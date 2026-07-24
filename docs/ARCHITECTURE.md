@@ -68,8 +68,13 @@ second backend is under construction:
 
 - **Interpreter** (`core/src/arm/arm_interp.c`) — the portable reference backend;
   unsupported forms trap. This is what boots today and what the dynarec is
-  validated against. The reached path includes VFPv2 and the ARMv5TE
-  `SMULxy`/`SMLAxy`/`SMLALxy`/`SMULWy`/`SMLAWy` families. Milestone M1.
+  validated against. The reached path includes broad VFPv2 and the ARMv5TE
+  `SMULxy`/`SMLAxy`/`SMLALxy`/`SMULWy`/`SMLAWy` families. Run20 reopened one
+  VFP11 decoder edge: committed `590d224` misclassifies the valid
+  `FMDHR`/`VMOV.32 d7[1], r4` word transfer as NEON. The current correction
+  passes the full local Release suite and focused strict tests, but is not yet
+  hosted or firmware-retested. Milestone M1 therefore has a pending
+  reached-path validation gate.
 - **Dynarec / JIT** — an AArch64 emitter and ARM/Thumb block translator exist
   behind `IOS3VM_JIT`, and emitted blocks run in macOS arm64 CI. There is no code
   cache or dispatcher, nothing in `s5l8900_run()` calls it, and the iOS target
@@ -443,8 +448,12 @@ handshake; mixer `+0` and SDO `+0` are the persistent timing eligibility pair,
 and the IRQ filter does not consult control `+0`. A surgical predicate change
 must preserve control-ready behavior while letting `0/5/1` accumulate phase
 and emit SDO VSYNC. The corrected local tree passes 23/23 Release tests, SoC
-5,504/0, and snapshot 469/0. Hosted CI and new real-firmware validation remain
-pending; no run20 or boot claim exists.
+5,504/0, and snapshot 469/0. Exact correction commit `590d224` also passed
+hosted
+[core run 30091220128](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30091220128)
+and [unsigned iOS run 30091220122](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30091220122).
+Run20 supplied the real-firmware validation and completed the exact TV-out
+filter/action/wake/close chain. It did not produce a rendered frame.
 
 That verdict used exact source commit
 `afa650e284c2b27b6a4a2a2b2d772e0f68e5dac9`; post-run hashes remained kernel
@@ -463,6 +472,34 @@ than run18 without any later UI checkpoint. CLCD scanned the corrected
 320x480, stride-1280 window for 662 frames, but the PPM remained exactly the
 128-white-pixel seed with zero live-scanout writes. The separate targeted
 unpatched-IORTC experiment also remains open.
+
+Run20 exercised exact commit
+`590d2248af4d7e5e92ec7bbd1be079c3bb415542`. Its architecture-level result is
+that the modeled mixer+SDO clock/IRQ path is sufficient for the shipped
+completion chain: the device counted 4 frames, VIC0 IRQ 30 entered the driver's
+filter/action, the swap gate woke, and the PID 20 `IOServiceClose` user return
+carried `r0=0` at 1,915,263,517. UIKit returned from `startWindowServer` at
+1,919,831,289 with a decoded 320x480, stride-1280 display, and SpringBoard
+entered `applicationDidFinishLaunching:` at 1,923,358,329.
+
+Those callbacks do not change the presentation contract. `UIController` was
+unreached, the live observer saw no RGB-visible scanout write, and the PPM
+remained the seed with 0 changed pixels. Run20 then exited 9 at 1,937,979,818
+on `0xEE274B10` in PID 20's libm `_fmod+0x1a8`. VFP11 defines that cp11
+high-word transfer as `FMDHR d7, r4` (modern `VMOV.32 d7[1], r4`); it is not a
+NEON lane operation.
+
+The correction accepts VFPv2's low/high 32-bit transfers for `d0..d15` while
+retaining traps for NEON-only lane widths, `d16..d31`, and reserved forms. It
+also distinguishes an architectural guest Undefined exception from a fatal
+emulator capability gap: denied user-mode FPEXC/FPSID access vectors into the
+guest without exposing state or stopping the host. The local Release suite
+passes 23/23; targeted VFP/ARM/JIT binaries pass 452/0, 810/0, and 347/0 under
+focused strict builds. Because hosted and firmware-replay results are still
+absent, this remains a candidate architecture correction rather than a
+validated new runtime boundary. Run20 otherwise preserved the original firmware
+hashes, reported zero external-md failures and a 51.76 MiB guest-free low, and
+occupied 447.18 MiB on F: including its retained work image and evidence.
 
 In the planned shared-session design, host services cross explicit non-blocking
 seams: frame descriptors out; bounded touch, PCM and network queues in/out;

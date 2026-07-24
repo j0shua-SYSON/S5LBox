@@ -24,11 +24,11 @@ proof that no private or unindexed implementation exists.
 | | Milestone | Observable completion criterion | State |
 |---|---|---|---|
 | **M0** | Pipeline online | Core/JIT/test workflows and iOS packaging are configured; the app has historically run a core self-test on the phone | ✅ done; workflow logs are the current CI verdict |
-| **M1** | ARMv6 interpreter | ARM + Thumb + VFPv2 on the reached path; unimplemented encodings trap instead of guessing | ✅ done for the reached boot path, including ARM1176 WFI and the reached ARMv5TE DSP multiply families; not every architectural extension is implemented |
+| **M1** | ARMv6 interpreter | ARM + Thumb + VFPv2 on the reached path; unimplemented encodings trap instead of guessing | 🔵 run20 reopened reached-path validation: `590d224` misclassifies valid VFP11 `FMDHR` as NEON. The current D-register word-transfer correction passes the full local Release suite and focused strict tests, but still needs hosted exact-commit and firmware-replay validation |
 | **M2** | SoC bring-up | A bare-metal payload prints over the emulated UART; a timer IRQ is taken and returned from | ✅ done and covered by host tests |
 | **M3** | Firmware containers + LLB execution | Real IMG3s parse and decrypt; an extracted real Apple LLB payload executes; the kernelcache is extracted | ✅ done; SecureROM/iBoot execution remains future full-chain work |
 | **M4** | XNU boots and logs | The kernel reaches `bsd_init`, prints, and Apple's own kexts match and start | ✅ **done** — plus the real root filesystem mounts |
-| **M5** | Userspace → SpringBoard | `launchd` runs; the home screen renders and takes a tap | 🔵 **in progress.** Run19 repeats exact SETEXEC success through a normal 2.5 B cap, reaches `UIApplicationMain` and `rendersLocally == YES`, completes the primary H1CLCD server, and validates the corrected framebuffer/TOKD layout. It also reproduces the optional TV-out close wait: shipped state is control/mixer/SDO `0/5/1`, but the first model required all three bit-0 states, so no IRQ 30, filter/action, close return, application delegate, or live scanout occurred. The frame stayed seed-only. The surgical mixer+SDO fix passes local full/focused validation; hosted and fresh firmware validation remain. No touch path exists yet. |
+| **M5** | Userspace → SpringBoard | `launchd` runs; the home screen renders and takes a tap | 🔵 **in progress.** Run20 validates the `590d224` TV-out correction with 4 frames, IRQ 30 filter/action, gate wake, exact close return `r0=0`, 320x480 `startWindowServer` return, and entry to `applicationDidFinishLaunching:`. SpringBoard is **not rendered**: `UIController` was unreached and the seed-only framebuffer had 0 changed pixels. The run then stopped on the pending VFP11 decoder correction. No touch path exists yet. |
 | **D** | Dynarec (parallel) | SpringBoard at interactive frame rates on the phone | 🔵 emitter + ARM/Thumb translator and host execution tests exist (off by default); no code cache or dispatcher calls them |
 | **N** | Guest networking (parallel) | The guest resolves a name and fetches a URL | ⚪ designed, not built |
 | **A** | Guest audio (first-device track) | Guest PCM reaches the host speaker without blocking the CPU thread | ⚪ priority, not designed or built |
@@ -70,7 +70,7 @@ the device.
 **Criterion:** an ARM1176 interpreter broad enough for the boot path, in which
 every unimplemented encoding *traps* rather than executing something plausible.
 
-Done for every path reached so far, and validated by historical long Apple-code
+Validated across the previously reached paths by historical long Apple-code
 runs: base ARM and Thumb data processing, branches/interworking, the implemented
 single and block-transfer forms, halfword/sign-extending loads, long multiplies,
 banked registers and mode switching, the reached exception entry/return paths,
@@ -82,6 +82,11 @@ devices directly to the next wake edge without fabricating retired instructions.
 This is reached-path coverage, not architectural completeness: LDRD/STRD, other
 DSP/media families, the CP14 debug unit and other documented forms still trap
 deliberately.
+
+Run20 reopened this milestone at `0xEE274B10`: valid VFP11
+`FMDHR d7, r4` / `VMOV.32 d7[1], r4` was incorrectly classified as NEON. The
+current correction is locally green, but reached-path completion cannot be
+restored until it is hosted and replayed at the exact firmware site.
 
 **The rule that makes this milestone worth anything:** an encoding we have not
 implemented returns `ARM_UNDEFINED` and stops the machine. It never falls
@@ -523,15 +528,19 @@ The revalidated replacement process retired 37,134,545 attributed user
 instructions, reached stock SpringBoard's `LC_UNIXTHREAD`/exported `start` at
 `0x34e8`, and later executed SpringBoard Objective-C methods. It never entered
 exact-process `_exit1` and ended scheduled out in a validated `mach_msg` trap.
-Run19 repeated run18's exact SETEXEC and display path in a fresh 2.5 B
-display-enabled run with the I2C/PMU model. Its exact process reached
-`UIApplicationMain`, `registerForSystemEvents`, `rendersLocally == YES`,
-completed the primary H1CLCD server, and then waited while closing the optional
-AppleH1TVOut object. Run19 mapped the missing pages but exposed the model's
-incorrect aggregate timing gate: control/mixer/SDO was `0/5/1`, so no VSYNC IRQ
-30, filter/action, or close return occurred. `applicationDidFinishLaunching:`
-was not reached, and the active 320x480 CLCD capture remained the seed-only 8x16
-block despite 662 controller frames. A current checkpoint chain
+Run19 repeated run18's exact SETEXEC and display path, then exposed the model's
+incorrect aggregate TV-out timing gate. Run20 validated the mixer+SDO correction
+in exact commit `590d224`: 4 TV-out frames reached IRQ 30's shipped
+filter/action, the gate woke, and PID 20 returned from the exact
+`IOServiceClose` with `r0=0` at 1,915,263,517. UIKit returned from
+`startWindowServer` at 1,919,831,289 with a 320x480 display, and SpringBoard
+entered `applicationDidFinishLaunching:` at 1,923,358,329.
+
+That is not criterion 3. `UIController` was unreached and the active capture
+remained the seed-only 8x16 block with 0 changed pixels. Run20 exited 9 at
+1,937,979,818 on valid VFP11 `FMDHR` / `VMOV.32 d7[1], r4` in PID 20's libm
+`_fmod+0x1a8`, which the committed decoder had misclassified as NEON. A current
+checkpoint chain
 restored at 2.2 B retired instructions,
 crossed the former
 `SMULBB` stop and wrote a 2.4 B checkpoint. The 2.4 B → 2.8 B interval wrote a
@@ -868,10 +877,12 @@ Static driver disassembly establishes the surgical correction. Control `+0`
 is conditional source-programming state; its independent stopped/ready
 handshake is real and remains modeled. Mixer `+0` and SDO `+0` are the
 persistent timing eligibility pair, and the IRQ filter does not read control
-`+0`. The predicate fix must pass hosted tests and a fresh real-firmware run
-before the milestone can advance. The local gate is now green
-at 23/23 Release tests, SoC 5,504/0, and snapshot 469/0; hosted CI and the
-firmware rerun remain. No run20 result or boot claim exists yet.
+`+0`. The local gate is now green at 23/23 Release tests, SoC 5,504/0, and
+snapshot 469/0. Exact correction commit `590d224` also passed hosted
+[core run 30091220128](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30091220128)
+and [unsigned iOS run 30091220122](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30091220122).
+Run20 supplied that firmware rerun and completed the TV-out chain. The milestone
+remains open because the visual and input criteria did not advance.
 
 The final PPM was exactly the run18 seed:
 SHA-256
@@ -879,6 +890,38 @@ SHA-256
 153,472 black pixels, 128 white pixels in the original 8x16 block, no other
 color, zero changed pixels, and zero live-scanout writes. Correct layout and
 662 CLCD frames do not prove SpringBoard rendered.
+
+### Run20 cleared the TV-out wait but did not render SpringBoard
+
+Run20 used exact source commit
+`590d2248af4d7e5e92ec7bbd1be079c3bb415542`. The original firmware hashes
+remained unchanged, external-md failures were 0, guest free memory bottomed at
+51.76 MiB, and the retained run directory occupied 447.18 MiB on F:.
+
+The corrected mixer+SDO predicate produced 4 TV-out frames. VIC0 IRQ 30 entered
+the shipped filter/action, the close gate woke, and the exact PID 20
+`IOServiceClose` user return carried `r0=0` at 1,915,263,517. UIKit's
+`startWindowServer` returned at 1,919,831,289 with the display decoded as
+320x480, stride 1280. SpringBoard then entered
+`applicationDidFinishLaunching:` at 1,923,358,329.
+
+The observable completion criterion still failed. `UIController` had zero hits,
+the PPM remained the same seed-only 8x16 block, and there were **0 changed
+pixels** or live RGB-visible scanout writes. A later lifecycle callback is not a
+home screen.
+
+Run20 exited 9 at 1,937,979,818 on `0xEE274B10`, resolved in PID 20 to libm
+`_fmod+0x1a8`. The instruction is valid VFP11 `FMDHR d7, r4`, also written
+`VMOV.32 d7[1], r4`, rather than NEON. The decoder correction passes the full
+local Release suite 23/23 and targeted VFP/ARM/JIT binaries at 452/0, 810/0,
+and 347/0 under focused strict builds, but it is not yet hosted or
+firmware-retested. The immediate gates are therefore:
+
+1. pass hosted core/iOS workflows for the exact correction commit;
+2. replay firmware through `0xEE274B10` and record the next fail-closed
+   boundary;
+3. reach `UIController` and capture recognizable changed pixels;
+4. add the host touch path and demonstrate an interaction.
 
 For chronology, this is the much earlier pre-VFP measurement from
 `bootkernel`'s milestone probes:
@@ -946,8 +989,12 @@ path.
 
 ### The M5 work item list, as it now stands
 
-- ~~**VFP load/store and arithmetic in the interpreter.**~~ **DONE and covered
-  by the VFP suite.** Current real firmware has crossed the old `VLDMIA` wall.
+- **VFP reached-path completion.** The old `VLDMIA` restore wall remains cleared,
+  but run20 exposed a different valid VFP11 form: `FMDHR` /
+  `VMOV.32 d7[1], r4`. The D-register word-transfer correction passes the full
+  local Release suite 23/23 and targeted VFP/ARM/JIT binaries at 452/0, 810/0,
+  and 347/0. Hosted and firmware-replay validation remain, so this item is open
+  again.
 - ~~**ARM1176 idle handling.**~~ **DONE and covered by CPU/machine tests.** XNU's
   CP15 WFI advances timer/CLCD state to the next enabled VIC wake edge without
   counting made-up CPU instructions; a current real-guest run exercised it.
@@ -971,12 +1018,11 @@ path.
 - **Userspace attribution is partial.** The exact process trace classifies dyld,
   shared-cache, stack, and low-image regions. A read-only HFSX/Mach-O/Objective-C
   audit mapped run15's SpringBoard entry and retained low PCs, but the harness
-  does not yet carry a general userspace image/symbol map. Bounded low-image
-  control-flow now places run19 after `rendersLocally == YES`, through the
-  primary H1CLCD construction, and inside the optional TV-out IOMFB finalizer,
-  before `applicationDidFinishLaunching:`. The exact UI/Mach checkpoint set
-  dynamically correlates that finalizer to the unresolved `io_service_close`;
-  the remaining attribution gap is what executes after the TV-out IRQ wakes it.
+  does not yet carry a general userspace image/symbol map. Run20 dynamically
+  correlates the TV-out IRQ/filter/action to the waiting close, observes the
+  exact PID 20 user return, and reaches `applicationDidFinishLaunching:`. It
+  also resolves the next stop to libm `_fmod+0x1a8`. The next named low-image
+  checkpoint, the SpringBoard `UIController` call, remains unreached.
 - **The display path** — the CLCD model now separates `VIDTCON0..3` timing from
   the `0x0d8..0x0ec` window configuration, seeds an iBoot-compatible N82
   handoff, and gates frame publication and WFI edges on genuinely live scanout.
@@ -986,14 +1032,12 @@ path.
   starts and H1 `start_hardware` returned success, with 795 CLCD reads and 32
   writes, but stopped before userspace. Run18 then completed the primary H1CLCD
   object and proved its exact SpringBoard-thread wait belongs to the optional
-  TV-out swap close. Run19 mapped those pages and revalidated framebuffer/TOKD
-  plus the active CLCD window, but reproduced the wait because the model
-  incorrectly required conditional control `+0` alongside the live mixer+SDO
-  timing pair. Zero IRQ 30/filter/action/close-return hits and the unchanged
-  seed frame keep M5 open. The surgical predicate fix still needs
-  local full/focused gate now passes 23/23, 5,504/0, and 469/0; hosted and
-  fresh real-firmware validation remain. The app still needs the shared
-  real-guest session; Metal is optional and not implemented.
+  TV-out swap close. Run19 exposed the over-strict timing predicate; run20
+  validates exact correction commit `590d224` with 4 frames, IRQ 30
+  filter/action, close wake/return, a 320x480 `startWindowServer` return, and
+  entry to `applicationDidFinishLaunching:`. The unchanged seed frame and 0
+  changed pixels keep M5 open. The app still needs the shared real-guest
+  session; Metal is optional and not implemented.
 - **Multitouch**, mapped from the host touchscreen to the guest's controller.
   `AppleMultitouchZ2SPI` already starts and reports "using DMA for bootloading",
   which proves that the recorded boot reached that request. Device, DMA and

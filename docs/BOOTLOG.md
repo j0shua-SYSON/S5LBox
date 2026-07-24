@@ -13,28 +13,29 @@ device behind each stage.
 > (`0xe6cf3073`) in user mode. The complete paired-extend implementation then
 > replayed through that stop, wrote a 2.97 B checkpoint and reached a clean
 > 2.98 B cap. Free pages dipped to 97 and ended at 214 against a target of 250.
-> The strongest current SpringBoard evidence is run19: a fresh display-enabled
-> 128 MiB cold boot of `afa650e` reached its 2.5 B cap with `OK`, exit code 0,
-> and empty stderr. It repeated exact SETEXEC success; the stock image called
-> `UIApplicationMain`, returned `YES` from `rendersLocally`, and completed the
-> primary H1CLCD server before opening the optional AppleH1TVOut display.
+> The strongest current SpringBoard evidence is run20: a fresh display-enabled
+> 128 MiB cold boot of exact commit `590d224`. The mixer+SDO correction had
+> already passed the local full suite 23/23, SoC 5,504/0, snapshot 469/0, and
+> hosted
+> [core run 30091220128](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30091220128)
+> plus [unsigned iOS run 30091220122](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30091220122).
+> Run20 validated it in real firmware: 4 TV-out frames reached IRQ 30's shipped
+> filter/action, the gate woke, and the exact PID 20 `IOServiceClose` returned
+> `r0=0` at 1,915,263,517. `startWindowServer` returned at 1,919,831,289 with a
+> 320x480 display, and SpringBoard entered `applicationDidFinishLaunching:` at
+> 1,923,358,329.
 >
-> This is a partial display handoff, not a rendered home screen.
-> `applicationDidFinishLaunching:` was not reached. The
-> TV-out IOMFB finalizer's exact `io_service_close` entered the swap wait and
-> switched only the SpringBoard thread out; the rest of the guest continued to
-> 2.5 B. Run19 mapped all three TV-out pages but exposed an over-strict model
-> predicate: the shipped completion path was control/mixer/SDO `0/5/1`, while
-> the model required all three bit-0 states. It therefore produced zero TV-out
-> frames, zero IRQ 30/filter/action hits, and no close return. Control's
-> independent stopped/ready semantics remain valid; mixer+SDO are the timing
-> eligibility pair. No live-scanout mutation occurred and the frame remained
-> the same seed-only 8x16 block despite 662 primary-CLCD frames. A surgical
-> predicate correction now passes the local full suite 23/23, SoC 5,504/0, and
-> snapshot 469/0; hosted and fresh real-firmware validation remain. The
-> installable app still runs a
-> synthetic guest through CoreGraphics and has no real-boot session, touch,
-> audio or guest networking.
+> This is later control flow, **not a rendered home screen**. `UIController` was
+> never reached, and the PPM remained the seed-only 8x16 block with 0 changed
+> pixels. Run20 exited 9 at 1,937,979,818 on `0xEE274B10` in PID 20's libm
+> `_fmod+0x1a8`. That is valid VFP11 `FMDHR` /
+> `VMOV.32 d7[1], r4`, previously misclassified as NEON. The current decoder
+> correction passes the full local Release suite and focused strict tests, but
+> is not yet hosted or firmware-retested. The original hashes remained
+> unchanged, external-md failures were 0, the guest-free low was 51.76 MiB,
+> and the run directory occupies 447.18 MiB on F:. The installable app still
+> runs a synthetic guest through CoreGraphics and has no real-boot session,
+> touch, audio or guest networking.
 
 Everything here is from actual historical runs. The command below is the recipe,
 not a promise of byte-identical current output: the stopping point and log are
@@ -1567,8 +1568,12 @@ ready bit 1. Run19 returned `0x2` immediately and eliminated run18's
 `TVOUT SHUT DOWN PROBLEM` warnings. The surgical correction is therefore to
 retain control ready semantics while making mixer+SDO, not all three banks,
 the VSYNC timing predicate. The corrected local tree passes 23/23 Release
-tests, with SoC 5,504/0 and snapshot 469/0; hosted CI and a fresh firmware run
-are still required. There is no run20 result here.
+tests, with SoC 5,504/0 and snapshot 469/0. Exact correction commit `590d224`
+also passed hosted
+[core run 30091220128](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30091220128)
+and [unsigned iOS run 30091220122](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30091220122).
+Run20 supplied the fresh firmware result: the correction completed the exact
+TV-out chain as recorded below. That runtime success is not a render claim.
 
 CLCD independently validated the corrected primary-display handoff. Window 0
 was active at framebuffer `0x0885c000`, 320x480, stride 1280, and the controller
@@ -1578,6 +1583,59 @@ was scanning/running with 662 frames. Rendering did not advance: the final
 and was byte-identical to run18's seed. It contained 153,472 black pixels and
 128 white pixels in the original 8x16 corner block, no other colors, zero
 changed pixels, and zero observed live-scanout writes.
+
+### 2026-07-24: run20 cleared TV-out and reached the launch delegate, not a frame
+
+Run20 booted exact source commit
+`590d2248af4d7e5e92ec7bbd1be079c3bb415542`, the hosted-green TV-out
+correction. It did not reach the configured cap: the harness exited **9** at
+**1,937,979,818** instructions after fail-closing on a user-mode instruction.
+The external-md bridge reported zero failures. The guest-free low-water mark
+was 13,250 pages (**51.76 MiB**) at instruction 1,937,571,840, and the retained
+run directory measured **447.18 MiB on F:**.
+
+The original source inputs were rehashed and remained:
+
+```text
+kernel.macho    0d8cdb339d37cf37a1db2638fff79272ecd63a17764bf7666efa1618725df70c
+devicetree.bin  4867c95fedf544bda2ecaa2626ae14c01a60d7771dc53ffe6fd3a6aac8b8ba57
+rootfs.img      c3251e7f092c939d5818e92086cb47680981cfb03731de7b55d238c942eb5e82
+```
+
+The TV-out correction worked under the shipped path. The model counted 4
+frames; VIC0 IRQ 30 entered the shipped filter and action; the close sleep gate
+returned; and the exact PID 20 user return carried `r0=0`:
+
+```text
+TV-out IRQ 30 filter entry                         1,894,168,651
+TV-out IRQ action entry                            1,894,171,336
+IOMFB close sleep-gate return                      1,894,175,066
+IOMFB close epilogue                               1,915,251,328
+IOServiceClose PID 20 user return, r0=0            1,915,263,517
+UIKit startWindowServer return                     1,919,831,289
+SpringBoard applicationDidFinishLaunching: entry  1,923,358,329
+```
+
+The primary display decoded as 320x480, stride 1280. SpringBoard advanced past
+the old optional-TV-out wait into `applicationDidFinishLaunching:`, but its
+`UIController` call had zero hits. The PPM remained byte-identical to the
+run18/run19 seed: 153,472 black pixels, 128 white pixels in the original 8x16
+block, no other colors, and **0 changed pixels**. The live observer also
+recorded zero RGB-visible scanout writes. SpringBoard is therefore **not
+rendered**.
+
+The terminal word was `0xEE274B10` at userspace PC `0x33acca88`, resolved under
+PID 20 to libm `_fmod+0x1a8`. The committed decoder rejected it as Advanced
+SIMD, but VFP11 defines it as `FMDHR d7, r4`; a modern disassembler may print
+`VMOV.32 d7[1], r4`. This is a VFPv2 transfer into the high word of `d7`, not
+NEON.
+
+The decoder correction handles the low/high 32-bit transfers for `d0..d15`
+while preserving fail-closed NEON/reserved cases. The full local Release suite
+passes 23/23; targeted binaries pass at VFP **452/0**, ARM **810/0**, and JIT
+**347/0**, including architectural guest-Undefined handling for denied
+user-mode FPEXC access. Hosted CI and firmware replay are still pending, so the
+next runtime boundary remains unproven.
 
 The earlier checkpoint-continuation chain is stronger evidence for sustained
 userspace and snapshot

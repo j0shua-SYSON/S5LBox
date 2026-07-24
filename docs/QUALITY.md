@@ -3,38 +3,50 @@
 This file records what was actually checked for the post-run18 TV-out,
 framebuffer-planning, CLCD-bounds, and boot-diagnostic change at commit
 `afa650e284c2b27b6a4a2a2b2d772e0f68e5dac9`, plus run19's real-firmware
-verdict and the resulting surgical timing-predicate correction. It separates
-baseline engineering evidence, real-firmware evidence, and pending correction
-validation so that a green unit test is never presented as a SpringBoard boot.
+verdict, the surgical timing-predicate correction at exact commit
+`590d2248af4d7e5e92ec7bbd1be079c3bb415542`, run20's firmware verdict, and the
+subsequent local VFP11 decoder correction. It separates committed/hosted,
+real-firmware, visual, and local-only evidence so that neither a green unit test
+nor a later lifecycle callback is presented as a rendered SpringBoard.
 
 ## Current verdict
 
-- The post-run19 surgical correction built successfully in Release mode, and
-  all **23/23** registered CTest tests passed on the final local tree.
+- The post-run19 TV-out correction built successfully in Release mode, and all
+  **23/23** then-registered CTest tests passed on that tree.
 - The corrected affected binaries reported **5,504 passed, 0 failed** for
   `test_soc` and **469 passed, 0 failed** for `test_snapshot`.
 - The pre-run19 `afa650e` targeted CTest gate for `s5l8900_machine`, `snapshot`,
   and `external_md_cli_preflight` had also passed **3/3**.
 - `external_md_cli_preflight`, strict compiler checks, diagnostic analyzer
   checks, and zero-step tool smokes passed as recorded below.
-- Hosted GitHub Actions passed for the exact commit: the
+- Hosted GitHub Actions passed for the pre-run19 exact commit: the
   [core run](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30088519878)
   was green across Linux, macOS, Windows, warnings-as-errors, ASan+UBSan, and
   JIT jobs; the
   [unsigned iOS run](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30088519892)
   was also green.
-- Run19, the first post-change real-firmware validation, completed cleanly at
-  2.5 B instructions with exit code 0 and empty stderr. It validated exact
-  source integrity, external-md layout, TV-out MMIO routing, and the active
-  primary CLCD window.
-- Run19 did **not** produce TV-out VSYNC/IRQ 30, enter the shipped filter/action,
-  return from the exact `IOServiceClose`, advance SpringBoard, or mutate live
-  scanout. It exposed an over-strict all-three-bank timing predicate in the
-  `afa650e` model.
-- The surgical correction keeps control's independent ready handshake but
-  makes mixer+SDO the timing eligibility pair. Local focused validation is
-  green; hosted validation and a fresh firmware run are pending. Nothing here
-  claims run20, a SpringBoard render, or iPhone runtime stability.
+- Hosted GitHub Actions also passed for exact correction commit `590d224`: the
+  [core run](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30091220128)
+  and
+  [unsigned iOS run](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30091220122)
+  were both green.
+- Run19 exposed the over-strict all-three-bank timing predicate. Run20 then
+  validated the `590d224` mixer+SDO correction in real firmware: 4 TV-out
+  frames, IRQ 30 filter/action, swap-gate wake, and exact `IOServiceClose` user
+  return `r0=0` at 1,915,263,517.
+- Run20 advanced UIKit's `startWindowServer` return to 1,919,831,289 with a
+  decoded 320x480 display and entered SpringBoard
+  `applicationDidFinishLaunching:` at 1,923,358,329.
+- **SpringBoard was not rendered.** `UIController` was unreached, live scanout
+  had zero changed writes/pixels, and the final PPM was the unchanged seed.
+- Run20 exited **9** at 1,937,979,818 on `0xEE274B10` in PID 20's libm
+  `_fmod+0x1a8`. The encoding is valid VFP11 `FMDHR` /
+  `VMOV.32 d7[1], r4`, not NEON.
+- The current VFP11 decoder correction passes the local Release suite **23/23**
+  and focused strict builds. Targeted `test_vfp`, `test_arm`, and `test_jit`
+  binaries pass **452/0**, **810/0**, and **347/0** respectively. Hosted and
+  firmware-replay validation remain pending; the last exact-commit hosted
+  verdict is still `590d224`.
 
 ## Evidence ledger
 
@@ -51,16 +63,25 @@ validation so that a green unit test is never presented as a SpringBoard boot.
 | Zero-step tool smokes | `bootkernel` and `snapboot` passed | Startup invariants, option/report plumbing, and the new non-invasive state diagnostics execute without retiring guest instructions | Any emulated-time progress or firmware stability |
 | [Hosted core run 30088519878](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30088519878) | Passed for exact commit `afa650e284c2b27b6a4a2a2b2d772e0f68e5dac9` | Linux, macOS, Windows, warnings-as-errors, ASan+UBSan, and JIT jobs were green in GitHub Actions | Private-firmware execution or an on-device boot |
 | [Hosted iOS run 30088519892](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30088519892) | Passed for the same exact commit | The unsigned iOS workflow built successfully on the hosted runner | Installation, signing, JIT entitlement activation, or iPhone runtime stability |
-| Run19 integrity/layout | Exit 0, `OK`, stderr 0 B; exact source hashes unchanged; work image 466,825,216 B | The `afa650e` firmware run was clean and confined to its work image; framebuffer/TOKD planning reached real firmware | A rendered frame or correct TV-out timing |
+| [Hosted correction core run 30091220128](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30091220128) | Passed for exact commit `590d2248af4d7e5e92ec7bbd1be079c3bb415542` | The corrected core passed the hosted platform, strict-warning, sanitizer, and JIT matrix | Private-firmware execution or an on-device boot |
+| [Hosted correction iOS run 30091220122](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30091220122) | Passed for the same exact commit | The corrected revision built successfully in the unsigned iOS workflow | Installation, signing, JIT entitlement activation, or iPhone runtime stability |
+| Run19 integrity/layout | Exit 0, `OK`, stderr 0 B; exact source hashes unchanged; work image 466,825,216 B | The `afa650e` firmware run was clean and persistent filesystem writes were confined to its work image; framebuffer/TOKD planning reached real firmware | A rendered frame or correct TV-out timing |
 | Run19 TV-out chain | Pages mapped; final control/mixer/SDO `0/5/1`; frames/IRQ/filter/action/close-return all zero | The all-three timing condition was not the shipped active state and suppressed completion | That mixer+SDO alone will clear the wait until rerun |
 | Run19 primary CLCD/frame | Correct 320x480, stride-1280 window; 662 CLCD frames; final PPM identical to seed | Corrected layout and controller handoff operated for the full run | Any SpringBoard pixel or live-scanout write |
+| Run20 integrity/resources | Exit **9** at 1,937,979,818; original source hashes unchanged; external-md failures **0**; guest-free low **51.76 MiB**; run directory **447.18 MiB on F:** | The retained `590d224` run stayed inside the expected storage/resource envelope until its explicit CPU stop | A clean cap, boot success, or decoder-fix validation |
+| Run20 TV-out chain | **4 frames**; IRQ 30 filter/action hit; gate woke; exact PID 20 close user return `r0=0` at 1,915,263,517 | The mixer+SDO correction fixes the observed run19 TV-out completion wait in real firmware | Framebuffer mutation or a rendered home screen |
+| Run20 SpringBoard/display | `startWindowServer` returned at 1,919,831,289; display decoded 320x480; `applicationDidFinishLaunching:` entered at 1,923,358,329; `UIController` unreached; **0 changed pixels** | Control flow advanced past the old close wait and into the application delegate | SpringBoard rendering, UI readiness, touch, or on-device runtime |
+| Run20 VFP stop | Exit 9 on `0xEE274B10` in PID 20 libm `_fmod+0x1a8` | The committed decoder's NEON classification is wrong; the word is VFP11 `FMDHR` / `VMOV.32 d7[1], r4` | That the local decoder correction works in firmware |
+| Current VFP local gate | Release **23/23**; `test_vfp` **452/0**; `test_arm` **810/0**; `test_jit` **347/0**; focused strict builds passed | All 16 D registers, both halves and directions, decoder boundaries, disabled-VFP behavior, conditions, JIT refusal, system-register privilege, and guest-Undefined disposition are locally covered | Hosted exact-commit or firmware-replay validation |
 | Diff hygiene | `git diff --check` passed after the documentation update | No whitespace-error patch was introduced | Markdown rendering on every client |
 
 Run19 is the real-firmware verdict on `afa650e`: routing/layout passed, but the
-aggregate timing predicate failed. The new local 23/23 result and focused
-5,504/0 plus 469/0 totals validate the surgical correction off-firmware. The
-hosted runs still describe `afa650e`; they do not validate the subsequent
-source change.
+aggregate timing predicate failed. The 23/23 result and focused 5,504/0 plus
+469/0 totals validate the surgical correction off-firmware; the `590d224`
+hosted runs validate its public build/test/package surface; run20 validates its
+TV-out behavior in private firmware. None of those establishes rendering or
+on-device behavior. The newer VFP correction has only the targeted local row
+above and must not inherit `590d224`'s hosted or run20 evidence.
 
 ## Run19 real-firmware evidence
 
@@ -99,6 +120,55 @@ The 460,815-byte PPM SHA-256 was
 `CBAD1C110E67CAD553A2B4EEBBF46E7BF09255389851902B24816249294AF2AB`,
 identical to run18's seed: 153,472 black pixels, 128 white seed pixels, no
 other colors, zero changed pixels, and zero live-scanout writes.
+
+## Run20 real-firmware evidence
+
+Run20 used exact source commit
+`590d2248af4d7e5e92ec7bbd1be079c3bb415542`. Unlike run19, it did not reach the
+configured 2.5 B cap: it exited 9 at 1,937,979,818 instructions on an explicit
+undefined-instruction stop. Before that stop, the original source inputs
+reverified unchanged:
+
+```text
+kernel.macho    0D8CDB339D37CF37A1DB2638FFF79272ECD63A17764BF7666EFA1618725DF70C
+devicetree.bin  4867C95FEDF544BDA2ECAA2626AE14C01A60D7771DC53FFE6FD3A6AAC8B8BA57
+rootfs.img      C3251E7F092C939D5818E92086CB47680981CFB03731DE7B55D238C942EB5E82
+```
+
+The external-md bridge reported zero failures. The 466,825,216-byte work image
+remained inside a retained run directory measuring 447.18 MiB on F:, and the
+guest-free low-water sample was 13,250 pages, 51.76 MiB, at instruction
+1,937,571,840.
+
+The corrected completion path and downstream checkpoints were:
+
+```text
+TV-out IRQ 30 filter entry                         1,894,168,651
+TV-out IRQ action entry                            1,894,171,336
+IOMFB close sleep-gate return                      1,894,175,066
+IOMFB close epilogue                               1,915,251,328
+IOServiceClose PID 20 user return, r0=0            1,915,263,517
+UIKit startWindowServer return                     1,919,831,289
+SpringBoard applicationDidFinishLaunching: entry  1,923,358,329
+VFP decoder stop                                   1,937,979,818
+```
+
+The TV-out model counted 4 frames, and the shipped filter/action cleared the
+work and woke the gate. The primary display decoded as 320x480 with stride
+1280. These are runtime confirmations of the `590d224` correction, not visual
+evidence.
+
+The `UIController` call had zero hits. The 460,815-byte PPM retained SHA-256
+`CBAD1C110E67CAD553A2B4EEBBF46E7BF09255389851902B24816249294AF2AB`,
+the run18/run19 seed: 153,472 black pixels, 128 white seed pixels, no other
+colors, and **0 changed pixels**. The live observer likewise recorded zero
+overlapping or RGB-visible scanout writes. Therefore SpringBoard is **not
+rendered**, even though its application delegate was entered.
+
+The terminal word was `0xEE274B10` at userspace PC `0x33acca88`, resolved under
+PID 20 to libm `_fmod+0x1a8`. VFP11 names it `FMDHR d7, r4`; modern tools may
+print `VMOV.32 d7[1], r4`. It is a VFPv2 32-bit transfer into the high word of
+`d7`, not an Advanced SIMD/NEON lane operation.
 
 ## Local edge coverage of the surgical correction
 
@@ -164,6 +234,27 @@ other colors, zero changed pixels, and zero live-scanout writes.
 - Format-heavy diagnostic paths received targeted compiler and analyzer
   checks, followed by zero-step `bootkernel` and `snapboot` executions.
 
+## Current VFP11 decoder correction (hosted and firmware replay pending)
+
+The local decoder now distinguishes the VFP11 cp11 word-transfer encodings from
+the genuinely NEON-only scalar forms. It accepts the low/high 32-bit halves of
+`d0..d15` (`FMDLR`/`FMDHR` and `FMRDL`/`FMRDH`), including the exact run20
+`0xEE274B10`, while retaining fail-closed behavior for 8/16-bit lanes,
+`d16..d31`, and malformed/reserved forms. The focused local binaries report:
+
+```text
+test_vfp  452 passed, 0 failed
+test_arm  810 passed, 0 failed
+test_jit  347 passed, 0 failed
+```
+
+The same source tree passes the complete local Release suite 23/23 and focused
+`-Wall -Wextra -Werror` builds. The privilege regressions also prove that
+user-mode FPEXC access enters the guest Undefined vector with state unchanged;
+it cannot escape as a fatal emulator status. Hosted core/iOS workflows and a
+fresh firmware replay are still pending, so this is not yet a proven new
+runtime boundary.
+
 ## Reproducing the public subset
 
 The public suite needs no Apple firmware:
@@ -203,15 +294,27 @@ authoritative.
   corrected framebuffer/TOKD layout, and captured the exact `0/5/1` state.
 - [x] The surgical mixer+SDO predicate correction passes the local full suite
   **23/23**, `test_soc` **5,504/0**, and `test_snapshot` **469/0**.
-- [ ] Hosted core/iOS workflows pass the exact surgical-fix commit.
-- [ ] A fresh firmware run shows SDO VSYNC and VIC0 raw IRQ 30 asserting under
-  the shipped `0/5/1` state.
-- [ ] The shipped IRQ filter/action acknowledges SDO pending, clears active
-  swap work, wakes the gate, and lets the exact `IOServiceClose` return.
-- [ ] Later SpringBoard control flow and live CLCD scanout mutation are
-  observed.
+- [x] Hosted
+  [core run 30091220128](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30091220128)
+  and
+  [iOS run 30091220122](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30091220122)
+  passed exact surgical-fix commit `590d224`.
+- [x] Run20 produced 4 TV-out frames, asserted IRQ 30, entered the shipped
+  filter/action, cleared the swap work, woke the gate, and returned the exact
+  `IOServiceClose` to PID 20 with `r0=0`.
+- [x] Run20 returned from `startWindowServer` with a decoded 320x480 display and
+  entered SpringBoard `applicationDidFinishLaunching:`.
+- [ ] SpringBoard reaches the `UIController` call and produces recognizable
+  live CLCD scanout. Run20 had zero hits and zero changed pixels respectively.
+- [x] The local VFP11 correction passes the targeted VFP/ARM/JIT binaries.
+- [x] The current VFP11 correction passes the full local Release suite and
+  focused strict builds.
+- [ ] Hosted core/iOS workflows pass the exact VFP11-correction commit.
+- [ ] A fresh firmware replay clears `0xEE274B10` in libm `_fmod+0x1a8` and
+  establishes the next fail-closed boundary.
 - [ ] An installable build is tested separately on the iPhone 6s Plus.
 
-Until those gates pass, the honest claim is narrow: run19 exposed the exact
-timing-predicate error and the correction has strong local edge coverage, but
-its hosted, real-firmware, rendering, and on-device results remain unproven.
+Until those gates pass, the honest claim is narrow: run20 proves the TV-out
+correction and later SpringBoard control flow, but **not rendering**. The VFP11
+decoder correction has local coverage only so far, and on-device behavior
+remains unproven.

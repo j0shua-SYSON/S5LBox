@@ -3218,6 +3218,7 @@ static void test_vfp_disabled_vectors_the_guest(void) {
         { 0xecb10a20u, "VLDMIA r1!,{s0-s31} (VFP load/store)"     },
         { 0xf4200a0fu, "VLD1.8 (SIMD element/structure ld/st)"    },
         { 0xee100a10u, "VMOV r0,s0 (VFP 32-bit transfer)"         },
+        { 0xee274b10u, "FMDHR d7,r4 (VFPv2 D-word transfer)"       },
         { 0xec510b10u, "VMOV r0,r1,d0 (VFP 64-bit transfer)"      },
     };
     for (unsigned i = 0; i < sizeof v / sizeof v[0]; i++) {
@@ -3243,7 +3244,7 @@ static void test_vfp_enabled_still_halts(void) {
         { 0xf2000d40u, "VADD.F32 (Advanced SIMD; no NEON on the ARM1176)" },
         { 0xf4200a0fu, "VLD1.8 (Advanced SIMD element/structure load)"    },
         { 0xeeb00b00u, "VMOV.F64 d0,#imm (VFPv3)"                        },
-        { 0xee000b10u, "VMOV.32 d0[0],r0 (Advanced SIMD scalar transfer)" },
+        { 0xee400b10u, "VMOV.8 d0[0],r0 (Advanced SIMD scalar transfer)"   },
     };
     for (unsigned i = 0; i < sizeof v / sizeof v[0]; i++) {
         arm_cpu_t c;

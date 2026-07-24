@@ -842,6 +842,7 @@ static void test_vfp_is_never_translated(void) {
         { 0xee304b01u, "VADD.F64 d4,d0,d1    (VFP data processing)"     },
         { 0xeeb40a60u, "VCMP.F32 s0,s1       (VFP data processing)"     },
         { 0xee100a10u, "VMOV r0,s0           (VFP 32-bit transfer)"     },
+        { 0xee274b10u, "FMDHR d7,r4           (VFPv2 D-word transfer)"   },
         { 0xeef10a10u, "VMRS r0,FPSCR        (VFP 32-bit transfer)"     },
         { 0xec510b10u, "VMOV r0,r1,d0        (VFP 64-bit transfer)"     },
         { 0xf2000d40u, "VADD.F32             (Advanced SIMD)"           },

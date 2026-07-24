@@ -798,16 +798,12 @@ The surgical correction is to preserve all three independent ready handshakes
 but define timing eligibility from mixer+SDO. Its local Release gate passes
 23/23; the affected binaries report SoC 5,504/0 and snapshot 469/0, including
 the real `0/5/1` state, control transitions without phase reset, IRQ/WFI, and
-malformed snapshot state. Before promoting it, still require:
-
-1. hosted CI passes the exact corrected commit;
-2. a fresh firmware run produces SDO VSYNC and raw VIC0 IRQ 30;
-3. the shipped filter/action acknowledges pending, clears the active swap,
-   wakes the gate, and returns the exact `IOServiceClose`;
-4. a later SpringBoard checkpoint and recognizable live scanout are observed.
-
-No run20 result exists yet. Do not infer a boot or synthesize a return if any
-link is absent.
+malformed snapshot state. Exact correction commit `590d224` also passed hosted
+[core run 30091220128](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30091220128)
+and [unsigned iOS run 30091220122](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30091220122).
+Run20 subsequently supplied the runtime validation: SDO timing asserted IRQ 30,
+the shipped filter/action cleared the swap, the gate woke, and the exact
+`IOServiceClose` returned. Recognizable live scanout did not follow.
 
 Run19 independently revalidated framebuffer bounds. CLCD window 0 ended at
 `0x0885c000`, 320x480, stride 1280, scanning/running with 662 frames. Its final
@@ -816,6 +812,45 @@ PPM SHA-256 was
 byte-identical to run18's seed: 153,472 black pixels, 128 white pixels in the
 original 8x16 corner block, zero other colors, zero changed pixels, and zero
 live-scanout writes. Treat that as layout/controller validation, not rendering.
+
+#### Run20 result: TV-out fixed, visual gate still closed
+
+Run20 used exact commit
+`590d2248af4d7e5e92ec7bbd1be079c3bb415542`. Its retained artifacts show the
+original firmware hashes unchanged, zero external-md failures, a 51.76 MiB
+guest-free low-water mark, and a 447.18 MiB run directory on F:. The run exited
+9 at 1,937,979,818 rather than reaching its configured cap.
+
+The completion-chain checkpoints are:
+
+```text
+TV-out IRQ 30 filter entry                         1,894,168,651
+TV-out IRQ action entry                            1,894,171,336
+IOMFB close sleep-gate return                      1,894,175,066
+IOMFB close epilogue                               1,915,251,328
+IOServiceClose PID 20 user return, r0=0            1,915,263,517
+UIKit startWindowServer return                     1,919,831,289
+SpringBoard applicationDidFinishLaunching: entry  1,923,358,329
+```
+
+The model counted 4 TV-out frames. The primary display decoded as 320x480,
+stride 1280. That proves the targeted runtime chain, not pixels:
+`UIController` had zero hits, the live observer saw no RGB-visible mutation,
+and the PPM remained the seed with **0 changed pixels**. SpringBoard is not
+rendered.
+
+The terminal report then did its job: `0xEE274B10` at VA `0x33acca88`, resolved
+under PID 20 to libm `_fmod+0x1a8`. VFP11 names this
+`FMDHR d7, r4`; modern tools may print `VMOV.32 d7[1], r4`. Treating every
+cp11 scalar-looking transfer as NEON was the decoder bug.
+
+The correction accepts VFPv2's low/high 32-bit `d0..d15` transfers while
+continuing to reject NEON-only lane widths, `d16..d31`, and reserved encodings.
+The local Release suite passes 23/23; targeted binaries pass VFP 452/0, ARM
+810/0, and JIT 347/0 under focused strict builds. Denied user-mode FPEXC access
+also enters the guest Undefined vector rather than returning a fatal emulator
+status. Do not call the stop cleared yet: hosted and firmware-replay validation
+remain absent.
 
 ### WFI changes elapsed device time, not the instruction coordinate
 
@@ -862,6 +897,14 @@ blocker at instruction 2,944,340,624. Keep this translation in the report;
 userspace has no kernelcache symbol to save a bad fetch assumption later.
 The complete paired-extend implementation replayed through that exact address
 to a clean 2.98 B cap, which is the required semantic confirmation.
+
+Run20 is the same method applied to a subtler decoder error. The report captured
+`0xEE274B10` at VA `0x33acca88` and the PID 20 address-space key; library
+resolution placed it at libm `_fmod+0x1a8`. A modern lane-style disassembly can
+invite the wrong NEON conclusion, but VFP11's legacy encoding table identifies
+`FMDHR d7, r4` / `VMOV.32 d7[1], r4`. The local implementation and 452/0,
+810/0, and 347/0 targeted results are useful, but only a firmware replay can
+turn “decoded and unit-tested” into “cleared at the exact runtime site.”
 
 ---
 

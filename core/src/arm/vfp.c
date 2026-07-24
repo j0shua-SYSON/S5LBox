@@ -141,6 +141,14 @@ static arm_status_t vfp_trap(uint32_t pc, uint32_t insn, const char *why) {
     return ARM_UNDEFINED;
 }
 
+/* A defined access check failed, so hardware enters the guest's Undefined
+ * exception. This is not an emulator capability gap and must never halt the
+ * host process merely because user code executed a privileged VFP access. */
+static arm_status_t vfp_guest_undefined(const char *why) {
+    g_reason = why;
+    return ARM_GUEST_UNDEFINED;
+}
+
 /* ======================================================== availability ==== *
  *
  * CPACR gates CP10/CP11 before FPEXC does. The ARM1176 requires the two fields
@@ -586,19 +594,23 @@ static arm_status_t vfp_ldst(arm_cpu_t *c, uint32_t pc, uint32_t insn,
 /* ======================================== 32-bit core-register transfer ==
  *
  * cond 1110 opc1 L Vn Rt 101 sz N 0 0 1 0000 — the MCR/MRC form.
- *   opc1 == 000 : VMOV between Sn and Rt
- *   opc1 == 111 : VMSR / VMRS
- * Everything else in this space is an Advanced SIMD scalar transfer, which
- * this part does not have.
+ *   cp10, opc1 == 000 : VMOV between Sn and Rt
+ *   cp11, opc1 == 000 : VMOV between Dn[31:0] and Rt (FMDLR/FMRDL)
+ *   cp11, opc1 == 001 : VMOV between Dn[63:32] and Rt (FMDHR/FMRDH)
+ *   cp10, opc1 == 111 : VMSR / VMRS
+ *
+ * The cp11 word transfers are VFPv2 instructions on VFP11, despite modern
+ * disassemblers spelling them with the same lane syntax used by NEON. Only
+ * the 32-bit low/high halves exist here; the 8/16-bit scalar forms are NEON.
  */
 static arm_status_t vfp_xfer32(arm_cpu_t *c, uint32_t pc, uint32_t insn) {
     unsigned opc1 = (insn >> 21) & 7u;
     bool     L    = BIT(20);
+    bool     cp11 = BIT(8);
     unsigned vn   = FIELD(16), rt = FIELD(12);
 
-    if (opc1 == 0u) {                               /* VMOV Sn <-> Rt        */
+    if (!cp11 && opc1 == 0u) {                      /* VMOV Sn <-> Rt        */
         unsigned sn = SREG(vn, BIT(7));
-        if (BIT(8)) return vfp_trap(pc, insn, "Advanced SIMD scalar transfer (no NEON on VFP11)");
         if ((insn & 0x0000006fu) != 0u)
             return vfp_trap(pc, insn, "reserved bits set in VMOV (core register)");
         if (rt == 15u) return vfp_trap(pc, insn, "PC as VMOV core register is UNPREDICTABLE");
@@ -607,18 +619,43 @@ static arm_status_t vfp_xfer32(arm_cpu_t *c, uint32_t pc, uint32_t insn) {
         return ARM_OK;
     }
 
-    if (opc1 != 7u)
+    if (cp11 && opc1 <= 1u) {                       /* VMOV Dn word <-> Rt   */
+        unsigned sn;
+        if (BIT(7)) return vfp_trap(pc, insn, "d16-d31 do not exist on VFPv2");
+        if ((insn & 0x0000006fu) != 0u)
+            return vfp_trap(pc, insn,
+                "not a VFPv2 32-bit double-register word transfer");
+        if (rt == 15u) return vfp_trap(pc, insn, "PC as VMOV core register is UNPREDICTABLE");
+        sn = SREG(vn, opc1);                        /* Dn[31:0]/[63:32] */
+        if (L) c->r[rt] = vfp_get_s(c, sn);
+        else   vfp_set_s(c, sn, c->r[rt]);
+        return ARM_OK;
+    }
+
+    if (cp11)
         return vfp_trap(pc, insn, "Advanced SIMD scalar transfer (no NEON on VFP11)");
+    if (opc1 != 7u)
+        return vfp_trap(pc, insn, "UNDEFINED VFPv2 32-bit core-register transfer");
+    if ((insn & 0x000000efu) != 0u)
+        return vfp_trap(pc, insn, "reserved bits set in VMRS/VMSR");
+    if (vn == 8u && (c->cpsr & ARM_CPSR_MODE_MASK) == ARM_MODE_USR)
+        return vfp_guest_undefined("FPEXC is privileged");
+    if (vn == 0u && !vfp_enabled(c) &&
+        (c->cpsr & ARM_CPSR_MODE_MASK) == ARM_MODE_USR)
+        return vfp_guest_undefined("FPSID is privileged while VFP is disabled");
 
     /*
      * VMRS / VMSR. The availability asymmetry here IS the lazy-enable
      * mechanism: with FPEXC.EN clear the only accessible system registers are
-     * FPEXC (8) and FPSID (0), which is exactly what _get_vfp_enabled relies
-     * on when it reads FPEXC precisely while VFP is off. The caller has
-     * already applied that rule.
+     * FPEXC (8) and FPSID (0), both from privileged mode. That is exactly what
+     * _get_vfp_enabled relies on when it reads FPEXC while VFP is off. The
+     * caller has already applied the enable half of that rule.
      */
     if (L) {
         uint32_t v;
+        if (rt == 15u && vn != 1u)
+            return vfp_trap(pc, insn,
+                "Rt=PC is defined only for VMRS APSR_nzcv, FPSCR");
         switch (vn) {
             case 0: v = ARM1176_FPSID;  break;
             case 1: v = c->vfp_fpscr;   break;
@@ -1019,10 +1056,10 @@ arm_status_t vfp_execute(arm_cpu_t *c, uint32_t pc, uint32_t insn,
      * guest's own handler gets to run and switch VFP on. It must stay silent —
      * it happens on every first VFP instruction of every thread.
      *
-     * With FPEXC.EN clear, VMRS/VMSR of FPEXC (CRn 8) and FPSID (CRn 0) remain
-     * accessible; everything else is UNDEFINED. _get_vfp_enabled reads FPEXC
-     * precisely when VFP is off, and _vfp_switch writes FPEXC before it
-     * touches FPSCR, so this asymmetry is load-bearing.
+     * With FPEXC.EN clear, privileged VMRS/VMSR of FPEXC (CRn 8) and FPSID
+     * (CRn 0) remain accessible; everything else is UNDEFINED.
+     * _get_vfp_enabled reads FPEXC precisely when VFP is off, and _vfp_switch
+     * writes FPEXC before it touches FPSCR, so this asymmetry is load-bearing.
      */
     if (!vfp_cpacr_permits(c)) return ARM_UNDEFINED;
     if (!vfp_enabled(c)) {

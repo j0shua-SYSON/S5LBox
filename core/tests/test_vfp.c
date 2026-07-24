@@ -117,6 +117,8 @@ static arm_status_t run(arm_cpu_t *c, const uint32_t *prog, size_t words, int st
 #define VMSR(crn,rt) (0xeee00a10u | ((uint32_t)(crn)<<16) | ((uint32_t)(rt)<<12))
 #define VMOV_S_R(sn,rt) (0xee000a10u | ((uint32_t)SV(sn)<<16) | ((uint32_t)(rt)<<12) | ((uint32_t)SB(sn)<<7))
 #define VMOV_R_S(rt,sn) (0xee100a10u | ((uint32_t)SV(sn)<<16) | ((uint32_t)(rt)<<12) | ((uint32_t)SB(sn)<<7))
+#define VMOV_DWORD_R(dn,hi,rt) (0xee000b10u | ((uint32_t)(hi)<<21) | ((uint32_t)(dn)<<16) | ((uint32_t)(rt)<<12))
+#define VMOV_R_DWORD(rt,dn,hi) (0xee100b10u | ((uint32_t)(hi)<<21) | ((uint32_t)(dn)<<16) | ((uint32_t)(rt)<<12))
 
 /* --------------------------------------------------------------- bit casts */
 static uint32_t f2u(float f)  { uint32_t u; memcpy(&u,&f,4); return u; }
@@ -292,10 +294,77 @@ static void test_fpsid_is_read_only(void) {
     CHECK(run(&c, prog, 1, 1) == ARM_UNDEFINED, "VMSR FPSID was accepted");
 }
 
+static void test_system_register_privilege(void) {
+    arm_cpu_t c;
+    uint32_t read_fpsid[]  = { VMRS(0, 0) };
+    uint32_t write_fpscr[] = { VMSR(1, 1), VMRS(2, 1) };
+    uint32_t read_fpexc[]  = { VMRS(0, 8) };
+    uint32_t write_fpexc[] = { VMSR(8, 0) };
+
+    /* With VFP enabled, user mode may access FPSID and FPSCR. */
+    vfp_reset(&c);
+    c.cpsr = (c.cpsr & ~ARM_CPSR_MODE_MASK) | ARM_MODE_USR;
+    CHECK(run(&c, read_fpsid, 1, 1) == ARM_OK,
+          "user VMRS FPSID trapped while VFP enabled");
+    CHECK(c.r[0] == ARM1176_FPSID, "user FPSID = 0x%08x", c.r[0]);
+
+    vfp_reset(&c);
+    c.cpsr = (c.cpsr & ~ARM_CPSR_MODE_MASK) | ARM_MODE_USR;
+    c.r[1] = 0xffffffffu;
+    CHECK(run(&c, write_fpscr, 2, 2) == ARM_OK,
+          "user FPSCR read/write trapped while VFP enabled");
+    CHECK(c.r[2] == ARM_FPSCR_WMASK, "user FPSCR = 0x%08x", c.r[2]);
+
+    /* FPEXC is privileged whether VFP is enabled or disabled. */
+    vfp_reset(&c);
+    c.cpsr = (c.cpsr & ~ARM_CPSR_MODE_MASK) | ARM_MODE_USR;
+    c.r[0] = 0x11223344u;
+    CHECK(run(&c, read_fpexc, 1, 1) == ARM_OK &&
+          (c.cpsr & ARM_CPSR_MODE_MASK) == ARM_MODE_UND &&
+          c.r[15] == ARM_VEC_UNDEFINED && c.r[14] == 4u,
+          "enabled user VMRS FPEXC did not enter guest Undefined");
+    CHECK(c.r[0] == 0x11223344u && c.vfp_fpexc == ARM_FPEXC_EN,
+          "denied FPEXC read changed state: r0=%08x FPEXC=%08x",
+          c.r[0], c.vfp_fpexc);
+
+    vfp_reset(&c);
+    c.cpsr = (c.cpsr & ~ARM_CPSR_MODE_MASK) | ARM_MODE_USR;
+    c.r[0] = 0u;
+    CHECK(run(&c, write_fpexc, 1, 1) == ARM_OK &&
+          (c.cpsr & ARM_CPSR_MODE_MASK) == ARM_MODE_UND &&
+          c.r[15] == ARM_VEC_UNDEFINED && c.r[14] == 4u,
+          "enabled user VMSR FPEXC did not enter guest Undefined");
+    CHECK(c.vfp_fpexc == ARM_FPEXC_EN,
+          "denied FPEXC write changed FPEXC to %08x", c.vfp_fpexc);
+
+    /* When disabled, FPSID also becomes privileged. These denied operations
+     * take the guest's Undefined vector and must not expose or mutate state. */
+    vfp_reset(&c);
+    c.cpsr = (c.cpsr & ~ARM_CPSR_MODE_MASK) | ARM_MODE_USR;
+    c.vfp_fpexc = 0u;
+    c.r[0] = 0x55667788u;
+    CHECK(run(&c, read_fpsid, 1, 1) == ARM_OK &&
+          (c.cpsr & ARM_CPSR_MODE_MASK) == ARM_MODE_UND,
+          "disabled user FPSID did not take the Undefined vector");
+    CHECK(c.r[0] == 0x55667788u,
+          "disabled user FPSID exposed 0x%08x", c.r[0]);
+
+    vfp_reset(&c);
+    c.cpsr = (c.cpsr & ~ARM_CPSR_MODE_MASK) | ARM_MODE_USR;
+    c.vfp_fpexc = 0u;
+    c.r[0] = ARM_FPEXC_EN;
+    CHECK(run(&c, write_fpexc, 1, 1) == ARM_OK &&
+          (c.cpsr & ARM_CPSR_MODE_MASK) == ARM_MODE_UND,
+          "disabled user FPEXC write did not take the Undefined vector");
+    CHECK(c.vfp_fpexc == 0u,
+          "disabled user write enabled FPEXC: %08x", c.vfp_fpexc);
+}
+
 /*
  * The lazy-enable asymmetry, which is not a quirk but the mechanism XNU relies
- * on: with FPEXC.EN clear, FPEXC and FPSID stay readable (that is how
- * _get_vfp_enabled asks whether VFP is on) and everything else is UNDEFINED.
+ * on: with FPEXC.EN clear, privileged code can still read FPEXC and FPSID
+ * (that is how _get_vfp_enabled asks whether VFP is on) and everything else
+ * is UNDEFINED.
  * Undefined here means the guest is VECTORED, not halted — arm_step routes it
  * through undefined_instruction — so a passing test sees ARM_OK with PC at the
  * Undefined vector.
@@ -306,6 +375,7 @@ static void test_fpexc_en_gates_the_other_registers(void) {
     uint32_t read_fpsid[] = { VMRS(0, 0) };
     uint32_t read_fpscr[] = { VMRS(0, 1) };
     uint32_t an_add[]     = { DP_S(0,1,1,0, 0,0,0) };
+    uint32_t dword_move[] = { 0xee274b10u };
 
     vfp_reset(&c); c.vfp_fpexc = 0;
     CHECK(run(&c, read_fpexc, 1, 1) == ARM_OK, "VMRS FPEXC refused while disabled");
@@ -328,6 +398,15 @@ static void test_fpexc_en_gates_the_other_registers(void) {
     vfp_reset(&c); c.vfp_fpexc = 0;
     CHECK(run(&c, an_add, 1, 1) == ARM_OK, "VADD should vector, not halt");
     CHECK((c.cpsr & ARM_CPSR_MODE_MASK) == ARM_MODE_UND, "mode = 0x%02x", c.cpsr & 0x1fu);
+
+    vfp_reset(&c); c.vfp_fpexc = 0; c.r[4] = 0x11223344u;
+    vfp_set_s(&c, 15, 0x55667788u);
+    CHECK(run(&c, dword_move, 1, 1) == ARM_OK,
+          "FMDHR should vector, not halt, while VFP is disabled");
+    CHECK((c.cpsr & ARM_CPSR_MODE_MASK) == ARM_MODE_UND,
+          "FMDHR disabled mode = 0x%02x", c.cpsr & 0x1fu);
+    CHECK(vfp_get_s(&c, 15) == 0x55667788u,
+          "disabled FMDHR changed s15 to 0x%08x", vfp_get_s(&c, 15));
 
     /* CPACR withholding CP10/CP11 does the same, even with FPEXC.EN set. */
     vfp_reset(&c); c.cp15.cpacr = 0;
@@ -361,6 +440,98 @@ static void test_vmov_core_registers(void) {
     /* The pair really landed in s2 and s3, i.e. in d1. */
     CHECK(vfp_get_d(&c, 1) == 0xfeedface0badf00dull, "d1 = 0x%016llx",
           (unsigned long long)vfp_get_d(&c, 1));
+}
+
+/*
+ * VFP11 names each half of d0-d15 through cp11. Modern disassemblers print
+ * these as VMOV.32 lane transfers, but the legacy FMDLR/FMDHR/FMRDL/FMRDH
+ * instructions are VFPv2 and are used by the original armv6 libm.
+ */
+static void test_vmov_double_register_words(void) {
+    arm_cpu_t c; vfp_reset(&c);
+    uint32_t prog[] = {
+        VMOV_DWORD_R(7, 1, 4),              /* FMDHR d7, r4 */
+        VMOV_DWORD_R(7, 0, 5),              /* FMDLR d7, r5 */
+        VMOV_R_DWORD(6, 7, 0),              /* FMRDL r6, d7 */
+        VMOV_R_DWORD(7, 7, 1),              /* FMRDH r7, d7 */
+        VMOV_DWORD_R(15, 1, 8),             /* d15 high word is s31 */
+        VMOV_R_DWORD(9, 15, 1),
+    };
+    uint32_t cpsr, fpexc;
+
+    CHECK(prog[0] == 0xee274b10u, "FMDHR d7,r4 = 0x%08x", prog[0]);
+    CHECK(prog[1] == 0xee075b10u, "FMDLR d7,r5 = 0x%08x", prog[1]);
+    CHECK(prog[2] == 0xee176b10u, "FMRDL r6,d7 = 0x%08x", prog[2]);
+    CHECK(prog[3] == 0xee377b10u, "FMRDH r7,d7 = 0x%08x", prog[3]);
+
+    vfp_set_d(&c, 7, 0xaabbccdd11223344ull);
+    vfp_set_d(&c, 15, 0x8899aabb44556677ull);
+    c.r[4] = 0xdeadbeefu;
+    c.r[5] = 0xcafebabeu;
+    c.r[8] = 0x01020304u;
+    c.vfp_fpscr = ARM_FPSCR_WMASK;          /* raw moves ignore every mode */
+    cpsr = c.cpsr;
+    fpexc = c.vfp_fpexc;
+
+    CHECK(run(&c, prog, sizeof prog / sizeof prog[0],
+              (int)(sizeof prog / sizeof prog[0])) == ARM_OK,
+          "a VFPv2 double-register word move trapped");
+    CHECK(vfp_get_d(&c, 7) == 0xdeadbeefcafebabeull,
+          "d7 = 0x%016llx", (unsigned long long)vfp_get_d(&c, 7));
+    CHECK(vfp_get_s(&c, 14) == 0xcafebabeu &&
+          vfp_get_s(&c, 15) == 0xdeadbeefu,
+          "d7 aliases s14/s15 as %08x/%08x",
+          vfp_get_s(&c, 14), vfp_get_s(&c, 15));
+    CHECK(c.r[6] == 0xcafebabeu && c.r[7] == 0xdeadbeefu,
+          "d7 readback r6/r7 = %08x/%08x", c.r[6], c.r[7]);
+    CHECK(vfp_get_d(&c, 15) == 0x0102030444556677ull &&
+          vfp_get_s(&c, 31) == 0x01020304u && c.r[9] == 0x01020304u,
+          "d15/s31 boundary = %016llx/%08x/%08x",
+          (unsigned long long)vfp_get_d(&c, 15), vfp_get_s(&c, 31), c.r[9]);
+    CHECK(c.r[4] == 0xdeadbeefu && c.r[5] == 0xcafebabeu &&
+          c.r[8] == 0x01020304u,
+          "core-to-VFP moves modified their sources");
+    CHECK(c.vfp_fpscr == ARM_FPSCR_WMASK && c.vfp_fpexc == fpexc &&
+          c.cpsr == cpsr,
+          "raw word moves modified FPSCR/FPEXC/CPSR: %08x/%08x/%08x",
+          c.vfp_fpscr, c.vfp_fpexc, c.cpsr);
+
+    /* Exhaust the complete VFP11 bank in both directions. This catches a
+     * swapped lane bit, a d/s alias off-by-one, and an accidental d15 wrap
+     * without relying on the handful of registers used by the real crash. */
+    for (unsigned dn = 0; dn < 16u; dn++) {
+        for (unsigned hi = 0; hi < 2u; hi++) {
+            unsigned rt = (dn + hi) % 15u;          /* never select PC */
+            unsigned sn = dn * 2u + hi;
+            unsigned other = dn * 2u + (hi ^ 1u);
+            uint32_t source = 0xa5000000u | (dn << 8) | hi;
+            uint32_t other_before = 0x3c000000u | (dn << 8) | hi;
+            uint32_t one[] = { VMOV_DWORD_R(dn, hi, rt) };
+
+            vfp_reset(&c);
+            c.r[rt] = source;
+            vfp_set_s(&c, sn, 0x5a5a5a5au);
+            vfp_set_s(&c, other, other_before);
+            CHECK(run(&c, one, 1, 1) == ARM_OK,
+                  "core-to-d%u[%u] trapped", dn, hi);
+            CHECK(vfp_get_s(&c, sn) == source &&
+                  vfp_get_s(&c, other) == other_before,
+                  "d%u[%u] write = %08x, other half = %08x",
+                  dn, hi, vfp_get_s(&c, sn), vfp_get_s(&c, other));
+
+            one[0] = VMOV_R_DWORD(rt, dn, hi);
+            vfp_reset(&c);
+            vfp_set_s(&c, sn, source);
+            vfp_set_s(&c, other, other_before);
+            c.r[rt] = 0xccccccccu;
+            CHECK(run(&c, one, 1, 1) == ARM_OK,
+                  "d%u[%u]-to-core trapped", dn, hi);
+            CHECK(c.r[rt] == source && vfp_get_s(&c, sn) == source &&
+                  vfp_get_s(&c, other) == other_before,
+                  "d%u[%u] read = %08x, source/other = %08x/%08x",
+                  dn, hi, c.r[rt], vfp_get_s(&c, sn), vfp_get_s(&c, other));
+        }
+    }
 }
 
 /* ================================================== arithmetic =========== */
@@ -713,8 +884,22 @@ static void test_unimplemented_encodings_still_halt(void) {
         { UN_S(10,1, 0,0),                   "VCVT fixed-point (VFPv3)" },
         { DP_S(1,1,0,0, 0,0,0),              "VFMA (VFPv4)" },
         { DP_S(1,0,1,0, 0,0,0),              "VFNMA (VFPv4)" },
-        /* Advanced SIMD scalar transfer: no NEON on this part. */
-        { 0xee000b10u,                       "VMOV.32 d0[0], r0 (NEON)" },
+        /* Advanced SIMD scalar transfers: only VFPv2's 32-bit d0-d15 word
+         * transfers exist on this part. 8/16-bit lanes need NEON, while d16+
+         * is simply outside VFP11's register bank. */
+        { 0xee400b10u,                       "VMOV.8 d0[0], r0 (NEON)" },
+        { 0xee000b30u,                       "VMOV.16 d0[0], r0 (NEON)" },
+        { 0xee000b90u,                       "VMOV.32 d16[0], r0 (absent on VFP11)" },
+        { 0xeee84b10u,                       "VDUP.8 q4, r4 (must not alias VMSR FPEXC)" },
+        { 0xeef14b10u,                       "NEON lane read (must not alias VMRS FPSCR)" },
+        /* Malformed/reserved VFP transfer encodings. */
+        { 0xee200a10u,                       "reserved cp10 opc1=1 transfer" },
+        { 0xee000b11u,                       "FMDLR with reserved CRm bits" },
+        { 0xee27fb10u,                       "FMDHR with PC as core register" },
+        { 0xee37fb10u,                       "FMRDH with PC as core register" },
+        { 0xeef10a30u,                       "VMRS with reserved opc2 bits" },
+        { VMRS(15, 0),                       "VMRS PC, FPSID" },
+        { VMRS(15, 8),                       "VMRS PC, FPEXC" },
         /* VFP system registers we do not implement. */
         { VMRS(0, 7),                        "VMRS r0, MVFR0" },
         { VMRS(0, 9),                        "VMRS r0, FPINST" },
@@ -938,6 +1123,18 @@ static void test_condition_codes_apply(void) {
     CHECK(get_f32(&c, 2) == 99.0f, "VADDNE executed with Z set: %f",
           (double)get_f32(&c, 2));
     CHECK(c.r[15] == 4u, "PC = 0x%08x", c.r[15]);
+
+    vfp_reset(&c);
+    {
+        uint32_t move_ne[] = { 0x1e274b10u };       /* FMDHRNE d7,r4 */
+        c.r[4] = 0x11223344u;
+        vfp_set_s(&c, 15, 0x55667788u);
+        c.cpsr |= ARM_CPSR_Z;
+        CHECK(run(&c, move_ne, 1, 1) == ARM_OK, "conditional FMDHR trapped");
+        CHECK(vfp_get_s(&c, 15) == 0x55667788u,
+              "FMDHRNE executed with Z set: s15 = 0x%08x", vfp_get_s(&c, 15));
+        CHECK(c.r[15] == 4u, "conditional FMDHR PC = 0x%08x", c.r[15]);
+    }
 }
 
 /* --------------------------------------------------------------- main ---- */
@@ -952,8 +1149,10 @@ int main(void) {
     test_overlong_lists_trap();
     test_vmrs_vmsr();
     test_fpsid_is_read_only();
+    test_system_register_privilege();
     test_fpexc_en_gates_the_other_registers();
     test_vmov_core_registers();
+    test_vmov_double_register_words();
     test_single_precision_arithmetic();
     test_double_precision_arithmetic();
     test_vmla_is_not_fused();

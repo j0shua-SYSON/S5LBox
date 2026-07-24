@@ -515,13 +515,17 @@ static bool vfp_lazy_enable_trap(const arm_cpu_t *c, uint32_t insn) {
  * lazy-VFP fault and always stops the machine. Writing the +2 case would be
  * unreachable code standing in for a case this part cannot produce.
  */
-static arm_status_t undefined_instruction(arm_cpu_t *c, uint32_t pc,
-                                          uint32_t insn) {
+static arm_status_t take_undefined_instruction(arm_cpu_t *c, uint32_t pc) {
     uint32_t vec;
-    if (!vfp_lazy_enable_trap(c, insn)) return ARM_UNDEFINED;
     take_exception(c, ARM_VEC_UNDEFINED, ARM_MODE_UND, pc + 4u, false, &vec);
     c->r[15] = vec;
     return ARM_OK;
+}
+
+static arm_status_t undefined_instruction(arm_cpu_t *c, uint32_t pc,
+                                          uint32_t insn) {
+    if (!vfp_lazy_enable_trap(c, insn)) return ARM_UNDEFINED;
+    return take_undefined_instruction(c, pc);
 }
 
 /*
@@ -2555,6 +2559,7 @@ arm_status_t arm_step(arm_cpu_t *c) {
      * the decode tree it was rejected — the CDP, LDC/STC and MCRR/MRRC forms
      * of VFP all fall out of the bottom of the tree, and MCR/MRC comes back
      * from exec_coprocessor. One choke point, one rule. */
+    if (st == ARM_GUEST_UNDEFINED) return take_undefined_instruction(c, pc);
     if (st == ARM_UNDEFINED) return undefined_instruction(c, pc, insn);
 
     if (st == ARM_OK) c->r[15] = next;

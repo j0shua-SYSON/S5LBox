@@ -167,9 +167,10 @@
 
 /* Result of stepping the core. */
 typedef enum {
-    ARM_OK = 0,          /* one instruction retired normally          */
-    ARM_UNDEFINED,       /* undefined / not-yet-implemented encoding   */
-    ARM_HALT             /* core requested halt (e.g. debug trap)      */
+    ARM_OK = 0,          /* one instruction retired normally           */
+    ARM_UNDEFINED,       /* unsupported encoding: stop for diagnosis    */
+    ARM_HALT,            /* core requested halt (e.g. debug trap)       */
+    ARM_GUEST_UNDEFINED  /* architected Undefined exception: vector it  */
 } arm_status_t;
 
 /*

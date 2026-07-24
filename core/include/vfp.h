@@ -105,9 +105,11 @@ bool vfp_enabled(const arm_cpu_t *c);
 /*
  * Execute one VFP encoding. `insn` must already have been identified as a
  * cp10/cp11 encoding by the caller and its condition code must already have
- * passed. Returns ARM_OK, or ARM_UNDEFINED for anything not implemented —
- * including a VFP instruction issued while the unit is disabled, which is the
- * lazy-enable trap and which arm_step routes on to the guest's handler.
+ * passed. Returns ARM_OK; ARM_UNDEFINED for anything not implemented or for a
+ * disabled-unit access (the lazy-enable trap); or ARM_GUEST_UNDEFINED for an
+ * architecturally denied access. arm_step recognizes the disabled-unit
+ * ARM_UNDEFINED separately and routes it plus ARM_GUEST_UNDEFINED to the
+ * guest's handler while keeping capability gaps fail-closed.
  *
  * VFP never writes r15, so the caller's `next` is unaffected.
  */
@@ -115,9 +117,9 @@ arm_status_t vfp_execute(arm_cpu_t *c, uint32_t pc, uint32_t insn,
                          const vfp_bus_t *bus);
 
 /*
- * Why the last ARM_UNDEFINED came back, as a short human-readable phrase, or
- * NULL if the last vfp_execute did not trap. vfp.c also prints this to stderr
- * as it happens; the accessor exists so a harness can quote it.
+ * Why the last refused access came back, as a short human-readable phrase, or
+ * NULL if the last vfp_execute did not trap. Unsupported instructions are also
+ * printed to stderr; architectural guest exceptions are intentionally quiet.
  */
 const char *vfp_trap_reason(void);
 
