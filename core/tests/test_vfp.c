@@ -534,6 +534,111 @@ static void test_vmov_double_register_words(void) {
     }
 }
 
+/*
+ * The exact six-instruction block reached in iPhone OS 3.1.3's armv6 libm
+ * `_fmod` at shared-cache VA 0x33acca88. Run20 stopped on its first word after
+ * mistaking the legacy VFP11 high-word transfer for a NEON lane move.
+ *
+ * Keep this as a sequence rather than six isolated decoder checks. In
+ * particular, Apple's binary writes d6's high word twice before consuming the
+ * complete aliased register in VADD.F64. Starting d6 at 2.0 makes a swapped
+ * half decode observable: the architecturally correct sequence clears d6 to
+ * +0.0 and returns 1.0, while a low-half write would leave it at 2.0 and
+ * produce 3.0.
+ */
+static void test_ios313_libm_fmod_return_block(void) {
+    arm_cpu_t c; vfp_reset(&c);
+    uint32_t prog[] = {
+        0xee274b10u,                         /* FMDHR d7, r4          */
+        0xee070b10u,                         /* FMDLR d7, r0          */
+        0xe0222002u,                         /* EOR   r2, r2, r2      */
+        0xee262b10u,                         /* FMDHR d6, r2          */
+        0xee262b10u,                         /* FMDHR d6, r2 (again)  */
+        0xee366b07u,                         /* VADD.F64 d6, d6, d7   */
+    };
+
+    CHECK(prog[0] == VMOV_DWORD_R(7, 1, 4), "unexpected first _fmod word");
+    CHECK(prog[1] == VMOV_DWORD_R(7, 0, 0), "unexpected second _fmod word");
+    CHECK(prog[3] == VMOV_DWORD_R(6, 1, 2), "unexpected d6 high-word move");
+    CHECK(prog[5] == DP_D(0,1,1,0, 6,6,7),
+          "unexpected _fmod VADD encoding 0x%08x", prog[5]);
+
+    c.r[0] = 0x00000000u;                   /* low word of 1.0 */
+    c.r[2] = 0xdeadbeefu;                   /* must be cleared by EOR */
+    c.r[4] = 0x3ff00000u;                   /* high word of 1.0 */
+    vfp_set_d(&c, 6, d2u(2.0));             /* exposes a half-swap */
+
+    CHECK(run(&c, prog, sizeof prog / sizeof prog[0],
+              (int)(sizeof prog / sizeof prog[0])) == ARM_OK,
+          "the exact iOS 3.1.3 _fmod return block trapped");
+    CHECK(c.r[2] == 0u, "_fmod EOR left r2 = 0x%08x", c.r[2]);
+    CHECK(vfp_get_d(&c, 7) == d2u(1.0),
+          "_fmod assembled d7 = 0x%016llx",
+          (unsigned long long)vfp_get_d(&c, 7));
+    CHECK(vfp_get_d(&c, 6) == d2u(1.0),
+          "_fmod result d6 = 0x%016llx",
+          (unsigned long long)vfp_get_d(&c, 6));
+    CHECK(c.r[0] == 0u && c.r[4] == 0x3ff00000u,
+          "_fmod word transfers modified r0/r4: %08x/%08x", c.r[0], c.r[4]);
+    CHECK(c.r[15] == sizeof prog,
+          "_fmod block PC = 0x%08x, expected 0x%08x",
+          c.r[15], (unsigned)sizeof prog);
+    CHECK((c.vfp_fpscr & 0x9fu) == 0u,
+          "exact _fmod block raised FPSCR flags 0x%08x", c.vfp_fpscr);
+
+    /*
+     * Also retain the original condition chain at 0x33acc900..0x33acc924.
+     * Relocating that span to zero preserves every PC-relative branch: the
+     * common block becomes offset 0x188. Exercise both routes that select it:
+     * finite y with x == 0 (the run20 path), and y == infinity.
+     */
+    {
+        uint32_t path[(0x188u / 4u) + (sizeof prog / sizeof prog[0])] = {0};
+        struct {
+            uint32_t r0, r2, r4, r5;
+            uint64_t expected;
+            int steps;
+            const char *why;
+        } cases[] = {
+            { 0x00000000u, 0xffe00000u, 0x00000000u, 0x41efffffu,
+              0x0000000000000000ull, 16, "x == 0 (run20)" },
+            { 0x00000000u, 0x00000000u, 0x3ff00000u, 0x7ff00000u,
+              0x3ff0000000000000ull, 13, "y == infinity" },
+        };
+
+        path[0x00u / 4u] = 0xe3550000u;      /* CMP   r5, #0          */
+        path[0x04u / 4u] = 0x03520000u;      /* CMPEQ r2, #0          */
+        path[0x08u / 4u] = 0x0a000066u;      /* BEQ   another return   */
+        path[0x0cu / 4u] = 0xe1550006u;      /* CMP   r5, r6          */
+        path[0x10u / 4u] = 0x03520000u;      /* CMPEQ r2, #0          */
+        path[0x14u / 4u] = 0x8a00006du;      /* BHI   reduction path  */
+        path[0x18u / 4u] = 0x0a00005au;      /* BEQ   common block    */
+        path[0x1cu / 4u] = 0xe3540000u;      /* CMP   r4, #0          */
+        path[0x20u / 4u] = 0x03500000u;      /* CMPEQ r0, #0          */
+        path[0x24u / 4u] = 0x0a000057u;      /* BEQ   common block    */
+        memcpy(&path[0x188u / 4u], prog, sizeof prog);
+
+        for (unsigned i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+            vfp_reset(&c);
+            c.r[0] = cases[i].r0;
+            c.r[2] = cases[i].r2;
+            c.r[4] = cases[i].r4;
+            c.r[5] = cases[i].r5;
+            c.r[6] = 0x7ff00000u;
+            vfp_set_d(&c, 6, d2u(2.0));
+
+            CHECK(run(&c, path, sizeof path / sizeof path[0],
+                      cases[i].steps) == ARM_OK,
+                  "_fmod %s condition path trapped", cases[i].why);
+            CHECK(vfp_get_d(&c, 6) == cases[i].expected,
+                  "_fmod %s result = 0x%016llx",
+                  cases[i].why, (unsigned long long)vfp_get_d(&c, 6));
+            CHECK(c.r[15] == 0x1a0u,
+                  "_fmod %s path ended at 0x%08x", cases[i].why, c.r[15]);
+        }
+    }
+}
+
 /* ================================================== arithmetic =========== */
 
 static void set_f32(arm_cpu_t *c, unsigned n, float v) { vfp_set_s(c, n, f2u(v)); }
@@ -1153,6 +1258,7 @@ int main(void) {
     test_fpexc_en_gates_the_other_registers();
     test_vmov_core_registers();
     test_vmov_double_register_words();
+    test_ios313_libm_fmod_return_block();
     test_single_precision_arithmetic();
     test_double_precision_arithmetic();
     test_vmla_is_not_fused();
