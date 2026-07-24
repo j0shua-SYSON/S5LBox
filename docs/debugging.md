@@ -849,8 +849,68 @@ continuing to reject NEON-only lane widths, `d16..d31`, and reserved encodings.
 The local Release suite passes 23/23; targeted binaries pass VFP 452/0, ARM
 810/0, and JIT 347/0 under focused strict builds. Denied user-mode FPEXC access
 also enters the guest Undefined vector rather than returning a fatal emulator
-status. Do not call the stop cleared yet: hosted and firmware-replay validation
-remain absent.
+status.
+
+#### Run21 result: exact VFP replay cleared, visual gate still closed
+
+Run21 used exact decoder-fix commit
+`debec04ff9b0faa469d5ad2ee7d75d1bf3b53b1a`. The harness exited **0** at its
+configured **2,500,000,000-instruction cap**, crossing run20's stop by
+**562,020,182 instructions**. This is the required firmware validation for the
+exact libm `_fmod+0x1a8` `FMDHR` / `VMOV.32 d7[1], r4` correction.
+
+The next trace boundary requires the same evidence discipline. SpringBoard
+entered `applicationDidFinishLaunching:` at 1,923,358,329.
+`-[SBTetherController isTethered]` returned from `0x967ba` to `0xa72c` at
+1,924,647,850 and took the false branch `0xa730 -> 0xa74c`. The trace then
+crossed `loadDebuggingAndDemoPrefs`, `_initLockButtonBearTrap`, and
+`SBPlatformController`, so tether detection was not the stall.
+
+SpringBoard entered `+[SBTelephonyManager sharedTelephonyManager]` at
+1,965,837,070 and `-init` at `0x28240`. PID 20's last exact-attributed user
+instruction was 1,966,242,080, then its thread switched out at 1,966,246,193
+in a shared-cache `mach_msg` before returning to `0xa77d`.
+
+Post-run shared-cache resolution and message-episode decoding identify the path
+without guessing. `_CTTelephonyCenterGetDefault` creates a CTServerConnection.
+Its bootstrap lookup for the literal `com.apple.commcenter` succeeds and
+returns port name **0x4f07**. The initial generated handshake enters at
+**0x30a1177c** and calls `mach_msg` at **0x30a117e0** with request ID
+**0x0054b557**, send size **0x834**, and receive size **0x30**. SpringBoard
+blocks before the return at **0x30a117e4**.
+
+Do not diagnose the observed header size **6** as guest or emulator
+corruption. The generated stock stub leaves `msgh_size` and `reserved`
+uninitialized before this call, so those fields contain stale stack state.
+Likewise, the current trace does not prove a reply, deadlock, queue-full
+condition, or baseband cause. The next run must trace the
+`ipc_mqueue_send` receiver/queue and CommCenter PID 24's wait state, then
+correlate that state with the baseband/SPI symptoms.
+
+The visual probes remained decisive and negative. `UIController` had zero
+hits, live scanout recorded zero mutations, and the final PPM was the exact
+seed, SHA-256
+`CBAD1C110E67CAD553A2B4EEBBF46E7BF09255389851902B24816249294AF2AB`,
+with zero changed pixels. The source firmware hashes were unchanged,
+external-md failures were zero, guest free memory bottomed at 50.63 MiB, and
+the retained run directory occupies 447.27 MiB on F:. Exit 0 at a cap means
+the emulator did not hit its fail-closed stop; it does not mean SpringBoard
+rendered or boot completed.
+
+Exact-commit hosted
+[core run 30095081111](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30095081111)
+and
+[unsigned iOS run 30095081184](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30095081184)
+passed for `debec04`. Test-only `0670ab8` later passed
+[core run 30096115501](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30096115501)
+and
+[unsigned iOS run 30096115527](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30096115527),
+with VFP 469/0. Latest hosted test-only `657e8d8` expands local VFP helper coverage to
+488/0 and passed hosted
+[core run 30097023293](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30097023293)
+and
+[unsigned iOS run 30097023356](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30097023356).
+Keep those commit ledgers separate: run21 executed `debec04`.
 
 ### WFI changes elapsed device time, not the instruction coordinate
 
@@ -904,7 +964,12 @@ resolution placed it at libm `_fmod+0x1a8`. A modern lane-style disassembly can
 invite the wrong NEON conclusion, but VFP11's legacy encoding table identifies
 `FMDHR d7, r4` / `VMOV.32 d7[1], r4`. The local implementation and 452/0,
 810/0, and 347/0 targeted results are useful, but only a firmware replay can
-turn “decoded and unit-tested” into “cleared at the exact runtime site.”
+turn a decoded and unit-tested fix into one cleared at the exact runtime site.
+Run21 supplied that replay and ran another 562,020,182 instructions to the
+clean 2.5 B cap. The same rule now applies to the named
+`com.apple.commcenter` handshake: follow the `ipc_mqueue_send` receiver/queue,
+CommCenter PID 24's wait state, and the missing return before declaring a
+reply, deadlock, queue-full condition, or baseband cause.
 
 ---
 

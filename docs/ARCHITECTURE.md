@@ -69,12 +69,13 @@ second backend is under construction:
 - **Interpreter** (`core/src/arm/arm_interp.c`) — the portable reference backend;
   unsupported forms trap. This is what boots today and what the dynarec is
   validated against. The reached path includes broad VFPv2 and the ARMv5TE
-  `SMULxy`/`SMLAxy`/`SMLALxy`/`SMULWy`/`SMLAWy` families. Run20 reopened one
-  VFP11 decoder edge: committed `590d224` misclassifies the valid
-  `FMDHR`/`VMOV.32 d7[1], r4` word transfer as NEON. The current correction
-  passes the full local Release suite and focused strict tests, but is not yet
-  hosted or firmware-retested. Milestone M1 therefore has a pending
-  reached-path validation gate.
+  `SMULxy`/`SMLAxy`/`SMLALxy`/`SMULWy`/`SMLAWy` families. Run20 exposed one
+  VFP11 decoder edge: committed `590d224` misclassified the valid
+  `FMDHR`/`VMOV.32 d7[1], r4` word transfer as NEON. Exact correction commit
+  `debec04` passes the full local Release suite, focused strict tests, and
+  hosted core/iOS workflows. Run21 then firmware-validated the correction by
+  crossing the exact libm stop and reaching a clean 2.5 B cap. This clears that
+  reached-path gate; it does not claim complete VFP or ARM coverage.
 - **Dynarec / JIT** — an AArch64 emitter and ARM/Thumb block translator exist
   behind `IOS3VM_JIT`, and emitted blocks run in macOS arm64 CI. There is no code
   cache or dispatcher, nothing in `s5l8900_run()` calls it, and the iOS target
@@ -495,11 +496,64 @@ also distinguishes an architectural guest Undefined exception from a fatal
 emulator capability gap: denied user-mode FPEXC/FPSID access vectors into the
 guest without exposing state or stopping the host. The local Release suite
 passes 23/23; targeted VFP/ARM/JIT binaries pass 452/0, 810/0, and 347/0 under
-focused strict builds. Because hosted and firmware-replay results are still
-absent, this remains a candidate architecture correction rather than a
-validated new runtime boundary. Run20 otherwise preserved the original firmware
-hashes, reported zero external-md failures and a 51.76 MiB guest-free low, and
-occupied 447.18 MiB on F: including its retained work image and evidence.
+focused strict builds. Exact-commit hosted
+[core run 30095081111](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30095081111)
+and
+[unsigned iOS run 30095081184](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30095081184)
+passed for `debec04`.
+
+### Run21 architecture boundary
+
+Run21 exercised that exact `debec04ff9b0faa469d5ad2ee7d75d1bf3b53b1a`
+source against the original firmware. It exited 0 at the configured
+2,500,000,000-instruction cap, **562,020,182 instructions beyond** run20's
+libm failure. This makes the `FMDHR` / `VMOV.32 d7[1], r4` implementation a
+firmware-validated reached-path correction.
+
+The next observed boundary is not another CPU trap. SpringBoard entered
+`applicationDidFinishLaunching:` at 1,923,358,329.
+`-[SBTetherController isTethered]` returned false at 1,924,647,850, after which
+SpringBoard continued through debugging/demo preferences, lock-button, and
+platform-controller initialization. It then entered
+`+[SBTelephonyManager sharedTelephonyManager]` at 1,965,837,070 and `-init`.
+PID 20's last exact user instruction was 1,966,242,080, and its thread switched
+out at 1,966,246,193 inside a shared-cache `mach_msg` before returning to the
+telephony caller.
+
+Post-run resolution identifies the architectural dependency exactly.
+`_CTTelephonyCenterGetDefault` creates a CTServerConnection. A bootstrap lookup
+for the literal `com.apple.commcenter` succeeds and returns port name
+**0x4f07**. Its initial generated handshake enters at **0x30a1177c** and calls
+`mach_msg` at **0x30a117e0** with request ID **0x0054b557**, send size
+**0x834**, and receive size **0x30**. The SpringBoard thread blocks before
+**0x30a117e4**. The generated stub leaves `msgh_size` and `reserved`
+uninitialized, so the observed header size **6** is stale stock stack state,
+not emulator corruption.
+
+This proves the service and call boundary, not a reply, deadlock, queue-full
+condition, or baseband cause. The next architecture trace must identify the
+`ipc_mqueue_send` receiver and queue state and correlate CommCenter PID 24's
+wait with the baseband/SPI observations. Because the unmodified UI startup
+visits this synchronous dependency, M5 now requires implementing enough
+faithful **graceful no-modem** behavior to let boot continue. Full telephony,
+SIM, and cellular emulation remains later work.
+
+The host-presentation contract also remains unfulfilled. `UIController` had
+zero hits, the live-scanout observer recorded zero mutations, and the final PPM
+was the exact seed, SHA-256
+`CBAD1C110E67CAD553A2B4EEBBF46E7BF09255389851902B24816249294AF2AB`,
+with zero changed pixels. The original firmware hashes were unchanged,
+external-md failures were zero, guest-free memory bottomed at 50.63 MiB, and
+the retained run directory occupies 447.27 MiB on F:. These data validate
+continued execution and resource bounds, not rendered SpringBoard.
+
+Later test-only commit `0670ab8` passes VFP 469/0 and hosted core/iOS runs
+30096115501/30096115527. Latest hosted test-only `657e8d8` expands local helper
+coverage to VFP 488/0 and passes hosted
+[core run 30097023293](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30097023293)
+and
+[unsigned iOS run 30097023356](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30097023356).
+Neither later test tree inherits run21's firmware evidence.
 
 In the planned shared-session design, host services cross explicit non-blocking
 seams: frame descriptors out; bounded touch, PCM and network queues in/out;

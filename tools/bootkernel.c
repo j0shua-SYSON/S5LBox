@@ -2246,10 +2246,36 @@ static unsigned    NM;
 #define SPRINGBOARD_LOW_FLOW_CAP 4096u
 #define SPRINGBOARD_TARGET_USER_RETRY_CAP 4u
 #define SPRINGBOARD_MACH_HEADER_SIZE 24u
-#define SPRINGBOARD_MACH_PATH_COUNT 6u
+#define SPRINGBOARD_MACH_PATH_COUNT 12u
 #define SPRINGBOARD_MACH_EVENT_CAP 256u
 #define SPRINGBOARD_MACH_RECEIVE_CAP 64u
 #define SPRINGBOARD_MACH_REPORT_CAP 96u
+#define SPRINGBOARD_COMMCENTER_ROUTE_COUNT 5u
+#define SPRINGBOARD_COMMCENTER_INITIAL_ID UINT32_C(0x0054b557)
+#define SPRINGBOARD_COMMCENTER_POST_SELECTED_WAITER_PC UINT32_C(0xc00146f4)
+#define SPRINGBOARD_COMMCENTER_POST_NO_WAITER_PC UINT32_C(0xc001471a)
+#define SPRINGBOARD_COMMCENTER_FULL_WAIT_PC UINT32_C(0xc00147ba)
+#define SPRINGBOARD_COMMCENTER_FULLWAITERS_STORE_PC UINT32_C(0xc00147d6)
+#define SPRINGBOARD_COMMCENTER_ACCEPTED_POST_PC UINT32_C(0xc001482e)
+#define SPRINGBOARD_COMMCENTER_MQUEUE_PORT_DELTA UINT32_C(0x18)
+#define SPRINGBOARD_COMMCENTER_PORT_IO_BITS_OFFSET UINT32_C(0x04)
+#define SPRINGBOARD_COMMCENTER_PORT_ACTIVE UINT32_C(0x80000000)
+#define SPRINGBOARD_COMMCENTER_MQUEUE_MSGCOUNT_OFFSET UINT32_C(0x14)
+#define SPRINGBOARD_COMMCENTER_MQUEUE_QLIMIT_OFFSET UINT32_C(0x18)
+#define SPRINGBOARD_COMMCENTER_MQUEUE_SEQNO_OFFSET UINT32_C(0x1c)
+#define SPRINGBOARD_COMMCENTER_MQUEUE_FULLWAITERS_OFFSET UINT32_C(0x20)
+#define SPRINGBOARD_COMMCENTER_PORT_RECEIVER_SPACE_OFFSET UINT32_C(0x3c)
+#define SPRINGBOARD_COMMCENTER_SPACE_TASK_OFFSET UINT32_C(0x58)
+#define SPRINGBOARD_COMMCENTER_SPACE_ACTIVE_OFFSET UINT32_C(0x1c)
+#define SPRINGBOARD_COMMCENTER_TASK_IPCSPACE_OFFSET UINT32_C(0x174)
+#define SPRINGBOARD_COMMCENTER_TASK_PROC_OFFSET UINT32_C(0x1c4)
+#define SPRINGBOARD_COMMCENTER_PROC_PID_OFFSET UINT32_C(0x08)
+#define COMMCENTER_WATCH_PHASE_COUNT 2u
+#define COMMCENTER_WATCH_MODE_COUNT 2u
+#define COMMCENTER_WATCH_SWITCH_CAP 64u
+#define COMMCENTER_WATCH_MACH_CAP 32u
+#define COMMCENTER_WATCH_MILESTONE_COUNT 6u
+#define COMMCENTER_WATCH_UNREADABLE_RETRY_INTERVAL UINT64_C(1024)
 #define SPRINGBOARD_UI_STACK_CAP 32u
 #define SPRINGBOARD_TETHER_CALL_PC UINT32_C(0x0009679a)
 #define SPRINGBOARD_TETHER_CONTINUATION_PC UINT32_C(0x0009679e)
@@ -2372,10 +2398,39 @@ SPRINGBOARD_UI_CHECKPOINTS[] = {
     { "IOMFB:finalizer-load-connection",           UINT32_C(0x3110dc18) },
     { "IOMFB:IOServiceClose-call",                 UINT32_C(0x3110dc1c) },
     { "IOMFB:IOServiceClose-return",               UINT32_C(0x3110dc20) },
+
+    /*
+     * Post-window-server SpringBoard initialization.  Append these rather
+     * than renumbering the older display checkpoints: Mach episodes retain
+     * the array index that was current when they began.
+     */
+    { "SpringBoard:isTethered-return",              UINT32_C(0x0000a72c) },
+    { "SpringBoard:post-tether-false",              UINT32_C(0x0000a74c) },
+    { "SpringBoard:telephony-shared-call",          UINT32_C(0x0000a778) },
+    { "SpringBoard:telephony-shared-entry",         UINT32_C(0x00024c30) },
+    { "SpringBoard:telephony-init-entry",           UINT32_C(0x00028240) },
+    { "SpringBoard:telephony-super-return",         UINT32_C(0x00028260) },
+    { "SpringBoard:CTCenterGetDefault-call",        UINT32_C(0x0002826e) },
+    { "SpringBoard:CTCenterGetDefault-return",      UINT32_C(0x00028270) },
+    { "SpringBoard:telephony-init-return",          UINT32_C(0x00024c50) },
+    { "SpringBoard:telephony-shared-return",        UINT32_C(0x0000a77c) },
+    { "CoreTelephony:CTCenterGetDefault-entry",      UINT32_C(0x30a0d2e8) },
+    { "CoreTelephony:CTServerConnectionCreate",     UINT32_C(0x30a1eedc) },
+    { "CoreTelephony:CommCenter-lookup-call",        UINT32_C(0x30a1ef9c) },
+    { "CoreTelephony:CommCenter-lookup-return",      UINT32_C(0x30a1efa0) },
+    { "CoreTelephony:initial-handshake-entry",       UINT32_C(0x30a1177c) },
+    { "CoreTelephony:initial-handshake-mach-call",   UINT32_C(0x30a117e0) },
+    { "CoreTelephony:initial-handshake-mach-return", UINT32_C(0x30a117e4) },
+    { "CoreTelephony:GetDefault-once-return",        UINT32_C(0x30a0d2fc) },
+    { "CoreTelephony:initial-handshake-call",        UINT32_C(0x30a1f030) },
+    { "CoreTelephony:initial-handshake-return",      UINT32_C(0x30a1f034) },
 };
 #define SPRINGBOARD_UI_CHECKPOINT_COUNT \
     ((unsigned)(sizeof SPRINGBOARD_UI_CHECKPOINTS / \
                 sizeof SPRINGBOARD_UI_CHECKPOINTS[0]))
+_Static_assert(
+    SPRINGBOARD_UI_CHECKPOINT_COUNT <= UINT8_MAX,
+    "UI checkpoint indices must leave UINT8_MAX available as a sentinel");
 
 typedef enum {
     LIFECYCLE_SYSCALL = 1,
@@ -2692,11 +2747,136 @@ typedef struct {
 typedef enum {
     SPRINGBOARD_MACH_PATH_MACH_MSG_TRAP = 0,
     SPRINGBOARD_MACH_PATH_MACH_MSG_OVERWRITE_TRAP,
+    SPRINGBOARD_MACH_PATH_MACH_MSG_SEND,
+    SPRINGBOARD_MACH_PATH_IPC_KMSG_GET,
+    SPRINGBOARD_MACH_PATH_IPC_KMSG_COPYIN,
+    SPRINGBOARD_MACH_PATH_IPC_KMSG_SEND,
+    SPRINGBOARD_MACH_PATH_IPC_MQUEUE_SEND,
+    SPRINGBOARD_MACH_PATH_IPC_MQUEUE_POST,
     SPRINGBOARD_MACH_PATH_IPC_MQUEUE_RECEIVE,
     SPRINGBOARD_MACH_PATH_IPC_MQUEUE_RECEIVE_CONTINUE,
     SPRINGBOARD_MACH_PATH_WAIT_QUEUE_ASSERT_WAIT,
     SPRINGBOARD_MACH_PATH_THREAD_BLOCK_REASON
 } springboard_mach_path_t;
+_Static_assert(
+    SPRINGBOARD_MACH_PATH_THREAD_BLOCK_REASON + 1 ==
+        SPRINGBOARD_MACH_PATH_COUNT,
+    "Mach path enum and storage count must agree");
+_Static_assert(
+    SPRINGBOARD_MACH_PATH_COUNT <= 32u,
+    "Mach path bits must fit in uint32_t");
+
+typedef enum {
+    SPRINGBOARD_COMMCENTER_ROUTE_POST_SELECTED_WAITER = 0,
+    SPRINGBOARD_COMMCENTER_ROUTE_POST_NO_WAITER,
+    SPRINGBOARD_COMMCENTER_ROUTE_FULL_WAIT,
+    SPRINGBOARD_COMMCENTER_ROUTE_FULLWAITERS_STORE,
+    SPRINGBOARD_COMMCENTER_ROUTE_ENQUEUE
+} springboard_commcenter_route_t;
+_Static_assert(
+    SPRINGBOARD_COMMCENTER_ROUTE_ENQUEUE + 1 ==
+        SPRINGBOARD_COMMCENTER_ROUTE_COUNT,
+    "CommCenter queue route enum and storage count must agree");
+_Static_assert(
+    (SPRINGBOARD_COMMCENTER_POST_SELECTED_WAITER_PC & 1u) == 0u &&
+        (SPRINGBOARD_COMMCENTER_POST_NO_WAITER_PC & 1u) == 0u &&
+        (SPRINGBOARD_COMMCENTER_FULL_WAIT_PC & 1u) == 0u &&
+        (SPRINGBOARD_COMMCENTER_FULLWAITERS_STORE_PC & 1u) == 0u &&
+        (SPRINGBOARD_COMMCENTER_ACCEPTED_POST_PC & 1u) == 0u,
+    "CommCenter queue route PCs must be normalized");
+
+typedef enum {
+    SPRINGBOARD_COMMCENTER_STAGE_NONE = 0,
+    SPRINGBOARD_COMMCENTER_STAGE_LAYOUT_DISABLED,
+    SPRINGBOARD_COMMCENTER_STAGE_MQUEUE_POINTER,
+    SPRINGBOARD_COMMCENTER_STAGE_PORT_POINTER,
+    SPRINGBOARD_COMMCENTER_STAGE_PORT_IO_BITS,
+    SPRINGBOARD_COMMCENTER_STAGE_PORT_ACTIVE,
+    SPRINGBOARD_COMMCENTER_STAGE_MSGCOUNT,
+    SPRINGBOARD_COMMCENTER_STAGE_QLIMIT,
+    SPRINGBOARD_COMMCENTER_STAGE_SEQNO,
+    SPRINGBOARD_COMMCENTER_STAGE_FULLWAITERS,
+    SPRINGBOARD_COMMCENTER_STAGE_RECEIVER_SPACE,
+    SPRINGBOARD_COMMCENTER_STAGE_RECEIVER_SPACE_POINTER,
+    SPRINGBOARD_COMMCENTER_STAGE_RECEIVER_SPACE_ACTIVE,
+    SPRINGBOARD_COMMCENTER_STAGE_RECEIVER_TASK,
+    SPRINGBOARD_COMMCENTER_STAGE_RECEIVER_TASK_POINTER,
+    SPRINGBOARD_COMMCENTER_STAGE_RECEIVER_TASK_SPACE,
+    SPRINGBOARD_COMMCENTER_STAGE_RECEIVER_TASK_SPACE_MATCH,
+    SPRINGBOARD_COMMCENTER_STAGE_RECEIVER_PROC,
+    SPRINGBOARD_COMMCENTER_STAGE_RECEIVER_PROC_POINTER,
+    SPRINGBOARD_COMMCENTER_STAGE_RECEIVER_PID,
+    SPRINGBOARD_COMMCENTER_STAGE_COMPLETE
+} springboard_commcenter_stage_t;
+
+typedef enum {
+    SPRINGBOARD_COMMCENTER_VALID_MQUEUE =
+        UINT32_C(1) << 0,
+    SPRINGBOARD_COMMCENTER_VALID_PORT =
+        UINT32_C(1) << 1,
+    SPRINGBOARD_COMMCENTER_VALID_IO_BITS =
+        UINT32_C(1) << 2,
+    SPRINGBOARD_COMMCENTER_VALID_PORT_ACTIVE =
+        UINT32_C(1) << 3,
+    SPRINGBOARD_COMMCENTER_VALID_MSGCOUNT =
+        UINT32_C(1) << 4,
+    SPRINGBOARD_COMMCENTER_VALID_QLIMIT =
+        UINT32_C(1) << 5,
+    SPRINGBOARD_COMMCENTER_VALID_SEQNO =
+        UINT32_C(1) << 6,
+    SPRINGBOARD_COMMCENTER_VALID_FULLWAITERS =
+        UINT32_C(1) << 7,
+    SPRINGBOARD_COMMCENTER_VALID_RECEIVER_SPACE =
+        UINT32_C(1) << 8,
+    SPRINGBOARD_COMMCENTER_VALID_RECEIVER_SPACE_POINTER =
+        UINT32_C(1) << 9,
+    SPRINGBOARD_COMMCENTER_VALID_RECEIVER_TASK =
+        UINT32_C(1) << 10,
+    SPRINGBOARD_COMMCENTER_VALID_RECEIVER_TASK_POINTER =
+        UINT32_C(1) << 11,
+    SPRINGBOARD_COMMCENTER_VALID_RECEIVER_PROC =
+        UINT32_C(1) << 12,
+    SPRINGBOARD_COMMCENTER_VALID_RECEIVER_PROC_POINTER =
+        UINT32_C(1) << 13,
+    SPRINGBOARD_COMMCENTER_VALID_RECEIVER_PID =
+        UINT32_C(1) << 14,
+    SPRINGBOARD_COMMCENTER_VALID_RECEIVER_SPACE_ACTIVE =
+        UINT32_C(1) << 15,
+    SPRINGBOARD_COMMCENTER_VALID_RECEIVER_TASK_SPACE =
+        UINT32_C(1) << 16,
+    SPRINGBOARD_COMMCENTER_VALID_RECEIVER_TASK_SPACE_MATCH =
+        UINT32_C(1) << 17
+} springboard_commcenter_valid_t;
+
+typedef struct {
+    uint64_t capture_at;
+    uint64_t route_first_at[SPRINGBOARD_COMMCENTER_ROUTE_COUNT];
+    uint32_t capture_r[4];
+    uint32_t capture_lr;
+    uint32_t route_first_r[SPRINGBOARD_COMMCENTER_ROUTE_COUNT][4];
+    uint32_t route_first_r4[SPRINGBOARD_COMMCENTER_ROUTE_COUNT];
+    uint32_t route_first_lr[SPRINGBOARD_COMMCENTER_ROUTE_COUNT];
+    uint32_t route_bits;
+    uint32_t valid_bits;
+    uint32_t mqueue;
+    uint32_t port;
+    uint32_t io_bits;
+    uint32_t msgcount;
+    uint32_t qlimit;
+    uint32_t seqno;
+    uint32_t fullwaiters;
+    uint32_t receiver_space;
+    uint32_t receiver_space_active;
+    uint32_t receiver_task;
+    uint32_t receiver_task_space;
+    uint32_t receiver_proc;
+    uint32_t receiver_pid;
+    uint32_t failure_va;
+    uint32_t failure_fsr;
+    uint8_t stage;
+    bool attempted;
+    bool complete;
+} springboard_commcenter_probe_t;
 
 typedef enum {
     SPRINGBOARD_MACH_RESOLUTION_NONE = 0,
@@ -2719,6 +2899,8 @@ typedef struct {
     uint64_t resolution_at;
     uint64_t ui_checkpoint_at;
     uint64_t path_first_at[SPRINGBOARD_MACH_PATH_COUNT];
+    uint32_t path_first_r[SPRINGBOARD_MACH_PATH_COUNT][4];
+    uint32_t path_first_lr[SPRINGBOARD_MACH_PATH_COUNT];
     uint32_t origin_pc;
     uint32_t origin_cpsr;
     uint32_t user_sp;
@@ -2730,6 +2912,7 @@ typedef struct {
     uint32_t entry_fcse_pid;
     uint32_t entry_context_id;
     uint32_t path_bits;
+    springboard_commcenter_probe_t commcenter_probe;
     springboard_mach_header_t request_header;
     springboard_mach_header_t receive_header;
     uint32_t raw_result;
@@ -3053,6 +3236,159 @@ typedef struct {
     bool effective_valid;
     bool effective_vfork;
 } diagnostic_thread_identity_t;
+
+typedef enum {
+    COMMCENTER_WATCH_BEFORE_SEND_QUEUE_ENTRY = 0,
+    COMMCENTER_WATCH_AT_OR_AFTER_SEND_QUEUE_ENTRY
+} commcenter_watch_phase_t;
+_Static_assert(
+    COMMCENTER_WATCH_AT_OR_AFTER_SEND_QUEUE_ENTRY + 1 ==
+        COMMCENTER_WATCH_PHASE_COUNT,
+    "CommCenter phase enum and storage count must agree");
+
+typedef enum {
+    COMMCENTER_WATCH_USER = 0,
+    COMMCENTER_WATCH_KERNEL
+} commcenter_watch_mode_t;
+
+typedef enum {
+    COMMCENTER_WATCH_MACH_MSG_TRAP = 0,
+    COMMCENTER_WATCH_MQUEUE_RECEIVE,
+    COMMCENTER_WATCH_MQUEUE_RECEIVE_CONTINUE,
+    COMMCENTER_WATCH_WAIT_QUEUE_ASSERT_WAIT,
+    COMMCENTER_WATCH_THREAD_BLOCK_REASON,
+    COMMCENTER_WATCH_THREAD_CONTINUE
+} commcenter_watch_milestone_t;
+_Static_assert(
+    COMMCENTER_WATCH_THREAD_CONTINUE + 1 ==
+        COMMCENTER_WATCH_MILESTONE_COUNT,
+    "CommCenter milestone enum and storage count must agree");
+
+typedef struct {
+    uint64_t at;
+    uint32_t pc;
+    uint32_t cpsr;
+    uint32_t thread;
+    uint32_t ttbr0;
+    uint32_t context_id;
+    bool valid;
+} commcenter_watch_sample_t;
+
+typedef struct {
+    uint64_t sequence;
+    uint64_t at;
+    uint32_t pc_from;
+    uint32_t pc_to;
+    uint32_t cpsr_from;
+    uint32_t cpsr_to;
+    uint32_t thread_from;
+    uint32_t thread_to;
+    uint8_t identity_stage;
+    bool from_commcenter;
+    bool to_commcenter;
+    bool identity_readable;
+    bool at_or_after_initial_send_queue_entry;
+} commcenter_watch_switch_event_t;
+
+typedef struct {
+    uint64_t sequence;
+    uint64_t at;
+    uint32_t user_pc;
+    uint32_t spsr;
+    uint32_t thread;
+    uint32_t args[7];
+    springboard_mach_header_t send_header;
+    bool at_or_after_initial_send_queue_entry;
+} commcenter_watch_mach_event_t;
+
+typedef struct {
+    uint64_t hits[COMMCENTER_WATCH_PHASE_COUNT];
+    commcenter_watch_sample_t
+        first[COMMCENTER_WATCH_PHASE_COUNT];
+    commcenter_watch_sample_t
+        last[COMMCENTER_WATCH_PHASE_COUNT];
+    uint32_t first_r[COMMCENTER_WATCH_PHASE_COUNT][5];
+    uint32_t last_r[COMMCENTER_WATCH_PHASE_COUNT][5];
+    uint32_t first_sp[COMMCENTER_WATCH_PHASE_COUNT];
+    uint32_t first_lr[COMMCENTER_WATCH_PHASE_COUNT];
+    uint32_t last_sp[COMMCENTER_WATCH_PHASE_COUNT];
+    uint32_t last_lr[COMMCENTER_WATCH_PHASE_COUNT];
+} commcenter_watch_milestone_observation_t;
+
+typedef struct {
+    bool enabled;
+    char reason[192];
+} commcenter_layout_config_t;
+
+/*
+ * Process-wide, diagnostic-only state for the exact CommCenter SETEXEC-attempt
+ * identity. The tuple comes from its pathname-qualified lifecycle event, never
+ * from a guessed PID. Per-instruction work is restricted to a cached thread
+ * comparison and, only while execution is attributed to that identity,
+ * bounded counter and last-sample updates.
+ */
+typedef struct {
+    bool armed;
+    bool terminal;
+    bool identity_invalidated;
+    bool current_classified;
+    bool current_matches;
+    bool initial_send_queue_entry_seen;
+    bool receiver_seen;
+    bool receiver_complete;
+    bool receiver_matches;
+    bool receiver_is_launchd;
+    uint64_t generation;
+    uint64_t armed_at;
+    uint64_t initial_send_queue_entry_at;
+    uint64_t current_next_unreadable_retry_at;
+    uint64_t identity_unreadable_classifications;
+    uint64_t identity_mismatch_switches;
+    uint64_t exact_setexec_attempts;
+    uint64_t ignored_distinct_attempts;
+    uint64_t last_ignored_distinct_attempt_at;
+    uint64_t user_returns[COMMCENTER_WATCH_PHASE_COUNT];
+    uint64_t instructions[COMMCENTER_WATCH_PHASE_COUNT]
+                         [COMMCENTER_WATCH_MODE_COUNT];
+    uint64_t switch_total;
+    uint64_t mach_total;
+    uint64_t mach_send[COMMCENTER_WATCH_PHASE_COUNT];
+    uint64_t mach_receive[COMMCENTER_WATCH_PHASE_COUNT];
+    uint64_t mach_send_header_readable[COMMCENTER_WATCH_PHASE_COUNT];
+    uint64_t signal_count;
+    uint64_t exit_count;
+    uint64_t first_signal_at;
+    uint64_t last_signal_at;
+    uint64_t exit_at;
+    uint32_t task;
+    uint32_t proc;
+    uint32_t pid;
+    uint32_t entry_thread;
+    uint32_t current_thread;
+    uint32_t last_ignored_distinct_task;
+    uint32_t last_ignored_distinct_proc;
+    uint32_t last_ignored_distinct_pid;
+    uint32_t first_signal;
+    uint32_t last_signal;
+    uint32_t exit_status;
+    uint32_t identity_failure_va;
+    uint32_t identity_failure_fsr;
+    uint32_t receiver_space;
+    uint32_t receiver_task;
+    uint32_t receiver_proc;
+    uint32_t receiver_pid;
+    uint32_t receiver_valid_bits;
+    commcenter_watch_sample_t
+        first[COMMCENTER_WATCH_PHASE_COUNT];
+    commcenter_watch_sample_t
+        last[COMMCENTER_WATCH_PHASE_COUNT];
+    commcenter_watch_switch_event_t
+        switches[COMMCENTER_WATCH_SWITCH_CAP];
+    commcenter_watch_mach_event_t
+        mach[COMMCENTER_WATCH_MACH_CAP];
+    commcenter_watch_milestone_observation_t
+        milestones[COMMCENTER_WATCH_MILESTONE_COUNT];
+} commcenter_watch_t;
 
 typedef struct {
     uint32_t vm_pc;
@@ -3429,6 +3765,8 @@ static struct {
     springboard_child_probe_t
                 springboard_child[SPRINGBOARD_RETURN_CAP];
     springboard_exec_trace_t springboard_exec_trace;
+    commcenter_layout_config_t commcenter_layout;
+    commcenter_watch_t commcenter_watch;
 
     /* Guest writes to the CLCD's current live scanout surface after the exact
      * SpringBoard SETEXEC handoff. The descriptor is cached and invalidated by
@@ -3911,6 +4249,160 @@ static void discover_springboard_child_probe(void) {
     else
         printf("SpringBoard SETEXEC chain: UNRESOLVED; image-user proof"
                " will remain fail-closed\n");
+}
+
+static bool diagnostic_kernel_symbol_window_matches(
+        const char *name, uint32_t expected_va, uint32_t offset,
+        const uint8_t *expected, size_t length) {
+    if (!name || !expected || !length ||
+        length > UINT32_MAX)
+        return false;
+    uint32_t va = ksym_value(name) & ~1u;
+    if (!va || va != expected_va)
+        return false;
+    uint64_t first64 = (uint64_t)va + offset;
+    uint64_t end64 = first64 + length;
+    uint32_t symbol_end = ksym_next_value(va);
+    if (first64 > UINT32_MAX || end64 <= first64 ||
+        end64 > (uint64_t)UINT32_MAX + 1u ||
+        !symbol_end || symbol_end <= va ||
+        end64 > symbol_end)
+        return false;
+    const uint8_t *bytes = guest_ptr(
+        (uint32_t)first64, (uint32_t)length);
+    return bytes && memcmp(bytes, expected, length) == 0;
+}
+
+/*
+ * The port/space fields below are not ABI. Refuse the CommCenter ownership
+ * decoder unless the exact stock 7E18 instructions that establish them are
+ * still present in the loaded (or restored) kernel image.
+ */
+static void discover_commcenter_layout(void) {
+    commcenter_layout_config_t *layout = &G.commcenter_layout;
+    memset(layout, 0, sizeof *layout);
+
+    static const uint8_t get_task_ipcspace_shape[] = {
+        0xba, 0x23, 0x5b, 0x00, 0xc0, 0x58, 0x70, 0x47
+    };
+    static const uint8_t ipc_task_space_store_shape[] = {
+        0x01, 0x9b, 0x68, 0x4d, 0x9e, 0x65
+    };
+    static const uint8_t ipc_port_init_shape[] = {
+        0x80, 0xb5, 0x00, 0xaf, 0x00, 0x23, 0xc1, 0x63,
+        0x82, 0x60, 0x43, 0x64, 0x83, 0x64, 0xc3, 0x64,
+        0x03, 0x65, 0x43, 0x65, 0x83, 0x65, 0xc3, 0x65,
+        0x03, 0x66, 0x43, 0x66, 0x00, 0x21, 0x18, 0x30
+    };
+    static const uint8_t ipc_mqueue_send_shape[] = {
+        0xf0, 0xb5, 0x5e, 0x46, 0x55, 0x46, 0x44, 0x46,
+        0x70, 0xb4, 0x06, 0xaf, 0x85, 0xb0, 0x15, 0x1c,
+        0x1e, 0x1c, 0x42, 0x69, 0x83, 0x69, 0x04, 0x1c,
+        0x88, 0x46, 0x9a, 0x42, 0x43, 0xd3
+    };
+    static const uint8_t ipc_space_active_shape[] = {
+        0x02, 0x23, 0x20, 0x1c, 0xe3, 0x60, 0x51, 0x46,
+        0x5a, 0x46, 0x10, 0x30, 0x4c, 0xf0, 0x4b, 0xf9,
+        0x40, 0x46, 0x04, 0x30, 0x01, 0x23, 0x00, 0x22,
+        0xe0, 0x62, 0x20, 0x1c, 0xe3, 0x61
+    };
+    static const uint8_t post_selected_waiter_shape[] = {
+        0xd0, 0x23, 0x5b, 0x00, 0x20, 0x1c, 0xe6, 0x50
+    };
+    static const uint8_t post_no_waiter_shape[] = {
+        0x2b, 0x69, 0x00, 0x2b, 0x27, 0xd0
+    };
+    static const uint8_t send_full_wait_shape[] = {
+        0x55, 0xf0, 0x92, 0xe8, 0xea, 0x06, 0xd5, 0x0f,
+        0x82, 0x46
+    };
+    static const uint8_t send_fullwaiters_store_shape[] = {
+        0x23, 0x62, 0x1c, 0x23, 0x53, 0x44
+    };
+    static const uint8_t send_accepted_post_shape[] = {
+        0x53, 0x1c, 0x20, 0x1d, 0x63, 0x61,
+        0x4f, 0xf0, 0xb4, 0xef
+    };
+
+    if (!G.springboard_child_config.enabled ||
+        G.springboard_child_config.task_proc_offset !=
+            SPRINGBOARD_COMMCENTER_TASK_PROC_OFFSET ||
+        G.springboard_child_config.proc_pid_offset !=
+            SPRINGBOARD_COMMCENTER_PROC_PID_OFFSET) {
+        snprintf(layout->reason, sizeof layout->reason,
+                 "thread/task/proc accessor gate unavailable");
+        printf("CommCenter ownership probe: DISABLED (%s)\n",
+               layout->reason);
+        return;
+    }
+    if (!diagnostic_kernel_symbol_window_matches(
+            "_get_task_ipcspace", UINT32_C(0xc002ed0e), 0,
+            get_task_ipcspace_shape,
+            sizeof get_task_ipcspace_shape) ||
+        !diagnostic_kernel_symbol_window_matches(
+            "_ipc_task_init", UINT32_C(0xc001fc70),
+            UINT32_C(0x20), ipc_task_space_store_shape,
+            sizeof ipc_task_space_store_shape) ||
+        !diagnostic_kernel_symbol_window_matches(
+            "_ipc_port_init", UINT32_C(0xc0015a9a), 0,
+            ipc_port_init_shape, sizeof ipc_port_init_shape) ||
+        !diagnostic_kernel_symbol_window_matches(
+            "_ipc_mqueue_send", UINT32_C(0xc0014788), 0,
+            ipc_mqueue_send_shape, sizeof ipc_mqueue_send_shape) ||
+        !diagnostic_kernel_symbol_window_matches(
+            "_ipc_space_create", UINT32_C(0xc001756c),
+            UINT32_C(0x9e), ipc_space_active_shape,
+            sizeof ipc_space_active_shape) ||
+        !diagnostic_kernel_symbol_window_matches(
+            "_ipc_mqueue_post", UINT32_C(0xc0014630),
+            SPRINGBOARD_COMMCENTER_POST_SELECTED_WAITER_PC -
+                UINT32_C(0xc0014630),
+            post_selected_waiter_shape,
+            sizeof post_selected_waiter_shape) ||
+        !diagnostic_kernel_symbol_window_matches(
+            "_ipc_mqueue_post", UINT32_C(0xc0014630),
+            SPRINGBOARD_COMMCENTER_POST_NO_WAITER_PC -
+                UINT32_C(0xc0014630),
+            post_no_waiter_shape,
+            sizeof post_no_waiter_shape) ||
+        !diagnostic_kernel_symbol_window_matches(
+            "_ipc_mqueue_send", UINT32_C(0xc0014788),
+            SPRINGBOARD_COMMCENTER_FULL_WAIT_PC -
+                UINT32_C(0xc0014788),
+            send_full_wait_shape,
+            sizeof send_full_wait_shape) ||
+        !diagnostic_kernel_symbol_window_matches(
+            "_ipc_mqueue_send", UINT32_C(0xc0014788),
+            SPRINGBOARD_COMMCENTER_FULLWAITERS_STORE_PC -
+                UINT32_C(0xc0014788),
+            send_fullwaiters_store_shape,
+            sizeof send_fullwaiters_store_shape) ||
+        !diagnostic_kernel_symbol_window_matches(
+            "_ipc_mqueue_send", UINT32_C(0xc0014788),
+            SPRINGBOARD_COMMCENTER_ACCEPTED_POST_PC -
+                UINT32_C(0xc0014788),
+            send_accepted_post_shape,
+            sizeof send_accepted_post_shape)) {
+        snprintf(layout->reason, sizeof layout->reason,
+                 "exact 7E18 port/space instruction shape mismatch");
+        printf("CommCenter ownership probe: DISABLED (%s)\n",
+               layout->reason);
+        return;
+    }
+
+    layout->enabled = true;
+    snprintf(layout->reason, sizeof layout->reason,
+             "exact 7E18 port/space/queue-route shapes validated");
+    printf("CommCenter ownership probe: VALIDATED; mqueue/port +%x,"
+           " receiver +%x, space active/task +%x/+%x,"
+           " task ipcspace/proc +%x/+%x, proc pid +%x\n",
+           SPRINGBOARD_COMMCENTER_MQUEUE_PORT_DELTA,
+           SPRINGBOARD_COMMCENTER_PORT_RECEIVER_SPACE_OFFSET,
+           SPRINGBOARD_COMMCENTER_SPACE_ACTIVE_OFFSET,
+           SPRINGBOARD_COMMCENTER_SPACE_TASK_OFFSET,
+           SPRINGBOARD_COMMCENTER_TASK_IPCSPACE_OFFSET,
+           SPRINGBOARD_COMMCENTER_TASK_PROC_OFFSET,
+           SPRINGBOARD_COMMCENTER_PROC_PID_OFFSET);
 }
 
 static lifecycle_event_t *lifecycle_begin(uint64_t at,
@@ -4593,6 +5085,26 @@ static int springboard_ui_checkpoint_index(uint32_t pc) {
         case UINT32_C(0x3110dc18): return 87;
         case UINT32_C(0x3110dc1c): return 88;
         case UINT32_C(0x3110dc20): return 89;
+        case UINT32_C(0x0000a72c): return 90;
+        case UINT32_C(0x0000a74c): return 91;
+        case UINT32_C(0x0000a778): return 92;
+        case UINT32_C(0x00024c30): return 93;
+        case UINT32_C(0x00028240): return 94;
+        case UINT32_C(0x00028260): return 95;
+        case UINT32_C(0x0002826e): return 96;
+        case UINT32_C(0x00028270): return 97;
+        case UINT32_C(0x00024c50): return 98;
+        case UINT32_C(0x0000a77c): return 99;
+        case UINT32_C(0x30a0d2e8): return 100;
+        case UINT32_C(0x30a1eedc): return 101;
+        case UINT32_C(0x30a1ef9c): return 102;
+        case UINT32_C(0x30a1efa0): return 103;
+        case UINT32_C(0x30a1177c): return 104;
+        case UINT32_C(0x30a117e0): return 105;
+        case UINT32_C(0x30a117e4): return 106;
+        case UINT32_C(0x30a0d2fc): return 107;
+        case UINT32_C(0x30a1f030): return 108;
+        case UINT32_C(0x30a1f034): return 109;
         default: break;
     }
     return -1;
@@ -4827,11 +5339,805 @@ static const char *const
 SPRINGBOARD_MACH_PATH_NAMES[SPRINGBOARD_MACH_PATH_COUNT] = {
     "_mach_msg_trap",
     "_mach_msg_overwrite_trap",
+    "_mach_msg_send",
+    "_ipc_kmsg_get",
+    "_ipc_kmsg_copyin",
+    "_ipc_kmsg_send",
+    "_ipc_mqueue_send",
+    "_ipc_mqueue_post",
     "_ipc_mqueue_receive",
     "_ipc_mqueue_receive_continue",
     "_wait_queue_assert_wait",
     "_thread_block_reason"
 };
+static uint32_t
+SPRINGBOARD_MACH_PATH_VA[SPRINGBOARD_MACH_PATH_COUNT];
+
+static const char *const
+SPRINGBOARD_COMMCENTER_ROUTE_NAMES[SPRINGBOARD_COMMCENTER_ROUTE_COUNT] = {
+    "post selected waiter",
+    "post no waiter/enqueue",
+    "full-wait path",
+    "fullwaiters store",
+    "accepted/post path"
+};
+
+static const uint32_t
+SPRINGBOARD_COMMCENTER_ROUTE_PC[SPRINGBOARD_COMMCENTER_ROUTE_COUNT] = {
+    SPRINGBOARD_COMMCENTER_POST_SELECTED_WAITER_PC,
+    SPRINGBOARD_COMMCENTER_POST_NO_WAITER_PC,
+    SPRINGBOARD_COMMCENTER_FULL_WAIT_PC,
+    SPRINGBOARD_COMMCENTER_FULLWAITERS_STORE_PC,
+    SPRINGBOARD_COMMCENTER_ACCEPTED_POST_PC
+};
+
+static const char COMMCENTER_EXEC_PATH[] =
+    "/System/Library/PrivateFrameworks/CoreTelephony.framework/"
+    "Support/CommCenter";
+
+static const char *const
+COMMCENTER_WATCH_MILESTONE_NAMES[COMMCENTER_WATCH_MILESTONE_COUNT] = {
+    "_mach_msg_trap",
+    "_ipc_mqueue_receive",
+    "_ipc_mqueue_receive_continue",
+    "_wait_queue_assert_wait",
+    "_thread_block_reason",
+    "_thread_continue"
+};
+
+static unsigned commcenter_watch_phase(
+        const commcenter_watch_t *watch, uint64_t at) {
+    return watch && watch->initial_send_queue_entry_seen &&
+            at >= watch->initial_send_queue_entry_at
+        ? COMMCENTER_WATCH_AT_OR_AFTER_SEND_QUEUE_ENTRY
+        : COMMCENTER_WATCH_BEFORE_SEND_QUEUE_ENTRY;
+}
+
+static void commcenter_watch_sample_capture(
+        commcenter_watch_sample_t *sample, const arm_cpu_t *cpu,
+        uint64_t at, uint32_t pc, uint32_t cpsr,
+        uint32_t thread) {
+    if (!sample || !cpu) return;
+    sample->at = at;
+    sample->pc = pc;
+    sample->cpsr = cpsr;
+    sample->thread = thread;
+    sample->ttbr0 = cpu->cp15.ttbr0;
+    sample->context_id = cpu->cp15.context_id;
+    sample->valid = true;
+}
+
+static bool commcenter_watch_setexec_path_attempt(
+        const lifecycle_event_t *event) {
+    return event &&
+        event->kind == LIFECYCLE_SYSCALL &&
+        event->syscall_number == 244u &&
+        event->path_status == LIFECYCLE_PATH_OK &&
+        event->path_length == sizeof COMMCENTER_EXEC_PATH - 1u &&
+        memcmp(event->path, COMMCENTER_EXEC_PATH,
+               sizeof COMMCENTER_EXEC_PATH - 1u) == 0 &&
+        event->spawn_attr_decoded && event->spawn_setexec;
+}
+
+static bool commcenter_watch_setexec_event_valid(
+        const lifecycle_event_t *event) {
+    return commcenter_watch_setexec_path_attempt(event) &&
+        event->identity_stage == LIFECYCLE_IDENTITY_COMPLETE &&
+        event->effective_identity_valid && !event->effective_vfork &&
+        event->current_thread && event->current_task &&
+        event->task_proc && event->effective_proc &&
+        event->task_pid > 1u &&
+        event->task_proc == event->effective_proc &&
+        event->task_pid == event->effective_pid;
+}
+
+static void commcenter_watch_start_generation(
+        commcenter_watch_t *watch,
+        const lifecycle_event_t *event, uint64_t at) {
+    if (!watch || !event) return;
+
+    uint64_t generation = watch->generation + 1u;
+    bool send_entry_seen =
+        watch->initial_send_queue_entry_seen;
+    uint64_t send_entry_at =
+        watch->initial_send_queue_entry_at;
+    uint64_t exact_attempts =
+        watch->exact_setexec_attempts;
+    uint64_t ignored_attempts =
+        watch->ignored_distinct_attempts;
+    uint64_t last_ignored_at =
+        watch->last_ignored_distinct_attempt_at;
+    uint32_t last_ignored_task =
+        watch->last_ignored_distinct_task;
+    uint32_t last_ignored_proc =
+        watch->last_ignored_distinct_proc;
+    uint32_t last_ignored_pid =
+        watch->last_ignored_distinct_pid;
+
+    memset(watch, 0, sizeof *watch);
+    watch->generation = generation;
+    watch->initial_send_queue_entry_seen = send_entry_seen;
+    watch->initial_send_queue_entry_at = send_entry_at;
+    watch->exact_setexec_attempts = exact_attempts;
+    watch->ignored_distinct_attempts = ignored_attempts;
+    watch->last_ignored_distinct_attempt_at = last_ignored_at;
+    watch->last_ignored_distinct_task = last_ignored_task;
+    watch->last_ignored_distinct_proc = last_ignored_proc;
+    watch->last_ignored_distinct_pid = last_ignored_pid;
+    watch->armed = true;
+    watch->armed_at = at;
+    watch->task = event->current_task;
+    watch->proc = event->effective_proc;
+    watch->pid = event->effective_pid;
+    watch->entry_thread = event->current_thread;
+    watch->current_thread = event->current_thread;
+    watch->current_classified = true;
+    watch->current_matches = true;
+}
+
+static void commcenter_watch_arm(
+        const lifecycle_event_t *event, uint64_t at) {
+    commcenter_watch_t *watch = &G.commcenter_watch;
+    if (!commcenter_watch_setexec_path_attempt(event))
+        return;
+    watch->exact_setexec_attempts++;
+    if (!G.springboard_child_config.enabled ||
+        !commcenter_watch_setexec_event_valid(event))
+        return;
+
+    if (watch->armed && !watch->terminal) {
+        /*
+         * An already-live exact-path SETEXEC-attempt identity must not be
+         * displaced by a later process tuple. An exact duplicate is harmless;
+         * retain distinct ignored attempts so the report cannot hide them.
+         */
+        if (watch->task == event->current_task &&
+            watch->proc == event->effective_proc &&
+            watch->pid == event->effective_pid)
+            return;
+        watch->ignored_distinct_attempts++;
+        watch->last_ignored_distinct_attempt_at = at;
+        watch->last_ignored_distinct_task =
+            event->current_task;
+        watch->last_ignored_distinct_proc =
+            event->effective_proc;
+        watch->last_ignored_distinct_pid =
+            event->effective_pid;
+        return;
+    }
+
+    commcenter_watch_start_generation(watch, event, at);
+}
+
+static void commcenter_watch_invalidate_identity(
+        commcenter_watch_t *watch) {
+    if (!watch) return;
+    watch->identity_invalidated = true;
+    watch->terminal = true;
+    watch->current_classified = false;
+    watch->current_matches = false;
+}
+
+static bool commcenter_watch_classify_thread(
+        commcenter_watch_t *watch, arm_cpu_t *cpu, uint32_t thread,
+        bool *readable) {
+    if (readable) *readable = false;
+    if (!watch || watch->terminal || !cpu || !thread) return false;
+
+    diagnostic_thread_identity_t identity;
+    diagnostic_read_thread_identity(cpu, thread, &identity);
+    if (!identity.task_valid || !identity.effective_valid) {
+        if (!identity.task_valid) {
+            watch->identity_failure_va = identity.failure_va;
+            watch->identity_failure_fsr = identity.failure_fsr;
+        } else {
+            watch->identity_failure_va =
+                identity.effective_failure_va;
+            watch->identity_failure_fsr =
+                identity.effective_failure_fsr;
+        }
+        return false;
+    }
+    if (readable) *readable = true;
+
+    if (identity.task != watch->task)
+        return false;
+    if (identity.task_proc != watch->proc ||
+        identity.task_pid != watch->pid) {
+        watch->identity_mismatch_switches++;
+        commcenter_watch_invalidate_identity(watch);
+        return false;
+    }
+    /*
+     * A vfork child legitimately shares its parent's task tuple while the
+     * uthread's effective proc/PID names the child. Exclude it without
+     * invalidating the retained parent generation. Any non-vfork effective
+     * tuple contradiction under the same task is fail-closed and terminal.
+     */
+    if (identity.effective_vfork)
+        return false;
+    if (identity.effective_proc != watch->proc ||
+        identity.effective_pid != watch->pid) {
+        watch->identity_mismatch_switches++;
+        commcenter_watch_invalidate_identity(watch);
+        return false;
+    }
+    return true;
+}
+
+static uint64_t commcenter_watch_unreadable_retry_at(uint64_t at) {
+    return at >
+            UINT64_MAX - COMMCENTER_WATCH_UNREADABLE_RETRY_INTERVAL
+        ? UINT64_MAX
+        : at + COMMCENTER_WATCH_UNREADABLE_RETRY_INTERVAL;
+}
+
+static void commcenter_watch_update_current_classification(
+        commcenter_watch_t *watch, arm_cpu_t *cpu,
+        uint32_t thread, uint64_t at) {
+    if (!watch || !cpu) return;
+    bool readable = false;
+    bool matches = commcenter_watch_classify_thread(
+        watch, cpu, thread, &readable);
+    watch->current_thread = thread;
+    watch->current_classified =
+        !watch->terminal && readable;
+    watch->current_matches =
+        !watch->terminal && readable && matches;
+    if (readable) {
+        watch->current_next_unreadable_retry_at = 0;
+    } else {
+        watch->identity_unreadable_classifications++;
+        watch->current_next_unreadable_retry_at =
+            commcenter_watch_unreadable_retry_at(at);
+    }
+}
+
+static BOOTKERNEL_NOINLINE void commcenter_watch_resync_current(
+        arm_cpu_t *cpu, uint64_t at, bool force) {
+    commcenter_watch_t *watch = &G.commcenter_watch;
+    if (!watch->armed || watch->terminal || !cpu) return;
+    uint32_t thread = cpu->cp15.tpidrprw;
+    if (!force && thread == watch->current_thread &&
+        !watch->current_classified &&
+        at < watch->current_next_unreadable_retry_at)
+        return;
+    commcenter_watch_update_current_classification(
+        watch, cpu, thread, at);
+}
+
+static inline void commcenter_watch_note_instruction(
+        arm_cpu_t *cpu, uint64_t at, uint32_t pc) {
+    commcenter_watch_t *watch = &G.commcenter_watch;
+    if (!watch->armed || watch->terminal || !cpu) return;
+    if (watch->current_thread != cpu->cp15.tpidrprw)
+        commcenter_watch_resync_current(cpu, at, true);
+    else if (!watch->current_classified)
+        commcenter_watch_resync_current(cpu, at, false);
+    if (!watch->current_matches ||
+        watch->current_thread != cpu->cp15.tpidrprw)
+        return;
+
+    unsigned phase = commcenter_watch_phase(watch, at);
+    unsigned mode =
+        (cpu->cpsr & ARM_CPSR_MODE_MASK) == ARM_MODE_USR
+        ? COMMCENTER_WATCH_USER : COMMCENTER_WATCH_KERNEL;
+    watch->instructions[phase][mode]++;
+    if (!watch->first[phase].valid)
+        commcenter_watch_sample_capture(
+            &watch->first[phase], cpu, at, pc, cpu->cpsr,
+            cpu->cp15.tpidrprw);
+    commcenter_watch_sample_capture(
+        &watch->last[phase], cpu, at, pc, cpu->cpsr,
+        cpu->cp15.tpidrprw);
+}
+
+static void commcenter_watch_note_transition(
+        arm_cpu_t *cpu, uint64_t at, uint32_t pc_before,
+        uint32_t cpsr_before, uint32_t thread_before) {
+    commcenter_watch_t *watch = &G.commcenter_watch;
+    if (!watch->armed || watch->terminal || !cpu) return;
+
+    uint32_t thread_after = cpu->cp15.tpidrprw;
+    if (thread_after == thread_before) {
+        if ((cpsr_before & ARM_CPSR_MODE_MASK) != ARM_MODE_USR &&
+            (cpu->cpsr & ARM_CPSR_MODE_MASK) == ARM_MODE_USR) {
+            /*
+             * UT_VFORK and the effective proc can change without changing
+             * TPIDRPRW. Re-walk at every privileged-to-user boundary before
+             * attributing the resumed user instruction stream.
+             */
+            commcenter_watch_resync_current(cpu, at, true);
+            if (!watch->terminal &&
+                watch->current_classified &&
+                watch->current_matches)
+                watch->user_returns[
+                    commcenter_watch_phase(watch, at)]++;
+        }
+        return;
+    }
+
+    /*
+     * Re-walk the outgoing uthread even if its cached classification matched.
+     * UT_VFORK/effective-proc state may have changed while that same uthread
+     * executed in the kernel.  Treat an unreadable outgoing identity as
+     * unproven for this transition, and stop immediately if a readable
+     * same-task contradiction invalidates the generation.
+     */
+    bool from_readable = false;
+    bool from_match = false;
+    if (thread_before) {
+        from_match = commcenter_watch_classify_thread(
+            watch, cpu, thread_before, &from_readable);
+        if (!from_readable)
+            watch->identity_unreadable_classifications++;
+    }
+    if (watch->terminal)
+        return;
+
+    commcenter_watch_update_current_classification(
+        watch, cpu, thread_after, at);
+    bool readable = watch->current_classified;
+    bool to_match = watch->current_matches;
+
+    if (from_match || to_match) {
+        uint64_t sequence = watch->switch_total++;
+        commcenter_watch_switch_event_t *event =
+            &watch->switches[sequence % COMMCENTER_WATCH_SWITCH_CAP];
+        memset(event, 0, sizeof *event);
+        event->sequence = sequence;
+        event->at = at;
+        event->pc_from = pc_before;
+        event->pc_to = cpu->r[15];
+        event->cpsr_from = cpsr_before;
+        event->cpsr_to = cpu->cpsr;
+        event->thread_from = thread_before;
+        event->thread_to = thread_after;
+        event->identity_stage = readable
+            ? LIFECYCLE_IDENTITY_COMPLETE
+            : LIFECYCLE_IDENTITY_NONE;
+        event->from_commcenter = from_match;
+        event->to_commcenter = to_match;
+        event->identity_readable = readable;
+        event->at_or_after_initial_send_queue_entry =
+            commcenter_watch_phase(watch, at) ==
+                COMMCENTER_WATCH_AT_OR_AFTER_SEND_QUEUE_ENTRY;
+    }
+}
+
+static void commcenter_watch_note_swi(
+        arm_cpu_t *cpu, uint64_t at) {
+    commcenter_watch_t *watch = &G.commcenter_watch;
+    if (!watch->armed || watch->terminal || !cpu)
+        return;
+    commcenter_watch_resync_current(cpu, at, true);
+    if (watch->terminal ||
+        !watch->current_classified || !watch->current_matches ||
+        watch->current_thread != cpu->cp15.tpidrprw ||
+        (cpu->spsr[ARM_BANK_SVC] & ARM_CPSR_MODE_MASK) !=
+            ARM_MODE_USR ||
+        (int32_t)cpu->r[12] != -31)
+        return;
+
+    unsigned phase = commcenter_watch_phase(watch, at);
+    uint64_t sequence = watch->mach_total++;
+    commcenter_watch_mach_event_t *event =
+        &watch->mach[sequence % COMMCENTER_WATCH_MACH_CAP];
+    memset(event, 0, sizeof *event);
+    event->sequence = sequence;
+    event->at = at;
+    event->spsr = cpu->spsr[ARM_BANK_SVC];
+    unsigned return_bytes =
+        (event->spsr & ARM_CPSR_T) ? 2u : 4u;
+    event->user_pc = cpu->r[14] >= return_bytes
+        ? cpu->r[14] - return_bytes : 0u;
+    event->thread = cpu->cp15.tpidrprw;
+    for (unsigned i = 0; i < 7u; i++)
+        event->args[i] = cpu->r[i];
+    event->at_or_after_initial_send_queue_entry =
+        phase == COMMCENTER_WATCH_AT_OR_AFTER_SEND_QUEUE_ENTRY;
+
+    if (event->args[1] & DIAGNOSTIC_MACH_SEND_MSG) {
+        watch->mach_send[phase]++;
+        springboard_mach_header_t *header =
+            &event->send_header;
+        header->read_attempted = true;
+        uint8_t bytes[SPRINGBOARD_MACH_HEADER_SIZE];
+        if (guest_read_user_bytes(
+                cpu, event->args[0], bytes, sizeof bytes,
+                &header->failure_va, &header->failure_fsr) &&
+            springboard_mach_header_decode(
+                bytes, sizeof bytes, event->args[1],
+                event->args[2], header))
+            watch->mach_send_header_readable[phase]++;
+        else if (!header->failure_va)
+            header->failure_va = event->args[0];
+    }
+    if (event->args[1] & DIAGNOSTIC_MACH_RCV_MSG)
+        watch->mach_receive[phase]++;
+}
+
+static int commcenter_watch_milestone_index(const char *name) {
+    if (!name) return -1;
+    for (unsigned i = 0;
+         i < COMMCENTER_WATCH_MILESTONE_COUNT; i++)
+        if (strcmp(name, COMMCENTER_WATCH_MILESTONE_NAMES[i]) == 0)
+            return (int)i;
+    return -1;
+}
+
+static void commcenter_watch_note_milestone(
+        arm_cpu_t *cpu, uint64_t at, const char *name) {
+    commcenter_watch_t *watch = &G.commcenter_watch;
+    if (!watch->armed || watch->terminal || !cpu)
+        return;
+    commcenter_watch_resync_current(cpu, at, true);
+    if (watch->terminal ||
+        !watch->current_classified || !watch->current_matches ||
+        watch->current_thread != cpu->cp15.tpidrprw)
+        return;
+    int index = commcenter_watch_milestone_index(name);
+    if (index < 0) return;
+
+    unsigned phase = commcenter_watch_phase(watch, at);
+    commcenter_watch_milestone_observation_t *observation =
+        &watch->milestones[index];
+    if (!observation->hits[phase]) {
+        commcenter_watch_sample_capture(
+            &observation->first[phase], cpu, at, cpu->r[15],
+            cpu->cpsr, cpu->cp15.tpidrprw);
+        memcpy(observation->first_r[phase], cpu->r,
+               sizeof observation->first_r[phase]);
+        observation->first_sp[phase] = cpu->r[13];
+        observation->first_lr[phase] = cpu->r[14];
+    }
+    observation->hits[phase]++;
+    commcenter_watch_sample_capture(
+        &observation->last[phase], cpu, at, cpu->r[15],
+        cpu->cpsr, cpu->cp15.tpidrprw);
+    memcpy(observation->last_r[phase], cpu->r,
+           sizeof observation->last_r[phase]);
+    observation->last_sp[phase] = cpu->r[13];
+    observation->last_lr[phase] = cpu->r[14];
+}
+
+static void commcenter_watch_note_kernel_lifecycle(
+        arm_cpu_t *cpu, uint64_t at, lifecycle_kind_t kind) {
+    commcenter_watch_t *watch = &G.commcenter_watch;
+    if (!watch->armed || watch->terminal || !cpu ||
+        (kind != LIFECYCLE_EXIT1 && kind != LIFECYCLE_PSIGNAL) ||
+        cpu->r[0] != watch->proc)
+        return;
+
+    uint32_t pid = 0, failure_va = 0, failure_fsr = 0;
+    if (!springboard_child_read_field(
+            cpu, watch->proc,
+            G.springboard_child_config.proc_pid_offset,
+            &pid, &failure_va, &failure_fsr)) {
+        watch->identity_failure_va = failure_va;
+        watch->identity_failure_fsr = failure_fsr;
+        return;
+    }
+    if (pid != watch->pid) {
+        commcenter_watch_invalidate_identity(watch);
+        return;
+    }
+
+    if (kind == LIFECYCLE_PSIGNAL) {
+        if (!watch->signal_count) {
+            watch->first_signal_at = at;
+            watch->first_signal = cpu->r[1];
+        }
+        watch->signal_count++;
+        watch->last_signal_at = at;
+        watch->last_signal = cpu->r[1];
+        return;
+    }
+
+    watch->exit_count++;
+    watch->exit_at = at;
+    watch->exit_status = cpu->r[1];
+    watch->terminal = true;
+}
+
+static void commcenter_watch_note_initial_send_queue_entry(
+        const springboard_commcenter_probe_t *probe, uint64_t at) {
+    commcenter_watch_t *watch = &G.commcenter_watch;
+    if (!probe || !probe->attempted)
+        return;
+    /*
+     * This epoch is global diagnostic evidence, not process-generation state:
+     * retain it if a terminal SETEXEC-attempt identity is later replaced.
+     * Entry proves the exact outbound message reached the kernel send queue;
+     * it does not prove delivery, reply, or handshake completion.
+     */
+    if (!watch->initial_send_queue_entry_seen) {
+        watch->initial_send_queue_entry_seen = true;
+        watch->initial_send_queue_entry_at = at;
+    }
+    if (!watch->armed || watch->terminal)
+        return;
+
+    watch->receiver_seen = true;
+    watch->receiver_valid_bits = probe->valid_bits;
+    watch->receiver_space = probe->receiver_space;
+    watch->receiver_task = probe->receiver_task;
+    watch->receiver_proc = probe->receiver_proc;
+    watch->receiver_pid = probe->receiver_pid;
+    watch->receiver_complete = probe->complete;
+    watch->receiver_matches =
+        probe->complete &&
+        probe->receiver_task == watch->task &&
+        probe->receiver_proc == watch->proc &&
+        probe->receiver_pid == watch->pid;
+    watch->receiver_is_launchd =
+        probe->complete && probe->receiver_pid == 1u;
+}
+
+/*
+ * Preliminary discriminator only: this is a readable user-header signature
+ * at the exact CoreTelephony call path, not kernel acceptance or service-owner
+ * proof.  The stock generated stub intentionally leaves msgh_size stale, so
+ * size_within_send must not be part of this gate.
+ */
+static bool springboard_commcenter_user_header_signature_matches(
+        const springboard_mach_event_t *event) {
+    const uint32_t send_receive =
+        DIAGNOSTIC_MACH_SEND_MSG | DIAGNOSTIC_MACH_RCV_MSG;
+    return event && event->valid && event->open &&
+        event->request_header.readable &&
+        (uint32_t)event->request_header.id ==
+            SPRINGBOARD_COMMCENTER_INITIAL_ID &&
+        (event->args[1] & send_receive) == send_receive;
+}
+
+/*
+ * Queue layout decoding is diagnostic-only and specific to the exact compiled
+ * 7E18 XNU image.  Validate every object and every field addition before
+ * asking the guest MMU to translate it.  A zero FSR therefore means
+ * structural validation failed rather than that a translation fault was
+ * observed.
+ */
+static bool springboard_commcenter_checked_field_va(
+        uint32_t object, uint32_t offset, uint32_t kernel_base,
+        uint32_t *field_va) {
+    if (field_va) *field_va = 0;
+    uint64_t field64 = (uint64_t)object + offset;
+    if (!object || (object & 3u) || object < kernel_base ||
+        field64 + 3u > UINT32_MAX)
+        return false;
+    if (field_va) *field_va = (uint32_t)field64;
+    return true;
+}
+
+static bool springboard_commcenter_read_field(
+        springboard_commcenter_probe_t *probe, arm_cpu_t *cpu,
+        uint32_t object, uint32_t offset, uint32_t valid_bit,
+        springboard_commcenter_stage_t stage, uint32_t *value) {
+    uint32_t field_va = 0;
+    if (!probe) return false;
+    probe->stage = (uint8_t)stage;
+    if (!springboard_commcenter_checked_field_va(
+            object, offset, g_virt_base, &field_va)) {
+        probe->failure_va = object;
+        probe->failure_fsr = 0;
+        return false;
+    }
+    if (!springboard_child_read_field(
+            cpu, object, offset, value,
+            &probe->failure_va, &probe->failure_fsr)) {
+        if (!probe->failure_va) probe->failure_va = field_va;
+        return false;
+    }
+    probe->valid_bits |= valid_bit;
+    return true;
+}
+
+static bool springboard_commcenter_validate_pointer(
+        springboard_commcenter_probe_t *probe, uint32_t pointer,
+        uint32_t valid_bit, springboard_commcenter_stage_t stage) {
+    if (!probe) return false;
+    probe->stage = (uint8_t)stage;
+    if (!springboard_commcenter_checked_field_va(
+            pointer, 0, g_virt_base, NULL)) {
+        probe->failure_va = pointer;
+        probe->failure_fsr = 0;
+        return false;
+    }
+    probe->valid_bits |= valid_bit;
+    return true;
+}
+
+static void springboard_commcenter_probe_capture(
+        springboard_mach_event_t *event, arm_cpu_t *cpu, uint64_t at) {
+    if (!springboard_commcenter_user_header_signature_matches(event) || !cpu)
+        return;
+    springboard_commcenter_probe_t *probe =
+        &event->commcenter_probe;
+    if (probe->attempted) return;
+
+    probe->attempted = true;
+    probe->capture_at = at;
+    memcpy(probe->capture_r, cpu->r, sizeof probe->capture_r);
+    probe->capture_lr = cpu->r[14];
+    if (!G.commcenter_layout.enabled) {
+        probe->stage =
+            SPRINGBOARD_COMMCENTER_STAGE_LAYOUT_DISABLED;
+        return;
+    }
+
+    probe->mqueue = cpu->r[0];
+    if (!springboard_commcenter_validate_pointer(
+            probe, probe->mqueue,
+            SPRINGBOARD_COMMCENTER_VALID_MQUEUE,
+            SPRINGBOARD_COMMCENTER_STAGE_MQUEUE_POINTER))
+        return;
+    if (probe->mqueue < SPRINGBOARD_COMMCENTER_MQUEUE_PORT_DELTA) {
+        probe->stage = SPRINGBOARD_COMMCENTER_STAGE_PORT_POINTER;
+        probe->failure_va = probe->mqueue;
+        return;
+    }
+    probe->port =
+        probe->mqueue - SPRINGBOARD_COMMCENTER_MQUEUE_PORT_DELTA;
+    if (!springboard_commcenter_validate_pointer(
+            probe, probe->port,
+            SPRINGBOARD_COMMCENTER_VALID_PORT,
+            SPRINGBOARD_COMMCENTER_STAGE_PORT_POINTER))
+        return;
+    if (!springboard_commcenter_read_field(
+            probe, cpu, probe->port,
+            SPRINGBOARD_COMMCENTER_PORT_IO_BITS_OFFSET,
+            SPRINGBOARD_COMMCENTER_VALID_IO_BITS,
+            SPRINGBOARD_COMMCENTER_STAGE_PORT_IO_BITS,
+            &probe->io_bits))
+        return;
+    probe->stage = SPRINGBOARD_COMMCENTER_STAGE_PORT_ACTIVE;
+    if (!(probe->io_bits & SPRINGBOARD_COMMCENTER_PORT_ACTIVE)) {
+        probe->failure_va =
+            probe->port +
+                SPRINGBOARD_COMMCENTER_PORT_IO_BITS_OFFSET;
+        return;
+    }
+    probe->valid_bits |= SPRINGBOARD_COMMCENTER_VALID_PORT_ACTIVE;
+
+    if (!springboard_commcenter_read_field(
+            probe, cpu, probe->mqueue,
+            SPRINGBOARD_COMMCENTER_MQUEUE_MSGCOUNT_OFFSET,
+            SPRINGBOARD_COMMCENTER_VALID_MSGCOUNT,
+            SPRINGBOARD_COMMCENTER_STAGE_MSGCOUNT,
+            &probe->msgcount) ||
+        !springboard_commcenter_read_field(
+            probe, cpu, probe->mqueue,
+            SPRINGBOARD_COMMCENTER_MQUEUE_QLIMIT_OFFSET,
+            SPRINGBOARD_COMMCENTER_VALID_QLIMIT,
+            SPRINGBOARD_COMMCENTER_STAGE_QLIMIT,
+            &probe->qlimit) ||
+        !springboard_commcenter_read_field(
+            probe, cpu, probe->mqueue,
+            SPRINGBOARD_COMMCENTER_MQUEUE_SEQNO_OFFSET,
+            SPRINGBOARD_COMMCENTER_VALID_SEQNO,
+            SPRINGBOARD_COMMCENTER_STAGE_SEQNO,
+            &probe->seqno) ||
+        !springboard_commcenter_read_field(
+            probe, cpu, probe->mqueue,
+            SPRINGBOARD_COMMCENTER_MQUEUE_FULLWAITERS_OFFSET,
+            SPRINGBOARD_COMMCENTER_VALID_FULLWAITERS,
+            SPRINGBOARD_COMMCENTER_STAGE_FULLWAITERS,
+            &probe->fullwaiters))
+        return;
+
+    if (!springboard_commcenter_read_field(
+            probe, cpu, probe->port,
+            SPRINGBOARD_COMMCENTER_PORT_RECEIVER_SPACE_OFFSET,
+            SPRINGBOARD_COMMCENTER_VALID_RECEIVER_SPACE,
+            SPRINGBOARD_COMMCENTER_STAGE_RECEIVER_SPACE,
+            &probe->receiver_space) ||
+        !springboard_commcenter_validate_pointer(
+            probe, probe->receiver_space,
+            SPRINGBOARD_COMMCENTER_VALID_RECEIVER_SPACE_POINTER,
+            SPRINGBOARD_COMMCENTER_STAGE_RECEIVER_SPACE_POINTER))
+        return;
+    if (!springboard_commcenter_read_field(
+            probe, cpu, probe->receiver_space,
+            SPRINGBOARD_COMMCENTER_SPACE_ACTIVE_OFFSET,
+            SPRINGBOARD_COMMCENTER_VALID_RECEIVER_SPACE_ACTIVE,
+            SPRINGBOARD_COMMCENTER_STAGE_RECEIVER_SPACE_ACTIVE,
+            &probe->receiver_space_active))
+        return;
+    if (probe->receiver_space_active != 1u) {
+        probe->valid_bits &=
+            ~SPRINGBOARD_COMMCENTER_VALID_RECEIVER_SPACE_ACTIVE;
+        probe->failure_va =
+            probe->receiver_space +
+                SPRINGBOARD_COMMCENTER_SPACE_ACTIVE_OFFSET;
+        probe->failure_fsr = 0;
+        return;
+    }
+    if (!springboard_commcenter_read_field(
+            probe, cpu, probe->receiver_space,
+            SPRINGBOARD_COMMCENTER_SPACE_TASK_OFFSET,
+            SPRINGBOARD_COMMCENTER_VALID_RECEIVER_TASK,
+            SPRINGBOARD_COMMCENTER_STAGE_RECEIVER_TASK,
+            &probe->receiver_task) ||
+        !springboard_commcenter_validate_pointer(
+            probe, probe->receiver_task,
+            SPRINGBOARD_COMMCENTER_VALID_RECEIVER_TASK_POINTER,
+            SPRINGBOARD_COMMCENTER_STAGE_RECEIVER_TASK_POINTER))
+        return;
+    if (!springboard_commcenter_read_field(
+            probe, cpu, probe->receiver_task,
+            SPRINGBOARD_COMMCENTER_TASK_IPCSPACE_OFFSET,
+            SPRINGBOARD_COMMCENTER_VALID_RECEIVER_TASK_SPACE,
+            SPRINGBOARD_COMMCENTER_STAGE_RECEIVER_TASK_SPACE,
+            &probe->receiver_task_space))
+        return;
+    probe->stage =
+        SPRINGBOARD_COMMCENTER_STAGE_RECEIVER_TASK_SPACE_MATCH;
+    if (probe->receiver_task_space != probe->receiver_space) {
+        probe->failure_va =
+            probe->receiver_task +
+                SPRINGBOARD_COMMCENTER_TASK_IPCSPACE_OFFSET;
+        probe->failure_fsr = 0;
+        return;
+    }
+    probe->valid_bits |=
+        SPRINGBOARD_COMMCENTER_VALID_RECEIVER_TASK_SPACE_MATCH;
+    if (!springboard_commcenter_read_field(
+            probe, cpu, probe->receiver_task,
+            SPRINGBOARD_COMMCENTER_TASK_PROC_OFFSET,
+            SPRINGBOARD_COMMCENTER_VALID_RECEIVER_PROC,
+            SPRINGBOARD_COMMCENTER_STAGE_RECEIVER_PROC,
+            &probe->receiver_proc) ||
+        !springboard_commcenter_validate_pointer(
+            probe, probe->receiver_proc,
+            SPRINGBOARD_COMMCENTER_VALID_RECEIVER_PROC_POINTER,
+            SPRINGBOARD_COMMCENTER_STAGE_RECEIVER_PROC_POINTER))
+        return;
+    if (!springboard_commcenter_read_field(
+            probe, cpu, probe->receiver_proc,
+            SPRINGBOARD_COMMCENTER_PROC_PID_OFFSET,
+            SPRINGBOARD_COMMCENTER_VALID_RECEIVER_PID,
+            SPRINGBOARD_COMMCENTER_STAGE_RECEIVER_PID,
+            &probe->receiver_pid))
+        return;
+    if (probe->receiver_pid > INT32_MAX) {
+        probe->valid_bits &=
+            ~SPRINGBOARD_COMMCENTER_VALID_RECEIVER_PID;
+        probe->failure_va =
+            probe->receiver_proc +
+                SPRINGBOARD_COMMCENTER_PROC_PID_OFFSET;
+        probe->failure_fsr = 0;
+        return;
+    }
+
+    probe->stage = SPRINGBOARD_COMMCENTER_STAGE_COMPLETE;
+    probe->complete = true;
+}
+
+static void springboard_commcenter_route_note(
+        springboard_mach_event_t *event, const arm_cpu_t *cpu,
+        uint64_t at, uint32_t pc) {
+    if (!G.commcenter_layout.enabled ||
+        !springboard_commcenter_user_header_signature_matches(event) ||
+        !cpu)
+        return;
+    for (unsigned i = 0;
+         i < SPRINGBOARD_COMMCENTER_ROUTE_COUNT; i++) {
+        if (pc != SPRINGBOARD_COMMCENTER_ROUTE_PC[i]) continue;
+        uint32_t bit = UINT32_C(1) << i;
+        springboard_commcenter_probe_t *probe =
+            &event->commcenter_probe;
+        if (!(probe->route_bits & bit)) {
+            probe->route_first_at[i] = at;
+            memcpy(probe->route_first_r[i], cpu->r,
+                   sizeof probe->route_first_r[i]);
+            probe->route_first_r4[i] = cpu->r[4];
+            probe->route_first_lr[i] = cpu->r[14];
+        }
+        probe->route_bits |= bit;
+        return;
+    }
+}
 
 static BOOTKERNEL_NOINLINE void
 springboard_target_note_mach_milestone(
@@ -4854,9 +6160,54 @@ springboard_target_note_mach_milestone(
         springboard_mach_event_t *event =
             springboard_target_mach_active(trace);
         if (event) {
-            if (!(event->path_bits & bit))
+            if (!(event->path_bits & bit)) {
                 event->path_first_at[i] = at;
+                memcpy(event->path_first_r[i], cpu->r,
+                       sizeof event->path_first_r[i]);
+                event->path_first_lr[i] = cpu->r[14];
+            }
             event->path_bits |= bit;
+        }
+        return;
+    }
+}
+
+/*
+ * Resolve and scan the expanded send/receive ladder only while the exact
+ * SpringBoard thread is inside a Mach episode.  Putting all of these symbols
+ * in the global milestone table would add six comparisons to every one of a
+ * multi-billion-step boot just to diagnose a few thousand kernel instructions.
+ */
+static inline void springboard_target_note_mach_pc(
+        springboard_exec_trace_t *trace, arm_cpu_t *cpu,
+        uint64_t at, uint32_t pc) {
+    if (!springboard_target_trace_active(trace) || !cpu ||
+        !trace->target_episode_open ||
+        !trace->target_episode_mach_msg ||
+        !trace->target_on_cpu ||
+        cpu->cp15.tpidrprw != trace->target_thread)
+        return;
+
+    pc &= ~1u;
+    springboard_mach_event_t *event =
+        springboard_target_mach_active(trace);
+    if (event)
+        springboard_commcenter_route_note(event, cpu, at, pc);
+
+    for (unsigned i = 0; i < SPRINGBOARD_MACH_PATH_COUNT; i++) {
+        if (!SPRINGBOARD_MACH_PATH_VA[i] ||
+            pc != SPRINGBOARD_MACH_PATH_VA[i])
+            continue;
+        springboard_target_note_mach_milestone(
+            trace, cpu, at, SPRINGBOARD_MACH_PATH_NAMES[i]);
+        if (i == SPRINGBOARD_MACH_PATH_IPC_MQUEUE_SEND) {
+            event = springboard_target_mach_active(trace);
+            if (event) {
+                springboard_commcenter_probe_capture(
+                    event, cpu, at);
+                commcenter_watch_note_initial_send_queue_entry(
+                    &event->commcenter_probe, at);
+            }
         }
         return;
     }
@@ -5083,6 +6434,95 @@ static void springboard_target_note_process_exit_entry(
     trace->exited_at = at;
 }
 
+static bool commcenter_watch_selfcheck(void) {
+    lifecycle_event_t event;
+    memset(&event, 0, sizeof event);
+    event.kind = LIFECYCLE_SYSCALL;
+    event.syscall_number = 244u;
+    event.path_status = LIFECYCLE_PATH_OK;
+    event.path_length = (uint16_t)(sizeof COMMCENTER_EXEC_PATH - 1u);
+    memcpy(event.path, COMMCENTER_EXEC_PATH,
+           sizeof COMMCENTER_EXEC_PATH);
+    event.spawn_attr_decoded = true;
+    event.spawn_setexec = true;
+    event.identity_stage = LIFECYCLE_IDENTITY_COMPLETE;
+    event.effective_identity_valid = true;
+    event.current_thread = UINT32_C(0xc1001000);
+    event.current_task = UINT32_C(0xc2002000);
+    event.task_proc = UINT32_C(0xc3003000);
+    event.task_pid = UINT32_C(24);
+    event.effective_proc = event.task_proc;
+    event.effective_pid = event.task_pid;
+
+    bool ok =
+        commcenter_watch_setexec_path_attempt(&event) &&
+        commcenter_watch_setexec_event_valid(&event);
+    event.spawn_setexec = false;
+    ok = ok &&
+        !commcenter_watch_setexec_path_attempt(&event) &&
+        !commcenter_watch_setexec_event_valid(&event);
+    event.spawn_setexec = true;
+    event.effective_vfork = true;
+    ok = ok && !commcenter_watch_setexec_event_valid(&event);
+    event.effective_vfork = false;
+    event.path[0] = 'X';
+    ok = ok &&
+        !commcenter_watch_setexec_path_attempt(&event) &&
+        !commcenter_watch_setexec_event_valid(&event);
+    event.path[0] = COMMCENTER_EXEC_PATH[0];
+
+    commcenter_watch_t watch;
+    memset(&watch, 0, sizeof watch);
+    ok = ok &&
+        commcenter_watch_phase(&watch, UINT64_C(99)) ==
+            COMMCENTER_WATCH_BEFORE_SEND_QUEUE_ENTRY;
+    watch.initial_send_queue_entry_seen = true;
+    watch.initial_send_queue_entry_at = UINT64_C(100);
+    ok = ok &&
+        commcenter_watch_phase(&watch, UINT64_C(99)) ==
+            COMMCENTER_WATCH_BEFORE_SEND_QUEUE_ENTRY &&
+        commcenter_watch_phase(&watch, UINT64_C(100)) ==
+            COMMCENTER_WATCH_AT_OR_AFTER_SEND_QUEUE_ENTRY &&
+        commcenter_watch_unreadable_retry_at(UINT64_C(7)) ==
+            UINT64_C(1031) &&
+        commcenter_watch_unreadable_retry_at(UINT64_MAX) ==
+            UINT64_MAX;
+
+    watch.exact_setexec_attempts = UINT64_C(3);
+    watch.ignored_distinct_attempts = UINT64_C(2);
+    watch.last_ignored_distinct_attempt_at = UINT64_C(77);
+    watch.last_ignored_distinct_task = UINT32_C(0xc7007000);
+    watch.last_ignored_distinct_proc = UINT32_C(0xc8008000);
+    watch.last_ignored_distinct_pid = UINT32_C(25);
+    commcenter_watch_start_generation(
+        &watch, &event, UINT64_C(150));
+    ok = ok && watch.armed && watch.generation == UINT64_C(1) &&
+        watch.armed_at == UINT64_C(150) &&
+        watch.task == event.current_task &&
+        watch.proc == event.effective_proc &&
+        watch.pid == event.effective_pid &&
+        watch.initial_send_queue_entry_seen &&
+        watch.initial_send_queue_entry_at == UINT64_C(100) &&
+        watch.exact_setexec_attempts == UINT64_C(3) &&
+        watch.ignored_distinct_attempts == UINT64_C(2) &&
+        watch.last_ignored_distinct_attempt_at == UINT64_C(77) &&
+        watch.last_ignored_distinct_task == UINT32_C(0xc7007000) &&
+        watch.last_ignored_distinct_proc == UINT32_C(0xc8008000) &&
+        watch.last_ignored_distinct_pid == UINT32_C(25);
+    commcenter_watch_invalidate_identity(&watch);
+    ok = ok && watch.terminal && watch.identity_invalidated &&
+        !watch.current_classified && !watch.current_matches;
+
+    for (unsigned i = 0;
+         i < COMMCENTER_WATCH_MILESTONE_COUNT; i++)
+        ok = ok &&
+            commcenter_watch_milestone_index(
+                COMMCENTER_WATCH_MILESTONE_NAMES[i]) == (int)i;
+    ok = ok &&
+        commcenter_watch_milestone_index("_not_a_milestone") < 0;
+    return ok;
+}
+
 static bool springboard_target_trace_selfcheck(void) {
     uint32_t expected = 0;
     bool ok =
@@ -5244,6 +6684,25 @@ static bool springboard_target_trace_selfcheck(void) {
         springboard_mach_receive_capture_length(24u) == 24u &&
         springboard_mach_receive_capture_length(64u) == 64u &&
         springboard_mach_receive_capture_length(4096u) == 64u;
+    {
+        uint32_t checked_va = 0;
+        ok = ok && springboard_commcenter_checked_field_va(
+                UINT32_C(0xc1234000), UINT32_C(0x3c),
+                UINT32_C(0xc0000000), &checked_va) &&
+            checked_va == UINT32_C(0xc123403c) &&
+            !springboard_commcenter_checked_field_va(
+                0, 0, UINT32_C(0xc0000000), &checked_va) &&
+            checked_va == 0 &&
+            !springboard_commcenter_checked_field_va(
+                UINT32_C(0xc1234001), 0,
+                UINT32_C(0xc0000000), &checked_va) &&
+            !springboard_commcenter_checked_field_va(
+                UINT32_C(0xbffff000), 0,
+                UINT32_C(0xc0000000), &checked_va) &&
+            !springboard_commcenter_checked_field_va(
+                UINT32_C(0xfffffffc), UINT32_C(0x04),
+                UINT32_C(0xc0000000), &checked_va);
+    }
     ok = ok &&
         springboard_ui_checkpoint_index(UINT32_C(0x0000381e)) >= 0 &&
         springboard_ui_checkpoint_index(UINT32_C(0x324a5b88)) >= 0 &&
@@ -5392,6 +6851,168 @@ static bool springboard_target_trace_selfcheck(void) {
             SPRINGBOARD_MACH_RESOLUTION_ATTRIBUTION_LOST &&
         ring.target_mach[0].outcome ==
             SPRINGBOARD_TARGET_OUTCOME_ATTRIBUTION_LOST;
+
+    /*
+     * Exercise the PC-gated path recorder itself, including its normalized-PC
+     * match and its first-hit-only register snapshot.  Preserve the resolver's
+     * global slot because this selfcheck can run independently of symbol-table
+     * initialization.
+     */
+    {
+        const unsigned path =
+            SPRINGBOARD_MACH_PATH_IPC_KMSG_SEND;
+        const uint32_t bit = UINT32_C(1) << path;
+        const uint32_t synthetic_va = UINT32_C(0x13579bde);
+        const uint32_t saved_va = SPRINGBOARD_MACH_PATH_VA[path];
+        SPRINGBOARD_MACH_PATH_VA[path] = synthetic_va;
+
+        memset(&ring, 0, sizeof ring);
+        memset(&mach_cpu, 0, sizeof mach_cpu);
+        ring.armed = true;
+        ring.target_thread = UINT32_C(0x10101010);
+        ring.target_uthread = UINT32_C(0x20202020);
+        ring.target_on_cpu = true;
+        ring.target_episode_open = true;
+        ring.target_episode_mach_msg = true;
+        ring.target_episode = UINT64_C(17);
+        ring.target_mach_total = UINT64_C(1);
+        ring.target_mach_active_sequence = 0;
+        ring.target_mach_active = true;
+        ring.target_mach[0].valid = true;
+        ring.target_mach[0].open = true;
+        ring.target_mach[0].sequence = 0;
+        ring.target_mach[0].episode = ring.target_episode;
+        mach_cpu.cp15.tpidrprw = ring.target_thread;
+        mach_cpu.r[0] = UINT32_C(0x11111111);
+        mach_cpu.r[1] = UINT32_C(0x22222222);
+        mach_cpu.r[2] = UINT32_C(0x33333333);
+        mach_cpu.r[3] = UINT32_C(0x44444444);
+        mach_cpu.r[14] = UINT32_C(0xeeeeeeee);
+        springboard_target_note_mach_pc(
+            &ring, &mach_cpu, UINT64_C(201), synthetic_va | 1u);
+
+        mach_cpu.r[0] = UINT32_C(0xaaaaaaaa);
+        mach_cpu.r[1] = UINT32_C(0xbbbbbbbb);
+        mach_cpu.r[2] = UINT32_C(0xcccccccc);
+        mach_cpu.r[3] = UINT32_C(0xdddddddd);
+        mach_cpu.r[14] = UINT32_C(0xffffffff);
+        springboard_target_note_mach_pc(
+            &ring, &mach_cpu, UINT64_C(202), synthetic_va);
+
+        ring.target_mach[0].request_header.readable = true;
+        ring.target_mach[0].request_header.id =
+            (int32_t)SPRINGBOARD_COMMCENTER_INITIAL_ID;
+        ring.target_mach[0].args[1] =
+            DIAGNOSTIC_MACH_SEND_MSG | DIAGNOSTIC_MACH_RCV_MSG;
+        bool saved_layout_enabled =
+            G.commcenter_layout.enabled;
+        G.commcenter_layout.enabled = false;
+        springboard_commcenter_probe_capture(
+            &ring.target_mach[0], &mach_cpu, UINT64_C(290));
+        springboard_commcenter_route_note(
+            &ring.target_mach[0], &mach_cpu, UINT64_C(291),
+            SPRINGBOARD_COMMCENTER_POST_SELECTED_WAITER_PC);
+        bool layout_disabled_ok =
+            ring.target_mach[0].commcenter_probe.attempted &&
+            ring.target_mach[0].commcenter_probe.stage ==
+                SPRINGBOARD_COMMCENTER_STAGE_LAYOUT_DISABLED &&
+            !ring.target_mach[0].commcenter_probe.valid_bits &&
+            !ring.target_mach[0].commcenter_probe.route_bits;
+        memset(&ring.target_mach[0].commcenter_probe, 0,
+               sizeof ring.target_mach[0].commcenter_probe);
+        G.commcenter_layout.enabled = true;
+        mach_cpu.r[0] = UINT32_C(0x01010101);
+        mach_cpu.r[1] = UINT32_C(0x02020202);
+        mach_cpu.r[2] = UINT32_C(0x03030303);
+        mach_cpu.r[3] = UINT32_C(0x04040404);
+        mach_cpu.r[4] = UINT32_C(0x05050505);
+        mach_cpu.r[14] = UINT32_C(0x0e0e0e0e);
+        springboard_target_note_mach_pc(
+            &ring, &mach_cpu, UINT64_C(301),
+            SPRINGBOARD_COMMCENTER_POST_SELECTED_WAITER_PC | 1u);
+        mach_cpu.r[0] = UINT32_C(0xaaaaaaaa);
+        mach_cpu.r[14] = UINT32_C(0xbbbbbbbb);
+        springboard_target_note_mach_pc(
+            &ring, &mach_cpu, UINT64_C(302),
+            SPRINGBOARD_COMMCENTER_POST_SELECTED_WAITER_PC);
+        ring.target_mach[0].request_header.id = 0;
+        springboard_target_note_mach_pc(
+            &ring, &mach_cpu, UINT64_C(303),
+            SPRINGBOARD_COMMCENTER_POST_NO_WAITER_PC);
+        ring.target_mach[0].request_header.id =
+            (int32_t)SPRINGBOARD_COMMCENTER_INITIAL_ID;
+        springboard_target_note_mach_pc(
+            &ring, &mach_cpu, UINT64_C(304),
+            SPRINGBOARD_COMMCENTER_POST_NO_WAITER_PC);
+        springboard_target_note_mach_pc(
+            &ring, &mach_cpu, UINT64_C(305),
+            SPRINGBOARD_COMMCENTER_FULL_WAIT_PC);
+        springboard_target_note_mach_pc(
+            &ring, &mach_cpu, UINT64_C(306),
+            SPRINGBOARD_COMMCENTER_FULLWAITERS_STORE_PC);
+        springboard_target_note_mach_pc(
+            &ring, &mach_cpu, UINT64_C(307),
+            SPRINGBOARD_COMMCENTER_ACCEPTED_POST_PC);
+        G.commcenter_layout.enabled = saved_layout_enabled;
+        SPRINGBOARD_MACH_PATH_VA[path] = saved_va;
+
+        const uint32_t all_route_bits =
+            (UINT32_C(1) << SPRINGBOARD_COMMCENTER_ROUTE_COUNT) - 1u;
+        ok = ok &&
+            ring.target_episode_mach_path_bits == bit &&
+            ring.target_episode_mach_path_first_at[path] ==
+                UINT64_C(201) &&
+            ring.target_mach[0].path_bits == bit &&
+            ring.target_mach[0].path_first_at[path] ==
+                UINT64_C(201) &&
+            ring.target_mach[0].path_first_r[path][0] ==
+                UINT32_C(0x11111111) &&
+            ring.target_mach[0].path_first_r[path][1] ==
+                UINT32_C(0x22222222) &&
+            ring.target_mach[0].path_first_r[path][2] ==
+                UINT32_C(0x33333333) &&
+            ring.target_mach[0].path_first_r[path][3] ==
+                UINT32_C(0x44444444) &&
+            ring.target_mach[0].path_first_lr[path] ==
+                UINT32_C(0xeeeeeeee) &&
+            layout_disabled_ok &&
+            springboard_commcenter_user_header_signature_matches(
+                &ring.target_mach[0]) &&
+            ring.target_mach[0].commcenter_probe.route_bits ==
+                all_route_bits &&
+            ring.target_mach[0].commcenter_probe
+                    .route_first_at[
+                        SPRINGBOARD_COMMCENTER_ROUTE_POST_SELECTED_WAITER] ==
+                UINT64_C(301) &&
+            ring.target_mach[0].commcenter_probe
+                    .route_first_r[
+                        SPRINGBOARD_COMMCENTER_ROUTE_POST_SELECTED_WAITER][0] ==
+                UINT32_C(0x01010101) &&
+            ring.target_mach[0].commcenter_probe
+                    .route_first_r4[
+                        SPRINGBOARD_COMMCENTER_ROUTE_POST_SELECTED_WAITER] ==
+                UINT32_C(0x05050505) &&
+            ring.target_mach[0].commcenter_probe
+                    .route_first_lr[
+                        SPRINGBOARD_COMMCENTER_ROUTE_POST_SELECTED_WAITER] ==
+                UINT32_C(0x0e0e0e0e) &&
+            ring.target_mach[0].commcenter_probe
+                    .route_first_at[
+                        SPRINGBOARD_COMMCENTER_ROUTE_POST_NO_WAITER] ==
+                UINT64_C(304) &&
+            ring.target_mach[0].commcenter_probe
+                    .route_first_at[
+                        SPRINGBOARD_COMMCENTER_ROUTE_FULL_WAIT] ==
+                UINT64_C(305) &&
+            ring.target_mach[0].commcenter_probe
+                    .route_first_at[
+                        SPRINGBOARD_COMMCENTER_ROUTE_FULLWAITERS_STORE] ==
+                UINT64_C(306) &&
+            ring.target_mach[0].commcenter_probe
+                    .route_first_at[
+                        SPRINGBOARD_COMMCENTER_ROUTE_ENQUEUE] ==
+                UINT64_C(307);
+    }
 
     memset(&ring, 0, sizeof ring);
     for (uint64_t sequence = 0;
@@ -7078,6 +8699,7 @@ static void lifecycle_note_syscall(arm_cpu_t *cpu, uint64_t at) {
     if (!cpu) return;
     springboard_return_note_swi_entry(cpu, at);
     springboard_exec_trace_note_swi(cpu, at);
+    commcenter_watch_note_swi(cpu, at);
 
     int32_t raw = (int32_t)cpu->r[12];
     if (raw < 0) return;                  /* Mach trap, not a BSD lifecycle call */
@@ -7120,6 +8742,7 @@ static void lifecycle_note_syscall(arm_cpu_t *cpu, uint64_t at) {
         G.lifecycle_path_failures++;
         return;
     }
+    commcenter_watch_arm(event, at);
 
     static const char springboard[] =
         "/System/Library/CoreServices/SpringBoard.app/SpringBoard";
@@ -7143,6 +8766,7 @@ static void lifecycle_note_kernel_entry(arm_cpu_t *cpu, uint64_t at,
     lifecycle_capture_identity(event, cpu);
     event->arg_count = kind == LIFECYCLE_EXIT1 ? 3u : 2u;
     for (unsigned i = 0; i < event->arg_count; i++) event->args[i] = cpu->r[i];
+    commcenter_watch_note_kernel_lifecycle(cpu, at, kind);
 }
 
 /* Attribute one sample to an exact PC. Cheap: no name is resolved here, only
@@ -7567,6 +9191,14 @@ static void milestones_build(void) {
         MILE[NM].va   = va & ~1u;
         NM++;
     }
+    for (unsigned i = 0; i < SPRINGBOARD_MACH_PATH_COUNT; i++) {
+        uint32_t va = ksym_value(SPRINGBOARD_MACH_PATH_NAMES[i]);
+        SPRINGBOARD_MACH_PATH_VA[i] = va & ~1u;
+        if (!va)
+            printf("  SpringBoard Mach path %-24s UNRESOLVED"
+                   " -- checkpoint disabled\n",
+                   SPRINGBOARD_MACH_PATH_NAMES[i]);
+    }
 }
 
 static void note_fault(uint32_t far_, uint32_t fsr, uint32_t pc,
@@ -7898,6 +9530,496 @@ static const char *springboard_mach_resolution_name(unsigned resolution) {
     return "unknown";
 }
 
+static const char *springboard_commcenter_stage_name(unsigned stage) {
+    switch ((springboard_commcenter_stage_t)stage) {
+        case SPRINGBOARD_COMMCENTER_STAGE_NONE:
+            return "not started";
+        case SPRINGBOARD_COMMCENTER_STAGE_LAYOUT_DISABLED:
+            return "exact 7E18 ownership/route layout gate disabled";
+        case SPRINGBOARD_COMMCENTER_STAGE_MQUEUE_POINTER:
+            return "mqueue pointer validation";
+        case SPRINGBOARD_COMMCENTER_STAGE_PORT_POINTER:
+            return "containing port pointer validation";
+        case SPRINGBOARD_COMMCENTER_STAGE_PORT_IO_BITS:
+            return "port io_bits read";
+        case SPRINGBOARD_COMMCENTER_STAGE_PORT_ACTIVE:
+            return "port active-bit validation";
+        case SPRINGBOARD_COMMCENTER_STAGE_MSGCOUNT:
+            return "mqueue msgcount read";
+        case SPRINGBOARD_COMMCENTER_STAGE_QLIMIT:
+            return "mqueue qlimit read";
+        case SPRINGBOARD_COMMCENTER_STAGE_SEQNO:
+            return "mqueue seqno read";
+        case SPRINGBOARD_COMMCENTER_STAGE_FULLWAITERS:
+            return "mqueue fullwaiters read";
+        case SPRINGBOARD_COMMCENTER_STAGE_RECEIVER_SPACE:
+            return "port receiver-space read";
+        case SPRINGBOARD_COMMCENTER_STAGE_RECEIVER_SPACE_POINTER:
+            return "receiver-space pointer validation";
+        case SPRINGBOARD_COMMCENTER_STAGE_RECEIVER_SPACE_ACTIVE:
+            return "receiver-space active read/validation";
+        case SPRINGBOARD_COMMCENTER_STAGE_RECEIVER_TASK:
+            return "receiver task read";
+        case SPRINGBOARD_COMMCENTER_STAGE_RECEIVER_TASK_POINTER:
+            return "receiver-task pointer validation";
+        case SPRINGBOARD_COMMCENTER_STAGE_RECEIVER_TASK_SPACE:
+            return "receiver-task ipc-space backpointer read";
+        case SPRINGBOARD_COMMCENTER_STAGE_RECEIVER_TASK_SPACE_MATCH:
+            return "receiver-task ipc-space backpointer match";
+        case SPRINGBOARD_COMMCENTER_STAGE_RECEIVER_PROC:
+            return "receiver proc read";
+        case SPRINGBOARD_COMMCENTER_STAGE_RECEIVER_PROC_POINTER:
+            return "receiver-proc pointer validation";
+        case SPRINGBOARD_COMMCENTER_STAGE_RECEIVER_PID:
+            return "receiver PID read/validation";
+        case SPRINGBOARD_COMMCENTER_STAGE_COMPLETE:
+            return "complete";
+    }
+    return "unknown";
+}
+
+static void springboard_commcenter_probe_report(
+        const springboard_commcenter_probe_t *probe) {
+    if (!probe || (!probe->attempted && !probe->route_bits))
+        return;
+
+    if (probe->attempted) {
+        printf("        preliminary user-header signature:"
+               " readable id=0x%08x with SEND|RCV;"
+               " msgh_size/send-bound relation intentionally not gated\n",
+               SPRINGBOARD_COMMCENTER_INITIAL_ID);
+        printf("        exact CoreTelephony initial send-queue probe"
+               " @%" PRIu64
+               " r0-r3=%08x/%08x/%08x/%08x lr=%08x\n",
+               probe->capture_at,
+               probe->capture_r[0], probe->capture_r[1],
+               probe->capture_r[2], probe->capture_r[3],
+               probe->capture_lr);
+        if (probe->valid_bits &
+                SPRINGBOARD_COMMCENTER_VALID_MQUEUE)
+            printf("          mqueue=%08x", probe->mqueue);
+        if (probe->valid_bits &
+                SPRINGBOARD_COMMCENTER_VALID_PORT)
+            printf(" containing-port=%08x", probe->port);
+        if (probe->valid_bits &
+                (SPRINGBOARD_COMMCENTER_VALID_MQUEUE |
+                 SPRINGBOARD_COMMCENTER_VALID_PORT))
+            printf("\n");
+        if (probe->valid_bits &
+                SPRINGBOARD_COMMCENTER_VALID_IO_BITS)
+            printf("          port io_bits=%08x; active-bit=%s\n",
+                   probe->io_bits,
+                   (probe->valid_bits &
+                        SPRINGBOARD_COMMCENTER_VALID_PORT_ACTIVE)
+                       ? "validated" : "not validated");
+        if (probe->valid_bits &
+                (SPRINGBOARD_COMMCENTER_VALID_MSGCOUNT |
+                 SPRINGBOARD_COMMCENTER_VALID_QLIMIT |
+                 SPRINGBOARD_COMMCENTER_VALID_SEQNO |
+                 SPRINGBOARD_COMMCENTER_VALID_FULLWAITERS)) {
+            printf("          queue fields:");
+            if (probe->valid_bits &
+                    SPRINGBOARD_COMMCENTER_VALID_MSGCOUNT)
+                printf(" msgcount=%u", probe->msgcount);
+            if (probe->valid_bits &
+                    SPRINGBOARD_COMMCENTER_VALID_QLIMIT)
+                printf(" qlimit=%u", probe->qlimit);
+            if (probe->valid_bits &
+                    SPRINGBOARD_COMMCENTER_VALID_SEQNO)
+                printf(" seqno=%u", probe->seqno);
+            if (probe->valid_bits &
+                    SPRINGBOARD_COMMCENTER_VALID_FULLWAITERS)
+                printf(" fullwaiters=%u", probe->fullwaiters);
+            printf("\n");
+        }
+        if (probe->valid_bits &
+                (SPRINGBOARD_COMMCENTER_VALID_RECEIVER_SPACE |
+                 SPRINGBOARD_COMMCENTER_VALID_RECEIVER_TASK |
+                 SPRINGBOARD_COMMCENTER_VALID_RECEIVER_PROC |
+                 SPRINGBOARD_COMMCENTER_VALID_RECEIVER_PID)) {
+            printf("          receiver chain:");
+            if (probe->valid_bits &
+                    SPRINGBOARD_COMMCENTER_VALID_RECEIVER_SPACE)
+                printf(" space=%08x%s", probe->receiver_space,
+                       (probe->valid_bits &
+                           SPRINGBOARD_COMMCENTER_VALID_RECEIVER_SPACE_POINTER)
+                           ? "" : " (pointer unvalidated)");
+            if (probe->valid_bits &
+                    SPRINGBOARD_COMMCENTER_VALID_RECEIVER_SPACE_ACTIVE)
+                printf(" active=%u", probe->receiver_space_active);
+            if (probe->valid_bits &
+                    SPRINGBOARD_COMMCENTER_VALID_RECEIVER_TASK)
+                printf(" task=%08x%s", probe->receiver_task,
+                       (probe->valid_bits &
+                           SPRINGBOARD_COMMCENTER_VALID_RECEIVER_TASK_POINTER)
+                           ? "" : " (pointer unvalidated)");
+            if (probe->valid_bits &
+                    SPRINGBOARD_COMMCENTER_VALID_RECEIVER_TASK_SPACE)
+                printf(" task-space=%08x%s",
+                       probe->receiver_task_space,
+                       (probe->valid_bits &
+                            SPRINGBOARD_COMMCENTER_VALID_RECEIVER_TASK_SPACE_MATCH)
+                           ? " (matches)" : " (mismatch)");
+            if (probe->valid_bits &
+                    SPRINGBOARD_COMMCENTER_VALID_RECEIVER_PROC)
+                printf(" proc=%08x%s", probe->receiver_proc,
+                       (probe->valid_bits &
+                            SPRINGBOARD_COMMCENTER_VALID_RECEIVER_PROC_POINTER)
+                           ? "" : " (pointer unvalidated)");
+            if (probe->valid_bits &
+                    SPRINGBOARD_COMMCENTER_VALID_RECEIVER_PID)
+                printf(" pid=%u", probe->receiver_pid);
+            printf("\n");
+        }
+        if (probe->complete) {
+            printf("          decode COMPLETE; pointers/alignment/kernel"
+                   " VA/readability, active bits, and task-space"
+                   " backpointer validated; PID is within signed range\n");
+        } else if (probe->stage ==
+                       SPRINGBOARD_COMMCENTER_STAGE_LAYOUT_DISABLED) {
+            printf("          decode INCOMPLETE: %s\n",
+                   springboard_commcenter_stage_name(probe->stage));
+        } else {
+            printf("          decode INCOMPLETE at %s;"
+                   " failure-va/fsr=%08x/%08x\n",
+                   springboard_commcenter_stage_name(probe->stage),
+                   probe->failure_va, probe->failure_fsr);
+        }
+    }
+
+    printf("        exact CommCenter queue route PCs:");
+    if (!probe->route_bits) {
+        printf(" none captured\n");
+        return;
+    }
+    printf("\n");
+    for (unsigned i = 0;
+         i < SPRINGBOARD_COMMCENTER_ROUTE_COUNT; i++) {
+        uint32_t bit = UINT32_C(1) << i;
+        if (!(probe->route_bits & bit)) continue;
+        printf("          %-24s pc=%08x @%" PRIu64
+               " r0-r4=%08x/%08x/%08x/%08x/%08x lr=%08x\n",
+               SPRINGBOARD_COMMCENTER_ROUTE_NAMES[i],
+               SPRINGBOARD_COMMCENTER_ROUTE_PC[i],
+               probe->route_first_at[i],
+               probe->route_first_r[i][0],
+               probe->route_first_r[i][1],
+               probe->route_first_r[i][2],
+               probe->route_first_r[i][3],
+               probe->route_first_r4[i],
+               probe->route_first_lr[i]);
+    }
+}
+
+static void commcenter_watch_sample_report(
+        const char *label, const commcenter_watch_sample_t *sample) {
+    if (!sample || !sample->valid) {
+        printf("      %s: none\n", label);
+        return;
+    }
+    printf("      %s: @%" PRIu64 " pc=%08x cpsr=%08x"
+           " mode=%02x thread=%08x TTBR0/context=%08x/%08x\n",
+           label, sample->at, sample->pc, sample->cpsr,
+           sample->cpsr & ARM_CPSR_MODE_MASK, sample->thread,
+           sample->ttbr0, sample->context_id);
+}
+
+static void commcenter_watch_report(void) {
+    const commcenter_layout_config_t *layout =
+        &G.commcenter_layout;
+    const springboard_child_config_t *identity_config =
+        &G.springboard_child_config;
+    const commcenter_watch_t *watch = &G.commcenter_watch;
+    static const char *const phase_names[
+        COMMCENTER_WATCH_PHASE_COUNT] = {
+        "before initial send queue entry",
+        "at/after initial send queue entry"
+    };
+
+    printf("\n=== COMMCENTER EXACT-PATH SETEXEC-ATTEMPT"
+           " IDENTITY WATCH ===\n");
+    printf("    identity accessor gate: %s (%s)\n",
+           identity_config->enabled ? "VALIDATED" : "DISABLED",
+           identity_config->reason[0]
+               ? identity_config->reason : "not discovered");
+    printf("    ownership layout gate: %s (%s)\n",
+           layout->enabled ? "VALIDATED" : "DISABLED",
+           layout->reason[0] ? layout->reason : "not discovered");
+    printf("    exact-path SETEXEC attempts observed globally: %" PRIu64
+           "; distinct fully validated attempts ignored while a generation"
+           " remained live: %" PRIu64 "\n",
+           watch->exact_setexec_attempts,
+           watch->ignored_distinct_attempts);
+    if (watch->ignored_distinct_attempts)
+        printf("      last ignored distinct attempt @%" PRIu64
+               " task/proc/pid=%08x/%08x/%u\n",
+               watch->last_ignored_distinct_attempt_at,
+               watch->last_ignored_distinct_task,
+               watch->last_ignored_distinct_proc,
+               watch->last_ignored_distinct_pid);
+    if (watch->initial_send_queue_entry_seen)
+        printf("    global SpringBoard initial send queue entry:"
+               " _ipc_mqueue_send @%" PRIu64 "\n",
+               watch->initial_send_queue_entry_at);
+    else
+        printf("    global SpringBoard initial send queue entry:"
+               " not observed\n");
+    if (!watch->armed) {
+        if (!identity_config->enabled)
+            printf("    NOT ARMED: thread/task/proc identity accessor"
+                   " configuration is unavailable; exact-path attempt"
+                   " count above is retained independently\n");
+        else if (!watch->exact_setexec_attempts)
+            printf("    NOT ARMED: no exact-path SETEXEC attempt with"
+                   " readable pathname and flags was observed\n");
+        else
+            printf("    NOT ARMED: exact-path SETEXEC attempt(s) were"
+                   " observed, but none passed the complete non-vfork"
+                   " thread/task/proc/PID identity gate\n");
+        return;
+    }
+
+    printf("    armed @%" PRIu64 " generation=%" PRIu64
+           " path=\"%s\"\n"
+           "    retained SETEXEC-attempt identity:"
+           " task=%08x proc=%08x pid=%u"
+           " entry-thread=%08x (PID was discovered, never hardcoded)\n",
+           watch->armed_at, watch->generation, COMMCENTER_EXEC_PATH,
+           watch->task, watch->proc, watch->pid, watch->entry_thread);
+    printf("    IMPORTANT: pathname and SETEXEC flags were copied at"
+           " syscall entry; this identity does not by itself prove syscall"
+           " success or image commit\n");
+    if (watch->initial_send_queue_entry_seen)
+        printf("    current generation scope: armed %s the retained"
+               " global initial-send-entry epoch\n",
+               watch->armed_at <
+                       watch->initial_send_queue_entry_at
+                   ? "before" : "at/after");
+    else
+        printf("    current generation scope: no initial-send-entry epoch"
+               " was observed\n");
+    printf("    state: terminal=%s identity-invalidated=%s"
+           " current-thread=%08x classified=%s matches=%s"
+           " unreadable-classifications=%" PRIu64
+           " readable-contradictions=%" PRIu64 "\n",
+           watch->terminal ? "yes" : "no",
+           watch->identity_invalidated ? "yes" : "no",
+           watch->current_thread,
+           watch->current_classified ? "yes" : "no",
+           watch->current_matches ? "yes" : "no",
+           watch->identity_unreadable_classifications,
+           watch->identity_mismatch_switches);
+    if (watch->identity_failure_va || watch->identity_failure_fsr)
+        printf("    last identity read failure va/fsr=%08x/%08x\n",
+               watch->identity_failure_va,
+               watch->identity_failure_fsr);
+
+    for (unsigned phase = 0;
+         phase < COMMCENTER_WATCH_PHASE_COUNT; phase++) {
+        printf("    %s execution: user=%" PRIu64
+               " kernel=%" PRIu64 " kernel-to-user returns=%" PRIu64
+               "\n",
+               phase_names[phase],
+               watch->instructions[phase][COMMCENTER_WATCH_USER],
+               watch->instructions[phase][COMMCENTER_WATCH_KERNEL],
+               watch->user_returns[phase]);
+        char first_label[96], last_label[96];
+        snprintf(first_label, sizeof first_label,
+                 "%s first pre-step", phase_names[phase]);
+        snprintf(last_label, sizeof last_label,
+                 "%s last pre-step", phase_names[phase]);
+        commcenter_watch_sample_report(
+            first_label, &watch->first[phase]);
+        commcenter_watch_sample_report(
+            last_label, &watch->last[phase]);
+    }
+
+    if (watch->receiver_seen) {
+        printf("    initial-send destination owner decode:"
+               " complete=%s valid-bits=%08x",
+               watch->receiver_complete ? "yes" : "no",
+               watch->receiver_valid_bits);
+        if (watch->receiver_valid_bits &
+                SPRINGBOARD_COMMCENTER_VALID_RECEIVER_SPACE)
+            printf(" space=%08x", watch->receiver_space);
+        if (watch->receiver_valid_bits &
+                SPRINGBOARD_COMMCENTER_VALID_RECEIVER_TASK)
+            printf(" task=%08x", watch->receiver_task);
+        if (watch->receiver_valid_bits &
+                SPRINGBOARD_COMMCENTER_VALID_RECEIVER_PROC)
+            printf(" proc=%08x", watch->receiver_proc);
+        if (watch->receiver_valid_bits &
+                SPRINGBOARD_COMMCENTER_VALID_RECEIVER_PID)
+            printf(" pid=%u", watch->receiver_pid);
+        printf("\n");
+        if (watch->receiver_complete)
+            printf("    exact destination-owner/retained"
+                   " SETEXEC-attempt-identity correlation: %s\n",
+                   watch->receiver_matches ? "MATCH" : "MISMATCH");
+        if (watch->receiver_is_launchd)
+            printf("    CAUTION: the destination receive right is held by"
+                   " launchd (PID 1). launchd may pre-create or retain a"
+                   " service port; this does not retarget the retained"
+                   " SETEXEC-attempt identity and does not by itself prove"
+                   " that the attempted image exited or failed.\n");
+        else if (watch->receiver_complete &&
+                 !watch->receiver_matches)
+            printf("    CAUTION: destination ownership differs from the"
+                   " retained SETEXEC-attempt identity. Both identities"
+                   " are retained; the watcher was not retargeted.\n");
+    } else {
+        printf("    initial-send destination owner decode:"
+               " not captured for this generation\n");
+    }
+
+    printf("    lifecycle: signals=%" PRIu64,
+           watch->signal_count);
+    if (watch->signal_count)
+        printf(" first=%u @%" PRIu64 " last=%u @%" PRIu64,
+               watch->first_signal, watch->first_signal_at,
+               watch->last_signal, watch->last_signal_at);
+    printf("; _exit1 entries/exit initiations=%" PRIu64,
+           watch->exit_count);
+    if (watch->exit_count)
+        printf(" raw-status=%08x entry@%" PRIu64,
+               watch->exit_status, watch->exit_at);
+    printf("\n");
+
+    uint64_t switch_retained =
+        watch->switch_total < COMMCENTER_WATCH_SWITCH_CAP
+        ? watch->switch_total : COMMCENTER_WATCH_SWITCH_CAP;
+    printf("    scheduling transitions involving retained"
+           " SETEXEC-attempt identity:"
+           " total=%" PRIu64 " retained-newest=%" PRIu64 "\n",
+           watch->switch_total, switch_retained);
+    uint64_t switch_start = watch->switch_total - switch_retained;
+    for (uint64_t sequence = switch_start;
+         sequence < watch->switch_total; sequence++) {
+        const commcenter_watch_switch_event_t *event =
+            &watch->switches[
+                sequence % COMMCENTER_WATCH_SWITCH_CAP];
+        if (event->sequence != sequence) continue;
+        printf("      #%" PRIu64 " @%" PRIu64 " %s"
+               " from=%08x pc/cpsr=%08x/%08x"
+               " -> to=%08x pc/cpsr=%08x/%08x"
+               " destination-identity-stage=%u readable=%s phase=%s\n",
+               event->sequence, event->at,
+               event->from_commcenter && event->to_commcenter
+                   ? "retained->retained"
+                   : event->from_commcenter
+                     ? "retained switch-out" : "retained switch-in",
+               event->thread_from, event->pc_from,
+               event->cpsr_from, event->thread_to,
+               event->pc_to, event->cpsr_to,
+               event->identity_stage,
+               event->identity_readable ? "yes" : "no",
+               event->at_or_after_initial_send_queue_entry
+                   ? "at/after-initial-send-entry"
+                   : "before-initial-send-entry");
+    }
+
+    printf("    Mach trap 31: total=%" PRIu64
+           " before-send-entry send/receive/header=%" PRIu64 "/%" PRIu64
+           "/%" PRIu64
+           " at/after-send-entry send/receive/header=%" PRIu64 "/%" PRIu64
+           "/%" PRIu64 "\n",
+           watch->mach_total,
+           watch->mach_send[COMMCENTER_WATCH_BEFORE_SEND_QUEUE_ENTRY],
+           watch->mach_receive[COMMCENTER_WATCH_BEFORE_SEND_QUEUE_ENTRY],
+           watch->mach_send_header_readable[
+               COMMCENTER_WATCH_BEFORE_SEND_QUEUE_ENTRY],
+           watch->mach_send[
+               COMMCENTER_WATCH_AT_OR_AFTER_SEND_QUEUE_ENTRY],
+           watch->mach_receive[
+               COMMCENTER_WATCH_AT_OR_AFTER_SEND_QUEUE_ENTRY],
+           watch->mach_send_header_readable[
+               COMMCENTER_WATCH_AT_OR_AFTER_SEND_QUEUE_ENTRY]);
+    uint64_t mach_retained =
+        watch->mach_total < COMMCENTER_WATCH_MACH_CAP
+        ? watch->mach_total : COMMCENTER_WATCH_MACH_CAP;
+    uint64_t mach_start = watch->mach_total - mach_retained;
+    for (uint64_t sequence = mach_start;
+         sequence < watch->mach_total; sequence++) {
+        const commcenter_watch_mach_event_t *event =
+            &watch->mach[sequence % COMMCENTER_WATCH_MACH_CAP];
+        if (event->sequence != sequence) continue;
+        printf("      #%" PRIu64 " @%" PRIu64
+               " user-pc=%08x thread=%08x phase=%s"
+               " args=%08x/%08x/%08x/%08x/%08x/%08x/%08x\n",
+               event->sequence, event->at, event->user_pc,
+               event->thread,
+               event->at_or_after_initial_send_queue_entry
+                   ? "at/after-initial-send-entry"
+                   : "before-initial-send-entry",
+               event->args[0], event->args[1], event->args[2],
+               event->args[3], event->args[4], event->args[5],
+               event->args[6]);
+        if (event->send_header.read_attempted) {
+            if (event->send_header.readable)
+                printf("        send header bits/size/remote/local/id="
+                       "%08x/%u/%08x/%08x/%08x"
+                       " size-within-send=%s\n",
+                       event->send_header.bits,
+                       event->send_header.size,
+                       event->send_header.remote_port,
+                       event->send_header.local_port,
+                       (uint32_t)event->send_header.id,
+                       event->send_header.size_within_send
+                           ? "yes" : "no");
+            else
+                printf("        send header unreadable"
+                       " failure-va/fsr=%08x/%08x\n",
+                       event->send_header.failure_va,
+                       event->send_header.failure_fsr);
+        }
+    }
+
+    printf("    selected kernel Mach/wait milestones:\n");
+    for (unsigned i = 0;
+         i < COMMCENTER_WATCH_MILESTONE_COUNT; i++) {
+        const commcenter_watch_milestone_observation_t *observation =
+            &watch->milestones[i];
+        printf("      %-28s before/at-or-after-send-entry=%" PRIu64
+               "/%" PRIu64 "\n",
+               COMMCENTER_WATCH_MILESTONE_NAMES[i],
+               observation->hits[
+                   COMMCENTER_WATCH_BEFORE_SEND_QUEUE_ENTRY],
+               observation->hits[
+                   COMMCENTER_WATCH_AT_OR_AFTER_SEND_QUEUE_ENTRY]);
+        for (unsigned phase = 0;
+             phase < COMMCENTER_WATCH_PHASE_COUNT; phase++) {
+            if (!observation->hits[phase]) continue;
+            const commcenter_watch_sample_t *first =
+                &observation->first[phase];
+            const commcenter_watch_sample_t *last =
+                &observation->last[phase];
+             printf("        %s first/last @%" PRIu64 "/%" PRIu64
+                    " pc=%08x/%08x thread=%08x/%08x"
+                    " first-r0-r4=%08x/%08x/%08x/%08x/%08x"
+                    " first-sp/lr=%08x/%08x"
+                    " last-r0-r4=%08x/%08x/%08x/%08x/%08x"
+                    " last-sp/lr=%08x/%08x\n",
+                    phase_names[phase], first->at, last->at,
+                    first->pc, last->pc,
+                    first->thread, last->thread,
+                   observation->first_r[phase][0],
+                   observation->first_r[phase][1],
+                    observation->first_r[phase][2],
+                    observation->first_r[phase][3],
+                    observation->first_r[phase][4],
+                    observation->first_sp[phase],
+                    observation->first_lr[phase],
+                    observation->last_r[phase][0],
+                    observation->last_r[phase][1],
+                    observation->last_r[phase][2],
+                    observation->last_r[phase][3],
+                    observation->last_r[phase][4],
+                    observation->last_sp[phase],
+                    observation->last_lr[phase]);
+        }
+    }
+}
+
 static void springboard_ui_checkpoint_report(
         const springboard_exec_trace_t *trace) {
     printf("    exact SETEXEC-thread UIKit/window-server checkpoints:\n");
@@ -8027,13 +10149,21 @@ static void springboard_mach_event_report(
         for (unsigned i = 0;
              i < SPRINGBOARD_MACH_PATH_COUNT; i++) {
             uint32_t bit = UINT32_C(1) << i;
-            if (event->path_bits & bit)
-                printf(" %s@%" PRIu64,
-                       SPRINGBOARD_MACH_PATH_NAMES[i],
-                       event->path_first_at[i]);
+            if (!(event->path_bits & bit)) continue;
+            printf("\n          %-32s @%" PRIu64
+                   " r0-r3=%08x/%08x/%08x/%08x lr=%08x",
+                   SPRINGBOARD_MACH_PATH_NAMES[i],
+                   event->path_first_at[i],
+                   event->path_first_r[i][0],
+                   event->path_first_r[i][1],
+                   event->path_first_r[i][2],
+                   event->path_first_r[i][3],
+                   event->path_first_lr[i]);
         }
         printf("\n");
     }
+    springboard_commcenter_probe_report(
+        &event->commcenter_probe);
     if (event->open) {
         printf("        OPEN/UNRESOLVED; receive buffer was not read\n");
         return;
@@ -11292,6 +13422,11 @@ int main(int argc, char **argv) {
                 "internal error: SpringBoard target trace self-check failed\n");
         return 2;
     }
+    if (!commcenter_watch_selfcheck()) {
+        fprintf(stderr,
+                "internal error: CommCenter watcher self-check failed\n");
+        return 2;
+    }
     if (!display_checkpoint_classifier_selfcheck()) {
         fprintf(stderr,
                 "internal error: display checkpoint classifier"
@@ -12341,6 +14476,7 @@ int main(int argc, char **argv) {
     thread_exception_return_gate_va =
         discover_thread_exception_return_gate();
     discover_springboard_child_probe();
+    discover_commcenter_layout();
 
     /* Snapshot positions are absolute. Reject requests that the selected
      * starting state has already passed or that the selected run limit cannot
@@ -12457,6 +14593,7 @@ int main(int argc, char **argv) {
         springboard_return_note_thread_activity(&mach.cpu, n, last_pc);
         springboard_child_note_instruction(&mach.cpu, n, last_pc);
         springboard_exec_trace_prepare_user(&mach.cpu, n, last_pc);
+        commcenter_watch_note_instruction(&mach.cpu, n, last_pc);
 
         /* How far down the console-init chain did we get? Each milestone is
          * matched at its virtual address and at its pre-MMU physical alias. */
@@ -12465,16 +14602,15 @@ int main(int argc, char **argv) {
             pmu_checkpoint_observe(p, n, &mach.cpu);
             display_checkpoint_observe(p, n, &mach.cpu);
             tvout_chain_checkpoint_observe(p, n, &mach.cpu);
+            springboard_target_note_mach_pc(
+                &G.springboard_exec_trace, &mach.cpu, n, p);
             for (unsigned i = 0; i < NM; i++) {
                 if (!pc_matches_vm_or_pre_mmu_alias(
                         &mach.cpu, p, MILE[i].va, G.mile_pa[i])) continue;
                 if (!G.mile_hits[i]) G.mile_first[i] = n;
                 G.mile_hits[i]++;
-                if (G.springboard_exec_trace
-                        .target_episode_mach_msg)
-                    springboard_target_note_mach_milestone(
-                        &G.springboard_exec_trace, &mach.cpu,
-                        n, MILE[i].name);
+                commcenter_watch_note_milestone(
+                    &mach.cpu, n, MILE[i].name);
                 break;
             }
 
@@ -12715,6 +14851,8 @@ int main(int argc, char **argv) {
             &mach.cpu, n, last_cpsr, last_pc, lr_before, sp_before,
             thread_before, last_mmu_enabled,
             thread_exception_return_gate_va);
+        commcenter_watch_note_transition(
+            &mach.cpu, n, last_pc, last_cpsr, thread_before);
         springboard_return_note_transition(
             &mach.cpu, n, mach.cpu.cycles, mode_before, last_pc,
             thread_exception_return_gate_va, sp_before);
@@ -13015,7 +15153,49 @@ int main(int argc, char **argv) {
            (last_cpsr & ARM_CPSR_T) ? ", Thumb" : "");
     printf("  MMU at pc      : %s\n",
            last_mmu_enabled ? "ENABLED BY THE KERNEL" : "off");
-    if (mach.cpu.cp15.ttbr0) printf("  TTBR0          : 0x%08x\n", mach.cpu.cp15.ttbr0);
+    {
+        diagnostic_thread_identity_t identity;
+        diagnostic_read_thread_identity(
+            &mach.cpu, mach.cpu.cp15.tpidrprw, &identity);
+        /*
+         * last_pc/last_cpsr above describe the instruction that arm_step()
+         * just attempted.  mach.cpu is the state after that step.  Keep the
+         * distinction explicit: a final instruction may itself switch tasks,
+         * so attributing last_pc with the post-step thread would be false.
+         */
+        printf("  post-step pc   : 0x%08x; cpsr 0x%08x\n",
+               mach.cpu.r[15], mach.cpu.cpsr);
+        printf("  post-step cpu  : thread 0x%08x;"
+               " TTBR0 raw/base 0x%08x/0x%08x,"
+               " TTBCR 0x%08x, context 0x%08x\n",
+               mach.cpu.cp15.tpidrprw,
+               mach.cpu.cp15.ttbr0,
+               diagnostic_ttbr0_base(&mach.cpu),
+               mach.cpu.cp15.ttbcr, mach.cpu.cp15.context_id);
+        if (identity.task_valid) {
+            printf("  post-step owner: task 0x%08x, proc 0x%08x,"
+                   " pid %u",
+                   identity.task, identity.task_proc,
+                   identity.task_pid);
+            if (identity.effective_valid)
+                printf("; effective proc 0x%08x, pid %u%s",
+                       identity.effective_proc,
+                       identity.effective_pid,
+                       identity.effective_vfork
+                           ? " (vfork override)" : "");
+            else
+                printf("; effective identity unavailable"
+                       " (va 0x%08x, fsr 0x%08x)",
+                       identity.effective_failure_va,
+                       identity.effective_failure_fsr);
+            putchar('\n');
+        } else {
+            printf("  post-step owner: unavailable at identity stage %u"
+                   " (va 0x%08x, fsr 0x%08x)\n",
+                   identity.task_stage, identity.failure_va,
+                   identity.failure_fsr);
+        }
+    }
     printf("  DFSR/DFAR      : 0x%08x / 0x%08x\n", mach.cpu.cp15.dfsr, mach.cpu.cp15.dfar);
     printf("  IFSR/IFAR      : 0x%08x / 0x%08x\n", mach.cpu.cp15.ifsr, mach.cpu.cp15.ifar);
     printf("  unmapped reads : %llu\n", (unsigned long long)mach.unmapped_reads);
@@ -13190,6 +15370,7 @@ int main(int argc, char **argv) {
     mode_report(win_lo, win_hi);
     syscall_report(virt_base, phys_base);
     lifecycle_report();
+    commcenter_watch_report();
     springboard_exec_trace_report();
 
     printf("\n=== WHERE THE TIME WENT (sampled every 1024 instructions%s) ===\n",

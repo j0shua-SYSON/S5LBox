@@ -24,11 +24,11 @@ proof that no private or unindexed implementation exists.
 | | Milestone | Observable completion criterion | State |
 |---|---|---|---|
 | **M0** | Pipeline online | Core/JIT/test workflows and iOS packaging are configured; the app has historically run a core self-test on the phone | ✅ done; workflow logs are the current CI verdict |
-| **M1** | ARMv6 interpreter | ARM + Thumb + VFPv2 on the reached path; unimplemented encodings trap instead of guessing | 🔵 run20 reopened reached-path validation: `590d224` misclassifies valid VFP11 `FMDHR` as NEON. The current D-register word-transfer correction passes the full local Release suite and focused strict tests, but still needs hosted exact-commit and firmware-replay validation |
+| **M1** | ARMv6 interpreter | ARM + Thumb + VFPv2 on the reached path; unimplemented encodings trap instead of guessing | ✅ run21 cleared the reopened reached-path gate: exact correction commit `debec04` passed hosted core/iOS CI and crossed the run20 libm VFP stop to a clean 2.5 B cap. This is reached-path validation, not architectural completeness |
 | **M2** | SoC bring-up | A bare-metal payload prints over the emulated UART; a timer IRQ is taken and returned from | ✅ done and covered by host tests |
 | **M3** | Firmware containers + LLB execution | Real IMG3s parse and decrypt; an extracted real Apple LLB payload executes; the kernelcache is extracted | ✅ done; SecureROM/iBoot execution remains future full-chain work |
 | **M4** | XNU boots and logs | The kernel reaches `bsd_init`, prints, and Apple's own kexts match and start | ✅ **done** — plus the real root filesystem mounts |
-| **M5** | Userspace → SpringBoard | `launchd` runs; the home screen renders and takes a tap | 🔵 **in progress.** Run20 validates the `590d224` TV-out correction with 4 frames, IRQ 30 filter/action, gate wake, exact close return `r0=0`, 320x480 `startWindowServer` return, and entry to `applicationDidFinishLaunching:`. SpringBoard is **not rendered**: `UIController` was unreached and the seed-only framebuffer had 0 changed pixels. The run then stopped on the pending VFP11 decoder correction. No touch path exists yet. |
+| **M5** | Userspace → SpringBoard | `launchd` runs; the home screen renders and takes a tap | 🔵 **in progress.** Run21 firmware-validates the VFP correction and reaches a clean 2.5 B cap. SpringBoard returns false from `isTethered`, continues into `SBTelephonyManager -init`, successfully looks up `com.apple.commcenter` as port `0x4f07`, and blocks in the initial CTServerConnection handshake before `mach_msg` returns. Reply, queue, and baseband causality remain unknown. `UIController` is unreached and the seed-only framebuffer has 0 changed pixels. |
 | **D** | Dynarec (parallel) | SpringBoard at interactive frame rates on the phone | 🔵 emitter + ARM/Thumb translator and host execution tests exist (off by default); no code cache or dispatcher calls them |
 | **N** | Guest networking (parallel) | The guest resolves a name and fetches a URL | ⚪ designed, not built |
 | **A** | Guest audio (first-device track) | Guest PCM reaches the host speaker without blocking the CPU thread | ⚪ priority, not designed or built |
@@ -85,8 +85,11 @@ deliberately.
 
 Run20 reopened this milestone at `0xEE274B10`: valid VFP11
 `FMDHR d7, r4` / `VMOV.32 d7[1], r4` was incorrectly classified as NEON. The
-current correction is locally green, but reached-path completion cannot be
-restored until it is hosted and replayed at the exact firmware site.
+correction at exact commit `debec04` passed the local Release and focused
+strict gates plus hosted core/iOS workflows. Run21 replayed the exact firmware
+site and reached its clean 2.5 B cap, 562,020,182 instructions beyond the old
+stop. That reached-path gate is restored. Other documented or as-yet-unreached
+forms can still trap deliberately.
 
 **The rule that makes this milestone worth anything:** an encoding we have not
 implemented returns `ARM_UNDEFINED` and stops the machine. It never falls
@@ -536,11 +539,27 @@ filter/action, the gate woke, and PID 20 returned from the exact
 `startWindowServer` at 1,919,831,289 with a 320x480 display, and SpringBoard
 entered `applicationDidFinishLaunching:` at 1,923,358,329.
 
-That is not criterion 3. `UIController` was unreached and the active capture
-remained the seed-only 8x16 block with 0 changed pixels. Run20 exited 9 at
-1,937,979,818 on valid VFP11 `FMDHR` / `VMOV.32 d7[1], r4` in PID 20's libm
-`_fmod+0x1a8`, which the committed decoder had misclassified as NEON. A current
-checkpoint chain
+Run21 then replayed exact decoder-fix commit `debec04`, cleared that libm
+`_fmod+0x1a8` stop, and exited 0 at its configured 2.5 B cap,
+562,020,182 instructions beyond run20. SpringBoard again reached
+`applicationDidFinishLaunching:`. `-[SBTetherController isTethered]` returned
+false at 1,924,647,850, and SpringBoard continued through debugging/demo
+preferences, lock-button, and platform-controller initialization before
+entering `+[SBTelephonyManager sharedTelephonyManager]` at 1,965,837,070 and
+`-init`. PID 20's last exact user instruction was 1,966,242,080, then its
+thread switched out at 1,966,246,193 in a shared-cache `mach_msg` before
+returning to the caller. Post-run resolution proves that
+`_CTTelephonyCenterGetDefault` creates a CTServerConnection, whose successful
+bootstrap lookup of literal `com.apple.commcenter` returns port name
+**0x4f07**. Its initial generated handshake enters at **0x30a1177c** and calls
+`mach_msg` at **0x30a117e0** with request ID **0x0054b557** and send/receive
+sizes **0x834**/**0x30**, then blocks before **0x30a117e4**. This names the
+service and wait boundary, but not a reply, deadlock, full queue, or baseband
+cause.
+
+That is still not criterion 3. `UIController` was unreached, live scanout
+recorded zero mutations, and the active capture remained the seed-only 8x16
+block with 0 changed pixels. A current checkpoint chain
 restored at 2.2 B retired instructions,
 crossed the former
 `SMULBB` stop and wrote a 2.4 B checkpoint. The 2.4 B → 2.8 B interval wrote a
@@ -914,14 +933,78 @@ Run20 exited 9 at 1,937,979,818 on `0xEE274B10`, resolved in PID 20 to libm
 `_fmod+0x1a8`. The instruction is valid VFP11 `FMDHR d7, r4`, also written
 `VMOV.32 d7[1], r4`, rather than NEON. The decoder correction passes the full
 local Release suite 23/23 and targeted VFP/ARM/JIT binaries at 452/0, 810/0,
-and 347/0 under focused strict builds, but it is not yet hosted or
-firmware-retested. The immediate gates are therefore:
+and 347/0 under focused strict builds. At the end of run20, the immediate gates
+were:
 
 1. pass hosted core/iOS workflows for the exact correction commit;
 2. replay firmware through `0xEE274B10` and record the next fail-closed
    boundary;
 3. reach `UIController` and capture recognizable changed pixels;
 4. add the host touch path and demonstrate an interaction.
+
+### Run21 cleared the VFP stop but did not render SpringBoard
+
+Run21 used exact source commit
+`debec04ff9b0faa469d5ad2ee7d75d1bf3b53b1a` and exited **0** at the configured
+**2,500,000,000-instruction cap**. It crossed run20's failure coordinate by
+**562,020,182 instructions**, firmware-validating the VFP11 high-word transfer
+fix on the exact libm path.
+
+SpringBoard again entered `applicationDidFinishLaunching:` at
+1,923,358,329. `-[SBTetherController isTethered]` returned from `0x967ba` to
+`0xa72c` at **1,924,647,850**, then took the false branch
+`0xa730 -> 0xa74c`. SpringBoard continued through
+`loadDebuggingAndDemoPrefs`, `_initLockButtonBearTrap`, and
+`SBPlatformController`. It entered
+`+[SBTelephonyManager sharedTelephonyManager]` at **1,965,837,070** and
+`-init` at `0x28240`. PID 20's last exact-attributed user instruction was
+**1,966,242,080**, and its thread switched out at **1,966,246,193** within a
+shared-cache `mach_msg` before returning to `0xa77d`.
+
+Post-run shared-cache resolution proves that
+`_CTTelephonyCenterGetDefault` creates a CTServerConnection. The bootstrap
+lookup for literal `com.apple.commcenter` succeeds and returns port name
+**0x4f07**. The initial generated handshake enters at **0x30a1177c** and calls
+`mach_msg` at **0x30a117e0** with request ID **0x0054b557**, send size
+**0x834**, and receive size **0x30**; SpringBoard blocks before
+**0x30a117e4**. The generated stub leaves `msgh_size` and `reserved` stale, so
+the observed header size **6** is stock stack state, not emulator corruption.
+The service identity is now exact, while reply, deadlock, queue-full status,
+and baseband causality remain unresolved.
+
+Criterion 3 remains open. `UIController` had **0 hits**, live scanout recorded
+**0 mutations**, and the PPM remained the seed with SHA-256
+`CBAD1C110E67CAD553A2B4EEBBF46E7BF09255389851902B24816249294AF2AB`
+and **0 changed pixels**. The source hashes remained unchanged, external-md
+failures were **0**, guest free memory bottomed at **50.63 MiB**, and the
+retained run directory occupies **447.27 MiB on F:**.
+
+Exact-commit hosted
+[core run 30095081111](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30095081111)
+and
+[unsigned iOS run 30095081184](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30095081184)
+passed for `debec04`. The next test-only commit `0670ab8` passed
+[core run 30096115501](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30096115501)
+and
+[unsigned iOS run 30096115527](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30096115527),
+with VFP **469/0**. Latest hosted test-only `657e8d8` expands VFP helper coverage to
+**488/0 locally** and passed hosted
+[core run 30097023293](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30097023293)
+and
+[unsigned iOS run 30097023356](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30097023356).
+Run21 is evidence for `debec04`, not those later test-only trees.
+
+The current immediate gates are:
+
+1. trace the initial CommCenter handshake through `ipc_mqueue_send`, including
+   the receiver and queue state;
+2. trace CommCenter PID 24's wait state and test, rather than assume, its
+   correlation with the observed baseband/SPI symptoms;
+3. implement the minimum faithful graceful no-modem behavior required for boot
+   if that correlation is causal, while leaving full telephony/SIM/cellular
+   emulation for later;
+4. reach `UIController` and capture recognizable changed pixels;
+5. add the host touch path and demonstrate an interaction.
 
 For chronology, this is the much earlier pre-VFP measurement from
 `bootkernel`'s milestone probes:
@@ -989,12 +1072,13 @@ path.
 
 ### The M5 work item list, as it now stands
 
-- **VFP reached-path completion.** The old `VLDMIA` restore wall remains cleared,
-  but run20 exposed a different valid VFP11 form: `FMDHR` /
-  `VMOV.32 d7[1], r4`. The D-register word-transfer correction passes the full
-  local Release suite 23/23 and targeted VFP/ARM/JIT binaries at 452/0, 810/0,
-  and 347/0. Hosted and firmware-replay validation remain, so this item is open
-  again.
+- ~~**VFP reached-path completion.**~~ **DONE for the run20 stop.** The old
+  `VLDMIA` restore wall remains cleared, and exact correction commit `debec04`
+  handles the later `FMDHR` / `VMOV.32 d7[1], r4` form. Its local Release suite
+  passed 23/23, targeted VFP/ARM/JIT binaries passed 452/0, 810/0, and 347/0,
+  hosted core/iOS CI passed, and run21 replayed through the exact firmware site
+  to a clean 2.5 B cap. This closes the named reached-path item, not every VFP
+  encoding.
 - ~~**ARM1176 idle handling.**~~ **DONE and covered by CPU/machine tests.** XNU's
   CP15 WFI advances timer/CLCD state to the next enabled VIC wake edge without
   counting made-up CPU instructions; a current real-guest run exercised it.
@@ -1021,8 +1105,16 @@ path.
   does not yet carry a general userspace image/symbol map. Run20 dynamically
   correlates the TV-out IRQ/filter/action to the waiting close, observes the
   exact PID 20 user return, and reaches `applicationDidFinishLaunching:`. It
-  also resolves the next stop to libm `_fmod+0x1a8`. The next named low-image
-  checkpoint, the SpringBoard `UIController` call, remains unreached.
+  also resolves the next stop to libm `_fmod+0x1a8`; run21 clears that stop.
+  It proves `isTethered` returned false, follows the next initialization
+  methods, and enters `SBTelephonyManager -init`. PID 20 then last executes
+  exact-attributed user code at 1,966,242,080 and switches out at 1,966,246,193
+  in the initial CTServerConnection handshake before returning to the telephony
+  caller. The bootstrap lookup for `com.apple.commcenter` succeeds with port
+  `0x4f07`; request `0x0054b557` calls `mach_msg` at `0x30a117e0` and does not
+  reach `0x30a117e4`. A matching reply, queue state, and baseband causality
+  remain unknown. The next named low-image checkpoint, the SpringBoard
+  `UIController` call, remains unreached.
 - **The display path** — the CLCD model now separates `VIDTCON0..3` timing from
   the `0x0d8..0x0ec` window configuration, seeds an iBoot-compatible N82
   handoff, and gates frame publication and WFI edges on genuinely live scanout.
@@ -1035,9 +1127,11 @@ path.
   TV-out swap close. Run19 exposed the over-strict timing predicate; run20
   validates exact correction commit `590d224` with 4 frames, IRQ 30
   filter/action, close wake/return, a 320x480 `startWindowServer` return, and
-  entry to `applicationDidFinishLaunching:`. The unchanged seed frame and 0
-  changed pixels keep M5 open. The app still needs the shared real-guest
-  session; Metal is optional and not implemented.
+  entry to `applicationDidFinishLaunching:`. Run21 crosses the later VFP stop
+  to a clean 2.5 B cap but still records zero `UIController` hits, zero
+  live-scanout mutations, and the unchanged seed with 0 changed pixels. M5
+  therefore remains open. The app still needs the shared real-guest session;
+  Metal is optional and not implemented.
 - **Multitouch**, mapped from the host touchscreen to the guest's controller.
   `AppleMultitouchZ2SPI` already starts and reports "using DMA for bootloading",
   which proves that the recorded boot reached that request. Device, DMA and
@@ -1328,9 +1422,12 @@ time.
 
 ## Deliberately out of scope
 
-- **Telephony, baseband, SIM.** We emulate the application processor; the modem
-  is stubbed. `AppleBaseband: Could not find mux function` in the boot log is
-  us, on purpose.
+- **Full telephony, baseband, SIM, and cellular service.** We emulate the
+  application processor; a complete modem remains out of scope. M5 now includes
+  only the minimum faithful **graceful no-modem** behavior required for the
+  unmodified SpringBoard/CommCenter startup path to continue. Whether the
+  current wait is actually caused by the stubbed baseband remains a run22
+  question, not a conclusion.
 - **Wi-Fi through the real Marvell 88W8686** and GPU acceleration. "Route A"
   for networking — emulating the real NIC so Apple's driver binds unmodified —
   has documented SDIO/controller reconnaissance in `networking.md`, but the

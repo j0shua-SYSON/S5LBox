@@ -88,20 +88,49 @@
 > **320x480**, stride-1280 primary display. SpringBoard entered
 > `applicationDidFinishLaunching:` at **1,923,358,329**.
 >
-> **SpringBoard is not rendered.** The `UIController` call was never reached,
-> the 320x480 PPM remained byte-identical to the seed-only frame, and the
-> live-scanout observer recorded **0 changed pixels**. Run20 stopped with exit
-> code **9** at **1,937,979,818** instructions on `0xEE274B10` in PID 20's
-> libm `_fmod+0x1a8`. That word is valid VFP11 `FMDHR` (modern spelling
-> `VMOV.32 d7[1], r4`), not NEON as the committed decoder reported.
+> Run21 replayed the exact failure site on decoder-fix commit
+> `debec04ff9b0faa469d5ad2ee7d75d1bf3b53b1a`. It executed through libm
+> `_fmod+0x1a8` and exited **0** at the configured
+> **2,500,000,000-instruction cap**, **562,020,182 instructions beyond** the
+> run20 stop. This firmware-validates the VFP11 `FMDHR` /
+> `VMOV.32 d7[1], r4` correction. SpringBoard again entered
+> `applicationDidFinishLaunching:` at **1,923,358,329**. Its
+> `SBTetherController isTethered` call returned false at **1,924,647,850**,
+> followed by debugging/demo preferences, lock-button, and platform-controller
+> initialization. SpringBoard entered
+> `+[SBTelephonyManager sharedTelephonyManager]` at **1,965,837,070** and its
+> `-init`, then PID 20's last exact-attributed user instruction was
+> **1,966,242,080**. The thread switched out at **1,966,246,193** inside a
+> shared-cache `mach_msg` before returning to the caller. Post-run resolution
+> identifies the exact path: `_CTTelephonyCenterGetDefault` creates a
+> CTServerConnection, whose bootstrap lookup for the literal
+> `com.apple.commcenter` succeeds and returns port name **0x4f07**. Its initial
+> generated handshake enters **0x30a1177c** and calls `mach_msg` at
+> **0x30a117e0** with request ID **0x0054b557**, send size **0x834**, and
+> receive size **0x30**; PID 20 blocks before **0x30a117e4**. The generated stub
+> leaves `msgh_size` and `reserved` stale, so the observed header size **6** is
+> stock stack state, not emulator corruption. No reply, deadlock, queue-full
+> condition, or baseband causality is proved yet.
 >
-> The original firmware hashes remained unchanged, the external-md bridge
-> reported zero failures, guest free memory bottomed at **51.76 MiB**, and the
-> retained run directory occupies **447.18 MiB on F:**. The current decoder
-> correction passes the full local Release suite **23/23**, strict focused
-> builds, and targeted VFP/ARM/JIT tests, but it is not yet hosted or
-> firmware-retested. The last exact-commit hosted result is still `590d224`;
-> neither a rendered home screen nor boot success is claimed.
+> **SpringBoard is still not rendered.** Run21 recorded **0** `UIController`
+> hits and **0** live-scanout mutations. Its PPM remained byte-identical to the
+> seed, SHA-256
+> `CBAD1C110E67CAD553A2B4EEBBF46E7BF09255389851902B24816249294AF2AB`,
+> with **0 changed pixels**. The original firmware hashes remained unchanged,
+> the external-md bridge reported zero failures, guest free memory bottomed at
+> **50.63 MiB**, and the retained run directory occupies **447.27 MiB on F:**.
+> Exact-commit hosted
+> [core run 30095081111](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30095081111)
+> and
+> [unsigned iOS run 30095081184](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30095081184)
+> passed for `debec04`. A later test-only revision `0670ab8` also passed hosted
+> core/iOS runs. The latest hosted test-only baseline, `657e8d8`, passes VFP
+> **488/0 locally** plus hosted
+> [core run 30097023293](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30097023293)
+> and
+> [unsigned iOS run 30097023356](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30097023356).
+> None of these
+> results is a rendered-home-screen or completed-boot claim.
 >
 > The installable iOS app
 > does **not** run it yet: it runs a small
@@ -136,8 +165,8 @@ core portable across hosts. Today the evidence is split deliberately:
 | Capability | CLI / portable core | Installable iOS app |
 |---|---|---|
 | ARM1176 and S5L8900 execution | Real-kernel path recorded | Synthetic demo guest |
-| Apple kernel and root filesystem | Host-backed cold path reached `launchd`, mounted `/dev/md0`, retained `mDNSResponder`, and run20 advanced PID 20 through successful SETEXEC, `UIApplicationMain`, and entry to `applicationDidFinishLaunching:` before the VFP decoder stop | Not integrated |
-| Display | Run20 validated the TV-out IRQ/filter/action/wake/close chain and a 320x480 `startWindowServer` return, but `UIController` was unreached and the framebuffer remained seed-only with 0 changed pixels | CoreGraphics demo bridge |
+| Apple kernel and root filesystem | Host-backed cold path reached `launchd`, mounted `/dev/md0`, retained `mDNSResponder`, and run21 advanced PID 20 through successful SETEXEC, `UIApplicationMain`, entry to `applicationDidFinishLaunching:`, and the former libm VFP stop to a clean 2.5 B cap | Not integrated |
+| Display | Run21 retained run20's validated TV-out IRQ/filter/action/wake/close chain and 320x480 `startWindowServer` return, but `UIController` was unreached and the framebuffer remained seed-only with 0 changed pixels | CoreGraphics demo bridge |
 | Touch, audio, guest networking | Not implemented | Not implemented |
 | Dynamic recompiler | Translator tested off-device; inactive in boot | Excluded from target |
 
@@ -149,11 +178,16 @@ can see.** No months in the dark.
 | | Milestone | State |
 |---|---|---|
 | **M0** | Toolchain online: core builds + tests in CI, iOS `.ipa` builds on a macOS runner, and the app has historically run its ARM self-test on-device | ✅ **done** — current CI proves build/package, not device launch |
-| **M1** | ARMv6 (ARM1176) interpreter; unsupported encodings trap | 🔵 **run20 validation reopened.** The `590d224` decoder misclassified valid VFP11 `FMDHR` as NEON. The current correction for VFPv2 D-register word transfers passes the full local Release suite and focused strict tests, but still needs exact-commit hosted and firmware-replay validation |
+| **M1** | ARMv6 (ARM1176) interpreter; unsupported encodings trap | ✅ **reached-path stop cleared.** Run21 firmware-validated the VFP11 D-register word-transfer correction at exact commit `debec04`, reaching the clean 2.5 B cap 562,020,182 instructions beyond run20's `_fmod` stop. This remains reached-path coverage, not a claim of complete ARM architecture support |
 | **M2** | S5L8900 bring-up: bare-metal payload prints over emulated UART | ✅ **done** — MMU, bus, UART, VIC, timer, power, CLCD, two S5L I2C controllers, the PCF50635 PMU endpoint, and NOR are integrated; standalone raw-NAND/storage primitives are host-tested, with no NAND controller/VFL/FTL |
 | **M3** | Firmware containers + LLB execution | ✅ **done** — parses/decrypts real IMG3 firmware, runs a real LLB payload and extracts the kernel; SecureROM and iBoot execution remain future full-chain work |
 | **M4** | The real **XNU kernel** boots and logs | ✅ **done** — a broad set of prelinked drivers matched or started in a recorded CLI run; the real 413 MiB root filesystem mounted, and that run did not reach `_panic` |
-| **M5** | `launchd` → **SpringBoard** renders — tap it 🏆 | 🔵 **in progress.** Run20 proves the `590d224` TV-out correction in real firmware: 4 timing frames, IRQ 30 filter/action, gate wake, exact close return `r0=0`, 320x480 `startWindowServer` return, and entry to `applicationDidFinishLaunching:`. It does **not** prove rendering: `UIController` was unreached and the framebuffer stayed seed-only with 0 changed pixels. The run then stopped on the pending VFP11 decoder correction. The iOS app is still a demo host. |
+| **M5** | `launchd` → **SpringBoard** renders — tap it 🏆 | 🔵 **in progress.** Run21 cleared run20's VFP stop and reached a clean 2.5 B cap. SpringBoard returned false from `isTethered`, continued into `SBTelephonyManager -init`, successfully looked up `com.apple.commcenter` as port `0x4f07`, and then blocked in the initial CTServerConnection handshake before its `mach_msg` return. Reply, queue, and baseband causality remain unknown. `UIController` was unreached and the framebuffer stayed seed-only with 0 changed pixels, so SpringBoard is **not rendered**. |
+
+Because the stock UI startup synchronously reaches this CoreTelephony path, M5
+now includes the minimum faithful **graceful no-modem** behavior required to
+continue boot. Full telephony, SIM, and cellular emulation remain later work and
+are not implied by the M5 boot criterion.
 
 At `3963d22`, hosted
 [`core-tests` run 30073161392](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30073161392)
@@ -199,14 +233,25 @@ both passed for that correction. Those workflows validate its public
 build/test/package surface, not private-firmware execution. Run20 validates its
 private-firmware TV-out behavior, but still produced no rendered pixels.
 
-The post-run20 VFP11 decoder correction passes the full local Release suite
-**23/23**, plus targeted `test_vfp` **452/0**, `test_arm` **810/0**, and
-`test_jit` **347/0** under focused strict builds. The VFP suite exhausts both
-lanes and directions across `d0..d15`, and verifies that denied user `FPEXC`
-access enters the guest Undefined vector instead of stopping the emulator. The
-correction has not yet run through hosted CI or replayed the firmware stop. The
-exact chronology, evidence boundaries, and remaining promotion gates are in
-[`docs/QUALITY.md`](docs/QUALITY.md).
+The post-run20 VFP11 decoder correction at exact commit `debec04` passes the
+full local Release suite **23/23**, targeted `test_vfp` **452/0**, `test_arm`
+**810/0**, and `test_jit` **347/0**, and hosted
+[core run 30095081111](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30095081111)
+plus
+[unsigned iOS run 30095081184](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30095081184).
+Run21 firmware-validated the exact correction through a clean 2.5 B cap. The
+test-only `0670ab8` revision then passed
+[core run 30096115501](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30096115501)
+and
+[unsigned iOS run 30096115527](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30096115527),
+with VFP **469/0**. The latest hosted test-only helper baseline at `657e8d8` is VFP
+**488/0 locally** and passed hosted
+[core run 30097023293](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30097023293)
+plus
+[unsigned iOS run 30097023356](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30097023356).
+These commit boundaries matter: run21 belongs to `debec04`, not either later
+test-only commit. The exact chronology, evidence boundaries, and remaining
+promotion gates are in [`docs/QUALITY.md`](docs/QUALITY.md).
 
 ### What it actually does today
 
@@ -592,7 +637,64 @@ The run retained the original firmware hashes, reported zero external-md
 failures and a 51.76 MiB guest-free low-water mark, and occupies 447.18 MiB in
 `work/run20-tvout-timing` on F:. The decoder correction passes the local
 Release suite 23/23 and targeted VFP/ARM/JIT binaries at 452/0, 810/0, and
-347/0. It has not yet had hosted or firmware-replay validation.
+347/0.
+
+### Run21 cleared the libm VFP stop, but still did not render SpringBoard
+
+Run21 replayed the same cold-boot configuration at exact decoder-fix commit
+`debec04ff9b0faa469d5ad2ee7d75d1bf3b53b1a`. It exited **0** at the configured
+**2,500,000,000-instruction cap**, crossing run20's stop by
+**562,020,182 instructions**. This is the firmware validation for the
+`FMDHR` / `VMOV.32 d7[1], r4` correction; it is not attached to either later
+test-only commit.
+
+SpringBoard again entered `applicationDidFinishLaunching:` at
+1,923,358,329. `-[SBTetherController isTethered]` returned from `0x967ba` to
+`0xa72c` at **1,924,647,850** and took the false branch
+`0xa730 -> 0xa74c`. SpringBoard then continued through
+`loadDebuggingAndDemoPrefs`, `_initLockButtonBearTrap`, and
+`SBPlatformController` before entering
+`+[SBTelephonyManager sharedTelephonyManager]` at **1,965,837,070** and
+`-init` at `0x28240`. PID 20 last retired an exact-attributed user instruction
+at **1,966,242,080**, then switched out at **1,966,246,193** in a shared-cache
+`mach_msg` before returning to `0xa77d`.
+
+Post-run shared-cache resolution identifies the call chain precisely.
+`_CTTelephonyCenterGetDefault` creates a CTServerConnection. Its bootstrap
+lookup for the literal `com.apple.commcenter` succeeds and returns port name
+**0x4f07**. The initial generated handshake enters at **0x30a1177c** and calls
+`mach_msg` at **0x30a117e0** with request ID **0x0054b557**, send size
+**0x834**, and receive size **0x30**. SpringBoard blocks before the return at
+**0x30a117e4**. The generated stock stub does not initialize `msgh_size` or
+`reserved` before that call; the observed header size **6** is therefore stale
+stock stack state, not evidence that the emulator corrupted the message.
+
+This proves the service identity and initial handshake boundary. It does
+**not** yet prove a reply, a deadlock, a full send queue, or that the absent
+baseband caused the wait. The next trace must identify the
+`ipc_mqueue_send` receiver and queue state, then correlate CommCenter PID 24's
+wait state with the recorded baseband/SPI symptoms.
+
+The visual gate stayed closed: `UIController` had zero hits, live scanout had
+zero mutations, and the PPM retained the exact seed SHA-256
+`CBAD1C110E67CAD553A2B4EEBBF46E7BF09255389851902B24816249294AF2AB`
+with **0 changed pixels**. The source firmware hashes were unchanged,
+external-md failures were 0, guest free memory bottomed at **50.63 MiB**, and
+the retained evidence directory occupies **447.27 MiB on F:**.
+
+Exact-commit hosted
+[core run 30095081111](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30095081111)
+and
+[unsigned iOS run 30095081184](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30095081184)
+passed for `debec04`. Test-only `0670ab8` subsequently passed hosted
+[core run 30096115501](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30096115501)
+and
+[unsigned iOS run 30096115527](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30096115527),
+with VFP **469/0**. The latest hosted test-only `657e8d8` helper expansion reports
+VFP **488/0 locally** and passed hosted
+[core run 30097023293](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30097023293)
+plus
+[unsigned iOS run 30097023356](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30097023356).
 
 Getting this far needed one more emulator-shaped bug worth naming, because it
 looked exactly like a corrupt disk. launchd's first text page was failing its
