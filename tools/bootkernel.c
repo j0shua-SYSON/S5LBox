@@ -2235,7 +2235,7 @@ static unsigned    NM;
 #define DISPLAY_ENTRY_EDGE_CAP 1024u
 #define DISPLAY_RECENT_EDGE_CAP 128u
 #define TVOUT_MMIO_PAGE_COUNT 3u
-#define TVOUT_MMIO_REGISTER_COUNT 7u
+#define TVOUT_MMIO_REGISTER_COUNT 8u
 #define TVOUT_OBJECT_FIELD_COUNT 14u
 #define SPRINGBOARD_RETURN_CAP 32u
 #define SPRINGBOARD_PHASE_COUNT 6u
@@ -3197,13 +3197,15 @@ typedef struct {
 } tvout_mmio_register_t;
 
 /*
- * The IRQ-30 filter reads these exact words.  The base words for all three
- * device-tree ranges are also retained so a report distinguishes "never
- * touched" from an all-zero, currently unmodelled register page.
+ * Retain the IRQ-30 filter words, all three device-tree range bases, and the
+ * control block's independently observed +0x200 initialization strobe.  This
+ * distinguishes "never touched" from an all-zero register page without making
+ * diagnostic MMIO reads.
  */
 static const tvout_mmio_register_t
 TVOUT_MMIO_REGISTERS[TVOUT_MMIO_REGISTER_COUNT] = {
-    { "clk+000",        UINT32_C(0x39100000) },
+    { "ctrl+000",       UINT32_C(0x39100000) },
+    { "ctrl+200-strobe", UINT32_C(0x39100200) },
     { "out+000",        UINT32_C(0x39200000) },
     { "out+004",        UINT32_C(0x39200004) },
     { "enc+000",        UINT32_C(0x39300000) },
@@ -7427,12 +7429,13 @@ static inline unsigned tvout_mmio_page_index(uint32_t addr) {
 static inline unsigned tvout_mmio_register_index(uint32_t addr) {
     switch (addr) {
         case UINT32_C(0x39100000): return 0u;
-        case UINT32_C(0x39200000): return 1u;
-        case UINT32_C(0x39200004): return 2u;
-        case UINT32_C(0x39300000): return 3u;
-        case UINT32_C(0x39300040): return 4u;
-        case UINT32_C(0x39300280): return 5u;
-        case UINT32_C(0x39300284): return 6u;
+        case UINT32_C(0x39100200): return 1u;
+        case UINT32_C(0x39200000): return 2u;
+        case UINT32_C(0x39200004): return 3u;
+        case UINT32_C(0x39300000): return 4u;
+        case UINT32_C(0x39300040): return 5u;
+        case UINT32_C(0x39300280): return 6u;
+        case UINT32_C(0x39300284): return 7u;
         default: break;
     }
     return TVOUT_MMIO_REGISTER_COUNT;

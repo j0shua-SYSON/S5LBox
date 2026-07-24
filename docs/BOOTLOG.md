@@ -13,25 +13,26 @@ device behind each stage.
 > (`0xe6cf3073`) in user mode. The complete paired-extend implementation then
 > replayed through that stop, wrote a 2.97 B checkpoint and reached a clean
 > 2.98 B cap. Free pages dipped to 97 and ended at 214 against a target of 250.
-> The strongest current SpringBoard evidence is run18: a fresh display-enabled
-> 128 MiB cold boot of `9bab56c` reached its 2.5 B cap with `OK` and empty
-> stderr. It repeated exact SETEXEC success and attributed 36,379,165 user
-> instructions to the revalidated SpringBoard process without an exact-process
-> `_exit1`. The stock image entered at `0x34e8`, called `UIApplicationMain`, and
-> returned `YES` from `rendersLocally`. UIKit/QuartzCore completed the primary
-> H1CLCD construction before opening the optional AppleH1TVOut display.
+> The strongest current SpringBoard evidence is run19: a fresh display-enabled
+> 128 MiB cold boot of `afa650e` reached its 2.5 B cap with `OK`, exit code 0,
+> and empty stderr. It repeated exact SETEXEC success; the stock image called
+> `UIApplicationMain`, returned `YES` from `rendersLocally`, and completed the
+> primary H1CLCD server before opening the optional AppleH1TVOut display.
 >
 > This is a partial display handoff, not a rendered home screen.
-> `applicationDidFinishLaunching:` and the tether call were not reached. The
+> `applicationDidFinishLaunching:` was not reached. The
 > TV-out IOMFB finalizer's exact `io_service_close` entered the swap wait and
 > switched only the SpringBoard thread out; the rest of the guest continued to
-> 2.5 B. Static control flow proves that close needs TV-out VSYNC IRQ 30, while
-> run18's `0x39100000`-`0x39300000` register pages were unmapped and no device
-> asserted that VIC line. Surface ID zero is expected for this optional TV-out
-> path, not a primary-CLCD failure. No live-scanout mutation occurred and the
-> frame remained the same seed-only 8x16 block. The post-run18 TV-out model is
-> implemented and focused-unit-tested, but must still be validated by the real
-> filter/action, wake and close return. The installable app still runs a
+> 2.5 B. Run19 mapped all three TV-out pages but exposed an over-strict model
+> predicate: the shipped completion path was control/mixer/SDO `0/5/1`, while
+> the model required all three bit-0 states. It therefore produced zero TV-out
+> frames, zero IRQ 30/filter/action hits, and no close return. Control's
+> independent stopped/ready semantics remain valid; mixer+SDO are the timing
+> eligibility pair. No live-scanout mutation occurred and the frame remained
+> the same seed-only 8x16 block despite 662 primary-CLCD frames. A surgical
+> predicate correction now passes the local full suite 23/23, SoC 5,504/0, and
+> snapshot 469/0; hosted and fresh real-firmware validation remain. The
+> installable app still runs a
 > synthetic guest through CoreGraphics and has no real-boot session, touch,
 > audio or guest networking.
 
@@ -1464,21 +1465,20 @@ pages to the unmapped path:
 VIC0 line 30 enabled, raw/pending never asserted
 ```
 
-The driver had programmed the run gates and unmasked SDO VSYNC, but no model
-could set the SDO pending bit or assert IRQ 30. Missing TV-out
-register/VSYNC/IRQ semantics are therefore a proved blocker for this exact
-close chain. They are not proved to be the only remaining blocker after the
-thread wakes.
+Because the pages were unmapped, run18 could not retain their final control
+state or generate SDO pending/IRQ 30. The contemporaneous interpretation that
+all three bit-0 run states would be active was a hypothesis, not a measured
+fact; run19 later disproved that aggregate-gate assumption. Missing TV-out
+register/VSYNC/IRQ semantics still explain run18's exact close wait. They were
+not proved to be the only remaining blocker after the thread wakes.
 
-The implemented post-run18 model follows only measured semantics:
-byte-lane-safe storage for the three pages; stopped/ready and run-state
-handling; SDO VSYNC pending as W1C with its mask bit; and a 60 Hz level on VIC0
-IRQ 30 only while all run gates are active and VSYNC is unmasked. IRQ
-acknowledgement drops the level. The model must not fabricate an IOSurface,
-framebuffer, TV signal, cable/hotplug state, IRQ 38, or pixels. Focused device,
-machine-routing, snapshot-v4, and WFI tests pass. A real-firmware rerun must
-still observe the filter/action, active-swap clear, gate wake, close return, and
-subsequent SpringBoard control flow before this changes the boot claim.
+The initial post-run18 model provided byte-lane-safe storage for the three
+pages, independent stopped/ready handshakes, SDO VSYNC pending as W1C with its
+mask bit, and a 60 Hz level on VIC0 IRQ 30. It incorrectly treated every
+bank's bit 0 as one aggregate timing gate. Run19 established that control `+0`
+is conditional programming state and that the persistent timing eligibility is
+mixer+SDO. The model must not fabricate an IOSurface, framebuffer, TV signal,
+cable/hotplug state, IRQ 38, or pixels.
 
 Run18 also exposed two independent safety issues outside that wait. Its
 historical Boot_Video address `0x0ff6a000` lay above physical
@@ -1488,8 +1488,96 @@ Current planning instead reserves framebuffer
 and requires `0x11000` bytes of bootstrap headroom. CLCD handoff validation now
 checks AppleH1CLCD's page-rounded `stride * height` allocation and rejects
 32-bit multiplication, rounding, or physical-end overflow without changing
-controller state. Both changes postdate run18 and need the same fresh
-real-firmware validation; they do not make its seed-only frame a rendered one.
+controller state. Both changes postdate run18; run19 validated the corrected
+placement and active CLCD window as recorded below, but not rendered pixels.
+
+### 2026-07-24: run19 validated layout and exposed the TV-out timing-gate bug
+
+Run19 was the first real-firmware boot of exact source commit
+`afa650e284c2b27b6a4a2a2b2d772e0f68e5dac9`. Its local preflight passed 3/3,
+and the exact commit already had green hosted core run
+[30088519878](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30088519878)
+and unsigned-iOS run
+[30088519892](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30088519892).
+The fresh 128 MiB external-md boot ran from
+`2026-07-24T11:12:00.8559935Z` to
+`2026-07-24T11:30:23.3127833Z`, exited 0 at the
+**2,500,000,000**-instruction cap with `OK`, and wrote 922,889 bytes to stdout
+and zero bytes to stderr. The bridge reported zero failures and its raw-native
+path completed two redirects and two completions with nothing pending.
+
+The exact-gated original inputs were rehashed after the run and remained:
+
+```text
+kernel.macho    0d8cdb339d37cf37a1db2638fff79272ecd63a17764bf7666efa1618725df70c
+devicetree.bin  4867c95fedf544bda2ecaa2626ae14c01a60d7771dc53ffe6fd3a6aac8b8ba57
+rootfs.img      c3251e7f092c939d5818e92086cb47680981cfb03731de7b55d238c942eb5e82
+```
+
+The 466,825,216-byte work image was a fresh copy. Firmware compatibility edits
+remained confined to loaded kernel/device-tree copies, and filesystem writes
+remained in that work image. The corrected external-md layout was exact and
+non-overlapping:
+
+```text
+boot_args       0x087db000
+raw bounce      0x087dc000..0x0885c000
+Boot_Video      0x0885c000..0x088f2000  (320x480x4)
+topOfKernelData 0x088f4000
+```
+
+The SpringBoard path repeated rather than advanced:
+
+```text
+SETEXEC result epilogue, r0=0                         599,023,341
+first identity-validated replacement instruction     599,119,560
+SpringBoard UIApplicationMain call                 1,849,444,535
+[SpringBoard rendersLocally] returns YES           1,869,087,332
+QuartzCore detectDisplays entry                    1,870,899,597
+primary QuartzCore new-server return               1,881,846,583
+optional IOMFB finalizer                            1,887,341,013
+IOServiceClose call                                 1,887,341,029
+Mach episode 2305 begins, message ID 2816           1,887,341,104
+wait_queue_assert_wait                              1,887,344,201
+SpringBoard thread switches out                     1,887,345,137
+```
+
+From run18's finalizer through `_wait_queue_assert_wait`, every corresponding
+checkpoint is exactly **13,983,022** instructions later in run19; the final
+switch is 13,983,074 later. This is scheduling drift, not downstream progress.
+`IOServiceClose` return, close-after-gated-work, the close epilogue,
+`GSSetMainScreenInfo`, and `applicationDidFinishLaunching:` all remained at
+zero hits. Generic kernel `io-service-close-return` hits belonged to other
+requests; the exact ID-2816 correlation stayed open and unobserved.
+
+The three TV-out pages were now mapped. Their final first-word state was
+control/mixer/SDO `0/5/1`; SDO pending/mask was `0/0`. The model consequently
+reported `running=0`, phase 0, zero TV-out frames, no raw IRQ 30, and zero
+filter/action/completion-dispatch hits. The driver did not fail to receive an
+IRQ while all three gates were active: the model's all-three condition never
+became true.
+
+Capstone disassembly resolves the discrepancy. Object `+0x200` is SDO,
+`+0x204` is mixer, and `+0x208` is the control/coefficient block. Start writes
+SDO `+0=1` and mixer `+0=5`; per-source programming writes control `+0=1` only
+when a source exists and explicitly writes zero on the no-source path. The
+shipped IRQ filter reads SDO and mixer state, not control `+0`. Control still
+has a real independent shutdown handshake: it is written zero and polled for
+ready bit 1. Run19 returned `0x2` immediately and eliminated run18's
+`TVOUT SHUT DOWN PROBLEM` warnings. The surgical correction is therefore to
+retain control ready semantics while making mixer+SDO, not all three banks,
+the VSYNC timing predicate. The corrected local tree passes 23/23 Release
+tests, with SoC 5,504/0 and snapshot 469/0; hosted CI and a fresh firmware run
+are still required. There is no run20 result here.
+
+CLCD independently validated the corrected primary-display handoff. Window 0
+was active at framebuffer `0x0885c000`, 320x480, stride 1280, and the controller
+was scanning/running with 662 frames. Rendering did not advance: the final
+460,815-byte PPM had SHA-256
+`CBAD1C110E67CAD553A2B4EEBBF46E7BF09255389851902B24816249294AF2AB`
+and was byte-identical to run18's seed. It contained 153,472 black pixels and
+128 white pixels in the original 8x16 corner block, no other colors, zero
+changed pixels, and zero observed live-scanout writes.
 
 The earlier checkpoint-continuation chain is stronger evidence for sustained
 userspace and snapshot

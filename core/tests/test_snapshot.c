@@ -290,10 +290,12 @@ static void test_device_state_round_trips(void) {
         for (unsigned i = 0; i < S5L_TVOUT_BANK_WORDS; i++)
             a->tvout.regs[bank][i] =
                 0xa0000000u | (bank << 20) | i;
-    for (unsigned bank = 0; bank < S5L_TVOUT_BANK_COUNT; bank++) {
-        a->tvout.regs[bank][0] &= ~TVOUT_READY;
-        a->tvout.regs[bank][0] |= TVOUT_RUN;
-    }
+    /* Real run19 timing state: the independent control block is stopped while
+     * mixer and SDO remain live.  A nonzero phase must round-trip in 0/5/1. */
+    a->tvout.regs[S5L_TVOUT_BANK_CTRL][0] = 0u;
+    a->tvout.regs[S5L_TVOUT_BANK_MIXER][0] = 5u;
+    a->tvout.regs[S5L_TVOUT_BANK_SDO][0] = TVOUT_RUN;
+    a->tvout.regs[S5L_TVOUT_BANK_SDO][TVOUT_SDO_IRQMASK / 4u] = 0u;
     /* Status words obey their hardware invariants: SDO can hold VSYNC, while
      * the deliberately nonasserting mixer source stays clear. */
     a->tvout.regs[S5L_TVOUT_BANK_SDO][TVOUT_SDO_IRQ / 4u] =
@@ -447,6 +449,19 @@ static void test_tvout_snapshot_invariants(void) {
     CHECK(snapshot_save_mem(&m, &buf, &len) == SNAP_ERR_CORRUPT &&
           buf == NULL && len == 0u,
           "impossible stopped TV-out phase was serialised");
+
+    /* Control-ready/mixer-5/SDO-1 is the observed resume state, not a stopped
+     * controller.  Its live residual phase must be accepted and restored. */
+    s5l_tvout_reset(&m.tvout, m.tb_hz);
+    s5l_tvout_write(&m.tvout, S5L_TVOUT_BANK_MIXER, 0, 5u, 4);
+    s5l_tvout_write(&m.tvout, S5L_TVOUT_BANK_SDO, 0, TVOUT_RUN, 4);
+    (void)s5l_tvout_tick(&m.tvout, 1u);
+    CHECK(s5l_tvout_running(&m.tvout) &&
+          m.tvout.frame_accum == 1u &&
+          snapshot_save_mem(&m, &buf, &len) == SNAP_OK &&
+          buf != NULL,
+          "run19 control-ready/mixer-5/SDO-1 phase was rejected");
+    free(buf);
 
     /* A real VSYNC latch may survive a stop until the driver's explicit W1C
      * ACK.  That is valid state and must not be confused with corruption. */

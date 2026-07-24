@@ -2,9 +2,9 @@
  * iOS3-VM -- S5L8900 standard-definition TV-out path.
  *
  * This is deliberately a narrow hardware model.  The shipped Apple driver
- * establishes the three run/ready handshakes, SDO's VSYNC W1C/mask pair, and
- * IRQ 30 as swap completion.  Everything else is retained as register storage
- * until firmware evidence justifies a side effect.
+ * establishes the three independent run/ready handshakes, SDO's VSYNC
+ * W1C/mask pair, and IRQ 30 as swap completion.  Everything else is retained
+ * as register storage until firmware evidence justifies a side effect.
  *
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed.
  */
@@ -34,8 +34,14 @@ static uint32_t visible_word(const s5l_tvout_t *t, s5l_tvout_bank_t bank,
 
 bool s5l_tvout_running(const s5l_tvout_t *t) {
     if (!t) return false;
-    return (t->regs[S5L_TVOUT_BANK_CTRL][0] & TVOUT_RUN) != 0u &&
-           (t->regs[S5L_TVOUT_BANK_MIXER][0] & TVOUT_RUN) != 0u &&
+    /*
+     * The control/coefficient block has its own run/ready handshake, but is
+     * not a persistent scan-timing gate.  The shipped resume path programs
+     * that page without setting CTRL+0, then starts MIXER+0 and SDO+0; its
+     * IRQ30 filter likewise consults SDO and mixer state, never CTRL+0.
+     * Requiring all three reproduced run19's impossible 0/5/1 deadlock.
+     */
+    return (t->regs[S5L_TVOUT_BANK_MIXER][0] & TVOUT_RUN) != 0u &&
            (t->regs[S5L_TVOUT_BANK_SDO][0] & TVOUT_RUN) != 0u;
 }
 
@@ -90,7 +96,8 @@ void s5l_tvout_write(s5l_tvout_t *t, s5l_tvout_bank_t bank,
         }
     }
 
-    /* Entering or leaving the fully-running state starts a fresh frame.  The
+    /* Entering or leaving the mixer+SDO timing state starts a fresh frame.
+     * A control-block transition is independent and must preserve phase.  The
      * pending latch is intentionally NOT cleared here: the shipped driver
      * explicitly W1C-acknowledges it during both start and stop, and status
      * hardware must not silently eat a real completion on a gate change. */

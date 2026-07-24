@@ -607,7 +607,7 @@ bool     s5l_clcd_scanout(const s5l_clcd_t *c, unsigned k,
  * three 4 KiB register ranges.  Resolving those child addresses through the
  * arm-io ranges gives, in the order AppleH1DisplayDrivers maps them:
  *
- *   0x39100000  TV control / clock gate
+ *   0x39100000  TV control / coefficient-scaler block
  *   0x39200000  mixer
  *   0x39300000  SDO (standard-definition output)
  *
@@ -660,6 +660,8 @@ uint32_t s5l_tvout_read(const s5l_tvout_t *t, s5l_tvout_bank_t bank,
                         uint32_t off, unsigned bytes);
 void     s5l_tvout_write(s5l_tvout_t *t, s5l_tvout_bank_t bank,
                          uint32_t off, uint32_t val, unsigned bytes);
+/* True while the persistent mixer and SDO timing engines are live.  The
+ * control/scaler block has an independent handshake and is not a VSYNC gate. */
 bool     s5l_tvout_running(const s5l_tvout_t *t);
 bool     s5l_tvout_irq(const s5l_tvout_t *t);
 /* Advance guest time and return the current level of interrupt line 30. */

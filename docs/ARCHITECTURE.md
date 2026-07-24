@@ -423,19 +423,46 @@ in `0xc006269f`, but raw IRQ 30 never asserted because no device model supplied
 the SDO VSYNC completion. This proves the cause of the observed close wait; it
 does not prove that TV-out is the only remaining boot blocker.
 
-The post-run18 TV-out model is implemented and focused-unit-tested, but it has
-not yet been exercised by a fresh real-firmware boot. It maps three independent,
-byte-lane-safe 4 KiB banks, retains unknown registers, derives each bank's ready
-bit from its run state, and emits a 60 Hz level IRQ on VIC0 line 30 only while
-all three run gates are active and VSYNC is unmasked. SDO `+0x280` bit 0 is a
-latched write-one-to-clear pending bit and `+0x284` bit 0 is its mask; mixer
-`+0x4c` is a nonasserting write-one-to-clear acknowledgement. IRQ 38, hotplug,
-TV signal, IOSurface, framebuffer, and pixel synthesis are deliberately absent.
-Snapshot v4 persists the three banks, phase, and frame counter, and WFI may
-advance to the next deliverable TV-out IRQ under the same run/mask contract.
-A real-firmware rerun must still observe IRQ 30, the shipped filter/action,
-gate wake, `IOServiceClose` return, and subsequent SpringBoard progress.
-The separate targeted unpatched-IORTC experiment also remains open.
+The first post-run18 TV-out model mapped three independent byte-lane-safe 4 KiB
+banks, retained unknown registers, derived each bank's ready bit from its own
+run state, and modeled SDO `+0x280` bit 0 as a latched write-one-to-clear
+pending bit with `+0x284` bit 0 as its mask. Mixer `+0x4c` remains a
+nonasserting write-one-to-clear acknowledgement. IRQ 38, hotplug, TV signal,
+IOSurface, framebuffer, and pixel synthesis are deliberately absent. Snapshot
+v4 persists the three banks, phase, and frame counter, and WFI may advance to
+the next deliverable TV-out IRQ.
+
+Run19 supplied the first real-firmware verdict for that model. It routed all
+three pages correctly and removed run18's shutdown-ready timeout warnings, but
+ended control/mixer/SDO `0/5/1`, SDO pending/mask `0/0`. The initial aggregate
+predicate therefore reported stopped, generated zero frames and no raw IRQ 30,
+and never reached the shipped filter/action, gate wake, or close return. Static
+driver control flow shows the architectural distinction: control `+0` is
+conditional source-programming state with a valid independent run/ready
+handshake; mixer `+0` and SDO `+0` are the persistent timing eligibility pair,
+and the IRQ filter does not consult control `+0`. A surgical predicate change
+must preserve control-ready behavior while letting `0/5/1` accumulate phase
+and emit SDO VSYNC. The corrected local tree passes 23/23 Release tests, SoC
+5,504/0, and snapshot 469/0. Hosted CI and new real-firmware validation remain
+pending; no run20 or boot claim exists.
+
+That verdict used exact source commit
+`afa650e284c2b27b6a4a2a2b2d772e0f68e5dac9`; post-run hashes remained kernel
+`0D8CDB339D37CF37A1DB2638FFF79272ECD63A17764BF7666EFA1618725DF70C`,
+device tree
+`4867C95FEDF544BDA2ECAA2626AE14C01A60D7771DC53FFE6FD3A6AAC8B8BA57`,
+and rootfs
+`C3251E7F092C939D5818E92086CB47680981CFB03731DE7B55D238C942EB5E82`.
+
+Run19 otherwise repeated the SpringBoard boundary. `UIApplicationMain` was
+called at 1,849,444,535, `rendersLocally` returned `YES` at 1,869,087,332, the
+optional finalizer/close ran at 1,887,341,013/1,887,341,029, and ID-2816 waited
+at 1,887,344,201 before the exact thread switched out at 1,887,345,137. The
+finalizer-through-wait checkpoints are exactly 13,983,022 instructions later
+than run18 without any later UI checkpoint. CLCD scanned the corrected
+320x480, stride-1280 window for 662 frames, but the PPM remained exactly the
+128-white-pixel seed with zero live-scanout writes. The separate targeted
+unpatched-IORTC experiment also remains open.
 
 In the planned shared-session design, host services cross explicit non-blocking
 seams: frame descriptors out; bounded touch, PCM and network queues in/out;
@@ -463,8 +490,12 @@ after the aligned static/raw-bounce reserve at
 16 KiB boundary, `0x088f4000`, while preserving at least `0x11000` bytes of
 bootstrap headroom. A firmware-free startup self-check pins those addresses.
 Run18 predates this unified planner: its framebuffer was still at
-`0x0ff6a000`, above its physical `topOfKernelData` of `0x0885c000`, so the
-run18 pixel result does not validate the corrected placement.
+`0x0ff6a000`, above its physical `topOfKernelData` of `0x0885c000`. Run19
+validated boot arguments at `0x087db000`, raw bounce
+`0x087dc000..0x0885c000`, framebuffer
+`0x0885c000..0x088f2000`, and physical `topOfKernelData 0x088f4000` with the
+exact 466,825,216-byte work image. The unchanged seed frame means this validates
+layout and controller handoff, not SpringBoard rendering.
 
 The CLCD handoff now validates the page-rounded physical mapping requested by
 `AppleH1CLCD`: `stride * height` and its 4 KiB round-up must fit the driver's

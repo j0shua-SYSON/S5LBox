@@ -723,32 +723,99 @@ VSYNC. The close path sleeps while a swap is queued or active; the TV-out IRQ
 gate. This proves why this close slept. It does not prove that TV-out is the
 only remaining boot issue.
 
-The post-run18 implementation maps three independent byte-lane-safe 4 KiB
-banks, retains unknown registers, derives ready from each bank's run state,
-and generates a 60 Hz level IRQ 30 only when all three run gates are active and
-SDO VSYNC is unmasked. SDO `+0x280` bit 0 is latched and write-one-to-clear;
-`+0x284` bit 0 masks it. Mixer `+0x4c` is a deliberately nonasserting
-write-one-to-clear acknowledgement. It does not fabricate IRQ 38, hotplug, an
-IOSurface, framebuffer pixels, or a TV signal. Snapshot v4 persists its banks,
-phase, and frame counter, and WFI can advance to the next deliverable IRQ 30.
-Focused unit tests pass, but no post-run18 real-firmware trace has validated
-the model yet.
+The initial post-run18 implementation maps three independent byte-lane-safe
+4 KiB banks, retains unknown registers, derives ready from each bank's own run
+state, and models SDO `+0x280` bit 0 as latched/write-one-to-clear with
+`+0x284` bit 0 as its mask. Mixer `+0x4c` is a deliberately nonasserting W1C
+acknowledgement. It does not fabricate IRQ 38, hotplug, an IOSurface,
+framebuffer pixels, or a TV signal. Its first VSYNC predicate incorrectly
+required all three banks' bit 0; run19 disproved that aggregate condition.
 
-For the next firmware run, require this sequence before advancing the claim:
+#### Run19 result: layout valid, TV-out timing predicate invalid
 
-1. the three TV-out pages route through the model rather than the unmapped bus;
-2. SDO VSYNC asserts raw VIC0 IRQ 30 under the shipped run/mask state;
-3. the shipped IRQ 30 filter/action executes and acknowledges the pending bit;
-4. the swap gate wakes and the exact `IOServiceClose` call returns;
-5. the target resumes beyond CAWindowServer setup and reaches a later exact
-   SpringBoard checkpoint, ideally `applicationDidFinishLaunching:`.
+Run19 used exact source commit
+`afa650e284c2b27b6a4a2a2b2d772e0f68e5dac9` and stopped normally at
+2,500,000,000 instructions with exit code 0, `OK`, empty stderr, and zero
+external-md failures. Reverification preserved the original SHA-256 values:
 
-Do not infer a boot or synthesize a return if any link is absent. Run18 also
-predates the unified framebuffer planner and stricter CLCD allocation bounds:
-the current external-md layout reserves `0x0885c000..0x088f2000`, advances
-physical `topOfKernelData` to `0x088f4000`, and validates the page-rounded
-`stride * height` mapping through the 4 GiB boundary. A fresh run must
-revalidate both hardening changes alongside the TV-out path.
+```text
+kernel.macho    0D8CDB339D37CF37A1DB2638FFF79272ECD63A17764BF7666EFA1618725DF70C
+devicetree.bin  4867C95FEDF544BDA2ECAA2626AE14C01A60D7771DC53FFE6FD3A6AAC8B8BA57
+rootfs.img      C3251E7F092C939D5818E92086CB47680981CFB03731DE7B55D238C942EB5E82
+```
+
+The work image stayed exactly 466,825,216 bytes. The startup report accepted
+boot arguments at `0x087db000`, raw bounce
+`0x087dc000..0x0885c000`, framebuffer
+`0x0885c000..0x088f2000`, and `topOfKernelData 0x088f4000`. The three TV-out
+pages no longer appear under `touched outside the memory map`.
+
+Run19's target chronology is:
+
+```text
+SETEXEC result epilogue, r0=0                         599,023,341
+first identity-validated replacement instruction     599,119,560
+SpringBoard UIApplicationMain call                 1,849,444,535
+[SpringBoard rendersLocally] returns YES           1,869,087,332
+QuartzCore detectDisplays entry                    1,870,899,597
+primary QuartzCore new-server return               1,881,846,583
+optional IOMFB finalizer                            1,887,341,013
+IOServiceClose call                                 1,887,341,029
+Mach episode 2305 begins, message ID 2816           1,887,341,104
+wait_queue_assert_wait                              1,887,344,201
+SpringBoard thread switches out                     1,887,345,137
+```
+
+The finalizer, close, Mach entry, and wait are each exactly 13,983,022
+instructions later than run18. This is timing drift: close return,
+close-after-gated-work, the close epilogue, `GSSetMainScreenInfo`, and
+`applicationDidFinishLaunching:` still have zero hits. Do not confuse the nine
+generic kernel `io-service-close-return` hits with this request; the exact
+ID-2816 anchor remains open and its result unobserved.
+
+The model's passive final state is the decisive diagnostic:
+
+```text
+control/mixer/SDO +0  0 / 5 / 1
+SDO pending/mask      0 / 0
+model running/frames  0 / 0
+VIC0 raw IRQ 30       0
+filter/action hits    0 / 0
+close sleep/return    1 / 0
+```
+
+This is not “IRQ delivery failed while all three gates were active.” The
+all-three condition never became true. Static disassembly maps object `+0x200`
+to SDO, `+0x204` to mixer, and `+0x208` to control. Start writes SDO `+0=1` and
+mixer `+0=5`. Per-source programming writes control `+0=1` only when a source
+exists and writes zero on the no-source path; the IRQ filter reads SDO and
+mixer, not control `+0`. Control still has its own valid shutdown handshake:
+write zero, then poll ready bit 1. Run19's modeled `0x2` response removed all
+six run18 `TVOUT SHUT DOWN PROBLEM` messages, so do not remove or invert that
+ready behavior.
+
+The surgical correction is to preserve all three independent ready handshakes
+but define timing eligibility from mixer+SDO. Its local Release gate passes
+23/23; the affected binaries report SoC 5,504/0 and snapshot 469/0, including
+the real `0/5/1` state, control transitions without phase reset, IRQ/WFI, and
+malformed snapshot state. Before promoting it, still require:
+
+1. hosted CI passes the exact corrected commit;
+2. a fresh firmware run produces SDO VSYNC and raw VIC0 IRQ 30;
+3. the shipped filter/action acknowledges pending, clears the active swap,
+   wakes the gate, and returns the exact `IOServiceClose`;
+4. a later SpringBoard checkpoint and recognizable live scanout are observed.
+
+No run20 result exists yet. Do not infer a boot or synthesize a return if any
+link is absent.
+
+Run19 independently revalidated framebuffer bounds. CLCD window 0 ended at
+`0x0885c000`, 320x480, stride 1280, scanning/running with 662 frames. Its final
+PPM SHA-256 was
+`CBAD1C110E67CAD553A2B4EEBBF46E7BF09255389851902B24816249294AF2AB`,
+byte-identical to run18's seed: 153,472 black pixels, 128 white pixels in the
+original 8x16 corner block, zero other colors, zero changed pixels, and zero
+live-scanout writes. Treat that as layout/controller validation, not rendering.
 
 ### WFI changes elapsed device time, not the instruction coordinate
 

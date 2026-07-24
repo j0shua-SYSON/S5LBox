@@ -28,7 +28,7 @@ proof that no private or unindexed implementation exists.
 | **M2** | SoC bring-up | A bare-metal payload prints over the emulated UART; a timer IRQ is taken and returned from | ✅ done and covered by host tests |
 | **M3** | Firmware containers + LLB execution | Real IMG3s parse and decrypt; an extracted real Apple LLB payload executes; the kernelcache is extracted | ✅ done; SecureROM/iBoot execution remains future full-chain work |
 | **M4** | XNU boots and logs | The kernel reaches `bsd_init`, prints, and Apple's own kexts match and start | ✅ **done** — plus the real root filesystem mounts |
-| **M5** | Userspace → SpringBoard | `launchd` runs; the home screen renders and takes a tap | 🔵 **in progress.** Run18 repeats exact SETEXEC success through a normal 2.5 B cap, reaches `UIApplicationMain` and `rendersLocally == YES`, completes the primary H1CLCD construction, and proves the exact SpringBoard-thread wait belongs to the optional TV-out swap/close path whose IRQ 30 source was absent. The guest continued globally, but the close did not return, `applicationDidFinishLaunching:` and live scanout were not reached, the post-run18 TV-out model has only unit validation, and no touch path exists yet. |
+| **M5** | Userspace → SpringBoard | `launchd` runs; the home screen renders and takes a tap | 🔵 **in progress.** Run19 repeats exact SETEXEC success through a normal 2.5 B cap, reaches `UIApplicationMain` and `rendersLocally == YES`, completes the primary H1CLCD server, and validates the corrected framebuffer/TOKD layout. It also reproduces the optional TV-out close wait: shipped state is control/mixer/SDO `0/5/1`, but the first model required all three bit-0 states, so no IRQ 30, filter/action, close return, application delegate, or live scanout occurred. The frame stayed seed-only. The surgical mixer+SDO fix passes local full/focused validation; hosted and fresh firmware validation remain. No touch path exists yet. |
 | **D** | Dynarec (parallel) | SpringBoard at interactive frame rates on the phone | 🔵 emitter + ARM/Thumb translator and host execution tests exist (off by default); no code cache or dispatcher calls them |
 | **N** | Guest networking (parallel) | The guest resolves a name and fetches a URL | ⚪ designed, not built |
 | **A** | Guest audio (first-device track) | Guest PCM reaches the host speaker without blocking the CPU thread | ⚪ priority, not designed or built |
@@ -523,13 +523,15 @@ The revalidated replacement process retired 37,134,545 attributed user
 instructions, reached stock SpringBoard's `LC_UNIXTHREAD`/exported `start` at
 `0x34e8`, and later executed SpringBoard Objective-C methods. It never entered
 exact-process `_exit1` and ended scheduled out in a validated `mach_msg` trap.
-Run18 repeated the exact SETEXEC success in a fresh 2.5 B display-enabled run
-with the I2C/PMU model. Its exact process reached `UIApplicationMain`,
-`registerForSystemEvents`, `rendersLocally == YES`, completed the primary H1CLCD
-construction, and then waited while closing the optional AppleH1TVOut object.
-The missing TV-out VSYNC/IRQ 30 completion is proved for that exact close chain,
-but `applicationDidFinishLaunching:` was not reached. Its active 320x480 CLCD
-capture remained the seed-only 8x16 block. A current checkpoint chain
+Run19 repeated run18's exact SETEXEC and display path in a fresh 2.5 B
+display-enabled run with the I2C/PMU model. Its exact process reached
+`UIApplicationMain`, `registerForSystemEvents`, `rendersLocally == YES`,
+completed the primary H1CLCD server, and then waited while closing the optional
+AppleH1TVOut object. Run19 mapped the missing pages but exposed the model's
+incorrect aggregate timing gate: control/mixer/SDO was `0/5/1`, so no VSYNC IRQ
+30, filter/action, or close return occurred. `applicationDidFinishLaunching:`
+was not reached, and the active 320x480 CLCD capture remained the seed-only 8x16
+block despite 662 controller frames. A current checkpoint chain
 restored at 2.2 B retired instructions,
 crossed the former
 `SMULBB` stop and wrote a 2.4 B checkpoint. The 2.4 B → 2.8 B interval wrote a
@@ -810,15 +812,13 @@ unmapped despite 287, 150, and 275 accesses respectively, and VIC0 line 30
 never became raw/pending. That is the root cause of the exact observed close
 wait, not proof that no later boot blocker exists.
 
-The implemented post-run18 model is bounded to the evidence: storage for the
-three byte-lane-safe 4 KiB register banks, observed run/ready and W1C
-status/mask behavior, and a 60 Hz VSYNC level on VIC0 IRQ 30 only when all run
-gates are active and SDO VSYNC is unmasked. It does not synthesize an IOSurface,
-framebuffer, pixels, TV hotplug/signal, or IRQ 38. Focused device,
-machine-routing, snapshot-v4 and WFI tests pass. The milestone advances only
-after a real run reaches the driver's IRQ filter/action, clears the swap, wakes
-the gate, returns from close, and proceeds beyond the current SpringBoard
-checkpoint.
+The initial post-run18 model provided storage for the three byte-lane-safe
+4 KiB register banks, independent run/ready handshakes, W1C status/mask
+behavior, and a 60 Hz VSYNC level on VIC0 IRQ 30. It incorrectly required every
+bank's bit 0 for timing. It does not synthesize an IOSurface, framebuffer,
+pixels, TV hotplug/signal, or IRQ 38. Run19, below, replaces the earlier
+unit-only claim with a real-firmware verdict and narrows the required timing
+predicate to mixer+SDO.
 
 Post-run18 framebuffer work is similarly gated on revalidation. Boot_Video is
 now reserved below `topOfKernelData` at
@@ -827,6 +827,58 @@ now reserved below `topOfKernelData` at
 validation now covers the page-rounded `stride * height` physical mapping used
 by AppleH1CLCD and rejects 32-bit size/address overflow atomically. Run18 used
 the old top-of-DRAM framebuffer and predates both hardening changes.
+
+### Run19 validated layout and falsified the all-three-bank timing predicate
+
+Run19 booted exact source commit
+`afa650e284c2b27b6a4a2a2b2d772e0f68e5dac9` to the normal
+**2,500,000,000**-instruction cap with exit code 0, `OK`, empty stderr, and zero
+external-md failures. Its original source hashes were reverified unchanged:
+
+```text
+kernel.macho    0d8cdb339d37cf37a1db2638fff79272ecd63a17764bf7666efa1618725df70c
+devicetree.bin  4867c95fedf544bda2ecaa2626ae14c01a60d7771dc53ffe6fd3a6aac8b8ba57
+rootfs.img      c3251e7f092c939d5818e92086cb47680981cfb03731de7b55d238c942eb5e82
+```
+
+The fresh work image was exactly 466,825,216 bytes. Boot arguments at
+`0x087db000`, raw bounce `0x087dc000..0x0885c000`, framebuffer
+`0x0885c000..0x088f2000`, and `topOfKernelData 0x088f4000` validated as
+disjoint. CLCD window 0 used that framebuffer at 320x480, stride 1280, and
+ended scanning/running with 662 frames.
+
+The SpringBoard path did not advance beyond run18. Run19 called
+`UIApplicationMain` at 1,849,444,535, returned `YES` from `rendersLocally` at
+1,869,087,332, entered the optional IOMFB finalizer at 1,887,341,013, and
+called `IOServiceClose` at 1,887,341,029. ID-2816 asserted its wait at
+1,887,344,201 and switched the exact thread out at 1,887,345,137. From run18's
+finalizer through its wait, every corresponding checkpoint is exactly
+13,983,022 instructions later; this is timing drift, not new control flow.
+Close return, `GSSetMainScreenInfo`, and
+`applicationDidFinishLaunching:` remained unobserved.
+
+All three TV-out pages reached the model, and modeled ready bit 1 removed
+run18's shutdown-timeout warnings. The late first-word state was nevertheless
+control/mixer/SDO `0/5/1`, SDO pending/mask `0/0`. Because the first model
+required all three bit-0 states, it generated zero TV-out frames, zero raw IRQ
+30, zero filter/action/completion-dispatch hits, and no gate wake or close
+return.
+
+Static driver disassembly establishes the surgical correction. Control `+0`
+is conditional source-programming state; its independent stopped/ready
+handshake is real and remains modeled. Mixer `+0` and SDO `+0` are the
+persistent timing eligibility pair, and the IRQ filter does not read control
+`+0`. The predicate fix must pass hosted tests and a fresh real-firmware run
+before the milestone can advance. The local gate is now green
+at 23/23 Release tests, SoC 5,504/0, and snapshot 469/0; hosted CI and the
+firmware rerun remain. No run20 result or boot claim exists yet.
+
+The final PPM was exactly the run18 seed:
+SHA-256
+`CBAD1C110E67CAD553A2B4EEBBF46E7BF09255389851902B24816249294AF2AB`,
+153,472 black pixels, 128 white pixels in the original 8x16 block, no other
+color, zero changed pixels, and zero live-scanout writes. Correct layout and
+662 CLCD frames do not prove SpringBoard rendered.
 
 For chronology, this is the much earlier pre-VFP measurement from
 `bootkernel`'s milestone probes:
@@ -920,7 +972,7 @@ path.
   shared-cache, stack, and low-image regions. A read-only HFSX/Mach-O/Objective-C
   audit mapped run15's SpringBoard entry and retained low PCs, but the harness
   does not yet carry a general userspace image/symbol map. Bounded low-image
-  control-flow now places run18 after `rendersLocally == YES`, through the
+  control-flow now places run19 after `rendersLocally == YES`, through the
   primary H1CLCD construction, and inside the optional TV-out IOMFB finalizer,
   before `applicationDidFinishLaunching:`. The exact UI/Mach checkpoint set
   dynamically correlates that finalizer to the unresolved `io_service_close`;
@@ -934,13 +986,14 @@ path.
   starts and H1 `start_hardware` returned success, with 795 CLCD reads and 32
   writes, but stopped before userspace. Run18 then completed the primary H1CLCD
   object and proved its exact SpringBoard-thread wait belongs to the optional
-  TV-out swap close. The unmapped `0x39100000`–`0x39300000` banks and missing
-  VIC0 IRQ 30 are causal for that close path, not a claim that TV-out is the
-  only remaining boot issue. The bounded TV-out model is now focused-unit-tested
-  but must pass the real-firmware filter/action/wake/close-return rerun;
-  framebuffer/TOKD and CLCD allocation bounds also need real-firmware
-  revalidation. The app still needs the shared real-guest session; Metal is
-  optional and not implemented.
+  TV-out swap close. Run19 mapped those pages and revalidated framebuffer/TOKD
+  plus the active CLCD window, but reproduced the wait because the model
+  incorrectly required conditional control `+0` alongside the live mixer+SDO
+  timing pair. Zero IRQ 30/filter/action/close-return hits and the unchanged
+  seed frame keep M5 open. The surgical predicate fix still needs
+  local full/focused gate now passes 23/23, 5,504/0, and 469/0; hosted and
+  fresh real-firmware validation remain. The app still needs the shared
+  real-guest session; Metal is optional and not implemented.
 - **Multitouch**, mapped from the host touchscreen to the guest's controller.
   `AppleMultitouchZ2SPI` already starts and reports "using DMA for bootloading",
   which proves that the recorded boot reached that request. Device, DMA and

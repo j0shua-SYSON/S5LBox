@@ -996,9 +996,10 @@ static void test_tvout_register_lanes_and_idle_handshake(void) {
     s5l_tvout_write(&t, S5L_TVOUT_BANK_MIXER, 0, 5u, 4);
     CHECK(s5l_tvout_read(&t, S5L_TVOUT_BANK_MIXER, 0, 4) == 5u,
           "mixer start lost bit 2 or exposed ready early");
-    s5l_tvout_write(&t, S5L_TVOUT_BANK_CTRL, 0, TVOUT_RUN, 1);
     s5l_tvout_write(&t, S5L_TVOUT_BANK_SDO, 0, TVOUT_RUN, 2);
-    CHECK(s5l_tvout_running(&t), "all three run gates did not start TV-out");
+    CHECK(s5l_tvout_running(&t) &&
+          s5l_tvout_read(&t, S5L_TVOUT_BANK_CTRL, 0, 4) == TVOUT_READY,
+          "run19's control-ready/mixer-5/SDO-1 state did not run TV timing");
 
     s5l_tvout_write(&t, S5L_TVOUT_BANK_MIXER, 0, 4u, 4);
     CHECK(!s5l_tvout_running(&t) &&
@@ -1012,6 +1013,40 @@ static void test_tvout_register_lanes_and_idle_handshake(void) {
     CHECK(s5l_tvout_read(&t, S5L_TVOUT_BANK_MIXER,
                          TVOUT_MIXER_STATUS, 4) == 0u,
           "mixer W1C ACK fabricated status");
+}
+
+/*
+ * Run19 captured the shipped resume state exactly as CTRL/MIXER/SDO = 0/5/1,
+ * with SDO +0x284 = 0.  The resume routine never sets CTRL+0, and the IRQ30
+ * filter never reads it, so treating that independent coefficient-block
+ * handshake as a scan-timing gate suppresses every frame.  Its transitions
+ * must also leave the already-running mixer+SDO phase untouched.
+ */
+static void test_tvout_run19_resume_state_and_control_phase(void) {
+    s5l_tvout_t t;
+    s5l_tvout_reset(&t, 600u);
+    s5l_tvout_write(&t, S5L_TVOUT_BANK_MIXER, 0, 5u, 4);
+    s5l_tvout_write(&t, S5L_TVOUT_BANK_SDO, 0, TVOUT_RUN, 4);
+    s5l_tvout_write(&t, S5L_TVOUT_BANK_SDO,
+                     TVOUT_SDO_IRQMASK, 0u, 4);
+
+    CHECK(s5l_tvout_running(&t) &&
+          s5l_tvout_read(&t, S5L_TVOUT_BANK_CTRL, 0, 4) == TVOUT_READY,
+          "run19 0/5/1 state was not live with control independently ready");
+    CHECK(!s5l_tvout_tick(&t, 4u) && t.frame_accum == 4u,
+          "run19 state did not begin accumulating a frame");
+
+    s5l_tvout_write(&t, S5L_TVOUT_BANK_CTRL, 0, TVOUT_RUN, 4);
+    CHECK(s5l_tvout_running(&t) && t.frame_accum == 4u,
+          "starting the independent control block reset TV timing");
+    s5l_tvout_write(&t, S5L_TVOUT_BANK_CTRL, 0, 0u, 4);
+    CHECK(s5l_tvout_running(&t) && t.frame_accum == 4u &&
+          s5l_tvout_read(&t, S5L_TVOUT_BANK_CTRL, 0, 4) == TVOUT_READY,
+          "stopping the independent control block reset or gated TV timing");
+
+    CHECK(s5l_tvout_tick(&t, 6u) && t.frames == 1u &&
+          t.frame_accum == 0u,
+          "run19 state did not deliver VSYNC after one complete frame");
 }
 
 /*
@@ -1115,11 +1150,15 @@ static void test_tvout_machine_routing_and_irq30(void) {
     m.tvout.frame_ticks = 4u;
     m.bus.write32(m.bus.ctx, S5L8900_VIC0_BASE + VIC_INTENABLE,
                   1u << S5L8900_IRQ_TVOUT);
-    m.bus.write8(m.bus.ctx, S5L8900_TVOUT_CTRL_BASE, TVOUT_RUN);
+    /* Exact run19 resume state: the independent control block is stopped and
+     * ready while mixer+SDO remain the live scan-timing engines. */
     m.bus.write32(m.bus.ctx, S5L8900_TVOUT_MIXER_BASE, 5u);
     m.bus.write16(m.bus.ctx, S5L8900_TVOUT_SDO_BASE, TVOUT_RUN);
     m.bus.write8(m.bus.ctx,
                   S5L8900_TVOUT_SDO_BASE + TVOUT_SDO_IRQMASK, 0u);
+    CHECK(m.bus.read32(m.bus.ctx, S5L8900_TVOUT_CTRL_BASE) ==
+              TVOUT_READY,
+          "run19 control block was not stopped/ready");
 
     s5l8900_tick(&m, 4u);
     CHECK(m.cpu.irq_line &&
@@ -1838,6 +1877,7 @@ int main(void) {
     test_vic_masks_and_routes();
     test_vic1_is_mapped_and_drives_the_cpu();
     test_tvout_register_lanes_and_idle_handshake();
+    test_tvout_run19_resume_state_and_control_phase();
     test_tvout_vsync_w1c_mask_and_phase();
     test_tvout_machine_routing_and_irq30();
     test_tvout_wfi_fast_forwards_to_vsync();

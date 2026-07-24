@@ -461,9 +461,10 @@ static bool tvout_state_valid(const s5l_tvout_t *t) {
         return false;
     for (unsigned bank = 0; bank < S5L_TVOUT_BANK_COUNT; bank++)
         if ((t->regs[bank][0] & TVOUT_READY) != 0u) return false;
-    /* tick() and every aggregate run->stop transition reset the phase.  A
-     * stopped controller with residual phase cannot be produced by the model
-     * and would silently normalize on the first post-restore zero tick. */
+    /* tick() and every mixer+SDO timing transition reset the phase.  A stopped
+     * timing engine with residual phase cannot be produced by the model and
+     * would silently normalize on the first post-restore zero tick.  The
+     * independent control block may be stopped while timing remains live. */
     if (!s5l_tvout_running(t) && t->frame_accum != 0u) return false;
 
     /* These are status latches, not guest storage.  The model can only
