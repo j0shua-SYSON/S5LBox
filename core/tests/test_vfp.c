@@ -543,8 +543,9 @@ static void test_vmov_double_register_words(void) {
  * particular, Apple's binary writes d6's high word twice before consuming the
  * complete aliased register in VADD.F64. Starting d6 at 2.0 makes a swapped
  * half decode observable: the architecturally correct sequence clears d6 to
- * +0.0 and returns 1.0, while a low-half write would leave it at 2.0 and
- * produce 3.0.
+ * +0.0 and leaves the VADD destination at 1.0, while a low-half write would
+ * leave it at 2.0 and produce 3.0. The soft-float ABI result remains in r0:r1;
+ * this d6 value is an internal temporary in Apple's block.
  */
 static void test_ios313_libm_fmod_return_block(void) {
     arm_cpu_t c; vfp_reset(&c);
@@ -576,7 +577,7 @@ static void test_ios313_libm_fmod_return_block(void) {
           "_fmod assembled d7 = 0x%016llx",
           (unsigned long long)vfp_get_d(&c, 7));
     CHECK(vfp_get_d(&c, 6) == d2u(1.0),
-          "_fmod result d6 = 0x%016llx",
+          "_fmod temporary d6 = 0x%016llx",
           (unsigned long long)vfp_get_d(&c, 6));
     CHECK(c.r[0] == 0u && c.r[4] == 0x3ff00000u,
           "_fmod word transfers modified r0/r4: %08x/%08x", c.r[0], c.r[4]);
@@ -631,7 +632,7 @@ static void test_ios313_libm_fmod_return_block(void) {
                       cases[i].steps) == ARM_OK,
                   "_fmod %s condition path trapped", cases[i].why);
             CHECK(vfp_get_d(&c, 6) == cases[i].expected,
-                  "_fmod %s result = 0x%016llx",
+                  "_fmod %s temporary d6 = 0x%016llx",
                   cases[i].why, (unsigned long long)vfp_get_d(&c, 6));
             CHECK(c.r[15] == 0x1a0u,
                   "_fmod %s path ended at 0x%08x", cases[i].why, c.r[15]);
@@ -966,6 +967,95 @@ static void test_conversions(void) {
     }
 }
 
+/*
+ * The exact compiler-runtime helpers called by CoreFoundation immediately
+ * after the run20 `_fmod` site. These are not synthetic mnemonics: their words
+ * come from the original iPhone OS 3.1.3 shared cache. Test them as complete
+ * call/return units, including BX back to the Thumb caller, because a correct
+ * VCVT surrounded by a wrong transfer or interworking edge is still a boot
+ * failure.
+ */
+static void test_ios313_corefoundation_vfp_helpers(void) {
+    uint32_t fix_u32[] = {
+        0xec410b17u,                         /* VMOV d7, r0, r1       */
+        0xeefc7bc7u,                         /* VCVT.U32.F64 s15, d7  */
+        0xee170a90u,                         /* VMOV r0, s15          */
+        0xe12fff1eu,                         /* BX   lr               */
+    };
+    uint32_t float_u32[] = {
+        0xee070a90u,                         /* VMOV s15, r0          */
+        0xeeb87b67u,                         /* VCVT.F64.U32 d7, s15  */
+        0xec510b17u,                         /* VMOV r0, r1, d7       */
+        0xe12fff1eu,                         /* BX   lr               */
+    };
+    struct {
+        uint32_t input;
+        const char *why;
+    } unsigned_cases[] = {
+        { 0x00000000u, "zero" },
+        { 0xffffffffu, "UINT32_MAX" },
+    };
+    arm_cpu_t c;
+
+    CHECK(fix_u32[1] == UN_S_FROM_D(12,1, 15,7),
+          "shared-cache VCVT.U32.F64 encoding = 0x%08x", fix_u32[1]);
+    CHECK(fix_u32[2] == VMOV_R_S(0,15),
+          "shared-cache VMOV r0,s15 encoding = 0x%08x", fix_u32[2]);
+    CHECK(float_u32[0] == VMOV_S_R(15,0),
+          "shared-cache VMOV s15,r0 encoding = 0x%08x", float_u32[0]);
+    CHECK(float_u32[1] == VFP_DP(1,1,1, 0,8,7, 1,0,1, 1,7),
+          "shared-cache VCVT.F64.U32 encoding = 0x%08x", float_u32[1]);
+
+    for (unsigned i = 0;
+         i < sizeof unsigned_cases / sizeof unsigned_cases[0]; i++) {
+        uint64_t source = d2u((double)unsigned_cases[i].input);
+
+        vfp_reset(&c);
+        c.vfp_fpscr = ARM_FPSCR_FZ | ARM_FPSCR_DN | ARM_FPSCR_RMODE;
+        c.r[0] = (uint32_t)source;
+        c.r[1] = (uint32_t)(source >> 32);
+        c.r[14] = 0x101u;                    /* real caller is Thumb */
+        CHECK(run(&c, fix_u32, sizeof fix_u32 / sizeof fix_u32[0], 4) == ARM_OK,
+              "___fixunsdfsivfp trapped for %s", unsigned_cases[i].why);
+        CHECK(c.r[0] == unsigned_cases[i].input,
+              "___fixunsdfsivfp(%s) = 0x%08x",
+              unsigned_cases[i].why, c.r[0]);
+        CHECK(c.r[15] == 0x100u && (c.cpsr & ARM_CPSR_T) != 0,
+              "___fixunsdfsivfp(%s) returned to %08x CPSR=%08x",
+              unsigned_cases[i].why, c.r[15], c.cpsr);
+
+        vfp_reset(&c);
+        c.vfp_fpscr = ARM_FPSCR_FZ | ARM_FPSCR_DN | ARM_FPSCR_RMODE;
+        c.r[0] = unsigned_cases[i].input;
+        c.r[14] = 0x101u;
+        CHECK(run(&c, float_u32, sizeof float_u32 / sizeof float_u32[0], 4) == ARM_OK,
+              "___floatunssidfvfp trapped for %s", unsigned_cases[i].why);
+        CHECK(((uint64_t)c.r[1] << 32 | c.r[0]) ==
+              d2u((double)unsigned_cases[i].input),
+              "___floatunssidfvfp(%s) = 0x%08x%08x",
+              unsigned_cases[i].why, c.r[1], c.r[0]);
+        CHECK(c.r[15] == 0x100u && (c.cpsr & ARM_CPSR_T) != 0,
+              "___floatunssidfvfp(%s) returned to %08x CPSR=%08x",
+              unsigned_cases[i].why, c.r[15], c.cpsr);
+    }
+
+    /* The helper's VCVT form is explicitly round-toward-zero and therefore
+     * ignores FPSCR.RMode. A fractional operand distinguishes it from VCVTR. */
+    {
+        uint64_t source = d2u(42.75);
+        vfp_reset(&c);
+        c.vfp_fpscr = ARM_FPSCR_FZ | ARM_FPSCR_DN | ARM_FPSCR_RMODE;
+        c.r[0] = (uint32_t)source;
+        c.r[1] = (uint32_t)(source >> 32);
+        c.r[14] = 0x101u;
+        CHECK(run(&c, fix_u32, sizeof fix_u32 / sizeof fix_u32[0], 4) == ARM_OK,
+              "___fixunsdfsivfp trapped on a fractional input");
+        CHECK(c.r[0] == 42u, "___fixunsdfsivfp(42.75) = %u", c.r[0]);
+        CHECK((c.vfp_fpscr & ARM_FPSCR_IXC) != 0,
+              "fractional ___fixunsdfsivfp did not set IXC");
+    }
+}
+
 /* ============================================ things that must trap ====== */
 
 /*
@@ -1267,6 +1357,7 @@ int main(void) {
     test_vcmp_writes_fpscr_not_cpsr();
     test_vcmp_with_zero();
     test_conversions();
+    test_ios313_corefoundation_vfp_helpers();
     test_unimplemented_encodings_still_halt();
     test_unmodelled_fpscr_modes_halt();
     test_flush_to_zero();
