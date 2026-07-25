@@ -2919,6 +2919,31 @@ SPRINGBOARD_UI_CHECKPOINTS[] = {
     { "SpringBoard:UIController-store",              UINT32_C(0x0000a7c4) },
     { "SpringBoard:post-UIController-call",          UINT32_C(0x0000a7d2) },
     { "SpringBoard:post-UIController-return",        UINT32_C(0x0000a7d6) },
+    /*
+     * Does userspace ever ASK for a drawing surface?
+     *
+     * The kernel-side answer is already known and is the reason no pixel is
+     * ever written: IOSurface:create-entry and the H1 createSurface path have
+     * zero hits in every run. What that cannot distinguish is whether UIKit
+     * never asks, or asks and fails before the request reaches the kernel.
+     *
+     * These are the userland entry points, resolved out of the 7E18 shared
+     * cache with tools/dscmap.py, so they are exact rather than guessed:
+     *
+     *   CoreSurface.framework @ 343ab000  _CoreSurfaceBufferCreate  +0x165c
+     *   IOSurface.framework   @ 3087d000  _IOSurfaceCreate          +0x3e10
+     *                                     _IOSurfaceClientCreate    +0x2538
+     *
+     * UIKit draws into a CoreSurface that the window server composites; it
+     * does not write the scanout buffer directly. So a zero hit on
+     * BufferCreate means the pixels were never going to exist no matter how
+     * many instructions the boot is given, and the search moves to why UIKit
+     * never reaches its own allocation.
+     */
+    { "CoreSurface:BufferCreate-entry",              UINT32_C(0x343ac65c) },
+    { "CoreSurface:AcceleratorCreate-entry",         UINT32_C(0x343ac7dc) },
+    { "IOSurface:IOSurfaceCreate-entry",             UINT32_C(0x30880e10) },
+    { "IOSurface:ClientCreate-entry",                UINT32_C(0x3087f538) },
 };
 #define SPRINGBOARD_UI_CHECKPOINT_COUNT \
     ((unsigned)(sizeof SPRINGBOARD_UI_CHECKPOINTS / \
@@ -6731,6 +6756,10 @@ static int springboard_ui_checkpoint_index(uint32_t pc) {
         case UINT32_C(0x0000a7c4): return 111;
         case UINT32_C(0x0000a7d2): return 112;
         case UINT32_C(0x0000a7d6): return 113;
+        case UINT32_C(0x343ac65c): return 114;
+        case UINT32_C(0x343ac7dc): return 115;
+        case UINT32_C(0x30880e10): return 116;
+        case UINT32_C(0x3087f538): return 117;
         default: break;
     }
     return -1;
