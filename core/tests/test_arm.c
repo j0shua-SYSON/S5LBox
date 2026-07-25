@@ -4350,6 +4350,102 @@ static void split_setup(arm_cpu_t *c, const uint32_t *prog, size_t words,
     c->r[15] = 0;
 }
 
+/*
+ * ARMv6 parallel add/subtract. Run32 stopped on 0xe611ef9e, SADD8 lr, r1, lr,
+ * in SpringBoard's path to its first frame. The whole family is implemented
+ * together because the classes differ only in how a lane result is reduced, so
+ * covering one and trapping its neighbours would hide the next stop behind an
+ * identical shape.
+ *
+ * Each case builds r1/r2, executes one encoding, and checks the packed result
+ * and the GE flags. Lane independence is the property that matters most: a
+ * carry or borrow must never cross a lane boundary.
+ */
+static void test_parallel_add_sub_family(void) {
+    arm_cpu_t c;
+    static const struct {
+        uint32_t insn, a, b, expect, ge;
+        bool check_ge;
+        const char *what;
+    } CASES[] = {
+        /* Every encoding below is Rd = r2, Rn = r1, Rm = r0. */
+        /* SADD8: -128+127, -1+1, 1+2, 127+1 -- the last wraps to 0x80 but its
+         * full-precision sum is still non-negative, so GE3 is set. */
+        { 0xe6112f90u, 0x7f01ff80u, 0x0102017fu, 0x800300ffu, 0xeu, true,
+          "SADD8 lanes and GE" },
+        /* The exact encoding run32 stopped on: SADD8 lr, r1, lr. */
+        { 0xe611ef9eu, 0x00000001u, 0u, 0u, 0u, false, "SADD8 lr,r1,lr decodes" },
+        /* SADD16: -1+1 in the low lane must not carry into the high lane. */
+        { 0xe6112f10u, 0x0001ffffu, 0x00010001u, 0x00020000u, 0xfu, true,
+          "SADD16 no carry across lanes" },
+        /* SSUB16 with a negative low lane clears the low GE pair. */
+        { 0xe6112f70u, 0x00000000u, 0x00000001u, 0x0000ffffu, 0xcu, true,
+          "SSUB16 GE from lane sign" },
+        /* UADD8 sets GE from the unsigned carry out of each byte. */
+        { 0xe6512f90u, 0x80ff0100u, 0x8001ff00u, 0x00000000u, 0xeu, true,
+          "UADD8 GE from carry" },
+        /* USUB8: GE means "no borrow", i.e. a >= b per byte. */
+        { 0xe6512ff0u, 0x02000200u, 0x01010100u, 0x01ff0100u, 0xbu, true,
+          "USUB8 GE from no-borrow" },
+        /* UQADD8 saturates each byte at 0xff rather than wrapping. */
+        { 0xe6612f90u, 0x80ff0100u, 0x8001ff00u, 0xffffff00u, 0u, false,
+          "UQADD8 saturates" },
+        /* QADD16 saturates a signed halfword at 0x7fff. */
+        { 0xe6212f10u, 0x7fff0000u, 0x00010000u, 0x7fff0000u, 0u, false,
+          "QADD16 saturates" },
+        /* SHADD8 halves each lane: (4+2)>>1 == 3. */
+        { 0xe6312f90u, 0x00000004u, 0x00000002u, 0x00000003u, 0u, false,
+          "SHADD8 halves" },
+        /* UHADD16 halves without sign extension: (0xffff+1)>>1 == 0x8000. */
+        { 0xe6712f10u, 0x0000ffffu, 0x00000001u, 0x00008000u, 0u, false,
+          "UHADD16 halves unsigned" },
+        /* SASX: low = a.lo - b.hi = 3-2 = 1; high = a.hi + b.lo = 5+1 = 6. */
+        { 0xe6112f30u, 0x00050003u, 0x00020001u, 0x00060001u, 0xfu, true,
+          "SASX exchange" },
+        /* SSAX: low = a.lo + b.hi = 3+2 = 5; high = a.hi - b.lo = 5-1 = 4. */
+        { 0xe6112f50u, 0x00050003u, 0x00020001u, 0x00040005u, 0xfu, true,
+          "SSAX exchange" },
+    };
+
+    for (size_t i = 0; i < sizeof CASES / sizeof CASES[0]; i++) {
+        uint32_t prog[] = { CASES[i].insn };
+        memset(g_ram, 0, sizeof g_ram);
+        m_w32(NULL, 0, prog[0]);
+        arm_reset(&c, &g_bus);
+        c.cpsr = (c.cpsr & ~0x1fu) | ARM_MODE_SYS;
+        c.r[1]  = CASES[i].a;      /* Rn */
+        c.r[0]  = CASES[i].b;      /* Rm */
+        c.r[14] = CASES[i].b;
+        CHECK(arm_step(&c) == ARM_OK, "%s: refused", CASES[i].what);
+        if (CASES[i].check_ge) {
+            CHECK(c.r[2] == CASES[i].expect, "%s: got %08x expected %08x",
+                  CASES[i].what, c.r[2], CASES[i].expect);
+            CHECK(((c.cpsr >> 16) & 0xfu) == CASES[i].ge,
+                  "%s: GE %x expected %x", CASES[i].what,
+                  (c.cpsr >> 16) & 0xfu, CASES[i].ge);
+        }
+    }
+
+    /* The saturating and halving classes must leave GE alone. */
+    {
+        uint32_t prog[] = { 0xe6612f90u };            /* UQADD8 r2, r1, r0 */
+        memset(g_ram, 0, sizeof g_ram);
+        m_w32(NULL, 0, prog[0]);
+        arm_reset(&c, &g_bus);
+        c.cpsr = ((c.cpsr & ~0x1fu) | ARM_MODE_SYS) | (0xfu << 16);
+        CHECK(arm_step(&c) == ARM_OK, "UQADD8 refused");
+        CHECK(((c.cpsr >> 16) & 0xfu) == 0xfu,
+              "a saturating class must not write GE");
+    }
+
+    /* PC operands are UNPREDICTABLE and must refuse rather than branch. */
+    {
+        uint32_t prog[] = { 0xe611ff90u };            /* SADD8 pc, r1, r0 */
+        CHECK(run_status(&c, prog, 1, 1) == ARM_UNDEFINED,
+              "SADD8 with Rd == PC must refuse");
+    }
+}
+
 static void test_srs_and_rfe_stop_after_the_first_fault(void) {
     /* The first frame word is in an unmapped page while the second is a mapped,
      * watched device-like address. Once the first access faults, neither SRS nor
@@ -4759,6 +4855,7 @@ int main(void) {
     test_cp15_thread_id_registers_stay_user_accessible();
     test_unaligned_access_spanning_two_pages();
     test_unaligned_access_faulting_on_the_second_page();
+    test_parallel_add_sub_family();
     test_srs_and_rfe_stop_after_the_first_fault();
     test_xn_blocks_fetch_from_a_small_page();
     test_xn_on_a_section_and_the_xp_gate();

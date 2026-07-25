@@ -1513,6 +1513,122 @@ static arm_status_t exec_media(arm_cpu_t *c, uint32_t pc, uint32_t insn) {
         c->r[rd] = sign_extend16(h);
         return ARM_OK;
     }
+    /*
+     * ARMv6 parallel (SIMD) addition and subtraction.
+     *
+     *   cccc 0110 0aaa nnnn dddd 1111 ooo1 mmmm
+     *
+     * aaa selects the class and ooo the lane operation. The whole family is
+     * implemented together rather than just the encoding that stopped a boot:
+     * these differ only in how one lane result is reduced, so implementing one
+     * and leaving its neighbours to trap would hide the next stop behind an
+     * identical shape. That is the same reasoning the paired-extend family was
+     * implemented under.
+     *
+     * Lane arithmetic is done in wider signed/unsigned intermediates and only
+     * then narrowed, so a carry or borrow can never leak between lanes.
+     *
+     * Only the plain signed and unsigned classes write GE; the saturating and
+     * halving classes leave it alone, which is what SEL then reads.
+     */
+    if ((insn & 0x0f800f10u) == 0x06000f10u) {
+        unsigned cls = (insn >> 20) & 7u;    /* 1 S, 2 Q, 3 SH, 5 U, 6 UQ, 7 UH */
+        unsigned op  = (insn >> 5) & 7u;
+        unsigned rn  = (insn >> 16) & 0xfu;
+        unsigned rd  = (insn >> 12) & 0xfu;
+        unsigned rm  = insn & 0xfu;
+        if (cls == 0u || cls == 4u) return ARM_UNDEFINED;
+        if (op == 5u || op == 6u)   return ARM_UNDEFINED;
+        /* Rd, Rn or Rm == PC is UNPREDICTABLE; refuse rather than invent. */
+        if (rd == 15u || rn == 15u || rm == 15u) return ARM_UNDEFINED;
+
+        uint32_t a = reg_read(c, pc, rn), b = reg_read(c, pc, rm);
+        bool byte    = (op == 4u || op == 7u);
+        bool is_sub  = (op == 3u || op == 7u);
+        bool exch_as = (op == 1u);           /* ASX: sub low, add high  */
+        bool exch_sa = (op == 2u);           /* SAX: add low, sub high  */
+        bool sgn     = (cls == 1u || cls == 2u || cls == 3u);
+        bool sat     = (cls == 2u || cls == 6u);
+        bool halve   = (cls == 3u || cls == 7u);
+        bool writes_ge = (cls == 1u || cls == 5u);
+
+        unsigned lanes = byte ? 4u : 2u;
+        unsigned width = byte ? 8u : 16u;
+        uint32_t result = 0, ge = 0;
+
+        for (unsigned i = 0; i < lanes; i++) {
+            unsigned sh = i * width;
+            uint32_t am = (a >> sh) & (byte ? 0xffu : 0xffffu);
+            /* The exchange forms pair lane 0 with lane 1 of the other operand;
+             * they are defined only for the halfword operations. */
+            unsigned bi = (!byte && (exch_as || exch_sa)) ? (1u - i) : i;
+            uint32_t bm = (b >> (bi * width)) & (byte ? 0xffu : 0xffffu);
+
+            bool sub = is_sub;
+            if (exch_as) sub = (i == 0u);    /* low subtracts, high adds */
+            if (exch_sa) sub = (i == 1u);    /* low adds, high subtracts */
+
+            int64_t  sv;                      /* signed full-precision lane   */
+            uint64_t uv;                      /* unsigned full-precision lane */
+            int64_t  as = sgn ? (byte ? (int64_t)(int8_t)am
+                                      : (int64_t)(int16_t)am)
+                              : (int64_t)am;
+            int64_t  bs = sgn ? (byte ? (int64_t)(int8_t)bm
+                                      : (int64_t)(int16_t)bm)
+                              : (int64_t)bm;
+            sv = sub ? (as - bs) : (as + bs);
+            uv = sub ? ((uint64_t)am - (uint64_t)bm)
+                     : ((uint64_t)am + (uint64_t)bm);
+
+            uint32_t lane;
+            if (halve) {
+                /* Arithmetic shift for the signed classes, logical for the
+                 * unsigned ones; the halving forms never saturate. */
+                lane = sgn ? (uint32_t)(int32_t)(sv >> 1)
+                           : (uint32_t)((sub ? (int64_t)am - (int64_t)bm
+                                             : (int64_t)am + (int64_t)bm) >> 1);
+            } else if (sat) {
+                if (sgn) {
+                    int64_t lo = byte ? -128 : -32768;
+                    int64_t hi = byte ?  127 :  32767;
+                    if (sv < lo) sv = lo;
+                    if (sv > hi) sv = hi;
+                    lane = (uint32_t)(int32_t)sv;
+                } else {
+                    int64_t s = sub ? ((int64_t)am - (int64_t)bm)
+                                    : ((int64_t)am + (int64_t)bm);
+                    int64_t hi = byte ? 255 : 65535;
+                    if (s < 0)  s = 0;
+                    if (s > hi) s = hi;
+                    lane = (uint32_t)s;
+                }
+            } else {
+                lane = (uint32_t)(sgn ? (uint64_t)sv : uv);
+            }
+
+            uint32_t mask = byte ? 0xffu : 0xffffu;
+            result |= (lane & mask) << sh;
+
+            if (writes_ge) {
+                /* Signed: the lane result is non-negative. Unsigned: an add
+                 * carried out, or a subtract did not borrow. */
+                bool set = sgn ? (sv >= 0)
+                               : (sub ? (am >= bm)
+                                      : (uv > (uint64_t)mask));
+                if (byte) {
+                    if (set) ge |= 1u << i;
+                } else if (set) {
+                    ge |= 3u << (i * 2u);
+                }
+            }
+        }
+
+        c->r[rd] = result;
+        if (writes_ge)
+            c->cpsr = (c->cpsr & ~(0xfu << 16)) | ((ge & 0xfu) << 16);
+        return ARM_OK;
+    }
+
     return ARM_UNDEFINED;                  /* PKH, SEL, USAT, SMLAD, ... */
 }
 
