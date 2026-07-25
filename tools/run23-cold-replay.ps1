@@ -11,7 +11,16 @@ param(
     [string] $BootkernelSha256,
 
     [Parameter(Mandatory = $true)]
-    [long] $BootkernelBytes
+    [long] $BootkernelBytes,
+
+    # Retired-instruction cap. The default is the full SpringBoard-frontier
+    # replay. A smaller cap is legitimate for a focused diagnostic -- for
+    # example CommCenter's entire startup completes below 1e9 -- and costs
+    # proportionally less wall clock. The profile window follows the cap so a
+    # short run still profiles its own tail rather than a range it never
+    # reaches.
+    [ValidateRange(1000000, 4000000000)]
+    [long] $InstructionCap = 2100000000
 )
 
 Set-StrictMode -Version Latest
@@ -618,6 +627,11 @@ try {
         'immutable rootfs' $sourceRoot $sourceRootBytes $sourceRootSha256
     $scriptEvidence = Get-FileEvidence 'Run23 launcher' $scriptPath
 
+    $profileSpan = [long]200000000
+    $profileStart = $InstructionCap - $profileSpan
+    if ($profileStart -lt 0) { $profileStart = [long]0 }
+    $profileWindow = '{0}:{1}' -f $profileStart, $InstructionCap
+
     $bootArguments = @(
         $kernel,
         '-p', '0x08000000',
@@ -630,9 +644,9 @@ try {
         '-R', '128',
         '-F',
         '-H', '0x3d200000',
-        '-W', '1900000000:2100000000',
+        '-W', $profileWindow,
         '-Z', '100000000',
-        '-n', '2100000000'
+        '-n', [string]$InstructionCap
     )
     $childCommandLine = (
         $bootArguments |
@@ -674,8 +688,8 @@ try {
         "executable: $runBin",
         "argv_json: $argvJson",
         "windows_command_line: $exactCommand",
-        'instruction_cap: 2100000000',
-        'profile_window: 1900000000:2100000000',
+        "instruction_cap: $InstructionCap",
+        "profile_window: $profileWindow",
         'heartbeat_interval: 100000000',
         'hot_page: 0x3d200000',
         'guest_ram_mib: 128',
