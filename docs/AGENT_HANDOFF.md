@@ -1752,11 +1752,30 @@ no SRDY / no SPI transfer model
 already fails the ioctl and CommCenter retries anyway — 177 times over 5.7e9
 instructions. A prompt clean failure is demonstrably insufficient.
 
-**The next step is read-only, and must precede any device work:** disassemble
-`BasebandSPIIFXProtocolVersion1`'s SRDY path and `handleSRDYTimeoutAction` to
-determine (a) exactly what it samples — the GPIO input, an SPI status bit, or
-an interrupt — and (b) whether any path exists in which the driver concludes
-"no modem" durably instead of rearming. Only then decide between:
+**The next step is read-only, and must precede any device work.** The entry
+points are already located, so resume exactly here rather than re-deriving them:
+
+```text
+BasebandSPI+0x71a8  c05f81a8  literal pool holding "handleSRDYTimeoutAction"
+BasebandSPI+0x7170  c05f8170  handleSRDYTimeoutAction itself (Thumb)
+                                vtable slot 0x50 -> name/getter
+                                IOLog c0174730 "Enter"
+                                real handler via literal c05f34d1
+                                IOLog "Exit"
+BasebandSPI+0x24d0  c05f34d0  THE SRDY TIMEOUT DECISION (Thumb)
+                                branches on the state field at [this+0x68]:
+                                  (state - 1) <= 1  -> c05f3578
+                                  else              -> formats and logs, and
+                                                       calls c05f33c0
+BasebandSPI+0x24bc  c05f33c0  called on the non-trivial arm; not yet read
+AppleSerialMultiplexer+0x5040 c060d040  the kASMFatalErrorSPI reference
+```
+
+Read `c05f34d0` through both arms and `c05f33c0`, and establish what `[this+0x68]`
+is set from, to answer (a) exactly what SRDY is sampled from — the GPIO input,
+an SPI status bit, or an interrupt — and (b) whether any path exists in which
+the driver concludes "no modem" durably instead of rearming. Only then decide
+between:
 
 - a minimal SRDY/GPIO input model that lets the handshake complete and the mux
   come up, with the modem reporting no service; or
