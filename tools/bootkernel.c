@@ -2290,6 +2290,31 @@ static unsigned    NM;
  * directly. These are address-space observations, not a symbol map.
  */
 #define COMMCENTER_WATCH_USER_PC_CAP 64u
+
+/*
+ * Exact stub sites in the stock 7E18 CommCenter executable.
+ *
+ * Provenance: the binary was extracted read-only from a retained rootfs work
+ * image with tools/hfsx_extract.py and resolved with tools/machosyms.py --
+ * 724,208 bytes, UUID b4b87526ae086bb62c982f1078f43f81, SHA-256
+ * 5E4AAA49C9CA2E05B3C0F58A462311097172AB2503505340E442C29FF7FDF3E3, __TEXT
+ * 0x1000..0x9c000, __symbolstub1 0x9b718..0x9c000 with 4-byte stubs. Each
+ * address below is that section's base plus the stub's indirect-table slot,
+ * so a hit means "called this imported function", not "executed its own code".
+ *
+ * These are absolute because the image is loaded at its Mach-O vmaddr. If a
+ * different CommCenter build is ever supplied they become meaningless, which
+ * is why the report prints the expected identity alongside the counts.
+ *
+ * _bootstrap_check_in is the one that decides the current frontier. Run24
+ * proved launchd still holds the com.apple.commcenter receive right while six
+ * clients queue behind it; whether CommCenter ever even asks for that right is
+ * exactly this checkpoint.
+ */
+#define COMMCENTER_IMAGE_STUB_LOW  UINT32_C(0x0009b718)
+#define COMMCENTER_IMAGE_STUB_HIGH UINT32_C(0x0009c000)
+#define COMMCENTER_IMAGE_CHECKPOINT_COUNT 8u
+
 typedef enum {
     COMMCENTER_WATCH_USER_REGION_LOW_IMAGE = 0,
     COMMCENTER_WATCH_USER_REGION_DYLD,
@@ -3766,6 +3791,13 @@ typedef struct {
     uint64_t user_pc_total;
     commcenter_watch_sample_t
         user_pcs[COMMCENTER_WATCH_USER_PC_CAP];
+    /* Exact imported-function stub sites; see COMMCENTER_IMAGE_CHECKPOINTS. */
+    uint64_t image_checkpoint_hits[COMMCENTER_IMAGE_CHECKPOINT_COUNT];
+    uint64_t image_checkpoint_first_at[COMMCENTER_IMAGE_CHECKPOINT_COUNT];
+    uint64_t image_checkpoint_last_at[COMMCENTER_IMAGE_CHECKPOINT_COUNT];
+    uint32_t image_checkpoint_lr[COMMCENTER_IMAGE_CHECKPOINT_COUNT];
+    uint32_t image_checkpoint_thread[COMMCENTER_IMAGE_CHECKPOINT_COUNT];
+    uint32_t image_checkpoint_r[COMMCENTER_IMAGE_CHECKPOINT_COUNT][4];
     commcenter_watch_switch_event_t
         switches[COMMCENTER_WATCH_SWITCH_CAP];
     commcenter_watch_mach_event_t
@@ -6652,6 +6684,25 @@ COMMCENTER_WATCH_MILESTONE_NAMES[COMMCENTER_WATCH_MILESTONE_COUNT] = {
     "_semaphore_wait_continue"
 };
 
+/*
+ * Exact imported-function stubs in the stock 7E18 CommCenter executable.
+ * Addresses are __symbolstub1 base plus slot * 4; see the block comment on
+ * COMMCENTER_IMAGE_STUB_LOW for provenance and why they are absolute.
+ */
+static const struct {
+    uint32_t pc;
+    const char *name;
+} COMMCENTER_IMAGE_CHECKPOINTS[COMMCENTER_IMAGE_CHECKPOINT_COUNT] = {
+    { UINT32_C(0x0009bd74), "_bootstrap_check_in" },
+    { UINT32_C(0x0009be04), "_mach_msg" },
+    { UINT32_C(0x0009baf8), "_IOServiceOpen" },
+    { UINT32_C(0x0009baa4), "_IOConnectCallScalarMethod" },
+    { UINT32_C(0x0009bed8), "_select" },
+    { UINT32_C(0x0009beec), "_sem_wait" },
+    { UINT32_C(0x0009be84), "_pthread_cond_timedwait" },
+    { UINT32_C(0x0009bdf0), "_ioctl" }
+};
+
 static unsigned commcenter_watch_phase(
         const commcenter_watch_t *watch, uint64_t at) {
     return watch && watch->initial_send_queue_entry_seen &&
@@ -7599,6 +7650,24 @@ static inline void commcenter_watch_note_instruction(
                          COMMCENTER_WATCH_USER_PC_CAP],
         cpu, at, pc, cpu->cpsr, cpu->cp15.tpidrprw);
     watch->user_pc_total++;
+
+    /* Exact imported-function stubs. The range test keeps the common path
+     * to one compare; only stub-section PCs reach the table scan. */
+    if (pc < COMMCENTER_IMAGE_STUB_LOW || pc >= COMMCENTER_IMAGE_STUB_HIGH)
+        return;
+    for (unsigned i = 0; i < COMMCENTER_IMAGE_CHECKPOINT_COUNT; i++) {
+        if (COMMCENTER_IMAGE_CHECKPOINTS[i].pc != pc) continue;
+        if (!watch->image_checkpoint_hits[i]) {
+            watch->image_checkpoint_first_at[i] = at;
+            watch->image_checkpoint_lr[i] = cpu->r[14];
+            watch->image_checkpoint_thread[i] = cpu->cp15.tpidrprw;
+            for (unsigned k = 0; k < 4; k++)
+                watch->image_checkpoint_r[i][k] = cpu->r[k];
+        }
+        watch->image_checkpoint_hits[i]++;
+        watch->image_checkpoint_last_at[i] = at;
+        break;
+    }
 }
 
 static void commcenter_watch_note_transition(
@@ -16228,6 +16297,30 @@ static void commcenter_watch_report(void) {
                        watch->user_region_last_pc[i]);
             printf("\n");
         }
+        printf("    CommCenter exact imported-function stubs"
+               " (stock 7E18 image, __symbolstub1 0009b718..0009c000,"
+               " UUID b4b87526ae086bb62c982f1078f43f81):\n");
+        for (unsigned i = 0; i < COMMCENTER_IMAGE_CHECKPOINT_COUNT; i++) {
+            printf("      %-28s pc=%08x hits=%" PRIu64,
+                   COMMCENTER_IMAGE_CHECKPOINTS[i].name,
+                   COMMCENTER_IMAGE_CHECKPOINTS[i].pc,
+                   watch->image_checkpoint_hits[i]);
+            if (watch->image_checkpoint_hits[i])
+                printf(" first/last @%" PRIu64 "/%" PRIu64
+                       " lr=%08x thread=%08x r0-r3=%08x/%08x/%08x/%08x",
+                       watch->image_checkpoint_first_at[i],
+                       watch->image_checkpoint_last_at[i],
+                       watch->image_checkpoint_lr[i],
+                       watch->image_checkpoint_thread[i],
+                       watch->image_checkpoint_r[i][0],
+                       watch->image_checkpoint_r[i][1],
+                       watch->image_checkpoint_r[i][2],
+                       watch->image_checkpoint_r[i][3]);
+            else
+                printf("  NEVER CALLED");
+            printf("\n");
+        }
+
         uint64_t retained = watch->user_pc_total <
                                 COMMCENTER_WATCH_USER_PC_CAP
                             ? watch->user_pc_total
