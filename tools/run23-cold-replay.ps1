@@ -731,7 +731,7 @@ try {
         ConvertTo-WindowsCommandLineArgument $runBin
     ), $childCommandLine
 
-    Write-NewUtf8File $manifest @(
+    $manifestLines = @(
         'run: run23-commcenter-baseband',
         'purpose: exact cold replay of fail-closed queue, per-thread wait, and AppleBaseband notification diagnostics',
         "source_commit: $sourceCommitNormalized",
@@ -780,6 +780,7 @@ try {
         'prelaunch_status: exact HEAD, clean tracked core/tools/CMake build inputs, launcher, copied binary, kernel, device tree, and immutable rootfs verified; all outputs fresh',
         'claim_gate: no owner, wait, baseband-causality, reply, or render claim until the terminal report and immutable hashes are reviewed'
     ) + $restoreEvidenceLines
+    Write-NewUtf8File $manifest $manifestLines
     $manifestOwned = $true
 
     $startUtc = (Get-Date).ToUniversalTime().ToString('o')
