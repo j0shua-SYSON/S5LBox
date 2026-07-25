@@ -104,6 +104,37 @@ run21's firmware evidence.
   30096115527 with VFP **469/0**. Latest hosted test-only commit `657e8d8` expands
   helper-sequence coverage to VFP **488/0 locally** and passed hosted core/iOS
   runs 30097023293 and 30097023356.
+- Run34 **failed closed at exit 4** without writing a checkpoint: the sidecar
+  opened the work image a second time with `fopen` while the `file_block`
+  adapter held the only handle Windows grants. Recorded as a pass of the
+  fail-closed rule, not as a run result — it refused to write a snapshot it
+  could not stand behind. Fixed in `a6febff` by copying through the adapter's
+  own `vm_block.read_at`, the same path the guest's I/O takes.
+- Run35 (cap 5e9, checkpoint at 2.4e9) exited **0** with **no CPU stop** and
+  reached **`SpringBoard:UIController-call`, hits=1 at 3,478,858,148** — the
+  first time in the project. Telephony **completed**: `CTCenterGetDefault` call
+  at 3,335,082,498 and return at 3,335,312,957. Checkpoint sidecars were written
+  and verified (87,457,413 / 466,825,216 / 131,248 bytes).
+- Runs 30–33 reporting `UIController` at 0 hits was **not** evidence of a
+  blocker. `UIController` lies past their 2.5e9 cap. A clean cap-stop means the
+  budget ran out and carries no information about blockers; earlier wording that
+  read it as a stall was wrong.
+- **SpringBoard still has not rendered.** Run35's final PPM is the unchanged
+  seed: `CBAD1C11…`, 384 of 460,800 RGB bytes non-zero, 128 non-black pixels in
+  the top-left corner, confirmed **by eye** via `tools/ppm2png.py` and not by
+  hash alone. Live CLCD scanout recorded 0 changed bytes. CLCD itself is
+  correct and live around it — `scanning=1`, `frames=1026`, window0 320×480 at
+  `0x0885c000`, descriptor refreshes 71 → 102 — so the display path is ready and
+  the guest has not drawn into it.
+- The post-`UIController` frontier is **RSA-class arithmetic, not a wait**:
+  99.6% of the final window is userspace and ~40% is one 22-instruction loop
+  resolving via `tools/dscmap.py` to `Security.framework` `_mulg_common`,
+  schoolbook multiplication on 16-bit limbs bounded by a limb count. The
+  co-reported `0x33aae484` is `svc #0x80` in libSystem, an ordinary syscall.
+  Run36's restore banner shows the 2.4e9 checkpoint was taken inside the same
+  loop and *before* `UIApplicationMain` at 3.268e9, so that block of work
+  finished and the boot moved on: the cost recurs, it does not hang. Which
+  operation drives it, and the total remaining, are **open**.
 
 ## Evidence ledger
 
