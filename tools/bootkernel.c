@@ -411,9 +411,15 @@ static bool g_external_restore_sidecar_valid = false;
 static bool external_md_sidecar_path(char *out, size_t cap,
                                      const char *base, const char *suffix) {
     if (!out || !base || !suffix) return false;
-    size_t need = strlen(base) + strlen(suffix) + 1u;
-    if (need > cap) return false;
-    snprintf(out, cap, "%s%s", base, suffix);
+    /* Copy rather than snprintf: the lengths are already known here, so the
+     * bound is exact and there is no truncating path for a reader -- or for
+     * -Wformat-truncation -- to have to reason about. */
+    size_t base_len = strlen(base);
+    size_t suffix_len = strlen(suffix);
+    if (base_len + suffix_len + 1u > cap) return false;
+    memcpy(out, base, base_len);
+    memcpy(out + base_len, suffix, suffix_len);
+    out[base_len + suffix_len] = '\0';
     return true;
 }
 
@@ -20543,6 +20549,9 @@ int main(int argc, char **argv) {
             "      remove serial=1 from -c to route it there.\n"
             "  -g  graphics experiment: implies -F, sets v_display=1, and\n"
             "      leaves the unmodelled MBX driver matched (it may stall).\n"
+            "  -u  leave the unmodelled Synopsys OTG controller matched. It\n"
+            "      reads its hardware-configuration registers from a block we\n"
+            "      do not model and panics on the endpoint count it derives.\n"
             "  -W  <lo>[:<hi>] restrict the sampled profile / hot-PC table /\n"
             "      per-kext attribution to instructions in [lo,hi). A whole-run\n"
             "      profile of a boot that STALLS describes the boot, not the\n"
@@ -20570,6 +20579,7 @@ int main(int argc, char **argv) {
     bool want_mbx = false;    /* -g keeps the (unmodelled, hang-prone) MBX GPU driver */
     bool want_sha1hw = false; /* -S keeps the (unmodelled) SHA-1 engine matched */
     bool want_baseband = false; /* -B keeps the (unmodelled) baseband matched */
+    bool want_usb_otg = false; /* -u keeps the (unmodelled) Synopsys OTG matched */
     bool no_kpatch = false;   /* -K disables the post-load kernel patches */
     bool want_kextmap = false;/* -L prints the kext load map and exits */
     /*
@@ -20742,6 +20752,7 @@ int main(int argc, char **argv) {
         if (!strcmp(argv[i], "-g")) { want_fb = true; v_display = 1; want_mbx = true; continue; }  /* defer to IOMFB, keep MBX */
         if (!strcmp(argv[i], "-S")) { want_sha1hw = true; continue; }  /* keep the SHA-1 nub matched */
         if (!strcmp(argv[i], "-B")) { want_baseband = true; continue; } /* keep the baseband nubs matched */
+        if (!strcmp(argv[i], "-u")) { want_usb_otg = true; continue; } /* keep the Synopsys OTG nub matched */
         if (!strcmp(argv[i], "-K")) { no_kpatch = true; continue; }  /* no kernel patches */
         if (!strcmp(argv[i], "-M")) { patch_memnode = false; continue; }
         if (!strcmp(argv[i], "-L")) { want_kextmap = true; continue; }
@@ -21848,6 +21859,41 @@ external_md_work_ready:
             dt_unmatch(dt, dt_n, "baseband");
             dt_unmatch(dt, dt_n, "arm-io/spi2");
         }
+
+        /*
+         * Keep the Synopsys OTG controller from matching unless -u asks for it.
+         *
+         * Run36 panicked at 8,728,148,009 in AppleSynopsysOTG2+0x6ab0, from
+         * AppleSynopsysOTGDevice::findMaxEndpoints (AppleSynopsysOTGDevice.cpp
+         * :522). The guard immediately before the call is
+         *
+         *     ldrb r3, [r5, #0x141]   ; max_endpoint
+         *     cmp  sl, r3             ; endpoint index
+         *     blt  <skip the panic>
+         *
+         * and the driver had derived "in EPs: 1 out, EPs: 1, max_endpoint: 1,
+         * num_endpoints: 4" — self-inconsistent, because there is no OTG model
+         * behind 0x38400000 at all. The driver reads the Synopsys hardware
+         * configuration registers, gets zeros back from an unmodelled block,
+         * and panics on the endpoint count it computed from them.
+         *
+         * This is the baseband case exactly: a device that is declared but has
+         * nothing behind it is worse than a device that is absent, because the
+         * stock driver believes the register values it reads. Nothing is
+         * fabricated here — no descriptor, endpoint or interrupt is
+         * synthesized, and no plausible-looking GHWCFG value is invented to get
+         * past the assertion.
+         *
+         * The PHY nub is deliberately left matched: AppleS5L8900XUSBPhy::start
+         * completes against the clock-gate model that is already tested, and
+         * nothing downstream of it panics.
+         *
+         * -u restores the old behaviour for anyone modelling the real DWC2
+         * controller later; at that point delete this un-match rather than keep
+         * it as a workaround.
+         */
+        if (!want_usb_otg)
+            dt_unmatch(dt, dt_n, "arm-io/usb-otg");
         for (unsigned i = 0; i < ndtov; i++)
             dt_set_u32(dt, dt_n, dtov[i].path, dtov[i].prop, dtov[i].val);
         if (external_md &&
