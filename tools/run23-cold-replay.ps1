@@ -38,7 +38,17 @@ param(
     # directory so it inherits the same freshness and containment rules as every
     # other output.
     [ValidateRange(0, 24000000000)]
-    [long] $SnapshotAt = 0
+    [long] $SnapshotAt = 0,
+
+    # Start from a checkpoint written by an earlier -SnapshotAt run instead of
+    # from the kernel entry point. The three sidecars (<file>, .mdimage,
+    # .mdstate) are read-only inputs and are hashed into the manifest exactly
+    # like the kernel and the immutable rootfs, so a restored run states which
+    # machine state it inherited. The trigger point of --snapshot-at is the
+    # machine's own retired-instruction counter, which is part of the snapshot,
+    # so -InstructionCap stays absolute across a restore: restoring a 2.4e9
+    # checkpoint and asking for 12e9 runs 9.6e9 further, not 12e9 further.
+    [string] $RestoreFrom = ''
 )
 
 Set-StrictMode -Version Latest
@@ -682,6 +692,33 @@ try {
         }
         $bootArguments += @('--snapshot-at', [string]$SnapshotAt, $snapshotPath)
     }
+
+    $restoreEvidenceLines = @('restore_from: none; cold boot from the kernel entry point')
+    if ($RestoreFrom -ne '') {
+        if ($SnapshotAt -gt 0) {
+            throw 'Taking a checkpoint during a restored run is not supported yet; use one of -SnapshotAt or -RestoreFrom'
+        }
+        $restorePath = ConvertTo-CanonicalPath $repo $RestoreFrom
+        # A checkpoint is machine state, not firmware, so it must live in the
+        # workspace's work root like every other mutable artefact -- but it is
+        # an INPUT here, so it is read, never written, and never placed under
+        # this run's own directory.
+        Assert-PathIsStrictlyBelow 'Run23 restore source' $workRoot $restorePath
+        $restoreEvidenceLines = @()
+        foreach ($suffix in @('', '.mdimage', '.mdstate')) {
+            $part = $restorePath + $suffix
+            if (-not (Test-Path -LiteralPath $part -PathType Leaf)) {
+                throw "Restore source is missing its '$suffix' sidecar: $part"
+            }
+            $evidence = Get-FileEvidence "restore$suffix" $part
+            $restoreEvidenceLines += @(
+                "restore_from$($suffix)_path: $part",
+                "restore_from$($suffix)_bytes: $($evidence.Bytes)",
+                "restore_from$($suffix)_sha256: $($evidence.Sha256)"
+            )
+        }
+        $bootArguments += @('--restore', $restorePath)
+    }
     $childCommandLine = (
         $bootArguments |
         ForEach-Object {
@@ -726,10 +763,11 @@ try {
         "profile_window: $profileWindow",
         "snapshot_at: $SnapshotAt",
         'heartbeat_interval: 100000000',
+        'restore_note: --snapshot-at and --restore are both keyed on the machine''s own retired-instruction counter, so the cap is absolute across a restore',
         'hot_page: 0x3d200000',
         'guest_ram_mib: 128',
         'display_enabled: true',
-        'snapshots: none; external-md is cold-boot-only',
+        'snapshots: -SnapshotAt writes a checkpoint; -RestoreFrom starts from one. Taking a checkpoint during a restored run is not supported yet.',
         "working_directory: $runDir",
         "stdout: $stdout",
         "stderr: $stderr",
@@ -741,7 +779,7 @@ try {
         "TMPDIR: $env:TMPDIR",
         'prelaunch_status: exact HEAD, clean tracked core/tools/CMake build inputs, launcher, copied binary, kernel, device tree, and immutable rootfs verified; all outputs fresh',
         'claim_gate: no owner, wait, baseband-causality, reply, or render claim until the terminal report and immutable hashes are reviewed'
-    )
+    ) + $restoreEvidenceLines
     $manifestOwned = $true
 
     $startUtc = (Get-Date).ToUniversalTime().ToString('o')
