@@ -2284,6 +2284,20 @@ static unsigned    NM;
 #define SPRINGBOARD_COMMCENTER_PROC_PID_OFFSET UINT32_C(0x08)
 #define COMMCENTER_WATCH_PHASE_COUNT 2u
 #define COMMCENTER_WATCH_MODE_COUNT 2u
+/*
+ * User-mode regions, using the same fixed boundaries as the SpringBoard
+ * post-SETEXEC trace so CommCenter's execution can be compared against it
+ * directly. These are address-space observations, not a symbol map.
+ */
+#define COMMCENTER_WATCH_USER_PC_CAP 64u
+typedef enum {
+    COMMCENTER_WATCH_USER_REGION_LOW_IMAGE = 0,
+    COMMCENTER_WATCH_USER_REGION_DYLD,
+    COMMCENTER_WATCH_USER_REGION_STACK,
+    COMMCENTER_WATCH_USER_REGION_SHARED_CACHE,
+    COMMCENTER_WATCH_USER_REGION_OTHER,
+    COMMCENTER_WATCH_USER_REGION_COUNT
+} commcenter_watch_user_region_t;
 #define COMMCENTER_WATCH_SWITCH_CAP 64u
 #define COMMCENTER_WATCH_MACH_CAP 32u
 #define COMMCENTER_WATCH_MILESTONE_COUNT 7u
@@ -3729,6 +3743,29 @@ typedef struct {
         first[COMMCENTER_WATCH_PHASE_COUNT];
     commcenter_watch_sample_t
         last[COMMCENTER_WATCH_PHASE_COUNT];
+    /*
+     * User-mode-only attribution. The samples above are captured regardless of
+     * mode, so in practice they report kernel PCs and say nothing about where
+     * CommCenter's own code goes. Run24 made that the live question: five
+     * daemons plus SpringBoard are queued behind a service that has never
+     * checked in, and the baseband lead that might have explained it is dead.
+     *
+     * These fields are USR-mode only, and the region counters use the same
+     * fixed boundaries the SpringBoard trace uses, so the two are comparable.
+     */
+    commcenter_watch_sample_t
+        first_user[COMMCENTER_WATCH_PHASE_COUNT];
+    commcenter_watch_sample_t
+        last_user[COMMCENTER_WATCH_PHASE_COUNT];
+    uint64_t user_region_hits[COMMCENTER_WATCH_USER_REGION_COUNT];
+    uint64_t user_region_first_at[COMMCENTER_WATCH_USER_REGION_COUNT];
+    uint64_t user_region_last_at[COMMCENTER_WATCH_USER_REGION_COUNT];
+    uint32_t user_region_first_pc[COMMCENTER_WATCH_USER_REGION_COUNT];
+    uint32_t user_region_last_pc[COMMCENTER_WATCH_USER_REGION_COUNT];
+    /* Newest-retaining tail of user PCs: where it got to before parking. */
+    uint64_t user_pc_total;
+    commcenter_watch_sample_t
+        user_pcs[COMMCENTER_WATCH_USER_PC_CAP];
     commcenter_watch_switch_event_t
         switches[COMMCENTER_WATCH_SWITCH_CAP];
     commcenter_watch_mach_event_t
@@ -7529,6 +7566,39 @@ static inline void commcenter_watch_note_instruction(
     commcenter_watch_sample_capture(
         &watch->last[phase], cpu, at, pc, cpu->cpsr,
         cpu->cp15.tpidrprw);
+
+    if (mode != COMMCENTER_WATCH_USER) return;
+    if (!watch->first_user[phase].valid)
+        commcenter_watch_sample_capture(
+            &watch->first_user[phase], cpu, at, pc, cpu->cpsr,
+            cpu->cp15.tpidrprw);
+    commcenter_watch_sample_capture(
+        &watch->last_user[phase], cpu, at, pc, cpu->cpsr,
+        cpu->cp15.tpidrprw);
+
+    commcenter_watch_user_region_t region =
+        pc < UINT32_C(0x10000000)
+            ? COMMCENTER_WATCH_USER_REGION_LOW_IMAGE
+        : (pc >= UINT32_C(0x2fe00000) && pc < UINT32_C(0x2ff00000))
+            ? COMMCENTER_WATCH_USER_REGION_DYLD
+        : (pc >= UINT32_C(0x2ff00000) && pc < UINT32_C(0x30000000))
+            ? COMMCENTER_WATCH_USER_REGION_STACK
+        : (pc >= UINT32_C(0x30000000) && pc < UINT32_C(0x40000000))
+            ? COMMCENTER_WATCH_USER_REGION_SHARED_CACHE
+            : COMMCENTER_WATCH_USER_REGION_OTHER;
+    if (!watch->user_region_hits[region]) {
+        watch->user_region_first_at[region] = at;
+        watch->user_region_first_pc[region] = pc;
+    }
+    watch->user_region_hits[region]++;
+    watch->user_region_last_at[region] = at;
+    watch->user_region_last_pc[region] = pc;
+
+    commcenter_watch_sample_capture(
+        &watch->user_pcs[watch->user_pc_total %
+                         COMMCENTER_WATCH_USER_PC_CAP],
+        cpu, at, pc, cpu->cpsr, cpu->cp15.tpidrprw);
+    watch->user_pc_total++;
 }
 
 static void commcenter_watch_note_transition(
@@ -15964,6 +16034,17 @@ static void commcenter_watch_report(void) {
                watch->instructions[phase][COMMCENTER_WATCH_USER],
                watch->instructions[phase][COMMCENTER_WATCH_KERNEL],
                watch->user_returns[phase]);
+        {
+            char label[96];
+            snprintf(label, sizeof label, "%s first USER-mode step",
+                     phase_names[phase]);
+            commcenter_watch_sample_report(
+                label, &watch->first_user[phase]);
+            snprintf(label, sizeof label, "%s last USER-mode step",
+                     phase_names[phase]);
+            commcenter_watch_sample_report(
+                label, &watch->last_user[phase]);
+        }
         char first_label[96], last_label[96];
         snprintf(first_label, sizeof first_label,
                  "%s first pre-step", phase_names[phase]);
@@ -16123,6 +16204,51 @@ static void commcenter_watch_report(void) {
     }
 
     printf("    selected kernel Mach/wait milestones:\n");
+    {
+        static const char *const region_names[
+                COMMCENTER_WATCH_USER_REGION_COUNT] = {
+            "low image [00000000,10000000)",
+            "dyld      [2fe00000,2ff00000)",
+            "stack     [2ff00000,30000000)",
+            "shrd cache[30000000,40000000)",
+            "other"
+        };
+        printf("    CommCenter USER-mode region attribution"
+               " (address-space observation, not a symbol map):\n");
+        for (unsigned i = 0;
+             i < COMMCENTER_WATCH_USER_REGION_COUNT; i++) {
+            printf("      %-30s %12" PRIu64,
+                   region_names[i], watch->user_region_hits[i]);
+            if (watch->user_region_hits[i])
+                printf("  first @%" PRIu64 " pc=%08x;"
+                       " last @%" PRIu64 " pc=%08x",
+                       watch->user_region_first_at[i],
+                       watch->user_region_first_pc[i],
+                       watch->user_region_last_at[i],
+                       watch->user_region_last_pc[i]);
+            printf("\n");
+        }
+        uint64_t retained = watch->user_pc_total <
+                                COMMCENTER_WATCH_USER_PC_CAP
+                            ? watch->user_pc_total
+                            : COMMCENTER_WATCH_USER_PC_CAP;
+        printf("      newest retained USER PCs %" PRIu64 "/%" PRIu64
+               " (the tail of CommCenter's own execution):\n",
+               retained, watch->user_pc_total);
+        for (uint64_t i = 0; i < retained; i++) {
+            uint64_t index =
+                (watch->user_pc_total - retained + i) %
+                COMMCENTER_WATCH_USER_PC_CAP;
+            const commcenter_watch_sample_t *sample =
+                &watch->user_pcs[index];
+            if (!sample->valid) continue;
+            printf("        @%-12" PRIu64 " pc=%08x cpsr=%08x"
+                   " thread=%08x\n",
+                   sample->at, sample->pc, sample->cpsr,
+                   sample->thread);
+        }
+    }
+
     for (unsigned i = 0;
          i < COMMCENTER_WATCH_MILESTONE_COUNT; i++) {
         const commcenter_watch_milestone_observation_t *observation =
