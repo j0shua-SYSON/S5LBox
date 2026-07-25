@@ -4446,6 +4446,83 @@ static void test_parallel_add_sub_family(void) {
     }
 }
 
+static void test_integer_divide_is_armv7_only(void) {
+    /* SDIV/UDIV do not exist on the ARM1176. The first half of this test is the
+     * important half: it pins the CURRENT target's behaviour, so adding a second
+     * machine profile cannot quietly start executing an instruction that the
+     * real hardware under iPhone OS 3 would have trapped. */
+    arm_cpu_t c;
+    static const struct {
+        uint32_t insn, n, m, expect;
+        const char *what;
+    } CASES[] = {
+        /* Rd = r2 (19:16), Rm = r0 (11:8), Rn = r1 (3:0). Bit 21 selects
+         * unsigned, so SDIV is 0xe712f011 and UDIV is 0xe732f011. */
+        { 0xe732f011u,  7u, 2u, 3u, "UDIV truncates toward zero" },
+        { 0xe732f011u, 10u, 5u, 2u, "UDIV exact" },
+        { 0xe732f011u,  1u, 0u, 0u, "UDIV by zero yields zero" },
+        { 0xe732f011u, UINT32_C(0xffffffff), 2u, UINT32_C(0x7fffffff),
+          "UDIV treats operands as unsigned" },
+        { 0xe712f011u,  7u, 2u, 3u, "SDIV positive truncates toward zero" },
+        /* C99 division truncates toward zero, which is what the architecture
+         * specifies -- -7/2 is -3, not -4. */
+        { 0xe712f011u, (uint32_t)-7, 2u, (uint32_t)-3,
+          "SDIV negative truncates toward zero, not down" },
+        { 0xe712f011u, (uint32_t)-7, (uint32_t)-2, 3u, "SDIV both negative" },
+        { 0xe712f011u,  1u, 0u, 0u, "SDIV by zero yields zero" },
+        /* INT_MIN / -1 overflows; the architecture defines the result as
+         * INT_MIN rather than trapping, and C would call it undefined. */
+        { 0xe712f011u, UINT32_C(0x80000000), UINT32_C(0xffffffff),
+          UINT32_C(0x80000000), "SDIV INT_MIN/-1 wraps to INT_MIN" },
+    };
+
+    for (size_t i = 0; i < sizeof CASES / sizeof CASES[0]; i++) {
+        /* ARMv6: every one of these must still be refused. */
+        memset(g_ram, 0, sizeof g_ram);
+        m_w32(NULL, 0, CASES[i].insn);
+        arm_reset(&c, &g_bus);
+        /* arch is core configuration, not runtime state, so arm_reset leaves it
+         * alone -- a reset does not change which CPU you are. Set it here
+         * rather than relying on the previous iteration. */
+        c.arch = ARM_ARCH_V6_ARM1176;
+        c.cpsr = (c.cpsr & ~0x1fu) | ARM_MODE_SYS;
+        c.r[1] = CASES[i].n;
+        c.r[0] = CASES[i].m;
+        CHECK(arm_step(&c) == ARM_UNDEFINED,
+              "%s: must be UNDEFINED on the ARM1176", CASES[i].what);
+
+        /* ARMv7: the same encoding executes and produces the defined result. */
+        memset(g_ram, 0, sizeof g_ram);
+        m_w32(NULL, 0, CASES[i].insn);
+        arm_reset(&c, &g_bus);
+        c.arch = ARM_ARCH_V7_SWIFT;
+        c.cpsr = (c.cpsr & ~0x1fu) | ARM_MODE_SYS;
+        c.r[1] = CASES[i].n;
+        c.r[0] = CASES[i].m;
+        CHECK(arm_step(&c) == ARM_OK, "%s: refused on ARMv7", CASES[i].what);
+        CHECK(c.r[2] == CASES[i].expect, "%s: got %08x expected %08x",
+              CASES[i].what, c.r[2], CASES[i].expect);
+    }
+
+    /* PC operands are UNPREDICTABLE in every position, even on ARMv7. */
+    {
+        static const struct { uint32_t insn; const char *what; } PCS[] = {
+            { 0xe71ff011u, "Rd == PC" },
+            { 0xe712f01fu, "Rn == PC" },
+            { 0xe712ff11u, "Rm == PC" },
+        };
+        for (size_t i = 0; i < sizeof PCS / sizeof PCS[0]; i++) {
+            memset(g_ram, 0, sizeof g_ram);
+            m_w32(NULL, 0, PCS[i].insn);
+            arm_reset(&c, &g_bus);
+            c.arch = ARM_ARCH_V7_SWIFT;
+            c.cpsr = (c.cpsr & ~0x1fu) | ARM_MODE_SYS;
+            CHECK(arm_step(&c) == ARM_UNDEFINED,
+                  "UDIV with %s must refuse", PCS[i].what);
+        }
+    }
+}
+
 static void test_srs_and_rfe_stop_after_the_first_fault(void) {
     /* The first frame word is in an unmapped page while the second is a mapped,
      * watched device-like address. Once the first access faults, neither SRS nor
@@ -4856,6 +4933,7 @@ int main(void) {
     test_unaligned_access_spanning_two_pages();
     test_unaligned_access_faulting_on_the_second_page();
     test_parallel_add_sub_family();
+    test_integer_divide_is_armv7_only();
     test_srs_and_rfe_stop_after_the_first_fault();
     test_xn_blocks_fetch_from_a_small_page();
     test_xn_on_a_section_and_the_xp_gate();

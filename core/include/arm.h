@@ -284,8 +284,27 @@ typedef struct arm_cp15 {
     uint32_t tpidrprw;    /* c13,c0,4 privileged only */
 } arm_cp15_t;
 
+/*
+ * Which architecture variant this core implements.
+ *
+ * The emulator is built around one machine at a time, but the instruction set
+ * is not a property of the machine's peripherals -- it is a property of the
+ * core, and a second machine profile needs a second answer. Keeping it as an
+ * explicit field rather than a compile-time switch means both variants can be
+ * exercised by the same test binary, which is the only way an ARMv7-only
+ * encoding can be proven to still be REFUSED on the ARM1176.
+ *
+ * ARM_ARCH_V6_ARM1176 is deliberately zero, so every zero-initialised
+ * arm_cpu_t keeps exactly the behaviour it had before this field existed.
+ */
+typedef enum {
+    ARM_ARCH_V6_ARM1176 = 0,  /* S5L8900 / iPhone OS 3 -- the current target */
+    ARM_ARCH_V7_SWIFT   = 1   /* S5L8950X / iPhone 5, ARMv7s -- roadmap P2   */
+} arm_arch_t;
+
 typedef struct arm_cpu {
     uint32_t r[16];      /* r0–r15; r15 is PC (address of current instruction) */
+    arm_arch_t arch;     /* zero => ARM1176, so existing callers are unchanged */
     uint32_t cpsr;
     arm_cp15_t cp15;
     uint32_t spsr[ARM_BANK_COUNT];     /* saved CPSR per privileged bank        */

@@ -1629,6 +1629,54 @@ static arm_status_t exec_media(arm_cpu_t *c, uint32_t pc, uint32_t insn) {
         return ARM_OK;
     }
 
+    /*
+     * SDIV / UDIV -- ARMv7 only, and genuinely absent on the ARM1176.
+     *
+     *   SDIV: cond 0111 0001 Rd 1111 Rm 0001 Rn   (0x0710f010)
+     *   UDIV: cond 0111 0011 Rd 1111 Rm 0001 Rn   (0x0730f010)
+     *
+     * Note the operand placement differs from the usual data-processing shape:
+     * Rd is at 19:16, Rm at 11:8 and Rn at 3:0, with 15:12 fixed to 1111.
+     *
+     * The gate is the point of this block. iPhone OS 3 code must keep taking an
+     * undefined-instruction trap here, because that trap is what the harness
+     * reports as a coverage gap; silently executing a division the real ARM1176
+     * would have refused would hide a decode bug on the current target in order
+     * to serve a future one.
+     */
+    /* Bit 21 selects unsigned, so it must be OUTSIDE the mask; bits 23 and 22
+     * are zero in both encodings and stay inside it. */
+    if ((insn & 0x0fd0f0f0u) == 0x0710f010u) {
+        unsigned rd = (insn >> 16) & 0xfu;
+        unsigned rm = (insn >> 8) & 0xfu;
+        unsigned rn = insn & 0xfu;
+        bool is_unsigned = (insn >> 21) & 1u;
+        uint32_t n, m;
+
+        if (c->arch < ARM_ARCH_V7_SWIFT) return ARM_UNDEFINED;
+        /* ARM ARM DDI0406C A8-352/A8-868: any of Rd, Rn, Rm == PC is
+         * UNPREDICTABLE. Refuse rather than read the pipelined PC. */
+        if (rd == 15u || rn == 15u || rm == 15u) return ARM_UNDEFINED;
+
+        n = c->r[rn];
+        m = c->r[rm];
+        if (m == 0u) {
+            /* Division by zero yields zero when SCTLR.DZ is clear, which is
+             * how iOS runs. It is not a trap and not UNPREDICTABLE. */
+            c->r[rd] = 0u;
+        } else if (is_unsigned) {
+            c->r[rd] = n / m;
+        } else if (n == UINT32_C(0x80000000) && m == UINT32_C(0xffffffff)) {
+            /* INT_MIN / -1 overflows a signed 32-bit result; the architecture
+             * defines the answer as INT_MIN rather than trapping. Computing it
+             * in C signed arithmetic would be undefined behaviour. */
+            c->r[rd] = UINT32_C(0x80000000);
+        } else {
+            c->r[rd] = (uint32_t)((int32_t)n / (int32_t)m);
+        }
+        return ARM_OK;
+    }
+
     return ARM_UNDEFINED;                  /* PKH, SEL, USAT, SMLAD, ... */
 }
 
