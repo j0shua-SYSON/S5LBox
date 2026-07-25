@@ -1629,17 +1629,35 @@ honest: this is **a second emulator sharing a core, not a port**.
    **Answer this before building anything else.** Every other item below is
    large but ordinary; this one is unbounded, and discovering it after an SoC
    model exists would waste that work.
-2. **NEON.** The iOS 8 shared cache uses Advanced SIMD throughout — `memcpy`,
-   string operations, CoreGraphics. Not optional, roughly a thousand encodings.
-3. **SMP.** The A6 is dual-core. Per-CPU state, exclusive monitors across
+2. **Thumb-2 — the real foundation, and bigger than it looks.** The decoder in
+   `arm_interp.c` is Thumb-**1** only, because the ARM1176 has no Thumb-2:
+   `0xE800..0xEFFF` is decoded as a Thumb-1 BLX suffix, not as a 32-bit
+   instruction prefix. The iOS 8 kernel is compiled Thumb-2 throughout, so
+   nothing of it decodes until 32-bit Thumb dispatch exists. Note that the
+   MOVW/MOVT already implemented are the **ARM-state** encodings; the kernel
+   needs the T3 forms, which are separate work.
+3. **NEON — much later than first scoped.** A census of the real 12H321
+   kernelcache (`tools/kcensus.py`, 1,407,613 instructions over 591 mnemonics)
+   puts the entire `v*` family at roughly **0.37%**: `vst1` 1609, `vmov` 1468,
+   `vld1` 1186, `vstr` 909. NEON is **not** a prerequisite for booting the
+   kernel, which is what the first draft of this entry claimed. It stays
+   essential for reaching SpringBoard, because the shared cache uses Advanced
+   SIMD throughout in `memcpy`, string operations and CoreGraphics — but that is
+   a userland problem, not a boot problem, and it sequences accordingly.
+
+   The same census orders the rest of the work by evidence rather than by
+   reading the ARM ARM front to back: after conditional forms (which are already
+   covered), the genuinely missing set is dominated by `movw`/`movt` at 7.1%
+   combined, then `addw` at 0.18%, then the small VFP/NEON core above.
+4. **SMP.** The A6 is dual-core. Per-CPU state, exclusive monitors across
    cores, IPIs, per-core timers, memory ordering. Mitigation: XNU will come up
    single-core on a boot-arg, which defers all of it.
-4. **ARMv7s.** Full Thumb-2, VFPv4 with FMA, hardware integer divide, real
-   barriers. Large but mechanical, and testable in isolation with no hardware
-   model — so it is the natural first *code* to write.
-5. **S5L8950X peripherals** from scratch, including the ANS NAND controller,
+5. **ARMv7s integer.** VFPv4 with FMA and hardware integer divide. SDIV/UDIV
+   and the ARM-state MOVW/MOVT are already implemented behind the profile
+   gate; the rest is mechanical and testable with no hardware model.
+6. **S5L8950X peripherals** from scratch, including the ANS NAND controller,
    which is nothing like the S5L8900's raw NAND.
-6. **Activation.** Server-dependent on iOS 8 in a way iPhone OS 3 is not.
+7. **Activation.** Server-dependent on iOS 8 in a way iPhone OS 3 is not.
 
 ### Sequencing
 
