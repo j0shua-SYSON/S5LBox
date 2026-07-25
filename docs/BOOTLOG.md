@@ -2068,6 +2068,109 @@ contradictions. Neither overlaps the decisive `_ipc_mqueue_send` episode, whose
 route bindings, queue walk, and owner decode are each independently marked
 validated or authoritative.
 
+### 2026-07-25: run35 reached `UIController`; the frontier is now RSA, not a wait
+
+#### Run34 failed closed on a bug in the checkpoint path
+
+The first checkpoint attempt never wrote a snapshot. It stopped with
+
+```text
+external-md sidecar: cannot read ...\rootfs-...-8f01295f77f1.img
+snapshot ...\run.snapshot-2400000000: external-md sidecar failed   (exit 4)
+```
+
+The cause was in the new code, not the guest: the sidecar copied the work image
+by opening it a second time with `fopen`, while the `file_block` adapter already
+holds the only handle Windows will grant. The fix copies through the adapter's
+own `vm_block.read_at` in 1 MiB chunks, which removes the second handle and is
+the stricter choice anyway — it is the same path the guest's own I/O takes, so a
+checkpoint cannot disagree with what the guest last wrote. A short read is
+treated as failure and the partial file is removed.
+
+This is recorded because it is the failure mode that matters: the run refused to
+produce a snapshot it could not stand behind, rather than writing a corrupt one.
+
+#### Run35: the boot was never stuck after `UIController` — it had not got there
+
+Run33 reached its 2.5e9 cap cleanly, with no CPU stop at all, and `UIController`
+at 0 hits. The natural reading was that something was blocking. It was not.
+`UIController` is simply **past 2.5e9**, and every previous run stopped short of
+it. Run35 (cap 5e9, checkpoint at 2.4e9, exit 0, no CPU stop) walked the whole
+launch sequence:
+
+```text
+UIApplicationMain-call          @3,267,854,042   return hits=0  (run loop, correct)
+applicationDidFinishLaunching   @3,321,020,021
+isTethered-return               @3,322,116,558   false branch
+telephony-shared-call           @3,335,002,459
+CTCenterGetDefault-call         @3,335,082,498
+CTCenterGetDefault-return       @3,335,312,957   <- telephony SUCCEEDED
+telephony-init-return           @3,478,515,451
+telephony-shared-return         @3,478,515,454
+SpringBoard:UIController-call   @3,478,858,148   hits=1   <- first time ever
+```
+
+Telephony did not merely stop blocking after the run30 device-tree fix; it
+**completed**, including `CTCenterGetDefault`. The checkpoint sidecars were
+written correctly on this run (`run.snapshot-2400000000` 87,457,413 B,
+`.mdimage` 466,825,216 B, `.mdstate` 131,248 B).
+
+#### What the remaining time is actually spent on
+
+In the final 200M-instruction window, **99.6%** of samples are userspace and
+~40% fall in one 22-instruction loop at `0x3145ad4c..0x3145ada4`. Run logs could
+only call that "userspace", because every PC above `0x30000000` lands in one
+96 MB shared cache spanning 273 libraries. Extracting the cache from the
+retained work image and resolving the address (now `tools/dscmap.py`) names it:
+
+```text
+image:  /System/Library/Frameworks/Security.framework/Security  (+0x2bd4c)
+symbol: _mulg_common at 3145ac70  (+0xdc)
+```
+
+`_mulg_common` is Apple's giant-integer multiply. The disassembly is schoolbook
+multiplication on **16-bit limbs** — `mul`, mask against a literal-pool
+`0xffff`, carry-propagate, `strh`, bounded by a limb count reloaded from
+`[sp,#0x14]`:
+
+```text
+3145ad4c  ldrh  sb, [r4, #-2]      3145ad78  ldrh  r5, [r1, #2]!
+3145ad58  mul   r0, fp, r3         3145ad84  strh  r2, [r1, #-2]
+3145ad5c  mul   lr, sb, sl         3145ad8c  ldr   r2, [sp, #0x14]
+3145ad64  and   r3, lr, ip         3145ad94  cmp   r2, r6
+3145ad80  add   ip, r3, lr, lsr #16   3145ada4  bne   #0x3145ad4c
+```
+
+That is bounded arithmetic, not a spin-wait, and the register trace agrees:
+`r1` advances two bytes per iteration and `lr` is used as scratch rather than a
+return address. Neighbouring symbols place it in the certificate/key family —
+`_SecRSAPrivateKeyRawSign`, `_SecCertificateIsSignedBy`,
+`_SecPolicyCreateiPhoneApplicationSigning`, `_SecGenerateSelfSignedCertificate`
+— and the kernel side shows `_prngInitialize`, `_SHA1Init`, `_prngOutput`.
+`0x33aae484`, the address the episode tracker reports, resolves to `svc #0x80`
+in libSystem: an ordinary syscall, so the process is alive and making calls
+throughout.
+
+**What this does not show.** No pixel was rendered. The captured frame is still
+the seed — `CBAD1C11…`, 384 of 460,800 RGB bytes non-zero, 128 non-black pixels
+in the top-left corner, verified by eye and not only by hash. CLCD is confirmed
+live and correct around it (`scanning=1`, `frames=1026`, window0 320x480 at
+`0x0885c000`, descriptor refreshes 71 → 102), so the display path is ready and
+SpringBoard has not drawn into it. Which higher-level operation calls the giant
+code, and whether it terminates, are **open**: "RSA-class arithmetic in
+Security.framework" is the whole claim, and a bounded inner loop does not by
+itself bound the outer computation.
+
+#### The checkpoint finally has a consumer
+
+`bootkernel` has had `--restore` throughout; the launcher never exposed it, so
+every iteration paid the full ~28-minute replay to a frontier the checkpoint
+already held. `-RestoreFrom` now hashes all three sidecars into the manifest, so
+a restored run records the machine state it inherited instead of implying it
+cold-booted. Two launches failed closed before one started — a positional-
+parameter bug in the manifest write, then a launcher dirty against `HEAD` — both
+loudly and before execution.
+
 ### 2026-07-25: run30 broke the CommCenter blocker; runs 31-33 clear CPU gaps
 
 #### The fix: stop declaring hardware this machine does not have

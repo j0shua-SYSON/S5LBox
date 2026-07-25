@@ -1740,12 +1740,21 @@ Run31 gaining exactly **one instruction** is the lesson worth keeping: UIKit
 sets a directed rounding mode and runs whole sequences under it, so clearing
 encodings one per half-hour replay never terminates. Fix the class.
 
-**Where the boot now is:** past `applicationDidFinishLaunching:`, past
-`isTethered`, through the telephony singleton, with CLCD descriptor refreshes
-up 1 → 7 → 27. `UIController` is still 0 hits and the framebuffer is still the
-seed. The remaining distance looks like ordinary reached-path CPU coverage
-rather than another architectural blocker — but that is an expectation, not a
-result, and the next stop may disprove it exactly as run31 disproved §13.0c.
+**Where the boot now is (updated after run35):** `SpringBoard:UIController-call`
+**has been reached**, hits=1 at instruction 3,478,858,148, and the telephony
+singleton does not merely return — `CTCenterGetDefault` call *and* return are
+both recorded. Runs 30-33 saw 0 hits for a simple reason that was not obvious at
+the time: `UIController` lies past 2.5e9 and every earlier cap stopped short of
+it. Run33 reaching its cap "cleanly, with no CPU stop" was therefore not
+evidence of a block; it was evidence of running out of budget. Read a clean
+cap-stop as *no information* about blockers.
+
+The remaining distance was ordinary reached-path coverage, as expected above —
+but the current frontier is not a CPU gap at all. In run35's final window 99.6%
+of samples are userspace and ~40% sit in one 22-instruction loop resolving to
+`Security.framework` `_mulg_common`, a 16-bit-limb giant-integer multiply
+(§13.0h). The framebuffer is still the seed and `UIController` is the newest
+checkpoint reached, so **no render claim is available.**
 
 **Method that is working, and should continue:**
 
@@ -1754,9 +1763,54 @@ result, and the next stop may disprove it exactly as run31 disproved §13.0c.
    encoding, with tests covering lane/mode/edge behaviour and PC refusal.
 3. Re-run. Expect a new stop; that is progress, not regression.
 
-**Checkpointing is implemented (§13.0e) and should now be used.** Each replay
-to the frontier costs 25-30 minutes at 2.5e9. Take a checkpoint around 1.9e9,
-before SpringBoard's UI work, and restore instead of re-running from zero.
+**Checkpointing is implemented (§13.0e) and now works end to end.** Each replay
+to the frontier costs 25-30 minutes. `-SnapshotAt <n>` writes the checkpoint;
+`-RestoreFrom <path>` starts from one, hashing all three sidecars into the
+manifest so a restored run records the state it inherited. Both flags key on the
+machine's own retired-instruction counter, which is part of the snapshot, so
+`-InstructionCap` stays **absolute** across a restore: restoring 2.4e9 with a
+12e9 cap runs 9.6e9 further, not 12e9 further. Taking a checkpoint *during* a
+restored run is refused, not silently ignored; that combination is unimplemented.
+
+### 13.0h THE FRONTIER IS NOW RSA-CLASS ARITHMETIC IN Security.framework
+
+After `UIController`, the guest spends essentially all of its time in a
+22-instruction loop at `0x3145ad4c..0x3145ada4`. Every PC above `0x30000000`
+lands in one 96 MB dyld shared cache spanning 273 libraries, which is why the
+logs could only ever call this "userspace". `tools/dscmap.py` resolves it:
+
+```text
+image:  /System/Library/Frameworks/Security.framework/Security  (+0x2bd4c)
+symbol: _mulg_common at 3145ac70  (+0xdc)
+```
+
+The disassembly is schoolbook multiplication on **16-bit limbs** — `mul`, mask
+against a literal-pool `0xffff`, carry-propagate, `strh`, loop bounded by a limb
+count reloaded from `[sp,#0x14]`. `r1` advances two bytes per iteration and `lr`
+is used as scratch, not as a return address. **This is bounded arithmetic, not a
+spin-wait**, and it should not be diagnosed as a hang. `0x33aae484`, the address
+the episode tracker reports alongside it, is `svc #0x80` in libSystem — an
+ordinary syscall, so the process is alive and calling throughout.
+
+Neighbouring symbols place the work in the certificate/key family:
+`_SecRSAPrivateKeyRawSign`, `_SecCertificateIsSignedBy`,
+`_SecPolicyCreateiPhoneApplicationSigning`, `_SecGenerateSelfSignedCertificate`.
+The kernel side shows `_prngInitialize`, `_SHA1Init`, `_prngOutput`.
+
+**This work demonstrably terminates and recurs.** Run36's restore banner reports
+the 2.4e9 checkpoint was taken at `pc 0x3145ad98` — inside the same loop, and
+*before* `UIApplicationMain` at 3.268e9. So that earlier block of giant-integer
+work finished and the boot moved on. Treat the cost as recurring, not as a
+single terminal computation.
+
+**What is still open:** which higher-level operation drives it, and how much
+total work remains. "RSA-class arithmetic in Security.framework" is the entire
+claim. A bounded inner loop does not bound the outer computation, so do not
+assert the boot will finish in any particular budget without a run that shows
+it. If a very large cap still ends inside `_mulg_common` with no new SpringBoard
+checkpoint beyond `UIController`, the next hypothesis to test — untested, and
+stated here only so it is not re-derived — is whether the guest's randomness
+source is degenerate enough to make a probabilistic prime search never succeed.
 
 ### 13.0f RUN29: THE BLOCKER IS SRDY, AND THE LONGER-RUN HYPOTHESIS WAS WRONG
 
