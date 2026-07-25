@@ -408,19 +408,41 @@ static double f64_do(fop_t op, double a, double b, uint32_t fpscr, uint32_t *exc
 }
 
 /*
+ * Round to an integral value the way FPSCR.RMode says to.
+ *
+ * This is worth doing explicitly rather than delegating to the host FPU. A
+ * conversion is the one place the emulator can honour a directed rounding mode
+ * exactly and cheaply, because the rounding happens here in software; the
+ * arithmetic operations cannot, because they hand the value to the host FPU in
+ * whatever mode the host is in, which is why those still refuse a directed
+ * mode instead of quietly rounding the wrong way.
+ *
+ * RN is left to rint() in the host's default mode, which is round-to-nearest
+ * ties-to-even, matching the architecture. The emulator never changes the host
+ * mode, so that equivalence holds.
+ */
+static double fp_round_integral(double v, uint32_t fpscr) {
+    switch ((fpscr & ARM_FPSCR_RMODE) >> 22) {
+    case 1u:  return ceil(v);                    /* RP: toward +infinity */
+    case 2u:  return floor(v);                   /* RM: toward -infinity */
+    case 3u:  return trunc(v);                   /* RZ: toward zero      */
+    default:  return rint(v);                    /* RN: nearest, ties even */
+    }
+}
+
+/*
  * ARM ARM FPToFixed with fbits == 0. NaN converts to zero and sets IOC; an
  * out-of-range value saturates to the extreme of the destination type and sets
  * IOC (and NOT IXC — saturation replaces the inexact report, it does not
  * accompany it). Rounding is explicit here rather than delegated to the host's
  * mode: round_to_zero is VCVT's architectural truncation, and the other case
- * is VCVTR, which uses FPSCR.RMode — gated to round-to-nearest above, which is
- * what rint() does in the host's default mode.
+ * is VCVTR, which takes FPSCR.RMode through fp_round_integral().
  */
 static uint32_t fp_to_int(double v, bool is_signed, bool round_to_zero,
-                          uint32_t *exc) {
+                          uint32_t fpscr, uint32_t *exc) {
     double r;
     if (v != v) { *exc |= ARM_FPSCR_IOC; return 0; }      /* NaN -> 0 + IOC */
-    r = round_to_zero ? trunc(v) : rint(v);
+    r = round_to_zero ? trunc(v) : fp_round_integral(v, fpscr);
     if (is_signed) {
         if (r >=  2147483648.0) { *exc |= ARM_FPSCR_IOC; return 0x7fffffffu; }
         if (r <  -2147483648.0) { *exc |= ARM_FPSCR_IOC; return 0x80000000u; }
@@ -1006,8 +1028,16 @@ static arm_status_t vfp_dp_other(arm_cpu_t *c, uint32_t pc, uint32_t insn) {
         bool to_zero   = top;
         double v;
 
-        /* VCVTR consults FPSCR.RMode; VCVT does not. */
-        bad = c->vfp_fpscr & (to_zero ? MODE_VALUES : MODE_ROUNDING);
+        /*
+         * VCVTR consults FPSCR.RMode; VCVT does not. Both are admissible in a
+         * directed rounding mode because fp_to_int() rounds in software and
+         * therefore implements RMode exactly -- unlike the arithmetic paths,
+         * which delegate to the host FPU and still refuse. UIKit converts with
+         * VCVTR under a directed mode on the way to SpringBoard's first frame,
+         * so refusing here stopped the boot on a conversion the ARM1176
+         * genuinely performs.
+         */
+        bad = c->vfp_fpscr & MODE_VALUES;
         if (bad) return vfp_trap(pc, insn, mode_complaint(bad));
 
         if (dbl) {
@@ -1021,7 +1051,8 @@ static arm_status_t vfp_dp_other(arm_cpu_t *c, uint32_t pc, uint32_t insn) {
         }
         /* The destination is an integer, so there is no output to flush and no
          * NaN to replace; FZ and DN stop at the input. */
-        vfp_set_s(c, SREG(vd, D), fp_to_int(v, is_signed, to_zero, &exc));
+        vfp_set_s(c, SREG(vd, D),
+                  fp_to_int(v, is_signed, to_zero, c->vfp_fpscr, &exc));
         c->vfp_fpscr |= exc;
         return ARM_OK;
     }

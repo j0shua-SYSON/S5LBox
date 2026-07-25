@@ -930,6 +930,68 @@ static void test_conversions(void) {
         CHECK((int32_t)vfp_get_s(&c, 0) == 4, "VCVTR 3.5 -> %d", (int32_t)vfp_get_s(&c, 0));
     }
 
+    /*
+     * VCVTR under each FPSCR.RMode. The conversion rounds in software, so a
+     * directed mode is implemented exactly and must not be refused -- UIKit
+     * converts this way on the path to SpringBoard's first frame, and the exact
+     * encoding that stopped run30 is 0xeefd7a67, VCVTR.S32.F32 s15, s15.
+     *
+     * VCVT (round-toward-zero) must ignore RMode entirely, and the arithmetic
+     * paths must still refuse a directed mode because they delegate rounding to
+     * the host FPU.
+     */
+    {
+        static const struct {
+            uint32_t rmode; float in; int32_t expect; const char *name;
+        } ROUND[] = {
+            { 0u << 22,  2.5f,  2, "RN 2.5 ties-to-even" },
+            { 0u << 22,  3.5f,  4, "RN 3.5 ties-to-even" },
+            { 1u << 22,  2.25f, 3, "RP toward +inf"      },
+            { 1u << 22, -2.75f,-2, "RP toward +inf neg"  },
+            { 2u << 22,  2.75f, 2, "RM toward -inf"      },
+            { 2u << 22, -2.25f,-3, "RM toward -inf neg"  },
+            { 3u << 22,  2.75f, 2, "RZ toward zero"      },
+            { 3u << 22, -2.75f,-2, "RZ toward zero neg"  },
+        };
+        uint32_t r[] = { UN_S(13,0, 0,0) };              /* VCVTR.S32.F32 s0,s0 */
+        for (unsigned i = 0; i < sizeof ROUND / sizeof ROUND[0]; i++) {
+            vfp_reset(&c);
+            c.vfp_fpscr = (c.vfp_fpscr & ~ARM_FPSCR_RMODE) | ROUND[i].rmode;
+            set_f32(&c, 0, ROUND[i].in);
+            CHECK(run(&c, r, 1, 1) == ARM_OK,
+                  "VCVTR refused in %s", ROUND[i].name);
+            CHECK((int32_t)vfp_get_s(&c, 0) == ROUND[i].expect,
+                  "%s: got %d expected %d", ROUND[i].name,
+                  (int32_t)vfp_get_s(&c, 0), ROUND[i].expect);
+        }
+
+        /* The exact instruction run30 stopped on. */
+        vfp_reset(&c);
+        {
+            uint32_t exact[] = { 0xeefd7a67u };      /* VCVTR.S32.F32 s15,s15 */
+            c.vfp_fpscr = (c.vfp_fpscr & ~ARM_FPSCR_RMODE) | (1u << 22);
+            set_f32(&c, 15, 2.25f);
+            CHECK(run(&c, exact, 1, 1) == ARM_OK,
+                  "the exact run30 encoding 0xeefd7a67 was refused");
+            CHECK((int32_t)vfp_get_s(&c, 15) == 3,
+                  "0xeefd7a67 under RP: got %d expected 3",
+                  (int32_t)vfp_get_s(&c, 15));
+        }
+
+        /* VCVT truncates regardless of RMode. */
+        vfp_reset(&c);
+        {
+            uint32_t t[] = { UN_S(13,1, 0,0) };          /* VCVT.S32.F32 s0,s0 */
+            c.vfp_fpscr = (c.vfp_fpscr & ~ARM_FPSCR_RMODE) | (1u << 22);
+            set_f32(&c, 0, 2.75f);
+            CHECK(run(&c, t, 1, 1) == ARM_OK, "VCVT refused under RP");
+            CHECK((int32_t)vfp_get_s(&c, 0) == 2,
+                  "VCVT must truncate regardless of RMode: got %d",
+                  (int32_t)vfp_get_s(&c, 0));
+        }
+
+    }
+
     /* Out of range and NaN saturate with IOC, per ARM's FPToFixed. */
     vfp_reset(&c);
     {
