@@ -1569,6 +1569,40 @@ hardware behavior:
    neither of the above is the cause and the real gate is earlier in
    CommCenter's startup.
 
+### 13.0c THE INSTRUCTION CAP HAS ALWAYS BEEN SHORTER THAN THE GUEST'S TIMEOUTS
+
+Read this before planning any further long run. It is the most consequential
+thing found so far and it is arithmetic, not a defect.
+
+Guest time advances from retired instructions at the real cpu:timebase ratio —
+a 412 MHz CPU model against a 6 MHz timebase, roughly **68.7 instructions per
+tick**. Therefore:
+
+```text
+one guest second  ~= 412,000,000 retired instructions
+sleep(1)          ~= one fifth of the entire historical 2.1e9 cap
+```
+
+CommCenter's startup contains a **bounded ten-attempt retry loop** —
+`SCPreferencesLock`, `SCNetworkSetCopyCurrent`, `SCPreferencesUnlock`,
+`sleep(1)`, `cmp r4,#0xa`, give up — which is about **4.1 billion instructions
+of guest patience on its own**. Run21 reached 2.5e9; runs 22, 23, 24, 26 all
+stopped at 2.1e9.
+
+**No run in this project has ever watched one of the guest's own timeouts
+expire.** Every long run stopped part-way through one. "CommCenter never checks
+in" is, so far, indistinguishable from "we stopped the machine after about five
+guest seconds".
+
+The launcher's `-InstructionCap` ceiling was raised from 4e9 to 24e9 for this
+reason. Budget wall clock accordingly: at the observed ~1.3-1.5M instructions
+per second, 7e9 is roughly 75-90 minutes.
+
+Corollary worth internalising: **any future "X never happens" conclusion about
+stock software must be checked against the guest-time cost of X's own timeout
+before it is believed.** Several past frontier claims deserve re-examination in
+that light.
+
 ### 13.0b Run24 closed the notification route and named the blocked clients
 
 **Scope this claim precisely.** What Run24 kills is the *IOKit-notification

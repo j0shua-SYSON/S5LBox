@@ -1078,6 +1078,22 @@ CommCenter registered is on AppleBaseband, registered at 931,584,215 by the
 same thread that blocked 923 K instructions later — but the blocked receive is
 on a different port than the interest port, so this is correlation, not cause.
 
+### The cap has always been shorter than the guest's own timeouts
+
+Guest time advances from retired instructions at the real 412 MHz : 6 MHz
+cpu:timebase ratio, so **one guest second costs about 412 million retired
+instructions**. CommCenter's startup contains a bounded ten-attempt retry loop
+(`SCPreferencesLock` / `SCNetworkSetCopyCurrent` / `SCPreferencesUnlock` /
+`sleep(1)`) worth roughly **4.1e9 instructions** — nearly twice the largest cap
+ever run here.
+
+Every long run to date stopped part-way through a guest timeout rather than
+observing one expire. That reframes the current frontier: run28 proved
+CommCenter **never calls `_bootstrap_check_in`** (hits=0) and run26 proved its
+last own-image instruction is a `_sleep` stub, so it is sleeping in a retry
+loop rather than deadlocked. Whether it eventually gives up and proceeds has
+never been observed. The launcher ceiling is raised to 24e9 to find out.
+
 The current immediate gates are:
 
 1. ~~resolve whether CommCenter's blocked receive port is a port set containing

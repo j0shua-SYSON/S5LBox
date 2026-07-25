@@ -2068,6 +2068,143 @@ contradictions. Neither overlaps the decisive `_ipc_mqueue_send` episode, whose
 route bindings, queue walk, and owner decode are each independently marked
 validated or authoritative.
 
+### 2026-07-25: runs 25-28 found the guest was still inside its own timeout
+
+This entry covers a short focused replay (run25, 1.0e9 cap, 582 s), the full
+2.1e9 replay of the same probe (run26), and the decisive checkpoint replay
+(run28, 1.0e9 cap). Run27 was deliberately killed at ~300M and carries an
+`ABORTED` marker; it is not evidence.
+
+#### First, the guest's own binary became readable
+
+The project had never carried a userspace image or symbol map, so every guest
+PC below `0x10000000` was an unresolved number. Two read-only helpers fixed
+that: `tools/hfsx_extract.py` walks a retained work image's catalog B-tree and
+extracts one named file, and `tools/machosyms.py` resolves an address in a
+32-bit ARM Mach-O *including lazy and non-lazy stubs* through the indirect
+symbol table.
+
+That distinction is the whole point. The tail of `__TEXT` is symbol stubs, so a
+PC there means "called an imported function", not "executed its own code", and
+only the indirect table says which one.
+
+The stock CommCenter came out at 724,208 bytes, UUID
+`b4b87526ae086bb62c982f1078f43f81`, `__TEXT 0x1000..0x9c000`, `__symbolstub1
+0x9b718..0x9c000` with 570 four-byte stubs.
+
+#### CommCenter never asks for its port
+
+Run28 watched twelve exact sites for the identity-validated CommCenter
+generation:
+
+```text
+_bootstrap_check_in         pc=0009bd74 hits=0   NEVER CALLED
+checkin:function-entry      pc=0001a99c hits=0   NEVER CALLED
+_mach_msg                   pc=0009be04 hits=0   NEVER CALLED
+_IOServiceOpen              pc=0009baf8 hits=4   @728317088..@965269818
+_IOConnectCallScalarMethod  pc=0009baa4 hits=3   @728341762..@965303169
+_ioctl                      pc=0009bdf0 hits=15  @933155896..@965442308
+                                        r0-r3=6/c004799a/2ffffa40/16
+_select                     pc=0009bed8 hits=1   @966164632 thread=e0379bb8
+```
+
+It is not that check-in fails. **CommCenter never enters the function at all.**
+
+An encoding-directed scan of `__text` — needed because a linear disassembly
+desyncs on inline data and silently loses call sites — found exactly **one**
+call to `_bootstrap_check_in`, the Thumb `BLX` at `0x0001a9be`, inside:
+
+```text
+task_get_special_port(task, 4, &bootstrap_port)          ; 0x1a9b4
+bootstrap_check_in(bootstrap_port, name, &service_port)  ; 0x1a9be
+cmp r0, #0                                               ; 0x1a9c4
+  success -> CPCreateMIGServerSource + pthread_create    ; 0x1a9c8..
+  failure -> mach_port_deallocate, return 0              ; 0x1a9fe..
+```
+
+The name argument resolves to the literal `"com.apple.commcenter"` at
+`__cstring 0x00085ee4`. So CommCenter's MIG server source and server thread
+exist **only** if that one call succeeds — which is precisely what run24 saw
+from the other side: launchd still holding the receive right, six clients
+queued, CommCenter alive but never receiving. The function itself is called
+from exactly one place, `0x0000cb08`, gated on `bl 0xcc50` returning non-zero.
+
+#### It is asleep, in a bounded retry loop
+
+Run26, the full 2.1e9 replay, gives CommCenter's true last own-image
+instruction: `0x0009bf08` at **1,966,338,697** — stub[508], `_sleep`. It was
+still executing *after* SpringBoard blocked at 1,966,246,193.
+
+Disassembling one of the four `_sleep` call sites shows the shape:
+
+```text
+0000a9ac  blx _SCPreferencesLock          ; wait = 1
+0000a9b2  bne 0xa9c0                      ; on failure: CFRelease and bail
+0000a9c2  blx _SCNetworkSetCopyCurrent
+0000a9c8  cmp r0, #0
+0000a9ca  bne 0xaa04                      ; success -> proceed
+0000a9d0  blx _SCPreferencesUnlock
+0000a9d4  movs r0, #1
+0000a9d6  blx _sleep                      ; sleep(1)
+0000a9da  cmp r4, #0xa                    ; ten attempts?
+0000a9de  b   0xafe8                      ; give up
+0000a9e0  b   0xa9a2                      ; else retry
+```
+
+**A bounded ten-attempt retry with `sleep(1)` between each.** And CommCenter's
+own strings name the rest of the territory it is working through:
+
+```text
+0x00088d54  /dev/mux.spi-baseband
+0x00091a74  ioctl(ASMIOCNEWDLCI) failed -- status: %d.
+0x00091a1c  Setting driver for DLCI %u, dispatcher %p
+0x00091bd8  Select exception on DLCI
+0x0008cc5c  No response from modem
+0x00089d60  Could not validate wireless modem connection
+```
+
+That identifies the `0xc004799a` ioctl as **`ASMIOCNEWDLCI`** on
+`/dev/mux.spi-baseband`, the AppleSerialMultiplexer node for the mux the
+console reports as `created new mux (18) for spi-baseband with adapter
+BasebandSPIDevice`.
+
+#### Why every run so far stopped in the middle of a timeout
+
+This is the result that reframes the whole effort, and it is arithmetic rather
+than a defect.
+
+Guest time is driven from retired instructions at the real cpu:timebase ratio —
+a 412 MHz CPU model against a 6 MHz timebase, about 68.7 instructions per tick.
+So **one guest second costs roughly 412 million retired instructions**, and a
+single `sleep(1)` is about a fifth of the entire historical 2.1e9 cap.
+
+CommCenter's ten-attempt loop is therefore worth about **4.1 billion
+instructions of guest patience on its own** — nearly twice the largest cap ever
+run here. Run21 reached 2.5e9; runs 22, 23, 24 and 26 all stopped at 2.1e9.
+
+**No run has ever observed one of the guest's own timeouts expire.** Every one
+of them stopped part-way through. A cap that ends at 2.1e9 has not shown that
+CommCenter gives up and continues; it has shown that we stopped watching after
+about five guest seconds.
+
+#### What this does and does not establish
+
+It establishes that CommCenter never calls `bootstrap_check_in`, that its MIG
+server is gated on that call, that it is in a bounded sleeping retry loop, and
+that the instruction caps used so far are shorter than the guest's own retry
+budget.
+
+It does **not** establish that running longer will make CommCenter check in.
+The `SCPreferencesLock`/`SCNetworkSetCopyCurrent` loop is not proved to sit on
+the path to `0xcb08`, the `ASMIOCNEWDLCI`/`select` work on
+`/dev/mux.spi-baseband` is not proved to be what blocks, and the branch taken
+after ten failures has not been followed. Those are questions for a replay long
+enough to outlast the guest, which is why the launcher's cap ceiling was raised
+from 4e9 to 24e9.
+
+Nothing here is a pixel. `UIController` remained at zero hits and the PPM
+remained the seed in every run above.
+
 ### 2026-07-25: run24 killed the baseband lead and named the five senders
 
 Run24 is the exact cold replay of commit
