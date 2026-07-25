@@ -1,8 +1,9 @@
 # iOS3-VM continuation handoff
 
-> Last reconciled with the working tree: 2026-07-25, branch
-> `codex/m5-hardening`, committed baseline
-> `40209b27cb10d01c552398ff918ee613c4908ed0`.
+> Last reconciled after publication and hosted CI: 2026-07-25, branch
+> `codex/m5-hardening`. The diagnostic implementation and tracked Run23 launcher
+> are exact commit
+> `5a40c5eec5bbf7c4b7d8909d0c1f364bc078338a`.
 >
 > **Read this first:** the strongest completed firmware run is Run22.
 > SpringBoard has executed deep into `applicationDidFinishLaunching:`, but it
@@ -11,15 +12,15 @@
 > subsequently blocked. It did not prove the queue's active receiver, five
 > linked messages, a permanent deadlock, or AppleBaseband causality.
 >
-> The working tree contains substantial post-Run22 queue, per-thread wait, and
-> AppleBaseband diagnostic hardening. Those changes are **not committed, not
-> pushed, not hosted-CI-green, and not validated by a long firmware run** at the
-> time of this handoff. The per-thread wait and AppleBaseband hardening have
-> completed their independent final audits. Strict GCC, one-target build,
-> `git diff --check`, and exact zero-instruction firmware-gate validation
-> passed; root's integrated validation also passed all three diagnostic gates
-> and the `-n 0` smoke. These are focused local checks, not hosted CI or a long
-> firmware result. Run23 has **not** been launched.
+> The post-Run22 queue, per-thread wait, and AppleBaseband diagnostic hardening
+> is **committed, pushed, independently audited, and hosted-CI-green**.
+> [Core run 30143448600](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30143448600)
+> passed all eight jobs, and
+> [iOS run 30143455036](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30143455036)
+> passed its unsigned-package job for exact commit `5a40c5e`. Strict GCC,
+> one-target build, `git diff --check`, exact zero-instruction firmware gates,
+> and the tracked launcher's parser/fail-closed smoke also passed. None of this
+> is a long firmware result. Run23 has **not** been launched.
 
 This document is an operational and technical continuation guide for another AI
 agent. It deliberately repeats critical facts from the README and project docs
@@ -144,7 +145,7 @@ The prepared Run23 launcher sets those variables to its own F:-local
 
 ## 3. Repository and Git state
 
-### Remotes, branch, and committed baseline
+### Remotes, branch, and committed baselines
 
 - Repository:
   `F:\JOSHUA_1st_2021\projects\iOS3-VM`
@@ -154,17 +155,30 @@ The prepared Run23 launcher sets those variables to its own F:-local
   `codex/m5-hardening`
 - Tracking branch:
   `origin/codex/m5-hardening`
-- Current committed baseline:
+- Current boot-diagnostic implementation:
+  `5a40c5eec5bbf7c4b7d8909d0c1f364bc078338a`
+- Diagnostic subject:
+  `Harden CommCenter boot diagnostics`
+- Strongest completed private-firmware baseline:
   `40209b27cb10d01c552398ff918ee613c4908ed0`
-- Baseline subject:
+- Firmware-baseline subject:
   `Trace the CommCenter boot frontier`
 - At handoff time, local and remote branch tips match.
 - `main` is far behind this continuation branch. Do not switch to or merge into
   `main` casually.
 
 The exact Run22 baseline passed all eight jobs in hosted core run
-`30106957804`. That result belongs to `40209b2`; it does not validate current
-uncommitted diagnostics.
+`30106957804`. That firmware result belongs to `40209b2`. The current
+diagnostic implementation has its own exact hosted results:
+
+- [core run 30143448600](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30143448600):
+  success, eight of eight jobs;
+- [iOS run 30143455036](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30143455036):
+  success, one unsigned-package job.
+
+The documentation publication that contains this final status is a docs-only
+descendant of `5a40c5e`; its `CMakeLists.txt`, `core/`, and `tools/` build inputs
+are unchanged from that validated implementation.
 
 ### Dirty-tree ownership boundary
 
@@ -172,18 +186,11 @@ At handoff, `git status --short` reports:
 
 ```text
  M .github/workflows/ios-build.yml
- M README.md
  M app/iOS3VM.entitlements
- M docs/BOOTLOG.md
- M docs/QUALITY.md
- M docs/ROADMAP.md
  M docs/activation.md
  M docs/networking.md
- M tools/bootkernel.c
 ?? .codex/
 ```
-
-This handoff adds `docs/AGENT_HANDOFF.md`.
 
 Treat the following existing dirty paths as **user-owned and protected** unless
 the user explicitly reassigns them:
@@ -200,7 +207,7 @@ Do not edit, discard, stage, commit, or push those paths as part of the current
 boot work. Their diffs overlap app-signing and documentation work that is
 outside the diagnostic ownership boundary.
 
-The current boot-effort paths are:
+The published boot-effort paths in `5a40c5e` are:
 
 ```text
 README.md
@@ -208,6 +215,7 @@ docs/BOOTLOG.md
 docs/QUALITY.md
 docs/ROADMAP.md
 tools/bootkernel.c
+tools/run23-cold-replay.ps1
 docs/AGENT_HANDOFF.md
 ```
 
@@ -523,10 +531,10 @@ CBAD1C110E67CAD553A2B4EEBBF46E7BF09255389851902B24816249294AF2AB
 That PPM is the seed-only frame: 153,472 black pixels and 128 white seed pixels,
 with no other colors.
 
-## 8. Current uncommitted diagnostic hardening
+## 8. Committed diagnostic hardening at `5a40c5e`
 
-The post-Run22 diff in `tools/bootkernel.c` is very large: at handoff it adds
-roughly 6,289 lines and removes 166 relative to `40209b2`. Most of this is
+The post-Run22 diff in `tools/bootkernel.c` is very large: it adds exactly
+6,668 lines and removes 161 relative to `40209b2`. Most of this is
 bounded diagnostic state, exact firmware gates, reporting, and adversarial
 startup self-checks. Review the actual diff; do not assume size implies a
 hardware behavior change.
@@ -686,7 +694,8 @@ Focused local validation of this wait hardening completed successfully:
 - adversarial readable pointer-reuse poisoning;
 - adversarial exact-hook omission poisoning.
 
-This validation is not a long firmware result and not hosted CI.
+This focused validation is not a long firmware result. The same committed code
+also passed the exact eight-job hosted core run `30143448600`.
 
 ### 8.3 Read-only AppleBaseband-to-CommCenter causal observer
 
@@ -806,9 +815,10 @@ integrated validation also passed the queue/owner, per-thread wait, and
 AppleBaseband gates and the `-n 0` smoke. The zero-instruction report shows the
 exact 7E18 AppleBaseband code/data gate as validated and all counters at zero,
 as expected. That establishes startup gating, not causal correctness under live
-firmware, hosted CI, or Run23 behavior.
+firmware or Run23 behavior. Exact commit `5a40c5e` also passed hosted core run
+`30143448600` and iOS-package run `30143455036`.
 
-Before committing:
+If this implementation changes:
 
 1. Preserve the invariants accepted by the completed independent audit; if the
    implementation changes again, repeat that audit.
@@ -985,6 +995,7 @@ Example path-scoped staging:
 ```powershell
 git add -- `
   tools/bootkernel.c `
+  tools/run23-cold-replay.ps1 `
   README.md `
   docs/QUALITY.md `
   docs/BOOTLOG.md `
@@ -1013,6 +1024,17 @@ git push origin codex/m5-hardening
 ```
 
 ### 10.5 Hosted workflows
+
+The publication gate is complete for exact diagnostic commit
+`5a40c5eec5bbf7c4b7d8909d0c1f364bc078338a`:
+
+- [core run 30143448600](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30143448600)
+  completed successfully with all eight Linux/macOS/Windows, JIT,
+  ASan+UBSan, and warnings-as-errors jobs green;
+- [iOS run 30143455036](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30143455036)
+  completed successfully with its unsigned arm64 package job green.
+
+For a future source change, follow the same process below.
 
 Because `tools/**` changed, pushing should trigger `core-tests.yml`. Confirm the
 run rather than assuming it appeared:
@@ -1134,10 +1156,15 @@ bootkernel.exe kernel.macho
 After commit and hosted validation, ensure the boot-source diff is clean:
 
 ```powershell
-git diff --exit-code HEAD -- tools/bootkernel.c
-git status --porcelain -- tools/bootkernel.c
+git diff --exit-code HEAD -- CMakeLists.txt core tools
+git status --porcelain=v1 --untracked-files=all -- CMakeLists.txt core tools
 $commit = (git rev-parse HEAD).Trim()
 ```
+
+The final handoff publication is docs-only; its `CMakeLists.txt`, `core/`, and
+`tools/` inputs are identical to exact hosted-green parent `5a40c5e`. Use the
+current clean HEAD as the private-run provenance commit and let the launcher
+record it together with the rebuilt binary hash.
 
 Rebuild the committed source, then copy the exact binary into the empty Run23
 `bin` directory:
@@ -1853,29 +1880,40 @@ repeatably evidenced.
 
 ## 22. Immediate continuation checklist
 
-1. Re-read `README.md`, `QUALITY.md`, `BOOTLOG.md`, `ROADMAP.md`, this handoff,
-   and the current `tools/bootkernel.c` diff.
-2. Preserve the completed independent AppleBaseband and wait-audit invariants;
-   repeat review if either implementation changes.
-3. Preserve the protected dirty paths.
-4. Run `git diff --check`.
-5. Rebuild only `bootkernel` in an F:-local tree.
-6. Re-run strict/startup/exact-gate checks after final source edits.
-7. Review reporting language for fail-closed conclusions.
-8. Commit only owned boot/docs paths.
-9. Push `codex/m5-hardening`.
-10. Obtain exact green hosted core and iOS workflow results for that commit.
-11. Rebuild and hash an exact committed Run23 binary.
-12. Confirm F: space and all Run23 outputs are fresh.
-13. Launch the prepared Run23 wrapper.
-14. Analyze integrity, exact identity, queue, waits, baseband chain, memory, and
-    pixels independently.
-15. Update README/QUALITY/BOOTLOG/ROADMAP and this handoff with the exact result
-    and explicit non-results.
-16. Push the evidence update.
-17. Implement only the next hardware/CPU correction proved by Run23.
-18. Repeat until guest-driven SpringBoard pixels appear, then add guest touch.
-19. Continue to app integration, audio, networking, device hardening, optional
+Publication gates already completed:
+
+- diagnostic implementation and tracked launcher committed/pushed as
+  `5a40c5eec5bbf7c4b7d8909d0c1f364bc078338a`;
+- final adversarial logic and handoff audits found no remaining blocker/high
+  issue;
+- strict GCC, `bootkernel` rebuild, `git diff --check`, exact 7E18 `-n 0`, and
+  launcher parser/fail-closed checks passed with F:-local mutable state;
+- hosted core run `30143448600` passed eight of eight jobs;
+- hosted iOS run `30143455036` passed its package job;
+- no long firmware replay was launched.
+
+The next agent should:
+
+1. Re-read `README.md`, `QUALITY.md`, `BOOTLOG.md`, `ROADMAP.md`, and this
+   handoff. Inspect commit `5a40c5e` before changing its diagnostics.
+2. Verify the branch contains `5a40c5e`, the source-build paths are clean, and
+   only the protected dirty paths remain.
+3. Preserve the completed AppleBaseband/queue/wait invariants; repeat
+   adversarial review if any implementation changes.
+4. Rebuild only `bootkernel` in an F:-local tree.
+5. Copy and hash the exact committed binary into the empty Run23 `bin`
+   directory.
+6. Confirm F: space, immutable firmware hashes, and fresh Run23 outputs.
+7. Launch the tracked wrapper in the documented background process and poll it
+   at intervals no longer than 60 seconds.
+8. Analyze integrity, exact identity, queue, waits, baseband chain, memory, and
+   pixels independently.
+9. Update README/QUALITY/BOOTLOG/ROADMAP and this handoff with the exact result
+   and explicit non-results.
+10. Push the evidence update.
+11. Implement only the next hardware/CPU correction proved by Run23.
+12. Repeat until guest-driven SpringBoard pixels appear, then add guest touch.
+13. Continue to app integration, audio, networking, device hardening, optional
     JIT, and portability rather than stopping at a screenshot.
 
 The central lesson from every prior breakthrough is still the right operating

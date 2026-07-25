@@ -759,8 +759,9 @@ build/test surface, not the private-firmware boot or rendering.
 
 ### The Run23 probe is validated, but Run23 has not run yet
 
-The current pre-Run23 working tree replaces run22's process-wide and
-adjacent-PC assumptions with three trace-only, fail-closed observers:
+Exact diagnostic commit
+`5a40c5eec5bbf7c4b7d8909d0c1f364bc078338a` replaces run22's process-wide
+and adjacent-PC assumptions with three trace-only, fail-closed observers:
 
 - the CommCenter send probe validates the copied-in kernel header, active
   `IOT_PORT` type and receiver-name union discriminator, walks the bounded
@@ -792,8 +793,12 @@ the `bootkernel` target build, adversarial startup self-checks, and an exact
 7E18 zero-instruction run all pass locally; the ownership, wait, and
 AppleBaseband code/data gates each report `VALIDATED`, followed by
 `stopped after 0 instructions: OK`. This proves probe compatibility only.
-The long immutable-firmware cold replay, hosted CI for the eventual commit,
-and all runtime conclusions remain pending.
+Exact
+[core run 30143448600](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30143448600)
+passed all eight jobs, and explicitly dispatched
+[iOS run 30143455036](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30143455036)
+passed its unsigned-package job. The long immutable-firmware cold replay and
+all runtime conclusions remain pending.
 
 Getting this far needed one more emulator-shaped bug worth naming, because it
 looked exactly like a corrupt disk. launchd's first text page was failing its

@@ -1786,8 +1786,9 @@ passed all eight jobs for the exact source.
 
 ### 2026-07-25: pre-Run23 probes passed their exact startup gates
 
-This is a tooling checkpoint, not a boot result. The working tree now carries
-trace-only observers that make run22's missing distinctions explicit:
+This is a tooling checkpoint, not a boot result. Exact diagnostic commit
+`5a40c5eec5bbf7c4b7d8909d0c1f364bc078338a` carries trace-only observers that
+make run22's missing distinctions explicit:
 authoritative receive-right ownership versus the port union; linked circular
 kmsgs versus reserved/in-flight `msgcount`; exact route kmsg binding;
 per-thread trap/semaphore/block/schedule episodes; and one nested-frame-safe,
@@ -1828,6 +1829,13 @@ The abbreviated lines above omit the report's decoded offsets and causal path
 description; they do not imply that any runtime event occurred. Run23 must
 cold-replay the exact committed binary to the SpringBoard frontier before
 these probes can answer the ownership, service-thread, or baseband questions.
+
+The same exact commit passed every job in hosted
+[core run 30143448600](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30143448600)
+and the unsigned-package job in explicitly dispatched
+[iOS run 30143455036](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30143455036).
+Those results validate public build/test/package behavior only. Run23 was not
+launched during this handoff.
 
 The earlier checkpoint-continuation chain is stronger evidence for sustained
 userspace and snapshot

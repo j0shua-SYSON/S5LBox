@@ -1020,8 +1020,9 @@ directory occupies **447.42 MiB on F:**. Exact source passed all eight jobs in
 hosted
 [core run 30106957804](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30106957804).
 
-The pre-Run23 working tree now implements the required trace-only evidence
-chain. Exact startup gates and adversarial self-checks validate active
+Exact pre-Run23 diagnostic commit
+`5a40c5eec5bbf7c4b7d8909d0c1f364bc078338a` implements the required trace-only
+evidence chain. Exact startup gates and adversarial self-checks validate active
 receive-right ownership, circular queue topology and reserved-slot arithmetic,
 same-kmsg route registers, sequence-bound per-thread waits, and nested-frame-
 safe, same-retained-event AppleBaseband notification delivery with live
@@ -1029,8 +1030,13 @@ notifier/port identity. The final audit rejects cross-event aggregate joins,
 repeated-send inheritance, stale dispatch sequences, and later candidate
 overwrites of an already bound kmsg.
 Strict compilation, the `bootkernel` target build, and a stock-7E18 zero-step
-run pass locally. This is probe readiness only: the exact committed cold replay
-and hosted CI remain required before any runtime gate below can be checked.
+run pass locally. Hosted
+[core run 30143448600](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30143448600)
+passes all eight jobs, and
+[iOS run 30143455036](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30143455036)
+passes its package job for that exact commit. This is probe readiness only: the
+exact committed cold replay remains required before any runtime gate below can
+be checked.
 Per-thread wait output proves an ordered last-observed block with no later
 execution; until a final live wait-state reread exists, it does not exclude an
 asynchronous wake that left the thread runnable but unscheduled at the cap.

@@ -360,10 +360,11 @@ does not contain the private firmware and does not establish this boot result.
 
 ## Pre-Run23 diagnostic validation
 
-The current working tree adds diagnostic evidence only; it does not change
-emulated baseband/GPIO/SPI behavior and has not yet supplied a long-run
-firmware verdict. Its startup self-checks adversarially reject the failure
-modes exposed by the run22 audit:
+Exact diagnostic commit
+`5a40c5eec5bbf7c4b7d8909d0c1f364bc078338a` adds diagnostic evidence only; it
+does not change emulated baseband/GPIO/SPI behavior and has not yet supplied a
+long-run firmware verdict. Its startup self-checks adversarially reject the
+failure modes exposed by the run22 audit:
 
 - ownership requires a complete copied-in kmsg, coherent
   `mqueue == port + 0x18`, active `IOT_PORT`, authoritative receiver-name
@@ -406,6 +407,17 @@ source commit was rejected before firmware or the copied binary was opened; the
 wrapper exited **99** and created its standard exit, error, end-time, and
 launcher-log evidence files. This tests the failure contract only. Run23 remains
 unlaunched.
+
+Hosted validation belongs to that same exact commit:
+
+- [core run 30143448600](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30143448600)
+  passed all eight jobs: Windows/Linux/macOS builds and tests, three JIT jobs,
+  ASan+UBSan, and warnings-as-errors;
+- [iOS run 30143455036](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30143455036)
+  passed its unsigned arm64 package job.
+
+These hosted jobs contain no private firmware. They validate the public
+build/test/package surface, not Run23, SpringBoard rendering, or device launch.
 
 ## Local edge coverage of the surgical correction
 
@@ -565,6 +577,10 @@ authoritative.
 - [x] The pre-Run23 trace-only ownership, queue-link, per-thread wait, and
   AppleBaseband causal observers pass strict compilation, adversarial startup
   self-checks, and exact 7E18 zero-step code/data gates.
+- [x] Exact diagnostic commit `5a40c5e` passes all eight jobs in
+  [core run 30143448600](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30143448600)
+  and the package job in
+  [iOS run 30143455036](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30143455036).
 - [ ] The exact committed Run23 cold replay establishes which of those runtime
   chains occurred and whether the SpringBoard sender remains unresolved.
 - [ ] The active receive-right owner, linked queue entries versus reserved
