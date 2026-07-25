@@ -23,16 +23,17 @@ proof that no private or unindexed implementation exists.
 
 | | Milestone | Observable completion criterion | State |
 |---|---|---|---|
-| **M0** | Pipeline online | Core/JIT/test workflows and iOS packaging are configured; the app has historically run a core self-test on the phone | ✅ done; workflow logs are the current CI verdict |
-| **M1** | ARMv6 interpreter | ARM + Thumb + VFPv2 on the reached path; unimplemented encodings trap instead of guessing | ✅ run21 cleared the reopened reached-path gate: exact correction commit `debec04` passed hosted core/iOS CI and crossed the run20 libm VFP stop to a clean 2.5 B cap. This is reached-path validation, not architectural completeness |
-| **M2** | SoC bring-up | A bare-metal payload prints over the emulated UART; a timer IRQ is taken and returned from | ✅ done and covered by host tests |
-| **M3** | Firmware containers + LLB execution | Real IMG3s parse and decrypt; an extracted real Apple LLB payload executes; the kernelcache is extracted | ✅ done; SecureROM/iBoot execution remains future full-chain work |
-| **M4** | XNU boots and logs | The kernel reaches `bsd_init`, prints, and Apple's own kexts match and start | ✅ **done** — plus the real root filesystem mounts |
-| **M5** | Userspace → SpringBoard | `launchd` runs; the home screen renders and takes a tap | 🔵 **in progress; `UIController` reached, nothing rendered.** The multi-run telephony blocker is resolved: un-matching the unmodelled baseband nubs let CommCenter call `bootstrap_check_in` successfully (`r0=0`, SUCCESS arm), and SpringBoard's telephony singleton now *completes*, `CTCenterGetDefault` call and return both recorded. Run35 then reached `SpringBoard:UIController-call`, hits=1 at 3,478,858,148 — the first time ever. Runs 30–33 saw 0 hits only because `UIController` lies past their 2.5e9 cap, so a clean cap-stop carries **no information** about blockers. Three CPU gaps were cleared as whole families on the way (`FPSCR.RMode` implemented rather than refused; the ARMv6 parallel add/subtract family). The frontier is no longer a CPU gap: 99.6% of the final window is userspace, ~40% of it in `Security.framework` `_mulg_common`, a 16-bit-limb giant-integer multiply — RSA-class arithmetic that demonstrably terminates and recurs. CLCD is live and correct (`scanning=1`, `frames=1026`, 320×480, refreshes 1→7→27→71→102) and the framebuffer is still the seed, so **not rendered and no tap**. Detail in `docs/BOOTLOG.md` and handoff §13.0h. |
-| ~~M5 (historical)~~ | | | Run23 binds both send-path routes to the exact mqueue/kmsg, walks the destination queue to **five linked** identical `0x0054b557` handshakes with **zero** reserved slots against `qlimit=5`, and authoritatively decodes the receive-right owner as **launchd (PID 1)**. AppleBaseband enabled its reset event source but its callback never fired, so no delivered notification explains the saturation. CommCenter (PID 24) is alive, never exited, and its only IOKit interest is on AppleBaseband — registered by the very thread that has been blocked in a Mach receive since 932,507,189. Why the service never checks in is the open question. `UIController` is unreached and the seed-only framebuffer has 0 changed pixels. |
-| **D** | Dynarec (parallel) | SpringBoard at interactive frame rates on the phone | 🔵 emitter + ARM/Thumb translator and host execution tests exist (off by default); no code cache or dispatcher calls them |
-| **N** | Guest networking (parallel) | The guest resolves a name and fetches a URL | ⚪ designed, not built |
-| **A** | Guest audio (first-device track) | Guest PCM reaches the host speaker without blocking the CPU thread | ⚪ priority, not designed or built |
+| **M0** | Pipeline online | Core/JIT/test workflows and iOS packaging are configured; the app has historically run a core self-test on the phone | ??done; workflow logs are the current CI verdict |
+| **M1** | ARMv6 interpreter | ARM + Thumb + VFPv2 on the reached path; unimplemented encodings trap instead of guessing | ??run21 cleared the reopened reached-path gate: exact correction commit `debec04` passed hosted core/iOS CI and crossed the run20 libm VFP stop to a clean 2.5 B cap. This is reached-path validation, not architectural completeness |
+| **M2** | SoC bring-up | A bare-metal payload prints over the emulated UART; a timer IRQ is taken and returned from | ??done and covered by host tests |
+| **M3** | Firmware containers + LLB execution | Real IMG3s parse and decrypt; an extracted real Apple LLB payload executes; the kernelcache is extracted | ??done; SecureROM/iBoot execution remains future full-chain work |
+| **M4** | XNU boots and logs | The kernel reaches `bsd_init`, prints, and Apple's own kexts match and start | ??**done** ??plus the real root filesystem mounts |
+| **M5** | Userspace ??SpringBoard | `launchd` runs; the home screen renders and takes a tap | ?뵷 **in progress; `UIController` reached, nothing rendered.** The multi-run telephony blocker is resolved: un-matching the unmodelled baseband nubs let CommCenter call `bootstrap_check_in` successfully (`r0=0`, SUCCESS arm), and SpringBoard's telephony singleton now *completes*, `CTCenterGetDefault` call and return both recorded. Run35 then reached `SpringBoard:UIController-call`, hits=1 at 3,478,858,148 ??the first time ever. Runs 30??3 saw 0 hits only because `UIController` lies past their 2.5e9 cap, so a clean cap-stop carries **no information** about blockers. Three CPU gaps were cleared as whole families on the way (`FPSCR.RMode` implemented rather than refused; the ARMv6 parallel add/subtract family). The frontier is no longer a CPU gap: 99.6% of the final window is userspace, ~40% of it in `Security.framework` `_mulg_common`, a 16-bit-limb giant-integer multiply ??RSA-class arithmetic that demonstrably terminates and recurs. CLCD is live and correct (`scanning=1`, `frames=1026`, 320횞480, refreshes 1????7??1??02) and the framebuffer is still the seed, so **not rendered and no tap**. Detail in `docs/BOOTLOG.md` and handoff 짠13.0h. |
+| ~~M5 (historical)~~ | | | Run23 binds both send-path routes to the exact mqueue/kmsg, walks the destination queue to **five linked** identical `0x0054b557` handshakes with **zero** reserved slots against `qlimit=5`, and authoritatively decodes the receive-right owner as **launchd (PID 1)**. AppleBaseband enabled its reset event source but its callback never fired, so no delivered notification explains the saturation. CommCenter (PID 24) is alive, never exited, and its only IOKit interest is on AppleBaseband ??registered by the very thread that has been blocked in a Mach receive since 932,507,189. Why the service never checks in is the open question. `UIController` is unreached and the seed-only framebuffer has 0 changed pixels. |
+| **D** | Dynarec (parallel) | SpringBoard at interactive frame rates on the phone | ?뵷 emitter + ARM/Thumb translator and host execution tests exist (off by default); no code cache or dispatcher calls them |
+| **N** | Guest networking (parallel) | The guest resolves a name and fetches a URL | ??designed, not built |
+| **A** | Guest audio (first-device track) | Guest PCM reaches the host speaker without blocking the CPU thread | ??priority, not designed or built |
+| **P2** | Second machine profile: iPhone 5 / iOS 8.4.1 | An S5L8950X machine boots iOS 8.4.1 to a rendered SpringBoard | ??requested, not started ??scoped below. **Gated on answering the GPU question first**; everything else is large but ordinary work |
 
 CI builds the portable core on Linux, macOS and Windows, runs strict-warning and
 sanitizer jobs, and executes emitted JIT blocks on the arm64 macOS runners. The
@@ -47,17 +48,17 @@ both completed successfully with the faultable raw bridge.
 
 ---
 
-## ✅ M0 — Pipeline online
+## ??M0 ??Pipeline online
 
 **Criterion:** CI green, and an `.ipa` that runs real ARM code through our core on
 the device.
 
 - Portable C11 core builds and unit-tests locally (MinGW/GCC) and in CI.
 - The iOS workflow builds on a macOS runner, fake-signs with `ldid`, and packages
-  an `.ipa` artifact — no Apple Developer account is in the CI loop. CI does not
+  an `.ipa` artifact ??no Apple Developer account is in the CI loop. CI does not
   install or launch that artifact.
 - The app's on-device self-test runs ARM instructions through the interpreter and
-  drives the emulated timer → VIC → CPU interrupt path. It also reports
+  drives the emulated timer ??VIC ??CPU interrupt path. It also reports
   `CS_DEBUGGED` and RWX-mapping preflight hints, but deliberately does not branch
   into generated code during startup. The JIT execution verdict remains an
   unrecorded, opt-in device check.
@@ -66,7 +67,7 @@ the device.
 
 ---
 
-## ✅ M1 — ARMv6 interpreter
+## ??M1 ??ARMv6 interpreter
 
 **Criterion:** an ARM1176 interpreter broad enough for the boot path, in which
 every unimplemented encoding *traps* rather than executing something plausible.
@@ -94,7 +95,7 @@ forms can still trap deliberately.
 
 **The rule that makes this milestone worth anything:** an encoding we have not
 implemented returns `ARM_UNDEFINED` and stops the machine. It never falls
-through to "close enough". CP15 is the one documented exception — unmodelled
+through to "close enough". CP15 is the one documented exception ??unmodelled
 config registers read as zero, because kernels probe that space far too widely
 to trap on it.
 
@@ -103,7 +104,7 @@ is intentionally not frozen here; VFP and edge-case coverage continue to grow.
 
 ---
 
-## ✅ M2 — SoC bring-up and UART
+## ??M2 ??SoC bring-up and UART
 
 **Criterion:** guest code running on the emulated S5L8900 prints text, and an
 interrupt is delivered and returned from.
@@ -132,17 +133,17 @@ assertion count.
 
 ---
 
-## ✅ M3 — Firmware containers and LLB execution
+## ??M3 ??Firmware containers and LLB execution
 
 **Criterion:** real, unmodified Apple firmware out of a real IPSW parses and
 decrypts, and an extracted real LLB payload executes in the firmware harness.
 This completed milestone is narrower than the full secure-boot chain:
 SecureROM is not modelled, iBoot itself has not executed, and SHSH/CERT presence
 is recorded without RSA verification. `bootkernel` currently synthesizes an
-iBoot-like handoff into XNU. Full SecureROM → iBoot execution remains future
+iBoot-like handoff into XNU. Full SecureROM ??iBoot execution remains future
 work rather than evidence claimed by M3.
 
-- IMG3 container parser — every tag present in genuine 7E18 firmware
+- IMG3 container parser ??every tag present in genuine 7E18 firmware
   (`TYPE`/`DATA`/`VERS`/`SEPO`/`BORD`/`KBAG`/`SHSH`/`CERT`) is one we handle.
   Bounds-checked in 64-bit arithmetic, because this is the first component to
   touch a user-supplied file.
@@ -158,8 +159,8 @@ work rather than evidence claimed by M3.
 
 **Observed:** the real version strings come out of the user's own IPSW
 (`iBoot-636.66.33`, `EmbeddedDeviceTrees-390.16`), and Apple's **LLB executes
-6,668 instructions** of genuine code — switching to Thumb, making real function
-calls, touching zero unmapped addresses — before failing a header check on flash
+6,668 instructions** of genuine code ??switching to Thumb, making real function
+calls, touching zero unmapped addresses ??before failing a header check on flash
 we had not yet populated.
 
 **Deliberately not done: Apple's VFL/FTL.** Mapping logical to physical NAND
@@ -170,11 +171,11 @@ sit on later, and the gap is stated in `nand.h` rather than papered over.
 
 ---
 
-## ✅ M4 — XNU boots and logs
+## ??M4 ??XNU boots and logs
 
 **Criterion:** the real iPhone OS 3.1.3 kernel initialises, prints to the
 console, and Apple's own kernel extensions match against our device tree and
-program our emulated peripherals — with no panic.
+program our emulated peripherals ??with no panic.
 
 **That criterion is met, and the milestone is complete.** A
 400,000,000-instruction boot of `xnu-1357.5.30~6/RELEASE_ARM_S5L8900X`,
@@ -191,9 +192,9 @@ now, so neither count states the current stopping point.
 | Root filesystem | **`BSD root: md0, major 2, minor 0`** |
 | Console output | **4,595 bytes** |
 | Distinct functions executed (sampled) | 1,024 (the profiler's table is now the limit, and says so) |
-| `_DTGetProperty` calls | 858 — IOKit walking our device tree |
+| `_DTGetProperty` calls | 858 ??IOKit walking our device tree |
 | FIQ entries / cost | 385 / 38,235 instructions (0.0% of the run) |
-| `STREX` executed / failed | 2,715,561 / 13 — all retries were observed in `lck_mtx_*`; the trace does not establish their cause or interleaving |
+| `STREX` executed / failed | 2,715,561 / 13 ??all retries were observed in `lck_mtx_*`; the trace does not establish their cause or interleaving |
 | Exception returns into Thumb | 351, of which 204 land 4-byte aligned (~58% in this recorded run; no hardware distribution is assumed) |
 | Non-RAM physical pages touched | 22 |
 
@@ -236,16 +237,15 @@ device each driver is talking to, is in [BOOTLOG.md](BOOTLOG.md).
 The kernel now paints its own boot log into the framebuffer. `initialize_screen`
 was being reached all along; the blocker was that `boot_args.v_display` was set
 non-zero, which makes `vcattach()` return early, so the graphics console was
-never acquired. With `v_display = 0` — and `serial=1` dropped from the command
-line — the kernel takes the framebuffer for itself: **61,659 of 614,400 bytes
+never acquired. With `v_display = 0` ??and `serial=1` dropped from the command
+line ??the kernel takes the framebuffer for itself: **61,659 of 614,400 bytes
 non-zero, 20,553 lit pixels across 313 rows**, verified by rendering the buffer
 to an image and reading the text back off it:
 
 ```
 iBoot version:
 Seatbelt MACF policy initialized
-AppleS5L8900XClockController: Dynamic Performance State Management Enabled…
-AppleS5L8900XSDIO::start(): SDIO Revision 8900X
+AppleS5L8900XClockController: Dynamic Performance State Management Enabled??AppleS5L8900XSDIO::start(): SDIO Revision 8900X
 AppleMBXDevice(0xc0bcf800): Init
 AppleMicron2020::start()
 Registering IOCameraSensor service.
@@ -272,7 +272,7 @@ it hid.
 1. **The timer block was invented.** Ours was a plausible four-register device
    at 0x00/04/08/0c. The kernel's own symbols said otherwise: a free-running
    64-bit counter at 0x80/0x84 (this is `mach_absolute_time`), timer 4 at
-   0xA0–0xAF, and VIC line 7 routed to **FIQ**, not IRQ. Nothing the kernel
+   0xA0??xAF, and VIC line 7 routed to **FIQ**, not IRQ. Nothing the kernel
    touched existed, so `mach_absolute_time()` read zero forever, every delay
    loop waited on a dead clock, and the boot died silently in a spin rather than
    panicking. Fixing it produced the first console output this project ever
@@ -290,24 +290,22 @@ it hid.
    `topOfKernelData 0x088f4000`; a firmware-free startup self-check pins both.
 
 3. **Exception returns word-aligned Thumb resume addresses.** Writing PC with S
-   set copies SPSR into CPSR — restoring the interrupted mode *and* its T bit —
-   and the next line then did `*next = res & ~3u`, unconditionally. Returning
+   set copies SPSR into CPSR ??restoring the interrupted mode *and* its T bit ??   and the next line then did `*next = res & ~3u`, unconditionally. Returning
    into Thumb code at an address 2 mod 4 rewound two bytes and re-executed the
    preceding halfword. It presented nowhere near its cause: a decrementer FIQ
    landed inside `_zfree`, the return rewound into the tail of the *locked*
-   path, and the kernel unlocked a mutex at address 1 — a data abort at
+   path, and the kernel unlocked a mutex at address 1 ??a data abort at
    `_lck_mtx_unlock+0x8` with DFAR 0x1, deep inside IOKit. The tell was
    statistical rather than local: **761 of 761** exception returns into Thumb
    resumed at a 4-byte-aligned address rather than producing the mixed alignment
    expected from the observed return targets, and 372 of them (48.9%) needed a
    +2 correction. Two competing
-   hypotheses — a failing exclusive monitor, an uninitialised IOKit structure —
-   were instrumented and *refuted* rather than assumed: 70,008 exclusive stores
+   hypotheses ??a failing exclusive monitor, an uninitialised IOKit structure ??   were instrumented and *refuted* rather than assumed: 70,008 exclusive stores
    executed in that boot, zero failed.
 
-4. **Guest time ran 68× fast.** The timebase advanced once per retired
+4. **Guest time ran 68횞 fast.** The timebase advanced once per retired
    instruction. On the hardware the CPU runs at 412 MHz and the timebase counts
-   at 6 MHz — one tick per ~68 cycles — so the kernel could never finish
+   at 6 MHz ??one tick per ~68 cycles ??so the kernel could never finish
    servicing a decrementer deadline before the next was already in the past. It
    clamped the decrementer to its minimum and re-entered, forever. Measured
    before: **1,939,179 FIQ entries, 131,864,057 instructions inside FIQ, 65.9%
@@ -320,22 +318,22 @@ it hid.
 5. **The power-gate controller.** `AppleS5L8900XPowerController::start` writes
    the domains it wants gated and then spins until `STATE` agrees:
    `write(OFFCTRL, 0x12fc); do { s = read(STATE); } while ((s & 0x12fc) != 0x12fc);`
-   Unmodelled, `STATE` read 0 forever — **3,887,707 reads** — and `start()`
+   Unmodelled, `STATE` read 0 forever ??**3,887,707 reads** ??and `start()`
    never returned, so the controller never registered and nothing downstream
    could power-gate anything. It is a real device model rather than a stub for a
    concrete reason: the guest never *writes* `STATE`, so read-back storage would
    return zero just as forever. Polarity came from the driver's own generic gate
-   routine — power-up writes `ONCTRL` and waits for the bit to **clear**,
-   power-down writes `OFFCTRL` and waits for it to **set** — not from a guess.
+   routine ??power-up writes `ONCTRL` and waits for the bit to **clear**,
+   power-down writes `OFFCTRL` and waits for it to **set** ??not from a guess.
    With the model in place the whole page takes 7 reads in a 200M-instruction
    boot, and a wave of drivers came up behind it: I2S, SPI1, MBX, SDIO, the PMU,
-   the camera sensor. Console output went 1,673 → 2,177 bytes.
+   the camera sensor. Console output went 1,673 ??2,177 bytes.
 
 Two smaller ones, just as instructive. `CLREX` was being silently swallowed by
-the `PLD` decode — `0xF57FF01F` satisfies the PLD pattern, so with PLD tested
+the `PLD` decode ??`0xF57FF01F` satisfies the PLD pattern, so with PLD tested
 first `CLREX` became a hint that did nothing, which would let a `STREX` the
 architecture requires to fail succeed instead: two threads holding one lock. And
-in the long multiplies, bit 22 selects **signed**, and it was inverted — caught
+in the long multiplies, bit 22 selects **signed**, and it was inverted ??caught
 only by a test that multiplies `0xFFFFFFFF` by itself both ways, because for
 small operands the signed and unsigned answers agree.
 
@@ -349,19 +347,18 @@ entry is a wall that stopped the boot dead, and how it was found.
    which the PL192 driver decodes as spurious source 0, so the IPI was
    acknowledged but never cleared and `_fleh_irq` re-fired forever. Fixed by
    modelling `VICADDRESS` to return `source | 0x80000000`. Console output jumped
-   2,177 → 8,191 bytes. (`8ebeb2a`)
+   2,177 ??8,191 bytes. (`8ebeb2a`)
 2. **`AppleS5L8900XADMFMC::start` panic** ("ADM startup failed"). The NAND/DMA
    driver's `admStart` polls the ADM status register for a ready bit that never
    sets in emulation. Since we boot from a RAM disk we do not need NAND, and the
-   driver's own `probe()` honours the boot-arg **`nand-enable-adm=0`** — with it,
+   driver's own `probe()` honours the boot-arg **`nand-enable-adm=0`** ??with it,
    the driver never matches and never panics. That boot-arg is now part of the
    standard recipe.
 3. **The MBX GPU driver.** `AppleMBX` matched `/arm-io/mbx` and wedged on an
    unmodelled 2D/3D block. Breaking that node's `compatible` string so nothing
    matches clears the graphics wedge and the boot goes idle instead; iPhone OS 3
    has a software-blit path, so the GPU is not required. (`559b633`)
-4. **The historical IORTC wait.** In that run, `bsd_init` →
-   `IOKitInitializeTime` waited 30 seconds for a service named `IORTC`; the
+4. **The historical IORTC wait.** In that run, `bsd_init` ??   `IOKitInitializeTime` waited 30 seconds for a service named `IORTC`; the
    PCF50635 PMU/RTC was not modelled and the service was not published. Patching
    that timeout to zero reached `IOFindBSDRoot`, and the kernel **mounted the RAM
    disk**: `BSD root: md0, major 2, minor 0`. (`9e29149`) Run16 now proves PMU
@@ -376,32 +373,32 @@ entry is a wall that stopped the boot dead, and how it was found.
    advertising more makes `zone_virtual_addr` index a `pv_head_table` that is
    still zero during `zone_bootstrap`. Current source also rejects any RAM
    aperture that overlaps NOR at `0x28000000`, which is exactly 512 MiB above
-   the `0x08000000` SDRAM base. Real S5L8900 devices shipped ≤256 MiB, so
+   the `0x08000000` SDRAM base. Real S5L8900 devices shipped ??56 MiB, so
    hardware never reached this oversized path.
    (`5625f5c`)
-6. **ARMv6 `TTBCR.N` / `TTBR1` — the first genuinely systemic bug.**
+6. **ARMv6 `TTBCR.N` / `TTBR1` ??the first genuinely systemic bug.**
    `arm_mmu_translate` walked TTBR0 unconditionally. ARMv6 splits translation
    between TTBR0 and TTBR1 at a boundary set by `TTBCR.N`, and this kernel runs
    with **N=2**: the only two `MCR p15,0,Rd,c2,c0,2` sites in the entire binary
    both write the literal 2, and `set_mmu_ttb` writes TTBR0 *alone*. So kernel
-   text at 0xc0008000–0xc020d000 and the 0xffff0000 vector page live in TTBR1,
+   text at 0xc0008000??xc020d000 and the 0xffff0000 vector page live in TTBR1,
    while TTBR0 holds the current user pmap. Walking TTBR0 always was survivable
-   only while both TTBRs happened to hold the same base — the first `pmap_switch`
+   only while both TTBRs happened to hold the same base ??the first `pmap_switch`
    to a user pmap deleted kernel text and the vector page from the walk, and the
    CPU stormed on prefetch aborts at 0xffff000c forever. **That was the
    long-standing "unsymbolized kext spin".** With the split honoured the boot
-   lets a much broader driver set run: timers, I²C, I²S, SPI, USB PHY, twelve
+   lets a much broader driver set run: timers, I짼C, I짼S, SPI, USB PHY, twelve
    DMA channels, uart0/1/3/4, the spi-baseband mux, `AppleMultitouchZ2SPI`,
    `AppleMobileFileIntegrity`, `ApplePCF50635PMU`. Tests cover the N=0 regression
    guard, the N=2 geometry, N=1/N=3 to prove the formulas scale, that
    a TTBR1 miss does not fall back to TTBR0, and the actual bug; they fail 17
    checks against the pre-fix walker. (`e97934d`, hardened in `aa4f0c5`)
-7. **`DFSR.WnR` was never set — the second systemic bug.** Bit 11 says "the abort
+7. **`DFSR.WnR` was never set ??the second systemic bug.** Bit 11 says "the abort
    was caused by a write access", and XNU's `sleh_abort` derives `fault_type`
    from `tst r2,#0x800`. With the bit clear it always took the read path,
    rewrote the PTE with `AP=0b10` (privileged RW, user read-only), and returned
    `KERN_SUCCESS`. The faulting unprivileged store re-ran, hit the same
-   permission fault, and the kernel repaired it the same wrong way — **~2.8
+   permission fault, and the kernel repaired it the same wrong way ??**~2.8
    million identical aborts** at `_copyout+0x40`, one every ~395 instructions,
    zero user-mode instructions in 1.1 billion. It hid for ~230 M instructions
    because privileged writes are *accidentally* satisfied by `AP=0b10`; only an
@@ -410,25 +407,25 @@ entry is a wall that stopped the boot dead, and how it was found.
    `Process 1 exec of /sbin/launchd`. (`85c4653`)
 8. **The ARMv6 CPUID registers, and `EBADARCH`.** That exec then failed with
    errno 86. All 385 ARM Mach-Os in the rootfs are cputype 12 / cpusubtype 6, so
-   the disk was never wrong — the kernel's idea of its own CPU was.
+   the disk was never wrong ??the kernel's idea of its own CPU was.
    `do_cpuid()` reads MIDR, sees architecture field 0xF (which the ARM ARM
    defines as "described by the CPUID scheme, not by this field"), and goes on
    to read `ID_ISAR1` to check for Jazelle. We modelled CP15 c0 only for CRm==0
    and returned zero, so the check failed, the arch field stayed 0xF,
    `cpu_init()` indexed past its 7-entry table and stored `CPU_SUBTYPE_ARM_ALL`,
    and `grade_binary`'s `__switch8` (count byte 5, covering host subtypes 5..9)
-   missed and returned grade 0 — `EBADARCH` for every armv6 binary on the disk.
+   missed and returned grade 0 ??`EBADARCH` for every armv6 binary on the disk.
    Fixed by returning the ARM1176JZF-S feature identification block for CP15 c0
-   CRm 1 and 2 (ARM DDI 0301H §3.2); **no kernel patch, the kernel's logic was
+   CRm 1 and 2 (ARM DDI 0301H 짠3.2); **no kernel patch, the kernel's logic was
    right and we were the ones not answering.** `ID_DFR0` deliberately stays 0
    where the real part says 0x33, because we have no CP14 debug unit and
    `do_debugid()` would take a non-zero value as licence to publish a breakpoint
    count; a test pins the two together. (`30a95d3`)
 9. **A hardware SHA-1 engine we do not model, silently fabricating digests.**
    With the exec path open, launchd's first text page failed its code-signature
-   hash and the thread spun `cs_invalid_page` → `psignal` without retiring a
+   hash and the thread spun `cs_invalid_page` ??`psignal` without retiring a
    single user instruction. **The bytes were never wrong.** Two independent
-   private, untracked historical verifications exonerated the image first — a
+   private, untracked historical verifications exonerated the image first ??a
    UDIF verifier that
    decompressed all 7 `blkx` tables and checked every per-`blkx` CRC32 (zero bad
    entries, and the reconstruction is byte-identical to `rootfs_apm.img`), and an
@@ -436,13 +433,13 @@ entry is a wall that stopped the boot dead, and how it was found.
    for every signed Mach-O on the volume (155 files, 6,731 code pages, 27.6 MB,
    zero mismatches, launchd 46/46 and dyld 56/56). The real cause:
    `SHA1UpdateUsePhysicalAddress` branches to a hardware engine for buffers of
-   exactly 4096 bytes whenever `_performSHA1WithinKernelOnly` is non-NULL — a
+   exactly 4096 bytes whenever `_performSHA1WithinKernelOnly` is non-NULL ??a
    function pointer installed by `IOCryptoAcceleratorFamily`, which matched in
    our boot. `cs_validate_page` hashes exactly 4096 bytes, so it took the
    hardware path every time, read six words out of an unmodelled register file at
    0x38000000, and `SHA1Final` emitted that. **The clinching evidence was
    timing**: `SHA1Transform` costs ~2,262 Thumb instructions per 64-byte block, so
-   4 KB should cost ~145,000 instructions; the observed `SHA1Init` → verdict
+   4 KB should cost ~145,000 instructions; the observed `SHA1Init` ??verdict
    interval was 14,329, an order of magnitude too few. Software SHA-1 provably
    never ran. Un-matching the `sha1` nub keeps the hook NULL; `-S` restores it.
    (`f01a9a4`). Those verifier tools and outputs are not present in the public
@@ -460,20 +457,20 @@ later.
   `IOBufferMemoryDescriptor::initWithPhysicalMask` and the kernel's own
   `_fleh_dataabt`. First at instruction ~116.6 M, DFAR 0xea110000. The kernel
   takes them and carries on; `_panic` is never reached. The table holds 48 entries
-  and now **reports how many it dropped** rather than truncating silently — a
+  and now **reports how many it dropped** rather than truncating silently ??a
   silently truncated list reads as "these are all the abort sites", which is
   exactly the wrong thing to believe while diagnosing a wedge (`f01a9a4`).
 - **22 distinct non-RAM physical pages** were touched in that historical run, up
   from 13, because far more drivers ran. The unmodelled ones then included the
   edge interrupt controller, GPIO, the clock/reset generator, i2c0/i2c1,
   spi0/spi1, the crypto
-  block, and SDIO — where 10,003 of the 10,013 accesses are the CMD5 poll that
+  block, and SDIO ??where 10,003 of the 10,013 accesses are the CMD5 poll that
   correctly times out because no card is modelled. Every one is counted and
   attributed to a PC *and now to a kext*, which is the point. I2C0/I2C1 are no
   longer members of that unmodelled list: run16 exercised both MMIO controller
   paths and the PCF50635 slave at seven-bit address `0x73`; focused tests
   validate the IRQ21/IRQ22 behavior.
-- **`AppleH1CLCD` was not observed starting in this run** — but NOT because the
+- **`AppleH1CLCD` was not observed starting in this run** ??but NOT because the
   CLCD was unmodelled. That earlier claim was wrong on both halves:
   `core/src/soc/clcd.c` is a tested model, and the nub's registers were never
   read. The sampled profiler also recorded no PC in the kext, but its
@@ -507,12 +504,12 @@ later.
   `DFSR[10]` and `DFSR[12]` are not produced. The audit also fixed two real gaps:
   `CPSR.A` is now set on
   Prefetch Abort / Data Abort / IRQ / FIQ entry as the ARM ARM requires, and
-  `CPS` is now correctly a no-op in User mode — honouring it was a privilege
+  `CPS` is now correctly a no-op in User mode ??honouring it was a privilege
   escalation that a kernel-only boot could never expose.
 
 ---
 
-## 🔵 M5 — userspace → SpringBoard 🏆
+## ?뵷 M5 ??userspace ??SpringBoard ?룇
 
 **Criterion, in order, each independently observable:**
 
@@ -563,7 +560,7 @@ recorded zero mutations, and the active capture remained the seed-only 8x16
 block with 0 changed pixels. A current checkpoint chain
 restored at 2.2 B retired instructions,
 crossed the former
-`SMULBB` stop and wrote a 2.4 B checkpoint. The 2.4 B → 2.8 B interval wrote a
+`SMULBB` stop and wrote a 2.4 B checkpoint. The 2.4 B ??2.8 B interval wrote a
 2.7 B checkpoint, observed one new `_execve` first at 2,605,595,575, and ended
 with `systemShutdown false`. Restoring 2.7 B wrote a 2.85 B checkpoint and
 reached the configured 2.9 B cap. None of those intervals reached `_panic`,
@@ -716,9 +713,8 @@ attributed user instructions and 882 traced traps without an exact-process
 
 The first low-image PC, `0x34e8`, is the untouched stock SpringBoard Mach-O's
 `LC_UNIXTHREAD`/exported `start`; later exact PCs resolve through Objective-C
-metadata to real SpringBoard methods. This advances the frontier from “launchd
-requested the stock path” to “stock SpringBoard application code executed.”
-Criterion 3 still requires a recognizable framebuffer, and criterion 4 requires
+metadata to real SpringBoard methods. This advances the frontier from ?쐋aunchd
+requested the stock path??to ?쐓tock SpringBoard application code executed.??Criterion 3 still requires a recognizable framebuffer, and criterion 4 requires
 host-to-guest touch.
 
 ### Run16 PMU/I2C and display-start diagnostic
@@ -741,7 +737,7 @@ not yet prove direct `IORTC` resource publication. That requires a one-patch
 diagnostic option or clearly identified targeted build; `-K` disables the whole
 patch table and external-md rejects it.
 
-Run16 also supersedes the old “AppleMerlotLCD remained frozen at 409” boundary.
+Run16 also supersedes the old ?쏛ppleMerlotLCD remained frozen at 409??boundary.
 Both observed Merlot start calls returned success, H1 `start_hardware` returned
 success, `AppleH1DisplayDrivers` accumulated 10,803 exact instruction-entry
 observations, and `AppleMerlotLCD` accumulated 948. The guest performed 795
@@ -1044,8 +1040,8 @@ asynchronous wake that left the thread runnable but unscheduled at the cap.
 
 ### Run23 answered the measurement questions and moved the frontier
 
-Run23 replayed exact commit `777afb4` — build inputs identical to hosted-green
-`5a40c5e` — to a clean **2,100,000,000-instruction cap** in **1,434.86 s**,
+Run23 replayed exact commit `777afb4` ??build inputs identical to hosted-green
+`5a40c5e` ??to a clean **2,100,000,000-instruction cap** in **1,434.86 s**,
 with empty stderr, unchanged immutable hashes, zero external-md failures, and
 a 50.63 MiB guest-free low-water mark.
 
@@ -1054,12 +1050,12 @@ rather than confirmations:
 
 1. **Owner.** `ip_receiver_name=0x1b03` validated first, then active space
    `c0acfe60`, task `c0ad7b10`, matching task-space backpointer, and proc
-   `e0381d68` → **PID 1**, printed `AUTHORITATIVE`. **launchd** holds the
+   `e0381d68` ??**PID 1**, printed `AUTHORITATIVE`. **launchd** holds the
    receive right for the port SpringBoard sends to.
 2. **Queue contents.** The bounded reciprocal walk closed consistent and
    untruncated on **five linked** kmsgs with **`reserved-or-in-flight=0`**.
-   All five are the same CTServerConnection handshake — id `0x0054b557`,
-   2,104 bytes, destination `c0d705a0` — with five distinct reply ports.
+   All five are the same CTServerConnection handshake ??id `0x0054b557`,
+   2,104 bytes, destination `c0d705a0` ??with five distinct reply ports.
    SpringBoard's is the sixth against `qlimit=5`. Both route PCs are **BOUND**
    with `r4=c0d705b8`/`r8=c3d3c000`: queue-full slow branch `c00147ba`
    @1,966,245,373 and `fullwaiters=1` pre-store `c00147d6` @1,966,245,387.
@@ -1068,7 +1064,7 @@ rather than confirmations:
    `_ipc_mqueue_receive` on port `c0dd99d8` since **932,507,189** with no
    resume observed. CommCenter never exited and took no signals.
 4. **Baseband.** AppleBaseband located its reset function, created, committed
-   and enabled an event source — and its **reset callback never fired**. Zero
+   and enabled an event source ??and its **reset callback never fired**. Zero
    reads, changes, dispatches, handlers, sends, or routes. The delivered-
    notification hypothesis is retired.
 
@@ -1076,15 +1072,14 @@ The new frontier is narrower and better posed: **CommCenter is alive and
 waiting, and has never taken the `com.apple.commcenter` receive right from
 launchd.** The strongest available lead is that the single IOKit interest
 CommCenter registered is on AppleBaseband, registered at 931,584,215 by the
-same thread that blocked 923 K instructions later — but the blocked receive is
+same thread that blocked 923 K instructions later ??but the blocked receive is
 on a different port than the interest port, so this is correlation, not cause.
 
 ### Run29: the blocker is SRDY, and the guest said so
 
-Run29 ran to **7e9** instructions (≈17 guest seconds, 4,679 s host, exit 0) —
-the first replay ever to outlast the guest's own timeouts. It falsified the
+Run29 ran to **7e9** instructions (??7 guest seconds, 4,679 s host, exit 0) ??the first replay ever to outlast the guest's own timeouts. It falsified the
 expectation below: CommCenter does **not** give up. `_bootstrap_check_in` is
-still never called, while `_ioctl` grew 15→177 and `_select` 1→10 evenly to
+still never called, while `_ioctl` grew 15??77 and `_select` 1??0 evenly to
 6.6e9. The bounded `SCPreferences` loop was an inner loop; the outer baseband
 retry does not terminate.
 
@@ -1098,7 +1093,7 @@ AppleSerialMultiplexer: !! mux-ad(err)::bsdIoctl: Fatal error code=kASMFatalErro
 The Infineon baseband SPI driver times out waiting for **SRDY** (spi2
 `function-srdy` GPIO `0x1804`), the multiplexer fails `ASMIOCNEWDLCI`, and
 CommCenter loops. That completes the chain from unmodelled hardware to a black
-screen. Making the failure faster or cleaner is **not** the fix — the ioctl
+screen. Making the failure faster or cleaner is **not** the fix ??the ioctl
 already fails and CommCenter retries regardless. The next step is to
 disassemble the SRDY path before choosing between a minimal SRDY/GPIO input
 model and a faithful permanent-failure state.
@@ -1109,7 +1104,7 @@ Guest time advances from retired instructions at the real 412 MHz : 6 MHz
 cpu:timebase ratio, so **one guest second costs about 412 million retired
 instructions**. CommCenter's startup contains a bounded ten-attempt retry loop
 (`SCPreferencesLock` / `SCNetworkSetCopyCurrent` / `SCPreferencesUnlock` /
-`sleep(1)`) worth roughly **4.1e9 instructions** — nearly twice the largest cap
+`sleep(1)`) worth roughly **4.1e9 instructions** ??nearly twice the largest cap
 ever run here.
 
 Every long run to date stopped part-way through a guest timeout rather than
@@ -1124,10 +1119,10 @@ The current immediate gates are:
 1. ~~resolve whether CommCenter's blocked receive port is a port set containing
    the AppleBaseband interest port;~~ **answered: it is not.** Run24 classified
    four CommCenter receives on non-interest mqueues and found **zero** port
-   sets — every one an active `IOT_PORT`. CommCenter never established a
+   sets ??every one an active `IOT_PORT`. CommCenter never established a
    receive that could deliver an AppleBaseband notification, so **that delivery
    route is closed**: building a GPIO-75 edge to deliver it would have nothing
-   on the other end. This does not show the absent modem is irrelevant — the
+   on the other end. This does not show the absent modem is irrelevant ??the
    spi2 SRDY/MRDY handshake and any bounded timeout path remain open.
    Run24 also named the five queued clients as **PIDs 16, 18, 15, 12 and 13**,
    all blocked on the identical `0x0054b557` handshake: CommCenter has served
@@ -1135,7 +1130,7 @@ The current immediate gates are:
    live question is now **why PID 24 never takes its own receive right**, which
    needs a user-code trace of CommCenter itself;
 2. ~~resolve the shipped AppleBaseband reset event source to its exact trigger and
-   decide from the binary — not by assumption — whether hardware with no modem
+   decide from the binary ??not by assumption ??whether hardware with no modem
    present would ever fire it;~~ **resolved as far as static evidence allows.**
    It is an `IOInterruptEventSource` on **index 0** of AppleBaseband's provider,
    which `/device-tree/baseband` gives as interrupt **0x4b (75)** on the GPIO
@@ -1143,9 +1138,9 @@ The current immediate gates are:
    `function-reset_det` GPIO platform function (GPIO `0x1203`). The descriptor
    encoding puts `reset_det` in the same class as the modem-driven `srdy` line
    rather than the SoC-driven `bb_rst`/`mrdy` lines, which suggests hardware
-   with no modem fitted would not fire interrupt 75 either — so the emulator's
+   with no modem fitted would not fire interrupt 75 either ??so the emulator's
    zero callbacks may be faithful, and the edge must **not** be fabricated. See
-   `AGENT_HANDOFF.md` §13.0a;
+   `AGENT_HANDOFF.md` 짠13.0a;
 3. determine where CommCenter's startup is actually gated relative to its
    `bootstrap_check_in` for `com.apple.commcenter`, and identify the senders
    behind the five queued reply ports;
@@ -1197,7 +1192,7 @@ taken, and twelve Mach traps and five BSD system calls were serviced. That
 historical run then stopped on VFP.
 
 XNU does not leave VFP enabled. `_init_vfp` grants CP10/CP11 full access once, and
-from then on the gate is `FPEXC.EN` alone, cleared per thread — so **the first VFP
+from then on the gate is `FPEXC.EN` alone, cleared per thread ??so **the first VFP
 instruction a thread executes is supposed to take an Undefined exception**, which
 the kernel handles by enabling VFP and re-running it. `d021205` made us vector
 exactly those to the guest, using `_sleh_undef`'s own six encoding masks as the
@@ -1206,7 +1201,7 @@ than being swallowed by the guest's handler. That path now works and has been
 crossed by the current run.
 
 What halted that machine was the *next* instruction along it: `0xecb10a20`,
-`VLDMIA r1!, {s0-s31}` — the load-multiple by which `_vfp_switch` restores a
+`VLDMIA r1!, {s0-s31}` ??the load-multiple by which `_vfp_switch` restores a
 thread's VFP register file. The interpreter correctly stopped instead of
 guessing. `core/src/arm/vfp.c` now implements that family and its regression
 tests; this trace remains evidence for why the implementation was needed, not a
@@ -1274,7 +1269,7 @@ path.
   reach `0x30a117e4`. A matching reply, queue state, and baseband causality
   remain unknown. The next named low-image checkpoint, the SpringBoard
   `UIController` call, remains unreached.
-- **The display path** — the CLCD model now separates `VIDTCON0..3` timing from
+- **The display path** ??the CLCD model now separates `VIDTCON0..3` timing from
   the `0x0d8..0x0ec` window configuration, seeds an iBoot-compatible N82
   handoff, and gates frame publication and WFI edges on genuinely live scanout.
   The app's CoreGraphics bridge follows a validated active window only while
@@ -1295,7 +1290,7 @@ path.
   `AppleMultitouchZ2SPI` already starts and reports "using DMA for bootloading",
   which proves that the recorded boot reached that request. Device, DMA and
   input-report semantics remain unimplemented and unproven.
-- ~~**Free space on the root volume.**~~ **DONE** — `bootkernel --grow <MB>`
+- ~~**Free space on the root volume.**~~ **DONE** ??`bootkernel --grow <MB>`
   (default 32) grows the HFS+ volume in the loaded copy of the RAM disk;
   `firmware/rootfs.img` is untouched. TN1150 layout, four edits, validated
   before and after and refusing loudly on anything unexpected; see BOOTLOG
@@ -1316,7 +1311,7 @@ path.
     identical with and without `--grow`. And `_execve` stuck at 11 was never
     the daemon counter it looked like: launchd spawns jobs with `posix_spawn`,
     which that probe does not see, and `mDNSResponder[14]` is running in both
-    runs. Free space was not what was holding the LaunchDaemons — and neither
+    runs. Free space was not what was holding the LaunchDaemons ??and neither
     was `execve`.
 - **Recover pinned RAM without inventing an invalid physical map.** Direct
   streaming removed the second host-side rootfs copy, but the RAM disk is still
@@ -1382,7 +1377,7 @@ path.
   layers read undocumented Apple on-media formats: `AppleNANDFTL`'s FTL/VFL
   metadata, and the partition table that **`IOFlashPartitionScheme`** validates
   by magic and major version. (There is no `AppleAPM`/`AppleGPT`/`AppleFDisk`
-  kext in this kernelcache — `IOFlashPartitionScheme` is what makes `disk0s1`
+  kext in this kernelcache ??`IOFlashPartitionScheme` is what makes `disk0s1`
   and `disk0s2`, and it fails its probe outright unless its provider carries a
   `boot-from-nand` property.) Per the project rule we do not invent either
   format, so this stays parked rather than half-built.
@@ -1409,11 +1404,11 @@ that SpringBoard will render or that the phone has a particular multiplier.
 
 ---
 
-## ⚪ Parallel tracks
+## ??Parallel tracks
 
 ### Dynarec
 
-An ARMv6→ARM64 JIT emitting into executable pages, with the interpreter as its
+An ARMv6?묨RM64 JIT emitting into executable pages, with the interpreter as its
 differential oracle. The backends have separate emitted and C semantics in
 places. Current focused tests run short blocks through both engines and compare
 their final architectural state and touched memory; a full per-instruction boot
@@ -1446,7 +1441,7 @@ thread-policy details remain host adapters.
 **Observable:** SpringBoard at interactive frame rates. Snapshot/restore
 (`95eaf8b`) has already reduced one historical desktop replay from 140 seconds
 for a cold 900 M-instruction run to 34 seconds when restoring at 200 M. That
-reduces a known cold-replay cost; the current 2.2 B → 2.98 B checkpoint chain
+reduces a known cold-replay cost; the current 2.2 B ??2.98 B checkpoint chain
 also proves that restore works across the post-VFP userspace frontier, can
 isolate a later opcode, and can replay through its fix. It does not
 measure the phone's iteration loop or make the inactive JIT a boot prerequisite.
@@ -1461,7 +1456,7 @@ PPP/IP/NAT core exits through ordinary socket adapters. It needs no guest kext, 
 Ethernet kext and real Marvell Wi-Fi model remain deferred routes, not the
 recommended implementation.
 
-N0–N2 (NAT, UART transport and PPP negotiation) can be built and tested with
+N0?밡2 (NAT, UART transport and PPP negotiation) can be built and tested with
 small host fixtures. N3 needs the shared real-guest session and a reliable
 `launchd` job path before device claims are meaningful. The CPU thread must
 never block on network I/O; queues and protocol state stay portable while
@@ -1469,7 +1464,7 @@ never block on network I/O; queues and protocol state stay portable while
 
 **Observable:** the guest resolves a hostname and fetches a URL over plain HTTP.
 
-### Guest audio — first-device priority
+### Guest audio ??first-device priority
 
 Audio is now a first-device track for the iPhone 6s Plus, but **no guest audio
 device or host sink exists today**. Start by proving which I2S/controller and
@@ -1492,21 +1487,21 @@ There is one lesson under nearly every bug in this project, and it is not
 "ARMv6 is fiddly".
 
 **Every bug found here was invisible until an unrelated fix unlocked the code
-path that exposed it.** Not merely hard to find — *invisible*, because the code
+path that exposed it.** Not merely hard to find ??*invisible*, because the code
 containing it had never executed.
 
 - Clearing the exclusive monitor on exception entry was wrong for a long time
   and could not matter, because no interrupt had ever fired. It became a real
   bug the instant the timer started working.
 - The `MOVS pc,lr` alignment bug is dormant without interrupts, for the same
-  reason. It needed the timer fix to become reachable — and then it did not
+  reason. It needed the timer fix to become reachable ??and then it did not
   announce itself either, presenting as a data abort on address 1 in a different
   subsystem, millions of instructions later.
 - The timebase ratio was harmless while nothing armed a decrementer.
 - The power controller could not be discovered until the drivers ran, and the
   drivers could not run until the kernel stopped panicking.
 - Even the diagnostics had this shape. The FIQ logger sampled the first twelve
-  interrupts, all healthy at 55,245-instruction spacing — and the storm began at
+  interrupts, all healthy at 55,245-instruction spacing ??and the storm began at
   instruction 66 million. The profiler silently dropped every function past its
   64-entry table, so it printed identical output at 200M and 400M instructions
   and looked exactly like coverage.
@@ -1522,15 +1517,15 @@ implement, never guess.** It is the difference between a bug and a mystery.
 
 - An unimplemented instruction stops the machine *at* the instruction instead of
   computing something plausible and corrupting state that fails somewhere else.
-  That is how `UMULL`, `LDREXD` and the Thumb `BLX` suffix were found — the
+  That is how `UMULL`, `LDREXD` and the Thumb `BLX` suffix were found ??the
   emulator named them.
 - Unmapped bus accesses are counted and attributed to a PC and a kernel symbol,
   so "which device does the kernel want next" is a report rather than a guess.
-  That is how the real timer register map was recovered — not from a datasheet,
+  That is how the real timer register map was recovered ??not from a datasheet,
   but by logging what the kernel touched and correlating it against the kernel's
   own symbol table. `_s5l8900x_get_timebase` reading 0x080/0x084 told us more
   than any documentation could have.
-- The one place the rule is deliberately relaxed — named MMIO stub windows — is
+- The one place the rule is deliberately relaxed ??named MMIO stub windows ??is
   bounded and argued, because for an MMIO read there *is* no neutral option:
   returning 0 is already a guess, and a demonstrably dangerous one. So a stub is
   honest storage (reads return what was written), and it is named and counted so
@@ -1549,7 +1544,7 @@ did not have.
 **Systemic beats device-specific, and the two look identical from the log.** Most
 wall-clearing here has been device whack-a-mole: model one more peripheral,
 un-match one more driver, patch one more wait. Each buys one symptom. Two fixes
-were a different kind — `TTBCR.N`/`TTBR1` and `DFSR.WnR` were each a single
+were a different kind ??`TTBCR.N`/`TTBR1` and `DFSR.WnR` were each a single
 architectural gap in the CPU itself, and each unblocked a dozen symptoms at once
 (the first unblocked a broad set of IOKit drivers observed in that run; the
 second reached userspace).
@@ -1563,7 +1558,7 @@ because privileged writes are accidentally satisfied by the `AP=0b10` the kernel
 repairs the PTE to; only `STRT`/`LDRT` or real user mode could expose it. `CPS`
 being honoured in User mode is unreachable from a kernel-only boot by
 construction. When something has been silently wrong for a very long time, do not
-look for a rare *value* — look for a rare *mode*.
+look for a rare *value* ??look for a rare *mode*.
 
 **"The profile blames one unsymbolized kext" is now a solved problem.** It cost
 five separate diagnosis cycles (ADMFMC, MBX, IORTC, the TTBR abort storm, the
@@ -1571,8 +1566,8 @@ post-SDIO stall) before anyone fixed the tool instead of the symptom. The kext
 symbolizer (`f105360`) maps `__PRELINK_TEXT` to bundle identifiers out of
 `__PRELINK_INFO`, so an address now resolves to `<bundle-id>+0xNNNN` and the
 report gained "time by prelinked kext" and "hottest individual PCs". Per-kext
-*function* names are impossible, not merely unimplemented — the kernelcache
-builder strips each kext's `LC_SYMTAB` — which is exactly why the hottest-PC list
+*function* names are impossible, not merely unimplemented ??the kernelcache
+builder strips each kext's `LC_SYMTAB` ??which is exactly why the hottest-PC list
 exists. The whole procedure these tools add up to is written down in
 [debugging.md](debugging.md), so it does not have to be rediscovered a sixth
 time.
@@ -1586,16 +1581,61 @@ time.
   only the minimum faithful **graceful no-modem** behavior required for the
   unmodified SpringBoard/CommCenter startup path to continue. Run22 proved the
   saturated Mach queue but not whether stubbed baseband hardware caused it.
-  Run23 then showed that no AppleBaseband notification was ever delivered — the
-  reset callback never fired — so the queue is not explained by baseband
+  Run23 then showed that no AppleBaseband notification was ever delivered ??the
+  reset callback never fired ??so the queue is not explained by baseband
   traffic. Whether the *absence* of that callback is what keeps CommCenter from
   checking in is the open question, and it is not yet a conclusion.
 - **Wi-Fi through the real Marvell 88W8686** and GPU acceleration. "Route A"
-  for networking — emulating the real NIC so Apple's driver binds unmodified —
-  has documented SDIO/controller reconnaissance in `networking.md`, but the
+  for networking ??emulating the real NIC so Apple's driver binds unmodified ??  has documented SDIO/controller reconnaissance in `networking.md`, but the
   Marvell firmware protocol remains underspecified and the route is deliberately
   deferred. Guest audio is now in scope for the first device, but remains
   unimplemented.
 - **App Store distribution.** Out of scope. The current ad-hoc signing,
   jailbreak-dependent executable-memory policy and user-supplied firmware plan
   are not an App Store distribution path.
+
+---
+
+## ⚪ P2 — Second machine profile: iPhone 5 (S5L8950X) / iOS 8.4.1
+
+Requested as a second target. Recorded here so the scope is honest before any
+code is written: this is **a second emulator sharing a core, not a port**.
+
+### What already transfers
+
+- **IMG3 parsing (M3).** The A6 still uses IMG3; IMG4 arrives with the A7. The
+  existing container work largely applies.
+- **The method and the tooling.** Fail-closed diagnostics, checkpoints and
+  restore, `tools/dscmap.py`, `tools/hfsx_extract.py`, the Mach-O and HFS+
+  readers, and the whole "un-match what is not modelled" discipline are
+  target-agnostic.
+- **Core architecture.** Bus, MMU framework, snapshot format, portable C, CI.
+
+### What is new, hardest first
+
+1. **The GPU, and it may be decisive.** iPhone OS 3's SpringBoard renders in
+   *software* into the CLCD framebuffer, which is the only reason the current
+   approach reaches pixels at all. iOS 8's SpringBoard is fully GPU-composited:
+   CoreAnimation to IOMobileFramebuffer to a PowerVR SGX543MP3. There is no
+   software fallback path. Either the SGX is emulated — undocumented,
+   proprietary — or IOSurface/IOMobileFramebuffer is shimmed at a higher level.
+   **Answer this before building anything else.** Every other item below is
+   large but ordinary; this one is unbounded.
+2. **NEON.** The iOS 8 shared cache uses Advanced SIMD throughout — `memcpy`,
+   string operations, CoreGraphics. Not optional, roughly a thousand encodings.
+3. **SMP.** The A6 is dual-core. Per-CPU state, exclusive monitors across cores,
+   IPIs, per-core timers, memory ordering. Mitigation: XNU will come up
+   single-core on a boot-arg, which defers all of it.
+4. **ARMv7s.** Full Thumb-2, VFPv4 with FMA, hardware integer divide, real
+   barriers. Large but mechanical, and testable in isolation with no hardware
+   model at all — so it is the natural first *code* to write.
+5. **S5L8950X peripherals** from scratch, including the ANS NAND controller,
+   which is nothing like the S5L8900's raw NAND.
+6. **Activation.** Server-dependent on iOS 8 in a way iPhone OS 3 is not.
+
+### Sequencing
+
+De-risk the GPU question → ARMv7s + NEON in the interpreter (pure, CI-testable)
+→ S5L8950X SoC → boot. Not before M5 renders and takes a tap: a finished first
+target is what makes the second one tractable rather than miserable, and every
+tool it produces is reused directly.
