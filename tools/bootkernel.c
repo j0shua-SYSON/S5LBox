@@ -2313,7 +2313,26 @@ static unsigned    NM;
  */
 #define COMMCENTER_IMAGE_STUB_LOW  UINT32_C(0x0009b718)
 #define COMMCENTER_IMAGE_STUB_HIGH UINT32_C(0x0009c000)
-#define COMMCENTER_IMAGE_CHECKPOINT_COUNT 8u
+
+/*
+ * The exact check-in function, at __text 0x1a99c..0x1aa16.
+ *
+ * An encoding-directed scan of __text found exactly ONE call site for
+ * _bootstrap_check_in: the Thumb BLX at 0x0001a9be. The function around it
+ * reads, in order: task_get_special_port(task, 4, &bootstrap_port);
+ * bootstrap_check_in(bootstrap_port, "com.apple.commcenter", &service_port)
+ * -- the literal resolved at __cstring 0x00085ee4 -- then `cmp r0,#0`, and
+ * only on success CPCreateMIGServerSource plus pthread_create for the server
+ * thread. The failure arm deallocates the port and returns 0.
+ *
+ * So CommCenter's MIG server only exists if this call succeeds, which makes
+ * the return value at 0x0001a9c2 the single number that explains run24: six
+ * clients queued on a port launchd still owns. The stub hit says whether the
+ * call happened; r0 at the return site says why it did not take.
+ */
+#define COMMCENTER_TEXT_CP_LOW  UINT32_C(0x0001a99c)
+#define COMMCENTER_TEXT_CP_HIGH UINT32_C(0x0001aa16)
+#define COMMCENTER_IMAGE_CHECKPOINT_COUNT 12u
 
 typedef enum {
     COMMCENTER_WATCH_USER_REGION_LOW_IMAGE = 0,
@@ -6700,7 +6719,12 @@ static const struct {
     { UINT32_C(0x0009bed8), "_select" },
     { UINT32_C(0x0009beec), "_sem_wait" },
     { UINT32_C(0x0009be84), "_pthread_cond_timedwait" },
-    { UINT32_C(0x0009bdf0), "_ioctl" }
+    { UINT32_C(0x0009bdf0), "_ioctl" },
+    /* The exact check-in function. r0 at the return site is the kern_return. */
+    { UINT32_C(0x0001a99c), "checkin:function-entry" },
+    { UINT32_C(0x0001a9c2), "checkin:bootstrap_check_in-RETURN(r0=kr)" },
+    { UINT32_C(0x0001a9c8), "checkin:SUCCESS-arm" },
+    { UINT32_C(0x0001a9fe), "checkin:FAILURE-arm" }
 };
 
 static unsigned commcenter_watch_phase(
@@ -7651,9 +7675,12 @@ static inline void commcenter_watch_note_instruction(
         cpu, at, pc, cpu->cpsr, cpu->cp15.tpidrprw);
     watch->user_pc_total++;
 
-    /* Exact imported-function stubs. The range test keeps the common path
-     * to one compare; only stub-section PCs reach the table scan. */
-    if (pc < COMMCENTER_IMAGE_STUB_LOW || pc >= COMMCENTER_IMAGE_STUB_HIGH)
+    /* Exact stub and check-in-function sites. Two disjoint range tests keep
+     * the common path cheap; only PCs inside them reach the table scan. */
+    if ((pc < COMMCENTER_IMAGE_STUB_LOW ||
+         pc >= COMMCENTER_IMAGE_STUB_HIGH) &&
+        (pc < COMMCENTER_TEXT_CP_LOW ||
+         pc > COMMCENTER_TEXT_CP_HIGH))
         return;
     for (unsigned i = 0; i < COMMCENTER_IMAGE_CHECKPOINT_COUNT; i++) {
         if (COMMCENTER_IMAGE_CHECKPOINTS[i].pc != pc) continue;
