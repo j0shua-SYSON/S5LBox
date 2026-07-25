@@ -29,7 +29,16 @@ param(
     # A run that stops at 2.1e9 has not observed a timeout; it has merely
     # stopped in the middle of one.
     [ValidateRange(1000000, 24000000000)]
-    [long] $InstructionCap = 2100000000
+    [long] $InstructionCap = 2100000000,
+
+    # Take a checkpoint at this retired-instruction count. Zero means none.
+    # bootkernel writes <file>, <file>.mdimage and <file>.mdstate; a later run
+    # restores all three, which turns a 25-30 minute replay to the SpringBoard
+    # frontier into seconds plus the delta. The checkpoint lands inside the run
+    # directory so it inherits the same freshness and containment rules as every
+    # other output.
+    [ValidateRange(0, 24000000000)]
+    [long] $SnapshotAt = 0
 )
 
 Set-StrictMode -Version Latest
@@ -657,6 +666,22 @@ try {
         '-Z', '100000000',
         '-n', [string]$InstructionCap
     )
+    if ($SnapshotAt -gt 0) {
+        if ($SnapshotAt -ge $InstructionCap) {
+            throw ("SnapshotAt {0} must be below the instruction cap {1}" -f
+                   $SnapshotAt, $InstructionCap)
+        }
+        $snapshotPath = Join-Path $runDir ('run.snapshot-{0}' -f $SnapshotAt)
+        foreach ($p in @($snapshotPath,
+                         ($snapshotPath + '.mdimage'),
+                         ($snapshotPath + '.mdstate'))) {
+            Assert-PathIsStrictlyBelow 'Run23 checkpoint path' $runDir $p
+            if (Test-Path -LiteralPath $p) {
+                throw "Refusing pre-existing checkpoint output: $p"
+            }
+        }
+        $bootArguments += @('--snapshot-at', [string]$SnapshotAt, $snapshotPath)
+    }
     $childCommandLine = (
         $bootArguments |
         ForEach-Object {
@@ -699,6 +724,7 @@ try {
         "windows_command_line: $exactCommand",
         "instruction_cap: $InstructionCap",
         "profile_window: $profileWindow",
+        "snapshot_at: $SnapshotAt",
         'heartbeat_interval: 100000000',
         'hot_page: 0x3d200000',
         'guest_ram_mib: 128',
