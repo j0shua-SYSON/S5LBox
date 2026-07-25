@@ -28,7 +28,7 @@ proof that no private or unindexed implementation exists.
 | **M2** | SoC bring-up | A bare-metal payload prints over the emulated UART; a timer IRQ is taken and returned from | ✅ done and covered by host tests |
 | **M3** | Firmware containers + LLB execution | Real IMG3s parse and decrypt; an extracted real Apple LLB payload executes; the kernelcache is extracted | ✅ done; SecureROM/iBoot execution remains future full-chain work |
 | **M4** | XNU boots and logs | The kernel reaches `bsd_init`, prints, and Apple's own kexts match and start | ✅ **done** — plus the real root filesystem mounts |
-| **M5** | Userspace → SpringBoard | `launchd` runs; the home screen renders and takes a tap | 🔵 **in progress.** Run22 proves SpringBoard's initial CTServerConnection request reaches a saturated Mach queue (`msgcount=qlimit=5`) and its sender later blocks without resuming before the clean 2.1 B cap. Adjacent full-path PCs were recorded, but the old trace omitted the decisive kmsg register required to bind them fail-closed. The active receiver owner, linked-versus-reserved entries, service dequeue/reply, and baseband causality remain unresolved. `UIController` is unreached and the seed-only framebuffer has 0 changed pixels. |
+| **M5** | Userspace → SpringBoard | `launchd` runs; the home screen renders and takes a tap | 🔵 **in progress.** Run23 binds both send-path routes to the exact mqueue/kmsg, walks the destination queue to **five linked** identical `0x0054b557` handshakes with **zero** reserved slots against `qlimit=5`, and authoritatively decodes the receive-right owner as **launchd (PID 1)**. AppleBaseband enabled its reset event source but its callback never fired, so no delivered notification explains the saturation. CommCenter (PID 24) is alive, never exited, and its only IOKit interest is on AppleBaseband — registered by the very thread that has been blocked in a Mach receive since 932,507,189. Why the service never checks in is the open question. `UIController` is unreached and the seed-only framebuffer has 0 changed pixels. |
 | **D** | Dynarec (parallel) | SpringBoard at interactive frame rates on the phone | 🔵 emitter + ARM/Thumb translator and host execution tests exist (off by default); no code cache or dispatcher calls them |
 | **N** | Guest networking (parallel) | The guest resolves a name and fetches a URL | ⚪ designed, not built |
 | **A** | Guest audio (first-device track) | Guest PCM reaches the host speaker without blocking the CPU thread | ⚪ priority, not designed or built |
@@ -1041,18 +1041,59 @@ Per-thread wait output proves an ordered last-observed block with no later
 execution; until a final live wait-state reread exists, it does not exclude an
 asynchronous wake that left the thread runnable but unscheduled at the cap.
 
+### Run23 answered the measurement questions and moved the frontier
+
+Run23 replayed exact commit `777afb4` — build inputs identical to hosted-green
+`5a40c5e` — to a clean **2,100,000,000-instruction cap** in **1,434.86 s**,
+with empty stderr, unchanged immutable hashes, zero external-md failures, and
+a 50.63 MiB guest-free low-water mark.
+
+Gates 1 through 4 above are now closed, and three of them closed with results
+rather than confirmations:
+
+1. **Owner.** `ip_receiver_name=0x1b03` validated first, then active space
+   `c0acfe60`, task `c0ad7b10`, matching task-space backpointer, and proc
+   `e0381d68` → **PID 1**, printed `AUTHORITATIVE`. **launchd** holds the
+   receive right for the port SpringBoard sends to.
+2. **Queue contents.** The bounded reciprocal walk closed consistent and
+   untruncated on **five linked** kmsgs with **`reserved-or-in-flight=0`**.
+   All five are the same CTServerConnection handshake — id `0x0054b557`,
+   2,104 bytes, destination `c0d705a0` — with five distinct reply ports.
+   SpringBoard's is the sixth against `qlimit=5`. Both route PCs are **BOUND**
+   with `r4=c0d705b8`/`r8=c3d3c000`: queue-full slow branch `c00147ba`
+   @1,966,245,373 and `fullwaiters=1` pre-store `c00147d6` @1,966,245,387.
+3. **Service threads.** Six CommCenter threads retained. Three are in timed
+   waits on the same semaphore `c0b239a0`; one, `e02f5888`, has been blocked in
+   `_ipc_mqueue_receive` on port `c0dd99d8` since **932,507,189** with no
+   resume observed. CommCenter never exited and took no signals.
+4. **Baseband.** AppleBaseband located its reset function, created, committed
+   and enabled an event source — and its **reset callback never fired**. Zero
+   reads, changes, dispatches, handlers, sends, or routes. The delivered-
+   notification hypothesis is retired.
+
+The new frontier is narrower and better posed: **CommCenter is alive and
+waiting, and has never taken the `com.apple.commcenter` receive right from
+launchd.** The strongest available lead is that the single IOKit interest
+CommCenter registered is on AppleBaseband, registered at 931,584,215 by the
+same thread that blocked 923 K instructions later — but the blocked receive is
+on a different port than the interest port, so this is correlation, not cause.
+
 The current immediate gates are:
 
-1. fail closed on `ip_receiver_name`, then identify the current active
-   receive-right owner rather than dereferencing the port union unconditionally;
-2. walk the actual queue links and separate linked kmsgs from reserved/in-flight
-   `msgcount` slots;
-3. retain every CommCenter thread's Mach/semaphore/continuation state and
-   correlate the service receiver rather than the last scheduled PID 24 worker;
-4. trace AppleBaseband reset-detect publication through its user-notification
-   Mach port before attributing causality to passive GPIO/SPI hardware;
+1. resolve, from the exact 7E18 binaries, what CommCenter's blocked receive port
+   `c0dd99d8` is and whether it is a port set containing the AppleBaseband
+   interest port `c3c59ab0`; a port-set membership would make the missing reset
+   notification a direct explanation, and its absence would rule it out;
+2. resolve the shipped AppleBaseband reset event source to its exact trigger and
+   decide from the binary — not by assumption — whether hardware with no modem
+   present would ever fire it;
+3. determine where CommCenter's startup is actually gated relative to its
+   `bootstrap_check_in` for `com.apple.commcenter`, and identify the senders
+   behind the five queued reply ports;
+4. name or model the `0x3d200000` BasebandSPI register window, which is
+   currently unmapped and answers the shipped driver with zeros;
 5. implement the minimum faithful graceful no-modem hardware behavior required
-   for boot only if that correlation is causal;
+   for boot, only once one of the above proves which semantic is wrong;
 6. reach `UIController`, capture recognizable changed pixels, then add the host
    touch path and demonstrate an interaction.
 
@@ -1476,9 +1517,11 @@ time.
   application processor; a complete modem remains out of scope. M5 now includes
   only the minimum faithful **graceful no-modem** behavior required for the
   unmodified SpringBoard/CommCenter startup path to continue. Run22 proved the
-  saturated Mach queue but not whether stubbed baseband hardware caused it;
-  exact AppleBaseband-to-CommCenter notification correlation remains a run23
-  question, not a conclusion.
+  saturated Mach queue but not whether stubbed baseband hardware caused it.
+  Run23 then showed that no AppleBaseband notification was ever delivered — the
+  reset callback never fired — so the queue is not explained by baseband
+  traffic. Whether the *absence* of that callback is what keeps CommCenter from
+  checking in is the open question, and it is not yet a conclusion.
 - **Wi-Fi through the real Marvell 88W8686** and GPU acceleration. "Route A"
   for networking — emulating the real NIC so Apple's driver binds unmodified —
   has documented SDIO/controller reconnaissance in `networking.md`, but the

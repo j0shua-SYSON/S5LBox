@@ -81,9 +81,25 @@ run21's firmware evidence.
   active-receiver/in-transit/timestamp union using `ip_receiver_name`.
 - Exact run22 source passed all eight hosted jobs in
   [core run 30106957804](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30106957804).
-- **SpringBoard was not rendered.** Run22 recorded zero `UIController` hits,
-  zero live-scanout mutations, and zero changed pixels; the final PPM was the
-  unchanged seed.
+- Run23 replayed exact commit `777afb4` — build inputs identical to hosted-green
+  `5a40c5e` — to a clean **2,100,000,000-instruction cap** in 1,434.86 s. It
+  **bound** both send-path route PCs to the exact mqueue/kmsg pair, **walked**
+  the queue to a closed consistent ring of **five linked** kmsgs with
+  **zero reserved/in-flight slots** (all id `0x0054b557`, all 2,104 bytes, five
+  distinct reply ports), and decoded the destination's receive-right owner
+  **authoritatively** as **launchd, PID 1**.
+- Run23 retires the delivered-baseband hypothesis: AppleBaseband created,
+  committed, and enabled its reset event source, but its **reset callback never
+  fired**, so there was no notification, no Mach send, and no queue route. The
+  one IOKit interest CommCenter registered is on AppleBaseband, and the thread
+  that registered it blocked in a Mach receive 923 K instructions later and was
+  never observed running again — a correlation, not a proof.
+- Run23 also names an unmapped peripheral: `0x3d200000`, first touched by
+  `com.apple.driver.BasebandSPI+0x1eca`, is not a declared stub, so the shipped
+  baseband transport reads zeros back from it.
+- **SpringBoard was not rendered.** Run22 and Run23 both recorded zero
+  `UIController` hits, zero live-scanout mutations, and zero changed pixels;
+  the final PPM was the unchanged seed in both.
 - Test-only commit `0670ab8` passed hosted core/iOS runs 30096115501 and
   30096115527 with VFP **469/0**. Latest hosted test-only commit `657e8d8` expands
   helper-sequence coverage to VFP **488/0 locally** and passed hosted core/iOS
@@ -127,6 +143,17 @@ run21's firmware evidence.
 | Run22 integrity/resources | Exit **0** at 2,100,000,000; stderr empty; source hashes unchanged; external-md failures **0**; guest-free low **50.63 MiB**; evidence directory **447.42 MiB on F:** | The exact `40209b2` diagnostic run reached its cap within the immutable-input and storage boundary | Boot completion, rendering, or device runtime |
 | Run22 CommCenter send route | Copied-in kernel ID `0x0054b557`; destination port `0xc0d705a0`; mqueue `0xc0d705b8`; `msgcount=qlimit=5`; adjacent full-queue PC candidate at 1,966,245,373; adjacent `fullwaiters` pre-store candidate at 1,966,245,387; block at 1,966,245,550; switch-out at 1,966,246,193 | The initial SpringBoard sender reached a saturated Mach queue and blocked without resuming before the cap | Fail-closed binding of those route PCs to the same kmsg, five linked kmsgs, the active receiver owner, why the queue is saturated, a permanent deadlock, or baseband causality |
 | Run22 SpringBoard/display | `UIController` **0**; live scanout mutations **0**; PPM unchanged seed SHA `CBAD1C...AF2AB`; **0 changed pixels** | The saturated queue remains before the current rendering gate | UI readiness, a rendered home screen, or touch |
+| Run23 integrity/resources | Exit **0** at 2,100,000,000 in **1,434.86 s**; stderr empty; launcher postflight passed; source hashes unchanged; work image 466,825,216 B; external-md failures **0**; guest-free low **50.63 MiB**; directory **447.43 MiB on F:** | The exact `777afb4` cold replay stayed inside the immutable-input, storage, and memory envelope | Boot completion, rendering, or device runtime |
+| Run23 queue topology | Bounded reciprocal walk: head `c21e3000`, **linked=5**, closed, consistent, untruncated, **reserved-or-in-flight=0**; all five kmsgs carry id `0x0054b557`, size 2104, destination `c0d705a0`, and five distinct reply ports | Five genuinely linked identical CTServerConnection handshakes occupy a `qlimit=5` queue; SpringBoard's kmsg `c3d3c000` is the sixth | Which processes sent the other five, why they were never dequeued, or that the state is permanent |
+| Run23 route binding | **BOUND** queue-full slow branch `c00147ba` @1,966,245,373 and **BOUND** `fullwaiters=1` pre-store `c00147d6` @1,966,245,387, each with `r4=c0d705b8`, `r8=c3d3c000`; 1 candidate, 1 bound, 0 rejected | Run22's adjacent PC candidates are now fail-closed bound to the exact mqueue and kmsg | A permanent deadlock, or that no other sender could later drain the queue |
+| Run23 receive-right owner | `ip_receiver_name=0x1b03` validated **first**; space `c0acfe60` active, task `c0ad7b10`, task-space backpointer matches, proc `e0381d68`, **PID 1**; decode **AUTHORITATIVE** | launchd holds the receive right for the port SpringBoard sends to; run22's rejected PID-1 candidate is confirmed through the discriminator | That CommCenter failed, since launchd legitimately pre-creates and holds service ports |
+| Run23 CommCenter identity | SETEXEC attempt armed @517,086,676; task `c2ca2760`, proc `e037f890`, **PID 24**; never invalidated, **0** signals, **0** `_exit1`; 10,975,004 user + 58,986,380 kernel instructions before the send entry and **0** after; owner correlation **MISMATCH** | CommCenter exists, ran, and never exited, but does not hold the destination receive right | Where its startup is gated, or that it will never check in |
+| Run23 per-thread waits | 6 retained threads; `e038dbb8`/`e0376000`/`e02e4774` in timed waits on the same semaphore `c0b239a0` (continuation `c0026fc5`, waitq `c0b239a8`); `e02f5888` blocked in `_ipc_mqueue_receive` on `c0dd99f0` @932,507,189 with no resume observed | Every retained CommCenter thread's last observed episode is an unresolved wait | That any thread was still enqueued at the cap; no final live wait-state reread exists |
+| Run23 AppleBaseband chain | Gate `VALIDATED`; object `c0c3a700`; reset-function setup 1/1 (`c0b6b020`); event source created/committed/enabled 1/1/1/1 (`c0b6c340`); **reset callback hits 0**; dispatches 0; handlers 0; sends 0; routes 0 | `frontier: event-source enable call was entered, but no reset callback was observed since trace start` — no baseband notification was delivered, so a delivered notification does not explain the saturation | That the *absence* of the callback is harmless, or that it is the reason CommCenter has not checked in |
+| Run23 baseband/CommCenter correlation | 14 `registerInterest` wrappers, 13 service-rejects, **1 accepted**: CommCenter (`c2ca2760`/`e037f890`/PID 24) on AppleBaseband, port `c3c59ab0`, thread `e02f5888` @931,584,215; receive entries on that port **0** | The one interest CommCenter registered is on AppleBaseband, and the registering thread blocked 923 K instructions later and never resumed | A causal link: the blocked receive is on port `c0dd99d8`, not the interest port, and no port-set relationship was established |
+| Run23 BasebandSPI window | Non-RAM page `0x3d200000`, first pc `com.apple.driver.BasebandSPI+0x1eca`, 4 reads / 11 writes; not among the five declared stubs, so reads return zero; write burst @933,033,890–933,033,922, read-back @1,757,842,145–1,757,842,149, final writes @1,760,475,736/740 | An identified baseband-transport register window is unmapped and answers the shipped driver with zeros | That this window blocks the boot — the driver does not poll it and stops touching it entirely |
+| Run23 SpringBoard/display | `applicationDidFinishLaunching:` @1,923,358,329; `startWindowServer` return @1,919,831,289; 4 TV-out frames; CLCD scanning/running `1/1`, 604 frames, 320x480 stride 1280; `UIController` **0**; live scanout **0**; PPM seed SHA `CBAD1C...AF2AB`, **0 changed pixels** | The corrected display chain reproduces exactly, and the frontier is still the telephony send | SpringBoard rendering, UI readiness, or touch |
+| Run23 diagnostic integrity | 16 exact-hook attribution omissions (first @551,530,083, last @1,388,875,916); 50 unreadable classifications; **0** readable contradictions; none overlapping the decisive send episode | The observers reported their own gaps instead of silently completing a chain | That every unobserved transition in the run is accounted for |
 | Diff hygiene | `git diff --check` passed after the documentation update | No whitespace-error patch was introduced | Markdown rendering on every client |
 
 Run19 is the real-firmware verdict on `afa650e`: routing/layout passed, but the
@@ -581,11 +608,28 @@ authoritative.
   [core run 30143448600](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30143448600)
   and the package job in
   [iOS run 30143455036](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30143455036).
-- [ ] The exact committed Run23 cold replay establishes which of those runtime
-  chains occurred and whether the SpringBoard sender remains unresolved.
-- [ ] The active receive-right owner, linked queue entries versus reserved
+- [x] The exact committed Run23 cold replay ran to a clean 2.1 B cap at commit
+  `777afb4` and established which runtime chains occurred: both send routes are
+  **BOUND**, the queue holds **five linked** identical `0x0054b557` kmsgs with
+  **zero** reserved slots, and the SpringBoard sender's episode ended
+  `OPEN/UNRESOLVED` with no resume observed.
+- [x] The active receive-right owner, linked queue entries versus reserved
   slots, CommCenter service thread, and AppleBaseband notification route are
-  correlated without union or process-wide-thread assumptions.
+  correlated without union or process-wide-thread assumptions. The owner is
+  **launchd (PID 1)** through a validated `ip_receiver_name` discriminator and
+  full object graph; CommCenter is PID 24 with six retained threads in
+  unresolved waits; and the AppleBaseband route does not exist because the
+  reset callback never fired.
+- [ ] The reason CommCenter has not checked in for `com.apple.commcenter` is
+  identified from exact guest code and runtime evidence, and the relationship
+  between CommCenter's blocked receive port `c0dd99d8` and its AppleBaseband
+  interest port `c3c59ab0` is established.
+- [ ] The shipped AppleBaseband reset event source is resolved to its exact
+  trigger, and whether faithful no-modem hardware would fire it is decided from
+  the binary rather than assumed.
+- [ ] The identified `0x3d200000` BasebandSPI register window is named, or
+  modelled if the shipped driver's semantics require state the machine does not
+  currently provide.
 - [x] Test-only `0670ab8` passes hosted core/iOS CI with VFP 469/0.
 - [x] Latest hosted test-only `657e8d8` helper coverage, VFP 488/0 locally, passes
   hosted
@@ -595,10 +639,95 @@ authoritative.
 - [ ] An installable build is tested separately on the iPhone 6s Plus.
 
 The honest claim remains narrow: run20 proves the TV-out correction, run21
-firmware-validates the VFP correction through a clean 2.5 B cap, and run22
-proves a saturated Mach queue at the initial CTServerConnection send and a
-subsequent unresolved sender block, while leaving the precise route unbound.
-None renders SpringBoard. The service is identified as
-`com.apple.commcenter`, but the active receiver owner, linked-versus-reserved
-queue contents, service dequeue/reply, CommCenter service-thread state,
-baseband correlation, UI readiness, and on-device behavior remain open.
+firmware-validates the VFP correction through a clean 2.5 B cap, run22 proves a
+saturated Mach queue at the initial CTServerConnection send and a subsequent
+unresolved sender block, and run23 binds that route, walks the queue, and names
+its owner. None renders SpringBoard. What run23 closed is the measurement
+question; what it opened is a cleaner engineering question — why the service
+has not taken its own port. UI readiness, pixels, touch, and on-device
+behavior all remain untouched.
+
+## Run23 real-firmware evidence
+
+Run23 used exact source commit
+`777afb4c2350690ecd40cd9e69d12e3967a227cb`, a docs-only descendant of
+hosted-green `5a40c5e` whose `CMakeLists.txt`, `core/`, and `tools/` inputs are
+byte-identical to it. The tracked launcher
+(`tools/run23-cold-replay.ps1`, SHA-256
+`FF29B15C09AAEF8EAAC461C5503CC04C4586EA0D52AB08C9B3CA25B174D6596D`) verified
+HEAD, refused any drift beneath `CMakeLists.txt`/`core`/`tools`, and pinned the
+copied binary at 625,423 bytes, SHA-256
+`978987BE339A7C11A3A3CBB87CBE28DB450518AD3AEB8C7CE5E5A6558ACAD67E`.
+
+The 128 MiB display-enabled cold boot exited **0** at the configured
+**2,100,000,000-instruction cap** in **1,434.86 seconds**, with empty stderr.
+Postflight re-verified the immutable inputs:
+
+```text
+kernel.macho    0D8CDB339D37CF37A1DB2638FFF79272ECD63A17764BF7666EFA1618725DF70C
+devicetree.bin  4867C95FEDF544BDA2ECAA2626AE14C01A60D7771DC53FFE6FD3A6AAC8B8BA57
+rootfs.img      C3251E7F092C939D5818E92086CB47680981CFB03731DE7B55D238C942EB5E82
+```
+
+### The three run22 candidates that became results
+
+1. **Route binding.** Both send-path PCs are now `BOUND` with the decisive
+   register pair `r4=c0d705b8` (mqueue) and `r8=c3d3c000` (kmsg): the
+   queue-full slow branch at `c00147ba` @1,966,245,373 and the `fullwaiters=1`
+   pre-store at `c00147d6` @1,966,245,387. One candidate each, one bound each,
+   zero rejected.
+2. **Linked versus reserved.** The bounded reciprocal walk closed on a
+   consistent, untruncated, fault-free ring of **five** kmsgs with
+   `reserved-or-in-flight=0`. Every entry carries request ID `0x0054b557` and
+   size 2,104 to destination `c0d705a0`, with five distinct reply ports
+   (`c2bf6ea0`, `c34d2630`, `c2d33d80`, `c31c32d0`, `c31c3cf0`). SpringBoard's
+   own message is the sixth against `qlimit=5`.
+3. **Ownership.** `ip_receiver_name=0x1b03` is validated before the union is
+   read; the space `c0acfe60` is active, task `c0ad7b10`'s space backpointer
+   matches, and proc `e0381d68` yields signed **PID 1**. The decode prints
+   `AUTHORITATIVE`. launchd holds the receive right.
+
+### The baseband hypothesis, in its delivered form, is retired
+
+The observer's frontier line is explicit:
+
+```text
+frontier: event-source enable call was entered, but no reset callback was
+          observed since trace start
+```
+
+AppleBaseband object `c0c3a700` located its reset platform function
+(`c0b6b020`) and created, committed, and enabled an event source
+(`c0b6c340`) — then the reset callback never ran. Reset reads, state changes,
+`messageClients` dispatches, notification handlers, Mach sends, and queue
+routes are all **0**. No baseband notification was delivered, so a delivered
+notification cannot be the cause of the saturation.
+
+The same observer produced the run's most suggestive correlation. Of 14
+`registerInterest` wrappers, 13 were service-rejected and exactly one accepted:
+CommCenter (task `c2ca2760`, proc `e037f890`, PID 24) subscribing to
+AppleBaseband on port `c3c59ab0` through thread `e02f5888` at
+**931,584,215**. That same thread blocked in `_ipc_mqueue_receive` at
+**932,507,189** and was never observed running again. This is a temporal and
+identity correlation, not a causal proof: the blocked receive is on port
+`c0dd99d8` (task-local name `0x10004001`), not on the interest port, and no
+port-set relationship between the two was established.
+
+### What remains unproven
+
+No dequeue, reply, permanent deadlock, or reason for CommCenter's silence is
+established. "Last observed unresolved block; no resume observed" is not "still
+enqueued at the cap" — no final live wait-state reread exists. The 16
+exact-hook attribution omissions and 50 unreadable classifications are reported
+rather than hidden; none overlaps the decisive send episode. And the
+presentation result did not move: `UIController` **0** hits, live scanout
+**0** mutations, and the 460,815-byte PPM byte-identical to the seed at
+`CBAD1C110E67CAD553A2B4EEBBF46E7BF09255389851902B24816249294AF2AB` with **0
+changed pixels**. SpringBoard is **not rendered**.
+
+Run23 belongs only to `777afb4`. Its build inputs are identical to `5a40c5e`,
+which owns hosted
+[core run 30143448600](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30143448600)
+and
+[iOS run 30143455036](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30143455036);
+hosted CI contains no private firmware and establishes nothing about this boot.

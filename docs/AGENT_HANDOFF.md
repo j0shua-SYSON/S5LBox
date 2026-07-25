@@ -5,22 +5,40 @@
 > are exact commit
 > `5a40c5eec5bbf7c4b7d8909d0c1f364bc078338a`.
 >
-> **Read this first:** the strongest completed firmware run is Run22.
-> SpringBoard has executed deep into `applicationDidFinishLaunching:`, but it
-> has **not rendered a frame**. Run22 proved that its initial CoreTelephony
-> request reached a saturated CommCenter Mach queue and that the sender
-> subsequently blocked. It did not prove the queue's active receiver, five
-> linked messages, a permanent deadlock, or AppleBaseband causality.
+> **Read this first:** the strongest completed firmware run is now **Run23**,
+> exact source commit `777afb4c2350690ecd40cd9e69d12e3967a227cb` (build inputs
+> byte-identical to hosted-green `5a40c5e`). SpringBoard has executed deep into
+> `applicationDidFinishLaunching:`, but it has **not rendered a frame**:
+> `UIController` hits, live-scanout mutations, and changed pixels are all still
+> **zero**, and the PPM is byte-identical to the seed.
 >
-> The post-Run22 queue, per-thread wait, and AppleBaseband diagnostic hardening
-> is **committed, pushed, independently audited, and hosted-CI-green**.
+> Run23 answered Run22's three open measurement questions and retired one
+> hypothesis:
+>
+> - both send-path route PCs are now **BOUND** to the exact mqueue `c0d705b8`
+>   and kmsg `c3d3c000`;
+> - the destination queue holds **five genuinely linked** messages with
+>   **`reserved-or-in-flight=0`**, all carrying request ID `0x0054b557` and
+>   2,104 bytes to `c0d705a0` with five distinct reply ports;
+> - the receive right decodes **AUTHORITATIVELY** to **launchd, PID 1**
+>   (`ip_receiver_name=0x1b03` validated before the union);
+> - **AppleBaseband never delivered a notification.** It enabled its reset event
+>   source and the callback never fired, so no baseband send or queue route
+>   exists. The delivered-notification hypothesis is dead.
+>
+> Run23 did **not** prove why CommCenter has not checked in, that the missing
+> reset callback is that reason, that any thread was still enqueued at the cap,
+> a reply, a permanent deadlock, or anything about pixels.
+>
+> The diagnostic implementation itself is **committed, pushed, independently
+> audited, and hosted-CI-green**.
 > [Core run 30143448600](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30143448600)
 > passed all eight jobs, and
 > [iOS run 30143455036](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30143455036)
 > passed its unsigned-package job for exact commit `5a40c5e`. Strict GCC,
 > one-target build, `git diff --check`, exact zero-instruction firmware gates,
-> and the tracked launcher's parser/fail-closed smoke also passed. None of this
-> is a long firmware result. Run23 has **not** been launched.
+> and the tracked launcher's parser/fail-closed smoke also passed. Hosted CI
+> contains no private firmware and establishes nothing about Run23.
 
 This document is an operational and technical continuation guide for another AI
 agent. It deliberately repeats critical facts from the README and project docs
@@ -516,7 +534,119 @@ The retained evidence directory occupies 447.42 MiB on F:.
   causal proof.
 - A clean cap is not boot completion.
 
-### Rendering result
+## 7a. Exact honest Run23 status
+
+Run23 is a fresh 128 MiB display-enabled cold run of exact source
+`777afb4c2350690ecd40cd9e69d12e3967a227cb`, launched through the tracked
+`tools/run23-cold-replay.ps1` (SHA-256
+`FF29B15C09AAEF8EAAC461C5503CC04C4586EA0D52AB08C9B3CA25B174D6596D`). Its copied
+binary was:
+
+```text
+bytes    625,423
+SHA-256  978987BE339A7C11A3A3CBB87CBE28DB450518AD3AEB8C7CE5E5A6558ACAD67E
+```
+
+It exited **0** at the 2,100,000,000-instruction cap in **1,434.86 seconds**
+(`04:29:18.4242467Z` → `04:53:13.2799675Z`), stderr empty, launcher postflight
+passed. Canonical kernel/device-tree/rootfs hashes re-verified unchanged; the
+work image was exactly 466,825,216 bytes. External-md: 12,195 reads
+(49,968,640 bytes), 178 writes (725,504 bytes), **0 failures**; raw path 2
+reads, 2 native redirects, 2 completions, **0 pending**. Guest free memory
+bottomed at **12,961 pages (50.63 MiB)** at 1,957,101,568. The retained
+directory occupies **447.43 MiB on F:**. No `_panic`, `_Debugger`, or
+undefined-instruction stop.
+
+### What Run23 proves
+
+- The initial CoreTelephony request reached copied-in kmsg `c3d3c000`
+  (header `c3d3c2c4`, bits/size `80001211/2104`, destination `c0d705a0`, reply
+  `c39e7000`, id `0x0054b557`); destination and id both matched.
+- The containing port `c0d705a0` was an active port object of the expected type
+  (`io_bits=80000000`).
+- **Owner is authoritative:** `ip_receiver_name=0x1b03` validated first, space
+  `c0acfe60` active, task `c0ad7b10`, task-space backpointer matching, proc
+  `e0381d68`, signed **PID 1 (launchd)**.
+- **Queue walk closed:** head `c21e3000`, `linked=5`, closed, consistent,
+  untruncated, no read fault, **`reserved-or-in-flight=0`**. Entries
+  `c21e3000`, `c31d7000`, `c3f50000`, `c3e52000`, `c448c000`, each size 2,104,
+  destination `c0d705a0`, id `0x0054b557`, reply ports `c2bf6ea0`, `c34d2630`,
+  `c2d33d80`, `c31c32d0`, `c31c3cf0`.
+- **Both routes BOUND** with `r4=c0d705b8`, `r8=c3d3c000`: queue-full slow
+  branch `c00147ba` @1,966,245,373; `fullwaiters=1` pre-store `c00147d6`
+  @1,966,245,387. One candidate, one bound, zero rejected on each.
+- Block at 1,966,245,550; SpringBoard switch-out at 1,966,246,193; episode
+  `OPEN/UNRESOLVED`; receive buffer never read.
+- CommCenter identity: armed @517,086,676, task `c2ca2760`, proc `e037f890`,
+  **PID 24**; never invalidated; 0 signals; 0 `_exit1`; 10,975,004 user and
+  58,986,380 kernel instructions before the send entry, 0 after.
+  Owner correlation: **MISMATCH**.
+- Six retained CommCenter threads. `e038dbb8`, `e0376000`, `e02e4774` are in
+  timed waits on semaphore `c0b239a0` (waitq `c0b239a8`, continuation
+  `c0026fc5`, timer active, distinct nonzero deadlines). `e02f5888` blocked in
+  `_ipc_mqueue_receive` on mqueue `c0dd99f0` / port `c0dd99d8` (task-local name
+  `0x10004001`) at 932,507,189. `e0379bb8` and `e035d000` are historical
+  resolved waits.
+- **AppleBaseband:** object `c0c3a700`; reset-function setup 1/1 (`c0b6b020`);
+  event source result/committed/enable-entry 1/1/1/1 (`c0b6c340`); **reset
+  callback hits 0**; reset reads 0; changes 0; dispatch attempts 0; handlers 0;
+  send headers 0; routes 0. Frontier line: `event-source enable call was
+  entered, but no reset callback was observed since trace start`.
+- **The one accepted IOKit interest is CommCenter's**, on AppleBaseband:
+  `interest[0] service/port/mqueue=c0c3a700/c3c59ab0/c3c59ac8`, thread
+  `e02f5888`, registrations/success 1/1 @931,584,215, baseline receiver
+  `0x3503`/`c0acf7e8`/`c2ca2760`/`e037f890`/PID 24. Receive entries on that
+  port: **0**. 14 wrappers seen, 13 service-rejected.
+- Non-RAM page `0x3d200000` is touched only by
+  `com.apple.driver.BasebandSPI` (4 reads, 11 writes) and is **not** a declared
+  stub, so reads return zero. Write burst @933,033,890–933,033,922, read-back
+  of offsets `0x000/0x004/0x008/0x034` @1,757,842,145–1,757,842,149, final
+  writes @1,760,475,736/740, then no further access.
+
+### What Run23 does not prove
+
+- Why CommCenter has not called `bootstrap_check_in` for
+  `com.apple.commcenter`, or that it never will.
+- That the missing AppleBaseband reset callback is the reason. The blocked
+  receive is on port `c0dd99d8`, **not** the interest port `c3c59ab0`, and no
+  port-set relationship between them was established.
+- That real no-modem hardware would fire that reset callback at all. That must
+  come from the shipped binary, not from assumption.
+- That the `0x3d200000` window blocks anything. The driver does not poll it.
+- Which processes sent the other five queued messages.
+- That any thread was still enqueued at the final cap. Every wait is reported as
+  "last observed unresolved block; no resume observed"; no final live
+  wait-state reread exists.
+- A dequeue, reply, permanent deadlock, or any pixel.
+
+### Run23 diagnostic-integrity caveats
+
+The per-thread observer reported **16** exact-hook attribution omissions
+(first @551,530,083 pc/thread `c0024dc2`/`e02f6998`; last @1,388,875,916
+pc/thread `c0024e14`/`e02f7220`) and **50** unreadable classifications with
+**0** readable contradictions. Two threads carry `schedule-uncertain=yes`.
+None of these overlaps the decisive `_ipc_mqueue_send` episode, whose route
+bindings, queue walk, and owner decode are each independently marked bound,
+closed, or authoritative.
+
+### Run23 rendering result
+
+SpringBoard is **not rendered**. TV-out produced 4 frames with one IRQ-30
+filter entry/acceptance, one action entry, one completion dispatch, and 8 IOMFB
+completions; `startWindowServer` returned at 1,919,831,289;
+`applicationDidFinishLaunching:` entered at 1,923,358,329; CLCD ended
+scanning/running `1/1` with 604 frames on a 320x480 stride-1280 window at
+`0x0885c000`. And yet:
+
+```text
+UIController hits             0
+live-scanout mutations        0
+changed pixels                0
+PPM SHA-256
+CBAD1C110E67CAD553A2B4EEBBF46E7BF09255389851902B24816249294AF2AB
+```
+
+### Rendering result (Run22)
 
 SpringBoard is **not rendered**.
 
@@ -1098,16 +1228,28 @@ The tracked fail-closed launcher is:
 tools\run23-cold-replay.ps1
 ```
 
-At handoff:
+**Run23 has completed.** The directory now holds its retained evidence:
+`manifest.txt`, `run23.stdout.log` (1,241,357 bytes, SHA-256
+`C33EEEACD5B0A8BDC5B718DF323F0A0F098C3AB393DEF1CCD579A9980A3A9DE7`),
+`run23.stderr.log` (0 bytes), `run23.exit.txt` (`0`), the launcher log, start
+and end timestamps, `bin\bootkernel.exe`, `firmware\screen.ppm`, and the
+466,825,216-byte work image
+`rootfs-7e18-run23-777afb4c2350-978987be339a.img`. Total 447.43 MiB on F:.
+**Do not delete it; it is user evidence.**
 
-- `bin\` exists but does not contain the final Run23 binary;
-- `firmware\` exists for the run-local `screen.ppm`;
-- `tmp\` exists;
+The launcher refuses every pre-existing output, so a *new* long run needs a new
+run directory (for example `work\run24-<topic>`) passed through
+`-RunDirectory`. Do not weaken the freshness guard to reuse this one.
+
+The procedure below is retained because it is the exact recipe a Run24 should
+follow. At the time it was written:
+
+- `bin\` existed but did not contain the final Run23 binary;
+- `firmware\` existed for the run-local `screen.ppm`;
+- `tmp\` existed;
 - an older ignored workspace-local launcher also exists at
   `work\run23-commcenter-baseband\launch-run23.ps1`;
-- the tracked launcher is the source of truth for a fresh clone;
-- the output files, manifest, work image, and screen are fresh/not created;
-- Run23 has **not started**.
+- the tracked launcher is the source of truth for a fresh clone.
 
 The launcher:
 
@@ -1386,8 +1528,58 @@ progress, pixel distribution, and the actual image.
 
 ## 13. Decision tree after Run23
 
-Do not implement a speculative “baseband success” response before Run23
-identifies the first broken link.
+**Run23 selected Case D, with a Case B shape underneath it.** No reset
+notification was ever delivered, so Case A and Case C do not apply. Use the
+Case D and Case B guidance below, and read §13.0 first.
+
+### 13.0 The Run23 verdict and the next three read-only questions
+
+Run23's queue walk gives Case D exactly what it asks for: linked IDs
+(five × `0x0054b557`), destination (`c0d705a0`), reservation count (zero), and
+service receive/dequeue activity (none). The earliest complete unresolved
+message producer is whichever sender owns kmsg `c21e3000` (reply `c2bf6ea0`);
+that sender was not identified.
+
+The blocker is now stated cleanly: **the `com.apple.commcenter` receive right
+is held by launchd, CommCenter is alive and waiting, and CommCenter has never
+taken the port.** Answer these three read-only questions before changing any
+hardware behavior:
+
+1. **Is CommCenter's blocked receive port a port set containing the
+   AppleBaseband interest port?** Thread `e02f5888` blocked on port
+   `c0dd99d8` (mqueue `c0dd99f0`, task-local name `0x10004001`) at
+   932,507,189, having registered interest on port `c3c59ab0` (mqueue
+   `c3c59ac8`) at 931,584,215. If `c0dd99d8` is a port set with `c3c59ab0` as a
+   member, the missing reset notification directly explains the stall. If it is
+   not, the baseband lead is dead and the gate is elsewhere. This is decidable
+   from guest memory plus the exact `ipc_pset`/`ipc_mqueue` layout; the
+   ownership probe already validates `mqueue == port + 0x18`.
+2. **What triggers the shipped AppleBaseband reset event source, and would
+   no-modem hardware fire it?** The observer proves setup (`c0b6b020`), event
+   source (`c0b6c340`), and an enable call, and zero callbacks. Disassemble the
+   enable path with Capstone to identify whether it is an interrupt event
+   source on a GPIO line, a timer, or a command-gated source, then decide from
+   the binary whether a device with no modem attached would ever produce that
+   edge. If real hardware would not, the emulator is faithful here and
+   CommCenter must have a timeout path that is itself blocked — look there
+   instead. If real hardware *would* (for example a power-on reset-detect
+   assertion), that is the hardware gap to implement.
+3. **Where is CommCenter's `bootstrap_check_in` relative to its blocking
+   point?** If check-in precedes any baseband work in the shipped binary, then
+   neither of the above is the cause and the real gate is earlier in
+   CommCenter's startup.
+
+Also outstanding, and independent of the above: page `0x3d200000` is touched
+only by `com.apple.driver.BasebandSPI` and is **not** a declared stub window,
+so it reads back zero. It is not proved to block anything (the driver does not
+poll it), but it is an identified peripheral answering with fabricated zeros.
+At minimum declare it as a named stub so its traffic is stored and reported;
+model it only if question 2 shows the shipped driver depends on state it must
+supply.
+
+Do not, on the current evidence, force a queue dequeue, retarget ownership away
+from launchd, synthesize a baseband reset edge, inject a CommCenter reply, or
+patch SpringBoard/CommCenter.
 
 ### Case A: AppleBaseband reset notification is exactly causal
 
@@ -1890,30 +2082,44 @@ Publication gates already completed:
   launcher parser/fail-closed checks passed with F:-local mutable state;
 - hosted core run `30143448600` passed eight of eight jobs;
 - hosted iOS run `30143455036` passed its package job;
-- no long firmware replay was launched.
+- **Run23 launched and completed** from exact commit `777afb4` with the Release
+  build tree, exiting 0 at the 2.1 B cap in 1,434.86 s. Its results and
+  non-results are in §7a.
+
+Build-tree note for the next long run: use the F:-local **Release** tree at
+`build\` (`cmake --build build --target bootkernel --parallel 1`). Run22's
+548,933-byte and Run23's 625,423-byte binaries both came from it.
+`work\build-strict-vfp` is configured `CMAKE_BUILD_TYPE=Debug` and produces a
+~1.06 MiB unoptimised binary; it is fine for strict-warning checks but would
+make a 2.1 B-instruction replay several times slower.
 
 The next agent should:
 
 1. Re-read `README.md`, `QUALITY.md`, `BOOTLOG.md`, `ROADMAP.md`, and this
-   handoff. Inspect commit `5a40c5e` before changing its diagnostics.
-2. Verify the branch contains `5a40c5e`, the source-build paths are clean, and
-   only the protected dirty paths remain.
+   handoff, especially §7a and §13.0.
+2. Verify the branch, that the source-build paths are clean, and that only the
+   protected dirty paths remain.
 3. Preserve the completed AppleBaseband/queue/wait invariants; repeat
    adversarial review if any implementation changes.
-4. Rebuild only `bootkernel` in an F:-local tree.
-5. Copy and hash the exact committed binary into the empty Run23 `bin`
-   directory.
-6. Confirm F: space, immutable firmware hashes, and fresh Run23 outputs.
-7. Launch the tracked wrapper in the documented background process and poll it
-   at intervals no longer than 60 seconds.
+4. Answer §13.0's three read-only questions from the exact 7E18 binaries and
+   retained Run23 evidence, using Capstone and `machoinfo`. Prefer read-only
+   analysis and zero-instruction probes to another 24-minute replay.
+5. Only then implement the smallest faithful hardware correction that analysis
+   proves, with firmware-neutral unit tests.
+6. Rebuild only `bootkernel` in the F:-local Release tree, re-run the strict
+   gates and the exact 7E18 `-n 0` self-check, commit, push, and confirm hosted
+   CI for the exact commit.
+7. Launch the next long replay into a **new** run directory (`work\run24-...`)
+   through the tracked launcher's `-RunDirectory`, in the documented hidden
+   background process, polling at intervals no longer than 60 seconds. Never
+   reuse or overwrite Run23's evidence.
 8. Analyze integrity, exact identity, queue, waits, baseband chain, memory, and
    pixels independently.
 9. Update README/QUALITY/BOOTLOG/ROADMAP and this handoff with the exact result
    and explicit non-results.
 10. Push the evidence update.
-11. Implement only the next hardware/CPU correction proved by Run23.
-12. Repeat until guest-driven SpringBoard pixels appear, then add guest touch.
-13. Continue to app integration, audio, networking, device hardening, optional
+11. Repeat until guest-driven SpringBoard pixels appear, then add guest touch.
+12. Continue to app integration, audio, networking, device hardening, optional
     JIT, and portability rather than stopping at a screenshot.
 
 The central lesson from every prior breakthrough is still the right operating
