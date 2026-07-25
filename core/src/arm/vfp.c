@@ -180,22 +180,26 @@ bool vfp_enabled(const arm_cpu_t *c) {
  * would invent a fault the guest cannot possibly be expecting.
  */
 /*
- * Four tiers, from the least to the most that an instruction can depend on.
+ * Three tiers, from the least to the most that an instruction can depend on.
  *
  * Short vectors change which REGISTERS any data-processing instruction writes,
  * VMOV and VABS included, so Len gates everything. The trap enables gate every
  * instruction that can raise an exception, which VMOV, VABS and VNEG cannot.
- * The rounding mode gates only instructions that round; VMOV, VABS, VNEG,
- * VCMP, the exact widening conversions and VCVT's explicit round-toward-zero
- * form never consult it, and refusing them in RZ mode would invent a fault the
- * guest cannot be expecting.
+ *
+ * FPSCR.RMode used to be a third gate, refusing every rounding instruction in a
+ * directed mode. It is no longer, because the mode is now implemented rather
+ * than refused: vfp_execute() adopts it on the host FPU for the duration of an
+ * instruction, and the float-to-integer path rounds explicitly in software via
+ * fp_round_integral(). Refusing was defensible while nothing needed it, but
+ * UIKit sets a directed mode and then runs whole sequences of conversions and
+ * arithmetic under it on the way to SpringBoard's first frame.
  *
  * FZ and DN are not here because they are implemented (see fz_in32 and
  * f32_do); they change results rather than making them unrepresentable.
  */
 #define MODE_EXACT    (ARM_FPSCR_LEN)
 #define MODE_VALUES   (MODE_EXACT | ARM_FPSCR_ENABLES)
-#define MODE_ROUNDING (MODE_VALUES | ARM_FPSCR_RMODE)
+#define MODE_ROUNDING (MODE_VALUES)
 
 static const char *mode_complaint(uint32_t bad) {
     if (bad & ARM_FPSCR_LEN)     return "FPSCR.Len selects short vectors";
@@ -1077,8 +1081,53 @@ static arm_status_t vfp_dp(arm_cpu_t *c, uint32_t pc, uint32_t insn) {
 
 /* ============================================================ entry ====== */
 
+/*
+ * FPSCR.RMode -> the host FPU's rounding mode.
+ *
+ * The arithmetic operations hand their values to the host FPU, so the only
+ * honest way to implement a directed rounding mode for them is to put the host
+ * in that mode for the duration of the instruction. Refusing instead was
+ * defensible while nothing needed it; UIKit needs it on the way to
+ * SpringBoard's first frame, and it sets the mode and then runs whole
+ * sequences of conversions and arithmetic under it.
+ *
+ * The common case is round-to-nearest, where this costs nothing: the mode is
+ * only queried and set when FPSCR actually selects a directed mode.
+ */
+static int host_round_from_fpscr(uint32_t fpscr) {
+    switch ((fpscr & ARM_FPSCR_RMODE) >> 22) {
+    case 1u:  return FE_UPWARD;        /* RP */
+    case 2u:  return FE_DOWNWARD;      /* RM */
+    case 3u:  return FE_TOWARDZERO;    /* RZ */
+    default:  return FE_TONEAREST;     /* RN */
+    }
+}
+
+static arm_status_t vfp_execute_inner(arm_cpu_t *c, uint32_t pc, uint32_t insn,
+                                      const vfp_bus_t *bus);
+
 arm_status_t vfp_execute(arm_cpu_t *c, uint32_t pc, uint32_t insn,
                          const vfp_bus_t *bus) {
+    if (!c || (c->vfp_fpscr & ARM_FPSCR_RMODE) == 0u)
+        return vfp_execute_inner(c, pc, insn, bus);
+
+    /*
+     * A directed mode is in force. Adopt it for exactly this instruction and
+     * put the host back afterwards, so nothing else in the emulator inherits
+     * it. If the host refuses the mode, say so rather than rounding the wrong
+     * way and reporting success.
+     */
+    int want = host_round_from_fpscr(c->vfp_fpscr);
+    int saved = fegetround();
+    if (want != saved && fesetround(want) != 0)
+        return vfp_trap(pc, insn, "host FPU refused FPSCR.RMode");
+    arm_status_t status = vfp_execute_inner(c, pc, insn, bus);
+    if (want != saved) (void)fesetround(saved);
+    return status;
+}
+
+static arm_status_t vfp_execute_inner(arm_cpu_t *c, uint32_t pc, uint32_t insn,
+                                      const vfp_bus_t *bus) {
     g_reason = NULL;
 
     /*

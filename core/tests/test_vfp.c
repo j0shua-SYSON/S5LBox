@@ -1181,13 +1181,41 @@ static void test_unmodelled_fpscr_modes_halt(void) {
     uint32_t mov[] = { UN_S(0,0, 1,0) };         /* VMOV.F32 s1,s0    */
 
     struct { uint32_t fpscr; const char *what; } modes[] = {
-        { ARM_FPSCR_RMODE, "RMode = RZ"      },
         { ARM_FPSCR_LEN,   "Len != 0"        },
         { ARM_FPSCR_IOE,   "IOE trap enable" },
     };
     for (size_t i = 0; i < sizeof modes / sizeof modes[0]; i++) {
         vfp_reset(&c); c.vfp_fpscr = modes[i].fpscr;
         CHECK(run(&c, add, 1, 1) == ARM_UNDEFINED, "VADD ran with %s", modes[i].what);
+    }
+
+    /*
+     * RMode is no longer in that list: a directed rounding mode is implemented
+     * rather than refused, because vfp_execute() adopts it on the host FPU for
+     * the duration of the instruction. Check it actually rounds, not merely
+     * that it runs -- 1.0f + 2^-25 is inexact in single precision, so it must
+     * round down to 1.0 toward zero and up to the next representable float
+     * toward +infinity.
+     */
+    {
+        static const struct {
+            uint32_t rmode; float expect; const char *what;
+        } DIRECTED[] = {
+            { 3u << 22, 1.0f,                  "RZ rounds toward zero"     },
+            { 2u << 22, 1.0f,                  "RM rounds toward -inf"     },
+            { 1u << 22, 1.0f + 1.1920929e-7f,  "RP rounds toward +inf"     },
+        };
+        for (size_t i = 0; i < sizeof DIRECTED / sizeof DIRECTED[0]; i++) {
+            vfp_reset(&c);
+            c.vfp_fpscr = (c.vfp_fpscr & ~ARM_FPSCR_RMODE) | DIRECTED[i].rmode;
+            set_f32(&c, 0, 1.0f);
+            set_f32(&c, 1, 2.9802322e-8f);          /* 2^-25, below the ulp */
+            CHECK(run(&c, add, 1, 1) == ARM_OK,
+                  "VADD refused with %s", DIRECTED[i].what);
+            CHECK(get_f32(&c, 2) == DIRECTED[i].expect,
+                  "%s: got %.9g expected %.9g", DIRECTED[i].what,
+                  (double)get_f32(&c, 2), (double)DIRECTED[i].expect);
+        }
     }
 
     /* VMOV survives everything except short vectors, which change which
