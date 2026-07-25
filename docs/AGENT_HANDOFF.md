@@ -1839,13 +1839,32 @@ composites. With no surface allocated there is nothing to render into, and no
 instruction budget produces a pixel. The question is not "how much further" but
 "why is `IOSurface::create` never called".
 
-Instrumentation stops exactly where it is needed. `SpringBoard:UIController-call`
-at `0x0000a7ba` is the last SpringBoard checkpoint defined, and disassembly
-shows it is `ldr r1,[r0]` immediately before `blx 0xb0bc8` — an `objc_msgSend`
-at `0x0000a7be`. So the recorded hit proves SpringBoard *reached* the send; it
-does not prove the send returned. **The next concrete step is checkpoints past
-`0xa7be`** to establish whether that message returns, and if it does, to follow
-the path toward the surface allocation that never happens.
+Instrumentation stops exactly where it is needed, and the address arithmetic
+here is easy to get wrong: SpringBoard's `__TEXT` is `vm 0x1000, file 0`, so
+**VA = file offset + 0x1000**. Disassembling the raw file at offset `0xa7ba`
+reads VA `0xb7ba` and produces plausible but entirely unrelated code. (An
+earlier revision of this section did exactly that and described the wrong
+instructions.)
+
+At the correct VA, `SpringBoard:UIController-call` at `0x0000a7ba` **is** the
+`blx` to `objc_msgSend`:
+
+```text
+0000a7b4  ldr  r0, [r0]        ; receiver, from a classref literal at 0xaa14
+0000a7b6  ldr  r1, [sp, #0x2c] ; selector
+0000a7ba  blx  #0xb1bc8        ; objc_msgSend   <- the checkpoint
+0000a7c4  str  r0, [r4]        ; stores the returned object
+```
+
+So `hits=1` proves the send was **entered**, not that it returned. The
+discriminator is one checkpoint at **`0x0000a7c4`**: if it fires, `UIController`
+was constructed and the failure is downstream of it; if it never fires,
+SpringBoard is stuck inside that message and the hunt is for whatever it waits
+on — the same shape as the telephony blocker.
+
+`tools/objcsel.py` resolves a PC-relative literal load to its selector name for
+this stripped binary (literal -> selref -> `__objc_methname`), which is how the
+sends around this site can be named rather than guessed at.
 
 Two measurements that bound what is worth trying:
 
