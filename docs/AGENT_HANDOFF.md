@@ -1647,6 +1647,68 @@ That also fixes the register map a GPIO model has to provide: pin state for
 groups 0..24 at gpio `+0x004..+0x304`, `fsel-offset 0x320` from the device
 tree, and the separate gpioic page carrying the 7 interrupt groups.
 
+### 13.0e External-md snapshots: why they are now mandatory, and the design
+
+Iteration cost is the binding constraint on reaching a rendered SpringBoard.
+§13.0c shows the frontier sits past 5e9 instructions, and at the measured
+~1.3-1.7M instructions/second that is **60-90 minutes per attempt**. Whack-a-mole
+past this point without checkpointing spends the entire budget on re-executing
+the same first five billion instructions.
+
+`--external-md` currently refuses `--snapshot-at` and `--restore` outright
+(`"--external-md is cold-boot only; snapshots and restore are unsupported"`).
+The reason is real but narrow: the core snapshot serialises `s5l8900_t` only —
+GEOM, CPU, MACH, RAM, NOR, STUB — and the md bridges live in `tools/`, so none
+of their host-side state is captured, and the work image is a host file that
+keeps moving after the checkpoint.
+
+**The host-side state that actually has to survive is small.** From
+`md_raw_bridge_t`: `config` is re-derivable from setup, `scratch`, `iov_plan`
+and `data_spans` are per-call transients, and `pending[4]` must simply be
+empty. What genuinely persists is:
+
+1. `guard_tail[131072]` — the 128 KiB coherent allocation-tail overlay;
+2. the stats counters, for reporting continuity only;
+3. the contents of the work image at the checkpoint instant.
+
+Everything else that matters is already inside the core snapshot: the
+exact-gated kernel patches live in the loaded kernel copy in guest RAM, and the
+four 128 KiB bounce slots are guest DRAM below `topOfKernelData`.
+
+**Design — two sidecars beside the snapshot, owned by `bootkernel`, leaving
+`core/` and the snapshot format untouched:**
+
+```text
+<snap>            existing core snapshot, unchanged format
+<snap>.mdimage    byte copy of the work image at the checkpoint
+<snap>.mdstate    magic/version, media size, image length,
+                  guard_tail[131072], strategy + raw stats
+```
+
+Save, inside `save_due_snapshots()` after `snapshot_save()` succeeds:
+fail closed if any `pending[i].active`; flush the block adapter; refuse either
+sidecar if it already exists; copy the image; write the state.
+
+Restore, at the provisioning site (`rootfs_work_create()` around
+`tools/bootkernel.c:21004`): when `--restore` is given, do **not** provision
+from the immutable source. Copy `<snap>.mdimage` into the new work path
+create-only, verify its length against `.mdstate`, open the adapter, install
+the bridges as usual, then apply `guard_tail` and the stats after
+`md_raw_bridge_init()`.
+
+Freshness discipline is preserved throughout: the restore still writes a new,
+uniquely named work image and still refuses to overwrite anything.
+
+Cost: 466 MiB per checkpoint, which is nothing against 1.5 TB free, and a
+few seconds to copy. Benefit: a checkpoint at ~4.5e9 turns each subsequent
+experiment from 60-90 minutes into seconds plus the delta.
+
+**Do this before the next round of frontier whack-a-mole.** It is roughly 400
+lines in `tools/bootkernel.c` plus option plumbing and a focused test, and it
+touches the storage bridge — the one subsystem that has never failed a run — so
+it deserves its own validation pass rather than being bolted onto a diagnostic
+change.
+
 ### 13.0c THE INSTRUCTION CAP HAS ALWAYS BEEN SHORTER THAN THE GUEST'S TIMEOUTS
 
 Read this before planning any further long run. It is the most consequential
