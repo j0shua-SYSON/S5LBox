@@ -417,8 +417,63 @@ static bool external_md_sidecar_path(char *out, size_t cap,
     return true;
 }
 
+/*
+ * Copy the live work image out through the block adapter that already owns it.
+ *
+ * The first version of this opened the image a second time with fopen() and
+ * failed closed on Windows, because the adapter holds the only handle the host
+ * will grant. Reading through the adapter is also simply more correct: it is
+ * the same path the guest's own I/O takes, so a checkpoint cannot disagree with
+ * what the guest last wrote.
+ */
+static bool external_md_copy_media_create_only(const vm_block_t *block,
+                                               uint64_t media_size,
+                                               const char *dst,
+                                               uint64_t *bytes_out) {
+    if (bytes_out) *bytes_out = 0;
+    if (!block || !block->read_at || !dst) return false;
+    FILE *probe = fopen(dst, "rb");
+    if (probe) {
+        fclose(probe);
+        fprintf(stderr, "external-md sidecar: refusing existing %s\n", dst);
+        return false;
+    }
+    FILE *out = fopen(dst, "wb");
+    if (!out) {
+        fprintf(stderr, "external-md sidecar: cannot create %s\n", dst);
+        return false;
+    }
+    static uint8_t buffer[1u << 20];
+    uint64_t done = 0;
+    bool ok = true;
+    while (done < media_size) {
+        uint64_t left = media_size - done;
+        size_t want = left < sizeof buffer ? (size_t)left : sizeof buffer;
+        size_t got = 0;
+        if (block->read_at(block->context, done, buffer, want, &got) !=
+                VM_BLOCK_IO_OK || got != want) {
+            fprintf(stderr,
+                    "external-md sidecar: media read failed at %" PRIu64 "\n",
+                    done);
+            ok = false;
+            break;
+        }
+        if (fwrite(buffer, 1, got, out) != got) { ok = false; break; }
+        done += got;
+    }
+    if (fflush(out) != 0) ok = false;
+    if (fclose(out) != 0) ok = false;
+    if (!ok) {
+        remove(dst);
+        return false;
+    }
+    if (bytes_out) *bytes_out = done;
+    return true;
+}
+
 /* Byte-exact copy that refuses an existing destination, preserving the same
- * create-only freshness rule the work-image provisioner enforces. */
+ * create-only freshness rule the work-image provisioner enforces. Used on the
+ * restore path, where nothing holds the sidecar open. */
 static bool external_md_copy_create_only(const char *src, const char *dst,
                                          uint64_t *bytes_out) {
     if (bytes_out) *bytes_out = 0;
@@ -499,8 +554,10 @@ static bool external_md_sidecar_save(const char *snapshot_path) {
     }
 
     uint64_t copied = 0;
-    if (!external_md_copy_create_only(g_external_work_image_path,
-                                      image_path, &copied))
+    if (!g_external_adapter_slot || !*g_external_adapter_slot ||
+        !external_md_copy_media_create_only(
+            file_block_get(*g_external_adapter_slot),
+            g_external_media_size_for_sidecar, image_path, &copied))
         return false;
 
     static external_md_sidecar_t sidecar;
