@@ -2368,6 +2368,40 @@ static unsigned    NM;
 #define APPLEBASEBAND_MQUEUE_RECEIVE_PC UINT32_C(0xc0014d34)
 #define APPLEBASEBAND_RESET_MESSAGE_HIGH UINT32_C(0xe3ff8000)
 #define APPLEBASEBAND_RESET_MESSAGE_LOW UINT32_C(0xe3ff8001)
+
+/*
+ * Port-set membership, for the one question run23 left decisive and could not
+ * answer: CommCenter blocks in _ipc_mqueue_receive on an mqueue that is NOT
+ * any registered AppleBaseband interest port's mqueue, so `receive entry hits`
+ * stayed at zero. If that mqueue is an ipc_pset whose members include the
+ * interest port, the absent reset notification is a direct explanation for the
+ * stall; if it is not, the baseband lead is dead and the frontier is elsewhere.
+ *
+ * An ipc_port keeps its ipc_mqueue at +0x18 (the validated ownership-layout
+ * constant above); an ipc_pset is `ipc_object; mach_port_name_t
+ * ips_local_name; ipc_mqueue ips_messages`, which puts its mqueue one word
+ * further along at +0x1c. Both candidates are tested and EXACTLY ONE must
+ * present an active object of the matching io_bits type; zero or two is
+ * ambiguity, not a result.
+ *
+ * For a set the mqueue IS a wait_queue_set. struct wait_queue is 0x10 bytes
+ * here (the port mqueue's kmsg head sits at +0x10), so wqs_setlinks is the
+ * queue_head_t at +0x10. Its chain threads through each wait_queue_link's
+ * wql_setlinks, which sits 0x10 into the link, and the member wait queue --
+ * which is the member port's mqueue, because ipc_mqueue begins with its
+ * waitq -- is wqe_queue at +0x0c. wql_setqueue at +0x18 must point back at the
+ * set: that back-reference is the self-check that proves these offsets are the
+ * right ones rather than a plausible misreading, and a single mismatch poisons
+ * the whole walk.
+ */
+#define APPLEBASEBAND_PSET_MQUEUE_DELTA UINT32_C(0x1c)
+#define APPLEBASEBAND_IO_TYPE_PORT UINT32_C(0x00000000)
+#define APPLEBASEBAND_IO_TYPE_PORT_SET UINT32_C(0x00010000)
+#define APPLEBASEBAND_WQS_SETLINKS_OFFSET UINT32_C(0x10)
+#define APPLEBASEBAND_WQL_SETLINKS_OFFSET UINT32_C(0x10)
+#define APPLEBASEBAND_WQL_ELEMENT_QUEUE_OFFSET UINT32_C(0x0c)
+#define APPLEBASEBAND_WQL_SETQUEUE_OFFSET UINT32_C(0x18)
+#define APPLEBASEBAND_PSET_MEMBER_CAP 32u
 #define APPLEBASEBAND_INTEREST_CAP 8u
 #define APPLEBASEBAND_NOTIFIER_CAP 4u
 #define APPLEBASEBAND_PENDING_THREAD_CAP 8u
@@ -2966,6 +3000,34 @@ typedef enum {
         UINT32_C(1) << 23
 } springboard_commcenter_valid_t;
 
+/*
+ * A queued message's sender, decoded from its reply port.
+ *
+ * A Mach request's msgh_local_port is the client's reply port, and its receive
+ * right is held by the client. Resolving it through the same object graph the
+ * destination owner uses therefore names the process that is blocked waiting
+ * for this reply. Run23 proved five identical requests were linked ahead of
+ * SpringBoard's but could not say whose they were; this answers that without
+ * assuming anything the destination decode does not already validate.
+ *
+ * `authoritative` is all-or-nothing: an unreadable field, a non-authoritative
+ * receiver name, an inactive space, or a task whose ipc_space backpointer
+ * disagrees leaves the PID unreported rather than approximate.
+ */
+typedef struct {
+    bool     attempted;
+    bool     authoritative;
+    uint32_t port;
+    uint32_t io_bits;
+    uint32_t receiver_name;
+    uint32_t space;
+    uint32_t task;
+    uint32_t proc;
+    int32_t  pid;
+    uint32_t failure_va;
+    uint32_t failure_fsr;
+} springboard_commcenter_sender_t;
+
 typedef struct {
     uint32_t kmsg;
     uint32_t next;
@@ -2979,6 +3041,7 @@ typedef struct {
     uint32_t failure_va;
     uint32_t failure_fsr;
     bool complete;
+    springboard_commcenter_sender_t sender;
 } springboard_commcenter_kmsg_t;
 
 typedef struct {
@@ -3899,6 +3962,41 @@ typedef struct {
     uint32_t message;
 } applebaseband_handler_frame_t;
 
+/*
+ * One CommCenter receive whose mqueue is not a registered interest port.
+ * Newest-retaining: the decisive question is what CommCenter is blocked on at
+ * the end, and every field is separately falsifiable so a partial walk cannot
+ * be read as a membership result.
+ */
+typedef struct {
+    bool     occupied;
+    bool     classified;         /* exactly one object hypothesis held      */
+    bool     is_port;
+    bool     is_port_set;
+    bool     ambiguous_type;     /* zero or both hypotheses held            */
+    bool     object_read_failed;
+    bool     walk_attempted;
+    bool     head_readable;
+    bool     closed;             /* chain returned to the head              */
+    bool     links_consistent;   /* reciprocal next/prev agreed             */
+    bool     truncated;          /* more members than the bounded array     */
+    bool     read_fault;
+    bool     setqueue_mismatch;  /* a link did not point back at this set   */
+    bool     member_port_rejected;
+    bool     interest_is_member;
+    uint32_t mqueue;
+    uint32_t object;
+    uint32_t io_bits;
+    uint32_t interest_member_mqueue;
+    uint32_t interest_member_port;
+    uint32_t failure_va;
+    uint32_t failure_fsr;
+    unsigned member_count;
+    uint32_t members[APPLEBASEBAND_PSET_MEMBER_CAP];
+    uint64_t at;
+    uint32_t thread;
+} applebaseband_receive_set_t;
+
 typedef struct {
     bool baseline_complete;
     bool lifecycle_uncertain;
@@ -3996,6 +4094,13 @@ typedef struct {
         message_frames[APPLEBASEBAND_MESSAGE_FRAME_CAP];
     applebaseband_handler_frame_t
         handler_frames[APPLEBASEBAND_HANDLER_FRAME_CAP];
+    /* Unmatched CommCenter receives: attempts, and the newest full result. */
+    uint64_t unmatched_receive_attempts;
+    uint64_t unmatched_receive_commcenter;
+    uint64_t unmatched_receive_identity_unreadable;
+    uint64_t unmatched_receive_sets_walked;
+    uint64_t unmatched_receive_membership_hits;
+    applebaseband_receive_set_t last_unmatched_receive;
 } applebaseband_trace_t;
 
 typedef struct {
@@ -9445,6 +9550,213 @@ static void applebaseband_note_notification(
     }
 }
 
+/*
+ * Decide whether `object` is an active IPC object of exactly `want_type`.
+ * A read failure is reported separately from a type mismatch, because "we
+ * could not look" and "we looked and it was something else" must never
+ * collapse into the same answer.
+ */
+static bool applebaseband_object_is_active_type(
+        arm_cpu_t *cpu, uint32_t object, uint32_t want_type,
+        uint32_t *io_bits_out, bool *read_failed,
+        uint32_t *failure_va, uint32_t *failure_fsr) {
+    if (io_bits_out) *io_bits_out = 0;
+    if (read_failed) *read_failed = false;
+    uint32_t io_bits = 0;
+    if (!springboard_commcenter_read_kernel_field(
+            cpu, object,
+            SPRINGBOARD_COMMCENTER_PORT_IO_BITS_OFFSET,
+            &io_bits, failure_va, failure_fsr)) {
+        if (read_failed) *read_failed = true;
+        return false;
+    }
+    if (io_bits_out) *io_bits_out = io_bits;
+    if (!(io_bits & SPRINGBOARD_COMMCENTER_PORT_ACTIVE))
+        return false;
+    return (io_bits & SPRINGBOARD_COMMCENTER_PORT_IO_TYPE_MASK) ==
+        want_type;
+}
+
+/*
+ * Classify an mqueue as a port's or a port set's, and if it is a set, walk its
+ * member links looking for any registered AppleBaseband interest port.
+ *
+ * Every failure mode is retained rather than swallowed: an ambiguous type, an
+ * unreadable head, a chain that does not close, inconsistent reciprocal links,
+ * truncation, a read fault, a link whose wql_setqueue does not point back at
+ * this set, or a member whose containing object is not an active port. Any of
+ * them leaves `interest_is_member` false AND records why, so the report can
+ * say "not established" instead of "not a member".
+ */
+static void applebaseband_classify_receive_mqueue(
+        applebaseband_trace_t *trace, arm_cpu_t *cpu,
+        uint32_t mqueue, uint64_t at) {
+    if (!trace || !cpu || !mqueue) return;
+
+    applebaseband_receive_set_t observation;
+    memset(&observation, 0, sizeof observation);
+    observation.occupied = true;
+    observation.mqueue = mqueue;
+    observation.at = at;
+    observation.thread = cpu->cp15.tpidrprw;
+
+    bool port_read_failed = false;
+    bool set_read_failed = false;
+    uint32_t port_object = 0;
+    uint32_t set_object = 0;
+    uint32_t port_bits = 0;
+    uint32_t set_bits = 0;
+    bool as_port = false;
+    bool as_set = false;
+
+    if (mqueue >= SPRINGBOARD_COMMCENTER_MQUEUE_PORT_DELTA) {
+        port_object = mqueue - SPRINGBOARD_COMMCENTER_MQUEUE_PORT_DELTA;
+        as_port = applebaseband_object_is_active_type(
+            cpu, port_object, APPLEBASEBAND_IO_TYPE_PORT, &port_bits,
+            &port_read_failed, &observation.failure_va,
+            &observation.failure_fsr);
+    }
+    if (mqueue >= APPLEBASEBAND_PSET_MQUEUE_DELTA) {
+        set_object = mqueue - APPLEBASEBAND_PSET_MQUEUE_DELTA;
+        as_set = applebaseband_object_is_active_type(
+            cpu, set_object, APPLEBASEBAND_IO_TYPE_PORT_SET, &set_bits,
+            &set_read_failed, &observation.failure_va,
+            &observation.failure_fsr);
+    }
+    observation.object_read_failed = port_read_failed || set_read_failed;
+
+    if (as_port == as_set) {
+        /* Zero or both. Neither is a classification. */
+        observation.ambiguous_type = true;
+        trace->last_unmatched_receive = observation;
+        return;
+    }
+    observation.classified = true;
+    observation.is_port = as_port;
+    observation.is_port_set = as_set;
+    observation.object = as_port ? port_object : set_object;
+    observation.io_bits = as_port ? port_bits : set_bits;
+    if (as_port) {
+        trace->last_unmatched_receive = observation;
+        return;
+    }
+
+    /* A port set: walk wqs_setlinks. */
+    observation.walk_attempted = true;
+    trace->unmatched_receive_sets_walked++;
+    uint32_t head_va = mqueue + APPLEBASEBAND_WQS_SETLINKS_OFFSET;
+    uint32_t node = 0;
+    if (!springboard_commcenter_read_kernel_field(
+            cpu, head_va, 0, &node, &observation.failure_va,
+            &observation.failure_fsr)) {
+        observation.read_fault = true;
+        trace->last_unmatched_receive = observation;
+        return;
+    }
+    observation.head_readable = true;
+
+    uint32_t previous = head_va;
+    bool consistent = true;
+    for (unsigned steps = 0; steps <= APPLEBASEBAND_PSET_MEMBER_CAP;
+         steps++) {
+        if (node == head_va) {
+            observation.closed = true;
+            break;
+        }
+        if (steps == APPLEBASEBAND_PSET_MEMBER_CAP) {
+            observation.truncated = true;
+            break;
+        }
+        if (!springboard_commcenter_checked_field_va(
+                node, 0, g_virt_base, NULL)) {
+            observation.read_fault = true;
+            observation.failure_va = node;
+            break;
+        }
+        /* The chain threads through wql_setlinks inside the link. */
+        if (node < APPLEBASEBAND_WQL_SETLINKS_OFFSET) {
+            observation.read_fault = true;
+            observation.failure_va = node;
+            break;
+        }
+        uint32_t link = node - APPLEBASEBAND_WQL_SETLINKS_OFFSET;
+
+        uint32_t back = 0;
+        uint32_t setqueue = 0;
+        uint32_t member = 0;
+        if (!springboard_commcenter_read_kernel_field(
+                cpu, node, 4u, &back, &observation.failure_va,
+                &observation.failure_fsr) ||
+            !springboard_commcenter_read_kernel_field(
+                cpu, link, APPLEBASEBAND_WQL_SETQUEUE_OFFSET,
+                &setqueue, &observation.failure_va,
+                &observation.failure_fsr) ||
+            !springboard_commcenter_read_kernel_field(
+                cpu, link, APPLEBASEBAND_WQL_ELEMENT_QUEUE_OFFSET,
+                &member, &observation.failure_va,
+                &observation.failure_fsr)) {
+            observation.read_fault = true;
+            break;
+        }
+        if (back != previous) consistent = false;
+        /* The back-reference is the proof that these offsets are right. */
+        if (setqueue != mqueue) {
+            observation.setqueue_mismatch = true;
+            break;
+        }
+
+        uint32_t member_bits = 0;
+        bool member_read_failed = false;
+        bool member_ok =
+            member >= SPRINGBOARD_COMMCENTER_MQUEUE_PORT_DELTA &&
+            applebaseband_object_is_active_type(
+                cpu,
+                member - SPRINGBOARD_COMMCENTER_MQUEUE_PORT_DELTA,
+                APPLEBASEBAND_IO_TYPE_PORT, &member_bits,
+                &member_read_failed, &observation.failure_va,
+                &observation.failure_fsr);
+        if (!member_ok) {
+            observation.member_port_rejected = true;
+            if (member_read_failed) observation.read_fault = true;
+        } else if (observation.member_count <
+                   APPLEBASEBAND_PSET_MEMBER_CAP) {
+            observation.members[observation.member_count++] = member;
+            int slot = applebaseband_interest_find_mqueue(
+                trace, member, false);
+            if (slot >= 0) {
+                observation.interest_is_member = true;
+                observation.interest_member_mqueue = member;
+                observation.interest_member_port =
+                    trace->interests[(unsigned)slot].port;
+            }
+        }
+
+        uint32_t next = 0;
+        if (!springboard_commcenter_read_kernel_field(
+                cpu, node, 0u, &next, &observation.failure_va,
+                &observation.failure_fsr)) {
+            observation.read_fault = true;
+            break;
+        }
+        previous = node;
+        node = next;
+    }
+    observation.links_consistent = consistent;
+
+    /*
+     * Membership only counts when the walk itself is trustworthy. A closed,
+     * consistent, untruncated, fault-free walk with every link pointing back
+     * at this set is the whole bar; anything less keeps the flag but the
+     * report prints it as UNPROVEN.
+     */
+    if (observation.interest_is_member && observation.closed &&
+        observation.links_consistent && !observation.truncated &&
+        !observation.read_fault && !observation.setqueue_mismatch)
+        trace->unmatched_receive_membership_hits++;
+
+    trace->last_unmatched_receive = observation;
+}
+
 static void applebaseband_note_mqueue_receive(
         applebaseband_trace_t *trace, arm_cpu_t *cpu,
         uint64_t at) {
@@ -9452,7 +9764,27 @@ static void applebaseband_note_mqueue_receive(
         return;
     int slot = applebaseband_interest_find_mqueue(
         trace, cpu->r[0], true);
-    if (slot < 0) return;
+    if (slot < 0) {
+        /*
+         * Not a registered interest port. Run23 showed this is the case that
+         * matters: CommCenter's blocked receive was on some other mqueue
+         * entirely, which is why the interest port's own receive counter
+         * stayed at zero. Classify it, but only for the exact CommCenter
+         * identity, and only while the walk is affordable.
+         */
+        bool readable = false;
+        if (!applebaseband_thread_is_commcenter(
+                cpu, cpu->cp15.tpidrprw, &readable)) {
+            if (!readable)
+                trace->unmatched_receive_identity_unreadable++;
+            return;
+        }
+        trace->unmatched_receive_attempts++;
+        trace->unmatched_receive_commcenter++;
+        applebaseband_classify_receive_mqueue(
+            trace, cpu, cpu->r[0], at);
+        return;
+    }
     applebaseband_interest_t *interest =
         &trace->interests[(unsigned)slot];
     if (!applebaseband_interest_validate_live(
@@ -9702,6 +10034,86 @@ static inline void applebaseband_note_instruction(
     }
 }
 
+/*
+ * Decode the process holding a port's receive right. Same graph, same exact
+ * offsets, and the same discriminator order as the destination-owner decode:
+ * active port object first, then an authoritative ip_receiver_name, only then
+ * the union, then space -> active -> task -> task's space backpointer ->
+ * proc -> signed PID. Any failure leaves `authoritative` false.
+ */
+static void springboard_commcenter_decode_sender(
+        springboard_commcenter_sender_t *sender, arm_cpu_t *cpu,
+        uint32_t port) {
+    if (!sender) return;
+    memset(sender, 0, sizeof *sender);
+    if (!cpu || !port) return;
+    sender->attempted = true;
+    sender->port = port;
+
+    uint32_t io_bits = 0;
+    if (!springboard_commcenter_read_kernel_field(
+            cpu, port, SPRINGBOARD_COMMCENTER_PORT_IO_BITS_OFFSET,
+            &io_bits, &sender->failure_va, &sender->failure_fsr))
+        return;
+    sender->io_bits = io_bits;
+    if (!(io_bits & SPRINGBOARD_COMMCENTER_PORT_ACTIVE) ||
+        (io_bits & SPRINGBOARD_COMMCENTER_PORT_IO_TYPE_MASK) !=
+            APPLEBASEBAND_IO_TYPE_PORT)
+        return;
+
+    uint32_t receiver_name = 0;
+    if (!springboard_commcenter_read_kernel_field(
+            cpu, port,
+            SPRINGBOARD_COMMCENTER_PORT_RECEIVER_NAME_OFFSET,
+            &receiver_name, &sender->failure_va, &sender->failure_fsr))
+        return;
+    sender->receiver_name = receiver_name;
+    if (!springboard_commcenter_receiver_name_is_authoritative(
+            receiver_name))
+        return;
+
+    uint32_t space = 0, active = 0, task = 0, task_space = 0;
+    uint32_t proc = 0, pid = 0;
+    if (!springboard_commcenter_read_kernel_field(
+            cpu, port,
+            SPRINGBOARD_COMMCENTER_PORT_RECEIVER_OR_DESTINATION_OFFSET,
+            &space, &sender->failure_va, &sender->failure_fsr) ||
+        !springboard_commcenter_checked_field_va(
+            space, 0, g_virt_base, NULL))
+        return;
+    sender->space = space;
+    if (!springboard_commcenter_read_kernel_field(
+            cpu, space, SPRINGBOARD_COMMCENTER_SPACE_ACTIVE_OFFSET,
+            &active, &sender->failure_va, &sender->failure_fsr) ||
+        !active)
+        return;
+    if (!springboard_commcenter_read_kernel_field(
+            cpu, space, SPRINGBOARD_COMMCENTER_SPACE_TASK_OFFSET,
+            &task, &sender->failure_va, &sender->failure_fsr) ||
+        !springboard_commcenter_checked_field_va(
+            task, 0, g_virt_base, NULL))
+        return;
+    sender->task = task;
+    if (!springboard_commcenter_read_kernel_field(
+            cpu, task, SPRINGBOARD_COMMCENTER_TASK_IPCSPACE_OFFSET,
+            &task_space, &sender->failure_va, &sender->failure_fsr) ||
+        task_space != space)
+        return;
+    if (!springboard_commcenter_read_kernel_field(
+            cpu, task, SPRINGBOARD_COMMCENTER_TASK_PROC_OFFSET,
+            &proc, &sender->failure_va, &sender->failure_fsr) ||
+        !springboard_commcenter_checked_field_va(
+            proc, 0, g_virt_base, NULL))
+        return;
+    sender->proc = proc;
+    if (!springboard_commcenter_read_kernel_field(
+            cpu, proc, SPRINGBOARD_COMMCENTER_PROC_PID_OFFSET,
+            &pid, &sender->failure_va, &sender->failure_fsr))
+        return;
+    sender->pid = (int32_t)pid;
+    sender->authoritative = true;
+}
+
 static bool springboard_commcenter_kmsg_capture(
         springboard_commcenter_kmsg_t *observation,
         arm_cpu_t *cpu, uint32_t kmsg, bool capture_links) {
@@ -9813,6 +10225,13 @@ static void springboard_commcenter_queue_snapshot(
             return;
         }
         probe->queue_linked_count++;
+        /*
+         * Name the client blocked on this queued request by resolving its
+         * reply port's receive right. Read-only, and its own all-or-nothing
+         * authority flag: an unnamed sender never becomes a guess.
+         */
+        springboard_commcenter_decode_sender(
+            &node->sender, cpu, node->reply);
         if (node->destination != probe->port)
             structurally_consistent = false;
         if (i && node->prev != previous)
@@ -10606,7 +11025,69 @@ static bool applebaseband_trace_selfcheck(void) {
         SPRINGBOARD_COMMCENTER_MARK_FULLWAITERS_PC,
         SPRINGBOARD_COMMCENTER_IMMEDIATE_SLOT_RESERVE_PC
     };
+    /*
+     * Port-set classification constants. The two mqueue deltas must differ by
+     * exactly the one word ips_local_name adds, or the port and port-set
+     * hypotheses would test the same object and could never disambiguate. The
+     * two io_bits type codes must differ, and neither may collide with the
+     * active bit. wql_setlinks must lie inside the link, and wqe_queue must
+     * precede it, or the node-to-link back-conversion would run off the front.
+     */
+    bool pset_layout_ok =
+        APPLEBASEBAND_PSET_MQUEUE_DELTA ==
+            SPRINGBOARD_COMMCENTER_MQUEUE_PORT_DELTA + 4u &&
+        APPLEBASEBAND_IO_TYPE_PORT != APPLEBASEBAND_IO_TYPE_PORT_SET &&
+        (APPLEBASEBAND_IO_TYPE_PORT &
+            ~SPRINGBOARD_COMMCENTER_PORT_IO_TYPE_MASK) == 0u &&
+        (APPLEBASEBAND_IO_TYPE_PORT_SET &
+            ~SPRINGBOARD_COMMCENTER_PORT_IO_TYPE_MASK) == 0u &&
+        (SPRINGBOARD_COMMCENTER_PORT_IO_TYPE_MASK &
+            SPRINGBOARD_COMMCENTER_PORT_ACTIVE) == 0u &&
+        APPLEBASEBAND_WQL_ELEMENT_QUEUE_OFFSET <
+            APPLEBASEBAND_WQL_SETLINKS_OFFSET &&
+        APPLEBASEBAND_WQL_SETQUEUE_OFFSET >
+            APPLEBASEBAND_WQL_SETLINKS_OFFSET &&
+        APPLEBASEBAND_WQS_SETLINKS_OFFSET <
+            SPRINGBOARD_COMMCENTER_MQUEUE_MSGCOUNT_OFFSET &&
+        APPLEBASEBAND_PSET_MEMBER_CAP > 1u;
+
+    /*
+     * Adversarial: a synthetic observation must never read as a membership
+     * result once any single integrity bit is wrong. This mirrors the
+     * report's own promotion rule, so the two cannot drift apart.
+     */
+    applebaseband_receive_set_t probe;
+    memset(&probe, 0, sizeof probe);
+    probe.occupied = true;
+    probe.classified = true;
+    probe.is_port_set = true;
+    probe.walk_attempted = true;
+    probe.head_readable = true;
+    probe.closed = true;
+    probe.links_consistent = true;
+    probe.interest_is_member = true;
+#define APPLEBASEBAND_PSET_TRUSTWORTHY(p)                                  \
+    ((p).closed && (p).links_consistent && !(p).truncated &&               \
+     !(p).read_fault && !(p).setqueue_mismatch)
+    bool pset_promotion_ok = APPLEBASEBAND_PSET_TRUSTWORTHY(probe);
+    {
+        applebaseband_receive_set_t bad = probe;
+        bad.closed = false;
+        pset_promotion_ok &= !APPLEBASEBAND_PSET_TRUSTWORTHY(bad);
+        bad = probe; bad.links_consistent = false;
+        pset_promotion_ok &= !APPLEBASEBAND_PSET_TRUSTWORTHY(bad);
+        bad = probe; bad.truncated = true;
+        pset_promotion_ok &= !APPLEBASEBAND_PSET_TRUSTWORTHY(bad);
+        bad = probe; bad.read_fault = true;
+        pset_promotion_ok &= !APPLEBASEBAND_PSET_TRUSTWORTHY(bad);
+        bad = probe; bad.setqueue_mismatch = true;
+        pset_promotion_ok &= !APPLEBASEBAND_PSET_TRUSTWORTHY(bad);
+    }
+#undef APPLEBASEBAND_PSET_TRUSTWORTHY
+
     bool ok =
+        pset_layout_ok &&
+        pset_promotion_ok &&
         APPLEBASEBAND_INTEREST_CAP <= UINT8_MAX &&
         APPLEBASEBAND_NOTIFIER_CAP > 1u &&
         APPLEBASEBAND_MESSAGE_FRAME_CAP > 1u &&
@@ -15218,6 +15699,25 @@ static void springboard_commcenter_probe_report(
                        node->id, (uint32_t)node->id,
                        node->destination == probe->port
                            ? "" : " DESTINATION-MISMATCH");
+                if (node->sender.authoritative)
+                    printf("                sender: reply-port receive"
+                           " right held by pid %d"
+                           " (space=%08x task=%08x proc=%08x"
+                           " receiver-name=%08x) AUTHORITATIVE\n",
+                           node->sender.pid, node->sender.space,
+                           node->sender.task, node->sender.proc,
+                           node->sender.receiver_name);
+                else if (node->sender.attempted)
+                    printf("                sender: UNPROVEN"
+                           " (io-bits=%08x receiver-name=%08x"
+                           " space=%08x task=%08x proc=%08x"
+                           " failure-va/fsr=%08x/%08x)\n",
+                           node->sender.io_bits,
+                           node->sender.receiver_name,
+                           node->sender.space, node->sender.task,
+                           node->sender.proc,
+                           node->sender.failure_va,
+                           node->sender.failure_fsr);
             }
         }
         if (probe->valid_bits &
@@ -16243,6 +16743,102 @@ static void applebaseband_trace_report(void) {
            trace->receive_on_registered_port,
            trace->receive_on_registered_port_commcenter,
            trace->receive_identity_unreadable);
+
+    /*
+     * The unmatched-receive classification. Run23's decisive gap: CommCenter
+     * blocks receiving on an mqueue that is not any interest port's, so the
+     * counter above stays at zero and says nothing about whether CommCenter is
+     * nonetheless waiting for that port through a set.
+     */
+    printf("    CommCenter receives on a NON-interest mqueue:"
+           " commcenter/identity-unreadable=%" PRIu64 "/%" PRIu64
+           " sets-walked=%" PRIu64 " membership-hits=%" PRIu64 "\n",
+           trace->unmatched_receive_commcenter,
+           trace->unmatched_receive_identity_unreadable,
+           trace->unmatched_receive_sets_walked,
+           trace->unmatched_receive_membership_hits);
+    {
+        const applebaseband_receive_set_t *last =
+            &trace->last_unmatched_receive;
+        if (!last->occupied) {
+            printf("      newest unmatched receive: NONE OBSERVED\n");
+        } else {
+            printf("      newest unmatched receive: mqueue=%08x"
+                   " @%" PRIu64 " thread=%08x\n",
+                   last->mqueue, last->at, last->thread);
+            if (!last->classified) {
+                printf("        object type: UNPROVEN (%s;"
+                       " port-candidate=%08x set-candidate=%08x"
+                       " failure-va/fsr=%08x/%08x)\n",
+                       last->ambiguous_type
+                           ? "zero or both hypotheses matched"
+                           : "not classified",
+                       last->mqueue >=
+                           SPRINGBOARD_COMMCENTER_MQUEUE_PORT_DELTA
+                           ? last->mqueue -
+                               SPRINGBOARD_COMMCENTER_MQUEUE_PORT_DELTA
+                           : 0u,
+                       last->mqueue >= APPLEBASEBAND_PSET_MQUEUE_DELTA
+                           ? last->mqueue -
+                               APPLEBASEBAND_PSET_MQUEUE_DELTA
+                           : 0u,
+                       last->failure_va, last->failure_fsr);
+            } else {
+                printf("        object=%08x io-bits=%08x type=%s\n",
+                       last->object, last->io_bits,
+                       last->is_port_set ? "IOT_PORT_SET" : "IOT_PORT");
+            }
+            if (last->is_port)
+                printf("        a plain port, not a set: this receive"
+                       " cannot deliver another port's notification\n");
+            if (last->walk_attempted) {
+                printf("        set walk head-readable/closed/consistent"
+                       "/truncated/read-fault/setqueue-mismatch"
+                       "/member-rejected=%s/%s/%s/%s/%s/%s/%s"
+                       " members=%u\n",
+                       last->head_readable ? "yes" : "no",
+                       last->closed ? "yes" : "no",
+                       last->links_consistent ? "yes" : "no",
+                       last->truncated ? "yes" : "no",
+                       last->read_fault ? "yes" : "no",
+                       last->setqueue_mismatch ? "yes" : "no",
+                       last->member_port_rejected ? "yes" : "no",
+                       last->member_count);
+                for (unsigned i = 0; i < last->member_count; i++)
+                    printf("          member[%u] mqueue=%08x"
+                           " containing-port=%08x%s\n",
+                           i, last->members[i],
+                           last->members[i] >=
+                               SPRINGBOARD_COMMCENTER_MQUEUE_PORT_DELTA
+                               ? last->members[i] -
+                                   SPRINGBOARD_COMMCENTER_MQUEUE_PORT_DELTA
+                               : 0u,
+                           last->members[i] ==
+                               last->interest_member_mqueue
+                               ? "  <- AppleBaseband interest port" : "");
+                bool trustworthy =
+                    last->closed && last->links_consistent &&
+                    !last->truncated && !last->read_fault &&
+                    !last->setqueue_mismatch;
+                if (last->interest_is_member && trustworthy)
+                    printf("        MEMBERSHIP: the AppleBaseband interest"
+                           " port %08x (mqueue %08x) IS a member of the set"
+                           " CommCenter is receiving on\n",
+                           last->interest_member_port,
+                           last->interest_member_mqueue);
+                else if (last->interest_is_member)
+                    printf("        MEMBERSHIP: UNPROVEN (a match was seen"
+                           " but the walk was not trustworthy)\n");
+                else if (trustworthy)
+                    printf("        MEMBERSHIP: no registered AppleBaseband"
+                           " interest port is a member of this set\n");
+                else
+                    printf("        MEMBERSHIP: UNPROVEN (walk incomplete"
+                           " or inconsistent; failure-va/fsr=%08x/%08x)\n",
+                           last->failure_va, last->failure_fsr);
+            }
+        }
+    }
 
     uint64_t notification_retained =
         trace->notification_total < APPLEBASEBAND_NOTIFICATION_CAP
