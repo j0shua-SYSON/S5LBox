@@ -1709,6 +1709,68 @@ touches the storage bridge — the one subsystem that has never failed a run —
 it deserves its own validation pass rather than being bolted onto a diagnostic
 change.
 
+### 13.0f RUN29: THE BLOCKER IS SRDY, AND THE LONGER-RUN HYPOTHESIS WAS WRONG
+
+Run29 (exact commit `cf2f7d1`, **7e9** cap ≈ 17 guest seconds, 4,679 s host,
+exit 0, hashes unchanged, external-md 0 failures) is the first replay ever to
+outlast the guest's own timeouts. Two results, and the first is a correction.
+
+**§13.0c's prediction is falsified.** Waiting longer did *not* let CommCenter
+give up and proceed. `_bootstrap_check_in` is still `hits=0`, while `_ioctl`
+grew 15 → **177** and `_select` 1 → **10**, spread evenly to 6.6e9, and
+CommCenter retired **3,235,016 user instructions after** SpringBoard's send.
+The bounded ten-attempt `SCPreferences` loop was real but *inner*; the outer
+retry against the baseband mux does not terminate. §13.0c's arithmetic about
+guest time remains correct and useful — its conclusion about this frontier does
+not.
+
+**The guest named the blocker itself**, in console output no 2.1e9-capped run
+could produce:
+
+```text
+BasebandSPIIFXProtocolVersion1::handleSRDYTimeoutAction: Exit
+AppleSerialMultiplexer: !! mux-ad(err)::bsdIoctl: Fatal error code=kASMFatalErrorSPI(11)
+```
+
+The Infineon baseband SPI protocol driver times out waiting for **SRDY**
+(`/arm-io/spi2 function-srdy` GPIO `0x1804` = group 24, bit 4 by §13.0d's
+encoding); the multiplexer then fails `ASMIOCNEWDLCI` with
+`kASMFatalErrorSPI(11)` — matching CommCenter's own
+`ioctl(ASMIOCNEWDLCI) failed` string — and CommCenter retries forever.
+
+Full chain, now confirmed rather than inferred:
+
+```text
+no SRDY / no SPI transfer model
+  -> SRDY timeout -> kASMFatalErrorSPI(11) -> ASMIOCNEWDLCI fails
+  -> CommCenter retries forever, never calls bootstrap_check_in
+  -> launchd keeps the port -> queue full at qlimit=5
+  -> SpringBoard blocks -> UIController never runs -> no pixels
+```
+
+**Do not "fix" this by making the timeout fire faster or cleaner.** The mux
+already fails the ioctl and CommCenter retries anyway — 177 times over 5.7e9
+instructions. A prompt clean failure is demonstrably insufficient.
+
+**The next step is read-only, and must precede any device work:** disassemble
+`BasebandSPIIFXProtocolVersion1`'s SRDY path and `handleSRDYTimeoutAction` to
+determine (a) exactly what it samples — the GPIO input, an SPI status bit, or
+an interrupt — and (b) whether any path exists in which the driver concludes
+"no modem" durably instead of rearming. Only then decide between:
+
+- a minimal SRDY/GPIO input model that lets the handshake complete and the mux
+  come up, with the modem reporting no service; or
+- a faithful permanent-failure state, if and only if the binary actually has
+  one that CommCenter honours.
+
+Both are real device-model work on the two blocks §13.0d identifies (SPI
+controller, GPIO interrupt controller) — the same pair multitouch needs, so
+neither is wasted.
+
+Use the new external-md checkpointing (§13.0e, implemented) to iterate: take a
+checkpoint around 1e9, before the retry storm, and restore instead of
+re-running five billion instructions per attempt.
+
 ### 13.0c THE INSTRUCTION CAP HAS ALWAYS BEEN SHORTER THAN THE GUEST'S TIMEOUTS
 
 Read this before planning any further long run. It is the most consequential

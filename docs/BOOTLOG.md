@@ -2068,6 +2068,90 @@ contradictions. Neither overlaps the decisive `_ipc_mqueue_send` episode, whose
 route bindings, queue walk, and owner decode are each independently marked
 validated or authoritative.
 
+### 2026-07-25: run29 named the blocker — SRDY, and the guest said so itself
+
+Run29 is the first replay in this project ever to outlast the guest's own
+timeouts: exact commit `cf2f7d1`, a **7,000,000,000-instruction** cap (about 17
+guest seconds), **4,679 seconds** of host time, exit **0**, stderr empty,
+launcher postflight passed, immutable hashes unchanged, external-md **0
+failures**, 0 pending continuations, and the screen still the unchanged seed.
+
+#### The hypothesis it was built to test was wrong
+
+§13.0c predicted that the 2.1e9 cap had merely been stopping part-way through
+CommCenter's bounded ten-attempt `SCPreferences` retry, and that a longer run
+would let it give up and proceed. It did not.
+
+```text
+_bootstrap_check_in   hits=0    STILL NEVER CALLED
+checkin:function-entry hits=0   STILL NEVER CALLED
+_ioctl                hits=177  @933,155,896 .. @6,601,520,520
+_select               hits=10   @966,164,632 .. @6,560,245,824
+_IOServiceOpen        hits=6    _IOConnectCallScalarMethod hits=6
+```
+
+The ioctls grew from 15 to 177 and the selects from 1 to 10, spread evenly all
+the way to 6.6e9. CommCenter also retired **3,235,016 user instructions after**
+SpringBoard's send — it is emphatically alive. So the bounded `SCPreferences`
+loop was a real but *inner* loop, and not the blocker. The outer retry against
+the baseband mux does not terminate.
+
+That correction matters more than the prediction would have: "it will give up
+if we wait" is now falsified, and no future frontier claim should assume a
+stock timeout resolves without watching it resolve.
+
+#### What the guest printed once the run was long enough
+
+Two console lines appear that no run capped at 2.1e9 could ever have produced:
+
+```text
+BasebandSPIIFXProtocolVersion1::handleSRDYTimeoutAction: Exit
+AppleSerialMultiplexer: !! mux-ad(err)::bsdIoctl: Fatal error code=kASMFatalErrorSPI(11)
+```
+
+That is the guest naming the blocker outright. `BasebandSPIIFXProtocolVersion1`
+is the Infineon baseband SPI protocol driver; it waits for **SRDY**, the
+modem's slave-ready line — `/arm-io/spi2 function-srdy` GPIO `0x1804`, which by
+the decoded encoding is **group 24, bit 4** — and times out. The
+AppleSerialMultiplexer then fails the `ASMIOCNEWDLCI` ioctl with
+`kASMFatalErrorSPI(11)`, which is exactly the `ioctl(ASMIOCNEWDLCI) failed`
+string in CommCenter's own `__cstring`.
+
+So the complete chain, now end-to-end and confirmed by the guest's own
+diagnostics rather than inferred:
+
+```text
+no modem, no SRDY line, no SPI transfer model
+  -> BasebandSPIIFXProtocolVersion1 SRDY timeout
+     -> AppleSerialMultiplexer kASMFatalErrorSPI(11)
+        -> ioctl(ASMIOCNEWDLCI) fails
+           -> CommCenter retries forever, never calls bootstrap_check_in
+              -> launchd keeps the com.apple.commcenter receive right
+                 -> its queue fills at qlimit=5 with five daemons' handshakes
+                    -> SpringBoard's is the sixth and blocks
+                       -> applicationDidFinishLaunching: never completes
+                          -> UIController never runs -> no pixels
+```
+
+#### What this does not settle
+
+It does not establish what a faithful fix is. A clean, prompt failure is
+evidently **not** sufficient on its own: the mux already fails the ioctl and
+CommCenter retries anyway, 177 times across 5.7 billion instructions. So
+"graceful no-modem" cannot simply mean "make the timeout fire faster".
+
+Whether stock CommCenter ever checks in on hardware whose modem is truly absent
+is unknown and matters enormously: if it does, there is a path we have not
+reached; if it does not, then reaching SpringBoard requires modelling the SPI
+transport far enough that the mux comes up and DLCIs are created, with the
+modem then reporting no service. That decision needs the
+`BasebandSPIIFXProtocolVersion1` SRDY path disassembled before anything is
+implemented, and it must not be guessed.
+
+Nothing here is a pixel. `UIController` remained at 0 hits, live scanout at 0
+mutations, and the PPM byte-identical to the seed at
+`CBAD1C110E67CAD553A2B4EEBBF46E7BF09255389851902B24816249294AF2AB`.
+
 ### 2026-07-25: runs 25-28 found the guest was still inside its own timeout
 
 This entry covers a short focused replay (run25, 1.0e9 cap, 582 s), the full

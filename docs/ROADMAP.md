@@ -1078,6 +1078,30 @@ CommCenter registered is on AppleBaseband, registered at 931,584,215 by the
 same thread that blocked 923 K instructions later — but the blocked receive is
 on a different port than the interest port, so this is correlation, not cause.
 
+### Run29: the blocker is SRDY, and the guest said so
+
+Run29 ran to **7e9** instructions (≈17 guest seconds, 4,679 s host, exit 0) —
+the first replay ever to outlast the guest's own timeouts. It falsified the
+expectation below: CommCenter does **not** give up. `_bootstrap_check_in` is
+still never called, while `_ioctl` grew 15→177 and `_select` 1→10 evenly to
+6.6e9. The bounded `SCPreferences` loop was an inner loop; the outer baseband
+retry does not terminate.
+
+Once the run was long enough the guest printed the cause itself:
+
+```text
+BasebandSPIIFXProtocolVersion1::handleSRDYTimeoutAction: Exit
+AppleSerialMultiplexer: !! mux-ad(err)::bsdIoctl: Fatal error code=kASMFatalErrorSPI(11)
+```
+
+The Infineon baseband SPI driver times out waiting for **SRDY** (spi2
+`function-srdy` GPIO `0x1804`), the multiplexer fails `ASMIOCNEWDLCI`, and
+CommCenter loops. That completes the chain from unmodelled hardware to a black
+screen. Making the failure faster or cleaner is **not** the fix — the ioctl
+already fails and CommCenter retries regardless. The next step is to
+disassemble the SRDY path before choosing between a minimal SRDY/GPIO input
+model and a faithful permanent-failure state.
+
 ### The cap has always been shorter than the guest's own timeouts
 
 Guest time advances from retired instructions at the real 412 MHz : 6 MHz
