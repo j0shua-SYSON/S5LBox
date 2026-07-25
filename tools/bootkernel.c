@@ -2889,6 +2889,36 @@ SPRINGBOARD_UI_CHECKPOINTS[] = {
     { "CoreTelephony:GetDefault-once-return",        UINT32_C(0x30a0d2fc) },
     { "CoreTelephony:initial-handshake-call",        UINT32_C(0x30a1f030) },
     { "CoreTelephony:initial-handshake-return",      UINT32_C(0x30a1f034) },
+    /*
+     * Does the UIController message actually RETURN?
+     *
+     * These are appended rather than placed next to the other SpringBoard
+     * entries on purpose: the pc-to-index switch below is hand-maintained and
+     * Mach episodes retain the array index that was current when they began,
+     * so inserting in the middle would renumber every later checkpoint.
+     *
+     * SpringBoard's __TEXT is vm 0x1000 with file offset 0, so VA = file
+     * offset + 0x1000. At the correct VA, UIController-call (0x0000a7ba) IS
+     * the blx to objc_msgSend -- not the instruction before it -- so its hit
+     * proves the send was ENTERED and nothing more. Runs 35, 36d and 38 all
+     * record that hit with an unchanged framebuffer, and run36d ran 607e6
+     * instructions past it, so "needs more budget" is not the explanation.
+     *
+     *   0000a7ba  blx  #0xb1bc8      ; objc_msgSend        (UIController-call)
+     *   0000a7be  ldr  r3, [pc, ...] ; first insn after it (UIController-return)
+     *   0000a7c4  str  r0, [r4]      ; stores the returned object
+     *   0000a7d2  blx  #0xb0050      ; the next call
+     *   0000a7d6  ldr  r1, [pc, ...] ; and its return
+     *
+     * If -return fires, UIController was constructed and the failure is
+     * downstream of it. If it never fires, SpringBoard is stuck inside that
+     * message and the hunt is for whatever it waits on -- the same shape the
+     * telephony blocker had.
+     */
+    { "SpringBoard:UIController-return",             UINT32_C(0x0000a7be) },
+    { "SpringBoard:UIController-store",              UINT32_C(0x0000a7c4) },
+    { "SpringBoard:post-UIController-call",          UINT32_C(0x0000a7d2) },
+    { "SpringBoard:post-UIController-return",        UINT32_C(0x0000a7d6) },
 };
 #define SPRINGBOARD_UI_CHECKPOINT_COUNT \
     ((unsigned)(sizeof SPRINGBOARD_UI_CHECKPOINTS / \
@@ -6696,6 +6726,11 @@ static int springboard_ui_checkpoint_index(uint32_t pc) {
         case UINT32_C(0x30a0d2fc): return 107;
         case UINT32_C(0x30a1f030): return 108;
         case UINT32_C(0x30a1f034): return 109;
+        /* Appended at the end so no existing index moves; see the table. */
+        case UINT32_C(0x0000a7be): return 110;
+        case UINT32_C(0x0000a7c4): return 111;
+        case UINT32_C(0x0000a7d2): return 112;
+        case UINT32_C(0x0000a7d6): return 113;
         default: break;
     }
     return -1;
