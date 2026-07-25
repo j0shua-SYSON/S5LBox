@@ -1569,9 +1569,17 @@ hardware behavior:
    neither of the above is the cause and the real gate is earlier in
    CommCenter's startup.
 
-### 13.0b Run24 closed the baseband lead and named the blocked clients
+### 13.0b Run24 closed the notification route and named the blocked clients
 
-**The baseband hypothesis is dead.** Run24 (exact commit `8a08e44`, exit 0 at
+**Scope this claim precisely.** What Run24 kills is the *IOKit-notification
+delivery route* — the idea that CommCenter is parked waiting for
+AppleBaseband's reset `messageClients` to arrive on a port. It does **not**
+establish that the absent modem is irrelevant. CommCenter could still be
+waiting on the modem through a different mechanism entirely: the spi2
+SRDY/MRDY handshake, a bounded timeout loop, or a state machine that never
+advances. Those remain open.
+
+**The notification route is dead.** Run24 (exact commit `8a08e44`, exit 0 at
 the 2.1 B cap in 1,625.1 s, all integrity invariants held) classified four
 CommCenter receives on non-interest mqueues and found **zero port sets**:
 every one resolved as an active `IOT_PORT` under the `+0x18` hypothesis, never
@@ -1580,10 +1588,12 @@ newest is `mqueue=c2966918` → object `c2966900`, `io-bits=80000000`, the same
 object run23's per-thread dump carried for threads `e0379bb8`/`e035d000`.
 
 CommCenter never established a receive that could deliver an AppleBaseband
-notification, so the missing GPIO-75 reset interrupt is **not** what gates it.
-Do not spend further effort on baseband reset edges, GPIO interrupt
-generation, or `reset_det` semantics for the purpose of unblocking this boot.
-§13.0a remains accurate as topology, but its lead is spent.
+notification, so delivering that notification could not have unblocked it.
+Do not build GPIO interrupt generation or a `reset_det` edge *in order to
+deliver that notification* — there is nothing on the other end to receive it.
+§13.0a remains accurate as topology, and if a later trace shows CommCenter
+waiting on the modem through the spi2 handshake instead, the GPIO and SPI work
+becomes relevant again for that different reason.
 
 **The queue is five different daemons.** Each linked kmsg's reply port
 resolved AUTHORITATIVE:

@@ -2101,10 +2101,15 @@ per-thread dump, where threads `e0379bb8` and `e035d000` carried exactly that
 value.
 
 CommCenter therefore never established a receive that *could* deliver an
-AppleBaseband notification. The absent GPIO-75 reset interrupt cannot be what
-gates it, and the entire baseband hypothesis — the most promising lead after
-run23 — is closed. This is decision-tree Case D, now with evidence rather than
-by elimination.
+AppleBaseband notification, so that **delivery route** is closed: synthesizing
+a GPIO-75 reset edge would have had nothing on the other end to receive it.
+
+Scope that carefully. It does not show the absent modem is irrelevant.
+CommCenter could still be waiting on the modem some other way — the spi2
+SRDY/MRDY handshake, or a bounded timeout that never fires. What died is the
+specific IOKit-notification hypothesis, which was the most promising lead
+after run23. This is decision-tree Case D for that route, by evidence rather
+than elimination.
 
 #### The five queued messages belong to five different daemons
 

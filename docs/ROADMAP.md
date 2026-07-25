@@ -1084,8 +1084,10 @@ The current immediate gates are:
    the AppleBaseband interest port;~~ **answered: it is not.** Run24 classified
    four CommCenter receives on non-interest mqueues and found **zero** port
    sets — every one an active `IOT_PORT`. CommCenter never established a
-   receive that could deliver an AppleBaseband notification, so the missing
-   GPIO-75 reset interrupt does not gate it and **the baseband lead is closed**.
+   receive that could deliver an AppleBaseband notification, so **that delivery
+   route is closed**: building a GPIO-75 edge to deliver it would have nothing
+   on the other end. This does not show the absent modem is irrelevant — the
+   spi2 SRDY/MRDY handshake and any bounded timeout path remain open.
    Run24 also named the five queued clients as **PIDs 16, 18, 15, 12 and 13**,
    all blocked on the identical `0x0054b557` handshake: CommCenter has served
    nobody since boot, so this is systemic rather than a SpringBoard defect. The
