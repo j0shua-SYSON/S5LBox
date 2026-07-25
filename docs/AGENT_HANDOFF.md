@@ -1618,25 +1618,34 @@ The two thin accessors are also decoded: object `+0x68` is the **gpio** base
 (`0x3e400000`, first touched at `0xc05a44d0`) and object `+0x6c` is the
 **gpioic** base (`0x39a00000`, first touched at `0xc05a44e8`).
 
-**One open discrepancy, deliberately not called a bug.** The device tree gives
-`/arm-io/gpio` reg `{0x06400000,0x1000, 0x01a00000,0x1000}` and
-`/arm-io/power` reg `{0x01a00000,0x1000}` — both name the same physical page
-`0x39a00000`, and the guest maps it twice at different VAs
+**A suspected power/gpioic overlap was investigated and does NOT exist.**
+The device tree gives `/arm-io/gpio` reg `{0x06400000,0x1000, 0x01a00000,0x1000}`
+and `/arm-io/power` reg `{0x01a00000,0x1000}` — both naming the same physical
+page `0x39a00000`, which the guest maps twice at different VAs
 (`gpioicBaseAddress 0xe3949000`, `_pcBaseAddress 0xe394a000`). Our model splits
-that page as power `0x00..0x7f` and gpioic `0x80..0xfff`.
+that page as power `0x00..0x7f` and gpioic `0x80..0xfff`, so if the pin-level
+register lived at `gpioic + group*32 + 4`, groups 0..3 would land inside
+power.c's claim — and lcd0's `reset`, `mpl_rx_enable`, `power_enable`,
+`pixel_clock_enable` and `control_enable` are all group 0 or 3 pins.
 
-If the pin-level register really lives at **gpioic + group*32 + 4**, then
-groups 0..3 (offsets `0x04..0x64`) fall inside power.c's claim and would be
-mis-decoded — and lcd0's `reset`, `mpl_rx_enable`, `power_enable`,
-`pixel_clock_enable` and `control_enable` are all group 0 or 3 pins, i.e. the
-display path. If instead that accessor uses the **gpio** base
-(`0x3e400000 + group*32 + 4`), there is no overlap and nothing is wrong.
+It does not. The four accessors sit consecutively at `c05add68` (`+0x68`
+read), `c05add6c` (`+0x68` write), `c05add70` (`+0x6c` read) and `c05add74`
+(`+0x6c` write). Scanning the kernelcache for the implied vtable bases shows
+`c05ad9e4` referenced as a literal at seven constructor sites and `c05ad9ec` at
+none, and `c05ad9e4` is preceded by three zero words — the vtable start
+pattern. So the vptr is **`0xc05ad9e4`**, and:
 
-Which of the two it is has **not** been established: it turns on whether
-vtable slot `0x384` resolves to the `+0x68` or the `+0x6c` accessor, and that
-vtable has not been read. Resolve it before touching the power/gpioic split —
-and note the run evidence is ambiguous rather than decisive (`0x3e400000` saw
-0 reads and 81 writes, `0x39a00000` saw 35 reads and 1362 writes).
+```text
+slot 0x384 = c05ad9e4 + 0x384 = c05add68 = the +0x68 accessor = GPIO base
+```
+
+**Pin level is therefore at `0x3e400000 + group*32 + 4`**, in the gpio block,
+never in the gpioic/power page. The existing power/gpioic split is unaffected
+and must not be "fixed" on the strength of the earlier suspicion.
+
+That also fixes the register map a GPIO model has to provide: pin state for
+groups 0..24 at gpio `+0x004..+0x304`, `fsel-offset 0x320` from the device
+tree, and the separate gpioic page carrying the 7 interrupt groups.
 
 ### 13.0c THE INSTRUCTION CAP HAS ALWAYS BEEN SHORTER THAN THE GUEST'S TIMEOUTS
 
