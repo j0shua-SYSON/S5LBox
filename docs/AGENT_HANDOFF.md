@@ -1812,6 +1812,56 @@ checkpoint beyond `UIController`, the next hypothesis to test — untested, and
 stated here only so it is not re-derived — is whether the guest's randomness
 source is degenerate enough to make a probabilistic prime search never succeed.
 
+### 13.0i NO SURFACE IS EVER CREATED. STOP ADDING INSTRUCTIONS.
+
+`UIController` has now been reached in runs 35, 36d and 38, and the framebuffer
+is **byte-identical every time** (`CBAD1C11…`, 384 of 460,800 bytes non-zero).
+Run36d ran **607 million instructions past it** and changed nothing. The
+standing hypothesis — "SpringBoard just needs more budget after
+`UIController`" — is not supported and should not be assumed again.
+
+The display side is not the problem. CLCD is programmed and live: `scanning=1`,
+1026 frames, window0 320x480 at `0x0885c000`, descriptor refreshes 98-102. The
+guest never writes pixels.
+
+Run36d's own checkpoints say why:
+
+```text
+IOSurface:create-entry      hits=0
+H1:createSurface-null-test  hits=0
+H1:createSurface-nonnull    hits=0
+H1:surface-field24-store    hits=0
+```
+
+**No surface is ever created.** iPhone OS 3's UIKit does not draw into the
+scanout buffer; it renders into a CoreSurface/IOSurface that the window server
+composites. With no surface allocated there is nothing to render into, and no
+instruction budget produces a pixel. The question is not "how much further" but
+"why is `IOSurface::create` never called".
+
+Instrumentation stops exactly where it is needed. `SpringBoard:UIController-call`
+at `0x0000a7ba` is the last SpringBoard checkpoint defined, and disassembly
+shows it is `ldr r1,[r0]` immediately before `blx 0xb0bc8` — an `objc_msgSend`
+at `0x0000a7be`. So the recorded hit proves SpringBoard *reached* the send; it
+does not prove the send returned. **The next concrete step is checkpoints past
+`0xa7be`** to establish whether that message returns, and if it does, to follow
+the path toward the surface allocation that never happens.
+
+Two measurements that bound what is worth trying:
+
+- **Runs are not deterministic.** Run36d restored run35's own 2.4e9 checkpoint
+  with the same binary and reached `UIApplicationMain` at 7.90e9 where run35
+  reached it at 3.27e9 — a 2.4x divergence in identical configuration, almost
+  certainly the probabilistic prime search consuming different budgets. Do not
+  attribute an instruction-count difference between two runs to a code change
+  without repeating it; an earlier claim that un-matching USB made the boot
+  4.3x slower was retracted for exactly this reason.
+- **Stripping diagnostics buys ~10%, not a multiple.** Measured over 500e6
+  instructions: minimal 1,408k inst/s, full 1,278k inst/s. A "dash with
+  diagnostics off" mode is not worth building. Parallel runs (the machine has 8
+  cores and had been running one) and the dynarec are the only real
+  accelerators.
+
 ### 13.0f RUN29: THE BLOCKER IS SRDY, AND THE LONGER-RUN HYPOTHESIS WAS WRONG
 
 Run29 (exact commit `cf2f7d1`, **7e9** cap ≈ 17 guest seconds, 4,679 s host,
