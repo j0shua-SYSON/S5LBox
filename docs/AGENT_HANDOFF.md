@@ -1709,6 +1709,55 @@ touches the storage bridge — the one subsystem that has never failed a run —
 it deserves its own validation pass rather than being bolted onto a diagnostic
 change.
 
+### 13.0g CURRENT STATE: THE COMMCENTER BLOCKER IS GONE. READ THIS FIRST.
+
+The multi-run CommCenter/telephony blocker described in §13.0b/§13.0f is
+**resolved**. Do not spend further effort on it.
+
+**The fix** (`f7f0f04`): the in-memory device tree un-matches `/baseband` and
+`/arm-io/spi2` by default, exactly as it already did for the MBX GPU and the
+SHA-1 engine. Run29 had shown that a *declared but unanswering* baseband makes
+BasebandSPI time out on SRDY, the multiplexer fail `ASMIOCNEWDLCI` with
+`kASMFatalErrorSPI(11)`, and CommCenter retry forever. A device that never
+responds is not a device that is absent, and the stock stack treats them very
+differently. `-B` restores the old behaviour for anyone modelling the real
+transport; at that point delete the un-match rather than keep it.
+
+**Run30 proved it worked:** `_bootstrap_check_in` hits=1 with
+`r1 = 0x00085ee4` (`"com.apple.commcenter"`), return `r0 = 0` (KERN_SUCCESS),
+SUCCESS arm taken, FAILURE arm never. SpringBoard's telephony singleton now
+enters *and returns*.
+
+**Three CPU gaps have followed, each fixed as a whole class:**
+
+| Run | Stop | Reached | Fix |
+|---|---|---:|---|
+| 30 | `VCVTR` refused | 2,061,479,415 | `c5be9ee` conversions honour RMode |
+| 31 | `VCVT.F32.S32` refused | 2,061,479,416 | `cddd53c` implement FPSCR.RMode |
+| 32 | `SADD8` undefined | 2,191,848,855 | `f898753` parallel add/sub family |
+
+Run31 gaining exactly **one instruction** is the lesson worth keeping: UIKit
+sets a directed rounding mode and runs whole sequences under it, so clearing
+encodings one per half-hour replay never terminates. Fix the class.
+
+**Where the boot now is:** past `applicationDidFinishLaunching:`, past
+`isTethered`, through the telephony singleton, with CLCD descriptor refreshes
+up 1 → 7 → 27. `UIController` is still 0 hits and the framebuffer is still the
+seed. The remaining distance looks like ordinary reached-path CPU coverage
+rather than another architectural blocker — but that is an expectation, not a
+result, and the next stop may disprove it exactly as run31 disproved §13.0c.
+
+**Method that is working, and should continue:**
+
+1. Run to a stop; the harness names the encoding and reason fail-closed.
+2. Decode it, and implement the **entire related family**, never the single
+   encoding, with tests covering lane/mode/edge behaviour and PC refusal.
+3. Re-run. Expect a new stop; that is progress, not regression.
+
+**Checkpointing is implemented (§13.0e) and should now be used.** Each replay
+to the frontier costs 25-30 minutes at 2.5e9. Take a checkpoint around 1.9e9,
+before SpringBoard's UI work, and restore instead of re-running from zero.
+
 ### 13.0f RUN29: THE BLOCKER IS SRDY, AND THE LONGER-RUN HYPOTHESIS WAS WRONG
 
 Run29 (exact commit `cf2f7d1`, **7e9** cap ≈ 17 guest seconds, 4,679 s host,

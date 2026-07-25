@@ -2068,6 +2068,77 @@ contradictions. Neither overlaps the decisive `_ipc_mqueue_send` episode, whose
 route bindings, queue walk, and owner decode are each independently marked
 validated or authoritative.
 
+### 2026-07-25: run30 broke the CommCenter blocker; runs 31-33 clear CPU gaps
+
+#### The fix: stop declaring hardware this machine does not have
+
+Run29 established that the shipped stack, given a baseband that is *declared*
+but never answers, times out on SRDY, fails `ASMIOCNEWDLCI` with
+`kASMFatalErrorSPI(11)`, and retries forever. Making that failure faster or
+cleaner was demonstrably not the answer — the ioctl already failed and
+CommCenter already retried, 177 times across 5.7 billion instructions.
+
+A device that never responds is not a device that is absent, and the stock
+stack treats them very differently. So the in-memory device tree now un-matches
+`/baseband` and `/arm-io/spi2`, exactly as it already did for the MBX GPU and
+the SHA-1 engine, telling the guest the truth about this machine. `-B` restores
+the old behaviour for anyone modelling the real transport later.
+
+Nothing is fabricated: no reset edge is synthesised, no SRDY asserted, no Mach
+message injected, no queue touched, and `firmware/devicetree.bin` on disk is
+untouched — the edit is to the loaded copy.
+
+**Run30 result — the blocker is gone:**
+
+```text
+_bootstrap_check_in     hits=1  @777,240,124  r1=0x00085ee4 "com.apple.commcenter"
+checkin:RETURN(r0=kr)   r0=00000000                     <- KERN_SUCCESS
+checkin:SUCCESS-arm     hits=1                          <- MIG server + thread
+checkin:FAILURE-arm     hits=0  NEVER CALLED
+```
+
+CommCenter owns `com.apple.commcenter`. SpringBoard's telephony singleton,
+which had blocked every run since run21, now **enters and returns**:
+
+```text
+applicationDidFinishLaunching:  @2,021,677,686
+isTethered returned             @2,022,920,037  (false branch)
+telephony-shared-call           @2,038,668,276
+telephony-shared-entry hits=2   @2,038,895,109 / @2,040,653,293
+```
+
+#### Then three CPU-coverage gaps, in the usual shape
+
+Each stop was fail-closed and named itself, and each fix covered the whole
+class rather than the single encoding:
+
+| Run | Stop | Reached | Gain |
+|---|---|---:|---:|
+| 30 | `VCVTR` refused (`0xeefd7a67`) | 2,061,479,415 | blocker cleared |
+| 31 | `VCVT.F32.S32` refused (`0xeef84ae7`) | 2,061,479,416 | +1 |
+| 32 | `SADD8` undefined (`0xe611ef9e`) | 2,191,848,855 | **+130,369,439** |
+
+Run31's gain of exactly **one instruction** was the useful failure. It proved
+that clearing these one encoding per half-hour replay would never end: UIKit
+sets a directed rounding mode and then runs whole *sequences* of conversions
+and arithmetic under it. So `FPSCR.RMode` was implemented rather than refused —
+`vfp_execute()` adopts the mode on the host FPU for the duration of one
+instruction and restores it, while the float-to-integer path rounds explicitly
+in software. That single change bought 130 million instructions.
+
+The same reasoning produced the ARMv6 parallel add/subtract family: all six
+classes (signed, signed-saturating, signed-halving, and the three unsigned
+counterparts) across all six lane operations, with GE flags, lane-independent
+arithmetic in wider intermediates, and PC operands refused. Implementing only
+`SADD8` would have hidden the next stop behind an identical shape.
+
+CLCD descriptor refreshes rose **1 → 7 → 27** across these runs, so the display
+path is doing progressively more real work as SpringBoard advances.
+
+**Still no pixels.** `UIController` remains at 0 hits and the PPM is still
+byte-identical to the seed in every run above. The CommCenter blocker is gone;
+the remaining distance is ordinary reached-path CPU coverage.
+
 ### 2026-07-25: run29 named the blocker — SRDY, and the guest said so itself
 
 Run29 is the first replay in this project ever to outlast the guest's own

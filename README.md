@@ -131,6 +131,30 @@
 > in-transit/timestamp union. No dequeue, reply, permanent deadlock, or baseband
 > cause is proved yet.
 >
+> **The telephony blocker is resolved.** Runs 23-29 traced SpringBoard's black
+> screen to a single cause: with a baseband *declared* in the device tree but
+> no modem behind it, `BasebandSPIIFXProtocolVersion1` times out waiting for
+> SRDY, the serial multiplexer fails `ASMIOCNEWDLCI` with
+> `kASMFatalErrorSPI(11)`, and CommCenter retries forever — so it never calls
+> `bootstrap_check_in`, launchd keeps the `com.apple.commcenter` port, its
+> queue fills at `qlimit=5` behind five other daemons, and SpringBoard's
+> handshake is the sixth sender and blocks.
+>
+> A device that never answers is not a device that is absent. The in-memory
+> device tree now un-matches the baseband nubs, exactly as it already did for
+> the MBX GPU and the SHA-1 engine. Run30 confirmed the effect:
+> `_bootstrap_check_in` returned **`KERN_SUCCESS`**, CommCenter stood up its MIG
+> server, and SpringBoard's telephony singleton **entered and returned** for the
+> first time. The boot then advanced through three ordinary CPU-coverage gaps —
+> `VCVTR`, `FPSCR.RMode` (now implemented rather than refused), and the ARMv6
+> parallel add/subtract family — reaching **2,191,848,855** instructions with
+> CLCD descriptor refreshes up 1 → 7 → 27.
+>
+> **SpringBoard still has not rendered:** `UIController` is unreached and the
+> framebuffer is still the seed. The remaining distance looks like reached-path
+> CPU coverage rather than another architectural blocker, but that is an
+> expectation, not a result.
+>
 > Run23 then replayed exact commit
 > `777afb4c2350690ecd40cd9e69d12e3967a227cb` — whose `CMakeLists.txt`,
 > `core/`, and `tools/` inputs are byte-identical to hosted-green `5a40c5e` —
