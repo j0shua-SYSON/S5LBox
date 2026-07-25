@@ -367,6 +367,212 @@ typedef struct {
     bool done;
 } boot_snapshot_request_t;
 
+/* ------------------------------------------- external-md snapshot sidecars ---
+ *
+ * The core snapshot serialises s5l8900_t only, so none of the md bridges' host
+ * state and none of the work image is in it. Rather than push host storage
+ * concepts into the portable core, bootkernel writes two sidecars beside the
+ * snapshot and owns their format entirely.
+ *
+ * What actually has to survive is small. In md_raw_bridge_t the config is
+ * re-derivable from setup, scratch/iov_plan/data_spans are per-call transients,
+ * and pending[] need only be empty; the exact-gated kernel patches and the four
+ * bounce slots already live in guest RAM and therefore in the core snapshot.
+ * That leaves the 128 KiB coherent allocation-tail overlay, the counters, and
+ * the image contents at the checkpoint instant.
+ *
+ * Saving fails closed if any native-uiomove continuation is still pending: that
+ * state spans a guest bounce slot and a host transfer, and a checkpoint taken
+ * mid-flight could not be restored coherently.
+ */
+#define EXTERNAL_MD_SIDECAR_MAGIC UINT32_C(0x3144534d)   /* "MDS1" */
+#define EXTERNAL_MD_SIDECAR_VERSION UINT32_C(1)
+
+typedef struct {
+    uint32_t magic;
+    uint32_t version;
+    uint64_t media_size;
+    uint64_t image_bytes;
+    md_bridge_stats_t strategy_stats;
+    md_raw_bridge_stats_t raw_stats;
+    uint8_t guard_tail[MD_RAW_BRIDGE_MAX_TRANSFER];
+} external_md_sidecar_t;
+
+/* Set during external-md setup so the checkpoint path can reach them. */
+static md_bridge_t *g_external_strategy_bridge = NULL;
+static md_raw_bridge_t *g_external_raw_bridge = NULL;
+static file_block_t **g_external_adapter_slot = NULL;
+static const char *g_external_work_image_path = NULL;
+static uint64_t g_external_media_size_for_sidecar = 0;
+/* Populated by a restore before the bridges exist, applied just after init. */
+static external_md_sidecar_t g_external_restore_sidecar;
+static bool g_external_restore_sidecar_valid = false;
+
+static bool external_md_sidecar_path(char *out, size_t cap,
+                                     const char *base, const char *suffix) {
+    if (!out || !base || !suffix) return false;
+    size_t need = strlen(base) + strlen(suffix) + 1u;
+    if (need > cap) return false;
+    snprintf(out, cap, "%s%s", base, suffix);
+    return true;
+}
+
+/* Byte-exact copy that refuses an existing destination, preserving the same
+ * create-only freshness rule the work-image provisioner enforces. */
+static bool external_md_copy_create_only(const char *src, const char *dst,
+                                         uint64_t *bytes_out) {
+    if (bytes_out) *bytes_out = 0;
+    if (!src || !dst) return false;
+    FILE *in = fopen(src, "rb");
+    if (!in) {
+        fprintf(stderr, "external-md sidecar: cannot read %s\n", src);
+        return false;
+    }
+    FILE *probe = fopen(dst, "rb");
+    if (probe) {
+        fclose(probe);
+        fclose(in);
+        fprintf(stderr, "external-md sidecar: refusing existing %s\n", dst);
+        return false;
+    }
+    FILE *out = fopen(dst, "wb");
+    if (!out) {
+        fclose(in);
+        fprintf(stderr, "external-md sidecar: cannot create %s\n", dst);
+        return false;
+    }
+    static uint8_t buffer[1u << 20];
+    uint64_t total = 0;
+    bool ok = true;
+    for (;;) {
+        size_t got = fread(buffer, 1, sizeof buffer, in);
+        if (!got) {
+            if (ferror(in)) ok = false;
+            break;
+        }
+        if (fwrite(buffer, 1, got, out) != got) { ok = false; break; }
+        total += got;
+    }
+    if (fflush(out) != 0) ok = false;
+    if (fclose(out) != 0) ok = false;
+    fclose(in);
+    if (!ok) {
+        fprintf(stderr, "external-md sidecar: copy %s -> %s failed\n", src, dst);
+        remove(dst);
+        return false;
+    }
+    if (bytes_out) *bytes_out = total;
+    return true;
+}
+
+static bool external_md_sidecar_save(const char *snapshot_path) {
+    if (!g_external_work_image_path) return true;   /* not external-md */
+    if (!snapshot_path || !g_external_raw_bridge || !g_external_strategy_bridge)
+        return false;
+
+    for (unsigned i = 0; i < MD_RAW_BRIDGE_MAX_BOUNCE_SLOTS; i++) {
+        if (g_external_raw_bridge->pending[i].active) {
+            fprintf(stderr,
+                    "external-md sidecar: refusing a checkpoint while native "
+                    "uiomove continuation %u is still pending\n", i);
+            return false;
+        }
+    }
+    if (g_external_adapter_slot && *g_external_adapter_slot) {
+        file_block_status_t flushed =
+            file_block_flush(*g_external_adapter_slot);
+        if (flushed != FILE_BLOCK_STATUS_OK) {
+            fprintf(stderr, "external-md sidecar: flush failed: %s\n",
+                    file_block_strerror(flushed));
+            return false;
+        }
+    }
+
+    char image_path[1024];
+    char state_path[1024];
+    if (!external_md_sidecar_path(image_path, sizeof image_path,
+                                  snapshot_path, ".mdimage") ||
+        !external_md_sidecar_path(state_path, sizeof state_path,
+                                  snapshot_path, ".mdstate")) {
+        fprintf(stderr, "external-md sidecar: path too long\n");
+        return false;
+    }
+
+    uint64_t copied = 0;
+    if (!external_md_copy_create_only(g_external_work_image_path,
+                                      image_path, &copied))
+        return false;
+
+    static external_md_sidecar_t sidecar;
+    memset(&sidecar, 0, sizeof sidecar);
+    sidecar.magic = EXTERNAL_MD_SIDECAR_MAGIC;
+    sidecar.version = EXTERNAL_MD_SIDECAR_VERSION;
+    sidecar.media_size = g_external_media_size_for_sidecar;
+    sidecar.image_bytes = copied;
+    sidecar.strategy_stats = g_external_strategy_bridge->stats;
+    sidecar.raw_stats = g_external_raw_bridge->stats;
+    memcpy(sidecar.guard_tail, g_external_raw_bridge->guard_tail,
+           sizeof sidecar.guard_tail);
+
+    FILE *state = fopen(state_path, "rb");
+    if (state) {
+        fclose(state);
+        fprintf(stderr, "external-md sidecar: refusing existing %s\n",
+                state_path);
+        return false;
+    }
+    state = fopen(state_path, "wb");
+    if (!state) {
+        fprintf(stderr, "external-md sidecar: cannot create %s\n", state_path);
+        return false;
+    }
+    bool ok = fwrite(&sidecar, sizeof sidecar, 1, state) == 1;
+    if (fflush(state) != 0) ok = false;
+    if (fclose(state) != 0) ok = false;
+    if (!ok) {
+        fprintf(stderr, "external-md sidecar: writing %s failed\n", state_path);
+        remove(state_path);
+        return false;
+    }
+    printf("snapshot   : external-md sidecars %s (%" PRIu64 " bytes) and %s\n",
+           image_path, copied, state_path);
+    fflush(stdout);
+    return true;
+}
+
+static bool external_md_sidecar_load(const char *snapshot_path,
+                                     external_md_sidecar_t *out) {
+    if (!snapshot_path || !out) return false;
+    char state_path[1024];
+    if (!external_md_sidecar_path(state_path, sizeof state_path,
+                                  snapshot_path, ".mdstate")) {
+        fprintf(stderr, "external-md sidecar: path too long\n");
+        return false;
+    }
+    FILE *state = fopen(state_path, "rb");
+    if (!state) {
+        fprintf(stderr,
+                "external-md restore: missing sidecar %s; a snapshot taken in "
+                "external-md mode always writes one\n", state_path);
+        return false;
+    }
+    bool ok = fread(out, sizeof *out, 1, state) == 1;
+    fclose(state);
+    if (!ok) {
+        fprintf(stderr, "external-md restore: short read on %s\n", state_path);
+        return false;
+    }
+    if (out->magic != EXTERNAL_MD_SIDECAR_MAGIC ||
+        out->version != EXTERNAL_MD_SIDECAR_VERSION) {
+        fprintf(stderr,
+                "external-md restore: %s is magic %08x version %u; expected "
+                "%08x version %u\n", state_path, out->magic, out->version,
+                EXTERNAL_MD_SIDECAR_MAGIC, EXTERNAL_MD_SIDECAR_VERSION);
+        return false;
+    }
+    return true;
+}
+
 /* Save every checkpoint due at the machine's current absolute retired-
  * instruction count.  Keeping completion state prevents a checkpoint at the
  * restored starting count from being written again if a failed arm_step()
@@ -377,6 +583,11 @@ static bool save_due_snapshots(s5l8900_t *mach,
     if (!mach || (!snaps && nsnaps)) return false;
     for (unsigned s = 0; s < nsnaps; s++) {
         if (snaps[s].done || snaps[s].at != mach->cpu.cycles) continue;
+        if (!external_md_sidecar_save(snaps[s].path)) {
+            fprintf(stderr, "snapshot %s: external-md sidecar failed\n",
+                    snaps[s].path);
+            return false;
+        }
         snapshot_status_t status = snapshot_save(mach, snaps[s].path);
         printf("snapshot   : @%" PRIu64 " -> %s: %s\n",
                mach->cpu.cycles, snaps[s].path, snapshot_strerror(status));
@@ -20630,10 +20841,24 @@ int main(int argc, char **argv) {
             fprintf(stderr, "--external-md cannot be combined with -r\n");
             return 1;
         }
-        if (restore_path || nsnaps) {
+        /*
+         * Snapshots used to be refused here because the core snapshot carries
+         * s5l8900_t only: none of the md bridges' host state and none of the
+         * work image was in it. bootkernel now writes two sidecars beside the
+         * snapshot (<snap>.mdimage, <snap>.mdstate) carrying the coherent
+         * allocation-tail overlay, the counters, and the image contents at the
+         * checkpoint instant, and a restore provisions its work image from the
+         * sidecar rather than from the immutable source. Everything else that
+         * matters -- the exact-gated kernel patches and the bounce slots -- is
+         * guest RAM and therefore already inside the core snapshot.
+         *
+         * The freshness rule is unchanged: a restore still writes a new,
+         * uniquely named work image and still refuses to overwrite anything.
+         */
+        if (restore_path && nsnaps) {
             fprintf(stderr,
-                    "--external-md is cold-boot only; snapshots and restore "
-                    "are unsupported\n");
+                    "--external-md: combining --restore with --snapshot-at is "
+                    "not supported yet; take checkpoints from a cold boot\n");
             return 1;
         }
         if (no_kpatch || !patch_memnode || rd_low || saw_rd_address_form ||
@@ -21000,6 +21225,54 @@ int main(int argc, char **argv) {
         memcpy(options.source_identity.expected_sha256, IOS3_ROOTFS_SHA256,
                sizeof options.source_identity.expected_sha256);
 
+        /*
+         * A restore must reproduce the disk exactly as it stood at the
+         * checkpoint, so it copies the sidecar image instead of re-deriving a
+         * fresh volume from the immutable source. Re-provisioning would give a
+         * filesystem from instruction 0 underneath guest RAM restored at N.
+         */
+        if (restore_path) {
+            if (!external_md_sidecar_load(restore_path,
+                                          &g_external_restore_sidecar)) {
+                free(dt);
+                s5l8900_free(&mach);
+                ksyms_free(&KS);
+                free(img);
+                return 1;
+            }
+            char image_path[1024];
+            uint64_t restored_bytes = 0;
+            if (!external_md_sidecar_path(image_path, sizeof image_path,
+                                          restore_path, ".mdimage") ||
+                !external_md_copy_create_only(image_path, external_md_work,
+                                              &restored_bytes)) {
+                free(dt);
+                s5l8900_free(&mach);
+                ksyms_free(&KS);
+                free(img);
+                return 1;
+            }
+            if (restored_bytes != g_external_restore_sidecar.image_bytes) {
+                fprintf(stderr,
+                        "external-md restore: %s is %" PRIu64 " bytes but the "
+                        "sidecar recorded %" PRIu64 "\n",
+                        image_path, restored_bytes,
+                        g_external_restore_sidecar.image_bytes);
+                free(dt);
+                s5l8900_free(&mach);
+                ksyms_free(&KS);
+                free(img);
+                return 1;
+            }
+            g_external_restore_sidecar_valid = true;
+            external_media_size = g_external_restore_sidecar.media_size;
+            printf("external md: restored work image from %s"
+                   " (%" PRIu64 " bytes, media %" PRIu64 ")\n",
+                   image_path, restored_bytes, external_media_size);
+            fflush(stdout);
+            goto external_md_work_ready;
+        }
+
         rootfs_work_status_t root_status =
             rootfs_work_create(external_md_source, external_md_work,
                                &options, &result);
@@ -21034,6 +21307,8 @@ int main(int argc, char **argv) {
         }
 
         external_media_size = result.final_size;
+external_md_work_ready:
+        (void)0;
         uint64_t token_end;
         if (!external_media_size ||
             external_media_size > EXTERNAL_MD_MAX_SIZE ||
@@ -21746,6 +22021,29 @@ int main(int argc, char **argv) {
 
         md_bridge_init(&external_bridge, &bridge_config);
         md_raw_bridge_init(&external_raw_bridge, &raw_config);
+
+        /*
+         * Register the bridges for checkpointing, and if this run is a restore,
+         * put back the two pieces of host state the core snapshot cannot carry:
+         * the coherent allocation-tail overlay and the counters. Everything
+         * else was re-derived by the init calls above or came back as guest RAM.
+         */
+        g_external_strategy_bridge = &external_bridge;
+        g_external_raw_bridge = &external_raw_bridge;
+        g_external_adapter_slot = &external_block_adapter;
+        g_external_work_image_path = external_md_work;
+        g_external_media_size_for_sidecar = external_media_size;
+        if (g_external_restore_sidecar_valid) {
+            memcpy(external_raw_bridge.guard_tail,
+                   g_external_restore_sidecar.guard_tail,
+                   sizeof external_raw_bridge.guard_tail);
+            external_raw_bridge.stats = g_external_restore_sidecar.raw_stats;
+            external_bridge.stats = g_external_restore_sidecar.strategy_stats;
+            printf("md bridge   : restored coherent tail overlay and bridge"
+                   " counters from the snapshot sidecar\n");
+            fflush(stdout);
+        }
+
         external_bridge_mux.strategy = &external_bridge;
         external_bridge_mux.raw = &external_raw_bridge;
         arm_bus_set_privileged_svc_handler(&mach.bus,

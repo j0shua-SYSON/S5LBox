@@ -31,9 +31,17 @@ expect_rejected(requires_tree "--external-md requires -d"
 expect_rejected(legacy_ramdisk "cannot be combined with -r"
     absent-kernel -d absent-tree -r absent-ramdisk
     --external-md absent-source new-work)
-expect_rejected(snapshot "cold-boot only"
+# external-md is no longer cold-boot-only: bootkernel writes <snap>.mdimage and
+# <snap>.mdstate beside a checkpoint and provisions a restore's work image from
+# them, so --snapshot-at and --restore are each accepted on their own and this
+# invocation now falls through to the ordinary missing-kernel open failure.
+# What is still refused is taking checkpoints during a restore.
+expect_rejected(snapshot_alone_is_allowed "open"
     absent-kernel -d absent-tree --external-md absent-source new-work
     --snapshot-at 1 absent-snapshot)
+expect_rejected(restore_plus_snapshot "not supported yet"
+    absent-kernel -d absent-tree --external-md absent-source new-work
+    --restore absent-snapshot --snapshot-at 1 absent-snapshot2)
 expect_rejected(wrong_ram "effective -R 128"
     absent-kernel -d absent-tree --external-md absent-source new-work -R 127)
 expect_rejected(wrong_root "exact rd=md0"
