@@ -20512,6 +20512,7 @@ int main(int argc, char **argv) {
     uint32_t v_display = 0;   /* 0 = kernel text console draws; 1 = defer to IOMFB */
     bool want_mbx = false;    /* -g keeps the (unmodelled, hang-prone) MBX GPU driver */
     bool want_sha1hw = false; /* -S keeps the (unmodelled) SHA-1 engine matched */
+    bool want_baseband = false; /* -B keeps the (unmodelled) baseband matched */
     bool no_kpatch = false;   /* -K disables the post-load kernel patches */
     bool want_kextmap = false;/* -L prints the kext load map and exits */
     /*
@@ -20683,6 +20684,7 @@ int main(int argc, char **argv) {
         if (!strcmp(argv[i], "-F")) { want_fb = true; continue; }
         if (!strcmp(argv[i], "-g")) { want_fb = true; v_display = 1; want_mbx = true; continue; }  /* defer to IOMFB, keep MBX */
         if (!strcmp(argv[i], "-S")) { want_sha1hw = true; continue; }  /* keep the SHA-1 nub matched */
+        if (!strcmp(argv[i], "-B")) { want_baseband = true; continue; } /* keep the baseband nubs matched */
         if (!strcmp(argv[i], "-K")) { no_kpatch = true; continue; }  /* no kernel patches */
         if (!strcmp(argv[i], "-M")) { patch_memnode = false; continue; }
         if (!strcmp(argv[i], "-L")) { want_kextmap = true; continue; }
@@ -21755,6 +21757,40 @@ external_md_work_ready:
          * /dev/sha1 or FairPlay. */
         if (!want_sha1hw)
             dt_unmatch(dt, dt_n, "arm-io/sha1");
+
+        /*
+         * Keep the baseband transport from matching unless -B asks for it.
+         *
+         * This machine has no modem. Run29 proved what the shipped stack does
+         * when the hardware is declared but never answers:
+         * BasebandSPIIFXProtocolVersion1 times out waiting for SRDY, the
+         * AppleSerialMultiplexer fails ASMIOCNEWDLCI with kASMFatalErrorSPI,
+         * and CommCenter retries that ioctl forever -- 177 times across 5.7
+         * billion instructions -- so it never reaches bootstrap_check_in. The
+         * com.apple.commcenter receive right therefore stays with launchd, its
+         * queue fills at qlimit=5, and SpringBoard's CTServerConnection
+         * handshake is the sixth sender and blocks before UIController.
+         *
+         * Declaring hardware we do not implement is the less faithful of the
+         * two options: a device that never responds is not a device that is
+         * absent, and the stock stack treats them very differently. Removing
+         * the match tells the guest the truth about this machine, which is the
+         * same argument already made for the MBX GPU and the SHA-1 engine
+         * above, and it is the documented M5 "graceful no-modem" position:
+         * stock CommCenter and SpringBoard get their natural no-hardware
+         * outcome rather than a fabricated successful modem.
+         *
+         * This fabricates nothing. No reset edge is synthesized, no SRDY is
+         * asserted, no Mach message is injected and no queue is touched.
+         *
+         * -B restores the old behaviour for anyone modelling the real
+         * transport later; at that point this un-match should be deleted, not
+         * kept as a workaround.
+         */
+        if (!want_baseband) {
+            dt_unmatch(dt, dt_n, "baseband");
+            dt_unmatch(dt, dt_n, "arm-io/spi2");
+        }
         for (unsigned i = 0; i < ndtov; i++)
             dt_set_u32(dt, dt_n, dtov[i].path, dtov[i].prop, dtov[i].val);
         if (external_md &&
