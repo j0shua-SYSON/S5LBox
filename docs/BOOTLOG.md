@@ -13,9 +13,9 @@ device behind each stage.
 > (`0xe6cf3073`) in user mode. The complete paired-extend implementation then
 > replayed through that stop, wrote a 2.97 B checkpoint and reached a clean
 > 2.98 B cap. Free pages dipped to 97 and ended at 214 against a target of 250.
-> The strongest current SpringBoard evidence is run21: a fresh display-enabled
-> 128 MiB cold boot of exact decoder-fix commit
-> `debec04ff9b0faa469d5ad2ee7d75d1bf3b53b1a`. Run20 had already validated the
+> The strongest current SpringBoard evidence is run22: a fresh display-enabled
+> 128 MiB cold boot of exact diagnostic commit
+> `40209b27cb10d01c552398ff918ee613c4908ed0`. Run20 had already validated the
 > mixer+SDO correction through 4 TV-out frames, IRQ 30's shipped filter/action,
 > the close-gate wake, exact PID 20 `IOServiceClose` return, and a 320x480
 > `startWindowServer` return. It then stopped at 1,937,979,818 on valid VFP11
@@ -34,14 +34,28 @@ device behind each stage.
 > creates a CTServerConnection, successfully looks up literal
 > `com.apple.commcenter`, receives port name **0x4f07**, and blocks in its
 > initial generated handshake. The request ID is **0x0054b557**, with send size
-> **0x834** and receive size **0x30**. No reply, deadlock, queue-full state, or
-> baseband cause is inferred.
+> **0x834** and receive size **0x30**.
+>
+> Run22 then proved that the copied-in request reaches destination port object
+> `0xc0d705a0`, whose mqueue is saturated at **`msgcount=qlimit=5`**. The
+> trace then recorded the exact queue-full and `fullwaiters` PCs before the
+> SpringBoard sender blocked and did not resume before the clean
+> **2,100,000,000-instruction cap**. This does not prove five linked messages:
+> `msgcount` includes reserved/in-flight slots. Those route PCs are also
+> adjacent candidates rather than a fail-closed binding because the old
+> recorder omitted the decisive `r8` kmsg. The original run22 PID-1 owner
+> print is also rejected because that decoder did not first distinguish the
+> port's active-receiver/in-transit/timestamp union. No dequeue, reply, permanent
+> deadlock, or baseband cause is yet inferred.
 >
 > This is later control flow, **not a rendered home screen**. `UIController`
 > remained at 0 hits, live scanout recorded 0 mutations, and the PPM remained
 > the seed-only 8x16 block with 0 changed pixels. The original hashes remained
 > unchanged, external-md failures were 0, the guest-free low was 50.63 MiB,
-> and the run directory occupies 447.27 MiB on F:. Exact-commit hosted
+> and the run22 directory occupies 447.42 MiB on F:. Exact run22 source passed
+> all eight hosted jobs in
+> [core run 30106957804](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30106957804).
+> Earlier exact-commit hosted
 > [core run 30095081111](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30095081111)
 > and
 > [unsigned iOS run 30095081184](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30095081184)
@@ -1686,11 +1700,11 @@ calls `mach_msg` at **0x30a117e0** with request ID **0x0054b557**, send size
 `reserved`, so the observed header size **6** is stale stock stack state, not
 emulator corruption.
 
-The destination and call boundary are therefore exact. A successful reply,
-deadlock, queue-full condition, and baseband causality all remain unproved.
-Run22 must trace the `ipc_mqueue_send` receiver/queue and CommCenter PID 24's
-wait state, then test whether that state actually correlates with the observed
-baseband/SPI symptoms.
+The destination and call boundary were therefore exact, while a successful
+reply, deadlock, queue-full condition, and baseband causality remained
+unproved. That requirement led to run22's saturated-queue result below; its
+active owner, linked entries, service receiver, and baseband correlation are
+the next trace boundary.
 
 The rendering result remained negative. `UIController` had **0 hits**,
 live scanout had **0 mutations**, and the PPM was byte-identical to the seed,
@@ -1724,6 +1738,96 @@ expands helper-sequence coverage to VFP **488/0 locally** and passed hosted
 [core run 30097023293](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30097023293)
 plus
 [unsigned iOS run 30097023356](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30097023356).
+
+### 2026-07-25: run22 proved the saturated CommCenter send path
+
+Run22 used exact source commit
+`40209b27cb10d01c552398ff918ee613c4908ed0`, with the copied executable pinned
+by SHA-256
+`D3B9C9BF543409C9EDC95C1A1233B000D0B6C42AF5C132B69B47C19207196614`.
+The 128 MiB display-enabled cold run exited **0** at its
+**2,100,000,000-instruction cap** with empty stderr.
+
+The copied-in kernel request retained ID `0x0054b557` and destination port
+object `0xc0d705a0`. At **1,966,245,348**, `_ipc_mqueue_send` received mqueue
+`0xc0d705b8` with `msgcount=5`, `qlimit=5`, `seqno=0`, and
+`fullwaiters=0`. The trace then recorded the full-queue and pre-store
+`fullwaiters=1` PCs at **1,966,245,373** and **1,966,245,387**,
+`_thread_block_reason` at **1,966,245,550**, and the SpringBoard switch-out at
+**1,966,246,193**. The sender did not resume before the cap.
+
+This establishes a saturated queue at entry and a later blocked sender. The
+old route recorder omitted `r8`, however, so the two exact PCs are adjacent
+candidates rather than a fail-closed binding to the same kmsg. It also does
+not establish five linked messages because `msgcount` counts reserved/in-flight
+slots. The committed report's PID-1 owner is not authoritative: it interpreted
+the port's `+0x3c` union without first validating `ip_receiver_name`, so an
+in-transit destination or inactive timestamp could be mistaken for a receiver
+space. CommCenter's last scheduled PID 24 worker repeatedly issued Mach ID
+`1000` before a semaphore wait, consistent with a periodic
+`clock_get_time` worker. Its destination was not resolved and the old counter
+did not require SEND, so that is a candidate, not proof about the service
+receiver.
+
+The hardened next probe therefore requires the active receiver-name
+discriminator, validates the copied-in kernel header, walks reciprocal mqueue
+links, retains wait state per CommCenter thread, and correlates the exact
+AppleBaseband reset-detect notification route before changing hardware
+behavior.
+
+SpringBoard remained unrendered: zero `UIController` hits, zero live-scanout
+mutations, and zero changed pixels. The PPM retained seed SHA-256
+`CBAD1C110E67CAD553A2B4EEBBF46E7BF09255389851902B24816249294AF2AB`.
+Immutable input hashes remained unchanged, external-md failures were zero,
+guest-free memory bottomed at **50.63 MiB**, and the retained directory
+occupies **447.42 MiB on F:**. Hosted
+[core run 30106957804](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30106957804)
+passed all eight jobs for the exact source.
+
+### 2026-07-25: pre-Run23 probes passed their exact startup gates
+
+This is a tooling checkpoint, not a boot result. The working tree now carries
+trace-only observers that make run22's missing distinctions explicit:
+authoritative receive-right ownership versus the port union; linked circular
+kmsgs versus reserved/in-flight `msgcount`; exact route kmsg binding;
+per-thread trap/semaphore/block/schedule episodes; and one nested-frame-safe,
+live-port AppleBaseband reset-to-CommCenter notification chain.
+
+The wait episode wording is deliberately bounded: an ordered block and
+switch-out with no later execution proves “no resume observed.” It does not yet
+prove that an off-CPU thread remained on its wait queue at the final cap,
+because another thread could wake it without it being scheduled again.
+
+The observers fail closed on unreadable or contradictory fields, incomplete
+queue topology, mismatched route registers, resumed or reused threads,
+sequence/ring overflow, restored history, notifier teardown, and stale port
+pointers. They read guest state only: they do not toggle reset GPIO, change
+SPI/baseband behavior, fabricate a message, edit a queue, or alter the source
+firmware.
+
+A final integration audit found that the first AppleBaseband draft could join a
+linked handler from one retained reset event to an unlinked send/route from
+another through aggregate counters. It also found repeated-send inheritance and
+a later failed candidate overwriting displayed bound-kmsg evidence. The final
+observer requires one still-retained matching dispatch with `messageClients`
+evidence, rejects repeated sends, captures candidates locally, and includes
+negative startup self-checks for all three cases.
+
+With all mutable compiler state on F:, the integrated tree passed strict GCC
+syntax, the `bootkernel` target build, whitespace validation, adversarial
+startup self-checks, and an exact 7E18 zero-instruction run. That run printed:
+
+```text
+CommCenter ownership probe: VALIDATED
+CommCenter wait probe: VALIDATED
+AppleBaseband reset/notification probe: VALIDATED
+stopped after 0 instructions: OK
+```
+
+The abbreviated lines above omit the report's decoded offsets and causal path
+description; they do not imply that any runtime event occurred. Run23 must
+cold-replay the exact committed binary to the SpringBoard frontier before
+these probes can answer the ownership, service-thread, or baseband questions.
 
 The earlier checkpoint-continuation chain is stronger evidence for sustained
 userspace and snapshot

@@ -2252,19 +2252,31 @@ static unsigned    NM;
 #define SPRINGBOARD_MACH_REPORT_CAP 96u
 #define SPRINGBOARD_COMMCENTER_ROUTE_COUNT 5u
 #define SPRINGBOARD_COMMCENTER_INITIAL_ID UINT32_C(0x0054b557)
-#define SPRINGBOARD_COMMCENTER_POST_SELECTED_WAITER_PC UINT32_C(0xc00146f4)
-#define SPRINGBOARD_COMMCENTER_POST_NO_WAITER_PC UINT32_C(0xc001471a)
-#define SPRINGBOARD_COMMCENTER_FULL_WAIT_PC UINT32_C(0xc00147ba)
-#define SPRINGBOARD_COMMCENTER_FULLWAITERS_STORE_PC UINT32_C(0xc00147d6)
-#define SPRINGBOARD_COMMCENTER_ACCEPTED_POST_PC UINT32_C(0xc001482e)
+#define SPRINGBOARD_COMMCENTER_POST_RECEIVER_WOKEN_PC UINT32_C(0xc00146f4)
+#define SPRINGBOARD_COMMCENTER_POST_NO_ELIGIBLE_RECEIVER_PC UINT32_C(0xc001471a)
+#define SPRINGBOARD_COMMCENTER_QUEUE_FULL_SLOW_PC UINT32_C(0xc00147ba)
+#define SPRINGBOARD_COMMCENTER_MARK_FULLWAITERS_PC UINT32_C(0xc00147d6)
+#define SPRINGBOARD_COMMCENTER_IMMEDIATE_SLOT_RESERVE_PC UINT32_C(0xc001482e)
 #define SPRINGBOARD_COMMCENTER_MQUEUE_PORT_DELTA UINT32_C(0x18)
 #define SPRINGBOARD_COMMCENTER_PORT_IO_BITS_OFFSET UINT32_C(0x04)
+#define SPRINGBOARD_COMMCENTER_PORT_RECEIVER_NAME_OFFSET UINT32_C(0x08)
 #define SPRINGBOARD_COMMCENTER_PORT_ACTIVE UINT32_C(0x80000000)
+#define SPRINGBOARD_COMMCENTER_PORT_IO_TYPE_MASK UINT32_C(0x7fff0000)
 #define SPRINGBOARD_COMMCENTER_MQUEUE_MSGCOUNT_OFFSET UINT32_C(0x14)
 #define SPRINGBOARD_COMMCENTER_MQUEUE_QLIMIT_OFFSET UINT32_C(0x18)
 #define SPRINGBOARD_COMMCENTER_MQUEUE_SEQNO_OFFSET UINT32_C(0x1c)
 #define SPRINGBOARD_COMMCENTER_MQUEUE_FULLWAITERS_OFFSET UINT32_C(0x20)
-#define SPRINGBOARD_COMMCENTER_PORT_RECEIVER_SPACE_OFFSET UINT32_C(0x3c)
+#define SPRINGBOARD_COMMCENTER_MQUEUE_HEAD_OFFSET UINT32_C(0x10)
+#define SPRINGBOARD_COMMCENTER_PORT_RECEIVER_OR_DESTINATION_OFFSET UINT32_C(0x3c)
+#define SPRINGBOARD_COMMCENTER_KMSG_HEADER_OFFSET UINT32_C(0x14)
+#define SPRINGBOARD_COMMCENTER_KMSG_NEXT_OFFSET UINT32_C(0x00)
+#define SPRINGBOARD_COMMCENTER_KMSG_PREV_OFFSET UINT32_C(0x04)
+#define SPRINGBOARD_COMMCENTER_KERNEL_HEADER_BITS_OFFSET UINT32_C(0x00)
+#define SPRINGBOARD_COMMCENTER_KERNEL_HEADER_SIZE_OFFSET UINT32_C(0x04)
+#define SPRINGBOARD_COMMCENTER_KERNEL_HEADER_DESTINATION_OFFSET UINT32_C(0x08)
+#define SPRINGBOARD_COMMCENTER_KERNEL_HEADER_REPLY_OFFSET UINT32_C(0x0c)
+#define SPRINGBOARD_COMMCENTER_KERNEL_HEADER_ID_OFFSET UINT32_C(0x14)
+#define SPRINGBOARD_COMMCENTER_QUEUE_NODE_CAP 8u
 #define SPRINGBOARD_COMMCENTER_SPACE_TASK_OFFSET UINT32_C(0x58)
 #define SPRINGBOARD_COMMCENTER_SPACE_ACTIVE_OFFSET UINT32_C(0x1c)
 #define SPRINGBOARD_COMMCENTER_TASK_IPCSPACE_OFFSET UINT32_C(0x174)
@@ -2274,8 +2286,95 @@ static unsigned    NM;
 #define COMMCENTER_WATCH_MODE_COUNT 2u
 #define COMMCENTER_WATCH_SWITCH_CAP 64u
 #define COMMCENTER_WATCH_MACH_CAP 32u
-#define COMMCENTER_WATCH_MILESTONE_COUNT 6u
+#define COMMCENTER_WATCH_MILESTONE_COUNT 7u
+#define COMMCENTER_WAIT_THREAD_CAP 64u
 #define COMMCENTER_WATCH_UNREADABLE_RETRY_INTERVAL UINT64_C(1024)
+#define COMMCENTER_WAIT_THREAD_WAIT_QUEUE_OFFSET UINT32_C(0x0c)
+#define COMMCENTER_WAIT_THREAD_EVENT_LOW_OFFSET UINT32_C(0x10)
+#define COMMCENTER_WAIT_THREAD_EVENT_HIGH_OFFSET UINT32_C(0x14)
+#define COMMCENTER_WAIT_THREAD_STATE_OFFSET UINT32_C(0x18)
+#define COMMCENTER_WAIT_THREAD_RESULT_OFFSET UINT32_C(0x40)
+#define COMMCENTER_WAIT_THREAD_CONTINUATION_OFFSET UINT32_C(0x44)
+#define COMMCENTER_WAIT_THREAD_PARAMETER_OFFSET UINT32_C(0x48)
+#define COMMCENTER_WAIT_THREAD_TIMER_ACTIVE_OFFSET UINT32_C(0x154)
+#define COMMCENTER_WAIT_THREAD_WAIT_SEMAPHORE_OFFSET UINT32_C(0x188)
+#define COMMCENTER_WAIT_THREAD_SIGNAL_SEMAPHORE_OFFSET UINT32_C(0x18c)
+#define COMMCENTER_WAIT_THREAD_OUTER_CONTINUATION_OFFSET UINT32_C(0x198)
+#define COMMCENTER_WAIT_SEMAPHORE_WAIT_QUEUE_OFFSET UINT32_C(0x08)
+#define COMMCENTER_WAIT_SEMAPHORE_COUNT_OFFSET UINT32_C(0x24)
+#define COMMCENTER_WAIT_SEMAPHORE_ACTIVE_OFFSET UINT32_C(0x28)
+#define COMMCENTER_WAIT_THREAD_BLOCK_REASON_PC UINT32_C(0xc0024dc2)
+#define COMMCENTER_WAIT_THREAD_BLOCK_FIELDS_COMMITTED_PC UINT32_C(0xc0024e14)
+#define COMMCENTER_WAIT_THREAD_BLOCK_RESULT_PC UINT32_C(0xc0024e6c)
+#define COMMCENTER_WAIT_SEMAPHORE_CONTINUATION_PC UINT32_C(0xc0026fc4)
+#define COMMCENTER_WAIT_SEMAPHORE_CORE_PC UINT32_C(0xc00272b4)
+#define COMMCENTER_WAIT_SEMAPHORE_FIELDS_COMMITTED_PC UINT32_C(0xc0027364)
+#define COMMCENTER_WAIT_QUEUE_ASSERT_CALL_PC UINT32_C(0xc00273e2)
+#define COMMCENTER_WAIT_SEMAPHORE_TRAP_PC UINT32_C(0xc0027728)
+#define COMMCENTER_WAIT_SEMAPHORE_WAIT_SIGNAL_TRAP_PC UINT32_C(0xc002759a)
+#define COMMCENTER_WAIT_SEMAPHORE_TIMEDWAIT_TRAP_PC UINT32_C(0xc002766c)
+#define COMMCENTER_WAIT_SEMAPHORE_TIMEDWAIT_SIGNAL_TRAP_PC UINT32_C(0xc00274a8)
+#define COMMCENTER_WAIT_SEMAPHORE_CONTINUATION UINT32_C(0xc0026fc5)
+#define COMMCENTER_WAIT_MACH_RECEIVE_CONTINUATION UINT32_C(0xc00187bd)
+#define COMMCENTER_WAIT_MQUEUE_RECEIVE_CONTINUATION UINT32_C(0xc001445d)
+#define COMMCENTER_WAIT_DIRECT_OUTER_CONTINUATION UINT32_C(0xc0068710)
+#define COMMCENTER_WAIT_BSD_OUTER_CONTINUATION UINT32_C(0xc0127e69)
+#define COMMCENTER_WAIT_SEMAPHORE_EVENT UINT32_C(0xc023c21c)
+#define APPLEBASEBAND_VTABLE UINT32_C(0xc055b584)
+#define APPLEBASEBAND_VTABLE_MESSAGE_CLIENTS_OFFSET UINT32_C(0x238)
+#define APPLEBASEBAND_MESSAGE_CLIENTS_TARGET UINT32_C(0xc017a279)
+#define APPLEBASEBAND_VTABLE_REGISTER_INTEREST_OFFSET UINT32_C(0x23c)
+#define APPLEBASEBAND_REGISTER_INTEREST_TARGET UINT32_C(0xc017edf9)
+#define APPLEBASEBAND_VTABLE_RESET_READ_OFFSET UINT32_C(0x35c)
+#define APPLEBASEBAND_RESET_READ_TARGET UINT32_C(0xc05581bc)
+#define APPLEBASEBAND_EVENT_VTABLE UINT32_C(0xc01fafbc)
+#define APPLEBASEBAND_EVENT_VTABLE_ENABLE_OFFSET UINT32_C(0x68)
+#define APPLEBASEBAND_EVENT_ENABLE_TARGET UINT32_C(0xc0189d59)
+#define APPLEBASEBAND_EVENT_FACTORY_LITERAL UINT32_C(0xc0558d78)
+#define APPLEBASEBAND_EVENT_FACTORY_TARGET UINT32_C(0xc0189e95)
+#define APPLEBASEBAND_EVENT_ACTION_LITERAL UINT32_C(0xc0558d74)
+#define APPLEBASEBAND_RESET_ACTION_PAIR UINT32_C(0xc055b118)
+#define APPLEBASEBAND_RESET_CALLBACK_PC UINT32_C(0xc0558358)
+#define APPLEBASEBAND_RESET_READ_RETURN_PC UINT32_C(0xc0558378)
+#define APPLEBASEBAND_RESET_CHANGED_PC UINT32_C(0xc05583a0)
+#define APPLEBASEBAND_RESET_LOW_SUPPRESS_PC UINT32_C(0xc05583d0)
+#define APPLEBASEBAND_RESET_DISPATCH_PC UINT32_C(0xc05583e8)
+#define APPLEBASEBAND_RESET_RETURN_PC UINT32_C(0xc05583ec)
+#define APPLEBASEBAND_SETUP_RESET_COMMITTED_PC UINT32_C(0xc0558c5c)
+#define APPLEBASEBAND_SETUP_EVENT_RESULT_PC UINT32_C(0xc0558c9c)
+#define APPLEBASEBAND_SETUP_EVENT_COMMITTED_PC UINT32_C(0xc0558ca4)
+#define APPLEBASEBAND_SETUP_ENABLE_PC UINT32_C(0xc0558cd4)
+#define APPLEBASEBAND_INTEREST_WRAPPER_64_PC UINT32_C(0xc019ee50)
+#define APPLEBASEBAND_INTEREST_WRAPPER_32_PC UINT32_C(0xc019ee6a)
+#define APPLEBASEBAND_INTEREST_WRAPPER_64_RETURN_PC UINT32_C(0xc019ee68)
+#define APPLEBASEBAND_INTEREST_WRAPPER_32_RETURN_PC UINT32_C(0xc019ee82)
+#define APPLEBASEBAND_REGISTER_INTEREST_CALL_PC UINT32_C(0xc019edd4)
+#define APPLEBASEBAND_REGISTER_INTEREST_RESULT_PC UINT32_C(0xc019edd6)
+#define APPLEBASEBAND_MESSAGE_CLIENTS_PC UINT32_C(0xc017a278)
+#define APPLEBASEBAND_MESSAGE_CLIENTS_RETURN_PC UINT32_C(0xc017a2a0)
+#define APPLEBASEBAND_CLIENT_DELIVERY_PC UINT32_C(0xc017be5c)
+#define APPLEBASEBAND_NOTIFICATION_HANDLER_PC UINT32_C(0xc019f574)
+#define APPLEBASEBAND_NOTIFICATION_SEND_PC UINT32_C(0xc019f5d6)
+#define APPLEBASEBAND_NOTIFICATION_SEND_RESULT_PC UINT32_C(0xc019f5d8)
+#define APPLEBASEBAND_NOTIFICATION_RETURN_PC UINT32_C(0xc019f602)
+#define APPLEBASEBAND_NOTIFICATION_SPECIAL_RETURN_PC UINT32_C(0xc019f644)
+#define APPLEBASEBAND_INTEREST_HANDLER_LITERAL UINT32_C(0xc019ee40)
+#define APPLEBASEBAND_INTEREST_HANDLER_TARGET UINT32_C(0xc019b1ad)
+#define APPLEBASEBAND_NOTIFICATION_SEND_LITERAL UINT32_C(0xc019f64c)
+#define APPLEBASEBAND_NOTIFICATION_SEND_TARGET UINT32_C(0xc001e411)
+#define APPLEBASEBAND_NOTIFICATION_SET_PC UINT32_C(0xc019d7a0)
+#define APPLEBASEBAND_NOTIFICATION_FREE_PC UINT32_C(0xc019ebf8)
+#define APPLEBASEBAND_PORT_DESTROY_PC UINT32_C(0xc00159ce)
+#define APPLEBASEBAND_MQUEUE_RECEIVE_PC UINT32_C(0xc0014d34)
+#define APPLEBASEBAND_RESET_MESSAGE_HIGH UINT32_C(0xe3ff8000)
+#define APPLEBASEBAND_RESET_MESSAGE_LOW UINT32_C(0xe3ff8001)
+#define APPLEBASEBAND_INTEREST_CAP 8u
+#define APPLEBASEBAND_NOTIFIER_CAP 4u
+#define APPLEBASEBAND_PENDING_THREAD_CAP 8u
+#define APPLEBASEBAND_DISPATCH_CAP 16u
+#define APPLEBASEBAND_NOTIFICATION_CAP 16u
+#define APPLEBASEBAND_MESSAGE_FRAME_CAP 16u
+#define APPLEBASEBAND_HANDLER_FRAME_CAP 16u
 #define SPRINGBOARD_UI_STACK_CAP 32u
 #define SPRINGBOARD_TETHER_CALL_PC UINT32_C(0x0009679a)
 #define SPRINGBOARD_TETHER_CONTINUATION_PC UINT32_C(0x0009679e)
@@ -2767,22 +2866,22 @@ _Static_assert(
     "Mach path bits must fit in uint32_t");
 
 typedef enum {
-    SPRINGBOARD_COMMCENTER_ROUTE_POST_SELECTED_WAITER = 0,
-    SPRINGBOARD_COMMCENTER_ROUTE_POST_NO_WAITER,
-    SPRINGBOARD_COMMCENTER_ROUTE_FULL_WAIT,
-    SPRINGBOARD_COMMCENTER_ROUTE_FULLWAITERS_STORE,
-    SPRINGBOARD_COMMCENTER_ROUTE_ENQUEUE
+    SPRINGBOARD_COMMCENTER_ROUTE_POST_RECEIVER_WOKEN = 0,
+    SPRINGBOARD_COMMCENTER_ROUTE_POST_NO_ELIGIBLE_RECEIVER,
+    SPRINGBOARD_COMMCENTER_ROUTE_QUEUE_FULL_SLOW,
+    SPRINGBOARD_COMMCENTER_ROUTE_MARK_FULLWAITERS,
+    SPRINGBOARD_COMMCENTER_ROUTE_IMMEDIATE_SLOT_RESERVE
 } springboard_commcenter_route_t;
 _Static_assert(
-    SPRINGBOARD_COMMCENTER_ROUTE_ENQUEUE + 1 ==
+    SPRINGBOARD_COMMCENTER_ROUTE_IMMEDIATE_SLOT_RESERVE + 1 ==
         SPRINGBOARD_COMMCENTER_ROUTE_COUNT,
     "CommCenter queue route enum and storage count must agree");
 _Static_assert(
-    (SPRINGBOARD_COMMCENTER_POST_SELECTED_WAITER_PC & 1u) == 0u &&
-        (SPRINGBOARD_COMMCENTER_POST_NO_WAITER_PC & 1u) == 0u &&
-        (SPRINGBOARD_COMMCENTER_FULL_WAIT_PC & 1u) == 0u &&
-        (SPRINGBOARD_COMMCENTER_FULLWAITERS_STORE_PC & 1u) == 0u &&
-        (SPRINGBOARD_COMMCENTER_ACCEPTED_POST_PC & 1u) == 0u,
+    (SPRINGBOARD_COMMCENTER_POST_RECEIVER_WOKEN_PC & 1u) == 0u &&
+        (SPRINGBOARD_COMMCENTER_POST_NO_ELIGIBLE_RECEIVER_PC & 1u) == 0u &&
+        (SPRINGBOARD_COMMCENTER_QUEUE_FULL_SLOW_PC & 1u) == 0u &&
+        (SPRINGBOARD_COMMCENTER_MARK_FULLWAITERS_PC & 1u) == 0u &&
+        (SPRINGBOARD_COMMCENTER_IMMEDIATE_SLOT_RESERVE_PC & 1u) == 0u,
     "CommCenter queue route PCs must be normalized");
 
 typedef enum {
@@ -2792,10 +2891,17 @@ typedef enum {
     SPRINGBOARD_COMMCENTER_STAGE_PORT_POINTER,
     SPRINGBOARD_COMMCENTER_STAGE_PORT_IO_BITS,
     SPRINGBOARD_COMMCENTER_STAGE_PORT_ACTIVE,
+    SPRINGBOARD_COMMCENTER_STAGE_KMSG_POINTER,
+    SPRINGBOARD_COMMCENTER_STAGE_KMSG_HEADER,
+    SPRINGBOARD_COMMCENTER_STAGE_KMSG_HEADER_POINTER,
+    SPRINGBOARD_COMMCENTER_STAGE_KERNEL_DESTINATION_MATCH,
+    SPRINGBOARD_COMMCENTER_STAGE_KERNEL_ID_MATCH,
     SPRINGBOARD_COMMCENTER_STAGE_MSGCOUNT,
     SPRINGBOARD_COMMCENTER_STAGE_QLIMIT,
     SPRINGBOARD_COMMCENTER_STAGE_SEQNO,
     SPRINGBOARD_COMMCENTER_STAGE_FULLWAITERS,
+    SPRINGBOARD_COMMCENTER_STAGE_RECEIVER_NAME,
+    SPRINGBOARD_COMMCENTER_STAGE_RECEIVER_NAME_AUTHORITY,
     SPRINGBOARD_COMMCENTER_STAGE_RECEIVER_SPACE,
     SPRINGBOARD_COMMCENTER_STAGE_RECEIVER_SPACE_POINTER,
     SPRINGBOARD_COMMCENTER_STAGE_RECEIVER_SPACE_ACTIVE,
@@ -2845,37 +2951,84 @@ typedef enum {
     SPRINGBOARD_COMMCENTER_VALID_RECEIVER_TASK_SPACE =
         UINT32_C(1) << 16,
     SPRINGBOARD_COMMCENTER_VALID_RECEIVER_TASK_SPACE_MATCH =
-        UINT32_C(1) << 17
+        UINT32_C(1) << 17,
+    SPRINGBOARD_COMMCENTER_VALID_RECEIVER_NAME =
+        UINT32_C(1) << 18,
+    SPRINGBOARD_COMMCENTER_VALID_RECEIVER_NAME_AUTHORITY =
+        UINT32_C(1) << 19,
+    SPRINGBOARD_COMMCENTER_VALID_KMSG =
+        UINT32_C(1) << 20,
+    SPRINGBOARD_COMMCENTER_VALID_KMSG_HEADER =
+        UINT32_C(1) << 21,
+    SPRINGBOARD_COMMCENTER_VALID_KERNEL_DESTINATION_MATCH =
+        UINT32_C(1) << 22,
+    SPRINGBOARD_COMMCENTER_VALID_KERNEL_ID_MATCH =
+        UINT32_C(1) << 23
 } springboard_commcenter_valid_t;
+
+typedef struct {
+    uint32_t kmsg;
+    uint32_t next;
+    uint32_t prev;
+    uint32_t header;
+    uint32_t bits;
+    uint32_t size;
+    uint32_t destination;
+    uint32_t reply;
+    int32_t id;
+    uint32_t failure_va;
+    uint32_t failure_fsr;
+    bool complete;
+} springboard_commcenter_kmsg_t;
 
 typedef struct {
     uint64_t capture_at;
     uint64_t route_first_at[SPRINGBOARD_COMMCENTER_ROUTE_COUNT];
+    uint64_t route_candidate_hits[SPRINGBOARD_COMMCENTER_ROUTE_COUNT];
+    uint64_t route_mismatch_hits[SPRINGBOARD_COMMCENTER_ROUTE_COUNT];
+    uint64_t route_mismatch_first_at[SPRINGBOARD_COMMCENTER_ROUTE_COUNT];
     uint32_t capture_r[4];
     uint32_t capture_lr;
-    uint32_t route_first_r[SPRINGBOARD_COMMCENTER_ROUTE_COUNT][4];
-    uint32_t route_first_r4[SPRINGBOARD_COMMCENTER_ROUTE_COUNT];
+    uint32_t route_first_r[SPRINGBOARD_COMMCENTER_ROUTE_COUNT][9];
     uint32_t route_first_lr[SPRINGBOARD_COMMCENTER_ROUTE_COUNT];
+    uint32_t
+        route_mismatch_first_r[SPRINGBOARD_COMMCENTER_ROUTE_COUNT][9];
     uint32_t route_bits;
     uint32_t valid_bits;
     uint32_t mqueue;
     uint32_t port;
     uint32_t io_bits;
+    springboard_commcenter_kmsg_t incoming;
+    bool incoming_destination_matches;
+    bool incoming_id_matches;
     uint32_t msgcount;
     uint32_t qlimit;
     uint32_t seqno;
     uint32_t fullwaiters;
+    uint32_t receiver_name;
     uint32_t receiver_space;
     uint32_t receiver_space_active;
     uint32_t receiver_task;
     uint32_t receiver_task_space;
     uint32_t receiver_proc;
     uint32_t receiver_pid;
+    uint32_t queue_head;
+    uint32_t queue_linked_count;
+    uint32_t queue_failure_va;
+    uint32_t queue_failure_fsr;
+    springboard_commcenter_kmsg_t
+        queue_nodes[SPRINGBOARD_COMMCENTER_QUEUE_NODE_CAP];
     uint32_t failure_va;
     uint32_t failure_fsr;
     uint8_t stage;
     bool attempted;
     bool complete;
+    bool route_counter_overflow[SPRINGBOARD_COMMCENTER_ROUTE_COUNT];
+    bool queue_snapshot_attempted;
+    bool queue_head_readable;
+    bool queue_closed;
+    bool queue_consistent;
+    bool queue_truncated;
 } springboard_commcenter_probe_t;
 
 typedef enum {
@@ -3257,10 +3410,11 @@ typedef enum {
     COMMCENTER_WATCH_MQUEUE_RECEIVE_CONTINUE,
     COMMCENTER_WATCH_WAIT_QUEUE_ASSERT_WAIT,
     COMMCENTER_WATCH_THREAD_BLOCK_REASON,
-    COMMCENTER_WATCH_THREAD_CONTINUE
+    COMMCENTER_WATCH_THREAD_CONTINUE,
+    COMMCENTER_WATCH_SEMAPHORE_WAIT_CONTINUE
 } commcenter_watch_milestone_t;
 _Static_assert(
-    COMMCENTER_WATCH_THREAD_CONTINUE + 1 ==
+    COMMCENTER_WATCH_SEMAPHORE_WAIT_CONTINUE + 1 ==
         COMMCENTER_WATCH_MILESTONE_COUNT,
     "CommCenter milestone enum and storage count must agree");
 
@@ -3320,6 +3474,127 @@ typedef struct {
     char reason[192];
 } commcenter_layout_config_t;
 
+typedef struct {
+    bool enabled;
+    char reason[192];
+} commcenter_wait_config_t;
+
+enum {
+    COMMCENTER_WAIT_VALID_WAIT_QUEUE = UINT32_C(1) << 0,
+    COMMCENTER_WAIT_VALID_EVENT_LOW = UINT32_C(1) << 1,
+    COMMCENTER_WAIT_VALID_EVENT_HIGH = UINT32_C(1) << 2,
+    COMMCENTER_WAIT_VALID_STATE = UINT32_C(1) << 3,
+    COMMCENTER_WAIT_VALID_RESULT = UINT32_C(1) << 4,
+    COMMCENTER_WAIT_VALID_CONTINUATION = UINT32_C(1) << 5,
+    COMMCENTER_WAIT_VALID_PARAMETER = UINT32_C(1) << 6,
+    COMMCENTER_WAIT_VALID_TIMER_ACTIVE = UINT32_C(1) << 7,
+    COMMCENTER_WAIT_VALID_WAIT_SEMAPHORE = UINT32_C(1) << 8,
+    COMMCENTER_WAIT_VALID_SIGNAL_SEMAPHORE = UINT32_C(1) << 9,
+    COMMCENTER_WAIT_VALID_OUTER_CONTINUATION = UINT32_C(1) << 10,
+    COMMCENTER_WAIT_VALID_SEMAPHORE_COUNT = UINT32_C(1) << 11,
+    COMMCENTER_WAIT_VALID_SEMAPHORE_ACTIVE = UINT32_C(1) << 12
+};
+
+typedef struct {
+    uint32_t valid_bits;
+    uint32_t wait_queue;
+    uint32_t event_low;
+    uint32_t event_high;
+    uint32_t state;
+    uint32_t result;
+    uint32_t continuation;
+    uint32_t parameter;
+    uint32_t timer_active;
+    uint32_t wait_semaphore;
+    uint32_t signal_semaphore;
+    uint32_t outer_continuation;
+    uint32_t semaphore_count;
+    uint32_t semaphore_active;
+    uint32_t failure_va;
+    uint32_t failure_fsr;
+} commcenter_wait_snapshot_t;
+
+typedef struct {
+    bool occupied;
+    bool relevant_trap_open;
+    uint64_t first_seen_at;
+    uint64_t last_seen_at;
+    uint64_t switch_ins;
+    uint64_t switch_outs;
+    uint64_t relevant_traps;
+    uint64_t mach_traps;
+    uint64_t mach_id_1000_send_candidates;
+    uint64_t semaphore_traps;
+    uint64_t semaphore_core_hits;
+    uint64_t queue_assert_calls;
+    uint64_t block_entries;
+    uint64_t block_fields_committed;
+    uint64_t block_returns;
+    uint64_t semaphore_continuations;
+    uint64_t last_swi_at;
+    uint64_t last_trap_return_at;
+    uint64_t last_switch_in_at;
+    uint64_t last_switch_out_at;
+    uint64_t last_block_at;
+    uint64_t last_block_fields_at;
+    uint64_t last_block_return_at;
+    uint64_t last_semaphore_handler_at;
+    uint64_t last_semaphore_core_at;
+    uint64_t last_semaphore_fields_at;
+    uint64_t last_queue_assert_at;
+    uint64_t last_semaphore_continuation_at;
+    uint64_t trap_sequence;
+    uint64_t semaphore_sequence;
+    uint64_t block_sequence;
+    uint64_t block_trap_sequence;
+    uint64_t block_semaphore_sequence;
+    uint64_t snapshot_block_sequence;
+    uint64_t switch_out_block_sequence;
+    uint64_t switch_in_block_sequence;
+    uint64_t return_block_sequence;
+    uint64_t continuation_block_sequence;
+    uint64_t semaphore_handler_trap_sequence;
+    uint64_t semaphore_core_trap_sequence;
+    uint64_t semaphore_fields_trap_sequence;
+    uint64_t semaphore_core_sequence;
+    uint64_t semaphore_fields_sequence;
+    uint64_t queue_assert_sequence;
+    uint64_t raw_resume_proofs;
+    uint32_t thread;
+    int32_t last_trap;
+    int32_t last_returned_trap;
+    int32_t last_mach_id;
+    uint32_t last_user_pc;
+    uint32_t last_trap_args[4];
+    uint32_t last_trap_return_value;
+    bool last_mach_header_readable;
+    uint32_t last_switch_in_pc;
+    uint32_t last_switch_out_pc;
+    uint32_t last_block_continuation_arg;
+    uint32_t last_block_parameter_arg;
+    uint32_t last_block_reason_arg;
+    uint32_t last_core_wait_semaphore;
+    uint32_t last_core_signal_semaphore;
+    uint32_t last_semaphore;
+    uint32_t last_signal_semaphore;
+    uint32_t last_deadline_low;
+    uint32_t last_deadline_high;
+    uint32_t last_queue_assert_queue;
+    uint32_t last_queue_assert_event_low;
+    uint32_t last_queue_assert_event_high;
+    uint32_t last_queue_assert_type;
+    uint32_t last_block_result;
+    bool last_trap_return_value_valid;
+    /* Defensive poison. Live new-SWI handling resolves the prior episode
+     * before replacement, so current paths do not set this true. */
+    bool trap_identity_poisoned;
+    bool sequence_exhausted;
+    bool semaphore_attempt_open;
+    bool block_open;
+    bool block_schedule_uncertain;
+    commcenter_wait_snapshot_t last_wait;
+} commcenter_thread_wait_t;
+
 /*
  * Process-wide, diagnostic-only state for the exact CommCenter SETEXEC-attempt
  * identity. The tuple comes from its pathname-qualified lifecycle event, never
@@ -3355,6 +3630,10 @@ typedef struct {
     uint64_t mach_send[COMMCENTER_WATCH_PHASE_COUNT];
     uint64_t mach_receive[COMMCENTER_WATCH_PHASE_COUNT];
     uint64_t mach_send_header_readable[COMMCENTER_WATCH_PHASE_COUNT];
+    uint64_t wait_thread_overflow;
+    uint64_t wait_exact_hook_attribution_omissions;
+    uint64_t wait_exact_hook_first_omission_at;
+    uint64_t wait_exact_hook_last_omission_at;
     uint64_t signal_count;
     uint64_t exit_count;
     uint64_t first_signal_at;
@@ -3373,6 +3652,11 @@ typedef struct {
     uint32_t exit_status;
     uint32_t identity_failure_va;
     uint32_t identity_failure_fsr;
+    uint32_t wait_exact_hook_first_omission_pc;
+    uint32_t wait_exact_hook_first_omission_thread;
+    uint32_t wait_exact_hook_last_omission_pc;
+    uint32_t wait_exact_hook_last_omission_thread;
+    uint32_t receiver_name;
     uint32_t receiver_space;
     uint32_t receiver_task;
     uint32_t receiver_proc;
@@ -3388,7 +3672,331 @@ typedef struct {
         mach[COMMCENTER_WATCH_MACH_CAP];
     commcenter_watch_milestone_observation_t
         milestones[COMMCENTER_WATCH_MILESTONE_COUNT];
+    commcenter_thread_wait_t
+        wait_threads[COMMCENTER_WAIT_THREAD_CAP];
 } commcenter_watch_t;
+
+/*
+ * AppleBaseband reset-edge diagnostics are intentionally separate from the
+ * GPIO/SPI/baseband device model.  These records never synthesize an edge,
+ * alter a queue, or answer a modem request: they retain only exact-path
+ * instruction-entry observations from the stock 7E18 prelinked image.
+ */
+typedef struct {
+    bool enabled;
+    bool restored_baseline;
+    uint64_t trace_start_at;
+    char reason[192];
+} applebaseband_trace_config_t;
+
+typedef struct {
+    bool complete;
+    bool active;
+    bool receiver_name_authoritative;
+    bool receiver_space_active;
+    bool task_space_matches;
+    uint32_t io_bits;
+    uint32_t receiver_name;
+    uint32_t receiver_space;
+    uint32_t receiver_task;
+    uint32_t receiver_task_space;
+    uint32_t receiver_proc;
+    uint32_t receiver_pid;
+    uint32_t failure_va;
+    uint32_t failure_fsr;
+} applebaseband_port_identity_t;
+
+typedef struct {
+    bool occupied;
+    bool active;
+    bool retired;
+    uint32_t object;
+} applebaseband_notifier_t;
+
+typedef struct {
+    bool occupied;
+    bool stale;
+    bool live_uncertain;
+    bool baseline_receiver_is_commcenter;
+    bool baseline_receiver_identity_readable;
+    bool notifier_overflow;
+    bool last_register_call_seen;
+    bool last_register_call_service_matches;
+    bool last_register_result_seen;
+    bool last_register_result_nonzero;
+    uint64_t registrations;
+    uint64_t successful_registrations;
+    uint64_t first_at;
+    uint64_t last_at;
+    uint64_t first_success_at;
+    uint64_t last_success_at;
+    uint64_t receive_hits;
+    uint64_t receive_commcenter_matches;
+    uint64_t receive_identity_unreadable;
+    uint64_t first_receive_at;
+    uint64_t last_receive_at;
+    uint64_t receiver_woken_hits;
+    uint64_t receiver_woken_commcenter_matches;
+    uint64_t receiver_woken_identity_unreadable;
+    uint64_t no_eligible_receiver_hits;
+    uint64_t queue_full_hits;
+    uint64_t fullwaiters_store_hits;
+    uint64_t immediate_reserve_hits;
+    uint64_t first_route_at;
+    uint64_t last_route_at;
+    uint64_t live_checks;
+    uint64_t live_check_failures;
+    uint64_t live_identity_changes;
+    uint64_t teardown_hits;
+    uint64_t notifier_additions;
+    uint64_t notifier_removals;
+    uint32_t service;
+    uint32_t port;
+    uint32_t mqueue;
+    uint32_t wrapper_pc;
+    uint32_t last_thread;
+    uint32_t last_register_call_service;
+    uint32_t last_register_result;
+    uint32_t last_receive_thread;
+    uint32_t last_woken_thread;
+    applebaseband_port_identity_t baseline_identity;
+    applebaseband_port_identity_t last_identity;
+    applebaseband_notifier_t notifiers[APPLEBASEBAND_NOTIFIER_CAP];
+} applebaseband_interest_t;
+
+typedef struct {
+    bool occupied;
+    bool active;
+    bool call_seen;
+    bool call_service_matches;
+    uint64_t started_at;
+    uint32_t thread;
+    uint32_t wrapper_pc;
+    uint32_t wrapper_entry_sp;
+    uint32_t wrapper_return_sp;
+    uint32_t register_frame_sp;
+    uint32_t notification_object;
+    uint8_t interest_slot;
+} applebaseband_pending_interest_t;
+
+typedef struct {
+    bool valid;
+    bool open;
+    bool message_clients_seen;
+    bool message_clients_epilogue_reached;
+    bool callback_epilogue_reached;
+    bool subscription_state_known;
+    bool before_successful_subscription;
+    uint64_t sequence;
+    uint64_t at;
+    uint64_t message_clients_at;
+    uint64_t message_clients_epilogue_at;
+    uint64_t callback_epilogue_at;
+    uint64_t client_delivery_hits;
+    uint64_t notification_handler_hits;
+    uint32_t service;
+    uint32_t message;
+    uint32_t argument;
+    uint32_t thread;
+    uint32_t callback_sp;
+    uint32_t callback_lr;
+    uint32_t message_clients_entry_sp;
+    uint32_t message_clients_frame_sp;
+    uint32_t message_clients_lr;
+    uint32_t last_client;
+    uint32_t last_client_vtable;
+    bool last_client_vtable_readable;
+} applebaseband_dispatch_event_t;
+
+enum {
+    APPLEBASEBAND_ROUTE_RECEIVER_WOKEN =
+        UINT32_C(1) << 0,
+    APPLEBASEBAND_ROUTE_NO_ELIGIBLE_RECEIVER =
+        UINT32_C(1) << 1,
+    APPLEBASEBAND_ROUTE_QUEUE_FULL =
+        UINT32_C(1) << 2,
+    APPLEBASEBAND_ROUTE_MARK_FULLWAITERS =
+        UINT32_C(1) << 3,
+    APPLEBASEBAND_ROUTE_IMMEDIATE_RESERVE =
+        UINT32_C(1) << 4
+};
+
+typedef struct {
+    bool valid;
+    bool open;
+    bool linked_dispatch;
+    bool send_seen;
+    bool send_repeated;
+    bool send_header_readable;
+    bool destination_matches_interest;
+    bool destination_registration_succeeded;
+    bool send_result_seen;
+    bool epilogue_reached;
+    bool route_kmsg_bound;
+    bool route_binding_uncertain;
+    bool receiver_identity_readable;
+    bool receiver_is_commcenter;
+    uint64_t sequence;
+    uint64_t dispatch_sequence;
+    uint64_t handler_at;
+    uint64_t send_at;
+    uint64_t send_result_at;
+    uint64_t return_at;
+    uint64_t first_route_at;
+    uint64_t last_route_at;
+    uint64_t route_candidates;
+    uint64_t route_capture_failures;
+    uint64_t route_semantic_mismatches;
+    uint32_t notifier;
+    uint32_t service;
+    uint32_t message;
+    uint32_t thread;
+    uint32_t handler_entry_sp;
+    uint32_t handler_frame_sp;
+    uint32_t handler_lr;
+    uint32_t header;
+    uint32_t header_bits;
+    uint32_t header_size;
+    uint32_t send_size_argument;
+    uint32_t destination;
+    uint32_t reply;
+    int32_t header_id;
+    uint32_t header_failure_va;
+    uint32_t header_failure_fsr;
+    uint32_t send_result;
+    uint32_t route_bits;
+    uint32_t selected_thread;
+    uint8_t interest_slot;
+    bool send_size_matches_header;
+    springboard_commcenter_kmsg_t route_kmsg;
+} applebaseband_notification_event_t;
+
+typedef struct {
+    bool occupied;
+    bool active;
+    bool linked_event;
+    uint64_t order;
+    uint64_t event_sequence;
+    uint32_t thread;
+    uint32_t entry_sp;
+    uint32_t frame_sp;
+    uint32_t entry_lr;
+    uint32_t service;
+    uint32_t message;
+} applebaseband_message_frame_t;
+
+typedef struct {
+    bool occupied;
+    bool active;
+    bool linked_event;
+    uint64_t order;
+    uint64_t event_sequence;
+    uint32_t thread;
+    uint32_t entry_sp;
+    uint32_t frame_sp;
+    uint32_t entry_lr;
+    uint32_t service;
+    uint32_t message;
+} applebaseband_handler_frame_t;
+
+typedef struct {
+    bool baseline_complete;
+    bool lifecycle_uncertain;
+    bool frame_uncertain;
+    uint64_t setup_reset_hits;
+    uint64_t setup_reset_nonzero;
+    uint64_t setup_event_result_hits;
+    uint64_t setup_event_nonzero;
+    uint64_t setup_event_committed_hits;
+    uint64_t setup_enable_hits;
+    uint64_t setup_owner_rejects;
+    uint64_t setup_event_source_rejects;
+    uint64_t callback_hits;
+    uint64_t callback_owner_rejects;
+    uint64_t read_return_hits;
+    uint64_t read_successes;
+    uint64_t read_failures;
+    uint64_t read_raw_unreadable;
+    uint64_t changed_hits;
+    uint64_t low_path_checks;
+    uint64_t low_suppressed;
+    uint64_t dispatch_total;
+    uint64_t dispatch_high;
+    uint64_t dispatch_low;
+    uint64_t dispatch_before_subscription;
+    uint64_t dispatch_subscription_unknown;
+    uint64_t dispatch_dropped;
+    uint64_t interest_wrapper_hits;
+    uint64_t interest_service_rejects;
+    uint64_t interest_pointer_rejects;
+    uint64_t interest_overflow;
+    uint64_t pending_interest_overflow;
+    uint64_t pending_interest_overwrites;
+    uint64_t pending_interest_frame_mismatches;
+    uint64_t wrapper_return_mismatches;
+    uint64_t notifier_overflow;
+    uint64_t notifier_teardowns;
+    uint64_t port_teardowns;
+    uint64_t live_validation_failures;
+    uint64_t live_identity_changes;
+    uint64_t message_frame_total;
+    uint64_t message_frame_overflow;
+    uint64_t message_frame_mismatches;
+    uint64_t handler_frame_total;
+    uint64_t handler_frame_overflow;
+    uint64_t handler_frame_mismatches;
+    uint64_t notification_total;
+    uint64_t notification_dropped;
+    uint64_t notification_send_headers;
+    uint64_t notification_send_header_failures;
+    uint64_t notification_send_repeats;
+    uint64_t notification_destination_matches;
+    uint64_t notification_successful_destination_matches;
+    uint64_t notification_receiver_woken;
+    uint64_t notification_no_eligible_receiver;
+    uint64_t notification_queue_full;
+    uint64_t notification_commcenter_receiver_woken;
+    uint64_t notification_receiver_identity_unreadable;
+    uint64_t notification_route_capture_failures;
+    uint64_t notification_route_semantic_mismatches;
+    uint64_t notification_route_bound;
+    uint64_t notification_route_binding_uncertain;
+    uint64_t notification_dispatch_rejects;
+    uint64_t receive_on_registered_port;
+    uint64_t receive_on_registered_port_commcenter;
+    uint64_t receive_identity_unreadable;
+    uint64_t first_callback_at;
+    uint64_t last_callback_at;
+    uint64_t first_dispatch_at;
+    uint64_t last_dispatch_at;
+    uint32_t owner;
+    uint32_t reset_function;
+    uint32_t event_source;
+    uint32_t last_read_status;
+    bool last_raw_valid;
+    uint32_t last_raw_low;
+    uint32_t last_raw_high;
+    uint32_t last_new_low;
+    uint32_t last_new_high;
+    uint32_t last_old_low;
+    uint32_t last_old_high;
+    uint32_t last_low_suppress_flag;
+    uint32_t owner_failure_va;
+    uint32_t owner_failure_fsr;
+    uint32_t retained_interest_count;
+    applebaseband_interest_t
+        interests[APPLEBASEBAND_INTEREST_CAP];
+    applebaseband_pending_interest_t
+        pending_interests[APPLEBASEBAND_PENDING_THREAD_CAP];
+    applebaseband_dispatch_event_t
+        dispatches[APPLEBASEBAND_DISPATCH_CAP];
+    applebaseband_notification_event_t
+        notifications[APPLEBASEBAND_NOTIFICATION_CAP];
+    applebaseband_message_frame_t
+        message_frames[APPLEBASEBAND_MESSAGE_FRAME_CAP];
+    applebaseband_handler_frame_t
+        handler_frames[APPLEBASEBAND_HANDLER_FRAME_CAP];
+} applebaseband_trace_t;
 
 typedef struct {
     uint32_t vm_pc;
@@ -3766,7 +4374,10 @@ static struct {
                 springboard_child[SPRINGBOARD_RETURN_CAP];
     springboard_exec_trace_t springboard_exec_trace;
     commcenter_layout_config_t commcenter_layout;
+    commcenter_wait_config_t commcenter_wait_config;
     commcenter_watch_t commcenter_watch;
+    applebaseband_trace_config_t applebaseband_trace_config;
+    applebaseband_trace_t applebaseband_trace;
 
     /* Guest writes to the CLCD's current live scanout surface after the exact
      * SpringBoard SETEXEC handoff. The descriptor is cached and invalidated by
@@ -4294,11 +4905,26 @@ static void discover_commcenter_layout(void) {
         0x03, 0x65, 0x43, 0x65, 0x83, 0x65, 0xc3, 0x65,
         0x03, 0x66, 0x43, 0x66, 0x00, 0x21, 0x18, 0x30
     };
+    static const uint8_t ipc_port_circularity_union_shape[] = {
+        0x63, 0x68, 0x00, 0x2b, 0x02, 0xda, 0xa3, 0x68,
+        0x00, 0x2b, 0x04, 0xd0, 0x0c, 0x23, 0x1b, 0x19,
+        0x25, 0x1c, 0x9a, 0x46, 0x27, 0xe0, 0xe3, 0x6b,
+        0x00, 0x2b, 0xf7, 0xd0, 0x58, 0x46
+    };
     static const uint8_t ipc_mqueue_send_shape[] = {
         0xf0, 0xb5, 0x5e, 0x46, 0x55, 0x46, 0x44, 0x46,
         0x70, 0xb4, 0x06, 0xaf, 0x85, 0xb0, 0x15, 0x1c,
         0x1e, 0x1c, 0x42, 0x69, 0x83, 0x69, 0x04, 0x1c,
         0x88, 0x46, 0x9a, 0x42, 0x43, 0xd3
+    };
+    static const uint8_t ipc_kmsg_send_header_shape[] = {
+        0x06, 0x1c, 0x40, 0x69, 0x49, 0x4b, 0x88, 0x46,
+        0x93, 0x46, 0x84, 0x68, 0x19, 0x42, 0x4f, 0xd1
+    };
+    static const uint8_t ipc_mqueue_init_shape[] = {
+        0x00, 0x21, 0x17, 0xf0, 0x90, 0xfd, 0x05, 0x23,
+        0x25, 0x61, 0xe5, 0x61, 0x65, 0x61, 0xa3, 0x61,
+        0x25, 0x62, 0xb0, 0xbd
     };
     static const uint8_t ipc_space_active_shape[] = {
         0x02, 0x23, 0x20, 0x1c, 0xe3, 0x60, 0x51, 0x46,
@@ -4347,44 +4973,57 @@ static void discover_commcenter_layout(void) {
             "_ipc_port_init", UINT32_C(0xc0015a9a), 0,
             ipc_port_init_shape, sizeof ipc_port_init_shape) ||
         !diagnostic_kernel_symbol_window_matches(
+            "_ipc_port_check_circularity", UINT32_C(0xc0015886),
+            UINT32_C(0x32), ipc_port_circularity_union_shape,
+            sizeof ipc_port_circularity_union_shape) ||
+        !diagnostic_kernel_symbol_window_matches(
             "_ipc_mqueue_send", UINT32_C(0xc0014788), 0,
             ipc_mqueue_send_shape, sizeof ipc_mqueue_send_shape) ||
+        !diagnostic_kernel_symbol_window_matches(
+            "_ipc_kmsg_send", UINT32_C(0xc0013e46),
+            UINT32_C(0x0e),
+            ipc_kmsg_send_header_shape,
+            sizeof ipc_kmsg_send_header_shape) ||
+        !diagnostic_kernel_symbol_window_matches(
+            "_ipc_mqueue_init", UINT32_C(0xc0014494),
+            UINT32_C(0x12), ipc_mqueue_init_shape,
+            sizeof ipc_mqueue_init_shape) ||
         !diagnostic_kernel_symbol_window_matches(
             "_ipc_space_create", UINT32_C(0xc001756c),
             UINT32_C(0x9e), ipc_space_active_shape,
             sizeof ipc_space_active_shape) ||
         !diagnostic_kernel_symbol_window_matches(
             "_ipc_mqueue_post", UINT32_C(0xc0014630),
-            SPRINGBOARD_COMMCENTER_POST_SELECTED_WAITER_PC -
+            SPRINGBOARD_COMMCENTER_POST_RECEIVER_WOKEN_PC -
                 UINT32_C(0xc0014630),
             post_selected_waiter_shape,
             sizeof post_selected_waiter_shape) ||
         !diagnostic_kernel_symbol_window_matches(
             "_ipc_mqueue_post", UINT32_C(0xc0014630),
-            SPRINGBOARD_COMMCENTER_POST_NO_WAITER_PC -
+            SPRINGBOARD_COMMCENTER_POST_NO_ELIGIBLE_RECEIVER_PC -
                 UINT32_C(0xc0014630),
             post_no_waiter_shape,
             sizeof post_no_waiter_shape) ||
         !diagnostic_kernel_symbol_window_matches(
             "_ipc_mqueue_send", UINT32_C(0xc0014788),
-            SPRINGBOARD_COMMCENTER_FULL_WAIT_PC -
+            SPRINGBOARD_COMMCENTER_QUEUE_FULL_SLOW_PC -
                 UINT32_C(0xc0014788),
             send_full_wait_shape,
             sizeof send_full_wait_shape) ||
         !diagnostic_kernel_symbol_window_matches(
             "_ipc_mqueue_send", UINT32_C(0xc0014788),
-            SPRINGBOARD_COMMCENTER_FULLWAITERS_STORE_PC -
+            SPRINGBOARD_COMMCENTER_MARK_FULLWAITERS_PC -
                 UINT32_C(0xc0014788),
             send_fullwaiters_store_shape,
             sizeof send_fullwaiters_store_shape) ||
         !diagnostic_kernel_symbol_window_matches(
             "_ipc_mqueue_send", UINT32_C(0xc0014788),
-            SPRINGBOARD_COMMCENTER_ACCEPTED_POST_PC -
+            SPRINGBOARD_COMMCENTER_IMMEDIATE_SLOT_RESERVE_PC -
                 UINT32_C(0xc0014788),
             send_accepted_post_shape,
             sizeof send_accepted_post_shape)) {
         snprintf(layout->reason, sizeof layout->reason,
-                 "exact 7E18 port/space instruction shape mismatch");
+                 "exact 7E18 port/space/union instruction shape mismatch");
         printf("CommCenter ownership probe: DISABLED (%s)\n",
                layout->reason);
         return;
@@ -4392,17 +5031,502 @@ static void discover_commcenter_layout(void) {
 
     layout->enabled = true;
     snprintf(layout->reason, sizeof layout->reason,
-             "exact 7E18 port/space/queue-route shapes validated");
+             "exact 7E18 port/space/union/queue-route shapes validated");
     printf("CommCenter ownership probe: VALIDATED; mqueue/port +%x,"
-           " receiver +%x, space active/task +%x/+%x,"
+           " receiver-name/union +%x/+%x, space active/task +%x/+%x,"
            " task ipcspace/proc +%x/+%x, proc pid +%x\n",
            SPRINGBOARD_COMMCENTER_MQUEUE_PORT_DELTA,
-           SPRINGBOARD_COMMCENTER_PORT_RECEIVER_SPACE_OFFSET,
+           SPRINGBOARD_COMMCENTER_PORT_RECEIVER_NAME_OFFSET,
+           SPRINGBOARD_COMMCENTER_PORT_RECEIVER_OR_DESTINATION_OFFSET,
            SPRINGBOARD_COMMCENTER_SPACE_ACTIVE_OFFSET,
            SPRINGBOARD_COMMCENTER_SPACE_TASK_OFFSET,
            SPRINGBOARD_COMMCENTER_TASK_IPCSPACE_OFFSET,
            SPRINGBOARD_COMMCENTER_TASK_PROC_OFFSET,
            SPRINGBOARD_COMMCENTER_PROC_PID_OFFSET);
+}
+
+static void discover_commcenter_wait_layout(void) {
+    commcenter_wait_config_t *config = &G.commcenter_wait_config;
+    memset(config, 0, sizeof *config);
+
+    static const uint8_t block_field_store_shape[] = {
+        0x22, 0x4b, 0x74, 0x64, 0xb5, 0x64, 0x1b, 0x68
+    };
+    static const uint8_t block_result_load_shape[] = {
+        0x08, 0xb0, 0x30, 0x6c, 0x1c, 0xbc
+    };
+    static const uint8_t semaphore_continue_shape[] = {
+        0xf0, 0xb5, 0x03, 0xaf, 0x42, 0xf0, 0x8a, 0xec,
+        0xcc, 0x23, 0x5b, 0x00, 0xc6, 0x58, 0xc4, 0x23,
+        0x5b, 0x00, 0x04, 0x1c, 0x05, 0x6c, 0xc0, 0x58,
+        0xff, 0xf7, 0xb8, 0xff, 0xc6, 0x20, 0x40, 0x00,
+        0x20, 0x58, 0x00, 0x28, 0x01, 0xd0, 0xff, 0xf7,
+        0xb1, 0xff, 0x28, 0x1c, 0xff, 0xf7, 0xd4, 0xfe,
+        0xb0, 0x47, 0xf0, 0xbd
+    };
+    static const uint8_t semaphore_field_store_shape[] = {
+        0x42, 0xf0, 0xc8, 0xea, 0xcc, 0x23, 0x11, 0x9a,
+        0x5b, 0x00, 0xc2, 0x50, 0xc4, 0x23, 0x5b, 0x00,
+        0xc5, 0x50, 0xc6, 0x23, 0x5b, 0x00, 0xc6, 0x50,
+        0x24, 0x48, 0xfd, 0xf7, 0xa1, 0xfd
+    };
+    static const uint8_t semaphore_queue_assert_shape[] = {
+        0x0d, 0x4b, 0x20, 0x1c, 0x03, 0x93, 0x00, 0x23,
+        0x04, 0x93, 0x05, 0x9a, 0x06, 0x9b, 0x1e, 0x24,
+        0x00, 0x92, 0x01, 0x93, 0x5b, 0x46, 0x02, 0x93,
+        0x03, 0x99, 0x04, 0x9a, 0x02, 0x23, 0x04, 0xf0,
+        0x63, 0xfd
+    };
+    static const uint8_t semaphore_active_field_shape[] = {
+        0xab, 0x6a, 0x00, 0x2b, 0x1a, 0xd1, 0x25, 0x24
+    };
+    static const uint8_t semaphore_count_field_shape[] = {
+        0x6b, 0x6a, 0x00, 0x2b, 0x27, 0xdd, 0x01, 0x3b,
+        0x00, 0x24, 0x6b, 0x62
+    };
+    static const uint8_t thread_timer_active_field_shape[] = {
+        0x04, 0xd1, 0xa8, 0x22, 0x52, 0x00, 0xa3, 0x58,
+        0x01, 0x33, 0xa3, 0x50, 0xaa, 0x23, 0x5b, 0x00,
+        0x5a, 0x46, 0xe2, 0x50
+    };
+    static const uint8_t wait_queue_field_store_shape[] = {
+        0xa2, 0x68, 0x23, 0x1c, 0x08, 0x33, 0x2a, 0x60,
+        0x6b, 0x60, 0xa5, 0x60, 0x55, 0x60, 0x00, 0x9a,
+        0x01, 0x9b, 0xec, 0x60, 0x2a, 0x61, 0x6b, 0x61,
+        0x07, 0x9b
+    };
+    static const uint8_t semaphore_wait_trap_shape[] = {
+        0x80, 0xb5, 0x00, 0xaf, 0x02, 0x49, 0x00, 0x68,
+        0xff, 0xf7, 0xe2, 0xff, 0x80, 0xbd
+    };
+    static const uint8_t semaphore_wait_signal_trap_shape[] = {
+        0x80, 0xb5, 0x00, 0xaf, 0x03, 0x68, 0x41, 0x68,
+        0x02, 0x4a, 0x18, 0x1c, 0xff, 0xf7, 0xd1, 0xff,
+        0x80, 0xbd
+    };
+    static const uint8_t semaphore_timedwait_trap_shape[] = {
+        0x90, 0xb5, 0x01, 0xaf, 0x04, 0x68, 0x41, 0x68,
+        0x82, 0x68, 0x02, 0x4b, 0x20, 0x1c, 0xff, 0xf7,
+        0xaa, 0xff, 0x90, 0xbd
+    };
+    static const uint8_t semaphore_timedwait_signal_trap_shape[] = {
+        0x90, 0xb5, 0x01, 0xaf, 0x81, 0xb0, 0x04, 0x68,
+        0x41, 0x68, 0x82, 0x68, 0xc3, 0x68, 0x03, 0x48,
+        0x00, 0x90, 0x20, 0x1c, 0xff, 0xf7, 0xa0, 0xff,
+        0x01, 0xb0, 0x90, 0xbd
+    };
+    static const uint8_t semaphore_continuation_literal[] = {
+        0xc5, 0x6f, 0x02, 0xc0
+    };
+    static const uint8_t semaphore_event_literal[] = {
+        0x1c, 0xc2, 0x23, 0xc0
+    };
+    static const uint8_t direct_outer_literal[] = {
+        0x10, 0x87, 0x06, 0xc0
+    };
+    static const uint8_t mach_trap_31_entry[] = {
+        0x07, 0x00, 0x00, 0x00, 0x65, 0x96, 0x01, 0xc0
+    };
+    static const uint8_t mach_trap_36_entry[] = {
+        0x01, 0x00, 0x00, 0x00, 0x29, 0x77, 0x02, 0xc0
+    };
+    static const uint8_t mach_trap_37_entry[] = {
+        0x02, 0x00, 0x00, 0x00, 0x9b, 0x75, 0x02, 0xc0
+    };
+    static const uint8_t mach_trap_38_entry[] = {
+        0x03, 0x00, 0x00, 0x00, 0x6d, 0x76, 0x02, 0xc0
+    };
+    static const uint8_t mach_trap_39_entry[] = {
+        0x04, 0x00, 0x00, 0x00, 0xa9, 0x74, 0x02, 0xc0
+    };
+
+    if (!diagnostic_kernel_symbol_window_matches(
+            "_thread_block_reason", UINT32_C(0xc0024dc2),
+            UINT32_C(0x4c), block_field_store_shape,
+            sizeof block_field_store_shape) ||
+        !diagnostic_kernel_symbol_window_matches(
+            "_thread_block_reason", UINT32_C(0xc0024dc2),
+            UINT32_C(0xa6), block_result_load_shape,
+            sizeof block_result_load_shape) ||
+        !diagnostic_kernel_symbol_window_matches(
+            "_semaphore_wait_continue", UINT32_C(0xc0026fc4), 0,
+            semaphore_continue_shape,
+            sizeof semaphore_continue_shape) ||
+        !diagnostic_kernel_symbol_window_matches(
+            "_semaphore_reference", UINT32_C(0xc0027264),
+            UINT32_C(0xe8), semaphore_field_store_shape,
+            sizeof semaphore_field_store_shape) ||
+        !diagnostic_kernel_symbol_window_matches(
+            "_semaphore_reference", UINT32_C(0xc0027264),
+            UINT32_C(0x160), semaphore_queue_assert_shape,
+            sizeof semaphore_queue_assert_shape) ||
+        !diagnostic_kernel_symbol_window_matches(
+            "_semaphore_reference", UINT32_C(0xc0027264),
+            UINT32_C(0x88), semaphore_active_field_shape,
+            sizeof semaphore_active_field_shape) ||
+        !diagnostic_kernel_symbol_window_matches(
+            "_semaphore_reference", UINT32_C(0xc0027264),
+            UINT32_C(0xc4), semaphore_count_field_shape,
+            sizeof semaphore_count_field_shape) ||
+        !diagnostic_kernel_symbol_window_matches(
+            "_semaphore_reference", UINT32_C(0xc0027264),
+            UINT32_C(0x194), semaphore_continuation_literal,
+            sizeof semaphore_continuation_literal) ||
+        !diagnostic_kernel_symbol_window_matches(
+            "_semaphore_reference", UINT32_C(0xc0027264),
+            UINT32_C(0x198), semaphore_event_literal,
+            sizeof semaphore_event_literal) ||
+        !diagnostic_kernel_symbol_window_matches(
+            "_wait_queue_link_size", UINT32_C(0xc002be40),
+            UINT32_C(0xc2), wait_queue_field_store_shape,
+            sizeof wait_queue_field_store_shape) ||
+        !diagnostic_kernel_symbol_window_matches(
+            "_thread_set_timer", UINT32_C(0xc00254d2),
+            UINT32_C(0x66), thread_timer_active_field_shape,
+            sizeof thread_timer_active_field_shape) ||
+        !diagnostic_kernel_symbol_window_matches(
+            "_semaphore_wait_trap", UINT32_C(0xc0027728), 0,
+            semaphore_wait_trap_shape,
+            sizeof semaphore_wait_trap_shape) ||
+        !diagnostic_kernel_symbol_window_matches(
+            "_semaphore_wait_signal_trap", UINT32_C(0xc002759a), 0,
+            semaphore_wait_signal_trap_shape,
+            sizeof semaphore_wait_signal_trap_shape) ||
+        !diagnostic_kernel_symbol_window_matches(
+            "_semaphore_timedwait_trap", UINT32_C(0xc002766c), 0,
+            semaphore_timedwait_trap_shape,
+            sizeof semaphore_timedwait_trap_shape) ||
+        !diagnostic_kernel_symbol_window_matches(
+            "_semaphore_timedwait_signal_trap",
+            UINT32_C(0xc00274a8), 0,
+            semaphore_timedwait_signal_trap_shape,
+            sizeof semaphore_timedwait_signal_trap_shape) ||
+        !diagnostic_kernel_symbol_window_matches(
+            "_semaphore_wait_trap", UINT32_C(0xc0027728),
+            UINT32_C(0x10), direct_outer_literal,
+            sizeof direct_outer_literal) ||
+        !diagnostic_kernel_symbol_window_matches(
+            "_mach_trap_table", UINT32_C(0xc020d424),
+            UINT32_C(0x0f8), mach_trap_31_entry,
+            sizeof mach_trap_31_entry) ||
+        !diagnostic_kernel_symbol_window_matches(
+            "_mach_trap_table", UINT32_C(0xc020d424),
+            UINT32_C(0x120), mach_trap_36_entry,
+            sizeof mach_trap_36_entry) ||
+        !diagnostic_kernel_symbol_window_matches(
+            "_mach_trap_table", UINT32_C(0xc020d424),
+            UINT32_C(0x128), mach_trap_37_entry,
+            sizeof mach_trap_37_entry) ||
+        !diagnostic_kernel_symbol_window_matches(
+            "_mach_trap_table", UINT32_C(0xc020d424),
+            UINT32_C(0x130), mach_trap_38_entry,
+            sizeof mach_trap_38_entry) ||
+        !diagnostic_kernel_symbol_window_matches(
+            "_mach_trap_table", UINT32_C(0xc020d424),
+            UINT32_C(0x138), mach_trap_39_entry,
+            sizeof mach_trap_39_entry) ||
+        (ksym_value("_mach_msg_receive_continue") & ~1u) !=
+            (COMMCENTER_WAIT_MACH_RECEIVE_CONTINUATION & ~1u) ||
+        (ksym_value("_ipc_mqueue_receive_continue") & ~1u) !=
+            (COMMCENTER_WAIT_MQUEUE_RECEIVE_CONTINUATION & ~1u) ||
+        (ksym_value("_thread_syscall_return") & ~1u) !=
+            COMMCENTER_WAIT_DIRECT_OUTER_CONTINUATION ||
+        (ksym_value("___posix_sem_syscall_return") & ~1u) !=
+            (COMMCENTER_WAIT_BSD_OUTER_CONTINUATION & ~1u)) {
+        snprintf(config->reason, sizeof config->reason,
+                 "exact 7E18 semaphore/thread/trap shape mismatch");
+        printf("CommCenter wait probe: DISABLED (%s)\n",
+               config->reason);
+        return;
+    }
+
+    config->enabled = true;
+    snprintf(config->reason, sizeof config->reason,
+             "exact 7E18 semaphore/thread/trap shapes validated");
+    printf("CommCenter wait probe: VALIDATED; per-thread wait fields,"
+           " timer-active +0x154, semaphore count/active +0x24/+0x28,"
+           " semaphore event, and Mach traps 31/36-39 exact-gated\n");
+}
+
+static bool diagnostic_kernel_va_window_matches(
+        uint32_t va, const uint8_t *expected, size_t length) {
+    if (!expected || !length || length > UINT32_MAX ||
+        va < g_virt_base)
+        return false;
+    uint64_t end64 = (uint64_t)va + length;
+    if (end64 <= va || end64 > (uint64_t)UINT32_MAX + 1u)
+        return false;
+    const uint8_t *actual = guest_ptr(va, (uint32_t)length);
+    return actual && memcmp(actual, expected, length) == 0;
+}
+
+static bool diagnostic_kernel_va_u32_matches(
+        uint32_t va, uint32_t expected) {
+    const uint8_t *actual = guest_ptr(va, 4u);
+    return actual && ld32(actual) == expected;
+}
+
+/*
+ * Gate every AppleBaseband/IOKit instruction whose live registers this probe
+ * interprets.  The prelinked kext has no useful public symbols for these
+ * routines, so its immutable VM addresses plus byte-for-byte code and vtable
+ * data are the fail-closed discriminator.  A restore is checked after guest
+ * RAM replacement, exactly like the symbol-backed CommCenter gates above.
+ */
+static void discover_applebaseband_trace_layout(bool restored_baseline) {
+    applebaseband_trace_config_t *config =
+        &G.applebaseband_trace_config;
+    memset(config, 0, sizeof *config);
+    memset(&G.applebaseband_trace, 0,
+           sizeof G.applebaseband_trace);
+    config->restored_baseline = restored_baseline;
+    config->trace_start_at =
+        g_mach ? g_mach->cpu.cycles : 0u;
+    G.applebaseband_trace.baseline_complete =
+        !restored_baseline;
+
+    static const uint8_t reset_callback_shape[] = {
+        0x90, 0x40, 0x2d, 0xe9, 0x04, 0x70, 0x8d, 0xe2,
+        0x08, 0xd0, 0x4d, 0xe2, 0x00, 0x30, 0x90, 0xe5,
+        0x0d, 0x10, 0xa0, 0xe1, 0x00, 0x40, 0xa0, 0xe1,
+        0x0f, 0xe0, 0xa0, 0xe1, 0x5c, 0xf3, 0x93, 0xe5,
+        0x00, 0xe0, 0x50, 0xe2, 0x1a, 0x00, 0x00, 0x1a,
+        0x03, 0x00, 0x9d, 0xe8, 0x70, 0xc0, 0x94, 0xe5,
+        0x00, 0x00, 0x5c, 0xe1, 0x0c, 0x20, 0xa0, 0xe1,
+        0xc2, 0x3f, 0xa0, 0xe1, 0x01, 0x00, 0x00, 0x1a,
+        0x01, 0x00, 0x53, 0xe1, 0x12, 0x00, 0x00, 0x0a,
+        0x01, 0x30, 0x90, 0xe1, 0x06, 0x00, 0x00, 0x0a,
+        0x00, 0xc0, 0x94, 0xe5, 0x44, 0x10, 0x9f, 0xe5,
+        0x01, 0x30, 0xa0, 0xe3, 0x04, 0x00, 0xa0, 0xe1,
+        0x0e, 0x20, 0xa0, 0xe1, 0x70, 0x30, 0x84, 0xe5,
+        0x06, 0x00, 0x00, 0xea, 0x69, 0x20, 0xd4, 0xe5,
+        0x70, 0x30, 0x84, 0xe5, 0x00, 0x00, 0x52, 0xe3,
+        0x05, 0x00, 0x00, 0x1a, 0x00, 0xc0, 0x94, 0xe5,
+        0x1c, 0x10, 0x9f, 0xe5, 0x04, 0x00, 0xa0, 0xe1,
+        0x02, 0x30, 0xa0, 0xe1, 0x0f, 0xe0, 0xa0, 0xe1,
+        0x38, 0xf2, 0x9c, 0xe5, 0x00, 0x00, 0xa0, 0xe3,
+        0x04, 0xd0, 0x47, 0xe2, 0x90, 0x80, 0xbd, 0xe8,
+        0x00, 0x80, 0xff, 0xe3, 0x01, 0x80, 0xff, 0xe3
+    };
+    static const uint8_t reset_read_shape[] = {
+        0x90, 0x40, 0x2d, 0xe9, 0x04, 0x70, 0x8d, 0xe2,
+        0x04, 0xd0, 0x4d, 0xe2, 0x6c, 0x00, 0x90, 0xe5,
+        0x01, 0x40, 0xa0, 0xe1, 0x00, 0x00, 0x50, 0xe3,
+        0x3c, 0x00, 0x9f, 0x05, 0x0c, 0x00, 0x00, 0x0a,
+        0x04, 0x20, 0x8d, 0xe2, 0x00, 0x10, 0xa0, 0xe3,
+        0x04, 0x10, 0x22, 0xe5, 0x01, 0x30, 0xa0, 0xe1,
+        0x00, 0xc0, 0x90, 0xe5, 0x0f, 0xe0, 0xa0, 0xe1,
+        0x50, 0xf0, 0x9c, 0xe5, 0x00, 0x00, 0x50, 0xe3,
+        0x03, 0x00, 0x00, 0x1a, 0x00, 0x30, 0x9d, 0xe5,
+        0x03, 0x20, 0xa0, 0xe1, 0x00, 0x30, 0xa0, 0xe3,
+        0x0c, 0x00, 0x84, 0xe8, 0x04, 0xd0, 0x47, 0xe2,
+        0x90, 0x80, 0xbd, 0xe8
+    };
+    static const uint8_t setup_reset_shape[] = {
+        0x18, 0x11, 0x9f, 0xe5, 0x05, 0x00, 0xa0, 0xe1,
+        0x36, 0xff, 0x2f, 0xe1, 0x00, 0x00, 0x50, 0xe3,
+        0x6c, 0x00, 0x84, 0xe5
+    };
+    static const uint8_t setup_event_shape[] = {
+        0xe4, 0xc0, 0x9f, 0xe5, 0x00, 0x10, 0xa0, 0xe1,
+        0x04, 0x00, 0xa0, 0xe1, 0x3c, 0xff, 0x2f, 0xe1,
+        0x00, 0x00, 0x50, 0xe3, 0x78, 0x00, 0x84, 0xe5,
+        0x0c, 0x00, 0x00, 0x0a
+    };
+    static const uint8_t setup_enable_shape[] = {
+        0x78, 0x00, 0x94, 0xe5, 0x00, 0x30, 0x90, 0xe5,
+        0x0f, 0xe0, 0xa0, 0xe1, 0x68, 0xf0, 0x93, 0xe5
+    };
+    static const uint8_t interest_wrapper_64_shape[] = {
+        0x90, 0xb5, 0x01, 0xaf, 0x83, 0xb0, 0x40, 0x24,
+        0x00, 0x94, 0x01, 0x24, 0x01, 0x94, 0x07, 0x9c,
+        0x02, 0x94, 0xff, 0xf7, 0x7f, 0xff, 0x03, 0xb0,
+        0x90, 0xbd
+    };
+    static const uint8_t interest_wrapper_32_shape[] = {
+        0x90, 0xb5, 0x01, 0xaf, 0x83, 0xb0, 0x20, 0x24,
+        0x00, 0x94, 0x00, 0x24, 0x01, 0x94, 0x07, 0x9c,
+        0x02, 0x94, 0xff, 0xf7, 0x72, 0xff, 0x03, 0xb0,
+        0x90, 0xbd
+    };
+    static const uint8_t register_interest_shape[] = {
+        0x28, 0x68, 0x8f, 0x23, 0x9b, 0x00, 0x00, 0x21,
+        0x00, 0x91, 0x1d, 0x4a, 0xc6, 0x58, 0x41, 0x46,
+        0x28, 0x1c, 0x23, 0x1c, 0xb0, 0x47, 0x01, 0x1e,
+        0x22, 0xd0, 0x0d, 0x9a, 0x20, 0x1c, 0x14, 0x60
+    };
+    static const uint8_t message_clients_shape[] = {
+        0x90, 0xb5, 0x01, 0xaf, 0x85, 0xb0, 0x03, 0x93,
+        0x00, 0x23, 0x00, 0x90, 0x01, 0x91, 0x02, 0x92,
+        0x04, 0x93, 0x06, 0x49, 0x04, 0x68, 0x92, 0x23,
+        0x9b, 0x00, 0x09, 0x68, 0xe4, 0x58, 0x04, 0x4a,
+        0x6b, 0x46, 0xa0, 0x47, 0x04, 0x98, 0x05, 0xb0,
+        0x90, 0xbd
+    };
+    static const uint8_t client_delivery_shape[] = {
+        0xf0, 0xb5, 0x5e, 0x46, 0x55, 0x46, 0x44, 0x46,
+        0x70, 0xb4, 0x06, 0xaf, 0x88, 0xb0, 0x3b, 0x4c,
+        0x82, 0x46, 0x88, 0x46, 0x10, 0x1c, 0x3a, 0x49,
+        0x15, 0x1c, 0x1e, 0x1c, 0xa0, 0x47
+    };
+    static const uint8_t notification_handler_shape[] = {
+        0xf0, 0xb5, 0x46, 0x46, 0x40, 0xb4, 0x04, 0xaf,
+        0x05, 0x1c, 0x00, 0x69, 0x98, 0x46, 0x31, 0x4b,
+        0x69, 0x69, 0xc4, 0x6a, 0x9a, 0x42, 0x53, 0xd0
+    };
+    static const uint8_t notification_send_shape[] = {
+        0x28, 0x69, 0x1e, 0x4b, 0x41, 0x68, 0x98, 0x47,
+        0x05, 0x1c, 0x00, 0x2c, 0x02, 0xd0
+    };
+    static const uint8_t notification_return_shape[] = {
+        0x00, 0x20, 0x04, 0xbc, 0x90, 0x46, 0xf0, 0xbd
+    };
+    static const uint8_t mqueue_receive_shape[] = {
+        0xf0, 0xb5, 0x56, 0x46, 0x45, 0x46, 0x60, 0xb4,
+        0x05, 0xaf, 0x82, 0xb0, 0x98, 0x46, 0x04, 0x1c,
+        0x0d, 0x1c, 0x16, 0x1c, 0x54, 0xf0, 0xca, 0xed
+    };
+    static const uint8_t notification_set_shape[] = {
+        0xf0, 0xb5, 0x46, 0x46, 0x40, 0xb4, 0x04, 0xaf,
+        0x0a, 0x4d, 0x06, 0x1c, 0x88, 0x46, 0x28, 0x68
+    };
+    static const uint8_t notification_free_shape[] = {
+        0x90, 0xb5, 0x01, 0xaf, 0x04, 0x1c, 0x80, 0x68,
+        0x00, 0x28, 0x02, 0xd0, 0x03, 0x68, 0xdb, 0x6c
+    };
+    static const uint8_t port_destroy_shape[] = {
+        0xf0, 0xb5, 0x03, 0xaf, 0x45, 0x6d, 0x04, 0x1c,
+        0x00, 0x2d, 0x0b, 0xd0, 0x00, 0x23, 0x43, 0x65
+    };
+
+    if (!G.springboard_child_config.enabled ||
+        !G.commcenter_layout.enabled) {
+        snprintf(config->reason, sizeof config->reason,
+                 "thread identity or exact IPC queue gate unavailable");
+        printf("AppleBaseband reset/notification probe: DISABLED (%s)\n",
+               config->reason);
+        return;
+    }
+
+    if (!diagnostic_kernel_va_window_matches(
+            APPLEBASEBAND_RESET_CALLBACK_PC,
+            reset_callback_shape, sizeof reset_callback_shape) ||
+        !diagnostic_kernel_va_window_matches(
+            APPLEBASEBAND_RESET_READ_TARGET,
+            reset_read_shape, sizeof reset_read_shape) ||
+        !diagnostic_kernel_va_window_matches(
+            UINT32_C(0xc0558c48),
+            setup_reset_shape, sizeof setup_reset_shape) ||
+        !diagnostic_kernel_va_window_matches(
+            UINT32_C(0xc0558c8c),
+            setup_event_shape, sizeof setup_event_shape) ||
+        !diagnostic_kernel_va_window_matches(
+            UINT32_C(0xc0558cc8),
+            setup_enable_shape, sizeof setup_enable_shape) ||
+        !diagnostic_kernel_va_window_matches(
+            APPLEBASEBAND_INTEREST_WRAPPER_64_PC,
+            interest_wrapper_64_shape,
+            sizeof interest_wrapper_64_shape) ||
+        !diagnostic_kernel_va_window_matches(
+            APPLEBASEBAND_INTEREST_WRAPPER_32_PC,
+            interest_wrapper_32_shape,
+            sizeof interest_wrapper_32_shape) ||
+        !diagnostic_kernel_va_window_matches(
+            UINT32_C(0xc019edc0),
+            register_interest_shape,
+            sizeof register_interest_shape) ||
+        !diagnostic_kernel_va_window_matches(
+            APPLEBASEBAND_MESSAGE_CLIENTS_PC,
+            message_clients_shape,
+            sizeof message_clients_shape) ||
+        !diagnostic_kernel_va_window_matches(
+            APPLEBASEBAND_CLIENT_DELIVERY_PC,
+            client_delivery_shape,
+            sizeof client_delivery_shape) ||
+        !diagnostic_kernel_va_window_matches(
+            APPLEBASEBAND_NOTIFICATION_HANDLER_PC,
+            notification_handler_shape,
+            sizeof notification_handler_shape) ||
+        !diagnostic_kernel_va_window_matches(
+            UINT32_C(0xc019f5d0),
+            notification_send_shape,
+            sizeof notification_send_shape) ||
+        !diagnostic_kernel_va_window_matches(
+            UINT32_C(0xc019f5fc),
+            notification_return_shape,
+            sizeof notification_return_shape) ||
+        !diagnostic_kernel_va_window_matches(
+            UINT32_C(0xc019f63e),
+            notification_return_shape,
+            sizeof notification_return_shape) ||
+        !diagnostic_kernel_symbol_window_matches(
+            "_ipc_mqueue_receive",
+            APPLEBASEBAND_MQUEUE_RECEIVE_PC, 0,
+            mqueue_receive_shape, sizeof mqueue_receive_shape) ||
+        !diagnostic_kernel_symbol_window_matches(
+            "__ZN18IOUserNotification15setNotificationEP10IONotifier",
+            APPLEBASEBAND_NOTIFICATION_SET_PC, 0,
+            notification_set_shape, sizeof notification_set_shape) ||
+        !diagnostic_kernel_symbol_window_matches(
+            "__ZN18IOUserNotification4freeEv",
+            APPLEBASEBAND_NOTIFICATION_FREE_PC, 0,
+            notification_free_shape, sizeof notification_free_shape) ||
+        !diagnostic_kernel_symbol_window_matches(
+            "_ipc_port_destroy",
+            APPLEBASEBAND_PORT_DESTROY_PC, 0,
+            port_destroy_shape, sizeof port_destroy_shape) ||
+        !diagnostic_kernel_va_u32_matches(
+            APPLEBASEBAND_VTABLE +
+                APPLEBASEBAND_VTABLE_MESSAGE_CLIENTS_OFFSET,
+            APPLEBASEBAND_MESSAGE_CLIENTS_TARGET) ||
+        !diagnostic_kernel_va_u32_matches(
+            APPLEBASEBAND_VTABLE +
+                APPLEBASEBAND_VTABLE_REGISTER_INTEREST_OFFSET,
+            APPLEBASEBAND_REGISTER_INTEREST_TARGET) ||
+        !diagnostic_kernel_va_u32_matches(
+            APPLEBASEBAND_VTABLE +
+                APPLEBASEBAND_VTABLE_RESET_READ_OFFSET,
+            APPLEBASEBAND_RESET_READ_TARGET) ||
+        !diagnostic_kernel_va_u32_matches(
+            APPLEBASEBAND_EVENT_VTABLE +
+                APPLEBASEBAND_EVENT_VTABLE_ENABLE_OFFSET,
+            APPLEBASEBAND_EVENT_ENABLE_TARGET) ||
+        !diagnostic_kernel_va_u32_matches(
+            APPLEBASEBAND_EVENT_FACTORY_LITERAL,
+            APPLEBASEBAND_EVENT_FACTORY_TARGET) ||
+        !diagnostic_kernel_va_u32_matches(
+            APPLEBASEBAND_EVENT_ACTION_LITERAL,
+            APPLEBASEBAND_RESET_ACTION_PAIR) ||
+        !diagnostic_kernel_va_u32_matches(
+            APPLEBASEBAND_INTEREST_HANDLER_LITERAL,
+            APPLEBASEBAND_INTEREST_HANDLER_TARGET) ||
+        !diagnostic_kernel_va_u32_matches(
+            APPLEBASEBAND_NOTIFICATION_SEND_LITERAL,
+            APPLEBASEBAND_NOTIFICATION_SEND_TARGET) ||
+        !diagnostic_kernel_va_u32_matches(
+            APPLEBASEBAND_RESET_ACTION_PAIR,
+            APPLEBASEBAND_RESET_CALLBACK_PC) ||
+        !diagnostic_kernel_va_u32_matches(
+            APPLEBASEBAND_RESET_ACTION_PAIR + 4u, 0u) ||
+        !diagnostic_kernel_va_u32_matches(
+            UINT32_C(0xc05583f8),
+            APPLEBASEBAND_RESET_MESSAGE_HIGH) ||
+        !diagnostic_kernel_va_u32_matches(
+            UINT32_C(0xc05583fc),
+            APPLEBASEBAND_RESET_MESSAGE_LOW)) {
+        snprintf(config->reason, sizeof config->reason,
+                 "exact 7E18 AppleBaseband/IOKit code or data mismatch");
+        printf("AppleBaseband reset/notification probe: DISABLED (%s)\n",
+               config->reason);
+        return;
+    }
+
+    config->enabled = true;
+    snprintf(config->reason, sizeof config->reason,
+             "exact 7E18 reset, interest, notification, and IPC shapes validated");
+    printf("AppleBaseband reset/notification probe: VALIDATED;"
+           " trace-only reset edge -> messageClients -> IOKit interest"
+           " -> Mach port route\n");
 }
 
 static lifecycle_event_t *lifecycle_begin(uint64_t at,
@@ -5355,20 +6479,20 @@ SPRINGBOARD_MACH_PATH_VA[SPRINGBOARD_MACH_PATH_COUNT];
 
 static const char *const
 SPRINGBOARD_COMMCENTER_ROUTE_NAMES[SPRINGBOARD_COMMCENTER_ROUTE_COUNT] = {
-    "post selected waiter",
-    "post no waiter/enqueue",
-    "full-wait path",
-    "fullwaiters store",
-    "accepted/post path"
+    "post: receiver woken (pre-kmsg handoff)",
+    "post: no eligible receiver (pre-enqueue)",
+    "send: queue-full slow branch (not yet waiting)",
+    "send: mark fullwaiters=1 (pre-store)",
+    "send: immediate slot reserve (pre-msgcount++)"
 };
 
 static const uint32_t
 SPRINGBOARD_COMMCENTER_ROUTE_PC[SPRINGBOARD_COMMCENTER_ROUTE_COUNT] = {
-    SPRINGBOARD_COMMCENTER_POST_SELECTED_WAITER_PC,
-    SPRINGBOARD_COMMCENTER_POST_NO_WAITER_PC,
-    SPRINGBOARD_COMMCENTER_FULL_WAIT_PC,
-    SPRINGBOARD_COMMCENTER_FULLWAITERS_STORE_PC,
-    SPRINGBOARD_COMMCENTER_ACCEPTED_POST_PC
+    SPRINGBOARD_COMMCENTER_POST_RECEIVER_WOKEN_PC,
+    SPRINGBOARD_COMMCENTER_POST_NO_ELIGIBLE_RECEIVER_PC,
+    SPRINGBOARD_COMMCENTER_QUEUE_FULL_SLOW_PC,
+    SPRINGBOARD_COMMCENTER_MARK_FULLWAITERS_PC,
+    SPRINGBOARD_COMMCENTER_IMMEDIATE_SLOT_RESERVE_PC
 };
 
 static const char COMMCENTER_EXEC_PATH[] =
@@ -5382,7 +6506,8 @@ COMMCENTER_WATCH_MILESTONE_NAMES[COMMCENTER_WATCH_MILESTONE_COUNT] = {
     "_ipc_mqueue_receive_continue",
     "_wait_queue_assert_wait",
     "_thread_block_reason",
-    "_thread_continue"
+    "_thread_continue",
+    "_semaphore_wait_continue"
 };
 
 static unsigned commcenter_watch_phase(
@@ -5606,17 +6731,686 @@ static BOOTKERNEL_NOINLINE void commcenter_watch_resync_current(
         watch, cpu, thread, at);
 }
 
+static commcenter_thread_wait_t *commcenter_wait_thread_find(
+        commcenter_watch_t *watch, uint32_t thread,
+        bool create, uint64_t at) {
+    if (!watch || !thread) return NULL;
+    commcenter_thread_wait_t *empty = NULL;
+    for (unsigned i = 0; i < COMMCENTER_WAIT_THREAD_CAP; i++) {
+        commcenter_thread_wait_t *state = &watch->wait_threads[i];
+        if (state->occupied && state->thread == thread)
+            return state;
+        if (!state->occupied && !empty)
+            empty = state;
+    }
+    if (!create) return NULL;
+    if (!empty) {
+        watch->wait_thread_overflow++;
+        return NULL;
+    }
+    memset(empty, 0, sizeof *empty);
+    empty->occupied = true;
+    empty->thread = thread;
+    empty->first_seen_at = at;
+    empty->last_seen_at = at;
+    return empty;
+}
+
+static void commcenter_wait_snapshot_note_failure(
+        commcenter_wait_snapshot_t *snapshot,
+        uint32_t failure_va, uint32_t failure_fsr) {
+    if (!snapshot || snapshot->failure_va ||
+        snapshot->failure_fsr)
+        return;
+    snapshot->failure_va = failure_va;
+    snapshot->failure_fsr = failure_fsr;
+}
+
+static void commcenter_wait_snapshot_capture(
+        commcenter_wait_snapshot_t *snapshot,
+        arm_cpu_t *cpu, uint32_t thread) {
+    if (!snapshot || !cpu || !thread) return;
+    memset(snapshot, 0, sizeof *snapshot);
+
+#define COMMCENTER_WAIT_READ_THREAD_FIELD(offset_, field_, bit_) do {        \
+        uint32_t failure_va_ = 0, failure_fsr_ = 0;                         \
+        if (springboard_child_read_field(                                   \
+                cpu, thread, (offset_), &(snapshot->field_),                \
+                &failure_va_, &failure_fsr_))                               \
+            snapshot->valid_bits |= (bit_);                                 \
+        else                                                                \
+            commcenter_wait_snapshot_note_failure(                          \
+                snapshot, failure_va_, failure_fsr_);                       \
+    } while (0)
+
+    COMMCENTER_WAIT_READ_THREAD_FIELD(
+        COMMCENTER_WAIT_THREAD_WAIT_QUEUE_OFFSET, wait_queue,
+        COMMCENTER_WAIT_VALID_WAIT_QUEUE);
+    COMMCENTER_WAIT_READ_THREAD_FIELD(
+        COMMCENTER_WAIT_THREAD_EVENT_LOW_OFFSET, event_low,
+        COMMCENTER_WAIT_VALID_EVENT_LOW);
+    COMMCENTER_WAIT_READ_THREAD_FIELD(
+        COMMCENTER_WAIT_THREAD_EVENT_HIGH_OFFSET, event_high,
+        COMMCENTER_WAIT_VALID_EVENT_HIGH);
+    COMMCENTER_WAIT_READ_THREAD_FIELD(
+        COMMCENTER_WAIT_THREAD_STATE_OFFSET, state,
+        COMMCENTER_WAIT_VALID_STATE);
+    COMMCENTER_WAIT_READ_THREAD_FIELD(
+        COMMCENTER_WAIT_THREAD_RESULT_OFFSET, result,
+        COMMCENTER_WAIT_VALID_RESULT);
+    COMMCENTER_WAIT_READ_THREAD_FIELD(
+        COMMCENTER_WAIT_THREAD_CONTINUATION_OFFSET, continuation,
+        COMMCENTER_WAIT_VALID_CONTINUATION);
+    COMMCENTER_WAIT_READ_THREAD_FIELD(
+        COMMCENTER_WAIT_THREAD_PARAMETER_OFFSET, parameter,
+        COMMCENTER_WAIT_VALID_PARAMETER);
+    COMMCENTER_WAIT_READ_THREAD_FIELD(
+        COMMCENTER_WAIT_THREAD_TIMER_ACTIVE_OFFSET, timer_active,
+        COMMCENTER_WAIT_VALID_TIMER_ACTIVE);
+    COMMCENTER_WAIT_READ_THREAD_FIELD(
+        COMMCENTER_WAIT_THREAD_WAIT_SEMAPHORE_OFFSET, wait_semaphore,
+        COMMCENTER_WAIT_VALID_WAIT_SEMAPHORE);
+    COMMCENTER_WAIT_READ_THREAD_FIELD(
+        COMMCENTER_WAIT_THREAD_SIGNAL_SEMAPHORE_OFFSET, signal_semaphore,
+        COMMCENTER_WAIT_VALID_SIGNAL_SEMAPHORE);
+    COMMCENTER_WAIT_READ_THREAD_FIELD(
+        COMMCENTER_WAIT_THREAD_OUTER_CONTINUATION_OFFSET,
+        outer_continuation,
+        COMMCENTER_WAIT_VALID_OUTER_CONTINUATION);
+
+#undef COMMCENTER_WAIT_READ_THREAD_FIELD
+
+    if ((snapshot->valid_bits &
+            COMMCENTER_WAIT_VALID_WAIT_SEMAPHORE) &&
+        snapshot->wait_semaphore) {
+        uint32_t failure_va = 0, failure_fsr = 0;
+        if (springboard_child_read_field(
+                cpu, snapshot->wait_semaphore,
+                COMMCENTER_WAIT_SEMAPHORE_COUNT_OFFSET,
+                &snapshot->semaphore_count,
+                &failure_va, &failure_fsr))
+            snapshot->valid_bits |=
+                COMMCENTER_WAIT_VALID_SEMAPHORE_COUNT;
+        else
+            commcenter_wait_snapshot_note_failure(
+                snapshot, failure_va, failure_fsr);
+        failure_va = 0;
+        failure_fsr = 0;
+        if (springboard_child_read_field(
+                cpu, snapshot->wait_semaphore,
+                COMMCENTER_WAIT_SEMAPHORE_ACTIVE_OFFSET,
+                &snapshot->semaphore_active,
+                &failure_va, &failure_fsr))
+            snapshot->valid_bits |=
+                COMMCENTER_WAIT_VALID_SEMAPHORE_ACTIVE;
+        else
+            commcenter_wait_snapshot_note_failure(
+                snapshot, failure_va, failure_fsr);
+    }
+}
+
+static bool commcenter_wait_state_has_unresolved_observed_block(
+        const commcenter_thread_wait_t *state,
+        bool process_live) {
+    if (!state || !process_live || !state->block_open ||
+        state->sequence_exhausted ||
+        !state->block_sequence ||
+        state->snapshot_block_sequence != state->block_sequence ||
+        state->switch_out_block_sequence != state->block_sequence ||
+        state->switch_in_block_sequence == state->block_sequence ||
+        state->return_block_sequence == state->block_sequence ||
+        state->continuation_block_sequence == state->block_sequence ||
+        state->block_schedule_uncertain ||
+        !state->last_block_at ||
+        state->last_block_fields_at <= state->last_block_at ||
+        state->last_switch_out_at <=
+            state->last_block_fields_at)
+        return false;
+    return true;
+}
+
+static bool commcenter_wait_state_has_committed_continuation(
+        const commcenter_thread_wait_t *state,
+        uint32_t continuation) {
+    return state &&
+        !state->sequence_exhausted &&
+        state->snapshot_block_sequence ==
+            state->block_sequence &&
+        (state->last_wait.valid_bits &
+            COMMCENTER_WAIT_VALID_CONTINUATION) &&
+        state->last_block_continuation_arg == continuation &&
+        state->last_wait.continuation == continuation;
+}
+
+static bool commcenter_wait_snapshot_is_exact_semaphore(
+        const commcenter_thread_wait_t *state,
+        bool process_live) {
+    if (!commcenter_wait_state_has_unresolved_observed_block(
+            state, process_live) ||
+        !state->block_semaphore_sequence ||
+        state->semaphore_core_sequence !=
+            state->block_semaphore_sequence ||
+        state->semaphore_fields_sequence !=
+            state->block_semaphore_sequence ||
+        state->queue_assert_sequence !=
+            state->block_semaphore_sequence ||
+        !state->last_semaphore_core_at ||
+        state->last_semaphore_fields_at <=
+            state->last_semaphore_core_at ||
+        state->last_queue_assert_at <=
+            state->last_semaphore_fields_at ||
+        state->last_block_at <=
+            state->last_queue_assert_at)
+        return false;
+    const commcenter_wait_snapshot_t *snapshot = &state->last_wait;
+    const uint32_t required =
+        COMMCENTER_WAIT_VALID_WAIT_QUEUE |
+        COMMCENTER_WAIT_VALID_EVENT_LOW |
+        COMMCENTER_WAIT_VALID_EVENT_HIGH |
+        COMMCENTER_WAIT_VALID_CONTINUATION |
+        COMMCENTER_WAIT_VALID_WAIT_SEMAPHORE |
+        COMMCENTER_WAIT_VALID_SIGNAL_SEMAPHORE |
+        COMMCENTER_WAIT_VALID_SEMAPHORE_COUNT |
+        COMMCENTER_WAIT_VALID_SEMAPHORE_ACTIVE;
+    return (snapshot->valid_bits & required) == required &&
+        commcenter_wait_state_has_committed_continuation(
+            state, COMMCENTER_WAIT_SEMAPHORE_CONTINUATION) &&
+        state->last_core_wait_semaphore ==
+            state->last_semaphore &&
+        state->last_core_signal_semaphore ==
+            state->last_signal_semaphore &&
+        snapshot->wait_semaphore ==
+            state->last_semaphore &&
+        snapshot->signal_semaphore ==
+            state->last_signal_semaphore &&
+        snapshot->wait_semaphore <=
+            UINT32_MAX - COMMCENTER_WAIT_SEMAPHORE_WAIT_QUEUE_OFFSET &&
+        snapshot->wait_queue ==
+            snapshot->wait_semaphore +
+                COMMCENTER_WAIT_SEMAPHORE_WAIT_QUEUE_OFFSET &&
+        snapshot->event_low == COMMCENTER_WAIT_SEMAPHORE_EVENT &&
+        snapshot->event_high == 0u &&
+        snapshot->semaphore_active == 1u &&
+        state->last_queue_assert_queue == snapshot->wait_queue &&
+        state->last_queue_assert_event_low == snapshot->event_low &&
+        state->last_queue_assert_event_high == snapshot->event_high &&
+        state->last_queue_assert_type == 2u;
+}
+
+static bool commcenter_wait_state_is_direct_semaphore(
+        const commcenter_thread_wait_t *state,
+        bool process_live) {
+    if (!state || !state->relevant_trap_open ||
+        state->last_trap > -36 || state->last_trap < -39 ||
+        state->trap_identity_poisoned ||
+        !state->trap_sequence ||
+        state->block_trap_sequence != state->trap_sequence ||
+        state->semaphore_handler_trap_sequence !=
+            state->trap_sequence ||
+        state->semaphore_core_trap_sequence !=
+            state->trap_sequence ||
+        state->semaphore_fields_trap_sequence !=
+            state->trap_sequence ||
+        !state->last_swi_at ||
+        state->last_semaphore_handler_at <=
+            state->last_swi_at ||
+        state->last_semaphore_core_at <=
+            state->last_semaphore_handler_at ||
+        !commcenter_wait_snapshot_is_exact_semaphore(
+            state, process_live))
+        return false;
+    const commcenter_wait_snapshot_t *snapshot = &state->last_wait;
+    bool signal_expected =
+        state->last_trap == -37 ||
+        state->last_trap == -39;
+    if ((signal_expected &&
+         !snapshot->signal_semaphore) ||
+        (!signal_expected &&
+         snapshot->signal_semaphore))
+        return false;
+    return (snapshot->valid_bits &
+                COMMCENTER_WAIT_VALID_OUTER_CONTINUATION) &&
+        snapshot->outer_continuation ==
+            COMMCENTER_WAIT_DIRECT_OUTER_CONTINUATION;
+}
+
+static bool commcenter_wait_state_is_timed(
+        const commcenter_thread_wait_t *state) {
+    if (!state || state->sequence_exhausted ||
+        (state->last_trap != -38 &&
+                   state->last_trap != -39))
+        return false;
+    return (state->last_wait.valid_bits &
+                COMMCENTER_WAIT_VALID_TIMER_ACTIVE) &&
+        state->last_wait.timer_active != 0u &&
+        (state->last_deadline_low != 0u ||
+         state->last_deadline_high != 0u);
+}
+
+static void commcenter_wait_resolve_for_new_swi(
+        commcenter_thread_wait_t *state, uint64_t at) {
+    if (!state) return;
+    state->last_seen_at = at;
+    state->semaphore_attempt_open = false;
+    if (state->block_open) {
+        state->return_block_sequence =
+            state->block_sequence;
+        state->block_open = false;
+    }
+    if (state->relevant_trap_open) {
+        state->last_trap_return_at = at;
+        state->last_returned_trap = state->last_trap;
+        state->last_trap_return_value_valid = false;
+        state->relevant_trap_open = false;
+    }
+    state->trap_identity_poisoned = false;
+}
+
+static bool commcenter_wait_sequence_advance(
+        commcenter_thread_wait_t *state,
+        uint64_t *sequence) {
+    if (!state || !sequence || state->sequence_exhausted)
+        return false;
+    if (*sequence == UINT64_MAX) {
+        state->sequence_exhausted = true;
+        return false;
+    }
+    (*sequence)++;
+    return true;
+}
+
+static void commcenter_wait_note_swi(
+        commcenter_watch_t *watch, arm_cpu_t *cpu, uint64_t at) {
+    if (!watch || !cpu || !G.commcenter_wait_config.enabled)
+        return;
+    int32_t trap = (int32_t)cpu->r[12];
+    bool relevant =
+        trap == -31 || (trap <= -36 && trap >= -39);
+    commcenter_thread_wait_t *state =
+        commcenter_wait_thread_find(
+            watch, cpu->cp15.tpidrprw, relevant, at);
+    if (!state) return;
+    /*
+     * A user-mode SWI cannot be nested inside the prior user trap.  Seeing
+     * any new SWI, including an unrelated BSD call, proves the old episode
+     * returned to userspace and must invalidate its terminal-wait claim
+     * before the new trap is filtered.
+     */
+    commcenter_wait_resolve_for_new_swi(state, at);
+    if (!relevant) return;
+    if (!commcenter_wait_sequence_advance(
+            state, &state->trap_sequence))
+        return;
+    state->last_seen_at = at;
+    state->relevant_traps++;
+    state->last_swi_at = at;
+    state->last_trap = trap;
+    state->relevant_trap_open = true;
+    uint32_t return_bytes =
+        (cpu->spsr[ARM_BANK_SVC] & ARM_CPSR_T) ? 2u : 4u;
+    state->last_user_pc = cpu->r[14] >= return_bytes
+        ? cpu->r[14] - return_bytes : 0u;
+    memcpy(state->last_trap_args, cpu->r,
+           sizeof state->last_trap_args);
+    if (trap == -31) {
+        state->mach_traps++;
+        state->last_mach_header_readable = false;
+        springboard_mach_header_t header;
+        uint8_t bytes[SPRINGBOARD_MACH_HEADER_SIZE];
+        memset(&header, 0, sizeof header);
+        if (guest_read_user_bytes(
+                cpu, cpu->r[0], bytes, sizeof bytes,
+                &header.failure_va, &header.failure_fsr) &&
+            springboard_mach_header_decode(
+                bytes, sizeof bytes, cpu->r[1], cpu->r[2],
+                &header)) {
+            state->last_mach_header_readable = true;
+            state->last_mach_id = header.id;
+            if ((cpu->r[1] & DIAGNOSTIC_MACH_SEND_MSG) &&
+                header.id == 1000)
+                state->mach_id_1000_send_candidates++;
+        }
+    } else {
+        state->semaphore_traps++;
+    }
+}
+
+static void commcenter_wait_state_note_user_return(
+        commcenter_thread_wait_t *state,
+        uint64_t at, uint32_t return_value,
+        bool identity_proven) {
+    if (!state) return;
+    state->last_seen_at = at;
+    if (state->relevant_trap_open) {
+        state->last_trap_return_at = at;
+        state->last_returned_trap = state->last_trap;
+        state->last_trap_return_value = return_value;
+        state->last_trap_return_value_valid = true;
+    }
+    state->semaphore_attempt_open = false;
+    if (state->block_open) {
+        state->return_block_sequence = state->block_sequence;
+        if (!identity_proven)
+            state->block_schedule_uncertain = true;
+        state->block_open = false;
+    }
+    state->relevant_trap_open = false;
+}
+
+static void commcenter_wait_note_user_return(
+        commcenter_watch_t *watch, arm_cpu_t *cpu,
+        uint32_t thread, uint64_t at,
+        bool identity_proven) {
+    commcenter_thread_wait_t *state =
+        commcenter_wait_thread_find(watch, thread, false, at);
+    if (!cpu) return;
+    commcenter_wait_state_note_user_return(
+        state, at, cpu->r[0], identity_proven);
+}
+
+static bool commcenter_wait_state_note_raw_resume(
+        commcenter_thread_wait_t *state,
+        uint64_t at, uint32_t pc) {
+    if (!state || !state->block_open ||
+        state->switch_out_block_sequence !=
+            state->block_sequence ||
+        at <= state->last_switch_out_at)
+        return false;
+    state->raw_resume_proofs++;
+    state->last_seen_at = at;
+    state->last_switch_in_at = at;
+    state->last_switch_in_pc = pc;
+    state->switch_in_block_sequence =
+        state->block_sequence;
+    state->block_open = false;
+    return true;
+}
+
+static void commcenter_wait_note_raw_instruction_resume(
+        commcenter_watch_t *watch, uint32_t thread,
+        uint64_t at, uint32_t pc) {
+    if (!watch || !thread ||
+        !G.commcenter_wait_config.enabled)
+        return;
+    commcenter_thread_wait_t *state =
+        commcenter_wait_thread_find(
+            watch, thread, false, at);
+    (void)commcenter_wait_state_note_raw_resume(
+        state, at, pc);
+}
+
+static void commcenter_wait_note_schedule(
+        commcenter_watch_t *watch, uint32_t thread,
+        bool switch_in, uint64_t at, uint32_t pc) {
+    if (!watch || !G.commcenter_wait_config.enabled) return;
+    commcenter_thread_wait_t *state =
+        commcenter_wait_thread_find(watch, thread, true, at);
+    if (!state) return;
+    state->last_seen_at = at;
+    if (switch_in) {
+        state->switch_ins++;
+        state->last_switch_in_at = at;
+        state->last_switch_in_pc = pc;
+        if (state->block_open &&
+            state->switch_out_block_sequence ==
+                state->block_sequence) {
+            state->switch_in_block_sequence =
+                state->block_sequence;
+            state->block_open = false;
+        }
+    } else {
+        state->switch_outs++;
+        state->last_switch_out_at = at;
+        state->last_switch_out_pc = pc;
+        if (state->block_open &&
+            state->snapshot_block_sequence ==
+                state->block_sequence)
+            state->switch_out_block_sequence =
+                state->block_sequence;
+    }
+}
+
+static void commcenter_wait_note_schedule_uncertain(
+        commcenter_watch_t *watch, uint32_t thread,
+        uint64_t at) {
+    if (!watch || !thread ||
+        !G.commcenter_wait_config.enabled)
+        return;
+    commcenter_thread_wait_t *state =
+        commcenter_wait_thread_find(
+            watch, thread, false, at);
+    if (!state || !state->block_open) return;
+    state->last_seen_at = at;
+    state->block_schedule_uncertain = true;
+}
+
+static void commcenter_wait_note_exact_hook_omission(
+        commcenter_watch_t *watch, uint64_t at,
+        uint32_t pc, uint32_t thread) {
+    if (!watch) return;
+    if (!watch->wait_exact_hook_attribution_omissions) {
+        watch->wait_exact_hook_first_omission_at = at;
+        watch->wait_exact_hook_first_omission_pc = pc;
+        watch->wait_exact_hook_first_omission_thread =
+            thread;
+    }
+    if (watch->wait_exact_hook_attribution_omissions !=
+        UINT64_MAX)
+        watch->wait_exact_hook_attribution_omissions++;
+    watch->wait_exact_hook_last_omission_at = at;
+    watch->wait_exact_hook_last_omission_pc = pc;
+    watch->wait_exact_hook_last_omission_thread = thread;
+}
+
+static inline void commcenter_wait_note_pc(
+        arm_cpu_t *cpu, uint64_t at, uint32_t pc) {
+    commcenter_watch_t *watch = &G.commcenter_watch;
+    if (!G.commcenter_wait_config.enabled ||
+        !watch->armed || watch->terminal || !cpu)
+        return;
+    pc &= ~1u;
+    if (pc != COMMCENTER_WAIT_THREAD_BLOCK_REASON_PC &&
+        pc != COMMCENTER_WAIT_THREAD_BLOCK_FIELDS_COMMITTED_PC &&
+        pc != COMMCENTER_WAIT_THREAD_BLOCK_RESULT_PC &&
+        pc != COMMCENTER_WAIT_SEMAPHORE_CONTINUATION_PC &&
+        pc != COMMCENTER_WAIT_SEMAPHORE_CORE_PC &&
+        pc != COMMCENTER_WAIT_SEMAPHORE_FIELDS_COMMITTED_PC &&
+        pc != COMMCENTER_WAIT_QUEUE_ASSERT_CALL_PC &&
+        pc != COMMCENTER_WAIT_SEMAPHORE_TRAP_PC &&
+        pc != COMMCENTER_WAIT_SEMAPHORE_WAIT_SIGNAL_TRAP_PC &&
+        pc != COMMCENTER_WAIT_SEMAPHORE_TIMEDWAIT_TRAP_PC &&
+        pc != COMMCENTER_WAIT_SEMAPHORE_TIMEDWAIT_SIGNAL_TRAP_PC)
+        return;
+    /*
+     * These exact PCs are sparse and decisive.  Force a fresh identity walk
+     * before attribution so an earlier unreadable cached classification
+     * cannot make us silently miss the wait lifecycle.
+     */
+    commcenter_watch_resync_current(cpu, at, true);
+    if (watch->terminal || !watch->current_classified) {
+        commcenter_wait_note_schedule_uncertain(
+            watch, cpu->cp15.tpidrprw, at);
+        commcenter_wait_note_exact_hook_omission(
+            watch, at, pc, cpu->cp15.tpidrprw);
+        return;
+    }
+    if (!watch->current_matches ||
+        watch->current_thread != cpu->cp15.tpidrprw) {
+        commcenter_wait_note_schedule_uncertain(
+            watch, cpu->cp15.tpidrprw, at);
+        return;
+    }
+    commcenter_thread_wait_t *state =
+        commcenter_wait_thread_find(
+            watch, cpu->cp15.tpidrprw, true, at);
+    if (!state) return;
+    state->last_seen_at = at;
+
+    switch (pc) {
+        case COMMCENTER_WAIT_THREAD_BLOCK_REASON_PC:
+            if (!commcenter_wait_sequence_advance(
+                    state, &state->block_sequence)) {
+                state->block_schedule_uncertain = true;
+                break;
+            }
+            state->block_entries++;
+            state->block_open = true;
+            state->block_schedule_uncertain = false;
+            state->block_trap_sequence =
+                state->relevant_trap_open
+                    ? state->trap_sequence : 0u;
+            state->block_semaphore_sequence =
+                state->semaphore_attempt_open
+                    ? state->semaphore_sequence : 0u;
+            state->semaphore_attempt_open = false;
+            state->snapshot_block_sequence = 0;
+            state->switch_out_block_sequence = 0;
+            state->switch_in_block_sequence = 0;
+            state->return_block_sequence = 0;
+            state->continuation_block_sequence = 0;
+            memset(&state->last_wait, 0,
+                   sizeof state->last_wait);
+            state->last_block_at = at;
+            state->last_block_fields_at = 0;
+            state->last_block_return_at = 0;
+            state->last_block_continuation_arg = cpu->r[0];
+            state->last_block_parameter_arg = cpu->r[1];
+            state->last_block_reason_arg = cpu->r[2];
+            break;
+        case COMMCENTER_WAIT_THREAD_BLOCK_FIELDS_COMMITTED_PC:
+            if (!state->block_open) break;
+            state->block_fields_committed++;
+            state->last_block_fields_at = at;
+            commcenter_wait_snapshot_capture(
+                &state->last_wait, cpu, state->thread);
+            state->snapshot_block_sequence =
+                state->block_sequence;
+            break;
+        case COMMCENTER_WAIT_THREAD_BLOCK_RESULT_PC:
+            state->block_returns++;
+            state->last_block_return_at = at;
+            state->last_block_result = cpu->r[0];
+            state->semaphore_attempt_open = false;
+            if (state->block_open) {
+                state->return_block_sequence =
+                    state->block_sequence;
+                state->block_open = false;
+            }
+            break;
+        case COMMCENTER_WAIT_SEMAPHORE_CONTINUATION_PC:
+            state->semaphore_continuations++;
+            state->last_semaphore_continuation_at = at;
+            state->semaphore_attempt_open = false;
+            if (state->block_open) {
+                state->continuation_block_sequence =
+                    state->block_sequence;
+                state->block_open = false;
+            }
+            break;
+        case COMMCENTER_WAIT_SEMAPHORE_CORE_PC:
+            if (!commcenter_wait_sequence_advance(
+                    state, &state->semaphore_sequence)) {
+                state->semaphore_attempt_open = false;
+                break;
+            }
+            state->semaphore_attempt_open = true;
+            state->semaphore_core_hits++;
+            state->last_semaphore_core_at = at;
+            state->semaphore_core_sequence =
+                state->semaphore_sequence;
+            state->semaphore_core_trap_sequence =
+                state->relevant_trap_open
+                    ? state->trap_sequence : 0u;
+            state->last_core_wait_semaphore = cpu->r[0];
+            state->last_core_signal_semaphore = cpu->r[1];
+            state->last_semaphore = cpu->r[0];
+            state->last_signal_semaphore = cpu->r[1];
+            state->last_deadline_low = cpu->r[2];
+            state->last_deadline_high = cpu->r[3];
+            break;
+        case COMMCENTER_WAIT_SEMAPHORE_FIELDS_COMMITTED_PC:
+            if (!state->semaphore_attempt_open ||
+                !state->semaphore_sequence)
+                break;
+            state->last_semaphore_fields_at = at;
+            state->semaphore_fields_sequence =
+                state->semaphore_sequence;
+            state->semaphore_fields_trap_sequence =
+                state->relevant_trap_open
+                    ? state->trap_sequence : 0u;
+            state->last_semaphore = cpu->r[5];
+            state->last_signal_semaphore = cpu->r[6];
+            break;
+        case COMMCENTER_WAIT_QUEUE_ASSERT_CALL_PC:
+            if (!state->semaphore_attempt_open ||
+                !state->semaphore_sequence)
+                break;
+            state->queue_assert_calls++;
+            state->last_queue_assert_at = at;
+            state->queue_assert_sequence =
+                state->semaphore_sequence;
+            state->last_queue_assert_queue = cpu->r[0];
+            state->last_queue_assert_event_low = cpu->r[1];
+            state->last_queue_assert_event_high = cpu->r[2];
+            state->last_queue_assert_type = cpu->r[3];
+            break;
+        case COMMCENTER_WAIT_SEMAPHORE_TRAP_PC:
+            if (state->relevant_trap_open &&
+                state->last_trap == -36) {
+                state->last_semaphore_handler_at = at;
+                state->semaphore_handler_trap_sequence =
+                    state->trap_sequence;
+            }
+            break;
+        case COMMCENTER_WAIT_SEMAPHORE_WAIT_SIGNAL_TRAP_PC:
+            if (state->relevant_trap_open &&
+                state->last_trap == -37) {
+                state->last_semaphore_handler_at = at;
+                state->semaphore_handler_trap_sequence =
+                    state->trap_sequence;
+            }
+            break;
+        case COMMCENTER_WAIT_SEMAPHORE_TIMEDWAIT_TRAP_PC:
+            if (state->relevant_trap_open &&
+                state->last_trap == -38) {
+                state->last_semaphore_handler_at = at;
+                state->semaphore_handler_trap_sequence =
+                    state->trap_sequence;
+            }
+            break;
+        case COMMCENTER_WAIT_SEMAPHORE_TIMEDWAIT_SIGNAL_TRAP_PC:
+            if (state->relevant_trap_open &&
+                state->last_trap == -39) {
+                state->last_semaphore_handler_at = at;
+                state->semaphore_handler_trap_sequence =
+                    state->trap_sequence;
+            }
+            break;
+    }
+}
+
 static inline void commcenter_watch_note_instruction(
         arm_cpu_t *cpu, uint64_t at, uint32_t pc) {
     commcenter_watch_t *watch = &G.commcenter_watch;
     if (!watch->armed || watch->terminal || !cpu) return;
+    /*
+     * This evidence does not depend on an identity-memory reread: executing
+     * any later instruction on a thread that we recorded switching out after
+     * a committed block proves that old block resumed.  Close it before this
+     * instruction can be attributed to a new wait episode.
+     */
+    commcenter_wait_note_raw_instruction_resume(
+        watch, cpu->cp15.tpidrprw, at, pc);
     if (watch->current_thread != cpu->cp15.tpidrprw)
         commcenter_watch_resync_current(cpu, at, true);
     else if (!watch->current_classified)
         commcenter_watch_resync_current(cpu, at, false);
     if (!watch->current_matches ||
-        watch->current_thread != cpu->cp15.tpidrprw)
+        watch->current_thread != cpu->cp15.tpidrprw) {
+        commcenter_wait_note_schedule_uncertain(
+            watch, cpu->cp15.tpidrprw, at);
         return;
+    }
 
     unsigned phase = commcenter_watch_phase(watch, at);
     unsigned mode =
@@ -5648,11 +7442,18 @@ static void commcenter_watch_note_transition(
              * attributing the resumed user instruction stream.
              */
             commcenter_watch_resync_current(cpu, at, true);
-            if (!watch->terminal &&
+            bool identity_proven =
+                !watch->terminal &&
                 watch->current_classified &&
-                watch->current_matches)
+                watch->current_matches &&
+                watch->current_thread == thread_after;
+            commcenter_wait_note_user_return(
+                watch, cpu, thread_after, at,
+                identity_proven);
+            if (identity_proven) {
                 watch->user_returns[
                     commcenter_watch_phase(watch, at)]++;
+            }
         }
         return;
     }
@@ -5669,8 +7470,12 @@ static void commcenter_watch_note_transition(
     if (thread_before) {
         from_match = commcenter_watch_classify_thread(
             watch, cpu, thread_before, &from_readable);
-        if (!from_readable)
+        if (!from_readable) {
             watch->identity_unreadable_classifications++;
+        }
+        if (!from_match)
+            commcenter_wait_note_schedule_uncertain(
+                watch, thread_before, at);
     }
     if (watch->terminal)
         return;
@@ -5679,8 +7484,17 @@ static void commcenter_watch_note_transition(
         watch, cpu, thread_after, at);
     bool readable = watch->current_classified;
     bool to_match = watch->current_matches;
+    if (!to_match)
+        commcenter_wait_note_schedule_uncertain(
+            watch, thread_after, at);
 
     if (from_match || to_match) {
+        if (from_match)
+            commcenter_wait_note_schedule(
+                watch, thread_before, false, at, pc_before);
+        if (to_match)
+            commcenter_wait_note_schedule(
+                watch, thread_after, true, at, cpu->r[15]);
         uint64_t sequence = watch->switch_total++;
         commcenter_watch_switch_event_t *event =
             &watch->switches[sequence % COMMCENTER_WATCH_SWITCH_CAP];
@@ -5710,13 +7524,23 @@ static void commcenter_watch_note_swi(
     commcenter_watch_t *watch = &G.commcenter_watch;
     if (!watch->armed || watch->terminal || !cpu)
         return;
+    bool user_swi =
+        (cpu->spsr[ARM_BANK_SVC] & ARM_CPSR_MODE_MASK) ==
+            ARM_MODE_USR;
+    if (user_swi && G.commcenter_wait_config.enabled) {
+        commcenter_thread_wait_t *prior =
+            commcenter_wait_thread_find(
+                watch, cpu->cp15.tpidrprw, false, at);
+        commcenter_wait_resolve_for_new_swi(prior, at);
+    }
     commcenter_watch_resync_current(cpu, at, true);
     if (watch->terminal ||
         !watch->current_classified || !watch->current_matches ||
         watch->current_thread != cpu->cp15.tpidrprw ||
-        (cpu->spsr[ARM_BANK_SVC] & ARM_CPSR_MODE_MASK) !=
-            ARM_MODE_USR ||
-        (int32_t)cpu->r[12] != -31)
+        !user_swi)
+        return;
+    commcenter_wait_note_swi(watch, cpu, at);
+    if ((int32_t)cpu->r[12] != -31)
         return;
 
     unsigned phase = commcenter_watch_phase(watch, at);
@@ -5860,6 +7684,7 @@ static void commcenter_watch_note_initial_send_queue_entry(
 
     watch->receiver_seen = true;
     watch->receiver_valid_bits = probe->valid_bits;
+    watch->receiver_name = probe->receiver_name;
     watch->receiver_space = probe->receiver_space;
     watch->receiver_task = probe->receiver_task;
     watch->receiver_proc = probe->receiver_proc;
@@ -5948,6 +7773,2188 @@ static bool springboard_commcenter_validate_pointer(
     return true;
 }
 
+static bool springboard_commcenter_receiver_name_is_authoritative(
+        uint32_t receiver_name) {
+    return receiver_name != 0u && receiver_name != UINT32_MAX;
+}
+
+static bool springboard_commcenter_read_kernel_field(
+        arm_cpu_t *cpu, uint32_t object, uint32_t offset,
+        uint32_t *value, uint32_t *failure_va,
+        uint32_t *failure_fsr) {
+    uint32_t field_va = 0;
+    if (failure_va) *failure_va = 0;
+    if (failure_fsr) *failure_fsr = 0;
+    if (!springboard_commcenter_checked_field_va(
+            object, offset, g_virt_base, &field_va)) {
+        if (failure_va) *failure_va = object;
+        return false;
+    }
+    if (!springboard_child_read_field(
+            cpu, object, offset, value, failure_va, failure_fsr)) {
+        if (failure_va && !*failure_va) *failure_va = field_va;
+        return false;
+    }
+    return true;
+}
+
+static bool applebaseband_message_is_reset(uint32_t message) {
+    return message == APPLEBASEBAND_RESET_MESSAGE_HIGH ||
+           message == APPLEBASEBAND_RESET_MESSAGE_LOW;
+}
+
+static bool applebaseband_object_vtable_matches(
+        arm_cpu_t *cpu, uint32_t object, uint32_t expected_vtable,
+        uint32_t *actual_vtable, uint32_t *failure_va,
+        uint32_t *failure_fsr) {
+    uint32_t vtable = 0;
+    if (actual_vtable) *actual_vtable = 0;
+    if (failure_va) *failure_va = 0;
+    if (failure_fsr) *failure_fsr = 0;
+    if (!springboard_commcenter_read_kernel_field(
+            cpu, object, 0u, &vtable, failure_va, failure_fsr))
+        return false;
+    if (actual_vtable) *actual_vtable = vtable;
+    if (vtable != expected_vtable) {
+        if (failure_va) *failure_va = object;
+        if (failure_fsr) *failure_fsr = 0;
+        return false;
+    }
+    return true;
+}
+
+static bool applebaseband_accept_owner(
+        applebaseband_trace_t *trace, arm_cpu_t *cpu,
+        uint32_t owner) {
+    uint32_t actual_vtable = 0;
+    uint32_t failure_va = 0, failure_fsr = 0;
+    if (!trace ||
+        !applebaseband_object_vtable_matches(
+            cpu, owner, APPLEBASEBAND_VTABLE,
+            &actual_vtable, &failure_va, &failure_fsr)) {
+        if (trace) {
+            trace->owner_failure_va = failure_va
+                ? failure_va : owner;
+            trace->owner_failure_fsr = failure_fsr;
+        }
+        return false;
+    }
+    if (trace->owner && trace->owner != owner) {
+        trace->owner_failure_va = owner;
+        trace->owner_failure_fsr = 0;
+        return false;
+    }
+    trace->owner = owner;
+    return true;
+}
+
+static bool springboard_commcenter_kmsg_capture(
+        springboard_commcenter_kmsg_t *observation,
+        arm_cpu_t *cpu, uint32_t kmsg, bool capture_links);
+
+static void applebaseband_port_identity_capture(
+        applebaseband_port_identity_t *identity,
+        arm_cpu_t *cpu, uint32_t port) {
+    if (!identity) return;
+    memset(identity, 0, sizeof *identity);
+    uint32_t failure_va = 0, failure_fsr = 0;
+    if (!springboard_commcenter_checked_field_va(
+            port, 0u, g_virt_base, NULL)) {
+        identity->failure_va = port;
+        return;
+    }
+    if (!springboard_commcenter_read_kernel_field(
+            cpu, port,
+            SPRINGBOARD_COMMCENTER_PORT_IO_BITS_OFFSET,
+            &identity->io_bits, &failure_va, &failure_fsr))
+        goto unreadable;
+    identity->active =
+        (identity->io_bits & SPRINGBOARD_COMMCENTER_PORT_ACTIVE) != 0u &&
+        (identity->io_bits &
+             SPRINGBOARD_COMMCENTER_PORT_IO_TYPE_MASK) == 0u;
+    if (!identity->active) {
+        identity->failure_va =
+            port + SPRINGBOARD_COMMCENTER_PORT_IO_BITS_OFFSET;
+        return;
+    }
+    if (!springboard_commcenter_read_kernel_field(
+            cpu, port,
+            SPRINGBOARD_COMMCENTER_PORT_RECEIVER_NAME_OFFSET,
+            &identity->receiver_name, &failure_va, &failure_fsr))
+        goto unreadable;
+    identity->receiver_name_authoritative =
+        springboard_commcenter_receiver_name_is_authoritative(
+            identity->receiver_name);
+    if (!identity->receiver_name_authoritative) {
+        identity->failure_va =
+            port + SPRINGBOARD_COMMCENTER_PORT_RECEIVER_NAME_OFFSET;
+        return;
+    }
+    if (!springboard_commcenter_read_kernel_field(
+            cpu, port,
+            SPRINGBOARD_COMMCENTER_PORT_RECEIVER_OR_DESTINATION_OFFSET,
+            &identity->receiver_space, &failure_va, &failure_fsr) ||
+        !springboard_commcenter_checked_field_va(
+            identity->receiver_space, 0u, g_virt_base, NULL))
+        goto unreadable;
+    uint32_t active = 0;
+    if (!springboard_commcenter_read_kernel_field(
+            cpu, identity->receiver_space,
+            SPRINGBOARD_COMMCENTER_SPACE_ACTIVE_OFFSET,
+            &active, &failure_va, &failure_fsr))
+        goto unreadable;
+    identity->receiver_space_active = active == 1u;
+    if (!identity->receiver_space_active) {
+        identity->failure_va =
+            identity->receiver_space +
+                SPRINGBOARD_COMMCENTER_SPACE_ACTIVE_OFFSET;
+        return;
+    }
+    if (!springboard_commcenter_read_kernel_field(
+            cpu, identity->receiver_space,
+            SPRINGBOARD_COMMCENTER_SPACE_TASK_OFFSET,
+            &identity->receiver_task, &failure_va, &failure_fsr) ||
+        !springboard_commcenter_checked_field_va(
+            identity->receiver_task, 0u, g_virt_base, NULL) ||
+        !springboard_commcenter_read_kernel_field(
+            cpu, identity->receiver_task,
+            SPRINGBOARD_COMMCENTER_TASK_IPCSPACE_OFFSET,
+            &identity->receiver_task_space,
+            &failure_va, &failure_fsr))
+        goto unreadable;
+    identity->task_space_matches =
+        identity->receiver_task_space == identity->receiver_space;
+    if (!identity->task_space_matches) {
+        identity->failure_va =
+            identity->receiver_task +
+                SPRINGBOARD_COMMCENTER_TASK_IPCSPACE_OFFSET;
+        return;
+    }
+    if (!springboard_commcenter_read_kernel_field(
+            cpu, identity->receiver_task,
+            SPRINGBOARD_COMMCENTER_TASK_PROC_OFFSET,
+            &identity->receiver_proc, &failure_va, &failure_fsr) ||
+        !springboard_commcenter_checked_field_va(
+            identity->receiver_proc, 0u, g_virt_base, NULL) ||
+        !springboard_commcenter_read_kernel_field(
+            cpu, identity->receiver_proc,
+            SPRINGBOARD_COMMCENTER_PROC_PID_OFFSET,
+            &identity->receiver_pid, &failure_va, &failure_fsr))
+        goto unreadable;
+    if (identity->receiver_pid > INT32_MAX) {
+        identity->failure_va =
+            identity->receiver_proc +
+                SPRINGBOARD_COMMCENTER_PROC_PID_OFFSET;
+        return;
+    }
+    identity->complete = true;
+    return;
+
+unreadable:
+    identity->failure_va = failure_va
+        ? failure_va : port;
+    identity->failure_fsr = failure_fsr;
+}
+
+static bool applebaseband_port_identity_same(
+        const applebaseband_port_identity_t *a,
+        const applebaseband_port_identity_t *b) {
+    return a && b && a->complete && b->complete &&
+        a->active && b->active &&
+        a->receiver_name_authoritative &&
+        b->receiver_name_authoritative &&
+        a->receiver_space_active &&
+        b->receiver_space_active &&
+        a->task_space_matches && b->task_space_matches &&
+        a->receiver_name == b->receiver_name &&
+        a->receiver_space == b->receiver_space &&
+        a->receiver_task == b->receiver_task &&
+        a->receiver_task_space == b->receiver_task_space &&
+        a->receiver_proc == b->receiver_proc &&
+        a->receiver_pid == b->receiver_pid;
+}
+
+/*
+ * Read the retained CommCenter identity without changing the process watcher.
+ * This correlation is evidence for the baseband notification route; it must
+ * never invalidate or retarget the independent SETEXEC-attempt diagnostic.
+ */
+static bool applebaseband_thread_is_commcenter(
+        arm_cpu_t *cpu, uint32_t thread, bool *readable) {
+    if (readable) *readable = false;
+    const commcenter_watch_t *watch = &G.commcenter_watch;
+    if (!cpu || !thread || !watch->armed || watch->terminal ||
+        watch->identity_invalidated)
+        return false;
+
+    diagnostic_thread_identity_t identity;
+    diagnostic_read_thread_identity(cpu, thread, &identity);
+    if (!identity.task_valid || !identity.effective_valid)
+        return false;
+    if (readable) *readable = true;
+    return !identity.effective_vfork &&
+        identity.task == watch->task &&
+        identity.task_proc == watch->proc &&
+        identity.task_pid == watch->pid &&
+        identity.effective_proc == watch->proc &&
+        identity.effective_pid == watch->pid;
+}
+
+static bool applebaseband_port_identity_is_commcenter(
+        const applebaseband_port_identity_t *identity,
+        bool *readable) {
+    if (readable) *readable = false;
+    const commcenter_watch_t *watch = &G.commcenter_watch;
+    if (!identity || !identity->complete ||
+        !watch->armed || watch->terminal ||
+        watch->identity_invalidated)
+        return false;
+    if (readable) *readable = true;
+    return identity->receiver_task == watch->task &&
+        identity->receiver_proc == watch->proc &&
+        identity->receiver_pid == watch->pid;
+}
+
+static unsigned applebaseband_interest_active_notifiers(
+        const applebaseband_interest_t *interest) {
+    if (!interest || interest->stale ||
+        interest->live_uncertain || interest->notifier_overflow)
+        return 0u;
+    unsigned count = 0;
+    for (unsigned i = 0; i < APPLEBASEBAND_NOTIFIER_CAP; i++)
+        if (interest->notifiers[i].occupied &&
+            interest->notifiers[i].active)
+            count++;
+    return count;
+}
+
+static unsigned applebaseband_interest_retired_notifiers(
+        const applebaseband_interest_t *interest) {
+    if (!interest) return 0u;
+    unsigned count = 0;
+    for (unsigned i = 0; i < APPLEBASEBAND_NOTIFIER_CAP; i++)
+        if (interest->notifiers[i].occupied &&
+            interest->notifiers[i].retired)
+            count++;
+    return count;
+}
+
+static bool applebaseband_interest_has_active_notifier(
+        const applebaseband_interest_t *interest,
+        uint32_t object) {
+    if (!interest || !object || interest->stale ||
+        interest->live_uncertain || interest->notifier_overflow)
+        return false;
+    for (unsigned i = 0; i < APPLEBASEBAND_NOTIFIER_CAP; i++)
+        if (interest->notifiers[i].occupied &&
+            interest->notifiers[i].active &&
+            interest->notifiers[i].object == object)
+            return true;
+    return false;
+}
+
+static bool applebaseband_interest_add_notifier(
+        applebaseband_trace_t *trace,
+        applebaseband_interest_t *interest,
+        uint32_t object) {
+    if (!trace || !interest || !object ||
+        interest->stale || interest->live_uncertain)
+        return false;
+    for (unsigned i = 0; i < APPLEBASEBAND_INTEREST_CAP; i++) {
+        applebaseband_interest_t *other =
+            &trace->interests[i];
+        if (!other->occupied) continue;
+        for (unsigned j = 0; j < APPLEBASEBAND_NOTIFIER_CAP; j++) {
+            applebaseband_notifier_t *notifier =
+                &other->notifiers[j];
+            if (!notifier->occupied ||
+                notifier->object != object)
+                continue;
+            if (other != interest || notifier->retired) {
+                interest->live_uncertain = true;
+                other->live_uncertain = true;
+                trace->lifecycle_uncertain = true;
+                return false;
+            }
+        }
+    }
+    for (unsigned i = 0; i < APPLEBASEBAND_NOTIFIER_CAP; i++) {
+        applebaseband_notifier_t *notifier =
+            &interest->notifiers[i];
+        if (!notifier->occupied || notifier->object != object)
+            continue;
+        notifier->active = true;
+        return true;
+    }
+    for (unsigned i = 0; i < APPLEBASEBAND_NOTIFIER_CAP; i++) {
+        applebaseband_notifier_t *notifier =
+            &interest->notifiers[i];
+        if (notifier->occupied) continue;
+        notifier->occupied = true;
+        notifier->active = true;
+        notifier->object = object;
+        interest->notifier_additions++;
+        return true;
+    }
+    interest->notifier_overflow = true;
+    interest->live_uncertain = true;
+    trace->notifier_overflow++;
+    trace->lifecycle_uncertain = true;
+    return false;
+}
+
+static bool applebaseband_interest_set_notifier_active(
+        applebaseband_trace_t *trace, uint32_t object,
+        bool active, bool retire) {
+    if (!trace || !object || !trace->retained_interest_count)
+        return false;
+    bool found = false;
+    for (unsigned i = 0; i < APPLEBASEBAND_INTEREST_CAP; i++) {
+        applebaseband_interest_t *interest =
+            &trace->interests[i];
+        if (!interest->occupied) continue;
+        for (unsigned j = 0; j < APPLEBASEBAND_NOTIFIER_CAP; j++) {
+            applebaseband_notifier_t *notifier =
+                &interest->notifiers[j];
+            if (!notifier->occupied ||
+                notifier->object != object)
+                continue;
+            found = true;
+            if (retire) {
+                if (notifier->active) {
+                    interest->notifier_removals++;
+                    trace->notifier_teardowns++;
+                }
+                notifier->active = false;
+                notifier->retired = true;
+                continue;
+            }
+            if (active &&
+                (interest->stale ||
+                 interest->live_uncertain ||
+                 interest->notifier_overflow ||
+                 notifier->retired)) {
+                if (notifier->retired) {
+                    interest->live_uncertain = true;
+                    trace->lifecycle_uncertain = true;
+                }
+                continue;
+            }
+            if (notifier->active && !active) {
+                interest->notifier_removals++;
+                trace->notifier_teardowns++;
+            }
+            notifier->active = active;
+        }
+    }
+    return found;
+}
+
+static bool applebaseband_interest_validate_live(
+        applebaseband_trace_t *trace,
+        applebaseband_interest_t *interest,
+        arm_cpu_t *cpu) {
+    if (!trace || !interest || !cpu || !interest->occupied ||
+        interest->stale || interest->live_uncertain ||
+        !interest->baseline_identity.complete ||
+        !interest->baseline_receiver_is_commcenter ||
+        !interest->baseline_receiver_identity_readable)
+        return false;
+    interest->live_checks++;
+    applebaseband_port_identity_capture(
+        &interest->last_identity, cpu, interest->port);
+    if (!interest->last_identity.complete) {
+        interest->live_check_failures++;
+        interest->live_uncertain = true;
+        trace->live_validation_failures++;
+        trace->lifecycle_uncertain = true;
+        return false;
+    }
+    if (!applebaseband_port_identity_same(
+            &interest->baseline_identity,
+            &interest->last_identity)) {
+        interest->live_identity_changes++;
+        interest->stale = true;
+        for (unsigned i = 0; i < APPLEBASEBAND_NOTIFIER_CAP; i++)
+            interest->notifiers[i].active = false;
+        trace->live_identity_changes++;
+        trace->lifecycle_uncertain = true;
+        return false;
+    }
+    bool receiver_identity_readable = false;
+    if (!applebaseband_port_identity_is_commcenter(
+            &interest->last_identity,
+            &receiver_identity_readable)) {
+        interest->live_check_failures++;
+        if (receiver_identity_readable)
+            interest->stale = true;
+        else
+            interest->live_uncertain = true;
+        for (unsigned i = 0; i < APPLEBASEBAND_NOTIFIER_CAP; i++)
+            interest->notifiers[i].active = false;
+        trace->live_validation_failures++;
+        trace->lifecycle_uncertain = true;
+        return false;
+    }
+    return true;
+}
+
+static void applebaseband_note_port_destroy(
+        applebaseband_trace_t *trace, uint32_t port) {
+    if (!trace || !port || !trace->retained_interest_count)
+        return;
+    for (unsigned i = 0; i < APPLEBASEBAND_INTEREST_CAP; i++) {
+        applebaseband_interest_t *interest =
+            &trace->interests[i];
+        if (!interest->occupied || interest->port != port)
+            continue;
+        interest->stale = true;
+        interest->teardown_hits++;
+        for (unsigned j = 0; j < APPLEBASEBAND_NOTIFIER_CAP; j++)
+            interest->notifiers[j].active = false;
+        trace->port_teardowns++;
+    }
+}
+
+static int applebaseband_interest_find(
+        const applebaseband_trace_t *trace,
+        uint32_t service, uint32_t port) {
+    if (!trace || !service || !port) return -1;
+    for (unsigned i = 0; i < APPLEBASEBAND_INTEREST_CAP; i++) {
+        const applebaseband_interest_t *interest =
+            &trace->interests[i];
+        if (interest->occupied &&
+            interest->service == service &&
+            interest->port == port)
+            return (int)i;
+    }
+    return -1;
+}
+
+static int applebaseband_interest_find_port(
+        const applebaseband_trace_t *trace,
+        uint32_t port, bool require_active_notifier) {
+    if (!trace || !port) return -1;
+    for (unsigned i = 0; i < APPLEBASEBAND_INTEREST_CAP; i++) {
+        const applebaseband_interest_t *interest =
+            &trace->interests[i];
+        if (!interest->occupied || interest->stale ||
+            interest->live_uncertain ||
+            interest->port != port ||
+            (require_active_notifier &&
+             !applebaseband_interest_active_notifiers(interest)))
+            continue;
+        return (int)i;
+    }
+    return -1;
+}
+
+static int applebaseband_interest_find_mqueue(
+        const applebaseband_trace_t *trace,
+        uint32_t mqueue, bool require_active_notifier) {
+    if (!trace || !mqueue) return -1;
+    for (unsigned i = 0; i < APPLEBASEBAND_INTEREST_CAP; i++) {
+        const applebaseband_interest_t *interest =
+            &trace->interests[i];
+        if (!interest->occupied || interest->stale ||
+            interest->live_uncertain ||
+            interest->mqueue != mqueue ||
+            (require_active_notifier &&
+             !applebaseband_interest_active_notifiers(interest)))
+            continue;
+        return (int)i;
+    }
+    return -1;
+}
+
+static int applebaseband_interest_allocate(
+        applebaseband_trace_t *trace,
+        uint32_t service, uint32_t port, uint32_t mqueue) {
+    int existing =
+        applebaseband_interest_find(trace, service, port);
+    if (existing >= 0) {
+        applebaseband_interest_t *interest =
+            &trace->interests[(unsigned)existing];
+        if (interest->stale || interest->live_uncertain ||
+            interest->mqueue != mqueue) {
+            trace->lifecycle_uncertain = true;
+            return -1;
+        }
+        return existing;
+    }
+    if (!trace) return -1;
+    for (unsigned i = 0; i < APPLEBASEBAND_INTEREST_CAP; i++) {
+        applebaseband_interest_t *interest =
+            &trace->interests[i];
+        if (interest->occupied) continue;
+        memset(interest, 0, sizeof *interest);
+        interest->occupied = true;
+        interest->service = service;
+        interest->port = port;
+        interest->mqueue = mqueue;
+        trace->retained_interest_count++;
+        return (int)i;
+    }
+    trace->interest_overflow++;
+    trace->lifecycle_uncertain = true;
+    return -1;
+}
+
+static applebaseband_pending_interest_t *
+applebaseband_pending_interest_find(
+        applebaseband_trace_t *trace, uint32_t thread,
+        bool active_only) {
+    if (!trace || !thread) return NULL;
+    for (unsigned i = 0;
+         i < APPLEBASEBAND_PENDING_THREAD_CAP; i++) {
+        applebaseband_pending_interest_t *pending =
+            &trace->pending_interests[i];
+        if (pending->occupied && pending->thread == thread &&
+            (!active_only || pending->active))
+            return pending;
+    }
+    return NULL;
+}
+
+static applebaseband_pending_interest_t *
+applebaseband_pending_interest_begin(
+        applebaseband_trace_t *trace, uint32_t thread,
+        unsigned interest_slot, uint32_t wrapper_pc,
+        uint32_t wrapper_entry_sp, uint64_t at) {
+    if (!trace || !thread ||
+        interest_slot >= APPLEBASEBAND_INTEREST_CAP)
+        return NULL;
+    if (wrapper_entry_sp < UINT32_C(68)) {
+        trace->pending_interest_frame_mismatches++;
+        trace->lifecycle_uncertain = true;
+        return NULL;
+    }
+    applebaseband_pending_interest_t *pending =
+        applebaseband_pending_interest_find(
+            trace, thread, false);
+    if (pending && pending->active) {
+        trace->pending_interest_overwrites++;
+        trace->lifecycle_uncertain = true;
+    }
+    if (!pending) {
+        for (unsigned i = 0;
+             i < APPLEBASEBAND_PENDING_THREAD_CAP; i++) {
+            if (!trace->pending_interests[i].occupied ||
+                !trace->pending_interests[i].active) {
+                pending = &trace->pending_interests[i];
+                break;
+            }
+        }
+    }
+    if (!pending) {
+        trace->pending_interest_overflow++;
+        trace->lifecycle_uncertain = true;
+        return NULL;
+    }
+    memset(pending, 0, sizeof *pending);
+    pending->occupied = true;
+    pending->active = true;
+    pending->started_at = at;
+    pending->thread = thread;
+    pending->wrapper_pc = wrapper_pc;
+    pending->wrapper_entry_sp = wrapper_entry_sp;
+    pending->wrapper_return_sp =
+        wrapper_entry_sp - UINT32_C(12);
+    pending->register_frame_sp =
+        wrapper_entry_sp - UINT32_C(68);
+    pending->interest_slot = (uint8_t)interest_slot;
+    return pending;
+}
+
+static bool applebaseband_subscription_state(
+        applebaseband_trace_t *trace, arm_cpu_t *cpu,
+        uint32_t service, bool *active) {
+    if (active) *active = false;
+    if (!trace || !service || !active ||
+        !trace->baseline_complete ||
+        trace->interest_overflow ||
+        trace->pending_interest_overflow ||
+        trace->pending_interest_overwrites ||
+        trace->pending_interest_frame_mismatches ||
+        trace->wrapper_return_mismatches ||
+        trace->notifier_overflow ||
+        trace->lifecycle_uncertain)
+        return false;
+    for (unsigned i = 0; i < APPLEBASEBAND_INTEREST_CAP; i++) {
+        applebaseband_interest_t *interest =
+            &trace->interests[i];
+        if (!interest->occupied || interest->service != service)
+            continue;
+        if (interest->stale || interest->live_uncertain ||
+            interest->notifier_overflow)
+            return false;
+        if (!applebaseband_interest_active_notifiers(interest))
+            continue;
+        if (!cpu ||
+            !applebaseband_interest_validate_live(
+                trace, interest, cpu))
+            return false;
+        *active = true;
+    }
+    return true;
+}
+
+static applebaseband_dispatch_event_t *
+applebaseband_dispatch_find_open(
+        applebaseband_trace_t *trace, uint32_t thread,
+        uint32_t service, uint32_t message) {
+    if (!trace || !thread) return NULL;
+    applebaseband_dispatch_event_t *newest = NULL;
+    for (unsigned i = 0; i < APPLEBASEBAND_DISPATCH_CAP; i++) {
+        applebaseband_dispatch_event_t *event =
+            &trace->dispatches[i];
+        if (!event->valid || !event->open ||
+            event->thread != thread ||
+            (service && event->service != service) ||
+            (message && event->message != message))
+            continue;
+        if (!newest || event->sequence > newest->sequence)
+            newest = event;
+    }
+    return newest;
+}
+
+static applebaseband_dispatch_event_t *
+applebaseband_dispatch_find_callback_frame(
+        applebaseband_trace_t *trace, uint32_t thread,
+        uint32_t service, uint32_t callback_sp) {
+    if (!trace || !thread || !service || !callback_sp)
+        return NULL;
+    applebaseband_dispatch_event_t *newest = NULL;
+    for (unsigned i = 0; i < APPLEBASEBAND_DISPATCH_CAP; i++) {
+        applebaseband_dispatch_event_t *event =
+            &trace->dispatches[i];
+        if (!event->valid || !event->open ||
+            event->thread != thread ||
+            event->service != service ||
+            event->callback_sp != callback_sp)
+            continue;
+        if (!newest || event->sequence > newest->sequence)
+            newest = event;
+    }
+    return newest;
+}
+
+static applebaseband_dispatch_event_t *
+applebaseband_dispatch_begin(
+        applebaseband_trace_t *trace, arm_cpu_t *cpu,
+        uint64_t at,
+        uint32_t service, uint32_t message,
+        uint32_t argument, uint32_t thread,
+        uint32_t callback_sp, uint32_t callback_lr) {
+    if (!trace || !thread) return NULL;
+    if (trace->dispatch_total == UINT64_MAX) {
+        trace->frame_uncertain = true;
+        return NULL;
+    }
+    uint64_t sequence = trace->dispatch_total++;
+    applebaseband_dispatch_event_t *event =
+        &trace->dispatches[
+            sequence % APPLEBASEBAND_DISPATCH_CAP];
+    if (event->valid) {
+        trace->dispatch_dropped++;
+        if (event->open) trace->frame_uncertain = true;
+    }
+    memset(event, 0, sizeof *event);
+    event->valid = true;
+    event->open = true;
+    event->sequence = sequence;
+    event->at = at;
+    event->service = service;
+    event->message = message;
+    event->argument = argument;
+    event->thread = thread;
+    event->callback_sp = callback_sp;
+    event->callback_lr = callback_lr;
+    bool active_subscription = false;
+    if (applebaseband_subscription_state(
+            trace, cpu, service, &active_subscription)) {
+        event->subscription_state_known = true;
+    } else {
+        trace->dispatch_subscription_unknown++;
+    }
+    if (event->subscription_state_known &&
+        !active_subscription) {
+        event->before_successful_subscription = true;
+        trace->dispatch_before_subscription++;
+    }
+    return event;
+}
+
+static applebaseband_notification_event_t *
+applebaseband_notification_find_open(
+        applebaseband_trace_t *trace, uint32_t thread) {
+    if (!trace || !thread) return NULL;
+    applebaseband_notification_event_t *newest = NULL;
+    for (unsigned i = 0;
+         i < APPLEBASEBAND_NOTIFICATION_CAP; i++) {
+        applebaseband_notification_event_t *event =
+            &trace->notifications[i];
+        if (!event->valid || !event->open ||
+            event->thread != thread)
+            continue;
+        if (!newest || event->sequence > newest->sequence)
+            newest = event;
+    }
+    return newest;
+}
+
+static applebaseband_notification_event_t *
+applebaseband_notification_begin(
+        applebaseband_trace_t *trace, uint64_t at,
+        uint32_t notifier, uint32_t service,
+        uint32_t message, uint32_t thread,
+        uint32_t handler_entry_sp, uint32_t handler_frame_sp,
+        uint32_t handler_lr,
+        const applebaseband_message_frame_t *message_frame) {
+    if (!trace || !thread) return NULL;
+    if (trace->notification_total == UINT64_MAX) {
+        trace->frame_uncertain = true;
+        return NULL;
+    }
+    uint64_t sequence = trace->notification_total++;
+    applebaseband_notification_event_t *event =
+        &trace->notifications[
+            sequence % APPLEBASEBAND_NOTIFICATION_CAP];
+    if (event->valid) {
+        trace->notification_dropped++;
+        if (event->open) trace->frame_uncertain = true;
+    }
+    memset(event, 0, sizeof *event);
+    event->valid = true;
+    event->open = true;
+    event->sequence = sequence;
+    event->handler_at = at;
+    event->notifier = notifier;
+    event->service = service;
+    event->message = message;
+    event->thread = thread;
+    event->handler_entry_sp = handler_entry_sp;
+    event->handler_frame_sp = handler_frame_sp;
+    event->handler_lr = handler_lr;
+    event->interest_slot = UINT8_MAX;
+
+    if (message_frame && message_frame->linked_event &&
+        message_frame->service == service &&
+        message_frame->message == message) {
+        applebaseband_dispatch_event_t *dispatch =
+            &trace->dispatches[
+                message_frame->event_sequence %
+                    APPLEBASEBAND_DISPATCH_CAP];
+        if (dispatch->valid &&
+            dispatch->sequence ==
+                message_frame->event_sequence &&
+            dispatch->open &&
+            dispatch->service == service &&
+            dispatch->message == message &&
+            dispatch->thread == thread &&
+            dispatch->message_clients_seen) {
+            event->linked_dispatch = true;
+            event->dispatch_sequence = dispatch->sequence;
+            dispatch->notification_handler_hits++;
+        }
+    }
+    return event;
+}
+
+static applebaseband_dispatch_event_t *
+applebaseband_dispatch_find_sequence(
+        applebaseband_trace_t *trace, uint64_t sequence) {
+    if (!trace) return NULL;
+    applebaseband_dispatch_event_t *event =
+        &trace->dispatches[
+            sequence % APPLEBASEBAND_DISPATCH_CAP];
+    return event->valid && event->sequence == sequence
+        ? event : NULL;
+}
+
+static applebaseband_notification_event_t *
+applebaseband_notification_find_sequence(
+        applebaseband_trace_t *trace, uint64_t sequence) {
+    if (!trace) return NULL;
+    applebaseband_notification_event_t *event =
+        &trace->notifications[
+            sequence % APPLEBASEBAND_NOTIFICATION_CAP];
+    return event->valid && event->sequence == sequence
+        ? event : NULL;
+}
+
+static const applebaseband_dispatch_event_t *
+applebaseband_notification_matching_dispatch(
+        const applebaseband_trace_t *trace,
+        const applebaseband_notification_event_t *event,
+        bool require_open) {
+    if (!trace || !event || !event->valid ||
+        !event->linked_dispatch ||
+        !applebaseband_message_is_reset(event->message))
+        return NULL;
+    const applebaseband_dispatch_event_t *dispatch =
+        &trace->dispatches[
+            event->dispatch_sequence %
+                APPLEBASEBAND_DISPATCH_CAP];
+    if (!dispatch->valid ||
+        dispatch->sequence != event->dispatch_sequence ||
+        (require_open && !dispatch->open) ||
+        dispatch->service != event->service ||
+        dispatch->message != event->message ||
+        dispatch->thread != event->thread ||
+        !dispatch->message_clients_seen ||
+        !dispatch->notification_handler_hits)
+        return NULL;
+    return dispatch;
+}
+
+static bool applebaseband_notification_has_linked_send_header(
+        const applebaseband_trace_t *trace,
+        const applebaseband_notification_event_t *event,
+        bool require_open_dispatch) {
+    return event && !event->send_repeated &&
+        event->send_seen && event->send_header_readable &&
+        event->send_size_matches_header &&
+        applebaseband_notification_matching_dispatch(
+            trace, event, require_open_dispatch) != NULL;
+}
+
+static bool applebaseband_notification_has_causal_send(
+        const applebaseband_trace_t *trace,
+        const applebaseband_notification_event_t *event,
+        bool require_open_dispatch) {
+    return
+        applebaseband_notification_has_linked_send_header(
+            trace, event, require_open_dispatch) &&
+        event->destination_matches_interest &&
+        event->destination_registration_succeeded;
+}
+
+static applebaseband_message_frame_t *
+applebaseband_message_frame_begin(
+        applebaseband_trace_t *trace, uint32_t thread,
+        uint32_t entry_sp, uint32_t entry_lr,
+        uint32_t service, uint32_t message) {
+    if (!trace || !thread || entry_sp < UINT32_C(12))
+        return NULL;
+    if (trace->message_frame_total == UINT64_MAX) {
+        trace->frame_uncertain = true;
+        return NULL;
+    }
+    uint64_t order = ++trace->message_frame_total;
+    applebaseband_message_frame_t *frame = NULL;
+    for (unsigned i = 0; i < APPLEBASEBAND_MESSAGE_FRAME_CAP; i++) {
+        if (trace->message_frames[i].active) continue;
+        frame = &trace->message_frames[i];
+        break;
+    }
+    if (!frame) {
+        trace->message_frame_overflow++;
+        trace->frame_uncertain = true;
+        return NULL;
+    }
+    memset(frame, 0, sizeof *frame);
+    frame->occupied = true;
+    frame->active = true;
+    frame->order = order;
+    frame->thread = thread;
+    frame->entry_sp = entry_sp;
+    frame->frame_sp = entry_sp - UINT32_C(12);
+    frame->entry_lr = entry_lr;
+    frame->service = service;
+    frame->message = message;
+    return frame;
+}
+
+static applebaseband_message_frame_t *
+applebaseband_message_frame_top(
+        applebaseband_trace_t *trace, uint32_t thread) {
+    if (!trace || !thread) return NULL;
+    applebaseband_message_frame_t *top = NULL;
+    for (unsigned i = 0; i < APPLEBASEBAND_MESSAGE_FRAME_CAP; i++) {
+        applebaseband_message_frame_t *frame =
+            &trace->message_frames[i];
+        if (!frame->occupied || !frame->active ||
+            frame->thread != thread)
+            continue;
+        if (!top || frame->order > top->order)
+            top = frame;
+    }
+    return top;
+}
+
+static applebaseband_message_frame_t *
+applebaseband_message_frame_find_return(
+        applebaseband_trace_t *trace, uint32_t thread,
+        uint32_t current_sp) {
+    if (!trace || !thread) return NULL;
+    applebaseband_message_frame_t *match = NULL;
+    for (unsigned i = 0; i < APPLEBASEBAND_MESSAGE_FRAME_CAP; i++) {
+        applebaseband_message_frame_t *frame =
+            &trace->message_frames[i];
+        if (!frame->occupied || !frame->active ||
+            frame->thread != thread ||
+            frame->frame_sp != current_sp)
+            continue;
+        if (!match || frame->order > match->order)
+            match = frame;
+    }
+    return match;
+}
+
+static applebaseband_handler_frame_t *
+applebaseband_handler_frame_begin(
+        applebaseband_trace_t *trace, uint32_t thread,
+        uint32_t entry_sp, uint32_t entry_lr,
+        uint32_t service, uint32_t message) {
+    if (!trace || !thread || entry_sp < UINT32_C(24))
+        return NULL;
+    if (trace->handler_frame_total == UINT64_MAX) {
+        trace->frame_uncertain = true;
+        return NULL;
+    }
+    uint64_t order = ++trace->handler_frame_total;
+    applebaseband_handler_frame_t *frame = NULL;
+    for (unsigned i = 0; i < APPLEBASEBAND_HANDLER_FRAME_CAP; i++) {
+        if (trace->handler_frames[i].active) continue;
+        frame = &trace->handler_frames[i];
+        break;
+    }
+    if (!frame) {
+        trace->handler_frame_overflow++;
+        trace->frame_uncertain = true;
+        return NULL;
+    }
+    memset(frame, 0, sizeof *frame);
+    frame->occupied = true;
+    frame->active = true;
+    frame->order = order;
+    frame->thread = thread;
+    frame->entry_sp = entry_sp;
+    frame->frame_sp = entry_sp - UINT32_C(24);
+    frame->entry_lr = entry_lr;
+    frame->service = service;
+    frame->message = message;
+    return frame;
+}
+
+static applebaseband_handler_frame_t *
+applebaseband_handler_frame_top(
+        applebaseband_trace_t *trace, uint32_t thread) {
+    if (!trace || !thread) return NULL;
+    applebaseband_handler_frame_t *top = NULL;
+    for (unsigned i = 0; i < APPLEBASEBAND_HANDLER_FRAME_CAP; i++) {
+        applebaseband_handler_frame_t *frame =
+            &trace->handler_frames[i];
+        if (!frame->occupied || !frame->active ||
+            frame->thread != thread)
+            continue;
+        if (!top || frame->order > top->order)
+            top = frame;
+    }
+    return top;
+}
+
+static applebaseband_handler_frame_t *
+applebaseband_handler_frame_find_exact(
+        applebaseband_trace_t *trace, uint32_t thread,
+        uint32_t current_sp) {
+    if (!trace || !thread) return NULL;
+    applebaseband_handler_frame_t *match = NULL;
+    for (unsigned i = 0; i < APPLEBASEBAND_HANDLER_FRAME_CAP; i++) {
+        applebaseband_handler_frame_t *frame =
+            &trace->handler_frames[i];
+        if (!frame->occupied || !frame->active ||
+            frame->thread != thread ||
+            frame->frame_sp != current_sp)
+            continue;
+        if (!match || frame->order > match->order)
+            match = frame;
+    }
+    return match;
+}
+
+static bool applebaseband_notification_route_kmsg_matches(
+        const applebaseband_notification_event_t *event,
+        const springboard_commcenter_kmsg_t *observation) {
+    return event && observation &&
+        event->send_header_readable &&
+        event->send_size_matches_header &&
+        event->header && event->destination &&
+        observation->complete &&
+        observation->kmsg && observation->header &&
+        observation->destination == event->destination &&
+        observation->id == event->header_id &&
+        observation->size == event->header_size;
+}
+
+static bool applebaseband_notification_commit_route_kmsg(
+        applebaseband_notification_event_t *event,
+        const springboard_commcenter_kmsg_t *candidate) {
+    if (!applebaseband_notification_route_kmsg_matches(
+            event, candidate))
+        return false;
+    event->route_kmsg = *candidate;
+    event->route_kmsg_bound = true;
+    return true;
+}
+
+static bool applebaseband_notification_has_causal_route(
+        const applebaseband_trace_t *trace,
+        const applebaseband_notification_event_t *event,
+        bool require_open_dispatch) {
+    return applebaseband_notification_has_causal_send(
+            trace, event, require_open_dispatch) &&
+        event->route_kmsg_bound &&
+        !event->route_binding_uncertain &&
+        applebaseband_notification_route_kmsg_matches(
+            event, &event->route_kmsg);
+}
+
+static void applebaseband_notification_reject_repeated_send(
+        applebaseband_notification_event_t *event,
+        uint64_t at) {
+    if (!event) return;
+    event->send_seen = true;
+    event->send_repeated = true;
+    event->send_at = at;
+    event->send_header_readable = false;
+    event->destination_matches_interest = false;
+    event->destination_registration_succeeded = false;
+    event->send_result_seen = false;
+    event->route_kmsg_bound = false;
+    event->route_binding_uncertain = true;
+    event->receiver_identity_readable = false;
+    event->receiver_is_commcenter = false;
+    event->send_result_at = 0u;
+    event->first_route_at = 0u;
+    event->last_route_at = 0u;
+    event->route_candidates = 0u;
+    event->route_capture_failures = 0u;
+    event->route_semantic_mismatches = 0u;
+    event->header = 0u;
+    event->header_bits = 0u;
+    event->header_size = 0u;
+    event->send_size_argument = 0u;
+    event->destination = 0u;
+    event->reply = 0u;
+    event->header_id = 0;
+    event->header_failure_va = 0u;
+    event->header_failure_fsr = 0u;
+    event->send_result = 0u;
+    event->route_bits = 0u;
+    event->selected_thread = 0u;
+    event->interest_slot = UINT8_MAX;
+    event->send_size_matches_header = false;
+    memset(&event->route_kmsg, 0,
+           sizeof event->route_kmsg);
+}
+
+static bool applebaseband_notification_header_capture(
+        applebaseband_notification_event_t *event,
+        arm_cpu_t *cpu, uint32_t header, uint32_t size_argument) {
+    if (!event || !cpu) return false;
+    event->header = header;
+    event->send_size_argument = size_argument;
+    event->header_failure_va = 0;
+    event->header_failure_fsr = 0;
+    uint32_t raw_id = 0;
+    if (!springboard_commcenter_read_kernel_field(
+            cpu, header,
+            SPRINGBOARD_COMMCENTER_KERNEL_HEADER_BITS_OFFSET,
+            &event->header_bits,
+            &event->header_failure_va,
+            &event->header_failure_fsr) ||
+        !springboard_commcenter_read_kernel_field(
+            cpu, header,
+            SPRINGBOARD_COMMCENTER_KERNEL_HEADER_SIZE_OFFSET,
+            &event->header_size,
+            &event->header_failure_va,
+            &event->header_failure_fsr) ||
+        !springboard_commcenter_read_kernel_field(
+            cpu, header,
+            SPRINGBOARD_COMMCENTER_KERNEL_HEADER_DESTINATION_OFFSET,
+            &event->destination,
+            &event->header_failure_va,
+            &event->header_failure_fsr) ||
+        !springboard_commcenter_read_kernel_field(
+            cpu, header,
+            SPRINGBOARD_COMMCENTER_KERNEL_HEADER_REPLY_OFFSET,
+            &event->reply,
+            &event->header_failure_va,
+            &event->header_failure_fsr) ||
+        !springboard_commcenter_read_kernel_field(
+            cpu, header,
+            SPRINGBOARD_COMMCENTER_KERNEL_HEADER_ID_OFFSET,
+            &raw_id,
+            &event->header_failure_va,
+            &event->header_failure_fsr))
+        return false;
+    event->header_id = (int32_t)raw_id;
+    event->send_size_matches_header =
+        event->header_size == size_argument;
+    event->send_header_readable = true;
+    return true;
+}
+
+static void applebaseband_note_setup(
+        applebaseband_trace_t *trace, arm_cpu_t *cpu,
+        uint32_t pc) {
+    if (!trace || !cpu) return;
+    uint32_t owner = cpu->r[4];
+    if (!applebaseband_accept_owner(trace, cpu, owner)) {
+        trace->setup_owner_rejects++;
+        return;
+    }
+
+    uint32_t stored = 0;
+    uint32_t failure_va = 0, failure_fsr = 0;
+    switch (pc) {
+    case APPLEBASEBAND_SETUP_RESET_COMMITTED_PC:
+        if (!springboard_commcenter_read_kernel_field(
+                cpu, owner, UINT32_C(0x6c), &stored,
+                &failure_va, &failure_fsr) ||
+            stored != cpu->r[0]) {
+            trace->setup_owner_rejects++;
+            trace->owner_failure_va =
+                failure_va ? failure_va : owner + UINT32_C(0x6c);
+            trace->owner_failure_fsr = failure_fsr;
+            return;
+        }
+        trace->setup_reset_hits++;
+        trace->reset_function = stored;
+        if (stored) trace->setup_reset_nonzero++;
+        break;
+    case APPLEBASEBAND_SETUP_EVENT_RESULT_PC:
+        trace->setup_event_result_hits++;
+        if (cpu->r[0]) {
+            if (!applebaseband_object_vtable_matches(
+                    cpu, cpu->r[0], APPLEBASEBAND_EVENT_VTABLE,
+                    NULL, &failure_va, &failure_fsr)) {
+                trace->setup_event_source_rejects++;
+                trace->owner_failure_va =
+                    failure_va ? failure_va : cpu->r[0];
+                trace->owner_failure_fsr = failure_fsr;
+                return;
+            }
+            trace->setup_event_nonzero++;
+        }
+        trace->event_source = cpu->r[0];
+        break;
+    case APPLEBASEBAND_SETUP_EVENT_COMMITTED_PC:
+        if (!springboard_commcenter_read_kernel_field(
+                cpu, owner, UINT32_C(0x78), &stored,
+                &failure_va, &failure_fsr) ||
+            stored != cpu->r[0]) {
+            trace->setup_owner_rejects++;
+            trace->owner_failure_va =
+                failure_va ? failure_va : owner + UINT32_C(0x78);
+            trace->owner_failure_fsr = failure_fsr;
+            return;
+        }
+        if (stored &&
+            !applebaseband_object_vtable_matches(
+                cpu, stored, APPLEBASEBAND_EVENT_VTABLE,
+                NULL, &failure_va, &failure_fsr)) {
+            trace->setup_event_source_rejects++;
+            trace->owner_failure_va =
+                failure_va ? failure_va : stored;
+            trace->owner_failure_fsr = failure_fsr;
+            return;
+        }
+        trace->setup_event_committed_hits++;
+        trace->event_source = stored;
+        break;
+    case APPLEBASEBAND_SETUP_ENABLE_PC:
+        if (!springboard_commcenter_read_kernel_field(
+                cpu, owner, UINT32_C(0x78), &stored,
+                &failure_va, &failure_fsr) ||
+            !stored || stored != cpu->r[0]) {
+            trace->setup_owner_rejects++;
+            trace->owner_failure_va =
+                failure_va ? failure_va : owner + UINT32_C(0x78);
+            trace->owner_failure_fsr = failure_fsr;
+            return;
+        }
+        if (!applebaseband_object_vtable_matches(
+                cpu, stored, APPLEBASEBAND_EVENT_VTABLE,
+                NULL, &failure_va, &failure_fsr)) {
+            trace->setup_event_source_rejects++;
+            trace->owner_failure_va =
+                failure_va ? failure_va : stored;
+            trace->owner_failure_fsr = failure_fsr;
+            return;
+        }
+        trace->setup_enable_hits++;
+        trace->event_source = stored;
+        break;
+    default:
+        break;
+    }
+}
+
+static void applebaseband_note_reset(
+        applebaseband_trace_t *trace, arm_cpu_t *cpu,
+        uint64_t at, uint32_t pc) {
+    if (!trace || !cpu) return;
+    uint32_t owner =
+        pc == APPLEBASEBAND_RESET_CALLBACK_PC ||
+        pc == APPLEBASEBAND_RESET_DISPATCH_PC
+            ? cpu->r[0] : cpu->r[4];
+    if (!applebaseband_accept_owner(trace, cpu, owner)) {
+        trace->callback_owner_rejects++;
+        return;
+    }
+
+    switch (pc) {
+    case APPLEBASEBAND_RESET_CALLBACK_PC:
+        if (!trace->callback_hits)
+            trace->first_callback_at = at;
+        trace->callback_hits++;
+        trace->last_callback_at = at;
+        break;
+    case APPLEBASEBAND_RESET_READ_RETURN_PC: {
+        trace->read_return_hits++;
+        trace->last_read_status = cpu->r[0];
+        trace->last_raw_valid = false;
+        if (cpu->r[0]) {
+            trace->read_failures++;
+            break;
+        }
+        trace->read_successes++;
+        uint32_t failure_va = 0, failure_fsr = 0;
+        uint32_t raw_low = 0, raw_high = 0;
+        if (!springboard_commcenter_read_kernel_field(
+                cpu, cpu->r[13], 0u,
+                &raw_low,
+                &failure_va, &failure_fsr) ||
+            !springboard_commcenter_read_kernel_field(
+                cpu, cpu->r[13], 4u,
+                &raw_high,
+                &failure_va, &failure_fsr)) {
+            trace->read_raw_unreadable++;
+            trace->owner_failure_va = failure_va;
+            trace->owner_failure_fsr = failure_fsr;
+        } else {
+            trace->last_raw_low = raw_low;
+            trace->last_raw_high = raw_high;
+            trace->last_raw_valid = true;
+        }
+        break;
+    }
+    case APPLEBASEBAND_RESET_CHANGED_PC:
+        trace->changed_hits++;
+        trace->last_new_low = cpu->r[0];
+        trace->last_new_high = cpu->r[1];
+        trace->last_old_low = cpu->r[2];
+        trace->last_old_high = cpu->r[3];
+        break;
+    case APPLEBASEBAND_RESET_LOW_SUPPRESS_PC:
+        trace->low_path_checks++;
+        trace->last_low_suppress_flag = cpu->r[2];
+        if (cpu->r[2]) trace->low_suppressed++;
+        break;
+    case APPLEBASEBAND_RESET_DISPATCH_PC:
+        if (!applebaseband_message_is_reset(cpu->r[1])) {
+            trace->callback_owner_rejects++;
+            break;
+        }
+        if (!trace->dispatch_total)
+            trace->first_dispatch_at = at;
+        trace->last_dispatch_at = at;
+        if (cpu->r[1] == APPLEBASEBAND_RESET_MESSAGE_HIGH)
+            trace->dispatch_high++;
+        else
+            trace->dispatch_low++;
+        (void)applebaseband_dispatch_begin(
+            trace, cpu, at, owner, cpu->r[1], cpu->r[2],
+            cpu->cp15.tpidrprw, cpu->r[13], cpu->r[14]);
+        break;
+    case APPLEBASEBAND_RESET_RETURN_PC: {
+        applebaseband_dispatch_event_t *event =
+            applebaseband_dispatch_find_callback_frame(
+                trace, cpu->cp15.tpidrprw, owner,
+                cpu->r[13]);
+        if (event) {
+            event->callback_epilogue_reached = true;
+            event->callback_epilogue_at = at;
+            event->open = false;
+        }
+        break;
+    }
+    default:
+        break;
+    }
+}
+
+static void applebaseband_note_interest_wrapper(
+        applebaseband_trace_t *trace, arm_cpu_t *cpu,
+        uint64_t at, uint32_t pc) {
+    if (!trace || !cpu) return;
+    trace->interest_wrapper_hits++;
+    uint32_t service = cpu->r[0];
+    uint32_t port = cpu->r[2];
+    uint32_t actual_vtable = 0;
+    uint32_t failure_va = 0, failure_fsr = 0;
+    if (!applebaseband_object_vtable_matches(
+            cpu, service, APPLEBASEBAND_VTABLE,
+            &actual_vtable, &failure_va, &failure_fsr)) {
+        trace->interest_service_rejects++;
+        if (!actual_vtable)
+            trace->lifecycle_uncertain = true;
+        return;
+    }
+
+    applebaseband_port_identity_t identity;
+    applebaseband_port_identity_capture(&identity, cpu, port);
+    bool thread_identity_readable = false;
+    bool port_identity_readable = false;
+    bool thread_is_commcenter =
+        applebaseband_thread_is_commcenter(
+            cpu, cpu->cp15.tpidrprw,
+            &thread_identity_readable);
+    bool port_is_commcenter =
+        applebaseband_port_identity_is_commcenter(
+            &identity, &port_identity_readable);
+    if ((thread_identity_readable && !thread_is_commcenter) ||
+        (port_identity_readable && !port_is_commcenter))
+        return;
+    if (!thread_identity_readable ||
+        !port_identity_readable) {
+        trace->interest_pointer_rejects++;
+        trace->lifecycle_uncertain = true;
+        return;
+    }
+
+    uint64_t mqueue64 =
+        (uint64_t)port + SPRINGBOARD_COMMCENTER_MQUEUE_PORT_DELTA;
+    uint32_t mqueue = 0;
+    if (!springboard_commcenter_checked_field_va(
+            port, 0u, g_virt_base, NULL) ||
+        mqueue64 > UINT32_MAX ||
+        !springboard_commcenter_checked_field_va(
+            (uint32_t)mqueue64, 0u, g_virt_base, &mqueue)) {
+        trace->interest_pointer_rejects++;
+        return;
+    }
+    mqueue = (uint32_t)mqueue64;
+
+    int existing =
+        applebaseband_interest_find(trace, service, port);
+    if (existing >= 0) {
+        applebaseband_interest_t *retained =
+            &trace->interests[(unsigned)existing];
+        if (retained->stale || retained->live_uncertain ||
+            !applebaseband_port_identity_same(
+                &retained->baseline_identity, &identity)) {
+            trace->interest_pointer_rejects++;
+            trace->lifecycle_uncertain = true;
+            return;
+        }
+    }
+
+    int slot = applebaseband_interest_allocate(
+        trace, service, port, mqueue);
+    if (slot < 0) return;
+    applebaseband_interest_t *interest =
+        &trace->interests[(unsigned)slot];
+    if (!interest->registrations) {
+        interest->first_at = at;
+        interest->baseline_identity = identity;
+        interest->last_identity = identity;
+        interest->baseline_receiver_is_commcenter = true;
+        interest->baseline_receiver_identity_readable = true;
+    }
+    interest->registrations++;
+    interest->last_at = at;
+    interest->wrapper_pc = pc;
+    interest->last_thread = cpu->cp15.tpidrprw;
+    interest->last_register_call_seen = false;
+    interest->last_register_call_service_matches = false;
+    interest->last_register_result_seen = false;
+    interest->last_register_result_nonzero = false;
+    (void)applebaseband_pending_interest_begin(
+        trace, cpu->cp15.tpidrprw, (unsigned)slot, pc,
+        cpu->r[13], at);
+}
+
+static void applebaseband_note_register_interest(
+        applebaseband_trace_t *trace, arm_cpu_t *cpu,
+        uint64_t at, uint32_t pc) {
+    if (!trace || !cpu) return;
+    applebaseband_pending_interest_t *pending =
+        applebaseband_pending_interest_find(
+            trace, cpu->cp15.tpidrprw, true);
+    if (!pending ||
+        pending->interest_slot >= APPLEBASEBAND_INTEREST_CAP)
+        return;
+    applebaseband_interest_t *interest =
+        &trace->interests[pending->interest_slot];
+    if (!interest->occupied || interest->stale ||
+        interest->live_uncertain) {
+        pending->active = false;
+        return;
+    }
+
+    if (cpu->r[13] != pending->register_frame_sp) {
+        trace->pending_interest_frame_mismatches++;
+        trace->lifecycle_uncertain = true;
+        pending->active = false;
+        return;
+    }
+
+    if (pc == APPLEBASEBAND_REGISTER_INTEREST_CALL_PC) {
+        pending->call_seen = true;
+        pending->call_service_matches =
+            cpu->r[0] == interest->service;
+        pending->notification_object = cpu->r[3];
+        interest->last_register_call_seen = true;
+        interest->last_register_call_service =
+            cpu->r[0];
+        interest->last_register_call_service_matches =
+            pending->call_service_matches;
+        return;
+    }
+    if (pc != APPLEBASEBAND_REGISTER_INTEREST_RESULT_PC ||
+        !pending->call_seen)
+        return;
+
+    interest->last_register_result_seen = true;
+    interest->last_register_result = cpu->r[0];
+    interest->last_register_result_nonzero =
+        cpu->r[0] != 0u;
+    if (pending->call_service_matches && cpu->r[0]) {
+        if (!interest->successful_registrations)
+            interest->first_success_at = at;
+        interest->successful_registrations++;
+        interest->last_success_at = at;
+        if (!applebaseband_interest_add_notifier(
+                trace, interest,
+                pending->notification_object))
+            trace->lifecycle_uncertain = true;
+    }
+}
+
+static void applebaseband_note_interest_wrapper_return(
+        applebaseband_trace_t *trace, const arm_cpu_t *cpu,
+        uint32_t pc) {
+    if (!trace || !cpu) return;
+    applebaseband_pending_interest_t *pending =
+        applebaseband_pending_interest_find(
+            trace, cpu->cp15.tpidrprw, true);
+    if (!pending) return;
+    uint32_t expected =
+        pending->wrapper_pc ==
+            APPLEBASEBAND_INTEREST_WRAPPER_64_PC
+        ? APPLEBASEBAND_INTEREST_WRAPPER_64_RETURN_PC
+        : APPLEBASEBAND_INTEREST_WRAPPER_32_RETURN_PC;
+    if (pc != expected ||
+        cpu->r[13] != pending->wrapper_return_sp) {
+        trace->wrapper_return_mismatches++;
+        trace->lifecycle_uncertain = true;
+        pending->active = false;
+        return;
+    }
+    pending->active = false;
+}
+
+static void applebaseband_note_message_clients(
+        applebaseband_trace_t *trace, arm_cpu_t *cpu,
+        uint64_t at, uint32_t pc) {
+    if (!trace || !cpu) return;
+    uint32_t thread = cpu->cp15.tpidrprw;
+    if (pc == APPLEBASEBAND_MESSAGE_CLIENTS_PC) {
+        applebaseband_message_frame_t *frame =
+            applebaseband_message_frame_begin(
+                trace, thread, cpu->r[13], cpu->r[14],
+                cpu->r[0], cpu->r[1]);
+        if (!frame) return;
+        uint32_t ignored = 0;
+        if (!applebaseband_message_is_reset(cpu->r[1]) ||
+            !applebaseband_object_vtable_matches(
+                cpu, cpu->r[0], APPLEBASEBAND_VTABLE,
+                &ignored, NULL, NULL))
+            return;
+        applebaseband_dispatch_event_t *event =
+            applebaseband_dispatch_find_callback_frame(
+                trace, thread, cpu->r[0], cpu->r[13]);
+        if (!event || event->message != cpu->r[1])
+            return;
+        frame->linked_event = true;
+        frame->event_sequence = event->sequence;
+        event->message_clients_seen = true;
+        event->message_clients_at = at;
+        event->message_clients_entry_sp = frame->entry_sp;
+        event->message_clients_frame_sp = frame->frame_sp;
+        event->message_clients_lr = frame->entry_lr;
+        return;
+    }
+    if (pc == APPLEBASEBAND_CLIENT_DELIVERY_PC) {
+        applebaseband_message_frame_t *frame =
+            applebaseband_message_frame_top(trace, thread);
+        if (!frame || !frame->linked_event ||
+            frame->service != cpu->r[0] ||
+            frame->message != cpu->r[1])
+            return;
+        applebaseband_dispatch_event_t *event =
+            applebaseband_dispatch_find_sequence(
+                trace, frame->event_sequence);
+        if (!event || !event->open ||
+            !event->message_clients_seen)
+            return;
+        event->client_delivery_hits++;
+        event->last_client = cpu->r[2];
+        event->last_client_vtable_readable =
+            springboard_commcenter_read_kernel_field(
+                cpu, event->last_client, 0u,
+                &event->last_client_vtable, NULL, NULL);
+        return;
+    }
+    if (pc == APPLEBASEBAND_MESSAGE_CLIENTS_RETURN_PC) {
+        applebaseband_message_frame_t *frame =
+            applebaseband_message_frame_find_return(
+                trace, thread, cpu->r[13]);
+        if (!frame) {
+            trace->message_frame_mismatches++;
+            trace->frame_uncertain = true;
+            return;
+        }
+        if (frame->linked_event) {
+            applebaseband_dispatch_event_t *event =
+                applebaseband_dispatch_find_sequence(
+                    trace, frame->event_sequence);
+            if (event && event->open) {
+                event->message_clients_epilogue_reached = true;
+                event->message_clients_epilogue_at = at;
+            } else {
+                trace->message_frame_mismatches++;
+                trace->frame_uncertain = true;
+            }
+        }
+        frame->active = false;
+    }
+}
+
+static void applebaseband_note_notification(
+        applebaseband_trace_t *trace, arm_cpu_t *cpu,
+        uint64_t at, uint32_t pc) {
+    if (!trace || !cpu) return;
+    uint32_t thread = cpu->cp15.tpidrprw;
+    if (pc == APPLEBASEBAND_NOTIFICATION_HANDLER_PC) {
+        applebaseband_handler_frame_t *handler_frame =
+            applebaseband_handler_frame_begin(
+                trace, thread, cpu->r[13], cpu->r[14],
+                cpu->r[3], cpu->r[2]);
+        if (!handler_frame) return;
+        uint32_t ignored = 0;
+        if (!applebaseband_message_is_reset(cpu->r[2]) ||
+            !applebaseband_object_vtable_matches(
+                cpu, cpu->r[3], APPLEBASEBAND_VTABLE,
+                &ignored, NULL, NULL))
+            return;
+        applebaseband_message_frame_t *message_frame =
+            applebaseband_message_frame_top(trace, thread);
+        applebaseband_notification_event_t *event =
+            applebaseband_notification_begin(
+            trace, at, cpu->r[0], cpu->r[3],
+            cpu->r[2], thread, cpu->r[13],
+            handler_frame->frame_sp, cpu->r[14],
+            message_frame);
+        if (event) {
+            handler_frame->linked_event = true;
+            handler_frame->event_sequence = event->sequence;
+        }
+        return;
+    }
+
+    applebaseband_handler_frame_t *handler_frame =
+        applebaseband_handler_frame_find_exact(
+            trace, thread, cpu->r[13]);
+    if (!handler_frame) {
+        trace->handler_frame_mismatches++;
+        trace->frame_uncertain = true;
+        return;
+    }
+    applebaseband_notification_event_t *event =
+        handler_frame->linked_event
+        ? applebaseband_notification_find_sequence(
+            trace, handler_frame->event_sequence)
+        : NULL;
+    if (handler_frame->linked_event &&
+        (!event || !event->open)) {
+        trace->handler_frame_mismatches++;
+        trace->frame_uncertain = true;
+        if (pc == APPLEBASEBAND_NOTIFICATION_RETURN_PC ||
+            pc == APPLEBASEBAND_NOTIFICATION_SPECIAL_RETURN_PC)
+            handler_frame->active = false;
+        return;
+    }
+    if (pc == APPLEBASEBAND_NOTIFICATION_SEND_PC) {
+        if (!event) return;
+        if (event->send_seen) {
+            trace->notification_send_repeats++;
+            if (!event->send_repeated)
+                trace->notification_route_binding_uncertain++;
+            applebaseband_notification_reject_repeated_send(
+                event, at);
+            return;
+        }
+        event->send_seen = true;
+        event->send_at = at;
+        if (!applebaseband_notification_header_capture(
+                event, cpu, cpu->r[0], cpu->r[1])) {
+            trace->notification_send_header_failures++;
+            return;
+        }
+        trace->notification_send_headers++;
+        int slot = applebaseband_interest_find(
+            trace, event->service, event->destination);
+        if (slot < 0) return;
+        applebaseband_interest_t *interest =
+            &trace->interests[(unsigned)slot];
+        if (!applebaseband_interest_has_active_notifier(
+                interest, event->notifier) ||
+            !applebaseband_interest_validate_live(
+                trace, interest, cpu))
+            return;
+        event->interest_slot = (uint8_t)slot;
+        event->destination_matches_interest = true;
+        event->destination_registration_succeeded = true;
+        trace->notification_destination_matches++;
+        trace->notification_successful_destination_matches++;
+        return;
+    }
+    if (pc == APPLEBASEBAND_NOTIFICATION_SEND_RESULT_PC) {
+        if (!event || event->send_repeated ||
+            !event->send_seen)
+            return;
+        event->send_result_seen = true;
+        event->send_result_at = at;
+        event->send_result = cpu->r[0];
+        return;
+    }
+    if (pc == APPLEBASEBAND_NOTIFICATION_RETURN_PC ||
+        pc == APPLEBASEBAND_NOTIFICATION_SPECIAL_RETURN_PC) {
+        if (event) {
+            event->epilogue_reached = true;
+            event->return_at = at;
+            event->open = false;
+        }
+        handler_frame->active = false;
+    }
+}
+
+static void applebaseband_note_mqueue_receive(
+        applebaseband_trace_t *trace, arm_cpu_t *cpu,
+        uint64_t at) {
+    if (!trace || !cpu || !trace->retained_interest_count)
+        return;
+    int slot = applebaseband_interest_find_mqueue(
+        trace, cpu->r[0], true);
+    if (slot < 0) return;
+    applebaseband_interest_t *interest =
+        &trace->interests[(unsigned)slot];
+    if (!applebaseband_interest_validate_live(
+            trace, interest, cpu))
+        return;
+    if (!interest->receive_hits)
+        interest->first_receive_at = at;
+    interest->receive_hits++;
+    interest->last_receive_at = at;
+    interest->last_receive_thread = cpu->cp15.tpidrprw;
+    trace->receive_on_registered_port++;
+    bool readable = false;
+    if (applebaseband_thread_is_commcenter(
+            cpu, cpu->cp15.tpidrprw, &readable)) {
+        interest->receive_commcenter_matches++;
+        trace->receive_on_registered_port_commcenter++;
+    } else if (!readable) {
+        interest->receive_identity_unreadable++;
+        trace->receive_identity_unreadable++;
+    }
+}
+
+static void applebaseband_note_notification_route(
+        applebaseband_trace_t *trace, arm_cpu_t *cpu,
+        uint64_t at, uint32_t pc) {
+    if (!trace || !cpu || !trace->retained_interest_count)
+        return;
+    uint32_t mqueue = 0;
+    uint32_t kmsg = 0;
+    uint32_t route_bit = 0;
+    switch (pc) {
+    case SPRINGBOARD_COMMCENTER_POST_RECEIVER_WOKEN_PC:
+        mqueue = cpu->r[5];
+        kmsg = cpu->r[6];
+        route_bit = APPLEBASEBAND_ROUTE_RECEIVER_WOKEN;
+        break;
+    case SPRINGBOARD_COMMCENTER_POST_NO_ELIGIBLE_RECEIVER_PC:
+        mqueue = cpu->r[5];
+        kmsg = cpu->r[6];
+        route_bit = APPLEBASEBAND_ROUTE_NO_ELIGIBLE_RECEIVER;
+        break;
+    case SPRINGBOARD_COMMCENTER_QUEUE_FULL_SLOW_PC:
+        mqueue = cpu->r[4];
+        kmsg = cpu->r[8];
+        route_bit = APPLEBASEBAND_ROUTE_QUEUE_FULL;
+        break;
+    case SPRINGBOARD_COMMCENTER_MARK_FULLWAITERS_PC:
+        mqueue = cpu->r[4];
+        kmsg = cpu->r[8];
+        route_bit = APPLEBASEBAND_ROUTE_MARK_FULLWAITERS;
+        break;
+    case SPRINGBOARD_COMMCENTER_IMMEDIATE_SLOT_RESERVE_PC:
+        mqueue = cpu->r[4];
+        kmsg = cpu->r[8];
+        route_bit = APPLEBASEBAND_ROUTE_IMMEDIATE_RESERVE;
+        break;
+    default:
+        return;
+    }
+
+    int slot = applebaseband_interest_find_mqueue(
+        trace, mqueue, true);
+    if (slot < 0) return;
+    applebaseband_interest_t *interest =
+        &trace->interests[(unsigned)slot];
+    if (!applebaseband_interest_validate_live(
+            trace, interest, cpu))
+        return;
+    if (!interest->first_route_at)
+        interest->first_route_at = at;
+    interest->last_route_at = at;
+    switch (route_bit) {
+    case APPLEBASEBAND_ROUTE_RECEIVER_WOKEN:
+        interest->receiver_woken_hits++;
+        break;
+    case APPLEBASEBAND_ROUTE_NO_ELIGIBLE_RECEIVER:
+        interest->no_eligible_receiver_hits++;
+        break;
+    case APPLEBASEBAND_ROUTE_QUEUE_FULL:
+        interest->queue_full_hits++;
+        break;
+    case APPLEBASEBAND_ROUTE_MARK_FULLWAITERS:
+        interest->fullwaiters_store_hits++;
+        break;
+    case APPLEBASEBAND_ROUTE_IMMEDIATE_RESERVE:
+        interest->immediate_reserve_hits++;
+        break;
+    default:
+        break;
+    }
+
+    applebaseband_handler_frame_t *handler_frame =
+        applebaseband_handler_frame_top(
+            trace, cpu->cp15.tpidrprw);
+    if (!handler_frame || !handler_frame->linked_event)
+        return;
+    applebaseband_notification_event_t *event =
+        applebaseband_notification_find_sequence(
+            trace, handler_frame->event_sequence);
+    if (!event || !event->open || event->send_repeated ||
+        !event->send_seen || !event->send_header_readable ||
+        !event->send_size_matches_header ||
+        !event->destination_matches_interest ||
+        !event->destination_registration_succeeded)
+        return;
+    if (!applebaseband_notification_matching_dispatch(
+            trace, event, true)) {
+        trace->notification_dispatch_rejects++;
+        return;
+    }
+    if (event->interest_slot != (uint8_t)slot ||
+        event->service != interest->service ||
+        event->destination != interest->port ||
+        !applebaseband_interest_has_active_notifier(
+            interest, event->notifier))
+        return;
+    event->route_candidates++;
+    springboard_commcenter_kmsg_t candidate;
+    if (!springboard_commcenter_kmsg_capture(
+            &candidate, cpu, kmsg, false)) {
+        event->route_capture_failures++;
+        trace->notification_route_capture_failures++;
+        return;
+    }
+    if (!applebaseband_notification_route_kmsg_matches(
+            event, &candidate)) {
+        event->route_semantic_mismatches++;
+        trace->notification_route_semantic_mismatches++;
+        return;
+    }
+    if (trace->frame_uncertain ||
+        trace->lifecycle_uncertain) {
+        event->route_binding_uncertain = true;
+        trace->notification_route_binding_uncertain++;
+        return;
+    }
+    if (!applebaseband_notification_commit_route_kmsg(
+            event, &candidate)) {
+        event->route_semantic_mismatches++;
+        trace->notification_route_semantic_mismatches++;
+        return;
+    }
+    trace->notification_route_bound++;
+    if (!event->first_route_at) event->first_route_at = at;
+    event->last_route_at = at;
+    event->route_bits |= route_bit;
+    if (route_bit == APPLEBASEBAND_ROUTE_RECEIVER_WOKEN) {
+        trace->notification_receiver_woken++;
+        event->selected_thread = cpu->r[4];
+        bool readable = false;
+        if (applebaseband_thread_is_commcenter(
+                cpu, event->selected_thread, &readable)) {
+            event->receiver_identity_readable = true;
+            event->receiver_is_commcenter = true;
+            interest->receiver_woken_commcenter_matches++;
+            trace->notification_commcenter_receiver_woken++;
+        } else if (readable) {
+            event->receiver_identity_readable = true;
+        } else {
+            interest->receiver_woken_identity_unreadable++;
+            trace->notification_receiver_identity_unreadable++;
+        }
+    } else if (route_bit ==
+               APPLEBASEBAND_ROUTE_NO_ELIGIBLE_RECEIVER) {
+        trace->notification_no_eligible_receiver++;
+    } else if (route_bit == APPLEBASEBAND_ROUTE_QUEUE_FULL) {
+        trace->notification_queue_full++;
+    }
+}
+
+static inline void applebaseband_note_instruction(
+        arm_cpu_t *cpu, uint64_t at, uint32_t pc) {
+    if (!G.applebaseband_trace_config.enabled || !cpu) return;
+    pc &= ~1u;
+    applebaseband_trace_t *trace = &G.applebaseband_trace;
+    switch (pc) {
+    case APPLEBASEBAND_SETUP_RESET_COMMITTED_PC:
+    case APPLEBASEBAND_SETUP_EVENT_RESULT_PC:
+    case APPLEBASEBAND_SETUP_EVENT_COMMITTED_PC:
+    case APPLEBASEBAND_SETUP_ENABLE_PC:
+        applebaseband_note_setup(trace, cpu, pc);
+        break;
+    case APPLEBASEBAND_RESET_CALLBACK_PC:
+    case APPLEBASEBAND_RESET_READ_RETURN_PC:
+    case APPLEBASEBAND_RESET_CHANGED_PC:
+    case APPLEBASEBAND_RESET_LOW_SUPPRESS_PC:
+    case APPLEBASEBAND_RESET_DISPATCH_PC:
+    case APPLEBASEBAND_RESET_RETURN_PC:
+        applebaseband_note_reset(trace, cpu, at, pc);
+        break;
+    case APPLEBASEBAND_INTEREST_WRAPPER_64_PC:
+    case APPLEBASEBAND_INTEREST_WRAPPER_32_PC:
+        applebaseband_note_interest_wrapper(
+            trace, cpu, at, pc);
+        break;
+    case APPLEBASEBAND_REGISTER_INTEREST_CALL_PC:
+    case APPLEBASEBAND_REGISTER_INTEREST_RESULT_PC:
+        applebaseband_note_register_interest(
+            trace, cpu, at, pc);
+        break;
+    case APPLEBASEBAND_INTEREST_WRAPPER_64_RETURN_PC:
+    case APPLEBASEBAND_INTEREST_WRAPPER_32_RETURN_PC:
+        applebaseband_note_interest_wrapper_return(
+            trace, cpu, pc);
+        break;
+    case APPLEBASEBAND_MESSAGE_CLIENTS_PC:
+    case APPLEBASEBAND_MESSAGE_CLIENTS_RETURN_PC:
+    case APPLEBASEBAND_CLIENT_DELIVERY_PC:
+        applebaseband_note_message_clients(
+            trace, cpu, at, pc);
+        break;
+    case APPLEBASEBAND_NOTIFICATION_HANDLER_PC:
+    case APPLEBASEBAND_NOTIFICATION_SEND_PC:
+    case APPLEBASEBAND_NOTIFICATION_SEND_RESULT_PC:
+    case APPLEBASEBAND_NOTIFICATION_RETURN_PC:
+    case APPLEBASEBAND_NOTIFICATION_SPECIAL_RETURN_PC:
+        applebaseband_note_notification(
+            trace, cpu, at, pc);
+        break;
+    case APPLEBASEBAND_NOTIFICATION_SET_PC:
+        if (trace->retained_interest_count)
+            (void)applebaseband_interest_set_notifier_active(
+                trace, cpu->r[0], cpu->r[1] != 0u,
+                false);
+        break;
+    case APPLEBASEBAND_NOTIFICATION_FREE_PC:
+        if (trace->retained_interest_count)
+            (void)applebaseband_interest_set_notifier_active(
+                trace, cpu->r[0], false, true);
+        break;
+    case APPLEBASEBAND_PORT_DESTROY_PC:
+        applebaseband_note_port_destroy(trace, cpu->r[0]);
+        break;
+    case APPLEBASEBAND_MQUEUE_RECEIVE_PC:
+        applebaseband_note_mqueue_receive(trace, cpu, at);
+        break;
+    case SPRINGBOARD_COMMCENTER_POST_RECEIVER_WOKEN_PC:
+    case SPRINGBOARD_COMMCENTER_POST_NO_ELIGIBLE_RECEIVER_PC:
+    case SPRINGBOARD_COMMCENTER_QUEUE_FULL_SLOW_PC:
+    case SPRINGBOARD_COMMCENTER_MARK_FULLWAITERS_PC:
+    case SPRINGBOARD_COMMCENTER_IMMEDIATE_SLOT_RESERVE_PC:
+        applebaseband_note_notification_route(
+            trace, cpu, at, pc);
+        break;
+    default:
+        break;
+    }
+}
+
+static bool springboard_commcenter_kmsg_capture(
+        springboard_commcenter_kmsg_t *observation,
+        arm_cpu_t *cpu, uint32_t kmsg, bool capture_links) {
+    if (!observation || !cpu) return false;
+    memset(observation, 0, sizeof *observation);
+    observation->kmsg = kmsg;
+    if (!springboard_commcenter_checked_field_va(
+            kmsg, 0, g_virt_base, NULL)) {
+        observation->failure_va = kmsg;
+        return false;
+    }
+    if (capture_links &&
+        (!springboard_commcenter_read_kernel_field(
+             cpu, kmsg, SPRINGBOARD_COMMCENTER_KMSG_NEXT_OFFSET,
+             &observation->next, &observation->failure_va,
+             &observation->failure_fsr) ||
+         !springboard_commcenter_read_kernel_field(
+             cpu, kmsg, SPRINGBOARD_COMMCENTER_KMSG_PREV_OFFSET,
+             &observation->prev, &observation->failure_va,
+             &observation->failure_fsr)))
+        return false;
+    if (!springboard_commcenter_read_kernel_field(
+            cpu, kmsg, SPRINGBOARD_COMMCENTER_KMSG_HEADER_OFFSET,
+            &observation->header, &observation->failure_va,
+            &observation->failure_fsr) ||
+        !springboard_commcenter_checked_field_va(
+            observation->header, 0, g_virt_base, NULL)) {
+        if (!observation->failure_va)
+            observation->failure_va = observation->header;
+        return false;
+    }
+
+    uint32_t raw_id = 0;
+    if (!springboard_commcenter_read_kernel_field(
+            cpu, observation->header,
+            SPRINGBOARD_COMMCENTER_KERNEL_HEADER_BITS_OFFSET,
+            &observation->bits, &observation->failure_va,
+            &observation->failure_fsr) ||
+        !springboard_commcenter_read_kernel_field(
+            cpu, observation->header,
+            SPRINGBOARD_COMMCENTER_KERNEL_HEADER_SIZE_OFFSET,
+            &observation->size, &observation->failure_va,
+            &observation->failure_fsr) ||
+        !springboard_commcenter_read_kernel_field(
+            cpu, observation->header,
+            SPRINGBOARD_COMMCENTER_KERNEL_HEADER_DESTINATION_OFFSET,
+            &observation->destination, &observation->failure_va,
+            &observation->failure_fsr) ||
+        !springboard_commcenter_read_kernel_field(
+            cpu, observation->header,
+            SPRINGBOARD_COMMCENTER_KERNEL_HEADER_REPLY_OFFSET,
+            &observation->reply, &observation->failure_va,
+            &observation->failure_fsr) ||
+        !springboard_commcenter_read_kernel_field(
+            cpu, observation->header,
+            SPRINGBOARD_COMMCENTER_KERNEL_HEADER_ID_OFFSET,
+            &raw_id, &observation->failure_va,
+            &observation->failure_fsr))
+        return false;
+    observation->id = (int32_t)raw_id;
+    observation->complete = true;
+    return true;
+}
+
+static void springboard_commcenter_queue_snapshot(
+        springboard_commcenter_probe_t *probe, arm_cpu_t *cpu) {
+    if (!probe || !cpu) return;
+    probe->queue_snapshot_attempted = true;
+    if (!springboard_commcenter_read_kernel_field(
+            cpu, probe->mqueue,
+            SPRINGBOARD_COMMCENTER_MQUEUE_HEAD_OFFSET,
+            &probe->queue_head, &probe->queue_failure_va,
+            &probe->queue_failure_fsr))
+        return;
+    probe->queue_head_readable = true;
+    if (!probe->queue_head) {
+        probe->queue_closed = true;
+        probe->queue_consistent = true;
+        return;
+    }
+    if (!probe->msgcount ||
+        !springboard_commcenter_checked_field_va(
+            probe->queue_head, 0, g_virt_base, NULL)) {
+        probe->queue_failure_va = probe->queue_head;
+        return;
+    }
+
+    uint32_t current = probe->queue_head;
+    uint32_t previous = 0;
+    uint32_t limit = probe->msgcount;
+    if (limit > SPRINGBOARD_COMMCENTER_QUEUE_NODE_CAP) {
+        limit = SPRINGBOARD_COMMCENTER_QUEUE_NODE_CAP;
+        probe->queue_truncated = true;
+    }
+    bool structurally_consistent = true;
+    for (uint32_t i = 0; i < limit; i++) {
+        for (uint32_t prior = 0; prior < i; prior++) {
+            if (probe->queue_nodes[prior].kmsg != current) continue;
+            probe->queue_failure_va = current;
+            structurally_consistent = false;
+            return;
+        }
+        springboard_commcenter_kmsg_t *node =
+            &probe->queue_nodes[i];
+        if (!springboard_commcenter_kmsg_capture(
+                node, cpu, current, true)) {
+            probe->queue_failure_va = node->failure_va;
+            probe->queue_failure_fsr = node->failure_fsr;
+            return;
+        }
+        probe->queue_linked_count++;
+        if (node->destination != probe->port)
+            structurally_consistent = false;
+        if (i && node->prev != previous)
+            structurally_consistent = false;
+        if (node->next == probe->queue_head) {
+            probe->queue_closed = true;
+            probe->queue_truncated = false;
+            if (probe->queue_nodes[0].prev != current)
+                structurally_consistent = false;
+            break;
+        }
+        previous = current;
+        current = node->next;
+        if (!springboard_commcenter_checked_field_va(
+                current, 0, g_virt_base, NULL)) {
+            probe->queue_failure_va = current;
+            return;
+        }
+    }
+    if (!probe->queue_closed && !probe->queue_truncated)
+        probe->queue_failure_va = current;
+    probe->queue_consistent =
+        probe->queue_closed && structurally_consistent &&
+        probe->queue_linked_count <= probe->msgcount;
+}
+
+/*
+ * port+0x3c is a union: it is ip_receiver only while the active port has a
+ * real receiver name.  An active port with name zero is in transit and the
+ * same word is ip_destination; a destroyed/inactive object can hold a
+ * timestamp there.  Keep the authority decision in one fail-closed predicate
+ * so a coherent-looking destination chain cannot be reported as ownership.
+ */
+static bool springboard_commcenter_owner_chain_is_authoritative(
+        const springboard_commcenter_probe_t *probe) {
+    const uint32_t required =
+        SPRINGBOARD_COMMCENTER_VALID_MQUEUE |
+        SPRINGBOARD_COMMCENTER_VALID_PORT |
+        SPRINGBOARD_COMMCENTER_VALID_IO_BITS |
+        SPRINGBOARD_COMMCENTER_VALID_PORT_ACTIVE |
+        SPRINGBOARD_COMMCENTER_VALID_KMSG |
+        SPRINGBOARD_COMMCENTER_VALID_KMSG_HEADER |
+        SPRINGBOARD_COMMCENTER_VALID_KERNEL_DESTINATION_MATCH |
+        SPRINGBOARD_COMMCENTER_VALID_KERNEL_ID_MATCH |
+        SPRINGBOARD_COMMCENTER_VALID_RECEIVER_NAME |
+        SPRINGBOARD_COMMCENTER_VALID_RECEIVER_NAME_AUTHORITY |
+        SPRINGBOARD_COMMCENTER_VALID_RECEIVER_SPACE |
+        SPRINGBOARD_COMMCENTER_VALID_RECEIVER_SPACE_POINTER |
+        SPRINGBOARD_COMMCENTER_VALID_RECEIVER_SPACE_ACTIVE |
+        SPRINGBOARD_COMMCENTER_VALID_RECEIVER_TASK |
+        SPRINGBOARD_COMMCENTER_VALID_RECEIVER_TASK_POINTER |
+        SPRINGBOARD_COMMCENTER_VALID_RECEIVER_TASK_SPACE |
+        SPRINGBOARD_COMMCENTER_VALID_RECEIVER_TASK_SPACE_MATCH |
+        SPRINGBOARD_COMMCENTER_VALID_RECEIVER_PROC |
+        SPRINGBOARD_COMMCENTER_VALID_RECEIVER_PROC_POINTER |
+        SPRINGBOARD_COMMCENTER_VALID_RECEIVER_PID;
+    return probe &&
+        (probe->valid_bits & required) == required &&
+        probe->mqueue != 0u &&
+        probe->port != 0u &&
+        probe->port <=
+            UINT32_MAX - SPRINGBOARD_COMMCENTER_MQUEUE_PORT_DELTA &&
+        probe->mqueue ==
+            probe->port + SPRINGBOARD_COMMCENTER_MQUEUE_PORT_DELTA &&
+        probe->incoming.complete &&
+        probe->incoming.kmsg != 0u &&
+        probe->incoming.header != 0u &&
+        probe->incoming.destination == probe->port &&
+        (uint32_t)probe->incoming.id ==
+            SPRINGBOARD_COMMCENTER_INITIAL_ID &&
+        probe->incoming_destination_matches &&
+        probe->incoming_id_matches &&
+        springboard_commcenter_receiver_name_is_authoritative(
+            probe->receiver_name) &&
+        (probe->io_bits & SPRINGBOARD_COMMCENTER_PORT_ACTIVE) != 0u &&
+        (probe->io_bits & SPRINGBOARD_COMMCENTER_PORT_IO_TYPE_MASK) == 0u &&
+        probe->receiver_space != 0u &&
+        probe->receiver_space_active == 1u &&
+        probe->receiver_task != 0u &&
+        probe->receiver_task_space == probe->receiver_space &&
+        probe->receiver_proc != 0u &&
+        probe->receiver_pid <= INT32_MAX;
+}
+
+static bool springboard_commcenter_reserved_slots_exact(
+        const springboard_commcenter_probe_t *probe,
+        uint32_t *reserved_slots) {
+    if (reserved_slots) *reserved_slots = 0;
+    const uint32_t required =
+        SPRINGBOARD_COMMCENTER_VALID_MQUEUE |
+        SPRINGBOARD_COMMCENTER_VALID_PORT |
+        SPRINGBOARD_COMMCENTER_VALID_MSGCOUNT |
+        SPRINGBOARD_COMMCENTER_VALID_QLIMIT;
+    if (!probe ||
+        (probe->valid_bits & required) != required ||
+        !probe->mqueue ||
+        !probe->port ||
+        probe->port >
+            UINT32_MAX - SPRINGBOARD_COMMCENTER_MQUEUE_PORT_DELTA ||
+        probe->mqueue !=
+            probe->port + SPRINGBOARD_COMMCENTER_MQUEUE_PORT_DELTA ||
+        !probe->queue_snapshot_attempted ||
+        !probe->queue_head_readable ||
+        !probe->queue_closed ||
+        !probe->queue_consistent ||
+        probe->queue_truncated ||
+        probe->queue_failure_va ||
+        probe->queue_failure_fsr ||
+        probe->msgcount > probe->qlimit ||
+        probe->queue_linked_count >
+            SPRINGBOARD_COMMCENTER_QUEUE_NODE_CAP ||
+        probe->queue_linked_count > probe->msgcount ||
+        ((probe->queue_head == 0u) !=
+         (probe->queue_linked_count == 0u)))
+        return false;
+    for (uint32_t i = 0; i < probe->queue_linked_count; i++) {
+        const springboard_commcenter_kmsg_t *node =
+            &probe->queue_nodes[i];
+        const springboard_commcenter_kmsg_t *previous =
+            &probe->queue_nodes[
+                (i + probe->queue_linked_count - 1u) %
+                    probe->queue_linked_count];
+        const springboard_commcenter_kmsg_t *next =
+            &probe->queue_nodes[
+                (i + 1u) % probe->queue_linked_count];
+        if (!node->complete || !node->kmsg || !node->header ||
+            node->failure_va || node->failure_fsr ||
+            node->destination != probe->port ||
+            (i == 0u && probe->queue_head != node->kmsg) ||
+            node->prev != previous->kmsg ||
+            node->next != next->kmsg)
+            return false;
+        for (uint32_t prior = 0; prior < i; prior++)
+            if (probe->queue_nodes[prior].kmsg == node->kmsg)
+                return false;
+    }
+    if (reserved_slots)
+        *reserved_slots =
+            probe->msgcount - probe->queue_linked_count;
+    return true;
+}
+
 static void springboard_commcenter_probe_capture(
         springboard_mach_event_t *event, arm_cpu_t *cpu, uint64_t at) {
     if (!springboard_commcenter_user_header_signature_matches(event) || !cpu)
@@ -5992,13 +9999,55 @@ static void springboard_commcenter_probe_capture(
             &probe->io_bits))
         return;
     probe->stage = SPRINGBOARD_COMMCENTER_STAGE_PORT_ACTIVE;
-    if (!(probe->io_bits & SPRINGBOARD_COMMCENTER_PORT_ACTIVE)) {
+    if (!(probe->io_bits & SPRINGBOARD_COMMCENTER_PORT_ACTIVE) ||
+        (probe->io_bits &
+             SPRINGBOARD_COMMCENTER_PORT_IO_TYPE_MASK) != 0u) {
         probe->failure_va =
             probe->port +
                 SPRINGBOARD_COMMCENTER_PORT_IO_BITS_OFFSET;
         return;
     }
     probe->valid_bits |= SPRINGBOARD_COMMCENTER_VALID_PORT_ACTIVE;
+
+    probe->stage = SPRINGBOARD_COMMCENTER_STAGE_KMSG_POINTER;
+    if (!springboard_commcenter_validate_pointer(
+            probe, cpu->r[1],
+            SPRINGBOARD_COMMCENTER_VALID_KMSG,
+            SPRINGBOARD_COMMCENTER_STAGE_KMSG_POINTER))
+        return;
+    probe->stage = SPRINGBOARD_COMMCENTER_STAGE_KMSG_HEADER;
+    if (!springboard_commcenter_kmsg_capture(
+            &probe->incoming, cpu, cpu->r[1], false)) {
+        probe->failure_va = probe->incoming.failure_va;
+        probe->failure_fsr = probe->incoming.failure_fsr;
+        return;
+    }
+    probe->valid_bits |=
+        SPRINGBOARD_COMMCENTER_VALID_KMSG_HEADER;
+    probe->stage =
+        SPRINGBOARD_COMMCENTER_STAGE_KERNEL_DESTINATION_MATCH;
+    probe->incoming_destination_matches =
+        probe->incoming.destination == probe->port;
+    if (!probe->incoming_destination_matches) {
+        probe->failure_va =
+            probe->incoming.header +
+                SPRINGBOARD_COMMCENTER_KERNEL_HEADER_DESTINATION_OFFSET;
+        return;
+    }
+    probe->valid_bits |=
+        SPRINGBOARD_COMMCENTER_VALID_KERNEL_DESTINATION_MATCH;
+    probe->stage = SPRINGBOARD_COMMCENTER_STAGE_KERNEL_ID_MATCH;
+    probe->incoming_id_matches =
+        (uint32_t)probe->incoming.id ==
+            SPRINGBOARD_COMMCENTER_INITIAL_ID;
+    if (!probe->incoming_id_matches) {
+        probe->failure_va =
+            probe->incoming.header +
+                SPRINGBOARD_COMMCENTER_KERNEL_HEADER_ID_OFFSET;
+        return;
+    }
+    probe->valid_bits |=
+        SPRINGBOARD_COMMCENTER_VALID_KERNEL_ID_MATCH;
 
     if (!springboard_commcenter_read_field(
             probe, cpu, probe->mqueue,
@@ -6025,10 +10074,31 @@ static void springboard_commcenter_probe_capture(
             SPRINGBOARD_COMMCENTER_STAGE_FULLWAITERS,
             &probe->fullwaiters))
         return;
+    springboard_commcenter_queue_snapshot(probe, cpu);
 
     if (!springboard_commcenter_read_field(
             probe, cpu, probe->port,
-            SPRINGBOARD_COMMCENTER_PORT_RECEIVER_SPACE_OFFSET,
+            SPRINGBOARD_COMMCENTER_PORT_RECEIVER_NAME_OFFSET,
+            SPRINGBOARD_COMMCENTER_VALID_RECEIVER_NAME,
+            SPRINGBOARD_COMMCENTER_STAGE_RECEIVER_NAME,
+            &probe->receiver_name))
+        return;
+    probe->stage =
+        SPRINGBOARD_COMMCENTER_STAGE_RECEIVER_NAME_AUTHORITY;
+    if (!springboard_commcenter_receiver_name_is_authoritative(
+            probe->receiver_name)) {
+        probe->failure_va =
+            probe->port +
+                SPRINGBOARD_COMMCENTER_PORT_RECEIVER_NAME_OFFSET;
+        probe->failure_fsr = 0;
+        return;
+    }
+    probe->valid_bits |=
+        SPRINGBOARD_COMMCENTER_VALID_RECEIVER_NAME_AUTHORITY;
+
+    if (!springboard_commcenter_read_field(
+            probe, cpu, probe->port,
+            SPRINGBOARD_COMMCENTER_PORT_RECEIVER_OR_DESTINATION_OFFSET,
             SPRINGBOARD_COMMCENTER_VALID_RECEIVER_SPACE,
             SPRINGBOARD_COMMCENTER_STAGE_RECEIVER_SPACE,
             &probe->receiver_space) ||
@@ -6110,8 +10180,55 @@ static void springboard_commcenter_probe_capture(
         return;
     }
 
-    probe->stage = SPRINGBOARD_COMMCENTER_STAGE_COMPLETE;
-    probe->complete = true;
+    if (springboard_commcenter_owner_chain_is_authoritative(probe)) {
+        probe->stage = SPRINGBOARD_COMMCENTER_STAGE_COMPLETE;
+        probe->complete = true;
+    }
+}
+
+static bool springboard_commcenter_route_binding_matches(
+        const springboard_commcenter_probe_t *probe,
+        const arm_cpu_t *cpu, unsigned route) {
+    const uint32_t required =
+        SPRINGBOARD_COMMCENTER_VALID_MQUEUE |
+        SPRINGBOARD_COMMCENTER_VALID_PORT |
+        SPRINGBOARD_COMMCENTER_VALID_IO_BITS |
+        SPRINGBOARD_COMMCENTER_VALID_PORT_ACTIVE |
+        SPRINGBOARD_COMMCENTER_VALID_KMSG |
+        SPRINGBOARD_COMMCENTER_VALID_KMSG_HEADER |
+        SPRINGBOARD_COMMCENTER_VALID_KERNEL_DESTINATION_MATCH |
+        SPRINGBOARD_COMMCENTER_VALID_KERNEL_ID_MATCH;
+    if (!probe || !cpu ||
+        route >= SPRINGBOARD_COMMCENTER_ROUTE_COUNT ||
+        !probe->attempted ||
+        (probe->valid_bits & required) != required ||
+        probe->mqueue == 0u ||
+        probe->port == 0u ||
+        probe->port >
+            UINT32_MAX - SPRINGBOARD_COMMCENTER_MQUEUE_PORT_DELTA ||
+        probe->mqueue !=
+            probe->port + SPRINGBOARD_COMMCENTER_MQUEUE_PORT_DELTA ||
+        !(probe->io_bits & SPRINGBOARD_COMMCENTER_PORT_ACTIVE) ||
+        (probe->io_bits &
+             SPRINGBOARD_COMMCENTER_PORT_IO_TYPE_MASK) != 0u ||
+        !probe->incoming.complete ||
+        probe->incoming.kmsg == 0u ||
+        probe->incoming.header == 0u ||
+        probe->incoming.destination != probe->port ||
+        (uint32_t)probe->incoming.id !=
+            SPRINGBOARD_COMMCENTER_INITIAL_ID ||
+        !probe->incoming_destination_matches ||
+        !probe->incoming_id_matches)
+        return false;
+
+    if (route ==
+            SPRINGBOARD_COMMCENTER_ROUTE_POST_RECEIVER_WOKEN ||
+        route ==
+            SPRINGBOARD_COMMCENTER_ROUTE_POST_NO_ELIGIBLE_RECEIVER)
+        return cpu->r[5] == probe->mqueue &&
+            cpu->r[6] == probe->incoming.kmsg;
+    return cpu->r[4] == probe->mqueue &&
+        cpu->r[8] == probe->incoming.kmsg;
 }
 
 static void springboard_commcenter_route_note(
@@ -6127,11 +10244,30 @@ static void springboard_commcenter_route_note(
         uint32_t bit = UINT32_C(1) << i;
         springboard_commcenter_probe_t *probe =
             &event->commcenter_probe;
+        if (probe->route_candidate_hits[i] == UINT64_MAX) {
+            probe->route_counter_overflow[i] = true;
+            return;
+        }
+        probe->route_candidate_hits[i]++;
+        if (!springboard_commcenter_route_binding_matches(
+                probe, cpu, i)) {
+            if (probe->route_mismatch_hits[i] == UINT64_MAX) {
+                probe->route_counter_overflow[i] = true;
+                return;
+            }
+            if (!probe->route_mismatch_hits[i]) {
+                probe->route_mismatch_first_at[i] = at;
+                memcpy(probe->route_mismatch_first_r[i],
+                       cpu->r,
+                       sizeof probe->route_mismatch_first_r[i]);
+            }
+            probe->route_mismatch_hits[i]++;
+            return;
+        }
         if (!(probe->route_bits & bit)) {
             probe->route_first_at[i] = at;
             memcpy(probe->route_first_r[i], cpu->r,
                    sizeof probe->route_first_r[i]);
-            probe->route_first_r4[i] = cpu->r[4];
             probe->route_first_lr[i] = cpu->r[14];
         }
         probe->route_bits |= bit;
@@ -6434,6 +10570,543 @@ static void springboard_target_note_process_exit_entry(
     trace->exited_at = at;
 }
 
+static bool applebaseband_trace_selfcheck(void) {
+    static const uint32_t hook_pcs[] = {
+        APPLEBASEBAND_RESET_CALLBACK_PC,
+        APPLEBASEBAND_RESET_READ_RETURN_PC,
+        APPLEBASEBAND_RESET_CHANGED_PC,
+        APPLEBASEBAND_RESET_LOW_SUPPRESS_PC,
+        APPLEBASEBAND_RESET_DISPATCH_PC,
+        APPLEBASEBAND_RESET_RETURN_PC,
+        APPLEBASEBAND_SETUP_RESET_COMMITTED_PC,
+        APPLEBASEBAND_SETUP_EVENT_RESULT_PC,
+        APPLEBASEBAND_SETUP_EVENT_COMMITTED_PC,
+        APPLEBASEBAND_SETUP_ENABLE_PC,
+        APPLEBASEBAND_INTEREST_WRAPPER_64_PC,
+        APPLEBASEBAND_INTEREST_WRAPPER_32_PC,
+        APPLEBASEBAND_INTEREST_WRAPPER_64_RETURN_PC,
+        APPLEBASEBAND_INTEREST_WRAPPER_32_RETURN_PC,
+        APPLEBASEBAND_REGISTER_INTEREST_CALL_PC,
+        APPLEBASEBAND_REGISTER_INTEREST_RESULT_PC,
+        APPLEBASEBAND_MESSAGE_CLIENTS_PC,
+        APPLEBASEBAND_MESSAGE_CLIENTS_RETURN_PC,
+        APPLEBASEBAND_CLIENT_DELIVERY_PC,
+        APPLEBASEBAND_NOTIFICATION_HANDLER_PC,
+        APPLEBASEBAND_NOTIFICATION_SEND_PC,
+        APPLEBASEBAND_NOTIFICATION_SEND_RESULT_PC,
+        APPLEBASEBAND_NOTIFICATION_RETURN_PC,
+        APPLEBASEBAND_NOTIFICATION_SPECIAL_RETURN_PC,
+        APPLEBASEBAND_NOTIFICATION_SET_PC,
+        APPLEBASEBAND_NOTIFICATION_FREE_PC,
+        APPLEBASEBAND_PORT_DESTROY_PC,
+        APPLEBASEBAND_MQUEUE_RECEIVE_PC,
+        SPRINGBOARD_COMMCENTER_POST_RECEIVER_WOKEN_PC,
+        SPRINGBOARD_COMMCENTER_POST_NO_ELIGIBLE_RECEIVER_PC,
+        SPRINGBOARD_COMMCENTER_QUEUE_FULL_SLOW_PC,
+        SPRINGBOARD_COMMCENTER_MARK_FULLWAITERS_PC,
+        SPRINGBOARD_COMMCENTER_IMMEDIATE_SLOT_RESERVE_PC
+    };
+    bool ok =
+        APPLEBASEBAND_INTEREST_CAP <= UINT8_MAX &&
+        APPLEBASEBAND_NOTIFIER_CAP > 1u &&
+        APPLEBASEBAND_MESSAGE_FRAME_CAP > 1u &&
+        APPLEBASEBAND_HANDLER_FRAME_CAP > 1u &&
+        APPLEBASEBAND_DISPATCH_CAP > 1u &&
+        APPLEBASEBAND_NOTIFICATION_CAP > 1u &&
+        applebaseband_message_is_reset(
+            APPLEBASEBAND_RESET_MESSAGE_HIGH) &&
+        applebaseband_message_is_reset(
+            APPLEBASEBAND_RESET_MESSAGE_LOW) &&
+        !applebaseband_message_is_reset(
+            APPLEBASEBAND_RESET_MESSAGE_LOW + 1u) &&
+        !applebaseband_message_is_reset(0u);
+    for (unsigned i = 0;
+         i < sizeof hook_pcs / sizeof hook_pcs[0]; i++) {
+        ok = ok && hook_pcs[i] && !(hook_pcs[i] & 1u);
+        for (unsigned j = i + 1u;
+             j < sizeof hook_pcs / sizeof hook_pcs[0]; j++)
+            ok = ok && hook_pcs[i] != hook_pcs[j];
+    }
+
+    const uint32_t service = UINT32_C(0xc0a00000);
+    const uint32_t port = UINT32_C(0xc0b00000);
+    const uint32_t mqueue =
+        port + SPRINGBOARD_COMMCENTER_MQUEUE_PORT_DELTA;
+    const uint32_t thread = UINT32_C(0xc0c00000);
+
+    applebaseband_trace_t trace;
+    memset(&trace, 0, sizeof trace);
+    trace.baseline_complete = true;
+    int slot = applebaseband_interest_allocate(
+        &trace, service, port, mqueue);
+    ok = ok && slot == 0 &&
+        trace.retained_interest_count == 1u &&
+        applebaseband_interest_find(
+            &trace, service, port) == slot &&
+        applebaseband_interest_find_port(
+            &trace, port, false) == slot &&
+        applebaseband_interest_find_port(
+            &trace, port, true) < 0 &&
+        applebaseband_interest_find_mqueue(
+            &trace, mqueue, false) == slot &&
+        applebaseband_interest_find_mqueue(
+            &trace, mqueue + 4u, false) < 0;
+    ok = ok && applebaseband_interest_add_notifier(
+        &trace, &trace.interests[0], UINT32_C(0xc0d00000)) &&
+        applebaseband_interest_active_notifiers(
+            &trace.interests[0]) == 1u &&
+        applebaseband_interest_has_active_notifier(
+            &trace.interests[0], UINT32_C(0xc0d00000)) &&
+        applebaseband_interest_find_port(
+            &trace, port, true) == slot &&
+        applebaseband_interest_set_notifier_active(
+            &trace, UINT32_C(0xc0d00000), false, false) &&
+        applebaseband_interest_active_notifiers(
+            &trace.interests[0]) == 0u &&
+        trace.notifier_teardowns == 1u;
+    trace.interests[0].stale = true;
+    ok = ok &&
+        applebaseband_interest_find_mqueue(
+            &trace, mqueue, false) < 0 &&
+        !applebaseband_interest_has_active_notifier(
+            &trace.interests[0], UINT32_C(0xc0d00000)) &&
+        applebaseband_interest_allocate(
+            &trace, service, port, mqueue) < 0 &&
+        trace.lifecycle_uncertain;
+
+    applebaseband_trace_t notifier_trace;
+    memset(&notifier_trace, 0, sizeof notifier_trace);
+    int notifier_slot = applebaseband_interest_allocate(
+        &notifier_trace, service, port, mqueue);
+    ok = ok && notifier_slot == 0;
+    for (unsigned i = 0; i < APPLEBASEBAND_NOTIFIER_CAP; i++)
+        ok = ok && applebaseband_interest_add_notifier(
+            &notifier_trace,
+            &notifier_trace.interests[0],
+            UINT32_C(0xc1000000) + i * 4u);
+    ok = ok && !applebaseband_interest_add_notifier(
+        &notifier_trace, &notifier_trace.interests[0],
+        UINT32_C(0xc2000000)) &&
+        notifier_trace.notifier_overflow == 1u &&
+        notifier_trace.lifecycle_uncertain &&
+        notifier_trace.interests[0].live_uncertain;
+
+    applebaseband_trace_t notifier_reuse_trace;
+    memset(&notifier_reuse_trace, 0,
+           sizeof notifier_reuse_trace);
+    (void)applebaseband_interest_allocate(
+        &notifier_reuse_trace, service, port, mqueue);
+    const uint32_t retired_notifier = UINT32_C(0xc2050000);
+    ok = ok && applebaseband_interest_add_notifier(
+        &notifier_reuse_trace,
+        &notifier_reuse_trace.interests[0],
+        retired_notifier) &&
+        applebaseband_interest_set_notifier_active(
+            &notifier_reuse_trace, retired_notifier,
+            false, true) &&
+        applebaseband_interest_retired_notifiers(
+            &notifier_reuse_trace.interests[0]) == 1u &&
+        !applebaseband_interest_add_notifier(
+            &notifier_reuse_trace,
+            &notifier_reuse_trace.interests[0],
+            retired_notifier) &&
+        notifier_reuse_trace.lifecycle_uncertain &&
+        notifier_reuse_trace.interests[0].live_uncertain;
+
+    applebaseband_trace_t teardown_trace;
+    memset(&teardown_trace, 0, sizeof teardown_trace);
+    (void)applebaseband_interest_allocate(
+        &teardown_trace, service, port, mqueue);
+    ok = ok && applebaseband_interest_add_notifier(
+        &teardown_trace, &teardown_trace.interests[0],
+        UINT32_C(0xc2100000));
+    applebaseband_note_port_destroy(&teardown_trace, port);
+    ok = ok && teardown_trace.interests[0].stale &&
+        teardown_trace.interests[0].teardown_hits == 1u &&
+        teardown_trace.port_teardowns == 1u &&
+        applebaseband_interest_active_notifiers(
+            &teardown_trace.interests[0]) == 0u;
+
+    applebaseband_port_identity_t identity_a;
+    memset(&identity_a, 0, sizeof identity_a);
+    identity_a.complete = true;
+    identity_a.active = true;
+    identity_a.receiver_name_authoritative = true;
+    identity_a.receiver_space_active = true;
+    identity_a.task_space_matches = true;
+    identity_a.receiver_name = UINT32_C(0x101);
+    identity_a.receiver_space = UINT32_C(0xc3000000);
+    identity_a.receiver_task = UINT32_C(0xc3001000);
+    identity_a.receiver_task_space = identity_a.receiver_space;
+    identity_a.receiver_proc = UINT32_C(0xc3002000);
+    identity_a.receiver_pid = UINT32_C(23);
+    applebaseband_port_identity_t identity_b = identity_a;
+    ok = ok && applebaseband_port_identity_same(
+        &identity_a, &identity_b);
+    identity_b.receiver_name++;
+    ok = ok && !applebaseband_port_identity_same(
+        &identity_a, &identity_b);
+    identity_b = identity_a;
+    identity_b.receiver_space += 4u;
+    ok = ok && !applebaseband_port_identity_same(
+        &identity_a, &identity_b);
+    identity_b = identity_a;
+    identity_b.receiver_task += 4u;
+    ok = ok && !applebaseband_port_identity_same(
+        &identity_a, &identity_b);
+
+    applebaseband_trace_t pending_trace;
+    memset(&pending_trace, 0, sizeof pending_trace);
+    (void)applebaseband_interest_allocate(
+        &pending_trace, service, port, mqueue);
+    applebaseband_pending_interest_t *pending =
+        applebaseband_pending_interest_begin(
+            &pending_trace, thread, 0u,
+            APPLEBASEBAND_INTEREST_WRAPPER_64_PC,
+            UINT32_C(0xc4000100), UINT64_C(60));
+    ok = ok && pending && pending->active &&
+        pending->interest_slot == 0u &&
+        pending->wrapper_return_sp == UINT32_C(0xc40000f4) &&
+        pending->register_frame_sp == UINT32_C(0xc40000bc) &&
+        applebaseband_pending_interest_find(
+            &pending_trace, thread, true) == pending;
+    applebaseband_pending_interest_t *replacement =
+        applebaseband_pending_interest_begin(
+            &pending_trace, thread, 0u,
+            APPLEBASEBAND_INTEREST_WRAPPER_32_PC,
+            UINT32_C(0xc4000200), UINT64_C(61));
+    bool subscription_active = false;
+    pending_trace.baseline_complete = true;
+    ok = ok && replacement == pending &&
+        pending_trace.pending_interest_overwrites == 1u &&
+        pending_trace.lifecycle_uncertain &&
+        replacement->wrapper_pc ==
+            APPLEBASEBAND_INTEREST_WRAPPER_32_PC &&
+        !applebaseband_subscription_state(
+            &pending_trace, NULL, service,
+            &subscription_active);
+
+    applebaseband_trace_t dispatch_trace;
+    memset(&dispatch_trace, 0, sizeof dispatch_trace);
+    dispatch_trace.baseline_complete = true;
+    applebaseband_dispatch_event_t *dispatch =
+        applebaseband_dispatch_begin(
+            &dispatch_trace, NULL, UINT64_C(70), service,
+            APPLEBASEBAND_RESET_MESSAGE_HIGH, 0u, thread,
+            UINT32_C(0xc5001000), UINT32_C(0xc5002000));
+    ok = ok && dispatch && dispatch->valid &&
+        dispatch->open &&
+        dispatch->subscription_state_known &&
+        dispatch->before_successful_subscription &&
+        dispatch_trace.dispatch_before_subscription == 1u &&
+        applebaseband_dispatch_find_open(
+            &dispatch_trace, thread, service,
+            APPLEBASEBAND_RESET_MESSAGE_HIGH) == dispatch &&
+        applebaseband_dispatch_find_callback_frame(
+            &dispatch_trace, thread, service,
+            UINT32_C(0xc5001000)) == dispatch;
+
+    applebaseband_trace_t restored_trace;
+    memset(&restored_trace, 0, sizeof restored_trace);
+    applebaseband_dispatch_event_t *restored_dispatch =
+        applebaseband_dispatch_begin(
+            &restored_trace, NULL, UINT64_C(71), service,
+            APPLEBASEBAND_RESET_MESSAGE_HIGH, 0u, thread,
+            UINT32_C(0xc5003000), UINT32_C(0xc5004000));
+    ok = ok && restored_dispatch &&
+        !restored_dispatch->subscription_state_known &&
+        !restored_dispatch->before_successful_subscription &&
+        restored_trace.dispatch_subscription_unknown == 1u;
+
+    applebaseband_message_frame_t *outer_message =
+        applebaseband_message_frame_begin(
+            &dispatch_trace, thread, UINT32_C(0xc6001000),
+            UINT32_C(0xc6002000), service,
+            APPLEBASEBAND_RESET_MESSAGE_HIGH);
+    ok = ok && outer_message;
+    if (outer_message) {
+        outer_message->linked_event = true;
+        outer_message->event_sequence = dispatch->sequence;
+    }
+    applebaseband_message_frame_t *inner_message =
+        applebaseband_message_frame_begin(
+            &dispatch_trace, thread, UINT32_C(0xc6000f00),
+            UINT32_C(0xc6003000), service,
+            UINT32_C(0x1234));
+    ok = ok && inner_message &&
+        applebaseband_message_frame_top(
+            &dispatch_trace, thread) == inner_message &&
+        applebaseband_message_frame_find_return(
+            &dispatch_trace, thread,
+            UINT32_C(0xc6000ef4)) == inner_message;
+    if (inner_message) inner_message->active = false;
+    ok = ok &&
+        applebaseband_message_frame_top(
+            &dispatch_trace, thread) == outer_message &&
+        applebaseband_message_frame_find_return(
+            &dispatch_trace, thread,
+            UINT32_C(0xc6000ff4)) == outer_message;
+
+    applebaseband_handler_frame_t *outer_handler =
+        applebaseband_handler_frame_begin(
+            &dispatch_trace, thread, UINT32_C(0xc7001000),
+            UINT32_C(0xc7002000), service,
+            APPLEBASEBAND_RESET_MESSAGE_HIGH);
+    applebaseband_handler_frame_t *inner_handler =
+        applebaseband_handler_frame_begin(
+            &dispatch_trace, thread, UINT32_C(0xc7000f00),
+            UINT32_C(0xc7003000), service,
+            UINT32_C(0x5678));
+    ok = ok && outer_handler && inner_handler &&
+        applebaseband_handler_frame_top(
+            &dispatch_trace, thread) == inner_handler &&
+        applebaseband_handler_frame_find_exact(
+            &dispatch_trace, thread,
+            UINT32_C(0xc7000ee8)) == inner_handler;
+    if (inner_handler) inner_handler->active = false;
+    ok = ok &&
+        applebaseband_handler_frame_top(
+            &dispatch_trace, thread) == outer_handler &&
+        applebaseband_handler_frame_find_exact(
+            &dispatch_trace, thread,
+            UINT32_C(0xc7000fe8)) == outer_handler;
+
+    dispatch->message_clients_seen = true;
+    dispatch->message_clients_at = UINT64_C(71);
+    applebaseband_notification_event_t *notification =
+        applebaseband_notification_begin(
+            &dispatch_trace, UINT64_C(72),
+            UINT32_C(0xc0e00000), service,
+            APPLEBASEBAND_RESET_MESSAGE_HIGH, thread,
+            UINT32_C(0xc7001000), UINT32_C(0xc7000fe8),
+            UINT32_C(0xc7002000), outer_message);
+    ok = ok && notification && notification->valid &&
+        notification->open && notification->linked_dispatch &&
+        notification->dispatch_sequence == dispatch->sequence &&
+        dispatch->notification_handler_hits == 1u &&
+        applebaseband_notification_find_open(
+            &dispatch_trace, thread) == notification;
+
+    ok = ok && applebaseband_notification_matching_dispatch(
+        &dispatch_trace, notification, true) == dispatch;
+
+    applebaseband_notification_event_t mismatched_notification =
+        *notification;
+    mismatched_notification.service += 4u;
+    ok = ok && !applebaseband_notification_matching_dispatch(
+        &dispatch_trace, &mismatched_notification, true);
+    mismatched_notification = *notification;
+    mismatched_notification.message =
+        APPLEBASEBAND_RESET_MESSAGE_LOW;
+    ok = ok && !applebaseband_notification_matching_dispatch(
+        &dispatch_trace, &mismatched_notification, true);
+    mismatched_notification = *notification;
+    mismatched_notification.thread += 4u;
+    ok = ok && !applebaseband_notification_matching_dispatch(
+        &dispatch_trace, &mismatched_notification, true);
+    dispatch->message_clients_seen = false;
+    ok = ok && !applebaseband_notification_matching_dispatch(
+        &dispatch_trace, notification, true);
+    dispatch->message_clients_seen = true;
+    dispatch->open = false;
+    ok = ok && !applebaseband_notification_matching_dispatch(
+        &dispatch_trace, notification, true) &&
+        applebaseband_notification_matching_dispatch(
+            &dispatch_trace, notification, false) == dispatch;
+    dispatch->open = true;
+    uint64_t dispatch_sequence_saved = dispatch->sequence;
+    dispatch->sequence += APPLEBASEBAND_DISPATCH_CAP;
+    ok = ok && !applebaseband_notification_matching_dispatch(
+        &dispatch_trace, notification, true);
+    dispatch->sequence = dispatch_sequence_saved;
+    dispatch->valid = false;
+    ok = ok && !applebaseband_notification_matching_dispatch(
+        &dispatch_trace, notification, true);
+    dispatch->valid = true;
+
+    notification->send_header_readable = true;
+    notification->send_seen = true;
+    notification->send_size_matches_header = true;
+    notification->destination_matches_interest = true;
+    notification->destination_registration_succeeded = true;
+    notification->header = UINT32_C(0xc8000000);
+    notification->destination = port;
+    notification->header_size = UINT32_C(64);
+    notification->header_id = INT32_C(0x1234);
+    applebaseband_notification_event_t linked_header_only =
+        *notification;
+    linked_header_only.destination_matches_interest = false;
+    linked_header_only.destination_registration_succeeded = false;
+    ok = ok &&
+        applebaseband_notification_has_linked_send_header(
+            &dispatch_trace, &linked_header_only, true) &&
+        !applebaseband_notification_has_causal_send(
+            &dispatch_trace, &linked_header_only, true);
+    springboard_commcenter_kmsg_t route_kmsg;
+    memset(&route_kmsg, 0, sizeof route_kmsg);
+    route_kmsg.complete = true;
+    route_kmsg.kmsg = UINT32_C(0xc8001000);
+    route_kmsg.header = UINT32_C(0xc8001014);
+    route_kmsg.destination = port;
+    route_kmsg.size = UINT32_C(64);
+    route_kmsg.id = INT32_C(0x1234);
+    ok = ok && applebaseband_notification_route_kmsg_matches(
+        notification, &route_kmsg) &&
+        applebaseband_notification_has_causal_send(
+            &dispatch_trace, notification, true) &&
+        applebaseband_notification_commit_route_kmsg(
+            notification, &route_kmsg) &&
+        applebaseband_notification_has_causal_route(
+            &dispatch_trace, notification, true);
+    springboard_commcenter_kmsg_t bound_kmsg =
+        notification->route_kmsg;
+    route_kmsg.destination += 4u;
+    ok = ok && !applebaseband_notification_route_kmsg_matches(
+        notification, &route_kmsg) &&
+        !applebaseband_notification_commit_route_kmsg(
+            notification, &route_kmsg) &&
+        memcmp(&notification->route_kmsg, &bound_kmsg,
+               sizeof bound_kmsg) == 0 &&
+        notification->route_kmsg_bound;
+    route_kmsg.destination = port;
+    route_kmsg.id++;
+    ok = ok && !applebaseband_notification_route_kmsg_matches(
+        notification, &route_kmsg);
+    route_kmsg.id = INT32_C(0x1234);
+    route_kmsg.size++;
+    ok = ok && !applebaseband_notification_route_kmsg_matches(
+        notification, &route_kmsg);
+    route_kmsg.size = UINT32_C(64);
+    route_kmsg.complete = false;
+    ok = ok && !applebaseband_notification_route_kmsg_matches(
+        notification, &route_kmsg);
+
+    applebaseband_notification_event_t *unlinked_notification =
+        applebaseband_notification_begin(
+            &dispatch_trace, UINT64_C(73),
+            UINT32_C(0xc0e00004), service,
+            APPLEBASEBAND_RESET_MESSAGE_HIGH, thread,
+            UINT32_C(0xc7101000), UINT32_C(0xc7100fe8),
+            UINT32_C(0xc7102000), NULL);
+    ok = ok && unlinked_notification &&
+        !unlinked_notification->linked_dispatch;
+    if (unlinked_notification) {
+        unlinked_notification->send_seen = true;
+        unlinked_notification->send_header_readable = true;
+        unlinked_notification->send_size_matches_header = true;
+        unlinked_notification->destination_matches_interest = true;
+        unlinked_notification->
+            destination_registration_succeeded = true;
+        unlinked_notification->header = UINT32_C(0xc8100000);
+        unlinked_notification->destination = port;
+        unlinked_notification->header_size = UINT32_C(64);
+        unlinked_notification->header_id = INT32_C(0x1234);
+        springboard_commcenter_kmsg_t unlinked_kmsg = bound_kmsg;
+        unlinked_kmsg.kmsg = UINT32_C(0xc8101000);
+        unlinked_kmsg.header = UINT32_C(0xc8101014);
+        ok = ok && applebaseband_notification_commit_route_kmsg(
+            unlinked_notification, &unlinked_kmsg) &&
+            !applebaseband_notification_has_causal_send(
+                &dispatch_trace, unlinked_notification, true) &&
+            !applebaseband_notification_has_causal_route(
+                &dispatch_trace, unlinked_notification, true);
+    }
+    applebaseband_notification_event_t linked_without_send =
+        *notification;
+    linked_without_send.send_seen = false;
+    linked_without_send.send_header_readable = false;
+    linked_without_send.route_kmsg_bound = false;
+    ok = ok && !applebaseband_notification_has_causal_send(
+        &dispatch_trace, &linked_without_send, true) &&
+        !(applebaseband_notification_has_causal_send(
+              &dispatch_trace, &linked_without_send, true) ||
+          (unlinked_notification &&
+           applebaseband_notification_has_causal_send(
+               &dispatch_trace, unlinked_notification, true))) &&
+        applebaseband_notification_has_causal_send(
+            &dispatch_trace, notification, true);
+
+    applebaseband_notification_event_t repeated_notification =
+        *notification;
+    applebaseband_notification_reject_repeated_send(
+        &repeated_notification, UINT64_C(74));
+    ok = ok && repeated_notification.send_repeated &&
+        repeated_notification.route_binding_uncertain &&
+        !repeated_notification.send_header_readable &&
+        !repeated_notification.destination_matches_interest &&
+        !repeated_notification.send_result_seen &&
+        !repeated_notification.route_kmsg_bound &&
+        !repeated_notification.route_bits &&
+        !repeated_notification.route_kmsg.kmsg &&
+        !applebaseband_notification_has_causal_send(
+            &dispatch_trace, &repeated_notification, true) &&
+        !applebaseband_notification_has_causal_route(
+            &dispatch_trace, &repeated_notification, true);
+
+    applebaseband_trace_t frame_overflow_trace;
+    memset(&frame_overflow_trace, 0,
+           sizeof frame_overflow_trace);
+    for (unsigned i = 0; i < APPLEBASEBAND_MESSAGE_FRAME_CAP; i++)
+        ok = ok && applebaseband_message_frame_begin(
+            &frame_overflow_trace, thread,
+            UINT32_C(0xc9001000) + i * UINT32_C(0x100),
+            UINT32_C(0xc9000000), service, i) != NULL;
+    ok = ok && !applebaseband_message_frame_begin(
+        &frame_overflow_trace, thread, UINT32_C(0xca001000),
+        UINT32_C(0xca000000), service, 0u) &&
+        frame_overflow_trace.message_frame_overflow == 1u &&
+        frame_overflow_trace.frame_uncertain;
+    for (unsigned i = 0; i < APPLEBASEBAND_HANDLER_FRAME_CAP; i++)
+        ok = ok && applebaseband_handler_frame_begin(
+            &frame_overflow_trace, thread,
+            UINT32_C(0xca101000) + i * UINT32_C(0x100),
+            UINT32_C(0xca100000), service, i) != NULL;
+    ok = ok && !applebaseband_handler_frame_begin(
+        &frame_overflow_trace, thread, UINT32_C(0xca201000),
+        UINT32_C(0xca200000), service, 0u) &&
+        frame_overflow_trace.handler_frame_overflow == 1u;
+
+    applebaseband_trace_t ring_trace;
+    memset(&ring_trace, 0, sizeof ring_trace);
+    ring_trace.baseline_complete = true;
+    for (unsigned i = 0; i <= APPLEBASEBAND_DISPATCH_CAP; i++)
+        ok = ok && applebaseband_dispatch_begin(
+            &ring_trace, NULL, i, service,
+            APPLEBASEBAND_RESET_MESSAGE_HIGH, 0u, thread,
+            UINT32_C(0xcb001000) + i * 4u,
+            UINT32_C(0xcb000000)) != NULL;
+    ok = ok &&
+        ring_trace.dispatch_dropped == 1u &&
+        ring_trace.frame_uncertain &&
+        applebaseband_dispatch_find_sequence(
+            &ring_trace, 0u) == NULL &&
+        applebaseband_dispatch_find_sequence(
+            &ring_trace, APPLEBASEBAND_DISPATCH_CAP) != NULL;
+    for (unsigned i = 0; i <= APPLEBASEBAND_NOTIFICATION_CAP; i++)
+        ok = ok && applebaseband_notification_begin(
+            &ring_trace, i, UINT32_C(0xcc000000) + i * 4u,
+            service, APPLEBASEBAND_RESET_MESSAGE_HIGH,
+            thread, UINT32_C(0xcc100000),
+            UINT32_C(0xcc0fffe8), UINT32_C(0xcc200000),
+            NULL) != NULL;
+    ok = ok &&
+        ring_trace.notification_dropped == 1u &&
+        applebaseband_notification_find_sequence(
+            &ring_trace, 0u) == NULL &&
+        applebaseband_notification_find_sequence(
+            &ring_trace, APPLEBASEBAND_NOTIFICATION_CAP) != NULL;
+
+    applebaseband_trace_t exhausted_trace;
+    memset(&exhausted_trace, 0, sizeof exhausted_trace);
+    exhausted_trace.dispatch_total = UINT64_MAX;
+    ok = ok && !applebaseband_dispatch_begin(
+        &exhausted_trace, NULL, 0u, service,
+        APPLEBASEBAND_RESET_MESSAGE_HIGH, 0u, thread,
+        UINT32_C(0xcd001000), UINT32_C(0xcd000000)) &&
+        exhausted_trace.frame_uncertain;
+    return ok;
+}
+
 static bool commcenter_watch_selfcheck(void) {
     lifecycle_event_t event;
     memset(&event, 0, sizeof event);
@@ -6520,6 +11193,657 @@ static bool commcenter_watch_selfcheck(void) {
                 COMMCENTER_WATCH_MILESTONE_NAMES[i]) == (int)i;
     ok = ok &&
         commcenter_watch_milestone_index("_not_a_milestone") < 0;
+
+    /*
+     * Shape an active, in-transit destination so every validation used by the
+     * old port+0x3c-only decoder appears coherent.  Receiver name zero must
+     * still reject it before the union word is granted ownership authority.
+     */
+    springboard_commcenter_probe_t destination_alias;
+    memset(&destination_alias, 0, sizeof destination_alias);
+    destination_alias.valid_bits = UINT32_MAX;
+    destination_alias.port = UINT32_C(0xc0d705a0);
+    destination_alias.mqueue =
+        destination_alias.port +
+            SPRINGBOARD_COMMCENTER_MQUEUE_PORT_DELTA;
+    destination_alias.io_bits = SPRINGBOARD_COMMCENTER_PORT_ACTIVE;
+    destination_alias.incoming.complete = true;
+    destination_alias.incoming.kmsg = UINT32_C(0xc3d3c000);
+    destination_alias.incoming.header = UINT32_C(0xc3d3c014);
+    destination_alias.incoming.destination =
+        destination_alias.port;
+    destination_alias.incoming.id =
+        (int32_t)SPRINGBOARD_COMMCENTER_INITIAL_ID;
+    destination_alias.incoming_destination_matches = true;
+    destination_alias.incoming_id_matches = true;
+    destination_alias.receiver_name = 0u;
+    destination_alias.receiver_space = UINT32_C(0xc0acfe60);
+    destination_alias.receiver_space_active = 1u;
+    destination_alias.receiver_task = UINT32_C(0xc0ad7b10);
+    destination_alias.receiver_task_space =
+        destination_alias.receiver_space;
+    destination_alias.receiver_proc = UINT32_C(0xe0381d68);
+    destination_alias.receiver_pid = 1u;
+    ok = ok &&
+        !springboard_commcenter_owner_chain_is_authoritative(
+            &destination_alias);
+    destination_alias.receiver_name = UINT32_MAX;
+    ok = ok &&
+        !springboard_commcenter_owner_chain_is_authoritative(
+            &destination_alias);
+    destination_alias.receiver_name = UINT32_C(0x00004f07);
+    ok = ok &&
+        springboard_commcenter_owner_chain_is_authoritative(
+            &destination_alias);
+    destination_alias.mqueue++;
+    ok = ok &&
+        !springboard_commcenter_owner_chain_is_authoritative(
+            &destination_alias);
+    destination_alias.mqueue =
+        destination_alias.port +
+            SPRINGBOARD_COMMCENTER_MQUEUE_PORT_DELTA;
+    destination_alias.incoming.header = 0u;
+    ok = ok &&
+        !springboard_commcenter_owner_chain_is_authoritative(
+            &destination_alias);
+    destination_alias.incoming.header = UINT32_C(0xc3d3c014);
+    destination_alias.incoming.complete = false;
+    ok = ok &&
+        !springboard_commcenter_owner_chain_is_authoritative(
+            &destination_alias);
+    destination_alias.incoming.complete = true;
+    destination_alias.incoming.kmsg = 0u;
+    ok = ok &&
+        !springboard_commcenter_owner_chain_is_authoritative(
+            &destination_alias);
+    destination_alias.incoming.kmsg = UINT32_C(0xc3d3c000);
+    destination_alias.incoming.destination++;
+    ok = ok &&
+        !springboard_commcenter_owner_chain_is_authoritative(
+            &destination_alias);
+    destination_alias.incoming.destination =
+        destination_alias.port;
+    destination_alias.incoming_destination_matches = false;
+    ok = ok &&
+        !springboard_commcenter_owner_chain_is_authoritative(
+            &destination_alias);
+    destination_alias.incoming_destination_matches = true;
+    destination_alias.incoming_id_matches = false;
+    ok = ok &&
+        !springboard_commcenter_owner_chain_is_authoritative(
+            &destination_alias);
+    destination_alias.incoming_id_matches = true;
+    destination_alias.io_bits = 0u;
+    ok = ok &&
+        !springboard_commcenter_owner_chain_is_authoritative(
+            &destination_alias);
+    destination_alias.io_bits = SPRINGBOARD_COMMCENTER_PORT_ACTIVE;
+    destination_alias.io_bits |= UINT32_C(0x00010000);
+    ok = ok &&
+        !springboard_commcenter_owner_chain_is_authoritative(
+            &destination_alias);
+    destination_alias.io_bits = SPRINGBOARD_COMMCENTER_PORT_ACTIVE;
+    destination_alias.incoming.id = 0;
+    ok = ok &&
+        !springboard_commcenter_owner_chain_is_authoritative(
+            &destination_alias);
+    destination_alias.incoming.id =
+        (int32_t)SPRINGBOARD_COMMCENTER_INITIAL_ID;
+    destination_alias.receiver_space_active = 0u;
+    ok = ok &&
+        !springboard_commcenter_owner_chain_is_authoritative(
+            &destination_alias);
+    destination_alias.receiver_space_active = 1u;
+    destination_alias.receiver_task_space++;
+    ok = ok &&
+        !springboard_commcenter_owner_chain_is_authoritative(
+            &destination_alias);
+    destination_alias.receiver_task_space =
+        destination_alias.receiver_space;
+    destination_alias.receiver_pid = UINT32_MAX;
+    ok = ok &&
+        !springboard_commcenter_owner_chain_is_authoritative(
+            &destination_alias);
+    destination_alias.receiver_pid = 1u;
+    destination_alias.valid_bits &=
+        ~SPRINGBOARD_COMMCENTER_VALID_RECEIVER_PID;
+    ok = ok &&
+        !springboard_commcenter_owner_chain_is_authoritative(
+            &destination_alias);
+
+    springboard_commcenter_probe_t reservation_probe;
+    memset(&reservation_probe, 0, sizeof reservation_probe);
+    reservation_probe.valid_bits =
+        SPRINGBOARD_COMMCENTER_VALID_MQUEUE |
+        SPRINGBOARD_COMMCENTER_VALID_PORT |
+        SPRINGBOARD_COMMCENTER_VALID_MSGCOUNT |
+        SPRINGBOARD_COMMCENTER_VALID_QLIMIT;
+    reservation_probe.port = UINT32_C(0xc0d705a0);
+    reservation_probe.mqueue =
+        reservation_probe.port +
+            SPRINGBOARD_COMMCENTER_MQUEUE_PORT_DELTA;
+    reservation_probe.msgcount = 5u;
+    reservation_probe.qlimit = 5u;
+    reservation_probe.queue_snapshot_attempted = true;
+    reservation_probe.queue_head_readable = true;
+    reservation_probe.queue_closed = true;
+    reservation_probe.queue_consistent = true;
+    reservation_probe.queue_head = UINT32_C(0xc3d3c000);
+    reservation_probe.queue_linked_count = 3u;
+    for (uint32_t i = 0; i < reservation_probe.queue_linked_count; i++) {
+        reservation_probe.queue_nodes[i].complete = true;
+        reservation_probe.queue_nodes[i].kmsg =
+            UINT32_C(0xc3d3c000) + i * UINT32_C(0x100);
+        reservation_probe.queue_nodes[i].header =
+            reservation_probe.queue_nodes[i].kmsg +
+                SPRINGBOARD_COMMCENTER_KMSG_HEADER_OFFSET;
+        reservation_probe.queue_nodes[i].next =
+            UINT32_C(0xc3d3c000) +
+            ((i + 1u) % reservation_probe.queue_linked_count) *
+                UINT32_C(0x100);
+        reservation_probe.queue_nodes[i].prev =
+            UINT32_C(0xc3d3c000) +
+            ((i + reservation_probe.queue_linked_count - 1u) %
+                 reservation_probe.queue_linked_count) *
+                UINT32_C(0x100);
+        reservation_probe.queue_nodes[i].destination =
+            reservation_probe.port;
+    }
+    uint32_t reserved_slots = UINT32_MAX;
+    ok = ok &&
+        springboard_commcenter_reserved_slots_exact(
+            &reservation_probe, &reserved_slots) &&
+        reserved_slots == 2u;
+    reservation_probe.queue_head = 0u;
+    reservation_probe.queue_linked_count = 0u;
+    ok = ok &&
+        springboard_commcenter_reserved_slots_exact(
+            &reservation_probe, &reserved_slots) &&
+        reserved_slots == 5u;
+    reservation_probe.queue_head = UINT32_C(0xc3d3c000);
+    reservation_probe.queue_linked_count = 3u;
+    reservation_probe.queue_snapshot_attempted = false;
+    reserved_slots = UINT32_MAX;
+    ok = ok &&
+        !springboard_commcenter_reserved_slots_exact(
+            &reservation_probe, &reserved_slots) &&
+        reserved_slots == 0u;
+    reservation_probe.queue_snapshot_attempted = true;
+    reservation_probe.valid_bits &=
+        ~SPRINGBOARD_COMMCENTER_VALID_MQUEUE;
+    ok = ok &&
+        !springboard_commcenter_reserved_slots_exact(
+            &reservation_probe, &reserved_slots);
+    reservation_probe.valid_bits |=
+        SPRINGBOARD_COMMCENTER_VALID_MQUEUE;
+    reservation_probe.mqueue++;
+    ok = ok &&
+        !springboard_commcenter_reserved_slots_exact(
+            &reservation_probe, &reserved_slots);
+    reservation_probe.mqueue =
+        reservation_probe.port +
+            SPRINGBOARD_COMMCENTER_MQUEUE_PORT_DELTA;
+    reservation_probe.valid_bits &=
+        ~SPRINGBOARD_COMMCENTER_VALID_MSGCOUNT;
+    ok = ok &&
+        !springboard_commcenter_reserved_slots_exact(
+            &reservation_probe, &reserved_slots);
+    reservation_probe.valid_bits |=
+        SPRINGBOARD_COMMCENTER_VALID_MSGCOUNT;
+    reservation_probe.valid_bits &=
+        ~SPRINGBOARD_COMMCENTER_VALID_QLIMIT;
+    ok = ok &&
+        !springboard_commcenter_reserved_slots_exact(
+            &reservation_probe, &reserved_slots);
+    reservation_probe.valid_bits |=
+        SPRINGBOARD_COMMCENTER_VALID_QLIMIT;
+    reservation_probe.qlimit = 4u;
+    ok = ok &&
+        !springboard_commcenter_reserved_slots_exact(
+            &reservation_probe, &reserved_slots);
+    reservation_probe.qlimit = 5u;
+    reservation_probe.queue_head = 0u;
+    ok = ok &&
+        !springboard_commcenter_reserved_slots_exact(
+            &reservation_probe, &reserved_slots);
+    reservation_probe.queue_head = UINT32_C(0xc3d3c000);
+    reservation_probe.queue_linked_count = 0u;
+    ok = ok &&
+        !springboard_commcenter_reserved_slots_exact(
+            &reservation_probe, &reserved_slots);
+    reservation_probe.queue_linked_count = 3u;
+    reservation_probe.queue_nodes[1].complete = false;
+    ok = ok &&
+        !springboard_commcenter_reserved_slots_exact(
+            &reservation_probe, &reserved_slots);
+    reservation_probe.queue_nodes[1].complete = true;
+    reservation_probe.queue_nodes[1].header = 0u;
+    ok = ok &&
+        !springboard_commcenter_reserved_slots_exact(
+            &reservation_probe, &reserved_slots);
+    reservation_probe.queue_nodes[1].header =
+        reservation_probe.queue_nodes[1].kmsg +
+            SPRINGBOARD_COMMCENTER_KMSG_HEADER_OFFSET;
+    reservation_probe.queue_nodes[1].destination++;
+    ok = ok &&
+        !springboard_commcenter_reserved_slots_exact(
+            &reservation_probe, &reserved_slots);
+    reservation_probe.queue_nodes[1].destination =
+        reservation_probe.port;
+    reservation_probe.queue_head++;
+    ok = ok &&
+        !springboard_commcenter_reserved_slots_exact(
+            &reservation_probe, &reserved_slots);
+    reservation_probe.queue_head = UINT32_C(0xc3d3c000);
+    reservation_probe.queue_nodes[1].next++;
+    ok = ok &&
+        !springboard_commcenter_reserved_slots_exact(
+            &reservation_probe, &reserved_slots);
+    reservation_probe.queue_nodes[1].next =
+        reservation_probe.queue_nodes[2].kmsg;
+    reservation_probe.queue_nodes[1].prev++;
+    ok = ok &&
+        !springboard_commcenter_reserved_slots_exact(
+            &reservation_probe, &reserved_slots);
+    reservation_probe.queue_nodes[1].prev =
+        reservation_probe.queue_nodes[0].kmsg;
+    uint32_t saved_second_kmsg =
+        reservation_probe.queue_nodes[1].kmsg;
+    reservation_probe.queue_nodes[1].kmsg =
+        reservation_probe.queue_nodes[0].kmsg;
+    ok = ok &&
+        !springboard_commcenter_reserved_slots_exact(
+            &reservation_probe, &reserved_slots);
+    reservation_probe.queue_nodes[1].kmsg = saved_second_kmsg;
+    reservation_probe.queue_head_readable = false;
+    ok = ok &&
+        !springboard_commcenter_reserved_slots_exact(
+            &reservation_probe, &reserved_slots);
+    reservation_probe.queue_head_readable = true;
+    reservation_probe.queue_closed = false;
+    ok = ok &&
+        !springboard_commcenter_reserved_slots_exact(
+            &reservation_probe, &reserved_slots);
+    reservation_probe.queue_closed = true;
+    reservation_probe.queue_truncated = true;
+    ok = ok &&
+        !springboard_commcenter_reserved_slots_exact(
+            &reservation_probe, &reserved_slots);
+    reservation_probe.queue_truncated = false;
+    reservation_probe.queue_consistent = false;
+    ok = ok &&
+        !springboard_commcenter_reserved_slots_exact(
+            &reservation_probe, &reserved_slots);
+    reservation_probe.queue_consistent = true;
+    reservation_probe.queue_failure_va = UINT32_C(0xc0ffffff);
+    ok = ok &&
+        !springboard_commcenter_reserved_slots_exact(
+            &reservation_probe, &reserved_slots);
+    reservation_probe.queue_failure_va = 0u;
+    reservation_probe.queue_failure_fsr = 1u;
+    ok = ok &&
+        !springboard_commcenter_reserved_slots_exact(
+            &reservation_probe, &reserved_slots);
+    reservation_probe.queue_failure_fsr = 0u;
+    reservation_probe.queue_linked_count = 6u;
+    ok = ok &&
+        !springboard_commcenter_reserved_slots_exact(
+            &reservation_probe, &reserved_slots);
+
+    commcenter_thread_wait_t synthetic_wait;
+    memset(&synthetic_wait, 0, sizeof synthetic_wait);
+    synthetic_wait.block_open = true;
+    synthetic_wait.relevant_trap_open = true;
+    synthetic_wait.last_trap = -36;
+    synthetic_wait.trap_sequence = 5u;
+    synthetic_wait.semaphore_sequence = 11u;
+    synthetic_wait.block_sequence = 7u;
+    synthetic_wait.block_trap_sequence = 5u;
+    synthetic_wait.block_semaphore_sequence = 11u;
+    synthetic_wait.snapshot_block_sequence = 7u;
+    synthetic_wait.switch_out_block_sequence = 7u;
+    synthetic_wait.semaphore_handler_trap_sequence = 5u;
+    synthetic_wait.semaphore_core_trap_sequence = 5u;
+    synthetic_wait.semaphore_fields_trap_sequence = 5u;
+    synthetic_wait.semaphore_core_sequence = 11u;
+    synthetic_wait.semaphore_fields_sequence = 11u;
+    synthetic_wait.queue_assert_sequence = 11u;
+    synthetic_wait.last_swi_at = 90u;
+    synthetic_wait.last_semaphore_handler_at = 92u;
+    synthetic_wait.last_semaphore_core_at = 94u;
+    synthetic_wait.last_semaphore_fields_at = 96u;
+    synthetic_wait.last_queue_assert_at = 98u;
+    synthetic_wait.last_block_at = 100u;
+    synthetic_wait.last_block_fields_at = 110u;
+    synthetic_wait.last_switch_out_at = 120u;
+    synthetic_wait.last_block_continuation_arg =
+        COMMCENTER_WAIT_SEMAPHORE_CONTINUATION;
+    synthetic_wait.last_wait.valid_bits =
+        COMMCENTER_WAIT_VALID_WAIT_QUEUE |
+        COMMCENTER_WAIT_VALID_EVENT_LOW |
+        COMMCENTER_WAIT_VALID_EVENT_HIGH |
+        COMMCENTER_WAIT_VALID_CONTINUATION |
+        COMMCENTER_WAIT_VALID_WAIT_SEMAPHORE |
+        COMMCENTER_WAIT_VALID_SIGNAL_SEMAPHORE |
+        COMMCENTER_WAIT_VALID_SEMAPHORE_COUNT |
+        COMMCENTER_WAIT_VALID_SEMAPHORE_ACTIVE |
+        COMMCENTER_WAIT_VALID_OUTER_CONTINUATION |
+        COMMCENTER_WAIT_VALID_TIMER_ACTIVE;
+    synthetic_wait.last_wait.wait_semaphore =
+        UINT32_C(0xc0abcdef);
+    synthetic_wait.last_wait.signal_semaphore = 0u;
+    synthetic_wait.last_wait.continuation =
+        COMMCENTER_WAIT_SEMAPHORE_CONTINUATION;
+    synthetic_wait.last_core_wait_semaphore =
+        synthetic_wait.last_wait.wait_semaphore;
+    synthetic_wait.last_core_signal_semaphore = 0u;
+    synthetic_wait.last_semaphore =
+        synthetic_wait.last_wait.wait_semaphore;
+    synthetic_wait.last_signal_semaphore = 0u;
+    synthetic_wait.last_wait.wait_queue =
+        synthetic_wait.last_wait.wait_semaphore +
+            COMMCENTER_WAIT_SEMAPHORE_WAIT_QUEUE_OFFSET;
+    synthetic_wait.last_wait.event_low =
+        COMMCENTER_WAIT_SEMAPHORE_EVENT;
+    synthetic_wait.last_wait.event_high = 0u;
+    synthetic_wait.last_wait.semaphore_active = 1u;
+    synthetic_wait.last_queue_assert_queue =
+        synthetic_wait.last_wait.wait_queue;
+    synthetic_wait.last_queue_assert_event_low =
+        synthetic_wait.last_wait.event_low;
+    synthetic_wait.last_queue_assert_event_high =
+        synthetic_wait.last_wait.event_high;
+    synthetic_wait.last_queue_assert_type = 2u;
+    synthetic_wait.last_wait.outer_continuation =
+        COMMCENTER_WAIT_DIRECT_OUTER_CONTINUATION;
+    ok = ok &&
+        commcenter_wait_snapshot_is_exact_semaphore(
+            &synthetic_wait, true) &&
+        commcenter_wait_state_is_direct_semaphore(
+            &synthetic_wait, true) &&
+        !commcenter_wait_state_is_timed(&synthetic_wait);
+    synthetic_wait.last_trap = -38;
+    synthetic_wait.last_wait.timer_active = 1u;
+    synthetic_wait.last_deadline_low = 1u;
+    ok = ok &&
+        commcenter_wait_state_is_timed(&synthetic_wait);
+    synthetic_wait.last_deadline_low = 0u;
+    ok = ok &&
+        !commcenter_wait_state_is_timed(&synthetic_wait);
+    synthetic_wait.last_deadline_high = 1u;
+    ok = ok &&
+        commcenter_wait_state_is_timed(&synthetic_wait);
+    synthetic_wait.last_wait.outer_continuation =
+        COMMCENTER_WAIT_BSD_OUTER_CONTINUATION;
+    ok = ok &&
+        commcenter_wait_snapshot_is_exact_semaphore(
+            &synthetic_wait, true) &&
+        !commcenter_wait_state_is_direct_semaphore(
+            &synthetic_wait, true);
+    synthetic_wait.last_wait.event_low ^= 1u;
+    ok = ok &&
+        !commcenter_wait_snapshot_is_exact_semaphore(
+            &synthetic_wait, true);
+    synthetic_wait.last_wait.event_low ^= 1u;
+    synthetic_wait.last_wait.semaphore_active = 2u;
+    ok = ok &&
+        !commcenter_wait_snapshot_is_exact_semaphore(
+            &synthetic_wait, true);
+    synthetic_wait.last_wait.semaphore_active = 1u;
+    synthetic_wait.last_wait.valid_bits &=
+        ~COMMCENTER_WAIT_VALID_SEMAPHORE_COUNT;
+    ok = ok &&
+        !commcenter_wait_snapshot_is_exact_semaphore(
+            &synthetic_wait, true);
+    synthetic_wait.last_wait.valid_bits |=
+        COMMCENTER_WAIT_VALID_SEMAPHORE_COUNT;
+    synthetic_wait.snapshot_block_sequence = 6u;
+    ok = ok &&
+        !commcenter_wait_snapshot_is_exact_semaphore(
+            &synthetic_wait, true);
+    synthetic_wait.snapshot_block_sequence = 7u;
+    synthetic_wait.switch_in_block_sequence = 7u;
+    ok = ok &&
+        !commcenter_wait_snapshot_is_exact_semaphore(
+            &synthetic_wait, true);
+    synthetic_wait.switch_in_block_sequence = 0u;
+    synthetic_wait.block_schedule_uncertain = true;
+    ok = ok &&
+        !commcenter_wait_snapshot_is_exact_semaphore(
+            &synthetic_wait, true);
+    synthetic_wait.block_schedule_uncertain = false;
+    synthetic_wait.return_block_sequence = 7u;
+    ok = ok &&
+        !commcenter_wait_snapshot_is_exact_semaphore(
+            &synthetic_wait, true);
+    synthetic_wait.return_block_sequence = 0u;
+    synthetic_wait.queue_assert_sequence = 10u;
+    ok = ok &&
+        !commcenter_wait_snapshot_is_exact_semaphore(
+            &synthetic_wait, true);
+    synthetic_wait.queue_assert_sequence = 11u;
+    synthetic_wait.last_switch_out_at = 105u;
+    ok = ok &&
+        !commcenter_wait_snapshot_is_exact_semaphore(
+            &synthetic_wait, true);
+    synthetic_wait.last_switch_out_at = 120u;
+    ok = ok &&
+        !commcenter_wait_snapshot_is_exact_semaphore(
+            &synthetic_wait, false);
+    synthetic_wait.last_wait.outer_continuation =
+        COMMCENTER_WAIT_DIRECT_OUTER_CONTINUATION;
+    synthetic_wait.trap_identity_poisoned = true;
+    ok = ok &&
+        !commcenter_wait_state_is_direct_semaphore(
+            &synthetic_wait, true);
+    synthetic_wait.trap_identity_poisoned = false;
+    synthetic_wait.semaphore_handler_trap_sequence = 4u;
+    ok = ok &&
+        !commcenter_wait_state_is_direct_semaphore(
+            &synthetic_wait, true);
+    synthetic_wait.semaphore_handler_trap_sequence = 5u;
+
+    synthetic_wait.last_trap = -36;
+    synthetic_wait.last_wait.valid_bits &=
+        ~COMMCENTER_WAIT_VALID_CONTINUATION;
+    ok = ok &&
+        !commcenter_wait_snapshot_is_exact_semaphore(
+            &synthetic_wait, true);
+    synthetic_wait.last_wait.valid_bits |=
+        COMMCENTER_WAIT_VALID_CONTINUATION;
+    synthetic_wait.last_block_continuation_arg ^=
+        UINT32_C(4);
+    ok = ok &&
+        !commcenter_wait_snapshot_is_exact_semaphore(
+            &synthetic_wait, true);
+    synthetic_wait.last_block_continuation_arg ^=
+        UINT32_C(4);
+    synthetic_wait.last_wait.continuation ^=
+        UINT32_C(4);
+    ok = ok &&
+        !commcenter_wait_snapshot_is_exact_semaphore(
+            &synthetic_wait, true);
+    synthetic_wait.last_wait.continuation ^=
+        UINT32_C(4);
+    synthetic_wait.last_core_wait_semaphore ^=
+        UINT32_C(4);
+    ok = ok &&
+        !commcenter_wait_snapshot_is_exact_semaphore(
+            &synthetic_wait, true);
+    synthetic_wait.last_core_wait_semaphore ^=
+        UINT32_C(4);
+    synthetic_wait.last_queue_assert_type = 1u;
+    ok = ok &&
+        !commcenter_wait_snapshot_is_exact_semaphore(
+            &synthetic_wait, true);
+    synthetic_wait.last_queue_assert_type = 2u;
+    synthetic_wait.last_semaphore_handler_at =
+        synthetic_wait.last_swi_at;
+    ok = ok &&
+        !commcenter_wait_state_is_direct_semaphore(
+            &synthetic_wait, true);
+    synthetic_wait.last_semaphore_handler_at = 92u;
+
+    synthetic_wait.last_trap = -37;
+    synthetic_wait.last_core_signal_semaphore =
+        UINT32_C(0xc0abc100);
+    synthetic_wait.last_signal_semaphore =
+        synthetic_wait.last_core_signal_semaphore;
+    synthetic_wait.last_wait.signal_semaphore =
+        synthetic_wait.last_signal_semaphore;
+    ok = ok &&
+        commcenter_wait_state_is_direct_semaphore(
+            &synthetic_wait, true);
+    synthetic_wait.last_wait.signal_semaphore = 0u;
+    ok = ok &&
+        !commcenter_wait_state_is_direct_semaphore(
+            &synthetic_wait, true);
+    synthetic_wait.last_wait.signal_semaphore =
+        synthetic_wait.last_signal_semaphore;
+    synthetic_wait.last_trap = -39;
+    ok = ok &&
+        commcenter_wait_state_is_direct_semaphore(
+            &synthetic_wait, true);
+    synthetic_wait.last_trap = -38;
+    ok = ok &&
+        !commcenter_wait_state_is_direct_semaphore(
+            &synthetic_wait, true);
+    synthetic_wait.last_core_signal_semaphore = 0u;
+    synthetic_wait.last_signal_semaphore = 0u;
+    synthetic_wait.last_wait.signal_semaphore = 0u;
+    ok = ok &&
+        commcenter_wait_state_is_direct_semaphore(
+            &synthetic_wait, true);
+
+    synthetic_wait.sequence_exhausted = true;
+    ok = ok &&
+        !commcenter_wait_state_has_unresolved_observed_block(
+            &synthetic_wait, true) &&
+        !commcenter_wait_snapshot_is_exact_semaphore(
+            &synthetic_wait, true) &&
+        !commcenter_wait_state_is_direct_semaphore(
+            &synthetic_wait, true) &&
+        !commcenter_wait_state_is_timed(
+            &synthetic_wait) &&
+        !commcenter_wait_state_has_committed_continuation(
+            &synthetic_wait,
+            COMMCENTER_WAIT_SEMAPHORE_CONTINUATION);
+    synthetic_wait.sequence_exhausted = false;
+
+    commcenter_thread_wait_t exhausted_wait;
+    memset(&exhausted_wait, 0, sizeof exhausted_wait);
+    exhausted_wait.trap_sequence = UINT64_MAX;
+    ok = ok &&
+        !commcenter_wait_sequence_advance(
+            &exhausted_wait,
+            &exhausted_wait.trap_sequence) &&
+        exhausted_wait.sequence_exhausted;
+    exhausted_wait.trap_sequence = 0u;
+    ok = ok &&
+        !commcenter_wait_sequence_advance(
+            &exhausted_wait,
+            &exhausted_wait.trap_sequence) &&
+        exhausted_wait.trap_sequence == 0u;
+    memset(&exhausted_wait, 0, sizeof exhausted_wait);
+    exhausted_wait.semaphore_sequence = UINT64_MAX;
+    ok = ok &&
+        !commcenter_wait_sequence_advance(
+            &exhausted_wait,
+            &exhausted_wait.semaphore_sequence) &&
+        exhausted_wait.sequence_exhausted;
+
+    commcenter_thread_wait_t resumed_wait =
+        synthetic_wait;
+    resumed_wait.block_open = true;
+    resumed_wait.switch_in_block_sequence = 0u;
+    resumed_wait.raw_resume_proofs = 0u;
+    ok = ok &&
+        !commcenter_wait_state_note_raw_resume(
+            &resumed_wait,
+            resumed_wait.last_switch_out_at, UINT32_C(0x1000)) &&
+        resumed_wait.block_open &&
+        commcenter_wait_state_note_raw_resume(
+            &resumed_wait,
+            resumed_wait.last_switch_out_at + 1u,
+            UINT32_C(0x1002)) &&
+        !resumed_wait.block_open &&
+        resumed_wait.switch_in_block_sequence ==
+            resumed_wait.block_sequence &&
+        resumed_wait.raw_resume_proofs == 1u;
+
+    commcenter_thread_wait_t new_swi_wait =
+        synthetic_wait;
+    new_swi_wait.block_open = true;
+    new_swi_wait.relevant_trap_open = true;
+    new_swi_wait.semaphore_attempt_open = true;
+    new_swi_wait.return_block_sequence = 0u;
+    commcenter_wait_resolve_for_new_swi(
+        &new_swi_wait, 130u);
+    ok = ok &&
+        !new_swi_wait.block_open &&
+        !new_swi_wait.relevant_trap_open &&
+        !new_swi_wait.semaphore_attempt_open &&
+        new_swi_wait.return_block_sequence ==
+            new_swi_wait.block_sequence &&
+        new_swi_wait.last_trap_return_at == 130u &&
+        !new_swi_wait.last_trap_return_value_valid;
+
+    commcenter_thread_wait_t unreadable_return_wait =
+        synthetic_wait;
+    unreadable_return_wait.block_open = true;
+    unreadable_return_wait.relevant_trap_open = false;
+    unreadable_return_wait.block_schedule_uncertain = false;
+    unreadable_return_wait.return_block_sequence = 0u;
+    commcenter_wait_state_note_user_return(
+        &unreadable_return_wait, 140u,
+        UINT32_C(0x1234), false);
+    ok = ok &&
+        !unreadable_return_wait.block_open &&
+        unreadable_return_wait.block_schedule_uncertain &&
+        unreadable_return_wait.return_block_sequence ==
+            unreadable_return_wait.block_sequence &&
+        !unreadable_return_wait.relevant_trap_open;
+
+    watch.wait_exact_hook_attribution_omissions = 0u;
+    watch.wait_exact_hook_first_omission_at = 0u;
+    watch.wait_exact_hook_last_omission_at = 0u;
+    watch.wait_exact_hook_first_omission_pc = 0u;
+    watch.wait_exact_hook_first_omission_thread = 0u;
+    watch.wait_exact_hook_last_omission_pc = 0u;
+    watch.wait_exact_hook_last_omission_thread = 0u;
+    commcenter_wait_note_exact_hook_omission(
+        &watch, 150u, UINT32_C(0xc00272b4),
+        UINT32_C(0xc0ffee00));
+    commcenter_wait_note_exact_hook_omission(
+        &watch, 160u, UINT32_C(0xc0027364),
+        UINT32_C(0xc0ffee40));
+    ok = ok &&
+        watch.wait_exact_hook_attribution_omissions == 2u &&
+        watch.wait_exact_hook_first_omission_at == 150u &&
+        watch.wait_exact_hook_first_omission_pc ==
+            UINT32_C(0xc00272b4) &&
+        watch.wait_exact_hook_first_omission_thread ==
+            UINT32_C(0xc0ffee00) &&
+        watch.wait_exact_hook_last_omission_at == 160u &&
+        watch.wait_exact_hook_last_omission_pc ==
+            UINT32_C(0xc0027364) &&
+        watch.wait_exact_hook_last_omission_thread ==
+            UINT32_C(0xc0ffee40);
+
+    synthetic_wait.last_block_continuation_arg =
+        COMMCENTER_WAIT_MACH_RECEIVE_CONTINUATION;
+    synthetic_wait.last_wait.continuation =
+        COMMCENTER_WAIT_MACH_RECEIVE_CONTINUATION;
+    ok = ok &&
+        commcenter_wait_state_has_committed_continuation(
+            &synthetic_wait,
+            COMMCENTER_WAIT_MACH_RECEIVE_CONTINUATION);
+    synthetic_wait.last_wait.continuation =
+        COMMCENTER_WAIT_MQUEUE_RECEIVE_CONTINUATION;
+    ok = ok &&
+        !commcenter_wait_state_has_committed_continuation(
+            &synthetic_wait,
+            COMMCENTER_WAIT_MACH_RECEIVE_CONTINUATION);
     return ok;
 }
 
@@ -6911,7 +12235,7 @@ static bool springboard_target_trace_selfcheck(void) {
             &ring.target_mach[0], &mach_cpu, UINT64_C(290));
         springboard_commcenter_route_note(
             &ring.target_mach[0], &mach_cpu, UINT64_C(291),
-            SPRINGBOARD_COMMCENTER_POST_SELECTED_WAITER_PC);
+            SPRINGBOARD_COMMCENTER_POST_RECEIVER_WOKEN_PC);
         bool layout_disabled_ok =
             ring.target_mach[0].commcenter_probe.attempted &&
             ring.target_mach[0].commcenter_probe.stage ==
@@ -6921,38 +12245,159 @@ static bool springboard_target_trace_selfcheck(void) {
         memset(&ring.target_mach[0].commcenter_probe, 0,
                sizeof ring.target_mach[0].commcenter_probe);
         G.commcenter_layout.enabled = true;
+        const uint32_t route_mqueue = UINT32_C(0xc0aa0018);
+        const uint32_t route_port =
+            route_mqueue -
+                SPRINGBOARD_COMMCENTER_MQUEUE_PORT_DELTA;
+        const uint32_t route_kmsg = UINT32_C(0xc0bb0000);
+        const uint32_t route_required =
+            SPRINGBOARD_COMMCENTER_VALID_MQUEUE |
+            SPRINGBOARD_COMMCENTER_VALID_PORT |
+            SPRINGBOARD_COMMCENTER_VALID_IO_BITS |
+            SPRINGBOARD_COMMCENTER_VALID_PORT_ACTIVE |
+            SPRINGBOARD_COMMCENTER_VALID_KMSG |
+            SPRINGBOARD_COMMCENTER_VALID_KMSG_HEADER |
+            SPRINGBOARD_COMMCENTER_VALID_KERNEL_DESTINATION_MATCH |
+            SPRINGBOARD_COMMCENTER_VALID_KERNEL_ID_MATCH;
+        springboard_commcenter_probe_t *route_probe =
+            &ring.target_mach[0].commcenter_probe;
+        route_probe->attempted = true;
+        route_probe->valid_bits = route_required;
+        route_probe->mqueue = route_mqueue;
+        route_probe->port = route_port;
+        route_probe->io_bits =
+            SPRINGBOARD_COMMCENTER_PORT_ACTIVE;
+        route_probe->incoming.complete = true;
+        route_probe->incoming.kmsg = route_kmsg;
+        route_probe->incoming.header =
+            route_kmsg + SPRINGBOARD_COMMCENTER_KMSG_HEADER_OFFSET;
+        route_probe->incoming.destination = route_port;
+        route_probe->incoming.id =
+            (int32_t)SPRINGBOARD_COMMCENTER_INITIAL_ID;
+        route_probe->incoming_destination_matches = true;
+        route_probe->incoming_id_matches = true;
         mach_cpu.r[0] = UINT32_C(0x01010101);
         mach_cpu.r[1] = UINT32_C(0x02020202);
         mach_cpu.r[2] = UINT32_C(0x03030303);
         mach_cpu.r[3] = UINT32_C(0x04040404);
         mach_cpu.r[4] = UINT32_C(0x05050505);
+        mach_cpu.r[5] = route_mqueue;
+        mach_cpu.r[6] = route_kmsg;
+        mach_cpu.r[8] = 0u;
         mach_cpu.r[14] = UINT32_C(0x0e0e0e0e);
         springboard_target_note_mach_pc(
             &ring, &mach_cpu, UINT64_C(301),
-            SPRINGBOARD_COMMCENTER_POST_SELECTED_WAITER_PC | 1u);
-        mach_cpu.r[0] = UINT32_C(0xaaaaaaaa);
-        mach_cpu.r[14] = UINT32_C(0xbbbbbbbb);
+            SPRINGBOARD_COMMCENTER_POST_RECEIVER_WOKEN_PC | 1u);
+        mach_cpu.r[5] = route_mqueue + 4u;
         springboard_target_note_mach_pc(
             &ring, &mach_cpu, UINT64_C(302),
-            SPRINGBOARD_COMMCENTER_POST_SELECTED_WAITER_PC);
+            SPRINGBOARD_COMMCENTER_POST_RECEIVER_WOKEN_PC);
+        mach_cpu.r[5] = route_mqueue;
         ring.target_mach[0].request_header.id = 0;
         springboard_target_note_mach_pc(
             &ring, &mach_cpu, UINT64_C(303),
-            SPRINGBOARD_COMMCENTER_POST_NO_WAITER_PC);
+            SPRINGBOARD_COMMCENTER_POST_NO_ELIGIBLE_RECEIVER_PC);
         ring.target_mach[0].request_header.id =
             (int32_t)SPRINGBOARD_COMMCENTER_INITIAL_ID;
         springboard_target_note_mach_pc(
             &ring, &mach_cpu, UINT64_C(304),
-            SPRINGBOARD_COMMCENTER_POST_NO_WAITER_PC);
+            SPRINGBOARD_COMMCENTER_POST_NO_ELIGIBLE_RECEIVER_PC);
+        mach_cpu.r[4] = route_mqueue;
+        mach_cpu.r[8] = route_kmsg;
         springboard_target_note_mach_pc(
             &ring, &mach_cpu, UINT64_C(305),
-            SPRINGBOARD_COMMCENTER_FULL_WAIT_PC);
+            SPRINGBOARD_COMMCENTER_QUEUE_FULL_SLOW_PC);
         springboard_target_note_mach_pc(
             &ring, &mach_cpu, UINT64_C(306),
-            SPRINGBOARD_COMMCENTER_FULLWAITERS_STORE_PC);
+            SPRINGBOARD_COMMCENTER_MARK_FULLWAITERS_PC);
         springboard_target_note_mach_pc(
             &ring, &mach_cpu, UINT64_C(307),
-            SPRINGBOARD_COMMCENTER_ACCEPTED_POST_PC);
+            SPRINGBOARD_COMMCENTER_IMMEDIATE_SLOT_RESERVE_PC);
+        mach_cpu.r[8] = route_kmsg + 4u;
+        springboard_target_note_mach_pc(
+            &ring, &mach_cpu, UINT64_C(308),
+            SPRINGBOARD_COMMCENTER_QUEUE_FULL_SLOW_PC);
+        mach_cpu.r[8] = route_kmsg;
+        mach_cpu.r[6] = route_kmsg + 4u;
+        springboard_target_note_mach_pc(
+            &ring, &mach_cpu, UINT64_C(309),
+            SPRINGBOARD_COMMCENTER_POST_NO_ELIGIBLE_RECEIVER_PC);
+        mach_cpu.r[6] = route_kmsg;
+        route_probe->route_candidate_hits[
+            SPRINGBOARD_COMMCENTER_ROUTE_MARK_FULLWAITERS] =
+                UINT64_MAX;
+        springboard_target_note_mach_pc(
+            &ring, &mach_cpu, UINT64_C(310),
+            SPRINGBOARD_COMMCENTER_MARK_FULLWAITERS_PC);
+        bool route_counter_overflow_rejected =
+            route_probe->route_counter_overflow[
+                SPRINGBOARD_COMMCENTER_ROUTE_MARK_FULLWAITERS] &&
+            route_probe->route_candidate_hits[
+                SPRINGBOARD_COMMCENTER_ROUTE_MARK_FULLWAITERS] ==
+                    UINT64_MAX;
+        route_probe->valid_bits &=
+            ~SPRINGBOARD_COMMCENTER_VALID_KERNEL_ID_MATCH;
+        bool missing_validation_rejected =
+            !springboard_commcenter_route_binding_matches(
+                route_probe, &mach_cpu,
+                SPRINGBOARD_COMMCENTER_ROUTE_QUEUE_FULL_SLOW);
+        route_probe->valid_bits = route_required;
+        route_probe->mqueue++;
+        bool mqueue_port_mismatch_rejected =
+            !springboard_commcenter_route_binding_matches(
+                route_probe, &mach_cpu,
+                SPRINGBOARD_COMMCENTER_ROUTE_QUEUE_FULL_SLOW);
+        route_probe->mqueue = route_mqueue;
+        route_probe->incoming.header = 0u;
+        bool missing_header_rejected =
+            !springboard_commcenter_route_binding_matches(
+                route_probe, &mach_cpu,
+                SPRINGBOARD_COMMCENTER_ROUTE_QUEUE_FULL_SLOW);
+        route_probe->incoming.header =
+            route_kmsg + SPRINGBOARD_COMMCENTER_KMSG_HEADER_OFFSET;
+        route_probe->io_bits |= UINT32_C(0x00010000);
+        bool wrong_port_type_rejected =
+            !springboard_commcenter_route_binding_matches(
+                route_probe, &mach_cpu,
+                SPRINGBOARD_COMMCENTER_ROUTE_QUEUE_FULL_SLOW);
+        route_probe->io_bits =
+            SPRINGBOARD_COMMCENTER_PORT_ACTIVE;
+        route_probe->incoming.destination++;
+        bool stored_destination_mismatch_rejected =
+            !springboard_commcenter_route_binding_matches(
+                route_probe, &mach_cpu,
+                SPRINGBOARD_COMMCENTER_ROUTE_QUEUE_FULL_SLOW);
+        route_probe->incoming.destination = route_port;
+        route_probe->incoming_destination_matches = false;
+        bool destination_match_flag_rejected =
+            !springboard_commcenter_route_binding_matches(
+                route_probe, &mach_cpu,
+                SPRINGBOARD_COMMCENTER_ROUTE_QUEUE_FULL_SLOW);
+        route_probe->incoming_destination_matches = true;
+        route_probe->incoming.id = 0;
+        bool stored_id_mismatch_rejected =
+            !springboard_commcenter_route_binding_matches(
+                route_probe, &mach_cpu,
+                SPRINGBOARD_COMMCENTER_ROUTE_QUEUE_FULL_SLOW);
+        route_probe->incoming.id =
+            (int32_t)SPRINGBOARD_COMMCENTER_INITIAL_ID;
+        route_probe->incoming_id_matches = false;
+        bool id_match_flag_rejected =
+            !springboard_commcenter_route_binding_matches(
+                route_probe, &mach_cpu,
+                SPRINGBOARD_COMMCENTER_ROUTE_QUEUE_FULL_SLOW);
+        route_probe->incoming_id_matches = true;
+        mach_cpu.r[4] = 0u;
+        bool post_mapping_does_not_bind_send =
+            !springboard_commcenter_route_binding_matches(
+                route_probe, &mach_cpu,
+                SPRINGBOARD_COMMCENTER_ROUTE_QUEUE_FULL_SLOW);
+        mach_cpu.r[4] = route_mqueue;
+        mach_cpu.r[5] = 0u;
+        bool send_mapping_does_not_bind_post =
+            !springboard_commcenter_route_binding_matches(
+                route_probe, &mach_cpu,
+                SPRINGBOARD_COMMCENTER_ROUTE_POST_RECEIVER_WOKEN);
         G.commcenter_layout.enabled = saved_layout_enabled;
         SPRINGBOARD_MACH_PATH_VA[path] = saved_va;
 
@@ -6978,40 +12423,91 @@ static bool springboard_target_trace_selfcheck(void) {
             layout_disabled_ok &&
             springboard_commcenter_user_header_signature_matches(
                 &ring.target_mach[0]) &&
+            route_counter_overflow_rejected &&
+            missing_validation_rejected &&
+            mqueue_port_mismatch_rejected &&
+            missing_header_rejected &&
+            wrong_port_type_rejected &&
+            stored_destination_mismatch_rejected &&
+            destination_match_flag_rejected &&
+            stored_id_mismatch_rejected &&
+            id_match_flag_rejected &&
+            post_mapping_does_not_bind_send &&
+            send_mapping_does_not_bind_post &&
             ring.target_mach[0].commcenter_probe.route_bits ==
                 all_route_bits &&
             ring.target_mach[0].commcenter_probe
                     .route_first_at[
-                        SPRINGBOARD_COMMCENTER_ROUTE_POST_SELECTED_WAITER] ==
+                        SPRINGBOARD_COMMCENTER_ROUTE_POST_RECEIVER_WOKEN] ==
                 UINT64_C(301) &&
             ring.target_mach[0].commcenter_probe
                     .route_first_r[
-                        SPRINGBOARD_COMMCENTER_ROUTE_POST_SELECTED_WAITER][0] ==
-                UINT32_C(0x01010101) &&
+                        SPRINGBOARD_COMMCENTER_ROUTE_POST_RECEIVER_WOKEN][5] ==
+                route_mqueue &&
             ring.target_mach[0].commcenter_probe
-                    .route_first_r4[
-                        SPRINGBOARD_COMMCENTER_ROUTE_POST_SELECTED_WAITER] ==
-                UINT32_C(0x05050505) &&
+                    .route_first_r[
+                        SPRINGBOARD_COMMCENTER_ROUTE_POST_RECEIVER_WOKEN][6] ==
+                route_kmsg &&
             ring.target_mach[0].commcenter_probe
                     .route_first_lr[
-                        SPRINGBOARD_COMMCENTER_ROUTE_POST_SELECTED_WAITER] ==
+                        SPRINGBOARD_COMMCENTER_ROUTE_POST_RECEIVER_WOKEN] ==
                 UINT32_C(0x0e0e0e0e) &&
             ring.target_mach[0].commcenter_probe
-                    .route_first_at[
-                        SPRINGBOARD_COMMCENTER_ROUTE_POST_NO_WAITER] ==
-                UINT64_C(304) &&
+                    .route_candidate_hits[
+                        SPRINGBOARD_COMMCENTER_ROUTE_POST_RECEIVER_WOKEN] ==
+                UINT64_C(2) &&
+            ring.target_mach[0].commcenter_probe
+                    .route_mismatch_hits[
+                        SPRINGBOARD_COMMCENTER_ROUTE_POST_RECEIVER_WOKEN] ==
+                UINT64_C(1) &&
+            ring.target_mach[0].commcenter_probe
+                    .route_mismatch_first_at[
+                        SPRINGBOARD_COMMCENTER_ROUTE_POST_RECEIVER_WOKEN] ==
+                UINT64_C(302) &&
             ring.target_mach[0].commcenter_probe
                     .route_first_at[
-                        SPRINGBOARD_COMMCENTER_ROUTE_FULL_WAIT] ==
+                        SPRINGBOARD_COMMCENTER_ROUTE_POST_NO_ELIGIBLE_RECEIVER] ==
+                UINT64_C(304) &&
+            ring.target_mach[0].commcenter_probe
+                    .route_candidate_hits[
+                        SPRINGBOARD_COMMCENTER_ROUTE_POST_NO_ELIGIBLE_RECEIVER] ==
+                UINT64_C(2) &&
+            ring.target_mach[0].commcenter_probe
+                    .route_mismatch_hits[
+                        SPRINGBOARD_COMMCENTER_ROUTE_POST_NO_ELIGIBLE_RECEIVER] ==
+                UINT64_C(1) &&
+            ring.target_mach[0].commcenter_probe
+                    .route_mismatch_first_at[
+                        SPRINGBOARD_COMMCENTER_ROUTE_POST_NO_ELIGIBLE_RECEIVER] ==
+                UINT64_C(309) &&
+            ring.target_mach[0].commcenter_probe
+                    .route_first_at[
+                        SPRINGBOARD_COMMCENTER_ROUTE_QUEUE_FULL_SLOW] ==
                 UINT64_C(305) &&
             ring.target_mach[0].commcenter_probe
                     .route_first_at[
-                        SPRINGBOARD_COMMCENTER_ROUTE_FULLWAITERS_STORE] ==
+                        SPRINGBOARD_COMMCENTER_ROUTE_MARK_FULLWAITERS] ==
                 UINT64_C(306) &&
             ring.target_mach[0].commcenter_probe
                     .route_first_at[
-                        SPRINGBOARD_COMMCENTER_ROUTE_ENQUEUE] ==
-                UINT64_C(307);
+                        SPRINGBOARD_COMMCENTER_ROUTE_IMMEDIATE_SLOT_RESERVE] ==
+                UINT64_C(307) &&
+            ring.target_mach[0].commcenter_probe
+                    .route_candidate_hits[
+                        SPRINGBOARD_COMMCENTER_ROUTE_QUEUE_FULL_SLOW] ==
+                UINT64_C(2) &&
+            ring.target_mach[0].commcenter_probe
+                    .route_mismatch_hits[
+                        SPRINGBOARD_COMMCENTER_ROUTE_QUEUE_FULL_SLOW] ==
+                UINT64_C(1) &&
+            ring.target_mach[0].commcenter_probe
+                    .route_first_r[
+                        SPRINGBOARD_COMMCENTER_ROUTE_QUEUE_FULL_SLOW][4] ==
+                route_mqueue &&
+            ring.target_mach[0].commcenter_probe
+                    .route_first_r[
+                        SPRINGBOARD_COMMCENTER_ROUTE_QUEUE_FULL_SLOW][8] ==
+                route_kmsg;
     }
 
     memset(&ring, 0, sizeof ring);
@@ -9544,6 +15040,16 @@ static const char *springboard_commcenter_stage_name(unsigned stage) {
             return "port io_bits read";
         case SPRINGBOARD_COMMCENTER_STAGE_PORT_ACTIVE:
             return "port active-bit validation";
+        case SPRINGBOARD_COMMCENTER_STAGE_KMSG_POINTER:
+            return "kernel kmsg pointer validation";
+        case SPRINGBOARD_COMMCENTER_STAGE_KMSG_HEADER:
+            return "kernel kmsg/header read";
+        case SPRINGBOARD_COMMCENTER_STAGE_KMSG_HEADER_POINTER:
+            return "kernel Mach-header pointer validation";
+        case SPRINGBOARD_COMMCENTER_STAGE_KERNEL_DESTINATION_MATCH:
+            return "kernel Mach-header destination match";
+        case SPRINGBOARD_COMMCENTER_STAGE_KERNEL_ID_MATCH:
+            return "kernel Mach-header message-ID match";
         case SPRINGBOARD_COMMCENTER_STAGE_MSGCOUNT:
             return "mqueue msgcount read";
         case SPRINGBOARD_COMMCENTER_STAGE_QLIMIT:
@@ -9552,8 +15058,12 @@ static const char *springboard_commcenter_stage_name(unsigned stage) {
             return "mqueue seqno read";
         case SPRINGBOARD_COMMCENTER_STAGE_FULLWAITERS:
             return "mqueue fullwaiters read";
+        case SPRINGBOARD_COMMCENTER_STAGE_RECEIVER_NAME:
+            return "port receiver-name read";
+        case SPRINGBOARD_COMMCENTER_STAGE_RECEIVER_NAME_AUTHORITY:
+            return "port receiver-name authority validation";
         case SPRINGBOARD_COMMCENTER_STAGE_RECEIVER_SPACE:
-            return "port receiver-space read";
+            return "port receiver-space union read";
         case SPRINGBOARD_COMMCENTER_STAGE_RECEIVER_SPACE_POINTER:
             return "receiver-space pointer validation";
         case SPRINGBOARD_COMMCENTER_STAGE_RECEIVER_SPACE_ACTIVE:
@@ -9580,7 +15090,17 @@ static const char *springboard_commcenter_stage_name(unsigned stage) {
 
 static void springboard_commcenter_probe_report(
         const springboard_commcenter_probe_t *probe) {
-    if (!probe || (!probe->attempted && !probe->route_bits))
+    bool route_candidates = false;
+    if (probe) {
+        for (unsigned i = 0;
+             i < SPRINGBOARD_COMMCENTER_ROUTE_COUNT; i++)
+            route_candidates =
+                route_candidates ||
+                probe->route_candidate_hits[i] != 0u;
+    }
+    if (!probe ||
+        (!probe->attempted && !probe->route_bits &&
+         !route_candidates))
         return;
 
     if (probe->attempted) {
@@ -9607,11 +15127,39 @@ static void springboard_commcenter_probe_report(
             printf("\n");
         if (probe->valid_bits &
                 SPRINGBOARD_COMMCENTER_VALID_IO_BITS)
-            printf("          port io_bits=%08x; active-bit=%s\n",
+            printf("          port io_bits=%08x; active-port-type=%s\n",
                    probe->io_bits,
                    (probe->valid_bits &
                         SPRINGBOARD_COMMCENTER_VALID_PORT_ACTIVE)
-                       ? "validated" : "not validated");
+                        ? "validated" : "not validated");
+        if (probe->incoming.kmsg || probe->incoming.failure_va) {
+            printf("          copied-in kernel message:"
+                   " kmsg=%08x header=%08x",
+                   probe->incoming.kmsg, probe->incoming.header);
+            if (probe->incoming.complete)
+                printf(" bits/size=%08x/%u destination/reply=%08x/%08x"
+                       " id=%d (0x%08x); destination/id match=%s/%s",
+                       probe->incoming.bits, probe->incoming.size,
+                       probe->incoming.destination,
+                       probe->incoming.reply,
+                       probe->incoming.id,
+                       (uint32_t)probe->incoming.id,
+                       probe->incoming_destination_matches ? "yes" : "no",
+                       probe->incoming_id_matches ? "yes" : "no");
+            else
+                printf(" INCOMPLETE failure-va/fsr=%08x/%08x",
+                       probe->incoming.failure_va,
+                       probe->incoming.failure_fsr);
+            printf("\n");
+        }
+        if (probe->valid_bits &
+                SPRINGBOARD_COMMCENTER_VALID_RECEIVER_NAME)
+            printf("          port receiver-name=%08x;"
+                   " union-authority=%s\n",
+                   probe->receiver_name,
+                   (probe->valid_bits &
+                        SPRINGBOARD_COMMCENTER_VALID_RECEIVER_NAME_AUTHORITY)
+                       ? "validated" : "rejected");
         if (probe->valid_bits &
                 (SPRINGBOARD_COMMCENTER_VALID_MSGCOUNT |
                  SPRINGBOARD_COMMCENTER_VALID_QLIMIT |
@@ -9631,6 +15179,46 @@ static void springboard_commcenter_probe_report(
                     SPRINGBOARD_COMMCENTER_VALID_FULLWAITERS)
                 printf(" fullwaiters=%u", probe->fullwaiters);
             printf("\n");
+        }
+        if (probe->queue_snapshot_attempted) {
+            printf("          queue linked-list snapshot:"
+                   " head=%08x readable=%s linked=%u"
+                   " closed=%s consistent=%s truncated=%s",
+                   probe->queue_head,
+                   probe->queue_head_readable ? "yes" : "no",
+                   probe->queue_linked_count,
+                   probe->queue_closed ? "yes" : "no",
+                   probe->queue_consistent ? "yes" : "no",
+                   probe->queue_truncated ? "yes" : "no");
+            uint32_t reserved_slots = 0;
+            if (springboard_commcenter_reserved_slots_exact(
+                    probe, &reserved_slots))
+                printf(" reserved-or-in-flight=%u",
+                       reserved_slots);
+            else
+                printf(" reservation-count=UNPROVEN");
+            if (probe->queue_failure_va ||
+                probe->queue_failure_fsr)
+                printf(" failure-va/fsr=%08x/%08x",
+                       probe->queue_failure_va,
+                       probe->queue_failure_fsr);
+            printf("\n");
+            for (uint32_t i = 0;
+                 i < probe->queue_linked_count &&
+                 i < SPRINGBOARD_COMMCENTER_QUEUE_NODE_CAP; i++) {
+                const springboard_commcenter_kmsg_t *node =
+                    &probe->queue_nodes[i];
+                printf("            [%u] kmsg=%08x next/prev=%08x/%08x"
+                       " header=%08x bits/size=%08x/%u"
+                       " destination/reply=%08x/%08x"
+                       " id=%d (0x%08x)%s\n",
+                       i, node->kmsg, node->next, node->prev,
+                       node->header, node->bits, node->size,
+                       node->destination, node->reply,
+                       node->id, (uint32_t)node->id,
+                       node->destination == probe->port
+                           ? "" : " DESTINATION-MISMATCH");
+            }
         }
         if (probe->valid_bits &
                 (SPRINGBOARD_COMMCENTER_VALID_RECEIVER_SPACE |
@@ -9672,9 +15260,10 @@ static void springboard_commcenter_probe_report(
             printf("\n");
         }
         if (probe->complete) {
-            printf("          decode COMPLETE; pointers/alignment/kernel"
-                   " VA/readability, active bits, and task-space"
-                   " backpointer validated; PID is within signed range\n");
+            printf("          decode AUTHORITATIVE; active port receiver"
+                   " name, pointers/alignment/kernel VA/readability,"
+                   " active space, task-space backpointer, and signed PID"
+                   " validated\n");
         } else if (probe->stage ==
                        SPRINGBOARD_COMMCENTER_STAGE_LAYOUT_DISABLED) {
             printf("          decode INCOMPLETE: %s\n",
@@ -9687,27 +15276,74 @@ static void springboard_commcenter_probe_report(
         }
     }
 
-    printf("        exact CommCenter queue route PCs:");
-    if (!probe->route_bits) {
-        printf(" none captured\n");
-        return;
-    }
-    printf("\n");
+    printf("        exact CommCenter queue route PCs:\n");
+    printf("          NOTE: PCs are sampled before the named instruction;"
+           " a BOUND route requires the same exact mqueue/kmsg in"
+           " r5/r6 for post paths or r4/r8 for send paths;"
+           " queue fields are entry snapshots, msgcount includes"
+           " reserved slots, and fullwaiters is Boolean\n");
+    if (!probe->route_bits && !route_candidates)
+        printf("          none captured\n");
     for (unsigned i = 0;
          i < SPRINGBOARD_COMMCENTER_ROUTE_COUNT; i++) {
         uint32_t bit = UINT32_C(1) << i;
-        if (!(probe->route_bits & bit)) continue;
-        printf("          %-24s pc=%08x @%" PRIu64
-               " r0-r4=%08x/%08x/%08x/%08x/%08x lr=%08x\n",
-               SPRINGBOARD_COMMCENTER_ROUTE_NAMES[i],
-               SPRINGBOARD_COMMCENTER_ROUTE_PC[i],
-               probe->route_first_at[i],
-               probe->route_first_r[i][0],
-               probe->route_first_r[i][1],
-               probe->route_first_r[i][2],
-               probe->route_first_r[i][3],
-               probe->route_first_r4[i],
-               probe->route_first_lr[i]);
+        if (probe->route_bits & bit) {
+            bool counts_exact =
+                !probe->route_counter_overflow[i] &&
+                probe->route_candidate_hits[i] >=
+                    probe->route_mismatch_hits[i];
+            if (counts_exact) {
+                uint64_t bound_hits =
+                    probe->route_candidate_hits[i] -
+                    probe->route_mismatch_hits[i];
+                printf("          BOUND %-18s pc=%08x @%" PRIu64
+                       " bound-hits=%" PRIu64
+                       " total-candidates=%" PRIu64
+                       " r4/r5/r6/r8=%08x/%08x/%08x/%08x"
+                       " lr=%08x\n",
+                       SPRINGBOARD_COMMCENTER_ROUTE_NAMES[i],
+                       SPRINGBOARD_COMMCENTER_ROUTE_PC[i],
+                       probe->route_first_at[i],
+                       bound_hits,
+                       probe->route_candidate_hits[i],
+                       probe->route_first_r[i][4],
+                       probe->route_first_r[i][5],
+                       probe->route_first_r[i][6],
+                       probe->route_first_r[i][8],
+                       probe->route_first_lr[i]);
+            } else {
+                printf("          BOUND %-18s pc=%08x @%" PRIu64
+                       " hit-counts=UNPROVEN(counter-overflow)"
+                       " r4/r5/r6/r8=%08x/%08x/%08x/%08x"
+                       " lr=%08x\n",
+                       SPRINGBOARD_COMMCENTER_ROUTE_NAMES[i],
+                       SPRINGBOARD_COMMCENTER_ROUTE_PC[i],
+                       probe->route_first_at[i],
+                       probe->route_first_r[i][4],
+                       probe->route_first_r[i][5],
+                       probe->route_first_r[i][6],
+                       probe->route_first_r[i][8],
+                       probe->route_first_lr[i]);
+            }
+        }
+        if (probe->route_mismatch_hits[i])
+            printf("          REJECTED-CANDIDATE %-7s pc=%08x"
+                   " total-candidates=%" PRIu64
+                   " mismatches=%" PRIu64 " first@%" PRIu64
+                   " r4/r5/r6/r8=%08x/%08x/%08x/%08x\n",
+                   SPRINGBOARD_COMMCENTER_ROUTE_NAMES[i],
+                   SPRINGBOARD_COMMCENTER_ROUTE_PC[i],
+                   probe->route_candidate_hits[i],
+                   probe->route_mismatch_hits[i],
+                   probe->route_mismatch_first_at[i],
+                   probe->route_mismatch_first_r[i][4],
+                   probe->route_mismatch_first_r[i][5],
+                   probe->route_mismatch_first_r[i][6],
+                   probe->route_mismatch_first_r[i][8]);
+        if (probe->route_counter_overflow[i])
+            printf("          COUNTER-OVERFLOW %-10s:"
+                   " route hit totals are UNPROVEN\n",
+                   SPRINGBOARD_COMMCENTER_ROUTE_NAMES[i]);
     }
 }
 
@@ -9745,6 +15381,11 @@ static void commcenter_watch_report(void) {
     printf("    ownership layout gate: %s (%s)\n",
            layout->enabled ? "VALIDATED" : "DISABLED",
            layout->reason[0] ? layout->reason : "not discovered");
+    printf("    per-thread wait layout gate: %s (%s)\n",
+           G.commcenter_wait_config.enabled
+               ? "VALIDATED" : "DISABLED",
+           G.commcenter_wait_config.reason[0]
+               ? G.commcenter_wait_config.reason : "not discovered");
     printf("    exact-path SETEXEC attempts observed globally: %" PRIu64
            "; distinct fully validated attempts ignored while a generation"
            " remained live: %" PRIu64 "\n",
@@ -9839,6 +15480,13 @@ static void commcenter_watch_report(void) {
                " complete=%s valid-bits=%08x",
                watch->receiver_complete ? "yes" : "no",
                watch->receiver_valid_bits);
+        if (watch->receiver_valid_bits &
+                SPRINGBOARD_COMMCENTER_VALID_RECEIVER_NAME)
+            printf(" receiver-name=%08x%s", watch->receiver_name,
+                   (watch->receiver_valid_bits &
+                        SPRINGBOARD_COMMCENTER_VALID_RECEIVER_NAME_AUTHORITY)
+                       ? " (authoritative union)"
+                       : " (union rejected)");
         if (watch->receiver_valid_bits &
                 SPRINGBOARD_COMMCENTER_VALID_RECEIVER_SPACE)
             printf(" space=%08x", watch->receiver_space);
@@ -10018,6 +15666,855 @@ static void commcenter_watch_report(void) {
                     observation->last_lr[phase]);
         }
     }
+
+    unsigned wait_thread_count = 0;
+    for (unsigned i = 0; i < COMMCENTER_WAIT_THREAD_CAP; i++)
+        if (watch->wait_threads[i].occupied)
+            wait_thread_count++;
+    printf("    exact-gated per-thread wait states:"
+           " retained=%u capacity=%u overflow=%" PRIu64 "\n",
+           wait_thread_count, COMMCENTER_WAIT_THREAD_CAP,
+           watch->wait_thread_overflow);
+    printf("      exact-hook attribution omissions=%" PRIu64,
+           watch->wait_exact_hook_attribution_omissions);
+    if (watch->wait_exact_hook_attribution_omissions)
+        printf(" first@%" PRIu64 " pc/thread=%08x/%08x"
+               " last@%" PRIu64 " pc/thread=%08x/%08x",
+               watch->wait_exact_hook_first_omission_at,
+               watch->wait_exact_hook_first_omission_pc,
+               watch->wait_exact_hook_first_omission_thread,
+               watch->wait_exact_hook_last_omission_at,
+               watch->wait_exact_hook_last_omission_pc,
+               watch->wait_exact_hook_last_omission_thread);
+    printf("\n");
+    printf("      CAUTION: a process-wide last-scheduled worker is not"
+           " the service thread; causality requires this per-thread state"
+           " plus service-port/notification correlation\n");
+    printf("      CAUTION: unresolved means no later execution was"
+           " observed; an off-CPU thread could be asynchronously woken"
+           " or terminated and remain unscheduled at the cap. No final"
+           " live wait-state reread is performed.\n");
+    for (unsigned i = 0; i < COMMCENTER_WAIT_THREAD_CAP; i++) {
+        const commcenter_thread_wait_t *state =
+            &watch->wait_threads[i];
+        if (!state->occupied) continue;
+        const commcenter_wait_snapshot_t *snapshot =
+            &state->last_wait;
+        bool process_live =
+            !watch->terminal && !watch->identity_invalidated;
+        const char *classification =
+            "no unresolved last-observed block proved";
+        if (commcenter_wait_state_is_direct_semaphore(
+                state, process_live))
+            classification = commcenter_wait_state_is_timed(state)
+                ? "last observed direct Mach timed-semaphore block;"
+                  " no resume observed"
+                : "last observed direct Mach semaphore block;"
+                  " no resume observed";
+        else if (commcenter_wait_snapshot_is_exact_semaphore(
+                     state, process_live) &&
+                 (snapshot->valid_bits &
+                      COMMCENTER_WAIT_VALID_OUTER_CONTINUATION) &&
+                 snapshot->outer_continuation ==
+                     COMMCENTER_WAIT_BSD_OUTER_CONTINUATION)
+            classification =
+                "last observed BSD/POSIX semaphore block;"
+                " no resume observed";
+        else if (commcenter_wait_snapshot_is_exact_semaphore(
+                     state, process_live))
+            classification =
+                "last observed exact semaphore block, outer caller"
+                " unclassified; no resume observed";
+        else if (commcenter_wait_state_has_unresolved_observed_block(
+                     state, process_live) &&
+                 commcenter_wait_state_has_committed_continuation(
+                     state,
+                     COMMCENTER_WAIT_MQUEUE_RECEIVE_CONTINUATION))
+            classification =
+                "last observed IPC mqueue-receive block;"
+                " no resume observed";
+        else if (commcenter_wait_state_has_unresolved_observed_block(
+                     state, process_live) &&
+                 commcenter_wait_state_has_committed_continuation(
+                     state,
+                     COMMCENTER_WAIT_MACH_RECEIVE_CONTINUATION))
+            classification =
+                "last observed Mach-receive block; no resume observed";
+        else if (state->sequence_exhausted)
+            classification =
+                "unproven wait: sequence counter exhausted";
+        else if (commcenter_wait_state_has_unresolved_observed_block(
+                     state, process_live))
+            classification =
+                "last observed unresolved block, continuation"
+                " unclassified; no resume observed";
+        else if (!process_live && state->block_entries)
+            classification =
+                "historical wait only: process generation terminal";
+        else if (state->block_entries && !state->block_open)
+            classification =
+                "historical wait only: resumed/returned/continued";
+        else if (state->block_open &&
+                 state->block_schedule_uncertain)
+            classification =
+                "unproven wait: unreadable schedule transition";
+        else if (state->block_open &&
+                 state->snapshot_block_sequence !=
+                     state->block_sequence)
+            classification =
+                "unproven wait: no same-block committed snapshot";
+        else if (state->block_open &&
+                 state->switch_out_block_sequence !=
+                     state->block_sequence)
+            classification =
+                "unproven wait: no ordered same-block switch-out";
+
+        printf("      thread=%08x%s first/last=%" PRIu64 "/%" PRIu64
+               " switches-in/out=%" PRIu64 "/%" PRIu64
+               " last-in/out=%" PRIu64 "/%" PRIu64
+               " classification=%s\n",
+               state->thread,
+               state->thread == watch->entry_thread
+                   ? " (SETEXEC entry thread)" : "",
+               state->first_seen_at, state->last_seen_at,
+               state->switch_ins, state->switch_outs,
+               state->last_switch_in_at,
+               state->last_switch_out_at,
+               classification);
+        printf("        traps relevant/mach/semaphore=%" PRIu64
+               "/%" PRIu64 "/%" PRIu64
+               " last=%d @%" PRIu64 " user-pc=%08x"
+               " state=%s",
+               state->relevant_traps, state->mach_traps,
+               state->semaphore_traps, state->last_trap,
+               state->last_swi_at, state->last_user_pc,
+               state->relevant_trap_open
+                   ? "open/pending" : "returned");
+        printf(" trap-seq=%" PRIu64
+               " block-seq=%" PRIu64
+               " semaphore-seq=%" PRIu64
+               " defensive-trap-poison=%s sequence-exhausted=%s"
+               " schedule-uncertain=%s raw-resume-proofs=%" PRIu64,
+               state->trap_sequence,
+               state->block_sequence,
+               state->semaphore_sequence,
+               state->trap_identity_poisoned
+                   ? "yes" : "no",
+               state->sequence_exhausted
+                   ? "yes" : "no",
+               state->block_schedule_uncertain
+                   ? "yes" : "no",
+               state->raw_resume_proofs);
+        if (!state->relevant_trap_open &&
+            state->last_trap_return_at)
+            printf(" return@%" PRIu64 " trap=%d",
+                   state->last_trap_return_at,
+                   state->last_returned_trap);
+        if (!state->relevant_trap_open &&
+            state->last_trap_return_at &&
+            state->last_trap_return_value_valid)
+            printf(" r0=%08x",
+                   state->last_trap_return_value);
+        if (state->last_mach_header_readable)
+            printf(" last-mach-id=%d", state->last_mach_id);
+        printf(" outbound-send-id1000-candidates=%" PRIu64,
+               state->mach_id_1000_send_candidates);
+        printf("\n");
+        printf("        semaphore core/queue-assert/block/"
+               "fields-committed/block-return/continuation="
+               "%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64
+               "/%" PRIu64 "/%" PRIu64
+               " last-at=%" PRIu64 "/%" PRIu64 "/%" PRIu64
+               "/%" PRIu64 "/%" PRIu64 "\n",
+               state->semaphore_core_hits,
+               state->queue_assert_calls,
+               state->block_entries,
+               state->block_fields_committed,
+               state->block_returns,
+               state->semaphore_continuations,
+               state->last_semaphore_core_at,
+               state->last_queue_assert_at,
+               state->last_block_at,
+               state->last_block_fields_at,
+               state->last_semaphore_continuation_at);
+        printf("        lifecycle sequences:"
+               " block/trap/semaphore=%" PRIu64 "/%" PRIu64
+               "/%" PRIu64
+               " snapshot/switch-out/switch-in=%" PRIu64
+               "/%" PRIu64 "/%" PRIu64
+               " return/continuation=%" PRIu64 "/%" PRIu64
+               " handler/core/fields-trap=%" PRIu64 "/%" PRIu64
+               "/%" PRIu64
+               " core/fields/assert-semaphore=%" PRIu64 "/%" PRIu64
+               "/%" PRIu64 "\n",
+               state->block_sequence,
+               state->block_trap_sequence,
+               state->block_semaphore_sequence,
+               state->snapshot_block_sequence,
+               state->switch_out_block_sequence,
+               state->switch_in_block_sequence,
+               state->return_block_sequence,
+               state->continuation_block_sequence,
+               state->semaphore_handler_trap_sequence,
+               state->semaphore_core_trap_sequence,
+               state->semaphore_fields_trap_sequence,
+               state->semaphore_core_sequence,
+               state->semaphore_fields_sequence,
+               state->queue_assert_sequence);
+        if (state->semaphore_core_hits)
+            printf("        semaphore args:"
+                   " core-wait/signal=%08x/%08x"
+                   " committed-wait/signal=%08x/%08x"
+                   " deadline=%08x:%08x;"
+                   " queue-assert queue/event/type=%08x/%08x:%08x/%u\n",
+                   state->last_core_wait_semaphore,
+                   state->last_core_signal_semaphore,
+                   state->last_semaphore,
+                   state->last_signal_semaphore,
+                   state->last_deadline_high,
+                   state->last_deadline_low,
+                   state->last_queue_assert_queue,
+                   state->last_queue_assert_event_high,
+                   state->last_queue_assert_event_low,
+                   state->last_queue_assert_type);
+        if (state->block_entries || state->block_fields_committed) {
+            printf("        block args continuation/parameter/reason="
+                   "%08x/%08x/%08x; snapshot valid=%08x"
+                   " waitq/event/state/result=%08x/%08x:%08x/%08x/%08x"
+                   " continuation/parameter=%08x/%08x"
+                   " timer=%08x sem/signal/outer=%08x/%08x/%08x"
+                   " sem-count/active=%08x/%08x",
+                   state->last_block_continuation_arg,
+                   state->last_block_parameter_arg,
+                   state->last_block_reason_arg,
+                   snapshot->valid_bits,
+                   snapshot->wait_queue,
+                   snapshot->event_high,
+                   snapshot->event_low,
+                   snapshot->state,
+                   snapshot->result,
+                   snapshot->continuation,
+                   snapshot->parameter,
+                   snapshot->timer_active,
+                   snapshot->wait_semaphore,
+                   snapshot->signal_semaphore,
+                   snapshot->outer_continuation,
+                   snapshot->semaphore_count,
+                   snapshot->semaphore_active);
+            if (snapshot->failure_va || snapshot->failure_fsr)
+                printf(" failure-va/fsr=%08x/%08x",
+                       snapshot->failure_va,
+                       snapshot->failure_fsr);
+            printf("\n");
+        }
+    }
+}
+
+static const char *applebaseband_reset_message_name(
+        uint32_t message) {
+    if (message == APPLEBASEBAND_RESET_MESSAGE_HIGH)
+        return "reset-high";
+    if (message == APPLEBASEBAND_RESET_MESSAGE_LOW)
+        return "reset-low";
+    return "not-reset";
+}
+
+static const char *applebaseband_subscription_state_name(
+        const applebaseband_dispatch_event_t *event) {
+    if (!event || !event->subscription_state_known)
+        return "unknown";
+    return event->before_successful_subscription
+        ? "known-none-before-attempt" : "known-active";
+}
+
+static void applebaseband_trace_report(void) {
+    const applebaseband_trace_config_t *config =
+        &G.applebaseband_trace_config;
+    const applebaseband_trace_t *trace =
+        &G.applebaseband_trace;
+    printf("\n=== APPLEBASEBAND RESET -> COMMCENTER NOTIFICATION"
+           " CAUSAL TRACE ===\n");
+    printf("    exact code/data gate: %s (%s)\n",
+           config->enabled ? "VALIDATED" : "DISABLED",
+           config->reason[0]
+               ? config->reason : "not discovered");
+    printf("    IMPORTANT: this observer is read-only. It never toggles"
+           " GPIO, fabricates reset state, sends a Mach message, or changes"
+           " a queue.\n");
+    if (!config->enabled) return;
+
+    printf("    trace baseline/start=%s/@%" PRIu64
+           " subscription-history-complete=%s\n",
+           config->restored_baseline
+               ? "restored-snapshot" : "cold-start",
+           config->trace_start_at,
+           trace->baseline_complete ? "yes" : "no");
+    printf("    AppleBaseband object=%08x"
+           " setup reset-function hits/nonzero=%" PRIu64 "/%" PRIu64
+           " value=%08x\n"
+           "    event-source result hits/nonzero/committed/"
+           "enable-call-entries="
+           "%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64
+           " value=%08x owner/source-rejects=%" PRIu64 "/%" PRIu64
+           "\n",
+           trace->owner,
+           trace->setup_reset_hits,
+           trace->setup_reset_nonzero,
+           trace->reset_function,
+           trace->setup_event_result_hits,
+           trace->setup_event_nonzero,
+           trace->setup_event_committed_hits,
+           trace->setup_enable_hits,
+           trace->event_source,
+           trace->setup_owner_rejects,
+           trace->setup_event_source_rejects);
+    if (trace->owner_failure_va || trace->owner_failure_fsr)
+        printf("      last object/field rejection va/fsr=%08x/%08x\n",
+               trace->owner_failure_va,
+               trace->owner_failure_fsr);
+
+    printf("    reset callback hits=%" PRIu64,
+           trace->callback_hits);
+    if (trace->callback_hits)
+        printf(" first/last @%" PRIu64 "/%" PRIu64,
+               trace->first_callback_at,
+               trace->last_callback_at);
+    printf(" owner-rejects=%" PRIu64 "\n"
+           "    reset read returns/success/failure/raw-unreadable="
+           "%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64
+           " last status=%08x raw=",
+           trace->callback_owner_rejects,
+           trace->read_return_hits,
+           trace->read_successes,
+           trace->read_failures,
+           trace->read_raw_unreadable,
+           trace->last_read_status);
+    if (trace->last_raw_valid)
+        printf("%08x:%08x\n",
+               trace->last_raw_high,
+               trace->last_raw_low);
+    else
+        printf("UNAVAILABLE\n");
+    printf("    changed=%" PRIu64
+           " last new/old=%08x:%08x/%08x:%08x;"
+           " low-path checks/suppressed=%" PRIu64 "/%" PRIu64
+           " last-flag=%08x\n",
+           trace->changed_hits,
+           trace->last_new_high,
+           trace->last_new_low,
+           trace->last_old_high,
+           trace->last_old_low,
+           trace->low_path_checks,
+           trace->low_suppressed,
+           trace->last_low_suppress_flag);
+    printf("    reset message dispatch-call attempts total/high/low="
+           "%" PRIu64 "/%" PRIu64 "/%" PRIu64,
+           trace->dispatch_total,
+           trace->dispatch_high,
+           trace->dispatch_low);
+    if (trace->dispatch_total)
+        printf(" first/last @%" PRIu64 "/%" PRIu64,
+               trace->first_dispatch_at,
+               trace->last_dispatch_at);
+    printf("; known-none-before-attempt/unknown="
+           "%" PRIu64 "/%" PRIu64
+           "; ring-overwrites=%" PRIu64 "\n",
+           trace->dispatch_before_subscription,
+           trace->dispatch_subscription_unknown,
+           trace->dispatch_dropped);
+
+    unsigned interest_count = 0;
+    for (unsigned i = 0; i < APPLEBASEBAND_INTEREST_CAP; i++)
+        if (trace->interests[i].occupied) interest_count++;
+    printf("    IOKit interest wrappers=%" PRIu64
+           " accepted-unique=%u/%u service-rejects=%" PRIu64
+           " pointer-rejects=%" PRIu64
+           " table-overflow=%" PRIu64 "\n"
+           "    per-thread registration correlation"
+           " pending-overflow/overwrite/frame-mismatch/"
+           "wrapper-return-mismatch=%" PRIu64 "/%" PRIu64
+           "/%" PRIu64 "/%" PRIu64 "\n"
+           "    lifecycle retained/notifier-overflow/"
+           "notifier-teardown/port-teardown=%u/%" PRIu64
+           "/%" PRIu64 "/%" PRIu64
+           " uncertain=%s; live failures/identity-changes="
+           "%" PRIu64 "/%" PRIu64 "\n",
+           trace->interest_wrapper_hits,
+           interest_count, APPLEBASEBAND_INTEREST_CAP,
+           trace->interest_service_rejects,
+           trace->interest_pointer_rejects,
+           trace->interest_overflow,
+           trace->pending_interest_overflow,
+           trace->pending_interest_overwrites,
+           trace->pending_interest_frame_mismatches,
+           trace->wrapper_return_mismatches,
+           trace->retained_interest_count,
+           trace->notifier_overflow,
+           trace->notifier_teardowns,
+           trace->port_teardowns,
+           trace->lifecycle_uncertain ? "yes" : "no",
+           trace->live_validation_failures,
+           trace->live_identity_changes);
+    for (unsigned i = 0; i < APPLEBASEBAND_INTEREST_CAP; i++) {
+        const applebaseband_interest_t *interest =
+            &trace->interests[i];
+        if (!interest->occupied) continue;
+        printf("      interest[%u] service/port/mqueue=%08x/%08x/%08x"
+               " wrapper=%08x thread=%08x"
+               " registrations/success=%" PRIu64 "/%" PRIu64,
+               i, interest->service, interest->port,
+               interest->mqueue, interest->wrapper_pc,
+               interest->last_thread,
+               interest->registrations,
+               interest->successful_registrations);
+        if (interest->successful_registrations)
+            printf(" success first/last @%" PRIu64 "/%" PRIu64,
+                   interest->first_success_at,
+                   interest->last_success_at);
+        printf("\n"
+               "        baseline CommCenter/readable=%s/%s"
+               " stale/live-uncertain/notifier-overflow=%s/%s/%s"
+               " active/retired-notifiers=%u/%u"
+               " live checks/failures/changes=%" PRIu64 "/%" PRIu64
+               "/%" PRIu64 "\n"
+               "        baseline receiver"
+               " name/space/task/proc/pid=%08x/%08x/%08x/%08x/%u\n"
+               "        last registerInterest"
+               " call-seen/service/match/result-seen/result/nonzero="
+               "%s/%08x/%s/%s/%08x/%s\n",
+               interest->baseline_receiver_is_commcenter
+                   ? "yes" : "no",
+               interest->baseline_receiver_identity_readable
+                   ? "yes" : "no",
+               interest->stale ? "yes" : "no",
+               interest->live_uncertain ? "yes" : "no",
+               interest->notifier_overflow ? "yes" : "no",
+               applebaseband_interest_active_notifiers(interest),
+               applebaseband_interest_retired_notifiers(interest),
+               interest->live_checks,
+               interest->live_check_failures,
+               interest->live_identity_changes,
+               interest->baseline_identity.receiver_name,
+               interest->baseline_identity.receiver_space,
+               interest->baseline_identity.receiver_task,
+               interest->baseline_identity.receiver_proc,
+               interest->baseline_identity.receiver_pid,
+               interest->last_register_call_seen ? "yes" : "no",
+               interest->last_register_call_service,
+               interest->last_register_call_service_matches
+                   ? "yes" : "no",
+               interest->last_register_result_seen
+                   ? "yes" : "no",
+               interest->last_register_result,
+               interest->last_register_result_nonzero
+                   ? "yes" : "no");
+        printf("        receive entry hits/CommCenter/unreadable="
+               "%" PRIu64 "/%" PRIu64 "/%" PRIu64,
+               interest->receive_hits,
+               interest->receive_commcenter_matches,
+               interest->receive_identity_unreadable);
+        if (interest->receive_hits)
+            printf(" first/last @%" PRIu64 "/%" PRIu64
+                   " last-thread=%08x",
+                   interest->first_receive_at,
+                   interest->last_receive_at,
+                   interest->last_receive_thread);
+        printf("\n"
+               "        routes reserve/full/fullwaiters/no-waiter/woken="
+               "%" PRIu64 "/%" PRIu64 "/%" PRIu64
+               "/%" PRIu64 "/%" PRIu64
+               " woken-CommCenter/unreadable=%" PRIu64 "/%" PRIu64,
+               interest->immediate_reserve_hits,
+               interest->queue_full_hits,
+               interest->fullwaiters_store_hits,
+               interest->no_eligible_receiver_hits,
+               interest->receiver_woken_hits,
+               interest->receiver_woken_commcenter_matches,
+               interest->receiver_woken_identity_unreadable);
+        if (interest->first_route_at)
+            printf(" first/last @%" PRIu64 "/%" PRIu64,
+                   interest->first_route_at,
+                   interest->last_route_at);
+        printf("\n");
+    }
+
+    printf("    frame correlation message attempts/overflow/mismatch="
+           "%" PRIu64 "/%" PRIu64 "/%" PRIu64
+           " handler attempts/overflow/mismatch="
+           "%" PRIu64 "/%" PRIu64 "/%" PRIu64
+           " uncertain=%s\n",
+           trace->message_frame_total,
+           trace->message_frame_overflow,
+           trace->message_frame_mismatches,
+           trace->handler_frame_total,
+           trace->handler_frame_overflow,
+           trace->handler_frame_mismatches,
+           trace->frame_uncertain ? "yes" : "no");
+
+    uint64_t dispatch_retained =
+        trace->dispatch_total < APPLEBASEBAND_DISPATCH_CAP
+        ? trace->dispatch_total : APPLEBASEBAND_DISPATCH_CAP;
+    uint64_t dispatch_start =
+        trace->dispatch_total - dispatch_retained;
+    uint64_t completed_without_handler = 0;
+    printf("    reset dispatches retained-newest=%" PRIu64 "/%u:\n",
+           dispatch_retained, APPLEBASEBAND_DISPATCH_CAP);
+    for (uint64_t sequence = dispatch_start;
+         sequence < trace->dispatch_total; sequence++) {
+        const applebaseband_dispatch_event_t *event =
+            &trace->dispatches[
+                sequence % APPLEBASEBAND_DISPATCH_CAP];
+        if (!event->valid || event->sequence != sequence)
+            continue;
+        if (event->message_clients_epilogue_reached &&
+            !event->notification_handler_hits)
+            completed_without_handler++;
+        printf("      #%" PRIu64 " @%" PRIu64
+               " %s(%08x) service/thread=%08x/%08x arg=%08x"
+               " subscription=%s messageClients-entry=%s",
+               event->sequence, event->at,
+               applebaseband_reset_message_name(event->message),
+               event->message, event->service, event->thread,
+               event->argument,
+               applebaseband_subscription_state_name(event),
+               event->message_clients_seen ? "yes" : "no");
+        if (event->message_clients_seen)
+            printf("@%" PRIu64, event->message_clients_at);
+        printf(" epilogue=%s callback-return-site=%s"
+               " clients/notifiers=%" PRIu64 "/%" PRIu64,
+               event->message_clients_epilogue_reached
+                   ? "reached" : "not-observed",
+               event->callback_epilogue_reached
+                   ? "reached" : "not-observed",
+               event->client_delivery_hits,
+               event->notification_handler_hits);
+        if (event->last_client)
+            printf(" last-client/vtable=%08x/",
+                   event->last_client);
+        if (event->last_client)
+            printf(event->last_client_vtable_readable
+                       ? "%08x" : "unreadable",
+                   event->last_client_vtable);
+        printf("\n");
+    }
+
+    printf("    notification handlers=%" PRIu64
+           " ring-overwrites=%" PRIu64
+           " send-headers/read-failures/repeats=%" PRIu64
+           "/%" PRIu64 "/%" PRIu64
+           " destination-live-match/active-registration="
+           "%" PRIu64 "/%" PRIu64
+           " dispatch-link-rejects=%" PRIu64 "\n",
+           trace->notification_total,
+           trace->notification_dropped,
+           trace->notification_send_headers,
+           trace->notification_send_header_failures,
+           trace->notification_send_repeats,
+           trace->notification_destination_matches,
+           trace->notification_successful_destination_matches,
+           trace->notification_dispatch_rejects);
+    printf("    historical exact-kmsg hook totals"
+           " candidates/bound/capture-failure/"
+           "semantic-mismatch/uncertain="
+           "%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64
+           "/%" PRIu64 "\n",
+           trace->notification_route_bound +
+               trace->notification_route_capture_failures +
+               trace->notification_route_semantic_mismatches +
+               trace->notification_route_binding_uncertain,
+           trace->notification_route_bound,
+           trace->notification_route_capture_failures,
+           trace->notification_route_semantic_mismatches,
+           trace->notification_route_binding_uncertain);
+    printf("    historical notification queue hook outcomes"
+           " reserve implicit in event bits;"
+           " full/no-waiter/woken/CommCenter-woken="
+           "%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64
+           " receiver-identity-unreadable=%" PRIu64 "\n",
+           trace->notification_queue_full,
+           trace->notification_no_eligible_receiver,
+           trace->notification_receiver_woken,
+           trace->notification_commcenter_receiver_woken,
+           trace->notification_receiver_identity_unreadable);
+    printf("    CommCenter exact-identity receive entries on a"
+           " successful AppleBaseband interest port:"
+           " all/match/unreadable=%" PRIu64 "/%" PRIu64 "/%" PRIu64
+           "\n",
+           trace->receive_on_registered_port,
+           trace->receive_on_registered_port_commcenter,
+           trace->receive_identity_unreadable);
+
+    uint64_t notification_retained =
+        trace->notification_total < APPLEBASEBAND_NOTIFICATION_CAP
+        ? trace->notification_total : APPLEBASEBAND_NOTIFICATION_CAP;
+    uint64_t notification_start =
+        trace->notification_total - notification_retained;
+    uint64_t send_successes = 0;
+    uint64_t send_failures = 0;
+    uint64_t causal_handlers = 0;
+    uint64_t causal_send_headers = 0;
+    uint64_t causal_destination_matches = 0;
+    uint64_t causal_send_successes = 0;
+    uint64_t causal_send_failures = 0;
+    uint64_t causal_routes = 0;
+    uint64_t causal_no_eligible = 0;
+    uint64_t causal_receiver_woken = 0;
+    uint64_t causal_commcenter_woken = 0;
+    printf("    notification events retained-newest=%" PRIu64 "/%u:\n",
+           notification_retained, APPLEBASEBAND_NOTIFICATION_CAP);
+    for (uint64_t sequence = notification_start;
+         sequence < trace->notification_total; sequence++) {
+        const applebaseband_notification_event_t *event =
+            &trace->notifications[
+                sequence % APPLEBASEBAND_NOTIFICATION_CAP];
+        if (!event->valid || event->sequence != sequence)
+            continue;
+        const applebaseband_dispatch_event_t *causal_dispatch =
+            applebaseband_notification_matching_dispatch(
+                trace, event, false);
+        bool linked_send_header =
+            applebaseband_notification_has_linked_send_header(
+                trace, event, false);
+        bool causal_send =
+            applebaseband_notification_has_causal_send(
+                trace, event, false);
+        bool causal_route =
+            applebaseband_notification_has_causal_route(
+                trace, event, false);
+        if (causal_dispatch) causal_handlers++;
+        if (linked_send_header)
+            causal_send_headers++;
+        if (causal_send) {
+            if (event->destination_registration_succeeded)
+                causal_destination_matches++;
+            if (event->send_result_seen) {
+                if (event->send_result == 0u)
+                    causal_send_successes++;
+                else
+                    causal_send_failures++;
+            }
+        }
+        if (causal_route) {
+            causal_routes++;
+            if (event->route_bits &
+                    APPLEBASEBAND_ROUTE_NO_ELIGIBLE_RECEIVER)
+                causal_no_eligible++;
+            if (event->route_bits &
+                    APPLEBASEBAND_ROUTE_RECEIVER_WOKEN) {
+                causal_receiver_woken++;
+                if (event->receiver_identity_readable &&
+                    event->receiver_is_commcenter)
+                    causal_commcenter_woken++;
+            }
+        }
+        printf("      #%" PRIu64 " handler@%" PRIu64
+               " %s(%08x) notifier/service/thread=%08x/%08x/%08x"
+               " dispatch=",
+               event->sequence, event->handler_at,
+               applebaseband_reset_message_name(event->message),
+               event->message, event->notifier,
+               event->service, event->thread);
+        if (event->linked_dispatch) {
+            printf("#%" PRIu64, event->dispatch_sequence);
+            if (!causal_dispatch)
+                printf("(stale-or-mismatched)");
+        }
+        else
+            printf("unlinked");
+        printf(" send=%s", event->send_seen ? "yes" : "no");
+        if (event->send_seen)
+            printf("@%" PRIu64, event->send_at);
+        if (event->send_repeated)
+            printf("(repeat-rejected)");
+        if (event->send_header_readable) {
+            printf(" header=%08x bits/size/arg-size/id="
+                   "%08x/%u/%u/%08x%s"
+                   " destination/reply=%08x/%08x"
+                   " interest=%s",
+                   event->header, event->header_bits,
+                   event->header_size,
+                   event->send_size_argument,
+                   (uint32_t)event->header_id,
+                   event->send_size_matches_header
+                       ? "" : " SIZE-MISMATCH",
+                   event->destination, event->reply,
+                   event->destination_matches_interest
+                       ? "match" : "no-match");
+            if (event->destination_matches_interest)
+                printf("[%u]%s", event->interest_slot,
+                       event->destination_registration_succeeded
+                           ? "(registered)" : "(not-proven-registered)");
+        } else if (event->send_seen) {
+            printf(" header-unreadable va/fsr=%08x/%08x",
+                   event->header_failure_va,
+                   event->header_failure_fsr);
+        }
+        if (event->send_result_seen)
+            printf(" send-result=%08x(%s)@%" PRIu64,
+                   event->send_result,
+                   event->send_result == 0u
+                       ? "success" : "failure",
+                   event->send_result_at);
+        if (event->send_result_seen) {
+            if (event->send_result == 0u)
+                send_successes++;
+            else
+                send_failures++;
+        }
+        printf(" route-candidates/bound/capture-fail/mismatch="
+               "%" PRIu64 "/%s/%" PRIu64 "/%" PRIu64
+               " routes=%02x",
+               event->route_candidates,
+               causal_route ? "causal"
+                   : event->route_kmsg_bound
+                     ? "stale-or-mismatched" : "no",
+               event->route_capture_failures,
+               event->route_semantic_mismatches,
+               event->route_bits);
+        if (event->route_binding_uncertain)
+            printf(" BINDING-UNCERTAIN");
+        if (event->route_kmsg_bound)
+            printf(" kmsg/header/destination/id/size="
+                   "%08x/%08x/%08x/%08x/%u",
+                   event->route_kmsg.kmsg,
+                   event->route_kmsg.header,
+                   event->route_kmsg.destination,
+                   (uint32_t)event->route_kmsg.id,
+                   event->route_kmsg.size);
+        if (event->route_bits &
+                APPLEBASEBAND_ROUTE_RECEIVER_WOKEN)
+            printf(" selected-thread=%08x identity=%s",
+                   event->selected_thread,
+                   !event->receiver_identity_readable
+                       ? "unreadable"
+                       : event->receiver_is_commcenter
+                         ? "CommCenter" : "other");
+        printf(" handler-epilogue=%s",
+               event->epilogue_reached
+                   ? "reached" : "not-observed");
+        if (event->epilogue_reached)
+            printf("@%" PRIu64, event->return_at);
+        printf("\n");
+    }
+
+    printf("    retained notification Mach-send results"
+           " success/failure=%" PRIu64 "/%" PRIu64 "%s\n",
+           send_successes, send_failures,
+           trace->notification_dropped
+               ? " (older results may be overwritten)" : "");
+    printf("    retained fully causal handlers/send-headers/"
+           "live-destinations/send-success/send-failure/routes="
+           "%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64
+           "/%" PRIu64 "/%" PRIu64 "\n",
+           causal_handlers,
+           causal_send_headers,
+           causal_destination_matches,
+           causal_send_successes,
+           causal_send_failures,
+           causal_routes);
+    printf("    retained completed messageClients dispatches with no"
+           " notification handler=%" PRIu64 "%s\n",
+           completed_without_handler,
+           trace->dispatch_dropped
+               ? " (lower bound; older dispatches overwritten)"
+               : "");
+    printf("    frontier: ");
+    if (config->restored_baseline &&
+        !causal_commcenter_woken)
+        printf("restored baseline: activity before trace start is"
+               " unknowable; ");
+    if (!trace->setup_reset_hits) {
+        printf("reset platform-function setup was not observed since"
+               " trace start\n");
+        return;
+    } else if (!trace->setup_reset_nonzero) {
+        printf("reset platform function lookup returned null\n");
+        return;
+    } else if (trace->setup_event_result_hits &&
+               !trace->setup_event_nonzero) {
+        printf("reset event-source creation returned null\n");
+        return;
+    } else if (!trace->setup_enable_hits) {
+        printf("reset event-source enable call was not observed since"
+               " trace start\n");
+        return;
+    } else if (!trace->callback_hits) {
+        printf("event-source enable call was entered, but no reset"
+               " callback was observed since trace start\n");
+        return;
+    } else if (!trace->read_return_hits) {
+        printf("reset callback entered, but its state-read return site"
+               " was not observed\n");
+        return;
+    } else if (trace->read_failures &&
+               !trace->read_successes) {
+        printf("every observed reset-state read failed\n");
+        return;
+    } else if (trace->read_successes &&
+               !trace->changed_hits) {
+        printf("reset state was read, but no state change was observed\n");
+        return;
+    } else if (trace->low_suppressed &&
+               !trace->dispatch_low &&
+               !trace->dispatch_high) {
+        printf("low reset transition was suppressed before the"
+               " messageClients call attempt\n");
+        return;
+    } else if (trace->dispatch_total) {
+        bool message_clients_seen = false;
+        for (unsigned i = 0; i < APPLEBASEBAND_DISPATCH_CAP; i++) {
+            const applebaseband_dispatch_event_t *event =
+                &trace->dispatches[i];
+            if (!event->valid) continue;
+            message_clients_seen =
+                message_clients_seen ||
+                event->message_clients_seen;
+        }
+        if (!message_clients_seen) {
+            printf("reset messageClients call was attempted, but its"
+                   " exact function entry was not observed\n");
+            return;
+        }
+        if (!causal_handlers) {
+            printf("messageClients entered, but no frame-linked reset"
+                   " notification retained an exact matching dispatch\n");
+            return;
+        }
+        if (!causal_send_headers) {
+            printf("a dispatch-linked reset notification handler"
+                   " entered, but no same-event readable Mach-send"
+                   " header was retained\n");
+            return;
+        }
+        if (!causal_destination_matches) {
+            printf("a dispatch-linked notification header was read,"
+                   " but its same event retained no current live"
+                   " CommCenter AppleBaseband registration\n");
+            return;
+        }
+        if (causal_send_failures && !causal_send_successes) {
+            printf("every retained fully causal notification Mach-send"
+                   " result was a failure\n");
+            return;
+        }
+        if (!causal_routes) {
+            printf("a fully linked notification send was observed,"
+                   " but no same-event exact frame-and-kmsg-bound"
+                   " queue route was proved\n");
+            return;
+        }
+    }
+    if (causal_no_eligible && !causal_receiver_woken)
+        printf("notification reached its port with no eligible receiver\n");
+    else if (causal_receiver_woken &&
+             !causal_commcenter_woken)
+        printf("notification woke a receiver, but exact CommCenter"
+               " identity was not proved\n");
+    else if (causal_commcenter_woken)
+        printf("reset notification reached and woke an exact CommCenter"
+               " thread\n");
+    else
+        printf("no complete reset-to-CommCenter delivery was observed\n");
 }
 
 static void springboard_ui_checkpoint_report(
@@ -13427,6 +19924,11 @@ int main(int argc, char **argv) {
                 "internal error: CommCenter watcher self-check failed\n");
         return 2;
     }
+    if (!applebaseband_trace_selfcheck()) {
+        fprintf(stderr,
+                "internal error: AppleBaseband trace self-check failed\n");
+        return 2;
+    }
     if (!display_checkpoint_classifier_selfcheck()) {
         fprintf(stderr,
                 "internal error: display checkpoint classifier"
@@ -14477,6 +20979,8 @@ int main(int argc, char **argv) {
         discover_thread_exception_return_gate();
     discover_springboard_child_probe();
     discover_commcenter_layout();
+    discover_commcenter_wait_layout();
+    discover_applebaseband_trace_layout(restore_path != NULL);
 
     /* Snapshot positions are absolute. Reject requests that the selected
      * starting state has already passed or that the selected run limit cannot
@@ -14594,6 +21098,8 @@ int main(int argc, char **argv) {
         springboard_child_note_instruction(&mach.cpu, n, last_pc);
         springboard_exec_trace_prepare_user(&mach.cpu, n, last_pc);
         commcenter_watch_note_instruction(&mach.cpu, n, last_pc);
+        commcenter_wait_note_pc(&mach.cpu, n, last_pc);
+        applebaseband_note_instruction(&mach.cpu, n, last_pc);
 
         /* How far down the console-init chain did we get? Each milestone is
          * matched at its virtual address and at its pre-MMU physical alias. */
@@ -15371,6 +21877,7 @@ int main(int argc, char **argv) {
     syscall_report(virt_base, phys_base);
     lifecycle_report();
     commcenter_watch_report();
+    applebaseband_trace_report();
     springboard_exec_trace_report();
 
     printf("\n=== WHERE THE TIME WENT (sampled every 1024 instructions%s) ===\n",

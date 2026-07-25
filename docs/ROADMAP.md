@@ -28,7 +28,7 @@ proof that no private or unindexed implementation exists.
 | **M2** | SoC bring-up | A bare-metal payload prints over the emulated UART; a timer IRQ is taken and returned from | ✅ done and covered by host tests |
 | **M3** | Firmware containers + LLB execution | Real IMG3s parse and decrypt; an extracted real Apple LLB payload executes; the kernelcache is extracted | ✅ done; SecureROM/iBoot execution remains future full-chain work |
 | **M4** | XNU boots and logs | The kernel reaches `bsd_init`, prints, and Apple's own kexts match and start | ✅ **done** — plus the real root filesystem mounts |
-| **M5** | Userspace → SpringBoard | `launchd` runs; the home screen renders and takes a tap | 🔵 **in progress.** Run21 firmware-validates the VFP correction and reaches a clean 2.5 B cap. SpringBoard returns false from `isTethered`, continues into `SBTelephonyManager -init`, successfully looks up `com.apple.commcenter` as port `0x4f07`, and blocks in the initial CTServerConnection handshake before `mach_msg` returns. Reply, queue, and baseband causality remain unknown. `UIController` is unreached and the seed-only framebuffer has 0 changed pixels. |
+| **M5** | Userspace → SpringBoard | `launchd` runs; the home screen renders and takes a tap | 🔵 **in progress.** Run22 proves SpringBoard's initial CTServerConnection request reaches a saturated Mach queue (`msgcount=qlimit=5`) and its sender later blocks without resuming before the clean 2.1 B cap. Adjacent full-path PCs were recorded, but the old trace omitted the decisive kmsg register required to bind them fail-closed. The active receiver owner, linked-versus-reserved entries, service dequeue/reply, and baseband causality remain unresolved. `UIController` is unreached and the seed-only framebuffer has 0 changed pixels. |
 | **D** | Dynarec (parallel) | SpringBoard at interactive frame rates on the phone | 🔵 emitter + ARM/Thumb translator and host execution tests exist (off by default); no code cache or dispatcher calls them |
 | **N** | Guest networking (parallel) | The guest resolves a name and fetches a URL | ⚪ designed, not built |
 | **A** | Guest audio (first-device track) | Guest PCM reaches the host speaker without blocking the CPU thread | ⚪ priority, not designed or built |
@@ -994,17 +994,61 @@ and
 [unsigned iOS run 30097023356](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30097023356).
 Run21 is evidence for `debec04`, not those later test-only trees.
 
+### Run22 proved the queue-full block but not its cause
+
+Run22 used exact diagnostic commit
+`40209b27cb10d01c552398ff918ee613c4908ed0` and exited **0** at the configured
+**2,100,000,000-instruction cap**. The copied-in kernel request retained ID
+`0x0054b557` and destination port object `0xc0d705a0`. Its mqueue
+`0xc0d705b8` reported `msgcount=5`, `qlimit=5`, `seqno=0`, and
+`fullwaiters=0` before the send.
+
+The trace recorded the exact queue-full and pre-store `fullwaiters=1` PCs at
+**1,966,245,373** and **1,966,245,387**, then blocked at
+**1,966,245,550** and switched out at **1,966,246,193** without resuming
+before the cap. The route recorder omitted `r8`, so those PCs are adjacent
+candidates rather than a fail-closed same-kmsg route. Because Mach `msgcount`
+includes reserved/in-flight slots, this also does not prove five linked
+messages. The run22 decoder failed to discriminate the port's
+receiver/destination/timestamp union before printing PID 1; that ownership
+candidate is not accepted.
+
+Run22 still recorded zero `UIController` hits, zero live-scanout mutations, and
+zero changed pixels. Source hashes remained unchanged, external-md failures
+were zero, guest-free memory bottomed at **50.63 MiB**, and the evidence
+directory occupies **447.42 MiB on F:**. Exact source passed all eight jobs in
+hosted
+[core run 30106957804](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30106957804).
+
+The pre-Run23 working tree now implements the required trace-only evidence
+chain. Exact startup gates and adversarial self-checks validate active
+receive-right ownership, circular queue topology and reserved-slot arithmetic,
+same-kmsg route registers, sequence-bound per-thread waits, and nested-frame-
+safe, same-retained-event AppleBaseband notification delivery with live
+notifier/port identity. The final audit rejects cross-event aggregate joins,
+repeated-send inheritance, stale dispatch sequences, and later candidate
+overwrites of an already bound kmsg.
+Strict compilation, the `bootkernel` target build, and a stock-7E18 zero-step
+run pass locally. This is probe readiness only: the exact committed cold replay
+and hosted CI remain required before any runtime gate below can be checked.
+Per-thread wait output proves an ordered last-observed block with no later
+execution; until a final live wait-state reread exists, it does not exclude an
+asynchronous wake that left the thread runnable but unscheduled at the cap.
+
 The current immediate gates are:
 
-1. trace the initial CommCenter handshake through `ipc_mqueue_send`, including
-   the receiver and queue state;
-2. trace CommCenter PID 24's wait state and test, rather than assume, its
-   correlation with the observed baseband/SPI symptoms;
-3. implement the minimum faithful graceful no-modem behavior required for boot
-   if that correlation is causal, while leaving full telephony/SIM/cellular
-   emulation for later;
-4. reach `UIController` and capture recognizable changed pixels;
-5. add the host touch path and demonstrate an interaction.
+1. fail closed on `ip_receiver_name`, then identify the current active
+   receive-right owner rather than dereferencing the port union unconditionally;
+2. walk the actual queue links and separate linked kmsgs from reserved/in-flight
+   `msgcount` slots;
+3. retain every CommCenter thread's Mach/semaphore/continuation state and
+   correlate the service receiver rather than the last scheduled PID 24 worker;
+4. trace AppleBaseband reset-detect publication through its user-notification
+   Mach port before attributing causality to passive GPIO/SPI hardware;
+5. implement the minimum faithful graceful no-modem hardware behavior required
+   for boot only if that correlation is causal;
+6. reach `UIController`, capture recognizable changed pixels, then add the host
+   touch path and demonstrate an interaction.
 
 For chronology, this is the much earlier pre-VFP measurement from
 `bootkernel`'s milestone probes:
@@ -1425,8 +1469,9 @@ time.
 - **Full telephony, baseband, SIM, and cellular service.** We emulate the
   application processor; a complete modem remains out of scope. M5 now includes
   only the minimum faithful **graceful no-modem** behavior required for the
-  unmodified SpringBoard/CommCenter startup path to continue. Whether the
-  current wait is actually caused by the stubbed baseband remains a run22
+  unmodified SpringBoard/CommCenter startup path to continue. Run22 proved the
+  saturated Mach queue but not whether stubbed baseband hardware caused it;
+  exact AppleBaseband-to-CommCenter notification correlation remains a run23
   question, not a conclusion.
 - **Wi-Fi through the real Marvell 88W8686** and GPU acceleration. "Route A"
   for networking — emulating the real NIC so Apple's driver binds unmodified —
