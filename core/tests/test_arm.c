@@ -1,4 +1,4 @@
-/*
+﻿/*
  * iOS3-VM — ARMv6 interpreter unit tests.
  *
  * A tiny dependency-free test harness: a flat 1 MiB RAM behind the arm_bus_t,
@@ -4523,6 +4523,67 @@ static void test_integer_divide_is_armv7_only(void) {
     }
 }
 
+static void test_movw_movt_are_armv7_only(void) {
+    /* MOVW/MOVT are ARMv6T2; the ARM1176 is ARMv6K and does not have them.
+     * ARMv7 compilers build every 32-bit constant this way, so they matter far
+     * more than their size suggests. */
+    arm_cpu_t c;
+
+    /* MOVW r3, #0xbeef  -> imm4 = 0xb (19:16), imm12 = 0xeef, Rd = r3. */
+    const uint32_t movw = 0xe30b3eefu;
+    /* MOVT r3, #0xdead  -> imm4 = 0xd, imm12 = 0xead, Rd = r3. */
+    const uint32_t movt = 0xe34d3eadu;
+
+    /* ARMv6 must still refuse both. */
+    for (int i = 0; i < 2; i++) {
+        memset(g_ram, 0, sizeof g_ram);
+        m_w32(NULL, 0, i ? movt : movw);
+        arm_reset(&c, &g_bus);
+        c.arch = ARM_ARCH_V6_ARM1176;
+        c.cpsr = (c.cpsr & ~0x1fu) | ARM_MODE_SYS;
+        CHECK(arm_step(&c) == ARM_UNDEFINED,
+              "%s must be UNDEFINED on the ARM1176", i ? "MOVT" : "MOVW");
+    }
+
+    /* ARMv7: MOVW zero-extends, then MOVT fills the top half and must leave the
+     * bottom half alone -- the whole point of the pair. */
+    {
+        uint32_t prog[] = { movw, movt };
+        memset(g_ram, 0, sizeof g_ram);
+        m_w32(NULL, 0, prog[0]);
+        m_w32(NULL, 4, prog[1]);
+        arm_reset(&c, &g_bus);
+        c.arch = ARM_ARCH_V7_SWIFT;
+        c.cpsr = (c.cpsr & ~0x1fu) | ARM_MODE_SYS;
+        c.r[3] = 0xffffffffu;          /* prove MOVW zero-extends, not merges */
+
+        CHECK(arm_step(&c) == ARM_OK, "MOVW refused on ARMv7");
+        CHECK(c.r[3] == 0x0000beefu, "MOVW gave %08x expected 0000beef", c.r[3]);
+        CHECK(arm_step(&c) == ARM_OK, "MOVT refused on ARMv7");
+        CHECK(c.r[3] == 0xdeadbeefu, "MOVT gave %08x expected deadbeef", c.r[3]);
+    }
+
+    /* Neither form writes flags, and Rd == PC is UNPREDICTABLE. */
+    {
+        memset(g_ram, 0, sizeof g_ram);
+        m_w32(NULL, 0, movw);
+        arm_reset(&c, &g_bus);
+        c.arch = ARM_ARCH_V7_SWIFT;
+        c.cpsr = ((c.cpsr & ~0x1fu) | ARM_MODE_SYS) | ARM_CPSR_Z | ARM_CPSR_C;
+        CHECK(arm_step(&c) == ARM_OK, "MOVW refused");
+        CHECK((c.cpsr & (ARM_CPSR_Z | ARM_CPSR_C)) == (ARM_CPSR_Z | ARM_CPSR_C),
+              "MOVW must not write flags");
+    }
+    {
+        memset(g_ram, 0, sizeof g_ram);
+        m_w32(NULL, 0, 0xe30bfeefu);              /* MOVW pc, #0xbeef */
+        arm_reset(&c, &g_bus);
+        c.arch = ARM_ARCH_V7_SWIFT;
+        c.cpsr = (c.cpsr & ~0x1fu) | ARM_MODE_SYS;
+        CHECK(arm_step(&c) == ARM_UNDEFINED, "MOVW with Rd == PC must refuse");
+    }
+}
+
 static void test_srs_and_rfe_stop_after_the_first_fault(void) {
     /* The first frame word is in an unmapped page while the second is a mapped,
      * watched device-like address. Once the first access faults, neither SRS nor
@@ -4934,6 +4995,7 @@ int main(void) {
     test_unaligned_access_faulting_on_the_second_page();
     test_parallel_add_sub_family();
     test_integer_divide_is_armv7_only();
+    test_movw_movt_are_armv7_only();
     test_srs_and_rfe_stop_after_the_first_fault();
     test_xn_blocks_fetch_from_a_small_page();
     test_xn_on_a_section_and_the_xp_gate();

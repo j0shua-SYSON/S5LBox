@@ -905,6 +905,30 @@ static arm_status_t exec_data_processing(arm_cpu_t *c, uint32_t pc, uint32_t ins
     unsigned rn     = (insn >> 16) & 0xf;
     unsigned rd     = (insn >> 12) & 0xf;
 
+    /*
+     * MOVW / MOVT -- ARMv6T2 and later, so absent on the ARM1176 (ARMv6K).
+     *
+     *   MOVW: cond 0011 0000 imm4 Rd imm12    (0x03000000)
+     *   MOVT: cond 0011 0100 imm4 Rd imm12    (0x03400000)
+     *
+     * These sit in the opcode 0x8..0xb / S==0 hole below, which is why they are
+     * tested first: on ARMv7 they are how a 32-bit constant is built, and
+     * compilers emit them constantly, so leaving them to fall into the
+     * miscellaneous/control decode would misread every one of them.
+     *
+     * MOVW zero-extends the 16-bit immediate; MOVT replaces only the top half
+     * and must leave the bottom half of Rd untouched. Neither sets flags.
+     */
+    if (c->arch >= ARM_ARCH_V7_SWIFT &&
+        ((insn & 0x0fb00000u) == 0x03000000u)) {
+        uint32_t imm16 = ((insn >> 4) & 0xf000u) | (insn & 0x0fffu);
+        bool top = (insn >> 22) & 1u;
+        if (rd == 15u) return ARM_UNDEFINED;   /* UNPREDICTABLE, not a branch */
+        c->r[rd] = top ? ((c->r[rd] & 0x0000ffffu) | (imm16 << 16))
+                       : imm16;
+        return ARM_OK;
+    }
+
     /* Opcodes 0x8..0xb (TST/TEQ/CMP/CMN) are valid comparisons only when S==1.
      * With S==0 this is the ARMv6 miscellaneous/control space (BX, BLX(reg),
      * MRS, MSR, CLZ, ...) — it must NOT fall through to the comparison cases,
