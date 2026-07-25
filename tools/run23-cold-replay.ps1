@@ -15,11 +15,20 @@ param(
 
     # Retired-instruction cap. The default is the full SpringBoard-frontier
     # replay. A smaller cap is legitimate for a focused diagnostic -- for
-    # example CommCenter's entire startup completes below 1e9 -- and costs
+    # example CommCenter's startup begins below 1e9 -- and costs
     # proportionally less wall clock. The profile window follows the cap so a
     # short run still profiles its own tail rather than a range it never
     # reaches.
-    [ValidateRange(1000000, 4000000000)]
+    #
+    # The upper bound is deliberately far above 2.1e9. Guest time, not host
+    # time, is what bounds the stock software's own retry loops: the timebase
+    # runs at 6 MHz against a 412 MHz CPU model, so one guest second costs
+    # roughly 412 million retired instructions. CommCenter retries with
+    # sleep(1) up to ten times before giving up, which is about 4.1e9
+    # instructions of budget on its own -- more than the entire historical cap.
+    # A run that stops at 2.1e9 has not observed a timeout; it has merely
+    # stopped in the middle of one.
+    [ValidateRange(1000000, 24000000000)]
     [long] $InstructionCap = 2100000000
 )
 
