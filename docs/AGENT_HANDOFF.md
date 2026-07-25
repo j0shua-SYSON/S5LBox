@@ -1569,13 +1569,83 @@ hardware behavior:
    neither of the above is the cause and the real gate is earlier in
    CommCenter's startup.
 
-Also outstanding, and independent of the above: page `0x3d200000` is touched
-only by `com.apple.driver.BasebandSPI` and is **not** a declared stub window,
-so it reads back zero. It is not proved to block anything (the driver does not
-poll it), but it is an identified peripheral answering with fabricated zeros.
-At minimum declare it as a named stub so its traffic is stored and reported;
-model it only if question 2 shows the shipped driver depends on state it must
-supply.
+### 13.0a The exact baseband topology, resolved read-only after Run23
+
+Question 2 above is now partly answered, and the hardware map is exact. All of
+this comes from the shipped 7E18 device tree and Capstone disassembly of the
+prelinked image; none of it is inferred from behaviour.
+
+**The reset event source is an interrupt event source.** `AppleBaseband`'s
+setup path at `0xc0558c98` calls
+`IOInterruptEventSource::interruptEventSource(OSObject *owner, Action, IOService *provider, int index)`
+(`__ZN22IOInterruptEventSource20interruptEventSourceEP8OSObjectPFvS1_PS_iEP9IOServicei`,
+`0xc0189e94`) with `r0` = the AppleBaseband object, `r2` = its provider, and
+`r3 = 0` — **interrupt index 0**. It then adds it to the workloop returned by
+vtable slot `0x1dc` and calls
+`IOInterruptEventSource::enable()` (`0xc0189d58`) through event-source vtable
+slot `0x68`. The retained object's vtable is `__ZTV22IOInterruptEventSource`.
+
+So the callback at `0xc0558358` can only run when that hardware interrupt is
+delivered. Its body is short and worth knowing exactly: it calls reset-state
+read through AppleBaseband vtable slot `0x35c` into a two-word stack buffer,
+returns immediately if the read fails, compares the 64-bit result against the
+remembered state at object `+0x70`, returns if unchanged, and otherwise calls
+`IOService::messageClients` through vtable slot `0x238` with `0xe3ff8000` for a
+non-zero (high) state or `0xe3ff8001` for zero (low) — the low path first
+checking a suppression byte at object `+0x69`.
+
+**Which interrupt.** `/device-tree/baseband` carries:
+
+```text
+name                'baseband'          compatible 'baseband,n82'
+interrupts          {0x0000004b, 0x00000005}
+interrupt-parent    {0x00b05320}
+function-reset_det  {0x00b05320, 'GPIO', 0x00001203, 0x00000100}
+function-bb_rst     {0x00b05320, 'GPIO', 0x00000700, 0x00000101}
+function-bb_on      {0x00b14140, 'GPIO', 0x00000003, 0x00070001}
+function-radio_on   {0x00b05320, 'GPIO', 0x00001507, 0x00010101}
+```
+
+`0x00b05320` is the `AAPL,phandle` of `/device-tree/arm-io/gpio`
+(`compatible 'gpio,s5l8900x'`, `device_type 'interrupt-controller'`,
+`reg {0x06400000,0x1000, 0x01a00000,0x1000}` → PA `0x3e400000` and
+`0x39a00000`, `#interrupt-cells 2`, `#interrupt-groups 7`,
+`fsel-offset 0x320`).
+
+Therefore **index 0 is GPIO interrupt `0x4b` (75) on the GPIO interrupt
+controller**, and the reset-detect signal itself is GPIO `0x1203`. The
+emulator declares `gpio` and `gpioic` as storage-only stub windows with no
+interrupt generation, so GPIO interrupt 75 can never be delivered, which is
+exactly why the callback has zero hits.
+
+**The transport.** `/device-tree/arm-io/spi2` is the baseband SPI:
+`compatible 'spi,s5l8900x,baseband'`, `reg {0x05200000,0x1000}` → PA
+`0x3d200000`, `interrupts {0x07, 0x02}`, with `function-srdy` GPIO `0x1804`,
+`function-mrdy` GPIO `0x1702`, `function-mosi` GPIO `0x1806`, `function-sclk`
+GPIO `0x1805`, `function-fail_gpio` GPIO `0x0c03`, and DMA channel descriptors
+pointing at `0x3d200010`/`0x3d200020`. Its siblings are `/arm-io/spi0`
+(`0x04300000` → `0x3c300000`, interrupt 9) and `/arm-io/spi1`
+(`0x04e00000` → `0x3ce00000`, interrupt 10).
+
+**What was changed as a result.** All three SPI windows are now declared named
+stubs. Exact disassembly of `BasebandSPI+0x1d42` shows the driver reading
+offsets `0x00/0x04/0x08/0x34` into a heap transfer descriptor without testing
+or polling them, and `BasebandSPI+0x1eca` shows the configuration burst that
+wrote them, so honest storage is the faithful answer and nothing autonomous is
+fabricated. This is a window, not a controller, and it is **not** claimed to
+unblock the boot.
+
+**What must not be done next without more evidence.** Do not assert GPIO
+interrupt 75. On real hardware `reset_det` senses a line; whether it transitions
+when no modem is fitted depends on whether it senses the SoC-driven `bb_rst`
+output or a modem-driven response, and that has not been established. The
+decisive follow-up is to disassemble AppleBaseband's use of `function-bb_rst`,
+`function-bb_on`, and the reset-state read at vtable slot `0x35c`
+(`AppleBaseband+0x11bc`, `0xc05581bc`) to determine what the driver itself
+drives and what it expects to sense. Only then is a faithful edge model
+possible, and only then does §13.0 question 1 — whether CommCenter's blocked
+receive port is a port set containing the interest port — become the deciding
+factor.
 
 Do not, on the current evidence, force a queue dequeue, retarget ownership away
 from launchd, synthesize a baseband reset edge, inject a CommCenter reply, or

@@ -675,6 +675,9 @@ static void test_machine_declares_its_known_windows(void) {
         { S5L8900_GPIO_BASE,   "gpio"      },
         { S5L8900_EDGEIC_BASE, "edgeic"    },
         { S5L8900_GPIOIC_BASE, "gpioic"    },
+        { S5L8900_SPI0_BASE,   "spi0"      },
+        { S5L8900_SPI1_BASE,   "spi1"      },
+        { S5L8900_SPI2_BASE,   "spi2"      },
     };
     for (unsigned i = 0; i < sizeof WANT / sizeof WANT[0]; i++) {
         /* Reads must come back as storage, not as the unmapped-access zero. */
@@ -703,6 +706,74 @@ static void test_machine_declares_its_known_windows(void) {
     m.bus.write32(m.bus.ctx, S5L8900_POWER_BASE + POWER_OFFCTRL, 0x12fcu);
     CHECK(m.bus.read32(m.bus.ctx, S5L8900_POWER_BASE + POWER_STATE) == 0x12fcu,
           "the gpioic stub must not take over the power controller's half");
+
+    s5l8900_free(&m);
+}
+
+/*
+ * The exact spi2 access shape run23 recorded, replayed against the machine
+ * alone. com.apple.driver.BasebandSPI writes a configuration block through the
+ * register base it caches at object+0xc4, and ~824 M instructions later reads
+ * offsets 0x00, 0x04, 0x08 and 0x34 straight back to build a transfer
+ * descriptor — it stores them, it never tests them for a status bit, and it
+ * never polls. Against an undeclared window every one of those reads returned
+ * zero. The property under test is that a driver reading back its own
+ * configuration gets its own configuration.
+ *
+ * This is a window, not a controller: nothing here claims spi2 transfers data,
+ * raises its device-tree interrupt 7, or drives SRDY/MRDY.
+ */
+static void test_baseband_spi_window_reads_back_its_configuration(void) {
+    s5l8900_t m;
+    CHECK(s5l8900_init(&m, 0, 1u << 20), "machine init failed");
+
+    /* The observed write burst, in the order BasebandSPI issues it. */
+    static const struct { uint32_t off, val; } BURST[] = {
+        { 0x00u, 0x0000000cu }, { 0x0cu, 0x00000000u },
+        { 0x38u, 0x00000000u }, { 0x34u, 0x00000000u },
+        { 0x30u, 0x00000002u }, { 0x08u, 0x0000000fu },
+        { 0x04u, 0x0001d01au },
+    };
+    for (unsigned i = 0; i < sizeof BURST / sizeof BURST[0]; i++)
+        m.bus.write32(m.bus.ctx, S5L8900_SPI2_BASE + BURST[i].off, BURST[i].val);
+
+    /* The read-back the driver performs, at the exact four offsets. */
+    static const struct { uint32_t off, val; } BACK[] = {
+        { 0x00u, 0x0000000cu }, { 0x04u, 0x0001d01au },
+        { 0x08u, 0x0000000fu }, { 0x34u, 0x00000000u },
+    };
+    for (unsigned i = 0; i < sizeof BACK / sizeof BACK[0]; i++)
+        CHECK(m.bus.read32(m.bus.ctx, S5L8900_SPI2_BASE + BACK[i].off)
+                  == BACK[i].val,
+              "spi2 +0x%02x read %08x, expected the %08x that was written",
+              BACK[i].off,
+              m.bus.read32(m.bus.ctx, S5L8900_SPI2_BASE + BACK[i].off),
+              BACK[i].val);
+
+    /* None of this traffic may be accounted as unmapped any more. */
+    CHECK(m.unmapped_reads == 0 && m.unmapped_writes == 0,
+          "spi2 traffic still counted as unmapped (r=%llu w=%llu)",
+          (unsigned long long)m.unmapped_reads,
+          (unsigned long long)m.unmapped_writes);
+
+    /* The three SPI windows are distinct and must not have been folded
+     * together or onto a neighbour: spi2 sits two pages above the crypto block
+     * the guest also touches. */
+    m.bus.write32(m.bus.ctx, S5L8900_SPI0_BASE + 0x04u, 0xa0a0a0a0u);
+    m.bus.write32(m.bus.ctx, S5L8900_SPI1_BASE + 0x04u, 0xb1b1b1b1u);
+    CHECK(m.bus.read32(m.bus.ctx, S5L8900_SPI0_BASE + 0x04u) == 0xa0a0a0a0u &&
+          m.bus.read32(m.bus.ctx, S5L8900_SPI1_BASE + 0x04u) == 0xb1b1b1b1u &&
+          m.bus.read32(m.bus.ctx, S5L8900_SPI2_BASE + 0x04u) == 0x0001d01au,
+          "the three SPI windows must be independent storage");
+
+    /* The last word of the page must still be backed: a short backing store
+     * once swallowed exactly the high offsets that mattered. */
+    m.bus.write32(m.bus.ctx, S5L8900_SPI2_BASE + S5L8900_DEV_SIZE - 4u,
+                  0xfeedfaceu);
+    CHECK(m.bus.read32(m.bus.ctx,
+                       S5L8900_SPI2_BASE + S5L8900_DEV_SIZE - 4u)
+              == 0xfeedfaceu,
+          "the last word of the spi2 window must be backed");
 
     s5l8900_free(&m);
 }
@@ -1867,6 +1938,7 @@ int main(void) {
     test_mmio_width_alignment_and_window_edges();
     test_address_space_wrap_is_refused();
     test_machine_declares_its_known_windows();
+    test_baseband_spi_window_reads_back_its_configuration();
     test_nor_reads_are_nor_at_the_boot_ram_size();
     test_no_window_the_machine_decodes_is_shadowed_by_ram();
     test_the_nor_window_is_out_of_every_drams_reach();

@@ -87,6 +87,32 @@
 #define S5L8900_DEV_SIZE    0x00001000u   /* per-peripheral window */
 
 /*
+ * The three SPI controllers, confirmed the same two ways GPIO was.
+ * /arm-io/spi0, /arm-io/spi1 and /arm-io/spi2 carry reg {0x4300000,0x1000},
+ * {0x4e00000,0x1000} and {0x5200000,0x1000}, and arm-io maps child+0x38000000;
+ * run23's non-RAM page report independently attributes live guest traffic at
+ * each resulting physical page to AppleS5L8900XSPIController (spi0/spi1) and
+ * com.apple.driver.BasebandSPI (spi2).
+ *
+ * spi2 is the baseband transport: compatible "spi,s5l8900x,baseband", with the
+ * SRDY and MRDY handshake lines exposed as GPIO platform functions and DMA
+ * channel descriptors pointing at 0x3d200010/0x3d200020. Their device-tree
+ * interrupt numbers are 9, 10 and 7, deliberately NOT defined here: nothing
+ * wires an SPI interrupt to the VIC, and a constant that looks wired but is not
+ * is the kind of landmine the GPIO base above was.
+ *
+ * These are declared windows, not device models. No transfer, FIFO, DMA, chip
+ * select or interrupt behaviour is emulated. They exist so the traffic is named
+ * and stored rather than reading back as the zero an unmapped access returns —
+ * run23 caught BasebandSPI writing a configuration block to spi2 and later
+ * reading those same four registers back to build a transfer descriptor, which
+ * an unmapped window answered with zeros.
+ */
+#define S5L8900_SPI0_BASE   0x3c300000u
+#define S5L8900_SPI1_BASE   0x3ce00000u
+#define S5L8900_SPI2_BASE   0x3d200000u
+
+/*
  * There are TWO PL192 VICs, not one. The device tree gives the block as
  * reg {0xe00000, 0x2000} with vic-stride 0x1000, and AppleARMPL192VIC maps both
  * pages. The interrupt numbering is flat across the pair: /arm-io/gpio lists

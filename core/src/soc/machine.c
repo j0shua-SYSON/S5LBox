@@ -538,11 +538,19 @@ bool s5l8900_init(s5l8900_t *m, uint32_t ram_base, uint32_t ram_size) {
      * Peripheral windows we have identified but not modelled. Each base was
      * resolved twice — from the VA the guest's own driver printed, walked
      * through its live page tables, and from the shipped device tree's arm-io
-     * ranges (child + 0x38000000) — and the two agree. All are low-traffic and
-     * none blocks the boot today; they are declared so their traffic is named
-     * and stored instead of reading back as the zero an unmapped access
-     * returns. See s5l_stub_t for why a stub is honest here and where the line
-     * is that turns one into a real device model.
+     * ranges (child + 0x38000000) — and the two agree. They are declared so
+     * their traffic is named and stored instead of reading back as the zero an
+     * unmapped access returns. See s5l_stub_t for why a stub is honest here and
+     * where the line is that turns one into a real device model.
+     *
+     * "Declared" is deliberately weaker than "harmless". The SPI trio below is
+     * on the current boot frontier: run23 proved that SpringBoard's first
+     * CoreTelephony request lands on a launchd-held service queue that
+     * CommCenter has never taken, and CommCenter's only IOKit subscription is
+     * to AppleBaseband, whose reset IOInterruptEventSource sits on GPIO
+     * interrupt 75 and has never fired. Storing spi2's registers does not fix
+     * that and is not claimed to; it stops one identified peripheral from
+     * answering the shipped driver with a fabricated zero.
      *
      * A failure to declare one is not fatal but must not be silent, so the
      * result is folded into a counter the caller can see.
@@ -560,6 +568,12 @@ bool s5l8900_init(s5l8900_t *m, uint32_t ram_base, uint32_t ram_size) {
             /* The upper part of the power page — power.c owns 0x00-0x7f and
              * this is a different block with a different driver. */
             { S5L8900_GPIOIC_BASE, S5L8900_GPIOIC_SIZE, "gpioic"   },
+            /* The three SPI controllers. spi0/spi1 are programmed by
+             * AppleS5L8900XSPIController; spi2 is the baseband transport that
+             * com.apple.driver.BasebandSPI configures and then reads back. */
+            { S5L8900_SPI0_BASE,   S5L8900_DEV_SIZE,   "spi0"      },
+            { S5L8900_SPI1_BASE,   S5L8900_DEV_SIZE,   "spi1"      },
+            { S5L8900_SPI2_BASE,   S5L8900_DEV_SIZE,   "spi2"      },
         };
         for (unsigned i = 0; i < sizeof STUBS / sizeof STUBS[0]; i++)
             if (!s5l8900_add_stub(m, STUBS[i].base, STUBS[i].size, STUBS[i].name))

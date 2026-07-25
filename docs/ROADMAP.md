@@ -1090,8 +1090,17 @@ The current immediate gates are:
 3. determine where CommCenter's startup is actually gated relative to its
    `bootstrap_check_in` for `com.apple.commcenter`, and identify the senders
    behind the five queued reply ports;
-4. name or model the `0x3d200000` BasebandSPI register window, which is
-   currently unmapped and answers the shipped driver with zeros;
+4. ~~name or model the `0x3d200000` BasebandSPI register window, which is
+   currently unmapped and answers the shipped driver with zeros;~~ **done.**
+   All three device-tree-confirmed SPI windows are declared: spi0
+   `0x3c300000`, spi1 `0x3ce00000`, and spi2 `0x3d200000`
+   (`compatible "spi,s5l8900x,baseband"`). Exact disassembly of
+   `BasebandSPI+0x1d42` shows the driver reads its four configuration
+   registers back into a transfer descriptor without testing or polling them,
+   so honest storage is faithful and nothing autonomous is fabricated. This is
+   a named window, not a controller: no transfer, FIFO, DMA, chip-select, or
+   interrupt behaviour is modelled, and it is **not** claimed to unblock the
+   boot;
 5. implement the minimum faithful graceful no-modem hardware behavior required
    for boot, only once one of the above proves which semantic is wrong;
 6. reach `UIController`, capture recognizable changed pixels, then add the host

@@ -154,6 +154,7 @@ run21's firmware evidence.
 | Run23 BasebandSPI window | Non-RAM page `0x3d200000`, first pc `com.apple.driver.BasebandSPI+0x1eca`, 4 reads / 11 writes; not among the five declared stubs, so reads return zero; write burst @933,033,890–933,033,922, read-back @1,757,842,145–1,757,842,149, final writes @1,760,475,736/740 | An identified baseband-transport register window is unmapped and answers the shipped driver with zeros | That this window blocks the boot — the driver does not poll it and stops touching it entirely |
 | Run23 SpringBoard/display | `applicationDidFinishLaunching:` @1,923,358,329; `startWindowServer` return @1,919,831,289; 4 TV-out frames; CLCD scanning/running `1/1`, 604 frames, 320x480 stride 1280; `UIController` **0**; live scanout **0**; PPM seed SHA `CBAD1C...AF2AB`, **0 changed pixels** | The corrected display chain reproduces exactly, and the frontier is still the telephony send | SpringBoard rendering, UI readiness, or touch |
 | Run23 diagnostic integrity | 16 exact-hook attribution omissions (first @551,530,083, last @1,388,875,916); 50 unreadable classifications; **0** readable contradictions; none overlapping the decisive send episode | The observers reported their own gaps instead of silently completing a chain | That every unobserved transition in the run is accounted for |
+| Post-Run23 SPI window declaration | `test_soc` **5,584/0**; full local Release suite **23/23**; strict `-Wall -Wextra -Werror` syntax checks on `machine.c`, `test_soc.c`, and `bootkernel.c`; exact 7E18 `-n 0` with every gate `VALIDATED` and exit 0; firmware hashes unchanged | The three device-tree-confirmed SPI windows — spi0 `0x3c300000`, spi1 `0x3ce00000`, spi2 `0x3d200000` — are declared named storage, so BasebandSPI's read-back of the configuration it wrote returns that configuration instead of an unmapped zero. A regression replays run23's exact write burst and four-offset read-back | That spi2 blocks the boot, that any SPI transfer, FIFO, DMA, chip-select, or interrupt behaviour is modelled, or any new firmware-run result |
 | Diff hygiene | `git diff --check` passed after the documentation update | No whitespace-error patch was introduced | Markdown rendering on every client |
 
 Run19 is the real-firmware verdict on `afa650e`: routing/layout passed, but the
@@ -627,9 +628,13 @@ authoritative.
 - [ ] The shipped AppleBaseband reset event source is resolved to its exact
   trigger, and whether faithful no-modem hardware would fire it is decided from
   the binary rather than assumed.
-- [ ] The identified `0x3d200000` BasebandSPI register window is named, or
-  modelled if the shipped driver's semantics require state the machine does not
-  currently provide.
+- [x] The identified `0x3d200000` BasebandSPI register window is named. All
+  three device-tree-confirmed SPI windows are now declared stubs; exact
+  disassembly of `BasebandSPI+0x1d42` shows the driver stores the four
+  registers it reads back into a transfer descriptor without testing or polling
+  them, so honest storage is the faithful answer and no autonomous state is
+  fabricated. A device model is still required if a later run shows the driver
+  waiting on a bit it does not itself write.
 - [x] Test-only `0670ab8` passes hosted core/iOS CI with VFP 469/0.
 - [x] Latest hosted test-only `657e8d8` helper coverage, VFP 488/0 locally, passes
   hosted
