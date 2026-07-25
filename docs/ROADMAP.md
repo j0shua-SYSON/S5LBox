@@ -1084,9 +1084,18 @@ The current immediate gates are:
    `c0dd99d8` is and whether it is a port set containing the AppleBaseband
    interest port `c3c59ab0`; a port-set membership would make the missing reset
    notification a direct explanation, and its absence would rule it out;
-2. resolve the shipped AppleBaseband reset event source to its exact trigger and
+2. ~~resolve the shipped AppleBaseband reset event source to its exact trigger and
    decide from the binary — not by assumption — whether hardware with no modem
-   present would ever fire it;
+   present would ever fire it;~~ **resolved as far as static evidence allows.**
+   It is an `IOInterruptEventSource` on **index 0** of AppleBaseband's provider,
+   which `/device-tree/baseband` gives as interrupt **0x4b (75)** on the GPIO
+   interrupt controller; the reset state is read by invoking the
+   `function-reset_det` GPIO platform function (GPIO `0x1203`). The descriptor
+   encoding puts `reset_det` in the same class as the modem-driven `srdy` line
+   rather than the SoC-driven `bb_rst`/`mrdy` lines, which suggests hardware
+   with no modem fitted would not fire interrupt 75 either — so the emulator's
+   zero callbacks may be faithful, and the edge must **not** be fabricated. See
+   `AGENT_HANDOFF.md` §13.0a;
 3. determine where CommCenter's startup is actually gated relative to its
    `bootstrap_check_in` for `com.apple.commcenter`, and identify the senders
    behind the five queued reply ports;

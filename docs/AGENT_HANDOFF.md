@@ -1635,17 +1635,63 @@ wrote them, so honest storage is the faithful answer and nothing autonomous is
 fabricated. This is a window, not a controller, and it is **not** claimed to
 unblock the boot.
 
-**What must not be done next without more evidence.** Do not assert GPIO
-interrupt 75. On real hardware `reset_det` senses a line; whether it transitions
-when no modem is fitted depends on whether it senses the SoC-driven `bb_rst`
-output or a modem-driven response, and that has not been established. The
-decisive follow-up is to disassemble AppleBaseband's use of `function-bb_rst`,
-`function-bb_on`, and the reset-state read at vtable slot `0x35c`
-(`AppleBaseband+0x11bc`, `0xc05581bc`) to determine what the driver itself
-drives and what it expects to sense. Only then is a faithful edge model
-possible, and only then does §13.0 question 1 — whether CommCenter's blocked
-receive port is a port set containing the interest port — become the deciding
-factor.
+**How the reset state is actually read.** Vtable slot `0x35c` resolves to
+`AppleBaseband+0x11bc` (`0xc05581bc`), and it is short enough to state exactly.
+It loads the reset platform-function object from AppleBaseband `+0x6c` — the
+one the observer reports as `value=c0b6b020` — returns a failure literal if it
+is null, zeroes a one-word stack slot, calls the object's vtable slot `0x50`
+with that slot as the out parameter, returns on a non-zero result, and
+otherwise widens the returned word to the 64-bit `{value, 0}` the callback
+compares against `+0x70`. So "read reset state" means "invoke the
+`function-reset_det` GPIO platform function", nothing more.
+
+**The platform-function descriptors, and what their last word appears to mean.**
+Across the shipped tree the fourth word is consistent with a direction/operation
+code, and the pattern is worth writing down because it bears directly on
+whether an edge is faithful:
+
+```text
+baseband function-reset_det  {gpio, 'GPIO', 0x1203, 0x00000100}
+spi2     function-srdy       {gpio, 'GPIO', 0x1804, 0x00000100}
+baseband function-bb_rst     {gpio, 'GPIO', 0x0700, 0x00000101}
+spi2     function-mrdy       {gpio, 'GPIO', 0x1702, 0x00000101}
+baseband function-radio_on   {gpio, 'GPIO', 0x1507, 0x00010101}
+spi2     function-fail_gpio  {gpio, 'GPIO', 0x0c03, 0x00000102}
+spi2     function-mosi       {gpio, 'GPIO', 0x1806, 0x00000002}
+```
+
+`0x100` lands on exactly the two signals the application processor must
+*sense* — `reset_det` and `srdy`, the modem's ready line — while `0x101` lands
+on the two it must *drive*, `bb_rst` and `mrdy`. Treat that as a strong reading
+of the encoding, not a decoded specification: it has not been confirmed against
+the GPIO platform-function implementation in `AppleS5L8900X`.
+
+**Why this argues against fabricating the edge.** If `reset_det` is an input
+sensing a line the modem drives, then hardware with no modem fitted would not
+produce a `reset_det` transition either, and GPIO interrupt 75 would not fire
+on a real device in the same condition. The emulator's zero callbacks would
+then be *faithful*, and the missing notification would not be what gates
+CommCenter — because a real iPhone whose modem is dead still reaches
+SpringBoard. Under that reading the blocker is elsewhere in CommCenter's
+startup, and asserting interrupt 75 would be inventing hardware behaviour to
+paper over a different bug. Do **not** assert it on the current evidence.
+
+Note also that `AppleBaseband: Could not find mux function` is **stock
+behaviour, not an emulator gap**: `/device-tree/baseband` genuinely has no
+`function-mux` property, and that line appears in the earliest recorded
+framebuffer consoles too.
+
+**Therefore the deciding evidence is §13.0 question 1**, and it needs runtime
+state this run did not capture: whether CommCenter's blocked receive port
+`c0dd99d8` (mqueue `c0dd99f0`, task-local name `0x10004001`) is an
+`ipc_pset` whose member set contains the AppleBaseband interest port
+`c3c59ab0`. If it is not a port set containing that port, the baseband lead is
+dead and the next frontier must be found by following the earliest of the five
+queued senders instead. The ownership probe already validates the
+`mqueue == port + 0x18` relationship and the active port-type check that
+distinguishes `IOT_PORT` from a port set, so extending it to walk port-set
+membership is a small, read-only addition — and it is cheap enough to answer
+with a short bounded run rather than a full 24-minute replay.
 
 Do not, on the current evidence, force a queue dequeue, retarget ownership away
 from launchd, synthesize a baseband reset edge, inject a CommCenter reply, or
