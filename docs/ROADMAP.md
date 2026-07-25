@@ -1080,10 +1080,17 @@ on a different port than the interest port, so this is correlation, not cause.
 
 The current immediate gates are:
 
-1. resolve, from the exact 7E18 binaries, what CommCenter's blocked receive port
-   `c0dd99d8` is and whether it is a port set containing the AppleBaseband
-   interest port `c3c59ab0`; a port-set membership would make the missing reset
-   notification a direct explanation, and its absence would rule it out;
+1. ~~resolve whether CommCenter's blocked receive port is a port set containing
+   the AppleBaseband interest port;~~ **answered: it is not.** Run24 classified
+   four CommCenter receives on non-interest mqueues and found **zero** port
+   sets — every one an active `IOT_PORT`. CommCenter never established a
+   receive that could deliver an AppleBaseband notification, so the missing
+   GPIO-75 reset interrupt does not gate it and **the baseband lead is closed**.
+   Run24 also named the five queued clients as **PIDs 16, 18, 15, 12 and 13**,
+   all blocked on the identical `0x0054b557` handshake: CommCenter has served
+   nobody since boot, so this is systemic rather than a SpringBoard defect. The
+   live question is now **why PID 24 never takes its own receive right**, which
+   needs a user-code trace of CommCenter itself;
 2. ~~resolve the shipped AppleBaseband reset event source to its exact trigger and
    decide from the binary — not by assumption — whether hardware with no modem
    present would ever fire it;~~ **resolved as far as static evidence allows.**

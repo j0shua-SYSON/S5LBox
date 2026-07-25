@@ -1569,6 +1569,47 @@ hardware behavior:
    neither of the above is the cause and the real gate is earlier in
    CommCenter's startup.
 
+### 13.0b Run24 closed the baseband lead and named the blocked clients
+
+**The baseband hypothesis is dead.** Run24 (exact commit `8a08e44`, exit 0 at
+the 2.1 B cap in 1,625.1 s, all integrity invariants held) classified four
+CommCenter receives on non-interest mqueues and found **zero port sets**:
+every one resolved as an active `IOT_PORT` under the `+0x18` hypothesis, never
+the `+0x1c` pset hypothesis, so no membership walk was ever entered. The
+newest is `mqueue=c2966918` → object `c2966900`, `io-bits=80000000`, the same
+object run23's per-thread dump carried for threads `e0379bb8`/`e035d000`.
+
+CommCenter never established a receive that could deliver an AppleBaseband
+notification, so the missing GPIO-75 reset interrupt is **not** what gates it.
+Do not spend further effort on baseband reset edges, GPIO interrupt
+generation, or `reset_det` semantics for the purpose of unblocking this boot.
+§13.0a remains accurate as topology, but its lead is spent.
+
+**The queue is five different daemons.** Each linked kmsg's reply port
+resolved AUTHORITATIVE:
+
+```text
+[0] c21e3000 reply c2bf6ea0 -> pid 16   [1] c31d7000 reply c34d2630 -> pid 18
+[2] c3f50000 reply c2d33d80 -> pid 15   [3] c3e52000 reply c31c32d0 -> pid 12
+[4] c448c000 reply c31c3cf0 -> pid 13
+```
+
+Five daemons plus SpringBoard (PID 20) are blocked on the identical
+`0x0054b557` CTServerConnection handshake. **CommCenter has served no client
+since boot.** The problem is therefore not in SpringBoard, not in
+CoreTelephony's client path, and not in the queue: it is that PID 24 never
+takes its own receive right.
+
+**The next question is CommCenter's own execution.** The harness already
+retains a full post-SETEXEC user trace for the SpringBoard generation (region
+attribution, low-image flow, Mach episodes, exact call/return checkpoints).
+The equivalent does not exist for PID 24 — the CommCenter watch tracks
+identity, scheduling and waits, but not where its user code goes. Extending
+that attribution to the CommCenter generation is the direct route to the
+answer: find its last retired user instruction, resolve it in the shared cache
+and its own image, and identify what it called before parking on semaphore
+`c0b239a0`.
+
 ### 13.0a The exact baseband topology, resolved read-only after Run23
 
 Question 2 above is now partly answered, and the hardware map is exact. All of

@@ -2068,6 +2068,75 @@ contradictions. Neither overlaps the decisive `_ipc_mqueue_send` episode, whose
 route bindings, queue walk, and owner decode are each independently marked
 validated or authoritative.
 
+### 2026-07-25: run24 killed the baseband lead and named the five senders
+
+Run24 is the exact cold replay of commit
+`8a08e441fc866ffad866c0c88abc94db9374d527`, which adds two read-only probes
+and nothing else. It ran into a fresh `work/run24-portset-senders`, exited
+**0** at the 2,100,000,000-instruction cap in **1,625.1 seconds**, stderr
+empty, launcher postflight passed, immutable hashes unchanged, work image
+exactly 466,825,216 bytes, external-md failures **0**, guest-free low
+**50.63 MiB** at 1,957,363,712. Its copied binary was 631,055 bytes, SHA-256
+`684A8501C17C792A8966D142F92249250024F4A8846237DC28FFFB39591403CF`.
+
+#### CommCenter is not waiting on a port set, so the baseband lead is dead
+
+Run23 left one decisive question: CommCenter blocks in `_ipc_mqueue_receive`
+on an mqueue that is not any AppleBaseband interest port's, so is it waiting
+for that port *through a port set*? The answer is no.
+
+```text
+CommCenter receives on a NON-interest mqueue:
+  commcenter/identity-unreadable=4/0  sets-walked=0  membership-hits=0
+newest unmatched receive: mqueue=c2966918 @1760204121 thread=e035d000
+  object=c2966900 io-bits=80000000 type=IOT_PORT
+  a plain port, not a set: this receive cannot deliver another port's notification
+```
+
+Four CommCenter receives were classified and **not one was a port set** —
+every candidate resolved as an active `IOT_PORT` against the `+0x18` port
+hypothesis, never the `+0x1c` pset hypothesis, so no set walk was ever
+entered. The port object `c2966900` also independently corroborates run23's
+per-thread dump, where threads `e0379bb8` and `e035d000` carried exactly that
+value.
+
+CommCenter therefore never established a receive that *could* deliver an
+AppleBaseband notification. The absent GPIO-75 reset interrupt cannot be what
+gates it, and the entire baseband hypothesis — the most promising lead after
+run23 — is closed. This is decision-tree Case D, now with evidence rather than
+by elimination.
+
+#### The five queued messages belong to five different daemons
+
+Resolving each linked kmsg's reply port through the same validated object
+graph the destination owner uses names every blocked client:
+
+```text
+[0] kmsg=c21e3000 reply=c2bf6ea0  -> pid 16  space=c0acfac8 task=c2d73760 proc=e03808f0
+[1] kmsg=c31d7000 reply=c34d2630  -> pid 18  space=c0acfa10 task=c2d733b0 proc=e03804d8
+[2] kmsg=c3f50000 reply=c2d33d80  -> pid 15  space=c0acfb24 task=c2d73938 proc=e0380afc
+[3] kmsg=c3e52000 reply=c31c32d0  -> pid 12  space=c0acfc38 task=c0ad7000 proc=e0381120
+[4] kmsg=c448c000 reply=c31c3cf0  -> pid 13  space=c0acfbdc task=c2d73ce8 proc=e0380f14
+```
+
+All five decodes printed `AUTHORITATIVE`. So five distinct daemons — PIDs 12,
+13, 15, 16 and 18 — are each blocked on the *identical* CTServerConnection
+handshake `0x0054b557`, and SpringBoard (PID 20) is the sixth against a
+`qlimit` of 5.
+
+That reframes the problem. This is not a SpringBoard bug and not a telephony
+bug: **CommCenter has never served a single client since boot.** Every
+CoreTelephony consumer in the system is queued behind the same silence.
+
+#### What run24 does not prove
+
+It does not prove why CommCenter has not checked in, that PID 12 was the
+earliest producer (the linked order is the queue's, and no enqueue timestamps
+were captured), that any thread was still enqueued at the cap, or anything
+about pixels. `SpringBoard:UIController-call` again had **0** hits, live
+scanout recorded **0** mutations, and the PPM is byte-identical to the seed at
+`CBAD1C110E67CAD553A2B4EEBBF46E7BF09255389851902B24816249294AF2AB`.
+
 #### What run23 changed, and what it did not
 
 It converted three run22 candidates into results — the route binding, the
