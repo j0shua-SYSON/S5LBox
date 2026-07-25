@@ -111,9 +111,11 @@ def main():
         % (vol.block_size, total_nodes, node_size, root, first_leaf))
 
     listing = target == "--list"
+    lsdir = target == "--ls"
+    parent_filter = int(sys.argv[3]) if lsdir else None
     needle = (sys.argv[3] if listing else target)
-    out_path = (sys.argv[3] if (not listing and len(sys.argv) > 3)
-                else None)
+    out_path = (sys.argv[3] if (not listing and not lsdir and
+                                len(sys.argv) > 3) else None)
 
     node_index = first_leaf
     seen = 0
@@ -129,9 +131,19 @@ def main():
             if not parsed:
                 continue
             parent, name, rtype, data_off, raw = parsed
+            # A folder record carries its own CNID at +8, which is what a
+            # child's parentID refers to; print it so a directory can be
+            # walked without implementing key ordering.
+            own_id = None
+            if rtype == 1 and data_off + 12 <= len(raw):
+                own_id = u32(raw, data_off + 8)
+            if lsdir:
+                if parent == parent_filter:
+                    hits.append((own_id if own_id else parent, name, rtype))
+                continue
             if listing:
                 if needle.lower() in name.lower():
-                    hits.append((parent, name, rtype))
+                    hits.append((own_id if own_id else parent, name, rtype))
                 continue
             if name == needle and rtype == 2:  # kHFSPlusFileRecord
                 fork = Fork(raw, data_off + 88)
@@ -154,9 +166,10 @@ def main():
                 return
         node_index = u32(node, 0)  # fLink
 
-    if listing:
-        for parent, name, rtype in hits:
-            print("parent=%-8d type=%d  %s" % (parent, rtype, name))
+    if listing or lsdir:
+        for ident, name, rtype in hits:
+            kind = {1: "dir ", 2: "file"}.get(rtype, "t=%d" % rtype)
+            print("id=%-8d %s  %s" % (ident, kind, name))
         print("(%d matches)" % len(hits))
     else:
         raise SystemExit("no file record named %r found" % needle)

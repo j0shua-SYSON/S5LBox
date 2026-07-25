@@ -1569,6 +1569,75 @@ hardware behavior:
    neither of the above is the cause and the real gate is earlier in
    CommCenter's startup.
 
+### 13.0d GPIO pin encoding, and why touch and baseband need the same two blocks
+
+Touch and the baseband transport converge on the same unmodelled hardware, so
+work on either pays for both.
+
+`/device-tree/arm-io/spi1/multi-touch` is `compatible "multi-touch,n82"` with
+`interrupts {0x9b, 0x00}` and `interrupt-parent 0x00b05320` — that is **GPIO
+interrupt 155 on the GPIO interrupt controller**, with `function-reset` GPIO
+`0x0606` and `function-power_ldo` GPIO `0x0701`, hanging off **spi1**
+(`0x3ce00000`). The baseband path needs the same two blocks: spi2
+(`0x3d200000`) plus GPIO `reset_det 0x1203`, `srdy 0x1804`, `mrdy 0x1702`.
+
+So the two remaining goal items — a rendered SpringBoard and a guest touch —
+both reduce to **a real S5L8900 SPI controller model and a real GPIO interrupt
+controller model**. Neither exists; all five windows are declared stubs with no
+transfer, interrupt, or autonomous behaviour.
+
+**The GPIO pin encoding is now decoded from the driver itself.**
+`AppleS5L8900X`'s pin accessor at `0xc05a4494` reads:
+
+```text
+lsr r1, r5, #8        ; group = pin >> 8
+lsl r1, r1, #5        ; group * 32
+add r1, r1, #4        ; + 4
+ldr pc, [r3, #0x384]  ; <accessor>(group * 32 + 4)
+and r1, r5, #0xff     ; bit = pin & 0xff
+lsr r0, r0, r1
+and r0, r0, #1        ; return (state >> bit) & 1
+```
+
+so a platform-function pin id splits as **group = pin >> 8, bit = pin & 0xff**,
+and a pin's level lives at **`<base> + group * 32 + 4`**. `#gpio-ports` is 25
+and `#interrupt-groups` is 7, consistent with groups 0..24. Concretely:
+
+```text
+lcd0 reset        0x0001 -> group  0 bit 1   +0x004
+lcd0 ctrl_enable  0x0304 -> group  3 bit 4   +0x064
+mt-reset          0x0606 -> group  6 bit 6   +0x0c4
+mt-power_ldo      0x0701 -> group  7 bit 1   +0x0e4
+bb_rst            0x0700 -> group  7 bit 0   +0x0e4
+mrdy              0x1702 -> group 23 bit 2   +0x2e4
+reset_det         0x1203 -> group 18 bit 3   +0x244
+srdy              0x1804 -> group 24 bit 4   +0x304
+```
+
+The two thin accessors are also decoded: object `+0x68` is the **gpio** base
+(`0x3e400000`, first touched at `0xc05a44d0`) and object `+0x6c` is the
+**gpioic** base (`0x39a00000`, first touched at `0xc05a44e8`).
+
+**One open discrepancy, deliberately not called a bug.** The device tree gives
+`/arm-io/gpio` reg `{0x06400000,0x1000, 0x01a00000,0x1000}` and
+`/arm-io/power` reg `{0x01a00000,0x1000}` — both name the same physical page
+`0x39a00000`, and the guest maps it twice at different VAs
+(`gpioicBaseAddress 0xe3949000`, `_pcBaseAddress 0xe394a000`). Our model splits
+that page as power `0x00..0x7f` and gpioic `0x80..0xfff`.
+
+If the pin-level register really lives at **gpioic + group*32 + 4**, then
+groups 0..3 (offsets `0x04..0x64`) fall inside power.c's claim and would be
+mis-decoded — and lcd0's `reset`, `mpl_rx_enable`, `power_enable`,
+`pixel_clock_enable` and `control_enable` are all group 0 or 3 pins, i.e. the
+display path. If instead that accessor uses the **gpio** base
+(`0x3e400000 + group*32 + 4`), there is no overlap and nothing is wrong.
+
+Which of the two it is has **not** been established: it turns on whether
+vtable slot `0x384` resolves to the `+0x68` or the `+0x6c` accessor, and that
+vtable has not been read. Resolve it before touching the power/gpioic split —
+and note the run evidence is ambiguous rather than decisive (`0x3e400000` saw
+0 reads and 81 writes, `0x39a00000` saw 35 reads and 1362 writes).
+
 ### 13.0c THE INSTRUCTION CAP HAS ALWAYS BEEN SHORTER THAN THE GUEST'S TIMEOUTS
 
 Read this before planning any further long run. It is the most consequential
