@@ -2132,25 +2132,71 @@ already filled `0x038c0000`-`0x03955000`, exactly `0x96000` bytes, 54,000
 instructions after a kernel IOSurface was created with 320/480/1280/'ARGB'/
 `0x96000` — so both the routine and the geometry we supply are correct.
 
-**The second blocker, which matters more.** `AppleH1CLCD::createSurface` has
-**0 hits across all five of its checkpoints** in 12 billion instructions.
-Nothing was ever wrapped around the physical framebuffer at `0x0885C000`.
-`CoreSurfaceBufferLookup` returned a non-NULL ref for display 0 and NULL for the
-720x480 TV-out, so QuartzCore is drawing into a surface it *looked up* rather than
-one built over the panel. Run52 ends with `0 changed bytes` of live scanout and
-`postrun_screen_sha256 CBAD1C11…` — the pre-guest seed. Fixing the pointer alone
-would produce a correct image in memory that never appears.
+**The second blocker: a surface is created successfully and still nothing
+appears.** `AppleH1CLCD::createSurface` fires all five of its checkpoints in
+run52 at roughly instruction 238,400,000, with a fully populated descriptor —
+`+0x58=0x140`, `+0x5c=0x1e0`, `+0x60=0x500`, `+0x6c='ARGB'`, `+0x74=0x96000` —
+and `H1:createSurface-return r0=00000001`, which is success. Yet 12 billion
+instructions later run52 still reports `0 changed writes, 0 changed bytes` of
+live scanout and `postrun_screen_sha256 CBAD1C11…`, the pre-guest seed. So the
+open question is not "why was no surface made" but "why does a successfully
+created surface never reach the panel", and the candidates are distinct: the
+surface may not sit over `0x0885C000`; the compositor may be drawing into a
+different mapping (the fatal composite targeted `0x00621000`, the earlier
+successful one `0x038c0000`); or our scanout tracker may be watching the wrong
+range, in which case `0 changed bytes` is a measurement failure and not a
+rendering one. `CoreSurface:BufferCreate-entry` is `hits=0` in all three runs
+including run52, so "the surface does not come from `CoreSurfaceBufferCreate`"
+does survive.
 
-**Open, and recorded as open.** Run52's own terminal report shows
-`SBUIController:orderFront-call` once at 11,985,078,306 and zero hits on three
-checkpoints where run55 — restored from run52's 3e9 snapshot — shows hits,
-including `orderFront` at 3.47e9. If restore is bit-exact those timelines must
-agree past 3e9. Whether this is a real divergence or a reporting artifact
-(different binary vintages with an appended checkpoint table, or the
-generation-scoped report block that already produced two retractions) is under
-audit and is **not** resolved here. The crash finding does not depend on it: two
-restored runs agree with each other and with the guest's own crash reports. What
-is in question is whether a short restore-replay reproduces cold-boot behaviour.
+**Restore is bit-exact; the run52/run55 disagreement was reporting, twice over.**
+An earlier draft of this entry recorded that disagreement as open and asserted
+that `createSurface` never ran. Both were wrong, from the same root cause, and
+the correction is worth more than the original claim.
+
+The execution is identical: 20 of 20 heartbeats match between run52 (cold) and
+run56 (restored) at every 100M from 3.0e9 to 4.9e9, in pc *and* mode; the 21-line
+SpringBoard spawn-probe block is byte-identical across all three runs, same TTBR0
+`0dfec018`, same thread `e069b554`, same 444,736 pointer-activity entries; and
+agreement continues to `_psignal @3,860,606,119` and `syscall 37 kill
+@3,862,108,105`, **862 million instructions past the restore point**. That holds
+across three different binaries, so the VIC1/WFI refactor in `10c5cd3` was
+behaviour-neutral as its commit claimed. `tools/bootkernel.c` is in fact
+byte-identical between run52's and run55's builds, so no checkpoint index moved.
+
+Two mechanisms produced the illusion. First, the SpringBoard trace block is
+per-generation and `memset`s itself on every respawn
+(`tools/bootkernel.c:13695-13697`), keeping only the generation counter: run52's
+report describes **generation 6, PID 46**, while run55/run56 describe
+**generation 1, PID 36**. Different processes. Nothing warns that generations 1-5
+were discarded. Second, the `-n 12000000000` cap truncated generation 6, which
+armed at 11,834,133,519 with 165,866,481 instructions of budget. Normalising each
+checkpoint to its own block's arm point separates perfectly: everything gen 6
+reached is ≤ +150,991,263, everything reading `hits=0` is ≥ +244,691,624. Gen 6
+was running the same sequence *faster* than gen 1 and simply ran out of room.
+
+The rule this violates is already written down, in AGENT_HANDOFF §17, added after
+the same trap was retracted the first time. This was the third occurrence. Two
+consequences follow. Compare the heartbeat pc stream **before** reading any
+divergence into differing checkpoint counters — it closes the question in one
+step. And a host-side counter is not machine state: `core/include/snapshot.h`
+says restored runs start those counters fresh, so a zero in a restored run means
+"not seen since the restore point", never "never happened". Reading a restored
+run's zero as a whole-run zero is exactly how the `createSurface` error above was
+made.
+
+The durable fix belongs in the tool rather than the docs:
+`springboard_exec_trace_report()` should print how many generations it discarded
+with each one's arm and exit instants, and any block whose counters were not
+restored should carry the "restored baseline" banner the AppleBaseband trace
+already prints. Not yet implemented.
+
+Two smaller corrections to the same draft. Run56 did **not** die: its emulator
+exited 0 and completed all 5e9 instructions; the launcher's exit 99 was a
+postflight check failing on the then-missing `firmware/kernel.macho`. And the
+distinct-abort tables in run52 and run55 both saturated at 48 entries, so the
+fatal fault line appears only in run56 — its absence elsewhere is a table-cap
+artifact and not evidence.
 
 ### 2026-07-26: runs 41-50 — SpringBoard was never rendering because it is dead
 
