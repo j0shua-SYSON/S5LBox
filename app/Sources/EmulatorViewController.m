@@ -233,11 +233,15 @@ static const NSUInteger kConsoleScrollback = 12000;
 
     [self launchEngine];
 
-    /* A foreground transition can race the relatively expensive VM startup
-     * before the observers above exist. Reconcile with current state so a
-     * missed resign-active notification cannot leave the interpreter burning
-     * CPU in the background on a memory-constrained phone. */
-    if ([UIApplication sharedApplication].applicationState != UIApplicationStateActive)
+    /* Reconcile with the current state, so a resign-active notification that
+     * arrived before the observers above existed cannot leave the interpreter
+     * burning CPU in the background on a memory-constrained phone.
+     *
+     * Tested against Background specifically. -viewDidLoad runs inside
+     * -application:didFinishLaunchingWithOptions:, where the state is always
+     * Inactive rather than Active, so "not Active" would take this branch on
+     * every single cold launch and then immediately undo it. */
+    if ([UIApplication sharedApplication].applicationState == UIApplicationStateBackground)
         [self appWillResignActive:nil];
 }
 
@@ -299,21 +303,22 @@ static const NSUInteger kConsoleScrollback = 12000;
  * and the settings screen states the consequence.
  */
 - (void)applyPauseState {
-    /* Drain first. Pausing stops the display link, so anything the guest
-     * printed since the last tick would otherwise sit in the engine's buffer
-     * unseen until the machine ran again — and the last thing it printed is
-     * usually the interesting one. */
-    [self appendConsole:[_engine takePendingConsoleText]];
-    [self flushConsole];
-
     const BOOL backgroundPause =
         _inBackground && [[VMSettings sharedSettings] pausesInBackground];
     const BOOL paused = _userPaused || backgroundPause;
 
     [_engine setPaused:paused];
-    // The display link is stopped whenever the app is hidden either way: there
-    // is nothing to draw to, whatever the emulator is doing.
-    _link.paused = paused || _inBackground;
+
+    /*
+     * The link stops only when the app is hidden — NOT when the machine is
+     * paused. It is the only thing that drains the engine's UART buffer, and
+     * the emulator thread is mid-chunk when a pause request lands, so it still
+     * publishes one last time afterwards: stopping the link on pause would
+     * strand exactly the output that says why the machine was paused. A tick
+     * against a paused engine costs a -copyFrameInto: that returns NO and a
+     * drain that returns nil.
+     */
+    _link.paused = _inBackground;
 
     [self refreshRunControls];
 }
@@ -374,6 +379,11 @@ static const NSUInteger kConsoleScrollback = 12000;
     (void)sender;
     if (!_frame) return;
 
+    /* Take what the outgoing machine has already said before letting go of it.
+     * Its final publication — the last of the guest's output, and the engine's
+     * own "stopped" line — happens on a thread whose only reader is about to
+     * be dropped, so anything not collected here is lost. */
+    [self appendConsole:[_engine takePendingConsoleText]];
     [self append:@"\n[vm] reset: dropping this machine and building a new one"];
 
     /* -stop is a request the emulator thread notices between chunks, so the
@@ -470,12 +480,23 @@ static const NSUInteger kConsoleScrollback = 12000;
 - (void)tick:(CADisplayLink *)sender {
     (void)sender;
 
+    /* Geometry comes back with the pixels rather than being assumed here. The
+     * emulator learns it from whichever CLCD window the guest enabled, and the
+     * guest is under no obligation to pick 320x480 — VMFramebufferView also
+     * measures touches against it, so an assumption here would be an
+     * assumption about where a finger landed. */
     BOOL argb = NO;
-    if (_frame && [_engine copyFrameInto:_frame capacity:VM_FB_BYTES argb:&argb])
+    uint32_t fbW = 0, fbH = 0, fbStride = 0;
+    if (_frame && [_engine copyFrameInto:_frame
+                                capacity:VM_FB_BYTES
+                                   width:&fbW
+                                  height:&fbH
+                                  stride:&fbStride
+                                    argb:&argb])
         [_screen presentPixels:_frame
-                         width:VM_FB_WIDTH
-                        height:VM_FB_HEIGHT
-                        stride:VM_FB_WIDTH * VM_FB_BPP
+                         width:fbW
+                        height:fbH
+                        stride:fbStride
                           argb:argb];
 
     [self appendConsole:[_engine takePendingConsoleText]];
@@ -497,14 +518,10 @@ static const NSUInteger kConsoleScrollback = 12000;
  * sits next to the reason it was not.
  */
 - (void)refreshStatusLine {
-    NSString *machine;
-    if (!_engine) {
-        machine = @"no machine";
-    } else {
-        machine = [_engine statusLine] ?: @"?";
-        if ([_engine isPaused])
-            machine = [@"paused  ·  " stringByAppendingString:machine];
-    }
+    /* One source for the machine's state: the engine. It reports "paused"
+     * itself now, so prefixing "paused" here as well would produce
+     * "paused · running", which is a contradiction rather than a status. */
+    NSString *machine = _engine ? ([_engine statusLine] ?: @"?") : @"no machine";
 
     NSString *reason = [VMEngine inputUnavailableReason];
     NSString *input;
@@ -546,7 +563,12 @@ static const NSUInteger kConsoleScrollback = 12000;
                                               options:0
                                                 range:NSMakeRange(excess,
                                                     _consoleText.length - excess)];
-        if (newline.location != NSNotFound)
+        /* Only when something survives it. If the only newline left is the
+         * very last character, taking this boundary would delete the entire
+         * scrollback and blank the console — a worse outcome than the ragged
+         * first line the fallback leaves. */
+        if (newline.location != NSNotFound &&
+            newline.location + newline.length < _consoleText.length)
             excess = newline.location + newline.length;
         [_consoleText deleteCharactersInRange:NSMakeRange(0, excess)];
     }
@@ -568,12 +590,31 @@ static const NSUInteger kConsoleScrollback = 12000;
     CGFloat slack = _console.contentSize.height - _console.contentOffset.y
                   - _console.bounds.size.height;
     BOOL followTail = (slack < 40.0);
+    CGPoint wasAt = _console.contentOffset;
 
     _console.text = _consoleText;
     _consoleDirty = NO;
 
-    if (followTail && _consoleText.length)
+    if (followTail && _consoleText.length) {
         [_console scrollRangeToVisible:NSMakeRange(_consoleText.length - 1, 1)];
+        return;
+    }
+
+    /* Assigning .text scrolls a UITextView back to the top, so without this
+     * the "let the user read" branch threw them to the start of a 12000
+     * character buffer on the next line of guest output — worse than not
+     * having the feature. Clamped because the scrollback may have been
+     * trimmed and the content is now shorter.
+     *
+     * This holds the OFFSET, not the text: a trim removes characters from the
+     * front, so a reader parked in a full buffer still sees the text drift up
+     * past them. Fixing that properly means measuring the removed text's
+     * height, which is not worth the machinery — a terminal scrolling its
+     * oldest lines away is behaviour people expect. */
+    CGFloat limit = _console.contentSize.height - _console.bounds.size.height;
+    if (limit < 0.0) limit = 0.0;
+    if (wasAt.y > limit) wasAt.y = limit;
+    _console.contentOffset = wasAt;
 }
 
 #pragma mark - Input (recorded and shown; never delivered)

@@ -51,3 +51,45 @@ vm_touch_point_t vm_touch_map(double view_w, double view_h,
     out.inside = true;
     return out;
 }
+
+void vm_touch_tracker_reset(vm_touch_tracker_t *tracker) {
+    if (!tracker) return;
+    tracker->active = false;
+    tracker->x = 0;
+    tracker->y = 0;
+}
+
+bool vm_touch_track(vm_touch_tracker_t *tracker, vm_touch_phase_t phase,
+                    vm_touch_point_t mapped, int *out_x, int *out_y) {
+    if (!tracker) return false;
+
+    if (phase == VM_TOUCH_BEGAN) {
+        /* Unconditional, not just on the inside branch. A begin in the
+         * letterbox has to CLEAR any gesture the tracker still believes in,
+         * or a lost end — a modal presented mid-drag, the view pulled out of
+         * the hierarchy — would let this untouchable gesture be reported at
+         * the previous one's coordinates. */
+        tracker->active = mapped.inside;
+        if (!mapped.inside) return false;
+        tracker->x = mapped.x;
+        tracker->y = mapped.y;
+    } else {
+        if (!tracker->active) return false;
+
+        if (mapped.inside) {
+            tracker->x = mapped.x;
+            tracker->y = mapped.y;
+        } else if (phase == VM_TOUCH_MOVED) {
+            // Dragged into the letterbox. Say nothing, but stay live: the end
+            // of this gesture still has to be reported.
+            return false;
+        }
+
+        if (phase == VM_TOUCH_ENDED || phase == VM_TOUCH_CANCELLED)
+            tracker->active = false;
+    }
+
+    if (out_x) *out_x = tracker->x;
+    if (out_y) *out_y = tracker->y;
+    return true;
+}

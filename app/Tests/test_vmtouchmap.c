@@ -199,6 +199,133 @@ static void test_sweep_never_escapes_the_panel(void) {
           inside_count);
 }
 
+/* ------------------------------------------------------------------ tracker */
+
+static vm_touch_point_t at(int x, int y) {
+    vm_touch_point_t p;
+    p.x = x; p.y = y; p.inside = true;
+    return p;
+}
+
+static vm_touch_point_t offscreen(void) {
+    vm_touch_point_t p;
+    p.x = 0; p.y = 0; p.inside = false;
+    return p;
+}
+
+/* Feed one event and assert both the verdict and, when reported, where. */
+static void expect_report(vm_touch_tracker_t *t, vm_touch_phase_t phase,
+                          vm_touch_point_t mapped, int want_x, int want_y,
+                          const char *what) {
+    int x = -1, y = -1;
+    bool reported = vm_touch_track(t, phase, mapped, &x, &y);
+    CHECK(reported && x == want_x && y == want_y,
+          "%s: reported=%d at (%d,%d), wanted (%d,%d)",
+          what, (int)reported, x, y, want_x, want_y);
+}
+
+static void expect_silence(vm_touch_tracker_t *t, vm_touch_phase_t phase,
+                           vm_touch_point_t mapped, const char *what) {
+    int x = -1, y = -1;
+    CHECK(!vm_touch_track(t, phase, mapped, &x, &y),
+          "%s: was reported at (%d,%d) when it should have been dropped",
+          what, x, y);
+}
+
+static void test_tracker_ordinary_gesture(void) {
+    vm_touch_tracker_t t;
+    vm_touch_tracker_reset(&t);
+
+    expect_report(&t, VM_TOUCH_BEGAN, at(10, 20), 10, 20, "began on the panel");
+    expect_report(&t, VM_TOUCH_MOVED, at(11, 25), 11, 25, "moved on the panel");
+    expect_report(&t, VM_TOUCH_ENDED, at(12, 30), 12, 30, "ended on the panel");
+
+    // And the gesture is over: a stray move afterwards is not a gesture.
+    expect_silence(&t, VM_TOUCH_MOVED, at(13, 31), "moved after the end");
+    expect_silence(&t, VM_TOUCH_ENDED, at(13, 31), "ended twice");
+}
+
+static void test_tracker_requires_a_begin(void) {
+    vm_touch_tracker_t t;
+    vm_touch_tracker_reset(&t);
+
+    expect_silence(&t, VM_TOUCH_MOVED, at(5, 5), "moved with no begin");
+    expect_silence(&t, VM_TOUCH_ENDED, at(5, 5), "ended with no begin");
+    expect_silence(&t, VM_TOUCH_CANCELLED, at(5, 5), "cancelled with no begin");
+}
+
+static void test_tracker_ignores_the_letterbox(void) {
+    vm_touch_tracker_t t;
+    vm_touch_tracker_reset(&t);
+
+    expect_silence(&t, VM_TOUCH_BEGAN, offscreen(), "began in the letterbox");
+    // Nothing was started, so nothing that follows it is a gesture either.
+    expect_silence(&t, VM_TOUCH_MOVED, at(9, 9), "moved after a letterbox begin");
+    expect_silence(&t, VM_TOUCH_ENDED, at(9, 9), "ended after a letterbox begin");
+}
+
+/*
+ * The defect this state machine was extracted to make testable: if an end is
+ * ever missed, a NEW gesture beginning in the letterbox must not inherit the
+ * old one's coordinates. VMFramebufferView.h promises a letterbox touch is not
+ * reported at all, and that promise has to survive a lost end.
+ */
+static void test_tracker_letterbox_begin_clears_a_stuck_gesture(void) {
+    vm_touch_tracker_t t;
+    vm_touch_tracker_reset(&t);
+
+    expect_report(&t, VM_TOUCH_BEGAN, at(100, 200), 100, 200, "first gesture");
+    // ...and its end never arrives: a modal appears, the view is removed.
+
+    expect_silence(&t, VM_TOUCH_BEGAN, offscreen(), "second began in the bar");
+    CHECK(!t.active, "a letterbox begin left the tracker live");
+    expect_silence(&t, VM_TOUCH_MOVED, offscreen(),
+                   "second gesture moved while untracked");
+    expect_silence(&t, VM_TOUCH_ENDED, offscreen(),
+                   "second gesture ended at the first one's coordinates");
+}
+
+static void test_tracker_drag_off_the_panel(void) {
+    vm_touch_tracker_t t;
+    vm_touch_tracker_reset(&t);
+
+    expect_report(&t, VM_TOUCH_BEGAN, at(300, 400), 300, 400, "began");
+    expect_report(&t, VM_TOUCH_MOVED, at(319, 470), 319, 470, "moved to the edge");
+    expect_silence(&t, VM_TOUCH_MOVED, offscreen(), "dragged into the bar");
+    CHECK(t.active, "dragging off the panel ended the gesture early");
+
+    // The end must still arrive, at the last coordinate that was on the panel.
+    expect_report(&t, VM_TOUCH_ENDED, offscreen(), 319, 470,
+                  "ended outside the panel");
+    CHECK(!t.active, "the end left the tracker live");
+}
+
+static void test_tracker_cancel_and_restart(void) {
+    vm_touch_tracker_t t;
+    vm_touch_tracker_reset(&t);
+
+    expect_report(&t, VM_TOUCH_BEGAN, at(1, 2), 1, 2, "first began");
+    expect_report(&t, VM_TOUCH_CANCELLED, at(3, 4), 3, 4, "first cancelled");
+    expect_silence(&t, VM_TOUCH_MOVED, at(5, 6), "moved after the cancel");
+
+    // A second gesture is completely independent of the first.
+    expect_report(&t, VM_TOUCH_BEGAN, at(7, 8), 7, 8, "second began");
+    expect_report(&t, VM_TOUCH_ENDED, at(7, 8), 7, 8, "second ended");
+}
+
+static void test_tracker_null_and_optional_outputs(void) {
+    CHECK(!vm_touch_track(NULL, VM_TOUCH_BEGAN, at(1, 1), NULL, NULL),
+          "a null tracker reported a touch");
+    vm_touch_tracker_reset(NULL);   /* must not crash */
+
+    vm_touch_tracker_t t;
+    vm_touch_tracker_reset(&t);
+    CHECK(!t.active && t.x == 0 && t.y == 0, "reset left state behind");
+    CHECK(vm_touch_track(&t, VM_TOUCH_BEGAN, at(2, 3), NULL, NULL),
+          "a begin with no output pointers was dropped");
+    CHECK(t.x == 2 && t.y == 3, "the tracker did not record the begin");
+}
+
 int main(void) {
     test_exact_fit_corners();
     test_horizontal_letterbox();
@@ -207,6 +334,14 @@ int main(void) {
     test_minification();
     test_degenerate_inputs();
     test_sweep_never_escapes_the_panel();
+
+    test_tracker_ordinary_gesture();
+    test_tracker_requires_a_begin();
+    test_tracker_ignores_the_letterbox();
+    test_tracker_letterbox_begin_clears_a_stuck_gesture();
+    test_tracker_drag_off_the_panel();
+    test_tracker_cancel_and_restart();
+    test_tracker_null_and_optional_outputs();
 
     printf("vmtouchmap: %u checks, %u failed\n", tests, failed);
     return failed ? 1 : 0;

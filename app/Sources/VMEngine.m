@@ -74,6 +74,7 @@ static double vm_now(void) {
                 status:(arm_status_t)status;
 - (void)appendConsole:(NSString *)text;
 - (void)noteDiscardedInput;
+- (void)publishBlankSnapshotLocked;
 @end
 
 @implementation VMEngine {
@@ -89,6 +90,13 @@ static double vm_now(void) {
     BOOL             _snapshotFresh;
     BOOL             _snapshotARGB;  // byte order of the snapshot's pixels
     BOOL             _snapshotBlank;
+    /* The geometry the display controller was scanning out when the snapshot
+     * was taken. Published with the pixels rather than assumed by the reader:
+     * the buffer is a fixed VM_FB_BYTES, but what is IN it is whatever window
+     * the guest enabled. */
+    uint32_t         _snapshotWidth;
+    uint32_t         _snapshotHeight;
+    uint32_t         _snapshotStride;
     NSMutableString *_pending;
     uint64_t         _retired;
     double           _rate;          // instructions per second, smoothed
@@ -153,23 +161,14 @@ static double vm_now(void) {
     _rate = 0.0;
     _status = @"starting";
     BOOL needSnapshot = (_snapshot == NULL);
-    if (_snapshot) {
-        memset(_snapshot, 0, VM_FB_BYTES);
-        _snapshotARGB = NO;
-        _snapshotFresh = YES;
-        _snapshotBlank = YES;
-    }
+    [self publishBlankSnapshotLocked];
     pthread_mutex_unlock(&_lock);
 
     if (needSnapshot) {
         uint8_t *snapshot = calloc(1, VM_FB_BYTES);
         pthread_mutex_lock(&_lock);
         _snapshot = snapshot;
-        if (snapshot) {
-            _snapshotARGB = NO;
-            _snapshotFresh = YES;
-            _snapshotBlank = YES;
-        }
+        [self publishBlankSnapshotLocked];
         if (!snapshot) {
             _state = VMEngineStateIdle;
             _stopRequested = NO;
@@ -276,6 +275,17 @@ static double vm_now(void) {
 
 - (void)setPaused:(BOOL)paused {
     pthread_mutex_lock(&_lock);
+    /* A suspended machine is retiring nothing, so say nothing rather than
+     * leaving the smoothed rate frozen at whatever it was a moment before the
+     * pause -- a number that keeps claiming work is being done.
+     *
+     * Only when it is actually running: -setPaused: is also reached on the way
+     * to the background, and a machine that has already halted must keep
+     * saying "halted" rather than being relabelled as merely paused. */
+    if (paused && !_paused && _state == VMEngineStateRunning) {
+        _rate = 0.0;
+        _status = @"paused";
+    }
     _paused = paused;
     pthread_mutex_unlock(&_lock);
 }
@@ -421,8 +431,16 @@ static double vm_now(void) {
             /* A diagnostic limit, not a guest fault. Publish the frame and the
              * counters that were reached and stop there, leaving the last
              * picture up: the whole point of asking for a limit is to look at
-             * what the machine had drawn by then. */
-            if (cap > 0 && retired >= cap) {
+             * what the machine had drawn by then.
+             *
+             * `status == ARM_OK` is load-bearing, not defensive. A chunk can
+             * both fault and cross the cap, and the terminal block below
+             * overwrites _status with "instruction cap reached" — so without
+             * this test an undefined instruction or a halt would be reported
+             * as a clean diagnostic stop. A failure reported as a success is
+             * the one outcome this project does not permit. The fault wins;
+             * the cap is still crossed and will be reported next time. */
+            if (status == ARM_OK && cap > 0 && retired >= cap) {
                 reachedCap = YES;
                 [self publishRetired:retired rate:0.0 status:status];
                 break;
@@ -469,12 +487,7 @@ static double vm_now(void) {
     _machineReady = NO;
     _thread = nil;
     if (stoppedByRequest) {
-        if (_snapshot) {
-            memset(_snapshot, 0, VM_FB_BYTES);
-            _snapshotARGB = NO;
-            _snapshotFresh = YES;
-            _snapshotBlank = YES;
-        }
+        [self publishBlankSnapshotLocked];
         _status = @"stopped";
         _rate = 0.0;
     } else if (reachedCap) {
@@ -534,6 +547,12 @@ static double vm_now(void) {
             memset(_snapshot + fbBytes, 0, VM_FB_BYTES - fbBytes);
         memcpy(_snapshot, fb, fbBytes);
         _snapshotARGB = (order == VM_ORDER_ARGB);
+        /* Published with the pixels. The reader must not assume 320x480: this
+         * geometry came out of whichever CLCD window the guest enabled, and it
+         * is the only description of what the bytes above mean. */
+        _snapshotWidth  = fbW;
+        _snapshotHeight = fbH;
+        _snapshotStride = fbStride;
         _snapshotFresh = YES;
         _snapshotBlank = NO;
     } else if (_snapshot && !_snapshotBlank) {
@@ -541,10 +560,7 @@ static double vm_now(void) {
          * leave the last good frame on screen forever. Publish that transition
          * once; do not allocate a new black CGImage at 30 Hz while it remains
          * stopped. */
-        memset(_snapshot, 0, VM_FB_BYTES);
-        _snapshotARGB = NO;
-        _snapshotFresh = YES;
-        _snapshotBlank = YES;
+        [self publishBlankSnapshotLocked];
     }
     if (fresh.length) [_pending appendString:fresh];
     if (_pending.length > kVMConsoleLimit) {
@@ -565,15 +581,37 @@ static double vm_now(void) {
     pthread_mutex_unlock(&_lock);
 }
 
+/* A black panel of the panel's nominal size. MUST be called with _lock already
+ * held: it is the tail of four different critical sections, and taking the
+ * lock here would deadlock every one of them. */
+- (void)publishBlankSnapshotLocked {
+    if (!_snapshot) return;
+    memset(_snapshot, 0, VM_FB_BYTES);
+    _snapshotARGB = NO;
+    _snapshotFresh = YES;
+    _snapshotBlank = YES;
+    _snapshotWidth  = VM_FB_WIDTH;
+    _snapshotHeight = VM_FB_HEIGHT;
+    _snapshotStride = VM_FB_WIDTH * VM_FB_BPP;
+}
+
 #pragma mark - Snapshot readers (main thread)
 
-- (BOOL)copyFrameInto:(void *)dst capacity:(size_t)capacity argb:(BOOL *)outARGB {
+- (BOOL)copyFrameInto:(void *)dst
+             capacity:(size_t)capacity
+                width:(uint32_t *)outWidth
+               height:(uint32_t *)outHeight
+               stride:(uint32_t *)outStride
+                 argb:(BOOL *)outARGB {
     if (!dst || capacity < VM_FB_BYTES) return NO;
     BOOL copied = NO;
     pthread_mutex_lock(&_lock);
     if (_snapshotFresh && _snapshot) {
         memcpy(dst, _snapshot, VM_FB_BYTES);
-        if (outARGB) *outARGB = _snapshotARGB;
+        if (outARGB)   *outARGB   = _snapshotARGB;
+        if (outWidth)  *outWidth  = _snapshotWidth;
+        if (outHeight) *outHeight = _snapshotHeight;
+        if (outStride) *outStride = _snapshotStride;
         _snapshotFresh = NO;
         copied = YES;
     }

@@ -66,4 +66,38 @@ vm_touch_point_t vm_touch_map(double view_w, double view_h,
                               unsigned guest_w, unsigned guest_h,
                               double point_x, double point_y);
 
+/*
+ * The gesture state machine that sits on top of the mapping.
+ *
+ * Down here rather than in the view for the same reason as the arithmetic: it
+ * is the part with STATE, and stateful UI code is exactly what cannot be
+ * exercised without a device. The rules it enforces are the contract
+ * VMFramebufferView.h states, so they are worth an assertion rather than a
+ * paragraph:
+ *
+ *   - a gesture that begins in the letterbox is not reported at all, and also
+ *     ends any gesture the tracker still thought was running, so a lost end
+ *     can never let one gesture inherit the previous one's coordinates;
+ *   - a move or an end without a matching begin is never reported;
+ *   - a move that leaves the panel is dropped, but the gesture stays live, so
+ *     its end is still reported -- at the last coordinate that was on-panel.
+ *     Nothing downstream is left holding a touch that is no longer down.
+ */
+typedef struct {
+    bool active;   /* a gesture that began on the panel is in progress */
+    int  x, y;     /* the last coordinate of it that was on the panel  */
+} vm_touch_tracker_t;
+
+/* Forget any gesture in progress. */
+void vm_touch_tracker_reset(vm_touch_tracker_t *tracker);
+
+/*
+ * Feed one event: its phase, and what vm_touch_map() made of its location.
+ * Returns true when the event should be reported onwards, and only then writes
+ * the coordinate to report through `out_x` and `out_y`, either of which may be
+ * NULL. A NULL tracker reports nothing.
+ */
+bool vm_touch_track(vm_touch_tracker_t *tracker, vm_touch_phase_t phase,
+                    vm_touch_point_t mapped, int *out_x, int *out_y);
+
 #endif /* IOS3VM_APP_VMTOUCHMAP_H */

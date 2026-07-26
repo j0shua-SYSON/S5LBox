@@ -255,6 +255,7 @@ titleForFooterInSection:(NSInteger)section {
     cell.textLabel.numberOfLines = 0;
     cell.textLabel.font = [UIFont systemFontOfSize:16.0];
     cell.textLabel.textColor = [UIColor labelColor];
+    cell.textLabel.text = nil;
     cell.detailTextLabel.numberOfLines = 0;
     cell.detailTextLabel.font = [UIFont systemFontOfSize:12.0];
     cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
@@ -401,6 +402,12 @@ titleForFooterInSection:(NSInteger)section {
 
 - (void)optionSwitchChanged:(UISwitch *)sender {
     [_settings setValue:sender.isOn forOptionIndex:(NSUInteger)sender.tag];
+
+    /* The clipboard still holds the OLD arguments, so the "copied" caption
+     * would now be attached to a line nobody has copied. On this screen of all
+     * screens, a caption that is not true is not acceptable. */
+    _copiedCommandLine = NO;
+
     // The rendered command line is derived from every switch, so it moves too.
     [self.tableView reloadSections:
         [NSIndexSet indexSetWithIndex:VMSettingsSectionCommandLine]

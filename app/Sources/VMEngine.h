@@ -55,12 +55,23 @@ typedef NS_ENUM(NSUInteger, VMButton) {
 - (uint64_t)instructionCap;
 
 /*
- * Copy the most recent framebuffer snapshot into `dst`, and report through
- * `outARGB` whether its bytes are A,R,G,B (YES) or B,G,R,A (NO). Returns NO —
- * without copying — if nothing new has been published since the last call, so
- * the UI can skip rebuilding an identical image. `outARGB` may be NULL.
+ * Copy the most recent framebuffer snapshot into `dst`. Returns NO — without
+ * copying — if nothing new has been published since the last call, so the UI
+ * can skip rebuilding an identical image.
+ *
+ * The geometry comes back with the pixels because it is not ours to assume:
+ * vm_guest_display() reads it out of whichever CLCD window the guest enabled,
+ * and the guest is free to program one that is not 320x480. `outStride` is
+ * bytes per row; the copied region is `outStride * outHeight` bytes and never
+ * exceeds VM_FB_BYTES. `outARGB` reports whether the bytes are A,R,G,B (YES)
+ * or B,G,R,A (NO). Every out parameter may be NULL.
  */
-- (BOOL)copyFrameInto:(void *)dst capacity:(size_t)capacity argb:(BOOL *)outARGB;
+- (BOOL)copyFrameInto:(void *)dst
+             capacity:(size_t)capacity
+                width:(uint32_t *)outWidth
+               height:(uint32_t *)outHeight
+               stride:(uint32_t *)outStride
+                 argb:(BOOL *)outARGB;
 
 /* Everything the guest has written to the UART since the last call, or nil. */
 - (NSString *)takePendingConsoleText;

@@ -50,11 +50,11 @@ static void vm_fb_release_data(void *info, const void *data, size_t size) {
     unsigned _guestWidth;
     unsigned _guestHeight;
 
-    /* A gesture that began on the panel, and the last coordinate it was seen
-     * at, so its end can be reported even from outside the panel. */
-    BOOL _touchActive;
-    int  _lastGuestX;
-    int  _lastGuestY;
+    /* The gesture state machine lives in VMTouchMap.c, tested by
+     * app/Tests/test_vmtouchmap.c, because its rules are the contract this
+     * view's header states and a contract deserves assertions. This file is
+     * then only the UIKit half: read the point, map it, feed the tracker. */
+    vm_touch_tracker_t _tracker;
 }
 
 @synthesize touchDelegate = _touchDelegate;
@@ -70,6 +70,7 @@ static void vm_fb_release_data(void *info, const void *data, size_t size) {
      * it is handed rather than a display of one particular guest. */
     _guestWidth  = 320u;
     _guestHeight = 480u;
+    vm_touch_tracker_reset(&_tracker);
 
     self.backgroundColor = [UIColor blackColor];
     self.opaque = YES;
@@ -94,7 +95,7 @@ static void vm_fb_release_data(void *info, const void *data, size_t size) {
      * caller can forget to throw. Turning it off also drops any gesture in
      * progress, so nothing is left half-reported. */
     self.userInteractionEnabled = (touchDelegate != nil);
-    if (!touchDelegate) _touchActive = NO;
+    if (!touchDelegate) vm_touch_tracker_reset(&_tracker);
 }
 
 - (void)presentPixels:(const void *)pixels
@@ -176,7 +177,10 @@ static void vm_fb_release_data(void *info, const void *data, size_t size) {
 - (void)reportTouches:(NSSet<UITouch *> *)touches phase:(vm_touch_phase_t)phase {
     id<VMFramebufferViewTouchDelegate> delegate = self.touchDelegate;
     UITouch *touch = [touches anyObject];
-    if (!delegate || !touch) { _touchActive = NO; return; }
+    if (!delegate || !touch) {
+        vm_touch_tracker_reset(&_tracker);
+        return;
+    }
 
     const CGSize size = self.bounds.size;
     const CGPoint point = [touch locationInView:self];
@@ -185,30 +189,10 @@ static void vm_fb_release_data(void *info, const void *data, size_t size) {
                      _guestWidth, _guestHeight,
                      (double)point.x, (double)point.y);
 
-    if (phase == VM_TOUCH_BEGAN) {
-        // The letterbox is not the panel: a touch there starts nothing.
-        if (!guest.inside) return;
-        _touchActive = YES;
-    } else if (!_touchActive) {
-        return;
-    }
+    int x = 0, y = 0;
+    if (!vm_touch_track(&_tracker, phase, guest, &x, &y)) return;
 
-    if (guest.inside) {
-        _lastGuestX = guest.x;
-        _lastGuestY = guest.y;
-    } else if (phase == VM_TOUCH_MOVED) {
-        // Dragged off the panel. Say nothing, but stay active: the end of this
-        // gesture still has to be reported, at the last coordinate on-panel.
-        return;
-    }
-
-    if (phase == VM_TOUCH_ENDED || phase == VM_TOUCH_CANCELLED)
-        _touchActive = NO;
-
-    [delegate framebufferView:self
-                touchAtGuestX:_lastGuestX
-                       guestY:_lastGuestY
-                        phase:phase];
+    [delegate framebufferView:self touchAtGuestX:x guestY:y phase:phase];
 }
 
 @end
