@@ -8,6 +8,7 @@
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed.
  */
 #include "devicetree.h"
+#include "dt_inplace.h"          /* the in-place writers bootkernel ships */
 #include <stdio.h>
 #include <string.h>
 
@@ -55,6 +56,15 @@ static void prop_str(const char *name, const char *val) {
 static void prop_u32(const char *name, uint32_t v) {
     uint8_t b[4] = { (uint8_t)v, (uint8_t)(v>>8), (uint8_t)(v>>16), (uint8_t)(v>>24) };
     prop(name, b, 4);
+}
+
+/* An 8-byte {address, size} "reg" entry, the shape iBoot fills in. */
+static void prop_reg(const char *name, uint32_t base, uint32_t size) {
+    uint8_t b[8] = {
+        (uint8_t)base, (uint8_t)(base>>8), (uint8_t)(base>>16), (uint8_t)(base>>24),
+        (uint8_t)size, (uint8_t)(size>>8), (uint8_t)(size>>16), (uint8_t)(size>>24)
+    };
+    prop(name, b, 8);
 }
 
 /*
@@ -208,6 +218,160 @@ static void test_property_length_flag_bit(void) {
     CHECK(reg == 0x44332211u, "reg=%08x expect 44332211", reg);
 }
 
+/* --- in-place patching: /vram, the property that lets the guest draw ------
+ *
+ * We load the kernel directly and never run iBoot, so every value iBoot would
+ * have measured arrives as zero. /vram:reg is the one where zero is not merely
+ * uninformative: IOSurfaceRoot builds its "PurpleGfxMem" region from that node,
+ * AppleH1CLCD falls back to an IOMemoryDescriptor with kIODirectionOut when the
+ * region is absent, and IOSurfaceRootUserClient turns kIODirectionOut into
+ * kIOMapReadOnly — so userspace gets the framebuffer read-only and SpringBoard's
+ * compositor faults on its first store. bootkernel therefore writes this entry
+ * itself, with dt_set_reg() from tools/dt_inplace.h, which is what these cases
+ * exercise: the real writer, not a copy of it.
+ *
+ * The N82 numbers are bootkernel's own: framebuffer PA 0x0885c000 and
+ * N82_FB_BYTES == 320 * 480 * 4 == 0x00096000.
+ */
+#define VRAM_FB_PA    0x0885c000u
+#define VRAM_FB_BYTES (320u * 480u * 4u)
+
+static uint32_t g_vram_reg_off;         /* file offset of /vram:reg's value */
+
+/*
+ * Shaped like the node in the shipped 7E18 tree: four properties, the third an
+ * 8-byte reg of two zero cells. A sibling is emitted after it so that an edit
+ * which changed any length would show up as downstream corruption rather than
+ * as a passing test.
+ */
+static void build_vram_tree(void) {
+    memset(g_dt, 0, sizeof g_dt);
+    g_len = 0;
+
+    node_begin(1, 3);                       /* root */
+    prop_str("name", "device-tree");
+
+    node_begin(3, 0);                       /* memory */
+    prop_str("name", "memory");
+    prop_str("device_type", "memory");
+    prop_reg("reg", 0, 0);
+
+    node_begin(4, 0);                       /* vram */
+    prop_str("name", "vram");
+    prop_str("device_type", "vram");
+    g_vram_reg_off = g_len + DT_PROP_NAME_LEN + 4u;
+    prop_reg("reg", 0, 0);
+    prop_u32("AAPL,phandle", 0x00b042d0u);
+
+    node_begin(2, 0);                       /* the sibling after /vram */
+    prop_str("name", "arm-io");
+    prop_u32("ranges", 0x38000000u);
+}
+
+static void test_inplace_vram_reg_is_written_exactly(void) {
+    build_vram_tree();
+    uint8_t before[sizeof g_dt];
+    memcpy(before, g_dt, sizeof g_dt);
+    uint32_t len_before = g_len;
+
+    CHECK(dt_set_reg(g_dt, g_len, "vram", "reg", VRAM_FB_PA, VRAM_FB_BYTES),
+          "dt_set_reg refused a shipped-shape /vram node");
+    CHECK(g_len == len_before, "the blob was resized (%u -> %u)",
+          len_before, g_len);
+
+    /* Pinned as bytes, not as two words: little-endian cells are the whole
+     * contract with the kernel, and a byte-order slip reads as a plausible
+     * address rather than as a crash. */
+    static const uint8_t expect[8] = {
+        0x00, 0xc0, 0x85, 0x08,             /* 0x0885c000                    */
+        0x00, 0x60, 0x09, 0x00              /* 0x00096000 == 320 * 480 * 4   */
+    };
+    const uint8_t *got = &g_dt[g_vram_reg_off];
+    CHECK(memcmp(got, expect, 8) == 0,
+          "reg = %02x%02x%02x%02x %02x%02x%02x%02x, expect 00c08508 00600900",
+          got[0], got[1], got[2], got[3], got[4], got[5], got[6], got[7]);
+
+    /* Same-length and in place: nothing outside those eight bytes may move. */
+    uint32_t bad = 0xffffffffu;
+    for (uint32_t i = 0; i < len_before && bad == 0xffffffffu; i++) {
+        if (i >= g_vram_reg_off && i < g_vram_reg_off + 8u) continue;
+        if (g_dt[i] != before[i]) bad = i;
+    }
+    CHECK(bad == 0xffffffffu, "byte %u changed outside the reg entry", bad);
+
+    /* And the parser the emulator actually reads trees with agrees. */
+    dt_t dt; dt_node_t root, vram;
+    CHECK(dt_parse(g_dt, g_len, &dt, &root) == DT_OK,
+          "the patched tree no longer parses");
+    CHECK(dt_path(&dt, &root, "vram", &vram) == DT_OK, "/vram disappeared");
+    const uint8_t *v; uint32_t n;
+    CHECK(dt_property(&dt, &vram, "reg", &v, &n) == DT_OK, "/vram:reg disappeared");
+    CHECK(n == 8, "/vram:reg is %u bytes, expect 8", n);
+    if (n == 8) {
+        uint32_t base = (uint32_t)v[0] | ((uint32_t)v[1] << 8) |
+                        ((uint32_t)v[2] << 16) | ((uint32_t)v[3] << 24);
+        uint32_t size = (uint32_t)v[4] | ((uint32_t)v[5] << 8) |
+                        ((uint32_t)v[6] << 16) | ((uint32_t)v[7] << 24);
+        CHECK(base == VRAM_FB_PA, "/vram:reg base = %08x, expect %08x",
+              base, VRAM_FB_PA);
+        CHECK(size == VRAM_FB_BYTES, "/vram:reg size = %08x, expect %08x",
+              size, VRAM_FB_BYTES);
+        printf("  [device tree] /vram reg = {0x%08x, 0x%08x}\n", base, size);
+    }
+
+    /* Re-running is a no-op, not a second edit: bootkernel patches a fresh
+     * in-memory copy each boot and must not depend on that. */
+    CHECK(dt_set_reg(g_dt, g_len, "vram", "reg", VRAM_FB_PA, VRAM_FB_BYTES),
+          "dt_set_reg refused an already-patched node");
+    CHECK(memcmp(&g_dt[g_vram_reg_off], expect, 8) == 0,
+          "a second dt_set_reg changed the bytes");
+}
+
+/*
+ * The writer is only safe because it is same-length. A node whose reg is not
+ * exactly two cells must be refused outright — a partial write there would
+ * either truncate the entry or run into the following property's name.
+ */
+static void test_inplace_reg_refuses_wrong_shape(void) {
+    static const uint8_t sixteen[16] = {0};
+    memset(g_dt, 0, sizeof g_dt);
+    g_len = 0;
+
+    node_begin(1, 3);                       /* root */
+    prop_str("name", "device-tree");
+
+    node_begin(2, 0);                       /* reg is one cell, not two */
+    prop_str("name", "vram");
+    prop_u32("reg", 0xa5a5a5a5u);
+
+    node_begin(2, 0);                       /* reg is two {addr,size} pairs */
+    prop_str("name", "pram");
+    prop("reg", sixteen, 16);
+
+    node_begin(1, 0);                       /* no reg property at all */
+    prop_str("name", "nvram");
+
+    uint8_t before[sizeof g_dt];
+    memcpy(before, g_dt, sizeof g_dt);
+
+    CHECK(!dt_set_reg(g_dt, g_len, "vram", "reg", VRAM_FB_PA, VRAM_FB_BYTES),
+          "a 4-byte reg was accepted and silently resized");
+    CHECK(!dt_set_reg(g_dt, g_len, "pram", "reg", VRAM_FB_PA, VRAM_FB_BYTES),
+          "a 16-byte reg was accepted");
+    CHECK(!dt_set_reg(g_dt, g_len, "nvram", "reg", VRAM_FB_PA, VRAM_FB_BYTES),
+          "a missing reg property was accepted");
+    CHECK(!dt_set_reg(g_dt, g_len, "vram0", "reg", VRAM_FB_PA, VRAM_FB_BYTES),
+          "a missing node was accepted");
+    CHECK(memcmp(before, g_dt, sizeof g_dt) == 0,
+          "a refused dt_set_reg still modified the blob");
+
+    /* Refusal has to be observable, because bootkernel fails the boot on it
+     * rather than shipping a half-configured display. */
+    dt_t dt; dt_node_t root;
+    CHECK(dt_parse(g_dt, g_len, &dt, &root) == DT_OK,
+          "the refused-edit tree no longer parses");
+}
+
 int main(void) {
     printf("iOS3-VM device tree tests\n");
     test_parse_and_root_properties();
@@ -219,6 +383,8 @@ int main(void) {
     test_reject_absurd_child_count();
     test_reject_excessive_nesting();
     test_property_length_flag_bit();
+    test_inplace_vram_reg_is_written_exactly();
+    test_inplace_reg_refuses_wrong_shape();
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
 }

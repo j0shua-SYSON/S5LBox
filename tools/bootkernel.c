@@ -21,6 +21,7 @@
 #endif
 
 #include "ksyms.h"
+#include "dt_inplace.h"
 #include "file_block.h"
 #include "ios3_kernel_patch.h"
 #include "macho.h"
@@ -352,7 +353,7 @@ static bool boot_option_takes_value(const char *option) {
     static const char *const options[] = {
         "-D", "-W", "-Z", "-p", "--restore", "-V", "-n", "-T",
         "-d", "-c", "-b", "-w", "-r", "--fstab", "--grow", "-R",
-        "-X", "-H", "--call-probe"
+        "-X", "-H", "--call-probe", "--call-probe-kernel"
     };
 
     if (!option) return false;
@@ -1460,189 +1461,12 @@ static void report_symbol_sources(void) {
 /* ===========================================================================
  * Device-tree patching — standing in for iBoot.
  *
- * The device tree shipped in the IPSW is a TEMPLATE. On real hardware iBoot
- * measures the PLLs and writes the actual clock rates into it before handing
- * it to the kernel; every frequency property in the file on disk is zero.
- * pe_identify_machine() copies those zeros into gPEClockFrequencyInfo, and the
- * kernel then divides by them:
- *
- *   pe_identify_machine+0xbe:  bus_to_cpu_rate_num = (cpu_clock_hz * 2) / bus_clock_hz
- *   pe_identify_machine+0xd0:  bus_to_dec_rate_den = bus_clock_hz / dec_clock_hz
- *   rtclock.c:132              panic if timebase_num < timebase_den
- *
- * so we do iBoot's job here. Patching is IN PLACE and SAME-LENGTH: the flat
- * format has no relocation table but every offset is implicit in the byte
- * stream, so resizing a property would mean rebuilding the whole blob.
- *
- * Format (Apple's, not FDT):
- *   node     := u32 nProperties, u32 nChildren, property[], node[]
- *   property := char name[32], u32 length (bit31 is a tool flag), value[],
- *               padded up to a 4-byte boundary
+ * The flat-tree walkers and the same-length in-place writers (dtn_path,
+ * dt_set_u32, dt_node_compatible_exact, dt_set_reg) moved verbatim into
+ * tools/dt_inplace.h, included above, so core/tests/test_devicetree.c can
+ * exercise the shipping implementation instead of a copy of it. What stays
+ * here is the patching that is specific to this machine's boot.
  * ------------------------------------------------------------------------- */
-
-static size_t dtn_hdr(const uint8_t *b, size_t len, size_t off,
-                      uint32_t *np, uint32_t *nc) {
-    if (off + 8 > len) return 0;
-    *np = ld32(b + off);
-    *nc = ld32(b + off + 4);
-    if (*np > 4096 || *nc > 4096) return 0;   /* corrupt-input guard */
-    return off + 8;
-}
-
-/* Offset just past the last property of the node at `off`. */
-static size_t dtn_props_end(const uint8_t *b, size_t len, size_t off) {
-    uint32_t np, nc;
-    size_t p = dtn_hdr(b, len, off, &np, &nc);
-    if (!p) return 0;
-    for (uint32_t i = 0; i < np; i++) {
-        if (p + 36 > len) return 0;
-        uint32_t l = ld32(b + p + 32) & 0x7fffffffu;
-        p += 36 + ((l + 3u) & ~3u);
-        if (p > len) return 0;
-    }
-    return p;
-}
-
-/* Offset just past the whole subtree rooted at `off`. */
-static size_t dtn_end(const uint8_t *b, size_t len, size_t off, unsigned depth) {
-    uint32_t np, nc;
-    if (depth > 32) return 0;
-    if (!dtn_hdr(b, len, off, &np, &nc)) return 0;
-    size_t p = dtn_props_end(b, len, off);
-    for (uint32_t i = 0; p && i < nc; i++) p = dtn_end(b, len, p, depth + 1);
-    return p;
-}
-
-/* Writable pointer to a property's value on the node at `off`. */
-static uint8_t *dtn_prop(uint8_t *b, size_t len, size_t off,
-                         const char *name, uint32_t *vlen) {
-    uint32_t np, nc;
-    size_t p = dtn_hdr(b, len, off, &np, &nc);
-    if (!p) return NULL;
-    for (uint32_t i = 0; i < np; i++) {
-        if (p + 36 > len) return NULL;
-        char nm[DTNAME + 1];
-        memcpy(nm, b + p, DTNAME); nm[DTNAME] = '\0';
-        uint32_t l = ld32(b + p + 32) & 0x7fffffffu;
-        if (p + 36 + (size_t)l > len) return NULL;
-        if (!strcmp(nm, name)) { if (vlen) *vlen = l; return b + p + 36; }
-        p += 36 + ((l + 3u) & ~3u);
-    }
-    return NULL;
-}
-
-#define DT_NONE ((size_t)-1)
-
-/* Walk a slash-separated path of node "name" properties from the root.
- * "" is the root itself; "cpus/cpu0" is the CPU node. */
-static size_t dtn_path(uint8_t *b, size_t len, const char *path) {
-    size_t off = 0;
-    while (path && *path) {
-        while (*path == '/') path++;
-        if (!*path) break;
-        const char *slash = strchr(path, '/');
-        size_t clen = slash ? (size_t)(slash - path) : strlen(path);
-        uint32_t np, nc;
-        if (!dtn_hdr(b, len, off, &np, &nc)) return DT_NONE;
-        size_t c = dtn_props_end(b, len, off);
-        size_t found = DT_NONE;
-        for (uint32_t i = 0; c && i < nc; i++) {
-            uint32_t vl = 0;
-            const uint8_t *nm = dtn_prop(b, len, c, "name", &vl);
-            if (nm && vl >= clen && !memcmp(nm, path, clen) &&
-                (vl == clen || nm[clen] == '\0')) { found = c; break; }
-            c = dtn_end(b, len, c, 0);
-        }
-        if (found == DT_NONE) return DT_NONE;
-        off = found;
-        path = slash ? slash + 1 : path + clen;
-    }
-    return off;
-}
-
-/* Overwrite a 4-byte property in place. Refuses to change its length. */
-static bool dt_set_u32(uint8_t *b, size_t len, const char *path,
-                       const char *prop, uint32_t v) {
-    size_t node = dtn_path(b, len, path);
-    if (node == DT_NONE) {
-        printf("  dt: node /%-22s NOT FOUND (skipping %s)\n", path, prop);
-        return false;
-    }
-    uint32_t vl = 0;
-    uint8_t *p = dtn_prop(b, len, node, prop, &vl);
-    if (!p) {
-        printf("  dt: /%s: property %s NOT FOUND\n", path, prop);
-        return false;
-    }
-    if (vl != 4) {
-        printf("  dt: /%s:%s is %u bytes, not 4 — refusing to resize\n",
-               path, prop, vl);
-        return false;
-    }
-    uint32_t old = ld32(p);
-    p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8);
-    p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24);
-    printf("  dt: /%-14s %-22s 0x%08x -> 0x%08x (%u)\n",
-           *path ? path : "device-tree", prop, old, v, v);
-    return true;
-}
-
-/*
- * A path lookup alone is not enough for /arm-io/spi0/lcd0: the 7E18 tree has
- * two siblings with the same name.  dtn_path() deliberately returns the first,
- * which is the Merlot panel in the stock tree, but silently writing whichever
- * duplicate happens to come first would corrupt a different device if the
- * template order ever changed.  Require one exact, bounded C string before the
- * panel-specific patch.  A compatible string list, missing terminator, prefix,
- * or trailing bytes all fail closed.
- */
-static bool dt_node_compatible_exact(uint8_t *b, size_t len, const char *path,
-                                     const char *expected) {
-    size_t node = dtn_path(b, len, path);
-    if (node == DT_NONE) {
-        printf("  dt: node /%-22s NOT FOUND (checking compatible)\n", path);
-        return false;
-    }
-
-    uint32_t vl = 0;
-    const uint8_t *p = dtn_prop(b, len, node, "compatible", &vl);
-    size_t expected_n = strlen(expected) + 1u;
-    if (!p) {
-        printf("  dt: /%s:compatible NOT FOUND\n", path);
-        return false;
-    }
-    if ((size_t)vl != expected_n || p[expected_n - 1u] != '\0' ||
-        memchr(p, '\0', expected_n - 1u) != NULL ||
-        memcmp(p, expected, expected_n - 1u) != 0) {
-        printf("  dt: /%s:compatible is not exact \"%s\" "
-               "(length %u; refusing panel-specific patch)\n",
-               path, expected, vl);
-        return false;
-    }
-    return true;
-}
-
-/* Overwrite two consecutive 32-bit cells (an 8-byte "reg" entry) in place. */
-static bool dt_set_reg(uint8_t *b, size_t len, const char *path,
-                       const char *prop, uint32_t base, uint32_t size) {
-    size_t node = dtn_path(b, len, path);
-    if (node == DT_NONE) { printf("  dt: node /%s NOT FOUND\n", path); return false; }
-    uint32_t vl = 0;
-    uint8_t *p = dtn_prop(b, len, node, prop, &vl);
-    if (!p || vl != 8) {
-        printf("  dt: /%s:%s missing or not 8 bytes (%u)\n", path, prop, vl);
-        return false;
-    }
-    uint32_t o0 = ld32(p), o1 = ld32(p + 4);
-    uint32_t vals[2] = { base, size };
-    for (int i = 0; i < 2; i++) {
-        p[i*4+0] = (uint8_t)vals[i];        p[i*4+1] = (uint8_t)(vals[i] >> 8);
-        p[i*4+2] = (uint8_t)(vals[i] >> 16); p[i*4+3] = (uint8_t)(vals[i] >> 24);
-    }
-    printf("  dt: /%-14s %-22s {0x%08x,0x%08x} -> {0x%08x,0x%08x}\n",
-           path, prop, o0, o1, base, size);
-    return true;
-}
 
 /*
  * Break a node's "compatible" so no driver matches it. IOKit matches AppleMBX
@@ -4895,10 +4719,10 @@ typedef struct {
     bool target_identity_valid;
 } framebuffer_write_event_t;
 
-/* --- DIAGNOSTIC: the user-mode call probe (--call-probe) ------------------
+/* --- DIAGNOSTIC: the call probe (--call-probe, --call-probe-kernel) -------
  *
  * Snapshot the AAPCS argument registers every time the guest is about to
- * execute one of a few command-line-selected user PCs.  It answers "who called
+ * execute one of a few command-line-selected PCs.  It answers "who called
  * this, and with what" for a routine whose crash is explained by a bad ARGUMENT
  * rather than by a bug in its own body -- the case in point being CoreGraphics
  * CGBlt_fillBytes at 0x338f61b0, the sole caller of _CGSFillDRAM8by1, which has
@@ -4910,9 +4734,30 @@ typedef struct {
  * project the decisive record twice (the abort-site table, raised to 65536 in
  * 5bef7cb).  Overwriting oldest-first loses only the uninteresting end, and
  * call_probe_total is printed alongside so truncation is never silent.
+ *
+ * Each PC carries the privilege it is expected to run at, because the two are
+ * read differently and a mistake must be visible rather than plausible.  A USER
+ * site reports the user bank and reads [sp+0]/[sp+4] unprivileged through the
+ * guest MMU.  A KERNEL site reports the executing bank -- r13/r14 of the
+ * exception mode, not the user ones diagnostic_user_reg() would hand back --
+ * and does not read the stack at all, because an unprivileged walk of a kernel
+ * frame reports a permission fault that says nothing about the guest.  Either
+ * way, a PC reached in the other privilege is counted separately, so "aimed at
+ * the wrong mode" never looks like "never reached".
+ *
+ * The kernel side exists for the framebuffer mapping question: r2 at
+ * 0xc0526a4c is the options word IOSurfaceRootUserClient hands to its mapper,
+ * and bit 12 of it (kIOMapReadOnly) is the whole difference between SpringBoard
+ * being able to draw and faulting on its first store.  r0 at 0xc0526a38 is the
+ * IOMemoryDescriptor direction that decided that bit.
  */
 #define CALL_PROBE_PC_MAX  8u
 #define CALL_PROBE_RING    4096u
+
+typedef enum {
+    CALL_PROBE_MODE_USER = 0,       /* --call-probe:        capture in USR */
+    CALL_PROBE_MODE_KERNEL          /* --call-probe-kernel: capture outside USR */
+} call_probe_mode_t;
 
 typedef struct {
     uint64_t at;                    /* retired-instruction index of the hit */
@@ -4922,12 +4767,14 @@ typedef struct {
     uint32_t fail_va[2];            /* which byte failed, per stack word */
     uint32_t fail_fsr[2];           /* ARMv6 FSR, or 0 for a non-RAM reject */
     uint8_t  stack_ok;              /* bit i set == stack[i] was read */
+    uint8_t  kernel;                /* 1 == kernel site; no stack was attempted */
 } call_probe_record_t;
 
 typedef struct {
     uint32_t pc;                    /* configured, already masked with ~1 */
-    uint64_t user_hits;             /* captures offered to the ring */
-    uint64_t nonuser_hits;          /* reached, but the CPSR was not USR */
+    call_probe_mode_t mode;         /* which privilege this site captures */
+    uint64_t hits;                  /* captures offered to the ring */
+    uint64_t wrong_mode_hits;       /* reached, but in the other privilege */
 } call_probe_site_t;
 
 /*
@@ -15577,6 +15424,12 @@ static void call_probe_read_stack_word(arm_cpu_t *cpu, uint32_t sp,
     rec->fail_fsr[index] = fail_fsr;
 }
 
+/* Whether a site configured for `mode` should capture at this CPSR. */
+static bool call_probe_mode_matches(call_probe_mode_t mode, uint32_t cpsr) {
+    bool in_user = (cpsr & ARM_CPSR_MODE_MASK) == ARM_MODE_USR;
+    return mode == CALL_PROBE_MODE_KERNEL ? !in_user : in_user;
+}
+
 /*
  * Record one call-probe hit.  Deliberately never inlined: the step loop's only
  * cost when no probe is configured is the G.call_probe_n test at the call site,
@@ -15592,28 +15445,46 @@ static BOOTKERNEL_NOINLINE void call_probe_note(
     if (slot == G.call_probe_n) return;
 
     /*
-     * User mode only, and counted separately when it is not.  A probe aimed by
-     * mistake at a kernel address must report "reached, wrong mode" instead of
-     * looking identical to "never reached", and the unprivileged stack read
-     * below would in any case describe the wrong frame for a kernel PC.
+     * The privilege the site was configured for, and counted separately when
+     * the guest arrives in the other one.  A probe aimed by mistake at the
+     * wrong side must report "reached, wrong mode" instead of looking identical
+     * to "never reached".
      */
-    if ((cpu->cpsr & ARM_CPSR_MODE_MASK) != ARM_MODE_USR) {
-        G.call_probe_pc[slot].nonuser_hits++;
+    call_probe_mode_t mode = G.call_probe_pc[slot].mode;
+    bool want_kernel = mode == CALL_PROBE_MODE_KERNEL;
+    if (!call_probe_mode_matches(mode, cpu->cpsr)) {
+        G.call_probe_pc[slot].wrong_mode_hits++;
         return;
     }
-    G.call_probe_pc[slot].user_hits++;
+    G.call_probe_pc[slot].hits++;
 
     unsigned k = G.call_probe_w;
     call_probe_record_t *rec = &G.call_probe_log[k];
     memset(rec, 0, sizeof *rec);
     rec->at = at;
     rec->pc = pc;
-    for (unsigned r = 0; r < 4u; r++)
-        rec->r[r] = diagnostic_user_reg(cpu, r);
-    rec->sp = diagnostic_user_reg(cpu, 13u);
-    rec->lr = diagnostic_user_reg(cpu, 14u);
-    call_probe_read_stack_word(cpu, rec->sp, rec, 0u);
-    call_probe_read_stack_word(cpu, rec->sp, rec, 1u);
+    rec->kernel = want_kernel ? 1u : 0u;
+    if (want_kernel) {
+        /*
+         * The executing bank IS the answer here.  r0-r3 are shared outside FIQ
+         * so they read the same either way, but r13/r14 must come from the
+         * exception mode's own bank -- diagnostic_user_reg() deliberately
+         * returns the USR bank, which for a kernel PC describes a different
+         * stack entirely.  No stack words are attempted: guest_read_user_bytes
+         * translates unprivileged, so a kernel frame yields a permission fault
+         * that is an artefact of the probe rather than a fact about the guest.
+         */
+        for (unsigned r = 0; r < 4u; r++) rec->r[r] = cpu->r[r];
+        rec->sp = cpu->r[13];
+        rec->lr = cpu->r[14];
+    } else {
+        for (unsigned r = 0; r < 4u; r++)
+            rec->r[r] = diagnostic_user_reg(cpu, r);
+        rec->sp = diagnostic_user_reg(cpu, 13u);
+        rec->lr = diagnostic_user_reg(cpu, 14u);
+        call_probe_read_stack_word(cpu, rec->sp, rec, 0u);
+        call_probe_read_stack_word(cpu, rec->sp, rec, 1u);
+    }
 
     G.call_probe_w = (k + 1u) % CALL_PROBE_RING;
     G.call_probe_total++;
@@ -15624,6 +15495,11 @@ static void call_probe_word_text(const call_probe_record_t *rec, unsigned index,
                                  char *out, size_t size) {
     if (rec->stack_ok & (1u << index)) {
         snprintf(out, size, "%08x", rec->stack[index]);
+        return;
+    }
+    /* Not attempted is not the same as attempted and refused. */
+    if (rec->kernel) {
+        snprintf(out, size, "<kernel>");
         return;
     }
     /* An FSR distinguishes a translation/permission fault from a structural
@@ -15660,6 +15536,26 @@ static bool call_probe_ring_selfcheck(void) {
                 return false;
         if (cnt > CALL_PROBE_RING) return false;
     }
+
+    /*
+     * The privilege gate as a truth table rather than as a comment.  Getting it
+     * backwards would not crash: it would file every capture under wrong-mode
+     * and read exactly like "the probed PC was never reached", which is the one
+     * answer this probe exists to rule out.
+     */
+    static const uint32_t privileged[] = {
+        ARM_MODE_FIQ, ARM_MODE_IRQ, ARM_MODE_SVC,
+        ARM_MODE_ABT, ARM_MODE_UND, ARM_MODE_SYS
+    };
+    if (!call_probe_mode_matches(CALL_PROBE_MODE_USER, ARM_MODE_USR)) return false;
+    if (call_probe_mode_matches(CALL_PROBE_MODE_KERNEL, ARM_MODE_USR)) return false;
+    for (unsigned m = 0; m < sizeof privileged / sizeof privileged[0]; m++) {
+        if (call_probe_mode_matches(CALL_PROBE_MODE_USER, privileged[m]))
+            return false;
+        if (!call_probe_mode_matches(CALL_PROBE_MODE_KERNEL, privileged[m]))
+            return false;
+    }
+
     return CALL_PROBE_PC_MAX >= 1u;
 }
 
@@ -15668,10 +15564,12 @@ static void call_probe_report(void) {
 
     printf("\n=== CALL PROBE: CONFIGURED PCs (%u) ===\n", G.call_probe_n);
     for (unsigned i = 0; i < G.call_probe_n; i++)
-        printf("    pc 0x%08x  user hits %-12llu  non-user hits %llu\n",
+        printf("    pc 0x%08x  %-6s  captured %-12llu  wrong-mode %llu\n",
                G.call_probe_pc[i].pc,
-               (unsigned long long)G.call_probe_pc[i].user_hits,
-               (unsigned long long)G.call_probe_pc[i].nonuser_hits);
+               G.call_probe_pc[i].mode == CALL_PROBE_MODE_KERNEL
+                   ? "kernel" : "user",
+               (unsigned long long)G.call_probe_pc[i].hits,
+               (unsigned long long)G.call_probe_pc[i].wrong_mode_hits);
 
     unsigned cnt = G.call_probe_total < (uint64_t)CALL_PROBE_RING
                  ? (unsigned)G.call_probe_total : CALL_PROBE_RING;
@@ -15679,7 +15577,9 @@ static void call_probe_report(void) {
            cnt, (unsigned long long)G.call_probe_total);
     printf("    Registers are captured before the probed instruction executes; a\n"
            "    capture proves entry, not retirement. r0-r3 are AAPCS arguments\n"
-           "    1-4 and [sp+0]/[sp+4] arguments 5-6 of a call probed at its entry.\n");
+           "    1-4 and [sp+0]/[sp+4] arguments 5-6 of a call probed at its entry.\n"
+           "    A kernel-mode site reports the executing bank's sp/lr and prints\n"
+           "    <kernel> for the stack words, which it never reads.\n");
     if (G.call_probe_total > (uint64_t)CALL_PROBE_RING)
         printf("    NOTE: %llu earlier captures were overwritten by the ring.\n",
                (unsigned long long)(G.call_probe_total -
@@ -20959,6 +20859,7 @@ int main(int argc, char **argv) {
             "          [-r <ramdisk.img>] [-R <ram-MB>] [-X phys|virt|<addr>]\n"
             "          [-H <4-KiB-aligned-physical-page>]\n"
             "          [--call-probe <user-mode-pc>] ...\n"
+            "          [--call-probe-kernel <kernel-mode-pc>] ...\n"
             "          [--external-md <immutable-source.img> <new-work.img>]\n"
             "          [-D <node/path>:<prop>=<value>] ...\n"
             "          [--snapshot-at <insn> <file>] ... [--restore <file>]\n"
@@ -20999,6 +20900,16 @@ int main(int argc, char **argv) {
             "      unreadable word prints a sentinel and the guest is never\n"
             "      disturbed. A capture proves entry, not retirement. Executions\n"
             "      of <pc> outside user mode are counted but not captured.\n"
+            "  --call-probe-kernel <pc>  the same probe aimed at a PRIVILEGED pc,\n"
+            "      sharing the same eight slots and the same ring. r0-r3 and the\n"
+            "      executing mode's own sp/lr are captured; the stack words are\n"
+            "      not read at all (an unprivileged walk of a kernel frame only\n"
+            "      reports the probe's own permission fault) and print <kernel>.\n"
+            "      Executions of <pc> in user mode are counted but not captured.\n"
+            "      This is how to read a value the kernel computes and never\n"
+            "      stores, e.g. r2 at 0xc0526a4c — the IOSurfaceRootUserClient\n"
+            "      mapping options word, whose bit 12 is kIOMapReadOnly — next to\n"
+            "      r0 at 0xc0526a38, the descriptor direction that chose it.\n"
             "  -D  patch a 4-byte device-tree property in the in-memory copy\n"
             "      (empty path == root), e.g. -D cpus/cpu0:timebase-frequency=6000000\n"
             "  -r  load a raw disk image into DRAM, publish it as the RAMDisk\n"
@@ -21086,9 +20997,11 @@ int main(int argc, char **argv) {
     uint32_t phys_base = S5L8900_SDRAM_BASE;
     uint32_t virt_base = 0xc0000000u;
     uint32_t hot_page = DEFAULT_HOT_PAGE;
-    /* --call-probe, repeatable. Parsed into locals for the same reason -H is:
-     * spy_install() zeroes G, so nothing may be written there before it runs. */
+    /* --call-probe / --call-probe-kernel, repeatable and sharing one table.
+     * Parsed into locals for the same reason -H is: spy_install() zeroes G, so
+     * nothing may be written there before it runs. */
     uint32_t call_probe_pcs[CALL_PROBE_PC_MAX] = {0};
+    call_probe_mode_t call_probe_modes[CALL_PROBE_PC_MAX] = {CALL_PROBE_MODE_USER};
     unsigned call_probe_n = 0;
     uint64_t steps = UINT64_C(2000000);
     const char *dtpath = NULL;
@@ -21406,27 +21319,35 @@ int main(int argc, char **argv) {
                 return 1;
             }
         }
-        else if (!strcmp(argv[i], "--call-probe")) {
+        else if (!strcmp(argv[i], "--call-probe") ||
+                 !strcmp(argv[i], "--call-probe-kernel")) {
+            /* One table, one PC namespace: the two flags differ only in the
+             * privilege the site expects, so giving the same PC to both is the
+             * same mistake as giving it to one of them twice. */
+            const char *flag = argv[i];
+            call_probe_mode_t probe_mode =
+                !strcmp(flag, "--call-probe-kernel") ? CALL_PROBE_MODE_KERNEL
+                                                     : CALL_PROBE_MODE_USER;
             uint32_t probe_pc = 0;
-            if (!parse_u32_arg("--call-probe", argv[++i], &probe_pc)) return 1;
+            if (!parse_u32_arg(flag, argv[++i], &probe_pc)) return 1;
             probe_pc &= ~1u;            /* a Thumb entry is named by its even VA */
             if (!probe_pc) {
-                fprintf(stderr, "--call-probe: pc must not be zero\n");
+                fprintf(stderr, "%s: pc must not be zero\n", flag);
                 return 1;
             }
             if (call_probe_n >= CALL_PROBE_PC_MAX) {
-                fprintf(stderr, "--call-probe: at most %u PCs are supported\n",
-                        CALL_PROBE_PC_MAX);
+                fprintf(stderr, "%s: at most %u PCs are supported\n",
+                        flag, CALL_PROBE_PC_MAX);
                 return 1;
             }
             bool duplicate = false;
             for (unsigned q = 0; q < call_probe_n; q++)
                 if (call_probe_pcs[q] == probe_pc) duplicate = true;
             if (duplicate) {
-                fprintf(stderr, "--call-probe: pc 0x%08x given twice\n",
-                        probe_pc);
+                fprintf(stderr, "%s: pc 0x%08x given twice\n", flag, probe_pc);
                 return 1;
             }
+            call_probe_modes[call_probe_n] = probe_mode;
             call_probe_pcs[call_probe_n++] = probe_pc;
         }
         else if (!strcmp(argv[i], "--restore")) restore_path = argv[++i];
@@ -22401,6 +22322,39 @@ external_md_work_ready:
             free(dt);
             return 1;
         }
+        /*
+         * /vram reg: iBoot allocates the scanout buffer and writes it here.
+         * Ours is {0,0}, and that zero is what makes SpringBoard's compositor
+         * fault on its first store to the screen:
+         *
+         *   IOSurfaceRoot::start (0xc0529248) keeps a "PurpleGfxMem" region at
+         *   +0xa8 only when IOSurfaceDeviceMemoryRegion::init succeeds off this
+         *   node (0xc052942c beq skips the store otherwise).  AppleH1CLCD then
+         *   asks for that region by name (0xc07060a0) and gets nothing, so
+         *   0xc07060ac takes the fallback and builds the descriptor with
+         *   IOMemoryDescriptor::withPhysicalAddress(fb, ..., #2) — that is
+         *   kIODirectionOut, where the region path would have passed #3,
+         *   kIODirectionOutIn.  IOSurfaceRootUserClient reads the direction back
+         *   at 0xc0526a38 and turns exactly that #2 into kIOMapReadOnly:
+         *
+         *       cmp r0,#2 ; moveq r2,#0x1000 ; movne r2,#0
+         *
+         *   so the mapping userspace receives is read-only.  Run57 measured the
+         *   consequence: L2 descriptor 0x0885c82f over the framebuffer page,
+         *   AP=0b10/APX=0 (privileged RW, user RO), and FSR 0x80f with WnR set.
+         *
+         * Fail closed for the same reason as the panel ID above: a display that
+         * is configured except for the one property that decides whether the
+         * guest may write to it is worse than no display at all.
+         */
+        if (want_fb &&
+            !dt_set_reg(dt, dt_n, "vram", "reg", fb_pa, N82_FB_BYTES)) {
+            fprintf(stderr,
+                    "framebuffer: cannot patch the /vram reg entry; "
+                    "refusing a half-configured display\n");
+            free(dt);
+            return 1;
+        }
         /* NOT touched: the shipped "DeviceTree" entry, whose address is still
          * zero. IODTFreeLoaderInfo() runs ml_static_ptovirt() over that value
          * and then ml_static_mfree()s the result, so filling it in changes what
@@ -22747,14 +22701,18 @@ external_md_work_ready:
 
     /* After spy_install, which zeroes G. Setting call_probe_n last is what
      * arms the step-loop gate. */
-    for (unsigned q = 0; q < call_probe_n; q++)
+    for (unsigned q = 0; q < call_probe_n; q++) {
         G.call_probe_pc[q].pc = call_probe_pcs[q];
+        G.call_probe_pc[q].mode = call_probe_modes[q];
+    }
     G.call_probe_n = call_probe_n;
     if (call_probe_n) {
-        printf("call probe: armed on %u user-mode pc%s (ring %u):", call_probe_n,
+        printf("call probe: armed on %u pc%s (ring %u):", call_probe_n,
                call_probe_n == 1u ? "" : "s", CALL_PROBE_RING);
         for (unsigned q = 0; q < call_probe_n; q++)
-            printf(" 0x%08x", call_probe_pcs[q]);
+            printf(" 0x%08x/%s", call_probe_pcs[q],
+                   call_probe_modes[q] == CALL_PROBE_MODE_KERNEL
+                       ? "kernel" : "user");
         printf("\n");
     }
 

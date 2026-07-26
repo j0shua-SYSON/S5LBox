@@ -126,6 +126,11 @@ add_test(NAME firmware_loader COMMAND test_loader)
 
 add_executable(test_devicetree tests/test_devicetree.c)
 target_link_libraries(test_devicetree PRIVATE emucore)
+# tools/dt_inplace.h holds the same-length in-place writers bootkernel uses to
+# stand in for iBoot. They decide values the guest cannot boot a display
+# without, so they are tested here against the shipping implementation rather
+# than against a copy of it.
+target_include_directories(test_devicetree PRIVATE ../tools)
 add_test(NAME device_tree COMMAND test_devicetree)
 
 add_executable(test_lzss tests/test_lzss.c)
