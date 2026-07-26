@@ -3151,10 +3151,17 @@ first:
 
 | plist | size | format | target | why inert |
 |---|---|---|---|---|
-| `com.apple.tcpdump.server.plist` | 433 B | **XML** | `/usr/libexec/tcpdumpserver` | absent; `RunAtLoad` not set, MachServices on-demand |
-| `com.apple.chud.pilotfish.plist` | 530 B | XML | `/Developer/usr/libexec/pilotfish` | `/Developer` absent |
+| `com.apple.chud.pilotfish.plist` | **530 B** | XML | `/Developer/usr/libexec/pilotfish` | absent — **best, largest budget** |
 | `com.apple.chud.chum.plist` | 515 B | XML | `/Developer/usr/libexec/chum` | `/Developer` absent |
 | `com.apple.graphicsservices.sample.plist` | 447 B | XML | `/usr/local/bin/sampled` | `/usr/local` absent |
+| `com.apple.tcpdump.server.plist` | 433 B | XML | `/usr/libexec/tcpdumpserver` | absent, and not `RunAtLoad` |
+
+Budget is computed, not guessed: a fully-argumented job with `RunAtLoad` is
+**549 bytes**; dropping `KeepAlive` gives **522**, which fits pilotfish's 530
+with 8 bytes spare. A minimal job is 383 and fits all four. So the precise
+requirement is **one file rewritten in place at exactly 530 bytes**, roughly 40
+lines in `rootfs_work.c` — a new constant and a length gate, exactly as the
+SpringBoard plist rewrite already does.
 
 XML beats binary here because the `<array>` can be rewritten freely and
 whitespace-padded back to the identical byte count. `com.apple.wifiFirmwareLoader.plist`
@@ -3191,6 +3198,75 @@ a random magic number, PCOMP and ACCOMP, with no auth option and echo off.
 `tcpdump`, `nc`, `telnet`. Present and usable: `scutil`, `scselect`,
 `ipconfig`, `configd`, `bootpd`, plus MobileSafari. Any milestone phrased as
 "ping succeeds" has to be rephrased against what actually ships.
+
+Two saving graces. `/etc/resolv.conf` is a 20-byte indirection to
+`/var/run/resolv.conf`, which `usepeerdns` writes — **DNS needs no provisioning
+at all**. And we are the peer, so the first observable is on the *host* side and
+needs no PPP implementation: **`7E FF 7D 23 C0 21` in the UART TX capture**, an
+HDLC-framed LCP Configure-Request, byte-checkable against RFC 1662. That one
+hex dump proves the DMA skip, driver bring-up, the devfs node name, the plist
+hijack, launchd starting the job, AMFI accepting Apple-signed `pppd`, dyld
+loading its frameworks, the tty opening, and the line discipline attaching —
+nine unknowns at once.
+
+### 23.5.1 DMA is optional. The answer is a boot argument, not a DMA model.
+
+The open question was whether `AppleS5L8900XSerial` insists on PL080 DMA, since
+every boot log brackets it with `AppleARMPL080DMAC::_initDMAChannel` and the
+PL080 is unmodelled. **Verified by disassembly: it does programmed I/O, and DMA
+setup is gated three ways at `0xc065e410`**, all three skips landing on the same
+non-error continuation at `0xc065e6f4` — build the interrupt event source, call
+the superclass, no log, no failure:
+
+1. no `dma-types` property on the nub → skip
+2. `dma-disable` property present → skip
+3. boot argument **`<node>_dma_enable=0`** → skip
+
+The base class agrees: `AppleOnboardSerial`'s vtable supplies a **default DMA
+capability of zero** (`movs r0,#0 / bx lr` at `0xc046f154`), queried once at
+start and cached; all three consumers treat it as a guard. The PIO receive loop
+is real and reads `URXH` in a counted loop at `0xc047212a`.
+
+All four UARTs *do* carry `dma-types`, so the driver will attempt DMA unless
+told otherwise — which makes **`uart4_dma_enable=0` in the `-c` string the
+entire fix, zero code.** That mechanism is already proven here: `nand-enable-adm=0`
+works the same way.
+
+**Use uart4, not uart3** — this contradicts `docs/networking.md` §6, on two
+grounds that section did not have. uart3 is the only UART **without**
+`no-flow-control`, so the driver enables hardware flow control and reads UMSTAT
+for CTS, whereas uart1/uart4 short-circuit `getFlowStatus` to asserted without
+touching the register (`0xc065e0bc`). And uart3's child is `bluetooth`, with
+`BTServer` (1.1 MB) and its launchd plist both shipping — a live contender for
+the port. Nothing owns uart4's `debug` child, and `/etc/ttys`'s getty lines are
+inert because getty does not ship.
+
+| node | phys | VIC | child |
+|---|---|---|---|
+| uart0 | 0x3CC00000 | 24 | `iap` — taken, `boot-console` |
+| uart1 | 0x3CC04000 | 25 | `umts` |
+| uart3 | 0x3CC0C000 | 27 | `bluetooth` — contended |
+| **uart4** | **0x3CC10000** | **28** | `debug` — free |
+
+Register semantics read out of Apple's binary rather than guessed: **UFSTAT
+(+0x18)** bits[3:0] RX count, bit8 RX full, bits[7:4] TX count, bit9 TX full,
+**FIFO depth 16**; **+0x10 is not a read-only status register** — the interrupt
+filter at `0xc065eed8` reads it, masks, and **writes the result back, so it is
+write-1-to-clear**.
+
+**Threading caveat that must not be got wrong.** Existing wake sources answer
+"how many ticks until my next edge", which a host-delivered byte cannot. The
+honest shape is `S5L_WAKE_NEVER` when the RX FIFO is empty and an immediate edge
+when it is not — safe because the timer always bounds the sleep. And the
+host→guest handoff must happen **on the CPU thread between run slices**, never
+from a socket callback: `core/` has no threading vocabulary and a data race
+there would be the worst bug this project could acquire.
+
+**Named risk.** `setBaud` (`0xc065ea4c`) divides by a 64-bit `nclk` rate read
+from the platform at `0xc065e44c`. `pppd` calls `cfsetspeed`, exercising that
+path for the first time — today's boots only *identify* the ports. If our
+unmodelled clock tree returns 0 there, expect a divide-by-zero rather than a
+graceful message.
 
 Requirements discovered from the acquired payload, each of which is a silent
 breakage if missed: **setuid/setgid bits must survive** (`MobileCydia` 6755,
