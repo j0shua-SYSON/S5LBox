@@ -662,8 +662,15 @@ static arm_status_t exec_coprocessor(arm_cpu_t *c, uint32_t pc, uint32_t insn) {
                 break;
             }
             case 1:
-                if (opc2 == 0) v = p->sctlr; else if (opc2 == 1) v = p->actlr;
-                else if (opc2 == 2) v = p->cpacr;
+                /* Gate CP15 c1 on CRm==0, as c2 is gated below. On the
+                 * ARM1176JZF-S CRm==1 is the TrustZone bank — Secure
+                 * Configuration, Secure Debug Enable, Non-Secure Access
+                 * Control — which this core does not model. Switching on CRn
+                 * alone aliased that whole bank onto SCTLR/ACTLR/CPACR. */
+                if (crm == 0) {
+                    if (opc2 == 0) v = p->sctlr; else if (opc2 == 1) v = p->actlr;
+                    else if (opc2 == 2) v = p->cpacr;
+                }
                 break;
             case 2:
                 if (crm == 0) {
@@ -690,8 +697,16 @@ static arm_status_t exec_coprocessor(arm_cpu_t *c, uint32_t pc, uint32_t insn) {
         uint32_t v = reg_read(c, pc, rd);
         switch (crn) {
             case 1:
-                if (opc2 == 0) p->sctlr = v; else if (opc2 == 1) p->actlr = v;
-                else if (opc2 == 2) p->cpacr = v;
+                /* Gate CP15 c1 on CRm==0, as c2 is gated below. Ungated, an
+                 * MCR p15,0,Rd,c1,c1,0 aimed at the unmodelled TrustZone bank
+                 * would overwrite SCTLR wholesale — and clearing SCTLR.U
+                 * switches the whole machine from the ARMv6 unaligned model to
+                 * the legacy align-down-and-rotate one, which corrupts loaded
+                 * data instead of faulting. */
+                if (crm == 0) {
+                    if (opc2 == 0) p->sctlr = v; else if (opc2 == 1) p->actlr = v;
+                    else if (opc2 == 2) p->cpacr = v;
+                }
                 break;
             case 2:
                 /* ARM1176 TTBCR keeps PD1[5], PD0[4], and N[2:0]. Bit 3 and
@@ -1226,10 +1241,17 @@ static arm_status_t exec_single_transfer(arm_cpu_t *c, uint32_t pc, uint32_t ins
     return ARM_OK;
 }
 
-/* Extra load/store: LDRH/STRH/LDRSB/LDRSH (halfword and sign-extending forms).
+/* Extra load/store: LDRH/STRH/LDRSB/LDRSH (halfword and sign-extending forms)
+ * plus the doubleword pair LDRD/STRD.
  * Encoding: cccc 000 P U I W L nnnn tttt iiii 1SH1 iiii, with SH != 00.
  * I selects an 8-bit immediate offset (split across bits[11:8] and bits[3:0])
- * versus a register offset in Rm. */
+ * versus a register offset in Rm.
+ *
+ * The doubleword forms are the two encodings with L == 0 and SH != 01: they
+ * reuse the L bit as part of the operation, so LDRD (SH == 10) is a LOAD even
+ * though L is clear. Everything else about them — addressing mode 3, the
+ * operand restrictions, the writeback rules — is shared with the halfword
+ * forms and is deliberately not duplicated below. */
 static arm_status_t exec_extra_transfer(arm_cpu_t *c, uint32_t pc, uint32_t insn,
                                         uint32_t *next) {
     bool P = (insn >> 24) & 1u;
@@ -1241,6 +1263,7 @@ static arm_status_t exec_extra_transfer(arm_cpu_t *c, uint32_t pc, uint32_t insn
     unsigned rd = (insn >> 12) & 0xf;
     unsigned sh = (insn >> 5) & 3u;
     bool writeback = !P || W;
+    bool doubleword = !L && sh != 1u;      /* LDRD (sh==2) / STRD (sh==3) */
 
     /* Every halfword/sign-extending form reserves R15 as the destination; do
      * not let a malformed encoding branch through a truncated load. */
@@ -1255,6 +1278,17 @@ static arm_status_t exec_extra_transfer(arm_cpu_t *c, uint32_t pc, uint32_t insn
     if (!I && ((((insn >> 8) & 0xfu) != 0u) || (insn & 0xfu) == 15u))
         return ARM_UNDEFINED;
 
+    /* LDRD/STRD name a register PAIR, Rd and Rd+1, so Rd must be even — an odd
+     * Rd has no defined pairing — and cannot be R14, which would make R15 the
+     * second half. (Rd == 15 is already refused above, so those two rules
+     * together are exactly "neither half may be R15".) A writeback base cannot
+     * alias EITHER half; the Rd case is covered above, Rd+1 is here. All are
+     * UNPREDICTABLE, so trap before an address is formed or the bus is touched. */
+    if (doubleword) {
+        if ((rd & 1u) != 0u || rd == 14u) return ARM_UNDEFINED;
+        if (writeback && rn == rd + 1u)   return ARM_UNDEFINED;
+    }
+
     uint32_t offset = I ? ((((insn >> 8) & 0xf) << 4) | (insn & 0xf))
                         : reg_read(c, pc, insn & 0xf);
     uint32_t base = reg_read(c, pc, rn);
@@ -1264,7 +1298,40 @@ static arm_status_t exec_extra_transfer(arm_cpu_t *c, uint32_t pc, uint32_t insn
         legacy_halfword_unpredictable(c, addr))
         return ARM_UNDEFINED;
 
-    if (L) {
+    if (doubleword) {
+        bool store = sh == 3u;             /* sh==2 is LDRD, sh==3 is STRD */
+
+        /*
+         * ARMv6 relaxed the ARMv5TE doubleword-alignment requirement: the pair
+         * is two ordinary word accesses and needs only word alignment, under
+         * the same U/A matrix LDM/STM uses (ARM1176 TRM DDI0301H, 6.11). With
+         * U set, a word-aligned-but-not-doubleword-aligned address is legal;
+         * in the legacy U=0/A=0 configuration the transfer aligns down.
+         *
+         * The aligned-down value is kept in a local so it cannot leak into the
+         * pre-indexed writeback below, exactly as LDM/STM computes its own
+         * writeback independently of the address it transfers from.
+         */
+        uint32_t xfer = addr;
+        if (!prepare_multiword_address(c, &xfer, 4u, store)) return ARM_OK;
+
+        if (store) {
+            mem_w32(c, xfer, reg_read(c, pc, rd));
+            if (c->abort_pending) return ARM_OK;   /* second word not issued */
+            mem_w32(c, xfer + 4u, reg_read(c, pc, rd + 1u));
+            if (c->abort_pending) return ARM_OK;
+        } else {
+            /* Base-restored abort model: both halves are buffered and committed
+             * only once both accesses have succeeded, so a fault on either word
+             * leaves the pair and the base exactly as the handler found them. */
+            uint32_t lo = mem_r32(c, xfer);
+            if (c->abort_pending) return ARM_OK;   /* second word not issued */
+            uint32_t hi = mem_r32(c, xfer + 4u);
+            if (c->abort_pending) return ARM_OK;
+            c->r[rd]      = lo;
+            c->r[rd + 1u] = hi;
+        }
+    } else if (L) {
         uint32_t val;
         switch (sh) {
             case 1: val = mem_r16(c, addr); break;   /* LDRH  */
@@ -1276,7 +1343,6 @@ static arm_status_t exec_extra_transfer(arm_cpu_t *c, uint32_t pc, uint32_t insn
         c->r[rd] = val;
         if (rd == 15) *next = val & ~3u;
     } else {
-        if (sh != 1) return ARM_UNDEFINED;        /* LDRD/STRD: not yet */
         mem_w16(c, addr, (uint16_t)reg_read(c, pc, rd)); /* STRH */
         if (c->abort_pending) return ARM_OK;
     }

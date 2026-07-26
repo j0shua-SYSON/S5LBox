@@ -1288,6 +1288,33 @@ static void test_cp15_sctlr_roundtrip(void) {
     CHECK((c.cp15.sctlr & ARM_SCTLR_C) != 0, "SCTLR.C should be set");
 }
 
+static void test_cp15_c1_is_gated_on_crm_zero(void) {
+    /* c1 with CRm != 0 is the ARM1176JZF-S TrustZone bank — Secure
+     * Configuration, Secure Debug Enable, Non-Secure Access Control — which
+     * this core does not model. Keying only on opcode_2 aliased that bank onto
+     * SCTLR/ACTLR/CPACR, so MCR p15,0,Rd,c1,c1,0 replaced SCTLR wholesale; a
+     * cleared SCTLR.U silently swaps the machine from the ARMv6 unaligned model
+     * to the legacy rotate one, corrupting data rather than faulting. */
+    uint32_t p[] = { 0xe3a00004 /*MOV r0,#4               */,
+                     0xee010f10 /*MCR p15,0,r0,c1,c0,0 SCTLR = 4  */,
+                     0xe3a00080 /*MOV r0,#0x80            */,
+                     0xee010f50 /*MCR p15,0,r0,c1,c0,2 CPACR = 0x80*/,
+                     0xe3a00020 /*MOV r0,#0x20            */,
+                     0xee010f11 /*MCR p15,0,r0,c1,c1,0 (SCR)      */,
+                     0xee010f51 /*MCR p15,0,r0,c1,c1,2 (NSACR)    */,
+                     0xee111f11 /*MRC p15,0,r1,c1,c1,0            */,
+                     0xee112f10 /*MRC p15,0,r2,c1,c0,0            */ };
+    arm_cpu_t c; load_and_run(&c, p, 9, 9);
+    CHECK(c.cp15.sctlr == 4u,
+          "sctlr=%08x expect 4 — c1,c1,0 must not write SCTLR", c.cp15.sctlr);
+    CHECK(c.cp15.cpacr == 0x80u,
+          "cpacr=%08x expect 80 — c1,c1,2 must not write CPACR", c.cp15.cpacr);
+    CHECK(c.r[1] == 0u,
+          "r1=%08x expect 0 — c1,c1,0 must not read SCTLR back", c.r[1]);
+    CHECK(c.r[2] == 4u,
+          "r2=%08x expect 4 — SCTLR is still readable at CRm==0", c.r[2]);
+}
+
 static void test_cp15_ttbr0_roundtrip(void) {
     /* Translation table base survives a write/read cycle (needed for the MMU). */
     uint32_t p[] = { 0xe3a00b02 /*MOV r0,#0x800*/,
@@ -2300,6 +2327,192 @@ static void test_single_transfer_unpredictable_forms_trap_before_bus(void) {
                                         "STRH r0,[r0],#2");
     check_unpredictable_single_transfer(0xe1ff00b2u, 0x00au,
                                         "LDRH r0,[pc,#2]!");
+}
+
+/*
+ * LDRD/STRD. These are ARM-mode only, which is why a Thumb-compiled daemon
+ * never reached them, but ARM library code does. The pair is Rd and Rd+1 and
+ * the transfer is two ordinary word accesses at addr and addr+4, so everything
+ * about the addressing modes is shared with the halfword forms above.
+ */
+static void test_ldrd_strd_transfer_the_register_pair(void) {
+    arm_cpu_t c;
+
+    /* LDRD r0,r1,[r2]: low word into Rd, high word into Rd+1. */
+    alignment_setup(&c, 0xe1c200d0u);             /* LDRD r0,r1,[r2] */
+    m_w32(NULL, 0x800u, 0x11223344u);
+    m_w32(NULL, 0x804u, 0x55667788u);
+    c.cp15.sctlr |= ARM_SCTLR_U;
+    c.r[2] = 0x800u;
+    CHECK(arm_step(&c) == ARM_OK && c.r[15] == 4u &&
+          c.r[0] == 0x11223344u && c.r[1] == 0x55667788u,
+          "LDRD pair=%08x/%08x expect 11223344/55667788", c.r[0], c.r[1]);
+
+    /* STRD r0,r1,[r2] writes BOTH words, in ascending address order. */
+    alignment_setup(&c, 0xe1c200f0u);             /* STRD r0,r1,[r2] */
+    c.cp15.sctlr |= ARM_SCTLR_U;
+    c.r[0] = 0xa1b2c3d4u; c.r[1] = 0xe5f60718u; c.r[2] = 0x800u;
+    CHECK(arm_step(&c) == ARM_OK && m_r32(NULL, 0x800u) == 0xa1b2c3d4u &&
+          m_r32(NULL, 0x804u) == 0xe5f60718u,
+          "STRD wrote %08x/%08x expect a1b2c3d4/e5f60718",
+          m_r32(NULL, 0x800u), m_r32(NULL, 0x804u));
+
+    /* The addressing-mode-3 machinery is the shared one: immediate offset up
+     * and down, register offset, and both writeback forms. */
+    alignment_setup(&c, 0xe1c200d8u);             /* LDRD r0,r1,[r2,#8] */
+    m_w32(NULL, 0x808u, 0xdeadbeefu);
+    m_w32(NULL, 0x80cu, 0xfeedfaceu);
+    c.cp15.sctlr |= ARM_SCTLR_U;
+    c.r[2] = 0x800u;
+    CHECK(arm_step(&c) == ARM_OK && c.r[0] == 0xdeadbeefu &&
+          c.r[1] == 0xfeedfaceu && c.r[2] == 0x800u,
+          "LDRD [r2,#8] pair=%08x/%08x base=%08x", c.r[0], c.r[1], c.r[2]);
+
+    alignment_setup(&c, 0xe14200d8u);             /* LDRD r0,r1,[r2,#-8] */
+    m_w32(NULL, 0x800u, 0x13579bdfu);
+    m_w32(NULL, 0x804u, 0x02468aceu);
+    c.cp15.sctlr |= ARM_SCTLR_U;
+    c.r[2] = 0x808u;
+    CHECK(arm_step(&c) == ARM_OK && c.r[0] == 0x13579bdfu &&
+          c.r[1] == 0x02468aceu,
+          "LDRD [r2,#-8] pair=%08x/%08x", c.r[0], c.r[1]);
+
+    alignment_setup(&c, 0xe18200d3u);             /* LDRD r0,r1,[r2,r3] */
+    m_w32(NULL, 0x810u, 0x0000cafeu);
+    m_w32(NULL, 0x814u, 0x0000babeu);
+    c.cp15.sctlr |= ARM_SCTLR_U;
+    c.r[2] = 0x800u; c.r[3] = 0x10u;
+    CHECK(arm_step(&c) == ARM_OK && c.r[0] == 0x0000cafeu &&
+          c.r[1] == 0x0000babeu,
+          "LDRD [r2,r3] pair=%08x/%08x", c.r[0], c.r[1]);
+
+    alignment_setup(&c, 0xe0c200d8u);             /* LDRD r0,r1,[r2],#8 */
+    m_w32(NULL, 0x800u, 0x00000001u);
+    m_w32(NULL, 0x804u, 0x00000002u);
+    c.cp15.sctlr |= ARM_SCTLR_U;
+    c.r[2] = 0x800u;
+    CHECK(arm_step(&c) == ARM_OK && c.r[0] == 1u && c.r[1] == 2u &&
+          c.r[2] == 0x808u,
+          "post-indexed LDRD pair=%08x/%08x base=%08x", c.r[0], c.r[1], c.r[2]);
+
+    alignment_setup(&c, 0xe1e200f8u);             /* STRD r0,r1,[r2,#8]! */
+    c.cp15.sctlr |= ARM_SCTLR_U;
+    c.r[0] = 0x0f0f0f0fu; c.r[1] = 0xf0f0f0f0u; c.r[2] = 0x800u;
+    CHECK(arm_step(&c) == ARM_OK && m_r32(NULL, 0x808u) == 0x0f0f0f0fu &&
+          m_r32(NULL, 0x80cu) == 0xf0f0f0f0u && c.r[2] == 0x808u,
+          "pre-indexed STRD wrote %08x/%08x base=%08x",
+          m_r32(NULL, 0x808u), m_r32(NULL, 0x80cu), c.r[2]);
+}
+
+static void test_ldrd_strd_alignment_is_the_armv6_word_rule(void) {
+    arm_cpu_t c;
+
+    /*
+     * The case most likely to be got wrong. ARMv5TE required a doubleword-
+     * aligned address; ARMv6 relaxed that to the multiword rule, which is word
+     * granularity. base+4 is word aligned but NOT doubleword aligned, and with
+     * SCTLR.U=1, A=0 it must succeed rather than fault.
+     */
+    alignment_setup(&c, 0xe1c200d0u);             /* LDRD r0,r1,[r2] */
+    m_w32(NULL, 0x804u, 0x0badf00du);
+    m_w32(NULL, 0x808u, 0x8badbeefu);
+    c.cp15.sctlr = (c.cp15.sctlr & ~ARM_SCTLR_A) | ARM_SCTLR_U;
+    c.r[2] = 0x804u;
+    CHECK(arm_step(&c) == ARM_OK && c.r[15] == 4u &&
+          c.r[0] == 0x0badf00du && c.r[1] == 0x8badbeefu,
+          "word-but-not-doubleword-aligned LDRD pair=%08x/%08x pc=%08x",
+          c.r[0], c.r[1], c.r[15]);
+
+    alignment_setup(&c, 0xe1c200f0u);             /* STRD r0,r1,[r2] */
+    c.cp15.sctlr = (c.cp15.sctlr & ~ARM_SCTLR_A) | ARM_SCTLR_U;
+    c.r[0] = 0x12345678u; c.r[1] = 0x9abcdef0u; c.r[2] = 0x804u;
+    CHECK(arm_step(&c) == ARM_OK && c.r[15] == 4u &&
+          m_r32(NULL, 0x804u) == 0x12345678u &&
+          m_r32(NULL, 0x808u) == 0x9abcdef0u,
+          "word-but-not-doubleword-aligned STRD wrote %08x/%08x pc=%08x",
+          m_r32(NULL, 0x804u), m_r32(NULL, 0x808u), c.r[15]);
+
+    /* A is the alignment CHECK, not a stricter alignment: a word-aligned pair
+     * is still legal with A set, exactly as it is for LDM. */
+    alignment_setup(&c, 0xe1c200d0u);
+    m_w32(NULL, 0x804u, 0xaaaa5555u);
+    m_w32(NULL, 0x808u, 0x5555aaaau);
+    c.cp15.sctlr |= ARM_SCTLR_A | ARM_SCTLR_U;
+    c.r[2] = 0x804u;
+    CHECK(arm_step(&c) == ARM_OK && c.r[0] == 0xaaaa5555u &&
+          c.r[1] == 0x5555aaaau,
+          "A=1 word-aligned LDRD pair=%08x/%08x", c.r[0], c.r[1]);
+
+    /* base+2 is not word aligned: alignment abort, and no bus access at all. */
+    alignment_setup(&c, 0xe1c200d0u);
+    c.cp15.sctlr = (c.cp15.sctlr & ~ARM_SCTLR_A) | ARM_SCTLR_U;
+    c.r[0] = 0xdeadbeefu; c.r[1] = 0xfeedfaceu; c.r[2] = 0x802u;
+    g_watch_addr = 0x802u;
+    CHECK(arm_step(&c) == ARM_OK && c.r[15] == ARM_VEC_DATA_ABORT,
+          "halfword-aligned LDRD did not take an alignment abort");
+    CHECK((c.cp15.dfsr & 0xfu) == ARM_FSR_ALIGNMENT &&
+          (c.cp15.dfsr & (1u << 11)) == 0u && c.cp15.dfar == 0x802u,
+          "LDRD alignment state dfsr=%x dfar=%08x", c.cp15.dfsr, c.cp15.dfar);
+    CHECK(g_watch_reads32 == 0u && c.r[0] == 0xdeadbeefu &&
+          c.r[1] == 0xfeedfaceu,
+          "alignment-faulting LDRD issued %u reads or moved the pair",
+          g_watch_reads32);
+
+    /* The store form reports WnR and performs no transaction either. */
+    alignment_setup(&c, 0xe1c200f0u);
+    c.cp15.sctlr = (c.cp15.sctlr & ~ARM_SCTLR_A) | ARM_SCTLR_U;
+    c.r[0] = 0x11223344u; c.r[1] = 0x55667788u; c.r[2] = 0x802u;
+    g_watch_addr = 0x802u;
+    CHECK(arm_step(&c) == ARM_OK && c.r[15] == ARM_VEC_DATA_ABORT,
+          "halfword-aligned STRD did not take an alignment abort");
+    CHECK((c.cp15.dfsr & 0xfu) == ARM_FSR_ALIGNMENT &&
+          (c.cp15.dfsr & (1u << 11)) != 0u && c.cp15.dfar == 0x802u &&
+          g_watch_writes32 == 0u,
+          "STRD alignment dfsr=%x dfar=%08x writes=%u",
+          c.cp15.dfsr, c.cp15.dfar, g_watch_writes32);
+
+    /* Legacy U=0/A=0 aligns the transfer down, like any other multiword one —
+     * and the aligned-down value must not leak into the writeback, which is
+     * still base+offset. */
+    alignment_setup(&c, 0xe1e200d3u);             /* LDRD r0,r1,[r2,#3]! */
+    m_w32(NULL, 0x800u, 0x11223344u);
+    m_w32(NULL, 0x804u, 0x55667788u);
+    c.cp15.sctlr &= ~(ARM_SCTLR_A | ARM_SCTLR_U);
+    c.r[2] = 0x800u;
+    CHECK(arm_step(&c) == ARM_OK && c.r[0] == 0x11223344u &&
+          c.r[1] == 0x55667788u,
+          "legacy LDRD did not align the transfer down: %08x/%08x",
+          c.r[0], c.r[1]);
+    CHECK(c.r[2] == 0x803u,
+          "base=%08x expect 803 — writeback is base+offset, not the "
+          "aligned-down transfer address", c.r[2]);
+    g_watch_addr = 0xffffffffu;
+}
+
+static void test_ldrd_strd_operand_restrictions_trap_before_bus(void) {
+    /* Rd names a PAIR: it must be even, and R14 would make R15 its second
+     * half. A writeback base may alias neither half. Every one is
+     * UNPREDICTABLE and must be refused before any bus access. */
+    check_unpredictable_single_transfer(0xe1c130d0u, 0x800u,
+                                        "LDRD r3,r4,[r1] (odd Rd)");
+    check_unpredictable_single_transfer(0xe1c130f0u, 0x800u,
+                                        "STRD r3,r4,[r1] (odd Rd)");
+    check_unpredictable_single_transfer(0xe1c1e0d0u, 0x800u,
+                                        "LDRD r14,pc,[r1]");
+    check_unpredictable_single_transfer(0xe1c1e0f0u, 0x800u,
+                                        "STRD r14,pc,[r1]");
+    check_unpredictable_single_transfer(0xe1c1f0d0u, 0x800u,
+                                        "LDRD pc,[r1]");
+    check_unpredictable_single_transfer(0xe1e100d4u, 0x804u,
+                                        "LDRD r0,r1,[r1,#4]! (Rn == Rd+1)");
+    check_unpredictable_single_transfer(0xe0c100f8u, 0x800u,
+                                        "STRD r0,r1,[r1],#8 (Rn == Rd+1)");
+    check_unpredictable_single_transfer(0xe0c000d8u, 0x800u,
+                                        "LDRD r0,r1,[r0],#8 (Rn == Rd)");
+    check_unpredictable_single_transfer(0xe0e100d4u, 0x800u,
+                                        "LDRD with the invalid P=0,W=1 form");
+    check_unpredictable_single_transfer(0xe18101d2u, 0x810u,
+                                        "LDRD with nonzero SBZ bits");
 }
 
 static void test_exclusive_alignment_is_never_silently_fixed(void) {
@@ -4618,6 +4831,64 @@ static void test_srs_and_rfe_stop_after_the_first_fault(void) {
     g_watch_addr = 0xffffffffu;
 }
 
+static void test_ldrd_strd_stop_after_the_first_faulting_word(void) {
+    /* Same property for the doubleword pair, and the same trap: the second word
+     * of an LDRD/STRD lies in the next page as often as not. VA 0x80000ffc is
+     * in the absent page; the second word at 0x80001000 is mapped and watched,
+     * so a stray access shows up as a bus read/write that must not exist. */
+    uint32_t ldrd[] = { 0xe1c200d0u };            /* LDRD r0,r1,[r2] */
+    arm_cpu_t c;
+    split_setup(&c, ldrd, 1, 0u /* first page absent */, 0x60000u, false);
+    c.r[0] = 0xdeadbeefu; c.r[1] = 0xfeedfaceu; c.r[2] = 0x80000ffcu;
+    c.r[15] = 0;
+    g_watch_addr = 0x60000u; g_watch_reads32 = g_watch_writes32 = 0;
+    CHECK(arm_step(&c) == ARM_OK && c.r[15] == ARM_VEC_DATA_ABORT,
+          "LDRD first-word fault must take a data abort");
+    CHECK(g_watch_reads32 == 0u,
+          "LDRD issued %u second-word reads after its first word faulted",
+          g_watch_reads32);
+    CHECK((c.cp15.dfsr & 0xfu) == ARM_FSR_PAGE_TRANSLATION &&
+          (c.cp15.dfsr & (1u << 11)) == 0u && c.cp15.dfar == 0x80000ffcu,
+          "LDRD fault state dfsr=%08x dfar=%08x", c.cp15.dfsr, c.cp15.dfar);
+    CHECK(c.r[0] == 0xdeadbeefu && c.r[1] == 0xfeedfaceu &&
+          c.r[2] == 0x80000ffcu,
+          "faulting LDRD moved the pair or the base: %08x/%08x base=%08x",
+          c.r[0], c.r[1], c.r[2]);
+
+    /* The mirror: the SECOND word faults. DFAR names it, and the base-restored
+     * abort model still forbids committing the half that did arrive. */
+    arm_cpu_t d;
+    split_setup(&d, ldrd, 1, 0x30000u, 0u /* second page absent */, false);
+    m_w32(NULL, 0x30ffcu, 0x11223344u);
+    d.r[0] = 0xdeadbeefu; d.r[1] = 0xfeedfaceu; d.r[2] = 0x80000ffcu;
+    d.r[15] = 0;
+    CHECK(arm_step(&d) == ARM_OK && d.r[15] == ARM_VEC_DATA_ABORT &&
+          d.cp15.dfar == 0x80001000u,
+          "LDRD second-word fault pc=%08x dfar=%08x", d.r[15], d.cp15.dfar);
+    CHECK(d.r[0] == 0xdeadbeefu && d.r[1] == 0xfeedfaceu &&
+          d.r[2] == 0x80000ffcu,
+          "LDRD committed a half pair across a fault: %08x/%08x base=%08x",
+          d.r[0], d.r[1], d.r[2]);
+
+    uint32_t strd[] = { 0xe1c200f0u };            /* STRD r0,r1,[r2] */
+    arm_cpu_t e;
+    split_setup(&e, strd, 1, 0u, 0x60000u, false);
+    e.r[0] = 0x11223344u; e.r[1] = 0x55667788u; e.r[2] = 0x80000ffcu;
+    e.r[15] = 0;
+    g_watch_addr = 0x60000u; g_watch_reads32 = g_watch_writes32 = 0;
+    CHECK(arm_step(&e) == ARM_OK && e.r[15] == ARM_VEC_DATA_ABORT,
+          "STRD first-word fault must take a data abort");
+    CHECK(g_watch_writes32 == 0u,
+          "STRD issued %u second-word writes after its first word faulted",
+          g_watch_writes32);
+    CHECK((e.cp15.dfsr & 0xfu) == ARM_FSR_PAGE_TRANSLATION &&
+          (e.cp15.dfsr & (1u << 11)) != 0u && e.cp15.dfar == 0x80000ffcu,
+          "STRD fault state dfsr=%08x dfar=%08x — a store must set WnR",
+          e.cp15.dfsr, e.cp15.dfar);
+    CHECK(e.r[2] == 0x80000ffcu, "faulting STRD moved its base to %08x", e.r[2]);
+    g_watch_addr = 0xffffffffu;
+}
+
 static void test_unaligned_access_spanning_two_pages(void) {
     /* VA 0x80000ffe..0x80001001: two bytes in the frame at PA 0x30000 and two
      * in the frame at PA 0x60000. Translating the base once and doing a single
@@ -4898,6 +5169,7 @@ int main(void) {
     test_cp15_cpuid_scheme_grades_as_armv6();
     test_cp15_id_dfr0_matches_absent_debug_unit();
     test_cp15_sctlr_roundtrip();
+    test_cp15_c1_is_gated_on_crm_zero();
     test_cp15_ttbr0_roundtrip();
     test_cp15_ttbcr_masks_only_reserved_bits();
     test_cp15_cache_op_is_accepted();
@@ -4930,6 +5202,9 @@ int main(void) {
     test_multiword_alignment_depends_on_sctlr_u_a();
     test_arm_multiword_base_writeback_restrictions();
     test_single_transfer_unpredictable_forms_trap_before_bus();
+    test_ldrd_strd_transfer_the_register_pair();
+    test_ldrd_strd_alignment_is_the_armv6_word_rule();
+    test_ldrd_strd_operand_restrictions_trap_before_bus();
     test_exclusive_alignment_is_never_silently_fixed();
     test_atomic_operand_aliases_are_rejected_before_bus();
     test_thumb_mov_add();
@@ -4997,6 +5272,7 @@ int main(void) {
     test_integer_divide_is_armv7_only();
     test_movw_movt_are_armv7_only();
     test_srs_and_rfe_stop_after_the_first_fault();
+    test_ldrd_strd_stop_after_the_first_faulting_word();
     test_xn_blocks_fetch_from_a_small_page();
     test_xn_on_a_section_and_the_xp_gate();
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
