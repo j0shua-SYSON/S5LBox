@@ -53,6 +53,22 @@ param(
     # baseline replay and a software-render replay differ by exactly this flag.
     [switch] $CaSoftwareRender,
 
+    # Pass -u to bootkernel, which leaves /arm-io/usb-otg MATCHED so the stock
+    # AppleSynopsysOTG2 driver loads. That used to panic deterministically at
+    # instruction 8,728,148,009 because nothing answered 0x38400000 and the
+    # driver believed the zeros; core/src/soc/usbotg.c now models the four
+    # configuration registers it actually reads, so the panic should be gone.
+    #
+    # It matters for far more than the panic. Un-matching the whole complex
+    # makes daemons that expect USB -- accessoryd, lockbot, ptpd, itunesstored
+    # -- retry against its absence, and that moves SpringBoard's
+    # UIApplicationMain from about 3.27e9 instructions to about 13.99e9. So a
+    # matched machine reaches the interesting part of the boot roughly four
+    # times sooner. OFF by default until a run confirms the model holds past
+    # 8.73e9 and through the driver's next unmodelled step (DIEPCTL/DOEPCTL
+    # programming and GINTSTS handling), which is unexplored.
+    [switch] $KeepUsbOtg,
+
     # Start from a checkpoint written by an earlier -SnapshotAt run instead of
     # from the kernel entry point. The three sidecars (<file>, .mdimage,
     # .mdstate) are read-only inputs and are hashed into the manifest exactly
@@ -692,6 +708,9 @@ try {
     if ($CaSoftwareRender.IsPresent) {
         $bootArguments += @('--ca-software-render')
     }
+    if ($KeepUsbOtg.IsPresent) {
+        $bootArguments += @('-u')
+    }
     if ($SnapshotAt -gt 0) {
         if ($SnapshotAt -ge $InstructionCap) {
             throw ("SnapshotAt {0} must be below the instruction cap {1}" -f
@@ -784,6 +803,8 @@ try {
         'guest_ram_mib: 128',
         'display_enabled: true',
         "ca_software_render: $($CaSoftwareRender.IsPresent.ToString().ToLowerInvariant())",
+        "keep_usb_otg: $($KeepUsbOtg.IsPresent.ToString().ToLowerInvariant())",
+        'keep_usb_otg_note: -u leaves /arm-io/usb-otg matched; the DWC2 configuration registers are modelled in core/src/soc/usbotg.c, and a matched machine reaches SpringBoard about four times sooner',
         'ca_software_render_note: when true, bootkernel rewrites /System/Library/LaunchDaemons/com.apple.SpringBoard.plist inside this run''s work image only, adding EnvironmentVariables CA_ENABLE_MBX2D=0 so QuartzCore selects its software renderer. Same 1490 bytes as the stock record, matched exactly once, so no HFS+ catalog change and no change to the expected work-image size; the immutable rootfs is never written.',
         'snapshots: -SnapshotAt writes a checkpoint; -RestoreFrom starts from one. Taking a checkpoint during a restored run is not supported yet.',
         "working_directory: $runDir",
