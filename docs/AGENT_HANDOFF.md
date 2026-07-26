@@ -3369,6 +3369,64 @@ comparable to run59's 5,690 because run59 ran 5e9 instructions to run60's 800e6.
 Deciding it needs either an unsigned binary to exec (blocked on §23.5) or a
 `--call-probe-kernel` on AMFI's `vnode_check_signature` return.
 
+### 23.9 Audio: the nub is published, so the first milestone is days not weeks
+
+Today's failure is one line — `AppleWM8991Audio: I2C register read failed (0):
+device error` — and everything above it already works: both I²S controllers
+start, `mediaserverd` is spawned, `IOAudio2Family` is loaded at 0.0% residency.
+The codec is a Wolfson **WM8991** on **i2c0** (`0x3C600000`), slave address
+**0x1B**: write an index byte, read 2 bytes MSB-first, and **register 0 must
+return `0x8990`** (literal at `c068b124`); then R1 bit 5 must be writable and
+read back. Nothing else is validated. `core/src/soc/pcf50635.c` (172 lines) is
+the working precedent for an I²C slave, and `S5L_I2C_SLAVES = 4` has room with
+no header change.
+
+**run62 settled the question that branched the plan.** `--call-probe-kernel` on
+`AppleS5L8900XI2SController::start`'s tail: `0xc05a3f40` (publishChildren) and
+`0xc05a3f44` (return true) each **captured 2**, `0xc05a3f4c` (return false)
+captured **0**. Both controllers publish, at instructions 235,126,205 and
+236,694,444. So the `AppleARMIISDevice` nub named `audio0` **exists today**, the
+two `IODMAEventSource`s are created successfully, and the three NULL-timeout
+`waitForService` calls ahead of it already resolve.
+
+Consequence: **the PL080 can be deferred.** Steps 1-2 — the codec slave plus the
+I²S window — are 2-3 days and produce a fully attached codec with a live
+`IOAudio2Family`. Samples need the PL080 later, and there is **no boot-argument
+escape** for it: all 40 `PE_parse_boot_argn` sites were enumerated and the
+`<node>_dma_enable` pattern exists only in `AppleS5L8900XSerial`.
+
+The I²S window itself is nearly free. The driver funnels access through two
+accessors and **`readRegister` (`c05a3c84`) has no caller anywhere in the
+kernelcache** — it writes seven offsets (`0x00, 0x04, 0x08, 0x30, 0x34, 0x3C,
+0x40`) and never reads. The FIFOs at `+0x10`/`+0x38` are touched only by the
+PL080 as physical addresses in an LLI. That independently explains the zero
+MMIO traffic the census shows on `0x3CA00000`/`0x3CD00000`, and makes the window
+80-120 lines rather than 250-350.
+
+> **Do not land the codec alone.** Today's failure is loud, correct and
+> harmless, and the boot continues past it. There are **five unbounded waits**
+> on the audio path — three NULL-timeout `waitForService` in series plus two
+> uninterruptible `IOLockSleep`s in the transfer path — so a codec that answers
+> `0x8990` with no I²S window behind it converts a good failure into a **silent,
+> uninterruptible hang**. That is a regression, not progress. Steps 1 and 2 are
+> one unit.
+
+Two things to keep honest about scope. **Nothing makes a sound today** and
+nothing would even with a perfect stack: the activation screen is silent and
+iPhone OS 3 has no boot chime, so audio output is downstream of touch exactly as
+Wi-Fi is. And **you cannot hear it live** — at 200-294× slower than the 412 MHz
+part, the smallest UI sound costs about 6 seconds of wall clock and one guest
+second costs about 200. The right design is to clock the model off the guest
+timebase, capture PCM to a WAV, and let the host play it back afterwards.
+
+One method note worth carrying. Before run62, the evidence for the nub was that
+the device tree declares 14 DMA channels while only 10 initialise, a shortfall
+of exactly 4 matching i2s0's 2 plus i2s1's 2. That fit was suggestive and
+**wrong** — other partitions exist, the analysis labelled it cannot-determine
+rather than concluding from the coincidence, and a four-minute read-only run
+settled it properly. The tidy arithmetic would have sent the plan down the
+expensive branch.
+
 ### 23.8 The trap that has now cost three retractions
 
 A per-process trace block that reports one generation does not describe the
