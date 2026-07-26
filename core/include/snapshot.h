@@ -56,7 +56,13 @@
 /* v4: the three-bank TV-out controller and its VSYNC phase joined MACH. */
 /* v5: the Synopsys DWC2 USB OTG block's PCGCCTL joined MACH. Its GHWCFG straps
  *     are build constants rather than state, so PCGCCTL is the whole of it. */
-#define SNAPSHOT_VERSION   5u
+/* v6: the two SPI controllers joined MACH, with their transmit and receive
+ *     FIFOs. A transfer can be in flight across a checkpoint — that is the
+ *     whole point of the model, since the guest sleeps inside one — so the FIFO
+ *     bytes and levels are state and the payload genuinely grows. The stub
+ *     windows for spi0 and spi1 also disappear from GEOM, which a v5 file would
+ *     not agree with either. */
+#define SNAPSHOT_VERSION   6u
 
 typedef enum {
     SNAP_OK = 0,

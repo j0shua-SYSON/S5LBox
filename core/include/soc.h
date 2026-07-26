@@ -111,20 +111,24 @@
  * on a controller that is itself a VIC child. It is emphatically not VIC
  * vector 7, which on this SoC is the timer (S5L8900_IRQ_TIMER).
  *
- * None of the three is defined here: nothing wires an SPI interrupt to the VIC,
- * and a constant that looks wired but is not is the kind of landmine the GPIO
- * base above was.
+ * spi0 and spi1 are now device models and their two VIC lines are defined and
+ * wired (see the SPI section further down). spi2's is deliberately still not:
+ * its interrupts are GPIO lines on a controller this machine models as storage,
+ * so nothing could route them, and a constant that looks wired but is not is
+ * the kind of landmine the GPIO base above was.
  *
- * These are declared windows, not device models. No transfer, FIFO, DMA, chip
- * select or interrupt behaviour is emulated. They exist so the traffic is named
- * and stored rather than reading back as the zero an unmapped access returns —
- * run23 caught BasebandSPI writing a configuration block to spi2 and later
- * reading those same four registers back to build a transfer descriptor, which
- * an unmapped window answered with zeros.
+ * spi2 therefore remains a declared window rather than a device model. It
+ * exists so the traffic is named and stored rather than reading back as the
+ * zero an unmapped access returns — run23 caught BasebandSPI writing a
+ * configuration block to spi2 and later reading those same four registers back
+ * to build a transfer descriptor, which an unmapped window answered with zeros.
  */
 #define S5L8900_SPI0_BASE   0x3c300000u
 #define S5L8900_SPI1_BASE   0x3ce00000u
 #define S5L8900_SPI2_BASE   0x3d200000u
+#define S5L8900_IRQ_SPI0    9u
+#define S5L8900_IRQ_SPI1    10u
+#define S5L8900_SPI_COUNT   2u
 
 /*
  * The Synopsys DesignWare USB 2.0 OTG (DWC2) controller. CONFIRMED from the
@@ -839,6 +843,203 @@ void s5l_pcf50635_bind(s5l_pcf50635_t *pmu, s5l_i2c_slave_t *slave);
 void s5l_pcf50635_civil(uint64_t unix_seconds, int *year, int *month, int *day,
                         int *hour, int *minute, int *second, int *weekday);
 
+/* ----------------------------------------------------------------- SPI ---
+ * The two S5L8900 SPI controllers AppleS5L8900XSPIController drives. Their
+ * windows and VIC lines are derived at the top of this header; what follows is
+ * the register model, and why it is a model rather than the stub it replaces.
+ *
+ * WHY THIS EXISTS. AppleMultitouchZ2SPI::finishStarting() @0xc0442670 probes
+ * the touch controller through isInHBPP() @0xc0441008, which issues one 16-byte
+ * full-duplex transfer on spi1 — `provider->vtbl[0x368](tx, 16, rx, 16, 0)` at
+ * 0xc04410a4 — and then blocks at 0xc05a6d80 in IOCommandGate::commandSleep(
+ * event, 0): the two-argument form, so no deadline. It loops there while its
+ * done flag is clear (0xc05a6d8c) until the SPI completion interrupt sets the
+ * flag and calls commandWakeup. Against a storage stub that interrupt can never
+ * arrive, so the kext has been asleep since the first time it ran. run59
+ * measured the shape of the stall exactly: spi1 `r=0 w=19`, which is the
+ * driver's eleven configuration writes plus the eight bytes it pushes into an
+ * eight-deep transmit FIFO before it starts and sleeps. `r=0` is the proof that
+ * the interrupt handler never ran even once.
+ *
+ * THE ONE RULE THAT MATTERS. The interrupt routine is the FILTER half of an
+ * IOFilterInterruptEventSource (registered at 0xc05a7150; body at 0xc05a6688,
+ * action finishTransfer at 0xc05a6840). It reads STATUS and, when the
+ * receive-FIFO level field is zero, returns false at 0xc05a66e4 having
+ * acknowledged nothing — and a filter returning false does not schedule its
+ * action, so finishTransfer never runs and nothing calls commandWakeup.
+ * Raising the line with an empty receive FIFO therefore reproduces the
+ * unbounded sleep exactly rather than ending it, which is why s5l_spi_irq()
+ * requires a byte the filter can actually drain.
+ *
+ * WHAT THIS IS NOT. No clock rate, DMA channel, chip-select edge or bit-order
+ * behaviour is emulated. The dividers at 0x30/0x38 are stored and never turned
+ * into time: a word is shifted the instant the guest stores it, exactly as an
+ * I2C transfer completes inside its command store.
+ */
+#define SPI_CONTROL 0x00u   /* run/mode; 0x0d starts, 0 powers the block down */
+#define SPI_SETUP   0x04u
+#define SPI_STATUS  0x08u   /* event latches + both FIFO levels               */
+#define SPI_PIN     0x0cu   /* internal chip select in bit 1                  */
+#define SPI_TXDATA  0x10u   /* transmit FIFO, write-only                      */
+#define SPI_RXDATA  0x20u   /* receive FIFO, read-only and destructive        */
+#define SPI_CLKDIV  0x30u
+#define SPI_CNT     0x34u   /* word count = max(txLen, rxLen)                 */
+#define SPI_IDD     0x38u   /* second divider                                 */
+
+/*
+ * CONTROL. The stock driver writes 0x0d to start a transfer and 0 to power the
+ * block down; run23 caught BasebandSPI writing 0x0c to spi2 while configuring
+ * it and never starting anything, so bit 0 is the run bit and the 0x0c above it
+ * is a mode field both drivers share.
+ */
+#define SPI_CONTROL_RUN   0x0001u
+#define SPI_CONTROL_START 0x000du
+
+/*
+ * SETUP. The driver builds a base of 0x1000 (0xc05a6fdc, the spi-version 0 arm
+ * of start()) ORed with 0x18 (0xc05a64b4), ORs 0x20 to arm the transfer
+ * (0xc05a6cb8), and then ORs 0x180 to go (0xc05a6d3c). 0x40 selects DMA
+ * (0xc05a6c40), which this model does not implement.
+ *
+ * Of that 0x180, 0x100 is the completion-interrupt enable, and it is the one
+ * SETUP bit s5l_spi_irq() consults. Two independent sites pin it: the filter
+ * clears exactly 0x100 and nothing else when the transfer's counts run out
+ * (`bic r3, r3, #0x100` at 0xc05a6808), and finishTransfer writes the bare base
+ * word back (0xc05a685c), dropping it again.
+ *
+ * Gating on it is not caution, it is required. The driver's order is fill the
+ * transmit FIFO, arm, THEN enable — precisely so the completion interrupt
+ * cannot arrive while it is still pushing bytes. A line that ignored this bit
+ * would fire on the driver's FIRST prefill store, and the filter would run
+ * against half-initialised transfer counts.
+ */
+#define SPI_SETUP_BASE 0x1018u
+#define SPI_SETUP_ARM  0x0020u
+#define SPI_SETUP_RUN  0x0080u
+#define SPI_SETUP_IRQ  0x0100u
+#define SPI_SETUP_GO   (SPI_SETUP_RUN | SPI_SETUP_IRQ)
+#define SPI_SETUP_DMA  0x0040u
+
+/*
+ * STATUS, for `spi-version 0` — which is what all three controllers are. The
+ * shipped tree gives every one of them `spi-version {0}`, and the guest's own
+ * start message agrees: `_spiVersion = 0 _spiInternalCS = 0`.
+ *
+ * The low four bits are event latches and are write-one-to-clear. Both FIFO
+ * levels sit above them and are OCCUPANCY, not free space: the driver's
+ * decoders at 0xc05a6904 and 0xc05a6928 read `(s >> 4) & 0xF` and
+ * `(s >> 8) & 0xF` and the transmit one then subtracts from the depth itself
+ * (`rsb r0, r0, #8`). Publishing free space in the transmit field instead would
+ * make a drained FIFO look full and the filter would never refill it.
+ *
+ * The levels are computed from the FIFOs on every read rather than stored,
+ * which is what makes the filter's acknowledge safe: it writes back the WHOLE
+ * raw status word it read (0xc05a67d0, `mov r2, r8`), not the event mask, so a
+ * model that stored the levels would zero them on the first acknowledge.
+ *
+ * Version 1 parts move both fields (`(s >> 6) & 0x1F` and `(s >> 11) & 0x1F`),
+ * use a depth of 16, a SETUP base of 0x4000 and an event mask of 0x0040000F,
+ * and add a register at 0x4c the driver writes only when _spiVersion is
+ * non-zero. None of that is defined here: this SoC has no such controller, and
+ * a constant that looks wired but is not is a landmine.
+ */
+#define SPI_STATUS_EVENTS   0x000fu
+#define SPI_STATUS_TX_SHIFT 4u
+#define SPI_STATUS_RX_SHIFT 8u
+#define SPI_STATUS_LEVEL    0x000fu
+
+/* Eight, from start()'s spi-version 0 arm at 0xc05a6fec — and the same 8 the
+ * driver uses as its prefill limit, which is why run59's 19 writes decompose
+ * as eleven configuration stores plus exactly eight FIFO bytes. */
+#define S5L_SPI_FIFO_DEPTH  8u
+/* Four chip selects, because the driver masks the select out of its per-device
+ * configuration word with `and r3, r3, #3` (0xc05a64c0) and indexes a table at
+ * this+0x84 by it. spi0 really does carry two devices, nor-flash and lcd0. */
+#define S5L_SPI_SLAVES      4u
+#define S5L_SPI_UNKNOWN_OFF 8u
+
+/*
+ * A device on the bus. SPI is full duplex: one byte leaves the master and one
+ * arrives in the same word, so a slave is a function from the outgoing byte to
+ * the incoming one and there is no separate read entry point as there is on
+ * I2C.
+ *
+ * There is deliberately no chip-select callback. On this board the select lines
+ * are GPIO platform functions (`function-spi_cs0`) and neither controller sets
+ * `internal-cs`, so the controller cannot observe a select edge and a callback
+ * for one could never fire. A device model that needs packet framing is what
+ * makes the GPIO block a model rather than a stub; it is not something this
+ * interface can fake.
+ */
+typedef struct {
+    void   *ctx;
+    uint8_t (*transfer)(void *ctx, uint8_t out);
+} s5l_spi_slave_t;
+
+typedef struct {
+    uint32_t control, setup, pin, clkdiv, cnt, idd;
+    uint32_t status;        /* event latches only; levels are computed        */
+    uint32_t words_left;    /* latched from CNT. Visibility, not a gate — see
+                             * s5l_spi_write() for why it must not be one.    */
+
+    uint8_t  tx[S5L_SPI_FIFO_DEPTH];
+    uint8_t  rx[S5L_SPI_FIFO_DEPTH];
+    uint8_t  tx_level, rx_level;
+    /*
+     * Which chip select words are routed to. Nothing writes it yet, and that is
+     * the honest state of the board rather than an oversight: the select lines
+     * are GPIO functions this machine models as storage, so the controller
+     * cannot see them move. The touch device's select is 0 — there is no
+     * `chip-select` property anywhere in the shipped tree; the number is
+     * reg[0] of /arm-io/spi1/multi-touch, whose reg begins {0, 0xa6, ...} —
+     * so that is where a device attached at reset is. When the GPIO block
+     * becomes a model, this field is what it drives and nothing else changes.
+     */
+    uint8_t  cs;
+
+    /* Bounded diagnostics, as on I2C: unknown or refused traffic must be
+     * visible without letting a guest grow host allocations. */
+    uint64_t words;         /* completed shifts                               */
+    uint64_t tx_drops;      /* TXDATA stores into a full transmit FIFO        */
+    uint64_t rx_underruns;  /* RXDATA loads from an empty receive FIFO        */
+    uint64_t unknown_reads, unknown_writes;
+    uint32_t unknown_off[S5L_SPI_UNKNOWN_OFF];
+    unsigned unknown_off_count;
+
+    /* Host wiring. Snapshot code serializes `cs`, never these callbacks. */
+    s5l_spi_slave_t slaves[S5L_SPI_SLAVES];
+} s5l_spi_t;
+
+/* Reset is total: valid on an uninitialized/poisoned object, and it removes
+ * attached devices. Callers attach board wiring after reset. */
+void     s5l_spi_reset(s5l_spi_t *bus);
+/* Attach at a chip select. Refuses an out-of-range select, a slave with no
+ * transfer callback, and any select that is already taken — silently shadowing
+ * a device would be worse than refusing. */
+bool     s5l_spi_attach(s5l_spi_t *bus, unsigned cs,
+                        const s5l_spi_slave_t *slave);
+/* Not const: reading SPI_RXDATA pops the receive FIFO, which is what makes room
+ * for the rest of a backed-up transfer. */
+uint32_t s5l_spi_read(s5l_spi_t *bus, uint32_t off);
+void     s5l_spi_write(s5l_spi_t *bus, uint32_t off, uint32_t val);
+/* A level, held until the guest clears the event latches through the W1C
+ * register — and only while the completion interrupt is enabled in SETUP and
+ * the receive FIFO holds a byte. See "THE ONE RULE THAT MATTERS" and the SETUP
+ * note above; neither term is a decoration. */
+bool     s5l_spi_irq(const s5l_spi_t *bus);
+
+/*
+ * The null device: it answers every word with 0x00.
+ *
+ * This is what proves the controller without claiming a touch controller.
+ * isInHBPP() accepts the probe only if the two big-endian halfwords rx[0..1]
+ * and rx[2..3] both pass its test at 0xc0440658, so an all-zero response is a
+ * definite rejection: the driver returns false from finishStarting() and says
+ * so, instead of sleeping with no deadline. A real device model attaches here
+ * later.
+ */
+void     s5l_spi_null_bind(s5l_spi_slave_t *slave);
+
 /* ------------------------------------ Synopsys DWC2 USB OTG (config only) ---
  * The four hardware-configuration registers AppleSynopsysOTGDevice reads out of
  * the block at S5L8900_USB_OTG_BASE, and nothing else. core/src/soc/usbotg.c
@@ -919,6 +1120,10 @@ typedef struct {
     s5l_tvout_t tvout;
     s5l_i2c_t   i2c[S5L8900_I2C_COUNT];
     s5l_pcf50635_t pmu;
+    /* spi[0] is spi0 and spi[1] is spi1. spi2 is not here: it is the baseband
+     * transport on GPIO interrupts this machine cannot route, so it stays a
+     * declared stub window. */
+    s5l_spi_t   spi[S5L8900_SPI_COUNT];
     s5l_usbotg_t usbotg;
     s5l_nor_t   nor;
     uint64_t   unmapped_reads;   /* visibility: accesses outside the map */
@@ -1004,11 +1209,12 @@ typedef struct {
     const char *name;                 /* string literal; never owned */
 } s5l_window_t;
 
-/* Enough for every fixed device window plus every stub. The 13 is the length of
+/* Enough for every fixed device window plus every stub. The 15 is the length of
  * DEVICE_WINDOWS in core/src/soc/machine.c — nor, clcd, the three tv-out banks,
- * i2c0, i2c1, usb-otg, vic0, vic1, power, uart0, timer — and there is no slack
- * left in it, so a new device model has to raise this number too. */
-#define S5L_WINDOW_MAX (S5L_STUB_MAX + 13u)
+ * i2c0, i2c1, spi0, spi1, usb-otg, vic0, vic1, power, uart0, timer — and there
+ * is no slack left in it, so a new device model has to raise this number too.
+ * It was 13 until spi0 and spi1 stopped being stubs. */
+#define S5L_WINDOW_MAX (S5L_STUB_MAX + 15u)
 
 /*
  * Every window this machine decodes: the modelled devices first, then the

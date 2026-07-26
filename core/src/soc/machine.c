@@ -32,6 +32,8 @@ static const s5l_window_t DEVICE_WINDOWS[] = {
     { S5L8900_TVOUT_SDO_BASE,   S5L_TVOUT_BANK_SIZE, "tvout-sdo"     },
     { S5L8900_I2C0_BASE,  S5L8900_DEV_SIZE,   "i2c0"  },
     { S5L8900_I2C1_BASE,  S5L8900_DEV_SIZE,   "i2c1"  },
+    { S5L8900_SPI0_BASE,  S5L8900_DEV_SIZE,   "spi0"  },
+    { S5L8900_SPI1_BASE,  S5L8900_DEV_SIZE,   "spi1"  },
     { S5L8900_USB_OTG_BASE, S5L8900_DEV_SIZE, "usb-otg" },
     { S5L8900_VIC0_BASE,  S5L8900_DEV_SIZE,   "vic0"  },
     { S5L8900_VIC1_BASE,  S5L8900_DEV_SIZE,   "vic1"  },
@@ -274,6 +276,10 @@ static uint32_t bus_read(void *ctx, uint32_t addr, unsigned bytes) {
         v = s5l_i2c_read(&m->i2c[0], addr - S5L8900_I2C0_BASE);
     } else if (mmio_word(addr, bytes, S5L8900_I2C1_BASE, S5L8900_DEV_SIZE)) {
         v = s5l_i2c_read(&m->i2c[1], addr - S5L8900_I2C1_BASE);
+    } else if (mmio_word(addr, bytes, S5L8900_SPI0_BASE, S5L8900_DEV_SIZE)) {
+        v = s5l_spi_read(&m->spi[0], addr - S5L8900_SPI0_BASE);
+    } else if (mmio_word(addr, bytes, S5L8900_SPI1_BASE, S5L8900_DEV_SIZE)) {
+        v = s5l_spi_read(&m->spi[1], addr - S5L8900_SPI1_BASE);
     } else if (mmio_word(addr, bytes, S5L8900_USB_OTG_BASE, S5L8900_DEV_SIZE)) {
         /* Word accesses only, as for the VICs, the CLCD and the I2C
          * controllers. The driver uses 32-bit accessors throughout; a narrower
@@ -365,6 +371,16 @@ static void bus_write(void *ctx, uint32_t addr, uint32_t val, unsigned bytes) {
     if (mmio_word(addr, bytes, S5L8900_I2C1_BASE, S5L8900_DEV_SIZE)) {
         note_device(m, addr, val, true);
         s5l_i2c_write(&m->i2c[1], addr - S5L8900_I2C1_BASE, val);
+        return;
+    }
+    if (mmio_word(addr, bytes, S5L8900_SPI0_BASE, S5L8900_DEV_SIZE)) {
+        note_device(m, addr, val, true);
+        s5l_spi_write(&m->spi[0], addr - S5L8900_SPI0_BASE, val);
+        return;
+    }
+    if (mmio_word(addr, bytes, S5L8900_SPI1_BASE, S5L8900_DEV_SIZE)) {
+        note_device(m, addr, val, true);
+        s5l_spi_write(&m->spi[1], addr - S5L8900_SPI1_BASE, val);
         return;
     }
     if (mmio_word(addr, bytes, S5L8900_USB_OTG_BASE, S5L8900_DEV_SIZE)) {
@@ -476,10 +492,39 @@ static s5l_wake_kind_t wake_edge_tvout(const s5l8900_t *m, uint32_t *ticks) {
     return S5L_WAKE_AT;
 }
 
+/*
+ * The two SPI controllers.
+ *
+ * Both answer S5L_WAKE_NEVER unconditionally, and that is a statement about the
+ * model rather than a placeholder. An SPI word completes as a direct
+ * consequence of a guest store into the transmit FIFO, and a core in WFI issues
+ * no stores; a line that was already high before the WFI is caught by
+ * machine_wait_for_interrupt()'s own pre-check, before any source is consulted.
+ * So there is no future edge to name, and NEVER — the only answer that lets
+ * guest time be skipped — is the correct one. Answering S5L_WAKE_UNKNOWN
+ * instead would be safe but would stop the machine fast-forwarding ANY idle
+ * period for the whole boot.
+ *
+ * They are declared anyway, because the table is this machine's definition of
+ * what can interrupt it (see the wake-source block in soc.h). A touch device
+ * that raises a report on its own schedule rather than in reply to a store is
+ * exactly the case the table exists for, and this is the entry it edits.
+ */
+static s5l_wake_kind_t wake_edge_spi0(const s5l8900_t *m, uint32_t *ticks) {
+    (void)m; (void)ticks;
+    return S5L_WAKE_NEVER;
+}
+static s5l_wake_kind_t wake_edge_spi1(const s5l8900_t *m, uint32_t *ticks) {
+    (void)m; (void)ticks;
+    return S5L_WAKE_NEVER;
+}
+
 static const s5l_wake_source_t WAKE_SOURCES[] = {
     { "timer", S5L8900_IRQ_TIMER, wake_edge_timer },
     { "clcd",  S5L8900_IRQ_CLCD,  wake_edge_clcd  },
     { "tvout", S5L8900_IRQ_TVOUT, wake_edge_tvout },
+    { "spi0",  S5L8900_IRQ_SPI0,  wake_edge_spi0  },
+    { "spi1",  S5L8900_IRQ_SPI1,  wake_edge_spi1  },
 };
 #define NWAKE_SOURCES (sizeof WAKE_SOURCES / sizeof WAKE_SOURCES[0])
 
@@ -618,11 +663,34 @@ bool s5l8900_init(s5l8900_t *m, uint32_t ram_base, uint32_t ram_size) {
     for (unsigned i = 0; i < S5L8900_I2C_COUNT; i++)
         s5l_i2c_reset(&m->i2c[i]);
     s5l_pcf50635_reset(&m->pmu, m->tb_hz);
+    for (unsigned i = 0; i < S5L8900_SPI_COUNT; i++) s5l_spi_reset(&m->spi[i]);
     s5l_usbotg_reset(&m->usbotg);
     {
         s5l_i2c_slave_t pmu;
         s5l_pcf50635_bind(&m->pmu, &pmu);
         if (!s5l_i2c_attach(&m->i2c[0], &pmu)) {
+            free(m->ram);
+            m->ram = NULL;
+            return false;
+        }
+    }
+    /*
+     * The null device on spi1 chip select 0 — where /arm-io/spi1/multi-touch
+     * is. It answers every word with 0x00, which is enough for
+     * AppleMultitouchZ2SPI's HBPP probe to complete, fail to recognise the
+     * response, and return a definite false instead of sleeping with no
+     * deadline. It is emphatically not a touch controller.
+     *
+     * spi0 gets nothing on purpose. Its devices — the NOR, which this machine
+     * exposes as a memory window instead, and the lcd0 panel — are unmodelled,
+     * and a controller with no attached device shifts no words, so spi0 behaves
+     * exactly as its storage stub did rather than answering the panel driver
+     * with a byte no device sent.
+     */
+    {
+        s5l_spi_slave_t null_touch;
+        s5l_spi_null_bind(&null_touch);
+        if (!s5l_spi_attach(&m->spi[1], 0u, &null_touch)) {
             free(m->ram);
             m->ram = NULL;
             return false;
@@ -667,11 +735,11 @@ bool s5l8900_init(s5l8900_t *m, uint32_t ram_base, uint32_t ram_size) {
             /* The upper part of the power page — power.c owns 0x00-0x7f and
              * this is a different block with a different driver. */
             { S5L8900_GPIOIC_BASE, S5L8900_GPIOIC_SIZE, "gpioic"   },
-            /* The three SPI controllers. spi0/spi1 are programmed by
-             * AppleS5L8900XSPIController; spi2 is the baseband transport that
-             * com.apple.driver.BasebandSPI configures and then reads back. */
-            { S5L8900_SPI0_BASE,   S5L8900_DEV_SIZE,   "spi0"      },
-            { S5L8900_SPI1_BASE,   S5L8900_DEV_SIZE,   "spi1"      },
+            /* spi2, the baseband transport com.apple.driver.BasebandSPI
+             * configures and then reads back. spi0 and spi1 used to be here
+             * too; they are device models now (DEVICE_WINDOWS above), and a
+             * duplicate declaration here would be refused as an overlap and
+             * silently counted as a failure rather than shadowing them. */
             { S5L8900_SPI2_BASE,   S5L8900_DEV_SIZE,   "spi2"      },
         };
         for (unsigned i = 0; i < sizeof STUBS / sizeof STUBS[0]; i++)
@@ -743,6 +811,12 @@ void s5l8900_tick(s5l8900_t *m, uint32_t ticks) {
                      s5l_i2c_irq(&m->i2c[0]));
     s5l_vic_set_line(&m->vic[0], S5L8900_IRQ_I2C1,
                      s5l_i2c_irq(&m->i2c[1]));
+
+    /* SPI words complete inside the store that pushes them, for the same reason
+     * and with the same consequence: a zero-tick refresh is all WFI needs to
+     * observe both the assertion and the guest's W1C acknowledge. */
+    s5l_vic_set_line(&m->vic[0], S5L8900_IRQ_SPI0, s5l_spi_irq(&m->spi[0]));
+    s5l_vic_set_line(&m->vic[0], S5L8900_IRQ_SPI1, s5l_spi_irq(&m->spi[1]));
 
     /*
      * BOTH VICs drive the CPU.

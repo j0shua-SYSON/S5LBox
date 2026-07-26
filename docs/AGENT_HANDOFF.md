@@ -3079,11 +3079,28 @@ file.
 ### 23.4 Touch: fully specified, ~750-900 lines, bounded
 
 `AppleMultitouchZ2SPI` already starts. It is asleep in an **unbounded
-`IOCommandGate::commandSleep()` with no deadline** (`0xc05a5f0c`, loop at
-`0xc05a5f18`) waiting for an SPI completion interrupt our stub cannot raise —
-failure shape number five. Arithmetic proof: `spi1 r=0 w=19`; one stalled
-transfer costs `11 + N` writes, so `N=8` is exactly the 8-deep TX FIFO filled by
-the 16-byte `isInHBPP` probe, and `r=0` proves the ISR never ran.
+`IOCommandGate::commandSleep()` with no deadline** waiting for an SPI completion
+interrupt our stub cannot raise — failure shape number five. Arithmetic proof:
+`spi1 r=0 w=19`; one stalled transfer costs `11 + N` writes (3 power-on + 6 setup
++ arm + 8 FIFO + go), so `N=8` is exactly the 8-deep TX FIFO filled by the
+16-byte `isInHBPP` probe, and `r=0` proves the ISR never ran.
+
+> **Corrected 2026-07-26 after implementation.** An earlier revision of this
+> section gave the sleep as `0xc05a5f0c` with its loop at `0xc05a5f18`. **That is
+> `AppleS5L8900XI2CController`, not SPI** — the metaclass constructor at
+> `0xc05a620c` names it. The behaviour described was right; the address was the
+> wrong driver, and it would have sent a reader to the I2C bus. The SPI
+> controller's no-deadline `commandSleep` is **`0xc05a6d80`**, its loop is
+> `beq 0xc05a6d70` at `0xc05a6d8c`, and its done flag is `this+0xE0`. Three
+> further corrections in the same revision: the success `printf` is **conditional**,
+> reachable only through `beq 0xc0442714` at `0xc04426d0` (the `isInHBPP()==false`
+> edge), and its literal is `"%s: Could not detect HBPP. Returning false from
+> finishStarting().\n"` — **grep for `HBPP`, not the sentence**; `isInHBPP` is
+> reached by **virtual dispatch through slot `0x4d0`**, not a direct `bl`, though
+> `provider->v[0x368](tx,16,rx,16,0)` at `0xc04410a4` is confirmed exactly; and
+> there is **no `chip-select` property anywhere in the device tree** — the select
+> is `reg[0]` of `/arm-io/spi1/multi-touch`, which the driver masks with
+> `and r3,r3,#3`. `internal-cs` appears zero times, hence `_spiInternalCS = 0`.
 
 Touch is on **`/arm-io/spi1`** (`multi-touch,n82`, chip-select 0, PA
 `0x3CE00000`, VIC 10). **`/arm-io/spi2` has zero children** and is the baseband
@@ -3114,10 +3131,31 @@ transactions per frame.
 `0xc05a6688` begins `if (((status>>8)&0xF) == 0) return 0;` — it bails without
 waking anything, reproducing the current hang exactly.
 
+**And do not raise it without checking the enable bit either.** `0x100` of the
+`0x180` written to SETUP is the interrupt enable, and gating the line on it is
+**mandatory**, not optional. The driver's order is prefill → arm → enable, so a
+line that ignores the enable fires on the **first prefill store** and runs the
+filter against transfer counts it has not finished building. Pinned twice: the
+filter clears exactly `0x100` on completion (`bic r3,r3,#0x100` at `0xc05a6808`),
+and `finishTransfer` writes the bare base word back. An earlier revision of this
+section described the line without that gate; implementing it as written would
+have been a live bug, and the model's mutation test №5 exists for it.
+
+Two more details the first revision omitted. The STATUS field positions are
+**version-dependent** — v1 uses `(s>>6)&0x1F` and `(s>>11)&0x1F` with depth 16,
+base `0x4000`, mask `0x0040000F` and a register at `0x4c` — which is harmless
+here only because the device tree gives all three controllers `spi-version {0}`.
+And completion is **by count exhaustion with no hardware done bit**
+(`0xc05a67d4`-`0xc05a67ec`); the `0x34` word count is latched and decremented for
+visibility but does not gate the shifter, since both the driver's own DMA path
+(`0xc05a6b10`) and BasebandSPI store zero there on controllers they then use.
+
 Build order, each step independently observable: (0) fix the UART capture;
 (1) SPI controller + **null slave returning 0x00**, whose success criterion is
-the unconditional `printf` at `0xc0442734`, `"Could not detect HBPP. Returning
-false from finishStarting()"`; (2) GPIO interrupt controller, 7 groups ×
+the `printf` at `0xc0442734` — **grep for `HBPP`**, and expect two lines in
+order, `"...: Could not detect HBPP. Response: 0x.."` from inside `isInHBPP`
+followed by the `finishStarting()` line. **Done: `core/src/soc/spi.c`, 230 lines,
+25/25 ctest, five mutation checks.** (2) GPIO interrupt controller, 7 groups ×
 {INTLEVEL 0x80, INTSTAT 0xA0 W1C, INTEN 0xC0, INTTYPE 0xE0}, cascading to VIC
 lines `{0,1,2,3,31,32,33}` — group 4 → VIC 2; (3) Z2 slave bring-up; (4) frame
 path and host injection; (5) payload format, the only genuine unknown, reversed

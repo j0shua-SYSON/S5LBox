@@ -118,6 +118,7 @@ SNAP_SIZE_GUARD(s5l_tvout_t,       12304, "snap_tvout");
  * describe host ABI layout only; the file format remains field-by-field. */
 SNAP_SIZE_GUARD(s5l_i2c_t,         320,   "snap_i2c");
 SNAP_SIZE_GUARD(s5l_pcf50635_t,    600,   "snap_pmu");
+SNAP_SIZE_GUARD(s5l_spi_t,         200,   "snap_spi");
 SNAP_SIZE_GUARD(s5l_usbotg_t,      4,     "snap_usbotg");
 SNAP_SIZE_GUARD(s5l_nor_entry_t,   12,    "snap_nor");
 SNAP_SIZE_GUARD(s5l_nor_t,         208,   "snap_nor");
@@ -127,7 +128,7 @@ SNAP_SIZE_GUARD(s5l_stub_t,        56,    "snap_stubs");
  * are deliberately excluded from MACH for the same reason as every other bus
  * callback; snapshot_load preserves the live machine's hooks and dedicated
  * privileged-SVC context. The byte format therefore does not change. */
-SNAP_SIZE_GUARD(s5l8900_t,         29344, "snap_mach");
+SNAP_SIZE_GUARD(s5l8900_t,         29744, "snap_mach");
 #endif
 
 /* ---------------------------------------------------------------- the IO --- */
@@ -433,6 +434,40 @@ static void snap_pmu(sn_io_t *io, s5l_pcf50635_t *p) {
         io->err = SNAP_ERR_CORRUPT;
 }
 
+static bool spi_state_valid(const s5l_spi_t *s) {
+    /* Only what the model itself can produce. The FIFO levels bound the arrays
+     * they index, `cs` bounds the slave table the shifter routes through, and
+     * the status word carries nothing but the four event latches — the two
+     * level fields are computed on read and are never stored. */
+    if (!s || s->tx_level > S5L_SPI_FIFO_DEPTH ||
+        s->rx_level > S5L_SPI_FIFO_DEPTH ||
+        s->cs >= S5L_SPI_SLAVES ||
+        (s->status & ~(uint32_t)SPI_STATUS_EVENTS) != 0u ||
+        s->unknown_off_count > S5L_SPI_UNKNOWN_OFF)
+        return false;
+    return true;
+}
+
+/*
+ * An SPI controller. The attached devices are host wiring and are deliberately
+ * not serialized, exactly as the I2C slave table is not; `cs` is guest-facing
+ * routing state and does travel.
+ */
+static void snap_spi(sn_io_t *io, s5l_spi_t *s) {
+    F32(s->control); F32(s->setup); F32(s->pin);
+    F32(s->clkdiv);  F32(s->cnt);   F32(s->idd);
+    F32(s->status);  F32(s->words_left);
+    FBYTES(s->tx, S5L_SPI_FIFO_DEPTH);
+    FBYTES(s->rx, S5L_SPI_FIFO_DEPTH);
+    F8(s->tx_level); F8(s->rx_level); F8(s->cs);
+    F64(s->words); F64(s->tx_drops); F64(s->rx_underruns);
+    F64(s->unknown_reads); F64(s->unknown_writes);
+    FA32(s->unknown_off, S5L_SPI_UNKNOWN_OFF);
+    F32(s->unknown_off_count);
+    if (sn_reading(io) && io->err == SNAP_OK && !spi_state_valid(s))
+        io->err = SNAP_ERR_CORRUPT;
+}
+
 /*
  * The DWC2 block's only writable register. The GHWCFG straps are constants in
  * core/src/soc/usbotg.c, not fields, so there is nothing else here to serialize
@@ -548,6 +583,8 @@ static void snap_mach(sn_io_t *io, s5l8900_t *m) {
     for (unsigned i = 0; i < S5L8900_I2C_COUNT; i++)
         snap_i2c(io, &m->i2c[i]);
     snap_pmu(io, &m->pmu);
+    for (unsigned i = 0; i < S5L8900_SPI_COUNT; i++)
+        snap_spi(io, &m->spi[i]);
     snap_usbotg(io, &m->usbotg);
 
     F64(m->unmapped_reads);
@@ -801,6 +838,8 @@ static bool snap_machine_valid(const s5l8900_t *m) {
         if (!i2c_state_valid(&m->i2c[i])) return false;
     if (!pmu_state_valid(&m->pmu)) return false;
     if (!tvout_state_valid(&m->tvout)) return false;
+    for (unsigned i = 0; i < S5L8900_SPI_COUNT; i++)
+        if (!spi_state_valid(&m->spi[i])) return false;
     /* Slave callbacks are host wiring, not file bytes. Requiring the board's
      * exact wiring on both save and load makes that omission safe: a snapshot
      * can never be applied to a differently wired machine. */
@@ -810,6 +849,15 @@ static bool snap_machine_valid(const s5l8900_t *m) {
         m->i2c[1].slave_count != 0u ||
         m->pmu.tick_hz != m->tb_hz)
         return false;
+    /* The SPI board wiring, for the same reason: spi1 chip select 0 carries the
+     * null device and nothing else is attached anywhere. Restoring a receive
+     * FIFO into a controller with no device behind it would resume a transfer
+     * that can never finish. */
+    for (unsigned cs = 0; cs < S5L_SPI_SLAVES; cs++)
+        if (m->spi[0].slaves[cs].transfer != NULL) return false;
+    if (m->spi[1].slaves[0].transfer == NULL) return false;
+    for (unsigned cs = 1; cs < S5L_SPI_SLAVES; cs++)
+        if (m->spi[1].slaves[cs].transfer != NULL) return false;
     for (unsigned i = 0; i < m->nor.image_count; i++)
         if (m->nor.images[i].size < 20u ||
             (uint64_t)m->nor.images[i].offset + m->nor.images[i].size > m->nor.size)

@@ -34,6 +34,7 @@
 #include <ctype.h>
 #include <errno.h>
 #include <inttypes.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -353,13 +354,669 @@ static bool boot_option_takes_value(const char *option) {
     static const char *const options[] = {
         "-D", "-W", "-Z", "-p", "--restore", "-V", "-n", "-T",
         "-d", "-c", "-b", "-w", "-r", "--fstab", "--grow", "-R",
-        "-X", "-H", "--call-probe", "--call-probe-kernel"
+        "-X", "-H", "--call-probe", "--call-probe-kernel",
+        "--jailbreak-payload"
     };
 
     if (!option) return false;
     for (size_t i = 0; i < sizeof(options) / sizeof(options[0]); i++)
         if (!strcmp(option, options[i])) return true;
     return false;
+}
+
+/* --------------------------------------------------------- boot toggles ----
+ *
+ * Every boolean setting bootkernel has, in one table.
+ *
+ * The flags grew one letter at a time and stopped agreeing with themselves:
+ * -g and -S RE-ENABLE deliberately hidden device-tree nodes, -M and -K DISABLE
+ * compatibility patches, --keep-fstab disables one by naming what it keeps, -S
+ * and -B were never in the help text at all, and the /vram fix that finally let
+ * the guest render had no switch, so the failure it corrects could not be
+ * reproduced side by side with the fix. Reading a command line meant reading
+ * this file.
+ *
+ * The rule now is uniform for every row below: --<name> turns a thing ON,
+ * --no-<name> turns it OFF. Each historical short flag is kept as an alias of
+ * whichever direction it already meant, so NO existing command line changes
+ * meaning. That is not politeness: roughly sixty runs in docs/BOOTLOG.md are
+ * interpreted against the defaults of the day, and a silent change of default
+ * would retroactively falsify them. The one deliberate addition is that the
+ * previously unconditional patches gained an off switch; their defaults are
+ * the behaviour that was already unconditional.
+ *
+ * Adding the next toggle is one row here plus one use of its bool. This is the
+ * same data-driven shape as DEVICE_WINDOWS, STUBS and WAKE_SOURCES in
+ * core/src/soc/machine.c, and for the same reason: a table fits on a screen,
+ * and the help text and the run header are generated from it, so neither can
+ * drift from what the code actually does.
+ *
+ * None of this runs per instruction. Every value is resolved once, before the
+ * machine is created, and none of it is machine state -- SNAPSHOT_VERSION is
+ * unaffected and no s5l8900_t field is added.
+ */
+typedef struct {
+    /* guest hardware: device-tree nubs this VM hides unless asked not to */
+    bool mbx;
+    bool sha1;
+    bool baseband;
+    bool spi2;
+    bool usb_otg;
+    bool framebuffer;
+    bool iomfb_display;
+    /* compatibility patches: iBoot's job, done here */
+    bool vram;
+    bool lcd_panel_id;
+    bool memory_reg;
+    bool rtc_patch;
+    bool fstab_fixup;
+    bool ca_software_render;
+    /* guest state: persistent changes to the guest or its work image */
+    bool activate;
+    bool jb_codesign;
+    bool jb_payload;
+    /* memory layout */
+    bool ramdisk_low;
+    /* diagnostics */
+    bool stop_on_abort;
+    bool kext_map;
+    bool print_config;
+} boot_toggles_t;
+
+enum {
+    BOOT_GROUP_HARDWARE = 0,
+    BOOT_GROUP_PATCH,
+    BOOT_GROUP_GUEST_STATE,
+    BOOT_GROUP_LAYOUT,
+    BOOT_GROUP_DIAGNOSTIC,
+    BOOT_GROUP_COUNT
+};
+
+static const char *const BOOT_GROUP_TITLE[BOOT_GROUP_COUNT] = {
+    "guest hardware  (device-tree nubs this VM hides by default)",
+    "compatibility patches  (iBoot's job; each one is separately bisectable)",
+    "guest state  (persistent changes to the guest or its work image)",
+    "memory layout",
+    "diagnostics"
+};
+
+typedef struct {
+    const char *name;       /* long name: --name enables, --no-name disables */
+    const char *on_alias;   /* historical flag that means "enable", or NULL  */
+    const char *off_alias;  /* historical flag that means "disable", or NULL */
+    bool        def;        /* value with nothing on the command line        */
+    unsigned    group;
+    size_t      offset;     /* offsetof() of the bool this row owns          */
+    const char *help;       /* printed by --help, one screen line per '\n'   */
+} boot_toggle_t;
+
+#define BOOT_FIELD(f) offsetof(boot_toggles_t, f)
+
+static const boot_toggle_t BOOT_TOGGLES[] = {
+    { "mbx", NULL, NULL, false, BOOT_GROUP_HARDWARE, BOOT_FIELD(mbx),
+      "leave /arm-io/mbx matched. The PowerVR MBX driver busy-polls a reset\n"
+      "bit in a register block this VM does not model and hangs the boot, so\n"
+      "the nub is un-matched by default. -g is NOT an alias for this row: it\n"
+      "has always also implied --framebuffer and --iomfb-display, so it stays\n"
+      "a compound (see below) and --mbx alone is the narrow form." },
+    { "sha1", "-S", NULL, false, BOOT_GROUP_HARDWARE, BOOT_FIELD(sha1),
+      "leave /arm-io/sha1 matched. IOCryptoAcceleratorFamily installs a\n"
+      "sha1_hardware_hook, after which every exactly-4096-byte digest --\n"
+      "which is what cs_validate_page asks for -- goes to a register file we\n"
+      "do not model, launchd's first text page fails its signature, and the\n"
+      "boot spins on cs_invalid_page forever." },
+    { "baseband", NULL, NULL, false, BOOT_GROUP_HARDWARE, BOOT_FIELD(baseband),
+      "leave /baseband matched. This machine has no modem, and run29 showed\n"
+      "that a declared-but-silent one is worse than an absent one: CommCenter\n"
+      "retries ASMIOCNEWDLCI forever, never reaches bootstrap_check_in, and\n"
+      "SpringBoard's CTServerConnection handshake blocks behind a full\n"
+      "com.apple.commcenter queue." },
+    { "spi2", NULL, NULL, false, BOOT_GROUP_HARDWARE, BOOT_FIELD(spi2),
+      "leave /arm-io/spi2 matched -- the SPI transport underneath the\n"
+      "baseband. Split from --baseband so either half of run29's failure can\n"
+      "be reproduced alone; -B still enables both at once, as it always did." },
+    { "usb-otg", "-u", NULL, false, BOOT_GROUP_HARDWARE, BOOT_FIELD(usb_otg),
+      "leave /arm-io/usb-otg matched. AppleSynopsysOTGDevice reads hardware-\n"
+      "configuration registers from an unmodelled block, derives a self-\n"
+      "inconsistent endpoint count and panics in findMaxEndpoints at about\n"
+      "8.73e9 instructions. Un-matching it costs boot progress -- daemons\n"
+      "retry against absent USB -- but it is the only configuration observed\n"
+      "to run past that panic." },
+    { "framebuffer", "-F", NULL, false, BOOT_GROUP_HARDWARE,
+      BOOT_FIELD(framebuffer),
+      "reserve a 320x480x32 Boot_Video buffer, seed an iBoot-compatible N82\n"
+      "CLCD handoff, and protect the buffer below topOfKernelData. Enables\n"
+      "the --lcd-panel-id and --vram device-tree patches, which need -d.\n"
+      "NOTE: -F rewrites firmware/screen.ppm at the end of the run." },
+    { "iomfb-display", NULL, NULL, false, BOOT_GROUP_HARDWARE,
+      BOOT_FIELD(iomfb_display),
+      "set boot_args v_display = 1, which tells the kernel NOT to draw its\n"
+      "own text console and to defer the panel to IOMobileFramebuffer. Off\n"
+      "means the kernel draws boot text (remove serial=1 from -c to see it).\n"
+      "Requires --framebuffer; -g turns both on together." },
+
+    { "vram", NULL, NULL, true, BOOT_GROUP_PATCH, BOOT_FIELD(vram),
+      "publish the scanout buffer in /vram:reg, which iBoot would have done\n"
+      "and we do not because we jump straight to the kernel. With it at the\n"
+      "shipped {0,0}, IOSurfaceDeviceMemoryRegion::init fails, AppleH1CLCD\n"
+      "falls back to a kIODirectionOut descriptor, IOSurfaceRootUserClient\n"
+      "turns that into kIOMapReadOnly, and SpringBoard's compositor faults on\n"
+      "its first store to the screen (run57: L2 0x0885c82f, FSR 0x80f, WnR).\n"
+      "ON by default since commit 691b727. --no-vram reproduces the exact\n"
+      "read-only-framebuffer failure for an A/B against a fixed run; it only\n"
+      "has meaning with --framebuffer." },
+    { "lcd-panel-id", NULL, NULL, true, BOOT_GROUP_PATCH,
+      BOOT_FIELD(lcd_panel_id),
+      "write the N82 Syrah panel ID into /arm-io/spi0/lcd0:lcd-panel-id. The\n"
+      "IPSW tree carries zero there because iBoot reads the real three-byte\n"
+      "ID off the panel; Merlot rejects zero before its target-specific\n"
+      "calibration. The resolved node's compatible string must be exactly\n"
+      "\"lcd,merlot\" -- the parent has two lcd0 children. Only applies with\n"
+      "--framebuffer, and a failure is fatal rather than half-configured." },
+    { "memory-reg", NULL, "-M", true, BOOT_GROUP_PATCH, BOOT_FIELD(memory_reg),
+      "synthesise /memory:reg from the RAM layout. The shipped cell is zero,\n"
+      "which would advertise a zero-sized DRAM bank." },
+    { "rtc-patch", NULL, "-K", true, BOOT_GROUP_PATCH, BOOT_FIELD(rtc_patch),
+      "apply the post-load kernel patch table: today one byte, the IORTC\n"
+      "waitForService tv_sec 30 -> 0 at 0xc0175b3e, so a PMU/RTC publication\n"
+      "failure stays observable instead of costing a 30-second guest stall.\n"
+      "Legacy path only -- under --external-md the exact-gated transaction in\n"
+      "tools/ios3_kernel_patch.c owns every patch site and is all-or-nothing,\n"
+      "so --no-rtc-patch is refused there rather than silently ignored." },
+    { "fstab-fixup", NULL, "--keep-fstab", true, BOOT_GROUP_PATCH,
+      BOOT_FIELD(fstab_fixup),
+      "overwrite the guest's /private/etc/fstab record (see --fstab for the\n"
+      "line). The stock record names disk0s1/disk0s2, which live behind a\n"
+      "NAND FTL this machine does not have, so launchd's fsck fails and it\n"
+      "halts. --no-fstab-fixup (== --keep-fstab) reproduces that halt." },
+    { "ca-software-render", NULL, NULL, false, BOOT_GROUP_PATCH,
+      BOOT_FIELD(ca_software_render),
+      "add EnvironmentVariables CA_ENABLE_MBX2D=0 to SpringBoard's\n"
+      "LaunchDaemon plist in this run's work image, which is how QuartzCore's\n"
+      "own code selects its software renderer. Without it CA::WindowServer\n"
+      "defaults to MBX2D, whose global context is NULL because this VM\n"
+      "un-matches the GPU, and SpringBoard dies in _mbx2DDisable forever.\n"
+      "The replacement plist is the same 1490 bytes and must match exactly\n"
+      "once, so no HFS+ catalog changes. Requires --external-md." },
+
+    { "activate", NULL, NULL, true, BOOT_GROUP_GUEST_STATE,
+      BOOT_FIELD(activate),
+      "present the guest as activated, so SpringBoard does not sit at the\n"
+      "\"connect to iTunes\" screen. NOT IMPLEMENTED YET: writing\n"
+      "ActivationState = Activated needs a file the source rootfs does not\n"
+      "contain, and tools/rootfs_work.c does size-neutral in-place rewrites\n"
+      "only -- it cannot create one. ON by default anyway, so the day the\n"
+      "provisioner lands no command line has to change; until then every run\n"
+      "header says, in as many words, that it was requested and not applied." },
+    { "jb-codesign", NULL, NULL, false, BOOT_GROUP_GUEST_STATE,
+      BOOT_FIELD(jb_codesign),
+      "the kernel half of --jailbreak: disable the guest's code-signature\n"
+      "enforcement. NOT IMPLEMENTED YET. Separate from --jb-payload because\n"
+      "the two halves are independent and this one only needs the kernel,\n"
+      "which we already load and own (docs/activation.md A.2 traces the\n"
+      "enforcement switch), so it can land first and be exercised alone." },
+    { "jb-payload", NULL, NULL, false, BOOT_GROUP_GUEST_STATE,
+      BOOT_FIELD(jb_payload),
+      "the filesystem half of --jailbreak: install the Cydia payload named by\n"
+      "--jailbreak-payload, and its launchd jobs, onto the work image. NOT\n"
+      "IMPLEMENTED YET -- it needs the same HFS+ file provisioner --activate\n"
+      "is waiting on. No exploit is involved in either half: inside an\n"
+      "emulator that loads the kernel and owns the disk there is nothing to\n"
+      "exploit past. Requires --external-md, which is the only mode with a\n"
+      "writable work image." },
+
+    { "ramdisk-low", "-Y", NULL, false, BOOT_GROUP_LAYOUT,
+      BOOT_FIELD(ramdisk_low),
+      "EXPERIMENT: put the RAM disk at the BOTTOM of DRAM, below the kernel,\n"
+      "so topOfKernelData only has to clear the kernel image. Needs -V to\n"
+      "open a gap, and THAT is what does not work yet: below 0xc0000000 the\n"
+      "boot reaches \"BSD root: md0\" and never reaches _load_init_program.\n"
+      "Headroom on paper only." },
+
+    { "stop-on-abort", "-a", NULL, false, BOOT_GROUP_DIAGNOSTIC,
+      BOOT_FIELD(stop_on_abort),
+      "stop the run at the first data abort instead of continuing past it." },
+    { "kext-map", "-L", NULL, false, BOOT_GROUP_DIAGNOSTIC,
+      BOOT_FIELD(kext_map),
+      "print the prelinked kext load map (bundle id, load address, size) read\n"
+      "out of __PRELINK_INFO, then exit without booting." },
+    { "print-config", NULL, NULL, false, BOOT_GROUP_DIAGNOSTIC,
+      BOOT_FIELD(print_config),
+      "print the fully resolved configuration -- every toggle, its effective\n"
+      "value, and whether that came from a default or from this command line\n"
+      "-- then exit 0 without opening the kernel, the tree or any image. The\n"
+      "command line is validated first, so a rejected combination is still\n"
+      "rejected." }
+};
+
+#define NBOOT_TOGGLES ((unsigned)(sizeof BOOT_TOGGLES / sizeof BOOT_TOGGLES[0]))
+
+/*
+ * Compound names: one word that resolves to several rows.
+ *
+ * -g and -B predate the table and each already meant more than one thing, so
+ * they stay compound rather than being quietly narrowed. A short form has no
+ * negative spelling and therefore only ever enables, exactly as today; a long
+ * form gets the usual --name / --no-name pair.
+ */
+static const struct {
+    const char *token;       /* "-g", or "jailbreak" for --jailbreak      */
+    bool        long_form;   /* true: --token / --no-token; false: literal */
+    const char *members[4];  /* NULL-terminated list of BOOT_TOGGLES names */
+    const char *help;
+} BOOT_COMPOUND[] = {
+    { "-g", false, { "framebuffer", "iomfb-display", "mbx", NULL },
+      "graphics experiment: --framebuffer --iomfb-display --mbx" },
+    { "-B", false, { "baseband", "spi2", NULL },
+      "leave the whole baseband transport matched: --baseband --spi2" },
+    { "jailbreak", true, { "jb-codesign", "jb-payload", NULL },
+      "both jailbreak halves at once: --jb-codesign --jb-payload" }
+};
+
+#define NBOOT_COMPOUND \
+    ((unsigned)(sizeof BOOT_COMPOUND / sizeof BOOT_COMPOUND[0]))
+
+/* Effective values plus where each one came from, so a run can report its own
+ * configuration instead of leaving a reader to reconstruct it from argv and a
+ * memory of what the defaults were that week. */
+typedef struct {
+    boot_toggles_t v;
+    signed char    req[NBOOT_TOGGLES];  /* -1 unset, 0 asked off, 1 asked on */
+    const char    *by[NBOOT_TOGGLES];   /* the argv token that asked         */
+} boot_config_t;
+
+static bool *boot_toggle_slot(boot_toggles_t *t, unsigned row) {
+    return (bool *)(void *)((unsigned char *)t + BOOT_TOGGLES[row].offset);
+}
+
+static bool boot_toggle_value(const boot_toggles_t *t, unsigned row) {
+    return *(const bool *)(const void *)
+           ((const unsigned char *)t + BOOT_TOGGLES[row].offset);
+}
+
+static void boot_config_defaults(boot_config_t *cfg) {
+    memset(cfg, 0, sizeof *cfg);
+    for (unsigned i = 0; i < NBOOT_TOGGLES; i++) {
+        *boot_toggle_slot(&cfg->v, i) = BOOT_TOGGLES[i].def;
+        cfg->req[i] = -1;
+        cfg->by[i]  = NULL;
+    }
+}
+
+static int boot_toggle_index(const char *name) {
+    for (unsigned i = 0; i < NBOOT_TOGGLES; i++)
+        if (!strcmp(BOOT_TOGGLES[i].name, name)) return (int)i;
+    return -1;
+}
+
+/* Last-wins is right for a value like -c and wrong for a switch: "-g --no-mbx"
+ * reads as a coherent request and is not one. Refuse both directions of the
+ * same row rather than let argument order decide silently. */
+static bool boot_toggle_request(boot_config_t *cfg, unsigned row, bool on,
+                                const char *token) {
+    if (cfg->req[row] >= 0 && (cfg->req[row] != 0) != on) {
+        fprintf(stderr,
+                "%s: contradicts the earlier %s -- --%s cannot be both "
+                "enabled and disabled in one run\n",
+                token, cfg->by[row], BOOT_TOGGLES[row].name);
+        return false;
+    }
+    cfg->req[row] = on ? 1 : 0;
+    if (!cfg->by[row]) cfg->by[row] = token;
+    *boot_toggle_slot(&cfg->v, row) = on;
+    return true;
+}
+
+/* Exact --name / --no-name match. Built by comparison rather than by
+ * formatting a candidate string, so there is no buffer to size and nothing for
+ * -Wformat-truncation to reason about. */
+static bool boot_long_match(const char *arg, const char *name, bool *on) {
+    if (!arg || !name || !on || strncmp(arg, "--", 2)) return false;
+    const char *rest = arg + 2;
+    bool negated = false;
+    if (!strncmp(rest, "no-", 3)) { negated = true; rest += 3; }
+    if (strcmp(rest, name)) return false;
+    *on = !negated;
+    return true;
+}
+
+typedef enum {
+    BOOT_TOGGLE_NOT_MINE = 0,   /* some other option; keep parsing */
+    BOOT_TOGGLE_ACCEPTED,
+    BOOT_TOGGLE_REJECTED
+} boot_toggle_parse_t;
+
+static boot_toggle_parse_t boot_toggle_parse(const char *arg,
+                                             boot_config_t *cfg) {
+    if (!arg || !cfg) return BOOT_TOGGLE_NOT_MINE;
+
+    /* Compounds first. A compound means MORE than any one row -- -g has always
+     * implied -F and v_display=1 as well as keeping MBX matched -- so if a
+     * token could be read either way, reading it as the single row would
+     * silently narrow a command line that already exists in the run logs.
+     * boot_toggle_table_selfcheck() refuses such an overlap outright; this
+     * order means that even if one were introduced it would fail safe. */
+    for (unsigned c = 0; c < NBOOT_COMPOUND; c++) {
+        bool on = true;
+        if (BOOT_COMPOUND[c].long_form) {
+            if (!boot_long_match(arg, BOOT_COMPOUND[c].token, &on)) continue;
+        } else if (strcmp(arg, BOOT_COMPOUND[c].token)) {
+            continue;
+        }
+        for (unsigned k = 0; BOOT_COMPOUND[c].members[k]; k++) {
+            int row = boot_toggle_index(BOOT_COMPOUND[c].members[k]);
+            if (row < 0) {
+                fprintf(stderr,
+                        "internal error: compound %s names unknown toggle %s\n",
+                        BOOT_COMPOUND[c].token, BOOT_COMPOUND[c].members[k]);
+                return BOOT_TOGGLE_REJECTED;
+            }
+            if (!boot_toggle_request(cfg, (unsigned)row, on, arg))
+                return BOOT_TOGGLE_REJECTED;
+        }
+        return BOOT_TOGGLE_ACCEPTED;
+    }
+
+    for (unsigned i = 0; i < NBOOT_TOGGLES; i++) {
+        const boot_toggle_t *row = &BOOT_TOGGLES[i];
+        bool on = false;
+        bool matched = boot_long_match(arg, row->name, &on);
+        if (!matched && row->on_alias && !strcmp(arg, row->on_alias)) {
+            matched = true;
+            on = true;
+        }
+        if (!matched && row->off_alias && !strcmp(arg, row->off_alias)) {
+            matched = true;
+            on = false;
+        }
+        if (matched)
+            return boot_toggle_request(cfg, i, on, arg)
+                       ? BOOT_TOGGLE_ACCEPTED : BOOT_TOGGLE_REJECTED;
+    }
+    return BOOT_TOGGLE_NOT_MINE;
+}
+
+/*
+ * Self-check the table itself.
+ *
+ * Two rows sharing a bool, two rows claiming the same alias, or a short flag
+ * that is both a compound and a single row all resolve a command line to
+ * something other than what it says -- and that is precisely the class of bug
+ * this layer exists to remove, so it is checked rather than reviewed. The
+ * compound/alias collision is not hypothetical: -g was written as an alias of
+ * --mbx first, which quietly dropped the -F and v_display=1 that -g has always
+ * also meant.
+ */
+static bool boot_alias_collides(const char *token) {
+    if (!token) return false;
+    for (unsigned i = 0; i < NBOOT_TOGGLES; i++)
+        if ((BOOT_TOGGLES[i].on_alias &&
+             !strcmp(BOOT_TOGGLES[i].on_alias, token)) ||
+            (BOOT_TOGGLES[i].off_alias &&
+             !strcmp(BOOT_TOGGLES[i].off_alias, token)))
+            return true;
+    return false;
+}
+
+static bool boot_toggle_table_selfcheck(void) {
+    bool ok = true;
+    for (unsigned i = 0; i < NBOOT_TOGGLES; i++) {
+        const boot_toggle_t *a = &BOOT_TOGGLES[i];
+        if (!a->name || !*a->name || !a->help || a->group >= BOOT_GROUP_COUNT ||
+            a->offset >= sizeof(boot_toggles_t))
+            ok = false;
+        /* A name beginning "no-" would make --no-<name> ambiguous. */
+        if (a->name && !strncmp(a->name, "no-", 3)) ok = false;
+        if (a->on_alias && a->off_alias && !strcmp(a->on_alias, a->off_alias))
+            ok = false;
+        for (unsigned j = i + 1; j < NBOOT_TOGGLES; j++) {
+            const boot_toggle_t *b = &BOOT_TOGGLES[j];
+            if (!strcmp(a->name, b->name) || a->offset == b->offset) ok = false;
+            const char *mine[2]  = { a->on_alias, a->off_alias };
+            const char *yours[2] = { b->on_alias, b->off_alias };
+            for (unsigned p = 0; p < 2; p++)
+                for (unsigned q = 0; q < 2; q++)
+                    if (mine[p] && yours[q] && !strcmp(mine[p], yours[q]))
+                        ok = false;
+        }
+    }
+    for (unsigned c = 0; c < NBOOT_COMPOUND; c++) {
+        if (!BOOT_COMPOUND[c].token || !*BOOT_COMPOUND[c].token ||
+            !BOOT_COMPOUND[c].members[0] || !BOOT_COMPOUND[c].help)
+            ok = false;
+        /* A token that is both a compound and a row alias reads as whichever
+         * loop runs first. Refuse it rather than depend on that order. */
+        if (!BOOT_COMPOUND[c].long_form &&
+            boot_alias_collides(BOOT_COMPOUND[c].token))
+            ok = false;
+        if (BOOT_COMPOUND[c].long_form &&
+            boot_toggle_index(BOOT_COMPOUND[c].token) >= 0)
+            ok = false;
+        for (unsigned k = 0; BOOT_COMPOUND[c].members[k]; k++)
+            if (boot_toggle_index(BOOT_COMPOUND[c].members[k]) < 0) ok = false;
+    }
+    /* Every row's default must round-trip through a fresh resolve, and a
+     * fresh resolve must record that nothing was asked for. */
+    boot_config_t probe;
+    boot_config_defaults(&probe);
+    for (unsigned i = 0; i < NBOOT_TOGGLES; i++)
+        if (boot_toggle_value(&probe.v, i) != BOOT_TOGGLES[i].def ||
+            probe.req[i] != -1)
+            ok = false;
+    /* And --name / --no-name must reach that row and only that row. */
+    for (unsigned i = 0; i < NBOOT_TOGGLES && ok; i++) {
+        for (unsigned pass = 0; pass < 2; pass++) {
+            boot_config_t t;
+            boot_config_defaults(&t);
+            char spelled[128];
+            size_t n = strlen(BOOT_TOGGLES[i].name);
+            const char *lead = pass ? "--no-" : "--";
+            size_t lead_n = strlen(lead);
+            if (lead_n + n + 1u > sizeof spelled) { ok = false; break; }
+            memcpy(spelled, lead, lead_n);
+            memcpy(spelled + lead_n, BOOT_TOGGLES[i].name, n + 1u);
+            if (boot_toggle_parse(spelled, &t) != BOOT_TOGGLE_ACCEPTED) {
+                ok = false;
+                break;
+            }
+            for (unsigned j = 0; j < NBOOT_TOGGLES; j++) {
+                bool want = j == i ? (pass == 0) : BOOT_TOGGLES[j].def;
+                if (boot_toggle_value(&t.v, j) != want) ok = false;
+                if ((t.req[j] >= 0) != (j == i)) ok = false;
+            }
+        }
+    }
+    return ok;
+}
+
+static void boot_print_indented(FILE *out, const char *prefix,
+                                const char *text) {
+    for (const char *p = text; p && *p; ) {
+        const char *nl = strchr(p, '\n');
+        size_t n = nl ? (size_t)(nl - p) : strlen(p);
+        fprintf(out, "%s%.*s\n", prefix, (int)n, p);
+        if (!nl) break;
+        p = nl + 1;
+    }
+}
+
+/* The whole point of generating this from the table is that help cannot drift
+ * from behaviour: a row with no help line, or a default that disagrees with the
+ * code, is now impossible rather than merely unlikely. */
+static void boot_print_toggle_help(FILE *out) {
+    for (unsigned g = 0; g < BOOT_GROUP_COUNT; g++) {
+        fprintf(out, "\n  %s\n", BOOT_GROUP_TITLE[g]);
+        for (unsigned i = 0; i < NBOOT_TOGGLES; i++) {
+            const boot_toggle_t *row = &BOOT_TOGGLES[i];
+            if (row->group != g) continue;
+            fprintf(out, "    %-4s--%s / --no-%s",
+                    row->def ? "ON" : "off", row->name, row->name);
+            if (row->on_alias)  fprintf(out, "   [%s enables]", row->on_alias);
+            if (row->off_alias) fprintf(out, "   [%s disables]", row->off_alias);
+            fputc('\n', out);
+            boot_print_indented(out, "         ", row->help);
+        }
+    }
+    fputs("\n  compound aliases  (one word, several rows above)\n", out);
+    for (unsigned c = 0; c < NBOOT_COMPOUND; c++) {
+        if (BOOT_COMPOUND[c].long_form)
+            fprintf(out, "    --%s / --no-%s\n",
+                    BOOT_COMPOUND[c].token, BOOT_COMPOUND[c].token);
+        else
+            fprintf(out, "    %s  (enables only; it has no negative form)\n",
+                    BOOT_COMPOUND[c].token);
+        boot_print_indented(out, "         ", BOOT_COMPOUND[c].help);
+    }
+}
+
+/* The value-taking options as they are resolved, so --print-config can report
+ * the whole machine description and not just its booleans. */
+typedef struct {
+    const char *kernel_path;
+    const char *dtpath;
+    const char *cmdline;
+    const char *rdpath;
+    const char *external_md_source;
+    const char *external_md_work;
+    const char *restore_path;
+    const char *fstab_line;
+    const char *jailbreak_payload;
+    const char *rd_form;
+    uint32_t    phys_base, virt_base, ram_size, hot_page, rd_grow_mb;
+    uint64_t    steps, win_lo, win_hi, heartbeat;
+    unsigned    ba_rev, ba_ver, ktail, nsnaps, ncall_probes, ndtov;
+} boot_values_t;
+
+static void boot_print_config(FILE *out, const boot_config_t *cfg,
+                              const boot_values_t *val) {
+    fputs("iOS3-VM resolved configuration\n", out);
+    fputs("  (\"default\" means nothing on this command line asked for it)\n",
+          out);
+    for (unsigned g = 0; g < BOOT_GROUP_COUNT; g++) {
+        fprintf(out, "\n  %s\n", BOOT_GROUP_TITLE[g]);
+        for (unsigned i = 0; i < NBOOT_TOGGLES; i++) {
+            if (BOOT_TOGGLES[i].group != g) continue;
+            fprintf(out, "    %-20s %-4s %s",
+                    BOOT_TOGGLES[i].name,
+                    boot_toggle_value(&cfg->v, i) ? "on" : "off",
+                    cfg->req[i] < 0 ? "default" : "command line");
+            if (cfg->req[i] >= 0 && cfg->by[i])
+                fprintf(out, " (%s)", cfg->by[i]);
+            fputc('\n', out);
+        }
+    }
+    fputs("\n  values\n", out);
+    fprintf(out, "    %-20s %s\n", "kernel",
+            val->kernel_path ? val->kernel_path : "(none)");
+    fprintf(out, "    %-20s 0x%08x\n", "phys-base", val->phys_base);
+    fprintf(out, "    %-20s 0x%08x\n", "virt-base", val->virt_base);
+    fprintf(out, "    %-20s %u MB\n", "ram", val->ram_size >> 20);
+    fprintf(out, "    %-20s %" PRIu64 "\n", "steps", val->steps);
+    fprintf(out, "    %-20s %s\n", "devicetree",
+            val->dtpath ? val->dtpath : "(none)");
+    fprintf(out, "    %-20s \"%s\"\n", "cmdline",
+            val->cmdline ? val->cmdline : "");
+    fprintf(out, "    %-20s %s\n", "ramdisk",
+            val->rdpath ? val->rdpath : "(none)");
+    fprintf(out, "    %-20s %s\n", "external-md source",
+            val->external_md_source ? val->external_md_source : "(none)");
+    fprintf(out, "    %-20s %s\n", "external-md work",
+            val->external_md_work ? val->external_md_work : "(none)");
+    fprintf(out, "    %-20s %s\n", "restore",
+            val->restore_path ? val->restore_path : "(none)");
+    fprintf(out, "    %-20s %u\n", "snapshot-at count", val->nsnaps);
+    fprintf(out, "    %-20s \"%s\"\n", "fstab",
+            val->fstab_line ? val->fstab_line : "");
+    fprintf(out, "    %-20s %u MB\n", "grow", val->rd_grow_mb);
+    fprintf(out, "    %-20s %s\n", "ramdisk address", val->rd_form);
+    fprintf(out, "    %-20s %s\n", "jailbreak payload",
+            val->jailbreak_payload ? val->jailbreak_payload : "(none)");
+    fprintf(out, "    %-20s rev %u ver %u\n", "boot_args", val->ba_rev,
+            val->ba_ver);
+    fprintf(out, "    %-20s [%" PRIu64 ",%" PRIu64 ")\n", "profile window",
+            val->win_lo, val->win_hi);
+    fprintf(out, "    %-20s %" PRIu64 "\n", "heartbeat", val->heartbeat);
+    fprintf(out, "    %-20s 0x%08x\n", "hot page", val->hot_page);
+    fprintf(out, "    %-20s %u\n", "abort trace lines", val->ktail);
+    fprintf(out, "    %-20s %u\n", "call probes", val->ncall_probes);
+    fprintf(out, "    %-20s %u\n", "-D overrides", val->ndtov);
+}
+
+/*
+ * Two lines in the run header, so a log describes the run that produced it.
+ *
+ * Runs record argv in their manifest, which is only self-describing while the
+ * defaults never move. Replaying an old argv against a newer binary can mean
+ * something different, and docs/BOOTLOG.md has roughly sixty entries whose
+ * reading depends on what the defaults were that day. These lines record the
+ * RESOLVED values, so the log is readable without knowing the binary:
+ *
+ *   config     : name=0|1 ...   every toggle, effective value, table order
+ *   config-cli : names          only what this command line actually asked for
+ */
+static void boot_config_emit(FILE *out, const boot_config_t *cfg) {
+    fputs("config     :", out);
+    for (unsigned i = 0; i < NBOOT_TOGGLES; i++)
+        fprintf(out, " %s=%d", BOOT_TOGGLES[i].name,
+                boot_toggle_value(&cfg->v, i) ? 1 : 0);
+    fputc('\n', out);
+
+    fputs("config-cli :", out);
+    unsigned n = 0;
+    for (unsigned i = 0; i < NBOOT_TOGGLES; i++) {
+        if (cfg->req[i] < 0) continue;
+        fprintf(out, " %s%s", cfg->req[i] ? "" : "no-", BOOT_TOGGLES[i].name);
+        n++;
+    }
+    if (!n) fputs(" (none)", out);
+    fputc('\n', out);
+}
+
+/*
+ * Capabilities that are asked for and cannot be delivered yet.
+ *
+ * --activate defaults ON and --jailbreak's two halves default off, but none of
+ * the three is implemented: two need an HFS+ file provisioner that does not
+ * exist (tools/rootfs_work.c does size-neutral in-place rewrites only, and
+ * data_ark.plist is not in the source rootfs), and the code-signing switch has
+ * been traced but not built. The rule for all three is the same -- never fail
+ * the run closed, because that would break every current workflow, and never
+ * no-op silently, because a run whose header claims a configuration it did not
+ * apply is worse than one that never offered the option.
+ */
+static void boot_capability_notes(FILE *out, const boot_config_t *cfg,
+                                  bool external_md,
+                                  const char *jailbreak_payload) {
+    if (cfg->v.activate)
+        fprintf(out,
+                "activation : requested but NOT APPLIED (no work-image file "
+                "provisioning yet)\n");
+    else
+        fprintf(out,
+                "activation : disabled by --no-activate; the guest keeps the "
+                "ActivationState it shipped with\n");
+
+    if (cfg->v.jb_codesign)
+        fprintf(out,
+                "jailbreak  : code-signing half requested but NOT APPLIED "
+                "(guest enforcement switch not implemented)\n");
+    if (cfg->v.jb_payload) {
+        fprintf(out,
+                "jailbreak  : payload half requested but NOT APPLIED (no "
+                "work-image file provisioning yet)\n");
+        if (jailbreak_payload)
+            fprintf(out,
+                    "jailbreak  : payload %s verified readable but NOT USED\n",
+                    jailbreak_payload);
+        else
+            fprintf(out,
+                    "jailbreak  : no --jailbreak-payload given; there would be "
+                    "nothing to install even once the provisioner lands\n");
+    }
+    if (!external_md && (cfg->v.activate || cfg->v.jb_payload))
+        fprintf(out,
+                "             (a writable work image means --external-md, and "
+                "this run has none)\n");
 }
 
 typedef struct {
@@ -20851,18 +21508,28 @@ static bool framebuffer_invalidate_output(const char *why) {
     return true;
 }
 
-int main(int argc, char **argv) {
-    if (argc < 2) {
-        fprintf(stderr,
-            "usage: %s <kernel.macho> [-p <physbase>] [-V <virtbase>] [-n <steps>]\n"
-            "          [-d <devicetree.bin>] [-c <cmdline>] [-a] [-M] [-F] [-g]\n"
+static void boot_print_usage(FILE *stream, const char *argv0) {
+        fprintf(stream,
+            "usage: %s <kernel.macho> [--feature | --no-feature] ...\n"
+            "          [-p <physbase>] [-V <virtbase>] [-n <steps>]\n"
+            "          [-d <devicetree.bin>] [-c <cmdline>]\n"
             "          [-r <ramdisk.img>] [-R <ram-MB>] [-X phys|virt|<addr>]\n"
             "          [-H <4-KiB-aligned-physical-page>]\n"
             "          [--call-probe <user-mode-pc>] ...\n"
             "          [--call-probe-kernel <kernel-mode-pc>] ...\n"
             "          [--external-md <immutable-source.img> <new-work.img>]\n"
+            "          [--jailbreak-payload <path>]\n"
             "          [-D <node/path>:<prop>=<value>] ...\n"
             "          [--snapshot-at <insn> <file>] ... [--restore <file>]\n"
+            "          [--print-config] [-h|--help]\n"
+            "\n"
+            "Every boolean setting has the same shape: --<name> enables it and\n"
+            "--no-<name> disables it. The historical short flags below still\n"
+            "work and mean exactly what they always did. --print-config prints\n"
+            "the resolved configuration and exits; every run's header records\n"
+            "it too, on the config: and config-cli: lines.\n"
+            "\n"
+            "value-taking options\n"
             "  --snapshot-at <insn> <file>\n"
             "      write the whole machine to <file> the moment the retired-\n"
             "      instruction counter reaches <insn>. Up to 8 checkpoints; the\n"
@@ -20925,20 +21592,12 @@ int main(int argc, char **argv) {
             "      AppleNANDFTL + IOFlashPartitionScheme; this VM has no NAND-\n"
             "      backed disk0, so launchd's fsck fails and it halts the\n"
             "      machine. The image on disk is never modified.\n"
-            "  --keep-fstab    legacy -r only: leave the stock record alone\n"
-            "      (reproduces the halt; external-md rejects this option)\n"
-            "  --ca-software-render  --external-md only, OFF by default: add\n"
-            "      an EnvironmentVariables dictionary carrying\n"
-            "      CA_ENABLE_MBX2D=0 to the SpringBoard LaunchDaemon plist in\n"
-            "      the work image, which is how QuartzCore's own code selects\n"
-            "      its software renderer. Without it CA::WindowServer defaults\n"
-            "      to MBX2D, whose global context is NULL because this VM\n"
-            "      un-matches the PowerVR GPU, and SpringBoard dies with SIGBUS\n"
-            "      in _mbx2DDisable forever. The replacement plist is the same\n"
-            "      1490 bytes as the stock one and must match it exactly once,\n"
-            "      so no HFS+ catalog change is involved and the image on disk\n"
-            "      is never modified.\n",
-            argv[0]);
+            "  --jailbreak-payload <path>\n"
+            "      the Cydia payload --jb-payload would install onto the work\n"
+            "      image. We ship none and never will, so it is supplied the\n"
+            "      same way firmware is. The path is checked for readability in\n"
+            "      preflight; nothing reads its contents yet.\n",
+            argv0);
         fputs(
             "  --grow <MB>  free space to give the guest by growing the HFS+\n"
             "      volume in the loaded RAM disk (default 32, 0 disables). The\n"
@@ -20951,36 +21610,12 @@ int main(int argc, char **argv) {
             "      static memory below topOfKernelData. Growth is capped\n"
             "      by the allocation file at a 512 MB volume. The image on disk\n"
             "      is never modified.\n"
-            "  -Y  EXPERIMENT: put the RAM disk at the BOTTOM of DRAM, below\n"
-            "      the kernel, instead of above it. Both are below\n"
-            "      topOfKernelData and so equally protected, but below the\n"
-            "      kernel the disk stops pushing that line up and the free\n"
-            "      page pool grew by its whole size in historical 768 MB\n"
-            "      experiments. Those old commands are now rejected: the\n"
-            "      corrected model reserves NOR at 0x28000000, exactly after\n"
-            "      the supported 512 MB DRAM window.\n"
-            "      It needs -V to open a gap under the kernel, and THAT is\n"
-            "      what does not work yet: with -V below 0xc0000000 the boot\n"
-            "      reaches \"BSD root: md0\" and then goes idle without ever\n"
-            "      reaching _load_init_program. Headroom on paper only.\n"
-            "  -L  print the prelinked kext load map (bundle id, load address,\n"
-            "      size) read out of __PRELINK_INFO, then exit without booting\n"
             "  -R  guest DRAM size in MB (default 128, the iPhone1,2 fitment)\n"
             "  -X  what to write as the RAMDisk address: 'phys' (the physical\n"
             "      address it was loaded at), 'virt' (the ml_static_ptovirt form,\n"
             "      the default), or a literal address to use as a sentinel\n"
             "  -b  boot_args Revision field (default 1)\n"
-            "  -M  do not synthesise /memory reg from the RAM layout\n"
-            "  -F  reserve a 320x480x32 Boot_Video buffer, seed an iBoot-\n"
-            "      compatible N82 CLCD handoff, protect the buffer below\n"
-            "      topOfKernelData, and patch the Merlot panel ID when -d is\n"
-            "      present. v_display stays 0 so the kernel can draw boot text;\n"
-            "      remove serial=1 from -c to route it there.\n"
-            "  -g  graphics experiment: implies -F, sets v_display=1, and\n"
-            "      leaves the unmodelled MBX driver matched (it may stall).\n"
-            "  -u  leave the unmodelled Synopsys OTG controller matched. It\n"
-            "      reads its hardware-configuration registers from a block we\n"
-            "      do not model and panics on the endpoint count it derives.\n"
+            "  -w  boot_args Version field (default 6, MEASURED)\n"
             "  -W  <lo>[:<hi>] restrict the sampled profile / hot-PC table /\n"
             "      per-kext attribution to instructions in [lo,hi). A whole-run\n"
             "      profile of a boot that STALLS describes the boot, not the\n"
@@ -20989,10 +21624,26 @@ int main(int argc, char **argv) {
             "  -Z  <n> print pc/mode/symbol every n instructions\n"
             "  -H  select the 4 KiB-aligned physical page traced by the bounded\n"
             "      hot-page diagnostics (default 0x39a00000)\n"
-            "  -T  how many trace lines to print at the first data abort\n"
-            "  -K  disable the post-load kernel patches (see the kpatch table)\n",
-            stderr);
-        return 1;
+            "  -T  how many trace lines to print at the first data abort\n",
+            stream);
+    fputs("\nboolean options  (--name enables, --no-name disables)\n", stream);
+    boot_print_toggle_help(stream);
+}
+
+int main(int argc, char **argv) {
+    /* --help anywhere an option may legally appear. Handled here for argv[1],
+     * and inside the walk below for every later position, so a FILE NAME that
+     * happens to read "-h" can never be mistaken for a request for help. */
+    if (argc < 2 || !strcmp(argv[1], "-h") || !strcmp(argv[1], "--help")) {
+        bool asked = argc >= 2;
+        boot_print_usage(asked ? stdout : stderr, argc ? argv[0] : "bootkernel");
+        return asked ? 0 : 1;
+    }
+    boot_config_t cfg;
+    boot_config_defaults(&cfg);
+    if (!boot_toggle_table_selfcheck()) {
+        fprintf(stderr, "internal error: boot toggle table self-check failed\n");
+        return 2;
     }
     uint32_t phys_base = S5L8900_SDRAM_BASE;
     uint32_t virt_base = 0xc0000000u;
@@ -21006,17 +21657,29 @@ int main(int argc, char **argv) {
     uint64_t steps = UINT64_C(2000000);
     const char *dtpath = NULL;
     const char *cmdline = "debug=0x8 serial=1";
-    bool stop_on_abort = false;
-    /* The boot framebuffer is reserved below topOfKernelData. It remains
-     * opt-in because headless diagnostics do not need display scanout. */
-    bool want_fb = false;
-    uint32_t v_display = 0;   /* 0 = kernel text console draws; 1 = defer to IOMFB */
-    bool want_mbx = false;    /* -g keeps the (unmodelled, hang-prone) MBX GPU driver */
-    bool want_sha1hw = false; /* -S keeps the (unmodelled) SHA-1 engine matched */
-    bool want_baseband = false; /* -B keeps the (unmodelled) baseband matched */
-    bool want_usb_otg = false; /* -u keeps the (unmodelled) Synopsys OTG matched */
-    bool no_kpatch = false;   /* -K disables the post-load kernel patches */
-    bool want_kextmap = false;/* -L prints the kext load map and exits */
+    /*
+     * The booleans all live in BOOT_TOGGLES now (see the table near
+     * boot_option_takes_value). These names are the effective values, read out
+     * of the resolved config once parsing is done, so the body of main() below
+     * is unchanged and every default is stated in exactly one place.
+     *
+     * The boot framebuffer is reserved below topOfKernelData and stays opt-in,
+     * because headless diagnostics do not need display scanout.
+     */
+    bool stop_on_abort;
+    bool want_fb;
+    uint32_t v_display;   /* 0 = kernel text console draws; 1 = defer to IOMFB */
+    bool want_mbx;        /* leave the unmodelled, hang-prone MBX GPU matched */
+    bool want_sha1hw;     /* leave the unmodelled SHA-1 engine matched        */
+    bool want_baseband;   /* leave the unmodelled baseband matched            */
+    bool want_spi2;       /* leave the baseband's SPI transport matched       */
+    bool want_usb_otg;    /* leave the unmodelled Synopsys OTG matched        */
+    bool want_vram;       /* publish /vram:reg, the fix from commit 691b727   */
+    bool want_lcd_panel_id;
+    bool no_kpatch;       /* the post-load kernel patch table is disabled     */
+    bool want_kextmap;    /* print the kext load map and exit                 */
+    /* --jailbreak-payload: the user supplies Cydia; we ship none. */
+    const char *jailbreak_payload = NULL;
     /*
      * boot_args header. MEASURED, not guessed: pe_identify_machine() at
      * 0xc01a7f22 does `ldrh r3,[r0,#2]; cmp r3,#6` and panics
@@ -21072,7 +21735,7 @@ int main(int argc, char **argv) {
      *     have come from disk0s2.
      */
     const char *fstab_line  = "/dev/md0 / hfs rw,update 0 1";
-    bool        fstab_fixup = true;
+    bool        fstab_fixup;
 
     /*
      * --ca-software-render: export CA_ENABLE_MBX2D=0 to SpringBoard, by
@@ -21106,7 +21769,7 @@ int main(int argc, char **argv) {
      * size-neutral, exactly-once-gated rewrite itself. firmware/rootfs.img is
      * never opened for writing.
      */
-    bool        ca_software_render = false;
+    bool        ca_software_render;
 
     /*
      * --grow <MB>: free space to give the guest, by growing the HFS+ volume in
@@ -21166,7 +21829,7 @@ int main(int argc, char **argv) {
      * is understood, the headroom here is arithmetic rather than usable, which
      * is exactly why -Y is off by default.
      */
-    bool rd_low = false;
+    bool rd_low;
 
     /* -W <lo>[:<hi>] profile window, -Z <n> heartbeat. Defaults are "the whole
      * run" and "silent", so neither changes an existing invocation. */
@@ -21183,7 +21846,7 @@ int main(int argc, char **argv) {
     struct { const char *path, *prop; uint32_t val; } dtov[32];
     unsigned ndtov = 0;
     char dtbuf[32][96];
-    bool patch_memnode = true;
+    bool patch_memnode;
     unsigned ktail = 512;              /* -T n: trace lines to print on abort */
 
     /*
@@ -21216,20 +21879,16 @@ int main(int argc, char **argv) {
     /* Walk the arguments one at a time: pair-stepping breaks as soon as a
      * single-argument flag like -a appears. */
     for (int i = 2; i < argc; i++) {
-        if (!strcmp(argv[i], "-a")) { stop_on_abort = true; continue; }
-        if (!strcmp(argv[i], "-F")) { want_fb = true; continue; }
-        if (!strcmp(argv[i], "-g")) { want_fb = true; v_display = 1; want_mbx = true; continue; }  /* defer to IOMFB, keep MBX */
-        if (!strcmp(argv[i], "-S")) { want_sha1hw = true; continue; }  /* keep the SHA-1 nub matched */
-        if (!strcmp(argv[i], "-B")) { want_baseband = true; continue; } /* keep the baseband nubs matched */
-        if (!strcmp(argv[i], "-u")) { want_usb_otg = true; continue; } /* keep the Synopsys OTG nub matched */
-        if (!strcmp(argv[i], "-K")) { no_kpatch = true; continue; }  /* no kernel patches */
-        if (!strcmp(argv[i], "-M")) { patch_memnode = false; continue; }
-        if (!strcmp(argv[i], "-L")) { want_kextmap = true; continue; }
-        if (!strcmp(argv[i], "--keep-fstab")) { fstab_fixup = false; continue; }
-        if (!strcmp(argv[i], "--ca-software-render")) {
-            ca_software_render = true; continue;
+        if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) {
+            boot_print_usage(stdout, argv[0]);
+            return 0;
         }
-        if (!strcmp(argv[i], "-Y")) { rd_low = true; continue; }
+        /* Every boolean, in one line, driven by BOOT_TOGGLES. */
+        switch (boot_toggle_parse(argv[i], &cfg)) {
+        case BOOT_TOGGLE_ACCEPTED: continue;
+        case BOOT_TOGGLE_REJECTED: return 1;
+        case BOOT_TOGGLE_NOT_MINE: break;
+        }
         /* Three-argument flag: must be recognised before the two-argument
          * guard below, which would otherwise stop the walk on the last pair. */
         if (!strcmp(argv[i], "--external-md")) {
@@ -21370,6 +22029,8 @@ int main(int argc, char **argv) {
             rdpath = argv[++i];
             saw_rd_option = true;
         }
+        else if (!strcmp(argv[i], "--jailbreak-payload"))
+            jailbreak_payload = argv[++i];
         else if (!strcmp(argv[i], "--fstab")) fstab_line = argv[++i];
         else if (!strcmp(argv[i], "--grow")) {
             if (!parse_u32_arg("--grow", argv[++i], &rd_grow_mb)) return 1;
@@ -21392,6 +22053,25 @@ int main(int argc, char **argv) {
             return 1;
         }
     }
+
+    /* Resolved once, here, and never re-derived. Everything below this line
+     * reads the historical names and cannot tell the table exists. */
+    want_mbx           = cfg.v.mbx;
+    want_sha1hw        = cfg.v.sha1;
+    want_baseband      = cfg.v.baseband;
+    want_spi2          = cfg.v.spi2;
+    want_usb_otg       = cfg.v.usb_otg;
+    want_fb            = cfg.v.framebuffer;
+    v_display          = cfg.v.iomfb_display ? 1u : 0u;
+    want_vram          = cfg.v.vram;
+    want_lcd_panel_id  = cfg.v.lcd_panel_id;
+    patch_memnode      = cfg.v.memory_reg;
+    no_kpatch          = !cfg.v.rtc_patch;
+    fstab_fixup        = cfg.v.fstab_fixup;
+    ca_software_render = cfg.v.ca_software_render;
+    rd_low             = cfg.v.ramdisk_low;
+    stop_on_abort      = cfg.v.stop_on_abort;
+    want_kextmap       = cfg.v.kext_map;
 
     enum {
         BOOT_STORAGE_NONE = 0,
@@ -21437,8 +22117,9 @@ int main(int argc, char **argv) {
         if (no_kpatch || !patch_memnode || rd_low || saw_rd_address_form ||
             !fstab_fixup || want_kextmap) {
             fprintf(stderr,
-                    "--external-md conflicts with -K, -M, -Y, -X, "
-                    "--keep-fstab, and -L\n");
+                    "--external-md conflicts with --no-rtc-patch (-K), "
+                    "--no-memory-reg (-M), --ramdisk-low (-Y), -X, "
+                    "--no-fstab-fixup (--keep-fstab), and --kext-map (-L)\n");
             return 1;
         }
         if (!dtpath) {
@@ -21486,6 +22167,123 @@ int main(int argc, char **argv) {
         fprintf(stderr,
                 "-L cannot be combined with --restore or --snapshot-at\n");
         return 1;
+    }
+
+    /* ------------------------------------------------- toggle coherence ---
+     *
+     * Same rule as the external-md block above: refuse before any firmware is
+     * opened. The cases below are all ones where accepting the command line
+     * would produce a run that quietly did not do what it was asked, which is
+     * the failure mode this whole option layer exists to remove.
+     *
+     * `cfg.req[...] > 0` is "the command line asked for this", as distinct from
+     * "this happens to be the default", so a default is never grounds for a
+     * rejection and no existing invocation can start failing.
+     */
+    {
+        int i_vram   = boot_toggle_index("vram");
+        int i_panel  = boot_toggle_index("lcd-panel-id");
+        int i_iomfb  = boot_toggle_index("iomfb-display");
+        int i_mbx    = boot_toggle_index("mbx");
+        int i_pcfg   = boot_toggle_index("print-config");
+        if (i_vram < 0 || i_panel < 0 || i_iomfb < 0 || i_mbx < 0 ||
+            i_pcfg < 0) {
+            fprintf(stderr, "internal error: toggle table lost a row\n");
+            return 2;
+        }
+
+        /* /vram and lcd-panel-id are only reached under --framebuffer. Turning
+         * one off on a headless run is a request that cannot be honoured, and
+         * an unhonourable request must not look like a satisfied one. */
+        if (!want_fb && cfg.req[i_vram] == 0) {
+            fprintf(stderr,
+                    "--no-vram only means anything with --framebuffer (-F/-g): "
+                    "without a framebuffer /vram is never patched at all\n");
+            return 1;
+        }
+        if (!want_fb && cfg.req[i_panel] == 0) {
+            fprintf(stderr,
+                    "--no-lcd-panel-id only means anything with --framebuffer "
+                    "(-F/-g): without a framebuffer the panel ID is never "
+                    "patched at all\n");
+            return 1;
+        }
+        /* v_display = 1 tells the kernel not to draw its own console because
+         * IOMobileFramebuffer will. With no Boot_Video buffer reserved that is
+         * a display configured to be handed to nobody. -g sets both together,
+         * so this combination is only reachable through the new long form. */
+        if (!want_fb && cfg.v.iomfb_display) {
+            fprintf(stderr,
+                    "--iomfb-display requires --framebuffer (-F): v_display=1 "
+                    "stops the kernel drawing boot text and there would be no "
+                    "Boot_Video buffer for IOMFB to take instead\n");
+            return 1;
+        }
+        /* --ca-software-render exists BECAUSE the GPU is un-matched: MBX2D's
+         * global context is NULL, so QuartzCore is pushed onto its software
+         * path. Matching the GPU and then telling QuartzCore to avoid it are
+         * two different experiments and the run can only be one of them. */
+        if (cfg.v.mbx && ca_software_render) {
+            fprintf(stderr,
+                    "--mbx conflicts with --ca-software-render: the renderer "
+                    "override exists because /arm-io/mbx is un-matched, so "
+                    "asking for both describes no single machine\n");
+            return 1;
+        }
+        /* --no-vram reproduces the pre-691b727 read-only framebuffer on
+         * purpose. --ca-software-render is a different attempt at getting the
+         * compositor to draw. Together neither result attributes. */
+        if (cfg.req[i_vram] == 0 && ca_software_render) {
+            fprintf(stderr,
+                    "--no-vram conflicts with --ca-software-render: one "
+                    "deliberately restores the read-only-framebuffer failure "
+                    "and the other tries to work around a render failure\n");
+            return 1;
+        }
+        /* Two terminal actions, one process. Printing the config and silently
+         * not printing the kext map is exactly the silent no-op this layer is
+         * meant to make impossible. */
+        if (cfg.v.print_config && want_kextmap) {
+            fprintf(stderr,
+                    "--print-config cannot be combined with --kext-map (-L): "
+                    "both end the run early and only one of them could\n");
+            return 1;
+        }
+
+        /* --jb-payload writes files into the work image, and --external-md is
+         * the only mode that has one. --jb-codesign is the kernel half and
+         * needs no image, which is the point of keeping the halves separate. */
+        if (cfg.v.jb_payload && !external_md) {
+            fprintf(stderr,
+                    "--jb-payload (and therefore --jailbreak) requires "
+                    "--external-md, the only mode with a writable work image; "
+                    "use --jb-codesign alone for the kernel-side half\n");
+            return 1;
+        }
+        /* A payload named for a run that will not install it is a typo or a
+         * misunderstanding, never an intention. */
+        if (jailbreak_payload && !cfg.v.jb_payload) {
+            fprintf(stderr,
+                    "--jailbreak-payload was given but --jb-payload is off; "
+                    "add --jailbreak (or --jb-payload), or drop the path\n");
+            return 1;
+        }
+        /* Validated here, with the other inputs, rather than at use: the point
+         * of a preflight is that a mistyped path costs a second and not a boot.
+         * Nothing reads the contents yet. */
+        if (jailbreak_payload) {
+            if (!*jailbreak_payload) {
+                fprintf(stderr, "--jailbreak-payload path must be non-empty\n");
+                return 1;
+            }
+            FILE *probe = fopen(jailbreak_payload, "rb");
+            if (!probe) {
+                fprintf(stderr, "--jailbreak-payload: cannot read %s\n",
+                        jailbreak_payload);
+                return 1;
+            }
+            fclose(probe);
+        }
     }
 
     /*
@@ -21605,6 +22403,54 @@ int main(int argc, char **argv) {
                 "internal error: call probe ring self-check failed\n");
         return 2;
     }
+
+    /* Everything is resolved and the command line has been accepted, so the
+     * configuration is now a fact about this run rather than a guess. */
+    boot_values_t resolved;
+    memset(&resolved, 0, sizeof resolved);
+    resolved.kernel_path        = argv[1];
+    resolved.dtpath             = dtpath;
+    resolved.cmdline            = cmdline;
+    resolved.rdpath             = rdpath;
+    resolved.external_md_source = external_md_source;
+    resolved.external_md_work   = external_md_work;
+    resolved.restore_path       = restore_path;
+    resolved.fstab_line         = fstab_line;
+    resolved.jailbreak_payload  = jailbreak_payload;
+    resolved.rd_form            = rd_form == RD_ADDR_PHYS    ? "phys"
+                                : rd_form == RD_ADDR_LITERAL ? "literal"
+                                                             : "virt";
+    resolved.phys_base    = phys_base;
+    resolved.virt_base    = virt_base;
+    resolved.ram_size     = ram_size;
+    resolved.hot_page     = hot_page;
+    resolved.rd_grow_mb   = rd_grow_mb;
+    resolved.steps        = steps;
+    resolved.win_lo       = win_lo;
+    resolved.win_hi       = win_hi;
+    resolved.heartbeat    = heartbeat;
+    resolved.ba_rev       = ba_rev;
+    resolved.ba_ver       = ba_ver;
+    resolved.ktail        = ktail;
+    resolved.nsnaps       = nsnaps;
+    resolved.ncall_probes = call_probe_n;
+    resolved.ndtov        = ndtov;
+
+    /* --print-config: report and stop, before the kernel, the tree, the rootfs
+     * or the work image is opened. Nothing on disk is read or written. */
+    if (cfg.v.print_config) {
+        boot_print_config(stdout, &cfg, &resolved);
+        fputc('\n', stdout);
+        boot_config_emit(stdout, &cfg);
+        boot_capability_notes(stdout, &cfg, external_md, jailbreak_payload);
+        return 0;
+    }
+
+    /* The run header's own record of what it was told to do. Emitted before
+     * the first input is opened so that even a run that dies on a missing file
+     * still says, in its log, what it would have been. */
+    boot_config_emit(stdout, &cfg);
+    boot_capability_notes(stdout, &cfg, external_md, jailbreak_payload);
 
     size_t len = 0;
     uint8_t *img = slurp(argv[1], &len);
@@ -22303,7 +23149,7 @@ external_md_work_ready:
          * it reaches the target-specific calibration path. The parent has two
          * lcd0 children, so never trust the duplicate name without checking the
          * resolved node's exact compatible string first. */
-        if (want_fb &&
+        if (want_fb && want_lcd_panel_id &&
             (!dt_node_compatible_exact(dt, dt_n, "arm-io/spi0/lcd0",
                                        "lcd,merlot") ||
              !dt_set_u32(dt, dt_n, "arm-io/spi0/lcd0", "lcd-panel-id",
@@ -22311,8 +23157,12 @@ external_md_work_ready:
             fprintf(stderr,
                     "framebuffer: cannot patch the N82 lcd-panel-id; "
                     "refusing a half-configured display\n");
+            free(dt);
             return 1;
         }
+        if (want_fb && !want_lcd_panel_id)
+            printf("  dt: /arm-io/spi0/lcd0  lcd-panel-id LEFT AT ZERO "
+                   "(--no-lcd-panel-id)\n");
         /* /memory reg: the real iBoot fills in the DRAM bank. Ours is
          * zero, which would advertise a zero-sized bank. */
         if (patch_memnode &&
@@ -22347,7 +23197,7 @@ external_md_work_ready:
          * is configured except for the one property that decides whether the
          * guest may write to it is worse than no display at all.
          */
-        if (want_fb &&
+        if (want_fb && want_vram &&
             !dt_set_reg(dt, dt_n, "vram", "reg", fb_pa, N82_FB_BYTES)) {
             fprintf(stderr,
                     "framebuffer: cannot patch the /vram reg entry; "
@@ -22355,6 +23205,13 @@ external_md_work_ready:
             free(dt);
             return 1;
         }
+        /* --no-vram is the A/B control for the fix above, so say plainly that
+         * the failure is being reproduced on purpose. Anyone reading the log
+         * of a run that renders nothing should find the reason in it. */
+        if (want_fb && !want_vram)
+            printf("  dt: /vram           reg LEFT AT {0,0} (--no-vram): "
+                   "IOSurface takes its fallback and userspace receives the "
+                   "framebuffer READ-ONLY\n");
         /* NOT touched: the shipped "DeviceTree" entry, whose address is still
          * zero. IODTFreeLoaderInfo() runs ml_static_ptovirt() over that value
          * and then ml_static_mfree()s the result, so filling it in changes what
@@ -22421,12 +23278,20 @@ external_md_work_ready:
          *
          * -B restores the old behaviour for anyone modelling the real
          * transport later; at that point this un-match should be deleted, not
-         * kept as a workaround.
+         * kept as a workaround. --baseband and --spi2 are the same two
+         * un-matches taken separately, so "which of the two nubs does
+         * CommCenter actually need?" can be answered by experiment instead of
+         * by argument; -B is still both at once and still means what it did.
          */
-        if (!want_baseband) {
+        if (!want_baseband)
             dt_unmatch(dt, dt_n, "baseband");
+        if (!want_spi2)
             dt_unmatch(dt, dt_n, "arm-io/spi2");
-        }
+        if (want_baseband != want_spi2)
+            printf("  dt: NOTE /baseband and /arm-io/spi2 differ "
+                   "(--baseband=%d --spi2=%d); the modem's SPI transport and "
+                   "the modem itself are being matched separately\n",
+                   want_baseband ? 1 : 0, want_spi2 ? 1 : 0);
 
         /*
          * Keep the Synopsys OTG controller from matching unless -u asks for it.

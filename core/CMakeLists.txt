@@ -17,6 +17,7 @@ add_library(emucore STATIC
     src/soc/tvout.c
     src/soc/i2c.c
     src/soc/pcf50635.c
+    src/soc/spi.c
     src/soc/usbotg.c
     src/soc/nor.c
     src/soc/nand.c
@@ -111,6 +112,10 @@ add_test(NAME s5l8900_machine COMMAND test_soc)
 add_executable(test_i2c tests/test_i2c.c)
 target_link_libraries(test_i2c PRIVATE emucore)
 add_test(NAME s5l8900_i2c_pmu COMMAND test_i2c)
+
+add_executable(test_spi tests/test_spi.c)
+target_link_libraries(test_spi PRIVATE emucore)
+add_test(NAME s5l8900_spi COMMAND test_spi)
 
 add_executable(test_img3 tests/test_img3.c)
 target_link_libraries(test_img3 PRIVATE emucore)
@@ -364,6 +369,17 @@ add_test(NAME external_md_cli_preflight
     COMMAND ${CMAKE_COMMAND}
             -DBOOTKERNEL=$<TARGET_FILE:bootkernel>
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_bootkernel_external_md.cmake)
+
+# The same trick applied to the option layer itself. --print-config resolves and
+# validates a whole command line and exits 0 without opening the kernel, the
+# tree or any image, so the resolver's defaults, its --no- overrides, its
+# short-flag aliases and its fail-closed rejections can all be pinned without
+# Apple firmware. These are the cases that stop a default drifting silently and
+# retroactively changing what ~60 runs in docs/BOOTLOG.md mean.
+add_test(NAME boot_option_resolution
+    COMMAND ${CMAKE_COMMAND}
+            -DBOOTKERNEL=$<TARGET_FILE:bootkernel>
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_bootkernel_options.cmake)
 
 # snapboot is the snapshot acceptance harness: it boots to a checkpoint, saves,
 # and can restore into a fresh process. Comparing snapshot bytes alone is not

@@ -923,8 +923,8 @@ static void test_wfi_wake_source_order_does_not_matter(void) {
      */
     const s5l_wake_source_t *real = NULL;
     unsigned nreal = s5l8900_wake_sources(&real);
-    CHECK(real != NULL && nreal == 3u,
-          "the machine declares %u wake sources, expected 3", nreal);
+    CHECK(real != NULL && nreal == 5u,
+          "the machine declares %u wake sources, expected 5", nreal);
     for (unsigned i = 0; i < nreal; i++)
         CHECK(real[i].name && real[i].next_edge &&
               real[i].line < 32u * S5L8900_VIC_COUNT,
@@ -1409,8 +1409,10 @@ static void test_machine_declares_its_known_windows(void) {
         { S5L8900_GPIO_BASE,   "gpio"      },
         { S5L8900_EDGEIC_BASE, "edgeic"    },
         { S5L8900_GPIOIC_BASE, "gpioic"    },
-        { S5L8900_SPI0_BASE,   "spi0"      },
-        { S5L8900_SPI1_BASE,   "spi1"      },
+        /* spi0 and spi1 are NOT here. They are device models now, so a store
+         * into one no longer reads back — see core/src/soc/spi.c. spi2 is still
+         * a stub because its interrupts are GPIO lines this machine cannot
+         * route. */
         { S5L8900_SPI2_BASE,   "spi2"      },
     };
     for (unsigned i = 0; i < sizeof WANT / sizeof WANT[0]; i++) {
@@ -1492,13 +1494,14 @@ static void test_baseband_spi_window_reads_back_its_configuration(void) {
 
     /* The three SPI windows are distinct and must not have been folded
      * together or onto a neighbour: spi2 sits two pages above the crypto block
-     * the guest also touches. */
-    m.bus.write32(m.bus.ctx, S5L8900_SPI0_BASE + 0x04u, 0xa0a0a0a0u);
-    m.bus.write32(m.bus.ctx, S5L8900_SPI1_BASE + 0x04u, 0xb1b1b1b1u);
-    CHECK(m.bus.read32(m.bus.ctx, S5L8900_SPI0_BASE + 0x04u) == 0xa0a0a0a0u &&
-          m.bus.read32(m.bus.ctx, S5L8900_SPI1_BASE + 0x04u) == 0xb1b1b1b1u &&
+     * the guest also touches. spi0 and spi1 are controllers rather than
+     * storage now, so the check is that a store into either leaves spi2's
+     * SETUP alone and lands in the right controller. */
+    m.bus.write32(m.bus.ctx, S5L8900_SPI0_BASE + SPI_SETUP, 0xa0a0a0a0u);
+    m.bus.write32(m.bus.ctx, S5L8900_SPI1_BASE + SPI_SETUP, 0xb1b1b1b1u);
+    CHECK(m.spi[0].setup == 0xa0a0a0a0u && m.spi[1].setup == 0xb1b1b1b1u &&
           m.bus.read32(m.bus.ctx, S5L8900_SPI2_BASE + 0x04u) == 0x0001d01au,
-          "the three SPI windows must be independent storage");
+          "the three SPI windows must be independent");
 
     /* The last word of the page must still be backed: a short backing store
      * once swallowed exactly the high offsets that mattered. */
@@ -1919,12 +1922,13 @@ static void test_tvout_machine_routing_and_irq30(void) {
 
     s5l_window_t windows[S5L_WINDOW_MAX];
     unsigned nw = s5l8900_windows(&m, windows, S5L_WINDOW_MAX);
-    /* 13 fixed device windows: nor, clcd, the three tv-out banks, i2c0, i2c1,
-     * usb-otg, vic0, vic1, power, uart0, timer. This count is a tripwire for a
-     * window silently vanishing from the table, so it moves only when a real
-     * device model is added or removed. */
-    CHECK(nw == m.stub_count + 13u,
-          "fixed device-window count=%u expect 13 (+%u stubs)",
+    /* 15 fixed device windows: nor, clcd, the three tv-out banks, i2c0, i2c1,
+     * spi0, spi1, usb-otg, vic0, vic1, power, uart0, timer. This count is a
+     * tripwire for a window silently vanishing from the table, so it moves only
+     * when a real device model is added or removed — it went from 13 to 15 when
+     * spi0 and spi1 stopped being stubs. */
+    CHECK(nw == m.stub_count + 15u,
+          "fixed device-window count=%u expect 15 (+%u stubs)",
           nw - m.stub_count, m.stub_count);
     bool have_ctrl = false, have_mixer = false, have_sdo = false;
     for (unsigned i = 0; i < nw && i < S5L_WINDOW_MAX; i++) {
