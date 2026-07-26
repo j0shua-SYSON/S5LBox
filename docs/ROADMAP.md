@@ -1477,6 +1477,29 @@ never block on network I/O; queues and protocol state stay portable while
 
 **Observable:** the guest resolves a hostname and fetches a URL over plain HTTP.
 
+**This route is explicitly a temporary workaround, and the owner chose it as
+one.** A real iPhone 3G reached the internet over the Marvell 88W8686 on SDIO or
+the Infineon baseband on SPI, and never over PPP on a serial line. PPP is being
+built first because every component of it is honest — the UART is modelled
+silicon, `pppd` is Apple's own shipped binary, and LCP/IPCP/HDLC-async are
+public RFCs with test vectors — so it delivers real packets through the guest's
+real network stack without inventing anything.
+
+The real radio is deferred rather than abandoned. It is deferred because the
+88W8686 executes its own firmware on its own processor, and a working 802.11
+world would mean inventing what firmware build `9.108.5.p1-26524` does — which
+TLVs it echoes, which events it sends unsolicited — none of it documented. That
+is the one thing this project does not do. The SDIO host controller is already
+driven by the guest's own `AppleS5L8900XSDIO` every boot, and the failure today
+is a bounded, graceful CMD5 timeout, so the foothold exists whenever the
+device-side work is taken on.
+
+Consequence to state plainly in any future result: working networking over this
+route means *the guest's TCP/IP stack works and reaches the internet*. It does
+not mean emulated Wi-Fi works, and the interface will be `ppp0` rather than
+`en0` or `pdp_ip0`. The standing entry is in
+[QUALITY.md](QUALITY.md#fidelity).
+
 ### Guest audio — first-device priority
 
 Audio is now a first-device track for the iPhone 6s Plus, but **no guest audio

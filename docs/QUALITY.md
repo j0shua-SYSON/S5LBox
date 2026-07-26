@@ -227,6 +227,26 @@ expire when the next run lands. The prose version is
   SpringBoard crash reports that diagnosed the current blocker into its own
   filesystem. The project ships no Apple firmware and never modifies the
   canonical inputs on disk.
+- **Networking transport is a deliberate, temporary substitution.** The chosen
+  route is PPP over a second emulated S5L8900 UART, using the guest's own stock
+  `/usr/sbin/pppd`. Every part of it is honest emulation — the UART is real
+  modelled silicon, `pppd` is Apple's own binary, and LCP/IPCP/HDLC-async are
+  specified in RFC 1661/1662/1332 with public test vectors, so no device
+  behaviour is invented and packets genuinely traverse the guest's own network
+  stack. But **a real iPhone 3G never reached the internet this way.** It used
+  the Marvell 88W8686 over SDIO, or the Infineon baseband over SPI. So the
+  interface the guest ends up with is `ppp0`, not `en0` or `pdp_ip0`, and its
+  topology is point-to-point with no ARP, no DHCP and no broadcast.
+
+  This is recorded as a **workaround, not an endpoint**. The reason it was chosen
+  over the real radio is that the 88W8686 runs its own firmware on its own
+  processor: reaching a working 802.11 world would require inventing the
+  behaviour of firmware build `9.108.5.p1-26524`, which is documented nowhere,
+  and inventing it is exactly what this project refuses to do. Modelling the
+  real SDIO controller and the real baseband remains the intended destination;
+  see `docs/ROADMAP.md`. Anyone reading a future run that reports working
+  networking should understand it as "the guest's TCP/IP stack works and can
+  reach the internet", never as "the emulated Wi-Fi hardware works".
 - **CPU.** ARM, Thumb and VFPv2 on the reached path; the ARMv6 unaligned-access
   model with `SCTLR.U` and `SCTLR.A` both honoured; MMU with XN enforcement;
   CP15. Runs are bit-exact reproducible — heartbeat PC streams are byte-identical
