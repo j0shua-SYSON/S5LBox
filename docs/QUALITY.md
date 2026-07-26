@@ -278,11 +278,14 @@ expire when the next run lands. The prose version is
 | Full Release CTest suite | **23/23 passed** on the post-fix tree | The public firmware-free suite, including storage, firmware parsers, CPU, SoC, snapshot, framebuffer bridge, and CLI preflight, is green with the corrected predicate | Private-firmware or device behavior |
 | Final focused unit binaries | `test_soc`: **5,504/0**; `test_snapshot`: **469/0** | The real `0/5/1` timing state, independent control transitions, IRQ/WFI, MMIO, CLCD, and snapshot invariants pass locally | Real Apple driver behavior after the correction |
 | Baseline targeted CTest | **3/3 passed** at `afa650e`: `s5l8900_machine`, `snapshot`, `external_md_cli_preflight` | The linked baseline targets and startup preflight passed before run19 | The post-run19 correction by itself |
+| Baseline focused unit binaries | `test_soc`: **5,498/0**; `test_snapshot`: **468/0** at `afa650e`, with the complete Release build green and **23/23** CTest on that tree | The pre-run19 hardening tree was green in the same focused binaries later reported as 5,504/0 and 469/0 | The post-run19 correction, which owns the later counts |
 | `external_md_cli_preflight` | Passed | Startup self-checks pin framebuffer PA `0x0885c000` and `topOfKernelData` `0x088f4000`; incompatible external-md/tree/RAM/root/snapshot combinations fail closed before firmware is opened | A rootfs copy, guest boot, or long storage run |
 | Strict GCC pass | Passed with `-std=c11 -Wall -Wextra -Werror` on the changed core and focused test sources | The affected portable-C paths are warning-free under the local GCC frontend | Clang, MSVC, Xcode, sanitizers, or runtime behavior |
 | Targeted diagnostic warnings | Relevant `-Wformat=2` and `-Wconversion` checks passed | New diagnostic formatting and selected conversion-sensitive paths were checked more strictly than the default build | A whole-repository conversion-clean guarantee |
 | GCC static analyzer | Passed for the changed `bootkernel` diagnostic paths | No analyzer finding remained in the new TV-out/framebuffer diagnostic control flow | Proof that the analyzer models every guest/host interaction |
 | Zero-step tool smokes | `bootkernel` and `snapboot` passed | Startup invariants, option/report plumbing, and the new non-invasive state diagnostics execute without retiring guest instructions | Any emulated-time progress or firmware stability |
+| [Hosted PMU core-tests run 30073161392](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30073161392) | Passed for exact commit `3963d22` | The S5L I2C/PCF50635 PMU model that run16-pmu-smoke exercised is green in the hosted core matrix | The later `0bc18ea` and `9bab56c` diagnostics, which runs 17 and 18 exercised and this earlier run does not cover |
+| [Hosted PMU ios-build run 30073161386](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30073161386) | Passed for the same exact commit | The same revision packaged in the unsigned iOS workflow | Private firmware, a SpringBoard boot, or device execution — hosted CI holds no firmware |
 | [Hosted core run 30088519878](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30088519878) | Passed for exact commit `afa650e284c2b27b6a4a2a2b2d772e0f68e5dac9` | Linux, macOS, Windows, warnings-as-errors, ASan+UBSan, and JIT jobs were green in GitHub Actions | Private-firmware execution or an on-device boot |
 | [Hosted iOS run 30088519892](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30088519892) | Passed for the same exact commit | The unsigned iOS workflow built successfully on the hosted runner | Installation, signing, JIT entitlement activation, or iPhone runtime stability |
 | [Hosted correction core run 30091220128](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30091220128) | Passed for exact commit `590d2248af4d7e5e92ec7bbd1be079c3bb415542` | The corrected core passed the hosted platform, strict-warning, sanitizer, and JIT matrix | Private-firmware execution or an on-device boot |
@@ -401,7 +404,8 @@ rootfs.img      C3251E7F092C939D5818E92086CB47680981CFB03731DE7B55D238C942EB5E82
 ```
 
 The external-md bridge reported zero failures. The 466,825,216-byte work image
-remained inside a retained run directory measuring 447.18 MiB on F:, and the
+remained inside the retained run directory `work/run20-tvout-timing`, measuring
+447.18 MiB on F:, and the
 guest-free low-water sample was 13,250 pages, 51.76 MiB, at instruction
 1,937,571,840.
 

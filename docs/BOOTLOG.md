@@ -1324,7 +1324,8 @@ was directly observed, UI readiness, or rendering.
 
 ### 2026-07-24: run16 completed the PMU/I2C and display-driver startup path
 
-Run16 was a fresh display-enabled 128 MiB external-md cold boot capped at
+Run16 exercised the new S5L I2C/PCF50635 model from commit `3963d22` in a fresh
+display-enabled 128 MiB external-md cold boot capped at
 **250,000,000** retired instructions. The harness reported `OK`, the host
 process exit status was 0, and stderr was empty. This was deliberately an early
 hardware-startup run: no user-mode instruction retired before the cap, so it
