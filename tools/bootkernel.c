@@ -2969,6 +2969,16 @@ SPRINGBOARD_UI_CHECKPOINTS[] = {
     { "QuartzCore:Transaction-flush-impl",           UINT32_C(0x311c8324) },
     { "QuartzCore:CABackingStoreCreate",             UINT32_C(0x311c9894) },
     { "QuartzCore:CABackingStoreUpdate",             UINT32_C(0x311c9cdc) },
+    /*
+     * The rung above CoreAnimation: does SpringBoard ever put a window on the
+     * screen at all? A layer cannot allocate a backing store for content that
+     * was never made visible, so if makeKeyAndVisible never fires then every
+     * zero below it is a consequence rather than a cause.
+     *
+     * UIKit.framework @ 324a3000, resolved with tools/dscmap.py.
+     */
+    { "UIKit:UIWindow-makeKeyAndVisible",            UINT32_C(0x3250f6ac) },
+    { "UIKit:UIWindowLayer-init",                    UINT32_C(0x325e6fbc) },
 };
 #define SPRINGBOARD_UI_CHECKPOINT_COUNT \
     ((unsigned)(sizeof SPRINGBOARD_UI_CHECKPOINTS / \
@@ -6789,6 +6799,8 @@ static int springboard_ui_checkpoint_index(uint32_t pc) {
         case UINT32_C(0x311c8324): return 119;
         case UINT32_C(0x311c9894): return 120;
         case UINT32_C(0x311c9cdc): return 121;
+        case UINT32_C(0x3250f6ac): return 122;
+        case UINT32_C(0x325e6fbc): return 123;
         default: break;
     }
     return -1;
