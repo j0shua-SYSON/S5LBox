@@ -96,10 +96,24 @@
  *
  * spi2 is the baseband transport: compatible "spi,s5l8900x,baseband", with the
  * SRDY and MRDY handshake lines exposed as GPIO platform functions and DMA
- * channel descriptors pointing at 0x3d200010/0x3d200020. Their device-tree
- * interrupt numbers are 9, 10 and 7, deliberately NOT defined here: nothing
- * wires an SPI interrupt to the VIC, and a constant that looks wired but is not
- * is the kind of landmine the GPIO base above was.
+ * channel descriptors pointing at 0x3d200010/0x3d200020.
+ *
+ * Their device-tree interrupt numbers are NOT three numbers of the same kind,
+ * and writing them as "9/10/7" conflated two different interrupt controllers.
+ * From the shipped tree:
+ *
+ *   /arm-io/spi0  interrupts {0x9}      interrupt-parent 0x00b04cc0 = /arm-io/vic
+ *   /arm-io/spi1  interrupts {0xa}      interrupt-parent 0x00b04cc0 = /arm-io/vic
+ *   /arm-io/spi2  interrupts {0x7,0x2}  interrupt-parent 0x00b05320 = /arm-io/gpio
+ *
+ * so spi0 and spi1 really are VIC vectors 9 and 10, while spi2's 7 is a GPIO
+ * interrupt — a two-cell specifier, /arm-io/gpio having #interrupt-cells 2 —
+ * on a controller that is itself a VIC child. It is emphatically not VIC
+ * vector 7, which on this SoC is the timer (S5L8900_IRQ_TIMER).
+ *
+ * None of the three is defined here: nothing wires an SPI interrupt to the VIC,
+ * and a constant that looks wired but is not is the kind of landmine the GPIO
+ * base above was.
  *
  * These are declared windows, not device models. No transfer, FIFO, DMA, chip
  * select or interrupt behaviour is emulated. They exist so the traffic is named
@@ -1031,6 +1045,74 @@ bool s5l8900_overlaps(uint32_t a, uint32_t alen, uint32_t b, uint32_t blen);
 /* Advance devices by elapsed guest CPU-clock ticks and refresh the CPU's
  * interrupt lines.  This does not retire CPU instructions. */
 void s5l8900_tick(s5l8900_t *m, uint32_t ticks);
+
+/* ---------------------------------------------------------- wake sources ---
+ *
+ * How far a WFI may fast-forward, expressed as DATA rather than as a list of
+ * devices baked into the wait itself.
+ *
+ * A core in WFI retires nothing, so the machine skips guest time to the first
+ * moment an interrupt can arrive instead of spinning the host. That skip is an
+ * optimisation, but it is one that decides what the guest can observe: a
+ * source the wait does not know about is a source that cannot wake the CPU,
+ * however correctly the device asserts its line, because time steps straight
+ * over the tick it fired on. An idle SpringBoard sits in WFI, which is exactly
+ * the state a touch, a GPIO edge or a USB event has to interrupt.
+ *
+ * So every modelled device that can raise an interrupt declares itself in the
+ * table in core/src/soc/machine.c, and the wait takes the minimum. Adding a
+ * device is a table entry, not an edit to the wait.
+ *
+ * The three-way answer is deliberately asymmetric, because the two ways of
+ * being wrong are not equally bad. Waking too early only costs host time;
+ * waking too late is a lost interrupt. S5L_WAKE_NEVER is therefore the ONLY
+ * reply that lets guest time be skipped past a source, and it means "this
+ * device cannot fire from the state it is in" — stopped, masked, not scanning.
+ * A source that merely finds the distance hard to work out must answer
+ * S5L_WAKE_UNKNOWN, and the machine then does not fast-forward at all.
+ */
+typedef enum {
+    S5L_WAKE_NEVER = 0,  /* cannot fire from this state; safe to sleep past   */
+    S5L_WAKE_AT,         /* fires in *ticks timebase ticks; *ticks is >= 1    */
+    S5L_WAKE_UNKNOWN     /* cannot say — the machine must not sleep past it   */
+} s5l_wake_kind_t;
+
+typedef struct {
+    const char *name;    /* string literal; never owned                       */
+    /*
+     * The flat device-tree interrupt number this source drives: 0-31 on VIC0,
+     * 32-63 on VIC1 (see the VIC1 note above). A source whose line is not
+     * enabled in its VIC cannot reach the CPU at all, so the wait skips it
+     * without asking — which is why `next_edge` need not re-check the VIC.
+     */
+    unsigned    line;
+    /* Distance to this source's next interrupt edge, in TIMEBASE ticks.
+     * Called only when `line` is enabled. Must not mutate the machine. */
+    s5l_wake_kind_t (*next_edge)(const s5l8900_t *m, uint32_t *ticks);
+} s5l_wake_source_t;
+
+/*
+ * The machine's wake sources. Sets `*out` to a static table and returns its
+ * length, exactly as s5l8900_soc_regions() does for physical regions.
+ */
+unsigned s5l8900_wake_sources(const s5l_wake_source_t **out);
+
+/*
+ * The earliest edge among `n` sources, in timebase ticks.
+ *
+ * Returns S5L_WAKE_AT and sets `*ticks` when every enabled source could say
+ * where it stands and at least one has a future edge; S5L_WAKE_NEVER when the
+ * enabled ones all decline (nothing to wait for, so nothing may be skipped
+ * either); S5L_WAKE_UNKNOWN if any enabled source could not answer — including
+ * one that answers S5L_WAKE_AT with a distance of zero, which is not a
+ * statement about the future. `*ticks` is untouched unless S5L_WAKE_AT.
+ *
+ * Pure with respect to the machine. Exposed so the reduction can be tested
+ * against sources the machine does not (yet) have.
+ */
+s5l_wake_kind_t s5l8900_next_wake(const s5l8900_t *m,
+                                  const s5l_wake_source_t *src, unsigned n,
+                                  uint32_t *ticks);
 
 /*
  * ram_base/ram_size define where RAM appears. Returns false on allocation

@@ -404,13 +404,128 @@ static void w32(void *c, uint32_t a, uint32_t v) { bus_write(c, a, v, 4); }
 static void w16(void *c, uint32_t a, uint16_t v) { bus_write(c, a, v, 2); }
 static void w8 (void *c, uint32_t a, uint8_t  v) { bus_write(c, a, v, 1); }
 
+/* -------------------------------------------------------- wake sources ---
+ *
+ * Which modelled devices can end a WFI, and how far away each one's next
+ * interrupt edge is.  See the wake-source block in soc.h for the contract;
+ * what follows is why this is a table at all.
+ *
+ * It used to be an if-chain inside machine_wait_for_interrupt() naming the
+ * timer, the CLCD and TV-out.  That made the fast-forward the real definition
+ * of "things that can interrupt this machine", and it was a definition nobody
+ * would think to come and update: a device could be modelled correctly, assert
+ * its line correctly, and still never be observed, because the idle skip
+ * stepped over the tick it fired on.  Declaring a source here is now the whole
+ * of wiring one into WFI, exactly as DEVICE_WINDOWS is the whole of putting a
+ * window on the bus.
+ *
+ * These three functions are the old if-chain's conditions, unchanged.  Each
+ * runs only when its VIC line is enabled, which is the test the chain applied
+ * to all three by hand.
+ */
+
+/*
+ * Can `line` reach the CPU at all?  The flat 0-63 numbering is the device
+ * tree's own and both VICs drive the core (see s5l8900_tick), so the gate is
+ * simply "enabled in the VIC that carries it".  A line outside the pair is not
+ * one this machine can route: s5l_vic_set_line() drops it, so nothing could
+ * ever assert it and there is nothing to wait for.
+ *
+ * CPSR is deliberately not consulted — an ARM1176 completes WFI on the raw
+ * line whether or not the exception is masked — and neither is INTSELECT,
+ * because IRQ and FIQ both wake the core.
+ */
+static bool wake_line_enabled(const s5l8900_t *m, unsigned line) {
+    if (line >= 32u * S5L8900_VIC_COUNT) return false;
+    return (m->vic[line / 32u].enable & (1u << (line % 32u))) != 0u;
+}
+
+/* Timer 4's decrementer.  A zero live value has not been loaded yet, so the
+ * first tick reloads it from the buffered count; zero in both is a timer that
+ * has stopped and will not expire again. */
+static s5l_wake_kind_t wake_edge_timer(const s5l8900_t *m, uint32_t *ticks) {
+    if ((m->timer.t4_state & TIMER4_STATE_START) == 0u) return S5L_WAKE_NEVER;
+    uint32_t until = m->timer.t4_value ? m->timer.t4_value : m->timer.t4_count;
+    if (until == 0u) return S5L_WAKE_NEVER;
+    *ticks = until;
+    return S5L_WAKE_AT;
+}
+
+/* The CLCD's frame (VBL) latch, which only exists while scanout is live and
+ * the controller's own mask lets it through. */
+static s5l_wake_kind_t wake_edge_clcd(const s5l8900_t *m, uint32_t *ticks) {
+    if ((m->clcd.intmask & CLCD_INT_FRAME) == 0u ||
+        !s5l_clcd_running(&m->clcd) || m->clcd.frame_ticks == 0u)
+        return S5L_WAKE_NEVER;
+    /* frame_accum is normally strictly below frame_ticks.  If a malformed
+     * in-memory caller violates that invariant, one tick is the only safe
+     * boundary: the CLCD normalizes it and asserts the frame latch there. */
+    *ticks = m->clcd.frame_accum < m->clcd.frame_ticks
+           ? m->clcd.frame_ticks - m->clcd.frame_accum
+           : 1u;
+    return S5L_WAKE_AT;
+}
+
+/* TV-out SDO VSYNC.  The device answers "no deliverable VSYNC" with zero,
+ * which is a statement about its state (stopped, masked, already pending) and
+ * therefore S5L_WAKE_NEVER rather than an unknown. */
+static s5l_wake_kind_t wake_edge_tvout(const s5l8900_t *m, uint32_t *ticks) {
+    uint32_t until = s5l_tvout_ticks_to_vsync(&m->tvout);
+    if (until == 0u) return S5L_WAKE_NEVER;
+    *ticks = until;
+    return S5L_WAKE_AT;
+}
+
+static const s5l_wake_source_t WAKE_SOURCES[] = {
+    { "timer", S5L8900_IRQ_TIMER, wake_edge_timer },
+    { "clcd",  S5L8900_IRQ_CLCD,  wake_edge_clcd  },
+    { "tvout", S5L8900_IRQ_TVOUT, wake_edge_tvout },
+};
+#define NWAKE_SOURCES (sizeof WAKE_SOURCES / sizeof WAKE_SOURCES[0])
+
+unsigned s5l8900_wake_sources(const s5l_wake_source_t **out) {
+    if (out) *out = WAKE_SOURCES;
+    return (unsigned)NWAKE_SOURCES;
+}
+
+s5l_wake_kind_t s5l8900_next_wake(const s5l8900_t *m,
+                                  const s5l_wake_source_t *src, unsigned n,
+                                  uint32_t *ticks) {
+    /* Nothing to reason about is not the same as nothing to wait for, so both
+     * of these decline to skip time rather than reporting a clear horizon. */
+    if (!m) return S5L_WAKE_UNKNOWN;
+    if (n != 0u && !src) return S5L_WAKE_UNKNOWN;
+
+    bool have = false;
+    uint32_t best = 0;
+    for (unsigned i = 0; i < n; i++) {
+        /* A masked line cannot reach the CPU, so its device cannot end this
+         * wait however close its next edge is.  Skipping it here is what makes
+         * the old chain's per-source VIC test unnecessary. */
+        if (!wake_line_enabled(m, src[i].line)) continue;
+        if (!src[i].next_edge) return S5L_WAKE_UNKNOWN;   /* declared, silent */
+
+        uint32_t at = 0;
+        s5l_wake_kind_t kind = src[i].next_edge(m, &at);
+        if (kind == S5L_WAKE_NEVER) continue;
+        /* Anything that is not a future distance stops the fast-forward: an
+         * unknown, or an "at" of zero, which cannot be a moment still to come
+         * (the caller has already refreshed every line at zero elapsed time). */
+        if (kind != S5L_WAKE_AT || at == 0u) return S5L_WAKE_UNKNOWN;
+        if (!have || at < best) { best = at; have = true; }
+    }
+
+    if (!have) return S5L_WAKE_NEVER;
+    if (ticks) *ticks = best;
+    return S5L_WAKE_AT;
+}
+
 /*
  * Complete one ARM1176 Wait For Interrupt operation without manufacturing CPU
- * work.  Only the timer, CLCD and TV-out currently advance autonomously, so the
- * first edge any can route through the VIC is the earliest point at which this
- * model can wake the core.  Advancing farther would coalesce guest-visible
- * work across an interrupt; advancing less would merely replace the kernel's
- * idle loop with a host idle loop.
+ * work.  The earliest edge any declared wake source can route through the VIC
+ * is the earliest point at which this model can wake the core.  Advancing
+ * farther would coalesce guest-visible work across an interrupt; advancing
+ * less would merely replace the kernel's idle loop with a host idle loop.
  */
 static bool machine_wait_for_interrupt(void *ctx) {
     s5l8900_t *m = ctx;
@@ -427,49 +542,20 @@ static bool machine_wait_for_interrupt(void *ctx) {
     s5l8900_tick(m, 0);
     if (m->cpu.irq_line || m->cpu.fiq_line) return true;
 
-    bool have_edge = false;
+    /*
+     * With no enabled source able to name a future edge — because none has one
+     * (NEVER), or because one of them cannot say (UNKNOWN) — there is nothing
+     * safe to fast-forward to.  Return to the interpreter's documented no-op
+     * fallback rather than hanging the host forever, inventing an interrupt, or
+     * skipping guest time past a source that might have fired inside it.  The
+     * guest still makes progress: the WFI retires, and the run loop's own tick
+     * moves time on by one.
+     */
     uint32_t edge_tb = 0;
-    const uint32_t timer_bit = 1u << S5L8900_IRQ_TIMER;
-    const uint32_t clcd_bit  = 1u << S5L8900_IRQ_CLCD;
-    const uint32_t tvout_bit = 1u << S5L8900_IRQ_TVOUT;
-
-    if ((m->vic[0].enable & timer_bit) != 0u &&
-        (m->timer.t4_state & TIMER4_STATE_START) != 0u) {
-        uint32_t until_timer = m->timer.t4_value
-                             ? m->timer.t4_value : m->timer.t4_count;
-        if (until_timer != 0u) {
-            edge_tb = until_timer;
-            have_edge = true;
-        }
-    }
-
-    if ((m->vic[0].enable & clcd_bit) != 0u &&
-        (m->clcd.intmask & CLCD_INT_FRAME) != 0u &&
-        s5l_clcd_running(&m->clcd) && m->clcd.frame_ticks != 0u) {
-        /* frame_accum is normally strictly below frame_ticks.  If a malformed
-         * in-memory caller violates that invariant, one tick is the only safe
-         * boundary: the CLCD normalizes it and asserts the frame latch there. */
-        uint32_t until_frame = m->clcd.frame_accum < m->clcd.frame_ticks
-                             ? m->clcd.frame_ticks - m->clcd.frame_accum
-                             : 1u;
-        if (!have_edge || until_frame < edge_tb) {
-            edge_tb = until_frame;
-            have_edge = true;
-        }
-    }
-
-    if ((m->vic[0].enable & tvout_bit) != 0u) {
-        uint32_t until_vsync = s5l_tvout_ticks_to_vsync(&m->tvout);
-        if (until_vsync != 0u && (!have_edge || until_vsync < edge_tb)) {
-            edge_tb = until_vsync;
-            have_edge = true;
-        }
-    }
-
-    /* With no enabled autonomous source there is nothing safe to fast-forward
-     * to.  Return to the interpreter's documented no-op fallback rather than
-     * hanging the host forever or inventing an interrupt. */
-    if (!have_edge || edge_tb == 0u) return false;
+    const s5l_wake_source_t *sources = NULL;
+    unsigned nsources = s5l8900_wake_sources(&sources);
+    if (s5l8900_next_wake(m, sources, nsources, &edge_tb) != S5L_WAKE_AT)
+        return false;
 
     uint64_t cpu_ticks;
     if (m->cpu_hz && m->tb_hz) {

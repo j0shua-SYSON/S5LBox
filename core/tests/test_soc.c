@@ -458,6 +458,504 @@ static void test_wfi_no_event_falls_back_without_time_or_host_hang(void) {
 }
 
 /*
+ * CHARACTERISATION: exactly how far WFI fast-forwards, in every shape the three
+ * modelled autonomous sources can be in.
+ *
+ * Every number below was measured against the hardcoded if-chain that decided
+ * this before the wake-source table existed. Turning that chain into data is a
+ * refactor, so all of them have to survive it unchanged — which is the whole
+ * reason this test exists rather than only the new-source tests further down.
+ *
+ * The clocks are 1:1 here so one emulated CPU tick is one timebase tick, and
+ * the distance is read off the free-running counter, which advances
+ * unconditionally. arm_step() is used rather than s5l8900_run() so the WFI's
+ * own retired tick does not land on top of the idle interval being measured.
+ */
+struct wfi_edge_case {
+    const char *name;
+    uint32_t vic_enable;
+    uint32_t t4_state, t4_count, t4_value;
+    bool     clcd_running;
+    uint32_t clcd_intmask, clcd_frame_ticks, clcd_frame_accum;
+    bool     tvout_running, tvout_unmasked;
+    uint32_t tvout_frame_ticks, tvout_frame_accum;
+    uint32_t expect_ticks;      /* timebase ticks the idle wait may cover */
+    bool     expect_wake;       /* a CPU line asserted by the time it ends */
+};
+
+static void wfi_edge_case_run(const struct wfi_edge_case *c,
+                              uint32_t *ticks, bool *wake) {
+    s5l8900_t m;
+    CHECK(s5l8900_init(&m, 0, 1u << 16), "%s: machine init failed", c->name);
+    const uint32_t wfi = 0xee070f90u;
+    s5l8900_load(&m, 0, &wfi, sizeof wfi);
+    m.cpu_hz = m.tb_hz = 1u;
+
+    m.vic[0].enable  = c->vic_enable;
+    m.timer.t4_state = c->t4_state;
+    m.timer.t4_count = c->t4_count;
+    m.timer.t4_value = c->t4_value;
+
+    m.clcd.scanning    = c->clcd_running;
+    m.clcd.ctrl        = c->clcd_running ? CLCD_CTRL_ENABLE : 0u;
+    m.clcd.gate        = c->clcd_running ? 1u : 0u;
+    m.clcd.intmask     = c->clcd_intmask;
+    m.clcd.frame_ticks = c->clcd_frame_ticks;
+    m.clcd.frame_accum = c->clcd_frame_accum;
+
+    /* Poke the TV-out run bits directly: writing them through the bus would
+     * reset the frame phase on the running transition, which is the state
+     * being set up here. */
+    if (c->tvout_running) {
+        m.tvout.regs[S5L_TVOUT_BANK_MIXER][0] = TVOUT_RUN;
+        m.tvout.regs[S5L_TVOUT_BANK_SDO][0]   = TVOUT_RUN;
+    }
+    m.tvout.regs[S5L_TVOUT_BANK_SDO][TVOUT_SDO_IRQMASK / 4u] =
+        c->tvout_unmasked ? 0u : TVOUT_SDO_MASK_VSYNC;
+    m.tvout.frame_ticks = c->tvout_frame_ticks;
+    m.tvout.frame_accum = c->tvout_frame_accum;
+
+    /* Both exceptions masked: an ARM1176 still wakes on the raw line, and the
+     * step must not vector into a handler and confuse the measurement. */
+    m.cpu.r[15] = 0;
+    m.cpu.cpsr  = ARM_MODE_SYS | ARM_CPSR_I | ARM_CPSR_F;
+    arm_status_t st = arm_step(&m.cpu);
+    CHECK(st == ARM_OK && m.cpu.r[15] == 4u && m.cpu.cycles == 1u,
+          "%s: WFI status=%d pc=%08x cycles=%llu",
+          c->name, (int)st, m.cpu.r[15], (unsigned long long)m.cpu.cycles);
+
+    *ticks = (uint32_t)m.timer.ticks;
+    *wake  = m.cpu.irq_line || m.cpu.fiq_line;
+    s5l8900_free(&m);
+}
+
+static void test_wfi_existing_source_edges_are_unchanged(void) {
+    const uint32_t T = 1u << S5L8900_IRQ_TIMER;
+    const uint32_t C = 1u << S5L8900_IRQ_CLCD;
+    const uint32_t V = 1u << S5L8900_IRQ_TVOUT;
+    const struct wfi_edge_case cases[] = {
+      /* --- timer 4's decrementer ------------------------------------------ */
+      { .name = "timer live value", .vic_enable = T,
+        .t4_state = TIMER4_STATE_START, .t4_count = 10u, .t4_value = 10u,
+        .expect_ticks = 10u, .expect_wake = true },
+      { .name = "timer reloads from a zero live value", .vic_enable = T,
+        .t4_state = TIMER4_STATE_START, .t4_count = 6u, .t4_value = 0u,
+        .expect_ticks = 6u, .expect_wake = true },
+      { .name = "timer live value below its reload", .vic_enable = T,
+        .t4_state = TIMER4_STATE_START, .t4_count = 10u, .t4_value = 3u,
+        .expect_ticks = 3u, .expect_wake = true },
+      { .name = "timer stopped at zero cannot expire", .vic_enable = T,
+        .t4_state = TIMER4_STATE_START, .t4_count = 0u, .t4_value = 0u,
+        .expect_ticks = 0u },
+      { .name = "timer armed but not started", .vic_enable = T,
+        .t4_count = 9u, .t4_value = 9u, .expect_ticks = 0u },
+      { .name = "timer running behind a masked VIC line",
+        .t4_state = TIMER4_STATE_START, .t4_count = 9u, .t4_value = 9u,
+        .expect_ticks = 0u },
+
+      /* --- CLCD frame (VBL) ----------------------------------------------- */
+      { .name = "clcd part way through a frame", .vic_enable = C,
+        .clcd_running = true, .clcd_intmask = CLCD_INT_FRAME,
+        .clcd_frame_ticks = 4u, .clcd_frame_accum = 1u,
+        .expect_ticks = 3u, .expect_wake = true },
+      { .name = "clcd at a frame boundary", .vic_enable = C,
+        .clcd_running = true, .clcd_intmask = CLCD_INT_FRAME,
+        .clcd_frame_ticks = 4u, .clcd_frame_accum = 0u,
+        .expect_ticks = 4u, .expect_wake = true },
+      /* A phase past its own period is malformed. The zero-tick refresh at the
+       * head of the wait normalises it and latches the frame there, so the wait
+       * ends immediately rather than reaching the distance calculation. */
+      { .name = "clcd phase past its period", .vic_enable = C,
+        .clcd_running = true, .clcd_intmask = CLCD_INT_FRAME,
+        .clcd_frame_ticks = 4u, .clcd_frame_accum = 9u,
+        .expect_ticks = 0u, .expect_wake = true },
+      { .name = "clcd with the VBL disabled by a zero period", .vic_enable = C,
+        .clcd_running = true, .clcd_intmask = CLCD_INT_FRAME,
+        .clcd_frame_ticks = 0u, .expect_ticks = 0u },
+      { .name = "clcd frame masked off at the controller", .vic_enable = C,
+        .clcd_running = true, .clcd_intmask = 0u,
+        .clcd_frame_ticks = 4u, .clcd_frame_accum = 1u, .expect_ticks = 0u },
+      { .name = "clcd not scanning", .vic_enable = C,
+        .clcd_intmask = CLCD_INT_FRAME,
+        .clcd_frame_ticks = 4u, .clcd_frame_accum = 1u, .expect_ticks = 0u },
+      { .name = "clcd behind a masked VIC line",
+        .clcd_running = true, .clcd_intmask = CLCD_INT_FRAME,
+        .clcd_frame_ticks = 4u, .clcd_frame_accum = 1u, .expect_ticks = 0u },
+
+      /* --- TV-out SDO VSYNC ------------------------------------------------ */
+      { .name = "tvout part way through a frame", .vic_enable = V,
+        .tvout_running = true, .tvout_unmasked = true,
+        .tvout_frame_ticks = 7u, .tvout_frame_accum = 5u,
+        .expect_ticks = 2u, .expect_wake = true },
+      { .name = "tvout vsync masked at the SDO", .vic_enable = V,
+        .tvout_running = true,
+        .tvout_frame_ticks = 7u, .tvout_frame_accum = 5u, .expect_ticks = 0u },
+      { .name = "tvout timing engines stopped", .vic_enable = V,
+        .tvout_unmasked = true,
+        .tvout_frame_ticks = 7u, .tvout_frame_accum = 5u, .expect_ticks = 0u },
+      { .name = "tvout behind a masked VIC line",
+        .tvout_running = true, .tvout_unmasked = true,
+        .tvout_frame_ticks = 7u, .tvout_frame_accum = 5u, .expect_ticks = 0u },
+
+      /* --- the minimum across several live sources ------------------------- */
+      { .name = "timer 10, clcd 3: clcd is nearer", .vic_enable = T | C,
+        .t4_state = TIMER4_STATE_START, .t4_count = 10u, .t4_value = 10u,
+        .clcd_running = true, .clcd_intmask = CLCD_INT_FRAME,
+        .clcd_frame_ticks = 4u, .clcd_frame_accum = 1u,
+        .expect_ticks = 3u, .expect_wake = true },
+      { .name = "timer 2, clcd 3: timer is nearer", .vic_enable = T | C,
+        .t4_state = TIMER4_STATE_START, .t4_count = 10u, .t4_value = 2u,
+        .clcd_running = true, .clcd_intmask = CLCD_INT_FRAME,
+        .clcd_frame_ticks = 4u, .clcd_frame_accum = 1u,
+        .expect_ticks = 2u, .expect_wake = true },
+      { .name = "timer 5, tvout 2: tvout is nearer", .vic_enable = T | V,
+        .t4_state = TIMER4_STATE_START, .t4_count = 5u, .t4_value = 5u,
+        .tvout_running = true, .tvout_unmasked = true,
+        .tvout_frame_ticks = 7u, .tvout_frame_accum = 5u,
+        .expect_ticks = 2u, .expect_wake = true },
+      { .name = "timer 1, tvout 2: timer is nearer", .vic_enable = T | V,
+        .t4_state = TIMER4_STATE_START, .t4_count = 1u, .t4_value = 1u,
+        .tvout_running = true, .tvout_unmasked = true,
+        .tvout_frame_ticks = 7u, .tvout_frame_accum = 5u,
+        .expect_ticks = 1u, .expect_wake = true },
+      { .name = "all three live, clcd nearest", .vic_enable = T | C | V,
+        .t4_state = TIMER4_STATE_START, .t4_count = 10u, .t4_value = 10u,
+        .clcd_running = true, .clcd_intmask = CLCD_INT_FRAME,
+        .clcd_frame_ticks = 4u, .clcd_frame_accum = 2u,
+        .tvout_running = true, .tvout_unmasked = true,
+        .tvout_frame_ticks = 7u, .tvout_frame_accum = 2u,
+        .expect_ticks = 2u, .expect_wake = true },
+      { .name = "all three live, tvout nearest", .vic_enable = T | C | V,
+        .t4_state = TIMER4_STATE_START, .t4_count = 10u, .t4_value = 10u,
+        .clcd_running = true, .clcd_intmask = CLCD_INT_FRAME,
+        .clcd_frame_ticks = 8u, .clcd_frame_accum = 0u,
+        .tvout_running = true, .tvout_unmasked = true,
+        .tvout_frame_ticks = 7u, .tvout_frame_accum = 4u,
+        .expect_ticks = 3u, .expect_wake = true },
+      { .name = "all three live, timer nearest", .vic_enable = T | C | V,
+        .t4_state = TIMER4_STATE_START, .t4_count = 10u, .t4_value = 1u,
+        .clcd_running = true, .clcd_intmask = CLCD_INT_FRAME,
+        .clcd_frame_ticks = 8u, .clcd_frame_accum = 0u,
+        .tvout_running = true, .tvout_unmasked = true,
+        .tvout_frame_ticks = 7u, .tvout_frame_accum = 4u,
+        .expect_ticks = 1u, .expect_wake = true },
+      { .name = "timer and clcd tie at 4", .vic_enable = T | C,
+        .t4_state = TIMER4_STATE_START, .t4_count = 4u, .t4_value = 4u,
+        .clcd_running = true, .clcd_intmask = CLCD_INT_FRAME,
+        .clcd_frame_ticks = 4u, .clcd_frame_accum = 0u,
+        .expect_ticks = 4u, .expect_wake = true },
+      /* Nothing enabled at all: the wait must not invent a boundary to run to,
+       * and must not hang the host looking for one. */
+      { .name = "no source enabled anywhere", .expect_ticks = 0u },
+    };
+
+    for (unsigned i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        uint32_t ticks = 0xffffffffu;
+        bool wake = false;
+        wfi_edge_case_run(&cases[i], &ticks, &wake);
+        CHECK(ticks == cases[i].expect_ticks && wake == cases[i].expect_wake,
+              "%s: WFI covered %u ticks (wake=%d), expected %u (wake=%d)",
+              cases[i].name, ticks, (int)wake,
+              cases[i].expect_ticks, (int)cases[i].expect_wake);
+    }
+}
+
+/* -------------------------------------------------------- wake sources ---
+ *
+ * The set of things that can end a WFI is data, so that a device modelled
+ * tomorrow is observable the day it asserts its line rather than the day
+ * somebody remembers to edit the idle path. These exercise the same reduction
+ * the machine uses, with sources the machine does not have.
+ *
+ * Each stand-in answers a fixed distance so the arithmetic under test is the
+ * reduction, not the device.
+ */
+static s5l_wake_kind_t wake_never(const s5l8900_t *m, uint32_t *ticks) {
+    (void)m; (void)ticks; return S5L_WAKE_NEVER;
+}
+static s5l_wake_kind_t wake_unknown(const s5l8900_t *m, uint32_t *ticks) {
+    (void)m; (void)ticks; return S5L_WAKE_UNKNOWN;
+}
+static s5l_wake_kind_t wake_at_3(const s5l8900_t *m, uint32_t *ticks) {
+    (void)m; *ticks = 3u; return S5L_WAKE_AT;
+}
+static s5l_wake_kind_t wake_at_9(const s5l8900_t *m, uint32_t *ticks) {
+    (void)m; *ticks = 9u; return S5L_WAKE_AT;
+}
+static s5l_wake_kind_t wake_at_20(const s5l8900_t *m, uint32_t *ticks) {
+    (void)m; *ticks = 20u; return S5L_WAKE_AT;
+}
+/* A distance of zero is not a moment still to come: every line was already
+ * refreshed at zero elapsed time before the distance was asked for. */
+static s5l_wake_kind_t wake_at_zero(const s5l8900_t *m, uint32_t *ticks) {
+    (void)m; *ticks = 0u; return S5L_WAKE_AT;
+}
+
+static void test_wfi_nearer_wake_source_wins(void) {
+    s5l8900_t m;
+    CHECK(s5l8900_init(&m, 0, 1u << 16), "machine init failed");
+
+    /* Lines 4, 5 and 6 are routable and unclaimed by any modelled device. */
+    const s5l_wake_source_t src[] = {
+        { "far",     4u, wake_at_9  },
+        { "near",    5u, wake_at_3  },
+        { "farther", 6u, wake_at_20 },
+    };
+    m.vic[0].enable = (1u << 4) | (1u << 5) | (1u << 6);
+
+    uint32_t at = 0xdeadbeefu;
+    CHECK(s5l8900_next_wake(&m, src, 3u, &at) == S5L_WAKE_AT && at == 3u,
+          "nearest edge = %u, expected 3", at);
+
+    /* Masking the nearest source's line hands the wait to the next-nearest:
+     * a source that cannot reach the CPU cannot end the wait, however close. */
+    m.vic[0].enable &= ~(1u << 5);
+    at = 0xdeadbeefu;
+    CHECK(s5l8900_next_wake(&m, src, 3u, &at) == S5L_WAKE_AT && at == 9u,
+          "with the near line masked the edge = %u, expected 9", at);
+
+    /* A source on a VIC1 line is gated by VIC1's own enable. The chain this
+     * replaced only ever read vic[0], so it could not have expressed a device
+     * on any of the device tree's lines 32-63 — the watchdog, SDIO, GPIO. */
+    const s5l_wake_source_t on_vic1[] = { { "vic1-dev", 40u, wake_at_3 } };
+    at = 0xdeadbeefu;
+    CHECK(s5l8900_next_wake(&m, on_vic1, 1u, &at) == S5L_WAKE_NEVER &&
+          at == 0xdeadbeefu,
+          "a VIC1 source with its line disabled should not offer an edge (%u)",
+          at);
+    m.vic[1].enable = 1u << (40u - 32u);
+    at = 0xdeadbeefu;
+    CHECK(s5l8900_next_wake(&m, on_vic1, 1u, &at) == S5L_WAKE_AT && at == 3u,
+          "a VIC1 source with its line enabled gave %u, expected 3", at);
+
+    /* A line outside the pair is one nothing can ever assert. */
+    const s5l_wake_source_t unroutable[] = { { "line-64", 64u, wake_at_3 } };
+    CHECK(s5l8900_next_wake(&m, unroutable, 1u, NULL) == S5L_WAKE_NEVER,
+          "an unroutable line offered an edge");
+
+    s5l8900_free(&m);
+}
+
+static void test_wfi_never_source_is_ignored_not_treated_as_zero(void) {
+    s5l8900_t m;
+    CHECK(s5l8900_init(&m, 0, 1u << 16), "machine init failed");
+    m.vic[0].enable = (1u << 3) | (1u << 4) | (1u << 5);
+
+    /* "Never" is an absence, not a distance. Folded in as zero it would pin
+     * every wait at the current instant and turn WFI into a busy loop. */
+    const s5l_wake_source_t mixed[] = {
+        { "quiet-before", 3u, wake_never },
+        { "live",         4u, wake_at_9  },
+        { "quiet-after",  5u, wake_never },
+    };
+    uint32_t at = 0xdeadbeefu;
+    CHECK(s5l8900_next_wake(&m, mixed, 3u, &at) == S5L_WAKE_AT && at == 9u,
+          "a quiet source displaced the live edge: %u, expected 9", at);
+
+    /* With every source quiet there is no edge at all — and the distance is
+     * left untouched rather than reported as zero ticks away. */
+    const s5l_wake_source_t all_quiet[] = {
+        { "quiet-a", 3u, wake_never },
+        { "quiet-b", 4u, wake_never },
+    };
+    at = 0xdeadbeefu;
+    CHECK(s5l8900_next_wake(&m, all_quiet, 2u, &at) == S5L_WAKE_NEVER &&
+          at == 0xdeadbeefu,
+          "all-quiet reported kind=%d ticks=%u, expected NEVER and no distance",
+          (int)s5l8900_next_wake(&m, all_quiet, 2u, NULL), at);
+
+    s5l8900_free(&m);
+}
+
+static void test_wfi_unpredictable_source_stops_the_fast_forward(void) {
+    s5l8900_t m;
+    CHECK(s5l8900_init(&m, 0, 1u << 16), "machine init failed");
+    m.vic[0].enable = (1u << 3) | (1u << 4) | (1u << 5);
+
+    const s5l_wake_source_t alone[] = { { "vague", 3u, wake_unknown } };
+    CHECK(s5l8900_next_wake(&m, alone, 1u, NULL) == S5L_WAKE_UNKNOWN,
+          "a source that cannot say when it fires must stop the skip");
+
+    /* An unknown outranks a known edge. Running to the known one could carry
+     * guest time straight over the moment the vague source fired. */
+    const s5l_wake_source_t with_known[] = {
+        { "vague", 3u, wake_unknown },
+        { "near",  4u, wake_at_3    },
+    };
+    uint32_t at = 0xdeadbeefu;
+    CHECK(s5l8900_next_wake(&m, with_known, 2u, &at) == S5L_WAKE_UNKNOWN &&
+          at == 0xdeadbeefu,
+          "a known edge overrode an unknown one: kind=%d ticks=%u",
+          (int)s5l8900_next_wake(&m, with_known, 2u, NULL), at);
+
+    /* Zero is not a future distance, and a declared source with no callback
+     * is a source that has not said anything. Both fail safe. */
+    const s5l_wake_source_t zero_distance[] = { { "now", 3u, wake_at_zero } };
+    CHECK(s5l8900_next_wake(&m, zero_distance, 1u, NULL) == S5L_WAKE_UNKNOWN,
+          "a zero distance was accepted as an edge");
+    const s5l_wake_source_t no_callback[] = { { "silent", 3u, NULL } };
+    CHECK(s5l8900_next_wake(&m, no_callback, 1u, NULL) == S5L_WAKE_UNKNOWN,
+          "a source with no next_edge was accepted");
+
+    /* But an unknown behind a masked line still cannot reach the CPU, so it
+     * does not get to hold the whole machine back. */
+    const s5l_wake_source_t masked_vague[] = {
+        { "vague", 9u, wake_unknown },     /* line 9 is not enabled above */
+        { "near",  4u, wake_at_9    },
+    };
+    at = 0xdeadbeefu;
+    CHECK(s5l8900_next_wake(&m, masked_vague, 2u, &at) == S5L_WAKE_AT &&
+          at == 9u,
+          "a masked unknown blocked the skip anyway: %u", at);
+
+    /* Degenerate inputs decline rather than guess. An empty table is the one
+     * that says NEVER: nothing declared, so nothing to wait for. */
+    CHECK(s5l8900_next_wake(&m, NULL, 0u, NULL) == S5L_WAKE_NEVER,
+          "an empty source table should offer no edge");
+    CHECK(s5l8900_next_wake(&m, NULL, 2u, NULL) == S5L_WAKE_UNKNOWN,
+          "a null table with a non-zero count should fail safe");
+    CHECK(s5l8900_next_wake(NULL, alone, 1u, NULL) == S5L_WAKE_UNKNOWN,
+          "a null machine should fail safe");
+    s5l8900_free(&m);
+
+    /*
+     * End to end: when nothing can name an edge the machine must not fast
+     * forward, at all, and must not hang the host looking for one. The clocks
+     * are left at the guest's real 412 MHz : 6 MHz here so that a wrongly
+     * unbounded wait would show up as a large jump in guest time.
+     */
+    s5l8900_t idle;
+    CHECK(s5l8900_init(&idle, 0, 1u << 16), "machine init failed");
+    const uint32_t program[] = { 0xee070f90u, 0xee070f90u, 0xe3a02007u };
+    s5l8900_load(&idle, 0, program, sizeof program);
+    idle.timer.t4_state = TIMER4_STATE_START;      /* armed, but VIC-masked */
+    idle.timer.t4_count = idle.timer.t4_value = 9u;
+    idle.cpu.cpsr = ARM_MODE_SYS;
+    for (unsigned i = 0; i < 2u; i++) {
+        arm_status_t st = arm_step(&idle.cpu);
+        CHECK(st == ARM_OK && idle.cpu.r[15] == 4u * (i + 1u),
+              "idle WFI %u: status=%d pc=%08x", i, (int)st, idle.cpu.r[15]);
+    }
+    CHECK(idle.timer.ticks == 0u && idle.tb_accum == 0u &&
+          idle.timer.t4_value == 9u,
+          "an unpredictable machine still skipped time: ticks=%llu frac=%llu",
+          (unsigned long long)idle.timer.ticks,
+          (unsigned long long)idle.tb_accum);
+    arm_status_t st = arm_step(&idle.cpu);
+    CHECK(st == ARM_OK && idle.cpu.r[2] == 7u,
+          "host made no progress past the idle WFIs: status=%d r2=%u",
+          (int)st, idle.cpu.r[2]);
+    s5l8900_free(&idle);
+}
+
+/* Every ordering of the same sources must reduce to the same answer: the wait
+ * takes a minimum, and a minimum has no order. */
+static void permute_wake_check(const s5l8900_t *m, const s5l_wake_source_t *src,
+                               unsigned n, unsigned *order, bool *used,
+                               unsigned k, s5l_wake_kind_t want,
+                               uint32_t want_ticks, const char *what) {
+    /* n! permutations, into fixed buffers. Six is already 720 orderings; a
+     * table that outgrows this wants sampling rather than exhaustion. */
+    if (n > 6u) {
+        CHECK(false, "%s: %u sources is too many to permute exhaustively",
+              what, n);
+        return;
+    }
+    if (k == n) {
+        s5l_wake_source_t shuffled[8];
+        char shown[16];
+        unsigned p = 0;
+        for (unsigned i = 0; i < n; i++) {
+            shuffled[i] = src[order[i]];
+            if (p + 1u < sizeof shown) shown[p++] = (char)('0' + order[i]);
+        }
+        shown[p] = '\0';
+        uint32_t at = 0xdeadbeefu;
+        s5l_wake_kind_t got = s5l8900_next_wake(m, shuffled, n, &at);
+        CHECK(got == want &&
+              (want != S5L_WAKE_AT || at == want_ticks),
+              "%s: order %s gave kind=%d ticks=%u, expected kind=%d ticks=%u",
+              what, shown, (int)got, at, (int)want, want_ticks);
+        return;
+    }
+    for (unsigned i = 0; i < n; i++) {
+        if (used[i]) continue;
+        used[i] = true;
+        order[k] = i;
+        permute_wake_check(m, src, n, order, used, k + 1u, want, want_ticks,
+                           what);
+        used[i] = false;
+    }
+}
+
+static void test_wfi_wake_source_order_does_not_matter(void) {
+    s5l8900_t m;
+    CHECK(s5l8900_init(&m, 0, 1u << 16), "machine init failed");
+    m.vic[0].enable = (1u << 3) | (1u << 4) | (1u << 5) | (1u << 6);
+    unsigned order[8];
+    bool used[8] = { false, false, false, false, false, false, false, false };
+
+    const s5l_wake_source_t four[] = {
+        { "quiet",   3u, wake_never },
+        { "far",     4u, wake_at_9  },
+        { "near",    5u, wake_at_3  },
+        { "farther", 6u, wake_at_20 },
+    };
+    permute_wake_check(&m, four, 4u, order, used, 0u, S5L_WAKE_AT, 3u,
+                       "nearest of four");
+
+    /* An unknown dominates from any position, not just from the front. */
+    const s5l_wake_source_t vague[] = {
+        { "quiet", 3u, wake_never   },
+        { "far",   4u, wake_at_9    },
+        { "vague", 5u, wake_unknown },
+        { "near",  6u, wake_at_3    },
+    };
+    permute_wake_check(&m, vague, 4u, order, used, 0u, S5L_WAKE_UNKNOWN, 0u,
+                       "unknown among four");
+
+    /*
+     * And the machine's own table, permuted, against a live state where each
+     * of the three has a different distance: timer 10, CLCD 2, TV-out 5.
+     * This also proves the table itself is well formed — every entry routable
+     * and answerable — which a bad new entry would break here rather than in a
+     * boot.
+     */
+    const s5l_wake_source_t *real = NULL;
+    unsigned nreal = s5l8900_wake_sources(&real);
+    CHECK(real != NULL && nreal == 3u,
+          "the machine declares %u wake sources, expected 3", nreal);
+    for (unsigned i = 0; i < nreal; i++)
+        CHECK(real[i].name && real[i].next_edge &&
+              real[i].line < 32u * S5L8900_VIC_COUNT,
+              "wake source %u is malformed: name=%s line=%u",
+              i, real[i].name ? real[i].name : "(null)", real[i].line);
+
+    m.vic[0].enable = (1u << S5L8900_IRQ_TIMER) | (1u << S5L8900_IRQ_CLCD) |
+                      (1u << S5L8900_IRQ_TVOUT);
+    m.timer.t4_state = TIMER4_STATE_START;
+    m.timer.t4_count = m.timer.t4_value = 10u;
+    m.clcd.scanning = true;
+    m.clcd.ctrl = CLCD_CTRL_ENABLE;
+    m.clcd.gate = 1u;
+    m.clcd.intmask = CLCD_INT_FRAME;
+    m.clcd.frame_ticks = 6u;
+    m.clcd.frame_accum = 4u;
+    m.tvout.regs[S5L_TVOUT_BANK_MIXER][0] = TVOUT_RUN;
+    m.tvout.regs[S5L_TVOUT_BANK_SDO][0]   = TVOUT_RUN;
+    m.tvout.regs[S5L_TVOUT_BANK_SDO][TVOUT_SDO_IRQMASK / 4u] = 0u;
+    m.tvout.frame_ticks = 9u;
+    m.tvout.frame_accum = 4u;
+
+    uint32_t at = 0xdeadbeefu;
+    CHECK(s5l8900_next_wake(&m, real, nreal, &at) == S5L_WAKE_AT && at == 2u,
+          "the machine's own table gave %u, expected the CLCD's 2", at);
+    permute_wake_check(&m, real, nreal, order, used, 0u, S5L_WAKE_AT, 2u,
+                       "the machine's own table");
+    s5l8900_free(&m);
+}
+
+/*
  * Guest time must advance at the guest's own CPU:timebase ratio, not once per
  * instruction. Running the timebase at instruction rate makes time pass ~68x
  * too fast relative to work done, so the kernel never finishes servicing one
@@ -2219,6 +2717,11 @@ int main(void) {
     test_wfi_stops_at_earliest_deliverable_device_edge();
     test_wfi_lump_preserves_non_waking_device_side_effects();
     test_wfi_no_event_falls_back_without_time_or_host_hang();
+    test_wfi_existing_source_edges_are_unchanged();
+    test_wfi_nearer_wake_source_wins();
+    test_wfi_never_source_is_ignored_not_treated_as_zero();
+    test_wfi_unpredictable_source_stops_the_fast_forward();
+    test_wfi_wake_source_order_does_not_matter();
     test_timer_interrupt_reaches_handler();
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
