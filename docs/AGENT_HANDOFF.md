@@ -3115,11 +3115,42 @@ Reset is group 6 bit 6, power_ldo group 7 bit 1.
 hatch, but it is direction-sensitive and getting it backwards uninstalls the
 driver:
 
-| moment | required answer |
+| probe # | required answer |
 |---|---|
-| probe 1, in `finishStarting` `0xc0442670`, before reset | **in HBPP** — accepted BE16 set `{0x1AA1,0x18E1,0x1F01,0x4879,0x4969,0x4BC1,0x4AD1}` |
-| probes 2-4, in `attemptToBootloadDevice` `0xc04414c4` | **not in HBPP** — zeros |
+| **1st exchange**, from `finishStarting` `0xc0442670` | **in HBPP** — accepted BE16 set `{0x1AA1,0x18E1,0x1F01,0x4879,0x4969,0x4BC1,0x4AD1}` |
+| **every later exchange**, from `attemptToBootloadDevice` `0xc04414c4` | **not in HBPP** — zeros |
 | then `getReportInfo(0xD3)` | must succeed → `isBootloaded()` true |
+
+> **Corrected again, 2026-07-26.** A previous revision said the device should
+> discriminate on `resetDevice(TRUE)` having occurred between probe 1 and the
+> rest. **It cannot: `resetDevice` is not on this path at all.**
+> `attemptToBootloadDevice` calls `isInHBPP` as its *first act* with nothing
+> before it — no reset, no GPIO write, no delay, no power call (`0xc04414d0`-
+> `0xc04414dc`) — and the retry loop re-enters with nothing in between
+> (`c043aa0c`/`c043aa10`), so attempts 1, 2 and 3 are **byte-identical on the
+> wire**. A whole-range scan for `ldr pc,[r3,#0x44c]` across
+> `0xc0437000..0xc0446a00` finds one call site, `0xc0438160`, in a third vtable
+> reached from none of these paths. `setDownloadMode` is also a no-op here
+> (`function-enable_download` is absent from the node, so it returns
+> `kIOReturnUnsupported`). **The model must use a probe counter — accept the
+> first exchange, decline every later one.** There is no other signal.
+>
+> Two consequences. Answering "in HBPP" runs `strb r3,[r4,#0x1bc]` at
+> `0xc04426fc`, and `deviceReadResultData` (`0xc0441324`) then **rejects `0xEB`
+> unless `0x1bc != 0`** — so the frame opcode is downstream of the HBPP answer.
+> And `isBootloaded` (`0xc043ac58`) is `getReportInfo(0xD3, &out4, retries=4,
+> useCache=0)` with `rsbs r0,r0,#1 / movlo r0,#0`: **true iff the call returns
+> 0, inspecting no payload field**, and `useCache=0` forces a real transaction.
+> Its wire format is `tx[0]=0xE3, tx[1]=id, tx[14..15]=LE16(0xE3+id)`, a 16/16
+> transfer, `IODelay(25)`, then an identical 16-byte transfer carrying the
+> answer, which must have `rx[0]==0xE3` and `LE16(rx[14..15]) ==
+> sum16(rx[0..13])`.
+>
+> Also: the failure literal has a **double space** after the colon. Grep `HBPP`.
+> And slot `0x458` holds `0xc044061c`, a bare `bx lr` leaving `r0 = this`, which
+> makes the following `IOSleep(r0)` nonsensical; the vtable base is anchored
+> twice independently so it is probably not a mis-index, but it is unexplained
+> and nothing should be built on it.
 
 Answering "not in HBPP" at probe 1 makes `finishStarting` return false and the
 driver detaches. Cost of the skip is three cosmetic `Bootload attempt N of 3
