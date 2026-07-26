@@ -43,3 +43,6 @@ ios3vm_nand_*.img
 *.a
 *.exe
 compile_commands.json
+
+# Agent scratch config (codex CLI)
+/.codex/
