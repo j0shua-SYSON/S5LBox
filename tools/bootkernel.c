@@ -355,7 +355,7 @@ static bool boot_option_takes_value(const char *option) {
         "-D", "-W", "-Z", "-p", "--restore", "-V", "-n", "-T",
         "-d", "-c", "-b", "-w", "-r", "--fstab", "--grow", "-R",
         "-X", "-H", "--call-probe", "--call-probe-kernel",
-        "--jailbreak-payload"
+        "--jailbreak-payload", "--touch"
     };
 
     if (!option) return false;
@@ -886,7 +886,7 @@ typedef struct {
     const uint32_t *hot_page;            /* hot_page_n entries; -H is repeatable */
     unsigned    hot_page_n;
     uint64_t    steps, win_lo, win_hi, heartbeat;
-    unsigned    ba_rev, ba_ver, ktail, nsnaps, ncall_probes, ndtov;
+    unsigned    ba_rev, ba_ver, ktail, nsnaps, ncall_probes, ndtov, ntouch;
 } boot_values_t;
 
 static void boot_print_config(FILE *out, const boot_config_t *cfg,
@@ -944,6 +944,7 @@ static void boot_print_config(FILE *out, const boot_config_t *cfg,
     fputc('\n', out);
     fprintf(out, "    %-20s %u\n", "abort trace lines", val->ktail);
     fprintf(out, "    %-20s %u\n", "call probes", val->ncall_probes);
+    fprintf(out, "    %-20s %u\n", "touch taps", val->ntouch);
     fprintf(out, "    %-20s %u\n", "-D overrides", val->ndtov);
 }
 
@@ -5467,6 +5468,38 @@ typedef struct {
  * a perfectly valid encoding (a translation fault), and so is 0xffffffff, so
  * absence has to be carried out of band rather than as a magic value.
  */
+/* --- DIAGNOSTIC: the scheduled tap (--touch) -------------------------------
+ *
+ * WHAT THIS IS AND IS NOT. It sets PENDING CONTACT STATE on the emulated Z2 at
+ * a chosen instruction and lets the guest's own AppleMultitouchZ2SPI discover
+ * it through the attention line and read it over SPI in its own encoding. It
+ * does not enqueue into MTIODataQueue, synthesise a GSEvent or touch UIKit. A
+ * tap that fails to reach SpringBoard must LOOK like it failed, because that is
+ * the only way the thing between here and there gets found.
+ *
+ * A tap is two reports: the finger lands, and after `hold` instructions it
+ * lifts. The device holds ONE report at a time and refuses a second while the
+ * first is unread, so each stage RETRIES on every subsequent instruction until
+ * the device accepts it -- and counts the refusals, because "the guest never
+ * drained the first report" and "the injection was never attempted" are
+ * different failures that must not look alike.
+ */
+#define TOUCH_TAP_MAX  8u
+/* Default hold. ~24 M instructions is a few tens of milliseconds of guest time
+ * at this machine's rate -- long enough to be a tap and not a flick, short
+ * enough that a boot cap of 1.6e9 leaves room for both halves. */
+#define TOUCH_HOLD_DEFAULT 24000000ull
+
+typedef struct {
+    uint64_t at;          /* first instruction at which the down is tried  */
+    uint64_t hold;        /* instructions between an accepted down and up  */
+    uint16_t x, y;        /* panel pixels                                  */
+    unsigned stage;       /* 0 = want down, 1 = want up, 2 = done          */
+    uint64_t down_at;     /* instruction at which the down was ACCEPTED    */
+    uint64_t up_at;
+    uint64_t refusals;    /* device said no; see s5l_mtz2_set_contacts     */
+} touch_tap_t;
+
 typedef enum {
     FAULT_DESC_ABSENT = 0,      /* nothing was attempted */
     FAULT_DESC_OK,              /* word read out of guest DRAM */
@@ -5739,6 +5772,11 @@ static struct {
     unsigned          call_probe_w;      /* ring write cursor */
     uint64_t          call_probe_total;  /* captures ever made, all PCs */
     call_probe_record_t call_probe_log[CALL_PROBE_RING];
+
+    /* --- the scheduled tap; --touch --------------------------------------
+     * touch_n is the hot-loop gate, exactly as call_probe_n is. */
+    unsigned          touch_n;
+    touch_tap_t       touch[TOUCH_TAP_MAX];
 } G;
 
 /*
@@ -16318,6 +16356,97 @@ static void call_probe_report(void) {
     }
 }
 
+/*
+ * Advance every scheduled tap by one instruction.
+ *
+ * Deliberately never inlined, for the same reason call_probe_note() is not:
+ * the step loop's whole cost when no tap is configured is one test of a global
+ * that is never written after startup.
+ */
+static BOOTKERNEL_NOINLINE void touch_tap_step(uint64_t n) {
+    if (!G.mach) return;
+    for (unsigned i = 0; i < G.touch_n; i++) {
+        touch_tap_t *t = &G.touch[i];
+        s5l_mt_contact_t c;
+
+        if (t->stage == 0u) {
+            if (n < t->at) continue;
+        } else if (t->stage == 1u) {
+            if (n < t->down_at + t->hold) continue;
+        } else {
+            continue;
+        }
+
+        memset(&c, 0, sizeof c);
+        c.id = 1u;
+        c.x  = t->x;
+        c.y  = t->y;
+        /*
+         * A landed finger and a lifted one, in the device's own phase
+         * encoding. The contact ellipse is the same either way -- a real part
+         * reports the last measured geometry on the frame that breaks the
+         * touch -- but the pressure is NOT: the parsed contact's Z amplitude
+         * is what the HID plugin tests for "is this finger down", so a lift
+         * carries zero there and BreakTouch in the stage byte, and the two
+         * agree instead of contradicting.
+         */
+        c.phase    = t->stage == 0u ? MTZ2_PHASE_MAKE_TOUCH
+                                    : MTZ2_PHASE_BREAK_TOUCH;
+        c.pressure = t->stage == 0u ? 160u : 0u;
+        c.major    = 24u;
+        c.minor    = 20u;
+
+        if (!s5l_mtz2_set_contacts(&G.mach->mtz2, &c, 1u)) {
+            t->refusals++;
+            continue;      /* the device is busy or not ready; try next step */
+        }
+        if (t->stage == 0u) { t->down_at = n; t->stage = 1u; }
+        else                { t->up_at   = n; t->stage = 2u; }
+    }
+}
+
+static void touch_report(void) {
+    if (!G.touch_n) return;
+    const s5l_mtz2_t *d = G.mach ? &G.mach->mtz2 : NULL;
+
+    printf("\n=== TOUCH: SCHEDULED TAPS (%u) ===\n", G.touch_n);
+    printf("    A tap is accepted by the DEVICE, not by the guest. `down`/`up`\n"
+           "    are the instructions at which s5l_mtz2_set_contacts() returned\n"
+           "    true; `refused` counts instructions on which it returned false,\n"
+           "    which means the part was held in reset, had not yet answered the\n"
+           "    HBPP probe, or still held an unread report.\n");
+    for (unsigned i = 0; i < G.touch_n; i++) {
+        const touch_tap_t *t = &G.touch[i];
+        printf("    tap %u  at %-12llu (%3u,%3u) hold %-10llu  ",
+               i, (unsigned long long)t->at, t->x, t->y,
+               (unsigned long long)t->hold);
+        if (t->stage == 0u) printf("NEVER ACCEPTED");
+        else if (t->stage == 1u)
+            printf("down @%llu, up NEVER ACCEPTED",
+                   (unsigned long long)t->down_at);
+        else
+            printf("down @%llu up @%llu",
+                   (unsigned long long)t->down_at,
+                   (unsigned long long)t->up_at);
+        printf("  refused %llu\n", (unsigned long long)t->refusals);
+    }
+    if (!d) return;
+    printf("    device: queued %llu  length-reads %llu  data-reads %llu  "
+           "read %llu  refused %llu\n",
+           (unsigned long long)d->frames_queued,
+           (unsigned long long)d->length_reads,
+           (unsigned long long)d->data_reads,
+           (unsigned long long)d->frames_read,
+           (unsigned long long)d->injects_refused);
+    printf("    pins:   reset-edges %llu  reset-bytes %llu  power-edges %llu  "
+           "power-level %u  in-reset %u  hbpp-answered %u\n",
+           (unsigned long long)d->resets,
+           (unsigned long long)d->reset_bytes,
+           (unsigned long long)d->power_edges,
+           d->power_level ? 1u : 0u, d->in_reset ? 1u : 0u,
+           d->hbpp_answered ? 1u : 0u);
+}
+
 static void framebuffer_surface_refresh(void) {
     G.framebuffer_surface_cache_valid = true;
     G.framebuffer_surface_active = false;
@@ -21622,6 +21751,7 @@ static void boot_print_usage(FILE *stream, const char *argv0) {
             "          [-H <4-KiB-aligned-physical-page>]\n"
             "          [--call-probe <user-mode-pc>] ...\n"
             "          [--call-probe-kernel <kernel-mode-pc>] ...\n"
+            "          [--touch <at>:<x>:<y>[:<hold>]] ...\n"
             "          [--external-md <immutable-source.img> <new-work.img>]\n"
             "          [--jailbreak-payload <path>]\n"
             "          [-D <node/path>:<prop>=<value>] ...\n"
@@ -21682,6 +21812,18 @@ static void boot_print_usage(FILE *stream, const char *argv0) {
             "      stores, e.g. r2 at 0xc0526a4c — the IOSurfaceRootUserClient\n"
             "      mapping options word, whose bit 12 is kIOMapReadOnly — next to\n"
             "      r0 at 0xc0526a38, the descriptor direction that chose it.\n"
+            "  --touch <at>:<x>:<y>[:<hold>]  repeatable, up to 8. At instruction\n"
+            "      <at>, set the emulated Z2's pending contact state to one finger\n"
+            "      down at panel pixel (<x>,<y>); <hold> instructions after that\n"
+            "      was ACCEPTED (default 24,000,000) set it to the same finger\n"
+            "      lifting. The DEVICE then raises its attention line and answers\n"
+            "      the guest driver's own two SPI reads. Nothing here enqueues to\n"
+            "      MTIODataQueue, builds a GSEvent or calls UIKit, so a tap that\n"
+            "      does not reach SpringBoard looks broken instead of being faked\n"
+            "      past. Each stage retries every instruction until the device\n"
+            "      accepts it, and the refusals are reported: \"the guest never\n"
+            "      read the first report\" and \"the tap was never attempted\" are\n"
+            "      different failures and must not print the same.\n"
             "  -D  patch a 4-byte device-tree property in the in-memory copy\n"
             "      (empty path == root), e.g. -D cpus/cpu0:timebase-frequency=6000000\n"
             "  -r  load a raw disk image into DRAM, publish it as the RAMDisk\n"
@@ -21762,6 +21904,14 @@ int main(int argc, char **argv) {
     uint32_t call_probe_pcs[CALL_PROBE_PC_MAX] = {0};
     call_probe_mode_t call_probe_modes[CALL_PROBE_PC_MAX] = {CALL_PROBE_MODE_USER};
     unsigned call_probe_n = 0;
+    /* --touch, for exactly the same reason. Writing a parsed tap straight into
+     * G is a bug that cannot be seen from --print-config -- which exits before
+     * spy_install() -- and shows up only as a boot in which the device is
+     * never asked for anything. The run header's "touch:" line below is what
+     * makes the arming visible rather than assumed. */
+    touch_tap_t touch_taps[TOUCH_TAP_MAX];
+    unsigned touch_n = 0;
+    memset(touch_taps, 0, sizeof touch_taps);
     uint64_t steps = UINT64_C(2000000);
     const char *dtpath = NULL;
     const char *cmdline = "debug=0x8 serial=1";
@@ -22132,6 +22282,61 @@ int main(int argc, char **argv) {
             }
             call_probe_modes[call_probe_n] = probe_mode;
             call_probe_pcs[call_probe_n++] = probe_pc;
+        }
+        else if (!strcmp(argv[i], "--touch")) {
+            /*
+             * --touch <at>:<x>:<y>[:<hold>]
+             *
+             * Every field is validated here rather than at injection time: a
+             * tap whose coordinate is off the panel would otherwise be refused
+             * by the device on every instruction from `at` to the end of the
+             * run and read exactly like "the guest never drained a report".
+             */
+            const char *spec = argv[++i];
+            char *end = NULL;
+            unsigned long long at, x, y, hold = TOUCH_HOLD_DEFAULT;
+            if (!spec) { fprintf(stderr, "--touch: missing value\n"); return 1; }
+            if (touch_n >= TOUCH_TAP_MAX) {
+                fprintf(stderr, "--touch: at most %u taps\n", TOUCH_TAP_MAX);
+                return 1;
+            }
+            at = strtoull(spec, &end, 0);
+            if (end == spec || *end != ':') goto touch_bad;
+            spec = end + 1;
+            x = strtoull(spec, &end, 0);
+            if (end == spec || *end != ':') goto touch_bad;
+            spec = end + 1;
+            y = strtoull(spec, &end, 0);
+            if (end == spec) goto touch_bad;
+            if (*end == ':') {
+                spec = end + 1;
+                hold = strtoull(spec, &end, 0);
+                if (end == spec) goto touch_bad;
+            }
+            if (*end != '\0') goto touch_bad;
+            if (x >= S5L_MT_PANEL_W || y >= S5L_MT_PANEL_H) {
+                fprintf(stderr, "--touch: (%llu,%llu) is off a %ux%u panel\n",
+                        x, y, S5L_MT_PANEL_W, S5L_MT_PANEL_H);
+                return 1;
+            }
+            if (!hold) {
+                fprintf(stderr, "--touch: hold must not be zero; the device "
+                                "holds one report at a time, so a lift in the "
+                                "same instruction as the landing would be "
+                                "refused forever\n");
+                return 1;
+            }
+            touch_taps[touch_n].at   = at;
+            touch_taps[touch_n].hold = hold;
+            touch_taps[touch_n].x    = (uint16_t)x;
+            touch_taps[touch_n].y    = (uint16_t)y;
+            touch_n++;
+            continue;
+        touch_bad:
+            fprintf(stderr,
+                    "--touch: expected <at>:<x>:<y>[:<hold>], got '%s'\n",
+                    argv[i]);
+            return 1;
         }
         else if (!strcmp(argv[i], "--restore")) restore_path = argv[++i];
         else if (!strcmp(argv[i], "-V")) {
@@ -22559,6 +22764,7 @@ int main(int argc, char **argv) {
     resolved.ktail        = ktail;
     resolved.nsnaps       = nsnaps;
     resolved.ncall_probes = call_probe_n;
+    resolved.ntouch       = touch_n;
     resolved.ndtov        = ndtov;
 
     /* --print-config: report and stop, before the kernel, the tree, the rootfs
@@ -23732,6 +23938,26 @@ external_md_work_ready:
         G.call_probe_pc[q].mode = call_probe_modes[q];
     }
     G.call_probe_n = call_probe_n;
+    /*
+     * The taps, for the same reason and with the same ordering rule: G is
+     * zeroed by spy_install, so touch_n is set LAST and is what arms the step
+     * loop. The line printed below is not decoration -- a run whose header
+     * does not carry it accepted a --touch and then injected nothing, which is
+     * exactly the failure this copy exists to prevent and which --print-config
+     * cannot see, because it exits before spy_install runs.
+     */
+    for (unsigned q = 0; q < touch_n; q++) G.touch[q] = touch_taps[q];
+    G.touch_n = touch_n;
+    if (touch_n) {
+        printf("touch     : armed on %u tap%s:", touch_n,
+               touch_n == 1u ? "" : "s");
+        for (unsigned q = 0; q < touch_n; q++)
+            printf(" @%llu(%u,%u)hold%llu",
+                   (unsigned long long)touch_taps[q].at,
+                   touch_taps[q].x, touch_taps[q].y,
+                   (unsigned long long)touch_taps[q].hold);
+        printf("\n");
+    }
     if (call_probe_n) {
         printf("call probe: armed on %u pc%s (ring %u):", call_probe_n,
                call_probe_n == 1u ? "" : "s", CALL_PROBE_RING);
@@ -24306,6 +24532,7 @@ external_md_work_ready:
             &mach.cpu, n, mach.cpu.cycles, mode_before, last_pc,
             thread_exception_return_gate_va, sp_before);
         s5l8900_tick(&mach, 1);
+        if (G.touch_n) touch_tap_step(n);
         if (!save_due_snapshots(&mach, snaps, nsnaps)) return 4;
 
         if (strex_rd < 16 && mach.cpu.r[15] != last_pc) {
@@ -24758,6 +24985,7 @@ external_md_work_ready:
 
     /* ------------------------------------------- the user-mode call probe --- */
     call_probe_report();
+    touch_report();
 
     /*
      * WHERE THE RUN ENDED, instruction by instruction.

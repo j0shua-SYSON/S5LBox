@@ -3189,8 +3189,11 @@ followed by the `finishStarting()` line. **Done: `core/src/soc/spi.c`, 230 lines
 25/25 ctest, five mutation checks.** (2) GPIO interrupt controller, 7 groups ×
 {INTLEVEL 0x80, INTSTAT 0xA0 W1C, INTEN 0xC0, INTTYPE 0xE0}, cascading to VIC
 lines `{0,1,2,3,31,32,33}` — group 4 → VIC 2; (3) Z2 slave bring-up; (4) frame
-path and host injection; (5) payload format, the only genuine unknown, reversed
-from `_MT_ParsedMultitouchFrameRepCreate` (cache VA `0x33cf99c0`).
+path and host injection; (5) payload format, the only genuine unknown.
+**Steps 4 and 5 are done — see §23.4b and §23.4c, which correct eight more
+things in this section and record the format that was actually reversed. The
+frame parser is `_mt_HandleMultitouchFrame` at cache VA `0x33cfb3ec`, NOT
+`_MT_ParsedMultitouchFrameRepCreate` at `0x33cf99c0`, which is a constructor.**
 
 **`wake_line_enabled()` rejects any line ≥ 32×VIC_COUNT.** A wake-source entry
 written as `{ "multitouch", 155, … }` returns false silently and can never wake
@@ -3209,7 +3212,27 @@ every mechanism it suggests for deciding it. So was the first revision of this
 subsection. Four designs have now been tried; two of them shipped and were
 caught by a boot. What follows is what the firmware actually does.
 
-**FIRST: HOW TO SEE ANY OF THIS.** Two things that were got wrong repeatedly:
+**FIRST: HOW TO SEE ANY OF THIS.** Three things that were got wrong repeatedly:
+
+- **LAUNCH FROM POWERSHELL, NOT FROM GIT BASH.** MSYS path conversion rewrites
+  any argument that looks like a Unix path, and the one that matters is
+  `--fstab "/dev/md0 / hfs rw,update 0 1"`, which arrives as
+  `C:/PortableGit/dev/md0 / hfs rw,update 0 1`. The guest's fstab then names a
+  Windows path, `fsck_hfs` fails with `CAN'T CHECK FILE SYSTEM`, launchd halts,
+  and the console ends at `pmu go stdby` — about 1.1 billion instructions of
+  boot that all look fine and prove nothing. Run69 lost a whole 27-minute run
+  to exactly this. The recipe in §11 is PowerShell for a reason. If you must
+  use `Start-Process -ArgumentList`, note that it joins the array with spaces
+  and does NOT quote: `-c` and `--fstab` need their own embedded `"` or the
+  boot dies on `unknown option: serial=1`.
+- **`spy_install()` memsets the whole of `G`.** Any option parsed straight into
+  `G` is silently discarded, and `--print-config` CANNOT see it, because
+  `--print-config` exits before `spy_install` runs. `-H` and `--call-probe`
+  already parse into locals and copy afterwards; `--touch` did not, and the
+  result was a 27-minute run that accepted two taps, injected neither, and
+  printed no touch section at all. Every such option now prints an "armed on"
+  line in the run header for exactly this reason: a header that does not carry
+  it is a run that did nothing.
 
 - **`debug=0x8` does NOT turn on the multitouch log.** `PE_i_can_has_debugger()`
   reads `/chosen/debug-enabled`, so the boot needs
@@ -3336,7 +3359,166 @@ framing from the chip select can have it.
 One thing flagged and unexplained: slot `0x458` holds `0xc044061c`, a bare
 `bx lr` that leaves `r0 = this`, which makes the following `IOSleep(r0)`
 nonsensical. The base is anchored twice, so it is probably not an indexing
-error. Do not reason from that line.
+error. Do not reason from that line. **RESOLVED — and it was simply misread.
+See §23.4b item 1.**
+
+#### 23.4b Corrected an eighth time, by implementing steps 4 and 5
+
+Eight more things §23.4 and §23.4a get wrong or leave out, every one of them
+found by writing the code rather than by reading the section again. The pattern
+has now held for every revision: the parts that were *measured* survive and the
+parts that were *inferred from a call graph* do not.
+
+**1. Slot `0x458` is not a bare `bx lr`. It is a constant accessor returning
+15, and `IOSleep(15)` is exactly what it is for.** `0xc0449f40 + 0x458 =
+0xc044a398`, which holds `0xc044061c`, and `0xc044061c` disassembles as
+`mov r0, #0xf` / `bx lr` — two instructions, not one. The neighbouring
+`0xc0440614` is `mov r0, #0xc8` / `bx lr`, the 200 in the guest's own
+`"Delaying poweron by 200 ms"`. §23.4a's advice to "not reason from that line"
+should be reversed: it is one of the most ordinary lines in the driver.
+
+**2. The kext DOES parse one byte of the frame payload.** §23.4 says it parses
+none. `0xc0441400`'s `v[0x414]` lands at `0xc04389fc`, which is
+`ldrb r3,[r1] / cmp r3,#0x50` and, on a match, calls `v[0x418]` = `0xc043d1ac`,
+a separate decoder for an 8-byte status record. Only a payload whose FIRST BYTE
+IS NOT `0x50` tail-calls `v[0x3c4]` = `0xc043c31c`, which fans it out to up to
+32 subscribed clients through `0xc043d684`:
+`IODataQueue::enqueue(payload, (len + 3) & ~3)`. The rounding is confirmed
+(`add r2,r2,#3 / bic r2,r2,#3`), so what userspace measures is up to three bytes
+longer than what the device sent.
+
+**3. There are TWO `readOneFrameOfData` implementations and they use different
+transfer lengths.** `0xc043bea0` — in a different vtable, at `0xc044961c` —
+calls the data read with **`L + 1`** (`add r1,r1,#1` at `0xc043bf98`).
+`0xc0442f70` — AppleMultitouchZ2SPI's own, at vtable slot `0x398` =
+`0xc044a2d8` — calls it with **`L + 5`** (`add r1,r1,#5` at `0xc04430c4`).
+§23.4's `L+5` is right for the class that runs. A reader who lands on the other
+function first will measure `L+1` and conclude the section is wrong; it is not,
+but nothing in it says there are two.
+
+**4. The data read's TRANSMIT checksum is not at `[14..15]`.** It is at
+`tx[len-2..len-1]`, the end of the TRANSFER (`0xc0441254` and `0xc044126c` store
+it relative to the length argument), while still being `sum16` of only the first
+FOURTEEN bytes. For the 16-byte length read the two coincide; for the `L+5` data
+read they do not, and a device that validated the host's checksum at `[14..15]`
+would reject every data read.
+
+**5. The receive side's length field is at a DIFFERENT offset in the two
+reads,** which looks like a transcription slip in §23.4 and is not.
+`0xc04425b0` reads the length answer as `rx[1] | rx[2] << 8`; `0xc0441370` reads
+the data answer's as `rx[2] | rx[3] << 8`. Both are LE16 and they really are one
+byte apart. The data read's `rx[4]` then carries whatever makes the first five
+bytes sum to zero mod 256 — that is the ONLY header check the driver makes
+(`0xc0441330`) — and `L` of 0 or 2 is tested BEFORE the payload checksum, so an
+empty frame never needs one.
+
+**6. The frame opcode and the toggle are `this+0x7e5` and `this+0x7e6`, and the
+toggle really does alternate.** `0xc0440560` writes `0xEB` when `this+0x1bc` is
+non-zero and `0xEA` when it is not — so §23.4a's "the frame opcode is downstream
+of the HBPP answer" is confirmed at the instruction — and initialises
+`this+0x7e6` and `this+0x7e7` to 1. `0xc0443100` flips `this+0x7e6` between 1
+and 2 after each SUCCESSFUL data read. Nothing in any receive path is validated
+against it, so a device may ignore it; but §23.4's "toggle(1/2)" is now measured
+rather than assumed.
+
+**7. `Z2F13` is the wrong personality, and
+`_MT_ParsedMultitouchFrameRepCreate` is not the frame parser.** Both are
+step-5 pointers in §23.4 and both send a reader to the wrong place.
+
+  - The n82 kext is **`AppleMultitouchSPIZ2F52`**, personality
+    `"AppleMultitouchSPI - Z2,N82"`, `IONameMatch multi-touch,n82`,
+    `mt-merge-personality Z2F52,1` — read out of the prelinked Info.plists in
+    `firmware/kernel.macho` at file offset `0x763a3d`. `multi-touch,k48` and
+    `Z2F13` appear **zero** times in this kernelcache; Z2F13 is iPad 1. The
+    `Z2F52,1` dictionary in `iPhone.mtprops` holds exactly three keys —
+    `Constructed Firmware` (54,156 bytes), `Constructed Firmware Version`
+    (`"0x0049.bin"`) and `PreconstructedBootloadPacketType` (`"Z2"`). **No
+    geometry anywhere in any shipped plist**, which is why the device has to
+    invent it.
+  - `_MT_ParsedMultitouchFrameRepCreate` (`0x33cf99c0`) is a two-`malloc`
+    constructor called once from `_MTDeviceCreate+0x98`. It allocates `0x3c8`
+    bytes, then a second buffer sized by the `"Max Packet Size"` property which
+    it stores at `rep+0x14` as the IMAGE buffer, then `memset`s the first. The
+    real dispatcher is **`_mt_HandleMultitouchFrame` at `0x33cfb3ec`**.
+
+**8. `function-power_ldo`'s polarity cannot be read off the device tree.** The
+node gives `function-power_ldo {phandle, 'GPIO', 0x0701, 0x00000101}` beside
+`function-reset {..., 0x0606, 0x00010001}`, and the obvious reading of that
+fourth word is contradicted immediately: `/baseband`'s `function-bb_rst` is
+`{..., 0x0700, 0x00000101}` — the same word for a reset line rather than a
+supply. The reset line's polarity was settled by MEASURING the guest's fsel
+stores; nothing equivalent has been measured for the power line, so
+`core/src/soc/mtz2.c` tracks its level and publishes it and gates nothing on
+it. Gating on a guessed polarity would refuse every injection for a whole boot
+with the device looking healthy.
+
+#### 23.4c The frame payload, and how it was pinned
+
+The kext imposes only item 2 above. Everything else is userspace's, and it was
+read by two agents given the same question and no access to each other's
+answer — one reading `MultitouchSupport.framework` inside the shared cache at
+`work/analysis/dsc_armv6` (load address `0x33cf6000`, **`__TEXT` file offset =
+VA − 0x30000000**; the per-image `__TEXT fileoff` is 0 and using it decodes a
+different dylib entirely), the other reading `MultitouchHID.plugin` at
+`work/analysis/touch2/MultitouchHID.bin` (**VA == file offset**). Both binaries
+are **ARM, not Thumb**.
+
+They agree on all of this:
+
+- **The format is self-describing.** `_mt_HandleMultitouchFrame` switches on
+  `payload[0]`: `0xC5/0xC6` image, **`0xCC/0xCE` contacts with a fixed 32-byte
+  stride**, `0x43/0x44` V2 binary, `0x73/0x74` V3 binary, `0x50` and `0x02`
+  silently ignored, anything else logged and dropped. **The device chooses.**
+- For `0xCC`: header is a CONSTANT ten bytes — `[0]` type, `[1]` frame counter,
+  `[2]` button state, `[3]` contact count — and the contact stride is 32
+  (`lsl r2,r3,#5` at `0x33cfbbcc`).
+- Per record: `[0]` path id, `[1]` stage, `[2]` finger id, `[3]` hand id
+  (SIGNED), `[4..7]` X as a 32-bit value the parser shifts right by 8,
+  `[8..11]` Y the same, `[12..19]` the two velocities (shifted right by 9),
+  `[20..21]` Z total (÷256), `[28..29]` ellipse major and `[30..31]` minor
+  (÷100 → mm).
+- **Coordinates are signed 16-bit HUNDREDTHS OF A MILLIMETRE** — the same unit
+  report `0xD9`'s surface size is already published in. Normalisation is
+  `(v − min) / (max − min)` over the surface bounds.
+- Path stages 0..7 are `NotTracking, StartInRange, HoverInRange, MakeTouch,
+  Touching, BreakTouch, LingerInRange, OutOfRange`. There is no
+  began/moved/ended triple; it is a hover-capable lifecycle.
+- Path identifiers must be **1..11** (`sub r3,r1,#1 / cmp r3,#0xa` at
+  `0x33cfd5f4`); outside that they silently alias to slot 0, and
+  MultitouchHID's own `mthm_ExpandAndFilterPackedContacts` `memcpy`s into
+  `gMTHMPathStates + id*0x5c` with no bounds check at all.
+- **No magic number and no checksum anywhere in userspace.** The rejections are:
+  an unknown `payload[0]`; a length at or below 9; a length below
+  header + count × stride.
+
+Two things only one reader established, and they are marked as such in the
+code:
+
+- **The `Endianness` selector.** `_mt_SwapInt32DeviceToHost` (`0x33cfb8e0`) is
+  `cmp r0,#1 / beq done / rev`, with `r0` the cached `Endianness` property. So
+  **1 means NO SWAP and every other value byte-swaps** — zero is *not* "native".
+  The model's `endianness = 1` was a guess when it was written and is now the
+  right value for a stated reason.
+- **The Y axis is flipped between the two coordinate systems.** MultitouchHID
+  computes a pixel row as `py = H * (1 − norm.y)`, i.e. device Y increases
+  UPWARD (the trackpad convention this stack came from) while a panel row
+  increases downward. `to_surface()` in mtz2.c applies that flip and
+  `test_mutations_are_caught` pins it, because a mirrored digitizer looks like
+  "the tap went somewhere else" rather than like a bug.
+
+And one number worth knowing before the geometry is ever revisited: when
+`"Sensor Surface Width"`/`"Sensor Surface Height"` are ABSENT the framework
+defaults to **5000 × 7500** (`0x1388`/`0x1d4c` at `0x33cf7db8`/`0x33cf7dd8`),
+i.e. 50.00 mm × 75.00 mm, and MultitouchHID's hardcoded fallback rect is the
+same 50 × 75. This project reports 4800 × 7200 instead, which buys an exact
+15 units per pixel in both axes; Apple's own number would be 15.625. The choice
+stands, but it is now a choice made against a known alternative rather than in
+the dark.
+
+**A third downstream kill switch, alongside the two §23.4 already lists.**
+MultitouchHID drops every frame while its `UILocked` flag is set, and that flag
+is **initialised to 1**. Neither of the two probes §23.4 names as the step-5
+milestone can fire while it is.
 
 ### 23.5 The HFS+ provisioner blocks two features, not four
 

@@ -557,13 +557,23 @@ static s5l_wake_kind_t wake_edge_spi1(const s5l8900_t *m, uint32_t *ticks) {
  * Lines 32 and 33 are on VIC1, which is why s5l8900_tick() has to route by
  * line/32 rather than hardcoding vic[0] the way every older device does.
  *
- * Every one answers S5L_WAKE_NEVER, and as with the SPI controllers that is a
- * statement about the model rather than a placeholder: nothing in this machine
- * drives a GPIO input on its own schedule yet, so no group has a future edge
- * to name. A line that is ALREADY asserted is caught by
- * machine_wait_for_interrupt()'s own pre-check before any source is consulted,
- * so NEVER cannot lose an interrupt that has already happened. The step that
- * gives the touch controller a frame to deliver is the step that edits this.
+ * Every one answers S5L_WAKE_NEVER, and that survives the touch controller
+ * gaining a report to deliver. The reasoning is the same as the SPI
+ * controllers': a future edge is only worth naming if this machine can produce
+ * one while the core sleeps, and the multitouch attention line moves at exactly
+ * two moments — a host call to s5l_mtz2_set_contacts(), which happens BETWEEN
+ * guest instructions and therefore never inside a skipped interval, and the
+ * last byte of a data read, which is a consequence of a guest store the sleeping
+ * core is not making. A line that is ALREADY asserted is caught by
+ * machine_wait_for_interrupt()'s own pre-check — it refreshes at zero elapsed
+ * time, which routes s5l_mtz2_irq() through the cascade before any source is
+ * consulted — so NEVER cannot lose an interrupt that has already happened, and
+ * an injection made during a WFI is observed on the very next refresh.
+ *
+ * The entry that matters is `gpio-group4`, and the number on it is 2 — the
+ * CASCADE VIC line, not 155. wake_line_enabled() rejects anything at or above
+ * 32 * S5L8900_VIC_COUNT, so a source written as `{ "multitouch", 155, ... }`
+ * would return false silently and could never wake the core.
  */
 static s5l_wake_kind_t wake_edge_gpio(const s5l8900_t *m, uint32_t *ticks) {
     (void)m; (void)ticks;
@@ -762,19 +772,23 @@ bool s5l8900_init(s5l8900_t *m, uint32_t ram_base, uint32_t ram_size) {
         }
     }
     /*
-     * The two GPIO pins the touch controller can observe.
+     * The three GPIO pins the touch controller can observe.
      *
-     * `function-reset` is /arm-io/spi1/multi-touch's own, GPIO 0x0606 = group 6
-     * bit 6; `function-spi_cs0` is /arm-io/spi1's, GPIO 0x1800 = group 24 bit
-     * 0. Neither is required for the device to work — the packet framer knows
-     * every packet's length from its opcode, and the HBPP answer has a
-     * one-shot of its own — so a failure to subscribe is folded into the same
-     * counter a refused stub declaration is, rather than refusing to build a
-     * machine over a diagnostic.
+     * `function-reset` (GPIO 0x0606 = group 6 bit 6) and `function-power_ldo`
+     * (0x0701 = group 7 bit 1) are /arm-io/spi1/multi-touch's own;
+     * `function-spi_cs0` (0x1800 = group 24 bit 0) is /arm-io/spi1's. Only the
+     * reset line changes behaviour — it is what tells resetDevice's dummy
+     * transfer from the probe that follows it. The select is a framer resync
+     * the device does not need, and the power line is recorded and not acted
+     * on (see s5l_mtz2_power_pin). A failure to subscribe is folded into the
+     * same counter a refused stub declaration is, rather than refusing to build
+     * a machine over a diagnostic.
      */
-    if (!s5l_gpio_watch(&m->gpio, 0x0606u, &m->mtz2, s5l_mtz2_reset_pin))
+    if (!s5l_gpio_watch(&m->gpio, MTZ2_PIN_RESET, &m->mtz2, s5l_mtz2_reset_pin))
         m->stub_declare_failures++;
-    if (!s5l_gpio_watch(&m->gpio, 0x1800u, &m->mtz2, s5l_mtz2_select_pin))
+    if (!s5l_gpio_watch(&m->gpio, MTZ2_PIN_SELECT, &m->mtz2, s5l_mtz2_select_pin))
+        m->stub_declare_failures++;
+    if (!s5l_gpio_watch(&m->gpio, MTZ2_PIN_POWER, &m->mtz2, s5l_mtz2_power_pin))
         m->stub_declare_failures++;
     /* Refresh in the guest's own time: the CLCD is ticked with timebase ticks,
      * so the period is expressed in them. */

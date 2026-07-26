@@ -221,6 +221,13 @@ unsigned s5l_mtz2_report(const s5l_mtz2_t *dev, uint8_t id, uint8_t *out) {
 
 /* ========================================================== packet framing === */
 
+/* The wire length L of the pending report: payload plus its two checksum
+ * bytes, and zero when nothing is pending. This is the number the length read
+ * answers with and the number the data read's transfer size is derived from. */
+static unsigned wire_len(const s5l_mtz2_t *dev) {
+    return dev->frame_len ? (unsigned)dev->frame_len + 2u : 0u;
+}
+
 /* How many bytes the packet starting with `op` occupies. Zero means "not an
  * opcode this device answers". */
 static unsigned frame_len(const s5l_mtz2_t *dev, uint8_t op) {
@@ -256,14 +263,17 @@ static unsigned frame_len(const s5l_mtz2_t *dev, uint8_t op) {
         case MTZ2_OP_FRAME_Z1:
         case MTZ2_OP_FRAME_Z2:
             /*
-             * A frame read is `frameLen + 5` bytes and this device has no
-             * frame to give: `contacts` is always zero until step 4. Answer the
-             * shortest well-formed header — length zero — rather than refusing,
-             * so a driver that reads speculatively gets a valid empty frame
-             * instead of a corrupt one.
+             * A frame read has TWO lengths and the byte that chooses between
+             * them — tx[2] — has not arrived yet. Start as the LENGTH read,
+             * which is always sixteen bytes (0xc0442440 loads `r4 = 0x10` and
+             * never changes it), and let the framer lengthen the packet to
+             * L + 5 when tx[2] turns out to be 1. Starting the other way round
+             * is not possible: L is not known to the host until the length read
+             * has answered, so the sixteen-byte form is the one a device with
+             * no context must assume.
              */
             (void)dev;
-            return 5u;
+            return MTZ2_FRAME_LEN;
         default:
             return 0u;
     }
@@ -330,19 +340,54 @@ static void compose(s5l_mtz2_t *dev) {
             memcpy(&dev->rsp[MTZ2_PAYLOAD_AT], body, n);
             break;
         case MTZ2_OP_FRAME_Z1:
-        case MTZ2_OP_FRAME_Z2:
+        case MTZ2_OP_FRAME_Z2: {
+            unsigned L = wire_len(dev);
             /*
-             * An empty frame. The driver checks that the low byte of the sum of
-             * the first five bytes is zero (0xc0441330-0xc044133c) before it
-             * trusts the length at [2..3], so the header carries its own
-             * complement in [4] rather than a checksum in the usual place.
+             * rx[1] is the low byte of L in BOTH forms, and that is what lets
+             * one composer serve both. The length read wants LE16 L at
+             * rx[1..2] (0xc04425b0: `rx[1] | rx[2] << 8`); the data read leaves
+             * rx[1] free, constrained only by the five-byte sum. Driving the
+             * same byte either way means position 1 — which goes out on the
+             * wire BEFORE tx[2] discloses which read this is — never has to
+             * know.
              */
-            dev->rsp[1] = 0u;
-            dev->rsp[2] = 0u;
-            dev->rsp[3] = 0u;
-            dev->rsp[4] = (uint8_t)(0u - (uint8_t)(dev->rsp[0] + dev->rsp[1] +
-                                                   dev->rsp[2] + dev->rsp[3]));
-            return;   /* its own check byte; no trailing sum16 */
+            dev->rsp[1] = (uint8_t)(L & 0xffu);
+            if (dev->frame_phase == 1u) {
+                /*
+                 * THE DATA READ. rx[2..3] is LE16 L again — a different
+                 * position from the length read's, which is not a
+                 * transcription slip: 0xc0441370 loads rx[3] and rx[2] where
+                 * 0xc04425b0 loads rx[2] and rx[1]. rx[4] then carries whatever
+                 * makes the first five bytes sum to zero mod 256, which is the
+                 * only header check the driver makes (0xc0441330, `sum(rx,5)`
+                 * must be 0) — the usual trailing sum16 covers the payload
+                 * instead.
+                 */
+                dev->rsp[2] = (uint8_t)(L & 0xffu);
+                dev->rsp[3] = (uint8_t)(L >> 8);
+                dev->rsp[4] = (uint8_t)(0u - (uint8_t)(dev->rsp[0] +
+                                                       dev->rsp[1] +
+                                                       dev->rsp[2] +
+                                                       dev->rsp[3]));
+                if (dev->frame_len) {
+                    uint16_t sum;
+                    memcpy(&dev->rsp[5], dev->frame, dev->frame_len);
+                    sum = s5l_mtz2_sum16(dev->frame, dev->frame_len);
+                    dev->rsp[5u + dev->frame_len]      = (uint8_t)(sum & 0xffu);
+                    dev->rsp[5u + dev->frame_len + 1u] = (uint8_t)(sum >> 8);
+                }
+                return;    /* its own header check byte and payload checksum */
+            }
+            /*
+             * THE LENGTH READ. rx[0] only has to satisfy `(rx[0] & 0xF0) ==
+             * 0xE0` (0xc0442558), which the echoed opcode does, and the
+             * ordinary trailing sum16 over the first fourteen bytes applies.
+             * L == 0 lands here too and is a complete, valid answer: the caller
+             * tests it at 0xc04430bc and stops without reading data.
+             */
+            dev->rsp[2] = (uint8_t)(L >> 8);
+            break;
+        }
         default:
             /* GET_CMD_STATUS, GET_DEVICE_INFO, the control writes and the wake:
              * an echoed opcode, a zero body meaning "no error", and a valid
@@ -364,7 +409,12 @@ static void compose(s5l_mtz2_t *dev) {
  */
 static uint8_t drive(const s5l_mtz2_t *dev, uint8_t out, unsigned pos) {
     if (dev->op == MTZ2_OP_HBPP && !dev->hbpp_answered) return out;
-    return pos < S5L_MTZ2_BUF ? dev->rsp[pos] : 0u;
+    return pos < S5L_MTZ2_RSP ? dev->rsp[pos] : 0u;
+}
+
+/* Is `op` one of the two frame-read opcodes? */
+static bool is_frame_op(uint8_t op) {
+    return op == MTZ2_OP_FRAME_Z1 || op == MTZ2_OP_FRAME_Z2;
 }
 
 static uint8_t mtz2_transfer(void *ctx, uint8_t out) {
@@ -401,6 +451,9 @@ static uint8_t mtz2_transfer(void *ctx, uint8_t out) {
         dev->op  = out;
         dev->len = (uint8_t)n;
         dev->pos = 0u;
+        /* 0xFF, not 0: tx[2] == 0 is the LENGTH read, so a cleared field would
+         * make every non-frame packet look like one. */
+        dev->frame_phase = 0xffu;
         memset(dev->req, 0, sizeof dev->req);
         dev->req[0] = out;
         compose(dev);              /* enough for a parameterless opcode */
@@ -414,6 +467,25 @@ static uint8_t mtz2_transfer(void *ctx, uint8_t out) {
     /* The parameter byte has landed; rebuild before driving the first byte
      * that can depend on it. */
     if (dev->pos == 1u) compose(dev);
+    /*
+     * tx[2] has landed, which for a frame read is the byte that says whether
+     * this is the length read or the data read. Latch it and lengthen the
+     * packet BEFORE driving position 2, which is the first byte whose value
+     * differs between the two forms. Any value other than 1 is treated as the
+     * length read, because that is the sixteen-byte form and reading sixteen
+     * bytes of a shorter packet is the failure that cannot be recovered from.
+     */
+    if (dev->pos == 2u && is_frame_op(dev->op)) {
+        dev->frame_phase = out;
+        if (out == 1u) {
+            unsigned total = wire_len(dev) + 5u;
+            dev->len = (uint8_t)total;
+            dev->data_reads++;
+        } else {
+            dev->length_reads++;
+        }
+        compose(dev);
+    }
 
     uint8_t v = drive(dev, out, dev->pos);
     dev->pos++;
@@ -425,8 +497,26 @@ static uint8_t mtz2_transfer(void *ctx, uint8_t out) {
              * the dummy transfer can never get here. */
             dev->hbpp_answered = true;
         }
+        /*
+         * A COMPLETED data read is what drops the attention line. Not the
+         * length read, which is only an enquiry, and not the first byte of the
+         * data read either: a report the host began clocking out and abandoned
+         * — the select moved, the part was reset — is still pending, and a
+         * device that forgot it here would lose the finger-down half of a tap
+         * with no trace. The line is a LEVEL and gpioic.c re-latches it every
+         * refresh, so holding it up until the last byte is clocked costs at
+         * most one extra interrupt in which the guest finds L == 0.
+         */
+        if (is_frame_op(dev->op) && dev->frame_phase == 1u && dev->frame_len) {
+            dev->frames_read++;
+            dev->frame_len = 0u;
+            dev->contacts  = 0u;
+            dev->atn       = false;
+            memset(dev->frame, 0, sizeof dev->frame);
+        }
         dev->pos = 0u;
         dev->len = 0u;
+        dev->frame_phase = 0xffu;
     }
     return v;
 }
@@ -450,6 +540,8 @@ void s5l_mtz2_reset(s5l_mtz2_t *dev) {
      */
     dev->in_reset      = true;
     dev->hbpp_answered = false;
+    /* Not zero: zero is the LENGTH read's tx[2]. See the framer. */
+    dev->frame_phase   = 0xffu;
 
     /*
      * THE GEOMETRY. None of this is in the device tree, so all of it is our
@@ -518,9 +610,9 @@ void s5l_mtz2_bind(s5l_mtz2_t *dev, s5l_spi_slave_t *slave) {
 }
 
 bool s5l_mtz2_irq(const s5l_mtz2_t *dev) {
-    /* The attention line. False for the whole of this step, and false for an
-     * honest reason: a device with no pending contact does not ask to be read.
-     * Step 4 sets `atn` when it queues a frame; nothing else changes. */
+    /* The attention line: asserted exactly while a queued report is waiting to
+     * be clocked out. A device with no pending contact does not ask to be
+     * read, and one whose report the host has already taken stops asking. */
     return dev && dev->atn;
 }
 
@@ -550,7 +642,21 @@ void s5l_mtz2_reset_pin(void *ctx, bool level) {
     dev->in_reset = !level;
     dev->pos = 0u;
     dev->len = 0u;
+    dev->frame_phase = 0xffu;
     dev->resets++;
+    /*
+     * A queued report does NOT survive a reset, and that is the physical
+     * answer rather than the convenient one: the part's scan buffer is what
+     * holds it, and a part in reset has cleared it. Keeping it would also let a
+     * report queued before bring-up arrive after it, dated to a moment the
+     * guest has no way to place. The attention line drops with it.
+     */
+    if (dev->in_reset) {
+        dev->frame_len = 0u;
+        dev->contacts  = 0u;
+        dev->atn       = false;
+        memset(dev->frame, 0, sizeof dev->frame);
+    }
 }
 
 void s5l_mtz2_select_pin(void *ctx, bool level) {
@@ -566,4 +672,284 @@ void s5l_mtz2_select_pin(void *ctx, bool level) {
     (void)level;
     dev->pos = 0u;
     dev->len = 0u;
+    dev->frame_phase = 0xffu;
+    /* A report half-clocked-out is still pending. See the framer's note on why
+     * the attention line falls at the LAST byte of a data read and not the
+     * first. */
+}
+
+void s5l_mtz2_power_pin(void *ctx, bool level) {
+    s5l_mtz2_t *dev = ctx;
+    if (!dev) return;
+    /*
+     * MTZ2_PIN_POWER, group 7 bit 1, and RECORDED RATHER THAN ACTED ON.
+     *
+     * The device tree gives `function-power_ldo {phandle, 'GPIO', 0x0701,
+     * 0x00000101}`; the reset line beside it is `{..., 0x0606, 0x00010001}`
+     * and /arm-io/spi1's chip select is `{..., 0x1800, 0x00000001}`. Those
+     * fourth words are the platform-function argument block, and which byte of
+     * it names the polarity is not established anywhere this project can read
+     * — the baseband node uses the SAME 0x00000101 for `function-bb_rst`,
+     * which is a reset and not a supply, so the obvious "0x0101 means active
+     * high" reading is already contradicted.
+     *
+     * The reset line's polarity was settled by MEASUREMENT (fsel 0x0006060e at
+     * 220,635,069 straddling the dummy transfer), not by reading the tree, and
+     * nothing equivalent has been measured for this pin. Gating frame delivery
+     * on a guessed polarity would mean a wrong guess refuses every injection
+     * for the whole boot with the device looking healthy — the exact silent
+     * failure this file keeps being corrected for. So the level is tracked and
+     * published, and `s5l_mtz2_set_contacts` does not consult it.
+     */
+    if (dev->power_level != level) dev->power_edges++;
+    dev->power_level = level;
+}
+
+/* ======================================================== host injection ===
+ *
+ * THE PAYLOAD FORMAT.
+ *
+ * The kext parses ONE byte of the payload — 0xc0438a1c tests
+ * `payload[0] == 0x50` and diverts that case to a separate 8-byte status
+ * decoder at 0xc043d1ac — and otherwise hands the buffer verbatim to
+ * `IODataQueue::enqueue(payload, (len + 3) & ~3)`. Everything else is decided
+ * by userspace, and the format below was read out of userspace by two
+ * independent readers that were given the same question and no access to each
+ * other's answer:
+ *
+ *   A. MultitouchSupport.framework's own parser, inside the shared cache at
+ *      load address 0x33cf6000. `_mt_HandleMultitouchFrame` (0x33cfb3ec)
+ *      switches on payload[0]; 0xCC and 0xCE go to `_MTProcess_0xCC_Data`
+ *      (0x33cfba60).
+ *   B. MultitouchHID.plugin, a different binary (VA == file offset), whose
+ *      MTSimpleHIDManager consumes what A produces.
+ *
+ * They agree, independently, on: the dispatch being on payload[0]; the header
+ * being counter / button state / contact count at [1] / [2] / [3]; the
+ * per-contact stride of THIRTY-TWO for this frame type (`lsl r2, r3, #5` at
+ * 0x33cfbbcc); the record beginning id / stage / fingerID / handID(s8); X as a
+ * 32-bit value at +4 shifted right by 8 and Y the same at +8; Z total at +0x14;
+ * the ellipse major and minor at +0x1c and +0x1e; coordinates in HUNDREDTHS OF
+ * A MILLIMETRE, which is the same unit report 0xD9's surface size is already
+ * published in; and the eight path stages 0..7 being NotTracking, StartInRange,
+ * HoverInRange, MakeTouch, Touching, BreakTouch, LingerInRange, OutOfRange.
+ *
+ * Reader A additionally verified the byte-order selector, which settles a
+ * question this file has carried as an open one since the geometry was chosen:
+ * `_mt_SwapInt32DeviceToHost` (0x33cfb8e0) is `cmp r0,#1 / beq done / rev`,
+ * with r0 taken from the device's cached `Endianness` property. So ONE means
+ * "no swap" and every other value byte-swaps — and zero is NOT "native". The
+ * model's `endianness = 1` is right, and it is right for a reason now rather
+ * than by inheritance.
+ *
+ * WHY 0xCC AND NOT 0x44 OR 0x74. The parser accepts four contact-carrying
+ * families and the device chooses by writing payload[0]; reader A's V2 (0x44)
+ * table is the more capable one but only ONE reader produced it, while the
+ * 0xCC record layout is what both readers derived separately. Where a wrong
+ * guess costs an 18-minute boot, the doubly-attested shape is worth more than
+ * the richer one. 0xCC also needs no negotiated header length and no stride
+ * field: its header is a constant ten bytes and its stride a constant 32, so
+ * there is no field whose default the two readings could differ about.
+ *
+ * WHAT REJECTS A FRAME, and it is a short list — there is no magic number and
+ * no checksum anywhere in userspace: an unknown payload[0]; a length at or
+ * below 9; a length below header + count * stride. Our shortest payload is
+ * 10 + 32 = 42 bytes, and the kext rounds the enqueued length UP to a multiple
+ * of four, so what userspace measures is 44 and both bounds hold with room.
+ */
+
+/*
+ * A panel pixel in the surface units report 0xD9 published, hundredths of a
+ * millimetre.
+ *
+ * Exact by construction: the surface is 15x the panel in both axes, so this is
+ * an integer multiply with no rounding rule to get wrong, and the half-step
+ * puts the reported point at the CENTRE of the pixel rather than its top-left
+ * corner — which is what stops a tap on pixel 0 from reading as "just off the
+ * edge" to anything that rounds.
+ *
+ * `flip` exists because the two coordinate systems disagree about which way Y
+ * runs. MultitouchHID converts a normalised contact to a pixel row with
+ * `py = H * (1 - norm.y)`, i.e. it treats device Y as increasing UPWARD — the
+ * trackpad convention this whole stack came from — while a panel pixel row
+ * increases downward. Reader B read that conversion; reader A read only the
+ * normalisation either side of it, so this one step is SINGLY attested and is
+ * called out as such. It is also the step a mutation test pins, because a
+ * mirrored Y is the failure that would look exactly like "the tap went
+ * somewhere else" rather than like a bug.
+ */
+static uint16_t to_surface(uint32_t pixel, uint32_t span_pixels,
+                           uint32_t span_units, bool flip) {
+    uint32_t scale = span_pixels ? span_units / span_pixels : 0u;
+    uint32_t v;
+    if (flip) {
+        /* The centre of the pixel counted from the far edge. Written as one
+         * subtraction from the span so that pixel 0 and pixel H-1 land the
+         * same distance from their respective edges. */
+        v = span_units - pixel * scale - scale / 2u;
+    } else {
+        v = pixel * scale + scale / 2u;
+    }
+    if (v > 0x7fffu) v = 0x7fffu;   /* the wire field is s16 */
+    return (uint16_t)v;
+}
+
+static void put16(uint8_t *p, uint16_t v) {
+    p[0] = (uint8_t)(v & 0xffu);
+    p[1] = (uint8_t)(v >> 8);
+}
+
+static void put32(uint8_t *p, uint32_t v) {
+    p[0] = (uint8_t)(v & 0xffu);
+    p[1] = (uint8_t)((v >> 8) & 0xffu);
+    p[2] = (uint8_t)((v >> 16) & 0xffu);
+    p[3] = (uint8_t)((v >> 24) & 0xffu);
+}
+
+unsigned s5l_mtz2_encode(const s5l_mtz2_t *dev, const s5l_mt_contact_t *c,
+                         unsigned n, uint8_t seq, uint32_t ms, uint8_t *out) {
+    unsigned len;
+    uint32_t scale_x;
+    if (!dev || !out) return 0u;
+    /*
+     * A contact count of zero is refused, and that is a decision rather than an
+     * oversight. The parser accepts a zero-contact frame — ten bytes clears its
+     * `len > 9` bound — but it carries nothing a BreakTouch frame has not
+     * already said, and allowing it would make "this device has no report" and
+     * "this device reports nothing" two states a caller could confuse. Say a
+     * finger left by saying so.
+     */
+    if (n == 0u || n > MTZ2_CONTACT_MAX) return 0u;
+    if (!c) return 0u;
+    scale_x = dev->surface_width / S5L_MT_PANEL_W;
+
+    memset(out, 0, MTZ2_PAYLOAD_LIMIT);
+    /*
+     * THE HEADER, a constant ten bytes for this frame type.
+     *
+     *  [0]     frame type. 0xCC selects _MTProcess_0xCC_Data. It is also not
+     *          0x50, which is the one value the KEXT would divert.
+     *  [1]     frame counter, wrapping at 8 bits.
+     *  [2]     button state. This digitizer has no buttons; report 0xD7 already
+     *          says so with the same zero.
+     *  [3]     contact count. A count, not a bitmask.
+     *  [4..5]  a 16-bit field the parser copies to rep+0x42 and nothing in
+     *          either reader's trace consumes. Zero.
+     *  [6..9]  LE32 timestamp in milliseconds, at an UNALIGNED offset — the
+     *          parser really does load a word at +6.
+     */
+    out[0] = MTZ2_FRAME_TYPE;
+    out[1] = seq;
+    out[2] = 0u;
+    out[3] = (uint8_t)n;
+    put32(&out[6], ms);
+    len = MTZ2_FRAME_HEADER + n * MTZ2_CONTACT_STRIDE;
+
+    for (unsigned i = 0; i < n; i++) {
+        uint8_t *r = &out[MTZ2_FRAME_HEADER + i * MTZ2_CONTACT_STRIDE];
+        uint16_t sx, sy;
+        /* 1..11 is the path-identifier range _mt_getPathLifeCycle accepts
+         * (0x33cfd5f4); this device never reports more than five fingers, so
+         * the tighter bound is the honest one to enforce. */
+        if (!c[i].id || c[i].id > MTZ2_CONTACT_MAX) return 0u;
+        if (c[i].phase > MTZ2_PHASE_OUT_OF_RANGE) return 0u;
+        if (c[i].x >= S5L_MT_PANEL_W || c[i].y >= S5L_MT_PANEL_H) return 0u;
+        sx = to_surface(c[i].x, S5L_MT_PANEL_W, dev->surface_width, false);
+        sy = to_surface(c[i].y, S5L_MT_PANEL_H, dev->surface_height, true);
+
+        r[0] = c[i].id;            /* path identifier                        */
+        r[1] = c[i].phase;         /* path stage; 0..7, see MTZ2_PHASE_*      */
+        r[2] = c[i].id;            /* finger id; one finger per path here    */
+        r[3] = 1;                  /* hand id, signed. One hand.             */
+        /*
+         * X and Y. This family stores them as 32-bit values that the parser
+         * arithmetic-shifts right by eight, so the low byte is a fractional
+         * part: the coordinate written here is the surface value scaled by
+         * 256. The velocities beside them are shifted right by NINE and are
+         * zero, because this device reports position only and a fabricated
+         * velocity would be a number the guest could act on.
+         */
+        put32(&r[4],  (uint32_t)sx << 8);
+        put32(&r[8],  (uint32_t)sy << 8);
+        put32(&r[12], 0u);         /* velocity X */
+        put32(&r[16], 0u);         /* velocity Y */
+        /*
+         * Z total, which the parser divides by 256 into a dimensionless
+         * amplitude. The caller's 0..255 maps linearly onto 0..1. The only
+         * property anything downstream was seen to require is that it be
+         * greater than zero while the finger is down, which is why a lift
+         * carries zero here and says BreakTouch in the stage byte: two
+         * independent statements of the same fact, so a consumer that reads
+         * either one agrees.
+         */
+        put16(&r[20], c[i].pressure);
+        /* +0x16 and +0x18: fields both readers place but neither names. Zero
+         * is a legal value for each and is what a device with nothing to say
+         * about them reports. */
+        put16(&r[22], 0u);
+        put16(&r[24], 0u);
+        /* Orientation, scaled by pi * 2^-15. This model reports circular
+         * contacts, so it is zero — a real angle would be invented. */
+        put16(&r[26], 0u);
+        /*
+         * The contact ellipse, in the same hundredths of a millimetre as the
+         * position: the parser divides both by 100 to get millimetres. These
+         * are LENGTHS and not positions, so they get the bare scale factor and
+         * NOT to_surface()'s half-pixel centring — an axis is measured from
+         * its own zero.
+         */
+        put16(&r[28], (uint16_t)(c[i].major * scale_x));
+        put16(&r[30], (uint16_t)(c[i].minor * scale_x));
+    }
+    return len;
+}
+
+
+bool s5l_mtz2_set_contacts(s5l_mtz2_t *dev, const s5l_mt_contact_t *c,
+                           unsigned n) {
+    uint8_t payload[MTZ2_PAYLOAD_LIMIT];
+    unsigned len;
+    if (!dev) return false;
+
+    /*
+     * THREE-WAY HONESTY. Each refusal is a different fact about the device and
+     * every one of them is checkable; none is defensive padding.
+     */
+    /* Held in reset: a part driving nothing cannot raise an attention line,
+     * and this model already refuses to answer a byte in that state. */
+    if (dev->in_reset)               { dev->injects_refused++; return false; }
+    /*
+     * Not brought up. `hbpp_answered` false means the driver has not yet had
+     * the affirmative probe that sets its this+0x1bc, and deviceReadResultData
+     * at 0xc0441324 REJECTS a 0xEB frame outright while that byte is zero
+     * (`ldrb r3,[r4,#0x1bc] / cmp r3,#0 / beq 0xc0441408`). A report queued now
+     * could be read off the wire and would still be thrown away.
+     */
+    if (!dev->hbpp_answered)         { dev->injects_refused++; return false; }
+    /*
+     * One report at a time. A real Z2 overwrites its scan buffer and drops
+     * frames the host was too slow for; doing that here would silently discard
+     * the finger-DOWN half of a tap and leave a lift the guest cannot explain.
+     * Refusing makes the caller pace itself and leaves the reason visible.
+     */
+    if (dev->frame_len)              { dev->injects_refused++; return false; }
+
+    len = s5l_mtz2_encode(dev, c, n, (uint8_t)(dev->frame_seq + 1u),
+                          dev->frame_ms + MTZ2_FRAME_PERIOD_MS, payload);
+    if (!len || len > MTZ2_PAYLOAD_LIMIT) { dev->injects_refused++; return false; }
+
+    memcpy(dev->frame, payload, len);
+    dev->frame_len = (uint8_t)len;
+    dev->contacts  = (uint8_t)n;
+    dev->frame_seq++;
+    /* Monotone and never zero: the parser logs "timestamp invalid!" on a zero
+     * and "time travel, eh?" on a decrease, and posts notification 0x66 to the
+     * driver for either. */
+    dev->frame_ms += MTZ2_FRAME_PERIOD_MS;
+    dev->frames_queued++;
+    /* The attention line is a LEVEL and it goes up here. gpioic.c latches it
+     * into group 4 bit 27 on the next refresh; it comes down at the last byte
+     * of the data read that carries this report. */
+    dev->atn = true;
+    return true;
 }

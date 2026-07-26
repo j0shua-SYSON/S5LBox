@@ -200,3 +200,33 @@ expect_refused(no_rtc_patch_under_external_md "--no-rtc-patch"
 #    used to make an incoherent run look acceptable.
 expect_refused(print_config_does_not_excuse_nonsense "requires --external-md"
     absent-kernel --ca-software-render --print-config)
+
+# --------------------------------------------------------------------------
+# 7. --touch, the scheduled tap.
+#
+# Every field is validated at parse time rather than at injection time, and
+# that is the whole point of these cases: a tap whose coordinate is off the
+# panel would otherwise be refused by the device on every instruction from
+# <at> to the end of the run and read exactly like "the guest never drained a
+# report" -- a wrong answer to the only question the run was asked.
+expect_config(touch_is_counted
+    "touch taps           1" absent-kernel --touch 1000:160:240 --print-config)
+expect_config(touch_repeats
+    "touch taps           3" absent-kernel --touch 1000:0:0 --touch 2000:319:479
+    --touch 3000:1:2:500 --print-config)
+expect_config(no_touch_is_zero
+    "touch taps           0" absent-kernel --print-config)
+expect_refused(touch_off_panel_x "off a 320x480 panel"
+    absent-kernel --touch 1000:320:240 --print-config)
+expect_refused(touch_off_panel_y "off a 320x480 panel"
+    absent-kernel --touch 1000:160:480 --print-config)
+expect_refused(touch_zero_hold "hold must not be zero"
+    absent-kernel --touch 1000:160:240:0 --print-config)
+expect_refused(touch_malformed "expected <at>:<x>:<y>"
+    absent-kernel --touch 1000-160-240 --print-config)
+expect_refused(touch_missing_field "expected <at>:<x>:<y>"
+    absent-kernel --touch 1000:160 --print-config)
+expect_refused(touch_trailing_junk "expected <at>:<x>:<y>"
+    absent-kernel --touch 1000:160:240:500x --print-config)
+expect_refused(touch_missing_value "missing option value"
+    absent-kernel --touch)

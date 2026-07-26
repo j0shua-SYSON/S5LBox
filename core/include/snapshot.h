@@ -78,7 +78,16 @@
  *     ABI size does not, and a v7 file restored into a v8 build would land a
  *     stale claim in the wrong field -- which decides whether the driver stays
  *     attached or pushes 54 KB of firmware at a device that cannot take it. */
-#define SNAPSHOT_VERSION   8u
+/* v9: the touch controller gained a report to deliver. The pending payload,
+ *     its length, the frame sequence number, the framer's latched tx[2] and
+ *     the power-line level all joined MACH, and the reply buffer grew from 40
+ *     bytes to MTZ2_PAYLOAD_LIMIT + 7 because a data read is L + 5 bytes long.
+ *     No encoding choice could have avoided this: a checkpoint taken between
+ *     the length read and the data read has already told the guest a length,
+ *     and a v8 file has no payload to answer the second half of that exchange
+ *     with. Every field after the Z2's in MACH also shifts, so a v8 file read
+ *     as v9 would misparse the USB OTG block onwards rather than fail. */
+#define SNAPSHOT_VERSION   9u
 
 typedef enum {
     SNAP_OK = 0,

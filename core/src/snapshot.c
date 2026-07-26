@@ -123,7 +123,7 @@ SNAP_SIZE_GUARD(s5l_gpioic_t,      200,   "snap_gpioic");
 /* The pin block is 4 KiB of page plus the host-side watch table, which is not
  * serialised — see snap_gpio(). */
 SNAP_SIZE_GUARD(s5l_gpio_t,        4192,  "snap_gpio");
-SNAP_SIZE_GUARD(s5l_mtz2_t,        152,   "snap_mtz2");
+SNAP_SIZE_GUARD(s5l_mtz2_t,        528,   "snap_mtz2");
 SNAP_SIZE_GUARD(s5l_usbotg_t,      4,     "snap_usbotg");
 SNAP_SIZE_GUARD(s5l_nor_entry_t,   12,    "snap_nor");
 SNAP_SIZE_GUARD(s5l_nor_t,         208,   "snap_nor");
@@ -133,7 +133,7 @@ SNAP_SIZE_GUARD(s5l_stub_t,        56,    "snap_stubs");
  * are deliberately excluded from MACH for the same reason as every other bus
  * callback; snapshot_load preserves the live machine's hooks and dedicated
  * privileged-SVC context. The byte format therefore does not change. */
-SNAP_SIZE_GUARD(s5l8900_t,         34288, "snap_mach");
+SNAP_SIZE_GUARD(s5l8900_t,         34664, "snap_mach");
 #endif
 
 /* ---------------------------------------------------------------- the IO --- */
@@ -400,9 +400,18 @@ static void snap_gpio(sn_io_t *io, s5l_gpio_t *g) {
 static bool mtz2_state_valid(const s5l_mtz2_t *d) {
     /* The framer's invariants, which the model maintains and a file is not
      * trusted to respect: `len` is zero between packets and never longer than
-     * the buffer, and `pos` is always inside the packet. The HBPP answer is a
-     * loopback within the ordinary framing, so it needs no separate case. */
-    if (!d || d->len > S5L_MTZ2_BUF) return false;
+     * the longest reply this device drives, and `pos` is always inside the
+     * packet. The HBPP answer is a loopback within the ordinary framing, so it
+     * needs no separate case. */
+    if (!d || d->len > S5L_MTZ2_RSP) return false;
+    /* The report and the line that announces it move together: a pending
+     * payload is bounded by the buffer, an asserted attention line means a
+     * payload is waiting, and a contact count without a payload is a frame
+     * this device could not have built. */
+    if (d->frame_len > MTZ2_PAYLOAD_LIMIT) return false;
+    if (d->atn != (d->frame_len != 0u)) return false;
+    if (d->contacts > MTZ2_CONTACT_MAX) return false;
+    if (d->contacts != 0u && d->frame_len == 0u) return false;
     if (d->len == 0u) return d->pos == 0u;
     return d->pos < d->len;
 }
@@ -423,9 +432,9 @@ static bool mtz2_state_valid(const s5l_mtz2_t *d) {
  */
 static void snap_mtz2(sn_io_t *io, s5l_mtz2_t *d) {
     FB (d->in_reset); FB(d->hbpp_answered);
-    F8 (d->pos); F8(d->len); F8(d->op);
+    F8 (d->pos); F8(d->len); F8(d->op); F8(d->frame_phase);
     FBYTES(d->req, S5L_MTZ2_BUF);
-    FBYTES(d->rsp, S5L_MTZ2_BUF);
+    FBYTES(d->rsp, S5L_MTZ2_RSP);
     F8 (d->rows); F8(d->columns); F8(d->endianness);
     F8 (d->family_id); F8(d->buttons);
     /* Widened for the wire: the format has 8-, 32- and 64-bit primitives and
@@ -435,9 +444,21 @@ static void snap_mtz2(sn_io_t *io, s5l_mtz2_t *d) {
     F32(bcd);
     if (sn_reading(io) && io->err == SNAP_OK) d->bcd_version = (uint16_t)bcd;
     F32(d->surface_width); F32(d->surface_height);
-    FB (d->atn); F8(d->contacts);
+    /*
+     * The pending report travels whole. A checkpoint taken between the length
+     * read and the data read has already told the guest a length; restoring
+     * without the payload would answer the second half of that exchange with a
+     * frame the driver's checksum rejects, and restoring without `atn` would
+     * leave a report nobody is ever told about.
+     */
+    FB (d->atn); F8(d->contacts); F8(d->frame_len); F8(d->frame_seq);
+    F32(d->frame_ms);
+    FBYTES(d->frame, MTZ2_PAYLOAD_LIMIT);
+    FB (d->power_level); F64(d->power_edges);
     F64(d->packets); F64(d->hbpp_probes); F64(d->unknown_opcodes);
     F64(d->resets); F64(d->reset_bytes);
+    F64(d->frames_queued); F64(d->frames_read);
+    F64(d->length_reads); F64(d->data_reads); F64(d->injects_refused);
     F8 (d->last_unknown_op);
     if (sn_reading(io) && io->err == SNAP_OK && !mtz2_state_valid(d))
         io->err = SNAP_ERR_CORRUPT;

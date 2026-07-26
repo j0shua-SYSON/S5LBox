@@ -1276,9 +1276,62 @@ void     s5l_spi_null_bind(s5l_spi_slave_t *slave);
 #define MTZ2_PAYLOAD_AT      3u
 #define MTZ2_PAYLOAD_MAX     (MTZ2_FRAME_LEN - MTZ2_PAYLOAD_AT - 2u)
 
-/* Longest packet this model frames. Nothing it answers exceeds a 16-byte
- * frame; the slack is for the frame reads step 4 adds. */
+/* Longest COMMAND packet this model frames, and the size of the received-byte
+ * buffer. Nothing the driver sends exceeds a 16-byte frame — a frame read's
+ * transmit side is 16 or L+5 bytes but only its first three carry information
+ * (opcode, toggle, phase), so the tail is dropped rather than stored. */
 #define S5L_MTZ2_BUF 40u
+
+/* =========================================================== frame reads ===
+ *
+ * A report is read in TWO transactions, both with opcode MTZ2_OP_FRAME_Z2 and
+ * distinguished by tx[2]. Both were read out of the kext, not inferred:
+ *
+ * LENGTH READ, tx[2] == 0, always 16 bytes (0xc0442440, `mov r4,#0x10`):
+ *   tx[0]   = this+0x7e5, the frame opcode        (0xEB; 0xEA before the HBPP
+ *             answer sets this+0x1bc — see 0xc0440560)
+ *   tx[1]   = this+0x7e6, the toggle              (1 initially, flipped 1<->2
+ *             after every successful data read at 0xc0443100)
+ *   tx[2]   = 0
+ *   tx[14..15] = LE16 sum16(tx, 14)
+ * and the answer must satisfy, at 0xc0442554-0xc04425c0:
+ *   (rx[0] & 0xF0) == 0xE0
+ *   LE16(rx[14..15]) == sum16(rx, 14)
+ *   L = rx[1] | rx[2] << 8            <- the caller's out-parameter
+ * L == 0 is NOT an error. The caller tests it at 0xc043bf90 / 0xc04430bc and
+ * simply stops, so an idle device answers one 16-byte transfer and is done.
+ *
+ * DATA READ, tx[2] == 1, L + 5 bytes (0xc04430c4, `add r1,r1,#5`), same
+ * tx[0..1], and the transmit checksum moves to tx[len-2..len-1] because it is
+ * stored relative to the transfer length (0xc0441254/0xc044126c) — it is still
+ * sum16 of only the first FOURTEEN bytes. The answer is checked at
+ * 0xc044130c-0xc04413b8:
+ *   rx[0]            == 0xEB (or 0xEA), and 0xEB additionally requires the
+ *                       driver's this+0x1bc to be non-zero
+ *   (rx[0]+rx[1]+rx[2]+rx[3]+rx[4]) & 0xFF == 0
+ *   L2 = rx[2] | rx[3] << 8, and L2 of 0 or 2 means "no payload", checked
+ *        BEFORE the payload checksum
+ *   payload          = rx[5 .. 5 + L2 - 3], i.e. L2 - 2 bytes
+ *   LE16(rx[len-2..len-1]) == sum16(payload, L2 - 2)
+ * The payload checksum's position comes from the TRANSFER length and the
+ * payload's own length comes from the EMBEDDED L2, so the two agree only when
+ * L2 == L: payload occupies [5, L+3) and the checksum [L+3, L+5).
+ *
+ * Then `this->v[0x414](payload, L-2)` at 0xc0441400 -> 0xc04389fc, which reads
+ * ONE byte of the payload — `payload[0] == 0x50` is diverted to v[0x418]
+ * (0xc043d1ac, a separate 8-byte status record) — and otherwise tail-calls
+ * v[0x3c4] = 0xc043c31c, which fans the buffer out to up to 32 subscribed
+ * clients through 0xc043d684: `IODataQueue::enqueue(payload, (len+3) & ~3)`.
+ * So a touch frame's first payload byte must not be 0x50.
+ */
+/* The largest payload this device will report. Five contacts is the panel's
+ * own limit and the encoding is 10 bytes of header plus 32 per contact, so 170
+ * is the real maximum; the buffer is rounded up to 176 and the transfer that
+ * carries it is payload + 7 = 183 bytes, which keeps every length in the
+ * uint8_t the framer uses. */
+#define MTZ2_PAYLOAD_LIMIT   176u
+/* Longest reply this device drives: 5 prologue + payload + 2 checksum. */
+#define S5L_MTZ2_RSP         (MTZ2_PAYLOAD_LIMIT + 7u)
 
 /* The reports the driver interrogates, in the order it asks for them. */
 #define MTZ2_REPORT_FAMILY_ID   0xd1u
@@ -1314,8 +1367,15 @@ typedef struct {
      */
     bool     hbpp_answered;
     uint8_t  pos, len, op;
+    /*
+     * `phase` is the frame read's tx[2], latched when it arrives so the framer
+     * can lengthen the packet from 16 to L+5 in the middle of it. 0xFF means
+     * "not a frame read", which keeps a stale 1 from a previous data read out
+     * of the next command's framing decision.
+     */
+    uint8_t  frame_phase;
     uint8_t  req[S5L_MTZ2_BUF];
-    uint8_t  rsp[S5L_MTZ2_BUF];
+    uint8_t  rsp[S5L_MTZ2_RSP];
 
     /*
      * What the device says it is. All of it — every dimension the driver
@@ -1327,16 +1387,44 @@ typedef struct {
     uint32_t surface_width, surface_height;
 
     /*
-     * Frame delivery is step 4's, but the state it needs exists now so that
-     * adding it is a change to one function rather than to this struct: `atn`
-     * is the attention line that drives GPIO interrupt line 155, and
-     * `contacts` is how many touches are waiting to be read out. Nothing sets
-     * either yet, and s5l_mtz2_irq() therefore answers false for the whole
-     * boot — which is honest rather than inert, because it is exactly what a
-     * device with nothing to report does.
+     * The pending report and the attention line that announces it.
+     *
+     * `atn` drives GPIO interrupt line 155 -> group 4 bit 27 -> VIC line 2, the
+     * cascade the guest armed with `INTEN group 4 = 0x08000000` in run59. It is
+     * a LEVEL: it goes up when a report is queued and comes down when the host
+     * has clocked the data read out, which is exactly the condition the GPIO
+     * interrupt controller's level latch (see gpioic.c) was built for.
+     *
+     * `frame_len` is the PAYLOAD length in bytes — the L-2 the driver hands to
+     * IODataQueue — so the wire length L is `frame_len + 2` and the data-read
+     * transfer is `L + 5`. Zero means no report, which is the answer a length
+     * read gets when nothing is pending and is not an error.
      */
     bool     atn;
     uint8_t  contacts;
+    uint8_t  frame_len;
+    uint8_t  frame[MTZ2_PAYLOAD_LIMIT];
+    /*
+     * The frame counter the payload header carries, incremented once per
+     * queued report. Wraps at 8 bits with the header field, so nothing here
+     * has to decide what a wrap means — and the parser's own field is a u8
+     * that "wraps at 256" too.
+     */
+    uint8_t  frame_seq;
+    /* The frame timestamp, in the milliseconds the parser expects. Advanced by
+     * MTZ2_FRAME_PERIOD_MS per queued report; see that constant. */
+    uint32_t frame_ms;
+    /*
+     * The power LDO, /arm-io/spi1/multi-touch's `function-power_ldo`
+     * {phandle, 'GPIO', 0x0701, 0x00000101}. Tracked as the pin's LEVEL, and
+     * deliberately NOT used to gate anything: the device tree's fourth word is
+     * the platform-function argument block and this project has not decoded
+     * which byte of it names the polarity, so calling level-0 "off" would be a
+     * guess that could silently refuse every injection. `power_edges` says the
+     * subscription is live; the level says what the guest last drove.
+     */
+    bool     power_level;
+    uint64_t power_edges;
 
     /*
      * Bounded diagnostics, as on I2C and SPI, and two of these are load-bearing
@@ -1345,13 +1433,28 @@ typedef struct {
      * the dummy transfer is not landing inside the asserted window — which is
      * the difference between the driver being kept alive and it pushing 54 KB
      * of firmware at a device that cannot take it.
+     *
+     * The frame counters answer the two questions a failed tap raises in the
+     * right order: `injects_refused` non-zero means the host asked and the
+     * DEVICE said no (and `s5l_mtz2_set_contacts` told it so); `frames_queued`
+     * without `length_reads` means the guest never looked, i.e. the interrupt
+     * did not route; `length_reads` without `data_reads` means it looked and
+     * declined, i.e. the length answer was malformed.
      */
     uint64_t packets, hbpp_probes, unknown_opcodes, resets, reset_bytes;
+    uint64_t frames_queued, frames_read, length_reads, data_reads;
+    uint64_t injects_refused;
     uint8_t  last_unknown_op;
 } s5l_mtz2_t;
 
-/* The two pins this device watches, as device-tree platform-function ids. */
+/* The three pins this device watches, as device-tree platform-function ids.
+ * Read straight off /arm-io/spi1 and its multi-touch child:
+ *   function-reset     {phandle, 'GPIO', 0x0606, 0x00010001}
+ *   function-power_ldo {phandle, 'GPIO', 0x0701, 0x00000101}
+ *   function-spi_cs0   {phandle, 'GPIO', 0x1800, 0x00000001}   (on spi1)
+ */
 #define MTZ2_PIN_RESET  0x0606u  /* multi-touch function-reset, ACTIVE LOW  */
+#define MTZ2_PIN_POWER  0x0701u  /* multi-touch function-power_ldo          */
 #define MTZ2_PIN_SELECT 0x1800u  /* /arm-io/spi1 function-spi_cs0           */
 
 /*
@@ -1365,7 +1468,8 @@ void     s5l_mtz2_reset(s5l_mtz2_t *dev);
 /* Attach to an SPI chip select. */
 void     s5l_mtz2_bind(s5l_mtz2_t *dev, s5l_spi_slave_t *slave);
 /* Is the attention line asserted? Drives GPIO line 155 through the interrupt
- * controller. Always false until step 4 gives the device a frame to deliver. */
+ * controller. True exactly while a queued report has not yet been clocked out
+ * by a data read. */
 bool     s5l_mtz2_irq(const s5l_mtz2_t *dev);
 /*
  * The protocol's only checksum: a plain truncating 16-bit sum of bytes, stored
@@ -1394,6 +1498,112 @@ void     s5l_mtz2_reset_pin(void *ctx, bool level);
  * so a driver that never drives the select is not broken by its absence.
  */
 void     s5l_mtz2_select_pin(void *ctx, bool level);
+/*
+ * The power LDO moved. Recorded, not acted on — see `power_level`.
+ */
+void     s5l_mtz2_power_pin(void *ctx, bool level);
+
+/* ------------------------------------------------ the host injection API ---
+ *
+ * THE LINE THIS API EXISTS TO DRAW. The host sets PENDING CONTACT STATE. The
+ * emulated Z2 then reports it through its own registers, in its own encoding,
+ * when the guest's own driver reads them. Nothing here enqueues into
+ * MTIODataQueue, synthesises a GSEvent or calls UIKit; a tap that does not
+ * reach SpringBoard because some part of the guest stack is wrong must LOOK
+ * broken, because that is the only way it can be found.
+ *
+ * Coordinates are PANEL PIXELS — x in [0, S5L_MT_PANEL_W), y in
+ * [0, S5L_MT_PANEL_H) — and the device converts them into the surface units it
+ * published in report 0xD9. Keeping the conversion inside the device is what
+ * makes "surface 4800 x 7200" one decision in one place rather than an
+ * agreement two files have to keep.
+ */
+#define S5L_MT_PANEL_W 320u
+#define S5L_MT_PANEL_H 480u
+/* Five fingers. The panel's own limit, and it bounds the payload: 10 bytes of
+ * header plus 32 per contact is 170, which is what MTZ2_PAYLOAD_LIMIT is sized
+ * for. It is also inside the 1..11 the parser's path table accepts. */
+#define MTZ2_CONTACT_MAX 5u
+/*
+ * The payload's shape, for frame type 0xCC. The header is a CONSTANT ten bytes
+ * for this type — the parser does not read a header-length field, it uses 10 —
+ * and the per-contact stride is a fixed 32 (`lsl r2, r3, #5` at 0x33cfbbcc).
+ * mtz2.c carries the full field map and the evidence for it.
+ */
+#define MTZ2_FRAME_TYPE     0xccu
+#define MTZ2_FRAME_HEADER   10u
+#define MTZ2_CONTACT_STRIDE 32u
+/*
+ * Milliseconds the device advances its frame timestamp by per report. This
+ * device has no time base of its own; the timestamp exists because
+ * _mt_CheckForTimestampErrors (0x33cfb2b4) logs "timestamp invalid!" on a zero
+ * and "time travel, eh?" on a decreasing one and posts notification 0x66 to
+ * the driver. Non-zero and non-decreasing are the only properties anything was
+ * observed to require, and 16 ms is one frame at the ~60 Hz a part like this
+ * scans at.
+ */
+#define MTZ2_FRAME_PERIOD_MS 16u
+
+/* Contact lifecycle, in the device's own encoding — see mtz2.c for how these
+ * map onto the eight path states MultitouchSupport names. */
+#define MTZ2_PHASE_NOT_TRACKING 0u
+#define MTZ2_PHASE_START        1u   /* in range, not yet touching  */
+#define MTZ2_PHASE_HOVER        2u
+#define MTZ2_PHASE_MAKE_TOUCH   3u   /* the finger just landed      */
+#define MTZ2_PHASE_TOUCHING     4u   /* still down, possibly moving */
+#define MTZ2_PHASE_BREAK_TOUCH  5u   /* the finger just lifted      */
+#define MTZ2_PHASE_LINGER       6u
+#define MTZ2_PHASE_OUT_OF_RANGE 7u
+
+typedef struct {
+    /*
+     * The path identifier. MUST be 1..11: _mt_getPathLifeCycle at 0x33cfd5f4
+     * does `sub r3,r1,#1 / cmp r3,#0xa` and silently aliases anything outside
+     * that range onto slot 0, and MultitouchHID's own
+     * mthm_ExpandAndFilterPackedContacts memcpys into
+     * gMTHMPathStates + id * 0x5c with NO bounds check at all. Zero in
+     * particular is not a contact: it is what an unset slot reads as.
+     */
+    uint8_t  id;
+    uint8_t  phase;      /* MTZ2_PHASE_*                                */
+    uint16_t x, y;       /* panel pixels, origin TOP-left               */
+    /*
+     * Contact amplitude, 0..255, mapped linearly onto the dimensionless "Z
+     * total" the parser divides by 256. The only property anything downstream
+     * was observed to require is that it be greater than zero for a finger
+     * that is actually touching, so a lift should carry 0.
+     */
+    uint8_t  pressure;
+    uint8_t  major, minor; /* contact ellipse axes, panel pixels        */
+} s5l_mt_contact_t;
+
+/*
+ * Queue one report. Returns FALSE — and queues nothing — when the device is in
+ * no state to report, so a caller can never assume delivery:
+ *
+ *   - `n` above MTZ2_CONTACT_MAX, a null array with n != 0, an out-of-range
+ *     coordinate, or a phase this device does not have: a malformed request.
+ *   - held in reset: a part driving nothing cannot raise an attention line.
+ *   - `!hbpp_answered`: the driver has not yet been told the part is alive, so
+ *     its this+0x1bc is still zero and deviceReadResultData (0xc0441324)
+ *     REJECTS a 0xEB frame outright. A report queued now could not be read.
+ *   - a report is already pending: this device holds exactly one, and silently
+ *     replacing it would drop the finger-down half of a tap.
+ *
+ * Every refusal bumps `injects_refused`, so a caller that ignores the return
+ * value still leaves evidence.
+ */
+bool     s5l_mtz2_set_contacts(s5l_mtz2_t *dev,
+                               const s5l_mt_contact_t *contacts, unsigned n);
+/*
+ * Build the payload for a set of contacts, without queueing anything. Returns
+ * the payload length, or 0 if the request is malformed. `out` must have room
+ * for MTZ2_PAYLOAD_LIMIT bytes. Exposed so the tests can check the encoding
+ * against a hand-written expectation rather than against the encoder's own
+ * output — a format checked against itself checks nothing.
+ */
+unsigned s5l_mtz2_encode(const s5l_mtz2_t *dev, const s5l_mt_contact_t *c,
+                         unsigned n, uint8_t seq, uint32_t ms, uint8_t *out);
 
 /* ------------------------------------ Synopsys DWC2 USB OTG (config only) ---
  * The four hardware-configuration registers AppleSynopsysOTGDevice reads out of
