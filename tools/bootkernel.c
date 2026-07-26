@@ -352,7 +352,7 @@ static bool boot_option_takes_value(const char *option) {
     static const char *const options[] = {
         "-D", "-W", "-Z", "-p", "--restore", "-V", "-n", "-T",
         "-d", "-c", "-b", "-w", "-r", "--fstab", "--grow", "-R",
-        "-X", "-H"
+        "-X", "-H", "--call-probe"
     };
 
     if (!option) return false;
@@ -4895,6 +4895,55 @@ typedef struct {
     bool target_identity_valid;
 } framebuffer_write_event_t;
 
+/* --- DIAGNOSTIC: the user-mode call probe (--call-probe) ------------------
+ *
+ * Snapshot the AAPCS argument registers every time the guest is about to
+ * execute one of a few command-line-selected user PCs.  It answers "who called
+ * this, and with what" for a routine whose crash is explained by a bad ARGUMENT
+ * rather than by a bug in its own body -- the case in point being CoreGraphics
+ * CGBlt_fillBytes at 0x338f61b0, the sole caller of _CGSFillDRAM8by1, which has
+ * no bounds checks and therefore faults exactly where its caller pointed it.
+ *
+ * A RING, not a saturating table.  The value of this probe is concentrated in
+ * the LAST call before the abort, and a table that fills with early-boot noise
+ * and then drops later entries is precisely the failure that already cost this
+ * project the decisive record twice (the abort-site table, raised to 65536 in
+ * 5bef7cb).  Overwriting oldest-first loses only the uninteresting end, and
+ * call_probe_total is printed alongside so truncation is never silent.
+ */
+#define CALL_PROBE_PC_MAX  8u
+#define CALL_PROBE_RING    4096u
+
+typedef struct {
+    uint64_t at;                    /* retired-instruction index of the hit */
+    uint32_t pc, lr, sp;
+    uint32_t r[4];                  /* r0-r3 == AAPCS arguments 1-4 */
+    uint32_t stack[2];              /* [sp,#0], [sp,#4] == arguments 5-6 */
+    uint32_t fail_va[2];            /* which byte failed, per stack word */
+    uint32_t fail_fsr[2];           /* ARMv6 FSR, or 0 for a non-RAM reject */
+    uint8_t  stack_ok;              /* bit i set == stack[i] was read */
+} call_probe_record_t;
+
+typedef struct {
+    uint32_t pc;                    /* configured, already masked with ~1 */
+    uint64_t user_hits;             /* captures offered to the ring */
+    uint64_t nonuser_hits;          /* reached, but the CPSR was not USR */
+} call_probe_site_t;
+
+/*
+ * Why a descriptor word is missing from an abort site.  A descriptor of zero is
+ * a perfectly valid encoding (a translation fault), and so is 0xffffffff, so
+ * absence has to be carried out of band rather than as a magic value.
+ */
+typedef enum {
+    FAULT_DESC_ABSENT = 0,      /* nothing was attempted */
+    FAULT_DESC_OK,              /* word read out of guest DRAM */
+    FAULT_DESC_MMU_OFF,         /* SCTLR.M clear: translation is identity */
+    FAULT_DESC_WALK_DISABLED,   /* TTBCR.PD0/PD1 suppressed this walk */
+    FAULT_DESC_NOT_RAM,         /* descriptor address is outside guest DRAM */
+    FAULT_DESC_NO_SECOND        /* L1 is not a coarse page-table pointer */
+} fault_desc_state_t;
+
 static struct {
     /* bus interposition */
     arm_bus_t   inner;              /* the machine's original callbacks */
@@ -5039,6 +5088,15 @@ static struct {
         uint32_t far_, fsr, pc, cpsr;
         bool prefetch, mmu_enabled;
         uint64_t first_at, n;
+        /*
+         * The guest's OWN page-table descriptors for far_, plus the two control
+         * registers that decide what they mean. This is what separates "our
+         * fault plumbing is wrong" from "the guest genuinely refused this
+         * access", and nothing else does. Captured at the FIRST occurrence, so
+         * they describe the same instant as first_at.
+         */
+        uint32_t l1, l2, dacr, sctlr;
+        uint8_t  l1_state, l2_state;   /* fault_desc_state_t */
     } fault[FAULT_SITE_CAP];
 
     /* --- DIAGNOSTIC: exception returns that resume in Thumb state ---------
@@ -5118,6 +5176,16 @@ static struct {
     uint64_t    hot_bucket[40];          /* when, over the whole run */
     uint64_t    hot_steps;               /* run length, for bucket scaling */
     uint32_t    hot_page;                /* selected physical page; -H */
+
+    /* --- DIAGNOSTIC: the user-mode call probe; --call-probe ---------------
+     * call_probe_n is the hot-loop gate: zero means the whole facility is off
+     * and the step loop pays one compare against a global that is never
+     * written after startup.  See call_probe_record_t above. */
+    unsigned          call_probe_n;      /* configured PCs; 0 == off */
+    call_probe_site_t call_probe_pc[CALL_PROBE_PC_MAX];
+    unsigned          call_probe_w;      /* ring write cursor */
+    uint64_t          call_probe_total;  /* captures ever made, all PCs */
+    call_probe_record_t call_probe_log[CALL_PROBE_RING];
 } G;
 
 /*
@@ -15482,6 +15550,155 @@ static void note_hot(uint32_t addr, uint32_t val, unsigned bytes, bool wr) {
     }
 }
 
+/*
+ * Read one 32-bit stack argument through the guest MMU, as the user thread
+ * itself would see it.  Read-only and non-faulting by construction:
+ * guest_read_user_bytes() translates with arm_mmu_translate(), which returns an
+ * FSR rather than raising anything, refuses any physical address outside RAM so
+ * no device register is ever touched, and writes no guest state.  A failure is
+ * recorded as a sentinel; the guest never learns this happened.
+ *
+ * The two words are read independently rather than as one 8-byte block so that
+ * a frame straddling a page boundary still yields [sp+0] when only [sp+4] is
+ * unmapped.
+ */
+static void call_probe_read_stack_word(arm_cpu_t *cpu, uint32_t sp,
+                                       call_probe_record_t *rec,
+                                       unsigned index) {
+    uint8_t bytes[4];
+    uint32_t fail_va = 0, fail_fsr = 0;
+    if (guest_read_user_bytes(cpu, sp + index * 4u, bytes, sizeof bytes,
+                              &fail_va, &fail_fsr)) {
+        rec->stack[index] = ld32(bytes);
+        rec->stack_ok |= (uint8_t)(1u << index);
+        return;
+    }
+    rec->fail_va[index] = fail_va;
+    rec->fail_fsr[index] = fail_fsr;
+}
+
+/*
+ * Record one call-probe hit.  Deliberately never inlined: the step loop's only
+ * cost when no probe is configured is the G.call_probe_n test at the call site,
+ * and nothing of this body is allowed to grow the loop body around it.
+ */
+static BOOTKERNEL_NOINLINE void call_probe_note(
+        arm_cpu_t *cpu, uint64_t at, uint32_t pc) {
+    if (!cpu) return;
+
+    unsigned slot;
+    for (slot = 0; slot < G.call_probe_n; slot++)
+        if (G.call_probe_pc[slot].pc == pc) break;
+    if (slot == G.call_probe_n) return;
+
+    /*
+     * User mode only, and counted separately when it is not.  A probe aimed by
+     * mistake at a kernel address must report "reached, wrong mode" instead of
+     * looking identical to "never reached", and the unprivileged stack read
+     * below would in any case describe the wrong frame for a kernel PC.
+     */
+    if ((cpu->cpsr & ARM_CPSR_MODE_MASK) != ARM_MODE_USR) {
+        G.call_probe_pc[slot].nonuser_hits++;
+        return;
+    }
+    G.call_probe_pc[slot].user_hits++;
+
+    unsigned k = G.call_probe_w;
+    call_probe_record_t *rec = &G.call_probe_log[k];
+    memset(rec, 0, sizeof *rec);
+    rec->at = at;
+    rec->pc = pc;
+    for (unsigned r = 0; r < 4u; r++)
+        rec->r[r] = diagnostic_user_reg(cpu, r);
+    rec->sp = diagnostic_user_reg(cpu, 13u);
+    rec->lr = diagnostic_user_reg(cpu, 14u);
+    call_probe_read_stack_word(cpu, rec->sp, rec, 0u);
+    call_probe_read_stack_word(cpu, rec->sp, rec, 1u);
+
+    G.call_probe_w = (k + 1u) % CALL_PROBE_RING;
+    G.call_probe_total++;
+}
+
+/* Format one stack word, or say why it could not be read. */
+static void call_probe_word_text(const call_probe_record_t *rec, unsigned index,
+                                 char *out, size_t size) {
+    if (rec->stack_ok & (1u << index)) {
+        snprintf(out, size, "%08x", rec->stack[index]);
+        return;
+    }
+    /* An FSR distinguishes a translation/permission fault from a structural
+     * rejection, which guest_read_user_bytes reports with fsr == 0. */
+    if (rec->fail_fsr[index])
+        snprintf(out, size, "<fsr%02x>", rec->fail_fsr[index]);
+    else
+        snprintf(out, size, "<no-ram>");
+}
+
+/*
+ * Ring arithmetic, proven rather than trusted.  The oldest-first replay below
+ * is the only reason this diagnostic exists, and an off-by-one in the start
+ * index would silently rotate the answer instead of failing.
+ */
+static bool call_probe_ring_selfcheck(void) {
+    static const uint64_t totals[] = {
+        0u, 1u, CALL_PROBE_RING - 1u, CALL_PROBE_RING,
+        CALL_PROBE_RING + 1u, (uint64_t)CALL_PROBE_RING * 3u + 7u
+    };
+    for (unsigned t = 0; t < sizeof totals / sizeof totals[0]; t++) {
+        uint64_t total = totals[t];
+        unsigned w = (unsigned)(total % CALL_PROBE_RING);
+        unsigned cnt = total < CALL_PROBE_RING
+                     ? (unsigned)total : CALL_PROBE_RING;
+        unsigned start = (w + CALL_PROBE_RING - cnt) % CALL_PROBE_RING;
+        /* The newest capture always sits immediately behind the cursor. */
+        if (cnt && (start + cnt - 1u) % CALL_PROBE_RING !=
+                   (w + CALL_PROBE_RING - 1u) % CALL_PROBE_RING)
+            return false;
+        /* Replay visits cnt distinct slots and never runs past the cursor. */
+        for (unsigned i = 0; i < cnt; i++)
+            if ((start + i) % CALL_PROBE_RING == w && i != 0u)
+                return false;
+        if (cnt > CALL_PROBE_RING) return false;
+    }
+    return CALL_PROBE_PC_MAX >= 1u;
+}
+
+static void call_probe_report(void) {
+    if (!G.call_probe_n) return;
+
+    printf("\n=== CALL PROBE: CONFIGURED PCs (%u) ===\n", G.call_probe_n);
+    for (unsigned i = 0; i < G.call_probe_n; i++)
+        printf("    pc 0x%08x  user hits %-12llu  non-user hits %llu\n",
+               G.call_probe_pc[i].pc,
+               (unsigned long long)G.call_probe_pc[i].user_hits,
+               (unsigned long long)G.call_probe_pc[i].nonuser_hits);
+
+    unsigned cnt = G.call_probe_total < (uint64_t)CALL_PROBE_RING
+                 ? (unsigned)G.call_probe_total : CALL_PROBE_RING;
+    printf("\n=== CALL PROBE: LAST %u OF %llu CAPTURES (newest last) ===\n",
+           cnt, (unsigned long long)G.call_probe_total);
+    printf("    Registers are captured before the probed instruction executes; a\n"
+           "    capture proves entry, not retirement. r0-r3 are AAPCS arguments\n"
+           "    1-4 and [sp+0]/[sp+4] arguments 5-6 of a call probed at its entry.\n");
+    if (G.call_probe_total > (uint64_t)CALL_PROBE_RING)
+        printf("    NOTE: %llu earlier captures were overwritten by the ring.\n",
+               (unsigned long long)(G.call_probe_total -
+                                    (uint64_t)CALL_PROBE_RING));
+
+    unsigned start = (G.call_probe_w + CALL_PROBE_RING - cnt) % CALL_PROBE_RING;
+    for (unsigned i = 0; i < cnt; i++) {
+        const call_probe_record_t *rec =
+            &G.call_probe_log[(start + i) % CALL_PROBE_RING];
+        char w0[16], w1[16];
+        call_probe_word_text(rec, 0u, w0, sizeof w0);
+        call_probe_word_text(rec, 1u, w1, sizeof w1);
+        printf("    @%-12llu pc %08x lr %08x sp %08x  "
+               "r0 %08x r1 %08x r2 %08x r3 %08x  [sp+0] %-8s [sp+4] %-8s\n",
+               (unsigned long long)rec->at, rec->pc, rec->lr, rec->sp,
+               rec->r[0], rec->r[1], rec->r[2], rec->r[3], w0, w1);
+    }
+}
+
 static void framebuffer_surface_refresh(void) {
     G.framebuffer_surface_cache_valid = true;
     G.framebuffer_surface_active = false;
@@ -15784,9 +16001,108 @@ static void milestones_build(void) {
     }
 }
 
+/*
+ * Read one 32-bit guest translation-table descriptor.
+ *
+ * Deliberately NOT through cpu->bus->read32, the accessor arm_mmu_translate()
+ * itself uses: that one is wrapped by the spy interposer, so a descriptor
+ * address outside DRAM would be logged as a device access attributed to
+ * whatever PC happens to be current, and would reach a modelled device's read
+ * handler. Guest translation tables live in DRAM, where the machine's bus read
+ * is itself a plain little-endian load out of m->ram -- RAM is routed first,
+ * and s5l8900_init() has already refused to build a machine whose RAM aperture
+ * shadows a device window. So for every address that can legitimately appear
+ * here this returns exactly the word the walker read, with no side effect of
+ * any kind, and anything else is refused rather than guessed.
+ */
+static bool fault_desc_read(uint32_t pa, uint32_t *out) {
+    if (!G.mach || !G.mach->ram || !is_ram(pa, 4u)) return false;
+    *out = ld32(&G.mach->ram[pa - G.mach->ram_base]);
+    return true;
+}
+
+/*
+ * Walk the guest's own translation tables for `va` exactly as
+ * arm_mmu_translate() does (core/src/mmu.c), and hand back the raw first- and
+ * second-level descriptor words.
+ *
+ * The emulator has no TLB — every access re-walks these tables — so what is
+ * read here is precisely what the hardware model used to raise the abort, and
+ * the permission bits in the second-level descriptor say whether the guest had
+ * actually forbidden the access or whether we manufactured the fault.
+ *
+ * Pure: no descriptor is interpreted, nothing is written, no fault is raised.
+ * Each level reports WHY it has no word instead of substituting one.
+ */
+static void fault_walk_descriptors(const arm_cpu_t *cpu, uint32_t va,
+                                   uint32_t *l1_out, uint8_t *l1_state,
+                                   uint32_t *l2_out, uint8_t *l2_state) {
+    *l1_out = 0; *l2_out = 0;
+    *l1_state = (uint8_t)FAULT_DESC_ABSENT;
+    *l2_state = (uint8_t)FAULT_DESC_ABSENT;
+    if (!cpu) return;
+
+    if (!(cpu->cp15.sctlr & ARM_SCTLR_M)) {
+        *l1_state = *l2_state = (uint8_t)FAULT_DESC_MMU_OFF;
+        return;
+    }
+
+    /* TTBCR.N splits the walk between TTBR0 and TTBR1 (mmu.c). The
+     * ttbcr_n == 0 short-circuit is load-bearing, not defensive: the shift in
+     * the second operand would otherwise be `va >> 32`, which is undefined. */
+    unsigned ttbcr_n = cpu->cp15.ttbcr & 7u;
+    bool use_ttbr0 = ttbcr_n == 0u || (va >> (32u - ttbcr_n)) == 0u;
+    uint32_t l1_addr;
+    if (use_ttbr0) {
+        uint32_t base = cpu->cp15.ttbr0 & (0xffffffffu << (14u - ttbcr_n));
+        uint32_t idx  = (va >> 20) & ((1u << (12u - ttbcr_n)) - 1u);
+        l1_addr = base | (idx << 2);
+    } else {
+        l1_addr = (cpu->cp15.ttbr1 & 0xffffc000u) | ((va >> 20) << 2);
+    }
+
+    /* TTBCR.PD0/PD1 suppress the walk before any descriptor is read at all. */
+    unsigned pd_bit = use_ttbr0 ? 4u : 5u;
+    if ((cpu->cp15.ttbcr & (1u << pd_bit)) != 0u) {
+        *l1_state = *l2_state = (uint8_t)FAULT_DESC_WALK_DISABLED;
+        return;
+    }
+
+    if (!fault_desc_read(l1_addr, l1_out)) {
+        *l1_state = *l2_state = (uint8_t)FAULT_DESC_NOT_RAM;
+        return;
+    }
+    *l1_state = (uint8_t)FAULT_DESC_OK;
+
+    /* Only L1 type 1, a coarse page-table pointer, has a second level. */
+    if ((*l1_out & 3u) != 1u) {
+        *l2_state = (uint8_t)FAULT_DESC_NO_SECOND;
+        return;
+    }
+
+    uint32_t l2_addr = (*l1_out & 0xfffffc00u) | (((va >> 12) & 0xffu) << 2);
+    *l2_state = fault_desc_read(l2_addr, l2_out)
+              ? (uint8_t)FAULT_DESC_OK : (uint8_t)FAULT_DESC_NOT_RAM;
+}
+
+/* Render one descriptor word, or say why there is none. */
+static const char *fault_desc_text(uint8_t state, uint32_t value,
+                                   char *out, size_t size) {
+    switch ((fault_desc_state_t)state) {
+        case FAULT_DESC_OK:            snprintf(out, size, "%08x", value); break;
+        case FAULT_DESC_MMU_OFF:       snprintf(out, size, "<mmu-off>"); break;
+        case FAULT_DESC_WALK_DISABLED: snprintf(out, size, "<walk-off>"); break;
+        case FAULT_DESC_NOT_RAM:       snprintf(out, size, "<no-ram>"); break;
+        case FAULT_DESC_NO_SECOND:     snprintf(out, size, "<no-l2>"); break;
+        case FAULT_DESC_ABSENT:
+        default:                       snprintf(out, size, "<none>"); break;
+    }
+    return out;
+}
+
 static void note_fault(uint32_t far_, uint32_t fsr, uint32_t pc,
                        uint32_t cpsr, bool mmu_enabled, bool pref,
-                       uint64_t at) {
+                       uint64_t at, const arm_cpu_t *cpu) {
     for (unsigned i = 0; i < G.fault_n; i++)
         if (G.fault[i].far_ == far_ && G.fault[i].pc == pc &&
             G.fault[i].fsr == fsr &&
@@ -15802,6 +16118,19 @@ static void note_fault(uint32_t far_, uint32_t fsr, uint32_t pc,
         G.fault[G.fault_n].cpsr = cpsr;
         G.fault[G.fault_n].mmu_enabled = mmu_enabled;
         G.fault[G.fault_n].first_at = at; G.fault[G.fault_n].n = 1;
+        /*
+         * Abort entry is a hardware event: it changes CPSR, the banked r13/r14,
+         * SPSR and the fault registers, and leaves TTBR0/TTBCR/DACR/SCTLR
+         * exactly as the faulting access saw them. Reading them now therefore
+         * describes the address space that refused the access.
+         */
+        G.fault[G.fault_n].dacr  = cpu ? cpu->cp15.dacr  : 0u;
+        G.fault[G.fault_n].sctlr = cpu ? cpu->cp15.sctlr : 0u;
+        fault_walk_descriptors(cpu, far_,
+                               &G.fault[G.fault_n].l1,
+                               &G.fault[G.fault_n].l1_state,
+                               &G.fault[G.fault_n].l2,
+                               &G.fault[G.fault_n].l2_state);
         G.fault_n++;
     } else {
         /* The table saturates early on a real boot — around instruction 116M.
@@ -20629,6 +20958,7 @@ int main(int argc, char **argv) {
             "          [-d <devicetree.bin>] [-c <cmdline>] [-a] [-M] [-F] [-g]\n"
             "          [-r <ramdisk.img>] [-R <ram-MB>] [-X phys|virt|<addr>]\n"
             "          [-H <4-KiB-aligned-physical-page>]\n"
+            "          [--call-probe <user-mode-pc>] ...\n"
             "          [--external-md <immutable-source.img> <new-work.img>]\n"
             "          [-D <node/path>:<prop>=<value>] ...\n"
             "          [--snapshot-at <insn> <file>] ... [--restore <file>]\n"
@@ -20658,6 +20988,17 @@ int main(int argc, char **argv) {
             "      cover only the window since the restore. Instruction INDICES\n"
             "      are absolute either way. Use tools/snapboot for a report that\n"
             "      is a pure function of the machine.\n"
+            "  --call-probe <pc>  repeatable, up to 8. Every time the guest is\n"
+            "      about to execute <pc> in USER mode, capture the retired-\n"
+            "      instruction index, lr, r0-r3, sp and the stack words at\n"
+            "      [sp+0] and [sp+4] into a 4096-entry ring, and print the ring\n"
+            "      oldest-first in the terminal report. For an ARM/AAPCS function\n"
+            "      probed at its entry that is arguments 1-6 plus the return\n"
+            "      address, i.e. who called it and with what. The stack words are\n"
+            "      read through the guest MMU unprivileged and non-faulting: an\n"
+            "      unreadable word prints a sentinel and the guest is never\n"
+            "      disturbed. A capture proves entry, not retirement. Executions\n"
+            "      of <pc> outside user mode are counted but not captured.\n"
             "  -D  patch a 4-byte device-tree property in the in-memory copy\n"
             "      (empty path == root), e.g. -D cpus/cpu0:timebase-frequency=6000000\n"
             "  -r  load a raw disk image into DRAM, publish it as the RAMDisk\n"
@@ -20745,6 +21086,10 @@ int main(int argc, char **argv) {
     uint32_t phys_base = S5L8900_SDRAM_BASE;
     uint32_t virt_base = 0xc0000000u;
     uint32_t hot_page = DEFAULT_HOT_PAGE;
+    /* --call-probe, repeatable. Parsed into locals for the same reason -H is:
+     * spy_install() zeroes G, so nothing may be written there before it runs. */
+    uint32_t call_probe_pcs[CALL_PROBE_PC_MAX] = {0};
+    unsigned call_probe_n = 0;
     uint64_t steps = UINT64_C(2000000);
     const char *dtpath = NULL;
     const char *cmdline = "debug=0x8 serial=1";
@@ -21061,6 +21406,29 @@ int main(int argc, char **argv) {
                 return 1;
             }
         }
+        else if (!strcmp(argv[i], "--call-probe")) {
+            uint32_t probe_pc = 0;
+            if (!parse_u32_arg("--call-probe", argv[++i], &probe_pc)) return 1;
+            probe_pc &= ~1u;            /* a Thumb entry is named by its even VA */
+            if (!probe_pc) {
+                fprintf(stderr, "--call-probe: pc must not be zero\n");
+                return 1;
+            }
+            if (call_probe_n >= CALL_PROBE_PC_MAX) {
+                fprintf(stderr, "--call-probe: at most %u PCs are supported\n",
+                        CALL_PROBE_PC_MAX);
+                return 1;
+            }
+            bool duplicate = false;
+            for (unsigned q = 0; q < call_probe_n; q++)
+                if (call_probe_pcs[q] == probe_pc) duplicate = true;
+            if (duplicate) {
+                fprintf(stderr, "--call-probe: pc 0x%08x given twice\n",
+                        probe_pc);
+                return 1;
+            }
+            call_probe_pcs[call_probe_n++] = probe_pc;
+        }
         else if (!strcmp(argv[i], "--restore")) restore_path = argv[++i];
         else if (!strcmp(argv[i], "-V")) {
             if (!parse_u32_arg("-V", argv[++i], &virt_base)) return 1;
@@ -21309,6 +21677,11 @@ int main(int argc, char **argv) {
     if (!pmu_checkpoint_classifier_selfcheck()) {
         fprintf(stderr,
                 "internal error: PMU checkpoint classifier self-check failed\n");
+        return 2;
+    }
+    if (!call_probe_ring_selfcheck()) {
+        fprintf(stderr,
+                "internal error: call probe ring self-check failed\n");
         return 2;
     }
 
@@ -22372,6 +22745,19 @@ external_md_work_ready:
     /* Interpose on the bus so every non-RAM access is attributed to a PC. */
     spy_install(&mach, virt_base, phys_base, hot_page);
 
+    /* After spy_install, which zeroes G. Setting call_probe_n last is what
+     * arms the step-loop gate. */
+    for (unsigned q = 0; q < call_probe_n; q++)
+        G.call_probe_pc[q].pc = call_probe_pcs[q];
+    G.call_probe_n = call_probe_n;
+    if (call_probe_n) {
+        printf("call probe: armed on %u user-mode pc%s (ring %u):", call_probe_n,
+               call_probe_n == 1u ? "" : "s", CALL_PROBE_RING);
+        for (unsigned q = 0; q < call_probe_n; q++)
+            printf(" 0x%08x", call_probe_pcs[q]);
+        printf("\n");
+    }
+
     if (external_md) {
         external_block_adapter = file_block_create();
         if (!external_block_adapter) {
@@ -22644,6 +23030,13 @@ external_md_work_ready:
     bool display_prev_mmu_enabled = false;
 
     G.hot_steps = steps;
+    /*
+     * Hoisted so the gate below costs no memory reference at all. G.call_probe_n
+     * is written once, before this loop, and never again; reading it here lets
+     * the compiler keep the answer in a register instead of reloading it from a
+     * struct that every observer in the loop could in principle have written.
+     */
+    const bool call_probe_active = G.call_probe_n != 0u;
     for (; n < steps; n++) {
         G.hot_now = n;
         last_pc = mach.cpu.r[15];
@@ -22668,6 +23061,9 @@ external_md_work_ready:
          * matched at its virtual address and at its pre-MMU physical alias. */
         {
             uint32_t p = last_pc & ~1u;
+            /* Off by default: a register test and a perfectly predicted
+             * not-taken branch, with the call sunk out of line. */
+            if (call_probe_active) call_probe_note(&mach.cpu, n, p);
             pmu_checkpoint_observe(p, n, &mach.cpu);
             display_checkpoint_observe(p, n, &mach.cpu);
             tvout_chain_checkpoint_observe(p, n, &mach.cpu);
@@ -23027,7 +23423,8 @@ external_md_work_ready:
                 bool pref = (mach.cpu.r[15] & 0xfffu) == 0x00cu;
                 note_fault(pref ? mach.cpu.cp15.ifar : mach.cpu.cp15.dfar,
                            pref ? mach.cpu.cp15.ifsr : mach.cpu.cp15.dfsr,
-                           last_pc, last_cpsr, last_mmu_enabled, pref, n);
+                           last_pc, last_cpsr, last_mmu_enabled, pref, n,
+                           &mach.cpu);
             }
             if (!have_first_exc && mode_after != mode_before &&
                 (mode_after == ARM_MODE_ABT || mode_after == ARM_MODE_UND ||
@@ -23370,6 +23767,9 @@ external_md_work_ready:
                    (unsigned long long)instruction_bucket_boundary(steps, i + 1u),
                    (unsigned long long)G.hot_bucket[i]);
 
+    /* ------------------------------------------- the user-mode call probe --- */
+    call_probe_report();
+
     /*
      * WHERE THE RUN ENDED, instruction by instruction.
      *
@@ -23582,14 +23982,29 @@ external_md_work_ready:
         printf("    WARNING: %" PRIu64
                " aborts at NEW sites were dropped (table full)"
                " — this list is NOT complete\n", G.fault_dropped);
-    for (unsigned i = 0; i < G.fault_n; i++)
-        printf("    %s FAR 0x%08x FSR 0x%02x  pc 0x%08x %s  n=%llu first@%" PRIu64 "\n",
+    /*
+     * FSR is printed to 12 bits, not 8. DFSR[11] is WnR, so masking with 0xff
+     * made a READ permission fault and a WRITE permission fault print
+     * identically — the single distinction that matters when the question is
+     * whether the guest refused a store. Bits [10] (FS[4]) and [7:4] (domain)
+     * were being dropped for the same reason.
+     */
+    for (unsigned i = 0; i < G.fault_n; i++) {
+        char l1[16], l2[16];
+        printf("    %s FAR 0x%08x FSR 0x%03x  pc 0x%08x %s  n=%llu first@%" PRIu64
+               "  L1=%-10s L2=%-10s DACR=%08x SCTLR=%08x\n",
                G.fault[i].prefetch ? "IFETCH" : "DATA  ",
-               G.fault[i].far_, G.fault[i].fsr & 0xff, G.fault[i].pc,
+               G.fault[i].far_, G.fault[i].fsr & 0xfff, G.fault[i].pc,
                diagnostic_pc_context_name(
                    G.fault[i].pc, G.fault[i].cpsr,
                    G.fault[i].mmu_enabled, NULL),
-               (unsigned long long)G.fault[i].n, G.fault[i].first_at);
+               (unsigned long long)G.fault[i].n, G.fault[i].first_at,
+               fault_desc_text(G.fault[i].l1_state, G.fault[i].l1,
+                               l1, sizeof l1),
+               fault_desc_text(G.fault[i].l2_state, G.fault[i].l2,
+                               l2, sizeof l2),
+               G.fault[i].dacr, G.fault[i].sctlr);
+    }
 
     vm_report();
 
