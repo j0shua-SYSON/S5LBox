@@ -229,7 +229,15 @@ expire when the next run lands. The prose version is
   canonical inputs on disk.
 - **Networking transport is a deliberate, temporary substitution.** The chosen
   route is PPP over a second emulated S5L8900 UART, using the guest's own stock
-  `/usr/sbin/pppd`. Every part of it is honest emulation — the UART is real
+  `/usr/sbin/pppd`. **Partially built as of 2026-07-27:** `uart4` is modelled
+  and decoded, and the guest is given a `pppd` launchd job by a size-neutral
+  in-place rewrite of an inert LaunchDaemon plist — one that points at a
+  binary this image does not contain, so nothing is displaced. launchd spawns
+  the job (measured, instruction 557,124,470), `pppd` runs, and then exits;
+  see `docs/AGENT_HANDOFF.md` §23.10 and the run entries in
+  `docs/BOOTLOG.md`. **No host-side PPP peer exists**, so even a `pppd` that
+  transmits will get no answer: LCP will retransmit and time out. Every part
+  of it is honest emulation — the UART is real
   modelled silicon, `pppd` is Apple's own binary, and LCP/IPCP/HDLC-async are
   specified in RFC 1661/1662/1332 with public test vectors, so no device
   behaviour is invented and packets genuinely traverse the guest's own network
@@ -251,10 +259,24 @@ expire when the next run lands. The prose version is
   model with `SCTLR.U` and `SCTLR.A` both honoured; MMU with XN enforcement;
   CP15. Runs are bit-exact reproducible — heartbeat PC streams are byte-identical
   across **27/27** samples for cold versus restored runs.
-- **Modelled peripherals.** UART, timers, VIC, the CLCD display controller,
-  I2C/PMU, and the DWC2 USB configuration registers.
-- **Not modelled at all.** No touch input. No audio. No networking. No cellular.
-  No Wi-Fi. No Bluetooth. No camera. No accelerometer. No GPU.
+- **Modelled peripherals.** Two UARTs — `uart0`, the kprintf console, and
+  `uart4`, the PPP line — timers, VIC, the CLCD display controller, I2C/PMU,
+  and the DWC2 USB configuration registers.
+- **`uart4` is transmit-only, and that is a statement rather than an
+  unfinished job.** It has no receive source, so its receive FIFO reports
+  empty — which is the truthful answer for a machine with no peer attached,
+  and the alternative would be answering a guest read with a byte no host ever
+  sent. It follows that it can never raise its interrupt line (device-tree
+  line 28), and it is deliberately absent from the wake-source table for that
+  reason. The day a receive path lands, `UFSTAT`'s receive count, `UTRSTAT`
+  bit 0 and a real write-one-to-clear latch all become load-bearing; the
+  header comment in `core/include/soc.h` says so, and
+  `core/tests/test_uart4.c`'s `test_uart4_raises_no_interrupt_line` is the
+  test that must then be rewritten rather than deleted.
+- **Not modelled at all.** No touch input. No audio. **No networking beyond a
+  transmit-only wire** — there is no host-side PPP peer, so the guest can send
+  LCP Configure-Requests and nothing answers them. No cellular. No Wi-Fi. No
+  Bluetooth. No camera. No accelerometer. No GPU.
 - **Declared absent to the guest.** The loaded (in-memory) device tree
   un-matches five nodes that real hardware has: `arm-io/mbx` (the PowerVR MBX
   GPU), `arm-io/sha1`, `baseband`, `arm-io/spi2` (the baseband transport), and

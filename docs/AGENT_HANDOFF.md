@@ -3758,3 +3758,284 @@ ran, when it runs and succeeds at instruction ~238,400,000.
 counters.** Restore is bit-exact — 20/20 heartbeats identical between cold run52
 and restored run56 across 3.0e9-4.9e9, agreeing 862 million instructions past
 the restore point, across three different binaries.
+
+### 23.10 Networking step S0: uart4, the plist hijack, and what a run must carry
+
+The first half of `docs/networking.md`'s Route D is implemented. This section
+records what was built, the three things it corrected in §23.5/§23.5.1, and the
+exact command that reproduces it — because two of the corrections would
+otherwise send the next reader down a path that does not exist.
+
+**This is a temporary workaround and the code says so in three places** (the
+`--ppp` help text, `rootfs_work.h`'s option comment, and `PPP_PLIST_STOCK`'s
+provenance block). PPP over an emulated UART is what is cheap today because
+both halves already ship. Real drivers and controllers replace it.
+
+#### What was built
+
+- **`uart4` is a decoded device window**, 0x3cc10000, transmit-only, a second
+  `s5l_uart_t` next to `uart0`. `SNAPSHOT_VERSION` 9 -> 10.
+- **`--ppp`** rewrites `com.apple.chud.pilotfish.plist` in place, at exactly
+  its own 530 bytes, into a `RunAtLoad` job running
+  `/usr/sbin/pppd /dev/uart.debug local nocrtscts nodetach` with
+  `StandardErrorPath = /dev/console`, and appends `uart4_dma_enable=0` to the
+  boot arguments.
+- **`uart4-ppp.bin`**, a per-run binary tee, plus an automatic scan for
+  `7E FF 7D 23 C0 21` reported in a `=== UART4 / PPP ===` section on every
+  armed run.
+
+#### Three corrections to §23.5 and §23.5.1
+
+**1. The `setBaud` "named risk" is not a boot-killer, and the reasoning behind
+it was inverted.** §23.5.1 warned that `pppd`'s `cfsetspeed` would exercise
+`setBaud` (`0xc065ea4c`) "for the first time" and that a zero `nclk` would give
+"a divide-by-zero rather than a graceful message". Both halves are wrong.
+
+- `setBaud` is **vtable slot +0x374** and has **zero direct `bl` call sites**.
+  `AppleOnboardSerial` reaches it from `start()` through `programHardware`,
+  after storing a default of **19200 8N1** at `0xc047244a` — the only baud
+  constant in either kext, and there is no device-tree baud property anywhere.
+  So it runs **unconditionally at start, before any tty is opened**, and
+  `pppd`'s speed argument adds nothing that was not already going to happen.
+- The divide is `__udivdi3(nclk << 17, baud)` then `__udivsi3(q, 2*framebits)`,
+  using helpers **compiled into the kext**, and the kext's own `__aeabi_idiv0`
+  at `0xc065f55c` is a bare **`bx lr`**. A zero divisor returns garbage and
+  **does not trap**. The consequence is a nonsense `UBRDIV`, not a panic — and
+  this VM derives no baud rate from `UBRDIV`, so it is not even observable
+  here.
+
+  `nclk` itself is **not** a device-tree property and **not** an MMIO read by
+  this driver: `0xc065e44c` loads the C string `"nclk"` at `0xc065fb40` and
+  makes a virtual call on the provider nub (slot **+0x358**), which forwards up
+  the provider chain (parent slot **+0x354**) into AppleARMPlatform's clock
+  layer. The string `nclk` occurs **zero times** in `devicetree.bin`. Nobody
+  has walked that chain to a register; do not claim one.
+
+**2. `AppleS5L8900XSerial` is ARM, not Thumb.** `tools/kdisasm.py` defaults to
+Thumb, so every address in §23.5.1 disassembles as garbage without `--arm`.
+`AppleOnboardSerial` *is* Thumb-1. Exact ranges from `__PRELINK_INFO`:
+`AppleOnboardSerial` `0xc046e000..0xc0479000`, `AppleS5L8900XSerial`
+`0xc065d000..0xc0662000`.
+
+**3. The window was undeclared, not merely unmodelled.** run59's census
+recorded `0x3cc10000 r=8 w=15` falling through to the **unmapped** path, so
+every `UTRSTAT` read answered 0 — "transmitter busy". A driver that waits for
+room before storing would have waited forever. Decoding the window is what
+makes a transmit path terminate at all; it is not a tidiness change.
+
+Confirmed unchanged from §23.5.1, now read out of the tree rather than
+inferred: uart4 carries `dma-types {3}`, a zero-length `no-flow-control`,
+`interrupts {0x1c}`, `reg {0x04c10000, 0x1000}`, and — unlike uart0 — **no
+`boot-console`**, so nothing contends for it. Its `debug` child has exactly two
+properties, `name` and `AAPL,phandle`, and nothing else.
+
+#### The plist, byte-exactly
+
+Stock `com.apple.chud.pilotfish.plist` lives at **offset 0xf5f000** in
+`firmware/rootfs.img`, is **530 bytes**, and the full pattern occurs **exactly
+once** in the whole 413 MiB image (verified by a full scan, not assumed).
+SHA-256 of those 530 bytes:
+`882ebd0b14088120b03750090ef9b6885a7b3bfbbe286df9ac23ecb431f55312`.
+
+Its DOCTYPE says **"Apple Inc."** where the SpringBoard plist's says **"Apple"**
+— two different Apple toolchains, and normalising either breaks the match.
+
+The budget arithmetic in §23.5 is confirmed and its candidate ranking stands:
+a fully-argumented job is **515 bytes**, so pilotfish's 530 is the only one of
+the four inert candidates that fits. `chud.chum` at 515 would fit with **zero**
+bytes of slack, which is not a margin.
+
+#### What a run must carry, and one trap that costs the whole run
+
+**`nand-enable-adm=0` is mandatory.** Without it the boot panics at
+**instruction 218,615,894** in `AppleS5L8900XADMFMC::start` —
+`"ADM startup failed"`, called from `0xc04d679c`. This is not new and is not
+related to PPP: **run72 died there too**, and so does a clean build of
+`55ebb98` with no PPP code in it at all. It is reproducible to the exact
+instruction across three different binaries. run71 has it in `-c` and never
+reaches the ADM path.
+
+Also note `-F` invalidates **`firmware/screen.ppm` relative to the process
+working directory**, so a run launched with its own working directory needs a
+`firmware/` subdirectory containing that file or it exits 1 before booting.
+
+Reproduction, from PowerShell (**not** Git Bash — §23.4a explains why
+`--fstab` dies there); written as one line per argument so it can be pasted
+without continuation characters:
+
+    $r = "F:\JOSHUA_1st_2021\projects\iOS3-VM"
+    $d = "$r\work\run74-ppp"
+    New-Item -ItemType Directory -Force "$d\firmware" | Out-Null
+    Copy-Item "$r\firmware\screen.ppm" "$d\firmware\screen.ppm" -Force
+    Push-Location $d
+    & "$r\work\build-ppp\core\bootkernel.exe" "$r\firmware\kernel.macho" -d "$r\firmware\devicetree.bin" -F --usb-otg --ca-software-render --ppp -R 128 --grow 32 --external-md "$r\firmware\rootfs.img" "$d\rootfs-run74.img" --fstab "/dev/md0 / hfs rw,update 0 1" -c "debug=0x8 serial=1 nand-enable-adm=0" -n 850000000 1>"$d\run74.stdout.log" 2>"$d\run74.stderr.log"
+    Pop-Location
+
+**A cap of 850e6 is enough and 1.2e9 is waste.** `pppd` is spawned at
+557,124,470 and, as run74 measured, is dead by 739,184,188. Everything S0 can
+observe has happened by then; 850e6 is about twelve minutes of wall clock
+against roughly eighteen for 1.2e9. Only raise it once `pppd` stops exiting.
+
+#### Measured, run73 (700e6 cap)
+
+The pipeline is proven as far as the exec. In order:
+
+| what | evidence |
+|---|---|
+| plist rewritten in the work image | `ppp : com.apple.chud.pilotfish.plist @ image+0x00f5f000` |
+| boot argument appended | `cmdline "debug=0x8 serial=1 nand-enable-adm=0 uart4_dma_enable=0 rd=md0"` |
+| window decoded, driver bound | `AppleS5L8900XSerial: Identified Serial Port on ARM Device=uart4 at 0x3cc10000(0xea9d6000)` |
+| **launchd spawned our job** | `syscall 244 posix_spawn ... path "/usr/sbin/pppd"` **at instruction 557,124,470** |
+| bytes on uart4 | **none by 700e6** |
+
+That `posix_spawn` is the load-bearing observation: it proves the hijack
+survived into the work image, that launchd parsed the rewritten plist, and that
+`RunAtLoad` fired. run73 capped only 143e6 instructions later, which is not
+enough for dyld to map a 284,608-byte binary and its frameworks, open the tty
+and transmit.
+
+#### Measured, run74 (1.2e9 cap) — THE BLOCKER, AND WHAT IT IS NOT
+
+**`pppd` runs, and then it calls `exit(1)`.** From the process-lifecycle
+section:
+
+```text
+#65  @557124470  syscall 244 posix_spawn   path "/usr/sbin/pppd"
+                 task/task-proc/pid c2e151d8/e03832cc/19
+#84  @739184188  syscall 1   exit          args a0=00000001
+                 task/task-proc/pid c2e151d8/e03832cc/19
+#85  @739184282  _exit1 proc=e03832cc rv/status=00000100
+```
+
+So pid 19 lived for **182,059,718 instructions** — it was not a failed exec,
+dyld mapped it and it ran — and then exited **1**. Zero bytes ever reached
+uart4, across the whole 1.2e9.
+
+**The exit code is itself evidence, and it rules out four things.** pppd 2.4.2
+has distinct exit codes, and ONE is `EXIT_FATAL_ERROR`. It is therefore:
+
+| not | which would mean |
+|---|---|
+| `EXIT_OPTION_ERROR` = 2 | the command line failed to parse |
+| `EXIT_NOT_ROOT` = 3 | the job ran unprivileged |
+| `EXIT_NO_KERNEL_SUPPORT` = 4 | `ppp_available()` said no — the line discipline is missing |
+| `EXIT_OPEN_FAILED` = 7 | `/dev/uart.debug` could not be opened |
+
+**So the devfs node exists under the predicted name, the argv parsed, the job
+ran as root, and `com.apple.nke.ppp` answered.** Four of the nine unknowns S0
+was supposed to settle are settled, by an exit code. What remains is a
+`fatal()` call, and the two candidates the strings support are
+`"Couldn't set tty to PPP discipline: %m"` (`TIOCSETD` with `PPPDISC`) and
+`"Baud rate for %s is 0; need explicit baud rate"` — both confirmed present in
+the image, once each.
+
+**Why that could not be narrowed further in run74, and the fix.** `fatal()`
+writes to stderr, and launchd gives a job with no `StandardErrorPath`
+`/dev/null`. The message was destroyed. The job now carries
+`StandardErrorPath = /dev/console`, so it lands in the same console capture
+every other guest message does; the key is confirmed present in the image
+rather than assumed supported. Two arguments were spent to afford the 61 bytes
+— see `PPP_PLIST_JOB`'s comment for the trade, which is stated there rather
+than made quietly, and note that dropping the explicit speed makes the
+*second* candidate above self-diagnosing rather than hiding it.
+
+#### Reading the verdict without fooling yourself
+
+`0x7E` is a byte, not a proof. The section reports three distinct outcomes and
+they are not interchangeable:
+
+- **`NOTHING was written to uart4`** — the guest never transmitted. This says
+  nothing about *which* step failed.
+- **`NOT the milestone`** — something opened the port and wrote to it. Compare
+  the dump against RFC 1662 before concluding anything about `pppd`.
+- **`*** MILESTONE ***`** — the exact six bytes, with the stream offset **and**
+  the instruction they landed at. Both are printed because "it appeared" and
+  "it appeared at a plausible point in the boot" are different claims.
+
+The scan uses a six-byte sliding window rather than a match counter, because
+`0x7E` starts every frame and a counter would miss `7E 7E FF 7D 23 C0 21` —
+an idle flag followed by a frame, which is exactly what a real line looks like.
+
+#### Measured, run75 (850e6 cap) — the arguments are not the cause, and
+#### `StandardErrorPath` did not deliver the message
+
+Same configuration, one change: `StandardErrorPath = /dev/console` added,
+`115200` and `noauth` removed to pay for it. Two results, and the second is
+more useful than the one that was being chased.
+
+**1. The failure is invariant to those arguments.** Side by side:
+
+| | spawn | exit(1) | `pppd` lifetime |
+|---|---|---|---|
+| run74 (`115200`, `noauth`) | 557,124,470 | 739,184,188 | 182,059,718 |
+| run75 (neither) | 557,135,323 | 739,143,287 | 182,007,964 |
+
+**51,754 instructions of difference out of 182 million — 0.028%.** Removing an
+argument shortens option parsing by about that much and changes nothing else.
+So `pppd` is failing at the *same place* with or without an explicit baud rate,
+which retires the `"Baud rate for %s is 0"` hypothesis: that fatal would fire
+only in the second row and would have moved the exit. Do not spend the 25
+bytes putting the speed back on the strength of that theory — it has been
+tested.
+
+**2. `pppd` printed nothing, anywhere.** The console is byte-identical to
+run74's across all 5,371 bytes both runs produced. So either launchd on 3.1.3
+does not honour `StandardErrorPath`, or `pppd` never gets far enough to have a
+usable stderr, or its `fatal()` on this build logs only through syslog. This
+was worth trying — it is one plist key and the alternative was guessing — but
+it did not work, and the honest reading is that **`pppd`'s message is not
+reachable this way** rather than that `pppd` had nothing to say.
+
+#### The next step, concretely: probe the exit site
+
+The lifecycle record carries a lead that costs one flag to follow. At the exit
+syscall, register **r3 = `0x00039c30`**:
+
+```text
+#84  @739143287  syscall 1 exit   args a0=00000001 a1=0000000c a2=2ffffeec a3=00039c30
+                 user pc 33ad7138 (ARM, spsr 00000010)
+```
+
+`a0 = 1` is the status. `user pc 33ad7138` is inside the dyld shared cache —
+libSystem's `exit` thunk, i.e. every caller looks the same there and it is
+useless as an identifier. But `0x00039c30` is in the **pppd image's own**
+address range (the binary is 284,608 = `0x457C0` bytes and loads low), so it is
+a `pppd` text address and almost certainly the neighbourhood of the `fatal()`
+or `die()` that called `exit`.
+
+So: **`--call-probe 0x00039c30`**, which captures `pc/lr/sp`, `r0`-`r3` and two
+stack words at a user-mode PC. `lr` from that capture names `pppd`'s own caller
+and turns "a fatal() somewhere" into an address to disassemble. Pair it with
+`--call-probe` on a second candidate if the first is a thunk. A cap of 850e6 is
+enough, so this is about twelve minutes per iteration.
+
+The static side is cheap too and has not been done: `pppd` is at
+`/usr/sbin/pppd` in the image and can be extracted and disassembled directly
+(`tools/kdisasm.py --arm`), so `0x39c30` can be resolved to a function and its
+string references read before any run is spent. Both `"Couldn't set tty to PPP
+discipline: %m"` and `"Baud rate for %s is 0; need explicit baud rate"` are
+present in the image exactly once, so their addresses are findable and can be
+compared against whatever `0x39c30` turns out to be near.
+
+What is already settled and should not be re-litigated: the plist hijack, the
+boot argument, the devfs node name, launchd starting the job, AMFI accepting
+the binary, dyld loading it, and `com.apple.nke.ppp` answering — the first six
+of the nine unknowns S0 was posed to settle.
+
+#### Step S1, when someone takes it
+
+S0 is transmit-only *by design*, and the header comment in `soc.h` says what
+changes when that stops being true. The receive direction needs, in this order:
+a bounded host-to-guest queue; `UFSTAT`'s receive count and `UTRSTAT` bit 0
+becoming real; `UTRSTAT` growing a genuine write-one-to-clear latch; VIC line
+**28** becoming a wired `S5L8900_IRQ_UART4` and a wake-source entry; and the
+host-to-guest handoff happening **on the CPU thread between run slices** —
+§23.5.1 is right that a socket-callback race there would be the worst bug this
+project could acquire. `core/tests/test_uart4.c`'s
+`test_uart4_raises_no_interrupt_line` is the test that must be rewritten rather
+than deleted at that point.
+
+Only after that does the host-side LCP/IPCP peer (RFC 1661/1332/1662) become
+worth writing, and `pppd` will Protocol-Reject-test us first: it sends CCP
+(0x80FD) by default with bsdcomp and deflate, and IPV6CP, Apple ACSP and ECP
+protents are all compiled in.
