@@ -18,6 +18,8 @@ add_library(emucore STATIC
     src/soc/i2c.c
     src/soc/pcf50635.c
     src/soc/spi.c
+    src/soc/gpioic.c
+    src/soc/mtz2.c
     src/soc/usbotg.c
     src/soc/nor.c
     src/soc/nand.c
@@ -116,6 +118,14 @@ add_test(NAME s5l8900_i2c_pmu COMMAND test_i2c)
 add_executable(test_spi tests/test_spi.c)
 target_link_libraries(test_spi PRIVATE emucore)
 add_test(NAME s5l8900_spi COMMAND test_spi)
+
+add_executable(test_gpioic tests/test_gpioic.c)
+target_link_libraries(test_gpioic PRIVATE emucore)
+add_test(NAME s5l8900_gpioic COMMAND test_gpioic)
+
+add_executable(test_mtz2 tests/test_mtz2.c)
+target_link_libraries(test_mtz2 PRIVATE emucore)
+add_test(NAME multitouch_z2 COMMAND test_mtz2)
 
 add_executable(test_img3 tests/test_img3.c)
 target_link_libraries(test_img3 PRIVATE emucore)
@@ -363,6 +373,27 @@ else()
 endif()
 add_test(NAME bounded_rootfs_work_image COMMAND test_rootfs_work)
 set_tests_properties(bounded_rootfs_work_image PROPERTIES
+    WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+
+# The catalog B-tree writer is the part of rootfs_work.c that a guest kernel
+# mounts and trusts, so it gets its own suite. Its fixtures are whole HFSX
+# volumes built in memory — B-tree header node, leaf and index nodes,
+# allocation bitmap, matching alternate volume header — which keeps the suite
+# firmware-free and runnable on every public CI runner.
+add_executable(test_rootfs_provision tests/test_rootfs_provision.c)
+target_link_libraries(test_rootfs_provision PRIVATE host_rootfs_work)
+set_target_properties(test_rootfs_provision PROPERTIES
+    C_STANDARD 11
+    C_STANDARD_REQUIRED YES
+    C_EXTENSIONS NO)
+if(MSVC)
+    target_compile_options(test_rootfs_provision PRIVATE /W4 /WX)
+else()
+    target_compile_options(test_rootfs_provision PRIVATE
+        -Wall -Wextra -Werror -pedantic)
+endif()
+add_test(NAME hfs_catalog_provisioning COMMAND test_rootfs_provision)
+set_tests_properties(hfs_catalog_provisioning PROPERTIES
     WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
 
 # img3dump points the real parser at real firmware, so inspecting an IPSW also

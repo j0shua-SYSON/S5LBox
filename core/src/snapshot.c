@@ -119,6 +119,11 @@ SNAP_SIZE_GUARD(s5l_tvout_t,       12304, "snap_tvout");
 SNAP_SIZE_GUARD(s5l_i2c_t,         320,   "snap_i2c");
 SNAP_SIZE_GUARD(s5l_pcf50635_t,    600,   "snap_pmu");
 SNAP_SIZE_GUARD(s5l_spi_t,         200,   "snap_spi");
+SNAP_SIZE_GUARD(s5l_gpioic_t,      200,   "snap_gpioic");
+/* The pin block is 4 KiB of page plus the host-side watch table, which is not
+ * serialised — see snap_gpio(). */
+SNAP_SIZE_GUARD(s5l_gpio_t,        4192,  "snap_gpio");
+SNAP_SIZE_GUARD(s5l_mtz2_t,        144,   "snap_mtz2");
 SNAP_SIZE_GUARD(s5l_usbotg_t,      4,     "snap_usbotg");
 SNAP_SIZE_GUARD(s5l_nor_entry_t,   12,    "snap_nor");
 SNAP_SIZE_GUARD(s5l_nor_t,         208,   "snap_nor");
@@ -128,7 +133,7 @@ SNAP_SIZE_GUARD(s5l_stub_t,        56,    "snap_stubs");
  * are deliberately excluded from MACH for the same reason as every other bus
  * callback; snapshot_load preserves the live machine's hooks and dedicated
  * privileged-SVC context. The byte format therefore does not change. */
-SNAP_SIZE_GUARD(s5l8900_t,         29744, "snap_mach");
+SNAP_SIZE_GUARD(s5l8900_t,         34280, "snap_mach");
 #endif
 
 /* ---------------------------------------------------------------- the IO --- */
@@ -360,6 +365,83 @@ static void snap_power(sn_io_t *io, s5l_power_t *p) {
     F32(p->sram);  F32(p->cfg24); F32(p->cfg28);
 }
 
+/*
+ * The GPIO interrupt controller. `raw` travels with the rest: it is what the
+ * board is driving, not host wiring, and a restore that dropped it would
+ * silently deassert every held source — the pending latch would survive but
+ * the next write-one-to-clear would clear it for good instead of re-latching.
+ */
+static void snap_gpioic(sn_io_t *io, s5l_gpioic_t *g) {
+    FA32(g->level, S5L_GPIOIC_GROUPS);
+    FA32(g->stat,  S5L_GPIOIC_GROUPS);
+    FA32(g->en,    S5L_GPIOIC_GROUPS);
+    FA32(g->type,  S5L_GPIOIC_GROUPS);
+    FA32(g->raw,   S5L_GPIOIC_GROUPS);
+    F64(g->unknown_reads); F64(g->unknown_writes);
+    FA32(g->unknown_off, S5L_GPIOIC_UNKNOWN_OFF);
+    F32(g->unknown_off_count);
+    if (sn_reading(io) && io->err == SNAP_OK &&
+        g->unknown_off_count > (unsigned)S5L_GPIOIC_UNKNOWN_OFF)
+        io->err = SNAP_ERR_CORRUPT;
+}
+
+/*
+ * The GPIO pin block: 4 KiB of storage and nothing else.
+ *
+ * Deliberately NOT serialised: `watch`, the host-side subscriptions, exactly
+ * as the SPI slave table and the I2C slave table are not. A restored machine
+ * keeps the live machine's wiring, which is the only wiring that can be valid
+ * — the callbacks point at host objects the snapshot never saw.
+ */
+static void snap_gpio(sn_io_t *io, s5l_gpio_t *g) {
+    FA32(g->regs, S5L_GPIO_WORDS);
+}
+
+static bool mtz2_state_valid(const s5l_mtz2_t *d) {
+    /* The framer's invariants, which the model maintains and a file is not
+     * trusted to respect: `len` is zero between packets and never longer than
+     * the buffer, and `pos` is always inside the packet. The HBPP answer is a
+     * loopback within the ordinary framing, so it needs no separate case. */
+    if (!d || d->len > S5L_MTZ2_BUF) return false;
+    if (d->len == 0u) return d->pos == 0u;
+    return d->pos < d->len;
+}
+
+/*
+ * The touch controller. Its protocol position is real state: the guest can be
+ * part way through a 16-byte frame when a checkpoint is taken, and whether it
+ * is still answering as its bootloader decides whether the driver stays
+ * attached at all. A restore that reset `hbpp` to its power-on true would make
+ * the next probe — which is one of attemptToBootloadDevice's — say "in HBPP"
+ * and send the driver into a firmware download.
+ *
+ * The published geometry travels too, even though nothing writes it after
+ * reset: a snapshot must not depend on the build that reads it choosing the
+ * same numbers, and a restored machine whose surface size differed from the
+ * one the guest already read would put every tap in the wrong place.
+ */
+static void snap_mtz2(sn_io_t *io, s5l_mtz2_t *d) {
+    FB (d->hbpp);
+    F8 (d->pos); F8(d->len); F8(d->op);
+    FBYTES(d->req, S5L_MTZ2_BUF);
+    FBYTES(d->rsp, S5L_MTZ2_BUF);
+    F8 (d->rows); F8(d->columns); F8(d->endianness);
+    F8 (d->family_id); F8(d->buttons);
+    /* Widened for the wire: the format has 8-, 32- and 64-bit primitives and
+     * no 16-bit one, and inventing one for a single field would be a worse
+     * trade than two spare bytes. */
+    uint32_t bcd = d->bcd_version;
+    F32(bcd);
+    if (sn_reading(io) && io->err == SNAP_OK) d->bcd_version = (uint16_t)bcd;
+    F32(d->surface_width); F32(d->surface_height);
+    FB (d->atn); F8(d->contacts);
+    F64(d->packets); F64(d->hbpp_probes); F64(d->unknown_opcodes);
+    F64(d->resets);
+    F8 (d->last_unknown_op);
+    if (sn_reading(io) && io->err == SNAP_OK && !mtz2_state_valid(d))
+        io->err = SNAP_ERR_CORRUPT;
+}
+
 static bool i2c_state_valid(const s5l_i2c_t *b) {
     if (!b || b->slave_count > S5L_I2C_SLAVES ||
         b->unknown_off_count > S5L_I2C_UNKNOWN_OFF ||
@@ -585,6 +667,9 @@ static void snap_mach(sn_io_t *io, s5l8900_t *m) {
     snap_pmu(io, &m->pmu);
     for (unsigned i = 0; i < S5L8900_SPI_COUNT; i++)
         snap_spi(io, &m->spi[i]);
+    snap_gpioic(io, &m->gpioic);
+    snap_gpio(io, &m->gpio);
+    snap_mtz2(io, &m->mtz2);
     snap_usbotg(io, &m->usbotg);
 
     F64(m->unmapped_reads);
@@ -850,14 +935,17 @@ static bool snap_machine_valid(const s5l8900_t *m) {
         m->pmu.tick_hz != m->tb_hz)
         return false;
     /* The SPI board wiring, for the same reason: spi1 chip select 0 carries the
-     * null device and nothing else is attached anywhere. Restoring a receive
-     * FIFO into a controller with no device behind it would resume a transfer
-     * that can never finish. */
+     * touch controller and nothing else is attached anywhere. Restoring a
+     * receive FIFO into a controller with no device behind it would resume a
+     * transfer that can never finish, and restoring the Z2's protocol position
+     * behind a DIFFERENT device would resume it into the wrong one. */
     for (unsigned cs = 0; cs < S5L_SPI_SLAVES; cs++)
         if (m->spi[0].slaves[cs].transfer != NULL) return false;
-    if (m->spi[1].slaves[0].transfer == NULL) return false;
+    if (m->spi[1].slaves[0].transfer == NULL ||
+        m->spi[1].slaves[0].ctx != (void *)&m->mtz2) return false;
     for (unsigned cs = 1; cs < S5L_SPI_SLAVES; cs++)
         if (m->spi[1].slaves[cs].transfer != NULL) return false;
+    if (!mtz2_state_valid(&m->mtz2)) return false;
     for (unsigned i = 0; i < m->nor.image_count; i++)
         if (m->nor.images[i].size < 20u ||
             (uint64_t)m->nor.images[i].offset + m->nor.images[i].size > m->nor.size)

@@ -436,6 +436,189 @@ void     s5l_power_reset(s5l_power_t *p);
 uint32_t s5l_power_read(s5l_power_t *p, uint32_t off);
 void     s5l_power_write(s5l_power_t *p, uint32_t off, uint32_t val);
 
+/* --------------------------------------------- GPIO interrupt controller ---
+ * The upper part of the 0x39a00000 page: AppleS5L8900XGPIOIC, a seven-group
+ * cascade in front of both VICs. See core/src/soc/gpioic.c for the model.
+ *
+ * REGISTER OFFSETS ARE RELATIVE TO THE PAGE, NOT TO THE DECODED WINDOW.
+ * The window this machine decodes starts at S5L8900_GPIOIC_BASE (0x39a00080),
+ * because power.c owns 0x00-0x7F of the same physical page. The driver,
+ * however, programs against the page base — its four accessors take an offset
+ * from object+0x6c, which the pin-accessor decoding in AGENT_HANDOFF §13.0d
+ * resolves to 0x39a00000 — so the constants below are the driver's own and
+ * s5l_gpioic_read()/write() take an offset from S5L8900_GPIOIC_PAGE. Rebasing
+ * them onto the window would make every one of them differ from the
+ * disassembly by 0x80, which is exactly how a register map goes wrong.
+ *
+ * CONFIRMED from AppleS5L8900XGPIOIC itself, ARM, in this kernelcache:
+ *
+ *   enable, 0xc05a5678-0xc05a56dc
+ *     asr r6, r3, #5        group = line >> 5
+ *     and r3, r5, #0x1f     bit   = line & 0x1f
+ *     add r1, r8, #0xa0     write 0xA0 + 4*group  <- 1 << bit   (clear stale)
+ *     ldr r3, [r1, r6, lsl #2] / orr r2, r3, r5 / str            (shadow |=)
+ *     add r1, r8, #0xc0     write 0xC0 + 4*group  <- shadow[group]
+ *
+ *   disable, 0xc05a5748-0xc05a5788: shadow &= ~(1<<bit), then 0xC0 + 4*group.
+ *
+ *   init, 0xc05a51a8: shadow[g] = 0 and 0xC0 + 4*g <- 0 for g < [r5+0x78],
+ *   which is /arm-io/gpio's `#interrupt-groups` = 7.
+ *
+ *   configure, 0xc05a5530-0xc05a5600: reads 0xE0 + 4*group and 0x80 + 4*group
+ *   and writes each back with one bit replaced — a read-modify-write of two
+ *   configuration registers, from bit 0 and bit 1 of the device tree's second
+ *   interrupt cell respectively. Bit 2 goes to a software shadow only.
+ *
+ * The seven cascade lines are /arm-io/gpio's own `interrupts`, read out of the
+ * shipped tree: {0x21,0x20,0x1f,0x03,0x02,0x01,0x00} = {33,32,31,3,2,1,0},
+ * one per group in array order. GROUP 4 IS THEREFORE VIC LINE 2, and the
+ * multi-touch ATN — /arm-io/spi1/multi-touch `interrupts {0x9b,0}`, i.e. line
+ * 155 — is group 4 bit 27, which is precisely the 0x08000000 run59 measured in
+ * this controller's group-4 enable register. "GPIO 155" is a line index on
+ * this controller with a stride of 32, NOT a pin number: do not compute it as
+ * group*8+bit, and do not put 155 in a wake-source entry, because
+ * wake_line_enabled() rejects anything at or above 32*S5L8900_VIC_COUNT and
+ * would silently answer "cannot wake".
+ */
+#define S5L8900_GPIOIC_PAGE  0x39a00000u   /* what the driver programs against */
+#define S5L_GPIOIC_GROUPS    7u            /* #interrupt-groups                */
+#define S5L_GPIOIC_LINES     (S5L_GPIOIC_GROUPS * 32u)
+
+#define GPIOIC_INTLEVEL 0x80u   /* + 4*group, read-modify-write configuration */
+#define GPIOIC_INTSTAT  0xa0u   /* + 4*group, pending latch, WRITE-1-TO-CLEAR */
+#define GPIOIC_INTEN    0xc0u   /* + 4*group, enable mask                     */
+#define GPIOIC_INTTYPE  0xe0u   /* + 4*group, read-modify-write configuration */
+
+/* The multi-touch ATN, as a flat line index on this controller. */
+#define S5L_GPIOIC_LINE_MULTITOUCH 155u
+
+/* Number of distinct unknown offsets remembered, as on I2C and SPI. */
+#define S5L_GPIOIC_UNKNOWN_OFF 8u
+
+typedef struct {
+    uint32_t level[S5L_GPIOIC_GROUPS];
+    uint32_t stat [S5L_GPIOIC_GROUPS];
+    uint32_t en   [S5L_GPIOIC_GROUPS];
+    uint32_t type [S5L_GPIOIC_GROUPS];
+    /*
+     * What the board is driving into each group right now, which is NOT a
+     * register: no guest access can reach it and it is not part of the page.
+     * It exists because the pending latch is level-sensitive (see gpioic.c),
+     * so a write-one-to-clear has to know whether the source is still there.
+     */
+    uint32_t raw  [S5L_GPIOIC_GROUPS];
+
+    uint64_t unknown_reads, unknown_writes;
+    uint32_t unknown_off[S5L_GPIOIC_UNKNOWN_OFF];
+    unsigned unknown_off_count;
+} s5l_gpioic_t;
+
+void     s5l_gpioic_reset(s5l_gpioic_t *g);
+/* `off` is relative to S5L8900_GPIOIC_PAGE — see the note above. */
+uint32_t s5l_gpioic_read(s5l_gpioic_t *g, uint32_t off);
+void     s5l_gpioic_write(s5l_gpioic_t *g, uint32_t off, uint32_t val);
+
+/*
+ * Drive one of the 224 input lines. Level, not edge: the caller states what
+ * the wire is doing and the controller decides what to latch. Out-of-range
+ * lines are refused rather than wrapped — a device wired to a line this
+ * controller does not have is a bug that must not silently drive a real one.
+ */
+void     s5l_gpioic_set_line(s5l_gpioic_t *g, unsigned line, bool level);
+/* Is that line currently being driven? Mirrors set_line for tests. */
+bool     s5l_gpioic_line(const s5l_gpioic_t *g, unsigned line);
+
+/* This group's output: OR(STAT & EN). */
+bool     s5l_gpioic_group_irq(const s5l_gpioic_t *g, unsigned group);
+/*
+ * The VIC line `group` cascades to. One definition, used by the bus routing,
+ * by the wake-source table and by the tests, so the {33,32,31,3,2,1,0} order
+ * cannot be transcribed differently in two places. Returns a value at or above
+ * 32*S5L8900_VIC_COUNT for a group that does not exist, which every caller
+ * already treats as unroutable.
+ */
+unsigned s5l_gpioic_cascade(unsigned group);
+
+/* ------------------------------------------------------- GPIO pin block ---
+ * The OTHER page /arm-io/gpio names: reg {0x06400000,0x1000, 0x01a00000,0x1000}
+ * maps to 0x3e400000 and 0x39a00000, and only the second is the interrupt
+ * controller above. This one carries the pin state.
+ *
+ * A pin id from a device tree `function-*` property splits as
+ * group = id >> 8, bit = id & 0xff (AppleS5L8900X's accessor at 0xc05a4494:
+ * `lsr r1,r5,#8 / lsl r1,r1,#5 / add r1,r1,#4` then `and r1,r5,#0xff /
+ * lsr r0,r0,r1 / and r0,r0,#1`), and the level READS BACK from
+ * S5L8900_GPIO_BASE + group*32 + 4. AGENT_HANDOFF §13.0d establishes that the
+ * accessor used is the object+0x68 one, i.e. this block and not the gpioic
+ * page — a distinction that matters because lcd0's pins are in groups 0 and 3,
+ * which would otherwise land inside power.c's claim.
+ *
+ * READS AND WRITES USE DIFFERENT REGISTERS, and getting that wrong produces a
+ * model in which nothing ever happens and nothing ever complains. The per-group
+ * level register is READ-ONLY. A pin is DRIVEN by a single 32-bit store to the
+ * function-select register at `fsel-offset` 0x320, whose word is
+ *
+ *     [23:16] group   [15:8] bit   [3:0] function, 0xE|level for a driven output
+ *
+ * i.e. `write32(0x3e400320, (pin << 8) | 0xE | (level & 1))`. There is no
+ * read-modify-write and no per-group write register. This is independently
+ * corroborated by run59's measurement of the storage stub that used to cover
+ * this page: offset 0x320 was the ONLY offset the guest ever touched on it. A
+ * model that watched group*32+4 for stores would therefore never have fired
+ * once in an entire boot.
+ *
+ * The multi-touch controller's `function-reset` (0x0606, group 6 bit 6,
+ * active low) and /arm-io/spi1's `function-spi_cs0` (0x1800, group 24 bit 0)
+ * are the two pins wired here, and a device watches them through
+ * s5l_gpio_watch() so that it sees the EDGE: a reset is a pulse, and polling
+ * the level afterwards finds the pin already back where it started.
+ *
+ * No direction, pull or drive-strength behaviour is modelled, and a function
+ * nibble that is not a driven output changes no pin — it is stored in the fsel
+ * register and read back, exactly as the storage stub this replaces did.
+ */
+#define S5L_GPIO_PORTS      25u    /* #gpio-ports, groups 0..24 */
+#define S5L_GPIO_WORDS      (S5L8900_DEV_SIZE / 4u)
+#define S5L_GPIO_WATCHERS   4u
+
+/* The function-select register: `fsel-offset {0x00000320}` in the device tree,
+ * and the only offset on this page run59 saw the guest touch. */
+#define S5L_GPIO_FSEL       0x320u
+/* Bits[3:1] of an fsel word. 0x7 — i.e. a nibble of 0xE or 0xF — is the driven
+ * output the platform expert uses; bit 0 is then the level. */
+#define S5L_GPIO_FUNC_OUT   0x7u
+
+/* Byte offset of group `g`'s read-only pin-level register. */
+#define S5L_GPIO_PIN_REG(g) ((g) * 32u + 4u)
+
+typedef struct {
+    void    *ctx;
+    uint16_t pin;                          /* group << 8 | bit */
+    bool     armed;
+    void   (*changed)(void *ctx, bool level);
+} s5l_gpio_watch_t;
+
+typedef struct {
+    uint32_t regs[S5L_GPIO_WORDS];
+    /* Host wiring. Snapshot code serializes `regs`, never these callbacks. */
+    s5l_gpio_watch_t watch[S5L_GPIO_WATCHERS];
+} s5l_gpio_t;
+
+void     s5l_gpio_reset(s5l_gpio_t *g);
+uint32_t s5l_gpio_read(const s5l_gpio_t *g, uint32_t off, unsigned bytes);
+void     s5l_gpio_write(s5l_gpio_t *g, uint32_t off, uint32_t val,
+                        unsigned bytes);
+/* The level of one device-tree pin id (group << 8 | bit). */
+bool     s5l_gpio_pin(const s5l_gpio_t *g, uint16_t pin);
+/*
+ * Call `changed` whenever a guest store alters that pin's level. Refuses a
+ * pin outside groups 0..24, a NULL callback, a full table, and a pin that is
+ * already watched — silently shadowing a subscription would hide exactly the
+ * edge the subscriber exists to see.
+ */
+bool     s5l_gpio_watch(s5l_gpio_t *g, uint16_t pin, void *ctx,
+                        void (*changed)(void *ctx, bool level));
+
 /* ---------------------------------------------------- CLCD display controller ---
  * The path to pixels. See core/src/soc/clcd.c for the evidence behind every
  * register below; the short version is that AppleH1CLCD's own code was read out
@@ -1040,6 +1223,146 @@ bool     s5l_spi_irq(const s5l_spi_t *bus);
  */
 void     s5l_spi_null_bind(s5l_spi_slave_t *slave);
 
+/* ---------------------------------------- AppleMultitouchZ2SPI's device ---
+ * The touch controller on /arm-io/spi1 chip select 0. See core/src/soc/mtz2.c
+ * for the protocol; what follows is the shape of the state and the one thing
+ * that must not be got backwards.
+ *
+ * THE HBPP ANSWER IS DIRECTION-SENSITIVE. isInHBPP() (0xc0441008, vtable slot
+ * 0x4d0 off base 0xc0449f40) issues one 16-byte full-duplex transfer of
+ * `1A A1 18 E1 18 E1 18 E1 18 E1 18 E1 18 E1 18 E1` and requires BOTH
+ * BE16(rx[0..1]) AND BE16(rx[2..3]) to be in the set
+ * {0x1AA1,0x18E1,0x1F01,0x4879,0x4969,0x4BC1,0x4AD1} (the test at 0xc0440658,
+ * whose literal pool holds 0x18E1, 0x1AA1 and 0x4879 and derives the other
+ * four by the add/sub chain at 0xc0440674-0xc044069c). The first two words
+ * transmitted are 0x1AA1 and 0x18E1, so a device that simply echoes passes and
+ * one that answers zeros fails. And the two callers want OPPOSITE answers:
+ *
+ *   finishStarting 0xc0442670  -> beq 0xc0442714 on FALSE, which prints
+ *                                 "Could not detect HBPP. Returning false from
+ *                                 finishStarting()" and detaches the driver.
+ *                                 It needs TRUE.
+ *   attemptToBootloadDevice 0xc04414c4 -> its first act is the same probe, and
+ *                                 a TRUE sends it into the real HBPP firmware
+ *                                 download. It needs FALSE.
+ *
+ * So the device answers the probe once and then stops. That is a deliberate
+ * choice, not a simulation: it costs three cosmetic "Bootload attempt N of 3
+ * failed" lines and it drops a 54,156-byte firmware push and the whole
+ * unmodelled AppleARMPL080DMAC out of scope. mtz2.c states it again where it
+ * is implemented.
+ */
+#define MTZ2_OP_CMD_STATUS   0xe1u
+#define MTZ2_OP_DEVICE_INFO  0xe2u
+#define MTZ2_OP_REPORT_INFO  0xe3u
+#define MTZ2_OP_WRITE_SHORT  0xe4u
+#define MTZ2_OP_WRITE_LONG   0xe5u
+#define MTZ2_OP_READ_SHORT   0xe6u
+#define MTZ2_OP_READ_LONG    0xe7u
+#define MTZ2_OP_FRAME_Z1     0xeau
+#define MTZ2_OP_FRAME_Z2     0xebu   /* this part uses 0xEB                  */
+#define MTZ2_OP_WAKE         0xeeu
+#define MTZ2_OP_REQ_WAKEUP   0x19u   /* two bytes, {0x19, 0xC1}              */
+#define MTZ2_OP_HBPP         0x1au   /* first byte of the HBPP loopback probe */
+
+/* Every 16-byte command frame: opcode at [0], parameters at [1..4], LE16 sum16
+ * of [0..13] at [14..15]. Confirmed at 0xc0443288-0xc044329c, which writes
+ * tx[0]=0xE3, tx[1]=id and tx[14..15] = LE16(0xE3 + id) — the plain byte sum,
+ * with no seed and no complement. */
+#define MTZ2_FRAME_LEN       16u
+/* A control read's payload begins at rx[3]: three prologue bytes, then the
+ * body, then the two checksum bytes. 16 - 3 - 2 = 11, which is exactly the
+ * `length <= 11 -> short form` cut the driver applies at 0xc0442aac. */
+#define MTZ2_PAYLOAD_AT      3u
+#define MTZ2_PAYLOAD_MAX     (MTZ2_FRAME_LEN - MTZ2_PAYLOAD_AT - 2u)
+
+/* Longest packet this model frames. Nothing it answers exceeds a 16-byte
+ * frame; the slack is for the frame reads step 4 adds. */
+#define S5L_MTZ2_BUF 40u
+
+/* The reports the driver interrogates, in the order it asks for them. */
+#define MTZ2_REPORT_FAMILY_ID   0xd1u
+#define MTZ2_REPORT_GEOMETRY    0xd3u   /* also the isBootloaded() probe */
+#define MTZ2_REPORT_BUTTONS     0xd7u
+#define MTZ2_REPORT_SURFACE     0xd9u
+#define MTZ2_REPORT_REGION_DESC 0xd0u
+#define MTZ2_REPORT_REGION_PARAM 0xa1u
+
+typedef struct {
+    /*
+     * Protocol position. `len` is zero when the device is between packets;
+     * `pos` is the byte index inside the current one. There is no chip-select
+     * callback on this bus (see s5l_spi_slave_t), so a packet is framed by the
+     * length its own opcode implies — which is enough, because every command
+     * this device answers has a length fixed by its first byte.
+     */
+    bool     hbpp;      /* answer the loopback probe with an echo             */
+    uint8_t  pos, len, op;
+    uint8_t  req[S5L_MTZ2_BUF];
+    uint8_t  rsp[S5L_MTZ2_BUF];
+
+    /*
+     * What the device says it is. All of it — every dimension the driver
+     * publishes — comes from the device and none of it from the device tree,
+     * so these are OUR choice and the reason for each is in mtz2.c.
+     */
+    uint8_t  rows, columns, endianness, family_id, buttons;
+    uint16_t bcd_version;
+    uint32_t surface_width, surface_height;
+
+    /*
+     * Frame delivery is step 4's, but the state it needs exists now so that
+     * adding it is a change to one function rather than to this struct: `atn`
+     * is the attention line that drives GPIO interrupt line 155, and
+     * `contacts` is how many touches are waiting to be read out. Nothing sets
+     * either yet, and s5l_mtz2_irq() therefore answers false for the whole
+     * boot — which is honest rather than inert, because it is exactly what a
+     * device with nothing to report does.
+     */
+    bool     atn;
+    uint8_t  contacts;
+
+    /* Bounded diagnostics, as on I2C and SPI. `resets` is not decoration: the
+     * guest really does pulse this device's reset line during driver start,
+     * which was discovered the hard way (see s5l_mtz2_reset_pin), and a run
+     * where it is zero means the GPIO subscription is not wired. */
+    uint64_t packets, hbpp_probes, unknown_opcodes, resets;
+    uint8_t  last_unknown_op;
+} s5l_mtz2_t;
+
+/* Reset is total and returns the device to its power-on answer, which is
+ * "in HBPP" — the one answer finishStarting() accepts. */
+void     s5l_mtz2_reset(s5l_mtz2_t *dev);
+/* Attach to an SPI chip select. */
+void     s5l_mtz2_bind(s5l_mtz2_t *dev, s5l_spi_slave_t *slave);
+/* Is the attention line asserted? Drives GPIO line 155 through the interrupt
+ * controller. Always false until step 4 gives the device a frame to deliver. */
+bool     s5l_mtz2_irq(const s5l_mtz2_t *dev);
+/*
+ * The protocol's only checksum: a plain truncating 16-bit sum of bytes, stored
+ * little-endian. Exposed because the tests build the driver's own frames with
+ * it and a checksum computed twice from the same code proves nothing.
+ */
+uint16_t s5l_mtz2_sum16(const uint8_t *p, unsigned n);
+/*
+ * The body of one report, as this device would return it. Returns its length
+ * (0 for a report this device does not have) and writes at most
+ * MTZ2_PAYLOAD_MAX bytes.
+ */
+unsigned s5l_mtz2_report(const s5l_mtz2_t *dev, uint8_t id, uint8_t *out);
+/*
+ * The reset line moved. Wired to GPIO pin 0x0606 (`function-reset`), which is
+ * the pin the device tree gives /arm-io/spi1/multi-touch. Signature matches
+ * s5l_gpio_watch()'s callback.
+ */
+void     s5l_mtz2_reset_pin(void *ctx, bool level);
+/*
+ * The chip select moved. Wired to GPIO pin 0x1800 (/arm-io/spi1's
+ * `function-spi_cs0`). It resynchronises the packet framer and nothing else,
+ * so a driver that never drives the select is not broken by its absence.
+ */
+void     s5l_mtz2_select_pin(void *ctx, bool level);
+
 /* ------------------------------------ Synopsys DWC2 USB OTG (config only) ---
  * The four hardware-configuration registers AppleSynopsysOTGDevice reads out of
  * the block at S5L8900_USB_OTG_BASE, and nothing else. core/src/soc/usbotg.c
@@ -1124,6 +1447,11 @@ typedef struct {
      * transport on GPIO interrupts this machine cannot route, so it stays a
      * declared stub window. */
     s5l_spi_t   spi[S5L8900_SPI_COUNT];
+    /* The two halves of /arm-io/gpio: the interrupt cascade on the power page
+     * and the pin state on its own. See the GPIOIC section above. */
+    s5l_gpioic_t gpioic;
+    s5l_gpio_t   gpio;
+    s5l_mtz2_t   mtz2;      /* the touch controller on spi1 chip select 0 */
     s5l_usbotg_t usbotg;
     s5l_nor_t   nor;
     uint64_t   unmapped_reads;   /* visibility: accesses outside the map */
@@ -1209,12 +1537,13 @@ typedef struct {
     const char *name;                 /* string literal; never owned */
 } s5l_window_t;
 
-/* Enough for every fixed device window plus every stub. The 15 is the length of
+/* Enough for every fixed device window plus every stub. The 17 is the length of
  * DEVICE_WINDOWS in core/src/soc/machine.c — nor, clcd, the three tv-out banks,
- * i2c0, i2c1, spi0, spi1, usb-otg, vic0, vic1, power, uart0, timer — and there
- * is no slack left in it, so a new device model has to raise this number too.
- * It was 13 until spi0 and spi1 stopped being stubs. */
-#define S5L_WINDOW_MAX (S5L_STUB_MAX + 15u)
+ * i2c0, i2c1, spi0, spi1, usb-otg, vic0, vic1, power, gpioic, gpio, uart0,
+ * timer — and there is no slack left in it, so a new device model has to raise
+ * this number too. It was 13 until spi0 and spi1 stopped being stubs, and 15
+ * until the two halves of /arm-io/gpio did. */
+#define S5L_WINDOW_MAX (S5L_STUB_MAX + 17u)
 
 /*
  * Every window this machine decodes: the modelled devices first, then the

@@ -923,8 +923,13 @@ static void test_wfi_wake_source_order_does_not_matter(void) {
      */
     const s5l_wake_source_t *real = NULL;
     unsigned nreal = s5l8900_wake_sources(&real);
-    CHECK(real != NULL && nreal == 5u,
-          "the machine declares %u wake sources, expected 5", nreal);
+    /* timer, clcd, tvout, spi0, spi1, and one per GPIO interrupt group. The
+     * GPIO seven are declared together because /arm-io/gpio's `interrupts`
+     * array is descending and declaring only the group that carries touch
+     * would make the whole test depend on that transcription being right. */
+    CHECK(real != NULL && nreal == 5u + S5L_GPIOIC_GROUPS,
+          "the machine declares %u wake sources, expected %u",
+          nreal, 5u + S5L_GPIOIC_GROUPS);
     for (unsigned i = 0; i < nreal; i++)
         CHECK(real[i].name && real[i].next_edge &&
               real[i].line < 32u * S5L8900_VIC_COUNT,
@@ -950,8 +955,26 @@ static void test_wfi_wake_source_order_does_not_matter(void) {
     uint32_t at = 0xdeadbeefu;
     CHECK(s5l8900_next_wake(&m, real, nreal, &at) == S5L_WAKE_AT && at == 2u,
           "the machine's own table gave %u, expected the CLCD's 2", at);
-    permute_wake_check(&m, real, nreal, order, used, 0u, S5L_WAKE_AT, 2u,
-                       "the machine's own table");
+    /*
+     * Permute only the sources whose lines are actually enabled here. The
+     * reduction skips a masked source before it asks anything, so a masked
+     * entry's position in the array cannot affect the answer and permuting it
+     * adds a factorial for nothing — and the table is twelve entries now,
+     * which is 479 million orderings. The three enabled ones are the three
+     * with distinct distances, which is the property being tested.
+     */
+    s5l_wake_source_t live[8];
+    unsigned nlive = 0;
+    for (unsigned i = 0; i < nreal && nlive < 8u; i++) {
+        unsigned line = real[i].line;
+        if (line >= 32u * S5L8900_VIC_COUNT) continue;
+        if (!(m.vic[line / 32u].enable & (1u << (line % 32u)))) continue;
+        live[nlive++] = real[i];
+    }
+    CHECK(nlive == 3u, "%u of the machine's sources are enabled, expected the "
+          "timer, the CLCD and TV-out", nlive);
+    permute_wake_check(&m, live, nlive, order, used, 0u, S5L_WAKE_AT, 2u,
+                       "the machine's own enabled sources");
     s5l8900_free(&m);
 }
 
@@ -1922,13 +1945,14 @@ static void test_tvout_machine_routing_and_irq30(void) {
 
     s5l_window_t windows[S5L_WINDOW_MAX];
     unsigned nw = s5l8900_windows(&m, windows, S5L_WINDOW_MAX);
-    /* 15 fixed device windows: nor, clcd, the three tv-out banks, i2c0, i2c1,
-     * spi0, spi1, usb-otg, vic0, vic1, power, uart0, timer. This count is a
-     * tripwire for a window silently vanishing from the table, so it moves only
-     * when a real device model is added or removed — it went from 13 to 15 when
-     * spi0 and spi1 stopped being stubs. */
-    CHECK(nw == m.stub_count + 15u,
-          "fixed device-window count=%u expect 15 (+%u stubs)",
+    /* 17 fixed device windows: nor, clcd, the three tv-out banks, i2c0, i2c1,
+     * spi0, spi1, usb-otg, vic0, vic1, power, gpioic, gpio, uart0, timer. This
+     * count is a tripwire for a window silently vanishing from the table, so it
+     * moves only when a real device model is added or removed — it went from 13
+     * to 15 when spi0 and spi1 stopped being stubs, and from 15 to 17 when the
+     * two halves of /arm-io/gpio did. */
+    CHECK(nw == m.stub_count + 17u,
+          "fixed device-window count=%u expect 17 (+%u stubs)",
           nw - m.stub_count, m.stub_count);
     bool have_ctrl = false, have_mixer = false, have_sdo = false;
     for (unsigned i = 0; i < nw && i < S5L_WINDOW_MAX; i++) {

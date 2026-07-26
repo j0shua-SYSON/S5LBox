@@ -3202,6 +3202,106 @@ SpringBoard VA `0x00041268` drops every digitizer event when the byte at data VA
 warning: buffer allocation failed. 320 x 480`, which will bite the moment a tap
 launches an app.
 
+#### 23.4a Corrected a third time, while implementing steps 0, 2 and 3
+
+Everything above about *what* the HBPP answer must be is right. Two mechanisms
+it describes are not, and both would have produced a model that looks correct
+and silently does the wrong thing. The anchor for all of it is the vtable base
+**`0xc0449f40`** — `base + 0x4d0 = 0xc044a410`, which holds `0xc0441008`,
+`isInHBPP`. An earlier working base of `0xc0449f3c` is off by one slot and makes
+`0x4d0` resolve to `getCMDStatus`; check any slot arithmetic against that
+identity before trusting it.
+
+**1. The device is in HBPP and stays in HBPP. There is nothing to
+discriminate on, and nothing that needs discriminating.** §23.4's table asks for
+"in HBPP" once and "not in HBPP" three times. Three separate mechanisms for
+that were tried and each was measured wrong:
+
+- *Watch the reset line.* `attemptToBootloadDevice`'s first act after its
+  prologue is the probe itself — `ldr r3,[r0]` at `0xc04414d0`,
+  `ldr pc,[r3,#0x4d0]` at `0xc04414dc` — with no reset, no GPIO store, no delay
+  and no power call before it, and the retry loop re-enters with nothing in
+  between (`cmp r6,#3` at `0xc043aa0c`, `bne 0xc043a970`). `setDownloadMode`
+  cannot help either: `function-enable_download` is absent from the node, so it
+  returns `kIOReturnUnsupported` without touching anything.
+- *Accept the first probe, decline the rest.* Measured wrong. A run with
+  `--call-probe-kernel 0xc0441008 --call-probe-kernel 0xc0442670` shows
+  `finishStarting` entered **once**, at instruction 220,700,146, and `isInHBPP`
+  entered **once**, at 316,898,121 with `lr = 0xc04426cc`. But spi1 carried
+  **two** byte-identical 16-byte `1A A1 18 E1…` transfers, at 309.53M and
+  316.91M, from the same eleven call sites. Something in `finishStarting`'s own
+  preamble — one of `v[0x4b4]`, `v[0x42c]`, `v[0x458]` at
+  `0xc0442688`-`0xc04426b0` — sends the pattern and never reads the answer, so a
+  one-shot spends itself there and hands the real caller the rejection.
+- *Decline at `attemptToBootloadDevice` to skip the download.* Backwards.
+  Declining makes it return 0 at `0xc04414e4` having done nothing, and the three
+  `Bootload attempt %d of %d failed` lines never appear — that printf is at
+  `0xc043a9e8`, inside `v[0x36c]` (`0xc043a8d0`), which is only reached **on a
+  TRUE**. The retry loop's per-attempt call at `0xc043a97c` is `v[0x378]` =
+  `0xc04382a0`, a `callPlatformFunction` — not another probe and not a firmware
+  push. `v[0x36c]` returns zero on every path it has (all reach `0xc043aab4`,
+  `mov r0,#0`), so `attemptToBootloadDevice` is bounded whatever happens inside.
+
+So the working model answers **every** probe with the loopback echo. It is a
+part with no resident firmware sitting in its bootloader, which is a state real
+silicon has, and it produces `detected HBPP. driver will be kept alive` — first
+observed 2026-07-26 at a 400M cap.
+
+**1a. THE RESET LINE IS REALLY DRIVEN, AND A RESET MUST RESTORE HBPP.** This
+cost a boot and is the least obvious thing in this section. The guest writes the
+GPIO function-select register **77 times** during driver start, and one of those
+stores lands on the multi-touch `function-reset` pin `0x0606` **between** the
+un-evaluated probe at 309.53M and `finishStarting`'s own at 316.91M. A model in
+which a reset *ends* HBPP — the physically obvious rule, since a part that has
+just reset boots its firmware — therefore leaves HBPP one transfer before the
+only transfer whose answer anybody reads, and the boot ends in exactly the
+"Could not detect HBPP" it was built to prevent. Both probes are visible in the
+spi1 trace: the first echoed, the second sixteen zeros. The rule is wrong
+because the premise is: a part with **no** firmware comes out of reset back into
+its bootloader, every time.
+
+**2. A GPIO pin is driven by one store to `fsel`, not by writing the level
+register.** §13.0d establishes that a pin's level is *read* at
+`0x3e400000 + group*32 + 4`, and that is correct. It does not say how a pin is
+*written*, and the natural assumption — that the same register is
+read-modify-written — is wrong. The write is a single 32-bit store to
+`fsel-offset` `0x320`:
+
+```text
+write32(0x3e400320, (pin << 8) | 0xE | (level & 1))
+    [23:16] group   [15:8] bit   [3:0] function, 0xE|level for a driven output
+```
+
+and `group*32 + 4` is read-only. This is independently corroborated by run59's
+own measurement of the storage stub that used to cover that page: **`0x320` was
+the only offset the guest ever touched on it**, so a model watching
+`group*32 + 4` for stores would not have fired once in an entire boot.
+
+**3. Answering "in HBPP" once also chooses the frame opcode.** The true return
+runs `strb r3, [r4, #0x1bc]` at `0xc04426fc`, and `deviceReadResultData` at
+`0xc0441324` rejects `0xEB` unless `this+0x1bc` is non-zero. §23.4 says Z2 uses
+`0xEB`; this is *why*, and it is conditional on the answer above.
+
+**4. `isBootloaded` inspects no payload field.** Slot `0x350` = `0xc043ac58`
+calls `getReportInfo(0xD3, &out, retries=4, useCache=0)` and then
+`rsbs r0,r0,#1 / movlo r0,#0` — true exactly when the call returns 0.
+`useCache=0` forces a real wire transaction, so it cannot be satisfied from the
+per-report cache at `this+0x1CC + id*4`.
+
+Confirmed unchanged, and now derived rather than assumed: the probe pattern
+(`1A A1` then `18 E1` seven times, loop `0xc0441030`-`0xc0441048`); that **both**
+`BE16(rx[0..1])` and `BE16(rx[2..3])` must pass (`0xc04410fc`, `0xc044110c`)
+while `rx[4..15]` is only printed; and the accepted set, which the literal pool
+gives as `0xc04406b4 = 0x18E1`, `0xc04406b8 = 0x1AA1`, `0xc04406bc = 0x4879`
+with `+0x620 -> 0x1F01`, `+0x2CC0 -> 0x4BC1`, `+0xF0 -> 0x4969` and
+`-0xF0 -> 0x4AD1`. The compared value is `uxth`-truncated. The failure `printf`
+has a **double space** after the colon, so grep for `HBPP`.
+
+One thing flagged and unexplained: slot `0x458` holds `0xc044061c`, a bare
+`bx lr` that leaves `r0 = this`, which makes the following `IOSleep(r0)`
+nonsensical. The base is anchored twice, so it is probably not an indexing
+error. Do not reason from that line.
+
 ### 23.5 The HFS+ provisioner blocks two features, not four
 
 `tools/rootfs_work.c` does size-neutral in-place rewrites only and has no

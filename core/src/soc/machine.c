@@ -38,6 +38,11 @@ static const s5l_window_t DEVICE_WINDOWS[] = {
     { S5L8900_VIC0_BASE,  S5L8900_DEV_SIZE,   "vic0"  },
     { S5L8900_VIC1_BASE,  S5L8900_DEV_SIZE,   "vic1"  },
     { S5L8900_POWER_BASE, S5L8900_POWER_SIZE, "power" },
+    /* The rest of the power page. Two blocks, two drivers, one page: see the
+     * GPIOIC section of soc.h for why the register offsets this window carries
+     * are stated relative to the page base rather than to this base. */
+    { S5L8900_GPIOIC_BASE, S5L8900_GPIOIC_SIZE, "gpioic" },
+    { S5L8900_GPIO_BASE,  S5L8900_DEV_SIZE,   "gpio"  },
     { S5L8900_UART0_BASE, S5L8900_DEV_SIZE,   "uart0" },
     { S5L8900_TIMER_BASE, S5L8900_TIMER_SIZE, "timer" },
 };
@@ -118,6 +123,9 @@ static inline bool mmio_word(uint32_t a, unsigned bytes,
  * its interrupt-status alias sits at offset 0x10000. */
 static inline bool in_power(uint32_t a, unsigned bytes) {
     return mmio_word(a, bytes, S5L8900_POWER_BASE, S5L8900_POWER_SIZE);
+}
+static inline bool in_gpioic(uint32_t a, unsigned bytes) {
+    return mmio_word(a, bytes, S5L8900_GPIOIC_BASE, S5L8900_GPIOIC_SIZE);
 }
 static inline bool in_timer(uint32_t a, unsigned bytes) {
     return mmio_word(a, bytes, S5L8900_TIMER_BASE, S5L8900_TIMER_SIZE);
@@ -272,6 +280,14 @@ static uint32_t bus_read(void *ctx, uint32_t addr, unsigned bytes) {
         v = s5l_timer_read(&m->timer, addr - S5L8900_TIMER_BASE);
     } else if (in_power(addr, bytes)) {
         v = s5l_power_read(&m->power, addr - S5L8900_POWER_BASE);
+    } else if (in_gpioic(addr, bytes)) {
+        /* Offset from the PAGE, not from the window: the driver's own
+         * 0x80/0xA0/0xC0/0xE0 are page-relative and rebasing them onto the
+         * window would silently shift the whole map by 0x80. */
+        v = s5l_gpioic_read(&m->gpioic, addr - S5L8900_GPIOIC_PAGE);
+    } else if ((bytes == 1u || bytes == 2u || bytes == 4u) &&
+               in_dev(addr, bytes, S5L8900_GPIO_BASE)) {
+        v = s5l_gpio_read(&m->gpio, addr - S5L8900_GPIO_BASE, bytes);
     } else if (mmio_word(addr, bytes, S5L8900_I2C0_BASE, S5L8900_DEV_SIZE)) {
         v = s5l_i2c_read(&m->i2c[0], addr - S5L8900_I2C0_BASE);
     } else if (mmio_word(addr, bytes, S5L8900_I2C1_BASE, S5L8900_DEV_SIZE)) {
@@ -361,6 +377,17 @@ static void bus_write(void *ctx, uint32_t addr, uint32_t val, unsigned bytes) {
     if (in_power(addr, bytes)) {
         note_device(m, addr, val, true);
         s5l_power_write(&m->power, addr - S5L8900_POWER_BASE, val);
+        return;
+    }
+    if (in_gpioic(addr, bytes)) {
+        note_device(m, addr, val, true);
+        s5l_gpioic_write(&m->gpioic, addr - S5L8900_GPIOIC_PAGE, val);
+        return;
+    }
+    if ((bytes == 1u || bytes == 2u || bytes == 4u) &&
+        in_dev(addr, bytes, S5L8900_GPIO_BASE)) {
+        note_device(m, addr, val, true);
+        s5l_gpio_write(&m->gpio, addr - S5L8900_GPIO_BASE, val, bytes);
         return;
     }
     if (mmio_word(addr, bytes, S5L8900_I2C0_BASE, S5L8900_DEV_SIZE)) {
@@ -519,12 +546,45 @@ static s5l_wake_kind_t wake_edge_spi1(const s5l8900_t *m, uint32_t *ticks) {
     return S5L_WAKE_NEVER;
 }
 
+/*
+ * The seven GPIO interrupt groups.
+ *
+ * All seven are declared, not just group 4. Nothing else in the shipped tree
+ * claims VIC lines 0, 1, 2, 3, 31, 32 or 33, so declaring the whole cascade
+ * costs nothing and removes the question of whether /arm-io/gpio's descending
+ * `interrupts` array is indexed by group or reversed — get that wrong for one
+ * entry and the touch line is routed to a VIC line nobody enabled, silently.
+ * Lines 32 and 33 are on VIC1, which is why s5l8900_tick() has to route by
+ * line/32 rather than hardcoding vic[0] the way every older device does.
+ *
+ * Every one answers S5L_WAKE_NEVER, and as with the SPI controllers that is a
+ * statement about the model rather than a placeholder: nothing in this machine
+ * drives a GPIO input on its own schedule yet, so no group has a future edge
+ * to name. A line that is ALREADY asserted is caught by
+ * machine_wait_for_interrupt()'s own pre-check before any source is consulted,
+ * so NEVER cannot lose an interrupt that has already happened. The step that
+ * gives the touch controller a frame to deliver is the step that edits this.
+ */
+static s5l_wake_kind_t wake_edge_gpio(const s5l8900_t *m, uint32_t *ticks) {
+    (void)m; (void)ticks;
+    return S5L_WAKE_NEVER;
+}
+
 static const s5l_wake_source_t WAKE_SOURCES[] = {
     { "timer", S5L8900_IRQ_TIMER, wake_edge_timer },
     { "clcd",  S5L8900_IRQ_CLCD,  wake_edge_clcd  },
     { "tvout", S5L8900_IRQ_TVOUT, wake_edge_tvout },
     { "spi0",  S5L8900_IRQ_SPI0,  wake_edge_spi0  },
     { "spi1",  S5L8900_IRQ_SPI1,  wake_edge_spi1  },
+    /* Group order, so entry k is group k. The lines are /arm-io/gpio's own
+     * `interrupts` = {33,32,31,3,2,1,0}; group 4 -> VIC line 2 carries touch. */
+    { "gpio-group0", 33u, wake_edge_gpio },
+    { "gpio-group1", 32u, wake_edge_gpio },
+    { "gpio-group2", 31u, wake_edge_gpio },
+    { "gpio-group3",  3u, wake_edge_gpio },
+    { "gpio-group4",  2u, wake_edge_gpio },
+    { "gpio-group5",  1u, wake_edge_gpio },
+    { "gpio-group6",  0u, wake_edge_gpio },
 };
 #define NWAKE_SOURCES (sizeof WAKE_SOURCES / sizeof WAKE_SOURCES[0])
 
@@ -664,6 +724,8 @@ bool s5l8900_init(s5l8900_t *m, uint32_t ram_base, uint32_t ram_size) {
         s5l_i2c_reset(&m->i2c[i]);
     s5l_pcf50635_reset(&m->pmu, m->tb_hz);
     for (unsigned i = 0; i < S5L8900_SPI_COUNT; i++) s5l_spi_reset(&m->spi[i]);
+    s5l_gpioic_reset(&m->gpioic);
+    s5l_gpio_reset(&m->gpio);
     s5l_usbotg_reset(&m->usbotg);
     {
         s5l_i2c_slave_t pmu;
@@ -675,11 +737,13 @@ bool s5l8900_init(s5l8900_t *m, uint32_t ram_base, uint32_t ram_size) {
         }
     }
     /*
-     * The null device on spi1 chip select 0 — where /arm-io/spi1/multi-touch
-     * is. It answers every word with 0x00, which is enough for
-     * AppleMultitouchZ2SPI's HBPP probe to complete, fail to recognise the
-     * response, and return a definite false instead of sleeping with no
-     * deadline. It is emphatically not a touch controller.
+     * The touch controller on spi1 chip select 0 — where
+     * /arm-io/spi1/multi-touch is; the select is reg[0] of that node, since
+     * there is no `chip-select` property anywhere in the shipped tree. It
+     * replaces the null device that proved the controller: that one answered
+     * every word with 0x00, which made AppleMultitouchZ2SPI's HBPP probe
+     * complete and fail cleanly instead of sleeping with no deadline, but a
+     * clean failure still detaches the driver.
      *
      * spi0 gets nothing on purpose. Its devices — the NOR, which this machine
      * exposes as a memory window instead, and the lcd0 panel — are unmodelled,
@@ -687,15 +751,31 @@ bool s5l8900_init(s5l8900_t *m, uint32_t ram_base, uint32_t ram_size) {
      * exactly as its storage stub did rather than answering the panel driver
      * with a byte no device sent.
      */
+    s5l_mtz2_reset(&m->mtz2);
     {
-        s5l_spi_slave_t null_touch;
-        s5l_spi_null_bind(&null_touch);
-        if (!s5l_spi_attach(&m->spi[1], 0u, &null_touch)) {
+        s5l_spi_slave_t touch;
+        s5l_mtz2_bind(&m->mtz2, &touch);
+        if (!s5l_spi_attach(&m->spi[1], 0u, &touch)) {
             free(m->ram);
             m->ram = NULL;
             return false;
         }
     }
+    /*
+     * The two GPIO pins the touch controller can observe.
+     *
+     * `function-reset` is /arm-io/spi1/multi-touch's own, GPIO 0x0606 = group 6
+     * bit 6; `function-spi_cs0` is /arm-io/spi1's, GPIO 0x1800 = group 24 bit
+     * 0. Neither is required for the device to work — the packet framer knows
+     * every packet's length from its opcode, and the HBPP answer has a
+     * one-shot of its own — so a failure to subscribe is folded into the same
+     * counter a refused stub declaration is, rather than refusing to build a
+     * machine over a diagnostic.
+     */
+    if (!s5l_gpio_watch(&m->gpio, 0x0606u, &m->mtz2, s5l_mtz2_reset_pin))
+        m->stub_declare_failures++;
+    if (!s5l_gpio_watch(&m->gpio, 0x1800u, &m->mtz2, s5l_mtz2_select_pin))
+        m->stub_declare_failures++;
     /* Refresh in the guest's own time: the CLCD is ticked with timebase ticks,
      * so the period is expressed in them. */
     m->clcd.frame_ticks = m->tb_hz / S5L_CLCD_REFRESH_HZ;
@@ -729,12 +809,11 @@ bool s5l8900_init(s5l8900_t *m, uint32_t ram_base, uint32_t ram_size) {
             /* _miuBaseAddress, the clock controller's second reg range.
              * Offsets 0x008 and 0x404 are the ones actually touched. */
             { S5L8900_MIU_BASE,    S5L8900_DEV_SIZE,   "miu"       },
-            /* Offset 0x320 (FSEL) is the one actually touched. */
-            { S5L8900_GPIO_BASE,   S5L8900_DEV_SIZE,   "gpio"      },
             { S5L8900_EDGEIC_BASE, S5L8900_DEV_SIZE,   "edgeic"    },
-            /* The upper part of the power page — power.c owns 0x00-0x7f and
-             * this is a different block with a different driver. */
-            { S5L8900_GPIOIC_BASE, S5L8900_GPIOIC_SIZE, "gpioic"   },
+            /* gpio and gpioic used to be here. Both are device models now
+             * (DEVICE_WINDOWS above) — a duplicate declaration would be
+             * refused as an overlap and counted as a failure rather than
+             * shadowing them. */
             /* spi2, the baseband transport com.apple.driver.BasebandSPI
              * configures and then reads back. spi0 and spi1 used to be here
              * too; they are device models now (DEVICE_WINDOWS above), and a
@@ -817,6 +896,27 @@ void s5l8900_tick(s5l8900_t *m, uint32_t ticks) {
      * observe both the assertion and the guest's W1C acknowledge. */
     s5l_vic_set_line(&m->vic[0], S5L8900_IRQ_SPI0, s5l_spi_irq(&m->spi[0]));
     s5l_vic_set_line(&m->vic[0], S5L8900_IRQ_SPI1, s5l_spi_irq(&m->spi[1]));
+
+    /*
+     * The GPIO interrupt cascade. Seven group outputs, seven VIC lines, and
+     * two of those lines are 32 and 33 — the FIRST sources this machine has
+     * ever routed to VIC1. s5l_vic_set_line() takes a per-controller 0-31 line
+     * and silently drops anything larger, so the flat device-tree number has
+     * to be split here; passing 33 to vic[0] would enable nothing and fail
+     * without a symptom.
+     */
+    /* The touch controller's attention line first, so the cascade below sees
+     * it in the same refresh. It is asserted only when the device has a frame
+     * waiting, which nothing produces yet. */
+    s5l_gpioic_set_line(&m->gpioic, S5L_GPIOIC_LINE_MULTITOUCH,
+                        s5l_mtz2_irq(&m->mtz2));
+
+    for (unsigned g = 0; g < S5L_GPIOIC_GROUPS; g++) {
+        unsigned line = s5l_gpioic_cascade(g);
+        if (line >= 32u * S5L8900_VIC_COUNT) continue;
+        s5l_vic_set_line(&m->vic[line / 32u], line % 32u,
+                         s5l_gpioic_group_irq(&m->gpioic, g));
+    }
 
     /*
      * BOTH VICs drive the CPU.

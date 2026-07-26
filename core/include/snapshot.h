@@ -62,7 +62,17 @@
  *     bytes and levels are state and the payload genuinely grows. The stub
  *     windows for spi0 and spi1 also disappear from GEOM, which a v5 file would
  *     not agree with either. */
-#define SNAPSHOT_VERSION   6u
+/* v7: the two halves of /arm-io/gpio and the multi-touch controller joined
+ *     MACH. This one could not have been avoided by any encoding choice: the
+ *     GPIO interrupt controller's pending latch and enable masks are guest
+ *     state that decides whether a touch report can reach the CPU, the pin
+ *     block is 4 KiB of guest-written levels one of which is the touch
+ *     controller's reset line, and the Z2's own protocol position — which
+ *     packet it is part way through, and whether it is still answering as its
+ *     bootloader — is state a checkpoint cannot invent. The `gpio` and
+ *     `gpioic` stub windows also disappear from GEOM, so a v6 file would fail
+ *     the geometry check even if the payload happened to line up. */
+#define SNAPSHOT_VERSION   7u
 
 typedef enum {
     SNAP_OK = 0,

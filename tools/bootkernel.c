@@ -882,7 +882,9 @@ typedef struct {
     const char *fstab_line;
     const char *jailbreak_payload;
     const char *rd_form;
-    uint32_t    phys_base, virt_base, ram_size, hot_page, rd_grow_mb;
+    uint32_t    phys_base, virt_base, ram_size, rd_grow_mb;
+    const uint32_t *hot_page;            /* hot_page_n entries; -H is repeatable */
+    unsigned    hot_page_n;
     uint64_t    steps, win_lo, win_hi, heartbeat;
     unsigned    ba_rev, ba_ver, ktail, nsnaps, ncall_probes, ndtov;
 } boot_values_t;
@@ -936,7 +938,10 @@ static void boot_print_config(FILE *out, const boot_config_t *cfg,
     fprintf(out, "    %-20s [%" PRIu64 ",%" PRIu64 ")\n", "profile window",
             val->win_lo, val->win_hi);
     fprintf(out, "    %-20s %" PRIu64 "\n", "heartbeat", val->heartbeat);
-    fprintf(out, "    %-20s 0x%08x\n", "hot page", val->hot_page);
+    fprintf(out, "    %-20s", "hot pages");
+    for (unsigned i = 0; i < val->hot_page_n; i++)
+        fprintf(out, " 0x%08x", val->hot_page[i]);
+    fputc('\n', out);
     fprintf(out, "    %-20s %u\n", "abort trace lines", val->ktail);
     fprintf(out, "    %-20s %u\n", "call probes", val->ncall_probes);
     fprintf(out, "    %-20s %u\n", "-D overrides", val->ndtov);
@@ -2979,6 +2984,22 @@ static unsigned    NM;
 
 #define LIFECYCLE_CAP 256u
 #define DEFAULT_HOT_PAGE UINT32_C(0x39a00000)
+/*
+ * -H is repeatable. It used to store a single page and the second occurrence
+ * silently replaced the first, which is the worst possible behaviour for a
+ * diagnostic: a run asked to watch two blocks watched one and said nothing.
+ * Four is enough to cover a controller, its interrupt controller and two
+ * neighbours without making the per-register tables unreadable.
+ */
+#define HOT_PAGE_MAX 4u
+
+/*
+ * Where the lossless console tee lands. A fixed relative name, resolved
+ * against the process working directory exactly as `firmware/screen.ppm`
+ * already is, so tools/run23-cold-replay.ps1's -WorkingDirectory puts it in
+ * the run directory beside the run's other outputs with no new option to pass.
+ */
+#define UART_TEE_PATH "uart-console.log"
 
 #define H1_DISPLAY_VM_BASE UINT32_C(0xc0703000)
 #define H1_DISPLAY_VM_SIZE UINT32_C(0x0000a000)
@@ -5667,19 +5688,40 @@ static struct {
      * called from where, reading/writing what, and *when* -- so we can tell a
      * loop that eventually gives up from one that never does. */
     uint64_t    hot_now;                 /* instruction index, updated per step */
-    uint64_t    hot_r[1024], hot_w[1024];/* per word-offset access counts */
-    uint32_t    hot_last[1024];          /* last value read/written per offset */
-    uint32_t    hot_firstw[1024];        /* first value ever written per offset */
-    unsigned char hot_written[1024];
+    uint64_t    hot_r[HOT_PAGE_MAX][1024], hot_w[HOT_PAGE_MAX][1024];
+    uint32_t    hot_last[HOT_PAGE_MAX][1024];   /* last value read/written    */
+    uint32_t    hot_firstw[HOT_PAGE_MAX][1024]; /* first value ever written   */
+    unsigned char hot_written[HOT_PAGE_MAX][1024];
     unsigned    hot_site_n;
-    struct { uint32_t pc, lr, off; bool wr; uint64_t n, first_at, last_at; } hot_site[64];
+    struct { uint32_t pc, lr, page, off; bool wr;
+             uint64_t n, first_at, last_at; } hot_site[64];
     unsigned    hot_log_n;               /* first N accesses, verbatim */
     struct { uint64_t at; uint32_t pc, lr, addr, val, r[6]; bool wr; unsigned bytes; } hot_log[80];
     unsigned    hot_tail_w; uint64_t hot_tail_n;   /* last N accesses, verbatim */
     struct { uint64_t at; uint32_t pc, lr, addr, val; bool wr; } hot_tail[64];
     uint64_t    hot_bucket[40];          /* when, over the whole run */
     uint64_t    hot_steps;               /* run length, for bucket scaling */
-    uint32_t    hot_page;                /* selected physical page; -H */
+    uint32_t    hot_page[HOT_PAGE_MAX];  /* selected physical pages; -H       */
+    unsigned    hot_page_n;
+
+    /* --- DIAGNOSTIC: the lossless console tee -----------------------------
+     * s5l_uart_t's tx buffer is a FIRST-8191-BYTES CAP, not a ring: run59 wrote
+     * ~16,575 bytes to UTXH, so roughly half of every boot log -- the TAIL half,
+     * which is the interesting half -- was silently discarded, and several
+     * conclusions on this project were unsound because of it.
+     *
+     * The fix is here rather than in uart.c on purpose. A ring in the model
+     * would change tx_len's meaning, break snap_uart's `tx_len < UART_TX_BUFFER`
+     * validation and force another SNAPSHOT_VERSION bump, for a problem that is
+     * purely about observation. This tee changes no machine state at all: it
+     * only copies the byte the guest just stored, from the same bus interposer
+     * that already counts UART page traffic. The in-report buffer keeps working
+     * exactly as before, and `uart_tx_bytes` makes a truncated buffer visibly
+     * distinguishable from a short boot. */
+    FILE       *uart_tee;                /* lazily opened on the first byte   */
+    uint64_t    uart_tx_bytes;           /* every byte stored to UTXH, capped
+                                          * by nothing                        */
+    bool        uart_tee_failed;         /* open or write error; reported once */
 
     /* --- DIAGNOSTIC: the user-mode call probe; --call-probe ---------------
      * call_probe_n is the hot-loop gate: zero means the whole facility is off
@@ -16015,20 +16057,33 @@ static bool is_ram(uint32_t a, unsigned bytes) {
     return (uint64_t)(a - G.mach->ram_base) + bytes <= (uint64_t)G.mach->ram_size;
 }
 
-/* Record one access to the hot page in as much detail as we can afford. */
-static void note_hot(uint32_t addr, uint32_t val, unsigned bytes, bool wr) {
+/*
+ * Record one access to a selected hot page in as much detail as we can afford.
+ *
+ * `slot` is the index of the matching -H page. The per-word-offset tables are
+ * indexed by it because two watched pages share every offset: without the
+ * dimension, spi1+0x08 and gpioic+0x08 would be summed into one row and the
+ * per-register table -- the whole point of -H -- would be fiction.
+ */
+static void note_hot(unsigned slot,
+                     uint32_t addr, uint32_t val, unsigned bytes, bool wr) {
     uint32_t pc = G.mach->cpu.r[15], lr = G.mach->cpu.r[14];
     unsigned wi = (addr & 0xfffu) >> 2;
-    if (wr) G.hot_w[wi]++; else G.hot_r[wi]++;
-    G.hot_last[wi] = val;
-    if (wr && !G.hot_written[wi]) { G.hot_written[wi] = 1; G.hot_firstw[wi] = val; }
+    if (wr) G.hot_w[slot][wi]++; else G.hot_r[slot][wi]++;
+    G.hot_last[slot][wi] = val;
+    if (wr && !G.hot_written[slot][wi]) {
+        G.hot_written[slot][wi] = 1;
+        G.hot_firstw[slot][wi] = val;
+    }
 
     unsigned i;
     for (i = 0; i < G.hot_site_n; i++)
         if (G.hot_site[i].pc == pc && G.hot_site[i].lr == lr &&
+            G.hot_site[i].page == (addr & ~0xfffu) &&
             G.hot_site[i].off == (addr & 0xfffu) && G.hot_site[i].wr == wr) break;
     if (i == G.hot_site_n && G.hot_site_n < 64) {
         G.hot_site[i].pc = pc; G.hot_site[i].lr = lr;
+        G.hot_site[i].page = addr & ~0xfffu;
         G.hot_site[i].off = addr & 0xfffu; G.hot_site[i].wr = wr;
         G.hot_site[i].n = 0; G.hot_site[i].first_at = G.hot_now;
         G.hot_site_n++;
@@ -16452,6 +16507,42 @@ static inline void tvout_mmio_note(
     }
 }
 
+/*
+ * Copy one byte the guest just stored to UTXH into the console tee.
+ *
+ * Called from the bus interposer BEFORE the byte reaches s5l_uart_write(), so
+ * it captures every byte whether or not the model's 8 KiB buffer still has
+ * room. It reads nothing back out of the machine and writes nothing into it.
+ *
+ * The file is opened on the first byte rather than at startup so a run that
+ * prints nothing -- the zero-step smoke test, --print-config, a refused command
+ * line -- leaves no file behind. A failure is latched and reported once at the
+ * end instead of per byte: the run itself is still valid without the tee, and
+ * 16,000 perror() lines would destroy the log this exists to preserve.
+ */
+static void uart_tee_byte(uint32_t val) {
+    G.uart_tx_bytes++;
+    if (G.uart_tee_failed) return;
+    if (!G.uart_tee) {
+        G.uart_tee = fopen(UART_TEE_PATH, "wb");
+        if (!G.uart_tee) { G.uart_tee_failed = true; return; }
+    }
+    int c = (int)(val & 0xffu);
+    if (fputc(c, G.uart_tee) == EOF) { G.uart_tee_failed = true; return; }
+    /*
+     * Flush at every newline, by hand.
+     *
+     * The point of this file is to survive a run that ends badly — a panic, an
+     * abort stop, a cap the operator cuts short — and a stdio buffer does not.
+     * setvbuf(_IOLBF) would be the tidy way to say this, but MSVCRT (which
+     * MinGW links) documents _IOLBF as a synonym for full buffering, so on the
+     * host this project is developed on it would silently do nothing. A boot
+     * writes on the order of sixteen thousand bytes in a few hundred lines, so
+     * the cost is a few hundred flushes across minutes of run time.
+     */
+    if (c == '\n' && fflush(G.uart_tee) != 0) G.uart_tee_failed = true;
+}
+
 static void spy_nonram(
         uint32_t addr, uint32_t val, unsigned bytes, bool wr) {
     uint32_t pc = G.mach->cpu.r[15];
@@ -16460,8 +16551,13 @@ static void spy_nonram(
         (G.mach->cpu.cp15.sctlr & ARM_SCTLR_M) != 0u;
     tvout_mmio_note(addr, val, bytes, wr);
     note_dev_page(addr, pc, cpsr, mmu_enabled, wr);
-    if ((addr & ~0xfffu) == G.hot_page) note_hot(addr, val, bytes, wr);
+    for (unsigned h = 0; h < G.hot_page_n; h++)
+        if ((addr & ~0xfffu) == G.hot_page[h]) {
+            note_hot(h, addr, val, bytes, wr);
+            break;
+        }
     if ((addr & ~0xfffu) == UARTPG) {
+        if (wr && (addr & 0xfffu) == UART_UTXH) uart_tee_byte(val);
         G.uart_hits++;
         if (G.uart_log_n < 64) {
             G.uart_log[G.uart_log_n].addr  = addr;
@@ -16522,11 +16618,13 @@ static void sw16(void *c, uint32_t a, uint16_t v) { spy_write(a, v, 2); G.inner.
 static void sw8 (void *c, uint32_t a, uint8_t  v) { spy_write(a, v, 1); G.inner.write8 (c, a, v); }
 
 static void spy_install(s5l8900_t *m, uint32_t virt_base, uint32_t phys_base,
-                        uint32_t hot_page) {
+                        const uint32_t *hot_page, unsigned hot_page_n) {
     memset(&G, 0, sizeof G);
     G.mach  = m;
     G.inner = m->bus;
-    G.hot_page = hot_page;
+    if (hot_page_n > HOT_PAGE_MAX) hot_page_n = HOT_PAGE_MAX;
+    for (unsigned i = 0; i < hot_page_n; i++) G.hot_page[i] = hot_page[i];
+    G.hot_page_n = hot_page_n;
     m->bus.read32 = sr32; m->bus.read16 = sr16; m->bus.read8 = sr8;
     m->bus.write32 = sw32; m->bus.write16 = sw16; m->bus.write8 = sw8;
     for (unsigned i = 0; i < NM; i++)
@@ -21622,8 +21720,9 @@ static void boot_print_usage(FILE *stream, const char *argv0) {
             "      stall; a window that starts after the last milestone\n"
             "      characterises what is actually spinning.\n"
             "  -Z  <n> print pc/mode/symbol every n instructions\n"
-            "  -H  select the 4 KiB-aligned physical page traced by the bounded\n"
-            "      hot-page diagnostics (default 0x39a00000)\n"
+            "  -H  select a 4 KiB-aligned physical page for the bounded\n"
+            "      hot-page diagnostics (default 0x39a00000). REPEATABLE: the\n"
+            "      first -H replaces the default, later ones add, up to 4\n"
             "  -T  how many trace lines to print at the first data abort\n",
             stream);
     fputs("\nboolean options  (--name enables, --no-name disables)\n", stream);
@@ -21647,7 +21746,9 @@ int main(int argc, char **argv) {
     }
     uint32_t phys_base = S5L8900_SDRAM_BASE;
     uint32_t virt_base = 0xc0000000u;
-    uint32_t hot_page = DEFAULT_HOT_PAGE;
+    uint32_t hot_page[HOT_PAGE_MAX] = { DEFAULT_HOT_PAGE };
+    unsigned hot_page_n = 1u;
+    bool     hot_page_given = false;
     /* --call-probe / --call-probe-kernel, repeatable and sharing one table.
      * Parsed into locals for the same reason -H is: spy_install() zeroes G, so
      * nothing may be written there before it runs. */
@@ -21970,13 +22071,29 @@ int main(int argc, char **argv) {
             if (!parse_u32_arg("-p", argv[++i], &phys_base)) return 1;
         }
         else if (!strcmp(argv[i], "-H")) {
-            if (!parse_u32_arg("-H", argv[++i], &hot_page)) return 1;
-            if (hot_page & 0xfffu) {
+            uint32_t page = 0;
+            if (!parse_u32_arg("-H", argv[++i], &page)) return 1;
+            if (page & 0xfffu) {
                 fprintf(stderr,
                         "-H: physical page must be 4 KiB aligned "
                         "(low 12 bits zero)\n");
                 return 1;
             }
+            /* The first -H replaces the default; later ones add to it. A
+             * silently ignored second page is worse than a refusal, so an
+             * overflow fails closed rather than dropping the request. */
+            if (!hot_page_given) { hot_page_n = 0; hot_page_given = true; }
+            if (hot_page_n >= HOT_PAGE_MAX) {
+                fprintf(stderr, "-H: at most %u pages may be watched\n",
+                        (unsigned)HOT_PAGE_MAX);
+                return 1;
+            }
+            for (unsigned h = 0; h < hot_page_n; h++)
+                if (hot_page[h] == page) {
+                    fprintf(stderr, "-H: page 0x%08x named twice\n", page);
+                    return 1;
+                }
+            hot_page[hot_page_n++] = page;
         }
         else if (!strcmp(argv[i], "--call-probe") ||
                  !strcmp(argv[i], "--call-probe-kernel")) {
@@ -22424,6 +22541,7 @@ int main(int argc, char **argv) {
     resolved.virt_base    = virt_base;
     resolved.ram_size     = ram_size;
     resolved.hot_page     = hot_page;
+    resolved.hot_page_n   = hot_page_n;
     resolved.rd_grow_mb   = rd_grow_mb;
     resolved.steps        = steps;
     resolved.win_lo       = win_lo;
@@ -23562,7 +23680,7 @@ external_md_work_ready:
     mach.cpu.r[0]  = ba_pa;            /* XNU takes boot_args in r0 */
 
     /* Interpose on the bus so every non-RAM access is attributed to a PC. */
-    spy_install(&mach, virt_base, phys_base, hot_page);
+    spy_install(&mach, virt_base, phys_base, hot_page, hot_page_n);
 
     /* After spy_install, which zeroes G. Setting call_probe_n last is what
      * arms the step-loop gate. */
@@ -24534,29 +24652,35 @@ external_md_work_ready:
                    G.dev_page[i].first_pc, G.dev_page[i].first_cpsr,
                    G.dev_page[i].first_mmu_enabled, NULL));
 
-    /* ------------------------------------------------ the hot MMIO page --- */
-    printf("\n=== HOT PAGE 0x%08x: PER-REGISTER ===\n", G.hot_page);
-    printf("    off    reads      writes     lastval    firstwrite\n");
-    for (unsigned i = 0; i < 1024; i++) {
-        char fw[16];
-        if (!G.hot_r[i] && !G.hot_w[i]) continue;
-        if (G.hot_written[i]) snprintf(fw, sizeof fw, "0x%08x", G.hot_firstw[i]);
-        else                  snprintf(fw, sizeof fw, "-");
-        printf("    0x%03x  %-10llu %-10llu 0x%08x %s\n", i * 4,
-               (unsigned long long)G.hot_r[i], (unsigned long long)G.hot_w[i],
-               G.hot_last[i], fw);
+    /* ----------------------------------------------- the hot MMIO pages --- */
+    for (unsigned p = 0; p < G.hot_page_n; p++) {
+        printf("\n=== HOT PAGE 0x%08x: PER-REGISTER ===\n", G.hot_page[p]);
+        printf("    off    reads      writes     lastval    firstwrite\n");
+        for (unsigned i = 0; i < 1024; i++) {
+            char fw[16];
+            if (!G.hot_r[p][i] && !G.hot_w[p][i]) continue;
+            if (G.hot_written[p][i])
+                snprintf(fw, sizeof fw, "0x%08x", G.hot_firstw[p][i]);
+            else
+                snprintf(fw, sizeof fw, "-");
+            printf("    0x%03x  %-10llu %-10llu 0x%08x %s\n", i * 4,
+                   (unsigned long long)G.hot_r[p][i],
+                   (unsigned long long)G.hot_w[p][i],
+                   G.hot_last[p][i], fw);
+        }
     }
 
-    printf("\n=== HOT PAGE 0x%08x: ACCESS SITES (pc/lr/off) ===\n", G.hot_page);
+    printf("\n=== HOT PAGES: ACCESS SITES (pc/lr/page+off) ===\n");
     for (unsigned i = 0; i < G.hot_site_n; i++)
-        printf("    %s off 0x%03x  n=%-10llu pc 0x%08x  lr 0x%08x  instr %llu..%llu\n",
-               G.hot_site[i].wr ? "W" : "R", G.hot_site[i].off,
+        printf("    %s 0x%08x off 0x%03x  n=%-10llu pc 0x%08x  lr 0x%08x"
+               "  instr %llu..%llu\n",
+               G.hot_site[i].wr ? "W" : "R", G.hot_site[i].page,
+               G.hot_site[i].off,
                (unsigned long long)G.hot_site[i].n, G.hot_site[i].pc, G.hot_site[i].lr,
                (unsigned long long)G.hot_site[i].first_at,
                (unsigned long long)G.hot_site[i].last_at);
 
-    printf("\n=== HOT PAGE 0x%08x: FIRST %u ACCESSES ===\n",
-           G.hot_page, G.hot_log_n);
+    printf("\n=== HOT PAGES: FIRST %u ACCESSES ===\n", G.hot_log_n);
     for (unsigned i = 0; i < G.hot_log_n; i++)
         printf("    @%-10llu %s%u 0x%08x (off 0x%03x) val 0x%08x  pc 0x%08x lr 0x%08x"
                "  r0-5 %08x %08x %08x %08x %08x %08x\n",
@@ -24567,7 +24691,7 @@ external_md_work_ready:
                G.hot_log[i].r[0], G.hot_log[i].r[1], G.hot_log[i].r[2],
                G.hot_log[i].r[3], G.hot_log[i].r[4], G.hot_log[i].r[5]);
 
-    printf("\n=== HOT PAGE 0x%08x: LAST ACCESSES (of %llu) ===\n", G.hot_page,
+    printf("\n=== HOT PAGES: LAST ACCESSES (of %llu) ===\n",
            (unsigned long long)G.hot_tail_n);
     {
         unsigned cnt = G.hot_tail_n < 64 ? (unsigned)G.hot_tail_n : 64;
@@ -24581,8 +24705,7 @@ external_md_work_ready:
         }
     }
 
-    printf("\n=== HOT PAGE 0x%08x: ACCESSES OVER TIME (40 buckets) ===\n",
-           G.hot_page);
+    printf("\n=== HOT PAGES: ACCESSES OVER TIME (40 buckets) ===\n");
     for (unsigned i = 0; i < 40; i++)
         if (G.hot_bucket[i])
             printf("    instr %10llu..%-10llu  %llu\n",
@@ -24831,9 +24954,39 @@ external_md_work_ready:
 
     vm_report();
 
+    /*
+     * Say how much of the console this buffer actually holds.
+     *
+     * s5l_uart_t.tx caps at UART_TX_BUFFER-1 bytes and then DISCARDS THE TAIL,
+     * so the text below is a prefix, not the log. Printing the true UTXH byte
+     * count next to it is what makes a truncated buffer distinguishable from a
+     * short boot -- the ambiguity that made several 2026-07-26 claims of the
+     * form "message X never appeared" unsound. The complete stream is in the
+     * tee file; see uart_tee_byte().
+     */
+    if (G.uart_tee) {
+        if (fclose(G.uart_tee) != 0) G.uart_tee_failed = true;
+        G.uart_tee = NULL;
+    }
+    printf("\n=== CONSOLE CAPTURE ===\n");
+    printf("    UTXH bytes written by the guest   %llu\n",
+           (unsigned long long)G.uart_tx_bytes);
+    printf("    held in the in-report buffer      %zu of %u\n",
+           mach.uart0.tx_len, (unsigned)UART_TX_BUFFER - 1u);
+    if (G.uart_tx_bytes > (uint64_t)mach.uart0.tx_len)
+        printf("    TRUNCATED: %llu bytes are only in the tee\n",
+               (unsigned long long)(G.uart_tx_bytes -
+                                    (uint64_t)mach.uart0.tx_len));
+    if (G.uart_tee_failed)
+        printf("    tee " UART_TEE_PATH ": FAILED (%s) -- the log below is all"
+               " that survived\n", strerror(errno));
+    else if (G.uart_tx_bytes)
+        printf("    complete stream written to        " UART_TEE_PATH "\n");
+
     if (mach.uart0.tx_len)
-        printf("\n=== KERNEL UART OUTPUT (%zu bytes) ===\n%s\n",
-               mach.uart0.tx_len, mach.uart0.tx);
+        printf("\n=== KERNEL UART OUTPUT (first %zu of %llu bytes) ===\n%s\n",
+               mach.uart0.tx_len, (unsigned long long)G.uart_tx_bytes,
+               mach.uart0.tx);
     else
         printf("\n(no UART output yet)\n");
 

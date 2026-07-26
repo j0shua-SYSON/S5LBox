@@ -592,8 +592,16 @@ static void test_machine_routes_spi_windows_and_irq_lines(void) {
     m.bus.write32(m.bus.ctx, S5L8900_SPI1_BASE + SPI_SETUP,
                   SPI_SETUP_BASE | SPI_SETUP_ARM);
     writes_before += 10u;
+    /* The driver's own sixteen probe bytes, `1A A1` then `18 E1` seven times
+     * (0xc0441014-0xc0441048). The first eight are the prefill. Sending the
+     * real pattern rather than an arbitrary ramp matters now that the attached
+     * device is a protocol model: what comes back is only a round trip if the
+     * device recognised what went out. */
+    static const uint8_t PROBE[S5L_SPI_FIFO_DEPTH] = {
+        0x1a, 0xa1, 0x18, 0xe1, 0x18, 0xe1, 0x18, 0xe1
+    };
     for (unsigned i = 0; i < S5L_SPI_FIFO_DEPTH; i++) {
-        m.bus.write32(m.bus.ctx, S5L8900_SPI1_BASE + SPI_TXDATA, 0x10u + i);
+        m.bus.write32(m.bus.ctx, S5L8900_SPI1_BASE + SPI_TXDATA, PROBE[i]);
         writes_before++;
         s5l8900_tick(&m, 0u);
         /* The raw VIC input, not the CPU line: line 10 is still masked here,
@@ -632,9 +640,14 @@ static void test_machine_routes_spi_windows_and_irq_lines(void) {
     CHECK(level == S5L_SPI_FIFO_DEPTH,
           "the handler would read receive level %u, expected %u",
           level, S5L_SPI_FIFO_DEPTH);
+    /* The device on spi1 chip select 0 is the touch controller, and it answers
+     * the HBPP probe with a loopback — so the bytes that come back are the
+     * bytes that went out. This test is about the CONTROLLER, so it checks the
+     * round trip rather than what the answer means; test_mtz2.c owns that. */
     for (unsigned i = 0; i < level; i++)
-        CHECK(m.bus.read32(m.bus.ctx, S5L8900_SPI1_BASE + SPI_RXDATA) == 0u,
-              "the null device's byte %u was not 0x00", i);
+        CHECK(m.bus.read32(m.bus.ctx, S5L8900_SPI1_BASE + SPI_RXDATA) ==
+              PROBE[i],
+              "the touch controller did not loop byte %u back", i);
     m.bus.write32(m.bus.ctx, S5L8900_SPI1_BASE + SPI_STATUS, status);
     s5l8900_tick(&m, 0u);
     CHECK((m.vic[0].raw & (1u << S5L8900_IRQ_SPI1)) == 0u && !m.cpu.irq_line,
@@ -746,10 +759,14 @@ static void test_the_stock_filter_algorithm_terminates(void) {
           "the filter needed %u passes for a 16-byte transfer over an 8-deep "
           "FIFO", iterations);
 
-    bool all_zero = true;
-    for (unsigned i = 0; i < 16u; i++) if (rx[i] != 0u) all_zero = false;
-    CHECK(all_zero, "the null device did not fill the whole receive buffer "
-          "with 0x00 — isInHBPP() would not reject cleanly");
+    /* Every one of the sixteen bytes came from the device. The attached device
+     * answers the HBPP probe with a loopback, so the whole buffer must be the
+     * probe pattern back again — a controller that dropped or duplicated a
+     * word would show up here as a shifted or repeated byte. What the pattern
+     * MEANS to the driver is test_mtz2.c's business. */
+    bool looped = true;
+    for (unsigned i = 0; i < 16u; i++) if (rx[i] != tx[i]) looped = false;
+    CHECK(looped, "the controller did not carry all sixteen bytes both ways");
 
     /* finishTransfer, and then nothing may still be asserted. */
     m.bus.write32(c, B + SPI_SETUP, SPI_SETUP_BASE);
