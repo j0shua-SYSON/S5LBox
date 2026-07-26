@@ -2124,6 +2124,33 @@ Note the timeline moved. SpringBoard spawns at 579,408,027 here against
 3,249,787,435 in run52, because the vram region changes early IOSurface work; do
 not compare instruction indices across the fix.
 
+**run54 is the negative control, and it arrived by accident.** It was launched
+before the vram fix existed and ran on to its 22e9 cap afterwards, which makes
+it the counterfactual the fix would otherwise lack:
+
+| | run54, no fix | run59, with fix |
+|---|---:|---:|
+| instructions | **22,000,000,000** | 5,000,000,000 |
+| SpringBoard launches | **33** (first @584,535,413, last @21,805,188,984) | **1** |
+| `SBUIController:orderFront-call` | 1 | 1 |
+| `QuartzCore:CATransaction-flush` | 3 | 3 |
+| `QuartzCore:CABackingStoreCreate` | 31 | 36 |
+| **changed scanout bytes** | **0** | **14,264,987** |
+| `postrun_screen_sha256` | `CBAD1C11…` (seed) | NONBLACK |
+
+Four times the runtime, thirty-three SpringBoard generations, the compositor
+reaching `CATransaction-flush` and building 31 backing stores — and not one
+pixel. So the blank screen was never insufficient runtime, never a timing
+artifact, and never a question of patience. One device-tree property separates
+these two runs and it is the whole difference. It also confirms the crash loop
+was continuous rather than an early-boot transient: 33 generations spread across
+21 billion instructions, each dying the same way, which is exactly what a
+read-only framebuffer mapping predicts.
+
+`FAR 0x00621000` does not appear in run54's abort table, but that is the
+48-entry saturation artifact described above and not evidence of anything — its
+binary predates the 65,536-entry table.
+
 One `_exit1 status=0000000a` remains, at @1,595,733,254, pid 32 — before any of
 SpringBoard's UI work, and `post-activation entry-proc/PID _psignal/_exit1
 entries: 0/0` says it is not on the SpringBoard path. Unidentified, recorded, not
