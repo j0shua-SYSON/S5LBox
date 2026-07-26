@@ -17,6 +17,13 @@ art found in the project's survey (devos50/qemu-ios) reaches SpringBoard on 1.1
 and 2.1.1 using emulated iPod touch hardware. This is project positioning, not a
 proof that no private or unindexed implementation exists.
 
+A milestone marked done means its own stated criterion was observed, not that
+the machine is complete. Which parts of this emulator run genuine Apple
+software, which hardware is not modelled at all, and which is patched,
+approximated, or deliberately declared absent to the guest is stated in full in
+[README.md, "What this is, and what it is not"](../README.md#what-this-is-and-what-it-is-not).
+Read that before reading the table below as a measure of fidelity.
+
 ---
 
 ## Status at a glance

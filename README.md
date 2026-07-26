@@ -16,6 +16,45 @@
 
 ---
 
+## What this is, and what it is not
+
+Read this before anything else on this page. Everything below it — features,
+milestones, run measurements — should be read against this section.
+
+**What is real:** your own unmodified iPhone OS 3.1.3 (7E18) firmware executes.
+Real XNU 1357.5.30 boots, Apple's own kexts match and start, the real root
+filesystem mounts, and real daemons run: `launchd`, `securityd`, `installd`,
+`mDNSResponder`, `fairplayd`, `itunesstored`, `lockbot`, `CommCenter`,
+SpringBoard. The clearest evidence that this is genuinely Apple's stack and not
+a reimplementation of it: when SpringBoard crashed, the guest's **own**
+`ReportCrash` wrote real crash reports into its own filesystem, and that is how
+the current blocker was diagnosed. The project ships no Apple firmware and never
+modifies the canonical inputs on disk.
+
+**What is not real:** the single most visible property of an iPhone — that it
+displays a home screen you can touch — has never been demonstrated here.
+SpringBoard has not rendered a frame. Every run to date ends with an identical,
+unchanged framebuffer. There is no touch, no audio, no networking, and no GPU.
+Five hardware nodes a real iPhone has are deliberately declared absent to the
+guest, so the guest is told it is running on a machine with less hardware than
+a real iPhone.
+
+| | |
+|---|---|
+| **Real Apple software** | The user's own unmodified 3.1.3 (7E18) firmware: XNU 1357.5.30, Apple's own kexts, the real root filesystem, and the real daemons listed above. No Apple firmware is shipped, and the canonical inputs are never modified on disk. |
+| **CPU** | ARM + Thumb + VFPv2 on the reached path; the ARMv6 unaligned-access model with `SCTLR.U` and `SCTLR.A` both honoured; MMU with XN enforcement; CP15. Runs are bit-exact reproducible. |
+| **Peripherals modelled** | UART, timers, VIC, the CLCD display controller, I2C/PMU, and the DWC2 USB configuration registers. |
+| **Not modelled at all** | No touch input. No audio. No networking. No cellular. No Wi-Fi. No Bluetooth. No camera. No accelerometer. No GPU. |
+| **Declared absent to the guest** | The loaded (in-memory) device tree un-matches five nodes that real hardware has: `arm-io/mbx` (the PowerVR MBX GPU), `arm-io/sha1`, `baseband`, `arm-io/spi2` (the baseband transport), and `arm-io/usb-otg`. The firmware on disk is never modified; only the loaded copy is edited. Each un-match has a documented reason, but the net effect is that the guest is told it is running on a machine with less hardware than a real iPhone. |
+| **Invented register values** | The DWC2 USB configuration registers (`GHWCFG1`/`GHWCFG2`/`GHWCFG4`) are a legal and sufficient configuration. They are **not** measured from real S5L8900 silicon. |
+| **Rendering** | QuartzCore is configured with `CA_ENABLE_MBX2D=0` so it uses its own CPU software compositor. The real device composites on the MBX GPU. This is a switch Apple's code reads and a renderer Apple shipped, but it is not the path real hardware takes. |
+| **Timing** | Not cycle-accurate. An interpreter running roughly **200x slower** than the real 412 MHz part, with a synthetic 412 MHz : 6 MHz instruction-to-timebase ratio rather than real cycle timing. |
+| **Kernel patches** | The kernel is patched in RAM at load: the IORTC timeout is forced to zero, `IOFindBSDRoot` is redirected to `md0`, and SVC hooks are installed for the host storage bridge. Exact-gated against a SHA-256 and a nine-segment check of the 7,942,144-byte kernel. |
+| **Storage** | Not NAND. The root filesystem is served by a host-backed bridge (external-md) into a unique writable per-run work image; `/etc/fstab` is rewritten in that work image to match. |
+| **Boot chain** | No secure boot chain is executed. The kernel is loaded directly; SecureROM, LLB and iBoot are not run. IMG3 parsing and an extracted LLB payload have been executed separately, but not as a chain. |
+| **Optional substitution** | Off by default: one LaunchDaemon plist in the work image is rewritten size-neutrally to add `CA_ENABLE_MBX2D=0`. |
+| **Unproven** | SpringBoard has not rendered a frame. Every run to date ends with an identical, unchanged framebuffer. |
+
 > **Current evidence and test status:** see
 > [Quality and validation](docs/QUALITY.md) for the exact run/commit ledger,
 > confidence boundaries, and pending gates. An AI agent continuing the project

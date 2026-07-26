@@ -74,6 +74,57 @@ candidate into a boot claim. The authoritative historical evidence remains in:
 - [`activation.md`](activation.md)
 - [`networking.md`](networking.md)
 
+## 0. What this emulator is and is not
+
+The full statement is
+[README.md, "What this is, and what it is not"](../README.md#what-this-is-and-what-it-is-not).
+The short form is repeated here because a fresh agent must not overstate this
+project — to the user, in a commit message, or to itself.
+
+- **Real.** The user's own unmodified iPhone OS 3.1.3 (7E18) firmware executes.
+  Real XNU 1357.5.30 boots, Apple's own kexts match and start, the real root
+  filesystem mounts, and real daemons run: `launchd`, `securityd`, `installd`,
+  `mDNSResponder`, `fairplayd`, `itunesstored`, `lockbot`, `CommCenter`,
+  SpringBoard. When SpringBoard crashed, the guest's **own** `ReportCrash` wrote
+  real crash reports into its own filesystem, which is how the current blocker
+  was diagnosed. CPU: ARM + Thumb + VFPv2 on the reached path, the ARMv6
+  unaligned-access model with `SCTLR.U` and `SCTLR.A` both honoured, MMU with XN
+  enforcement, CP15; runs are bit-exact reproducible. Modelled peripherals:
+  UART, timers, VIC, CLCD, I2C/PMU, and the DWC2 USB configuration registers.
+- **Not modelled at all.** No touch input. No audio. No networking. No cellular.
+  No Wi-Fi. No Bluetooth. No camera. No accelerometer. No GPU.
+- **Declared absent to the guest.** The loaded (in-memory) device tree
+  un-matches five nodes that real hardware has: `arm-io/mbx` (the PowerVR MBX
+  GPU), `arm-io/sha1`, `baseband`, `arm-io/spi2` (the baseband transport), and
+  `arm-io/usb-otg`. The firmware on disk is never modified; only the loaded copy
+  is edited. Each un-match has a documented reason, but the net effect is that
+  the guest is told it is running on a machine with less hardware than a real
+  iPhone.
+- **Approximated or invented.** The DWC2 USB configuration register values
+  (`GHWCFG1`/`GHWCFG2`/`GHWCFG4`) are a legal and sufficient configuration, not
+  measured from real S5L8900 silicon. Rendering goes through QuartzCore's own
+  CPU software compositor, selected with `CA_ENABLE_MBX2D=0`; the real device
+  composites on the MBX GPU. That is a switch Apple's code reads and a renderer
+  Apple shipped, but it is not the path real hardware takes. Timing is not
+  cycle-accurate: an interpreter running roughly 200x slower than the real
+  412 MHz part, with a synthetic 412 MHz : 6 MHz instruction-to-timebase ratio
+  rather than real cycle timing.
+- **Patched or substituted.** The kernel is patched in RAM at load — IORTC
+  timeout forced to zero, `IOFindBSDRoot` redirected to `md0`, SVC hooks
+  installed for the host storage bridge — exact-gated against a SHA-256 and a
+  nine-segment check of the 7,942,144-byte kernel. Storage is not NAND: the root
+  filesystem is served by a host-backed bridge (external-md) into a unique
+  writable per-run work image, with `/etc/fstab` rewritten in that work image to
+  match. No secure boot chain is executed; the kernel is loaded directly, and
+  SecureROM, LLB and iBoot are not run (IMG3 parsing and an extracted LLB
+  payload have been executed separately, but not as a chain). Optionally, and
+  off by default, one LaunchDaemon plist in the work image is rewritten
+  size-neutrally to add `CA_ENABLE_MBX2D=0`.
+- **Unproven.** The single most visible property of an iPhone — that it displays
+  a home screen you can touch — has never been demonstrated here. SpringBoard
+  has not rendered a frame. Every run to date ends with an identical, unchanged
+  framebuffer.
+
 ## 1. User objective and non-negotiable priorities
 
 The user's objective is not merely to reach the old M5 label. The continuing

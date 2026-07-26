@@ -210,6 +210,66 @@ run21's firmware evidence.
   un-matches the USB complex unless `-u` is passed, so the fix is covered by
   tests rather than by a firmware run.
 
+## Fidelity
+
+A standing divergence ledger: what executes as genuine Apple software, and every
+place where the modelled machine differs from an S5L8900 iPhone. Unlike the run
+entries below, these facts are not owned by a single commit or run and do not
+expire when the next run lands. The prose version is
+[README.md, "What this is, and what it is not"](../README.md#what-this-is-and-what-it-is-not).
+
+- **Genuine.** The user's own unmodified iPhone OS 3.1.3 (7E18) firmware
+  executes: XNU 1357.5.30 boots, Apple's own kexts match and start, the real
+  root filesystem mounts, and `launchd`, `securityd`, `installd`,
+  `mDNSResponder`, `fairplayd`, `itunesstored`, `lockbot`, `CommCenter` and
+  SpringBoard run. The evidence that this is Apple's stack rather than a
+  reimplementation of it: the guest's **own** `ReportCrash` wrote the 35
+  SpringBoard crash reports that diagnosed the current blocker into its own
+  filesystem. The project ships no Apple firmware and never modifies the
+  canonical inputs on disk.
+- **CPU.** ARM, Thumb and VFPv2 on the reached path; the ARMv6 unaligned-access
+  model with `SCTLR.U` and `SCTLR.A` both honoured; MMU with XN enforcement;
+  CP15. Runs are bit-exact reproducible — heartbeat PC streams are byte-identical
+  across **27/27** samples for cold versus restored runs.
+- **Modelled peripherals.** UART, timers, VIC, the CLCD display controller,
+  I2C/PMU, and the DWC2 USB configuration registers.
+- **Not modelled at all.** No touch input. No audio. No networking. No cellular.
+  No Wi-Fi. No Bluetooth. No camera. No accelerometer. No GPU.
+- **Declared absent to the guest.** The loaded (in-memory) device tree
+  un-matches five nodes that real hardware has: `arm-io/mbx` (the PowerVR MBX
+  GPU), `arm-io/sha1`, `baseband`, `arm-io/spi2` (the baseband transport), and
+  `arm-io/usb-otg`. The firmware on disk is never modified; only the loaded copy
+  is edited. Each un-match has a documented reason recorded above, but the net
+  effect is that the guest is told it is running on a machine with less hardware
+  than a real iPhone.
+- **Invented register values.** The DWC2 USB configuration registers
+  (`GHWCFG1=0`, `GHWCFG2=0x228de550`, `GHWCFG4=0`) are a legal and sufficient
+  configuration. They are **not** measured from real S5L8900 silicon.
+- **Rendering diverges from hardware.** QuartzCore is configured with
+  `CA_ENABLE_MBX2D=0` so it uses its own CPU software compositor
+  (`CARenderOGLNew(_kCARenderSoftwareCallbacks)` → `CA::OGL::SWContext`). The
+  real device composites on the MBX GPU. This is a switch Apple's code reads and
+  a renderer Apple shipped, but it is not the path real hardware takes.
+- **Timing is not cycle-accurate.** An interpreter running roughly **200x
+  slower** than the real 412 MHz part, with a synthetic 412 MHz : 6 MHz
+  instruction-to-timebase ratio rather than real cycle timing.
+- **Kernel patched in RAM.** At load the IORTC timeout is forced to zero,
+  `IOFindBSDRoot` is redirected to `md0`, and SVC hooks are installed for the
+  host storage bridge. Exact-gated against a SHA-256 and a nine-segment check of
+  the 7,942,144-byte kernel; `firmware/kernel.macho` itself is never written.
+- **Storage is not NAND.** The root filesystem is served by a host-backed bridge
+  (external-md) into a unique writable per-run work image, and `/etc/fstab` is
+  rewritten in that work image to match.
+- **No secure boot chain is executed.** The kernel is loaded directly;
+  SecureROM, LLB and iBoot are not run. IMG3 parsing and an extracted LLB
+  payload have been executed separately, but not as a chain.
+- **Optional plist substitution.** Off by default: one LaunchDaemon plist in the
+  work image is rewritten size-neutrally to add `CA_ENABLE_MBX2D=0`.
+- **Unproven.** The single most visible property of an iPhone — that it displays
+  a home screen you can touch — has never been demonstrated here. SpringBoard
+  has not rendered a frame. Every run to date ends with an identical, unchanged
+  framebuffer.
+
 ## Evidence ledger
 
 | Check | Result | What it establishes | What it does not establish |
