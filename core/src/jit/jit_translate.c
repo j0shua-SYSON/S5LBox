@@ -949,9 +949,12 @@ static void emit_nz_flags(jit_t *t, unsigned wres, tflag_c_t mode, unsigned wcar
 /*
  * cpu->cpsr.T := bit 0 of `wsrc` (pass A64_ZR for "definitely ARM").
  *
- *   ldr w10, [x28, #64]
+ *   ldr w10, [x28, #OFF_CPSR]
  *   bfi w10, wsrc, #5, #1
- *   str w10, [x28, #64]
+ *   str w10, [x28, #OFF_CPSR]
+ *
+ * The offset is spelled symbolically because it is not stable: it was 64 until
+ * arm_arch_t arch was inserted ahead of cpsr and is 68 now.
  *
  * Uses S1 rather than S0 so a caller can keep the branch target in S0.
  */

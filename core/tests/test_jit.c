@@ -19,6 +19,7 @@
  */
 #include "jit.h"
 #include "a64_emit.h"
+#include <stddef.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -246,6 +247,37 @@ static unsigned count_word(const jit_block_t *b, uint32_t w) {
     for (i = 0; i < b->code_words; i++) if (b->code[i] == w) n++;
     return n;
 }
+
+/*
+ * Accesses to one arm_cpu_t field, counted whichever register they land in.
+ *
+ * `base` is an LDR/STR (immediate, 32-bit, unsigned offset) with Rt left zero;
+ * Rt is bits 4:0, so masking those off counts every spelling of the same
+ * access. A whole-word match cannot express "this field is written once",
+ * only "this exact instruction appears once", and the two differ by exactly
+ * the bug such an invariant is there to catch — a second writer that happens
+ * to use a different scratch register.
+ */
+static unsigned count_field_access(const jit_block_t *b, uint32_t base) {
+    unsigned i, n = 0;
+    for (i = 0; i < b->code_words; i++) if ((b->code[i] & ~0x1fu) == base) n++;
+    return n;
+}
+
+/*
+ * Where cpu->cpsr lives, asked of the compiler rather than written down.
+ *
+ * The emitter uses offsetof(arm_cpu_t, cpsr) (jit_translate.c OFF_CPSR), so a
+ * literal here is a second, independent copy of a number this file does not
+ * own. It was 64 when these tests were written and is 68 since bab7ecb
+ * inserted arm_arch_t arch between r[16] and cpsr. Deriving it means the next
+ * field added ahead of cpsr moves the expectation with the emitter instead of
+ * silently invalidating it.
+ */
+#define OFF_CPSR     ((uint32_t)offsetof(arm_cpu_t, cpsr))
+#define W_CPSR_LDR   (0xb9400000u | ((OFF_CPSR / 4u) << 10) | (28u << 5))
+#define W_CPSR_STR   (0xb9000000u | ((OFF_CPSR / 4u) << 10) | (28u << 5))
+
 static void dump(const jit_block_t *b) {
     unsigned i;
     printf("    emitted %u words:", (unsigned)b->code_words);
@@ -547,10 +579,25 @@ static void test_thumb_shift_carry(void) {
  * spurious state change is silent until the next fetch decodes garbage.
  *
  * The T bit is CPSR bit 5, so the write is `bfi w10, <src>, #5, #1` around a
- * load and store of cpu->cpsr at offset 64.
+ * load and store of cpu->cpsr.
+ *
+ * HOW MANY TIMES A BLOCK MAY TOUCH cpu->cpsr. Emitted code keeps N/Z/C/V in
+ * host PSTATE and the rest of CPSR in memory, so the field is touched at
+ * exactly three sites and no others:
+ *
+ *   prologue            ldr  -- feeds `msr nzcv` (jit_translate.c:291)
+ *   emit_set_thumb_bit  ldr + str -- the T update, and ONLY for an
+ *                          instruction that can leave Thumb (:958)
+ *   epilogue            ldr + str -- splices NZCV back without disturbing
+ *                          I/F/T/Q/mode (:310, :313)
+ *
+ * so a block that changes no state reads it twice and writes it once, and one
+ * that does reads it three times and writes it twice. Counting is by field,
+ * not by instruction word: the previous form of these two checks matched
+ * `ldr w10`/`str w10` literally, which silently excused the prologue's
+ * `ldr w9` and let "read once, by the epilogue" stand while the field was in
+ * fact read twice.
  */
-#define W_LDR_CPSR   0xb940438au   /* ldr w10, [x28, #64]      */
-#define W_STR_CPSR   0xb900438au   /* str w10, [x28, #64]      */
 #define W_T_FROM_R3  0x331b02cau   /* bfi w10, w22, #5, #1     */
 #define W_T_CLEAR    0x331b03eau   /* bfi w10, wzr, #5, #1     */
 #define W_MOV_PC_S0  0x2a0903e8u   /* mov w8, w9  (exit_reg)   */
@@ -567,6 +614,12 @@ static void test_thumb_state_transitions(void) {
     CHECK(count_word(&b, 0x52800020u) == 1,
           "BX must emit an invalid-target interpreter exit");
     CHECK(count_word(&b, W_T_FROM_R3) == 1, "bfi w10,w22,#5,#1 sets T from the target");
+    CHECK(count_field_access(&b, W_CPSR_LDR) == 3,
+          "BX reads cpu->cpsr %u times, expect 3 (prologue, T update, epilogue)",
+          count_field_access(&b, W_CPSR_LDR));
+    CHECK(count_field_access(&b, W_CPSR_STR) == 2,
+          "BX writes cpu->cpsr %u times, expect 2 (T update, then epilogue)",
+          count_field_access(&b, W_CPSR_STR));
     CHECK(count_word(&b, 0x121f7ac9u) == 1, "and w9,w22,#0xfffffffe clears bit 0");
     CHECK(count_word(&b, W_MOV_PC_S0) == 1, "the resume PC comes from a register");
     CHECK(count_word(&b, 0xb9003b89u) == 0, "BX writes no link register");
@@ -611,7 +664,10 @@ static void test_thumb_state_transitions(void) {
     CHECK(b.end_reason == JIT_END_BRANCH, "BL suffix ends the block");
     CHECK(count_word(&b, W_T_CLEAR) == 0, "BL suffix does not clear T");
     CHECK(count_word(&b, 0x121f7929u) == 1, "and w9,w9,#0xfffffffe keeps halfword alignment");
-    CHECK(count_word(&b, W_STR_CPSR) == 1, "only the epilogue writes cpu->cpsr");
+    CHECK(count_field_access(&b, W_CPSR_STR) == 1,
+          "BL suffix stays in Thumb, so cpu->cpsr is written %u times, expect 1 "
+          "(the epilogue's NZCV splice, with no T update)",
+          count_field_access(&b, W_CPSR_STR));
 
     /* BL prefix (0xf000): a pure LR write. It is not a branch, so the block
      * continues into the suffix. */
@@ -626,7 +682,12 @@ static void test_thumb_state_transitions(void) {
     CHECK(xlate16(&c, 0, p, 1, &b, CODE_WORDS), "B translated");
     CHECK(count_word(&b, 0x52800088u) == 1, "movz w8,#4 is pc + 4");
     CHECK(count_word(&b, W_T_CLEAR) == 0, "B does not touch T");
-    CHECK(count_word(&b, W_LDR_CPSR) == 1, "cpu->cpsr is read once, by the epilogue");
+    CHECK(count_field_access(&b, W_CPSR_LDR) == 2,
+          "B reads cpu->cpsr %u times, expect 2 (prologue and epilogue only)",
+          count_field_access(&b, W_CPSR_LDR));
+    CHECK(count_field_access(&b, W_CPSR_STR) == 1,
+          "B changes no state, so cpu->cpsr is written %u times, expect 1",
+          count_field_access(&b, W_CPSR_STR));
 }
 
 /* B<cond> has two static edges, exactly like its ARM counterpart (§3.5). */
@@ -946,7 +1007,16 @@ static void test_prologue_is_exact(void) {
         0x29426397,   /* ldp  w23, w24, [x28, #16]   */
         0x29436b99,   /* ldp  w25, w26, [x28, #24]   */
         0xb940379b,   /* ldr  w27, [x28, #52]        */
-        0xb9404389,   /* ldr  w9,  [x28, #64]        */
+        /*
+         * ldr w9, [x28, #offsetof(arm_cpu_t, cpsr)] -- 68 today, 64 until
+         * bab7ecb added arm_arch_t arch ahead of cpsr. Every other word here
+         * is a literal because the prologue is meant to be frozen; this one
+         * is derived because the field's address is arm.h's to choose, not
+         * this test's. Baked as 0xb9404389 it made a struct edit look like a
+         * corrupt prologue, and it went unnoticed for weeks because the
+         * default build never configures the JIT.
+         */
+        (0xb9400000u | ((OFF_CPSR / 4u) << 10) | (28u << 5) | 9u),
         0xd51b4209    /* msr  nzcv, x9               */
     };
     uint32_t p[] = { 0xeafffffe };   /* B . */
