@@ -123,6 +123,14 @@ add_executable(test_gpioic tests/test_gpioic.c)
 target_link_libraries(test_gpioic PRIVATE emucore)
 add_test(NAME s5l8900_gpioic COMMAND test_gpioic)
 
+# uart4, the guest's PPP line. Separate from test_soc's general machine tests
+# because the property being defended is a relationship between two devices --
+# that the console capture and the PPP capture never become one buffer -- and
+# that is not a fact about either UART on its own.
+add_executable(test_uart4 tests/test_uart4.c)
+target_link_libraries(test_uart4 PRIVATE emucore)
+add_test(NAME s5l8900_uart4_ppp_line COMMAND test_uart4)
+
 add_executable(test_mtz2 tests/test_mtz2.c)
 target_link_libraries(test_mtz2 PRIVATE emucore)
 add_test(NAME multitouch_z2 COMMAND test_mtz2)

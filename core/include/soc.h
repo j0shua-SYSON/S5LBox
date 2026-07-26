@@ -69,6 +69,30 @@
 #define S5L8900_ARMIO_BASE  0x38000000u   /* /arm-io ranges parent           */
 #define S5L8900_ARMIO_SIZE  0x08000000u
 #define S5L8900_UART0_BASE  0x3cc00000u
+/*
+ * uart4, the fourth of the four serial ports the shipped tree declares, and
+ * the one this machine carries guest PPP over. See the UART section below for
+ * the whole rationale; the address is derived exactly as every other /arm-io
+ * child's is (child offset + 0x38000000), and run59's non-RAM page report
+ * independently attributes live traffic at 0x3cc10000 to AppleS5L8900XSerial.
+ *
+ * The four ports and their children, from the shipped device tree:
+ *
+ *   uart0  0x3cc00000  VIC 24  `iap`        taken: this is the kprintf console
+ *   uart1  0x3cc04000  VIC 25  `umts`       the baseband's line
+ *   uart3  0x3cc0c000  VIC 27  `bluetooth`  contended: BTServer ships
+ *   uart4  0x3cc10000  VIC 28  `debug`      free: nothing on the image owns it
+ *
+ * uart2 is genuinely absent from the tree; the numbering is Apple's, not a gap
+ * we introduced.
+ *
+ * There is deliberately NO S5L8900_IRQ_UART4 constant. VIC line 28 is what the
+ * nub's `interrupts` property says, and it is recorded here in prose for
+ * whoever wires it, but this model is transmit-only and never raises a line —
+ * and a constant that looks wired but is not is exactly the landmine the old
+ * S5L8900_GPIO_BASE was. It joins the header the day a receive path needs it.
+ */
+#define S5L8900_UART4_BASE  0x3cc10000u
 #define S5L8900_VIC0_BASE   0x38e00000u
 #define S5L8900_TIMER_BASE  0x3e200000u
 #define S5L8900_CLOCK_BASE  0x3c500000u
@@ -156,6 +180,54 @@
  * Samsung-style UART (as on S3C-family parts). Writing a byte to UTXH
  * transmits it; UTRSTAT reports the transmitter permanently ready, so guest
  * "wait until TX empty" spin loops make progress immediately.
+ *
+ * TWO INSTANCES, ONE MODEL. uart0 is the kprintf console. uart4 is the port
+ * the guest's own /usr/sbin/pppd is pointed at (see S5L8900_UART4_BASE above
+ * and docs/networking.md). Both are transmit-only: this model has no receive
+ * source, and that is a statement rather than an omission — see below.
+ *
+ * REGISTER SEMANTICS, read out of AppleS5L8900XSerial rather than guessed
+ * (docs/AGENT_HANDOFF.md §23.5.1):
+ *
+ *   UFSTAT (+0x18)  bits[3:0] receive count, bit 8 receive full,
+ *                   bits[7:4] transmit count, bit 9 transmit full.
+ *                   FIFO depth is 16.
+ *   UTRSTAT (+0x10) is NOT a read-only status word. The interrupt filter at
+ *                   0xc065eed8 reads it, masks, and writes the result back,
+ *                   so the hardware register is write-one-to-clear.
+ *
+ * Both of those are satisfied EXACTLY by the constants below, and the reason
+ * is worth stating because it looks like a shortcut and is not. A transmitter
+ * that drains instantly and a receiver with nothing behind it have, at every
+ * instant, empty FIFOs: UFSTAT's four fields and its two full bits are all
+ * zero, which is what s5l_uart_read() returns. And a write-one-to-clear
+ * register whose latches are never set has nothing to clear, so dropping the
+ * store is not an approximation of the hardware — it is the hardware's own
+ * answer for this state. The day a receive path lands, both become real:
+ * UFSTAT grows a receive count and UTRSTAT grows a latch and a W1C path.
+ *
+ * WHY TRANSMIT-ONLY IS SAFE AND NOT MERELY UNFINISHED. Answering a read with a
+ * byte the host never sent is the one thing this core's device models are
+ * forbidden to do, and a receive FIFO reported empty is the truthful answer
+ * for a machine with no peer attached. It also keeps the whole port out of the
+ * wake-source table: nothing here can raise a line, so there is no future edge
+ * to name and no host-thread handoff to get wrong. docs/AGENT_HANDOFF.md
+ * §23.5.1 is explicit that the host->guest direction must happen on the CPU
+ * thread between run slices, and the cheapest way to honour that today is to
+ * not have the direction at all.
+ *
+ * FLOW CONTROL is not modelled and does not need to be: uart1 and uart4 carry
+ * `no-flow-control`, so AppleS5L8900XSerial's getFlowStatus short-circuits to
+ * "asserted" at 0xc065e0bc without ever reading UMSTAT. uart3 is the only port
+ * that would have needed it, which is one of the two reasons uart4 was chosen
+ * over uart3 — the other being that BTServer ships and contends for uart3.
+ *
+ * THE CAPTURE IS A FIRST-N CAP, NOT A RING. tx_len stops growing at
+ * UART_TX_BUFFER - 1, so a long run keeps the FIRST 8191 bytes and discards
+ * the tail. For uart0 that is a known defect (§23.2: roughly half of every
+ * boot's console is lost). For uart4 it is the policy we want: the observable
+ * is pppd's FIRST LCP Configure-Request, so keeping the head is keeping the
+ * evidence. Do not "fix" this into a ring without re-reading both call sites.
  */
 #define UART_ULCON   0x00u
 #define UART_UCON    0x04u
@@ -1674,6 +1746,16 @@ typedef struct {
     uint32_t   ram_size;
     s5l_uart_t  uart0;
     /*
+     * uart4, the guest's PPP line. A second instance of the same block rather
+     * than a second model, because it IS the same block: one register file,
+     * one set of semantics, and two independent transmit captures. Keeping the
+     * captures separate is the whole point — the console and the PPP stream
+     * must never be spliced into one buffer, because a reader cannot tell
+     * which byte came from which port afterwards, and the milestone this port
+     * exists for is a six-byte sequence. core/tests/test_uart4.c pins that.
+     */
+    s5l_uart_t  uart4;
+    /*
      * Both PL192 VICs. vic[0] is the historical vic0; vic[1] backs the second
      * page at S5L8900_VIC1_BASE, which AppleARMPL192VIC maps and which carries
      * device-tree interrupt lines 32..63.
@@ -1779,13 +1861,13 @@ typedef struct {
     const char *name;                 /* string literal; never owned */
 } s5l_window_t;
 
-/* Enough for every fixed device window plus every stub. The 17 is the length of
+/* Enough for every fixed device window plus every stub. The 18 is the length of
  * DEVICE_WINDOWS in core/src/soc/machine.c — nor, clcd, the three tv-out banks,
  * i2c0, i2c1, spi0, spi1, usb-otg, vic0, vic1, power, gpioic, gpio, uart0,
- * timer — and there is no slack left in it, so a new device model has to raise
- * this number too. It was 13 until spi0 and spi1 stopped being stubs, and 15
- * until the two halves of /arm-io/gpio did. */
-#define S5L_WINDOW_MAX (S5L_STUB_MAX + 17u)
+ * uart4, timer — and there is no slack left in it, so a new device model has to
+ * raise this number too. It was 13 until spi0 and spi1 stopped being stubs, 15
+ * until the two halves of /arm-io/gpio did, and 17 until uart4 was decoded. */
+#define S5L_WINDOW_MAX (S5L_STUB_MAX + 18u)
 
 /*
  * Every window this machine decodes: the modelled devices first, then the

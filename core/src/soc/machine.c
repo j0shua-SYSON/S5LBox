@@ -44,6 +44,23 @@ static const s5l_window_t DEVICE_WINDOWS[] = {
     { S5L8900_GPIOIC_BASE, S5L8900_GPIOIC_SIZE, "gpioic" },
     { S5L8900_GPIO_BASE,  S5L8900_DEV_SIZE,   "gpio"  },
     { S5L8900_UART0_BASE, S5L8900_DEV_SIZE,   "uart0" },
+    /*
+     * uart4, the PPP line. Decoded unconditionally rather than behind the
+     * harness toggle that provisions the guest job, and that is deliberate:
+     * the toggle decides whether anything TALKS to this port, never whether
+     * the port answers correctly. A window that appears and disappears with a
+     * command-line flag would make every recorded MMIO census conditional on
+     * it, and the run that has the flag off is exactly the run that proves the
+     * port is quiet.
+     *
+     * Before this entry existed the page was not merely unmodelled, it was
+     * undeclared: run59's census recorded `0x3cc10000 r=8 w=15` falling
+     * through to the unmapped path, so every UTRSTAT read answered 0 — i.e.
+     * "transmitter busy" — and any driver that waited for room before writing
+     * would have waited forever. Decoding the window is what makes the
+     * transmit path terminate at all.
+     */
+    { S5L8900_UART4_BASE, S5L8900_DEV_SIZE,   "uart4" },
     { S5L8900_TIMER_BASE, S5L8900_TIMER_SIZE, "timer" },
 };
 #define NDEVICE_WINDOWS (sizeof DEVICE_WINDOWS / sizeof DEVICE_WINDOWS[0])
@@ -244,6 +261,12 @@ static uint32_t bus_read(void *ctx, uint32_t addr, unsigned bytes) {
     if ((bytes == 1u || bytes == 2u || bytes == 4u) && (addr & 3u) == 0u &&
         in_dev(addr, bytes, S5L8900_UART0_BASE)) {
         v = s5l_uart_read(&m->uart0, addr - S5L8900_UART0_BASE);
+    } else if ((bytes == 1u || bytes == 2u || bytes == 4u) && (addr & 3u) == 0u &&
+               in_dev(addr, bytes, S5L8900_UART4_BASE)) {
+        /* Same access widths as uart0's, for the same reason: the console
+         * driver reaches this register file with byte, halfword and word
+         * loads, and the two ports run the same driver. */
+        v = s5l_uart_read(&m->uart4, addr - S5L8900_UART4_BASE);
     } else if (mmio_word(addr, bytes, S5L8900_VIC0_BASE, S5L8900_DEV_SIZE)) {
         uint32_t off = addr - S5L8900_VIC0_BASE;
         /* VIC0's VICADDRESS surfaces its own sources first, then daisy-chains
@@ -331,6 +354,12 @@ static void bus_write(void *ctx, uint32_t addr, uint32_t val, unsigned bytes) {
         in_dev(addr, bytes, S5L8900_UART0_BASE)) {
         note_device(m, addr, val, true);
         s5l_uart_write(&m->uart0, addr - S5L8900_UART0_BASE, val);
+        return;
+    }
+    if ((bytes == 1u || bytes == 2u || bytes == 4u) && (addr & 3u) == 0u &&
+        in_dev(addr, bytes, S5L8900_UART4_BASE)) {
+        note_device(m, addr, val, true);
+        s5l_uart_write(&m->uart4, addr - S5L8900_UART4_BASE, val);
         return;
     }
     if (mmio_word(addr, bytes, S5L8900_VIC0_BASE, S5L8900_DEV_SIZE)) {
@@ -725,6 +754,7 @@ bool s5l8900_init(s5l8900_t *m, uint32_t ram_base, uint32_t ram_size) {
     m->tb_hz    = S5L8900_TB_HZ;
 
     s5l_uart_reset(&m->uart0);
+    s5l_uart_reset(&m->uart4);
     for (unsigned i = 0; i < S5L8900_VIC_COUNT; i++) s5l_vic_reset(&m->vic[i]);
     s5l_timer_reset(&m->timer);
     s5l_power_reset(&m->power);

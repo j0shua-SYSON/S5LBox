@@ -133,7 +133,8 @@ SNAP_SIZE_GUARD(s5l_stub_t,        56,    "snap_stubs");
  * are deliberately excluded from MACH for the same reason as every other bus
  * callback; snapshot_load preserves the live machine's hooks and dedicated
  * privileged-SVC context. The byte format therefore does not change. */
-SNAP_SIZE_GUARD(s5l8900_t,         34664, "snap_mach");
+/* 42888 = 34664 + one more s5l_uart_t (8224), which is uart4. */
+SNAP_SIZE_GUARD(s5l8900_t,         42888, "snap_mach");
 #endif
 
 /* ---------------------------------------------------------------- the IO --- */
@@ -679,6 +680,10 @@ static void snap_nor(sn_io_t *io, s5l_nor_t *n) {
  */
 static void snap_mach(sn_io_t *io, s5l8900_t *m) {
     snap_uart(io, &m->uart0);
+    /* uart4, the PPP line, immediately after the console — the same visitor
+     * over a second, independent capture. See SNAPSHOT_VERSION's v10 note for
+     * why inserting it here is a version bump and not a free append. */
+    snap_uart(io, &m->uart4);
     for (unsigned i = 0; i < S5L8900_VIC_COUNT; i++) snap_vic(io, &m->vic[i]);
     snap_timer(io, &m->timer);
     snap_power(io, &m->power);
@@ -938,6 +943,7 @@ static bool snap_machine_valid(const s5l8900_t *m) {
     if (!m || !m->ram || !m->ram_size || !m->nor.data || !m->nor.size ||
         m->stub_count > S5L_STUB_MAX ||
         m->uart0.tx_len >= UART_TX_BUFFER ||
+        m->uart4.tx_len >= UART_TX_BUFFER ||
         m->nor.image_count > S5L_NOR_MAX_IMAGES ||
         m->unmapped_addr_count > S5L_UNMAPPED_LOG || m->dev_count > S5L_DEVLOG)
         return false;

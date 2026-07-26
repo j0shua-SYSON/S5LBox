@@ -1945,14 +1945,15 @@ static void test_tvout_machine_routing_and_irq30(void) {
 
     s5l_window_t windows[S5L_WINDOW_MAX];
     unsigned nw = s5l8900_windows(&m, windows, S5L_WINDOW_MAX);
-    /* 17 fixed device windows: nor, clcd, the three tv-out banks, i2c0, i2c1,
-     * spi0, spi1, usb-otg, vic0, vic1, power, gpioic, gpio, uart0, timer. This
-     * count is a tripwire for a window silently vanishing from the table, so it
-     * moves only when a real device model is added or removed — it went from 13
-     * to 15 when spi0 and spi1 stopped being stubs, and from 15 to 17 when the
-     * two halves of /arm-io/gpio did. */
-    CHECK(nw == m.stub_count + 17u,
-          "fixed device-window count=%u expect 17 (+%u stubs)",
+    /* 18 fixed device windows: nor, clcd, the three tv-out banks, i2c0, i2c1,
+     * spi0, spi1, usb-otg, vic0, vic1, power, gpioic, gpio, uart0, uart4,
+     * timer. This count is a tripwire for a window silently vanishing from the
+     * table, so it moves only when a real device model is added or removed —
+     * it went from 13 to 15 when spi0 and spi1 stopped being stubs, from 15 to
+     * 17 when the two halves of /arm-io/gpio did, and from 17 to 18 when uart4
+     * became the guest's PPP line. */
+    CHECK(nw == m.stub_count + 18u,
+          "fixed device-window count=%u expect 18 (+%u stubs)",
           nw - m.stub_count, m.stub_count);
     bool have_ctrl = false, have_mixer = false, have_sdo = false;
     for (unsigned i = 0; i < nw && i < S5L_WINDOW_MAX; i++) {

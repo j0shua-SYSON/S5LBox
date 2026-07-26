@@ -87,7 +87,18 @@
  *     and a v8 file has no payload to answer the second half of that exchange
  *     with. Every field after the Z2's in MACH also shifts, so a v8 file read
  *     as v9 would misparse the USB OTG block onwards rather than fail. */
-#define SNAPSHOT_VERSION   9u
+/* v10: uart4 joined MACH. The PPP line is a second full s5l_uart_t — five
+ *     configuration registers, an 8 KiB transmit capture and its length — and
+ *     it is serialised immediately after uart0, at the very front of the
+ *     section. That placement is what makes the bump unavoidable rather than
+ *     merely tidy: EVERY field after it moves by 8,224 bytes, so a v9 file
+ *     read as v10 would hand uart0's capture to uart4, then read the VICs out
+ *     of the middle of a console log and carry on — it would MISPARSE, not
+ *     fail, and the first symptom would be an interrupt mask a billion
+ *     instructions later. The capture also cannot be reconstructed: it is the
+ *     only record of what the guest transmitted before the checkpoint, and the
+ *     milestone this port exists for is a six-byte sequence at its head. */
+#define SNAPSHOT_VERSION   10u
 
 typedef enum {
     SNAP_OK = 0,
