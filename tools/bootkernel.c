@@ -2944,6 +2944,31 @@ SPRINGBOARD_UI_CHECKPOINTS[] = {
     { "CoreSurface:AcceleratorCreate-entry",         UINT32_C(0x343ac7dc) },
     { "IOSurface:IOSurfaceCreate-entry",             UINT32_C(0x30880e10) },
     { "IOSurface:ClientCreate-entry",                UINT32_C(0x3087f538) },
+    /*
+     * The rungs between UIKit and CoreSurface.
+     *
+     * Runs 41 and 43 established that UIKit's window server fully starts --
+     * startWindowServer returns, CAWindowServer is created, the display is
+     * enumerated -- and that UIController's message returns. What never happens
+     * is CoreSurfaceBufferCreate. Between those two facts sits CoreAnimation,
+     * and without it the failure cannot be placed:
+     *
+     *   +[CATransaction flush]  the run loop committing a transaction. If this
+     *                           never fires, nothing ever renders because
+     *                           nothing is ever committed.
+     *   CABackingStoreCreate    a layer allocating its backing store. This is
+     *                           what reaches CoreSurfaceBufferCreate; if flush
+     *                           fires and this does not, the layers have no
+     *                           content to draw.
+     *   CABackingStoreUpdate    the draw into that store.
+     *
+     * Resolved out of the 7E18 shared cache with tools/dscmap.py:
+     * QuartzCore.framework @ 311bd000.
+     */
+    { "QuartzCore:CATransaction-flush",              UINT32_C(0x311c82f8) },
+    { "QuartzCore:Transaction-flush-impl",           UINT32_C(0x311c8324) },
+    { "QuartzCore:CABackingStoreCreate",             UINT32_C(0x311c9894) },
+    { "QuartzCore:CABackingStoreUpdate",             UINT32_C(0x311c9cdc) },
 };
 #define SPRINGBOARD_UI_CHECKPOINT_COUNT \
     ((unsigned)(sizeof SPRINGBOARD_UI_CHECKPOINTS / \
@@ -6760,6 +6785,10 @@ static int springboard_ui_checkpoint_index(uint32_t pc) {
         case UINT32_C(0x343ac7dc): return 115;
         case UINT32_C(0x30880e10): return 116;
         case UINT32_C(0x3087f538): return 117;
+        case UINT32_C(0x311c82f8): return 118;
+        case UINT32_C(0x311c8324): return 119;
+        case UINT32_C(0x311c9894): return 120;
+        case UINT32_C(0x311c9cdc): return 121;
         default: break;
     }
     return -1;
