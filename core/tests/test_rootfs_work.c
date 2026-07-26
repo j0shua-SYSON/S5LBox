@@ -43,6 +43,90 @@ static const uint8_t FSTAB_STOCK[] =
     "/dev/disk0s1 / hfs ro 0 1\n"
     "/dev/disk0s2 /private/var hfs rw,nosuid,nodev 0 2\n";
 
+/*
+ * Stock /System/Library/LaunchDaemons/com.apple.SpringBoard.plist, iPhone OS
+ * 3.1.3 (7E18): 1490 bytes.  Held here independently of the provisioner's own
+ * copy so the fixtures assert what the transformation must match rather than
+ * agreeing with it by construction.
+ */
+static const uint8_t CA_PLIST_STOCK[] =
+    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+    "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
+    "<plist version=\"1.0\">\n"
+    "<dict>\n"
+    "\t<key>KeepAlive</key>\n"
+    "\t<true/>\n"
+    "\t<key>Label</key>\n"
+    "\t<string>com.apple.SpringBoard</string>\n"
+    "\t<key>MachServices</key>\n"
+    "\t<dict>\n"
+    "\t\t<key>com.apple.springboard.watchdogserver</key>\n"
+    "\t\t<true/>\n"
+    "\t\t<key>com.apple.SBUserNotification</key>\n"
+    "\t\t<true/>\n"
+    "\t\t<key>PurpleSystemEventPort</key>\n"
+    "\t\t<dict>\n"
+    "\t\t\t<key>ResetAtClose</key>\n"
+    "\t\t\t<true/>\n"
+    "\t\t</dict>\n"
+    "\t\t<key>com.apple.CARenderServer</key>\n"
+    "\t\t<dict>\n"
+    "\t\t\t<key>ResetAtClose</key>\n"
+    "\t\t\t<true/>\n"
+    "\t\t</dict>\n"
+    "\t\t<key>com.apple.iohideventsystem</key>\n"
+    "\t\t<dict>\n"
+    "\t\t\t<key>ResetAtClose</key>\n"
+    "\t\t\t<true/>\n"
+    "\t\t</dict>\n"
+    "\t\t<key>com.apple.springboard</key>\n"
+    "\t\t<dict>\n"
+    "\t\t\t<key>ResetAtClose</key>\n"
+    "\t\t\t<true/>\n"
+    "\t\t</dict>\n"
+    "\t\t<key>com.apple.springboard.UIKit.migserver</key>\n"
+    "\t\t<dict>\n"
+    "\t\t\t<key>ResetAtClose</key>\n"
+    "\t\t\t<true/>\n"
+    "\t\t</dict>\n"
+    "\t\t<key>com.apple.springboard.services</key>\n"
+    "\t\t<dict>\n"
+    "\t\t\t<key>ResetAtClose</key>\n"
+    "\t\t\t<true/>\n"
+    "\t\t</dict>\n"
+    "\t\t<key>com.apple.springboard.remotenotifications</key>\n"
+    "\t\t<dict>\n"
+    "\t\t\t<key>ResetAtClose</key>\n"
+    "\t\t\t<true/>\n"
+    "\t\t</dict>\n"
+    "\t\t<key>com.apple.smsserver</key>\n"
+    "\t\t<dict>\n"
+    "\t\t\t<key>ResetAtClose</key>\n"
+    "\t\t\t<true/>\n"
+    "\t\t</dict>\n"
+    "\t</dict>\n"
+    "\t<key>ProgramArguments</key>\n"
+    "\t<array>\n"
+    "\t\t<string>/System/Library/CoreServices/SpringBoard.app/SpringBoard</string>\n"
+    "\t</array>\n"
+    "\t<key>UserName</key>\n"
+    "\t<string>mobile</string>\n"
+    "\t<key>ThrottleInterval</key>\n"
+    "\t<integer>5</integer>\n"
+    "\t<key>EmbeddedPrivilegeDispensation</key>\n"
+    "\t<true/>\n"
+    "</dict>\n"
+    "</plist>\n";
+
+#define CA_PLIST_SIZE (sizeof(CA_PLIST_STOCK) - 1u)
+/*
+ * Two 1490-byte copies inside the 8 KiB fixture, both clear of the reserved
+ * head (blocks 0..2), the allocation file (block 4), the stock fstab record at
+ * 4090, and the reserved tail (blocks 14..15).
+ */
+#define FIXTURE_PLIST_OFFSET 2570u
+#define FIXTURE_PLIST_OFFSET_SECOND 4200u
+
 /* Independently fixed SHA-256 of make_hfs_fixture(..., 1). */
 static const uint8_t FIXTURE_SHA256[IOS3_SHA256_DIGEST_SIZE] = {
     0xa2u, 0x95u, 0x22u, 0x37u, 0x9bu, 0x5eu, 0xf1u, 0x8fu,
@@ -163,6 +247,31 @@ static void make_hfs_fixture(uint8_t image[FIXTURE_SIZE], unsigned fstab_count) 
     if (fstab_count >= 2u)
         memcpy(image + 5200u, FSTAB_STOCK, sizeof(FSTAB_STOCK) - 1u);
     memcpy(image + FIXTURE_SIZE - HFS_VH_OFF, header, HFS_VH_LEN);
+}
+
+/*
+ * The stock SpringBoard launchd plist, `count` times, on top of the ordinary
+ * single-fstab fixture: the plist rewrite runs after the fstab rewrite, so a
+ * fixture that reaches it must still carry exactly one stock fstab record.
+ */
+static void make_plist_fixture(uint8_t image[FIXTURE_SIZE], unsigned count) {
+    make_hfs_fixture(image, 1u);
+    if (count >= 1u)
+        memcpy(image + FIXTURE_PLIST_OFFSET, CA_PLIST_STOCK, CA_PLIST_SIZE);
+    if (count >= 2u)
+        memcpy(image + FIXTURE_PLIST_OFFSET_SECOND, CA_PLIST_STOCK,
+               CA_PLIST_SIZE);
+}
+
+static bool region_contains(const uint8_t *region, size_t region_size,
+                            const char *needle) {
+    size_t needle_size = strlen(needle);
+    size_t index;
+
+    for (index = 0; index + needle_size <= region_size; index++)
+        if (memcmp(region + index, needle, needle_size) == 0)
+            return true;
+    return false;
 }
 
 static bool write_file(const char *path, const uint8_t *bytes, size_t size) {
@@ -597,6 +706,153 @@ static void test_fstab_uniqueness_and_cleanup(void) {
     expect_fstab_failure(2u, ROOTFS_WORK_FSTAB_NOT_UNIQUE, "duplicate");
 }
 
+/* Everything the rewrite did not deliberately touch must be byte-identical:
+ * the plist record it replaced and the fstab record are the only two windows
+ * where the published image is allowed to differ from its source. */
+static void expect_only_records_changed(const uint8_t *published,
+                                        const uint8_t *fixture,
+                                        const char *tag) {
+    size_t index;
+    size_t differences = 0;
+
+    for (index = 0; index < FIXTURE_SIZE; index++) {
+        bool in_plist = index >= FIXTURE_PLIST_OFFSET &&
+                        index < FIXTURE_PLIST_OFFSET + CA_PLIST_SIZE;
+        bool in_fstab = index >= FIXTURE_FSTAB_OFFSET &&
+                        index < FIXTURE_FSTAB_OFFSET +
+                                (sizeof(FSTAB_STOCK) - 1u);
+        if (!in_plist && !in_fstab && published[index] != fixture[index])
+            differences++;
+    }
+    CHECK(differences == 0u,
+          "%s rewrite changed %zu bytes outside the two rewritten records",
+          tag, differences);
+}
+
+static void expect_ca_plist_refusal(const uint8_t *fixture, const char *tag) {
+    char source[160];
+    char destination[160];
+    rootfs_work_options_t options;
+    rootfs_work_result_t result;
+
+    CHECK(make_path(source, sizeof(source), tag),
+          "could not form %s plist source path", tag);
+    CHECK(make_path(destination, sizeof(destination), "ca-plist-rejected"),
+          "could not form %s plist destination path", tag);
+    remove_if_present(source);
+    remove_if_present(destination);
+    CHECK(write_file(source, fixture, FIXTURE_SIZE),
+          "could not write %s plist fixture", tag);
+    memset(&options, 0, sizeof(options));
+    options.ca_software_render = true;
+    options.io_buffer_bytes = 37u; /* pattern spans many chunk boundaries */
+    CHECK(rootfs_work_create(source, destination, &options, &result) ==
+              ROOTFS_WORK_CA_PLIST_NOT_UNIQUE &&
+          result.stage == ROOTFS_WORK_STAGE_CA_PLIST_SCAN,
+          "%s plist fixture returned %s/%s: %s", tag,
+          rootfs_work_status_name(result.status),
+          rootfs_work_stage_name(result.stage), result.detail);
+    CHECK(result.ca_plist_offset == UINT64_MAX && !result.published,
+          "%s plist refusal reported a rewrite or a publication", tag);
+    CHECK(!path_exists(destination) && no_temporary_files(),
+          "%s plist refusal left an output artifact", tag);
+    remove_if_present(destination);
+    remove_if_present(source);
+}
+
+static void test_ca_software_render_plist(void) {
+    char source[160];
+    char destination[160];
+    uint8_t fixture[FIXTURE_SIZE];
+    uint8_t published[FIXTURE_SIZE];
+    uint8_t rewritten[CA_PLIST_SIZE];
+    rootfs_work_options_t options;
+    rootfs_work_result_t result;
+    rootfs_work_status_t status;
+
+    CHECK(CA_PLIST_SIZE == 1490u,
+          "stock SpringBoard plist fixture is %zu bytes, expected 1490",
+          (size_t)CA_PLIST_SIZE);
+
+    /* One stock record and the flag on: rewritten in place, same length. */
+    CHECK(make_path(source, sizeof(source), "ca-plist-source"),
+          "could not form plist source path");
+    CHECK(make_path(destination, sizeof(destination), "ca-plist-work"),
+          "could not form plist destination path");
+    remove_if_present(source);
+    remove_if_present(destination);
+    make_plist_fixture(fixture, 1u);
+    CHECK(write_file(source, fixture, sizeof(fixture)),
+          "could not write software-render plist fixture");
+    memset(&options, 0, sizeof(options));
+    options.ca_software_render = true;
+    options.io_buffer_bytes = 7u; /* 1490-byte pattern, 7-byte chunks */
+    status = rootfs_work_create(source, destination, &options, &result);
+    CHECK(status == ROOTFS_WORK_OK && result.published,
+          "software-render rewrite returned %s/%s: %s",
+          rootfs_work_status_name(status), rootfs_work_stage_name(result.stage),
+          result.detail);
+    CHECK(result.ca_plist_offset == FIXTURE_PLIST_OFFSET,
+          "software-render rewrite reported offset 0x%llx, expected 0x%x",
+          (unsigned long long)result.ca_plist_offset, FIXTURE_PLIST_OFFSET);
+    CHECK(result.final_size == FIXTURE_SIZE &&
+          file_size(destination) == FIXTURE_SIZE,
+          "software-render rewrite changed the image size to %llu",
+          (unsigned long long)file_size(destination));
+    CHECK(read_file(destination, published, sizeof(published)),
+          "could not read the rewritten work image");
+    memcpy(rewritten, published + FIXTURE_PLIST_OFFSET, CA_PLIST_SIZE);
+    CHECK(memcmp(rewritten, CA_PLIST_STOCK, CA_PLIST_SIZE) != 0,
+          "software-render rewrite left the stock plist in place");
+    CHECK(region_contains(rewritten, CA_PLIST_SIZE,
+                          "<key>EnvironmentVariables</key>") &&
+          region_contains(rewritten, CA_PLIST_SIZE,
+                          "<key>CA_ENABLE_MBX2D</key>") &&
+          region_contains(rewritten, CA_PLIST_SIZE, "<string>0</string>"),
+          "rewritten plist does not export CA_ENABLE_MBX2D=0");
+    CHECK(memcmp(rewritten, "<?xml", 5u) == 0 &&
+          memcmp(rewritten + CA_PLIST_SIZE - 9u, "</plist>\n", 9u) == 0,
+          "rewritten plist is not a well-formed <?xml ... </plist> document");
+    expect_only_records_changed(published, fixture, "software-render");
+    CHECK(no_temporary_files(), "software-render rewrite left a temp name");
+    remove_if_present(destination);
+    remove_if_present(source);
+
+    /* Same fixture, flag off: the stock record survives untouched. */
+    CHECK(make_path(destination, sizeof(destination), "ca-plist-disabled"),
+          "could not form disabled-plist destination path");
+    remove_if_present(source);
+    remove_if_present(destination);
+    CHECK(write_file(source, fixture, sizeof(fixture)),
+          "could not write disabled-flag plist fixture");
+    memset(&options, 0, sizeof(options));
+    options.ca_software_render = false;
+    options.io_buffer_bytes = 37u;
+    status = rootfs_work_create(source, destination, &options, &result);
+    CHECK(status == ROOTFS_WORK_OK && result.published,
+          "disabled software-render returned %s/%s: %s",
+          rootfs_work_status_name(status), rootfs_work_stage_name(result.stage),
+          result.detail);
+    CHECK(result.ca_plist_offset == UINT64_MAX,
+          "disabled software-render reported a rewrite at 0x%llx",
+          (unsigned long long)result.ca_plist_offset);
+    CHECK(read_file(destination, published, sizeof(published)) &&
+          memcmp(published + FIXTURE_PLIST_OFFSET, CA_PLIST_STOCK,
+                 CA_PLIST_SIZE) == 0,
+          "disabled software-render still modified the SpringBoard plist");
+    remove_if_present(destination);
+    remove_if_present(source);
+
+    /* Ambiguous, absent, and already-rewritten images are all refused. */
+    make_plist_fixture(fixture, 2u);
+    expect_ca_plist_refusal(fixture, "ca-plist-duplicate");
+    make_plist_fixture(fixture, 0u);
+    expect_ca_plist_refusal(fixture, "ca-plist-absent");
+    make_plist_fixture(fixture, 1u);
+    memcpy(fixture + FIXTURE_PLIST_OFFSET, rewritten, CA_PLIST_SIZE);
+    expect_ca_plist_refusal(fixture, "ca-plist-already-rewritten");
+}
+
 static void expect_hfs_invalid(const uint8_t fixture[FIXTURE_SIZE],
                                const char *tag, const char *detail_fragment) {
     char source[160];
@@ -908,6 +1164,7 @@ int main(void) {
     test_required_identity_chunk_boundaries();
     test_source_identity_policy_and_cleanup();
     test_fstab_uniqueness_and_cleanup();
+    test_ca_software_render_plist();
     test_malformed_hfs_refused();
     test_growth_rejects_head_tail_overlap();
     test_existing_destination_preserved();

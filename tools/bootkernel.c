@@ -20667,7 +20667,18 @@ int main(int argc, char **argv) {
             "      backed disk0, so launchd's fsck fails and it halts the\n"
             "      machine. The image on disk is never modified.\n"
             "  --keep-fstab    legacy -r only: leave the stock record alone\n"
-            "      (reproduces the halt; external-md rejects this option)\n",
+            "      (reproduces the halt; external-md rejects this option)\n"
+            "  --ca-software-render  --external-md only, OFF by default: add\n"
+            "      an EnvironmentVariables dictionary carrying\n"
+            "      CA_ENABLE_MBX2D=0 to the SpringBoard LaunchDaemon plist in\n"
+            "      the work image, which is how QuartzCore's own code selects\n"
+            "      its software renderer. Without it CA::WindowServer defaults\n"
+            "      to MBX2D, whose global context is NULL because this VM\n"
+            "      un-matches the PowerVR GPU, and SpringBoard dies with SIGBUS\n"
+            "      in _mbx2DDisable forever. The replacement plist is the same\n"
+            "      1490 bytes as the stock one and must match it exactly once,\n"
+            "      so no HFS+ catalog change is involved and the image on disk\n"
+            "      is never modified.\n",
             argv[0]);
         fputs(
             "  --grow <MB>  free space to give the guest by growing the HFS+\n"
@@ -20799,6 +20810,40 @@ int main(int argc, char **argv) {
     bool        fstab_fixup = true;
 
     /*
+     * --ca-software-render: export CA_ENABLE_MBX2D=0 to SpringBoard, by
+     * rewriting its LaunchDaemon plist in the per-run work image.
+     *
+     * MEASURED: SpringBoard dies with SIGBUS roughly every 470 M instructions
+     * and launchd respawns it forever. Thirty-five identical crash reports
+     * pulled out of the guest all say EXC_BAD_ACCESS (SIGBUS),
+     * KERN_PROTECTION_FAILURE at 0x00000048, pc 0x30e1ea50 ==
+     * MBX2D`_mbx2DDisable+0x20, which is `strbeq r0,[r3,#0x48]` with r3 NULL.
+     * r3 is MBX2D's global context and it is NULL because this VM un-matches
+     * the PowerVR GPU (dt_unmatch of arm-io/mbx), so the kext never starts and
+     * MBX2D never gets its IOKit connection.
+     *
+     * QuartzCore has a documented-by-its-own-code way out. CA::WindowServer::
+     * MBXServer::MBXServer reads CA_ENABLE_MBX2D via getenv(), falls back to
+     * LK_ENABLE_MBX2D, and DEFAULTS TO ENABLED when neither is set; with the
+     * flag at 0 the only reader, MBXServer::mbx2d_context(), returns NULL
+     * early and both callers fall through to CA::WindowServer::Server's
+     * software path (sw_renderer -> _CARenderOGLNew -> CA::OGL::SWContext).
+     * launchd is the thing that can set it: /sbin/launchd's key table carries
+     * EnvironmentVariables and UserEnvironmentVariables, and it imports
+     * _setenv. There is no launchd.conf in this build.
+     *
+     * OFF by default, unlike --fstab and --grow, because unlike those two it
+     * is not needed to get through the launchd bootstrap: it changes which
+     * renderer Apple's compositor picks, which is a hypothesis about the
+     * crash loop rather than a precondition for booting at all. It only has
+     * meaning for --external-md, which is the mode that provisions a writable
+     * work image; see ca_plist_rewrite() in tools/rootfs_work.c for the
+     * size-neutral, exactly-once-gated rewrite itself. firmware/rootfs.img is
+     * never opened for writing.
+     */
+    bool        ca_software_render = false;
+
+    /*
      * --grow <MB>: free space to give the guest, by growing the HFS+ volume in
      * the loaded RAM disk. See rd_grow_volume() above for the format work; this
      * is the size question.
@@ -20916,6 +20961,9 @@ int main(int argc, char **argv) {
         if (!strcmp(argv[i], "-M")) { patch_memnode = false; continue; }
         if (!strcmp(argv[i], "-L")) { want_kextmap = true; continue; }
         if (!strcmp(argv[i], "--keep-fstab")) { fstab_fixup = false; continue; }
+        if (!strcmp(argv[i], "--ca-software-render")) {
+            ca_software_render = true; continue;
+        }
         if (!strcmp(argv[i], "-Y")) { rd_low = true; continue; }
         /* Three-argument flag: must be recognised before the two-argument
          * guard below, which would otherwise stop the walk on the last pair. */
@@ -21125,6 +21173,14 @@ int main(int argc, char **argv) {
                     "255-byte boot_args field\n");
             return 1;
         }
+    }
+
+    /* The plist rewrite lives in the work-image provisioner, and only
+     * --external-md runs that. Accepting the flag anywhere else would let a
+     * run claim a renderer selection it never made. */
+    if (ca_software_render && !external_md) {
+        fprintf(stderr, "--ca-software-render requires --external-md\n");
+        return 1;
     }
 
     /* -L exits after parsing the Mach-O and never creates or restores a
@@ -21447,7 +21503,11 @@ int main(int argc, char **argv) {
         rootfs_work_result_t result;
         memset(&options, 0, sizeof options);
         memset(&result, 0, sizeof result);
+        /* "no rewrite happened" is UINT64_MAX, not 0, and the restore path
+         * below reaches the report without ever calling the provisioner. */
+        result.ca_plist_offset = UINT64_MAX;
         options.fstab_line = fstab_line;
+        options.ca_software_render = ca_software_render;
         options.growth_bytes = (uint64_t)rd_grow_mb << 20;
         options.source_identity.required = true;
         options.source_identity.expected_size = IOS3_ROOTFS_FILE_SIZE;
@@ -21498,6 +21558,13 @@ int main(int argc, char **argv) {
             printf("external md: restored work image from %s"
                    " (%" PRIu64 " bytes, media %" PRIu64 ")\n",
                    image_path, restored_bytes, external_media_size);
+            /* A restore reproduces the disk as it stood at the checkpoint, so
+             * no transformation is re-applied to it. Say so rather than let
+             * the flag look like it did something. */
+            if (ca_software_render)
+                printf("CA renderer: --ca-software-render does not apply to a "
+                       "restored work image; the checkpoint's own image is "
+                       "used verbatim\n");
             fflush(stdout);
             goto external_md_work_ready;
         }
@@ -21559,6 +21626,14 @@ external_md_work_ready:
         printf("external md: verified %s; created %s (%llu bytes, +%u MiB)\n",
                external_md_source, external_md_work,
                (unsigned long long)external_media_size, rd_grow_mb);
+        if (result.ca_plist_offset != UINT64_MAX)
+            printf("CA renderer: com.apple.SpringBoard.plist @ image+0x%08llx"
+                   " -> EnvironmentVariables CA_ENABLE_MBX2D=0\n"
+                   "             (same 1490 bytes, so no HFS+ catalog change;"
+                   " QuartzCore takes its\n"
+                   "              software path instead of the MBX2D one this"
+                   " machine has no GPU for.)\n",
+                   (unsigned long long)result.ca_plist_offset);
     } else if (!no_kpatch) {
         struct { uint32_t va; uint8_t want, set; const char *why; } kp[] = {
             { 0xc0175b3eu, 0x1e, 0x00, "IORTC wait tv_sec 30->0 (reach IOFindBSDRoot)" },

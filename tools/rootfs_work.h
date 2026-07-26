@@ -3,9 +3,10 @@
  *
  * This interface deliberately owns no guest or emulator state.  It copies an
  * immutable bare HFS+/HFSX source into a new file beside the requested
- * destination name, applies the narrowly-defined fstab and volume-growth
- * transformations to that unpublished temporary file, validates the result,
- * flushes it, and publishes it without replacing an existing path.
+ * destination name, applies the narrowly-defined fstab, opt-in SpringBoard
+ * launchd-plist, and volume-growth transformations to that unpublished
+ * temporary file, validates the result, flushes it, and publishes it without
+ * replacing an existing path.
  *
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed.
  */
@@ -47,6 +48,8 @@ typedef enum rootfs_work_status {
     ROOTFS_WORK_HFS_INVALID,
     ROOTFS_WORK_FSTAB_NOT_UNIQUE,
     ROOTFS_WORK_FSTAB_LINE_INVALID,
+    ROOTFS_WORK_CA_PLIST_NOT_UNIQUE,
+    ROOTFS_WORK_CA_PLIST_INVALID,
     ROOTFS_WORK_GROW_INVALID,
     ROOTFS_WORK_RANGE_ERROR,
     ROOTFS_WORK_PUBLISH_FAILED,
@@ -66,6 +69,8 @@ typedef enum rootfs_work_stage {
     ROOTFS_WORK_STAGE_COPY_VERIFY,
     ROOTFS_WORK_STAGE_FSTAB_SCAN,
     ROOTFS_WORK_STAGE_FSTAB_WRITE,
+    ROOTFS_WORK_STAGE_CA_PLIST_SCAN,
+    ROOTFS_WORK_STAGE_CA_PLIST_WRITE,
     ROOTFS_WORK_STAGE_GROW_PLAN,
     ROOTFS_WORK_STAGE_GROW_WRITE,
     ROOTFS_WORK_STAGE_FINAL_VALIDATE,
@@ -84,6 +89,17 @@ typedef struct rootfs_work_source_identity {
 typedef struct rootfs_work_options {
     /* NULL selects ROOTFS_WORK_DEFAULT_FSTAB. */
     const char *fstab_line;
+
+    /*
+     * Opt-in, OFF by default: rewrite the stock SpringBoard LaunchDaemon plist
+     * in place so launchd exports CA_ENABLE_MBX2D=0 to SpringBoard, which is
+     * how Apple's own QuartzCore selects its software renderer instead of the
+     * MBX2D path this machine has no GPU for.  Same-length overwrite of an
+     * exactly-once byte pattern, so no HFS catalog change is involved; see
+     * ca_plist_rewrite() for the whole argument.  When false the transformation
+     * is not attempted at all and the stock record is left untouched.
+     */
+    bool ca_software_render;
 
     /*
      * Same arithmetic as bootkernel's historical --grow implementation:
@@ -119,6 +135,8 @@ typedef struct rootfs_work_result {
     uint64_t final_size;
     uint64_t bytes_copied;
     uint64_t fstab_offset;
+    /* UINT64_MAX unless the CA software-render rewrite actually ran. */
+    uint64_t ca_plist_offset;
     uint8_t source_sha256[IOS3_SHA256_DIGEST_SIZE];
     size_t io_buffer_bytes;
     bool source_sha256_valid;

@@ -52,6 +52,195 @@ static const uint8_t FSTAB_STOCK[] =
     "/dev/disk0s1 / hfs ro 0 1\n"
     "/dev/disk0s2 /private/var hfs rw,nosuid,nodev 0 2\n";
 
+/*
+ * /System/Library/LaunchDaemons/com.apple.SpringBoard.plist, stock iPhone OS
+ * 3.1.3 (7E18).  Plain XML, 1490 bytes, one extent, one allocation block.
+ * This is the search pattern, not a template: the rewrite below refuses unless
+ * these exact bytes occur exactly once in the whole work image.
+ */
+static const uint8_t CA_PLIST_STOCK[] =
+    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+    "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
+    "<plist version=\"1.0\">\n"
+    "<dict>\n"
+    "\t<key>KeepAlive</key>\n"
+    "\t<true/>\n"
+    "\t<key>Label</key>\n"
+    "\t<string>com.apple.SpringBoard</string>\n"
+    "\t<key>MachServices</key>\n"
+    "\t<dict>\n"
+    "\t\t<key>com.apple.springboard.watchdogserver</key>\n"
+    "\t\t<true/>\n"
+    "\t\t<key>com.apple.SBUserNotification</key>\n"
+    "\t\t<true/>\n"
+    "\t\t<key>PurpleSystemEventPort</key>\n"
+    "\t\t<dict>\n"
+    "\t\t\t<key>ResetAtClose</key>\n"
+    "\t\t\t<true/>\n"
+    "\t\t</dict>\n"
+    "\t\t<key>com.apple.CARenderServer</key>\n"
+    "\t\t<dict>\n"
+    "\t\t\t<key>ResetAtClose</key>\n"
+    "\t\t\t<true/>\n"
+    "\t\t</dict>\n"
+    "\t\t<key>com.apple.iohideventsystem</key>\n"
+    "\t\t<dict>\n"
+    "\t\t\t<key>ResetAtClose</key>\n"
+    "\t\t\t<true/>\n"
+    "\t\t</dict>\n"
+    "\t\t<key>com.apple.springboard</key>\n"
+    "\t\t<dict>\n"
+    "\t\t\t<key>ResetAtClose</key>\n"
+    "\t\t\t<true/>\n"
+    "\t\t</dict>\n"
+    "\t\t<key>com.apple.springboard.UIKit.migserver</key>\n"
+    "\t\t<dict>\n"
+    "\t\t\t<key>ResetAtClose</key>\n"
+    "\t\t\t<true/>\n"
+    "\t\t</dict>\n"
+    "\t\t<key>com.apple.springboard.services</key>\n"
+    "\t\t<dict>\n"
+    "\t\t\t<key>ResetAtClose</key>\n"
+    "\t\t\t<true/>\n"
+    "\t\t</dict>\n"
+    "\t\t<key>com.apple.springboard.remotenotifications</key>\n"
+    "\t\t<dict>\n"
+    "\t\t\t<key>ResetAtClose</key>\n"
+    "\t\t\t<true/>\n"
+    "\t\t</dict>\n"
+    "\t\t<key>com.apple.smsserver</key>\n"
+    "\t\t<dict>\n"
+    "\t\t\t<key>ResetAtClose</key>\n"
+    "\t\t\t<true/>\n"
+    "\t\t</dict>\n"
+    "\t</dict>\n"
+    "\t<key>ProgramArguments</key>\n"
+    "\t<array>\n"
+    "\t\t<string>/System/Library/CoreServices/SpringBoard.app/SpringBoard</string>\n"
+    "\t</array>\n"
+    "\t<key>UserName</key>\n"
+    "\t<string>mobile</string>\n"
+    "\t<key>ThrottleInterval</key>\n"
+    "\t<integer>5</integer>\n"
+    "\t<key>EmbeddedPrivilegeDispensation</key>\n"
+    "\t<true/>\n"
+    "</dict>\n"
+    "</plist>\n";
+
+/*
+ * The replacement.  PROVENANCE: this is Apple's own plist above with ONE
+ * addition -- an EnvironmentVariables dictionary containing CA_ENABLE_MBX2D=0
+ * -- and it is deliberately the same 1490 bytes.  Parsed with a property-list
+ * reader the two differ by exactly that one key: every other key, value and
+ * nesting level is identical, and the DOCTYPE is kept.
+ *
+ * The indentation is NOT the stock indentation, and that is the whole trick.
+ * The new dictionary costs 100 bytes, so all 122 leading tabs were removed and
+ * 29 of them re-added, one per line, from the DOCTYPE down.  XML treats
+ * inter-element whitespace as insignificant, so this changes nothing a parser
+ * sees while making the file byte-for-byte the length of the record it
+ * replaces -- which is what lets logicalSize, totalBlocks and the file's single
+ * extent stay exactly as they are.  Do not "tidy" this back up: any edit that
+ * changes the length turns a safe overwrite into HFS+ catalog surgery, and the
+ * length gate below will refuse to build rather than let that happen quietly.
+ *
+ * What it configures is Apple's switch, not ours.  CA::WindowServer::
+ * MBXServer::MBXServer (0x31241d78 in this build's QuartzCore) reads
+ * CA_ENABLE_MBX2D with getenv(), falls back to LK_ENABLE_MBX2D, and treats
+ * "absent" as ENABLED; the only reader of that flag, MBXServer::mbx2d_context()
+ * at 0x31241a8c, returns NULL early when it is 0, and both of its callers then
+ * take CA::WindowServer::Server's software path (sw_renderer -> _CARenderOGLNew
+ * -> CA::OGL::SWContext).  With the flag left at its default, MBX2D talks to a
+ * PowerVR kext that never started -- this VM un-matches arm-io/mbx -- and
+ * _mbx2DDisable+0x20 stores through a NULL global context, which is the
+ * KERN_PROTECTION_FAILURE at 0x00000048 that kills SpringBoard and leaves
+ * launchd respawning it forever.  launchd honours the key: /sbin/launchd's key
+ * table carries EnvironmentVariables and UserEnvironmentVariables next to
+ * ThrottleInterval and MachServices, and it imports _setenv.
+ */
+static const uint8_t CA_PLIST_SOFTWARE_RENDER[] =
+    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+    "\t<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
+    "\t<plist version=\"1.0\">\n"
+    "\t<dict>\n"
+    "\t<key>EnvironmentVariables</key>\n"
+    "\t<dict>\n"
+    "\t<key>CA_ENABLE_MBX2D</key>\n"
+    "\t<string>0</string>\n"
+    "\t</dict>\n"
+    "\t<key>KeepAlive</key>\n"
+    "\t<true/>\n"
+    "\t<key>Label</key>\n"
+    "\t<string>com.apple.SpringBoard</string>\n"
+    "\t<key>MachServices</key>\n"
+    "\t<dict>\n"
+    "\t<key>com.apple.springboard.watchdogserver</key>\n"
+    "\t<true/>\n"
+    "\t<key>com.apple.SBUserNotification</key>\n"
+    "\t<true/>\n"
+    "\t<key>PurpleSystemEventPort</key>\n"
+    "\t<dict>\n"
+    "\t<key>ResetAtClose</key>\n"
+    "\t<true/>\n"
+    "\t</dict>\n"
+    "\t<key>com.apple.CARenderServer</key>\n"
+    "\t<dict>\n"
+    "\t<key>ResetAtClose</key>\n"
+    "\t<true/>\n"
+    "\t</dict>\n"
+    "\t<key>com.apple.iohideventsystem</key>\n"
+    "<dict>\n"
+    "<key>ResetAtClose</key>\n"
+    "<true/>\n"
+    "</dict>\n"
+    "<key>com.apple.springboard</key>\n"
+    "<dict>\n"
+    "<key>ResetAtClose</key>\n"
+    "<true/>\n"
+    "</dict>\n"
+    "<key>com.apple.springboard.UIKit.migserver</key>\n"
+    "<dict>\n"
+    "<key>ResetAtClose</key>\n"
+    "<true/>\n"
+    "</dict>\n"
+    "<key>com.apple.springboard.services</key>\n"
+    "<dict>\n"
+    "<key>ResetAtClose</key>\n"
+    "<true/>\n"
+    "</dict>\n"
+    "<key>com.apple.springboard.remotenotifications</key>\n"
+    "<dict>\n"
+    "<key>ResetAtClose</key>\n"
+    "<true/>\n"
+    "</dict>\n"
+    "<key>com.apple.smsserver</key>\n"
+    "<dict>\n"
+    "<key>ResetAtClose</key>\n"
+    "<true/>\n"
+    "</dict>\n"
+    "</dict>\n"
+    "<key>ProgramArguments</key>\n"
+    "<array>\n"
+    "<string>/System/Library/CoreServices/SpringBoard.app/SpringBoard</string>\n"
+    "</array>\n"
+    "<key>UserName</key>\n"
+    "<string>mobile</string>\n"
+    "<key>ThrottleInterval</key>\n"
+    "<integer>5</integer>\n"
+    "<key>EmbeddedPrivilegeDispensation</key>\n"
+    "<true/>\n"
+    "</dict>\n"
+    "</plist>\n";
+
+/*
+ * Size neutrality is the precondition for every claim made above, so state it
+ * as a build-time constraint rather than a comment.  A negative array size is
+ * the portable C11 way to say "this translation unit does not compile if the
+ * two records ever stop being the same length".
+ */
+typedef char ca_plist_is_size_neutral[
+    (sizeof(CA_PLIST_SOFTWARE_RENDER) == sizeof(CA_PLIST_STOCK)) ? 1 : -1];
+
 typedef struct host_file {
 #ifdef _WIN32
     HANDLE handle;
@@ -122,6 +311,7 @@ static void result_reset(rootfs_work_result_t *result) {
     result->status = ROOTFS_WORK_OK;
     result->stage = ROOTFS_WORK_STAGE_NONE;
     result->fstab_offset = UINT64_MAX;
+    result->ca_plist_offset = UINT64_MAX;
     result->detail[0] = '\0';
 }
 
@@ -164,6 +354,8 @@ const char *rootfs_work_status_name(rootfs_work_status_t status) {
     case ROOTFS_WORK_HFS_INVALID: return "hfs-invalid";
     case ROOTFS_WORK_FSTAB_NOT_UNIQUE: return "fstab-not-unique";
     case ROOTFS_WORK_FSTAB_LINE_INVALID: return "fstab-line-invalid";
+    case ROOTFS_WORK_CA_PLIST_NOT_UNIQUE: return "ca-plist-not-unique";
+    case ROOTFS_WORK_CA_PLIST_INVALID: return "ca-plist-invalid";
     case ROOTFS_WORK_GROW_INVALID: return "grow-invalid";
     case ROOTFS_WORK_RANGE_ERROR: return "range-error";
     case ROOTFS_WORK_PUBLISH_FAILED: return "publish-failed";
@@ -187,6 +379,8 @@ const char *rootfs_work_stage_name(rootfs_work_stage_t stage) {
     case ROOTFS_WORK_STAGE_COPY_VERIFY: return "copy-verify";
     case ROOTFS_WORK_STAGE_FSTAB_SCAN: return "fstab-scan";
     case ROOTFS_WORK_STAGE_FSTAB_WRITE: return "fstab-write";
+    case ROOTFS_WORK_STAGE_CA_PLIST_SCAN: return "ca-plist-scan";
+    case ROOTFS_WORK_STAGE_CA_PLIST_WRITE: return "ca-plist-write";
     case ROOTFS_WORK_STAGE_GROW_PLAN: return "grow-plan";
     case ROOTFS_WORK_STAGE_GROW_WRITE: return "grow-write";
     case ROOTFS_WORK_STAGE_FINAL_VALIDATE: return "final-validate";
@@ -1705,16 +1899,76 @@ static bool allocation_bit_write(host_file_t *file, uint64_t file_size,
     return checked_write(file, file_size, offset, &byte, 1u, stage, result);
 }
 
+/*
+ * Knuth-Morris-Pratt scan of the whole work image for one exact byte pattern.
+ *
+ * Both in-place record rewrites below ask the image the same question -- does
+ * this exact stock record appear, and does it appear exactly once? -- so they
+ * share one bounded scanner instead of keeping two copies of the same state
+ * machine.  `prefix` is caller-owned scratch with one entry per pattern byte,
+ * which keeps this allocation-free; the pattern may be far larger than the I/O
+ * buffer, because the automaton carries `matched` across chunk boundaries.
+ *
+ * The walk stops at the second hit: every caller refuses anything other than
+ * exactly one, so a larger count is never needed, only distinguishable from 1.
+ */
+static bool pattern_scan_unique(host_file_t *file, uint64_t file_size,
+                                const uint8_t *pattern, size_t pattern_size,
+                                size_t *prefix, uint8_t *buffer,
+                                size_t buffer_size, uint64_t *hit,
+                                unsigned *hits, rootfs_work_stage_t stage,
+                                rootfs_work_result_t *result) {
+    uint64_t offset = 0;
+    size_t matched = 0;
+    size_t index;
+
+    *hit = UINT64_MAX;
+    *hits = 0;
+    prefix[0] = 0u;
+    for (index = 1u; index < pattern_size; index++) {
+        size_t candidate = prefix[index - 1u];
+        while (candidate != 0u && pattern[index] != pattern[candidate])
+            candidate = prefix[candidate - 1u];
+        if (pattern[index] == pattern[candidate])
+            candidate++;
+        prefix[index] = candidate;
+    }
+    while (offset < file_size) {
+        uint64_t remaining = file_size - offset;
+        size_t amount = remaining > buffer_size ? buffer_size :
+                        (size_t)remaining;
+
+        if (!checked_read(file, file_size, offset, buffer, amount, stage,
+                          result))
+            return false;
+        for (index = 0; index < amount; index++) {
+            uint8_t value = buffer[index];
+            while (matched != 0u && value != pattern[matched])
+                matched = prefix[matched - 1u];
+            if (value == pattern[matched])
+                matched++;
+            if (matched == pattern_size) {
+                uint64_t end = offset + index + 1u;
+                if (*hits == 0u)
+                    *hit = end - pattern_size;
+                (*hits)++;
+                if (*hits > 1u)
+                    return true;
+                matched = prefix[matched - 1u];
+            }
+        }
+        offset += amount;
+    }
+    return true;
+}
+
 static bool fstab_rewrite(host_file_t *file, uint64_t file_size,
                           const char *line, uint8_t *buffer,
                           size_t buffer_size, rootfs_work_result_t *result) {
     size_t prefix[sizeof(FSTAB_STOCK) - 1u];
     const size_t pattern_size = sizeof(FSTAB_STOCK) - 1u;
-    uint64_t offset = 0;
     uint64_t hit = UINT64_MAX;
     unsigned hits = 0;
-    size_t matched = 0;
-    size_t index;
     size_t line_size = 0;
     uint8_t replacement[sizeof(FSTAB_STOCK) - 1u];
 
@@ -1742,44 +1996,15 @@ static bool fstab_rewrite(host_file_t *file, uint64_t file_size,
         return false;
     }
 
-    prefix[0] = 0u;
-    for (index = 1u; index < pattern_size; index++) {
-        size_t candidate = prefix[index - 1u];
-        while (candidate != 0u &&
-               FSTAB_STOCK[index] != FSTAB_STOCK[candidate])
-            candidate = prefix[candidate - 1u];
-        if (FSTAB_STOCK[index] == FSTAB_STOCK[candidate])
-            candidate++;
-        prefix[index] = candidate;
-    }
-    while (offset < file_size) {
-        uint64_t remaining = file_size - offset;
-        size_t amount = remaining > buffer_size ? buffer_size :
-                        (size_t)remaining;
-
-        if (!checked_read(file, file_size, offset, buffer, amount,
-                          ROOTFS_WORK_STAGE_FSTAB_SCAN, result))
-            return false;
-        for (index = 0; index < amount; index++) {
-            uint8_t value = buffer[index];
-            while (matched != 0u && value != FSTAB_STOCK[matched])
-                matched = prefix[matched - 1u];
-            if (value == FSTAB_STOCK[matched])
-                matched++;
-            if (matched == pattern_size) {
-                uint64_t end = offset + index + 1u;
-                hit = end - pattern_size;
-                hits++;
-                if (hits > 1u) {
-                    result_fail(result, ROOTFS_WORK_FSTAB_NOT_UNIQUE,
-                                ROOTFS_WORK_STAGE_FSTAB_SCAN, 0,
-                                "stock fstab record occurs more than once");
-                    return false;
-                }
-                matched = prefix[matched - 1u];
-            }
-        }
-        offset += amount;
+    if (!pattern_scan_unique(file, file_size, FSTAB_STOCK, pattern_size,
+                             prefix, buffer, buffer_size, &hit, &hits,
+                             ROOTFS_WORK_STAGE_FSTAB_SCAN, result))
+        return false;
+    if (hits > 1u) {
+        result_fail(result, ROOTFS_WORK_FSTAB_NOT_UNIQUE,
+                    ROOTFS_WORK_STAGE_FSTAB_SCAN, 0,
+                    "stock fstab record occurs more than once");
+        return false;
     }
     if (hits != 1u) {
         result_fail(result, ROOTFS_WORK_FSTAB_NOT_UNIQUE,
@@ -1799,6 +2024,66 @@ static bool fstab_rewrite(host_file_t *file, uint64_t file_size,
                        ROOTFS_WORK_STAGE_FSTAB_WRITE, result))
         return false;
     result->fstab_offset = hit;
+    return true;
+}
+
+/*
+ * Select QuartzCore's software renderer for SpringBoard, by the one mechanism
+ * Apple's own code provides for it: an environment variable launchd exports.
+ *
+ * This is the same shape of edit as fstab_rewrite above, and for the same
+ * reason -- it is a guest CONFIGURATION change to a documented, plain-text
+ * Apple file, not a guess at an undocumented binary layout.  The stock record
+ * is located BY CONTENT and must occur EXACTLY ONCE in the whole image; the
+ * replacement is exactly as long, so logicalSize, totalBlocks and the file's
+ * single extent are all unchanged and no HFS+ catalog surgery is involved.
+ * Missing, ambiguous, or a replacement of the wrong length are all refusals,
+ * before anything is written.  See CA_PLIST_SOFTWARE_RENDER for the provenance
+ * of the bytes and for why the flag is the thing that stops the crash loop.
+ *
+ * Only the unpublished temporary work image is touched; the immutable source
+ * is already closed by the time this runs.
+ */
+static bool ca_plist_rewrite(host_file_t *file, uint64_t file_size,
+                             uint8_t *buffer, size_t buffer_size,
+                             rootfs_work_result_t *result) {
+    size_t prefix[sizeof(CA_PLIST_STOCK) - 1u];
+    const size_t pattern_size = sizeof(CA_PLIST_STOCK) - 1u;
+    const size_t replacement_size = sizeof(CA_PLIST_SOFTWARE_RENDER) - 1u;
+    uint64_t hit = UINT64_MAX;
+    unsigned hits = 0;
+
+    /* The compile-time gate above already forbids this; keep the runtime
+     * refusal anyway so the invariant is enforced where the write happens. */
+    if (replacement_size != pattern_size) {
+        result_fail(result, ROOTFS_WORK_CA_PLIST_INVALID,
+                    ROOTFS_WORK_STAGE_CA_PLIST_WRITE, 0,
+                    "software-render plist is %zu bytes, not the stock %zu",
+                    replacement_size, pattern_size);
+        return false;
+    }
+    if (!pattern_scan_unique(file, file_size, CA_PLIST_STOCK, pattern_size,
+                             prefix, buffer, buffer_size, &hit, &hits,
+                             ROOTFS_WORK_STAGE_CA_PLIST_SCAN, result))
+        return false;
+    if (hits > 1u) {
+        result_fail(result, ROOTFS_WORK_CA_PLIST_NOT_UNIQUE,
+                    ROOTFS_WORK_STAGE_CA_PLIST_SCAN, 0,
+                    "stock SpringBoard launchd plist occurs more than once");
+        return false;
+    }
+    if (hits != 1u) {
+        result_fail(result, ROOTFS_WORK_CA_PLIST_NOT_UNIQUE,
+                    ROOTFS_WORK_STAGE_CA_PLIST_SCAN, 0,
+                    "stock SpringBoard launchd plist occurs 0 times; exactly 1 "
+                    "is required");
+        return false;
+    }
+    if (!checked_write(file, file_size, hit, CA_PLIST_SOFTWARE_RENDER,
+                       replacement_size, ROOTFS_WORK_STAGE_CA_PLIST_WRITE,
+                       result))
+        return false;
+    result->ca_plist_offset = hit;
     return true;
 }
 
@@ -2234,6 +2519,12 @@ rootfs_work_status_t rootfs_work_create(const char *source_path,
     work_size = source_before.size;
     if (!fstab_rewrite(&temporary, work_size, selected.fstab_line, buffer,
                        selected.io_buffer_bytes, result))
+        goto done;
+    /* Opt-in and off by default: a stock image is left with Apple's own
+     * renderer selection, so the flag is the only thing that changes it. */
+    if (selected.ca_software_render &&
+        !ca_plist_rewrite(&temporary, work_size, buffer,
+                          selected.io_buffer_bytes, result))
         goto done;
     if (!grow_volume(&temporary, &work_size, selected.growth_bytes,
                      &copied_volume, buffer, selected.io_buffer_bytes, result))

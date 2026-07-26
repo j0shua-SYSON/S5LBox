@@ -40,6 +40,19 @@ param(
     [ValidateRange(0, 90000000000)]
     [long] $SnapshotAt = 0,
 
+    # Pass --ca-software-render to bootkernel, which adds an
+    # EnvironmentVariables dictionary carrying CA_ENABLE_MBX2D=0 to the
+    # SpringBoard LaunchDaemon plist inside THIS RUN'S work image. That is the
+    # switch QuartzCore's own code reads to select its software renderer;
+    # without it CA::WindowServer defaults to MBX2D, whose global context is
+    # NULL on a machine that un-matches the PowerVR GPU, and SpringBoard dies
+    # with SIGBUS in _mbx2DDisable on a respawn loop. The rewrite is
+    # size-neutral -- the replacement plist is the same 1490 bytes as the stock
+    # one -- so it does not change the expected work-image size checked below,
+    # and the immutable rootfs is never opened for writing. OFF by default so a
+    # baseline replay and a software-render replay differ by exactly this flag.
+    [switch] $CaSoftwareRender,
+
     # Start from a checkpoint written by an earlier -SnapshotAt run instead of
     # from the kernel entry point. The three sidecars (<file>, .mdimage,
     # .mdstate) are read-only inputs and are hashed into the manifest exactly
@@ -676,6 +689,9 @@ try {
         '-Z', '100000000',
         '-n', [string]$InstructionCap
     )
+    if ($CaSoftwareRender.IsPresent) {
+        $bootArguments += @('--ca-software-render')
+    }
     if ($SnapshotAt -gt 0) {
         if ($SnapshotAt -ge $InstructionCap) {
             throw ("SnapshotAt {0} must be below the instruction cap {1}" -f
@@ -767,6 +783,8 @@ try {
         'hot_page: 0x3d200000',
         'guest_ram_mib: 128',
         'display_enabled: true',
+        "ca_software_render: $($CaSoftwareRender.IsPresent.ToString().ToLowerInvariant())",
+        'ca_software_render_note: when true, bootkernel rewrites /System/Library/LaunchDaemons/com.apple.SpringBoard.plist inside this run''s work image only, adding EnvironmentVariables CA_ENABLE_MBX2D=0 so QuartzCore selects its software renderer. Same 1490 bytes as the stock record, matched exactly once, so no HFS+ catalog change and no change to the expected work-image size; the immutable rootfs is never written.',
         'snapshots: -SnapshotAt writes a checkpoint; -RestoreFrom starts from one. Taking a checkpoint during a restored run is not supported yet.',
         "working_directory: $runDir",
         "stdout: $stdout",
