@@ -2990,3 +2990,250 @@ model: each fix unlocks code that has never run here before, and that newly
 reachable code will expose another hidden bug. Make every stop exact, make every
 claim narrower than the evidence, and keep moving the real untouched input
 forward one proved boundary at a time.
+
+## 23. State after 2026-07-26 — rendering reached; read this before §22
+
+§22 is retained for history and is superseded from item 11 onward: "guest-driven
+SpringBoard pixels" happened in run59. This section carries what a fresh agent
+needs that exists nowhere else, because several findings below were produced by
+analysis rather than by a commit and would otherwise be lost.
+
+### 23.1 The guest renders. What did it.
+
+`/device-tree/vram` ships with `reg = {0,0}`; iBoot fills it and we never ran
+iBoot. Without it `IOSurfaceRoot` cannot publish its `PurpleGfxMem` region
+(`0xc0529248`, skipped at `0xc052942c`), so `AppleH1CLCD` takes its fallback at
+`0xc07060ac` and builds the surface with `withPhysicalAddress(..., kIODirectionOut)`
+instead of `withSubRange(..., kIODirectionOutIn)`. `IOSurfaceClient` slot 21 then
+does `cmp r0,#2 / moveq r2,#0x1000` at `0xc0526a38`, mapping any output-only
+descriptor `kIOMapReadOnly`. Userspace received the framebuffer read-only and
+SpringBoard's compositor faulted on its first store. One `dt_set_reg` call fixed
+it (`691b727`). Screenshot: `docs/images/run59-first-frame.png`.
+
+**Generalisable:** three top-level nodes ship `{0,0}` and iBoot fills all three.
+We patch `/memory` and now `/vram`. **`/pram` is still zero** and nobody has
+checked what reads it.
+
+### 23.2 The console log is lossy. Distrust "message X never appeared".
+
+`core/src/soc/uart.c:47` is `if (u->tx_len < UART_TX_BUFFER - 1)` — a
+**first-8191-bytes cap, not a ring**. run59 wrote roughly 16,575 bytes to UTXH,
+so **about half of every boot's console output is silently discarded, and the
+discarded half is the tail.** Any negative claim about late-boot messages is
+unsound until this is fixed, including several made on 2026-07-26.
+
+Fixing it in `uart.c` means either a ring (which changes `tx_len` semantics and
+therefore `SNAPSHOT_VERSION`, since `snap_uart` validates
+`tx_len < UART_TX_BUFFER`) or a harness-side tee in `tools/bootkernel.c` that
+streams UTXH to a file. The tee costs no snapshot bump and is preferred.
+
+Also free and not currently used: `mt-strings=1` in `-c` turns on the entire
+multitouch log stream (`mtlog` at `0xc0439bb0` needs `PE_parse_boot_argn` plus
+`PE_i_can_has_debugger()`, and `debug=0x8` already satisfies the second).
+`mt-bytes=1` additionally hex-dumps every SPI packet.
+
+### 23.3 Activation: settled, and `docs/activation.md` is wrong
+
+`docs/activation.md` is a protected file and could not be corrected in place, so
+the corrections live here. All of the following is byte-verified against
+`/usr/libexec/lockdownd` (VA = file offset + 0x1000, ARM not Thumb).
+
+**SpringBoard does not gate the home screen on `ActivationState`.** It reads
+`BrickState`. lockdownd derives `BrickState` *from* `ActivationState` at boot.
+Two hops the document never modelled:
+
+```
+ActivationState --(lockdownd determine_activation_state 0xd340)--> BrickState
+BrickState      --(SB _setupActivationState, key _kLockdownBrickStateKey)--> brickedDevice
+brickedDevice   --(SBAwayView updateInterface)--> lockout screen
+```
+
+**The value the era's tools used does not work here.** Seeding
+`ActivationState = Activated` is overwritten to `Unactivated` every boot
+(`0xd4f8` CFEqual against `FactoryActivated` fails → `0xd50c` forces
+`Unactivated` → tail `0xdba8`/`0xdd00` rewrites). Seeding **`FactoryActivated`**
+survives (`0xd508` → `bne 0xda2c`; tail `0xdbb8` not taken → write skipped).
+
+`ActivationState` is normally **non-persistent** (attribute 2, set at `0xdd14`),
+which is why the runtime-created `data_ark.plist` has no such key at all.
+
+**No Apple signature is needed to read state.** `verify_activation_record`
+(`0xe218`) is called only from `dealwith_activation` and `handle_activate` — the
+apply paths — never on boot-default read.
+
+The file to provision, at `/private/var/root/Library/Lockdown/data_ark.plist`:
+
+```xml
+<key>-ActivationState</key>  <string>FactoryActivated</string>
+<key>-BrickState</key>       <false/>
+```
+
+The leading `-` is the global-domain composed form (key builder `0x7b08`). The
+second key is not redundant: it makes the fix hold even if `is_phone` is false,
+since `determine_activation_state` then skips brick management entirely.
+
+Note the pristine rootfs has `/private/var/root/Library` (CNID 4541) but **no
+`Lockdown` subdirectory**, so provisioning must create a directory as well as a
+file.
+
+### 23.4 Touch: fully specified, ~750-900 lines, bounded
+
+`AppleMultitouchZ2SPI` already starts. It is asleep in an **unbounded
+`IOCommandGate::commandSleep()` with no deadline** (`0xc05a5f0c`, loop at
+`0xc05a5f18`) waiting for an SPI completion interrupt our stub cannot raise —
+failure shape number five. Arithmetic proof: `spi1 r=0 w=19`; one stalled
+transfer costs `11 + N` writes, so `N=8` is exactly the 8-deep TX FIFO filled by
+the 16-byte `isInHBPP` probe, and `r=0` proves the ISR never ran.
+
+Touch is on **`/arm-io/spi1`** (`multi-touch,n82`, chip-select 0, PA
+`0x3CE00000`, VIC 10). **`/arm-io/spi2` has zero children** and is the baseband
+transport — un-matching it is irrelevant to touch.
+
+**The guest has already armed the interrupt**: `GPIOIC INTEN group 4 =
+0x08000000` (bit 27 = line 155), measured in run59. "GPIO 155" is an
+interrupt-controller line index, not a pin; 155 = group 4, bit 27, stride 32.
+Reset is group 6 bit 6, power_ldo group 7 bit 1.
+
+**You never implement the HBPP firmware download.** Apple built the escape
+hatch, but it is direction-sensitive and getting it backwards uninstalls the
+driver:
+
+| moment | required answer |
+|---|---|
+| probe 1, in `finishStarting` `0xc0442670`, before reset | **in HBPP** — accepted BE16 set `{0x1AA1,0x18E1,0x1F01,0x4879,0x4969,0x4BC1,0x4AD1}` |
+| probes 2-4, in `attemptToBootloadDevice` `0xc04414c4` | **not in HBPP** — zeros |
+| then `getReportInfo(0xD3)` | must succeed → `isBootloaded()` true |
+
+Answering "not in HBPP" at probe 1 makes `finishStarting` return false and the
+driver detaches. Cost of the skip is three cosmetic `Bootload attempt N of 3
+failed` lines, and it drops the 54,156-byte firmware **and the entire
+`AppleARMPL080DMAC` model** out of scope. Normal operation is PIO, two
+transactions per frame.
+
+**Do not raise the SPI interrupt with an empty RX FIFO.** The ISR at
+`0xc05a6688` begins `if (((status>>8)&0xF) == 0) return 0;` — it bails without
+waking anything, reproducing the current hang exactly.
+
+Build order, each step independently observable: (0) fix the UART capture;
+(1) SPI controller + **null slave returning 0x00**, whose success criterion is
+the unconditional `printf` at `0xc0442734`, `"Could not detect HBPP. Returning
+false from finishStarting()"`; (2) GPIO interrupt controller, 7 groups ×
+{INTLEVEL 0x80, INTSTAT 0xA0 W1C, INTEN 0xC0, INTTYPE 0xE0}, cascading to VIC
+lines `{0,1,2,3,31,32,33}` — group 4 → VIC 2; (3) Z2 slave bring-up; (4) frame
+path and host injection; (5) payload format, the only genuine unknown, reversed
+from `_MT_ParsedMultitouchFrameRepCreate` (cache VA `0x33cf99c0`).
+
+**`wake_line_enabled()` rejects any line ≥ 32×VIC_COUNT.** A wake-source entry
+written as `{ "multitouch", 155, … }` returns false silently and can never wake
+the CPU. The entry must be the cascade VIC line.
+
+Two downstream kill-switches that will look like touch bugs and are not:
+SpringBoard VA `0x00041268` drops every digitizer event when the byte at data VA
+`0x001076b8` is non-zero, and run59 already logs 29 consecutive `IOSurface
+warning: buffer allocation failed. 320 x 480`, which will bite the moment a tap
+launches an app.
+
+### 23.5 The HFS+ provisioner blocks two features, not four
+
+`tools/rootfs_work.c` does size-neutral in-place rewrites only and has no
+catalog B-tree code. It genuinely blocks **activation** (§23.3, which needs a new
+directory *and* a new file) and the **jailbreak payload** (§23.6, 555 files).
+
+It does **not** block touch (§23.4) — every multitouch file ships and
+`mtmergeprops` already runs.
+
+And it may not block **PPP** either. The rootfs ships **no ppp launchd job** and
+`/private/etc/ppp` is empty, but several shipped launchd plists point at
+binaries that **do not exist on this image**, so rewriting one in place is
+size-neutral with zero collateral damage — exactly the mechanism already used
+for `/etc/fstab` and the SpringBoard `CA_ENABLE_MBX2D` plist. Candidates, best
+first:
+
+| plist | size | format | target | why inert |
+|---|---|---|---|---|
+| `com.apple.tcpdump.server.plist` | 433 B | **XML** | `/usr/libexec/tcpdumpserver` | absent; `RunAtLoad` not set, MachServices on-demand |
+| `com.apple.chud.pilotfish.plist` | 530 B | XML | `/Developer/usr/libexec/pilotfish` | `/Developer` absent |
+| `com.apple.chud.chum.plist` | 515 B | XML | `/Developer/usr/libexec/chum` | `/Developer` absent |
+| `com.apple.graphicsservices.sample.plist` | 447 B | XML | `/usr/local/bin/sampled` | `/usr/local` absent |
+
+XML beats binary here because the `<array>` can be rewritten freely and
+whitespace-padded back to the identical byte count. `com.apple.wifiFirmwareLoader.plist`
+is **binary** and only 170 B, whose single 31-byte argv string leaves room for
+`/usr/sbin/pppd` and nothing else — not enough for a device or options, so it
+only works paired with an `/etc/ppp/options` file we also cannot create.
+
+**Verified `pppd` facts that make the standalone invocation viable.** It is Apple
+pppd 2.4.2, armv6, at `/usr/sbin/pppd` (284,608 bytes). A missing
+`/etc/ppp/options` is **non-fatal** — it warns and runs on built-in defaults plus
+argv. It daemonises by default, so `nodetach` is required under launchd. It uses
+modem control by default and will watch for carrier, so an emulated UART with no
+DCD needs `local` and probably `nocrtscts`. Peer authentication is not required
+at first bring-up (2.4.2 only sets `auth_required` when a default route already
+exists), but pass `noauth` for determinism — no secrets ship. So:
+
+```
+/usr/sbin/pppd <dev> <speed> local nocrtscts noauth nodetach
+```
+
+The Apple `PPPController`/`serviceid` path exists but is optional; classic
+standalone invocation works.
+
+**What the host-side peer must tolerate:** pppd sends CCP (0x80FD) by default
+with bsdcomp and deflate enabled, so the peer must Protocol-Reject it. IPV6CP,
+Apple ACSP and ECP protents are also compiled in — Protocol-Reject any unknown
+NCP rather than assuming the set. VJ compression is on by default (16 slots);
+`novj` is optional. First LCP Config-Req carries MRU 1500, ASYNCMAP 0x00000000,
+a random magic number, PCOMP and ACCOMP, with no auth option and echo off.
+
+**Observability is the real constraint.** The image has **no shell at all** — no
+`sh`, no `bash`, no coreutils, no `getty`, and `/bin` contains exactly
+`launchctl`. Also absent: `ifconfig`, `ping`, `netstat`, `route`, `curl`,
+`tcpdump`, `nc`, `telnet`. Present and usable: `scutil`, `scselect`,
+`ipconfig`, `configd`, `bootpd`, plus MobileSafari. Any milestone phrased as
+"ping succeeds" has to be rephrased against what actually ships.
+
+Requirements discovered from the acquired payload, each of which is a silent
+breakage if missed: **setuid/setgid bits must survive** (`MobileCydia` 6755,
+`bin/su` 4555, `var/local` 2775 gid=50); **89 symlinks** including `/etc`,
+`/var`, `/tmp` into `private/`; and the volume ships `freeBlocks = 0`, so
+`grow_volume` must run first.
+
+### 23.6 The payload, already acquired and verified
+
+In `work/payload/` (gitignored, never commit it). Every Mach-O in all sets is
+`cputype 12` subtype 0 or 6 — **zero armv7**, censused from headers by two
+independent code paths.
+
+Use `gala-Cydia.tar`'s skeleton (555 files, seeded dpkg database, apt keys) but
+substitute `cydia_1.0.3044-66` from `debs-3.1.3/`: the tarball's Cydia is 1.1.8
+from 2012 and links the iOS 5 SDK, while 1.0.3044-66 links exactly the 3.1 SDK
+that 7E18 provides. Both Cydia binaries are setuid root with
+`LC_CODE_SIGNATURE`, so this depends on the code-signing disable in §23.7.
+
+### 23.7 Code signing: armed, result inconclusive
+
+`docs/activation.md` §A.4 confirmed the switch from disassembly:
+`/chosen/debug-enabled = 1` plus boot-args `cs_enforcement_disable=1
+amfi_get_out_of_my_way=1 amfi_allow_any_signature=1`. run60 applied it — both
+confirmed in the run header — and booted clean to 800e6.
+
+**The result is inconclusive and must not be read as failure.**
+`_cs_validate_page` still fires 1,705 times, but that symbol is the kernel's
+page-hashing primitive, not AMFI's policy gate; and the counts are not
+comparable to run59's 5,690 because run59 ran 5e9 instructions to run60's 800e6.
+Deciding it needs either an unsigned binary to exec (blocked on §23.5) or a
+`--call-probe-kernel` on AMFI's `vnode_check_signature` return.
+
+### 23.8 The trap that has now cost three retractions
+
+A per-process trace block that reports one generation does not describe the
+whole run, and **host-side counters are not machine state**: `core/include/snapshot.h`
+says a restored process starts them fresh, so a zero in a restored run means
+"not seen since the restore point", never "never happened". On 2026-07-26 that
+misreading produced a committed claim that `AppleH1CLCD::createSurface` never
+ran, when it runs and succeeds at instruction ~238,400,000.
+
+**Compare the heartbeat pc stream before reading divergence into differing
+counters.** Restore is bit-exact — 20/20 heartbeats identical between cold run52
+and restored run56 across 3.0e9-4.9e9, agreeing 862 million instructions past
+the restore point, across three different binaries.
