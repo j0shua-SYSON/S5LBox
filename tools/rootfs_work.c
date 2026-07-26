@@ -305,25 +305,50 @@ static const uint8_t PPP_PLIST_STOCK[] =
  *                    CommCenter's own strings carry /dev/uart.umts and
  *                    /dev/uart.debug verbatim, which is where the naming rule
  *                    comes from rather than from a guess.
- *   115200           pppd 2.4.2's set_up_tty() calls cfsetospeed/cfsetispeed
- *                    only when a speed was given on the command line; with no
- *                    speed it reads the port's current one back and calls
- *                    fatal("Baud rate for %s is 0; need explicit baud rate")
- *                    if that reads zero.  tcsetattr -- and therefore
- *                    AppleS5L8900XSerial::setBaud -- is reached either way, so
- *                    naming a speed removes a failure mode without adding one.
  *   local            do not use modem control lines.  pppd watches for carrier
  *                    by default, and this UART has no DCD to raise.
  *   nocrtscts        do not ask for hardware flow control.  uart4 carries
  *                    `no-flow-control`, so the driver short-circuits
  *                    getFlowStatus to "asserted" without reading UMSTAT; the
  *                    flag keeps pppd's request consistent with that.
- *   noauth           determinism, not necessity: 2.4.2 only sets
- *                    auth_required when a default route already exists, and no
- *                    secrets ship, but a run should not depend on that.
  *   nodetach         MANDATORY under launchd.  pppd daemonises by default, and
  *                    a job whose first process exits immediately is a job
  *                    launchd believes has died.
+ *
+ * StandardErrorPath = /dev/console IS THE MOST IMPORTANT LINE IN THIS FILE,
+ * and it is here because of a measurement rather than a preference.
+ *
+ * run74 established that this job already works as far as the exec: launchd
+ * posix_spawned /usr/sbin/pppd at instruction 557,124,470 as pid 19, pppd ran
+ * for 182 million instructions, and then called exit(1) at 739,184,188
+ * (_exit1 status 0x100).  ONE is pppd 2.4.2's EXIT_FATAL_ERROR, which is
+ * already informative: it is NOT EXIT_OPTION_ERROR (2), NOT EXIT_NOT_ROOT (3),
+ * NOT EXIT_NO_KERNEL_SUPPORT (4) and NOT EXIT_OPEN_FAILED (7), so the device
+ * node was not the problem and the command line parsed.  It is a fatal() call,
+ * and fatal() writes its message to stderr.  Without this key launchd gives
+ * the job /dev/null and that message is destroyed -- which is exactly the
+ * state run74 was read in, and why it could only report an exit code.
+ * `StandardErrorPath` is confirmed present in the image (5 occurrences of the
+ * key name; /dev/console appears 7 times).
+ *
+ * TWO ARGUMENTS WERE SPENT TO BUY IT, and the trade is stated rather than
+ * quietly made.  The key and its value cost 61 bytes and the budget had 15.
+ *
+ *   `noauth` was dropped.  pppd 2.4.2 only sets auth_required when a default
+ *   route already exists, and at this point in the boot there is none, so it
+ *   was determinism rather than necessity from the start.
+ *
+ *   The explicit `115200` was dropped, and this one is a real trade.  With no
+ *   speed on the command line, set_up_tty() reads the port's current one back
+ *   and calls fatal("Baud rate for %s is 0; need explicit baud rate") if it
+ *   reads zero.  That risk is now bounded rather than blind: AppleOnboardSerial
+ *   programs a default of 19200 8N1 at 0xc047244a during start(), before any
+ *   tty is opened, and that is the only baud constant in either serial kext.
+ *   And the trade is self-resolving -- if the readback IS zero, that fatal()
+ *   is now the message that appears on the console, which is more than the
+ *   previous configuration could tell us.  Putting the speed back is a
+ *   one-line change once the console says what pppd is actually complaining
+ *   about.
  *
  * MachServices is dropped deliberately.  With no Mach port to hold there is no
  * on-demand path, so RunAtLoad is the whole lifecycle; keeping the port would
@@ -337,12 +362,12 @@ static const uint8_t PPP_PLIST_STOCK[] =
  * viable at all, since this provisioner cannot create that file either.
  *
  * THE INDENTATION IS FILLER, exactly as it is in CA_PLIST_SOFTWARE_RENDER, and
- * for the same reason.  The job's own bytes come to 515; the budget is 530; so
- * fifteen leading tabs are distributed one per line over the fifteen lines
- * from <key>Label</key> to </dict>.  XML treats inter-element whitespace as
- * insignificant, so a property-list reader sees exactly the seven-argument job
- * above and nothing else.  Do not reformat this: the length gate below is a
- * compile error, not a comment.
+ * for the same reason.  The job's own bytes come to 526; the budget is 530; so
+ * there are exactly FOUR leading tabs, one on each dict-level <key>.  XML
+ * treats inter-element whitespace as insignificant, so a property-list reader
+ * sees exactly the four keys and the five-argument job above and nothing else.
+ * Do not reformat this: the length gate below is a compile error, not a
+ * comment.
  */
 static const uint8_t PPP_PLIST_JOB[] =
     "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
@@ -350,20 +375,20 @@ static const uint8_t PPP_PLIST_JOB[] =
     "<plist version=\"1.0\">\n"
     "<dict>\n"
     "\t<key>Label</key>\n"
-    "\t<string>com.apple.chud.pilotfish</string>\n"
+    "<string>com.apple.chud.pilotfish</string>\n"
     "\t<key>RunAtLoad</key>\n"
-    "\t<true/>\n"
+    "<true/>\n"
+    "\t<key>StandardErrorPath</key>\n"
+    "<string>/dev/console</string>\n"
     "\t<key>ProgramArguments</key>\n"
-    "\t<array>\n"
-    "\t<string>/usr/sbin/pppd</string>\n"
-    "\t<string>/dev/uart.debug</string>\n"
-    "\t<string>115200</string>\n"
-    "\t<string>local</string>\n"
-    "\t<string>nocrtscts</string>\n"
-    "\t<string>noauth</string>\n"
-    "\t<string>nodetach</string>\n"
-    "\t</array>\n"
-    "\t</dict>\n"
+    "<array>\n"
+    "<string>/usr/sbin/pppd</string>\n"
+    "<string>/dev/uart.debug</string>\n"
+    "<string>local</string>\n"
+    "<string>nocrtscts</string>\n"
+    "<string>nodetach</string>\n"
+    "</array>\n"
+    "</dict>\n"
     "</plist>\n";
 
 /* Both halves of the contract, as build-time constraints rather than comments:

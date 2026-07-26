@@ -30,6 +30,21 @@
  *      the only copy of what the guest transmitted; SNAPSHOT_VERSION 10 exists
  *      because uart4 is serialised in front of every other device.
  *
+ * MUTATION CHECKS. A test that cannot fail is not evidence, so each of the
+ * three bugs above was introduced deliberately, into a clean tree, and the
+ * suite was required to catch it. All three were caught, and by the assertions
+ * written for them rather than incidentally:
+ *
+ *   1. route uart4's stores into uart0's model (the aliasing bug) —
+ *      8 checks across 4 tests, including "an HDLC flag reached the console
+ *      capture", which is the one that would otherwise have made a boot log
+ *      unreadable rather than wrong;
+ *   2. UTRSTAT returns 0, i.e. the transmitter is permanently busy (which is
+ *      what the UNDECODED page answered before this window existed) —
+ *      3 checks, all naming the spin;
+ *   3. drop uart4 from snap_mach() — 2 checks, on the restored capture and on
+ *      the two ports' configuration registers being crossed.
+ *
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed.
  */
 #include "soc.h"

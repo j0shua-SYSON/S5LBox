@@ -1039,8 +1039,15 @@ static void test_ppp_launchd_job_plist(void) {
     CHECK(region_contains(rewritten, PPP_PLIST_SIZE,
                           "<string>/dev/uart.debug</string>"),
           "rewritten job does not name uart4's devfs node");
-    CHECK(region_contains(rewritten, PPP_PLIST_SIZE, "<string>115200</string>"),
-          "rewritten job gives pppd no explicit baud rate");
+    /* The console log path, which run74 is the reason for: pppd exited 1 --
+     * its EXIT_FATAL_ERROR -- and fatal() writes to stderr, which launchd
+     * sends to /dev/null unless this key says otherwise. Without it a run can
+     * report an exit code and nothing else. */
+    CHECK(region_contains(rewritten, PPP_PLIST_SIZE,
+                          "<key>StandardErrorPath</key>") &&
+          region_contains(rewritten, PPP_PLIST_SIZE,
+                          "<string>/dev/console</string>"),
+          "rewritten job discards pppd's own error messages");
     CHECK(region_contains(rewritten, PPP_PLIST_SIZE, "<string>local</string>"),
           "rewritten job lets pppd wait for a carrier this UART has no DCD "
           "to raise");
@@ -1048,8 +1055,6 @@ static void test_ppp_launchd_job_plist(void) {
                           "<string>nocrtscts</string>"),
           "rewritten job asks for hardware flow control on a no-flow-control "
           "port");
-    CHECK(region_contains(rewritten, PPP_PLIST_SIZE, "<string>noauth</string>"),
-          "rewritten job does not disable peer authentication");
     CHECK(region_contains(rewritten, PPP_PLIST_SIZE,
                           "<string>nodetach</string>"),
           "rewritten job lets pppd daemonise, which launchd reads as a death");
