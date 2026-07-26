@@ -2979,6 +2979,48 @@ SPRINGBOARD_UI_CHECKPOINTS[] = {
      */
     { "UIKit:UIWindow-makeKeyAndVisible",            UINT32_C(0x3250f6ac) },
     { "UIKit:UIWindowLayer-init",                    UINT32_C(0x325e6fbc) },
+    /*
+     * -[UIWindow makeKeyAndVisible] is the WRONG probe and its zero means
+     * nothing. Cross-referencing the makeKeyAndVisible selref across the whole
+     * 1.19 MB SpringBoard __text finds exactly one call site, inside
+     * -[SBSyncController _delayedBeginReset], which is the restore path and is
+     * never taken at boot. SpringBoard 3.1.3 shows its main window with
+     * -[UIWindow orderFront:] and -[UIWindow makeKey:]. A zero on
+     * makeKeyAndVisible is the expected reading on healthy hardware. It is kept
+     * only so that fact stays visible.
+     *
+     * The real window bring-up is -[SBUIController init] at 0x0000e140, which
+     * applicationDidFinishLaunching: delegates to entirely via
+     * +[SBUIController sharedInstance] at 0x0000a7ba. Between [super init] and
+     * orderFront: the method is straight-line except for ONE conditional: the
+     * nil bail-out at 0x0000e16a. So a single checkpoint there distinguishes
+     * "the controller was never constructed" from "it was, and the failure is
+     * later".
+     *
+     * Note 0x0000e164 stores the result into the singleton BEFORE the nil
+     * check, so +sharedInstance returns nil happily and 0x0000a7ba still
+     * "executes and returns" while 0x0000a7c4 still "stores the result".
+     * Both previously recorded facts hold with a nil controller, and every
+     * later message to it is a silent Objective-C no-op. That is why those two
+     * hits proved less than they appeared to.
+     *
+     * 0x0000e15c is the first objc_msgSendSuper2 (stub 0xb1bd4) on the boot
+     * path -- a different stub from the objc_msgSend already proven to work --
+     * and 0x0000e1a4 is objc_msgSend_stret (stub 0xb1bec) for
+     * [[UIScreen mainScreen] bounds], whose CGRect sizes the window.
+     */
+    { "SBUIController:sharedInstance-init-call",     UINT32_C(0x0000b420) },
+    { "SBUIController:super-init-return",            UINT32_C(0x0000e160) },
+    { "SBUIController:nil-bailout",                  UINT32_C(0x0000e16a) },
+    { "SBUIController:screen-bounds-return",         UINT32_C(0x0000e1a8) },
+    { "SBUIController:window-created",               UINT32_C(0x0000e1f8) },
+    { "SBUIController:orderFront-call",              UINT32_C(0x0000e350) },
+    { "SBUIController:makeKey-return",               UINT32_C(0x0000e380) },
+    { "SpringBoard:animateAppleDown-call",           UINT32_C(0x0000abcc) },
+    { "UIKit:UIScreen-mainScreen",                   UINT32_C(0x324ae778) },
+    { "UIKit:UIWindow-initWithContentRect",          UINT32_C(0x324ac628) },
+    { "UIKit:UIWindow-orderFront",                   UINT32_C(0x324e2858) },
+    { "UIKit:UIWindow-makeKey",                      UINT32_C(0x324e2914) },
 };
 #define SPRINGBOARD_UI_CHECKPOINT_COUNT \
     ((unsigned)(sizeof SPRINGBOARD_UI_CHECKPOINTS / \
@@ -6801,6 +6843,18 @@ static int springboard_ui_checkpoint_index(uint32_t pc) {
         case UINT32_C(0x311c9cdc): return 121;
         case UINT32_C(0x3250f6ac): return 122;
         case UINT32_C(0x325e6fbc): return 123;
+        case UINT32_C(0x0000b420): return 124;
+        case UINT32_C(0x0000e160): return 125;
+        case UINT32_C(0x0000e16a): return 126;
+        case UINT32_C(0x0000e1a8): return 127;
+        case UINT32_C(0x0000e1f8): return 128;
+        case UINT32_C(0x0000e350): return 129;
+        case UINT32_C(0x0000e380): return 130;
+        case UINT32_C(0x0000abcc): return 131;
+        case UINT32_C(0x324ae778): return 132;
+        case UINT32_C(0x324ac628): return 133;
+        case UINT32_C(0x324e2858): return 134;
+        case UINT32_C(0x324e2914): return 135;
         default: break;
     }
     return -1;
