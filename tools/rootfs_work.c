@@ -299,11 +299,21 @@ static uint64_t read_be64(const uint8_t *bytes) {
     return ((uint64_t)read_be32(bytes) << 32) | read_be32(bytes + 4);
 }
 
+static void write_be16(uint8_t *bytes, uint16_t value) {
+    bytes[0] = (uint8_t)(value >> 8);
+    bytes[1] = (uint8_t)value;
+}
+
 static void write_be32(uint8_t *bytes, uint32_t value) {
     bytes[0] = (uint8_t)(value >> 24);
     bytes[1] = (uint8_t)(value >> 16);
     bytes[2] = (uint8_t)(value >> 8);
     bytes[3] = (uint8_t)value;
+}
+
+static void write_be64(uint8_t *bytes, uint64_t value) {
+    write_be32(bytes, (uint32_t)(value >> 32));
+    write_be32(bytes + 4, (uint32_t)value);
 }
 
 static void result_reset(rootfs_work_result_t *result) {
@@ -357,6 +367,17 @@ const char *rootfs_work_status_name(rootfs_work_status_t status) {
     case ROOTFS_WORK_CA_PLIST_NOT_UNIQUE: return "ca-plist-not-unique";
     case ROOTFS_WORK_CA_PLIST_INVALID: return "ca-plist-invalid";
     case ROOTFS_WORK_GROW_INVALID: return "grow-invalid";
+    case ROOTFS_WORK_PROVISION_INVALID: return "provision-invalid";
+    case ROOTFS_WORK_PROVISION_UNSUPPORTED: return "provision-unsupported";
+    case ROOTFS_WORK_PROVISION_CATALOG_CORRUPT:
+        return "provision-catalog-corrupt";
+    case ROOTFS_WORK_PROVISION_PARENT_MISSING:
+        return "provision-parent-missing";
+    case ROOTFS_WORK_PROVISION_EXISTS: return "provision-exists";
+    case ROOTFS_WORK_PROVISION_NODE_FULL: return "provision-node-full";
+    case ROOTFS_WORK_PROVISION_LEAF_HEAD: return "provision-leaf-head";
+    case ROOTFS_WORK_PROVISION_NO_SPACE: return "provision-no-space";
+    case ROOTFS_WORK_PROVISION_LIMIT: return "provision-limit";
     case ROOTFS_WORK_RANGE_ERROR: return "range-error";
     case ROOTFS_WORK_PUBLISH_FAILED: return "publish-failed";
     case ROOTFS_WORK_PUBLISH_DURABILITY_FAILED:
@@ -383,6 +404,8 @@ const char *rootfs_work_stage_name(rootfs_work_stage_t stage) {
     case ROOTFS_WORK_STAGE_CA_PLIST_WRITE: return "ca-plist-write";
     case ROOTFS_WORK_STAGE_GROW_PLAN: return "grow-plan";
     case ROOTFS_WORK_STAGE_GROW_WRITE: return "grow-write";
+    case ROOTFS_WORK_STAGE_PROVISION_PLAN: return "provision-plan";
+    case ROOTFS_WORK_STAGE_PROVISION_WRITE: return "provision-write";
     case ROOTFS_WORK_STAGE_FINAL_VALIDATE: return "final-validate";
     case ROOTFS_WORK_STAGE_FLUSH: return "flush";
     case ROOTFS_WORK_STAGE_PUBLISH: return "publish";
@@ -2221,6 +2244,1651 @@ static bool grow_volume(host_file_t *file, uint64_t *file_size,
     return true;
 }
 
+/* ======================= HFS+ catalog provisioning =======================
+ *
+ * Everything above this line is a size-neutral overwrite: the catalog never
+ * changes, so nothing can go wrong in it.  This section is the opposite kind
+ * of code -- it inserts records into the catalog B-tree that a guest kernel
+ * will mount and trust -- so it is built around four rules.
+ *
+ * 1. PLAN, THEN COMMIT.  Every decision and every refusal happens while the
+ *    work image is still untouched.  The plan is applied to an in-memory cache
+ *    of the nodes, the bitmap and the volume header; not one byte reaches the
+ *    file until the whole request has succeeded in memory.  A refusal
+ *    therefore leaves the image byte-identical, and that is a property of the
+ *    structure rather than of remembering to undo things.
+ *
+ * 2. NO SPLITTING.  If a record does not fit in the leaf it belongs in, this
+ *    refuses (ROOTFS_WORK_PROVISION_NODE_FULL).  If it would become a leaf's
+ *    FIRST key in a tree that has index nodes, it refuses too
+ *    (ROOTFS_WORK_PROVISION_LEAF_HEAD), because the ancestors' index keys
+ *    would have to be rewritten.  What is left is provably local: one leaf
+ *    node's record area and offset array, and nothing else in the tree's
+ *    shape.  No node is allocated or freed, no fLink/bLink changes,
+ *    firstLeafNode and lastLeafNode keep their meaning, and treeDepth,
+ *    totalNodes and freeNodes are untouched.
+ *
+ * 3. A SEARCH THAT CANNOT LOOK MUST SAY SO.  tools/hfsx_extract.py starts its
+ *    walk at the B-tree header's firstLeafNode, and on an image where that
+ *    field was stale it reported "not found" for every file that was actually
+ *    there.  Absence and inability are different answers.  Here, lookups
+ *    descend from rootNode with full structural validation at every step and
+ *    return ROOTFS_WORK_PROVISION_CATALOG_CORRUPT -- never "missing" -- for
+ *    anything unexpected; and catalog_audit() below independently walks the
+ *    whole leaf chain, checks it against the header's own firstLeafNode,
+ *    lastLeafNode and leafRecords, and requires globally ascending keys.  It
+ *    runs once before the plan, so a broken tree is refused rather than
+ *    written into, and once after the commit, so what was written is verified
+ *    by a reader that shares no state with the writer.
+ *
+ * 4. THE ORDERING IS CHECKED, NOT ASSUMED.  The stock rootfs ships with
+ *    freeBlocks = 0.  This runs after grow_volume and re-reads the volume
+ *    header itself, so "there is somewhere to put it" is a measurement of the
+ *    image in front of it.
+ *
+ * Key ordering is HFSX binary compare (keyCompareType 0xBC), which is what the
+ * shipping image uses.  Case-folding order (0xCF, and every HFS+ volume) needs
+ * Apple's fold table to place a name correctly among existing ones, so it is
+ * refused rather than approximated.
+ */
+
+#define HFS_CAT_FOLDER_RECORD 1u
+#define HFS_CAT_FILE_RECORD 2u
+#define HFS_CAT_FOLDER_THREAD 3u
+#define HFS_CAT_FILE_THREAD 4u
+#define HFS_CAT_FOLDER_DATA 88u
+#define HFS_CAT_FILE_DATA 248u
+#define HFS_CAT_THREAD_FIXED 10u
+#define HFS_BT_INDEX_NODE 0x00u
+#define HFS_BT_HEADER_NODE 0x01u
+#define HFS_BT_LEAF_NODE 0xffu
+#define HFS_BT_BIG_KEYS 0x00000002u
+#define HFS_BT_VARIABLE_INDEX_KEYS 0x00000004u
+#define HFS_KEY_COMPARE_BINARY 0xbcu
+#define HFS_ROOT_PARENT_CNID 1u
+#define HFS_ROOT_FOLDER_CNID 2u
+#define HFS_FIRST_USER_CNID 16u
+#define HFS_NAME_MAX_UNITS 255u
+#define HFS_NODE_DESCRIPTOR 14u
+#define HFS_MAX_RECORD_BYTES 1024u
+#define HFS_MAX_TREE_DEPTH 8u
+#define HFS_FLAG_THREAD_EXISTS 0x0002u
+#define HFS_FLAG_HAS_FOLDER_COUNT 0x0010u
+#define HFS_MODE_IFDIR 0040000u
+#define HFS_MODE_IFREG 0100000u
+#define HFS_MODE_PERM_MASK 07777u
+
+typedef struct catalog_node_cache {
+    uint32_t index;
+    bool dirty;
+    uint8_t *bytes;
+} catalog_node_cache_t;
+
+typedef struct catalog_content {
+    uint32_t start_block;
+    uint32_t block_count;
+    const uint8_t *bytes;
+    size_t size;
+} catalog_content_t;
+
+typedef struct catalog_ctx {
+    host_file_t *file;
+    uint64_t file_size;
+    uint32_t block_size;
+    uint32_t total_blocks;
+
+    /* Mutable copy of the primary volume header. */
+    uint8_t vh[HFS_VH_LEN];
+    bool vh_dirty;
+
+    /* Catalog fork geometry. */
+    uint32_t ext_start[8];
+    uint32_t ext_count[8];
+    uint64_t fork_bytes;
+
+    /* B-tree header (node 0). */
+    uint16_t node_size;
+    uint16_t tree_depth;
+    uint32_t root_node;
+    uint32_t first_leaf;
+    uint32_t last_leaf;
+    uint32_t total_nodes;
+    uint32_t leaf_records;
+
+    /* Allocation bitmap, cached whole. */
+    const hfs_volume_t *volume;
+    uint8_t *bitmap;
+    size_t bitmap_bytes;
+    bool bitmap_dirty;
+
+    catalog_node_cache_t *nodes;
+    size_t node_count;
+    uint8_t *build;   /* one record under construction */
+    uint8_t *scratch; /* one node: rebuilds and uncached streaming reads */
+
+    uint32_t file_count;
+    uint32_t folder_count;
+    uint32_t next_cnid;
+    uint32_t free_blocks;
+    uint32_t next_alloc;
+    uint32_t mac_time;
+} catalog_ctx_t;
+
+typedef struct catalog_folder_ref {
+    uint32_t cnid;
+    uint32_t key_parent;
+    uint16_t key_length;
+    uint16_t key_unit[HFS_NAME_MAX_UNITS];
+} catalog_folder_ref_t;
+
+typedef struct rootfs_path_component {
+    uint16_t start;
+    uint16_t length;
+} rootfs_path_component_t;
+
+/*
+ * HFSX binary key order: parent CNID first, then the name as unsigned UTF-16
+ * code units, then the shorter name first.  `*valid` distinguishes "this
+ * record's key is malformed" from any ordering answer, so no caller can read a
+ * corrupt record as a miss.
+ */
+static int catalog_key_compare_raw(const uint8_t *record, uint16_t record_len,
+                                   uint32_t parent, const uint16_t *units,
+                                   uint16_t unit_count, bool *valid) {
+    uint16_t key_length;
+    uint32_t record_parent;
+    uint16_t record_units;
+    uint16_t limit;
+    uint16_t index;
+
+    *valid = false;
+    if (record_len < 8u)
+        return 0;
+    key_length = read_be16(record);
+    if (key_length < 6u || (uint32_t)key_length + 2u > (uint32_t)record_len)
+        return 0;
+    record_parent = read_be32(record + 2);
+    record_units = read_be16(record + 6);
+    if (record_units > HFS_NAME_MAX_UNITS ||
+        (uint32_t)record_units * 2u + 6u > (uint32_t)key_length)
+        return 0;
+    *valid = true;
+    if (record_parent != parent)
+        return record_parent < parent ? -1 : 1;
+    limit = record_units < unit_count ? record_units : unit_count;
+    for (index = 0; index < limit; index++) {
+        uint16_t left = read_be16(record + 8u + (uint32_t)index * 2u);
+        uint16_t right = units[index];
+        if (left != right)
+            return left < right ? -1 : 1;
+    }
+    if (record_units == unit_count)
+        return 0;
+    return record_units < unit_count ? -1 : 1;
+}
+
+static uint16_t catalog_record_data_offset(const uint8_t *record) {
+    uint32_t offset = 2u + read_be16(record);
+    if ((offset & 1u) != 0u)
+        offset++;
+    return (uint16_t)offset;
+}
+
+static uint16_t catalog_slot(const uint8_t *node, uint16_t node_size,
+                             uint16_t index) {
+    return read_be16(node + node_size - 2u * ((uint32_t)index + 1u));
+}
+
+static void catalog_slot_write(uint8_t *node, uint16_t node_size,
+                               uint16_t index, uint16_t value) {
+    write_be16(node + node_size - 2u * ((uint32_t)index + 1u), value);
+}
+
+static uint16_t catalog_record_count(const uint8_t *node) {
+    return read_be16(node + 10);
+}
+
+/*
+ * Structural validation of one node.  This is the gate that turns "the tree
+ * disagrees with itself" into a refusal instead of a wrong answer, so it is
+ * deliberately exhaustive: descriptor, offset array, every key, and every
+ * record body's minimum size for the type it claims to be.
+ */
+static bool catalog_node_check(const catalog_ctx_t *ctx, const uint8_t *node,
+                               uint32_t index, uint8_t expect_kind,
+                               uint8_t expect_height,
+                               rootfs_work_stage_t stage,
+                               rootfs_work_result_t *result) {
+    uint16_t node_size = ctx->node_size;
+    uint16_t count = catalog_record_count(node);
+    uint16_t previous = HFS_NODE_DESCRIPTOR;
+    uint16_t limit;
+    uint16_t record_index;
+
+    if (node[8] != expect_kind || node[9] != expect_height) {
+        result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
+                    "catalog node %u is kind 0x%02x height %u, expected "
+                    "0x%02x/%u", index, node[8], node[9], expect_kind,
+                    expect_height);
+        return false;
+    }
+    if (count == 0u ||
+        (uint32_t)HFS_NODE_DESCRIPTOR + 2u * ((uint32_t)count + 1u) >
+            (uint32_t)node_size) {
+        result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
+                    "catalog node %u claims %u records", index, count);
+        return false;
+    }
+    limit = (uint16_t)(node_size - 2u * ((uint32_t)count + 1u));
+    for (record_index = 0; record_index <= count; record_index++) {
+        uint16_t offset = catalog_slot(node, node_size, record_index);
+        if ((offset & 1u) != 0u || offset > limit ||
+            (record_index == 0u ? offset != HFS_NODE_DESCRIPTOR
+                                : offset <= previous)) {
+            result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
+                        "catalog node %u offset slot %u is 0x%04x after "
+                        "0x%04x (limit 0x%04x)", index, record_index, offset,
+                        previous, limit);
+            return false;
+        }
+        previous = offset;
+    }
+    for (record_index = 0; record_index < count; record_index++) {
+        uint16_t offset = catalog_slot(node, node_size, record_index);
+        uint16_t end = catalog_slot(node, node_size,
+                                    (uint16_t)(record_index + 1u));
+        uint16_t record_len = (uint16_t)(end - offset);
+        const uint8_t *record = node + offset;
+        uint16_t data_offset;
+        bool valid = false;
+        uint16_t needed;
+
+        (void)catalog_key_compare_raw(record, record_len, 0u, NULL, 0u, &valid);
+        if (!valid) {
+            result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
+                        "catalog node %u record %u has a malformed key",
+                        index, record_index);
+            return false;
+        }
+        data_offset = catalog_record_data_offset(record);
+        if (expect_kind == HFS_BT_INDEX_NODE) {
+            uint32_t child;
+            if ((uint32_t)data_offset + 4u > (uint32_t)record_len) {
+                result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT,
+                            stage, 0, "catalog index node %u record %u has no "
+                            "child pointer", index, record_index);
+                return false;
+            }
+            child = read_be32(record + data_offset);
+            if (child == 0u || child >= ctx->total_nodes) {
+                result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT,
+                            stage, 0, "catalog index node %u record %u points "
+                            "at node %u of %u", index, record_index, child,
+                            ctx->total_nodes);
+                return false;
+            }
+            continue;
+        }
+        if ((uint32_t)data_offset + 2u > (uint32_t)record_len) {
+            result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
+                        "catalog leaf %u record %u has no record type",
+                        index, record_index);
+            return false;
+        }
+        switch (read_be16(record + data_offset)) {
+        case HFS_CAT_FOLDER_RECORD: needed = HFS_CAT_FOLDER_DATA; break;
+        case HFS_CAT_FILE_RECORD: needed = HFS_CAT_FILE_DATA; break;
+        case HFS_CAT_FOLDER_THREAD:
+        case HFS_CAT_FILE_THREAD: needed = HFS_CAT_THREAD_FIXED; break;
+        default:
+            result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
+                        "catalog leaf %u record %u has record type %u",
+                        index, record_index, read_be16(record + data_offset));
+            return false;
+        }
+        if ((uint32_t)data_offset + needed > (uint32_t)record_len) {
+            result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
+                        "catalog leaf %u record %u is %u bytes, too short for "
+                        "its type", index, record_index, record_len);
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool catalog_node_offset(const catalog_ctx_t *ctx, uint32_t index,
+                                uint64_t *offset, rootfs_work_stage_t stage,
+                                rootfs_work_result_t *result) {
+    uint64_t logical = (uint64_t)index * ctx->node_size;
+    uint64_t seen = 0;
+    unsigned extent;
+
+    if (index >= ctx->total_nodes ||
+        logical + ctx->node_size > ctx->fork_bytes) {
+        result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
+                    "catalog node %u is outside the %" PRIu64 "-byte fork",
+                    index, ctx->fork_bytes);
+        return false;
+    }
+    for (extent = 0; extent < 8u; extent++) {
+        uint64_t span = (uint64_t)ctx->ext_count[extent] * ctx->block_size;
+        if (span == 0u)
+            continue;
+        if (logical < seen + span) {
+            *offset = (uint64_t)ctx->ext_start[extent] * ctx->block_size +
+                      (logical - seen);
+            return true;
+        }
+        seen += span;
+    }
+    result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
+                "catalog node %u is not covered by the fork's extents", index);
+    return false;
+}
+
+static bool catalog_node_read_raw(catalog_ctx_t *ctx, uint32_t index,
+                                  uint8_t *into, rootfs_work_stage_t stage,
+                                  rootfs_work_result_t *result) {
+    uint64_t offset = 0;
+
+    if (!catalog_node_offset(ctx, index, &offset, stage, result))
+        return false;
+    return checked_read(ctx->file, ctx->file_size, offset, into,
+                        ctx->node_size, stage, result);
+}
+
+static bool catalog_node_load(catalog_ctx_t *ctx, uint32_t index,
+                              uint8_t **bytes, rootfs_work_stage_t stage,
+                              rootfs_work_result_t *result) {
+    size_t slot;
+
+    for (slot = 0; slot < ctx->node_count; slot++) {
+        if (ctx->nodes[slot].index == index) {
+            *bytes = ctx->nodes[slot].bytes;
+            return true;
+        }
+    }
+    if (ctx->node_count >= ROOTFS_WORK_MAX_CATALOG_NODES) {
+        result_fail(result, ROOTFS_WORK_PROVISION_LIMIT, stage, 0,
+                    "this request touches more than %u catalog nodes",
+                    ROOTFS_WORK_MAX_CATALOG_NODES);
+        return false;
+    }
+    ctx->nodes[ctx->node_count].bytes = (uint8_t *)malloc(ctx->node_size);
+    if (!ctx->nodes[ctx->node_count].bytes) {
+        result_fail(result, ROOTFS_WORK_NO_MEMORY, stage, 0,
+                    "cannot cache catalog node %u", index);
+        return false;
+    }
+    if (!catalog_node_read_raw(ctx, index, ctx->nodes[ctx->node_count].bytes,
+                               stage, result)) {
+        free(ctx->nodes[ctx->node_count].bytes);
+        ctx->nodes[ctx->node_count].bytes = NULL;
+        return false;
+    }
+    ctx->nodes[ctx->node_count].index = index;
+    ctx->nodes[ctx->node_count].dirty = false;
+    *bytes = ctx->nodes[ctx->node_count].bytes;
+    ctx->node_count++;
+    return true;
+}
+
+static void catalog_node_dirty(catalog_ctx_t *ctx, uint32_t index) {
+    size_t slot;
+
+    for (slot = 0; slot < ctx->node_count; slot++) {
+        if (ctx->nodes[slot].index == index) {
+            ctx->nodes[slot].dirty = true;
+            return;
+        }
+    }
+}
+
+/*
+ * Descend from rootNode to the leaf that owns `parent`/`name`.  On a clean
+ * return *leaf is the leaf node, *position is either the matching record or
+ * the index the record would be inserted at, and *found says which.  Any
+ * structural surprise is a CATALOG_CORRUPT failure, never a miss.
+ */
+static bool catalog_search(catalog_ctx_t *ctx, uint32_t parent,
+                           const uint16_t *units, uint16_t unit_count,
+                           uint32_t *leaf, uint16_t *position, bool *found,
+                           rootfs_work_stage_t stage,
+                           rootfs_work_result_t *result) {
+    uint32_t node_index = ctx->root_node;
+    uint16_t level;
+
+    *found = false;
+    *position = 0;
+    *leaf = 0;
+    for (level = ctx->tree_depth; level >= 1u; level--) {
+        uint8_t *node = NULL;
+        uint16_t count;
+        uint16_t record_index;
+        int best = -1;
+        int best_order = 1;
+        uint8_t kind = level == 1u ? HFS_BT_LEAF_NODE : HFS_BT_INDEX_NODE;
+
+        if (!catalog_node_load(ctx, node_index, &node, stage, result))
+            return false;
+        if (!catalog_node_check(ctx, node, node_index, kind, (uint8_t)level,
+                                stage, result))
+            return false;
+        count = catalog_record_count(node);
+        for (record_index = 0; record_index < count; record_index++) {
+            uint16_t offset = catalog_slot(node, ctx->node_size, record_index);
+            uint16_t end = catalog_slot(node, ctx->node_size,
+                                        (uint16_t)(record_index + 1u));
+            bool valid = false;
+            int order = catalog_key_compare_raw(node + offset,
+                                                (uint16_t)(end - offset),
+                                                parent, units, unit_count,
+                                                &valid);
+            if (!valid) {
+                result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT,
+                            stage, 0, "catalog node %u record %u key became "
+                            "unreadable during search", node_index,
+                            record_index);
+                return false;
+            }
+            if (order > 0)
+                break;
+            best = (int)record_index;
+            best_order = order;
+        }
+        if (level == 1u) {
+            *leaf = node_index;
+            if (best >= 0 && best_order == 0) {
+                *found = true;
+                *position = (uint16_t)best;
+            } else {
+                *found = false;
+                *position = (uint16_t)(best + 1);
+            }
+            return true;
+        }
+        {
+            /* Below every index key: the record cannot exist, but its
+             * insertion point is the leftmost leaf, so keep descending. */
+            uint16_t child_index = best < 0 ? 0u : (uint16_t)best;
+            uint16_t offset = catalog_slot(node, ctx->node_size, child_index);
+            node_index = read_be32(node + offset +
+                                   catalog_record_data_offset(node + offset));
+        }
+    }
+    result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
+                "catalog descent ran past treeDepth %u", ctx->tree_depth);
+    return false;
+}
+
+/*
+ * The independent reader.  It shares no state with the search above: it walks
+ * the leaf chain the way tools/hfsx_extract.py does, from the B-tree header's
+ * own firstLeafNode, and holds it to the header's lastLeafNode and
+ * leafRecords while requiring globally ascending keys.  A stale firstLeafNode
+ * -- the exact bug that made hfsx_extract.py report "not found" for every
+ * file on one image -- fails here loudly instead of silently.
+ */
+static bool catalog_audit(catalog_ctx_t *ctx, uint32_t expect_records,
+                          rootfs_work_stage_t stage,
+                          rootfs_work_result_t *result) {
+    uint32_t node_index = ctx->first_leaf;
+    uint32_t visited = 0;
+    uint32_t records = 0;
+    uint32_t previous_parent = 0;
+    uint16_t previous_units[HFS_NAME_MAX_UNITS];
+    uint16_t previous_length = 0;
+    bool have_previous = false;
+    uint32_t final_node = 0;
+
+    if (ctx->first_leaf == 0u || ctx->first_leaf >= ctx->total_nodes) {
+        result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
+                    "B-tree header firstLeafNode %u is not a node of %u",
+                    ctx->first_leaf, ctx->total_nodes);
+        return false;
+    }
+    while (node_index != 0u) {
+        uint16_t count;
+        uint16_t record_index;
+
+        if (visited >= ctx->total_nodes) {
+            result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
+                        "catalog leaf chain does not terminate within %u nodes",
+                        ctx->total_nodes);
+            return false;
+        }
+        if (!catalog_node_read_raw(ctx, node_index, ctx->scratch, stage,
+                                   result))
+            return false;
+        if (!catalog_node_check(ctx, ctx->scratch, node_index,
+                                HFS_BT_LEAF_NODE, 1u, stage, result))
+            return false;
+        count = catalog_record_count(ctx->scratch);
+        for (record_index = 0; record_index < count; record_index++) {
+            uint16_t offset = catalog_slot(ctx->scratch, ctx->node_size,
+                                           record_index);
+            uint16_t end = catalog_slot(ctx->scratch, ctx->node_size,
+                                        (uint16_t)(record_index + 1u));
+            const uint8_t *record = ctx->scratch + offset;
+            uint16_t length = read_be16(record + 6);
+            uint16_t unit;
+
+            if (have_previous) {
+                bool valid = false;
+                int order = catalog_key_compare_raw(record,
+                                                    (uint16_t)(end - offset),
+                                                    previous_parent,
+                                                    previous_units,
+                                                    previous_length, &valid);
+                if (!valid || order <= 0) {
+                    result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT,
+                                stage, 0, "catalog key order breaks at node %u "
+                                "record %u", node_index, record_index);
+                    return false;
+                }
+            }
+            previous_parent = read_be32(record + 2);
+            previous_length = length;
+            for (unit = 0; unit < length; unit++)
+                previous_units[unit] = read_be16(record + 8u +
+                                                 (uint32_t)unit * 2u);
+            have_previous = true;
+            records++;
+        }
+        visited++;
+        final_node = node_index;
+        node_index = read_be32(ctx->scratch);
+    }
+    if (final_node != ctx->last_leaf) {
+        result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
+                    "catalog leaf chain ends at node %u, header says %u",
+                    final_node, ctx->last_leaf);
+        return false;
+    }
+    if (records != expect_records) {
+        result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
+                    "catalog leaf chain holds %u records, header says %u",
+                    records, expect_records);
+        return false;
+    }
+    return true;
+}
+
+/*
+ * Insert one already-built record into a leaf.  The node is rebuilt in
+ * scratch and copied back only once it is complete, so a partially shifted
+ * record area is never visible even in memory.
+ */
+static bool catalog_leaf_insert(catalog_ctx_t *ctx, uint32_t leaf,
+                                uint16_t position, const uint8_t *record,
+                                uint16_t record_len,
+                                rootfs_work_stage_t stage,
+                                rootfs_work_result_t *result) {
+    uint8_t *node = NULL;
+    uint16_t node_size = ctx->node_size;
+    uint16_t count;
+    uint16_t free_start;
+    uint16_t array_low;
+    uint16_t insert_at;
+    uint16_t record_index;
+
+    if (record_len < 8u || (record_len & 1u) != 0u ||
+        record_len > HFS_MAX_RECORD_BYTES) {
+        result_fail(result, ROOTFS_WORK_PROVISION_INVALID, stage, 0,
+                    "refusing to insert a %u-byte catalog record", record_len);
+        return false;
+    }
+    if (!catalog_node_load(ctx, leaf, &node, stage, result))
+        return false;
+    count = catalog_record_count(node);
+    if (position > count) {
+        result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
+                    "insert position %u exceeds %u records in leaf %u",
+                    position, count, leaf);
+        return false;
+    }
+    if (position == 0u && ctx->tree_depth > 1u) {
+        result_fail(result, ROOTFS_WORK_PROVISION_LEAF_HEAD, stage, 0,
+                    "record would become leaf %u's first key; rewriting the "
+                    "ancestors' index keys is not implemented", leaf);
+        return false;
+    }
+    free_start = catalog_slot(node, node_size, count);
+    array_low = (uint16_t)(node_size - 2u * ((uint32_t)count + 1u));
+    if ((uint32_t)free_start + record_len + 2u > (uint32_t)array_low) {
+        result_fail(result, ROOTFS_WORK_PROVISION_NODE_FULL, stage, 0,
+                    "leaf %u has %u free bytes, the record needs %u; splitting "
+                    "is not implemented", leaf,
+                    (unsigned)(array_low - free_start),
+                    (unsigned)(record_len + 2u));
+        return false;
+    }
+    insert_at = catalog_slot(node, node_size, position);
+
+    memcpy(ctx->scratch, node, node_size);
+    memmove(ctx->scratch + insert_at + record_len, node + insert_at,
+            (size_t)(free_start - insert_at));
+    memcpy(ctx->scratch + insert_at, record, record_len);
+    for (record_index = position; record_index <= count; record_index++) {
+        uint16_t moved = record_index == position ?
+            insert_at :
+            (uint16_t)(catalog_slot(node, node_size,
+                                    (uint16_t)(record_index - 1u)) +
+                       record_len);
+        catalog_slot_write(ctx->scratch, node_size, record_index, moved);
+    }
+    catalog_slot_write(ctx->scratch, node_size, (uint16_t)(count + 1u),
+                       (uint16_t)(free_start + record_len));
+    write_be16(ctx->scratch + 10, (uint16_t)(count + 1u));
+    memcpy(node, ctx->scratch, node_size);
+    catalog_node_dirty(ctx, leaf);
+    if (!catalog_node_check(ctx, node, leaf, HFS_BT_LEAF_NODE, 1u, stage,
+                            result))
+        return false;
+    ctx->leaf_records++;
+    return true;
+}
+
+static bool catalog_bitmap_test(const catalog_ctx_t *ctx, uint32_t block) {
+    size_t byte = (size_t)(block >> 3);
+
+    if (byte >= ctx->bitmap_bytes)
+        return true;
+    return (ctx->bitmap[byte] & (uint8_t)(1u << (7u - (block & 7u)))) != 0u;
+}
+
+static bool catalog_bitmap_alloc(catalog_ctx_t *ctx, uint32_t count,
+                                 uint32_t *start, rootfs_work_stage_t stage,
+                                 rootfs_work_result_t *result) {
+    uint32_t scanned;
+    uint32_t run_start = 0;
+    uint32_t run = 0;
+    uint32_t cursor = ctx->next_alloc < ctx->total_blocks ? ctx->next_alloc : 0u;
+
+    if (count == 0u || count > ctx->free_blocks) {
+        result_fail(result, ROOTFS_WORK_PROVISION_NO_SPACE, stage, 0,
+                    "%u allocation blocks requested, %u free; the stock volume "
+                    "ships freeBlocks = 0, so growth_bytes must be set",
+                    count, ctx->free_blocks);
+        return false;
+    }
+    /* One wrapped pass, restarting the run at the wrap so it stays
+     * contiguous in block order rather than in scan order. */
+    for (scanned = 0; scanned < ctx->total_blocks; scanned++) {
+        /* 64-bit so a volume whose totalBlocks approaches UINT32_MAX cannot
+         * wrap the cursor arithmetic instead of the block number. */
+        uint64_t sum = (uint64_t)cursor + scanned;
+        uint32_t block;
+
+        if (sum >= ctx->total_blocks) {
+            sum -= ctx->total_blocks;
+            if (sum == 0u)
+                run = 0;
+        }
+        block = (uint32_t)sum;
+        if (catalog_bitmap_test(ctx, block)) {
+            run = 0;
+            continue;
+        }
+        if (run == 0u)
+            run_start = block;
+        run++;
+        if (run == count) {
+            uint32_t index;
+            for (index = 0; index < count; index++) {
+                size_t byte = (size_t)((run_start + index) >> 3);
+                ctx->bitmap[byte] |= (uint8_t)(1u <<
+                    (7u - ((run_start + index) & 7u)));
+            }
+            ctx->bitmap_dirty = true;
+            ctx->free_blocks -= count;
+            ctx->next_alloc = run_start + count < ctx->total_blocks ?
+                              run_start + count : 0u;
+            *start = run_start;
+            return true;
+        }
+    }
+    result_fail(result, ROOTFS_WORK_PROVISION_NO_SPACE, stage, 0,
+                "no run of %u contiguous free allocation blocks exists", count);
+    return false;
+}
+
+static void catalog_build_key(uint8_t *record, uint32_t parent,
+                              const uint16_t *units, uint16_t unit_count) {
+    uint16_t index;
+
+    write_be16(record, (uint16_t)(6u + 2u * (uint32_t)unit_count));
+    write_be32(record + 2, parent);
+    write_be16(record + 6, unit_count);
+    for (index = 0; index < unit_count; index++)
+        write_be16(record + 8u + (uint32_t)index * 2u, units[index]);
+}
+
+static void catalog_build_bsd(uint8_t *data, uint32_t owner, uint32_t group,
+                              uint16_t mode) {
+    write_be32(data + 32, owner);
+    write_be32(data + 36, group);
+    data[40] = 0u;
+    data[41] = 0u;
+    write_be16(data + 42, mode);
+    /* special.linkCount; the shipping volume carries 1 on files and folders
+     * alike, so match it rather than inventing a different convention. */
+    write_be32(data + 44, 1u);
+}
+
+static uint16_t catalog_build_folder(catalog_ctx_t *ctx, uint32_t parent,
+                                     const uint16_t *units,
+                                     uint16_t unit_count, uint32_t cnid,
+                                     uint16_t flags, uint32_t owner,
+                                     uint32_t group, uint16_t mode) {
+    uint16_t key_bytes = (uint16_t)(8u + 2u * (uint32_t)unit_count);
+    uint8_t *data = ctx->build + key_bytes;
+
+    memset(ctx->build, 0, (size_t)key_bytes + HFS_CAT_FOLDER_DATA);
+    catalog_build_key(ctx->build, parent, units, unit_count);
+    write_be16(data, (uint16_t)HFS_CAT_FOLDER_RECORD);
+    write_be16(data + 2, flags);
+    write_be32(data + 4, 0u);            /* valence: no children yet */
+    write_be32(data + 8, cnid);
+    write_be32(data + 12, ctx->mac_time);
+    write_be32(data + 16, ctx->mac_time);
+    write_be32(data + 20, ctx->mac_time);
+    write_be32(data + 24, ctx->mac_time);
+    write_be32(data + 28, 0u);
+    catalog_build_bsd(data, owner, group, (uint16_t)(HFS_MODE_IFDIR | mode));
+    return (uint16_t)(key_bytes + HFS_CAT_FOLDER_DATA);
+}
+
+static uint16_t catalog_build_file(catalog_ctx_t *ctx, uint32_t parent,
+                                   const uint16_t *units, uint16_t unit_count,
+                                   uint32_t cnid, uint32_t owner,
+                                   uint32_t group, uint16_t mode,
+                                   uint64_t logical, uint32_t start_block,
+                                   uint32_t block_count) {
+    uint16_t key_bytes = (uint16_t)(8u + 2u * (uint32_t)unit_count);
+    uint8_t *data = ctx->build + key_bytes;
+
+    memset(ctx->build, 0, (size_t)key_bytes + HFS_CAT_FILE_DATA);
+    catalog_build_key(ctx->build, parent, units, unit_count);
+    write_be16(data, (uint16_t)HFS_CAT_FILE_RECORD);
+    write_be16(data + 2, (uint16_t)HFS_FLAG_THREAD_EXISTS);
+    write_be32(data + 8, cnid);
+    write_be32(data + 12, ctx->mac_time);
+    write_be32(data + 16, ctx->mac_time);
+    write_be32(data + 20, ctx->mac_time);
+    write_be32(data + 24, ctx->mac_time);
+    write_be32(data + 28, 0u);
+    catalog_build_bsd(data, owner, group, (uint16_t)(HFS_MODE_IFREG | mode));
+    write_be64(data + 88, logical);
+    write_be32(data + 96, 0u);           /* clumpSize */
+    write_be32(data + 100, block_count);
+    write_be32(data + 104, start_block);
+    write_be32(data + 108, block_count);
+    return (uint16_t)(key_bytes + HFS_CAT_FILE_DATA);
+}
+
+static uint16_t catalog_build_thread(catalog_ctx_t *ctx, uint32_t cnid,
+                                     uint16_t type, uint32_t parent,
+                                     const uint16_t *units,
+                                     uint16_t unit_count) {
+    uint8_t *data = ctx->build + 8;
+    uint16_t index;
+
+    memset(ctx->build, 0,
+           (size_t)8u + HFS_CAT_THREAD_FIXED + 2u * (size_t)unit_count);
+    catalog_build_key(ctx->build, cnid, NULL, 0u);
+    write_be16(data, type);
+    write_be16(data + 2, 0u);
+    write_be32(data + 4, parent);
+    write_be16(data + 8, unit_count);
+    for (index = 0; index < unit_count; index++)
+        write_be16(data + 10u + (uint32_t)index * 2u, units[index]);
+    return (uint16_t)(8u + HFS_CAT_THREAD_FIXED + 2u * (uint32_t)unit_count);
+}
+
+/*
+ * Bump a folder record that has just gained a child.  The record is located
+ * again by key rather than remembered, because an insert into the same leaf
+ * moves record positions.
+ */
+static bool catalog_touch_folder(catalog_ctx_t *ctx,
+                                 const catalog_folder_ref_t *folder,
+                                 bool added_folder,
+                                 rootfs_work_stage_t stage,
+                                 rootfs_work_result_t *result) {
+    uint32_t leaf = 0;
+    uint16_t position = 0;
+    bool found = false;
+    uint8_t *node = NULL;
+    uint16_t offset;
+    uint8_t *data;
+
+    if (!catalog_search(ctx, folder->key_parent, folder->key_unit,
+                        folder->key_length, &leaf, &position, &found, stage,
+                        result))
+        return false;
+    if (!found) {
+        result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
+                    "folder record for CNID %u vanished before its valence "
+                    "could be updated", folder->cnid);
+        return false;
+    }
+    if (!catalog_node_load(ctx, leaf, &node, stage, result))
+        return false;
+    offset = catalog_slot(node, ctx->node_size, position);
+    data = node + offset + catalog_record_data_offset(node + offset);
+    if (read_be16(data) != HFS_CAT_FOLDER_RECORD ||
+        read_be32(data + 8) != folder->cnid) {
+        result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
+                    "record for CNID %u is not the folder it was resolved as",
+                    folder->cnid);
+        return false;
+    }
+    if (read_be32(data + 4) == UINT32_MAX) {
+        result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
+                    "folder CNID %u already reports a saturated valence",
+                    folder->cnid);
+        return false;
+    }
+    write_be32(data + 4, read_be32(data + 4) + 1u);
+    /* folderCount is only maintained on volumes that already maintain it;
+     * the flag on the parent is the volume's own statement of that. */
+    if (added_folder &&
+        (read_be16(data + 2) & HFS_FLAG_HAS_FOLDER_COUNT) != 0u)
+        write_be32(data + 84, read_be32(data + 84) + 1u);
+    write_be32(data + 16, ctx->mac_time);
+    write_be32(data + 20, ctx->mac_time);
+    catalog_node_dirty(ctx, leaf);
+    return true;
+}
+
+static bool catalog_folder_flags(catalog_ctx_t *ctx,
+                                 const catalog_folder_ref_t *folder,
+                                 uint16_t *flags, rootfs_work_stage_t stage,
+                                 rootfs_work_result_t *result) {
+    uint32_t leaf = 0;
+    uint16_t position = 0;
+    bool found = false;
+    uint8_t *node = NULL;
+    uint16_t offset;
+
+    if (!catalog_search(ctx, folder->key_parent, folder->key_unit,
+                        folder->key_length, &leaf, &position, &found, stage,
+                        result))
+        return false;
+    if (!found) {
+        result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
+                    "folder record for CNID %u could not be re-read",
+                    folder->cnid);
+        return false;
+    }
+    if (!catalog_node_load(ctx, leaf, &node, stage, result))
+        return false;
+    offset = catalog_slot(node, ctx->node_size, position);
+    *flags = read_be16(node + offset + catalog_record_data_offset(node + offset)
+                       + 2);
+    return true;
+}
+
+static bool catalog_root_folder(catalog_ctx_t *ctx,
+                                catalog_folder_ref_t *folder,
+                                rootfs_work_stage_t stage,
+                                rootfs_work_result_t *result) {
+    uint32_t leaf = 0;
+    uint16_t position = 0;
+    bool found = false;
+    uint8_t *node = NULL;
+    uint16_t offset;
+    const uint8_t *data;
+    uint16_t length;
+    uint16_t index;
+
+    if (!catalog_search(ctx, HFS_ROOT_FOLDER_CNID, NULL, 0u, &leaf, &position,
+                        &found, stage, result))
+        return false;
+    if (!found) {
+        result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
+                    "the catalog has no thread record for the root folder");
+        return false;
+    }
+    if (!catalog_node_load(ctx, leaf, &node, stage, result))
+        return false;
+    offset = catalog_slot(node, ctx->node_size, position);
+    data = node + offset + catalog_record_data_offset(node + offset);
+    length = read_be16(data + 8);
+    if (read_be16(data) != HFS_CAT_FOLDER_THREAD ||
+        read_be32(data + 4) != HFS_ROOT_PARENT_CNID ||
+        length == 0u || length > HFS_NAME_MAX_UNITS) {
+        result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
+                    "the root folder's thread record is not a named folder "
+                    "thread under CNID %u", HFS_ROOT_PARENT_CNID);
+        return false;
+    }
+    folder->cnid = HFS_ROOT_FOLDER_CNID;
+    folder->key_parent = HFS_ROOT_PARENT_CNID;
+    folder->key_length = length;
+    for (index = 0; index < length; index++)
+        folder->key_unit[index] = read_be16(data + 10u + (uint32_t)index * 2u);
+    return true;
+}
+
+static bool catalog_child_folder(catalog_ctx_t *ctx,
+                                 const catalog_folder_ref_t *parent,
+                                 const uint16_t *units, uint16_t unit_count,
+                                 catalog_folder_ref_t *folder,
+                                 rootfs_work_stage_t stage,
+                                 rootfs_work_result_t *result) {
+    uint32_t leaf = 0;
+    uint16_t position = 0;
+    bool found = false;
+    uint8_t *node = NULL;
+    uint16_t offset;
+    const uint8_t *data;
+    uint16_t index;
+
+    if (!catalog_search(ctx, parent->cnid, units, unit_count, &leaf, &position,
+                        &found, stage, result))
+        return false;
+    if (!found) {
+        result_fail(result, ROOTFS_WORK_PROVISION_PARENT_MISSING, stage, 0,
+                    "no catalog record under CNID %u for a path component",
+                    parent->cnid);
+        return false;
+    }
+    if (!catalog_node_load(ctx, leaf, &node, stage, result))
+        return false;
+    offset = catalog_slot(node, ctx->node_size, position);
+    data = node + offset + catalog_record_data_offset(node + offset);
+    if (read_be16(data) != HFS_CAT_FOLDER_RECORD) {
+        result_fail(result, ROOTFS_WORK_PROVISION_PARENT_MISSING, stage, 0,
+                    "a path component under CNID %u exists but is not a "
+                    "folder", parent->cnid);
+        return false;
+    }
+    folder->cnid = read_be32(data + 8);
+    if (folder->cnid < HFS_FIRST_USER_CNID) {
+        result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
+                    "a folder record claims reserved CNID %u", folder->cnid);
+        return false;
+    }
+    folder->key_parent = parent->cnid;
+    folder->key_length = unit_count;
+    for (index = 0; index < unit_count; index++)
+        folder->key_unit[index] = units[index];
+    return true;
+}
+
+static bool rootfs_path_split(const char *path,
+                              rootfs_path_component_t *components,
+                              size_t *count, rootfs_work_result_t *result) {
+    size_t length = 0;
+    size_t cursor;
+
+    *count = 0;
+    if (!path || path[0] != '/') {
+        result_fail(result, ROOTFS_WORK_PROVISION_INVALID,
+                    ROOTFS_WORK_STAGE_PROVISION_PLAN, 0,
+                    "provisioned paths must be absolute");
+        return false;
+    }
+    while (path[length] != '\0') {
+        if (length >= ROOTFS_WORK_MAX_PATH) {
+            result_fail(result, ROOTFS_WORK_PROVISION_INVALID,
+                        ROOTFS_WORK_STAGE_PROVISION_PLAN, 0,
+                        "provisioned paths are limited to %u bytes",
+                        ROOTFS_WORK_MAX_PATH);
+            return false;
+        }
+        length++;
+    }
+    if (length > 1u && path[length - 1u] == '/') {
+        result_fail(result, ROOTFS_WORK_PROVISION_INVALID,
+                    ROOTFS_WORK_STAGE_PROVISION_PLAN, 0,
+                    "a provisioned path must not end in '/'");
+        return false;
+    }
+    cursor = 1;
+    while (cursor < length) {
+        size_t start = cursor;
+        size_t span;
+
+        while (cursor < length && path[cursor] != '/')
+            cursor++;
+        span = cursor - start;
+        if (span == 0u || span > HFS_NAME_MAX_UNITS) {
+            result_fail(result, ROOTFS_WORK_PROVISION_INVALID,
+                        ROOTFS_WORK_STAGE_PROVISION_PLAN, 0,
+                        "path component %zu is %zu bytes; 1..%u are allowed "
+                        "and empty components are not", *count, span,
+                        HFS_NAME_MAX_UNITS);
+            return false;
+        }
+        if ((span == 1u && path[start] == '.') ||
+            (span == 2u && path[start] == '.' && path[start + 1u] == '.')) {
+            result_fail(result, ROOTFS_WORK_PROVISION_INVALID,
+                        ROOTFS_WORK_STAGE_PROVISION_PLAN, 0,
+                        "'.' and '..' are not provisionable components");
+            return false;
+        }
+        for (span = start; span < cursor; span++) {
+            unsigned char byte = (unsigned char)path[span];
+            /* Printable ASCII only, and not ':': HFS+ stores the POSIX '/'
+             * as ':', so a ':' here would surface to the guest as a slash. */
+            if (byte < 0x20u || byte > 0x7eu || byte == ':') {
+                result_fail(result, ROOTFS_WORK_PROVISION_INVALID,
+                            ROOTFS_WORK_STAGE_PROVISION_PLAN, 0,
+                            "byte 0x%02x in a path component is not "
+                            "provisionable", byte);
+                return false;
+            }
+        }
+        if (*count >= ROOTFS_WORK_MAX_PATH_DEPTH) {
+            result_fail(result, ROOTFS_WORK_PROVISION_LIMIT,
+                        ROOTFS_WORK_STAGE_PROVISION_PLAN, 0,
+                        "provisioned paths are limited to %u components",
+                        ROOTFS_WORK_MAX_PATH_DEPTH);
+            return false;
+        }
+        components[*count].start = (uint16_t)start;
+        components[*count].length = (uint16_t)(cursor - start);
+        (*count)++;
+        if (cursor < length)
+            cursor++;
+    }
+    if (*count == 0u) {
+        result_fail(result, ROOTFS_WORK_PROVISION_INVALID,
+                    ROOTFS_WORK_STAGE_PROVISION_PLAN, 0,
+                    "\"/\" names no object to create");
+        return false;
+    }
+    return true;
+}
+
+static void rootfs_component_units(const char *path,
+                                   const rootfs_path_component_t *component,
+                                   uint16_t *units) {
+    uint16_t index;
+
+    for (index = 0; index < component->length; index++)
+        units[index] = (uint16_t)(unsigned char)path[component->start + index];
+}
+
+static bool provision_one(catalog_ctx_t *ctx,
+                          const rootfs_work_entry_t *entry,
+                          catalog_content_t *content,
+                          rootfs_work_result_t *result) {
+    const rootfs_work_stage_t stage = ROOTFS_WORK_STAGE_PROVISION_PLAN;
+    rootfs_path_component_t components[ROOTFS_WORK_MAX_PATH_DEPTH];
+    uint16_t units[HFS_NAME_MAX_UNITS];
+    catalog_folder_ref_t folder;
+    catalog_folder_ref_t child;
+    size_t count = 0;
+    size_t index;
+    uint32_t leaf = 0;
+    uint32_t thread_leaf = 0;
+    uint16_t position = 0;
+    uint16_t thread_position = 0;
+    bool found = false;
+    uint32_t cnid;
+    uint16_t leaf_units;
+    uint16_t record_len;
+    uint16_t mode;
+    uint16_t parent_flags = 0;
+    bool is_directory = entry->kind == ROOTFS_WORK_ENTRY_DIRECTORY;
+
+    content->block_count = 0;
+    content->start_block = 0;
+    content->bytes = NULL;
+    content->size = 0;
+    if (entry->kind != ROOTFS_WORK_ENTRY_DIRECTORY &&
+        entry->kind != ROOTFS_WORK_ENTRY_FILE) {
+        result_fail(result, ROOTFS_WORK_PROVISION_INVALID, stage, 0,
+                    "entry kind %d is not a directory or a file",
+                    (int)entry->kind);
+        return false;
+    }
+    if (is_directory && (entry->content != NULL || entry->content_size != 0u)) {
+        result_fail(result, ROOTFS_WORK_PROVISION_INVALID, stage, 0,
+                    "a directory entry cannot carry content");
+        return false;
+    }
+    if (entry->content_size > ROOTFS_WORK_MAX_ENTRY_BYTES) {
+        result_fail(result, ROOTFS_WORK_PROVISION_LIMIT, stage, 0,
+                    "entry content is %zu bytes; the cap is %u",
+                    entry->content_size, ROOTFS_WORK_MAX_ENTRY_BYTES);
+        return false;
+    }
+    if (entry->content_size != 0u && !entry->content) {
+        result_fail(result, ROOTFS_WORK_PROVISION_INVALID, stage, 0,
+                    "entry declares %zu content bytes but has no buffer",
+                    entry->content_size);
+        return false;
+    }
+    if ((entry->permissions & (uint16_t)~(uint16_t)HFS_MODE_PERM_MASK) != 0u) {
+        result_fail(result, ROOTFS_WORK_PROVISION_INVALID, stage, 0,
+                    "permissions 0%o set bits outside the mode's low 12",
+                    entry->permissions);
+        return false;
+    }
+    mode = entry->permissions != 0u ? entry->permissions :
+           (uint16_t)(is_directory ? 0755u : 0644u);
+    if (!rootfs_path_split(entry->path, components, &count, result))
+        return false;
+    if (!catalog_root_folder(ctx, &folder, stage, result))
+        return false;
+    for (index = 0; index + 1u < count; index++) {
+        rootfs_component_units(entry->path, &components[index], units);
+        if (!catalog_child_folder(ctx, &folder, units,
+                                  components[index].length, &child, stage,
+                                  result))
+            return false;
+        folder = child;
+    }
+    if (!catalog_folder_flags(ctx, &folder, &parent_flags, stage, result))
+        return false;
+
+    leaf_units = components[count - 1u].length;
+    rootfs_component_units(entry->path, &components[count - 1u], units);
+    if (!catalog_search(ctx, folder.cnid, units, leaf_units, &leaf, &position,
+                        &found, stage, result))
+        return false;
+    if (found) {
+        result_fail(result, ROOTFS_WORK_PROVISION_EXISTS, stage, 0,
+                    "an object already exists under CNID %u with that name",
+                    folder.cnid);
+        return false;
+    }
+
+    if (ctx->next_cnid < HFS_FIRST_USER_CNID || ctx->next_cnid == UINT32_MAX) {
+        result_fail(result, ROOTFS_WORK_PROVISION_NO_SPACE, stage, 0,
+                    "nextCatalogID %u leaves no allocatable CNID",
+                    ctx->next_cnid);
+        return false;
+    }
+    cnid = ctx->next_cnid;
+    if (!catalog_search(ctx, cnid, NULL, 0u, &thread_leaf, &thread_position,
+                        &found, stage, result))
+        return false;
+    if (found) {
+        result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
+                    "CNID %u from nextCatalogID is already in use as a thread "
+                    "key", cnid);
+        return false;
+    }
+
+    if (!is_directory && entry->content_size != 0u) {
+        uint64_t blocks = ((uint64_t)entry->content_size + ctx->block_size -
+                           1u) / ctx->block_size;
+        uint32_t start = 0;
+
+        if (blocks > UINT32_MAX) {
+            result_fail(result, ROOTFS_WORK_PROVISION_LIMIT, stage, 0,
+                        "content needs more allocation blocks than HFS+ can "
+                        "name");
+            return false;
+        }
+        if (!catalog_bitmap_alloc(ctx, (uint32_t)blocks, &start, stage, result))
+            return false;
+        content->start_block = start;
+        content->block_count = (uint32_t)blocks;
+        content->bytes = entry->content;
+        content->size = entry->content_size;
+    }
+
+    if (is_directory)
+        record_len = catalog_build_folder(ctx, folder.cnid, units, leaf_units,
+                                          cnid,
+                                          (uint16_t)(parent_flags &
+                                                     HFS_FLAG_HAS_FOLDER_COUNT),
+                                          entry->owner_id, entry->group_id,
+                                          mode);
+    else
+        record_len = catalog_build_file(ctx, folder.cnid, units, leaf_units,
+                                        cnid, entry->owner_id, entry->group_id,
+                                        mode, (uint64_t)entry->content_size,
+                                        content->start_block,
+                                        content->block_count);
+    if (!catalog_leaf_insert(ctx, leaf, position, ctx->build, record_len,
+                             stage, result))
+        return false;
+
+    record_len = catalog_build_thread(ctx, cnid,
+                                      (uint16_t)(is_directory ?
+                                          HFS_CAT_FOLDER_THREAD :
+                                          HFS_CAT_FILE_THREAD),
+                                      folder.cnid, units, leaf_units);
+    /* The first insert may have moved the thread's leaf position, so resolve
+     * it again rather than reusing the pre-insert answer. */
+    if (!catalog_search(ctx, cnid, NULL, 0u, &thread_leaf, &thread_position,
+                        &found, stage, result))
+        return false;
+    if (found) {
+        result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
+                    "thread key for CNID %u appeared during the insert", cnid);
+        return false;
+    }
+    if (!catalog_leaf_insert(ctx, thread_leaf, thread_position, ctx->build,
+                             record_len, stage, result))
+        return false;
+
+    if (!catalog_touch_folder(ctx, &folder, is_directory, stage, result))
+        return false;
+    ctx->next_cnid = cnid + 1u;
+    if (is_directory) {
+        if (ctx->folder_count == UINT32_MAX) {
+            result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
+                        "volume folderCount is saturated");
+            return false;
+        }
+        ctx->folder_count++;
+    } else {
+        if (ctx->file_count == UINT32_MAX) {
+            result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
+                        "volume fileCount is saturated");
+            return false;
+        }
+        ctx->file_count++;
+    }
+    if (result->provision_first_cnid == 0u)
+        result->provision_first_cnid = cnid;
+    result->provision_last_cnid = cnid;
+    result->provision_entries++;
+    result->provision_blocks += content->block_count;
+    return true;
+}
+
+static bool catalog_alloc_fork_io(catalog_ctx_t *ctx, bool writing,
+                                  rootfs_work_stage_t stage,
+                                  rootfs_work_result_t *result) {
+    uint64_t remaining = ctx->bitmap_bytes;
+    size_t done = 0;
+    unsigned extent;
+
+    for (extent = 0; extent < 8u && remaining != 0u; extent++) {
+        uint64_t span = (uint64_t)ctx->volume->ext_count[extent] *
+                        ctx->block_size;
+        uint64_t physical = (uint64_t)ctx->volume->ext_start[extent] *
+                            ctx->block_size;
+        size_t amount;
+
+        if (span == 0u)
+            continue;
+        amount = span < remaining ? (size_t)span : (size_t)remaining;
+        if (writing) {
+            if (!checked_write(ctx->file, ctx->file_size, physical,
+                               ctx->bitmap + done, amount, stage, result))
+                return false;
+        } else {
+            if (!checked_read(ctx->file, ctx->file_size, physical,
+                              ctx->bitmap + done, amount, stage, result))
+                return false;
+        }
+        done += amount;
+        remaining -= amount;
+    }
+    if (remaining != 0u) {
+        result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
+                    "the allocation fork does not cover its own bitmap");
+        return false;
+    }
+    return true;
+}
+
+/*
+ * Commit order is deliberate: data first, then the bitmap that claims those
+ * blocks, then the catalog records that name them, then the volume header.  A
+ * commit torn anywhere leaks blocks at worst; at no point does a record refer
+ * to a block the bitmap still calls free.
+ */
+static bool catalog_commit(catalog_ctx_t *ctx,
+                           const catalog_content_t *contents, size_t count,
+                           uint8_t *buffer, size_t buffer_size,
+                           rootfs_work_result_t *result) {
+    const rootfs_work_stage_t stage = ROOTFS_WORK_STAGE_PROVISION_WRITE;
+    size_t index;
+    size_t slot;
+
+    for (index = 0; index < count; index++) {
+        uint64_t base = (uint64_t)contents[index].start_block *
+                        ctx->block_size;
+        uint64_t span = (uint64_t)contents[index].block_count *
+                        ctx->block_size;
+        uint64_t written = contents[index].size;
+
+        if (contents[index].block_count == 0u)
+            continue;
+        if (!checked_write(ctx->file, ctx->file_size, base,
+                           contents[index].bytes, contents[index].size, stage,
+                           result))
+            return false;
+        /* Zero the slack so the tail of the last block never publishes
+         * whatever the grown image happened to contain. */
+        memset(buffer, 0, buffer_size);
+        while (written < span) {
+            uint64_t chunk = span - written;
+            size_t amount = chunk > buffer_size ? buffer_size : (size_t)chunk;
+
+            if (!checked_write(ctx->file, ctx->file_size, base + written,
+                               buffer, amount, stage, result))
+                return false;
+            written += amount;
+        }
+    }
+    if (ctx->bitmap_dirty &&
+        !catalog_alloc_fork_io(ctx, true, stage, result))
+        return false;
+    for (slot = 0; slot < ctx->node_count; slot++) {
+        uint64_t offset = 0;
+
+        if (!ctx->nodes[slot].dirty)
+            continue;
+        if (!catalog_node_offset(ctx, ctx->nodes[slot].index, &offset, stage,
+                                 result))
+            return false;
+        if (!checked_write(ctx->file, ctx->file_size, offset,
+                           ctx->nodes[slot].bytes, ctx->node_size, stage,
+                           result))
+            return false;
+    }
+    {
+        uint64_t offset = 0;
+
+        if (!catalog_node_read_raw(ctx, 0u, ctx->scratch, stage, result))
+            return false;
+        if (ctx->scratch[8] != HFS_BT_HEADER_NODE) {
+            result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
+                        "catalog node 0 stopped being a header node");
+            return false;
+        }
+        write_be32(ctx->scratch + HFS_NODE_DESCRIPTOR + 6, ctx->leaf_records);
+        if (!catalog_node_offset(ctx, 0u, &offset, stage, result))
+            return false;
+        if (!checked_write(ctx->file, ctx->file_size, offset, ctx->scratch,
+                           ctx->node_size, stage, result))
+            return false;
+    }
+    if (ctx->vh_dirty) {
+        write_be32(ctx->vh + 32, ctx->file_count);
+        write_be32(ctx->vh + 36, ctx->folder_count);
+        write_be32(ctx->vh + 48, ctx->free_blocks);
+        write_be32(ctx->vh + 52, ctx->next_alloc);
+        write_be32(ctx->vh + 64, ctx->next_cnid);
+        if (!checked_write(ctx->file, ctx->file_size, HFS_VH_OFF, ctx->vh,
+                           HFS_VH_LEN, stage, result) ||
+            !checked_write(ctx->file, ctx->file_size,
+                           ctx->file_size - HFS_VH_OFF, ctx->vh, HFS_VH_LEN,
+                           stage, result))
+            return false;
+    }
+    return true;
+}
+
+static void catalog_close(catalog_ctx_t *ctx) {
+    size_t slot;
+
+    if (ctx->nodes) {
+        for (slot = 0; slot < ctx->node_count; slot++)
+            free(ctx->nodes[slot].bytes);
+        free(ctx->nodes);
+    }
+    free(ctx->bitmap);
+    free(ctx->build);
+    free(ctx->scratch);
+    memset(ctx, 0, sizeof(*ctx));
+}
+
+static bool catalog_open(catalog_ctx_t *ctx, host_file_t *file,
+                         uint64_t file_size, const hfs_volume_t *volume,
+                         uint32_t mac_time, rootfs_work_result_t *result) {
+    const rootfs_work_stage_t stage = ROOTFS_WORK_STAGE_PROVISION_PLAN;
+    uint8_t header[HFS_NODE_DESCRIPTOR + 106u];
+    uint64_t fork_blocks_seen = 0;
+    uint32_t fork_blocks;
+    uint32_t bt_attributes;
+    unsigned extent;
+
+    memset(ctx, 0, sizeof(*ctx));
+    ctx->file = file;
+    ctx->file_size = file_size;
+    ctx->volume = volume;
+    ctx->block_size = volume->block_size;
+    ctx->total_blocks = volume->total_blocks;
+    ctx->free_blocks = volume->free_blocks;
+    ctx->next_alloc = volume->next_alloc;
+    ctx->mac_time = mac_time;
+    if (!checked_read(file, file_size, HFS_VH_OFF, ctx->vh, HFS_VH_LEN, stage,
+                      result))
+        return false;
+    ctx->file_count = read_be32(ctx->vh + 32);
+    ctx->folder_count = read_be32(ctx->vh + 36);
+    ctx->next_cnid = read_be32(ctx->vh + 64);
+    ctx->fork_bytes = read_be64(ctx->vh + 272);
+    fork_blocks = read_be32(ctx->vh + 284);
+    for (extent = 0; extent < 8u; extent++) {
+        ctx->ext_start[extent] = read_be32(ctx->vh + 288 + extent * 8u);
+        ctx->ext_count[extent] = read_be32(ctx->vh + 292 + extent * 8u);
+        if (ctx->ext_count[extent] == 0u)
+            continue;
+        if ((uint64_t)ctx->ext_start[extent] + ctx->ext_count[extent] >
+            ctx->total_blocks) {
+            result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
+                        "catalog extent %u runs past the volume", extent);
+            return false;
+        }
+        fork_blocks_seen += ctx->ext_count[extent];
+    }
+    if (fork_blocks_seen != fork_blocks || fork_blocks == 0u) {
+        result_fail(result, ROOTFS_WORK_PROVISION_UNSUPPORTED, stage, 0,
+                    "the catalog fork has an extents-overflow spill (%" PRIu64
+                    " of %u blocks inline)", fork_blocks_seen, fork_blocks);
+        return false;
+    }
+    if (ctx->fork_bytes == 0u ||
+        ctx->fork_bytes > (uint64_t)fork_blocks * ctx->block_size) {
+        result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
+                    "catalog logicalSize %" PRIu64 " does not fit its %u "
+                    "blocks", ctx->fork_bytes, fork_blocks);
+        return false;
+    }
+    /* Node 0 is at the fork's first byte no matter what nodeSize turns out
+     * to be, so the descriptor and header record can be read before the
+     * geometry is known. */
+    if (!checked_read(file, file_size,
+                      (uint64_t)ctx->ext_start[0] * ctx->block_size, header,
+                      sizeof(header), stage, result))
+        return false;
+    if (header[8] != HFS_BT_HEADER_NODE) {
+        result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
+                    "catalog node 0 is kind 0x%02x, not a B-tree header",
+                    header[8]);
+        return false;
+    }
+    ctx->tree_depth = read_be16(header + HFS_NODE_DESCRIPTOR);
+    ctx->root_node = read_be32(header + HFS_NODE_DESCRIPTOR + 2);
+    ctx->leaf_records = read_be32(header + HFS_NODE_DESCRIPTOR + 6);
+    ctx->first_leaf = read_be32(header + HFS_NODE_DESCRIPTOR + 10);
+    ctx->last_leaf = read_be32(header + HFS_NODE_DESCRIPTOR + 14);
+    ctx->node_size = read_be16(header + HFS_NODE_DESCRIPTOR + 18);
+    ctx->total_nodes = read_be32(header + HFS_NODE_DESCRIPTOR + 22);
+    bt_attributes = read_be32(header + HFS_NODE_DESCRIPTOR + 38);
+    if (ctx->node_size < 512u || ctx->node_size > 32768u ||
+        (ctx->node_size & (uint16_t)(ctx->node_size - 1u)) != 0u) {
+        result_fail(result, ROOTFS_WORK_PROVISION_UNSUPPORTED, stage, 0,
+                    "catalog nodeSize %u is not a power of two in 512..32768",
+                    ctx->node_size);
+        return false;
+    }
+    if (header[HFS_NODE_DESCRIPTOR + 36] != 0u ||
+        header[HFS_NODE_DESCRIPTOR + 37] != HFS_KEY_COMPARE_BINARY) {
+        result_fail(result, ROOTFS_WORK_PROVISION_UNSUPPORTED, stage, 0,
+                    "catalog btreeType %u keyCompareType 0x%02x; only HFSX "
+                    "binary compare (0x%02x) is supported",
+                    header[HFS_NODE_DESCRIPTOR + 36],
+                    header[HFS_NODE_DESCRIPTOR + 37], HFS_KEY_COMPARE_BINARY);
+        return false;
+    }
+    if ((bt_attributes & (HFS_BT_BIG_KEYS | HFS_BT_VARIABLE_INDEX_KEYS)) !=
+        (HFS_BT_BIG_KEYS | HFS_BT_VARIABLE_INDEX_KEYS)) {
+        result_fail(result, ROOTFS_WORK_PROVISION_UNSUPPORTED, stage, 0,
+                    "catalog B-tree attributes 0x%08x lack big or variable "
+                    "index keys", bt_attributes);
+        return false;
+    }
+    if (ctx->total_nodes == 0u ||
+        (uint64_t)ctx->total_nodes * ctx->node_size != ctx->fork_bytes) {
+        result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
+                    "%u nodes of %u bytes is not the %" PRIu64 "-byte catalog",
+                    ctx->total_nodes, ctx->node_size, ctx->fork_bytes);
+        return false;
+    }
+    for (extent = 0; extent < 8u; extent++) {
+        uint64_t span = (uint64_t)ctx->ext_count[extent] * ctx->block_size;
+        if (span != 0u && span % ctx->node_size != 0u) {
+            result_fail(result, ROOTFS_WORK_PROVISION_UNSUPPORTED, stage, 0,
+                        "catalog extent %u is %" PRIu64 " bytes, not a whole "
+                        "number of %u-byte nodes", extent, span,
+                        ctx->node_size);
+            return false;
+        }
+    }
+    if (ctx->tree_depth == 0u || ctx->tree_depth > HFS_MAX_TREE_DEPTH ||
+        ctx->root_node == 0u || ctx->root_node >= ctx->total_nodes ||
+        ctx->first_leaf >= ctx->total_nodes ||
+        ctx->last_leaf >= ctx->total_nodes) {
+        result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
+                    "B-tree header depth %u root %u firstLeaf %u lastLeaf %u "
+                    "against %u nodes", ctx->tree_depth, ctx->root_node,
+                    ctx->first_leaf, ctx->last_leaf, ctx->total_nodes);
+        return false;
+    }
+    if (volume->alloc_bytes > ROOTFS_WORK_MAX_BITMAP_BYTES) {
+        result_fail(result, ROOTFS_WORK_PROVISION_LIMIT, stage, 0,
+                    "the allocation bitmap is %" PRIu64 " bytes; the cap is %u",
+                    volume->alloc_bytes, ROOTFS_WORK_MAX_BITMAP_BYTES);
+        return false;
+    }
+    ctx->bitmap_bytes = (size_t)volume->alloc_bytes;
+    ctx->bitmap = (uint8_t *)malloc(ctx->bitmap_bytes);
+    ctx->build = (uint8_t *)malloc(HFS_MAX_RECORD_BYTES);
+    ctx->scratch = (uint8_t *)malloc(ctx->node_size);
+    ctx->nodes = (catalog_node_cache_t *)
+        calloc(ROOTFS_WORK_MAX_CATALOG_NODES, sizeof(*ctx->nodes));
+    if (!ctx->bitmap || !ctx->build || !ctx->scratch || !ctx->nodes) {
+        result_fail(result, ROOTFS_WORK_NO_MEMORY, stage, 0,
+                    "cannot allocate the catalog provisioning plan");
+        return false;
+    }
+    return catalog_alloc_fork_io(ctx, false, stage, result);
+}
+
+/*
+ * Create the requested catalog objects in the already-grown work image.
+ *
+ * Nothing is written until every entry has been planned and applied to the
+ * in-memory tree, so every refusal below leaves the image byte-identical.
+ */
+static bool provision_volume(host_file_t *file, uint64_t file_size,
+                             const hfs_volume_t *volume,
+                             const rootfs_work_options_t *options,
+                             uint8_t *buffer, size_t buffer_size,
+                             rootfs_work_result_t *result) {
+    catalog_ctx_t ctx;
+    catalog_content_t *contents = NULL;
+    uint32_t before_records;
+    size_t index;
+    bool okay = false;
+
+    memset(&ctx, 0, sizeof(ctx));
+    if (options->entry_count > ROOTFS_WORK_MAX_ENTRIES) {
+        result_fail(result, ROOTFS_WORK_PROVISION_LIMIT,
+                    ROOTFS_WORK_STAGE_PROVISION_PLAN, 0,
+                    "%zu entries requested; the cap is %u",
+                    options->entry_count, ROOTFS_WORK_MAX_ENTRIES);
+        return false;
+    }
+    if (!options->entries) {
+        result_fail(result, ROOTFS_WORK_PROVISION_INVALID,
+                    ROOTFS_WORK_STAGE_PROVISION_PLAN, 0,
+                    "entry_count is %zu but entries is NULL",
+                    options->entry_count);
+        return false;
+    }
+    if (!catalog_open(&ctx, file, file_size, volume,
+                      options->entry_mac_time != 0u ? options->entry_mac_time :
+                          ROOTFS_WORK_DEFAULT_MAC_TIME,
+                      result))
+        goto done;
+    before_records = ctx.leaf_records;
+    /* Refuse a catalog whose header and content disagree BEFORE planning,
+     * so a lookup can never answer "absent" out of a tree it cannot walk. */
+    if (!catalog_audit(&ctx, before_records, ROOTFS_WORK_STAGE_PROVISION_PLAN,
+                       result))
+        goto done;
+    contents = (catalog_content_t *)calloc(options->entry_count,
+                                           sizeof(*contents));
+    if (!contents) {
+        result_fail(result, ROOTFS_WORK_NO_MEMORY,
+                    ROOTFS_WORK_STAGE_PROVISION_PLAN, 0,
+                    "cannot allocate %zu content placements",
+                    options->entry_count);
+        goto done;
+    }
+    for (index = 0; index < options->entry_count; index++) {
+        if (!provision_one(&ctx, &options->entries[index], &contents[index],
+                           result))
+            goto done;
+    }
+    ctx.vh_dirty = true;
+    if (!catalog_commit(&ctx, contents, options->entry_count, buffer,
+                        buffer_size, result))
+        goto done;
+    /* Read the tree back through the independent chain walk.  This shares no
+     * state with the writer: if the commit produced anything the leaf chain
+     * or the header cannot account for, it is caught here and the work image
+     * is destroyed unpublished. */
+    if (!catalog_audit(&ctx, ctx.leaf_records,
+                       ROOTFS_WORK_STAGE_PROVISION_WRITE, result))
+        goto done;
+    okay = true;
+
+done:
+    free(contents);
+    catalog_close(&ctx);
+    return okay;
+}
+
+/*
+ * PROVENANCE: byte-verified against lockdownd's own disassembly, not guessed.
+ * See rootfs_work_activation_entries() in the header.
+ */
+static const char ACTIVATION_DATA_ARK[] =
+    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+    "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
+    "<plist version=\"1.0\">\n"
+    "<dict>\n"
+    "\t<key>-ActivationState</key>\n"
+    "\t<string>FactoryActivated</string>\n"
+    "\t<key>-BrickState</key>\n"
+    "\t<false/>\n"
+    "</dict>\n"
+    "</plist>\n";
+
+size_t rootfs_work_activation_entries(rootfs_work_entry_t *entries,
+                                      size_t capacity) {
+    if (entries && capacity >= 2u) {
+        memset(entries, 0, 2u * sizeof(*entries));
+        entries[0].kind = ROOTFS_WORK_ENTRY_DIRECTORY;
+        entries[0].path = "/private/var/root/Library/Lockdown";
+        entries[0].permissions = 0755u;
+        entries[1].kind = ROOTFS_WORK_ENTRY_FILE;
+        entries[1].path = "/private/var/root/Library/Lockdown/data_ark.plist";
+        entries[1].content = (const uint8_t *)ACTIVATION_DATA_ARK;
+        entries[1].content_size = sizeof(ACTIVATION_DATA_ARK) - 1u;
+        entries[1].permissions = 0644u;
+    }
+    return 2u;
+}
+
 static bool copy_source(host_file_t *source, host_file_t *temporary,
                         uint64_t source_size, uint8_t *buffer,
                         size_t buffer_size,
@@ -2379,6 +4047,7 @@ rootfs_work_status_t rootfs_work_create(const char *source_path,
     file_stamp_t temporary_stamp;
     hfs_volume_t source_volume;
     hfs_volume_t copied_volume;
+    hfs_volume_t grown_volume;
     hfs_volume_t final_volume;
     uint8_t *buffer = NULL;
     ios3_sha256_context_t source_sha256;
@@ -2529,6 +4198,23 @@ rootfs_work_status_t rootfs_work_create(const char *source_path,
     if (!grow_volume(&temporary, &work_size, selected.growth_bytes,
                      &copied_volume, buffer, selected.io_buffer_bytes, result))
         goto done;
+    /*
+     * Catalog provisioning is placed HERE, after growth, and re-validates the
+     * volume from the image rather than reusing copied_volume.  That is the
+     * ordering guarantee: the provisioner cannot see the pre-growth freeBlocks
+     * even if a caller sets the options in a different order, and the stock
+     * volume's freeBlocks = 0 becomes a measured ROOTFS_WORK_PROVISION_NO_SPACE
+     * refusal rather than an assumption about what the caller did.
+     */
+    if (selected.entry_count != 0u) {
+        if (!hfs_validate(&temporary, work_size, &grown_volume, buffer,
+                          selected.io_buffer_bytes,
+                          ROOTFS_WORK_STAGE_PROVISION_PLAN, result))
+            goto done;
+        if (!provision_volume(&temporary, work_size, &grown_volume, &selected,
+                              buffer, selected.io_buffer_bytes, result))
+            goto done;
+    }
     if (!hfs_validate(&temporary, work_size, &final_volume, buffer,
                       selected.io_buffer_bytes,
                       ROOTFS_WORK_STAGE_FINAL_VALIDATE, result))
