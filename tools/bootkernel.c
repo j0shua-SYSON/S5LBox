@@ -5026,13 +5026,20 @@ static struct {
     uint64_t    irq_n;
 
     /* distinct MMU faults */
+    /*
+     * The fatal fault is the one that matters, and it arrives LAST. A small
+     * saturating table fills with early demand-paging noise and then drops
+     * exactly the abort that killed the process: run55 dropped 5,828 sites and
+     * none of the 48 it kept was the one that ended SpringBoard.
+     */
+#define FAULT_SITE_CAP 65536u
     unsigned    fault_n;
     uint64_t    fault_dropped;
     struct {
         uint32_t far_, fsr, pc, cpsr;
         bool prefetch, mmu_enabled;
         uint64_t first_at, n;
-    } fault[48];
+    } fault[FAULT_SITE_CAP];
 
     /* --- DIAGNOSTIC: exception returns that resume in Thumb state ---------
      * A "MOVS pc,lr" / "LDM ^" leaving an ARM handler for Thumb code must
@@ -15789,7 +15796,7 @@ static void note_fault(uint32_t far_, uint32_t fsr, uint32_t pc,
                 (cpsr & ARM_CPSR_MODE_MASK)) {
             G.fault[i].n++; return;
         }
-    if (G.fault_n < 48) {
+    if (G.fault_n < FAULT_SITE_CAP) {
         G.fault[G.fault_n].far_ = far_; G.fault[G.fault_n].fsr = fsr;
         G.fault[G.fault_n].pc = pc; G.fault[G.fault_n].prefetch = pref;
         G.fault[G.fault_n].cpsr = cpsr;
