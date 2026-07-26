@@ -73,6 +73,7 @@ static double vm_now(void) {
                   rate:(double)instantRate
                 status:(arm_status_t)status;
 - (void)appendConsole:(NSString *)text;
+- (void)noteDiscardedInput;
 @end
 
 @implementation VMEngine {
@@ -95,6 +96,9 @@ static double vm_now(void) {
     VMEngineState    _state;
     BOOL             _stopRequested;
     BOOL             _paused;
+    uint64_t         _instructionCap; // 0: run until stopped or halted
+    BOOL             _buttons[VMButtonCount];
+    BOOL             _discardedInputLogged;
 }
 
 + (uint64_t)physFootprintBytes {
@@ -276,6 +280,97 @@ static double vm_now(void) {
     pthread_mutex_unlock(&_lock);
 }
 
+- (BOOL)isPaused {
+    pthread_mutex_lock(&_lock);
+    BOOL paused = _paused;
+    pthread_mutex_unlock(&_lock);
+    return paused;
+}
+
+- (BOOL)isRunning {
+    pthread_mutex_lock(&_lock);
+    BOOL running = (_state == VMEngineStateRunning);
+    pthread_mutex_unlock(&_lock);
+    return running;
+}
+
+- (void)setInstructionCap:(uint64_t)cap {
+    pthread_mutex_lock(&_lock);
+    _instructionCap = cap;
+    pthread_mutex_unlock(&_lock);
+}
+
+- (uint64_t)instructionCap {
+    pthread_mutex_lock(&_lock);
+    uint64_t cap = _instructionCap;
+    pthread_mutex_unlock(&_lock);
+    return cap;
+}
+
+#pragma mark - Guest input (see the header: none of it reaches the guest)
+
++ (NSString *)inputUnavailableReason {
+    /* One place, one sentence, and every control that would need input asks
+     * for it rather than deciding for itself that it is dead. */
+    return @"no touchscreen or button input is modelled yet";
+}
+
++ (NSString *)nameForButton:(VMButton)button {
+    switch (button) {
+        case VMButtonHome:         return @"Home";
+        case VMButtonPower:        return @"Power";
+        case VMButtonVolumeUp:     return @"Vol +";
+        case VMButtonVolumeDown:   return @"Vol -";
+        case VMButtonRingerSilent: return @"Silent";
+        case VMButtonCount:        break;
+    }
+    return @"?";
+}
+
+- (BOOL)setButton:(VMButton)button pressed:(BOOL)pressed {
+    if (button >= VMButtonCount) return NO;
+
+    /* Recorded under the same lock as everything else the UI can read, so the
+     * day a PMU model wants the held state it is already there and already
+     * safe to read from the emulator thread. */
+    pthread_mutex_lock(&_lock);
+    _buttons[button] = pressed;
+    pthread_mutex_unlock(&_lock);
+
+    [self noteDiscardedInput];
+    return NO;      // see +inputUnavailableReason
+}
+
+- (BOOL)isButtonPressed:(VMButton)button {
+    if (button >= VMButtonCount) return NO;
+    pthread_mutex_lock(&_lock);
+    BOOL held = _buttons[button];
+    pthread_mutex_unlock(&_lock);
+    return held;
+}
+
+- (BOOL)sendTouchAtGuestX:(int)x y:(int)y phase:(vm_touch_phase_t)phase {
+    (void)x; (void)y; (void)phase;
+    [self noteDiscardedInput];
+    return NO;      // see +inputUnavailableReason
+}
+
+/* Say it once. A drag produces a report per frame, and a console that scrolls
+ * the guest's own output away to repeat the same refusal is worse than one
+ * that states it plainly and then stops. */
+- (void)noteDiscardedInput {
+    pthread_mutex_lock(&_lock);
+    BOOL first = !_discardedInputLogged;
+    _discardedInputLogged = YES;
+    pthread_mutex_unlock(&_lock);
+    if (!first) return;
+
+    [self appendConsole:[NSString stringWithFormat:
+        @"[input] discarded: %@. The coordinate is shown on screen and thrown "
+        @"away; the guest is never told. Printed once.\n",
+        [VMEngine inputUnavailableReason]]];
+}
+
 #pragma mark - Emulator thread
 
 - (void)threadMain:(id)unused {
@@ -284,6 +379,7 @@ static double vm_now(void) {
     uint64_t retired = 0, retiredAtLastPublish = 0;
     arm_status_t status = ARM_OK;
     BOOL stoppedByRequest = NO;
+    BOOL reachedCap = NO;
 
     while (YES) {
         @autoreleasepool {
@@ -310,11 +406,25 @@ static double vm_now(void) {
              * guest halt as though the controller were still active. */
             pthread_mutex_lock(&_lock);
             stop = _stopRequested;
+            uint64_t cap = _instructionCap;
             if (status != ARM_OK && !stop && _state == VMEngineStateRunning)
+                _state = VMEngineStateStopping;
+            if (cap > 0 && retired >= cap && !stop &&
+                _state == VMEngineStateRunning)
                 _state = VMEngineStateStopping;
             pthread_mutex_unlock(&_lock);
             if (stop) {
                 stoppedByRequest = YES;
+                break;
+            }
+
+            /* A diagnostic limit, not a guest fault. Publish the frame and the
+             * counters that were reached and stop there, leaving the last
+             * picture up: the whole point of asking for a limit is to look at
+             * what the machine had drawn by then. */
+            if (cap > 0 && retired >= cap) {
+                reachedCap = YES;
+                [self publishRetired:retired rate:0.0 status:status];
                 break;
             }
 
@@ -343,6 +453,11 @@ static double vm_now(void) {
     if (stoppedByRequest)
         [self publishRetired:retired rate:0.0 status:ARM_OK];
 
+    if (reachedCap)
+        [self appendConsole:[NSString stringWithFormat:
+            @"[vm] stopped at the instruction cap: %llu retired\n",
+            (unsigned long long)retired]];
+
     if (_machineReady) {
         s5l8900_free(&_machine);
     }
@@ -361,6 +476,9 @@ static double vm_now(void) {
             _snapshotBlank = YES;
         }
         _status = @"stopped";
+        _rate = 0.0;
+    } else if (reachedCap) {
+        _status = @"instruction cap reached";
         _rate = 0.0;
     }
     _state = VMEngineStateIdle;

@@ -25,6 +25,7 @@
 //
 #import "VMFramebufferView.h"
 #import <QuartzCore/QuartzCore.h>
+#include <limits.h>
 #include <stdint.h>
 #import <stdlib.h>
 #import <string.h>
@@ -36,15 +37,39 @@ static void vm_fb_release_data(void *info, const void *data, size_t size) {
     free((void *)data);
 }
 
+// Declared up front so every call below is checked against a prototype.
+@interface VMFramebufferView ()
+- (void)reportTouches:(NSSet<UITouch *> *)touches phase:(vm_touch_phase_t)phase;
+@end
+
 @implementation VMFramebufferView {
     CGColorSpaceRef _colorSpace;
+
+    /* What the last presented frame was, so a touch is mapped against the
+     * geometry actually on screen rather than against an assumption. */
+    unsigned _guestWidth;
+    unsigned _guestHeight;
+
+    /* A gesture that began on the panel, and the last coordinate it was seen
+     * at, so its end can be reported even from outside the panel. */
+    BOOL _touchActive;
+    int  _lastGuestX;
+    int  _lastGuestY;
 }
+
+@synthesize touchDelegate = _touchDelegate;
 
 - (instancetype)initWithFrame:(CGRect)frame {
     self = [super initWithFrame:frame];
     if (!self) return nil;
 
     _colorSpace = CGColorSpaceCreateDeviceRGB();
+
+    /* The original panel, until a frame says otherwise. Written as the numbers
+     * rather than VMGuest.h's macros so this view stays a display of whatever
+     * it is handed rather than a display of one particular guest. */
+    _guestWidth  = 320u;
+    _guestHeight = 480u;
 
     self.backgroundColor = [UIColor blackColor];
     self.opaque = YES;
@@ -63,6 +88,15 @@ static void vm_fb_release_data(void *info, const void *data, size_t size) {
     if (_colorSpace) CGColorSpaceRelease(_colorSpace);
 }
 
+- (void)setTouchDelegate:(id<VMFramebufferViewTouchDelegate>)touchDelegate {
+    _touchDelegate = touchDelegate;
+    /* Interaction follows the delegate rather than being a second switch the
+     * caller can forget to throw. Turning it off also drops any gesture in
+     * progress, so nothing is left half-reported. */
+    self.userInteractionEnabled = (touchDelegate != nil);
+    if (!touchDelegate) _touchActive = NO;
+}
+
 - (void)presentPixels:(const void *)pixels
                 width:(size_t)w
                height:(size_t)h
@@ -70,6 +104,13 @@ static void vm_fb_release_data(void *info, const void *data, size_t size) {
                  argb:(BOOL)argb {
     if (!pixels || w == 0 || h == 0 || !_colorSpace ||
         w > SIZE_MAX / 4 || stride < w * 4 || h > SIZE_MAX / stride) return;
+
+    /* Only after the frame has been accepted: a rejected frame must not move
+     * the coordinate system a touch is measured against. */
+    if (w <= UINT_MAX && h <= UINT_MAX) {
+        _guestWidth  = (unsigned)w;
+        _guestHeight = (unsigned)h;
+    }
 
     const size_t bytes = stride * h;
 
@@ -101,6 +142,73 @@ static void vm_fb_release_data(void *info, const void *data, size_t size) {
 
     self.layer.contents = (__bridge id)image;
     CGImageRelease(image);
+}
+
+#pragma mark - Touches
+
+/*
+ * multipleTouchEnabled is left at its default of NO, so UIKit delivers one
+ * touch at a time and -anyObject is that touch. A guest that predates
+ * multi-touch APIs on the host side is not the reason — the reason is that
+ * nothing downstream can carry a second finger, and pretending otherwise here
+ * would be a shape to unpick later rather than a feature.
+ */
+- (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    [super touchesBegan:touches withEvent:event];
+    [self reportTouches:touches phase:VM_TOUCH_BEGAN];
+}
+
+- (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    [super touchesMoved:touches withEvent:event];
+    [self reportTouches:touches phase:VM_TOUCH_MOVED];
+}
+
+- (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    [super touchesEnded:touches withEvent:event];
+    [self reportTouches:touches phase:VM_TOUCH_ENDED];
+}
+
+- (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    [super touchesCancelled:touches withEvent:event];
+    [self reportTouches:touches phase:VM_TOUCH_CANCELLED];
+}
+
+- (void)reportTouches:(NSSet<UITouch *> *)touches phase:(vm_touch_phase_t)phase {
+    id<VMFramebufferViewTouchDelegate> delegate = self.touchDelegate;
+    UITouch *touch = [touches anyObject];
+    if (!delegate || !touch) { _touchActive = NO; return; }
+
+    const CGSize size = self.bounds.size;
+    const CGPoint point = [touch locationInView:self];
+    const vm_touch_point_t guest =
+        vm_touch_map((double)size.width, (double)size.height,
+                     _guestWidth, _guestHeight,
+                     (double)point.x, (double)point.y);
+
+    if (phase == VM_TOUCH_BEGAN) {
+        // The letterbox is not the panel: a touch there starts nothing.
+        if (!guest.inside) return;
+        _touchActive = YES;
+    } else if (!_touchActive) {
+        return;
+    }
+
+    if (guest.inside) {
+        _lastGuestX = guest.x;
+        _lastGuestY = guest.y;
+    } else if (phase == VM_TOUCH_MOVED) {
+        // Dragged off the panel. Say nothing, but stay active: the end of this
+        // gesture still has to be reported, at the last coordinate on-panel.
+        return;
+    }
+
+    if (phase == VM_TOUCH_ENDED || phase == VM_TOUCH_CANCELLED)
+        _touchActive = NO;
+
+    [delegate framebufferView:self
+                touchAtGuestX:_lastGuestX
+                       guestY:_lastGuestY
+                        phase:phase];
 }
 
 @end

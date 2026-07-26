@@ -11,12 +11,30 @@
 //  the bus, the UART, the VIC and the timer all work on *this* device, and that
 //  is worth keeping even now that there is something to look at.
 //
+//  WHAT THE CONTROLS ON THIS SCREEN DO, AND DO NOT DO
+//
+//  Play/pause and reset drive the emulator and are read back from it, so the
+//  toolbar shows what the machine is doing rather than what the last tap
+//  intended. Everything to do with INPUT does not work, and is drawn as not
+//  working: the row of physical keys under the screen is disabled with the
+//  reason printed beneath it, and a finger on the guest's panel has its
+//  coordinate mapped, shown on the status line, and thrown away.
+//
+//  That last part is deliberate rather than lazy. The mapping is real, tested
+//  arithmetic (VMTouchMap.c, app/Tests/test_vmtouchmap.c), and showing it live
+//  is how it can be seen to be right before there is a digitizer to send it to.
+//  What must never happen is a control that looks like it works.
+//
 //  Copyright (c) 2026 j0shua-SYSON. MIT licensed.
 //
 #import "EmulatorViewController.h"
+#import "VMButtonBar.h"
 #import "VMEngine.h"
 #import "VMFramebufferView.h"
 #import "VMGuest.h"
+#import "VMSettings.h"
+#import "VMSettingsViewController.h"
+#import "VMTouchMap.h"
 
 #import <QuartzCore/QuartzCore.h>
 #import <math.h>
@@ -46,17 +64,28 @@ static const NSUInteger kConsoleScrollback = 12000;
 @end
 
 // Declared up front so every call below is checked against a prototype.
-@interface EmulatorViewController ()
+@interface EmulatorViewController () <VMButtonBarDelegate,
+                                      VMFramebufferViewTouchDelegate>
 - (void)startEmulator;
+- (void)launchEngine;
 - (void)tick:(CADisplayLink *)sender;
 - (void)append:(NSString *)line;
 - (void)appendConsole:(NSString *)text;
+- (void)flushConsole;
 - (void)reportEnvironment;
 - (void)runUartDemo;
 - (void)runInterruptDemo;
 - (void)runMmuDemo;
 - (void)appWillResignActive:(NSNotification *)notification;
 - (void)appDidBecomeActive:(NSNotification *)notification;
+- (void)settingsDidChange:(NSNotification *)notification;
+- (void)applyPauseState;
+- (void)applySettingsToEngine;
+- (void)refreshRunControls;
+- (void)refreshStatusLine;
+- (void)playPauseTapped:(id)sender;
+- (void)resetTapped:(id)sender;
+- (void)settingsTapped:(id)sender;
 @end
 
 @implementation VMDisplayLinkProxy {
@@ -79,14 +108,35 @@ static const NSUInteger kConsoleScrollback = 12000;
 
 @implementation EmulatorViewController {
     VMFramebufferView *_screen;
+    VMButtonBar       *_keys;
     UILabel           *_stats;
     UITextView        *_console;
+    UIToolbar         *_toolbar;
     NSMutableString   *_consoleText;
+    BOOL               _consoleDirty;
 
     VMEngine          *_engine;
     CADisplayLink     *_link;
     uint8_t           *_frame;        // main thread's copy of the guest's pixels
     NSUInteger         _ticks;
+
+    /* Pause has two independent causes and the engine has one flag, so the
+     * causes are tracked here and combined. Without this, coming back to the
+     * foreground would silently un-pause a machine the user had paused on
+     * purpose. Neither of these is a copy of engine state: they are the two
+     * reasons for it, and -applyPauseState is the only thing that writes it. */
+    BOOL               _userPaused;
+    BOOL               _inBackground;
+
+    /* What the toolbar is currently showing, so it is only rebuilt when the
+     * engine's answer changes rather than four times a second. */
+    BOOL               _toolbarShowsPlay;
+    BOOL               _toolbarBuilt;
+
+    /* The last touch the mapping produced. Displayed, never delivered. */
+    BOOL               _haveTouch;
+    int                _touchX;
+    int                _touchY;
 }
 
 #pragma mark - Lifecycle
@@ -100,13 +150,25 @@ static const NSUInteger kConsoleScrollback = 12000;
     _screen = [[VMFramebufferView alloc] initWithFrame:CGRectZero];
     _screen.layer.borderWidth = 1.0;
     _screen.layer.borderColor = [UIColor colorWithWhite:0.25 alpha:1.0].CGColor;
+    /* Setting the delegate is what turns the picture into a touch surface. The
+     * coordinates it produces are shown on the status line and discarded; see
+     * -framebufferView:touchAtGuestX:guestY:phase:. */
+    _screen.touchDelegate = self;
     [self.view addSubview:_screen];
+
+    _keys = [[VMButtonBar alloc] initWithFrame:CGRectZero];
+    _keys.delegate = self;
+    /* The bar asks the engine whether input goes anywhere, rather than being
+     * told here that it does not. One nil from the engine lights it up. */
+    _keys.unavailableReason = [VMEngine inputUnavailableReason];
+    [self.view addSubview:_keys];
 
     _stats = [[UILabel alloc] initWithFrame:CGRectZero];
     _stats.backgroundColor = [UIColor clearColor];
     _stats.textColor = [UIColor colorWithWhite:0.62 alpha:1.0];
-    _stats.font = [UIFont fontWithName:@"Menlo" size:11]
-                  ?: [UIFont systemFontOfSize:11];
+    _stats.font = [UIFont fontWithName:@"Menlo" size:10]
+                  ?: [UIFont systemFontOfSize:10];
+    _stats.numberOfLines = 2;
     _stats.text = @"starting…";
     [self.view addSubview:_stats];
 
@@ -116,8 +178,22 @@ static const NSUInteger kConsoleScrollback = 12000;
     _console.font = [UIFont fontWithName:@"Menlo" size:10]
                     ?: [UIFont systemFontOfSize:10];
     _console.editable = NO;
+    /* Stated rather than inherited. A non-editable text view is selectable by
+     * default, but "you can select and copy the guest's output" is a property
+     * worth writing down, and -flushConsole depends on it being true. */
+    _console.selectable = YES;
+    _console.dataDetectorTypes = UIDataDetectorTypeNone;
     _console.textContainerInset = UIEdgeInsetsMake(6, 12, 12, 12);
     [self.view addSubview:_console];
+
+    /* A real UIToolbar rather than a row of buttons: the system draws the
+     * standard play/pause/refresh glyphs, and they are the ones anybody with an
+     * iPhone already knows. */
+    _toolbar = [[UIToolbar alloc] initWithFrame:CGRectZero];
+    _toolbar.barStyle = UIBarStyleBlack;
+    _toolbar.translucent = NO;
+    [self.view addSubview:_toolbar];
+    [self refreshRunControls];
 
     [self append:@"iOS3-VM  ·  on-device self-test"];
     [self append:@"================================\n"];
@@ -131,19 +207,11 @@ static const NSUInteger kConsoleScrollback = 12000;
     [self startEmulator];
 }
 
+/* Everything that happens once: the pixel buffer, the display link, and the
+ * notifications. -launchEngine is separate because Reset does it again. */
 - (void)startEmulator {
     _frame = calloc(1, VM_FB_BYTES);
     if (!_frame) { [self append:@"[vm] out of memory for the frame buffer"]; return; }
-
-    _engine = [[VMEngine alloc] init];
-    if (![_engine start]) {
-        [self append:@"[vm] emulator failed to start"];
-        [self appendConsole:[_engine takePendingConsoleText]];
-        _engine = nil;
-        free(_frame);
-        _frame = NULL;
-        return;
-    }
 
     // 30 Hz is plenty: the guest cannot repaint 320x480 anywhere near that
     // fast, so a higher rate would only re-upload identical pixels.
@@ -160,6 +228,10 @@ static const NSUInteger kConsoleScrollback = 12000;
                name:UIApplicationWillResignActiveNotification object:nil];
     [nc addObserver:self selector:@selector(appDidBecomeActive:)
                name:UIApplicationDidBecomeActiveNotification object:nil];
+    [nc addObserver:self selector:@selector(settingsDidChange:)
+               name:VMSettingsDidChangeNotification object:nil];
+
+    [self launchEngine];
 
     /* A foreground transition can race the relatively expensive VM startup
      * before the observers above exist. Reconcile with current state so a
@@ -167,6 +239,23 @@ static const NSUInteger kConsoleScrollback = 12000;
      * CPU in the background on a memory-constrained phone. */
     if ([UIApplication sharedApplication].applicationState != UIApplicationStateActive)
         [self appWillResignActive:nil];
+}
+
+- (void)launchEngine {
+    if (!_frame) return;
+
+    _engine = [[VMEngine alloc] init];
+    if (![_engine start]) {
+        [self append:@"[vm] emulator failed to start"];
+        [self appendConsole:[_engine takePendingConsoleText]];
+        _engine = nil;
+        [self refreshRunControls];
+        return;
+    }
+
+    [self applySettingsToEngine];
+    [self applyPauseState];
+    [self refreshRunControls];
 }
 
 - (void)dealloc {
@@ -178,14 +267,136 @@ static const NSUInteger kConsoleScrollback = 12000;
 
 - (void)appWillResignActive:(NSNotification *)notification {
     (void)notification;
-    [_engine setPaused:YES];
-    _link.paused = YES;
+    _inBackground = YES;
+    [self applyPauseState];
 }
 
 - (void)appDidBecomeActive:(NSNotification *)notification {
     (void)notification;
-    _link.paused = NO;
-    [_engine setPaused:NO];
+    _inBackground = NO;
+    [self applyPauseState];
+}
+
+- (void)settingsDidChange:(NSNotification *)notification {
+    (void)notification;
+    /* Only two settings are applied by this app, and both are cheap to
+     * re-apply, so re-apply both rather than working out which moved. */
+    [self applySettingsToEngine];
+    [self applyPauseState];
+    [self refreshStatusLine];
+}
+
+#pragma mark - Run state
+
+/*
+ * The single writer of the engine's pause flag. Pause has two causes — the
+ * user asked, or the app is not frontmost and the setting says to stop — and
+ * folding them here is what stops a return to the foreground from resuming a
+ * machine the user deliberately paused.
+ *
+ * Backgrounding is honoured through a setting because a user who has turned
+ * "pause when not frontmost" off is asking for the interpreter to keep going,
+ * and the settings screen states the consequence.
+ */
+- (void)applyPauseState {
+    const BOOL backgroundPause =
+        _inBackground && [[VMSettings sharedSettings] pausesInBackground];
+    const BOOL paused = _userPaused || backgroundPause;
+
+    [_engine setPaused:paused];
+    // The display link is stopped whenever the app is hidden either way: there
+    // is nothing to draw to, whatever the emulator is doing.
+    _link.paused = paused || _inBackground;
+
+    [self refreshRunControls];
+}
+
+- (void)applySettingsToEngine {
+    [_engine setInstructionCap:[[VMSettings sharedSettings] instructionCap]];
+}
+
+/* The toolbar is built from what the engine says, not from what was last
+ * tapped, so a machine that stopped on its own — a halt, or a reached
+ * instruction cap — is shown as stopped without anything having to notice. */
+- (void)refreshRunControls {
+    const BOOL showPlay = (_engine == nil) || [_engine isPaused] ||
+                          ![_engine isRunning];
+    if (_toolbarBuilt && showPlay == _toolbarShowsPlay) return;
+    _toolbarShowsPlay = showPlay;
+    _toolbarBuilt = YES;
+
+    UIBarButtonItem *playPause = [[UIBarButtonItem alloc]
+        initWithBarButtonSystemItem:(showPlay ? UIBarButtonSystemItemPlay
+                                              : UIBarButtonSystemItemPause)
+                             target:self
+                             action:@selector(playPauseTapped:)];
+    UIBarButtonItem *reset = [[UIBarButtonItem alloc]
+        initWithBarButtonSystemItem:UIBarButtonSystemItemRefresh
+                             target:self
+                             action:@selector(resetTapped:)];
+    UIBarButtonItem *space = [[UIBarButtonItem alloc]
+        initWithBarButtonSystemItem:UIBarButtonSystemItemFlexibleSpace
+                             target:nil
+                             action:nil];
+    UIBarButtonItem *settings = [[UIBarButtonItem alloc]
+        initWithTitle:@"Settings"
+                style:UIBarButtonItemStylePlain
+               target:self
+               action:@selector(settingsTapped:)];
+
+    [_toolbar setItems:@[playPause, reset, space, settings] animated:NO];
+}
+
+- (void)playPauseTapped:(id)sender {
+    (void)sender;
+
+    /* A machine that has stopped — halted, or reached its cap — cannot be
+     * resumed, because its s5l8900_t is gone. Play then means start a new one,
+     * which is what Reset does, and saying so is better than a dead button. */
+    if (!_engine || ![_engine isRunning]) {
+        [self resetTapped:nil];
+        return;
+    }
+
+    _userPaused = !_userPaused;
+    [self applyPauseState];
+    [self refreshStatusLine];
+}
+
+- (void)resetTapped:(id)sender {
+    (void)sender;
+    if (!_frame) return;
+
+    [self append:@"\n[vm] reset: dropping this machine and building a new one"];
+
+    /* -stop is a request the emulator thread notices between chunks, so the
+     * old machine is not gone yet. Nothing waits for it: the thread holds the
+     * last reference to its own engine and frees the machine before letting
+     * go, so a fresh engine can be built immediately alongside it. The two
+     * overlap for a few tens of milliseconds and 128 MB of guest DRAM is
+     * address space rather than footprint until it is touched (see VMEngine.m),
+     * so the overlap costs a fraction of a megabyte. */
+    [_engine stop];
+    _engine = nil;
+
+    _userPaused = NO;
+    _haveTouch = NO;
+    [self launchEngine];
+    [self refreshStatusLine];
+}
+
+- (void)settingsTapped:(id)sender {
+    (void)sender;
+
+    VMSettingsViewController *settings = [[VMSettingsViewController alloc] init];
+    UINavigationController *nav = [[UINavigationController alloc]
+        initWithRootViewController:settings];
+    // The emulator screen is black; a white sheet over it would be a jolt.
+    nav.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
+    /* Nothing needs intercepting on dismissal: every control writes through to
+     * NSUserDefaults immediately and posts VMSettingsDidChangeNotification, so
+     * a swipe-to-dismiss and the Done button are the same thing. */
+    [self presentViewController:nav animated:YES completion:nil];
 }
 
 #pragma mark - Layout
@@ -195,16 +406,30 @@ static const NSUInteger kConsoleScrollback = 12000;
 
     CGRect b = self.view.bounds;
     UIEdgeInsets safe = self.view.safeAreaInsets;
-    CGFloat top    = safe.top + 8.0;
-    CGFloat bottom = safe.bottom + 8.0;
-    CGFloat available = b.size.height - top - bottom;
-    if (available < 120.0) available = 120.0;
 
-    // Give the guest's screen the top ~60%, then fit 320x480 inside that
-    // without distortion. The layer's contentsGravity would do this anyway;
-    // doing it here too means the view's own aspect is already correct, so
-    // there is no interpretation of contentsScale that can stretch the image.
-    CGFloat band  = floor(available * 0.60);
+    // The run controls sit on the bottom edge, above the home indicator.
+    const CGFloat toolbarH = 44.0;
+    CGFloat toolbarY = b.size.height - safe.bottom - toolbarH;
+    if (toolbarY < 0.0) toolbarY = 0.0;
+    _toolbar.frame = CGRectMake(0.0, toolbarY, b.size.width, toolbarH);
+
+    const CGFloat top     = safe.top + 8.0;
+    const CGFloat keysH   = [VMButtonBar preferredHeight];
+    const CGFloat statsH  = 28.0;
+    const CGFloat chrome  = 6.0 + keysH + 6.0 + statsH + 4.0;
+
+    /* Split what is left between the guest's screen and the console. The
+     * fixed chrome comes off the top of the calculation so that a small phone
+     * shrinks the picture rather than the console down to nothing. */
+    CGFloat freeSpace = toolbarY - top - chrome;
+    if (freeSpace < 120.0) freeSpace = 120.0;
+
+    // Fit 320x480 inside the band without distortion. The layer's
+    // contentsGravity would do this anyway; doing it here too means the view's
+    // own aspect is already correct, so there is no interpretation of
+    // contentsScale that can stretch the image — and vm_touch_map() is then
+    // working against the same rectangle the picture is drawn in.
+    CGFloat band  = floor(freeSpace * 0.62);
     CGFloat scale = fmin(b.size.width / (CGFloat)VM_FB_WIDTH,
                          band / (CGFloat)VM_FB_HEIGHT);
     CGFloat w = floor((CGFloat)VM_FB_WIDTH  * scale);
@@ -213,12 +438,20 @@ static const NSUInteger kConsoleScrollback = 12000;
                                top + floor((band - h) * 0.5), w, h);
 
     CGFloat y = top + band + 6.0;
-    _stats.frame = CGRectMake(14.0, y, b.size.width - 28.0, 16.0);
-    y += 20.0;
+    _keys.frame = CGRectMake(0.0, y, b.size.width, keysH);
+    y += keysH + 6.0;
 
-    CGFloat consoleH = b.size.height - bottom - y;
+    _stats.frame = CGRectMake(14.0, y, b.size.width - 28.0, statsH);
+    y += statsH + 4.0;
+
+    CGFloat consoleH = toolbarY - y;
     if (consoleH < 40.0) consoleH = 40.0;
     _console.frame = CGRectMake(0.0, y, b.size.width, consoleH);
+}
+
+- (UIStatusBarStyle)preferredStatusBarStyle {
+    // The whole screen is black; the default dark clock would be invisible.
+    return UIStatusBarStyleLightContent;
 }
 
 #pragma mark - Presentation
@@ -235,32 +468,131 @@ static const NSUInteger kConsoleScrollback = 12000;
                           argb:argb];
 
     [self appendConsole:[_engine takePendingConsoleText]];
+    [self flushConsole];
 
     // The status line reads as noise if it changes 30 times a second.
-    if ((++_ticks % 8) == 0) _stats.text = [_engine statusLine];
+    if ((++_ticks % 8) == 0) {
+        [self refreshStatusLine];
+        // A machine can stop on its own, so the toolbar has to keep asking.
+        [self refreshRunControls];
+    }
+}
+
+/*
+ * Two lines. The first is the machine: whether it is paused, and then whatever
+ * VMEngine reports about the guest, its rate and this process's footprint. The
+ * second is input, which is permanently a statement that it does not work —
+ * once there is a touch to report, the coordinate that WOULD have been sent
+ * sits next to the reason it was not.
+ */
+- (void)refreshStatusLine {
+    NSString *machine;
+    if (!_engine) {
+        machine = @"no machine";
+    } else {
+        machine = [_engine statusLine] ?: @"?";
+        if ([_engine isPaused])
+            machine = [@"paused  ·  " stringByAppendingString:machine];
+    }
+
+    NSString *reason = [VMEngine inputUnavailableReason];
+    NSString *input;
+    if (reason.length == 0) {
+        input = _haveTouch
+            ? [NSString stringWithFormat:@"touch %d,%d  ·  delivered",
+               _touchX, _touchY]
+            : @"touch  ·  delivered to the guest";
+    } else if (_haveTouch) {
+        input = [NSString stringWithFormat:
+                 @"touch %d,%d  ·  NOT delivered: %@", _touchX, _touchY, reason];
+    } else {
+        input = [NSString stringWithFormat:@"input  ·  NOT delivered: %@",
+                 reason];
+    }
+
+    _stats.text = [NSString stringWithFormat:@"%@\n%@", machine, input];
 }
 
 - (void)append:(NSString *)line {
     [self appendConsole:[line stringByAppendingString:@"\n"]];
+    [self flushConsole];
 }
 
+/* Accumulate only. Pushing the string into the text view is -flushConsole's
+ * job, because doing it here would mean doing it from inside the self-tests
+ * before the view has been laid out, and thirty times a second afterwards. */
 - (void)appendConsole:(NSString *)text {
     if (!text.length) return;
+
+    [_consoleText appendString:text];
+
+    if (_consoleText.length > kConsoleScrollback) {
+        NSUInteger excess = _consoleText.length - kConsoleScrollback;
+        /* Cut at a line boundary rather than mid-word: the top of the console
+         * is then a whole line of the guest's output instead of a fragment
+         * that reads as corruption. */
+        NSRange newline = [_consoleText rangeOfString:@"\n"
+                                              options:0
+                                                range:NSMakeRange(excess,
+                                                    _consoleText.length - excess)];
+        if (newline.location != NSNotFound)
+            excess = newline.location + newline.length;
+        [_consoleText deleteCharactersInRange:NSMakeRange(0, excess)];
+    }
+    _consoleDirty = YES;
+}
+
+/*
+ * Replacing a UITextView's text destroys any selection in it, and the guest
+ * prints a line per frame forever, so a plain "assign every tick" console
+ * cannot be copied from: the selection is gone before a finger reaches Copy.
+ * So while something is selected, new output is held in _consoleText and shown
+ * when the selection is dropped. Scrollback is still bounded either way.
+ */
+- (void)flushConsole {
+    if (!_consoleDirty) return;
+    if (_console.selectedRange.length > 0) return;
 
     // Only follow the tail if the user has not scrolled up to read something.
     CGFloat slack = _console.contentSize.height - _console.contentOffset.y
                   - _console.bounds.size.height;
     BOOL followTail = (slack < 40.0);
 
-    [_consoleText appendString:text];
-    if (_consoleText.length > kConsoleScrollback) {
-        [_consoleText deleteCharactersInRange:
-            NSMakeRange(0, _consoleText.length - kConsoleScrollback)];
-    }
     _console.text = _consoleText;
+    _consoleDirty = NO;
 
     if (followTail && _consoleText.length)
         [_console scrollRangeToVisible:NSMakeRange(_consoleText.length - 1, 1)];
+}
+
+#pragma mark - Input (recorded and shown; never delivered)
+
+- (void)framebufferView:(VMFramebufferView *)view
+          touchAtGuestX:(int)x
+                 guestY:(int)y
+                  phase:(vm_touch_phase_t)phase {
+    (void)view;
+
+    _haveTouch = YES;
+    _touchX = x;
+    _touchY = y;
+
+    // Returns NO today, and the status line says so. Routed through the engine
+    // anyway so there is exactly one place that will start returning YES.
+    [_engine sendTouchAtGuestX:x y:y phase:phase];
+    [self refreshStatusLine];
+}
+
+- (void)buttonBar:(VMButtonBar *)bar
+  didChangeButton:(VMButton)button
+          pressed:(BOOL)pressed {
+    (void)bar;
+
+    /* Unreachable while +[VMEngine inputUnavailableReason] is non-nil, because
+     * the bar disables every key. Wired regardless: the day that returns nil,
+     * the keys light up and this is already the path they take. */
+    [_engine setButton:button pressed:pressed];
+    [self refreshStatusLine];
 }
 
 #pragma mark - Environment
