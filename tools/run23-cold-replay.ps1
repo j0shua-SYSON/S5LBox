@@ -28,7 +28,7 @@ param(
     # instructions of budget on its own -- more than the entire historical cap.
     # A run that stops at 2.1e9 has not observed a timeout; it has merely
     # stopped in the middle of one.
-    [ValidateRange(1000000, 24000000000)]
+    [ValidateRange(1000000, 90000000000)]
     [long] $InstructionCap = 2100000000,
 
     # Take a checkpoint at this retired-instruction count. Zero means none.
@@ -37,7 +37,7 @@ param(
     # frontier into seconds plus the delta. The checkpoint lands inside the run
     # directory so it inherits the same freshness and containment rules as every
     # other output.
-    [ValidateRange(0, 24000000000)]
+    [ValidateRange(0, 90000000000)]
     [long] $SnapshotAt = 0,
 
     # Start from a checkpoint written by an earlier -SnapshotAt run instead of

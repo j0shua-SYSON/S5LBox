@@ -22018,8 +22018,30 @@ external_md_work_ready:
          * render question now lives: no run has ever had more than 607e6
          * instructions of budget past that point.
          */
+        /*
+         * Un-matching the child nub alone does NOT work, and run46 proved it.
+         *
+         * The obvious narrow fix -- drop only arm-io/usb-otg/usb-device, since
+         * AppleSynopsysOTGDevice is what panics -- left the panic exactly where
+         * it was, at instruction 8,728,148,009, identical to the fully matched
+         * machine. So that driver is not reached by device-tree matching at
+         * all; AppleSynopsysOTGCore instantiates it in code, and the only nub
+         * that gates it is the parent.
+         *
+         * Un-matching the parent is therefore the correction that works, at a
+         * measured cost: cold boots reach SpringBoard's UIApplicationMain at
+         * ~3.27e9 fully matched, ~7.9e9 with the child un-matched (which still
+         * panics), and ~13.99e9 with the whole complex un-matched. Daemons that
+         * expect USB retry against its absence. That cost buys the only
+         * configuration observed to run past 8.73e9 at all.
+         *
+         * Modelling the Synopsys hardware-configuration registers so
+         * findMaxEndpoints computes a self-consistent endpoint count would keep
+         * the fast path AND remove the panic; that is the right long-term fix
+         * and is not done here.
+         */
         if (!want_usb_otg)
-            dt_unmatch(dt, dt_n, "arm-io/usb-otg/usb-device");
+            dt_unmatch(dt, dt_n, "arm-io/usb-otg");
         for (unsigned i = 0; i < ndtov; i++)
             dt_set_u32(dt, dt_n, dtov[i].path, dtov[i].prop, dtov[i].val);
         if (external_md &&
