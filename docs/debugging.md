@@ -678,10 +678,18 @@ were reverified after the run:
 ```text
 kernelcache.release.s5l8900x  0D8CDB339D37CF37A1DB2638FFF79272ECD63A17764BF7666EFA1618725DF70C
 DeviceTree.n82ap             4867C95FEDF544BDA2ECAA2626AE14C01A60D7771DC53FFE6FD3A6AAC8B8BA57
-018-6494-014.dmg             C3251E7F092C939D5818E92086CB47680981CFB03731DE7B55D238C942EB5E82
+018-6482-014.dmg             C3251E7F092C939D5818E92086CB47680981CFB03731DE7B55D238C942EB5E82
 ```
 
-Those are the immutable original source artifacts. Kernel and device-tree
+Those are the immutable original source artifacts. Two cautions about that
+block, both learned by rebuilding it from the IPSW on 2026-07-26. The names are
+IPSW members but the hashes are of the *derived outputs*, so
+`kernelcache.release.s5l8900x` is 4,078,708 bytes in the archive and the hash
+above is of the 7,942,144-byte decompressed Mach-O. And the third line read
+`018-6494-014.dmg` until that rebuild proved it wrong: 018-6494 is the 12.6 MB
+restore ramdisk, and the root filesystem is `018-6482-014.dmg`, 208,195,584
+bytes, exactly as docs/activation.md already said. docs/BOOT_CHAIN.md now
+carries the full regeneration sequence. Kernel and device-tree
 compatibility edits apply only to loaded guest copies; the writable filesystem
 is a fresh work-image copy, never the source DMG.
 

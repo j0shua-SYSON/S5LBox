@@ -112,6 +112,57 @@ byte-swapped magic constant once survived a fully green test suite because our
 fixtures shared the same mistake as our code. Seeing the real bytes is how that
 class of error gets caught.
 
+## Regenerating the three accepted inputs
+
+The emulator accepts exactly three files, checked by size and SHA-256 before
+anything is opened; README.md lists them. They are all derived from your own
+IPSW, and this is how. Written down because on 2026-07-26 the `firmware/`
+directory was found empty, and rebuilding it took an afternoon of rediscovery
+for what is really five commands -- the repo had `img3dump` and `unlzss` but
+nothing at all for the encrypted, compressed root filesystem.
+
+```sh
+S=work/scratch
+IPSW=firmware/iPhone1,2_3.1.3_7E18_Restore.ipsw
+
+# kernel.macho -- 7,942,144 bytes
+python tools/ipsw_explore.py $IPSW -x kernelcache.release.s5l8900x -o $S/kc.img3
+./build/core/img3dump $S/kc.img3 -k <hexkey> -iv <hexiv> -o $S/kc.complzss
+./build/core/unlzss $S/kc.complzss firmware/kernel.macho
+
+# devicetree.bin -- 40,544 bytes
+python tools/ipsw_explore.py $IPSW \
+    -x Firmware/all_flash/all_flash.n82ap.production/DeviceTree.n82ap.img3 \
+    -o $S/dt.img3
+./build/core/img3dump $S/dt.img3 -k <hexkey> -iv <hexiv> -o firmware/devicetree.bin
+
+# rootfs.img -- 433,274,880 bytes
+python tools/ipsw_explore.py $IPSW -x 018-6482-014.dmg -o $S/rootfs.enc.dmg
+python tools/vfdecrypt.py $S/rootfs.enc.dmg <rootfs-key-hex> $S/rootfs.dmg
+python tools/udif.py extract $S/rootfs.dmg firmware/rootfs.img Apple_HFSX
+```
+
+Keys are published per build and per device on The iPhone Wiki, under the build
+codename rather than the version -- for 7E18 the page is named for the build,
+not for "3.1.3". Pass them on the command line; the repository has no key
+loader and no key belongs in a file, a log or a commit. Note that the iPhone1,1
+page for the same build carries a *different* RootFS key; the device matters.
+
+Four things that cost time and are easy to get wrong:
+
+- The IPSW member names are not self-describing. `018-6482-014.dmg` is the root
+  filesystem; `018-6494-014.dmg` is the restore ramdisk, and an older line in
+  docs/debugging.md named the wrong one.
+- `unlzss` prints `adler32 check: MISMATCH` and a 42-byte zero-fill notice on
+  this kernelcache. That is the documented known discrepancy, it is baked into
+  the canonical hash, and it is **not** a failure.
+- The decrypted DMG is a whole disk, 846,324 sectors, including the partition
+  map and free space. Only the `Apple_HFSX` partition -- 846,240 sectors --
+  reproduces the accepted hash, which is why `udif.py` takes a blkx filter.
+- Verify by hash, never by size alone, and write into `firmware/` only after the
+  hash matches in scratch. A wrong file there is worse than no file: the
+  emulator's own gate will reject it, but only after you have trusted it.
+
 Before committing, verify that firmware remains untracked, for example with
 `git status --short` and `git diff --cached --name-only`. Git ignore rules can
 be bypassed and do not prevent data from being added under another path.
