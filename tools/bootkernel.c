@@ -4890,7 +4890,7 @@ static struct {
     /* --- USER-MODE PC HISTOGRAM ------------------------------------------
      * Sampled on EVERY user-mode instruction, not every 1024: user mode is
      * rare enough here that a 1-in-1024 sample of it rounds to nothing. */
-#define UPCHASH 4096u
+#define UPCHASH 262144u
     unsigned    upc_n;
     uint64_t    upc_dropped;
     struct { uint32_t va; uint64_t hits; } upc_hist[UPCHASH];
@@ -5041,7 +5041,7 @@ static struct {
      * address to disassemble. Open-addressed so a sample costs a hash and a
      * probe; capacity is a power of two and never grows.
      */
-#define PCHASH 8192u
+#define PCHASH 262144u
     unsigned    pc_n;
     uint64_t    pc_dropped;
     struct {
