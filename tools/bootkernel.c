@@ -21956,8 +21956,29 @@ external_md_work_ready:
          * controller later; at that point delete this un-match rather than keep
          * it as a workaround.
          */
+        /*
+         * Un-match ONLY the device-mode nub, not the whole USB complex.
+         *
+         * The panic is specifically AppleSynopsysOTGDevice::findMaxEndpoints,
+         * and that driver matches `usb-device` (compatible
+         * "usb-device,s5l8900x"). Un-matching the parent `usb-otg` took the
+         * OTG core and the host nub with it, which is far more than the
+         * evidence justifies and measurably costs boot progress: measured as
+         * work done between the restore point and SpringBoard's UIController,
+         * the whole-complex un-match needs roughly twice as many instructions
+         * (11.3e9 from run37's 8.5e9 checkpoint) as the matched machine
+         * (5.7e9 from run35's 2.4e9 checkpoint). Daemons that expect USB to
+         * exist -- accessoryd, lockbot, ptpd, itunesstored -- appear to retry
+         * against its absence.
+         *
+         * Keeping the core and host matched while dropping only the driver
+         * that panics is the narrower correction the evidence supports, and it
+         * preserves the fast path to UIController, which is where the whole
+         * render question now lives: no run has ever had more than 607e6
+         * instructions of budget past that point.
+         */
         if (!want_usb_otg)
-            dt_unmatch(dt, dt_n, "arm-io/usb-otg");
+            dt_unmatch(dt, dt_n, "arm-io/usb-otg/usb-device");
         for (unsigned i = 0; i < ndtov; i++)
             dt_set_u32(dt, dt_n, dtov[i].path, dtov[i].prop, dtov[i].val);
         if (external_md &&
