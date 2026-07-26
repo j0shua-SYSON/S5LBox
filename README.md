@@ -40,12 +40,24 @@ own filesystem, and that is how the current blocker was diagnosed. The project
 ships no Apple firmware and never modifies the files you supply.
 
 **What is not real:** the single most visible property of an iPhone — that it
-displays a home screen you can touch — has never been demonstrated here.
-SpringBoard has not rendered a frame. Every run to date ends with an identical,
-unchanged screen. There is no touch, no audio, no networking, and no graphics
-chip. Five pieces of hardware a real iPhone has are deliberately hidden from the
-guest, so it is told it is running on a machine with less hardware than a real
-iPhone.
+displays a home screen **you can touch** — is still not demonstrated here. As of
+run59 the guest does draw real frames: SpringBoard composites through Apple's own
+software renderer and the pixels reach the emulated panel. But the device is
+unactivated, so what it draws is the activation screen, not the home screen —
+and there is still **no touch**, so nothing on it can be used. There is also no
+audio, no networking, and no graphics chip. Five pieces of hardware a real iPhone
+has are deliberately hidden from the guest, so it is told it is running on a
+machine with less hardware than a real iPhone.
+
+<div align="center">
+
+<img src="docs/images/run59-first-frame.png" width="240" alt="The first frame this emulator ever drew: iPhone OS 3.1.3's activation screen, composited by SpringBoard.">
+
+*run59, instruction 4.97e9 — the first frame. Drawn by the guest's own
+SpringBoard through Apple's CPU compositor, scanned out through the emulated
+display controller. Nothing here is drawn by the host.*
+
+</div>
 
 | | |
 |---|---|
@@ -61,7 +73,7 @@ iPhone.
 | **Storage** | Not flash memory. The root filesystem is served from a file on the host into a fresh writable copy made for each run, and the guest's `/etc/fstab` is rewritten inside that copy to match. |
 | **Boot chain** | No secure boot chain is executed. The kernel is loaded directly; the boot ROM, the low-level bootloader and iBoot are not run. Apple's firmware container format has been parsed and an extracted bootloader payload executed, but separately, never as a chain. |
 | **Optional substitution** | Off by default: one of the guest's service-configuration files is rewritten in the work copy, without changing its size, to add `CA_ENABLE_MBX2D=0`. |
-| **Unproven** | SpringBoard has not rendered a frame. Every run to date ends with an identical, unchanged screen. |
+| **Rendering reached, use not** | run59 draws real frames — 14,264,987 changed scanout bytes, 97,510 of 460,800 framebuffer bytes non-zero, against 384 (the pre-guest seed) in every earlier run. What is on screen is the **activation** UI, because the guest is unactivated; the home screen is not reached. With no touch input modelled, nothing displayed can be interacted with. |
 
 > The evidence behind every claim above — what was measured, in which run, and
 > what each result does *not* prove — is in
@@ -103,18 +115,24 @@ Apple's own code reads, selecting the CPU renderer Apple already ships, so it
 needs no GPU emulation. Thirty restarts became one, and SpringBoard went on to
 build its interface and make its window visible for the first time.
 
-It now gets much further, and still dies. The whole drawing pipeline runs: the
-layer tree is walked, the compositor descends through nested layers, and Apple's
-graphics library reaches the instruction that writes pixels. There it stops with
-a memory-protection error while clearing the screen to black. The guest's own
-crash reporter recorded it twice, and the emulator's independent measurements
-agree with it exactly.
+The second blocker is fixed too, and the guest now renders. SpringBoard used to
+die writing the screen, with a memory-protection fault on the very first store.
+The cause was four indirections away: `/device-tree/vram` ships with
+`reg = {0,0}` and real iBoot fills it in. We load the kernel directly, never run
+iBoot, and so never did. Without it Apple's IOSurface layer cannot publish its
+video-memory region, the display driver falls back to describing the framebuffer
+as output-only, and the kernel then maps output-only memory **read-only** into
+the process that wanted to draw on it. Apple's code was correct throughout; we
+had simply never told it where video memory lives.
 
-The cause is neither the drawing code nor the screen geometry this emulator
-reports. Both have been checked: that same instruction correctly filled a
-complete 614,400-byte screen buffer earlier in the same run, stopping exactly on
-its last byte. Something hands the final step a pointer to the wrong memory.
-Finding out what is the current work. Nothing has rendered.
+Filling that one property in — the same in-memory device-tree patch this
+emulator already applies for the DRAM bank and the panel ID — produced the frame
+above: **14,264,987 changed scanout bytes**, where every previous run changed
+zero. SpringBoard was still compositing when the run hit its cap.
+
+What remains is that the device is **unactivated**, so SpringBoard draws the
+activation screen rather than the home screen, and there is no touch input, so
+nothing on screen can be used.
 
 Milestones are tracked in [`docs/ROADMAP.md`](docs/ROADMAP.md), the run-by-run
 history including every dead end in [`docs/BOOTLOG.md`](docs/BOOTLOG.md), and

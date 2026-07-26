@@ -2069,6 +2069,66 @@ contradictions. Neither overlaps the decisive `_ipc_mqueue_send` episode, whose
 route bindings, queue walk, and owner decode are each independently marked
 validated or authoritative.
 
+### 2026-07-26: runs 58-59 — the guest drew a frame
+
+![the first frame](images/run59-first-frame.png)
+
+The first pixels this project has ever produced. `/device-tree/vram` ships with
+`reg = {0,0}`; real iBoot fills it in and we never did. One `dt_set_reg` call in
+the block already labelled "device-tree patches (iBoot would have done these)"
+turned every measurement around.
+
+**run58-vram**, cold, cap 350e6, seven kernel probes — the cheap half of the
+test, because the whole decision chain completes before ~240e6:
+
+```text
+dt: /vram reg {0x00000000,0x00000000} -> {0x0885c000,0x00096000}
+
+@178085168  c0527b78  r0 c0bd1d00   waitForService("vram")      nub FOUND
+@178085354  c0527b94  r0 c0c3da00   getDeviceMemoryWithIndex(0) range RESOLVED
+@240093517  c07060a4  r0 c0b59740   copyMemoryRegionWithName    PurpleGfxMem EXISTS
+@240093770  c07060c0  r0 00000001   region->allocate(surface)   SUCCESS
+            c0706214            captured 0   <- kIODirectionOut fallback NEVER RAN
+```
+
+Both risks flagged before the run cleared. `/vram` is a root-level node rather
+than an `/arm-io` child, so whether the platform expert would publish a nub named
+`"vram"` for `waitForService` to find was genuinely open: it does. And the region
+is sized to exactly one surface, `0x96000`, because that is all that is reserved
+below `topOfKernelData`: `allocate` returned 1, so it was enough.
+
+**run59-vram-render**, cold, cap 5e9, exit 0:
+
+```text
+live CLCD scanout: 16,092,611 overlapping writes; 4,773,941 changed writes,
+                   14,264,987 changed bytes (14,264,987 RGB-visible)
+framebuffer: 97,510 of 460,800 RGB bytes non-zero        (every prior run: 384)
+wrote firmware/screen.ppm - live CLCD frame is NONBLACK
+```
+
+`FAR 0x00621000` does not appear anywhere in the log. `SpringBoard exact-path
+attempts: 1`. `CGBlt_fillBytes` was called **61,289** times against 510 in
+run57 before it died. `SBUIController:window-created` and `orderFront-call` each
+hit once with `nil-bailout` at zero, and `CABackingStoreUpdate` fired 102 times
+with its last at **@4,973,034,198** — SpringBoard was still compositing when the
+cap stopped it, not limping to a halt.
+
+What is on screen is the **activation** UI, not the home screen: `lockdownd.log`
+records `The original activation state is Unactivated`, and SpringBoard draws the
+iTunes-connect prompt and emergency-call slider accordingly. That is the correct
+frame for this guest to be showing. It is drawn entirely by the guest —
+QuartzCore's software compositor, CoreGraphics' rasteriser, our CLCD scanout —
+with nothing supplied by the host.
+
+Note the timeline moved. SpringBoard spawns at 579,408,027 here against
+3,249,787,435 in run52, because the vram region changes early IOSurface work; do
+not compare instruction indices across the fix.
+
+One `_exit1 status=0000000a` remains, at @1,595,733,254, pid 32 — before any of
+SpringBoard's UI work, and `post-activation entry-proc/PID _psignal/_exit1
+entries: 0/0` says it is not on the SpringBoard path. Unidentified, recorded, not
+guessed at.
+
 ### 2026-07-26: runs 52-56 — the MBX crash loop is broken, and two blockers remain
 
 The `CA_ENABLE_MBX2D=0` fix that runs 41-50 identified from disassembly has now
