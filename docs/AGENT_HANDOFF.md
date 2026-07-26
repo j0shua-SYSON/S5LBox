@@ -3202,100 +3202,136 @@ SpringBoard VA `0x00041268` drops every digitizer event when the byte at data VA
 warning: buffer allocation failed. 320 x 480`, which will bite the moment a tap
 launches an app.
 
-#### 23.4a Corrected a third time, while implementing steps 0, 2 and 3
+#### 23.4a Corrected, twice more, by run65 and run67. Read this before §23.4
 
-Everything above about *what* the HBPP answer must be is right. Two mechanisms
-it describes are not, and both would have produced a model that looks correct
-and silently does the wrong thing. The anchor for all of it is the vtable base
-**`0xc0449f40`** — `base + 0x4d0 = 0xc044a410`, which holds `0xc0441008`,
-`isInHBPP`. An earlier working base of `0xc0449f3c` is off by one slot and makes
-`0x4d0` resolve to `getCMDStatus`; check any slot arithmetic against that
-identity before trusting it.
+§23.4 is right about *what* the HBPP answer must be at each site and wrong about
+every mechanism it suggests for deciding it. So was the first revision of this
+subsection. Four designs have now been tried; two of them shipped and were
+caught by a boot. What follows is what the firmware actually does.
 
-**1. The device is in HBPP and stays in HBPP. There is nothing to
-discriminate on, and nothing that needs discriminating.** §23.4's table asks for
-"in HBPP" once and "not in HBPP" three times. Three separate mechanisms for
-that were tried and each was measured wrong:
+**FIRST: HOW TO SEE ANY OF THIS.** Two things that were got wrong repeatedly:
 
-- *Watch the reset line.* `attemptToBootloadDevice`'s first act after its
-  prologue is the probe itself — `ldr r3,[r0]` at `0xc04414d0`,
-  `ldr pc,[r3,#0x4d0]` at `0xc04414dc` — with no reset, no GPIO store, no delay
-  and no power call before it, and the retry loop re-enters with nothing in
-  between (`cmp r6,#3` at `0xc043aa0c`, `bne 0xc043a970`). `setDownloadMode`
-  cannot help either: `function-enable_download` is absent from the node, so it
-  returns `kIOReturnUnsupported` without touching anything.
-- *Accept the first probe, decline the rest.* Measured wrong. A run with
-  `--call-probe-kernel 0xc0441008 --call-probe-kernel 0xc0442670` shows
-  `finishStarting` entered **once**, at instruction 220,700,146, and `isInHBPP`
-  entered **once**, at 316,898,121 with `lr = 0xc04426cc`. But spi1 carried
-  **two** byte-identical 16-byte `1A A1 18 E1…` transfers, at 309.53M and
-  316.91M, from the same eleven call sites. Something in `finishStarting`'s own
-  preamble — one of `v[0x4b4]`, `v[0x42c]`, `v[0x458]` at
-  `0xc0442688`-`0xc04426b0` — sends the pattern and never reads the answer, so a
-  one-shot spends itself there and hands the real caller the rejection.
-- *Decline at `attemptToBootloadDevice` to skip the download.* Backwards.
-  Declining makes it return 0 at `0xc04414e4` having done nothing, and the three
-  `Bootload attempt %d of %d failed` lines never appear — that printf is at
-  `0xc043a9e8`, inside `v[0x36c]` (`0xc043a8d0`), which is only reached **on a
-  TRUE**. The retry loop's per-attempt call at `0xc043a97c` is `v[0x378]` =
-  `0xc04382a0`, a `callPlatformFunction` — not another probe and not a firmware
-  push. `v[0x36c]` returns zero on every path it has (all reach `0xc043aab4`,
-  `mov r0,#0`), so `attemptToBootloadDevice` is bounded whatever happens inside.
+- **`debug=0x8` does NOT turn on the multitouch log.** `PE_i_can_has_debugger()`
+  reads `/chosen/debug-enabled`, so the boot needs
+  **`-D chosen:debug-enabled=1`**. With it, `mt-strings=1` produces the whole
+  `mtlog:` stream and the bring-up becomes readable instead of inferred.
+- **The bootload timer does not fire until instruction 1,112,618,577.** Every
+  cap used before run65 — 400e6, 700e6 — stopped short of the entire bootload
+  path, so no observation about it made before then means anything. Use a cap of
+  at least **1.5e9**.
 
-So the working model answers **every** probe with the loopback echo. It is a
-part with no resident firmware sitting in its bootloader, which is a state real
-silicon has, and it produces `detected HBPP. driver will be kept alive` — first
-observed 2026-07-26 at a 400M cap.
+**The anchor for all slot arithmetic is vtable base `0xc0449f40`**:
+`base + 0x4d0 = 0xc044a410`, which holds `0xc0441008` = `isInHBPP`. A base of
+`0xc0449f3c` is off by one slot and makes `0x4d0` resolve to `getCMDStatus`.
 
-**1a. THE RESET LINE IS REALLY DRIVEN, AND A RESET MUST RESTORE HBPP.** This
-cost a boot and is the least obvious thing in this section. The guest writes the
-GPIO function-select register **77 times** during driver start, and one of those
-stores lands on the multi-touch `function-reset` pin `0x0606` **between** the
-un-evaluated probe at 309.53M and `finishStarting`'s own at 316.91M. A model in
-which a reset *ends* HBPP — the physically obvious rule, since a part that has
-just reset boots its firmware — therefore leaves HBPP one transfer before the
-only transfer whose answer anybody reads, and the boot ends in exactly the
-"Could not detect HBPP" it was built to prevent. Both probes are visible in the
-spi1 trace: the first echoed, the second sixteen zeros. The rule is wrong
-because the premise is: a part with **no** firmware comes out of reset back into
-its bootloader, every time.
+**1. `resetDevice` DOES run, at every probe site, and it clocks a decoy.** The
+first revision of this subsection claimed resetDevice was unreachable on this
+path. Wrong — run65's mtlog shows it at both sites, and each site is:
 
-**2. A GPIO pin is driven by one store to `fsel`, not by writing the level
-register.** §13.0d establishes that a pin's level is *read* at
-`0x3e400000 + group*32 + 4`, and that is correct. It does not say how a pin is
-*written*, and the natural assumption — that the same register is
-read-modify-written — is wrong. The write is a single 32-bit store to
-`fsel-offset` `0x320`:
-
-```text
-write32(0x3e400320, (pin << 8) | 0xE | (level & 1))
-    [23:16] group   [15:8] bit   [3:0] function, 0xE|level for a driven output
+```
+mtlog: AppleMultitouchSPI::setPowerEnabled[false]
+mtlog: Asserting reset line
+mtlog: disabling power
+mtlog: AppleMultitouchSPI::setPowerEnabled[true]
+mtlog: enabling power
+mtlog: ensuring S_CLK is high
+mtlog: initiating dummy transfer        <- 16 bytes, reset still ASSERTED
+mtlog: Deasserting reset line
+mtlog: checking if in HBPP              <- 16 bytes, reset RELEASED
 ```
 
-and `group*32 + 4` is read-only. This is independently corroborated by run59's
-own measurement of the storage stub that used to cover that page: **`0x320` was
-the only offset the guest ever touched on it**, so a model watching
-`group*32 + 4` for stores would not have fired once in an entire boot.
+The dummy transfer at `0xc0440d7c` builds **the same sixteen bytes as the
+probe** — `mov r3,#0x1a / strb / sub r3,r3,#0x79 / strb` then `0x18,0xE1`
+seven times — sends them through the same `v[0x368]`, and discards the answer.
+So each site makes **two byte-identical exchanges** and only the second one's
+answer is read. Any scheme that counts probes spends itself on the decoy.
 
-**3. Answering "in HBPP" once also chooses the frame opcode.** The true return
-runs `strb r3, [r4, #0x1bc]` at `0xc04426fc`, and `deviceReadResultData` at
-`0xc0441324` rejects `0xEB` unless `this+0x1bc` is non-zero. §23.4 says Z2 uses
-`0xEB`; this is *why*, and it is conditional on the answer above.
+**2. The reset line is ACTIVE LOW, and its level is the only discriminator.**
+Measured to the instruction from the GPIO trace with `-H 0x3e400000`:
 
-**4. `isBootloaded` inspects no payload field.** Slot `0x350` = `0xc043ac58`
-calls `getReportInfo(0xD3, &out, retries=4, useCache=0)` and then
-`rsbs r0,r0,#1 / movlo r0,#0` — true exactly when the call returns 0.
-`useCache=0` forces a real wire transaction, so it cannot be satisfied from the
-per-report cache at `this+0x1CC + id*4`.
+| instruction | fsel write | meaning |
+|---|---|---|
+| 220,635,069 | `0x0006060e` | assert (group 6, bit 6, level 0) |
+| ~309,530,000 | — | the dummy transfer runs |
+| 309,541,162 | `0x0006060f` | release |
+| 316,898,121 | — | `isInHBPP` entered, `lr = 0xc04426cc` |
+| ~316,910,000 | — | the probe runs |
+| 316,965,809 | `0x0006060e` | assert again |
 
-Confirmed unchanged, and now derived rather than assumed: the probe pattern
+The dummy is entirely inside the asserted window and the probe entirely outside
+it. A part held in its reset pin drives nothing, so modelling that one physical
+fact separates the decoy from the probe with no counting at all. Note also that
+the guest's **first** store to this pin writes level 0 — no change from the
+pin block's all-zero power-on state, so **no watch callback fires**; a model
+must start out believing the part is held down.
+
+**3. A reset must NOT re-arm the claim.** `098ce49` made a reset restore the
+in-HBPP state, on the reasoning that a part with no firmware resets into its
+bootloader. That reasoning is correct about silicon and fatal here: the guest
+resets before *every* site, so it makes the bootload site identical to the
+first, and run65 watched the driver answer affirmatively and begin
+`MTSPIBootloader_Z2::bootloadDevice()` / "sending preconstructed firmware
+bytes". A reset restores the part's **state**; it does not un-ask a question the
+host has already had answered. The working model is one monotonic bit spent by
+the first probe answered **out of reset**.
+
+**4. Declining at `attemptToBootloadDevice` DOES produce the three
+`Bootload attempt` lines.** The first revision of this subsection said the
+opposite, from a mis-derived call graph. The literal
+`"not in HBPP, so skipping bootload"` (`0xc04486f0`) is referenced from exactly
+one place, `0xc04415e4`, which is `attemptToBootloadDevice`'s own literal pool:
+the FALSE path logs it and returns 0, and the retry loop at `0xc043a980`
+(`subs r2,r0,#0 / beq 0xc043a9e8`) counts that as one failed attempt and prints
+`Bootload attempt %d of %d failed`. Three of those, then `isBootloaded()`.
+
+**4a. "Device has firmware?!" DOES NOT PRINT on the cycle that succeeds.**
+Expecting it as the success marker will read a working boot as a failure. After
+the three attempts the routine calls `isBootloaded()` and branches
+`bne 0xc043aa80` (`0xc043aaac`), which lands PAST the log at `0xc043aa64`. The
+string only prints on a LATER bootload cycle, when the cached byte at
+`this+0x69` is already 1 and `0xc043a950` branches to it. run68 confirms the
+shape with `--call-probe-kernel` on all three targets: `0xc043ac58`
+(`isBootloaded`) captured 1, `0xc043aa80` (the true branch) captured 1,
+`0xc043aa64` (the log) captured 0, and `0xc043aa48`
+("No firmware running, and couldn't load any") captured **0**. The correct
+success criterion is the ABSENCE of `0xc043aa48`, plus three
+`Bootload attempt N of 3 failed` lines.
+
+**5. "Device has no firmware - will attempt to bootload" is a cache read, not a
+failed report exchange.** The string at `0xc04472b4` is referenced from
+`0xc043aac8`, inside the timer-fired routine, and the top of that routine tests
+the cached byte at `this+0x69` (`ldrb r6,[r4,#0x69]` at `0xc043a948`) which is
+only written after the three attempts (`strb r0,[r4,#0x69]` at `0xc043aaa8`).
+So seeing that line does not mean `getReportInfo(0xD3)` failed — on the first
+pass it has not been asked yet.
+
+**6. THE SINK IS NOT BLOCKED BY DMA.** §23.4 says skipping the download "drops
+the entire `AppleARMPL080DMAC` model out of scope", which is true, but the
+implication that implementing it would *require* that model is not.
+`MTSPIBootloader_Z2` pushes through the ordinary SPI entry `v[0x368]` at
+`0xc0444ff8`, `0xc0445224` and `0xc04454d0`, and the controller only arms DMA
+when `this+0xf4` is non-zero — `ldr r5,[r4,#0xf4] / cmp r5,#0 /
+beq 0xc05a6cb4` at `0xc05a6c24`, the branch that skips `orr r2,r2,#0x40`. Our
+16-byte transfers run in PIO today, which proves that field is zero, and it is
+not per-transfer. So a firmware sink would receive the 54,156 bytes through the
+same slave callback everything else uses. What blocks it is that the
+bootloader's own multi-stage protocol is unread, its failure mode is a hang
+inside `commandSleep` rather than an error, and the feedback loop is an
+18-minute boot. It is a fidelity upgrade, not a prerequisite.
+
+Confirmed unchanged and now derived rather than assumed: the probe pattern
 (`1A A1` then `18 E1` seven times, loop `0xc0441030`-`0xc0441048`); that **both**
 `BE16(rx[0..1])` and `BE16(rx[2..3])` must pass (`0xc04410fc`, `0xc044110c`)
-while `rx[4..15]` is only printed; and the accepted set, which the literal pool
-gives as `0xc04406b4 = 0x18E1`, `0xc04406b8 = 0x1AA1`, `0xc04406bc = 0x4879`
-with `+0x620 -> 0x1F01`, `+0x2CC0 -> 0x4BC1`, `+0xF0 -> 0x4969` and
+while `rx[4..15]` is only printed; and the accepted set, whose literal pool
+gives `0xc04406b4 = 0x18E1`, `0xc04406b8 = 0x1AA1`, `0xc04406bc = 0x4879` with
+`+0x620 -> 0x1F01`, `+0x2CC0 -> 0x4BC1`, `+0xF0 -> 0x4969` and
 `-0xF0 -> 0x4AD1`. The compared value is `uxth`-truncated. The failure `printf`
 has a **double space** after the colon, so grep for `HBPP`.
+
+Also confirmed: `/arm-io/spi1`'s `function-spi_cs0` (GPIO `0x1800`, group 24
+bit 0) is really driven, `0x0018000e` at 316,902,467 and `0x0018000f` at
+316,918,158, bracketing the probe transfer — so a slave that wants packet
+framing from the chip select can have it.
 
 One thing flagged and unexplained: slot `0x458` holds `0xc044061c`, a bare
 `bx lr` that leaves `r0 = this`, which makes the following `IOSleep(r0)`

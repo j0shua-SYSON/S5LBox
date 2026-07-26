@@ -992,10 +992,17 @@ static void boot_config_emit(FILE *out, const boot_config_t *cfg) {
 static void boot_capability_notes(FILE *out, const boot_config_t *cfg,
                                   bool external_md,
                                   const char *jailbreak_payload) {
-    if (cfg->v.activate)
+    if (cfg->v.activate && external_md)
         fprintf(out,
-                "activation : requested but NOT APPLIED (no work-image file "
-                "provisioning yet)\n");
+                "activation : /var/root/Library/Lockdown/data_ark.plist will be "
+                "provisioned with -ActivationState=FactoryActivated and "
+                "-BrickState=false\n"
+                "             (offline provisioning, not an Apple activation: "
+                "no record is applied and none is verified)\n");
+    else if (cfg->v.activate)
+        fprintf(out,
+                "activation : requested but NOT APPLIED -- provisioning needs a "
+                "writable work image, i.e. --external-md\n");
     else
         fprintf(out,
                 "activation : disabled by --no-activate; the guest keeps the "
@@ -22778,6 +22785,42 @@ int main(int argc, char **argv) {
         options.source_identity.expected_size = IOS3_ROOTFS_FILE_SIZE;
         memcpy(options.source_identity.expected_sha256, IOS3_ROOTFS_SHA256,
                sizeof options.source_identity.expected_sha256);
+
+        /*
+         * Activation. lockdownd derives BrickState from ActivationState at
+         * boot, and SpringBoard paints its lockout from BrickState -- so the
+         * two keys in this file are what stand between the activation screen
+         * and the lock screen. `Activated` is the value every jailbreak tool of
+         * the era wrote and it does not work here: determine_activation_state
+         * rewrites it to `Unactivated` on every boot (0xd4f8/0xd50c), while
+         * `FactoryActivated` survives (0xd508). No Apple signature is consulted
+         * on this path; verify_activation_record is reached only when applying
+         * a record. Derivation in docs/AGENT_HANDOFF.md section 23.3.
+         *
+         * The file cannot be rewritten in place because it does not exist --
+         * the pristine image has /private/var/root/Library with no Lockdown
+         * subdirectory at all -- so this needs the catalog writer, and the
+         * catalog writer needs somewhere to put it. A stock volume ships
+         * freeBlocks = 0, so without --grow the provisioner refuses rather than
+         * quietly skipping.
+         */
+        static rootfs_work_entry_t activation_entries[2];
+        if (cfg.v.activate) {
+            size_t n = rootfs_work_activation_entries(
+                activation_entries,
+                sizeof activation_entries / sizeof activation_entries[0]);
+            if (n == 0) {
+                fprintf(stderr, "activation: entry table refused; refusing a "
+                                "half-configured work image\n");
+                free(dt);
+                s5l8900_free(&mach);
+                ksyms_free(&KS);
+                free(img);
+                return 1;
+            }
+            options.entries = activation_entries;
+            options.entry_count = n;
+        }
 
         /*
          * A restore must reproduce the disk exactly as it stood at the

@@ -51,3 +51,6 @@ compile_commands.json
 
 # Agent scratch config (codex CLI)
 /.codex/
+
+# Guest console tee, written into the CWD by -F runs (see the CONSOLE CAPTURE block)
+uart-console.log

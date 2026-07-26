@@ -13,77 +13,92 @@
  * reached by virtual dispatch through slot 0x4d0 of the vtable at 0xc0449f40,
  * never by a direct bl — and TWO CALLERS WANT OPPOSITE ANSWERS:
  *
- *   finishStarting()        0xc0442670: `beq 0xc0442714` on false. False means
- *                           "Could not detect HBPP. Returning false from
- *                           finishStarting()" and the driver detaches. This
- *                           is the state run61 measured against the null
- *                           device, and it is the whole reason this file
- *                           exists.
- *   attemptToBootloadDevice 0xc04414c4: its first instruction after the
- *                           prologue is the same probe (`ldr pc,[r3,#0x4d0]`
- *                           at 0xc04414dc), and `subs r5,r0,#0 / bne` sends a
- *                           TRUE into the real HBPP firmware download — 54 KB
- *                           over a DMA controller this machine does not model.
- *                           It needs FALSE, whereupon it returns r5 = 0, the
- *                           retry loop at 0xc043a970 logs "Bootload attempt %d
- *                           of %d failed", and after three of those it calls
- *                           isBootloaded() (0xc043ac58) and believes the
- *                           firmware is already there.
+ *   finishStarting() 0xc0442670 takes `beq 0xc0442714` on FALSE, prints
+ *   "Could not detect HBPP. Returning false from finishStarting()" and
+ *   DETACHES. That is the state run61 measured against the null device and the
+ *   whole reason this file exists. It needs TRUE.
  *
- * SO THIS DEVICE ANSWERS EVERY PROBE THE SAME WAY: it is in HBPP, and it stays
- * in HBPP. It is a part with no resident firmware sitting in its bootloader,
- * which is a state real silicon has. It is not a fabricated one-shot, and it
- * used to be — three earlier designs for this file were wrong, and the way each
- * was wrong is worth keeping:
+ *   attemptToBootloadDevice 0xc04414c4 probes first thing
+ *   (`ldr pc,[r3,#0x4d0]` at 0xc04414dc). On TRUE it logs "attempting to
+ *   bootload device" and pushes 54,156 bytes of firmware — run65 watched it
+ *   reach "MTSPIBootloader_Z2::bootloadDevice() / sending preconstructed
+ *   firmware bytes". On FALSE it logs "not in HBPP, so skipping bootload"
+ *   (literal 0xc04486f0, referenced only from this function's pool at
+ *   0xc04415e4) and returns 0 — which the retry loop at 0xc043a980 counts as
+ *   one failure, printing "Bootload attempt %d of %d failed". It needs FALSE.
  *
- *   1. "The second probe follows resetDevice(TRUE), so watch the reset line."
- *      There is no reset to watch. attemptToBootloadDevice's first act after
- *      its prologue is the probe (`ldr r3,[r0]` 0xc04414d0, `ldr pc,[r3,#0x4d0]`
- *      0xc04414dc) — no reset, no GPIO store, no delay, no power call — and
- *      resetDevice (0xc0443dd0) has one call site in the entire kext,
- *      0xc0438160, inside a virtual that neither finishStarting nor the
- *      bootload path reaches.
+ * The two sites are BYTE-IDENTICAL on the wire, so the discrimination has to be
+ * stateful. It is one monotonic bit, `hbpp_answered`, and getting the state it
+ * keys on right took four wrong designs and two boots:
  *
- *   2. "Then accept the first probe and decline the rest." MEASURED WRONG.
- *      A run with `--call-probe-kernel 0xc0441008 --call-probe-kernel
- *      0xc0442670` shows finishStarting entered exactly once, at instruction
- *      220,700,146, and isInHBPP entered exactly once, at 316,898,121 with
- *      lr = 0xc04426cc — the return address of finishStarting's own dispatch.
- *      But spi1 carried TWO byte-identical 16-byte `1A A1 18 E1...` transfers,
- *      at 309.53M and 316.91M, from the same eleven call sites. So something
- *      inside finishStarting's preamble — one of v[0x4b4], v[0x42c], v[0x458]
- *      at 0xc0442688-0xc04426b0 — sends the probe pattern and never looks at
- *      the answer. A one-shot spends itself on that transfer and hands
- *      finishStarting the rejection. That is exactly the run this file was
- *      written to end, reproduced by the fix for it.
+ *   1. "Watch the reset line: the bootload probe follows resetDevice(TRUE)."
+ *      Both sites reset. Worthless as a discriminator on its own.
  *
- *   3. "Then decline at attemptToBootloadDevice, to skip the download."
- *      Backwards. Declining there makes it return 0 at 0xc04414e4 having done
- *      nothing, and the three "Bootload attempt %d of %d failed" lines never
- *      appear — because that printf is at 0xc043a9e8, inside v[0x36c]
- *      (0xc043a8d0), which is only reached ON A TRUE. The download is skipped
- *      by the retry loop failing, not by the probe failing, and the loop's
- *      per-attempt call at 0xc043a97c is v[0x378] = 0xc04382a0, a
- *      `callPlatformFunction` — not another probe and not a firmware push.
- *      v[0x36c] returns zero on every path it has (they all reach 0xc043aab4,
- *      `mov r0,#0`), so attemptToBootloadDevice is bounded whatever happens
- *      inside it.
+ *   2. "Accept the first probe, decline the rest." MEASURED WRONG. A run with
+ *      `--call-probe-kernel 0xc0441008 --call-probe-kernel 0xc0442670` shows
+ *      finishStarting entered once, at instruction 220,700,146, and isInHBPP
+ *      entered once, at 316,898,121 with lr = 0xc04426cc. But spi1 carried TWO
+ *      byte-identical 16-byte `1A A1 18 E1…` transfers, at 309.53M and 316.91M.
+ *      The first is resetDevice's DUMMY TRANSFER (0xc0440d7c builds the same
+ *      sixteen bytes and logs "initiating dummy transfer"), whose answer is
+ *      discarded. A plain probe counter spends itself there and hands
+ *      finishStarting the rejection.
  *
- * The cost of answering true is three cosmetic log lines. The 54 KB firmware
- * push and the unmodelled AppleARMPL080DMAC stay out of scope because the
- * driver has no firmware to push, not because we lied about the probe.
+ *   3. "Never decline, then." That is what shipped in 098ce49, and run65 showed
+ *      where it leads: the bootload probe answered TRUE and the driver began
+ *      pushing firmware. Correct behaviour for an unprogrammed part; not what
+ *      this model can survive.
  *
- * ANSWERING TRUE ALSO CHOOSES THE FRAME OPCODE. The true return runs
+ *   4. "A reset restores HBPP, so a reset must also re-arm the claim." No. The
+ *      guest pulses this line at every site, so re-arming the claim makes site
+ *      2 identical to site 1 — which is bug 3 again. A reset restores the
+ *      part's STATE; it does not un-ask the question the host already asked.
+ *
+ * WHAT ACTUALLY SEPARATES THE TWO EXCHANGES IS THE RESET LINE'S LEVEL, and the
+ * guest's own log says so:
+ *
+ *      mtlog: enabling power
+ *      mtlog: ensuring S_CLK is high
+ *      mtlog: initiating dummy transfer      <- reset still ASSERTED
+ *      mtlog: Deasserting reset line
+ *      mtlog: checking if in HBPP            <- reset RELEASED
+ *
+ * confirmed against the GPIO trace to the instruction: fsel write 0x0006060e
+ * (group 6, bit 6, level 0) at 220,635,069 asserts; the dummy runs at
+ * 309.53M; 0x0006060f releases at 309,541,162; the probe runs at 316.91M;
+ * 0x0006060e asserts again at 316,965,809. So the line is ACTIVE LOW, the
+ * dummy is entirely inside the asserted window and the probe entirely outside
+ * it.
+ *
+ * A part held in its reset pin drives nothing. Modelling that one physical
+ * fact makes the dummy answer sixteen zeros — which the driver discards, as it
+ * always did — and leaves `hbpp_answered` for the exchange that is actually
+ * read. No magic constant, no counting of transfers, and every element of it
+ * is visible in the guest's own log.
+ *
+ * `hbpp_answered` is still a lie: a real unprogrammed Z2 answers TRUE forever
+ * and expects firmware. It is a bounded, named, single-bit lie that costs three
+ * cosmetic log lines, and the alternative is in the note at the end of this
+ * comment.
+ *
+ * ANSWERING TRUE ONCE ALSO CHOOSES THE FRAME OPCODE. The true return runs
  * `strb r3, [r4, #0x1bc]` at 0xc04426fc, and deviceReadResultData at
  * 0xc0441324 rejects 0xEB unless this+0x1bc is non-zero. So this device's Z2
- * frame opcode is downstream of the HBPP answer rather than independent of it,
- * and a model that declined the probe would also have to fall back to 0xEA.
+ * frame opcode is downstream of the HBPP answer rather than independent of it.
  *
- * `hbpp` is still state rather than a constant, because the reset line really
- * does end it: a part that has just reset runs whatever firmware it has. On
- * this boot path nothing drives that line (see s5l_mtz2_reset_pin), so nothing
- * ends it, which is the correct behaviour for a device that has never been
- * given firmware.
+ * THE ALTERNATIVE, AND WHY NOT YET. Implementing the HBPP sink — accepting the
+ * 54,156 bytes and afterwards reporting firmware resident — removes the lie
+ * entirely. It is NOT blocked by DMA, which was the standing objection:
+ * MTSPIBootloader_Z2 pushes through the ordinary SPI entry `v[0x368]` at
+ * 0xc0444ff8, 0xc0445224 and 0xc04454d0, and the controller only arms DMA when
+ * `this+0xf4` is non-zero (`ldr r5,[r4,#0xf4] / cmp r5,#0 / beq 0xc05a6cb4` at
+ * 0xc05a6c24, the branch that skips `orr r2,r2,#0x40`) — which our 16-byte
+ * transfers prove is zero, since they run in PIO today. What blocks it is that
+ * the bootloader's own multi-stage protocol is unread, its failure mode is a
+ * hang inside commandSleep rather than an error, and the feedback loop is an
+ * 18-minute boot because the timer does not fire until instruction 1.11e9. It
+ * is a fidelity upgrade, not a prerequisite: nothing above the bootloader can
+ * tell a part that was programmed from one that says it was.
  *
  * ===========================================================================
  * THE WIRE PROTOCOL
@@ -276,7 +291,7 @@ static void compose(s5l_mtz2_t *dev) {
 
     if (dev->op == MTZ2_OP_HBPP) {
         /*
-         * The out-of-HBPP answer: sixteen zeros, opcode byte included, and
+         * The declining answer: sixteen zeros, opcode byte included, and
          * deliberately NOT an echo. The driver tests BE16(rx[0..1]) and
          * BE16(rx[2..3]) against a set containing neither 0x0000 nor 0x1A00,
          * so this is a definite rejection — and it is exactly the sixteen
@@ -348,13 +363,30 @@ static void compose(s5l_mtz2_t *dev) {
  * accepted set. Everything else is answered from the composed reply.
  */
 static uint8_t drive(const s5l_mtz2_t *dev, uint8_t out, unsigned pos) {
-    if (dev->op == MTZ2_OP_HBPP && dev->hbpp) return out;
+    if (dev->op == MTZ2_OP_HBPP && !dev->hbpp_answered) return out;
     return pos < S5L_MTZ2_BUF ? dev->rsp[pos] : 0u;
 }
 
 static uint8_t mtz2_transfer(void *ctx, uint8_t out) {
     s5l_mtz2_t *dev = ctx;
     if (!dev) return 0u;
+
+    /*
+     * Held in reset: drive nothing, remember nothing.
+     *
+     * This is one physical fact and it is what makes the whole skip work.
+     * resetDevice clocks a 16-byte dummy transfer while the line is down —
+     * `1A A1 18 E1…`, byte-identical to the real probe, answer discarded — and
+     * then releases the line and probes. Swallowing the dummy here is what
+     * leaves the one-time claim in `hbpp_answered` for the exchange whose
+     * answer is actually read. Note the framer is deliberately NOT advanced:
+     * a part in reset has no protocol position either.
+     */
+    if (dev->in_reset) {
+        dev->reset_bytes++;
+        (void)out;
+        return 0u;
+    }
 
     if (dev->len == 0u) {
         /* Between packets: this byte is an opcode or it is nothing. */
@@ -387,7 +419,12 @@ static uint8_t mtz2_transfer(void *ctx, uint8_t out) {
     dev->pos++;
     if (dev->pos >= dev->len) {
         dev->packets++;
-        if (dev->op == MTZ2_OP_HBPP) dev->hbpp_probes++;
+        if (dev->op == MTZ2_OP_HBPP) {
+            dev->hbpp_probes++;
+            /* The host has had its one look. Only reachable out of reset, so
+             * the dummy transfer can never get here. */
+            dev->hbpp_answered = true;
+        }
         dev->pos = 0u;
         dev->len = 0u;
     }
@@ -400,9 +437,19 @@ void s5l_mtz2_reset(s5l_mtz2_t *dev) {
     if (!dev) return;
     memset(dev, 0, sizeof *dev);
 
-    /* Power-on answer. finishStarting() is the first thing to probe and it is
-     * the caller that needs a true. */
-    dev->hbpp = true;
+    /*
+     * Power-on state. `hbpp_answered` false means the next probe answered out
+     * of reset gets the affirmative finishStarting() needs.
+     *
+     * `in_reset` true is not a stylistic choice: the GPIO pin block powers up
+     * all-zero and MTZ2_PIN_RESET is active low, so a part on this board is
+     * genuinely held down until the driver releases it. It also matters that
+     * the model start here rather than at "released", because the guest's
+     * first store to this pin writes level 0 — no change, so no watch callback
+     * — and only the later release produces an edge.
+     */
+    dev->in_reset      = true;
+    dev->hbpp_answered = false;
 
     /*
      * THE GEOMETRY. None of this is in the device tree, so all of it is our
@@ -481,35 +528,28 @@ void s5l_mtz2_reset_pin(void *ctx, bool level) {
     s5l_mtz2_t *dev = ctx;
     if (!dev) return;
     /*
-     * `function-reset`, GPIO 0x0606 = group 6 bit 6.
+     * MTZ2_PIN_RESET, group 6 bit 6, ACTIVE LOW — so `level == false` holds the
+     * part down. Measured, not assumed: fsel write 0x0006060e (level 0) at
+     * instruction 220,635,069 is the guest's "Asserting reset line", and
+     * 0x0006060f (level 1) at 309,541,162 is its "Deasserting reset line",
+     * with the dummy transfer between them and the probe after.
      *
-     * THIS LINE IS REALLY DRIVEN, and finding that out cost a boot. An earlier
-     * revision made a reset LEAVE HBPP, on the reasoning that a part which has
-     * just reset is running its resident firmware. Measured: the guest writes
-     * the GPIO function-select register 77 times during driver start, and one
-     * of those stores lands on this pin BETWEEN the un-evaluated probe at
-     * instruction 309.53M and finishStarting's own at 316.91M — so the device
-     * left HBPP one transfer before the only transfer whose answer anybody
-     * read, and the boot ended in exactly the "Could not detect HBPP" the
-     * device exists to prevent. Both probes are visible in the spi1 register
-     * trace: the first came back echoed, the second came back as sixteen zeros.
+     * THIS FUNCTION MUST NOT TOUCH `hbpp_answered`, AND THAT IS THE FIX.
+     * An earlier revision set it back to "in HBPP" here, reasoning that a part
+     * with no firmware resets into its bootloader — which is true, and is
+     * exactly why it breaks. The guest pulses this line before EVERY probe
+     * site, so re-arming the claim makes the bootload site indistinguishable
+     * from the first one, the bootload probe answers affirmatively, and the
+     * driver starts pushing 54,156 bytes of firmware. run65 watched it do
+     * precisely that. A reset restores the part's state; it does not un-ask a
+     * question the host has already had answered.
      *
-     * The reasoning was wrong, not just the outcome. A part with resident
-     * firmware boots it; a part with NONE — which is what this device is, and
-     * why the driver is about to try to bootload it — comes out of reset back
-     * into its bootloader, every time. So a reset RESTORES HBPP here. That is
-     * the physically correct answer for an unprogrammed Z2 and it is also the
-     * one that keeps the driver attached, which is a good sign rather than a
-     * coincidence.
-     *
-     * Either edge, because the pulse is two stores and the model must not
-     * depend on which of them it sees. A partly received packet does not
-     * survive a reset.
+     * The part does lose its protocol position: a packet half-received when
+     * the line drops did not survive.
      */
-    (void)level;
-    dev->hbpp = true;
-    dev->pos  = 0u;
-    dev->len  = 0u;
+    dev->in_reset = !level;
+    dev->pos = 0u;
+    dev->len = 0u;
     dev->resets++;
 }
 

@@ -592,6 +592,15 @@ static void test_machine_routes_spi_windows_and_irq_lines(void) {
     m.bus.write32(m.bus.ctx, S5L8900_SPI1_BASE + SPI_SETUP,
                   SPI_SETUP_BASE | SPI_SETUP_ARM);
     writes_before += 10u;
+    /*
+     * Release the touch controller's reset line before expecting it to answer.
+     * A part held in its reset pin drives nothing, and the pin block powers up
+     * all-zero with this line active low -- so a machine that has only just
+     * been built has the device held down, exactly as the board does before
+     * the driver's "Deasserting reset line". This is the store the guest makes.
+     */
+    m.bus.write32(m.bus.ctx, S5L8900_GPIO_BASE + S5L_GPIO_FSEL,
+                  (6u << 16) | (6u << 8) | 0xfu);
     /* The driver's own sixteen probe bytes, `1A A1` then `18 E1` seven times
      * (0xc0441014-0xc0441048). The first eight are the prefill. Sending the
      * real pattern rather than an arbitrary ramp matters now that the attached
@@ -693,8 +702,16 @@ static void test_the_stock_filter_algorithm_terminates(void) {
     void *c = m.bus.ctx;
     const uint32_t B = S5L8900_SPI1_BASE;
 
+    m.bus.write32(c, S5L8900_GPIO_BASE + S5L_GPIO_FSEL,
+                  (6u << 16) | (6u << 8) | 0xfu);   /* release reset; see above */
+
+    /* The driver's own probe bytes. The attached device is a protocol model,
+     * so what comes back is only a round trip if it recognised what went out. */
     uint8_t tx[16], rx[16];
-    for (unsigned i = 0; i < 16u; i++) { tx[i] = (uint8_t)(0x1au + i); rx[i] = 0xcc; }
+    for (unsigned i = 0; i < 16u; i++) {
+        tx[i] = (i == 0) ? 0x1au : (i == 1) ? 0xa1u : ((i & 1u) ? 0xe1u : 0x18u);
+        rx[i] = 0xcc;
+    }
     unsigned tx_left = 16u, rx_left = 16u, dummy_left = 0u, tx_at = 0, rx_at = 0;
 
     /* The driver's prologue, ending with prefill-arm-go. */

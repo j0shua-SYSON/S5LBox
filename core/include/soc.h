@@ -1296,7 +1296,23 @@ typedef struct {
      * length its own opcode implies — which is enough, because every command
      * this device answers has a length fixed by its first byte.
      */
-    bool     hbpp;      /* answer the loopback probe with an echo             */
+    /*
+     * Held in the reset pin. A part whose reset line is asserted drives
+     * nothing, and modelling that is what separates the two wire-identical
+     * exchanges each probe site makes: `resetDevice` clocks a 16-byte DUMMY
+     * transfer while the line is down and discards the answer, then releases
+     * the line and probes. Both transfers send `1A A1 18 E1…`; only the
+     * second one's answer is ever read. See s5l_mtz2_reset_pin().
+     */
+    bool     in_reset;
+    /*
+     * Monotonic: the host has been shown one "yes, I am in my bootloader"
+     * answer. NEVER cleared by a reset — that is the whole of the skip, and
+     * clearing it is the bug that made the driver push firmware. `in HBPP` is
+     * `!hbpp_answered`, and the name says outright that this is a one-time
+     * claim rather than a device state.
+     */
+    bool     hbpp_answered;
     uint8_t  pos, len, op;
     uint8_t  req[S5L_MTZ2_BUF];
     uint8_t  rsp[S5L_MTZ2_BUF];
@@ -1322,16 +1338,29 @@ typedef struct {
     bool     atn;
     uint8_t  contacts;
 
-    /* Bounded diagnostics, as on I2C and SPI. `resets` is not decoration: the
-     * guest really does pulse this device's reset line during driver start,
-     * which was discovered the hard way (see s5l_mtz2_reset_pin), and a run
-     * where it is zero means the GPIO subscription is not wired. */
-    uint64_t packets, hbpp_probes, unknown_opcodes, resets;
+    /*
+     * Bounded diagnostics, as on I2C and SPI, and two of these are load-bearing
+     * rather than decoration. `resets` zero means the GPIO subscription is not
+     * wired at all. `reset_bytes` zero means the reset line is being SEEN but
+     * the dummy transfer is not landing inside the asserted window — which is
+     * the difference between the driver being kept alive and it pushing 54 KB
+     * of firmware at a device that cannot take it.
+     */
+    uint64_t packets, hbpp_probes, unknown_opcodes, resets, reset_bytes;
     uint8_t  last_unknown_op;
 } s5l_mtz2_t;
 
-/* Reset is total and returns the device to its power-on answer, which is
- * "in HBPP" — the one answer finishStarting() accepts. */
+/* The two pins this device watches, as device-tree platform-function ids. */
+#define MTZ2_PIN_RESET  0x0606u  /* multi-touch function-reset, ACTIVE LOW  */
+#define MTZ2_PIN_SELECT 0x1800u  /* /arm-io/spi1 function-spi_cs0           */
+
+/*
+ * Reset is total. It leaves the part HELD IN RESET, which is not an arbitrary
+ * choice: the pin block powers up all-zero, this line is active low, so a part
+ * on this board really is held down until the driver releases it. A unit test
+ * that wants a live device calls s5l_mtz2_reset_pin(dev, true) first, exactly
+ * as the guest does.
+ */
 void     s5l_mtz2_reset(s5l_mtz2_t *dev);
 /* Attach to an SPI chip select. */
 void     s5l_mtz2_bind(s5l_mtz2_t *dev, s5l_spi_slave_t *slave);
@@ -1351,9 +1380,12 @@ uint16_t s5l_mtz2_sum16(const uint8_t *p, unsigned n);
  */
 unsigned s5l_mtz2_report(const s5l_mtz2_t *dev, uint8_t id, uint8_t *out);
 /*
- * The reset line moved. Wired to GPIO pin 0x0606 (`function-reset`), which is
- * the pin the device tree gives /arm-io/spi1/multi-touch. Signature matches
+ * The reset line moved. Wired to GPIO pin MTZ2_PIN_RESET, ACTIVE LOW, so
+ * `level == false` means the part is held down. Signature matches
  * s5l_gpio_watch()'s callback.
+ *
+ * This does NOT touch `hbpp_answered`. That is the fix for the bug run65 found
+ * and the single most important line in this file; see s5l_mtz2_reset_pin().
  */
 void     s5l_mtz2_reset_pin(void *ctx, bool level);
 /*

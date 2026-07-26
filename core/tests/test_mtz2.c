@@ -3,20 +3,23 @@
  *
  * One property dominates this file: the answer to isInHBPP() (0xc0441008,
  * vtable slot 0x4d0 off base 0xc0449f40). finishStarting() at 0xc0442670 keeps
- * the driver attached only on a TRUE — a FALSE takes beq 0xc0442714, prints
- * "Could not detect HBPP. Returning false from finishStarting()" and detaches,
- * which is exactly what run61 measured against the null device and exactly what
- * this device exists to end. Nothing shows up as a crash either way.
+ * the driver attached only on a TRUE. attemptToBootloadDevice() at 0xc04414c4
+ * pushes 54,156 bytes of firmware on a TRUE and logs "not in HBPP, so skipping
+ * bootload" on a FALSE. The two probes are BYTE-IDENTICAL on the wire, so the
+ * discrimination is one monotonic bit and four designs for it have now been
+ * wrong -- twice in ways that only showed up in an 18-minute boot.
  *
- * Three things about that answer were specified wrongly before being measured,
- * and the tests here pin the measurements rather than the specification: there
- * is no reset edge to discriminate on; a one-shot is spent by an un-evaluated
- * probe inside finishStarting's own preamble; and declining at
- * attemptToBootloadDevice does NOT produce the three "Bootload attempt" lines,
- * because that printf lives inside the routine a TRUE reaches. The tests build
- * the driver's own probe bytes, its own frames and its own acceptance tests,
- * transcribed from the disassembly rather than reused from the model — a model
- * checked against itself checks nothing.
+ * What separates them is the reset line's LEVEL: resetDevice clocks a dummy
+ * 16-byte transfer sending the same `1A A1 18 E1...` while the line is
+ * asserted and discards the answer, then releases the line and probes. Held in
+ * reset the part drives nothing, so the dummy cannot spend the claim. Three
+ * tests below exist only to make each past mistake fail loudly:
+ * test_the_dummy_transfer_cannot_spend_the_claim, test_reset_does_not_rearm,
+ * and test_the_whole_bring_up_sequence.
+ *
+ * The tests build the driver's own probe bytes, frames and acceptance tests,
+ * transcribed from the disassembly rather than reused from the model -- a
+ * model checked against itself checks nothing.
  *
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed.
  */
@@ -70,6 +73,15 @@ static bool driver_says_in_hbpp(const uint8_t *rx) {
     return driver_accepts_hbpp_word(a) && driver_accepts_hbpp_word(b);
 }
 
+/*
+ * Release the reset line, as the guest's "Deasserting reset line" does. A
+ * device fresh from s5l_mtz2_reset() is HELD in reset -- the pin block powers
+ * up all-zero and the line is active low -- so a test that wants a live part
+ * has to do what the driver does.
+ */
+static void release_reset(s5l_mtz2_t *dev) { s5l_mtz2_reset_pin(dev, true); }
+static void assert_reset(s5l_mtz2_t *dev)  { s5l_mtz2_reset_pin(dev, false); }
+
 /* Run one full-duplex transaction against the device. */
 static void xfer(s5l_spi_slave_t *s, const uint8_t *tx, uint8_t *rx,
                  unsigned n) {
@@ -110,11 +122,17 @@ static void test_reset_is_total_and_null_safe(void) {
     s5l_mtz2_t dev;
     memset(&dev, 0x5a, sizeof dev);
     s5l_mtz2_reset(&dev);
-    CHECK(dev.hbpp, "a reset device does not answer the first probe in HBPP — "
+    CHECK(!dev.hbpp_answered,
+          "a reset device has already spent its HBPP claim — "
           "finishStarting() would detach the driver");
     CHECK(dev.pos == 0u && dev.len == 0u && dev.packets == 0u &&
-          dev.hbpp_probes == 0u && dev.unknown_opcodes == 0u,
+          dev.hbpp_probes == 0u && dev.unknown_opcodes == 0u &&
+          dev.resets == 0u && dev.reset_bytes == 0u,
           "reset did not clear the framer on a poisoned object");
+    CHECK(dev.in_reset,
+          "a reset device is not held in reset — the pin block powers up "
+          "all-zero and this line is active low, and starting released means "
+          "the dummy transfer gets answered");
     CHECK(!dev.atn && dev.contacts == 0u,
           "a reset device claims a pending contact");
 
@@ -165,24 +183,17 @@ static void test_checksum_is_a_plain_sum_stored_little_endian(void) {
 }
 
 /*
- * THE probe. Every probe must pass the driver's own test, checked with the
- * driver's transcribed acceptance function rather than against a golden byte
- * string — and the count matters as much as the answer.
- *
- * A one-shot was tried and measured wrong. `--call-probe-kernel 0xc0441008`
- * shows isInHBPP entered exactly once in a whole boot, at instruction
- * 316,898,121 with lr = 0xc04426cc, while spi1 carried TWO byte-identical
- * 16-byte probe patterns, at 309.53M and 316.91M. Something inside
- * finishStarting's preamble sends the pattern and never reads the answer, so a
- * device that spends a one-shot on the first transfer hands the real caller
- * the rejection — reproducing precisely the failure this device exists to end.
+ * THE probe, and the claim. The first probe answered out of reset must pass the
+ * driver's own test; every later one must fail it. Checked with the driver's
+ * transcribed acceptance function rather than against a golden byte string.
  */
-static void test_every_probe_is_answered_in_hbpp(void) {
+static void test_the_claim_is_spent_exactly_once(void) {
     s5l_mtz2_t dev;
     s5l_spi_slave_t s;
     uint8_t tx[MTZ2_FRAME_LEN], rx[MTZ2_FRAME_LEN];
     s5l_mtz2_reset(&dev);
     s5l_mtz2_bind(&dev, &s);
+    release_reset(&dev);
     build_hbpp_probe(tx);
 
     /* The probe bytes themselves, so a change to the transcription is caught
@@ -192,59 +203,167 @@ static void test_every_probe_is_answered_in_hbpp(void) {
           "the probe pattern is wrong: %02x %02x %02x %02x ... %02x %02x",
           tx[0], tx[1], tx[2], tx[3], tx[14], tx[15]);
 
-    /* Six in a row: the un-evaluated preamble transfer, finishStarting's own,
-     * attemptToBootloadDevice's, and more than the boot has ever made. */
-    for (unsigned probe = 1; probe <= 6u; probe++) {
+    /* finishStarting's probe. */
+    xfer(&s, tx, rx, MTZ2_FRAME_LEN);
+    CHECK(driver_says_in_hbpp(rx),
+          "the first probe was rejected: rx = %02x %02x %02x %02x -- "
+          "finishStarting() takes beq 0xc0442714, prints its "
+          "\"Could not detect HBPP\" line and DETACHES",
+          rx[0], rx[1], rx[2], rx[3]);
+    CHECK(memcmp(rx, tx, MTZ2_FRAME_LEN) == 0,
+          "HBPP is a loopback and all sixteen bytes must come back");
+    CHECK(dev.hbpp_answered, "the claim was not spent");
+
+    /* attemptToBootloadDevice's three probes. Byte-identical requests; the
+     * answer must invert, or the driver pushes 54,156 bytes of firmware. */
+    for (unsigned attempt = 1; attempt <= 3u; attempt++) {
         memset(rx, 0xff, sizeof rx);
         xfer(&s, tx, rx, MTZ2_FRAME_LEN);
-        CHECK(driver_says_in_hbpp(rx),
-              "probe %u was rejected: rx = %02x %02x %02x %02x — if this is "
-              "the one finishStarting() reads it takes beq 0xc0442714, prints "
-              "\"Could not detect HBPP. Returning false from finishStarting()\" "
-              "and DETACHES", probe, rx[0], rx[1], rx[2], rx[3]);
-        CHECK(memcmp(rx, tx, MTZ2_FRAME_LEN) == 0,
-              "probe %u: HBPP is a loopback and all sixteen bytes must come "
-              "back", probe);
+        CHECK(!driver_says_in_hbpp(rx),
+              "bootload probe %u was accepted: rx = %02x %02x %02x %02x -- "
+              "the driver logs \"attempting to bootload device\" and starts "
+              "MTSPIBootloader_Z2::bootloadDevice()",
+              attempt, rx[0], rx[1], rx[2], rx[3]);
+        bool zeros = true;
+        for (unsigned i = 0; i < MTZ2_FRAME_LEN; i++) if (rx[i]) zeros = false;
+        CHECK(zeros, "bootload probe %u was answered with something other than "
+              "the sixteen zeros run61 measured", attempt);
     }
-    CHECK(dev.hbpp_probes == 6u, "%llu probes were counted, expected 6",
+    CHECK(dev.hbpp_probes == 4u, "%llu probes were counted, expected 4",
           (unsigned long long)dev.hbpp_probes);
-    CHECK(dev.hbpp, "the device left HBPP with nothing having reset it");
     CHECK(dev.unknown_opcodes == 0u,
-          "a probe was counted as %llu unknown opcodes — 0x1A must be framed "
+          "a probe was counted as %llu unknown opcodes -- 0x1A must be framed "
           "as a 16-byte packet, or the 0xE1 at offset 3 starts a phantom "
           "GET_CMD_STATUS and the framer never resynchronises",
           (unsigned long long)dev.unknown_opcodes);
 
-    /* A reset pulse must NOT end it. The guest really does pulse this device's
-     * reset line, between the un-evaluated probe and the one finishStarting
-     * reads, and a part with no firmware comes out of reset into its
-     * bootloader. A model that left HBPP here answers the only probe anybody
-     * reads with a rejection. */
-    s5l_mtz2_reset_pin(&dev, false);
-    memset(rx, 0xff, sizeof rx);
+    /* A machine reset is a fresh part. */
+    s5l_mtz2_reset(&dev);
+    release_reset(&dev);
     xfer(&s, tx, rx, MTZ2_FRAME_LEN);
-    CHECK(driver_says_in_hbpp(rx),
-          "a reset pulse ended HBPP: rx = %02x %02x %02x %02x — the guest "
-          "pulses this line during driver start, so this is finishStarting's "
-          "probe being rejected", rx[0], rx[1], rx[2], rx[3]);
-    CHECK(dev.resets == 1u, "the reset was not counted (%llu)",
-          (unsigned long long)dev.resets);
+    CHECK(driver_says_in_hbpp(rx), "a machine reset did not restore the claim");
+}
 
-    /* The rejection is still representable: a device that HAS firmware answers
-     * the sixteen zeros run61 measured. */
-    dev.hbpp = false;
+/*
+ * THE BUG run65 FOUND, in miniature. resetDevice clocks a dummy 16-byte
+ * transfer of the SAME `1A A1 18 E1...` bytes while the reset line is asserted
+ * and throws the answer away, then releases the line and probes. A model that
+ * answers while held in reset spends the claim on the dummy and hands
+ * finishStarting the rejection.
+ */
+static void test_the_dummy_transfer_cannot_spend_the_claim(void) {
+    s5l_mtz2_t dev;
+    s5l_spi_slave_t s;
+    uint8_t tx[MTZ2_FRAME_LEN], rx[MTZ2_FRAME_LEN];
+    s5l_mtz2_reset(&dev);
+    s5l_mtz2_bind(&dev, &s);
+    build_hbpp_probe(tx);
+
+    /* resetDevice: the line is already asserted, then the dummy. */
+    assert_reset(&dev);
     memset(rx, 0xff, sizeof rx);
     xfer(&s, tx, rx, MTZ2_FRAME_LEN);
-    CHECK(!driver_says_in_hbpp(rx), "a device out of HBPP still passed");
     bool zeros = true;
     for (unsigned i = 0; i < MTZ2_FRAME_LEN; i++) if (rx[i]) zeros = false;
-    CHECK(zeros, "a device out of HBPP answered with something other than the "
-          "sixteen zeros run61 measured");
+    CHECK(zeros, "a part held in its reset pin drove the bus: "
+          "%02x %02x %02x %02x", rx[0], rx[1], rx[2], rx[3]);
+    CHECK(!dev.hbpp_answered,
+          "the dummy transfer spent the claim -- finishStarting's own probe is "
+          "next and would be rejected, which is the run61 failure this device "
+          "exists to end");
+    CHECK(dev.reset_bytes == MTZ2_FRAME_LEN,
+          "%llu bytes were swallowed while held in reset, expected %u",
+          (unsigned long long)dev.reset_bytes, (unsigned)MTZ2_FRAME_LEN);
+    CHECK(dev.len == 0u && dev.pos == 0u && dev.packets == 0u,
+          "a transfer during reset advanced the framer");
 
-    /* A machine reset is a fresh device. */
-    s5l_mtz2_reset(&dev);
+    /* Deassert, then the real probe. */
+    release_reset(&dev);
     xfer(&s, tx, rx, MTZ2_FRAME_LEN);
-    CHECK(driver_says_in_hbpp(rx), "reset did not restore the answer");
+    CHECK(driver_says_in_hbpp(rx),
+          "the probe after the dummy was rejected: %02x %02x %02x %02x",
+          rx[0], rx[1], rx[2], rx[3]);
+}
+
+/*
+ * The other half of the same bug: a reset must NOT re-arm the claim. The guest
+ * pulses this line before EVERY probe site, so a reset that restores the claim
+ * makes the bootload site identical to the first one -- which is what shipped
+ * in 098ce49 and what run65 caught pushing firmware.
+ */
+static void test_reset_does_not_rearm_the_claim(void) {
+    s5l_mtz2_t dev;
+    s5l_spi_slave_t s;
+    uint8_t tx[MTZ2_FRAME_LEN], rx[MTZ2_FRAME_LEN];
+    s5l_mtz2_reset(&dev);
+    s5l_mtz2_bind(&dev, &s);
+    build_hbpp_probe(tx);
+    release_reset(&dev);
+    xfer(&s, tx, rx, MTZ2_FRAME_LEN);
+    CHECK(driver_says_in_hbpp(rx), "the first probe was rejected");
+
+    /* Four more full reset pulses, each with its dummy and its probe, exactly
+     * as the bootload attempts do. None may be accepted. */
+    for (unsigned site = 1; site <= 4u; site++) {
+        assert_reset(&dev);
+        xfer(&s, tx, rx, MTZ2_FRAME_LEN);          /* the dummy */
+        release_reset(&dev);
+        memset(rx, 0xff, sizeof rx);
+        xfer(&s, tx, rx, MTZ2_FRAME_LEN);          /* the probe */
+        CHECK(!driver_says_in_hbpp(rx),
+              "site %u was accepted after a reset pulse: %02x %02x %02x %02x "
+              "-- a reset restores the part's state, it does not un-ask a "
+              "question the host already had answered",
+              site, rx[0], rx[1], rx[2], rx[3]);
+        CHECK(dev.hbpp_answered, "site %u cleared the claim", site);
+    }
+    CHECK(dev.resets == 9u, "%llu reset edges were seen, expected 9",
+          (unsigned long long)dev.resets);
+}
+
+/*
+ * The guest's whole bring-up sequence, in its own order, transcribed from the
+ * mtlog stream of a boot with `-D chosen:debug-enabled=1`:
+ *
+ *      setPowerEnabled[false] / Asserting reset line / disabling power
+ *      setPowerEnabled[true]  / enabling power / ensuring S_CLK is high
+ *      initiating dummy transfer
+ *      Deasserting reset line
+ *      checking if in HBPP                       -> must be accepted
+ *      ... three bootload attempts, each the same shape ...
+ *
+ * If this passes and the boot still fails, the fault is in the wiring rather
+ * than in the device.
+ */
+static void test_the_whole_bring_up_sequence(void) {
+    s5l_mtz2_t dev;
+    s5l_spi_slave_t s;
+    uint8_t tx[MTZ2_FRAME_LEN], rx[MTZ2_FRAME_LEN];
+    s5l_mtz2_reset(&dev);
+    s5l_mtz2_bind(&dev, &s);
+    build_hbpp_probe(tx);
+
+    static const bool WANT[4] = { true, false, false, false };
+    for (unsigned site = 0; site < 4u; site++) {
+        assert_reset(&dev);                        /* Asserting reset line   */
+        xfer(&s, tx, rx, MTZ2_FRAME_LEN);          /* dummy transfer         */
+        release_reset(&dev);                       /* Deasserting reset line */
+        memset(rx, 0xff, sizeof rx);
+        xfer(&s, tx, rx, MTZ2_FRAME_LEN);          /* checking if in HBPP    */
+        CHECK(driver_says_in_hbpp(rx) == WANT[site],
+              "site %u answered %s, wanted %s -- site 0 is finishStarting and "
+              "the rest are bootload attempts",
+              site, driver_says_in_hbpp(rx) ? "in HBPP" : "not in HBPP",
+              WANT[site] ? "in HBPP" : "not in HBPP");
+    }
+
+    /* And after all of it the report protocol still answers, because that is
+     * what isBootloaded() asks next and it decides between "Device has
+     * firmware?!" and "No firmware running, and couldn't load any". */
+    build_frame(tx, MTZ2_OP_REPORT_INFO, MTZ2_REPORT_GEOMETRY);
+    xfer(&s, tx, rx, MTZ2_FRAME_LEN);
+    CHECK(driver_accepts_reply(tx, rx) && rx[3] == 5u,
+          "getReportInfo(0xD3) stopped answering after the bootload attempts");
 }
 
 /*
@@ -294,6 +413,7 @@ static void test_get_report_info_satisfies_isbootloaded(void) {
     uint8_t tx[MTZ2_FRAME_LEN], rx[MTZ2_FRAME_LEN], probe[MTZ2_FRAME_LEN];
     s5l_mtz2_reset(&dev);
     s5l_mtz2_bind(&dev, &s);
+    release_reset(&dev);
 
     /* Probe first, exactly as the boot does — the device stays in HBPP and
      * the ordinary protocol has to keep working alongside it. A model that put
@@ -366,6 +486,7 @@ static void test_control_read_returns_the_report_body(void) {
     uint8_t tx[MTZ2_FRAME_LEN], rx[MTZ2_FRAME_LEN], probe[MTZ2_FRAME_LEN];
     s5l_mtz2_reset(&dev);
     s5l_mtz2_bind(&dev, &s);
+    release_reset(&dev);
     build_hbpp_probe(probe);
     xfer(&s, probe, rx, MTZ2_FRAME_LEN);
 
@@ -432,6 +553,7 @@ static void test_the_other_opcodes_are_well_formed(void) {
     uint8_t tx[MTZ2_FRAME_LEN], rx[MTZ2_FRAME_LEN];
     s5l_mtz2_reset(&dev);
     s5l_mtz2_bind(&dev, &s);
+    release_reset(&dev);
     build_hbpp_probe(tx);
     xfer(&s, tx, rx, MTZ2_FRAME_LEN);
 
@@ -479,6 +601,7 @@ static void test_framing_survives_without_a_chip_select(void) {
     uint8_t tx[MTZ2_FRAME_LEN], rx[MTZ2_FRAME_LEN];
     s5l_mtz2_reset(&dev);
     s5l_mtz2_bind(&dev, &s);
+    release_reset(&dev);
     build_hbpp_probe(tx);
     xfer(&s, tx, rx, MTZ2_FRAME_LEN);
 
@@ -513,55 +636,6 @@ static void test_framing_survives_without_a_chip_select(void) {
           "the two-byte wakeup was framed as something longer");
 }
 
-/*
- * The reset line RESTORES HBPP rather than ending it, and that is the single
- * most expensive thing measured while building this device. The guest writes
- * the GPIO function-select register 77 times during driver start and one of
- * those stores lands on pin 0x0606, between the un-evaluated probe at
- * instruction 309.53M and finishStarting's own at 316.91M. A model in which a
- * reset ends HBPP therefore answers the only probe anybody reads with a
- * rejection — the exact failure this device exists to end, reintroduced by a
- * rule that sounded physically obvious. It is not: a part with resident
- * firmware boots it, and a part with none, which is what this device is, comes
- * out of reset back into its bootloader.
- */
-static void test_reset_pin_restores_hbpp(void) {
-    s5l_mtz2_t dev;
-    s5l_spi_slave_t s;
-    uint8_t tx[MTZ2_FRAME_LEN], rx[MTZ2_FRAME_LEN];
-    s5l_mtz2_reset(&dev);
-    s5l_mtz2_bind(&dev, &s);
-    build_hbpp_probe(tx);
-
-    /* With no reset, the answer never changes however many probes arrive. */
-    for (unsigned i = 0; i < 3u; i++) {
-        xfer(&s, tx, rx, MTZ2_FRAME_LEN);
-        CHECK(driver_says_in_hbpp(rx), "probe %u refused with no reset", i + 1u);
-    }
-    CHECK(dev.hbpp, "HBPP ended without the reset line moving");
-
-    /* Either edge, in either direction: the pulse is two stores and the model
-     * must not depend on which one it sees, nor on the device having been in
-     * HBPP beforehand. */
-    for (unsigned level = 0; level < 2u; level++) {
-        s5l_mtz2_reset(&dev);
-        dev.hbpp = false;                    /* as if it had firmware */
-        s5l_mtz2_reset_pin(&dev, level != 0u);
-        xfer(&s, tx, rx, MTZ2_FRAME_LEN);
-        CHECK(driver_says_in_hbpp(rx),
-              "a reset to level %u did not restore HBPP", level);
-    }
-
-    /* It also discards a partly received packet. */
-    s5l_mtz2_reset(&dev);
-    build_frame(tx, MTZ2_OP_CMD_STATUS, 0u);
-    for (unsigned i = 0; i < 5u; i++) (void)s.transfer(s.ctx, tx[i]);
-    CHECK(dev.len == MTZ2_FRAME_LEN && dev.pos == 5u, "the framer is not mid-packet");
-    s5l_mtz2_reset_pin(&dev, true);
-    CHECK(dev.len == 0u && dev.pos == 0u,
-          "a reset left a half-received packet in the framer");
-}
-
 /* The attention line, and the state step 4 will drive. */
 static void test_attention_line_is_quiet_until_a_frame_exists(void) {
     s5l_mtz2_t dev;
@@ -591,7 +665,10 @@ static void test_machine_wires_the_device_and_its_attention_line(void) {
     CHECK(m.spi[1].slaves[1].transfer == NULL &&
           m.spi[0].slaves[0].transfer == NULL,
           "something else was attached to an SPI bus");
-    CHECK(m.mtz2.hbpp, "the machine's device did not power on in HBPP");
+    CHECK(!m.mtz2.hbpp_answered && m.mtz2.in_reset,
+          "the machine's device did not power on unclaimed and held in "
+          "reset: answered=%d in_reset=%d",
+          (int)m.mtz2.hbpp_answered, (int)m.mtz2.in_reset);
     CHECK(m.stub_declare_failures == 0u,
           "%u declarations were refused, so a GPIO subscription is missing",
           m.stub_declare_failures);
@@ -600,6 +677,15 @@ static void test_machine_wires_the_device_and_its_attention_line(void) {
      * does: fill the transmit FIFO, drain the receive FIFO, repeat. */
     uint8_t tx[MTZ2_FRAME_LEN], rx[MTZ2_FRAME_LEN];
     build_hbpp_probe(tx);
+    /* Release the reset line the way the guest does -- through the GPIO
+     * function-select register, which is the only path that reaches the pin,
+     * so this exercises the subscription as well as the device. */
+    m.bus.write32(c, S5L8900_GPIO_BASE + S5L_GPIO_FSEL,
+                  (6u << 16) | (6u << 8) | 0xfu);
+    CHECK(!m.mtz2.in_reset && m.mtz2.resets == 1u,
+          "an fsel store to group 6 bit 6 did not release the touch "
+          "controller's reset: in_reset=%d resets=%llu",
+          (int)m.mtz2.in_reset, (unsigned long long)m.mtz2.resets);
     m.bus.write32(c, S5L8900_SPI1_BASE + SPI_CNT, MTZ2_FRAME_LEN);
     m.bus.write32(c, S5L8900_SPI1_BASE + SPI_CONTROL, SPI_CONTROL_START);
     unsigned sent = 0, got = 0;
@@ -669,20 +755,22 @@ static void test_snapshot_carries_the_protocol_position(void) {
     uint8_t tx[MTZ2_FRAME_LEN], rx[MTZ2_FRAME_LEN];
     s5l_spi_slave_t s = src.spi[1].slaves[0];
     build_hbpp_probe(tx);
+    release_reset(&src.mtz2);
     xfer(&s, tx, rx, MTZ2_FRAME_LEN);
-    src.mtz2.hbpp = false;                     /* as if it had firmware */
+    src.mtz2.hbpp_answered = true;             /* the claim is spent */
     build_frame(tx, MTZ2_OP_REPORT_INFO, MTZ2_REPORT_GEOMETRY);
     for (unsigned i = 0; i < 6u; i++) (void)s.transfer(s.ctx, tx[i]);
-    CHECK(src.mtz2.len == MTZ2_FRAME_LEN && src.mtz2.pos == 6u && !src.mtz2.hbpp,
-          "the source is not mid-frame: len=%u pos=%u hbpp=%d",
-          src.mtz2.len, src.mtz2.pos, (int)src.mtz2.hbpp);
+    CHECK(src.mtz2.len == MTZ2_FRAME_LEN && src.mtz2.pos == 6u &&
+          src.mtz2.hbpp_answered,
+          "the source is not mid-frame: len=%u pos=%u answered=%d",
+          src.mtz2.len, src.mtz2.pos, (int)src.mtz2.hbpp_answered);
 
     CHECK(snapshot_save_mem(&src, &blob, &blob_len) == SNAP_OK, "save failed");
     CHECK(snapshot_load_mem(&dst, blob, blob_len) == SNAP_OK, "load failed");
-    CHECK(!dst.mtz2.hbpp,
-          "the restored device is back in HBPP — whether the part is still in "
-          "its bootloader is state the file must carry, not a constant the "
-          "reading build re-derives");
+    CHECK(dst.mtz2.hbpp_answered && dst.mtz2.in_reset == src.mtz2.in_reset,
+          "the restored device forgot that its claim was spent -- the next "
+          "probe is a bootload attempt's and would be answered affirmatively, "
+          "sending the driver into a 54 KB firmware download");
     CHECK(dst.mtz2.pos == src.mtz2.pos && dst.mtz2.len == src.mtz2.len &&
           dst.mtz2.op == src.mtz2.op &&
           memcmp(dst.mtz2.rsp, src.mtz2.rsp, S5L_MTZ2_BUF) == 0,
@@ -746,13 +834,15 @@ int main(void) {
     printf("iOS3-VM AppleMultitouchZ2SPI device tests\n");
     test_reset_is_total_and_null_safe();
     test_checksum_is_a_plain_sum_stored_little_endian();
-    test_every_probe_is_answered_in_hbpp();
+    test_the_claim_is_spent_exactly_once();
+    test_the_dummy_transfer_cannot_spend_the_claim();
+    test_reset_does_not_rearm_the_claim();
+    test_the_whole_bring_up_sequence();
     test_the_driver_tests_both_halfwords();
     test_get_report_info_satisfies_isbootloaded();
     test_control_read_returns_the_report_body();
     test_the_other_opcodes_are_well_formed();
     test_framing_survives_without_a_chip_select();
-    test_reset_pin_restores_hbpp();
     test_attention_line_is_quiet_until_a_frame_exists();
     test_machine_wires_the_device_and_its_attention_line();
     test_snapshot_carries_the_protocol_position();

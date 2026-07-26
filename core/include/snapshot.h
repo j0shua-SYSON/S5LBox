@@ -72,7 +72,13 @@
  *     bootloader — is state a checkpoint cannot invent. The `gpio` and
  *     `gpioic` stub windows also disappear from GEOM, so a v6 file would fail
  *     the geometry check even if the payload happened to line up. */
-#define SNAPSHOT_VERSION   7u
+/* v8: the touch controller's HBPP bookkeeping changed shape. One `hbpp` bool
+ *     became `in_reset` plus a monotonic `hbpp_answered`, and a `reset_bytes`
+ *     counter joined it. The byte format therefore differs even where the host
+ *     ABI size does not, and a v7 file restored into a v8 build would land a
+ *     stale claim in the wrong field -- which decides whether the driver stays
+ *     attached or pushes 54 KB of firmware at a device that cannot take it. */
+#define SNAPSHOT_VERSION   8u
 
 typedef enum {
     SNAP_OK = 0,
