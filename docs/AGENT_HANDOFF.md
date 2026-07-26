@@ -1,5 +1,23 @@
 # iOS3-VM continuation handoff
 
+> **CURRENT STATE, 2026-07-26 — read §13.0j before anything else.**
+> SpringBoard is **crash-looping**, not progressing. The guest's own
+> `ReportCrash` wrote 35 byte-identical `EXC_BAD_ACCESS (SIGBUS)` reports:
+> `KERN_PROTECTION_FAILURE at 0x00000048`, crashed thread 3, `pc 0x30e1ea50`
+> in `_mbx2DDisable+0x20`, reached from `CA::RenderMBX2D::render` on the IOMFB
+> vblank callback. `launchd` respawns SpringBoard roughly every 470 million
+> instructions, forever. The root cause is a NULL `_mbx2DGlobalContext` that
+> QuartzCore stores through after its own MBX2D initialisation has already
+> failed. The fix is `CA_ENABLE_MBX2D=0` in SpringBoard's launchd environment,
+> which selects QuartzCore's shipped CPU software compositor; **no GPU emulation
+> is required.** That fix is verified at instruction level from disassembly and
+> **has not been run. SpringBoard has still never rendered a frame.**
+> §13.0j also lists six retractions that must not be re-derived.
+>
+> Everything below this line that frames the missing frame as a budget, latency,
+> determinism, or checkpoint-fidelity question is superseded by §13.0j. The
+> Run23-era text is retained as history.
+>
 > Last reconciled after publication and hosted CI: 2026-07-25, branch
 > `codex/m5-hardening`. The diagnostic implementation and tracked Run23 launcher
 > are exact commit
@@ -1569,6 +1587,166 @@ hardware behavior:
    neither of the above is the cause and the real gate is earlier in
    CommCenter's startup.
 
+### 13.0j SPRINGBOARD IS CRASH-LOOPING. THE BLOCKER IS MBX2D. READ THIS FIRST.
+
+SpringBoard is not slow, not deadlocked, and not short of instructions. It is
+being killed and respawned by `launchd`, roughly every **470 million
+instructions**, and has been for every display-enabled run that got this far.
+One run recorded **30 exec attempts and 29 deaths across 13.7e9 instructions**.
+
+**The guest diagnosed itself and nobody had read the output.** The guest's own
+`ReportCrash` wrote **35** crash reports into the rootfs work images; they are
+extracted to `work\analysis\crashes\` (32 from run40, 3 from run46). All 35 are
+byte-identical in the crashed thread:
+
+```text
+Process:         SpringBoard [20]
+Parent Process:  launchd [1]
+OS Version:      iPhone OS 3.1.3 (7E18)
+
+Exception Type:  EXC_BAD_ACCESS (SIGBUS)
+Exception Codes: KERN_PROTECTION_FAILURE at 0x00000048
+Crashed Thread:  3
+
+  pc: 0x30e1ea50   lr: 0x3123d928   cpsr: 0x60000010   sp: 0x007b75d4
+```
+
+Thread 3, symbolicated innermost first:
+
+```text
+_mbx2DDisable+0x20
+CA::RenderMBX2D::render
+render_display
+CA::WindowServer::MBXServer::render_update
+CA::WindowServer::Server::render_for_time
+IOMFBServer::link_callback
+IOMobileFramebufferNotifyFunc
+IODispatchCalloutFromCFMessage
+CFRunLoopRunSpecific
+IOMFBServer::link_body
+_pthread_body
+```
+
+The faulting instruction, in ARM mode:
+
+```text
+30e1ea3c  ldr    r3, [r3]          ; r3 = *(0x381200d8) = NULL (MBX2D global ctx)
+30e1ea50  strbeq r0, [r3, #0x48]   ; store to 0x00000048   <== FAULT
+```
+
+A NULL dereference into `__PAGEZERO` is `KERN_PROTECTION_FAILURE` under Darwin,
+which is delivered as **SIGBUS**, not SIGSEGV. No CPU bug is involved: a
+separate audit found the interpreter's ARMv6 unaligned-access model **correct**
+(SCTLR.U and SCTLR.A both honoured), and no alignment fault appears anywhere in
+the 2,052 recorded faults.
+
+**The causal chain, fully verified:**
+
+```text
+bootkernel un-matches /arm-io/mbx in the loaded device tree
+  -> com.apple.driver.AppleMBX never starts, so no AppleMBXDevice is published
+  -> userspace _mbxConnectionOpen calls
+     IOServiceGetMatchingServices("AppleMBXDevice"), which SUCCEEDS; then
+     IOIteratorNext at 0x30e1fd60 returns MACH_PORT_NULL — an empty iterator,
+     not a match failure -> kIOReturnError
+  -> _mbx2DCtxInitialize prints "Failed to open connection to MBX", returns NULL
+  -> _mbx2DInitialize stores NULL into _mbx2DGlobalContext (0x381200d8),
+     and returns 1
+  -> CA::WindowServer::MBXServer::MBXServer logs
+     "Failed to initialized MBX2D driver (%d)."   (Apple's typo, verbatim)
+     but does NOT clear enable_mbx2d, which it set to 1 eighteen instructions
+     earlier
+  -> the first IOMFB vblank drives RenderMBX2D::render into the NULL context
+  -> SIGBUS
+  -> launchd respawns SpringBoard (ThrottleInterval 5), and it happens again
+```
+
+Thread 0 meanwhile blocks in `semaphore_signal_trap` under
+`CA::Render::Context::did_commit` <- `+[CATransaction flush]`. That is exactly
+why `SpringBoard:UIApplicationMain-return` is `hits=0` in every run, and why
+`IOSurface:create-entry` is `hits=0`: the process dies in the render thread
+before anything downstream of the window server can run.
+
+#### The fix: one environment variable, verified statically, NOT YET RUN
+
+QuartzCore ships a complete CPU software compositor.
+`CA::WindowServer::MBXServer::render_update` (`0x3124207c`) is a three-way
+fallback:
+
+```text
+gles_context()  ->  mbx2d_context()  ->  CA::WindowServer::Server::render_update
+```
+
+`mbx2d_context()` (`0x31241a8c`) reads exactly one byte — `enable_mbx2d` at
+`0x38190db1` — and returns NULL early at `0x31241aa8` when it is zero. The
+fallback reaches `Server::sw_renderer()` ->
+`CARenderOGLNew(_kCARenderSoftwareCallbacks)` -> `CA::OGL::SWContext`, a genuine
+CPU rasteriser. `enable_mbx2d` is set from `getenv("CA_ENABLE_MBX2D")` or,
+failing that, `getenv("LK_ENABLE_MBX2D")`, defaulting to **ENABLED**.
+
+So setting **`CA_ENABLE_MBX2D=0`** in SpringBoard's launchd environment selects
+software rendering and never reaches the NULL store. **No GPU emulation is
+required.** A candidate `com.apple.SpringBoard.plist` carrying that variable is
+staged under `work\analysis\envvar\`.
+
+This is verified at instruction level from disassembly. **It has not been run.**
+Nothing here says SpringBoard has rendered; it has not.
+
+**Keep `dt_unmatch("arm-io/mbx")`.** Only its explanation was wrong (below).
+Un-matching the node is what makes the software path reachable at all; the
+defect is that userspace then stores through a context it never checked.
+
+#### Retractions — established, do not re-derive
+
+1. **"SpringBoard is progressing normally and merely runs out of instruction
+   budget."** FALSE. It is crash-looping. Every run since run35 ends with the
+   identical framebuffer hash
+   `CBAD1C110E67CAD553A2B4EEBBF46E7BF09255389851902B24816249294AF2AB`
+   because nothing was ever going to draw.
+2. **"Checkpoint restore loses fidelity; cold and restored runs disagree by
+   4.6e9 instructions."** FALSE. Restore is **bit-exact**. Heartbeat PC streams
+   are byte-identical for run35 vs run36d across **27/27** samples, and likewise
+   for run37/38, run38/40/41/43, and capA/capB. The apparent disagreement was an
+   artifact of the `SPRINGBOARD POST-SETEXEC TRACE` block, which reports only
+   the **most recent** SpringBoard generation: a longer run simply prints a
+   later generation of the same crash loop.
+3. **"The instruction cap perturbs guest execution."** FALSE — same artifact,
+   same evidence as (2).
+4. **"`-[UIWindow makeKeyAndVisible]` is never called, so no window is made
+   visible."** MISLEADING. That selector has exactly **one** call site in the
+   whole 1.19 MB SpringBoard binary, inside `-[SBSyncController
+   _delayedBeginReset]`, a restore path never taken at boot. SpringBoard 3.1.3
+   uses `-[UIWindow orderFront:]` and `-[UIWindow makeKey:]`. A zero there is
+   the **expected** reading on healthy hardware.
+5. **"Un-matching only `/arm-io/usb-otg/usb-device` is insufficient."**
+   Understated — it was a complete **no-op**. Driver output census: run46
+   (child un-matched) had **24** `AppleSynopsysOTGDevice` lines; run37 (parent
+   un-matched) had **0**. IOKit matching keys off the parent node.
+6. **Any claim resting on run39 or run42 "with USB un-matched" is void.** Both
+   restored from a snapshot taken with the driver already matched in guest RAM,
+   and a device-tree patch cannot affect a restored run.
+
+#### Two factual corrections to the MBX story
+
+- **The MBX register block is at physical `0x3B000000`, not `0x03000000`.** The
+  device-tree `reg` value is `{0x03000000, 0x01000000}` and `/arm-io` `ranges`
+  adds `0x38000000`.
+- **The "busy-polls a reset bit" description of the MBX hang is wrong.** That
+  poll (`AppleMBXController`, `0xC07799E0`) is gated on `fVariant == 2`
+  (s5l8720x) and cannot execute on s5l8900x; the controller's `fRegs` is NULL
+  because the node has only one `reg` pair. The actual wedge is
+  **`AppleMBXDevice` at `0xC077E8D8`, spinning on physical `0x3B00012C` bit 6,
+  with no timeout and no exit.**
+
+#### Where this leaves the next agent
+
+The next experiment is to place `CA_ENABLE_MBX2D=0` into SpringBoard's launchd
+environment and run it. Until that run exists, the only supported claims are the
+ones above: the crash loop is measured, the cause is disassembled, and the fix
+is statically verified and unexecuted. A `hits=0` on any post-window-server
+checkpoint carries **no information** while the process is dying upstream of it,
+and neither does a repeated framebuffer hash.
+
 ### 13.0d GPIO pin encoding, and why touch and baseband need the same two blocks
 
 Touch and the baseband transport converge on the same unmodelled hardware, so
@@ -1709,7 +1887,12 @@ touches the storage bridge — the one subsystem that has never failed a run —
 it deserves its own validation pass rather than being bolted onto a diagnostic
 change.
 
-### 13.0g CURRENT STATE: THE COMMCENTER BLOCKER IS GONE. READ THIS FIRST.
+### 13.0g THE COMMCENTER BLOCKER IS GONE — but §13.0j is the current state
+
+> The "CURRENT STATE" claim this section used to carry has moved to **§13.0j**.
+> What remains true below: the telephony blocker is resolved, the three CPU gaps
+> are closed, and checkpointing works. What is superseded: every sentence that
+> reads the boot's position as forward progress toward a frame.
 
 The multi-run CommCenter/telephony blocker described in §13.0b/§13.0f is
 **resolved**. Do not spend further effort on it.
@@ -1774,6 +1957,12 @@ restored run is refused, not silently ignored; that combination is unimplemented
 
 ### 13.0h THE FRONTIER IS NOW RSA-CLASS ARITHMETIC IN Security.framework
 
+> **Superseded as a frontier claim by §13.0j.** The `_mulg_common` resolution
+> below is an accurate account of where userspace time was going, and its
+> "bounded arithmetic, not a spin-wait" conclusion still stands. It is **not**
+> the reason nothing renders: SpringBoard is crash-looping on a NULL MBX2D
+> context. Do not plan an instruction budget around this section.
+
 After `UIController`, the guest spends essentially all of its time in a
 22-instruction loop at `0x3145ad4c..0x3145ada4`. Every PC above `0x30000000`
 lands in one 96 MB dyld shared cache spanning 273 libraries, which is why the
@@ -1812,7 +2001,14 @@ checkpoint beyond `UIController`, the next hypothesis to test — untested, and
 stated here only so it is not re-derived — is whether the guest's randomness
 source is degenerate enough to make a probabilistic prime search never succeed.
 
-### 13.0i NO SURFACE IS EVER CREATED. STOP ADDING INSTRUCTIONS.
+### 13.0i NO SURFACE IS EVER CREATED — SUPERSEDED BY §13.0j, WHICH SAYS WHY
+
+> **Superseded.** The central observation here is correct — no surface is ever
+> created — but its framing is not. SpringBoard is not alive and failing to ask
+> for one; it is dying in the CoreAnimation render thread on a NULL MBX2D
+> context and being respawned by `launchd` (§13.0j). Read §13.0j first. The
+> address-arithmetic warning and the `0x0000a7c4` discriminator below remain
+> valid; the determinism bullet is retracted in place.
 
 `UIController` has now been reached in runs 35, 36d and 38, and the framebuffer
 is **byte-identical every time** (`CBAD1C11…`, 384 of 460,800 bytes non-zero).
@@ -1837,7 +2033,9 @@ H1:surface-field24-store    hits=0
 scanout buffer; it renders into a CoreSurface/IOSurface that the window server
 composites. With no surface allocated there is nothing to render into, and no
 instruction budget produces a pixel. The question is not "how much further" but
-"why is `IOSurface::create` never called".
+"why is `IOSurface::create` never called" — **and §13.0j answers it**:
+SpringBoard is killed by SIGBUS in the IOMFB vblank callback before anything
+downstream of the window server runs, then respawned, indefinitely.
 
 Instrumentation stops exactly where it is needed, and the address arithmetic
 here is easy to get wrong: SpringBoard's `__TEXT` is `vm 0x1000, file 0`, so
@@ -1868,13 +2066,18 @@ sends around this site can be named rather than guessed at.
 
 Two measurements that bound what is worth trying:
 
-- **Runs are not deterministic.** Run36d restored run35's own 2.4e9 checkpoint
-  with the same binary and reached `UIApplicationMain` at 7.90e9 where run35
-  reached it at 3.27e9 — a 2.4x divergence in identical configuration, almost
-  certainly the probabilistic prime search consuming different budgets. Do not
-  attribute an instruction-count difference between two runs to a code change
-  without repeating it; an earlier claim that un-matching USB made the boot
-  4.3x slower was retracted for exactly this reason.
+- **RETRACTED — "runs are not deterministic".** They are, and restore is
+  bit-exact. The heartbeat PC streams for run35 and run36d are byte-identical
+  across **27/27** samples, as are run37/38, run38/40/41/43, and capA/capB. The
+  apparent 4.6e9 divergence — run36d reporting `UIApplicationMain` at 7.90e9
+  where run35 reported it at 3.27e9 — was an artifact of the
+  `SPRINGBOARD POST-SETEXEC TRACE` block, which reports only the **most recent**
+  SpringBoard generation; a longer run prints a later generation of the same
+  crash loop (§13.0j). The instruction cap does not perturb guest execution
+  either, on the same evidence. The operating rule survives its retracted
+  justification: do not attribute an instruction-count difference between two
+  runs to a code change without repeating it. The earlier retracted claim that
+  un-matching USB made the boot 4.3x slower had this same cause.
 - **Stripping diagnostics buys ~10%, not a multiple.** Measured over 500e6
   instructions: minimal 1,408k inst/s, full 1,278k inst/s. A "dash with
   diagnostics off" mode is not worth building. Parallel runs (the machine has 8
@@ -2436,6 +2639,21 @@ Every report must state what it does **not** prove.
   SEND correlation.
 - A static disassembly path does not prove it ran.
 - Capstone's mnemonic does not replace architecture-version checks.
+- A per-process trace block that reports one generation does not describe the
+  whole run. If the process respawns, a longer run prints a **later**
+  generation, and the difference between the two is not divergence.
+- A checkpoint-restored run that reports different coordinates from its cold
+  parent is not evidence of lost restore fidelity until the heartbeat PC stream
+  itself is compared.
+- A `hits=0` checkpoint proves nothing while the process is dying upstream of
+  it; neither does a framebuffer hash that repeats across runs.
+- A `hits=0` on a selector is not evidence the work did not happen until that
+  selector's call sites are counted in the binary. `-[UIWindow
+  makeKeyAndVisible]` has exactly one, on a restore path never taken at boot.
+- Un-matching a child device-tree node is not un-matching the device; IOKit
+  matching keys off the parent.
+- A device-tree patch cannot affect a restored run: the snapshot already holds
+  the matched driver in guest RAM.
 - JIT tests do not mean boot uses JIT.
 - Running on a jailbroken iPhone does not justify embedding a native tweak
   dependency in the core.

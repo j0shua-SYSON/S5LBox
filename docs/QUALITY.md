@@ -135,6 +135,80 @@ run21's firmware evidence.
   loop and *before* `UIApplicationMain` at 3.268e9, so that block of work
   finished and the boot moved on: the cost recurs, it does not hang. Which
   operation drives it, and the total remaining, are **open**.
+- **SpringBoard is in a `launchd` crash/respawn loop, and every bullet above
+  that treats the missing frame as a progress, budget, or latency question is
+  superseded.** The guest's own `ReportCrash` wrote **35** SpringBoard crash
+  reports into the rootfs work images (extracted to `work\analysis\crashes\`:
+  32 from run40, 3 from run46). All 35 are byte-identical in the crashed thread:
+  `EXC_BAD_ACCESS (SIGBUS)`, `KERN_PROTECTION_FAILURE at 0x00000048`, crashed
+  thread 3, `pc 0x30e1ea50`, `lr 0x3123d928`, `cpsr 0x60000010`,
+  `sp 0x007b75d4`. The process dies roughly every **470 million instructions**;
+  one run recorded **30 exec attempts and 29 deaths across 13.7e9
+  instructions**.
+- **The SIGBUS is identified, and it is not a CPU defect.** Thread 3 is the
+  CoreAnimation render thread on the IOMFB vblank callback —
+  `_mbx2DDisable+0x20` <- `CA::RenderMBX2D::render` <- `render_display` <-
+  `CA::WindowServer::MBXServer::render_update` <- `Server::render_for_time` <-
+  `IOMFBServer::link_callback`. The faulting instruction is
+  `30e1ea50 strbeq r0, [r3, #0x48]` after `30e1ea3c ldr r3, [r3]` loads
+  `_mbx2DGlobalContext` (`0x381200d8`) as NULL, because `_mbx2DCtxInitialize`
+  failed (`IOIteratorNext` at `0x30e1fd60` returned `MACH_PORT_NULL` from a
+  successful-but-empty `IOServiceGetMatchingServices("AppleMBXDevice")`) while
+  `MBXServer::MBXServer` left `enable_mbx2d` set to 1. A NULL dereference into
+  `__PAGEZERO` yields `KERN_PROTECTION_FAILURE` and therefore SIGBUS, not
+  SIGSEGV. A separate audit found the interpreter's ARMv6 unaligned-access model
+  **correct** (SCTLR.U and SCTLR.A both honoured), with no alignment fault among
+  the 2,052 recorded faults.
+- **The fix is verified statically and has NOT been run.**
+  `MBXServer::render_update` (`0x3124207c`) is a three-way fallback whose third
+  arm is `CA::WindowServer::Server::render_update` ->
+  `CARenderOGLNew(_kCARenderSoftwareCallbacks)` -> `CA::OGL::SWContext`, a real
+  CPU rasteriser; `mbx2d_context()` (`0x31241a8c`) returns NULL early at
+  `0x31241aa8` when the byte `enable_mbx2d` at `0x38190db1` is zero, and that
+  byte comes from `getenv("CA_ENABLE_MBX2D")` or `getenv("LK_ENABLE_MBX2D")`.
+  Setting `CA_ENABLE_MBX2D=0` in SpringBoard's launchd environment therefore
+  selects software rendering with **no GPU emulation**. This is disassembly, not
+  a run result. **SpringBoard has still never rendered a frame.**
+- **Retracted:** "SpringBoard is progressing normally and merely runs out of
+  instruction budget." It is crash-looping; the identical framebuffer hash
+  `CBAD1C11…` in every run since run35 is the signature of that.
+- **Retracted:** "Checkpoint restore loses fidelity — cold and restored runs
+  disagree by 4.6e9 instructions," and "the instruction cap perturbs guest
+  execution." Restore is **bit-exact**: heartbeat PC streams are byte-identical
+  for run35 vs run36d across **27/27** samples, and likewise for run37/38,
+  run38/40/41/43, and capA/capB. The apparent disagreement was an artifact of
+  the `SPRINGBOARD POST-SETEXEC TRACE` block reporting only the most recent
+  SpringBoard generation.
+- **Retracted:** "`-[UIWindow makeKeyAndVisible]` is never called." That
+  selector has exactly one call site in the whole 1.19 MB SpringBoard binary,
+  inside `-[SBSyncController _delayedBeginReset]`, a restore path never taken at
+  boot; 3.1.3 uses `-[UIWindow orderFront:]` and `-[UIWindow makeKey:]`. Zero
+  hits there is the **expected** reading on healthy hardware.
+- **Retracted:** "un-matching only `/arm-io/usb-otg/usb-device` is
+  insufficient." It was a complete no-op — run46 (child un-matched) printed
+  **24** `AppleSynopsysOTGDevice` lines against run37's (parent un-matched)
+  **0**; matching keys off the parent node. Consequently any claim resting on
+  run39 or run42 "with USB un-matched" is **void**: both restored from a
+  snapshot taken with the driver already matched in guest RAM, and a device-tree
+  patch cannot affect a restored run.
+- **Corrected:** the MBX register block is at physical **`0x3B000000`**, not
+  `0x03000000` (device-tree `reg` `{0x03000000, 0x01000000}` plus `/arm-io`
+  `ranges` `0x38000000`); and the "busy-polls a reset bit" account of the MBX
+  hang is wrong — that poll (`AppleMBXController`, `0xC07799E0`) is gated on
+  `fVariant == 2` (s5l8720x) and cannot run on s5l8900x, where `fRegs` is NULL.
+  The real wedge is `AppleMBXDevice` at `0xC077E8D8` spinning on physical
+  `0x3B00012C` bit 6 with no timeout and no exit. The `dt_unmatch("arm-io/mbx")`
+  call itself stays; only its explanation was wrong.
+- `2b08c4d` implements **LDRD/STRD** and gates CP15 c1 on CRm: `test_arm`
+  **939 passed, 0 failed** (was 878).
+- `a09478e` models the **DWC2 configuration registers** the OTG driver reads, in
+  new `core/src/soc/usbotg.c` (`GHWCFG1=0`, `GHWCFG2=0x228de550`, `GHWCFG4=0`
+  read-only; `PCGCCTL` read/write). It removes the deterministic panic at
+  instruction **8,728,148,009**, and `test_soc` reports **5,621 passed, 0
+  failed** (was 5,591). Snapshot format **4 → 5**, which invalidates existing
+  checkpoints. This path is **not** reached by a default boot: bootkernel still
+  un-matches the USB complex unless `-u` is passed, so the fix is covered by
+  tests rather than by a firmware run.
 
 ## Evidence ledger
 
