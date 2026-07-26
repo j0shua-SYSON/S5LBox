@@ -187,6 +187,31 @@ target_include_directories(test_vmguest PRIVATE ../app/Sources)
 target_link_libraries(test_vmguest PRIVATE emucore)
 add_test(NAME app_vmguest_bridge COMMAND test_vmguest)
 
+# The app's user interface is built by a macOS CI runner and can only be run on
+# a phone, so none of its Objective-C is reachable from this suite.  The two
+# pieces that are pure arithmetic and pure data are therefore deliberately NOT
+# written in Objective-C, and are tested here instead: where a finger landed on
+# the guest's panel, and the option table the settings screen mirrors from
+# tools/bootkernel.c.  Neither target links emucore -- they have nothing to do
+# with the machine, and keeping them free-standing keeps that true.
+add_executable(test_vmtouchmap
+    ../app/Tests/test_vmtouchmap.c
+    ../app/Sources/VMTouchMap.c
+)
+target_include_directories(test_vmtouchmap PRIVATE ../app/Sources)
+# floor() and isfinite(): the same libm split that caught emucore on Linux.
+if(NOT WIN32 AND NOT APPLE)
+    target_link_libraries(test_vmtouchmap PRIVATE m)
+endif()
+add_test(NAME app_touch_map COMMAND test_vmtouchmap)
+
+add_executable(test_vmoptions
+    ../app/Tests/test_vmoptions.c
+    ../app/Sources/VMOptions.c
+)
+target_include_directories(test_vmoptions PRIVATE ../app/Sources)
+add_test(NAME app_option_table COMMAND test_vmoptions)
+
 # --- host tools -------------------------------------------------------------
 # The host-owned writable-file adapter stays outside emucore: the portable core
 # exposes vm_block_t callbacks but never depends on descriptors, locks, or

@@ -73,6 +73,8 @@ static double vm_now(void) {
                   rate:(double)instantRate
                 status:(arm_status_t)status;
 - (void)appendConsole:(NSString *)text;
+- (void)noteDiscardedInput;
+- (void)publishBlankSnapshotLocked;
 @end
 
 @implementation VMEngine {
@@ -88,6 +90,13 @@ static double vm_now(void) {
     BOOL             _snapshotFresh;
     BOOL             _snapshotARGB;  // byte order of the snapshot's pixels
     BOOL             _snapshotBlank;
+    /* The geometry the display controller was scanning out when the snapshot
+     * was taken. Published with the pixels rather than assumed by the reader:
+     * the buffer is a fixed VM_FB_BYTES, but what is IN it is whatever window
+     * the guest enabled. */
+    uint32_t         _snapshotWidth;
+    uint32_t         _snapshotHeight;
+    uint32_t         _snapshotStride;
     NSMutableString *_pending;
     uint64_t         _retired;
     double           _rate;          // instructions per second, smoothed
@@ -95,6 +104,9 @@ static double vm_now(void) {
     VMEngineState    _state;
     BOOL             _stopRequested;
     BOOL             _paused;
+    uint64_t         _instructionCap; // 0: run until stopped or halted
+    BOOL             _buttons[VMButtonCount];
+    BOOL             _discardedInputLogged;
 }
 
 + (uint64_t)physFootprintBytes {
@@ -149,23 +161,14 @@ static double vm_now(void) {
     _rate = 0.0;
     _status = @"starting";
     BOOL needSnapshot = (_snapshot == NULL);
-    if (_snapshot) {
-        memset(_snapshot, 0, VM_FB_BYTES);
-        _snapshotARGB = NO;
-        _snapshotFresh = YES;
-        _snapshotBlank = YES;
-    }
+    [self publishBlankSnapshotLocked];
     pthread_mutex_unlock(&_lock);
 
     if (needSnapshot) {
         uint8_t *snapshot = calloc(1, VM_FB_BYTES);
         pthread_mutex_lock(&_lock);
         _snapshot = snapshot;
-        if (snapshot) {
-            _snapshotARGB = NO;
-            _snapshotFresh = YES;
-            _snapshotBlank = YES;
-        }
+        [self publishBlankSnapshotLocked];
         if (!snapshot) {
             _state = VMEngineStateIdle;
             _stopRequested = NO;
@@ -272,8 +275,110 @@ static double vm_now(void) {
 
 - (void)setPaused:(BOOL)paused {
     pthread_mutex_lock(&_lock);
+    /* A suspended machine is retiring nothing, so say nothing rather than
+     * leaving the smoothed rate frozen at whatever it was a moment before the
+     * pause -- a number that keeps claiming work is being done.
+     *
+     * Only when it is actually running: -setPaused: is also reached on the way
+     * to the background, and a machine that has already halted must keep
+     * saying "halted" rather than being relabelled as merely paused. */
+    if (paused && !_paused && _state == VMEngineStateRunning) {
+        _rate = 0.0;
+        _status = @"paused";
+    }
     _paused = paused;
     pthread_mutex_unlock(&_lock);
+}
+
+- (BOOL)isPaused {
+    pthread_mutex_lock(&_lock);
+    BOOL paused = _paused;
+    pthread_mutex_unlock(&_lock);
+    return paused;
+}
+
+- (BOOL)isRunning {
+    pthread_mutex_lock(&_lock);
+    BOOL running = (_state == VMEngineStateRunning);
+    pthread_mutex_unlock(&_lock);
+    return running;
+}
+
+- (void)setInstructionCap:(uint64_t)cap {
+    pthread_mutex_lock(&_lock);
+    _instructionCap = cap;
+    pthread_mutex_unlock(&_lock);
+}
+
+- (uint64_t)instructionCap {
+    pthread_mutex_lock(&_lock);
+    uint64_t cap = _instructionCap;
+    pthread_mutex_unlock(&_lock);
+    return cap;
+}
+
+#pragma mark - Guest input (see the header: none of it reaches the guest)
+
++ (NSString *)inputUnavailableReason {
+    /* One place, one sentence, and every control that would need input asks
+     * for it rather than deciding for itself that it is dead. */
+    return @"no touchscreen or button input is modelled yet";
+}
+
++ (NSString *)nameForButton:(VMButton)button {
+    switch (button) {
+        case VMButtonHome:         return @"Home";
+        case VMButtonPower:        return @"Power";
+        case VMButtonVolumeUp:     return @"Vol +";
+        case VMButtonVolumeDown:   return @"Vol -";
+        case VMButtonRingerSilent: return @"Silent";
+        case VMButtonCount:        break;
+    }
+    return @"?";
+}
+
+- (BOOL)setButton:(VMButton)button pressed:(BOOL)pressed {
+    if (button >= VMButtonCount) return NO;
+
+    /* Recorded under the same lock as everything else the UI can read, so the
+     * day a PMU model wants the held state it is already there and already
+     * safe to read from the emulator thread. */
+    pthread_mutex_lock(&_lock);
+    _buttons[button] = pressed;
+    pthread_mutex_unlock(&_lock);
+
+    [self noteDiscardedInput];
+    return NO;      // see +inputUnavailableReason
+}
+
+- (BOOL)isButtonPressed:(VMButton)button {
+    if (button >= VMButtonCount) return NO;
+    pthread_mutex_lock(&_lock);
+    BOOL held = _buttons[button];
+    pthread_mutex_unlock(&_lock);
+    return held;
+}
+
+- (BOOL)sendTouchAtGuestX:(int)x y:(int)y phase:(vm_touch_phase_t)phase {
+    (void)x; (void)y; (void)phase;
+    [self noteDiscardedInput];
+    return NO;      // see +inputUnavailableReason
+}
+
+/* Say it once. A drag produces a report per frame, and a console that scrolls
+ * the guest's own output away to repeat the same refusal is worse than one
+ * that states it plainly and then stops. */
+- (void)noteDiscardedInput {
+    pthread_mutex_lock(&_lock);
+    BOOL first = !_discardedInputLogged;
+    _discardedInputLogged = YES;
+    pthread_mutex_unlock(&_lock);
+    if (!first) return;
+
+    [self appendConsole:[NSString stringWithFormat:
+        @"[input] discarded: %@. The coordinate is shown on screen and thrown "
+        @"away; the guest is never told. Printed once.\n",
+        [VMEngine inputUnavailableReason]]];
 }
 
 #pragma mark - Emulator thread
@@ -284,6 +389,7 @@ static double vm_now(void) {
     uint64_t retired = 0, retiredAtLastPublish = 0;
     arm_status_t status = ARM_OK;
     BOOL stoppedByRequest = NO;
+    BOOL reachedCap = NO;
 
     while (YES) {
         @autoreleasepool {
@@ -310,11 +416,33 @@ static double vm_now(void) {
              * guest halt as though the controller were still active. */
             pthread_mutex_lock(&_lock);
             stop = _stopRequested;
+            uint64_t cap = _instructionCap;
             if (status != ARM_OK && !stop && _state == VMEngineStateRunning)
+                _state = VMEngineStateStopping;
+            if (cap > 0 && retired >= cap && !stop &&
+                _state == VMEngineStateRunning)
                 _state = VMEngineStateStopping;
             pthread_mutex_unlock(&_lock);
             if (stop) {
                 stoppedByRequest = YES;
+                break;
+            }
+
+            /* A diagnostic limit, not a guest fault. Publish the frame and the
+             * counters that were reached and stop there, leaving the last
+             * picture up: the whole point of asking for a limit is to look at
+             * what the machine had drawn by then.
+             *
+             * `status == ARM_OK` is load-bearing, not defensive. A chunk can
+             * both fault and cross the cap, and the terminal block below
+             * overwrites _status with "instruction cap reached" — so without
+             * this test an undefined instruction or a halt would be reported
+             * as a clean diagnostic stop. A failure reported as a success is
+             * the one outcome this project does not permit. The fault wins;
+             * the cap is still crossed and will be reported next time. */
+            if (status == ARM_OK && cap > 0 && retired >= cap) {
+                reachedCap = YES;
+                [self publishRetired:retired rate:0.0 status:status];
                 break;
             }
 
@@ -343,6 +471,11 @@ static double vm_now(void) {
     if (stoppedByRequest)
         [self publishRetired:retired rate:0.0 status:ARM_OK];
 
+    if (reachedCap)
+        [self appendConsole:[NSString stringWithFormat:
+            @"[vm] stopped at the instruction cap: %llu retired\n",
+            (unsigned long long)retired]];
+
     if (_machineReady) {
         s5l8900_free(&_machine);
     }
@@ -354,13 +487,11 @@ static double vm_now(void) {
     _machineReady = NO;
     _thread = nil;
     if (stoppedByRequest) {
-        if (_snapshot) {
-            memset(_snapshot, 0, VM_FB_BYTES);
-            _snapshotARGB = NO;
-            _snapshotFresh = YES;
-            _snapshotBlank = YES;
-        }
+        [self publishBlankSnapshotLocked];
         _status = @"stopped";
+        _rate = 0.0;
+    } else if (reachedCap) {
+        _status = @"instruction cap reached";
         _rate = 0.0;
     }
     _state = VMEngineStateIdle;
@@ -416,6 +547,12 @@ static double vm_now(void) {
             memset(_snapshot + fbBytes, 0, VM_FB_BYTES - fbBytes);
         memcpy(_snapshot, fb, fbBytes);
         _snapshotARGB = (order == VM_ORDER_ARGB);
+        /* Published with the pixels. The reader must not assume 320x480: this
+         * geometry came out of whichever CLCD window the guest enabled, and it
+         * is the only description of what the bytes above mean. */
+        _snapshotWidth  = fbW;
+        _snapshotHeight = fbH;
+        _snapshotStride = fbStride;
         _snapshotFresh = YES;
         _snapshotBlank = NO;
     } else if (_snapshot && !_snapshotBlank) {
@@ -423,10 +560,7 @@ static double vm_now(void) {
          * leave the last good frame on screen forever. Publish that transition
          * once; do not allocate a new black CGImage at 30 Hz while it remains
          * stopped. */
-        memset(_snapshot, 0, VM_FB_BYTES);
-        _snapshotARGB = NO;
-        _snapshotFresh = YES;
-        _snapshotBlank = YES;
+        [self publishBlankSnapshotLocked];
     }
     if (fresh.length) [_pending appendString:fresh];
     if (_pending.length > kVMConsoleLimit) {
@@ -447,15 +581,37 @@ static double vm_now(void) {
     pthread_mutex_unlock(&_lock);
 }
 
+/* A black panel of the panel's nominal size. MUST be called with _lock already
+ * held: it is the tail of four different critical sections, and taking the
+ * lock here would deadlock every one of them. */
+- (void)publishBlankSnapshotLocked {
+    if (!_snapshot) return;
+    memset(_snapshot, 0, VM_FB_BYTES);
+    _snapshotARGB = NO;
+    _snapshotFresh = YES;
+    _snapshotBlank = YES;
+    _snapshotWidth  = VM_FB_WIDTH;
+    _snapshotHeight = VM_FB_HEIGHT;
+    _snapshotStride = VM_FB_WIDTH * VM_FB_BPP;
+}
+
 #pragma mark - Snapshot readers (main thread)
 
-- (BOOL)copyFrameInto:(void *)dst capacity:(size_t)capacity argb:(BOOL *)outARGB {
+- (BOOL)copyFrameInto:(void *)dst
+             capacity:(size_t)capacity
+                width:(uint32_t *)outWidth
+               height:(uint32_t *)outHeight
+               stride:(uint32_t *)outStride
+                 argb:(BOOL *)outARGB {
     if (!dst || capacity < VM_FB_BYTES) return NO;
     BOOL copied = NO;
     pthread_mutex_lock(&_lock);
     if (_snapshotFresh && _snapshot) {
         memcpy(dst, _snapshot, VM_FB_BYTES);
-        if (outARGB) *outARGB = _snapshotARGB;
+        if (outARGB)   *outARGB   = _snapshotARGB;
+        if (outWidth)  *outWidth  = _snapshotWidth;
+        if (outHeight) *outHeight = _snapshotHeight;
+        if (outStride) *outStride = _snapshotStride;
         _snapshotFresh = NO;
         copied = YES;
     }
