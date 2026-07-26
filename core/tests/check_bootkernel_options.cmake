@@ -68,7 +68,7 @@ endfunction()
 # to any of them silently changes the meaning of ~60 recorded runs, so they are
 # spelled out here rather than left implicit in the table.
 expect_config(defaults_resolve
-    "mbx=0|sha1=0|baseband=0|spi2=0|usb-otg=0|framebuffer=0|iomfb-display=0|vram=1|lcd-panel-id=1|memory-reg=1|rtc-patch=1|fstab-fixup=1|ca-software-render=0|activate=1|jb-codesign=0|jb-payload=0|ramdisk-low=0|stop-on-abort=0|kext-map=0"
+    "mbx=0|sha1=0|baseband=0|spi2=0|usb-otg=0|framebuffer=0|iomfb-display=0|vram=1|lcd-panel-id=1|memory-reg=1|rtc-patch=1|fstab-fixup=1|ca-software-render=0|activate=1|jb-codesign=0|jb-payload=0|ppp=0|ramdisk-low=0|stop-on-abort=0|kext-map=0"
     absent-kernel --print-config)
 
 # Nothing but --print-config itself came from the command line.
@@ -173,6 +173,18 @@ expect_refused(payload_without_jailbreak "but --jb-payload is off"
     absent-kernel --jailbreak-payload absent-payload --print-config)
 expect_refused(jailbreak_without_external_md "requires --external-md"
     absent-kernel --jailbreak --print-config)
+# --ppp writes a launchd job into the work image, so it needs the one mode that
+# has one. Without this gate a run would append uart4_dma_enable=0, arm the LCP
+# scan, and report a configuration whose guest half never happened -- which
+# reads exactly like "pppd ran and sent nothing".
+expect_refused(ppp_without_external_md "--ppp requires --external-md"
+    absent-kernel --ppp --print-config)
+expect_config(ppp_off_by_default
+    "ppp=0" absent-kernel --print-config)
+expect_config(ppp_resolves_under_external_md
+    "ppp=1|config-cli : ppp"
+    absent-kernel -d absent-tree --external-md absent-source new-work
+    --ppp --print-config)
 # The payload path is validated in preflight like every other input, so a typo
 # costs a second rather than a boot.
 expect_refused(unreadable_payload "--jailbreak-payload: cannot read"

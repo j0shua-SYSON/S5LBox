@@ -65,7 +65,11 @@ static const vm_option_t VM_OPTIONS[] = {
     { "jb-payload", "Jailbreak: filesystem half",
       "Off, and NOT IMPLEMENTED ANYWHERE: would install the payload named below "
       "onto the work image, and waits on the same file provisioner.",
-      false, VM_OPT_GROUP_GUEST_STATE, VM_OPT_IMPL_NOWHERE }
+      false, VM_OPT_GROUP_GUEST_STATE, VM_OPT_IMPL_NOWHERE },
+    { "ppp", "Guest networking (PPP over uart4)",
+      "Off, and explicitly temporary: runs the guest's own pppd over an "
+      "emulated UART until real drivers exist. Needs a writable work image.",
+      false, VM_OPT_GROUP_GUEST_STATE, VM_OPT_IMPL_HARNESS }
 };
 
 #define VM_OPTION_COUNT ((unsigned)(sizeof VM_OPTIONS / sizeof VM_OPTIONS[0]))

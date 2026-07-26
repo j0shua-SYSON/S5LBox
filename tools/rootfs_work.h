@@ -72,6 +72,9 @@ typedef enum rootfs_work_status {
     ROOTFS_WORK_FSTAB_LINE_INVALID,
     ROOTFS_WORK_CA_PLIST_NOT_UNIQUE,
     ROOTFS_WORK_CA_PLIST_INVALID,
+    /* The PPP launchd job, which reuses the CA plist's mechanism exactly. */
+    ROOTFS_WORK_PPP_PLIST_NOT_UNIQUE,
+    ROOTFS_WORK_PPP_PLIST_INVALID,
     ROOTFS_WORK_GROW_INVALID,
     /*
      * Catalog provisioning refusals.  Every one of them is decided during the
@@ -114,6 +117,8 @@ typedef enum rootfs_work_stage {
     ROOTFS_WORK_STAGE_FSTAB_WRITE,
     ROOTFS_WORK_STAGE_CA_PLIST_SCAN,
     ROOTFS_WORK_STAGE_CA_PLIST_WRITE,
+    ROOTFS_WORK_STAGE_PPP_PLIST_SCAN,
+    ROOTFS_WORK_STAGE_PPP_PLIST_WRITE,
     ROOTFS_WORK_STAGE_GROW_PLAN,
     ROOTFS_WORK_STAGE_GROW_WRITE,
     ROOTFS_WORK_STAGE_PROVISION_PLAN,
@@ -178,6 +183,32 @@ typedef struct rootfs_work_options {
     bool ca_software_render;
 
     /*
+     * Opt-in, OFF by default: replace the stock com.apple.chud.pilotfish
+     * LaunchDaemon plist, in place and at exactly its own 530 bytes, with a
+     * job that runs the guest's own /usr/sbin/pppd against the emulated uart4.
+     *
+     * WHY THAT FILE. The rootfs ships no PPP launchd job and /private/etc/ppp
+     * is empty, and this provisioner cannot split a catalog B-tree node, so a
+     * new file at a path of our choosing is not available. What IS available
+     * is that several shipped plists name binaries that do not exist on this
+     * image, which makes rewriting one of them size-neutral with zero
+     * collateral damage. pilotfish points at /Developer/usr/libexec/pilotfish,
+     * /Developer does not exist, and at 530 bytes it is the largest of the
+     * four inert candidates -- enough for a fully-argumented job.
+     *
+     * It is a HIJACK and it is TEMPORARY. docs/networking.md is explicit that
+     * PPP over an emulated UART is a stopgap until real drivers and
+     * controllers exist; this option is the guest half of that stopgap, and
+     * the day a provisioner can create a file it should be replaced by one at
+     * a path that says what it is.
+     *
+     * Same mechanism as ca_software_render above: an exactly-once byte
+     * pattern, overwritten by exactly as many bytes, so logicalSize,
+     * totalBlocks and the file's single extent are all untouched.
+     */
+    bool ppp_launchd_job;
+
+    /*
      * Same arithmetic as bootkernel's historical --grow implementation:
      * floor(growth_bytes / allocationBlockSize), less the old reserved-tail
      * block, is added to totalBlocks and then clamped to the existing
@@ -236,6 +267,8 @@ typedef struct rootfs_work_result {
     uint64_t fstab_offset;
     /* UINT64_MAX unless the CA software-render rewrite actually ran. */
     uint64_t ca_plist_offset;
+    /* UINT64_MAX unless the PPP launchd-job rewrite actually ran. */
+    uint64_t ppp_plist_offset;
     /* Catalog provisioning, all zero unless entries were requested. */
     uint32_t provision_entries;
     uint32_t provision_first_cnid;

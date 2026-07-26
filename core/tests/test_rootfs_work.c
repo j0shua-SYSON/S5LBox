@@ -127,6 +127,47 @@ static const uint8_t CA_PLIST_STOCK[] =
 #define FIXTURE_PLIST_OFFSET 2570u
 #define FIXTURE_PLIST_OFFSET_SECOND 4200u
 
+/*
+ * /System/Library/LaunchDaemons/com.apple.chud.pilotfish.plist, stock iPhone
+ * OS 3.1.3 (7E18), 530 bytes.  Held here independently of the provisioner's
+ * own copy for the same reason the SpringBoard plist is: these bytes are the
+ * assertion, and a test that included the header's constant would agree with
+ * the transformation by construction rather than check it.
+ *
+ * Transcribed byte-for-byte, mixed indentation and all -- the file really does
+ * use eight spaces almost everywhere and four tabs on the <true/> line, and
+ * its DOCTYPE really does say "Apple Inc." where the SpringBoard plist's says
+ * "Apple".  Normalising either would break the pattern match against a real
+ * image, which is exactly the failure this copy exists to catch.
+ */
+static const uint8_t PPP_PLIST_STOCK[] =
+    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+    "<!DOCTYPE plist PUBLIC \"-//Apple Inc.//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
+    "<plist version=\"1.0\">\n"
+    "<dict>\n"
+    "        <key>Label</key>\n"
+    "        <string>com.apple.chud.pilotfish</string>\n"
+    "        <key>MachServices</key>\n"
+    "        <dict>\n"
+    "                <key>com.apple.chud.pilotfish</key>\n"
+    "\t\t\t\t<true/>\n"
+    "        </dict>\n"
+    "        <key>ProgramArguments</key>\n"
+    "        <array>\n"
+    "                <string>/Developer/usr/libexec/pilotfish</string>\n"
+    "        </array>\n"
+    "</dict>\n"
+    "</plist>\n";
+
+#define PPP_PLIST_SIZE (sizeof(PPP_PLIST_STOCK) - 1u)
+/*
+ * Two 530-byte copies, both inside blocks 5..13 (2560..7167) and therefore
+ * clear of the reserved head, the allocation file, the stock fstab record at
+ * 4090, the reserved tail, and both SpringBoard plist windows.
+ */
+#define FIXTURE_PPP_OFFSET 6000u
+#define FIXTURE_PPP_OFFSET_SECOND 6600u
+
 /* Independently fixed SHA-256 of make_hfs_fixture(..., 1). */
 static const uint8_t FIXTURE_SHA256[IOS3_SHA256_DIGEST_SIZE] = {
     0xa2u, 0x95u, 0x22u, 0x37u, 0x9bu, 0x5eu, 0xf1u, 0x8fu,
@@ -261,6 +302,24 @@ static void make_plist_fixture(uint8_t image[FIXTURE_SIZE], unsigned count) {
     if (count >= 2u)
         memcpy(image + FIXTURE_PLIST_OFFSET_SECOND, CA_PLIST_STOCK,
                CA_PLIST_SIZE);
+}
+
+/*
+ * The stock chud.pilotfish launchd plist, `count` times, layered the same way
+ * and for the same reason: the PPP rewrite runs after the fstab rewrite, so a
+ * fixture that reaches it must still carry exactly one stock fstab record.
+ *
+ * Layered on top of make_hfs_fixture rather than folded into it, because
+ * FIXTURE_SHA256 is the pinned digest of make_hfs_fixture(..., 1) and every
+ * identity test in this file would have to be re-derived if that changed.
+ */
+static void make_ppp_fixture(uint8_t image[FIXTURE_SIZE], unsigned count) {
+    make_hfs_fixture(image, 1u);
+    if (count >= 1u)
+        memcpy(image + FIXTURE_PPP_OFFSET, PPP_PLIST_STOCK, PPP_PLIST_SIZE);
+    if (count >= 2u)
+        memcpy(image + FIXTURE_PPP_OFFSET_SECOND, PPP_PLIST_STOCK,
+               PPP_PLIST_SIZE);
 }
 
 static bool region_contains(const uint8_t *region, size_t region_size,
@@ -853,6 +912,265 @@ static void test_ca_software_render_plist(void) {
     expect_ca_plist_refusal(fixture, "ca-plist-already-rewritten");
 }
 
+/*
+ * The PPP job's blast radius. Kept separate from expect_only_records_changed
+ * rather than folded into it: widening that function to tolerate a third
+ * window would weaken the SpringBoard test by exactly the size of this one,
+ * and these two rewrites are meant to be independently provable.
+ */
+static void expect_only_ppp_and_fstab_changed(const uint8_t *published,
+                                              const uint8_t *fixture,
+                                              const char *tag) {
+    size_t index;
+    size_t differences = 0;
+
+    for (index = 0; index < FIXTURE_SIZE; index++) {
+        bool in_ppp = index >= FIXTURE_PPP_OFFSET &&
+                      index < FIXTURE_PPP_OFFSET + PPP_PLIST_SIZE;
+        bool in_fstab = index >= FIXTURE_FSTAB_OFFSET &&
+                        index < FIXTURE_FSTAB_OFFSET +
+                                (sizeof(FSTAB_STOCK) - 1u);
+        if (!in_ppp && !in_fstab && published[index] != fixture[index])
+            differences++;
+    }
+    CHECK(differences == 0u,
+          "%s rewrite changed %zu bytes outside the two rewritten records",
+          tag, differences);
+}
+
+static void expect_ppp_plist_refusal(const uint8_t *fixture, const char *tag) {
+    char source[160];
+    char destination[160];
+    rootfs_work_options_t options;
+    rootfs_work_result_t result;
+
+    CHECK(make_path(source, sizeof(source), tag),
+          "could not form %s ppp source path", tag);
+    CHECK(make_path(destination, sizeof(destination), "ppp-plist-rejected"),
+          "could not form %s ppp destination path", tag);
+    remove_if_present(source);
+    remove_if_present(destination);
+    CHECK(write_file(source, fixture, FIXTURE_SIZE),
+          "could not write %s ppp fixture", tag);
+    memset(&options, 0, sizeof(options));
+    options.ppp_launchd_job = true;
+    options.io_buffer_bytes = 37u; /* pattern spans many chunk boundaries */
+    CHECK(rootfs_work_create(source, destination, &options, &result) ==
+              ROOTFS_WORK_PPP_PLIST_NOT_UNIQUE &&
+          result.stage == ROOTFS_WORK_STAGE_PPP_PLIST_SCAN,
+          "%s ppp fixture returned %s/%s: %s", tag,
+          rootfs_work_status_name(result.status),
+          rootfs_work_stage_name(result.stage), result.detail);
+    CHECK(result.ppp_plist_offset == UINT64_MAX && !result.published,
+          "%s ppp refusal reported a rewrite or a publication", tag);
+    CHECK(!path_exists(destination) && no_temporary_files(),
+          "%s ppp refusal left an output artifact", tag);
+    remove_if_present(destination);
+    remove_if_present(source);
+}
+
+/*
+ * The guest half of docs/networking.md's Route D: an inert LaunchDaemon plist
+ * becomes a job that runs the guest's own /usr/sbin/pppd against uart4.
+ *
+ * The property under test is not "some bytes changed". It is that the change
+ * is invisible to HFS+: the record is located by content, must occur exactly
+ * once, and is overwritten by exactly as many bytes, so no catalog field --
+ * not logicalSize, not totalBlocks, not the file's single extent -- has to
+ * move. The image size assertion and the blast-radius assertion together are
+ * what make that checkable rather than asserted.
+ */
+static void test_ppp_launchd_job_plist(void) {
+    char source[160];
+    char destination[160];
+    uint8_t fixture[FIXTURE_SIZE];
+    uint8_t published[FIXTURE_SIZE];
+    uint8_t rewritten[PPP_PLIST_SIZE];
+    rootfs_work_options_t options;
+    rootfs_work_result_t result;
+    rootfs_work_status_t status;
+
+    /* The budget, stated as a test rather than as a comment. 530 is what
+     * makes chud.pilotfish the only one of the four inert candidates that can
+     * hold a fully-argumented job; the next largest is 515. */
+    CHECK(PPP_PLIST_SIZE == 530u,
+          "stock chud.pilotfish fixture is %zu bytes, expected 530",
+          (size_t)PPP_PLIST_SIZE);
+
+    /* One stock record and the flag on: rewritten in place, same length. */
+    CHECK(make_path(source, sizeof(source), "ppp-plist-source"),
+          "could not form ppp source path");
+    CHECK(make_path(destination, sizeof(destination), "ppp-plist-work"),
+          "could not form ppp destination path");
+    remove_if_present(source);
+    remove_if_present(destination);
+    make_ppp_fixture(fixture, 1u);
+    CHECK(write_file(source, fixture, sizeof(fixture)),
+          "could not write ppp job fixture");
+    memset(&options, 0, sizeof(options));
+    options.ppp_launchd_job = true;
+    options.io_buffer_bytes = 7u; /* 530-byte pattern, 7-byte chunks */
+    status = rootfs_work_create(source, destination, &options, &result);
+    CHECK(status == ROOTFS_WORK_OK && result.published,
+          "ppp job rewrite returned %s/%s: %s",
+          rootfs_work_status_name(status), rootfs_work_stage_name(result.stage),
+          result.detail);
+    CHECK(result.ppp_plist_offset == FIXTURE_PPP_OFFSET,
+          "ppp job rewrite reported offset 0x%llx, expected 0x%x",
+          (unsigned long long)result.ppp_plist_offset, FIXTURE_PPP_OFFSET);
+    CHECK(result.final_size == FIXTURE_SIZE &&
+          file_size(destination) == FIXTURE_SIZE,
+          "ppp job rewrite changed the image size to %llu",
+          (unsigned long long)file_size(destination));
+    CHECK(read_file(destination, published, sizeof(published)),
+          "could not read the rewritten work image");
+    memcpy(rewritten, published + FIXTURE_PPP_OFFSET, PPP_PLIST_SIZE);
+    CHECK(memcmp(rewritten, PPP_PLIST_STOCK, PPP_PLIST_SIZE) != 0,
+          "ppp job rewrite left the stock plist in place");
+
+    /* Every argument, checked individually. A job missing `nodetach` runs
+     * once and is declared dead by launchd; one missing `local` blocks
+     * forever waiting for a carrier this UART cannot raise; one missing the
+     * device name does not open a port at all. None of those would be
+     * distinguishable from "the guest never ran pppd" in a boot log. */
+    CHECK(region_contains(rewritten, PPP_PLIST_SIZE,
+                          "<string>/usr/sbin/pppd</string>"),
+          "rewritten job does not run /usr/sbin/pppd");
+    CHECK(region_contains(rewritten, PPP_PLIST_SIZE,
+                          "<string>/dev/uart.debug</string>"),
+          "rewritten job does not name uart4's devfs node");
+    CHECK(region_contains(rewritten, PPP_PLIST_SIZE, "<string>115200</string>"),
+          "rewritten job gives pppd no explicit baud rate");
+    CHECK(region_contains(rewritten, PPP_PLIST_SIZE, "<string>local</string>"),
+          "rewritten job lets pppd wait for a carrier this UART has no DCD "
+          "to raise");
+    CHECK(region_contains(rewritten, PPP_PLIST_SIZE,
+                          "<string>nocrtscts</string>"),
+          "rewritten job asks for hardware flow control on a no-flow-control "
+          "port");
+    CHECK(region_contains(rewritten, PPP_PLIST_SIZE, "<string>noauth</string>"),
+          "rewritten job does not disable peer authentication");
+    CHECK(region_contains(rewritten, PPP_PLIST_SIZE,
+                          "<string>nodetach</string>"),
+          "rewritten job lets pppd daemonise, which launchd reads as a death");
+    CHECK(region_contains(rewritten, PPP_PLIST_SIZE, "<key>RunAtLoad</key>"),
+          "rewritten job is not RunAtLoad, so nothing ever starts it");
+
+    /* And the negative: the binary that does not exist must be gone. A job
+     * that still pointed at /Developer would be launched, fail to exec, and
+     * look exactly like a job that was never installed. */
+    CHECK(!region_contains(rewritten, PPP_PLIST_SIZE, "/Developer"),
+          "rewritten job still points at the absent pilotfish binary");
+    CHECK(!region_contains(rewritten, PPP_PLIST_SIZE, "MachServices"),
+          "rewritten job still registers a Mach service for a missing binary");
+
+    CHECK(memcmp(rewritten, "<?xml", 5u) == 0 &&
+          memcmp(rewritten + PPP_PLIST_SIZE - 9u, "</plist>\n", 9u) == 0,
+          "rewritten job is not a well-formed <?xml ... </plist> document");
+    expect_only_ppp_and_fstab_changed(published, fixture, "ppp-job");
+    CHECK(no_temporary_files(), "ppp job rewrite left a temp name");
+    remove_if_present(destination);
+    remove_if_present(source);
+
+    /* Same fixture, flag off: the stock record survives untouched. This is
+     * what keeps a default run a stock run. */
+    CHECK(make_path(destination, sizeof(destination), "ppp-plist-disabled"),
+          "could not form disabled-ppp destination path");
+    remove_if_present(source);
+    remove_if_present(destination);
+    CHECK(write_file(source, fixture, sizeof(fixture)),
+          "could not write disabled-flag ppp fixture");
+    memset(&options, 0, sizeof(options));
+    options.ppp_launchd_job = false;
+    options.io_buffer_bytes = 37u;
+    status = rootfs_work_create(source, destination, &options, &result);
+    CHECK(status == ROOTFS_WORK_OK && result.published,
+          "disabled ppp job returned %s/%s: %s",
+          rootfs_work_status_name(status), rootfs_work_stage_name(result.stage),
+          result.detail);
+    CHECK(result.ppp_plist_offset == UINT64_MAX,
+          "disabled ppp job reported a rewrite at 0x%llx",
+          (unsigned long long)result.ppp_plist_offset);
+    CHECK(read_file(destination, published, sizeof(published)) &&
+          memcmp(published + FIXTURE_PPP_OFFSET, PPP_PLIST_STOCK,
+                 PPP_PLIST_SIZE) == 0,
+          "disabled ppp job still modified the pilotfish plist");
+    remove_if_present(destination);
+    remove_if_present(source);
+
+    /* Ambiguous, absent, and already-rewritten images are all refused. The
+     * already-rewritten case is the one that matters operationally: this
+     * transformation runs once against a freshly copied work image, and
+     * re-running it against its own output must fail loudly rather than
+     * appear to succeed. */
+    make_ppp_fixture(fixture, 2u);
+    expect_ppp_plist_refusal(fixture, "ppp-plist-duplicate");
+    make_ppp_fixture(fixture, 0u);
+    expect_ppp_plist_refusal(fixture, "ppp-plist-absent");
+    make_ppp_fixture(fixture, 1u);
+    memcpy(fixture + FIXTURE_PPP_OFFSET, rewritten, PPP_PLIST_SIZE);
+    expect_ppp_plist_refusal(fixture, "ppp-plist-already-rewritten");
+}
+
+/*
+ * Both plist rewrites in one build, which is the realistic invocation: a run
+ * that wants guest networking also wants SpringBoard to render. They touch
+ * disjoint records and run in a fixed order, and neither may disturb the
+ * other's pattern before it has been matched.
+ */
+static void test_both_plist_rewrites_in_one_build(void) {
+    char source[160];
+    char destination[160];
+    uint8_t fixture[FIXTURE_SIZE];
+    uint8_t published[FIXTURE_SIZE];
+    rootfs_work_options_t options;
+    rootfs_work_result_t result;
+    rootfs_work_status_t status;
+
+    CHECK(make_path(source, sizeof(source), "both-plist-source"),
+          "could not form both-plist source path");
+    CHECK(make_path(destination, sizeof(destination), "both-plist-work"),
+          "could not form both-plist destination path");
+    remove_if_present(source);
+    remove_if_present(destination);
+
+    /* One of each, in the same image, alongside the single stock fstab. */
+    make_hfs_fixture(fixture, 1u);
+    memcpy(fixture + FIXTURE_PLIST_OFFSET, CA_PLIST_STOCK, CA_PLIST_SIZE);
+    memcpy(fixture + FIXTURE_PPP_OFFSET, PPP_PLIST_STOCK, PPP_PLIST_SIZE);
+    CHECK(write_file(source, fixture, sizeof(fixture)),
+          "could not write the two-rewrite fixture");
+
+    memset(&options, 0, sizeof(options));
+    options.ca_software_render = true;
+    options.ppp_launchd_job = true;
+    options.io_buffer_bytes = 13u;
+    status = rootfs_work_create(source, destination, &options, &result);
+    CHECK(status == ROOTFS_WORK_OK && result.published,
+          "two-rewrite build returned %s/%s: %s",
+          rootfs_work_status_name(status), rootfs_work_stage_name(result.stage),
+          result.detail);
+    CHECK(result.ca_plist_offset == FIXTURE_PLIST_OFFSET &&
+          result.ppp_plist_offset == FIXTURE_PPP_OFFSET,
+          "two-rewrite build reported ca=0x%llx ppp=0x%llx",
+          (unsigned long long)result.ca_plist_offset,
+          (unsigned long long)result.ppp_plist_offset);
+    CHECK(result.final_size == FIXTURE_SIZE &&
+          file_size(destination) == FIXTURE_SIZE,
+          "two-rewrite build changed the image size to %llu",
+          (unsigned long long)file_size(destination));
+    CHECK(read_file(destination, published, sizeof(published)),
+          "could not read the two-rewrite work image");
+    CHECK(region_contains(published + FIXTURE_PLIST_OFFSET, CA_PLIST_SIZE,
+                          "<key>CA_ENABLE_MBX2D</key>"),
+          "the PPP rewrite displaced the renderer rewrite");
+    CHECK(region_contains(published + FIXTURE_PPP_OFFSET, PPP_PLIST_SIZE,
+                          "<string>/usr/sbin/pppd</string>"),
+          "the renderer rewrite displaced the PPP rewrite");
+    remove_if_present(destination);
+    remove_if_present(source);
+}
+
 static void expect_hfs_invalid(const uint8_t fixture[FIXTURE_SIZE],
                                const char *tag, const char *detail_fragment) {
     char source[160];
@@ -1165,6 +1483,8 @@ int main(void) {
     test_source_identity_policy_and_cleanup();
     test_fstab_uniqueness_and_cleanup();
     test_ca_software_render_plist();
+    test_ppp_launchd_job_plist();
+    test_both_plist_rewrites_in_one_build();
     test_malformed_hfs_refused();
     test_growth_rejects_head_tail_overlap();
     test_existing_destination_preserved();

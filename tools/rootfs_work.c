@@ -241,6 +241,140 @@ static const uint8_t CA_PLIST_SOFTWARE_RENDER[] =
 typedef char ca_plist_is_size_neutral[
     (sizeof(CA_PLIST_SOFTWARE_RENDER) == sizeof(CA_PLIST_STOCK)) ? 1 : -1];
 
+/*
+ * /System/Library/LaunchDaemons/com.apple.chud.pilotfish.plist, stock iPhone
+ * OS 3.1.3 (7E18).  Plain XML, 530 bytes, one extent.  As above, this is the
+ * search pattern rather than a template, and the rewrite refuses unless these
+ * exact bytes occur exactly once in the whole work image.
+ *
+ * WHY THIS FILE IS THE ONE.  The image ships no PPP launchd job at all, and
+ * this provisioner cannot split a catalog B-tree node, so creating a file at a
+ * path that says what it is was not on the table.  What was on the table is
+ * that several shipped plists name binaries this image does not contain, which
+ * makes overwriting one of them size-neutral with no collateral damage
+ * whatsoever.  Four were surveyed: chud.pilotfish (530 B, points at
+ * /Developer/usr/libexec/pilotfish), chud.chum (515 B), graphicsservices.sample
+ * (447 B) and tcpdump.server (433 B).  /Developer, /usr/local and
+ * /usr/libexec/tcpdumpserver are all absent, so all four are inert -- but a
+ * fully-argumented pppd job is 515 bytes, so only the largest of them has the
+ * budget, and an earlier revision of the plan that named tcpdump.server was
+ * simply wrong about the arithmetic.
+ *
+ * Note the DOCTYPE says "Apple Inc.", where the SpringBoard plist above says
+ * "Apple".  Both are byte-exact transcriptions of what the image contains; the
+ * two files were produced by different Apple toolchains and normalising them
+ * to each other would break the pattern match.
+ *
+ * This is a HIJACK, and docs/networking.md says in as many words that PPP over
+ * an emulated UART is a temporary workaround pending real drivers and
+ * controllers.  It should be replaced by a job at an honest path the day this
+ * provisioner can create one.
+ */
+static const uint8_t PPP_PLIST_STOCK[] =
+    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+    "<!DOCTYPE plist PUBLIC \"-//Apple Inc.//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
+    "<plist version=\"1.0\">\n"
+    "<dict>\n"
+    "        <key>Label</key>\n"
+    "        <string>com.apple.chud.pilotfish</string>\n"
+    "        <key>MachServices</key>\n"
+    "        <dict>\n"
+    "                <key>com.apple.chud.pilotfish</key>\n"
+    "\t\t\t\t<true/>\n"
+    "        </dict>\n"
+    "        <key>ProgramArguments</key>\n"
+    "        <array>\n"
+    "                <string>/Developer/usr/libexec/pilotfish</string>\n"
+    "        </array>\n"
+    "</dict>\n"
+    "</plist>\n";
+
+/*
+ * The replacement: a launchd job that runs the guest's own signed
+ * /usr/sbin/pppd against uart4, at exactly the same 530 bytes.
+ *
+ * EVERY ARGUMENT IS THERE FOR A STATED REASON.  This is Apple pppd 2.4.2,
+ * armv6, 284,608 bytes, with its tty channel intact (_tty_channel,
+ * _set_up_tty, _connect_tty, _tty_establish_ppp, _options_for_tty are all
+ * present as symbols).  The tty channel is pppd's DEFAULT channel and the
+ * string "PPPSerial" does not appear in the binary, so no link plugin is
+ * involved -- which matters, because PPPSerial.ppp does not ship either.
+ *
+ *   /dev/uart.debug  AppleOnboardSerialBSDClient names its devfs node after
+ *                    the device tree child, and uart4's child is `debug`.
+ *                    CommCenter's own strings carry /dev/uart.umts and
+ *                    /dev/uart.debug verbatim, which is where the naming rule
+ *                    comes from rather than from a guess.
+ *   115200           pppd 2.4.2's set_up_tty() calls cfsetospeed/cfsetispeed
+ *                    only when a speed was given on the command line; with no
+ *                    speed it reads the port's current one back and calls
+ *                    fatal("Baud rate for %s is 0; need explicit baud rate")
+ *                    if that reads zero.  tcsetattr -- and therefore
+ *                    AppleS5L8900XSerial::setBaud -- is reached either way, so
+ *                    naming a speed removes a failure mode without adding one.
+ *   local            do not use modem control lines.  pppd watches for carrier
+ *                    by default, and this UART has no DCD to raise.
+ *   nocrtscts        do not ask for hardware flow control.  uart4 carries
+ *                    `no-flow-control`, so the driver short-circuits
+ *                    getFlowStatus to "asserted" without reading UMSTAT; the
+ *                    flag keeps pppd's request consistent with that.
+ *   noauth           determinism, not necessity: 2.4.2 only sets
+ *                    auth_required when a default route already exists, and no
+ *                    secrets ship, but a run should not depend on that.
+ *   nodetach         MANDATORY under launchd.  pppd daemonises by default, and
+ *                    a job whose first process exits immediately is a job
+ *                    launchd believes has died.
+ *
+ * MachServices is dropped deliberately.  With no Mach port to hold there is no
+ * on-demand path, so RunAtLoad is the whole lifecycle; keeping the port would
+ * register a service for a binary that no longer exists.  The Label is kept
+ * byte-identical so the console messages launchd prints about this job remain
+ * greppable against the name the file already had, and so the label cannot
+ * disagree with the filename.
+ *
+ * A MISSING /etc/ppp/options IS NOT FATAL -- pppd warns and continues on its
+ * built-in defaults plus argv -- which is what makes a standalone invocation
+ * viable at all, since this provisioner cannot create that file either.
+ *
+ * THE INDENTATION IS FILLER, exactly as it is in CA_PLIST_SOFTWARE_RENDER, and
+ * for the same reason.  The job's own bytes come to 515; the budget is 530; so
+ * fifteen leading tabs are distributed one per line over the fifteen lines
+ * from <key>Label</key> to </dict>.  XML treats inter-element whitespace as
+ * insignificant, so a property-list reader sees exactly the seven-argument job
+ * above and nothing else.  Do not reformat this: the length gate below is a
+ * compile error, not a comment.
+ */
+static const uint8_t PPP_PLIST_JOB[] =
+    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+    "<!DOCTYPE plist PUBLIC \"-//Apple Inc.//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
+    "<plist version=\"1.0\">\n"
+    "<dict>\n"
+    "\t<key>Label</key>\n"
+    "\t<string>com.apple.chud.pilotfish</string>\n"
+    "\t<key>RunAtLoad</key>\n"
+    "\t<true/>\n"
+    "\t<key>ProgramArguments</key>\n"
+    "\t<array>\n"
+    "\t<string>/usr/sbin/pppd</string>\n"
+    "\t<string>/dev/uart.debug</string>\n"
+    "\t<string>115200</string>\n"
+    "\t<string>local</string>\n"
+    "\t<string>nocrtscts</string>\n"
+    "\t<string>noauth</string>\n"
+    "\t<string>nodetach</string>\n"
+    "\t</array>\n"
+    "\t</dict>\n"
+    "</plist>\n";
+
+/* Both halves of the contract, as build-time constraints rather than comments:
+ * the replacement is the same length as the record it overwrites, and that
+ * length is the 530 bytes the stock file measures.  Either one drifting turns
+ * a safe overwrite into HFS+ catalog surgery. */
+typedef char ppp_plist_is_size_neutral[
+    (sizeof(PPP_PLIST_JOB) == sizeof(PPP_PLIST_STOCK)) ? 1 : -1];
+typedef char ppp_plist_is_530_bytes[
+    (sizeof(PPP_PLIST_STOCK) - 1u == 530u) ? 1 : -1];
+
 typedef struct host_file {
 #ifdef _WIN32
     HANDLE handle;
@@ -322,6 +456,7 @@ static void result_reset(rootfs_work_result_t *result) {
     result->stage = ROOTFS_WORK_STAGE_NONE;
     result->fstab_offset = UINT64_MAX;
     result->ca_plist_offset = UINT64_MAX;
+    result->ppp_plist_offset = UINT64_MAX;
     result->detail[0] = '\0';
 }
 
@@ -366,6 +501,8 @@ const char *rootfs_work_status_name(rootfs_work_status_t status) {
     case ROOTFS_WORK_FSTAB_LINE_INVALID: return "fstab-line-invalid";
     case ROOTFS_WORK_CA_PLIST_NOT_UNIQUE: return "ca-plist-not-unique";
     case ROOTFS_WORK_CA_PLIST_INVALID: return "ca-plist-invalid";
+    case ROOTFS_WORK_PPP_PLIST_NOT_UNIQUE: return "ppp-plist-not-unique";
+    case ROOTFS_WORK_PPP_PLIST_INVALID: return "ppp-plist-invalid";
     case ROOTFS_WORK_GROW_INVALID: return "grow-invalid";
     case ROOTFS_WORK_PROVISION_INVALID: return "provision-invalid";
     case ROOTFS_WORK_PROVISION_UNSUPPORTED: return "provision-unsupported";
@@ -402,6 +539,8 @@ const char *rootfs_work_stage_name(rootfs_work_stage_t stage) {
     case ROOTFS_WORK_STAGE_FSTAB_WRITE: return "fstab-write";
     case ROOTFS_WORK_STAGE_CA_PLIST_SCAN: return "ca-plist-scan";
     case ROOTFS_WORK_STAGE_CA_PLIST_WRITE: return "ca-plist-write";
+    case ROOTFS_WORK_STAGE_PPP_PLIST_SCAN: return "ppp-plist-scan";
+    case ROOTFS_WORK_STAGE_PPP_PLIST_WRITE: return "ppp-plist-write";
     case ROOTFS_WORK_STAGE_GROW_PLAN: return "grow-plan";
     case ROOTFS_WORK_STAGE_GROW_WRITE: return "grow-write";
     case ROOTFS_WORK_STAGE_PROVISION_PLAN: return "provision-plan";
@@ -2107,6 +2246,70 @@ static bool ca_plist_rewrite(host_file_t *file, uint64_t file_size,
                        result))
         return false;
     result->ca_plist_offset = hit;
+    return true;
+}
+
+/*
+ * Give the guest a PPP job, by rewriting an inert LaunchDaemon plist in place.
+ *
+ * Structurally identical to ca_plist_rewrite above and deliberately so: same
+ * locate-by-content, same exactly-once requirement, same equal-length
+ * overwrite, same refusal set.  See PPP_PLIST_STOCK and PPP_PLIST_JOB for the
+ * provenance of both byte strings, why com.apple.chud.pilotfish is the file
+ * with the budget, and why every pppd argument is on the command line.
+ *
+ * The one thing worth restating here, because it is what makes the whole
+ * transformation defensible: nothing about this creates, moves, grows or
+ * shrinks a catalog record.  The file keeps its CNID, its logicalSize, its
+ * totalBlocks and its single extent, and the only bytes that change are the
+ * 530 inside it.  An image that already carries the job is refused rather than
+ * rewritten, because the stock pattern is then absent -- which is the correct
+ * answer and not a bug: this transformation runs against a freshly copied
+ * work image, once.
+ *
+ * Only the unpublished temporary work image is touched; the immutable source
+ * is already closed by the time this runs.
+ */
+static bool ppp_plist_rewrite(host_file_t *file, uint64_t file_size,
+                              uint8_t *buffer, size_t buffer_size,
+                              rootfs_work_result_t *result) {
+    size_t prefix[sizeof(PPP_PLIST_STOCK) - 1u];
+    const size_t pattern_size = sizeof(PPP_PLIST_STOCK) - 1u;
+    const size_t replacement_size = sizeof(PPP_PLIST_JOB) - 1u;
+    uint64_t hit = UINT64_MAX;
+    unsigned hits = 0;
+
+    /* The compile-time gate above already forbids this; keep the runtime
+     * refusal anyway so the invariant is enforced where the write happens. */
+    if (replacement_size != pattern_size) {
+        result_fail(result, ROOTFS_WORK_PPP_PLIST_INVALID,
+                    ROOTFS_WORK_STAGE_PPP_PLIST_WRITE, 0,
+                    "pppd launchd job is %zu bytes, not the stock %zu",
+                    replacement_size, pattern_size);
+        return false;
+    }
+    if (!pattern_scan_unique(file, file_size, PPP_PLIST_STOCK, pattern_size,
+                             prefix, buffer, buffer_size, &hit, &hits,
+                             ROOTFS_WORK_STAGE_PPP_PLIST_SCAN, result))
+        return false;
+    if (hits > 1u) {
+        result_fail(result, ROOTFS_WORK_PPP_PLIST_NOT_UNIQUE,
+                    ROOTFS_WORK_STAGE_PPP_PLIST_SCAN, 0,
+                    "stock chud.pilotfish launchd plist occurs more than once");
+        return false;
+    }
+    if (hits != 1u) {
+        result_fail(result, ROOTFS_WORK_PPP_PLIST_NOT_UNIQUE,
+                    ROOTFS_WORK_STAGE_PPP_PLIST_SCAN, 0,
+                    "stock chud.pilotfish launchd plist occurs 0 times; "
+                    "exactly 1 is required");
+        return false;
+    }
+    if (!checked_write(file, file_size, hit, PPP_PLIST_JOB,
+                       replacement_size, ROOTFS_WORK_STAGE_PPP_PLIST_WRITE,
+                       result))
+        return false;
+    result->ppp_plist_offset = hit;
     return true;
 }
 
@@ -4194,6 +4397,13 @@ rootfs_work_status_t rootfs_work_create(const char *source_path,
     if (selected.ca_software_render &&
         !ca_plist_rewrite(&temporary, work_size, buffer,
                           selected.io_buffer_bytes, result))
+        goto done;
+    /* Also opt-in and off by default, and for a stronger reason than the
+     * renderer flag: this one changes what the guest RUNS.  A stock image gets
+     * a stock set of LaunchDaemons. */
+    if (selected.ppp_launchd_job &&
+        !ppp_plist_rewrite(&temporary, work_size, buffer,
+                           selected.io_buffer_bytes, result))
         goto done;
     if (!grow_volume(&temporary, &work_size, selected.growth_bytes,
                      &copied_volume, buffer, selected.io_buffer_bytes, result))

@@ -415,6 +415,7 @@ typedef struct {
     bool activate;
     bool jb_codesign;
     bool jb_payload;
+    bool ppp;
     /* memory layout */
     bool ramdisk_low;
     /* diagnostics */
@@ -564,6 +565,26 @@ static const boot_toggle_t BOOT_TOGGLES[] = {
       "emulator that loads the kernel and owns the disk there is nothing to\n"
       "exploit past. Requires --external-md, which is the only mode with a\n"
       "writable work image." },
+    { "ppp", NULL, NULL, false, BOOT_GROUP_GUEST_STATE, BOOT_FIELD(ppp),
+      "give the guest a network by running its own /usr/sbin/pppd over the\n"
+      "emulated uart4, and terminate PPP on the host. TEMPORARY AND SAID SO:\n"
+      "docs/networking.md picks this route because both halves already ship\n"
+      "-- Apple's signed pppd in userland and com.apple.nke.ppp's pppserial\n"
+      "line discipline in the kernel -- not because it is the right long-term\n"
+      "answer. Real drivers and controllers replace it.\n"
+      "This flag does exactly two things. It rewrites the inert\n"
+      "com.apple.chud.pilotfish LaunchDaemon plist in this run's work image,\n"
+      "in place and at its own 530 bytes, into a job that runs pppd against\n"
+      "/dev/uart.debug; pilotfish points at /Developer, which this image does\n"
+      "not have, so nothing is displaced. And it appends uart4_dma_enable=0\n"
+      "to the boot arguments, because all four UARTs carry dma-types and\n"
+      "AppleS5L8900XSerial would otherwise try to drive a PL080 this VM does\n"
+      "not model -- the driver's own boot-argument escape, not a patch.\n"
+      "STEP S0 IS TRANSMIT-ONLY. There is no host peer yet, so pppd will send\n"
+      "Configure-Requests and get no answer. The success criterion is the six\n"
+      "bytes 7E FF 7D 23 C0 21 appearing in uart4-ppp.bin, which is an\n"
+      "HDLC-framed LCP Configure-Request and is checked for automatically.\n"
+      "Requires --external-md, the only mode with a writable work image." },
 
     { "ramdisk-low", "-Y", NULL, false, BOOT_GROUP_LAYOUT,
       BOOT_FIELD(ramdisk_low),
@@ -887,6 +908,11 @@ typedef struct {
     unsigned    hot_page_n;
     uint64_t    steps, win_lo, win_hi, heartbeat;
     unsigned    ba_rev, ba_ver, ktail, nsnaps, ncall_probes, ndtov, ntouch;
+    /* --ppp appends a boot argument, and it does so AFTER --print-config has
+     * already exited. Without this the printed cmdline would be the one the
+     * operator typed rather than the one the guest gets, and a reader would
+     * reasonably conclude the DMA skip was never applied. */
+    bool        ppp;
 } boot_values_t;
 
 static void boot_print_config(FILE *out, const boot_config_t *cfg,
@@ -918,6 +944,10 @@ static void boot_print_config(FILE *out, const boot_config_t *cfg,
             val->dtpath ? val->dtpath : "(none)");
     fprintf(out, "    %-20s \"%s\"\n", "cmdline",
             val->cmdline ? val->cmdline : "");
+    if (val->ppp)
+        fprintf(out, "    %-20s %s\n", "",
+                "+ uart4_dma_enable=0 (appended by --ppp unless already "
+                "present)");
     fprintf(out, "    %-20s %s\n", "ramdisk",
             val->rdpath ? val->rdpath : "(none)");
     fprintf(out, "    %-20s %s\n", "external-md source",
@@ -2874,6 +2904,13 @@ static void vm_report(void) {
  *     virtual address and at the physical alias it has before the MMU is on.
  * ---------------------------------------------------------------------- */
 #define UARTPG 0x3cc00000u
+/*
+ * uart4, the PPP line. A separate page and a separate tee, because the two
+ * streams answer different questions and splicing them would destroy both
+ * answers: this one is a byte stream with no line structure, and the only
+ * thing that makes a byte on it meaningful is that it came from THIS port.
+ */
+#define UART4PG 0x3cc10000u
 
 typedef struct { const char *name; uint32_t va; } milestone_t;
 
@@ -3008,6 +3045,42 @@ static unsigned    NM;
  * the run directory beside the run's other outputs with no new option to pass.
  */
 #define UART_TEE_PATH "uart-console.log"
+
+/*
+ * And where uart4's stream lands. Binary, and named .bin rather than .log, for
+ * a reason that is not cosmetic: PPP is HDLC-framed and its escape byte is
+ * 0x7D, so a stream opened in text mode on this host would have every 0x0A
+ * inside a frame rewritten to CR LF and the capture would no longer be the
+ * bytes the guest sent. That is the whole value of the file.
+ */
+#define PPP_TEE_PATH "uart4-ppp.bin"
+
+/*
+ * The milestone, byte for byte.
+ *
+ *   7E     flag, start of frame                       (RFC 1662 4.1)
+ *   FF     all-stations address                       (RFC 1662 4.2)
+ *   7D 23  the UI control byte 0x03, escaped: pppd has not yet negotiated
+ *          ACCOMP, and 0x03 is below 0x20 so the default async control
+ *          character map requires 0x7D followed by 0x03 ^ 0x20
+ *   C0 21  protocol identifier 0xC021, LCP            (RFC 1661 2)
+ *
+ * Six bytes and nothing more, because everything after them varies: the code,
+ * identifier and length are followed by pppd 2.4.2's default first request --
+ * MRU 1500, ASYNCMAP 0x00000000, a RANDOM magic number, PCOMP and ACCOMP --
+ * and pinning the magic number would make the check fail on every run but one.
+ *
+ * Seeing this prefix on uart4 is the S0 milestone, and it proves nine things
+ * at once that are otherwise separately unobservable: the DMA skip took, the
+ * serial driver bound the nub, the devfs node carries the name we predicted,
+ * the plist hijack survived into the work image, launchd started the job, AMFI
+ * accepted Apple-signed pppd, dyld loaded its frameworks, the tty opened, and
+ * the pppserial line discipline attached. Anything less than these exact bytes
+ * is not the milestone.
+ */
+static const uint8_t PPP_LCP_CONFREQ[6] = {
+    0x7eu, 0xffu, 0x7du, 0x23u, 0xc0u, 0x21u
+};
 
 #define H1_DISPLAY_VM_BASE UINT32_C(0xc0703000)
 #define H1_DISPLAY_VM_SIZE UINT32_C(0x0000a000)
@@ -5762,6 +5835,30 @@ static struct {
     uint64_t    uart_tx_bytes;           /* every byte stored to UTXH, capped
                                           * by nothing                        */
     bool        uart_tee_failed;         /* open or write error; reported once */
+
+    /* --- uart4, the PPP line -------------------------------------------
+     * A second, independent tee. The machine model already keeps uart4's own
+     * 8 KiB capture, and for this port a first-8191-bytes cap is the RIGHT
+     * policy rather than a defect -- the observable is pppd's FIRST
+     * Configure-Request -- so this tee exists for two other reasons: the file
+     * is a byte-exact artifact a run can be judged from afterwards, and the
+     * milestone scan needs to see every byte in order as it is stored.
+     *
+     * ppp_lcp_at is a BYTE OFFSET into the stream and ppp_lcp_step is the
+     * instruction count at which the last byte of the prefix was stored.
+     * Both are recorded because "it appeared" and "it appeared at a plausible
+     * point in the boot" are different claims, and only the second one
+     * survives someone asking whether the bytes could have come from
+     * somewhere else. ppp_window holds the last six bytes seen, which is what
+     * makes the scan correct across a partial match that has to restart. */
+    FILE       *ppp_tee;                 /* lazily opened on the first byte   */
+    uint64_t    ppp_tx_bytes;            /* every byte stored to uart4's UTXH */
+    bool        ppp_tee_failed;          /* open or write error; reported once */
+    uint8_t     ppp_window[sizeof PPP_LCP_CONFREQ];
+    unsigned    ppp_window_n;            /* bytes valid in ppp_window         */
+    bool        ppp_lcp_seen;
+    uint64_t    ppp_lcp_at;              /* stream offset of the prefix's 7E  */
+    uint64_t    ppp_lcp_step;            /* instruction count when it landed  */
 
     /* --- DIAGNOSTIC: the user-mode call probe; --call-probe ---------------
      * call_probe_n is the hot-loop gate: zero means the whole facility is off
@@ -16679,6 +16776,59 @@ static void uart_tee_byte(uint32_t val) {
     if (c == '\n' && fflush(G.uart_tee) != 0) G.uart_tee_failed = true;
 }
 
+/*
+ * The same for uart4, plus the milestone scan.
+ *
+ * Called from the same bus interposer and, like uart_tee_byte, it reads
+ * nothing back out of the machine and writes nothing into it. This is a
+ * diagnostic: it may never influence what the guest sees, and it does not.
+ *
+ * Two differences from the console tee, both deliberate.
+ *
+ * It flushes EVERY byte rather than every newline. The console writes on the
+ * order of sixteen thousand bytes and a per-byte flush would cost sixteen
+ * thousand syscalls; this stream is a few hundred bytes across a whole run,
+ * because pppd sends one Configure-Request and then waits three seconds --
+ * which at this emulator's speed is ten to fifteen minutes of wall clock. The
+ * cost is nothing and the property bought is that a run killed at any instant
+ * still has every byte it produced on disk.
+ *
+ * And it scans, in a six-byte sliding window rather than with a match counter.
+ * A counter that reset to zero on a mismatch would be wrong on any stream
+ * where a failed match can itself begin a real one, and 0x7E is the byte that
+ * starts every frame -- so the sequence 7E 7E FF 7D 23 C0 21, which is exactly
+ * what an idle-flag followed by a frame looks like on a real line, would be
+ * missed. The window costs six bytes and cannot be got wrong that way.
+ */
+static void ppp_tee_byte(uint32_t val) {
+    uint8_t c = (uint8_t)(val & 0xffu);
+    uint64_t offset = G.ppp_tx_bytes;      /* this byte's index in the stream */
+
+    G.ppp_tx_bytes++;
+
+    if (G.ppp_window_n < sizeof G.ppp_window) {
+        G.ppp_window[G.ppp_window_n++] = c;
+    } else {
+        memmove(G.ppp_window, G.ppp_window + 1, sizeof G.ppp_window - 1u);
+        G.ppp_window[sizeof G.ppp_window - 1u] = c;
+    }
+    if (!G.ppp_lcp_seen && G.ppp_window_n == sizeof G.ppp_window &&
+        memcmp(G.ppp_window, PPP_LCP_CONFREQ, sizeof PPP_LCP_CONFREQ) == 0) {
+        G.ppp_lcp_seen = true;
+        /* The offset of the 7E, not of the byte that completed the match. */
+        G.ppp_lcp_at   = offset + 1u - (uint64_t)sizeof PPP_LCP_CONFREQ;
+        G.ppp_lcp_step = G.hot_now;
+    }
+
+    if (G.ppp_tee_failed) return;
+    if (!G.ppp_tee) {
+        G.ppp_tee = fopen(PPP_TEE_PATH, "wb");
+        if (!G.ppp_tee) { G.ppp_tee_failed = true; return; }
+    }
+    if (fputc((int)c, G.ppp_tee) == EOF) { G.ppp_tee_failed = true; return; }
+    if (fflush(G.ppp_tee) != 0) G.ppp_tee_failed = true;
+}
+
 static void spy_nonram(
         uint32_t addr, uint32_t val, unsigned bytes, bool wr) {
     uint32_t pc = G.mach->cpu.r[15];
@@ -16692,6 +16842,13 @@ static void spy_nonram(
             note_hot(h, addr, val, bytes, wr);
             break;
         }
+    /* uart4's transmit register, teed and scanned. Placed before the console
+     * page test rather than inside it: the two pages are 64 KiB apart and a
+     * single `else` chain that got the order wrong would silently send PPP
+     * bytes to the console tee, which is the one confusion this whole split
+     * exists to prevent. */
+    if ((addr & ~0xfffu) == UART4PG && wr && (addr & 0xfffu) == UART_UTXH)
+        ppp_tee_byte(val);
     if ((addr & ~0xfffu) == UARTPG) {
         if (wr && (addr & 0xfffu) == UART_UTXH) uart_tee_byte(val);
         G.uart_hits++;
@@ -22030,6 +22187,26 @@ int main(int argc, char **argv) {
     bool        ca_software_render;
 
     /*
+     * --ppp: the guest half of docs/networking.md's Route D, and explicitly a
+     * temporary workaround pending real drivers and controllers.
+     *
+     * Like ca_software_render it only means anything for --external-md, and
+     * for the same reason: the work it does to the guest is a size-neutral
+     * in-place plist rewrite in the writable work image, which is the only
+     * place this project ever writes a guest filesystem. firmware/rootfs.img
+     * is never opened for writing. See ppp_plist_rewrite() in
+     * tools/rootfs_work.c.
+     *
+     * It also appends one boot argument, which is the entire DMA story: all
+     * four UART nubs carry `dma-types`, so AppleS5L8900XSerial attempts PL080
+     * DMA unless told otherwise, and `<node>_dma_enable=0` is the driver's own
+     * escape (gated at 0xc065e410 alongside a missing dma-types and a
+     * dma-disable property, all three landing on the same non-error
+     * continuation). The same mechanism as nand-enable-adm=0. Zero code.
+     */
+    bool        ppp;
+
+    /*
      * --grow <MB>: free space to give the guest, by growing the HFS+ volume in
      * the loaded RAM disk. See rd_grow_volume() above for the format work; this
      * is the size question.
@@ -22398,6 +22575,7 @@ int main(int argc, char **argv) {
     no_kpatch          = !cfg.v.rtc_patch;
     fstab_fixup        = cfg.v.fstab_fixup;
     ca_software_render = cfg.v.ca_software_render;
+    ppp                = cfg.v.ppp;
     rd_low             = cfg.v.ramdisk_low;
     stop_on_abort      = cfg.v.stop_on_abort;
     want_kextmap       = cfg.v.kext_map;
@@ -22486,6 +22664,15 @@ int main(int argc, char **argv) {
      * run claim a renderer selection it never made. */
     if (ca_software_render && !external_md) {
         fprintf(stderr, "--ca-software-render requires --external-md\n");
+        return 1;
+    }
+
+    /* Same gate, same reason: the PPP job is provisioned by the same work-image
+     * builder, and a run that accepted the flag without it would append a boot
+     * argument, arm a milestone scan, and report a configuration whose guest
+     * half never happened. */
+    if (ppp && !external_md) {
+        fprintf(stderr, "--ppp requires --external-md\n");
         return 1;
     }
 
@@ -22766,6 +22953,7 @@ int main(int argc, char **argv) {
     resolved.ncall_probes = call_probe_n;
     resolved.ntouch       = touch_n;
     resolved.ndtov        = ndtov;
+    resolved.ppp          = ppp;
 
     /* --print-config: report and stop, before the kernel, the tree, the rootfs
      * or the work image is opened. Nothing on disk is read or written. */
@@ -22984,8 +23172,10 @@ int main(int argc, char **argv) {
         /* "no rewrite happened" is UINT64_MAX, not 0, and the restore path
          * below reaches the report without ever calling the provisioner. */
         result.ca_plist_offset = UINT64_MAX;
+        result.ppp_plist_offset = UINT64_MAX;
         options.fstab_line = fstab_line;
         options.ca_software_render = ca_software_render;
+        options.ppp_launchd_job = ppp;
         options.growth_bytes = (uint64_t)rd_grow_mb << 20;
         options.source_identity.required = true;
         options.source_identity.expected_size = IOS3_ROOTFS_FILE_SIZE;
@@ -23079,6 +23269,20 @@ int main(int argc, char **argv) {
                 printf("CA renderer: --ca-software-render does not apply to a "
                        "restored work image; the checkpoint's own image is "
                        "used verbatim\n");
+            /*
+             * The same for the PPP job, and it matters more here: the boot
+             * argument IS still appended and the milestone scan IS still
+             * armed, so without this line a restored run could report "no LCP
+             * frame" against an image that never had the launchd job in it.
+             * That is the exact shape of a wrong negative result.
+             */
+            if (ppp)
+                printf("ppp        : --ppp does not provision a restored work "
+                       "image; the launchd job is present only if the "
+                       "checkpoint's\n"
+                       "             own image already carried it. "
+                       "uart4_dma_enable=0 is still appended and the LCP scan "
+                       "is still armed.\n");
             fflush(stdout);
             goto external_md_work_ready;
         }
@@ -23148,6 +23352,16 @@ external_md_work_ready:
                    "              software path instead of the MBX2D one this"
                    " machine has no GPU for.)\n",
                    (unsigned long long)result.ca_plist_offset);
+        if (result.ppp_plist_offset != UINT64_MAX)
+            printf("ppp        : com.apple.chud.pilotfish.plist @"
+                   " image+0x%08llx\n"
+                   "             -> /usr/sbin/pppd /dev/uart.debug 115200"
+                   " local nocrtscts noauth nodetach\n"
+                   "             (same 530 bytes, so no HFS+ catalog change;"
+                   " pilotfish itself points at\n"
+                   "              /Developer, which this image does not have."
+                   " TEMPORARY -- see docs/networking.md.)\n",
+                   (unsigned long long)result.ppp_plist_offset);
     } else if (!no_kpatch) {
         struct { uint32_t va; uint8_t want, set; const char *why; } kp[] = {
             { 0xc0175b3eu, 0x1e, 0x00, "IORTC wait tv_sec 30->0 (reach IOFindBSDRoot)" },
@@ -23779,6 +23993,51 @@ external_md_work_ready:
     }
 
     /*
+     * --ppp's other half: tell AppleS5L8900XSerial to leave uart4 on
+     * programmed I/O.
+     *
+     * All four UART nubs carry a `dma-types` property, so the driver attempts
+     * PL080 DMA on each of them, and this VM has no PL080 model. The driver
+     * supplies its own escape: DMA setup at 0xc065e410 is gated three ways --
+     * no dma-types, a dma-disable property, or the boot argument
+     * `<node>_dma_enable=0` -- and all three skips land on the same non-error
+     * continuation at 0xc065e6f4, which builds the interrupt event source,
+     * calls the superclass, and logs nothing. The base class agrees:
+     * AppleOnboardSerial's vtable answers a DMA capability of zero
+     * (0xc046f154), queried once at start and cached, and all three consumers
+     * treat it as a guard. The programmed-I/O receive loop is real and reads
+     * URXH in a counted loop at 0xc047212a. So this is the driver's own
+     * switch, not a patch, and the identical mechanism is already proven here
+     * by nand-enable-adm=0.
+     *
+     * Appended into a buffer of its own, and BEFORE the rd=md0 append below,
+     * because that one may leave `cmdline` pointing into cmdbuf -- and passing
+     * cmdbuf as both source and destination of one snprintf is undefined
+     * behaviour, not merely untidy. A caller who already spelled the token in
+     * -c gets it left alone rather than doubled.
+     */
+    char pppbuf[512];
+    if (ppp && !strstr(cmdline, "uart4_dma_enable")) {
+        int needed = snprintf(pppbuf, sizeof pppbuf, "%s%suart4_dma_enable=0",
+                              cmdline, *cmdline ? " " : "");
+        if (needed < 0 || (size_t)needed >= sizeof pppbuf) {
+            fprintf(stderr,
+                    "--ppp: cannot append uart4_dma_enable=0 to the boot "
+                    "arguments\n");
+            return 1;
+        }
+        cmdline = pppbuf;
+        /* Say it here rather than only in the header: this is the moment the
+         * boot arguments stop being what the operator typed, and a run whose
+         * log does not record that is a run whose DMA behaviour cannot be
+         * reconstructed from its own output. */
+        printf("ppp        : boot args -> \"%s\"\n", cmdline);
+    } else if (ppp) {
+        printf("ppp        : boot args already carry uart4_dma_enable;"
+               " left as \"%s\"\n", cmdline);
+    }
+
+    /*
      * Root-device selector. IOFindBSDRoot compares rdBootVar[0..1] against
      * "md" and rdBootVar[3] against NUL, so the token has to be exactly
      * "md<digit>" — mdevlookup then resolves the minor number.
@@ -23966,6 +24225,19 @@ external_md_work_ready:
                    call_probe_modes[q] == CALL_PROBE_MODE_KERNEL
                        ? "kernel" : "user");
         printf("\n");
+    }
+    /*
+     * The PPP scan says so in the header, for the reason every other armed-on
+     * line here exists: a run whose header does not carry it is a run that
+     * did nothing, and AGENT_HANDOFF 23.4a records a 27-minute boot lost to
+     * exactly that -- an option parsed into G, which spy_install() memsets,
+     * and which therefore silently did not arm. This line is read AFTER the
+     * install for that reason.
+     */
+    if (ppp) {
+        printf("ppp       : armed on uart4 0x%08x -> %s; watching for"
+               " 7E FF 7D 23 C0 21 (LCP Configure-Request)\n",
+               UART4PG, PPP_TEE_PATH);
     }
 
     if (external_md) {
@@ -25260,6 +25532,69 @@ external_md_work_ready:
                mach.uart0.tx);
     else
         printf("\n(no UART output yet)\n");
+
+    /*
+     * uart4, and the S0 verdict.
+     *
+     * Printed on EVERY run that armed --ppp, including the ones where nothing
+     * came out, because "zero bytes" and "bytes but no LCP frame" are
+     * different failures with different next steps, and a section that only
+     * appeared on success would make them indistinguishable from each other
+     * and from a run that forgot the flag.
+     *
+     * The hex dump is capped rather than complete: the whole stream is in the
+     * tee file, and what a reader needs inline is the head, which is where the
+     * frame is. Bytes are printed with an ASCII column suppressed on purpose —
+     * this is not text, and rendering 0x7D as '}' invites exactly the kind of
+     * eyeballing that turns a coincidence into a claim.
+     */
+    if (G.ppp_tee) {
+        if (fclose(G.ppp_tee) != 0) G.ppp_tee_failed = true;
+        G.ppp_tee = NULL;
+    }
+    if (ppp || G.ppp_tx_bytes) {
+        printf("\n=== UART4 / PPP ===\n");
+        printf("    UTXH bytes written by the guest   %llu\n",
+               (unsigned long long)G.ppp_tx_bytes);
+        if (G.ppp_tee_failed)
+            printf("    tee " PPP_TEE_PATH ": FAILED (%s)\n", strerror(errno));
+        else if (G.ppp_tx_bytes)
+            printf("    complete stream written to        " PPP_TEE_PATH "\n");
+
+        if (G.ppp_tx_bytes) {
+            size_t shown = mach.uart4.tx_len;
+            if (shown > 128u) shown = 128u;
+            printf("    first %zu bytes:\n       ", shown);
+            for (size_t i = 0; i < shown; i++)
+                printf(" %02x%s", (unsigned)(uint8_t)mach.uart4.tx[i],
+                       (i % 16u) == 15u && i + 1u < shown ? "\n       " : "");
+            printf("\n");
+        }
+
+        if (G.ppp_lcp_seen)
+            printf("    *** MILESTONE: LCP Configure-Request on uart4 ***\n"
+                   "        7E FF 7D 23 C0 21 at stream offset %llu,"
+                   " instruction %llu\n"
+                   "        HDLC flag, all-stations address, escaped UI"
+                   " control byte, protocol 0xC021.\n"
+                   "        RFC 1662 4.1/4.2 framing; RFC 1661 2 protocol"
+                   " field.\n",
+                   (unsigned long long)G.ppp_lcp_at,
+                   (unsigned long long)G.ppp_lcp_step);
+        else if (G.ppp_tx_bytes)
+            printf("    NOT the milestone: uart4 carried bytes but no"
+                   " 7E FF 7D 23 C0 21 prefix.\n"
+                   "        Something opened the port. Compare the dump above"
+                   " against RFC 1662 before\n"
+                   "        concluding anything about pppd.\n");
+        else
+            printf("    NOTHING was written to uart4. The guest never"
+                   " transmitted on the PPP line;\n"
+                   "        this says nothing about which of the steps ahead"
+                   " of it failed. Check the\n"
+                   "        console for the launchd job, then for pppd, then"
+                   " for the tty open.\n");
+    }
 
     /* Capture the controller's CURRENT live scanout, not merely the original
      * Boot_Video address: IOMFB is allowed to swap FBADDR after adopting the
