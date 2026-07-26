@@ -32,6 +32,7 @@ static const s5l_window_t DEVICE_WINDOWS[] = {
     { S5L8900_TVOUT_SDO_BASE,   S5L_TVOUT_BANK_SIZE, "tvout-sdo"     },
     { S5L8900_I2C0_BASE,  S5L8900_DEV_SIZE,   "i2c0"  },
     { S5L8900_I2C1_BASE,  S5L8900_DEV_SIZE,   "i2c1"  },
+    { S5L8900_USB_OTG_BASE, S5L8900_DEV_SIZE, "usb-otg" },
     { S5L8900_VIC0_BASE,  S5L8900_DEV_SIZE,   "vic0"  },
     { S5L8900_VIC1_BASE,  S5L8900_DEV_SIZE,   "vic1"  },
     { S5L8900_POWER_BASE, S5L8900_POWER_SIZE, "power" },
@@ -273,6 +274,12 @@ static uint32_t bus_read(void *ctx, uint32_t addr, unsigned bytes) {
         v = s5l_i2c_read(&m->i2c[0], addr - S5L8900_I2C0_BASE);
     } else if (mmio_word(addr, bytes, S5L8900_I2C1_BASE, S5L8900_DEV_SIZE)) {
         v = s5l_i2c_read(&m->i2c[1], addr - S5L8900_I2C1_BASE);
+    } else if (mmio_word(addr, bytes, S5L8900_USB_OTG_BASE, S5L8900_DEV_SIZE)) {
+        /* Word accesses only, as for the VICs, the CLCD and the I2C
+         * controllers. The driver uses 32-bit accessors throughout; a narrower
+         * or unaligned access to this page stays unmapped-and-counted rather
+         * than being answered with a fabricated lane. */
+        v = s5l_usbotg_read(&m->usbotg, addr - S5L8900_USB_OTG_BASE);
     } else if ((bytes == 1u || bytes == 2u || bytes == 4u) &&
                in_window(addr, bytes, S5L8900_NOR_BASE, m->nor.size)) {
         v = s5l_nor_read(&m->nor, addr - S5L8900_NOR_BASE, bytes);
@@ -358,6 +365,11 @@ static void bus_write(void *ctx, uint32_t addr, uint32_t val, unsigned bytes) {
     if (mmio_word(addr, bytes, S5L8900_I2C1_BASE, S5L8900_DEV_SIZE)) {
         note_device(m, addr, val, true);
         s5l_i2c_write(&m->i2c[1], addr - S5L8900_I2C1_BASE, val);
+        return;
+    }
+    if (mmio_word(addr, bytes, S5L8900_USB_OTG_BASE, S5L8900_DEV_SIZE)) {
+        note_device(m, addr, val, true);
+        s5l_usbotg_write(&m->usbotg, addr - S5L8900_USB_OTG_BASE, val);
         return;
     }
     if ((bytes == 1u || bytes == 2u || bytes == 4u) &&
@@ -520,6 +532,7 @@ bool s5l8900_init(s5l8900_t *m, uint32_t ram_base, uint32_t ram_size) {
     for (unsigned i = 0; i < S5L8900_I2C_COUNT; i++)
         s5l_i2c_reset(&m->i2c[i]);
     s5l_pcf50635_reset(&m->pmu, m->tb_hz);
+    s5l_usbotg_reset(&m->usbotg);
     {
         s5l_i2c_slave_t pmu;
         s5l_pcf50635_bind(&m->pmu, &pmu);

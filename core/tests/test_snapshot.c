@@ -220,6 +220,11 @@ static void test_device_state_round_trips(void) {
     a->power.state = 0x000012fcu; a->power.cfg0 = 1; a->power.cfg1 = 2;
     a->power.sram  = 3; a->power.cfg24 = 4; a->power.cfg28 = 5;
 
+    /* Synopsys DWC2 USB OTG. PCGCCTL is the block's only writable register —
+     * the GHWCFG straps are build constants, not state — and this is the value
+     * findMaxEndpoints leaves behind: bit 0 set again after its ungate. */
+    a->usbotg.pcgcctl = 0x00000011u;
+
     /* I2C0 mid-write to the attached PMU; I2C1 mid-transfer to an unknown
      * slave. Callback wiring is host state and is checked separately below. */
     a->i2c[0].con = I2C_CON_ACKEN; a->i2c[0].stat = 0xf0u;
@@ -338,6 +343,8 @@ static void test_device_state_round_trips(void) {
 
     SAME(power.state); SAME(power.cfg0); SAME(power.cfg1);
     SAME(power.sram);  SAME(power.cfg24); SAME(power.cfg28);
+
+    SAME(usbotg.pcgcctl);
 
     for (unsigned i = 0; i < S5L8900_I2C_COUNT; i++) {
         SAME(i2c[i].con); SAME(i2c[i].stat); SAME(i2c[i].add);

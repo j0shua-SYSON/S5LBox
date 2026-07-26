@@ -264,6 +264,11 @@ static void report(const s5l8900_t *m, arm_status_t st) {
     printf("  tb_accum      : %llu\n", (unsigned long long)m->tb_accum);
     printf("  power         : state=%08x cfg0=%08x cfg1=%08x sram=%08x\n",
            m->power.state, m->power.cfg0, m->power.cfg1, m->power.sram);
+    /* The DWC2 block's only writable register, and therefore the whole of what
+     * a snapshot can get wrong about it. A snapshotted field that never reaches
+     * this report is invisible to a save/restore diff, which is the blind spot
+     * this report exists to close. */
+    printf("  usb-otg       : pcgcctl=%08x\n", m->usbotg.pcgcctl);
     printf("  clcd          : ctrl=%08x status=%08x mask=%08x scanning=%d frames=%llu\n",
            m->clcd.ctrl, m->clcd.intstatus, m->clcd.intmask, m->clcd.scanning,
            (unsigned long long)m->clcd.frames);

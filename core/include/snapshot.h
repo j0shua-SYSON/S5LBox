@@ -54,7 +54,9 @@
 /* v3: both I2C controllers and the PCF50635 PMU/RTC joined MACH. Old
  *     checkpoints cannot safely invent an in-flight transfer or RTC state. */
 /* v4: the three-bank TV-out controller and its VSYNC phase joined MACH. */
-#define SNAPSHOT_VERSION   4u
+/* v5: the Synopsys DWC2 USB OTG block's PCGCCTL joined MACH. Its GHWCFG straps
+ *     are build constants rather than state, so PCGCCTL is the whole of it. */
+#define SNAPSHOT_VERSION   5u
 
 typedef enum {
     SNAP_OK = 0,

@@ -118,6 +118,7 @@ SNAP_SIZE_GUARD(s5l_tvout_t,       12304, "snap_tvout");
  * describe host ABI layout only; the file format remains field-by-field. */
 SNAP_SIZE_GUARD(s5l_i2c_t,         320,   "snap_i2c");
 SNAP_SIZE_GUARD(s5l_pcf50635_t,    600,   "snap_pmu");
+SNAP_SIZE_GUARD(s5l_usbotg_t,      4,     "snap_usbotg");
 SNAP_SIZE_GUARD(s5l_nor_entry_t,   12,    "snap_nor");
 SNAP_SIZE_GUARD(s5l_nor_t,         208,   "snap_nor");
 SNAP_SIZE_GUARD(s5l_stub_t,        56,    "snap_stubs");
@@ -126,7 +127,7 @@ SNAP_SIZE_GUARD(s5l_stub_t,        56,    "snap_stubs");
  * are deliberately excluded from MACH for the same reason as every other bus
  * callback; snapshot_load preserves the live machine's hooks and dedicated
  * privileged-SVC context. The byte format therefore does not change. */
-SNAP_SIZE_GUARD(s5l8900_t,         29336, "snap_mach");
+SNAP_SIZE_GUARD(s5l8900_t,         29344, "snap_mach");
 #endif
 
 /* ---------------------------------------------------------------- the IO --- */
@@ -432,6 +433,15 @@ static void snap_pmu(sn_io_t *io, s5l_pcf50635_t *p) {
         io->err = SNAP_ERR_CORRUPT;
 }
 
+/*
+ * The DWC2 block's only writable register. The GHWCFG straps are constants in
+ * core/src/soc/usbotg.c, not fields, so there is nothing else here to serialize
+ * — and a restored machine reads the same straps because it is the same build.
+ */
+static void snap_usbotg(sn_io_t *io, s5l_usbotg_t *u) {
+    F32(u->pcgcctl);
+}
+
 static void snap_clcd(sn_io_t *io, s5l_clcd_t *c) {
     F32(c->enable); F32(c->disable); F32(c->ctrl); F32(c->fifo);
     F32(c->intmask); F32(c->intstatus); F32(c->reg1c);
@@ -538,6 +548,7 @@ static void snap_mach(sn_io_t *io, s5l8900_t *m) {
     for (unsigned i = 0; i < S5L8900_I2C_COUNT; i++)
         snap_i2c(io, &m->i2c[i]);
     snap_pmu(io, &m->pmu);
+    snap_usbotg(io, &m->usbotg);
 
     F64(m->unmapped_reads);
     F64(m->unmapped_writes);

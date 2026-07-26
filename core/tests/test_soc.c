@@ -655,6 +655,242 @@ static void test_power_gate_state_tracks_onctrl_offctrl(void) {
           s5l_power_read(&p, POWER_STATE));
 }
 
+/* ------------------------------------------ Synopsys DWC2 USB OTG (config) ---
+ *
+ * The block behind 0x38400000 was unmodelled, so every read of it returned the
+ * zero an unmapped access returns, and AppleSynopsysOTGDevice believed it: the
+ * boot panicked in provideEndpointIDsForConfiguration ("ran of OUT endpoints",
+ * AppleSynopsysOTGDevice.cpp:533) at retired instruction 8,728,148,009 — the
+ * same instruction on every run.
+ *
+ * These three tests cover the three separable claims: the registers hold the
+ * values we say they hold, PCGCCTL survives the read-modify-write the driver
+ * wraps its reads in, and the endpoint derivation the driver runs on those
+ * registers comes out self-consistent instead of panicking.
+ */
+
+/*
+ * AppleSynopsysOTGDevice::findMaxEndpoints (kernel VA 0xc048c424), transcribed
+ * from its disassembly. This is the driver's loop, not a paraphrase of it —
+ * that is the whole point of running it here.
+ *
+ * One deliberate difference: the driver's loop does not bound `ep`, so a
+ * unidirectional GHWCFG1 encoding walks it past 15 and off the end of its own
+ * 15-byte endpoint lists. A test must not reproduce that by shifting by 32 or
+ * more (undefined behaviour in C), so the shift is guarded and the iteration
+ * count is capped and reported instead.
+ */
+typedef struct {
+    unsigned in, out, max_endpoint, num_endpoints, iters;
+    bool     aborted;      /* the driver's "11" direction encoding: give up */
+} otg_endpoints_t;
+
+static otg_endpoints_t otg_find_max_endpoints(uint32_t ghwcfg1,
+                                              uint32_t ghwcfg2) {
+    otg_endpoints_t r;
+    memset(&r, 0, sizeof r);
+    unsigned num_dev_eps = (ghwcfg2 >> 10) & 0xfu;
+    unsigned ep = 1u;
+    while (num_dev_eps >= r.in + r.out) {
+        if (r.iters++ >= 64u) break;          /* the driver has no such guard */
+        unsigned sh = 2u * ep;
+        unsigned d = sh < 32u ? (ghwcfg1 >> sh) & 3u : 0u;
+        if (d == 3u) { r.aborted = true; break; }
+        if      (d == 0u) { r.in++; r.out++; }   /* bidirectional */
+        else if (d == 1u) { r.in++;  }           /* IN only       */
+        else              { r.out++; }           /* OUT only      */
+        r.max_endpoint = ep;
+        ep++;
+    }
+    r.num_endpoints = r.in + r.out + 2u;
+    return r;
+}
+
+static void test_usb_otg_config_registers_read_their_specified_values(void) {
+    s5l8900_t m;
+    CHECK(s5l8900_init(&m, 0, 1u << 20), "machine init failed");
+    const uint32_t B = S5L8900_USB_OTG_BASE;
+
+    CHECK(B == 0x38400000u,
+          "USB OTG base 0x%08x expect 0x38400000 (/arm-io/usb-otg reg "
+          "{0x400000,0x1000} over ranges child+0x38000000)", B);
+
+    CHECK(m.bus.read32(m.bus.ctx, B + USBOTG_GHWCFG1) == S5L_DWC2_GHWCFG1,
+          "GHWCFG1 = %08x expect %08x",
+          m.bus.read32(m.bus.ctx, B + USBOTG_GHWCFG1), S5L_DWC2_GHWCFG1);
+    CHECK(m.bus.read32(m.bus.ctx, B + USBOTG_GHWCFG2) == S5L_DWC2_GHWCFG2,
+          "GHWCFG2 = %08x expect %08x",
+          m.bus.read32(m.bus.ctx, B + USBOTG_GHWCFG2), S5L_DWC2_GHWCFG2);
+    CHECK(m.bus.read32(m.bus.ctx, B + USBOTG_GHWCFG4) == S5L_DWC2_GHWCFG4,
+          "GHWCFG4 = %08x expect %08x",
+          m.bus.read32(m.bus.ctx, B + USBOTG_GHWCFG4), S5L_DWC2_GHWCFG4);
+    CHECK(m.bus.read32(m.bus.ctx, B + USBOTG_PCGCCTL) == 0u,
+          "PCGCCTL must reset to 0, read %08x",
+          m.bus.read32(m.bus.ctx, B + USBOTG_PCGCCTL));
+
+    /* The three GHWCFG words are hardware straps. A guest that writes them
+     * must not be able to talk itself back into the endpoint count that
+     * panicked. */
+    m.bus.write32(m.bus.ctx, B + USBOTG_GHWCFG1, 0xffffffffu);
+    m.bus.write32(m.bus.ctx, B + USBOTG_GHWCFG2, 0u);
+    m.bus.write32(m.bus.ctx, B + USBOTG_GHWCFG4, 0xffffffffu);
+    CHECK(m.bus.read32(m.bus.ctx, B + USBOTG_GHWCFG1) == S5L_DWC2_GHWCFG1 &&
+          m.bus.read32(m.bus.ctx, B + USBOTG_GHWCFG2) == S5L_DWC2_GHWCFG2 &&
+          m.bus.read32(m.bus.ctx, B + USBOTG_GHWCFG4) == S5L_DWC2_GHWCFG4,
+          "GHWCFG1/2/4 must be read-only (got %08x %08x %08x)",
+          m.bus.read32(m.bus.ctx, B + USBOTG_GHWCFG1),
+          m.bus.read32(m.bus.ctx, B + USBOTG_GHWCFG2),
+          m.bus.read32(m.bus.ctx, B + USBOTG_GHWCFG4));
+
+    /*
+     * Everything else in the page is unchanged from what an unmapped access
+     * answered: reads return zero, writes are accepted and discarded. Modelling
+     * four registers is not a licence to invent the other 1020, and GHWCFG3 at
+     * 0x04c is checked by name because it is the one the driver does NOT read —
+     * an invented value there would be a claim with nothing behind it.
+     */
+    static const uint32_t QUIET[] = { 0x000u, 0x04cu, 0x800u,
+                                      S5L8900_DEV_SIZE - 4u };
+    for (unsigned i = 0; i < sizeof QUIET / sizeof QUIET[0]; i++) {
+        CHECK(m.bus.read32(m.bus.ctx, B + QUIET[i]) == 0u,
+              "unmodelled +0x%03x must read 0, got %08x",
+              QUIET[i], m.bus.read32(m.bus.ctx, B + QUIET[i]));
+        m.bus.write32(m.bus.ctx, B + QUIET[i], 0xa5a5a5a5u);
+        CHECK(m.bus.read32(m.bus.ctx, B + QUIET[i]) == 0u,
+              "unmodelled +0x%03x stored a write; it must be discarded",
+              QUIET[i]);
+    }
+
+    /* None of this traffic may be accounted as unmapped any more: that counter
+     * is how a missing peripheral announces itself, and this one is present. */
+    CHECK(m.unmapped_reads == 0 && m.unmapped_writes == 0,
+          "USB OTG traffic still counted as unmapped (r=%llu w=%llu)",
+          (unsigned long long)m.unmapped_reads,
+          (unsigned long long)m.unmapped_writes);
+
+    s5l8900_free(&m);
+}
+
+/*
+ * The exact MMIO trace findMaxEndpoints performs, replayed against the machine
+ * alone. Read from its disassembly, in order:
+ *
+ *   read PCGCCTL / write PCGCCTL &= ~3 / read GHWCFG2 / read GHWCFG1 /
+ *   read PCGCCTL / write PCGCCTL |= 1
+ *
+ * so PCGCCTL has to be a word that remembers what it was given: the second read
+ * must see the effect of the first write, or the driver's |= 1 lands on a value
+ * it never wrote. Nothing here gates a clock — there is no clock to gate — and
+ * nothing self-clears.
+ */
+static void test_usb_otg_pcgcctl_round_trips_the_drivers_sequence(void) {
+    s5l8900_t m;
+    CHECK(s5l8900_init(&m, 0, 1u << 20), "machine init failed");
+    const uint32_t B = S5L8900_USB_OTG_BASE;
+
+    /* Plain storage first, across the whole width. */
+    m.bus.write32(m.bus.ctx, B + USBOTG_PCGCCTL, 0xdeadbeefu);
+    CHECK(m.bus.read32(m.bus.ctx, B + USBOTG_PCGCCTL) == 0xdeadbeefu,
+          "PCGCCTL did not round-trip: %08x",
+          m.bus.read32(m.bus.ctx, B + USBOTG_PCGCCTL));
+
+    /* Seed a value with both gate bits set plus unrelated bits, so "&= ~3"
+     * clearing exactly two bits is distinguishable from it clearing the word. */
+    m.bus.write32(m.bus.ctx, B + USBOTG_PCGCCTL, 0x00000013u);
+
+    uint32_t v = m.bus.read32(m.bus.ctx, B + USBOTG_PCGCCTL);   /* 1. read  */
+    m.bus.write32(m.bus.ctx, B + USBOTG_PCGCCTL, v & ~3u);      /* 2. ungate */
+    CHECK(m.bus.read32(m.bus.ctx, B + USBOTG_PCGCCTL) == 0x00000010u,
+          "PCGCCTL &= ~3 = %08x expect 00000010 (bits 0,1 clear, bit 4 kept)",
+          m.bus.read32(m.bus.ctx, B + USBOTG_PCGCCTL));
+
+    uint32_t cfg2 = m.bus.read32(m.bus.ctx, B + USBOTG_GHWCFG2); /* 3. */
+    uint32_t cfg1 = m.bus.read32(m.bus.ctx, B + USBOTG_GHWCFG1); /* 4. */
+    CHECK(cfg2 == S5L_DWC2_GHWCFG2 && cfg1 == S5L_DWC2_GHWCFG1,
+          "the ungated reads must still see the straps (%08x %08x)",
+          cfg1, cfg2);
+
+    v = m.bus.read32(m.bus.ctx, B + USBOTG_PCGCCTL);            /* 5. read  */
+    CHECK(v == 0x00000010u,
+          "the second PCGCCTL read must see the first write, got %08x", v);
+    m.bus.write32(m.bus.ctx, B + USBOTG_PCGCCTL, v | 1u);       /* 6. gate  */
+    CHECK(m.bus.read32(m.bus.ctx, B + USBOTG_PCGCCTL) == 0x00000011u,
+          "PCGCCTL |= 1 = %08x expect 00000011",
+          m.bus.read32(m.bus.ctx, B + USBOTG_PCGCCTL));
+
+    CHECK(m.unmapped_reads == 0 && m.unmapped_writes == 0,
+          "the driver's own access trace must not touch anything unmapped");
+
+    s5l8900_free(&m);
+}
+
+/*
+ * THE HEADLINE: the derivation that panicked, run on the registers this model
+ * now supplies.
+ *
+ * findMaxEndpoints computes the endpoint layout straight out of GHWCFG1 and
+ * GHWCFG2, and provideEndpointIDsForConfiguration panics when that layout
+ * cannot satisfy the configuration it is asked for. Reading the modelled
+ * registers back through the bus and running the driver's own loop over them is
+ * therefore the test that the panic is gone — not a claim about it.
+ *
+ * 5 IN / 5 OUT is enough for THIS guest, read from the guest rather than
+ * assumed: its USB configuration plist in the rootfs (iPhone1,2,
+ * standardMuxPTPEthernet) needs 2 OUT / 3 IN pipes by default and 3 OUT / 4 IN
+ * at worst.
+ */
+static void test_usb_otg_endpoint_derivation_is_self_consistent(void) {
+    s5l8900_t m;
+    CHECK(s5l8900_init(&m, 0, 1u << 20), "machine init failed");
+    const uint32_t B = S5L8900_USB_OTG_BASE;
+
+    uint32_t cfg1 = m.bus.read32(m.bus.ctx, B + USBOTG_GHWCFG1);
+    uint32_t cfg2 = m.bus.read32(m.bus.ctx, B + USBOTG_GHWCFG2);
+    otg_endpoints_t e = otg_find_max_endpoints(cfg1, cfg2);
+
+    CHECK(!e.aborted, "the direction encoding must never hit the driver's "
+                      "\"11\" abort case");
+    CHECK(e.in == 5u && e.out == 5u && e.max_endpoint == 5u &&
+          e.num_endpoints == 12u,
+          "in=%u out=%u max_endpoint=%u num_endpoints=%u; expected 5/5/5/12",
+          e.in, e.out, e.max_endpoint, e.num_endpoints);
+
+    /* NumDevEps is the field the whole derivation turns on; pin it separately
+     * so a wrong GHWCFG2 is reported as a wrong field, not just a wrong total. */
+    CHECK(((cfg2 >> 10) & 0xfu) == 9u,
+          "NumDevEps = %u expect 9", (unsigned)((cfg2 >> 10) & 0xfu));
+
+    /* The driver's loop has no bound on `ep`, and its endpoint lists are 15
+     * bytes. An all-bidirectional GHWCFG1 keeps it far short of that; any
+     * unidirectional encoding would not. */
+    CHECK(e.max_endpoint <= 15u,
+          "max_endpoint=%u would run past the driver's 15-byte endpoint lists",
+          e.max_endpoint);
+
+    /* What the guest actually asks for, worst case, from its own plist. */
+    CHECK(e.out >= 3u && e.in >= 4u,
+          "worst-case standardMuxPTPEthernet needs 3 OUT / 4 IN; got %u/%u",
+          e.out, e.in);
+
+    /*
+     * The contrast that proves the loop above is the driver's and not a
+     * flattering rewrite: fed the zeros an unmodelled window returned, it
+     * reproduces the panicking run's own printout exactly — "in EPs: 1 out,
+     * EPs: 1, max_endpoint: 1, num_endpoints: 4".
+     */
+    otg_endpoints_t z = otg_find_max_endpoints(0u, 0u);
+    CHECK(z.in == 1u && z.out == 1u && z.max_endpoint == 1u &&
+          z.num_endpoints == 4u,
+          "all-zero registers should reproduce the panic input 1/1/1/4, got "
+          "%u/%u/%u/%u", z.in, z.out, z.max_endpoint, z.num_endpoints);
+
+    printf("  [otg] GHWCFG1=%08x GHWCFG2=%08x -> in=%u out=%u max_ep=%u "
+           "num_eps=%u (unmodelled was 1/1/1/4)\n",
+           cfg1, cfg2, e.in, e.out, e.max_endpoint, e.num_endpoints);
+
+    s5l8900_free(&m);
+}
+
 /*
  * The peripheral windows the machine declares for itself. The property under
  * test is not "a stub exists" but that each one is at the address two
@@ -1185,8 +1421,12 @@ static void test_tvout_machine_routing_and_irq30(void) {
 
     s5l_window_t windows[S5L_WINDOW_MAX];
     unsigned nw = s5l8900_windows(&m, windows, S5L_WINDOW_MAX);
-    CHECK(nw == m.stub_count + 12u,
-          "fixed device-window count=%u expect 12 (+%u stubs)",
+    /* 13 fixed device windows: nor, clcd, the three tv-out banks, i2c0, i2c1,
+     * usb-otg, vic0, vic1, power, uart0, timer. This count is a tripwire for a
+     * window silently vanishing from the table, so it moves only when a real
+     * device model is added or removed. */
+    CHECK(nw == m.stub_count + 13u,
+          "fixed device-window count=%u expect 13 (+%u stubs)",
           nw - m.stub_count, m.stub_count);
     bool have_ctrl = false, have_mixer = false, have_sdo = false;
     for (unsigned i = 0; i < nw && i < S5L_WINDOW_MAX; i++) {
@@ -1945,6 +2185,9 @@ int main(void) {
     test_soc_regions_match_the_device_tree();
     test_gpio_base_is_the_s5l8900_address();
     test_power_gate_state_tracks_onctrl_offctrl();
+    test_usb_otg_config_registers_read_their_specified_values();
+    test_usb_otg_pcgcctl_round_trips_the_drivers_sequence();
+    test_usb_otg_endpoint_derivation_is_self_consistent();
     test_vic_vectaddr_reports_tagged_source();
     test_vic_masks_and_routes();
     test_vic1_is_mapped_and_drives_the_cpu();

@@ -113,6 +113,18 @@
 #define S5L8900_SPI2_BASE   0x3d200000u
 
 /*
+ * The Synopsys DesignWare USB 2.0 OTG (DWC2) controller. CONFIRMED from the
+ * shipped device tree the same way the SPI trio above was: /arm-io/usb-otg has
+ * reg {0x00400000,0x1000} and compatible "usb-otg,s5l8900x", and /arm-io maps
+ * child + 0x38000000.
+ *
+ * Only the hardware-configuration registers are modelled. See the DWC2 section
+ * further down for exactly which four, why those values, and what this
+ * deliberately does not claim to be.
+ */
+#define S5L8900_USB_OTG_BASE 0x38400000u
+
+/*
  * There are TWO PL192 VICs, not one. The device tree gives the block as
  * reg {0xe00000, 0x2000} with vic-stride 0x1000, and AppleARMPL192VIC maps both
  * pages. The interrupt numbering is flat across the pair: /arm-io/gpio lists
@@ -813,6 +825,45 @@ void s5l_pcf50635_bind(s5l_pcf50635_t *pmu, s5l_i2c_slave_t *slave);
 void s5l_pcf50635_civil(uint64_t unix_seconds, int *year, int *month, int *day,
                         int *hour, int *minute, int *second, int *weekday);
 
+/* ------------------------------------ Synopsys DWC2 USB OTG (config only) ---
+ * The four hardware-configuration registers AppleSynopsysOTGDevice reads out of
+ * the block at S5L8900_USB_OTG_BASE, and nothing else. core/src/soc/usbotg.c
+ * carries the evidence: which accesses the driver makes, the endpoint
+ * derivation it runs on what it reads, and why each value below is the one
+ * chosen. The short version is that an unmodelled window answered those reads
+ * with zero, the driver believed it, and the boot panicked on the endpoint
+ * count it computed — deterministically, at the same instruction every run.
+ *
+ * These are a legal and sufficient DWC2 configuration. They are NOT values
+ * measured from real S5L8900 silicon; we have no dump of this part's
+ * configuration registers, and nothing here pretends otherwise.
+ *
+ * This is a configuration-register model, not a USB controller. No transfer,
+ * FIFO, endpoint, DMA, PHY or interrupt behaviour is emulated, and the device
+ * tree's interrupt 0x13 is deliberately not defined as a constant: nothing here
+ * ever asserts it, and a constant that looks wired but is not is the same
+ * landmine the SPI note above describes.
+ */
+#define USBOTG_GHWCFG1 0x044u   /* per-endpoint direction, 2 bits per endpoint */
+#define USBOTG_GHWCFG2 0x048u   /* architecture + counts, incl. NumDevEps      */
+#define USBOTG_GHWCFG4 0x050u   /* driver reads it and uses only bit 25        */
+#define USBOTG_PCGCCTL 0xe00u   /* power/clock gating; guest read-modify-write */
+
+#define S5L_DWC2_GHWCFG1 0x00000000u   /* every endpoint bidirectional */
+#define S5L_DWC2_GHWCFG2 0x228de550u   /* NumDevEps=9 -> 5 IN / 5 OUT  */
+#define S5L_DWC2_GHWCFG4 0x00000000u
+
+typedef struct {
+    /* The only writable state in this model. Reset 0. */
+    uint32_t pcgcctl;
+} s5l_usbotg_t;
+
+void     s5l_usbotg_reset(s5l_usbotg_t *u);
+/* Unmodelled offsets read 0 and accept-and-discard writes, which is exactly
+ * what an unmapped access did before this window existed. */
+uint32_t s5l_usbotg_read(const s5l_usbotg_t *u, uint32_t off);
+void     s5l_usbotg_write(s5l_usbotg_t *u, uint32_t off, uint32_t val);
+
 #define S5L_STUB_MAX      16
 
 typedef struct {
@@ -854,6 +905,7 @@ typedef struct {
     s5l_tvout_t tvout;
     s5l_i2c_t   i2c[S5L8900_I2C_COUNT];
     s5l_pcf50635_t pmu;
+    s5l_usbotg_t usbotg;
     s5l_nor_t   nor;
     uint64_t   unmapped_reads;   /* visibility: accesses outside the map */
     uint64_t   unmapped_writes;
@@ -938,7 +990,10 @@ typedef struct {
     const char *name;                 /* string literal; never owned */
 } s5l_window_t;
 
-/* Enough for every fixed device window plus every stub. */
+/* Enough for every fixed device window plus every stub. The 13 is the length of
+ * DEVICE_WINDOWS in core/src/soc/machine.c — nor, clcd, the three tv-out banks,
+ * i2c0, i2c1, usb-otg, vic0, vic1, power, uart0, timer — and there is no slack
+ * left in it, so a new device model has to raise this number too. */
 #define S5L_WINDOW_MAX (S5L_STUB_MAX + 13u)
 
 /*

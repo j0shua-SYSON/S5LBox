@@ -17,6 +17,7 @@ add_library(emucore STATIC
     src/soc/tvout.c
     src/soc/i2c.c
     src/soc/pcf50635.c
+    src/soc/usbotg.c
     src/soc/nor.c
     src/soc/nand.c
     src/soc/storage.c
