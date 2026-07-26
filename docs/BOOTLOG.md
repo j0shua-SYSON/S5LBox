@@ -2069,6 +2069,89 @@ contradictions. Neither overlaps the decisive `_ipc_mqueue_send` episode, whose
 route bindings, queue walk, and owner decode are each independently marked
 validated or authoritative.
 
+### 2026-07-26: runs 52-56 — the MBX crash loop is broken, and two blockers remain
+
+The `CA_ENABLE_MBX2D=0` fix that runs 41-50 identified from disassembly has now
+been run, and it works. It also moved the failure far enough forward to expose a
+second, independent problem that had been hidden behind the first.
+
+`run52-fastpath-swrender` is the cold boot of record: 12,000,000,000 retired
+instructions, `--ca-software-render`, USB OTG matched, exit 0 with `OK`. It wrote
+`run.snapshot-3000000000` (sha256 `99F7087C…`), which runs 55 and 56 restored
+from; both therefore inherit the rewritten SpringBoard plist through the snapshot
+and record `ca_software_render: false` in their own manifests, which is
+provenance rather than a contradiction.
+
+What the fix bought, from run55: `SpringBoard exact-path attempts` fell from
+**30 to 1**, `SBUIController:nil-bailout` recorded **0** hits, and
+`SBUIController:orderFront-call` recorded its **first hit ever** at
+3,470,018,203. SpringBoard constructed its UI controller, created its window and
+made it visible. `CATransaction-flush` 2, `CABackingStoreCreate` 31.
+
+Run56 carried the 65,536-entry abort table from `5bef7cb` and caught the fault
+the old 48-entry table had been dropping:
+
+```text
+@3,641,884,794  DATA  FAR 0x00621000  FSR 0x0f  pc 0x338f64f4
+@3,641,885,715  _exception_triage        (vm_fault refused; only hit in the run)
+@3,641,911,380  _exit1 status 0x0a       (SIGBUS)
+```
+
+`0x338f64f4` is CoreGraphics `_CGSFillDRAM8by1+0x10c`, the instruction
+`stm fp!, {r1,r2,r3,r4,r5,r6,r8,sl}`. All eight source registers hold
+`0xff000000`: SpringBoard is clearing a surface to opaque black. The backtrace is
+29 QuartzCore frames below `IOMobileFramebuffer`, with the four-deep sublayer
+recursion visible in it — the entire compositing pipeline runs.
+
+The guest corroborated this itself. `ReportCrash` wrote two reports for two
+SpringBoard generations, both `EXC_BAD_ACCESS (SIGBUS)` /
+`KERN_PROTECTION_FAILURE at 0x00621000`, and both had to be **carved from
+unreferenced disk blocks**: the work image is unjournaled and was never cleanly
+unmounted, so the data reached the platter while the catalog insert did not. Any
+future search for guest-written evidence should carve as well as walk the
+catalog. `/private/var/mobile/Library/Logs/AppleSupport/general.log` shows the
+same story — 2 entries on disk behind a stale 146-byte catalog size.
+
+**The destination argument was wrong; nothing overran.** `r9` is not touched
+inside the fill loop and `fp` is copied from it once outside, so `r11 == r9`
+proves zero iterations completed, and the stack arithmetic agrees exactly
+(`r7 = 0x7b2c90` ⇒ entry `sp 0x7b2c98`, less `0x10`, less both pushes = the
+reported `0x7b2c40`). CoreGraphics wrote no bytes. Note for anyone reading these
+registers later: `lr` is loaded from the per-row width each row, so `lr = 0x500`
+means the fill is 1280 bytes *wide*, not that 1280 remain — a reading that looked
+compelling and was wrong.
+
+Two hypotheses are excluded rather than merely disfavoured. Our MMU: `ap_permits`
+matches DDI0100I for all eight APX:AP encodings, APX is read from bit 15 for
+sections and bit 9 for pages, DACR is implemented, and there is **no TLB at all**
+— every access re-walks the guest tables, so a stale permission is
+architecturally impossible. Copy-on-write: the fault has `n=1`, and a
+failed-then-retried upgrade would re-execute the same instruction and climb
+without bound. The kernel refused once. For contrast the same instruction had
+already filled `0x038c0000`-`0x03955000`, exactly `0x96000` bytes, 54,000
+instructions after a kernel IOSurface was created with 320/480/1280/'ARGB'/
+`0x96000` — so both the routine and the geometry we supply are correct.
+
+**The second blocker, which matters more.** `AppleH1CLCD::createSurface` has
+**0 hits across all five of its checkpoints** in 12 billion instructions.
+Nothing was ever wrapped around the physical framebuffer at `0x0885C000`.
+`CoreSurfaceBufferLookup` returned a non-NULL ref for display 0 and NULL for the
+720x480 TV-out, so QuartzCore is drawing into a surface it *looked up* rather than
+one built over the panel. Run52 ends with `0 changed bytes` of live scanout and
+`postrun_screen_sha256 CBAD1C11…` — the pre-guest seed. Fixing the pointer alone
+would produce a correct image in memory that never appears.
+
+**Open, and recorded as open.** Run52's own terminal report shows
+`SBUIController:orderFront-call` once at 11,985,078,306 and zero hits on three
+checkpoints where run55 — restored from run52's 3e9 snapshot — shows hits,
+including `orderFront` at 3.47e9. If restore is bit-exact those timelines must
+agree past 3e9. Whether this is a real divergence or a reporting artifact
+(different binary vintages with an appended checkpoint table, or the
+generation-scoped report block that already produced two retractions) is under
+audit and is **not** resolved here. The crash finding does not depend on it: two
+restored runs agree with each other and with the guest's own crash reports. What
+is in question is whether a short restore-replay reproduces cold-boot behaviour.
+
 ### 2026-07-26: runs 41-50 — SpringBoard was never rendering because it is dead
 
 Ten more runs were retained chasing the missing drawing surface down the
