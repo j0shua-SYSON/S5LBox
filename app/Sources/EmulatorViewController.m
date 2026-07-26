@@ -299,6 +299,13 @@ static const NSUInteger kConsoleScrollback = 12000;
  * and the settings screen states the consequence.
  */
 - (void)applyPauseState {
+    /* Drain first. Pausing stops the display link, so anything the guest
+     * printed since the last tick would otherwise sit in the engine's buffer
+     * unseen until the machine ran again — and the last thing it printed is
+     * usually the interesting one. */
+    [self appendConsole:[_engine takePendingConsoleText]];
+    [self flushConsole];
+
     const BOOL backgroundPause =
         _inBackground && [[VMSettings sharedSettings] pausesInBackground];
     const BOOL paused = _userPaused || backgroundPause;
@@ -418,18 +425,22 @@ static const NSUInteger kConsoleScrollback = 12000;
     const CGFloat statsH  = 28.0;
     const CGFloat chrome  = 6.0 + keysH + 6.0 + statsH + 4.0;
 
-    /* Split what is left between the guest's screen and the console. The
-     * fixed chrome comes off the top of the calculation so that a small phone
-     * shrinks the picture rather than the console down to nothing. */
+    /* Split what is left between the guest's screen and the console. The fixed
+     * chrome comes off the top of the calculation so that a cramped screen —
+     * a small phone, or this one in landscape — shrinks the picture rather than
+     * pushing the console out through the bottom of the view. The band is
+     * never allowed to exceed the space that exists, so no two views here can
+     * overlap however little room there is. */
     CGFloat freeSpace = toolbarY - top - chrome;
-    if (freeSpace < 120.0) freeSpace = 120.0;
+    if (freeSpace < 0.0) freeSpace = 0.0;
 
     // Fit 320x480 inside the band without distortion. The layer's
     // contentsGravity would do this anyway; doing it here too means the view's
     // own aspect is already correct, so there is no interpretation of
     // contentsScale that can stretch the image — and vm_touch_map() is then
     // working against the same rectangle the picture is drawn in.
-    CGFloat band  = floor(freeSpace * 0.62);
+    CGFloat band = floor(freeSpace * 0.62);
+    if (band < 60.0) band = fmin(60.0, freeSpace);
     CGFloat scale = fmin(b.size.width / (CGFloat)VM_FB_WIDTH,
                          band / (CGFloat)VM_FB_HEIGHT);
     CGFloat w = floor((CGFloat)VM_FB_WIDTH  * scale);
@@ -445,7 +456,7 @@ static const NSUInteger kConsoleScrollback = 12000;
     y += statsH + 4.0;
 
     CGFloat consoleH = toolbarY - y;
-    if (consoleH < 40.0) consoleH = 40.0;
+    if (consoleH < 0.0) consoleH = 0.0;
     _console.frame = CGRectMake(0.0, y, b.size.width, consoleH);
 }
 

@@ -297,8 +297,23 @@ titleForFooterInSection:(NSInteger)section {
         UISwitch *toggle = [[UISwitch alloc] initWithFrame:CGRectZero];
         toggle.tag = (NSInteger)index;
         toggle.on = [_settings valueForOptionIndex:index];
-        /* Grey, not green. An "on" switch that looks like every other working
-         * switch in iOS would be claiming an effect this one does not have. */
+        /*
+         * Grey, not green. An "on" switch that looks like every other working
+         * switch in iOS would be claiming an effect this one does not have.
+         *
+         * These are left MOVABLE rather than disabled, which is the one place
+         * on this screen that judgement was needed. Recording an intended
+         * configuration is a thing the app really can do, and bootkernel's own
+         * --activate sets the precedent: it is settable, defaults on, and every
+         * run header then says it was requested and not applied. So the
+         * treatment here is the same — say NOT APPLIED loudly, in the banner
+         * and in every footer, rather than take the switch away and leave the
+         * user unable to record anything at all. The controls whose OWN
+         * function is missing, the device keys and the firmware rows, are
+         * disabled outright instead.
+         *
+         * To take the other view, this is the line: set toggle.enabled = NO.
+         */
         toggle.onTintColor = [UIColor systemGrayColor];
         [toggle addTarget:self
                    action:@selector(optionSwitchChanged:)
