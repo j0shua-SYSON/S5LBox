@@ -8,6 +8,11 @@
 /.m5-lab/
 /work/
 
+# Python bytecode. The tools under tools/ are run directly and leave these
+# behind; they are host- and version-specific and must never be committed.
+__pycache__/
+*.pyc
+
 # XcodeGen output (generated from app/project.yml — never committed)
 *.xcodeproj
 *.xcworkspace
