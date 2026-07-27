@@ -2424,12 +2424,79 @@ it is counted above, and it is not otherwise explained here.
 surviving failure. Whatever refuses the next surface is **not short of bytes**.
 
 The open question therefore changes from *how many surfaces* to *which client
-is asking, and what the allocator's real admission test is*.
-`IOSurfaceDeviceMemoryRegion::init` hands `getLength() - 1` to
-`IORangeAllocator::withRange` at `0xc0527c04`, so an off-by-one on an
-inclusive/exclusive end, a fixed free-list capacity, and fragmentation are all
-still live candidates — and none of them are fixed by adding bytes. That is
-being settled by static disassembly rather than another two-hour boot.
+is asking*. Static disassembly settled the rest the same afternoon, without a
+second boot, and it eliminated every candidate we had:
+
+- **No off-by-one.** The range is *inclusive*. `withRange(L-1)` yields the one
+  element `[0, L-1]` — exactly `L` bytes. `IORangeAllocator::init` calls
+  `deallocate(0, endOfRange + 1)` at `0xc0194824`, `getFreeCount` sums
+  `end + 1 - start` at `0xc019469c`, and the kext itself asserts
+  `getFreeCount() == getLength()` for an idle region at `0xc0527a30`. The
+  admission test at `0xc0194bb2` gives `N(L) = floor(L / 0x96000)` exactly.
+  **Every pool we ever configured was sized correctly.**
+- **No fixed free-list capacity.** `withRange` gets capacity `0`
+  (`0xc0527bec`); `init` turns that into `capacityIncrement 1` and
+  `allocElement` grows the array via `_IOMalloc` at `0xc0194700`.
+  Fragmentation and element exhaustion are both out.
+- **No retry in the kernel.** `IOSurface::allocate` has exactly one reference
+  in the entire kernelcache — vtable slot `+0x70` at `0xc052e048` — reached
+  from one guarded, non-looping call site at `0xc0526108`, and
+  `IOSurfaceRoot::createSurface` releases and returns `NULL` on failure with
+  every branch forward.
+
+So **122 failure lines are 122 distinct `createSurface` calls**, and the only
+sites that issue them (`0xc052a914`, `0xc052aae8`, `0xc052ac44`) take an owning
+task and a client-supplied dictionary: they are `IOSurfaceRootUserClient`
+external methods. **The loop is in userspace**, one `IOConnectCall` per line.
+Why that client asked once when one surface was free and 122 times when two
+were is *not determined*, and nothing in this kernel encodes it.
+
+#### The correction that matters most: `AppleH1CLCD` was never the caller
+
+We had it backwards, in this document and in the source comment. `AppleH1CLCD`
+**does not call `IOSurface::allocate` and structurally cannot emit a "buffer
+allocation failed" line.** At `0xc0705f00` it builds a dictionary carrying only
+`IOSurfaceIsGlobal` and **no geometry**, so `init` computes size 0, logs
+`IOSurface: buffer allocation size is zero` (`0xc0525090`), and the guard at
+`0xc05260c0` skips `allocate` altogether — which is exactly why every run,
+run85 and run86 alike, prints that line precisely once.
+
+It then sets `size = pitch * height = 0x96000` by hand
+(`0xc0706064`–`0xc0706078`), looks the region up **by name** at `0xc07060a0`,
+and takes a block directly at `0xc07060bc`. That allocation is **silent**, and
+its failure path at `0xc07060c4` falls back to a physical address from its own
+mode table (`0xc0706210`). The display therefore gets a scanout buffer whether
+or not the pool had room — **which is why run85 and run86 rendered
+byte-identical frames.**
+
+One block is consumed before any client sees the pool:
+
+```text
+N_client(L) = floor(L / 0x96000) - 1
+```
+
+run85 left userspace **one** surface; run86 left it **two**. The "three layers,
+so three surfaces" reasoning that motivated run86 was never verified either:
+`0xc0705f00` creates exactly one surface per invocation, selecting one of four
+parameter sets, with no loop over any layer table.
+
+#### Why the next increment is still the wrong experiment
+
+No region length can be read off statically, because the count is set entirely
+by a userspace client. Four probes settle it in a single boot, at PCs where the
+operands are live:
+
+| PC | what it proves |
+|---|---|
+| `0xc0527ae4` | every `/vram` allocation — `r1` size in, `r0` success out, including the silent CLCD one |
+| `0xc0526108` | every `IOSurface::allocate`, i.e. every loud client attempt |
+| `0xc05244e4` vs `0xc0524528` | pool exhausted, or `withOptions` returned NULL |
+| `0xc07060c0` | whether `AppleH1CLCD` got its block or took the fallback |
+
+A caveat that follows from the same read: the `iommu-present` gate at
+`0xc05244e4` is only *reached* when the surface has a non-empty region list. A
+surface with `[+0x90] == 0` goes straight to `withOptions` at `0xc05244f0`, so
+**not every failure line means the pool was exhausted.**
 
 The default is back to **two**, the only configuration measured to produce the
 lock screen with a quiet console.

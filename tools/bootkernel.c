@@ -2353,19 +2353,54 @@ static bool dt_memmap_matches_once(uint8_t *b, size_t len, const char *key,
  * enough to make the first frame appear and is the reason nothing after it
  * ever did.
  *
- * IOSurfaceDeviceMemoryRegion::init (0xc0527bb4) hands the region's whole
- * length, less one, to IORangeAllocator::withRange at 0xc0527c04. AppleH1CLCD
- * asks for round_up(1280 * 480, 0x1000) = 0x96000 (0xc0706064-0xc0706078),
- * and N82_FB_BYTES is 0x96000 exactly. So the first surface consumes the pool
- * and every later one returns kIOReturnNoResources with
- * "buffer allocation failed. 320 x 480".
+ * IOSurfaceDeviceMemoryRegion::init (0xc0527b20) hands the region's length
+ * less one to IORangeAllocator::withRange -- the `sub r0, r0, #1` is at
+ * 0xc0527c04 and the `blx` at 0xc0527c08. THAT MINUS ONE COSTS NOTHING: the
+ * range is inclusive, so withRange(L-1) yields the single element [0, L-1],
+ * which is exactly L bytes. IORangeAllocator::init proves it by calling
+ * deallocate(0, endOfRange + 1) at 0xc0194824, getFreeCount sums end + 1 -
+ * start at 0xc019469c, and the kext asserts getFreeCount() == getLength() for
+ * an idle region at 0xc0527a30.
  *
- * There is no fallback path on this machine. IOSurface::allocate's
- * IOBufferMemoryDescriptor branch is gated at 0xc05244e4 on
- * getProperty("iommu-present"), and `iommu-present` occurs ZERO times in the
- * shipped device tree -- correctly, because S5L8900 has no DART. Adding it
+ * The admission test is at 0xc0194bb2: accept iff elem.end >= aligned(start)
+ * + round_up(size, 0x1000) - 1. Blocks pack from offset 0 with no slack, so
+ *
+ *     N(L) = floor(L / 0x96000)
+ *
+ * exactly. There is no off-by-one, and the free list is not fixed-capacity
+ * either: withRange gets capacity 0 (0xc0527bec), init turns that into
+ * capacityIncrement 1, and allocElement grows the array through _IOMalloc at
+ * 0xc0194700. Fragmentation and exhaustion of the element list are both ruled
+ * out. Every pool this harness has ever configured was sized correctly.
+ *
+ * WHAT ACTUALLY TAKES A BLOCK. AppleH1CLCD does NOT call IOSurface::allocate
+ * and structurally cannot emit "buffer allocation failed". At 0xc0705f00 it
+ * builds a dictionary carrying only "IOSurfaceIsGlobal" and NO geometry, so
+ * init computes size 0, logs "IOSurface: buffer allocation size is zero"
+ * (0xc0525090) and the guard at 0xc05260c0 skips allocate entirely -- which is
+ * why every run prints that line exactly once. It then sets size = pitch *
+ * height = 0x96000 by hand (0xc0706064-0xc0706078), looks up the region by
+ * name at 0xc07060a0 and takes a block directly at 0xc07060bc. That allocation
+ * is SILENT, and its failure path at 0xc07060c4 falls back to a physical
+ * address from its own mode table (0xc0706210). So the display always gets a
+ * scanout buffer whether or not the pool had room, which is why run85 and
+ * run86 rendered byte-identical frames.
+ *
+ * The consequence for sizing: one block is consumed before any client sees the
+ * pool.
+ *
+ *     N_client(L) = floor(L / 0x96000) - 1
+ *
+ * so run85 left userspace ONE surface and run86 left it TWO.
+ *
+ * IOSurface::allocate's IOBufferMemoryDescriptor branch is gated at 0xc05244e4
+ * on getProperty("iommu-present"), and `iommu-present` occurs ZERO times in
+ * the shipped device tree -- correctly, because S5L8900 has no DART. Adding it
  * would route allocations to memory the display cannot scan out, which is a
- * worse failure than this one because it would look like it worked.
+ * worse failure than this one because it would look like it worked. Note the
+ * gate is only REACHED when the surface has a non-empty region list; a surface
+ * with [+0x90] == 0 goes straight to withOptions at 0xc05244f0, so not every
+ * failure line means the pool was exhausted.
  *
  * The observable consequence, measured in run76 and run83: the swap pipeline
  * runs perfectly -- 289 VBLs, 150 swaps committed, every commandWakeup
@@ -2398,12 +2433,31 @@ static bool dt_memmap_matches_once(uint8_t *b, size_t len, const char *key,
  * surface is never successfully handed out. Enlarging the pool only bought
  * some client the chance to ask again and fail, apparently once per composite.
  *
- * That is the useful thing run86 paid for: it rules out "the pool is too
- * small" as the explanation for the surviving failure. Whatever refuses the
- * next surface is not short of bytes, so the question is which client asks and
- * what the allocator's real admission test is -- not another increment. A pool
- * sized by trial would hide exactly the kind of leak this constant makes
- * visible.
+ * That is the useful thing run86 paid for, and static analysis has since
+ * closed the question it opened. THE KERNEL HAS NO RETRY. IOSurface::allocate
+ * (0xc05242ec) has exactly one reference in the whole kernelcache -- vtable
+ * slot +0x70 at 0xc052e048 -- reached from one guarded, non-looping call site
+ * at 0xc0526108, and IOSurfaceRoot::createSurface releases the surface and
+ * returns NULL on failure with every branch forward. So 122 failure lines are
+ * 122 DISTINCT createSurface calls, and the only sites that make them
+ * (0xc052a914, 0xc052aae8, 0xc052ac44) take an owning task and a
+ * client-supplied dictionary: they are IOSurfaceRootUserClient external
+ * methods. The loop is in USERSPACE, one IOConnectCall per line.
+ *
+ * Why that client asked once with one surface available and 122 times with two
+ * is NOT determined, and nothing in this kernel encodes it. So the next
+ * increment is still the wrong experiment -- no region length can be read off
+ * statically, and a pool sized by trial would hide exactly the kind of leak
+ * this constant makes visible. Four probes settle it in one boot, at PCs where
+ * the operands are live:
+ *
+ *   0xc0527ae4  every /vram allocation: r1 = size in, r0 = success out,
+ *               including AppleH1CLCD's silent one
+ *   0xc0526108  every IOSurface::allocate, i.e. every loud client attempt
+ *   0xc05244e4  vs 0xc0524528: pool exhausted or withOptions returned NULL
+ *   0xc07060c0  whether AppleH1CLCD got its block or took the fallback
+ *
+ * Two is kept until those counters say what the client actually wants.
  */
 #define N82_VRAM_SURFACES 2u
 #define N82_VRAM_BYTES    (N82_FB_BYTES * N82_VRAM_SURFACES)
