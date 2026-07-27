@@ -2371,14 +2371,24 @@ static bool dt_memmap_matches_once(uint8_t *b, size_t len, const char *key,
  * it is the only one that exists. A compositor with one surface can show a
  * boot spinner. It cannot show a home screen over a wallpaper.
  *
- * Two is the minimum that can composite anything, and it is what this sets:
- * enough to prove the mechanism, cheap enough (0x96000 = 600 KiB) that it
- * costs half a percent of DRAM. AppleH1CLCD's own layer table has three
- * entries (layer 0 -> window 0, layer 1 -> window 2, layer 2 -> the video
- * overlay), so three may turn out to be the real number; raising this is one
- * constant, and the run header prints what it chose.
+ * TWO PROVED THE MECHANISM AND WAS NOT ENOUGH. run85 drew the lock screen --
+ * status bar, wallpaper, slide to unlock, 273,206 of 460,800 bytes non-zero
+ * against 1,659 the run before -- and still logged one
+ *
+ *     IOSurface warning: buffer allocation failed.  320 x 480
+ *     fmt: 42475241 size: 614400 bytes
+ *
+ * where 0x42475241 is 'BGRA'. AppleH1CLCD's layer table has three entries
+ * (layer 0 -> window 0, layer 1 -> window 2, layer 2 -> the video overlay),
+ * which is where three comes from; it is not a guess that a bigger number
+ * might help.
+ *
+ * Three costs 1.8 MB of a 128 MB machine. If a fourth failure appears, the
+ * next question is which client is asking rather than another increment --
+ * a pool sized by trial would hide exactly the kind of leak this constant
+ * makes visible.
  */
-#define N82_VRAM_SURFACES 2u
+#define N82_VRAM_SURFACES 3u
 #define N82_VRAM_BYTES    (N82_FB_BYTES * N82_VRAM_SURFACES)
 
 static uint16_t boot_args_get_le16(const uint8_t *bytes, size_t offset) {
@@ -25792,13 +25802,53 @@ external_md_work_ready:
             printf("\nframebuffer: CLCD window %u, %ux%u, "
                    "%zu of %zu RGB bytes non-zero\n",
                    active, out_w, out_h, nonzero, out_n);
+            /*
+             * A SECOND COPY, BESIDE THIS RUN'S OWN WORK IMAGE.
+             *
+             * firmware/screen.ppm is one fixed path shared by every concurrent
+             * run, and run85 nearly lost the first lock-screen capture to it:
+             * a short boot started by other work overwrote the frame 45
+             * seconds after run85 had exited (run85's log is stamped 16:35:38,
+             * the PPM 16:36:23). The image was only recovered because run85
+             * had a checkpoint, and only trusted because its non-zero byte
+             * count matched run85's own report exactly.
+             *
+             * So when --external-md names a work image, the frame is also
+             * written next to it as <work>.screen.ppm. That path is unique per
+             * run by construction -- the harness already refuses to reuse a
+             * work image -- so a capture cannot be claimed by a run that did
+             * not produce it. The shared path is still written, because every
+             * existing recipe and doc reads it.
+             */
+            if (external_md_work && *external_md_work) {
+                char beside[1024];
+                int beside_len = snprintf(beside, sizeof beside,
+                                          "%s.screen.ppm", external_md_work);
+                if (beside_len > 0 && (size_t)beside_len < sizeof beside) {
+                    FILE *b = fopen(beside, "wb");
+                    if (b) {
+                        bool ok = fprintf(b, "P6\n%u %u\n255\n",
+                                          out_w, out_h) > 0 &&
+                                  fwrite(rgb, 1, out_n, b) == out_n;
+                        if (fclose(b) != 0) ok = false;
+                        printf("wrote %s%s\n", beside,
+                               ok ? "" : "  (INCOMPLETE - do not trust it)");
+                    } else {
+                        fprintf(stderr,
+                                "framebuffer: cannot write the per-run copy at "
+                                "%s; only the shared path will exist\n", beside);
+                    }
+                }
+            }
             FILE *o = fopen("firmware/screen.ppm", "wb");
             if (o) {
                 bool wrote = fprintf(o, "P6\n%u %u\n255\n", out_w, out_h) > 0 &&
                              fwrite(rgb, 1, out_n, o) == out_n;
                 if (fclose(o) != 0) wrote = false;
                 if (wrote) {
-                    printf("wrote firmware/screen.ppm - live CLCD frame is %s\n",
+                    printf("wrote firmware/screen.ppm - live CLCD frame is %s "
+                           "(SHARED PATH: a concurrent run can overwrite this; "
+                           "prefer the per-run copy above)\n",
                            nonzero ? "NONBLACK" : "ALL BLACK");
                 } else {
                     fprintf(stderr,
