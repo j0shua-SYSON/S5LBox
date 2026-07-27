@@ -399,6 +399,25 @@ static void snap_uart(sn_io_t *io, s5l_uart_t *u) {
         (u->tx_len >= (size_t)UART_TX_BUFFER ||
          u->rx_count > UART_RX_FIFO || u->rx_head >= UART_RX_FIFO))
         io->err = SNAP_ERR_CORRUPT;     /* the writer keeps a NUL slot free */
+    /*
+     * UTRSTAT's latched half is DERIVED here rather than serialised, which is
+     * why the receive interrupt landing did not move SNAPSHOT_VERSION and why
+     * every checkpoint written before it still loads.
+     *
+     * The two ways of being wrong are not symmetric. Restoring the latch clear
+     * over a non-empty FIFO loses an edge, and the bytes then wait for an
+     * arrival that may never come — the peer already counted them as delivered.
+     * Restoring it set over a FIFO the guest had already been told about costs
+     * one spurious interrupt into a driver that will find real data waiting for
+     * it and drain it. So a non-empty FIFO re-arms, and an empty one does not.
+     *
+     * This is the same exception `level_dirty` takes in soc.h: derived state
+     * that the load path sets rather than reads, with the byte format unchanged.
+     * It stops being tenable the day a second cause is latched here, because
+     * "the FIFO has bytes in it" cannot re-derive a transmit or an error edge.
+     */
+    if (sn_reading(io) && io->err == SNAP_OK)
+        u->utrstat_pending = u->rx_count ? UTRSTAT_RX_INT : 0u;
 }
 
 static void snap_vic(sn_io_t *io, s5l_vic_t *v) {

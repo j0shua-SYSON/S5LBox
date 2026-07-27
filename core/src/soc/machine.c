@@ -687,12 +687,15 @@ static s5l_wake_kind_t wake_edge_gpio(const s5l8900_t *m, uint32_t *ticks) {
  *
  * A host-delivered byte has no schedule — the host pushes it between run
  * slices, which is a moment a sleeping core is not inside — so there is no
- * future distance to name and this source can never produce one. A FIFO that is
- * ALREADY non-empty has already asserted the line, and
+ * future distance to name and this source can never produce one. A FIFO with an
+ * UNACKNOWLEDGED arrival in it has already asserted the line, and
  * machine_wait_for_interrupt() refreshes every level at zero elapsed time
- * before consulting any source, so it ends the wait there. Answering
- * S5L_WAKE_AT with 0 would be rejected as "not a future distance" anyway
- * (s5l8900_next_wake), and answering UNKNOWN would stop the machine
+ * before consulting any source, so it ends the wait there. (A FIFO the driver
+ * has acknowledged but not drained asserts nothing — the latch is edge
+ * triggered, see the UART block in soc.h — and there is still nothing to wait
+ * for either: only an arrival can latch it, and only the host can produce one.)
+ * Answering S5L_WAKE_AT with 0 would be rejected as "not a future distance"
+ * anyway (s5l8900_next_wake), and answering UNKNOWN would stop the machine
  * fast-forwarding any idle period for the whole boot — on a source that is
  * inert on every run without a peer.
  *

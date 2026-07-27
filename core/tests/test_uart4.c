@@ -30,6 +30,16 @@
  *      the only copy of what the guest transmitted; SNAPSHOT_VERSION 10 exists
  *      because uart4 is serialised in front of every other device.
  *
+ *   5. THE RECEIVE INTERRUPT IS THE BIT THE DRIVER CAN SEE, AND IT IS AN EDGE.
+ *      Added after the fact, and the reason is measured rather than argued:
+ *      asserting UTRSTAT bit 0 — a bit that can never enter the driver's filter
+ *      mask — cost run94 6,393,888 IRQ entries and 44.5% of the machine, and
+ *      the guest transmitted one octet of PPP instead of forty-seven. The
+ *      latched cause is 0x10, the acknowledge is a write-one-to-clear store,
+ *      and the line is gated by UCON. See the UART block in soc.h for where
+ *      each of those comes from; the cases below are what stops any of them
+ *      being quietly undone.
+ *
  * MUTATION CHECKS. A test that cannot fail is not evidence, so each of the
  * three bugs above was introduced deliberately, into a clean tree, and the
  * suite was required to catch it. All three were caught, and by the assertions
@@ -44,6 +54,21 @@
  *      3 checks, all naming the spin;
  *   3. drop uart4 from snap_mach() — 2 checks, on the restored capture and on
  *      the two ports' configuration registers being crossed.
+ *
+ * The interrupt cases were built the same way, against the model that had just
+ * been written, and every one of the five plausible ways to get it wrong was
+ * caught by an assertion written for it:
+ *
+ *   4. re-arm the latch from a non-empty FIFO after the acknowledge (the
+ *      tempting "do not lose the rest of the frame" mistake, and the one that
+ *      reinstates run94) — 6 checks;
+ *   5. latch only on the empty->non-empty transition — 1 check, "an arrival
+ *      into a non-empty FIFO did not latch", which is the whole difference;
+ *   6. drop the UCON gate — 4 checks, including a machine-level one;
+ *   7. drop the UTRSTAT store again, as it used to be — 10 checks across five
+ *      tests, the loudest being "the acknowledge did not lower line 28";
+ *   8. restore the latch CLEAR instead of deriving it from the FIFO — 1 check,
+ *      in the snapshot test that owns that decision.
  *
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed.
  */
@@ -84,6 +109,23 @@ static int g_pass, g_fail;
 static const uint8_t LCP_CONFREQ_PREFIX[6] = {
     0x7eu, 0xffu, 0x7du, 0x23u, 0xc0u, 0x21u
 };
+
+/*
+ * UCON's receive-interrupt enable, and the driver's own filter mask.
+ *
+ * 0x1000 sits eight bits above the UTRSTAT cause it arms (0x10), and the two
+ * are written by the same straight-line code at 0xc065f0e4 — which is also the
+ * only reason a silent gate is safe to model here. Every test below that wants
+ * a line has to program it, exactly as AppleS5L8900XSerial does. A test that
+ * forgot would be testing a port nobody had opened.
+ *
+ * 0x18 is what that function puts in this->0x9c for a receive-enabled port:
+ * receive_interrupt_status | receive_time_out_interrupt_status. The filter at
+ * 0xc065eecc ANDs UTRSTAT with it and stores the result BACK, so writing
+ * `UTRSTAT & FILTER_RX_MASK` is a byte-exact imitation of the acknowledge.
+ */
+#define UCON_RX_INT_ENABLE 0x1000u
+#define FILTER_RX_MASK     0x0018u
 
 /* --------------------------------------------------------------------------
  * Device-level behaviour.
@@ -495,6 +537,13 @@ static void test_a_utrstat_store_cannot_discard_a_queued_byte(void) {
      * a word with bit 0 set while a byte is still queued. If that store cleared
      * the ready bit, the byte would be stranded in the FIFO with nothing left to
      * announce it — the exact silent loss this model refuses.
+     *
+     * The store is honoured now rather than dropped, so this is no longer true
+     * by construction: it holds because the levels are derived from the FIFO on
+     * every read and only the LATCHED half is stored, which is what makes "a
+     * W1C store cannot clear a level" a property of the layout. The blunt
+     * instrument below — every bit written at once — is the one a careless
+     * clear-everything implementation would fail.
      */
     s5l_uart_t u;
     s5l_uart_reset(&u);
@@ -514,11 +563,15 @@ static void test_uart4_asserts_vic_line_28_for_a_waiting_byte(void) {
     CHECK(s5l8900_init(&m, 0, 1u << 20), "machine init failed");
 
     m.bus.write32(m.bus.ctx, S5L8900_VIC0_BASE + VIC_INTENABLE, 1u << 28);
+    m.bus.write32(m.bus.ctx, S5L8900_UART4_BASE + UART_UCON,
+                  UCON_RX_INT_ENABLE);
     s5l8900_tick(&m, 1u);
     CHECK(!m.cpu.irq_line, "arming the line alone raised an interrupt");
 
     /* A host peer delivers one byte between run slices, which is the only way
-     * this can ever happen (docs/AGENT_HANDOFF.md §23.5.1). */
+     * this can ever happen (docs/AGENT_HANDOFF.md §23.5.1). The push cannot set
+     * `level_dirty` — it takes a port, not a machine — so this also pins that
+     * the NEXT tick still notices, through ext_inputs()'s witness. */
     CHECK(s5l_uart_rx_push(&m.uart4, 0xffu), "push into an empty FIFO failed");
     s5l8900_tick(&m, 1u);
     uint32_t raw = m.bus.read32(m.bus.ctx, S5L8900_VIC0_BASE + VIC_RAWINTR);
@@ -526,31 +579,237 @@ static void test_uart4_asserts_vic_line_28_for_a_waiting_byte(void) {
           "a queued byte did not assert VIC line 28 (RAWINTR=0x%08x)", raw);
     CHECK(m.cpu.irq_line, "line 28 was asserted but the core saw no IRQ");
 
-    /* The guest's driver drains it through the bus, and the LEVEL drops. Level
-     * and not edge: core/src/soc/vic.c's own reason — a source that re-raised
-     * inside the handler would lose the interrupt. */
+    /*
+     * The guest's driver drains it through the bus — and the line STAYS UP.
+     * This is the half of the repair that is easy to undo by accident: 0x10 is
+     * an edge, and draining the FIFO is not what clears it. Only the
+     * acknowledge below is, because the filter returns 0 for a receive cause
+     * and IOFilterInterruptEventSource::disableInterruptOccurred then returns
+     * without masking anything.
+     */
     CHECK(m.bus.read32(m.bus.ctx, S5L8900_UART4_BASE + UART_URXH) == 0xffu,
           "the guest read the wrong byte back through the bus");
     s5l8900_tick(&m, 1u);
     raw = m.bus.read32(m.bus.ctx, S5L8900_VIC0_BASE + VIC_RAWINTR);
+    CHECK((raw & (1u << 28)) != 0u,
+          "draining URXH lowered a latched cause the driver had not yet "
+          "acknowledged (0x%08x)", raw);
+
+    /* The acknowledge, byte for byte as the filter performs it: read UTRSTAT,
+     * AND with the enable mask, store the result back. */
+    uint32_t tr = m.bus.read32(m.bus.ctx, S5L8900_UART4_BASE + UART_UTRSTAT);
+    CHECK((tr & UTRSTAT_RX_INT) != 0u,
+          "the arrival did not latch receive_interrupt_status (0x%08x)", tr);
+    m.bus.write32(m.bus.ctx, S5L8900_UART4_BASE + UART_UTRSTAT,
+                  tr & FILTER_RX_MASK);
+    s5l8900_tick(&m, 1u);
+    raw = m.bus.read32(m.bus.ctx, S5L8900_VIC0_BASE + VIC_RAWINTR);
     CHECK((raw & (1u << 28)) == 0u,
-          "the line stayed asserted after the FIFO was drained (0x%08x)", raw);
-    CHECK(!m.cpu.irq_line, "the core's IRQ line stayed high after the drain");
+          "the acknowledge did not lower line 28 (0x%08x) -- this is run94, "
+          "6.4 M IRQ entries, with a different bit number", raw);
+    CHECK(!m.cpu.irq_line, "the core's IRQ line stayed high after the ack");
 
     /*
-     * Two bytes, one read: the line must STAY asserted. A model that dropped it
-     * after any read would strand the second byte, and a driver that reads one
-     * byte per interrupt is the common shape.
+     * Two bytes arrive, and the driver acknowledges FIRST and drains SECOND —
+     * which is its own filter's order, not a choice made here. After the ack
+     * the line is down and the SECOND byte is announced by UTRSTAT bit 0, the
+     * live level, which is what a drain loop tests. "One byte per interrupt"
+     * was a viable driver shape against the level this model used to assert and
+     * is not one against an edge; that is a fact about the hardware, and the
+     * live ready bit is what the hardware offers instead.
      */
     CHECK(s5l_uart_rx_push(&m.uart4, 0x01u) &&
           s5l_uart_rx_push(&m.uart4, 0x02u), "pushes failed");
-    (void)m.bus.read32(m.bus.ctx, S5L8900_UART4_BASE + UART_URXH);
     s5l8900_tick(&m, 1u);
     raw = m.bus.read32(m.bus.ctx, S5L8900_VIC0_BASE + VIC_RAWINTR);
     CHECK((raw & (1u << 28)) != 0u,
-          "the line dropped with a byte still queued (0x%08x)", raw);
+          "two arrivals did not re-assert line 28 (0x%08x)", raw);
+    tr = m.bus.read32(m.bus.ctx, S5L8900_UART4_BASE + UART_UTRSTAT);
+    m.bus.write32(m.bus.ctx, S5L8900_UART4_BASE + UART_UTRSTAT,
+                  tr & FILTER_RX_MASK);
+    CHECK(m.bus.read32(m.bus.ctx, S5L8900_UART4_BASE + UART_URXH) == 0x01u,
+          "the first of the two bytes came back wrong");
+    s5l8900_tick(&m, 1u);
+    raw = m.bus.read32(m.bus.ctx, S5L8900_VIC0_BASE + VIC_RAWINTR);
+    CHECK((raw & (1u << 28)) == 0u,
+          "one acknowledge was not enough for two arrivals (0x%08x) -- the "
+          "latch is a status bit, not a count", raw);
+    CHECK((m.bus.read32(m.bus.ctx, S5L8900_UART4_BASE + UART_UTRSTAT) & 1u)
+              != 0u,
+          "the second byte is stranded: the ack cleared the live ready bit");
+    CHECK(m.bus.read32(m.bus.ctx, S5L8900_UART4_BASE + UART_URXH) == 0x02u,
+          "the second byte did not survive the acknowledge");
 
     s5l8900_free(&m);
+}
+
+static void test_the_receive_interrupt_is_an_edge_not_a_level(void) {
+    /*
+     * The register-level contract, away from the VIC: what sets the latch, what
+     * clears it, and what must not. Every claim here is quoted in the UART block
+     * in soc.h with the instruction address it came out of.
+     */
+    s5l_uart_t u;
+    s5l_uart_reset(&u);
+    s5l_uart_write(&u, UART_UCON, UCON_RX_INT_ENABLE);
+
+    CHECK((s5l_uart_read(&u, UART_UTRSTAT) & UTRSTAT_RX_INT) == 0u,
+          "a port nobody has spoken to came up with a latched interrupt");
+    CHECK(!s5l_uart_rx_irq(&u), "an empty port asserted its line");
+
+    /* ARRIVAL SETS IT. */
+    CHECK(s5l_uart_rx_push(&u, 0x7eu), "push failed");
+    uint32_t tr = s5l_uart_read(&u, UART_UTRSTAT);
+    CHECK((tr & UTRSTAT_RX_INT) != 0u,
+          "an arriving byte did not latch 0x10 (0x%08x)", tr);
+    CHECK(s5l_uart_rx_irq(&u), "a latched, enabled cause did not assert");
+
+    /* A SECOND BYTE WHILE IT IS STILL PENDING CHANGES NOTHING. The latch is one
+     * status bit, so two arrivals still cost the driver one acknowledge; a
+     * model that counted arrivals would need two here and would leave the line
+     * up after the first. And reading UTRSTAT is not an acknowledge. */
+    CHECK(s5l_uart_rx_push(&u, 0x5eu), "second push failed");
+    CHECK(s5l_uart_read(&u, UART_UTRSTAT) == tr,
+          "a second arrival changed UTRSTAT from 0x%08x to 0x%08x", tr,
+          s5l_uart_read(&u, UART_UTRSTAT));
+    CHECK((s5l_uart_read(&u, UART_UTRSTAT) & UTRSTAT_RX_INT) != 0u,
+          "reading UTRSTAT cleared the latch; only a store may");
+
+    /* W1C CLEARS THE LATCH AND NOT THE LEVELS. */
+    s5l_uart_write(&u, UART_UTRSTAT, UTRSTAT_RX_INT);
+    tr = s5l_uart_read(&u, UART_UTRSTAT);
+    CHECK((tr & UTRSTAT_RX_INT) == 0u,
+          "the acknowledge did not clear the latch (0x%08x)", tr);
+    CHECK((tr & 1u) != 0u,
+          "the acknowledge cleared receive_buffer_data_ready with two bytes "
+          "still in the FIFO (0x%08x)", tr);
+    CHECK((tr & 0x6u) == 0x6u,
+          "the acknowledge disturbed the two transmitter levels (0x%08x)", tr);
+    CHECK(!s5l_uart_rx_irq(&u),
+          "the line stayed up after the acknowledge with the FIFO non-empty -- "
+          "re-arming from the FIFO is exactly the storm this replaced");
+
+    /* THE BYTES ARE NOT STRANDED: the live ready bit still announces them, and
+     * a drain loop that tests it collects both. */
+    unsigned drained = 0;
+    while ((s5l_uart_read(&u, UART_UTRSTAT) & 1u) && drained < 8u) {
+        (void)s5l_uart_read(&u, UART_URXH);
+        drained++;
+    }
+    CHECK(drained == 2u, "the drain loop collected %u of two bytes", drained);
+    CHECK(!s5l_uart_rx_irq(&u), "draining re-asserted the line");
+
+    /* AND THE NEXT ARRIVAL IS A FRESH EDGE. */
+    CHECK(s5l_uart_rx_push(&u, 0x41u), "push after the drain failed");
+    CHECK(s5l_uart_rx_irq(&u), "a byte arriving after an ack did not re-latch");
+
+    /* An arrival into a NON-EMPTY, already-acknowledged FIFO also re-latches.
+     * This is the case a transition-triggered latch would miss, and it is the
+     * one that would strand the tail of a frame behind a driver that drained
+     * only part of the FIFO. */
+    s5l_uart_write(&u, UART_UTRSTAT, UTRSTAT_RX_INT);
+    CHECK(!s5l_uart_rx_irq(&u), "the acknowledge did not take");
+    CHECK(u.rx_count == 1u, "the FIFO should still hold one byte");
+    CHECK(s5l_uart_rx_push(&u, 0x42u), "push into a non-empty FIFO failed");
+    CHECK(s5l_uart_rx_irq(&u),
+          "an arrival into a non-empty FIFO did not latch: a driver that "
+          "drains partially would never hear about the rest");
+
+    /* A REFUSED push is not an arrival and must not latch. */
+    while (s5l_uart_rx_space(&u)) (void)s5l_uart_rx_push(&u, 0x00u);
+    s5l_uart_write(&u, UART_UTRSTAT, UTRSTAT_RX_INT);
+    CHECK(!s5l_uart_rx_push(&u, 0xffu), "a full FIFO accepted a byte");
+    CHECK(!s5l_uart_rx_irq(&u),
+          "a REFUSED push latched an interrupt for a byte that is gone");
+}
+
+static void test_the_line_is_gated_by_ucon(void) {
+    /*
+     * The gate the previous model declined to guess. Each enable sits eight
+     * bits above the cause it arms (0xc065f0e4 writes both), so 0x1000 arms
+     * 0x10 — and nothing else does.
+     */
+    s5l_uart_t u;
+    s5l_uart_reset(&u);
+
+    CHECK(s5l_uart_rx_push(&u, 0x7eu), "push failed");
+    CHECK((s5l_uart_read(&u, UART_UTRSTAT) & UTRSTAT_RX_INT) != 0u,
+          "the arrival did not latch with UCON clear -- the gate belongs on "
+          "the LINE, not on the latch");
+    CHECK(!s5l_uart_rx_irq(&u),
+          "a port whose driver never enabled the receive interrupt asserted "
+          "one anyway");
+
+    /* The neighbouring enables must not arm it: 0x800 is the receive timeout,
+     * 0x2000 the transmit interrupt, 0x80 rx_time_out_enable. A one-bit slip in
+     * the shift would show up here and nowhere else. */
+    s5l_uart_write(&u, UART_UCON, 0x800u | 0x2000u | 0x80u);
+    CHECK(!s5l_uart_rx_irq(&u),
+          "an adjacent UCON enable armed receive_interrupt_status (ucon=0x%08x)",
+          u.ucon);
+
+    /* ENABLING AFTER THE FACT RAISES THE LINE. The latch is already set, so a
+     * driver that opens the port after a byte has arrived is not owed a second
+     * one -- and the byte in the FIFO is not lost while the port was shut. */
+    s5l_uart_write(&u, UART_UCON, UCON_RX_INT_ENABLE);
+    CHECK(s5l_uart_rx_irq(&u), "enabling the interrupt did not raise the line");
+
+    /* And disabling lowers it without acknowledging anything: the cause is
+     * still latched and comes back when the driver re-enables. */
+    s5l_uart_write(&u, UART_UCON, 0u);
+    CHECK(!s5l_uart_rx_irq(&u), "clearing UCON did not lower the line");
+    CHECK((s5l_uart_read(&u, UART_UTRSTAT) & UTRSTAT_RX_INT) != 0u,
+          "disabling the interrupt cleared the pending cause");
+    s5l_uart_write(&u, UART_UCON, UCON_RX_INT_ENABLE);
+    CHECK(s5l_uart_rx_irq(&u), "re-enabling did not restore the line");
+
+    /* Through the machine, because that is where it has to work: a guest store
+     * to UCON changes VIC line 28 on the next tick. */
+    s5l8900_t m;
+    CHECK(s5l8900_init(&m, 0, 1u << 20), "machine init failed");
+    m.bus.write32(m.bus.ctx, S5L8900_VIC0_BASE + VIC_INTENABLE, 1u << 28);
+    CHECK(s5l_uart_rx_push(&m.uart4, 0x7eu), "push failed");
+    s5l8900_tick(&m, 1u);
+    uint32_t raw = m.bus.read32(m.bus.ctx, S5L8900_VIC0_BASE + VIC_RAWINTR);
+    CHECK((raw & (1u << 28)) == 0u,
+          "uart4 asserted line 28 with UCON at reset (0x%08x)", raw);
+    m.bus.write32(m.bus.ctx, S5L8900_UART4_BASE + UART_UCON,
+                  UCON_RX_INT_ENABLE);
+    s5l8900_tick(&m, 1u);
+    raw = m.bus.read32(m.bus.ctx, S5L8900_VIC0_BASE + VIC_RAWINTR);
+    CHECK((raw & (1u << 28)) != 0u,
+          "enabling the receive interrupt did not reach the VIC (0x%08x)", raw);
+    s5l8900_free(&m);
+}
+
+static void test_the_causes_this_model_refuses_stay_clear(void) {
+    /*
+     * 0x8, 0x40, 0x100 and 0x200 are never asserted, and each refusal has a
+     * consequence attached: 0x8's handler reports an overrun that did not
+     * happen, 0x100 runs an auto-baud calculation over +0x2c that this model
+     * answers 0 from, and 0x200 is newer than this kext. A model that started
+     * setting one would be caught here rather than by a boot that wandered.
+     */
+    s5l_uart_t u;
+    s5l_uart_reset(&u);
+    s5l_uart_write(&u, UART_UCON, 0xffffffffu);   /* every enable armed */
+
+    uint32_t seen = 0;
+    for (unsigned i = 0; i < 64u; i++) {
+        (void)s5l_uart_rx_push(&u, (uint8_t)i);   /* overruns the FIFO too */
+        seen |= s5l_uart_read(&u, UART_UTRSTAT);
+        if (i % 3u == 0u) (void)s5l_uart_read(&u, UART_URXH);
+        if (i % 7u == 0u) s5l_uart_write(&u, UART_UTXH, (uint32_t)i);
+    }
+    CHECK((seen & 0x8u) == 0u, "receive_time_out_interrupt_status was asserted");
+    CHECK((seen & 0x40u) == 0u, "error_interrupt_status was asserted");
+    CHECK((seen & 0x100u) == 0u, "auto_baud_interrupt_status was asserted");
+    CHECK((seen & 0x200u) == 0u,
+          "new_receive_time_out_interrupt_status was asserted");
+    CHECK((seen & ~0x17u) == 0u,
+          "UTRSTAT reported a bit outside {0,1,2,4} (0x%08x)", seen);
+    CHECK(u.rx_dropped != 0u,
+          "the FIFO never overran, so the error bits were never tested");
 }
 
 static void test_suppression_withholds_the_line_and_nothing_else(void) {
@@ -565,6 +824,8 @@ static void test_suppression_withholds_the_line_and_nothing_else(void) {
     s5l8900_t m;
     CHECK(s5l8900_init(&m, 0, 1u << 20), "machine init failed");
     m.bus.write32(m.bus.ctx, S5L8900_VIC0_BASE + VIC_INTENABLE, 1u << 28);
+    m.bus.write32(m.bus.ctx, S5L8900_UART4_BASE + UART_UCON,
+                  UCON_RX_INT_ENABLE);
 
     s5l_uart_set_rx_irq(&m.uart4, false);
     CHECK(s5l_uart_rx_push(&m.uart4, 0x7eu), "push into an empty FIFO failed");
@@ -577,12 +838,17 @@ static void test_suppression_withholds_the_line_and_nothing_else(void) {
     CHECK(!m.cpu.irq_line, "suppressed, but the core saw an IRQ");
 
     /* Everything the guest can actually observe is unchanged: the byte is in
-     * the FIFO, UTRSTAT still says "receive data ready", UFSTAT still counts
-     * it, and URXH still hands it over. */
+     * the FIFO, UTRSTAT still says "receive data ready" AND still shows the
+     * latched cause, UFSTAT still counts it, and URXH still hands it over. The
+     * latch in particular must not be suppressed — a control that quietly
+     * changed the register file would be measuring two things at once. */
     CHECK(s5l_uart_rx_irq(&m.uart4) == false, "s5l_uart_rx_irq() ignored it");
     uint32_t tr = m.bus.read32(m.bus.ctx, S5L8900_UART4_BASE + UART_UTRSTAT);
     CHECK((tr & 1u) != 0u,
           "suppression changed UTRSTAT bit 0 (0x%08x) -- it must not", tr);
+    CHECK((tr & UTRSTAT_RX_INT) != 0u,
+          "suppression stopped the arrival latching (0x%08x) -- it must not",
+          tr);
     uint32_t fs = m.bus.read32(m.bus.ctx, S5L8900_UART4_BASE + UART_UFSTAT);
     CHECK((fs & 0x0fu) == 1u,
           "suppression changed UFSTAT's count (0x%08x) -- it must not", fs);
@@ -591,6 +857,24 @@ static void test_suppression_withholds_the_line_and_nothing_else(void) {
     CHECK(m.uart4.rx_reads == 1u && m.uart4.rx_pushed == 1u &&
           m.uart4.rx_dropped == 0u && m.uart4.rx_underruns == 0u,
           "suppression disturbed the receive counters");
+
+    /* The acknowledge and the next edge behave identically too, which is the
+     * half of "identical register state" that only exists since the latch did.
+     * A control that quietly stopped latching would be measuring two things. */
+    m.bus.write32(m.bus.ctx, S5L8900_UART4_BASE + UART_UTRSTAT,
+                  tr & FILTER_RX_MASK);
+    CHECK((m.bus.read32(m.bus.ctx, S5L8900_UART4_BASE + UART_UTRSTAT) &
+           UTRSTAT_RX_INT) == 0u,
+          "suppression changed what a write-one-to-clear store does");
+    CHECK(s5l_uart_rx_push(&m.uart4, 0x7eu),
+          "push after the acknowledge failed");
+    CHECK((m.bus.read32(m.bus.ctx, S5L8900_UART4_BASE + UART_UTRSTAT) &
+           UTRSTAT_RX_INT) != 0u,
+          "suppression changed how the next arrival re-latches");
+    s5l8900_tick(&m, 1u);
+    raw = m.bus.read32(m.bus.ctx, S5L8900_VIC0_BASE + VIC_RAWINTR);
+    CHECK((raw & (1u << 28)) == 0u,
+          "suppressed, but the re-latched edge reached line 28 (0x%08x)", raw);
 
     /* And it is reversible in the same process, so a harness cannot get stuck
      * in the control configuration. */
@@ -625,6 +909,10 @@ static void test_suppression_defaults_off_and_reset_clears_it(void) {
     memset(&u, 0xa5, sizeof u);
     s5l_uart_reset(&u);
     CHECK(!u.rx_irq_suppressed, "a reset port defaulted to SUPPRESSED");
+    /* The driver's enable, because the default under test is the SUPPRESSION
+     * policy and not the gate: a port at reset asserts nothing whatever the
+     * policy says, which test_the_line_is_gated_by_ucon owns. */
+    s5l_uart_write(&u, UART_UCON, UCON_RX_INT_ENABLE);
     CHECK(s5l_uart_rx_push(&u, 0x41u), "push failed");
     CHECK(s5l_uart_rx_irq(&u), "the default did not assert for a queued byte");
 
@@ -636,6 +924,10 @@ static void test_suppression_defaults_off_and_reset_clears_it(void) {
     CHECK(!u.rx_irq_suppressed,
           "reset left the policy bit set -- reset must be total, and the flag "
           "must therefore be applied after s5l8900_init()");
+    CHECK(u.utrstat_pending == 0u,
+          "reset left a latched interrupt cause (0x%08x) -- a port that has "
+          "just been reset owes nobody an edge", u.utrstat_pending);
+    s5l_uart_write(&u, UART_UCON, UCON_RX_INT_ENABLE);
     CHECK(s5l_uart_rx_push(&u, 0x42u), "push failed after reset");
     CHECK(s5l_uart_rx_irq(&u), "reset did not restore the default");
 
@@ -723,12 +1015,15 @@ static void test_the_loop_closes_through_the_uart(void) {
      * lose data here.
      *
      * The "guest" below is deliberately the awkward shape rather than the
-     * convenient one: it stores one octet, then drains only what UTRSTAT says
-     * is ready, one byte at a time, through the bus.
+     * convenient one: it stores one octet, then services the line the way
+     * AppleS5L8900XSerial's filter does — acknowledge FIRST, drain SECOND —
+     * one byte at a time, through the bus.
      */
     s5l8900_t m;
     CHECK(s5l8900_init(&m, 0, 1u << 20), "machine init failed");
     m.bus.write32(m.bus.ctx, S5L8900_VIC0_BASE + VIC_INTENABLE, 1u << 28);
+    m.bus.write32(m.bus.ctx, S5L8900_UART4_BASE + UART_UCON,
+                  UCON_RX_INT_ENABLE);
 
     ppp_peer_t p;
     ppp_init(&p, NULL);
@@ -760,9 +1055,26 @@ static void test_the_loop_closes_through_the_uart(void) {
         uint32_t raw = m.bus.read32(m.bus.ctx, S5L8900_VIC0_BASE + VIC_RAWINTR);
         if (raw & (1u << 28)) {
             irq_seen++;
-            /* One byte per interrupt, which is the harshest realistic shape. */
-            if ((m.bus.read32(m.bus.ctx, S5L8900_UART4_BASE + UART_UTRSTAT) & 1u)
-                && ngot < sizeof got)
+            /*
+             * ACKNOWLEDGE FIRST, exactly as the filter at 0xc065eecc does: read
+             * UTRSTAT, AND with the enable mask, store the result back, and only
+             * then look at what it found. That order is what makes an octet
+             * arriving mid-drain a fresh edge instead of one the acknowledge
+             * swallows — and the pump below pushes on every step, so it happens.
+             *
+             * THEN drain on the live ready bit until the FIFO is empty. "One
+             * byte per interrupt" was a viable driver shape against the level
+             * this port used to assert and is not one against an edge: nothing
+             * re-announces an octet that is already in the FIFO. Bit 0 is what
+             * the hardware offers instead, and this is the loop that uses it.
+             */
+            uint32_t tr = m.bus.read32(m.bus.ctx,
+                                       S5L8900_UART4_BASE + UART_UTRSTAT);
+            m.bus.write32(m.bus.ctx, S5L8900_UART4_BASE + UART_UTRSTAT,
+                          tr & FILTER_RX_MASK);
+            while ((m.bus.read32(m.bus.ctx,
+                                 S5L8900_UART4_BASE + UART_UTRSTAT) & 1u) &&
+                   ngot < sizeof got)
                 got[ngot++] = (uint8_t)m.bus.read32(
                     m.bus.ctx, S5L8900_UART4_BASE + UART_URXH);
         }
@@ -913,6 +1225,22 @@ static void test_snapshot_carries_the_receive_fifo(void) {
           "the refused push was not recorded (%llu)",
           (unsigned long long)r.uart4.rx_dropped);
 
+    /*
+     * UTRSTAT's latch is DERIVED on restore rather than serialised — which is
+     * why this change did not move SNAPSHOT_VERSION and why every checkpoint
+     * written before it still loads. The direction is the whole argument: a
+     * non-empty FIFO comes back ARMED, because restoring it clear would lose an
+     * edge and leave octets the peer has already counted as delivered waiting
+     * for an arrival that may never come, while restoring it set costs at worst
+     * one spurious interrupt into a driver that will find real data waiting.
+     */
+    CHECK(r.uart4.utrstat_pending == UTRSTAT_RX_INT,
+          "a restored non-empty FIFO came back with no latched cause (0x%08x)",
+          r.uart4.utrstat_pending);
+    CHECK(r.uart0.utrstat_pending == 0u,
+          "a restored EMPTY FIFO invented a latched cause (0x%08x)",
+          r.uart0.utrstat_pending);
+
     /* And the restored port really delivers the same next byte. */
     CHECK(s5l_uart_read(&r.uart4, UART_URXH) ==
           s5l_uart_read(&m.uart4, UART_URXH),
@@ -978,6 +1306,9 @@ int main(void) {
     test_receive_fifo_is_ordered_and_bounded();
     test_a_utrstat_store_cannot_discard_a_queued_byte();
     test_uart4_asserts_vic_line_28_for_a_waiting_byte();
+    test_the_receive_interrupt_is_an_edge_not_a_level();
+    test_the_line_is_gated_by_ucon();
+    test_the_causes_this_model_refuses_stay_clear();
     test_suppression_withholds_the_line_and_nothing_else();
     test_suppression_defaults_off_and_reset_clears_it();
     test_uart0_receive_is_deliberately_not_wired();

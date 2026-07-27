@@ -16,12 +16,33 @@
 #include "soc.h"
 #include <string.h>
 
-/* UTRSTAT bits: [0] receive data ready, [1] TX buffer empty, [2] transmitter
- * empty. We report the transmitter permanently drained so guest spin-loops of
- * the form "wait until TX empty, then write" always make progress. */
+/*
+ * UTRSTAT's LIVE half, named as Apple names it in pexpert/pexpert/arm/
+ * apple_uart_regs.h: receive_buffer_data_ready, transmit_buffer_empty,
+ * transmitter_empty. Status with a source behind it, derived on every read. We
+ * report the transmitter permanently drained so guest spin-loops of the form
+ * "wait until TX empty, then write" always make progress.
+ */
 #define UTRSTAT_RX_READY     (1u << 0)
-#define UTRSTAT_TX_EMPTY     (1u << 2)
 #define UTRSTAT_TX_BUF_EMPTY (1u << 1)
+#define UTRSTAT_TX_EMPTY     (1u << 2)
+
+/*
+ * UTRSTAT's LATCHED half. Only UTRSTAT_RX_INT (soc.h) is ever set — see the UART
+ * block there for why the other four are not, and for what asserting 0x100 in
+ * particular would set running. UTRSTAT_LATCHED is the whole of the set the
+ * driver's enable mask at this->0x9c can hold, and so the whole of what an
+ * enable may arm; it is written out rather than derived so that adding a bit is
+ * a decision somebody makes here.
+ */
+#define UTRSTAT_LATCHED      0x178u      /* 0x8|0x10|0x20|0x40|0x100  */
+
+/*
+ * Each enable sits eight bits above the status bit it gates: UCON 0x1000 enables
+ * UTRSTAT 0x10, 0x800 enables 0x8, and so on up to 0x10000 for 0x100. All five
+ * pairs come out of the one function at 0xc065f0e4 that writes both registers.
+ */
+#define UCON_ENABLE_SHIFT    8u
 
 /* UFSTAT: bits[3:0] receive count, bit 8 receive full, bits[7:4] transmit
  * count, bit 9 transmit full. The transmitter drains instantly, so its two
@@ -48,13 +69,27 @@ unsigned s5l_uart_rx_space(const s5l_uart_t *u) {
     return UART_RX_FIFO - u->rx_count;
 }
 
+/* Which latched causes UCON has armed. Nothing in this model ever latches a bit
+ * outside UTRSTAT_LATCHED, so the mask is documentation as much as a guard. */
+static uint32_t utrstat_enables(const s5l_uart_t *u) {
+    return (u->ucon >> UCON_ENABLE_SHIFT) & UTRSTAT_LATCHED;
+}
+
 bool s5l_uart_rx_irq(const s5l_uart_t *u) {
     /* The suppression is applied HERE and nowhere else, so that every other
-     * observable — UTRSTAT bit 0, UFSTAT's count, what URXH dequeues — is bit
-     * for bit what it is with the interrupt on. That is what makes the two runs
-     * a controlled pair: the VIC line is the only difference between them. */
-    if (u && u->rx_irq_suppressed) return false;
-    return u && u->rx_count != 0u;
+     * observable — UTRSTAT's levels and its latch, UFSTAT's count, what URXH
+     * dequeues, what a W1C store clears — is bit for bit what it is with the
+     * interrupt on. That is what makes the two runs a controlled pair: the VIC
+     * line is the only difference between them. */
+    if (!u || u->rx_irq_suppressed) return false;
+    /*
+     * The line, gated. A driver that has not set UCON's enable never sees this
+     * cause, which is how the hardware works and is also the only reason a
+     * silent gate is safe to model: the enable and the filter's mask are set by
+     * the same straight-line code at 0xc065f0e4, so a driver that reads the bit
+     * has enabled it.
+     */
+    return (u->utrstat_pending & utrstat_enables(u)) != 0u;
 }
 
 bool s5l_uart_rx_push(s5l_uart_t *u, uint8_t byte) {
@@ -70,6 +105,15 @@ bool s5l_uart_rx_push(s5l_uart_t *u, uint8_t byte) {
     u->rx[(unsigned)(u->rx_head + u->rx_count) % UART_RX_FIFO] = byte;
     u->rx_count++;
     u->rx_pushed++;
+    /*
+     * THE EDGE. Every arrival latches, not just the empty->non-empty one: after
+     * an acknowledge the driver may have drained only part of the FIFO, and a
+     * latch that only fired on the transition would leave the remainder with
+     * nothing to announce it. Setting a bit that is already set is a no-op, so
+     * two bytes still cost the driver one acknowledge — the latch is a status
+     * bit, not a count of arrivals.
+     */
+    u->utrstat_pending |= UTRSTAT_RX_INT;
     return true;
 }
 
@@ -81,8 +125,12 @@ uint32_t s5l_uart_read(s5l_uart_t *u, uint32_t off) {
         case UART_UMCON:   return u->umcon;
         case UART_UBRDIV:  return u->ubrdiv;
         case UART_UTRSTAT:
+            /* Levels derived now, latch as it stands. Reading does NOT clear
+             * the latch: the filter at 0xc065eecc reads this register, masks it
+             * and writes the result BACK, and that store is the acknowledge. */
             return UTRSTAT_TX_EMPTY | UTRSTAT_TX_BUF_EMPTY |
-                   (u->rx_count ? UTRSTAT_RX_READY : 0u);
+                   (u->rx_count ? UTRSTAT_RX_READY : 0u) |
+                   u->utrstat_pending;
         case UART_UERSTAT: return 0;
         case UART_UFSTAT:
             /* The count field is four bits wide and the depth is sixteen, so a
@@ -120,10 +168,29 @@ void s5l_uart_write(s5l_uart_t *u, uint32_t off, uint32_t val) {
         case UART_UTXH:
             if (u->tx_len < UART_TX_BUFFER - 1) u->tx[u->tx_len++] = (char)(val & 0xff);
             break;
-        /* UART_UTRSTAT is write-one-to-clear on the hardware and is dropped
-         * here on purpose — every bit this model reports is a level with a live
-         * source behind it, and clearing bit 0 while a byte still sat in the
-         * FIFO would lose that byte. See the receive-path block in soc.h. */
+        case UART_UTRSTAT:
+            /*
+             * THE ACKNOWLEDGE, write-one-to-clear — Apple's own
+             * apple_uart_ack_irq() builds a zero word, sets one status bit and
+             * stores it, and the filter at 0xc065eecc stores back what it read
+             * ANDed with its enable mask.
+             *
+             * It clears the named pending bits and NOTHING else. The levels are
+             * not stored in the latch at all, so a store with bit 0 set — which
+             * the filter cannot even produce, since 0x1 can never enter its mask
+             * — is structurally incapable of stranding a queued byte.
+             *
+             * And it clears 0x10 whether or not the FIFO still holds data. That
+             * is the whole repair: this line is lowered by the acknowledge and
+             * by nothing else, because the filter returns 0 for a receive cause
+             * and IOFilterInterruptEventSource::disableInterruptOccurred then
+             * returns without masking. A latch re-armed from a non-empty FIFO
+             * would re-raise a level nobody masks, which is exactly the storm
+             * run94 measured. The remaining bytes are announced by UTRSTAT bit
+             * 0, which is live and which the driver's drain loop reads.
+             */
+            u->utrstat_pending &= ~val;
+            break;
         default: break;
     }
 }

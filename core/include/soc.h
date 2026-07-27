@@ -214,7 +214,9 @@
  *                   FIFO depth is 16.
  *   UTRSTAT (+0x10) is NOT a read-only status word. The interrupt filter at
  *                   0xc065eed8 reads it, masks, and writes the result back,
- *                   so the hardware register is write-one-to-clear.
+ *                   so the hardware register is write-one-to-clear. Apple's
+ *                   own apple_uart_ack_irq() acknowledges the same way: build
+ *                   a zero word, set one status bit, store it.
  *
  * THE RECEIVE PATH, and what is modelled versus what is deliberately not.
  *
@@ -233,45 +235,51 @@
  *            encoding, and the reason the full bit exists at all.
  *   UTRSTAT  bit 0 = "receive data ready" = rx_count != 0. A LEVEL derived from
  *            the FIFO, not a latch: it clears when the guest drains URXH.
+ *            bit 4 = the LATCHED receive interrupt, set by an arriving byte and
+ *            cleared only by the driver's own store. The two halves of this
+ *            register are the subject of the block below.
  *   URXH     dequeues one byte, or answers 0 when empty. Answering anything
  *            else for an empty FIFO would be inventing a byte the host never
  *            sent, which is the one thing these models may not do.
  *
- * UTRSTAT stores are still dropped. AppleS5L8900XSerial's interrupt filter at
- * 0xc065eecc reads the register, masks, and writes the result back, so the
- * hardware register is write-one-to-clear — but every bit this model reports is
- * a level with a live source behind it, and a W1C write cannot clear a level.
- * Accepting the store and clearing bit 0 while a byte still sat in the FIFO
- * would lose that byte silently. The real latch layout is NOT known; only the
- * fact that the register is W1C is confirmed. Trap what you do not implement:
- * this drops the store and says so, rather than guessing a latch set.
- *
- * THE INTERRUPT IS NOT GATED BY UCON, and that is a decision rather than an
- * oversight. On a Samsung S3C part UCON bits[1:0] select the receive mode and
- * would gate the line; the S5L8900's UCON bit layout is not confirmed from
- * Apple's binary, only its value on uart0 (0x00000405, docs/BOOTLOG.md stage
- * 2). Gating on a guessed bit fails SILENTLY — the line never asserts and the
- * port looks dead — whereas not gating can at worst assert a line for a FIFO
- * that genuinely has a byte in it. The host's decision to attach a peer is the
- * gate this model actually has, and it is the one it can defend.
- *
  * ---------------------------------------------------------------------------
- * THAT DEFENCE DID NOT SURVIVE CONTACT. Read out of the binary, not inferred:
+ * UTRSTAT IS TWO REGISTERS IN ONE, and which half a bit is in decides this
+ * port's whole interrupt behaviour. Apple names every bit in current XNU
+ * (pexpert/pexpert/arm/apple_uart_regs.h); Linux names four of the same ones
+ * (APPLE_S5L_UTRSTAT_RXTHRESH = BIT(4), RXTO_LEGACY = BIT(3)) and m1n1 agrees:
+ *
+ *   0x001 receive_buffer_data_ready     0x010 receive_interrupt_status
+ *   0x002 transmit_buffer_empty         0x020 transmit_interrupt_status
+ *   0x004 transmitter_empty             0x040 error_interrupt_status
+ *   0x008 receive_time_out_int_status   0x100 auto_baud_interrupt_status
+ *                                       0x200 new_receive_time_out_int_status
+ *
+ * The first three are LEVELS with a live source behind them — status, which is
+ * what a polled console loop reads and what the three lines above describe. The
+ * rest are LATCHED interrupt causes: "internal interrupt sources are treated as
+ * edge-triggered, even though the IRQ output is level-triggered" (the upstream
+ * Linux commit for this variant). They are also exactly the set the driver's
+ * own enable mask can hold, which is the second, independent way the two halves
+ * were told apart here — read out of the binary, not inferred:
  *
  *   0xc065eecc  the filter, registered as the IOFilterInterruptEventSource
  *               filter action by AppleS5L8900XSerial::start at 0xc065e734.
  *               It computes  r5 = UTRSTAT(+0x10) & this->0x9c , writes r5 back
- *               to +0x10, and then tests ONLY bits 0x100, 0x40, 0x8, 0x10 and
- *               0x20. Its return value is r6, and the sole `mov r6, #1` is on
- *               the 0x8 branch, so r5 == 0 returns 0.
+ *               to +0x10 — THAT WRITE IS THE ACKNOWLEDGE — and then tests ONLY
+ *               bits 0x100, 0x40, 0x8, 0x10 and 0x20. Its return value is r6,
+ *               and the sole `mov r6, #1` is on the 0x8 branch, so r5 == 0
+ *               returns 0.
  *   0xc065f0e4  the only writer of this->0x9c in the whole kext (two stores,
  *               no branch between them). Three boolean arguments contribute
  *               0x18, 0x20 and 0x140 respectively, and each also sets UCON
  *               (+0x04) bits 0x1880, 0x2000 and 0x14000. So the mask can hold
- *               ONLY {0x8,0x10,0x20,0x40,0x100} — bit 0x1 can never enter it,
- *               and the UCON gate this model declined to guess is legible
- *               after all: it is set by the same instruction stream as the
- *               status bit it gates.
+ *               ONLY {0x8,0x10,0x20,0x40,0x100} — bit 0x1 can never enter it —
+ *               and every enable sits eight bits above the status bit it gates:
+ *               0x1000 enables 0x10, 0x800 enables 0x8, 0x2000 enables 0x20,
+ *               0x4000 enables 0x40, 0x10000 enables 0x100. (UCON 0x80 is
+ *               rx_time_out_enable, and 0x200's enable is UCON bit 9, outside
+ *               the rule — neither matters while neither status bit is ever
+ *               asserted.)
  *   0xc018b70a  IOFilterInterruptEventSource::disableInterruptOccurred returns
  *               HERE when the filter returns 0 — before the
  *               provider->disableInterrupt(source) at 0xc018b718. A level that
@@ -281,17 +289,45 @@
  * instructions that touch +0x10 at all (the read and the write-back above).
  * NOTHING in this driver tests UTRSTAT bit 0.
  *
- * So the bit this model asserts is a bit the driver cannot see, and the level
- * it leaves asserted is one the driver's own path declines to mask. run94:
- * 6,393,888 IRQ entries, 44.5% of the run in IRQ mode, and
- * disableInterruptOccurred hot in the profile — which is also what settles
- * level-vs-edge, since IOInterruptEventSource::init only installs that handler
- * for kIOInterruptTypeLevel. run80, before this path existed: 2,614 and 0.2%.
+ * WHAT THAT COST. This model used to assert bit 0 as the interrupt, i.e. a bit
+ * that can never enter the driver's mask: the filter therefore returned 0, the
+ * level was never masked, and the VIC re-dispatched it forever. run94: 6,393,888
+ * IRQ entries, 44.5% of the run in IRQ mode, disableInterruptOccurred hot in
+ * the profile, and one octet of PPP transmitted instead of forty-seven. run80,
+ * before the receive path existed: 2,614 and 0.2%. Withholding the line
+ * (--no-uart4-rx-irq) restored run80's behaviour with byte delivery unchanged,
+ * which is what turned the explanation into a demonstrated cause.
  *
- * NOTHING ABOVE IS CHANGED YET, deliberately. --no-uart4-rx-irq exists to run
- * the control that turns this from a very good explanation into a demonstrated
- * cause, and the repair is not worth designing until that run says which of
- * the three choices in this comment actually has to move.
+ * SO: 0x10 IS LATCHED, AND NOTHING ELSE IS.
+ *
+ *   - A byte arriving in the receive FIFO sets pending bit 0x10. Every arrival,
+ *     not just the empty->non-empty one: a driver that acknowledges, drains
+ *     part of the FIFO and stops would otherwise never be told about the rest.
+ *   - Bits 0, 1 and 2 stay LEVELS and are never latched. They are status, the
+ *     polled console path depends on them, and bit 0 is what a drain loop tests
+ *     to know when to stop.
+ *   - A store to UTRSTAT clears exactly the pending bits set in the value. It
+ *     cannot touch a level, because no level is stored in the latch.
+ *   - The VIC line is (pending & the UCON enables), so a driver that has not
+ *     enabled the receive interrupt never sees it. The gate this model once
+ *     declined to guess is legible now: 0xc065f0e4 sets the enable and the mask
+ *     in the same straight-line instruction stream.
+ *   - 0x8, 0x40, 0x100 and 0x200 are NEVER asserted. 0x8's handler reports an
+ *     overrun that did not happen; 0x100 runs an auto-baud calculation over
+ *     +0x2c, which this model answers 0 from and which is only safe while that
+ *     branch is never taken; 0x200 is newer than this kext, which neither tests
+ *     it nor enables it.
+ *
+ * THE ACKNOWLEDGE CLEARS 0x10 EVEN WITH THE FIFO STILL FULL, and that is the
+ * load-bearing half of the repair rather than a corner case. The filter's
+ * write-back is the only thing that lowers this line: it returns 0 for a receive
+ * interrupt (the sole `mov r6, #1` is on the 0x8 branch), so
+ * disableInterruptOccurred returns before disableInterrupt() and NOTHING MASKS
+ * the line. Re-arming the latch because the FIFO still held data would put the
+ * level straight back up against a driver that has already declined to mask it,
+ * which is run94 again with a different bit number. The byte is not stranded by
+ * this: bit 0 is still a live level, so the driver's drain loop keeps reading
+ * until the FIFO is empty, and the next arrival latches a fresh edge.
  * ---------------------------------------------------------------------------
  *
  * FLOW CONTROL is not modelled and does not need to be: uart1 and uart4 carry
@@ -318,6 +354,16 @@
 #define UART_UTXH    0x20u
 #define UART_URXH    0x24u
 #define UART_UBRDIV  0x28u
+
+/*
+ * UTRSTAT's latched receive cause, Apple's own receive_interrupt_status. It is
+ * named in the header rather than kept private to core/src/soc/uart.c for one
+ * reason: core/src/snapshot.c re-derives it on restore, and a bare 0x10 there
+ * would be a magic number in the one file where a wrong bit is silent. Every
+ * other bit of the register stays private, because uart.c is the only place
+ * entitled to decide that one of them is set.
+ */
+#define UTRSTAT_RX_INT 0x010u
 
 #define UART_TX_BUFFER 8192
 
@@ -362,6 +408,24 @@ typedef struct {
      * adding a second one.
      */
     bool     rx_irq_suppressed;
+
+    /*
+     * UTRSTAT's LATCHED half — today only 0x10, receive_interrupt_status. Set
+     * by an arriving byte, cleared by the driver's write-one-to-clear store,
+     * and ANDed with the UCON enables to produce the VIC line. The levels (bits
+     * 0, 1, 2) are deliberately not here: they are derived from the FIFO on
+     * every read, which is what makes "a W1C store cannot clear a level" a
+     * property of the layout rather than a rule someone has to remember.
+     *
+     * Placed last on purpose. It lands in the tail padding this struct already
+     * had, so sizeof stays 8280 and core/src/snapshot.c's guard — and the
+     * machine's, which contains two of these — do not move.
+     *
+     * NOT serialised, for the reason `level_dirty` is not: snap_uart() DERIVES
+     * it on restore, from the FIFO that does travel, in the only direction that
+     * cannot lose an interrupt. See the note there before changing that.
+     */
+    uint32_t utrstat_pending;
 } s5l_uart_t;
 
 void     s5l_uart_reset(s5l_uart_t *u);
@@ -381,27 +445,36 @@ bool     s5l_uart_rx_push(s5l_uart_t *u, uint8_t byte);
 /* How many more bytes s5l_uart_rx_push() would accept right now. */
 unsigned s5l_uart_rx_space(const s5l_uart_t *u);
 /*
- * The receive interrupt as a LEVEL: asserted while the FIFO holds anything.
- * Level and not edge for the reason core/src/soc/vic.c gives — an edge device
- * that re-raises inside the handler loses the interrupt — and because a level
- * that only clears when the guest drains URXH cannot lose a byte.
+ * The port's interrupt line: (UTRSTAT's latched half & the UCON enables) != 0.
+ *
+ * NOT "the FIFO is non-empty". The latch is set by an arriving byte and cleared
+ * by the driver's acknowledge, so this can be false with bytes still queued —
+ * which is the point, because the driver's filter declines to mask the line and
+ * only the acknowledge can lower it. The UART block above has the evidence and
+ * the run94 measurement that forced it.
+ *
+ * The line is still a LEVEL as far as core/src/soc/vic.c is concerned, exactly
+ * as the hardware's IRQ output is: it stays asserted until the acknowledge,
+ * so a handler cannot miss an edge that arrived while it was masked.
  */
 bool     s5l_uart_rx_irq(const s5l_uart_t *u);
 /*
- * Suppress that level without touching anything else: bytes still arrive, the
- * FIFO still fills, UTRSTAT bit 0 and UFSTAT still report them, URXH still
- * dequeues them — only s5l_uart_rx_irq() is forced false, so the VIC line never
- * asserts. `enabled` is the interrupt, so s5l_uart_set_rx_irq(u, false) is the
- * suppression; true restores the default.
+ * Suppress that line without touching anything else: bytes still arrive, the
+ * FIFO still fills, UTRSTAT reports both its levels and its latch, UFSTAT still
+ * counts, URXH still dequeues, a W1C store still acknowledges — only
+ * s5l_uart_rx_irq() is forced false, so the VIC line never asserts. `enabled` is
+ * the interrupt, so s5l_uart_set_rx_irq(u, false) is the suppression; true
+ * restores the default.
  *
  * This exists for ONE experiment, and it is a control rather than a fix. run94
- * (with this path enabled) took 6,393,888 IRQ entries and spent 44.5% of the
- * run in IRQ mode, against run80's 2,614 and 0.2% before the receive path
- * existed; suppressing the line reproduces run80's interrupt behaviour while
- * leaving byte delivery exactly as it is, which is the only way to separate
- * "the interrupt broke the guest" from "the byte did". Neither answer is
- * assumed here. If the interrupt is the cause, the repair belongs in the bits
- * this model reports — not in this flag.
+ * (with this path enabled, asserting the wrong bit) took 6,393,888 IRQ entries
+ * and spent 44.5% of the run in IRQ mode, against run80's 2,614 and 0.2% before
+ * the receive path existed; suppressing the line reproduced run80's interrupt
+ * behaviour while leaving byte delivery exactly as it was, which is the only
+ * way to separate "the interrupt broke the guest" from "the byte did". It said
+ * the interrupt, and the repair went where that answer pointed — into the bits
+ * this model reports, not into this flag. The flag stays because that control
+ * is the one to re-run the day this line misbehaves again.
  *
  * MUST be called AFTER s5l8900_init(), which resets every port and would clear
  * it. There is no second reset path today; if one appears, it will clear this
