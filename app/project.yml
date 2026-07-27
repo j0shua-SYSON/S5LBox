@@ -39,6 +39,31 @@ targets:
       # phone binary.
       - path: ../tools/sha256.c
         group: core
+      # BOOTING APPLE'S KERNEL needs five more of those files, and no more.
+      # Each is portable C that already has a host test and is already built by
+      # core/CMakeLists.txt, so none of it is first compiled here:
+      #
+      #   ios3_bringup_gate.c  binds the gate below to core/src/boot/bringup.c
+      #   ios3_kernel_patch.c  the exact 7E18 identity gate and its five patch
+      #                        sites -- host POLICY, deliberately not in the
+      #                        portable core (see core/include/md_bridge.h)
+      #   guest_patch.c        the bounded, all-or-nothing patch transaction
+      #   file_block.c         the writable work image as a vm_block_t
+      #   rootfs_work.c        makes that work image from the imported rootfs
+      #
+      # They are listed one by one rather than as `path: ../tools` because the
+      # rest of that directory is desktop harness code -- bootkernel.c alone is
+      # 27,000 lines of diagnostics -- which has no business in a phone binary.
+      - path: ../tools/ios3_bringup_gate.c
+        group: core
+      - path: ../tools/ios3_kernel_patch.c
+        group: core
+      - path: ../tools/guest_patch.c
+        group: core
+      - path: ../tools/file_block.c
+        group: core
+      - path: ../tools/rootfs_work.c
+        group: core
     # Linked explicitly rather than relying on module auto-linking: the display
     # path calls into CoreGraphics (CGImageCreate) and QuartzCore (CALayer
     # filters) directly, and "it happened to link via UIKit" is not something to
@@ -59,6 +84,15 @@ targets:
           - $(SRCROOT)/../core/include
           - $(SRCROOT)/../tools
         GCC_C_LANGUAGE_STANDARD: c11
+        # tools/file_block.c does 64-bit random access into a ~450 MB work
+        # image. iOS's off_t is already 64-bit, so this is belt rather than
+        # braces -- but core/CMakeLists.txt sets it for the same file on every
+        # non-Windows host, and a build that differs from the tested one only
+        # in a width is the kind of difference that shows up as a silently
+        # truncated root filesystem.
+        GCC_PREPROCESSOR_DEFINITIONS:
+          - $(inherited)
+          - _FILE_OFFSET_BITS=64
         # Stated rather than inherited: the Objective-C sources are written for
         # ARC, and would leak (or double-free) under manual retain/release.
         CLANG_ENABLE_OBJC_ARC: YES

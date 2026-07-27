@@ -4,6 +4,7 @@
 # holds open: a 2-hour run in /build locks bootkernel.exe, and verifying a fix
 # meanwhile needs somewhere else to link.
 /build-verify/
+/build-net/
 **/build/
 **/dist/
 **/DerivedData/

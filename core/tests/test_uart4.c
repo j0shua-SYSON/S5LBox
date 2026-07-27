@@ -48,6 +48,7 @@
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed.
  */
 #include "soc.h"
+#include "ppp.h"
 #include "snapshot.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -334,17 +335,21 @@ static void test_uart4_registers_route_through_the_bus(void) {
     s5l8900_free(&m);
 }
 
-static void test_uart4_raises_no_interrupt_line(void) {
+static void test_transmitting_alone_raises_no_interrupt_line(void) {
     s5l8900_t m;
     CHECK(s5l8900_init(&m, 0, 1u << 20), "machine init failed");
 
     /*
-     * The nub's device-tree `interrupts` property says VIC line 28. This model
-     * is transmit-only and must never assert it — there is no receive FIFO to
-     * fill and no transmit-room event to report, because room is always
-     * available. Enable the line, drive a whole frame, and require the VIC to
-     * stay quiet. If a receive path ever lands, THIS is the test that has to
-     * be rewritten rather than deleted.
+     * The nub's device-tree `interrupts` property says VIC line 28, and this
+     * model now CAN assert it — but only for a receive FIFO with something in
+     * it. Transmitting must still raise nothing: room is always available, so
+     * there is no transmit-room event, and this port's whole S0 milestone was
+     * measured on runs where nothing asserted anything.
+     *
+     * This test predates the receive path and was rewritten rather than deleted
+     * when it landed, which is what its original comment asked for. The claim
+     * it makes is narrower now and more useful: not "this port cannot
+     * interrupt" but "transmitting does not".
      */
     m.bus.write32(m.bus.ctx, S5L8900_VIC0_BASE + VIC_INTENABLE, 1u << 28);
     for (size_t i = 0; i < sizeof LCP_CONFREQ_PREFIX; i++)
@@ -354,9 +359,367 @@ static void test_uart4_raises_no_interrupt_line(void) {
 
     uint32_t raw = m.bus.read32(m.bus.ctx, S5L8900_VIC0_BASE + VIC_RAWINTR);
     CHECK((raw & (1u << 28)) == 0u,
-          "uart4 asserted VIC line 28 (RAWINTR=0x%08x)", raw);
+          "transmitting asserted VIC line 28 (RAWINTR=0x%08x)", raw);
     CHECK(!m.cpu.irq_line,
-          "a transmit-only port raised the core's IRQ line");
+          "transmitting raised the core's IRQ line");
+
+    s5l8900_free(&m);
+}
+
+/* --------------------------------------------------------------------------
+ * The receive path. Nothing in core/ can produce a byte for it, which is the
+ * property most of these cases are about: a run with no host peer must be
+ * indistinguishable from the transmit-only model this port used to be.
+ */
+
+static void test_no_host_peer_means_no_receive_anything(void) {
+    s5l8900_t m;
+    CHECK(s5l8900_init(&m, 0, 1u << 20), "machine init failed");
+
+    /*
+     * Run a machine hard — a whole frame out, a thousand ticks, the interrupt
+     * line armed — and require every receive-side observable to be exactly
+     * what the transmit-only model answered. This is the regression that
+     * protects ~90 recorded runs in docs/BOOTLOG.md from being retroactively
+     * described by a different machine.
+     */
+    m.bus.write32(m.bus.ctx, S5L8900_VIC0_BASE + VIC_INTENABLE,
+                  (1u << 28) | (1u << 24));
+    for (size_t i = 0; i < sizeof LCP_CONFREQ_PREFIX; i++)
+        m.bus.write32(m.bus.ctx, S5L8900_UART4_BASE + UART_UTXH,
+                      LCP_CONFREQ_PREFIX[i]);
+    s5l8900_tick(&m, 1000u);
+
+    uint32_t trstat = m.bus.read32(m.bus.ctx,
+                                   S5L8900_UART4_BASE + UART_UTRSTAT);
+    CHECK((trstat & 1u) == 0u,
+          "UTRSTAT claims receive data with no host peer (0x%08x)", trstat);
+    CHECK(m.bus.read32(m.bus.ctx, S5L8900_UART4_BASE + UART_UFSTAT) == 0u,
+          "UFSTAT is non-zero with both FIFOs empty");
+    CHECK(m.bus.read32(m.bus.ctx, S5L8900_UART4_BASE + UART_URXH) == 0u,
+          "URXH invented a byte");
+    uint32_t raw = m.bus.read32(m.bus.ctx, S5L8900_VIC0_BASE + VIC_RAWINTR);
+    CHECK((raw & ((1u << 28) | (1u << 24))) == 0u,
+          "a UART asserted its line with an empty FIFO (RAWINTR=0x%08x)", raw);
+    CHECK(!m.cpu.irq_line, "the core's IRQ line rose with no host peer");
+    CHECK(m.uart4.rx_pushed == 0u && m.uart4.rx_dropped == 0u &&
+          m.uart4.rx_reads == 0u,
+          "something inside core/ pushed a byte into uart4's receive FIFO");
+    CHECK(m.uart4.rx_underruns == 1u,
+          "the URXH read of an empty FIFO was not counted (%llu)",
+          (unsigned long long)m.uart4.rx_underruns);
+
+    s5l8900_free(&m);
+}
+
+static void test_receive_fifo_is_ordered_and_bounded(void) {
+    s5l_uart_t u;
+    s5l_uart_reset(&u);
+
+    CHECK(s5l_uart_rx_space(&u) == UART_RX_FIFO,
+          "a reset port has %u bytes of receive room, expected %u",
+          s5l_uart_rx_space(&u), (unsigned)UART_RX_FIFO);
+
+    /* Fill it exactly. */
+    for (unsigned i = 0; i < UART_RX_FIFO; i++)
+        CHECK(s5l_uart_rx_push(&u, (uint8_t)(0x40u + i)),
+              "push %u into an empty-enough FIFO was refused", i);
+    CHECK(u.rx_pushed == UART_RX_FIFO, "rx_pushed = %llu",
+          (unsigned long long)u.rx_pushed);
+    CHECK(s5l_uart_rx_space(&u) == 0u, "a full FIFO reports room");
+
+    /*
+     * The seventeenth byte is REFUSED and counted, not stored, and not silently
+     * overwriting the sixteenth. Back-pressure is the whole reason
+     * s5l_uart_rx_push() returns a bool: a host that ignores it loses a frame,
+     * and rx_dropped is what tells the operator afterwards.
+     */
+    CHECK(!s5l_uart_rx_push(&u, 0xffu), "a full FIFO accepted a byte");
+    CHECK(u.rx_dropped == 1u, "the refused push was not counted (%llu)",
+          (unsigned long long)u.rx_dropped);
+    CHECK(u.rx_pushed == UART_RX_FIFO, "a refused push was counted as pushed");
+
+    /* UFSTAT's split encoding: the count field is four bits and the depth is
+     * sixteen, so a full FIFO is 0 in the field and 1 in the full bit. */
+    uint32_t fstat = s5l_uart_read(&u, UART_UFSTAT);
+    CHECK((fstat & 0x0fu) == 0u,
+          "a full FIFO reports count %u in a four-bit field", fstat & 0x0fu);
+    CHECK((fstat & (1u << 8)) != 0u, "a full FIFO does not set UFSTAT bit 8");
+    CHECK((s5l_uart_read(&u, UART_UTRSTAT) & 1u) != 0u,
+          "UTRSTAT bit 0 is clear with sixteen bytes waiting");
+
+    /* Out in the order they went in. */
+    bool ordered = true;
+    for (unsigned i = 0; i < UART_RX_FIFO; i++)
+        if (s5l_uart_read(&u, UART_URXH) != (uint32_t)(0x40u + i))
+            ordered = false;
+    CHECK(ordered, "the receive FIFO is not first-in first-out");
+    CHECK(u.rx_reads == UART_RX_FIFO, "rx_reads = %llu",
+          (unsigned long long)u.rx_reads);
+    CHECK((s5l_uart_read(&u, UART_UTRSTAT) & 1u) == 0u,
+          "UTRSTAT still claims data after the FIFO was drained");
+    CHECK(u.rx_underruns == 0u,
+          "draining exactly what was pushed counted an underrun");
+
+    /*
+     * The ring wraps. Push and pop past the end of the array many times over:
+     * a head index that failed to wrap would start returning stale bytes here
+     * and nowhere else.
+     */
+    bool wrapped_ok = true;
+    for (unsigned i = 0; i < 200u; i++) {
+        if (!s5l_uart_rx_push(&u, (uint8_t)i)) wrapped_ok = false;
+        if (s5l_uart_read(&u, UART_URXH) != (uint32_t)(uint8_t)i)
+            wrapped_ok = false;
+    }
+    CHECK(wrapped_ok, "the receive ring does not wrap correctly");
+
+    /* Half-full, so the count field is exercised at a value that is neither 0
+     * nor the full-bit special case. */
+    for (unsigned i = 0; i < 5u; i++) (void)s5l_uart_rx_push(&u, 0x5au);
+    fstat = s5l_uart_read(&u, UART_UFSTAT);
+    CHECK((fstat & 0x0fu) == 5u, "UFSTAT reports %u of five queued bytes",
+          fstat & 0x0fu);
+    CHECK((fstat & (1u << 8)) == 0u, "a five-deep FIFO claims to be full");
+    /* And the transmit half of UFSTAT stays zero throughout: this model drains
+     * instantly, and a receive count leaking into the transmit field would send
+     * the driver's flow control somewhere unpredictable. */
+    CHECK(((fstat >> 4) & 0x0fu) == 0u && (fstat & (1u << 9)) == 0u,
+          "receive state leaked into UFSTAT's transmit fields (0x%08x)", fstat);
+}
+
+static void test_a_utrstat_store_cannot_discard_a_queued_byte(void) {
+    /*
+     * AppleS5L8900XSerial's interrupt filter reads +0x10, masks, and writes the
+     * result back (docs/AGENT_HANDOFF.md §23.5.1), so a real driver WILL store
+     * a word with bit 0 set while a byte is still queued. If that store cleared
+     * the ready bit, the byte would be stranded in the FIFO with nothing left to
+     * announce it — the exact silent loss this model refuses.
+     */
+    s5l_uart_t u;
+    s5l_uart_reset(&u);
+    CHECK(s5l_uart_rx_push(&u, 0x7eu), "push failed");
+
+    s5l_uart_write(&u, UART_UTRSTAT, 0xffffffffu);
+    CHECK((s5l_uart_read(&u, UART_UTRSTAT) & 1u) != 0u,
+          "a write-one-to-clear store dropped a byte still in the FIFO");
+    CHECK(s5l_uart_read(&u, UART_URXH) == 0x7eu,
+          "the queued byte did not survive the status store");
+    CHECK((s5l_uart_read(&u, UART_UTRSTAT) & 1u) == 0u,
+          "draining URXH did not clear the ready bit");
+}
+
+static void test_uart4_asserts_vic_line_28_for_a_waiting_byte(void) {
+    s5l8900_t m;
+    CHECK(s5l8900_init(&m, 0, 1u << 20), "machine init failed");
+
+    m.bus.write32(m.bus.ctx, S5L8900_VIC0_BASE + VIC_INTENABLE, 1u << 28);
+    s5l8900_tick(&m, 1u);
+    CHECK(!m.cpu.irq_line, "arming the line alone raised an interrupt");
+
+    /* A host peer delivers one byte between run slices, which is the only way
+     * this can ever happen (docs/AGENT_HANDOFF.md §23.5.1). */
+    CHECK(s5l_uart_rx_push(&m.uart4, 0xffu), "push into an empty FIFO failed");
+    s5l8900_tick(&m, 1u);
+    uint32_t raw = m.bus.read32(m.bus.ctx, S5L8900_VIC0_BASE + VIC_RAWINTR);
+    CHECK((raw & (1u << 28)) != 0u,
+          "a queued byte did not assert VIC line 28 (RAWINTR=0x%08x)", raw);
+    CHECK(m.cpu.irq_line, "line 28 was asserted but the core saw no IRQ");
+
+    /* The guest's driver drains it through the bus, and the LEVEL drops. Level
+     * and not edge: core/src/soc/vic.c's own reason — a source that re-raised
+     * inside the handler would lose the interrupt. */
+    CHECK(m.bus.read32(m.bus.ctx, S5L8900_UART4_BASE + UART_URXH) == 0xffu,
+          "the guest read the wrong byte back through the bus");
+    s5l8900_tick(&m, 1u);
+    raw = m.bus.read32(m.bus.ctx, S5L8900_VIC0_BASE + VIC_RAWINTR);
+    CHECK((raw & (1u << 28)) == 0u,
+          "the line stayed asserted after the FIFO was drained (0x%08x)", raw);
+    CHECK(!m.cpu.irq_line, "the core's IRQ line stayed high after the drain");
+
+    /*
+     * Two bytes, one read: the line must STAY asserted. A model that dropped it
+     * after any read would strand the second byte, and a driver that reads one
+     * byte per interrupt is the common shape.
+     */
+    CHECK(s5l_uart_rx_push(&m.uart4, 0x01u) &&
+          s5l_uart_rx_push(&m.uart4, 0x02u), "pushes failed");
+    (void)m.bus.read32(m.bus.ctx, S5L8900_UART4_BASE + UART_URXH);
+    s5l8900_tick(&m, 1u);
+    raw = m.bus.read32(m.bus.ctx, S5L8900_VIC0_BASE + VIC_RAWINTR);
+    CHECK((raw & (1u << 28)) != 0u,
+          "the line dropped with a byte still queued (0x%08x)", raw);
+
+    s5l8900_free(&m);
+}
+
+static void test_uart0_receive_is_deliberately_not_wired(void) {
+    /*
+     * uart0 runs the identical model and has an identical FIFO. Its VIC line is
+     * 24 and it is NOT connected, because uart0 is the kprintf console and
+     * nothing in this project has any business injecting console input. This is
+     * a decision, so it is asserted rather than left to be rediscovered.
+     */
+    s5l8900_t m;
+    CHECK(s5l8900_init(&m, 0, 1u << 20), "machine init failed");
+    m.bus.write32(m.bus.ctx, S5L8900_VIC0_BASE + VIC_INTENABLE, 1u << 24);
+    CHECK(s5l_uart_rx_push(&m.uart0, 0x41u),
+          "uart0's FIFO refused a byte; the model is shared and should accept");
+    s5l8900_tick(&m, 1u);
+    uint32_t raw = m.bus.read32(m.bus.ctx, S5L8900_VIC0_BASE + VIC_RAWINTR);
+    CHECK((raw & (1u << 24)) == 0u,
+          "uart0's receive FIFO reached VIC line 24 (RAWINTR=0x%08x)", raw);
+    /* The byte is still readable — the port works, it simply cannot interrupt. */
+    CHECK(m.bus.read32(m.bus.ctx, S5L8900_UART0_BASE + UART_URXH) == 0x41u,
+          "uart0 did not deliver the byte a host pushed");
+    /* And the two FIFOs are separate, exactly as the two captures are. */
+    CHECK(m.uart4.rx_pushed == 0u,
+          "a push into uart0 reached uart4's receive FIFO");
+
+    s5l8900_free(&m);
+}
+
+static void test_uart4_rx_is_a_declared_wake_source(void) {
+    /*
+     * The wake-source table is this machine's definition of what can interrupt
+     * it. uart4's receive line answers S5L_WAKE_NEVER — a host-delivered byte
+     * has no schedule, so there is no future edge to name — but it must be IN
+     * the table, because a source missing from it is a source the next reader
+     * has to rediscover. See wake_edge_uart4() in core/src/soc/machine.c.
+     */
+    const s5l_wake_source_t *src = NULL;
+    unsigned n = s5l8900_wake_sources(&src);
+    bool found = false;
+    for (unsigned i = 0; i < n; i++)
+        if (src[i].line == S5L8900_IRQ_UART4 &&
+            strcmp(src[i].name, "uart4-rx") == 0)
+            found = true;
+    CHECK(found, "uart4-rx is not a declared wake source");
+    CHECK(S5L8900_IRQ_UART4 == 28u,
+          "uart4's interrupt is line %u, not the device tree's 28",
+          (unsigned)S5L8900_IRQ_UART4);
+}
+
+/*
+ * The 47 octets run80's real guest transmitted on this port, transcribed from
+ * work/run80-ppp-tty/uart4-ppp.bin. core/tests/test_ppp.c checks the same
+ * transcription against the file itself and decodes it option by option; here
+ * they are only a realistically shaped stimulus for the TRANSPORT.
+ */
+static const uint8_t RUN80_CAPTURE[47] = {
+    0x7e, 0xff, 0x7d, 0x23, 0xc0, 0x21, 0x7d, 0x21,
+    0x7d, 0x21, 0x7d, 0x20, 0x7d, 0x34, 0x7d, 0x22,
+    0x7d, 0x26, 0x7d, 0x20, 0x7d, 0x20, 0x7d, 0x20,
+    0x7d, 0x20, 0x7d, 0x25, 0x7d, 0x26, 0x79, 0x61,
+    0xf5, 0x7d, 0x3c, 0x7d, 0x27, 0x7d, 0x22, 0x7d,
+    0x28, 0x7d, 0x22, 0x51, 0x7d, 0x39, 0x7e
+};
+
+static void test_the_loop_closes_through_the_uart(void) {
+    /*
+     * THE SEAM NEITHER OTHER SUITE COVERS. test_ppp.c drives the peer with
+     * arrays and never touches a register; the cases above drive the registers
+     * and never touch the peer. What is left is the wiring in
+     * tools/bootkernel.c — feed each transmitted octet into the peer, move what
+     * the peer produces into a SIXTEEN-BYTE FIFO, let the guest drain it — and
+     * the peer's first Configure-Request alone is more than twice that FIFO.
+     * A pump that pushed without checking room, or a guest loop that read one
+     * byte per interrupt, would both work perfectly on an infinite queue and
+     * lose data here.
+     *
+     * The "guest" below is deliberately the awkward shape rather than the
+     * convenient one: it stores one octet, then drains only what UTRSTAT says
+     * is ready, one byte at a time, through the bus.
+     */
+    s5l8900_t m;
+    CHECK(s5l8900_init(&m, 0, 1u << 20), "machine init failed");
+    m.bus.write32(m.bus.ctx, S5L8900_VIC0_BASE + VIC_INTENABLE, 1u << 28);
+
+    ppp_peer_t p;
+    ppp_init(&p, NULL);
+    ppp_open(&p);                       /* the guest's first octet does this */
+
+    uint8_t  got[512];
+    size_t   ngot = 0;
+    unsigned irq_seen = 0;
+
+    for (size_t i = 0; i < sizeof RUN80_CAPTURE + 400u; i++) {
+        if (i < sizeof RUN80_CAPTURE) {
+            /* The guest transmits. bootkernel's bus interposer tees the octet
+             * into the peer and does nothing else — no machine state changes
+             * from this direction. */
+            m.bus.write32(m.bus.ctx, S5L8900_UART4_BASE + UART_UTXH,
+                          RUN80_CAPTURE[i]);
+            ppp_input_byte(&p, RUN80_CAPTURE[i]);
+        }
+
+        /* ppp_pump_step(), byte for byte. */
+        unsigned room = s5l_uart_rx_space(&m.uart4);
+        while (room--) {
+            int b = ppp_output_byte(&p);
+            if (b < 0) break;
+            if (!s5l_uart_rx_push(&m.uart4, (uint8_t)b)) break;
+        }
+        s5l8900_tick(&m, 1u);
+
+        uint32_t raw = m.bus.read32(m.bus.ctx, S5L8900_VIC0_BASE + VIC_RAWINTR);
+        if (raw & (1u << 28)) {
+            irq_seen++;
+            /* One byte per interrupt, which is the harshest realistic shape. */
+            if ((m.bus.read32(m.bus.ctx, S5L8900_UART4_BASE + UART_UTRSTAT) & 1u)
+                && ngot < sizeof got)
+                got[ngot++] = (uint8_t)m.bus.read32(
+                    m.bus.ctx, S5L8900_UART4_BASE + UART_URXH);
+        }
+    }
+
+    CHECK(irq_seen > 0u, "the receive line never asserted across the whole run");
+    CHECK(ngot > 0u, "nothing the peer produced ever reached the guest");
+    /*
+     * NOT ONE OCTET LOST, and none dropped by the FIFO: the pump asks for room
+     * before it pushes, so back-pressure is a delay and never a loss.
+     */
+    CHECK(m.uart4.rx_dropped == 0u,
+          "%llu octets were dropped by a FIFO the pump should never overfill",
+          (unsigned long long)m.uart4.rx_dropped);
+    CHECK(ngot == p.stats.tx_bytes,
+          "the guest received %zu of the %llu octets the peer queued",
+          ngot, (unsigned long long)p.stats.tx_bytes);
+    CHECK(ppp_output_pending(&p) == 0u,
+          "%zu octets are still stuck in the peer's ring",
+          ppp_output_pending(&p));
+
+    /*
+     * And what arrived is two whole frames in order: the peer's own
+     * Configure-Request, then its Configure-Ack for run80's. Checked by
+     * structure rather than by decoding — test_ppp.c owns the decode — but the
+     * flags and the two LCP codes are enough to say the FIFO did not reorder or
+     * splice anything.
+     */
+    unsigned flags = 0;
+    for (size_t i = 0; i < ngot; i++) if (got[i] == 0x7eu) flags++;
+    CHECK(flags == 4u,
+          "%u flag octets arrived; two whole frames carry four", flags);
+    CHECK(ngot > 6u && got[0] == 0x7eu && got[1] == 0xffu &&
+          got[2] == 0x7du && got[3] == 0x23u &&
+          got[4] == 0xc0u && got[5] == 0x21u,
+          "the first frame the guest received is not an HDLC-framed LCP packet");
+    CHECK(got[ngot - 1u] == 0x7eu, "the last octet received is not a flag");
+
+    /* The line is quiet again once everything has been read. */
+    s5l8900_tick(&m, 1u);
+    uint32_t raw = m.bus.read32(m.bus.ctx, S5L8900_VIC0_BASE + VIC_RAWINTR);
+    CHECK((raw & (1u << 28)) == 0u,
+          "the receive line is still asserted with an empty FIFO (0x%08x)", raw);
+    CHECK(m.uart4.rx_reads == ngot, "rx_reads (%llu) disagrees with %zu octets",
+          (unsigned long long)m.uart4.rx_reads, ngot);
+
+    /* The transmit capture is untouched by any of this: 47 octets out, and the
+     * received stream must not have leaked into it. */
+    CHECK(m.uart4.tx_len == sizeof RUN80_CAPTURE,
+          "the transmit capture holds %zu octets, not 47", m.uart4.tx_len);
+    CHECK(memcmp(m.uart4.tx, RUN80_CAPTURE, sizeof RUN80_CAPTURE) == 0,
+          "the receive path corrupted the transmit capture");
 
     s5l8900_free(&m);
 }
@@ -408,6 +771,87 @@ static void test_snapshot_carries_both_captures_separately(void) {
     s5l8900_free(&m);
 }
 
+static void test_snapshot_carries_the_receive_fifo(void) {
+    /*
+     * A checkpoint taken mid-negotiation holds bytes the host peer has ALREADY
+     * transmitted and will never transmit again: its restart timer counted them
+     * as delivered. A restore that dropped them would resume a link that stalls
+     * for one restart interval and then renegotiates — indistinguishable, in a
+     * log, from a bug in the peer. That is why SNAPSHOT_VERSION went 12 -> 13.
+     */
+    s5l8900_t m;
+    CHECK(s5l8900_init(&m, 0, 1u << 20), "machine init failed");
+
+    /* Leave the FIFO wrapped and partly drained, so head, count and the ring
+     * contents are all non-trivial and a restore that reconstructed them from
+     * the array alone would be caught. */
+    for (unsigned i = 0; i < UART_RX_FIFO; i++)
+        (void)s5l_uart_rx_push(&m.uart4, (uint8_t)(0x10u + i));
+    for (unsigned i = 0; i < 10u; i++)
+        (void)s5l_uart_read(&m.uart4, UART_URXH);   /* six left, head at 10 */
+    for (unsigned i = 0; i < 10u; i++)
+        (void)s5l_uart_rx_push(&m.uart4, (uint8_t)(0xa0u + i));  /* full again */
+    (void)s5l_uart_rx_push(&m.uart4, 0xffu);        /* refused, and counted   */
+
+    uint8_t *img = NULL;
+    size_t   len = 0;
+    CHECK(snapshot_save_mem(&m, &img, &len) == SNAP_OK, "save failed");
+
+    s5l8900_t r;
+    CHECK(s5l8900_init(&r, 0, 1u << 20), "restore machine init failed");
+    CHECK(snapshot_load_mem(&r, img, len) == SNAP_OK, "load failed");
+
+    CHECK(r.uart4.rx_count == m.uart4.rx_count &&
+          r.uart4.rx_head == m.uart4.rx_head,
+          "the FIFO's head/count did not survive (%u/%u vs %u/%u)",
+          r.uart4.rx_head, r.uart4.rx_count,
+          m.uart4.rx_head, m.uart4.rx_count);
+    CHECK(memcmp(r.uart4.rx, m.uart4.rx, UART_RX_FIFO) == 0,
+          "the queued bytes did not survive the round trip");
+    CHECK(r.uart4.rx_pushed == m.uart4.rx_pushed &&
+          r.uart4.rx_dropped == m.uart4.rx_dropped &&
+          r.uart4.rx_reads == m.uart4.rx_reads &&
+          r.uart4.rx_underruns == m.uart4.rx_underruns,
+          "the receive counters did not survive; a restored run would report a "
+          "host that had never been told 'no'");
+    CHECK(r.uart4.rx_dropped == 1u,
+          "the refused push was not recorded (%llu)",
+          (unsigned long long)r.uart4.rx_dropped);
+
+    /* And the restored port really delivers the same next byte. */
+    CHECK(s5l_uart_read(&r.uart4, UART_URXH) ==
+          s5l_uart_read(&m.uart4, UART_URXH),
+          "the restored FIFO's next byte differs from the original's");
+    /* uart0's FIFO must be untouched: two ports, two FIFOs, one visitor. */
+    CHECK(r.uart0.rx_count == 0u && r.uart0.rx_pushed == 0u,
+          "uart4's receive state was restored into uart0");
+
+    free(img);
+    s5l8900_free(&r);
+    s5l8900_free(&m);
+}
+
+static void test_snapshot_rejects_an_impossible_receive_fifo(void) {
+    /* rx_count > UART_RX_FIFO and rx_head >= UART_RX_FIFO are unreachable by
+     * any push or read, so a machine holding either is corrupt and the save
+     * path must refuse rather than write a file that cannot be loaded. */
+    s5l8900_t m;
+    CHECK(s5l8900_init(&m, 0, 1u << 20), "machine init failed");
+
+    uint8_t *img = NULL;
+    size_t   len = 0;
+    m.uart4.rx_count = (uint8_t)(UART_RX_FIFO + 1u);
+    CHECK(snapshot_save_mem(&m, &img, &len) != SNAP_OK,
+          "a machine with an over-full receive FIFO was snapshotted");
+    m.uart4.rx_count = 0;
+    m.uart4.rx_head  = (uint8_t)UART_RX_FIFO;
+    CHECK(snapshot_save_mem(&m, &img, &len) != SNAP_OK,
+          "a machine with an out-of-range FIFO head was snapshotted");
+    CHECK(img == NULL && len == 0u, "a refused snapshot returned bytes");
+
+    s5l8900_free(&m);
+}
+
 static void test_snapshot_rejects_an_impossible_uart4_length(void) {
     s5l8900_t m;
     CHECK(s5l8900_init(&m, 0, 1u << 20), "machine init failed");
@@ -434,9 +878,18 @@ int main(void) {
     test_machine_decodes_uart4_as_its_own_window();
     test_the_two_captures_do_not_alias();
     test_uart4_registers_route_through_the_bus();
-    test_uart4_raises_no_interrupt_line();
+    test_transmitting_alone_raises_no_interrupt_line();
+    test_no_host_peer_means_no_receive_anything();
+    test_receive_fifo_is_ordered_and_bounded();
+    test_a_utrstat_store_cannot_discard_a_queued_byte();
+    test_uart4_asserts_vic_line_28_for_a_waiting_byte();
+    test_uart0_receive_is_deliberately_not_wired();
+    test_uart4_rx_is_a_declared_wake_source();
+    test_the_loop_closes_through_the_uart();
     test_snapshot_carries_both_captures_separately();
     test_snapshot_rejects_an_impossible_uart4_length();
+    test_snapshot_carries_the_receive_fifo();
+    test_snapshot_rejects_an_impossible_receive_fifo();
     printf("  %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

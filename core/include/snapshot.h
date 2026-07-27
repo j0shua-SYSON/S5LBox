@@ -151,8 +151,26 @@
  *      unmodelled level lines asserted forever. That second one is not
  *      hypothetical: it is what run87 measured before the mask existed,
  *      668,039 acknowledges of a group-2 pending word the guest could never
- *      clear, and no progress past instruction ~96 million. */
-#define SNAPSHOT_VERSION   12u
+ *      clear, and no progress past instruction ~96 million.
+ *
+ * v13: both UARTs grew a RECEIVE FIFO — sixteen bytes, a head, a count and four
+ *      counters — and snap_uart() is the first visitor in MACH, so every field
+ *      from the VICs onwards moves by 56 bytes twice. A hard break, and not one
+ *      that could have been defaulted: the bytes in that FIFO are bytes the
+ *      host's PPP peer has ALREADY transmitted and will never transmit again,
+ *      because its restart timer (RFC 1661 §4.6) counted them as delivered. A
+ *      v12 file read as v13 would misparse every device after the console; a
+ *      v13 file restored with the FIFO zeroed would resume a link that stalls
+ *      for one restart interval and then renegotiates, which looks exactly like
+ *      a bug in the peer.
+ *
+ *      The four counters travel for the reason every other refusal counter in
+ *      this format does: rx_dropped separates "the host never sent a byte" from
+ *      "the host sent one into a full FIFO and it is gone", and rx_reads
+ *      separates both from "the guest's driver never read URXH". Those are
+ *      three different failures with three different next steps and nothing
+ *      else in the machine can tell them apart. */
+#define SNAPSHOT_VERSION   13u
 
 typedef enum {
     SNAP_OK = 0,

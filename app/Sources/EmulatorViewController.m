@@ -69,6 +69,7 @@ static const NSUInteger kConsoleScrollback = 12000;
                                       VMFramebufferViewTouchDelegate>
 - (void)startEmulator;
 - (void)launchEngine;
+- (void)reportBringUpProblem:(NSString *)reason;
 - (void)tick:(CADisplayLink *)sender;
 - (void)append:(NSString *)line;
 - (void)appendConsole:(NSString *)text;
@@ -264,12 +265,45 @@ static const NSUInteger kConsoleScrollback = 12000;
         [self appendConsole:[_engine takePendingConsoleText]];
         _engine = nil;
         [self refreshRunControls];
+        [self reportBringUpProblem:@"The machine could not be started."];
         return;
     }
 
     [self applySettingsToEngine];
     [self applyPauseState];
     [self refreshRunControls];
+
+    /*
+     * WHY THIS IS AN ALERT AND NOT A LOG LINE.
+     *
+     * Everything else on this screen reports through -append:, which goes to
+     * the guest console -- and the console is gated behind developer mode. So
+     * a firmware bring-up that failed used to be, for an ordinary user, a
+     * black screen and a 10 pt grey word. The reason exists; it just never
+     * arrived. -bringUpNote is non-nil exactly when there is firmware and
+     * something about it needs saying, so it is shown where it cannot be
+     * missed.
+     */
+    NSString *note = [_engine bringUpNote];
+    if (note.length) [self reportBringUpProblem:note];
+}
+
+/* One place, so every reason reaches the user the same way. */
+- (void)reportBringUpProblem:(NSString *)reason {
+    if (!reason.length) return;
+    [self append:[@"[vm] " stringByAppendingString:reason]];
+    if (!self.viewIfLoaded.window) return;   /* not on screen: the log has it */
+
+    BOOL preparing = [_engine isPreparingRootFilesystem];
+    UIAlertController *alert = [UIAlertController
+        alertControllerWithTitle:preparing ? @"Preparing iPhone OS"
+                                           : @"Not running iPhone OS"
+                         message:reason
+                  preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"OK"
+                                              style:UIAlertActionStyleDefault
+                                            handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
 }
 
 - (void)dealloc {

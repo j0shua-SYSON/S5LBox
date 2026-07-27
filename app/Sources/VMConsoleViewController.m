@@ -46,7 +46,8 @@
     _empty.text = @"Nothing printed yet.\n\nThis is the guest's serial port — "
                   @"where a real iPhone's kernel log goes. The built-in test "
                   @"program prints a short banner and little else, so an almost "
-                  @"empty console here is expected.";
+                  @"empty console here is expected when no firmware has been "
+                  @"imported. A firmware boot fills it.";
     _empty.autoresizingMask =
         UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     [self.view addSubview:_empty];

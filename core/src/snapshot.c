@@ -107,7 +107,7 @@
 
 SNAP_SIZE_GUARD(arm_cp15_t,        64,    "snap_cpu");
 SNAP_SIZE_GUARD(arm_cpu_t,         424,   "snap_cpu");
-SNAP_SIZE_GUARD(s5l_uart_t,        8224,  "snap_uart");
+SNAP_SIZE_GUARD(s5l_uart_t,        8280,  "snap_uart");
 SNAP_SIZE_GUARD(s5l_vic_t,         16,    "snap_vic");
 SNAP_SIZE_GUARD(s5l_timer_t,       40,    "snap_timer");
 SNAP_SIZE_GUARD(s5l_power_t,       24,    "snap_power");
@@ -141,7 +141,7 @@ SNAP_SIZE_GUARD(s5l_stub_t,        56,    "snap_stubs");
  * privileged-SVC context. The byte format therefore does not change. */
 /* 43648 = 42888 + the codec (496) + two I2S windows (2 x 104) + the five
  * physical buttons (32) + the GPIO controller's `driven` mask (28). */
-SNAP_SIZE_GUARD(s5l8900_t,         43648, "snap_mach");
+SNAP_SIZE_GUARD(s5l8900_t,         43760, "snap_mach");
 #endif
 
 /* ---------------------------------------------------------------- the IO --- */
@@ -367,8 +367,23 @@ static void snap_uart(sn_io_t *io, s5l_uart_t *u) {
     F32(u->ulcon); F32(u->ucon); F32(u->ufcon); F32(u->umcon); F32(u->ubrdiv);
     FBYTES(u->tx, UART_TX_BUFFER);
     FSZ(u->tx_len);
+    /*
+     * The receive FIFO travels too, and it is not optional bookkeeping: a
+     * checkpoint taken mid-negotiation holds bytes the host peer has already
+     * transmitted and will never transmit again — its restart timer counts them
+     * as delivered. A restore that dropped them would resume a link that stalls
+     * for one restart interval and then renegotiates, which is indistinguishable
+     * from a peer bug. Whole array, not just the used part, for the same reason
+     * the transmit capture is whole: a restored machine then compares
+     * byte-identical to the original including the slack.
+     */
+    FBYTES(u->rx, UART_RX_FIFO);
+    F8(u->rx_head); F8(u->rx_count);
+    F64(u->rx_pushed); F64(u->rx_dropped);
+    F64(u->rx_reads);  F64(u->rx_underruns);
     if (sn_reading(io) && io->err == SNAP_OK &&
-        u->tx_len >= (size_t)UART_TX_BUFFER)
+        (u->tx_len >= (size_t)UART_TX_BUFFER ||
+         u->rx_count > UART_RX_FIFO || u->rx_head >= UART_RX_FIFO))
         io->err = SNAP_ERR_CORRUPT;     /* the writer keeps a NUL slot free */
 }
 
@@ -1056,6 +1071,8 @@ static bool snap_machine_valid(const s5l8900_t *m) {
         m->stub_count > S5L_STUB_MAX ||
         m->uart0.tx_len >= UART_TX_BUFFER ||
         m->uart4.tx_len >= UART_TX_BUFFER ||
+        m->uart0.rx_count > UART_RX_FIFO || m->uart0.rx_head >= UART_RX_FIFO ||
+        m->uart4.rx_count > UART_RX_FIFO || m->uart4.rx_head >= UART_RX_FIFO ||
         m->nor.image_count > S5L_NOR_MAX_IMAGES ||
         m->unmapped_addr_count > S5L_UNMAPPED_LOG || m->dev_count > S5L_DEVLOG)
         return false;

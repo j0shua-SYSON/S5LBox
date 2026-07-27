@@ -923,13 +923,15 @@ static void test_wfi_wake_source_order_does_not_matter(void) {
      */
     const s5l_wake_source_t *real = NULL;
     unsigned nreal = s5l8900_wake_sources(&real);
-    /* timer, clcd, tvout, spi0, spi1, and one per GPIO interrupt group. The
-     * GPIO seven are declared together because /arm-io/gpio's `interrupts`
-     * array is descending and declaring only the group that carries touch
-     * would make the whole test depend on that transcription being right. */
-    CHECK(real != NULL && nreal == 5u + S5L_GPIOIC_GROUPS,
+    /* timer, clcd, tvout, spi0, spi1, uart4-rx, and one per GPIO interrupt
+     * group. The GPIO seven are declared together because /arm-io/gpio's
+     * `interrupts` array is descending and declaring only the group that
+     * carries touch would make the whole test depend on that transcription
+     * being right. uart4-rx joined them with the receive path: it is the only
+     * source in the table whose producer is OUTSIDE the machine. */
+    CHECK(real != NULL && nreal == 6u + S5L_GPIOIC_GROUPS,
           "the machine declares %u wake sources, expected %u",
-          nreal, 5u + S5L_GPIOIC_GROUPS);
+          nreal, 6u + S5L_GPIOIC_GROUPS);
     for (unsigned i = 0; i < nreal; i++)
         CHECK(real[i].name && real[i].next_edge &&
               real[i].line < 32u * S5L8900_VIC_COUNT,

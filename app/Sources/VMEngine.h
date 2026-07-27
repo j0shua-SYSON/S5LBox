@@ -26,9 +26,19 @@ typedef NS_ENUM(NSUInteger, VMButton) {
 
 @interface VMEngine : NSObject
 
-/* Allocate the machine, install the demo guest, and start interpreting on a
+/*
+ * Allocate the machine, install a guest, and start interpreting on a
  * background thread. Returns YES when already running, and NO if startup fails
- * or a start/stop transition is already in progress. */
+ * or a start/stop transition is already in progress.
+ *
+ * WHICH GUEST depends on what has been imported. When the firmware directory
+ * holds a kernel, a device tree, a root filesystem and the writable work image
+ * made from it, this brings up Apple's own iPhone OS 3.1.3 kernel; otherwise
+ * it installs the built-in test guest in VMGuest.c. -modeDescription says
+ * which happened and -bringUpNote says why, when there is a why.
+ *
+ * A YES here never means "firmware booted". Ask -isRunningFirmware.
+ */
 - (BOOL)start;
 
 /* Ask the emulator thread to finish and release the machine. */
@@ -76,8 +86,47 @@ typedef NS_ENUM(NSUInteger, VMButton) {
 /* Everything the guest has written to the UART since the last call, or nil. */
 - (NSString *)takePendingConsoleText;
 
-/* One line for the status bar: work done, rate, and memory footprint. */
+/* One line for the status bar: which guest, work done, rate, and footprint. */
 - (NSString *)statusLine;
+
+#pragma mark - Which guest is running
+
+/*
+ * WHAT IS ACTUALLY EXECUTING, and why it is not the other thing.
+ *
+ * These exist because the app used to tell every user, on its first screen,
+ * that machines run a built-in test program — which stopped being true the day
+ * bring-up landed, and would have gone on being displayed. Every claim the UI
+ * makes about the guest now comes from here, and every one of these is set
+ * from what the engine did rather than from what it was asked to do.
+ *
+ * -modeDescription:  a short label for the running guest, or nil before a
+ *                    machine exists. "built-in test guest", or a description
+ *                    of the firmware, e.g. "iPhone OS 3.1.3 kernel, root on
+ *                    /dev/md0".
+ * -isRunningFirmware: NO unless Apple's kernel is what was installed. There is
+ *                    no path that makes this YES without bring-up succeeding.
+ * -bringUpNote:      why the firmware path was not taken, when there was
+ *                    firmware to take it with, or what the app is doing about
+ *                    it. nil when there is nothing to explain — which includes
+ *                    the ordinary case of no firmware having been imported.
+ *                    THIS MUST REACH THE USER: a failed bring-up that only
+ *                    logs to the console is invisible outside developer mode.
+ * -isPreparingRootFilesystem: whether the one slow first-boot step is running
+ *                    on its own thread. The machine runs the test guest
+ *                    meanwhile; reopening it afterwards boots iPhone OS.
+ */
+- (NSString *)modeDescription;
+- (BOOL)isRunningFirmware;
+- (NSString *)bringUpNote;
+- (BOOL)isPreparingRootFilesystem;
+
+/*
+ * What a machine WOULD do if it were opened now, without opening one. For the
+ * machine list and the settings screen, so neither has to keep its own idea of
+ * what firmware is present.
+ */
++ (NSString *)firmwareReadinessSummary;
 
 /* This process's phys_footprint — the number jetsam actually judges — in
  * bytes, or 0 if the kernel would not tell us. */

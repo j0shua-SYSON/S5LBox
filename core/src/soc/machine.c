@@ -635,6 +635,32 @@ static s5l_wake_kind_t wake_edge_gpio(const s5l8900_t *m, uint32_t *ticks) {
     return S5L_WAKE_NEVER;
 }
 
+/*
+ * uart4's receive line, and the answer docs/AGENT_HANDOFF.md §23.5.1 asked for:
+ * "S5L_WAKE_NEVER when the RX FIFO is empty and an immediate edge when it is
+ * not". Both halves of that sentence are NEVER here, and the difference is only
+ * in who catches the second half.
+ *
+ * A host-delivered byte has no schedule — the host pushes it between run
+ * slices, which is a moment a sleeping core is not inside — so there is no
+ * future distance to name and this source can never produce one. A FIFO that is
+ * ALREADY non-empty has already asserted the line, and
+ * machine_wait_for_interrupt() refreshes every level at zero elapsed time
+ * before consulting any source, so it ends the wait there. Answering
+ * S5L_WAKE_AT with 0 would be rejected as "not a future distance" anyway
+ * (s5l8900_next_wake), and answering UNKNOWN would stop the machine
+ * fast-forwarding any idle period for the whole boot — on a source that is
+ * inert on every run without a peer.
+ *
+ * It is declared rather than omitted for the reason the SPI block gives: this
+ * table is the machine's definition of what can interrupt it, and a device
+ * missing from it is a device the next reader has to rediscover.
+ */
+static s5l_wake_kind_t wake_edge_uart4(const s5l8900_t *m, uint32_t *ticks) {
+    (void)m; (void)ticks;
+    return S5L_WAKE_NEVER;
+}
+
 static const s5l_wake_source_t WAKE_SOURCES[] = {
     { "timer", S5L8900_IRQ_TIMER, wake_edge_timer },
     { "clcd",  S5L8900_IRQ_CLCD,  wake_edge_clcd  },
@@ -650,6 +676,7 @@ static const s5l_wake_source_t WAKE_SOURCES[] = {
     { "gpio-group4",  2u, wake_edge_gpio },
     { "gpio-group5",  1u, wake_edge_gpio },
     { "gpio-group6",  0u, wake_edge_gpio },
+    { "uart4-rx", S5L8900_IRQ_UART4, wake_edge_uart4 },
 };
 #define NWAKE_SOURCES (sizeof WAKE_SOURCES / sizeof WAKE_SOURCES[0])
 
@@ -995,6 +1022,23 @@ void s5l8900_tick(s5l8900_t *m, uint32_t ticks) {
      * observe both the assertion and the guest's W1C acknowledge. */
     s5l_vic_set_line(&m->vic[0], S5L8900_IRQ_SPI0, s5l_spi_irq(&m->spi[0]));
     s5l_vic_set_line(&m->vic[0], S5L8900_IRQ_SPI1, s5l_spi_irq(&m->spi[1]));
+
+    /*
+     * uart4's receive FIFO — the ONLY interrupt in this machine whose source is
+     * outside the machine. It is a level, asserted while a byte the host pushed
+     * is still waiting, and it drops when the guest drains URXH.
+     *
+     * uart0 runs the identical model and has an identical FIFO, and is
+     * deliberately NOT wired: it is the kprintf console, its VIC line is 24,
+     * and nothing in this project has any business injecting console input.
+     * A line nobody can assert is worse than no line at all, so it does not get
+     * one until something needs it.
+     *
+     * On a run with no host peer this is a refresh of `false` over `false`
+     * forever: s5l_uart_rx_push() is the only producer and core/ never calls
+     * it. core/tests/test_uart4.c pins that.
+     */
+    s5l_vic_set_line(&m->vic[0], S5L8900_IRQ_UART4, s5l_uart_rx_irq(&m->uart4));
 
     /*
      * The GPIO interrupt cascade. Seven group outputs, seven VIC lines, and

@@ -33,11 +33,14 @@
 #import "VMEngine.h"
 #import "VMTouchQueue.h"
 #import "VMButtonQueue.h"
+#import "VMFirmwareBoot.h"
+#import "VMSettings.h"
 
 #import <mach/mach.h>
 #import <pthread.h>
 #import <time.h>
 #import <unistd.h>
+#import <stdio.h>
 #import <stdlib.h>
 #import <string.h>
 
@@ -98,11 +101,32 @@ static double vm_now(void) {
 - (void)drainOneTouch_emulatorThread;
 - (void)drainOneButton_emulatorThread;
 - (void)publishBlankSnapshotLocked;
+- (BOOL)installGuestPayload;
+- (void)provisionRootFilesystem:(id)unused;
 @end
 
 @implementation VMEngine {
     s5l8900_t        _machine;
     BOOL             _machineReady;
+
+    /*
+     * WHICH GUEST IS RUNNING, and why it is not the other one.
+     *
+     * The app has two payloads now: Apple's kernel, and the synthetic guest in
+     * VMGuest.c. Which one it got is the first thing a user needs to know and
+     * the easiest thing for a UI to be wrong about, so it is recorded here as
+     * a string the engine sets from what actually happened rather than as a
+     * flag the UI infers. -modeDescription is the only way to read it, and
+     * there is no path that sets it to a firmware string without
+     * vm_firmware_boot_start() having returned true.
+     *
+     * _bringUpNote carries the reason the firmware path was NOT taken, when
+     * there was firmware to take it with. Empty means "nothing to explain".
+     */
+    vm_firmware_boot_t *_firmwareBoot;   // owns the work image + bridge storage
+    NSString        *_mode;
+    NSString        *_bringUpNote;
+    BOOL             _preparingRootFS;
 
     NSThread        *_thread;
     pthread_mutex_t  _lock;
@@ -176,6 +200,8 @@ static double vm_now(void) {
     _pending = [NSMutableString string];
     if (!_pending) return nil;
     _status  = @"idle";
+    _mode    = @"";
+    _bringUpNote = @"";
     return self;
 }
 
@@ -185,6 +211,179 @@ static double vm_now(void) {
     // run while -threadMain is still using the snapshot buffer or the lock.
     free(_snapshot);
     if (_lockReady) pthread_mutex_destroy(&_lock);
+}
+
+#pragma mark - Choosing a guest
+
+/*
+ * THE ONE DECISION: Apple's kernel, or the built-in test guest.
+ *
+ * Called on the starting thread with the machine already allocated and nothing
+ * else touching it. All the real work is in app/Sources/VMFirmwareBoot.c, which
+ * is plain C and is tested by core/tests -- this method is only the policy of
+ * WHEN to try, and what to say when it does not work.
+ *
+ * THE RULES IT ENFORCES, in order of how badly getting them wrong would hurt:
+ *
+ *  1. The firmware path is taken only when vm_firmware_boot_start() returns
+ *     true. There is no other assignment of a firmware string to _mode.
+ *  2. A firmware failure is NEVER silent. _bringUpNote gets the reason,
+ *     -statusLine carries it, and the console gets the full detail. The demo
+ *     guest then runs, and _mode says it is the demo guest.
+ *  3. A failed bring-up may have written megabytes of kernel into DRAM, so the
+ *     machine is torn down and rebuilt before the demo guest is installed
+ *     rather than layered on top of a half-loaded kernel.
+ *
+ * WHERE IT LOOKS. VMSettings' firmware directory -- Documents/firmware -- which
+ * is where VMFirmwareImporter actually writes, and is shared by every machine.
+ * The per-instance directories VMInstanceStore hands out are still empty, and
+ * this method has no way to learn which instance it is running: nothing plumbs
+ * an identifier from the machine list through to the engine. That is a real
+ * limitation and the reason the work image is shared too; it is recorded here
+ * rather than hidden behind a plausible-looking per-instance path.
+ */
+- (BOOL)installGuestPayload {
+    NSString *directory = [[VMSettings sharedSettings] firmwareDirectory];
+    /* Copied rather than borrowed: -fileSystemRepresentation returns a pointer
+     * owned by an autoreleased buffer, and this method holds it across several
+     * calls, one of which reads 8 MB from disk. */
+    char buffer[1024];
+    buffer[0] = '\0';
+    const char *path = NULL;
+    if (directory.length &&
+        [directory getFileSystemRepresentation:buffer maxLength:sizeof buffer])
+        path = buffer;
+
+    vm_firmware_boot_state_t state;
+    vm_firmware_boot_probe(path, &state);
+
+    NSString *note = @"";
+    if (state.readiness == VM_FW_BOOT_READY) {
+        vm_firmware_boot_destroy(&_firmwareBoot);
+        _firmwareBoot = vm_firmware_boot_create();
+        if (_firmwareBoot) {
+            vm_firmware_boot_report_t report;
+            if (vm_firmware_boot_start(_firmwareBoot, &_machine, path,
+                                       &report)) {
+                [self appendConsole:[NSString stringWithFormat:
+                    @"[vm] Apple firmware: kernel at pa 0x%08x, device tree at "
+                    @"0x%08x (%u bytes), boot_args at 0x%08x\n"
+                    @"[vm] topOfKernelData 0x%08x, /vram pool 0x%08x+0x%x, "
+                    @"free page pool %.1f MB\n"
+                    @"[vm] boot arguments: \"%s\"\n",
+                    report.bringup.entry_pa, report.bringup.devicetree_pa,
+                    report.bringup.devicetree_size, report.bringup.boot_args_pa,
+                    report.bringup.top_of_kernel_data_pa,
+                    report.bringup.framebuffer_pa, report.bringup.vram_bytes,
+                    report.bringup.free_pool_bytes / 1048576.0,
+                    report.bringup.cmdline]];
+                /* -stringWithUTF8String: rather than the @() boxing syntax:
+                 * these are fixed char arrays, and the explicit form has no
+                 * decay question in it. It returns nil for bytes that are not
+                 * valid UTF-8, so neither result is used unguarded. */
+                NSString *summary =
+                    [NSString stringWithUTF8String:report.summary];
+                pthread_mutex_lock(&_lock);
+                _mode = summary ?: @"Apple firmware";
+                _bringUpNote = @"";
+                pthread_mutex_unlock(&_lock);
+                return YES;
+            }
+            note = [NSString stringWithUTF8String:report.detail]
+                 ?: @"Apple's kernel could not be started.";
+            [self appendConsole:[NSString stringWithFormat:
+                @"[vm] FIRMWARE BOOT FAILED: %s\n"
+                @"[vm] falling back to the built-in test guest\n",
+                report.detail]];
+            vm_firmware_boot_destroy(&_firmwareBoot);
+            /* A partially-loaded kernel is not a blank machine. */
+            s5l8900_free(&_machine);
+            if (!s5l8900_init(&_machine, VM_GUEST_RAM_BASE, VM_GUEST_RAM_SIZE))
+                return NO;
+        } else {
+            note = @"Not enough memory to start Apple's kernel.";
+        }
+    } else if (state.readiness == VM_FW_BOOT_NEEDS_WORK_IMAGE) {
+        /*
+         * The three imported files are here but the writable root filesystem
+         * has not been made. That copy is ~450 MB and takes long enough to be
+         * killed by the watchdog if it ran here, so it runs on its own thread
+         * and this machine gets the demo guest. Reopening the machine after it
+         * finishes boots the real kernel.
+         */
+        note = @"Preparing the writable root filesystem (first boot only). "
+               @"Close and reopen this machine when it has finished.";
+        BOOL alreadyRunning;
+        pthread_mutex_lock(&_lock);
+        alreadyRunning = _preparingRootFS;
+        _preparingRootFS = YES;
+        pthread_mutex_unlock(&_lock);
+        if (!alreadyRunning) {
+            NSThread *worker = [[NSThread alloc]
+                initWithTarget:self
+                      selector:@selector(provisionRootFilesystem:)
+                        object:directory];
+            if (worker) {
+                worker.name = @"S5LBox rootfs provisioning";
+                worker.qualityOfService = NSQualityOfServiceUtility;
+                [worker start];
+            } else {
+                pthread_mutex_lock(&_lock);
+                _preparingRootFS = NO;
+                pthread_mutex_unlock(&_lock);
+                note = @"Could not start preparing the root filesystem.";
+            }
+        }
+    } else {
+        /* No firmware at all is the ordinary case, not a failure: the demo
+         * guest is what this app does for anyone who has imported nothing. */
+        note = @"";
+    }
+
+    if (!vm_guest_install(&_machine)) return NO;
+
+    pthread_mutex_lock(&_lock);
+    _mode = @"built-in test guest";
+    _bringUpNote = note ?: @"";
+    pthread_mutex_unlock(&_lock);
+    return YES;
+}
+
+/*
+ * The one slow step, on its own thread. rootfs_work_create() refuses to
+ * replace an existing destination, so a second start while this is running
+ * cannot corrupt the image being written -- it is the flag, not the file, that
+ * keeps two of these from being launched.
+ */
+- (void)provisionRootFilesystem:(id)directory {
+    @autoreleasepool {
+        NSString *dir = (NSString *)directory;
+        char detail[VM_FW_BOOT_DETAIL_CAPACITY];
+        char path[1024];
+        detail[0] = '\0';
+        BOOL havePath = dir.length &&
+            [dir getFileSystemRepresentation:path maxLength:sizeof path];
+        BOOL ok = havePath
+            ? vm_firmware_boot_provision(path, detail, sizeof detail)
+            : NO;
+        if (!havePath)
+            (void)snprintf(detail, sizeof detail,
+                           "This app has no documents directory to prepare the "
+                           "root filesystem in.");
+        NSString *why = [NSString stringWithUTF8String:detail]
+                      ?: @"The root filesystem could not be prepared.";
+        pthread_mutex_lock(&_lock);
+        _preparingRootFS = NO;
+        _bringUpNote = ok
+            ? @"The root filesystem is ready. Reopen this machine to boot "
+              @"iPhone OS."
+            : why;
+        pthread_mutex_unlock(&_lock);
+        [self appendConsole:ok
+            ? @"[vm] root filesystem prepared; reopen to boot iPhone OS\n"
+            : [NSString stringWithFormat:
+                @"[vm] could not prepare the root filesystem: %s\n", detail]];
+    }
 }
 
 #pragma mark - Lifecycle
@@ -266,8 +465,9 @@ static double vm_now(void) {
         [self appendConsole:@"[vm] could not allocate 128 MB of guest DRAM\n"];
         return NO;
     }
-    if (!vm_guest_install(&_machine)) {
+    if (![self installGuestPayload]) {
         s5l8900_free(&_machine);
+        vm_firmware_boot_destroy(&_firmwareBoot);
         pthread_mutex_lock(&_lock);
         _state = VMEngineStateIdle;
         _stopRequested = NO;
@@ -290,6 +490,7 @@ static double vm_now(void) {
                                                  object:nil];
     if (!thread) {
         s5l8900_free(&_machine);
+        vm_firmware_boot_destroy(&_firmwareBoot);
         pthread_mutex_lock(&_lock);
         _state = VMEngineStateIdle;
         _stopRequested = NO;
@@ -313,6 +514,7 @@ static double vm_now(void) {
 
     if (cancelled) {
         s5l8900_free(&_machine);
+        vm_firmware_boot_destroy(&_firmwareBoot);
         pthread_mutex_lock(&_lock);
         _state = VMEngineStateIdle;
         _stopRequested = NO;
@@ -778,6 +980,10 @@ static double vm_now(void) {
     if (_machineReady) {
         s5l8900_free(&_machine);
     }
+    /* AFTER the machine, never before: the memory-disk bridges hold a borrowed
+     * descriptor onto the work image and a pointer into guest DRAM, and both
+     * have to stop existing before the file they write through is closed. */
+    vm_firmware_boot_destroy(&_firmwareBoot);
 
     /* Publish the terminal state only after the machine is gone. In
      * particular, clear _thread here so a later start really creates a fresh
@@ -934,12 +1140,70 @@ static double vm_now(void) {
     uint64_t retired = _retired;
     double rate = _rate;
     NSString *status = _status;
+    NSString *mode = _mode;
     pthread_mutex_unlock(&_lock);
 
     double footprintMB = [VMEngine physFootprintBytes] / 1048576.0;
+    /* The mode leads, because "3.2 M insn/s" means something different
+     * depending on what is retiring them, and a user who cannot see which
+     * guest is running has no way to tell. */
     return [NSString stringWithFormat:
-            @"%@  ·  %.1f M insn  ·  %.2f M insn/s  ·  %.0f MB",
+            @"%@%@  ·  %.1f M insn  ·  %.2f M insn/s  ·  %.0f MB",
+            mode.length ? [mode stringByAppendingString:@"  ·  "] : @"",
             status, retired / 1.0e6, rate / 1.0e6, footprintMB];
+}
+
+- (NSString *)modeDescription {
+    pthread_mutex_lock(&_lock);
+    NSString *mode = _mode;
+    pthread_mutex_unlock(&_lock);
+    return mode.length ? mode : nil;
+}
+
+- (BOOL)isRunningFirmware {
+    /* Deliberately derived from the same string the UI shows rather than from
+     * a second flag: two sources of truth is how a UI ends up claiming one
+     * thing in the status bar and another in an alert. */
+    pthread_mutex_lock(&_lock);
+    BOOL firmware = _firmwareBoot != NULL && _mode.length > 0 &&
+                    ![_mode isEqualToString:@"built-in test guest"];
+    pthread_mutex_unlock(&_lock);
+    return firmware;
+}
+
+- (NSString *)bringUpNote {
+    pthread_mutex_lock(&_lock);
+    NSString *note = _bringUpNote;
+    pthread_mutex_unlock(&_lock);
+    return note.length ? note : nil;
+}
+
+- (BOOL)isPreparingRootFilesystem {
+    pthread_mutex_lock(&_lock);
+    BOOL preparing = _preparingRootFS;
+    pthread_mutex_unlock(&_lock);
+    return preparing;
+}
+
++ (NSString *)firmwareReadinessSummary {
+    NSString *directory = [[VMSettings sharedSettings] firmwareDirectory];
+    char buffer[1024];
+    BOOL havePath = directory.length &&
+        [directory getFileSystemRepresentation:buffer maxLength:sizeof buffer];
+    vm_firmware_boot_state_t state;
+    vm_firmware_boot_probe(havePath ? buffer : NULL, &state);
+    switch (state.readiness) {
+    case VM_FW_BOOT_READY:
+        return @"Boots iPhone OS 3.1.3 from the imported firmware.";
+    case VM_FW_BOOT_NEEDS_WORK_IMAGE:
+        return @"Firmware imported. The writable root filesystem is prepared "
+               @"on first open, then it boots iPhone OS 3.1.3.";
+    case VM_FW_BOOT_INCOMPLETE:
+    default:
+        break;
+    }
+    return @"No firmware imported — runs the built-in test guest, which "
+           @"exercises the processor, the serial port and the screen.";
 }
 
 @end

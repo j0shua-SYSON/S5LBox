@@ -70,15 +70,21 @@ typedef struct {
               @"real one did." }];
 
     [e addObject:@{ @"h": @"What this app does today",
-        @"b": @"It runs a small built-in test program, not iPhone OS.\n\n"
-              @"That program exercises the parts of the emulator the phone "
-              @"version needs — the processor, the serial port and the screen "
-              @"— and draws to the display so you can see it working. It is a "
-              @"proof that the engine runs on a phone, not the finished thing."
-              @"\n\nThe full operating system currently boots on the desktop "
-              @"version of this project, where it reaches the iPhone OS 3 lock "
-              @"screen. Bringing that to the app needs the two halves to share "
-              @"one guest session, which is the next piece of work." }];
+        @"b": @"With no firmware imported, it runs a small built-in test "
+              @"program. That program exercises the parts of the emulator the "
+              @"phone version needs — the processor, the serial port and the "
+              @"screen — and draws to the display so you can see it working."
+              @"\n\nOnce you have imported a kernel, a device tree and a root "
+              @"filesystem, opening a machine boots Apple's own iPhone OS "
+              @"3.1.3 kernel instead: the same segments at the same addresses, "
+              @"the same device tree with the same values written into it, and "
+              @"the same boot arguments the desktop version of this project "
+              @"uses. The status line under the screen says which of the two "
+              @"is running, and it is never a guess — it reports what was "
+              @"actually installed.\n\nOn the desktop that boot reaches the "
+              @"iPhone OS 3 lock screen. How far it gets here has not been "
+              @"measured on a phone yet, and this manual will not claim a "
+              @"number it has not seen." }];
 
     [e addObject:@{ @"h": @"Machines",
         @"b": @"The first screen is a list of machines. Each one keeps its own "
@@ -97,7 +103,7 @@ typedef struct {
               @"Touching the screen is passed to the guest as a real touch "
               @"report, in the same format the original digitizer used.\n\n"
               @"If the guest is not listening — and the built-in test program "
-              @"is not — the app says so rather than pretending the press "
+              @"never is — the app says so rather than pretending the press "
               @"worked." }];
 
     [e addObject:@{ @"h": @"Why it needs firmware, and why none is included",
@@ -137,7 +143,8 @@ typedef struct {
                   @"is where a real iPhone's kernel logs go. On a real firmware "
                   @"boot this is the primary evidence of how far it got.\n\n"
                   @"The built-in test program prints a short banner and then "
-                  @"very little, so a nearly-empty console here is correct." }];
+                  @"very little, so a nearly-empty console here is correct "
+                  @"when no firmware is imported. A firmware boot fills it." }];
 
         [e addObject:@{ @"h": @"A note on the numbers",
             @"b": @"Instruction counts are the honest unit of progress in this "

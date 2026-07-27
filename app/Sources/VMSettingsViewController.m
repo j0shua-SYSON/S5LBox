@@ -202,16 +202,22 @@ static NSString *VMStringFromC(const char *text) {
     [[VMSettings sharedSettings] setInlineConsole:sender.isOn];
 }
 
+/*
+ * The banner said "this app boots no firmware" unconditionally. It can now,
+ * so the sentence has to follow what has been imported -- and the part that
+ * has NOT changed has to keep being said just as plainly: these switches are
+ * still recorded rather than applied, whichever guest is running.
+ */
 - (void)refreshBanner {
     BOOL dev = [[VMSettings sharedSettings] developerMode];
+    NSString *readiness = [VMEngine firmwareReadinessSummary];
     _banner.text = dev
-        ? @"This app boots no firmware. None of the option switches below "
-          @"changes the machine on the previous screen — it is running the "
-          @"synthetic guest in VMGuest.c, not iPhone OS. They are recorded, and "
-          @"rendered back as a command line for the desktop harness. Only the "
-          @"two rows under Diagnostics are applied here."
-        : @"This app boots no firmware yet. The machine on the previous screen "
-          @"runs a small built-in test program — see the Manual.";
+        ? [readiness stringByAppendingString:
+            @"\n\nNone of the option switches below changes the machine on the "
+            @"previous screen. They are recorded, and rendered back as a "
+            @"command line for the desktop harness. Only the two rows under "
+            @"Diagnostics are applied here."]
+        : [readiness stringByAppendingString:@" See the Manual."];
 }
 
 - (void)developerModeToggled:(UISwitch *)sender {
@@ -328,8 +334,8 @@ titleForFooterInSection:(NSInteger)section {
             : @"New here? Read the manual first.\n\n"
               @"Jailbreak disables the guest's signature checking and installs "
               @"Cydia into that machine's own files. It applies to a real "
-              @"firmware boot — this app boots none yet, so today it is "
-              @"recorded and not performed.\n\n"
+              @"firmware boot, and this app does not perform it yet — today it "
+              @"is recorded and not performed.\n\n"
               @"Developer mode adds the full option table, the guest console "
               @"and diagnostics — useful for working on the emulator, noise "
               @"otherwise.";
@@ -338,9 +344,12 @@ titleForFooterInSection:(NSInteger)section {
 
     if (section < VM_OPT_GROUP_COUNT) {
         NSString *note = VMStringFromC(vm_option_group_note((unsigned)section));
+        /* Still true, and still worth saying on every group: the app boots
+         * firmware now, but it boots it with the one configuration ~90
+         * recorded desktop runs converged on, not with these switches. */
         return [note stringByAppendingString:
                 @"\n\nRECORDED, NOT APPLIED: these describe a firmware boot, "
-                @"and this app has no firmware to boot."];
+                @"and the app's own boot does not read them yet."];
     }
 
     switch ((VMSettingsSection)section) {
@@ -354,9 +363,14 @@ titleForFooterInSection:(NSInteger)section {
                     @"payload in a 3.x IPSW is encrypted with a key that is "
                     @"not in the archive, and this app has none of them and "
                     @"fetches none — it asks you for the ones it needs.\n\n"
-                    @"Even with all three present, the app cannot boot them — "
-                    @"that is the desktop harness's job today.",
-                    [_settings firmwareDirectory] ?: @"(no documents directory)"];
+                    @"With all three present, opening a machine boots Apple's "
+                    @"own kernel. The first open makes a writable copy of the "
+                    @"root filesystem beside them — about 450 MB, once — and "
+                    @"runs the built-in test guest while it does; reopen the "
+                    @"machine afterwards. If a boot cannot be started, the "
+                    @"machine says why instead of pretending.\n\n%@",
+                    [_settings firmwareDirectory] ?: @"(no documents directory)",
+                    [VMEngine firmwareReadinessSummary]];
         case VMSettingsSectionDiagnostics:
             return @"These two are applied. The cap stops the emulator thread "
                     "at a chosen instruction count and leaves the last frame on "

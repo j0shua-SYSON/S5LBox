@@ -35,6 +35,12 @@ add_library(emucore STATIC
     src/firmware/lzss.c
     src/firmware/macho.c
     src/firmware/ksyms.c
+    src/boot/bringup.c
+    # The host's PPP peer (docs/networking.md §10, N2). It belongs in emucore
+    # rather than in a host-tool target for the reason the header states: it has
+    # no platform dependency at all, not even a clock, so it is testable on any
+    # runner and linkable into the iOS app unchanged.
+    src/net/ppp.c
 )
 target_include_directories(emucore PUBLIC include)
 
@@ -152,6 +158,18 @@ add_executable(test_uart4 tests/test_uart4.c)
 target_link_libraries(test_uart4 PRIVATE emucore)
 add_test(NAME s5l8900_uart4_ppp_line COMMAND test_uart4)
 
+# The host PPP peer. Its centrepiece replays work/run80-ppp-tty/uart4-ppp.bin,
+# the 47 bytes a real guest's pppd really transmitted; /work/ is git-ignored, so
+# the test carries a transcription of those bytes and checks it against the file
+# whenever the file is present. Passing the path as a definition rather than
+# reading a relative name keeps the test independent of the working directory,
+# exactly as test_bringup does with the firmware.
+add_executable(test_ppp tests/test_ppp.c)
+target_link_libraries(test_ppp PRIVATE emucore)
+target_compile_definitions(test_ppp PRIVATE
+    S5LBOX_RUN80_PPP="${CMAKE_CURRENT_SOURCE_DIR}/../work/run80-ppp-tty/uart4-ppp.bin")
+add_test(NAME ppp_peer COMMAND test_ppp)
+
 add_executable(test_mtz2 tests/test_mtz2.c)
 target_link_libraries(test_mtz2 PRIVATE emucore)
 add_test(NAME multitouch_z2 COMMAND test_mtz2)
@@ -235,6 +253,33 @@ add_test(NAME app_vmguest_bridge COMMAND test_vmguest)
 # emulator thread cannot keep up.  Only the last of these needs a core header
 # (for the contact struct it fills in); none of them links emucore, because none
 # of them has anything to do with a running machine.
+# The app's firmware boot path. Objective-C cannot be compiled by this runner,
+# so everything between "there are files in a directory" and "the machine is
+# pointed at Apple's kernel" is plain C in app/Sources/VMFirmwareBoot.c and is
+# tested here. What it protects is narrow and important: that the app cannot
+# report a firmware boot it did not perform. Needs no firmware -- every fixture
+# is a file the test writes itself.
+add_executable(test_vmfirmwareboot
+    ../app/Tests/test_vmfirmwareboot.c
+    ../app/Sources/VMFirmwareBoot.c
+)
+target_include_directories(test_vmfirmwareboot PRIVATE ../app/Sources ../tools)
+target_link_libraries(test_vmfirmwareboot PRIVATE
+    emucore host_ios3_bringup_gate host_file_block host_rootfs_work)
+set_target_properties(test_vmfirmwareboot PROPERTIES
+    C_STANDARD 11
+    C_STANDARD_REQUIRED YES
+    C_EXTENSIONS NO)
+if(MSVC)
+    target_compile_options(test_vmfirmwareboot PRIVATE /W4 /WX)
+else()
+    target_compile_options(test_vmfirmwareboot PRIVATE
+        -Wall -Wextra -Werror -pedantic -Wformat=2 -Wshadow)
+endif()
+add_test(NAME app_firmware_boot COMMAND test_vmfirmwareboot)
+set_tests_properties(app_firmware_boot PROPERTIES
+    WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+
 add_executable(test_vmtouchmap
     ../app/Tests/test_vmtouchmap.c
     ../app/Sources/VMTouchMap.c
@@ -458,6 +503,50 @@ else()
         -Wall -Wextra -Werror -pedantic)
 endif()
 
+# The gate as a bring-up hook: one adapter, shared by the desktop test below
+# and by the iOS app, so a kernel is authorized by the same code in both.
+add_library(host_ios3_bringup_gate STATIC ../tools/ios3_bringup_gate.c)
+target_include_directories(host_ios3_bringup_gate PUBLIC ../tools include)
+target_link_libraries(host_ios3_bringup_gate
+    PUBLIC host_ios3_kernel_patch emucore)
+set_target_properties(host_ios3_bringup_gate PROPERTIES
+    C_STANDARD 11
+    C_STANDARD_REQUIRED YES
+    C_EXTENSIONS NO)
+if(MSVC)
+    target_compile_options(host_ios3_bringup_gate PRIVATE /W4 /WX)
+else()
+    target_compile_options(host_ios3_bringup_gate PRIVATE
+        -Wall -Wextra -Werror -pedantic)
+endif()
+
+# The orchestration that turns three files into a running kernel, against the
+# real firmware. The layout it computes is the one ~90 recorded desktop runs
+# were made with, so this test compares against those printed addresses rather
+# than against itself.
+#
+# Public CI has no Apple firmware, so the firmware-backed cases skip there and
+# the fail-closed refusal cases -- the ones that stop the app claiming a boot
+# that did not happen -- run everywhere. ../tools is on the include path for
+# dt_inplace.h, which the test uses to read the patched tree back through the
+# shipping implementation instead of through a copy of bringup.c's writers.
+add_executable(test_bringup tests/test_bringup.c)
+target_link_libraries(test_bringup PRIVATE emucore host_ios3_bringup_gate)
+target_include_directories(test_bringup PRIVATE ../tools)
+target_compile_definitions(test_bringup PRIVATE
+    S5LBOX_FIRMWARE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../firmware")
+set_target_properties(test_bringup PROPERTIES
+    C_STANDARD 11
+    C_STANDARD_REQUIRED YES
+    C_EXTENSIONS NO)
+if(MSVC)
+    target_compile_options(test_bringup PRIVATE /W4 /WX)
+else()
+    target_compile_options(test_bringup PRIVATE
+        -Wall -Wextra -Werror -pedantic)
+endif()
+add_test(NAME kernel_bringup COMMAND test_bringup)
+
 add_executable(test_ios3_kernel_patch tests/test_ios3_kernel_patch.c)
 target_link_libraries(test_ios3_kernel_patch PRIVATE host_ios3_kernel_patch)
 set_target_properties(test_ios3_kernel_patch PROPERTIES
@@ -585,3 +674,21 @@ add_test(NAME app_option_mirror
 # cancels out — so it also prints a machine-derived report to diff.
 add_executable(snapboot ../tools/snapboot.c)
 target_link_libraries(snapboot PRIVATE emucore)
+
+# insnbench measures interpreter throughput on the six synthetic configurations
+# docs/dynarec.md §1.1-§1.2 used, whose every recorded number was taken on one
+# desktop x86-64 box. Built here rather than as a test on purpose: it produces a
+# rate, not a verdict, so it is deliberately NOT registered with ctest and must
+# not become a performance gate — a threshold measured on a shared, virtualised
+# CI runner would either catch nothing or flake. .github/workflows/core-tests.yml
+# runs it as a non-gating step in the existing three-platform matrix, which is
+# what makes the arm64-vs-x86 ratio a same-commit, same-day comparison instead of
+# a comparison against historical numbers from a different tree.
+#
+# $<CONFIG> is a single bare token in every generator, so passing it as a
+# definition cannot go wrong the way an embedded flags string with spaces could.
+# The workflow prints the resolved compiler and CMAKE_C_FLAGS_<CONFIG> out of the
+# cache alongside the run, which is where the literal -O level comes from.
+add_executable(insnbench ../tools/insnbench.c)
+target_link_libraries(insnbench PRIVATE emucore)
+target_compile_definitions(insnbench PRIVATE INSNBENCH_BUILD_TYPE="$<CONFIG>")

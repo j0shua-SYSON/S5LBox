@@ -35,6 +35,48 @@ jobs:
       - name: Test
         run: ctest --test-dir build -C Release --output-on-failure
 
+      # ---------------------------------------------------------------------
+      # Interpreter throughput. A MEASUREMENT, NOT A GATE.
+      #
+      # docs/dynarec.md §1.1-§1.2 is explicit that every throughput number in it
+      # is a desktop x86-64 number and that every target-device figure is
+      # INFERRED or GUESS. This matrix already builds the same core on
+      # ubuntu-latest and windows-latest (x86-64) and macos-latest (Apple
+      # Silicon, arm64), so the missing ARM64 measurement costs one step: the
+      # same binary, from the same commit, on the same day, on both ISAs. That
+      # is what makes the arm64/x86 ratio real rather than a comparison against
+      # historical numbers taken on a different tree with a different compiler.
+      #
+      # continue-on-error is deliberate and must stay. A hosted runner is
+      # shared, virtualised and noisy, so any threshold here would either be so
+      # loose it caught nothing or would flake on a busy neighbour; a real
+      # performance regression test needs a stable machine, which CI is not.
+      # The step can still go red on a BROKEN harness — insnbench exits non-zero
+      # when a run fails its architectural end-state check — and that stays
+      # visible in the job summary without failing the build.
+      #
+      # Runtime is roughly 2-3 minutes per runner at these settings; the two
+      # tick=yes rows are most of it. Trim --reps or --insns if that ever
+      # matters more than matching §1.1's 20,000,000-instruction sample size.
+      - name: Interpreter throughput (measurement, not a gate)
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -uo pipefail
+          echo "=== host ==="
+          uname -a || true
+          uname -m || true
+          echo "=== toolchain (the -O level the numbers below were built with) ==="
+          grep -E '^CMAKE_C_COMPILER:|^CMAKE_C_FLAGS(_RELEASE)?:|^CMAKE_BUILD_TYPE:' \
+            build/CMakeCache.txt || true
+          echo "=== insnbench ==="
+          bin="$(find build -type f \( -name insnbench -o -name insnbench.exe \) | head -n 1)"
+          if [ -z "$bin" ]; then
+            echo "insnbench was not built" >&2
+            exit 1
+          fi
+          "$bin" --insns 20000000 --reps 5
+
   jit:
     # The dynamic recompiler (docs/dynarec.md). It is off in the default build,
     # so it needs a job of its own or it would never be compiled at all.

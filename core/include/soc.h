@@ -86,13 +86,16 @@
  * uart2 is genuinely absent from the tree; the numbering is Apple's, not a gap
  * we introduced.
  *
- * There is deliberately NO S5L8900_IRQ_UART4 constant. VIC line 28 is what the
- * nub's `interrupts` property says, and it is recorded here in prose for
- * whoever wires it, but this model is transmit-only and never raises a line —
- * and a constant that looks wired but is not is exactly the landmine the old
- * S5L8900_GPIO_BASE was. It joins the header the day a receive path needs it.
+ * VIC line 28 is what the nub's `interrupts` property says. It used to be
+ * recorded here in prose and deliberately NOT given a constant, because a
+ * transmit-only port never raises a line and a constant that looks wired but is
+ * not is the landmine the old S5L8900_GPIO_BASE was. The receive path is the
+ * day that comment named: the constant is below, and s5l8900_tick() drives it
+ * from uart4's receive FIFO. It still cannot assert on a run with no host peer,
+ * because nothing but s5l_uart_rx_push() can put a byte in that FIFO.
  */
 #define S5L8900_UART4_BASE  0x3cc10000u
+#define S5L8900_IRQ_UART4   28u   /* /arm-io/uart4 `interrupts` = {28} */
 #define S5L8900_VIC0_BASE   0x38e00000u
 #define S5L8900_TIMER_BASE  0x3e200000u
 #define S5L8900_CLOCK_BASE  0x3c500000u
@@ -199,8 +202,9 @@
  *
  * TWO INSTANCES, ONE MODEL. uart0 is the kprintf console. uart4 is the port
  * the guest's own /usr/sbin/pppd is pointed at (see S5L8900_UART4_BASE above
- * and docs/networking.md). Both are transmit-only: this model has no receive
- * source, and that is a statement rather than an omission — see below.
+ * and docs/networking.md). Transmit is captured on both. Receive exists on
+ * both — one model, one FIFO — but only uart4's is wired to a VIC line, and
+ * only a host that calls s5l_uart_rx_push() can put a byte in either.
  *
  * REGISTER SEMANTICS, read out of AppleS5L8900XSerial rather than guessed
  * (docs/AGENT_HANDOFF.md §23.5.1):
@@ -212,25 +216,44 @@
  *                   0xc065eed8 reads it, masks, and writes the result back,
  *                   so the hardware register is write-one-to-clear.
  *
- * Both of those are satisfied EXACTLY by the constants below, and the reason
- * is worth stating because it looks like a shortcut and is not. A transmitter
- * that drains instantly and a receiver with nothing behind it have, at every
- * instant, empty FIFOs: UFSTAT's four fields and its two full bits are all
- * zero, which is what s5l_uart_read() returns. And a write-one-to-clear
- * register whose latches are never set has nothing to clear, so dropping the
- * store is not an approximation of the hardware — it is the hardware's own
- * answer for this state. The day a receive path lands, both become real:
- * UFSTAT grows a receive count and UTRSTAT grows a latch and a W1C path.
+ * THE RECEIVE PATH, and what is modelled versus what is deliberately not.
  *
- * WHY TRANSMIT-ONLY IS SAFE AND NOT MERELY UNFINISHED. Answering a read with a
- * byte the host never sent is the one thing this core's device models are
- * forbidden to do, and a receive FIFO reported empty is the truthful answer
- * for a machine with no peer attached. It also keeps the whole port out of the
- * wake-source table: nothing here can raise a line, so there is no future edge
- * to name and no host-thread handoff to get wrong. docs/AGENT_HANDOFF.md
- * §23.5.1 is explicit that the host->guest direction must happen on the CPU
- * thread between run slices, and the cheapest way to honour that today is to
- * not have the direction at all.
+ * s5l_uart_rx_push() is the ONLY way a byte enters the receive FIFO. Nothing
+ * inside core/ ever calls it: a host that has attached a peer calls it between
+ * run slices, which is the handoff docs/AGENT_HANDOFF.md §23.5.1 requires
+ * (never from a socket callback — core/ has no threading vocabulary). So on
+ * every run without a peer the FIFO is empty at every instant, and the three
+ * registers below answer exactly what they answered when this model was
+ * transmit-only. That is not a coincidence to be preserved by luck; it is
+ * asserted in core/tests/test_uart4.c.
+ *
+ *   UFSTAT   bits[3:0] = rx_count, bit 8 = rx_count == UART_RX_FIFO. The count
+ *            field is four bits and the depth is sixteen, so a full FIFO shows
+ *            0 in the field and 1 in the full bit — the standard Samsung
+ *            encoding, and the reason the full bit exists at all.
+ *   UTRSTAT  bit 0 = "receive data ready" = rx_count != 0. A LEVEL derived from
+ *            the FIFO, not a latch: it clears when the guest drains URXH.
+ *   URXH     dequeues one byte, or answers 0 when empty. Answering anything
+ *            else for an empty FIFO would be inventing a byte the host never
+ *            sent, which is the one thing these models may not do.
+ *
+ * UTRSTAT stores are still dropped. AppleS5L8900XSerial's interrupt filter at
+ * 0xc065eed8 reads the register, masks, and writes the result back, so the
+ * hardware register is write-one-to-clear — but every bit this model reports is
+ * a level with a live source behind it, and a W1C write cannot clear a level.
+ * Accepting the store and clearing bit 0 while a byte still sat in the FIFO
+ * would lose that byte silently. The real latch layout is NOT known; only the
+ * fact that the register is W1C is confirmed. Trap what you do not implement:
+ * this drops the store and says so, rather than guessing a latch set.
+ *
+ * THE INTERRUPT IS NOT GATED BY UCON, and that is a decision rather than an
+ * oversight. On a Samsung S3C part UCON bits[1:0] select the receive mode and
+ * would gate the line; the S5L8900's UCON bit layout is not confirmed from
+ * Apple's binary, only its value on uart0 (0x00000405, docs/BOOTLOG.md stage
+ * 2). Gating on a guessed bit fails SILENTLY — the line never asserts and the
+ * port looks dead — whereas not gating can at worst assert a line for a FIFO
+ * that genuinely has a byte in it. The host's decision to attach a peer is the
+ * gate this model actually has, and it is the one it can defend.
  *
  * FLOW CONTROL is not modelled and does not need to be: uart1 and uart4 carry
  * `no-flow-control`, so AppleS5L8900XSerial's getFlowStatus short-circuits to
@@ -259,15 +282,55 @@
 
 #define UART_TX_BUFFER 8192
 
+/* AppleS5L8900XSerial's own depth, read out of UFSTAT's field widths: a
+ * four-bit count plus a separate full bit is exactly sixteen entries. */
+#define UART_RX_FIFO 16u
+
 typedef struct {
     uint32_t ulcon, ucon, ufcon, umcon, ubrdiv;
     char     tx[UART_TX_BUFFER];   /* everything the guest has printed */
     size_t   tx_len;
+
+    /*
+     * The receive FIFO, and four counters that exist because "the guest never
+     * read a byte" and "the host never sent one" are different failures with
+     * different next steps, and nothing else in the machine can tell them
+     * apart. rx_dropped in particular is the back-pressure signal: the host
+     * pushed into a full FIFO and the byte is GONE, which for a PPP stream
+     * means a frame the peer will have to retransmit.
+     */
+    uint64_t rx_pushed;            /* bytes the host handed to this port    */
+    uint64_t rx_dropped;           /* pushes refused: the FIFO was full     */
+    uint64_t rx_reads;             /* URXH reads that returned a real byte  */
+    uint64_t rx_underruns;         /* URXH reads of an empty FIFO           */
+    uint8_t  rx[UART_RX_FIFO];
+    uint8_t  rx_head;              /* index of the next byte out            */
+    uint8_t  rx_count;             /* 0 .. UART_RX_FIFO                     */
 } s5l_uart_t;
 
 void     s5l_uart_reset(s5l_uart_t *u);
 uint32_t s5l_uart_read(s5l_uart_t *u, uint32_t off);
 void     s5l_uart_write(s5l_uart_t *u, uint32_t off, uint32_t val);
+
+/*
+ * Hand one byte to the port as if it had arrived on the wire. Returns false and
+ * counts a drop when the FIFO is full — it never blocks and never grows, so the
+ * CPU thread cannot be stalled by a host that is producing faster than the
+ * guest consumes (docs/networking.md §6).
+ *
+ * MUST be called between run slices, on the CPU thread. See the receive-path
+ * block above.
+ */
+bool     s5l_uart_rx_push(s5l_uart_t *u, uint8_t byte);
+/* How many more bytes s5l_uart_rx_push() would accept right now. */
+unsigned s5l_uart_rx_space(const s5l_uart_t *u);
+/*
+ * The receive interrupt as a LEVEL: asserted while the FIFO holds anything.
+ * Level and not edge for the reason core/src/soc/vic.c gives — an edge device
+ * that re-raises inside the handler loses the interrupt — and because a level
+ * that only clears when the guest drains URXH cannot lose a byte.
+ */
+bool     s5l_uart_rx_irq(const s5l_uart_t *u);
 
 /* ---------------------------------------------------------------- VIC ---
  * PL190-style vectored interrupt controller. Devices assert lines into `raw`;

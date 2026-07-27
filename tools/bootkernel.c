@@ -28,6 +28,7 @@
 #include "md_bridge.h"
 #include "md_raw_bridge.h"
 #include "mt_drag.h"
+#include "ppp.h"
 #include "rootfs_work.h"
 #include "sha256.h"
 #include "snapshot.h"
@@ -583,10 +584,17 @@ static const boot_toggle_t BOOT_TOGGLES[] = {
       "to the boot arguments, because all four UARTs carry dma-types and\n"
       "AppleS5L8900XSerial would otherwise try to drive a PL080 this VM does\n"
       "not model -- the driver's own boot-argument escape, not a patch.\n"
-      "STEP S0 IS TRANSMIT-ONLY. There is no host peer yet, so pppd will send\n"
-      "Configure-Requests and get no answer. The success criterion is the six\n"
-      "bytes 7E FF 7D 23 C0 21 appearing in uart4-ppp.bin, which is an\n"
-      "HDLC-framed LCP Configure-Request and is checked for automatically.\n"
+      "It also attaches the host's PPP peer (core/src/net/ppp.c): LCP and IPCP\n"
+      "are terminated here, the guest is offered 10.0.2.15 and this end is\n"
+      "10.0.2.2. The peer does not open until the guest's first octet arrives,\n"
+      "and it ROUTES NO IP -- N2 ends at \"the link is up and the guest has an\n"
+      "address\", and IP frames are counted and dropped.\n"
+      "TWO SEPARATE SUCCESS CRITERIA, and the report keeps them apart. The\n"
+      "first is still the six bytes 7E FF 7D 23 C0 21 in uart4-ppp.bin, which\n"
+      "is an HDLC-framed LCP Configure-Request and says the GUEST reached\n"
+      "pppd. The second is IPCP Opened, which says the guest read our answer\n"
+      "back out of uart4 and accepted it. The first has been observed (run80);\n"
+      "the second has not been observed in any boot.\n"
       "Requires --external-md, the only mode with a writable work image." },
 
     { "ramdisk-low", "-Y", NULL, false, BOOT_GROUP_LAYOUT,
@@ -6133,6 +6141,38 @@ static struct {
     bool        ppp_lcp_seen;
     uint64_t    ppp_lcp_at;              /* stream offset of the prefix's 7E  */
     uint64_t    ppp_lcp_step;            /* instruction count when it landed  */
+
+    /* --- the host's half of the link, docs/networking.md §10's N2 ---------
+     * core/src/net/ppp.c terminates PPP for us. It has no I/O of its own, so
+     * this is the whole of its wiring: every octet the guest stores to uart4's
+     * UTXH is fed into ppp_input_byte() from the bus interposer (pure
+     * computation -- it never touches the machine), and ppp_pump_step() moves
+     * whatever the peer produced into uart4's receive FIFO from the STEP LOOP,
+     * between instructions, which is where docs/AGENT_HANDOFF.md §23.5.1
+     * requires the host->guest direction to happen.
+     *
+     * ppp_peer_armed is separate from the --ppp flag because the peer is opened
+     * by the guest's FIRST transmitted octet rather than at startup. Opening it
+     * earlier would queue our Configure-Request into a sixteen-byte FIFO that
+     * nothing is draining, minutes before pppd exists to read it.
+     *
+     * ppp_rx_bytes counts what actually reached the guest's FIFO. It is NOT the
+     * same number as the peer's own tx_bytes: the difference is what is still
+     * queued because the guest has not drained, and that difference is the
+     * single most useful thing this section can report. */
+    ppp_peer_t  ppp_peer;
+    bool        ppp_peer_armed;          /* --ppp: feed and pump the peer     */
+    bool        ppp_peer_opened;         /* the RFC 1661 Open event was sent  */
+    uint64_t    ppp_rx_bytes;            /* octets handed to uart4's RX FIFO  */
+    uint64_t    ppp_open_step;           /* instruction count at the Open     */
+    /* The two instants that decide whether the receive path works at all. The
+     * gap between them is how long AppleS5L8900XSerial took to service VIC
+     * line 28, and a first_read of zero with a non-zero first_push is the
+     * single most useful negative result this whole option can produce. */
+    uint64_t    ppp_first_push_step;
+    uint64_t    ppp_first_read_step;
+    uint64_t    ppp_lcp_up_step;         /* ... when LCP reached Opened, or 0 */
+    uint64_t    ppp_ipcp_up_step;        /* ... when IPCP did                 */
 
     /* --- DIAGNOSTIC: the user-mode call probe; --call-probe ---------------
      * call_probe_n is the hot-loop gate: zero means the whole facility is off
@@ -17373,6 +17413,28 @@ static void ppp_tee_byte(uint32_t val) {
         G.ppp_lcp_step = G.hot_now;
     }
 
+    /*
+     * And into the host's peer. Deliberately AFTER the tee and the scan, and
+     * deliberately doing nothing to the machine: ppp_input_byte() is pure
+     * computation over the peer's own state, so this hook still cannot change
+     * what the guest sees. Everything that CAN is in ppp_pump_step(), which
+     * runs from the step loop.
+     *
+     * The very first octet is what opens the link. That octet is the only
+     * evidence this harness will ever get that pppd has the tty open and the
+     * line discipline attached, and it is a better Open event than a clock:
+     * the guest's launchd job starts minutes into a boot, and a peer opened at
+     * startup would have spent its whole Max-Configure budget before then.
+     */
+    if (G.ppp_peer_armed) {
+        if (!G.ppp_peer_opened) {
+            G.ppp_peer_opened = true;
+            G.ppp_open_step   = G.hot_now;
+            ppp_open(&G.ppp_peer);
+        }
+        ppp_input_byte(&G.ppp_peer, c);
+    }
+
     if (G.ppp_tee_failed) return;
     if (!G.ppp_tee) {
         G.ppp_tee = fopen(PPP_TEE_PATH, "wb");
@@ -17380,6 +17442,52 @@ static void ppp_tee_byte(uint32_t val) {
     }
     if (fputc((int)c, G.ppp_tee) == EOF) { G.ppp_tee_failed = true; return; }
     if (fflush(G.ppp_tee) != 0) G.ppp_tee_failed = true;
+}
+
+/*
+ * The host->guest half, and the ONLY place this harness writes into the
+ * machine on behalf of the peer.
+ *
+ * Called from the step loop after s5l8900_tick(), which is "on the CPU thread,
+ * between run slices" as docs/AGENT_HANDOFF.md §23.5.1 requires. Two things
+ * happen here and nowhere else:
+ *
+ * TIME. The peer's restart timer (RFC 1661 §4.6, three seconds) runs on GUEST
+ * time, derived from retired instructions at the machine's own clock rate --
+ * not on host wall clock. That is the only choice that makes sense: pppd's
+ * identical three-second timer is running on the same guest clock, so both ends
+ * retransmit on the same schedule. At this emulator's speed three guest seconds
+ * is ten to fifteen wall minutes, which is exactly what run80 measured. A WFI
+ * fast-forward advances guest time without retiring instructions, so this clock
+ * runs SLOW during idle -- conservative, because a timer that fires late merely
+ * waits, while one that fires early floods a line the guest is still using.
+ *
+ * BYTES. Only as many as the sixteen-entry FIFO will take. Refusing to push
+ * into a full FIFO is back-pressure rather than loss: the octets stay in the
+ * peer's ring and go out on a later step. If the guest never drains, nothing is
+ * dropped and nothing is claimed -- the end-of-run report prints the shortfall.
+ */
+static void ppp_pump_step(uint64_t n) {
+    if (!G.ppp_peer_armed || !G.ppp_peer_opened || !G.mach) return;
+
+    ppp_tick(&G.ppp_peer, (uint32_t)((n * 1000ull) / (uint64_t)S5L8900_CPU_HZ));
+
+    if (!G.ppp_lcp_up_step && ppp_lcp_open(&G.ppp_peer))
+        G.ppp_lcp_up_step = n ? n : 1u;
+    if (!G.ppp_ipcp_up_step && ppp_ipcp_open(&G.ppp_peer))
+        G.ppp_ipcp_up_step = n ? n : 1u;
+
+    if (!G.ppp_first_read_step && G.mach->uart4.rx_reads)
+        G.ppp_first_read_step = n ? n : 1u;
+
+    unsigned room = s5l_uart_rx_space(&G.mach->uart4);
+    while (room--) {
+        int b = ppp_output_byte(&G.ppp_peer);
+        if (b < 0) break;
+        if (!s5l_uart_rx_push(&G.mach->uart4, (uint8_t)b)) break;
+        if (!G.ppp_first_push_step) G.ppp_first_push_step = n ? n : 1u;
+        G.ppp_rx_bytes++;
+    }
 }
 
 static void spy_nonram(
@@ -25194,6 +25302,19 @@ external_md_work_ready:
         printf("ppp       : armed on uart4 0x%08x -> %s; watching for"
                " 7E FF 7D 23 C0 21 (LCP Configure-Request)\n",
                UART4PG, PPP_TEE_PATH);
+        /*
+         * Read AFTER spy_install() for the same reason the line above is: this
+         * is the state that memset would silently clear, and a peer that did
+         * not arm looks exactly like a guest that never transmitted.
+         */
+        ppp_init(&G.ppp_peer, NULL);
+        G.ppp_peer_armed = true;
+        printf("ppp       : host peer armed -- LCP/IPCP terminated here,"
+               " guest 10.0.2.15, peer 10.0.2.2\n"
+               "            it does NOT open until the guest's first octet"
+               " arrives, and it routes no IP:\n"
+               "            N2 ends at \"the link is up and the guest has an"
+               " address\".\n");
     }
 
     if (external_md) {
@@ -25763,6 +25884,9 @@ external_md_work_ready:
         if (G.touch_n) touch_tap_step(n);
         if (G.drag_n) touch_drag_step(n);
         if (G.button_n) button_press_step(n);
+        /* The host's PPP peer. Gated on the same one-word test as the three
+         * above, and inert until the guest's first octet opens the link. */
+        if (G.ppp_peer_armed) ppp_pump_step(n);
         if (!save_due_snapshots(&mach, snaps, nsnaps)) return 4;
 
         if (strex_rd < 16 && mach.cpu.r[15] != last_pc) {
@@ -26555,6 +26679,129 @@ external_md_work_ready:
                    " of it failed. Check the\n"
                    "        console for the launchd job, then for pppd, then"
                    " for the tty open.\n");
+
+        /*
+         * The host peer's own account, kept strictly apart from the guest's.
+         *
+         * THE TWO CLAIMS THAT MUST NEVER BE MERGED. "The peer answered" is a
+         * fact about code in this process and is worth exactly nothing on its
+         * own -- it would print the same numbers against a machine with no
+         * guest in it. "The guest accepted the answer" is the milestone, and
+         * the ONLY evidence for it is guest behaviour: octets read out of
+         * uart4's receive FIFO, and a Configure-Ack coming back the other way.
+         * So the section below reports the peer's state and, separately and
+         * explicitly, whether anything on the other side ever read a byte.
+         */
+        if (G.ppp_peer_armed) {
+            const ppp_stats_t *s = &G.ppp_peer.stats;
+            printf("\n    --- host peer (core/src/net/ppp.c) ---\n");
+            if (!G.ppp_peer_opened) {
+                printf("    NEVER OPENED. The peer waits for the guest's first"
+                       " octet before sending\n"
+                       "        anything, and none arrived, so it has not"
+                       " transmitted and cannot have\n"
+                       "        negotiated. Nothing here is evidence about"
+                       " PPP either way.\n");
+            } else {
+                printf("    opened at instruction              %llu\n",
+                       (unsigned long long)G.ppp_open_step);
+                printf("    frames in / out                   %llu / %llu\n",
+                       (unsigned long long)s->frames_in,
+                       (unsigned long long)s->frames_out);
+                printf("    deframer: fcs %llu  short %llu  long %llu"
+                       "  abort %llu\n",
+                       (unsigned long long)s->fcs_errors,
+                       (unsigned long long)s->short_frames,
+                       (unsigned long long)s->long_frames,
+                       (unsigned long long)s->aborts);
+                printf("    rejected: %llu protocol(s), %llu code(s);"
+                       " echo replies %llu\n",
+                       (unsigned long long)s->unknown_protos,
+                       (unsigned long long)s->unknown_codes,
+                       (unsigned long long)s->echo_replies);
+                printf("    LCP  %-9s   IPCP %-9s   phase %s\n",
+                       ppp_state_name(G.ppp_peer.lcp.state),
+                       ppp_state_name(G.ppp_peer.ipcp.state),
+                       ppp_phase_name(ppp_phase(&G.ppp_peer)));
+
+                /* Delivery, which is where a stall shows up first. */
+                printf("    octets queued for the guest       %llu\n"
+                       "    octets accepted by uart4's FIFO   %llu\n"
+                       "    octets the guest READ from URXH   %llu"
+                       "   (underruns %llu, drops %llu)\n",
+                       (unsigned long long)s->tx_bytes,
+                       (unsigned long long)G.ppp_rx_bytes,
+                       (unsigned long long)mach.uart4.rx_reads,
+                       (unsigned long long)mach.uart4.rx_underruns,
+                       (unsigned long long)mach.uart4.rx_dropped);
+                if (s->tx_bytes && !mach.uart4.rx_reads)
+                    printf("        *** THE GUEST NEVER READ A BYTE. The peer"
+                           " transmitted at instruction %llu\n"
+                           "            and uart4 asserted VIC line 28; either"
+                           " the line was never enabled\n"
+                           "            or AppleS5L8900XSerial's filter did not"
+                           " accept it. This is the\n"
+                           "            first thing to look at, and it is NOT"
+                           " a PPP problem.\n",
+                           (unsigned long long)G.ppp_first_push_step);
+                else if (mach.uart4.rx_reads)
+                    printf("        first octet delivered at instruction %llu,"
+                           " first read at %llu\n"
+                           "            (the driver serviced the line %llu"
+                           " instructions later)\n",
+                           (unsigned long long)G.ppp_first_push_step,
+                           (unsigned long long)G.ppp_first_read_step,
+                           (unsigned long long)(G.ppp_first_read_step >
+                                                G.ppp_first_push_step
+                               ? G.ppp_first_read_step - G.ppp_first_push_step
+                               : 0u));
+                else if (ppp_output_pending(&G.ppp_peer))
+                    printf("        %zu octets are still queued: the guest is"
+                           " draining slower than\n"
+                           "            the peer produces, which is"
+                           " back-pressure, not loss.\n",
+                           ppp_output_pending(&G.ppp_peer));
+
+                if (ppp_ipcp_open(&G.ppp_peer))
+                    printf("    *** MILESTONE: IPCP Opened at instruction"
+                           " %llu.\n"
+                           "        The guest acknowledged an address and this"
+                           " peer assigned"
+                           " %u.%u.%u.%u.\n"
+                           "        That is N2 complete. It is NOT ppp0"
+                           " appearing in the guest (N3),\n"
+                           "        and this peer routes no IP (N4).\n",
+                           (unsigned long long)G.ppp_ipcp_up_step,
+                           (unsigned)(G.ppp_peer.assigned_ip >> 24) & 0xffu,
+                           (unsigned)(G.ppp_peer.assigned_ip >> 16) & 0xffu,
+                           (unsigned)(G.ppp_peer.assigned_ip >> 8) & 0xffu,
+                           (unsigned)(G.ppp_peer.assigned_ip) & 0xffu);
+                else if (ppp_lcp_open(&G.ppp_peer))
+                    printf("    LCP came up at instruction %llu; IPCP did"
+                           " not finish. No address was\n"
+                           "        assigned, so the guest has no interface"
+                           " configuration.\n",
+                           (unsigned long long)G.ppp_lcp_up_step);
+                else if (s->frames_in)
+                    printf("    LCP did NOT come up. The guest sent %llu"
+                           " frame(s) and this peer answered,\n"
+                           "        but no Configure-Ack for OUR request ever"
+                           " arrived, so the link is\n"
+                           "        one-way at best. Compare the two"
+                           " directions above.\n",
+                           (unsigned long long)s->frames_in);
+                else
+                    printf("    NO COMPLETE FRAME was ever received. Octets"
+                           " arrived but never formed a\n"
+                           "        frame that passed its FCS. Read the hex"
+                           " dump above against RFC 1662.\n");
+            }
+            if (s->tx_overflows)
+                printf("    %llu frame(s) did not fit the transmit ring --"
+                       " report this, it should not\n"
+                       "        happen for control traffic.\n",
+                       (unsigned long long)s->tx_overflows);
+        }
     }
 
     /* Capture the controller's CURRENT live scanout, not merely the original

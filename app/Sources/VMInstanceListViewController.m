@@ -6,6 +6,7 @@
 #import "VMInstanceListViewController.h"
 
 #import "EmulatorViewController.h"
+#import "VMEngine.h"
 #import "VMInstanceStore.h"
 #import "VMInstances.h"
 
@@ -48,6 +49,16 @@ static NSString *const kCell = @"machine";
 }
 
 - (void)storeChanged {
+    [self.tableView reloadData];
+}
+
+/* The footer's claim about what opening a machine does depends on files this
+ * screen does not own -- importing firmware happens two screens away and does
+ * not touch the instance store, so -storeChanged never fires for it. Reload on
+ * every appearance so returning from the importer cannot leave the old,
+ * now-false sentence on screen. */
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
     [self.tableView reloadData];
 }
 
@@ -174,14 +185,23 @@ titleForHeaderInSection:(NSInteger)section {
     return @"Machines";
 }
 
-/* The standing caveat, on the first screen rather than buried in settings. */
+/*
+ * What opening a machine actually does, on the first screen rather than buried
+ * in settings.
+ *
+ * This used to be a constant saying no machine boots Apple's firmware. That is
+ * no longer true when firmware has been imported, and a fixed string is
+ * exactly how a UI ends up lying about it — so the sentence comes from
+ * +[VMEngine firmwareReadinessSummary], which asks the same C code the engine
+ * itself will ask a moment later. The two cannot disagree.
+ */
 - (NSString *)tableView:(UITableView *)tableView
 titleForFooterInSection:(NSInteger)section {
     (void)tableView; (void)section;
-    return @"Each machine keeps its own options and its own files. None of "
-           @"them boots Apple's firmware yet — opening one runs the built-in "
-           @"test guest, which exercises the processor, the serial port and "
-           @"the screen. Only one machine runs at a time.";
+    return [NSString stringWithFormat:
+            @"Each machine keeps its own options and its own files. %@ "
+            @"Only one machine runs at a time.",
+            [VMEngine firmwareReadinessSummary]];
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView
