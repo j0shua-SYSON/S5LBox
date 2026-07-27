@@ -23357,8 +23357,8 @@ external_md_work_ready:
         if (result.ppp_plist_offset != UINT64_MAX)
             printf("ppp        : com.apple.chud.pilotfish.plist @"
                    " image+0x%08llx\n"
-                   "             -> /usr/sbin/pppd /dev/uart.debug local"
-                   " nocrtscts nodetach, stderr to /dev/console\n"
+                   "             -> /usr/sbin/pppd /dev/tty.debug local"
+                   " nocrtscts nodetach, stdout to /dev/console\n"
                    "             (same 530 bytes, so no HFS+ catalog change;"
                    " pilotfish itself points at\n"
                    "              /Developer, which this image does not have."

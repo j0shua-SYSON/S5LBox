@@ -300,11 +300,46 @@ static const uint8_t PPP_PLIST_STOCK[] =
  * string "PPPSerial" does not appear in the binary, so no link plugin is
  * involved -- which matters, because PPPSerial.ppp does not ship either.
  *
- *   /dev/uart.debug  AppleOnboardSerialBSDClient names its devfs node after
- *                    the device tree child, and uart4's child is `debug`.
- *                    CommCenter's own strings carry /dev/uart.umts and
- *                    /dev/uart.debug verbatim, which is where the naming rule
- *                    comes from rather than from a guess.
+ *   /dev/tty.debug   NOT /dev/uart.debug, and run78 is why.
+ *
+ *                    AppleOnboardSerialBSDClient names its devfs node after
+ *                    the device tree child, and uart4's child is `debug`, so
+ *                    /dev/uart.debug is the node that exists -- CommCenter's
+ *                    own strings carry it and /dev/uart.umts verbatim.  It
+ *                    opens, and tcgetattr and tcsetattr both work on it.  It
+ *                    is still the wrong node, because it is not a tty:
+ *                    AppleOnboardSerialBSDClient::start registers its cdevsw
+ *                    (0xc0478060) with d_ttys = NULL and d_type = 0 rather
+ *                    than D_TTY, and the ioctl switch at 0xc046fd52 handles
+ *                    TIOCGETA and TIOCSETA* but has no arm for TIOCSETD or
+ *                    TIOCSCTTY -- both fall to `movs r0,#0x19` at 0xc046fe30,
+ *                    which is ENOTTY.  That is exactly what run78's console
+ *                    printed, twice.
+ *
+ *                    The path cannot reach ttioctl at all, so linesw[PPPDISC]
+ *                    is never consulted: _ttioctl's Thumb pointer 0xc01368a9
+ *                    occurs EXACTLY ONCE in the whole 7.9 MB kernelcache, at
+ *                    0xc0469430 inside IOSerialFamily, and AppleOnboardSerial
+ *                    never references it.
+ *
+ *                    IOSerialBSDClient is the kext that publishes tty nodes
+ *                    (its name templates are at 0xc046b164 / 0xc046b158), and
+ *                    AppleOnboardSerialSync's metaclass names a superclass at
+ *                    0xc046d280 inside IOSerialFamily's image, so a
+ *                    /dev/tty.debug MAY also be published.  That is not
+ *                    proven, and this argument is the experiment: pppd probes
+ *                    it for free.  A node that does not exist makes
+ *                    setdevname() return 0, and tty_process_extra_options+0x68
+ *                    (0x00021628) prints "no device specified and stdin is not
+ *                    a tty" and exits TWO, which is distinguishable from every
+ *                    other failure this job has produced.
+ *
+ *                    If it is absent, the fallback is `notty`: get_pty
+ *                    (0x0001bd70) hands pppd a pty slave, which is a real BSD
+ *                    tty where TIOCSETD applies, and pppd then shuttles bytes
+ *                    over stdin/stdout, which the raw cdev does support.  That
+ *                    costs a StandardInPath key and puts pppd's log on the
+ *                    same line as its frames, so it is second choice.
  *   local            do not use modem control lines.  pppd watches for carrier
  *                    by default, and this UART has no DCD to raise.
  *   nocrtscts        do not ask for hardware flow control.  uart4 carries
@@ -397,9 +432,9 @@ static const uint8_t PPP_PLIST_JOB[] =
     "\t<key>StandardOutPath</key>\n"
     "<string>/dev/console</string>\n"
     "\t<key>ProgramArguments</key>\n"
-    "\t<array>\n"
+    "\t\t<array>\n"
     "<string>/usr/sbin/pppd</string>\n"
-    "<string>/dev/uart.debug</string>\n"
+    "<string>/dev/tty.debug</string>\n"
     "<string>local</string>\n"
     "<string>nocrtscts</string>\n"
     "<string>nodetach</string>\n"

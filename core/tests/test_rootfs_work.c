@@ -1037,8 +1037,8 @@ static void test_ppp_launchd_job_plist(void) {
                           "<string>/usr/sbin/pppd</string>"),
           "rewritten job does not run /usr/sbin/pppd");
     CHECK(region_contains(rewritten, PPP_PLIST_SIZE,
-                          "<string>/dev/uart.debug</string>"),
-          "rewritten job does not name uart4's devfs node");
+                          "<string>/dev/tty.debug</string>"),
+          "rewritten job does not name uart4's tty node");
     /* The console log path, which run74 is the reason for: pppd exited 1 --
      * its EXIT_FATAL_ERROR -- and launchd sends the job's output to /dev/null
      * unless a key says otherwise. Without it a run reports an exit code and
