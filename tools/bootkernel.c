@@ -1043,8 +1043,16 @@ static void boot_capability_notes(FILE *out, const boot_config_t *cfg,
 
     if (cfg->v.jb_codesign)
         fprintf(out,
-                "jailbreak  : code-signing half requested but NOT APPLIED "
-                "(guest enforcement switch not implemented)\n");
+                "jailbreak  : code-signing half APPLIED — boot args gain "
+                "cs_enforcement_disable=1 amfi_get_out_of_my_way=1\n"
+                "             amfi_allow_any_signature=1, and "
+                "/chosen/debug-enabled is set to 1\n"
+                "             (applied, NOT demonstrated: nothing unsigned has "
+                "been executed, and _cs_validate_page\n"
+                "              fires either way because it is the kernel's "
+                "page hasher, not AMFI's policy gate.\n"
+                "              The deciding test is an unsigned binary that "
+                "runs — see --jb-payload.)\n");
     if (cfg->v.jb_payload) {
         fprintf(out,
                 "jailbreak  : payload half requested but NOT APPLIED (no "
@@ -23953,6 +23961,29 @@ external_md_work_ready:
          */
         if (!want_usb_otg)
             dt_unmatch(dt, dt_n, "arm-io/usb-otg");
+        /*
+         * --jb-codesign's device-tree half. PE_i_can_has_debugger() reads
+         * /chosen/debug-enabled, and the three boot-args tokens appended above
+         * are only consulted on a kernel that already believes a debugger is
+         * attached -- so setting one without the other arms nothing. This is
+         * exactly the trap that made an earlier run's mt-strings=1 inert.
+         *
+         * Applied BEFORE the -D loop, deliberately, so that an operator who
+         * spells -D chosen:debug-enabled=0 overrides the toggle rather than
+         * being silently overridden by it. The explicit flag wins.
+         */
+        if (cfg.v.jb_codesign) {
+            if (!dt_set_u32(dt, dt_n, "chosen", "debug-enabled", 1u)) {
+                fprintf(stderr,
+                        "--jb-codesign: cannot set /chosen/debug-enabled; "
+                        "refusing a half-armed code-signing disable\n");
+                free(dt);
+                return 1;
+            }
+            printf("jailbreak  : /chosen/debug-enabled = 1 "
+                   "(PE_i_can_has_debugger; without it the boot-args tokens "
+                   "above are inert)\n");
+        }
         for (unsigned i = 0; i < ndtov; i++)
             dt_set_u32(dt, dt_n, dtov[i].path, dtov[i].prop, dtov[i].val);
         if (external_md &&
@@ -24037,6 +24068,76 @@ external_md_work_ready:
     } else if (ppp) {
         printf("ppp        : boot args already carry uart4_dma_enable;"
                " left as \"%s\"\n", cmdline);
+    }
+
+    /*
+     * --jb-codesign. The same append, for the same reason, and with the same
+     * "a caller who spelled it in -c keeps their own" rule.
+     *
+     * These three tokens plus /chosen/debug-enabled=1 ARE the code-signing
+     * disable on 3.1.3; docs/activation.md A.4 derives them from disassembly,
+     * and run60 applied them by hand and booted clean to 800e6. Until now the
+     * toggle only printed "requested but NOT APPLIED", so the switch existed
+     * and did nothing -- an operator asking for it got a normal boot and a
+     * line of text.
+     *
+     * Chained off pppbuf rather than off `cmdline` directly so that --ppp and
+     * --jb-codesign compose: each stage reads the previous stage's buffer and
+     * writes its own, and neither is ever both source and destination of one
+     * snprintf.
+     *
+     * WHAT THIS STILL DOES NOT PROVE. Booting clean with enforcement disabled
+     * is not evidence that enforcement is disabled -- nothing unsigned has
+     * been executed. _cs_validate_page keeps firing either way because it is
+     * the kernel's page-hashing primitive rather than AMFI's policy gate. The
+     * deciding test is an unsigned binary that runs, which needs the payload
+     * provisioner, and the header below says so rather than implying the
+     * switch has been demonstrated.
+     */
+    static const char *const JB_CS_TOKENS[] = {
+        "cs_enforcement_disable=1",
+        "amfi_get_out_of_my_way=1",
+        "amfi_allow_any_signature=1",
+    };
+    char jbbuf[512];
+    if (cfg.v.jb_codesign) {
+        size_t used = strlen(cmdline);
+        if (used >= sizeof jbbuf) {
+            fprintf(stderr, "--jb-codesign: boot arguments are already too "
+                            "long to extend\n");
+            return 1;
+        }
+        memcpy(jbbuf, cmdline, used + 1u);
+        unsigned appended = 0;
+        for (unsigned i = 0; i < sizeof JB_CS_TOKENS / sizeof JB_CS_TOKENS[0];
+             i++) {
+            /* Match on the key, not the whole token: an operator who wrote
+             * cs_enforcement_disable=0 on purpose must not have it silently
+             * joined by a =1. */
+            char key[64];
+            const char *eq = strchr(JB_CS_TOKENS[i], '=');
+            size_t klen = (size_t)(eq - JB_CS_TOKENS[i]);
+            if (klen >= sizeof key) continue;
+            memcpy(key, JB_CS_TOKENS[i], klen);
+            key[klen] = '\0';
+            if (strstr(jbbuf, key)) continue;
+
+            int needed = snprintf(jbbuf + used, sizeof jbbuf - used, "%s%s",
+                                  used ? " " : "", JB_CS_TOKENS[i]);
+            if (needed < 0 || (size_t)needed >= sizeof jbbuf - used) {
+                fprintf(stderr, "--jb-codesign: cannot append %s to the boot "
+                                "arguments\n", JB_CS_TOKENS[i]);
+                return 1;
+            }
+            used += (size_t)needed;
+            appended++;
+        }
+        cmdline = jbbuf;
+        if (appended)
+            printf("jailbreak  : boot args -> \"%s\"\n", cmdline);
+        else
+            printf("jailbreak  : boot args already carry every code-signing "
+                   "token; left as \"%s\"\n", cmdline);
     }
 
     /*
