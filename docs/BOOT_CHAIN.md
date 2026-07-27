@@ -80,9 +80,24 @@ it is not something this project does. Instead, at runtime you provide:
 
 The repository-root `firmware/` directory is ignored by default. That is a
 convenience, not a security boundary: inspect staged files before every push and
-never force-add firmware, keys or decrypted Apple payloads. The app currently has
-no firmware importer. You are responsible for using material you are entitled to
-use and for following applicable law.
+never force-add firmware, keys or decrypted Apple payloads. You are responsible
+for using material you are entitled to use and for following applicable law.
+
+### The app can now do the unpacking itself
+
+`app/Sources/VMFirmwareImport.{h,c}` runs the whole procedure below on the phone
+from a `.ipsw` the user picks: it reads `Restore.plist` to identify the device
+and name the members, unwraps the IMG3 containers, decompresses the kernel,
+decrypts and expands the root filesystem's `Apple_HFSX` partition, and checks
+each result against the SHA-256 of the known-good artefact. Verified end to end
+against the real 7E18 archive: all three outputs are byte-identical to the files
+in `firmware/`.
+
+It ships no keys and fetches none. Every payload in a 3.x IPSW is AES-encrypted
+and the keys are not in the archive, so the app asks the user for the ones it
+needs and says precisely which artefact is waiting on which key. Without keys it
+still opens the archive, identifies the build, locates every member and parses
+every container -- which is most of what the procedure below is for.
 
 ## Inspecting your IPSW
 

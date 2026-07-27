@@ -32,6 +32,13 @@ targets:
         # exclusion at stage J3, when the app enables the JIT for real.
         excludes:
           - "jit/**"
+      # The firmware importer authenticates what it produces against known-good
+      # SHA-256 digests, and the exact kernel and rootfs host policies already
+      # share this one implementation. Pulled in as a single file rather than as
+      # all of tools/, which is desktop harness code that has no business in a
+      # phone binary.
+      - path: ../tools/sha256.c
+        group: core
     # Linked explicitly rather than relying on module auto-linking: the display
     # path calls into CoreGraphics (CGImageCreate) and QuartzCore (CALayer
     # filters) directly, and "it happened to link via UIKit" is not something to
@@ -50,6 +57,7 @@ targets:
         CODE_SIGN_ENTITLEMENTS: S5LBox.entitlements
         HEADER_SEARCH_PATHS:
           - $(SRCROOT)/../core/include
+          - $(SRCROOT)/../tools
         GCC_C_LANGUAGE_STANDARD: c11
         # Stated rather than inherited: the Objective-C sources are written for
         # ARC, and would leak (or double-free) under manual retain/release.

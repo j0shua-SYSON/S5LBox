@@ -286,6 +286,48 @@ add_executable(test_vmoptions
 target_include_directories(test_vmoptions PRIVATE ../app/Sources)
 add_test(NAME app_option_table COMMAND test_vmoptions)
 
+# The IPSW importer. Every byte it reads comes from a file the user found on the
+# internet, so this is the app's largest untrusted-input surface by a wide
+# margin -- a zip central directory, a DEFLATE stream, an XML property list, an
+# IMG3 container, an AES-wrapped disk image and a table of compressed chunks,
+# all of them carrying lengths and offsets nobody has checked.
+#
+# It is therefore written in plain C rather than Objective-C, for the same
+# reason as VMTouchMap and VMOptions: so a host runner can test it. It links
+# emucore for the IMG3, AES and LZSS implementations that already exist and are
+# already pinned by test_img3/test_aes/test_lzss -- the importer reuses those
+# rather than carrying a second copy of the byte-level decisions -- and
+# host_sha256 for the digest that decides whether an artefact is the right one.
+add_executable(test_vmfirmwareimport
+    ../app/Tests/test_vmfirmwareimport.c
+    ../app/Tests/test_vmfw_inflate.c
+    ../app/Tests/test_vmfw_digest.c
+    ../app/Tests/test_vmfw_plist.c
+    ../app/Tests/test_vmfw_zip.c
+    ../app/Tests/test_vmfw_dmg.c
+    ../app/Tests/test_vmfw_import.c
+    ../app/Sources/VMFirmwareInflate.c
+    ../app/Sources/VMFirmwareDigest.c
+    ../app/Sources/VMFirmwarePlist.c
+    ../app/Sources/VMFirmwareZip.c
+    ../app/Sources/VMFirmwareDMG.c
+    ../app/Sources/VMFirmwareImport.c
+)
+target_include_directories(test_vmfirmwareimport
+    PRIVATE ../app/Sources ../app/Tests include ../tools)
+target_link_libraries(test_vmfirmwareimport PRIVATE emucore host_sha256)
+set_target_properties(test_vmfirmwareimport PROPERTIES
+    C_STANDARD 11
+    C_STANDARD_REQUIRED YES
+    C_EXTENSIONS NO)
+if(MSVC)
+    target_compile_options(test_vmfirmwareimport PRIVATE /W4 /WX)
+else()
+    target_compile_options(test_vmfirmwareimport PRIVATE
+        -Wall -Wextra -Werror -Wformat=2 -Wshadow)
+endif()
+add_test(NAME app_firmware_import COMMAND test_vmfirmwareimport)
+
 # --- host tools -------------------------------------------------------------
 # The host-owned writable-file adapter stays outside emucore: the portable core
 # exposes vm_block_t callbacks but never depends on descriptors, locks, or
