@@ -2468,6 +2468,258 @@ void     s5l_usbotg_reset(s5l_usbotg_t *u);
 uint32_t s5l_usbotg_read(const s5l_usbotg_t *u, uint32_t off);
 void     s5l_usbotg_write(s5l_usbotg_t *u, uint32_t off, uint32_t val);
 
+/* ------------------------------------------- ARM PrimeCell PL080 DMAC ---
+ * The two DMA controllers, /arm-io/dmac0 and /arm-io/dmac1.
+ *
+ *   /arm-io/dmac0  reg {0x00200000,0x1000}  interrupts {0x10}  compatible
+ *                  'dmac,pl080'
+ *   /arm-io/dmac1  reg {0x01900000,0x1000}  interrupts {0x11}  same compatible
+ *
+ * /arm-io's `ranges` is TWO windows — {0, 0x38000000, 0x08000000} and
+ * {0x10000000, 0x18000000, 0x10000000} — so "child + 0x38000000" is the rule
+ * for the FIRST only. Both dmac nodes are under 0x08000000 and therefore in it,
+ * giving the two bases below; a node above 0x10000000 would need the second.
+ * Both interrupt-parent to /arm-io/vic, and both numbers are under 32, so both
+ * lines are VIC0's — unlike i2s0/i2s1, whose `interrupts` are GPIO-IC numbers
+ * and therefore have deliberately no constant here.
+ *
+ * WHY THIS EXISTS AT ALL. `dma-channels` on /arm-io/i2s0 hands the PL080 the
+ * absolute physical addresses 0x3ca00010 and 0x3ca00038 — the I2S transmit and
+ * receive FIFOs. The CPU never touches them: the audio path is DMA-driven end
+ * to end, so with no controller here not one sample could ever leave the guest,
+ * however correct the codec and the I2S window were. The driver allocates ten
+ * channels on every boot, printing a physical LLI-buffer address for each.
+ *
+ * AND WHAT THE FIRST BOOT WITH IT MEASURED, which is narrower than the sentence
+ * above deserves. Allocating a channel touches no register: _initDMAChannel
+ * (0xc070f01c) only allocates the 4 KiB linked-list buffer and copies the
+ * device tree's 32-byte `dma-channels` entry into a software record. The
+ * registers are first touched when a COMMAND is queued, and in a boot to
+ * userspace at 900M instructions the whole 0x38200000 page saw one read and two
+ * writes — byte for byte what run89-base's census recorded with no model here at
+ * all, and that run went to 3.55 BILLION instructions. 0x39900000 saw nothing.
+ * So this controller is now correct, decoded, and idle: nothing in this boot
+ * ever calls startDMACommand, and the blocker for guest audio has moved
+ * upstream of the DMA controller.
+ *
+ * ------------------------------------------------------------------------
+ * THE REGISTER MAP, AND WHERE EACH LINE OF IT COMES FROM
+ *
+ * Everything marked "read" below was read out of AppleARMPL080DMAC in the
+ * shipped 7E18 kernelcache (kext __TEXT 0xc070e000..0xc070fe28, ARM mode), not
+ * out of the published PrimeCell TRM. The driver reaches the register file
+ * through exactly two out-of-line virtuals, which is what makes the census
+ * complete rather than merely thorough:
+ *
+ *   vptr+0x3a4  0xc070ecd0  read32 (this, off)          -> ldr r0,[off, base]
+ *   vptr+0x3a8  0xc070ecdc  writeMasked(this, off, val, mask)
+ *
+ * writeMasked skips the read-modify-write when mask == 0xffffffff, so a full
+ * write never reads first. Every call site was enumerated: 10 reads and 17
+ * writes, resolving to these offsets and no others.
+ *
+ *   0x000  read   at 0xc070f16c, the interrupt filter's first act.
+ *   0x008  write  at 0xc070f18c, the value just read from 0x000, mask ~0.
+ *   0x030  write  1 at 0xc070ed7c and 0 at 0xc070ee90 (power on / off).
+ *   0x100 + 0x20*n + 0x00  write  SrcAddr   (0xc070e98c)
+ *                    + 0x04  write  DestAddr  (0xc070e9ac)
+ *                    + 0x08  read+write  LLI  (0xc070e8f0 / 0xc070e934)
+ *                    + 0x0c  read+write  Control (0xc070f9f8 / 0xc070e9cc)
+ *                    + 0x10  read+write  Configuration (0xc070e948/0xc070e9f0)
+ *
+ * The channel stride and count are read, not assumed: the power-on path at
+ * 0xc070edb8 clears Configuration and LLI for r5 = 0x130, 0x150 ... 0x1f0 after
+ * doing channel 0 explicitly at 0x110/0x108, which is eight channels 0x20
+ * apart. startDMACommand refuses an index above 7 (`cmp r1,#7; bhi`, 0xc070e0f8)
+ * and the channel-allocator at 0xc070e830 clamps to 7 and walks a 100-byte
+ * per-channel record with `ldr r0,[ip],#-0x64`.
+ *
+ * The bit positions are read the same way:
+ *
+ *   Configuration bit 0  (E)      0xc070e950 `tst r0,#1` decides whether the
+ *                                 channel still needs programming; 0xc070e9d0
+ *                                 starts it with template | 0x8001.
+ *   Configuration bit 15 (ITC)    the 0x8000 half of that same 0x8001.
+ *   Configuration bit 17 (A)      0xc070efc8 `tst r0,#0x20000` spins in an
+ *                                 UNBOUNDED loop until it clears — this model
+ *                                 must never leave it set, or the guest hangs.
+ *   Configuration bit 18 (H)      0xc070ef04 halts with template | 0x40001,
+ *                                 the literal at 0xc070ef68 — enable AND halt
+ *                                 in one store, so a model that reads bit 0 as
+ *                                 "go" would start the transfer this write
+ *                                 exists to stop.
+ *   Configuration [13:11] flow    0xc070e45c rewrites exactly that field in the
+ *                                 software template per direction: 0x800 out,
+ *                                 0x1000 in — and 0xc070e444 skips the rewrite
+ *                                 entirely for direction 0, leaving whatever
+ *                                 the device tree supplied.
+ *   Control [11:0] size           0xc070e738 and 0xc070fb7c mask a read-back
+ *                                 with 0xfff to get the remaining count.
+ *   Control bit 26 (SI)           0xc070e4bc ORs 0x4000000 when direction & 2.
+ *   Control bit 27 (DI)           0xc070e4c4 ORs 0x8000000 when direction & 1.
+ *   Control bit 31 (I)            0xc070fbfc sets 0x80000000 on the LAST LLI
+ *                                 only, and 0xc070fb94 reads it back with
+ *                                 `lsr #0x1f`.
+ *   Control [20:18]/[23:21] width 0xc070e14c picks >>21 for direction 1 and
+ *                                 >>18 otherwise, then &7.
+ *
+ * The linked-list item is four words {SrcAddr, DestAddr, Next, Control} at
+ * +0x0/+4/+8/+0xc: the builder at 0xc070fba0 stores exactly those, and the
+ * reader at 0xc070fb3c takes Next from +8 and Control from +0xc. `bic ...,#3`
+ * at 0xc070e718, 0xc070e750 and 0xc070f954 strips the AHB master-select field
+ * in the low two bits — on the three read-backs whose value is used as an
+ * ADDRESS. The fourth, 0xc070e8f0, is left unmasked because 0xc070e8f8 only
+ * compares it against zero.
+ *
+ * WHERE APPLE'S PART MATCHES THE PUBLISHED SPEC. Everywhere the driver goes.
+ * Nothing in the disassembly contradicts the PL080 TRM's map, and the DT's own
+ * `compatible` is 'dmac,pl080'. The offsets NOT in the list above are the ones
+ * this comment cannot vouch for from the binary — see the refusals below.
+ *
+ * ------------------------------------------------------------------------
+ * WHAT THIS MODEL REFUSES, BY NAME
+ *
+ * Each of these is counted, not silently ignored, so a guest that needs one is
+ * visible in the counters instead of mysterious:
+ *
+ *   refused_flow    FlowCntrl 4-7 — the ones where the PERIPHERAL is the flow
+ *                   controller and supplies the transfer size. This model has
+ *                   no DMA request lines, so it cannot know when such a
+ *                   transfer ends. The shipped tree only ever uses 0, 1, 2 and
+ *                   3 (all "DMA controller is the flow controller"), which is
+ *                   why those four run and these four do not.
+ *   refused_width   a reserved width code (3-7), or a transfer whose total byte
+ *                   count is not a whole number of DESTINATION transfers.
+ *                   Mismatched source and destination widths themselves DO run
+ *                   — /arm-io/spi1 uses them, four bytes in and one byte out —
+ *                   but a remainder would be left sitting in the channel FIFO
+ *                   this model does not have, and there is no Active bit it
+ *                   could honestly set to say so. See run_item() in pl080.c for
+ *                   which side Control[11:0] counts and how that was settled.
+ *   refused_chain   an LLI chain longer than S5L_PL080_MAX_ITEMS. A list that
+ *                   points at itself is a hung host, and real hardware has no
+ *                   such limit; this one is ours and it is stated.
+ *   refused_softreq a write to SoftBReq/SoftSReq/SoftLBReq/SoftLSReq (0x020,
+ *                   0x024, 0x028, 0x02c). Software DMA requests only mean
+ *                   something to the burst/single pacing this model does not
+ *                   have. The stock driver writes none of the four.
+ *   refused_endian  DMACConfiguration M1/M2 (bits 1-2). The whole machine is
+ *                   little-endian; a guest asking for big-endian AHB masters
+ *                   would get bytes this model does not swap.
+ *
+ * Also deliberately absent, with no counter because nothing can ask for them:
+ * the PrimeCell identification registers at 0xfe0-0xffc. We have no dump of
+ * Apple's PeriphID/PCellID values, the driver never reads one, and inventing
+ * four constants would be exactly the fabrication this file exists to avoid.
+ * They fall through to the unknown-offset log like any other unmodelled word.
+ *
+ * BURSTS AND REQUEST LINES ARE NOT MODELLED. SBSize/DBSize are stored and
+ * ignored, and a channel with E set and H clear transfers as though its
+ * peripheral always had a request pending. That is the one place this model is
+ * knowingly faster than the part: audio moves at whatever rate the guest can
+ * queue it, not at 44.1 kHz. It is what makes the capture record anything at
+ * all, and it is not a claim about timing.
+ */
+#define S5L8900_DMAC0_BASE  0x38200000u
+#define S5L8900_DMAC1_BASE  0x39900000u
+#define S5L8900_DMAC_COUNT  2u
+#define S5L8900_IRQ_DMAC0   0x10u
+#define S5L8900_IRQ_DMAC1   0x11u
+
+#define S5L_PL080_CHANNELS      8u
+#define S5L_PL080_UNKNOWN_OFF   8u
+/* Our cap on how far one enable may follow the guest's linked list. Four times
+ * the 256 items its own 4 KiB LLI buffer can hold (0xc070f02c allocates 0x1000
+ * and 0xc070fba0 strides 16), so a well-formed chain can never reach it. */
+#define S5L_PL080_MAX_ITEMS  1024u
+
+#define PL080_INTSTATUS        0x000u  /* masked TC | masked error, read-only */
+#define PL080_INTTCSTATUS      0x004u
+#define PL080_INTTCCLEAR       0x008u  /* write-one-to-clear, write-only      */
+#define PL080_INTERRSTATUS     0x00cu
+#define PL080_INTERRCLEAR      0x010u
+#define PL080_RAWINTTCSTATUS   0x014u
+#define PL080_RAWINTERRSTATUS  0x018u
+#define PL080_ENBLDCHNS        0x01cu
+#define PL080_SOFTBREQ         0x020u
+#define PL080_SOFTSREQ         0x024u
+#define PL080_SOFTLBREQ        0x028u
+#define PL080_SOFTLSREQ        0x02cu
+#define PL080_CONFIG           0x030u
+#define PL080_SYNC             0x034u
+#define PL080_CHAN_BASE        0x100u
+#define PL080_CHAN_STRIDE      0x020u
+#define PL080_CH_SRC           0x00u
+#define PL080_CH_DST           0x04u
+#define PL080_CH_LLI           0x08u
+#define PL080_CH_CTRL          0x0cu
+#define PL080_CH_CFG           0x10u
+
+#define PL080_CONFIG_EN        0x00000001u
+#define PL080_CONFIG_ENDIAN    0x00000006u  /* M1, M2 */
+
+#define PL080_CFG_EN           0x00000001u
+#define PL080_CFG_FLOW_SHIFT   11u
+#define PL080_CFG_FLOW_MASK    0x00003800u
+#define PL080_CFG_IE           0x00004000u
+#define PL080_CFG_ITC          0x00008000u
+#define PL080_CFG_LOCK         0x00010000u
+#define PL080_CFG_ACTIVE       0x00020000u  /* read-only in this model, always 0 */
+#define PL080_CFG_HALT         0x00040000u
+
+#define PL080_CTRL_SIZE_MASK   0x00000fffu
+#define PL080_CTRL_SWIDTH_SHIFT 18u
+#define PL080_CTRL_DWIDTH_SHIFT 21u
+#define PL080_CTRL_WIDTH_MASK  7u
+#define PL080_CTRL_SI          0x04000000u
+#define PL080_CTRL_DI          0x08000000u
+#define PL080_CTRL_I           0x80000000u
+
+/* The five per-channel registers, in the order the driver programs them. */
+typedef struct {
+    uint32_t src, dst, lli, ctrl, cfg;
+} s5l_pl080_chan_t;
+
+typedef struct {
+    s5l_pl080_chan_t ch[S5L_PL080_CHANNELS];
+    uint32_t config;    /* 0x030 */
+    uint32_t sync;      /* 0x034, stored; no request line is gated by it     */
+    uint32_t raw_tc;    /* 0x014; 0x004 and 0x000 are derived from it        */
+    uint32_t raw_err;   /* 0x018; nothing in this model ever sets a bit here */
+
+    uint64_t reads, writes;
+    uint64_t unknown_reads, unknown_writes;
+    uint32_t unknown_off[S5L_PL080_UNKNOWN_OFF];
+    unsigned unknown_off_count;
+
+    /* What actually moved. bytes_moved is the number the audio question is
+     * really asking, so it is counted separately from the transfer count. */
+    uint64_t transfers;
+    uint64_t bytes_moved;
+    uint64_t items;         /* linked-list items retired                     */
+    uint64_t completions;   /* terminal-count events that set a status bit   */
+
+    uint64_t refused_flow;
+    uint64_t refused_width;
+    uint64_t refused_chain;
+    uint64_t refused_softreq;
+    uint64_t refused_endian;
+} s5l_pl080_t;
+
+void     s5l_pl080_reset(s5l_pl080_t *d);
+uint32_t s5l_pl080_read(s5l_pl080_t *d, uint32_t off);
+void     s5l_pl080_write(s5l_pl080_t *d, uint32_t off, uint32_t val);
+/* The combined interrupt line, which is what 0x000 reads back. */
+bool     s5l_pl080_irq(const s5l_pl080_t *d);
+/*
+ * Run every runnable channel to the end of its chain and return the new line
+ * level. Called from s5l8900_tick(), NOT from the register write, so the bus
+ * accesses it makes never re-enter bus_write(); `bus` is passed rather than
+ * stored so the device holds no pointer into the machine that a snapshot or a
+ * copy could invalidate. Passing a null bus does nothing and moves nothing.
+ */
+bool     s5l_pl080_run(s5l_pl080_t *d, const arm_bus_t *bus);
+
 #define S5L_STUB_MAX      16
 
 typedef struct {
@@ -2540,6 +2792,8 @@ typedef struct {
     s5l_buttons_t buttons;
     s5l_mtz2_t   mtz2;      /* the touch controller on spi1 chip select 0 */
     s5l_usbotg_t usbotg;
+    /* The two PL080 DMA controllers, /arm-io/dmac0 and /arm-io/dmac1. */
+    s5l_pl080_t dmac[S5L8900_DMAC_COUNT];
     s5l_nor_t   nor;
     uint64_t   unmapped_reads;   /* visibility: accesses outside the map */
     uint64_t   unmapped_writes;
@@ -2691,13 +2945,15 @@ typedef struct {
     const char *name;                 /* string literal; never owned */
 } s5l_window_t;
 
-/* Enough for every fixed device window plus every stub. The 18 is the length of
+/* Enough for every fixed device window plus every stub. The 22 is the length of
  * DEVICE_WINDOWS in core/src/soc/machine.c — nor, clcd, the three tv-out banks,
- * i2c0, i2c1, spi0, spi1, usb-otg, vic0, vic1, power, gpioic, gpio, uart0,
- * uart4, timer — and there is no slack left in it, so a new device model has to
- * raise this number too. It was 13 until spi0 and spi1 stopped being stubs, 15
- * until the two halves of /arm-io/gpio did, and 17 until uart4 was decoded. */
-#define S5L_WINDOW_MAX (S5L_STUB_MAX + 20u)
+ * i2c0, i2c1, i2s0, i2s1, spi0, spi1, usb-otg, vic0, vic1, power, gpioic, gpio,
+ * uart0, uart4, timer, dmac0, dmac1 — and there is no slack left in it, so a
+ * new device model has to raise this number too. It was 13 until spi0 and spi1
+ * stopped being stubs, 15 until the two halves of /arm-io/gpio did, 17 until
+ * uart4 was decoded, 20 until the two I2S windows were, and 22 with the two
+ * PL080 DMA controllers. */
+#define S5L_WINDOW_MAX (S5L_STUB_MAX + 22u)
 
 /*
  * Every window this machine decodes: the modelled devices first, then the

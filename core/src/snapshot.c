@@ -131,6 +131,10 @@ SNAP_SIZE_GUARD(s5l_gpio_t,        4192,  "snap_gpio");
 SNAP_SIZE_GUARD(s5l_buttons_t,     32,    "snap_buttons");
 SNAP_SIZE_GUARD(s5l_mtz2_t,        528,   "snap_mtz2");
 SNAP_SIZE_GUARD(s5l_usbotg_t,      4,     "snap_usbotg");
+/* Eight channels of five registers (160), the four controller-wide words, the
+ * access and unknown-offset accounting, and the work/refusal counters. */
+SNAP_SIZE_GUARD(s5l_pl080_chan_t,  20,    "snap_pl080");
+SNAP_SIZE_GUARD(s5l_pl080_t,       320,   "snap_pl080");
 SNAP_SIZE_GUARD(s5l_nor_entry_t,   12,    "snap_nor");
 SNAP_SIZE_GUARD(s5l_nor_t,         208,   "snap_nor");
 SNAP_SIZE_GUARD(s5l_stub_t,        56,    "snap_stubs");
@@ -140,8 +144,18 @@ SNAP_SIZE_GUARD(s5l_stub_t,        56,    "snap_stubs");
  * callback; snapshot_load preserves the live machine's hooks and dedicated
  * privileged-SVC context. The byte format therefore does not change. */
 /* 43648 = 42888 + the codec (496) + two I2S windows (2 x 104) + the five
- * physical buttons (32) + the GPIO controller's `driven` mask (28). */
-SNAP_SIZE_GUARD(s5l8900_t,         43760, "snap_mach");
+ * physical buttons (32) + the GPIO controller's `driven` mask (28).
+ *
+ * 43768 = 43760 + `level_dirty` and its padding. That one is NOT in snap_mach()
+ * and SNAPSHOT_VERSION does not move for it, which is the exception this guard
+ * exists to make you justify: it is derived state, snap_apply() SETS it rather
+ * than reading it, and the bytes on disk are identical to a v13 file written
+ * before it existed. See its comment in soc.h.
+ *
+ * 44408 = 43768 + the two PL080 DMA controllers (2 x 320). Unlike level_dirty
+ * this one IS in snap_mach() and the byte format DOES change, so
+ * SNAPSHOT_VERSION moves with it — see the v14 note. */
+SNAP_SIZE_GUARD(s5l8900_t,         44408, "snap_mach");
 #endif
 
 /* ---------------------------------------------------------------- the IO --- */
@@ -700,6 +714,46 @@ static void snap_usbotg(sn_io_t *io, s5l_usbotg_t *u) {
     F32(u->pcgcctl);
 }
 
+static bool pl080_state_valid(const s5l_pl080_t *d) {
+    /* Only what the model itself can produce. The Active bit is derived on read
+     * and is never stored, so a saved Configuration carrying it is a file this
+     * build did not write; the unknown-offset cursor bounds its own array. */
+    if (!d || d->unknown_off_count > S5L_PL080_UNKNOWN_OFF) return false;
+    for (unsigned i = 0; i < S5L_PL080_CHANNELS; i++)
+        if (d->ch[i].cfg & PL080_CFG_ACTIVE) return false;
+    return true;
+}
+
+/*
+ * A PL080 DMA controller. Every field travels, including the counters: a
+ * restore that reset `bytes_moved` would make "did any audio leave the guest"
+ * a question about when the snapshot was taken. There is no host wiring to
+ * exclude — s5l_pl080_run() is HANDED the bus rather than holding it, precisely
+ * so that this visitor has no pointer to decide about.
+ *
+ * A channel can be saved mid-chain: the registers describe how far it got, so
+ * a restore resumes from the same item with the same remaining count. It cannot
+ * be saved mid-ITEM, because s5l_pl080_run() completes every runnable channel
+ * inside the tick that started it and a snapshot is taken between ticks.
+ */
+static void snap_pl080(sn_io_t *io, s5l_pl080_t *d) {
+    for (unsigned i = 0; i < S5L_PL080_CHANNELS; i++) {
+        F32(d->ch[i].src); F32(d->ch[i].dst); F32(d->ch[i].lli);
+        F32(d->ch[i].ctrl); F32(d->ch[i].cfg);
+    }
+    F32(d->config); F32(d->sync); F32(d->raw_tc); F32(d->raw_err);
+    F64(d->reads); F64(d->writes);
+    F64(d->unknown_reads); F64(d->unknown_writes);
+    FA32(d->unknown_off, S5L_PL080_UNKNOWN_OFF);
+    F32(d->unknown_off_count);
+    F64(d->transfers); F64(d->bytes_moved);
+    F64(d->items); F64(d->completions);
+    F64(d->refused_flow); F64(d->refused_width); F64(d->refused_chain);
+    F64(d->refused_softreq); F64(d->refused_endian);
+    if (sn_reading(io) && io->err == SNAP_OK && !pl080_state_valid(d))
+        io->err = SNAP_ERR_CORRUPT;
+}
+
 static void snap_clcd(sn_io_t *io, s5l_clcd_t *c) {
     F32(c->enable); F32(c->disable); F32(c->ctrl); F32(c->fifo);
     F32(c->intmask); F32(c->intstatus); F32(c->reg1c);
@@ -825,6 +879,12 @@ static void snap_mach(sn_io_t *io, s5l8900_t *m) {
     snap_buttons(io, &m->buttons);
     snap_mtz2(io, &m->mtz2);
     snap_usbotg(io, &m->usbotg);
+    /* The two DMA controllers. Appended after usbotg rather than placed beside
+     * the I2S windows they feed, because MACH is a positional stream: putting
+     * them mid-list would move every field after them for no benefit. See
+     * SNAPSHOT_VERSION's v14 note. */
+    for (unsigned i = 0; i < S5L8900_DMAC_COUNT; i++)
+        snap_pl080(io, &m->dmac[i]);
 
     F64(m->unmapped_reads);
     F64(m->unmapped_writes);
@@ -1278,6 +1338,11 @@ static snapshot_status_t snap_apply(s5l8900_t *m, FILE *f,
      * interposed bus (bootkernel's tracing wrapper) work. */
     m->cpu.bus = &m->bus;
     m->bus.ctx = m;
+    /* Every device in this machine was just replaced, so nothing the previous
+     * tick derived about its levels still holds. Setting rather than restoring
+     * this is what keeps it out of the file format — see `level_dirty` in
+     * soc.h — and it is the safe direction: it costs one full refresh. */
+    m->level_dirty = true;
     return SNAP_OK;
 }
 

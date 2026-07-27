@@ -34,10 +34,17 @@
  *
  * WHAT IS NOT CLAIMED, AND IS THE REASON A REAL BOOT CAPTURES NOTHING TODAY.
  * The CPU does not touch the I2S FIFOs at all: /arm-io/i2s0's `dma-channels`
- * hands their physical addresses to the PL080, and the PL080 is not modelled
- * (docs/AGENT_HANDOFF.md 23.9, "the PL080, and any host audio sink"). So the
- * only stores this can ever see are programmed I/O the stock driver does not
- * do. A zero here is a statement about the DMA controller, not about audio.
+ * hands their physical addresses to the PL080. That controller IS modelled now
+ * (core/src/soc/pl080.c), and a boot to userspace still records nothing -- the
+ * reason moved upstream, and was measured rather than assumed. With
+ * per-register logging on the DMAC window, a full boot writes
+ * DMACConfiguration (+0x030) ZERO times, so setEnabled(true) never runs, the
+ * command refcount never goes 0->1, and startDMACommand is never called. No
+ * channel is ever enabled. A phone sitting at the lock screen is silent.
+ *
+ * So a zero here is a statement about what the guest was ASKED to do, not
+ * about the DMA controller and not about audio. Getting a sample out needs
+ * something that plays one -- which is downstream of touch, not of this file.
  *
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed.
  */

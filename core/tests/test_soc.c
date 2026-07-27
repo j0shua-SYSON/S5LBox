@@ -923,15 +923,18 @@ static void test_wfi_wake_source_order_does_not_matter(void) {
      */
     const s5l_wake_source_t *real = NULL;
     unsigned nreal = s5l8900_wake_sources(&real);
-    /* timer, clcd, tvout, spi0, spi1, uart4-rx, and one per GPIO interrupt
-     * group. The GPIO seven are declared together because /arm-io/gpio's
-     * `interrupts` array is descending and declaring only the group that
-     * carries touch would make the whole test depend on that transcription
-     * being right. uart4-rx joined them with the receive path: it is the only
-     * source in the table whose producer is OUTSIDE the machine. */
-    CHECK(real != NULL && nreal == 6u + S5L_GPIOIC_GROUPS,
+    /* timer, clcd, tvout, spi0, spi1, uart4-rx, dmac0, dmac1, and one per GPIO
+     * interrupt group. The GPIO seven are declared together because
+     * /arm-io/gpio's `interrupts` array is descending and declaring only the
+     * group that carries touch would make the whole test depend on that
+     * transcription being right. uart4-rx joined them with the receive path: it
+     * is the only source in the table whose producer is OUTSIDE the machine.
+     * The two DMA controllers joined with the PL080 model; both answer NEVER
+     * today for the reason the SPI pair does, and both are declared anyway
+     * because this table is the machine's definition of what can interrupt it. */
+    CHECK(real != NULL && nreal == 8u + S5L_GPIOIC_GROUPS,
           "the machine declares %u wake sources, expected %u",
-          nreal, 6u + S5L_GPIOIC_GROUPS);
+          nreal, 8u + S5L_GPIOIC_GROUPS);
     for (unsigned i = 0; i < nreal; i++)
         CHECK(real[i].name && real[i].next_edge &&
               real[i].line < 32u * S5L8900_VIC_COUNT,
@@ -1012,6 +1015,126 @@ static void test_timebase_runs_at_the_guest_ratio(void) {
 
     s5l8900_free(&m);
     s5l8900_free(&b);
+}
+
+/*
+ * The per-instruction tick skips its level refresh when no timebase tick
+ * elapsed and nothing has been touched (see `level_dirty` in soc.h). That skip
+ * took tools/insnbench's slowest tick=yes row from 1.58 to 7.89 M guest
+ * instructions per second, and it is only allowed to exist because it changes
+ * nothing the guest can observe -- so this runs the two paths side by side and
+ * compares them instruction by instruction.
+ *
+ * `reference` is forced through the full refresh by setting the flag itself
+ * before every tick, which is exactly what the code did before the skip.
+ * Nothing here is a claim about a real boot -- that is the byte-identical
+ * snapshot comparison the change was accepted on -- but a divergence in these
+ * few thousand ticks would be one that never had to be reproduced.
+ */
+static void machine_visible_state(const s5l8900_t *m, uint32_t *out) {
+    unsigned n = 0;
+    out[n++] = m->cpu.irq_line ? 1u : 0u;
+    out[n++] = m->cpu.fiq_line ? 1u : 0u;
+    for (unsigned i = 0; i < S5L8900_VIC_COUNT; i++) out[n++] = m->vic[i].raw;
+    out[n++] = m->timer.ticks;
+    out[n++] = m->timer.t4_value;
+    out[n++] = m->timer.irqlatch;
+    out[n++] = m->clcd.intstatus;
+    out[n++] = m->clcd.frame_accum;
+    out[n++] = (uint32_t)m->clcd.frames;
+    out[n++] = m->tvout.frame_accum;
+    out[n++] = (uint32_t)m->pmu.seconds;
+    out[n++] = (uint32_t)m->pmu.tick_accum;
+    out[n++] = (uint32_t)m->tb_accum;
+    for (unsigned g = 0; g < S5L_GPIOIC_GROUPS; g++) {
+        out[n++] = m->gpioic.stat[g];
+        out[n++] = m->gpioic.raw[g];
+    }
+}
+#define VISIBLE_WORDS (12u + S5L8900_VIC_COUNT + 2u * S5L_GPIOIC_GROUPS)
+
+static void arm_a_live_machine(s5l8900_t *m) {
+    /* A timer that expires inside the loop, a CLCD scanning, and both lines
+     * enabled -- so the comparison covers an interrupt actually arriving and
+     * not just two idle machines agreeing about nothing. */
+    m->bus.write32(m->bus.ctx, S5L8900_VIC0_BASE + VIC_INTENABLE,
+                   (1u << S5L8900_IRQ_TIMER) | (1u << S5L8900_IRQ_CLCD));
+    m->bus.write32(m->bus.ctx, S5L8900_TIMER_BASE + TIMER4_COUNTBUF, 7u);
+    m->bus.write32(m->bus.ctx, S5L8900_TIMER_BASE + TIMER4_STATE,
+                   TIMER4_STATE_START | TIMER4_STATE_UPDATE);
+    m->bus.write32(m->bus.ctx, S5L8900_CLCD_BASE + CLCD_INTMASK, CLCD_INT_FRAME);
+    m->bus.write32(m->bus.ctx, S5L8900_CLCD_BASE + CLCD_CTRL, CLCD_CTRL_ENABLE);
+    m->bus.write32(m->bus.ctx, S5L8900_CLCD_BASE + CLCD_GATE, 1u);
+    m->bus.write32(m->bus.ctx, S5L8900_CLCD_BASE + CLCD_ENABLE, 1u);
+    m->clcd.frame_ticks = 11u;      /* frames inside the loop, not every 60th s */
+}
+
+/* Clear whatever is asserting, through the bus, as the kernel's own handlers
+ * do. Returns 1 if there was anything to clear. */
+static unsigned ack_pending(s5l8900_t *m) {
+    if (!m->cpu.irq_line && !m->cpu.fiq_line) return 0u;
+    m->bus.write32(m->bus.ctx, S5L8900_TIMER_BASE + TIMER_IRQACK,
+                   TIMER4_IRQ_BITS);
+    m->bus.write32(m->bus.ctx, S5L8900_CLCD_BASE + CLCD_INTSTATUS,
+                   CLCD_INT_FRAME);
+    return 1u;
+}
+
+static void test_skipped_refresh_is_invisible_to_the_guest(void) {
+    s5l8900_t fast, reference;
+    CHECK(s5l8900_init(&fast, 0, 1u << 20), "machine init failed");
+    CHECK(s5l8900_init(&reference, 0, 1u << 20), "machine init failed");
+    arm_a_live_machine(&fast);
+    arm_a_live_machine(&reference);
+
+    uint32_t a[VISIBLE_WORDS], b[VISIBLE_WORDS];
+    unsigned diverged = 0, acks = 0;
+    const unsigned TICKS = 200000u;         /* ~2900 timebase ticks */
+    for (unsigned i = 0; i < TICKS && !diverged; i++) {
+        reference.level_dirty = true;       /* the pre-skip code path, exactly */
+        s5l8900_tick(&reference, 1u);
+        s5l8900_tick(&fast, 1u);
+
+        /* The guest reads its own hardware occasionally, not every step: an
+         * access forces the refresh, so a loop that read every tick would test
+         * the fast path by never taking it. */
+        if ((i % 397u) == 0u) {
+            uint32_t ra = fast.bus.read32(fast.bus.ctx,
+                              S5L8900_TIMER_BASE + TIMER_TICKSLOW);
+            uint32_t rb = reference.bus.read32(reference.bus.ctx,
+                              S5L8900_TIMER_BASE + TIMER_TICKSLOW);
+            if (ra != rb) { diverged = i + 1u; break; }
+            ra = fast.bus.read32(fast.bus.ctx, S5L8900_VIC0_BASE + VIC_RAWINTR);
+            rb = reference.bus.read32(reference.bus.ctx,
+                                      S5L8900_VIC0_BASE + VIC_RAWINTR);
+            if (ra != rb) { diverged = i + 1u; break; }
+        }
+        /*
+         * And acknowledges, the way the handlers do -- each machine on its own
+         * line, so a line that came up at the wrong tick produces a different
+         * acknowledge and the comparison below sees it. Both sources, because
+         * a latch nobody clears stays high, and a machine whose line never
+         * drops does MMIO on every tick and therefore never skips.
+         */
+        acks += ack_pending(&fast);
+        (void)ack_pending(&reference);
+
+        machine_visible_state(&fast, a);
+        machine_visible_state(&reference, b);
+        if (memcmp(a, b, sizeof a) != 0) diverged = i + 1u;
+    }
+
+    CHECK(!diverged, "the skipping and refreshing machines differ at tick %u",
+          diverged);
+    /* Evidence the run was not two idle machines agreeing about nothing. */
+    CHECK(acks > 100u, "only %u interrupts in %u ticks — the devices never "
+          "fired, so nothing was compared", acks, TICKS);
+    CHECK(fast.timer.ticks > 0u && fast.clcd.frames > 0u,
+          "timebase=%u frames=%llu — no device advanced",
+          fast.timer.ticks, (unsigned long long)fast.clcd.frames);
+
+    s5l8900_free(&fast);
+    s5l8900_free(&reference);
 }
 
 /*
@@ -1947,16 +2070,17 @@ static void test_tvout_machine_routing_and_irq30(void) {
 
     s5l_window_t windows[S5L_WINDOW_MAX];
     unsigned nw = s5l8900_windows(&m, windows, S5L_WINDOW_MAX);
-    /* 20 fixed device windows: nor, clcd, the three tv-out banks, i2c0, i2c1,
+    /* 22 fixed device windows: nor, clcd, the three tv-out banks, i2c0, i2c1,
      * i2s0, i2s1, spi0, spi1, usb-otg, vic0, vic1, power, gpioic, gpio, uart0,
-     * uart4, timer. This count is a tripwire for a window silently vanishing
-     * from the table, so it moves only when a real device model is added or
-     * removed — it went from 13 to 15 when spi0 and spi1 stopped being stubs,
-     * from 15 to 17 when the two halves of /arm-io/gpio did, from 17 to 18 when
-     * uart4 became the guest's PPP line, and from 18 to 20 when the two I2S
-     * controllers landed with the WM8991 codec. */
-    CHECK(nw == m.stub_count + 20u,
-          "fixed device-window count=%u expect 20 (+%u stubs)",
+     * uart4, timer, dmac0, dmac1. This count is a tripwire for a window
+     * silently vanishing from the table, so it moves only when a real device
+     * model is added or removed — it went from 13 to 15 when spi0 and spi1
+     * stopped being stubs, from 15 to 17 when the two halves of /arm-io/gpio
+     * did, from 17 to 18 when uart4 became the guest's PPP line, from 18 to 20
+     * when the two I2S controllers landed with the WM8991 codec, and from 20 to
+     * 22 with the two PL080 DMA controllers that feed those I2S FIFOs. */
+    CHECK(nw == m.stub_count + 22u,
+          "fixed device-window count=%u expect 22 (+%u stubs)",
           nw - m.stub_count, m.stub_count);
     bool have_ctrl = false, have_mixer = false, have_sdo = false;
     for (unsigned i = 0; i < nw && i < S5L_WINDOW_MAX; i++) {
@@ -2740,6 +2864,7 @@ int main(void) {
     test_clcd_interrupt_reaches_the_cpu_on_line_13();
     test_timebase_runs_without_a_timer();
     test_timebase_runs_at_the_guest_ratio();
+    test_skipped_refresh_is_invisible_to_the_guest();
     test_timer_period_is_exact();
     test_timer_ack_mask_matches_the_kernels();
     test_timer_lump_matches_literal_countdown();

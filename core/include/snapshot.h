@@ -169,8 +169,27 @@
  *      "the host sent one into a full FIFO and it is gone", and rx_reads
  *      separates both from "the guest's driver never read URXH". Those are
  *      three different failures with three different next steps and nothing
- *      else in the machine can tell them apart. */
-#define SNAPSHOT_VERSION   13u
+ *      else in the machine can tell them apart.
+ *
+ * v14: the two PL080 DMA controllers, /arm-io/dmac0 and /arm-io/dmac1. Appended
+ *      at the END of MACH, after usbotg, so nothing before them moves — but the
+ *      payload is 640 bytes longer and a v13 reader would run off the end of
+ *      the section, so this is still a hard break rather than a free append.
+ *
+ *      It could not have been defaulted. A DMA channel's five registers ARE the
+ *      transfer in flight: source, destination, the remaining count in
+ *      Control[11:0] and the address of the next linked-list item. Restoring
+ *      them as zero would resume a guest whose driver is waiting on a channel
+ *      that is no longer enabled, no longer has anything queued, and will never
+ *      raise the terminal count it is blocked on — and AppleARMPL080DMAC's
+ *      queryDMACommand spins on the Active bit with no deadline, so that guest
+ *      does not fail, it stops.
+ *
+ *      The counters travel for the same reason v13's do. bytes_moved is the
+ *      only thing in this machine that can distinguish "the guest never
+ *      programmed a transfer" from "it programmed one and this model refused
+ *      it", and refused_flow/width/chain/softreq/endian name which refusal. */
+#define SNAPSHOT_VERSION   14u
 
 typedef enum {
     SNAP_OK = 0,

@@ -24,6 +24,7 @@ add_library(emucore STATIC
     src/soc/buttons.c
     src/soc/mtz2.c
     src/soc/usbotg.c
+    src/soc/pl080.c
     src/soc/nor.c
     src/soc/nand.c
     src/soc/storage.c
@@ -173,6 +174,15 @@ add_test(NAME ppp_peer COMMAND test_ppp)
 add_executable(test_mtz2 tests/test_mtz2.c)
 target_link_libraries(test_mtz2 PRIVATE emucore)
 add_test(NAME multitouch_z2 COMMAND test_mtz2)
+
+# The two PL080 DMA controllers. Half of these tests drive the model through a
+# fake bus, because that is the only way to assert the exact address, value AND
+# WIDTH of every store; the other half go through a real machine, because "a DMA
+# store lands where a CPU store lands" is a claim about machine.c's decode and
+# cannot be checked against the device alone.
+add_executable(test_pl080 tests/test_pl080.c)
+target_link_libraries(test_pl080 PRIVATE emucore)
+add_test(NAME s5l8900_pl080_dmac COMMAND test_pl080)
 
 add_executable(test_img3 tests/test_img3.c)
 target_link_libraries(test_img3 PRIVATE emucore)

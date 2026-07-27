@@ -434,10 +434,24 @@ void s5l_gpio_drive(s5l_gpio_t *g, uint16_t pin, bool level) {
     unsigned bit   = (unsigned)(pin & 0xffu);
     if (!g || group >= S5L_GPIO_PORTS || bit > 31u) return;
 
+    uint32_t *reg = &g->regs[S5L_GPIO_PIN_REG(group) >> 2];
+    /*
+     * The pin is already there, so there is nothing to tell anyone: this call
+     * can move at most the one bit below, and notify() only fires a watcher
+     * whose own pin differs from the snapshot. Returning here is not a
+     * shortcut past a side effect, it is skipping a 25-word snapshot and a
+     * watcher sweep whose every comparison is guaranteed equal.
+     *
+     * Worth its own branch because s5l_buttons_apply() re-drives five
+     * unchanged switches on every full refresh, so this is five snapshots of
+     * the whole pin map per tick that exist only to prove nothing happened.
+     * See `level_dirty` in soc.h for what the refresh costs and why it runs.
+     */
+    if (((*reg >> bit) & 1u) == (level ? 1u : 0u)) return;
+
     for (unsigned i = 0; i < S5L_GPIO_PORTS; i++)
         before[i] = g->regs[S5L_GPIO_PIN_REG(i) >> 2];
 
-    uint32_t *reg = &g->regs[S5L_GPIO_PIN_REG(group) >> 2];
     if (level) *reg |=  (1u << bit);
     else       *reg &= ~(1u << bit);
 

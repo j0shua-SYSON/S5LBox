@@ -72,6 +72,15 @@ static const s5l_window_t DEVICE_WINDOWS[] = {
      */
     { S5L8900_UART4_BASE, S5L8900_DEV_SIZE,   "uart4" },
     { S5L8900_TIMER_BASE, S5L8900_TIMER_SIZE, "timer" },
+    /*
+     * The two PL080 DMA controllers. Neither page was decoded or even declared
+     * before, so AppleARMPL080DMAC::start mapped it, printed a base address,
+     * initialised ten channels into it and had every one of those writes
+     * discarded — including the two the device tree points at the I2S FIFOs.
+     * See the PL080 block in soc.h for the whole derivation.
+     */
+    { S5L8900_DMAC0_BASE, S5L8900_DEV_SIZE,   "dmac0" },
+    { S5L8900_DMAC1_BASE, S5L8900_DEV_SIZE,   "dmac1" },
 };
 #define NDEVICE_WINDOWS (sizeof DEVICE_WINDOWS / sizeof DEVICE_WINDOWS[0])
 
@@ -267,6 +276,17 @@ static uint32_t bus_read(void *ctx, uint32_t addr, unsigned bytes) {
         memcpy(&v, &m->ram[addr - m->ram_base], bytes);   /* little-endian host */
         return v;
     }
+    /*
+     * Past the RAM aperture is a device, and this is the ONE place every guest
+     * device access passes through — which is what makes `level_dirty` a
+     * complete account of guest-caused level changes rather than a list of
+     * windows somebody has to remember to extend. Set on reads as well as
+     * writes: draining URXH, popping the SPI receive FIFO and reading
+     * VICADDRESS all change what a line asserts, and nine of the fifteen read
+     * entry points take a non-const device pointer. Distinguishing the pure
+     * ones would buy a store per MMIO read and cost the guarantee.
+     */
+    m->level_dirty = true;
     uint32_t v;
     if ((bytes == 1u || bytes == 2u || bytes == 4u) && (addr & 3u) == 0u &&
         in_dev(addr, bytes, S5L8900_UART0_BASE)) {
@@ -341,6 +361,13 @@ static uint32_t bus_read(void *ctx, uint32_t addr, unsigned bytes) {
          * or unaligned access to this page stays unmapped-and-counted rather
          * than being answered with a fabricated lane. */
         v = s5l_usbotg_read(&m->usbotg, addr - S5L8900_USB_OTG_BASE);
+    } else if (mmio_word(addr, bytes, S5L8900_DMAC0_BASE, S5L8900_DEV_SIZE)) {
+        /* Word accesses only: AppleARMPL080DMAC reaches this file through one
+         * `ldr r0,[off, base]` at 0xc070ecd4 and one `str r2,[off, base]` at
+         * 0xc070ed08, both 32-bit. */
+        v = s5l_pl080_read(&m->dmac[0], addr - S5L8900_DMAC0_BASE);
+    } else if (mmio_word(addr, bytes, S5L8900_DMAC1_BASE, S5L8900_DEV_SIZE)) {
+        v = s5l_pl080_read(&m->dmac[1], addr - S5L8900_DMAC1_BASE);
     } else if ((bytes == 1u || bytes == 2u || bytes == 4u) &&
                in_window(addr, bytes, S5L8900_NOR_BASE, m->nor.size)) {
         v = s5l_nor_read(&m->nor, addr - S5L8900_NOR_BASE, bytes);
@@ -366,6 +393,7 @@ static void bus_write(void *ctx, uint32_t addr, uint32_t val, unsigned bytes) {
         memcpy(&m->ram[addr - m->ram_base], &val, bytes);
         return;
     }
+    m->level_dirty = true;      /* a device store; see bus_read() */
     if ((bytes == 1u || bytes == 2u || bytes == 4u) && (addr & 3u) == 0u &&
         in_dev(addr, bytes, S5L8900_UART0_BASE)) {
         note_device(m, addr, val, true);
@@ -468,6 +496,22 @@ static void bus_write(void *ctx, uint32_t addr, uint32_t val, unsigned bytes) {
     if (mmio_word(addr, bytes, S5L8900_USB_OTG_BASE, S5L8900_DEV_SIZE)) {
         note_device(m, addr, val, true);
         s5l_usbotg_write(&m->usbotg, addr - S5L8900_USB_OTG_BASE, val);
+        return;
+    }
+    /*
+     * The DMACs. The store is recorded and applied here; NOTHING is transferred
+     * from inside it. A channel enabled by this store moves its bytes in
+     * s5l_pl080_run(), which s5l8900_tick() calls — see the comment at the top
+     * of pl080.c for why the bus is never re-entered from a bus write.
+     */
+    if (mmio_word(addr, bytes, S5L8900_DMAC0_BASE, S5L8900_DEV_SIZE)) {
+        note_device(m, addr, val, true);
+        s5l_pl080_write(&m->dmac[0], addr - S5L8900_DMAC0_BASE, val);
+        return;
+    }
+    if (mmio_word(addr, bytes, S5L8900_DMAC1_BASE, S5L8900_DEV_SIZE)) {
+        note_device(m, addr, val, true);
+        s5l_pl080_write(&m->dmac[1], addr - S5L8900_DMAC1_BASE, val);
         return;
     }
     if ((bytes == 1u || bytes == 2u || bytes == 4u) &&
@@ -661,6 +705,33 @@ static s5l_wake_kind_t wake_edge_uart4(const s5l8900_t *m, uint32_t *ticks) {
     return S5L_WAKE_NEVER;
 }
 
+/*
+ * The two PL080 DMA controllers, and the answer is NEVER for the same reason
+ * the SPI controllers' is — but the reasoning has one extra step, because a DMA
+ * transfer is the one thing in this machine that looks like it might complete
+ * on its own schedule.
+ *
+ * It does not, here. A channel becomes runnable only when a guest store sets
+ * its enable bit, that store sets `level_dirty`, and the very next
+ * s5l8900_tick() — which cannot early-out while `level_dirty` is set — runs
+ * s5l_pl080_run() to the END of the chain and latches any terminal count. So by
+ * the time a core could reach WFI, either the interrupt is already asserted (in
+ * which case machine_wait_for_interrupt()'s own pre-check ends the wait before
+ * any source is consulted) or there is no transfer in flight at all. There is
+ * no future edge to name.
+ *
+ * That would stop being true the day this model paces transfers against a
+ * peripheral's DMA request line instead of completing them in one call, which
+ * is exactly the change the burst note in soc.h says has not been made. This
+ * entry is where that change would be felt: it would have to start answering
+ * S5L_WAKE_AT with the remaining distance, or the machine would fast-forward
+ * straight over the completion.
+ */
+static s5l_wake_kind_t wake_edge_dmac(const s5l8900_t *m, uint32_t *ticks) {
+    (void)m; (void)ticks;
+    return S5L_WAKE_NEVER;
+}
+
 static const s5l_wake_source_t WAKE_SOURCES[] = {
     { "timer", S5L8900_IRQ_TIMER, wake_edge_timer },
     { "clcd",  S5L8900_IRQ_CLCD,  wake_edge_clcd  },
@@ -677,6 +748,8 @@ static const s5l_wake_source_t WAKE_SOURCES[] = {
     { "gpio-group5",  1u, wake_edge_gpio },
     { "gpio-group6",  0u, wake_edge_gpio },
     { "uart4-rx", S5L8900_IRQ_UART4, wake_edge_uart4 },
+    { "dmac0", S5L8900_IRQ_DMAC0, wake_edge_dmac },
+    { "dmac1", S5L8900_IRQ_DMAC1, wake_edge_dmac },
 };
 #define NWAKE_SOURCES (sizeof WAKE_SOURCES / sizeof WAKE_SOURCES[0])
 
@@ -782,6 +855,18 @@ static bool machine_wait_for_interrupt(void *ctx) {
 
 /* ----------------------------------------------------------- lifecycle --- */
 
+/*
+ * S5LBOX_TICK_EAGER=1 restores the per-instruction refresh s5l8900_tick() used
+ * to do unconditionally. It exists so the two paths can be run against each
+ * other on the same binary and the same boot — which is the only way to claim
+ * the skip changes nothing the guest can see — and it is read once per machine
+ * rather than per tick. A machine-independent static because it describes the
+ * BUILD under test, not a property of a machine, and therefore must not enter
+ * a snapshot.
+ */
+static bool g_tick_eager;
+static bool g_tick_eager_read;
+
 bool s5l8900_init(s5l8900_t *m, uint32_t ram_base, uint32_t ram_size) {
     if (!m) return false;
     memset(m, 0, sizeof *m);
@@ -832,6 +917,8 @@ bool s5l8900_init(s5l8900_t *m, uint32_t ram_base, uint32_t ram_size) {
     s5l_buttons_reset(&m->buttons);
     s5l_buttons_apply(&m->buttons, &m->gpio, &m->gpioic);
     s5l_usbotg_reset(&m->usbotg);
+    for (unsigned i = 0; i < S5L8900_DMAC_COUNT; i++)
+        s5l_pl080_reset(&m->dmac[i]);
     {
         s5l_i2c_slave_t pmu;
         s5l_pcf50635_bind(&m->pmu, &pmu);
@@ -952,6 +1039,17 @@ bool s5l8900_init(s5l8900_t *m, uint32_t ram_base, uint32_t ram_size) {
                 m->stub_declare_failures++;
     }
 
+    /* Nothing has refreshed the levels yet: the resets and s5l_buttons_apply()
+     * above drove pins, and the VIC outputs still hold the memset's zero. The
+     * first tick must be a full one however small it is. */
+    m->level_dirty = true;
+
+    if (!g_tick_eager_read) {
+        const char *eager = getenv("S5LBOX_TICK_EAGER");
+        g_tick_eager = eager && *eager && *eager != '0';
+        g_tick_eager_read = true;
+    }
+
     m->bus.ctx = m;
     m->bus.read32 = r32; m->bus.read16 = r16; m->bus.read8 = r8;
     m->bus.write32 = w32; m->bus.write16 = w16; m->bus.write8 = w8;
@@ -981,6 +1079,22 @@ void s5l8900_load(s5l8900_t *m, uint32_t addr, const void *data, size_t len) {
     memcpy(&m->ram[addr - m->ram_base], data, len);
 }
 
+/*
+ * The inputs a host can move behind the bus, in one word. See `ext_seen` in
+ * soc.h for why the machine has to WATCH these rather than be told about them,
+ * and why the list is exactly three long: they are the three s5l_*_t sub-
+ * structs a host is handed a pointer to without the machine that owns them.
+ *
+ * uart0's receive FIFO is deliberately absent. Its line is 24 and s5l8900_tick
+ * does not connect it (see the uart4 block there), so a byte pushed into it
+ * cannot change any level and watching it would be watching nothing.
+ */
+static uint32_t ext_inputs(const s5l8900_t *m) {
+    return (uint32_t)m->uart4.rx_count
+         | ((uint32_t)m->buttons.pressed << 8)
+         | ((uint32_t)(m->mtz2.atn ? 1u : 0u) << 16);
+}
+
 void s5l8900_tick(s5l8900_t *m, uint32_t ticks) {
     /*
      * Convert elapsed emulated CPU-clock ticks into timebase ticks at the
@@ -993,9 +1107,43 @@ void s5l8900_tick(s5l8900_t *m, uint32_t ticks) {
     uint32_t tb = ticks;
     if (m->cpu_hz && m->tb_hz) {
         m->tb_accum += (uint64_t)ticks * m->tb_hz;
+        /*
+         * THE EARLY OUT, and the whole reason this function is affordable per
+         * instruction. See `level_dirty` in soc.h for the measurement and for
+         * why the rest of this function is idempotent over unchanged inputs.
+         *
+         * Four conditions, and each is load-bearing:
+         *
+         *   tb_accum < cpu_hz   no timebase tick elapsed, so every `tb`
+         *                       below would be 0 and every device's advance a
+         *                       no-op. At 412:6 this holds for 68 of every 69
+         *                       calls, which is where the time goes.
+         *   !level_dirty        no guest access has touched a device since the
+         *                       last refresh, so re-deriving the levels would
+         *                       reproduce the ones already there.
+         *   ext_inputs == seen  and neither has a host, on the three inputs it
+         *                       can reach behind the bus. Four loads; see
+         *                       ext_inputs() above.
+         *   ticks               a caller asking for zero ticks is asking for a
+         *                       refresh and nothing else; that is the only
+         *                       reason to call with zero, and both WFI and the
+         *                       host injection paths depend on it.
+         *
+         * The modulo below is skipped rather than deferred: tb_accum is
+         * already less than cpu_hz here, so `tb_accum %= cpu_hz` would not
+         * change it. Time is still carried exactly — the accumulator was
+         * advanced above, before this returns.
+         *
+         * g_tick_eager is the A/B switch, and it is here rather than around
+         * the whole function so that "eager" means the pre-change code path
+         * exactly: same conversion, same order, same everything below.
+         */
+        if (ticks && !m->level_dirty && !g_tick_eager &&
+            m->tb_accum < m->cpu_hz && ext_inputs(m) == m->ext_seen) return;
         tb = (uint32_t)(m->tb_accum / m->cpu_hz);
         m->tb_accum %= m->cpu_hz;
     }
+    m->level_dirty = false;
 
     /* Devices advance, then the controllers recompute what the CPU sees. */
     bool timer_irq = s5l_timer_tick(&m->timer, tb);
@@ -1039,6 +1187,24 @@ void s5l8900_tick(s5l8900_t *m, uint32_t ticks) {
      * it. core/tests/test_uart4.c pins that.
      */
     s5l_vic_set_line(&m->vic[0], S5L8900_IRQ_UART4, s5l_uart_rx_irq(&m->uart4));
+
+    /*
+     * The two DMA controllers, and the ONLY device in this machine that reaches
+     * back through the bus while it runs. It is given `&m->bus` rather than
+     * holding it, so that the pointer it uses is always the one installed NOW:
+     * tools/bootkernel.c interposes on m->bus AFTER s5l8900_init returns, and a
+     * copy taken at init would route every DMA store past that interposer —
+     * which is precisely the tap the guest's audio capture is listening on.
+     *
+     * This is before the GPIO cascade for no reason other than that both DMAC
+     * lines are VIC0's and neither feeds the cascade; the order is free.
+     */
+    for (unsigned i = 0; i < S5L8900_DMAC_COUNT; i++) {
+        bool dmac_irq = s5l_pl080_run(&m->dmac[i], &m->bus);
+        s5l_vic_set_line(&m->vic[0],
+                         i == 0u ? S5L8900_IRQ_DMAC0 : S5L8900_IRQ_DMAC1,
+                         dmac_irq);
+    }
 
     /*
      * The GPIO interrupt cascade. Seven group outputs, seven VIC lines, and
@@ -1095,6 +1261,12 @@ void s5l8900_tick(s5l8900_t *m, uint32_t ticks) {
     }
     m->cpu.irq_line = irq;
     m->cpu.fiq_line = fiq;
+
+    /* Sampled LAST, not first: s5l_buttons_apply() above can move a pin whose
+     * watcher is s5l_mtz2_reset_pin(), and that clears the attention line this
+     * word carries. Recording what the refresh started from would leave the
+     * next call convinced a host had moved it. */
+    m->ext_seen = ext_inputs(m);
 }
 
 unsigned s5l8900_run(s5l8900_t *m, unsigned max_steps, arm_status_t *status) {
