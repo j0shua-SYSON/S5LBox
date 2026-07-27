@@ -994,6 +994,50 @@ static void boot_print_config(FILE *out, const boot_config_t *cfg,
  *   config     : name=0|1 ...   every toggle, effective value, table order
  *   config-cli : names          only what this command line actually asked for
  */
+/*
+ * The exact command line, quoted so it can be pasted back.
+ *
+ * This exists because the two lines below are NOT sufficient to reproduce a
+ * run, and twice now that has cost a boot. `config-cli` names toggles only: it
+ * says nothing about -c, -d, -r, -R, --external-md or --snapshot-at. run72 and
+ * run89 were both reconstructed from a `config-cli` line, both silently lost
+ * `nand-enable-adm=0` from the kernel command line, and both died inside
+ * AppleS5L8900XADMFMC::start about 218 million instructions in -- a failure
+ * that looks like a guest bug and is actually a missing boot argument.
+ *
+ * A log that describes its own run must therefore carry the whole argv, not a
+ * summary of part of it. This is the line to copy when reproducing a run;
+ * `config` remains the line to READ when interpreting one, because argv alone
+ * is only self-describing while the defaults never move.
+ *
+ * Quoting deliberately leaves backslashes alone. Every path on this host
+ * contains them, and escaping them would make the common case unreadable, be
+ * wrong for PowerShell and cmd, and be unnecessary for sh -- inside double
+ * quotes sh only treats \ as an escape before $ ` " \ and newline, so a
+ * Windows path survives verbatim. An argument is quoted only if it holds a
+ * space, a tab or a quote; a quote is escaped; and a trailing backslash run is
+ * doubled, which is the one case where an unescaped backslash would swallow
+ * the closing quote.
+ */
+static void boot_argv_emit(FILE *out, int argc, char **argv) {
+    fputs("relaunch   :", out);
+    for (int i = 0; i < argc; i++) {
+        const char *a = argv[i];
+        bool quote = (*a == '\0') || strpbrk(a, " \t\"") != NULL;
+        fputc(' ', out);
+        if (!quote) { fputs(a, out); continue; }
+        fputc('"', out);
+        for (const char *p = a; *p; p++) {
+            if (*p == '"') fputc('\\', out);
+            fputc(*p, out);
+        }
+        for (const char *p = a + strlen(a); p > a && p[-1] == '\\'; p--)
+            fputc('\\', out);
+        fputc('"', out);
+    }
+    fputc('\n', out);
+}
+
 static void boot_config_emit(FILE *out, const boot_config_t *cfg) {
     fputs("config     :", out);
     for (unsigned i = 0; i < NBOOT_TOGGLES; i++)
@@ -23355,6 +23399,7 @@ int main(int argc, char **argv) {
         boot_print_config(stdout, &cfg, &resolved);
         fputc('\n', stdout);
         boot_config_emit(stdout, &cfg);
+        boot_argv_emit(stdout, argc, argv);
         boot_capability_notes(stdout, &cfg, external_md, jailbreak_payload);
         return 0;
     }
@@ -23363,6 +23408,7 @@ int main(int argc, char **argv) {
      * the first input is opened so that even a run that dies on a missing file
      * still says, in its log, what it would have been. */
     boot_config_emit(stdout, &cfg);
+    boot_argv_emit(stdout, argc, argv);
     boot_capability_notes(stdout, &cfg, external_md, jailbreak_payload);
 
     size_t len = 0;
