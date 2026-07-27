@@ -3566,6 +3566,95 @@ milestone can fire while it is.
 
 ### 23.5 The HFS+ provisioner blocks two features, not four
 
+**STATUS: the catalog block is LIFTED. `tools/rootfs_work.c` is now an HFS+
+catalog writer.** What follows the status block is the original assessment,
+kept because its PPP reasoning is still live; the first two paragraphs of it
+are now historical and are corrected here.
+
+**What it can create.** Directories, files, and — new — **BSD symlinks**
+(`ROOTFS_WORK_ENTRY_SYMLINK`), each with a catalog record, a thread record, an
+allocated extent for the content, and the parent folder's valence,
+`folderCount` and `contentModDate` updated. Permissions are the low **twelve**
+bits of the mode word, so `06755 MobileCydia`, `04555 bin/su`, `02775
+var/local` and `01777 var/lock` reach the record's `fileMode` unmasked; a test
+writes each of them and reads it back through an independent chain walker.
+
+**The symlink format was derived from the stock image, not recalled.** All
+**409** symlinks in `firmware/rootfs.img` were censused field by field, and on
+that volume they are byte-identical on every field except CNID, dates, target
+and extent:
+
+| field | value on all 409 |
+|---|---|
+| `recordType` / `flags` | 2 (file record) / `0x0002`, thread-exists only |
+| `fileMode` | **`0120755`** — `S_IFLNK|0755`, no exceptions |
+| `userInfo` | `fdType` **`'slnk'`**, `fdCreator` **`'rhap'`**, rest zero |
+| `finderInfo`, `textEncoding`, `reserved1/2` | zero |
+| `permissions.special` | `1` (linkCount) |
+| data fork | `logicalSize == strlen(target)` — **the NUL is outside the fork** — `clumpSize` 0, `totalBlocks` 1, one extent, `extents[1..7]` zero |
+| resource fork | 80 zero bytes |
+| thread | an ordinary `0x0004` file thread |
+
+`/etc` → `"private/etc"` (CNID 14880, `logicalSize` 11) is the worked example.
+The only field that varies is `groupID` — 0 on 384 of them, 80/admin on the 25
+under `/` and `/Library` — so it stays the caller's, exactly like the
+permission bits.
+
+**Node splitting: one shape, everything else refused by name.** The payload
+arrives as a batch of ascending CNIDs, so the only split implemented is the
+**rightmost append**: the key sorts after every key in the tree, it does not
+fit the last leaf, and a new leaf is chained onto the right-hand end holding
+that one record. **No existing record moves, at any level.** The same routine
+extends the index level above when the parent index node is also full, and
+recurses. Exhaustively, what changes:
+
+```
+old leaf   fLink 0 -> new node                     (chain forward)
+new node   bLink = old leaf, fLink = 0, ONE record (chain back, new chain end)
+parent     one appended index record -> new node   (descent finds it)
+header     lastLeafNode = new node, freeNodes -= 1, one map bit set
+```
+
+`firstLeafNode`, `rootNode`, `treeDepth` and `totalNodes` are never touched.
+Every one of those lines is asserted from the **published** image by a reader
+that walks the leaf chain from `firstLeafNode` the way `tools/hfsx_extract.py`
+does, and `catalog_audit()` re-walks both leaf and index levels before and
+after the commit.
+
+Four boundaries are refusals, not attempts — each decided in the read-only
+plan phase, so the refused work image is byte-identical to the input:
+
+| refusal | when |
+|---|---|
+| `PROVISION_NODE_FULL` | full leaf, and the insert is **not** a rightmost append (interior position, or a leaf that is not the chain's end) |
+| `PROVISION_LEAF_HEAD` | the record would become a leaf's first key, so an ancestor index key would have to be rewritten |
+| `PROVISION_SPLIT_UNSUPPORTED` | the split would have to grow a **new root** and increment `treeDepth` |
+| `PROVISION_BTREE_FULL` | the B-tree's own free-node map is exhausted; growing the catalog fork is a different capability |
+
+`provision_leaf_splits` and `provision_index_splits` are reported in the
+result, so a caller comparing two work images learns that the shape changed.
+
+**What still bounds the payload, and it is not silent.**
+`ROOTFS_WORK_MAX_ENTRIES` is **64**, well under the payload's 555 files plus 89
+symlinks, and a larger request is a named `PROVISION_LIMIT` refusal rather than
+a truncation. That constant is a policy cap, not a structural one — the plan
+state is heap-allocated from the caller's entry count — so raising it is the
+whole change, but it has not been raised here because no fixture in the suite
+is large enough to exercise it. `ROOTFS_WORK_MAX_CATALOG_NODES` (1024) bounds
+the nodes **one request touches**, not the tree: the real 7E18 catalog is 1998
+nodes and opens fine.
+
+Tests: `core/tests/test_rootfs_provision.c`, 718 assertions over in-memory
+HFSX volumes built at 512-byte nodes so an index node can actually be filled.
+Twenty mutations of the writer — dropped `fLink`, forgotten `lastLeafNode`,
+zeroed `bLink`, an unreported node claim, a wrong Finder type or creator, an
+`S_IFREG` symlink, a NUL-terminated target, a mode mask that eats the setuid
+bit, and both halves of the rightmost-append guard — are all killed.
+
+---
+
+*Original assessment, superseded above for the catalog and retained for PPP:*
+
 `tools/rootfs_work.c` does size-neutral in-place rewrites only and has no
 catalog B-tree code. It genuinely blocks **activation** (§23.3, which needs a new
 directory *and* a new file) and the **jailbreak payload** (§23.6, 555 files).
