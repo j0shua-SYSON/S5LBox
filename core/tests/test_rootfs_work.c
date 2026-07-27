@@ -1040,14 +1040,26 @@ static void test_ppp_launchd_job_plist(void) {
                           "<string>/dev/uart.debug</string>"),
           "rewritten job does not name uart4's devfs node");
     /* The console log path, which run74 is the reason for: pppd exited 1 --
-     * its EXIT_FATAL_ERROR -- and fatal() writes to stderr, which launchd
-     * sends to /dev/null unless this key says otherwise. Without it a run can
-     * report an exit code and nothing else. */
+     * its EXIT_FATAL_ERROR -- and launchd sends the job's output to /dev/null
+     * unless a key says otherwise. Without it a run reports an exit code and
+     * nothing else, which is exactly the state run74 was read in.
+     *
+     * It must be StandardOUTPath, and this assertion exists to keep it that
+     * way. run75 spent a whole boot on StandardErrorPath and came back with a
+     * console byte-identical to run74's, because pppd does not use fd 2:
+     * error() and fatal() share one emitter at 0x0002245c which syslog()s and
+     * then writes to *log_to_fd, and _log_to_fd at 0x00039c70 has a file image
+     * of 1. `nodetach` means nothing ever lowers it. Naming the wrong stream
+     * is not a smaller mistake than omitting the key -- it costs the same run
+     * and produces the same silence. */
     CHECK(region_contains(rewritten, PPP_PLIST_SIZE,
-                          "<key>StandardErrorPath</key>") &&
+                          "<key>StandardOutPath</key>") &&
           region_contains(rewritten, PPP_PLIST_SIZE,
                           "<string>/dev/console</string>"),
           "rewritten job discards pppd's own error messages");
+    CHECK(!region_contains(rewritten, PPP_PLIST_SIZE,
+                           "<key>StandardErrorPath</key>"),
+          "rewritten job points at fd 2, which pppd never writes to");
     CHECK(region_contains(rewritten, PPP_PLIST_SIZE, "<string>local</string>"),
           "rewritten job lets pppd wait for a carrier this UART has no DCD "
           "to raise");

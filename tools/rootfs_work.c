@@ -315,8 +315,24 @@ static const uint8_t PPP_PLIST_STOCK[] =
  *                    a job whose first process exits immediately is a job
  *                    launchd believes has died.
  *
- * StandardErrorPath = /dev/console IS THE MOST IMPORTANT LINE IN THIS FILE,
+ * StandardOutPath = /dev/console IS THE MOST IMPORTANT LINE IN THIS FILE,
  * and it is here because of a measurement rather than a preference.
+ *
+ * IT WAS StandardErrorPath UNTIL 5944b5f READ THE BINARY, and that is why
+ * run75 came back with a console byte-identical to run74's.  pppd's error()
+ * and fatal() both reach one emitter at 0x0002245c, which syslog()s the
+ * message and then writes it to `*log_to_fd`.  `_log_to_fd` lives at
+ * 0x00039c70 with a file image of ONE -- stdout -- and `nodetach` means
+ * nothing ever lowers it.  File descriptor 2 is never written to at all, so
+ * the previous key pointed launchd at a stream pppd does not use, and
+ * /dev/null still consumed the only message that could name the failure.
+ *
+ * The rename frees exactly TWO bytes -- the key name occurs once per line,
+ * inside <key>...</key>, not once per tag -- and those two go back into the
+ * filler so the record is still exactly 530.  The four dict-level <key>s keep
+ * their single leading tab and the <array>/</array> pair gains one each.  XML
+ * treats inter-element whitespace as insignificant, so a property-list reader
+ * still sees four keys and a five-argument job.
  *
  * run74 established that this job already works as far as the exec: launchd
  * posix_spawned /usr/sbin/pppd at instruction 557,124,470 as pid 19, pppd ran
@@ -378,16 +394,16 @@ static const uint8_t PPP_PLIST_JOB[] =
     "<string>com.apple.chud.pilotfish</string>\n"
     "\t<key>RunAtLoad</key>\n"
     "<true/>\n"
-    "\t<key>StandardErrorPath</key>\n"
+    "\t<key>StandardOutPath</key>\n"
     "<string>/dev/console</string>\n"
     "\t<key>ProgramArguments</key>\n"
-    "<array>\n"
+    "\t<array>\n"
     "<string>/usr/sbin/pppd</string>\n"
     "<string>/dev/uart.debug</string>\n"
     "<string>local</string>\n"
     "<string>nocrtscts</string>\n"
     "<string>nodetach</string>\n"
-    "</array>\n"
+    "\t</array>\n"
     "</dict>\n"
     "</plist>\n";
 
