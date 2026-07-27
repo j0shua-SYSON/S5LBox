@@ -3515,6 +3515,50 @@ same 50 × 75. This project reports 4800 × 7200 instead, which buys an exact
 stands, but it is now a choice made against a known alternative rather than in
 the dark.
 
+#### 23.4d The GPIO interrupt controller's pending latch is EDGE-triggered
+
+This is the ninth correction, and unlike the other eight it is a correction to
+*this project's own model* rather than to a reading of Apple's. It is also the
+one that decided whether touch works at all, so it is worth the space.
+
+`core/src/soc/gpioic.c` shipped with a LEVEL-sensitive pending latch: the
+guest's write-one-to-clear cleared the bit and then immediately re-asserted it
+from whatever the board was still driving. The file argued the case in three
+points, and the third — "for a device that does deassert it is
+indistinguishable from an edge latch, so nothing that behaves correctly can
+tell the difference" — is simply false. run71 measured how false:
+
+```
+HOT PAGE 0x39a00000, offset 0x0b0 (INTSTAT group 4):
+    reads 1,193,122   writes 1,193,123   lastval 0x08000000
+@1799986776 R 0x39a000b0 val 0x08000000  pc 0xc05a44dc lr 0xc05a4310
+@1799986797 W 0x39a000b0 val 0x08000000  pc 0xc05a44e8 lr 0xc05a4358
+@1799987195 R 0x39a000b0 val 0x08000000  pc 0xc05a44dc      <- 419 later
+@1799987216 W 0x39a000b0 val 0x08000000  pc 0xc05a44e8
+```
+
+One touch report was queued at instruction 1,300,000,000 and the attention line
+came up. The GPIO interrupt controller's filter read the pending word, wrote it
+back to acknowledge, and the re-latch undid the acknowledge inside the same
+store — so it re-entered every ~419 instructions and did so **1,193,122 times**,
+for the whole remaining half-billion instructions of the run.
+`IOWorkLoop::signalWorkAvailable` ran every time; the work loop's thread never
+got scheduled; `AppleMultitouchZ2SPI`'s handler never ran; the frame read never
+happened. The device's own counters said so from the other side:
+`queued 1, length-reads 0, data-reads 0, read 0` with `in-reset 0` and
+`hbpp-answered 1`. A LIVELOCK, not a lost interrupt, and it looks exactly like
+"touch is broken" from every direction except this register.
+
+The driver settles it independently: it writes this group's `INTEN` **twice in
+the whole boot** (offset 0x0d0, writes 2), so it does not mask the line while
+servicing it. A controller whose pending bit survived its own acknowledge would
+be unusable by this driver, which means the real part's does not.
+
+So the write-one-to-clear CLEARS, and only a RISING edge on the incoming line
+sets a pending bit again. Deasserting still does not clear the latch, so a
+pulse shorter than the guest's polling interval is still delivered — the one
+property the level design was actually right to want. Four mutations pin it.
+
 **A third downstream kill switch, alongside the two §23.4 already lists.**
 MultitouchHID drops every frame while its `UILocked` flag is set, and that flag
 is **initialised to 1**. Neither of the two probes §23.4 names as the step-5
@@ -4021,6 +4065,179 @@ What is already settled and should not be re-litigated: the plist hijack, the
 boot argument, the devfs node name, launchd starting the job, AMFI accepting
 the binary, dyld loading it, and `com.apple.nke.ppp` answering — the first six
 of the nine unknowns S0 was posed to settle.
+
+#### 23.10a `pppd` disassembled: the blocker is `tty_establish_ppp`, and
+#### `0x39c30` is not a string
+
+The static work proposed above was done, and it answers the question without a
+run. `/usr/sbin/pppd` extracted from `work/run75-ppp-log/rootfs-run75.img` with
+`tools/hfsx_extract.py` is 284,608 bytes, `MH_MAGIC` `cputype 12 cpusubtype 6`
+(armv6), **not stripped** — 576 defined symbols, and **zero** carry
+`N_ARM_THUMB_DEF`, so the whole `__text` decodes as ARM. That symbol table is
+what makes everything below cheap; disassemble with it, not without it.
+
+**`0x00039c30` is `fd_ppp`, not a message.** `__cstring` ends at `0x00035d9e`;
+`0x39c30` is in `__DATA,__data`, its file image is `ffffffff` (`= -1`), and the
+whole binary references it in exactly two places:
+
+- `_die+0x10` (`0x00013a1c`) — `if (fd_ppp >= 0) the_channel->disestablish_ppp(devfd)`
+- `_main+0xc6c` (`0x00015684`) — `ldr sl, [pc, #0x45c]`, held across the store
+  at `_main+0xca8`: `fd_ppp = the_channel->establish_ppp(devfd)`
+
+That is `fd_ppp`'s definition, use and initialiser exactly. The lead was worth
+following and it did not lead where §23.10's last block guessed.
+
+**The exit is `die(EXIT_FATAL_ERROR)`.** `_fatal` (`0x00023ad0`) ends in
+`mov r0,#1; bl _die`, and `_die` (`0x00013a0c`) ends in `mov r0,r5; bl _exit`.
+Every `exit(1)` in the image is either that or `_load_kext+0x6c`, and
+`load_kext` `fork()`s first — **pid 19 never forked** (the run75 lifecycle ring
+retained 92 of 92 events, so it is complete), so `load_kext` never ran. Two
+things follow immediately: `ppp_available()`'s
+`socket(PF_PPP /*34*/, SOCK_RAW, PPPPROTO_CTL)` at `_ppp_available+0x24`
+**succeeded** — it only forks when that fails — so `com.apple.nke.ppp` really
+does answer; and no connector/initializer/welcomer script ran either.
+
+**`status = 1` has exactly one reachable writer.** Scanning every reference to
+`_status` (`0x00040418`, reached through the non-lazy pointer at `0x000373c8`)
+finds 36 stores. Only two store `1`:
+
+- `_connect_tty+0x9c` (`0x000207fc`), guarded by `using_pty || record_file` —
+  unreachable with this argv, which names a real device
+- `_main+0xcb0` (`0x000156c8`), immediately after
+  `fd_ppp = the_channel->establish_ppp(devfd); if (fd_ppp < 0)`
+
+`the_channel` is `tty_channel` at `0x0003ae2c` — `+0xc = _connect_tty`,
+`+0x14 = _tty_establish_ppp`, `+0x24 = _cleanup_tty`, the standard `struct
+channel` layout. **So `_tty_establish_ppp` (`0x0001c528`) returned negative.**
+
+#### A per-process execution trace, from page faults, at zero run cost
+
+`=== DISTINCT ABORT SITES ===` is a symbolisable trace of userspace, and this
+had not been used. Each record carries `L1=`, the L1 descriptor for the faulting
+VA — a *per-address-space* value, which is what separates one process's
+low-address faults from another's. `pppd`'s is `0x0b139001` in both run74 and
+run75 (identified by the `IFETCH FAR 0x00002334` right after the spawn:
+`0x2334` is `start`, pppd's entry point). Filtering on it and symbolising
+against the extracted binary gives 98 records for run75. The tail:
+
+```text
+IFETCH @731392297  0x000040b4  _auth_check_options
+IFETCH @731778474  0x0001ce7c  _sys_init
+IFETCH @735408996  0x000294ac  _acsp_init_plugins
+IFETCH @735607256  0x00020760  _connect_tty
+IFETCH @735794554  0x0001bf80  _set_up_tty
+IFETCH @738641962  0x0001a6ec  _sys_cleanup      <- first call inside die()
+       @739143287  exit(1)
+```
+
+run74 is the same sequence, offset by ~37k instructions. Read it carefully: a
+missing entry proves nothing (`_tty_establish_ppp` at `0x1c528` shares page
+`0x1c000` with `_sys_init`, already resident since 731.8M), but a *present*
+entry is proof the function was entered. So `sys_init` ran to completion — none
+of its six `fatal()`s fired, including `"Couldn't open PF_PPP: %m"` and
+`"SCDynamicStoreCreate failed: %s"` — and `connect_tty` reached `set_up_tty`.
+
+**Reuse this.** `L1=` plus an unstripped guest binary turns the abort table into
+a function-entry trace for any process, retroactively, on logs already on disk.
+
+#### Both of `set_up_tty`'s `fatal()`s are excluded
+
+`_set_up_tty` (`0x0001bf80`) has two, and one non-fatal early return that has
+been mistaken for one:
+
+| site | call | condition |
+|---|---|---|
+| `0x0001bfd0` | `error("tcgetattr: %m")` | **returns**, does not die |
+| `0x0001c12c` | `fatal("Baud rate for %s is 0…")` | `inspeed == 0 && cfgetospeed() == 0` |
+| `0x0001c164` | `fatal("tcsetattr: %m")` | `tcsetattr(fd, TCSAFLUSH, &tios) < 0` |
+
+The baud fatal is excluded by construction, not by the 0.028% argument above:
+run74's argv carries `115200`, so `inspeed != 0`, so the branch at `0x0001c0ec`
+takes `cfsetospeed`/`cfsetispeed` and the fatal is *unreachable in that run* —
+and run74 still exits 1, at the same place, with the same `r3`. run75 takes the
+same path: between `_set_up_tty` and `exit` the two runs differ by **3,905
+instructions out of 3.35 million (0.12%)**, which is not enough to contain a
+skipped `tcsetattr` and everything after it.
+
+And `tcsetattr` ran. The uart4 register census is the witness:
+
+| run | cap | `0x3cc10000` | reached |
+|---|---|---|---|
+| run73 | 700e6 | `r=8 w=15` | died at the cap **before** `connect_tty` (735.6M) |
+| run74 | 850e6 | `r=41 w=100` | `set_up_tty` |
+| run75 | 850e6 | `r=41 w=100` | `set_up_tty` |
+
+`r=8 w=15` is the "identified, never opened" baseline — uart1 reads exactly
+`r=8 w=15` and uart3 `r=10 w=17` in every run. The +33/+85 in run74/run75 is the
+`open()` and the termios programming, and it is **byte-identical** between a run
+that asked for 115200 and one that asked for whatever the port reported. The
+port was opened and programmed; `set_up_tty` returned.
+
+#### The message, and the honest limit of what the binary can say
+
+`_tty_establish_ppp` returns `-1` from five places. All five call `error()`, not
+`fatal()` — which is why exit code 1 arrives with no `fatal()` anywhere, and why
+chasing `fatal()` call sites was the wrong search. In execution order:
+
+| # | string VA | message | guard |
+|---|---|---|---|
+| 1 | `0x00032a34` | `Couldn't set tty to PPP discipline: %m` | `ioctl(tty_fd, TIOCSETD 0x8004741b, &disc)`, `disc = PPPDISC = 5` (14 if `sync_serial`), failing with `errno != EIO` |
+| 2 | `0x0003296c` | `Couldn't get link number: %m` | `ioctl(tty_fd, PPPIOCGCHAN 0x40047437, &chindex)` |
+| 3 | `0x0003299c` | `Couldn't reopen PF_PPP: %m` | `socket(PF_PPP,SOCK_RAW,PPPPROTO_CTL)` + `connect()` in the helper at `0x0001c2b0` |
+| 4 | `0x000329b8` | `Couldn't attach to the ppp link %d: %m` | `ioctl(sock, PPPIOCATTCHAN 0x80047438, &chindex)` |
+| 5 | `0x00032a10` | `Couldn't attach to PPP unit %d: %m` | `ioctl(fd_ppp, PPPIOCCONNECT 0x8004743a, &ifunit)` |
+
+Each string occurs exactly once in the image. **#3 is excluded** — the identical
+`socket(PF_PPP,…)` already succeeded twice (in `ppp_available`, proved by the
+absent fork, and in `sys_init`, proved by `sys_init` returning). **#1 is the
+first and the one every later step presupposes**, and is the single most likely
+answer. But say plainly what the binary cannot: it cannot distinguish #1 from
+#2/#4/#5, because all four are `error()` calls on already-resident pages and
+leave no trace the run logs captured.
+
+#### What must hold, named exactly — and it is not a device model
+
+Nothing here is a missing register, a device-tree property or a file. The four
+operations that must succeed on the fd for `/dev/uart.debug` are:
+
+```text
+TIOCSETD        0x8004741b   _IOW('t',27,int)   value 5 (PPPDISC)
+PPPIOCGCHAN     0x40047437   _IOR('t',55,int)
+PPPIOCATTCHAN   0x80047438   _IOW('t',56,int)
+PPPIOCCONNECT   0x8004743a   _IOW('t',58,int)
+```
+
+All four are served by `com.apple.nke.ppp`, and that kext is present and armed
+in this exact kernelcache: `pppserial_ioctl: … TIOCSETD` / `… PPPIOCGCHAN = %d`
+are at `0x005583fc`+ in `firmware/kernel.macho`, and the **only** reference to
+`&linesw[PPPDISC]` (`0xc0221b4c`) in the entire 7.9 MB image is the literal at
+`0xc05925c0`, loaded by an eight-word `ldm/stm` structure copy at
+`0xc0592554`-`0xc0592568` — i.e. `linesw[PPPDISC] = pppdisc`, by direct
+assignment rather than `ldisc_register` (which has zero call sites anywhere).
+`nlinesw` is 8, so `PPPDISC = 5` also passes `ttioctl`'s range check.
+
+**This is a small change or none at all, and that is the finding.** There is no
+new emulated device between here and the LCP frame. The blocker is one of four
+ioctls inside a kext that is loaded and whose sibling entry point (the PF_PPP
+socket) already works — so the fix is either a one-line device-tree/`ioctl`
+detail or nothing, and the remaining cost is *identification*, not construction.
+Do not size S0's remainder as a driver.
+
+#### Why run75's console was empty, and the one-key fix
+
+`StandardErrorPath` was aimed at a file descriptor `pppd` never writes to.
+`error()`/`fatal()` funnel into the formatter at `0x000230d0`, which calls the
+emitter at `0x0002245c`, and that function does exactly two things: `syslog()`
+unconditionally, then — if `*log_to_fd >= 0` — a timestamp and the message with
+`write(*log_to_fd, …)`. `_log_to_fd` is at `0x00039c70` and its file image is
+**`00000001`, i.e. stdout**, and `nodetach` means nothing lowers it. fd 2 is
+never touched.
+
+So the next run's plist needs **`StandardOutPath`**, not `StandardErrorPath` —
+one key, same 530-byte budget, and it puts the exact string from the table above
+on the console and collapses the four-way ambiguity to one. That is the whole
+measurement: *which of those four `error()` strings `pppd` prints*. Nothing else
+needs to change, and no probe or new flag is required.
 
 #### Step S1, when someone takes it
 
