@@ -2343,6 +2343,44 @@ static bool dt_memmap_matches_once(uint8_t *b, size_t len, const char *key,
 #define N82_FB_BPP       4u
 #define N82_FB_BYTES     (N82_FB_WIDTH * N82_FB_HEIGHT * N82_FB_BPP)
 
+/*
+ * HOW MANY SURFACES /vram MUST HOLD, and why one is not enough.
+ *
+ * `/vram` is not the scanout buffer. It is the pool IOSurface allocates every
+ * surface from, and 691b727 sized it to exactly ONE framebuffer -- which was
+ * enough to make the first frame appear and is the reason nothing after it
+ * ever did.
+ *
+ * IOSurfaceDeviceMemoryRegion::init (0xc0527bb4) hands the region's whole
+ * length, less one, to IORangeAllocator::withRange at 0xc0527c04. AppleH1CLCD
+ * asks for round_up(1280 * 480, 0x1000) = 0x96000 (0xc0706064-0xc0706078),
+ * and N82_FB_BYTES is 0x96000 exactly. So the first surface consumes the pool
+ * and every later one returns kIOReturnNoResources with
+ * "buffer allocation failed. 320 x 480".
+ *
+ * There is no fallback path on this machine. IOSurface::allocate's
+ * IOBufferMemoryDescriptor branch is gated at 0xc05244e4 on
+ * getProperty("iommu-present"), and `iommu-present` occurs ZERO times in the
+ * shipped device tree -- correctly, because S5L8900 has no DART. Adding it
+ * would route allocations to memory the display cannot scan out, which is a
+ * worse failure than this one because it would look like it worked.
+ *
+ * The observable consequence, measured in run76 and run83: the swap pipeline
+ * runs perfectly -- 289 VBLs, 150 swaps committed, every commandWakeup
+ * delivered -- and commits the SAME surface at 0x0885c000 every time, because
+ * it is the only one that exists. A compositor with one surface can show a
+ * boot spinner. It cannot show a home screen over a wallpaper.
+ *
+ * Two is the minimum that can composite anything, and it is what this sets:
+ * enough to prove the mechanism, cheap enough (0x96000 = 600 KiB) that it
+ * costs half a percent of DRAM. AppleH1CLCD's own layer table has three
+ * entries (layer 0 -> window 0, layer 1 -> window 2, layer 2 -> the video
+ * overlay), so three may turn out to be the real number; raising this is one
+ * constant, and the run header prints what it chose.
+ */
+#define N82_VRAM_SURFACES 2u
+#define N82_VRAM_BYTES    (N82_FB_BYTES * N82_VRAM_SURFACES)
+
 static uint16_t boot_args_get_le16(const uint8_t *bytes, size_t offset) {
     return (uint16_t)bytes[offset] |
            (uint16_t)((uint16_t)bytes[offset + 1u] << 8);
@@ -23450,7 +23488,11 @@ external_md_work_ready:
      */
     const uint32_t FB_W = N82_FB_WIDTH, FB_H = N82_FB_HEIGHT;
     const uint32_t FB_BPP = N82_FB_BPP;
-    const uint32_t fb_bytes = want_fb ? N82_FB_BYTES : 0u;
+    /* The RESERVE, which is the whole /vram pool -- not the scanout buffer.
+     * Boot_Video below still describes one 320x480 framebuffer at the base of
+     * this range, and the CLCD is seeded to scan out that one; the rest of the
+     * range exists so IOSurface has somewhere to put a second surface. */
+    const uint32_t fb_bytes = want_fb ? N82_VRAM_BYTES : 0u;
 
     uint64_t dt_pa64, ba_pa64;
     boot_range_t dt_range, ba_range;
@@ -23789,7 +23831,7 @@ external_md_work_ready:
          * guest may write to it is worse than no display at all.
          */
         if (want_fb && want_vram &&
-            !dt_set_reg(dt, dt_n, "vram", "reg", fb_pa, N82_FB_BYTES)) {
+            !dt_set_reg(dt, dt_n, "vram", "reg", fb_pa, N82_VRAM_BYTES)) {
             fprintf(stderr,
                     "framebuffer: cannot patch the /vram reg entry; "
                     "refusing a half-configured display\n");
@@ -24222,6 +24264,15 @@ external_md_work_ready:
         }
         printf("framebuffer: pa 0x%08x  %ux%u %u-bit; CLCD window 0 seeded\n",
                fb_pa, FB_W, FB_H, FB_BPP * 8u);
+        /* The pool, separately from the scanout buffer, because they are
+         * different sizes for the first time and a run that cannot tell them
+         * apart in its own log cannot be compared against one that had a
+         * different pool. */
+        printf("vram pool  : pa 0x%08x..0x%08x  %u surface(s) of 0x%x "
+               "(IOSurface allocates every layer from this; one surface is "
+               "why run76 composited nothing)\n",
+               fb_pa, (unsigned)(fb_pa + N82_VRAM_BYTES),
+               N82_VRAM_SURFACES, N82_FB_BYTES);
     } else {
         printf("framebuffer: disabled (-F enables Boot_Video + CLCD window 0)\n");
     }
