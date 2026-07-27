@@ -7,10 +7,16 @@
     <!-- What the home screen shows under the icon. Deliberately NOT the same
          as CFBundleName / PRODUCT_NAME, which stay iOS3VM: the product, the
          Xcode target, the repository and every path in the docs are iOS3VM,
-         and renaming those would invalidate build recipes and run manifests
-         for a label. This key is the only one the user reads. -->
+         and renaming those would invalidate build recipes and ~80 run
+         manifests for a label. This key is the only one the user reads.
+
+         S5LBox names the SILICON, which is what this project actually
+         emulates, and the *Box suffix reads as "emulator" the way DOSBox and
+         86Box do. It also survives the roadmap: M-P2 adds a second machine
+         profile on the S5L8950X, and a name tied to one OS version would go
+         stale the moment that lands. -->
     <key>CFBundleDisplayName</key>
-    <string>SlideToBoot</string>
+    <string>S5LBox</string>
     <key>CFBundleExecutable</key>
     <string>$(EXECUTABLE_NAME)</string>
     <key>CFBundleIdentifier</key>
