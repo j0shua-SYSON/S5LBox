@@ -41,10 +41,21 @@ ships no Apple firmware and never modifies the files you supply.
 
 **What it reaches:** as of run85 the guest draws its **lock screen** — status
 bar, clock, the Earth wallpaper and *slide to unlock* — composited by Apple's
-own software renderer onto the emulated panel. 273,206 of 460,800 framebuffer
-bytes non-zero, 92,145 non-black pixels in 44,087 colours.
+own software renderer onto the emulated panel.
 
-![the lock screen](docs/images/run85-lock-screen.png)
+Both frames on this page were drawn by the guest's own SpringBoard through
+Apple's CPU compositor and scanned out through the emulated display
+controller. Nothing in either is drawn by the host.
+
+<div align="center">
+
+<img src="docs/images/run85-lock-screen.png" width="240" alt="iPhone OS 3.1.3's lock screen: status bar, clock, Earth wallpaper and slide to unlock, composited by SpringBoard.">
+
+*run85, instruction 3.5e9 — the lock screen. 273,206 of 460,800 framebuffer
+bytes non-zero, 92,145 non-black pixels in 44,087 colours. Reached by giving
+`/vram` room for a second surface; with one, the same boot drew 1,659.*
+
+</div>
 
 **What is not real:** the single most visible property of an iPhone — that it
 displays a home screen **you can touch** — is still not demonstrated here. What
@@ -67,9 +78,10 @@ guest. There is also no audio and no graphics chip.
 
 <img src="docs/images/run59-first-frame.png" width="240" alt="The first frame this emulator ever drew: iPhone OS 3.1.3's activation screen, composited by SpringBoard.">
 
-*run59, instruction 4.97e9 — the first frame. Drawn by the guest's own
-SpringBoard through Apple's CPU compositor, scanned out through the emulated
-display controller. Nothing here is drawn by the host.*
+*run59, instruction 4.97e9 — the first frame. 14,264,987 changed scanout
+bytes, 97,510 of 460,800 framebuffer bytes non-zero, against 384 in every
+earlier run. Reached by giving `/vram` a real address; with `reg = {0,0}`
+userspace received the framebuffer read-only and faulted on its first store.*
 
 </div>
 
