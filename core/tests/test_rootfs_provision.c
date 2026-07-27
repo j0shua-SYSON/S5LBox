@@ -992,7 +992,11 @@ static scale_fixture_t *sx_create(void) {
         "/dev/disk0s1 / hfs ro 0 1\n"
         "/dev/disk0s2 /private/var hfs rw,nosuid,nodev 0 2\n";
     uint8_t *header;
-    uint32_t leaves[SX_MAX_BASE_RECORDS];
+    /* Zeroed because `sx->first_leaf = leaves[0]` below is only reachable with
+     * at least one leaf, and GCC cannot prove that: it warns
+     * -Wmaybe-uninitialized at -O2, which is -Werror in CI. The guard after the
+     * emit loop makes the invariant explicit; this makes it cheap. */
+    uint32_t leaves[SX_MAX_BASE_RECORDS] = { 0 };
     size_t leaf_first[SX_MAX_BASE_RECORDS];
     size_t leaf_count = 0;
     size_t cursor = 0;
@@ -1077,6 +1081,11 @@ static scale_fixture_t *sx_create(void) {
 
         put_be32(node, index + 1u < leaf_count ? leaves[index + 1u] : 0u);
         put_be32(node + 4, index != 0u ? leaves[index - 1u] : 0u);
+    }
+    if (leaf_count == 0u) {               /* the invariant leaves[0] needs */
+        free(sx->image);
+        free(sx);
+        return NULL;
     }
     sx->leaf_nodes = (uint32_t)leaf_count;
     sx->first_leaf = leaves[0];
@@ -4170,6 +4179,11 @@ static void test_scale_payload_forces_real_splits(void) {
     for (deep = 1; deep <= SC_DEEP_DIRS; deep++) {
         size_t at = strlen(deep_path);
 
+        /* Bound `at` so the compiler knows there is room for "/dNN". The chain
+         * is 30 components of four bytes, so this is never taken; without it
+         * GCC assumes at could reach SC_PATH-1 and reports a truncation, which
+         * -Wformat-truncation=2 turns into an error. */
+        if (at + 8u >= sizeof deep_path) break;
         snprintf(deep_path + at, sizeof(deep_path) - at, "/d%02u", deep);
         snprintf(paths[count], SC_PATH, "%s", deep_path);
         leaf[count] = paths[count] + at + 1u;
@@ -4180,7 +4194,18 @@ static void test_scale_payload_forces_real_splits(void) {
         count++;
         dirs++;
     }
-    snprintf(paths[count], SC_PATH, "%s/leaf.txt", deep_path);
+    /*
+     * The %s is bounded so the compiler can prove the result fits. deep_path is
+     * SC_PATH bytes and "/leaf.txt" is nine more, which GCC reports as a
+     * possible truncation at -O2 -- and -O2 is -Werror in CI, where this first
+     * broke the build. The chain is 30 components of "/dNN", 120 bytes, so the
+     * bound never binds in practice; the CHECK is what would catch it if the
+     * fixture ever grew deep enough for it to matter.
+     */
+    CHECK(snprintf(paths[count], SC_PATH, "%.*s/leaf.txt",
+                   (int)(SC_PATH - sizeof("/leaf.txt")), deep_path)
+              < (int)SC_PATH,
+          "the deepest path plus /leaf.txt fits SC_PATH");
     leaf[count] = paths[count] + strlen(deep_path) + 1u;
     parent_of[count] = deep_index;
     snprintf(bodies[count], SC_BODY, "deepest\n");
