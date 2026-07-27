@@ -69,34 +69,52 @@ static bool decode(uint32_t off, uint32_t base, unsigned *group) {
 }
 
 /*
- * Refresh a group's pending latch from what the board is driving.
+ * THE PENDING LATCH IS EDGE-TRIGGERED, AND THAT WAS MEASURED, NOT CHOSEN.
  *
- * The latch is LEVEL-sensitive: a bit that a device is still holding is
- * re-asserted after the guest's write-one-to-clear. Three reasons, and the
- * first is the one that decides it.
+ * An earlier revision of this file made it LEVEL-sensitive: the write-one-to-
+ * clear cleared the bit and then re-asserted it from whatever the board was
+ * still driving. The reasoning was that a level latch cannot lose the second
+ * report of a device that raises one mid-acknowledge, and that a device which
+ * does deassert cannot tell the difference. The first half is true. The second
+ * half is false, and run71 measured exactly how false:
  *
- *  1. It cannot lose an interrupt. This machine's whole wake-source contract
- *     (soc.h) is built on "waking too early costs host time, waking too late
- *     is a lost interrupt", and an edge-only latch loses the second report of
- *     any device that raises one while the first is being acknowledged.
- *  2. It is what the Z2 protocol wants. The controller holds its attention
- *     line down until the host has drained the report; dropping it is the
- *     device's statement that there is nothing left, and that is exactly the
- *     condition that should stop the interrupt.
- *  3. For a device that does deassert, it is indistinguishable from an edge
- *     latch, so nothing that behaves correctly can tell the difference.
+ *   HOT PAGE 0x39a00000, offset 0x0b0 (INTSTAT group 4):
+ *       reads 1,193,122   writes 1,193,123   lastval 0x08000000
+ *   @1799986776 R 0x39a000b0 val 0x08000000  pc 0xc05a44dc
+ *   @1799986797 W 0x39a000b0 val 0x08000000  pc 0xc05a44e8
+ *   @1799987195 R 0x39a000b0 val 0x08000000  pc 0xc05a44dc   <- 419 later
+ *   @1799987216 W 0x39a000b0 val 0x08000000  pc 0xc05a44e8
  *
- * INTLEVEL and INTTYPE are deliberately NOT consulted. They are stored and
- * read-modify-written exactly as the driver expects (0xc05a5530-0xc05a5600),
- * but nothing in the shipped device tree asks for a non-default configuration:
- * every `interrupts` property's second cell — /arm-io/spi1/multi-touch's
- * included — is zero, so both registers stay zero for every line this machine
- * can drive, and interpreting them would be inventing a polarity nobody
- * selected. Callers of s5l_gpioic_set_line() state assertion as `true`.
+ * One touch report was queued at instruction 1,300,000,000 and the attention
+ * line came up. The GPIO interrupt controller's filter read the pending word,
+ * wrote it back to acknowledge, and our re-latch undid the acknowledge inside
+ * the same store — so it re-entered every ~419 instructions and did so
+ * 1,193,122 times, for the whole remaining half-billion instructions of the
+ * run. `IOWorkLoop::signalWorkAvailable` was reached every time and the work
+ * loop's thread was never scheduled, so AppleMultitouchZ2SPI's handler never
+ * ran, never issued the SPI frame read, and the report was still pending at
+ * the cap. A livelock, not a lost interrupt.
+ *
+ * The driver settles it a second way: it writes INTEN for this group exactly
+ * TWICE in the whole boot (offset 0x0d0, writes 2), so it does not mask the
+ * line while servicing it. A controller whose pending bit survived its own
+ * acknowledge would be unusable by this driver, which means the real part's
+ * does not.
+ *
+ * So: the write-one-to-clear CLEARS, and only a RISING edge on the incoming
+ * line sets a pending bit again. A device that holds its line up until it is
+ * serviced -- which is exactly what the Z2's attention line does -- gets one
+ * interrupt per report, which is what it wants.
+ *
+ * INTLEVEL and INTTYPE are still deliberately NOT consulted. They are stored
+ * and read-modify-written exactly as the driver expects (0xc05a5530-
+ * 0xc05a5600), but nothing in the shipped device tree asks for a non-default
+ * configuration: every `interrupts` property's second cell —
+ * /arm-io/spi1/multi-touch's included — is zero, so both registers stay zero
+ * for every line this machine can drive, and interpreting them would be
+ * inventing a polarity nobody selected. Callers of s5l_gpioic_set_line() state
+ * assertion as `true`.
  */
-static void latch(s5l_gpioic_t *g, unsigned group) {
-    g->stat[group] |= g->raw[group];
-}
 
 uint32_t s5l_gpioic_read(s5l_gpioic_t *g, uint32_t off) {
     unsigned group;
@@ -129,9 +147,9 @@ void s5l_gpioic_write(s5l_gpioic_t *g, uint32_t off, uint32_t val) {
          * SET pending bits instead would have the driver raising an interrupt
          * every time it enabled a line.
          */
+        /* And it CLEARS. It does not re-latch from what is still driven —
+         * see the note above, and run71's 1,193,122 acknowledges. */
         g->stat[group] &= ~val;
-        /* A source that is still asserted is still asserted. See latch(). */
-        latch(g, group);
         return;
     }
     if (decode(off, GPIOIC_INTEN, &group)) {
@@ -158,12 +176,19 @@ void s5l_gpioic_set_line(s5l_gpioic_t *g, unsigned line, bool level) {
     if (!g || line >= S5L_GPIOIC_LINES) return;
     unsigned group = line >> 5;
     uint32_t bit   = 1u << (line & 31u);
+    bool was = (g->raw[group] & bit) != 0u;
     if (level) g->raw[group] |= bit;
     else       g->raw[group] &= ~bit;
-    /* Asserting latches immediately. Deasserting does NOT clear the latch:
-     * only the guest's write-one-to-clear does, which is what stops a short
-     * pulse from being missed between two instructions. */
-    latch(g, group);
+    /*
+     * A RISING EDGE latches. Two consequences worth stating, because callers
+     * refresh this every tick with the current level:
+     *   - a line that is merely STILL high sets nothing, which is what stops
+     *     the acknowledge/re-assert livelock run71 measured;
+     *   - deasserting does NOT clear the latch, so a pulse shorter than the
+     *     guest's polling interval is still delivered. Only the guest's
+     *     write-one-to-clear clears it.
+     */
+    if (level && !was) g->stat[group] |= bit;
 }
 
 bool s5l_gpioic_line(const s5l_gpioic_t *g, unsigned line) {

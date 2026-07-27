@@ -208,13 +208,35 @@ static void test_intstat_is_write_one_to_clear_not_write_one_to_set(void) {
     CHECK(s5l_gpioic_read(&g, GPIOIC_INTSTAT + 4u * 4u) == 0u,
           "write-one-to-clear did not clear the latch");
 
-    /* And a source that is STILL asserted survives its own acknowledge, which
-     * is the difference between an edge latch and this one. */
-    s5l_gpioic_set_line(&g, 155u, true);
-    s5l_gpioic_write(&g, GPIOIC_INTSTAT + 4u * 4u, 0xffffffffu);
+    /*
+     * AND AN ACKNOWLEDGE STICKS, even while the source is still driving.
+     *
+     * This is the one that run71 measured. A latch that re-asserted from the
+     * still-high line undid its own acknowledge inside the same store: the
+     * GPIO interrupt controller's filter re-entered every ~419 instructions
+     * and did so 1,193,122 times over half a billion instructions, the touch
+     * driver's work loop never ran, and the queued report was never read.
+     * The driver writes this group's INTEN exactly twice in a whole boot, so
+     * it does not mask the line while servicing it -- a controller that
+     * behaved the other way would be unusable by it.
+     */
+    s5l_gpioic_set_line(&g, 155u, true);         /* raw was low: an edge */
     CHECK(s5l_gpioic_read(&g, GPIOIC_INTSTAT + 4u * 4u) == 0x08000000u,
-          "acknowledging a still-asserted source dropped it — the second "
-          "report of any device that raises one mid-acknowledge is lost");
+          "a rising edge did not latch");
+    s5l_gpioic_set_line(&g, 155u, true);         /* already high: no edge */
+    s5l_gpioic_write(&g, GPIOIC_INTSTAT + 4u * 4u, 0xffffffffu);
+    CHECK(s5l_gpioic_read(&g, GPIOIC_INTSTAT + 4u * 4u) == 0u,
+          "acknowledging a still-asserted source did not stick — that is the "
+          "1,193,122-iteration livelock run71 spent half a billion "
+          "instructions in");
+
+    /* A device that drops its line and raises it again is a NEW interrupt. */
+    s5l_gpioic_set_line(&g, 155u, false);
+    CHECK(s5l_gpioic_read(&g, GPIOIC_INTSTAT + 4u * 4u) == 0u,
+          "deasserting set a pending bit");
+    s5l_gpioic_set_line(&g, 155u, true);
+    CHECK(s5l_gpioic_read(&g, GPIOIC_INTSTAT + 4u * 4u) == 0x08000000u,
+          "a second report after the first was serviced did not latch");
     s5l_gpioic_set_line(&g, 155u, false);
     s5l_gpioic_write(&g, GPIOIC_INTSTAT + 4u * 4u, 0xffffffffu);
     CHECK(s5l_gpioic_read(&g, GPIOIC_INTSTAT + 4u * 4u) == 0u,
@@ -407,13 +429,23 @@ static void test_machine_routes_the_cascade_to_both_vics(void) {
           "VICADDRESS reported 0x%08x for the touch cascade",
           m.bus.read32(c, S5L8900_VIC0_BASE + VIC_VECTADDR));
 
-    /* Acknowledge at the source while it is still driving: the interrupt must
-     * come straight back, because the device has not said it is finished. */
+    /*
+     * Acknowledge at the source while it is still driving: the interrupt must
+     * STAY DOWN. This is the assertion that changed, and run71 is why. With
+     * the old level-re-latch the line came straight back and the guest's
+     * filter re-entered every ~419 instructions for 1,193,122 iterations,
+     * so AppleMultitouchZ2SPI's work loop never ran and the report it was
+     * being told about was never read. The device still has the report; the
+     * driver has been told once, which is all it needs.
+     */
     m.bus.write32(c, S5L8900_GPIOIC_PAGE + GPIOIC_INTSTAT + 4u * 4u,
                   0x08000000u);
     s5l8900_tick(&m, 0u);
-    CHECK(m.cpu.irq_line,
-          "the still-asserted source stopped interrupting on acknowledge");
+    CHECK(!m.cpu.irq_line,
+          "acknowledging a still-asserted source left the line up — that is "
+          "the livelock, not a delivered interrupt");
+    CHECK(s5l_gpioic_line(&m.gpioic, S5L_GPIOIC_LINE_MULTITOUCH),
+          "the source stopped driving just because it was acknowledged");
     /* Withdraw, let the machine propagate it, and only then acknowledge —
      * which is the order a handler that drains the device produces. */
     m.mtz2.atn = false;

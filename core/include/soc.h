@@ -575,8 +575,13 @@ typedef struct {
     /*
      * What the board is driving into each group right now, which is NOT a
      * register: no guest access can reach it and it is not part of the page.
-     * It exists because the pending latch is level-sensitive (see gpioic.c),
-     * so a write-one-to-clear has to know whether the source is still there.
+     * It exists because the pending latch is EDGE-triggered (see gpioic.c),
+     * so setting a line has to know whether it was already high — a device
+     * that holds its line up until it is serviced must produce one interrupt
+     * and not one per refresh. Getting that backwards cost run71 a
+     * 1,193,122-iteration livelock in which the guest acknowledged the touch
+     * line half a billion instructions' worth of times and never read the
+     * report it was being told about.
      */
     uint32_t raw  [S5L_GPIOIC_GROUPS];
 
