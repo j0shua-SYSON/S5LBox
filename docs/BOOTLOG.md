@@ -2315,6 +2315,76 @@ at 0x3cc10000(0xea9d6000)` — and uart4 still carried **zero bytes**. The
 milestone is unchanged.
 
 
+### 2026-07-27: run85 — the lock screen
+
+![the lock screen](images/run85-lock-screen.png)
+
+Status bar with "Searching…", the lock glyph and the battery. 4:00, Wednesday
+31 December. The Earth wallpaper. **slide to unlock.** iPhone OS 3.1.3,
+composited by Apple's own software renderer, on an emulator written from
+scratch.
+
+```text
+framebuffer: CLCD window 0, 320x480, 273206 of 460800 RGB bytes non-zero
+```
+
+against run76's 1,659 on the same activated configuration. 92,145 non-black
+pixels — **60% of the screen** — spanning x 0..319, y 3..457, in **44,087
+distinct colours**, of which **53,620 pixels are not grey**. run76's frame was
+553 grey pixels in a 175x255 corner. This is not a brighter spinner; it is a
+different kind of thing.
+
+#### What changed: one constant
+
+`/vram` went from one framebuffer to two. Nothing else.
+
+The display pipeline was never broken, and §23.11 is the measurement that
+settled it: 289 VBLANK interrupts, 150 swaps committed, every submitter woken
+by `commandWakeup`, hardware-interrupt-driven on a work loop. It was
+compositing correctly the entire time. It had ONE surface to composite,
+because `IOSurfaceDeviceMemoryRegion::init` hands the region's whole length to
+`IORangeAllocator::withRange` (0xc0527c04) and `AppleH1CLCD` asks for
+`round_up(1280*480, 0x1000)` = 0x96000, which is exactly what `/vram` held.
+The first surface consumed the pool; every later one returned
+`kIOReturnNoResources`.
+
+A compositor with one surface can draw a spinner. A wallpaper *and* the chrome
+over it needs two.
+
+This is the same bug as `reg = {0,0}` (691b727), one layer further in. That
+fix made a first frame possible. This one is why nothing followed it.
+
+#### Still not the home screen, and three other things this does not show
+
+**It is the LOCK screen.** The next step is a swipe, and no tap has yet reached
+SpringBoard — run77 proved the driver reads our frames, not that anything
+above it does.
+
+**Two surfaces is still not enough.** run85's console carries one remaining
+`IOSurface warning: buffer allocation failed. 320 x 480 fmt: 42475241 size:
+614400 bytes` — `0x42475241` is `'BGRA'`. `AppleH1CLCD`'s layer table has
+three entries (layer 0 -> window 0, layer 1 -> window 2, layer 2 -> the video
+overlay), so three is the likely real number.
+
+**The clock is wrong on purpose-ish.** 4:00 on 31 December 1969 is the RTC
+answering with a placeholder. Cosmetic, but it is a modelled device returning
+a value nobody has connected to anything.
+
+**"Searching…"** is the status bar correctly reporting no baseband. The
+baseband is deliberately hidden from the guest.
+
+#### The capture was nearly lost, and the reason is a live hazard
+
+`firmware/screen.ppm` is a single shared path, and a concurrent short boot
+overwrote run85's frame **45 seconds after run85 exited** — run85's log is
+stamped 16:35:38, the PPM 16:36:23. The recovered image above came from
+run85's own 3.5e9 checkpoint, and it is trustworthy for one specific reason:
+its non-zero byte count is **273,206**, matching what run85 reported to the
+byte. Without that check the analysis would have been of another run's console
+glyph. Any run that writes a PPM while another is running is producing
+evidence it does not own.
+
+
 ### 2026-07-27: run80 — the guest transmits PPP. **S0 is met.**
 
 ```text

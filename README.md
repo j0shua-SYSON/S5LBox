@@ -39,23 +39,29 @@ crashed, the guest's **own** crash reporter wrote real crash reports into its
 own filesystem, and that is how the current blocker was diagnosed. The project
 ships no Apple firmware and never modifies the files you supply.
 
-**What is not real:** the single most visible property of an iPhone — that it
-displays a home screen **you can touch** — is still not demonstrated here. As of
-run59 the guest does draw real frames: SpringBoard composites through Apple's own
-software renderer and the pixels reach the emulated panel. But what it draws is
-the activation screen or the boot spinner, never a home screen. Activation is
-now provisioned and it did not produce one: SpringBoard launches, opens the
-touchscreen's IOKit user client, and blocks in the fourth method it calls
-(run66, 12 billion instructions, zero CoreAnimation transaction flushes, the
-framebuffer unchanged for the final 10.1 billion).
+**What it reaches:** as of run85 the guest draws its **lock screen** — status
+bar, clock, the Earth wallpaper and *slide to unlock* — composited by Apple's
+own software renderer onto the emulated panel. 273,206 of 460,800 framebuffer
+bytes non-zero, 92,145 non-black pixels in 44,087 colours.
 
-Touch reaches the driver but nothing above it. run77 shows the emulated
+![the lock screen](docs/images/run85-lock-screen.png)
+
+**What is not real:** the single most visible property of an iPhone — that it
+displays a home screen **you can touch** — is still not demonstrated here. What
+is on screen is the lock screen, and the next step past it is a swipe.
+
+Touch reaches the driver and nothing above it. run77 shows the emulated
 controller delivering four reports that Apple's own `AppleMultitouchZ2SPI`
-reads and whose checksums it accepts — but no userspace client had subscribed,
-so nothing was delivered to an application, and **no tap has ever reached
-SpringBoard**. There is no audio and no graphics chip. Five pieces of hardware
-a real iPhone has are deliberately hidden from the guest, so it is told it is
-running on a machine with less hardware than a real iPhone.
+reads and whose payload checksums it accepts — but no userspace client had
+subscribed, so nothing was delivered to an application, and **no tap has ever
+reached SpringBoard**. Until one does, the lock screen cannot be unlocked from
+inside the emulator.
+
+Two smaller things the picture shows honestly. The clock reads 4:00 on
+31 December because the real-time clock answers with a placeholder nobody has
+connected to anything. "Searching…" is the status bar correctly reporting no
+baseband, which is one of five pieces of hardware deliberately hidden from the
+guest. There is also no audio and no graphics chip.
 
 <div align="center">
 
