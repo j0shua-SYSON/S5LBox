@@ -42,12 +42,20 @@ ships no Apple firmware and never modifies the files you supply.
 **What is not real:** the single most visible property of an iPhone — that it
 displays a home screen **you can touch** — is still not demonstrated here. As of
 run59 the guest does draw real frames: SpringBoard composites through Apple's own
-software renderer and the pixels reach the emulated panel. But the device is
-unactivated, so what it draws is the activation screen, not the home screen —
-and there is still **no touch**, so nothing on it can be used. There is also no
-audio, no networking, and no graphics chip. Five pieces of hardware a real iPhone
-has are deliberately hidden from the guest, so it is told it is running on a
-machine with less hardware than a real iPhone.
+software renderer and the pixels reach the emulated panel. But what it draws is
+the activation screen or the boot spinner, never a home screen. Activation is
+now provisioned and it did not produce one: SpringBoard launches, opens the
+touchscreen's IOKit user client, and blocks in the fourth method it calls
+(run66, 12 billion instructions, zero CoreAnimation transaction flushes, the
+framebuffer unchanged for the final 10.1 billion).
+
+Touch reaches the driver but nothing above it. run77 shows the emulated
+controller delivering four reports that Apple's own `AppleMultitouchZ2SPI`
+reads and whose checksums it accepts — but no userspace client had subscribed,
+so nothing was delivered to an application, and **no tap has ever reached
+SpringBoard**. There is no audio and no graphics chip. Five pieces of hardware
+a real iPhone has are deliberately hidden from the guest, so it is told it is
+running on a machine with less hardware than a real iPhone.
 
 <div align="center">
 
@@ -63,9 +71,10 @@ display controller. Nothing here is drawn by the host.*
 |---|---|
 | **Real Apple software** | Your own unmodified 3.1.3 (7E18) firmware: the XNU 1357.5.30 kernel, Apple's own drivers, the real root filesystem, and the real background programs listed above. No Apple firmware is shipped, and the files you supply are never modified on disk. |
 | **CPU** | ARM, Thumb and VFPv2 floating point — over the code the boot has actually reached, not the whole architecture. The ARMv6 rules for unaligned memory access are honoured, memory translation enforces no-execute pages, and the system-control coprocessor is modelled. Runs are bit-exact reproducible. |
-| **Hardware modelled** | Serial port, timers, interrupt controller, display controller, the power-management chip and its I2C bus, and the USB controller's configuration registers. |
-| **Not modelled at all** | No touch input. No audio. No cellular. No Wi-Fi. No Bluetooth. No camera. No accelerometer. No GPU. |
-| **Networking: a temporary substitution** | Networking is being built as PPP over a second emulated serial port, driven by the guest's own stock `pppd`. That is honest emulation — real modelled silicon, Apple's own binary, and a protocol fully specified in public RFCs — but **a real iPhone 3G never connected this way**; it used Wi-Fi over SDIO or the cellular baseband. The guest gets a `ppp0` interface rather than real wireless. This is a deliberate workaround chosen because the Wi-Fi part runs undocumented firmware that would have to be *invented* to emulate, and inventing behaviour is not something this project does. Modelling the real radio and controllers remains the goal. |
+| **Hardware modelled** | Serial ports, timers, both interrupt controllers, the GPIO controller, display controller, SPI, the multitouch controller, the power-management chip and its I2C bus, and the USB controller's configuration registers. |
+| **Touch: the device works, the path does not** | The Z2 touchscreen is modelled on SPI, and Apple's own `AppleMultitouchZ2SPI` drives it: run77 delivered four reports that the driver read and whose payload checksums it accepted (probe `0xc04413e8`, reachable only through the branch taken after `cmp r5,r0`). That proves the wire format and one direction of one bus. It does **not** mean touch works — no userspace client had subscribed, so no frame was handed to an application, and no tap has ever reached SpringBoard. |
+| **Not modelled at all** | No audio. No cellular. No Wi-Fi. No Bluetooth. No camera. No accelerometer. No GPU. |
+| **Networking: a temporary substitution** | The guest's own stock `pppd` runs on an emulated second serial port and, as of run80, transmits a complete LCP Configure-Request — `7E FF 7D 23 C0 21 …`, 47 bytes, RFC 1662 framing, RFC 1661 options. **Nothing answers it.** There is no host-side PPP endpoint, no address is negotiated, and no packet has been carried; what is proven is one direction of one link layer. It is honest emulation — real modelled silicon, Apple's own binary, and a protocol fully specified in public RFCs — but **a real iPhone 3G never connected this way**; it used Wi-Fi over SDIO or the cellular baseband. The guest gets a `ppp0` interface rather than real wireless. This is a deliberate workaround chosen because the Wi-Fi part runs undocumented firmware that would have to be *invented* to emulate, and inventing behaviour is not something this project does. Modelling the real radio and controllers remains the goal. |
 | **Hidden from the guest** | Five pieces of hardware a real iPhone has are deliberately declared absent, by editing the in-memory copy of the device tree — the hardware inventory the emulator hands the kernel at boot — so Apple's drivers for them never start: the PowerVR MBX graphics chip, the SHA-1 hashing accelerator, the cellular baseband, the serial link to that baseband, and the USB controller. The firmware on disk is never modified; only the loaded copy is edited. Each omission has a documented reason, but the net effect is that the guest is told it is running on a machine with less hardware than a real iPhone. |
 | **Invented register values** | The USB controller's three configuration registers (`GHWCFG1`/`GHWCFG2`/`GHWCFG4`) hold a legal and sufficient configuration. They are **not** measured from real S5L8900 silicon. |
 | **Rendering** | QuartzCore, Apple's own graphics layer, is set to `CA_ENABLE_MBX2D=0` so it uses the CPU software renderer Apple built into it. The real device draws on the MBX graphics chip. This is a switch Apple's code reads and a renderer Apple shipped, but it is not the path real hardware takes. |
@@ -74,7 +83,8 @@ display controller. Nothing here is drawn by the host.*
 | **Storage** | Not flash memory. The root filesystem is served from a file on the host into a fresh writable copy made for each run, and the guest's `/etc/fstab` is rewritten inside that copy to match. |
 | **Boot chain** | No secure boot chain is executed. The kernel is loaded directly; the boot ROM, the low-level bootloader and iBoot are not run. Apple's firmware container format has been parsed and an extracted bootloader payload executed, but separately, never as a chain. |
 | **Optional substitution** | Off by default: one of the guest's service-configuration files is rewritten in the work copy, without changing its size, to add `CA_ENABLE_MBX2D=0`. |
-| **Rendering reached, use not** | run59 draws real frames — 14,264,987 changed scanout bytes, 97,510 of 460,800 framebuffer bytes non-zero, against 384 (the pre-guest seed) in every earlier run. What is on screen is the **activation** UI, because the guest is unactivated; the home screen is not reached. With no touch input modelled, nothing displayed can be interacted with. |
+| **Rendering reached, use not** | run59 draws real frames — 14,264,987 changed scanout bytes, 97,510 of 460,800 framebuffer bytes non-zero, against 384 (the pre-guest seed) in every earlier run. What is on screen is the **activation** UI, because that run's guest is unactivated. |
+| **Activation does not produce a home screen** | Provisioning `ActivationState = FactoryActivated` clears the lockout — the iTunes-connect artwork is gone — and what replaces it is the boot spinner, not a home screen. run66 ran 12 billion instructions with it: `CATransaction-flush` was called **0** times, the last scanout write was at instruction 1,887,035,649, and the final frame held 1,833 of 460,800 non-zero bytes. SpringBoard opens the touchscreen's IOKit user client and blocks in the fourth method it calls. Why is under measurement; it is not yet known. |
 
 > The evidence behind every claim above — what was measured, in which run, and
 > what each result does *not* prove — is in
@@ -131,9 +141,13 @@ emulator already applies for the DRAM bank and the panel ID — produced the fra
 above: **14,264,987 changed scanout bytes**, where every previous run changed
 zero. SpringBoard was still compositing when the run hit its cap.
 
-What remains is that the device is **unactivated**, so SpringBoard draws the
-activation screen rather than the home screen, and there is no touch input, so
-nothing on screen can be used.
+That run's device is **unactivated**, so what SpringBoard draws is the
+activation screen. Activating it does not produce a home screen either:
+`ActivationState = FactoryActivated` is provisioned into the work image and
+clears the lockout, and what appears instead is the boot spinner. SpringBoard
+opens the touchscreen's IOKit user client and blocks in the fourth method it
+calls, having flushed no CoreAnimation transaction at all. That block is
+located but not yet explained.
 
 Milestones are tracked in [`docs/ROADMAP.md`](docs/ROADMAP.md), the run-by-run
 history including every dead end in [`docs/BOOTLOG.md`](docs/BOOTLOG.md), and
@@ -142,8 +156,12 @@ the diagnosis procedure in [`docs/debugging.md`](docs/debugging.md).
 **Two separate things exist.** The command-line harness (`bootkernel`) runs
 Apple's real software, on a desktop. The installable iPhone app runs only a
 small synthetic test program exercising the CPU, serial port and screen bridge —
-it cannot boot the OS yet, and has no touch, audio or networking. Merging the
-two into a shared guest session is the next app-side prerequisite.
+it cannot boot the OS yet, and has no audio or networking. A finger on its
+screen is now mapped to panel pixels and handed to the emulated touch
+controller, but that controller refuses reports while no driver has announced
+itself, and the app's synthetic guest has none; the app says so on screen
+rather than reporting a delivery that did not happen. Merging the two into a
+shared guest session is the next app-side prerequisite.
 
 ## How it works
 
