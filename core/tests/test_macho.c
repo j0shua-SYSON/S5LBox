@@ -1,5 +1,5 @@
 /*
- * iOS3-VM -- focused 32-bit Mach-O identity/parser tests.
+ * S5LBox -- focused 32-bit Mach-O identity/parser tests.
  *
  * Version-specific guest patches must never run against a merely similar
  * kernel. These fixtures exercise LC_UUID as untrusted input: exact parsing,

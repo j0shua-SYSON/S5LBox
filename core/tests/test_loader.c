@@ -1,5 +1,5 @@
 /*
- * iOS3-VM — firmware loader tests.
+ * S5LBox — firmware loader tests.
  *
  * The headline test is the whole M3 pipeline in miniature: build an
  * AES-encrypted IMG3 whose payload is real ARM code, then decrypt it, load it
@@ -458,7 +458,7 @@ static void test_nor_image_rebuilds_directory_on_load(void) {
 }
 
 int main(void) {
-    printf("iOS3-VM firmware loader tests\n");
+    printf("S5LBox firmware loader tests\n");
     test_plain_image_boots();
     test_encrypted_image_boots();
     test_encrypted_without_key_is_refused();

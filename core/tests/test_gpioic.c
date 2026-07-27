@@ -1,5 +1,5 @@
 /*
- * iOS3-VM — S5L8900 GPIO interrupt controller and GPIO pin block tests.
+ * S5LBox — S5L8900 GPIO interrupt controller and GPIO pin block tests.
  *
  * The property that matters most here is not that a register stores a word. It
  * is that the ONE line the guest has already armed reaches the CPU: run59
@@ -784,7 +784,7 @@ static void test_wake_sources_declare_the_cascade_not_line_155(void) {
 }
 
 int main(void) {
-    printf("iOS3-VM S5L8900 GPIO interrupt controller tests\n");
+    printf("S5LBox S5L8900 GPIO interrupt controller tests\n");
     test_reset_is_total_and_null_safe();
     test_cascade_is_the_device_trees_own_array();
     test_register_file_decodes_four_banks_of_seven();

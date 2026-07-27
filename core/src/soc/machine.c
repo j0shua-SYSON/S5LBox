@@ -1,5 +1,5 @@
 /*
- * iOS3-VM — S5L8900 machine: the system bus tying the CPU to RAM and devices.
+ * S5LBox — S5L8900 machine: the system bus tying the CPU to RAM and devices.
  *
  * Every guest access lands here after MMU translation, and is routed by
  * physical address to either RAM or a peripheral window. Accesses outside the

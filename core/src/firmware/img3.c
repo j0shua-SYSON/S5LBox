@@ -1,5 +1,5 @@
 /*
- * iOS3-VM — IMG3 firmware container parser.
+ * S5LBox — IMG3 firmware container parser.
  *
  * This is the first code to touch untrusted, user-supplied files, so it is
  * written defensively: every declared size is validated against the real buffer

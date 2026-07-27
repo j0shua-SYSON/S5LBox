@@ -1,5 +1,5 @@
 /*
- * iOS3-VM — AArch64 instruction emitter.
+ * S5LBox — AArch64 instruction emitter.
  *
  * The code-generation half of the ARMv6 -> arm64 dynamic recompiler described
  * in docs/dynarec.md. This file knows nothing about ARMv6, about the guest, or
@@ -28,8 +28,8 @@
  *
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed.
  */
-#ifndef IOS3VM_A64_EMIT_H
-#define IOS3VM_A64_EMIT_H
+#ifndef S5LBOX_A64_EMIT_H
+#define S5LBOX_A64_EMIT_H
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -265,4 +265,4 @@ void a64_msr_nzcv(a64_emit_t *e, unsigned rt);
 void a64_nop(a64_emit_t *e);
 void a64_brk(a64_emit_t *e, uint32_t imm16);
 
-#endif /* IOS3VM_A64_EMIT_H */
+#endif /* S5LBOX_A64_EMIT_H */

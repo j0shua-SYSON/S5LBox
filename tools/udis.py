@@ -3,7 +3,7 @@ import os
 import struct
 import sys
 
-REPO = r"F:\JOSHUA_1st_2021\projects\iOS3-VM"
+REPO = r"F:\JOSHUA_1st_2021\projects\S5LBox"
 sys.path.insert(0, os.path.join(REPO, "work", "tools", "capstone-python"))
 from capstone import Cs, CS_ARCH_ARM, CS_MODE_THUMB, CS_MODE_ARM, \
     CS_MODE_LITTLE_ENDIAN

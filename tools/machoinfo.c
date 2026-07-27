@@ -1,5 +1,5 @@
 /*
- * iOS3-VM — machoinfo: describe the decompressed XNU kernel.
+ * S5LBox — machoinfo: describe the decompressed XNU kernel.
  *
  * With -k it also prints the prelinked kext load map, which is the table you
  * want in front of you when a profile says "66.9% of samples in one kext":

@@ -1,5 +1,5 @@
 /*
- * iOS3-VM — VFPv2 (the ARM1176JZF-S's VFP11 unit).
+ * S5LBox — VFPv2 (the ARM1176JZF-S's VFP11 unit).
  *
  * WHY THIS EXISTS, AND WHY NOW
  * ----------------------------

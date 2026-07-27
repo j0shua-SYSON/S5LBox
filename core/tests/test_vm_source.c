@@ -1,5 +1,5 @@
 /*
- * iOS3-VM -- random-access byte source boundary tests.
+ * S5LBox -- random-access byte source boundary tests.
  *
  * These deliberately force every awkward callback outcome.  Real host I/O is
  * not involved, so the test stays tiny and deterministic on every platform.

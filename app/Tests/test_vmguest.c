@@ -96,9 +96,9 @@ static void test_install_scanout_and_execution(void) {
     unsigned retired = s5l8900_run(&m, 2000, &status);
     CHECK(retired == 2000 && status == ARM_OK,
           "demo stopped early: retired=%u status=%d", retired, (int)status);
-    CHECK(m.uart0.tx_len >= strlen("iOS3-VM:"),
+    CHECK(m.uart0.tx_len >= strlen("S5LBox:"),
           "demo did not publish its UART banner");
-    CHECK(memcmp(m.uart0.tx, "iOS3-VM:", strlen("iOS3-VM:")) == 0,
+    CHECK(memcmp(m.uart0.tx, "S5LBox:", strlen("S5LBox:")) == 0,
           "unexpected UART prefix");
     CHECK(expected[0] == 0 && expected[1] == 0 &&
           expected[2] == 0 && expected[3] == 0xff,

@@ -1,4 +1,4 @@
-# XcodeGen spec for the iOS3-VM app.
+# XcodeGen spec for the S5LBox app.
 #
 # We do NOT commit an .xcodeproj (it is a churny binary blob). CI runs
 # `xcodegen generate` on the macOS runner to produce iOS3VM.xcodeproj from

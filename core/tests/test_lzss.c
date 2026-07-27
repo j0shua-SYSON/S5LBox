@@ -1,5 +1,5 @@
 /*
- * iOS3-VM — LZSS tests.
+ * S5LBox — LZSS tests.
  *
  * The decompressor eats a user-supplied firmware payload, so the important
  * properties are that it round-trips real data and that malformed or truncated
@@ -102,7 +102,7 @@ static void test_adler32(void) {
 }
 
 int main(void) {
-    printf("iOS3-VM LZSS tests\n");
+    printf("S5LBox LZSS tests\n");
     test_literal_roundtrip();
     test_back_reference();
     test_never_overruns_destination();

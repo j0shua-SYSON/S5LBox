@@ -1,5 +1,5 @@
 //
-//  iOS3-VM — the machine list, on disk.
+//  S5LBox — the machine list, on disk.
 //
 //  VMInstances.c owns the list and everything that can be wrong about it; this
 //  is the thin Objective-C layer that gives it a file and a place to live. It

@@ -1,5 +1,5 @@
 /*
- * iOS3-VM — NAND device tests.
+ * S5LBox — NAND device tests.
  *
  * The important property here is that the model behaves like real NAND rather
  * than like RAM: erased pages read as all ones, programming can only clear
@@ -345,7 +345,7 @@ static void test_nor_integrity_and_exact_length(void) {
 }
 
 int main(void) {
-    printf("iOS3-VM NAND device tests\n");
+    printf("S5LBox NAND device tests\n");
     test_erased_reads_all_ones();
     test_program_and_read_back();
     test_program_can_only_clear_bits();

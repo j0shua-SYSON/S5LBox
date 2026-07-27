@@ -1,5 +1,5 @@
 /*
- * iOS3-VM -- fail-closed iPhone OS 3.1.3 (7E18) kernel compatibility gate.
+ * S5LBox -- fail-closed iPhone OS 3.1.3 (7E18) kernel compatibility gate.
  *
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed.
  */

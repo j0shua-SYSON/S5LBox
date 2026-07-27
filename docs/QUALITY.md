@@ -24,15 +24,15 @@ run21's firmware evidence.
 - `external_md_cli_preflight`, strict compiler checks, diagnostic analyzer
   checks, and zero-step tool smokes passed as recorded below.
 - Hosted GitHub Actions passed for the pre-run19 exact commit: the
-  [core run](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30088519878)
+  [core run](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30088519878)
   was green across Linux, macOS, Windows, warnings-as-errors, ASan+UBSan, and
   JIT jobs; the
-  [unsigned iOS run](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30088519892)
+  [unsigned iOS run](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30088519892)
   was also green.
 - Hosted GitHub Actions also passed for exact correction commit `590d224`: the
-  [core run](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30091220128)
+  [core run](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30091220128)
   and
-  [unsigned iOS run](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30091220122)
+  [unsigned iOS run](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30091220122)
   were both green.
 - Run19 exposed the over-strict all-three-bank timing predicate. Run20 then
   validated the `590d224` mixer+SDO correction in real firmware: 4 TV-out
@@ -48,9 +48,9 @@ run21's firmware evidence.
   Release suite **23/23** and focused strict builds. Targeted `test_vfp`,
   `test_arm`, and `test_jit` binaries pass **452/0**, **810/0**, and **347/0**
   respectively. Exact-commit hosted
-  [core run 30095081111](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30095081111)
+  [core run 30095081111](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30095081111)
   and
-  [unsigned iOS run 30095081184](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30095081184)
+  [unsigned iOS run 30095081184](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30095081184)
   are green.
 - Run21 firmware-validated that exact correction: it cleared `_fmod+0x1a8` and
   exited **0** at the configured **2,500,000,000-instruction cap**,
@@ -80,7 +80,7 @@ run21's firmware evidence.
   rejected as authoritative because the probe did not first discriminate the
   active-receiver/in-transit/timestamp union using `ip_receiver_name`.
 - Exact run22 source passed all eight hosted jobs in
-  [core run 30106957804](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30106957804).
+  [core run 30106957804](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30106957804).
 - Run23 replayed exact commit `777afb4` — build inputs identical to hosted-green
   `5a40c5e` — to a clean **2,100,000,000-instruction cap** in 1,434.86 s. It
   **bound** both send-path route PCs to the exact mqueue/kmsg pair, **walked**
@@ -326,19 +326,19 @@ expire when the next run lands. The prose version is
 | Targeted diagnostic warnings | Relevant `-Wformat=2` and `-Wconversion` checks passed | New diagnostic formatting and selected conversion-sensitive paths were checked more strictly than the default build | A whole-repository conversion-clean guarantee |
 | GCC static analyzer | Passed for the changed `bootkernel` diagnostic paths | No analyzer finding remained in the new TV-out/framebuffer diagnostic control flow | Proof that the analyzer models every guest/host interaction |
 | Zero-step tool smokes | `bootkernel` and `snapboot` passed | Startup invariants, option/report plumbing, and the new non-invasive state diagnostics execute without retiring guest instructions | Any emulated-time progress or firmware stability |
-| [Hosted PMU core-tests run 30073161392](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30073161392) | Passed for exact commit `3963d22` | The S5L I2C/PCF50635 PMU model that run16-pmu-smoke exercised is green in the hosted core matrix | The later `0bc18ea` and `9bab56c` diagnostics, which runs 17 and 18 exercised and this earlier run does not cover |
-| [Hosted PMU ios-build run 30073161386](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30073161386) | Passed for the same exact commit | The same revision packaged in the unsigned iOS workflow | Private firmware, a SpringBoard boot, or device execution — hosted CI holds no firmware |
-| [Hosted core run 30088519878](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30088519878) | Passed for exact commit `afa650e284c2b27b6a4a2a2b2d772e0f68e5dac9` | Linux, macOS, Windows, warnings-as-errors, ASan+UBSan, and JIT jobs were green in GitHub Actions | Private-firmware execution or an on-device boot |
-| [Hosted iOS run 30088519892](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30088519892) | Passed for the same exact commit | The unsigned iOS workflow built successfully on the hosted runner | Installation, signing, JIT entitlement activation, or iPhone runtime stability |
-| [Hosted correction core run 30091220128](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30091220128) | Passed for exact commit `590d2248af4d7e5e92ec7bbd1be079c3bb415542` | The corrected core passed the hosted platform, strict-warning, sanitizer, and JIT matrix | Private-firmware execution or an on-device boot |
-| [Hosted correction iOS run 30091220122](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30091220122) | Passed for the same exact commit | The corrected revision built successfully in the unsigned iOS workflow | Installation, signing, JIT entitlement activation, or iPhone runtime stability |
-| [Hosted VFP core run 30095081111](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30095081111) | Passed for exact commit `debec04ff9b0faa469d5ad2ee7d75d1bf3b53b1a` | The VFP correction passed the hosted platform, strict-warning, sanitizer, and JIT matrix | Private-firmware execution, pixels, or an on-device boot |
-| [Hosted VFP iOS run 30095081184](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30095081184) | Passed for the same exact commit | The decoder-fix revision built successfully in the unsigned iOS workflow | Installation, signing, JIT activation, or iPhone runtime stability |
-| [Hosted exact-path test core run 30096115501](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30096115501) | Passed for test-only commit `0670ab8cbf6b9febbfe059b17ffdeb755ee0133a`; VFP **469/0** | The exact libm sequence regression passed in the hosted core matrix | A second firmware run or evidence belonging to `debec04` |
-| [Hosted exact-path test iOS run 30096115527](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30096115527) | Passed for the same test-only commit | The expanded-test revision still built in the unsigned iOS workflow | Device execution or private-firmware behavior |
-| [Latest hosted helper core run 30097023293](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30097023293) | Passed for test-only commit `657e8d8f2f42d09c573a4012a618e0f896307bdf`; VFP **488/0 locally** | Additional post-`_fmod` helper sequences are covered and the hosted core matrix is green | Firmware execution at that test-only commit or rendering |
-| [Current helper iOS run 30097023356](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30097023356) | Passed for the same test-only commit | The current expanded-test revision builds in the unsigned iOS workflow | Device execution or private-firmware behavior |
-| [Run22 diagnostic core run 30106957804](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30106957804) | **8/8 jobs passed** for exact commit `40209b27cb10d01c552398ff918ee613c4908ed0` | Warnings-as-errors, ASan+UBSan, Windows/Linux/macOS builds and tests, and Ubuntu/macOS JIT jobs are green for the run22 source | Private-firmware execution, SpringBoard rendering, or baseband behavior |
+| [Hosted PMU core-tests run 30073161392](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30073161392) | Passed for exact commit `3963d22` | The S5L I2C/PCF50635 PMU model that run16-pmu-smoke exercised is green in the hosted core matrix | The later `0bc18ea` and `9bab56c` diagnostics, which runs 17 and 18 exercised and this earlier run does not cover |
+| [Hosted PMU ios-build run 30073161386](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30073161386) | Passed for the same exact commit | The same revision packaged in the unsigned iOS workflow | Private firmware, a SpringBoard boot, or device execution — hosted CI holds no firmware |
+| [Hosted core run 30088519878](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30088519878) | Passed for exact commit `afa650e284c2b27b6a4a2a2b2d772e0f68e5dac9` | Linux, macOS, Windows, warnings-as-errors, ASan+UBSan, and JIT jobs were green in GitHub Actions | Private-firmware execution or an on-device boot |
+| [Hosted iOS run 30088519892](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30088519892) | Passed for the same exact commit | The unsigned iOS workflow built successfully on the hosted runner | Installation, signing, JIT entitlement activation, or iPhone runtime stability |
+| [Hosted correction core run 30091220128](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30091220128) | Passed for exact commit `590d2248af4d7e5e92ec7bbd1be079c3bb415542` | The corrected core passed the hosted platform, strict-warning, sanitizer, and JIT matrix | Private-firmware execution or an on-device boot |
+| [Hosted correction iOS run 30091220122](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30091220122) | Passed for the same exact commit | The corrected revision built successfully in the unsigned iOS workflow | Installation, signing, JIT entitlement activation, or iPhone runtime stability |
+| [Hosted VFP core run 30095081111](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30095081111) | Passed for exact commit `debec04ff9b0faa469d5ad2ee7d75d1bf3b53b1a` | The VFP correction passed the hosted platform, strict-warning, sanitizer, and JIT matrix | Private-firmware execution, pixels, or an on-device boot |
+| [Hosted VFP iOS run 30095081184](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30095081184) | Passed for the same exact commit | The decoder-fix revision built successfully in the unsigned iOS workflow | Installation, signing, JIT activation, or iPhone runtime stability |
+| [Hosted exact-path test core run 30096115501](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30096115501) | Passed for test-only commit `0670ab8cbf6b9febbfe059b17ffdeb755ee0133a`; VFP **469/0** | The exact libm sequence regression passed in the hosted core matrix | A second firmware run or evidence belonging to `debec04` |
+| [Hosted exact-path test iOS run 30096115527](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30096115527) | Passed for the same test-only commit | The expanded-test revision still built in the unsigned iOS workflow | Device execution or private-firmware behavior |
+| [Latest hosted helper core run 30097023293](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30097023293) | Passed for test-only commit `657e8d8f2f42d09c573a4012a618e0f896307bdf`; VFP **488/0 locally** | Additional post-`_fmod` helper sequences are covered and the hosted core matrix is green | Firmware execution at that test-only commit or rendering |
+| [Current helper iOS run 30097023356](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30097023356) | Passed for the same test-only commit | The current expanded-test revision builds in the unsigned iOS workflow | Device execution or private-firmware behavior |
+| [Run22 diagnostic core run 30106957804](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30106957804) | **8/8 jobs passed** for exact commit `40209b27cb10d01c552398ff918ee613c4908ed0` | Warnings-as-errors, ASan+UBSan, Windows/Linux/macOS builds and tests, and Ubuntu/macOS JIT jobs are green for the run22 source | Private-firmware execution, SpringBoard rendering, or baseband behavior |
 | Run19 integrity/layout | Exit 0, `OK`, stderr 0 B; exact source hashes unchanged; work image 466,825,216 B | The `afa650e` firmware run was clean and persistent filesystem writes were confined to its work image; framebuffer/TOKD planning reached real firmware | A rendered frame or correct TV-out timing |
 | Run19 TV-out chain | Pages mapped; final control/mixer/SDO `0/5/1`; frames/IRQ/filter/action/close-return all zero | The all-three timing condition was not the shipped active state and suppressed completion | That mixer+SDO alone will clear the wait until rerun |
 | Run19 primary CLCD/frame | Correct 320x480, stride-1280 window; 662 CLCD frames; final PPM identical to seed | Corrected layout and controller handoff operated for the full run | Any SpringBoard pixel or live-scanout write |
@@ -364,8 +364,8 @@ expire when the next run lands. The prose version is
 | Run23 BasebandSPI window | Non-RAM page `0x3d200000`, first pc `com.apple.driver.BasebandSPI+0x1eca`, 4 reads / 11 writes; not among the five declared stubs, so reads return zero; write burst @933,033,890–933,033,922, read-back @1,757,842,145–1,757,842,149, final writes @1,760,475,736/740 | An identified baseband-transport register window is unmapped and answers the shipped driver with zeros | That this window blocks the boot — the driver does not poll it and stops touching it entirely |
 | Run23 SpringBoard/display | `applicationDidFinishLaunching:` @1,923,358,329; `startWindowServer` return @1,919,831,289; 4 TV-out frames; CLCD scanning/running `1/1`, 604 frames, 320x480 stride 1280; `UIController` **0**; live scanout **0**; PPM seed SHA `CBAD1C...AF2AB`, **0 changed pixels** | The corrected display chain reproduces exactly, and the frontier is still the telephony send | SpringBoard rendering, UI readiness, or touch |
 | Run23 diagnostic integrity | 16 exact-hook attribution omissions (first @551,530,083, last @1,388,875,916); 50 unreadable classifications; **0** readable contradictions; none overlapping the decisive send episode | The observers reported their own gaps instead of silently completing a chain | That every unobserved transition in the run is accounted for |
-| [Hosted SPI-window core run 30145593885](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30145593885) | **8/8 jobs passed** for exact commit `3faa04a3b9e57e1fe4404f644354c09ae03c2c53` | Windows/Linux/macOS builds and tests, three JIT jobs, ASan+UBSan, and warnings-as-errors are green with the three SPI windows declared | Private-firmware execution, rendering, or that spi2 affects the boot |
-| [Hosted SPI-window iOS run 30145593887](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30145593887) | Passed for the same exact commit | The unsigned arm64 package job still builds | Installation, launch, entitlements, JIT, or guest boot |
+| [Hosted SPI-window core run 30145593885](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30145593885) | **8/8 jobs passed** for exact commit `3faa04a3b9e57e1fe4404f644354c09ae03c2c53` | Windows/Linux/macOS builds and tests, three JIT jobs, ASan+UBSan, and warnings-as-errors are green with the three SPI windows declared | Private-firmware execution, rendering, or that spi2 affects the boot |
+| [Hosted SPI-window iOS run 30145593887](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30145593887) | Passed for the same exact commit | The unsigned arm64 package job still builds | Installation, launch, entitlements, JIT, or guest boot |
 | Run30 CommCenter check-in | `_bootstrap_check_in` **hits=1** @777,240,124 with `r1=0x00085ee4` (`"com.apple.commcenter"`); return **`r0=0`** (KERN_SUCCESS); **SUCCESS arm taken**, FAILURE arm never | Un-matching the baseband nubs lets CommCenter claim its port and stand up its MIG server; SpringBoard's telephony singleton now enters *and returns* — the blocker that held every run since run21 is gone | Any rendering; `UIController` still 0 hits and the PPM still the seed |
 | Post-blocker CPU coverage | Run30 stopped on `VCVTR` `0xeefd7a67` @2,061,479,415; run31 on `VCVT.F32.S32` `0xeef84ae7` @2,061,479,416 (**+1**); run32 on `SADD8` `0xe611ef9e` @**2,191,848,855** (**+130,369,439**) | Each stop is fail-closed and self-naming; implementing `FPSCR.RMode` as a class rather than per-encoding bought 130 M instructions in one step | That the remaining distance is only CPU coverage — the next stop could still be architectural |
 | `FPSCR.RMode` implementation | `vfp_execute()` adopts the mode on the host FPU per instruction and restores it; float→int rounds explicitly in software; short vectors and trap enables still refuse. `test_vfp` **488 → 513/0** | Directed rounding is implemented rather than refused, covering conversions *and* arithmetic, with tests proving arithmetic actually rounds (1.0f + 2⁻²⁵ under RZ/RM/RP) | Short vectors or trapped FP exceptions, which remain unimplemented |
@@ -540,18 +540,18 @@ seed with SHA-256
 and **0 changed pixels**. SpringBoard is therefore **not rendered**.
 
 Run21 belongs only to `debec04`. Exact-commit hosted
-[core run 30095081111](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30095081111)
+[core run 30095081111](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30095081111)
 and
-[unsigned iOS run 30095081184](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30095081184)
+[unsigned iOS run 30095081184](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30095081184)
 also passed. Test-only commit `0670ab8` later passed
-[core run 30096115501](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30096115501)
+[core run 30096115501](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30096115501)
 and
-[unsigned iOS run 30096115527](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30096115527),
+[unsigned iOS run 30096115527](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30096115527),
 with VFP **469/0**. Latest hosted test-only commit `657e8d8` expands the local VFP
 result to **488/0** and passed hosted
-[core run 30097023293](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30097023293)
+[core run 30097023293](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30097023293)
 and
-[unsigned iOS run 30097023356](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30097023356).
+[unsigned iOS run 30097023356](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30097023356).
 
 ## Run22 real-firmware evidence
 
@@ -609,7 +609,7 @@ rootfs.img      c3251e7f092c939d5818e92086cb47680981cfb03731de7b55d238c942eb5e82
 The external-md bridge reported **0 failures**, guest-free memory bottomed at
 **50.63 MiB**, and the retained evidence directory occupies **447.42 MiB on
 F:**. Hosted
-[core run 30106957804](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30106957804)
+[core run 30106957804](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30106957804)
 passed all eight jobs for the exact commit: warnings-as-errors, ASan+UBSan,
 Windows/Linux/macOS builds and tests, and Ubuntu/macOS JIT execution. Hosted CI
 does not contain the private firmware and does not establish this boot result.
@@ -666,10 +666,10 @@ unlaunched.
 
 Hosted validation belongs to that same exact commit:
 
-- [core run 30143448600](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30143448600)
+- [core run 30143448600](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30143448600)
   passed all eight jobs: Windows/Linux/macOS builds and tests, three JIT jobs,
   ASan+UBSan, and warnings-as-errors;
-- [iOS run 30143455036](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30143455036)
+- [iOS run 30143455036](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30143455036)
   passed its unsigned arm64 package job.
 
 These hosted jobs contain no private firmware. They validate the public
@@ -802,9 +802,9 @@ authoritative.
 - [x] The surgical mixer+SDO predicate correction passes the local full suite
   **23/23**, `test_soc` **5,504/0**, and `test_snapshot` **469/0**.
 - [x] Hosted
-  [core run 30091220128](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30091220128)
+  [core run 30091220128](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30091220128)
   and
-  [iOS run 30091220122](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30091220122)
+  [iOS run 30091220122](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30091220122)
   passed exact surgical-fix commit `590d224`.
 - [x] Run20 produced 4 TV-out frames, asserted IRQ 30, entered the shipped
   filter/action, cleared the swap work, woke the gate, and returned the exact
@@ -817,9 +817,9 @@ authoritative.
 - [x] The current VFP11 correction passes the full local Release suite and
   focused strict builds.
 - [x] Hosted
-  [core run 30095081111](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30095081111)
+  [core run 30095081111](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30095081111)
   and
-  [iOS run 30095081184](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30095081184)
+  [iOS run 30095081184](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30095081184)
   pass exact VFP11-correction commit `debec04`.
 - [x] Run21 clears `0xEE274B10` in libm `_fmod+0x1a8` and reaches the clean
   2.5 B cap, 562,020,182 instructions beyond run20.
@@ -828,15 +828,15 @@ authoritative.
   resuming before the 2.1 B cap; its full-path PCs remain unbound candidates
   because the old recorder omitted the decisive kmsg register.
 - [x] Hosted
-  [core run 30106957804](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30106957804)
+  [core run 30106957804](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30106957804)
   passes all eight jobs for exact run22 commit `40209b2`.
 - [x] The pre-Run23 trace-only ownership, queue-link, per-thread wait, and
   AppleBaseband causal observers pass strict compilation, adversarial startup
   self-checks, and exact 7E18 zero-step code/data gates.
 - [x] Exact diagnostic commit `5a40c5e` passes all eight jobs in
-  [core run 30143448600](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30143448600)
+  [core run 30143448600](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30143448600)
   and the package job in
-  [iOS run 30143455036](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30143455036).
+  [iOS run 30143455036](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30143455036).
 - [x] The exact committed Run23 cold replay ran to a clean 2.1 B cap at commit
   `777afb4` and established which runtime chains occurred: both send routes are
   **BOUND**, the queue holds **five linked** identical `0x0054b557` kmsgs with
@@ -866,9 +866,9 @@ authoritative.
 - [x] Test-only `0670ab8` passes hosted core/iOS CI with VFP 469/0.
 - [x] Latest hosted test-only `657e8d8` helper coverage, VFP 488/0 locally, passes
   hosted
-  [core run 30097023293](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30097023293)
+  [core run 30097023293](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30097023293)
   and
-  [iOS run 30097023356](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30097023356).
+  [iOS run 30097023356](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30097023356).
 - [ ] An installable build is tested separately on the iPhone 6s Plus.
 
 The honest claim remains narrow: run20 proves the TV-out correction, run21
@@ -960,7 +960,7 @@ changed pixels**. SpringBoard is **not rendered**.
 
 Run23 belongs only to `777afb4`. Its build inputs are identical to `5a40c5e`,
 which owns hosted
-[core run 30143448600](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30143448600)
+[core run 30143448600](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30143448600)
 and
-[iOS run 30143455036](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30143455036);
+[iOS run 30143455036](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30143455036);
 hosted CI contains no private firmware and establishes nothing about this boot.

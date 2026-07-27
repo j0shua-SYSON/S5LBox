@@ -1,5 +1,5 @@
 /*
- * iOS3-VM — AArch64 instruction emitter.
+ * S5LBox — AArch64 instruction emitter.
  *
  * See core/include/a64_emit.h for the contract. Every base opcode below is
  * written as the literal field layout from the ARMv8-A encoding tables, with a

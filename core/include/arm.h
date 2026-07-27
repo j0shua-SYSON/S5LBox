@@ -1,5 +1,5 @@
 /*
- * iOS3-VM — ARMv6 (ARM1176JZF-S) CPU core, public interface.
+ * S5LBox — ARMv6 (ARM1176JZF-S) CPU core, public interface.
  *
  * The ARM1176JZF-S is the application processor inside the Samsung S5L8900
  * (original iPhone / iPhone 3G / iPod touch 1G) that iPhone OS 1–3 ran on.
@@ -9,8 +9,8 @@
  *
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed.
  */
-#ifndef IOS3VM_ARM_H
-#define IOS3VM_ARM_H
+#ifndef S5LBOX_ARM_H
+#define S5LBOX_ARM_H
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -397,4 +397,4 @@ arm_status_t arm_step(arm_cpu_t *cpu);
 /* Evaluate an ARM 4-bit condition field against the current flags. */
 bool arm_cond_passed(const arm_cpu_t *cpu, uint32_t cond);
 
-#endif /* IOS3VM_ARM_H */
+#endif /* S5LBOX_ARM_H */

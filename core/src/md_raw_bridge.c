@@ -1,5 +1,5 @@
 /*
- * iOS3-VM -- bounded host-backed XNU32 raw memory-disk bridge.
+ * S5LBox -- bounded host-backed XNU32 raw memory-disk bridge.
  *
  * The patched entry ABI is the ordinary Darwin character-device ABI:
  *   r0 = dev_t, r1 = struct uio *, r2 = ioflag (ignored), r14 = return PC.

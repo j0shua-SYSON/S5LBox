@@ -1,5 +1,5 @@
 /*
- * iOS3-VM — S5L8900 power-gate controller.
+ * S5LBox — S5L8900 power-gate controller.
  *
  * This block is what stood between a booting kernel and a booting OS. Apple's
  * AppleS5L8900XPowerController::start writes the domains it wants gated and

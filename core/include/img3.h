@@ -1,5 +1,5 @@
 /*
- * iOS3-VM — IMG3 firmware container.
+ * S5LBox — IMG3 firmware container.
  *
  * Every 3.x-era Apple firmware image (LLB, iBoot, kernelcache, device tree,
  * logo) ships wrapped in IMG3: a tagged container holding the payload, its
@@ -24,8 +24,8 @@
  *
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed.
  */
-#ifndef IOS3VM_IMG3_H
-#define IOS3VM_IMG3_H
+#ifndef S5LBOX_IMG3_H
+#define S5LBOX_IMG3_H
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -105,4 +105,4 @@ const char *img3_strerror(img3_status_t st);
 /* Render a four-character tag/ident into `out` (needs 5 bytes). */
 void img3_ident_str(uint32_t ident, char *out);
 
-#endif /* IOS3VM_IMG3_H */
+#endif /* S5LBOX_IMG3_H */

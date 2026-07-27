@@ -1,5 +1,5 @@
 /*
- * iOS3-VM — S5L8900 CLCD display controller (AppleH1CLCD's hardware).
+ * S5LBox — S5L8900 CLCD display controller (AppleH1CLCD's hardware).
  *
  * This is the block between a booting kernel and a screen. Nothing here is
  * guessed from a datasheet — no S5L8900 documentation exists — every offset and

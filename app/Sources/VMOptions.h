@@ -1,5 +1,5 @@
 /*
- * iOS3-VM — the settings screen's option table.
+ * S5LBox — the settings screen's option table.
  *
  * tools/bootkernel.c holds every boolean the emulator has in one table
  * (BOOT_TOGGLES) precisely so that its help text and its run header cannot
@@ -37,8 +37,8 @@
  *
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed.
  */
-#ifndef IOS3VM_APP_VMOPTIONS_H
-#define IOS3VM_APP_VMOPTIONS_H
+#ifndef S5LBOX_APP_VMOPTIONS_H
+#define S5LBOX_APP_VMOPTIONS_H
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -113,4 +113,4 @@ const char *vm_option_group_note(unsigned group);
 size_t vm_option_command_line(const bool *values, unsigned count,
                               char *out, size_t cap);
 
-#endif /* IOS3VM_APP_VMOPTIONS_H */
+#endif /* S5LBOX_APP_VMOPTIONS_H */

@@ -1,5 +1,5 @@
 /*
- * iOS3-VM -- descriptor-backed vm_block_t adapter tests.
+ * S5LBox -- descriptor-backed vm_block_t adapter tests.
  *
  * Fixtures use tiny relative paths.  CMake pins the test working directory to
  * its F:-backed build tree, never the host's system temporary directory.

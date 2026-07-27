@@ -1,5 +1,5 @@
 //
-//  iOS3-VM — the settings screen.
+//  S5LBox — the settings screen.
 //
 //  A grouped table of every option the emulator has, in the same order and
 //  under the same headings the desktop harness prints them, driven by the C

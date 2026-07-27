@@ -1,5 +1,5 @@
 /*
- * iOS3-VM — S5L8900 timer block.
+ * S5LBox — S5L8900 timer block.
  *
  * Two independent things live here, and conflating them is the mistake that
  * kept this kernel silent:

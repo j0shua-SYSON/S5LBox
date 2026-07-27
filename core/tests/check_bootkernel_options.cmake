@@ -1,4 +1,4 @@
-# iOS3-VM -- boot option resolution tests.
+# S5LBox -- boot option resolution tests.
 #
 # The option layer's whole claim is that a command line resolves to exactly one
 # configuration and that the run says which. That claim is only worth anything

@@ -1,5 +1,5 @@
 /*
- * iOS3-VM -- HFS+ catalog provisioning tests.
+ * S5LBox -- HFS+ catalog provisioning tests.
  *
  * These build whole HFSX volumes in memory, catalog B-tree and all, so the
  * suite runs in public CI with no Apple firmware anywhere near it.  The

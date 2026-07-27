@@ -1,5 +1,5 @@
 /*
- * iOS3-VM — AES tests.
+ * S5LBox — AES tests.
  *
  * Validated against the FIPS-197 Appendix C known-answer vectors. These are
  * published constants: if our implementation reproduces them exactly for all
@@ -131,7 +131,7 @@ static void test_cbc_rejects_partial_block(void) {
 }
 
 int main(void) {
-    printf("iOS3-VM AES tests (FIPS-197 known-answer vectors)\n");
+    printf("S5LBox AES tests (FIPS-197 known-answer vectors)\n");
     test_fips197_aes128();
     test_fips197_aes192();
     test_fips197_aes256();

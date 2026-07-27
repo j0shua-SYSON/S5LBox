@@ -69,7 +69,7 @@ loader:
 
 ## Firmware & keys — you supply your own
 
-**iOS3-VM ships no Apple firmware.** Apple firmware is copyrighted; distributing
+**S5LBox ships no Apple firmware.** Apple firmware is copyrighted; distributing
 it is not something this project does. Instead, at runtime you provide:
 
 1. **An iPhone OS 3.1.3 IPSW** for the matching device (an S5L8900 model). IPSWs

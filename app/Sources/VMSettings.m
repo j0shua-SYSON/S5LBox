@@ -1,5 +1,5 @@
 //
-//  iOS3-VM — the app's settings. See VMSettings.h.
+//  S5LBox — the app's settings. See VMSettings.h.
 //
 //  Every key is read through -objectForKey: and falls back to the table's own
 //  default when absent, rather than being seeded with -registerDefaults:. That

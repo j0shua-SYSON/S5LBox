@@ -1,5 +1,5 @@
 /*
- * iOS3-VM — JIT code buffers, and the one place that enters emitted code.
+ * S5LBox — JIT code buffers, and the one place that enters emitted code.
  *
  * Four functions (alloc / begin_write / end_write / commit) are the entire
  * platform surface of the dynarec, so a change of host memory policy costs

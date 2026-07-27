@@ -1,5 +1,5 @@
 /*
- * iOS3-VM -- bounded descriptor-backed adapter for a writable vm_block_t.
+ * S5LBox -- bounded descriptor-backed adapter for a writable vm_block_t.
  *
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed.
  */

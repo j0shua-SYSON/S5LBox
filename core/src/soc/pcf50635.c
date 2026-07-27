@@ -1,5 +1,5 @@
 /*
- * iOS3-VM — NXP PCF50635 PMU/RTC at i2c0 address 0x73.
+ * S5LBox — NXP PCF50635 PMU/RTC at i2c0 address 0x73.
  *
  * The register model stays deliberately bounded. Bytes written by the guest
  * are persistent storage, the RTC bytes are computed from deterministic guest

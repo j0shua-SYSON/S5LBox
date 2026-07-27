@@ -1,5 +1,5 @@
 //
-//  iOS3-VM — root view controller.
+//  S5LBox — root view controller.
 //
 //  This screen shows the emulated machine: the guest's 320x480 framebuffer at
 //  the top, the guest's UART underneath, and a status line in between. The

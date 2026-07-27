@@ -1,5 +1,5 @@
 /*
- * iOS3-VM — ARMv6 -> arm64 block translator.
+ * S5LBox — ARMv6 -> arm64 block translator.
  *
  * Translates a straight-line run of ARM or Thumb instructions into arm64,
  * stopping at the first thing it does not handle and leaving that instruction

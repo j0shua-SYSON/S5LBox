@@ -1,13 +1,13 @@
 /*
- * iOS3-VM -- bounded descriptor-backed adapter for a writable vm_block_t.
+ * S5LBox -- bounded descriptor-backed adapter for a writable vm_block_t.
  *
  * This host-tool layer owns one already-existing regular work file.  It never
  * allocates an image-sized buffer and never creates, grows, or copies media.
  *
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed.
  */
-#ifndef IOS3VM_FILE_BLOCK_H
-#define IOS3VM_FILE_BLOCK_H
+#ifndef S5LBOX_FILE_BLOCK_H
+#define S5LBOX_FILE_BLOCK_H
 
 #include "vm_block.h"
 
@@ -100,4 +100,4 @@ bool file_block_is_open(const file_block_t *adapter);
 int file_block_last_system_error(const file_block_t *adapter);
 const char *file_block_strerror(file_block_status_t status);
 
-#endif /* IOS3VM_FILE_BLOCK_H */
+#endif /* S5LBOX_FILE_BLOCK_H */

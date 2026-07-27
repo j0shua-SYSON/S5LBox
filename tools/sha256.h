@@ -1,10 +1,10 @@
 /*
- * iOS3-VM -- small, allocation-free SHA-256 implementation.
+ * S5LBox -- small, allocation-free SHA-256 implementation.
  *
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed.
  */
-#ifndef IOS3VM_SHA256_H
-#define IOS3VM_SHA256_H
+#ifndef S5LBOX_SHA256_H
+#define S5LBOX_SHA256_H
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -50,4 +50,4 @@ bool ios3_sha256(const void *data, size_t length,
 }
 #endif
 
-#endif /* IOS3VM_SHA256_H */
+#endif /* S5LBOX_SHA256_H */

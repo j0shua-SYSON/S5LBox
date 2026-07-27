@@ -1,5 +1,5 @@
 /*
- * iOS3-VM — persistent storage backing.
+ * S5LBox — persistent storage backing.
  *
  * Why this exists: a jailbreak is fundamentally a *persistent* modification to
  * the guest's storage. Installing Cydia, remounting / read-write, keeping your
@@ -25,8 +25,8 @@
  *
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed.
  */
-#ifndef IOS3VM_STORAGE_H
-#define IOS3VM_STORAGE_H
+#ifndef S5LBOX_STORAGE_H
+#define S5LBOX_STORAGE_H
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -65,4 +65,4 @@ storage_status_t storage_load_nor(s5l_nor_t *n, const char *path);
 
 const char *storage_strerror(storage_status_t st);
 
-#endif /* IOS3VM_STORAGE_H */
+#endif /* S5LBOX_STORAGE_H */

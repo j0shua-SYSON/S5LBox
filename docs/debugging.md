@@ -303,9 +303,9 @@ status, interrupt mask, and scanning were all zero. The run proves additional
 serial userspace execution, not SpringBoard startup or display-path operation.
 
 At `df9dc7b`, hosted
-[`core-tests` run 30004015881](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30004015881)
+[`core-tests` run 30004015881](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30004015881)
 and
-[`ios-build` run 30004015807](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30004015807)
+[`ios-build` run 30004015807](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30004015807)
 also completed successfully. Continue with a new work filename and a higher
 bounded cap before app integration. Snapshot backing-identity and overlay
 coupling remain separate work.
@@ -807,8 +807,8 @@ but define timing eligibility from mixer+SDO. Its local Release gate passes
 23/23; the affected binaries report SoC 5,504/0 and snapshot 469/0, including
 the real `0/5/1` state, control transitions without phase reset, IRQ/WFI, and
 malformed snapshot state. Exact correction commit `590d224` also passed hosted
-[core run 30091220128](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30091220128)
-and [unsigned iOS run 30091220122](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30091220122).
+[core run 30091220128](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30091220128)
+and [unsigned iOS run 30091220122](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30091220122).
 Run20 subsequently supplied the runtime validation: SDO timing asserted IRQ 30,
 the shipped filter/action cleared the swap, the gate woke, and the exact
 `IOServiceClose` returned. Recognizable live scanout did not follow.
@@ -906,18 +906,18 @@ the emulator did not hit its fail-closed stop; it does not mean SpringBoard
 rendered or boot completed.
 
 Exact-commit hosted
-[core run 30095081111](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30095081111)
+[core run 30095081111](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30095081111)
 and
-[unsigned iOS run 30095081184](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30095081184)
+[unsigned iOS run 30095081184](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30095081184)
 passed for `debec04`. Test-only `0670ab8` later passed
-[core run 30096115501](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30096115501)
+[core run 30096115501](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30096115501)
 and
-[unsigned iOS run 30096115527](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30096115527),
+[unsigned iOS run 30096115527](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30096115527),
 with VFP 469/0. Latest hosted test-only `657e8d8` expands local VFP helper coverage to
 488/0 and passed hosted
-[core run 30097023293](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30097023293)
+[core run 30097023293](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30097023293)
 and
-[unsigned iOS run 30097023356](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30097023356).
+[unsigned iOS run 30097023356](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30097023356).
 Keep those commit ledgers separate: run21 executed `debec04`.
 
 ### WFI changes elapsed device time, not the instruction coordinate

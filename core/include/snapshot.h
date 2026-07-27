@@ -1,5 +1,5 @@
 /*
- * iOS3-VM — full machine snapshot / restore.
+ * S5LBox — full machine snapshot / restore.
  *
  * WHY THIS EXISTS. Reaching the current frontier of the boot costs ~2 billion
  * interpreted instructions, i.e. minutes of wall clock per debugging iteration.
@@ -31,15 +31,15 @@
  *
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed.
  */
-#ifndef IOS3VM_SNAPSHOT_H
-#define IOS3VM_SNAPSHOT_H
+#ifndef S5LBOX_SNAPSHOT_H
+#define S5LBOX_SNAPSHOT_H
 
 #include <stddef.h>
 #include <stdint.h>
 #include "soc.h"
 
 /* 16 bytes, stored without a terminator. */
-#define SNAPSHOT_MAGIC     "iOS3-VM SNAPSHOT"
+#define SNAPSHOT_MAGIC     "S5LBox SNAPSHOT"
 #define SNAPSHOT_MAGIC_LEN 16u
 
 /*
@@ -148,4 +148,4 @@ snapshot_status_t snapshot_save_mem(const s5l8900_t *m,
 snapshot_status_t snapshot_load_mem(s5l8900_t *m,
                                     const uint8_t *buf, size_t len);
 
-#endif /* IOS3VM_SNAPSHOT_H */
+#endif /* S5LBOX_SNAPSHOT_H */

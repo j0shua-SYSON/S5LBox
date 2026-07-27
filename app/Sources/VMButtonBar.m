@@ -1,5 +1,5 @@
 //
-//  iOS3-VM — the emulated machine's physical buttons. See VMButtonBar.h.
+//  S5LBox — the emulated machine's physical buttons. See VMButtonBar.h.
 //
 //  WHY THE KEYS ARE DRAWN AT ALL IF THEY CANNOT BE PRESSED
 //

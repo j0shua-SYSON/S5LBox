@@ -1,5 +1,5 @@
 /*
- * iOS3-VM -- adversarial tests for the XNU32 raw memory-disk bridge.
+ * S5LBox -- adversarial tests for the XNU32 raw memory-disk bridge.
  *
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed.
  */
@@ -1834,7 +1834,7 @@ static void test_saturating_diagnostics_and_strings(void) {
 }
 
 int main(void) {
-    printf("iOS3-VM raw md bridge tests\n");
+    printf("S5LBox raw md bridge tests\n");
     test_read_write_and_exact_uio_commit();
     test_zero_and_multi_iovec_semantics();
     test_media_eof_semantics();

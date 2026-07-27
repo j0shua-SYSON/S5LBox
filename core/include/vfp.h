@@ -1,5 +1,5 @@
 /*
- * iOS3-VM — VFPv2 (VFP11) coprocessor, public interface.
+ * S5LBox — VFPv2 (VFP11) coprocessor, public interface.
  *
  * The ARM1176JZF-S carries a VFP11 unit implementing VFPv2: 32 single-precision
  * registers s0-s31 aliased onto 16 double-precision registers d0-d15. There is
@@ -11,8 +11,8 @@
  *
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed.
  */
-#ifndef IOS3VM_VFP_H
-#define IOS3VM_VFP_H
+#ifndef S5LBOX_VFP_H
+#define S5LBOX_VFP_H
 
 #include "arm.h"
 
@@ -123,4 +123,4 @@ arm_status_t vfp_execute(arm_cpu_t *c, uint32_t pc, uint32_t insn,
  */
 const char *vfp_trap_reason(void);
 
-#endif /* IOS3VM_VFP_H */
+#endif /* S5LBOX_VFP_H */

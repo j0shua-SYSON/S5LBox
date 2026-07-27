@@ -1,5 +1,5 @@
 /*
- * iOS3-VM — in-place Apple device-tree patching, standing in for iBoot.
+ * S5LBox — in-place Apple device-tree patching, standing in for iBoot.
  *
  * The device tree shipped in the IPSW is a TEMPLATE. On real hardware iBoot
  * measures the PLLs and writes the actual clock rates into it before handing
@@ -29,8 +29,8 @@
  *
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed.
  */
-#ifndef IOS3VM_DT_INPLACE_H
-#define IOS3VM_DT_INPLACE_H
+#ifndef S5LBOX_DT_INPLACE_H
+#define S5LBOX_DT_INPLACE_H
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -211,4 +211,4 @@ static inline bool dt_set_reg(uint8_t *b, size_t len, const char *path,
     return true;
 }
 
-#endif /* IOS3VM_DT_INPLACE_H */
+#endif /* S5LBOX_DT_INPLACE_H */

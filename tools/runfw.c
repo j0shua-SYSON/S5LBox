@@ -1,5 +1,5 @@
 /*
- * iOS3-VM — runfw: execute a raw firmware payload on the emulated S5L8900.
+ * S5LBox — runfw: execute a raw firmware payload on the emulated S5L8900.
  *
  * This is the diagnostic that turns "our tests pass" into "real Apple code
  * runs". It loads a decrypted payload, executes it, and — crucially — reports

@@ -1,5 +1,5 @@
 /*
- * iOS3-VM -- S5L8900 standard-definition TV-out path.
+ * S5LBox -- S5L8900 standard-definition TV-out path.
  *
  * This is deliberately a narrow hardware model.  The shipped Apple driver
  * establishes the three independent run/ready handshakes, SDO's VSYNC

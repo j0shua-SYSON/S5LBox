@@ -1,5 +1,5 @@
 /*
- * iOS3-VM — firmware loader.
+ * S5LBox — firmware loader.
  *
  * Turns a user-supplied IMG3 file into running guest code: parse the container,
  * decrypt the payload with the user's key, copy it into guest RAM, and point
@@ -9,8 +9,8 @@
  *
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed.
  */
-#ifndef IOS3VM_LOADER_H
-#define IOS3VM_LOADER_H
+#ifndef S5LBOX_LOADER_H
+#define S5LBOX_LOADER_H
 
 #include "img3.h"
 #include "soc.h"
@@ -68,4 +68,4 @@ fw_status_t fw_boot_img3_iv(s5l8900_t *m, const uint8_t *buf, size_t len,
 
 const char *fw_strerror(fw_status_t st);
 
-#endif /* IOS3VM_LOADER_H */
+#endif /* S5LBOX_LOADER_H */

@@ -48,9 +48,9 @@ iOS workflow proves compile, link, fake-sign and packaging only; it is not an
 on-device runtime or real-firmware boot test. Exact assertion totals change with
 the suite and optional private firmware, so the workflow log is authoritative.
 At `df9dc7b`, `core-tests` run
-[`30004015881`](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30004015881)
+[`30004015881`](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30004015881)
 and `ios-build` run
-[`30004015807`](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30004015807)
+[`30004015807`](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30004015807)
 both completed successfully with the faultable raw bridge.
 
 ---
@@ -130,7 +130,7 @@ interrupt is delivered and returned from.
 **Observed:**
 
 ```
-iOS3-VM S5L8900 machine tests
+S5LBox S5L8900 machine tests
   [guest said] HI
   [timer IRQ -> handler -> return] uart="T", resumed at pc=00000100
 ```
@@ -907,8 +907,8 @@ handshake is real and remains modeled. Mixer `+0` and SDO `+0` are the
 persistent timing eligibility pair, and the IRQ filter does not read control
 `+0`. The local gate is now green at 23/23 Release tests, SoC 5,504/0, and
 snapshot 469/0. Exact correction commit `590d224` also passed hosted
-[core run 30091220128](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30091220128)
-and [unsigned iOS run 30091220122](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30091220122).
+[core run 30091220128](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30091220128)
+and [unsigned iOS run 30091220122](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30091220122).
 Run20 supplied that firmware rerun and completed the TV-out chain. The milestone
 remains open because the visual and input criteria did not advance.
 
@@ -989,18 +989,18 @@ failures were **0**, guest free memory bottomed at **50.63 MiB**, and the
 retained run directory occupies **447.27 MiB on F:**.
 
 Exact-commit hosted
-[core run 30095081111](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30095081111)
+[core run 30095081111](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30095081111)
 and
-[unsigned iOS run 30095081184](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30095081184)
+[unsigned iOS run 30095081184](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30095081184)
 passed for `debec04`. The next test-only commit `0670ab8` passed
-[core run 30096115501](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30096115501)
+[core run 30096115501](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30096115501)
 and
-[unsigned iOS run 30096115527](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30096115527),
+[unsigned iOS run 30096115527](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30096115527),
 with VFP **469/0**. Latest hosted test-only `657e8d8` expands VFP helper coverage to
 **488/0 locally** and passed hosted
-[core run 30097023293](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30097023293)
+[core run 30097023293](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30097023293)
 and
-[unsigned iOS run 30097023356](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30097023356).
+[unsigned iOS run 30097023356](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30097023356).
 Run21 is evidence for `debec04`, not those later test-only trees.
 
 ### Run22 proved the queue-full block but not its cause
@@ -1027,7 +1027,7 @@ zero changed pixels. Source hashes remained unchanged, external-md failures
 were zero, guest-free memory bottomed at **50.63 MiB**, and the evidence
 directory occupies **447.42 MiB on F:**. Exact source passed all eight jobs in
 hosted
-[core run 30106957804](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30106957804).
+[core run 30106957804](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30106957804).
 
 Exact pre-Run23 diagnostic commit
 `5a40c5eec5bbf7c4b7d8909d0c1f364bc078338a` implements the required trace-only
@@ -1040,9 +1040,9 @@ repeated-send inheritance, stale dispatch sequences, and later candidate
 overwrites of an already bound kmsg.
 Strict compilation, the `bootkernel` target build, and a stock-7E18 zero-step
 run pass locally. Hosted
-[core run 30143448600](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30143448600)
+[core run 30143448600](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30143448600)
 passes all eight jobs, and
-[iOS run 30143455036](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30143455036)
+[iOS run 30143455036](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30143455036)
 passes its package job for that exact commit. This is probe readiness only: the
 exact committed cold replay remains required before any runtime gate below can
 be checked.

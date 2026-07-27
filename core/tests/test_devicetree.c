@@ -1,5 +1,5 @@
 /*
- * iOS3-VM — Apple device tree parser tests.
+ * S5LBox — Apple device tree parser tests.
  *
  * Builds trees in memory (we ship no Apple firmware) and checks both correct
  * traversal and, importantly, that malformed trees are rejected rather than
@@ -373,7 +373,7 @@ static void test_inplace_reg_refuses_wrong_shape(void) {
 }
 
 int main(void) {
-    printf("iOS3-VM device tree tests\n");
+    printf("S5LBox device tree tests\n");
     test_parse_and_root_properties();
     test_find_child_and_property();
     test_path_lookup();

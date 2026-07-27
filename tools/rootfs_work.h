@@ -1,5 +1,5 @@
 /*
- * iOS3-VM -- bounded host-side rootfs work-image provisioning.
+ * S5LBox -- bounded host-side rootfs work-image provisioning.
  *
  * This interface deliberately owns no guest or emulator state.  It copies an
  * immutable bare HFS+/HFSX source into a new file beside the requested
@@ -10,8 +10,8 @@
  *
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed.
  */
-#ifndef IOS3VM_ROOTFS_WORK_H
-#define IOS3VM_ROOTFS_WORK_H
+#ifndef S5LBOX_ROOTFS_WORK_H
+#define S5LBOX_ROOTFS_WORK_H
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -359,4 +359,4 @@ size_t rootfs_work_activation_entries(rootfs_work_entry_t *entries,
 }
 #endif
 
-#endif /* IOS3VM_ROOTFS_WORK_H */
+#endif /* S5LBOX_ROOTFS_WORK_H */

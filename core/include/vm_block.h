@@ -1,5 +1,5 @@
 /*
- * iOS3-VM -- portable, bounded random-access block backend.
+ * S5LBox -- portable, bounded random-access block backend.
  *
  * Mutable guest media must not make the portable core depend on FILE,
  * descriptors, errno, Objective-C objects, or any other host API.  Host
@@ -8,8 +8,8 @@
  *
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed.
  */
-#ifndef IOS3VM_VM_BLOCK_H
-#define IOS3VM_VM_BLOCK_H
+#ifndef S5LBOX_VM_BLOCK_H
+#define S5LBOX_VM_BLOCK_H
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -167,4 +167,4 @@ vm_block_status_t vm_block_flush(const vm_block_t *block,
 
 const char *vm_block_strerror(vm_block_status_t status);
 
-#endif /* IOS3VM_VM_BLOCK_H */
+#endif /* S5LBOX_VM_BLOCK_H */

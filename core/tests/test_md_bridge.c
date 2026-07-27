@@ -1,5 +1,5 @@
 /*
- * iOS3-VM -- adversarial tests for the host-backed memory-disk bridge.
+ * S5LBox -- adversarial tests for the host-backed memory-disk bridge.
  *
  * The bridge is a privileged boundary.  These tests intentionally feed it
  * malformed firmware sites, CPU state, 64-bit bcopy arguments, translations,
@@ -1211,7 +1211,7 @@ static void test_error_strings_and_nulls(void) {
 }
 
 int main(void) {
-    printf("iOS3-VM md bridge tests\n");
+    printf("S5LBox md bridge tests\n");
     test_success_and_cpu_immutability();
     test_exact_gate_is_unhandled();
     test_configuration_preflight();

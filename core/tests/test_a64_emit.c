@@ -1,5 +1,5 @@
 /*
- * iOS3-VM — byte-exact tests for the AArch64 emitter.
+ * S5LBox — byte-exact tests for the AArch64 emitter.
  *
  * The dev box is x86, so emitted arm64 code cannot be *executed* here — but it
  * can be checked exactly, which is most of the value. Every case below asserts

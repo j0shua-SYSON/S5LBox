@@ -1,5 +1,5 @@
 /*
- * iOS3-VM — S5L8900 SPI controller focused tests.
+ * S5LBox — S5L8900 SPI controller focused tests.
  *
  * The property that matters most here is not that a byte moves. It is that the
  * interrupt this controller raises is one the stock handler will act on: the
@@ -948,7 +948,7 @@ static void test_snapshot_rejects_impossible_spi_state(void) {
 }
 
 int main(void) {
-    printf("iOS3-VM S5L8900 SPI controller tests\n");
+    printf("S5LBox S5L8900 SPI controller tests\n");
     test_reset_and_attachment_are_bounded();
     test_status_level_fields_sit_where_the_driver_looks();
     test_fifo_depth_boundary_is_eight_and_bounded();

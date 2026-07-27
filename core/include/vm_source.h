@@ -1,5 +1,5 @@
 /*
- * iOS3-VM -- portable, random-access byte source.
+ * S5LBox -- portable, random-access byte source.
  *
  * Large guest inputs must not be copied wholesale into RAM.  This interface
  * gives the portable core a small pread-like boundary without exposing FILE,
@@ -7,8 +7,8 @@
  *
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed.
  */
-#ifndef IOS3VM_VM_SOURCE_H
-#define IOS3VM_VM_SOURCE_H
+#ifndef S5LBOX_VM_SOURCE_H
+#define S5LBOX_VM_SOURCE_H
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -82,4 +82,4 @@ vm_source_status_t vm_source_read_exact(const vm_source_t *source,
 
 const char *vm_source_strerror(vm_source_status_t status);
 
-#endif /* IOS3VM_VM_SOURCE_H */
+#endif /* S5LBOX_VM_SOURCE_H */

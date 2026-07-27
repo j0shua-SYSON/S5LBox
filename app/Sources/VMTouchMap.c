@@ -1,5 +1,5 @@
 /*
- * iOS3-VM — turning a finger on the host's screen into a guest coordinate.
+ * S5LBox — turning a finger on the host's screen into a guest coordinate.
  * See VMTouchMap.h for why this is C and not Objective-C.
  *
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed.

@@ -1,5 +1,5 @@
 /*
- * iOS3-VM -- atomic, firmware-neutral guest-RAM patch manifests.
+ * S5LBox -- atomic, firmware-neutral guest-RAM patch manifests.
  *
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed.
  */

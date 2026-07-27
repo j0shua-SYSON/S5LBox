@@ -1,5 +1,5 @@
 /*
- * iOS3-VM — ARMv6 -> arm64 dynamic recompiler, block translator.
+ * S5LBox — ARMv6 -> arm64 dynamic recompiler, block translator.
  *
  * Stages J2 and J4 of docs/dynarec.md: the skeleton, and Thumb translation.
  * It exists only when the project is configured with -DIOS3VM_JIT=ON, and even
@@ -17,8 +17,8 @@
  *
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed.
  */
-#ifndef IOS3VM_JIT_H
-#define IOS3VM_JIT_H
+#ifndef S5LBOX_JIT_H
+#define S5LBOX_JIT_H
 
 #include "arm.h"
 #include <stddef.h>
@@ -213,4 +213,4 @@ const char *jit_buf_policy(const jit_buf_t *b);
  */
 int jit_enter(const jit_buf_t *arena, const jit_block_t *blk, arm_cpu_t *cpu);
 
-#endif /* IOS3VM_JIT_H */
+#endif /* S5LBOX_JIT_H */

@@ -1,5 +1,5 @@
 /*
- * iOS3-VM -- firmware-parameterized host-backed memory-disk bridge.
+ * S5LBox -- firmware-parameterized host-backed memory-disk bridge.
  *
  * A platform may replace two audited Thumb SVC sites inside a guest memory-
  * disk strategy routine and install md_bridge_handle_svc() on arm_bus_t.  The
@@ -9,8 +9,8 @@
  *
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed.
  */
-#ifndef IOS3VM_MD_BRIDGE_H
-#define IOS3VM_MD_BRIDGE_H
+#ifndef S5LBOX_MD_BRIDGE_H
+#define S5LBOX_MD_BRIDGE_H
 
 #include "arm.h"
 #include "vm_block.h"
@@ -151,4 +151,4 @@ arm_svc_result_t md_bridge_handle_svc(void *context, arm_cpu_t *cpu,
 
 const char *md_bridge_error_string(md_bridge_error_code_t code);
 
-#endif /* IOS3VM_MD_BRIDGE_H */
+#endif /* S5LBOX_MD_BRIDGE_H */

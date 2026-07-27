@@ -1,5 +1,5 @@
 /*
- * iOS3-VM — VFPv2 (VFP11) unit tests.
+ * S5LBox — VFPv2 (VFP11) unit tests.
  *
  * Same shape as test_arm.c: a flat 1 MiB RAM behind arm_bus_t, hand-assembled
  * ARM encodings, single-stepped, with assertions. Every encoding used here was

@@ -1,5 +1,5 @@
 ﻿/*
- * iOS3-VM — ARMv6 interpreter unit tests.
+ * S5LBox — ARMv6 interpreter unit tests.
  *
  * A tiny dependency-free test harness: a flat 1 MiB RAM behind the arm_bus_t,
  * hand-assembled ARM encodings, single-stepped, with register/flag assertions.
@@ -5110,7 +5110,7 @@ static void test_xn_on_a_section_and_the_xp_gate(void) {
 }
 
 int main(void) {
-    printf("iOS3-VM ARMv6 interpreter tests\n");
+    printf("S5LBox ARMv6 interpreter tests\n");
     test_mov_imm();
     test_add_reg();
     test_sub_flags();

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-iOS3-VM - inspect an IPSW without extracting the whole thing.
+S5LBox - inspect an IPSW without extracting the whole thing.
 
 An IPSW is a ZIP. This lists what is inside, identifies the IMG3 containers by
 their real on-disk magic, reads the Restore.plist to confirm the device and

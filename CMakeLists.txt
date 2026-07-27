@@ -1,4 +1,4 @@
-# iOS3-VM — top-level build.
+# S5LBox — top-level build.
 # Builds and tests the platform-independent emulator core on any host
 # (Windows/Linux/macOS). The iOS app is built separately by Xcode; see app/.
 cmake_minimum_required(VERSION 3.16)

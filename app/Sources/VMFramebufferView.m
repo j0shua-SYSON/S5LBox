@@ -1,5 +1,5 @@
 //
-//  iOS3-VM — the guest's screen.
+//  S5LBox — the guest's screen.
 //
 //  WHY A CGImage ON A CALayer AND NOT METAL
 //

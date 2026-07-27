@@ -1,5 +1,5 @@
 /*
- * iOS3-VM — the settings screen's option table. See VMOptions.h.
+ * S5LBox — the settings screen's option table. See VMOptions.h.
  *
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed.
  */

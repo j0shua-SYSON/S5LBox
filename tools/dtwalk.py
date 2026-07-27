@@ -8,7 +8,7 @@ import struct
 import sys
 import os
 
-REPO = r"F:\JOSHUA_1st_2021\projects\iOS3-VM"
+REPO = r"F:\JOSHUA_1st_2021\projects\S5LBox"
 DT = os.path.join(REPO, "firmware", "devicetree.bin")
 
 WANT = [w.lower() for w in sys.argv[1:]] or ["baseband"]

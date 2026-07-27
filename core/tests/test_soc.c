@@ -1,5 +1,5 @@
 /*
- * iOS3-VM — S5L8900 machine tests.
+ * S5LBox — S5L8900 machine tests.
  *
  * The headline test runs a hand-assembled bare-metal ARM payload on the
  * emulated SoC and reads back what it printed over the UART. This is the first
@@ -2695,7 +2695,7 @@ static void test_timer_interrupt_reaches_handler(void) {
 }
 
 int main(void) {
-    printf("iOS3-VM S5L8900 machine tests\n");
+    printf("S5LBox S5L8900 machine tests\n");
     test_ram_readback();
     test_uart_status_is_ready();
     test_unmapped_access_counted();

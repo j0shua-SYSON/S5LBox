@@ -1,5 +1,5 @@
 /*
- * iOS3-VM — S5L8900 I2C and PCF50635 focused tests.
+ * S5LBox — S5L8900 I2C and PCF50635 focused tests.
  */
 #include "soc.h"
 #include "snapshot.h"
@@ -524,7 +524,7 @@ static void test_snapshot_rejects_invalid_i2c_and_pmu_state(void) {
 }
 
 int main(void) {
-    printf("iOS3-VM S5L8900 I2C / PCF50635 tests\n");
+    printf("S5LBox S5L8900 I2C / PCF50635 tests\n");
     test_reset_and_attachment_are_bounded();
     test_controller_register_edges();
     test_unknown_slave_naks_and_w1c_is_selective();

@@ -1,5 +1,5 @@
 /*
- * iOS3-VM — Apple flattened device tree.
+ * S5LBox — Apple flattened device tree.
  *
  * iBoot hands XNU a device tree describing the hardware: which peripherals
  * exist, where their registers live, which interrupts they use. The kernel
@@ -22,8 +22,8 @@
  *
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed.
  */
-#ifndef IOS3VM_DEVICETREE_H
-#define IOS3VM_DEVICETREE_H
+#ifndef S5LBOX_DEVICETREE_H
+#define S5LBOX_DEVICETREE_H
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -73,4 +73,4 @@ dt_status_t dt_path(const dt_t *dt, const dt_node_t *root, const char *path,
 
 const char *dt_strerror(dt_status_t st);
 
-#endif /* IOS3VM_DEVICETREE_H */
+#endif /* S5LBOX_DEVICETREE_H */

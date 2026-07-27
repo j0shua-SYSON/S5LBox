@@ -1,5 +1,5 @@
 /*
- * iOS3-VM — AppleMultitouchZ2SPI's device: focused tests.
+ * S5LBox — AppleMultitouchZ2SPI's device: focused tests.
  *
  * One property dominates this file: the answer to isInHBPP() (0xc0441008,
  * vtable slot 0x4d0 off base 0xc0449f40). finishStarting() at 0xc0442670 keeps
@@ -1443,7 +1443,7 @@ static void test_snapshot_rejects_impossible_mtz2_state(void) {
 }
 
 int main(void) {
-    printf("iOS3-VM AppleMultitouchZ2SPI device tests\n");
+    printf("S5LBox AppleMultitouchZ2SPI device tests\n");
     test_reset_is_total_and_null_safe();
     test_checksum_is_a_plain_sum_stored_little_endian();
     test_the_claim_is_spent_exactly_once();

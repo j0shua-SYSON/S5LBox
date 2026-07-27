@@ -1,5 +1,5 @@
 /*
- * iOS3-VM — 32-bit Mach-O loader for the XNU kernelcache.
+ * S5LBox — 32-bit Mach-O loader for the XNU kernelcache.
  *
  * After decrypting and decompressing, the kernelcache is a plain 32-bit Mach-O
  * executable (magic feedface, cputype ARM, subtype v6). Booting it means
@@ -12,8 +12,8 @@
  *
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed.
  */
-#ifndef IOS3VM_MACHO_H
-#define IOS3VM_MACHO_H
+#ifndef S5LBOX_MACHO_H
+#define S5LBOX_MACHO_H
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -85,4 +85,4 @@ const char *macho_strerror(macho_status_t st);
 /* The segment with this exact name, or NULL. */
 const macho_segment_t *macho_segment(const macho_t *m, const char *name);
 
-#endif /* IOS3VM_MACHO_H */
+#endif /* S5LBOX_MACHO_H */

@@ -1,5 +1,5 @@
 /*
- * iOS3-VM -- bounded external rootfs work-image provisioner tests.
+ * S5LBox -- bounded external rootfs work-image provisioner tests.
  *
  * Fixtures are intentionally tiny bare HFSX volumes (8 KiB before growth),
  * and every path is relative to the F:-backed test working directory.

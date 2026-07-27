@@ -1,5 +1,5 @@
 /*
- * iOS3-VM — Samsung S5L8900 SPI controller.
+ * S5LBox — Samsung S5L8900 SPI controller.
  *
  * See the SPI section of core/include/soc.h for the register map, the evidence
  * behind each field, and the one rule this model is built around: the stock

@@ -1,5 +1,5 @@
 //
-//  iOS3-VM — application delegate.
+//  S5LBox — application delegate.
 //  Copyright (c) 2026 j0shua-SYSON. MIT licensed.
 //
 #import "AppDelegate.h"

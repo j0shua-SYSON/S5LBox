@@ -1,5 +1,5 @@
 /*
- * iOS3-VM — the on-device demo guest. See VMGuest.h for what this is for.
+ * S5LBox — the on-device demo guest. See VMGuest.h for what this is for.
  *
  * The payload is emitted here by a ~40-line assembler rather than written out
  * as a table of magic words. That is not decoration: every branch target is
@@ -269,7 +269,7 @@ bool vm_guest_install(s5l8900_t *m) {
     emitter_t e = { blob, 0 };
 
     static const char banner[] =
-        "iOS3-VM: S5L8900 running on this device.\r\n"
+        "S5LBox: S5L8900 running on this device.\r\n"
         "ARMv6 interpreter -> system bus -> guest DRAM.\r\n"
         "Painting a 320x480 32bpp framebuffer.\r\n";
     static const char msg[] = "guest: frame ";

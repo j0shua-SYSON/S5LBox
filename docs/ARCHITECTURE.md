@@ -1,6 +1,6 @@
 # Architecture
 
-iOS3-VM is a **full-system, low-level emulator project**. It does not fake or
+S5LBox is a **full-system, low-level emulator project**. It does not fake or
 reimplement iPhone OS — it emulates the *hardware* (the Samsung **S5L8900** SoC
 and its ARM1176JZF-S core). The long-term target is for Apple's boot ROM, iBoot,
 XNU kernel, `launchd`, and SpringBoard to run on top of it, believing they are on
@@ -451,8 +451,8 @@ must preserve control-ready behavior while letting `0/5/1` accumulate phase
 and emit SDO VSYNC. The corrected local tree passes 23/23 Release tests, SoC
 5,504/0, and snapshot 469/0. Exact correction commit `590d224` also passed
 hosted
-[core run 30091220128](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30091220128)
-and [unsigned iOS run 30091220122](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30091220122).
+[core run 30091220128](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30091220128)
+and [unsigned iOS run 30091220122](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30091220122).
 Run20 supplied the real-firmware validation and completed the exact TV-out
 filter/action/wake/close chain. It did not produce a rendered frame.
 
@@ -497,9 +497,9 @@ emulator capability gap: denied user-mode FPEXC/FPSID access vectors into the
 guest without exposing state or stopping the host. The local Release suite
 passes 23/23; targeted VFP/ARM/JIT binaries pass 452/0, 810/0, and 347/0 under
 focused strict builds. Exact-commit hosted
-[core run 30095081111](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30095081111)
+[core run 30095081111](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30095081111)
 and
-[unsigned iOS run 30095081184](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30095081184)
+[unsigned iOS run 30095081184](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30095081184)
 passed for `debec04`.
 
 ### Run21 architecture boundary
@@ -550,9 +550,9 @@ continued execution and resource bounds, not rendered SpringBoard.
 Later test-only commit `0670ab8` passes VFP 469/0 and hosted core/iOS runs
 30096115501/30096115527. Latest hosted test-only `657e8d8` expands local helper
 coverage to VFP 488/0 and passes hosted
-[core run 30097023293](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30097023293)
+[core run 30097023293](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30097023293)
 and
-[unsigned iOS run 30097023356](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30097023356).
+[unsigned iOS run 30097023356](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30097023356).
 Neither later test tree inherits run21's firmware evidence.
 
 In the planned shared-session design, host services cross explicit non-blocking

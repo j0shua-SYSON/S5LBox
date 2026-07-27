@@ -1,5 +1,5 @@
 /*
- * iOS3-VM — Samsung S5L8900 system-on-chip model.
+ * S5LBox — Samsung S5L8900 system-on-chip model.
  *
  * The S5L8900 is the application processor in the original iPhone, the iPhone
  * 3G, and the iPod touch 1G — the silicon iPhone OS 1–3 ran on. This header
@@ -13,8 +13,8 @@
  *
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed.
  */
-#ifndef IOS3VM_SOC_H
-#define IOS3VM_SOC_H
+#ifndef S5LBOX_SOC_H
+#define S5LBOX_SOC_H
 
 #include <stddef.h>
 #include <stdint.h>
@@ -1995,4 +1995,4 @@ void s5l8900_load(s5l8900_t *m, uint32_t addr, const void *data, size_t len);
  * Returns the number of instructions retired. */
 unsigned s5l8900_run(s5l8900_t *m, unsigned max_steps, arm_status_t *status);
 
-#endif /* IOS3VM_SOC_H */
+#endif /* S5LBOX_SOC_H */

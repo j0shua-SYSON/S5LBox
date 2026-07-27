@@ -1,5 +1,5 @@
 /*
- * iOS3-VM — PC-to-symbol resolution for the XNU kernelcache.
+ * S5LBox — PC-to-symbol resolution for the XNU kernelcache.
  *
  * A wedged boot reports a hot PC. Without this, that PC is a bare hex number,
  * and every diagnosis cycle starts by working out by hand which kext owns it —
@@ -29,8 +29,8 @@
  *
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed.
  */
-#ifndef IOS3VM_KSYMS_H
-#define IOS3VM_KSYMS_H
+#ifndef S5LBOX_KSYMS_H
+#define S5LBOX_KSYMS_H
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -118,4 +118,4 @@ uint32_t       ksyms_value(const ksyms_t *ks, const char *name);
 
 const char    *ksyms_strerror(ksyms_status_t st);
 
-#endif /* IOS3VM_KSYMS_H */
+#endif /* S5LBOX_KSYMS_H */

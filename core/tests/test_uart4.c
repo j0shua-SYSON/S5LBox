@@ -1,5 +1,5 @@
 /*
- * iOS3-VM — uart4, the guest's PPP line, focused tests.
+ * S5LBox — uart4, the guest's PPP line, focused tests.
  *
  * uart0 has been modelled since the first week of this project and is exercised
  * by every boot, so the interesting question here is not "does a Samsung UART
@@ -426,7 +426,7 @@ static void test_snapshot_rejects_an_impossible_uart4_length(void) {
 }
 
 int main(void) {
-    printf("iOS3-VM uart4 (guest PPP line) tests\n");
+    printf("S5LBox uart4 (guest PPP line) tests\n");
     test_reset_is_total();
     test_status_lets_a_transmit_loop_terminate();
     test_configuration_registers_round_trip();

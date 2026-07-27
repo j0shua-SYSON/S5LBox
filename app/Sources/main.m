@@ -1,5 +1,5 @@
 //
-//  iOS3-VM — app entry point.
+//  S5LBox — app entry point.
 //  Copyright (c) 2026 j0shua-SYSON. MIT licensed.
 //
 #import <UIKit/UIKit.h>

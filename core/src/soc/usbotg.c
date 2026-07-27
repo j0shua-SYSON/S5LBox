@@ -1,5 +1,5 @@
 /*
- * iOS3-VM — Synopsys DesignWare USB 2.0 OTG (DWC2) hardware-configuration
+ * S5LBox — Synopsys DesignWare USB 2.0 OTG (DWC2) hardware-configuration
  * registers.
  *
  * This is not a USB controller. It is the four registers a stock driver reads

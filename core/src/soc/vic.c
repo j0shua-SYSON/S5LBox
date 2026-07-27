@@ -1,5 +1,5 @@
 /*
- * iOS3-VM — S5L8900 vectored interrupt controller (PL190-style).
+ * S5LBox — S5L8900 vectored interrupt controller (PL190-style).
  *
  * Devices assert numbered lines; the controller masks them by the enable
  * register and routes each to IRQ or FIQ. Its outputs drive arm_cpu_t's

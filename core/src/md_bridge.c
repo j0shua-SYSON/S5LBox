@@ -1,5 +1,5 @@
 /*
- * iOS3-VM -- firmware-parameterized host-backed memory-disk bridge.
+ * S5LBox -- firmware-parameterized host-backed memory-disk bridge.
  *
  * The patched guest calls the original bcopy_phys ABI:
  *   source      r1:r0

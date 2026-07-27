@@ -1,5 +1,5 @@
 /*
- * iOS3-VM — block translator tests.
+ * S5LBox — block translator tests.
  *
  * The dev box cannot execute arm64, so these tests check the two things that
  * are checkable off-target and that matter most:

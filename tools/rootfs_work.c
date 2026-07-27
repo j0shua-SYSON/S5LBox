@@ -1,5 +1,5 @@
 /*
- * iOS3-VM -- bounded host-side rootfs work-image provisioning.
+ * S5LBox -- bounded host-side rootfs work-image provisioning.
  *
  * The source image is opened read-only and is never exposed through a writable
  * handle.  All edits happen under an exclusive, unpublished temporary name in

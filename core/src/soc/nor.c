@@ -1,5 +1,5 @@
 /*
- * iOS3-VM — S5L8900 NOR flash.
+ * S5LBox — S5L8900 NOR flash.
  *
  * Holds the low-level boot images. Reads are served memory-mapped; the image
  * directory is built by scanning for IMG3 containers rather than by parsing a

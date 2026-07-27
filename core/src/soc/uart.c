@@ -1,5 +1,5 @@
 /*
- * iOS3-VM — S5L8900 UART.
+ * S5LBox — S5L8900 UART.
  *
  * This is the first device that makes the emulator *observable*: whatever the
  * guest writes to UTXH is captured, which is how iBoot and the XNU kernel will

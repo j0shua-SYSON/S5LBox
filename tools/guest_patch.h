@@ -1,5 +1,5 @@
 /*
- * iOS3-VM -- atomic, firmware-neutral guest-RAM patch manifests.
+ * S5LBox -- atomic, firmware-neutral guest-RAM patch manifests.
  *
  * The caller supplies version-specific addresses and bytes.  This module only
  * validates a small fixed manifest, maps 32-bit guest virtual addresses into
@@ -7,8 +7,8 @@
  *
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed.
  */
-#ifndef IOS3VM_GUEST_PATCH_H
-#define IOS3VM_GUEST_PATCH_H
+#ifndef S5LBOX_GUEST_PATCH_H
+#define S5LBOX_GUEST_PATCH_H
 
 #include <stddef.h>
 #include <stdint.h>
@@ -93,4 +93,4 @@ guest_patch_status_t guest_patch_apply(const guest_patch_manifest_t *manifest,
 
 const char *guest_patch_status_string(guest_patch_status_t status);
 
-#endif /* IOS3VM_GUEST_PATCH_H */
+#endif /* S5LBOX_GUEST_PATCH_H */

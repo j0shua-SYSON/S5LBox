@@ -8,7 +8,7 @@ resolved instead of guessed.
 import struct
 import sys
 
-KERNEL = r"F:\JOSHUA_1st_2021\projects\iOS3-VM\firmware\kernel.macho"
+KERNEL = r"F:\JOSHUA_1st_2021\projects\S5LBox\firmware\kernel.macho"
 SEGS = [
     (0xC0008000, 0xC020D000, 0x00000000),
     (0xC020D000, 0xC0260000, 0x00205000),

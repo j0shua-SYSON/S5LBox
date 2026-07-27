@@ -1,5 +1,5 @@
 /*
- * iOS3-VM — LZSS decompression for Apple's compressed kernelcache.
+ * S5LBox — LZSS decompression for Apple's compressed kernelcache.
  *
  * The kernelcache in an IPSW is AES-encrypted and then LZSS-compressed behind a
  * small "complzss" header. Decrypting it is not enough; this is the last step
@@ -16,8 +16,8 @@
  *
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed.
  */
-#ifndef IOS3VM_LZSS_H
-#define IOS3VM_LZSS_H
+#ifndef S5LBOX_LZSS_H
+#define S5LBOX_LZSS_H
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -49,4 +49,4 @@ size_t lzss_decompress(uint8_t *dst, size_t dstcap,
 /* Adler-32, used to verify a decompressed kernelcache against its header. */
 uint32_t lzss_adler32(const uint8_t *data, size_t len);
 
-#endif /* IOS3VM_LZSS_H */
+#endif /* S5LBOX_LZSS_H */

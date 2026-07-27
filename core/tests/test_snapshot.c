@@ -1,5 +1,5 @@
 /*
- * iOS3-VM — snapshot / restore tests.
+ * S5LBox — snapshot / restore tests.
  *
  * Two kinds of test live here and both are necessary.
  *
@@ -936,7 +936,7 @@ static void test_restore_is_idempotent(void) {
 }
 
 int main(void) {
-    printf("iOS3-VM snapshot tests\n");
+    printf("S5LBox snapshot tests\n");
     test_cpu_state_round_trips();
     test_device_state_round_trips();
     test_tvout_snapshot_invariants();

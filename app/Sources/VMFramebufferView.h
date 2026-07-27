@@ -1,5 +1,5 @@
 //
-//  iOS3-VM — the guest's screen.
+//  S5LBox — the guest's screen.
 //
 //  Displays a 32-bit guest framebuffer, scaled to fit while preserving the
 //  original iPhone's 320x480 aspect ratio, with nearest-neighbour filtering so

@@ -1,5 +1,5 @@
 /*
- * iOS3-VM -- portable, bounded random-access block backend.
+ * S5LBox -- portable, bounded random-access block backend.
  *
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed.
  */

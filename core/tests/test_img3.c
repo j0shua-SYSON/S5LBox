@@ -1,5 +1,5 @@
 /*
- * iOS3-VM — IMG3 parser tests.
+ * S5LBox — IMG3 parser tests.
  *
  * Builds IMG3 containers in memory (we ship no Apple firmware) and checks both
  * correct parsing and, importantly, that malformed containers are rejected
@@ -377,7 +377,7 @@ static void test_long_vers_is_clamped(void) {
 }
 
 int main(void) {
-    printf("iOS3-VM IMG3 parser tests\n");
+    printf("S5LBox IMG3 parser tests\n");
     test_parse_minimal();
     test_parse_kbag_and_vers();
     test_reject_too_small();

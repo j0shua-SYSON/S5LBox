@@ -1,5 +1,5 @@
 /*
- * iOS3-VM — the multi-touch controller on spi1 chip select 0.
+ * S5LBox — the multi-touch controller on spi1 chip select 0.
  *
  * /arm-io/spi1/multi-touch, `compatible "multi-touch,n82"`, reg[0] = 0 (the
  * chip select — there is no `chip-select` property anywhere in the shipped

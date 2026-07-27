@@ -1,4 +1,4 @@
-# iOS3-VM continuation handoff
+# S5LBox continuation handoff
 
 > **CURRENT STATE, 2026-07-26 — read §13.0j before anything else.**
 > SpringBoard is **crash-looping**, not progressing. The guest's own
@@ -50,9 +50,9 @@
 >
 > The diagnostic implementation itself is **committed, pushed, independently
 > audited, and hosted-CI-green**.
-> [Core run 30143448600](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30143448600)
+> [Core run 30143448600](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30143448600)
 > passed all eight jobs, and
-> [iOS run 30143455036](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30143455036)
+> [iOS run 30143455036](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30143455036)
 > passed its unsigned-package job for exact commit `5a40c5e`. Strict GCC,
 > one-target build, `git diff --check`, exact zero-instruction firmware gates,
 > and the tracked launcher's parser/fail-closed smoke also passed. Hosted CI
@@ -195,7 +195,7 @@ Treat the user's low C: storage as a hard boundary, not a preference.
 
 - Keep all mutable build trees, temporary files, caches, downloaded tools,
   copied binaries, logs, work images, and firmware-run artifacts below
-  `F:\JOSHUA_1st_2021\projects\iOS3-VM`.
+  `F:\JOSHUA_1st_2021\projects\S5LBox`.
 - Before any tool that may create temporary files, set `TEMP`, `TMP`, and
   `TMPDIR` to an existing F:-local directory such as `work\tmp` or the current
   run's `tmp` directory.
@@ -220,7 +220,7 @@ Treat the user's low C: storage as a hard boundary, not a preference.
 PowerShell setup for a small local command:
 
 ```powershell
-$repo = 'F:\JOSHUA_1st_2021\projects\iOS3-VM'
+$repo = 'F:\JOSHUA_1st_2021\projects\S5LBox'
 $env:TEMP = Join-Path $repo 'work\tmp'
 $env:TMP = $env:TEMP
 $env:TMPDIR = $env:TEMP
@@ -235,9 +235,9 @@ The prepared Run23 launcher sets those variables to its own F:-local
 ### Remotes, branch, and committed baselines
 
 - Repository:
-  `F:\JOSHUA_1st_2021\projects\iOS3-VM`
+  `F:\JOSHUA_1st_2021\projects\S5LBox`
 - Public remote:
-  `https://github.com/j0shua-SYSON/iOS3-VM.git`
+  `https://github.com/j0shua-SYSON/S5LBox.git`
 - Active branch:
   `codex/m5-hardening`
 - Tracking branch:
@@ -258,9 +258,9 @@ The exact Run22 baseline passed all eight jobs in hosted core run
 `30106957804`. That firmware result belongs to `40209b2`. The current
 diagnostic implementation has its own exact hosted results:
 
-- [core run 30143448600](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30143448600):
+- [core run 30143448600](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30143448600):
   success, eight of eight jobs;
-- [iOS run 30143455036](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30143455036):
+- [iOS run 30143455036](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30143455036):
   success, one unsigned-package job.
 
 The documentation publication that contains this final status is a docs-only
@@ -1113,7 +1113,7 @@ focused audit and all validation gates after the final edit.
 Use the existing F:-local build tree and one target:
 
 ```powershell
-$repo = 'F:\JOSHUA_1st_2021\projects\iOS3-VM'
+$repo = 'F:\JOSHUA_1st_2021\projects\S5LBox'
 $env:TEMP = Join-Path $repo 'work\tmp'
 $env:TMP = $env:TEMP
 $env:TMPDIR = $env:TEMP
@@ -1227,10 +1227,10 @@ git push origin codex/m5-hardening
 The publication gate is complete for exact diagnostic commit
 `5a40c5eec5bbf7c4b7d8909d0c1f364bc078338a`:
 
-- [core run 30143448600](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30143448600)
+- [core run 30143448600](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30143448600)
   completed successfully with all eight Linux/macOS/Windows, JIT,
   ASan+UBSan, and warnings-as-errors jobs green;
-- [iOS run 30143455036](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30143455036)
+- [iOS run 30143455036](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30143455036)
   completed successfully with its unsigned arm64 package job green.
 
 For a future source change, follow the same process below.
@@ -3996,7 +3996,7 @@ Reproduction, from PowerShell (**not** Git Bash — §23.4a explains why
 `--fstab` dies there); written as one line per argument so it can be pasted
 without continuation characters:
 
-    $r = "F:\JOSHUA_1st_2021\projects\iOS3-VM"
+    $r = "F:\JOSHUA_1st_2021\projects\S5LBox"
     $d = "$r\work\run74-ppp"
     New-Item -ItemType Directory -Force "$d\firmware" | Out-Null
     Copy-Item "$r\firmware\screen.ppm" "$d\firmware\screen.ppm" -Force

@@ -1,5 +1,5 @@
 /*
- * iOS3-VM — turning a finger on the host's screen into a guest coordinate.
+ * S5LBox — turning a finger on the host's screen into a guest coordinate.
  *
  * The guest panel is 320x480 and the host's is not, so the picture is fitted
  * inside the view with its aspect ratio preserved and the leftover space is
@@ -21,8 +21,8 @@
  *
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed.
  */
-#ifndef IOS3VM_APP_VMTOUCHMAP_H
-#define IOS3VM_APP_VMTOUCHMAP_H
+#ifndef S5LBOX_APP_VMTOUCHMAP_H
+#define S5LBOX_APP_VMTOUCHMAP_H
 
 #include <stdbool.h>
 
@@ -100,4 +100,4 @@ void vm_touch_tracker_reset(vm_touch_tracker_t *tracker);
 bool vm_touch_track(vm_touch_tracker_t *tracker, vm_touch_phase_t phase,
                     vm_touch_point_t mapped, int *out_x, int *out_y);
 
-#endif /* IOS3VM_APP_VMTOUCHMAP_H */
+#endif /* S5LBOX_APP_VMTOUCHMAP_H */

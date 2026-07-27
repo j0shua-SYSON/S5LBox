@@ -1,5 +1,5 @@
 /*
- * iOS3-VM — LZSS decompression (Okumura's algorithm) and Adler-32.
+ * S5LBox — LZSS decompression (Okumura's algorithm) and Adler-32.
  *
  * Written defensively: the input is a user-supplied firmware payload, so both
  * the source and destination are bounded and a truncated or hostile stream

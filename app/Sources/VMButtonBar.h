@@ -1,5 +1,5 @@
 //
-//  iOS3-VM — the emulated machine's physical buttons.
+//  S5LBox — the emulated machine's physical buttons.
 //
 //  An iPhone 3G has five inputs that are not the screen: Home, Sleep/Wake, the
 //  two volume keys and the ringer switch. This is a row of them.

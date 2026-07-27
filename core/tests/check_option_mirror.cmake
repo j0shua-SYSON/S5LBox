@@ -1,4 +1,4 @@
-# iOS3-VM -- the app's option table against bootkernel's, mechanically.
+# S5LBox -- the app's option table against bootkernel's, mechanically.
 #
 # app/Sources/VMOptions.c mirrors tools/bootkernel.c's BOOT_TOGGLES by hand, and
 # app/Tests/test_vmoptions.c pins that copy longhand. What neither of those can

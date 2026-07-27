@@ -1,5 +1,5 @@
 /*
- * iOS3-VM -- fail-closed iPhone OS 3.1.3 (7E18) kernel compatibility gate.
+ * S5LBox -- fail-closed iPhone OS 3.1.3 (7E18) kernel compatibility gate.
  *
  * The compatibility patches in this interface are valid for one exact
  * decrypted kernel build. They are deliberately host policy rather than a
@@ -8,8 +8,8 @@
  *
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed.
  */
-#ifndef IOS3VM_IOS3_KERNEL_PATCH_H
-#define IOS3VM_IOS3_KERNEL_PATCH_H
+#ifndef S5LBOX_IOS3_KERNEL_PATCH_H
+#define S5LBOX_IOS3_KERNEL_PATCH_H
 
 #include "guest_patch.h"
 #include "macho.h"
@@ -167,4 +167,4 @@ bool ios3_kernel_patch_sha256(
 const char *ios3_kernel_patch_status_string(ios3_kernel_patch_status_t status);
 const char *ios3_kernel_patch_site_string(uint32_t site);
 
-#endif /* IOS3VM_IOS3_KERNEL_PATCH_H */
+#endif /* S5LBOX_IOS3_KERNEL_PATCH_H */

@@ -1,5 +1,5 @@
 /*
- * iOS3-VM — 32-bit Mach-O parser.
+ * S5LBox — 32-bit Mach-O parser.
  *
  * Bounds-checked throughout: this reads a kernel image that came out of a
  * user-supplied IPSW, so a malformed load command must produce an error rather

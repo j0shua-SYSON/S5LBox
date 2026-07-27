@@ -1,5 +1,5 @@
 //
-//  iOS3-VM — root view controller.
+//  S5LBox — root view controller.
 //
 //  The screen is now the point. The top of the view is the guest's 320x480
 //  framebuffer; underneath it is the guest's UART, which is where an operating
@@ -195,7 +195,7 @@ static const NSUInteger kConsoleScrollback = 12000;
     [self.view addSubview:_toolbar];
     [self refreshRunControls];
 
-    [self append:@"iOS3-VM  ·  on-device self-test"];
+    [self append:@"S5LBox  ·  on-device self-test"];
     [self append:@"================================\n"];
     [self reportEnvironment];
     [self append:@"\n-- emulated S5L8900 --"];

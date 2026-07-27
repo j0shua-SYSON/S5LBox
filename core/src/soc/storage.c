@@ -1,5 +1,5 @@
 /*
- * iOS3-VM — persistent storage backing (see storage.h for why this exists).
+ * S5LBox — persistent storage backing (see storage.h for why this exists).
  *
  * The container is deliberately simple and self-describing: a magic, a version,
  * and the geometry the image was written with. Restoring into a device of a
@@ -34,7 +34,7 @@ const char *storage_strerror(storage_status_t st) {
     switch (st) {
         case STORAGE_OK:            return "ok";
         case STORAGE_ERR_IO:        return "could not read or write the file";
-        case STORAGE_ERR_FORMAT:    return "not an iOS3-VM storage image";
+        case STORAGE_ERR_FORMAT:    return "not an S5LBox storage image";
         case STORAGE_ERR_VERSION:   return "image written by an incompatible version";
         case STORAGE_ERR_GEOMETRY:  return "image geometry does not match the device";
         case STORAGE_ERR_TRUNCATED: return "image is shorter than its header promises";

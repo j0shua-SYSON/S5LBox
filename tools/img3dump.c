@@ -1,5 +1,5 @@
 /*
- * iOS3-VM — img3dump: inspect a real IMG3 file with the emulator's own parser.
+ * S5LBox — img3dump: inspect a real IMG3 file with the emulator's own parser.
  *
  * Purpose. Everything in this project has so far been validated against images
  * we generate ourselves, and that is exactly how the byte-swapped magic bug

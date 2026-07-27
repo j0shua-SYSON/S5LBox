@@ -1,5 +1,5 @@
 /*
- * iOS3-VM — full machine snapshot / restore.  See core/include/snapshot.h for
+ * S5LBox — full machine snapshot / restore.  See core/include/snapshot.h for
  * what this promises and why it exists.
  *
  * ===========================================================================
@@ -35,7 +35,7 @@
  * FILE FORMAT
  * ===========================================================================
  *   header  (40 bytes, little-endian)
- *       0  char     magic[16]        "iOS3-VM SNAPSHOT"
+ *       0  char     magic[16]        "S5LBox SNAPSHOT"
  *      16  uint32   version          SNAPSHOT_VERSION, exact match required
  *      20  uint32   header_len       40
  *      24  uint64   payload_len
@@ -1181,7 +1181,7 @@ const char *snapshot_strerror(snapshot_status_t st) {
     switch (st) {
         case SNAP_OK:            return "ok";
         case SNAP_ERR_IO:        return "I/O error";
-        case SNAP_ERR_MAGIC:     return "not an iOS3-VM snapshot (bad magic)";
+        case SNAP_ERR_MAGIC:     return "not an S5LBox snapshot (bad magic)";
         case SNAP_ERR_VERSION:   return "snapshot format version mismatch";
         case SNAP_ERR_TRUNCATED: return "snapshot file is truncated";
         case SNAP_ERR_CHECKSUM:  return "snapshot payload failed its checksum";

@@ -1,5 +1,5 @@
 /*
- * iOS3-VM — bootkernel: load the real XNU kernelcache and start executing it.
+ * S5LBox — bootkernel: load the real XNU kernelcache and start executing it.
  *
  * The kernel's segments carry VIRTUAL addresses (0xc0000000-based). At entry
  * the MMU is off, so each segment is placed at the physical address its virtual
@@ -919,7 +919,7 @@ typedef struct {
 
 static void boot_print_config(FILE *out, const boot_config_t *cfg,
                               const boot_values_t *val) {
-    fputs("iOS3-VM resolved configuration\n", out);
+    fputs("S5LBox resolved configuration\n", out);
     fputs("  (\"default\" means nothing on this command line asked for it)\n",
           out);
     for (unsigned g = 0; g < BOOT_GROUP_COUNT; g++) {

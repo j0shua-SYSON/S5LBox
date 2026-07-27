@@ -1,5 +1,5 @@
 /*
- * iOS3-VM — AES (128/192/256) and CBC mode.
+ * S5LBox — AES (128/192/256) and CBC mode.
  *
  * A compact byte-oriented implementation: no lookup-table generation beyond the
  * S-box, and the inverse S-box is derived from the forward one at init so it

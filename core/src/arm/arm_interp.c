@@ -1,5 +1,5 @@
 /*
- * iOS3-VM — ARMv6 interpreter.
+ * S5LBox — ARMv6 interpreter.
  *
  * Scope (M1, in progress): the ARM instruction set (Thumb comes later).
  * Implemented: condition evaluation, the barrel shifter with carry-out,

@@ -1,5 +1,5 @@
 /*
- * iOS3-VM — ARMv6 MMU: virtual-to-physical translation.
+ * S5LBox — ARMv6 MMU: virtual-to-physical translation.
  *
  * Implements the ARMv6 short-descriptor translation scheme the ARM1176 uses:
  * a 4096-entry first-level table indexed by VA[31:20], whose entries are either

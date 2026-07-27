@@ -1,5 +1,5 @@
 /*
- * iOS3-VM -- bounded writable block backend tests.
+ * S5LBox -- bounded writable block backend tests.
  *
  * These tests use only in-memory callbacks and deliberately exercise hostile
  * partial, retry, cancellation, overflow, and protocol outcomes.

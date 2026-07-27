@@ -1,5 +1,5 @@
 //
-//  iOS3-VM — the machine list screen. The app's root.
+//  S5LBox — the machine list screen. The app's root.
 //
 //  A table of configured machines: tap one to open it, swipe for rename,
 //  duplicate and delete, plus at the top of the screen the one sentence that

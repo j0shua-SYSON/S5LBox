@@ -1,5 +1,5 @@
 /*
- * iOS3-VM — snapboot: the snapshot acceptance harness.
+ * S5LBox — snapboot: the snapshot acceptance harness.
  *
  * WHY THIS EXISTS SEPARATELY FROM bootkernel. bootkernel is the debugging
  * instrument: it carries a 256 KB trace ring, a sampled profile, milestone hit

@@ -1,5 +1,5 @@
 /*
- * iOS3-VM — S5L8900 NAND flash device.
+ * S5LBox — S5L8900 NAND flash device.
  *
  * Models the raw device faithfully, including the property that programming can
  * only clear bits. See nand.h for why the Apple VFL/FTL layers are deliberately

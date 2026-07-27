@@ -1,13 +1,13 @@
 <div align="center">
 
-# iOS3-VM
+# S5LBox
 
 ### Project goal: boot **real iPhone OS 3** — Apple's actual kernel, `launchd`, and SpringBoard — inside an app on a modern, jailbroken iPhone.
 
 *A from-scratch emulator of the 2007 iPhone's chip, written in portable C.*
 
-[![core-tests](https://github.com/j0shua-SYSON/iOS3-VM/actions/workflows/core-tests.yml/badge.svg)](https://github.com/j0shua-SYSON/iOS3-VM/actions/workflows/core-tests.yml)
-[![ios-build](https://github.com/j0shua-SYSON/iOS3-VM/actions/workflows/ios-build.yml/badge.svg)](https://github.com/j0shua-SYSON/iOS3-VM/actions/workflows/ios-build.yml)
+[![core-tests](https://github.com/j0shua-SYSON/S5LBox/actions/workflows/core-tests.yml/badge.svg)](https://github.com/j0shua-SYSON/S5LBox/actions/workflows/core-tests.yml)
+[![ios-build](https://github.com/j0shua-SYSON/S5LBox/actions/workflows/ios-build.yml/badge.svg)](https://github.com/j0shua-SYSON/S5LBox/actions/workflows/ios-build.yml)
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![platform](https://img.shields.io/badge/host-iOS%2015%20·%20A9%20·%20jailbroken-black)
 ![guest](https://img.shields.io/badge/guest-iPhone%20OS%203.1.3%20·%20S5L8900-lightgrey)
@@ -16,7 +16,7 @@
 
 ---
 
-iOS3-VM does not reimplement iPhone OS or fake its apps. It emulates the
+S5LBox does not reimplement iPhone OS or fake its apps. It emulates the
 **hardware** of the original iPhone — the Samsung **S5L8900** chip and its ARMv6
 processor — in software, then runs Apple's own unmodified operating system on
 top of that model. You supply the firmware; none is included here. To the
@@ -294,7 +294,7 @@ No Apple firmware is committed or bundled.
 
 ## Legal
 
-iOS3-VM is an independently written emulator under the MIT license. It ships
+S5LBox is an independently written emulator under the MIT license. It ships
 **no Apple firmware images or decryption keys.** You supply firmware you are
 entitled to use. "iPhone", "iOS", and "iPhone OS" are trademarks of Apple Inc.;
 this project is not affiliated with or endorsed by Apple.

@@ -1,5 +1,5 @@
 //
-//  iOS3-VM — the emulator run loop. See VMEngine.h.
+//  S5LBox — the emulator run loop. See VMEngine.h.
 //
 //  THREADING
 //
@@ -260,7 +260,7 @@ static double vm_now(void) {
         [self appendConsole:@"[vm] could not allocate the emulator thread\n"];
         return NO;
     }
-    thread.name = @"iOS3-VM emulator";
+    thread.name = @"S5LBox emulator";
     thread.qualityOfService = NSQualityOfServiceUserInitiated;
     thread.stackSize = 512 * 1024;
 

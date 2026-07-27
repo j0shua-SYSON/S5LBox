@@ -1,5 +1,5 @@
 /*
- * iOS3-VM — many configured machines, one running at a time.
+ * S5LBox — many configured machines, one running at a time.
  *
  * WHAT THIS IS. The app has had exactly one implicit machine: one set of
  * options, one guest, no name. Every other VM app people know — UTM, Parallels,
@@ -36,8 +36,8 @@
  *
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed.
  */
-#ifndef IOS3VM_APP_VMINSTANCES_H
-#define IOS3VM_APP_VMINSTANCES_H
+#ifndef S5LBOX_APP_VMINSTANCES_H
+#define S5LBOX_APP_VMINSTANCES_H
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -206,4 +206,4 @@ vm_instance_status_t vm_instance_deserialize(vm_instance_list_t *list,
  */
 bool vm_instance_options_fit(unsigned option_count);
 
-#endif /* IOS3VM_APP_VMINSTANCES_H */
+#endif /* S5LBOX_APP_VMINSTANCES_H */

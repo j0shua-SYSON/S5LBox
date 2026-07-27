@@ -1,5 +1,5 @@
 /*
- * iOS3-VM -- adversarial tests for atomic guest-RAM patch manifests.
+ * S5LBox -- adversarial tests for atomic guest-RAM patch manifests.
  *
  * These fixtures are entirely synthetic.  Firmware-specific addresses and
  * patch bytes belong in the boot frontend, never this generic primitive.

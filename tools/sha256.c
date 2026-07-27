@@ -1,5 +1,5 @@
 /*
- * iOS3-VM -- small, allocation-free SHA-256 implementation.
+ * S5LBox -- small, allocation-free SHA-256 implementation.
  *
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed.
  */

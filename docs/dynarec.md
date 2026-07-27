@@ -1,6 +1,6 @@
 # Dynamic recompilation: ARMv6 → arm64
 
-How iOS3-VM is intended to close a large historically measured interpreter gap.
+How S5LBox is intended to close a large historically measured interpreter gap.
 The target-device gap has not been measured.
 
 This document is a **design**. Part of J2 now exists; §0 records exactly how

@@ -1,5 +1,5 @@
 //
-//  iOS3-VM — the emulator run loop.
+//  S5LBox — the emulator run loop.
 //
 //  The core in core/ is single-threaded and has no locks in it, by design. So
 //  exactly one thread ever calls into it: the one this class owns. The UI never

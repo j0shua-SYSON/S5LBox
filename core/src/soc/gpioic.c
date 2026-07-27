@@ -1,5 +1,5 @@
 /*
- * iOS3-VM — Samsung S5L8900 GPIO interrupt controller, and the GPIO pin block.
+ * S5LBox — Samsung S5L8900 GPIO interrupt controller, and the GPIO pin block.
  *
  * Two blocks, one file, because /arm-io/gpio is one device tree node with two
  * reg ranges and one driver reaches both: the interrupt cascade on the

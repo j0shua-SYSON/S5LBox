@@ -1,5 +1,5 @@
 /*
- * iOS3-VM — PC-to-symbol resolution tests.
+ * S5LBox — PC-to-symbol resolution tests.
  *
  * We ship no Apple firmware, so the kernelcache under test is built in memory:
  * a 32-bit ARM Mach-O with an LC_SYMTAB, a __PRELINK_TEXT extent and a
@@ -473,7 +473,7 @@ static void test_real_kernelcache(void) {
 }
 
 int main(void) {
-    printf("iOS3-VM symbol/kext resolver tests\n");
+    printf("S5LBox symbol/kext resolver tests\n");
     test_good_cache();
     test_no_prelink_still_names_kernel();
     test_stripped_kernel();

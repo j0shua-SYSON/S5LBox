@@ -1,7 +1,7 @@
 # Anatomy of a boot
 
 An annotated walk through one real boot of Apple's iPhone OS 3.1.3 kernel on
-iOS3-VM: from the reset vector to the last driver that starts, with the emulated
+S5LBox: from the reset vector to the last driver that starts, with the emulated
 device behind each stage.
 
 > **The stage-by-stage narrative is historical; the frontier note is current.**
@@ -64,17 +64,17 @@ device behind each stage.
 > 50.63 MiB, and the run22 and run23 directories occupy 447.42 and 447.43 MiB on
 > F:. Exact run22 source passed
 > all eight hosted jobs in
-> [core run 30106957804](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30106957804).
+> [core run 30106957804](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30106957804).
 > Earlier exact-commit hosted
-> [core run 30095081111](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30095081111)
+> [core run 30095081111](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30095081111)
 > and
-> [unsigned iOS run 30095081184](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30095081184)
+> [unsigned iOS run 30095081184](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30095081184)
 > passed for `debec04`. Later test-only `0670ab8` also passed hosted core/iOS
 > runs with VFP 469/0. Latest hosted test-only `657e8d8` passes VFP 488/0 locally and
 > hosted
-> [core run 30097023293](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30097023293)
+> [core run 30097023293](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30097023293)
 > plus
-> [unsigned iOS run 30097023356](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30097023356).
+> [unsigned iOS run 30097023356](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30097023356).
 > The installable app still runs a synthetic guest through CoreGraphics and
 > has no real-boot session, touch, audio or guest networking.
 
@@ -1060,9 +1060,9 @@ the loaded guest-RAM copy, and filesystem edits remained confined to the
 separate work image.
 
 The latest matching hosted checks at `ea92fca` also completed successfully:
-[`core-tests` run 30009684129](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30009684129)
+[`core-tests` run 30009684129](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30009684129)
 and
-[`ios-build` run 30009684054](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30009684054).
+[`ios-build` run 30009684054](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30009684054).
 Those workflows validate the public build and tests; run05 through run08 are
 the separate private-firmware runtime evidence.
 
@@ -1539,9 +1539,9 @@ placement and active CLCD window as recorded below, but not rendered pixels.
 Run19 was the first real-firmware boot of exact source commit
 `afa650e284c2b27b6a4a2a2b2d772e0f68e5dac9`. Its local preflight passed 3/3,
 and the exact commit already had green hosted core run
-[30088519878](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30088519878)
+[30088519878](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30088519878)
 and unsigned-iOS run
-[30088519892](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30088519892).
+[30088519892](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30088519892).
 The fresh 128 MiB external-md boot ran from
 `2026-07-24T11:12:00.8559935Z` to
 `2026-07-24T11:30:23.3127833Z`, exited 0 at the
@@ -1612,8 +1612,8 @@ retain control ready semantics while making mixer+SDO, not all three banks,
 the VSYNC timing predicate. The corrected local tree passes 23/23 Release
 tests, with SoC 5,504/0 and snapshot 469/0. Exact correction commit `590d224`
 also passed hosted
-[core run 30091220128](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30091220128)
-and [unsigned iOS run 30091220122](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30091220122).
+[core run 30091220128](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30091220128)
+and [unsigned iOS run 30091220122](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30091220122).
 Run20 supplied the fresh firmware result: the correction completed the exact
 TV-out chain as recorded below. That runtime success is not a render claim.
 
@@ -1734,21 +1734,21 @@ rootfs.img      c3251e7f092c939d5818e92086cb47680981cfb03731de7b55d238c942eb5e82
 The external-md bridge reported **0 failures**, guest free memory bottomed at
 **50.63 MiB**, and the retained run directory occupies **447.27 MiB on F:**.
 Hosted
-[core run 30095081111](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30095081111)
+[core run 30095081111](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30095081111)
 and
-[unsigned iOS run 30095081184](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30095081184)
+[unsigned iOS run 30095081184](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30095081184)
 passed the exact `debec04` source used by run21.
 
 The next two commits changed tests only and must not be treated as run21 source.
 `0670ab8cbf6b9febbfe059b17ffdeb755ee0133a` passed hosted
-[core run 30096115501](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30096115501)
+[core run 30096115501](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30096115501)
 and
-[unsigned iOS run 30096115527](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30096115527),
+[unsigned iOS run 30096115527](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30096115527),
 with VFP **469/0**. Latest hosted `657e8d8f2f42d09c573a4012a618e0f896307bdf`
 expands helper-sequence coverage to VFP **488/0 locally** and passed hosted
-[core run 30097023293](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30097023293)
+[core run 30097023293](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30097023293)
 plus
-[unsigned iOS run 30097023356](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30097023356).
+[unsigned iOS run 30097023356](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30097023356).
 
 ### 2026-07-25: run22 proved the saturated CommCenter send path
 
@@ -1792,7 +1792,7 @@ mutations, and zero changed pixels. The PPM retained seed SHA-256
 Immutable input hashes remained unchanged, external-md failures were zero,
 guest-free memory bottomed at **50.63 MiB**, and the retained directory
 occupies **447.42 MiB on F:**. Hosted
-[core run 30106957804](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30106957804)
+[core run 30106957804](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30106957804)
 passed all eight jobs for the exact source.
 
 ### 2026-07-25: pre-Run23 probes passed their exact startup gates
@@ -1842,9 +1842,9 @@ cold-replay the exact committed binary to the SpringBoard frontier before
 these probes can answer the ownership, service-thread, or baseband questions.
 
 The same exact commit passed every job in hosted
-[core run 30143448600](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30143448600)
+[core run 30143448600](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30143448600)
 and the unsigned-package job in explicitly dispatched
-[iOS run 30143455036](https://github.com/j0shua-SYSON/iOS3-VM/actions/runs/30143455036).
+[iOS run 30143455036](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30143455036).
 Those results validate public build/test/package behavior only. Run23 was not
 launched during this handoff.
 

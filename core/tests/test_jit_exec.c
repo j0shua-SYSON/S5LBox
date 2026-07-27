@@ -1,5 +1,5 @@
 /*
- * iOS3-VM — arm64 EXECUTION tests for the emitter and the block translator.
+ * S5LBox — arm64 EXECUTION tests for the emitter and the block translator.
  *
  * This is the only test that runs emitted code, so it is the only one that can
  * show the encodings are not merely well-formed but correct. It therefore

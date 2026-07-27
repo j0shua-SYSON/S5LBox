@@ -1,5 +1,5 @@
 /*
- * iOS3-VM — S5L8900 NAND flash device.
+ * S5LBox — S5L8900 NAND flash device.
  *
  * NAND holds the root filesystem, so it is what M4/M5 ultimately need. This
  * header models the *device*: geometry, page reads and writes, block erase,
@@ -20,8 +20,8 @@
  *
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed.
  */
-#ifndef IOS3VM_NAND_H
-#define IOS3VM_NAND_H
+#ifndef S5LBOX_NAND_H
+#define S5LBOX_NAND_H
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -76,4 +76,4 @@ nand_status_t nand_erase_block(nand_t *n, uint32_t block);
 void nand_mark_bad(nand_t *n, uint32_t block);
 bool nand_is_bad(const nand_t *n, uint32_t block);
 
-#endif /* IOS3VM_NAND_H */
+#endif /* S5LBOX_NAND_H */

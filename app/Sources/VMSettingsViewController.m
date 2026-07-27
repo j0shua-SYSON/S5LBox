@@ -1,5 +1,5 @@
 //
-//  iOS3-VM — the settings screen. See VMSettingsViewController.h.
+//  S5LBox — the settings screen. See VMSettingsViewController.h.
 //
 //  Copyright (c) 2026 j0shua-SYSON. MIT licensed.
 //

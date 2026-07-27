@@ -1,5 +1,5 @@
 /*
- * iOS3-VM — PC-to-symbol resolution: kernel nlist symbols + the prelinked
+ * S5LBox — PC-to-symbol resolution: kernel nlist symbols + the prelinked
  * kext load map. See ksyms.h for what this exists to stop us re-doing by hand.
  *
  * The plist scanner here is deliberately NOT a general XML parser. It walks

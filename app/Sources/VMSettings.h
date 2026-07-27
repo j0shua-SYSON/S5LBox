@@ -1,5 +1,5 @@
 //
-//  iOS3-VM — the app's settings, and an honest account of which of them do
+//  S5LBox — the app's settings, and an honest account of which of them do
 //  anything.
 //
 //  Two kinds of value live here and they are deliberately kept apart:

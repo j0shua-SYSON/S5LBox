@@ -1,5 +1,5 @@
 /*
- * iOS3-VM -- portable, random-access byte source.
+ * S5LBox -- portable, random-access byte source.
  *
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed.
  */

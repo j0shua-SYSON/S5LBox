@@ -1,5 +1,5 @@
 /*
- * iOS3-VM — AES (128/192/256) with CBC mode.
+ * S5LBox — AES (128/192/256) with CBC mode.
  *
  * Apple encrypts the DATA payload of 3.x-era IMG3 images with AES-CBC, so
  * decryption sits between us and running real firmware. The keys and IVs for
@@ -16,8 +16,8 @@
  *
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed.
  */
-#ifndef IOS3VM_AES_H
-#define IOS3VM_AES_H
+#ifndef S5LBOX_AES_H
+#define S5LBOX_AES_H
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -49,4 +49,4 @@ bool aes_cbc_decrypt(const aes_ctx_t *ctx, const uint8_t iv[16],
 bool aes_cbc_encrypt(const aes_ctx_t *ctx, const uint8_t iv[16],
                      const uint8_t *in, uint8_t *out, size_t len);
 
-#endif /* IOS3VM_AES_H */
+#endif /* S5LBOX_AES_H */

@@ -1,5 +1,5 @@
 /*
- * iOS3-VM — Samsung S5L8900 I2C controller.
+ * S5LBox — Samsung S5L8900 I2C controller.
  *
  * The stock AppleS5L8900XI2CController uses 32-bit accesses.  A transfer is
  * intentionally instantaneous at this abstraction boundary: BUSY therefore

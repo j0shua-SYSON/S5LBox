@@ -1,5 +1,5 @@
 /*
- * iOS3-VM -- bounded host-backed XNU32 raw memory-disk bridge.
+ * S5LBox -- bounded host-backed XNU32 raw memory-disk bridge.
  *
  * A frontend may replace one audited Thumb memory-disk character entry with
  * `svc #0xe3; svc #0xe4` and install md_raw_bridge_handle_svc() on the ARM
@@ -10,8 +10,8 @@
  *
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed.
  */
-#ifndef IOS3VM_MD_RAW_BRIDGE_H
-#define IOS3VM_MD_RAW_BRIDGE_H
+#ifndef S5LBOX_MD_RAW_BRIDGE_H
+#define S5LBOX_MD_RAW_BRIDGE_H
 
 #include "arm.h"
 #include "vm_block.h"
@@ -241,4 +241,4 @@ arm_svc_result_t md_raw_bridge_handle_svc(void *context, arm_cpu_t *cpu,
 
 const char *md_raw_bridge_error_string(md_raw_bridge_error_code_t code);
 
-#endif /* IOS3VM_MD_RAW_BRIDGE_H */
+#endif /* S5LBOX_MD_RAW_BRIDGE_H */

@@ -1,5 +1,5 @@
 /*
- * iOS3-VM — firmware loader.
+ * S5LBox — firmware loader.
  *
  * Parse -> decrypt -> place in guest RAM -> execute. Everything here operates
  * on user-supplied files, so failures are reported rather than assumed away:

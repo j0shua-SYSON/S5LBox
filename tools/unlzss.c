@@ -1,5 +1,5 @@
 /*
- * iOS3-VM — unlzss: expand an Apple "complzss" kernelcache to a raw Mach-O.
+ * S5LBox — unlzss: expand an Apple "complzss" kernelcache to a raw Mach-O.
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed.
  */
 #include "lzss.h"

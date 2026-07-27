@@ -1,5 +1,5 @@
 /*
- * iOS3-VM — the buffer between a finger and the emulated touch controller.
+ * S5LBox — the buffer between a finger and the emulated touch controller.
  *
  * WHY THIS IS A SEPARATE FILE. The UI thread produces touch reports at whatever
  * rate UIKit delivers them; the emulator thread consumes them between bounded
@@ -31,8 +31,8 @@
  *
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed.
  */
-#ifndef IOS3VM_APP_VMTOUCHQUEUE_H
-#define IOS3VM_APP_VMTOUCHQUEUE_H
+#ifndef S5LBOX_APP_VMTOUCHQUEUE_H
+#define S5LBOX_APP_VMTOUCHQUEUE_H
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -119,4 +119,4 @@ bool vm_touch_queue_peek(const vm_touch_queue_t *q, s5l_mt_contact_t *out);
 /* Remove the oldest report. Harmless on an empty queue. */
 void vm_touch_queue_pop(vm_touch_queue_t *q);
 
-#endif /* IOS3VM_APP_VMTOUCHQUEUE_H */
+#endif /* S5LBOX_APP_VMTOUCHQUEUE_H */

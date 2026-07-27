@@ -1,5 +1,5 @@
 /*
- * iOS3-VM — Apple flattened device tree parser.
+ * S5LBox — Apple flattened device tree parser.
  *
  * Written for untrusted input: every read is bounds-checked against the blob,
  * all offset arithmetic is done in 64-bit so it cannot wrap, and recursion is

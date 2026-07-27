@@ -1,5 +1,5 @@
 /*
- * iOS3-VM — the on-device demo guest.
+ * S5LBox — the on-device demo guest.
  *
  * This is the payload the app runs so that the framebuffer path can be shown to
  * WORK before real Apple firmware is available on the phone. It is deliberately
@@ -18,8 +18,8 @@
  *
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed.
  */
-#ifndef IOS3VM_APP_VMGUEST_H
-#define IOS3VM_APP_VMGUEST_H
+#ifndef S5LBOX_APP_VMGUEST_H
+#define S5LBOX_APP_VMGUEST_H
 
 #include "soc.h"
 
@@ -84,4 +84,4 @@ const uint8_t *vm_guest_display(const s5l8900_t *m,
                                 uint32_t *width, uint32_t *height,
                                 uint32_t *stride, vm_pixel_order_t *order);
 
-#endif /* IOS3VM_APP_VMGUEST_H */
+#endif /* S5LBOX_APP_VMGUEST_H */
