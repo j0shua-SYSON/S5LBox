@@ -2315,6 +2315,98 @@ at 0x3cc10000(0xea9d6000)` — and uart4 still carried **zero bytes**. The
 milestone is unchanged.
 
 
+### 2026-07-28: run98 — every touch lands in the same place, and why
+
+**The root cause of the touch failure, measured rather than reasoned.** Six
+probes, restored from a fresh v14 snapshot at the lock screen, dragging 12 steps
+of 16 pixels each from (62, 432) to (270, 432):
+
+| probe | captures | meaning |
+|---|---|---|
+| `plugin+0x2344` | **14** | the mask builder was entered, every frame |
+| `plugin+0x240c` | **14** | the position compare was reached, every frame |
+| `plugin+0x243c` | **0** | **the Position bit was NEVER granted** |
+| `plugin+0x2114` | 24 | the slew limiter ran; the flag never latched |
+| `0x000417bc` | 12 | SpringBoard discarded the move |
+
+The companion probes are what make this readable: the plugin reaches its
+decision fourteen times out of fourteen and answers "did not move" every time.
+This is not "never got there", which is the ambiguity that cost three earlier
+runs.
+
+#### The measurement that explains it
+
+`plugin+0x2114` was captured 24 times. All twelve first-calls are **byte
+identical**:
+
+```text
+pc 007d9114  r0 43a00000  r1 00000000  r2 007e0f54  r3 00000000  [sp+0] 3f400000
+```
+
+`r0` is `320.0f` and `r1` is `0.0f` — **constant across a 208-pixel drag**.
+That is normalised x = 1.0 and y = 1.0, both axes pinned at the surface
+maximum. The contact never moves a single pixel, so the 2.0 px dead band at
+`plugin+0x21ac` can never be cleared and **no step size could ever have
+worked** — which is exactly why 52 px failed identically to 16 px.
+
+#### The cause: eight zero bytes
+
+`_mt_FillMTContactDirectFromBinary` (`0x33cfdac4`) normalises each raw
+coordinate as `(v − min) / (max − min)` after clamping through `0x33d00f2c`.
+The bounds come from `_alg_InitRowColXYConvert` (`0x33d01010`), which reads the
+**second 7-byte record** of the Sensor Region Descriptor — `0x33d01dc8` stores
+`blob + 7` as the descriptor pointer:
+
+```text
+Xmax = margin + colTable[desc[5] - 1]      colTable[i] = i * 5600 / 11
+Ymax = margin + rowTable[desc[2] - 1]      rowTable[i] = i * 3600 / 7
+Xmin = Ymin = margin - 75
+```
+
+`core/src/soc/mtz2.c` answers report `0xD0` with **eight zero bytes**, so
+`desc[2]` and `desc[5]` are zero and each table is indexed at −1. `Xmax` comes
+out **−434** against `Xmin` of **−75**: a *negative span*. The clamp then
+returns the maximum for every coordinate unconditionally, on both axes, on every
+frame — reproducing the measurement exactly.
+
+The kernel side never reads a field of this blob, which is why eight zeroes
+stood for so long. Userspace does.
+
+#### The fix, and why it is not a one-liner
+
+The descriptor must carry the electrode counts the device already reports
+through `MTZ2_REPORT_GEOMETRY` — 10 columns, 15 rows — in the two bytes that
+index those tables. That makes the span −75..4656 by −75..7275, and
+`to_surface()`'s existing 937..4057 normalises to 0.214..0.873: about 16 px per
+step, past the 9.45 px slew limit and clear of the 2.0 px dead band. The
+Position bit would be granted on the first moving frame.
+
+**But `desc[5]` sits at blob offset 12, so the reply is 14 bytes, and the short
+control-read form caps at 11.** `core/tests/test_mtz2.c` catches this
+immediately:
+
+```text
+Region Descriptor does not fit the short control-read form (14 > 11), so the
+driver would use 0xE7 and a longer frame than this model builds
+```
+
+So the descriptor change requires the long control-read (report `0xE7`) to exist
+first. That is real work, and the change was reverted rather than committed
+half-done — the tree is green at 46/46.
+
+**Not established:** what the other five bytes of a region record mean, and
+whether `[2]` and `[5]` are literally electrode counts rather than table indices
+that happen to equal them for this panel. A one-boot probe at `0x33d010b0` plus
+a dump of `grid+0x148..0x14e` would read the four bounds directly and settle it
+before the device is changed.
+
+Also settled for free while pinning the plugin base (`0x007D7000`, five
+independent confirmations): the frame timestamp **does** advance at 60 Hz —
+0.016, 0.032 … 0.224 s, reassembled from the split `double` in
+`forwardContactFrame`'s ABI — and the contact count drops to **0** on liftoff,
+so `BreakTouch` is delivered and parsed. Neither was the problem.
+
+
 ### 2026-07-27: run90 — a touch reaches UIKit
 
 **The first time in this project that a synthetic finger has reached the
