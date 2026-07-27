@@ -2315,6 +2315,95 @@ at 0x3cc10000(0xea9d6000)` — and uart4 still carried **zero bytes**. The
 milestone is unchanged.
 
 
+### 2026-07-27: run80 — the guest transmits PPP. **S0 is met.**
+
+```text
+Wed Dec 31 16:00:06 1969 : Using interface ppp0
+Wed Dec 31 16:00:06 1969 : Connect: ppp0 <--> /dev/tty.debug
+
+=== UART4 / PPP ===
+    UTXH bytes written by the guest   47
+    *** MILESTONE: LCP Configure-Request on uart4 ***
+        7E FF 7D 23 C0 21 at stream offset 0, instruction 739413052
+```
+
+The milestone was stated before any of this was built and it is met exactly,
+byte for byte. The whole 47-byte stream is one complete frame:
+
+```text
+7e              HDLC flag
+ff              all-stations address
+7d 23           escaped 0x03, UI control
+c0 21           protocol 0xC021, LCP
+7d 21           escaped 0x01, Configure-Request
+7d 21           identifier 1
+7d 20 7d 34     length 0x0014 = 20
+7d 22 7d 26  7d 20 7d 20 7d 20 7d 20     option 2, ACCM = 0x00000000
+7d 25 7d 26  79 61 f5 7d 3c              option 5, magic number 0x7961f51c
+7d 27 7d 22                              option 7, protocol-field compression
+7d 28 7d 22                              option 8, address/control compression
+51 7d 39        FCS
+7e              closing flag
+```
+
+Every escape is `0x7D` followed by the byte XOR `0x20`, as RFC 1662 4.2 says,
+and the options are the four pppd 2.4.2 asks for by default. `pppd` did not
+exit: no `_exit1` was observed for it at all, against run74/75/78 where it died
+at 739,184,188. It is sitting in its negotiation loop waiting for a reply,
+which is exactly where a peer-less LCP Configure-Request should leave it.
+
+#### What actually fixed it, and what did not
+
+Nothing in the emulator changed. The device model, the device tree and the
+kernel are the same bytes that failed four runs in a row. What changed is one
+argument: `/dev/uart.debug` became `/dev/tty.debug`.
+
+`/dev/uart.debug` is real, it opens, and `tcgetattr`/`tcsetattr` work on it —
+which is why it looked right for so long. It is not a tty.
+`AppleOnboardSerialBSDClient::start` registers its cdevsw at `0xc0478060` with
+`d_ttys = NULL` and `d_type = 0` rather than `D_TTY`, and the ioctl switch at
+`0xc046fd52` has arms for `TIOCGETA` and `TIOCSETA*` but none for `TIOCSETD`
+or `TIOCSCTTY`; both fall to `movs r0,#0x19` at `0xc046fe30`, which is ENOTTY.
+The path cannot reach `ttioctl` at all — `_ttioctl`'s Thumb pointer
+`0xc01368a9` occurs exactly once in the whole 7.9 MB kernelcache, at
+`0xc0469430` inside IOSerialFamily, and `AppleOnboardSerial` never references
+it — so `linesw[PPPDISC]` was never going to be consulted.
+
+`/dev/tty.debug` is published by `IOSerialBSDClient` and is a real BSD tty.
+That it existed was **not** proven when the change was made; the argument was
+chosen because pppd probes it for free, exiting 2 with a distinct message if
+the node is absent. It was there.
+
+#### The four runs this cost, and why
+
+Worth recording, because three of them measured nothing and each failure was
+a different kind:
+
+| run | what it was for | why it told us nothing |
+|---|---|---|
+| run73 | first `--ppp` boot | died at its 700e6 cap before `connect_tty` |
+| run74 | reach the failure | launchd sent the job's output to `/dev/null` |
+| run75 | route the message | `StandardErrorPath` — pppd writes to fd **1** |
+| run78 | route it correctly | worked: ENOTTY, twice |
+
+run75 is the instructive one. The key was not ignored and launchd was not at
+fault; it named a stream `pppd` does not use. `error()` and `fatal()` share one
+emitter at `0x0002245c` which writes to `*log_to_fd`, and `_log_to_fd` at
+`0x00039c70` has a file image of **1**. Naming the wrong descriptor cost
+exactly as much as omitting the key, and looked identical from outside.
+
+The other retraction: `r3 = 0x00039c30` at the exit syscall was read as a text
+address and proposed as a probe target. `__cstring` ends at `0x35d9e`;
+`0x39c30` is `__DATA,__data`, and it is `fd_ppp`. That probe would have
+captured a variable.
+
+**S0 is met and S0 is not networking.** The guest is talking to nobody: there
+is no host-side PPP endpoint, so nothing answers the Configure-Request and no
+address is negotiated. What is proven is one direction of one link layer.
+`docs/networking.md` says what this route is and is not, and it says
+temporary.
+
+
 ### 2026-07-27: run77 — the guest reads a touch frame, and accepts it
 
 run71 delivered a report the guest never read. The attention line came up, the

@@ -54,3 +54,7 @@ compile_commands.json
 
 # Guest console tee, written into the CWD by -F runs (see the CONSOLE CAPTURE block)
 uart-console.log
+
+# Raw uart4 byte stream, written into the CWD by --ppp runs (see UART4 / PPP).
+# The bytes belong to a run, so they are kept beside its manifest under work/.
+uart4-ppp.bin
