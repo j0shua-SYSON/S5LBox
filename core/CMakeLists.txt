@@ -397,6 +397,31 @@ else()
 endif()
 add_test(NAME atomic_guest_patch COMMAND test_guest_patch)
 
+# The drag gesture the harness schedules: the phase sequence, the identifier and
+# the interpolated path, as pure arithmetic over emucore's contact struct.  Kept
+# out of tools/bootkernel.c for exactly the reason above -- it is a host policy,
+# not a property of the device -- and, more usefully, because that is what lets
+# it be pinned in milliseconds.  run90 spent a full boot discovering that eight
+# taps on one path identifier are eight fingers to UIKit; the tests here would
+# have cost nothing.
+add_library(host_mt_drag STATIC ../tools/mt_drag.c)
+target_include_directories(host_mt_drag PUBLIC ../tools)
+target_link_libraries(host_mt_drag PUBLIC emucore)   # s5l_mt_contact_t, phases
+set_target_properties(host_mt_drag PROPERTIES
+    C_STANDARD 11
+    C_STANDARD_REQUIRED YES
+    C_EXTENSIONS NO)
+if(MSVC)
+    target_compile_options(host_mt_drag PRIVATE /W4 /WX)
+else()
+    target_compile_options(host_mt_drag PRIVATE
+        -Wall -Wextra -Werror -pedantic)
+endif()
+
+add_executable(test_mt_drag tests/test_mt_drag.c)
+target_link_libraries(test_mt_drag PRIVATE host_mt_drag emucore)
+add_test(NAME mt_drag_gesture COMMAND test_mt_drag)
+
 # The exact kernel and rootfs policies authenticate caller-selected bytes with
 # the same small, allocation-free implementation.  Keep that primitive in a
 # separate strict target so neither host policy carries a private hash copy.
@@ -521,7 +546,7 @@ target_link_libraries(machoinfo PRIVATE emucore)
 add_executable(bootkernel ../tools/bootkernel.c)
 target_link_libraries(bootkernel PRIVATE
     emucore host_file_block host_guest_patch host_ios3_kernel_patch
-    host_rootfs_work)
+    host_mt_drag host_rootfs_work)
 
 # Public CI cannot contain Apple's firmware, but it can still exercise the
 # external-md parser's fail-closed boundary before any file is opened. These

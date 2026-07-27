@@ -284,3 +284,73 @@ expect_refused(button_trailing_junk "expected <name>:<at>"
     absent-kernel --button menu:1000:24000000x --print-config)
 expect_refused(button_missing_value "missing option value"
     absent-kernel --button)
+
+# --------------------------------------------------------------------------
+# 7b. --drag, the scheduled gesture.
+#
+# The same parse-time discipline as --touch's, for a stronger version of the
+# same reason: an invalid drag would be refused by the device on every
+# instruction from <at> to the end of the run, which reads exactly like "the
+# guest never drained a report" -- and a drag is many more instructions of that
+# than a tap is.
+#
+# ONE SLOT PER GESTURE is pinned here too. run90 faked a slider drag out of
+# eight --touch points and spent every available slot doing it; a drag that
+# still cost one slot per point would not have fixed anything.
+expect_config(drag_is_counted
+    "drag gestures        1"
+    absent-kernel --drag 1000:10:240:300:240 --print-config)
+expect_config(drag_expands_internally_into_one_slot
+    "drag gestures        8|touch taps           0"
+    absent-kernel --drag 1:0:0:319:479:64 --drag 2:0:0:1:1
+    --drag 3:0:0:1:1 --drag 4:0:0:1:1 --drag 5:0:0:1:1 --drag 6:0:0:1:1
+    --drag 7:0:0:1:1 --drag 8:0:0:1:1 --print-config)
+expect_config(no_drag_is_zero
+    "drag gestures        0" absent-kernel --print-config)
+# --touch is untouched by any of this: runs 77-79 and run90 are read against
+# its behaviour and both counters must stay independent.
+expect_config(drag_and_touch_are_separate_pools
+    "touch taps           1|drag gestures        1"
+    absent-kernel --touch 1000:160:240 --drag 2000:10:240:300:240
+    --print-config)
+expect_refused(drag_ninth_is_refused "at most 8 drags"
+    absent-kernel --drag 1:0:0:1:1 --drag 2:0:0:1:1 --drag 3:0:0:1:1
+    --drag 4:0:0:1:1 --drag 5:0:0:1:1 --drag 6:0:0:1:1 --drag 7:0:0:1:1
+    --drag 8:0:0:1:1 --drag 9:0:0:1:1 --print-config)
+# Every coordinate of both endpoints is bounded, not just the start.
+expect_refused(drag_start_off_panel_x "leaves a 320x480 panel"
+    absent-kernel --drag 1000:320:240:10:240 --print-config)
+expect_refused(drag_start_off_panel_y "leaves a 320x480 panel"
+    absent-kernel --drag 1000:10:480:10:240 --print-config)
+expect_refused(drag_end_off_panel_x "leaves a 320x480 panel"
+    absent-kernel --drag 1000:10:240:320:240 --print-config)
+expect_refused(drag_end_off_panel_y "leaves a 320x480 panel"
+    absent-kernel --drag 1000:10:240:10:480 --print-config)
+# Zero intermediate reports is not a small drag. It is MakeTouch followed by
+# BreakTouch -- a tap -- and run90 measured what happens to a sequence of those:
+# a 16/17/9/2 funnel, 16 reports enqueued by the kernel and 2 events delivered.
+expect_refused(drag_without_movement_reports "steps must be at least 1"
+    absent-kernel --drag 1000:10:240:300:240:0 --print-config)
+expect_refused(drag_too_many_steps "at most 64 steps"
+    absent-kernel --drag 1000:10:240:300:240:65 --print-config)
+# A span that cannot give every report its own instruction can never complete:
+# the device holds exactly one report, so two due at the same instruction are
+# not both acceptable however long the harness retries.
+expect_refused(drag_zero_span "cannot pace"
+    absent-kernel --drag 1000:10:240:300:240:8:0 --print-config)
+expect_refused(drag_span_one_short "cannot pace"
+    absent-kernel --drag 1000:10:240:300:240:8:8 --print-config)
+# ...and exactly one instruction per gap is the boundary, which is accepted.
+expect_config(drag_minimum_legal_span
+    "drag gestures        1"
+    absent-kernel --drag 1000:10:240:300:240:8:9 --print-config)
+expect_refused(drag_malformed "expected <at>:<x0>:<y0>:<x1>:<y1>"
+    absent-kernel --drag 1000-10-240-300-240 --print-config)
+expect_refused(drag_missing_field "expected <at>:<x0>:<y0>:<x1>:<y1>"
+    absent-kernel --drag 1000:10:240:300 --print-config)
+expect_refused(drag_trailing_junk "expected <at>:<x0>:<y0>:<x1>:<y1>"
+    absent-kernel --drag 1000:10:240:300:240:8:59328000x --print-config)
+expect_refused(drag_trailing_junk_on_steps "expected <at>:<x0>:<y0>:<x1>:<y1>"
+    absent-kernel --drag 1000:10:240:300:240:8x --print-config)
+expect_refused(drag_missing_value "missing option value"
+    absent-kernel --drag)

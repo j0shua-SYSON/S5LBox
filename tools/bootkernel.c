@@ -27,6 +27,7 @@
 #include "macho.h"
 #include "md_bridge.h"
 #include "md_raw_bridge.h"
+#include "mt_drag.h"
 #include "rootfs_work.h"
 #include "sha256.h"
 #include "snapshot.h"
@@ -355,7 +356,7 @@ static bool boot_option_takes_value(const char *option) {
         "-D", "-W", "-Z", "-p", "--restore", "-V", "-n", "-T",
         "-d", "-c", "-b", "-w", "-r", "--fstab", "--grow", "-R",
         "-X", "-H", "--call-probe", "--call-probe-kernel",
-        "--jailbreak-payload", "--touch", "--button"
+        "--jailbreak-payload", "--touch", "--drag", "--button"
     };
 
     if (!option) return false;
@@ -910,7 +911,7 @@ typedef struct {
     unsigned    hot_page_n;
     uint64_t    steps, win_lo, win_hi, heartbeat;
     unsigned    ba_rev, ba_ver, ktail, nsnaps, ncall_probes, ndtov, ntouch;
-    unsigned    nbuttons;
+    unsigned    ndrags, nbuttons;
     /* --ppp appends a boot argument, and it does so AFTER --print-config has
      * already exited. Without this the printed cmdline would be the one the
      * operator typed rather than the one the guest gets, and a reader would
@@ -978,6 +979,7 @@ static void boot_print_config(FILE *out, const boot_config_t *cfg,
     fprintf(out, "    %-20s %u\n", "abort trace lines", val->ktail);
     fprintf(out, "    %-20s %u\n", "call probes", val->ncall_probes);
     fprintf(out, "    %-20s %u\n", "touch taps", val->ntouch);
+    fprintf(out, "    %-20s %u\n", "drag gestures", val->ndrags);
     fprintf(out, "    %-20s %u\n", "button presses", val->nbuttons);
     fprintf(out, "    %-20s %u\n", "-D overrides", val->ndtov);
 }
@@ -5746,6 +5748,55 @@ typedef struct {
     uint64_t refusals;    /* device said no; see s5l_mtz2_set_contacts     */
 } touch_tap_t;
 
+/* --- DIAGNOSTIC: the scheduled drag (--drag) -------------------------------
+ *
+ * WHAT THIS IS AND IS NOT. Exactly what --touch is -- pending contact state on
+ * the emulated Z2, discovered by the guest's own AppleMultitouchZ2SPI through
+ * the attention line -- except that it is a SEQUENCE of reports describing ONE
+ * contact that moves, rather than two describing one that lands and lifts. It
+ * still enqueues nothing into MTIODataQueue, synthesises no GSEvent and calls
+ * no UIKit. A drag that fails to reach SpringBoard must LOOK like it failed.
+ *
+ * WHY IT EXISTS AT ALL, in one measurement. run90 faked a slider drag out of
+ * eight --touch points, and its funnel reads 16 / 17 / 9 / 2: 16 reports
+ * enqueued by the kernel (probe 0xc043d6b8 saw exactly 16, none refused), 17
+ * frames parsed in userspace at _mt_HandleMultitouchFrame, 9 surviving as far
+ * as the MultitouchHID plugin, and 2 reaching __UIApplicationHandleEvent --
+ * the first down and the first up. Eight taps on one path identifier is not a
+ * drag, it is eight fingers, and everything above the plugin coalesced them.
+ * MTZ2_PHASE_TOUCHING -- which the device model has always accepted --
+ * was emitted by nothing in this tree. mt_drag.h carries the rest of that
+ * evidence and owns the phase sequence and the interpolation, so both are
+ * testable without a boot; this struct owns only the schedule and the
+ * bookkeeping, which are not.
+ *
+ * ONE SLOT PER GESTURE. A drag expands internally into `steps + 2` reports and
+ * does not spend a --touch slot per point, which is the whole reason run90's
+ * operator had to choose between resolution and having any slots left.
+ *
+ * THE RETRY DISCIPLINE IS --touch's, PER REPORT. The device holds exactly one
+ * report and refuses a second while the first is unread, so each report is
+ * retried on every subsequent instruction until it is accepted, and the
+ * refusals are counted. Report k+1 is never even attempted until report k has
+ * been ACCEPTED, so the phase sequence the guest sees stays monotonic no
+ * matter how long any one report was delayed -- a drag whose Touching reports
+ * arrived out of order, or whose lift overtook a move, would be a worse lie
+ * than the eight taps it replaces.
+ */
+#define TOUCH_DRAG_MAX 8u
+
+typedef struct {
+    mt_drag_t g;          /* the gesture's shape; see mt_drag.h            */
+    uint64_t  at;         /* first instruction at which the landing is tried */
+    uint64_t  gap;        /* nominal instructions between reports          */
+    unsigned  reports;    /* total reports in this gesture = steps + 2     */
+    unsigned  accepted;   /* reports the DEVICE took; also the next index  */
+    uint64_t  last_at;    /* instruction of the most recent acceptance     */
+    uint64_t  down_at;    /* instruction at which the landing was ACCEPTED */
+    uint64_t  up_at;      /* ... and the lift. Only meaningful when done   */
+    uint64_t  refusals;   /* device said no; see s5l_mtz2_set_contacts     */
+} touch_drag_t;
+
 /* --- DIAGNOSTIC: the scheduled button press (--button) ----------------------
  *
  * WHAT THIS IS AND IS NOT. It moves a physical switch on the emulated board at
@@ -6097,6 +6148,12 @@ static struct {
      * touch_n is the hot-loop gate, exactly as call_probe_n is. */
     unsigned          touch_n;
     touch_tap_t       touch[TOUCH_TAP_MAX];
+
+    /* --- the scheduled drag; --drag --------------------------------------
+     * drag_n is the hot-loop gate, exactly as touch_n is. A separate array
+     * from the taps on purpose: a drag must cost one slot, not one per point. */
+    unsigned          drag_n;
+    touch_drag_t      drag[TOUCH_DRAG_MAX];
 
     /* --- the scheduled button press; --button ----------------------------
      * button_n is the hot-loop gate, exactly as touch_n is. */
@@ -16731,6 +16788,56 @@ static BOOTKERNEL_NOINLINE void touch_tap_step(uint64_t n) {
 }
 
 /*
+ * Advance every scheduled drag by one instruction.
+ *
+ * Not inlined, for the same reason touch_tap_step() is not: the step loop's
+ * whole cost when no drag is configured is one test of a global that is never
+ * written after startup.
+ *
+ * THE ORDERING RULE, which is the only interesting thing in here. `accepted`
+ * is both the count of reports the device has taken and the index of the one
+ * being attempted, so there is exactly one report in flight at any moment and
+ * report k+1 cannot be built, let alone injected, before report k succeeded.
+ * A refusal therefore delays the rest of the gesture and can never reorder or
+ * drop any of it: the guest sees MakeTouch, then Touching, then BreakTouch, in
+ * that order, whatever the device was busy with. The cost of a delay is that
+ * the drag takes longer than `span` said, and drag_report() prints the
+ * measured span next to the nominal one so that is visible rather than assumed.
+ *
+ * Each report is due `gap` instructions after the previous one was ACCEPTED,
+ * which is --touch's rule (its lift is `hold` after the accepted landing) and
+ * guarantees every report the full pacing interval of guest time regardless of
+ * how long its predecessor spent waiting.
+ */
+static BOOTKERNEL_NOINLINE void touch_drag_step(uint64_t n) {
+    if (!G.mach) return;
+    for (unsigned i = 0; i < G.drag_n; i++) {
+        touch_drag_t *d = &G.drag[i];
+        s5l_mt_contact_t c;
+        uint64_t due;
+
+        if (d->accepted >= d->reports) continue;          /* completed */
+        due = d->accepted == 0u ? d->at : d->last_at + d->gap;
+        if (n < due) continue;
+
+        /* mt_drag_contact() refuses an out-of-range index and an invalid
+         * gesture, and the parser already rejected the latter, so a false here
+         * would be a bug in this loop rather than in the command line. Skip
+         * the injection instead of feeding the device something undescribed. */
+        if (!mt_drag_contact(&d->g, d->accepted, &c)) continue;
+
+        if (!s5l_mtz2_set_contacts(&G.mach->mtz2, &c, 1u)) {
+            d->refusals++;
+            continue;      /* the device is busy or not ready; try next step */
+        }
+        if (d->accepted == 0u) d->down_at = n;
+        d->last_at = n;
+        d->accepted++;
+        if (d->accepted == d->reports) d->up_at = n;
+    }
+}
+
+/*
  * Advance every scheduled button press by one instruction. Not inlined, for the
  * same reason touch_tap_step() is not: the step loop's whole cost when no press
  * is configured is one test of a global that is never written after startup.
@@ -16815,32 +16922,15 @@ static void button_report(void) {
                s5l_gpio_read(&G.mach->gpio, S5L_GPIO_PIN_REG(22u), 4u));
 }
 
-static void touch_report(void) {
-    if (!G.touch_n) return;
-    const s5l_mtz2_t *d = G.mach ? &G.mach->mtz2 : NULL;
-
-    printf("\n=== TOUCH: SCHEDULED TAPS (%u) ===\n", G.touch_n);
-    printf("    A tap is accepted by the DEVICE, not by the guest. `down`/`up`\n"
-           "    are the instructions at which s5l_mtz2_set_contacts() returned\n"
-           "    true; `refused` counts instructions on which it returned false,\n"
-           "    which means the part was held in reset, had not yet answered the\n"
-           "    HBPP probe, or still held an unread report.\n");
-    for (unsigned i = 0; i < G.touch_n; i++) {
-        const touch_tap_t *t = &G.touch[i];
-        printf("    tap %u  at %-12llu (%3u,%3u) hold %-10llu  ",
-               i, (unsigned long long)t->at, t->x, t->y,
-               (unsigned long long)t->hold);
-        if (t->stage == 0u) printf("NEVER ACCEPTED");
-        else if (t->stage == 1u)
-            printf("down @%llu, up NEVER ACCEPTED",
-                   (unsigned long long)t->down_at);
-        else
-            printf("down @%llu up @%llu",
-                   (unsigned long long)t->down_at,
-                   (unsigned long long)t->up_at);
-        printf("  refused %llu\n", (unsigned long long)t->refusals);
-    }
-    if (!d) return;
+/*
+ * The device's own counters, printed once for whichever of --touch and --drag
+ * was armed. Kept separate from the two schedule sections because it answers a
+ * DIFFERENT question than either of them: those say what the device accepted
+ * from us, this says what the guest then did about it. `queued` versus `read`
+ * is the whole distinction, and a report that ran them together would let
+ * "injected fine" pass for "the guest saw it".
+ */
+static void mtz2_device_report(const s5l_mtz2_t *d) {
     printf("    device: queued %llu  length-reads %llu  data-reads %llu  "
            "read %llu  refused %llu\n",
            (unsigned long long)d->frames_queued,
@@ -16855,6 +16945,131 @@ static void touch_report(void) {
            (unsigned long long)d->power_edges,
            d->power_level ? 1u : 0u, d->in_reset ? 1u : 0u,
            d->hbpp_answered ? 1u : 0u);
+}
+
+/*
+ * The scheduled drags. Four outcomes, and they are spelled out separately
+ * because collapsing any two of them is how a run gets misread:
+ *
+ *   NEVER ATTEMPTED  `at` was never reached -- the run ended first, or a
+ *                    restore started past it. Nothing was injected and nothing
+ *                    was refused. This is a mistake in the command line.
+ *   NEVER STARTED    the landing was offered and refused on every instruction
+ *                    from `at` onwards. That is a fact about the DEVICE (in
+ *                    reset, no HBPP answer, or an undrained report), not about
+ *                    the gesture.
+ *   INCOMPLETE       some reports were accepted and then the run ended
+ *                    mid-gesture. The guest is holding a finger that never
+ *                    lifted, which is worth knowing before reading anything
+ *                    else in the log.
+ *   COMPLETED        every report was accepted, in order. Still not a claim
+ *                    that the guest saw any of it -- see the device block.
+ */
+static void drag_report(void) {
+    printf("\n=== TOUCH: SCHEDULED DRAGS (%u) ===\n", G.drag_n);
+    printf("    A drag is ONE contact reported many times, every report on path\n"
+           "    identifier %u: MakeTouch at the start point, Touching (phase %u)\n"
+           "    at each intermediate point, BreakTouch at the end. run90 is why\n"
+           "    that middle phase exists. Eight independent --touch points along\n"
+           "    the unlock slider measured a 16/17/9/2 funnel: 16 reports\n"
+           "    enqueued by the kernel, 17 frames parsed in userspace, 9 reaching\n"
+           "    the MultitouchHID plugin, 2 reaching __UIApplicationHandleEvent.\n"
+           "    Eight fingers landing on one identifier, not one finger moving.\n",
+           MT_DRAG_CONTACT_ID, MTZ2_PHASE_TOUCHING);
+    printf("    ACCEPTED IS NOT OBSERVED. `accepted` counts reports for which\n"
+           "    s5l_mtz2_set_contacts() returned true; `refused` counts\n"
+           "    instructions on which it returned false, which means the part\n"
+           "    was held in reset, had not answered the HBPP probe, or still\n"
+           "    held a report the guest has not read. Whether the guest\n"
+           "    CONSUMED any of them is the device block below: `read` is how\n"
+           "    many frames were clocked off the wire, and it is a different\n"
+           "    number.\n");
+    for (unsigned i = 0; i < G.drag_n; i++) {
+        const touch_drag_t *d = &G.drag[i];
+        printf("    drag %u  at %-12llu (%3u,%3u)->(%3u,%3u) steps %-3u "
+               "span %-11llu gap %llu%s\n",
+               i, (unsigned long long)d->at,
+               d->g.x0, d->g.y0, d->g.x1, d->g.y1, d->g.steps,
+               (unsigned long long)d->g.span, (unsigned long long)d->gap,
+               mt_drag_stationary(&d->g)
+                   ? "  [STATIONARY: a held contact, not a movement]" : "");
+        printf("            ");
+        if (d->accepted == 0u && d->refusals == 0u)
+            printf("NEVER ATTEMPTED (instruction %llu was never reached)",
+                   (unsigned long long)d->at);
+        else if (d->accepted == 0u)
+            printf("NEVER STARTED (the landing was refused every time it was "
+                   "offered)");
+        else if (d->accepted < d->reports) {
+            s5l_mt_contact_t c;
+            const char *phase = mt_drag_contact(&d->g, d->accepted, &c)
+                                    ? mt_drag_phase_name(c.phase) : "?";
+            /* 1-based here and only here: `accepted N/M` on the next line is
+             * a count, and printing an index beside it under the same word
+             * would read as a contradiction. */
+            printf("INCOMPLETE: stopped waiting for report %u of %u (%s); "
+                   "the finger never lifted",
+                   d->accepted + 1u, d->reports, phase);
+        } else
+            printf("COMPLETED");
+        printf("  accepted %u/%u  refused %llu\n",
+               d->accepted, d->reports, (unsigned long long)d->refusals);
+        if (d->accepted)
+            printf("            down @%llu", (unsigned long long)d->down_at);
+        if (d->accepted >= d->reports)
+            printf("  up @%llu  measured span %llu (nominal %llu)",
+                   (unsigned long long)d->up_at,
+                   (unsigned long long)(d->up_at - d->down_at),
+                   (unsigned long long)d->g.span);
+        if (d->accepted) printf("\n");
+    }
+    /*
+     * Both armed means both are reporting contact id %u, and that is not two
+     * fingers -- it is one path identifier being driven by two schedules that
+     * know nothing about each other. Whether their windows actually overlapped
+     * depends on how often the device refused each of them, so this cannot be
+     * decided at parse time; saying it here is the honest alternative to
+     * guessing.
+     */
+    if (G.touch_n)
+        printf("    NOTE: %u --touch tap%s path identifier %u with these\n"
+               "          drags. Where their windows overlap the guest is shown\n"
+               "          one contact driven by two schedules, and neither\n"
+               "          section above can tell you which report it saw.\n",
+               G.touch_n, G.touch_n == 1u ? " shares" : "s share",
+               MT_DRAG_CONTACT_ID);
+}
+
+static void touch_report(void) {
+    if (!G.touch_n && !G.drag_n) return;
+    const s5l_mtz2_t *d = G.mach ? &G.mach->mtz2 : NULL;
+
+    if (G.touch_n) {
+        printf("\n=== TOUCH: SCHEDULED TAPS (%u) ===\n", G.touch_n);
+        printf("    A tap is accepted by the DEVICE, not by the guest. `down`/`up`\n"
+               "    are the instructions at which s5l_mtz2_set_contacts() returned\n"
+               "    true; `refused` counts instructions on which it returned false,\n"
+               "    which means the part was held in reset, had not yet answered the\n"
+               "    HBPP probe, or still held an unread report.\n");
+        for (unsigned i = 0; i < G.touch_n; i++) {
+            const touch_tap_t *t = &G.touch[i];
+            printf("    tap %u  at %-12llu (%3u,%3u) hold %-10llu  ",
+                   i, (unsigned long long)t->at, t->x, t->y,
+                   (unsigned long long)t->hold);
+            if (t->stage == 0u) printf("NEVER ACCEPTED");
+            else if (t->stage == 1u)
+                printf("down @%llu, up NEVER ACCEPTED",
+                       (unsigned long long)t->down_at);
+            else
+                printf("down @%llu up @%llu",
+                       (unsigned long long)t->down_at,
+                       (unsigned long long)t->up_at);
+            printf("  refused %llu\n", (unsigned long long)t->refusals);
+        }
+    }
+    if (G.drag_n) drag_report();
+    if (!d) return;
+    mtz2_device_report(d);
 }
 
 static void framebuffer_surface_refresh(void) {
@@ -22247,6 +22462,7 @@ static void boot_print_usage(FILE *stream, const char *argv0) {
             "          [--call-probe <user-mode-pc>] ...\n"
             "          [--call-probe-kernel <kernel-mode-pc>] ...\n"
             "          [--touch <at>:<x>:<y>[:<hold>]] ...\n"
+            "          [--drag <at>:<x0>:<y0>:<x1>:<y1>[:<steps>[:<span>]]] ...\n"
             "          [--button <name>:<at>[:<hold>]] ...\n"
             "          [--external-md <immutable-source.img> <new-work.img>]\n"
             "          [--jailbreak-payload <path>]\n"
@@ -22320,6 +22536,45 @@ static void boot_print_usage(FILE *stream, const char *argv0) {
             "      accepts it, and the refusals are reported: \"the guest never\n"
             "      read the first report\" and \"the tap was never attempted\" are\n"
             "      different failures and must not print the same.\n"
+            "  --drag <at>:<x0>:<y0>:<x1>:<y1>[:<steps>[:<span>]]  repeatable,\n"
+            "      up to 8, and ONE slot per gesture however many points it\n"
+            "      has. At instruction <at> the emulated Z2 reports one finger\n"
+            "      LANDING at panel pixel (<x0>,<y0>); it then reports the SAME\n"
+            "      contact still down at <steps> points interpolated along the\n"
+            "      straight line to (<x1>,<y1>) (default 8, at least 1, at most\n"
+            "      64), and finally reports it LIFTING at (<x1>,<y1>) exactly.\n"
+            "      That middle phase -- MTZ2_PHASE_TOUCHING, which the device\n"
+            "      has always accepted and nothing here ever sent -- is the\n"
+            "      whole difference from repeated --touch. run90 faked a slider\n"
+            "      drag out of eight taps and measured a 16/17/9/2 funnel: the\n"
+            "      kernel enqueued all 16 reports, userspace parsed 17 frames,\n"
+            "      9 reached the MultitouchHID plugin and 2 reached\n"
+            "      __UIApplicationHandleEvent. Eight landings on one path\n"
+            "      identifier is eight fingers, not one drag.\n"
+            "      <span> is the NOMINAL instruction count from the accepted\n"
+            "      landing to the lift, split evenly into <steps>+1 gaps. It\n"
+            "      defaults to one 60 Hz scan of the modelled part per gap --\n"
+            "      6,592,000 instructions, so 59,328,000 for the default 8\n"
+            "      steps, about 144 ms of guest time. A shorter span is allowed\n"
+            "      and is not faster: the device holds one report at a time, so\n"
+            "      the extra reports are simply refused until the guest drains\n"
+            "      the previous one, and the run report prints the measured\n"
+            "      span beside the nominal one. A span too short to give every\n"
+            "      report its own instruction is REFUSED.\n"
+            "      Every report retries every instruction until the device\n"
+            "      accepts it, and report N+1 is not attempted until report N\n"
+            "      was accepted, so a busy device delays the gesture and can\n"
+            "      never reorder or drop part of it. The report distinguishes\n"
+            "      never attempted, never started, incomplete and completed,\n"
+            "      and none of those is a claim that the guest CONSUMED\n"
+            "      anything -- that is the device block's `read` count.\n"
+            "      Coincident endpoints are allowed and are labelled STATIONARY\n"
+            "      in the report: that is a held contact, not a movement.\n"
+            "      Like --touch this enqueues nothing into MTIODataQueue,\n"
+            "      builds no GSEvent and calls no UIKit; a drag that does not\n"
+            "      reach SpringBoard looks broken instead of being faked past.\n"
+            "      Both options report contact id 1, so overlapping --touch and\n"
+            "      --drag windows drive one path identifier from two schedules.\n"
             "  --button <name>:<at>[:<hold>]  repeatable, up to 8. At\n"
             "      instruction <at>, move one of the board's five physical\n"
             "      switches to its pressed position; <hold> instructions after\n"
@@ -22427,6 +22682,10 @@ int main(int argc, char **argv) {
     touch_tap_t touch_taps[TOUCH_TAP_MAX];
     unsigned touch_n = 0;
     memset(touch_taps, 0, sizeof touch_taps);
+    /* --drag, for exactly the same reason and with the same trap. */
+    touch_drag_t drags[TOUCH_DRAG_MAX];
+    unsigned drag_n = 0;
+    memset(drags, 0, sizeof drags);
     /* --button, for exactly the same reason and with the same trap. */
     button_press_t button_presses[BUTTON_PRESS_MAX];
     unsigned button_n = 0;
@@ -22952,6 +23211,123 @@ int main(int argc, char **argv) {
                     argv[i]);
             return 1;
         }
+        else if (!strcmp(argv[i], "--drag")) {
+            /*
+             * --drag <at>:<x0>:<y0>:<x1>:<y1>[:<steps>[:<span>]]
+             *
+             * Validated here for --touch's reason, doubled: an invalid drag
+             * would be refused by the device on every instruction from `at` to
+             * the end of the run and read exactly like "the guest never
+             * drained a report", and a drag is many more instructions of that
+             * than a tap is. mt_drag_valid() owns the geometry half so that
+             * core/tests/test_mt_drag.c and this parser cannot disagree about
+             * what is legal.
+             */
+            const char *spec = argv[++i];
+            char *end = NULL;
+            unsigned long long at, x0, y0, x1, y1;
+            unsigned long long steps = MT_DRAG_STEPS_DEFAULT, span = 0;
+            bool span_given = false;
+            mt_drag_t g;
+            if (!spec) { fprintf(stderr, "--drag: missing value\n"); return 1; }
+            if (drag_n >= TOUCH_DRAG_MAX) {
+                fprintf(stderr, "--drag: at most %u drags\n", TOUCH_DRAG_MAX);
+                return 1;
+            }
+            at = strtoull(spec, &end, 0);
+            if (end == spec || *end != ':') goto drag_bad;
+            spec = end + 1;
+            x0 = strtoull(spec, &end, 0);
+            if (end == spec || *end != ':') goto drag_bad;
+            spec = end + 1;
+            y0 = strtoull(spec, &end, 0);
+            if (end == spec || *end != ':') goto drag_bad;
+            spec = end + 1;
+            x1 = strtoull(spec, &end, 0);
+            if (end == spec || *end != ':') goto drag_bad;
+            spec = end + 1;
+            y1 = strtoull(spec, &end, 0);
+            if (end == spec) goto drag_bad;
+            if (*end == ':') {
+                spec = end + 1;
+                steps = strtoull(spec, &end, 0);
+                if (end == spec) goto drag_bad;
+                if (*end == ':') {
+                    spec = end + 1;
+                    span = strtoull(spec, &end, 0);
+                    if (end == spec) goto drag_bad;
+                    span_given = true;
+                }
+            }
+            if (*end != '\0') goto drag_bad;
+            /*
+             * Diagnose each field separately rather than handing the whole
+             * gesture to mt_drag_valid() and printing one verdict: "off the
+             * panel", "no intermediate reports" and "too short to pace" are
+             * three different mistakes with three different fixes, and a
+             * single "invalid drag" would make the operator guess.
+             */
+            if (x0 >= S5L_MT_PANEL_W || y0 >= S5L_MT_PANEL_H ||
+                x1 >= S5L_MT_PANEL_W || y1 >= S5L_MT_PANEL_H) {
+                fprintf(stderr,
+                        "--drag: (%llu,%llu)->(%llu,%llu) leaves a %ux%u "
+                        "panel\n", x0, y0, x1, y1,
+                        S5L_MT_PANEL_W, S5L_MT_PANEL_H);
+                return 1;
+            }
+            if (steps < MT_DRAG_STEPS_MIN) {
+                fprintf(stderr,
+                        "--drag: steps must be at least %u; a drag with no "
+                        "intermediate report emits only MakeTouch and "
+                        "BreakTouch, which is a tap -- use --touch, or read "
+                        "run90 for what UIKit does with one\n",
+                        MT_DRAG_STEPS_MIN);
+                return 1;
+            }
+            if (steps > MT_DRAG_STEPS_MAX) {
+                fprintf(stderr, "--drag: at most %u steps\n",
+                        MT_DRAG_STEPS_MAX);
+                return 1;
+            }
+            if (!span_given) span = mt_drag_span_default((unsigned)steps);
+            if (span < steps + 1u) {
+                fprintf(stderr,
+                        "--drag: span %llu cannot pace %llu reports; the "
+                        "device holds one report at a time, so two due on the "
+                        "same instruction can never both be accepted. Give at "
+                        "least %llu, or %llu for one report per %llu-"
+                        "instruction scan frame\n",
+                        span, steps + 2u, steps + 1u,
+                        (unsigned long long)mt_drag_span_default(
+                            (unsigned)steps),
+                        (unsigned long long)MT_DRAG_FRAME_INSTRS);
+                return 1;
+            }
+            memset(&g, 0, sizeof g);
+            g.x0 = (uint16_t)x0; g.y0 = (uint16_t)y0;
+            g.x1 = (uint16_t)x1; g.y1 = (uint16_t)y1;
+            g.steps = (unsigned)steps;
+            g.span  = span;
+            /* Belt and braces, and it is not free padding: the checks above
+             * are a transcription of mt_drag_valid()'s and the two must never
+             * drift apart quietly. */
+            if (!mt_drag_valid(&g)) {
+                fprintf(stderr, "--drag: '%s' is not a gesture this harness "
+                                "can emit\n", argv[i]);
+                return 1;
+            }
+            drags[drag_n].g       = g;
+            drags[drag_n].at      = at;
+            drags[drag_n].gap     = mt_drag_gap(&g);
+            drags[drag_n].reports = mt_drag_reports(&g);
+            drag_n++;
+            continue;
+        drag_bad:
+            fprintf(stderr,
+                    "--drag: expected <at>:<x0>:<y0>:<x1>:<y1>[:<steps>"
+                    "[:<span>]], got '%s'\n", argv[i]);
+            return 1;
+        }
         else if (!strcmp(argv[i], "--restore")) restore_path = argv[++i];
         else if (!strcmp(argv[i], "-V")) {
             if (!parse_u32_arg("-V", argv[++i], &virt_base)) return 1;
@@ -23389,6 +23765,7 @@ int main(int argc, char **argv) {
     resolved.nsnaps       = nsnaps;
     resolved.ncall_probes = call_probe_n;
     resolved.ntouch       = touch_n;
+    resolved.ndrags       = drag_n;
     resolved.nbuttons     = button_n;
     resolved.ndtov        = ndtov;
     resolved.ppp          = ppp;
@@ -24753,6 +25130,10 @@ external_md_work_ready:
      */
     for (unsigned q = 0; q < touch_n; q++) G.touch[q] = touch_taps[q];
     G.touch_n = touch_n;
+    /* The scheduled drags, with the SAME ordering rule and for the same
+     * reason: drag_n is set LAST and is what arms the step loop. */
+    for (unsigned q = 0; q < drag_n; q++) G.drag[q] = drags[q];
+    G.drag_n = drag_n;
     /*
      * The scheduled presses, with the SAME ordering rule and for the same
      * reason: G is zeroed by spy_install(), so button_n is set LAST and is
@@ -24779,6 +25160,17 @@ external_md_work_ready:
                    (unsigned long long)touch_taps[q].at,
                    touch_taps[q].x, touch_taps[q].y,
                    (unsigned long long)touch_taps[q].hold);
+        printf("\n");
+    }
+    if (drag_n) {
+        printf("drag      : armed on %u drag%s:", drag_n,
+               drag_n == 1u ? "" : "s");
+        for (unsigned q = 0; q < drag_n; q++)
+            printf(" @%llu(%u,%u)->(%u,%u)steps%u+2span%llu",
+                   (unsigned long long)drags[q].at,
+                   drags[q].g.x0, drags[q].g.y0,
+                   drags[q].g.x1, drags[q].g.y1,
+                   drags[q].g.steps, (unsigned long long)drags[q].g.span);
         printf("\n");
     }
     if (call_probe_n) {
@@ -25369,6 +25761,7 @@ external_md_work_ready:
             thread_exception_return_gate_va, sp_before);
         s5l8900_tick(&mach, 1);
         if (G.touch_n) touch_tap_step(n);
+        if (G.drag_n) touch_drag_step(n);
         if (G.button_n) button_press_step(n);
         if (!save_due_snapshots(&mach, snaps, nsnaps)) return 4;
 
