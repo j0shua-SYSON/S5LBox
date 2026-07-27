@@ -2315,6 +2315,98 @@ at 0x3cc10000(0xea9d6000)` — and uart4 still carried **zero bytes**. The
 milestone is unchanged.
 
 
+### 2026-07-27: run90 — a touch reaches UIKit
+
+**The first time in this project that a synthetic finger has reached the
+application.** Not the driver, not the kernel queue, not SpringBoard's vicinity
+— `__UIApplicationHandleEvent`, called from GraphicsServices.
+
+run90 restored run85's 3.5e9 snapshot — the machine sitting at the lock screen
+— and dragged a contact across the unlock slider from (62, 432) to (270, 432)
+in eight steps, with six probes spanning the whole delivery chain.
+
+| probe | mode | captures | meaning |
+|---|---|---|---|
+| `0xc043d6b8` | kernel | **16** | every event enqueued to userspace |
+| `0xc043d560` | kernel | 0 | nobody newly subscribed |
+| `0xc043d57c` | kernel | 0 | **nobody unsubscribed** |
+| `0x33cfb3ec` | user | **17** | frames crossed into userspace |
+| `0x33cfdee0` | user | 9 | reached the MultitouchHID plugin |
+| `0x324f6edc` | user | **2** | **reached UIKit** |
+
+The kernel dropped nothing, and the correlation is exact — 8 downs and 8 ups,
+every one enqueued ~43,000 instructions after its scheduled moment:
+
+```text
+@3520043350  @3523043403  @3526042968  @3529043038
+@3532042997  @3535042968  @3538042959  @3541042997     <- the 8 downs
+@3544042971  @3547042968  @3550043017  @3553042980
+@3556042959  @3559042997  @3562042988  @3565042968     <- the 8 ups
+```
+
+Both `__UIApplicationHandleEvent` captures arrive via `lr 335067e4`, the `blx`
+inside GraphicsServices' `PurpleEventCallback` — one 643k instructions after
+the first finger-down, one 77k after the finger-up.
+
+`0xc043d560` reading zero is not a contradiction: the snapshot restored a
+machine whose client had already subscribed before 3.5e9. `0xc043d57c` reading
+zero is the load-bearing one — **nobody unsubscribed at any point.**
+
+#### Two theories die here
+
+**"Nothing is listening"** is finished. It was already retracted on the
+strength of run77's single enqueue; run90 buries it with 16 enqueues, 17
+userspace handles and 2 app deliveries.
+
+**The `UILocked` gate is not blocking delivery to the app.** MultitouchHID
+drops frames while that flag is set and it initialises to 1, which was the
+leading reason to expect an injected swipe to vanish. Events reached UIKit
+anyway. Whatever that gate does here, it is not swallowing the gesture.
+
+#### It did not unlock, and the reason is ours
+
+The final frame is **273,206 of 460,800 non-zero bytes — byte-identical to
+run85.** Nothing moved.
+
+UIKit received a **tap**, not a **drag**. The finger-down arrived and the
+finger-up arrived; *none of the seven intermediate positions became an
+application event*. Slide-to-unlock needs the movement between them, so a tap
+on the slider is correctly ignored.
+
+The cause is a defect in our harness, confirmed by reading it rather than
+inferred from the funnel — `tools/bootkernel.c`, `touch_tap_step()`:
+
+```c
+c.phase    = t->stage == 0u ? MTZ2_PHASE_MAKE_TOUCH : MTZ2_PHASE_BREAK_TOUCH;
+c.pressure = t->stage == 0u ? 160u : 0u;
+```
+
+with `c.id = 1u` for every tap. **`MTZ2_PHASE_TOUCHING` — value 4, "still
+down, possibly moving" — is never emitted by the harness anywhere**, though
+`s5l_mtz2_set_contacts()` validates and stores it and the device model has
+supported it since the phase encoding was written.
+
+So eight `--touch` points are not a drag and never could be: they are eight
+independent *"finger just landed"* reports for the same contact id. A HID stack
+that coalesced or discarded seven of them was behaving correctly. No amount of
+geometry tuning would have fixed this, and the 16/17/9/2 funnel is what a
+correct stack looks like when it is fed a malformed gesture.
+
+The fix is a drag primitive that emits `MAKE_TOUCH`, then `TOUCHING` for every
+intermediate report, then `BREAK_TOUCH`, as one gesture on one contact id.
+
+#### What run90 settles for the record
+
+- The device→driver→kernel→userspace→plugin→SpringBoard→GraphicsServices→UIKit
+  chain **works end to end.**
+- The remaining failure is in **gesture semantics, in our harness** — not in
+  the emulator core, not in the kernel, and not in a missing subscriber.
+- One caveat on provenance: run90 used run85's archived binary, which predates
+  the per-run capture fix, so its frame went to the shared `firmware/screen.ppm`.
+  The byte count is identical to run85's, so nothing is ambiguous here, but the
+  capture is not independently owned.
+
+
 ### 2026-07-27: run85 — the lock screen
 
 ![the lock screen](images/run85-lock-screen.png)
