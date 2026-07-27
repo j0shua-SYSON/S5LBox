@@ -24,6 +24,7 @@ typedef NS_ENUM(NSInteger, VMSettingsSection) {
 
 typedef NS_ENUM(NSInteger, VMGeneralRow) {
     VMGeneralRowManual = 0,
+    VMGeneralRowJailbreak,
     VMGeneralRowDeveloperMode,
     VMGeneralRowCount
 };
@@ -31,6 +32,7 @@ typedef NS_ENUM(NSInteger, VMGeneralRow) {
 typedef NS_ENUM(NSInteger, VMDiagnosticsRow) {
     VMDiagnosticsRowInstructionCap = 0,
     VMDiagnosticsRowPauseInBackground,
+    VMDiagnosticsRowInlineConsole,
     VMDiagnosticsRowCount
 };
 
@@ -69,6 +71,8 @@ static NSString *VMStringFromC(const char *text) {
                                   style:(UITableViewCellStyle)style;
 - (void)performReset;
 - (void)refreshBanner;
+- (void)jailbreakToggled:(UISwitch *)sender;
+- (void)inlineConsoleChanged:(UISwitch *)sender;
 - (void)developerModeToggled:(UISwitch *)sender;
 @end
 
@@ -166,6 +170,19 @@ static NSString *VMStringFromC(const char *text) {
 /* The banner says the same true thing in both modes, but it cannot name "the
  * three sections below" in a mode that has none -- a caveat that describes a
  * screen the reader is not looking at reads as a bug in the caveat. */
+
+- (void)jailbreakToggled:(UISwitch *)sender {
+    [[VMSettings sharedSettings] setJailbreakEnabled:sender.isOn];
+    /* Developer mode shows the two halves as separate switches, and they have
+     * just both moved. Reload so the screen cannot show this on and one half
+     * off at the same time. */
+    if ([[VMSettings sharedSettings] developerMode]) [self.tableView reloadData];
+}
+
+- (void)inlineConsoleChanged:(UISwitch *)sender {
+    [[VMSettings sharedSettings] setInlineConsole:sender.isOn];
+}
+
 - (void)refreshBanner {
     BOOL dev = [[VMSettings sharedSettings] developerMode];
     _banner.text = dev
@@ -289,9 +306,17 @@ titleForFooterInSection:(NSInteger)section {
             ? @"Developer mode is on: the option table, the guest console and "
               @"the diagnostics are shown. None of those switches changes this "
               @"app's built-in test program."
-            : @"New here? Read the manual first. Developer mode adds the full "
-              @"option table, the guest console and diagnostics — useful for "
-              @"working on the emulator, noise otherwise.";
+            : @"New here? Read the manual first.
+
+Jailbreak disables the "
+              @"guest's signature checking and installs Cydia into that "
+              @"machine's own files. It applies to a real firmware boot — this "
+              @"app boots none yet, so today it is recorded and not performed."
+              @"
+
+Developer mode adds the full option table, the guest "
+              @"console and diagnostics — useful for working on the emulator, "
+              @"noise otherwise.";
     }
     (void)tableView;
 
@@ -368,6 +393,15 @@ titleForFooterInSection:(NSInteger)section {
             cell.textLabel.text = @"Manual";
             cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
             cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+        } else if (indexPath.row == VMGeneralRowJailbreak) {
+            cell.textLabel.text = @"Jailbreak";
+            cell.accessoryType = UITableViewCellAccessoryNone;
+            cell.selectionStyle = UITableViewCellSelectionStyleNone;
+            UISwitch *sw = [[UISwitch alloc] init];
+            sw.on = [[VMSettings sharedSettings] jailbreakEnabled];
+            [sw addTarget:self action:@selector(jailbreakToggled:)
+                 forControlEvents:UIControlEventValueChanged];
+            cell.accessoryView = sw;
         } else {
             cell.textLabel.text = @"Developer Mode";
             cell.accessoryType = UITableViewCellAccessoryNone;
@@ -464,6 +498,23 @@ titleForFooterInSection:(NSInteger)section {
                     @"%@  ·  applied  ·  tap to change",
                     VMDescribeInstructionCap([_settings instructionCap])];
                 cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+                return cell;
+            }
+
+            if (indexPath.row == VMDiagnosticsRowInlineConsole) {
+                UITableViewCell *cell = [self cellWithIdentifier:kVMSwitchCell
+                                                           style:UITableViewCellStyleSubtitle];
+                cell.textLabel.text = @"Console under the screen";
+                cell.detailTextLabel.text =
+                    @"Applied. Puts the guest's serial output back beneath the "
+                     "picture for live debugging, as it was before it moved to "
+                     "its own screen. Costs about a third of the picture.";
+                UISwitch *t = [[UISwitch alloc] initWithFrame:CGRectZero];
+                t.on = [[VMSettings sharedSettings] inlineConsole];
+                [t addTarget:self action:@selector(inlineConsoleChanged:)
+                    forControlEvents:UIControlEventValueChanged];
+                cell.accessoryView = t;
+                cell.selectionStyle = UITableViewCellSelectionStyleNone;
                 return cell;
             }
 

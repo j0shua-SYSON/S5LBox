@@ -187,14 +187,14 @@ static const NSUInteger kConsoleScrollback = 12000;
     _console.dataDetectorTypes = UIDataDetectorTypeNone;
     _console.textContainerInset = UIEdgeInsetsMake(6, 12, 12, 12);
     /*
-     * DELIBERATELY NOT added as a subview. The guest's serial output is the
-     * most valuable thing in this app to about one person in fifty and the
-     * least useful to everybody else, and it used to occupy 38% of the main
-     * screen. It lives on its own screen now; this view object stays only
-     * because -flushConsole already writes into it and the Console screen
-     * reads its text out. Adding it back here is not a formatting choice, it
-     * is undoing the change.
+     * In the hierarchy but HIDDEN by default. The guest's serial output used
+     * to occupy 38% of this screen for everybody; it now has its own screen,
+     * and comes back underneath the picture only when "Console under the
+     * screen" is on -- a developer-mode setting whose one real use is watching
+     * output arrive WHILE the guest runs, which a separate screen cannot do.
      */
+    _console.hidden = YES;
+    [self.view addSubview:_console];
 
     /* A real UIToolbar rather than a row of buttons: the system draws the
      * standard play/pause/refresh glyphs, and they are the ones anybody with an
@@ -304,6 +304,8 @@ static const NSUInteger kConsoleScrollback = 12000;
      * changed, which is the usual case here. */
     _toolbarBuilt = NO;
     [self refreshRunControls];
+    /* The inline-console setting changes the layout, not just the chrome. */
+    [self.view setNeedsLayout];
 }
 
 #pragma mark - Run state
@@ -499,7 +501,11 @@ static const NSUInteger kConsoleScrollback = 12000;
     // own aspect is already correct, so there is no interpretation of
     // contentsScale that can stretch the image — and vm_touch_map() is then
     // working against the same rectangle the picture is drawn in.
-    CGFloat band = freeSpace;
+    /* The picture takes everything unless the console is sharing the screen,
+     * in which case it takes the 62% it always did. */
+    BOOL inlineConsole = [[VMSettings sharedSettings] inlineConsole] &&
+                         [[VMSettings sharedSettings] developerMode];
+    CGFloat band = inlineConsole ? floor(freeSpace * 0.62) : freeSpace;
     if (band < 60.0) band = fmin(60.0, freeSpace);
     CGFloat scale = fmin(b.size.width / (CGFloat)VM_FB_WIDTH,
                          band / (CGFloat)VM_FB_HEIGHT);
@@ -515,9 +521,14 @@ static const NSUInteger kConsoleScrollback = 12000;
     _stats.frame = CGRectMake(14.0, y, b.size.width - 28.0, statsH);
     y += statsH + 4.0;
 
-    /* _console is no longer in the view hierarchy; it survives only as the
-     * text store the Console screen reads from. Laying it out would be laying
-     * out nothing. */
+    if (inlineConsole) {
+        CGFloat consoleH = toolbarY - y;
+        if (consoleH < 0.0) consoleH = 0.0;
+        _console.frame = CGRectMake(0.0, y, b.size.width, consoleH);
+        _console.hidden = NO;
+    } else {
+        _console.hidden = YES;
+    }
 }
 
 - (UIStatusBarStyle)preferredStatusBarStyle {

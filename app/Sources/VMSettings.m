@@ -13,6 +13,8 @@
 //
 #import "VMSettings.h"
 
+#import "VMOptions.h"
+
 NSString *const VMSettingsDidChangeNotification =
     @"VMSettingsDidChangeNotification";
 
@@ -25,6 +27,7 @@ static NSString *const kVMOptionKeyPrefix   = @"vm.option.";
 static NSString *const kVMInstructionCapKey = @"vm.diag.instructionCap";
 static NSString *const kVMPauseInBackground = @"vm.diag.pauseInBackground";
 static NSString *const kVMDeveloperMode = @"VMDeveloperMode";
+static NSString *const kVMInlineConsole = @"VMInlineConsole";
 
 /*
  * The instruction caps the screen cycles through. 0 first because no limit is
@@ -140,6 +143,32 @@ static const uint64_t kVMInstructionCaps[] = {
     }
     // A value from an older build, or none: rejoin the cycle at the start.
     return kVMInstructionCaps[0];
+}
+
+- (BOOL)jailbreakEnabled {
+    /* Both halves, or it is not on. A half-jailbroken machine is a state the
+     * harness supports and this switch deliberately cannot express. */
+    int cs = vm_option_index("jb-codesign");
+    int pl = vm_option_index("jb-payload");
+    if (cs < 0 || pl < 0) return NO;
+    return [self valueForOptionIndex:(NSUInteger)cs] &&
+           [self valueForOptionIndex:(NSUInteger)pl];
+}
+
+- (void)setJailbreakEnabled:(BOOL)enabled {
+    int cs = vm_option_index("jb-codesign");
+    int pl = vm_option_index("jb-payload");
+    if (cs >= 0) [self setValue:enabled forOptionIndex:(NSUInteger)cs];
+    if (pl >= 0) [self setValue:enabled forOptionIndex:(NSUInteger)pl];
+}
+
+- (BOOL)inlineConsole {
+    return [[self defaults] boolForKey:kVMInlineConsole];
+}
+
+- (void)setInlineConsole:(BOOL)inline_ {
+    [[self defaults] setBool:inline_ forKey:kVMInlineConsole];
+    [self publishChange];
 }
 
 - (BOOL)developerMode {

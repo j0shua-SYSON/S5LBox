@@ -78,6 +78,32 @@ extern NSString *const VMFirmwareJailbreakPayloadFile;
  * /arm-io/mbx" answers a question almost nobody arrived with. The desktop
  * harness is where bisecting a boot happens; this is a phone.
  */
+/*
+ * JAILBREAK, as one switch.
+ *
+ * The option table splits it in two, because the halves are independent and
+ * fail independently: jb-codesign disables the guest's signature enforcement,
+ * jb-payload installs Cydia into the work image. On the desktop that split is
+ * exactly right -- either half alone is a useful experiment.
+ *
+ * Nobody arriving at a phone wants to choose between them. This is the pair,
+ * and it is the harness's own --jailbreak compound.
+ */
+- (BOOL)jailbreakEnabled;
+- (void)setJailbreakEnabled:(BOOL)enabled;
+
+/*
+ * Put the guest's console back under the picture, the way it was before the
+ * console moved to its own screen. Developer-mode only, and off by default.
+ *
+ * Its one real use is watching output arrive WHILE the guest runs -- a
+ * separate screen is better for reading and useless for noticing the moment
+ * something appears. It costs a third of the picture, which is why it is a
+ * choice rather than the layout.
+ */
+- (BOOL)inlineConsole;
+- (void)setInlineConsole:(BOOL)inline_;
+
 - (BOOL)developerMode;
 - (void)setDeveloperMode:(BOOL)enabled;
 
