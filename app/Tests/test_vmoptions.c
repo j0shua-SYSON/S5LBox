@@ -236,12 +236,94 @@ static void test_command_line_truncation_and_nulls(void) {
           "an over-long count was not clamped to the table");
 }
 
-int main(void) {
+/*
+ * The omissions table, longhand, for the same reason the mirror is longhand:
+ * changing what the app refuses to offer should be a deliberate edit to a
+ * test, not a silent one.
+ *
+ * check_option_mirror.cmake enforces the other half -- that these names plus
+ * the mirrored ones account for bootkernel's live table exactly. What THIS
+ * checks is the part a cmake script cannot: that the list is the one that was
+ * agreed, that no name is in both tables, and that every omission carries a
+ * reason. An omission with an empty reason is indistinguishable from a row
+ * somebody dropped to make a build pass.
+ */
+static const char *const EXPECTED_OMISSIONS[] = {
+    "framebuffer", "iomfb-display", "fstab-fixup", "ramdisk-low",
+    "stop-on-abort", "kext-map", "print-config",
+};
+
+static void test_omissions(void) {
+    const unsigned want =
+        (unsigned)(sizeof EXPECTED_OMISSIONS / sizeof EXPECTED_OMISSIONS[0]);
+    CHECK(vm_option_omitted_count() == want,
+          "omission count is %u, expected %u", vm_option_omitted_count(), want);
+
+    for (unsigned i = 0; i < want && i < vm_option_omitted_count(); i++) {
+        const vm_option_omission_t *o = vm_option_omitted_at(i);
+        CHECK(o != NULL, "omission %u is NULL", i);
+        if (!o) continue;
+        CHECK(o->name && strcmp(o->name, EXPECTED_OMISSIONS[i]) == 0,
+              "omission %u is '%s', expected '%s'", i,
+              o->name ? o->name : "(null)", EXPECTED_OMISSIONS[i]);
+        /* A reason is what separates "we decided not to" from "we forgot". */
+        CHECK(o->reason && o->reason[0] != '\0',
+              "omission '%s' carries no reason", EXPECTED_OMISSIONS[i]);
+        CHECK(o->reason && strlen(o->reason) >= 20u,
+              "omission '%s' has a reason too short to be one: '%s'",
+              EXPECTED_OMISSIONS[i], o->reason ? o->reason : "");
+    }
+
+    CHECK(vm_option_omitted_at(vm_option_omitted_count()) == NULL,
+          "one past the end of the omissions table is not NULL");
+
+    /* Disjoint. A name in both tables is a contradiction: the app cannot both
+     * offer a toggle and declare that it does not. */
+    for (unsigned i = 0; i < vm_option_omitted_count(); i++) {
+        const vm_option_omission_t *o = vm_option_omitted_at(i);
+        if (!o || !o->name) continue;
+        CHECK(vm_option_index(o->name) < 0,
+              "'%s' is both mirrored and declared omitted", o->name);
+    }
+
+    /* And unique among themselves. */
+    for (unsigned i = 0; i < vm_option_omitted_count(); i++)
+        for (unsigned j = i + 1u; j < vm_option_omitted_count(); j++) {
+            const vm_option_omission_t *a = vm_option_omitted_at(i);
+            const vm_option_omission_t *b = vm_option_omitted_at(j);
+            if (!a || !b || !a->name || !b->name) continue;
+            CHECK(strcmp(a->name, b->name) != 0,
+                  "omission '%s' appears twice", a->name);
+        }
+}
+
+/*
+ * `--list` prints the app's whole claim about bootkernel's table, one name per
+ * line, for check_option_mirror.cmake to partition the real binary's
+ * --print-config against. Printed by the TEST rather than by the app so that
+ * nothing in the shipped code exists only to be tested.
+ */
+static int list_mode(void) {
+    for (unsigned i = 0; i < vm_option_count(); i++) {
+        const vm_option_t *row = vm_option_at(i);
+        if (row && row->name) printf("mirror:%s\n", row->name);
+    }
+    for (unsigned i = 0; i < vm_option_omitted_count(); i++) {
+        const vm_option_omission_t *o = vm_option_omitted_at(i);
+        if (o && o->name) printf("omit:%s\n", o->name);
+    }
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    if (argc > 1 && strcmp(argv[1], "--list") == 0) return list_mode();
+
     test_table_matches_bootkernel();
     test_rows_are_grouped_and_unique();
     test_lookup();
     test_command_line();
     test_command_line_truncation_and_nulls();
+    test_omissions();
 
     printf("vmoptions: %u checks, %u failed\n", tests, failed);
     return failed ? 1 : 0;

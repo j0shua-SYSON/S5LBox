@@ -17,9 +17,17 @@
  * this one and its test change with it.
  *
  * DELIBERATELY NOT MIRRORED HERE, because they describe a desktop run rather
- * than a setting a phone screen can meaningfully offer: framebuffer,
- * iomfb-display, fstab-fixup, ramdisk-low, stop-on-abort, kext-map,
- * print-config. They remain bootkernel's.
+ * than a setting a phone screen can meaningfully offer. That list used to be a
+ * sentence in this comment, and a sentence cannot fail a build: `ppp` was added
+ * to BOOT_TOGGLES and mirrored here by hand, and nothing anywhere would have
+ * complained if it had not been. So the omissions are a TABLE now, and
+ * core/tests/check_option_mirror.cmake requires bootkernel's live table to
+ * partition exactly into the mirrored rows and the omitted ones -- a new
+ * toggle on either side fails until somebody decides which it is.
+ *
+ * "Missing" and "deliberately not offered" are different, and only one of them
+ * is a bug. The reason string is what tells them apart, so every omission
+ * carries one.
  *
  * NOTHING IN THIS TABLE IS APPLIED BY THE APP. Every row describes what
  * happens when Apple's firmware is booted, and the app boots no firmware -- it
@@ -61,8 +69,25 @@ typedef struct {
     unsigned char impl;    /* vm_option_impl_t                                          */
 } vm_option_t;
 
+/*
+ * A toggle bootkernel has that this app does not offer, and the reason. The
+ * reason is not decoration: it is the difference between a considered decision
+ * and a row somebody forgot, and the mirror check cannot tell those apart on
+ * its own.
+ */
+typedef struct {
+    const char *name;      /* bootkernel's spelling, exactly */
+    const char *reason;    /* one clause, lower case, no full stop */
+} vm_option_omission_t;
+
 /* How many rows the table has. */
 unsigned vm_option_count(void);
+
+/* How many toggles are deliberately not offered. */
+unsigned vm_option_omitted_count(void);
+
+/* Omission `index`, or NULL when out of range. */
+const vm_option_omission_t *vm_option_omitted_at(unsigned index);
 
 /* Row `index`, or NULL when out of range. */
 const vm_option_t *vm_option_at(unsigned index);

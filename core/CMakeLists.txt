@@ -454,6 +454,17 @@ add_test(NAME boot_option_resolution
             -DBOOTKERNEL=$<TARGET_FILE:bootkernel>
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_bootkernel_options.cmake)
 
+# The app mirrors that table by hand, and its own test cannot notice a row
+# bootkernel GAINED -- it compares the app's copy against the app's own
+# expectation, so both can be edited together and still be short a toggle.
+# This runs both binaries and requires bootkernel's live table to partition
+# into the mirrored rows and the deliberately-omitted ones.
+add_test(NAME app_option_mirror
+    COMMAND ${CMAKE_COMMAND}
+            -DBOOTKERNEL=$<TARGET_FILE:bootkernel>
+            -DVMOPTIONS=$<TARGET_FILE:test_vmoptions>
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_option_mirror.cmake)
+
 # snapboot is the snapshot acceptance harness: it boots to a checkpoint, saves,
 # and can restore into a fresh process. Comparing snapshot bytes alone is not
 # enough — a field the format never stores is absent from both sides and

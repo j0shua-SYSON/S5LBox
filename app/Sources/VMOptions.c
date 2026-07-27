@@ -94,8 +94,51 @@ static const char *const VM_OPTION_GROUP_NOTE[VM_OPT_GROUP_COUNT] = {
     "but NOT APPLIED\" for exactly these rows, and so does this screen."
 };
 
+/*
+ * The toggles this app deliberately does not offer.
+ *
+ * Together with VM_OPTIONS this must account for EVERY row of bootkernel's
+ * BOOT_TOGGLES, exactly once each -- check_option_mirror.cmake runs the real
+ * binary's --print-config and enforces the partition. A toggle that is in
+ * neither table is the bug this exists to catch; a toggle in both is a
+ * contradiction and fails just as loudly.
+ */
+static const vm_option_omission_t VM_OMITTED[] = {
+    { "framebuffer",
+      "the app IS a framebuffer viewer, so turning the display off would leave "
+      "it with nothing to show" },
+    { "iomfb-display",
+      "meaningful only alongside --framebuffer, which this app does not offer" },
+    { "fstab-fixup",
+      "turning it off halts the boot at fsck by design, which is a bisection "
+      "step rather than a setting" },
+    { "ramdisk-low",
+      "a desktop memory-layout experiment; the app's guest RAM is fixed at the "
+      "128 MB the hardware shipped with" },
+    { "stop-on-abort",
+      "a debugger behaviour for a terminal, with no console here to stop into" },
+    { "kext-map",
+      "prints a load-address table to stdout, which this app has no reader "
+      "for" },
+    { "print-config",
+      "resolves the command line and exits without booting; the settings "
+      "screen already shows the resolved configuration" },
+};
+
+#define VM_OMITTED_COUNT \
+    ((unsigned)(sizeof VM_OMITTED / sizeof VM_OMITTED[0]))
+
 unsigned vm_option_count(void) {
     return VM_OPTION_COUNT;
+}
+
+unsigned vm_option_omitted_count(void) {
+    return VM_OMITTED_COUNT;
+}
+
+const vm_option_omission_t *vm_option_omitted_at(unsigned index) {
+    if (index >= VM_OMITTED_COUNT) return NULL;
+    return &VM_OMITTED[index];
 }
 
 const vm_option_t *vm_option_at(unsigned index) {
