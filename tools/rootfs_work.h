@@ -29,14 +29,69 @@ extern "C" {
 #define ROOTFS_WORK_DEFAULT_FSTAB "/dev/md0 / hfs rw,update 0 1"
 
 /*
- * Bounds for the catalog provisioner below.  Every one of them is a policy
- * cap enforced with a named refusal, not a structural limit: the plan state is
- * heap-allocated from the caller's entry count, so raising a constant is the
- * whole change needed to admit a larger payload.
+ * Bounds for the catalog provisioner below.  Every one of them is a policy cap
+ * enforced with a named refusal rather than a truncation, and the state each
+ * one bounds is heap-allocated, so raising a constant costs only memory.
+ *
+ * AN EARLIER VERSION OF THIS COMMENT WAS WRONG and the correction is worth
+ * keeping.  It claimed raising ROOTFS_WORK_MAX_ENTRIES from 64 was "the whole
+ * change needed to admit a larger payload".  It was not.  A batch of entries is
+ * not one ascending run of keys even when the caller's paths are sorted:
+ * creating file f under folder P writes a name key (P, f) AND a thread key
+ * (cnid(f), ""), and every cnid handed out is larger than P, so the SECOND file
+ * under P has to be inserted between the first file's name record and the first
+ * file's thread record.  Once that stretch of the tree fills one leaf, the next
+ * name record is an interior insert into a full leaf -- which the writer used
+ * to refuse by name (PROVISION_NODE_FULL) because the only split it had was the
+ * rightmost append.
+ *
+ * MEASURED, not reasoned: with the cap raised and nothing else changed, the
+ * 678-entry scale request in core/tests/test_rootfs_provision.c refused after
+ * THREE entries -- "leaf 8 has 186 free bytes, the record needs 274" -- and the
+ * record it could not place was the second file in the payload's first
+ * directory.  catalog_node_split() in rootfs_work.c is the general split added
+ * to fix it, and that test is what now holds the fix to 678 entries, 665 leaf
+ * splits and 58 index splits deep.
+ *
+ * WHAT IS STILL A STRUCTURAL LIMIT, and it is not one of these constants:
+ * splitting the B-tree's ROOT is not implemented, so a request that would have
+ * to grow a new root and increment treeDepth is a PROVISION_SPLIT_UNSUPPORTED
+ * refusal.  On the shipping 7E18 catalog it should be far out of reach -- that
+ * volume's root index node was measured at 3280 free bytes against 15 children
+ * (see catalog_level_extend(), a prior measurement not re-checked here), and a
+ * 644-entry payload is roughly 1300 catalog records, which at that volume's
+ * 4096-byte nodes is on the order of a hundred new leaves and so a handful of
+ * new level-2 index records in the root.  The scale test starts a depth-4 tree
+ * with a deliberately roomy root for the same reason and finishes without
+ * needing to grow it.  UNVERIFIED against the real firmware image: no test in
+ * this suite opens firmware/rootfs.img.
  */
-#define ROOTFS_WORK_MAX_ENTRIES 64u
+
+/*
+ * 1024.  The acquired Cydia payload is 555 regular files plus 89 symlinks --
+ * 644 objects -- and every directory in its tree is an entry too, so the real
+ * request is somewhere above that; the exact directory count has not been
+ * measured here.  1024 admits 644 with half again in headroom, plus the two
+ * activation entries.  The cost is one catalog_content_t (24 bytes) per entry
+ * in the plan, so the cap itself is 24 KiB.  The scale test runs 678.
+ */
+#define ROOTFS_WORK_MAX_ENTRIES 1024u
 #define ROOTFS_WORK_MAX_ENTRY_BYTES (16u * 1024u * 1024u)
-#define ROOTFS_WORK_MAX_CATALOG_NODES 1024u
+/*
+ * 4096 catalog nodes one request may TOUCH -- not a bound on the tree, which
+ * may be any size.  Every node this writer touches is a node of the tree, so
+ * the tree's own node count is the ceiling, and the worst case for that count
+ * is the SMALLEST nodeSize the writer accepts (512 bytes), where the same
+ * records need the most nodes to hold them.
+ *
+ * Measured at that worst case: the 678-entry scale test publishes a tree of 669
+ * leaves and 731 nodes in all.  Scaled linearly to this file's 1024-entry cap
+ * that is about 1100, and the shipping volume's 4096-byte nodes would need
+ * roughly an eighth of it.  4096 clears the measured worst case by 5.6x and the
+ * extrapolated one by 3.7x.  The cap itself costs only its 16-byte cache slot
+ * (64 KiB in all); node buffers are allocated per node actually touched.
+ */
+#define ROOTFS_WORK_MAX_CATALOG_NODES 4096u
 #define ROOTFS_WORK_MAX_BITMAP_BYTES (1024u * 1024u)
 #define ROOTFS_WORK_MAX_PATH 1024u
 #define ROOTFS_WORK_MAX_PATH_DEPTH 32u
@@ -91,18 +146,19 @@ typedef enum rootfs_work_status {
                                          /* "not found"                      */
     ROOTFS_WORK_PROVISION_PARENT_MISSING,
     ROOTFS_WORK_PROVISION_EXISTS,
-    ROOTFS_WORK_PROVISION_NODE_FULL,     /* the leaf is full and the insert  */
-                                         /* is NOT a rightmost append, so no */
-                                         /* implemented split applies        */
-    ROOTFS_WORK_PROVISION_LEAF_HEAD,     /* insert would become a leaf's     */
+    ROOTFS_WORK_PROVISION_NODE_FULL,     /* the node is full and NO split of */
+                                         /* its records plus the new one     */
+                                         /* leaves two halves that both fit  */
+    ROOTFS_WORK_PROVISION_LEAF_HEAD,     /* insert would become a node's     */
                                          /* first key, so an index key would */
                                          /* have to be rewritten             */
-    ROOTFS_WORK_PROVISION_SPLIT_UNSUPPORTED, /* a rightmost-append split was */
-                                         /* the right answer but its shape   */
-                                         /* is outside what is implemented:  */
-                                         /* no index level above the leaf,   */
-                                         /* or no room in the parent index   */
-                                         /* node for the new child pointer   */
+    ROOTFS_WORK_PROVISION_SPLIT_UNSUPPORTED, /* a split was the right answer */
+                                         /* but its shape is outside what is */
+                                         /* implemented: the node is the     */
+                                         /* ROOT, so a new root would have   */
+                                         /* to be grown and treeDepth        */
+                                         /* incremented; or the record does  */
+                                         /* not fit even an empty node       */
     ROOTFS_WORK_PROVISION_BTREE_FULL,    /* the catalog B-tree's own free-   */
                                          /* node map is exhausted; growing   */
                                          /* the catalog fork is a different  */
