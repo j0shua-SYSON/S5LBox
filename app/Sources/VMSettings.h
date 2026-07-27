@@ -4,16 +4,22 @@
 //
 //  Two kinds of value live here and they are deliberately kept apart:
 //
-//  RECORDED ONLY. The boolean rows, which mirror bootkernel's BOOT_TOGGLES
-//  through VMOptions.c. Every one of them describes what happens when Apple's
-//  firmware is booted, and this app boots no firmware — it runs the synthetic
-//  guest in VMGuest.c. They are stored, shown, and rendered back as a
-//  bootkernel command line so a phone session and a desktop session can be
-//  compared. They change nothing about the machine on screen, and the settings
-//  screen says so above the first switch.
+//  THE OPTION ROWS, which mirror bootkernel's BOOT_TOGGLES through VMOptions.c.
+//  This class only STORES them. What each one does to a real bring-up — reach
+//  the request, get written into the work image, or reach nothing at all — is
+//  decided in app/Sources/VMBootOptions.c and is different per row. That used
+//  to be one sentence here saying none of them did anything, which stopped
+//  being true the day the app booted firmware; it is a tested table now
+//  precisely so it cannot go stale again.
 //
-//  APPLIED. The instruction cap and the pause-on-background switch. Both are
-//  real properties of this app's run loop and both take effect immediately.
+//  APPLIED HERE. The instruction cap and the pause-on-background switch. Both
+//  are real properties of this app's run loop and both take effect immediately.
+//
+//  APP-WIDE, NOT PER MACHINE. These are NSUserDefaults keys, so every machine
+//  shares them. VMInstanceStore carries a per-instance option array that
+//  nothing writes yet; when the settings screen becomes per-machine it becomes
+//  the source and -[VMEngine copyOptionValuesInto:capacity:] is the one place
+//  that changes.
 //
 //  Firmware paths are a third case: reported, not stored. The app ships no
 //  firmware and downloads none, so all this class does is name the directory it

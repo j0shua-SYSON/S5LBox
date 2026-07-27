@@ -123,6 +123,12 @@ static const NSUInteger kConsoleScrollback = 12000;
     uint8_t           *_frame;        // main thread's copy of the guest's pixels
     NSUInteger         _ticks;
 
+    /* The last -bringUpNote this screen actually put in front of the user, so
+     * -tick: can notice a NEW one -- the root-filesystem provisioning thread
+     * finishes long after -start returned -- without re-alerting on the same
+     * sentence eight frames later. Reset to nil with the engine. */
+    NSString          *_lastBringUpNote;
+
     /* Pause has two independent causes and the engine has one flag, so the
      * causes are tracked here and combined. Without this, coming back to the
      * foreground would silently un-pause a machine the user had paused on
@@ -259,7 +265,7 @@ static const NSUInteger kConsoleScrollback = 12000;
 - (void)launchEngine {
     if (!_frame) return;
 
-    _engine = [[VMEngine alloc] init];
+    _engine = [[VMEngine alloc] initWithInstanceID:self.instanceID];
     if (![_engine start]) {
         [self append:@"[vm] emulator failed to start"];
         [self appendConsole:[_engine takePendingConsoleText]];
@@ -285,7 +291,10 @@ static const NSUInteger kConsoleScrollback = 12000;
      * missed.
      */
     NSString *note = [_engine bringUpNote];
-    if (note.length) [self reportBringUpProblem:note];
+    if (note.length) {
+        _lastBringUpNote = note;      /* -tick: watches for it to CHANGE */
+        [self reportBringUpProblem:note];
+    }
 }
 
 /* One place, so every reason reaches the user the same way. */
@@ -294,10 +303,20 @@ static const NSUInteger kConsoleScrollback = 12000;
     [self append:[@"[vm] " stringByAppendingString:reason]];
     if (!self.viewIfLoaded.window) return;   /* not on screen: the log has it */
 
+    /*
+     * THE TITLE HAS TO FOLLOW WHAT IS RUNNING, not merely that something needs
+     * saying. A firmware boot can succeed and still owe the user a sentence --
+     * most of the settings switches never reach the machine, and that is now
+     * reported here -- so titling every such sentence "Not running iPhone OS"
+     * would be exactly the kind of confident wrong claim this alert exists to
+     * prevent. Asked of the engine, which knows.
+     */
     BOOL preparing = [_engine isPreparingRootFilesystem];
+    NSString *title = preparing        ? @"Preparing iPhone OS"
+                    : [_engine isRunningFirmware] ? @"Running iPhone OS"
+                                                  : @"Not running iPhone OS";
     UIAlertController *alert = [UIAlertController
-        alertControllerWithTitle:preparing ? @"Preparing iPhone OS"
-                                           : @"Not running iPhone OS"
+        alertControllerWithTitle:title
                          message:reason
                   preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"OK"
@@ -466,15 +485,37 @@ static const NSUInteger kConsoleScrollback = 12000;
     [self appendConsole:[_engine takePendingConsoleText]];
     [self append:@"\n[vm] reset: dropping this machine and building a new one"];
 
-    /* -stop is a request the emulator thread notices between chunks, so the
+    /*
+     * -stop is a request the emulator thread notices between chunks, so the
      * old machine is not gone yet. Nothing waits for it: the thread holds the
      * last reference to its own engine and frees the machine before letting
      * go, so a fresh engine can be built immediately alongside it. The two
      * overlap for a few tens of milliseconds and 128 MB of guest DRAM is
      * address space rather than footprint until it is touched (see VMEngine.m),
-     * so the overlap costs a fraction of a megabyte. */
+     * so the overlap costs a fraction of a megabyte.
+     *
+     * KNOWN HAZARD, STATED RATHER THAN HIDDEN. That reasoning was written when
+     * an engine owned nothing outside its own guest DRAM. It now owns an open,
+     * WRITABLE root filesystem, and the new engine opens the same file: both
+     * machines are this machine, so both resolve to the same
+     * Machines/<id>/rootfs-work.img. tools/file_block.c takes an fcntl record
+     * lock, and file_block.h says in as many words that the lock is not the
+     * correctness boundary -- it is per PROCESS, so the second open from this
+     * app succeeds, and the outgoing engine's close releases the lock for both.
+     * The outgoing guest can therefore write through its memory-disk bridge for
+     * up to one chunk (kVMChunkInstructions) while the incoming one is already
+     * mounting the same HFS+ volume.
+     *
+     * The fix is for this to WAIT until the outgoing engine has released the
+     * image -- VMEngine would need a stop that joins its thread, which it does
+     * not have -- and it is not done here. Reset after a firmware boot is
+     * therefore the one operation in this app that can corrupt a guest disk,
+     * and this comment is here so that the next person to touch it knows that
+     * rather than reading the paragraph above and concluding it is safe.
+     */
     [_engine stop];
     _engine = nil;
+    _lastBringUpNote = nil;
 
     _userPaused = NO;
     _haveTouch = NO;
@@ -602,6 +643,24 @@ static const NSUInteger kConsoleScrollback = 12000;
         [self refreshStatusLine];
         // A machine can stop on its own, so the toolbar has to keep asking.
         [self refreshRunControls];
+        /*
+         * AND SO CAN A MACHINE BECOME READY. Preparing the root filesystem is
+         * the one thing this app does that finishes long after -start returned,
+         * on its own thread, ~450 MB later. Its result was written to
+         * -bringUpNote and read by nobody: the only reader was the one call
+         * below -start, so a user who was told "reopen this machine when it has
+         * finished" got no signal that it had -- or that it had failed. The
+         * console has it, and the console is developer-mode only.
+         *
+         * Compared against the last note SHOWN rather than against a flag, so
+         * this reports each distinct thing once and does not re-alert on the
+         * same sentence every eight frames.
+         */
+        NSString *note = [_engine bringUpNote];
+        if (note.length && ![note isEqualToString:_lastBringUpNote]) {
+            _lastBringUpNote = note;
+            [self reportBringUpProblem:note];
+        }
     }
 }
 

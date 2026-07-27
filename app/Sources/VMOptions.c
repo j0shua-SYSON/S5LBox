@@ -89,9 +89,10 @@ static const char *const VM_OPTION_GROUP_NOTE[VM_OPT_GROUP_COUNT] = {
     "straight to the kernel. Each patch has its own switch so a boot can be "
     "bisected against it.",
 
-    "Persistent changes to the guest or its work image. Neither half exists "
-    "yet in any part of this project: the desktop harness prints \"requested "
-    "but NOT APPLIED\" for exactly these rows, and so does this screen."
+    "Persistent changes to the guest or its work image. Activation and both "
+    "jailbreak halves exist in no part of this project: the desktop harness "
+    "prints \"requested but NOT APPLIED\" for exactly those rows, and so does "
+    "this screen. Guest networking exists on the desktop only."
 };
 
 /*

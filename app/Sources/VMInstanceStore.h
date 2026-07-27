@@ -73,12 +73,29 @@ extern NSString *const VMInstanceStoreDidChangeNotification;
      forInstanceWithID:(NSString *)identifier;
 
 /*
- * Where this machine's mutable files belong — its work image and any
- * snapshots. One directory per identifier, created on demand. Nothing writes
- * here yet; the app boots no firmware. It exists so that when it does, the
- * layout is already one machine per directory rather than a shared pile.
+ * Where this machine's mutable files belong — its work image and, later, its
+ * snapshots. One directory per identifier, created on demand.
+ *
+ * This is now load-bearing rather than a placeholder: VMInstancePaths.c derives
+ * <this>/rootfs-work.img and the engine boots that file, so two machines have
+ * two root filesystems. -deleteInstanceAtIndex:error: removes the whole
+ * directory, which is how a machine's ~465 MB disk is reclaimed.
+ *
+ * The IMPORTED artefacts are deliberately NOT here. They are read-only for
+ * their whole life, so one shared copy in Documents/firmware is the right
+ * number and a per-machine copy would multiply the largest thing on the device
+ * for nothing.
  */
 - (NSString *)directoryForInstanceWithID:(NSString *)identifier;
+
+/*
+ * The directory those per-machine directories sit in. Exposed because the path
+ * derivation lives in C (VMInstancePaths.c) and takes the container plus an
+ * identifier rather than a finished path — deriving the container by stripping
+ * a component off the one above would work today and break silently the day
+ * the layout gains a level.
+ */
+- (NSString *)machinesDirectory;
 
 @end
 

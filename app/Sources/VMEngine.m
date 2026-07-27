@@ -34,6 +34,8 @@
 #import "VMTouchQueue.h"
 #import "VMButtonQueue.h"
 #import "VMFirmwareBoot.h"
+#import "VMInstancePaths.h"
+#import "VMInstanceStore.h"
 #import "VMSettings.h"
 
 #import <mach/mach.h>
@@ -103,6 +105,8 @@ static double vm_now(void) {
 - (void)publishBlankSnapshotLocked;
 - (BOOL)installGuestPayload;
 - (void)provisionRootFilesystem:(id)unused;
+- (BOOL)resolveFilesInto:(vm_instance_paths_t *)paths note:(NSString **)note;
+- (NSUInteger)copyOptionValuesInto:(bool *)values capacity:(NSUInteger)capacity;
 @end
 
 @implementation VMEngine {
@@ -127,6 +131,14 @@ static double vm_now(void) {
     NSString        *_mode;
     NSString        *_bringUpNote;
     BOOL             _preparingRootFS;
+    /*
+     * WHICH MACHINE THIS ENGINE IS. Set once at construction and never
+     * changed: it names the directory this machine's writable root filesystem
+     * lives in, and a machine that changed identity mid-run would be a machine
+     * that changed disks mid-run. nil means nobody said, which is a
+     * configuration this class refuses to guess about -- see -resolveFilesInto:.
+     */
+    NSString        *_instanceID;
 
     NSThread        *_thread;
     pthread_mutex_t  _lock;
@@ -193,6 +205,10 @@ static double vm_now(void) {
 }
 
 - (instancetype)init {
+    return [self initWithInstanceID:nil];
+}
+
+- (instancetype)initWithInstanceID:(NSString *)identifier {
     self = [super init];
     if (!self) return nil;
     if (pthread_mutex_init(&_lock, NULL) != 0) return nil;
@@ -202,6 +218,7 @@ static double vm_now(void) {
     _status  = @"idle";
     _mode    = @"";
     _bringUpNote = @"";
+    _instanceID = [identifier copy];
     return self;
 }
 
@@ -234,37 +251,72 @@ static double vm_now(void) {
  *     machine is torn down and rebuilt before the demo guest is installed
  *     rather than layered on top of a half-loaded kernel.
  *
- * WHERE IT LOOKS. VMSettings' firmware directory -- Documents/firmware -- which
- * is where VMFirmwareImporter actually writes, and is shared by every machine.
- * The per-instance directories VMInstanceStore hands out are still empty, and
- * this method has no way to learn which instance it is running: nothing plumbs
- * an identifier from the machine list through to the engine. That is a real
- * limitation and the reason the work image is shared too; it is recorded here
- * rather than hidden behind a plausible-looking per-instance path.
+ * WHERE IT LOOKS. Two directories, not one, and the split is what makes two
+ * machines two machines: the three imported artefacts are shared and read-only
+ * (Documents/firmware, where VMFirmwareImporter writes), and the writable work
+ * image belongs to THIS machine alone (Machines/<id>). VMInstancePaths.c owns
+ * that derivation, including what happens to the single shared work image an
+ * older build left behind. An engine with no instance id refuses the firmware
+ * path outright rather than guessing at a directory -- see -resolveFilesInto:.
  */
 - (BOOL)installGuestPayload {
-    NSString *directory = [[VMSettings sharedSettings] firmwareDirectory];
-    /* Copied rather than borrowed: -fileSystemRepresentation returns a pointer
-     * owned by an autoreleased buffer, and this method holds it across several
-     * calls, one of which reads 8 MB from disk. */
-    char buffer[1024];
-    buffer[0] = '\0';
-    const char *path = NULL;
-    if (directory.length &&
-        [directory getFileSystemRepresentation:buffer maxLength:sizeof buffer])
-        path = buffer;
+    vm_instance_paths_t paths;
+    NSString *note = nil;
+    if (![self resolveFilesInto:&paths note:&note]) {
+        if (!vm_guest_install(&_machine)) return NO;
+        pthread_mutex_lock(&_lock);
+        _mode = @"built-in test guest";
+        _bringUpNote = note ?: @"";
+        pthread_mutex_unlock(&_lock);
+        return YES;
+    }
+
+    vm_firmware_boot_paths_t boot_paths;
+    vm_instance_paths_to_boot(&paths, &boot_paths);
+
+    /*
+     * ADOPTION, before the probe rather than after it: a machine that can take
+     * over the pre-instance work image IS ready, and probing first would send
+     * it down the 450 MB provisioning path with a perfectly good disk sitting
+     * unused. The move is a rename, so it costs nothing and cannot run long
+     * enough to matter on this thread.
+     */
+    NSString *adoptionProblem = nil;
+    if (vm_instance_work_plan(&paths) == VM_INSTANCE_WORK_ADOPT) {
+        char detail[VM_FW_BOOT_DETAIL_CAPACITY];
+        BOOL adopted = vm_instance_work_adopt(&paths, detail, sizeof detail);
+        NSString *said = [NSString stringWithUTF8String:detail];
+        [self appendConsole:[NSString stringWithFormat:@"[vm] %@\n",
+            said ?: (adopted ? @"adopted the shared root filesystem"
+                             : @"could not adopt the shared root filesystem")]];
+        /*
+         * A FAILED ADOPTION IS NEVER SILENT, and it is kept separately from
+         * `note` because the next thing that happens is the branch below
+         * overwriting `note` with "preparing the root filesystem" -- which is
+         * true, and which would replace "we could not move the 450 MB disk you
+         * already had" with a sentence that sounds like everything is fine.
+         */
+        if (!adopted) adoptionProblem =
+            said.length ? said
+                        : @"The root filesystem this machine could have "
+                          @"adopted could not be moved.";
+    }
+
+    /* The switches, resolved by the same C the tests run. */
+    bool values[VM_BOOT_OPTION_MAX];
+    NSUInteger count = [self copyOptionValuesInto:values
+                                         capacity:VM_BOOT_OPTION_MAX];
 
     vm_firmware_boot_state_t state;
-    vm_firmware_boot_probe(path, &state);
+    vm_firmware_boot_probe(&boot_paths, &state);
 
-    NSString *note = @"";
     if (state.readiness == VM_FW_BOOT_READY) {
         vm_firmware_boot_destroy(&_firmwareBoot);
         _firmwareBoot = vm_firmware_boot_create();
         if (_firmwareBoot) {
             vm_firmware_boot_report_t report;
-            if (vm_firmware_boot_start(_firmwareBoot, &_machine, path,
-                                       &report)) {
+            if (vm_firmware_boot_start(_firmwareBoot, &_machine, &boot_paths,
+                                       values, (unsigned)count, &report)) {
                 [self appendConsole:[NSString stringWithFormat:
                     @"[vm] Apple firmware: kernel at pa 0x%08x, device tree at "
                     @"0x%08x (%u bytes), boot_args at 0x%08x\n"
@@ -283,9 +335,29 @@ static double vm_now(void) {
                  * valid UTF-8, so neither result is used unguarded. */
                 NSString *summary =
                     [NSString stringWithUTF8String:report.summary];
+                /*
+                 * A SUCCESSFUL BOOT STILL OWES THE USER THIS. Twelve of the
+                 * fourteen switches do not reach the request, and six of them
+                 * disagree with what the machine did on an installation
+                 * nobody has touched. Saying nothing here would be the exact
+                 * failure this class was built to end -- the settings screen
+                 * showing one configuration and the machine running another.
+                 */
+                NSString *switches =
+                    [NSString stringWithUTF8String:report.options.summary];
+                if (switches.length)
+                    [self appendConsole:[NSString stringWithFormat:
+                        @"[vm] settings: %@\n", switches]];
+                /* Actionable, not merely alarming: the settings screen is
+                 * where each of these now says what happens instead. */
+                NSString *said = switches.length
+                    ? [switches stringByAppendingString:
+                        @" Each one says what the machine does instead, under "
+                        @"its own switch in Settings."]
+                    : nil;
                 pthread_mutex_lock(&_lock);
                 _mode = summary ?: @"Apple firmware";
-                _bringUpNote = @"";
+                _bringUpNote = said ?: (note ?: @"");
                 pthread_mutex_unlock(&_lock);
                 return YES;
             }
@@ -311,18 +383,30 @@ static double vm_now(void) {
          * and this machine gets the demo guest. Reopening the machine after it
          * finishes boots the real kernel.
          */
-        note = @"Preparing the writable root filesystem (first boot only). "
-               @"Close and reopen this machine when it has finished.";
+        note = @"Preparing this machine's writable root filesystem (first boot "
+               @"only). Close and reopen this machine when it has finished.";
         BOOL alreadyRunning;
         pthread_mutex_lock(&_lock);
         alreadyRunning = _preparingRootFS;
         _preparingRootFS = YES;
         pthread_mutex_unlock(&_lock);
         if (!alreadyRunning) {
-            NSThread *worker = [[NSThread alloc]
+            /* Two strings rather than the C struct: NSThread wants an object,
+             * and the worker rebuilds the struct itself so nothing on the
+             * emulator side has to outlive this stack frame.
+             * -stringWithUTF8String: rather than @(): these are fixed char
+             * arrays and the explicit form has no decay question in it, and it
+             * returns nil for bytes that are not valid UTF-8 -- which a
+             * dictionary literal would turn into a crash, so it is checked. */
+            NSString *firmwareDir =
+                [NSString stringWithUTF8String:boot_paths.firmware];
+            NSString *workDir = [NSString stringWithUTF8String:boot_paths.work];
+            NSDictionary *where = (firmwareDir && workDir)
+                ? @{ @"firmware": firmwareDir, @"work": workDir } : nil;
+            NSThread *worker = where ? [[NSThread alloc]
                 initWithTarget:self
                       selector:@selector(provisionRootFilesystem:)
-                        object:directory];
+                        object:where] : nil;
             if (worker) {
                 worker.name = @"S5LBox rootfs provisioning";
                 worker.qualityOfService = NSQualityOfServiceUtility;
@@ -342,6 +426,13 @@ static double vm_now(void) {
 
     if (!vm_guest_install(&_machine)) return NO;
 
+    /* The adoption failure leads, because it is about a file the user already
+     * had and everything else here is about one the app is making. */
+    if (adoptionProblem.length)
+        note = note.length
+            ? [adoptionProblem stringByAppendingFormat:@" %@", note]
+            : adoptionProblem;
+
     pthread_mutex_lock(&_lock);
     _mode = @"built-in test guest";
     _bringUpNote = note ?: @"";
@@ -355,35 +446,186 @@ static double vm_now(void) {
  * cannot corrupt the image being written -- it is the flag, not the file, that
  * keeps two of these from being launched.
  */
-- (void)provisionRootFilesystem:(id)directory {
+- (void)provisionRootFilesystem:(id)where {
     @autoreleasepool {
-        NSString *dir = (NSString *)directory;
+        NSDictionary *dirs = (NSDictionary *)where;
         char detail[VM_FW_BOOT_DETAIL_CAPACITY];
-        char path[1024];
+        vm_firmware_boot_paths_t paths;
         detail[0] = '\0';
-        BOOL havePath = dir.length &&
-            [dir getFileSystemRepresentation:path maxLength:sizeof path];
-        BOOL ok = havePath
-            ? vm_firmware_boot_provision(path, detail, sizeof detail)
+
+        NSString *firmware = dirs[@"firmware"];
+        NSString *work = dirs[@"work"];
+        char firmwarePath[VM_FW_BOOT_PATH_CAPACITY];
+        char workPath[VM_FW_BOOT_PATH_CAPACITY];
+        BOOL havePaths =
+            firmware.length && work.length &&
+            [firmware getFileSystemRepresentation:firmwarePath
+                                        maxLength:sizeof firmwarePath] &&
+            [work getFileSystemRepresentation:workPath
+                                    maxLength:sizeof workPath] &&
+            vm_firmware_boot_paths_split(&paths, firmwarePath, workPath);
+
+        /*
+         * The switches are read HERE, not carried from the start, because this
+         * is the moment their value is written into the image: the QuartzCore
+         * software-renderer rewrite is a property of the file from now on, and
+         * a value captured a second earlier would be no more accurate and much
+         * easier to get wrong.
+         */
+        bool values[VM_BOOT_OPTION_MAX];
+        NSUInteger count = [self copyOptionValuesInto:values
+                                             capacity:VM_BOOT_OPTION_MAX];
+
+        BOOL ok = havePaths
+            ? vm_firmware_boot_provision(&paths, values, (unsigned)count,
+                                         detail, sizeof detail)
             : NO;
-        if (!havePath)
+        if (!havePaths)
             (void)snprintf(detail, sizeof detail,
-                           "This app has no documents directory to prepare the "
-                           "root filesystem in.");
-        NSString *why = [NSString stringWithUTF8String:detail]
-                      ?: @"The root filesystem could not be prepared.";
+                           "This app has nowhere to prepare this machine's "
+                           "root filesystem.");
+
+        /*
+         * A REFUSAL IS NOT ALWAYS A FAILURE. rootfs_work_create() will not
+         * replace an existing destination, which is the behaviour that keeps a
+         * second run from discarding the guest's writes -- but it also means
+         * that a machine which was provisioned by another engine (a Reset
+         * relaunches one, and its _preparingRootFS flag is a per-engine ivar)
+         * gets told "could not prepare the root filesystem" about a filesystem
+         * it now has. Ask the disk rather than the return value: if the work
+         * image is there, this machine is ready, whoever made it.
+         */
+        if (!ok && havePaths) {
+            vm_firmware_boot_state_t after;
+            vm_firmware_boot_probe(&paths, &after);
+            if (after.work_present) {
+                ok = YES;
+                (void)snprintf(detail, sizeof detail,
+                               "The root filesystem was already prepared.");
+            }
+        }
+        NSString *said = [NSString stringWithUTF8String:detail];
         pthread_mutex_lock(&_lock);
         _preparingRootFS = NO;
         _bringUpNote = ok
-            ? @"The root filesystem is ready. Reopen this machine to boot "
-              @"iPhone OS."
-            : why;
+            ? [NSString stringWithFormat:
+                @"This machine's root filesystem is ready. Reopen it to boot "
+                @"iPhone OS. %@", said ?: @""]
+            : (said ?: @"The root filesystem could not be prepared.");
         pthread_mutex_unlock(&_lock);
+        /* Two literal format strings rather than one chosen by a ternary: a
+         * non-literal format is unchecked by the compiler, and this one is
+         * built from a fixed char array whose contents come from four
+         * different refusal paths. */
         [self appendConsole:ok
-            ? @"[vm] root filesystem prepared; reopen to boot iPhone OS\n"
+            ? [NSString stringWithFormat:
+                @"[vm] root filesystem prepared; reopen to boot iPhone OS "
+                @"(%s)\n", detail]
             : [NSString stringWithFormat:
                 @"[vm] could not prepare the root filesystem: %s\n", detail]];
     }
+}
+
+/*
+ * WHICH FILES THIS MACHINE USES, or why it cannot have any.
+ *
+ * Everything that can be wrong here -- an identifier that is not sixteen hex
+ * digits, a path too long to hold, the pre-instance work image -- is decided
+ * in VMInstancePaths.c, which a host runner tests. This method is the two
+ * lookups Objective-C is needed for and nothing else.
+ *
+ * Returns NO, with a sentence in `note`, when the firmware path is not
+ * available. That is not always a failure: no instance id is the ordinary case
+ * for a machine opened by something other than the machine list, and no
+ * firmware imported is the ordinary case full stop.
+ */
+- (BOOL)resolveFilesInto:(vm_instance_paths_t *)paths note:(NSString **)note {
+    if (note) *note = @"";
+    if (!paths) return NO;
+
+    NSString *firmware = [[VMSettings sharedSettings] firmwareDirectory];
+    if (!firmware.length) {
+        if (note) *note = @"This app has no documents directory to look for "
+                          @"firmware in.";
+        return NO;
+    }
+
+    if (!_instanceID.length) {
+        /*
+         * REFUSED RATHER THAN GUESSED. The alternative -- falling back to a
+         * shared work image in the firmware directory -- is exactly the
+         * behaviour that made every machine one machine, and it would come
+         * back silently the first time something constructed an engine
+         * without an identifier. The demo guest runs and says why.
+         */
+        if (note) *note = @"This machine has no identity, so it has no root "
+                          @"filesystem of its own. Open it from the machine "
+                          @"list to boot iPhone OS.";
+        return NO;
+    }
+
+    /*
+     * Called for its SIDE EFFECT as much as its value: it CREATES this
+     * machine's directory, and C cannot portably mkdir, so both the adoption
+     * rename and the provisioner depend on this having happened first.
+     *
+     * The C then rebuilds the same path from the container and the identifier.
+     * That is one derivation stated twice, and it is deliberate: the C one is
+     * the one that can be tested, and it is also the one that refuses an
+     * identifier that is not sixteen hex digits. They agree because both are
+     * <container>/<id> and the identifier contains no separator.
+     */
+    NSString *mine =
+        [[VMInstanceStore sharedStore] directoryForInstanceWithID:_instanceID];
+    NSString *machines = [[VMInstanceStore sharedStore] machinesDirectory];
+    if (!mine.length) {
+        if (note) *note = @"This machine has nowhere on disk to keep its root "
+                          @"filesystem.";
+        return NO;
+    }
+
+    char firmwarePath[VM_FW_BOOT_PATH_CAPACITY];
+    char machinesPath[VM_FW_BOOT_PATH_CAPACITY];
+    if (![firmware getFileSystemRepresentation:firmwarePath
+                                     maxLength:sizeof firmwarePath] ||
+        !machines.length ||
+        ![machines getFileSystemRepresentation:machinesPath
+                                     maxLength:sizeof machinesPath]) {
+        if (note) *note = @"This machine's files are somewhere this app cannot "
+                          @"name.";
+        return NO;
+    }
+
+    vm_instance_paths_status_t s =
+        vm_instance_paths_derive(firmwarePath, machinesPath,
+                                 _instanceID.UTF8String, paths);
+    if (s != VM_INSTANCE_PATHS_OK) {
+        if (note)
+            *note = [NSString stringWithFormat:
+                @"This machine's files cannot be located: %s.",
+                vm_instance_paths_status_text(s)];
+        return NO;
+    }
+    return YES;
+}
+
+/*
+ * The settings screen's values, in option-table order.
+ *
+ * READ FROM VMSettings, which is the store the settings screen writes.
+ * VMInstanceStore also carries a per-instance option array, but nothing in the
+ * app writes it yet, so reading it here would take the switches back to doing
+ * nothing -- this time invisibly. When the settings screen becomes
+ * per-machine, this is the one method that changes.
+ */
+- (NSUInteger)copyOptionValuesInto:(bool *)values capacity:(NSUInteger)capacity {
+    if (!values || capacity == 0) return 0;
+    NSUInteger count = vm_option_count();
+    if (count > capacity) count = capacity;
+    VMSettings *settings = [VMSettings sharedSettings];
+    for (NSUInteger i = 0; i < count; i++)
+        values[i] = [settings valueForOptionIndex:i] ? true : false;
+    return count;
 }
 
 #pragma mark - Lifecycle
@@ -768,6 +1010,10 @@ static double vm_now(void) {
     if (!have) return;
 
     if (s5l_mtz2_set_contacts(&_machine.mtz2, &c, 1u)) {
+        /* The attention line moved behind the bus. `level_dirty` in soc.h says
+         * why a machine that is not told re-derives the cascade up to 68
+         * instructions later instead of at this chunk boundary. */
+        s5l8900_tick(&_machine, 0);
         pthread_mutex_lock(&_lock);
         vm_touch_queue_pop(&_touch);
         _touchDelivered++;
@@ -815,6 +1061,7 @@ static double vm_now(void) {
 
     if (s5l_buttons_set(&_machine.buttons, &_machine.gpio, &_machine.gpioic,
                         e.which, e.pressed)) {
+        s5l8900_tick(&_machine, 0);     /* as drainOneTouch; see soc.h */
         pthread_mutex_lock(&_lock);
         vm_button_queue_pop(&_buttonQueue);
         _buttonDelivered++;
@@ -1185,19 +1432,33 @@ static double vm_now(void) {
     return preparing;
 }
 
+/*
+ * WHAT A MACHINE WOULD DO, asked without naming a machine.
+ *
+ * It therefore cannot answer the half that is per-machine. The work image
+ * belongs to one machine and lives in that machine's directory, so this probes
+ * the SHARED artefacts with an empty work directory -- which reports
+ * NEEDS_WORK_IMAGE -- and words that as what it is: every machine prepares its
+ * own on first open. Claiming READY here would be claiming a fact about a
+ * machine the caller has not identified.
+ */
 + (NSString *)firmwareReadinessSummary {
     NSString *directory = [[VMSettings sharedSettings] firmwareDirectory];
-    char buffer[1024];
+    char buffer[VM_FW_BOOT_PATH_CAPACITY];
     BOOL havePath = directory.length &&
         [directory getFileSystemRepresentation:buffer maxLength:sizeof buffer];
+    vm_firmware_boot_paths_t paths;
+    if (!havePath || !vm_firmware_boot_paths_split(&paths, buffer, ""))
+        memset(&paths, 0, sizeof paths);
+
     vm_firmware_boot_state_t state;
-    vm_firmware_boot_probe(havePath ? buffer : NULL, &state);
+    vm_firmware_boot_probe(&paths, &state);
     switch (state.readiness) {
     case VM_FW_BOOT_READY:
-        return @"Boots iPhone OS 3.1.3 from the imported firmware.";
     case VM_FW_BOOT_NEEDS_WORK_IMAGE:
-        return @"Firmware imported. The writable root filesystem is prepared "
-               @"on first open, then it boots iPhone OS 3.1.3.";
+        return @"Firmware imported. Each machine prepares its own writable "
+               @"root filesystem the first time you open it, then boots "
+               @"iPhone OS 3.1.3.";
     case VM_FW_BOOT_INCOMPLETE:
     default:
         break;

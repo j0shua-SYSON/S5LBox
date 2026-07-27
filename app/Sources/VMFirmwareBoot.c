@@ -64,26 +64,60 @@ static void set_detail(char *out, size_t capacity, const char *text) {
 
 /* -------------------------------------------------------------------------- */
 
-void vm_firmware_boot_probe(const char *directory,
+/* Copy one directory into a fixed field, refusing anything that does not fit
+ * rather than truncating: a truncated directory is a real path somewhere else,
+ * and the one thing worse than not finding the work image is finding a
+ * different one. */
+static bool set_directory(char *field, const char *value) {
+    int written = snprintf(field, VM_FW_BOOT_PATH_CAPACITY, "%s",
+                           value ? value : "");
+    return written >= 0 && (size_t)written < VM_FW_BOOT_PATH_CAPACITY;
+}
+
+bool vm_firmware_boot_paths_shared(vm_firmware_boot_paths_t *out,
+                                   const char *directory) {
+    return vm_firmware_boot_paths_split(out, directory, directory);
+}
+
+bool vm_firmware_boot_paths_split(vm_firmware_boot_paths_t *out,
+                                  const char *firmware_directory,
+                                  const char *work_directory) {
+    if (!out) return false;
+    memset(out, 0, sizeof *out);
+    if (!set_directory(out->firmware, firmware_directory) ||
+        !set_directory(out->work, work_directory)) {
+        memset(out, 0, sizeof *out);
+        return false;
+    }
+    return true;
+}
+
+void vm_firmware_boot_probe(const vm_firmware_boot_paths_t *paths,
                             vm_firmware_boot_state_t *out) {
     if (!out) return;
     memset(out, 0, sizeof *out);
     out->readiness = VM_FW_BOOT_INCOMPLETE;
 
-    if (!directory || !*directory) {
+    if (!paths || !paths->firmware[0]) {
         set_detail(out->detail, sizeof out->detail,
                    "This app has no directory to look for firmware in.");
         return;
     }
 
-    char path[1024];
+    const char *directory = paths->firmware;
+    char path[VM_FW_BOOT_PATH_CAPACITY + 64u];
     if (join_path(path, sizeof path, directory, VM_FW_BOOT_KERNEL_FILE))
         out->kernel_size = file_size(path);
     if (join_path(path, sizeof path, directory, VM_FW_BOOT_DEVICETREE_FILE))
         out->devicetree_size = file_size(path);
     if (join_path(path, sizeof path, directory, VM_FW_BOOT_ROOTFS_FILE))
         out->rootfs_size = file_size(path);
-    if (join_path(path, sizeof path, directory, VM_FW_BOOT_WORK_FILE))
+    /* The work image is the one file that belongs to a single machine, so it
+     * is looked for in the machine's own directory and nowhere else. An empty
+     * work directory reports "no work image", which is the truthful answer for
+     * a caller that has not named a machine. */
+    if (paths->work[0] &&
+        join_path(path, sizeof path, paths->work, VM_FW_BOOT_WORK_FILE))
         out->work_size = file_size(path);
 
     out->kernel_present     = out->kernel_size > 0u;
@@ -165,13 +199,14 @@ void vm_firmware_boot_destroy(vm_firmware_boot_t **slot) {
 
 bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
                             s5l8900_t *machine,
-                            const char *directory,
+                            const vm_firmware_boot_paths_t *paths,
+                            const bool *options, unsigned option_count,
                             vm_firmware_boot_report_t *report) {
     if (!report) return false;
     memset(report, 0, sizeof *report);
     set_detail(report->summary, sizeof report->summary, "not started");
 
-    if (!boot || !boot->bridges || !boot->media || !machine || !directory) {
+    if (!boot || !boot->bridges || !boot->media || !machine || !paths) {
         set_detail(report->detail, sizeof report->detail,
                    "Internal error: the firmware boot path was not set up.");
         set_detail(report->summary, sizeof report->summary, "internal error");
@@ -179,7 +214,7 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
     }
 
     vm_firmware_boot_state_t state;
-    vm_firmware_boot_probe(directory, &state);
+    vm_firmware_boot_probe(paths, &state);
     if (state.readiness != VM_FW_BOOT_READY) {
         set_detail(report->detail, sizeof report->detail, state.detail);
         set_detail(report->summary, sizeof report->summary,
@@ -189,12 +224,14 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
         return false;
     }
 
-    char kernel_path[1024], tree_path[1024], work_path[1024];
-    if (!join_path(kernel_path, sizeof kernel_path, directory,
+    char kernel_path[VM_FW_BOOT_PATH_CAPACITY + 64u];
+    char tree_path[VM_FW_BOOT_PATH_CAPACITY + 64u];
+    char work_path[VM_FW_BOOT_PATH_CAPACITY + 64u];
+    if (!join_path(kernel_path, sizeof kernel_path, paths->firmware,
                    VM_FW_BOOT_KERNEL_FILE) ||
-        !join_path(tree_path, sizeof tree_path, directory,
+        !join_path(tree_path, sizeof tree_path, paths->firmware,
                    VM_FW_BOOT_DEVICETREE_FILE) ||
-        !join_path(work_path, sizeof work_path, directory,
+        !join_path(work_path, sizeof work_path, paths->work,
                    VM_FW_BOOT_WORK_FILE)) {
         set_detail(report->detail, sizeof report->detail,
                    "The firmware directory path is too long to use.");
@@ -243,6 +280,15 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
      * memory-disk call sites are, so the bridges can never be armed against a
      * kernel that was authorized somewhere else. */
     ios3_bringup_gate_configure(&request, NULL);
+    /*
+     * The user's switches, resolved into the request AFTER the fields above so
+     * that a switch can never overwrite the media or the gate, and BEFORE
+     * s5l_bringup() so the report describes the request that actually ran.
+     * Everything the mapping refuses is recorded in report->options, which the
+     * caller shows: this is where a switch that does not reach the machine
+     * becomes a sentence instead of a silence.
+     */
+    vm_boot_options_apply(options, option_count, &request, &report->options);
 
     s5l_bringup_status_t status =
         s5l_bringup(machine, &request, boot->bridges, &report->bringup);
@@ -276,23 +322,28 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
 
 /* -------------------------------------------------------------------------- */
 
-bool vm_firmware_boot_provision(const char *directory,
+bool vm_firmware_boot_provision(const vm_firmware_boot_paths_t *paths,
+                                const bool *values, unsigned value_count,
                                 char *detail, size_t detail_capacity) {
-    char source_path[1024], work_path[1024];
+    char source_path[VM_FW_BOOT_PATH_CAPACITY + 64u];
+    char work_path[VM_FW_BOOT_PATH_CAPACITY + 64u];
     rootfs_work_options_t options;
     rootfs_work_result_t result;
+    vm_boot_provision_options_t wanted;
 
     set_detail(detail, detail_capacity, "");
 
-    if (!directory || !*directory ||
-        !join_path(source_path, sizeof source_path, directory,
+    if (!paths || !paths->firmware[0] || !paths->work[0] ||
+        !join_path(source_path, sizeof source_path, paths->firmware,
                    VM_FW_BOOT_ROOTFS_FILE) ||
-        !join_path(work_path, sizeof work_path, directory,
+        !join_path(work_path, sizeof work_path, paths->work,
                    VM_FW_BOOT_WORK_FILE)) {
         set_detail(detail, detail_capacity,
                    "The firmware directory path is unusable.");
         return false;
     }
+
+    vm_boot_options_for_provisioning(values, value_count, &wanted);
 
     memset(&options, 0, sizeof options);
     memset(&result, 0, sizeof result);
@@ -300,9 +351,15 @@ bool vm_firmware_boot_provision(const char *directory,
      * model; without this line launchd fails fsck and halts. */
     options.fstab_line = ROOTFS_WORK_DEFAULT_FSTAB;
     options.growth_bytes = VM_FW_BOOT_GROWTH_BYTES;
-    /* This machine has no GPU, so QuartzCore must be told to software-render
-     * or SpringBoard's compositor has nowhere to go. */
-    options.ca_software_render = true;
+    /*
+     * The QuartzCore software renderer used to be forced on here regardless of
+     * the switch, which meant the settings screen could show it OFF while
+     * every work image this app made had it ON. It now follows the switch --
+     * and because it is written into the image rather than decided at boot,
+     * changing it later does nothing until the image is remade. VMBootOptions
+     * is where that is said to the user.
+     */
+    options.ca_software_render = wanted.ca_software_render;
 
     rootfs_work_status_t status =
         rootfs_work_create(source_path, work_path, &options, &result);
@@ -315,5 +372,18 @@ bool vm_firmware_boot_provision(const char *directory,
         if (detail && detail_capacity) detail[detail_capacity - 1u] = '\0';
         return false;
     }
+
+    /*
+     * Say what was applied even on success, and take it from the RESULT rather
+     * than from the request: ca_plist_offset stays UINT64_MAX unless the
+     * rewrite actually found and replaced its pattern, so this cannot report a
+     * transformation that did not happen. The value is fixed in the image from
+     * here on, which is why it is worth a line at all.
+     */
+    (void)snprintf(detail, detail_capacity,
+                   "Prepared %.1f MB. QuartzCore software renderer: %s.",
+                   (double)result.final_size / 1048576.0,
+                   result.ca_plist_offset != UINT64_MAX ? "on" : "off");
+    if (detail && detail_capacity) detail[detail_capacity - 1u] = '\0';
     return true;
 }

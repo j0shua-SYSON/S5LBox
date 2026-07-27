@@ -138,6 +138,14 @@ static NSString *const kCell = @"machine";
     }];
 }
 
+/*
+ * The CONFIGURATION, not the disk. VMInstances.h is explicit that duplicating
+ * copies the option values and nothing on the filesystem, and now that a
+ * machine has a filesystem that matters: the copy gets a fresh work image
+ * built from the pristine rootfs.img the first time it is opened, and says so
+ * while it is doing it. Copying a 465 MB image behind a swipe action, with no
+ * progress and no way to cancel, is the alternative and it is worse.
+ */
 - (void)duplicateAtIndex:(NSUInteger)index {
     NSError *err = nil;
     if (![[VMInstanceStore sharedStore] duplicateInstanceAtIndex:index error:&err])
@@ -255,6 +263,11 @@ didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
 
     EmulatorViewController *vc = [[EmulatorViewController alloc] init];
     vc.title = row[@"name"];
+    /* The identity, not just the name: it is what decides which root
+     * filesystem this machine gets. Without it the engine will not boot
+     * firmware at all, which is deliberate -- see -[VMEngine
+     * initWithInstanceID:]. */
+    vc.instanceID = row[@"id"];
     [self.navigationController pushViewController:vc animated:YES];
 }
 

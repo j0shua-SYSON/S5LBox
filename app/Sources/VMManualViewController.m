@@ -87,9 +87,16 @@ typedef struct {
               @"number it has not seen." }];
 
     [e addObject:@{ @"h": @"Machines",
-        @"b": @"The first screen is a list of machines. Each one keeps its own "
-              @"settings and its own files, the way a virtual machine does on a "
-              @"desktop.\n\nSwipe a machine for Rename, Duplicate and Delete. "
+        @"b": @"The first screen is a list of machines. Each one has its own "
+              @"disk — its own writable copy of the filesystem, made the first "
+              @"time you open it — so what one machine does to iPhone OS does "
+              @"not happen to the others.\n\nWhat they SHARE is the firmware "
+              @"you imported, which nothing ever writes to, and the switches in "
+              @"Settings, which are still one set for the whole app.\n\n"
+              @"Swipe a machine for Rename, Duplicate and Delete. Duplicate "
+              @"copies the settings, not the disk: the copy builds its own the "
+              @"first time you open it. Delete removes that machine's disk too, "
+              @"which is most of the space it uses.\n\n"
               @"Tap one to open it.\n\nOnly one machine runs at a time. Each "
               @"needs 128 MB of memory to itself, and the emulator core runs "
               @"one machine per thread by design — so this is a limit of how it "
@@ -111,24 +118,29 @@ typedef struct {
               @"the drivers and the filesystem from a real firmware image.\n\n"
               @"None of it is shipped, bundled or downloaded by this app, and "
               @"it never will be — it is Apple's, not ours. You supply your "
-              @"own copy. Whatever you supply is never modified: every run "
-              @"works on a fresh writable copy and leaves your files alone." }];
+              @"own copy. Whatever you supply is never modified: each machine "
+              @"gets its own writable copy of the filesystem, and every run "
+              @"works on that. Your import is only ever read." }];
 
     [e addObject:@{ @"h": @"Settings",
         @"b": dev
             ? @"Developer mode is ON, so Settings shows the full option table: "
               @"fourteen switches that mirror the desktop tool exactly, plus "
-              @"the instruction cap and the diagnostics pages.\n\nNone of them "
-              @"changes this app's built-in test program. They describe what "
-              @"would happen to a real firmware boot, and the screen renders "
-              @"them as a command line you can run on the desktop."
+              @"the instruction cap and the diagnostics pages.\n\nMOST OF THEM "
+              @"STILL DO NOTHING HERE, and each one now says so under itself, "
+              @"in its own words, rather than leaving you to read one blanket "
+              @"warning at the top. A few do reach a real firmware boot. None "
+              @"of them changes the built-in test program, which has no device "
+              @"tree to configure.\n\nThe screen also renders them as a command "
+              @"line you can run on the desktop, where all fourteen work."
             : @"Settings is deliberately short. The switches that control how a "
               @"real firmware boot is set up — which pieces of hardware the "
               @"guest is told about, which compatibility fixes are applied — "
               @"live behind Developer Mode.\n\nThey are not hidden because they "
-              @"are dangerous. None of them does anything in this app yet. They "
-              @"are hidden because the first thing you meet should not be a "
-              @"list of device-tree paths." }];
+              @"are dangerous. Most of them still do nothing in this app, and "
+              @"the ones that do only matter once you have imported firmware. "
+              @"They are hidden because the first thing you meet should not be "
+              @"a list of device-tree paths." }];
 
     [e addObject:@{ @"h": @"Developer mode",
         @"b": @"Turning it on adds: the full fourteen-switch option table, the "

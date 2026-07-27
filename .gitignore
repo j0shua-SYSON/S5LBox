@@ -5,6 +5,12 @@
 # meanwhile needs somewhere else to link.
 /build-verify/
 /build-net/
+# And more of them, for the same reason: parallel work on the app, the DMA
+# controller and the interrupt path each needs a tree the others do not relink.
+/build-app/
+/build-dma/
+/build-irq/
+/build-rx/
 **/build/
 **/dist/
 **/DerivedData/

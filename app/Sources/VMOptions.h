@@ -29,11 +29,18 @@
  * is a bug. The reason string is what tells them apart, so every omission
  * carries one.
  *
- * NOTHING IN THIS TABLE IS APPLIED BY THE APP. Every row describes what
- * happens when Apple's firmware is booted, and the app boots no firmware -- it
- * runs the synthetic guest in VMGuest.c. The rows are recorded, shown, and
- * rendered back as a bootkernel command line; that is all. The settings screen
- * says so, in those words, above the first switch.
+ * WHICH ROWS ARE APPLIED IS NOT DECIDED HERE, and this file deliberately does
+ * not say. It used to: it said NOTHING IN THIS TABLE IS APPLIED BY THE APP,
+ * which was true when the app booted no firmware and became false the day
+ * bring-up landed, with nothing anywhere to notice. A sentence in a comment
+ * cannot fail a build.
+ *
+ * app/Sources/VMBootOptions.c is the answer instead. It maps every row of this
+ * table onto what a bring-up request can express, and its test fails when a
+ * row has no map entry -- so "does this switch do anything" is a fact with a
+ * test attached rather than a paragraph that rots. Today two rows reach the
+ * request, one is written into the work image, and eleven do not reach the
+ * machine at all; the settings screen shows that per row, from the same C.
  *
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed.
  */

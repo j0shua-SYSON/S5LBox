@@ -51,6 +51,10 @@ static NSString *const kErrorDomain = @"VMInstanceStore";
     return [[self containerDirectory] stringByAppendingPathComponent:kStoreFile];
 }
 
+- (NSString *)machinesDirectory {
+    return [self containerDirectory];
+}
+
 - (NSString *)directoryForInstanceWithID:(NSString *)identifier {
     NSString *dir =
         [[self containerDirectory] stringByAppendingPathComponent:identifier];
@@ -124,7 +128,13 @@ static NSString *const kErrorDomain = @"VMInstanceStore";
 #pragma mark - Errors
 
 - (NSError *)errorFor:(vm_instance_status_t)status {
-    NSString *why = @(vm_instance_status_text(status));
+    /* Guarded rather than @()-boxed: the boxing syntax goes through
+     * +stringWithUTF8String:, which returns nil for anything that is not valid
+     * UTF-8, and a nil value in the dictionary literal below raises. Every
+     * string this can return today is ASCII, which is exactly the argument
+     * that stops being true the day somebody adds a status. */
+    NSString *why = [NSString stringWithUTF8String:vm_instance_status_text(status)]
+                  ?: @"the machine list refused, without saying why";
     return [NSError errorWithDomain:kErrorDomain
                                code:(NSInteger)status
                            userInfo:@{ NSLocalizedDescriptionKey: why }];

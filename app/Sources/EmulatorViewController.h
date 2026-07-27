@@ -17,4 +17,14 @@
 #import <UIKit/UIKit.h>
 
 @interface EmulatorViewController : UIViewController
+
+/*
+ * WHICH MACHINE THIS SCREEN IS SHOWING. Set before the screen is pushed and
+ * not changed afterwards; it is handed straight to VMEngine, where it names
+ * this machine's own writable root filesystem. nil means no machine was named,
+ * and the engine then refuses to boot firmware rather than picking somebody
+ * else's disk — see -[VMEngine initWithInstanceID:].
+ */
+@property (nonatomic, copy) NSString *instanceID;
+
 @end

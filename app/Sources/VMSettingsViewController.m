@@ -5,6 +5,7 @@
 //
 #import "VMSettingsViewController.h"
 
+#import "VMBootOptions.h"       /* what each switch actually does, per row */
 #import "VMEngine.h"            /* +firmwareReadinessSummary, used below */
 #import "VMFirmwareImportViewController.h"
 #import "VMOptions.h"
@@ -12,6 +13,29 @@
 #import "VMSettings.h"
 
 #import <math.h>
+
+/*
+ * WHAT THE SWITCHES DO, ASKED OF THE CODE THAT DOES IT.
+ *
+ * This screen used to state, in a banner and in every group footer, that none
+ * of these rows was applied. That was true and then it was not, and nothing
+ * would have made it stop being displayed. It now asks VMBootOptions for the
+ * fate of each row with the values currently set, and prints what it is told;
+ * a row whose mapping changes changes here with no edit.
+ *
+ * Recomputed on every reload rather than cached: it depends on the switches,
+ * and the switches change on this screen.
+ */
+static void VMResolveOptions(vm_boot_options_report_t *report) {
+    bool values[VM_BOOT_OPTION_MAX];
+    unsigned count = vm_option_count();
+    if (count > VM_BOOT_OPTION_MAX) count = VM_BOOT_OPTION_MAX;
+    for (unsigned i = 0; i < count; i++)
+        values[i] = [[VMSettings sharedSettings] valueForOptionIndex:i]
+                        ? true : false;
+    /* NULL request: nothing is being started, only described. */
+    vm_boot_options_apply(values, count, NULL, report);
+}
 
 typedef NS_ENUM(NSInteger, VMSettingsSection) {
     /* The first VM_OPT_GROUP_COUNT sections are the option table's own groups,
@@ -86,6 +110,13 @@ static NSString *VMStringFromC(const char *text) {
 - (void)jailbreakToggled:(UISwitch *)sender;
 - (void)inlineConsoleChanged:(UISwitch *)sender;
 - (void)developerModeToggled:(UISwitch *)sender;
+/* These two were missing, which the comment above says cannot happen: clang
+ * late-parses method bodies inside an @implementation, so a call before the
+ * definition compiles anyway and the invariant this block exists to hold was
+ * quietly not held. -rebuildVisibleSections is called from -viewDidLoad, well
+ * above its definition. */
+- (void)rebuildVisibleSections;
+- (NSInteger)sectionAt:(NSInteger)visible;
 @end
 
 @implementation VMSettingsViewController {
@@ -204,21 +235,38 @@ static NSString *VMStringFromC(const char *text) {
 }
 
 /*
- * The banner said "this app boots no firmware" unconditionally. It can now,
- * so the sentence has to follow what has been imported -- and the part that
- * has NOT changed has to keep being said just as plainly: these switches are
- * still recorded rather than applied, whichever guest is running.
+ * The banner counted the switches nobody applies. It counted them by hand, in
+ * a sentence, and the count was "all of them" -- which stopped being true and
+ * would have gone on being displayed. The numbers come from VMBootOptions now,
+ * computed from the switches as they are actually set, so the banner cannot
+ * claim more or less than the mapping does.
  */
 - (void)refreshBanner {
     BOOL dev = [[VMSettings sharedSettings] developerMode];
     NSString *readiness = [VMEngine firmwareReadinessSummary];
-    _banner.text = dev
-        ? [readiness stringByAppendingString:
-            @"\n\nNone of the option switches below changes the machine on the "
-            @"previous screen. They are recorded, and rendered back as a "
-            @"command line for the desktop harness. Only the two rows under "
-            @"Diagnostics are applied here."]
-        : [readiness stringByAppendingString:@" See the Manual."];
+    if (!dev) {
+        _banner.text = [readiness stringByAppendingString:@" See the Manual."];
+        return;
+    }
+
+    vm_boot_options_report_t report;
+    VMResolveOptions(&report);
+    NSMutableString *text = [NSMutableString stringWithString:readiness];
+    [text appendFormat:
+        @"\n\n%u of the %u option switches below %@ a firmware boot, and %u %@ "
+        @"written into a machine's work image when that image is made. The "
+        @"rest change nothing, and each says so under its own switch.",
+        report.applied, report.count,
+        report.applied == 1u ? @"reaches" : @"reach",
+        report.provisioned, report.provisioned == 1u ? @"is" : @"are"];
+    if (report.overridden > 0u) {
+        NSString *summary =
+            [NSString stringWithUTF8String:report.summary] ?: @"";
+        if (summary.length) [text appendFormat:@"\n\n%@", summary];
+    }
+    [text appendString:
+        @"\n\nOnly the rows under Diagnostics take effect immediately."];
+    _banner.text = text;
 }
 
 - (void)developerModeToggled:(UISwitch *)sender {
@@ -330,8 +378,8 @@ titleForFooterInSection:(NSInteger)section {
     if (section == VMSettingsSectionGeneral) {
         return [[VMSettings sharedSettings] developerMode]
             ? @"Developer mode is on: the option table, the guest console and "
-              @"the diagnostics are shown. None of those switches changes this "
-              @"app's built-in test program."
+              @"the diagnostics are shown. Most of the option switches change "
+              @"nothing; each one says, under itself, what it does."
             : @"New here? Read the manual first.\n\n"
               @"Jailbreak disables the guest's signature checking and installs "
               @"Cydia into that machine's own files. It applies to a real "
@@ -345,12 +393,30 @@ titleForFooterInSection:(NSInteger)section {
 
     if (section < VM_OPT_GROUP_COUNT) {
         NSString *note = VMStringFromC(vm_option_group_note((unsigned)section));
-        /* Still true, and still worth saying on every group: the app boots
-         * firmware now, but it boots it with the one configuration ~90
-         * recorded desktop runs converged on, not with these switches. */
-        return [note stringByAppendingString:
-                @"\n\nRECORDED, NOT APPLIED: these describe a firmware boot, "
-                @"and the app's own boot does not read them yet."];
+        /*
+         * The blanket "RECORDED, NOT APPLIED" that used to be appended here is
+         * gone, because it is no longer true of every row and a caveat that is
+         * wrong about some rows teaches people to skip it on all of them. The
+         * per-group count comes from the mapping; the per-row sentence is
+         * under each switch.
+         */
+        vm_boot_options_report_t report;
+        VMResolveOptions(&report);
+        unsigned reaching = 0, total = 0;
+        for (unsigned i = 0; i < report.count; i++) {
+            const vm_option_t *option = vm_option_at(i);
+            if (!option || option->group != (unsigned char)section) continue;
+            total++;
+            if (report.row[i].outcome != VM_BOOT_OPTION_IGNORED) reaching++;
+        }
+        if (reaching == 0u)
+            return [note stringByAppendingString:
+                    @"\n\nNONE of the switches in this group reaches the app's "
+                    @"own boot. Each says underneath what happens instead."];
+        return [note stringByAppendingFormat:
+                @"\n\n%u of these %u switches %@ the app's own boot; the rest "
+                @"say underneath what happens instead.",
+                reaching, total, reaching == 1u ? @"reaches" : @"reach"];
     }
 
     switch ((VMSettingsSection)section) {
@@ -472,32 +538,65 @@ titleForFooterInSection:(NSInteger)section {
                                                    style:UITableViewCellStyleSubtitle];
         if (!option) return cell;
 
+        /*
+         * THE ROW'S OWN FATE, UNDER THE ROW. Asked of the same C the engine
+         * calls, so a switch cannot be described here one way and honoured
+         * another. An ignored row says what the machine does instead; a row
+         * whose value is already fixed in a work image says that too.
+         */
+        vm_boot_options_report_t report;
+        VMResolveOptions(&report);
+        const vm_boot_option_status_t *fate =
+            index < report.count ? &report.row[index] : NULL;
+
         cell.textLabel.text = VMStringFromC(option->title);
-        cell.detailTextLabel.text = [NSString stringWithFormat:@"--%s  ·  %@",
-                                     option->name,
-                                     VMStringFromC(option->detail)];
+        NSMutableString *detail = [NSMutableString stringWithFormat:
+            @"--%s  ·  %@", option->name, VMStringFromC(option->detail)];
+        if (fate && fate->note) {
+            /*
+             * Three prefixes, because the three ways a switch can fail to mean
+             * what it looks like are different problems. A PROVISIONED row is
+             * flagged even when its position agrees with the mapping: the
+             * value that is actually in an existing work image is whatever was
+             * set when that image was made, and nothing here can read it back,
+             * so "off" next to a machine that has one is not a claim this
+             * screen is entitled to make silently.
+             */
+            NSString *prefix = @"";
+            if (fate->effective != fate->requested) prefix = @"NOT APPLIED: ";
+            else if (fate->outcome == VM_BOOT_OPTION_PROVISIONED)
+                prefix = @"NOT READ AT BOOT: ";
+            [detail appendFormat:@"\n%@%@", prefix, VMStringFromC(fate->note)];
+        }
+        cell.detailTextLabel.text = detail;
 
         UISwitch *toggle = [[UISwitch alloc] initWithFrame:CGRectZero];
         toggle.tag = (NSInteger)index;
         toggle.on = [_settings valueForOptionIndex:index];
         /*
-         * Grey, not green. An "on" switch that looks like every other working
-         * switch in iOS would be claiming an effect this one does not have.
+         * Grey for a row the machine does not read, the system tint for one it
+         * does. That distinction did not exist when nothing was applied and
+         * everything was grey; now that two rows really do change the boot,
+         * making them look the same as the twelve that do not would understate
+         * them exactly as badly as the old banner overstated the rest.
          *
          * These are left MOVABLE rather than disabled, which is the one place
          * on this screen that judgement was needed. Recording an intended
          * configuration is a thing the app really can do, and bootkernel's own
          * --activate sets the precedent: it is settable, defaults on, and every
          * run header then says it was requested and not applied. So the
-         * treatment here is the same — say NOT APPLIED loudly, in the banner
-         * and in every footer, rather than take the switch away and leave the
-         * user unable to record anything at all. The controls whose OWN
-         * function is missing, the device keys and the firmware rows, are
-         * disabled outright instead.
-         *
-         * To take the other view, this is the line: set toggle.enabled = NO.
+         * treatment here is the same — say NOT APPLIED loudly, under the switch
+         * itself, rather than take the switch away and leave the user unable to
+         * record anything at all. The controls whose OWN function is missing,
+         * the device keys and the firmware rows, are disabled outright instead.
          */
-        toggle.onTintColor = [UIColor systemGrayColor];
+        /* nil restores the system's own "this works" green. Written as an
+         * assignment rather than a ternary because `cond ? nil : aColor` makes
+         * clang pick the common type of `nil` and UIColor*, and this file has
+         * no reason to make a reader check that. */
+        UIColor *tint = [UIColor systemGrayColor];
+        if (fate && fate->outcome == VM_BOOT_OPTION_APPLIED) tint = nil;
+        toggle.onTintColor = tint;
         [toggle addTarget:self
                    action:@selector(optionSwitchChanged:)
          forControlEvents:UIControlEventValueChanged];
@@ -623,10 +722,16 @@ titleForFooterInSection:(NSInteger)section {
      * screens, a caption that is not true is not acceptable. */
     _copiedCommandLine = NO;
 
-    // The rendered command line is derived from every switch, so it moves too.
-    [self.tableView reloadSections:
-        [NSIndexSet indexSetWithIndex:VMSettingsSectionCommandLine]
-                  withRowAnimation:UITableViewRowAnimationNone];
+    /*
+     * A full reload rather than the command-line section alone. Every row now
+     * carries a sentence about what the machine will actually do with it, and
+     * "NOT APPLIED" appears on a row exactly when its position disagrees with
+     * the machine -- which is a property of the switch that was just moved.
+     * Reloading one section would leave the row the user touched showing the
+     * verdict for the position they just left.
+     */
+    [self refreshBanner];
+    [self.tableView reloadData];
 }
 
 - (void)pauseSwitchChanged:(UISwitch *)sender {

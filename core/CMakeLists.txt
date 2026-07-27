@@ -272,6 +272,8 @@ add_test(NAME app_vmguest_bridge COMMAND test_vmguest)
 add_executable(test_vmfirmwareboot
     ../app/Tests/test_vmfirmwareboot.c
     ../app/Sources/VMFirmwareBoot.c
+    ../app/Sources/VMBootOptions.c
+    ../app/Sources/VMOptions.c
 )
 target_include_directories(test_vmfirmwareboot PRIVATE ../app/Sources ../tools)
 target_link_libraries(test_vmfirmwareboot PRIVATE
@@ -288,6 +290,62 @@ else()
 endif()
 add_test(NAME app_firmware_boot COMMAND test_vmfirmwareboot)
 set_tests_properties(app_firmware_boot PROPERTIES
+    WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+
+# Which of the settings screen's fourteen switches reaches a bring-up request,
+# and what the app says about the ones that do not.  Two do; twelve do not; on
+# an untouched installation six are already in conflict with what bring-up
+# actually does, and this is the only place that can be asserted without a
+# phone.  Needs no core symbols -- s5l_bringup_request_t is a struct and
+# nothing here calls into emucore -- so it does not link it.
+add_executable(test_vmbootoptions
+    ../app/Tests/test_vmbootoptions.c
+    ../app/Sources/VMBootOptions.c
+    ../app/Sources/VMOptions.c
+)
+target_include_directories(test_vmbootoptions PRIVATE ../app/Sources include)
+set_target_properties(test_vmbootoptions PROPERTIES
+    C_STANDARD 11
+    C_STANDARD_REQUIRED YES
+    C_EXTENSIONS NO)
+if(MSVC)
+    target_compile_options(test_vmbootoptions PRIVATE /W4 /WX)
+else()
+    target_compile_options(test_vmbootoptions PRIVATE
+        -Wall -Wextra -Werror -pedantic -Wformat=2 -Wshadow)
+endif()
+add_test(NAME app_boot_options COMMAND test_vmbootoptions)
+
+# Which files belong to which machine.  The identifier from the machine list
+# becomes a PATH COMPONENT here, so the check that admits only sixteen
+# lower-case hex digits is a security boundary and not a formatting rule; and
+# the adoption of a pre-instance work image is the one operation in the app
+# that can lose 450 MB of somebody's guest disk.  Links the firmware boot path
+# because the property worth asserting is end to end: that two machines see two
+# root filesystems through the code that actually opens them.
+add_executable(test_vminstancepaths
+    ../app/Tests/test_vminstancepaths.c
+    ../app/Sources/VMInstancePaths.c
+    ../app/Sources/VMInstances.c
+    ../app/Sources/VMFirmwareBoot.c
+    ../app/Sources/VMBootOptions.c
+    ../app/Sources/VMOptions.c
+)
+target_include_directories(test_vminstancepaths PRIVATE ../app/Sources ../tools)
+target_link_libraries(test_vminstancepaths PRIVATE
+    emucore host_ios3_bringup_gate host_file_block host_rootfs_work)
+set_target_properties(test_vminstancepaths PROPERTIES
+    C_STANDARD 11
+    C_STANDARD_REQUIRED YES
+    C_EXTENSIONS NO)
+if(MSVC)
+    target_compile_options(test_vminstancepaths PRIVATE /W4 /WX)
+else()
+    target_compile_options(test_vminstancepaths PRIVATE
+        -Wall -Wextra -Werror -pedantic -Wformat=2 -Wshadow)
+endif()
+add_test(NAME app_instance_paths COMMAND test_vminstancepaths)
+set_tests_properties(app_instance_paths PROPERTIES
     WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
 
 add_executable(test_vmtouchmap
@@ -493,6 +551,11 @@ set_target_properties(host_audio_capture PROPERTIES
     C_EXTENSIONS NO)
 if(MSVC)
     target_compile_options(host_audio_capture PRIVATE /W4 /WX)
+    # This target opens a file, and MSVC's C4996 calls fopen unsafe and /WX
+    # turns that into an error. fopen_s is not an option: this is C11 built for
+    # four toolchains and the sink must behave identically on all of them.
+    # test_file_block already carries the same definition for the same reason.
+    target_compile_definitions(host_audio_capture PRIVATE _CRT_SECURE_NO_WARNINGS)
 else()
     target_compile_options(host_audio_capture PRIVATE
         -Wall -Wextra -Werror -pedantic)

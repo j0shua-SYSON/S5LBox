@@ -20,6 +20,7 @@
 #ifndef S5LBOX_APP_VMFIRMWAREBOOT_H
 #define S5LBOX_APP_VMFIRMWAREBOOT_H
 
+#include "VMBootOptions.h"
 #include "bringup.h"
 #include "soc.h"
 
@@ -33,6 +34,7 @@ extern "C" {
 
 #define VM_FW_BOOT_DETAIL_CAPACITY  256u
 #define VM_FW_BOOT_SUMMARY_CAPACITY 128u
+#define VM_FW_BOOT_PATH_CAPACITY    1024u
 
 /*
  * The importer's three artefacts, plus the one file this layer makes itself.
@@ -54,6 +56,38 @@ extern "C" {
  * nothing and the boot stops early. 32 MB is the harness's long-standing
  * value and is what run89-base's work image was built with. */
 #define VM_FW_BOOT_GROWTH_BYTES  (32u * 1024u * 1024u)
+
+/*
+ * TWO DIRECTORIES, NOT ONE, and the split is the difference between two
+ * machines and two names for one.
+ *
+ * `firmware` holds the importer's three artefacts. They are read-only for the
+ * whole life of the app, they are the expensive thing a user obtained (an IPSW
+ * unpacked into ~450 MB), and there is exactly one useful copy of them: every
+ * machine reads the same three files and none of them can damage the others.
+ *
+ * `work` holds ONE machine's writable root filesystem. This is the file the
+ * guest mounts read-write and scribbles all over, so it is the file that must
+ * not be shared -- two machines pointed at one work image are one machine with
+ * two names, and worse, two machines that can corrupt each other's disk.
+ *
+ * Both may be the same directory, which is the layout the app had before
+ * instances existed; vm_firmware_boot_paths_shared() builds exactly that.
+ */
+typedef struct {
+    char firmware[VM_FW_BOOT_PATH_CAPACITY];
+    char work[VM_FW_BOOT_PATH_CAPACITY];
+} vm_firmware_boot_paths_t;
+
+/* Both halves in one directory. False, with `out` zeroed, if it does not fit. */
+bool vm_firmware_boot_paths_shared(vm_firmware_boot_paths_t *out,
+                                   const char *directory);
+
+/* Read-only artefacts in one directory, this machine's work image in another.
+ * False, with `out` zeroed, if either does not fit. */
+bool vm_firmware_boot_paths_split(vm_firmware_boot_paths_t *out,
+                                  const char *firmware_directory,
+                                  const char *work_directory);
 
 typedef enum {
     /* All four files are present: a real kernel boot is possible right now. */
@@ -81,12 +115,13 @@ typedef struct {
 } vm_firmware_boot_state_t;
 
 /*
- * Look at `directory` and report what is there. Opens nothing for writing and
+ * Look at `paths` and report what is there. Opens nothing for writing and
  * reads no file contents, so it is cheap enough to call before every start.
  * A zero-length file counts as ABSENT: the settings screen's existence check
- * would otherwise call a failed import "present".
+ * would otherwise call a failed import "present". A NULL `paths`, or either
+ * directory empty, is INCOMPLETE with a reason rather than a crash.
  */
-void vm_firmware_boot_probe(const char *directory,
+void vm_firmware_boot_probe(const vm_firmware_boot_paths_t *paths,
                             vm_firmware_boot_state_t *out);
 
 typedef struct {
@@ -98,6 +133,13 @@ typedef struct {
     char detail[VM_FW_BOOT_DETAIL_CAPACITY];
     /* The layout that was planned, whether or not it was reached. */
     s5l_bringup_result_t bringup;
+    /*
+     * What became of every settings switch. Filled in whenever the request was
+     * built at all -- that is, on every outcome after the files were found --
+     * so a caller can say which switches the machine contradicted even on a
+     * run that succeeded. See VMBootOptions.h.
+     */
+    vm_boot_options_report_t options;
 } vm_firmware_boot_report_t;
 
 /*
@@ -110,7 +152,7 @@ typedef struct vm_firmware_boot vm_firmware_boot_t;
 vm_firmware_boot_t *vm_firmware_boot_create(void);
 
 /*
- * Bring `machine` up on the firmware in `directory`.
+ * Bring `machine` up on the firmware `paths` names.
  *
  * `machine` must already be s5l8900_init()'d at S5L_BRINGUP_PHYS_BASE with
  * S5L_BRINGUP_RAM_SIZE bytes and must not be running. On success the CPU is
@@ -118,26 +160,39 @@ vm_firmware_boot_t *vm_firmware_boot_create(void);
  * machine has been partially written and the caller must free and rebuild it
  * before falling back to the demo guest.
  *
+ * `options` is the settings screen's values in option-table order; NULL means
+ * every row at its table default. They are resolved HERE rather than by the
+ * caller so that the mapping, and the record of which switches the machine
+ * contradicted, is the same code on the phone and under the test suite.
+ *
  * Reads the kernel (about 8 MB) and the device tree into memory for the
  * duration of the call only; the root filesystem is never read into memory.
  */
 bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
                             s5l8900_t *machine,
-                            const char *directory,
+                            const vm_firmware_boot_paths_t *paths,
+                            const bool *options, unsigned option_count,
                             vm_firmware_boot_report_t *report);
 
 /* Close the work image and release the bridge storage. Safe on a NULL slot. */
 void vm_firmware_boot_destroy(vm_firmware_boot_t **boot);
 
 /*
- * Make the writable work image from the imported rootfs.img.
+ * Make this machine's writable work image from the shared imported rootfs.img:
+ * reads paths->firmware/rootfs.img, writes paths->work/rootfs-work.img.
  *
  * SLOW: it copies ~433 MB and then grows the volume. Call it on a background
  * thread, never from a UI callback or from anything holding the engine lock.
  * Refuses rather than replaces if the destination already exists, so calling
  * it twice is safe. `detail` always receives a reason on failure.
+ *
+ * `options` selects the work-image transformations -- today only the
+ * QuartzCore software-renderer plist rewrite. NULL is the table's defaults.
+ * The directory paths->work names must already exist; nothing here creates
+ * directories, because C has no portable way to.
  */
-bool vm_firmware_boot_provision(const char *directory,
+bool vm_firmware_boot_provision(const vm_firmware_boot_paths_t *paths,
+                                const bool *options, unsigned option_count,
                                 char *detail, size_t detail_capacity);
 
 #ifdef __cplusplus

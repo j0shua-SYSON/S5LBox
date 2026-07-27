@@ -27,6 +27,22 @@ typedef NS_ENUM(NSUInteger, VMButton) {
 @interface VMEngine : NSObject
 
 /*
+ * WHICH MACHINE THIS ENGINE RUNS.
+ *
+ * `identifier` is the machine list's stable id, and it is what names this
+ * machine's own writable root filesystem on disk. Two engines with different
+ * identifiers are two machines: they share the imported kernel, device tree
+ * and pristine rootfs.img, which nothing ever writes to, and they do NOT share
+ * the work image, which the guest writes to constantly.
+ *
+ * -init is -initWithInstanceID:nil, and an engine with no identifier will not
+ * boot firmware at all: it has no work image it could call its own, and
+ * inventing a shared one is how every machine became the same machine. It runs
+ * the built-in test guest and -bringUpNote says so.
+ */
+- (instancetype)initWithInstanceID:(NSString *)identifier;
+
+/*
  * Allocate the machine, install a guest, and start interpreting on a
  * background thread. Returns YES when already running, and NO if startup fails
  * or a start/stop transition is already in progress.
@@ -112,6 +128,13 @@ typedef NS_ENUM(NSUInteger, VMButton) {
  *                    the ordinary case of no firmware having been imported.
  *                    THIS MUST REACH THE USER: a failed bring-up that only
  *                    logs to the console is invisible outside developer mode.
+ *                    A SUCCESSFUL boot can set it too, and that is not a
+ *                    contradiction: most of the settings switches never reach
+ *                    the request, and a machine running with a configuration
+ *                    the settings screen does not show is exactly the thing
+ *                    this pair of methods exists to stop being invisible. Read
+ *                    -isRunningFirmware to title it, never the presence of a
+ *                    note.
  * -isPreparingRootFilesystem: whether the one slow first-boot step is running
  *                    on its own thread. The machine runs the test guest
  *                    meanwhile; reopening it afterwards boots iPhone OS.
