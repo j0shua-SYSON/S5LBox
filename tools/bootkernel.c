@@ -1043,7 +1043,7 @@ static void boot_capability_notes(FILE *out, const boot_config_t *cfg,
 
     if (cfg->v.jb_codesign)
         fprintf(out,
-                "jailbreak  : code-signing half APPLIED — boot args gain "
+                "jailbreak  : code-signing half APPLIED -- boot args gain "
                 "cs_enforcement_disable=1 amfi_get_out_of_my_way=1\n"
                 "             amfi_allow_any_signature=1, and "
                 "/chosen/debug-enabled is set to 1\n"
@@ -1052,7 +1052,7 @@ static void boot_capability_notes(FILE *out, const boot_config_t *cfg,
                 "              fires either way because it is the kernel's "
                 "page hasher, not AMFI's policy gate.\n"
                 "              The deciding test is an unsigned binary that "
-                "runs — see --jb-payload.)\n");
+                "runs -- see --jb-payload.)\n");
     if (cfg->v.jb_payload) {
         fprintf(out,
                 "jailbreak  : payload half requested but NOT APPLIED (no "

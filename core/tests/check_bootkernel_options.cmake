@@ -92,8 +92,14 @@ expect_config(activation_off_is_also_stated
 expect_config(jailbreak_default_off
     "jb-codesign=0|jb-payload=0"
     absent-kernel --print-config)
+# The code-signing half is APPLIED as of the boot-args/device-tree wiring, and
+# this case pins both halves of what that means: that it is applied, and that
+# the header still refuses to claim it has been demonstrated. Booting clean
+# with enforcement disabled is not evidence that enforcement is disabled --
+# nothing unsigned has executed -- and a run header that dropped the second
+# sentence would read as proof of something never measured.
 expect_config(jailbreak_codesign_half_alone
-    "jb-codesign=1|jb-payload=0|jailbreak  : code-signing half requested but NOT APPLIED"
+    "jb-codesign=1|jb-payload=0|jailbreak  : code-signing half APPLIED|applied, NOT demonstrated"
     absent-kernel --jb-codesign --print-config)
 
 # --------------------------------------------------------------------------
