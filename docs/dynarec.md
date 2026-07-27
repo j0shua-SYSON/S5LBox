@@ -199,11 +199,55 @@ do per instruction:
    instructions (§1.3) that is about **2.5 table-walk reads per retired guest
    instruction**. XNU maps the kernel with sections *and* pages; the 4 KB row is
    the honest one.
-2. **The device tick costs a fifth of the interpreter.** `s5l8900_tick` runs a
-   64-bit divide *and* a 64-bit modulo per guest instruction to convert retired
-   instructions into timebase ticks at the 412 MHz : 6 MHz ratio in
+2. ~~**The device tick costs a fifth of the interpreter.**~~ `s5l8900_tick` runs
+   a 64-bit divide *and* a 64-bit modulo per guest instruction to convert
+   retired instructions into timebase ticks at the 412 MHz : 6 MHz ratio in
    `s5l8900_tick()`. One tick per instruction is also 68x finer
    than the timebase can represent.
+
+   > **SUPERSEDED 2026-07-27. It costs closer to nine tenths.** The −21% above
+   > was true when it was taken and is now badly stale: at that commit
+   > `s5l8900_tick` was a divide, one `s5l_timer_tick`, one `s5l_vic_set_line`
+   > and two VIC reads. It now sweeps timer, CLCD, TV-out, PMU, two I²C and two
+   > SPI controllers, uart4 and the touch panel; applies five buttons; walks
+   > seven GPIO cascade groups; and recomputes both VICs — **on every retired
+   > instruction**. Several of those devices were added the same day this was
+   > re-measured.
+   >
+   > `tools/insnbench.c` measures it directly, and CI now runs it on every
+   > push. Medians over five interleaved repetitions of 20 M instructions:
+   >
+   > | loop | MMU | tick | ubuntu-latest | windows-latest |
+   > |---|---|---|---|---|
+   > | alu/branch | off | no | 41.86 | 30.12 |
+   > | load/store | off | no | 38.03 | 32.98 |
+   > | load/store | off | **yes** | **3.25** | **5.21** |
+   > | load/store | 1 MB sections | no | 24.50 | 22.68 |
+   > | load/store | 4 KB pages | no | 17.97 | 19.45 |
+   > | load/store | 4 KB pages | **yes** | **2.85** | **4.47** |
+   >
+   > The last pair is the configuration a real boot runs in: **17.97 → 2.85
+   > M/s, a −84% loss to the tick alone** (−92% with the MMU off). An
+   > independent cross-check outside the repo puts `s5l8900_tick(m,1)` at
+   > **543 ns/call** against ~84 ns to interpret one instruction; 84 + 543
+   > predicts 1.60 M/s on the dev box against 1.58 measured, agreeing to 2%.
+   >
+   > Two consequences. **Deferring the tick is worth about 6.3× and is the
+   > largest non-JIT win available, ahead of the software TLB** — and every
+   > shipping caller does it per instruction (`bootkernel`, `s5l8900_run`,
+   > `runfw`, `snapboot`). And **§1.5's "tick once per batch ≈ 1.2×" is
+   > superseded**: on this loop it is worth roughly 8×.
+   >
+   > Note also that the no-tick rows here are far above the historical table
+   > (41.86 vs 8.59 M/s for alu/branch). Those older figures were taken on a
+   > thermally limited laptop; these are CI hardware. Any comparison of an old
+   > number to a new one must account for the host, which is why the benchmark
+   > prints its arch, OS, compiler and optimisation level on every run.
+   >
+   > **Still not measured: ARM64.** The macOS runners failed to build on the
+   > push that produced the table above, so the benchmark step never ran there.
+   > Every figure in this document remains an x86 figure, and every A9 claim
+   > remains INFERRED.
 
 ### 1.3 What the guest actually executes
 
