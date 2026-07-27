@@ -306,17 +306,14 @@ titleForFooterInSection:(NSInteger)section {
             ? @"Developer mode is on: the option table, the guest console and "
               @"the diagnostics are shown. None of those switches changes this "
               @"app's built-in test program."
-            : @"New here? Read the manual first.
-
-Jailbreak disables the "
-              @"guest's signature checking and installs Cydia into that "
-              @"machine's own files. It applies to a real firmware boot — this "
-              @"app boots none yet, so today it is recorded and not performed."
-              @"
-
-Developer mode adds the full option table, the guest "
-              @"console and diagnostics — useful for working on the emulator, "
-              @"noise otherwise.";
+            : @"New here? Read the manual first.\n\n"
+              @"Jailbreak disables the guest's signature checking and installs "
+              @"Cydia into that machine's own files. It applies to a real "
+              @"firmware boot — this app boots none yet, so today it is "
+              @"recorded and not performed.\n\n"
+              @"Developer mode adds the full option table, the guest console "
+              @"and diagnostics — useful for working on the emulator, noise "
+              @"otherwise.";
     }
     (void)tableView;
 
