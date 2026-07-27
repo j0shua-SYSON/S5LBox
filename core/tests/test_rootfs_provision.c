@@ -133,6 +133,34 @@ typedef struct fixture {
     uint32_t next_cnid;
     uint32_t free_data_blocks;
     uint16_t leaf_free;
+    /*
+     * Node size is a fixture parameter, not a constant, because the split
+     * tests need an index node that can actually be filled.  At 4096 bytes an
+     * index node holds hundreds of children and the fixture has eight nodes in
+     * total, so the index-split path would be unreachable; at 512 -- the
+     * smallest nodeSize the provisioner accepts -- two or three children fill
+     * one, and the same eight catalog blocks become 64 nodes.
+     */
+    uint16_t node_size;
+    uint32_t catalog_nodes;
+    /* Shape of the tree the builder produced, for the tests to assert on. */
+    uint32_t leaf_nodes;
+    uint32_t index_nodes;
+    uint32_t root_node;
+    uint32_t first_leaf;
+    uint32_t last_leaf;
+    uint32_t used_nodes;
+    uint16_t index_free;
+    uint16_t tree_depth;
+    /*
+     * How many records the LAST leaf holds before anything is provisioned.
+     * The split under test claims to move no existing record, so a test that
+     * only counted the tree's total would not notice records sliding from the
+     * old leaf into the new one.  This is the number the old leaf must still
+     * have afterwards.
+     */
+    uint32_t last_leaf_records;
+    uint32_t root_children;
 } fixture_t;
 
 static uint16_t fx_key(uint8_t *record, uint32_t parent, const char *name) {
@@ -219,7 +247,19 @@ static void fx_thread(fixture_t *fx, uint32_t cnid, uint16_t type,
 
 static uint8_t *fx_node(fixture_t *fx, uint32_t index) {
     return fx->image + FX_CATALOG_BLOCK * FX_BLOCK_SIZE +
-           (size_t)index * FX_NODE_SIZE;
+           (size_t)index * fx->node_size;
+}
+
+/* Free bytes in one node of the fixture, read back out of the image the way
+ * the writer's own fit test computes it. */
+static uint16_t fx_node_free(const fixture_t *fx, uint32_t node_index) {
+    const uint8_t *node = fx->image + FX_CATALOG_BLOCK * FX_BLOCK_SIZE +
+                          (size_t)node_index * fx->node_size;
+    uint16_t count = get_be16(node + 10);
+    uint16_t end = get_be16(node + fx->node_size -
+                            2u * ((uint32_t)count + 1u));
+
+    return (uint16_t)(fx->node_size - 2u * ((uint32_t)count + 1u) - end);
 }
 
 static void fx_bitmap_set(fixture_t *fx, uint32_t block, int set) {
@@ -237,19 +277,19 @@ static uint16_t fx_emit_leaf(fixture_t *fx, uint32_t node_index, size_t from,
     uint16_t count = (uint16_t)(to - from);
     size_t index;
 
-    memset(node, 0, FX_NODE_SIZE);
+    memset(node, 0, fx->node_size);
     put_be32(node, flink);
     put_be32(node + 4, blink);
     node[8] = 0xffu;
     node[9] = 1u;
     put_be16(node + 10, count);
     for (index = from; index < to; index++) {
-        put_be16(node + FX_NODE_SIZE - 2u * (index - from + 1u), offset);
+        put_be16(node + fx->node_size - 2u * (index - from + 1u), offset);
         memcpy(node + offset, fx->record[index], fx->length[index]);
         offset = (uint16_t)(offset + fx->length[index]);
     }
-    put_be16(node + FX_NODE_SIZE - 2u * ((size_t)count + 1u), offset);
-    return (uint16_t)(FX_NODE_SIZE - 2u * ((uint32_t)count + 1u) - offset);
+    put_be16(node + fx->node_size - 2u * ((size_t)count + 1u), offset);
+    return (uint16_t)(fx->node_size - 2u * ((uint32_t)count + 1u) - offset);
 }
 
 /*
@@ -257,43 +297,52 @@ static uint16_t fx_emit_leaf(fixture_t *fx, uint32_t node_index, size_t from,
  * `key_override` argument exists only for the malformed-index fixture that the
  * leaf-head refusal test needs; pass NULL for a well-formed tree.
  */
-static void fx_emit_index(fixture_t *fx, uint32_t node_index,
-                          const uint32_t *children, const size_t *first_record,
-                          size_t children_count, const uint8_t *key_override,
-                          size_t override_child) {
+static uint16_t fx_emit_index(fixture_t *fx, uint32_t node_index,
+                              const uint32_t *children,
+                              const uint8_t *const *first_key,
+                              size_t children_count, uint8_t level,
+                              uint32_t flink, uint32_t blink) {
     uint8_t *node = fx_node(fx, node_index);
     uint16_t offset = 14u;
     size_t index;
 
-    memset(node, 0, FX_NODE_SIZE);
+    memset(node, 0, fx->node_size);
+    put_be32(node, flink);
+    put_be32(node + 4, blink);
     node[8] = 0x00u;
-    node[9] = 2u;
+    node[9] = level;
     put_be16(node + 10, (uint16_t)children_count);
     for (index = 0; index < children_count; index++) {
-        const uint8_t *source = fx->record[first_record[index]];
-        uint16_t key_bytes;
+        const uint8_t *source = first_key[index];
+        uint16_t key_bytes = (uint16_t)(2u + get_be16(source));
 
-        if (key_override && index == override_child)
-            source = key_override;
-        key_bytes = (uint16_t)(2u + get_be16(source));
         if ((key_bytes & 1u) != 0u)
             key_bytes++;
-        put_be16(node + FX_NODE_SIZE - 2u * (index + 1u), offset);
+        put_be16(node + fx->node_size - 2u * (index + 1u), offset);
         memcpy(node + offset, source, key_bytes);
         put_be32(node + offset + key_bytes, children[index]);
         offset = (uint16_t)(offset + key_bytes + 4u);
     }
-    put_be16(node + FX_NODE_SIZE - 2u * (children_count + 1u), offset);
+    put_be16(node + fx->node_size - 2u * (children_count + 1u), offset);
+    return (uint16_t)(fx->node_size - 2u * ((uint32_t)children_count + 1u) -
+                      offset);
 }
 
+/*
+ * `used` is a bitmap of nodes to mark in use, or NULL to mark 0..used_nodes-1.
+ * The split tests need the second form because their trees do not occupy a
+ * contiguous prefix of the node space.
+ */
 static void fx_emit_header(fixture_t *fx, uint16_t depth, uint32_t root,
                            uint32_t first_leaf, uint32_t last_leaf,
-                           uint32_t leaf_records, uint32_t used_nodes) {
+                           uint32_t leaf_records, uint32_t used_nodes,
+                           const uint8_t *used) {
     uint8_t *node = fx_node(fx, 0u);
     uint8_t *header = node + 14;
     uint32_t index;
+    uint32_t catalog_nodes = fx->catalog_nodes;
 
-    memset(node, 0, FX_NODE_SIZE);
+    memset(node, 0, fx->node_size);
     node[8] = 0x01u;
     node[9] = 0u;
     put_be16(node + 10, 3u);
@@ -302,21 +351,25 @@ static void fx_emit_header(fixture_t *fx, uint16_t depth, uint32_t root,
     put_be32(header + 6, leaf_records);
     put_be32(header + 10, first_leaf);
     put_be32(header + 14, last_leaf);
-    put_be16(header + 18, (uint16_t)FX_NODE_SIZE);
+    put_be16(header + 18, fx->node_size);
     put_be16(header + 20, 516u);
-    put_be32(header + 22, FX_CATALOG_NODES);
-    put_be32(header + 26, FX_CATALOG_NODES - used_nodes);
+    put_be32(header + 22, catalog_nodes);
+    put_be32(header + 26, catalog_nodes - used_nodes);
     put_be32(header + 32, FX_CATALOG_BYTES);
     header[36] = 0u;                 /* btreeType: hfs */
     header[37] = 0xbcu;              /* keyCompareType: HFSX binary */
     put_be32(header + 38, 0x00000006u); /* big keys + variable index keys */
     /* Node-allocation map record; the header node's third record. */
-    for (index = 0; index < used_nodes; index++)
-        node[248u + (index >> 3)] |= (uint8_t)(1u << (7u - (index & 7u)));
-    put_be16(node + FX_NODE_SIZE - 2u, 14u);
-    put_be16(node + FX_NODE_SIZE - 4u, 120u);
-    put_be16(node + FX_NODE_SIZE - 6u, 248u);
-    put_be16(node + FX_NODE_SIZE - 8u, (uint16_t)(FX_NODE_SIZE - 8u));
+    if (used) {
+        memcpy(node + 248u, used, (size_t)((catalog_nodes + 7u) / 8u));
+    } else {
+        for (index = 0; index < used_nodes; index++)
+            node[248u + (index >> 3)] |= (uint8_t)(1u << (7u - (index & 7u)));
+    }
+    put_be16(node + fx->node_size - 2u, 14u);
+    put_be16(node + fx->node_size - 4u, 120u);
+    put_be16(node + fx->node_size - 6u, 248u);
+    put_be16(node + fx->node_size - 8u, (uint16_t)(fx->node_size - 8u));
 }
 
 /*
@@ -396,11 +449,17 @@ static void fx_records(fixture_t *fx) {
     fx_thread(fx, FX_NOTE, 4u, FX_BETA, "note.txt");
 }
 
+static void fx_init(fixture_t *fx, uint16_t node_size) {
+    fx->node_size = node_size;
+    fx->catalog_nodes = FX_CATALOG_BYTES / node_size;
+}
+
 static fixture_t *fx_create(uint32_t free_data_blocks) {
     fixture_t *fx = (fixture_t *)calloc(1u, sizeof(*fx));
 
     if (!fx)
         return NULL;
+    fx_init(fx, (uint16_t)FX_NODE_SIZE);
     /* note.txt occupies the first data block, so it is never free. */
     if (free_data_blocks > FX_DATA_BLOCKS - 1u)
         free_data_blocks = FX_DATA_BLOCKS - 1u;
@@ -411,7 +470,7 @@ static fixture_t *fx_create(uint32_t free_data_blocks) {
     fx_records(fx);
     memcpy(fx->image + FX_DATA_FIRST * FX_BLOCK_SIZE, "note\n", 5u);
     (void)fx_emit_leaf(fx, 1u, 0u, fx->count, 0u, 0u);
-    fx_emit_header(fx, 1u, 1u, 1u, 1u, (uint32_t)fx->count, 2u);
+    fx_emit_header(fx, 1u, 1u, 1u, 1u, (uint32_t)fx->count, 2u, NULL);
     fx_emit_volume(fx);
     return fx;
 }
@@ -420,11 +479,12 @@ static fixture_t *fx_create(uint32_t free_data_blocks) {
 static fixture_t *fx_create_depth2(int malformed_index) {
     fixture_t *fx = (fixture_t *)calloc(1u, sizeof(*fx));
     uint32_t children[2];
-    size_t first[2];
+    const uint8_t *first[2];
     uint8_t override_key[16];
 
     if (!fx)
         return NULL;
+    fx_init(fx, (uint16_t)FX_NODE_SIZE);
     fx->free_data_blocks = FX_DATA_BLOCKS - 1u;
     fx->file_count = 1u;
     fx->folder_count = 3u;
@@ -435,8 +495,8 @@ static fixture_t *fx_create_depth2(int malformed_index) {
     (void)fx_emit_leaf(fx, 2u, 6u, fx->count, 0u, 1u);
     children[0] = 1u;
     children[1] = 2u;
-    first[0] = 0u;
-    first[1] = 6u;
+    first[0] = fx->record[0];
+    first[1] = fx->record[6];
     if (malformed_index) {
         /*
          * Leaf 2 really begins at (17,""), but tell the index it begins at
@@ -448,11 +508,10 @@ static fixture_t *fx_create_depth2(int malformed_index) {
          * leaf-head guard at all, which is the point of testing it.
          */
         (void)fx_key(override_key, FX_ALPHA, "e");
-        fx_emit_index(fx, 3u, children, first, 2u, override_key, 1u);
-    } else {
-        fx_emit_index(fx, 3u, children, first, 2u, NULL, 0u);
+        first[1] = override_key;
     }
-    fx_emit_header(fx, 2u, 3u, 1u, 2u, (uint32_t)fx->count, 4u);
+    (void)fx_emit_index(fx, 3u, children, first, 2u, 2u, 0u, 0u);
+    fx_emit_header(fx, 2u, 3u, 1u, 2u, (uint32_t)fx->count, 4u, NULL);
     fx_emit_volume(fx);
     return fx;
 }
@@ -462,6 +521,271 @@ static fixture_t *fx_create_depth2(int malformed_index) {
  * dedicated parent, so the node-full refusal is provoked by real records
  * rather than by a doctored header.
  */
+/*
+ * A real depth-3 tree, small enough to fill.
+ *
+ * The fixtures above use 4096-byte nodes, where one index node holds hundreds
+ * of children and the whole catalog is eight nodes -- so an index node can
+ * never be filled and the index-split path is unreachable.  This builds the
+ * same kind of volume with 512-byte nodes, the smallest the provisioner
+ * accepts, which turns the same eight catalog blocks into 64 nodes and lets
+ * two or three children fill an index node.
+ *
+ * It is a real B-tree builder, not a hand-tuned layout: records are packed
+ * into leaves until they stop fitting, leaves are packed into level-2 index
+ * nodes the same way, and a root is laid over those.  `leaf_slack` and
+ * `index_slack` are the free bytes deliberately left in the LAST leaf and the
+ * LAST level-2 index node, which is what decides whether the next append fits,
+ * splits the leaf only, or splits the leaf and the index node above it.
+ *
+ * The filler records carry long names and rising CNIDs, so they sort after
+ * everything the standard fixture ships and after each other -- which is what
+ * makes every provisioned record a rightmost append.
+ *
+ * `levels` is 3 for leaves -> index -> root, and 2 for leaves -> root, where
+ * the single index node IS the root.  The second shape is the only way to
+ * reach the "a full root would have to grow a new root" refusal at this size:
+ * at 512 bytes a root over 40-child index nodes would need well over a
+ * thousand leaves to fill.
+ */
+static fixture_t *fx_create_deep(uint16_t leaf_slack, uint16_t index_slack,
+                                 unsigned filler_pairs,
+                                 uint16_t leaf_headroom, uint16_t levels) {
+    fixture_t *fx = (fixture_t *)calloc(1u, sizeof(*fx));
+    uint8_t used[(FX_CATALOG_BYTES / 512u + 7u) / 8u];
+    uint32_t leaves[FX_MAX_RECORDS];
+    size_t leaf_first[FX_MAX_RECORDS];
+    size_t leaf_last[FX_MAX_RECORDS];
+    const uint8_t *leaf_key[FX_MAX_RECORDS];
+    uint32_t level2[FX_MAX_RECORDS];
+    const uint8_t *level2_key[FX_MAX_RECORDS];
+    size_t leaf_count = 0;
+    size_t level2_count = 0;
+    size_t last_index_first = 0;
+    size_t cursor = 0;
+    size_t index;
+    uint32_t next_node = 1u;
+    unsigned filler;
+    uint16_t last_leaf_free = 0;
+    uint16_t last_index_free = 0;
+
+    if (!fx)
+        return NULL;
+    fx_init(fx, 512u);
+    memset(used, 0, sizeof(used));
+    used[0] |= 0x80u;                       /* node 0, the header node */
+    fx->free_data_blocks = FX_DATA_BLOCKS - 1u;
+    fx->file_count = 1u;
+    fx->folder_count = 3u;
+    fx_records(fx);
+    memcpy(fx->image + FX_DATA_FIRST * FX_BLOCK_SIZE, "note\n", 5u);
+    for (filler = 0; filler < filler_pairs; filler++) {
+        char name[64];
+        uint32_t parent = 100u + 2u * filler;
+
+        memset(name, 'a' + (int)(filler % 26u), 24u);
+        name[24] = '\0';
+        fx_folder(fx, parent, name, parent + 1u, 0u, 0x0010u, 0u);
+        fx_thread(fx, parent + 1u, 3u, parent, name);
+        fx->folder_count++;
+    }
+    fx->next_cnid = 100u + 2u * filler_pairs + 2u;
+
+    /*
+     * Pack records into leaves.  A record needs its own bytes plus its offset
+     * slot, and the node keeps one trailing slot for the free-space pointer.
+     */
+    while (cursor < fx->count) {
+        size_t take = 0;
+        uint32_t used_bytes = 14u;
+
+        while (cursor + take < fx->count) {
+            uint32_t want = used_bytes + fx->length[cursor + take] +
+                            2u * ((uint32_t)take + 2u);
+
+            /* Headroom keeps the non-last leaves able to accept an interior
+             * insert, which is what a provisioned folder record is: only its
+             * THREAD record is a rightmost append. */
+            if (want + leaf_headroom > fx->node_size)
+                break;
+            used_bytes += fx->length[cursor + take];
+            take++;
+        }
+        if (take == 0u || leaf_count + 1u >= FX_MAX_RECORDS) {
+            free(fx);
+            return NULL;
+        }
+        leaf_key[leaf_count] = fx->record[cursor];
+        leaf_first[leaf_count] = cursor;
+        leaf_last[leaf_count] = cursor + take;
+        leaves[leaf_count] = next_node;
+        used[next_node >> 3] |= (uint8_t)(1u << (7u - (next_node & 7u)));
+        last_leaf_free = fx_emit_leaf(fx, next_node, cursor, cursor + take, 0u,
+                                      0u);
+        cursor += take;
+        leaf_count++;
+        next_node++;
+    }
+
+    /* Pack leaves into level-2 index nodes the same way. */
+    cursor = 0;
+    while (cursor < leaf_count) {
+        size_t take = 0;
+        uint32_t used_bytes = 14u;
+
+        while (cursor + take < leaf_count) {
+            uint16_t key_bytes = (uint16_t)(2u +
+                                            get_be16(leaf_key[cursor + take]));
+            uint32_t want;
+
+            if ((key_bytes & 1u) != 0u)
+                key_bytes++;
+            want = used_bytes + key_bytes + 4u + 2u * ((uint32_t)take + 2u);
+            if (want > fx->node_size)
+                break;
+            used_bytes += (uint32_t)key_bytes + 4u;
+            take++;
+        }
+        if (take == 0u) {
+            free(fx);
+            return NULL;
+        }
+        level2_key[level2_count] = leaf_key[cursor];
+        level2[level2_count] = next_node;
+        last_index_first = cursor;
+        used[next_node >> 3] |= (uint8_t)(1u << (7u - (next_node & 7u)));
+        last_index_free = fx_emit_index(fx, next_node, &leaves[cursor],
+                                        &leaf_key[cursor], take, 2u, 0u, 0u);
+        cursor += take;
+        level2_count++;
+        next_node++;
+    }
+
+    /*
+     * Squeeze the LAST level-2 index node down to `index_slack` by giving it
+     * more children: one extra single-record leaf each time, whose name length
+     * is chosen so the index record it costs lands on the requested slack
+     * exactly.  An index record for a thread key costs 2 + (6 + 2*len) + 4 and
+     * one 2-byte offset slot, so 2*len + 14 bytes.
+     */
+    while (last_index_free > index_slack && fx->count + 1u <= FX_MAX_RECORDS &&
+           leaf_count + 1u < FX_MAX_RECORDS) {
+        unsigned budget = (unsigned)(last_index_free - index_slack);
+        char name[128];
+        size_t length;
+
+        if (budget < 16u)
+            break;
+        length = (size_t)((budget - 14u) / 2u);
+        if (length > 100u)
+            length = 100u;
+        memset(name, 'y', length);
+        name[length] = '\0';
+        leaf_key[leaf_count] = fx_next(fx);
+        leaf_first[leaf_count] = fx->count;
+        fx_thread(fx, fx->next_cnid, 3u, FX_ROOT, name);
+        fx->next_cnid++;
+        leaf_last[leaf_count] = fx->count;
+        leaves[leaf_count] = next_node;
+        used[next_node >> 3] |= (uint8_t)(1u << (7u - (next_node & 7u)));
+        last_leaf_free = fx_emit_leaf(fx, next_node, leaf_first[leaf_count],
+                                      fx->count, 0u, 0u);
+        leaf_count++;
+        next_node++;
+        last_index_free = fx_emit_index(fx, level2[level2_count - 1u],
+                                        &leaves[last_index_first],
+                                        &leaf_key[last_index_first],
+                                        leaf_count - last_index_first, 2u, 0u,
+                                        0u);
+    }
+    fx->index_free = last_index_free;
+
+    /*
+     * Then squeeze the last LEAF down to `leaf_slack` with more thread
+     * records, which cost 20 + 2*len each with their offset slot.
+     */
+    while (last_leaf_free > leaf_slack && fx->count + 1u <= FX_MAX_RECORDS) {
+        unsigned budget = (unsigned)(last_leaf_free - leaf_slack);
+        char name[128];
+        size_t length;
+
+        if (budget < 22u)
+            break;
+        length = (size_t)((budget - 20u) / 2u);
+        if (length > 100u)
+            length = 100u;
+        memset(name, 'z', length);
+        name[length] = '\0';
+        fx_thread(fx, fx->next_cnid, 3u, FX_ROOT, name);
+        fx->next_cnid++;
+        leaf_last[leaf_count - 1u] = fx->count;
+        last_leaf_free = fx_emit_leaf(fx, leaves[leaf_count - 1u],
+                                      leaf_first[leaf_count - 1u], fx->count,
+                                      0u, 0u);
+    }
+    fx->leaf_free = last_leaf_free;
+
+    /* Chain both levels once every node's contents are final. */
+    for (index = 0; index < leaf_count; index++) {
+        uint8_t *node = fx_node(fx, leaves[index]);
+
+        put_be32(node, index + 1u < leaf_count ? leaves[index + 1u] : 0u);
+        put_be32(node + 4, index != 0u ? leaves[index - 1u] : 0u);
+    }
+    for (index = 0; index < level2_count; index++) {
+        uint8_t *node = fx_node(fx, level2[index]);
+
+        put_be32(node, index + 1u < level2_count ? level2[index + 1u] : 0u);
+        put_be32(node + 4, index != 0u ? level2[index - 1u] : 0u);
+    }
+
+    if (levels >= 3u) {
+        fx->root_node = next_node;
+        used[next_node >> 3] |= (uint8_t)(1u << (7u - (next_node & 7u)));
+        (void)fx_emit_index(fx, next_node, level2, level2_key, level2_count,
+                            3u, 0u, 0u);
+        next_node++;
+        fx->root_children = (uint32_t)level2_count;
+    } else {
+        /* The index level IS the root, so there must be exactly one of it. */
+        if (level2_count != 1u) {
+            free(fx);
+            return NULL;
+        }
+        fx->root_node = level2[0];
+        fx->root_children = (uint32_t)(leaf_count - last_index_first);
+    }
+
+    fx->tree_depth = levels;
+    fx->leaf_nodes = (uint32_t)leaf_count;
+    fx->index_nodes = (uint32_t)level2_count;
+    fx->first_leaf = leaves[0];
+    fx->last_leaf = leaves[leaf_count - 1u];
+    fx->last_leaf_records = (uint32_t)(leaf_last[leaf_count - 1u] -
+                                       leaf_first[leaf_count - 1u]);
+    fx->used_nodes = next_node;
+    fx_emit_header(fx, levels, fx->root_node, fx->first_leaf, fx->last_leaf,
+                   (uint32_t)fx->count, next_node, used);
+    fx_emit_volume(fx);
+    return fx;
+}
+
+/*
+ * Mark every node of the catalog's node-allocation map in use and set
+ * freeNodes to match.  A B-tree that is structurally fine but has no spare
+ * node is a real state -- it is what a catalog looks like just before its fork
+ * has to grow -- and it is the only way to reach the BTREE_FULL refusal.
+ */
+static void fx_exhaust_node_map(fixture_t *fx) {
+    uint8_t *node = fx_node(fx, 0u);
+    uint32_t map_bytes = (fx->catalog_nodes + 7u) / 8u;
+    uint32_t index;
+
+    for (index = 0; index < map_bytes; index++)
+        node[248u + index] = 0xffu;
+    put_be32(node + 14 + 26, 0u);
+}
+
 static fixture_t *fx_create_tight(uint16_t leave_free) {
     fixture_t *fx = fx_create(FX_DATA_BLOCKS - 1u);
     uint16_t free_bytes;
@@ -518,7 +842,7 @@ static fixture_t *fx_create_tight(uint16_t leave_free) {
     fx->leaf_free = free_bytes;
     /* Keep nextCatalogID above every CNID the fillers consumed. */
     fx->next_cnid = 100u + 2u * filler + 2u;
-    fx_emit_header(fx, 1u, 1u, 1u, 1u, (uint32_t)fx->count, 2u);
+    fx_emit_header(fx, 1u, 1u, 1u, 1u, (uint32_t)fx->count, 2u, NULL);
     fx_emit_volume(fx);
     return fx;
 }
@@ -547,10 +871,12 @@ typedef struct tr_volume {
     size_t catalog_bytes;
     uint16_t node_size;
     uint16_t tree_depth;
+    uint32_t root_node;
     uint32_t first_leaf;
     uint32_t last_leaf;
     uint32_t leaf_records;
     uint32_t total_nodes;
+    uint32_t free_nodes;
 } tr_volume_t;
 
 static int tr_open(const uint8_t *image, size_t size, tr_volume_t *vol) {
@@ -596,12 +922,93 @@ static int tr_open(const uint8_t *image, size_t size, tr_volume_t *vol) {
         done += take;
     }
     vol->tree_depth = get_be16(vol->catalog + 14);
+    vol->root_node = get_be32(vol->catalog + 14 + 2);
     vol->leaf_records = get_be32(vol->catalog + 14 + 6);
     vol->first_leaf = get_be32(vol->catalog + 14 + 10);
     vol->last_leaf = get_be32(vol->catalog + 14 + 14);
     vol->node_size = get_be16(vol->catalog + 14 + 18);
     vol->total_nodes = get_be32(vol->catalog + 14 + 22);
+    vol->free_nodes = get_be32(vol->catalog + 14 + 26);
     return vol->node_size != 0u;
+}
+
+/* ---- direct node access, so a test can name the exact pointer it means ---- */
+
+static const uint8_t *tr_node(const tr_volume_t *vol, uint32_t index) {
+    if ((size_t)(index + 1u) * vol->node_size > vol->catalog_bytes)
+        return NULL;
+    return vol->catalog + (size_t)index * vol->node_size;
+}
+
+static uint32_t tr_flink(const tr_volume_t *vol, uint32_t index) {
+    const uint8_t *node = tr_node(vol, index);
+    return node ? get_be32(node) : UINT32_MAX;
+}
+
+static uint32_t tr_blink(const tr_volume_t *vol, uint32_t index) {
+    const uint8_t *node = tr_node(vol, index);
+    return node ? get_be32(node + 4) : UINT32_MAX;
+}
+
+static uint16_t tr_records(const tr_volume_t *vol, uint32_t index) {
+    const uint8_t *node = tr_node(vol, index);
+    return node ? get_be16(node + 10) : 0u;
+}
+
+/* Bit `index` of the node-allocation map in the header node's third record. */
+static int tr_node_used(const tr_volume_t *vol, uint32_t index) {
+    const uint8_t *node = tr_node(vol, 0u);
+    uint16_t map_offset;
+
+    if (!node)
+        return -1;
+    map_offset = get_be16(node + vol->node_size - 2u * 3u);
+    return (node[map_offset + (index >> 3)] >> (7u - (index & 7u))) & 1;
+}
+
+/*
+ * The child pointers of one index node, in record order.  Returns the count,
+ * or 0 if the node is not an index node at `level`.
+ */
+static uint16_t tr_children(const tr_volume_t *vol, uint32_t index,
+                            uint8_t level, uint32_t *out, size_t capacity) {
+    const uint8_t *node = tr_node(vol, index);
+    uint16_t count;
+    uint16_t record;
+
+    if (!node || node[8] != 0x00u || node[9] != level)
+        return 0u;
+    count = get_be16(node + 10);
+    for (record = 0; record < count && (size_t)record < capacity; record++) {
+        uint16_t offset = get_be16(node + vol->node_size -
+                                   2u * ((uint32_t)record + 1u));
+        uint16_t key_bytes = (uint16_t)(2u + get_be16(node + offset));
+
+        if ((key_bytes & 1u) != 0u)
+            key_bytes++;
+        out[record] = get_be32(node + offset + key_bytes);
+    }
+    return count;
+}
+
+/* Walk one level by fLink from `first`, checking bLink on the way. */
+static uint32_t tr_level_chain(const tr_volume_t *vol, uint32_t first,
+                               uint32_t *out, size_t capacity, int *links_ok) {
+    uint32_t index = first;
+    uint32_t previous = 0;
+    uint32_t count = 0;
+
+    *links_ok = 1;
+    while (index != 0u && count < capacity && count <= vol->total_nodes) {
+        if (tr_blink(vol, index) != previous)
+            *links_ok = 0;
+        out[count++] = index;
+        previous = index;
+        index = tr_flink(vol, index);
+    }
+    if (index != 0u)
+        *links_ok = 0;
+    return count;
 }
 
 static void tr_close(tr_volume_t *vol) {
@@ -880,6 +1287,8 @@ static int is_provision_status(rootfs_work_status_t status) {
     case ROOTFS_WORK_PROVISION_EXISTS:
     case ROOTFS_WORK_PROVISION_NODE_FULL:
     case ROOTFS_WORK_PROVISION_LEAF_HEAD:
+    case ROOTFS_WORK_PROVISION_SPLIT_UNSUPPORTED:
+    case ROOTFS_WORK_PROVISION_BTREE_FULL:
     case ROOTFS_WORK_PROVISION_NO_SPACE:
     case ROOTFS_WORK_PROVISION_LIMIT:
         return 1;
@@ -946,6 +1355,27 @@ static void entry_file(rootfs_work_entry_t *entry, const char *path,
     entry->content = (const uint8_t *)content;
     entry->content_size = size;
     entry->permissions = permissions;
+}
+
+/* For a symlink the content IS the target, and its length is the fork's
+ * logicalSize -- the trailing NUL is deliberately not counted. */
+static void entry_symlink(rootfs_work_entry_t *entry, const char *path,
+                          const char *target, uint16_t permissions) {
+    memset(entry, 0, sizeof(*entry));
+    entry->kind = ROOTFS_WORK_ENTRY_SYMLINK;
+    entry->path = path;
+    entry->content = (const uint8_t *)target;
+    entry->content_size = target ? strlen(target) : 0u;
+    entry->permissions = permissions;
+}
+
+static int all_zero(const uint8_t *bytes, size_t count) {
+    size_t index;
+
+    for (index = 0; index < count; index++)
+        if (bytes[index] != 0u)
+            return 0;
+    return 1;
 }
 
 /* ------------------------------- the tests ------------------------------ */
@@ -1437,6 +1867,14 @@ static void test_full_leaf_is_refused_not_split(void) {
      * the second.  That is the case where an entry is half-representable:
      * the plan must abandon the whole entry, not leave a file record whose
      * thread is missing.
+     *
+     * The refusal is SPLIT_UNSUPPORTED rather than NODE_FULL, and the
+     * distinction is the point.  The file record lands INSIDE the leaf, among
+     * keys under CNID 16; the thread record's key is (nextCatalogID, "") which
+     * sorts after every key the fixture holds, so it is a rightmost append and
+     * the writer does try to split for it.  In this depth-1 fixture the leaf
+     * IS the root, so the split would have to grow the tree a level -- which
+     * is the one rightmost case that is still refused, by name.
      */
     {
         static const char body[] = "x";
@@ -1445,7 +1883,8 @@ static void test_full_leaf_is_refused_not_split(void) {
         entry_file(&big, "/alpha/a-file-with-a-fairly-long-name.bin", body, 1u,
                    0u);
         if (run_provision(&run, roomy, "halfway", &big, 1u, 0u)) {
-            expect_refusal(&run, roomy, ROOTFS_WORK_PROVISION_NODE_FULL,
+            expect_refusal(&run, roomy,
+                           ROOTFS_WORK_PROVISION_SPLIT_UNSUPPORTED,
                            "leaf that fits the record but not the thread");
             run_release(&run);
         }
@@ -1454,7 +1893,9 @@ static void test_full_leaf_is_refused_not_split(void) {
      * The boundary itself.  /gamma costs 106 + 2 for the folder record and its
      * offset slot, then 28 + 2 for the thread: 138 bytes exactly.  138 free
      * must fit and 136 must not, which pins the comparison rather than just
-     * its direction.
+     * its direction.  At 136 it is again the THREAD that does not fit, and a
+     * thread key is always a rightmost append, so the two-bytes-short refusal
+     * is SPLIT_UNSUPPORTED in this root-is-a-leaf fixture.
      */
     {
         fixture_t *exact = fx_create_tight(138u);
@@ -1471,7 +1912,7 @@ static void test_full_leaf_is_refused_not_split(void) {
             }
             if (run_provision(&run, short_by_two, "twoshort", &entry, 1u, 0u)) {
                 expect_refusal(&run, short_by_two,
-                               ROOTFS_WORK_PROVISION_NODE_FULL,
+                               ROOTFS_WORK_PROVISION_SPLIT_UNSUPPORTED,
                                "leaf two bytes short of enough room");
                 run_release(&run);
             }
@@ -2124,12 +2565,931 @@ static void test_activation_entries(void) {
     free(fx);
 }
 
+/* ------------------------------- B-tree splits -------------------------- */
+
+/*
+ * The level-2 index chain, walked from the ROOT's first child rather than from
+ * anything the writer remembers.  Returns the node count.
+ */
+static uint32_t tr_index_chain(const tr_volume_t *vol, uint32_t *out,
+                               size_t capacity, int *links_ok) {
+    uint32_t kids[FX_MAX_RECORDS];
+    uint16_t count;
+
+    *links_ok = 0;
+    if (vol->tree_depth < 3u)
+        return 0u;
+    count = tr_children(vol, vol->root_node, (uint8_t)vol->tree_depth, kids,
+                        sizeof(kids) / sizeof(kids[0]));
+    if (count == 0u)
+        return 0u;
+    return tr_level_chain(vol, kids[0], out, capacity, links_ok);
+}
+
+/*
+ * THE ONE SPLIT, checked pointer by pointer.
+ *
+ * A provisioned directory costs two records with two different fates: the
+ * folder record's key is (parentCNID, name), which lands among the fixture's
+ * existing keys, while the thread record's key is (nextCatalogID, ""), which
+ * sorts after every key in the tree.  So the thread record -- and only it --
+ * is the rightmost append this split exists for.  Sizing the last leaf to 28
+ * free bytes against the 30 that record needs is what provokes it; the control
+ * fixture below differs only in that number.
+ *
+ * Every line the split's own comment claims is asserted here from the
+ * PUBLISHED image, through the chain walker rather than the writer's descent:
+ *
+ *   old leaf   keeps every record it had, and its fLink now names the new node
+ *   new node   bLink = old leaf, fLink = 0, exactly ONE record
+ *   parent     one more child, appended last, pointing at the new node
+ *   header     lastLeafNode = new node, freeNodes -= 1, its map bit set
+ *   untouched  firstLeafNode, rootNode, treeDepth, totalNodes
+ */
+static void test_rightmost_leaf_split(void) {
+    fixture_t *fits = fx_create_deep(40u, 400u, 0u, 170u, 3u);
+    fixture_t *fx = fx_create_deep(28u, 400u, 0u, 170u, 3u);
+    rootfs_work_entry_t entry;
+    rootfs_work_entry_t pair[2];
+    run_t run;
+
+    if (!fits || !fx) {
+        CHECK(0, "deep fixture allocation failed");
+        free(fits);
+        free(fx);
+        return;
+    }
+    /*
+     * The two fixtures must differ in exactly the way the test claims, or the
+     * split below is a statement about luck.  A /gamma thread record is 28
+     * bytes and its offset slot 2, so 30 free bytes fit and 28 do not.
+     */
+    CHECK(fits->leaf_free == 40u && fx->leaf_free == 28u,
+          "split fixtures left %u and %u free leaf bytes, not 40 and 28",
+          fits->leaf_free, fx->leaf_free);
+    CHECK(fx->index_free >= 14u,
+          "the leaf-split fixture's parent index node has %u free bytes, so "
+          "the leaf split would drag an index split with it", fx->index_free);
+    CHECK(fx->tree_depth == 3u && fx->index_nodes == 1u,
+          "the leaf-split fixture is depth %u with %u index nodes",
+          fx->tree_depth, fx->index_nodes);
+
+    /* Control: the same request, against a last leaf with room. */
+    entry_directory(&entry, "/gamma", 0u);
+    if (run_provision(&run, fits, "nosplit", &entry, 1u, 0u)) {
+        expect_success(&run, "append that fits the last leaf");
+        CHECK(run.result.provision_leaf_splits == 0u &&
+              run.result.provision_index_splits == 0u,
+              "an append that fitted still reported %u leaf and %u index "
+              "splits", run.result.provision_leaf_splits,
+              run.result.provision_index_splits);
+        if (run.output) {
+            tr_volume_t vol;
+
+            if (tr_open(run.output, run.output_size, &vol)) {
+                CHECK(vol.last_leaf == fits->last_leaf &&
+                      vol.free_nodes == fits->catalog_nodes -
+                                        fits->used_nodes,
+                      "an append that fitted moved lastLeafNode to %u or "
+                      "consumed a node (freeNodes %u)", vol.last_leaf,
+                      vol.free_nodes);
+                tr_close(&vol);
+            }
+        }
+        run_release(&run);
+    }
+
+    /* The split itself. */
+    if (run_provision(&run, fx, "leafsplit", &entry, 1u, 0u)) {
+        expect_success(&run, "rightmost append into a full last leaf");
+        CHECK(run.result.provision_leaf_splits == 1u &&
+              run.result.provision_index_splits == 0u,
+              "split report: %u leaf splits, %u index splits",
+              run.result.provision_leaf_splits,
+              run.result.provision_index_splits);
+        if (run.output) {
+            tr_volume_t vol;
+
+            if (tr_open(run.output, run.output_size, &vol)) {
+                uint32_t chain[FX_MAX_RECORDS];
+                uint32_t kids[FX_MAX_RECORDS];
+                uint32_t level2[FX_MAX_RECORDS];
+                int links_ok = 0;
+                int index_links_ok = 0;
+                uint32_t nodes;
+                uint32_t index_nodes;
+                uint32_t fresh = vol.last_leaf;
+                tr_walk_t walk;
+                tr_record_t folder;
+                tr_record_t thread;
+
+                /* --- what must NOT have moved --- */
+                CHECK(vol.tree_depth == fx->tree_depth,
+                      "treeDepth became %u, was %u", vol.tree_depth,
+                      fx->tree_depth);
+                CHECK(vol.root_node == fx->root_node,
+                      "rootNode became %u, was %u", vol.root_node,
+                      fx->root_node);
+                CHECK(vol.first_leaf == fx->first_leaf,
+                      "firstLeafNode became %u, was %u", vol.first_leaf,
+                      fx->first_leaf);
+                CHECK(vol.total_nodes == fx->catalog_nodes,
+                      "totalNodes became %u, was %u", vol.total_nodes,
+                      fx->catalog_nodes);
+
+                /* --- the new node --- */
+                CHECK(fresh != fx->last_leaf,
+                      "lastLeafNode is still %u after a split", fresh);
+                CHECK(vol.free_nodes ==
+                          fx->catalog_nodes - fx->used_nodes - 1u,
+                      "freeNodes is %u, expected %u after claiming one node",
+                      vol.free_nodes,
+                      fx->catalog_nodes - fx->used_nodes - 1u);
+                CHECK(tr_node_used(&vol, fresh) == 1,
+                      "the node map still calls the new leaf %u free", fresh);
+                CHECK(tr_records(&vol, fresh) == 1u,
+                      "the new leaf holds %u records, expected exactly the one "
+                      "being inserted", tr_records(&vol, fresh));
+                CHECK(tr_records(&vol, fx->last_leaf) ==
+                          (uint16_t)fx->last_leaf_records,
+                      "the old last leaf holds %u records, it had %u -- the "
+                      "split moved existing records",
+                      tr_records(&vol, fx->last_leaf), fx->last_leaf_records);
+
+                /* --- the leaf chain, in both directions --- */
+                CHECK(tr_flink(&vol, fx->last_leaf) == fresh,
+                      "the old last leaf's fLink is %u, not the new node %u",
+                      tr_flink(&vol, fx->last_leaf), fresh);
+                CHECK(tr_blink(&vol, fresh) == fx->last_leaf,
+                      "the new leaf's bLink is %u, not the old last leaf %u",
+                      tr_blink(&vol, fresh), fx->last_leaf);
+                CHECK(tr_flink(&vol, fresh) == 0u,
+                      "the new leaf's fLink is %u, so it is not the chain end",
+                      tr_flink(&vol, fresh));
+                nodes = tr_level_chain(&vol, vol.first_leaf, chain,
+                                       sizeof(chain) / sizeof(chain[0]),
+                                       &links_ok);
+                CHECK(links_ok && nodes == fx->leaf_nodes + 1u,
+                      "the leaf chain is %u nodes with links_ok=%d, expected "
+                      "%u", nodes, links_ok, fx->leaf_nodes + 1u);
+                CHECK(nodes != 0u && chain[nodes - 1u] == fresh &&
+                      fresh == vol.last_leaf,
+                      "the chain ends at %u but the header says lastLeafNode "
+                      "is %u", nodes ? chain[nodes - 1u] : 0u, vol.last_leaf);
+
+                /* --- the level above --- */
+                index_nodes = tr_index_chain(&vol, level2,
+                                             sizeof(level2) /
+                                                 sizeof(level2[0]),
+                                             &index_links_ok);
+                CHECK(index_links_ok && index_nodes == fx->index_nodes,
+                      "the index level is %u nodes with links_ok=%d, expected "
+                      "%u -- no index split was due", index_nodes,
+                      index_links_ok, fx->index_nodes);
+                if (index_nodes != 0u) {
+                    uint16_t children = tr_children(&vol,
+                                                    level2[index_nodes - 1u],
+                                                    2u, kids,
+                                                    sizeof(kids) /
+                                                        sizeof(kids[0]));
+                    CHECK(children == (uint16_t)fx->leaf_nodes + 1u,
+                          "the parent index node names %u children, expected "
+                          "%u", children, fx->leaf_nodes + 1u);
+                    CHECK(children != 0u && kids[children - 1u] == fresh,
+                          "the parent's LAST child is %u, not the new leaf %u",
+                          children ? kids[children - 1u] : 0u, fresh);
+                    CHECK(children >= 2u &&
+                          kids[children - 2u] == fx->last_leaf,
+                          "the parent's second-to-last child is %u, not the "
+                          "old last leaf %u",
+                          children >= 2u ? kids[children - 2u] : 0u,
+                          fx->last_leaf);
+                }
+                CHECK(tr_children(&vol, vol.root_node, 3u, kids,
+                                  sizeof(kids) / sizeof(kids[0])) ==
+                          (uint16_t)fx->root_children,
+                      "the root gained or lost a child across a leaf-only "
+                      "split");
+
+                /* --- and the records are all still findable, in order --- */
+                tr_walk(&vol, &walk, NULL, NULL);
+                CHECK(walk.shape_ok && walk.order_ok &&
+                      walk.records == vol.leaf_records &&
+                      walk.records == (uint32_t)fx->count + 2u,
+                      "split catalog: shape=%d order=%d records=%u header=%u "
+                      "expected=%u", walk.shape_ok, walk.order_ok,
+                      walk.records, vol.leaf_records, (uint32_t)fx->count + 2u);
+                CHECK(tr_find(&vol, FX_ROOT, "gamma", &folder) &&
+                      folder.type == 1u, "/gamma is missing after the split");
+                CHECK(folder.type == 1u &&
+                      tr_find(&vol, get_be32(folder.data + 8), NULL, &thread) &&
+                      thread.type == 3u,
+                      "/gamma's thread record is missing after the split");
+                tr_close(&vol);
+            }
+        }
+        run_release(&run);
+    }
+
+    /*
+     * A batch, which is the shape the payload actually arrives in.  /gamma's
+     * thread splits the leaf; /gamma/inner's folder record and thread then sort
+     * after it and must go into the NEW node.  If the writer did not move its
+     * idea of the last leaf, the second append would try to split the old one
+     * again -- so ONE split for three appended records is the assertion.
+     */
+    entry_directory(&pair[0], "/gamma", 0u);
+    entry_directory(&pair[1], "/gamma/inner", 0u);
+    if (run_provision(&run, fx, "batch", pair, 2u, 0u)) {
+        expect_success(&run, "a two-entry ascending batch across a split");
+        CHECK(run.result.provision_leaf_splits == 1u &&
+              run.result.provision_index_splits == 0u,
+              "the batch reported %u leaf and %u index splits, expected 1 and "
+              "0", run.result.provision_leaf_splits,
+              run.result.provision_index_splits);
+        if (run.output) {
+            tr_volume_t vol;
+
+            if (tr_open(run.output, run.output_size, &vol)) {
+                tr_walk_t walk;
+                tr_record_t inner;
+
+                tr_walk(&vol, &walk, NULL, NULL);
+                CHECK(walk.shape_ok && walk.order_ok &&
+                      walk.records == (uint32_t)fx->count + 4u,
+                      "batch catalog: shape=%d order=%d records=%u expected %u",
+                      walk.shape_ok, walk.order_ok, walk.records,
+                      (uint32_t)fx->count + 4u);
+                CHECK(tr_records(&vol, vol.last_leaf) == 3u,
+                      "the new leaf holds %u records, expected the 3 that sort "
+                      "after the split point", tr_records(&vol, vol.last_leaf));
+                CHECK(tr_records(&vol, fx->last_leaf) ==
+                          (uint16_t)fx->last_leaf_records,
+                      "the batch moved records out of the old last leaf");
+                CHECK(tr_find(&vol, FX_ROOT, "gamma", &inner) &&
+                      inner.type == 1u &&
+                      tr_find(&vol, get_be32(inner.data + 8), "inner", &inner),
+                      "/gamma/inner is missing after the batch");
+                tr_close(&vol);
+            }
+        }
+        run_release(&run);
+    }
+    free(fits);
+    free(fx);
+}
+
+/*
+ * The same split, one level up.  Here the parent index node is 10 bytes short
+ * of the 14 a new child pointer costs, so chaining the new leaf on forces the
+ * index level to be extended too -- the recursion in catalog_level_extend().
+ * It terminates at the root, which has room, so treeDepth never changes.
+ */
+static void test_rightmost_index_split(void) {
+    fixture_t *fx = fx_create_deep(28u, 0u, 0u, 150u, 3u);
+    rootfs_work_entry_t entry;
+    run_t run;
+
+    if (!fx) {
+        CHECK(0, "index-split fixture allocation failed");
+        return;
+    }
+    CHECK(fx->leaf_free == 28u && fx->index_free < 14u,
+          "index-split fixture left %u free leaf bytes and %u free index "
+          "bytes; the leaf needs 30 and the index record costs 14",
+          fx->leaf_free, fx->index_free);
+    CHECK(fx->tree_depth == 3u && fx->index_nodes == 1u,
+          "index-split fixture is depth %u with %u index nodes",
+          fx->tree_depth, fx->index_nodes);
+    entry_directory(&entry, "/gamma", 0u);
+    if (!run_provision(&run, fx, "idxsplit", &entry, 1u, 0u)) {
+        CHECK(0, "index-split fixture setup failed");
+        free(fx);
+        return;
+    }
+    expect_success(&run, "a rightmost append that splits two levels");
+    CHECK(run.result.provision_leaf_splits == 1u &&
+          run.result.provision_index_splits == 1u,
+          "index-split report: %u leaf splits, %u index splits",
+          run.result.provision_leaf_splits, run.result.provision_index_splits);
+    if (run.output) {
+        tr_volume_t vol;
+
+        if (tr_open(run.output, run.output_size, &vol)) {
+            uint32_t chain[FX_MAX_RECORDS];
+            uint32_t level2[FX_MAX_RECORDS];
+            uint32_t kids[FX_MAX_RECORDS];
+            int links_ok = 0;
+            int index_links_ok = 0;
+            uint32_t nodes;
+            uint32_t index_nodes;
+            uint32_t fresh = vol.last_leaf;
+            uint16_t root_children;
+            tr_walk_t walk;
+            tr_record_t folder;
+
+            CHECK(vol.tree_depth == 3u && vol.root_node == fx->root_node &&
+                  vol.first_leaf == fx->first_leaf &&
+                  vol.total_nodes == fx->catalog_nodes,
+                  "the index split changed depth=%u root=%u first=%u nodes=%u",
+                  vol.tree_depth, vol.root_node, vol.first_leaf,
+                  vol.total_nodes);
+            /* TWO nodes were claimed this time, one per level. */
+            CHECK(vol.free_nodes == fx->catalog_nodes - fx->used_nodes - 2u,
+                  "freeNodes is %u, expected %u after claiming a leaf and an "
+                  "index node", vol.free_nodes,
+                  fx->catalog_nodes - fx->used_nodes - 2u);
+            CHECK(tr_node_used(&vol, fresh) == 1,
+                  "the node map still calls the new leaf %u free", fresh);
+            CHECK(tr_flink(&vol, fx->last_leaf) == fresh &&
+                  tr_blink(&vol, fresh) == fx->last_leaf &&
+                  tr_flink(&vol, fresh) == 0u,
+                  "leaf chain after the index split: old.fLink=%u new.bLink=%u "
+                  "new.fLink=%u", tr_flink(&vol, fx->last_leaf),
+                  tr_blink(&vol, fresh), tr_flink(&vol, fresh));
+            nodes = tr_level_chain(&vol, vol.first_leaf, chain,
+                                   sizeof(chain) / sizeof(chain[0]),
+                                   &links_ok);
+            CHECK(links_ok && nodes == fx->leaf_nodes + 1u &&
+                  chain[nodes - 1u] == fresh,
+                  "leaf chain is %u nodes (links_ok=%d) ending at %u, expected "
+                  "%u ending at %u", nodes, links_ok,
+                  nodes ? chain[nodes - 1u] : 0u, fx->leaf_nodes + 1u, fresh);
+
+            /* The index level grew by exactly one node, chained on the right. */
+            index_nodes = tr_index_chain(&vol, level2,
+                                         sizeof(level2) / sizeof(level2[0]),
+                                         &index_links_ok);
+            CHECK(index_links_ok && index_nodes == fx->index_nodes + 1u,
+                  "the index level is %u nodes with links_ok=%d, expected %u",
+                  index_nodes, index_links_ok, fx->index_nodes + 1u);
+            if (index_nodes >= 2u) {
+                uint32_t grown = level2[index_nodes - 1u];
+                uint32_t previous = level2[index_nodes - 2u];
+                uint16_t children;
+
+                CHECK(tr_node_used(&vol, grown) == 1,
+                      "the node map still calls the new index node %u free",
+                      grown);
+                CHECK(tr_flink(&vol, previous) == grown &&
+                      tr_blink(&vol, grown) == previous &&
+                      tr_flink(&vol, grown) == 0u,
+                      "index chain: old.fLink=%u new.bLink=%u new.fLink=%u",
+                      tr_flink(&vol, previous), tr_blink(&vol, grown),
+                      tr_flink(&vol, grown));
+                children = tr_children(&vol, grown, 2u, kids,
+                                       sizeof(kids) / sizeof(kids[0]));
+                CHECK(children == 1u && kids[0] == fresh,
+                      "the new index node names %u children, first %u; "
+                      "expected exactly the new leaf %u", children,
+                      children ? kids[0] : 0u, fresh);
+                children = tr_children(&vol, previous, 2u, kids,
+                                       sizeof(kids) / sizeof(kids[0]));
+                CHECK(children == (uint16_t)fx->leaf_nodes &&
+                      kids[children - 1u] == fx->last_leaf,
+                      "the old index node kept %u children ending at %u, "
+                      "expected %u ending at %u", children,
+                      children ? kids[children - 1u] : 0u, fx->leaf_nodes,
+                      fx->last_leaf);
+                /* The root learned about the new index node, and only that. */
+                root_children = tr_children(&vol, vol.root_node, 3u, kids,
+                                            sizeof(kids) / sizeof(kids[0]));
+                CHECK(root_children == (uint16_t)fx->root_children + 1u,
+                      "the root names %u children, expected %u",
+                      root_children, fx->root_children + 1u);
+                CHECK(root_children != 0u &&
+                      kids[root_children - 1u] == grown,
+                      "the root's last child is %u, not the new index node %u",
+                      root_children ? kids[root_children - 1u] : 0u, grown);
+            }
+            tr_walk(&vol, &walk, NULL, NULL);
+            CHECK(walk.shape_ok && walk.order_ok &&
+                  walk.records == vol.leaf_records &&
+                  walk.records == (uint32_t)fx->count + 2u,
+                  "index-split catalog: shape=%d order=%d records=%u header=%u",
+                  walk.shape_ok, walk.order_ok, walk.records,
+                  vol.leaf_records);
+            CHECK(tr_find(&vol, FX_ROOT, "gamma", &folder) &&
+                  folder.type == 1u,
+                  "/gamma is missing after the two-level split");
+            tr_close(&vol);
+        }
+    }
+    run_release(&run);
+    free(fx);
+}
+
+/*
+ * Where the split stops, by name.  Both of these are cases a half-implemented
+ * writer would take a run at; a refused work image is byte-identical to the
+ * one the provisioner was handed, which expect_refusal() re-reads and checks.
+ */
+static void test_split_boundaries_are_refused(void) {
+    fixture_t *root_full = fx_create_deep(28u, 0u, 0u, 150u, 2u);
+    fixture_t *no_nodes = fx_create_deep(28u, 400u, 0u, 170u, 3u);
+    rootfs_work_entry_t entry;
+    run_t run;
+
+    entry_directory(&entry, "/gamma", 0u);
+    /*
+     * A depth-2 tree whose ROOT is the index node, with no room in it.  Growing
+     * a new root and incrementing treeDepth is the one rightmost-append shape
+     * that is not implemented, and it must say so rather than attempt it.
+     */
+    if (root_full) {
+        CHECK(root_full->tree_depth == 2u && root_full->leaf_free == 28u &&
+              root_full->index_free < 14u,
+              "root-full fixture is depth %u with %u free leaf and %u free "
+              "root bytes", root_full->tree_depth, root_full->leaf_free,
+              root_full->index_free);
+        if (run_provision(&run, root_full, "rootfull", &entry, 1u, 0u)) {
+            expect_refusal(&run, root_full,
+                           ROOTFS_WORK_PROVISION_SPLIT_UNSUPPORTED,
+                           "a split that would have to grow a new root");
+            run_release(&run);
+        }
+    } else {
+        CHECK(0, "root-full fixture allocation failed");
+    }
+    /*
+     * A structurally fine tree with no spare node.  The split is the right
+     * answer and there is nowhere to put it, which is a different refusal from
+     * "the shape is unsupported" and gets a different name.
+     */
+    if (no_nodes) {
+        fx_exhaust_node_map(no_nodes);
+        if (run_provision(&run, no_nodes, "btreefull", &entry, 1u, 0u)) {
+            expect_refusal(&run, no_nodes, ROOTFS_WORK_PROVISION_BTREE_FULL,
+                           "a split with no free B-tree node to take");
+            run_release(&run);
+        }
+    } else {
+        CHECK(0, "exhausted-map fixture allocation failed");
+    }
+    /*
+     * A full leaf that is NOT the chain's end.  This fixture's first leaf ends
+     * at (16,""), so a key of (16,"bbbbbbbbbbbb") sorts after everything in it
+     * and before (16,"dup") in the next leaf: position == count, which is HALF
+     * of what the rightmost split requires, in a leaf that is not the last one.
+     * Chaining a node in there would leave the following leaf's ancestor key
+     * describing the wrong range, so it stays the NODE_FULL refusal it has
+     * always been -- and this is what pins the `leaf == last_leaf` half of the
+     * guard, because the last leaf of this same fixture has 400 free bytes.
+     */
+    {
+        fixture_t *interior = fx_create_deep(400u, 400u, 0u, 100u, 3u);
+
+        if (interior) {
+            uint16_t room = fx_node_free(interior, interior->first_leaf);
+
+            CHECK(interior->first_leaf != interior->last_leaf &&
+                  interior->leaf_free == 400u,
+                  "interior fixture: first leaf %u, last leaf %u with %u free "
+                  "bytes", interior->first_leaf, interior->last_leaf,
+                  interior->leaf_free);
+            /*
+             * The name lengths straddle that leaf's free space: a 12-unit name
+             * makes the folder record 120 bytes and 122 with its slot, which
+             * does not fit; a 1-unit name makes it 98 and 100, which does.
+             */
+            CHECK(room >= 100u && room < 122u,
+                  "the interior leaf has %u free bytes; the test needs it "
+                  "between 100 and 121", room);
+            entry_directory(&entry, "/alpha/bbbbbbbbbbbb", 0u);
+            if (run_provision(&run, interior, "interior", &entry, 1u, 0u)) {
+                expect_refusal(&run, interior, ROOTFS_WORK_PROVISION_NODE_FULL,
+                               "a full leaf that is not the chain's end");
+                run_release(&run);
+            }
+            /* The same insert point, two bytes inside the leaf's means. */
+            entry_directory(&entry, "/alpha/b", 0u);
+            if (run_provision(&run, interior, "interiorfits", &entry, 1u, 0u)) {
+                expect_success(&run, "an interior append that fits");
+                CHECK(run.result.provision_leaf_splits == 0u,
+                      "an interior append that fitted reported %u leaf splits",
+                      run.result.provision_leaf_splits);
+                run_release(&run);
+            }
+        } else {
+            CHECK(0, "interior-leaf fixture allocation failed");
+        }
+        free(interior);
+    }
+    free(root_full);
+    free(no_nodes);
+}
+
+/* ------------------------------- symlinks ------------------------------- */
+
+/*
+ * PROVENANCE.  Nothing asserted below was recalled: every field was censused
+ * out of firmware/rootfs.img itself, by walking its leaf chain and decoding
+ * HFSPlusCatalogFile at absolute offsets.  All 409 symlinks on the stock 7E18
+ * volume agree, with no exceptions, on
+ *
+ *   recordType 2, flags 0x0002, reserved1 0
+ *   fileMode 0120755, adminFlags 0, ownerFlags 0, linkCount 1
+ *   fdType 'slnk', fdCreator 'rhap', the rest of FndrFileInfo zero
+ *   FndrOpaqueInfo 16 zero bytes, textEncoding 0, reserved2 0
+ *   dataFork logicalSize == strlen(target) with NO NUL inside it,
+ *            clumpSize 0, totalBlocks 1, one extent, extents[1..7] zero
+ *   resourceFork 80 zero bytes
+ *
+ * and /etc (CNID 14880, target "private/etc") is the worked example the
+ * constants were taken from.  The only field that varies is groupID -- 0 on
+ * 384 of them, 80 on the 25 under / and /Library -- which is why it stays the
+ * caller's to choose.  A provisioned symlink that fails any line here is
+ * unlike anything the stock volume contains.
+ *
+ * The targets are real ones from the acquired payload, so the shapes exercised
+ * are the shapes that have to be written: a trailing-slash target, a bare
+ * sibling name, and a relative one with '..'.
+ */
+static void test_symlink_matches_the_stock_format(void) {
+    static const char ETC_TARGET[] = "private/etc/";
+    static const char SH_TARGET[] = "bash";
+    static const char PREFS_TARGET[] = "../private/var/preferences/";
+    fixture_t *fx = fx_create(FX_DATA_BLOCKS - 1u);
+    rootfs_work_entry_t entries[3];
+    run_t run;
+
+    if (!fx) {
+        CHECK(0, "fixture allocation failed");
+        return;
+    }
+    entry_symlink(&entries[0], "/etc", ETC_TARGET, 0u);
+    entry_symlink(&entries[1], "/sh", SH_TARGET, 0u);
+    entry_symlink(&entries[2], "/alpha/Preferences", PREFS_TARGET, 0u);
+    if (!run_provision(&run, fx, "symlink", entries, 3u, 0u)) {
+        CHECK(0, "symlink fixture setup failed");
+        free(fx);
+        return;
+    }
+    expect_success(&run, "three symlinks");
+    CHECK(run.result.provision_entries == 3u && run.result.provision_blocks == 3u,
+          "symlink report: entries=%u blocks=%u", run.result.provision_entries,
+          run.result.provision_blocks);
+    if (run.output) {
+        tr_volume_t vol;
+
+        if (tr_open(run.output, run.output_size, &vol)) {
+            static const struct {
+                uint32_t parent;
+                const char *name;
+                const char *target;
+            } CASES[] = {
+                {FX_ROOT, "etc", ETC_TARGET},
+                {FX_ROOT, "sh", SH_TARGET},
+                {FX_ALPHA, "Preferences", PREFS_TARGET}
+            };
+            tr_walk_t walk;
+            size_t index;
+
+            tr_walk(&vol, &walk, NULL, NULL);
+            CHECK(walk.shape_ok && walk.order_ok &&
+                  walk.records == vol.leaf_records &&
+                  walk.records == (uint32_t)fx->count + 6u,
+                  "symlink catalog: shape=%d order=%d records=%u header=%u",
+                  walk.shape_ok, walk.order_ok, walk.records, vol.leaf_records);
+            for (index = 0; index < sizeof(CASES) / sizeof(CASES[0]); index++) {
+                tr_record_t link;
+                tr_record_t thread;
+                const uint8_t *data;
+                size_t length = strlen(CASES[index].target);
+                uint32_t start;
+                uint32_t cnid;
+
+                if (!tr_find(&vol, CASES[index].parent, CASES[index].name,
+                             &link)) {
+                    CHECK(0, "symlink %s is missing", CASES[index].name);
+                    continue;
+                }
+                data = link.data;
+                cnid = get_be32(data + 8);
+                CHECK(link.type == 2u,
+                      "%s is record type %u, not a catalog FILE record",
+                      CASES[index].name, link.type);
+                CHECK(link.data_length == 248u,
+                      "%s data is %u bytes, the stock volume's are 248",
+                      CASES[index].name, link.data_length);
+                CHECK(get_be16(data + 2) == 0x0002u,
+                      "%s flags are 0x%04x, the stock volume's are 0x0002",
+                      CASES[index].name, get_be16(data + 2));
+                CHECK(get_be32(data + 4) == 0u, "%s reserved1 is not zero",
+                      CASES[index].name);
+                CHECK(get_be16(data + 42) == 0120755u,
+                      "%s fileMode is 0%o, every stock symlink is 0120755",
+                      CASES[index].name, get_be16(data + 42));
+                CHECK(data[40] == 0u && data[41] == 0u,
+                      "%s adminFlags/ownerFlags are 0x%02x/0x%02x, not 0/0",
+                      CASES[index].name, data[40], data[41]);
+                CHECK(get_be32(data + 32) == 0u && get_be32(data + 36) == 0u,
+                      "%s owner/group are %u/%u, not 0/0", CASES[index].name,
+                      get_be32(data + 32), get_be32(data + 36));
+                CHECK(get_be32(data + 44) == 1u,
+                      "%s linkCount is %u, the stock volume's is 1",
+                      CASES[index].name, get_be32(data + 44));
+                CHECK(memcmp(data + 48, "slnk", 4u) == 0,
+                      "%s Finder type is %02x%02x%02x%02x, not 'slnk'",
+                      CASES[index].name, data[48], data[49], data[50],
+                      data[51]);
+                CHECK(memcmp(data + 52, "rhap", 4u) == 0,
+                      "%s Finder creator is %02x%02x%02x%02x, not 'rhap'",
+                      CASES[index].name, data[52], data[53], data[54],
+                      data[55]);
+                CHECK(all_zero(data + 56, 8u),
+                      "%s fdFlags/fdLocation/fdFldr are not zero",
+                      CASES[index].name);
+                CHECK(all_zero(data + 64, 16u),
+                      "%s FndrOpaqueInfo is not 16 zero bytes",
+                      CASES[index].name);
+                CHECK(get_be32(data + 80) == 0u && get_be32(data + 84) == 0u,
+                      "%s textEncoding/reserved2 are not zero",
+                      CASES[index].name);
+                CHECK(get_be64(data + 88) == (uint64_t)length,
+                      "%s logicalSize is %llu, strlen(target) is %zu",
+                      CASES[index].name,
+                      (unsigned long long)get_be64(data + 88), length);
+                CHECK(get_be32(data + 96) == 0u, "%s clumpSize is %u, not 0",
+                      CASES[index].name, get_be32(data + 96));
+                CHECK(get_be32(data + 100) == 1u && get_be32(data + 108) == 1u,
+                      "%s owns %u blocks in a %u-block extent",
+                      CASES[index].name, get_be32(data + 100),
+                      get_be32(data + 108));
+                CHECK(all_zero(data + 112, 48u),
+                      "%s uses more than its first extent descriptor",
+                      CASES[index].name);
+                CHECK(all_zero(data + 160, 80u),
+                      "%s has a non-empty resource fork", CASES[index].name);
+                start = get_be32(data + 104);
+                CHECK(tr_bitmap(&vol, start),
+                      "%s: allocation bit for block %u was not set",
+                      CASES[index].name, start);
+                CHECK((size_t)start * FX_BLOCK_SIZE + length <=
+                          run.output_size &&
+                      memcmp(run.output + (size_t)start * FX_BLOCK_SIZE,
+                             CASES[index].target, length) == 0,
+                      "%s: the target bytes are not in its allocation block",
+                      CASES[index].name);
+                /*
+                 * The NUL is outside logicalSize on the stock volume: the
+                 * target ends where the fork ends, and the rest of the block
+                 * is zero.  Both halves matter -- a writer that stored
+                 * strlen+1 would look identical until something read the link.
+                 */
+                CHECK(run.output[(size_t)start * FX_BLOCK_SIZE + length] == 0u,
+                      "%s: the byte past the target is not zero",
+                      CASES[index].name);
+                CHECK(all_zero(run.output + (size_t)start * FX_BLOCK_SIZE +
+                               length, FX_BLOCK_SIZE - length),
+                      "%s: the tail of the target's block is not zeroed",
+                      CASES[index].name);
+                /* A symlink's thread is an ordinary FILE thread. */
+                CHECK(tr_find(&vol, cnid, NULL, &thread) && thread.type == 4u,
+                      "%s has no file thread record", CASES[index].name);
+                CHECK(get_be32(thread.data + 4) == CASES[index].parent,
+                      "%s thread names parent %u, expected %u",
+                      CASES[index].name, get_be32(thread.data + 4),
+                      CASES[index].parent);
+            }
+            /* Symlinks are files to the volume header, not folders. */
+            CHECK(vol.file_count == 4u && vol.folder_count == 3u,
+                  "after three symlinks the volume counts are file=%u "
+                  "folder=%u, expected 4/3", vol.file_count, vol.folder_count);
+            {
+                tr_record_t alpha;
+
+                CHECK(tr_find(&vol, FX_ROOT, "alpha", &alpha) &&
+                      get_be32(alpha.data + 84) == 1u,
+                      "alpha's folderCount changed for a SYMLINK child");
+            }
+            tr_close(&vol);
+        }
+    }
+    run_release(&run);
+
+    /*
+     * groupID is the caller's, exactly as on the stock volume where 25 of the
+     * 409 carry 80/admin, and so are the permission bits -- but the format
+     * bits are not, and 0755 stays the default because that is what all 409
+     * carry.
+     */
+    {
+        rootfs_work_entry_t owned;
+
+        entry_symlink(&owned, "/etc", "private/etc", 0777u);
+        owned.owner_id = 501u;
+        owned.group_id = 80u;
+        if (run_provision(&run, fx, "symowner", &owned, 1u, 0u)) {
+            tr_volume_t vol;
+            tr_record_t link;
+
+            expect_success(&run, "symlink with an explicit owner and mode");
+            if (run.output && tr_open(run.output, run.output_size, &vol)) {
+                CHECK(tr_find(&vol, FX_ROOT, "etc", &link),
+                      "the owned symlink is missing");
+                CHECK(get_be16(link.data + 42) == (0120000u | 0777u),
+                      "an explicit symlink mode came back as 0%o",
+                      get_be16(link.data + 42));
+                CHECK(get_be32(link.data + 32) == 501u &&
+                      get_be32(link.data + 36) == 80u,
+                      "symlink owner/group came back as %u/%u",
+                      get_be32(link.data + 32), get_be32(link.data + 36));
+                CHECK(memcmp(link.data + 48, "slnk", 4u) == 0,
+                      "an explicit mode disturbed the Finder type");
+                tr_close(&vol);
+            }
+            run_release(&run);
+        }
+    }
+
+    /* A symlink with no target is not a symlink, and is refused rather than
+     * written as a zero-length one. */
+    {
+        rootfs_work_entry_t bad;
+
+        entry_symlink(&bad, "/etc", "", 0u);
+        if (run_provision(&run, fx, "symempty", &bad, 1u, 0u)) {
+            expect_refusal(&run, fx, ROOTFS_WORK_PROVISION_INVALID,
+                           "symlink with an empty target");
+            run_release(&run);
+        }
+        entry_symlink(&bad, "/etc", NULL, 0u);
+        if (run_provision(&run, fx, "symnull", &bad, 1u, 0u)) {
+            expect_refusal(&run, fx, ROOTFS_WORK_PROVISION_INVALID,
+                           "symlink with a NULL target");
+            run_release(&run);
+        }
+        /* An embedded NUL would silently truncate the link for the guest. */
+        entry_symlink(&bad, "/etc", "private/etc", 0u);
+        bad.content = (const uint8_t *)"private\0etc";
+        bad.content_size = 11u;
+        if (run_provision(&run, fx, "symnul", &bad, 1u, 0u)) {
+            expect_refusal(&run, fx, ROOTFS_WORK_PROVISION_INVALID,
+                           "symlink target with an embedded NUL");
+            run_release(&run);
+        }
+        entry_symlink(&bad, "/etc", "private/\x80tc", 0u);
+        if (run_provision(&run, fx, "symhigh", &bad, 1u, 0u)) {
+            expect_refusal(&run, fx, ROOTFS_WORK_PROVISION_INVALID,
+                           "symlink target outside printable ASCII");
+            run_release(&run);
+        }
+    }
+    /* Above the target cap, which is reported and not silently truncated. */
+    {
+        rootfs_work_entry_t big;
+        char *target = (char *)malloc(ROOTFS_WORK_MAX_PATH + 2u);
+
+        if (target) {
+            memset(target, 'x', ROOTFS_WORK_MAX_PATH + 1u);
+            target[ROOTFS_WORK_MAX_PATH + 1u] = '\0';
+            entry_symlink(&big, "/etc", target, 0u);
+            if (run_provision(&run, fx, "symbig", &big, 1u, 0u)) {
+                expect_refusal(&run, fx, ROOTFS_WORK_PROVISION_LIMIT,
+                               "symlink target above the path cap");
+                run_release(&run);
+            }
+            free(target);
+        }
+    }
+    /* An entry kind that is none of the three is refused by name. */
+    {
+        rootfs_work_entry_t odd;
+
+        entry_directory(&odd, "/gamma", 0u);
+        odd.kind = (rootfs_work_entry_kind_t)7;
+        if (run_provision(&run, fx, "symkind", &odd, 1u, 0u)) {
+            expect_refusal(&run, fx, ROOTFS_WORK_PROVISION_INVALID,
+                           "an entry kind that is not one of the three");
+            run_release(&run);
+        }
+    }
+    free(fx);
+}
+
+/*
+ * setuid, setgid and sticky must reach the record's BSD fileMode unmasked.
+ * These are not hypothetical bits: the acquired payload ships MobileCydia
+ * 06755, bin/su 04555, private/var/local 02775 and private/var/lock 01777, and
+ * a provisioner that quietly dropped any of them would produce a Cydia that
+ * cannot escalate and a lock directory anyone can empty.
+ */
+static void test_special_mode_bits_survive(void) {
+    static const struct {
+        int directory;
+        const char *path;
+        const char *name;
+        uint32_t parent;
+        uint16_t mode;
+        uint32_t group;
+        const char *payload_path;
+    } CASES[] = {
+        {0, "/alpha/MobileCydia", "MobileCydia", FX_ALPHA, 06755u, 0u,
+         "Applications/Cydia.app/MobileCydia"},
+        {0, "/su", "su", FX_ROOT, 04555u, 0u, "bin/su"},
+        {1, "/local", "local", FX_ROOT, 02775u, 50u, "private/var/local"},
+        {1, "/lock", "lock", FX_ROOT, 01777u, 0u, "private/var/lock"},
+        {0, "/beta/everything", "everything", FX_BETA, 07777u, 0u, "(all 12)"}
+    };
+    fixture_t *fx = fx_create(FX_DATA_BLOCKS - 1u);
+    rootfs_work_entry_t entries[sizeof(CASES) / sizeof(CASES[0])];
+    run_t run;
+    size_t index;
+
+    if (!fx) {
+        CHECK(0, "fixture allocation failed");
+        return;
+    }
+    for (index = 0; index < sizeof(CASES) / sizeof(CASES[0]); index++) {
+        if (CASES[index].directory)
+            entry_directory(&entries[index], CASES[index].path,
+                            CASES[index].mode);
+        else
+            entry_file(&entries[index], CASES[index].path, "x", 1u,
+                       CASES[index].mode);
+        entries[index].group_id = CASES[index].group;
+    }
+    if (!run_provision(&run, fx, "setuid", entries,
+                       sizeof(CASES) / sizeof(CASES[0]), 0u)) {
+        CHECK(0, "setuid fixture setup failed");
+        free(fx);
+        return;
+    }
+    expect_success(&run, "records carrying setuid/setgid/sticky");
+    if (run.output) {
+        tr_volume_t vol;
+
+        if (tr_open(run.output, run.output_size, &vol)) {
+            for (index = 0; index < sizeof(CASES) / sizeof(CASES[0]);
+                 index++) {
+                tr_record_t record;
+                uint16_t want = (uint16_t)((CASES[index].directory ? 0040000u
+                                                                   : 0100000u) |
+                                           CASES[index].mode);
+
+                if (!tr_find(&vol, CASES[index].parent, CASES[index].name,
+                             &record)) {
+                    CHECK(0, "%s is missing", CASES[index].path);
+                    continue;
+                }
+                CHECK(get_be16(record.data + 42) == want,
+                      "%s (payload %s) came back as mode 0%o, requested 0%o",
+                      CASES[index].path, CASES[index].payload_path,
+                      get_be16(record.data + 42), want);
+                /*
+                 * Name the three bits individually, so a mask that ate exactly
+                 * one of them says which.
+                 */
+                CHECK((get_be16(record.data + 42) & 04000u) ==
+                          (CASES[index].mode & 04000u),
+                      "%s lost or gained setuid", CASES[index].path);
+                CHECK((get_be16(record.data + 42) & 02000u) ==
+                          (CASES[index].mode & 02000u),
+                      "%s lost or gained setgid", CASES[index].path);
+                CHECK((get_be16(record.data + 42) & 01000u) ==
+                          (CASES[index].mode & 01000u),
+                      "%s lost or gained sticky", CASES[index].path);
+                CHECK(get_be32(record.data + 36) == CASES[index].group,
+                      "%s groupID is %u, requested %u", CASES[index].path,
+                      get_be32(record.data + 36), CASES[index].group);
+            }
+            tr_close(&vol);
+        }
+    }
+    run_release(&run);
+    /* A symlink carries them too, since it is the same BSD info word. */
+    {
+        rootfs_work_entry_t link;
+
+        entry_symlink(&link, "/sticky", "private/var/tmp/", 01777u);
+        if (run_provision(&run, fx, "stickylink", &link, 1u, 0u)) {
+            tr_volume_t vol;
+            tr_record_t record;
+
+            expect_success(&run, "symlink with the sticky bit");
+            if (run.output && tr_open(run.output, run.output_size, &vol)) {
+                CHECK(tr_find(&vol, FX_ROOT, "sticky", &record) &&
+                      get_be16(record.data + 42) == (0120000u | 01777u),
+                      "a sticky symlink came back as mode 0%o",
+                      tr_find(&vol, FX_ROOT, "sticky", &record) ?
+                          get_be16(record.data + 42) : 0u);
+                tr_close(&vol);
+            }
+            run_release(&run);
+        }
+    }
+    free(fx);
+}
+
 static void test_status_and_stage_names(void) {
     static const rootfs_work_status_t statuses[] = {
         ROOTFS_WORK_PROVISION_INVALID, ROOTFS_WORK_PROVISION_UNSUPPORTED,
         ROOTFS_WORK_PROVISION_CATALOG_CORRUPT,
         ROOTFS_WORK_PROVISION_PARENT_MISSING, ROOTFS_WORK_PROVISION_EXISTS,
         ROOTFS_WORK_PROVISION_NODE_FULL, ROOTFS_WORK_PROVISION_LEAF_HEAD,
+        ROOTFS_WORK_PROVISION_SPLIT_UNSUPPORTED,
+        ROOTFS_WORK_PROVISION_BTREE_FULL,
         ROOTFS_WORK_PROVISION_NO_SPACE, ROOTFS_WORK_PROVISION_LIMIT
     };
     size_t index;
@@ -2158,6 +3518,11 @@ int main(void) {
     test_broken_catalog_is_never_absence();
     test_unsupported_catalogs_are_refused();
     test_index_descent_and_leaf_head();
+    test_rightmost_leaf_split();
+    test_rightmost_index_split();
+    test_split_boundaries_are_refused();
+    test_symlink_matches_the_stock_format();
+    test_special_mode_bits_survive();
     test_invalid_requests_are_refused();
     test_output_is_deterministic();
     test_activation_entries();
