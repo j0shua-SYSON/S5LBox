@@ -2647,16 +2647,78 @@ driver's computed payload checksum against ours — and every capture shows
 confirmed against the real parser; it is confirmed now.
 
 `0xc043d684` (`IODataQueue::enqueue`) captured **1**, at instruction
-1,113,171,698 — before either tap, so not ours. That is the predicted outcome
-and not a failure: `0xc043c31c` only enqueues for client slots whose
-`this+0x80` bit 0 is set, and at 1.8e9 SpringBoard's UI does not exist to have
-subscribed. It means "no subscriber yet", not "no frame". The three SpringBoard
-user probes stayed at zero, as the manifest predicted they would.
+1,113,171,698 — before either tap, so not ours. The three SpringBoard user
+probes stayed at zero, as the manifest predicted they would.
 
-What this does **not** establish: that a tap reaches SpringBoard. Nothing in
-this run had a subscriber, and the final frame is the boot spinner at 1,830 of
-460,800 non-zero bytes. The device half is proven; the userspace half is
-untested.
+> **Retracted 2026-07-27.** The paragraph that stood here read that single hit
+> as "no subscriber yet", and concluded *"nothing in this run had a
+> subscriber."* **That is backwards, and it inverted the meaning of the one
+> positive measurement in the run.**
+>
+> `0xc043d684` is referenced by exactly one word in the entire binary
+> (`0xc043c3d0`) and called from exactly one instruction — `blxne r3` at
+> `0xc043c390` — which is gated on `cmp r0,#0` against the slot pointer **and**
+> `tst r3,#1` against the flags. It therefore **cannot execute unless some slot
+> simultaneously held a non-null client with bit 0 set.** It fired. So at
+> instruction 1,113,171,698 a userspace client *was* subscribed.
+>
+> "No userspace subscriber exists" has been this project's leading explanation
+> for why no tap reaches SpringBoard. It is not supported by this run, and it
+> should not be repeated. Candidate explanations that remain live, and that the
+> probe set below distinguishes: the client subscribed and then closed or
+> unsubscribed (`0xc043d57c` / `0xc043d430`); or `setNotificationPort` was never
+> called, so the enqueue succeeded silently with no mach wakeup
+> (`0xc043df94`).
+
+What this run does establish is the device half: the driver reads our frames
+and accepts their checksums. What it does **not** establish is that a tap
+reaches SpringBoard — the final frame is the boot spinner at 1,830 of 460,800
+non-zero bytes, and the userspace half is untested.
+
+#### The probe pair that bisects the chain
+
+The full path is now mapped end to end, all ARM mode, read from `LC_SYMTAB`
+and disassembly:
+
+```text
+kernel IODataQueue -> MultitouchSupport (dequeue) -> _mt_HandleMultitouchFrame
+  -> _mt_ProcessPathFrame -> _mt_ForwardBinaryContacts -> MultitouchHID.plugin
+  -> IOHIDEventSystem -> SpringBoard -> GSSendEvent -> mach_msg to the app's
+     Purple port -> PurpleEventCallback -> _UIApplicationHandleEvent
+```
+
+| PC | mode | what it proves |
+|---|---|---|
+| `0xc043d6b8` | kernel | `enqueue` was called; `r0` = 1 success, 0 queue-full |
+| `0x33cfb3ec` | user | `_mt_HandleMultitouchFrame` — a frame crossed into userspace |
+| `0xc043d560` | kernel | userspace *enabled* frame delivery (selector 0) |
+| `0xc043d57c` | kernel | userspace **un**subscribed |
+| `0x324f6edc` | user | `__UIApplicationHandleEvent` — the touch reached the application |
+
+`0x33cfb3ec` is the single best probe: it sits at the kernel/userspace
+boundary, so one bit bisects the chain optimally, and it is reached from
+**both** dequeue paths so it cannot be missed by guessing the wrong one.
+Paired with `0xc043d6b8` the diagnosis is mechanical — kernel fires and user
+does not means the loss is precisely in the notification/mach/run-loop leg;
+neither fires means the loss is in the kernel, and `0xc043d560` then says
+whether anyone had subscribed at all.
+
+Two hazards worth recording before they cost a run:
+
+- **`MultitouchHID.plugin` addresses cannot be probed.** It is `MH_BUNDLE`
+  with `__TEXT vmaddr = 0`, loaded at a dyld-chosen base by
+  `IOCreatePlugInInterfaceForService`, so its file offsets do not convert to
+  absolute VAs. Any list offering them as probe PCs is wrong; use
+  `0x33cfdee0` (the `blx` inside `_mt_ForwardBinaryContacts`) instead.
+- **`IOKit.framework` appears twice in this cache**, at `0x31464000` and
+  `0x32299000` — two complete copies. Probing anything in IOKit means setting
+  **both** PCs, because only one copy is bound into a given process.
+
+And a gate that may block the slide-to-unlock experiment outright:
+`MultitouchHID` drops every frame while `UILocked` is set, and that flag
+**initialises to 1** (`docs/AGENT_HANDOFF.md` §23.4d — repo-recorded, not
+re-verified). The probe pair is what tells us whether that is what swallows an
+injected swipe, rather than guessing.
 
 
 ### 2026-07-26: runs 58-59 — the guest drew a frame
