@@ -1396,18 +1396,31 @@ static bool host_file_stamp(host_file_t *file, file_stamp_t *stamp,
     stamp->changed_a = (uint64_t)info.st_ctime;
 #if defined(__APPLE__)
     /*
-     * Darwin carries nanoseconds in a struct timespec, always, whether or not
-     * _DARWIN_C_SOURCE is in force. This used to have a second Apple branch
-     * claiming that "Darwin's strict POSIX layout exposes nanoseconds as scalar
-     * fields" and reading st_mtimensec -- which is a Linux/BSD name that Darwin
-     * does not define at all. It stayed invisible because the macOS CI job
-     * compiles this file WITH _DARWIN_C_SOURCE and took the other branch; iOS
-     * is the only target that compiles it without, so the first iOS build to
-     * include rootfs_work.c is the one that found it. clang's own fixit said
-     * "did you mean 'st_mtimespec'?".
+     * Darwin really does ship BOTH layouts, and which one you get depends on
+     * the C dialect, not on _DARWIN_C_SOURCE:
+     *
+     *   strict (-std=c11 sets __STRICT_ANSI__)  scalar  st_mtimensec
+     *   otherwise                               struct  st_mtimespec.tv_nsec
+     *
+     * The macOS CI jobs compile this file with -std=c11 and get the scalar
+     * form; Xcode builds the iOS app without it and gets the struct form. So
+     * the two Apple targets need DIFFERENT code, and any single-branch answer
+     * breaks one of them -- which is exactly what happened: gating on
+     * _DARWIN_C_SOURCE broke iOS, and then collapsing both branches onto
+     * st_mtimespec broke macOS with the mirror-image error.
+     *
+     * Discriminate on Darwin's own signal instead of guessing at feature
+     * macros: <sys/stat.h> #defines st_mtime to st_mtimespec.tv_sec precisely
+     * when the timespec layout is in force, so the macro's existence IS the
+     * layout test. The st_mtime/st_ctime reads above work either way.
      */
+#  ifdef st_mtime
     stamp->modified_b = (uint64_t)info.st_mtimespec.tv_nsec;
     stamp->changed_b = (uint64_t)info.st_ctimespec.tv_nsec;
+#  else
+    stamp->modified_b = (uint64_t)info.st_mtimensec;
+    stamp->changed_b = (uint64_t)info.st_ctimensec;
+#  endif
 #elif defined(__linux__) || defined(__FreeBSD__) || defined(__NetBSD__) || \
       defined(__OpenBSD__)
     stamp->modified_b = (uint64_t)info.st_mtim.tv_nsec;
