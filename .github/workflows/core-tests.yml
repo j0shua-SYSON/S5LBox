@@ -68,7 +68,7 @@ jobs:
         run: uname -m
 
       - name: Configure (JIT on)
-        run: cmake -S . -B build-jit -DCMAKE_BUILD_TYPE=Release -DIOS3VM_JIT=ON
+        run: cmake -S . -B build-jit -DCMAKE_BUILD_TYPE=Release -DS5LBOX_JIT=ON
 
       - name: Build
         run: cmake --build build-jit --config Release
@@ -127,7 +127,7 @@ jobs:
         run: |
           cmake -S . -B build-san \
             -DCMAKE_BUILD_TYPE=Debug \
-            -DIOS3VM_JIT=ON \
+            -DS5LBOX_JIT=ON \
             -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all"
 
       - name: Build
@@ -152,7 +152,7 @@ jobs:
         run: |
           cmake -S . -B build-strict \
             -DCMAKE_BUILD_TYPE=Debug \
-            -DIOS3VM_JIT=ON \
+            -DS5LBOX_JIT=ON \
             -DCMAKE_C_FLAGS="-Wall -Wextra -Werror"
 
       - name: Build

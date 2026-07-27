@@ -24,7 +24,7 @@ endif()
 # executables; the emitter and translator are portable C and are fully tested
 # on any host, while core/tests/test_jit_exec.c — the only test that *runs*
 # emitted code — skips itself at runtime unless the host is arm64.
-option(IOS3VM_JIT "Build the ARMv6 -> arm64 dynamic recompiler" OFF)
+option(S5LBOX_JIT "Build the ARMv6 -> arm64 dynamic recompiler" OFF)
 
 enable_testing()
 add_subdirectory(core)

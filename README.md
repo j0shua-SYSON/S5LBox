@@ -205,7 +205,7 @@ The public suite runs without Apple firmware; extra symbol and driver checks
 switch on only if you supply a kernelcache. Test counts move as coverage grows,
 so trust the current output and CI logs, not a number copied into this file.
 `Release` is the default on purpose: the interpreter is the hot loop here. Add
-`-DIOS3VM_JIT=ON` in a separate build directory to compile the (inactive)
+`-DS5LBOX_JIT=ON` in a separate build directory to compile the (inactive)
 translator and run its tests.
 
 **Boot the kernel** once you have supplied firmware. The recommended path leaves
@@ -271,7 +271,7 @@ so historical 768 MiB experiments are not valid recipes.
 [`docs/debugging.md`](docs/debugging.md) is the procedure these add up to.
 
 **Get the app:** on a matching push or manual dispatch, the `ios-build` workflow
-produces an ad-hoc (`ldid` fake-signed) `iOS3VM.ipa` as a temporary GitHub
+produces an ad-hoc (`ldid` fake-signed) `S5LBox.ipa` as a temporary GitHub
 Actions artifact. CI builds, signs and packages it; it does not install or launch
 it. Installing needs a method compatible with your device's jailbreak, such as
 AppSync or TrollStore. No Apple Developer account is involved.

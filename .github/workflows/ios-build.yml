@@ -1,8 +1,9 @@
 name: ios-build
 
-# Builds the iOS app on a macOS runner (free + unlimited minutes on public
-# repos), fake-signs it with ldid — no Apple Developer account required — and
-# uploads an installable .ipa artifact for a jailbroken device.
+# Builds the iOS app on a standard hosted macOS runner, subject to GitHub's
+# current usage and billing policy. It ad-hoc/fake-signs with ldid — no Apple
+# Developer account required — and uploads a candidate .ipa for a compatible
+# jailbroken device. The workflow does not install or launch it.
 on:
   push:
     paths:
@@ -13,7 +14,7 @@ on:
 
 jobs:
   build:
-    name: build unsigned .ipa
+    name: build ad-hoc-signed .ipa
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
@@ -40,6 +41,22 @@ jobs:
           if [ -n "$latest" ]; then sudo xcode-select -s "$latest"; fi
           xcodebuild -version
 
+      - name: Compile-check every JIT source for iphoneos
+        # The app deliberately excludes jit/** until the run loop owns a code
+        # cache. Keep the exact iOS preprocessor/API path from silently rotting
+        # in the meantime, especially the no-pthread A9 RWX policy.
+        run: |
+          set -euo pipefail
+          sdkroot="$(xcrun --sdk iphoneos --show-sdk-path)"
+          xcrun --sdk iphoneos clang \
+            -std=c11 -Wall -Wextra -Werror -Werror=unguarded-availability-new \
+            -arch arm64 -miphoneos-version-min=13.0 \
+            -DS5LBOX_JIT=1 -Icore/include -isysroot "$sdkroot" \
+            -fsyntax-only \
+            core/src/jit/a64_emit.c \
+            core/src/jit/jit_translate.c \
+            core/src/jit/jit_mem.c
+
       - name: Generate Xcode project
         working-directory: app
         run: xcodegen generate
@@ -49,8 +66,8 @@ jobs:
         run: |
           set -euo pipefail
           xcodebuild \
-            -project iOS3VM.xcodeproj \
-            -target iOS3VM \
+            -project S5LBox.xcodeproj \
+            -target S5LBox \
             -configuration Release \
             -sdk iphoneos \
             -arch arm64 \
@@ -62,18 +79,19 @@ jobs:
         working-directory: app
         run: |
           set -euo pipefail
-          APP="dist/iOS3VM.app"
+          APP="dist/S5LBox.app"
           test -d "$APP"
-          # Embed entitlements and ad-hoc sign; the jailbreak's AMFI patch trusts this.
-          ldid -S"iOS3VM.entitlements" "$APP/iOS3VM"
+          # Request the declared entitlements and ad-hoc sign. Whether the
+          # target jailbreak grants them must be validated on that device.
+          ldid -S"S5LBox.entitlements" "$APP/S5LBox"
           rm -rf Payload && mkdir Payload
           cp -R "$APP" Payload/
-          zip -qry iOS3VM.ipa Payload
-          ls -lh iOS3VM.ipa
+          zip -qry S5LBox.ipa Payload
+          ls -lh S5LBox.ipa
 
       - name: Upload .ipa
         uses: actions/upload-artifact@v4
         with:
-          name: iOS3VM-ipa
-          path: app/iOS3VM.ipa
+          name: S5LBox-ipa
+          path: app/S5LBox.ipa
           if-no-files-found: error

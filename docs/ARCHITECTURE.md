@@ -77,7 +77,7 @@ second backend is under construction:
   crossing the exact libm stop and reaching a clean 2.5 B cap. This clears that
   reached-path gate; it does not claim complete VFP or ARM coverage.
 - **Dynarec / JIT** — an AArch64 emitter and ARM/Thumb block translator exist
-  behind `IOS3VM_JIT`, and emitted blocks run in macOS arm64 CI. There is no code
+  behind `S5LBOX_JIT`, and emitted blocks run in macOS arm64 CI. There is no code
   cache or dispatcher, nothing in `s5l8900_run()` calls it, and the iOS target
   excludes it. It is a parallel milestone, not a current execution engine.
 

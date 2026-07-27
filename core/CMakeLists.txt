@@ -61,13 +61,13 @@ endif()
 # it does not handle is left to arm_step(), so enabling this cannot change what
 # the guest computes, only how fast. It is still off by default because nothing
 # in the machine's run loop calls it yet.
-if(IOS3VM_JIT)
+if(S5LBOX_JIT)
     target_sources(emucore PRIVATE
         src/jit/a64_emit.c
         src/jit/jit_translate.c
         src/jit/jit_mem.c
     )
-    target_compile_definitions(emucore PUBLIC IOS3VM_JIT)
+    target_compile_definitions(emucore PUBLIC S5LBOX_JIT)
 
     # Byte-exact encoder tests. Pure computation, so these run everywhere —
     # including the x86 dev box, which is the point.

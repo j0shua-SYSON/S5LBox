@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+      Entitlement requests for a JAILBROKEN install. No Apple Developer team is
+      used by CI: the .ipa is ad-hoc/fake-signed with ldid -S. A jailbreak may
+      ignore or alter these requests, so the effective process flags, executable
+      memory policy and memory budget must be measured on the target device.
+    -->
+
+    <!-- Request debug eligibility. This does not guarantee CS_DEBUGGED or
+         executable unsigned code under a particular jailbreak. -->
+    <key>get-task-allow</key>
+    <true/>
+
+    <!-- Request the private JIT entitlement. Acceptance and effect depend on
+         the target's signing and jailbreak policy. -->
+    <key>dynamic-codesigning</key>
+    <true/>
+
+    <!-- Request a higher per-app memory limit. This is not a guaranteed jetsam
+         budget and the app must remain memory-bounded. -->
+    <key>com.apple.developer.kernel.increased-memory-limit</key>
+    <true/>
+</dict>
+</plist>

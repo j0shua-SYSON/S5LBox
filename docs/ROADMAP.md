@@ -1433,7 +1433,7 @@ Whether the intended jailbroken
 iPhone grants executable memory is still an on-device validation item, not a
 portable-core assumption.
 
-**Foundation present behind `-DIOS3VM_JIT=ON`, and off by default.** The
+**Foundation present behind `-DS5LBOX_JIT=ON`, and off by default.** The
 AArch64 emitter and ARM/Thumb translator have structural tests, and emitted
 blocks run in the macOS arm64 CI jobs. A historical private, untracked
 translation-eligibility sample improved substantially after Thumb support, but

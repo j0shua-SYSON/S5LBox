@@ -49,7 +49,7 @@ expect:
 
 ## 0. Implementation status
 
-Built so far, behind the CMake option `IOS3VM_JIT` (**OFF by default**, and the
+Built so far, behind the CMake option `S5LBOX_JIT` (**OFF by default**, and the
 default build and the boot path are untouched):
 
 | | State |
@@ -1281,7 +1281,7 @@ permanent regression, following the existing firmware-found regressions.
 ### 9.5 Validating the TLB *before* the JIT exists
 
 The software TLB (J1) is a pure cache, so it has a free oracle: build with
-`IOS3VM_NO_TLB` and run the same boot. The two runs must produce **identical**
+`S5LBOX_NO_TLB` and run the same boot. The two runs must produce **identical**
 instruction traces, UART output and final state. A full Apple-firmware comparison
 belongs in a private, firmware-enabled workflow; public CI cannot obtain those
 inputs. Public CI should use focused synthetic page tables and a sanitized trace

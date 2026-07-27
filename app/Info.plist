@@ -4,17 +4,20 @@
 <dict>
     <key>CFBundleDevelopmentRegion</key>
     <string>en</string>
-    <!-- What the home screen shows under the icon. Deliberately NOT the same
-         as CFBundleName / PRODUCT_NAME, which stay iOS3VM: the product, the
-         Xcode target, the repository and every path in the docs are iOS3VM,
-         and renaming those would invalidate build recipes and ~80 run
-         manifests for a label. This key is the only one the user reads.
+    <!-- What the home screen shows under the icon.
 
-         S5LBox names the SILICON, which is what this project actually
-         emulates, and the *Box suffix reads as "emulator" the way DOSBox and
-         86Box do. It also survives the roadmap: M-P2 adds a second machine
-         profile on the S5L8950X, and a name tied to one OS version would go
-         stale the moment that lands. -->
+         S5LBox names the SILICON, which is what this project emulates, and the
+         *Box suffix reads as "emulator" the way DOSBox and 86Box do. It also
+         survives the roadmap: M-P2 adds a second machine profile on the
+         S5L8950X, and a name tied to one OS version would go stale the moment
+         that lands.
+
+         CFBundleName follows PRODUCT_NAME, which is now S5LBox as well -- the
+         Xcode target, the .app, the .ipa and the entitlements file were all
+         renamed once the CI workflow that pinned them could be edited. The
+         only thing still called iOS3-VM is the working directory on disk,
+         because 16 CMake build trees cache its absolute path and a folder name
+         is not worth reconfiguring them for. -->
     <key>CFBundleDisplayName</key>
     <string>S5LBox</string>
     <key>CFBundleExecutable</key>

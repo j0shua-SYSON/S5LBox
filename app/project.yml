@@ -1,10 +1,10 @@
 # XcodeGen spec for the S5LBox app.
 #
 # We do NOT commit an .xcodeproj (it is a churny binary blob). CI runs
-# `xcodegen generate` on the macOS runner to produce iOS3VM.xcodeproj from
+# `xcodegen generate` on the macOS runner to produce S5LBox.xcodeproj from
 # this file, then `xcodebuild`. To develop locally on a Mac, run the same
 # `xcodegen generate` and open the project.
-name: iOS3VM
+name: S5LBox
 options:
   bundleIdPrefix: com.j0shua
   deploymentTarget:
@@ -12,7 +12,7 @@ options:
   createIntermediateGroups: true
 
 targets:
-  iOS3VM:
+  S5LBox:
     type: application
     platform: iOS
     sources:
@@ -26,7 +26,7 @@ targets:
       - path: ../core/src
         name: core
         # The dynamic recompiler (docs/dynarec.md) is deliberately NOT in the
-        # app yet. It is gated by the CMake option IOS3VM_JIT for host builds
+        # app yet. It is gated by the CMake option S5LBOX_JIT for host builds
         # and nothing in the machine's run loop calls it, so compiling it in
         # would add code to the shipping binary that cannot run. Delete this
         # exclusion at stage J3, when the app enables the JIT for real.
@@ -43,11 +43,11 @@ targets:
       - sdk: QuartzCore.framework
     settings:
       base:
-        PRODUCT_NAME: iOS3VM
-        PRODUCT_BUNDLE_IDENTIFIER: com.j0shua.iOS3VM
+        PRODUCT_NAME: S5LBox
+        PRODUCT_BUNDLE_IDENTIFIER: com.j0shua.S5LBox
         INFOPLIST_FILE: Info.plist
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-        CODE_SIGN_ENTITLEMENTS: iOS3VM.entitlements
+        CODE_SIGN_ENTITLEMENTS: S5LBox.entitlements
         HEADER_SEARCH_PATHS:
           - $(SRCROOT)/../core/include
         GCC_C_LANGUAGE_STANDARD: c11

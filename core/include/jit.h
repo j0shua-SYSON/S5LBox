@@ -2,7 +2,7 @@
  * S5LBox — ARMv6 -> arm64 dynamic recompiler, block translator.
  *
  * Stages J2 and J4 of docs/dynarec.md: the skeleton, and Thumb translation.
- * It exists only when the project is configured with -DIOS3VM_JIT=ON, and even
+ * It exists only when the project is configured with -DS5LBOX_JIT=ON, and even
  * then it is inert until something calls it — there is still no code cache, so
  * nothing in the interpreter's boot path references it.
  *
