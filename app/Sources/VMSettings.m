@@ -18,9 +18,13 @@
 NSString *const VMSettingsDidChangeNotification =
     @"VMSettingsDidChangeNotification";
 
-NSString *const VMFirmwareKernelFile           = @"kernelcache";
-NSString *const VMFirmwareDeviceTreeFile       = @"DeviceTree";
-NSString *const VMFirmwareRootFilesystemFile   = @"rootfs.dmg";
+/* The names the importer writes and the emulator accepts, per
+ * docs/BOOT_CHAIN.md's "Regenerating the three accepted inputs". They were
+ * "kernelcache", "DeviceTree" and "rootfs.dmg" until the importer existed,
+ * which named the IPSW's own members rather than anything produced from them. */
+NSString *const VMFirmwareKernelFile           = @"kernel.macho";
+NSString *const VMFirmwareDeviceTreeFile       = @"devicetree.bin";
+NSString *const VMFirmwareRootFilesystemFile   = @"rootfs.img";
 NSString *const VMFirmwareJailbreakPayloadFile = @"jailbreak-payload";
 
 static NSString *const kVMOptionKeyPrefix   = @"vm.option.";

@@ -5,6 +5,7 @@
 //
 #import "VMSettingsViewController.h"
 
+#import "VMFirmwareImportViewController.h"
 #import "VMOptions.h"
 #import "VMManualViewController.h"
 #import "VMSettings.h"
@@ -27,6 +28,16 @@ typedef NS_ENUM(NSInteger, VMGeneralRow) {
     VMGeneralRowJailbreak,
     VMGeneralRowDeveloperMode,
     VMGeneralRowCount
+};
+
+/* The three status rows keep the indices they always had, and the one thing a
+ * person can DO in this section is added after them. */
+typedef NS_ENUM(NSInteger, VMFirmwareRow) {
+    VMFirmwareRowKernel = 0,
+    VMFirmwareRowDeviceTree,
+    VMFirmwareRowRootFilesystem,
+    VMFirmwareRowImport,
+    VMFirmwareRowCount
 };
 
 typedef NS_ENUM(NSInteger, VMDiagnosticsRow) {
@@ -135,6 +146,14 @@ static NSString *VMStringFromC(const char *text) {
     UIView *header = [[UIView alloc] initWithFrame:CGRectZero];
     [header addSubview:_banner];
     self.tableView.tableHeaderView = header;
+}
+
+/* Coming back from the importer, the three firmware rows may be describing
+ * files that did not exist when this screen was last drawn. Nothing else here
+ * is expensive enough for a full reload to matter. */
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    [self.tableView reloadData];
 }
 
 /* The header view is laid out by hand because it is not a cell and does not
@@ -275,7 +294,7 @@ static NSString *VMStringFromC(const char *text) {
         return rows;
     }
     switch ((VMSettingsSection)section) {
-        case VMSettingsSectionFirmware:    return 3;
+        case VMSettingsSectionFirmware:    return VMFirmwareRowCount;
         case VMSettingsSectionDiagnostics: return VMDiagnosticsRowCount;
         case VMSettingsSectionCommandLine: return 1;
         case VMSettingsSectionReset:       return 1;
@@ -328,9 +347,13 @@ titleForFooterInSection:(NSInteger)section {
         case VMSettingsSectionFirmware:
             return [NSString stringWithFormat:
                     @"The project ships no Apple firmware, bundles none, and "
-                    @"downloads none. There is also no file picker yet, so "
-                    @"these rows are read-only: the app reports whether a file "
-                    @"with the expected name is present in\n\n%@\n\n"
+                    @"downloads none. The three rows above report whether a "
+                    @"file with the expected name is present in\n\n%@\n\n"
+                    @"Import unpacks an IPSW you already have into exactly "
+                    @"those three files. It cannot finish on its own: every "
+                    @"payload in a 3.x IPSW is encrypted with a key that is "
+                    @"not in the archive, and this app has none of them and "
+                    @"fetches none — it asks you for the ones it needs.\n\n"
                     @"Even with all three present, the app cannot boot them — "
                     @"that is the desktop harness's job today.",
                     [_settings firmwareDirectory] ?: @"(no documents directory)"];
@@ -469,12 +492,28 @@ titleForFooterInSection:(NSInteger)section {
 
     switch ((VMSettingsSection)section) {
         case VMSettingsSectionFirmware: {
+            if (indexPath.row == VMFirmwareRowImport) {
+                UITableViewCell *cell = [self cellWithIdentifier:kVMPlainCell
+                                                           style:UITableViewCellStyleSubtitle];
+                cell.textLabel.text = @"Import from an IPSW";
+                cell.detailTextLabel.text =
+                    @"Unpacks an IPSW you already have into the three files "
+                     "above. Some of them need a key that you supply.";
+                cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+                cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+                return cell;
+            }
+
             NSString *title = @"";
             NSString *file  = @"";
             switch (indexPath.row) {
-                case 0: title = @"Kernel";          file = VMFirmwareKernelFile; break;
-                case 1: title = @"Device tree";     file = VMFirmwareDeviceTreeFile; break;
-                default: title = @"Root filesystem"; file = VMFirmwareRootFilesystemFile; break;
+                case VMFirmwareRowKernel:
+                    title = @"Kernel";          file = VMFirmwareKernelFile; break;
+                case VMFirmwareRowDeviceTree:
+                    title = @"Device tree";     file = VMFirmwareDeviceTreeFile; break;
+                case VMFirmwareRowRootFilesystem:
+                default:
+                    title = @"Root filesystem"; file = VMFirmwareRootFilesystemFile; break;
             }
             UITableViewCell *cell = [self cellWithIdentifier:kVMPlainCell
                                                        style:UITableViewCellStyleSubtitle];
@@ -593,6 +632,16 @@ didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
         return;
     }
     switch ((VMSettingsSection)[self sectionAt:indexPath.section]) {
+        case VMSettingsSectionFirmware:
+            /* The three status rows above are still not selectable; only the
+             * one row that leads somewhere does anything. */
+            if (indexPath.row != VMFirmwareRowImport) return;
+            if (self.navigationController)
+                [self.navigationController
+                    pushViewController:[[VMFirmwareImportViewController alloc] init]
+                              animated:YES];
+            return;
+
         case VMSettingsSectionDiagnostics:
             if (indexPath.row != VMDiagnosticsRowInstructionCap) return;
             [_settings setInstructionCap:[_settings nextInstructionCap]];

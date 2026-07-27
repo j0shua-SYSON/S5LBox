@@ -15,9 +15,10 @@
 //  APPLIED. The instruction cap and the pause-on-background switch. Both are
 //  real properties of this app's run loop and both take effect immediately.
 //
-//  Firmware paths are a third case: read-only. The app ships no firmware, has
-//  no file picker, and downloads nothing, so all it can honestly do is name the
-//  directory it would read and report whether a file is there.
+//  Firmware paths are a third case: reported, not stored. The app ships no
+//  firmware and downloads none, so all this class does is name the directory it
+//  would read and say whether a file is there. Putting files in that directory
+//  is VMFirmwareImporter's job, from an IPSW the user already has.
 //
 //  Copyright (c) 2026 j0shua-SYSON. MIT licensed.
 //
@@ -30,8 +31,11 @@
  * info: a reader re-reads, which is cheap and cannot go stale. */
 extern NSString *const VMSettingsDidChangeNotification;
 
-/* The file names the app looks for, so the settings screen and this class
- * cannot disagree about what to tell the user to copy where. */
+/* The three file names the emulator accepts, which are also exactly what the
+ * importer writes -- vm_fw_artefact_filename() in VMFirmwareImport.h produces
+ * the same three strings. Named here as well so the settings screen, this
+ * class and the importer cannot disagree about what a present file is called.
+ * The fourth is the jailbreak payload, which no importer produces. */
 extern NSString *const VMFirmwareKernelFile;
 extern NSString *const VMFirmwareDeviceTreeFile;
 extern NSString *const VMFirmwareRootFilesystemFile;
@@ -110,7 +114,7 @@ extern NSString *const VMFirmwareJailbreakPayloadFile;
 - (BOOL)pausesInBackground;
 - (void)setPausesInBackground:(BOOL)pauses;
 
-#pragma mark - Firmware (read-only: none is shipped and none can be chosen)
+#pragma mark - Firmware (reported only: none is shipped and none is downloaded)
 
 /* Where the app looks. Returned whether or not it exists, because the point of
  * printing it is to say where to put files. */
