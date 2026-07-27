@@ -123,6 +123,9 @@ static const vm_option_omission_t VM_OMITTED[] = {
     { "print-config",
       "resolves the command line and exits without booting; the settings "
       "screen already shows the resolved configuration" },
+    { "call-probe-regs",
+      "formats the terminal report for --call-probe, and this app offers no "
+      "way to arm a probe in the first place" },
 };
 
 #define VM_OMITTED_COUNT \

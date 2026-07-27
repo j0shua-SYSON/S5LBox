@@ -29,6 +29,33 @@ uint32_t s5l_i2s_offset(unsigned index) {
     return I2S_OFFSETS[index];
 }
 
+/*
+ * The FIFO offsets, named. See the `dma-channels` decode in soc.h for where
+ * both of them and the direction inference come from.
+ *
+ * This is deliberately a pure classifier rather than a branch inside
+ * s5l_i2s_write(). Recognising an offset must not start excusing it: a CPU
+ * store to a FIFO whose physical address the tree hands to the PL080 is the
+ * driver doing programmed I/O where DMA was intended, and that stays counted
+ * as an unknown-offset access below, where a census will see it. Naming it and
+ * forgiving it are different changes and only the first one is made here.
+ */
+s5l_i2s_fifo_t s5l_i2s_fifo_role(uint32_t off) {
+    if (off == S5L_I2S_TX_FIFO_OFF) return S5L_I2S_FIFO_TX;
+    if (off == S5L_I2S_RX_FIFO_OFF) return S5L_I2S_FIFO_RX;
+    return S5L_I2S_FIFO_NONE;
+}
+
+uint32_t s5l_i2s_fifo_pa(unsigned index, s5l_i2s_fifo_t which) {
+    uint32_t base;
+    if (index == 0u)      base = S5L8900_I2S0_BASE;
+    else if (index == 1u) base = S5L8900_I2S1_BASE;
+    else                  return UINT32_MAX;
+    if (which == S5L_I2S_FIFO_TX) return base + S5L_I2S_TX_FIFO_OFF;
+    if (which == S5L_I2S_FIFO_RX) return base + S5L_I2S_RX_FIFO_OFF;
+    return UINT32_MAX;
+}
+
 static int slot_for(uint32_t off) {
     for (unsigned i = 0; i < S5L_I2S_REGS; i++)
         if (I2S_OFFSETS[i] == off) return (int)i;

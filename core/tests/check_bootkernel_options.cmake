@@ -68,7 +68,7 @@ endfunction()
 # to any of them silently changes the meaning of ~60 recorded runs, so they are
 # spelled out here rather than left implicit in the table.
 expect_config(defaults_resolve
-    "mbx=0|sha1=0|baseband=0|spi2=0|usb-otg=0|framebuffer=0|iomfb-display=0|vram=1|lcd-panel-id=1|memory-reg=1|rtc-patch=1|fstab-fixup=1|ca-software-render=0|activate=1|jb-codesign=0|jb-payload=0|ppp=0|ramdisk-low=0|stop-on-abort=0|kext-map=0"
+    "mbx=0|sha1=0|baseband=0|spi2=0|usb-otg=0|framebuffer=0|iomfb-display=0|vram=1|lcd-panel-id=1|memory-reg=1|rtc-patch=1|fstab-fixup=1|ca-software-render=0|activate=1|jb-codesign=0|jb-payload=0|ppp=0|ramdisk-low=0|stop-on-abort=0|kext-map=0|call-probe-regs=1"
     absent-kernel --print-config)
 
 # Nothing but --print-config itself came from the command line.
@@ -354,3 +354,64 @@ expect_refused(drag_trailing_junk_on_steps "expected <at>:<x0>:<y0>:<x1>:<y1>"
     absent-kernel --drag 1000:10:240:300:240:8x --print-config)
 expect_refused(drag_missing_value "missing option value"
     absent-kernel --drag)
+
+# --------------------------------------------------------------------------
+# 8. --call-probe / --call-probe-kernel, and the register-file line.
+#
+# The two flags share one PC namespace and one ring, so the count is the thing
+# to pin: a second flag that quietly resolved into its own pool would let a run
+# arm nine probes while the header said eight.
+expect_config(call_probe_is_counted
+    "call probes          1" absent-kernel --call-probe 0x33cfdee0 --print-config)
+expect_config(call_probe_kernel_shares_the_pool
+    "call probes          2"
+    absent-kernel --call-probe 0x33cfdee0 --call-probe-kernel 0xc0526a4c
+    --print-config)
+expect_config(no_call_probe_is_zero
+    "call probes          0" absent-kernel --print-config)
+# A Thumb entry is named by its even VA, so 0x33cfdee1 and 0x33cfdee0 are the
+# same site and the second is a duplicate rather than a ninth probe.
+expect_refused(call_probe_duplicate_pc "given twice"
+    absent-kernel --call-probe 0x33cfdee0 --call-probe 0x33cfdee1 --print-config)
+expect_refused(call_probe_zero_pc "pc must not be zero"
+    absent-kernel --call-probe 0 --print-config)
+expect_refused(call_probe_missing_value "missing option value"
+    absent-kernel --call-probe)
+
+# The register-file line defaults ON. That default is what makes a probed boot
+# yield r4-r12 without anybody having remembered to ask, which matters because
+# a register that was not printed cannot be recovered without paying for the
+# boot again -- and it is the reason MultitouchHID.plugin's dyld-chosen load
+# base is reachable at all, since it exists only as r12 at one instruction.
+expect_config(call_probe_regs_default_on
+    "call-probe-regs=1"
+    absent-kernel --call-probe 0x33cfdee0 --print-config)
+# ...and nothing on a default command line asked for it, so it must not appear
+# on the config-cli line. This is the row that would catch a default flipped by
+# accident: config: says what is effective, config-cli says what was requested.
+expect_config(call_probe_regs_is_a_default_not_a_request
+    "config-cli : print-config"
+    absent-kernel --call-probe 0x33cfdee0 --print-config)
+expect_config(call_probe_regs_can_be_suppressed
+    "call-probe-regs=0|config-cli : print-config no-call-probe-regs"
+    absent-kernel --call-probe 0x33cfdee0 --no-call-probe-regs --print-config)
+# Both directions are refused with no probe armed, for the reason --no-vram is
+# refused without --framebuffer: with nothing to capture there is no report for
+# either spelling to change, and an unhonourable request must not resolve like
+# a satisfied one.
+expect_refused(call_probe_regs_without_a_probe
+    "only means anything with --call-probe"
+    absent-kernel --call-probe-regs --print-config)
+expect_refused(no_call_probe_regs_without_a_probe
+    "only means anything with --call-probe"
+    absent-kernel --no-call-probe-regs --print-config)
+# The kernel-mode spelling arms it just as well.
+expect_config(call_probe_regs_under_the_kernel_flag
+    "call-probe-regs=0"
+    absent-kernel --call-probe-kernel 0xc0526a4c --no-call-probe-regs
+    --print-config)
+# --call-probe-regs is its own token and must never be eaten as --call-probe's
+# value: that would silently arm a probe at a nonsense PC and consume the flag.
+expect_refused(call_probe_regs_is_not_a_probe_value
+    "negative values are not allowed"
+    absent-kernel --call-probe --call-probe-regs --print-config)

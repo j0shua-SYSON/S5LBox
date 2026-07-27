@@ -1719,6 +1719,59 @@ void     s5l_i2s_write(s5l_i2s_t *i2s, uint32_t off, uint32_t val);
  * re-deriving them from this model's own storage order. */
 uint32_t s5l_i2s_offset(unsigned index);
 
+/* --- the two FIFOs, named rather than merely counted --------------------
+ * The paragraph above says the FIFOs live at +0x10 and +0x38 and that the CPU
+ * never touches them. Both halves of that remain true and neither is weakened
+ * here: nothing below stores anything, nothing below changes what a guest
+ * access does, and a CPU access to either offset is still counted as the
+ * off-map anomaly it is. What is added is a NAME for the two offsets and the
+ * evidence for which of them carries samples OUT, so a capture that taps them
+ * cites the device tree instead of a constant somebody typed.
+ *
+ * WHERE THE TWO OFFSETS COME FROM. /arm-io/i2s0's own `dma-channels`, 64 bytes,
+ * read as two 32-byte entries of little-endian words:
+ *
+ *   [0] 0x00000800 0x00249000 0x00000000 0x3ca00010 0 0 0 0
+ *   [1] 0x00001042 0x00249000 0x3ca00038 0x00000000 0 0 0 0
+ *
+ * and /arm-io/i2s1's is the same shape over its own window:
+ *
+ *   [0] 0x00000884 0x00249000 0x00000000 0x3cd00010 1 0 0 0
+ *   [1] 0x000010c6 0x00249000 0x3cd00038 0x00000000 1 0 0 0
+ *
+ * Words 2 and 3 are a pair with exactly one side filled in; the zero side is
+ * the memory end, which only exists once a transfer is set up. In all four
+ * entries +0x10 occupies the LATER of the two slots and +0x38 the EARLIER, so
+ * the two channels are opposite directions -- that much is established, twice,
+ * independently per controller.
+ *
+ * WHICH ONE IS TRANSMIT IS AN INFERENCE, not an established fact, and the
+ * distinction matters enough to spell out. It rests on reading the pair as
+ * (source, destination), which makes +0x10 a destination and therefore the
+ * transmit side. Word 0 is consistent with that -- the +0x10 channel carries
+ * 0x0800 and the +0x38 one 0x1000, a single differing bit, while their low
+ * bits are peripheral identifiers that shift by the same +0x84 from i2s0 to
+ * i2s1 -- but "consistent with" is not "established", exactly as for the seven
+ * registers above. Nothing here depends on the inference being right: a capture
+ * records CPU STORES, and a store is data leaving the CPU whichever FIFO it
+ * lands in, so a reversed reading would mislabel a stream rather than lose one.
+ */
+typedef enum {
+    S5L_I2S_FIFO_NONE = 0,   /* not a FIFO offset                            */
+    S5L_I2S_FIFO_TX,         /* +0x10: the destination side of channel 0     */
+    S5L_I2S_FIFO_RX          /* +0x38: the source side of channel 1          */
+} s5l_i2s_fifo_t;
+
+#define S5L_I2S_TX_FIFO_OFF 0x10u
+#define S5L_I2S_RX_FIFO_OFF 0x38u
+
+/* Which FIFO, if either, `off` names. Pure; takes no device. */
+s5l_i2s_fifo_t s5l_i2s_fifo_role(uint32_t off);
+/* The absolute physical address the `dma-channels` blob hands the PL080 for
+ * controller `index` (0 or 1). UINT32_MAX for a bad index or S5L_I2S_FIFO_NONE.
+ * Exposed so a host tap derives the address the same way the tree states it. */
+uint32_t s5l_i2s_fifo_pa(unsigned index, s5l_i2s_fifo_t which);
+
 /* ----------------------------------------------------------------- SPI ---
  * The two S5L8900 SPI controllers AppleS5L8900XSPIController drives. Their
  * windows and VIC lines are derived at the top of this header; what follows is
@@ -2438,6 +2491,64 @@ typedef struct {
     uint32_t   cpu_hz, tb_hz;
     uint64_t   tb_accum;
 
+    /*
+     * Has anything moved a device level since the last full refresh?
+     *
+     * THE MEASUREMENT. tools/insnbench prices s5l8900_tick(m, 1) at 543 ns
+     * against ~84 ns for an interpreted instruction, so ticking once per
+     * retired instruction costs about seven eighths of the interpreter's
+     * throughput — 1.58 M/s measured against 6.68 M/s with the tick removed.
+     * docs/dynarec.md §1.2's -21% is a reading from when the tick was a
+     * divide, one timer and one VIC line; it now sweeps twelve devices, five
+     * buttons and seven GPIO cascade groups and recomputes both VICs.
+     *
+     * WHAT THE FLAG BUYS. Almost all of that work is a LEVEL REFRESH, not a
+     * time advance: re-reading the I2C/SPI/UART latches, re-driving the five
+     * button pins through s5l_gpio_drive() (which snapshots all 25 pin words
+     * per call), recomputing the seven cascade groups and both VIC outputs.
+     * Every one of those steps is idempotent — see the "still high sets
+     * nothing" note in s5l_gpioic_set_line() and the s5l_gpio_drive() comment
+     * that makes s5l_buttons_apply() safe per-tick — so repeating it over
+     * unchanged inputs cannot change the machine. The inputs change in exactly
+     * three ways: elapsed timebase ticks, a guest access to a device window,
+     * and a host reaching in behind the bus. The first is detected by the
+     * accumulator; the second sets this flag at the bus interposer; the third
+     * is what `s5l8900_tick(m, 0)` is for.
+     *
+     * WHY THE FAILURE MODE IS BENIGN. The skip only ever applies to a tick
+     * that crossed NO timebase edge, and at 412 MHz against 6 MHz that is at
+     * most 68 consecutive instructions. So a host that changes a level and
+     * forgets to ask for a refresh delivers it up to 68 instructions late,
+     * never not at all — unlike a wake-source deadline, where guessing wrong
+     * loses the interrupt outright.
+     *
+     * Deliberately NOT serialised. It is derived state, and snapshot_load()
+     * sets it rather than restoring it, so a loaded machine re-derives every
+     * level once before it can observe anything. That is why the s5l8900_t
+     * size guard in core/src/snapshot.c moves without SNAPSHOT_VERSION moving:
+     * the file format is unchanged.
+     */
+    bool       level_dirty;
+
+    /*
+     * What the last full refresh saw on the three inputs a HOST can move
+     * WITHOUT going through the bus, packed by ext_inputs() in machine.c.
+     *
+     * This is the third way in, and it is the one nothing in the machine can
+     * observe: s5l_uart_rx_push() into uart4's receive FIFO, the touch
+     * controller's attention line after s5l_mtz2_set_contacts(), and the five
+     * switches after s5l_buttons_set(). Each takes a sub-struct, not a machine,
+     * so none of them can set `level_dirty`. `s5l8900_tick(m, 0)` is the
+     * contract and every shipping injector now calls it; this witness is what
+     * makes forgetting it a lost 68 instructions rather than a lost interrupt,
+     * and it is what lets core/tests/test_uart4.c still pin "a byte pushed
+     * between run slices asserts VIC line 28 on the NEXT tick" unchanged.
+     *
+     * A new host-drivable input belongs in ext_inputs() beside these three.
+     * Not serialised, for the same reason `level_dirty` is not.
+     */
+    uint32_t   ext_seen;
+
     /* Identified-but-unmodelled peripheral windows. See s5l_stub_t. */
     s5l_stub_t stubs[S5L_STUB_MAX];
     unsigned   stub_count;
@@ -2533,8 +2644,17 @@ unsigned s5l8900_soc_regions(const s5l_window_t **out);
  * false negative. */
 bool s5l8900_overlaps(uint32_t a, uint32_t alen, uint32_t b, uint32_t blen);
 
-/* Advance devices by elapsed guest CPU-clock ticks and refresh the CPU's
- * interrupt lines.  This does not retire CPU instructions. */
+/*
+ * Advance devices by elapsed guest CPU-clock ticks and refresh the CPU's
+ * interrupt lines.  This does not retire CPU instructions.
+ *
+ * `ticks == 0` is not a no-op: it means "re-derive every level NOW, without
+ * advancing guest time". That is what machine_wait_for_interrupt() has always
+ * used it for, and it is also the call a HOST must make after reaching into
+ * the machine's devices behind the bus — s5l_buttons_set(),
+ * s5l_mtz2_set_contacts(), s5l_uart_rx_push(). See `level_dirty` in s5l8900_t
+ * for why a refresh has to be asked for rather than assumed.
+ */
 void s5l8900_tick(s5l8900_t *m, uint32_t ticks);
 
 /* ---------------------------------------------------------- wake sources ---

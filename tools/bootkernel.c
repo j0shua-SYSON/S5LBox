@@ -21,6 +21,7 @@
 #endif
 
 #include "ksyms.h"
+#include "audio_capture.h"
 #include "dt_inplace.h"
 #include "file_block.h"
 #include "ios3_kernel_patch.h"
@@ -424,6 +425,7 @@ typedef struct {
     bool stop_on_abort;
     bool kext_map;
     bool print_config;
+    bool call_probe_regs;
 } boot_toggles_t;
 
 enum {
@@ -618,7 +620,22 @@ static const boot_toggle_t BOOT_TOGGLES[] = {
       "value, and whether that came from a default or from this command line\n"
       "-- then exit 0 without opening the kernel, the tree or any image. The\n"
       "command line is validated first, so a rejected combination is still\n"
-      "rejected." }
+      "rejected." },
+    { "call-probe-regs", NULL, NULL, true, BOOT_GROUP_DIAGNOSTIC,
+      BOOT_FIELD(call_probe_regs),
+      "give every --call-probe capture a second, indented line carrying r4-r12\n"
+      "and the CPSR, so a capture is the whole register file rather than the\n"
+      "four AAPCS argument registers. The first line of each capture is byte\n"
+      "for byte what it always was, either way, so earlier BOOTLOG entries stay\n"
+      "readable. ON by default because a boot here costs tens of minutes and a\n"
+      "register that was not printed is gone: MultitouchHID.plugin is an\n"
+      "MH_BUNDLE with __TEXT vmaddr 0, and its dyld-chosen load base -- without\n"
+      "which none of its static offsets can be probed at all -- is readable\n"
+      "here only as r12 at the blx that enters it. --no-call-probe-regs\n"
+      "restores the one-line form for a probe that hits thousands of times and\n"
+      "is only being asked for its arguments; the registers are captured either\n"
+      "way and only the printing is suppressed. Only meaningful with a probe\n"
+      "armed, so naming it on a run with none is refused rather than ignored." }
 };
 
 #define NBOOT_TOGGLES ((unsigned)(sizeof BOOT_TOGGLES / sizeof BOOT_TOGGLES[0]))
@@ -1174,6 +1191,27 @@ static uint64_t g_external_media_size_for_sidecar = 0;
 /* Populated by a restore before the bridges exist, applied just after init. */
 static external_md_sidecar_t g_external_restore_sidecar;
 static bool g_external_restore_sidecar_valid = false;
+
+/*
+ * What /arm-io/i2s0/audio0 declares, and whether that settled a capture format.
+ *
+ * OUTSIDE `G` deliberately, for the same reason g_external_work_image_path is:
+ * the tree is read while it is still in the harness's hands, and spy_install()
+ * memsets the whole of G afterwards. A field here would be silently zeroed
+ * between the read and every use of it -- which is exactly what happened when
+ * these did live in G, and the run reported "no audio node" against a tree it
+ * had just successfully read two rates out of.
+ *
+ * The decision is deferred to the FIRST SAMPLE rather than made here, because
+ * at device-tree time the guest has not configured the controller yet and a
+ * derivation then could only ever answer "unconfigured". g_audio_fmt_decided
+ * separates "not evaluated" from AUDIO_FMT_OK, which is 0.
+ */
+static audio_dt_facts_t   g_audio_dt;
+static bool               g_audio_dt_read = false;
+static audio_format_t     g_audio_fmt;          /* valid only on ..._FMT_OK */
+static audio_fmt_status_t g_audio_fmt_status = AUDIO_FMT_NO_NODE;
+static bool               g_audio_fmt_decided = false;
 
 static bool external_md_sidecar_path(char *out, size_t cap,
                                      const char *base, const char *suffix) {
@@ -5692,6 +5730,25 @@ typedef struct {
  * and bit 12 of it (kIOMapReadOnly) is the whole difference between SpringBoard
  * being able to draw and faulting on its first store.  r0 at 0xc0526a38 is the
  * IOMemoryDescriptor direction that decided that bit.
+ *
+ * THE WHOLE REGISTER FILE, not just the arguments.  r0-r3 answer "with what",
+ * and that stopped being the only question the moment the touch chain turned
+ * out to die inside MultitouchHID.plugin.  That bundle is an MH_BUNDLE with
+ * __TEXT vmaddr 0, loaded at a base dyld picks inside
+ * IOCreatePlugInInterfaceForService, so no static offset in it can be turned
+ * into an address to probe until that base is known.  The one place this
+ * harness can read it is ip (r12) at the `blx ip` at 0x33cfdee0, the call that
+ * enters the plugin: at that instruction ip holds the branch target.  A probe
+ * that captures four registers cannot see it.
+ *
+ * So the record carries r0-r15 and the CPSR.  The CPSR is not decoration: it
+ * NAMES THE BANK r8-r14 came from.  A kernel site captures the executing mode,
+ * whose r13/r14 (and, in FIQ, r8-r12) are that exception mode's own -- the same
+ * distinction the sp/lr paragraph above already makes, now applying to nine
+ * more registers.  Nothing is fabricated and nothing needs a marker: a user
+ * site captures only in USR mode, where cpu->r[] IS the user bank, and a kernel
+ * site reports the bank it is executing in, so every register in the record was
+ * read rather than inferred.
  */
 #define CALL_PROBE_PC_MAX  8u
 #define CALL_PROBE_RING    4096u
@@ -5704,7 +5761,10 @@ typedef enum {
 typedef struct {
     uint64_t at;                    /* retired-instruction index of the hit */
     uint32_t pc, lr, sp;
-    uint32_t r[4];                  /* r0-r3 == AAPCS arguments 1-4 */
+    /* r0-r15 as the reported bank sees them. r0-r3 are AAPCS arguments 1-4 and
+     * r13/r14/r15 are the sp/lr/pc above, read in the same capture. */
+    uint32_t r[16];
+    uint32_t cpsr;                  /* names the bank r8-r14 were read from */
     uint32_t stack[2];              /* [sp,#0], [sp,#4] == arguments 5-6 */
     uint32_t fail_va[2];            /* which byte failed, per stack word */
     uint32_t fail_fsr[2];           /* ARMv6 FSR, or 0 for a non-RAM reject */
@@ -6174,6 +6234,32 @@ static struct {
     uint64_t    ppp_lcp_up_step;         /* ... when LCP reached Opened, or 0 */
     uint64_t    ppp_ipcp_up_step;        /* ... when IPCP did                 */
 
+    /* --- DIAGNOSTIC: the I2S transmit capture -----------------------------
+     * The audio equivalent of the console tee, and it exists for the same
+     * reason: "does iPhone OS 3 produce sound" was an assumption in both
+     * directions because nothing kept the samples. Tapped from the same bus
+     * interposer, reading nothing back out of the machine and writing nothing
+     * into it.
+     *
+     * ONLY i2s0. /arm-io/i2s0/audio0 is `audio-data,wm8991` and i2s1's child
+     * is `audio-data,baseband`; they are two unrelated streams and splicing
+     * them into one file would produce a capture that is wrong in a way no
+     * later reader could detect. i2s1's stores are counted separately and
+     * reported, never captured.
+     *
+     * A store to the RECEIVE FIFO gets its own counter for the same reason.
+     * It cannot be part of a transmit capture, and it would be a strong signal
+     * that the direction inference in soc.h's dma-channels decode is backwards
+     * -- which is exactly the kind of thing a counter of zero should be asked
+     * to say out loud.
+     *
+     * What the device DECLARED, and whether that settled a format, lives
+     * outside this struct -- see g_audio_dt -- because it is learned before
+     * spy_install() zeroes G. Only the per-run counters belong here. */
+    audio_sink_t      audio;
+    uint64_t          audio_rx_stores;   /* CPU stores to i2s0's +0x38        */
+    uint64_t          audio_i2s1_stores; /* ... to either of i2s1's FIFOs     */
+
     /* --- DIAGNOSTIC: the user-mode call probe; --call-probe ---------------
      * call_probe_n is the hot-loop gate: zero means the whole facility is off
      * and the step loop pays one compare against a global that is never
@@ -6182,6 +6268,10 @@ static struct {
     call_probe_site_t call_probe_pc[CALL_PROBE_PC_MAX];
     unsigned          call_probe_w;      /* ring write cursor */
     uint64_t          call_probe_total;  /* captures ever made, all PCs */
+    /* Report-time only, and read nowhere in the step loop: the capture is
+     * unconditional because a register that was not captured cannot be
+     * recovered without paying for the boot again. */
+    bool              call_probe_regs;   /* print the r4-r12/CPSR line */
     call_probe_record_t call_probe_log[CALL_PROBE_RING];
 
     /* --- the scheduled tap; --touch --------------------------------------
@@ -16642,25 +16732,34 @@ static BOOTKERNEL_NOINLINE void call_probe_note(
     memset(rec, 0, sizeof *rec);
     rec->at = at;
     rec->pc = pc;
+    rec->cpsr = cpu->cpsr;
     rec->kernel = want_kernel ? 1u : 0u;
     if (want_kernel) {
         /*
-         * The executing bank IS the answer here.  r0-r3 are shared outside FIQ
-         * so they read the same either way, but r13/r14 must come from the
-         * exception mode's own bank -- diagnostic_user_reg() deliberately
-         * returns the USR bank, which for a kernel PC describes a different
-         * stack entirely.  No stack words are attempted: guest_read_user_bytes
-         * translates unprivileged, so a kernel frame yields a permission fault
-         * that is an artefact of the probe rather than a fact about the guest.
+         * The executing bank IS the answer here.  r0-r7 are shared, but
+         * r8-r12 in FIQ and r13/r14 in any exception mode must come from that
+         * mode's own bank -- diagnostic_user_reg() deliberately returns the USR
+         * bank, which for a kernel PC describes a different stack entirely.
+         * cpu->r[] is that executing bank by definition, so this is a straight
+         * copy and rec->cpsr records which mode it was.  No stack words are
+         * attempted: guest_read_user_bytes translates unprivileged, so a kernel
+         * frame yields a permission fault that is an artefact of the probe
+         * rather than a fact about the guest.
          */
-        for (unsigned r = 0; r < 4u; r++) rec->r[r] = cpu->r[r];
+        for (unsigned r = 0; r < 16u; r++) rec->r[r] = cpu->r[r];
         rec->sp = cpu->r[13];
         rec->lr = cpu->r[14];
     } else {
-        for (unsigned r = 0; r < 4u; r++)
+        /* The mode gate above already required USR, so diagnostic_user_reg()
+         * hands back cpu->r[] here; it is used anyway because it is the checked
+         * accessor and a probe hit is far too rare for the cost to matter.  It
+         * stops at r14, so r15 is taken directly -- the interpreter keeps the
+         * Thumb bit in CPSR.T and never in r15, so this is the true PC. */
+        for (unsigned r = 0; r < 15u; r++)
             rec->r[r] = diagnostic_user_reg(cpu, r);
-        rec->sp = diagnostic_user_reg(cpu, 13u);
-        rec->lr = diagnostic_user_reg(cpu, 14u);
+        rec->r[15] = cpu->r[15];
+        rec->sp = rec->r[13];
+        rec->lr = rec->r[14];
         call_probe_read_stack_word(cpu, rec->sp, rec, 0u);
         call_probe_read_stack_word(cpu, rec->sp, rec, 1u);
     }
@@ -16687,6 +16786,25 @@ static void call_probe_word_text(const call_probe_record_t *rec, unsigned index,
         snprintf(out, size, "<fsr%02x>", rec->fail_fsr[index]);
     else
         snprintf(out, size, "<no-ram>");
+}
+
+/*
+ * Which register bank a capture's r8-r14 came from, named rather than left as a
+ * CPSR the reader has to decode.  This is the difference between reading the
+ * interrupted thread's sp and reading IRQ's, and it is not inferable from the
+ * PC: the same kernel routine is reached from SVC and from IRQ.
+ */
+static const char *call_probe_bank_text(uint32_t cpsr) {
+    switch (cpsr & ARM_CPSR_MODE_MASK) {
+    case ARM_MODE_USR: return "usr";
+    case ARM_MODE_FIQ: return "fiq";
+    case ARM_MODE_IRQ: return "irq";
+    case ARM_MODE_SVC: return "svc";
+    case ARM_MODE_ABT: return "abt";
+    case ARM_MODE_UND: return "und";
+    case ARM_MODE_SYS: return "sys";
+    default:           return "???";   /* not a mode this core implements */
+    }
 }
 
 /*
@@ -16759,6 +16877,17 @@ static void call_probe_report(void) {
            "    1-4 and [sp+0]/[sp+4] arguments 5-6 of a call probed at its entry.\n"
            "    A kernel-mode site reports the executing bank's sp/lr and prints\n"
            "    <kernel> for the stack words, which it never reads.\n");
+    /* The first line above is unchanged from the form every earlier BOOTLOG
+     * entry was read against, so the second line has to say it is extra rather
+     * than let a reader think the old one grew. */
+    if (G.call_probe_regs)
+        printf("    The indented second line is the rest of the file: r4-r12 and\n"
+               "    the CPSR, whose mode is named because it is the bank r8-r14\n"
+               "    were read from. r13/r14/r15 are not repeated there -- they are\n"
+               "    the sp/lr/pc on the first line, from that same bank.\n");
+    else
+        printf("    --no-call-probe-regs: r4-r12 and the CPSR were captured but\n"
+               "    are not printed. Drop that flag to see them.\n");
     if (G.call_probe_total > (uint64_t)CALL_PROBE_RING)
         printf("    NOTE: %llu earlier captures were overwritten by the ring.\n",
                (unsigned long long)(G.call_probe_total -
@@ -16775,6 +16904,25 @@ static void call_probe_report(void) {
                "r0 %08x r1 %08x r2 %08x r3 %08x  [sp+0] %-8s [sp+4] %-8s\n",
                (unsigned long long)rec->at, rec->pc, rec->lr, rec->sp,
                rec->r[0], rec->r[1], rec->r[2], rec->r[3], w0, w1);
+        if (!G.call_probe_regs) continue;
+        printf("        r4 %08x r5 %08x r6 %08x r7 %08x r8 %08x r9 %08x "
+               "r10 %08x r11 %08x r12 %08x  cpsr %08x %s%s\n",
+               rec->r[4], rec->r[5], rec->r[6], rec->r[7], rec->r[8],
+               rec->r[9], rec->r[10], rec->r[11], rec->r[12], rec->cpsr,
+               call_probe_bank_text(rec->cpsr),
+               (rec->cpsr & ARM_CPSR_T) ? "/thumb" : "");
+        /*
+         * r13/r14/r15 are the sp/lr/pc on the line above -- same bank, same
+         * capture -- so printing them again would be one number under two
+         * names. They are stored anyway, and compared here, because that turns
+         * the claim into a check: a disagreement would be a fact about the
+         * capture and must not be silently formatted away.
+         */
+        if (rec->r[13] != rec->sp || rec->r[14] != rec->lr ||
+            rec->r[15] != rec->pc)
+            printf("        !! r13 %08x r14 %08x r15 %08x disagree with the "
+                   "sp/lr/pc above\n",
+                   rec->r[13], rec->r[14], rec->r[15]);
     }
 }
 
@@ -16822,6 +16970,13 @@ static BOOTKERNEL_NOINLINE void touch_tap_step(uint64_t n) {
             t->refusals++;
             continue;      /* the device is busy or not ready; try next step */
         }
+        /* The attention line moved behind the bus, so the machine has no way
+         * to know its cascade needs re-deriving. See `level_dirty` in soc.h:
+         * without this the report still reaches the guest, but up to 68
+         * instructions later than the host asked for, which is exactly the
+         * reproducibility s5l_mtz2_set_contacts() raises the line inside the
+         * call to get. */
+        s5l8900_tick(G.mach, 0);
         if (t->stage == 0u) { t->down_at = n; t->stage = 1u; }
         else                { t->up_at   = n; t->stage = 2u; }
     }
@@ -16870,6 +17025,7 @@ static BOOTKERNEL_NOINLINE void touch_drag_step(uint64_t n) {
             d->refusals++;
             continue;      /* the device is busy or not ready; try next step */
         }
+        s5l8900_tick(G.mach, 0);        /* as touch_tap_step(); see soc.h */
         if (d->accepted == 0u) d->down_at = n;
         d->last_at = n;
         d->accepted++;
@@ -16906,6 +17062,7 @@ static BOOTKERNEL_NOINLINE void button_press_step(uint64_t n) {
             b->refusals++;
             continue;              /* not armed yet, or still unserviced */
         }
+        s5l8900_tick(G.mach, 0);        /* as touch_tap_step(); see soc.h */
         if (b->stage == 0u) { b->down_at = n; b->stage = 1u; }
         else                { b->up_at   = n; b->stage = 2u; }
     }
@@ -17445,6 +17602,59 @@ static void ppp_tee_byte(uint32_t val) {
 }
 
 /*
+ * Copy one 32-bit word the guest just stored to an I2S FIFO into the audio
+ * capture.
+ *
+ * Called from the bus interposer BEFORE the word reaches s5l_i2s_write(), and
+ * like the two tees above it reads nothing back out of the machine and writes
+ * nothing into it. The model still classifies the access exactly as it did --
+ * a CPU store to an address the device tree hands the PL080 remains the
+ * off-map anomaly it always was -- so this observes without forgiving.
+ *
+ * IT WILL SEE NOTHING ON A STOCK BOOT, and that is a fact about the DMA
+ * controller rather than about audio. /arm-io/i2s0's `dma-channels` gives the
+ * PL080 the physical addresses 0x3ca00010 and 0x3ca00038 and the PL080 is not
+ * modelled, so the only stores that can arrive here are programmed I/O the
+ * stock driver does not do. A zero in the report must be read that way.
+ */
+/*
+ * Ask the device what format it established. Called once, from whichever of
+ * the first sample and the end-of-run report happens first, so that a run
+ * which captured nothing still reports what the device said.
+ */
+static void audio_decide_format(void) {
+    if (g_audio_fmt_decided) return;
+    g_audio_fmt_decided = true;
+    g_audio_fmt_status = audio_format_derive(
+        g_audio_dt_read ? &g_audio_dt : NULL,
+        G.mach ? &G.mach->i2s[0] : NULL, &g_audio_fmt);
+}
+
+static void audio_tap_store(uint32_t addr, uint32_t val) {
+    uint32_t page = addr & ~0xfffu;
+    s5l_i2s_fifo_t role = s5l_i2s_fifo_role(addr & 0xfffu);
+    if (role == S5L_I2S_FIFO_NONE) return;
+    if (page == S5L8900_I2S1_BASE) { G.audio_i2s1_stores++; return; }
+    if (page != S5L8900_I2S0_BASE) return;
+    if (role == S5L_I2S_FIFO_RX) { G.audio_rx_stores++; return; }
+
+    if (!G.audio.armed) {
+        /*
+         * The path rule, identical to uart_tee_byte()'s and for the identical
+         * reason: a single fixed name has already destroyed two of this
+         * project's results. Under --external-md the capture lands beside the
+         * work image, which the harness refuses to reuse, so the name is
+         * unique per run by construction.
+         */
+        audio_decide_format();
+        audio_sink_arm(&G.audio, g_external_work_image_path,
+                       g_audio_fmt_status == AUDIO_FMT_OK ? &g_audio_fmt
+                                                          : NULL);
+    }
+    audio_sink_word(&G.audio, val);
+}
+
+/*
  * The host->guest half, and the ONLY place this harness writes into the
  * machine on behalf of the peer.
  *
@@ -17481,6 +17691,7 @@ static void ppp_pump_step(uint64_t n) {
         G.ppp_first_read_step = n ? n : 1u;
 
     unsigned room = s5l_uart_rx_space(&G.mach->uart4);
+    uint64_t pushed = G.ppp_rx_bytes;
     while (room--) {
         int b = ppp_output_byte(&G.ppp_peer);
         if (b < 0) break;
@@ -17488,6 +17699,9 @@ static void ppp_pump_step(uint64_t n) {
         if (!G.ppp_first_push_step) G.ppp_first_push_step = n ? n : 1u;
         G.ppp_rx_bytes++;
     }
+    /* The receive FIFO went non-empty behind the bus, and uart4's line is a
+     * level over exactly that. See `level_dirty` in soc.h. */
+    if (G.ppp_rx_bytes != pushed) s5l8900_tick(G.mach, 0);
 }
 
 static void spy_nonram(
@@ -17510,6 +17724,13 @@ static void spy_nonram(
      * exists to prevent. */
     if ((addr & ~0xfffu) == UART4PG && wr && (addr & 0xfffu) == UART_UTXH)
         ppp_tee_byte(val);
+    /* And the two I2S windows' FIFOs. Placed beside the UART taps rather than
+     * inside a device-page chain for the same reason they are: the test is on
+     * the page AND the offset, so it cannot be reached by an unrelated
+     * peripheral whichever order the branches end up in. */
+    if (wr && ((addr & ~0xfffu) == S5L8900_I2S0_BASE ||
+               (addr & ~0xfffu) == S5L8900_I2S1_BASE))
+        audio_tap_store(addr, val);
     if ((addr & ~0xfffu) == UARTPG) {
         if (wr && (addr & 0xfffu) == UART_UTXH) uart_tee_byte(val);
         G.uart_hits++;
@@ -22613,20 +22834,28 @@ static void boot_print_usage(FILE *stream, const char *argv0) {
             "      is a pure function of the machine.\n"
             "  --call-probe <pc>  repeatable, up to 8. Every time the guest is\n"
             "      about to execute <pc> in USER mode, capture the retired-\n"
-            "      instruction index, lr, r0-r3, sp and the stack words at\n"
-            "      [sp+0] and [sp+4] into a 4096-entry ring, and print the ring\n"
-            "      oldest-first in the terminal report. For an ARM/AAPCS function\n"
-            "      probed at its entry that is arguments 1-6 plus the return\n"
-            "      address, i.e. who called it and with what. The stack words are\n"
-            "      read through the guest MMU unprivileged and non-faulting: an\n"
-            "      unreadable word prints a sentinel and the guest is never\n"
-            "      disturbed. A capture proves entry, not retirement. Executions\n"
-            "      of <pc> outside user mode are counted but not captured.\n"
+            "      instruction index, the whole register file (r0-r15 and the\n"
+            "      CPSR) and the stack words at [sp+0] and [sp+4] into a\n"
+            "      4096-entry ring, and print the ring oldest-first in the\n"
+            "      terminal report. The first line of each capture is lr, sp and\n"
+            "      r0-r3 -- for an ARM/AAPCS function probed at its entry, its\n"
+            "      arguments 1-6 plus the return address, i.e. who called it and\n"
+            "      with what. r4-r12 and the CPSR follow on a second line unless\n"
+            "      --no-call-probe-regs; they are what recovers a value that is\n"
+            "      alive only in a register, e.g. the dyld-chosen load base of an\n"
+            "      MH_BUNDLE, which this harness can read only as r12 at the blx\n"
+            "      that enters it. The stack words are read through the guest MMU\n"
+            "      unprivileged and non-faulting: an unreadable word prints a\n"
+            "      sentinel and the guest is never disturbed. A capture proves\n"
+            "      entry, not retirement. Executions of <pc> outside user mode\n"
+            "      are counted but not captured.\n"
             "  --call-probe-kernel <pc>  the same probe aimed at a PRIVILEGED pc,\n"
-            "      sharing the same eight slots and the same ring. r0-r3 and the\n"
-            "      executing mode's own sp/lr are captured; the stack words are\n"
-            "      not read at all (an unprivileged walk of a kernel frame only\n"
-            "      reports the probe's own permission fault) and print <kernel>.\n"
+            "      sharing the same eight slots and the same ring. The register\n"
+            "      file is the EXECUTING bank's -- that mode's own r13/r14, and\n"
+            "      in FIQ its own r8-r12 -- which is why the CPSR is reported\n"
+            "      beside it and its mode named. The stack words are not read at\n"
+            "      all (an unprivileged walk of a kernel frame only reports the\n"
+            "      probe's own permission fault) and print <kernel>.\n"
             "      Executions of <pc> in user mode are counted but not captured.\n"
             "      This is how to read a value the kernel computes and never\n"
             "      stores, e.g. r2 at 0xc0526a4c — the IOSurfaceRootUserClient\n"
@@ -23623,10 +23852,24 @@ int main(int argc, char **argv) {
         int i_iomfb  = boot_toggle_index("iomfb-display");
         int i_mbx    = boot_toggle_index("mbx");
         int i_pcfg   = boot_toggle_index("print-config");
+        int i_cpregs = boot_toggle_index("call-probe-regs");
         if (i_vram < 0 || i_panel < 0 || i_iomfb < 0 || i_mbx < 0 ||
-            i_pcfg < 0) {
+            i_pcfg < 0 || i_cpregs < 0) {
             fprintf(stderr, "internal error: toggle table lost a row\n");
             return 2;
+        }
+
+        /* The register-file line exists only inside the call-probe report, so
+         * on a run with no probe armed there is nothing for either direction of
+         * this flag to change. Refused rather than ignored, in both directions,
+         * for the reason --no-vram is refused without --framebuffer: a request
+         * that cannot be honoured must not resolve like a satisfied one. */
+        if (!call_probe_n && cfg.req[i_cpregs] >= 0) {
+            fprintf(stderr,
+                    "--call-probe-regs only means anything with --call-probe "
+                    "or --call-probe-kernel: with no probe armed there is no "
+                    "capture whose registers could be printed\n");
+            return 1;
         }
 
         /* /vram and lcd-panel-id are only reached under --framebuffer. Turning
@@ -24914,6 +25157,17 @@ external_md_work_ready:
             free(dt);
             return 1;
         }
+        /*
+         * What /arm-io/i2s0/audio0 says about itself, read from the tree the
+         * guest is ABOUT TO BE GIVEN rather than from the file on disk -- the
+         * patching above is iBoot's job and a property it rewrote is the one
+         * the guest will act on. Nothing here is interpreted; see
+         * tools/audio_capture.h. This is read-only and cannot fail the boot:
+         * a tree with no audio node is a run that reports it has none.
+         */
+        g_audio_dt_read = audio_dt_read(dt, dt_n, "arm-io/i2s0/audio0",
+                                        &g_audio_dt);
+
         printf("  ---------------------------------------------------------\n");
         s5l8900_load(&mach, dt_pa, dt, dt_n);
         free(dt);
@@ -25227,6 +25481,10 @@ external_md_work_ready:
         G.call_probe_pc[q].pc = call_probe_pcs[q];
         G.call_probe_pc[q].mode = call_probe_modes[q];
     }
+    /* Report-time only, so the ordering rule below does not apply to it -- but
+     * it is still written after spy_install() for the same reason everything
+     * else here is: G is memset there. */
+    G.call_probe_regs = cfg.v.call_probe_regs;
     G.call_probe_n = call_probe_n;
     /*
      * The taps, for the same reason and with the same ordering rule: G is
@@ -26610,6 +26868,121 @@ external_md_work_ready:
                strerror(errno));
     else if (G.uart_tx_bytes)
         printf("    complete stream written to        %s\n", G.uart_tee_name);
+
+    /*
+     * The I2S transmit capture.
+     *
+     * Printed on EVERY run, including -- especially -- the ones that captured
+     * nothing, for the reason the uart4 section is: a block that only appeared
+     * on success would make "the guest transmitted no samples" and "the
+     * harness was not watching" the same output.
+     *
+     * THREE CLAIMS THAT MUST NEVER BE MERGED. "The guest wrote N words" is a
+     * fact about the FIFO. "M of them were not all-zero" is a fact about the
+     * audio, and M = 0 with N > 0 is digital silence -- a real result, not a
+     * failure. "A file exists" is a fact about this host's filesystem and is
+     * evidence of nothing at all on its own.
+     */
+    audio_decide_format();
+    bool audio_file = audio_sink_close(&G.audio);
+    printf("\n=== I2S AUDIO CAPTURE (i2s0 = /arm-io/i2s0/audio0, wm8991) ===\n");
+    printf("    words the guest stored to the TX FIFO (+0x10)  %llu\n",
+           (unsigned long long)G.audio.words);
+    printf("    ... of which were not all-zero                 %llu\n",
+           (unsigned long long)G.audio.nonzero_words);
+    if (G.audio.words)
+        printf("    bit evidence over every word    or=%08x and=%08x\n",
+               G.audio.or_all, G.audio.and_all);
+    if (G.audio_rx_stores)
+        printf("    NOTE %llu store(s) landed on the RECEIVE FIFO (+0x38);"
+               " not captured.\n"
+               "         Worth reading soc.h's dma-channels decode again --"
+               " a transmit path\n"
+               "         arriving there would mean the direction inference is"
+               " backwards.\n",
+               (unsigned long long)G.audio_rx_stores);
+    if (G.audio_i2s1_stores)
+        printf("    NOTE %llu store(s) on i2s1's FIFOs; that is the baseband"
+               " voice path\n"
+               "         (`audio-data,baseband`) and is deliberately a"
+               " separate stream.\n",
+               (unsigned long long)G.audio_i2s1_stores);
+
+    printf("    format: %s (%s)\n",
+           g_audio_fmt_status == AUDIO_FMT_OK ? "established"
+                                              : "NOT established",
+           audio_fmt_reason(g_audio_fmt_status));
+    if (g_audio_fmt_status == AUDIO_FMT_OK)
+        printf("            %u Hz, %u-bit, %u channel(s)\n",
+               g_audio_fmt.rate_hz, (unsigned)g_audio_fmt.bits,
+               (unsigned)g_audio_fmt.channels);
+    if (g_audio_dt_read && g_audio_dt.node_found) {
+        printf("            audio0 declares %u sample rate(s):",
+               g_audio_dt.rates);
+        for (unsigned i = 0; i < g_audio_dt.rates; i++)
+            printf(" %u", g_audio_dt.rate[i]);
+        printf("%s\n", g_audio_dt.rates ? "" : " (none)");
+        if (g_audio_dt.have_clock_frequency)
+            printf("            clock-frequency %u\n",
+                   g_audio_dt.clock_frequency);
+        /* Printed, never interpreted. These 32 bytes are the only other thing
+         * the node carries, and a future derivation of the sample width has to
+         * start from them; a run that shows them costs nothing and saves the
+         * next reader a device-tree walk. */
+        if (g_audio_dt.reg_len) {
+            printf("            reg (%u bytes, uninterpreted)\n",
+                   g_audio_dt.reg_len);
+            for (unsigned i = 0; i < g_audio_dt.reg_len; i++)
+                printf("%s%02x%s", (i % 16u) == 0u ? "                " : " ",
+                       (unsigned)g_audio_dt.reg[i],
+                       (i % 16u) == 15u || i + 1u == g_audio_dt.reg_len
+                           ? "\n" : "");
+        }
+    }
+
+    if (audio_file) {
+        printf("    file    %s%s\n", G.audio.path,
+               G.audio.have_fmt ? "" : "  (HEADERLESS)");
+        printf("            %llu payload bytes\n",
+               (unsigned long long)audio_sink_data_bytes(&G.audio));
+        if (!G.audio.have_fmt)
+            printf("            No RIFF header, because no format was"
+                   " established. The file is\n"
+                   "            exactly the words the guest stored, "
+                   "little-endian, with no claim\n"
+                   "            attached about how to read them.\n");
+        if (audio_sink_partial_frame(&G.audio))
+            printf("            WARNING: %u trailing bytes are less than one"
+                   " frame; not padded.\n",
+                   audio_sink_partial_frame(&G.audio));
+        if (G.audio.nonzero_words == 0u)
+            printf("            Every captured word was zero. That is digital"
+                   " SILENCE, which is a\n"
+                   "            real result -- not a failed capture, and not"
+                   " evidence of a fault.\n");
+    } else if (G.audio.words) {
+        printf("    file    NOT written (%s)\n",
+               G.audio.failed ? strerror(errno) : "sink was never armed");
+    } else {
+        printf("    file    none\n");
+        printf("            NOTHING was captured: the CPU stored no word to"
+               " 0x%08x all run.\n"
+               "            That is a statement about the DMA controller, not"
+               " about audio.\n"
+               "            /arm-io/i2s0's `dma-channels` hands 0x%08x and"
+               " 0x%08x to the\n"
+               "            PL080, which this machine does not model, so a"
+               " stock driver's\n"
+               "            samples never pass through the CPU at all. This"
+               " says nothing\n"
+               "            about whether the guest's audio stack ran.\n"
+               "            No file was written on purpose: one would be"
+               " indistinguishable\n"
+               "            from a capture of silence.\n",
+               s5l_i2s_fifo_pa(0u, S5L_I2S_FIFO_TX),
+               s5l_i2s_fifo_pa(0u, S5L_I2S_FIFO_TX),
+               s5l_i2s_fifo_pa(0u, S5L_I2S_FIFO_RX));
+    }
 
     if (mach.uart0.tx_len)
         printf("\n=== KERNEL UART OUTPUT (first %zu of %llu bytes) ===\n%s\n",

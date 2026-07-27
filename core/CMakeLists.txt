@@ -467,6 +467,41 @@ add_executable(test_mt_drag tests/test_mt_drag.c)
 target_link_libraries(test_mt_drag PRIVATE host_mt_drag emucore)
 add_test(NAME mt_drag_gesture COMMAND test_mt_drag)
 
+# Writing the guest's I2S transmit stream to a file is host filesystem work,
+# not emulated machine behaviour -- the same argument that keeps file_block.c
+# and rootfs_work.c out of emucore, and the same one that put the framebuffer's
+# PPM capture in tools/bootkernel.c rather than in clcd.c. It links emucore for
+# the device-tree parser it asks about the sample rate and for the I2S window's
+# own FIFO classifier, so the format question is answered against the shipping
+# implementations rather than against a copy of them.
+add_library(host_audio_capture STATIC ../tools/audio_capture.c)
+target_include_directories(host_audio_capture PUBLIC ../tools include)
+target_link_libraries(host_audio_capture PUBLIC emucore)
+set_target_properties(host_audio_capture PROPERTIES
+    C_STANDARD 11
+    C_STANDARD_REQUIRED YES
+    C_EXTENSIONS NO)
+if(MSVC)
+    target_compile_options(host_audio_capture PRIVATE /W4 /WX)
+else()
+    target_compile_options(host_audio_capture PRIVATE
+        -Wall -Wextra -Werror -pedantic)
+endif()
+
+# The suite runs in the build directory because several cases turn on a file
+# NOT existing, and a fixed relative name resolved against an unknown working
+# directory could find somebody else's. The firmware directory is passed as a
+# definition so the one case that reads the real 7E18 tree is independent of
+# where it is run from, exactly as test_bringup does; that case skips when the
+# firmware is absent, which is the state of every public CI runner.
+add_executable(test_audio_capture tests/test_audio_capture.c)
+target_link_libraries(test_audio_capture PRIVATE host_audio_capture emucore)
+target_compile_definitions(test_audio_capture PRIVATE
+    S5LBOX_FIRMWARE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../firmware")
+add_test(NAME guest_audio_capture COMMAND test_audio_capture)
+set_tests_properties(guest_audio_capture PROPERTIES
+    WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+
 # The exact kernel and rootfs policies authenticate caller-selected bytes with
 # the same small, allocation-free implementation.  Keep that primitive in a
 # separate strict target so neither host policy carries a private hash copy.
@@ -634,8 +669,8 @@ target_link_libraries(machoinfo PRIVATE emucore)
 
 add_executable(bootkernel ../tools/bootkernel.c)
 target_link_libraries(bootkernel PRIVATE
-    emucore host_file_block host_guest_patch host_ios3_kernel_patch
-    host_mt_drag host_rootfs_work)
+    emucore host_audio_capture host_file_block host_guest_patch
+    host_ios3_kernel_patch host_mt_drag host_rootfs_work)
 
 # Public CI cannot contain Apple's firmware, but it can still exercise the
 # external-md parser's fail-closed boundary before any file is opened. These
