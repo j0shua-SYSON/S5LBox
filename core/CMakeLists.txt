@@ -206,12 +206,14 @@ target_link_libraries(test_vmguest PRIVATE emucore)
 add_test(NAME app_vmguest_bridge COMMAND test_vmguest)
 
 # The app's user interface is built by a macOS CI runner and can only be run on
-# a phone, so none of its Objective-C is reachable from this suite.  The two
-# pieces that are pure arithmetic and pure data are therefore deliberately NOT
-# written in Objective-C, and are tested here instead: where a finger landed on
-# the guest's panel, and the option table the settings screen mirrors from
-# tools/bootkernel.c.  Neither target links emucore -- they have nothing to do
-# with the machine, and keeping them free-standing keeps that true.
+# a phone, so none of its Objective-C is reachable from this suite.  The pieces
+# that are pure arithmetic, pure data and pure bookkeeping are therefore
+# deliberately NOT written in Objective-C, and are tested here instead: where a
+# finger landed on the guest's panel, the option table the settings screen
+# mirrors from tools/bootkernel.c, and which touch report gets dropped when the
+# emulator thread cannot keep up.  Only the last of these needs a core header
+# (for the contact struct it fills in); none of them links emucore, because none
+# of them has anything to do with a running machine.
 add_executable(test_vmtouchmap
     ../app/Tests/test_vmtouchmap.c
     ../app/Sources/VMTouchMap.c
@@ -222,6 +224,13 @@ if(NOT WIN32 AND NOT APPLE)
     target_link_libraries(test_vmtouchmap PRIVATE m)
 endif()
 add_test(NAME app_touch_map COMMAND test_vmtouchmap)
+
+add_executable(test_vmtouchqueue
+    ../app/Tests/test_vmtouchqueue.c
+    ../app/Sources/VMTouchQueue.c
+)
+target_include_directories(test_vmtouchqueue PRIVATE ../app/Sources include)
+add_test(NAME app_touch_queue COMMAND test_vmtouchqueue)
 
 add_executable(test_vmoptions
     ../app/Tests/test_vmoptions.c

@@ -31,6 +31,7 @@
 //  Copyright (c) 2026 j0shua-SYSON. MIT licensed.
 //
 #import "VMEngine.h"
+#import "VMTouchQueue.h"
 
 #import <mach/mach.h>
 #import <pthread.h>
@@ -74,6 +75,8 @@ static double vm_now(void) {
                 status:(arm_status_t)status;
 - (void)appendConsole:(NSString *)text;
 - (void)noteDiscardedInput;
+- (void)noteDroppedTouch;
+- (void)drainOneTouch_emulatorThread;
 - (void)publishBlankSnapshotLocked;
 @end
 
@@ -107,6 +110,23 @@ static double vm_now(void) {
     uint64_t         _instructionCap; // 0: run until stopped or halted
     BOOL             _buttons[VMButtonCount];
     BOOL             _discardedInputLogged;
+    BOOL             _droppedTouchLogged;
+    /*
+     * Touch reports waiting to be handed to the Z2.
+     *
+     * The UI thread must not touch the machine — it runs at whatever rate
+     * UIKit delivers events, and s5l8900_run() is executing on the emulator
+     * thread the whole time. So a report is enqueued here under _lock and
+     * applied between chunks by threadMain, which is the only place the
+     * machine is ever poked.
+     *
+     * The container and its drop policy live in VMTouchQueue.c, in plain C,
+     * because "which report gets thrown away when the queue is full" is the
+     * part of this that can be wrong without anything reporting an error —
+     * and the part a host CI runner can test.
+     */
+    vm_touch_queue_t _touch;
+    uint64_t         _touchDelivered;
 }
 
 + (uint64_t)physFootprintBytes {
@@ -159,6 +179,11 @@ static double vm_now(void) {
     _snapshotBlank = NO;
     _retired = 0;
     _rate = 0.0;
+    /* A restart must not inherit the previous machine's pending finger, nor
+     * its counters — the status line reads them as claims about THIS run. */
+    vm_touch_queue_reset(&_touch);
+    _touchDelivered = 0;
+    _droppedTouchLogged = NO;
     _status = @"starting";
     BOOL needSnapshot = (_snapshot == NULL);
     [self publishBlankSnapshotLocked];
@@ -317,12 +342,44 @@ static double vm_now(void) {
     return cap;
 }
 
-#pragma mark - Guest input (see the header: none of it reaches the guest)
+#pragma mark - Guest input (see the header for what reaches the guest)
 
-+ (NSString *)inputUnavailableReason {
-    /* One place, one sentence, and every control that would need input asks
++ (NSString *)buttonUnavailableReason {
+    /* One place, one sentence, and every control that would need a button asks
      * for it rather than deciding for itself that it is dead. */
-    return @"no touchscreen or button input is modelled yet";
+    return @"no button or ringer input is modelled yet";
+}
+
+- (NSString *)touchUnavailableReason {
+    pthread_mutex_lock(&_lock);
+    BOOL ready     = _machineReady && _state == VMEngineStateRunning;
+    uint64_t made  = _touchDelivered;
+    uint64_t lost  = _touch.dropped;
+    uint64_t held  = _touch.count;
+    pthread_mutex_unlock(&_lock);
+
+    /* Once the device has taken a report, the app's half of this is proven and
+     * nothing later can un-prove it. A subsequent refusal is a fact about the
+     * guest at that moment, not about whether this path works. */
+    if (made > 0) return nil;
+    if (!ready)   return @"the machine is not running";
+    if (lost > 0)
+        return @"the guest's touch controller refused the report — no driver "
+               @"has announced itself";
+    if (held > 0) return @"queued, not yet handed to the controller";
+    return @"nothing sent yet";
+}
+
+- (void)touchCountersQueued:(uint64_t *)queued
+                  delivered:(uint64_t *)delivered
+                  coalesced:(uint64_t *)coalesced
+                    dropped:(uint64_t *)dropped {
+    pthread_mutex_lock(&_lock);
+    if (queued)    *queued    = _touch.queued;
+    if (delivered) *delivered = _touchDelivered;
+    if (coalesced) *coalesced = _touch.coalesced;
+    if (dropped)   *dropped   = _touch.dropped;
+    pthread_mutex_unlock(&_lock);
 }
 
 + (NSString *)nameForButton:(VMButton)button {
@@ -348,7 +405,7 @@ static double vm_now(void) {
     pthread_mutex_unlock(&_lock);
 
     [self noteDiscardedInput];
-    return NO;      // see +inputUnavailableReason
+    return NO;      // see +buttonUnavailableReason
 }
 
 - (BOOL)isButtonPressed:(VMButton)button {
@@ -360,9 +417,89 @@ static double vm_now(void) {
 }
 
 - (BOOL)sendTouchAtGuestX:(int)x y:(int)y phase:(vm_touch_phase_t)phase {
-    (void)x; (void)y; (void)phase;
-    [self noteDiscardedInput];
-    return NO;      // see +inputUnavailableReason
+    s5l_mt_contact_t c;
+    if (!vm_touch_contact_from_ui(phase, x, y, &c))
+        return NO;              // off the panel, or a phase we do not produce
+
+    BOOL queued = NO, notRunning = NO;
+    pthread_mutex_lock(&_lock);
+    if (!_machineReady || _state != VMEngineStateRunning)
+        notRunning = YES;
+    else
+        queued = vm_touch_queue_push(&_touch, &c);
+    pthread_mutex_unlock(&_lock);
+
+    if (notRunning) {
+        [self noteDiscardedInput];
+        return NO;
+    }
+    if (!queued) {
+        [self noteDroppedTouch];
+        return NO;
+    }
+    return YES;
+}
+
+/*
+ * Drain one queued report into the device. Runs ONLY on the emulator thread,
+ * between chunks, which is what makes it safe to reach into _machine at all.
+ *
+ * One per chunk is not a throttle, it is the device's own shape: the Z2 holds
+ * a single report and refuses the next until the guest has clocked this one
+ * out. Draining more would just be a run of refusals.
+ *
+ * A refusal is not necessarily an error. s5l_mtz2_set_contacts() says no when
+ * a report is still pending — ordinary backpressure, and the report stays
+ * queued for the next chunk — and also when the part is held in reset or the
+ * driver has not yet been told it is alive, in which case the report can never
+ * be read and holding it would wedge the queue behind it. s5l_mtz2_irq() tells
+ * the two apart: it is true exactly while a queued report is still unread.
+ */
+- (void)drainOneTouch_emulatorThread {
+    s5l_mt_contact_t c;
+    pthread_mutex_lock(&_lock);
+    BOOL have = vm_touch_queue_peek(&_touch, &c);
+    pthread_mutex_unlock(&_lock);
+    if (!have) return;
+
+    if (s5l_mtz2_set_contacts(&_machine.mtz2, &c, 1u)) {
+        pthread_mutex_lock(&_lock);
+        vm_touch_queue_pop(&_touch);
+        _touchDelivered++;
+        pthread_mutex_unlock(&_lock);
+        return;
+    }
+
+    if (s5l_mtz2_irq(&_machine.mtz2))
+        return;                 // backpressure: the guest has not read yet
+
+    /* The device is in no state to report and will not become one by waiting
+     * on this report in particular. Drop it, count it, and let the next one
+     * try — a queue that never empties would turn a transient into a
+     * permanent loss of input. */
+    pthread_mutex_lock(&_lock);
+    vm_touch_queue_pop(&_touch);
+    _touch.dropped++;
+    pthread_mutex_unlock(&_lock);
+    [self noteDroppedTouch];
+}
+
+/* Same discipline as noteDiscardedInput: a drag can drop many reports, and a
+ * console that scrolls the guest's own output away to repeat itself is worse
+ * than one that says it once. */
+- (void)noteDroppedTouch {
+    pthread_mutex_lock(&_lock);
+    BOOL first = !_droppedTouchLogged;
+    _droppedTouchLogged = YES;
+    uint64_t dropped = _touch.dropped;
+    pthread_mutex_unlock(&_lock);
+    if (!first) return;
+
+    [self appendConsole:[NSString stringWithFormat:
+        @"[input] a touch report was not delivered (%llu so far). The guest's "
+        @"touch controller refused it, or the queue was full of edges that "
+        @"must not be coalesced. Printed once.\n",
+        (unsigned long long)dropped]];
 }
 
 /* Say it once. A drag produces a report per frame, and a console that scrolls
@@ -378,7 +515,7 @@ static double vm_now(void) {
     [self appendConsole:[NSString stringWithFormat:
         @"[input] discarded: %@. The coordinate is shown on screen and thrown "
         @"away; the guest is never told. Printed once.\n",
-        [VMEngine inputUnavailableReason]]];
+        [VMEngine buttonUnavailableReason]]];
 }
 
 #pragma mark - Emulator thread
@@ -408,6 +545,10 @@ static double vm_now(void) {
                 retiredAtLastPublish = retired;
                 continue;
             }
+
+            /* The only place the UI's input reaches the machine, and it is on
+             * this thread, between chunks, with nothing executing. */
+            [self drainOneTouch_emulatorThread];
 
             retired += s5l8900_run(&_machine, kVMChunkInstructions, &status);
 

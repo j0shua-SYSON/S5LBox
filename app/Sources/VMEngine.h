@@ -86,34 +86,64 @@ typedef NS_ENUM(NSUInteger, VMButton) {
 #pragma mark - Guest input
 
 /*
- * GUEST INPUT DOES NOT WORK, AND THIS IS WHERE THAT IS STATED.
+ * WHAT REACHES THE GUEST, AND WHAT DOES NOT.
  *
- * core/ models no digitizer, no PMU button line and no ringer GPIO, and the
- * app runs the synthetic guest in VMGuest.c, which would not read them if they
- * existed. So every method below records what was asked for and returns NO.
- *
- * It is a reason string rather than a bare BOOL on purpose: a control the user
- * cannot press must say why, the same way bootkernel's run header prints
+ * These are reason strings rather than bare BOOLs on purpose: a control the
+ * user cannot press must say why, the same way bootkernel's run header prints
  * "requested but NOT APPLIED" instead of quietly doing nothing. The UI asks
- * this class rather than hard-coding the answer, so the day a digitizer exists
- * the controls light up on their own.
+ * this class rather than hard-coding the answer, so each control lights up on
+ * its own the day its path exists.
  *
- * Returns nil once input really is delivered; non-nil, one line, until then.
+ * BUTTONS still do not work. core/ models no PMU button line and no ringer
+ * GPIO, so -setButton:pressed: records the press and returns NO.
  */
-+ (NSString *)inputUnavailableReason;
++ (NSString *)buttonUnavailableReason;
+
+/*
+ * TOUCH does work — as far as the device. -sendTouchAtGuestX:y:phase: queues a
+ * report and the emulator thread hands it to the emulated Z2 controller, which
+ * reports it through its own registers when the guest's own driver reads them.
+ *
+ * Whether the guest then does anything with it is NOT this class's claim to
+ * make, and this method will not make it. It reports only what it can see: the
+ * device either accepted a report or refused it. A refusal is the truthful
+ * answer while this app runs the synthetic guest in VMGuest.c, which has no
+ * AppleMultitouchZ2 driver to have announced itself — the device declines to
+ * queue a report that provably could not be read.
+ *
+ * Returns nil once the device has accepted at least one report; otherwise one
+ * line saying what it last refused for.
+ */
+- (NSString *)touchUnavailableReason;
 
 /* Short label for a button, for the control bar and for logs. */
 + (NSString *)nameForButton:(VMButton)button;
 
 /* Record a physical button's state. Returns whether the guest was told, which
- * is NO for as long as +inputUnavailableReason is non-nil. */
+ * is NO for as long as +buttonUnavailableReason is non-nil. */
 - (BOOL)setButton:(VMButton)button pressed:(BOOL)pressed;
 
 /* Whether that button is currently held, as last recorded. */
 - (BOOL)isButtonPressed:(VMButton)button;
 
-/* Record a touch, already converted to guest pixels by vm_touch_map(). Same
- * contract as -setButton:pressed:. */
+/*
+ * Queue a touch, already converted to guest pixels by vm_touch_map().
+ *
+ * Returns whether the report was QUEUED — not whether the guest saw it. The
+ * emulator thread hands it to the device between chunks, and the device is
+ * entitled to refuse; -touchUnavailableReason is where that shows up. A NO
+ * here means the report never even got that far: the machine is not running,
+ * the coordinate is off the panel, or the queue was full of phase edges that
+ * must not be coalesced away.
+ */
 - (BOOL)sendTouchAtGuestX:(int)x y:(int)y phase:(vm_touch_phase_t)phase;
+
+/* Touch delivery counters, for the status line and the log. `delivered` counts
+ * reports the DEVICE accepted; it is the only one of these that means the
+ * guest was actually offered a frame. */
+- (void)touchCountersQueued:(uint64_t *)queued
+                  delivered:(uint64_t *)delivered
+                  coalesced:(uint64_t *)coalesced
+                    dropped:(uint64_t *)dropped;
 
 @end

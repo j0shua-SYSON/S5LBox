@@ -160,7 +160,7 @@ static const NSUInteger kConsoleScrollback = 12000;
     _keys.delegate = self;
     /* The bar asks the engine whether input goes anywhere, rather than being
      * told here that it does not. One nil from the engine lights it up. */
-    _keys.unavailableReason = [VMEngine inputUnavailableReason];
+    _keys.unavailableReason = [VMEngine buttonUnavailableReason];
     [self.view addSubview:_keys];
 
     _stats = [[UILabel alloc] initWithFrame:CGRectZero];
@@ -523,13 +523,23 @@ static const NSUInteger kConsoleScrollback = 12000;
      * "paused · running", which is a contradiction rather than a status. */
     NSString *machine = _engine ? ([_engine statusLine] ?: @"?") : @"no machine";
 
-    NSString *reason = [VMEngine inputUnavailableReason];
+    /* The touch path's own account of itself. "Delivered" here means the
+     * emulated controller ACCEPTED the report — not that the guest acted on
+     * it, which this app is in no position to know and will not claim. */
+    NSString *reason = _engine ? [_engine touchUnavailableReason]
+                               : @"no machine";
     NSString *input;
     if (reason.length == 0) {
+        uint64_t delivered = 0;
+        [_engine touchCountersQueued:NULL delivered:&delivered
+                           coalesced:NULL dropped:NULL];
         input = _haveTouch
-            ? [NSString stringWithFormat:@"touch %d,%d  ·  delivered",
-               _touchX, _touchY]
-            : @"touch  ·  delivered to the guest";
+            ? [NSString stringWithFormat:
+               @"touch %d,%d  ·  %llu accepted by the controller",
+               _touchX, _touchY, (unsigned long long)delivered]
+            : [NSString stringWithFormat:
+               @"touch  ·  %llu accepted by the controller",
+               (unsigned long long)delivered];
     } else if (_haveTouch) {
         input = [NSString stringWithFormat:
                  @"touch %d,%d  ·  NOT delivered: %@", _touchX, _touchY, reason];
@@ -640,7 +650,7 @@ static const NSUInteger kConsoleScrollback = 12000;
           pressed:(BOOL)pressed {
     (void)bar;
 
-    /* Unreachable while +[VMEngine inputUnavailableReason] is non-nil, because
+    /* Unreachable while +[VMEngine buttonUnavailableReason] is non-nil, because
      * the bar disables every key. Wired regardless: the day that returns nil,
      * the keys light up and this is already the path they take. */
     [_engine setButton:button pressed:pressed];

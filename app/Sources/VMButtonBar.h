@@ -7,7 +7,7 @@
 //  It is a row of DISABLED keys, and it says so underneath, because nothing
 //  behind them exists: core/ models no PMU button line and no ringer GPIO, so
 //  a press has nowhere to go. The bar asks VMEngine for the reason rather than
-//  deciding it — +[VMEngine inputUnavailableReason] returning nil is the single
+//  deciding it — +[VMEngine buttonUnavailableReason] returning nil is the single
 //  edit that makes every key here live.
 //
 //  Copyright (c) 2026 j0shua-SYSON. MIT licensed.
