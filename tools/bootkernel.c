@@ -27164,7 +27164,21 @@ external_md_work_ready:
                        (unsigned long long)mach.uart4.rx_reads,
                        (unsigned long long)mach.uart4.rx_underruns,
                        (unsigned long long)mach.uart4.rx_dropped);
-                if (s->tx_bytes && !mach.uart4.rx_reads)
+                if (s->tx_bytes && !mach.uart4.rx_reads &&
+                    mach.uart4.rx_irq_suppressed)
+                    /* Do not offer the diagnosis below on a run that was told
+                     * to withhold the line: "either the line was never enabled
+                     * or the filter rejected it" would be a false dichotomy
+                     * when the operator is the reason, and a control run whose
+                     * own report misexplains it is worse than no report. */
+                    printf("        THE GUEST NEVER READ A BYTE, as expected:"
+                           " --no-uart4-rx-irq withheld VIC\n"
+                           "            line 28. The peer transmitted at"
+                           " instruction %llu and the FIFO holds\n"
+                           "            its bytes. This says nothing about the"
+                           " filter -- it is the control.\n",
+                           (unsigned long long)G.ppp_first_push_step);
+                else if (s->tx_bytes && !mach.uart4.rx_reads)
                     printf("        *** THE GUEST NEVER READ A BYTE. The peer"
                            " transmitted at instruction %llu\n"
                            "            and uart4 asserted VIC line 28; either"
