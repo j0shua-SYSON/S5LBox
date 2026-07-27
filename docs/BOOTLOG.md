@@ -2360,7 +2360,8 @@ The bounds come from `_alg_InitRowColXYConvert` (`0x33d01010`), which reads the
 ```text
 Xmax = margin + colTable[desc[5] - 1]      colTable[i] = i * 5600 / 11
 Ymax = margin + rowTable[desc[2] - 1]      rowTable[i] = i * 3600 / 7
-Xmin = Ymin = margin - 75
+Xmin = colTable[0] - margin        Ymin = rowTable[0] - margin
+                                   (both -75; margins are 75, tables start at 0)
 ```
 
 `core/src/soc/mtz2.c` answers report `0xD0` with **eight zero bytes**, so
@@ -2398,7 +2399,50 @@ half-done — the tree is green at 46/46.
 whether `[2]` and `[5]` are literally electrode counts rather than table indices
 that happen to equal them for this panel. A one-boot probe at `0x33d010b0` plus
 a dump of `grid+0x148..0x14e` would read the four bounds directly and settle it
-before the device is changed.
+before the device is changed. (`grid` is `device + 0x168`, from
+`33d002a0 add r6, r4, #0x168` in `_mt_InitProcessing`.)
+
+#### A second reader confirmed all of this, and found one thing that may change the fix
+
+Independently re-derived from the dyld shared cache: the base, the store of
+`blob + 7` at `0x33d01dc8`, the byte offsets `blob[9]` and `blob[12]`, which
+table each feeds, the 75-pixel margins, and the clamp. Three narrowings:
+
+- **`Xmin` above was mis-transcribed** and is corrected in place. The code is
+  `table[0] − margin`, not `margin − 75`. Both give −75 here, so no number
+  downstream changes.
+- The column generator is `(i − grid->0x3c) × 5600 / 11`, not `i × 5600 / 11`.
+  The centring term is **zero on this device's path** — `grid->0x3c` is only
+  written when `grid->0x20c` is clear, and `_mt_InitM68SurfaceSpecifics` sets
+  it — so the arithmetic above is exact, and the projected post-fix
+  `Xmax = 4656` survives.
+- The clamp returns the **minimum** for `v < min`, not the maximum. "Returns
+  the maximum for every coordinate" is broader than the code; it holds across
+  the whole realistic input range, which is why it predicts the failure
+  correctly, but it is not universal.
+
+**And a live alternative the fix must account for.** `_mt_DefineSurfaceGrid`
+back-fills the record itself when `blob[7] == 0`:
+
+```text
+33d01dd0  ldrb r3, [r8, #7]        ; blob[7]
+33d01dd4  cmp  r3, #0
+33d01dd8  bne  #0x33d01e04         ; non-zero -> leave the record alone
+33d01df4  strb r1, [r2, #2]        ; desc[2] = (byte)arg1
+33d01e00  strb r0, [r2, #5]        ; desc[5] = (byte)arg2
+```
+
+So userspace may already intend to supply these two bytes from its own
+arguments, and whether that path runs depends on the blob buffer being writable
+and on `blob[7]` being zero — neither checkable from the binary alone. If it
+does run, the descriptor may not be the right lever at all, and the question
+becomes what `arg1`/`arg2` are. **Settle this before changing `mtz2.c`.**
+
+Also worth recording: the platform constants (3600/7, 5600/11, margin 75) are
+established for the **M68/default path** of `_alg_InitZephyrPlatformSpecifics`
+only. Codes `0x11/0x13/0x20/0x30/0x31/0x60/0x61/0x62/0x70` select different
+pitches and margins, and there is no evidence yet of `grid->0x14`'s runtime
+value on iPhone1,2.
 
 Also settled for free while pinning the plugin base (`0x007D7000`, five
 independent confirmations): the frame timestamp **does** advance at 60 Hz —
