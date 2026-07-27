@@ -1130,8 +1130,9 @@ static void test_skipped_refresh_is_invisible_to_the_guest(void) {
     CHECK(acks > 100u, "only %u interrupts in %u ticks — the devices never "
           "fired, so nothing was compared", acks, TICKS);
     CHECK(fast.timer.ticks > 0u && fast.clcd.frames > 0u,
-          "timebase=%u frames=%llu — no device advanced",
-          fast.timer.ticks, (unsigned long long)fast.clcd.frames);
+          "timebase=%llu frames=%llu — no device advanced",
+          (unsigned long long)fast.timer.ticks,
+          (unsigned long long)fast.clcd.frames);
 
     s5l8900_free(&fast);
     s5l8900_free(&reference);
