@@ -5,6 +5,7 @@
 //
 #import "VMSettingsViewController.h"
 
+#import "VMEngine.h"            /* +firmwareReadinessSummary, used below */
 #import "VMFirmwareImportViewController.h"
 #import "VMOptions.h"
 #import "VMManualViewController.h"
