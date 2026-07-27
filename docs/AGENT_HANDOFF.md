@@ -4239,6 +4239,140 @@ on the console and collapses the four-way ambiguity to one. That is the whole
 measurement: *which of those four `error()` strings `pppd` prints*. Nothing else
 needs to change, and no probe or new flag is required.
 
+#### 23.10b run78 answered it: ENOTTY, because `/dev/uart.debug` is a character
+#### device that is not a tty
+
+`StandardOutPath` worked. run78's console carries `pppd`'s own words:
+
+```text
+Wed Dec 31 16:00:06 1969 : set_up_tty, can't set controlling terminal: Inappropriate ioctl for device
+Wed Dec 31 16:00:06 1969 : Couldn't set tty to PPP discipline: Inappropriate ioctl for device
+```
+
+Candidate #1 from 23.10a, and a second failure ahead of it. Both are **ENOTTY**.
+Everything else repeats exactly: pid 19, `exit(1)`, `r3 = 0x00039c30`, uart4
+`r=41 w=100`.
+
+**Read the second line as the only blocker.** `set_up_tty`'s `TIOCSCTTY` is
+`error()`, not `fatal()` — `0x0001bfa0` calls it, `0x0001bfb0` prints, and
+`0x0001bfb4` falls straight through to `tcgetattr`. It has never been in the
+failure path. Do not spend a run on it.
+
+#### The origin of ENOTTY, exactly
+
+`/dev/uart.debug` is **not** an `IOSerialBSDClient` tty. `IOSerialFamily`
+(prelinked `0xc0464000+0xa000`) builds its names from `'/dev/tty.'`
+(`0xc046b164`) and `'/dev/cu.'` (`0xc046b158`). The node `pppd` opened comes
+from a different kext: `com.apple.driver.AppleOnboardSerial`, prelinked at
+`0xc046e000+0xb000`, whose `AppleOnboardSerialBSDClient::start` does
+
+```text
+c0470492  movs r0, #1 ; rsbs r0,r0,#0     ; index = -1, allocate any major
+c0470496  ldr  r1, [pc] -> 0xc0478060     ; &cdevsw
+c047049a  blx  _cdevsw_add                ; c015473c
+c04704f6  … getProperty("IOTTYBaseName")  ; 0xc047500c
+c047050a  … getProperty("IOTTYSuffix")    ; 0xc0475000
+c047055a  ldr  r3, [pc] -> 'uart.%s%s'    ; 0xc047520c, mode 0666 at c0470554
+```
+
+so the name is literally `uart.` + base + suffix. That cdevsw at `0xc0478060`
+is the whole answer:
+
+| field | value | |
+|---|---|---|
+| `d_open`/`d_close`/`d_read`/`d_write` | `c046fad5`/`c046faf7`/`c0470419`/`c046fb19` | real |
+| `d_ioctl` | `c0470341` | real |
+| `d_stop`/`d_reset`/`d_select`/`d_mmap` | `c0130b2d` | `_enodev` |
+| **`d_ttys`** | **`00000000`** | no `struct tty` |
+| **`d_type`** | **`00000000`** | not `D_TTY` (3) |
+
+`d_ioctl` → `c0470340` (look up the client, else `ENXIO`) → `c047032c` →
+**`c046fd52`**, a flat switch on the command. It recognises exactly `TIOCEXCL`
+/`TIOCNXCL` (via `+0xdfff8bf3, <=1`), `TIOCCDTR`/`TIOCSDTR`/`TIOCCBRK`/`TIOCSBRK`,
+`TIOCFLUSH`, `TIOCGETA`, `TIOCSETA`/`SETAW`/`SETAF` (via `+0x7fd38bec, <=2`),
+`TIOCMGET`/`MBIS`/`MBIC`/`MSET`, `FIONBIO`, `FIOASYNC`, and four private
+`_IOW('T', n, int)` commands. Everything else falls to
+
+```text
+c046fe30  movs r0, #0x19        ; ENOTTY = 25
+c046fe32  b    c04702a0         ; return
+```
+
+`TIOCSCTTY` (`0x20007461`) and `TIOCSETD` (`0x8004741b`) are not in that table.
+**That is the address the two console lines come from.**
+
+And the clincher, because absence usually proves nothing: `_ttioctl`'s Thumb
+pointer `0xc01368a9` occurs **exactly once in the whole 7.9 MB kernelcache**, at
+`0xc0469430` — inside `IOSerialFamily`. `AppleOnboardSerial` contains no
+reference to it at all. `/dev/uart.debug`'s ioctl path cannot reach the BSD tty
+layer, by construction, so `ttioctl` never runs, `linesw[PPPDISC]` is never
+consulted, and no session-leader check is ever reached.
+
+So of the four hypotheses: it is **(a)** — the fd is not a tty — with **(b)**'s
+mechanism, the driver's own `d_ioctl` default arm, as the proximate return.
+**(c) is excluded**: `TIOCSCTTY` never reaches any session logic, and its failure
+is non-fatal to `pppd` regardless.
+
+Two things this also explains rather than leaves open. `open()`, `tcgetattr()`
+and `tcsetattr()` all succeeded because `TIOCGETA` and `TIOCSETA*` *are* in the
+table — which is precisely why uart4 reads `r=41 w=100` against a `r=8 w=15`
+"identified but never opened" baseline. And `default_device` stayed 0, so
+`setdevname()` stat'd the node and `S_ISCHR` passed: the node exists and is a
+character device. Both were previously inferences; they are now consequences.
+
+#### Correction: the `_cttyopen` burst is a symbolisation artifact
+
+`_cttyopen+0x48` (`c013a0dc`) in the last-200-instructions trace at ~849.96e6 is
+not `cttyopen`. `_cttyopen` is Thumb, `c013a094..c013a0db`, and ends with `pop
+{r4,r5,r6,r7,pc}` at `c013a0da`; **`c013a0dc` begins a new, unnamed static** —
+`push {r4,lr}` then a 64-bit range-containment test — called in a loop from
+`_ubc_cs_getcdhash` and `_cs_validate_page`, with which it interleaves in the
+trace. It is code-signing work, 111 million instructions after `pppd` died, and
+the kernel's symbol table simply does not name it. Nearest-preceding-symbol
+labels in these logs are a hint, never a fact.
+
+#### What has to change on our side: nothing
+
+No device register, no device-tree property, no cdevsw of ours, no ioctl the
+emulated UART must answer. Every emulated thing worked; the ENOTTY is real,
+unmodified Apple kext code behaving correctly on a node that was never meant to
+carry a line discipline. `/dev/uart.debug` is the debug console UART's raw
+character interface — `AppleOnboardSerialBSDClient` also registers a kernel
+control socket `com.apple.uart.%s` (`0xc0475260`, via `ctl_register` at
+`0xc0470616`), which is the other half of how Apple expects that port to be used.
+
+The change is to `pppd`'s invocation. Two candidates, in cost order:
+
+1. **`/dev/tty.debug`** — one byte *shorter* than the current argv, so it fits
+   with slack to spare. `AppleOnboardSerialSync`'s metaclass constructor
+   (`0xc0470952`) passes superclass `0xc046d280`, which is inside
+   `IOSerialFamily`'s image, and the kext declares `com.apple.iokit.IOSerialFamily`
+   as a library — so the nub is an `IOSerialFamily` stream class, and
+   `IOSerialBSDClientSync` (`IOProviderClass = IOSerialStreamSync`, probe score
+   1000, `IOMatchCategory` distinct from `AppleOnboardSerialBSDClient`'s) could
+   attach to the same nub and publish `/dev/tty.<base><suffix>`. **Unproven** — I
+   could not name the class at `0xc046d280`, and `IOSerialFamily` does not appear
+   in run78's top-10 kext time table, which is truncated and therefore not
+   evidence of absence.
+   `pppd` is its own probe here, at zero extra cost: if the node does not exist,
+   `setdevname()` returns 0, `default_device` stays 1, and
+   `tty_process_extra_options+0x68` (`0x00021628`) prints **`no device specified
+   and stdin is not a tty`** and exits **2** — a different console line and a
+   different exit code from today's 1. One run answers it either way.
+
+2. **`notty`** — works whether or not any tty node exists. `pppd` then calls
+   `get_pty` (`0x0001bd70` → `openpty@stub`), which gives it a **pty slave**: a
+   real BSD tty, so `TIOCSETD`/`PPPDISC` applies there, and `pppd` shuttles bytes
+   between the pty master and its own stdin/stdout with plain `read`/`write`,
+   which the raw cdev fully supports. Costs a `StandardInPath` key alongside the
+   `StandardOutPath` already added, and puts `pppd`'s log output onto the serial
+   line interleaved with the PPP frames.
+
+Small either way — it is an argv/plist edit and no emulator code. The residual
+risk is that both fail, which would mean the built-in tty channel is unusable on
+this device and `pppd` needs Apple's `PPPSerial` plugin instead. That would be a
+larger job, but it still would not be an emulator job.
+
 #### Step S1, when someone takes it
 
 S0 is transmit-only *by design*, and the header comment in `soc.h` says what
