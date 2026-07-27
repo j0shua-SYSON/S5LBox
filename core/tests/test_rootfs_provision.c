@@ -1171,29 +1171,29 @@ static void test_create_file(void) {
      */
     entry_file(&entry, "/alpha/empty", NULL, 0u, 0u);
     if (run_provision(&run, fx, "empty", &entry, 1u, 0u)) {
-        tr_volume_t vol;
-        tr_record_t file;
+        tr_volume_t emptyVol;
+        tr_record_t emptyFile;
 
         expect_success(&run, "zero-byte file");
         CHECK(run.result.provision_blocks == 0u,
               "an empty file consumed %u allocation blocks",
               run.result.provision_blocks);
-        if (run.output && tr_open(run.output, run.output_size, &vol)) {
-            CHECK(tr_find(&vol, FX_ALPHA, "empty", &file) && file.type == 2u,
+        if (run.output && tr_open(run.output, run.output_size, &emptyVol)) {
+            CHECK(tr_find(&emptyVol, FX_ALPHA, "empty", &emptyFile) && emptyFile.type == 2u,
                   "/alpha/empty is missing");
-            CHECK(get_be64(file.data + 88) == 0u &&
-                  get_be32(file.data + 100) == 0u &&
-                  get_be32(file.data + 104) == 0u &&
-                  get_be32(file.data + 108) == 0u,
+            CHECK(get_be64(emptyFile.data + 88) == 0u &&
+                  get_be32(emptyFile.data + 100) == 0u &&
+                  get_be32(emptyFile.data + 104) == 0u &&
+                  get_be32(emptyFile.data + 108) == 0u,
                   "an empty file was given a fork: size=%llu blocks=%u "
-                  "ext=(%u,%u)", (unsigned long long)get_be64(file.data + 88),
-                  get_be32(file.data + 100), get_be32(file.data + 104),
-                  get_be32(file.data + 108));
-            CHECK(tr_find(&vol, FX_NEXT_CNID, NULL, &file) && file.type == 4u,
+                  "ext=(%u,%u)", (unsigned long long)get_be64(emptyFile.data + 88),
+                  get_be32(emptyFile.data + 100), get_be32(emptyFile.data + 104),
+                  get_be32(emptyFile.data + 108));
+            CHECK(tr_find(&emptyVol, FX_NEXT_CNID, NULL, &emptyFile) && emptyFile.type == 4u,
                   "the empty file has no thread record");
-            CHECK(vol.free_blocks == FX_DATA_BLOCKS - 1u,
-                  "an empty file changed freeBlocks to %u", vol.free_blocks);
-            tr_close(&vol);
+            CHECK(emptyVol.free_blocks == FX_DATA_BLOCKS - 1u,
+                  "an empty file changed freeBlocks to %u", emptyVol.free_blocks);
+            tr_close(&emptyVol);
         }
         run_release(&run);
     }
