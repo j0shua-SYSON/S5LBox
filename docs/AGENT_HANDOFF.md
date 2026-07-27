@@ -4479,3 +4479,390 @@ Only after that does the host-side LCP/IPCP peer (RFC 1661/1332/1662) become
 worth writing, and `pppd` will Protocol-Reject-test us first: it sends CCP
 (0x80FD) by default with bsdcomp and deflate, and IPV6CP, Apple ACSP and ECP
 protents are all compiled in.
+
+### 23.11 The CLCD "reconfiguration loop" is the normal swap pipeline, and it works
+
+Run83 (`work/run83-clcd-off/run83.stdout.log`, restored from
+`work/run76-springboard/snap-2.5e9.bin`, 2.5e9 -> 5.0e9) put a hot-page census on
+`0x38900000` and found window 0 reprogrammed 68 times with identical values while
+`CLCD_CTRL` was rewritten 150 times, alternating between `0x01110041` (window 0
+enabled) and `0x01110001` (no window enabled). That was read as a display
+controller stuck in a reconfiguration loop. **It is not a loop that fails to
+terminate. It is the IOMobileFramebuffer swap pipeline running normally, and
+terminating correctly 150 times.** 82 of those 150 commits attach no layer
+because the client had no surface to name, and the client had no surface because
+**`/device-tree/vram` is sized to exactly one framebuffer** — so the second
+IOSurface allocation and every one after it fails. Everything below is read out
+of the shipped 7E18 kernelcache with Capstone in ARM mode unless marked
+otherwise.
+
+#### The three functions the census PCs land in
+
+`AppleH1DisplayDrivers` is prelinked and stripped, so these have no symbols.
+Boundaries are read from their `push {..., lr}` / `pop {..., pc}` pairs; the
+names are INFERRED and marked as such.
+
+| VA | what it is | evidence |
+|---|---|---|
+| `0xc0704938`-`0xc0705260` | window/layer programming routine (INFERRED name: `programWindows`) | already probed as `H1:window-update pc=c0704940` |
+| `0xc0705c88`-`0xc0705d64` | swap-queue processor, **vtable slot `0x35c`** | see vtable below |
+| `0xc0705d7c`-`0xc0705e90` | interrupt **action** | called from `IOInterruptEventSource::checkForWork+0x18` |
+| `0xc0705ea8`-`0xc0705ef4` | interrupt **filter** | called from `IOFilterInterruptEventSource::disableInterruptOccurred+0x12` |
+
+The vtable is at **`0xc070940c`** (READ: it is the only word in the image equal
+to `0xc0705c88`, at `0xc0709768`, and `0xc0709768 - 0x35c = 0xc070940c`; the
+words just below it are `IOService::cancelPowerChange` / `powerChangeDone`).
+That fixes two slots the ISR calls:
+
+```
+slot 0x35c  ->  0xc0705c88   AppleH1CLCD's swap-queue processor  (override)
+slot 0x360  ->  0xc0630064   IOMobileFramebuffer's swap completion (inherited)
+```
+
+`0xc0630064` is already probed in `tools/bootkernel.c` as
+`IOMFB:completion-entry`, which independently confirms the slot arithmetic.
+
+`0xc0704938` reads `CLCD_CTRL` at `0xc0704950`, clears `bic r8,r3,#0x1fc` (video
+`0x80`, win0 `0x40`, win1 `0x20`, win2 `0x10`, win3 `0x08`, plus bits `0x04` and
+`0x100`), writes `0x0d4 = 2`, `0x0e8 = 0x50001000` and the backdrop at `0x024`,
+then loops over **three layers**, ORing an enable bit back in for each layer that
+has a surface, and finally writes the recomputed `CLCD_CTRL` at `0xc0705188`.
+The layer-to-hardware map is READ from the code, and it is not the obvious one:
+
+```
+layer 0 -> RGB window 0 (0x058..0x06c), CTRL bit 0x40
+layer 1 -> RGB window 2 (0x088..0x09c), CTRL bit 0x10
+layer 2 -> the video/YUV overlay,       CTRL bit 0x80
+```
+
+#### `0xc0193b2c` is not a trampoline. It is link-register residue.
+
+The census showed 68 of the 150 `CLCD_CTRL` writes with `lr = 0xc0193b2d`, which
+looked like a Thumb kernel trampoline driving the loop. It is not.
+`0xc0193b2c` is inside
+`__ZN25IOGeneralMemoryDescriptor18getPhysicalSegmentEmPmm` (READ from the
+symbol table, offset +0x13c), and it is the return address of the `blx r4` at
+`0xc0193b28`.
+
+The chain is: at `0xc0704c10` the layer-programming routine does
+`blx r3` with `r3 = 0xc0190c1f` = `IOMemoryDescriptor::getPhysicalAddress()`
+(READ: literal at `0xc0705288`, symbol from the symbol table), to compute
+`WIN_FBADDR`. `getPhysicalAddress` reaches `getPhysicalSegment`, which makes the
+virtual call at `0xc0193b28`. Every return on the way back is a `pop {..., pc}`
+or `bx lr`, none of which restores LR, so LR still reads `0xc0193b2d` when the
+`CLCD_CTRL` store finally executes at `0xc0705188`.
+
+**So the 68/82 split is not two callers. It is one caller and two paths through
+one function**: 68 commits where layer 0 had a surface (and therefore called
+`getPhysicalAddress`), 82 where it did not (LR still `0xc0705d18`, the `bl` at
+`0xc0705d14`). This is worth remembering generally: in this driver LR at an MMIO
+store is usually the residue of the last `bl`/`blx` on the path, not the caller.
+
+#### What actually drives it: a filtered interrupt event source, not a timer
+
+`AppleH1CLCD` registers an `IOFilterInterruptEventSource` in auto-disable mode.
+Per VBL the sequence is READ from the two symbolicated kernel LRs:
+
+1. `IOFilterInterruptEventSource::disableInterruptOccurred` calls the filter at
+   `0xc0705ea8`. The filter reads `0x018`, ANDs it with the software shadow at
+   `this+0x200`, returns 1 if anything matched, **disables VIC line 13**, and
+   signals the work loop. (This is why the log's VIC captures alternate between
+   `en=c004269f` and `en=c004069f` — bit `0x2000` is the CLCD line being masked
+   and unmasked by IOKit, not by us.)
+2. `IOInterruptEventSource::checkForWork` calls the action at `0xc0705d7c`, which
+   reads `0x018` again, acks with `write32(0x018, 1)`, then calls vtable slot
+   `0x360` (IOMFB completion) and slot `0x35c` (the queue processor).
+
+Two reads of `0x018` per interrupt is the whole explanation for the "read far
+more than written" anomaly. The run83 arithmetic closes exactly:
+
+```
+0x018 reads  578 = 289 filter (pc 0xc0705ebc) + 289 action (pc 0xc0705d98)
+0x018 writes 312 = 289 acks   (pc 0xc0705dac) +  23 arms  (pc 0xc0705d4c)
+0x014 writes  45 =  23 arms   (pc 0xc0705d60) +  22 disarms (pc 0xc0705dec)
+0x008 rd/wr  150 = 150 commits, one read + one write each
+0x0d4 writes 150,  0x0e8 writes 150,  0x024 writes 150   (one per commit)
+```
+
+**289 frame interrupts were raised by our model, filtered, delivered and acked.**
+The two error paths are excluded by that arithmetic rather than by any console
+line, which matters given the truncation note at the end of this section: the
+filter's spurious path writes `0x018 = 0xff` at `0xc0705eec` (before
+`kprintf "unexpected CLCD interrupt: %08x"`, literal `0xc0709078`) and the
+underrun path writes `0x018 = 0x3f00` at `0xc0705e80` (before
+`IOLog "AppleH1CLCD: Graphics underrun interrupt: %08x"`, literal `0xc0709048`).
+Neither PC appears among the census access sites and the 312 writes are fully
+accounted for by 289 + 23, so neither path executed.
+
+#### The pipeline closes. Nothing is waiting on us.
+
+`0xc0705c88` (slot `0x35c`) is the queue processor:
+
+```
+if (this->0x1d4 == 0) return;                        // hardware not up
+loop:
+  if (this->0x16c != 0)              goto arm;       // a swap is already in flight
+  if (queue at this->0x170 is empty) goto check2;
+  if (head->0x7c != head->0x80)      goto check2;    // not every declared layer signalled
+  if (((read32(0x204) >> 6) & 3) == 3) goto arm;     // hardware busy -> defer
+  dequeue head into this->0x16c
+  bl 0xc0704938                                      // program the windows + CTRL
+  if (this->0x188 & 1) { this->vtbl[0x360](this); goto loop; }
+arm:
+  if (this->0x200 & 1) return;                       // already armed
+  write32(0x018, 1); this->0x200 |= 1; write32(0x014, this->0x200);
+```
+
+and `0xc0630064` (slot `0x360`, IOMFB) completes it: for each declared layer it
+releases the installed surface at `this->[0xfc+4*i]`, installs the swap's
+surface `req->[0xc+4*i]` if non-NULL, `memmove`s the two 16-byte rects,
+`IOFree(req, 0x98)`, clears `this->0x16c` (`0xc0630188`, the `IOMFB:active-clear`
+probe) and calls `IOCommandGate::commandWakeup(&this->0x170)` at `0xc0630290`
+(the `IOMFB:wakeupGate-call` probe).
+
+Run83's own probe counts confirm the loop is closed end to end:
+
+```
+H1:swap-handler        289   = ISR invocations
+IOMFB:completion-entry 289   = slot 0x360 calls
+IOMFB:active-clear     150   = swaps actually completed
+IOMFB:wakeupGate-call  150   = submitters woken
+H1:window-update       150   = commits
+0x204 reads            150   = 92 with lr 0xc0630514 + 58 with lr 0xc0705e28
+```
+
+(`H1:swap-path-arm` reports 453 because that probe sits on `0xc0705d38`, which is
+the *entry* to the arm block; the `if (this->0x200 & 1) return` guard two
+instructions later is why only 23 of those 453 reached a register write. The
+probe counts arrivals, not arms.)
+
+`0xc0630514` is the return address of the `ldr pc,[r3,#0x35c]` at `0xc0630510`
+inside `IOMobileFramebuffer::swap_submit`, and `0xc0705e28` is the return address
+of the same slot call inside the ISR. **92 + 58 = 150.** So of the 150 commits,
+92 were driven straight from a client submit and 58 were drained by a VBL, and
+every one of them was completed and its submitter woken. There is no stall, no
+retry, and no deadline being missed.
+
+Three CLCD registers are read during the whole loop, and our model answers all
+three in a way that lets the driver make progress every single time: `0x008`
+(the RMW base), `0x018` (raw latch, correctly unmasked), and `0x204` (returns
+`0x00000008`, so `(v>>6)&3 == 0` and the swap is never deferred). `0x000`,
+`0x004`, `0x01c`, `0x020` and `0x200` were **not touched at all** in the
+restored window, so the driver never tried to restart or re-gate the controller.
+
+#### What is actually wrong: the client submits swaps with no layer-0 surface
+
+`IOMobileFramebuffer::swap_submit_gated(IOMFBSwap*)` is at roughly
+`0xc0631400`-`0xc06317cc` — named from its own `__PRETTY_FUNCTION__` literal at
+`0xc0631db8` (READ). Per layer `i` it does (READ, `0xc0631588`-`0xc0631600`):
+
+```
+if (!(req->0x7c & (1<<i))) continue;               // layer not declared
+memmove(req + 0x18 + 16*i, user + 0x10 + 16*i, 0x10);   // srcRect
+memmove(req + 0x48 + 16*i, user + 0x40 + 16*i, 0x10);   // dstRect
+id      = user->[4 + 4*i];                          // client's surface ID
+surface = fb->0x54->vtbl[0x35c](fb->0x54, id, current_task());
+                                                   // fb->0x54 is the surface
+                                                   // registry (INFERRED name);
+                                                   // slot 0x35c here is a
+                                                   // DIFFERENT class from the
+                                                   // 0x35c above - coincidence
+req->[0xc + 4*i] = surface;                         // 0xc0631600
+if (id != 0 && surface == 0) -> IOLog("%s, transaction (%p) is not valid")
+                               and return kIOReturnBadArgument
+if (id == 0 && surface == 0) -> silently skip this layer
+```
+
+That is the fork that decides everything. **A layer whose client-supplied
+surface ID is zero is accepted without complaint and produces a swap with a NULL
+layer.** A non-zero ID that fails to resolve takes the other branch, logs
+`"%s, transaction (%p) is not valid"` and returns `kIOReturnBadArgument`
+**before the request is enqueued**, so it produces no commit at all.
+
+That last sentence is the load-bearing one, and it needs no console evidence:
+150 commits happened, therefore 150 requests were enqueued, therefore none of
+them took the error branch. So for every request `swap_submit_gated` built,
+`req->[0xc] == 0` implies `id == 0`.
+
+The conclusion is narrow and it is forced: **on 82 of 150 commits the swap
+request carried no surface for layer 0, and the only way `swap_submit_gated` can
+build such a request is a client surface ID of 0.** The display controller then
+correctly programmed no window, and `CLCD_CTRL` correctly came out `0x01110001`.
+
+And it is no layer at all, not a layer moved elsewhere: the census records zero
+accesses to windows 1-3 (`0x070`-`0x0b4`) and zero to the video overlay
+(`0x028`-`0x054`) for the entire run, so layers 1 and 2 were never present
+either.
+
+Caveat, stated because it is not yet excluded: the literal at `0xc0631a78`
+(`"%s, failed to allocate swap structure"`) is referenced from four literal-pool
+slots (`0xc06307d0`, `0xc0630990`, `0xc0630b34`, `0xc06314bc`), so
+`swap_submit_gated` is one of up to four routines that build a `0x98`-byte swap
+request. All 150 commits go through the single store at `0xc0705188`, so they all
+reach the hardware the same way, but which routine built each request has not
+been measured. The checkpoint pair below settles it.
+
+The completion routine makes that latch: declaring a layer with a NULL surface
+releases `this->[0xfc]` and sets it to 0, and every later swap that does *not*
+declare layer 0 falls back to that same zero. So one ID-0 swap darkens the
+display until another swap supplies a real ID. The two kinds are interleaved,
+not terminal — the with-layer commits run `2817970909..4946473868` and the empty
+ones `2967784334..4989952592` — but the run was cut on an empty one.
+
+Also note what does *not* follow from "the framebuffer address never changes":
+`0xc0704c38` is the **only** store to `WIN_FBADDR` in the whole kext, so a page
+flip in this driver would go through exactly this path. `0x0885c000` every time
+means the same IOSurface is being re-committed, not that no double-buffering
+mechanism exists.
+
+#### The screenshot is refusing, and the pixels may already be there
+
+All three of run76, run79 and run83 end with exactly this on stderr:
+
+```
+framebuffer: running CLCD has no active RGB window
+```
+
+That is `tools/bootkernel.c:25726`, reached because
+`s5l_clcd_active_window()` returns `CLCD_WIN_NONE` when `CLCD_CTRL` has no window
+bit set. Meanwhile run76's own live-scanout tracer recorded **3,127,527 changed
+writes / 9,382,429 changed bytes** into the window-0 framebuffer, including
+`first live-scanout mutation under exact SpringBoard process identity
+@3037967875 pa=0885d174`. **SpringBoard is drawing.** The capture is being
+declined because the guest happened to have the window disabled at the instant
+the run was cut, not because there is nothing to capture.
+
+run66 is the contrast case and it fits: it ends `ctrl=0x01110041` with window 0
+still enabled, and it is the only run that wrote a PPM. It reached only 13
+`H1:window-update` commits (SpringBoard never woke there: `CATransaction-flush
+hits=0`), so it simply never reached a commit that cleared the window.
+
+Two cheap harness changes fall out of this, both optional and neither a model
+change: capture the last *known-good* window programming rather than the live
+`CLCD_CTRL` at the stop instant, and/or stop on a `CLCD_CTRL` write that enables
+window 0 so the sample is taken while the window is up.
+
+#### Why the client has no surface: `/vram` is sized to exactly one
+
+The client cannot pass an ID it never got, and it never got one because
+**`/device-tree/vram` is sized to exactly one framebuffer, so the second
+IOSurface allocation and every one after it fails.**
+
+`IOSurfaceRoot::start` (`0xc0529248`) publishes two regions: `PurpleGfxMem` from
+the `vram` node (stored at `root+0xa8`, created at `0xc0529424`, skipped on
+failure at `0xc052942c` — the addresses §23.1 already recorded) and
+`PurpleEDRAM` from `arm-io/edram`. `IOSurfaceDeviceMemoryRegion::init`
+(`0xc0527b20`) takes the node's device memory, reads `getLength()` at
+`0xc0527bb4`, does `sub r0,r0,#1` at `0xc0527c04` and hands that to
+`IORangeAllocator::withRange` at `0xc0527c08`. **The region's entire free pool is
+the DT `reg` size, and nothing else.**
+
+`AppleH1CLCD` asks only for `PurpleGfxMem` (name literal `0xc07090b0`, READ) and
+computes its request at `0xc0706064`-`0xc0706078`:
+`round_up(pitch * height, 0x1000)` = `round_up(1280 * 480, 0x1000)` =
+**`0x96000`**, stored to `surface+0x74`.
+
+We install `dt_set_reg(dt, dt_n, "vram", "reg", fb_pa, N82_FB_BYTES)`
+(`tools/bootkernel.c:23792`), and `N82_FB_BYTES` is
+`320 * 480 * 4` = **`0x96000`** (`tools/bootkernel.c:2341-2344`). One surface
+fits the region exactly. **There is no room for a second.**
+
+And there is no soft fallback. `IOSurface::allocate` (`0xc05242ec`) falls back to
+`IOBufferMemoryDescriptor::withOptions` at `0xc05244f0` only when
+`root->0x51` is set, and that byte is set at `0xc05293ac` from
+`getProperty("iommu-present")` on `arm-io`. **`iommu-present` occurs zero times
+in `firmware/devicetree.bin`** (READ), which is correct — S5L8900 has no DART —
+so the branch at `0xc05244e4`/`0xc05244ec` always takes the failure path, logs
+`IOSurface warning: buffer allocation failed.  %d x %d fmt: %08x size: %d bytes`
+(two spaces, literal `0xc052d1a4`) and returns `kIOReturnNoResources`
+(`0xe00002be`).
+
+That is why `WIN_FBADDR` is `0x0885c000` on all 68 lit commits: the one surface
+that ever allocated is at offset 0 of the region, which is `fb_pa` itself.
+A double-buffered compositor with one buffer produces exactly the observed
+shape — alternating swaps, half of them with no surface to name.
+
+**Do not "fix" this by adding `iommu-present` to the device tree.** That would
+route allocations to `IOBufferMemoryDescriptor::withOptions` and hand the
+display controller memory it cannot scan out. The fix is to enlarge the region.
+
+`PurpleEDRAM` is a separate, working region (`arm-io/edram`, `reg =
+{0x10000000, 0x00140000}`, phys `0x18000000` after `/arm-io:ranges`, 1.25 MB) and
+is never consulted, because a surface's region list comes from the
+`IOSurfaceMemoryRegion` key in its creation dictionary and `AppleH1CLCD` names
+only `PurpleGfxMem`. Note that `0x18000000` is **not** in the emulator's device
+windows, so nothing should be pointed at it without modelling it first.
+
+#### The fix, and the measurement that confirms it
+
+The change is to `/vram`'s size, and it is not a one-liner because
+`N82_FB_BYTES` currently serves two masters: the CLCD scanout plane and the DT
+`reg` size. Raising only the DT size hands IOSurface DRAM that XNU also owns.
+Both of these have to move together:
+
+* the `/vram` `reg` size at `tools/bootkernel.c:23792`, to `N * 0x96000`;
+* the DRAM carve-out that backs it — `boot_framebuffer_plan`
+  (declared `tools/bootkernel.c:1464`, called at 2450 and 2461 with
+  `N82_FB_BYTES`) and the `topOfKernelData` raise in
+  `boot_static_top_finalize` (declared 1488, called at 2456 and 2464).
+
+`s5l_clcd_seed_window0()` must keep describing only the scanout plane
+(`stride * height`), so the extra pages belong to the region, not to the window.
+
+`N = 3` is the conventional front/back/scratch count and is a guess, not a
+reading; `N = 2` is the minimum that lets a double buffer exist at all. Start at
+2, because it is the smallest change that distinguishes "the compositor wanted a
+second buffer" from "something else is wrong".
+
+Two checkpoints confirm it without a census, and both registers are live at
+those exact PCs (`TVOUT_CHAIN_CHECKPOINTS`, `tools/bootkernel.c:5300`):
+
+```
+{ "IOMFB:swap-layer-id",      0xc06315f4, 1u },   /* r1 = client surface ID    */
+{ "IOMFB:swap-layer-surface", 0xc06315fc, 0u },   /* r0 = resolved IOSurface   */
+```
+
+plus, on the IOSurface side, `0xc05244e4` (the `ldrb r3,[r3,#0x51]` fallback
+gate) and `0xc0527ae4` (the `IORangeAllocator::allocate` call, `r1` = requested
+size in, `r0` = success/fail out). Success looks like: allocations stop failing,
+`IOMFB:swap-layer-id` stops reporting 0 for layer 0, the 68/82 split collapses
+toward 150/0, and `CLCD_CTRL` stops returning to `0x01110001`.
+
+#### §23.2's truncation trap is still live, and it just cost a conclusion
+
+Read this before quoting any guest console line from run76, run79 or run83.
+The `=== CONSOLE CAPTURE ===` header says exactly how much survived:
+
+```
+run83   UTXH written 7933    in-report buffer 8191 of 8191   (no TRUNCATED line)
+run76   UTXH written 21116   in-report buffer 8191 of 8191   TRUNCATED 12925
+run79   UTXH written 14401   in-report buffer 8191 of 8191   TRUNCATED  6210
+run66   UTXH written 7599    in-report buffer 7599 of 8191   complete
+```
+
+`core/src/soc/uart.c:47` is still a first-8191-bytes cap, so the block printed in
+the report is always the **earliest** console, never the latest. Two consequences
+that were nearly missed here:
+
+1. **run83 restored a snapshot whose UART buffer was already full**, so all 7933
+   bytes it produced were dropped and the console block in `run83.stdout.log` is
+   the first 8191 bytes of run76's cold boot — everything in it predates
+   instruction 2.5e9. So every `IOSurface warning: buffer allocation failed.
+   320 x 480 fmt: 42475241 size: 614400 bytes` and every
+   `AppleMultitouchZ2SPI: Could not detect HBPP` line printed in that file
+   happened **before the swap traffic studied here even began** (first commit
+   @2817970455). They are not evidence about what CoreAnimation was doing during
+   the 150 commits, and reading them that way would have been wrong. Whether
+   they recur after 2.5e9 is not recorded anywhere that still exists — though
+   the region arithmetic above says they must, since the pool never grows.
+2. **The `TRUNCATED:` warning did not fire for run83**, because the test at
+   `tools/bootkernel.c:25622` is `G.uart_tx_bytes > mach.uart0.tx_len` and
+   7933 > 8191 is false. When `tx_len` is inherited full from a snapshot the
+   report claims nothing was lost while losing everything. The test wants to be
+   "did any byte get dropped", which the device would have to count.
+
+`uart-console.log` does hold the full stream, but it is written to the process
+CWD (`UART_TEE_PATH`, `tools/bootkernel.c:3057`), not into the run directory, so
+each run overwrites the last. run83's own console no longer exists. **Archiving
+`uart-console.log` next to the stdout log is a one-line change and every future
+negative claim about a late-boot message depends on it.**
