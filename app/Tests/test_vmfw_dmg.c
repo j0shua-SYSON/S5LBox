@@ -69,12 +69,39 @@ typedef struct {
     size_t   root_blkx_b64_offset;
 } udif_t;
 
-/* Build one mish blob for a partition. Returns its length. */
+/* True when [off, off + bytes) lies wholly inside `expect`. Written as a
+ * subtraction rather than `off + bytes <= cap` so an oversized sector count
+ * cannot wrap the addition and pass. */
+static bool expect_room(const uint8_t *expect, size_t expect_cap,
+                        uint64_t off, size_t bytes) {
+    if (!expect) return false;
+    if (off > (uint64_t)expect_cap) return false;
+    return bytes <= expect_cap - (size_t)off;
+}
+
+/*
+ * Build one mish blob for a partition. Returns its length.
+ *
+ * `expect` needs a capacity for the same reason `data_fork` does, and it was
+ * missing one. Most of the plans here are DELIBERATELY malformed -- that is
+ * what they test -- and "dmg/table overruns" sets a chunk's sector_count past
+ * the end of the partition on purpose, so that the parser has to reject it
+ * with VMFW_DMG_ERR_BAD_CHUNK. The image builder honoured that oversized count
+ * while filling the expected-output buffer and wrote 1024 bytes off the end of
+ * it. AddressSanitizer caught it in CI; the release build and MinGW locally
+ * did not, because the bytes it landed on were real memory.
+ *
+ * The guard skips only the out-of-range part of the write. It cannot hide a
+ * fixture bug: for a WELL-FORMED plan every chunk fits by construction, so the
+ * guard never fires, and `expect` is only ever compared for plans that are
+ * supposed to parse. For a malformed plan the buffer is never read at all.
+ */
 static size_t build_mish(uint8_t *dst, size_t cap, uint64_t first_sector,
                          uint64_t sector_count, const plan_t *plan,
                          unsigned nplan, const uint8_t *source,
                          uint8_t *data_fork, size_t *data_fork_len,
-                         size_t data_fork_cap, uint8_t *expect) {
+                         size_t data_fork_cap, uint8_t *expect,
+                         size_t expect_cap) {
     size_t need = 0xCCu + (size_t)nplan * 40u;
     if (need > cap) return 0;
     memset(dst, 0, need);
@@ -106,13 +133,15 @@ static size_t build_mish(uint8_t *dst, size_t cap, uint64_t first_sector,
         const uint8_t *src = source ? source + sector * 512u : NULL;
 
         if (type == 0x00000000u || type == 0x00000002u) {   /* ZERO, IGNORE */
-            if (expect) memset(expect + sector * 512u, 0, bytes);
+            if (expect_room(expect, expect_cap, sector * 512u, bytes))
+                memset(expect + sector * 512u, 0, bytes);
             fx_w64be(c + 0x18, (uint64_t)*data_fork_len);
             fx_w64be(c + 0x20, 0u);
         } else if (type == 0x00000001u) {                   /* RAW */
             if (*data_fork_len + bytes > data_fork_cap) return 0;
             memcpy(data_fork + *data_fork_len, src, bytes);
-            if (expect) memcpy(expect + sector * 512u, src, bytes);
+            if (expect_room(expect, expect_cap, sector * 512u, bytes))
+                memcpy(expect + sector * 512u, src, bytes);
             fx_w64be(c + 0x18, (uint64_t)*data_fork_len);
             fx_w64be(c + 0x20, (uint64_t)bytes);
             *data_fork_len += bytes;
@@ -121,7 +150,8 @@ static size_t build_mish(uint8_t *dst, size_t cap, uint64_t first_sector,
                                       data_fork_cap - *data_fork_len,
                                       src, bytes);
             if (n == 0) return 0;
-            if (expect) memcpy(expect + sector * 512u, src, bytes);
+            if (expect_room(expect, expect_cap, sector * 512u, bytes))
+                memcpy(expect + sector * 512u, src, bytes);
             if (plan[i].bad_extent) {
                 /* An offset inside the image with a length that runs off the
                  * end of it. Unbounded, this is a read past the mapping. */
@@ -161,14 +191,14 @@ static bool build_udif(udif_t *u, const plan_t *root_plan, unsigned root_n) {
     };
     size_t mfree = build_mish(mish_free, sizeof mish_free, 0u, SECTORS_FREE,
                               free_plan, 2u, NULL, data_fork, &data_len,
-                              sizeof data_fork, NULL);
+                              sizeof data_fork, NULL, 0u);
     if (!mfree) return false;
 
     static uint8_t mish_root[8192];
     size_t mroot = build_mish(mish_root, sizeof mish_root, SECTORS_FREE,
                               SECTORS_ROOT, root_plan, root_n, source,
                               data_fork, &data_len, sizeof data_fork,
-                              u->expect);
+                              u->expect, sizeof u->expect);
     if (!mroot) return false;
 
     static char b64_free[4096];
