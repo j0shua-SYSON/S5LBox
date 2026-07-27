@@ -9,6 +9,25 @@ on:
     paths:
       - 'app/**'
       - 'core/**'
+      # The app compiles six files out of tools/ (see app/project.yml, which
+      # lists them one by one rather than pulling in the directory). Without
+      # these, a change to one of them cannot trigger this workflow -- and that
+      # is not hypothetical: d38f1c4 FIXED an iOS build break in
+      # tools/rootfs_work.c and did not run this job, because the fix touched
+      # only tools/. Listed individually, mirroring project.yml, so ordinary
+      # desktop-harness churn in tools/ does not spend macOS runner minutes.
+      - 'tools/file_block.c'
+      - 'tools/guest_patch.c'
+      - 'tools/ios3_bringup_gate.c'
+      - 'tools/ios3_bringup_gate.h'
+      - 'tools/ios3_kernel_patch.c'
+      - 'tools/ios3_kernel_patch.h'
+      - 'tools/rootfs_work.c'
+      - 'tools/rootfs_work.h'
+      - 'tools/sha256.c'
+      - 'tools/sha256.h'
+      - 'tools/file_block.h'
+      - 'tools/guest_patch.h'
       - '.github/workflows/ios-build.yml'
   workflow_dispatch:
 
