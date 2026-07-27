@@ -276,6 +276,23 @@ didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
         done(YES);
     }];
 
+    /*
+     * Three actions need three colours. UIContextualActionStyleNormal has no
+     * colour of its own, so Duplicate and Rename both came out the same grey
+     * and were told apart only by reading them — which is the one thing a
+     * swipe action is meant to avoid, since the row is under your thumb.
+     *
+     * Delete keeps the red its destructive style gives it. Blue sits between
+     * red and orange in the swipe order, so the two warm colours are never
+     * adjacent — red beside orange is the pair most likely to be misread at a
+     * glance, and it is the pair where the mistake is unrecoverable.
+     *
+     * The colours are an aid, not the signal: every action still carries its
+     * own word, which is what a colour-blind reader and VoiceOver both use.
+     */
+    dup.backgroundColor = [UIColor systemBlueColor];
+    ren.backgroundColor = [UIColor systemOrangeColor];
+
     return [UISwipeActionsConfiguration
         configurationWithActions:@[ del, dup, ren ]];
 }
