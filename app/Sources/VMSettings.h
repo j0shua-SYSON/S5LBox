@@ -64,6 +64,23 @@ extern NSString *const VMFirmwareJailbreakPayloadFile;
 
 /* Suspend the emulator while the app is not frontmost. On by default: iOS
  * terminates apps that keep a core busy in the background. */
+/*
+ * DEVELOPER MODE. Off by default, and it is the switch that decides which app
+ * this is.
+ *
+ * Off, the app shows a screen, five buttons, and a short settings list whose
+ * rows are things a person can decide. On, it additionally shows the fourteen
+ * device-tree and kernel-patch toggles that mirror the desktop harness, the
+ * instruction cap, the raw guest console, and the diagnostics pages.
+ *
+ * Those fourteen rows are not hidden because they are dangerous -- none of
+ * them does anything in this app yet -- but because leading with "MBX GPU ·
+ * /arm-io/mbx" answers a question almost nobody arrived with. The desktop
+ * harness is where bisecting a boot happens; this is a phone.
+ */
+- (BOOL)developerMode;
+- (void)setDeveloperMode:(BOOL)enabled;
+
 - (BOOL)pausesInBackground;
 - (void)setPausesInBackground:(BOOL)pauses;
 

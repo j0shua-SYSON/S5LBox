@@ -24,6 +24,7 @@ NSString *const VMFirmwareJailbreakPayloadFile = @"jailbreak-payload";
 static NSString *const kVMOptionKeyPrefix   = @"vm.option.";
 static NSString *const kVMInstructionCapKey = @"vm.diag.instructionCap";
 static NSString *const kVMPauseInBackground = @"vm.diag.pauseInBackground";
+static NSString *const kVMDeveloperMode = @"VMDeveloperMode";
 
 /*
  * The instruction caps the screen cycles through. 0 first because no limit is
@@ -139,6 +140,17 @@ static const uint64_t kVMInstructionCaps[] = {
     }
     // A value from an older build, or none: rejoin the cycle at the start.
     return kVMInstructionCaps[0];
+}
+
+- (BOOL)developerMode {
+    /* Absent means off. A first launch is somebody who has not asked for the
+     * harness's option table, so they do not get it. */
+    return [[self defaults] boolForKey:kVMDeveloperMode];
+}
+
+- (void)setDeveloperMode:(BOOL)enabled {
+    [[self defaults] setBool:enabled forKey:kVMDeveloperMode];
+    [self publishChange];
 }
 
 - (BOOL)pausesInBackground {

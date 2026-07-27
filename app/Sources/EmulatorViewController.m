@@ -30,6 +30,7 @@
 #import "EmulatorViewController.h"
 #import "VMButtonBar.h"
 #import "VMEngine.h"
+#import "VMConsoleViewController.h"
 #import "VMFramebufferView.h"
 #import "VMGuest.h"
 #import "VMSettings.h"
@@ -86,6 +87,7 @@ static const NSUInteger kConsoleScrollback = 12000;
 - (void)playPauseTapped:(id)sender;
 - (void)resetTapped:(id)sender;
 - (void)settingsTapped:(id)sender;
+- (void)consoleTapped:(id)sender;
 @end
 
 @implementation VMDisplayLinkProxy {
@@ -184,7 +186,15 @@ static const NSUInteger kConsoleScrollback = 12000;
     _console.selectable = YES;
     _console.dataDetectorTypes = UIDataDetectorTypeNone;
     _console.textContainerInset = UIEdgeInsetsMake(6, 12, 12, 12);
-    [self.view addSubview:_console];
+    /*
+     * DELIBERATELY NOT added as a subview. The guest's serial output is the
+     * most valuable thing in this app to about one person in fifty and the
+     * least useful to everybody else, and it used to occupy 38% of the main
+     * screen. It lives on its own screen now; this view object stays only
+     * because -flushConsole already writes into it and the Console screen
+     * reads its text out. Adding it back here is not a formatting choice, it
+     * is undoing the change.
+     */
 
     /* A real UIToolbar rather than a row of buttons: the system draws the
      * standard play/pause/refresh glyphs, and they are the ones anybody with an
@@ -288,6 +298,12 @@ static const NSUInteger kConsoleScrollback = 12000;
     [self applySettingsToEngine];
     [self applyPauseState];
     [self refreshStatusLine];
+    /* Developer mode adds and removes the Console button, so the toolbar has
+     * to be rebuilt rather than only refreshed — _toolbarBuilt is what stops
+     * -refreshRunControls short-circuiting when the play/pause glyph has not
+     * changed, which is the usual case here. */
+    _toolbarBuilt = NO;
+    [self refreshRunControls];
 }
 
 #pragma mark - Run state
@@ -356,7 +372,35 @@ static const NSUInteger kConsoleScrollback = 12000;
                target:self
                action:@selector(settingsTapped:)];
 
-    [_toolbar setItems:@[playPause, reset, space, settings] animated:NO];
+    /*
+     * Console is a DEVELOPER-MODE item. Somebody who has not asked for the
+     * guest's serial log does not get a button to a screen full of kernel
+     * output; somebody who has gets it one tap away. The toolbar is rebuilt
+     * whenever settings change, so toggling developer mode adds and removes
+     * this without leaving the screen.
+     */
+    NSMutableArray<UIBarButtonItem *> *items =
+        [NSMutableArray arrayWithObjects:playPause, reset, space, nil];
+    if ([[VMSettings sharedSettings] developerMode]) {
+        [items addObject:[[UIBarButtonItem alloc]
+            initWithTitle:@"Console"
+                    style:UIBarButtonItemStylePlain
+                   target:self
+                   action:@selector(consoleTapped:)]];
+    }
+    [items addObject:settings];
+    [_toolbar setItems:items animated:NO];
+}
+
+- (void)consoleTapped:(id)sender {
+    (void)sender;
+    VMConsoleViewController *vc = [[VMConsoleViewController alloc] init];
+    /* A snapshot of what has accumulated, not a live binding: the emulator
+     * thread appends to _consoleText continuously, and handing that mutable
+     * string straight to another view would be a data race across a screen
+     * transition. */
+    vc.text = [_consoleText copy];
+    [self.navigationController pushViewController:vc animated:YES];
 }
 
 - (void)playPauseTapped:(id)sender {
@@ -435,12 +479,18 @@ static const NSUInteger kConsoleScrollback = 12000;
     const CGFloat statsH  = 28.0;
     const CGFloat chrome  = 6.0 + keysH + 6.0 + statsH + 4.0;
 
-    /* Split what is left between the guest's screen and the console. The fixed
-     * chrome comes off the top of the calculation so that a cramped screen —
-     * a small phone, or this one in landscape — shrinks the picture rather than
-     * pushing the console out through the bottom of the view. The band is
-     * never allowed to exceed the space that exists, so no two views here can
-     * overlap however little room there is. */
+    /* The guest's screen gets ALL the space the fixed chrome does not need.
+     *
+     * It used to get 62% of it, with the guest's serial console taking the
+     * rest — so the first thing anyone saw was a wall of kernel logging under
+     * a small picture. The console moved to its own screen (VMConsole-
+     * ViewController, reachable from the toolbar in developer mode) and the
+     * picture grew into the space, which is the right split for a device whose
+     * entire point is the display.
+     *
+     * The fixed chrome still comes off the top of the calculation, so a
+     * cramped layout — a small phone, or landscape — shrinks the picture
+     * rather than pushing the buttons out through the bottom. */
     CGFloat freeSpace = toolbarY - top - chrome;
     if (freeSpace < 0.0) freeSpace = 0.0;
 
@@ -449,7 +499,7 @@ static const NSUInteger kConsoleScrollback = 12000;
     // own aspect is already correct, so there is no interpretation of
     // contentsScale that can stretch the image — and vm_touch_map() is then
     // working against the same rectangle the picture is drawn in.
-    CGFloat band = floor(freeSpace * 0.62);
+    CGFloat band = freeSpace;
     if (band < 60.0) band = fmin(60.0, freeSpace);
     CGFloat scale = fmin(b.size.width / (CGFloat)VM_FB_WIDTH,
                          band / (CGFloat)VM_FB_HEIGHT);
@@ -465,9 +515,9 @@ static const NSUInteger kConsoleScrollback = 12000;
     _stats.frame = CGRectMake(14.0, y, b.size.width - 28.0, statsH);
     y += statsH + 4.0;
 
-    CGFloat consoleH = toolbarY - y;
-    if (consoleH < 0.0) consoleH = 0.0;
-    _console.frame = CGRectMake(0.0, y, b.size.width, consoleH);
+    /* _console is no longer in the view hierarchy; it survives only as the
+     * text store the Console screen reads from. Laying it out would be laying
+     * out nothing. */
 }
 
 - (UIStatusBarStyle)preferredStatusBarStyle {

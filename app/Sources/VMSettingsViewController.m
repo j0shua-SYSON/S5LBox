@@ -6,6 +6,7 @@
 #import "VMSettingsViewController.h"
 
 #import "VMOptions.h"
+#import "VMManualViewController.h"
 #import "VMSettings.h"
 
 #import <math.h>
@@ -13,11 +14,18 @@
 typedef NS_ENUM(NSInteger, VMSettingsSection) {
     /* The first VM_OPT_GROUP_COUNT sections are the option table's own groups,
      * in its order, so a row added to VMOptions.c appears here with no edit. */
-    VMSettingsSectionFirmware = VM_OPT_GROUP_COUNT,
+    VMSettingsSectionGeneral = VM_OPT_GROUP_COUNT,
+    VMSettingsSectionFirmware,
     VMSettingsSectionDiagnostics,
     VMSettingsSectionCommandLine,
     VMSettingsSectionReset,
     VMSettingsSectionCount
+};
+
+typedef NS_ENUM(NSInteger, VMGeneralRow) {
+    VMGeneralRowManual = 0,
+    VMGeneralRowDeveloperMode,
+    VMGeneralRowCount
 };
 
 typedef NS_ENUM(NSInteger, VMDiagnosticsRow) {
@@ -60,9 +68,12 @@ static NSString *VMStringFromC(const char *text) {
 - (UITableViewCell *)cellWithIdentifier:(NSString *)identifier
                                   style:(UITableViewCellStyle)style;
 - (void)performReset;
+- (void)refreshBanner;
+- (void)developerModeToggled:(UISwitch *)sender;
 @end
 
 @implementation VMSettingsViewController {
+    NSArray<NSNumber *> *_visible;
     VMSettings *_settings;
     NSArray<NSArray<NSNumber *> *> *_optionsByGroup;
     UILabel *_banner;
@@ -116,12 +127,7 @@ static NSString *VMStringFromC(const char *text) {
     _banner.numberOfLines = 0;
     _banner.font = [UIFont systemFontOfSize:13.0];
     _banner.textColor = [UIColor systemOrangeColor];
-    _banner.text = @"This app boots no firmware. Nothing in the three sections "
-                    "below changes the machine on the previous screen — it is "
-                    "running the synthetic guest in VMGuest.c, not iPhone OS. "
-                    "The switches are recorded, and rendered back as a command "
-                    "line for the desktop harness, and that is all they do. "
-                    "Only the two rows under Diagnostics are applied here.";
+    [self refreshBanner];
     UIView *header = [[UIView alloc] initWithFrame:CGRectZero];
     [header addSubview:_banner];
     self.tableView.tableHeaderView = header;
@@ -155,6 +161,35 @@ static NSString *VMStringFromC(const char *text) {
     }
 }
 
+
+
+/* The banner says the same true thing in both modes, but it cannot name "the
+ * three sections below" in a mode that has none -- a caveat that describes a
+ * screen the reader is not looking at reads as a bug in the caveat. */
+- (void)refreshBanner {
+    BOOL dev = [[VMSettings sharedSettings] developerMode];
+    _banner.text = dev
+        ? @"This app boots no firmware. None of the option switches below "
+          @"changes the machine on the previous screen — it is running the "
+          @"synthetic guest in VMGuest.c, not iPhone OS. They are recorded, and "
+          @"rendered back as a command line for the desktop harness. Only the "
+          @"two rows under Diagnostics are applied here."
+        : @"This app boots no firmware yet. The machine on the previous screen "
+          @"runs a small built-in test program — see the Manual.";
+}
+
+- (void)developerModeToggled:(UISwitch *)sender {
+    [[VMSettings sharedSettings] setDeveloperMode:sender.isOn];
+    [self rebuildVisibleSections];
+    [self refreshBanner];
+    [self.view setNeedsLayout];
+    /* A full reload rather than an animated section insert: turning the mode on
+     * adds five sections at once and removes them again, and an animation that
+     * has to be right in both directions is more ways to be wrong than this
+     * screen is worth. */
+    [self.tableView reloadData];
+}
+
 - (void)doneTapped:(id)sender {
     (void)sender;
     [self dismissViewControllerAnimated:YES completion:nil];
@@ -167,13 +202,55 @@ static NSString *VMStringFromC(const char *text) {
     return _optionsByGroup[(NSUInteger)group];
 }
 
+
+/*
+ * WHICH SECTIONS EXIST, AND WHY THIS IS A MAP RATHER THAN AN if.
+ *
+ * Off developer mode this screen shows General, Firmware and Reset: three
+ * short lists of things a person can decide. On, it also shows the fourteen
+ * option-table rows, the diagnostics, and the rendered command line.
+ *
+ * The table's delegate methods are indexed by VISIBLE section, and every one
+ * of them switches on VMSettingsSection. Translating once here means none of
+ * them has to know the mode exists -- and, more to the point, means a section
+ * cannot be shown while its row count comes from a different one, which is
+ * exactly the bug an `if (dev) section += 3` scattered through six methods
+ * produces.
+ */
+- (void)rebuildVisibleSections {
+    BOOL dev = [[VMSettings sharedSettings] developerMode];
+    NSMutableArray<NSNumber *> *v = [NSMutableArray array];
+    [v addObject:@(VMSettingsSectionGeneral)];
+    if (dev)
+        for (NSInteger g = 0; g < VM_OPT_GROUP_COUNT; g++)
+            [v addObject:@(g)];
+    [v addObject:@(VMSettingsSectionFirmware)];
+    if (dev) {
+        [v addObject:@(VMSettingsSectionDiagnostics)];
+        [v addObject:@(VMSettingsSectionCommandLine)];
+    }
+    [v addObject:@(VMSettingsSectionReset)];
+    _visible = v;
+}
+
+/* Visible index -> VMSettingsSection. Out of range returns Reset rather than
+ * an option group, because a stale index must not silently address a switch. */
+- (NSInteger)sectionAt:(NSInteger)visible {
+    if (visible < 0 || (NSUInteger)visible >= _visible.count)
+        return VMSettingsSectionReset;
+    return _visible[(NSUInteger)visible].integerValue;
+}
+
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
     (void)tableView;
-    return VMSettingsSectionCount;
+    if (!_visible) [self rebuildVisibleSections];
+    return (NSInteger)_visible.count;
 }
 
 - (NSInteger)tableView:(UITableView *)tableView
  numberOfRowsInSection:(NSInteger)section {
+    section = [self sectionAt:section];
+    if (section == VMSettingsSectionGeneral) return VMGeneralRowCount;
     (void)tableView;
     if (section < VM_OPT_GROUP_COUNT) {
         NSInteger rows = (NSInteger)[self optionsInGroup:section].count;
@@ -191,6 +268,8 @@ static NSString *VMStringFromC(const char *text) {
 
 - (NSString *)tableView:(UITableView *)tableView
 titleForHeaderInSection:(NSInteger)section {
+    section = [self sectionAt:section];
+    if (section == VMSettingsSectionGeneral) return nil;
     (void)tableView;
     if (section < VM_OPT_GROUP_COUNT)
         return VMStringFromC(vm_option_group_title((unsigned)section));
@@ -204,6 +283,16 @@ titleForHeaderInSection:(NSInteger)section {
 
 - (NSString *)tableView:(UITableView *)tableView
 titleForFooterInSection:(NSInteger)section {
+    section = [self sectionAt:section];
+    if (section == VMSettingsSectionGeneral) {
+        return [[VMSettings sharedSettings] developerMode]
+            ? @"Developer mode is on: the option table, the guest console and "
+              @"the diagnostics are shown. None of those switches changes this "
+              @"app's built-in test program."
+            : @"New here? Read the manual first. Developer mode adds the full "
+              @"option table, the guest console and diagnostics — useful for "
+              @"working on the emulator, noise otherwise.";
+    }
     (void)tableView;
 
     if (section < VM_OPT_GROUP_COUNT) {
@@ -266,7 +355,31 @@ titleForFooterInSection:(NSInteger)section {
 - (UITableViewCell *)tableView:(UITableView *)tableView
          cellForRowAtIndexPath:(NSIndexPath *)indexPath {
     (void)tableView;
-    const NSInteger section = indexPath.section;
+    const NSInteger section = [self sectionAt:indexPath.section];
+    if (section == VMSettingsSectionGeneral) {
+        UITableViewCell *cell =
+            [tableView dequeueReusableCellWithIdentifier:@"general"];
+        if (!cell)
+            cell = [[UITableViewCell alloc]
+                       initWithStyle:UITableViewCellStyleDefault
+                     reuseIdentifier:@"general"];
+        cell.accessoryView = nil;
+        if (indexPath.row == VMGeneralRowManual) {
+            cell.textLabel.text = @"Manual";
+            cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+            cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+        } else {
+            cell.textLabel.text = @"Developer Mode";
+            cell.accessoryType = UITableViewCellAccessoryNone;
+            cell.selectionStyle = UITableViewCellSelectionStyleNone;
+            UISwitch *sw = [[UISwitch alloc] init];
+            sw.on = [[VMSettings sharedSettings] developerMode];
+            [sw addTarget:self action:@selector(developerModeToggled:)
+                 forControlEvents:UIControlEventValueChanged];
+            cell.accessoryView = sw;
+        }
+        return cell;
+    }
 
     if (section < VM_OPT_GROUP_COUNT) {
         NSArray<NSNumber *> *rows = [self optionsInGroup:section];
@@ -422,7 +535,16 @@ titleForFooterInSection:(NSInteger)section {
 didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
 
-    switch ((VMSettingsSection)indexPath.section) {
+    if ([self sectionAt:indexPath.section] == VMSettingsSectionGeneral) {
+        [tableView deselectRowAtIndexPath:indexPath animated:YES];
+        if (indexPath.row == VMGeneralRowManual) {
+            VMManualViewController *m = [[VMManualViewController alloc] init];
+            if (self.navigationController)
+                [self.navigationController pushViewController:m animated:YES];
+        }
+        return;
+    }
+    switch ((VMSettingsSection)[self sectionAt:indexPath.section]) {
         case VMSettingsSectionDiagnostics:
             if (indexPath.row != VMDiagnosticsRowInstructionCap) return;
             [_settings setInstructionCap:[_settings nextInstructionCap]];
