@@ -1,3 +1,19 @@
+# MSVC deprecates fopen, sscanf, strerror and most of the C string library in
+# favour of its own _s variants (C4996), and every strict target here builds
+# with /WX, which turns that into an error. The _s functions are not an option:
+# this is C11 built for four toolchains, and these files must behave identically
+# on all of them.
+#
+# Set for the whole directory rather than per target. Two CI failures in one
+# evening were the same bug in different targets -- host_audio_capture's fopen,
+# then VMInstancePaths' strerror and VMInstances' sscanf -- and both times the
+# only target missing the definition was the one that happened to be new. A list
+# would go stale the same way; this covers every target defined below,
+# including ones nobody has written yet.
+if(MSVC)
+    add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
+endif()
+
 # The emulator core: portable C11, zero platform dependencies.
 # This same static library is what the iOS app links against.
 add_library(emucore STATIC
