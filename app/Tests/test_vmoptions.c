@@ -251,6 +251,7 @@ static void test_command_line_truncation_and_nulls(void) {
 static const char *const EXPECTED_OMISSIONS[] = {
     "framebuffer", "iomfb-display", "fstab-fixup", "ramdisk-low",
     "stop-on-abort", "kext-map", "print-config", "call-probe-regs",
+    "uart4-rx-irq",
 };
 
 static void test_omissions(void) {

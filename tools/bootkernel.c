@@ -426,6 +426,7 @@ typedef struct {
     bool kext_map;
     bool print_config;
     bool call_probe_regs;
+    bool uart4_rx_irq;
 } boot_toggles_t;
 
 enum {
@@ -635,7 +636,29 @@ static const boot_toggle_t BOOT_TOGGLES[] = {
       "restores the one-line form for a probe that hits thousands of times and\n"
       "is only being asked for its arguments; the registers are captured either\n"
       "way and only the printing is suppressed. Only meaningful with a probe\n"
-      "armed, so naming it on a run with none is refused rather than ignored." }
+      "armed, so naming it on a run with none is refused rather than ignored." },
+    { "uart4-rx-irq", NULL, NULL, true, BOOT_GROUP_DIAGNOSTIC,
+      BOOT_FIELD(uart4_rx_irq),
+      "let uart4's receive FIFO assert VIC line 28. ON by default, because that\n"
+      "is what the receive path does today and a flag that changes behaviour by\n"
+      "existing is worse than no flag. --no-uart4-rx-irq is a CONTROL, not a\n"
+      "fix: the host peer still writes into the FIFO, UTRSTAT bit 0 and UFSTAT\n"
+      "still report the byte, and URXH still dequeues it -- only the line is\n"
+      "withheld, so the two runs differ in exactly one thing.\n"
+      "It exists because run94 took 6,393,888 IRQ entries and spent 44.5% of\n"
+      "the run in IRQ mode against run80's 2,614 and 0.2%, and because\n"
+      "AppleS5L8900XSerial's filter (0xc065eecc, registered as the filter\n"
+      "action at 0xc065e734) computes UTRSTAT & this->0x9c, tests only bits\n"
+      "{0x100,0x40,0x8,0x10,0x20}, and returns 0 when that is zero. The mask is\n"
+      "built at 0xc065f0e4 and can hold only those same five bits. This model\n"
+      "reports bit 0x1, which is in neither set. A filter that returns 0 makes\n"
+      "IOFilterInterruptEventSource::disableInterruptOccurred return at\n"
+      "0xc018b70a WITHOUT calling disableInterrupt, so a level source stays\n"
+      "asserted and the guest re-enters the handler forever.\n"
+      "Suppressing the line tests that chain end to end: if pppd writes its\n"
+      "47-octet LCP Configure-Request again with the interrupt withheld, the\n"
+      "interrupt was the cause. Only meaningful with --ppp, so naming it on a\n"
+      "run without one is refused rather than ignored." }
 };
 
 #define NBOOT_TOGGLES ((unsigned)(sizeof BOOT_TOGGLES / sizeof BOOT_TOGGLES[0]))
@@ -23165,6 +23188,12 @@ int main(int argc, char **argv) {
     bool        ppp;
 
     /*
+     * --no-uart4-rx-irq: deliver the peer's bytes but withhold VIC line 28.
+     * The control half of the run80/run94 pair; see the toggle row.
+     */
+    bool        uart4_rx_irq;
+
+    /*
      * --grow <MB>: free space to give the guest, by growing the HFS+ volume in
      * the loaded RAM disk. See rd_grow_volume() above for the format work; this
      * is the size question.
@@ -23726,6 +23755,7 @@ int main(int argc, char **argv) {
     fstab_fixup        = cfg.v.fstab_fixup;
     ca_software_render = cfg.v.ca_software_render;
     ppp                = cfg.v.ppp;
+    uart4_rx_irq       = cfg.v.uart4_rx_irq;
     rd_low             = cfg.v.ramdisk_low;
     stop_on_abort      = cfg.v.stop_on_abort;
     want_kextmap       = cfg.v.kext_map;
@@ -23853,10 +23883,24 @@ int main(int argc, char **argv) {
         int i_mbx    = boot_toggle_index("mbx");
         int i_pcfg   = boot_toggle_index("print-config");
         int i_cpregs = boot_toggle_index("call-probe-regs");
+        int i_u4irq  = boot_toggle_index("uart4-rx-irq");
         if (i_vram < 0 || i_panel < 0 || i_iomfb < 0 || i_mbx < 0 ||
-            i_pcfg < 0 || i_cpregs < 0) {
+            i_pcfg < 0 || i_cpregs < 0 || i_u4irq < 0) {
             fprintf(stderr, "internal error: toggle table lost a row\n");
             return 2;
+        }
+
+        /* Nothing pushes a byte into uart4's receive FIFO without --ppp, so
+         * without one the line this flag governs is already never asserted and
+         * neither direction of the flag can change a single instruction. A
+         * control that controls nothing must not report success. */
+        if (!ppp && cfg.req[i_u4irq] >= 0) {
+            fprintf(stderr,
+                    "--uart4-rx-irq / --no-uart4-rx-irq only means anything "
+                    "with --ppp: nothing else in this VM ever pushes a byte "
+                    "into uart4's receive FIFO, so VIC line 28 stays low "
+                    "either way\n");
+            return 1;
         }
 
         /* The register-file line exists only inside the call-probe report, so
@@ -25567,6 +25611,19 @@ external_md_work_ready:
          */
         ppp_init(&G.ppp_peer, NULL);
         G.ppp_peer_armed = true;
+        /*
+         * Applied here, after spy_install(), because this is where G.mach is
+         * known to exist -- and applied to the port rather than to the pump, so
+         * that the bytes, the FIFO, UTRSTAT and URXH are untouched and the VIC
+         * line is the only difference between the two runs.
+         */
+        s5l_uart_set_rx_irq(&G.mach->uart4, uart4_rx_irq);
+        if (!uart4_rx_irq)
+            printf("ppp       : uart4 receive interrupt SUPPRESSED"
+                   " (--no-uart4-rx-irq): bytes still reach the FIFO and"
+                   " URXH,\n"
+                   "            but VIC line 28 never asserts. This is the"
+                   " control run, not a repair.\n");
         printf("ppp       : host peer armed -- LCP/IPCP terminated here,"
                " guest 10.0.2.15, peer 10.0.2.2\n"
                "            it does NOT open until the guest's first octet"

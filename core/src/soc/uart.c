@@ -29,7 +29,18 @@
 #define UFSTAT_RX_FULL       (1u << 8)
 
 void s5l_uart_reset(s5l_uart_t *u) {
+    /* Still every byte, including rx_irq_suppressed. Preserving the flag here
+     * was tried and reverted: reset's one caller is s5l8900_init(), which runs
+     * on storage that has not been initialised yet, so reading any field before
+     * the memset is reading uninitialised memory — and core/tests/test_uart4.c
+     * pins reset as "a statement about every byte", which a preserved field
+     * would quietly falsify. The ordering requirement lives in
+     * s5l_uart_set_rx_irq()'s contract instead: call it AFTER init. */
     memset(u, 0, sizeof *u);
+}
+
+void s5l_uart_set_rx_irq(s5l_uart_t *u, bool enabled) {
+    if (u) u->rx_irq_suppressed = !enabled;
 }
 
 unsigned s5l_uart_rx_space(const s5l_uart_t *u) {
@@ -38,6 +49,11 @@ unsigned s5l_uart_rx_space(const s5l_uart_t *u) {
 }
 
 bool s5l_uart_rx_irq(const s5l_uart_t *u) {
+    /* The suppression is applied HERE and nowhere else, so that every other
+     * observable — UTRSTAT bit 0, UFSTAT's count, what URXH dequeues — is bit
+     * for bit what it is with the interrupt on. That is what makes the two runs
+     * a controlled pair: the VIC line is the only difference between them. */
+    if (u && u->rx_irq_suppressed) return false;
     return u && u->rx_count != 0u;
 }
 

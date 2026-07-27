@@ -238,7 +238,7 @@
  *            sent, which is the one thing these models may not do.
  *
  * UTRSTAT stores are still dropped. AppleS5L8900XSerial's interrupt filter at
- * 0xc065eed8 reads the register, masks, and writes the result back, so the
+ * 0xc065eecc reads the register, masks, and writes the result back, so the
  * hardware register is write-one-to-clear — but every bit this model reports is
  * a level with a live source behind it, and a W1C write cannot clear a level.
  * Accepting the store and clearing bit 0 while a byte still sat in the FIFO
@@ -254,6 +254,45 @@
  * port looks dead — whereas not gating can at worst assert a line for a FIFO
  * that genuinely has a byte in it. The host's decision to attach a peer is the
  * gate this model actually has, and it is the one it can defend.
+ *
+ * ---------------------------------------------------------------------------
+ * THAT DEFENCE DID NOT SURVIVE CONTACT. Read out of the binary, not inferred:
+ *
+ *   0xc065eecc  the filter, registered as the IOFilterInterruptEventSource
+ *               filter action by AppleS5L8900XSerial::start at 0xc065e734.
+ *               It computes  r5 = UTRSTAT(+0x10) & this->0x9c , writes r5 back
+ *               to +0x10, and then tests ONLY bits 0x100, 0x40, 0x8, 0x10 and
+ *               0x20. Its return value is r6, and the sole `mov r6, #1` is on
+ *               the 0x8 branch, so r5 == 0 returns 0.
+ *   0xc065f0e4  the only writer of this->0x9c in the whole kext (two stores,
+ *               no branch between them). Three boolean arguments contribute
+ *               0x18, 0x20 and 0x140 respectively, and each also sets UCON
+ *               (+0x04) bits 0x1880, 0x2000 and 0x14000. So the mask can hold
+ *               ONLY {0x8,0x10,0x20,0x40,0x100} — bit 0x1 can never enter it,
+ *               and the UCON gate this model declined to guess is legible
+ *               after all: it is set by the same instruction stream as the
+ *               status bit it gates.
+ *   0xc018b70a  IOFilterInterruptEventSource::disableInterruptOccurred returns
+ *               HERE when the filter returns 0 — before the
+ *               provider->disableInterrupt(source) at 0xc018b718. A level that
+ *               the filter rejects is therefore never masked.
+ *
+ * A sweep of 0xc065d000..0xc0662000 in both ARM and Thumb finds exactly two
+ * instructions that touch +0x10 at all (the read and the write-back above).
+ * NOTHING in this driver tests UTRSTAT bit 0.
+ *
+ * So the bit this model asserts is a bit the driver cannot see, and the level
+ * it leaves asserted is one the driver's own path declines to mask. run94:
+ * 6,393,888 IRQ entries, 44.5% of the run in IRQ mode, and
+ * disableInterruptOccurred hot in the profile — which is also what settles
+ * level-vs-edge, since IOInterruptEventSource::init only installs that handler
+ * for kIOInterruptTypeLevel. run80, before this path existed: 2,614 and 0.2%.
+ *
+ * NOTHING ABOVE IS CHANGED YET, deliberately. --no-uart4-rx-irq exists to run
+ * the control that turns this from a very good explanation into a demonstrated
+ * cause, and the repair is not worth designing until that run says which of
+ * the three choices in this comment actually has to move.
+ * ---------------------------------------------------------------------------
  *
  * FLOW CONTROL is not modelled and does not need to be: uart1 and uart4 carry
  * `no-flow-control`, so AppleS5L8900XSerial's getFlowStatus short-circuits to
@@ -306,6 +345,23 @@ typedef struct {
     uint8_t  rx[UART_RX_FIFO];
     uint8_t  rx_head;              /* index of the next byte out            */
     uint8_t  rx_count;             /* 0 .. UART_RX_FIFO                     */
+
+    /*
+     * HARNESS POLICY, NOT DEVICE STATE — see s5l_uart_set_rx_irq(). Zero is the
+     * hardware-faithful behaviour, so a memset()-initialised port asserts and a
+     * run that never names the flag is byte for byte the run it was before this
+     * field existed. s5l_uart_reset() clears it like everything else, which is
+     * why the setter must be called AFTER s5l8900_init(); see its contract.
+     *
+     * It is deliberately NOT in snap_uart(): a snapshot carries what the guest
+     * did, and this is what the operator asked for, so it is re-applied from the
+     * restoring run's command line instead of travelling in the stream. It fits
+     * in the tail padding this struct already had, so SNAP_SIZE_GUARD's 8280
+     * still holds and no SNAPSHOT_VERSION bump is owed — which is the only
+     * reason a new field here is not a snapshot change. Check that again before
+     * adding a second one.
+     */
+    bool     rx_irq_suppressed;
 } s5l_uart_t;
 
 void     s5l_uart_reset(s5l_uart_t *u);
@@ -331,6 +387,28 @@ unsigned s5l_uart_rx_space(const s5l_uart_t *u);
  * that only clears when the guest drains URXH cannot lose a byte.
  */
 bool     s5l_uart_rx_irq(const s5l_uart_t *u);
+/*
+ * Suppress that level without touching anything else: bytes still arrive, the
+ * FIFO still fills, UTRSTAT bit 0 and UFSTAT still report them, URXH still
+ * dequeues them — only s5l_uart_rx_irq() is forced false, so the VIC line never
+ * asserts. `enabled` is the interrupt, so s5l_uart_set_rx_irq(u, false) is the
+ * suppression; true restores the default.
+ *
+ * This exists for ONE experiment, and it is a control rather than a fix. run94
+ * (with this path enabled) took 6,393,888 IRQ entries and spent 44.5% of the
+ * run in IRQ mode, against run80's 2,614 and 0.2% before the receive path
+ * existed; suppressing the line reproduces run80's interrupt behaviour while
+ * leaving byte delivery exactly as it is, which is the only way to separate
+ * "the interrupt broke the guest" from "the byte did". Neither answer is
+ * assumed here. If the interrupt is the cause, the repair belongs in the bits
+ * this model reports — not in this flag.
+ *
+ * MUST be called AFTER s5l8900_init(), which resets every port and would clear
+ * it. There is no second reset path today; if one appears, it will clear this
+ * too, and a control run would stop being a control halfway through without
+ * saying so. core/tests/test_uart4.c pins both halves of that.
+ */
+void     s5l_uart_set_rx_irq(s5l_uart_t *u, bool enabled);
 
 /* ---------------------------------------------------------------- VIC ---
  * PL190-style vectored interrupt controller. Devices assert lines into `raw`;
@@ -2521,6 +2599,15 @@ typedef struct {
      * forgets to ask for a refresh delivers it up to 68 instructions late,
      * never not at all — unlike a wake-source deadline, where guessing wrong
      * loses the interrupt outright.
+     *
+     * WHAT IT MEASURED. insnbench's tick=yes rows went 1.58 -> 7.89 M/s with
+     * the 4 KiB-page MMU and 1.83 -> 14.18 M/s without it, which leaves the
+     * tick costing 3.4% of the MMU row rather than 76% of it. A real 300 M
+     * instruction kernel boot through s5l8900_run() went 189.1 s -> 48.8 s,
+     * and produced byte-identical guest console, framebuffer and machine
+     * snapshot. Part of that is s5l_gpio_drive()'s own early out, which this
+     * flag is what made worth having: it cut the remaining full refresh in
+     * half, and the refresh is now what a real boot mostly pays for.
      *
      * Deliberately NOT serialised. It is derived state, and snapshot_load()
      * sets it rather than restoring it, so a loaded machine re-derives every

@@ -553,6 +553,101 @@ static void test_uart4_asserts_vic_line_28_for_a_waiting_byte(void) {
     s5l8900_free(&m);
 }
 
+static void test_suppression_withholds_the_line_and_nothing_else(void) {
+    /*
+     * --no-uart4-rx-irq is a CONTROL, and a control is only worth running if it
+     * changes exactly one thing. This pins that: with the interrupt suppressed,
+     * every other observable of the receive path must be bit for bit what it is
+     * with the interrupt on, and only VIC line 28 may differ. If this test ever
+     * fails, the control run stops being evidence about the interrupt and
+     * becomes evidence about whatever else drifted.
+     */
+    s5l8900_t m;
+    CHECK(s5l8900_init(&m, 0, 1u << 20), "machine init failed");
+    m.bus.write32(m.bus.ctx, S5L8900_VIC0_BASE + VIC_INTENABLE, 1u << 28);
+
+    s5l_uart_set_rx_irq(&m.uart4, false);
+    CHECK(s5l_uart_rx_push(&m.uart4, 0x7eu), "push into an empty FIFO failed");
+    s5l8900_tick(&m, 1u);
+
+    /* The line, and the core, stay down. */
+    uint32_t raw = m.bus.read32(m.bus.ctx, S5L8900_VIC0_BASE + VIC_RAWINTR);
+    CHECK((raw & (1u << 28)) == 0u,
+          "suppressed, but a queued byte still asserted line 28 (0x%08x)", raw);
+    CHECK(!m.cpu.irq_line, "suppressed, but the core saw an IRQ");
+
+    /* Everything the guest can actually observe is unchanged: the byte is in
+     * the FIFO, UTRSTAT still says "receive data ready", UFSTAT still counts
+     * it, and URXH still hands it over. */
+    CHECK(s5l_uart_rx_irq(&m.uart4) == false, "s5l_uart_rx_irq() ignored it");
+    uint32_t tr = m.bus.read32(m.bus.ctx, S5L8900_UART4_BASE + UART_UTRSTAT);
+    CHECK((tr & 1u) != 0u,
+          "suppression changed UTRSTAT bit 0 (0x%08x) -- it must not", tr);
+    uint32_t fs = m.bus.read32(m.bus.ctx, S5L8900_UART4_BASE + UART_UFSTAT);
+    CHECK((fs & 0x0fu) == 1u,
+          "suppression changed UFSTAT's count (0x%08x) -- it must not", fs);
+    CHECK(m.bus.read32(m.bus.ctx, S5L8900_UART4_BASE + UART_URXH) == 0x7eu,
+          "suppression changed what URXH dequeued");
+    CHECK(m.uart4.rx_reads == 1u && m.uart4.rx_pushed == 1u &&
+          m.uart4.rx_dropped == 0u && m.uart4.rx_underruns == 0u,
+          "suppression disturbed the receive counters");
+
+    /* And it is reversible in the same process, so a harness cannot get stuck
+     * in the control configuration. */
+    s5l_uart_set_rx_irq(&m.uart4, true);
+    CHECK(s5l_uart_rx_push(&m.uart4, 0x5eu), "push failed after re-enable");
+    s5l8900_tick(&m, 1u);
+    raw = m.bus.read32(m.bus.ctx, S5L8900_VIC0_BASE + VIC_RAWINTR);
+    CHECK((raw & (1u << 28)) != 0u,
+          "re-enabling did not restore line 28 (0x%08x)", raw);
+
+    s5l8900_free(&m);
+}
+
+static void test_suppression_defaults_off_and_reset_clears_it(void) {
+    /*
+     * The default is what makes this flag safe to land: a port nobody has
+     * spoken to asserts, so a run that never names --no-uart4-rx-irq is byte
+     * for byte the run it was before the flag existed.
+     *
+     * And s5l_uart_reset() CLEARS the policy rather than preserving it. That is
+     * deliberate and was the second attempt: preserving it meant reading a
+     * field before the memset, and reset's only caller is s5l8900_init(), which
+     * runs on storage that has not been initialised yet -- so the read was of
+     * uninitialised memory, and it also falsified test_reset_is_total's claim
+     * that reset is a statement about every byte. The consequence is an
+     * ordering requirement, pinned here: set the flag AFTER init. If a second
+     * reset caller ever appears it will clear the flag mid-run and a control
+     * run will silently stop being one, which is why this asserts the clearing
+     * out loud instead of leaving it to be discovered.
+     */
+    s5l_uart_t u;
+    memset(&u, 0xa5, sizeof u);
+    s5l_uart_reset(&u);
+    CHECK(!u.rx_irq_suppressed, "a reset port defaulted to SUPPRESSED");
+    CHECK(s5l_uart_rx_push(&u, 0x41u), "push failed");
+    CHECK(s5l_uart_rx_irq(&u), "the default did not assert for a queued byte");
+
+    s5l_uart_set_rx_irq(&u, false);
+    CHECK(u.rx_irq_suppressed, "the setter did not record the suppression");
+    CHECK(!s5l_uart_rx_irq(&u), "suppression did not take");
+
+    s5l_uart_reset(&u);
+    CHECK(!u.rx_irq_suppressed,
+          "reset left the policy bit set -- reset must be total, and the flag "
+          "must therefore be applied after s5l8900_init()");
+    CHECK(s5l_uart_rx_push(&u, 0x42u), "push failed after reset");
+    CHECK(s5l_uart_rx_irq(&u), "reset did not restore the default");
+
+    /* And a machine's uart4 is in the default state straight out of init, so
+     * bootkernel's apply-after-init ordering starts from a known place. */
+    s5l8900_t m;
+    CHECK(s5l8900_init(&m, 0, 1u << 20), "machine init failed");
+    CHECK(!m.uart4.rx_irq_suppressed && !m.uart0.rx_irq_suppressed,
+          "a freshly initialised machine came up SUPPRESSED");
+    s5l8900_free(&m);
+}
+
 static void test_uart0_receive_is_deliberately_not_wired(void) {
     /*
      * uart0 runs the identical model and has an identical FIFO. Its VIC line is
@@ -883,6 +978,8 @@ int main(void) {
     test_receive_fifo_is_ordered_and_bounded();
     test_a_utrstat_store_cannot_discard_a_queued_byte();
     test_uart4_asserts_vic_line_28_for_a_waiting_byte();
+    test_suppression_withholds_the_line_and_nothing_else();
+    test_suppression_defaults_off_and_reset_clears_it();
     test_uart0_receive_is_deliberately_not_wired();
     test_uart4_rx_is_a_declared_wake_source();
     test_the_loop_closes_through_the_uart();
