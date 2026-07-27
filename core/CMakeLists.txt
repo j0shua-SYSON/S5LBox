@@ -17,8 +17,11 @@ add_library(emucore STATIC
     src/soc/tvout.c
     src/soc/i2c.c
     src/soc/pcf50635.c
+    src/soc/wm8991.c
+    src/soc/i2s.c
     src/soc/spi.c
     src/soc/gpioic.c
+    src/soc/buttons.c
     src/soc/mtz2.c
     src/soc/usbotg.c
     src/soc/nor.c
@@ -115,6 +118,15 @@ add_executable(test_i2c tests/test_i2c.c)
 target_link_libraries(test_i2c PRIVATE emucore)
 add_test(NAME s5l8900_i2c_pmu COMMAND test_i2c)
 
+# The WM8991 codec and the two I2S windows. Separate from test_i2c because the
+# property being defended is not a fact about the I2C controller: it is that a
+# specific slave answers a specific identity, refuses a specific bit, and that
+# the transport window behind it exists — the codec and the window are one
+# milestone and are tested as one.
+add_executable(test_wm8991 tests/test_wm8991.c)
+target_link_libraries(test_wm8991 PRIVATE emucore)
+add_test(NAME wm8991_codec_and_i2s COMMAND test_wm8991)
+
 add_executable(test_spi tests/test_spi.c)
 target_link_libraries(test_spi PRIVATE emucore)
 add_test(NAME s5l8900_spi COMMAND test_spi)
@@ -122,6 +134,15 @@ add_test(NAME s5l8900_spi COMMAND test_spi)
 add_executable(test_gpioic tests/test_gpioic.c)
 target_link_libraries(test_gpioic PRIVATE emucore)
 add_test(NAME s5l8900_gpioic COMMAND test_gpioic)
+
+# The five physical buttons. Separate from test_gpioic because the property
+# being defended is not a fact about the interrupt controller: it is that the
+# board asserts NOTHING at rest and exactly one interrupt per transition once
+# armed, and that spans the pin block, the controller's level rules and the
+# device tree's own wiring at once.
+add_executable(test_buttons tests/test_buttons.c)
+target_link_libraries(test_buttons PRIVATE emucore)
+add_test(NAME iphone1_2_buttons COMMAND test_buttons)
 
 # uart4, the guest's PPP line. Separate from test_soc's general machine tests
 # because the property being defended is a relationship between two devices --
@@ -231,6 +252,21 @@ add_executable(test_vmtouchqueue
 )
 target_include_directories(test_vmtouchqueue PRIVATE ../app/Sources include)
 add_test(NAME app_touch_queue COMMAND test_vmtouchqueue)
+
+# The app's button queue and, more importantly, its mapping onto the core's
+# buttons. The app's enum is in the order the control bar draws (Home first) and
+# the core's is /device-tree/buttons' own (hold first); a cast between them
+# compiles, runs, and quietly sends Power when the user pressed Home. Links
+# buttons.c so the names and identifiers are checked against the model itself
+# rather than against a copy of it.
+add_executable(test_vmbuttonqueue
+    ../app/Tests/test_vmbuttonqueue.c
+    ../app/Sources/VMButtonQueue.c
+    src/soc/buttons.c
+    src/soc/gpioic.c   # buttons.c drives both halves of /arm-io/gpio
+)
+target_include_directories(test_vmbuttonqueue PRIVATE ../app/Sources include)
+add_test(NAME app_button_queue COMMAND test_vmbuttonqueue)
 
 # The machine list. Links VMOptions too, because the one bound that protects
 # every saved machine -- that an instance can still store a value for every

@@ -32,6 +32,7 @@
 //
 #import "VMEngine.h"
 #import "VMTouchQueue.h"
+#import "VMButtonQueue.h"
 
 #import <mach/mach.h>
 #import <pthread.h>
@@ -53,6 +54,23 @@ static const double kVMPublishInterval = 1.0 / 30.0;
 // frame and keeps the real scrollback; this bound only matters if the UI
 // stops draining (backgrounded, say) while the guest keeps printing.
 static const NSUInteger kVMConsoleLimit = 16000;
+
+/*
+ * THE ONE PLACE THE APP'S TWO BUTTON ENUMS MEET.
+ *
+ * VMButton (VMEngine.h) is Objective-C and needs Foundation; VM_BUTTON_*
+ * (VMButtonQueue.h) is plain C so a host CI runner can test the mapping table
+ * without an Apple toolchain. They are two spellings of one order and they must
+ * agree by value, or -setButton:pressed:'s cast quietly sends the wrong key.
+ * Neither header can check that on its own. This file can, and does, here —
+ * on the macOS build, which is the only build where both exist.
+ */
+_Static_assert((NSUInteger)VMButtonHome         == VM_BUTTON_HOME,          "VMButton order");
+_Static_assert((NSUInteger)VMButtonPower        == VM_BUTTON_POWER,         "VMButton order");
+_Static_assert((NSUInteger)VMButtonVolumeUp     == VM_BUTTON_VOLUME_UP,     "VMButton order");
+_Static_assert((NSUInteger)VMButtonVolumeDown   == VM_BUTTON_VOLUME_DOWN,   "VMButton order");
+_Static_assert((NSUInteger)VMButtonRingerSilent == VM_BUTTON_RINGER_SILENT, "VMButton order");
+_Static_assert((NSUInteger)VMButtonCount        == VM_BUTTON_COUNT,         "VMButton count");
 
 typedef NS_ENUM(uint8_t, VMEngineState) {
     VMEngineStateIdle = 0,
@@ -76,7 +94,9 @@ static double vm_now(void) {
 - (void)appendConsole:(NSString *)text;
 - (void)noteDiscardedInput;
 - (void)noteDroppedTouch;
+- (void)noteDroppedButton;
 - (void)drainOneTouch_emulatorThread;
+- (void)drainOneButton_emulatorThread;
 - (void)publishBlankSnapshotLocked;
 @end
 
@@ -127,6 +147,16 @@ static double vm_now(void) {
      */
     vm_touch_queue_t _touch;
     uint64_t         _touchDelivered;
+    /*
+     * Button transitions waiting to be handed to the board, for exactly the
+     * same reason and with a stricter rule: nothing here may ever be coalesced
+     * away, because a press and its release are two edges and dropping either
+     * leaves the guest holding a key nobody is pressing. See VMButtonQueue.h.
+     */
+    vm_button_queue_t _buttonQueue;
+    uint64_t          _buttonDelivered;
+    uint64_t          _buttonRefused;
+    BOOL              _droppedButtonLogged;
 }
 
 + (uint64_t)physFootprintBytes {
@@ -184,6 +214,14 @@ static double vm_now(void) {
     vm_touch_queue_reset(&_touch);
     _touchDelivered = 0;
     _droppedTouchLogged = NO;
+    /* And the buttons, for the same reason: a switch held when the last
+     * machine went away is not held on this one, whose board resets with
+     * every switch released. */
+    vm_button_queue_reset(&_buttonQueue);
+    memset(_buttons, 0, sizeof _buttons);
+    _buttonDelivered = 0;
+    _buttonRefused = 0;
+    _droppedButtonLogged = NO;
     _status = @"starting";
     BOOL needSnapshot = (_snapshot == NULL);
     [self publishBlankSnapshotLocked];
@@ -345,9 +383,54 @@ static double vm_now(void) {
 #pragma mark - Guest input (see the header for what reaches the guest)
 
 + (NSString *)buttonUnavailableReason {
-    /* One place, one sentence, and every control that would need a button asks
-     * for it rather than deciding for itself that it is dead. */
-    return @"no button or ringer input is modelled yet";
+    /*
+     * NIL, and this is the only thing that changed about it: the path exists.
+     * core/src/soc/buttons.c models all five of the board's switches on the
+     * GPIO pins and interrupt lines /device-tree/buttons names, and
+     * -setButton:pressed: queues a transition that the emulator thread hands
+     * to that model.
+     *
+     * This is a statement about the EMULATOR, not about the guest. Whether any
+     * particular guest has a driver listening is a live question with a live
+     * answer, and -buttonUnavailableReason is where it is asked; a control bar
+     * that wants to know whether pressing Home will do something must ask that
+     * one. This class method exists so a control can be built at all.
+     */
+    return nil;
+}
+
+- (NSString *)buttonUnavailableReason {
+    pthread_mutex_lock(&_lock);
+    BOOL ready      = _machineReady && _state == VMEngineStateRunning;
+    uint64_t made   = _buttonDelivered;
+    uint64_t lost   = _buttonQueue.dropped;
+    uint64_t held   = _buttonQueue.count;
+    uint64_t said_no = _buttonRefused;
+    pthread_mutex_unlock(&_lock);
+
+    /* Once the board has taken a transition, the app's half of this is proven
+     * and nothing later can un-prove it. A subsequent refusal is a fact about
+     * the guest at that moment, not about whether this path works. */
+    if (made > 0) return nil;
+    if (!ready)   return @"the machine is not running";
+    if (said_no > 0)
+        return @"the guest has not armed the button interrupt lines — no "
+               @"driver has claimed /device-tree/buttons";
+    if (lost > 0) return @"the queue filled before the board took anything";
+    if (held > 0) return @"queued, not yet handed to the board";
+    return @"nothing sent yet";
+}
+
+- (void)buttonCountersQueued:(uint64_t *)queued
+                   delivered:(uint64_t *)delivered
+                     refused:(uint64_t *)refused
+                     dropped:(uint64_t *)dropped {
+    pthread_mutex_lock(&_lock);
+    if (queued)    *queued    = _buttonQueue.queued;
+    if (delivered) *delivered = _buttonDelivered;
+    if (refused)   *refused   = _buttonRefused;
+    if (dropped)   *dropped   = _buttonQueue.dropped;
+    pthread_mutex_unlock(&_lock);
 }
 
 - (NSString *)touchUnavailableReason {
@@ -395,17 +478,37 @@ static double vm_now(void) {
 }
 
 - (BOOL)setButton:(VMButton)button pressed:(BOOL)pressed {
-    if (button >= VMButtonCount) return NO;
+    unsigned which = 0;
+    bool guestPressed = false;
+    /* The app's enum order and the core's are different and permanently so —
+     * see VMButtonQueue.h. The translation is a table in plain C that a host CI
+     * runner checks against the core's enum, rather than a cast that happens to
+     * work; the cast below is safe only because of the _Static_asserts at the
+     * top of this file, which are the one place the two app enums meet. */
+    if (!vm_button_to_guest((unsigned)button, pressed ? true : false,
+                            &which, &guestPressed))
+        return NO;
 
-    /* Recorded under the same lock as everything else the UI can read, so the
-     * day a PMU model wants the held state it is already there and already
-     * safe to read from the emulator thread. */
+    BOOL queued = NO, notRunning = NO;
     pthread_mutex_lock(&_lock);
+    /* Recorded under the same lock as everything else the UI can read, so the
+     * control bar can draw a held key without asking the emulator thread. */
     _buttons[button] = pressed;
+    if (!_machineReady || _state != VMEngineStateRunning)
+        notRunning = YES;
+    else
+        queued = vm_button_queue_push(&_buttonQueue, which, guestPressed);
     pthread_mutex_unlock(&_lock);
 
-    [self noteDiscardedInput];
-    return NO;      // see +buttonUnavailableReason
+    if (notRunning) {
+        [self noteDiscardedInput];
+        return NO;
+    }
+    if (!queued) {
+        [self noteDroppedButton];
+        return NO;
+    }
+    return YES;     /* QUEUED. Not "the guest saw it" — see the header. */
 }
 
 - (BOOL)isButtonPressed:(VMButton)button {
@@ -484,6 +587,58 @@ static double vm_now(void) {
     [self noteDroppedTouch];
 }
 
+/*
+ * Hand ONE queued transition to the board. Runs ONLY on the emulator thread,
+ * between chunks, which is what makes it safe to reach into _machine at all.
+ *
+ * One per chunk is not a throttle, it is the board's own shape: it refuses a
+ * second transition on a line whose previous one the guest has not serviced,
+ * so draining more would just be a run of refusals.
+ *
+ * A refusal is not necessarily an error and it is never a reason to throw the
+ * transition away. s5l_buttons_set() says no while the guest has not armed
+ * that line's interrupt — which, for a real boot, is true until
+ * AppleM68Buttons starts a couple of hundred million instructions in — and
+ * while the previous transition on that line is still pending. Both become
+ * false with time, so the transition stays queued and is retried, exactly as
+ * bootkernel's --button retries on every instruction. Only a FULL queue loses
+ * input, and VMButtonQueue.c counts that.
+ */
+- (void)drainOneButton_emulatorThread {
+    vm_button_event_t e;
+    pthread_mutex_lock(&_lock);
+    BOOL have = vm_button_queue_peek(&_buttonQueue, &e);
+    pthread_mutex_unlock(&_lock);
+    if (!have) return;
+
+    if (s5l_buttons_set(&_machine.buttons, &_machine.gpio, &_machine.gpioic,
+                        e.which, e.pressed)) {
+        pthread_mutex_lock(&_lock);
+        vm_button_queue_pop(&_buttonQueue);
+        _buttonDelivered++;
+        pthread_mutex_unlock(&_lock);
+        return;
+    }
+    pthread_mutex_lock(&_lock);
+    _buttonRefused++;
+    pthread_mutex_unlock(&_lock);
+}
+
+/* Same discipline as noteDroppedTouch. */
+- (void)noteDroppedButton {
+    pthread_mutex_lock(&_lock);
+    BOOL first = !_droppedButtonLogged;
+    _droppedButtonLogged = YES;
+    uint64_t dropped = _buttonQueue.dropped;
+    pthread_mutex_unlock(&_lock);
+    if (!first) return;
+
+    [self appendConsole:[NSString stringWithFormat:
+        @"[input] a button transition was not delivered (%llu so far). The "
+        @"queue was full, and a press or a release may never be coalesced "
+        @"away. Printed once.\n", (unsigned long long)dropped]];
+}
+
 /* Same discipline as noteDiscardedInput: a drag can drop many reports, and a
  * console that scrolls the guest's own output away to repeat itself is worse
  * than one that says it once. */
@@ -512,10 +667,12 @@ static double vm_now(void) {
     pthread_mutex_unlock(&_lock);
     if (!first) return;
 
-    [self appendConsole:[NSString stringWithFormat:
-        @"[input] discarded: %@. The coordinate is shown on screen and thrown "
-        @"away; the guest is never told. Printed once.\n",
-        [VMEngine buttonUnavailableReason]]];
+    /* This used to quote +buttonUnavailableReason, which now returns nil and
+     * would have formatted as "(null)". It was never the right sentence
+     * anyway: both callers reach here for one reason and it is this one. */
+    [self appendConsole:
+        @"[input] discarded: the machine is not running. The input is shown on "
+        @"screen and thrown away; the guest is never told. Printed once.\n"];
 }
 
 #pragma mark - Emulator thread
@@ -549,6 +706,7 @@ static double vm_now(void) {
             /* The only place the UI's input reaches the machine, and it is on
              * this thread, between chunks, with nothing executing. */
             [self drainOneTouch_emulatorThread];
+            [self drainOneButton_emulatorThread];
 
             retired += s5l8900_run(&_machine, kVMChunkInstructions, &status);
 

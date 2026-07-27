@@ -118,11 +118,17 @@ SNAP_SIZE_GUARD(s5l_tvout_t,       12304, "snap_tvout");
  * describe host ABI layout only; the file format remains field-by-field. */
 SNAP_SIZE_GUARD(s5l_i2c_t,         320,   "snap_i2c");
 SNAP_SIZE_GUARD(s5l_pcf50635_t,    600,   "snap_pmu");
+SNAP_SIZE_GUARD(s5l_wm8991_t,      496,   "snap_codec");
+SNAP_SIZE_GUARD(s5l_i2s_t,         104,   "snap_i2s");
 SNAP_SIZE_GUARD(s5l_spi_t,         200,   "snap_spi");
-SNAP_SIZE_GUARD(s5l_gpioic_t,      200,   "snap_gpioic");
+/* Four register banks, plus what the board is driving and which lines it
+ * drives at all -- see the `driven` note in soc.h. */
+SNAP_SIZE_GUARD(s5l_gpioic_t,      224,   "snap_gpioic");
 /* The pin block is 4 KiB of page plus the host-side watch table, which is not
  * serialised — see snap_gpio(). */
 SNAP_SIZE_GUARD(s5l_gpio_t,        4192,  "snap_gpio");
+/* One held-button byte and three counters, padded to 8-byte alignment. */
+SNAP_SIZE_GUARD(s5l_buttons_t,     32,    "snap_buttons");
 SNAP_SIZE_GUARD(s5l_mtz2_t,        528,   "snap_mtz2");
 SNAP_SIZE_GUARD(s5l_usbotg_t,      4,     "snap_usbotg");
 SNAP_SIZE_GUARD(s5l_nor_entry_t,   12,    "snap_nor");
@@ -133,8 +139,9 @@ SNAP_SIZE_GUARD(s5l_stub_t,        56,    "snap_stubs");
  * are deliberately excluded from MACH for the same reason as every other bus
  * callback; snapshot_load preserves the live machine's hooks and dedicated
  * privileged-SVC context. The byte format therefore does not change. */
-/* 42888 = 34664 + one more s5l_uart_t (8224), which is uart4. */
-SNAP_SIZE_GUARD(s5l8900_t,         42888, "snap_mach");
+/* 43648 = 42888 + the codec (496) + two I2S windows (2 x 104) + the five
+ * physical buttons (32) + the GPIO controller's `driven` mask (28). */
+SNAP_SIZE_GUARD(s5l8900_t,         43648, "snap_mach");
 #endif
 
 /* ---------------------------------------------------------------- the IO --- */
@@ -233,6 +240,21 @@ static void sn_discard(sn_io_t *io, size_t n) {
 
 static void sn_u8(sn_io_t *io, uint8_t *v) { sn_raw(io, v, 1); }
 
+/* The codec's register file is the only 16-bit state in the machine. It gets a
+ * primitive of its own rather than being widened to u32: 128 registers stored
+ * four bytes wide would put 256 bytes of guaranteed zero in every checkpoint,
+ * and a narrowing conversion on load is exactly the silent-truncation bug the
+ * per-width primitives exist to make impossible. */
+static void sn_u16(sn_io_t *io, uint16_t *v) {
+    uint8_t b[2];
+    if (io->mode == SN_SAVE) {
+        b[0] = (uint8_t)*v; b[1] = (uint8_t)(*v >> 8);
+    }
+    sn_raw(io, b, 2);
+    if (sn_reading(io) && io->err == SNAP_OK)
+        *v = (uint16_t)((uint16_t)b[0] | ((uint16_t)b[1] << 8));
+}
+
 static void sn_u32(sn_io_t *io, uint32_t *v) {
     uint8_t b[4];
     if (io->mode == SN_SAVE) {
@@ -283,6 +305,7 @@ static void sn_size(sn_io_t *io, size_t *v) {   /* size_t as a fixed u64 */
  * every visitor takes a parameter called `io`, so a field line is just the
  * field. */
 #define F8(x)       sn_u8  (io, &(x))
+#define F16(x)      sn_u16 (io, &(x))
 #define F32(x)      sn_u32 (io, &(x))
 #define F64(x)      sn_u64 (io, &(x))
 #define FB(x)       sn_bool(io, &(x))
@@ -378,6 +401,10 @@ static void snap_gpioic(sn_io_t *io, s5l_gpioic_t *g) {
     FA32(g->en,    S5L_GPIOIC_GROUPS);
     FA32(g->type,  S5L_GPIOIC_GROUPS);
     FA32(g->raw,   S5L_GPIOIC_GROUPS);
+    /* Which lines have a device on them travels with what they are driving:
+     * a restore that dropped it would turn every level line back into an
+     * undriven one and stop delivering its interrupts. */
+    FA32(g->driven, S5L_GPIOIC_GROUPS);
     F64(g->unknown_reads); F64(g->unknown_writes);
     FA32(g->unknown_off, S5L_GPIOIC_UNKNOWN_OFF);
     F32(g->unknown_off_count);
@@ -396,6 +423,25 @@ static void snap_gpioic(sn_io_t *io, s5l_gpioic_t *g) {
  */
 static void snap_gpio(sn_io_t *io, s5l_gpio_t *g) {
     FA32(g->regs, S5L_GPIO_WORDS);
+}
+
+/*
+ * The five physical buttons. Board state, like s5l_gpioic_t.raw and for the
+ * same reason: a restore that dropped it would release every held switch
+ * silently, and the pin levels it left behind could not be used to rebuild it
+ * — two of the five are active low, so a released volume key and a pressed
+ * Home button are indistinguishable at the pin.
+ *
+ * `pressed` is validated on the way IN. It indexes nothing, but a file that
+ * claimed a sixth button would restore a machine whose held-button set could
+ * never be cleared through the public API, which range-checks `which`.
+ */
+static void snap_buttons(sn_io_t *io, s5l_buttons_t *b) {
+    F8(b->pressed);
+    F64(b->sets); F64(b->refused); F64(b->edges);
+    if (sn_reading(io) && io->err == SNAP_OK &&
+        (b->pressed & (uint8_t)~((1u << S5L_BUTTON_COUNT) - 1u)) != 0u)
+        io->err = SNAP_ERR_CORRUPT;
 }
 
 static bool mtz2_state_valid(const s5l_mtz2_t *d) {
@@ -536,6 +582,63 @@ static void snap_pmu(sn_io_t *io, s5l_pcf50635_t *p) {
     FBYTES(p->unknown_reg, PCF50635_UNKNOWN_REGS);
     F32(p->unknown_reg_count);
     if (sn_reading(io) && io->err == SNAP_OK && !pmu_state_valid(p))
+        io->err = SNAP_ERR_CORRUPT;
+}
+
+static bool codec_state_valid(const s5l_wm8991_t *c) {
+    if (!c || c->ptr >= WM8991_NREG ||
+        c->wlen > WM8991_MAX_WRITE ||
+        c->unknown_reg_count > WM8991_UNKNOWN_REGS)
+        return false;
+    /* Register 0 is the identity and is never stored, so a file claiming a
+     * value for it was not written by this model. Everything else is free
+     * storage and has no invariant to check beyond the boolean marker. */
+    if (c->regs[WM8991_REG_ID] != 0u || c->written[WM8991_REG_ID] != 0u)
+        return false;
+    /* Bit 5 of register 1 is unimplemented. A stored 1 there could only come
+     * from a file this model did not write, and restoring it would silently
+     * turn the part into a WM1817 for every subsequent read. */
+    if ((c->regs[WM8991_REG_PWR1] & WM8991_PWR1_PROBE) != 0u) return false;
+    /* Same argument for bit 12 of the status register: it is a mirror of the
+     * control register, never storage, so a stored 1 is a file this model did
+     * not write — and restoring one would make the driver's poll observe a
+     * level nothing commanded. */
+    if ((c->regs[WM8991_REG_GPSTAT] & WM8991_GP_BIT) != 0u) return false;
+    for (unsigned i = 0; i < WM8991_NREG; i++)
+        if (c->written[i] > 1u) return false;
+    for (unsigned i = 0; i < c->unknown_reg_count; i++)
+        if (c->unknown_reg[i] >= WM8991_NREG) return false;
+    return true;
+}
+
+static bool i2s_state_valid(const s5l_i2s_t *s) {
+    return s && s->unknown_off_count <= S5L_I2S_UNKNOWN_OFF;
+}
+
+static void snap_codec(sn_io_t *io, s5l_wm8991_t *c) {
+    for (unsigned i = 0; i < WM8991_NREG; i++) F16(c->regs[i]);
+    FBYTES(c->written, WM8991_NREG);
+    F8(c->ptr); FB(c->reading); FB(c->second_byte); F16(c->latch);
+    FBYTES(c->wbuf, WM8991_MAX_WRITE);
+    F32(c->wlen);
+    F64(c->reg_reads); F64(c->reg_writes);
+    F64(c->wide_writes); F64(c->packed_writes);
+    F64(c->refused_writes); F64(c->id_reads); F64(c->probe_bit_writes);
+    F64(c->status_mirror_reads);
+    F64(c->unknown_reads);
+    FBYTES(c->unknown_reg, WM8991_UNKNOWN_REGS);
+    F32(c->unknown_reg_count);
+    if (sn_reading(io) && io->err == SNAP_OK && !codec_state_valid(c))
+        io->err = SNAP_ERR_CORRUPT;
+}
+
+static void snap_i2s(sn_io_t *io, s5l_i2s_t *s) {
+    FA32(s->regs, S5L_I2S_REGS);
+    F64(s->reads); F64(s->writes);
+    F64(s->unknown_reads); F64(s->unknown_writes);
+    FA32(s->unknown_off, S5L_I2S_UNKNOWN_OFF);
+    F32(s->unknown_off_count);
+    if (sn_reading(io) && io->err == SNAP_OK && !i2s_state_valid(s))
         io->err = SNAP_ERR_CORRUPT;
 }
 
@@ -692,10 +795,19 @@ static void snap_mach(sn_io_t *io, s5l8900_t *m) {
     for (unsigned i = 0; i < S5L8900_I2C_COUNT; i++)
         snap_i2c(io, &m->i2c[i]);
     snap_pmu(io, &m->pmu);
+    /* The codec immediately after the PMU — the two i2c0 slaves adjacent, in
+     * attach order — and the I2S windows after it. See SNAPSHOT_VERSION's v11
+     * note for why inserting here is a version bump and not a free append. */
+    snap_codec(io, &m->codec);
+    for (unsigned i = 0; i < S5L8900_I2S_COUNT; i++)
+        snap_i2s(io, &m->i2s[i]);
     for (unsigned i = 0; i < S5L8900_SPI_COUNT; i++)
         snap_spi(io, &m->spi[i]);
     snap_gpioic(io, &m->gpioic);
     snap_gpio(io, &m->gpio);
+    /* The board's switches, adjacent to the two blocks they drive. See
+     * SNAPSHOT_VERSION's v12 note for why this is a bump and not an append. */
+    snap_buttons(io, &m->buttons);
     snap_mtz2(io, &m->mtz2);
     snap_usbotg(io, &m->usbotg);
 
@@ -950,15 +1062,20 @@ static bool snap_machine_valid(const s5l8900_t *m) {
     for (unsigned i = 0; i < S5L8900_I2C_COUNT; i++)
         if (!i2c_state_valid(&m->i2c[i])) return false;
     if (!pmu_state_valid(&m->pmu)) return false;
+    if (!codec_state_valid(&m->codec)) return false;
+    for (unsigned i = 0; i < S5L8900_I2S_COUNT; i++)
+        if (!i2s_state_valid(&m->i2s[i])) return false;
     if (!tvout_state_valid(&m->tvout)) return false;
     for (unsigned i = 0; i < S5L8900_SPI_COUNT; i++)
         if (!spi_state_valid(&m->spi[i])) return false;
     /* Slave callbacks are host wiring, not file bytes. Requiring the board's
      * exact wiring on both save and load makes that omission safe: a snapshot
      * can never be applied to a differently wired machine. */
-    if (m->i2c[0].slave_count != 1u ||
+    if (m->i2c[0].slave_count != 2u ||
         m->i2c[0].slaves[0].addr != PCF50635_I2C_ADDR ||
         m->i2c[0].slaves[0].ctx != &m->pmu ||
+        m->i2c[0].slaves[1].addr != WM8991_I2C_ADDR ||
+        m->i2c[0].slaves[1].ctx != &m->codec ||
         m->i2c[1].slave_count != 0u ||
         m->pmu.tick_hz != m->tb_hz)
         return false;

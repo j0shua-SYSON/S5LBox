@@ -32,6 +32,16 @@ static const s5l_window_t DEVICE_WINDOWS[] = {
     { S5L8900_TVOUT_SDO_BASE,   S5L_TVOUT_BANK_SIZE, "tvout-sdo"     },
     { S5L8900_I2C0_BASE,  S5L8900_DEV_SIZE,   "i2c0"  },
     { S5L8900_I2C1_BASE,  S5L8900_DEV_SIZE,   "i2c1"  },
+    /*
+     * The two I2S windows. Decoded rather than stubbed for the same reason
+     * uart4 is: run62's census shows zero traffic on either page, but "no
+     * traffic yet" is a statement about how far the boot got, not about the
+     * window. The codec's identify() fails before any transfer is configured,
+     * so the first writes to these pages are downstream of the WM8991 model
+     * that lands with them — which is precisely why the two are one change.
+     */
+    { S5L8900_I2S0_BASE,  S5L8900_DEV_SIZE,   "i2s0"  },
+    { S5L8900_I2S1_BASE,  S5L8900_DEV_SIZE,   "i2s1"  },
     { S5L8900_SPI0_BASE,  S5L8900_DEV_SIZE,   "spi0"  },
     { S5L8900_SPI1_BASE,  S5L8900_DEV_SIZE,   "spi1"  },
     { S5L8900_USB_OTG_BASE, S5L8900_DEV_SIZE, "usb-otg" },
@@ -315,6 +325,12 @@ static uint32_t bus_read(void *ctx, uint32_t addr, unsigned bytes) {
         v = s5l_i2c_read(&m->i2c[0], addr - S5L8900_I2C0_BASE);
     } else if (mmio_word(addr, bytes, S5L8900_I2C1_BASE, S5L8900_DEV_SIZE)) {
         v = s5l_i2c_read(&m->i2c[1], addr - S5L8900_I2C1_BASE);
+    } else if (mmio_word(addr, bytes, S5L8900_I2S0_BASE, S5L8900_DEV_SIZE)) {
+        /* Word accesses only, as for the I2C controllers: the stock accessors
+         * are a bare `ldr`/`str` of a 32-bit word at a byte offset. */
+        v = s5l_i2s_read(&m->i2s[0], addr - S5L8900_I2S0_BASE);
+    } else if (mmio_word(addr, bytes, S5L8900_I2S1_BASE, S5L8900_DEV_SIZE)) {
+        v = s5l_i2s_read(&m->i2s[1], addr - S5L8900_I2S1_BASE);
     } else if (mmio_word(addr, bytes, S5L8900_SPI0_BASE, S5L8900_DEV_SIZE)) {
         v = s5l_spi_read(&m->spi[0], addr - S5L8900_SPI0_BASE);
     } else if (mmio_word(addr, bytes, S5L8900_SPI1_BASE, S5L8900_DEV_SIZE)) {
@@ -427,6 +443,16 @@ static void bus_write(void *ctx, uint32_t addr, uint32_t val, unsigned bytes) {
     if (mmio_word(addr, bytes, S5L8900_I2C1_BASE, S5L8900_DEV_SIZE)) {
         note_device(m, addr, val, true);
         s5l_i2c_write(&m->i2c[1], addr - S5L8900_I2C1_BASE, val);
+        return;
+    }
+    if (mmio_word(addr, bytes, S5L8900_I2S0_BASE, S5L8900_DEV_SIZE)) {
+        note_device(m, addr, val, true);
+        s5l_i2s_write(&m->i2s[0], addr - S5L8900_I2S0_BASE, val);
+        return;
+    }
+    if (mmio_word(addr, bytes, S5L8900_I2S1_BASE, S5L8900_DEV_SIZE)) {
+        note_device(m, addr, val, true);
+        s5l_i2s_write(&m->i2s[1], addr - S5L8900_I2S1_BASE, val);
         return;
     }
     if (mmio_word(addr, bytes, S5L8900_SPI0_BASE, S5L8900_DEV_SIZE)) {
@@ -763,14 +789,43 @@ bool s5l8900_init(s5l8900_t *m, uint32_t ram_base, uint32_t ram_size) {
     for (unsigned i = 0; i < S5L8900_I2C_COUNT; i++)
         s5l_i2c_reset(&m->i2c[i]);
     s5l_pcf50635_reset(&m->pmu, m->tb_hz);
+    s5l_wm8991_reset(&m->codec);
+    for (unsigned i = 0; i < S5L8900_I2S_COUNT; i++) s5l_i2s_reset(&m->i2s[i]);
     for (unsigned i = 0; i < S5L8900_SPI_COUNT; i++) s5l_spi_reset(&m->spi[i]);
     s5l_gpioic_reset(&m->gpioic);
     s5l_gpio_reset(&m->gpio);
+    /*
+     * The board's five switches, and the ORDER MATTERS: both blocks above
+     * power up all-zero, and two of the five buttons are active low, so their
+     * released level is HIGH. Applying the rest state here — after the resets
+     * that would wipe it, before the guest has configured anything — is what
+     * stops the volume keys from reading as held down for the whole boot. See
+     * s5l_buttons_reset() for why zeroing the struct is not enough.
+     */
+    s5l_buttons_reset(&m->buttons);
+    s5l_buttons_apply(&m->buttons, &m->gpio, &m->gpioic);
     s5l_usbotg_reset(&m->usbotg);
     {
         s5l_i2c_slave_t pmu;
         s5l_pcf50635_bind(&m->pmu, &pmu);
         if (!s5l_i2c_attach(&m->i2c[0], &pmu)) {
+            free(m->ram);
+            m->ram = NULL;
+            return false;
+        }
+        /*
+         * The WM8991 codec, /arm-io/i2c0/audio0 at seven-bit 0x1B. Attached
+         * next to the PMU on the same controller because the device tree puts
+         * it there; S5L_I2C_SLAVES has room for four, so this needs no header
+         * change. The other two nodes on i2c0 — the lis331dl accelerometer at
+         * 0x1d and the isl29003 ambient-light sensor at 0x44 — stay
+         * deliberately absent: nothing has established what they must answer,
+         * and an address that NAKs is a driver that fails cleanly, which is
+         * what both do today.
+         */
+        s5l_i2c_slave_t codec;
+        s5l_wm8991_bind(&m->codec, &codec);
+        if (!s5l_i2c_attach(&m->i2c[0], &codec)) {
             free(m->ram);
             m->ram = NULL;
             return false;
@@ -954,6 +1009,16 @@ void s5l8900_tick(s5l8900_t *m, uint32_t ticks) {
      * waiting, which nothing produces yet. */
     s5l_gpioic_set_line(&m->gpioic, S5L_GPIOIC_LINE_MULTITOUCH,
                         s5l_mtz2_irq(&m->mtz2));
+
+    /*
+     * The five switches, refreshed for the same reason: the guest's own stores
+     * to INTTYPE and INTLEVEL change what a level line asserts, and a switch
+     * that has not moved must still be presenting its level when that happens.
+     * s5l_buttons_set() has already driven any change at the exact instruction
+     * the host chose, so this is idempotent — re-driving an unchanged level
+     * latches nothing on either an edge line or a level one.
+     */
+    s5l_buttons_apply(&m->buttons, &m->gpio, &m->gpioic);
 
     for (unsigned g = 0; g < S5L_GPIOIC_GROUPS; g++) {
         unsigned line = s5l_gpioic_cascade(g);

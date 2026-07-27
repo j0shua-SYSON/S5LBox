@@ -106,15 +106,93 @@ static bool decode(uint32_t off, uint32_t base, unsigned *group) {
  * serviced -- which is exactly what the Z2's attention line does -- gets one
  * interrupt per report, which is what it wants.
  *
- * INTLEVEL and INTTYPE are still deliberately NOT consulted. They are stored
- * and read-modify-written exactly as the driver expects (0xc05a5530-
- * 0xc05a5600), but nothing in the shipped device tree asks for a non-default
- * configuration: every `interrupts` property's second cell —
- * /arm-io/spi1/multi-touch's included — is zero, so both registers stay zero
- * for every line this machine can drive, and interpreting them would be
- * inventing a polarity nobody selected. Callers of s5l_gpioic_set_line() state
- * assertion as `true`.
+ * THAT IS THE EDGE LINE. A LEVEL LINE IS A DIFFERENT MACHINE.
+ *
+ * INTLEVEL and INTTYPE used to be stored and never consulted, on the stated
+ * grounds that "every `interrupts` property's second cell is zero". That was
+ * only ever true of the lines that had been modelled. /device-tree/buttons
+ * uses cells 7 and 5 for all five of its lines, and both have INTTYPE bit 0
+ * set, which getInterruptType at 0xc05a429c proves is IOKit's own
+ * kIOInterruptTypeLevel. See the register map in core/include/soc.h for the
+ * full decode and the panic string that names bit 2 "auto-flip".
+ *
+ * For a line whose INTTYPE bit is set:
+ *
+ *   pending  <=  (raw bit == INTLEVEL bit)
+ *
+ * evaluated whenever anything on either side of that comparison moves. It is a
+ * SET-only rule. The latch is still a latch: only the guest's write-one-to-
+ * clear clears it, so a condition that goes away on its own does not silently
+ * un-report an interrupt the guest has already been given.
+ *
+ * That is why this file re-evaluates in four places rather than one — a device
+ * moving a line is only the most obvious of them:
+ *
+ *   set_line          the board moved the wire
+ *   write(INTSTAT)    the guest acknowledged; if the condition still holds a
+ *                     real level line asserts again immediately
+ *   write(INTLEVEL)   the guest changed which level asserts. This one is the
+ *                     whole mechanism, not an edge case — see below
+ *   write(INTTYPE)    the guest changed whether this line is level at all
+ *
+ * AUTO-FLIP, and why a button needs it. handleInterrupt at 0xc05a4358 reads a
+ * software shadow of the device tree's cell bit 2 and, for a line that has it,
+ * does `eor r2, r0, r6` on the INTLEVEL word and writes it back — inverting
+ * that one line's polarity — BEFORE dispatching the child handler and BEFORE
+ * acknowledging. So one wire reports both transitions: a press asserts, the
+ * flip makes the asserted condition false, the acknowledge therefore STICKS,
+ * and the release asserts again against the flipped polarity. Model the
+ * INTLEVEL write without re-evaluating and half of that disappears; model the
+ * acknowledge without the flip having happened first and it is run71's
+ * livelock again, on five more lines.
+ *
+ * Auto-flip itself is NOT modelled here, and deliberately: it is something the
+ * GUEST does, with a store this file already sees. Reproducing it in the model
+ * as well would mean the polarity flipped twice per interrupt.
+ *
+ * The EDGE path is untouched, including its rising-edge sense. There is an
+ * argument from the polarity byte that a cell-0 line is really active low in
+ * silicon and therefore falling-edge; it is unobservable, because no cell-0
+ * line in this machine has both a pin the guest reads and an interrupt, and
+ * changing it would break the one proven input path this emulator has.
  */
+
+/*
+ * Re-evaluate every LEVEL-configured line of one group and latch the ones whose
+ * asserting condition holds. SET-ONLY: see the note above. Edge lines are not
+ * touched at all here, which is what keeps the whole currently-working world —
+ * multi-touch included, whose cell is 0 — running through set_line's rising
+ * edge and nothing else.
+ */
+static void relatch_level(s5l_gpioic_t *g, unsigned group) {
+    /*
+     * `raw ^ level` is 0 in the bits where the wire equals the selected
+     * polarity, so its complement is "asserting". It is masked twice:
+     *
+     *   `type`   keeps only the lines the guest asked to be level-sensitive.
+     *   `driven` keeps only the lines this machine has a device on.
+     *
+     * THE SECOND MASK IS NOT DEFENSIVE. It was measured. Without it, run87
+     * spent its whole budget in an interrupt storm: /arm-io/i2c0/als and
+     * /arm-io/i2c0/pmu both have interrupt cell 1, which is LEVEL with
+     * INTLEVEL 0 — assert while LOW — and this machine models neither device,
+     * so their `raw` bit sat at the array's initial zero and `0 == 0` made
+     * them permanently asserted. The guest read and acknowledged group 2's
+     * pending word 668,039 times and never got past instruction ~96 million.
+     *
+     * An undriven line is not a line at level zero. It is a line with nothing
+     * on the end of it, and the model has to be able to say so — which is what
+     * `driven` is for, and why it is set by s5l_gpioic_set_line() for a FALSE
+     * level as well as a true one. A device stating "my line is low" is
+     * driving it; the absence of a device is not.
+     *
+     * The edge path never needed this: an undriven line has no rising edge, so
+     * it silently never latched. That is exactly why this was invisible until a
+     * level line existed.
+     */
+    g->stat[group] |= ~(g->raw[group] ^ g->level[group]) &
+                      g->type[group] & g->driven[group];
+}
 
 uint32_t s5l_gpioic_read(s5l_gpioic_t *g, uint32_t off) {
     unsigned group;
@@ -136,6 +214,11 @@ void s5l_gpioic_write(s5l_gpioic_t *g, uint32_t off, uint32_t val) {
          * a read-modify-write of one bit, so storing the word it hands back is
          * the same thing and needs no bit interpretation. */
         g->level[group] = val;
+        /* And this is the auto-flip store. The guest has just changed which
+         * level asserts, so a level line can start or stop asserting without
+         * any wire having moved. Re-evaluating here is what makes a button
+         * report its RELEASE as well as its press. */
+        relatch_level(g, group);
         return;
     }
     if (decode(off, GPIOIC_INTSTAT, &group)) {
@@ -147,9 +230,18 @@ void s5l_gpioic_write(s5l_gpioic_t *g, uint32_t off, uint32_t val) {
          * SET pending bits instead would have the driver raising an interrupt
          * every time it enabled a line.
          */
-        /* And it CLEARS. It does not re-latch from what is still driven —
-         * see the note above, and run71's 1,193,122 acknowledges. */
+        /* And for an EDGE line it CLEARS. It does not re-latch from what is
+         * still driven — see the note above, and run71's 1,193,122
+         * acknowledges. */
         g->stat[group] &= ~val;
+        /* A LEVEL line is the opposite, and that is not a contradiction: it is
+         * what "level-sensitive" means. If the wire still matches the selected
+         * polarity the condition is still true and the part still asserts.
+         * This does not reintroduce run71 for the buttons, because the guest's
+         * own auto-flip has already inverted the polarity by the time it
+         * acknowledges — handleInterrupt flips at 0xc05a4384 and acknowledges
+         * a level line at 0xc05a4418, in that order. */
+        relatch_level(g, group);
         return;
     }
     if (decode(off, GPIOIC_INTEN, &group)) {
@@ -166,6 +258,13 @@ void s5l_gpioic_write(s5l_gpioic_t *g, uint32_t off, uint32_t val) {
     }
     if (decode(off, GPIOIC_INTTYPE, &group)) {
         g->type[group] = val;
+        /* A line the guest has just declared level-sensitive is level-sensitive
+         * NOW, not after the next time its wire moves. initVector writes this
+         * register before INTLEVEL (0xc05a55e4 then 0xc05a5608), so on the
+         * first configure this evaluates against a polarity bit that is about
+         * to change — which is why INTLEVEL re-evaluates too, and why both
+         * being SET-only rather than assignments matters. */
+        relatch_level(g, group);
         return;
     }
     g->unknown_writes++;
@@ -177,11 +276,28 @@ void s5l_gpioic_set_line(s5l_gpioic_t *g, unsigned line, bool level) {
     unsigned group = line >> 5;
     uint32_t bit   = 1u << (line & 31u);
     bool was = (g->raw[group] & bit) != 0u;
+    bool first = (g->driven[group] & bit) == 0u;
     if (level) g->raw[group] |= bit;
     else       g->raw[group] &= ~bit;
+    /* Something is on the end of this wire. See relatch_level() for why that is
+     * a different fact from "the wire is low", and what it cost to learn. */
+    g->driven[group] |= bit;
+
+    if (g->type[group] & bit) {
+        /*
+         * LEVEL. Either transition can start an assertion, because which level
+         * asserts is the guest's choice and it inverts that choice after every
+         * interrupt on an auto-flip line. A line that has not moved cannot
+         * change the answer, so this is gated on the change — and on the very
+         * first drive, which is a change from "nothing on the wire" and is not
+         * visible in `raw` — and stays free of the per-tick refresh cost.
+         */
+        if (level != was || first) relatch_level(g, group);
+        return;
+    }
     /*
-     * A RISING EDGE latches. Two consequences worth stating, because callers
-     * refresh this every tick with the current level:
+     * EDGE, and A RISING EDGE latches. Two consequences worth stating, because
+     * callers refresh this every tick with the current level:
      *   - a line that is merely STILL high sets nothing, which is what stops
      *     the acknowledge/re-assert livelock run71 measured;
      *   - deasserting does NOT clear the latch, so a pulse shorter than the
@@ -194,6 +310,11 @@ void s5l_gpioic_set_line(s5l_gpioic_t *g, unsigned line, bool level) {
 bool s5l_gpioic_line(const s5l_gpioic_t *g, unsigned line) {
     if (!g || line >= S5L_GPIOIC_LINES) return false;
     return (g->raw[line >> 5] & (1u << (line & 31u))) != 0u;
+}
+
+bool s5l_gpioic_pending(const s5l_gpioic_t *g, unsigned line) {
+    if (!g || line >= S5L_GPIOIC_LINES) return false;
+    return (g->stat[line >> 5] & (1u << (line & 31u))) != 0u;
 }
 
 bool s5l_gpioic_group_irq(const s5l_gpioic_t *g, unsigned group) {
@@ -225,6 +346,24 @@ uint32_t s5l_gpio_read(const s5l_gpio_t *g, uint32_t off, unsigned bytes) {
         v |= ((g->regs[at >> 2] >> ((at & 3u) * 8u)) & 0xffu) << (i * 8u);
     }
     return v;
+}
+
+/*
+ * Tell every watcher whose pin's level differs from the snapshot in `before`.
+ * One implementation, shared by the guest's fsel store and by the board's
+ * s5l_gpio_drive(), so a watcher cannot be told about one and not the other.
+ */
+static void notify(s5l_gpio_t *g, const uint32_t *before) {
+    for (unsigned w = 0; w < S5L_GPIO_WATCHERS; w++) {
+        s5l_gpio_watch_t *watch = &g->watch[w];
+        if (!watch->armed || !watch->changed) continue;
+        unsigned group = (unsigned)(watch->pin >> 8);
+        if (group >= S5L_GPIO_PORTS) continue;
+        uint32_t mask = 1u << (watch->pin & 0x1fu);
+        uint32_t now  = g->regs[S5L_GPIO_PIN_REG(group) >> 2];
+        if (((before[group] ^ now) & mask) == 0u) continue;
+        watch->changed(watch->ctx, (now & mask) != 0u);
+    }
 }
 
 /* True if the byte at `off` belongs to some group's read-only level register. */
@@ -278,16 +417,34 @@ void s5l_gpio_write(s5l_gpio_t *g, uint32_t off, uint32_t val, unsigned bytes) {
         }
     }
 
-    for (unsigned w = 0; w < S5L_GPIO_WATCHERS; w++) {
-        s5l_gpio_watch_t *watch = &g->watch[w];
-        if (!watch->armed || !watch->changed) continue;
-        unsigned group = (unsigned)(watch->pin >> 8);
-        if (group >= S5L_GPIO_PORTS) continue;
-        uint32_t mask = 1u << (watch->pin & 0x1fu);
-        uint32_t now  = g->regs[S5L_GPIO_PIN_REG(group) >> 2];
-        if (((before[group] ^ now) & mask) == 0u) continue;
-        watch->changed(watch->ctx, (now & mask) != 0u);
-    }
+    notify(g, before);
+}
+
+/*
+ * The board drives an input pin. The level register is read-only to the GUEST
+ * — s5l_gpio_write() drops every store to it — but it is not read-only to the
+ * wire, and something has to put an input's level there. Kept as its own entry
+ * point on purpose: if a guest store and a board level reached the same code,
+ * the model could no longer answer "which one moved this pin", which is the
+ * question the read-only level register was built to settle.
+ */
+void s5l_gpio_drive(s5l_gpio_t *g, uint16_t pin, bool level) {
+    uint32_t before[S5L_GPIO_PORTS];
+    unsigned group = (unsigned)(pin >> 8);
+    unsigned bit   = (unsigned)(pin & 0xffu);
+    if (!g || group >= S5L_GPIO_PORTS || bit > 31u) return;
+
+    for (unsigned i = 0; i < S5L_GPIO_PORTS; i++)
+        before[i] = g->regs[S5L_GPIO_PIN_REG(i) >> 2];
+
+    uint32_t *reg = &g->regs[S5L_GPIO_PIN_REG(group) >> 2];
+    if (level) *reg |=  (1u << bit);
+    else       *reg &= ~(1u << bit);
+
+    /* A watcher is a subscription to the PIN, and the pin moved. It still only
+     * fires on a real change, which is what makes s5l_buttons_apply() safe to
+     * call on every tick. */
+    notify(g, before);
 }
 
 bool s5l_gpio_pin(const s5l_gpio_t *g, uint16_t pin) {

@@ -94,10 +94,36 @@ typedef NS_ENUM(NSUInteger, VMButton) {
  * this class rather than hard-coding the answer, so each control lights up on
  * its own the day its path exists.
  *
- * BUTTONS still do not work. core/ models no PMU button line and no ringer
- * GPIO, so -setButton:pressed: records the press and returns NO.
+ * BUTTONS NOW WORK — as far as the board. core/src/soc/buttons.c models all
+ * five switches on the GPIO pins and interrupt lines /device-tree/buttons
+ * names, and -setButton:pressed: queues a transition that the emulator thread
+ * hands to that model. This class method therefore returns nil: the path
+ * exists. Whether a particular guest is listening is a different and live
+ * question, and -buttonUnavailableReason below is where it is asked.
  */
 + (NSString *)buttonUnavailableReason;
+
+/*
+ * Whether the GUEST can currently see a button, as opposed to whether this app
+ * can send one.
+ *
+ * Returns nil once the board has accepted at least one transition; otherwise
+ * one line saying what it is waiting for. The most likely answer while this app
+ * runs the synthetic guest in VMGuest.c is that no driver has armed the button
+ * interrupt lines — which is the truthful answer, because AppleM68Buttons never
+ * polls a pin. It samples only after an interrupt it armed itself, so a press
+ * on a line nobody armed is one the guest provably cannot observe, and the
+ * board says so rather than pretending.
+ */
+- (NSString *)buttonUnavailableReason;
+
+/* Button delivery counters, for the status line and the log. `delivered` counts
+ * transitions the BOARD accepted; it is the only one that means the guest was
+ * offered anything. `refused` counts board refusals, which are retried. */
+- (void)buttonCountersQueued:(uint64_t *)queued
+                   delivered:(uint64_t *)delivered
+                     refused:(uint64_t *)refused
+                     dropped:(uint64_t *)dropped;
 
 /*
  * TOUCH does work — as far as the device. -sendTouchAtGuestX:y:phase: queues a
@@ -119,8 +145,17 @@ typedef NS_ENUM(NSUInteger, VMButton) {
 /* Short label for a button, for the control bar and for logs. */
 + (NSString *)nameForButton:(VMButton)button;
 
-/* Record a physical button's state. Returns whether the guest was told, which
- * is NO for as long as +buttonUnavailableReason is non-nil. */
+/*
+ * Move a physical switch.
+ *
+ * Returns whether the transition was QUEUED — not whether the guest saw it. The
+ * emulator thread hands it to the board between chunks, and the board is
+ * entitled to refuse while the guest has not armed that line or has not
+ * serviced the previous transition; a refusal is retried, not lost, and shows
+ * up in -buttonUnavailableReason. A NO here means it never got that far: the
+ * machine is not running, the button is not one of the five, or the queue was
+ * full of edges that must not be coalesced away.
+ */
 - (BOOL)setButton:(VMButton)button pressed:(BOOL)pressed;
 
 /* Whether that button is currently held, as last recorded. */

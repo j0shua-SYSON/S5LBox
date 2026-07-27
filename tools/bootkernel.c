@@ -355,7 +355,7 @@ static bool boot_option_takes_value(const char *option) {
         "-D", "-W", "-Z", "-p", "--restore", "-V", "-n", "-T",
         "-d", "-c", "-b", "-w", "-r", "--fstab", "--grow", "-R",
         "-X", "-H", "--call-probe", "--call-probe-kernel",
-        "--jailbreak-payload", "--touch"
+        "--jailbreak-payload", "--touch", "--button"
     };
 
     if (!option) return false;
@@ -910,6 +910,7 @@ typedef struct {
     unsigned    hot_page_n;
     uint64_t    steps, win_lo, win_hi, heartbeat;
     unsigned    ba_rev, ba_ver, ktail, nsnaps, ncall_probes, ndtov, ntouch;
+    unsigned    nbuttons;
     /* --ppp appends a boot argument, and it does so AFTER --print-config has
      * already exited. Without this the printed cmdline would be the one the
      * operator typed rather than the one the guest gets, and a reader would
@@ -977,6 +978,7 @@ static void boot_print_config(FILE *out, const boot_config_t *cfg,
     fprintf(out, "    %-20s %u\n", "abort trace lines", val->ktail);
     fprintf(out, "    %-20s %u\n", "call probes", val->ncall_probes);
     fprintf(out, "    %-20s %u\n", "touch taps", val->ntouch);
+    fprintf(out, "    %-20s %u\n", "button presses", val->nbuttons);
     fprintf(out, "    %-20s %u\n", "-D overrides", val->ndtov);
 }
 
@@ -5631,6 +5633,54 @@ typedef struct {
     uint64_t refusals;    /* device said no; see s5l_mtz2_set_contacts     */
 } touch_tap_t;
 
+/* --- DIAGNOSTIC: the scheduled button press (--button) ----------------------
+ *
+ * WHAT THIS IS AND IS NOT. It moves a physical switch on the emulated board at
+ * a chosen instruction and lets the guest's own AppleM68Buttons discover it —
+ * through the GPIO interrupt line it armed itself, and then by reading the pin
+ * through its own platform function. It does not dispatch a HID event, post a
+ * GSEvent or call UIKit. A Home press that fails to reach SpringBoard must LOOK
+ * like it failed, because that is the only way the thing between here and there
+ * gets found.
+ *
+ * A press is two transitions: the switch closes, and after `hold` instructions
+ * it opens. Each stage RETRIES on every subsequent instruction until the board
+ * accepts it -- and counts the refusals, because "the guest never armed the
+ * line" and "the press was never attempted" are different failures that must
+ * not look alike. See s5l_buttons_set() for what a refusal means.
+ */
+#define BUTTON_PRESS_MAX 8u
+/*
+ * THE DEBOUNCE FLOOR, and it is not a safety margin -- it is arithmetic.
+ *
+ * AppleM68Buttons does not read a pin when it is interrupted. Its interrupt
+ * action (0xc065a31c) does exactly one thing: arm a 14,000 us one-shot timer.
+ * Only when that expires does it sample all five pins (0xc065a2a8) and report
+ * what changed. So a press that has already been undone by the time the timer
+ * fires is sampled once, unchanged, and reported as nothing at all.
+ *
+ * 14,000 us of guest time is 0.014 * S5L8900_TB_HZ = 84,000 timebase ticks,
+ * and this machine advances the timebase by S5L8900_TB_HZ ticks per
+ * S5L8900_CPU_HZ CPU ticks with one CPU tick per retired instruction, so it is
+ * 0.014 * 412,000,000 = 5,768,000 instructions. A shorter hold is not a
+ * shorter press; it is no press, and the parser refuses it rather than letting
+ * a run spend an hour proving nothing.
+ */
+#define BUTTON_DEBOUNCE_INSTRS 5768000ull
+/* Default hold, shared with --touch's: comfortably past the debounce floor and
+ * short enough that a boot cap leaves room for both halves. */
+#define BUTTON_HOLD_DEFAULT TOUCH_HOLD_DEFAULT
+
+typedef struct {
+    unsigned which;       /* S5L_BUTTON_*                                  */
+    uint64_t at;          /* first instruction at which the press is tried */
+    uint64_t hold;        /* instructions between an accepted press/release */
+    unsigned stage;       /* 0 = want press, 1 = want release, 2 = done    */
+    uint64_t down_at;     /* instruction at which the press was ACCEPTED   */
+    uint64_t up_at;
+    uint64_t refusals;    /* the board said no; see s5l_buttons_set()      */
+} button_press_t;
+
 typedef enum {
     FAULT_DESC_ABSENT = 0,      /* nothing was attempted */
     FAULT_DESC_OK,              /* word read out of guest DRAM */
@@ -5932,6 +5982,11 @@ static struct {
      * touch_n is the hot-loop gate, exactly as call_probe_n is. */
     unsigned          touch_n;
     touch_tap_t       touch[TOUCH_TAP_MAX];
+
+    /* --- the scheduled button press; --button ----------------------------
+     * button_n is the hot-loop gate, exactly as touch_n is. */
+    unsigned          button_n;
+    button_press_t    button[BUTTON_PRESS_MAX];
 } G;
 
 /*
@@ -16560,6 +16615,91 @@ static BOOTKERNEL_NOINLINE void touch_tap_step(uint64_t n) {
     }
 }
 
+/*
+ * Advance every scheduled button press by one instruction. Not inlined, for the
+ * same reason touch_tap_step() is not: the step loop's whole cost when no press
+ * is configured is one test of a global that is never written after startup.
+ */
+static BOOTKERNEL_NOINLINE void button_press_step(uint64_t n) {
+    if (!G.mach) return;
+    for (unsigned i = 0; i < G.button_n; i++) {
+        button_press_t *b = &G.button[i];
+
+        if (b->stage == 0u) {
+            if (n < b->at) continue;
+        } else if (b->stage == 1u) {
+            if (n < b->down_at + b->hold) continue;
+        } else {
+            continue;
+        }
+
+        /*
+         * The board decides. s5l_buttons_set() says no while the guest has not
+         * armed that line and while it has not serviced the previous
+         * transition, and either is a real fact about the guest that must stay
+         * visible rather than being retried into invisibility.
+         */
+        if (!s5l_buttons_set(&G.mach->buttons, &G.mach->gpio, &G.mach->gpioic,
+                             b->which, b->stage == 0u)) {
+            b->refusals++;
+            continue;              /* not armed yet, or still unserviced */
+        }
+        if (b->stage == 0u) { b->down_at = n; b->stage = 1u; }
+        else                { b->up_at   = n; b->stage = 2u; }
+    }
+}
+
+static void button_report(void) {
+    if (!G.button_n) return;
+    const s5l_buttons_t *b = G.mach ? &G.mach->buttons : NULL;
+
+    printf("\n=== BUTTONS: SCHEDULED PRESSES (%u) ===\n", G.button_n);
+    printf("    A press is accepted by the BOARD, not by the guest. `down`/`up`\n"
+           "    are the instructions at which s5l_buttons_set() returned true;\n"
+           "    `refused` counts instructions on which it returned false, which\n"
+           "    means the guest had not armed that line's INTEN bit or had not\n"
+           "    yet serviced the previous transition. Acceptance is not\n"
+           "    observation: AppleM68Buttons samples the pin %llu instructions\n"
+           "    after the interrupt, so a press must outlast that to be seen.\n",
+           (unsigned long long)BUTTON_DEBOUNCE_INSTRS);
+    for (unsigned i = 0; i < G.button_n; i++) {
+        const button_press_t *p = &G.button[i];
+        printf("    press %u  %-9s at %-12llu hold %-10llu  ",
+               i, s5l_button_name(p->which), (unsigned long long)p->at,
+               (unsigned long long)p->hold);
+        if (p->stage == 0u) printf("NEVER ACCEPTED");
+        else if (p->stage == 1u)
+            printf("down @%llu, up NEVER ACCEPTED",
+                   (unsigned long long)p->down_at);
+        else
+            printf("down @%llu up @%llu",
+                   (unsigned long long)p->down_at,
+                   (unsigned long long)p->up_at);
+        printf("  refused %llu\n", (unsigned long long)p->refusals);
+    }
+    if (!b) return;
+    printf("    board:  sets %llu  refused %llu  edges driven %llu\n",
+           (unsigned long long)b->sets, (unsigned long long)b->refused,
+           (unsigned long long)b->edges);
+    printf("    wiring: ");
+    for (unsigned i = 0; i < S5L_BUTTON_COUNT; i++)
+        printf("%s=pin 0x%04x/line %u%s ", s5l_button_name(i),
+               s5l_button_pin(i), s5l_button_line(i),
+               s5l_buttons_held(b, i) ? "(HELD)" : "");
+    printf("\n");
+    /*
+     * The three numbers that say whether the guest is listening at all. INTEN
+     * group 1 is what run86 measured settling at 0x00002f00; a zero here means
+     * AppleM68Buttons never started and every press was correctly refused.
+     */
+    if (G.mach)
+        printf("    gpioic group 1: en 0x%08x  stat 0x%08x  level 0x%08x  "
+               "type 0x%08x   pin word 0x%08x\n",
+               G.mach->gpioic.en[1], G.mach->gpioic.stat[1],
+               G.mach->gpioic.level[1], G.mach->gpioic.type[1],
+               s5l_gpio_read(&G.mach->gpio, S5L_GPIO_PIN_REG(22u), 4u));
+}
+
 static void touch_report(void) {
     if (!G.touch_n) return;
     const s5l_mtz2_t *d = G.mach ? &G.mach->mtz2 : NULL;
@@ -21967,6 +22107,7 @@ static void boot_print_usage(FILE *stream, const char *argv0) {
             "          [--call-probe <user-mode-pc>] ...\n"
             "          [--call-probe-kernel <kernel-mode-pc>] ...\n"
             "          [--touch <at>:<x>:<y>[:<hold>]] ...\n"
+            "          [--button <name>:<at>[:<hold>]] ...\n"
             "          [--external-md <immutable-source.img> <new-work.img>]\n"
             "          [--jailbreak-payload <path>]\n"
             "          [-D <node/path>:<prop>=<value>] ...\n"
@@ -22039,6 +22180,25 @@ static void boot_print_usage(FILE *stream, const char *argv0) {
             "      accepts it, and the refusals are reported: \"the guest never\n"
             "      read the first report\" and \"the tap was never attempted\" are\n"
             "      different failures and must not print the same.\n"
+            "  --button <name>:<at>[:<hold>]  repeatable, up to 8. At\n"
+            "      instruction <at>, move one of the board's five physical\n"
+            "      switches to its pressed position; <hold> instructions after\n"
+            "      that was ACCEPTED (default 24,000,000) move it back. <name>\n"
+            "      is the device tree's own: hold, menu, volup, voldown,\n"
+            "      ringerab -- menu is Home and hold is Power. For the ringer,\n"
+            "      pressed means the position the guest reports as MUTED.\n"
+            "      The board then drives the pin and the GPIO interrupt line\n"
+            "      the guest armed itself, and AppleM68Buttons reads the pin\n"
+            "      through its own platform function 14 ms later. Nothing here\n"
+            "      dispatches a HID event or calls UIKit, so a press that does\n"
+            "      not reach SpringBoard looks broken instead of being faked\n"
+            "      past. Each stage retries every instruction until the board\n"
+            "      accepts it, and the refusals are reported: \"the guest never\n"
+            "      armed that line\" and \"the press was never attempted\" are\n"
+            "      different failures and must not print the same. A <hold>\n"
+            "      below the guest's own 14 ms debounce (5,768,000\n"
+            "      instructions) is REFUSED, because it would be sampled once,\n"
+            "      unchanged, and reported as nothing at all.\n"
             "  -D  patch a 4-byte device-tree property in the in-memory copy\n"
             "      (empty path == root), e.g. -D cpus/cpu0:timebase-frequency=6000000\n"
             "  -r  load a raw disk image into DRAM, publish it as the RAMDisk\n"
@@ -22127,6 +22287,10 @@ int main(int argc, char **argv) {
     touch_tap_t touch_taps[TOUCH_TAP_MAX];
     unsigned touch_n = 0;
     memset(touch_taps, 0, sizeof touch_taps);
+    /* --button, for exactly the same reason and with the same trap. */
+    button_press_t button_presses[BUTTON_PRESS_MAX];
+    unsigned button_n = 0;
+    memset(button_presses, 0, sizeof button_presses);
     uint64_t steps = UINT64_C(2000000);
     const char *dtpath = NULL;
     const char *cmdline = "debug=0x8 serial=1";
@@ -22517,6 +22681,81 @@ int main(int argc, char **argv) {
             }
             call_probe_modes[call_probe_n] = probe_mode;
             call_probe_pcs[call_probe_n++] = probe_pc;
+        }
+        else if (!strcmp(argv[i], "--button")) {
+            /*
+             * --button <name>:<at>[:<hold>]
+             *
+             * Every field is validated here rather than at press time, for the
+             * same reason --touch's are: a press that the board would refuse
+             * on every instruction from `at` to the end of the run reads
+             * exactly like "the guest never armed the line", and only one of
+             * those is the user's mistake.
+             */
+            const char *spec = argv[++i];
+            char *end = NULL;
+            unsigned long long at, hold = BUTTON_HOLD_DEFAULT;
+            unsigned which = S5L_BUTTON_COUNT;
+            size_t namelen;
+            if (!spec) { fprintf(stderr, "--button: missing value\n"); return 1; }
+            if (button_n >= BUTTON_PRESS_MAX) {
+                fprintf(stderr, "--button: at most %u presses\n",
+                        BUTTON_PRESS_MAX);
+                return 1;
+            }
+            /* The name is the device tree's own, matched exactly against
+             * s5l_button_name() so the harness cannot know a button the model
+             * does not have. */
+            {
+                const char *colon = strchr(spec, ':');
+                if (!colon) goto button_bad;
+                namelen = (size_t)(colon - spec);
+                for (unsigned q = 0; q < S5L_BUTTON_COUNT; q++) {
+                    const char *nm = s5l_button_name(q);
+                    if (strlen(nm) == namelen && !memcmp(nm, spec, namelen)) {
+                        which = q;
+                        break;
+                    }
+                }
+                if (which >= S5L_BUTTON_COUNT) {
+                    fprintf(stderr, "--button: unknown button '%.*s'; the "
+                            "device tree's own names are:", (int)namelen, spec);
+                    for (unsigned q = 0; q < S5L_BUTTON_COUNT; q++)
+                        fprintf(stderr, " %s", s5l_button_name(q));
+                    fprintf(stderr, " (menu is Home, hold is Power)\n");
+                    return 1;
+                }
+                spec = colon + 1;
+            }
+            at = strtoull(spec, &end, 0);
+            if (end == spec) goto button_bad;
+            if (*end == ':') {
+                spec = end + 1;
+                hold = strtoull(spec, &end, 0);
+                if (end == spec) goto button_bad;
+            }
+            if (*end != '\0') goto button_bad;
+            if (hold < BUTTON_DEBOUNCE_INSTRS) {
+                fprintf(stderr,
+                        "--button: hold %llu is below the guest's own debounce "
+                        "of %llu instructions. AppleM68Buttons does not read a "
+                        "pin when it is interrupted; it arms a 14 ms timer and "
+                        "samples every pin when that expires, so a press this "
+                        "short is sampled once, unchanged, and reported as "
+                        "nothing at all.\n",
+                        hold, (unsigned long long)BUTTON_DEBOUNCE_INSTRS);
+                return 1;
+            }
+            button_presses[button_n].which = which;
+            button_presses[button_n].at    = at;
+            button_presses[button_n].hold  = hold;
+            button_n++;
+            continue;
+        button_bad:
+            fprintf(stderr,
+                    "--button: expected <name>:<at>[:<hold>], got '%s'\n",
+                    argv[i]);
+            return 1;
         }
         else if (!strcmp(argv[i], "--touch")) {
             /*
@@ -23010,6 +23249,7 @@ int main(int argc, char **argv) {
     resolved.nsnaps       = nsnaps;
     resolved.ncall_probes = call_probe_n;
     resolved.ntouch       = touch_n;
+    resolved.nbuttons     = button_n;
     resolved.ndtov        = ndtov;
     resolved.ppp          = ppp;
 
@@ -24371,6 +24611,24 @@ external_md_work_ready:
      */
     for (unsigned q = 0; q < touch_n; q++) G.touch[q] = touch_taps[q];
     G.touch_n = touch_n;
+    /*
+     * The scheduled presses, with the SAME ordering rule and for the same
+     * reason: G is zeroed by spy_install(), so button_n is set LAST and is
+     * what arms the step loop. AGENT_HANDOFF 23.4a records a 27-minute boot
+     * lost to exactly this mistake with a different option.
+     */
+    for (unsigned q = 0; q < button_n; q++) G.button[q] = button_presses[q];
+    G.button_n = button_n;
+    if (button_n) {
+        printf("buttons   : armed on %u press%s:", button_n,
+               button_n == 1u ? "" : "es");
+        for (unsigned q = 0; q < button_n; q++)
+            printf(" %s@%llu hold%llu",
+                   s5l_button_name(button_presses[q].which),
+                   (unsigned long long)button_presses[q].at,
+                   (unsigned long long)button_presses[q].hold);
+        printf("\n");
+    }
     if (touch_n) {
         printf("touch     : armed on %u tap%s:", touch_n,
                touch_n == 1u ? "" : "s");
@@ -24969,6 +25227,7 @@ external_md_work_ready:
             thread_exception_return_gate_va, sp_before);
         s5l8900_tick(&mach, 1);
         if (G.touch_n) touch_tap_step(n);
+        if (G.button_n) button_press_step(n);
         if (!save_due_snapshots(&mach, snaps, nsnaps)) return 4;
 
         if (strex_rd < 16 && mach.cpu.r[15] != last_pc) {
@@ -25422,6 +25681,7 @@ external_md_work_ready:
     /* ------------------------------------------- the user-mode call probe --- */
     call_probe_report();
     touch_report();
+    button_report();
 
     /*
      * WHERE THE RUN ENDED, instruction by instruction.

@@ -248,3 +248,39 @@ expect_refused(touch_trailing_junk "expected <at>:<x>:<y>"
     absent-kernel --touch 1000:160:240:500x --print-config)
 expect_refused(touch_missing_value "missing option value"
     absent-kernel --touch)
+
+# --------------------------------------------------------------------------
+# 7a. --button, the scheduled press on one of the board's five switches.
+#
+# The same shape as --touch's checks, plus the one that is specific to a
+# button: a hold shorter than the guest's own 14 ms debounce is refused, because
+# AppleM68Buttons samples a pin only after a timer it arms from the interrupt,
+# so a press that has already been undone by then is reported as nothing at all.
+# Refusing it at parse time is what stops a run spending an hour proving that.
+expect_config(button_is_counted
+    "button presses       1" absent-kernel --button menu:1000 --print-config)
+expect_config(button_repeats
+    "button presses       3" absent-kernel --button menu:1000
+    --button hold:2000 --button ringerab:3000:6000000 --print-config)
+expect_config(no_button_is_zero
+    "button presses       0" absent-kernel --print-config)
+# Every one of the tree's five names is accepted, and nothing else is.
+expect_config(button_all_five_names
+    "button presses       5" absent-kernel --button hold:1 --button menu:2
+    --button volup:3 --button voldown:4 --button ringerab:5 --print-config)
+expect_refused(button_unknown_name "unknown button 'home'"
+    absent-kernel --button home:1000 --print-config)
+expect_refused(button_empty_name "unknown button ''"
+    absent-kernel --button :1000 --print-config)
+expect_refused(button_short_hold "below the guest's own debounce"
+    absent-kernel --button menu:1000:1000 --print-config)
+expect_refused(button_zero_hold "below the guest's own debounce"
+    absent-kernel --button menu:1000:0 --print-config)
+expect_refused(button_malformed "expected <name>:<at>"
+    absent-kernel --button menu-1000 --print-config)
+expect_refused(button_missing_at "expected <name>:<at>"
+    absent-kernel --button menu: --print-config)
+expect_refused(button_trailing_junk "expected <name>:<at>"
+    absent-kernel --button menu:1000:24000000x --print-config)
+expect_refused(button_missing_value "missing option value"
+    absent-kernel --button)

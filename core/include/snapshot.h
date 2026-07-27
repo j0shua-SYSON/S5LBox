@@ -98,7 +98,61 @@
  *     instructions later. The capture also cannot be reconstructed: it is the
  *     only record of what the guest transmitted before the checkpoint, and the
  *     milestone this port exists for is a six-byte sequence at its head. */
-#define SNAPSHOT_VERSION   10u
+/* v11: the WM8991 codec and both I2S windows joined MACH. The codec is
+ *      serialised immediately after the PMU — the two I2C slaves adjacent, in
+ *      the order they are attached — and the I2S pair immediately after it, so
+ *      EVERY field from the SPI controllers onwards moves by 680 bytes — 488
+ *      for the codec and 96 for each window. That placement is what makes this
+ *      a bump rather than a free append: a v10
+ *      file read as v11 would hand the PMU's tail to the codec, then read spi0
+ *      out of the middle of a register file and carry on. It would MISPARSE,
+ *      not fail, and the first symptom would be a touch controller whose FIFO
+ *      level came from a codec register — a divergence that surfaces a billion
+ *      instructions later, which is the exact failure this format exists to
+ *      prevent.
+ *
+ *      The codec's state also cannot be reconstructed by re-probing. Its
+ *      transfer position is genuinely in flight across a checkpoint: the stock
+ *      controller sets the register pointer in one I2C transaction and reads in
+ *      the NEXT, so a snapshot taken between them has already told the guest
+ *      which register it is about to read, and `second_byte` records whether
+ *      the MSB of that register has already gone out on the wire. A file with
+ *      neither would resume the read byte-swapped. `written[]` matters for the
+ *      same reason it does on the PMU: it is what separates "this register
+ *      holds zero because the guest wrote zero" from "nobody has ever touched
+ *      it", and only the latter is worth recording in a census.
+ *
+ *      The two I2S windows are seven stored words each and no more, because the
+ *      driver never reads one back — see the I2S block in soc.h. They are still
+ *      state: they are the configuration a resumed transfer would run under.
+ *      Their windows additionally appear in GEOM, so a v10 file would fail the
+ *      geometry check even if the payload happened to line up. */
+/* v12: the board's five physical buttons joined MACH, immediately after the
+ *      GPIO pin block, so every field from the touch controller onwards moves
+ *      by 32 bytes. Which switches are held cannot be recovered from anything
+ *      else in the file: the pin levels alone do not say, because two of the
+ *      five are wired active low, so a RELEASED volume key and a PRESSED Home
+ *      button are the same pin level and only this byte tells them apart. A
+ *      v11 file read as v12 would therefore misparse the Z2 onwards as well as
+ *      losing the state, which is why this is a hard break and not a field
+ *      that could have been defaulted.
+ *
+ *      The refusal counter travels with it deliberately. A restored run that
+ *      silently zeroed it would report a host that had been told "no" a
+ *      thousand times as one that had never asked — and "the guest never armed
+ *      the line" is exactly the diagnosis those refusals exist to carry.
+ *
+ *      The GPIO interrupt controller grew a `driven` mask in the same change,
+ *      immediately after `raw`, for the same class of reason: it records which
+ *      of the 224 lines have a device on the end of them at all, and a level
+ *      line's pending condition is evaluated only for those. A file without it
+ *      would restore a machine in which every level line was undriven and so
+ *      permanently silent — or, defaulted the other way, one in which the seven
+ *      unmodelled level lines asserted forever. That second one is not
+ *      hypothetical: it is what run87 measured before the mask existed,
+ *      668,039 acknowledges of a group-2 pending word the guest could never
+ *      clear, and no progress past instruction ~96 million. */
+#define SNAPSHOT_VERSION   12u
 
 typedef enum {
     SNAP_OK = 0,

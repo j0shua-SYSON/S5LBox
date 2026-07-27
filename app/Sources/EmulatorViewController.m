@@ -650,9 +650,11 @@ static const NSUInteger kConsoleScrollback = 12000;
           pressed:(BOOL)pressed {
     (void)bar;
 
-    /* Unreachable while +[VMEngine buttonUnavailableReason] is non-nil, because
-     * the bar disables every key. Wired regardless: the day that returns nil,
-     * the keys light up and this is already the path they take. */
+    /* Reachable now: +[VMEngine buttonUnavailableReason] returns nil, the bar
+     * enables every key, and this queues a transition the emulator thread hands
+     * to the board's five switches. A NO here means it was not even queued —
+     * the machine is not running, or the queue was full of edges that must not
+     * be coalesced away — and never that the guest ignored it. */
     [_engine setButton:button pressed:pressed];
     [self refreshStatusLine];
 }

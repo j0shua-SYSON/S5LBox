@@ -4,11 +4,18 @@
 //  An iPhone 3G has five inputs that are not the screen: Home, Sleep/Wake, the
 //  two volume keys and the ringer switch. This is a row of them.
 //
-//  It is a row of DISABLED keys, and it says so underneath, because nothing
-//  behind them exists: core/ models no PMU button line and no ringer GPIO, so
-//  a press has nowhere to go. The bar asks VMEngine for the reason rather than
-//  deciding it — +[VMEngine buttonUnavailableReason] returning nil is the single
-//  edit that makes every key here live.
+//  The keys are LIVE now. core/src/soc/buttons.c models all five switches on
+//  the GPIO pins and interrupt lines /device-tree/buttons names, so a press has
+//  somewhere to go: VMEngine queues it and the emulator thread hands it to the
+//  board. The bar still asks VMEngine for a reason rather than deciding for
+//  itself, and +[VMEngine buttonUnavailableReason] returning nil is what lights
+//  it up.
+//
+//  "Live" is a claim about the emulator, not about the guest. Whether anything
+//  in the guest is listening is a separate question with its own answer in
+//  -[VMEngine buttonUnavailableReason]; while this app runs the synthetic guest
+//  in VMGuest.c the honest answer is that no driver has armed the button
+//  interrupt lines, and the board refuses every press for that reason.
 //
 //  Copyright (c) 2026 j0shua-SYSON. MIT licensed.
 //

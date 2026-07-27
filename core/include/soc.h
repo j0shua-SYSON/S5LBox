@@ -108,6 +108,22 @@
 #define S5L8900_GPIO_BASE   0x3e400000u
 #define S5L8900_MIU_BASE    0x38100000u   /* clkrstgen's second reg range */
 #define S5L8900_EDGEIC_BASE 0x38e02000u
+/*
+ * The two I2S controllers. /arm-io/i2s0 carries reg {0x4a00000,0x1000} and
+ * /arm-io/i2s1 {0x4d00000,0x1000}, and arm-io maps child+0x38000000 — the same
+ * derivation every other peripheral here uses. The guest's own driver prints a
+ * mapped VA for each on every boot, so the pair is confirmed twice.
+ *
+ * As with uart4 there is deliberately NO S5L8900_IRQ_I2S0/1 constant. The
+ * `interrupts` properties say 0x86 and 0xaa, but both nodes name
+ * `interrupt-parent = /arm-io/gpio` — they are GPIO-IC lines, not VIC lines —
+ * and nothing in this model raises either. A constant that looks wired but is
+ * not is the landmine the old S5L8900_GPIO_BASE was; it joins the header the
+ * day something can actually assert it.
+ */
+#define S5L8900_I2S0_BASE   0x3ca00000u
+#define S5L8900_I2S1_BASE   0x3cd00000u
+#define S5L8900_I2S_COUNT   2u
 #define S5L8900_DEV_SIZE    0x00001000u   /* per-peripheral window */
 
 /*
@@ -536,10 +552,57 @@ void     s5l_power_write(s5l_power_t *p, uint32_t off, uint32_t val);
  *   init, 0xc05a51a8: shadow[g] = 0 and 0xC0 + 4*g <- 0 for g < [r5+0x78],
  *   which is /arm-io/gpio's `#interrupt-groups` = 7.
  *
- *   configure, 0xc05a5530-0xc05a5600: reads 0xE0 + 4*group and 0x80 + 4*group
- *   and writes each back with one bit replaced — a read-modify-write of two
- *   configuration registers, from bit 0 and bit 1 of the device tree's second
- *   interrupt cell respectively. Bit 2 goes to a software shadow only.
+ *   initVector, 0xc05a54b8-0xc05a562c (the "configure" this file used to call
+ *   it): reads 0xE0 + 4*group and 0x80 + 4*group and writes each back with one
+ *   bit replaced — a read-modify-write of two configuration registers, from
+ *   bit 0 and bit 1 of the device tree's second interrupt cell respectively.
+ *   Bit 2, and bit 0 a second time, also go to software shadows. See below.
+ *
+ * THE SECOND INTERRUPT CELL, and why this file no longer ignores it.
+ *
+ * An earlier revision of this header said "every `interrupts` property's second
+ * cell is zero, so both registers stay zero for every line this machine can
+ * drive". That was only ever true of the lines that had been modelled. The
+ * shipped tree uses cells 0, 1, 2, 3, 5 and 7 across eleven nodes, and
+ * /device-tree/buttons uses 7 and 5 for all five of its lines.
+ *
+ *   cell bit 0  -> INTTYPE bit (0xE0 + 4*group), 0xc05a55c8-0xc05a55e4,
+ *                  AND a software shadow at this+0x8c.
+ *   cell bit 1  -> INTLEVEL bit (0x80 + 4*group), 0xc05a55e8-0xc05a5608.
+ *   cell bit 2  -> a software shadow at this+0x84, and nothing else.
+ *   bits 3..31  -> dead. The only masks applied to the cell in the whole
+ *                  function are #5, #1, >>1 &1 and >>2 &1.
+ *
+ * What those two bits MEAN is settled by the driver itself, twice:
+ *
+ *   - getInterruptType, 0xc05a429c-0xc05a42b0, stores `cell & 1` as IOKit's
+ *     own type value, and kIOInterruptTypeLevel is 1 and kIOInterruptTypeEdge
+ *     is 0. So INTTYPE bit 1 == LEVEL-SENSITIVE.
+ *   - 0xc05a54fc `and r3, r8, #5` / `cmp r3, #4` calls a panic whose string at
+ *     0xc05ac940 is "auto-flip GPIO interrupts must be level-triggered". So
+ *     cell bit 2 == AUTO-FLIP, and it is illegal without bit 0. Corroboration:
+ *     the shipped tree contains cells 0,1,2,3,5,7 and never 4 or 6 — exactly
+ *     the two values that trip that assertion.
+ *
+ * AUTO-FLIP is how a GPIO button reports both press and release with one line.
+ * handleInterrupt at 0xc05a4358-0xc05a4390 reads the this+0x84 shadow and, for
+ * an auto-flip line, does `eor r2, r0, r6` on the INTLEVEL word and writes it
+ * back — inverting that line's polarity bit — BEFORE dispatching the child
+ * handler and BEFORE acknowledging. So the next interrupt is the opposite
+ * transition. That shadow is read nowhere else in the class.
+ *
+ * ACKNOWLEDGE ORDER IS NOT UNIFORM, and it is decided by the this+0x8c shadow,
+ * i.e. by cell bit 0: an EDGE line is acknowledged at 0xc05a4354, before the
+ * child handler; a LEVEL line at 0xc05a4418, after it returns. handleInterrupt
+ * then re-reads 0xA0 + 4*group and loops until it reads zero (0xc05a42fc-
+ * 0xc05a4424), highest set bit first, and it never masks with INTEN.
+ *
+ * These were measured as well as read. run86's group-1 registers settle at
+ * INTTYPE 0x00002f00 and INTLEVEL 0x00002900 — five lines configured, and the
+ * three whose cell is 7 have their INTLEVEL bit set while the two whose cell is
+ * 5 do not — and group 5 settles at INTTYPE 0x00000000, INTLEVEL 0x00000004,
+ * which is /arm-io/spi0/lcd0's `interrupts {162, 2}`: bit 0 clear, bit 1 set.
+ * Four groups, six distinct cell values, no disagreement.
  *
  * The seven cascade lines are /arm-io/gpio's own `interrupts`, read out of the
  * shipped tree: {0x21,0x20,0x1f,0x03,0x02,0x01,0x00} = {33,32,31,3,2,1,0},
@@ -575,15 +638,37 @@ typedef struct {
     /*
      * What the board is driving into each group right now, which is NOT a
      * register: no guest access can reach it and it is not part of the page.
-     * It exists because the pending latch is EDGE-triggered (see gpioic.c),
-     * so setting a line has to know whether it was already high — a device
-     * that holds its line up until it is serviced must produce one interrupt
-     * and not one per refresh. Getting that backwards cost run71 a
-     * 1,193,122-iteration livelock in which the guest acknowledged the touch
+     * It exists because the pending latch is EDGE-triggered for an EDGE line
+     * (see gpioic.c), so setting a line has to know whether it was already
+     * high — a device that holds its line up until it is serviced must produce
+     * one interrupt and not one per refresh. Getting that backwards cost run71
+     * a 1,193,122-iteration livelock in which the guest acknowledged the touch
      * line half a billion instructions' worth of times and never read the
      * report it was being told about.
+     *
+     * It is load-bearing a second way now: a LEVEL line's pending condition is
+     * `raw bit == INTLEVEL bit`, so `raw` is re-consulted every time the guest
+     * writes INTSTAT, INTLEVEL or INTTYPE, not only when a device moves a line.
      */
     uint32_t raw  [S5L_GPIOIC_GROUPS];
+    /*
+     * WHICH LINES HAVE A DEVICE ON THE END OF THEM. Set the first time anything
+     * calls s5l_gpioic_set_line() for that line, for a FALSE level as well as a
+     * true one, and never cleared except by reset.
+     *
+     * This is not the same fact as `raw`, and conflating the two cost run87 its
+     * entire budget. Eleven nodes hang off /arm-io/gpio and this machine models
+     * four of them; /arm-io/i2c0/als and /arm-io/i2c0/pmu are among the seven it
+     * does not, and both declare interrupt cell 1 — LEVEL, asserting while LOW.
+     * With `raw` at its initial zero and no way to say "nothing drives this",
+     * `raw == INTLEVEL` made them permanently asserted, and the guest read and
+     * acknowledged group 2's pending word 668,039 times without ever getting
+     * past instruction ~96 million.
+     *
+     * The edge path never needed it, because an undriven line has no rising
+     * edge and silently never latched. A level line has no such luck.
+     */
+    uint32_t driven[S5L_GPIOIC_GROUPS];
 
     uint64_t unknown_reads, unknown_writes;
     uint32_t unknown_off[S5L_GPIOIC_UNKNOWN_OFF];
@@ -600,10 +685,21 @@ void     s5l_gpioic_write(s5l_gpioic_t *g, uint32_t off, uint32_t val);
  * the wire is doing and the controller decides what to latch. Out-of-range
  * lines are refused rather than wrapped — a device wired to a line this
  * controller does not have is a bug that must not silently drive a real one.
+ *
+ * `level` is the electrical level on the wire, NOT "please interrupt". For an
+ * EDGE line the controller latches a rising edge of it; for a LEVEL line it
+ * latches while it equals that line's INTLEVEL bit. Which of the two applies
+ * is the guest's choice, recorded in INTTYPE, and a caller must not try to
+ * anticipate it: a device that inverted its own level to "make the interrupt
+ * happen" would break the moment the guest flipped the polarity, which for an
+ * auto-flip line is after every single interrupt.
  */
 void     s5l_gpioic_set_line(s5l_gpioic_t *g, unsigned line, bool level);
 /* Is that line currently being driven? Mirrors set_line for tests. */
 bool     s5l_gpioic_line(const s5l_gpioic_t *g, unsigned line);
+/* Is that line's pending bit latched? Mirrors the INTSTAT read for tests and
+ * for the button model's "the guest has not serviced the last edge" refusal. */
+bool     s5l_gpioic_pending(const s5l_gpioic_t *g, unsigned line);
 
 /* This group's output: OR(STAT & EN). */
 bool     s5l_gpioic_group_irq(const s5l_gpioic_t *g, unsigned group);
@@ -688,6 +784,21 @@ void     s5l_gpio_write(s5l_gpio_t *g, uint32_t off, uint32_t val,
 /* The level of one device-tree pin id (group << 8 | bit). */
 bool     s5l_gpio_pin(const s5l_gpio_t *g, uint16_t pin);
 /*
+ * THE OTHER END OF THE WIRE. The level register is read-only to the GUEST —
+ * s5l_gpio_write() drops stores to it, and the fsel path is the only way the
+ * guest moves a pin — but a pin the BOARD drives is an input, and something
+ * has to put its level there. This is that, and it is deliberately a separate
+ * entry point from s5l_gpio_write(): a model in which a guest store and a
+ * board level reached the same code could not answer "which one moved this
+ * pin", which is the question the read-only level register exists to settle.
+ *
+ * Watchers fire on a real change, exactly as they do for a guest store, because
+ * a watcher is a subscription to the PIN and the pin moved.
+ *
+ * Out-of-range groups and bits are dropped rather than wrapped.
+ */
+void     s5l_gpio_drive(s5l_gpio_t *g, uint16_t pin, bool level);
+/*
  * Call `changed` whenever a guest store alters that pin's level. Refuses a
  * pin outside groups 0..24, a NULL callback, a full table, and a pin that is
  * already watched — silently shadowing a subscription would hide exactly the
@@ -695,6 +806,219 @@ bool     s5l_gpio_pin(const s5l_gpio_t *g, uint16_t pin);
  */
 bool     s5l_gpio_watch(s5l_gpio_t *g, uint16_t pin, void *ctx,
                         void (*changed)(void *ctx, bool level));
+
+/* ------------------------------------------------- the five physical buttons ---
+ *
+ * There is no button chip. The iPhone1,2 wires five switches to five GPIO pins
+ * on port 22 and routes five lines of the GPIO interrupt controller's group 1,
+ * and com.apple.driver.AppleM68Buttons — "M68" is this board — is the driver.
+ * So this is not a device model in the sense mtz2.c is; it is the BOARD, and
+ * everything below is a statement about wiring rather than about registers.
+ *
+ * /device-tree/buttons, read out of the shipped 40,544-byte tree:
+ *
+ *   device_type      'buttons'          compatible 'buttons'
+ *   interrupt-parent  -> /arm-io/gpio   (the interrupt controller above)
+ *   button-names     'hold\0menu\0volup\0voldown\0ringerab\0'
+ *   interrupts       {45,7} {40,7} {41,5} {42,5} {43,7}
+ *   function-button_hold     {gpio, 'GPIO', 0x1605, 0x00000100}
+ *   function-button_menu     {gpio, 'GPIO', 0x1600, 0x00000100}
+ *   function-button_volup    {gpio, 'GPIO', 0x1601, 0x00000000}
+ *   function-button_voldown  {gpio, 'GPIO', 0x1602, 0x00000000}
+ *   function-button_ringerab {gpio, 'GPIO', 0x1603, 0x00010000}
+ *   function-wake_button_hold{pmu,  'STAT', 0x00000100}
+ *
+ * `button-names` and `interrupts` are parallel arrays — the driver walks the
+ * names in order and asks its provider for interrupt index i (0xc065a6b0,
+ * `interruptEventSource(this, action, provider, i)`) — so BUTTON_HOLD is index
+ * 0 and takes line 45, and this file's order is the tree's order for exactly
+ * that reason. A table in a different order would still compile.
+ *
+ * ALL FIVE ARE SoC GPIOs, INCLUDING POWER/HOLD AND THE VOLUME KEYS. The PMU is
+ * involved only through `function-wake_button_hold`, a 'STAT' function on
+ * /arm-io/i2c0/pmu that AppleM68Buttons resolves once at start (0xc065a6a4,
+ * stored at this+0x90+4i) and reads only in its power-state path (0xc065a0c8)
+ * to answer "did this button wake us". It is NOT the press/release path and is
+ * NOT modelled here; nothing in a machine that never sleeps consults it.
+ *
+ * WHICH LEVEL IS "PRESSED". This is the number that had to be right, because a
+ * wrong one reads as a button held down forever. Two independently decoded
+ * fields agree, and a third pin whose polarity was already known corroborates.
+ *
+ *  1. The fourth word of a `function-*` property is a platform-function
+ *     argument block. AppleS5L8900X's apply routine reads BYTE 1 of it and
+ *     uses it, and only it, as a polarity: the read path at 0xc05a45d8 is
+ *          ldrb r3,[r3,#0xd] / eor r3,r3,#1 / eor r3,r3,r0
+ *     over the raw level from getPinLevel (0xc05a4474, which is soc.h's
+ *     documented `(reg >> bit) & 1` accessor on the PIN page), and the write
+ *     path at 0xc05a459c is the identical pair before setPinOutput. So byte 1
+ *     == 1 means ACTIVE HIGH and 0 means ACTIVE LOW, and what a child sees is
+ *     already normalised to "1 == asserted".
+ *     CORROBORATION: /arm-io/spi1/multi-touch's `function-reset` is
+ *     0x00010001, byte 1 == 0 — and that pin was independently established as
+ *     ACTIVE LOW from the driver's own reset behaviour long before this byte
+ *     was decoded. /arm-io/spi0/lcd0's `function-reset` 0x00000001 agrees too.
+ *  2. Every one of these five lines is configured LEVEL-sensitive with
+ *     AUTO-FLIP (cell 7 and cell 5 both have bits 0 and 2 set). A level line
+ *     that is asserted at rest is an interrupt storm at boot, so the INTLEVEL
+ *     bit the guest programs must be the OPPOSITE of the resting level. Guest
+ *     programs INTLEVEL 1 for hold and menu, 0 for volup and voldown
+ *     (measured: group 1 settles at 0x00002900) — which says hold and menu
+ *     rest LOW and the volume keys rest HIGH.
+ *
+ * (1) and (2) are derived from different words of a different property by
+ * different code and they give the same answer for all four momentary keys.
+ *
+ *              pin      line  cell  INTTYPE  INTLEVEL  polarity  PRESSED  rest
+ *   hold      0x1605     45     7    level      1      high        high    low
+ *   menu      0x1600     40     7    level      1      high        high    low
+ *   volup     0x1601     41     5    level      0      low          low   high
+ *   voldown   0x1602     42     5    level      0      low          low   high
+ *   ringerab  0x1603     43     7    level      1      low           —      —
+ *
+ * WHAT THE GUEST DOES WITH THEM. AppleM68Buttons never polls. An interrupt on
+ * any of the five arms a single 14 ms one-shot timer (0xc065a31c, the literal
+ * is 0x36b0 = 14000 us); when it expires the driver samples ALL FIVE pins
+ * (0xc065a2a8) through their platform functions and reports every one whose
+ * value differs from its shadow bitmap at this+0xbc. So a press shorter than
+ * one debounce interval that has already been undone when the timer fires is
+ * genuinely not seen, and this model does not pretend otherwise.
+ *
+ * It dispatches (0xc065aad0):
+ *   hold      HID usage page 0x0C (Consumer), usage 0x30  Power
+ *   menu                     0x0C,                  0x40  Menu
+ *   volup                    0x0C,                  0xE9  Volume Increment
+ *   voldown                  0x0C,                  0xEA  Volume Decrement
+ *   ringerab  HID usage page 0x0B (Telephony), usage 0x2E Phone Mute
+ *
+ * THE RINGER IS THE ONE THE DRIVER INVERTS. At 0xc065ab10 it compares the
+ * button's name symbol against the one built from "ringerab" and does
+ * `eoreq r6, r6, #1` on the value before anything else. Composed with the
+ * active-low platform polarity above, the Phone Mute value it dispatches is
+ * the RAW pin level: pin high == muted. That composition is established; which
+ * physical position of the slider drives the pin high is NOT, and this model
+ * does not claim it. The host API therefore names the two positions after what
+ * the guest is told (S5L_BUTTONS_RINGER_MUTED), not after a silkscreen.
+ *
+ * The rest position chosen for the ringer here is the one that asserts NOTHING
+ * at boot, i.e. pin low, unmuted. A rest position that asserted its level line
+ * would hand the guest an interrupt it did not ask for before its driver has
+ * finished starting, and "the machine boots quietly" is worth more than a
+ * guess about a slider.
+ */
+#define S5L_BUTTON_HOLD     0u   /* Power/Hold  */
+#define S5L_BUTTON_MENU     1u   /* Home        */
+#define S5L_BUTTON_VOLUP    2u
+#define S5L_BUTTON_VOLDOWN  3u
+#define S5L_BUTTON_RINGERAB 4u   /* the ringer/silent slider */
+#define S5L_BUTTON_COUNT    5u
+
+/*
+ * `pressed` in this API always means WHAT THE GUEST WILL REPORT, for all five,
+ * and the wiring table absorbs however many inversions lie between that and
+ * the wire. For the four momentary keys that is one inversion or none — the
+ * platform-function polarity byte. For the slider it is two, because
+ * AppleM68Buttons inverts the ringer a second time at 0xc065ab14, and the two
+ * compose to "dispatched Phone Mute value == the raw pin level".
+ *
+ * Defining it the other way round — `pressed` meaning "the pin is asserted" —
+ * would have made s5l_buttons_set(RINGERAB, true) silence the phone by putting
+ * the slider in the position the guest calls unmuted, which is precisely the
+ * class of quiet inversion this project keeps paying for.
+ */
+#define S5L_BUTTONS_RINGER_MUTED true
+
+typedef struct {
+    /*
+     * One bit per S5L_BUTTON_*, as the HOST has set it. This is board state,
+     * not a register: it is what the switches are doing, and the guest can
+     * only see it through the pin levels and the interrupt lines it produces.
+     * It travels in a snapshot for the same reason s5l_gpioic_t.raw does — a
+     * restore that dropped it would release every held button silently.
+     */
+    uint8_t  pressed;
+    /*
+     * Bounded diagnostics, and two of these are load-bearing rather than
+     * decoration. `refused` non-zero means the HOST asked and the board said
+     * no, and s5l_buttons_set() told it so; `edges` counts transitions this
+     * model actually drove onto a pin. `edges` without a guest interrupt means
+     * the line is not armed; `refused` alone means the host is pressing faster
+     * than the guest is servicing.
+     */
+    uint64_t sets, refused, edges;
+} s5l_buttons_t;
+
+/* Reset releases everything. The rest LEVELS are not zero — see the table
+ * above — so a machine must call s5l_buttons_apply() after resetting the pin
+ * block and the interrupt controller, and s5l8900_init() does. */
+void     s5l_buttons_reset(s5l_buttons_t *b);
+
+/* The wiring, one accessor each, so the device tree's numbers exist once. Out
+ * of range answers with a pin/line no board carries, which every caller drops,
+ * and with "no name". */
+const char *s5l_button_name(unsigned which);
+uint16_t s5l_button_pin(unsigned which);
+unsigned s5l_button_line(unsigned which);
+/*
+ * Byte 1 of this button's `function-*` fourth word: the pin level at which the
+ * GUEST'S OWN PLATFORM FUNCTION reports the line asserted (0xc05a45dc). Pure
+ * hardware, and NOT the same question as s5l_button_level() for the ringer.
+ */
+bool     s5l_button_active_high(unsigned which);
+/*
+ * Whether AppleM68Buttons inverts this button a second time before dispatching
+ * it (0xc065ab14). True for the ringer and nothing else.
+ */
+bool     s5l_button_driver_inverts(unsigned which);
+/*
+ * The pin level that makes the guest report this button as `pressed`, i.e.
+ * both inversions composed. This is the one the model drives.
+ */
+bool     s5l_button_level(unsigned which, bool pressed);
+
+/* Whether the host currently holds that button. */
+bool     s5l_buttons_held(const s5l_buttons_t *b, unsigned which);
+
+/*
+ * Drive the current board state onto the pin block and the interrupt
+ * controller. Idempotent: re-driving an unchanged level latches nothing, which
+ * is what lets s5l8900_tick() call it every tick without inventing interrupts.
+ * Called once from s5l8900_init() so the rest levels exist before the guest
+ * configures anything, and after a snapshot restore for the same reason.
+ */
+void     s5l_buttons_apply(const s5l_buttons_t *b, s5l_gpio_t *gpio,
+                           s5l_gpioic_t *ic);
+
+/* -------------------------------------------------- the host injection API ---
+ *
+ * THE LINE THIS API DRAWS is the one s5l_mtz2_set_contacts() draws. The host
+ * sets the position of a physical switch. The board then presents that through
+ * a pin level and an interrupt line, and the guest's own AppleM68Buttons reads
+ * it when and if it chooses to. Nothing here dispatches a HID event, posts a
+ * GSEvent or calls UIKit: a Home press that does not reach SpringBoard must
+ * LOOK like it failed, because that is the only way the thing in between gets
+ * found.
+ *
+ * Returns FALSE — and changes nothing — when the board is in no state to
+ * report the change:
+ *
+ *   - `which` is not one of the five: a malformed request.
+ *   - the guest has not armed that line (its INTEN bit is clear): the driver
+ *     never polls, so a press it cannot be interrupted for is a press it can
+ *     never see. This is the button equivalent of the Z2's `!hbpp_answered`.
+ *   - that line's pending bit is still latched: the guest has not serviced the
+ *     PREVIOUS transition. Accepting now would collapse a press and a release
+ *     into a single pending bit and the guest would observe neither, which is
+ *     strictly worse than being told no.
+ *
+ * Setting a button to the state it is already in is NOT a refusal and NOT an
+ * edge. It is a host that is holding a button.
+ *
+ * Every refusal bumps `refused`, so a caller that ignores the return value
+ * still leaves evidence.
+ */
+bool     s5l_buttons_set(s5l_buttons_t *b, s5l_gpio_t *gpio, s5l_gpioic_t *ic,
+                         unsigned which, bool pressed);
 
 /* ---------------------------------------------------- CLCD display controller ---
  * The path to pixels. See core/src/soc/clcd.c for the evidence behind every
@@ -1102,6 +1426,235 @@ void s5l_pcf50635_tick(s5l_pcf50635_t *pmu, uint32_t ticks);
 void s5l_pcf50635_bind(s5l_pcf50635_t *pmu, s5l_i2c_slave_t *slave);
 void s5l_pcf50635_civil(uint64_t unix_seconds, int *year, int *month, int *day,
                         int *hour, int *minute, int *second, int *weekday);
+
+/* ------------------------------------------- WM8991 audio codec (i2c0) ---
+ * The Wolfson codec `AppleWM8991Audio` drives. Everything below is read out of
+ * the shipped device tree and the shipped kext; nothing is taken from a
+ * datasheet, because we have none for this part and a guessed register map is
+ * indistinguishable from a correct one until the boot diverges.
+ *
+ * WHERE IT IS. `/arm-io/i2c0/audio0`, device_type `audio-control`, compatible
+ * `audio-control,wm8991`, `reg = {0x1b, 0x9c4, 0, 0}` — seven-bit address
+ * 0x1B on i2c0, exactly the shape the PMU node uses for 0x73. Its sibling
+ * `/arm-io/i2s0/audio0` is `audio-data,wm8991`, which is what puts this codec's
+ * sample path on i2s0 rather than i2s1 (i2s1's child is `audio-data,baseband`).
+ *
+ * THE WIRE PROTOCOL, from AppleEmbeddedAudio's own transfer helpers:
+ *
+ *   read  (0xc053ff94): one index byte out, then TWO bytes in, and the value is
+ *         assembled MSB-first — `ldrb r3,[sp,#0xe]; ldrb r0,[sp,#0xf];
+ *         orr r0,r0,r3,lsl #8` at 0xc0540030..0xc0540038. The first byte on
+ *         the wire is bits [15:8]. On failure this is the helper that prints
+ *         `%s: I2C register read failed (%#x): %s` (0xc0548048) — the exact
+ *         format string behind today's `(0): device error`, with `%#x` of zero
+ *         rendering as a bare `0`.
+ *   write, wide form (0xc0540050): index byte, then the 16-bit value MSB-first
+ *         — `lsr r3,r5,#8; strb r3,[sp,#0xe]; strb r5,[sp,#0xf]`. Three bytes
+ *         after the address.
+ *   write, packed form (0xc0540108): the classic Wolfson two-wire encoding,
+ *         seven-bit register and nine-bit datum in two bytes —
+ *         `and r1,r1,#0x7f; and r3,r2,#0x100; lsl r1,r1,#1;
+ *          orr r1,r1,r3,lsr #8` gives byte0 = (reg << 1) | value[8], and
+ *         byte1 = value[7:0]. Two bytes after the address.
+ *
+ * THIS codec uses the WIDE form: `AppleWM8991Audio::writeCodecRegister`
+ * (0xc068b168) dispatches to the wide helper and nothing in the kext reaches
+ * the packed one, which belongs to the WM8758 sibling driver. Both are
+ * implemented here anyway, because the BYTE COUNT distinguishes them for free
+ * and a model that silently misreads a two-byte transfer as a truncated
+ * three-byte one would be wrong in a way no test would catch: one byte after
+ * the address is a pointer-only write — the stock controller's read setup,
+ * which must not be mistaken for a register store — two bytes is the packed
+ * form, three the wide form. The counts are distinct, so nothing here has to
+ * guess which encoding it is looking at, and any other length is refused and
+ * counted rather than interpreted.
+ *
+ * WHICH REGISTERS EVER REACH THIS MODEL AT ALL. Only six.
+ * `AppleWM8991Audio::readCodecRegister` (0xc068b1b4) gates every read on the
+ * bitmap 0x0084000f held at 0xc068b21c — `ands r3, r2, r3, lsl r1` over
+ * `1 << reg` — and serves everything else out of a RAM shadow the driver seeds
+ * from its own default table at 0xc0691030. Set bits {0,1,2,3,18,23} means
+ * registers 0x00, 0x01, 0x02, 0x03, 0x12 and 0x17 are the complete set whose
+ * readback this model can affect. That default table is NOT reproduced here:
+ * its 63 entries are the driver's belief about an untouched part, the driver
+ * never needs the device to supply them, and copying them in would be the full
+ * register map this model deliberately does not invent. Its entry 0 is 0x8990,
+ * which is a second independent confirmation of the identity literal.
+ *
+ * WHAT IS ACTUALLY VALIDATED. The identify method at 0xc068b078 (codec vtable
+ * slot +0x178, which calls its own superclass at the same slot first):
+ *
+ *   - reads register 0 and compares it against the literal at 0xc068b124.
+ *     That word is `0x00008990`, confirmed by reading the file at the byte
+ *     level, and 0xc068b0ac is the ONLY instruction anywhere in the kernelcache
+ *     that loads it. A mismatch takes `movne r5,#0` and the probe fails. This
+ *     is the one hard gate.
+ *   - then writes register 1 bit 5, reads register 1 back, and tests bit 5.
+ *     This is NOT a second gate: both branches return the same success value.
+ *     It selects a NAME. `strbeq` stores 0 when the bit reads back clear and
+ *     the getter at 0xc068b044 turns 0 into "WM8991" (0xc0690158) and 1 into
+ *     "WM1817" (0xc0690150). So a part whose R1 bit 5 sticks is reported as a
+ *     WM1817. The shipped device tree says `wm8991` in both of its audio nodes
+ *     and contains no occurrence of "1817" at all, so on THIS board bit 5 must
+ *     read back clear, and this model leaves it unimplemented: writes to it are
+ *     discarded and reads return zero. The flag it sets is loaded from `this`
+ *     at ten further sites in the kext, so this is not a cosmetic choice.
+ *
+ * THE ONE PLACE THIS MODEL INFERS RATHER THAN OBSERVES, stated plainly because
+ * it is the only one. The codec's GPIO configure path contains a poll at
+ * 0xc068d4ac..0xc068d514 with NO timeout, NO iteration cap and no IODelay or
+ * IOSleep in its body:
+ *
+ *     rmw(0x17, 0x1000, level << 12);            // 0xc068d44c, before the loop
+ *     do {  write(0x17, computed);               // 0xc068d4cc
+ *           write(0x12, last & 0x0000efff);      // 0xc068d4e8 — clears bit 12
+ *           v = read(0x12);                      // 0xc068d4fc
+ *     } while ((v & ~arg & 0x1000) != (level << 12));   // 0xc068d50c
+ *
+ * The driver forces bit 12 of register 0x12 CLEAR every time it writes that
+ * register, and then waits for that same bit to read back as `level`. So it
+ * cannot be waiting for storage: on a part where 0x12 bit 12 held what was last
+ * written, `level == 1` would spin forever. The only self-consistent reading is
+ * that 0x12 bit 12 is a read-only status reflecting the request made through
+ * 0x17 bit 12 — a pin commanded in one register and observed in another. This
+ * model implements exactly that and nothing more: bit 12 of register 0x12 is
+ * not storage, it mirrors bit 12 of register 0x17.
+ *
+ * That is an inference from the poll's own structure, not a measurement, and it
+ * is deliberately the narrowest one that makes a loop whose only exit condition
+ * is the device terminate. It is counted, so a boot can say how often it
+ * mattered. Every other bit of both registers is ordinary storage.
+ *
+ * WHAT IS NOT MODELLED. Everything else. There is no volume, routing, clocking,
+ * power-sequencing or mute behaviour here, and no register has a reset value
+ * other than zero — because none was established. Unwritten registers read zero
+ * and are recorded, exactly as the PMU does, so the next reader learns which
+ * registers the driver actually wanted from a boot rather than from a guess.
+ */
+#define WM8991_I2C_ADDR   0x1bu
+#define WM8991_NREG       0x80u   /* seven-bit register index space */
+#define WM8991_REG_ID     0x00u
+#define WM8991_ID_VALUE   0x8990u /* literal at 0xc068b124; the sole hard gate */
+#define WM8991_REG_PWR1   0x01u
+#define WM8991_PWR1_PROBE 0x0020u /* bit 5: the WM8991/WM1817 discriminator   */
+#define WM8991_REG_GPSTAT 0x12u   /* polled at 0xc068d4fc; bit 12 read-only   */
+#define WM8991_REG_GPCTRL 0x17u   /* commanded at 0xc068d44c; drives the above */
+#define WM8991_GP_BIT     0x1000u
+#define WM8991_UNKNOWN_REGS 16u
+#define WM8991_MAX_WRITE  3u      /* the longest form: index + two data bytes */
+
+typedef struct {
+    uint16_t regs[WM8991_NREG];
+    uint8_t  written[WM8991_NREG];
+
+    /* Transfer position. `ptr` survives STOP for the same reason the PMU's
+     * does: the stock controller sets the pointer in one transaction and reads
+     * in the next, so forgetting it between them would break every read. */
+    uint8_t  ptr;
+    bool     reading;
+    /* Which half of the 16-bit value the next read byte is. False means the
+     * MSB, which is what a fresh read must always start with. */
+    bool     second_byte;
+    /* The register sampled at the first byte and held for the second. Real
+     * in-flight state: a checkpoint taken between the two halves has already
+     * put the MSB on the wire, and the LSB must come from the same sample. */
+    uint16_t latch;
+    /* Bytes of the current write, address byte excluded. wbuf[0] is the index
+     * or the packed first byte; the rest are data. */
+    uint8_t  wbuf[WM8991_MAX_WRITE];
+    unsigned wlen;
+
+    uint64_t reg_reads, reg_writes;
+    uint64_t wide_writes, packed_writes;  /* which encoding the driver used  */
+    uint64_t refused_writes;              /* a length this model cannot read */
+    uint64_t id_reads;                    /* how often register 0 was asked  */
+    uint64_t probe_bit_writes;            /* attempts to set R1 bit 5        */
+    uint64_t status_mirror_reads;         /* reads of 0x12 that took bit 12  */
+                                          /* from 0x17 rather than storage   */
+    uint64_t unknown_reads;
+    uint8_t  unknown_reg[WM8991_UNKNOWN_REGS];
+    unsigned unknown_reg_count;
+} s5l_wm8991_t;
+
+void s5l_wm8991_reset(s5l_wm8991_t *codec);
+void s5l_wm8991_bind(s5l_wm8991_t *codec, s5l_i2c_slave_t *slave);
+/* The value a guest read of `reg` would return, without disturbing transfer
+ * state. Exposed so the tests can assert the register file directly. */
+uint16_t s5l_wm8991_peek(const s5l_wm8991_t *codec, uint8_t reg);
+
+/* ----------------------------------------------------------------- I2S ---
+ * The two S5L8900 I2S controllers. Their windows are derived at the top of this
+ * header; this is the register model, and it is deliberately the smallest one
+ * in this file because the driver is the smallest consumer in the kernelcache.
+ *
+ * WHY IT IS THIS SMALL. AppleS5L8900XI2SController funnels every window access
+ * through two three-instruction accessors, and only one of them is ever
+ * reached:
+ *
+ *     readRegister   0xc05a3c84   ldr r3,[r0,#0x78]; ldr r0,[r1,r3]; bx lr
+ *     writeRegister  0xc05a3c90   ldr r3,[r0,#0x78]; str r2,[r1,r3]; bx lr
+ *
+ * `readRegister` has NO caller anywhere in the kernelcache. Four independent
+ * checks agree: its address occurs as an aligned word exactly once in the whole
+ * file (its own vtable slot 0xc05ad888); no ARM or Thumb BL/BLX targets it; no
+ * `ldr pc,[Rn,#0x3c0]` dispatch exists with any base but PC; and slot +0x3c0 is
+ * a virtual this class INTRODUCES — its parent AppleARMIISController's vtable
+ * ends at +0x3ac — so no other kext can reach it through a base pointer even in
+ * principle. The class therefore contains exactly one MMIO load instruction in
+ * the entire image, and that instruction is dead code.
+ *
+ * That is what makes an unread window safe rather than merely convenient: there
+ * is no status bit, no reset acknowledge, no FIFO level and no revision check
+ * for a fabricated zero to answer wrongly, because nothing asks. It also
+ * independently explains the zero MMIO traffic run62's census recorded on
+ * 0x3ca00000 and 0x3cd00000 while both controllers started and published.
+ *
+ * THE SEVEN OFFSETS, enumerated from every writeRegister dispatch site:
+ *
+ *   configure()     0xc05a3820  +0x00 (cfg|1), +0x40, +0x04 (cfg|1), +0x30,
+ *                               +0x08 (0), +0x34 (0), +0x3c (1, if TX)
+ *   startTransfer() 0xc05a3928  +0x08 (6), +0x34 (6)
+ *   stop()          0xc05a3ad0  +0x08 (0), +0x34 (0)
+ *
+ * The values at +0x00/+0x04/+0x30/+0x40 come from a caller-supplied
+ * AppleARMIISCommand, never from a register read. NO SEMANTICS ARE CLAIMED for
+ * any of the seven. The pattern at +0x08/+0x34 (0 configured, 6 running, 0
+ * stopped) is consistent with a per-direction enable, and bit 0 is forced set
+ * at +0x00/+0x04, but "consistent with" is not "established", and this model
+ * stores rather than interprets. Anything outside the seven is counted and its
+ * offset recorded, exactly as on I2C and SPI, so a driver that grows a new
+ * register names it in a census instead of vanishing into a stub.
+ *
+ * WHAT THIS IS NOT. Not a sample path. The PCM FIFOs live at +0x10 and +0x38
+ * and the CPU never touches them: the device tree hands their PHYSICAL
+ * addresses (0x3ca00010/0x3ca00038, 0x3cd00010/0x3cd00038 — already absolute in
+ * the `dma-channels` blob, not arm-io relative) straight to the PL080, which is
+ * not modelled. No clock, no frame timing, no interrupt. i2s0 carries the
+ * WM8991 (`/arm-io/i2s0/audio0`, `audio-data,wm8991`); i2s1 carries the
+ * baseband voice path (`audio-data,baseband`), which is why both windows exist
+ * here even though only one of them belongs to the codec.
+ */
+#define S5L_I2S_REGS         7u
+#define S5L_I2S_UNKNOWN_OFF  8u
+
+typedef struct {
+    /* Storage for the seven offsets above, in the order they are listed by
+     * s5l_i2s_offset(). Indexing by a small map rather than by offset/4 keeps
+     * this 28 bytes instead of a 4 KiB page nothing would ever read back. */
+    uint32_t regs[S5L_I2S_REGS];
+    uint64_t reads, writes;
+    uint64_t unknown_reads, unknown_writes;
+    uint32_t unknown_off[S5L_I2S_UNKNOWN_OFF];
+    unsigned unknown_off_count;
+} s5l_i2s_t;
+
+void     s5l_i2s_reset(s5l_i2s_t *i2s);
+uint32_t s5l_i2s_read(s5l_i2s_t *i2s, uint32_t off);
+void     s5l_i2s_write(s5l_i2s_t *i2s, uint32_t off, uint32_t val);
+/* The byte offset backing slot `index`, or UINT32_MAX past the end. The map is
+ * exposed so the tests pin the exact seven the driver writes rather than
+ * re-deriving them from this model's own storage order. */
+uint32_t s5l_i2s_offset(unsigned index);
 
 /* ----------------------------------------------------------------- SPI ---
  * The two S5L8900 SPI controllers AppleS5L8900XSPIController drives. Their
@@ -1772,6 +2325,14 @@ typedef struct {
     s5l_tvout_t tvout;
     s5l_i2c_t   i2c[S5L8900_I2C_COUNT];
     s5l_pcf50635_t pmu;
+    /* The WM8991 on i2c0 address 0x1B, and the two I2S windows. The codec and
+     * the transport are one unit and land together on purpose: a codec that
+     * answers its identity with no window behind it turns today's loud, correct
+     * and harmless `I2C register read failed` into a boot that proceeds into an
+     * audio stack whose transport is undeclared. i2s[0] is i2s0 (the codec's),
+     * i2s[1] is i2s1 (the baseband voice path). */
+    s5l_wm8991_t codec;
+    s5l_i2s_t   i2s[S5L8900_I2S_COUNT];
     /* spi[0] is spi0 and spi[1] is spi1. spi2 is not here: it is the baseband
      * transport on GPIO interrupts this machine cannot route, so it stays a
      * declared stub window. */
@@ -1780,6 +2341,9 @@ typedef struct {
      * and the pin state on its own. See the GPIOIC section above. */
     s5l_gpioic_t gpioic;
     s5l_gpio_t   gpio;
+    /* The five switches the board wires to gpio port 22 and gpioic group 1.
+     * Not a chip: see the buttons section above. */
+    s5l_buttons_t buttons;
     s5l_mtz2_t   mtz2;      /* the touch controller on spi1 chip select 0 */
     s5l_usbotg_t usbotg;
     s5l_nor_t   nor;
@@ -1872,7 +2436,7 @@ typedef struct {
  * uart4, timer — and there is no slack left in it, so a new device model has to
  * raise this number too. It was 13 until spi0 and spi1 stopped being stubs, 15
  * until the two halves of /arm-io/gpio did, and 17 until uart4 was decoded. */
-#define S5L_WINDOW_MAX (S5L_STUB_MAX + 18u)
+#define S5L_WINDOW_MAX (S5L_STUB_MAX + 20u)
 
 /*
  * Every window this machine decodes: the modelled devices first, then the
