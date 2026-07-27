@@ -589,6 +589,9 @@ const char *rootfs_work_status_name(rootfs_work_status_t status) {
     case ROOTFS_WORK_PROVISION_EXISTS: return "provision-exists";
     case ROOTFS_WORK_PROVISION_NODE_FULL: return "provision-node-full";
     case ROOTFS_WORK_PROVISION_LEAF_HEAD: return "provision-leaf-head";
+    case ROOTFS_WORK_PROVISION_SPLIT_UNSUPPORTED:
+        return "provision-split-unsupported";
+    case ROOTFS_WORK_PROVISION_BTREE_FULL: return "provision-btree-full";
     case ROOTFS_WORK_PROVISION_NO_SPACE: return "provision-no-space";
     case ROOTFS_WORK_PROVISION_LIMIT: return "provision-limit";
     case ROOTFS_WORK_RANGE_ERROR: return "range-error";
@@ -2537,15 +2540,43 @@ static bool grow_volume(host_file_t *file, uint64_t *file_size,
  *    therefore leaves the image byte-identical, and that is a property of the
  *    structure rather than of remembering to undo things.
  *
- * 2. NO SPLITTING.  If a record does not fit in the leaf it belongs in, this
- *    refuses (ROOTFS_WORK_PROVISION_NODE_FULL).  If it would become a leaf's
- *    FIRST key in a tree that has index nodes, it refuses too
- *    (ROOTFS_WORK_PROVISION_LEAF_HEAD), because the ancestors' index keys
- *    would have to be rewritten.  What is left is provably local: one leaf
- *    node's record area and offset array, and nothing else in the tree's
- *    shape.  No node is allocated or freed, no fLink/bLink changes,
- *    firstLeafNode and lastLeafNode keep their meaning, and treeDepth,
- *    totalNodes and freeNodes are untouched.
+ * 2. ONE SPLIT, AND IT IS THE ONLY ONE THAT CAN HAPPEN HERE.  The rule used to
+ *    be "no splitting at all".  Exactly one case is now implemented, because
+ *    exactly one case can arise from the way this provisioner is used: a batch
+ *    of new CNIDs is created in ascending key order, so every key that does not
+ *    fit is a key BEYOND the tree's current maximum, landing at the end of the
+ *    LAST leaf.  catalog_leaf_split_append() handles that and nothing else.
+ *
+ *    A full leaf's split has to be recorded in the index node above it, and
+ *    THAT node can be full too -- on the shipping 7E18 catalog it very nearly
+ *    is, with 16 free bytes against 127 children, room for exactly one more
+ *    leaf.  So catalog_level_extend() is written once and used at every level:
+ *    the operation "chain a new node on to the right-hand end of this level and
+ *    tell the level above" is identical for a leaf and for an index node, and
+ *    it recurses upwards until some level has room.  It is still append-only at
+ *    every level, and it still moves no existing record.
+ *
+ *    Everything else still refuses, by the same names as before.  An interior
+ *    insert into a full leaf is ROOTFS_WORK_PROVISION_NODE_FULL -- unchanged,
+ *    including its message.  A record that would become a leaf's FIRST key in a
+ *    tree with index nodes is ROOTFS_WORK_PROVISION_LEAF_HEAD, because the
+ *    ancestors' index keys would have to be rewritten.  A rightmost append that
+ *    runs out of levels -- a full ROOT, or a root leaf with no index level
+ *    above it at all -- is ROOTFS_WORK_PROVISION_SPLIT_UNSUPPORTED, because
+ *    growing a new root changes treeDepth and rootNode and that is not
+ *    implemented; an exhausted node map is ROOTFS_WORK_PROVISION_BTREE_FULL.
+ *    A half-implemented interior split that silently corrupted the tree would
+ *    be far worse than any of those refusals.
+ *
+ *    What the implemented split touches is still a short, enumerable list, and
+ *    catalog_audit() below checks every item on it: the old node's fLink, the
+ *    new node's bLink/fLink, the B-tree header's lastLeafNode, freeNodes and
+ *    the node-allocation map in the header node's third record, and one
+ *    appended record in the parent index node.  The new node receives the
+ *    single record being inserted and the old node is left exactly as it was,
+ *    which is both the cheapest split for ascending appends and the one with
+ *    the least to get wrong.  treeDepth, rootNode, firstLeafNode and totalNodes
+ *    are never written.
  *
  * 3. A SEARCH THAT CANNOT LOOK MUST SAY SO.  tools/hfsx_extract.py starts its
  *    walk at the B-tree header's firstLeafNode, and on an image where that
@@ -2596,6 +2627,10 @@ static bool grow_volume(host_file_t *file, uint64_t *file_size,
 #define HFS_MODE_IFDIR 0040000u
 #define HFS_MODE_IFREG 0100000u
 #define HFS_MODE_PERM_MASK 07777u
+/* The header node's three records: BTHeaderRec, a 128-byte user record, and
+ * the node-allocation map that fills the rest of the node. */
+#define HFS_BT_HEADER_RECORDS 3u
+#define HFS_BT_MAP_RECORD 2u
 
 typedef struct catalog_node_cache {
     uint32_t index;
@@ -2632,7 +2667,24 @@ typedef struct catalog_ctx {
     uint32_t first_leaf;
     uint32_t last_leaf;
     uint32_t total_nodes;
+    uint32_t free_nodes;
     uint32_t leaf_records;
+
+    /*
+     * The B-tree's own node-allocation map, cached out of the header node's
+     * third record exactly the way the allocation bitmap is cached out of the
+     * allocation file.  map_offset/map_bytes locate it inside node 0 so the
+     * commit can put it back where it came from, and a tree whose totalNodes
+     * outgrows this one record (which would put the rest in chained map nodes)
+     * is refused rather than half-read.
+     */
+    uint8_t *node_map;
+    uint16_t map_offset;
+    uint16_t map_bytes;
+    bool map_dirty;
+    /* Rightmost splits performed; reported, never silently absorbed. */
+    uint32_t leaf_splits;
+    uint32_t index_splits;
 
     /* Allocation bitmap, cached whole. */
     const hfs_volume_t *volume;
@@ -3001,12 +3053,154 @@ static bool catalog_search(catalog_ctx_t *ctx, uint32_t parent,
 }
 
 /*
+ * The other half of the independent reader: every index level, checked against
+ * the level below it.
+ *
+ * An index node's whole job is to name its children in key order, so the
+ * concatenation of one level's child pointers, left to right, must be exactly
+ * the next level down's chain, node for node and in the same order.  That one
+ * equality catches a split that chained a new node into the leaf chain but
+ * never told the index about it, one that told the index about it but left the
+ * chain broken, and one that appended the child pointer to the wrong node --
+ * which is why it is worth walking the levels rather than trusting the descent
+ * code, whose assumptions the writer shares.
+ *
+ * Each level is walked by fLink from the leftmost node of that level, and each
+ * node's bLink must point back at where the walk arrived from, so both link
+ * directions are read rather than one being inferred from the other.
+ *
+ * Measured true on the shipping 7E18 catalog before it was relied on here: 15
+ * level-3 children == the 15-node level-2 chain, and 1355 level-2 children ==
+ * the 1355-node leaf chain, with no bLink violation at any level.
+ */
+static bool catalog_audit_index_levels(catalog_ctx_t *ctx,
+                                       const uint32_t *leaf_chain,
+                                       uint32_t leaf_count,
+                                       rootfs_work_stage_t stage,
+                                       rootfs_work_result_t *result) {
+    uint32_t *chain = NULL;
+    uint32_t *settled = NULL;
+    const uint32_t *below = leaf_chain;
+    uint32_t below_count = leaf_count;
+    uint32_t spine[HFS_MAX_TREE_DEPTH + 1u];
+    uint16_t level;
+    bool okay = false;
+
+    if (ctx->tree_depth < 2u)
+        return true;
+    /* The left spine, so each level's walk has a leftmost node to start at. */
+    spine[ctx->tree_depth] = ctx->root_node;
+    for (level = ctx->tree_depth; level >= 2u; level--) {
+        uint16_t offset;
+
+        if (!catalog_node_read_raw(ctx, spine[level], ctx->scratch, stage,
+                                   result))
+            return false;
+        if (!catalog_node_check(ctx, ctx->scratch, spine[level],
+                                HFS_BT_INDEX_NODE, (uint8_t)level, stage,
+                                result))
+            return false;
+        offset = catalog_slot(ctx->scratch, ctx->node_size, 0u);
+        spine[level - 1u] =
+            read_be32(ctx->scratch + offset +
+                      catalog_record_data_offset(ctx->scratch + offset));
+    }
+    if (spine[1] != ctx->first_leaf) {
+        result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
+                    "the tree's leftmost leaf is %u but the header's "
+                    "firstLeafNode is %u", spine[1], ctx->first_leaf);
+        return false;
+    }
+    /* Two buffers, not one: `below` must never alias the array being filled,
+     * or a level would be compared against a chain it was overwriting. */
+    chain = (uint32_t *)malloc((size_t)ctx->total_nodes * sizeof(*chain));
+    settled = (uint32_t *)malloc((size_t)ctx->total_nodes * sizeof(*settled));
+    if (!chain || !settled) {
+        result_fail(result, ROOTFS_WORK_NO_MEMORY, stage, 0,
+                    "cannot audit %u catalog nodes", ctx->total_nodes);
+        goto done;
+    }
+    for (level = 2u; level <= ctx->tree_depth; level++) {
+        uint32_t node_index = spine[level];
+        uint32_t previous = 0;
+        uint32_t nodes = 0;
+        uint32_t cursor = 0;
+
+        while (node_index != 0u) {
+            uint16_t count;
+            uint16_t record;
+
+            if (nodes >= ctx->total_nodes) {
+                result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT,
+                            stage, 0, "the level-%u chain does not terminate "
+                            "within %u nodes", level, ctx->total_nodes);
+                goto done;
+            }
+            if (!catalog_node_read_raw(ctx, node_index, ctx->scratch, stage,
+                                       result))
+                goto done;
+            if (!catalog_node_check(ctx, ctx->scratch, node_index,
+                                    HFS_BT_INDEX_NODE, (uint8_t)level, stage,
+                                    result))
+                goto done;
+            if (read_be32(ctx->scratch + 4) != previous) {
+                result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT,
+                            stage, 0, "index node %u at level %u has bLink %u, "
+                            "but the chain reached it from %u", node_index,
+                            level, read_be32(ctx->scratch + 4), previous);
+                goto done;
+            }
+            count = catalog_record_count(ctx->scratch);
+            for (record = 0; record < count; record++) {
+                uint16_t offset = catalog_slot(ctx->scratch, ctx->node_size,
+                                               record);
+                uint32_t child =
+                    read_be32(ctx->scratch + offset +
+                              catalog_record_data_offset(ctx->scratch + offset));
+
+                if (cursor >= below_count || child != below[cursor]) {
+                    result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT,
+                                stage, 0, "level %u child %u of index node %u "
+                                "is node %u; the level below has %u there",
+                                level, cursor, node_index, child,
+                                cursor < below_count ? below[cursor] : 0u);
+                    goto done;
+                }
+                cursor++;
+            }
+            chain[nodes++] = node_index;
+            previous = node_index;
+            node_index = read_be32(ctx->scratch);
+        }
+        if (cursor != below_count) {
+            result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
+                        "level %u names %u children but the level below is a "
+                        "%u-node chain", level, cursor, below_count);
+            goto done;
+        }
+        /* This level becomes the level below for the next round, parked in the
+         * buffer the next round does not write. */
+        memcpy(settled, chain, (size_t)nodes * sizeof(*chain));
+        below = settled;
+        below_count = nodes;
+    }
+    okay = true;
+
+done:
+    free(chain);
+    free(settled);
+    return okay;
+}
+
+/*
  * The independent reader.  It shares no state with the search above: it walks
  * the leaf chain the way tools/hfsx_extract.py does, from the B-tree header's
  * own firstLeafNode, and holds it to the header's lastLeafNode and
  * leafRecords while requiring globally ascending keys.  A stale firstLeafNode
  * -- the exact bug that made hfsx_extract.py report "not found" for every
- * file on one image -- fails here loudly instead of silently.
+ * file on one image -- fails here loudly instead of silently.  Then every
+ * index level is checked against the level below it, so the tree's shape is
+ * verified and not just its bottom row.
  */
 static bool catalog_audit(catalog_ctx_t *ctx, uint32_t expect_records,
                           rootfs_work_stage_t stage,
@@ -3019,11 +3213,22 @@ static bool catalog_audit(catalog_ctx_t *ctx, uint32_t expect_records,
     uint16_t previous_length = 0;
     bool have_previous = false;
     uint32_t final_node = 0;
+    uint32_t previous_node = 0;
+    uint32_t *leaf_chain = NULL;
+    bool okay = false;
 
     if (ctx->first_leaf == 0u || ctx->first_leaf >= ctx->total_nodes) {
         result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
                     "B-tree header firstLeafNode %u is not a node of %u",
                     ctx->first_leaf, ctx->total_nodes);
+        return false;
+    }
+    leaf_chain = (uint32_t *)malloc((size_t)ctx->total_nodes *
+                                    sizeof(*leaf_chain));
+    if (!leaf_chain) {
+        result_fail(result, ROOTFS_WORK_NO_MEMORY, stage, 0,
+                    "cannot record a %u-node catalog leaf chain",
+                    ctx->total_nodes);
         return false;
     }
     while (node_index != 0u) {
@@ -3034,14 +3239,20 @@ static bool catalog_audit(catalog_ctx_t *ctx, uint32_t expect_records,
             result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
                         "catalog leaf chain does not terminate within %u nodes",
                         ctx->total_nodes);
-            return false;
+            goto done;
         }
         if (!catalog_node_read_raw(ctx, node_index, ctx->scratch, stage,
                                    result))
-            return false;
+            goto done;
         if (!catalog_node_check(ctx, ctx->scratch, node_index,
                                 HFS_BT_LEAF_NODE, 1u, stage, result))
-            return false;
+            goto done;
+        if (read_be32(ctx->scratch + 4) != previous_node) {
+            result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
+                        "leaf %u has bLink %u, but the chain reached it from %u",
+                        node_index, read_be32(ctx->scratch + 4), previous_node);
+            goto done;
+        }
         count = catalog_record_count(ctx->scratch);
         for (record_index = 0; record_index < count; record_index++) {
             uint16_t offset = catalog_slot(ctx->scratch, ctx->node_size,
@@ -3063,7 +3274,7 @@ static bool catalog_audit(catalog_ctx_t *ctx, uint32_t expect_records,
                     result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT,
                                 stage, 0, "catalog key order breaks at node %u "
                                 "record %u", node_index, record_index);
-                    return false;
+                    goto done;
                 }
             }
             previous_parent = read_be32(record + 2);
@@ -3074,22 +3285,327 @@ static bool catalog_audit(catalog_ctx_t *ctx, uint32_t expect_records,
             have_previous = true;
             records++;
         }
-        visited++;
+        leaf_chain[visited++] = node_index;
         final_node = node_index;
+        previous_node = node_index;
         node_index = read_be32(ctx->scratch);
     }
     if (final_node != ctx->last_leaf) {
         result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
                     "catalog leaf chain ends at node %u, header says %u",
                     final_node, ctx->last_leaf);
-        return false;
+        goto done;
     }
     if (records != expect_records) {
         result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
                     "catalog leaf chain holds %u records, header says %u",
                     records, expect_records);
+        goto done;
+    }
+    okay = catalog_audit_index_levels(ctx, leaf_chain, visited, stage, result);
+
+done:
+    free(leaf_chain);
+    return okay;
+}
+
+/*
+ * Bytes a node has left for one more record AND its offset slot.  One
+ * definition, used by the fit test, by the refusal message that quotes it, and
+ * by the split's look-before-you-leap check on the parent index node, so those
+ * three can never drift apart.
+ */
+static uint16_t catalog_node_free_bytes(const uint8_t *node,
+                                        uint16_t node_size) {
+    uint16_t count = catalog_record_count(node);
+    uint16_t free_start = catalog_slot(node, node_size, count);
+    uint16_t array_low = (uint16_t)(node_size - 2u * ((uint32_t)count + 1u));
+
+    return free_start >= array_low ? 0u : (uint16_t)(array_low - free_start);
+}
+
+/*
+ * Claim one node from the B-tree's own free-node map.  This is the map in the
+ * header node's third record; a tree whose map spills into chained map nodes
+ * was already refused at open, so this record is the whole picture.
+ */
+static bool catalog_node_map_alloc(catalog_ctx_t *ctx, uint32_t *node,
+                                   rootfs_work_stage_t stage,
+                                   rootfs_work_result_t *result) {
+    uint32_t index;
+
+    /* Node 0 is the header node and is never allocatable; open() already
+     * required the map to agree. */
+    for (index = 1u; index < ctx->total_nodes; index++) {
+        size_t byte = (size_t)(index >> 3);
+        uint8_t mask = (uint8_t)(1u << (7u - (index & 7u)));
+
+        if ((ctx->node_map[byte] & mask) != 0u)
+            continue;
+        if (ctx->free_nodes == 0u) {
+            result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
+                        "the node map calls node %u free but the B-tree header "
+                        "says freeNodes is 0", index);
+            return false;
+        }
+        ctx->node_map[byte] |= mask;
+        ctx->map_dirty = true;
+        ctx->free_nodes--;
+        *node = index;
+        return true;
+    }
+    result_fail(result, ROOTFS_WORK_PROVISION_BTREE_FULL, stage, 0,
+                "all %u catalog B-tree nodes are in use; growing the catalog "
+                "fork is not implemented", ctx->total_nodes);
+    return false;
+}
+
+/*
+ * Walk the rightmost spine from the root down to the index node that owns
+ * `node` (which sits at `node_level`), proving on the way that it really does
+ * own it as its LAST child.  Only the last child pointer of each level is
+ * followed, so this answers exactly one question and cannot wander.
+ */
+static bool catalog_rightmost_parent(catalog_ctx_t *ctx, uint32_t node,
+                                     uint16_t node_level, uint32_t *parent,
+                                     rootfs_work_stage_t stage,
+                                     rootfs_work_result_t *result) {
+    uint32_t node_index = ctx->root_node;
+    uint16_t level;
+
+    if (node_level >= ctx->tree_depth) {
+        result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
+                    "node %u at level %u has no parent in a depth-%u tree",
+                    node, node_level, ctx->tree_depth);
         return false;
     }
+    for (level = ctx->tree_depth; level > node_level; level--) {
+        uint8_t *index_node = NULL;
+        uint16_t count;
+        uint16_t offset;
+        uint32_t child;
+
+        if (!catalog_node_load(ctx, node_index, &index_node, stage, result))
+            return false;
+        if (!catalog_node_check(ctx, index_node, node_index, HFS_BT_INDEX_NODE,
+                                (uint8_t)level, stage, result))
+            return false;
+        count = catalog_record_count(index_node);
+        offset = catalog_slot(index_node, ctx->node_size,
+                              (uint16_t)(count - 1u));
+        child = read_be32(index_node + offset +
+                          catalog_record_data_offset(index_node + offset));
+        if (level == (uint16_t)(node_level + 1u)) {
+            if (child != node) {
+                result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT,
+                            stage, 0, "the rightmost level-%u index node %u "
+                            "ends at child %u, not at node %u", level,
+                            node_index, child, node);
+                return false;
+            }
+            *parent = node_index;
+            return true;
+        }
+        node_index = child;
+    }
+    result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
+                "the rightmost spine of a depth-%u tree never reached level %u",
+                ctx->tree_depth, (unsigned)(node_level + 1u));
+    return false;
+}
+
+static bool catalog_index_append(catalog_ctx_t *ctx, uint32_t index_node,
+                                 const uint8_t *key_record, uint32_t child,
+                                 uint16_t level, rootfs_work_stage_t stage,
+                                 rootfs_work_result_t *result);
+
+/*
+ * Chain a new node on to the right-hand end of one B-tree level, carrying a
+ * single record, and tell the level above about it.
+ *
+ * This is the shared body of BOTH splits, because they are the same operation:
+ * `full` is the last node at `level`, the record belongs after everything it
+ * holds, and it does not fit.  For a leaf the record is a catalog record; for
+ * an index node it is a key plus a child pointer, which catalog_index_append()
+ * has already built into `record`.  Nothing existing moves, at any level.
+ *
+ * The recursion terminates at the root: a full root would have to be replaced
+ * by a new one and treeDepth incremented, and that is refused by name.  On the
+ * shipping 7E18 catalog the root index node has 3280 free bytes against 15
+ * children, so that refusal is not reachable by any payload this provisioner
+ * is sized for -- but it is still a refusal rather than an assumption.
+ */
+static bool catalog_level_extend(catalog_ctx_t *ctx, uint32_t full,
+                                 uint16_t level, const uint8_t *record,
+                                 uint16_t record_len,
+                                 const uint8_t *parent_key, uint32_t *fresh_out,
+                                 rootfs_work_stage_t stage,
+                                 rootfs_work_result_t *result) {
+    uint16_t node_size = ctx->node_size;
+    uint8_t *full_node = NULL;
+    uint8_t *new_node = NULL;
+    uint32_t parent = 0;
+    uint32_t fresh = 0;
+
+    if (level >= ctx->tree_depth) {
+        result_fail(result, ROOTFS_WORK_PROVISION_SPLIT_UNSUPPORTED, stage, 0,
+                    "node %u is the root of a depth-%u tree; splitting it would "
+                    "have to grow a new root, which is not implemented", full,
+                    ctx->tree_depth);
+        return false;
+    }
+    if ((uint32_t)HFS_NODE_DESCRIPTOR + record_len + 4u > (uint32_t)node_size) {
+        result_fail(result, ROOTFS_WORK_PROVISION_SPLIT_UNSUPPORTED, stage, 0,
+                    "a %u-byte record does not fit an empty %u-byte node",
+                    record_len, node_size);
+        return false;
+    }
+    if (!catalog_rightmost_parent(ctx, full, level, &parent, stage, result))
+        return false;
+    if (!catalog_node_load(ctx, full, &full_node, stage, result))
+        return false;
+    /* The spine called this the last node at its level.  If the node's own
+     * fLink disagrees, the two readings are inconsistent and nothing may be
+     * written. */
+    if (read_be32(full_node) != 0u) {
+        result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
+                    "node %u ends the level-%u spine but its fLink is %u", full,
+                    level, read_be32(full_node));
+        return false;
+    }
+    if (!catalog_node_map_alloc(ctx, &fresh, stage, result))
+        return false;
+    if (fresh == full || fresh == parent || fresh == ctx->root_node ||
+        fresh == ctx->first_leaf || fresh == ctx->last_leaf) {
+        result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
+                    "the node map handed out node %u, which the tree is "
+                    "already using", fresh);
+        return false;
+    }
+    /* Read-then-overwrite rather than conjure: catalog_node_load bounds-checks
+     * the node against the fork's extents, which is the check that matters. */
+    if (!catalog_node_load(ctx, fresh, &new_node, stage, result))
+        return false;
+    memset(new_node, 0, node_size);
+    write_be32(new_node, 0u);
+    write_be32(new_node + 4, full);
+    new_node[8] = level == 1u ? (uint8_t)HFS_BT_LEAF_NODE
+                              : (uint8_t)HFS_BT_INDEX_NODE;
+    new_node[9] = (uint8_t)level;
+    write_be16(new_node + 10, 1u);
+    memcpy(new_node + HFS_NODE_DESCRIPTOR, record, record_len);
+    catalog_slot_write(new_node, node_size, 0u, HFS_NODE_DESCRIPTOR);
+    catalog_slot_write(new_node, node_size, 1u,
+                       (uint16_t)(HFS_NODE_DESCRIPTOR + record_len));
+    catalog_node_dirty(ctx, fresh);
+    if (!catalog_node_check(ctx, new_node, fresh, new_node[8], (uint8_t)level,
+                            stage, result))
+        return false;
+    /* Only once the level above has accepted the new node does the old node
+     * point at it: a refusal in there must not leave a chain the descent
+     * cannot reach. */
+    if (!catalog_index_append(ctx, parent, parent_key, fresh,
+                              (uint16_t)(level + 1u), stage, result))
+        return false;
+    write_be32(full_node, fresh);
+    catalog_node_dirty(ctx, full);
+    *fresh_out = fresh;
+    return true;
+}
+
+/*
+ * Append one index record -- a copy of `key_record`'s key plus a child pointer
+ * -- to the end of an index node, splitting that index node if it is full.
+ * Append only: this is called for a child whose keys are beyond every key the
+ * node already points at, so no existing record moves and no ancestor key
+ * changes.
+ */
+static bool catalog_index_append(catalog_ctx_t *ctx, uint32_t index_node,
+                                 const uint8_t *key_record, uint32_t child,
+                                 uint16_t level, rootfs_work_stage_t stage,
+                                 rootfs_work_result_t *result) {
+    uint8_t *node = NULL;
+    uint16_t node_size = ctx->node_size;
+    uint16_t key_bytes = (uint16_t)(2u + read_be16(key_record));
+    uint16_t record_len;
+    uint16_t count;
+    uint16_t free_start;
+
+    if ((key_bytes & 1u) != 0u)
+        key_bytes++;
+    record_len = (uint16_t)(key_bytes + 4u);
+    if (record_len > HFS_MAX_RECORD_BYTES) {
+        result_fail(result, ROOTFS_WORK_PROVISION_INVALID, stage, 0,
+                    "refusing to insert a %u-byte index record", record_len);
+        return false;
+    }
+    if (!catalog_node_load(ctx, index_node, &node, stage, result))
+        return false;
+    if (catalog_node_free_bytes(node, node_size) < (uint32_t)record_len + 2u) {
+        uint8_t built[HFS_MAX_RECORD_BYTES];
+        uint32_t fresh = 0;
+
+        memcpy(built, key_record, key_bytes);
+        write_be32(built + key_bytes, child);
+        if (!catalog_level_extend(ctx, index_node, level, built, record_len,
+                                  key_record, &fresh, stage, result))
+            return false;
+        ctx->index_splits++;
+        return true;
+    }
+    count = catalog_record_count(node);
+    free_start = catalog_slot(node, node_size, count);
+    memcpy(node + free_start, key_record, key_bytes);
+    write_be32(node + free_start + key_bytes, child);
+    catalog_slot_write(node, node_size, (uint16_t)(count + 1u),
+                       (uint16_t)(free_start + record_len));
+    write_be16(node + 10, (uint16_t)(count + 1u));
+    catalog_node_dirty(ctx, index_node);
+    return catalog_node_check(ctx, node, index_node, HFS_BT_INDEX_NODE,
+                              (uint8_t)level, stage, result);
+}
+
+/*
+ * THE ONE SPLIT.  `record` sorts after every key in the tree and does not fit
+ * in the last leaf, so a new last leaf is chained on to hold it.
+ *
+ * No existing record moves.  The old node keeps every byte it had and gains
+ * only a new fLink; the new node gets the single record being inserted.  For
+ * the ascending-key batch this provisioner exists to write, that is also the
+ * best split available -- the next append goes into the new node and fills it
+ * before the next split -- and it is the variant with the fewest invariants in
+ * flight.  What changes, exhaustively:
+ *
+ *   old leaf   fLink 0 -> new node                     (chain forward)
+ *   new node   bLink = old leaf, fLink = 0, one record (chain back, and it is
+ *                                                       the new chain end)
+ *   parent     one appended index record -> new node   (descent finds it)
+ *   header     lastLeafNode = new node, freeNodes -= 1, one map bit set
+ *
+ * firstLeafNode, rootNode, treeDepth and totalNodes are not touched, and every
+ * one of the four lines above is re-read from the written image by
+ * catalog_audit() and by the tests' independent chain walker.
+ */
+static bool catalog_leaf_split_append(catalog_ctx_t *ctx, uint32_t leaf,
+                                      const uint8_t *record,
+                                      uint16_t record_len,
+                                      rootfs_work_stage_t stage,
+                                      rootfs_work_result_t *result) {
+    uint32_t fresh = 0;
+
+    if (ctx->tree_depth < 2u) {
+        result_fail(result, ROOTFS_WORK_PROVISION_SPLIT_UNSUPPORTED, stage, 0,
+                    "leaf %u is the whole tree, so splitting it would have to "
+                    "grow a new root; that is not implemented", leaf);
+        return false;
+    }
+    /* The new leaf's own first record supplies the key the level above files
+     * it under, and that record is the one being inserted. */
+    if (!catalog_level_extend(ctx, leaf, 1u, record, record_len, record, &fresh,
+                              stage, result))
+        return false;
+    ctx->last_leaf = fresh;
+    ctx->leaf_splits++;
     return true;
 }
 
@@ -3107,7 +3623,6 @@ static bool catalog_leaf_insert(catalog_ctx_t *ctx, uint32_t leaf,
     uint16_t node_size = ctx->node_size;
     uint16_t count;
     uint16_t free_start;
-    uint16_t array_low;
     uint16_t insert_at;
     uint16_t record_index;
 
@@ -3133,12 +3648,25 @@ static bool catalog_leaf_insert(catalog_ctx_t *ctx, uint32_t leaf,
         return false;
     }
     free_start = catalog_slot(node, node_size, count);
-    array_low = (uint16_t)(node_size - 2u * ((uint32_t)count + 1u));
-    if ((uint32_t)free_start + record_len + 2u > (uint32_t)array_low) {
+    if (catalog_node_free_bytes(node, node_size) < (uint32_t)record_len + 2u) {
+        /*
+         * The only split implemented: this key sorts after every key in the
+         * tree, so it lands past the end of the LAST leaf.  Anything else --
+         * an interior insert into a full leaf, or an append to a leaf that is
+         * not the chain's end -- keeps refusing, with the message it has
+         * always had.
+         */
+        if (position == count && leaf == ctx->last_leaf) {
+            if (!catalog_leaf_split_append(ctx, leaf, record, record_len, stage,
+                                           result))
+                return false;
+            ctx->leaf_records++;
+            return true;
+        }
         result_fail(result, ROOTFS_WORK_PROVISION_NODE_FULL, stage, 0,
                     "leaf %u has %u free bytes, the record needs %u; splitting "
                     "is not implemented", leaf,
-                    (unsigned)(array_low - free_start),
+                    (unsigned)catalog_node_free_bytes(node, node_size),
                     (unsigned)(record_len + 2u));
         return false;
     }
@@ -3304,6 +3832,59 @@ static uint16_t catalog_build_file(catalog_ctx_t *ctx, uint32_t parent,
     write_be32(data + 104, start_block);
     write_be32(data + 108, block_count);
     return (uint16_t)(key_bytes + HFS_CAT_FILE_DATA);
+}
+
+/*
+ * A BSD symbolic link, which HFS+ stores as an ordinary catalog FILE record
+ * whose fileMode says S_IFLNK and whose data fork holds the target path.
+ *
+ * PROVENANCE.  Every constant below was read out of firmware/rootfs.img's own
+ * symlinks rather than recalled, by dumping all 409 of them and taking the
+ * intersection.  On that volume these fields are byte-identical across all
+ * 409, and /etc (CNID 14880, target "private/etc") is the worked example:
+ *
+ *   fileMode      0xA1ED  = S_IFLNK | 0755   on all 409, no exceptions
+ *   userInfo      fdType 'slnk', fdCreator 'rhap', rest of FndrFileInfo zero
+ *   finderInfo    16 zero bytes
+ *   flags         0x0002, thread-exists only
+ *   special       1 (linkCount), same as files and folders
+ *   dataFork      logicalSize == strlen(target) -- the target is NOT
+ *                 NUL-terminated within logicalSize -- clumpSize 0,
+ *                 totalBlocks 1, one extent, extents[1..7] zero
+ *   resourceFork  all 80 bytes zero
+ *   thread        a normal 0x0004 file thread, exactly as for a regular file
+ *
+ * The only field that varies beyond CNID, dates, target and extent is groupID
+ * (0 in most of the tree, 80/admin under / and /Library), which is the
+ * caller's to choose because it tracks the parent directory, not the link.
+ *
+ * So this is catalog_build_file() plus three stores: the format bits in
+ * fileMode, and the two Finder type/creator words.  The permission bits stay
+ * the caller's; a symlink whose mode bits differ from 0755 is unlike anything
+ * on the stock volume, which is why the default is 0755 rather than 0644.
+ */
+#define HFS_MODE_IFLNK 0120000u
+#define HFS_SYMLINK_FINDER_TYPE 0x736c6e6bu    /* 'slnk' */
+#define HFS_SYMLINK_FINDER_CREATOR 0x72686170u /* 'rhap' */
+
+static uint16_t catalog_build_symlink(catalog_ctx_t *ctx, uint32_t parent,
+                                      const uint16_t *units,
+                                      uint16_t unit_count, uint32_t cnid,
+                                      uint32_t owner, uint32_t group,
+                                      uint16_t mode, uint64_t logical,
+                                      uint32_t start_block,
+                                      uint32_t block_count) {
+    uint16_t key_bytes = (uint16_t)(8u + 2u * (uint32_t)unit_count);
+    uint8_t *data = ctx->build + key_bytes;
+    uint16_t record_len = catalog_build_file(ctx, parent, units, unit_count,
+                                             cnid, owner, group, mode, logical,
+                                             start_block, block_count);
+
+    /* Rewrite the format bits catalog_build_file() set to S_IFREG. */
+    write_be16(data + 42, (uint16_t)(HFS_MODE_IFLNK | mode));
+    write_be32(data + 48, HFS_SYMLINK_FINDER_TYPE);
+    write_be32(data + 52, HFS_SYMLINK_FINDER_CREATOR);
+    return record_len;
 }
 
 static uint16_t catalog_build_thread(catalog_ctx_t *ctx, uint32_t cnid,
@@ -3614,15 +4195,17 @@ static bool provision_one(catalog_ctx_t *ctx,
     uint16_t mode;
     uint16_t parent_flags = 0;
     bool is_directory = entry->kind == ROOTFS_WORK_ENTRY_DIRECTORY;
+    bool is_symlink = entry->kind == ROOTFS_WORK_ENTRY_SYMLINK;
 
     content->block_count = 0;
     content->start_block = 0;
     content->bytes = NULL;
     content->size = 0;
     if (entry->kind != ROOTFS_WORK_ENTRY_DIRECTORY &&
-        entry->kind != ROOTFS_WORK_ENTRY_FILE) {
+        entry->kind != ROOTFS_WORK_ENTRY_FILE &&
+        entry->kind != ROOTFS_WORK_ENTRY_SYMLINK) {
         result_fail(result, ROOTFS_WORK_PROVISION_INVALID, stage, 0,
-                    "entry kind %d is not a directory or a file",
+                    "entry kind %d is not a directory, a file or a symlink",
                     (int)entry->kind);
         return false;
     }
@@ -3630,6 +4213,38 @@ static bool provision_one(catalog_ctx_t *ctx,
         result_fail(result, ROOTFS_WORK_PROVISION_INVALID, stage, 0,
                     "a directory entry cannot carry content");
         return false;
+    }
+    if (is_symlink) {
+        size_t byte_index;
+
+        /*
+         * The target is the whole meaning of a symlink, so an empty or
+         * unrepresentable one is refused rather than written.  A NUL would
+         * silently truncate the link for the guest, and the bound is the same
+         * one the path parser uses.  The 409 symlinks on the stock volume are
+         * 1..69 bytes of printable ASCII, so nothing here narrows the payload.
+         */
+        if (entry->content_size == 0u || !entry->content) {
+            result_fail(result, ROOTFS_WORK_PROVISION_INVALID, stage, 0,
+                        "a symlink entry must carry a non-empty target");
+            return false;
+        }
+        if (entry->content_size > ROOTFS_WORK_MAX_PATH) {
+            result_fail(result, ROOTFS_WORK_PROVISION_LIMIT, stage, 0,
+                        "a symlink target is %zu bytes; the cap is %u",
+                        entry->content_size, ROOTFS_WORK_MAX_PATH);
+            return false;
+        }
+        for (byte_index = 0; byte_index < entry->content_size; byte_index++) {
+            unsigned char byte = entry->content[byte_index];
+
+            if (byte < 0x20u || byte > 0x7eu) {
+                result_fail(result, ROOTFS_WORK_PROVISION_INVALID, stage, 0,
+                            "byte 0x%02x at offset %zu of a symlink target is "
+                            "not provisionable", byte, byte_index);
+                return false;
+            }
+        }
     }
     if (entry->content_size > ROOTFS_WORK_MAX_ENTRY_BYTES) {
         result_fail(result, ROOTFS_WORK_PROVISION_LIMIT, stage, 0,
@@ -3649,8 +4264,9 @@ static bool provision_one(catalog_ctx_t *ctx,
                     entry->permissions);
         return false;
     }
+    /* 0755 for a symlink is what all 409 on the stock volume carry. */
     mode = entry->permissions != 0u ? entry->permissions :
-           (uint16_t)(is_directory ? 0755u : 0644u);
+           (uint16_t)((is_directory || is_symlink) ? 0755u : 0644u);
     if (!rootfs_path_split(entry->path, components, &count, result))
         return false;
     if (!catalog_root_folder(ctx, &folder, stage, result))
@@ -3721,6 +4337,13 @@ static bool provision_one(catalog_ctx_t *ctx,
                                                      HFS_FLAG_HAS_FOLDER_COUNT),
                                           entry->owner_id, entry->group_id,
                                           mode);
+    else if (is_symlink)
+        record_len = catalog_build_symlink(ctx, folder.cnid, units, leaf_units,
+                                           cnid, entry->owner_id,
+                                           entry->group_id, mode,
+                                           (uint64_t)entry->content_size,
+                                           content->start_block,
+                                           content->block_count);
     else
         record_len = catalog_build_file(ctx, folder.cnid, units, leaf_units,
                                         cnid, entry->owner_id, entry->group_id,
@@ -3880,6 +4503,30 @@ static bool catalog_commit(catalog_ctx_t *ctx,
             return false;
         }
         write_be32(ctx->scratch + HFS_NODE_DESCRIPTOR + 6, ctx->leaf_records);
+        /*
+         * lastLeafNode and freeNodes only move when a rightmost split ran, and
+         * the map only when a node was claimed; writing them unconditionally
+         * from the values open() read is the identity otherwise.  Node 0 is
+         * never in the node cache, so this is the single writer of the header
+         * node and cannot race the dirty-node loop above.
+         */
+        write_be32(ctx->scratch + HFS_NODE_DESCRIPTOR + 14, ctx->last_leaf);
+        write_be32(ctx->scratch + HFS_NODE_DESCRIPTOR + 26, ctx->free_nodes);
+        if (ctx->map_dirty) {
+            if (catalog_record_count(ctx->scratch) != HFS_BT_HEADER_RECORDS ||
+                catalog_slot(ctx->scratch, ctx->node_size,
+                             HFS_BT_MAP_RECORD) != ctx->map_offset ||
+                catalog_slot(ctx->scratch, ctx->node_size,
+                             (uint16_t)(HFS_BT_MAP_RECORD + 1u)) !=
+                    (uint16_t)(ctx->map_offset + ctx->map_bytes)) {
+                result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT,
+                            stage, 0, "the header node's map record moved "
+                            "between the plan and the commit");
+                return false;
+            }
+            memcpy(ctx->scratch + ctx->map_offset, ctx->node_map,
+                   ctx->map_bytes);
+        }
         if (!catalog_node_offset(ctx, 0u, &offset, stage, result))
             return false;
         if (!checked_write(ctx->file, ctx->file_size, offset, ctx->scratch,
@@ -3911,9 +4558,86 @@ static void catalog_close(catalog_ctx_t *ctx) {
         free(ctx->nodes);
     }
     free(ctx->bitmap);
+    free(ctx->node_map);
     free(ctx->build);
     free(ctx->scratch);
     memset(ctx, 0, sizeof(*ctx));
+}
+
+/*
+ * Cache the B-tree's node-allocation map out of the header node's third
+ * record, and hold it to what the header itself claims: the header node and
+ * the three nodes the header names must all be marked in use.  A map that does
+ * not agree with the tree that owns it is a refusal, never a source of free
+ * nodes.
+ */
+static bool catalog_node_map_open(catalog_ctx_t *ctx,
+                                  rootfs_work_stage_t stage,
+                                  rootfs_work_result_t *result) {
+    static const char *const NAMED[] = {"the header node", "rootNode",
+                                        "firstLeafNode", "lastLeafNode"};
+    uint32_t named[4];
+    uint16_t map_end;
+    uint16_t limit;
+    unsigned which;
+
+    if (!catalog_node_read_raw(ctx, 0u, ctx->scratch, stage, result))
+        return false;
+    if (ctx->scratch[8] != HFS_BT_HEADER_NODE || ctx->scratch[9] != 0u ||
+        catalog_record_count(ctx->scratch) != HFS_BT_HEADER_RECORDS) {
+        result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
+                    "catalog node 0 is kind 0x%02x height %u with %u records, "
+                    "not a %u-record B-tree header node", ctx->scratch[8],
+                    ctx->scratch[9], catalog_record_count(ctx->scratch),
+                    HFS_BT_HEADER_RECORDS);
+        return false;
+    }
+    limit = (uint16_t)(ctx->node_size -
+                       2u * ((uint32_t)HFS_BT_HEADER_RECORDS + 1u));
+    ctx->map_offset = catalog_slot(ctx->scratch, ctx->node_size,
+                                   HFS_BT_MAP_RECORD);
+    map_end = catalog_slot(ctx->scratch, ctx->node_size,
+                           (uint16_t)(HFS_BT_MAP_RECORD + 1u));
+    if (ctx->map_offset < HFS_NODE_DESCRIPTOR || map_end <= ctx->map_offset ||
+        map_end > limit) {
+        result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
+                    "the header node's map record spans 0x%04x..0x%04x of a "
+                    "%u-byte node", ctx->map_offset, map_end, ctx->node_size);
+        return false;
+    }
+    ctx->map_bytes = (uint16_t)(map_end - ctx->map_offset);
+    if ((uint64_t)ctx->map_bytes * 8u < (uint64_t)ctx->total_nodes) {
+        result_fail(result, ROOTFS_WORK_PROVISION_UNSUPPORTED, stage, 0,
+                    "the %u-byte node map covers %u of %u nodes, so the rest "
+                    "is in chained map nodes this writer does not read",
+                    ctx->map_bytes, (unsigned)((uint32_t)ctx->map_bytes * 8u),
+                    ctx->total_nodes);
+        return false;
+    }
+    ctx->node_map = (uint8_t *)malloc(ctx->map_bytes);
+    if (!ctx->node_map) {
+        result_fail(result, ROOTFS_WORK_NO_MEMORY, stage, 0,
+                    "cannot cache the %u-byte catalog node map",
+                    ctx->map_bytes);
+        return false;
+    }
+    memcpy(ctx->node_map, ctx->scratch + ctx->map_offset, ctx->map_bytes);
+    named[0] = 0u;
+    named[1] = ctx->root_node;
+    named[2] = ctx->first_leaf;
+    named[3] = ctx->last_leaf;
+    for (which = 0; which < 4u; which++) {
+        size_t byte = (size_t)(named[which] >> 3);
+
+        if ((ctx->node_map[byte] &
+             (uint8_t)(1u << (7u - (named[which] & 7u)))) == 0u) {
+            result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
+                        "the node map calls node %u free, but it is %s",
+                        named[which], NAMED[which]);
+            return false;
+        }
+    }
+    return true;
 }
 
 static bool catalog_open(catalog_ctx_t *ctx, host_file_t *file,
@@ -3989,6 +4713,7 @@ static bool catalog_open(catalog_ctx_t *ctx, host_file_t *file,
     ctx->last_leaf = read_be32(header + HFS_NODE_DESCRIPTOR + 14);
     ctx->node_size = read_be16(header + HFS_NODE_DESCRIPTOR + 18);
     ctx->total_nodes = read_be32(header + HFS_NODE_DESCRIPTOR + 22);
+    ctx->free_nodes = read_be32(header + HFS_NODE_DESCRIPTOR + 26);
     bt_attributes = read_be32(header + HFS_NODE_DESCRIPTOR + 38);
     if (ctx->node_size < 512u || ctx->node_size > 32768u ||
         (ctx->node_size & (uint16_t)(ctx->node_size - 1u)) != 0u) {
@@ -4033,11 +4758,13 @@ static bool catalog_open(catalog_ctx_t *ctx, host_file_t *file,
     if (ctx->tree_depth == 0u || ctx->tree_depth > HFS_MAX_TREE_DEPTH ||
         ctx->root_node == 0u || ctx->root_node >= ctx->total_nodes ||
         ctx->first_leaf >= ctx->total_nodes ||
-        ctx->last_leaf >= ctx->total_nodes) {
+        ctx->last_leaf >= ctx->total_nodes ||
+        ctx->free_nodes > ctx->total_nodes) {
         result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
                     "B-tree header depth %u root %u firstLeaf %u lastLeaf %u "
-                    "against %u nodes", ctx->tree_depth, ctx->root_node,
-                    ctx->first_leaf, ctx->last_leaf, ctx->total_nodes);
+                    "freeNodes %u against %u nodes", ctx->tree_depth,
+                    ctx->root_node, ctx->first_leaf, ctx->last_leaf,
+                    ctx->free_nodes, ctx->total_nodes);
         return false;
     }
     if (volume->alloc_bytes > ROOTFS_WORK_MAX_BITMAP_BYTES) {
@@ -4057,6 +4784,8 @@ static bool catalog_open(catalog_ctx_t *ctx, host_file_t *file,
                     "cannot allocate the catalog provisioning plan");
         return false;
     }
+    if (!catalog_node_map_open(ctx, stage, result))
+        return false;
     return catalog_alloc_fork_io(ctx, false, stage, result);
 }
 
@@ -4118,6 +4847,10 @@ static bool provision_volume(host_file_t *file, uint64_t file_size,
             goto done;
     }
     ctx.vh_dirty = true;
+    /* Report the shape change before the commit can fail, so a caller reading
+     * a failed result still learns that a split was required. */
+    result->provision_leaf_splits = ctx.leaf_splits;
+    result->provision_index_splits = ctx.index_splits;
     if (!catalog_commit(&ctx, contents, options->entry_count, buffer,
                         buffer_size, result))
         goto done;

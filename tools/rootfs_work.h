@@ -91,10 +91,22 @@ typedef enum rootfs_work_status {
                                          /* "not found"                      */
     ROOTFS_WORK_PROVISION_PARENT_MISSING,
     ROOTFS_WORK_PROVISION_EXISTS,
-    ROOTFS_WORK_PROVISION_NODE_FULL,     /* the leaf would have to split     */
+    ROOTFS_WORK_PROVISION_NODE_FULL,     /* the leaf is full and the insert  */
+                                         /* is NOT a rightmost append, so no */
+                                         /* implemented split applies        */
     ROOTFS_WORK_PROVISION_LEAF_HEAD,     /* insert would become a leaf's     */
                                          /* first key, so an index key would */
                                          /* have to be rewritten             */
+    ROOTFS_WORK_PROVISION_SPLIT_UNSUPPORTED, /* a rightmost-append split was */
+                                         /* the right answer but its shape   */
+                                         /* is outside what is implemented:  */
+                                         /* no index level above the leaf,   */
+                                         /* or no room in the parent index   */
+                                         /* node for the new child pointer   */
+    ROOTFS_WORK_PROVISION_BTREE_FULL,    /* the catalog B-tree's own free-   */
+                                         /* node map is exhausted; growing   */
+                                         /* the catalog fork is a different  */
+                                         /* capability and is not implemented*/
     ROOTFS_WORK_PROVISION_NO_SPACE,      /* free blocks or CNIDs exhausted   */
     ROOTFS_WORK_PROVISION_LIMIT,         /* a ROOTFS_WORK_MAX_* cap          */
     ROOTFS_WORK_RANGE_ERROR,
@@ -138,7 +150,16 @@ typedef struct rootfs_work_source_identity {
 
 typedef enum rootfs_work_entry_kind {
     ROOTFS_WORK_ENTRY_DIRECTORY = 0,
-    ROOTFS_WORK_ENTRY_FILE = 1
+    ROOTFS_WORK_ENTRY_FILE = 1,
+    /*
+     * A BSD symbolic link.  `content`/`content_size` carry the link TARGET as
+     * a path string -- not NUL-terminated on disk, because logicalSize is
+     * exactly strlen(target) -- and the record is a catalog FILE record whose
+     * fileMode says S_IFLNK and whose Finder userInfo says 'slnk'/'rhap'.  See
+     * catalog_build_symlink() for the byte-level derivation, which was read
+     * out of the stock image's own symlinks rather than recalled.
+     */
+    ROOTFS_WORK_ENTRY_SYMLINK = 2
 } rootfs_work_entry_kind_t;
 
 /*
@@ -274,6 +295,14 @@ typedef struct rootfs_work_result {
     uint32_t provision_first_cnid;
     uint32_t provision_last_cnid;
     uint32_t provision_blocks;
+    /*
+     * B-tree nodes the request had to add, reported rather than absorbed: a
+     * split changes the catalog's shape, and a caller comparing two work
+     * images is entitled to know it happened.  Both stay zero when every
+     * record fitted where it belonged.
+     */
+    uint32_t provision_leaf_splits;
+    uint32_t provision_index_splits;
     uint8_t source_sha256[IOS3_SHA256_DIGEST_SIZE];
     size_t io_buffer_bytes;
     bool source_sha256_valid;
