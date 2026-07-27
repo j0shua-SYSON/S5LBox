@@ -7,7 +7,11 @@
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed.
  */
 #ifdef _WIN32
+/* Guarded: core/CMakeLists.txt now defines this for the whole directory, and an
+ * unguarded redefinition is C4005, which /WX makes an error. */
+#ifndef _CRT_SECURE_NO_WARNINGS
 #define _CRT_SECURE_NO_WARNINGS
+#endif
 #else
 #define _POSIX_C_SOURCE 200809L
 #endif
