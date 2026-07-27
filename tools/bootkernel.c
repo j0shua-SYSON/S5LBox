@@ -2373,24 +2373,39 @@ static bool dt_memmap_matches_once(uint8_t *b, size_t len, const char *key,
  * it is the only one that exists. A compositor with one surface can show a
  * boot spinner. It cannot show a home screen over a wallpaper.
  *
- * TWO PROVED THE MECHANISM AND WAS NOT ENOUGH. run85 drew the lock screen --
- * status bar, wallpaper, slide to unlock, 273,206 of 460,800 bytes non-zero
- * against 1,659 the run before -- and still logged one
+ * TWO IS THE MEASURED OPTIMUM. run85 drew the lock screen -- status bar,
+ * wallpaper, slide to unlock, 273,206 of 460,800 bytes non-zero against 1,659
+ * the run before -- and logged exactly one
  *
  *     IOSurface warning: buffer allocation failed.  320 x 480
  *     fmt: 42475241 size: 614400 bytes
  *
  * where 0x42475241 is 'BGRA'. AppleH1CLCD's layer table has three entries
- * (layer 0 -> window 0, layer 1 -> window 2, layer 2 -> the video overlay),
- * which is where three comes from; it is not a guess that a bigger number
- * might help.
+ * (layer 0 -> window 0, layer 1 -> window 2, layer 2 -> the video overlay), so
+ * three looked like the real number, and run86 tried it.
  *
- * Three costs 1.8 MB of a 128 MB machine. If a fourth failure appears, the
- * next question is which client is asking rather than another increment --
- * a pool sized by trial would hide exactly the kind of leak this constant
- * makes visible.
+ * THREE IS WORSE. run86 was run85 with this constant at 3 and nothing else
+ * changed -- same 6e9 instruction cap, same flags, same clean build:
+ *
+ *                        run85 (2)         run86 (3)
+ *     console total      6,571 bytes       17,821 bytes
+ *     alloc failures     1                 122 (12,709 bytes)
+ *     genuine output     ~6,480 bytes      5,112 bytes
+ *     rendered frame     273,206/460,800   273,206/460,800
+ *
+ * The frame is byte-identical, the extra console is ENTIRELY the 122 failure
+ * lines, and the guest printed about 1.4 KB LESS real output. So the third
+ * surface is never successfully handed out. Enlarging the pool only bought
+ * some client the chance to ask again and fail, apparently once per composite.
+ *
+ * That is the useful thing run86 paid for: it rules out "the pool is too
+ * small" as the explanation for the surviving failure. Whatever refuses the
+ * next surface is not short of bytes, so the question is which client asks and
+ * what the allocator's real admission test is -- not another increment. A pool
+ * sized by trial would hide exactly the kind of leak this constant makes
+ * visible.
  */
-#define N82_VRAM_SURFACES 3u
+#define N82_VRAM_SURFACES 2u
 #define N82_VRAM_BYTES    (N82_FB_BYTES * N82_VRAM_SURFACES)
 
 static uint16_t boot_args_get_le16(const uint8_t *bytes, size_t offset) {
@@ -5943,6 +5958,8 @@ static struct {
     uint64_t    uart_tx_bytes;           /* every byte stored to UTXH, capped
                                           * by nothing                        */
     bool        uart_tee_failed;         /* open or write error; reported once */
+    char        uart_tee_name[1024];     /* the path actually opened, resolved
+                                          * once in uart_tee_byte()           */
 
     /* --- uart4, the PPP line -------------------------------------------
      * A second, independent tee. The machine model already keeps uart4's own
@@ -16955,7 +16972,32 @@ static void uart_tee_byte(uint32_t val) {
     G.uart_tx_bytes++;
     if (G.uart_tee_failed) return;
     if (!G.uart_tee) {
-        G.uart_tee = fopen(UART_TEE_PATH, "wb");
+        /*
+         * Resolve the tee's path once, here, because this is the first moment
+         * it is both needed and knowable.
+         *
+         * UART_TEE_PATH is a single fixed relative name, so two runs started
+         * from the same directory write the same file and the second destroys
+         * the first without a word. That is not hypothetical: run86 overwrote
+         * run85's complete console. run85's stream survived only because it
+         * happened to fit the 8 KiB in-report buffer whole -- run86's did not,
+         * and 9,630 of its 17,821 bytes existed in no other place.
+         *
+         * When --external-md names a work image the tee is written beside it
+         * as <work>.uart-console.log, a path unique per run by construction
+         * because the harness refuses to reuse a work image. This is exactly
+         * what the final framebuffer capture already does. A run without
+         * --external-md keeps the shared name, so existing recipes and the
+         * cold-replay script still find their file where they expect it.
+         */
+        int n = -1;
+        if (g_external_work_image_path && *g_external_work_image_path)
+            n = snprintf(G.uart_tee_name, sizeof G.uart_tee_name,
+                         "%s.uart-console.log", g_external_work_image_path);
+        if (n <= 0 || (size_t)n >= sizeof G.uart_tee_name)
+            snprintf(G.uart_tee_name, sizeof G.uart_tee_name,
+                     "%s", UART_TEE_PATH);
+        G.uart_tee = fopen(G.uart_tee_name, "wb");
         if (!G.uart_tee) { G.uart_tee_failed = true; return; }
     }
     int c = (int)(val & 0xffu);
@@ -25945,10 +25987,12 @@ external_md_work_ready:
                (unsigned long long)(G.uart_tx_bytes -
                                     (uint64_t)mach.uart0.tx_len));
     if (G.uart_tee_failed)
-        printf("    tee " UART_TEE_PATH ": FAILED (%s) -- the log below is all"
-               " that survived\n", strerror(errno));
+        printf("    tee %s: FAILED (%s) -- the log below is all"
+               " that survived\n",
+               G.uart_tee_name[0] ? G.uart_tee_name : UART_TEE_PATH,
+               strerror(errno));
     else if (G.uart_tx_bytes)
-        printf("    complete stream written to        " UART_TEE_PATH "\n");
+        printf("    complete stream written to        %s\n", G.uart_tee_name);
 
     if (mach.uart0.tx_len)
         printf("\n=== KERNEL UART OUTPUT (first %zu of %llu bytes) ===\n%s\n",

@@ -2360,11 +2360,12 @@ fix made a first frame possible. This one is why nothing followed it.
 SpringBoard — run77 proved the driver reads our frames, not that anything
 above it does.
 
-**Two surfaces is still not enough.** run85's console carries one remaining
+**One allocation still fails.** run85's console carries one remaining
 `IOSurface warning: buffer allocation failed. 320 x 480 fmt: 42475241 size:
 614400 bytes` — `0x42475241` is `'BGRA'`. `AppleH1CLCD`'s layer table has
 three entries (layer 0 -> window 0, layer 1 -> window 2, layer 2 -> the video
-overlay), so three is the likely real number.
+overlay), so three looked like the real number. **run86 tested that and it is
+wrong** — see the next entry. The pool is not what refuses the surface.
 
 **The clock is wrong on purpose-ish.** 4:00 on 31 December 1969 is the RTC
 answering with a placeholder. Cosmetic, but it is a modelled device returning
@@ -2383,6 +2384,76 @@ its non-zero byte count is **273,206**, matching what run85 reported to the
 byte. Without that check the analysis would have been of another run's console
 glyph. Any run that writes a PPM while another is running is producing
 evidence it does not own.
+
+
+### 2026-07-27: run86 — three surfaces is *worse* than two
+
+run86 is run85 with `N82_VRAM_SURFACES` at 3 and **nothing else changed**: same
+6e9 instruction cap, same flags, same clean build, `/vram reg` widened from
+`{0x0885c000,0x0012c000}` to `{0x0885c000,0x001c2000}`. The prediction — written
+into the source *before* the run, which is the only reason it is falsifiable —
+was that a third surface would clear the last `'BGRA'` failure, because
+`AppleH1CLCD`'s layer table has three entries.
+
+It did the opposite.
+
+|                     | run85 (2 surfaces) | run86 (3 surfaces)   |
+|---------------------|--------------------|----------------------|
+| guest console       | 6,571 bytes        | 17,821 bytes         |
+| allocation failures | **1**              | **122** (12,709 B)   |
+| non-failure output  | ≈6,480 bytes       | 5,112 bytes          |
+| rendered frame      | 273,206 / 460,800  | 273,206 / 460,800    |
+
+The frame is byte-identical. The 122 failure lines account for 12,709 of
+run86's 17,821 console bytes — *more* than the entire 11,250-byte increase over
+run85 — so stripping them leaves run86 with about 1.4 KB **less** real output
+than run85 produced. The third surface is therefore never successfully handed
+out. Widening the pool only bought some client the chance to ask again and
+fail, apparently once per composite.
+
+Both runs also print exactly one `IOSurface: buffer allocation size is zero`,
+so that line is a constant of this configuration and not part of the change.
+
+One of run86's 122 lines is 1,818 bytes rather than 89: a bare `CR` followed by
+1,729 `NUL` bytes before the message. That is a serial-console padding artifact,
+it is counted above, and it is not otherwise explained here.
+
+#### What this rules out, which is the point
+
+"The pool is too small" is no longer available as the explanation for the
+surviving failure. Whatever refuses the next surface is **not short of bytes**.
+
+The open question therefore changes from *how many surfaces* to *which client
+is asking, and what the allocator's real admission test is*.
+`IOSurfaceDeviceMemoryRegion::init` hands `getLength() - 1` to
+`IORangeAllocator::withRange` at `0xc0527c04`, so an off-by-one on an
+inclusive/exclusive end, a fixed free-list capacity, and fragmentation are all
+still live candidates — and none of them are fixed by adding bytes. That is
+being settled by static disassembly rather than another two-hour boot.
+
+The default is back to **two**, the only configuration measured to produce the
+lock screen with a quiet console.
+
+#### A second shared-path hazard, found the same way as the first
+
+The near-loss of `firmware/screen.ppm` is recorded in the previous entry. The
+console tee had exactly the same defect, and it was not noticed until it bit:
+`uart-console.log` is one fixed relative name, so **run86 overwrote run85's
+complete console**.
+
+run85's stream survived only by luck — all 6,571 of its bytes fit the 8 KiB
+in-report buffer, so the full text was already inside its own stdout log.
+run86's did not fit. 9,630 of its 17,821 bytes lived in that one shared file and
+nowhere else, and every number in the table above depends on them.
+
+Under `--external-md` the tee now also resolves to `<work>.uart-console.log`,
+unique per run by construction because the harness refuses to reuse a work
+image. A run without `--external-md` keeps the shared name, so existing recipes
+and `tools/run23-cold-replay.ps1` still find their file where they expect it.
+
+**The general rule, now twice paid for:** any output written to a fixed path is
+evidence that belongs to whichever run finished last, not to the run that
+produced it.
 
 
 ### 2026-07-27: run80 — the guest transmits PPP. **S0 is met.**
