@@ -2277,6 +2277,90 @@ another run is spent.
 them, and the milestone stands unmet and unchanged: `7E FF 7D 23 C0 21`, or it
 did not happen.
 
+#### run78 (850e6) — `pppd` says what is wrong, in its own words
+
+The paragraph above is superseded on one point, and it is worth stating which:
+`fatal()` does **not** log only through syslog, and launchd does honour the
+key. run75 named the wrong stream.
+
+`pppd`'s `error()` and `fatal()` share one emitter at `0x0002245c`. It calls
+`syslog()` and then writes the formatted message to `*log_to_fd`. `_log_to_fd`
+is at `0x00039c70` with a file image of **1** — stdout — and `nodetach` means
+nothing ever lowers it. File descriptor 2 is never written to at all. So
+`StandardErrorPath` pointed launchd at a stream `pppd` does not use, and
+`/dev/null` consumed the message exactly as before. One key, `StandardOutPath`,
+same 530-byte budget (`40ce8e2`), and the console carries:
+
+```text
+Wed Dec 31 16:00:06 1969 : set_up_tty, can't set controlling terminal: Inappropriate ioctl for device
+Wed Dec 31 16:00:06 1969 : Couldn't set tty to PPP discipline: Inappropriate ioctl for device
+```
+
+Two things, not one. `TIOCSETD` with `PPPDISC` is the fatal, and it is the
+first of the four `error()` sites in `_tty_establish_ppp` — the one at string
+`0x00032a34`, which every later step presupposes. But `TIOCSCTTY` fails
+immediately **before** it, and no previous run had visibility into that.
+
+Both fail with `ENOTTY`. That is the whole remaining question, and it is now a
+question about the tty layer rather than about `pppd`.
+
+Also corrected by this run: **`0x00039c30` was never a string.** `__cstring`
+ends at `0x35d9e`; `0x39c30` is `__DATA,__data`, file image `ffffffff`,
+referenced twice — `_die+0x10` tests it and `_main+0xca8` stores
+`establish_ppp()`'s return into it. It is **`fd_ppp`**. The run75 note above
+proposed probing it as a text address; that would have measured nothing.
+
+`AppleS5L8900XSerial` did attach — `Identified Serial Port on ARM Device=uart4
+at 0x3cc10000(0xea9d6000)` — and uart4 still carried **zero bytes**. The
+milestone is unchanged.
+
+
+### 2026-07-27: run77 — the guest reads a touch frame, and accepts it
+
+run71 delivered a report the guest never read. The attention line came up, the
+interrupt routed, and then `INTSTAT` group 4 at `0x39a000b0` logged
+**1,193,122** read/write-back pairs at ~419-instruction intervals for the rest
+of the run, with `length-reads 0` and `data-reads 0`. The GPIO pending latch
+was level-sensitive, so the guest's own write-one-to-clear re-asserted the bit
+from the still-driven line inside the same store: every acknowledge undid
+itself, `IOWorkLoop::signalWorkAvailable` ran every time, and the work-loop
+thread that would have issued the SPI read was never scheduled. A livelock, not
+a lost interrupt (`5932755` makes the latch edge-triggered).
+
+run77 is the same run with that one change:
+
+```text
+tap 0  at 1300000000   (160,240) hold 24000000    down @1300000000 up @1324000000  refused 0
+tap 1  at 1550000000   (160,240) hold 24000000    down @1550000000 up @1574000000  refused 0
+device: queued 4  length-reads 4  data-reads 4  read 4  refused 0
+pins:   reset-edges 5  reset-bytes 48  power-edges 3  power-level 1  in-reset 0  hbpp-answered 1
+```
+
+and `INTSTAT` offset `0x0b0` falls to **8 reads, 5 writes** for the whole boot,
+four of each landing between instructions 1,300,000,114 and 1,574,001,063 —
+one acknowledge per report, which is what the driver's own usage implies (it
+writes that group's `INTEN` exactly twice in a boot, so it never masks the line
+while servicing it).
+
+The load-bearing probe is `0xc04413e8`, **captured 4**. It is reachable only
+via the `beq` after `cmp r5,r0` at `0xc04413b4` — the comparison of the
+driver's computed payload checksum against ours — and every capture shows
+`r0 == r2` (`0x2a1`, `0x214`, `0x2c3`). **The driver accepted the frames.** The
+0xCC frame encoding was derived by reverse-engineering and had never been
+confirmed against the real parser; it is confirmed now.
+
+`0xc043d684` (`IODataQueue::enqueue`) captured **1**, at instruction
+1,113,171,698 — before either tap, so not ours. That is the predicted outcome
+and not a failure: `0xc043c31c` only enqueues for client slots whose
+`this+0x80` bit 0 is set, and at 1.8e9 SpringBoard's UI does not exist to have
+subscribed. It means "no subscriber yet", not "no frame". The three SpringBoard
+user probes stayed at zero, as the manifest predicted they would.
+
+What this does **not** establish: that a tap reaches SpringBoard. Nothing in
+this run had a subscriber, and the final frame is the boot spinner at 1,830 of
+460,800 non-zero bytes. The device half is proven; the userspace half is
+untested.
+
 
 ### 2026-07-26: runs 58-59 — the guest drew a frame
 
