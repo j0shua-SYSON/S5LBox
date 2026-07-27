@@ -17,6 +17,11 @@ targets:
     platform: iOS
     sources:
       - path: Sources
+      # The app icon. A single 1024x1024 RGB image; Xcode derives every other
+      # size from it. It must have NO alpha channel -- the source art was RGBA
+      # and was composited onto black before being placed here, because iOS
+      # rejects an icon with transparency rather than flattening it for you.
+      - path: Assets.xcassets
       # Compile the platform-independent emulator core straight into the app.
       - path: ../core/src
         name: core
@@ -41,6 +46,7 @@ targets:
         PRODUCT_NAME: iOS3VM
         PRODUCT_BUNDLE_IDENTIFIER: com.j0shua.iOS3VM
         INFOPLIST_FILE: Info.plist
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         CODE_SIGN_ENTITLEMENTS: iOS3VM.entitlements
         HEADER_SEARCH_PATHS:
           - $(SRCROOT)/../core/include

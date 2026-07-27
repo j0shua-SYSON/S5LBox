@@ -232,6 +232,17 @@ add_executable(test_vmtouchqueue
 target_include_directories(test_vmtouchqueue PRIVATE ../app/Sources include)
 add_test(NAME app_touch_queue COMMAND test_vmtouchqueue)
 
+# The machine list. Links VMOptions too, because the one bound that protects
+# every saved machine -- that an instance can still store a value for every
+# option row -- is a fact about both tables at once.
+add_executable(test_vminstances
+    ../app/Tests/test_vminstances.c
+    ../app/Sources/VMInstances.c
+    ../app/Sources/VMOptions.c
+)
+target_include_directories(test_vminstances PRIVATE ../app/Sources)
+add_test(NAME app_instance_list COMMAND test_vminstances)
+
 add_executable(test_vmoptions
     ../app/Tests/test_vmoptions.c
     ../app/Sources/VMOptions.c
