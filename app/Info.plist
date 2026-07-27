@@ -4,8 +4,13 @@
 <dict>
     <key>CFBundleDevelopmentRegion</key>
     <string>en</string>
+    <!-- What the home screen shows under the icon. Deliberately NOT the same
+         as CFBundleName / PRODUCT_NAME, which stay iOS3VM: the product, the
+         Xcode target, the repository and every path in the docs are iOS3VM,
+         and renaming those would invalidate build recipes and run manifests
+         for a label. This key is the only one the user reads. -->
     <key>CFBundleDisplayName</key>
-    <string>iOS 3 VM</string>
+    <string>SlideToBoot</string>
     <key>CFBundleExecutable</key>
     <string>$(EXECUTABLE_NAME)</string>
     <key>CFBundleIdentifier</key>
