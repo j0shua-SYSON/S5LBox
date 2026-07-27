@@ -8,7 +8,12 @@ import struct
 import sys
 import os
 
-REPO = r"F:\JOSHUA_1st_2021\projects\S5LBox"
+# Derived from this file's own location rather than hardcoded: these
+# scripts live in <repo>/tools/, and an absolute path here is a path a
+# project rename silently rewrites. That is exactly what happened -- the
+# S5LBox rename replaced the folder name inside the string and left six
+# tools pointing at a directory that has never existed.
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DT = os.path.join(REPO, "firmware", "devicetree.bin")
 
 WANT = [w.lower() for w in sys.argv[1:]] or ["baseband"]

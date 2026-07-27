@@ -3,7 +3,12 @@ import os
 import struct
 import sys
 
-REPO = r"F:\JOSHUA_1st_2021\projects\S5LBox"
+# Derived from this file's own location rather than hardcoded: these
+# scripts live in <repo>/tools/, and an absolute path here is a path a
+# project rename silently rewrites. That is exactly what happened -- the
+# S5LBox rename replaced the folder name inside the string and left six
+# tools pointing at a directory that has never existed.
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO, "work", "tools", "capstone-python"))
 from capstone import Cs, CS_ARCH_ARM, CS_MODE_THUMB, CS_MODE_ARM, \
     CS_MODE_LITTLE_ENDIAN
