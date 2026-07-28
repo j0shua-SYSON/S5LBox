@@ -2315,6 +2315,68 @@ at 0x3cc10000(0xea9d6000)` — and uart4 still carried **zero bytes**. The
 milestone is unchanged.
 
 
+### 2026-07-28: the whole causal chain, from "no touch" back to the DMA controller
+
+With run106's numbers in hand the remaining gap closed by reading, not by
+booting. `v[0x360]` -- the SPI controller entry the firmware sender calls -- is
+`0xc05a69a4`, confirmed because that address appears exactly once as a word, at
+`0xc05ae554`, which is `0xc05ae1f4 + 0x360`.
+
+Its first act is a refusal:
+
+```
+    ldr r3, [r0, #0xb0]     ; the controller's TX DMA channel
+    cmp r3, #0
+    bne  ...                ; present -> check the RX side
+    ldr r3, [r1, #0x20]     ; the request wants TX DMA
+    cmp r3, #0
+    bne  refuse
+  ...same shape for [r4,#0xb4] and [r5,#0x24]...
+  refuse:
+    ldr r3, =0xe00002d4     ; kIOReturnDMAError
+    str r3, [r5, #0x40]     ; into the REQUEST, not the return value
+```
+
+`0xe00002d4` is 0x18 past `kIOReturnError`, which is **kIOReturnDMAError**. So
+the controller is saying "you asked for DMA and I have no channel for it".
+
+**AND IT RETURNS SUCCESS.** The refusal branches to `0xc05a6e04`, which does
+`mov r5, #0` and ends `mov r0, r5`. The error goes in `request->0x40` and the
+return value is zero.
+
+That is the whole of run103's 15/15/15. The firmware sender checks only the
+return value (`cmp r0,#0` at `0xc0445228`), believes the transfer happened,
+performs the ATN_ACK, reads `0x1AA1` where it wanted `0x4BC1`, and retries --
+five times per attempt, three attempts. Nothing ever reaches the digitizer,
+which is why `spi1 words 176` and `tx_drops 0`.
+
+**The chain, end to end:**
+
+```
+  AppleARMPL080DMAC never writes DMACConfiguration      (run104, run106)
+        -> setEnabled(true) never runs
+        -> the SPI controller holds no DMA channel      (this+0xb0 / +0xb4 zero)
+        -> v[0x360] refuses with kIOReturnDMAError
+        -> ...and returns 0, so the bootloader cannot tell
+        -> the ATN_ACK answers 0x1AA1, never 0x4BC1
+        -> the Z2 is never programmed                   (run101, run105)
+        -> no property reaches userspace                (run100)
+        -> the surface bounds are negative              (run96 snapshot)
+        -> every touch lands on the same pixel          (run98)
+```
+
+Ten links, every one measured. The bottom four were established days ago and
+the top four today, and the join is this function.
+
+**What that means for the model.** Nothing above `AppleARMPL080DMAC` needs
+changing. The question is why that driver never enables itself -- the same
+question `tools/bootkernel.c` recorded against the AUDIO path and which was
+filed there as "a locked phone plays nothing". It is not about audio. It gates
+the digitizer too, and through it everything downstream.
+
+Sound was described as downstream of touch. It is more direct than that: both
+are downstream of the same unenabled DMA controller.
+
 ### 2026-07-28: run106 -- the SPI DMA fix was aimed at the wrong thing
 
 run105 applied the SPI DMA overrun change and the digitizer's counters did not
