@@ -69,7 +69,12 @@ static const vm_option_t VM_OPTIONS[] = {
     { "ppp", "Guest networking (PPP over uart4)",
       "Off, and explicitly temporary: runs the guest's own pppd over an "
       "emulated UART until real drivers exist. Needs a writable work image.",
-      false, VM_OPT_GROUP_GUEST_STATE, VM_OPT_IMPL_HARNESS }
+      false, VM_OPT_GROUP_GUEST_STATE, VM_OPT_IMPL_HARNESS },
+    { "nat", "Route guest traffic to the internet",
+      "On, but it does nothing without PPP, which is what carries the "
+      "datagrams. Terminates ICMP echo, resolves names through the host, and "
+      "turns guest TCP and UDP into ordinary unprivileged sockets.",
+      true, VM_OPT_GROUP_GUEST_STATE, VM_OPT_IMPL_HARNESS }
 };
 
 #define VM_OPTION_COUNT ((unsigned)(sizeof VM_OPTIONS / sizeof VM_OPTIONS[0]))

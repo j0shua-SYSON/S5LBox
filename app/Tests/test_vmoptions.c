@@ -47,7 +47,8 @@ static const struct {
     { "activate",           true,  VM_OPT_GROUP_GUEST_STATE, VM_OPT_IMPL_NOWHERE },
     { "jb-codesign",        false, VM_OPT_GROUP_GUEST_STATE, VM_OPT_IMPL_NOWHERE },
     { "jb-payload",         false, VM_OPT_GROUP_GUEST_STATE, VM_OPT_IMPL_NOWHERE },
-    { "ppp",                false, VM_OPT_GROUP_GUEST_STATE, VM_OPT_IMPL_HARNESS }
+    { "ppp",                false, VM_OPT_GROUP_GUEST_STATE, VM_OPT_IMPL_HARNESS },
+    { "nat",                true,  VM_OPT_GROUP_GUEST_STATE, VM_OPT_IMPL_HARNESS }
 };
 
 #define NEXPECTED ((unsigned)(sizeof EXPECTED / sizeof EXPECTED[0]))
@@ -108,10 +109,10 @@ static void test_rows_are_grouped_and_unique(void) {
 static void test_lookup(void) {
     CHECK(vm_option_index("vram") >= 0, "vram is not findable by name");
     CHECK(vm_option_index("mbx") == 0, "mbx is not the first row");
-    CHECK(vm_option_index("ppp") == (int)NEXPECTED - 1,
-          "ppp is not the last row");
-    CHECK(vm_option_index("jb-payload") == (int)NEXPECTED - 2,
-          "jb-payload is not the second-to-last row");
+    CHECK(vm_option_index("nat") == (int)NEXPECTED - 1,
+          "nat is not the last row");
+    CHECK(vm_option_index("ppp") == (int)NEXPECTED - 2,
+          "ppp is not the second-to-last row");
     CHECK(vm_option_index("no-vram") == -1, "a negated spelling resolved");
     CHECK(vm_option_index("--vram") == -1, "a dashed spelling resolved");
     CHECK(vm_option_index("") == -1, "the empty name resolved");

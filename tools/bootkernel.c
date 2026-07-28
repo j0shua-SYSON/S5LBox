@@ -30,6 +30,8 @@
 #include "md_raw_bridge.h"
 #include "mt_drag.h"
 #include "ppp.h"
+#include "net.h"
+#include "net_host.h"
 #include "rootfs_work.h"
 #include "sha256.h"
 #include "snapshot.h"
@@ -419,6 +421,7 @@ typedef struct {
     bool jb_codesign;
     bool jb_payload;
     bool ppp;
+    bool nat;
     /* memory layout */
     bool ramdisk_low;
     /* diagnostics */
@@ -570,6 +573,16 @@ static const boot_toggle_t BOOT_TOGGLES[] = {
       "emulator that loads the kernel and owns the disk there is nothing to\n"
       "exploit past. Requires --external-md, which is the only mode with a\n"
       "writable work image." },
+    { "nat", NULL, NULL, true, BOOT_GROUP_GUEST_STATE, BOOT_FIELD(nat),
+      "route what the guest sends over PPP through the host IPv4 stack in\n"
+      "core/src/net/net.c: ICMP echo terminated here, names resolved\n"
+      "through the host's own getaddrinfo(), and TCP and UDP turned into\n"
+      "ordinary unprivileged sockets. Has no effect without --ppp, which\n"
+      "is what carries the datagrams.\n"
+      "ON by default, and --no-nat is the A/B: the guest still negotiates\n"
+      "IPCP and still transmits, and every datagram it sends is then\n"
+      "counted and dropped by the peer -- so a run can tell a link that\n"
+      "came up with nothing listening apart from one the NAT answered.\n" },
     { "ppp", NULL, NULL, false, BOOT_GROUP_GUEST_STATE, BOOT_FIELD(ppp),
       "give the guest a network by running its own /usr/sbin/pppd over the\n"
       "emulated uart4, and terminate PPP on the host. TEMPORARY AND SAID SO:\n"
@@ -965,6 +978,7 @@ typedef struct {
      * operator typed rather than the one the guest gets, and a reader would
      * reasonably conclude the DMA skip was never applied. */
     bool        ppp;
+    bool        nat;
 } boot_values_t;
 
 static void boot_print_config(FILE *out, const boot_config_t *cfg,
@@ -6248,6 +6262,18 @@ static struct {
     bool        ppp_peer_opened;         /* the RFC 1661 Open event was sent  */
     uint64_t    ppp_rx_bytes;            /* octets handed to uart4's RX FIFO  */
     uint64_t    ppp_open_step;           /* instruction count at the Open     */
+
+    /*
+     * The host IPv4 stack that sits above the PPP peer, and the sockets behind
+     * it. Both are allocated rather than inline: net_stack_t carries every
+     * flow's buffers and is a quarter of a megabyte, which net.h says outright
+     * not to put on a stack.
+     */
+    net_stack_t *net_stack;
+    net_host_t  *net_host;
+    bool         net_armed;
+    uint64_t     net_to_guest;           /* datagrams framed toward the guest */
+    uint64_t     net_to_guest_lost;      /* ...that PPP's ring would not take */
     /* The two instants that decide whether the receive path works at all. The
      * gap between them is how long AppleS5L8900XSerial took to service VIC
      * line 28, and a first_read of zero with a non-zero first_push is the
@@ -17715,10 +17741,47 @@ static void audio_tap_store(uint32_t addr, uint32_t val) {
  * peer's ring and go out on a later step. If the guest never drains, nothing is
  * dropped and nothing is claimed -- the end-of-run report prints the shortfall.
  */
+/*
+ * One IPv4 datagram off the PPP link, handed to the NAT.
+ *
+ * ppp.c only calls this once IPCP is Opened (RFC 1332 §2), so nothing here has
+ * to check the phase -- a datagram that arrives earlier is counted and dropped
+ * by the peer rather than silently delivered.
+ */
+static void nat_ip_sink(void *ctx, const uint8_t *pkt, size_t n) {
+    net_input((net_stack_t *)ctx, pkt, n);
+}
+
 static void ppp_pump_step(uint64_t n) {
     if (!G.ppp_peer_armed || !G.ppp_peer_opened || !G.mach) return;
 
-    ppp_tick(&G.ppp_peer, (uint32_t)((n * 1000ull) / (uint64_t)S5L8900_CPU_HZ));
+    uint32_t now_ms = (uint32_t)((n * 1000ull) / (uint64_t)S5L8900_CPU_HZ);
+    ppp_tick(&G.ppp_peer, now_ms);
+
+    /*
+     * The NAT runs here and only here, which is the one place
+     * docs/networking.md §8.3 allows it: on the CPU thread, between run slices.
+     * net_tick() is also where every host socket is polled, so a caller that
+     * never ticks gets a stack that answers pings and nothing else.
+     *
+     * A DATAGRAM TAKEN OUT OF THE QUEUE IS COMMITTED. net_output() advances the
+     * queue as it copies, and ppp_send_ip() can still refuse it if the peer's
+     * transmit ring is full -- so the one that gets refused is GONE, and it is
+     * counted rather than quietly absorbed. That is honest for IP, which has no
+     * delivery guarantee, and the count is what says whether uart4 is the
+     * bottleneck. The loop is bounded by the queue's own depth so a fast
+     * loopback server cannot starve the CPU.
+     */
+    if (G.net_armed && G.net_stack) {
+        net_tick(G.net_stack, now_ms);
+        for (unsigned guard = 0; guard < NET_OUT_SLOTS; guard++) {
+            uint8_t dg[NET_MTU];
+            size_t  got = net_output(G.net_stack, dg, sizeof dg);
+            if (!got) break;
+            if (ppp_send_ip(&G.ppp_peer, dg, got)) G.net_to_guest++;
+            else                                   G.net_to_guest_lost++;
+        }
+    }
 
     if (!G.ppp_lcp_up_step && ppp_lcp_open(&G.ppp_peer))
         G.ppp_lcp_up_step = n ? n : 1u;
@@ -23201,6 +23264,7 @@ int main(int argc, char **argv) {
      * continuation). The same mechanism as nand-enable-adm=0. Zero code.
      */
     bool        ppp;
+    bool        nat;
 
     /*
      * --no-uart4-rx-irq: deliver the peer's bytes but withhold VIC line 28.
@@ -23770,6 +23834,7 @@ int main(int argc, char **argv) {
     fstab_fixup        = cfg.v.fstab_fixup;
     ca_software_render = cfg.v.ca_software_render;
     ppp                = cfg.v.ppp;
+    nat                = cfg.v.nat;
     uart4_rx_irq       = cfg.v.uart4_rx_irq;
     rd_low             = cfg.v.ramdisk_low;
     stop_on_abort      = cfg.v.stop_on_abort;
@@ -24179,6 +24244,7 @@ int main(int argc, char **argv) {
     resolved.nbuttons     = button_n;
     resolved.ndtov        = ndtov;
     resolved.ppp          = ppp;
+    resolved.nat          = nat;
 
     /* --print-config: report and stop, before the kernel, the tree, the rootfs
      * or the work image is opened. Nothing on disk is read or written. */
@@ -25626,6 +25692,30 @@ external_md_work_ready:
          */
         ppp_init(&G.ppp_peer, NULL);
         G.ppp_peer_armed = true;
+        /*
+         * The NAT, if it was asked for. Failing to open the sockets layer is
+         * NOT fatal: a host that will not give us a socket still boots a guest
+         * that negotiates IPCP and transmits, and the report says which of the
+         * two happened rather than leaving a silent difference.
+         */
+        if (nat) {
+            G.net_stack = calloc(1, sizeof *G.net_stack);
+            net_egress_t eg;
+            memset(&eg, 0, sizeof eg);
+            G.net_host = G.net_stack ? net_host_open(&eg) : NULL;
+            if (G.net_stack) {
+                net_init(G.net_stack, NULL, G.net_host ? &eg : NULL);
+                ppp_set_ip_sink(&G.ppp_peer, nat_ip_sink, G.net_stack);
+                G.net_armed = true;
+            }
+            printf("nat        : %s\n",
+                   !G.net_stack   ? "NOT ARMED (out of memory)"
+                   : !G.net_host  ? "armed WITHOUT sockets -- it will answer "
+                                    "ICMP echo to 10.0.2.2 and 10.0.2.3 and "
+                                    "nothing else"
+                                  : "armed: 10.0.2.2 gateway, 10.0.2.3 resolver,"
+                                    " TCP and UDP through host sockets");
+        }
         /*
          * Applied here, after spy_install(), because this is where G.mach is
          * known to exist -- and applied to the port rather than to the pump, so

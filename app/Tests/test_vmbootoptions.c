@@ -152,8 +152,17 @@ static void test_applied_rows_reach_the_request(void) {
  * that would have caught the whole problem: the app has been showing five nubs
  * as hidden and one activation as on, and doing neither.
  */
+/*
+ * "nat" joins this list for a different reason from the rest, and the
+ * difference is worth keeping visible. The others are devices this app
+ * deliberately does not declare; the NAT is portable and would work here --
+ * core/src/net/net.c has no socket in it and tools/net_host.c needs nothing
+ * privileged. It is fixed off only because --ppp is, and --ppp is what would
+ * carry its datagrams. It stops being an override on the day the app
+ * terminates PPP.
+ */
 static const char *const EXPECTED_OVERRIDDEN_AT_DEFAULT[] = {
-    "mbx", "sha1", "baseband", "spi2", "usb-otg", "activate"
+    "mbx", "sha1", "baseband", "spi2", "usb-otg", "activate", "nat"
 };
 
 static void test_untouched_installation_is_already_lying(void) {

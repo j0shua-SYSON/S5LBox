@@ -109,7 +109,18 @@ static const struct {
     { "ppp", MAP_FIXED_OFF,
       "Not offered here. The guest half could be written into the work image, "
       "but nothing in this app terminates PPP on the host side, so the guest's "
-      "pppd would talk to a UART nobody answers." }
+      "pppd would talk to a UART nobody answers." },
+    /*
+     * The NAT itself is portable -- core/src/net/net.c has no socket in it and
+     * tools/net_host.c needs nothing privileged -- so this one is fixed off
+     * only because the thing that would carry its datagrams is. It becomes a
+     * real toggle here on the day the app terminates PPP, and not before:
+     * offering a route to the internet with no link under it would be the
+     * declared-but-silent-device failure the row above refuses.
+     */
+    { "nat", MAP_FIXED_OFF,
+      "Not offered here, because --ppp above is not. The NAT is what would "
+      "answer the guest's datagrams, and without the link there are none." }
 };
 
 #define VM_BOOT_MAP_COUNT \
