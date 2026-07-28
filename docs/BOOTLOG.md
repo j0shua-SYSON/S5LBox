@@ -2315,6 +2315,43 @@ at 0x3cc10000(0xea9d6000)` — and uart4 still carried **zero bytes**. The
 milestone is unchanged.
 
 
+### 2026-07-28: sound is not "not started" — the driver attaches and never writes I2S
+
+This was measured in run121 and simply never read. Every run has printed it.
+
+```
+  === I2S AUDIO CAPTURE (i2s0 = /arm-io/i2s0/audio0, wm8991) ===
+      words the guest stored to the TX FIFO (+0x10)  0
+      ... of which were not all-zero                 0
+      format: NOT established (the guest never wrote an I2S register)
+              audio0 declares 2 sample rate(s): 48000 44100
+              clock-frequency 12000000
+```
+
+`AppleWM8991Audio::start` appears in the console of every boot, with both its
+nubs resolved — `_wmIICNub` and `_wmIISNub`. So the codec driver **matches,
+starts and binds to its I²C and I²S providers**, and then writes no I2S
+register for the rest of the run.
+
+The honest reading is that this is probably correct behaviour rather than a
+defect. Nothing in these boots asks for audio: the guest reaches a lock screen
+with nothing playing, and a codec with no client has no reason to program a
+serial port. "Zero words" is what a silent phone looks like.
+
+What that changes is the shape of the remaining work. Sound is **instrumented
+and idle**, not missing — the capture path, the format derivation, the
+`dma-channels` decode and the direction inference are all in place and print
+themselves every run. The narrow-MMIO decode bug that would have discarded
+every DMA store was fixed pre-emptively on the strength of the SPI one, and
+remains unexercised by a guest. What is missing is a guest that plays
+something, which sits downstream of SpringBoard coming up, not downstream of
+any audio work.
+
+So the next audio measurement is not an audio task. Guarding against the
+opposite error: this does NOT establish that the path works. It establishes
+that the path has never been asked to carry a sample, and that the reason is
+visible and expected.
+
 ### 2026-07-28: run127 — the pool really was too small, and the gate says so
 
 The first genuine four-surface test. Every earlier attempt edited the core's

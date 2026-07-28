@@ -1561,10 +1561,23 @@ not mean emulated Wi-Fi works, and the interface will be `ppp0` rather than
 
 ### Guest audio — first-device priority
 
-Audio is now a first-device track for the iPhone 6s Plus, but **no guest audio
-device or host sink exists today**. Start by proving which I2S/controller and
-codec driver path the 3.1.3 kernel expects; do not invent register behavior to
-make sound appear. The eventual device model publishes PCM through a bounded
+Audio is a first-device track for the iPhone 6s Plus. **Updated 2026-07-28 —
+the first two sentences of this section used to say no guest audio device
+existed and that the work began by proving which driver path 3.1.3 expects.
+Both are now out of date.** The path is proven from the guest's own side:
+`AppleWM8991Audio::start` matches and binds both nubs, `_wmIICNub` and
+`_wmIISNub`, in every boot, so the expected path is `/arm-io/i2s0/audio0` with
+the WM8991 codec over I²C. The S5L8900 I2S controller, the codec, the
+`dma-channels` decode that names the transmit FIFO, format derivation and a
+capture sink all exist and print themselves in every run.
+
+What does **not** exist is a host *playback* sink — capture writes a file, and
+nothing reaches a speaker. And what has never been measured is a single sample:
+the guest writes **zero** I2S registers all run, which is what a phone sitting
+on a lock screen with nothing playing should do. So the blocker is not audio
+work; it is a guest that gets far enough to play something. Do not build
+plumbing against that zero, and do not invent register behavior to make sound
+appear. The eventual device model publishes PCM through a bounded
 queue. A host adapter performs format conversion and playback outside the CPU
 thread; underruns become counted silence and overruns are bounded and counted.
 The guest-facing model and queue contract stay platform-neutral even though the
