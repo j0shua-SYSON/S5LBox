@@ -2315,6 +2315,74 @@ at 0x3cc10000(0xea9d6000)` — and uart4 still carried **zero bytes**. The
 milestone is unchanged.
 
 
+### 2026-07-28: the un-match fix lands on device, and the black screen is not /vram sizing
+
+**THE FIX WORKS.** The user's second log, same phone, build with
+`s5l_bringup_request_t::unmatch`:
+
+```
+  [vm] 4 switches are not applied as set: activate, jb-codesign, jb-payload, nat
+  ...
+  com.apple.launchd 1  *** launchd[1] has started up. ***
+  Running fsck on the boot volume...
+  /dev/md0 on / (hfs, local, noatime)
+  mDNSResponder[14] Builtin profile: mDNSResponder (seatbelt)
+  systemShutdown false
+```
+
+Nine unapplied switches became four, every `AppleMBX` / `AppleBaseband` /
+`AppleSerialMultiplexer` line is gone, and **launchd starts** -- inside the first
+410 M instructions, where before it had not appeared by 11.5 G. The device now
+matches the desktop line for line.
+
+The sampler correction is confirmed by the same log at the same 409.6 M mark:
+`spread over 64 regions, the busiest taking only 13 of 512 samples`. Sixty-four
+regions with the hottest at 2.5% is real work. The previous build called the
+wedge "NOT spinning" at 2 regions and 60%.
+
+**THE BLACK SCREEN IS A SEPARATE FAULT, and /vram sizing is not it.** Both
+machines now reach:
+
+```
+  IOSurface warning: buffer allocation failed.  320 x 480 fmt: 42475241 size: 614400 bytes
+```
+
+Found by its own message: the string is at `0xc052d1a4`, referenced once from
+`com.apple.iokit.IOSurface+0x260c`. The failing function reads:
+
+```
+  c05244a0  ldr  r1, [r5, #0x70]        ; the PARENT descriptor
+  c05244ac  blx  IOSubMemoryDescriptor::withSubRange   ; 0xc0195088
+  c05244b4  str  r0, [r5, #0x24]
+  c05244cc  cmp  r3, #0                 ; r3 = [r5,#0x90], the REGION COUNT
+  c05244d0  beq  0xc05244f0             ; zero regions -> fall through
+  ...
+  c05244f0  ldr  r0, [r5, #0x80]        ; the FALLBACK
+  c05244fc  ldr  r2, =_page_size
+  c052451c  blx  IOBufferMemoryDescriptor::withOptions ; 0xc018c91c
+  c0524524  str  r0, [r5, #0x24]
+  c0524528  beq  0xc0524598             ; NULL -> the warning
+  c05245c0  ldreq r0, =0xe00002be       ; kIOReturnNoMemory
+```
+
+So there are TWO paths and both failed. The primary carves the surface out of a
+parent memory descriptor with `IOSubMemoryDescriptor::withSubRange` -- that is
+the `/vram` path, and it is driven by a loop over `[r5+0x90]` regions. The
+fallback is a plain `IOBufferMemoryDescriptor::withOptions(opts, 614400,
+page_size)` against the kernel map, and it returned NULL.
+
+**This reframes the question.** "/vram is the pool IOSurface allocates every
+surface from" is true only of the primary path, and that path is skipped
+entirely when the region count is zero -- which would also explain the earlier
+`IOSurface: buffer allocation size is zero`, and why run86 measured THREE
+surfaces as strictly worse than two. If the regions are not being enumerated,
+the pool's size was never the variable.
+
+run110 probes `0xc05244ac` (the withSubRange call), `0xc05244f0` (the fallback
+entry) and `0xc0524598` (the warning) to settle which: if the fallback is
+entered without withSubRange ever being reached, the region count is zero and
+the fix is upstream of the allocator entirely.
+
 ### 2026-07-28: run108/run109 -- the DMAC chain is REFUTED, and the real hang was configuration
 
 Two separate things were wrong today, and measuring both cost less than the
