@@ -571,6 +571,37 @@ static void bus_write(void *ctx, uint32_t addr, uint32_t val, unsigned bytes) {
 static uint32_t r32(void *c, uint32_t a) { return bus_read(c, a, 4); }
 static uint16_t r16(void *c, uint32_t a) { return (uint16_t)bus_read(c, a, 2); }
 static uint8_t  r8 (void *c, uint32_t a) { return (uint8_t) bus_read(c, a, 1); }
+/*
+ * THE DMA REQUEST LINE, which this machine answers on its peripherals' behalf.
+ *
+ * A PL080 moves a burst into a peripheral only when that peripheral asks for
+ * one. This model has no request wires, and until run116 it did not need them:
+ * narrow stores to the two data ports were being dropped by the bus decode, so
+ * nothing ever arrived fast enough to overflow anything.
+ *
+ * With that fixed the controller delivered a whole 54,156-byte Z2 firmware
+ * image into an eight-deep transmit FIFO inside a single tick, before the
+ * driver had armed the port -- `tx-drops 54140`. Real hardware cannot do that,
+ * because the SPI only raises its request when it has room.
+ *
+ * Only the transmit FIFOs are gated. Everything else -- memory, control
+ * registers, devices with no FIFO -- is always ready, which is both true of the
+ * hardware and the behaviour every existing test was written against.
+ */
+static bool dma_dst_ready(void *ctx, uint32_t dst, unsigned width) {
+    const s5l8900_t *m = ctx;
+    (void)width;
+    for (unsigned i = 0; i < S5L8900_SPI_COUNT; i++) {
+        static const uint32_t base[] = {
+            S5L8900_SPI0_BASE, S5L8900_SPI1_BASE, S5L8900_SPI2_BASE
+        };
+        if (i >= sizeof base / sizeof base[0]) break;
+        if (dst == base[i] + SPI_TXDATA)
+            return m->spi[i].tx_level < S5L_SPI_FIFO_DEPTH;
+    }
+    return true;
+}
+
 static void w32(void *c, uint32_t a, uint32_t v) { bus_write(c, a, v, 4); }
 static void w16(void *c, uint32_t a, uint16_t v) { bus_write(c, a, v, 2); }
 static void w8 (void *c, uint32_t a, uint8_t  v) { bus_write(c, a, v, 1); }
@@ -1232,7 +1263,7 @@ void s5l8900_tick(s5l8900_t *m, uint32_t ticks) {
      * lines are VIC0's and neither feeds the cascade; the order is free.
      */
     for (unsigned i = 0; i < S5L8900_DMAC_COUNT; i++) {
-        bool dmac_irq = s5l_pl080_run(&m->dmac[i], &m->bus);
+        bool dmac_irq = s5l_pl080_run(&m->dmac[i], &m->bus, dma_dst_ready, m);
         s5l_vic_set_line(&m->vic[0],
                          i == 0u ? S5L8900_IRQ_DMAC0 : S5L8900_IRQ_DMAC1,
                          dmac_irq);

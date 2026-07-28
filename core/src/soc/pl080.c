@@ -245,7 +245,9 @@ static void bus_store(const arm_bus_t *bus, uint32_t addr, uint32_t v,
  * reads Control & 0xfff for the remaining count (0xc070f9f8) and the LLI
  * register for which item is next (0xc070f93c).
  */
-static bool run_item(s5l_pl080_t *d, unsigned c, const arm_bus_t *bus) {
+static bool run_item(s5l_pl080_t *d, unsigned c, const arm_bus_t *bus,
+                     s5l_pl080_ready_fn ready, void *ready_ctx,
+                     bool *stalled) {
     s5l_pl080_chan_t *ch = &d->ch[c];
 
     uint32_t sw = (ch->ctrl >> PL080_CTRL_SWIDTH_SHIFT) & PL080_CTRL_WIDTH_MASK;
@@ -301,6 +303,24 @@ static bool run_item(s5l_pl080_t *d, unsigned c, const arm_bus_t *bus) {
     unsigned pend_bytes = 0;    /* at most dwidth - 1 + swidth, so under 8    */
 
     while (n) {
+        /*
+         * THE REQUEST LINE, asked at a clean boundary and only at one.
+         *
+         * `pend` holds bytes read from the source and not yet delivered, and it
+         * is a local: stopping with anything staged in it would lose those
+         * bytes outright. With swidth 4 and dwidth 1 -- which is exactly what
+         * /arm-io/spi1 uses -- a partial drain leaves a remainder that is not a
+         * whole number of SOURCE transfers, so it cannot be rolled back into
+         * the count either. Stalling only when nothing is staged makes the stop
+         * lossless by construction rather than by arithmetic.
+         *
+         * The enable bit is left set and Control[11:0] already carries the
+         * remaining count, so the next tick resumes precisely here.
+         */
+        if (pend_bytes == 0u && ready && !ready(ready_ctx, ch->dst, dwidth)) {
+            if (stalled) *stalled = true;
+            return false;
+        }
         pend |= (uint64_t)bus_load(bus, ch->src, swidth) << (8u * pend_bytes);
         pend_bytes += swidth;
         if (si) ch->src += swidth;
@@ -351,7 +371,8 @@ static bool run_item(s5l_pl080_t *d, unsigned c, const arm_bus_t *bus) {
     return true;
 }
 
-bool s5l_pl080_run(s5l_pl080_t *d, const arm_bus_t *bus) {
+bool s5l_pl080_run(s5l_pl080_t *d, const arm_bus_t *bus,
+                   s5l_pl080_ready_fn ready, void *ready_ctx) {
     if (!d) return false;
     if (!bus) return s5l_pl080_irq(d);
     /* The whole controller is gated by 0x030 bit 0. The driver sets it in the
@@ -372,7 +393,8 @@ bool s5l_pl080_run(s5l_pl080_t *d, const arm_bus_t *bus) {
             continue;
 
         unsigned items = 0;
-        while (run_item(d, c, bus)) {
+        bool stalled = false;
+        while (run_item(d, c, bus, ready, ready_ctx, &stalled)) {
             if (++items >= S5L_PL080_MAX_ITEMS) {
                 /* See refused_chain in soc.h. Real hardware would follow a
                  * self-referential list forever; a host that did the same would

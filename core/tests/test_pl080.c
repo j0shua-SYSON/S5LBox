@@ -264,7 +264,7 @@ static void test_a_memory_to_peripheral_transfer_moves_the_exact_bytes(void) {
           "bytes moved from inside the register store — the model is "
           "re-entering the bus from a bus write");
 
-    (void)s5l_pl080_run(&d, &bus);
+    (void)s5l_pl080_run(&d, &bus, NULL, NULL);
 
     CHECK(f.stores == 8u, "expected 8 peripheral stores, got %u", f.stores);
     CHECK(f.overflow == 0u, "the recorder overflowed");
@@ -315,7 +315,7 @@ static void test_a_peripheral_to_memory_transfer_runs_the_other_way(void) {
             0x00249000u | C_DI | C_I | 4u,
             0x00001042u | B_ITC | B_EN, 0u);
     s5l_pl080_write(&d, OFF_DMACCONFIG, 1u);
-    (void)s5l_pl080_run(&d, &bus);
+    (void)s5l_pl080_run(&d, &bus, NULL, NULL);
 
     CHECK(f.stores == 0u,
           "a peripheral-to-memory transfer stored outside memory");
@@ -354,7 +354,7 @@ static void test_a_linked_list_is_followed_and_reloaded_from_memory(void) {
             0x00249000u | C_SI | 4u,
             0x00000800u | B_ITC | B_EN, 0x200u | 3u);
     s5l_pl080_write(&d, OFF_DMACCONFIG, 1u);
-    (void)s5l_pl080_run(&d, &bus);
+    (void)s5l_pl080_run(&d, &bus, NULL, NULL);
 
     CHECK(d.items == 2u, "items is %llu, expected 2 — the chain was not "
           "followed", (unsigned long long)d.items);
@@ -402,7 +402,7 @@ static void test_mismatched_widths_pack_through_the_channel(void) {
             0x00089000u | C_SI | C_I | 3u,
             0x00000b00u | B_ITC | B_EN, 0u);
     s5l_pl080_write(&d, OFF_DMACCONFIG, 1u);
-    (void)s5l_pl080_run(&d, &bus);
+    (void)s5l_pl080_run(&d, &bus, NULL, NULL);
 
     CHECK(d.refused_width == 0u,
           "a four-into-one width change was refused; spi1 uses exactly this");
@@ -434,7 +434,7 @@ static void test_mismatched_widths_pack_through_the_channel(void) {
             (0u << 18) | (2u << 21) | C_SI | C_I | 8u,
             B_FLOW_M2P | B_ITC | B_EN, 0u);
     s5l_pl080_write(&d, OFF_DMACCONFIG, 1u);
-    (void)s5l_pl080_run(&d, &bus);
+    (void)s5l_pl080_run(&d, &bus, NULL, NULL);
     CHECK(f.stores == 2u, "expected 2 word stores, got %u", f.stores);
     if (f.stores >= 2u) {
         CHECK(f.width[0] == 4u && f.val[0] == 0x33221100u,
@@ -458,7 +458,7 @@ static void test_a_channel_disables_itself_at_the_end_of_the_chain(void) {
     s5l_pl080_write(&d, OFF_DMACCONFIG, 1u);
     CHECK((s5l_pl080_read(&d, CH(4, R_CFG)) & B_EN) != 0u,
           "setup: the channel was not enabled");
-    (void)s5l_pl080_run(&d, &bus);
+    (void)s5l_pl080_run(&d, &bus, NULL, NULL);
 
     /*
      * The part clears the enable bit when the transfer ends, and the driver
@@ -473,7 +473,7 @@ static void test_a_channel_disables_itself_at_the_end_of_the_chain(void) {
 
     /* A second run must not repeat the transfer. */
     unsigned was = f.stores;
-    (void)s5l_pl080_run(&d, &bus);
+    (void)s5l_pl080_run(&d, &bus, NULL, NULL);
     CHECK(f.stores == was, "a finished channel transferred again");
 }
 
@@ -487,13 +487,13 @@ static void test_the_controller_enable_gates_every_channel(void) {
     program(&d, 0, 0x40u, 0x3ca00010u, 0x00249000u | C_SI | C_I | 4u,
             0x00000800u | B_ITC | B_EN, 0u);
     /* 0x030 left at its reset zero. */
-    (void)s5l_pl080_run(&d, &bus);
+    (void)s5l_pl080_run(&d, &bus, NULL, NULL);
     CHECK(f.stores == 0u && d.bytes_moved == 0u,
           "a disabled controller transferred: %u stores", f.stores);
     CHECK(s5l_pl080_irq(&d) == false, "a disabled controller raised a line");
 
     s5l_pl080_write(&d, OFF_DMACCONFIG, 1u);
-    (void)s5l_pl080_run(&d, &bus);
+    (void)s5l_pl080_run(&d, &bus, NULL, NULL);
     CHECK(f.stores == 4u, "enabling the controller did not release the "
           "channel: %u stores", f.stores);
 }
@@ -514,7 +514,7 @@ static void test_halt_holds_a_channel_without_disabling_it(void) {
     program(&d, 6, 0x40u, 0x3ca00010u, 0x00249000u | C_SI | C_I | 4u,
             0x00000800u | B_ITC | 0x00040001u, 0u);
     s5l_pl080_write(&d, OFF_DMACCONFIG, 1u);
-    (void)s5l_pl080_run(&d, &bus);
+    (void)s5l_pl080_run(&d, &bus, NULL, NULL);
 
     CHECK(f.stores == 0u && d.bytes_moved == 0u,
           "a halted channel transferred: %u stores", f.stores);
@@ -526,7 +526,7 @@ static void test_halt_holds_a_channel_without_disabling_it(void) {
 
     /* Releasing halt releases the transfer. */
     s5l_pl080_write(&d, CH(6, R_CFG), 0x00000800u | B_ITC | B_EN);
-    (void)s5l_pl080_run(&d, &bus);
+    (void)s5l_pl080_run(&d, &bus, NULL, NULL);
     CHECK(f.stores == 4u, "clearing halt did not release the channel: %u",
           f.stores);
 }
@@ -542,7 +542,7 @@ static void test_the_completion_interrupt_is_the_one_the_filter_reads(void) {
     /* An item WITHOUT the terminal-count bit raises nothing. */
     program(&d, 3, 0x40u, 0x3ca00010u, 0x00249000u | C_SI | 2u,
             0x00000800u | B_ITC | B_EN, 0u);
-    (void)s5l_pl080_run(&d, &bus);
+    (void)s5l_pl080_run(&d, &bus, NULL, NULL);
     CHECK(d.bytes_moved == 4u, "setup: the transfer did not run");
     CHECK(s5l_pl080_read(&d, OFF_INTSTATUS) == 0u,
           "an item with Control bit 31 clear raised a terminal count");
@@ -551,7 +551,7 @@ static void test_the_completion_interrupt_is_the_one_the_filter_reads(void) {
     /* With it, exactly the channel's bit, in all three status words. */
     program(&d, 3, 0x40u, 0x3ca00010u, 0x00249000u | C_SI | C_I | 2u,
             0x00000800u | B_ITC | B_EN, 0u);
-    (void)s5l_pl080_run(&d, &bus);
+    (void)s5l_pl080_run(&d, &bus, NULL, NULL);
     CHECK(s5l_pl080_read(&d, OFF_RAWTC) == (1u << 3),
           "RawIntTCStatus is %#x, expected bit 3",
           s5l_pl080_read(&d, OFF_RAWTC));
@@ -578,7 +578,7 @@ static void test_the_completion_interrupt_is_the_one_the_filter_reads(void) {
     s5l_pl080_write(&d, OFF_DMACCONFIG, 1u);
     program(&d, 3, 0x40u, 0x3ca00010u, 0x00249000u | C_SI | C_I | 2u,
             0x00000800u | B_EN, 0u);          /* no ITC */
-    (void)s5l_pl080_run(&d, &bus);
+    (void)s5l_pl080_run(&d, &bus, NULL, NULL);
     CHECK(s5l_pl080_read(&d, OFF_RAWTC) == (1u << 3),
           "the raw status is masked by ITC — it must not be");
     CHECK(s5l_pl080_read(&d, OFF_INTSTATUS) == 0u,
@@ -598,7 +598,7 @@ static void test_refusals_are_counted_and_named(void) {
     s5l_pl080_write(&d, OFF_DMACCONFIG, 1u);
     program(&d, 0, 0x40u, 0x3ca00010u, 0x00249000u | C_SI | C_I | 4u,
             (6u << 11) | B_ITC | B_EN, 0u);
-    (void)s5l_pl080_run(&d, &bus);
+    (void)s5l_pl080_run(&d, &bus, NULL, NULL);
     CHECK(d.refused_flow == 1u, "peripheral-controlled flow was not refused");
     CHECK(f.stores == 0u && d.bytes_moved == 0u,
           "a refused channel still transferred");
@@ -616,7 +616,7 @@ static void test_refusals_are_counted_and_named(void) {
         s5l_pl080_write(&d, OFF_DMACCONFIG, 1u);
         program(&d, 0, 0x40u, 0x3ca00010u, 0x00249000u | C_SI | C_I | 2u,
                 (fc << 11) | B_ITC | B_EN, 0u);
-        (void)s5l_pl080_run(&d, &bus);
+        (void)s5l_pl080_run(&d, &bus, NULL, NULL);
         CHECK(d.refused_flow == 0u && d.bytes_moved == 4u,
               "flow control %u was refused; the shipped tree uses it", fc);
     }
@@ -629,14 +629,14 @@ static void test_refusals_are_counted_and_named(void) {
     s5l_pl080_write(&d, OFF_DMACCONFIG, 1u);
     program(&d, 1, 0x40u, 0x3ca00010u, (5u << 18) | (5u << 21) | C_SI | 2u,
             B_FLOW_M2P | B_ITC | B_EN, 0u);
-    (void)s5l_pl080_run(&d, &bus);
+    (void)s5l_pl080_run(&d, &bus, NULL, NULL);
     CHECK(d.refused_width == 1u, "a reserved width code was accepted");
 
     /* Three byte-wide source transfers into a word-wide destination: eight
      * bits left over in a FIFO this model does not have. */
     program(&d, 2, 0x40u, 0x3ca00010u, (0u << 18) | (2u << 21) | C_SI | 3u,
             B_FLOW_M2P | B_ITC | B_EN, 0u);
-    (void)s5l_pl080_run(&d, &bus);
+    (void)s5l_pl080_run(&d, &bus, NULL, NULL);
     CHECK(d.refused_width == 2u,
           "a transfer with a partial destination word was accepted — the "
           "remainder would sit in a channel FIFO that does not exist here");
@@ -671,7 +671,7 @@ static void test_refusals_are_counted_and_named(void) {
     }
     program(&d, 7, 0x40u, 0x3ca00010u, 0x00249000u | 0u,
             B_FLOW_M2P | B_ITC | B_EN, 0x300u);
-    (void)s5l_pl080_run(&d, &bus);
+    (void)s5l_pl080_run(&d, &bus, NULL, NULL);
     CHECK(d.refused_chain == 1u, "a self-referential chain was not refused");
     CHECK(d.items <= (uint64_t)S5L_PL080_MAX_ITEMS + 1u,
           "the chain cap did not bound the walk: %llu items",
@@ -686,10 +686,10 @@ static void test_a_null_bus_moves_nothing(void) {
     s5l_pl080_write(&d, OFF_DMACCONFIG, 1u);
     program(&d, 0, 0x40u, 0x3ca00010u, 0x00249000u | C_SI | C_I | 4u,
             B_FLOW_M2P | B_ITC | B_EN, 0u);
-    CHECK(s5l_pl080_run(&d, NULL) == false, "a null bus raised a line");
+    CHECK(s5l_pl080_run(&d, NULL, NULL, NULL) == false, "a null bus raised a line");
     CHECK(d.bytes_moved == 0u && d.transfers == 0u,
           "a null bus moved %llu bytes", (unsigned long long)d.bytes_moved);
-    CHECK(s5l_pl080_run(NULL, NULL) == false, "a null device answered true");
+    CHECK(s5l_pl080_run(NULL, NULL, NULL, NULL) == false, "a null device answered true");
     s5l_pl080_reset(NULL);
     CHECK(s5l_pl080_read(NULL, 0u) == 0u, "a null device answered a read");
     s5l_pl080_write(NULL, 0u, 0u);

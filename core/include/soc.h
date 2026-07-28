@@ -2997,7 +2997,35 @@ bool     s5l_pl080_irq(const s5l_pl080_t *d);
  * stored so the device holds no pointer into the machine that a snapshot or a
  * copy could invalidate. Passing a null bus does nothing and moves nothing.
  */
-bool     s5l_pl080_run(s5l_pl080_t *d, const arm_bus_t *bus);
+/*
+ * DESTINATION PACING, which is what a PL080's request lines do.
+ *
+ * `ready` is asked, before every destination transfer, whether the thing at
+ * that address can accept one. NULL means "always", which is the right answer
+ * for a memory destination and was this model's only behaviour until run116.
+ *
+ * It is not a refinement. This controller completes a whole channel inside one
+ * s5l8900_tick() -- see the note at the top of pl080.c, which defends that as
+ * "the same ORDER the guest observes", and for memory it is. For a PERIPHERAL
+ * it is not: the real part moves a burst only when the peripheral asserts
+ * DMACBREQ, and even in flow modes 0-3, where the CONTROLLER owns the transfer
+ * size, that request still gates each burst.
+ *
+ * run116 measured what its absence costs. With the bus decode fixed so narrow
+ * stores finally reach the port, the controller delivered a 54,156-byte Z2
+ * firmware image into an eight-deep FIFO before the driver had armed it:
+ * `tx-drops 54140`, `dma-arms 1`. The bytes arrived and were thrown away one
+ * FIFO-full at a time.
+ *
+ * A channel that is refused stops WITHOUT clearing its enable bit and with its
+ * remaining count already written back, so the next tick resumes it exactly
+ * where it stopped. That is also what the driver's own progress reporting
+ * expects to see.
+ */
+typedef bool (*s5l_pl080_ready_fn)(void *ctx, uint32_t dst, unsigned width);
+
+bool     s5l_pl080_run(s5l_pl080_t *d, const arm_bus_t *bus,
+                       s5l_pl080_ready_fn ready, void *ready_ctx);
 
 #define S5L_STUB_MAX      16
 
