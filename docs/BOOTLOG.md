@@ -2315,6 +2315,37 @@ at 0x3cc10000(0xea9d6000)` — and uart4 still carried **zero bytes**. The
 milestone is unchanged.
 
 
+### 2026-07-28: run121 -- the Z2 acknowledges and consumes, for the first time
+
+With the three data-path defects fixed, the digitizer's own counters move for
+the first time in this project's history:
+
+```
+  run106 (before):  hbpp: probes 4  acks 0  data 0 (0 bytes)      exec 0
+  run121 (now):     hbpp: probes 5  acks 1  data 2 (18408 bytes)  exec 0
+```
+
+**`acks 1` and `data 2` are both firsts.** The device has answered an ATN_ACK
+and consumed DATA packets. The protocol is running rather than idling.
+
+**IT DOES NOT COMPLETE, and touch still does not work.** 18,408 bytes of the
+54,156 delivered were framed as DATA packets, and `exec 0` says the EXEC
+command never arrived -- so the Z2 never leaves HBPP, never runs application
+firmware, and never publishes Sensor Rows/Columns. The surface bounds are still
+whatever they were.
+
+So the claim is exactly this and no more: the transport is fixed and the device
+is now participating in the protocol. The bootload is partial.
+
+**Where to look next, and it is a measurement rather than a read.** 18,408 is
+roughly a third of the image, and the run shows `rx-overruns 54148` -- nothing
+drained the responses while the download ran. In HBPP the sender checks an
+acknowledgement between packets, so the next question is whether the driver is
+losing the answers it needs to continue, or whether this model's framer is
+failing to split a back-to-back burst into more than two packets. Those are
+distinguishable: the first shows up as the driver retrying, the second as the
+framer's own byte counter stopping mid-image.
+
 ### 2026-07-28: run120 -- the Z2 firmware is delivered, all 54,156 bytes of it
 
 ```
