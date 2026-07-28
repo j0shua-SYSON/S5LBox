@@ -356,13 +356,72 @@ answer the four register writes. Reporting the "convenient" value that skips
 the writes would take the branch that disables touch — which is the sort of
 thing that only shows up as a working bootload and a dead digitizer.
 
-### 6.7 Still not established
+### 6.7 The calibration request, and what "waiting" actually is
 
-What `performCalibSeq` polls after "requesting calibration" (it builds a packet
-starting `1F 01`) while it logs "Waiting for calibration to end", and the exact
-byte order of the value returned by the long MemRead ATN_ACK. Both are needed
-before the sequence can complete, and neither is answerable from the packet
-builders alone.
+`0xc0445740` onward: a **two-octet** transfer of
+
+```
+   1F 01
+```
+
+then — and this is much less than the log line suggests — a single
+`IOSleep(0x41)` (65 ms) at `0xc04457e0`, then **one short ATN_ACK**. It is not
+a poll loop. And `0xc0445804` returns success on the ATN_ACK's *transfer*
+status alone: the halfword it returns is **not compared to anything**. So the
+part only has to not fail the transfer.
+
+The long MemRead ATN_ACK's reply carries the value at `rx[2..5]` in the same
+middle-endian order as everything else — `0xc0440c5c`-`0xc0440c74` assemble it
+as `(rx[2]<<8 | rx[3]) | (rx[4]<<8 | rx[5]) << 16`.
+
+### 6.8 The framing problem, and how to resolve it
+
+`isInHBPP` (`0xc0441008`) builds its probe as `0x1A 0xA1` followed by seven
+`18 E1` pairs — **sixteen octets**. So three different transactions begin with
+the same two bytes:
+
+| length | bytes | when |
+|---|---|---|
+| 2 | `1A A1` | short ATN_ACK, after a DATA packet or a calibration request |
+| 8 | `1A A1 18 E1 18 E1 18 E1` | long ATN_ACK, after a register read |
+| 16 | `1A A1` + `18 E1` ×7 | the HBPP probe |
+
+The 8- and 16-octet forms are **prefixes of one another**, so no amount of
+looking at the bytes can separate them. On real silicon the chip select does
+it; `soc.h` records that this controller cannot observe a select edge, because
+the select lines are GPIO platform functions and neither controller sets
+`internal-cs`.
+
+The model must therefore frame these by **context** — which is available,
+because it sees the whole stream in order:
+
+```
+   after a 0x30 DATA packet      -> the next 1A A1 is 2 octets
+   after a 1C 73 register read   -> the next 1A A1 is 8 octets
+   after a 1F 01 calib request   -> the next 1A A1 is 2 octets
+   otherwise                     -> 16 octets, the probe
+```
+
+That is a fact about this bus rather than a convenience, and it is the one
+piece of the design that is not a direct transcription of the driver.
+
+### 6.9 The complete HBPP command set
+
+Everything the model has to answer, in one place:
+
+| bytes | length | meaning | the device must |
+|---|---|---|---|
+| `EE …` | 16 | `MT_SPI_Z2_WAKE_CMD` | answer like any command frame |
+| `30 01 …` | 14 + 4·W | DATA packet | consume it |
+| `1A A1` | 2 | short ATN_ACK | answer **`4B C1`** |
+| `1C 73 …` | 8 | register read request | consume it |
+| `1A A1 18 E1 ×3` | 8 | long ATN_ACK (MemRead) | return the value at `rx[2..5]` |
+| `1E 33 …` | 16 | register write | succeed |
+| `1F 01` | 2 | request calibration | succeed |
+| `1D 53 …` | 12 | execute | **leave HBPP** |
+| `1A A1 18 E1 ×7` | 16 | `isInHBPP` probe | loopback while in HBPP |
+
+with register `0x10008ffc` reporting anything **except** `0x5A020028`.
 
 ## 7. Downstream, once this is unblocked
 
