@@ -41,16 +41,64 @@ static NSString *const kErrorDomain = @"VMInstanceStore";
 
 #pragma mark - Paths
 
+/*
+ * WHERE MACHINES LIVE, and it moved.
+ *
+ * They were under Application Support, which the Files app does not show. That
+ * was defensible while nothing was user-visible, and stopped being defensible
+ * the moment UIFileSharingEnabled went in: the argument for that switch was
+ * that a work image you cannot copy off the device is a VM you cannot back up,
+ * and Application Support is exactly where you cannot copy it from. Worse, the
+ * launch code then created an EMPTY Documents/Machines beside it, so a user
+ * looking for a machine found a folder that was correct in name and would
+ * never contain anything.
+ *
+ * They are in Documents/Machines now: visible, copyable, deletable, and where
+ * this app has already told people to look.
+ */
 - (NSString *)containerDirectory {
-    NSArray<NSString *> *dirs =
-        NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory,
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSArray<NSString *> *docs =
+        NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,
                                             NSUserDomainMask, YES);
-    NSString *base = dirs.firstObject ?: NSTemporaryDirectory();
+    NSString *base = docs.firstObject ?: NSTemporaryDirectory();
     NSString *dir = [base stringByAppendingPathComponent:@"Machines"];
-    [[NSFileManager defaultManager] createDirectoryAtPath:dir
-                             withIntermediateDirectories:YES
-                                              attributes:nil
-                                                   error:NULL];
+    [fm createDirectoryAtPath:dir
+  withIntermediateDirectories:YES
+                   attributes:nil
+                        error:NULL];
+
+    /*
+     * Anything already under the old root is moved across once. Item by item
+     * rather than by renaming the directory, because the new one already
+     * exists -- the launch path creates it so Files has somewhere to drop an
+     * IPSW -- and a rename onto an existing directory fails.
+     *
+     * Nothing is overwritten: a name that is already in the new location wins,
+     * because it is the one this build has been using. Anything left behind
+     * stays where it is rather than being deleted, so a failed move loses
+     * nothing.
+     */
+    static dispatch_once_t migrateOnce;
+    dispatch_once(&migrateOnce, ^{
+        NSArray<NSString *> *support =
+            NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory,
+                                                NSUserDomainMask, YES);
+        NSString *oldDir = [support.firstObject
+            stringByAppendingPathComponent:@"Machines"];
+        if (oldDir.length == 0 || ![fm fileExistsAtPath:oldDir]) return;
+
+        for (NSString *name in [fm contentsOfDirectoryAtPath:oldDir error:NULL]) {
+            NSString *from = [oldDir stringByAppendingPathComponent:name];
+            NSString *to   = [dir stringByAppendingPathComponent:name];
+            if ([fm fileExistsAtPath:to]) continue;
+            (void)[fm moveItemAtPath:from toPath:to error:NULL];
+        }
+        /* Only if it emptied. A leftover means a move failed and the data is
+         * still there to be recovered by hand. */
+        if ([fm contentsOfDirectoryAtPath:oldDir error:NULL].count == 0)
+            (void)[fm removeItemAtPath:oldDir error:NULL];
+    });
 
     /*
      * PHYSICALLY RESOLVED, for the same reason VMSettings' documents directory

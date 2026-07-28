@@ -248,9 +248,11 @@ static const uint64_t kVMInstructionCaps[] = {
 
     /*
      * firmware/ is where the three files live and where an IPSW is dropped.
-     * Machines/ is where per-machine work images go, and it is created here
-     * too so that a user who opens Files sees the shape of the thing rather
-     * than one folder that appears later for no visible reason.
+     * Machines/ is where per-machine work images really go -- see
+     * VMInstanceStore's containerDirectory, which moved them here out of
+     * Application Support precisely so this folder is not a decoy. Created at
+     * launch so a user who opens Files sees the shape of the thing rather than
+     * one folder that appears later for no visible reason.
      */
     NSArray<NSString *> *wanted = @[
         [root stringByAppendingPathComponent:@"firmware"],
