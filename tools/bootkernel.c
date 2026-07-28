@@ -27717,6 +27717,44 @@ external_md_work_ready:
                    "%zu of %zu RGB bytes non-zero\n",
                    active, out_w, out_h, nonzero, out_n);
             /*
+             * EVERY SLOT IN THE POOL, not just the one being scanned out.
+             *
+             * The capture above photographs whatever address window0 happens
+             * to hold, and on 2026-07-29 that turned out to be the whole
+             * story: across eight runs the scanout base predicts the result
+             * perfectly. Every run that "rendered" had window0 at pool+0x96000
+             * and every "black" run had it at the pool base, still on the boot
+             * framebuffer the kernel drew into.
+             *
+             * That makes "the screen is black" and "the compositor drew into a
+             * slot we never looked at" indistinguishable from the line above
+             * alone -- and they are completely different bugs. This walks the
+             * published /vram pool a surface at a time and counts what is
+             * actually in each one, so the difference is visible without
+             * needing the scanout to be correct first.
+             */
+            if (fb_pa) {
+                const uint32_t slot = (uint32_t)N82_FB_BYTES;
+                printf("             /vram pool survey, %u slot(s) of %u bytes:\n",
+                       (unsigned)N82_VRAM_SURFACES, slot);
+                for (unsigned s = 0; s < (unsigned)N82_VRAM_SURFACES; s++) {
+                    const uint32_t pa = fb_pa + s * slot;
+                    if (pa < mach.ram_base ||
+                        (uint64_t)pa + slot >
+                            (uint64_t)mach.ram_base + mach.ram_size) {
+                        printf("               slot %u @ 0x%08x  outside DRAM\n",
+                               s, pa);
+                        continue;
+                    }
+                    const uint8_t *p = mach.ram + (pa - mach.ram_base);
+                    size_t nz = 0;
+                    for (uint32_t i = 0; i < slot; i++)
+                        if (p[i]) nz++;
+                    printf("               slot %u @ 0x%08x  %zu of %u bytes "
+                           "non-zero\n", s, pa, nz, slot);
+                }
+            }
+            /*
              * A SECOND COPY, BESIDE THIS RUN'S OWN WORK IMAGE.
              *
              * firmware/screen.ppm is one fixed path shared by every concurrent
