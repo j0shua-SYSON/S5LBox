@@ -420,6 +420,42 @@ neither `fll-mval` nor `cal-dl-addr`, but `0xc04443a4` defaults them to
 `0x16e4` and `0x400200`, so a missing property is not the blocker. See
 `docs/BOOTLOG.md` run101.
 
+### 6.11 Where the firmware is, and an unresolved contradiction
+
+`bootloadDevice()`'s FIRST step is the download. `+0x8c` (`0xc0444370`) is only
+a dispatcher -- it tests `this->0x44` and tail-calls the bootloader vtable's
+`+0x90` (`0xc0445144`, "sending preconstructed firmware bytes") or `+0x94`
+(`0xc04452c8`, "sending unconstructed firmware bytes"). Both take the image
+from `this->0x20`, an OSData the property reader at `0xc04443e4` fills.
+
+run101 sent nothing at all, so the question is where that OSData comes from.
+
+**The kernelcache does not contain it.** `__PRELINK_INFO` is 242,664 bytes of
+plist and holds **no** `<key>Firmware</key>`, `<key>Constructed Firmware</key>`,
+`<key>Calibration Data</key>` or `<key>PreconstructedBootloadPacketType</key>`.
+Its largest `<data>` blob is 1,756 characters, which is
+`HIDPointerAccelerationTable`; a 54,156-byte image would be roughly 72,000
+characters of base64 and there is nothing of that order anywhere in it.
+
+The N82 personality names `mt-merge-personality = Z2F52,1`, which resolves to
+`AppleMultitouchSPI.kext/PlugIns/AppleMultitouchSPIZ2F52.kext`
+(`com.apple.driver.AppleMultitouchSPIZ2F52`). That plugin IS in the cache, and
+its personality carries no firmware either.
+
+**AND THAT CONTRADICTS run65**, which watched this same driver reach
+`MTSPIBootloader_Z2::bootloadDevice() / sending preconstructed firmware bytes`
+and begin pushing. Both readings cannot be right. Either the image reaches the
+driver by a route this search did not cover -- a plugin `__DATA` section rather
+than a plist property, or the root filesystem rather than the cache -- or
+run65's log line was reached without an image behind it.
+
+**This is recorded as an open contradiction rather than resolved by choosing
+the more convenient half.** run102 is the measurement: kernel probes on
+`attemptToBootloadDevice`, the object-creation call whose NULL return would
+bail silently (`0xc044153c`, where `r0` is the result), `bootloadDevice`, the
+dispatcher and both senders, with `isInHBPP` and `finishStarting` as positive
+controls. Whichever probe is the last to fire names the step that gives up.
+
 ### 6.10 The complete HBPP command set
 
 Everything the model has to answer, in one place:
