@@ -116,6 +116,42 @@ semantics to UIKit, Darwin sockets or one jailbreak. Other hosts keep the
 interpreter and device models and supply their own presentation, storage, audio,
 network and JIT-memory adapters.
 
+## The networking boundary
+
+Networking is the cleanest example of the rule the whole core is organised
+around, so it is worth stating where the boundary actually falls.
+
+`core/src/net/` is three modules and **none of them contains a socket**:
+
+- `ppp.c` — HDLC-async framing, LCP and IPCP (RFC 1662, 1661, 1332). Bytes in,
+  bytes out.
+- `net.c` — IPv4 admission, ICMP echo, UDP NAT and a DNS resolver that parses
+  the query and asks the *host's* resolver rather than forwarding port 53.
+- `tcp.c` — the TCP state machine, from handshake to both close directions,
+  with window back-pressure, retransmission and a persist timer.
+
+Their only include set is `<stdint.h>`, `<stdbool.h>`, `<stddef.h>` and
+`<string.h>`. No I/O, no clock, no allocation, no platform header. Time arrives
+as a number the caller chooses; every byte that must really leave the machine
+leaves through the `net_egress_t` function table.
+
+`tools/net_host.c` is the only implementation of that table, and it is the same
+split as `tools/audio_capture.c` and `tools/file_block.c`. What it asks of a
+host is deliberately small — an unprivileged `SOCK_STREAM`, an unprivileged
+`SOCK_DGRAM`, and `getaddrinfo()`. No raw socket, no TUN device, no new
+entitlement, which is why NAT was chosen over bridging and why this can ship
+inside a sandboxed app unchanged.
+
+**What that boundary buys, concretely.** A whole TCP handshake, a window
+collapse and a retransmission storm are driven in microseconds by
+`core/tests/test_net.c` against a scripted egress, on a runner with no network.
+That is not a convenience: it is what let three real defects surface as failing
+assertions rather than as a guest that stalls. The most consequential —
+`tcp_consume_ack()` computing its acceptable-ACK ceiling from the send buffer,
+which never contains the SYN — meant **no connection could ever have reached
+ESTABLISHED**, and from inside a guest it would have looked like a hung socket
+five layers away from the arithmetic that caused it.
+
 ## Current host boundary and next prerequisite
 
 `tools/bootkernel` owns the real-firmware boot orchestration today. The iOS app
