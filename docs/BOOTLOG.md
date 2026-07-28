@@ -2406,6 +2406,49 @@ run122 measures the actual pair — the region's mode from the virtual call at
 `0xc05243d4`, and the requested mode from `[r5+0x80]` — so the fix is aimed at
 a number rather than at a guess about which side is wrong.
 
+### 2026-07-28: run117/run118/run126 NEVER TESTED A BIGGER POOL -- retracted
+
+Three experiments claimed to raise `/vram` from two surfaces to four. All three
+published the two-surface size:
+
+```
+  run117  dt: /vram  reg -> {0x0885c000,0x0012c000}
+  run118  dt: /vram  reg -> {0x0885c000,0x0012c000}
+  run126  dt: /vram  reg -> {0x0885c000,0x0012c000}
+```
+
+**The constant being edited was not the one bootkernel uses.** There are two,
+and nothing makes them agree:
+
+```
+  tools/bootkernel.c:2602    #define N82_VRAM_SURFACES 2u
+  core/include/bringup.h:72  #define S5L_BRINGUP_VRAM_SURFACES  2u
+```
+
+The app boots through core's; the desktop harness boots through its own. Every
+one of those runs edited core's and measured bootkernel's.
+
+**So the entry above -- "a bigger /vram pool does NOT fix the IOSurface
+refusal" -- was never measured, and is withdrawn.** The capacity hypothesis is
+untested rather than dead. So is the claim that run86's "three surfaces
+measured worse than two" was noise around an irrelevant knob: that dismissal
+rested on run118, which measured nothing.
+
+What exposed it was one command -- reading the `dt: /vram` line out of the run
+header -- which costs nothing and should have been run the first time, three
+experiments earlier. A configuration experiment that does not verify the
+configuration took effect is not an experiment.
+
+Nothing shipped on any of this: each run built a throwaway binary and reverted
+its source immediately, and no commit depended on the result. The two constants
+are both 2u today, so the desktop and the app do agree right now. That they
+CAN disagree, silently, is a real defect and is worth a test of its own -- it is
+the same shape as the app-versus-desktop divergence that cost this whole
+morning, where bring-up had no un-match step and only the desktop knew.
+
+run127 is the first genuine four-surface run: verified at `0x00258000` before
+it was started.
+
 ### 2026-07-28: run118 -- a bigger /vram pool does NOT fix the IOSurface refusal
 
 The A/B, with `S5L_BRINGUP_VRAM_SURFACES` at 4 instead of 2 and enough budget
