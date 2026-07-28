@@ -453,6 +453,28 @@ add_test(NAME app_option_table COMMAND test_vmoptions)
 # already pinned by test_img3/test_aes/test_lzss -- the importer reuses those
 # rather than carrying a second copy of the byte-level decisions -- and
 # host_sha256 for the digest that decides whether an artefact is the right one.
+# The app's IPSW importer, driven from a terminal. Its 1,126 assertions all run
+# against fixtures this project built, which proves the parser does what it was
+# written to do and says nothing about whether it can open Apple's actual
+# archive -- a different claim, and the one a user is really asking about.
+# Identify-only by default: no output paths, so it opens nothing for writing
+# and needs no key.
+add_executable(fwimport
+    ../tools/fwimport.c
+    ../app/Sources/VMFirmwareInflate.c
+    ../app/Sources/VMFirmwareDigest.c
+    ../app/Sources/VMFirmwarePlist.c
+    ../app/Sources/VMFirmwareZip.c
+    ../app/Sources/VMFirmwareDMG.c
+    ../app/Sources/VMFirmwareImport.c
+)
+target_include_directories(fwimport PRIVATE ../app/Sources include ../tools)
+target_link_libraries(fwimport PRIVATE emucore host_sha256)
+set_target_properties(fwimport PROPERTIES
+    C_STANDARD 11
+    C_STANDARD_REQUIRED YES
+    C_EXTENSIONS NO)
+
 add_executable(test_vmfirmwareimport
     ../app/Tests/test_vmfirmwareimport.c
     ../app/Tests/test_vmfw_inflate.c
