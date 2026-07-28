@@ -2315,6 +2315,63 @@ at 0x3cc10000(0xea9d6000)` — and uart4 still carried **zero bytes**. The
 milestone is unchanged.
 
 
+### 2026-07-28: run100 — the driver never reads a single report, and the HBPP lie is why
+
+The entry below establishes that no int32 property reaches userspace. run100
+establishes **why**, and it is upstream of everything touch-related.
+
+Eight kernel-mode call probes, three of them chosen as **positive controls** —
+addresses the guest console already proves were executed, so that a row of
+zeroes cannot be confused with a probe that never armed. (run99 ran the same
+experiment without controls and its seven zeroes proved nothing; that is why it
+is not written up as a result.)
+
+| probe | captures | |
+|---|---|---|
+| `0xc0442670` `finishStarting` | **1** | control — "detected HBPP. driver will be kept alive" |
+| `0xc0441008` `isInHBPP` | **4** | control |
+| `0xc04414c4` `attemptToBootloadDevice` | **3** | control — the three retries |
+| `0xc043b11c` `publishProperties` | **0** | never entered |
+| `0xc04385a8` `getReport` (vtable+0x3f0) | **0** | **not one report is ever read** |
+| `0xc0438670` / `0xc04386e0` / `0xc043880c` | **0** | the three publishers |
+
+The controls fired, so the facility works and the driver is alive and probing.
+And in two billion instructions **it never issues a single control read of any
+report**, and never enters the function that would publish the properties.
+
+**The mechanism, in the driver's own words.** `isInHBPP()` has two callers that
+want opposite answers, which `core/src/soc/mtz2.c` documents at length:
+`finishStarting()` DETACHES on FALSE, and `attemptToBootloadDevice()` pushes
+54,156 bytes of firmware on TRUE. The model resolves this with one monotonic
+bit — TRUE once, FALSE forever after — so the driver stays attached and then
+skips the bootload. run96's console is that decision, verbatim:
+
+```
+AppleMultitouchZ2SPI: successfully started
+AppleMultitouchZ2SPI: using DMA for bootloading
+AppleMultitouchZ2SPI: detected HBPP. driver will be kept alive
+AppleMultitouchZ2SPI:  Could not detect HBPP. Response: 0x00 ...   (x6)
+```
+
+A Z2 has no flash. iOS downloads its firmware **on every boot**, which is why
+`finishStarting` insists on HBPP: at that moment the part really is an
+unprogrammed bootloader. Our device claims to be one and then refuses to be
+programmed, so it never runs application firmware — and the driver, correctly,
+never interrogates a part that has none.
+
+`mtz2.c` calls this "a bounded, named, single-bit lie that costs three cosmetic
+log lines." **That is now measured to be wrong.** It costs every property, and
+therefore the surface bounds, and therefore touch — and sound sits downstream
+of touch. The file's own note on the alternative is the work item:
+
+> Implementing the HBPP sink — accepting the 54,156 bytes and afterwards
+> reporting firmware resident — removes the lie entirely. It is NOT blocked by
+> DMA … What blocks it is that the bootloader's own multi-stage protocol is
+> unread.
+
+That is now the whole of touch.
+
+
 ### 2026-07-28: the touch bounds read out of a guest — and the lever is **not** the descriptor
 
 run98 left one question standing, and it was the right one to stand on: does
