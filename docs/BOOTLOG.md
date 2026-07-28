@@ -2315,6 +2315,93 @@ at 0x3cc10000(0xea9d6000)` — and uart4 still carried **zero bytes**. The
 milestone is unchanged.
 
 
+### 2026-07-28: run108/run109 -- the DMAC chain is REFUTED, and the real hang was configuration
+
+Two separate things were wrong today, and measuring both cost less than the
+reasoning that produced either.
+
+**THE TWELVE-LINK CHAIN'S TOP THREE LINKS ARE FALSE.** run108 armed call probes
+on the registration path and run109 on the return site:
+
+```
+  pc 0xc019a35c  registerDMAController     captured 2
+  pc 0xc019a2d8  IODMAController::start    captured 2
+  pc 0xc019a3c4  getController             captured 11
+  pc 0xc018b3fc  IODMAEventSource::init    captured 11
+
+  return of getController (0xc018b42e), 11 captures:
+      7 x  r0 c0ce5000     a real controller
+      3 x  r0 c0ceac00     the other one
+      1 x  r0 00000000     a different call site (lr c019a3db)
+```
+
+`AppleARMPL080DMAC` DOES register, twice -- once per controller -- and
+`IODMAController::start` is entered from the kext at `lr c070f434` both times.
+`getController` then returns a real controller in TEN of eleven calls, and the
+two pointers it returns are exactly the `this` values captured entering
+`IODMAController::start`. They are the registered PL080 instances.
+
+So "AppleARMPL080DMAC never registers as an IODMAController" is retracted, and
+with it "getController returns NULL" and "IODMAEventSource::init fails". The
+question of why the SPI controller's `this->0xb0` is zero is OPEN again, and it
+is a question about the SPI controller's own path, not the DMAC's.
+
+**HOW THE WRONG ANSWER WAS REACHED**, because the method matters more than the
+claim. Three errors compounded:
+
+  1. A vtable slot was read as a call site. `0xc019a35d` appears in the kext at
+     `0xc0710390` -- but its neighbours are `IODMAController::completeDMACommand`
+     and `notifyDMACommand` among the driver's own overrides. It is the
+     inherited vtable, and it proves inheritance, nothing more.
+  2. Scanning for direct branches then found nothing, which was read as
+     confirmation. But `registerDMAController` is VIRTUAL: C++ dispatches it
+     indirectly, so no branch scan can ever see the call.
+  3. The XNU core is THUMB. Disassembling `IODMAEventSource::init` as ARM
+     produced fluent, entirely fictional output.
+
+Static reading answered none of it. Four probe addresses and one boot did.
+
+**THE HANG THE USER ACTUALLY HAD was not this at all.** An iPhone 17 running the
+app burned ~51 M instructions inside `AppleMBX+0xb440`, then reached 11.5 G
+without launchd ever starting, while the desktop was at launchd before 1.5 G on
+the same kernel, tree and block backend. The difference was configuration, and
+the app had been reporting it as a defect all along:
+
+```
+  [vm] 9 switches are not applied as set: mbx, sha1, baseband, spi2, usb-otg, ...
+```
+
+`bootkernel` un-matches those nubs by default and its own switch help says why:
+`/arm-io/mbx` matched means the PowerVR driver busy-polls a reset bit in a
+register block this VM does not model; `/arm-io/sha1` matched means
+IOCryptoAcceleratorFamily's hardware hook takes every exactly-4096-byte
+digest -- the size `cs_validate_page` asks for -- to a register file we do not
+model, so launchd's first text page fails its signature and the boot spins on
+`cs_invalid_page` HAVING PRINTED NOTHING. That is the reported symptom exactly.
+
+The un-match step existed only as a private helper in `tools/bootkernel.c`, so
+the portable core could not do it and the app could not ask. It is core's now,
+as `s5l_bringup_request_t::unmatch`.
+
+**THE INSTRUMENT WAS ALSO WRONG, and its own output said so.** The spin sampler
+called the wedged device "NOT spinning: work is spread over 2 regions, the
+busiest (0xc0783440) taking only 309 of 512 samples". Two regions is 128 bytes
+of code holding an entire window -- a loop straddling a 64-byte boundary. The
+share test looked at one region only. Fixed: four or fewer distinct regions
+across a whole window is a spin however it splits.
+
+**THE NEW FRONTIER is the black screen, and it is not the boot.** run107 ran the
+desktop to 12 G and got past everything run106 saw:
+
+```
+  IOSurface warning: buffer allocation failed.  320 x 480 fmt: 42475241 size: 614400 bytes
+```
+
+`42475241` is 'BGRA' and 614400 is exactly 320x480x4. SpringBoard is asking for
+its surface and being refused -- and an earlier line in every run, `IOSurface:
+buffer allocation size is zero`, is very likely the same wound seen sooner. The
+framebuffer being black is downstream of THAT, not of touch and not of the DMAC.
+
 ### 2026-07-28: two links further -- why the SPI controller has no DMA channel
 
 `v[0x360]` refuses because `this->0xb0` is zero, and `0xc05a71b4` is where that
