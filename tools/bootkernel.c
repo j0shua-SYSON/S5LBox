@@ -17309,6 +17309,23 @@ static void mtz2_device_report(const s5l_mtz2_t *d) {
            (unsigned long long)d->packets,
            (unsigned long long)d->unknown_opcodes,
            d->last_unknown_op);
+    /*
+     * THE PACKET STILL IN FLIGHT when the run ended, which is the one the
+     * counters above cannot see. hbpp_data_bytes is credited only when a
+     * packet COMPLETES, so a packet that declared a huge length and never
+     * finished contributes nothing to `data N (M bytes)` and nothing to
+     * `packets` -- it just silently consumes octets.
+     *
+     * run128 is why this exists. spi1 shifted 54,236 octets and spi_shift()
+     * hands every one of them to the device, yet the device's three buckets --
+     * reset_bytes 48, unknown_opcodes 192, and everything inside a completed
+     * packet -- account for under 19,000. The missing ~35,500 have to be
+     * sitting inside an unfinished packet, and `len` says whether that packet
+     * asked for a plausible number of octets or an absurd one.
+     */
+    printf("            in flight: op 0x%02x  pos %u  len %u%s\n",
+           d->op, d->pos, d->len,
+           d->len == 0u ? "  (idle, between packets)" : "");
 }
 
 /*
