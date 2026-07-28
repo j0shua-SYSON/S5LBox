@@ -22656,6 +22656,49 @@ static void pmu_checkpoint_report(void) {
  * never asked" are the two answers this is meant to separate and neither is
  * visible anywhere else.
  */
+
+/*
+ * The SPI controllers, and specifically WHETHER THE FIRMWARE BYTES ARRIVED.
+ *
+ * run105 applied the DMA overrun fix and the digitizer's counters did not move
+ * -- data 0, acks 0, still in HBPP, byte-identical to run101. Two very
+ * different things produce that, and these four numbers tell them apart:
+ *
+ *   tx_drops large      bytes ARE reaching TXDATA and being discarded, so the
+ *                       DMA gate is not firing -- setup's 0x40 was never set
+ *   words small,        nothing is reaching TXDATA at all, so the DMAC channel
+ *   tx_drops zero       aimed at this port never ran
+ *
+ * `setup` is printed raw because bit 0x40 is SPI_SETUP_DMA, and whether the
+ * driver ever set it is the single fact the fix was built on. It was inferred
+ * from one branch at 0xc05a6c24 and never measured.
+ */
+static void spi_report(void) {
+    if (!G.mach) return;
+    printf("\n=== SPI CONTROLLERS ===\n");
+    printf("    words is completed shifts; tx-drops is TXDATA stores into a\n"
+           "    full transmit FIFO; rx-overruns is answers discarded because\n"
+           "    nothing was draining the receive FIFO, which only happens in\n"
+           "    DMA. setup bit 0x40 is SPI_SETUP_DMA.\n");
+    for (unsigned i = 0; i < S5L8900_SPI_COUNT; i++) {
+        const s5l_spi_t *b = &G.mach->spi[i];
+        unsigned attached = 0;
+        for (unsigned c = 0; c < S5L_SPI_SLAVES; c++)
+            if (b->slaves[c].transfer) attached++;
+        printf("    spi%u  words %llu  tx-drops %llu  rx-underruns %llu  "
+               "rx-overruns %llu\n",
+               i, (unsigned long long)b->words,
+               (unsigned long long)b->tx_drops,
+               (unsigned long long)b->rx_underruns,
+               (unsigned long long)b->rx_overruns);
+        printf("          control %08x  setup %08x%s  cnt %08x  "
+               "tx/rx level %u/%u  slaves %u\n",
+               b->control, b->setup,
+               (b->setup & SPI_SETUP_DMA) ? " [DMA]" : " [no DMA bit]",
+               b->cnt, b->tx_level, b->rx_level, attached);
+    }
+}
+
 static void dmac_report(void) {
     if (!G.mach) return;
     printf("\n=== PL080 DMA CONTROLLERS ===\n");
@@ -22689,6 +22732,7 @@ static void dmac_report(void) {
 static void i2c_pmu_state_report(const s5l8900_t *mach) {
     if (!mach) return;
 
+    spi_report();
     dmac_report();
     printf("\n=== I2C / PCF50635 LIVE STATE ===\n");
     for (unsigned i = 0; i < S5L8900_I2C_COUNT; i++) {

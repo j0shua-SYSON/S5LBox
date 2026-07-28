@@ -2315,6 +2315,70 @@ at 0x3cc10000(0xea9d6000)` — and uart4 still carried **zero bytes**. The
 milestone is unchanged.
 
 
+### 2026-07-28: run106 -- the SPI DMA fix was aimed at the wrong thing
+
+run105 applied the SPI DMA overrun change and the digitizer's counters did not
+move: `data 0, acks 0, exec 0, in-hbpp 1`, byte-identical to run101. run106
+added an SPI report, and the numbers say the hypothesis behind that fix was
+wrong.
+
+```
+spi1  words 176  tx-drops 0  rx-underruns 0  rx-overruns 0
+      control 00000000  setup 0000101e [no DMA bit]  slaves 1
+```
+
+**`tx_drops` is ZERO.** Not one octet was ever discarded at a full transmit
+FIFO. The stall that run103/run104 pointed at was never happening, because
+nothing was arriving to stall. `words 176` is the probes and command frames and
+nothing else -- seven sixteen-octet probes is already 112 of it.
+
+**`setup` bit 0x40 is never set**, so `SPI_SETUP_DMA` -- the flag the whole fix
+is gated on -- is never raised by the driver. That bit was INFERRED from one
+branch at `0xc05a6c24` and never measured, and this is the measurement.
+
+**WHAT run104 ACTUALLY SHOWED, corrected.** Its `dmac1 items 210 bytes 812340`
+was read as "the DMAC is pushing 812 KB into SPI1". Those counters are
+per-CONTROLLER, not per-channel. Channel 5 is simply the residue left in the
+registers, and its own control word settles it:
+
+```
+ch5  src 0bfdd38c  dst 3ce00010  ctrl 84089000  cfg 00000000
+```
+
+`dst` is `S5L8900_SPI1_BASE + 0x10`, which is `SPI_TXDATA` -- so the channel is
+aimed correctly. But `ctrl & 0xfff` is the transfer size and it is **ZERO**, and
+`cfg` has no Enable bit. `DI = 0` and `SI = 1` are right for a FIFO
+destination, so this is a channel that was INITIALISED and never given a
+transfer. The console's `AppleARMPL080DMAC::_initDMAChannel` lines are exactly
+that initialisation.
+
+So the 812,340 octets belong to other channels, and the firmware never reached
+the DMAC at all.
+
+**Also measured, and previously only asserted:** `DMACConfiguration (+0x030)` is
+NEVER WRITTEN on either controller. An earlier note in `tools/bootkernel.c`
+said the same thing about the audio path; it holds for the whole DMAC.
+
+**Where this leaves the bootload.** The chain is: `attemptToBootloadDevice` runs
+(run102: 3 captures), `bootloadDevice` runs (3), the preconstructed firmware
+sender runs (3), it takes the DMA arm at `0xc04451c4` (run103: 15) and calls
+`v[0x360]` (15) -- and the SPI controller then neither arms DMA nor falls back
+to PIO, because SPI1 sees 176 octets total and zero drops. The failure is
+inside the controller's DMA entry, between `v[0x360]` being called and any
+register being written.
+
+`this+0xf4` is what `0xc05a6c24` tests to decide whether to arm DMA, and
+`setup` never carrying 0x40 says that test fails. What sets `this+0xf4`, and
+what the controller does when it is zero, is the next read -- and it is a
+question about `AppleS5L8900XSPIController`, not about the digitizer or the
+DMAC.
+
+**The SPI change from run105 is kept**, because it is independently correct: a
+shifter does not stall on a full receive FIFO in DMA, and the test pins both
+halves. It simply is not what is blocking touch, and it was committed as though
+it might be.
+
+
 ### 2026-07-28: run103 -- the firmware goes out over DMA, and the SPI model has none
 
 The last step of the touch diagnosis. run102 put `attemptToBootloadDevice`,
