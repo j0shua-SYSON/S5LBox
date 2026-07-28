@@ -670,6 +670,8 @@ static uint8_t mtz2_transfer(void *ctx, uint8_t out) {
      * answer is actually read. Note the framer is deliberately NOT advanced:
      * a part in reset has no protocol position either.
      */
+    dev->octets++;
+
     if (dev->in_reset) {
         dev->reset_bytes++;
         (void)out;
@@ -689,6 +691,7 @@ static uint8_t mtz2_transfer(void *ctx, uint8_t out) {
         dev->op  = out;
         dev->len = n;
         dev->pos = 0u;
+        dev->packet_octets++;
         /* 0xFF, not 0: tx[2] == 0 is the LENGTH read, so a cleared field would
          * make every non-frame packet look like one. */
         dev->frame_phase = 0xffu;
@@ -701,6 +704,7 @@ static uint8_t mtz2_transfer(void *ctx, uint8_t out) {
         return drive(dev, out, 0u);
     }
 
+    dev->packet_octets++;
     if (dev->pos < S5L_MTZ2_BUF) dev->req[dev->pos] = out;
     /* The parameter byte has landed; rebuild before driving the first byte
      * that can depend on it. */

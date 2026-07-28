@@ -17326,6 +17326,30 @@ static void mtz2_device_report(const s5l_mtz2_t *d) {
     printf("            in flight: op 0x%02x  pos %u  len %u%s\n",
            d->op, d->pos, d->len,
            d->len == 0u ? "  (idle, between packets)" : "");
+    /*
+     * THE LEDGER, and whether it closes.
+     *
+     * Every octet handed to the device takes exactly one of three paths, so
+     * the three add up to `octets` or this model is lying somewhere. Printing
+     * the identity rather than its parts is deliberate: I derived where 35,000
+     * octets went twice from counters that were never obliged to add up, and
+     * both derivations were wrong. A residual of zero is a fact; three numbers
+     * that look plausible individually are not.
+     *
+     * `octets` against spi1's `words` is the second half of it -- the
+     * controller counts one shift per octet it hands over, so a disagreement
+     * there means they are not even talking about the same traffic.
+     */
+    const uint64_t booked = d->reset_bytes + d->unknown_opcodes +
+                            d->packet_octets;
+    printf("            octets seen %llu = reset %llu + unknown %llu + "
+           "in-packet %llu%s\n",
+           (unsigned long long)d->octets,
+           (unsigned long long)d->reset_bytes,
+           (unsigned long long)d->unknown_opcodes,
+           (unsigned long long)d->packet_octets,
+           booked == d->octets ? "   [balances]"
+                               : "   *** DOES NOT BALANCE ***");
 }
 
 /*

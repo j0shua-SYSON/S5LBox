@@ -2532,6 +2532,26 @@ typedef struct {
     uint64_t hbpp_data_packets, hbpp_data_bytes, hbpp_atn_acks;
     uint64_t hbpp_reg_reads, hbpp_reg_writes, hbpp_calibs, hbpp_execs;
     uint64_t packets, hbpp_probes, unknown_opcodes, resets, reset_bytes;
+    /*
+     * THE LEDGER THAT HAS TO BALANCE.
+     *
+     * `octets` counts every call into s5l_mtz2_transfer, and `packet_octets`
+     * counts the ones consumed inside a packet. Every octet takes exactly one
+     * of three paths -- held in reset, not an opcode, or inside a packet -- so
+     *
+     *     octets == reset_bytes + unknown_opcodes + packet_octets
+     *
+     * is an identity, and `octets` against spi1's `words` says whether the
+     * controller and the device even agree on how much crossed the wire.
+     *
+     * This exists because the counters that were here could not close the
+     * books, and I mis-derived where 35,000 octets went TWICE from them --
+     * first as a framer desync (refuted by unknown_opcodes 192), then as an
+     * unfinished packet (refuted by the framer being idle at exit). Both
+     * derivations were arithmetic on numbers that never had to add up to
+     * anything. These do.
+     */
+    uint64_t octets, packet_octets;
     uint64_t frames_queued, frames_read, length_reads, data_reads;
     uint64_t injects_refused;
     uint8_t  last_unknown_op;
