@@ -2365,6 +2365,46 @@ Not yet claimed: that a default route is *sufficient*. It gives the guest
 somewhere to send; whether any daemon then sends is a separate measurement, and
 mDNSResponder's multicast is not obviously something this NAT should carry.
 
+### 2026-07-29: run133 and run135 — the regression is ours, and nothing is composited
+
+**run133 is the control that should have come first.** run96's own preserved
+binary at `work/run96-base/bin/`, against today's firmware, today's root
+filesystem and today's work-image recipe:
+
+```
+  run133  old code + today's inputs  ->  273206 of 460800   renders
+  run130  new code + today's inputs  ->    1821 of 460800   black
+```
+
+Exactly one variable differs. Before this pair the comparison was run96 against
+run130, which differed in the code AND in everything else that moved between
+two days — a two-variable comparison cannot isolate a cause. The canonical
+inputs are also untouched since 2026-07-26 by their timestamps, so this agrees
+with itself. **The regression is in our code**, and the bisect it licenses is
+now running.
+
+**run135 kills the hopeful reading.** The pool survey walks every /vram slot
+straight out of DRAM, independent of where the scanout points:
+
+```
+  /vram pool survey, 2 slot(s) of 614400 bytes:
+    slot 0 @ 0x0885c000   1949 of 614400 bytes non-zero
+    slot 1 @ 0x088f2000      0 of 614400 bytes non-zero
+```
+
+Slot 1 is **entirely zero** — never written, not written-then-cleared. So
+SpringBoard is not compositing into a buffer we merely failed to photograph.
+
+That corrects the previous section, which called this "a one-register hand-off
+bug" on the strength of the scanout base predicting the outcome 8 runs out of
+8. The correlation is real and the causal direction was backwards: the CLCD
+still points at slot 0 **because slot 1 was never filled and never published**,
+not because an update was missed. The scanout address is a symptom.
+
+What the bisect must now explain is harder and more specific: three commits
+that stop the guest before the compositor writes a single pixel, while leaving
+the guest console byte-identical to a run that renders.
+
 ### 2026-07-28: THE LOCK SCREEN USED TO RENDER, and stopped today
 
 Every run on disk prints its final framebuffer as a non-zero byte count. Read
