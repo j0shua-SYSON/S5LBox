@@ -411,6 +411,35 @@ const char *rootfs_work_stage_name(rootfs_work_stage_t stage);
 size_t rootfs_work_activation_entries(rootfs_work_entry_t *entries,
                                       size_t capacity);
 
+/*
+ * The guest's own pppd, given somewhere to send.
+ *
+ * run129 measured a link that comes all the way up -- LCP Opened, IPCP Opened,
+ * guest 10.0.2.15 -- and then carried zero IP datagrams for the following 1.2
+ * billion instructions.  The NAT's ip_in was 0 with every refusal counter also
+ * 0 and the egress open, so nothing was dropped and nothing arrived.
+ *
+ * The cause is not in the emulator.  The launchd job runs pppd with `local
+ * nocrtscts nodetach` and no `defaultroute`, so ppp0 comes up holding an
+ * address that nothing in the guest's routing table points at.
+ *
+ * That job is written in place at the stock file's exact 530 bytes and has
+ * four bytes of slack, which is nowhere near the thirty an extra argument
+ * costs.  pppd reads /etc/ppp/options before argv, so the option goes THERE
+ * instead, where there is no size constraint at all -- the same catalog writer
+ * that provisions data_ark.plist creates it.  A missing options file is not
+ * fatal to pppd, which is why the file does not exist to begin with and why
+ * creating it needs the catalog rather than an overwrite.
+ *
+ * /private/etc/ppp already exists on the stock volume, so only the options
+ * file is created; asking for the parent too made the provisioner refuse the
+ * whole plan with "an object already exists under CNID 1410".
+ *
+ * Returns the number of entries required (1).  Fills `entries` only when
+ * `capacity` is at least that.  The filled entries point at static storage.
+ */
+size_t rootfs_work_ppp_entries(rootfs_work_entry_t *entries, size_t capacity);
+
 #ifdef __cplusplus
 }
 #endif

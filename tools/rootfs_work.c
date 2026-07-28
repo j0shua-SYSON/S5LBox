@@ -5450,6 +5450,34 @@ size_t rootfs_work_activation_entries(rootfs_work_entry_t *entries,
     return 2u;
 }
 
+/*
+ * One option, one line, and it is the option run129 named.  pppd 2.4.2 parses
+ * this file with the same lexer it uses for argv, one option per line, before
+ * it looks at argv -- so this composes with the five arguments the launchd job
+ * already passes rather than replacing them.
+ */
+static const char PPP_OPTIONS_FILE[] = "defaultroute\n";
+
+size_t rootfs_work_ppp_entries(rootfs_work_entry_t *entries, size_t capacity) {
+    if (entries && capacity >= 1u) {
+        memset(entries, 0, sizeof(*entries));
+        /*
+         * The DIRECTORY entry this used to carry was wrong and the provisioner
+         * said so: "an object already exists under CNID 1410 with that name".
+         * /private/etc/ppp SHIPS on the stock volume -- it holds the stock
+         * peer scripts -- so only `options` is missing, and asking to create
+         * the parent refused the whole plan rather than just that entry.
+         * Entries are create-only by design; there is no overwrite kind.
+         */
+        entries[0].kind = ROOTFS_WORK_ENTRY_FILE;
+        entries[0].path = "/private/etc/ppp/options";
+        entries[0].content = (const uint8_t *)PPP_OPTIONS_FILE;
+        entries[0].content_size = sizeof(PPP_OPTIONS_FILE) - 1u;
+        entries[0].permissions = 0644u;
+    }
+    return 1u;
+}
+
 static bool copy_source(host_file_t *source, host_file_t *temporary,
                         uint64_t source_size, uint8_t *buffer,
                         size_t buffer_size,

@@ -24824,6 +24824,52 @@ int main(int argc, char **argv) {
         }
 
         /*
+         * --ppp needs one more provisioned file, and it must MERGE with the
+         * activation entries rather than replace them: both switches are on by
+         * default in the app, and an assignment here would have silently
+         * dropped whichever ran second. options.entries is one array, so the
+         * two tables are concatenated into one.
+         *
+         * See rootfs_work_ppp_entries() for why the option goes in
+         * /etc/ppp/options rather than into the launchd job's argument list.
+         */
+        static rootfs_work_entry_t provision_entries[4];
+        if (cfg.v.ppp) {
+            size_t have = options.entry_count;
+            size_t want = rootfs_work_ppp_entries(NULL, 0);
+            if (have + want > sizeof provision_entries /
+                              sizeof provision_entries[0]) {
+                fprintf(stderr, "ppp: %zu provisioning entries do not fit in "
+                                "%zu; refusing a half-configured work image\n",
+                        have + want,
+                        sizeof provision_entries / sizeof provision_entries[0]);
+                free(dt);
+                s5l8900_free(&mach);
+                ksyms_free(&KS);
+                free(img);
+                return 1;
+            }
+            for (size_t i = 0; i < have; i++)
+                provision_entries[i] = options.entries[i];
+            if (rootfs_work_ppp_entries(provision_entries + have,
+                                        want) != want) {
+                fprintf(stderr, "ppp: entry table refused; refusing a "
+                                "half-configured work image\n");
+                free(dt);
+                s5l8900_free(&mach);
+                ksyms_free(&KS);
+                free(img);
+                return 1;
+            }
+            options.entries = provision_entries;
+            options.entry_count = have + want;
+            printf("ppp        : /etc/ppp/options will be provisioned with "
+                   "defaultroute\n"
+                   "             (run129: the link opened and the guest had no "
+                   "route pointing at it)\n");
+        }
+
+        /*
          * A restore must reproduce the disk exactly as it stood at the
          * checkpoint, so it copies the sidecar image instead of re-deriving a
          * fresh volume from the immutable source. Re-provisioning would give a
