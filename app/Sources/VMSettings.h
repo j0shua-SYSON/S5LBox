@@ -120,6 +120,42 @@ extern NSString *const VMFirmwareJailbreakPayloadFile;
 - (BOOL)pausesInBackground;
 - (void)setPausesInBackground:(BOOL)pauses;
 
+#pragma mark - Automatic snapshots
+
+/*
+ * Take a snapshot every so often while a machine is running.
+ *
+ * OFF by default, and deliberately. A snapshot is the whole machine — on the
+ * order of the guest's RAM — so a timer nobody asked for would quietly fill a
+ * phone. Turning it on is a decision about disk space, and the settings screen
+ * is where that decision belongs.
+ */
+- (BOOL)autoSnapshotEnabled;
+- (void)setAutoSnapshotEnabled:(BOOL)enabled;
+
+/* Seconds of WALL CLOCK between automatic snapshots, clamped to something
+ * sane. Wall clock and not instructions, because the user is choosing how much
+ * work they are willing to lose, and that is measured in minutes. */
+- (NSInteger)autoSnapshotIntervalSeconds;
+- (void)setAutoSnapshotIntervalSeconds:(NSInteger)seconds;
+
+/*
+ * Whether to delete old AUTOMATIC snapshots, and how many to keep.
+ *
+ * Separate from the interval, because "checkpoint often" and "let them
+ * accumulate" are different wishes and a user may hold either. With pruning
+ * off, automatic snapshots pile up until the disk objects — which is the right
+ * behaviour for someone bisecting a boot and the wrong one for everybody else,
+ * so it is a switch and not a policy.
+ *
+ * Pruning never touches a snapshot the user made by hand. That is enforced in
+ * VMSnapshotStore, not here.
+ */
+- (BOOL)autoSnapshotPruneEnabled;
+- (void)setAutoSnapshotPruneEnabled:(BOOL)enabled;
+- (NSInteger)autoSnapshotKeep;
+- (void)setAutoSnapshotKeep:(NSInteger)keep;
+
 #pragma mark - Firmware (reported only: none is shipped and none is downloaded)
 
 /* Where the app looks. Returned whether or not it exists, because the point of
