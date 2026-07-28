@@ -2315,6 +2315,46 @@ at 0x3cc10000(0xea9d6000)` — and uart4 still carried **zero bytes**. The
 milestone is unchanged.
 
 
+### 2026-07-28: run120 -- the Z2 firmware is delivered, all 54,156 bytes of it
+
+```
+  ch5  dst 3ce00010  runs 14  bytes 54156
+  spi1 words 54236  tx-drops 0  rx-overruns 54148
+```
+
+**54,156 bytes is the Z2 firmware image exactly.** It has reached the digitizer
+for the first time in the history of this project. Nothing was dropped. The
+overruns are expected and correct: during a DMA download nothing reads the
+receive FIFO, and silicon overruns rather than stalling.
+
+Getting there took three defects, each of which could only be seen once the one
+above it was fixed:
+
+  1. **The bus decode dropped every narrow DMA store.** `mmio_word()` demanded
+     `bytes == 4`, and /arm-io/spi1's own dma-channels template asks for a
+     ONE-BYTE destination. 812,340 bytes went to `unmapped_writes` (run114).
+  2. **The controller burst the whole image into an eight-deep FIFO** inside one
+     tick, before the driver had armed the port: `tx-drops 54140` against an
+     image of 54,156 (run116). A PL080 paces peripheral destinations with
+     request lines this model did not have.
+  3. **The shifter only ran on register access.** With the controller waiting
+     for FIFO space instead of writing, nobody was writing, so nobody was
+     shifting: `ch5 runs 0 bytes 16 ENABLED` with 1020 transfers left, against
+     `tx/rx level 8/8` (run119). A shifter with data and a clock shifts.
+
+All three were in THIS EMULATOR. Every explanation this project previously
+wrote for "touch does not work" looked at the guest -- a bootloader that would
+not program, a DMA channel never allocated, a controller refusing with
+kIOReturnDMAError, AppleARMPL080DMAC never registering as an IODMAController.
+Every one of those was retracted today, on measurement, and all of them were
+downstream of a width check in the bus.
+
+**What is NOT yet shown.** That the bytes arrived is measured. That the Z2
+accepted them, answered its ATN_ACK with 0x4BC1 instead of 0x1AA1, ran
+application firmware, published Sensor Rows/Columns, and produced non-negative
+surface bounds is NOT. The digitizer's own counters are gated behind --touch
+and run120 did not pass it. run121 does.
+
 ### 2026-07-28: run114/run116 -- the bug was ours, and it was the bus decode
 
 **THE CAUSE OF "TOUCH DOES NOT WORK" IS FOUND, AND IT WAS NEVER IN THE GUEST.**
