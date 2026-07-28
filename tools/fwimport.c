@@ -56,6 +56,57 @@ static size_t src_pread(void *ctx, uint64_t off, uint8_t *buf, size_t len) {
     return got;
 }
 
+
+/* ------------------------------------------------------------------------ */
+/* Writing the three files out, when keys were supplied                      */
+/* ------------------------------------------------------------------------ */
+/*
+ * The smallest sink that satisfies vm_fw_files_t. It writes into ONE directory
+ * given on the command line, and it will not touch anything outside it: the
+ * importer only ever asks for the three fixed names, and a name containing a
+ * separator or a dot-dot is refused here rather than trusted.
+ *
+ * It never writes into firmware/ unless told to. The canonical inputs are not
+ * this tool's to overwrite.
+ */
+typedef struct { char dir[1024]; } out_ctx_t;
+
+static bool safe_name(const char *n) {
+    if (!n || !*n || *n == '.') return false;
+    for (const char *p = n; *p; p++)
+        if (*p == '/' || *p == '\\' || *p == ':') return false;
+    return true;
+}
+
+static void *out_open(void *ctx, const char *name) {
+    out_ctx_t *o = ctx;
+    char path[1200];
+    if (!safe_name(name)) return NULL;
+    snprintf(path, sizeof path, "%s/%s", o->dir, name);
+    return fopen(path, "wb");
+}
+static bool out_write(void *ctx, void *h, const uint8_t *d, size_t n) {
+    (void)ctx;
+    return h && fwrite(d, 1, n, (FILE *)h) == n;
+}
+static size_t out_pread(void *ctx, void *h, uint64_t off, uint8_t *b, size_t n) {
+    (void)ctx;
+    if (!h) return 0;
+    if (fflush((FILE *)h) != 0) return 0;
+#if defined(_WIN32)
+    if (_fseeki64((FILE *)h, (long long)off, SEEK_SET) != 0) return 0;
+#else
+    if (fseeko((FILE *)h, (off_t)off, SEEK_SET) != 0) return 0;
+#endif
+    size_t got = fread(b, 1, n, (FILE *)h);
+    (void)fseek((FILE *)h, 0, SEEK_END);
+    return got;
+}
+static void out_close(void *ctx, void *h, bool keep) {
+    (void)ctx; (void)keep;
+    if (h) fclose((FILE *)h);
+}
+
 static const char *state_name(vm_fw_state_t st) {
     switch (st) {
         case VM_FW_STATE_NOT_STARTED:     return "not started";
@@ -87,7 +138,14 @@ static void on_progress(void *ctx, vm_fw_artefact_t which,
 int main(int argc, char **argv) {
     if (argc < 2) {
         fprintf(stderr,
-            "usage: fwimport <archive.ipsw>\n"
+            "usage: fwimport <archive.ipsw> [options]\n"
+            "  --out <dir>            produce the three files there\n"
+            "  --kernel <key> <iv>    IMG3 key and IV for the kernelcache\n"
+            "  --devicetree <key> <iv>  the same for the device tree\n"
+            "  --rootfs <key>         the root filesystem key\n"
+            "\n"
+            "Keys are taken from the command line and held in memory only.\n"
+            "They are never written anywhere, and nor is the archive.\n"
             "\n"
             "Identify-only: reads the archive, reports what is in it and what\n"
             "each artefact would still need. Writes nothing, needs no key, and\n"
@@ -110,13 +168,59 @@ int main(int argc, char **argv) {
     printf("peak heap  : %llu bytes if it were asked to produce files\n",
            (unsigned long long)vm_fw_import_peak_memory());
 
+    /* Options. Absent keys leave the run in identify-only, which is the
+     * default and the safe half. */
+    vm_fw_keys_t keys;
+    vm_fw_keys_clear(&keys);
+    bool have_keys = false;
+    const char *outdir = NULL;
+    for (int i = 2; i < argc; i++) {
+        if (!strcmp(argv[i], "--out") && i + 1 < argc) {
+            outdir = argv[++i];
+        } else if (!strcmp(argv[i], "--kernel") && i + 2 < argc) {
+            if (vm_fw_keys_set_img3(&keys, VM_FW_KERNEL, argv[i + 1],
+                                    argv[i + 2]) != VM_FW_OK) {
+                fprintf(stderr, "fwimport: bad kernel key or iv\n");
+                return 2;
+            }
+            i += 2; have_keys = true;
+        } else if (!strcmp(argv[i], "--devicetree") && i + 2 < argc) {
+            if (vm_fw_keys_set_img3(&keys, VM_FW_DEVICE_TREE, argv[i + 1],
+                                    argv[i + 2]) != VM_FW_OK) {
+                fprintf(stderr, "fwimport: bad device tree key or iv\n");
+                return 2;
+            }
+            i += 2; have_keys = true;
+        } else if (!strcmp(argv[i], "--rootfs") && i + 1 < argc) {
+            if (vm_fw_keys_set_root(&keys, argv[++i]) != VM_FW_OK) {
+                fprintf(stderr, "fwimport: bad root filesystem key\n");
+                return 2;
+            }
+            have_keys = true;
+        } else {
+            fprintf(stderr, "fwimport: unknown option %s\n", argv[i]);
+            return 2;
+        }
+    }
+
+    out_ctx_t octx;
+    vm_fw_files_t files;
+    memset(&octx, 0, sizeof octx);
+    memset(&files, 0, sizeof files);
+    if (outdir) {
+        snprintf(octx.dir, sizeof octx.dir, "%s", outdir);
+        files.open = out_open; files.write = out_write;
+        files.pread = out_pread; files.close = out_close;
+        files.ctx = &octx;
+    }
+
     vm_fw_import_t in;
     memset(&in, 0, sizeof in);
     in.pread       = src_pread;
     in.pread_ctx   = &src;
     in.size        = src.size;
-    in.files       = NULL;          /* identify only: produce nothing */
-    in.keys        = NULL;          /* and therefore need no key      */
+    in.files       = outdir ? &files : NULL;
+    in.keys        = have_keys ? &keys : NULL;
     in.progress    = on_progress;
 
     vm_fw_report_t rep;
@@ -153,6 +257,9 @@ int main(int argc, char **argv) {
         if (a->detail[0]) printf("    detail   %s\n", a->detail);
     }
 
+    /* The keys go out of scope here and are in no file, no log and no
+     * environment variable -- the same promise the app makes. */
+    vm_fw_keys_clear(&keys);
     fclose(src.f);
     return st == VM_FW_OK ? 0 : 1;
 }
