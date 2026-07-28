@@ -2315,6 +2315,52 @@ at 0x3cc10000(0xea9d6000)` — and uart4 still carried **zero bytes**. The
 milestone is unchanged.
 
 
+### 2026-07-28: the cache-mode theory was never printed, and is retracted
+
+I found `IOSurface::allocate() - requested cache mode %08x incompatible with
+memory region cache mode %08x` in the binary, traced the branch that emits it,
+wrote it up as the cause of the black screen, and aimed three probes at it.
+
+**That message is never printed.** Zero occurrences in run124, zero in run107,
+in logs that were already on disk when the claim was made. The probes aimed at
+it captured NOTHING in a run that went well past the failure, because the guest
+never takes that path: the check at `0xc05243d8` only runs on a SECOND region
+iteration, and the first one takes `beq 0xc052442c` instead.
+
+The check that would have cost thirty seconds -- grep an existing log for the
+string -- was not done. This is the same error as every retraction above it,
+committed while writing the entry that describes them.
+
+**What the guest actually prints, in order:**
+
+```
+  IOSurfaceDeviceMemoryRegion: edram was powered on at boot
+  IOSurface: buffer allocation size is zero
+  IOSurface warning: buffer allocation failed.  320 x 480 fmt: 42475241 size: 614400 bytes
+```
+
+The middle line is a different allocation, not this one: it is emitted at
+`0xc0525090` when `[r8+0x74]` -- a size rounded as `(size + align) & ~align` --
+comes out zero, and the failing surface has size 614400. Chasing it would be
+the same mistake a third time.
+
+**The gate that is actually taken**, and it was in a disassembly already
+recorded here:
+
+```
+  c0524454  ldr pc, [r3, #0x50]   ; virtual call on the region
+  c0524458  cmp r0, #0
+  c052445c  beq 0xc05244bc        ; 0 -> skip this region, try the next
+```
+
+A region that answers 0 is skipped, the loop runs out, `[r5+0x24]` stays NULL,
+and the generic warning fires. That fits every measurement: two `withSubRange`
+calls that both SUCCEED (run115), a fallback never entered (run110), a bounds
+test that passes (run111), and a pool whose size is irrelevant (run118).
+
+run125 probes `0xc0524458` with `--call-probe-live`, so the verdict is readable
+the moment it is measured rather than after a 6 G budget.
+
 ### 2026-07-28: the black screen is a CACHE MODE mismatch, and IOSurface says so itself
 
 The refusal has a message, and it was three feet from where the search had been
