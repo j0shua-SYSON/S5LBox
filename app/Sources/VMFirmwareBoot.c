@@ -391,6 +391,33 @@ bool vm_firmware_boot_provision(const vm_firmware_boot_paths_t *paths,
     options.ca_software_render = wanted.ca_software_render;
 
     /*
+     * ACTIVATION, which the app used to describe as unimplemented while the
+     * library it already links has always been able to do it. Without these two
+     * catalog objects lockdownd finds no data_ark.plist, and a SpringBoard that
+     * renders perfectly still sits at "connect to iTunes" forever.
+     *
+     * The entries point at static storage inside rootfs_work and stay valid for
+     * the life of the process, so this array only has to outlive the create
+     * call below -- which it does, being in the same frame.
+     *
+     * Offline provisioning of a file on this machine's own writable image: no
+     * Apple record is applied, none is verified, and the canonical firmware is
+     * not touched.
+     */
+    rootfs_work_entry_t activation[VM_FW_BOOT_ACTIVATION_ENTRIES];
+    if (wanted.activate) {
+        size_t n = rootfs_work_activation_entries(
+            activation, sizeof activation / sizeof activation[0]);
+        /* The library reports how many it needs and fills nothing when the
+         * array is short. Refusing to provision beats provisioning half of a
+         * two-object dependency chain and leaving a directory with no plist. */
+        if (n > 0u && n <= sizeof activation / sizeof activation[0]) {
+            options.entries = activation;
+            options.entry_count = n;
+        }
+    }
+
+    /*
      * CLEAR AN INCOMPLETE ONE FIRST, AND ONLY AN INCOMPLETE ONE.
      *
      * rootfs_work_create() opens the destination O_CREAT|O_EXCL, so it refuses

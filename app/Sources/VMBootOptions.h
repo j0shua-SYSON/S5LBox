@@ -145,6 +145,14 @@ void vm_boot_options_apply(const bool *values, unsigned count,
  */
 typedef struct {
     bool ca_software_render;
+    /*
+     * Adds the two catalog objects lockdownd needs -- the Lockdown directory
+     * the stock image does not have, and the data_ark.plist inside it -- so
+     * SpringBoard does not sit at "connect to iTunes". Offline provisioning of
+     * a file on this machine's own writable image: no Apple record is applied
+     * and none is verified.
+     */
+    bool activate;
 } vm_boot_provision_options_t;
 
 void vm_boot_options_for_provisioning(const bool *values, unsigned count,

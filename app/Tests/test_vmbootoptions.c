@@ -4,11 +4,18 @@
  *
  * The property being defended is not "the right switches work". It is that the
  * app cannot show a switch in one position while the machine honours the
- * other WITHOUT SAYING SO. Two rows reach the request; twelve do not; on a
- * completely untouched installation six of those twelve are already in
- * conflict with what bring-up does. Every one of those facts is asserted here
- * longhand, so that a change to either side is a deliberate edit to a test
- * rather than a UI that silently starts lying again.
+ * other WITHOUT SAYING SO. Every one of those facts is asserted here longhand,
+ * so that a change to either side is a deliberate edit to a test rather than a
+ * UI that silently starts lying again.
+ *
+ * The counts in this comment used to be "two rows reach the request; twelve do
+ * not; six are already in conflict on an untouched installation", and they
+ * were accurate when written. They are not the shape of the thing any more:
+ * seven rows now reach the request (two opt-outs and the five nubs bring-up
+ * learned to un-match), two are written into the work image when it is made,
+ * and exactly one -- "nat" -- is still in conflict at its defaults. The live
+ * numbers are asserted below; this paragraph is prose and must never be the
+ * thing anyone trusts.
  *
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed.
  */
@@ -165,7 +172,7 @@ static void test_applied_rows_reach_the_request(void) {
  * terminates PPP.
  */
 static const char *const EXPECTED_OVERRIDDEN_AT_DEFAULT[] = {
-    "activate", "nat"
+    "nat"
 };
 
 /*
@@ -308,9 +315,13 @@ static void test_fixed_rows(void) {
               FIXED_ON[i], report.summary);
     }
 
-    /* The three that are implemented nowhere, plus ppp. */
+    /*
+     * The two that are implemented nowhere, plus ppp. "activate" was here
+     * and is not any more: rootfs_work has always been able to write the
+     * Lockdown objects and the app now asks it to, at image time.
+     */
     static const char *const FIXED_OFF[] = {
-        "activate", "jb-codesign", "jb-payload", "ppp"
+        "jb-codesign", "jb-payload", "ppp"
     };
     for (unsigned i = 0; i < sizeof FIXED_OFF / sizeof FIXED_OFF[0]; i++) {
         int index = index_of(FIXED_OFF[i]);
@@ -346,8 +357,10 @@ static void test_provisioned_row(void) {
     vm_boot_options_apply(values, vm_option_count(), NULL, &report);
     CHECK(report.row[ca].outcome == VM_BOOT_OPTION_PROVISIONED,
           "ca-software-render is not reported as an image-time decision");
-    CHECK(report.provisioned == 1u,
-          "%u provisioned rows, expected 1", report.provisioned);
+    /* ca-software-render and activate. Both are written into the work image
+     * when it is made, and neither can be revisited by a boot. */
+    CHECK(report.provisioned == 2u,
+          "%u provisioned rows, expected 2", report.provisioned);
     CHECK(report.row[ca].note &&
           strstr(report.row[ca].note, "work image") != NULL,
           "ca-software-render does not say where its value lives");

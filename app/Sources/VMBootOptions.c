@@ -24,6 +24,8 @@ typedef enum {
     MAP_NO_MEMORY_NODE,
     /* rootfs_work_create()'s ca_software_render, at image-creation time. */
     MAP_PROVISION_CA_SOFTWARE_RENDER,
+    /* rootfs_work_create()'s activation entries, likewise at image time. */
+    MAP_PROVISION_ACTIVATE,
     /* A device-tree nub. Set means "leave it matched"; clear un-matches it
      * through s5l_bringup_request_t::unmatch. */
     MAP_UNMATCH,
@@ -104,10 +106,22 @@ static const struct {
       "not at boot, so changing it does nothing to a machine that already has "
       "one. A new machine gets an image built with it as set now.", NULL },
 
-    { "activate", MAP_FIXED_OFF,
-      "Not implemented anywhere. Writing ActivationState needs a file the "
-      "imported root filesystem does not contain and nothing can yet create.",
-      NULL },
+    /*
+     * This row used to say "not implemented anywhere", and that was true of
+     * the app and never true of the project: tools/rootfs_work.c has carried
+     * rootfs_work_activation_entries() -- the Lockdown directory the stock
+     * image lacks, and the data_ark.plist inside it -- and bootkernel has
+     * provisioned them by default for as long as the desktop has booted. The
+     * app links the same library and simply was not asking.
+     *
+     * Offline provisioning of two catalog objects on this machine's own
+     * writable image. No Apple record is applied and none is verified; the
+     * canonical firmware is not touched.
+     */
+    { "activate", MAP_PROVISION_ACTIVATE,
+      "Written into this machine's work image when that image is prepared, "
+      "not at boot, so changing it does nothing to a machine that already has "
+      "one. A new machine gets an image built with it as set now.", NULL },
     { "jb-codesign", MAP_FIXED_OFF,
       "Not implemented anywhere. Nothing in this app disables the guest "
       "kernel's code-signature enforcement.", NULL },
@@ -253,6 +267,7 @@ void vm_boot_options_apply(const bool *values, unsigned count,
                 }
                 report->applied++;
                 break;
+            case MAP_PROVISION_ACTIVATE:
             case MAP_PROVISION_CA_SOFTWARE_RENDER:
                 row->outcome = VM_BOOT_OPTION_PROVISIONED;
                 row->effective = row->requested;
@@ -331,6 +346,10 @@ void vm_boot_options_for_provisioning(const bool *values, unsigned count,
     memset(out, 0, sizeof *out);
 
     int index = vm_option_index("ca-software-render");
-    if (index < 0) return;
-    out->ca_software_render = requested_value(values, count, (unsigned)index);
+    if (index >= 0)
+        out->ca_software_render = requested_value(values, count, (unsigned)index);
+
+    index = vm_option_index("activate");
+    if (index >= 0)
+        out->activate = requested_value(values, count, (unsigned)index);
 }

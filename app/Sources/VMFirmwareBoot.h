@@ -57,6 +57,11 @@ extern "C" {
  * value and is what run89-base's work image was built with. */
 #define VM_FW_BOOT_GROWTH_BYTES  (32u * 1024u * 1024u)
 
+/* What rootfs_work_activation_entries() returns: the Lockdown directory and
+ * the data_ark.plist inside it. Asserted against the library at provision
+ * time rather than trusted, because a short array silently fills nothing. */
+#define VM_FW_BOOT_ACTIVATION_ENTRIES 2u
+
 /*
  * TWO DIRECTORIES, NOT ONE, and the split is the difference between two
  * machines and two names for one.
