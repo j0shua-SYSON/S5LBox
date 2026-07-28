@@ -22864,11 +22864,81 @@ static void dmac_report(void) {
     }
 }
 
+/*
+ * THE NAT, and the one question it exists to answer: has a datagram the GUEST
+ * wrote ever left this machine?
+ *
+ * net_stats_t has carried all of this since net.c was written and
+ * core/tests/test_net.c asserts on it across 32 deterministic cases -- but
+ * nothing printed it, so a --ppp --nat boot produced no evidence in either
+ * direction and "the stack is never reached" was indistinguishable from "the
+ * stack ran and refused everything". Both are things this project has believed.
+ *
+ * `ip_in` is the number to read first. Zero means PPP is not handing IP up at
+ * all and every line below it is noise; non-zero with everything else zero
+ * means the guest is talking and we are dropping it, and the refusal counters
+ * say which rule did it -- each is a rule net.c states in docs/networking.md,
+ * not a generic failure.
+ */
+static void nat_report(void) {
+    if (!G.net_armed || !G.net_stack) {
+        printf("\n=== HOST NAT ===\n    not armed (needs --ppp --nat)\n");
+        return;
+    }
+
+    const net_stats_t *s = &G.net_stack->stats;
+    printf("\n=== HOST NAT ===\n");
+    printf("    ip      in %llu  out %llu   egress %s\n",
+           (unsigned long long)s->ip_in, (unsigned long long)s->ip_out,
+           G.net_host ? "open" : "NONE (nothing can leave this machine)");
+    printf("    refused bad-version %llu  bad-header %llu  bad-checksum %llu  "
+           "frags %llu  bad-source %llu  proto %llu\n",
+           (unsigned long long)s->ip_bad_version,
+           (unsigned long long)s->ip_bad_header,
+           (unsigned long long)s->ip_bad_checksum,
+           (unsigned long long)s->ip_frags_refused,
+           (unsigned long long)s->ip_bad_source,
+           (unsigned long long)s->proto_unsupported);
+    printf("    icmp    in %llu  echo-replies %llu  unsupported %llu\n",
+           (unsigned long long)s->icmp_in,
+           (unsigned long long)s->icmp_echo_replies,
+           (unsigned long long)s->icmp_unsupported);
+    printf("    udp     in %llu  out %llu   dns q %llu  answered %llu  "
+           "nxdomain %llu  failed %llu  malformed %llu\n",
+           (unsigned long long)s->udp_in, (unsigned long long)s->udp_out,
+           (unsigned long long)s->dns_queries,
+           (unsigned long long)s->dns_answered,
+           (unsigned long long)s->dns_nxdomain,
+           (unsigned long long)s->dns_failed,
+           (unsigned long long)s->dns_malformed);
+    printf("    tcp     in %llu  out %llu  syns %llu  established %llu  "
+           "refused %llu  rst out/in %llu/%llu\n",
+           (unsigned long long)s->tcp_in, (unsigned long long)s->tcp_out,
+           (unsigned long long)s->tcp_syns,
+           (unsigned long long)s->tcp_established,
+           (unsigned long long)s->tcp_refused,
+           (unsigned long long)s->tcp_resets_out,
+           (unsigned long long)s->tcp_resets_in);
+    printf("    tcp     retransmits %llu  out-of-order %llu  "
+           "bytes to-host %llu  to-guest %llu\n",
+           (unsigned long long)s->tcp_retransmits,
+           (unsigned long long)s->tcp_out_of_order,
+           (unsigned long long)s->tcp_bytes_to_host,
+           (unsigned long long)s->tcp_bytes_to_guest);
+    printf("    flows   open %llu  peak %llu  table-full %llu  "
+           "out-dropped %llu\n",
+           (unsigned long long)s->flows_open,
+           (unsigned long long)s->flows_peak,
+           (unsigned long long)s->flow_table_full,
+           (unsigned long long)s->out_dropped);
+}
+
 static void i2c_pmu_state_report(const s5l8900_t *mach) {
     if (!mach) return;
 
     spi_report();
     dmac_report();
+    nat_report();
     printf("\n=== I2C / PCF50635 LIVE STATE ===\n");
     for (unsigned i = 0; i < S5L8900_I2C_COUNT; i++) {
         const s5l_i2c_t *bus = &mach->i2c[i];
