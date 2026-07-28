@@ -2315,6 +2315,54 @@ at 0x3cc10000(0xea9d6000)` — and uart4 still carried **zero bytes**. The
 milestone is unchanged.
 
 
+### 2026-07-28: run110 -- the fallback allocator is never reached, and my reading of it was wasted
+
+Probes on the three branches of IOSurface's allocation:
+
+```
+  pc 0xc05244ac  withSubRange call    captured 2
+  pc 0xc05244f0  fallback entry       captured 0     <- NEVER REACHED
+  pc 0xc0524598  the warning          captured 1
+```
+
+**The hypothesis was wrong.** The region count is not zero -- withSubRange is
+called twice -- and `IOBufferMemoryDescriptor::withOptions`, which the previous
+entry analysed at length as "the fallback that returned NULL", NEVER EXECUTES.
+The code reaches `0xc05244ec` and branches straight to the warning, stepping
+over the fallback entirely. That whole paragraph was reading, not measurement,
+and measurement disagreed with it within one boot.
+
+**What is actually happening.** The one captured call is:
+
+```
+  withSubRange(of=0xc0cbaa00, offset=0x00096000, length=0x00096000,
+               options=0x00100003)
+```
+
+`0x96000` is 614400 -- exactly one 320x480 BGRA framebuffer. So the first
+surface took bytes 0..614399 of the pool and this one asks for
+614400..1228799. `offset + length` is `0x12c000`, which is EXACTLY
+`S5L_BRINGUP_VRAM_BYTES`, the whole published /vram pool. The request lands
+precisely on the pool's end and is refused.
+
+So the surface is not too large and the pool is not too small in the device
+tree. **The parent memory descriptor is very likely shorter than the /vram
+region we publish** -- one framebuffer rather than two -- which would also
+explain `IOSurface: buffer allocation size is zero` appearing earlier in every
+boot, and it would explain run86: raising VRAM_SURFACES to three changed
+`/vram:reg` while leaving whatever the descriptor is built from alone, so the
+extra memory was never reachable and the only measured effect was noise.
+
+**The next measurement, and it is a measurement and not a read:** the length of
+the descriptor at `0xc0cbaa00`, and what `IOSurfaceDeviceMemoryRegion` was
+given when it built it. If that is 614400 while `/vram:reg` says 1228800, the
+gap is between the device tree and whatever the region actually maps, and it is
+ours.
+
+Not to be repeated: `S5L_BRINGUP_VRAM_SURFACES` must not be changed on the
+strength of this. run86 already measured that knob and found it backwards, and
+the reason is now visible.
+
 ### 2026-07-28: the un-match fix lands on device, and the black screen is not /vram sizing
 
 **THE FIX WORKS.** The user's second log, same phone, build with
