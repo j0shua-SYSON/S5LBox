@@ -2315,6 +2315,68 @@ at 0x3cc10000(0xea9d6000)` — and uart4 still carried **zero bytes**. The
 milestone is unchanged.
 
 
+### 2026-07-28: run114/run116 -- the bug was ours, and it was the bus decode
+
+**THE CAUSE OF "TOUCH DOES NOT WORK" IS FOUND, AND IT WAS NEVER IN THE GUEST.**
+
+`machine.c` decoded the SPI and I2S windows with `mmio_word()`, which requires
+`bytes == 4`. For a control register that is correct. But both are DMA
+DESTINATIONS, and `/arm-io/spi1`'s own `dma-channels` template is `0x00089000`
+-- four-byte source, ONE-BYTE destination. So the DMAC issued `write8`, every
+one failed the width test, fell past every device in the chain, and was counted
+as an unmapped write.
+
+run114 measured it end to end, per channel for the first time:
+
+```
+  ch5  dst 3ce00010 (SPI1 TXDATA)   runs 210   bytes 812340
+  spi1 words 176   tx-drops 0   dma-arms 15
+  unmapped writes: 813135          0x3ce00000 in the outside-the-map list
+```
+
+The controller did all of its work. The port never heard a byte of it. The
+digitizer went on echoing its idle `1A A1` pattern, which is precisely correct
+behaviour for a device that has received no command frame.
+
+**Everything this project ever wrote about that looked at the guest**: a
+bootloader that would not program, a DMA channel that was never allocated, a
+controller refusing with `kIOReturnDMAError`, `AppleARMPL080DMAC` never
+registering. All four were retracted today on measurement, and this was
+underneath all of them.
+
+**run116, with `mmio_data()` routing 1/2/4-byte accesses at natural alignment:**
+
+```
+  unmapped writes: 795            (was 813,135)
+  spi1 words 88   tx-drops 54140   dma-arms 1   tx/rx level 8/8
+```
+
+**54,140 dropped bytes against a Z2 firmware image of 54,156.** The download is
+arriving at the port for the first time in the history of this project. It is
+now being dropped at a full eight-deep FIFO instead of vanishing into unmapped
+space, which is a different and much better problem.
+
+**WHY IT STILL DROPS, and it is a fidelity gap rather than a bug.** This model
+runs a whole channel inside one `s5l8900_tick()` -- pl080.c says so at the top,
+and defends it as "the same ORDER the guest observes". For a memory
+destination that is true. For a PERIPHERAL destination it is not: on a PL080
+the transfer is paced by the peripheral's DMA request lines, and even in flow
+modes 0-3, where the controller owns the transfer size, the request signal
+still gates each burst. This model has no request lines -- soc.h says so under
+`refused_flow` -- so it delivers 54 KB into an eight-byte FIFO before the driver
+has finished arming the port. `dma-arms 1` is the evidence: the setup bit is
+raised once, and by then the bytes are long gone.
+
+The shifter cannot simply stop stalling on a full receive FIFO, either. spi.c
+already explains why: in PIO the CPU is the reader, and stalling is exactly
+what lets a sixteen-octet command work against an eight-deep FIFO. Shifting
+regardless would throw away half of every reply.
+
+**So the next piece of work is destination pacing in the DMAC**: a channel must
+stop when its peripheral destination cannot accept another transfer, stay
+enabled, and resume on a later tick. That is a real feature and it is the last
+thing between the Z2 and its firmware.
+
 ### 2026-07-28: run112 -- the SPI controller HAS its DMA channel, and never refuses
 
 The last surviving links of the touch chain are gone too. Probes on all four
