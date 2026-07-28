@@ -140,6 +140,10 @@ uint32_t s5l_spi_read(s5l_spi_t *bus, uint32_t off) {
     }
 }
 
+void s5l_spi_step(s5l_spi_t *bus) {
+    if (bus) spi_shift(bus);
+}
+
 void s5l_spi_write(s5l_spi_t *bus, uint32_t off, uint32_t val) {
     if (!bus) return;
     switch (off) {

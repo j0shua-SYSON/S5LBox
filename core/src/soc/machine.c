@@ -1262,6 +1262,10 @@ void s5l8900_tick(s5l8900_t *m, uint32_t ticks) {
      * This is before the GPIO cascade for no reason other than that both DMAC
      * lines are VIC0's and neither feeds the cascade; the order is free.
      */
+    /* Before the controllers, so a port that can drain has drained and the
+     * request line below reads true rather than stale. */
+    for (unsigned i = 0; i < S5L8900_SPI_COUNT; i++) s5l_spi_step(&m->spi[i]);
+
     for (unsigned i = 0; i < S5L8900_DMAC_COUNT; i++) {
         bool dmac_irq = s5l_pl080_run(&m->dmac[i], &m->bus, dma_dst_ready, m);
         s5l_vic_set_line(&m->vic[0],

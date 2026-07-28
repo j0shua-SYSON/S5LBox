@@ -2128,6 +2128,20 @@ void     s5l_spi_write(s5l_spi_t *bus, uint32_t off, uint32_t val);
  * the receive FIFO holds a byte. See "THE ONE RULE THAT MATTERS" and the SETUP
  * note above; neither term is a decoration. */
 bool     s5l_spi_irq(const s5l_spi_t *bus);
+/*
+ * Run the shifter, from the tick rather than from a register access.
+ *
+ * The shifter used to run only inside s5l_spi_write() and s5l_spi_read(),
+ * which is enough while the CPU is the only thing feeding the port: every
+ * byte arrives as a store, and the store shifts it. It is NOT enough once
+ * the DMA controller waits for transmit-FIFO space, because then nobody is
+ * writing -- the controller is waiting for the port and the port is waiting
+ * to be written. run119 deadlocked exactly there: `ch5 ... runs 0 bytes 16
+ * ENABLED` with 1020 transfers left, against `spi1 tx/rx level 8/8`.
+ *
+ * Silicon does not work that way: a shifter with data and a clock shifts.
+ */
+void     s5l_spi_step(s5l_spi_t *bus);
 
 /*
  * The null device: it answers every word with 0x00.
