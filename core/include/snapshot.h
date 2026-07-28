@@ -189,7 +189,7 @@
  *      only thing in this machine that can distinguish "the guest never
  *      programmed a transfer" from "it programmed one and this model refused
  *      it", and refused_flow/width/chain/softreq/endian name which refusal. */
-#define SNAPSHOT_VERSION   18u
+#define SNAPSHOT_VERSION   19u
 
 typedef enum {
     SNAP_OK = 0,

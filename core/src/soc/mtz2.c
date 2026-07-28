@@ -788,6 +788,11 @@ static uint8_t mtz2_transfer(void *ctx, uint8_t out) {
     uint8_t v = drive(dev, out, dev->pos);
     dev->pos++;
     if (dev->pos >= dev->len) {
+        if (dev->pkt_n < sizeof dev->pkt_op / sizeof dev->pkt_op[0]) {
+            dev->pkt_op[dev->pkt_n]  = dev->op;
+            dev->pkt_len[dev->pkt_n] = dev->len;
+            dev->pkt_n++;
+        }
         dev->packets++;
         /*
          * End of packet: settle what the NEXT `1A A1` will mean, and whether

@@ -2552,6 +2552,23 @@ typedef struct {
      * anything. These do.
      */
     uint64_t octets, packet_octets;
+    /*
+     * THE FIRST 24 PACKETS, opcode and length, because three rounds of
+     * reasoning from aggregate counters produced three wrong answers.
+     *
+     * run137's ledger balances -- 54,236 octets in, 53,996 of them inside
+     * packets -- so nothing is lost. But only 15 packets consumed those
+     * 53,996, and the two counted as HBPP DATA account for 18,436 of them.
+     * Nothing in frame_len() returns more than 16, and both lengthening paths
+     * are bounded (wire_len is frame_len+2; the READ_LONG path clamps to
+     * S5L_MTZ2_RSP), so on paper no packet can be thousands of octets long.
+     * One of those statements is false and aggregates cannot say which.
+     *
+     * Fifteen packets is a list, not a statistic. This records it.
+     */
+    uint8_t  pkt_op[24];
+    uint32_t pkt_len[24];
+    unsigned pkt_n;
     uint64_t frames_queued, frames_read, length_reads, data_reads;
     uint64_t injects_refused;
     uint8_t  last_unknown_op;

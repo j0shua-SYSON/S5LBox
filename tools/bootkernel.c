@@ -17350,6 +17350,19 @@ static void mtz2_device_report(const s5l_mtz2_t *d) {
            (unsigned long long)d->packet_octets,
            booked == d->octets ? "   [balances]"
                                : "   *** DOES NOT BALANCE ***");
+    if (d->pkt_n) {
+        uint64_t listed = 0;
+        printf("            packets, in order (op:len):");
+        for (unsigned i = 0; i < d->pkt_n; i++) {
+            if (i && i % 6u == 0u) printf("\n                                     ");
+            printf(" %02x:%u", d->pkt_op[i], (unsigned)d->pkt_len[i]);
+            listed += d->pkt_len[i];
+        }
+        printf("\n            those %u packet(s) are %llu octet(s) of the "
+               "%llu booked\n",
+               d->pkt_n, (unsigned long long)listed,
+               (unsigned long long)d->packet_octets);
+    }
 }
 
 /*
