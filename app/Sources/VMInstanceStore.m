@@ -13,6 +13,13 @@ NSString *const VMInstanceStoreDidChangeNotification =
 static NSString *const kStoreFile = @"machines.txt";
 static NSString *const kErrorDomain = @"VMInstanceStore";
 
+/* realpath(), PATH_MAX. Declarations must precede @implementation --
+ * Objective-C takes only method definitions inside one. */
+#include <limits.h>
+#include <stdlib.h>
+#include <string.h>
+
+
 @implementation VMInstanceStore {
     vm_instance_list_t _list;
 }
@@ -31,10 +38,6 @@ static NSString *const kErrorDomain = @"VMInstanceStore";
     [self load];
     return self;
 }
-
-#include <limits.h>
-#include <stdlib.h>
-#include <string.h>
 
 #pragma mark - Paths
 
