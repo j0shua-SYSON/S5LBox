@@ -307,6 +307,13 @@ static void vmfw_strip_trailing_slash(char *path) {
 
 #pragma mark - Lifecycle
 
++ (instancetype)sharedImporter {
+    static VMFirmwareImporter *shared;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ shared = [[VMFirmwareImporter alloc] init]; });
+    return shared;
+}
+
 - (instancetype)init {
     self = [super init];
     if (!self) return nil;

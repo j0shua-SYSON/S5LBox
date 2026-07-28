@@ -7,6 +7,7 @@
 
 #import "VMFirmwareImport.h"
 #import "VMFirmwareImporter.h"
+#import "VMFirmwareBoot.h"
 #import "VMSettings.h"
 
 #import <math.h>
@@ -23,7 +24,19 @@
  * from another.
  */
 typedef NS_ENUM(NSInteger, VMImportSection) {
-    VMImportSectionChoose = 0,
+    /*
+     * CAN THIS MACHINE BOOT REAL FIRMWARE RIGHT NOW, and if not, what is
+     * missing. Always present, always first.
+     *
+     * The app boots Apple firmware automatically when the files are there --
+     * there is no "boot firmware" button, because there is no choice to make.
+     * The failure that produced this section is that the converse was also
+     * silent: with a file missing it fell back to the synthetic guest and said
+     * nothing, so a user who had imported an IPSW, typed keys and closed the
+     * screen had no way to find out that nothing had been produced.
+     */
+    VMImportSectionReadiness = 0,
+    VMImportSectionChoose,
     VMImportSectionProgress,
     VMImportSectionResults,
     VMImportSectionKeys,
@@ -183,6 +196,23 @@ static UIColor *VMImportStateColor(vm_fw_state_t state) {
     double           _fraction;      /* negative when no total is known yet   */
 }
 
+/*
+ * What vm_firmware_boot_probe() says about the firmware directory right now.
+ * Opens nothing for writing and reads no file contents, so calling it every
+ * time the table reloads is cheap.
+ */
+static BOOL VMProbeFirmware(vm_firmware_boot_state_t *out) {
+    memset(out, 0, sizeof *out);
+    NSString *dir = [[VMSettings sharedSettings] firmwareDirectory];
+    if (dir.length == 0) return NO;
+
+    vm_firmware_boot_paths_t paths;
+    if (!vm_firmware_boot_paths_shared(&paths, [dir fileSystemRepresentation]))
+        return NO;
+    vm_firmware_boot_probe(&paths, out);
+    return YES;
+}
+
 #pragma mark - Lifecycle
 
 /* Grouped, not inset-grouped, for the same reason as the settings screen: the
@@ -197,8 +227,14 @@ static UIColor *VMImportStateColor(vm_fw_state_t state) {
 
     self.title = @"Import firmware";
 
-    _importer = [[VMFirmwareImporter alloc] init];
+    /*
+     * The shared one. Keys the user typed on a previous visit are still here,
+     * and an import started before this screen was dismissed is still running
+     * -- both of which used to be destroyed with the view controller.
+     */
+    _importer = [VMFirmwareImporter sharedImporter];
     _importer.delegate = self;
+    _running = [_importer isRunning];
 
     _stage         = VM_FW_STAGE_OPENING;
     _stageArtefact = VM_FW_KERNEL;
@@ -286,6 +322,7 @@ static UIColor *VMImportStateColor(vm_fw_state_t state) {
  * how many rows a section has. */
 - (void)rebuildSections {
     NSMutableArray<NSNumber *> *visible = [NSMutableArray array];
+    [visible addObject:@(VMImportSectionReadiness)];
     [visible addObject:@(VMImportSectionChoose)];
     if (_running) [visible addObject:@(VMImportSectionProgress)];
     if (_haveReport) [visible addObject:@(VMImportSectionResults)];
@@ -333,6 +370,7 @@ static UIColor *VMImportStateColor(vm_fw_state_t state) {
  numberOfRowsInSection:(NSInteger)section {
     (void)tableView;
     switch ((VMImportSection)[self sectionAt:section]) {
+        case VMImportSectionReadiness: return 1;
         case VMImportSectionChoose:   return _chooseRowCount;
         case VMImportSectionProgress: return VMImportProgressRowCount;
         case VMImportSectionResults:  return VM_FW_ARTEFACT_COUNT;
@@ -383,6 +421,12 @@ titleForFooterInSection:(NSInteger)section {
                     @"reference hash for this build to check it against.",
                     [[VMSettings sharedSettings] firmwareDirectory]
                         ?: @"(no documents directory)"];
+
+        case VMImportSectionReadiness:
+            return @"The emulator boots Apple firmware whenever all three "
+                    "files are present and the right size -- there is nothing "
+                    "to switch on. If they are not, it runs a small synthetic "
+                    "guest instead, which is what this row exists to tell you.";
 
         case VMImportSectionKeys:
             return @"These are yours, not the app's. S5LBox ships no keys, "
@@ -487,6 +531,47 @@ estimatedHeightForRowAtIndexPath:(NSIndexPath *)indexPath {
     const NSInteger row = indexPath.row;
 
     switch ((VMImportSection)section) {
+        case VMImportSectionReadiness: {
+            UITableViewCell *cell =
+                [self cellWithIdentifier:kVMImportPlainCell
+                                   style:UITableViewCellStyleSubtitle];
+            cell.selectionStyle = UITableViewCellSelectionStyleNone;
+            cell.detailTextLabel.numberOfLines = 0;
+
+            vm_firmware_boot_state_t st;
+            if (!VMProbeFirmware(&st)) {
+                cell.textLabel.text = @"Cannot check";
+                cell.textLabel.textColor = [UIColor systemRedColor];
+                cell.detailTextLabel.text =
+                    @"there is no Documents directory to look in";
+                return cell;
+            }
+            switch (st.readiness) {
+                case VM_FW_BOOT_READY:
+                    cell.textLabel.text = @"Ready to boot Apple firmware";
+                    cell.textLabel.textColor = [UIColor systemGreenColor];
+                    cell.detailTextLabel.text =
+                        @"Start a machine and it boots this, not the synthetic "
+                        @"guest. There is no separate button.";
+                    break;
+                case VM_FW_BOOT_NEEDS_WORK_IMAGE:
+                    cell.textLabel.text = @"Ready, first boot will be slow";
+                    cell.textLabel.textColor = [UIColor systemGreenColor];
+                    cell.detailTextLabel.text =
+                        @"All three files are here. Starting a machine copies "
+                        @"about 450 MB once to make its writable image.";
+                    break;
+                case VM_FW_BOOT_INCOMPLETE:
+                default:
+                    cell.textLabel.text = @"Not ready -- the synthetic guest "
+                                          @"will run instead";
+                    cell.textLabel.textColor = [UIColor systemOrangeColor];
+                    cell.detailTextLabel.text = VMStringFromC(st.detail);
+                    break;
+            }
+            return cell;
+        }
+
         case VMImportSectionChoose: {
             UITableViewCell *cell =
                 [self cellWithIdentifier:kVMImportPlainCell
@@ -742,6 +827,18 @@ didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
 
     [self refresh];
     [_importer importIPSWAtURL:url];
+}
+
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    /*
+     * The importer is shared, so another instance of this screen may hold the
+     * delegate. Taking it back here is what makes progress appear on the
+     * screen the user is actually looking at.
+     */
+    _importer.delegate = self;
+    _running = [_importer isRunning];
+    [self refresh];
 }
 
 #pragma mark - Keys the user supplies

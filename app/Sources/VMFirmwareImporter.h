@@ -65,6 +65,21 @@ NS_ASSUME_NONNULL_BEGIN
 
 @interface VMFirmwareImporter : NSObject
 
+/*
+ * THE ONE IMPORTER, and it outlives every screen.
+ *
+ * This used to be allocated by the firmware view controller, which meant the
+ * keys the user typed lived exactly as long as that screen did: enter three
+ * keys, leave, come back, and they were gone with no indication that anything
+ * had been lost. Worse, dismissing the screen during a 433 MB extraction
+ * destroyed the importer mid-run.
+ *
+ * The keys are still never written anywhere -- not to a file, not to
+ * NSUserDefaults, not to the keychain -- which was always the point. What
+ * changed is that "this session" now means the app, not the view.
+ */
++ (instancetype)sharedImporter;
+
 @property (nonatomic, weak, nullable) id<VMFirmwareImporterDelegate> delegate;
 
 /* Safe from any thread. */
