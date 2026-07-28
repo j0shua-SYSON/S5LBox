@@ -404,7 +404,7 @@ static void test_a_stationary_drag_is_legal_and_says_so(void) {
 /* Bring a device up the way the guest does, condensed from the sequence
  * test_mtz2.c replays in full: the dummy 16-byte HBPP transfer while the reset
  * line is asserted, then the real one with it released. Anything less leaves
- * hbpp_answered clear and s5l_mtz2_set_contacts() refuses everything. */
+ * still a bootloader and s5l_mtz2_set_contacts() refuses everything. */
 static void bring_up(s5l_mtz2_t *dev, s5l_spi_slave_t *s) {
     uint8_t tx[MTZ2_FRAME_LEN];
     s5l_mtz2_reset(dev);
@@ -419,6 +419,17 @@ static void bring_up(s5l_mtz2_t *dev, s5l_spi_slave_t *s) {
     s5l_mtz2_reset_pin(dev, true);
     for (unsigned i = 0; i < MTZ2_FRAME_LEN; i++)
         (void)s->transfer(s->ctx, tx[i]);        /* the probe, out of reset  */
+    /* ...and the execute packet, which is what turns a bootloader into a
+     * digitizer. Before it the part has no application firmware and
+     * s5l_mtz2_set_contacts() refuses, which is the correct refusal. */
+    {
+        static const uint8_t exec[12] = {
+            0x1du, 0x53u, 0x18u, 0x00u, 0x10u, 0x00u,
+            0x00u, 0x01u, 0x00u, 0x00u, 0x00u, 0x29u
+        };
+        for (unsigned i = 0; i < sizeof exec; i++)
+            (void)s->transfer(s->ctx, exec[i]);
+    }
 }
 
 /*

@@ -2162,6 +2162,67 @@ void     s5l_spi_null_bind(s5l_spi_slave_t *slave);
 #define MTZ2_OP_REQ_WAKEUP   0x19u   /* two bytes, {0x19, 0xC1}              */
 #define MTZ2_OP_HBPP         0x1au   /* first byte of the HBPP loopback probe */
 
+/* ================================================== the HBPP bootloader ===
+ *
+ * A Z2 has no flash. iOS downloads its firmware ON EVERY BOOT, which is why
+ * finishStarting() (0xc0442670) detaches unless isInHBPP() says yes: at that
+ * moment the part really is an unprogrammed bootloader. The full derivation,
+ * with every address, is docs/multitouch.md §6.
+ *
+ * These are the five packet types the bootloader speaks, in addition to the
+ * probe above and MTZ2_OP_WAKE.
+ */
+#define MTZ2_OP_HBPP_RDREG   0x1cu   /* 1C 73 <addr:4> <sum:2>,       8 bytes */
+#define MTZ2_OP_HBPP_EXEC    0x1du   /* 1D 53 …,                     12 bytes */
+#define MTZ2_OP_HBPP_WRREG   0x1eu   /* 1E 33 <addr><mask><val><sum>,16 bytes */
+#define MTZ2_OP_HBPP_CALIB   0x1fu   /* 1F 01,                        2 bytes */
+#define MTZ2_OP_HBPP_DATA    0x30u   /* 30 01 <count:2> <addr:4> …,14+4W bytes */
+
+/* The second octet of each, which the driver hard-codes and this model checks
+ * rather than ignores: a packet whose marker is wrong is not one of ours. */
+#define MTZ2_HBPP_RDREG_M2   0x73u
+#define MTZ2_HBPP_EXEC_M2    0x53u
+#define MTZ2_HBPP_WRREG_M2   0x33u
+#define MTZ2_HBPP_CALIB_M2   0x01u
+#define MTZ2_HBPP_DATA_M2    0x01u
+
+/*
+ * What an ATN_ACK must answer, compared at 0xc0445284 against the literal
+ * 0x00004bc1 and retried five times before the send is abandoned. Assembled
+ * big-endian: rx[0] = 0x4B, rx[1] = 0xC1.
+ */
+#define MTZ2_HBPP_ATN_OK     0x4bc1u
+
+/*
+ * The register performCalibSeq reads at 0xc044562c, and the value it must NOT
+ * see. 0x5A020028 makes the driver SKIP the four register writes and set
+ * bootloader->0x7e4, which attemptToBootloadDevice then reads at 0xc0441568 as
+ * a reason to take the "*** ERROR: Disabling touch ***" path. So the
+ * convenient-looking answer is the one that switches the digitizer off.
+ */
+#define MTZ2_HBPP_VERSION_REG 0x10008ffcu
+#define MTZ2_HBPP_VERSION_BAD 0x5a020028u
+/*
+ * What this part reports instead. The low half matches the bad revision's
+ * (0x0028) because that is a stepping field and nothing reads it; the high
+ * half is deliberately NOT 0x5a02, and any value that differs would do — this
+ * one is chosen so a log line reading "Detected Z2 Version: 0x5A030028" is
+ * recognisable as one revision along rather than as a number from nowhere.
+ */
+#define MTZ2_HBPP_VERSION     0x5a030028u
+
+/*
+ * The ATN_ACK's length is not decidable from its bytes. isInHBPP's probe is
+ * `1A A1` + `18 E1` x7; the MemRead acknowledgement is the same bytes cut to
+ * eight; the short acknowledgement is the same bytes cut to two. Two of the
+ * three are PREFIXES of one another, so only the command that came before can
+ * separate them — on real silicon the chip select does it, and s5l_spi_slave_t
+ * records why this controller cannot see one.
+ */
+#define MTZ2_ATN_PROBE       16u
+#define MTZ2_ATN_MEMREAD     8u
+#define MTZ2_ATN_SHORT       2u
+
 /* Every 16-byte command frame: opcode at [0], parameters at [1..4], LE16 sum16
  * of [0..13] at [14..15]. Confirmed at 0xc0443288-0xc044329c, which writes
  * tx[0]=0xE3, tx[1]=id and tx[14..15] = LE16(0xE3 + id) — the plain byte sum,
@@ -2318,14 +2379,42 @@ typedef struct {
      */
     bool     in_reset;
     /*
-     * Monotonic: the host has been shown one "yes, I am in my bootloader"
-     * answer. NEVER cleared by a reset — that is the whole of the skip, and
-     * clearing it is the bug that made the driver push firmware. `in HBPP` is
-     * `!hbpp_answered`, and the name says outright that this is a one-time
-     * claim rather than a device state.
+     * IS THIS PART RUNNING ITS BOOTLOADER, and it is a device state now rather
+     * than a one-time claim.
+     *
+     * It used to be `hbpp_answered`: TRUE once, FALSE forever after. That
+     * satisfied finishStarting() — which detaches on FALSE — and then starved
+     * attemptToBootloadDevice(), which needs TRUE to push firmware. run100
+     * measured the cost: the driver never issued a single control read of any
+     * report in two billion instructions, so no property ever reached
+     * userspace, so the surface bounds went negative, so every touch landed in
+     * the same place. The comment that called it "a bounded, named, single-bit
+     * lie that costs three cosmetic log lines" was wrong about the cost.
+     *
+     * A real Z2 has no flash and is bootloaded on every boot, so TRUE is
+     * simply what it says until it has been programmed. `hbpp_exec` is the
+     * event that ends it: the twelve-octet 1D 53 packet, whose answer the
+     * driver never even looks at.
      */
-    bool     hbpp_answered;
-    uint8_t  pos, len, op;
+    bool     hbpp_mode;
+    /*
+     * The length the NEXT `1A A1` carries, because its bytes cannot say. Set
+     * by whichever command precedes it; MTZ2_ATN_PROBE when nothing has.
+     */
+    uint8_t  atn_len;
+    /* Where a MemRead acknowledgement's answer comes from: the address the
+     * preceding 1C 73 named, resolved once so the reply is pure arithmetic. */
+    uint32_t rdreg_addr;
+    /*
+     * WIDER THAN A BYTE, because an HBPP DATA packet is 14 + 4W octets and the
+     * driver only reaches for DMA above 255 (0xc04451bc) -- so a PIO packet is
+     * already allowed to be longer than a uint8_t can frame, and the firmware
+     * arrives in packets far larger than that. The receive buffer stays small:
+     * nothing past the header of a DATA packet is worth keeping, and both
+     * req[] and rsp[] are bounds-guarded at their own sizes.
+     */
+    uint32_t pos, len;
+    uint8_t  op;
     /*
      * `phase` is the frame read's tx[2], latched when it arrives so the framer
      * can lengthen the packet from 16 to L+5 in the middle of it. 0xFF means
@@ -2400,6 +2489,13 @@ typedef struct {
      * did not route; `length_reads` without `data_reads` means it looked and
      * declined, i.e. the length answer was malformed.
      */
+    /*
+     * The bootload, counted so a run can say which step it stopped on. A
+     * download that never starts and one that stops after two packets look
+     * identical in the guest's log, which prints nothing per packet.
+     */
+    uint64_t hbpp_data_packets, hbpp_data_bytes, hbpp_atn_acks;
+    uint64_t hbpp_reg_reads, hbpp_reg_writes, hbpp_calibs, hbpp_execs;
     uint64_t packets, hbpp_probes, unknown_opcodes, resets, reset_bytes;
     uint64_t frames_queued, frames_read, length_reads, data_reads;
     uint64_t injects_refused;

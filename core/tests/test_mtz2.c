@@ -14,7 +14,7 @@
  * asserted and discards the answer, then releases the line and probes. Held in
  * reset the part drives nothing, so the dummy cannot spend the claim. Three
  * tests below exist only to make each past mistake fail loudly:
- * test_the_dummy_transfer_cannot_spend_the_claim, test_reset_does_not_rearm,
+ * test_the_dummy_transfer_is_not_observable, test_reset_does_not_rearm,
  * and test_the_whole_bring_up_sequence.
  *
  * The tests build the driver's own probe bytes, frames and acceptance tests,
@@ -271,9 +271,10 @@ static void test_reset_is_total_and_null_safe(void) {
     s5l_mtz2_t dev;
     memset(&dev, 0x5a, sizeof dev);
     s5l_mtz2_reset(&dev);
-    CHECK(!dev.hbpp_answered,
-          "a reset device has already spent its HBPP claim — "
-          "finishStarting() would detach the driver");
+    CHECK(dev.hbpp_mode,
+          "a reset device is not in its bootloader — a Z2 has no flash, so a "
+          "part that has just been powered IS one, and finishStarting() "
+          "detaches unless it says so");
     CHECK(dev.pos == 0u && dev.len == 0u && dev.packets == 0u &&
           dev.hbpp_probes == 0u && dev.unknown_opcodes == 0u &&
           dev.resets == 0u && dev.reset_bytes == 0u,
@@ -336,7 +337,7 @@ static void test_checksum_is_a_plain_sum_stored_little_endian(void) {
  * driver's own test; every later one must fail it. Checked with the driver's
  * transcribed acceptance function rather than against a golden byte string.
  */
-static void test_the_claim_is_spent_exactly_once(void) {
+static void test_the_part_stays_a_bootloader_until_it_is_executed(void) {
     s5l_mtz2_t dev;
     s5l_spi_slave_t s;
     uint8_t tx[MTZ2_FRAME_LEN], rx[MTZ2_FRAME_LEN];
@@ -346,51 +347,69 @@ static void test_the_claim_is_spent_exactly_once(void) {
     build_hbpp_probe(tx);
 
     /* The probe bytes themselves, so a change to the transcription is caught
-     * rather than agreed with. */
+     * rather than agreed with. isInHBPP builds them at 0xc0441014-0xc0441048:
+     * 1A A1 then seven 18 E1 pairs, sixteen octets. */
     CHECK(tx[0] == 0x1au && tx[1] == 0xa1u && tx[2] == 0x18u && tx[3] == 0xe1u &&
           tx[14] == 0x18u && tx[15] == 0xe1u,
-          "the probe pattern is wrong: %02x %02x %02x %02x ... %02x %02x",
-          tx[0], tx[1], tx[2], tx[3], tx[14], tx[15]);
+          "the transcribed probe is not 1A A1 18 E1 ... 18 E1");
 
-    /* finishStarting's probe. */
-    xfer(&s, tx, rx, MTZ2_FRAME_LEN);
-    CHECK(driver_says_in_hbpp(rx),
-          "the first probe was rejected: rx = %02x %02x %02x %02x -- "
-          "finishStarting() takes beq 0xc0442714, prints its "
-          "\"Could not detect HBPP\" line and DETACHES",
-          rx[0], rx[1], rx[2], rx[3]);
-    CHECK(memcmp(rx, tx, MTZ2_FRAME_LEN) == 0,
-          "HBPP is a loopback and all sixteen bytes must come back");
-    CHECK(dev.hbpp_answered, "the claim was not spent");
-
-    /* attemptToBootloadDevice's three probes. Byte-identical requests; the
-     * answer must invert, or the driver pushes 54,156 bytes of firmware. */
-    for (unsigned attempt = 1; attempt <= 3u; attempt++) {
+    /*
+     * BOTH CALLERS GET THE SAME ANSWER, and that is the whole correction.
+     * finishStarting() (0xc0442670) DETACHES on no; attemptToBootloadDevice()
+     * (0xc04414c4) skips the download on no. The old model answered yes once
+     * and no thereafter, which satisfied the first and starved the second --
+     * run100 measured the result: not one control read of any report in two
+     * billion instructions, so not one property, so a negative surface span,
+     * so every touch in the same place.
+     */
+    for (unsigned probe = 0; probe < 4u; probe++) {
         memset(rx, 0xff, sizeof rx);
         xfer(&s, tx, rx, MTZ2_FRAME_LEN);
-        CHECK(!driver_says_in_hbpp(rx),
-              "bootload probe %u was accepted: rx = %02x %02x %02x %02x -- "
-              "the driver logs \"attempting to bootload device\" and starts "
-              "MTSPIBootloader_Z2::bootloadDevice()",
-              attempt, rx[0], rx[1], rx[2], rx[3]);
-        bool zeros = true;
-        for (unsigned i = 0; i < MTZ2_FRAME_LEN; i++) if (rx[i]) zeros = false;
-        CHECK(zeros, "bootload probe %u was answered with something other than "
-              "the sixteen zeros run61 measured", attempt);
+        CHECK(driver_says_in_hbpp(rx),
+              "probe %u was rejected: rx = %02x %02x %02x %02x", probe,
+              rx[0], rx[1], rx[2], rx[3]);
+        CHECK(memcmp(rx, tx, MTZ2_FRAME_LEN) == 0,
+              "probe %u: HBPP is a loopback and all sixteen bytes must come "
+              "back", probe);
+        CHECK(dev.hbpp_mode, "probe %u ended the bootloader", probe);
     }
     CHECK(dev.hbpp_probes == 4u, "%llu probes were counted, expected 4",
           (unsigned long long)dev.hbpp_probes);
-    CHECK(dev.unknown_opcodes == 0u,
-          "a probe was counted as %llu unknown opcodes -- 0x1A must be framed "
-          "as a 16-byte packet, or the 0xE1 at offset 3 starts a phantom "
-          "GET_CMD_STATUS and the framer never resynchronises",
-          (unsigned long long)dev.unknown_opcodes);
 
-    /* A machine reset is a fresh part. */
-    s5l_mtz2_reset(&dev);
-    release_reset(&dev);
+    /*
+     * The execute packet, and only it, ends the bootloader. Twelve octets,
+     * built by 0xc044490c; its answer is never examined (0xc0444a00 returns 1
+     * unconditionally), so the ARRIVAL is the event.
+     */
+    static const uint8_t exec[12] = {
+        0x1du, 0x53u, 0x18u, 0x00u, 0x10u, 0x00u,
+        0x00u, 0x01u, 0x00u, 0x00u, 0x00u, 0x29u
+    };
+    CHECK(s5l_mtz2_sum16(exec + 2, 8u) == 0x0029u,
+          "the transcribed execute packet's checksum is %04x, not the 0x0029 "
+          "0xc044496c computes over its [2..9]",
+          s5l_mtz2_sum16(exec + 2, 8u));
+    uint8_t erx[12];
+    xfer(&s, exec, erx, sizeof exec);
+    CHECK(!dev.hbpp_mode,
+          "the execute packet did not end the bootloader");
+    CHECK(dev.hbpp_execs == 1u, "the execute was not counted");
+
+    /*
+     * And now the probe must say NO -- which is what lets the driver stop
+     * treating this as a bootloader and start reading reports out of it. The
+     * answer is sixteen zeros, exactly the "Response: 0x00 0x00 ..." its own
+     * log prints.
+     */
+    memset(rx, 0xff, sizeof rx);
     xfer(&s, tx, rx, MTZ2_FRAME_LEN);
-    CHECK(driver_says_in_hbpp(rx), "a machine reset did not restore the claim");
+    CHECK(!driver_says_in_hbpp(rx),
+          "a programmed part still claimed to be in its bootloader; "
+          "attemptToBootloadDevice would download 54 KB to it again");
+    bool zeros = true;
+    for (unsigned i = 0; i < MTZ2_FRAME_LEN; i++) if (rx[i]) zeros = false;
+    CHECK(zeros, "the refusal is not sixteen zeros: %02x %02x %02x %02x",
+          rx[0], rx[1], rx[2], rx[3]);
 }
 
 /*
@@ -400,7 +419,7 @@ static void test_the_claim_is_spent_exactly_once(void) {
  * answers while held in reset spends the claim on the dummy and hands
  * finishStarting the rejection.
  */
-static void test_the_dummy_transfer_cannot_spend_the_claim(void) {
+static void test_the_dummy_transfer_is_not_observable(void) {
     s5l_mtz2_t dev;
     s5l_spi_slave_t s;
     uint8_t tx[MTZ2_FRAME_LEN], rx[MTZ2_FRAME_LEN];
@@ -416,10 +435,10 @@ static void test_the_dummy_transfer_cannot_spend_the_claim(void) {
     for (unsigned i = 0; i < MTZ2_FRAME_LEN; i++) if (rx[i]) zeros = false;
     CHECK(zeros, "a part held in its reset pin drove the bus: "
           "%02x %02x %02x %02x", rx[0], rx[1], rx[2], rx[3]);
-    CHECK(!dev.hbpp_answered,
-          "the dummy transfer spent the claim -- finishStarting's own probe is "
-          "next and would be rejected, which is the run61 failure this device "
-          "exists to end");
+    CHECK(dev.hbpp_mode,
+          "the dummy transfer changed the part's state -- it is clocked while "
+          "the line is asserted and its answer is thrown away, so nothing "
+          "about it may be observable");
     CHECK(dev.reset_bytes == MTZ2_FRAME_LEN,
           "%llu bytes were swallowed while held in reset, expected %u",
           (unsigned long long)dev.reset_bytes, (unsigned)MTZ2_FRAME_LEN);
@@ -440,34 +459,43 @@ static void test_the_dummy_transfer_cannot_spend_the_claim(void) {
  * makes the bootload site identical to the first one -- which is what shipped
  * in 098ce49 and what run65 caught pushing firmware.
  */
-static void test_reset_does_not_rearm_the_claim(void) {
+static void test_the_reset_pin_does_not_unprogram_the_part(void) {
     s5l_mtz2_t dev;
     s5l_spi_slave_t s;
-    uint8_t tx[MTZ2_FRAME_LEN], rx[MTZ2_FRAME_LEN];
+    uint8_t rx[16];
+    static const uint8_t exec[12] = {
+        0x1du, 0x53u, 0x18u, 0x00u, 0x10u, 0x00u,
+        0x00u, 0x01u, 0x00u, 0x00u, 0x00u, 0x29u
+    };
     s5l_mtz2_reset(&dev);
     s5l_mtz2_bind(&dev, &s);
-    build_hbpp_probe(tx);
     release_reset(&dev);
-    xfer(&s, tx, rx, MTZ2_FRAME_LEN);
-    CHECK(driver_says_in_hbpp(rx), "the first probe was rejected");
+    xfer(&s, exec, rx, sizeof exec);
+    CHECK(!dev.hbpp_mode, "the part was not programmed");
 
-    /* Four more full reset pulses, each with its dummy and its probe, exactly
-     * as the bootload attempts do. None may be accepted. */
-    for (unsigned site = 1; site <= 4u; site++) {
+    /*
+     * The guest pulses this line at every probe site, so a pin that returned
+     * the part to its bootloader would undo the download at the next one and
+     * the driver would spend the whole boot re-programming a part that is
+     * already running. The pin is modelled as "drives nothing while asserted",
+     * which is the physical fact; it is not a state reset.
+     *
+     * s5l_mtz2_reset() -- the POWER-ON reset -- is the one that does return a
+     * bootloader, and the case below checks that too so the two cannot be
+     * conflated.
+     */
+    for (unsigned site = 0; site < 3u; site++) {
         assert_reset(&dev);
-        xfer(&s, tx, rx, MTZ2_FRAME_LEN);          /* the dummy */
         release_reset(&dev);
-        memset(rx, 0xff, sizeof rx);
-        xfer(&s, tx, rx, MTZ2_FRAME_LEN);          /* the probe */
-        CHECK(!driver_says_in_hbpp(rx),
-              "site %u was accepted after a reset pulse: %02x %02x %02x %02x "
-              "-- a reset restores the part's state, it does not un-ask a "
-              "question the host already had answered",
-              site, rx[0], rx[1], rx[2], rx[3]);
-        CHECK(dev.hbpp_answered, "site %u cleared the claim", site);
+        CHECK(!dev.hbpp_mode,
+              "reset-pin pulse %u put a programmed part back into its "
+              "bootloader", site);
     }
-    CHECK(dev.resets == 9u, "%llu reset edges were seen, expected 9",
-          (unsigned long long)dev.resets);
+
+    s5l_mtz2_reset(&dev);
+    CHECK(dev.hbpp_mode,
+          "a power-on reset left the part claiming to be programmed -- a part "
+          "with no flash has lost its firmware and IS a bootloader again");
 }
 
 /*
@@ -492,18 +520,24 @@ static void test_the_whole_bring_up_sequence(void) {
     s5l_mtz2_bind(&dev, &s);
     build_hbpp_probe(tx);
 
-    static const bool WANT[4] = { true, false, false, false };
+    /*
+     * EVERY SITE GETS YES, and that is the correction run100 forced. Site 0 is
+     * finishStarting(), which detaches on no; sites 1-3 are
+     * attemptToBootloadDevice()'s, which SKIP the download on no. The old
+     * model answered yes once and no thereafter, satisfying the first and
+     * starving the rest, and the measured cost was every property and
+     * therefore every touch.
+     */
     for (unsigned site = 0; site < 4u; site++) {
         assert_reset(&dev);                        /* Asserting reset line   */
         xfer(&s, tx, rx, MTZ2_FRAME_LEN);          /* dummy transfer         */
         release_reset(&dev);                       /* Deasserting reset line */
         memset(rx, 0xff, sizeof rx);
         xfer(&s, tx, rx, MTZ2_FRAME_LEN);          /* checking if in HBPP    */
-        CHECK(driver_says_in_hbpp(rx) == WANT[site],
-              "site %u answered %s, wanted %s -- site 0 is finishStarting and "
-              "the rest are bootload attempts",
-              site, driver_says_in_hbpp(rx) ? "in HBPP" : "not in HBPP",
-              WANT[site] ? "in HBPP" : "not in HBPP");
+        CHECK(driver_says_in_hbpp(rx),
+              "site %u answered not in HBPP -- site 0 is finishStarting, "
+              "which detaches, and the rest are bootload attempts, which "
+              "skip the download", site);
     }
 
     /* And after all of it the report protocol still answers, because that is
@@ -790,6 +824,171 @@ static void test_control_read_returns_the_report_body(void) {
 
 /* The remaining opcodes must at least be well-formed, and an unknown one must
  * neither answer nor derail the framer. */
+/*
+ * THE BOOTLOAD, driven end to end the way MTSPIBootloader_Z2 drives it.
+ *
+ * A Z2 has no flash, so this is not an optional path: it is what happens on
+ * every boot before the driver will read a single report. Each packet below is
+ * transcribed from the function that builds it, and the acknowledgement is
+ * checked against the one number the whole sequence turns on.
+ */
+static void test_the_hbpp_bootload_runs_to_completion(void) {
+    s5l_mtz2_t dev;
+    s5l_spi_slave_t s;
+    uint8_t tx[64], rx[64];
+    s5l_mtz2_reset(&dev);
+    s5l_mtz2_bind(&dev, &s);
+    release_reset(&dev);
+
+    /* --- the wake, 0xc0445f2c: an ordinary sixteen-octet command frame --- */
+    memset(tx, 0, MTZ2_FRAME_LEN);
+    tx[0] = MTZ2_OP_WAKE;
+    tx[14] = (uint8_t)(MTZ2_OP_WAKE & 0xffu);       /* LE16 sum16(tx[0..13]) */
+    tx[15] = 0u;
+    xfer(&s, tx, rx, MTZ2_FRAME_LEN);
+    CHECK(rx[0] == MTZ2_OP_WAKE,
+          "the wake was not echoed: rx[0] = 0x%02x", rx[0]);
+
+    /* --- a DATA packet, 0xc0445dcc. Three words at 0x22000000. --- */
+    static const uint32_t words[3] = { 0x11223344u, 0x55667788u, 0x99aabbccu };
+    const uint32_t addr = 0x22000000u;
+    unsigned n = 0;
+    tx[n++] = MTZ2_OP_HBPP_DATA; tx[n++] = MTZ2_HBPP_DATA_M2;
+    tx[n++] = 0u; tx[n++] = 3u;                     /* word count, big-endian */
+    tx[n++] = (uint8_t)(addr >> 8);  tx[n++] = (uint8_t)(addr);
+    tx[n++] = (uint8_t)(addr >> 24); tx[n++] = (uint8_t)(addr >> 16);
+    uint16_t hsum = s5l_mtz2_sum16(tx + 2, 6u);
+    tx[n++] = (uint8_t)(hsum >> 8);  tx[n++] = (uint8_t)(hsum);
+    for (unsigned i = 0; i < 3u; i++) {
+        tx[n++] = (uint8_t)(words[i] >> 8);  tx[n++] = (uint8_t)(words[i]);
+        tx[n++] = (uint8_t)(words[i] >> 24); tx[n++] = (uint8_t)(words[i] >> 16);
+    }
+    uint32_t psum = 0;
+    for (unsigned i = 10; i < 22u; i++) psum += tx[i];
+    tx[n++] = (uint8_t)(psum >> 8);  tx[n++] = (uint8_t)(psum);
+    tx[n++] = (uint8_t)(psum >> 24); tx[n++] = (uint8_t)(psum >> 16);
+    CHECK(n == 14u + 12u,
+          "the transcribed DATA packet is %u octets, expected 14 + 4*3", n);
+    xfer(&s, tx, rx, n);
+    CHECK(dev.hbpp_data_packets == 1u && dev.hbpp_data_bytes == 12u,
+          "the DATA packet was not consumed as 12 payload octets: "
+          "%llu packet(s), %llu byte(s)",
+          (unsigned long long)dev.hbpp_data_packets,
+          (unsigned long long)dev.hbpp_data_bytes);
+    CHECK(dev.len == 0u && dev.pos == 0u,
+          "the framer is still inside the DATA packet: len=%u pos=%u",
+          (unsigned)dev.len, (unsigned)dev.pos);
+
+    /* --- the acknowledgement, and the number it has to be --- */
+    tx[0] = 0x1au; tx[1] = 0xa1u;
+    memset(rx, 0xff, sizeof rx);
+    xfer(&s, tx, rx, MTZ2_ATN_SHORT);
+    uint16_t status = (uint16_t)((rx[0] << 8) | rx[1]);
+    CHECK(status == MTZ2_HBPP_ATN_OK,
+          "the ATN_ACK answered 0x%04x; 0xc0445284 compares it against 0x4bc1 "
+          "and abandons the send after five tries", status);
+
+    /* --- a register read, then the LONG acknowledgement that carries it --- */
+    n = 0;
+    tx[n++] = MTZ2_OP_HBPP_RDREG; tx[n++] = MTZ2_HBPP_RDREG_M2;
+    tx[n++] = (uint8_t)(MTZ2_HBPP_VERSION_REG >> 8);
+    tx[n++] = (uint8_t)(MTZ2_HBPP_VERSION_REG);
+    tx[n++] = (uint8_t)(MTZ2_HBPP_VERSION_REG >> 24);
+    tx[n++] = (uint8_t)(MTZ2_HBPP_VERSION_REG >> 16);
+    hsum = s5l_mtz2_sum16(tx + 2, 4u);
+    tx[n++] = (uint8_t)(hsum >> 8); tx[n++] = (uint8_t)(hsum);
+    xfer(&s, tx, rx, n);
+    CHECK(dev.rdreg_addr == MTZ2_HBPP_VERSION_REG,
+          "the read address decoded as 0x%08x", dev.rdreg_addr);
+
+    /*
+     * The same bytes as the probe, cut to eight. Only the preceding command
+     * says which this is, which is the one piece of this design that is not a
+     * transcription -- see docs/multitouch.md section 6.8.
+     */
+    tx[0] = 0x1au; tx[1] = 0xa1u;
+    for (unsigned i = 2; i < MTZ2_ATN_MEMREAD; i += 2u) {
+        tx[i] = 0x18u; tx[i + 1u] = 0xe1u;
+    }
+    memset(rx, 0xff, sizeof rx);
+    xfer(&s, tx, rx, MTZ2_ATN_MEMREAD);
+    uint32_t v = ((uint32_t)rx[2] << 8) | (uint32_t)rx[3] |
+                 (((uint32_t)rx[4] << 8) | (uint32_t)rx[5]) << 16;
+    CHECK(v == MTZ2_HBPP_VERSION,
+          "the version register read back 0x%08x, expected 0x%08x", v,
+          (unsigned)MTZ2_HBPP_VERSION);
+    CHECK(v != MTZ2_HBPP_VERSION_BAD,
+          "the version is 0x5A020028, which makes performCalibSeq skip its "
+          "four register writes and set the byte attemptToBootloadDevice reads "
+          "as a reason to disable touch outright");
+
+    /* --- the four register writes performCalibSeq then makes --- */
+    static const struct { uint32_t a, val, mask; } W[4] = {
+        { 0x10001c04u, 0u,        0x00001fffu },
+        { 0x10001c08u, 0x840000u, 0x00ff0000u },
+        { 0x1000300cu, 5u,        0x00000085u },
+        { 0x1000304cu, 0x20u,     0xffffffffu },
+    };
+    for (unsigned i = 0; i < 4u; i++) {
+        memset(tx, 0, MTZ2_FRAME_LEN);
+        tx[0] = MTZ2_OP_HBPP_WRREG; tx[1] = MTZ2_HBPP_WRREG_M2;
+        tx[2] = (uint8_t)(W[i].a >> 8);     tx[3] = (uint8_t)(W[i].a);
+        tx[4] = (uint8_t)(W[i].a >> 24);    tx[5] = (uint8_t)(W[i].a >> 16);
+        tx[6] = (uint8_t)(W[i].mask >> 8);  tx[7] = (uint8_t)(W[i].mask);
+        tx[8] = (uint8_t)(W[i].mask >> 24); tx[9] = (uint8_t)(W[i].mask >> 16);
+        tx[10] = (uint8_t)(W[i].val >> 8);  tx[11] = (uint8_t)(W[i].val);
+        tx[12] = (uint8_t)(W[i].val >> 24); tx[13] = (uint8_t)(W[i].val >> 16);
+        hsum = s5l_mtz2_sum16(tx + 2, 12u);
+        tx[14] = (uint8_t)(hsum >> 8); tx[15] = (uint8_t)(hsum);
+        xfer(&s, tx, rx, MTZ2_FRAME_LEN);
+    }
+    CHECK(dev.hbpp_reg_writes == 4u, "%llu register writes were seen",
+          (unsigned long long)dev.hbpp_reg_writes);
+
+    /* --- request calibration, then its short acknowledgement --- */
+    tx[0] = MTZ2_OP_HBPP_CALIB; tx[1] = MTZ2_HBPP_CALIB_M2;
+    xfer(&s, tx, rx, 2u);
+    CHECK(dev.hbpp_calibs == 1u, "the calibration request was not counted");
+    tx[0] = 0x1au; tx[1] = 0xa1u;
+    memset(rx, 0xff, sizeof rx);
+    xfer(&s, tx, rx, MTZ2_ATN_SHORT);
+    CHECK(((rx[0] << 8) | rx[1]) == MTZ2_HBPP_ATN_OK,
+          "the calibration acknowledgement answered 0x%04x",
+          (unsigned)((rx[0] << 8) | rx[1]));
+
+    /* --- and the execute, which is what makes it a digitizer --- */
+    CHECK(dev.hbpp_mode, "the part stopped being a bootloader early");
+    static const uint8_t exec[12] = {
+        0x1du, 0x53u, 0x18u, 0x00u, 0x10u, 0x00u,
+        0x00u, 0x01u, 0x00u, 0x00u, 0x00u, 0x29u
+    };
+    xfer(&s, exec, rx, sizeof exec);
+    CHECK(!dev.hbpp_mode, "the execute did not end the bootload");
+
+    /*
+     * THE POINT OF ALL OF IT: a programmed part answers reports. Report 0xD3
+     * carries Sensor Rows and Sensor Columns, and those two bytes are what the
+     * surface bounds are built from.
+     */
+    build_frame(tx, MTZ2_OP_READ_SHORT, MTZ2_REPORT_GEOMETRY);
+    xfer(&s, tx, rx, MTZ2_FRAME_LEN);
+    CHECK(driver_accepts_reply(tx, rx),
+          "a programmed part rejected a control read");
+    CHECK(rx[MTZ2_PAYLOAD_AT + 1] == 15u && rx[MTZ2_PAYLOAD_AT + 2] == 10u,
+          "Rows/Columns came back %u/%u after the bootload",
+          rx[MTZ2_PAYLOAD_AT + 1], rx[MTZ2_PAYLOAD_AT + 2]);
+
+    /* And an injection is finally accepted, which it never was before. Built
+     * here rather than through one_finger(), which is declared below. */
+    s5l_mt_contact_t c;
+    memset(&c, 0, sizeof c);
+    c.id = 1u; c.phase = MTZ2_PHASE_MAKE_TOUCH;
+    c.x = 160u; c.y = 240u; c.pressure = 160u;
+    CHECK(s5l_mtz2_set_contacts(&dev, &c, 1u),
+          "a programmed part still refused a contact (refused=%llu)",
+          (unsigned long long)dev.injects_refused);
+}
+
 static void test_the_other_opcodes_are_well_formed(void) {
     s5l_mtz2_t dev;
     s5l_spi_slave_t s;
@@ -891,9 +1090,21 @@ static void test_attention_line_is_quiet_until_a_frame_exists(void) {
     CHECK(!s5l_mtz2_irq(&dev), "the attention line cannot be released");
 }
 
-/* Bring a device all the way up, the way the guest does. */
+/*
+ * Bring a device all the way up, the way the guest does — INCLUDING the
+ * bootload, which is what makes it a digitizer rather than a bootloader.
+ *
+ * A part that has not been executed reports nothing, and refusing an injection
+ * in that state is not pedantry: deviceReadResultData at 0xc0441324 throws a
+ * 0xEB frame away while this+0x1bc is zero, so a report queued before the
+ * download would be clocked off the wire and discarded.
+ */
 static void bring_up(s5l_mtz2_t *dev, s5l_spi_slave_t *s) {
     uint8_t tx[MTZ2_FRAME_LEN], rx[MTZ2_FRAME_LEN];
+    static const uint8_t exec[12] = {
+        0x1du, 0x53u, 0x18u, 0x00u, 0x10u, 0x00u,
+        0x00u, 0x01u, 0x00u, 0x00u, 0x00u, 0x29u
+    };
     s5l_mtz2_reset(dev);
     s5l_mtz2_bind(dev, s);
     build_hbpp_probe(tx);
@@ -901,6 +1112,7 @@ static void bring_up(s5l_mtz2_t *dev, s5l_spi_slave_t *s) {
     release_reset(dev);
     build_hbpp_probe(tx);
     xfer(s, tx, rx, MTZ2_FRAME_LEN);      /* the probe, out of reset */
+    xfer(s, exec, rx, sizeof exec);       /* "about to execute"      */
 }
 
 static s5l_mt_contact_t one_finger(uint16_t x, uint16_t y, uint8_t phase) {
@@ -1343,6 +1555,25 @@ static void test_an_injection_reaches_the_cpu_through_the_cascade(void) {
                     (uint8_t)m.bus.read32(ctx, S5L8900_SPI1_BASE + SPI_RXDATA);
         }
         CHECK(driver_says_in_hbpp(rx), "bring-up failed through the machine");
+
+        /* ...and the execute packet, through the same controller, because a
+         * part that has not been programmed reports nothing. */
+        static const uint8_t exec[12] = {
+            0x1du, 0x53u, 0x18u, 0x00u, 0x10u, 0x00u,
+            0x00u, 0x01u, 0x00u, 0x00u, 0x00u, 0x29u
+        };
+        sent = 0; got = 0;
+        while (got < sizeof exec) {
+            while (sent < sizeof exec &&
+                   m.spi[1].tx_level + m.spi[1].rx_level < S5L_SPI_FIFO_DEPTH)
+                m.bus.write32(ctx, S5L8900_SPI1_BASE + SPI_TXDATA, exec[sent++]);
+            while (m.spi[1].rx_level && got < sizeof exec) {
+                (void)m.bus.read32(ctx, S5L8900_SPI1_BASE + SPI_RXDATA);
+                got++;
+            }
+        }
+        CHECK(!m.mtz2.hbpp_mode,
+              "the part was not programmed through the machine");
     }
 
     s5l8900_tick(&m, 0);
@@ -1409,10 +1640,10 @@ static void test_machine_wires_the_device_and_its_attention_line(void) {
     CHECK(m.spi[1].slaves[1].transfer == NULL &&
           m.spi[0].slaves[0].transfer == NULL,
           "something else was attached to an SPI bus");
-    CHECK(!m.mtz2.hbpp_answered && m.mtz2.in_reset,
-          "the machine's device did not power on unclaimed and held in "
-          "reset: answered=%d in_reset=%d",
-          (int)m.mtz2.hbpp_answered, (int)m.mtz2.in_reset);
+    CHECK(m.mtz2.hbpp_mode && m.mtz2.in_reset,
+          "the machine's device did not power on as a bootloader held in "
+          "reset: hbpp=%d in_reset=%d",
+          (int)m.mtz2.hbpp_mode, (int)m.mtz2.in_reset);
     CHECK(m.stub_declare_failures == 0u,
           "%u declarations were refused, so a GPIO subscription is missing",
           m.stub_declare_failures);
@@ -1501,20 +1732,20 @@ static void test_snapshot_carries_the_protocol_position(void) {
     build_hbpp_probe(tx);
     release_reset(&src.mtz2);
     xfer(&s, tx, rx, MTZ2_FRAME_LEN);
-    src.mtz2.hbpp_answered = true;             /* the claim is spent */
+    src.mtz2.hbpp_mode = false;                /* programmed */
     build_frame(tx, MTZ2_OP_REPORT_INFO, MTZ2_REPORT_GEOMETRY);
     for (unsigned i = 0; i < 6u; i++) (void)s.transfer(s.ctx, tx[i]);
     CHECK(src.mtz2.len == MTZ2_FRAME_LEN && src.mtz2.pos == 6u &&
-          src.mtz2.hbpp_answered,
-          "the source is not mid-frame: len=%u pos=%u answered=%d",
-          src.mtz2.len, src.mtz2.pos, (int)src.mtz2.hbpp_answered);
+          !src.mtz2.hbpp_mode,
+          "the source is not mid-frame: len=%u pos=%u hbpp=%d",
+          src.mtz2.len, src.mtz2.pos, (int)src.mtz2.hbpp_mode);
 
     CHECK(snapshot_save_mem(&src, &blob, &blob_len) == SNAP_OK, "save failed");
     CHECK(snapshot_load_mem(&dst, blob, blob_len) == SNAP_OK, "load failed");
-    CHECK(dst.mtz2.hbpp_answered && dst.mtz2.in_reset == src.mtz2.in_reset,
-          "the restored device forgot that its claim was spent -- the next "
-          "probe is a bootload attempt's and would be answered affirmatively, "
-          "sending the driver into a 54 KB firmware download");
+    CHECK(!dst.mtz2.hbpp_mode && dst.mtz2.in_reset == src.mtz2.in_reset,
+          "the restored device went back to being a bootloader -- the driver "
+          "would answer by downloading 54 KB of firmware to a part that is "
+          "already running it");
     CHECK(dst.mtz2.pos == src.mtz2.pos && dst.mtz2.len == src.mtz2.len &&
           dst.mtz2.op == src.mtz2.op &&
           memcmp(dst.mtz2.rsp, src.mtz2.rsp, S5L_MTZ2_BUF) == 0,
@@ -1580,14 +1811,15 @@ int main(void) {
     printf("S5LBox AppleMultitouchZ2SPI device tests\n");
     test_reset_is_total_and_null_safe();
     test_checksum_is_a_plain_sum_stored_little_endian();
-    test_the_claim_is_spent_exactly_once();
-    test_the_dummy_transfer_cannot_spend_the_claim();
-    test_reset_does_not_rearm_the_claim();
+    test_the_part_stays_a_bootloader_until_it_is_executed();
+    test_the_dummy_transfer_is_not_observable();
+    test_the_reset_pin_does_not_unprogram_the_part();
     test_the_whole_bring_up_sequence();
     test_the_driver_tests_both_halfwords();
     test_get_report_info_satisfies_isbootloaded();
     test_the_long_control_read_carries_the_descriptor();
     test_control_read_returns_the_report_body();
+    test_the_hbpp_bootload_runs_to_completion();
     test_the_other_opcodes_are_well_formed();
     test_framing_survives_without_a_chip_select();
     test_attention_line_is_quiet_until_a_frame_exists();

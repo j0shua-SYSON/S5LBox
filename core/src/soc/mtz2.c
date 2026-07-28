@@ -330,21 +330,47 @@ static unsigned frame_len(const s5l_mtz2_t *dev, uint8_t op) {
             return 2u;   /* {0x19, 0xC1} */
         case MTZ2_OP_HBPP:
             /*
-             * The HBPP loopback probe, framed as a 16-byte packet like any
-             * other command rather than handled by putting the whole device
-             * into a loopback mode. That distinction matters twice over. It
-             * means a probe cannot swallow a following command, and it means
-             * the ordinary protocol keeps working while the device is in HBPP
-             * — which it now is for the whole boot, so a loopback mode would
-             * have echoed every GET_REPORT_INFO frame back at the driver.
+             * The HBPP loopback probe, framed as a packet like any other
+             * command rather than handled by putting the whole device into a
+             * loopback mode. That distinction matters twice over. It means a
+             * probe cannot swallow a following command, and it means the
+             * ordinary protocol keeps working while the device is in HBPP — so
+             * a loopback mode would have echoed every GET_REPORT_INFO frame
+             * back at the driver.
              *
              * It also must be framed rather than skipped a byte at a time: the
              * probe pattern `1A A1 18 E1 ...` CONTAINS 0xE1, so a device that
              * treated 0x1A as an unknown byte would reach the 0xE1 at offset 3
              * and start parsing the rest of the probe as a GET_CMD_STATUS
              * frame, ending twelve bytes into a frame that never completes.
+             *
+             * BUT THE LENGTH IS NOT SIXTEEN ANY MORE, and it cannot be read off
+             * the bytes. `1A A1` alone is the acknowledgement after a DATA
+             * packet or a calibration request; `1A A1 18 E1 18 E1 18 E1` is the
+             * one after a register read; the sixteen-octet form is the probe.
+             * The middle one is a strict PREFIX of the last, so only the
+             * command that came before separates them — see `atn_len`, which
+             * the previous packet set, and docs/multitouch.md §6.8.
              */
-            return MTZ2_FRAME_LEN;
+            return dev->atn_len ? dev->atn_len : MTZ2_ATN_PROBE;
+        case MTZ2_OP_HBPP_CALIB:
+            return 2u;   /* 1F 01 — "requesting calibration", 0xc0445750     */
+        case MTZ2_OP_HBPP_RDREG:
+            return 8u;   /* 1C 73 <addr:4> <sum:2>, 0xc0440adc              */
+        case MTZ2_OP_HBPP_EXEC:
+            return 12u;  /* 1D 53 …, `mov r4,#0xc` at 0xc04449a8            */
+        case MTZ2_OP_HBPP_WRREG:
+            return MTZ2_FRAME_LEN;   /* 1E 33 <addr><mask><val><sum>        */
+        case MTZ2_OP_HBPP_DATA:
+            /*
+             * 14 + 4W, where W is the big-endian word count at [2..3]. Not
+             * known until [3] arrives, so the framer starts this packet at its
+             * minimum and lengthens it there, exactly as a frame read is
+             * lengthened when tx[2] lands. Ten is the header alone: a
+             * zero-length DATA packet is still a complete, well-formed one.
+             */
+            (void)dev;
+            return 14u;
         case MTZ2_OP_FRAME_Z1:
         case MTZ2_OP_FRAME_Z2:
             /*
@@ -403,21 +429,68 @@ static void compose(s5l_mtz2_t *dev) {
 
     if (dev->op == MTZ2_OP_HBPP) {
         /*
-         * The declining answer: sixteen zeros, opcode byte included, and
-         * deliberately NOT an echo. The driver tests BE16(rx[0..1]) and
+         * `1A A1` is three different transactions and only its LENGTH — which
+         * the framer already settled from the command before it — says which.
+         *
+         * THE PROBE, sixteen octets. In HBPP the answer is not built here at
+         * all: it is the incoming byte returned as it arrives by
+         * mtz2_transfer(), because a loopback has no buffer. Once programmed
+         * the declining answer is sixteen zeros, opcode byte included and
+         * deliberately NOT an echo — the driver tests BE16(rx[0..1]) and
          * BE16(rx[2..3]) against a set containing neither 0x0000 nor 0x1A00,
-         * so this is a definite rejection — and it is exactly the sixteen
-         * zeros the null device produced in run61, which is the measurement
-         * this half of the behaviour is anchored to. The in-HBPP answer is not
-         * built here at all: it is the incoming byte, returned as it arrives
-         * by mtz2_transfer(), because a loopback has no buffer.
+         * so this is a definite rejection, and it is exactly the sixteen zeros
+         * the null device produced in run61.
          */
-        return;
+        if (dev->len == MTZ2_ATN_PROBE) return;
+
+        /*
+         * THE ACKNOWLEDGEMENTS, and the one number the bootload turns on.
+         * 0xc0445284 compares the halfword against 0x00004bc1 and abandons the
+         * send after five tries, so a part that answers anything else cannot
+         * be programmed. Assembled big-endian at 0xc0440d5c.
+         */
+        dev->rsp[0] = (uint8_t)(MTZ2_HBPP_ATN_OK >> 8);
+        dev->rsp[1] = (uint8_t)(MTZ2_HBPP_ATN_OK & 0xffu);
+        if (dev->len == MTZ2_ATN_MEMREAD) {
+            /*
+             * A MemRead's value rides at rx[2..5] in the same middle-endian
+             * order as every other 32-bit field here — 0xc0440c5c assembles it
+             * as (rx[2]<<8 | rx[3]) | (rx[4]<<8 | rx[5]) << 16.
+             *
+             * Only one register has a value anything reads. performCalibSeq
+             * compares 0x10008ffc against 0x5A020028 and, ON A MATCH, skips
+             * its four register writes and sets the byte that later routes
+             * attemptToBootloadDevice into "*** ERROR: Disabling touch ***".
+             * So this must not be that value. Everything else reads zero,
+             * which is what an unwritten register on a just-powered part holds.
+             */
+            uint32_t v = dev->rdreg_addr == MTZ2_HBPP_VERSION_REG
+                             ? (uint32_t)MTZ2_HBPP_VERSION : 0u;
+            dev->rsp[2] = (uint8_t)(v >> 8);
+            dev->rsp[3] = (uint8_t)(v);
+            dev->rsp[4] = (uint8_t)(v >> 24);
+            dev->rsp[5] = (uint8_t)(v >> 16);
+        }
+        return;                     /* an acknowledgement carries no sum */
     }
 
     dev->rsp[0] = dev->op;          /* the driver's rx[0] == tx[0] test */
 
     switch (dev->op) {
+        case MTZ2_OP_HBPP_DATA:
+        case MTZ2_OP_HBPP_RDREG:
+        case MTZ2_OP_HBPP_WRREG:
+        case MTZ2_OP_HBPP_CALIB:
+        case MTZ2_OP_HBPP_EXEC:
+            /*
+             * The host TALKS in these; it does not listen. Every one of them is
+             * followed either by an ATN_ACK that carries the answer or, for the
+             * execute, by nothing at all — 0xc0444a00 returns success without
+             * looking. Driving zeros is therefore the whole of the reply, and
+             * inventing a status byte here would be a number no code reads.
+             */
+            memset(dev->rsp, 0, sizeof dev->rsp);
+            return;
         case MTZ2_OP_REPORT_INFO:
             /*
              * 0xc0443440-0xc0443460: rx[2] is stored as the record's first byte
@@ -519,7 +592,20 @@ static void compose(s5l_mtz2_t *dev) {
  * accepted set. Everything else is answered from the composed reply.
  */
 static uint8_t drive(const s5l_mtz2_t *dev, uint8_t out, unsigned pos) {
-    if (dev->op == MTZ2_OP_HBPP && !dev->hbpp_answered) return out;
+    /*
+     * The PROBE loops back; the two ACKNOWLEDGEMENTS do not. All three start
+     * `1A A1` and the framer has already decided which this is (see atn_len),
+     * so the length is what separates them here — there is nothing in the
+     * bytes to separate them by.
+     *
+     * A part that has been programmed answers the probe from its composed
+     * reply instead, which is sixteen zeros: that is exactly the "Could not
+     * detect HBPP. Response: 0x00 …" the driver prints, and it is what a real
+     * Z2 running application firmware would produce.
+     */
+    if (dev->op == MTZ2_OP_HBPP && dev->len == MTZ2_ATN_PROBE &&
+        dev->hbpp_mode)
+        return out;
     return pos < S5L_MTZ2_RSP ? dev->rsp[pos] : 0u;
 }
 
@@ -560,7 +646,7 @@ static uint8_t mtz2_transfer(void *ctx, uint8_t out) {
             return 0u;
         }
         dev->op  = out;
-        dev->len = (uint8_t)n;
+        dev->len = n;
         dev->pos = 0u;
         /* 0xFF, not 0: tx[2] == 0 is the LENGTH read, so a cleared field would
          * make every non-frame packet look like one. */
@@ -590,7 +676,7 @@ static uint8_t mtz2_transfer(void *ctx, uint8_t out) {
         dev->frame_phase = out;
         if (out == 1u) {
             unsigned total = wire_len(dev) + 5u;
-            dev->len = (uint8_t)total;
+            dev->len = total;
             dev->data_reads++;
         } else {
             dev->length_reads++;
@@ -634,19 +720,84 @@ static uint8_t mtz2_transfer(void *ctx, uint8_t out) {
          * bus and not as a buffer overrun.
          */
         if (total > S5L_MTZ2_RSP) total = S5L_MTZ2_RSP;
-        dev->len = (uint8_t)total;
+        dev->len = total;
         compose(dev);
+    }
+    /*
+     * tx[3] completes the DATA packet's word count at [2..3], big-endian, and
+     * that is the only thing on the wire that says how long this packet runs:
+     * 14 + 4W, ten octets of header plus the payload plus a four-octet sum.
+     *
+     * The payload itself is neither stored nor checked. This model is not a
+     * Z2 core and cannot execute what it is handed; what it owes the driver is
+     * to CONSUME exactly the right number of octets so the next packet starts
+     * where the host thinks it does. A desynchronised bus here would look like
+     * a corrupted firmware image, which is the least diagnosable failure this
+     * device has.
+     */
+    if (dev->pos == 3u && dev->op == MTZ2_OP_HBPP_DATA) {
+        unsigned words = ((unsigned)dev->req[2] << 8) | (unsigned)out;
+        dev->len = 14u + 4u * words;
     }
 
     uint8_t v = drive(dev, out, dev->pos);
     dev->pos++;
     if (dev->pos >= dev->len) {
         dev->packets++;
-        if (dev->op == MTZ2_OP_HBPP) {
-            dev->hbpp_probes++;
-            /* The host has had its one look. Only reachable out of reset, so
-             * the dummy transfer can never get here. */
-            dev->hbpp_answered = true;
+        /*
+         * End of packet: settle what the NEXT `1A A1` will mean, and whether
+         * this part is still a bootloader.
+         *
+         * Every command that is followed by an acknowledgement says which kind
+         * it expects; everything else leaves the probe. This is the one place
+         * the ambiguity of §6.8 is resolved, and it is resolved by ordering
+         * rather than by content because the content cannot do it.
+         */
+        switch (dev->op) {
+            case MTZ2_OP_HBPP:
+                if (dev->len == MTZ2_ATN_PROBE) dev->hbpp_probes++;
+                else                            dev->hbpp_atn_acks++;
+                dev->atn_len = MTZ2_ATN_PROBE;
+                break;
+            case MTZ2_OP_HBPP_DATA:
+                dev->hbpp_data_packets++;
+                dev->hbpp_data_bytes += dev->len > 14u ? dev->len - 14u : 0u;
+                dev->atn_len = MTZ2_ATN_SHORT;
+                break;
+            case MTZ2_OP_HBPP_RDREG:
+                dev->hbpp_reg_reads++;
+                /* The address, middle-endian: 0xc0440a90-0xc0440ab0 writes it
+                 * as [a>>8, a, a>>24, a>>16] and every other 32-bit field in
+                 * this protocol uses the same order. */
+                dev->rdreg_addr = ((uint32_t)dev->req[2] << 8) |
+                                  (uint32_t)dev->req[3] |
+                                  ((uint32_t)dev->req[4] << 24) |
+                                  ((uint32_t)dev->req[5] << 16);
+                dev->atn_len = MTZ2_ATN_MEMREAD;
+                break;
+            case MTZ2_OP_HBPP_WRREG:
+                dev->hbpp_reg_writes++;
+                dev->atn_len = MTZ2_ATN_PROBE;
+                break;
+            case MTZ2_OP_HBPP_CALIB:
+                dev->hbpp_calibs++;
+                dev->atn_len = MTZ2_ATN_SHORT;
+                break;
+            case MTZ2_OP_HBPP_EXEC:
+                /*
+                 * THE PART IS PROGRAMMED. Its answer to this packet is never
+                 * examined — 0xc0444a00 returns 1 unconditionally — so the
+                 * arrival is the event, and from here the probe answers no,
+                 * which is what lets the driver stop treating this as a
+                 * bootloader and start interrogating it.
+                 */
+                dev->hbpp_execs++;
+                dev->hbpp_mode = false;
+                dev->atn_len = MTZ2_ATN_PROBE;
+                break;
+            default:
+                dev->atn_len = MTZ2_ATN_PROBE;
+                break;
         }
         /*
          * A COMPLETED data read is what drops the attention line. Not the
@@ -679,8 +830,12 @@ void s5l_mtz2_reset(s5l_mtz2_t *dev) {
     memset(dev, 0, sizeof *dev);
 
     /*
-     * Power-on state. `hbpp_answered` false means the next probe answered out
-     * of reset gets the affirmative finishStarting() needs.
+     * Power-on state. `hbpp_mode` true is the honest one: a Z2 has no flash,
+     * so a part that has just been powered IS its bootloader, and it stays one
+     * until the twelve-octet execute packet arrives. That is what gives
+     * finishStarting() the yes it detaches without, and gives
+     * attemptToBootloadDevice() the yes it needs to actually push firmware --
+     * which the old one-time claim could not do for both.
      *
      * `in_reset` true is not a stylistic choice: the GPIO pin block powers up
      * all-zero and MTZ2_PIN_RESET is active low, so a part on this board is
@@ -690,7 +845,9 @@ void s5l_mtz2_reset(s5l_mtz2_t *dev) {
      * — and only the later release produces an edge.
      */
     dev->in_reset      = true;
-    dev->hbpp_answered = false;
+    dev->hbpp_mode     = true;
+    dev->atn_len       = MTZ2_ATN_PROBE;
+    dev->rdreg_addr    = 0u;
     /* Not zero: zero is the LENGTH read's tx[2]. See the framer. */
     dev->frame_phase   = 0xffu;
 
@@ -1150,13 +1307,14 @@ bool s5l_mtz2_set_contacts(s5l_mtz2_t *dev, const s5l_mt_contact_t *c,
      * and this model already refuses to answer a byte in that state. */
     if (dev->in_reset)               { dev->injects_refused++; return false; }
     /*
-     * Not brought up. `hbpp_answered` false means the driver has not yet had
-     * the affirmative probe that sets its this+0x1bc, and deviceReadResultData
-     * at 0xc0441324 REJECTS a 0xEB frame outright while that byte is zero
-     * (`ldrb r3,[r4,#0x1bc] / cmp r3,#0 / beq 0xc0441408`). A report queued now
-     * could be read off the wire and would still be thrown away.
+     * Still a bootloader. A part that has not been programmed is not running
+     * the application firmware that scans the panel, so it has no contact to
+     * report -- and the driver would throw the frame away in any case:
+     * deviceReadResultData at 0xc0441324 REJECTS a 0xEB frame while this+0x1bc
+     * is zero (`ldrb r3,[r4,#0x1bc] / cmp r3,#0 / beq 0xc0441408`), and that
+     * byte is set by the affirmative probe the bootload begins with.
      */
-    if (!dev->hbpp_answered)         { dev->injects_refused++; return false; }
+    if (dev->hbpp_mode)              { dev->injects_refused++; return false; }
     /*
      * One report at a time. A real Z2 overwrites its scan buffer and drops
      * frames the host was too slow for; doing that here would silently discard

@@ -129,7 +129,7 @@ SNAP_SIZE_GUARD(s5l_gpioic_t,      224,   "snap_gpioic");
 SNAP_SIZE_GUARD(s5l_gpio_t,        4192,  "snap_gpio");
 /* One held-button byte and three counters, padded to 8-byte alignment. */
 SNAP_SIZE_GUARD(s5l_buttons_t,     32,    "snap_buttons");
-SNAP_SIZE_GUARD(s5l_mtz2_t,        528,   "snap_mtz2");
+SNAP_SIZE_GUARD(s5l_mtz2_t,        600,   "snap_mtz2");
 SNAP_SIZE_GUARD(s5l_usbotg_t,      4,     "snap_usbotg");
 /* Eight channels of five registers (160), the four controller-wide words, the
  * access and unknown-offset accounting, and the work/refusal counters. */
@@ -155,7 +155,7 @@ SNAP_SIZE_GUARD(s5l_stub_t,        56,    "snap_stubs");
  * 44408 = 43768 + the two PL080 DMA controllers (2 x 320). Unlike level_dirty
  * this one IS in snap_mach() and the byte format DOES change, so
  * SNAPSHOT_VERSION moves with it — see the v14 note. */
-SNAP_SIZE_GUARD(s5l8900_t,         44408, "snap_mach");
+SNAP_SIZE_GUARD(s5l8900_t,         44480, "snap_mach");
 #endif
 
 /* ---------------------------------------------------------------- the IO --- */
@@ -513,12 +513,11 @@ static bool mtz2_state_valid(const s5l_mtz2_t *d) {
 
 /*
  * The touch controller. Its protocol position is real state: the guest can be
- * part way through a 16-byte frame when a checkpoint is taken. So is
- * `hbpp_answered`, and far more consequentially — a restore that cleared it
- * would let the next probe, which is one of attemptToBootloadDevice's, be
- * answered affirmatively and send the driver into a 54 KB firmware download.
- * `in_reset` travels for the same reason: it is what tells the dummy transfer
- * apart from the probe.
+ * part way through a packet when a checkpoint is taken. So is `hbpp_mode` —
+ * a restore that set it would put an already-programmed part back into its
+ * bootloader, and the driver would answer by downloading 54 KB of firmware to
+ * something that is already running it. `in_reset` travels for the same
+ * reason: it is what tells the dummy transfer apart from the probe.
  *
  * The published geometry travels too, even though nothing writes it after
  * reset: a snapshot must not depend on the build that reads it choosing the
@@ -526,8 +525,15 @@ static bool mtz2_state_valid(const s5l_mtz2_t *d) {
  * one the guest already read would put every tap in the wrong place.
  */
 static void snap_mtz2(sn_io_t *io, s5l_mtz2_t *d) {
-    FB (d->in_reset); FB(d->hbpp_answered);
-    F8 (d->pos); F8(d->len); F8(d->op); F8(d->frame_phase);
+    FB (d->in_reset); FB(d->hbpp_mode);
+    /*
+     * `atn_len` and `rdreg_addr` travel because they are the only things that
+     * say what the NEXT `1A A1` means, and a restore that guessed would frame
+     * an eight-octet acknowledgement as a sixteen-octet probe and desynchronise
+     * the bus for the rest of the boot.
+     */
+    F8 (d->atn_len); F32(d->rdreg_addr);
+    F32(d->pos); F32(d->len); F8(d->op); F8(d->frame_phase);
     FBYTES(d->req, S5L_MTZ2_BUF);
     FBYTES(d->rsp, S5L_MTZ2_RSP);
     F8 (d->rows); F8(d->columns); F8(d->endianness);

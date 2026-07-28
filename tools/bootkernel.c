@@ -17159,12 +17159,27 @@ static void mtz2_device_report(const s5l_mtz2_t *d) {
            (unsigned long long)d->frames_read,
            (unsigned long long)d->injects_refused);
     printf("    pins:   reset-edges %llu  reset-bytes %llu  power-edges %llu  "
-           "power-level %u  in-reset %u  hbpp-answered %u\n",
+           "power-level %u  in-reset %u  in-hbpp %u\n",
            (unsigned long long)d->resets,
            (unsigned long long)d->reset_bytes,
            (unsigned long long)d->power_edges,
            d->power_level ? 1u : 0u, d->in_reset ? 1u : 0u,
-           d->hbpp_answered ? 1u : 0u);
+           d->hbpp_mode ? 1u : 0u);
+    /*
+     * The bootload, step by step. A download that never started and one that
+     * stopped after two packets look identical in the guest's log, which prints
+     * nothing per packet -- so this is the only place the difference shows.
+     */
+    printf("    hbpp:   probes %llu  acks %llu  data %llu (%llu bytes)  "
+           "rd %llu  wr %llu  calib %llu  exec %llu\n",
+           (unsigned long long)d->hbpp_probes,
+           (unsigned long long)d->hbpp_atn_acks,
+           (unsigned long long)d->hbpp_data_packets,
+           (unsigned long long)d->hbpp_data_bytes,
+           (unsigned long long)d->hbpp_reg_reads,
+           (unsigned long long)d->hbpp_reg_writes,
+           (unsigned long long)d->hbpp_calibs,
+           (unsigned long long)d->hbpp_execs);
 }
 
 /*
