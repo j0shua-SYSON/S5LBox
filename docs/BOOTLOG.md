@@ -2315,6 +2315,56 @@ at 0x3cc10000(0xea9d6000)` — and uart4 still carried **zero bytes**. The
 milestone is unchanged.
 
 
+### 2026-07-28: run129 — the link is up, and the guest has nothing to send over it
+
+First use of the NAT report, and it gave a crisp negative on a question this
+project could not previously ask at all:
+
+```
+  === HOST NAT ===
+      ip      in 0  out 0   egress open
+      refused bad-version 0  bad-header 0  bad-checksum 0  frags 0  bad-source 0  proto 0
+      icmp    in 0   udp in 0  out 0   tcp in 0  out 0
+      flows   open 0  peak 0  table-full 0  out-dropped 0
+```
+
+Every refusal counter is zero, so the stack did not drop anything — nothing
+arrived. And the egress is open, so this is not a host-side failure either.
+
+The PPP peer says the link is genuinely up:
+
+```
+  frames in / out                   7 / 7
+  rejected: 1 protocol(s), 0 code(s); echo replies 0
+  LCP  Opened      IPCP Opened      phase open (the guest has an address)
+  *** MILESTONE: IPCP Opened at instruction 767711085.
+```
+
+Seven frames each way is negotiation and nothing else. The run continued about
+1.2 G instructions past IPCP and carried **zero** IP frames.
+
+**Why, and it is not mysterious.** The launchd job this project installs runs
+the guest's own pppd as:
+
+```
+  /usr/sbin/pppd /dev/tty.debug local nocrtscts nodetach
+```
+
+There is no `defaultroute`. pppd brings `ppp0` up with an address and installs
+no route, so nothing in the guest's routing table points at the link and no
+daemon has any reason to write to it. `ip in 0` is the correct and expected
+consequence, not a fault in the NAT, the peer, or uart4.
+
+So N2 (address assigned) is complete and has been since `8e30052`; N3/N4 are
+untouched. The next step is a guest-configuration change rather than emulator
+work: add `defaultroute` to those arguments. The constraint to respect is that
+the replacement plist is written in place at exactly the original's 530 bytes,
+so the argument has to be paid for out of the literal's own whitespace.
+
+Not yet claimed: that a default route is *sufficient*. It gives the guest
+somewhere to send; whether any daemon then sends is a separate measurement, and
+mDNSResponder's multicast is not obviously something this NAT should carry.
+
 ### 2026-07-28: THE LOCK SCREEN USED TO RENDER, and stopped today
 
 Every run on disk prints its final framebuffer as a non-zero byte count. Read
