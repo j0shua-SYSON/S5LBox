@@ -2614,6 +2614,21 @@ static bool dt_memmap_matches_once(uint8_t *b, size_t len, const char *key,
  *   0xc07060c0  whether AppleH1CLCD got its block or took the fallback
  *
  * Two is kept until those counters say what the client actually wants.
+ *
+ * PARTLY ANSWERED, 2026-07-28, run127. A different probe than the four above --
+ * the region gate at 0xc0524454, read at 0xc0524458 -- reports 1 for both
+ * allocations under a four-surface pool and 0 for the second under two. The
+ * second request is offset 0x12c000 + length 0x96000 and a two-surface pool
+ * ends at exactly 0x12c000, so it starts one whole surface past the end and
+ * the gate is simply doing bounds arithmetic. Three is the observed minimum.
+ *
+ * The paragraph above is therefore too strong: the increment was not the wrong
+ * experiment, it was an experiment three earlier runs failed to actually
+ * perform (they edited the core constant while this file read its own copy --
+ * that is why these are now aliases). What survives from it is the reason two
+ * is STILL the shipped value: run127 cleared the refusal and reached the same
+ * console milestone, so nothing has yet connected the gate to a drawn pixel,
+ * and a pool sized by trial would hide the leak this constant makes visible.
  */
 #define N82_VRAM_SURFACES S5L_BRINGUP_VRAM_SURFACES
 #define N82_VRAM_BYTES    S5L_BRINGUP_VRAM_BYTES

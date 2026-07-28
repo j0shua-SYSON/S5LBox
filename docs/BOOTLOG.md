@@ -2315,6 +2315,63 @@ at 0x3cc10000(0xea9d6000)` — and uart4 still carried **zero bytes**. The
 milestone is unchanged.
 
 
+### 2026-07-28: run127 — the pool really was too small, and the gate says so
+
+The first genuine four-surface test. Every earlier attempt edited the core's
+constant and ran the harness, which read its own; this one was **verified in the
+run header before any conclusion rested on it**, which is the check whose
+absence cost the morning:
+
+```
+  dt: /vram   reg   {0x00000000,0x00000000} -> {0x0885c000,0x00258000}
+  vram pool : pa 0x0885c000..0x08ab4000  4 surface(s) of 0x96000
+```
+
+The region gate at `0xc0524454` (`ldr pc, [r3, #0x50]`, verdict read at
+`0xc0524458`) was probed live. Both allocations pass, and the warning path at
+`0xc0524598` is never entered:
+
+```
+  @1595586401  pc c0524458  r0 00000001
+  @1595586462  pc c05244ac  r0 c0dbba00 r1 00096000 r2 00096000 r3 00100003
+  @1595979068  pc c0524458  r0 00000001
+  @1595979129  pc c05244ac  r0 c0dbba00 r1 0012c000 r2 00096000 r3 00100003
+```
+
+Against run125, same probes, two surfaces: first `r0 00000001`, second
+`r0 00000000`, then the warning. **One number changed and the verdict flipped.**
+
+The arithmetic is exact, which is what makes this a measurement rather than a
+coincidence. Request #2 is offset `0x12c000` plus length `0x96000`, ending at
+`0x1c2000`. A two-surface pool ends at `0x12c000` — request #2 begins precisely
+where the old pool stopped, not near its limit but one whole surface past it.
+`0x1c2000` is three surfaces, so **three is the observed minimum** for the two
+allocations seen here.
+
+**What this refutes.** The run110 section below reads the same refusal and
+concludes "the parent memory descriptor is very likely shorter than the /vram
+region we publish", then instructs that `S5L_BRINGUP_VRAM_SURFACES` "must not be
+changed on the strength of this". The descriptor was not short; the pool was.
+That instruction is withdrawn.
+
+**What it does not refute.** run86 measured *guest output* with three surfaces
+and found it worse; run127 measured the *gate*. Different observables, and
+run86 was a harness run, so unlike run117/118/126 its edit did take effect. It
+stands as a measurement. What no longer stands is citing it as a reason the knob
+cannot matter — the gate demonstrably depends on it.
+
+**What is NOT established: that this renders.** run127's guest console stops at
+`AppleMultitouchSPIUserClient: Inhibited externally initiated reset`, the same
+milestone the two-surface boots reach. Removing this refusal has not yet been
+shown to put a pixel on the screen. The run is still executing (30.6 min CPU
+over 34 min wall, ~90% of a core — working, not spinning), and the shipped
+constant remains `2u` until a run earns the change.
+
+The class of error behind the three lost runs is closed in `ac9b065`: the
+harness's `N82_FB_*` and `N82_VRAM_*` are now aliases of the core constants
+rather than copies, verified by moving the core's value and watching the
+harness's published pool follow.
+
 ### 2026-07-28: the cache-mode theory was never printed, and is retracted
 
 I found `IOSurface::allocate() - requested cache mode %08x incompatible with
@@ -2718,6 +2775,11 @@ ours.
 Not to be repeated: `S5L_BRINGUP_VRAM_SURFACES` must not be changed on the
 strength of this. run86 already measured that knob and found it backwards, and
 the reason is now visible.
+
+> **Superseded by run127.** Both paragraphs above are wrong. The descriptor is
+> not short — the pool was, and raising it to four surfaces makes this exact
+> gate return 1 where it returned 0. See *run127 — the pool really was too
+> small* above. The instruction not to touch the constant is withdrawn.
 
 ### 2026-07-28: the un-match fix lands on device, and the black screen is not /vram sizing
 

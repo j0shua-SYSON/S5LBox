@@ -65,9 +65,18 @@
 /*
  * /vram is the pool IOSurface allocates every surface from, NOT the scanout
  * buffer. Sizing it to one framebuffer is why run76 composited nothing; three
- * measured strictly worse than two (run86: 122 allocation failures, ~1.4 KB
- * LESS guest output, byte-identical frame). See the N82_VRAM_SURFACES comment
- * in tools/bootkernel.c for the static analysis that closed the question.
+ * measured strictly worse than two in guest output (run86: 122 allocation
+ * failures, ~1.4 KB LESS guest output, byte-identical frame).
+ *
+ * THE QUESTION IS OPEN, and an earlier version of this comment said the
+ * opposite. run127 probed the region gate that refuses the second surface and
+ * found that four surfaces make it return 1 where two make it return 0: the
+ * second request is offset 0x12c000 + length 0x96000, and a two-surface pool
+ * ends at exactly 0x12c000, so it begins one whole surface past the end. Three
+ * is the observed minimum. What has NOT been shown is that removing that
+ * refusal renders anything -- run127 reached the same console milestone as the
+ * two-surface boots -- so the value stays at the one whose output is measured
+ * until a run earns the change. tools/bootkernel.c reads THIS constant.
  */
 #define S5L_BRINGUP_VRAM_SURFACES  2u
 #define S5L_BRINGUP_VRAM_BYTES     (S5L_BRINGUP_FB_BYTES * S5L_BRINGUP_VRAM_SURFACES)
