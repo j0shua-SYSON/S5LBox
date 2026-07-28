@@ -22641,9 +22641,55 @@ static void pmu_checkpoint_report(void) {
                "the early-provider or I2C branch.\n");
 }
 
+
+/*
+ * The two PL080 DMA controllers, and specifically WHAT THEY REFUSED.
+ *
+ * run103 established that the Z2 firmware leaves the driver over DMA -- the
+ * v[0x360] path, fifteen captures against zero for PIO -- and arrives at the
+ * digitizer as nothing at all. Every way that can happen is a counter in this
+ * block: a channel that was never enabled shows zero items; one this model
+ * declined shows the named refusal; one that ran and moved bytes shows the
+ * count, and then the fault is downstream of here.
+ *
+ * Printed unconditionally, because "the DMAC did nothing" and "the DMAC was
+ * never asked" are the two answers this is meant to separate and neither is
+ * visible anywhere else.
+ */
+static void dmac_report(void) {
+    if (!G.mach) return;
+    printf("\n=== PL080 DMA CONTROLLERS ===\n");
+    printf("    A refusal here is this model declining a mode it cannot honour,\n"
+           "    by name, rather than a channel that quietly did nothing. See the\n"
+           "    'WHAT THIS MODEL REFUSES' block in soc.h for what each means.\n");
+    for (unsigned i = 0; i < 2u; i++) {
+        const s5l_pl080_t *d = &G.mach->dmac[i];
+        printf("    dmac%u @ 0x%08x  config %s  items %llu  bytes %llu\n",
+               i, i == 0u ? 0x38200000u : 0x39900000u,
+               d->config ? "written" : "NEVER WRITTEN",
+               (unsigned long long)d->items,
+               (unsigned long long)d->bytes_moved);
+        printf("           refused: flow %llu  width %llu  chain %llu  "
+               "softreq %llu  endian %llu\n",
+               (unsigned long long)d->refused_flow,
+               (unsigned long long)d->refused_width,
+               (unsigned long long)d->refused_chain,
+               (unsigned long long)d->refused_softreq,
+               (unsigned long long)d->refused_endian);
+        for (unsigned c = 0; c < S5L_PL080_CHANNELS; c++) {
+            const s5l_pl080_chan_t *ch = &d->ch[c];
+            if (!ch->src && !ch->dst && !ch->ctrl && !ch->cfg) continue;
+            printf("           ch%u src %08x dst %08x ctrl %08x cfg %08x%s\n",
+                   c, ch->src, ch->dst, ch->ctrl, ch->cfg,
+                   (ch->cfg & PL080_CFG_EN) ? "  ENABLED" : "");
+        }
+    }
+}
+
 static void i2c_pmu_state_report(const s5l8900_t *mach) {
     if (!mach) return;
 
+    dmac_report();
     printf("\n=== I2C / PCF50635 LIVE STATE ===\n");
     for (unsigned i = 0; i < S5L8900_I2C_COUNT; i++) {
         const s5l_i2c_t *bus = &mach->i2c[i];
