@@ -692,12 +692,25 @@ static void test_dns_refuses_names_it_should_not_hand_to_getaddrinfo(void) {
      * the bit and something else queued a datagram; if it did not, the guard
      * never ran and the bit did not survive the trip through udp_input.
      */
+    /*
+     * The two ends, side by side. dns_last_flags is what dns_input read out of
+     * the datagram it was handed; r16(q + 2) is what this test put in. If they
+     * differ, the bytes changed somewhere between send_udp() and dns_input()
+     * and the fault is in the plumbing; if they agree and the guard still did
+     * not fire, the fault is in the comparison.
+     */
+    CHECK(g_ns.stats.dns_last_flags == r16(q + 2),
+          "dns_input saw flags 0x%04x where this test sent 0x%04x "
+          "(qdcount seen %u), so the datagram changed in transit",
+          g_ns.stats.dns_last_flags, r16(q + 2),
+          g_ns.stats.dns_last_qdcount);
     CHECK(g_ns.stats.dns_malformed == 1u,
           "the QR guard did not fire: dns_malformed %llu, dns_queries %llu, "
-          "ip_bad_checksum %llu -- the query carried flags 0x%04x",
+          "ip_bad_checksum %llu -- flags seen 0x%04x, sent 0x%04x",
           (unsigned long long)g_ns.stats.dns_malformed,
           (unsigned long long)g_ns.stats.dns_queries,
-          (unsigned long long)g_ns.stats.ip_bad_checksum, r16(q + 2));
+          (unsigned long long)g_ns.stats.ip_bad_checksum,
+          g_ns.stats.dns_last_flags, r16(q + 2));
     CHECK(net_output_pending(&g_ns) == 0u,
           "a DNS *response* aimed at us produced a reply, which is how a "
           "reflection loop starts (queued %u; the query we sent had flags "

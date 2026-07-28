@@ -148,8 +148,9 @@ static void test_a_udp_socket_is_ready_at_once(void) {
          */
         int r = eg.recv(eg.ctx, fd, (uint8_t *)&w, sizeof w);
         CHECK(r == NET_EG_WOULDBLOCK || r > 0,
-              "an idle UDP socket reported %d; a bounced datagram must read as "
-              "WOULDBLOCK, never as a fatal error", r);
+              "an idle UDP socket reported %d (host error %d); a bounced "
+              "datagram must read as WOULDBLOCK, never as a fatal error",
+              r, net_host_stats(h)->last_error);
         eg.close(eg.ctx, fd);
     }
     net_host_close(h);

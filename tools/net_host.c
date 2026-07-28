@@ -40,6 +40,11 @@
 #  define SOCK_EALREADY    WSAEALREADY
 #  define SOCK_EISCONN     WSAEISCONN
 #  define SOCK_ECONNRESET  WSAECONNRESET
+#  define SOCK_ECONNREFUSED WSAECONNREFUSED
+#  define SOCK_ENETRESET   WSAENETRESET
+#  define SOCK_EHOSTUNREACH WSAEHOSTUNREACH
+#  define SOCK_ENETUNREACH WSAENETUNREACH
+#  define SOCK_EMSGSIZE    WSAEMSGSIZE
 #else
 #  include <errno.h>
 #  include <fcntl.h>
@@ -56,6 +61,11 @@
 #  define SOCK_EALREADY    EALREADY
 #  define SOCK_EISCONN     EISCONN
 #  define SOCK_ECONNRESET  ECONNRESET
+#  define SOCK_ECONNREFUSED ECONNREFUSED
+#  define SOCK_ENETRESET   ENETRESET
+#  define SOCK_EHOSTUNREACH EHOSTUNREACH
+#  define SOCK_ENETUNREACH ENETUNREACH
+#  define SOCK_EMSGSIZE    EMSGSIZE
 #endif
 
 typedef struct {
@@ -72,6 +82,36 @@ struct net_host {
 };
 
 /* ------------------------------------------------------------- helpers --- */
+
+/*
+ * "That datagram did not get there", as opposed to "this socket is finished".
+ *
+ * A connected UDP socket surfaces an ICMP error from a PREVIOUS send on the
+ * NEXT recv, and which code it picks is the host's business: Winsock uses
+ * WSAECONNRESET for port-unreachable and WSAENETRESET for TTL-exceeded, BSD
+ * uses ECONNREFUSED, and either may produce EHOSTUNREACH or ENETUNREACH from
+ * an intermediate router. The first draft of this file named only one of them
+ * and a CI runner promptly returned a different one -- which is the whole
+ * argument for listing the family rather than the one code that happened to
+ * come up locally.
+ *
+ * None of them is terminal for UDP, which has no connection to lose. Treating
+ * any as fatal would kill a live NAT flow because a single datagram bounced.
+ * For TCP every one of these IS terminal and this is not consulted.
+ */
+static bool bounced(int e) {
+    switch (e) {
+        case SOCK_ECONNRESET:
+        case SOCK_ECONNREFUSED:
+        case SOCK_ENETRESET:
+        case SOCK_EHOSTUNREACH:
+        case SOCK_ENETUNREACH:
+        case SOCK_EMSGSIZE:
+            return true;
+        default:
+            return false;
+    }
+}
 
 static bool would_block(int e) {
     return e == SOCK_EWOULDBLOCK
@@ -258,8 +298,9 @@ static int h_recv(void *ctx, int handle, uint8_t *buf, size_t cap) {
      *
      * For TCP the same code IS terminal: a reset is the end of that connection.
      */
-    if (e == SOCK_ECONNRESET && s->proto != NET_PROTO_TCP) {
+    if (s->proto != NET_PROTO_TCP && bounced(e)) {
         h->stats.recv_wouldblock++;
+        h->stats.last_error = e;      /* kept, so a report can name it */
         return NET_EG_WOULDBLOCK;
     }
     note_error(h);

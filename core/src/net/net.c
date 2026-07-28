@@ -342,6 +342,9 @@ static void dns_input(net_stack_t *ns, uint16_t gport,
     ns->stats.dns_queries++;
     if (n < 12u) { ns->stats.dns_malformed++; return; }
     uint16_t flags = net_rd16(p + 2);
+    /* Recorded before anything acts on it; see net.h. */
+    ns->stats.dns_last_flags   = flags;
+    ns->stats.dns_last_qdcount = net_rd16(p + 4);
     if (flags & DNS_QR) { ns->stats.dns_malformed++; return; } /* a response */
     if (net_rd16(p + 4) != 1u) {
         ns->stats.dns_malformed++;

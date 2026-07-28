@@ -260,6 +260,16 @@ typedef struct {
     uint64_t udp_in, udp_out;
     uint64_t dns_queries, dns_answered, dns_nxdomain, dns_failed;
     uint64_t dns_malformed;     /* answered FORMERR, or too broken to answer */
+    /*
+     * The header word of the last query this stack looked at, kept ONLY so a
+     * test can say what dns_input actually received rather than what the
+     * caller believes it sent. Windows CI reports the QR guard not firing on a
+     * query the test can show carries QR, and MinGW disagrees on the same
+     * bytes in both Debug and Release -- so the two ends must be compared
+     * directly instead of inferred from a symptom.
+     */
+    uint16_t dns_last_flags;
+    uint16_t dns_last_qdcount;
 
     uint64_t tcp_in, tcp_out;
     uint64_t tcp_syns;          /* SYNs that created a flow                  */
