@@ -85,10 +85,180 @@ static bool mentions(const char *haystack, const char *needle) {
     return strstr(haystack, needle) != NULL;
 }
 
+/*
+ * The real kernelcache and device tree, which cannot be committed. Absent is
+ * not a failure -- CI without firmware still runs everything else -- but it is
+ * announced, because a silent skip is how a seam test stops covering the seam.
+ */
+static uint8_t *slurp_firmware(const char *name, size_t *len_out) {
+    char path[512];
+    (void)snprintf(path, sizeof path, "%s/%s", S5LBOX_FIRMWARE_DIR, name);
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return NULL; }
+    long n = ftell(f);
+    rewind(f);
+    if (n <= 0) { fclose(f); return NULL; }
+    uint8_t *b = (uint8_t *)malloc((size_t)n);
+    if (!b || fread(b, 1, (size_t)n, f) != (size_t)n) {
+        free(b); fclose(f); return NULL;
+    }
+    fclose(f);
+    *len_out = (size_t)n;
+    return b;
+}
+
+/*
+ * THE SEAM: the app's own settings, through the app's own mapping, into a real
+ * bring-up -- and then look at the machine that came out.
+ *
+ * THIS IS THE TEST THAT WAS MISSING, and its absence is why a hang shipped
+ * while forty-nine tests stayed green. Both halves were covered and the join
+ * was not: test_vmbootoptions checks the mapping table but does not link the
+ * emulator core at all, and everything that boots a real guest builds its own
+ * request rather than the app's. Every one of those tests made true statements
+ * about a machine that hung on a phone.
+ *
+ * So this asserts the one thing none of them could: that setting a switch in
+ * the app changes the DEVICE TREE THE GUEST IS GIVEN. It is checked by diffing
+ * the published tree against the same bring-up with the un-match list cleared,
+ * because a count would pass just as happily if the wrong byte moved.
+ */
+static void test_app_settings_reach_the_guest(const uint8_t *kernel,
+                                              size_t kernel_len,
+                                              const uint8_t *tree,
+                                              size_t tree_len) {
+    static const char *const NUBS[] = {
+        "mbx", "sha1", "baseband", "spi2", "usb-otg"
+    };
+    const unsigned want = (unsigned)(sizeof NUBS / sizeof NUBS[0]);
+    bool values[VM_BOOT_OPTION_MAX];
+    vm_boot_options_report_t options;
+    s5l_bringup_request_t request;
+    s5l_bringup_result_t result;
+    s5l8900_t machine;
+    uint8_t *plain = NULL;
+    uint32_t published = 0u;
+
+    printf("the app's settings reach the guest\n");
+
+    /* The baseline: identical bring-up, un-match list explicitly empty. */
+    CHECK(s5l8900_init(&machine, S5L_BRINGUP_PHYS_BASE, S5L_BRINGUP_RAM_SIZE),
+          "s5l8900_init failed");
+    memset(&request, 0, sizeof request);
+    request.kernel = kernel;
+    request.kernel_size = kernel_len;
+    request.devicetree = tree;
+    request.devicetree_size = tree_len;
+    CHECK(s5l_bringup(&machine, &request, NULL, &result) == S5L_BRINGUP_OK,
+          "the baseline bring-up was refused: %s", result.detail);
+    published = result.devicetree_size;
+    plain = (uint8_t *)malloc(published ? published : 1u);
+    CHECK(plain != NULL, "out of memory");
+    if (plain)
+        memcpy(plain, machine.ram + (result.devicetree_pa - 0x08000000u),
+               published);
+    s5l8900_free(&machine);
+
+    /*
+     * Now the app's defaults, mapped by the app's own code. Nothing here names
+     * a device-tree path: if the mapping stops reaching bring-up again, this
+     * fails, which is the whole point.
+     */
+    for (unsigned i = 0; i < vm_option_count() && i < VM_BOOT_OPTION_MAX; i++)
+        values[i] = vm_option_at(i)->def;
+
+    CHECK(s5l8900_init(&machine, S5L_BRINGUP_PHYS_BASE, S5L_BRINGUP_RAM_SIZE),
+          "s5l8900_init failed");
+    memset(&request, 0, sizeof request);
+    vm_boot_options_apply(values, vm_option_count(), &request, &options);
+    request.kernel = kernel;
+    request.kernel_size = kernel_len;
+    request.devicetree = tree;
+    request.devicetree_size = tree_len;
+
+    CHECK(request.unmatch_count == want,
+          "the app's defaults asked for %u un-matches, expected %u",
+          request.unmatch_count, want);
+
+    CHECK(s5l_bringup(&machine, &request, NULL, &result) == S5L_BRINGUP_OK,
+          "the app's own configuration was refused: %s", result.detail);
+    CHECK(result.devicetree_unmatched == want,
+          "%u nodes struck, expected %u", result.devicetree_unmatched, want);
+    CHECK(result.devicetree_size == published,
+          "the app's configuration resized the device tree");
+
+    if (plain && result.devicetree_size == published) {
+        const uint8_t *now = machine.ram + (result.devicetree_pa - 0x08000000u);
+        unsigned differs = 0u;
+        for (uint32_t i = 0; i < published; i++) {
+            if (plain[i] == now[i]) continue;
+            differs++;
+            CHECK(now[i] == (uint8_t)'x',
+                  "byte %u became 0x%02x, not 'x'", i, now[i]);
+        }
+        CHECK(differs == want,
+              "the app's defaults changed %u bytes of the tree, expected %u -- "
+              "if this is 0, the settings screen is again deciding nothing",
+              differs, want);
+    }
+    s5l8900_free(&machine);
+
+    /*
+     * And the other direction, which is what makes it a test of the seam
+     * rather than of a constant: turning the nubs ON must leave the tree
+     * untouched. A mapping hard-wired to strike five nodes would pass
+     * everything above and fail here.
+     */
+    for (unsigned i = 0; i < vm_option_count() && i < VM_BOOT_OPTION_MAX; i++)
+        values[i] = vm_option_at(i)->def;
+    for (unsigned n = 0; n < want; n++)
+        for (unsigned i = 0; i < vm_option_count(); i++)
+            if (!strcmp(vm_option_at(i)->name, NUBS[n])) values[i] = true;
+
+    CHECK(s5l8900_init(&machine, S5L_BRINGUP_PHYS_BASE, S5L_BRINGUP_RAM_SIZE),
+          "s5l8900_init failed");
+    memset(&request, 0, sizeof request);
+    vm_boot_options_apply(values, vm_option_count(), &request, &options);
+    request.kernel = kernel;
+    request.kernel_size = kernel_len;
+    request.devicetree = tree;
+    request.devicetree_size = tree_len;
+    CHECK(request.unmatch_count == 0u,
+          "matching every nub still asked for %u un-matches",
+          request.unmatch_count);
+    CHECK(s5l_bringup(&machine, &request, NULL, &result) == S5L_BRINGUP_OK,
+          "bring-up with every nub matched was refused: %s", result.detail);
+    CHECK(result.devicetree_unmatched == 0u,
+          "%u nodes struck with every nub matched",
+          result.devicetree_unmatched);
+    if (plain && result.devicetree_size == published) {
+        const uint8_t *now = machine.ram + (result.devicetree_pa - 0x08000000u);
+        CHECK(memcmp(plain, now, published) == 0,
+              "matching every nub still changed the tree");
+    }
+    s5l8900_free(&machine);
+    free(plain);
+}
+
 int main(void) {
     vm_firmware_boot_state_t state;
 
     printf("== vm firmware boot ==\n");
+
+    {
+        size_t klen = 0, tlen = 0;
+        uint8_t *k = slurp_firmware("kernel.macho", &klen);
+        uint8_t *t = k ? slurp_firmware("devicetree.bin", &tlen) : NULL;
+        if (k && t) {
+            test_app_settings_reach_the_guest(k, klen, t, tlen);
+        } else {
+            printf("SKIP: the app-to-guest seam needs the kernelcache and "
+                   "device tree in %s\n", S5LBOX_FIRMWARE_DIR);
+        }
+        free(k);
+        free(t);
+    }
 
     if (!make_dir(DIR) || !make_dir(WORKDIR)) {
         printf("SKIP: cannot create the fixture directory\n");

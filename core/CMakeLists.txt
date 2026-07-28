@@ -330,6 +330,8 @@ else()
     target_compile_options(test_vmfirmwareboot PRIVATE
         -Wall -Wextra -Werror -pedantic -Wformat=2 -Wshadow)
 endif()
+target_compile_definitions(test_vmfirmwareboot PRIVATE
+    S5LBOX_FIRMWARE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../firmware")
 add_test(NAME app_firmware_boot COMMAND test_vmfirmwareboot)
 set_tests_properties(app_firmware_boot PROPERTIES
     WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
