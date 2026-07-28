@@ -201,11 +201,73 @@ The driver's own narration of the sequence, in address order:
   "about to execute"                                    0xc0444988
 ```
 
-**Not yet established:** the HBPP DATA packet layout, what the status word at
-"status: 0x%08X sending DATA packet" must contain, what `performCalibSeq`
-polls, and what the part must report after "about to execute" so that a later
-`isInHBPP` returns FALSE without the driver detaching. Those are the next
-reads, and they are what stands between here and a working touchscreen.
+### 6.1 The HBPP DATA packet, exactly
+
+Built by `0xc0445dcc` (the function at `0xc0444a20` is only the wrapper that
+logs "constructing HBPP DATA packet with %d bytes payload"). Arguments are
+`(out, address, words, nbytes)`, and the return is `nbytes`.
+
+```
+  [0]           0x30                       the DATA marker
+  [1]           0x01
+  [2]           nbytes >> 10               [2..3] is the WORD count,
+  [3]           nbytes >> 2                big-endian 16-bit
+  [4]           address >> 8
+  [5]           address >> 0
+  [6]           address >> 24
+  [7]           address >> 16
+  [8]           hdrsum >> 8                hdrsum = sum16(pkt[2..7])
+  [9]           hdrsum >> 0
+  [10 + 4i + 0] w_i >> 8                   for i in 0 .. (nbytes/4 - 1)
+  [10 + 4i + 1] w_i >> 0
+  [10 + 4i + 2] w_i >> 24
+  [10 + 4i + 3] w_i >> 16
+  [10 + 4c + 0] paysum >> 8                paysum = sum32(pkt[10 .. 10+4c))
+  [10 + 4c + 1] paysum >> 0
+  [10 + 4c + 2] paysum >> 24
+  [10 + 4c + 3] paysum >> 16
+
+  total length  = 14 + nbytes
+```
+
+**Every 32-bit quantity is middle-endian**: big-endian 16-bit halves with the
+LOW half first, `[v>>8, v>>0, v>>24, v>>16]`. That is the byte order of a part
+with a 16-bit bus, and it applies to the address, to each payload word and to
+the trailing checksum alike.
+
+Both checksums are plain byte sums with no seed and no complement —
+`0xc0445d74` truncates to 16 bits (it is byte-for-byte `s5l_mtz2_sum16`) and
+`0xc0445da4` keeps all 32.
+
+### 6.2 The acknowledgement, and the number it has to be
+
+After each packet the sender (`0xc0445144` for preconstructed firmware; the
+calibration senders are the same shape) calls vtable `+0x4d4` —
+`0xc0440c98`, which logs "performing HBPP ATN_ACK". That is a **two-byte SPI
+transfer**:
+
+```
+   host sends   1A A1
+   device must  4B C1        status = (rx[0] << 8) | rx[1] == 0x4BC1
+```
+
+`1A A1` is the first halfword of the HBPP probe pattern the model already
+answers. The comparison is at `0xc0445284` against the literal `0x00004bc1`;
+anything else is retried, **five times**, and then the whole send fails.
+
+So the minimum a device must do to be programmed is: accept a `0x30`-marked
+DATA packet of `14 + nbytes` octets, and answer `4B C1` to the `1A A1` that
+follows it.
+
+### 6.3 Not yet established
+
+The WAKE command's wire form ("sending MT_SPI_Z2_WAKE_CMD", `0xc0445fac`);
+the version read behind "Detected Z2 Version: 0x%08X" (`0xc0445654`); what
+`performCalibSeq` polls while it logs "Waiting for calibration to end"; and
+what the part must report after "about to execute" so that a later `isInHBPP`
+returns FALSE **without** `finishStarting` having already detached. That last
+one is the ordering question the whole design turns on, and it is not
+answerable from the packet format alone.
 
 ## 7. Downstream, once this is unblocked
 
