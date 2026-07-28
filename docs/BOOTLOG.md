@@ -2397,12 +2397,36 @@ run86 was a harness run, so unlike run117/118/126 its edit did take effect. It
 stands as a measurement. What no longer stands is citing it as a reason the knob
 cannot matter — the gate demonstrably depends on it.
 
-**What is NOT established: that this renders.** run127's guest console stops at
-`AppleMultitouchSPIUserClient: Inhibited externally initiated reset`, the same
-milestone the two-surface boots reach. Removing this refusal has not yet been
-shown to put a pixel on the screen. The run is still executing (30.6 min CPU
-over 34 min wall, ~90% of a core — working, not spinning), and the shipped
-constant remains `2u` until a run earns the change.
+**AND IT IS NOT THE BLACK SCREEN.** run127 ran to its full 6 G budget. Over the
+whole run the gate was consulted **four** times and returned 1 every time, with
+the warning path entered **zero** times — so a four-surface pool does not merely
+clear the one refusal that was captured, it clears every refusal the run makes.
+The framebuffer at the end:
+
+```
+  run121, 2 surfaces:  1821 of 460800 RGB bytes non-zero
+  run127, 4 surfaces:   384 of 460800 RGB bytes non-zero
+```
+
+Both are black. Four surfaces is not better, and on this observable it is
+slightly worse — which is the same direction run86 measured for three. The two
+runs are not otherwise identical (run127 carried three probes and `--call-probe
+-live`, ran 6 G against run121's 3 G, and injected no tap), so the *ordering*
+of 384 against 1821 is not a clean result and is not claimed as one. What is
+clean is that neither is a rendered screen.
+
+So the capacity hypothesis is now **tested and insufficient**, which is a
+different and better position than the one this project held all morning. The
+refusal was real, exactly located and exactly explained; it was not the cause.
+The shipped constant stays at `2u`, now for a measured reason rather than a
+cautious one.
+
+**Where the lead goes next.** `IOSurface: buffer allocation size is zero` is
+still printed by run127, as it is by every boot, early — right after
+`AppleWM8991Audio::start` and long before any of this. A pool that refuses a
+surface and a surface asked for with no size are different failures, and only
+the first has been chased. That message has been visible in every log this
+project has ever produced.
 
 The class of error behind the three lost runs is closed in `ac9b065`: the
 harness's `N82_FB_*` and `N82_VRAM_*` are now aliases of the core constants
