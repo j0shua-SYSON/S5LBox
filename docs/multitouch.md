@@ -473,13 +473,47 @@ two. There is exactly one branch there that can do that (`0xc04451b0`):
 and the guest's own console says **`AppleMultitouchZ2SPI: using DMA for
 bootloading`**, which is `this->0x2c` being non-zero.
 
-`core/src/soc/mtz2.c` currently records the opposite as settled: *"It is NOT
-blocked by DMA, which was the standing objection: MTSPIBootloader_Z2 pushes
-through the ordinary SPI entry `v[0x368]`."* That reading came from the three
-`v[0x368]` sites in the calibration senders. **It missed `v[0x360]` at
-`0xc04451ec`, which is a different slot on the firmware path**, and the flag
-that chooses it is one the console announces. run103 is measuring which arm is
-taken; until it reports, this is a strong hypothesis and not a result.
+run103 answered which arm is taken, and it is the DMA one: `0xc04451c4` 15
+captures, `v[0x360]` 15, the PIO path 0. The guest was never the problem.
+
+**RESOLVED 2026-07-28, and the cause was in this emulator, not in the guest.**
+Everything below this line about *why* the bootload failed is superseded; the
+protocol table that follows it is unaffected and still correct.
+
+The firmware is delivered now — `ch5 runs 14 bytes 54156`, which is the Z2
+image exactly, with `spi1 words 54236` and `tx-drops 0` (run120). Getting there
+meant three defects, each visible only once the one above it was fixed:
+
+1. **The bus decode dropped every narrow DMA store.** `machine.c` decoded the
+   SPI and I2S windows with `mmio_word()`, which requires `bytes == 4`. But
+   `/arm-io/spi1`'s own `dma-channels` template is `0x00089000` — four-byte
+   source, ONE-BYTE destination — so the controller issued `write8` and every
+   one fell past every device into `unmapped_writes`. run114 measured 812,340
+   bytes leaving the DMAC against 176 words shifted by the port, with SPI1's
+   page named in the outside-the-map list.
+2. **The controller burst the whole image into an eight-deep FIFO** inside one
+   tick, before the driver had armed the port: `tx-drops 54140` against an image
+   of 54,156 (run116). A PL080 paces peripheral destinations with request lines
+   this model did not have; it has them now.
+3. **The shifter only ran on register access**, so a controller waiting for FIFO
+   space deadlocked against a port waiting to be written — `ch5 runs 0 bytes 16
+   ENABLED` with 1020 transfers left (run119). A shifter with data and a clock
+   shifts, so it runs from the tick.
+
+The reason this took so long is worth recording next to the answer. A whole
+chain of guest-side explanations was written and believed — that
+`AppleARMPL080DMAC` never registered as an `IODMAController`, that
+`IODMAController::getController` returned NULL, that `v[0x360]` refused with
+`kIOReturnDMAError`, that `DMACConfiguration` was never written, that
+`SPI_SETUP_DMA` was never raised. **Every one of those was measured false on
+2026-07-28**, and several came from diagnostics that printed a register's
+resting VALUE while reading as though they reported whether an event had ever
+happened. Those diagnostics now count events.
+
+What is delivered is measured. What the device does with the image — whether
+the ATN_ACK answers `4B C1`, application firmware runs, and `Sensor Rows` /
+`Sensor Columns` reach userspace — is a separate question and is not claimed
+here.
 
 ### 6.10 The complete HBPP command set
 
