@@ -2315,6 +2315,62 @@ at 0x3cc10000(0xea9d6000)` — and uart4 still carried **zero bytes**. The
 milestone is unchanged.
 
 
+### 2026-07-28: run101 -- the HBPP claim is fixed, and the bootload still sends nothing
+
+The first boot with `core/src/soc/mtz2.c`'s bootloader implemented. Half of it
+worked, and the half that did not is now bounded.
+
+**What changed, measured.** The device's own counters at the 3.6e9 cap:
+
+```
+hbpp:  probes 7  acks 0  data 0 (0 bytes)  rd 0  wr 0  calib 0  exec 0
+pins:  reset-edges 7  reset-bytes 64  in-reset 0  in-hbpp 1
+```
+
+Seven probes, all answered yes. run96's six `Could not detect HBPP. Response:
+0x00 ...` lines are **gone** -- that was one TRUE and six FALSE from the
+one-time claim, and it is now seven TRUE, which is what `finishStarting()` and
+`attemptToBootloadDevice()` both need and what a part with no flash actually
+says. That specific defect is closed.
+
+**What did not happen.** Not one HBPP packet arrived: no DATA, no ATN_ACK, no
+register access, no execute. `in-hbpp 1` at the end -- the part was never
+programmed.
+
+**And a consequence worth stating plainly: this run had no touch at all.**
+`tap 0 ... NEVER ACCEPTED refused 600000000`. The injection gate now refuses
+while the part is a bootloader, which is correct -- an unprogrammed Z2 runs no
+firmware that scans a panel, and `deviceReadResultData` at `0xc0441324` would
+throw the frame away anyway. But it means the model is, for now, *further* from
+a working tap than it was: it used to deliver contacts that all landed on the
+same pixel, and it now delivers none. That is a real regression in observable
+behaviour and it is not being papered over. It is also not a loss of function,
+because a contact that always lands in one place was never a tap.
+
+**Where it stops is NOT yet established, and the console cannot say.** Neither
+`attempting to bootload device` nor `not in HBPP, so skipping bootload` appears
+-- and the second one did not appear in run96 either, where it certainly ran.
+Both use the same level-gated logger, so their absence is evidence about
+verbosity and not about control flow. The four `reset-bytes 64` say the dummy
+transfers are still landing inside the asserted window, so the pin modelling is
+intact.
+
+One hypothesis is already **eliminated**: the device tree carries neither
+`fll-mval` nor `cal-dl-addr`, which `0xc04443e4` reads -- but `0xc04443a4`
+installs defaults of `0x16e4` and `0x400200` when they are missing, and
+`performCalibSeq` then uses `this->0x48` as the value it writes to
+`0x10001c04`. A missing property is not fatal, so that is not the blocker.
+
+**The next measurement is the same one that settled run100**: kernel call
+probes on `attemptToBootloadDevice` (`0xc04414c4`), `bootloadDevice`
+(`0xc0445860`) and its five steps -- `+0x8c` `0xc0444370`, `+0x9c`
+`0xc0444a98`, `+0x98` `0xc0444dec`, `+0x88` `0xc04455d0`, `+0x60` `0xc044490c`
+-- with a positive control among them. Each must return non-zero or
+`bootloadDevice` bails, and the first one is a dispatcher on `this->0x44` that
+tail-calls the bootloader vtable's `+0x90` or `+0x94`, neither of which has been
+read yet.
+
+
 ### 2026-07-28: run100 — the driver never reads a single report, and the HBPP lie is why
 
 The entry below establishes that no int32 property reaches userspace. run100

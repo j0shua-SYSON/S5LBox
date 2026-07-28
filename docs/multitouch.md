@@ -405,7 +405,22 @@ because it sees the whole stream in order:
 That is a fact about this bus rather than a convenience, and it is the one
 piece of the design that is not a direct transcription of the driver.
 
-### 6.9 The complete HBPP command set
+### 6.9 Measured against a guest, once
+
+run101 booted with all of this implemented. **The probes are fixed** — seven,
+all answered yes, and run96's six refusals are gone, so `finishStarting()` and
+`attemptToBootloadDevice()` now get the same honest answer.
+
+**The bootload still sent nothing**: `data 0, acks 0, rd 0, wr 0, exec 0`, and
+the part ended the run still a bootloader. So every packet layout in this
+section is transcribed from the builders but **none of it has yet been
+exercised by a real driver**, and where `bootloadDevice()` gives up is the open
+question. One hypothesis is already eliminated — the device tree carries
+neither `fll-mval` nor `cal-dl-addr`, but `0xc04443a4` defaults them to
+`0x16e4` and `0x400200`, so a missing property is not the blocker. See
+`docs/BOOTLOG.md` run101.
+
+### 6.10 The complete HBPP command set
 
 Everything the model has to answer, in one place:
 
