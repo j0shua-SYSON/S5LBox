@@ -1124,6 +1124,100 @@ static double vm_now(void) {
         @"screen and thrown away; the guest is never told. Printed once.\n"];
 }
 
+#pragma mark - Spin sampler
+
+/*
+ * A WEDGED GUEST AND A BUSY ONE LOOK IDENTICAL FROM OUTSIDE. Instructions
+ * retire, the rate looks healthy, and nothing is printed. The difference is
+ * WHERE the instructions go, and on a phone there is no debugger to ask.
+ *
+ * So the emulator thread asks the machine itself, between chunks, at a point
+ * where nothing is executing and no lock is held: one PC per chunk, binned
+ * into 64-byte regions.
+ *
+ * Sampling once per 100,000 instructions sounds far too sparse to find a
+ * loop, and for a profile it would be. For THIS question it is exactly right:
+ * a spin loop executes its handful of instructions billions of times, so
+ * every single sample lands inside it. Sparseness is not a weakness here, it
+ * is what makes the signal unambiguous -- a region that takes almost a whole
+ * window is not "hot", it is the only thing running.
+ *
+ * Diagnostics only, in the sense this project means it: it never stops the
+ * guest, never writes guest state, never changes what executes, and cannot
+ * manufacture a result. It reports where the machine already was.
+ *
+ * Addresses are printed raw rather than symbolised. Carrying a symbol table
+ * for an 8 MB kernel on the device costs memory on the one machine that has
+ * least of it, and resolving four numbers against ksyms afterwards costs
+ * nothing.
+ */
+#define kVMSpinRegionShift 6u      /* 64-byte regions                        */
+#define kVMSpinSlots       64u     /* wider than any spin; full == not a spin */
+#define kVMSpinWindow      512u    /* ~2.5 s of guest time at 20 M insn/s    */
+#define kVMSpinShareNum    7u      /* report at >= 7/8 of a window in one    */
+#define kVMSpinShareDen    8u      /* region                                 */
+#define kVMSpinReportCap   6u      /* never turn the console into a log      */
+
+typedef struct {
+    uint32_t region[kVMSpinSlots];
+    uint32_t count[kVMSpinSlots];
+    unsigned used;
+    unsigned samples;
+    uint32_t reported[kVMSpinReportCap];
+    unsigned reports;
+    unsigned quiet;          /* windows closed without a concentrated region */
+    bool     spreadReported;
+} vm_spin_t;
+
+/* Windows of ordinary work before saying so. A "stuck" report that stays
+ * silent when the guest is merely grinding leaves the user unable to tell the
+ * two apart, which is the whole question they are asking. */
+#define kVMSpinSpreadWindows 8u
+
+static void vm_spin_sample(vm_spin_t *s, uint32_t pc) {
+    uint32_t region = pc >> kVMSpinRegionShift;
+    s->samples++;
+    for (unsigned i = 0; i < s->used; i++) {
+        if (s->region[i] == region) { s->count[i]++; return; }
+    }
+    /* Table full means the guest is spread across more than 64 regions, which
+     * is the shape of ordinary work, not a spin. The sample still counts so
+     * the window closes on time and the share test fails honestly. */
+    if (s->used < kVMSpinSlots) {
+        s->region[s->used] = region;
+        s->count[s->used] = 1u;
+        s->used++;
+    }
+}
+
+static void vm_spin_reset(vm_spin_t *s) {
+    s->used = 0u;
+    s->samples = 0u;
+}
+
+/* Index of the nth-hottest region, or -1 once they run out. Selection rather
+ * than a sort: n is 3 and the table is 64. */
+static int vm_spin_rank(const vm_spin_t *s, unsigned n) {
+    int best = -1;
+    uint32_t ceiling = 0xffffffffu;
+    for (unsigned rank = 0; rank <= n; rank++) {
+        best = -1;
+        for (unsigned i = 0; i < s->used; i++) {
+            if (s->count[i] > ceiling) continue;
+            if (best < 0 || s->count[i] > s->count[best]) best = (int)i;
+        }
+        if (best < 0) return -1;
+        ceiling = s->count[best] - 1u;   /* strictly below, next round */
+    }
+    return best;
+}
+
+static bool vm_spin_already_reported(const vm_spin_t *s, uint32_t region) {
+    for (unsigned i = 0; i < s->reports && i < kVMSpinReportCap; i++)
+        if (s->reported[i] == region) return true;
+    return false;
+}
+
 #pragma mark - Emulator thread
 
 - (void)threadMain:(id)unused {
@@ -1133,6 +1227,11 @@ static double vm_now(void) {
     arm_status_t status = ARM_OK;
     BOOL stoppedByRequest = NO;
     BOOL reachedCap = NO;
+
+    /* Emulator-thread only, so it is a local and not an ivar: nothing else may
+     * read it and no lock can be forgotten. */
+    vm_spin_t spin;
+    memset(&spin, 0, sizeof spin);
 
     while (YES) {
         @autoreleasepool {
@@ -1158,6 +1257,61 @@ static double vm_now(void) {
             [self drainOneButton_emulatorThread];
 
             retired += s5l8900_run(&_machine, kVMChunkInstructions, &status);
+
+            /* Taken here precisely because the chunk has ENDED: the machine is
+             * between instructions, this thread owns it, and no lock is held. */
+            vm_spin_sample(&spin, _machine.cpu.r[15]);
+            if (spin.samples >= kVMSpinWindow) {
+                int hot = vm_spin_rank(&spin, 0);
+                uint32_t region = hot >= 0 ? spin.region[hot] : 0u;
+                if (hot >= 0 &&
+                    (uint64_t)spin.count[hot] * kVMSpinShareDen >=
+                        (uint64_t)spin.samples * kVMSpinShareNum &&
+                    spin.reports < kVMSpinReportCap &&
+                    !vm_spin_already_reported(&spin, region)) {
+                    spin.reported[spin.reports++] = region;
+
+                    NSMutableString *next = [NSMutableString string];
+                    for (unsigned n = 1; n <= 2; n++) {
+                        int i = vm_spin_rank(&spin, n);
+                        if (i < 0) break;
+                        [next appendFormat:@"%@0x%08x (%u)",
+                            next.length ? @", " : @"",
+                            (unsigned)(spin.region[i] << kVMSpinRegionShift),
+                            (unsigned)spin.count[i]];
+                    }
+                    uint32_t base = region << kVMSpinRegionShift;
+                    [self appendConsole:[NSString stringWithFormat:
+                        @"[stall] at %.1f M insn the guest is in one place: "
+                        @"0x%08x-0x%08x took %u of %u samples, cpsr 0x%08x.%@%@ "
+                        @"Nothing was stopped or altered to find this. Printed "
+                        @"once per region.\n",
+                        retired / 1.0e6, base,
+                        base + (1u << kVMSpinRegionShift) - 1u,
+                        (unsigned)spin.count[hot], (unsigned)spin.samples,
+                        _machine.cpu.cpsr,
+                        next.length ? @" Next: " : @"",
+                        next.length ? [next stringByAppendingString:@"."] : @""]];
+                } else if (hot >= 0) {
+                    /* Not concentrated. Say that too, once: "it is working, it
+                     * is just slow" and "it is wedged" are the two answers, and
+                     * an instrument that can only report one of them is not
+                     * telling the user what they asked. */
+                    spin.quiet++;
+                    if (spin.quiet >= kVMSpinSpreadWindows && !spin.spreadReported) {
+                        spin.spreadReported = true;
+                        [self appendConsole:[NSString stringWithFormat:
+                            @"[stall] at %.1f M insn the guest is NOT spinning: "
+                            @"work is spread over %u regions, the busiest "
+                            @"(0x%08x) taking only %u of %u samples. It is "
+                            @"executing real code, just slowly. Printed once.\n",
+                            retired / 1.0e6, spin.used,
+                            (unsigned)(spin.region[hot] << kVMSpinRegionShift),
+                            (unsigned)spin.count[hot], (unsigned)spin.samples]];
+                    }
+                }
+                vm_spin_reset(&spin);
+            }
 
             /* A stop can arrive while the bounded chunk is executing. Let the
              * explicit lifecycle request win before publishing a simultaneous
