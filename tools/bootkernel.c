@@ -17286,6 +17286,29 @@ static void mtz2_device_report(const s5l_mtz2_t *d) {
            (unsigned long long)d->hbpp_reg_writes,
            (unsigned long long)d->hbpp_calibs,
            (unsigned long long)d->hbpp_execs);
+    /*
+     * THE OCTETS THE LINE ABOVE DOES NOT ACCOUNT FOR, which on 2026-07-28 were
+     * most of them. run121 shifted 54,236 octets through spi1 and framed 18,436
+     * of them as DATA; the report named the 18,436 and said nothing about the
+     * other ~35,700, so "the bootload stopped after two packets" and "the
+     * framer lost the bus and ate the rest of the image" printed identically.
+     *
+     * Every octet arriving between packets that is not a known opcode is
+     * counted here and its value kept. The model has tracked both since it was
+     * written and core/tests/test_mtz2.c asserts on them; only the report was
+     * missing, which is the third diagnostic today that reported what it
+     * recognised and stayed quiet about the remainder.
+     *
+     * How to read it: a count near the shortfall means the framer desynchronised
+     * and every subsequent octet fell out of the protocol -- our bug, and
+     * `last` names the byte it choked on. A small count means the octets DID
+     * land in recognised packets and the shortfall is upstream, in what the
+     * driver chose to send.
+     */
+    printf("    frames: packets %llu  unknown-opcodes %llu  last 0x%02x\n",
+           (unsigned long long)d->packets,
+           (unsigned long long)d->unknown_opcodes,
+           d->last_unknown_op);
 }
 
 /*
