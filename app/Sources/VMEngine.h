@@ -10,7 +10,6 @@
 #import <Foundation/Foundation.h>
 #import "VMGuest.h"
 #import "VMTouchMap.h"
-#import "VMSnapshotStore.h"
 
 /* The iPhone 3G's physical inputs, in the order the control bar shows them.
  * The ringer is a sliding switch rather than a button on the real device; it is
@@ -271,16 +270,9 @@ typedef NS_ENUM(NSUInteger, VMButton) {
 - (BOOL)requestSnapshotSaveTo:(NSString *)path;
 - (BOOL)requestSnapshotLoadFrom:(NSString *)path;
 
-/*
- * Take one now, under a name the user chose. Empty or nil gets a timestamped
- * name rather than a refusal — the user asked for a snapshot, and the name is
- * the part they can change afterwards.
- */
-- (BOOL)requestSnapshotNamed:(NSString *)displayName;
-
-/* This machine's snapshots: list, rename, delete. Nil until the machine has a
- * work image, because until then there is nothing to snapshot. */
-- (VMSnapshotStore *)snapshotStore;
+/* Where this machine's snapshot lives by default: beside its work image, so a
+ * machine and its checkpoints are copied, backed up and deleted together. */
+- (NSString *)defaultSnapshotPath;
 
 /* Touch delivery counters, for the status line and the log. `delivered` counts
  * reports the DEVICE accepted; it is the only one of these that means the

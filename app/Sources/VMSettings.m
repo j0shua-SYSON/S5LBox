@@ -34,26 +34,6 @@ NSString *const VMFirmwareJailbreakPayloadFile = @"jailbreak-payload";
 static NSString *const kVMOptionKeyPrefix   = @"vm.option.";
 static NSString *const kVMInstructionCapKey = @"vm.diag.instructionCap";
 static NSString *const kVMPauseInBackground = @"vm.diag.pauseInBackground";
-static NSString *const kVMAutoSnapEnabled   = @"vm.snapshot.autoEnabled";
-static NSString *const kVMAutoSnapInterval  = @"vm.snapshot.autoIntervalSeconds";
-static NSString *const kVMAutoSnapPrune     = @"vm.snapshot.autoPruneEnabled";
-static NSString *const kVMAutoSnapKeep      = @"vm.snapshot.autoKeep";
-
-/*
- * Bounds, not suggestions. An interval of zero would snapshot the machine every
- * time round the run loop and never make progress; thirty seconds is the
- * shortest that leaves the guest more time running than checkpointing at the
- * ~20 M insn/s a phone manages without a JIT. The ceiling is a day because
- * beyond that the feature is not doing anything a user would notice.
- */
-#define VM_AUTOSNAP_MIN_SECONDS   30
-#define VM_AUTOSNAP_MAX_SECONDS   86400
-#define VM_AUTOSNAP_DEF_SECONDS   300
-/* Keeping zero automatic snapshots means taking them and immediately deleting
- * them, which is a busy loop that writes 130 MB a time and keeps nothing. */
-#define VM_AUTOSNAP_MIN_KEEP      1
-#define VM_AUTOSNAP_MAX_KEEP      100
-#define VM_AUTOSNAP_DEF_KEEP      5
 static NSString *const kVMDeveloperMode = @"VMDeveloperMode";
 static NSString *const kVMInlineConsole = @"VMInlineConsole";
 
@@ -218,68 +198,6 @@ static const uint64_t kVMInstructionCaps[] = {
 
 - (void)setPausesInBackground:(BOOL)pauses {
     [[self defaults] setBool:pauses forKey:kVMPauseInBackground];
-    [self publishChange];
-}
-
-#pragma mark - Automatic snapshots
-
-- (BOOL)autoSnapshotEnabled {
-    /* Absent means OFF. A stored NO and a never-set key are the same answer
-     * here, which is the one case where -boolForKey:'s default is the one we
-     * want, so it is used directly rather than probed for presence. */
-    return [[self defaults] boolForKey:kVMAutoSnapEnabled];
-}
-
-- (void)setAutoSnapshotEnabled:(BOOL)enabled {
-    [[self defaults] setBool:enabled forKey:kVMAutoSnapEnabled];
-    [self publishChange];
-}
-
-/* Clamped on the way OUT as well as in. A value written by an older build, by
- * a syncing defaults store, or by hand is still read here, and honouring a
- * zero-second interval would wedge the machine. */
-static NSInteger vm_clamp(NSInteger v, NSInteger lo, NSInteger hi) {
-    return v < lo ? lo : (v > hi ? hi : v);
-}
-
-- (NSInteger)autoSnapshotIntervalSeconds {
-    NSNumber *stored = [[self defaults] objectForKey:kVMAutoSnapInterval];
-    if (![stored isKindOfClass:[NSNumber class]]) return VM_AUTOSNAP_DEF_SECONDS;
-    return vm_clamp(stored.integerValue,
-                    VM_AUTOSNAP_MIN_SECONDS, VM_AUTOSNAP_MAX_SECONDS);
-}
-
-- (void)setAutoSnapshotIntervalSeconds:(NSInteger)seconds {
-    [[self defaults] setInteger:vm_clamp(seconds, VM_AUTOSNAP_MIN_SECONDS,
-                                         VM_AUTOSNAP_MAX_SECONDS)
-                         forKey:kVMAutoSnapInterval];
-    [self publishChange];
-}
-
-- (BOOL)autoSnapshotPruneEnabled {
-    NSNumber *stored = [[self defaults] objectForKey:kVMAutoSnapPrune];
-    /* ON when unset. Someone who switches automatic snapshots on without
-     * touching anything else means "keep me safe", not "fill the disk". */
-    if (![stored isKindOfClass:[NSNumber class]]) return YES;
-    return stored.boolValue;
-}
-
-- (void)setAutoSnapshotPruneEnabled:(BOOL)enabled {
-    [[self defaults] setBool:enabled forKey:kVMAutoSnapPrune];
-    [self publishChange];
-}
-
-- (NSInteger)autoSnapshotKeep {
-    NSNumber *stored = [[self defaults] objectForKey:kVMAutoSnapKeep];
-    if (![stored isKindOfClass:[NSNumber class]]) return VM_AUTOSNAP_DEF_KEEP;
-    return vm_clamp(stored.integerValue,
-                    VM_AUTOSNAP_MIN_KEEP, VM_AUTOSNAP_MAX_KEEP);
-}
-
-- (void)setAutoSnapshotKeep:(NSInteger)keep {
-    [[self defaults] setInteger:vm_clamp(keep, VM_AUTOSNAP_MIN_KEEP,
-                                         VM_AUTOSNAP_MAX_KEEP)
-                         forKey:kVMAutoSnapKeep];
     [self publishChange];
 }
 

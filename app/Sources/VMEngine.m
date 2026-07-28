@@ -182,12 +182,6 @@ static double vm_now(void) {
      */
     unsigned         _snapRequest;   /* 0 none, 1 save, 2 load */
     NSString        *_snapPath;
-    /* Emulator-thread only: when the next automatic snapshot is due, as a
-     * vm_now() timestamp. Zero means "not armed", which is both the initial
-     * state and what disabling the feature resets it to. */
-    double           _autoSnapNext;
-    /* Rate-limits the settings read above it; see the note there. */
-    double           _autoSnapCheck;
     /*
      * Touch reports waiting to be handed to the Z2.
      *
@@ -1147,116 +1141,15 @@ static double vm_now(void) {
 
 #pragma mark - Snapshots
 
-- (VMSnapshotStore *)snapshotStore {
+- (NSString *)defaultSnapshotPath {
     vm_instance_paths_t paths;
     NSString *note = nil;
     if (![self resolveFilesInto:&paths note:&note]) return nil;
     if (paths.work_image[0] == '\0') return nil;
-    return [VMSnapshotStore storeForWorkImagePath:
-                [NSString stringWithUTF8String:paths.work_image]];
-}
-
-/* The name an unnamed snapshot gets. Local time and seconds resolution, because
- * it is read by a human choosing between two of them, not parsed. */
-- (NSString *)timestampedNameWithPrefix:(NSString *)prefix {
-    NSDateFormatter *f = [[NSDateFormatter alloc] init];
-    f.dateFormat = @"yyyy-MM-dd HH:mm:ss";
-    return [NSString stringWithFormat:@"%@ %@",
-            prefix, [f stringFromDate:[NSDate date]]];
-}
-
-- (BOOL)requestSnapshotNamed:(NSString *)displayName {
-    VMSnapshotStore *store = [self snapshotStore];
-    if (!store) {
-        [self appendConsole:
-            @"[snapshot] this machine has no work image yet, so there is "
-            @"nothing to snapshot.\n"];
-        return NO;
-    }
-    NSString *name = displayName.length
-                   ? displayName
-                   : [self timestampedNameWithPrefix:@"Snapshot"];
-    NSString *path = [store pathForNewSnapshotNamed:name automatic:NO];
-    if (!path) {
-        [self appendConsole:
-            @"[snapshot] could not create a file for the snapshot.\n"];
-        return NO;
-    }
-    return [self requestSnapshotSaveTo:path];
-}
-
-/*
- * The automatic one, considered between chunks on the emulator thread.
- *
- * Wall clock rather than retired instructions, because the user is choosing how
- * much WORK they are willing to lose and that is measured in minutes — and
- * because at 20 M insn/s an instruction budget would fire at wildly different
- * real intervals depending on what the guest is doing.
- *
- * The clock starts when the machine starts, not at the last save, so a machine
- * that is paused for an hour does not immediately snapshot on resume. And the
- * settings are read every time rather than latched: turning the feature off
- * must stop the next one, not the one after it.
- */
-- (void)considerAutomaticSnapshot_emulatorThread {
-    /*
-     * Throttled to once a second before anything else happens.
-     *
-     * This is called between every chunk — thousands of times a second — and
-     * everything below it reads NSUserDefaults. Even a cached read is far too
-     * much work to do per chunk on a machine that manages 20 M insn/s, and the
-     * shortest interval the settings allow is thirty seconds, so a one-second
-     * resolution costs the feature nothing.
-     */
-    double check = vm_now();
-    if (check < _autoSnapCheck) return;
-    _autoSnapCheck = check + 1.0;
-
-    VMSettings *settings = [VMSettings sharedSettings];
-    if (![settings autoSnapshotEnabled]) {
-        _autoSnapNext = 0.0;                    /* re-arm cleanly if re-enabled */
-        return;
-    }
-    double now = vm_now();
-    if (_autoSnapNext == 0.0) {
-        _autoSnapNext = now + (double)[settings autoSnapshotIntervalSeconds];
-        return;
-    }
-    if (now < _autoSnapNext) return;
-    _autoSnapNext = now + (double)[settings autoSnapshotIntervalSeconds];
-
-    VMSnapshotStore *store = [self snapshotStore];
-    if (!store) return;
-
-    NSString *name = [self timestampedNameWithPrefix:@"Auto"];
-    NSString *path = [store pathForNewSnapshotNamed:name automatic:YES];
-    if (!path) return;
-
-    /*
-     * Written here rather than queued: this IS the emulator thread and the
-     * machine is already at a safe point, so going through the request slot
-     * would only risk the user's own snapshot being coalesced away by a timer.
-     */
-    snapshot_status_t st = snapshot_save(&_machine, path.fileSystemRepresentation);
-    if (st != SNAP_OK) {
-        [self appendConsole:[NSString stringWithFormat:
-            @"[snapshot] automatic snapshot failed: %s. Automatic snapshots "
-            @"stay on; the next one will try again.\n", snapshot_strerror(st)]];
-        return;
-    }
-
-    NSUInteger pruned = 0;
-    if ([settings autoSnapshotPruneEnabled])
-        pruned = [store pruneAutomaticSnapshotsKeeping:
-                     (NSUInteger)[settings autoSnapshotKeep]];
-
-    [self appendConsole:[NSString stringWithFormat:
-        @"[snapshot] automatic: %@ at %llu instructions%@\n",
-        name, (unsigned long long)_machine.cpu.cycles,
-        pruned ? [NSString stringWithFormat:
-                     @" (%lu older automatic snapshot%s removed)",
-                     (unsigned long)pruned, pruned == 1 ? "" : "s"]
-               : @""]];
+    /* Beside the work image and named after it, so a machine and its
+     * checkpoints are copied, backed up and deleted as one thing. */
+    return [[NSString stringWithUTF8String:paths.work_image]
+            stringByAppendingPathExtension:@"snapshot"];
 }
 
 - (BOOL)queueSnapshot:(unsigned)what path:(NSString *)path {
@@ -1478,7 +1371,6 @@ static bool vm_spin_already_reported(const vm_spin_t *s, uint32_t region) {
             /* Same safe point, same reason: the machine is between
              * instructions and this thread owns it. */
             [self drainSnapshotRequest_emulatorThread];
-            [self considerAutomaticSnapshot_emulatorThread];
 
             retired += s5l8900_run(&_machine, kVMChunkInstructions, &status);
 
