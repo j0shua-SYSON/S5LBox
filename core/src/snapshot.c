@@ -134,7 +134,7 @@ SNAP_SIZE_GUARD(s5l_usbotg_t,      4,     "snap_usbotg");
 /* Eight channels of five registers (160), the four controller-wide words, the
  * access and unknown-offset accounting, and the work/refusal counters. */
 SNAP_SIZE_GUARD(s5l_pl080_chan_t,  20,    "snap_pl080");
-SNAP_SIZE_GUARD(s5l_pl080_t,       320,   "snap_pl080");
+SNAP_SIZE_GUARD(s5l_pl080_t,       336,   "snap_pl080");
 SNAP_SIZE_GUARD(s5l_nor_entry_t,   12,    "snap_nor");
 SNAP_SIZE_GUARD(s5l_nor_t,         208,   "snap_nor");
 SNAP_SIZE_GUARD(s5l_stub_t,        56,    "snap_stubs");
@@ -155,7 +155,9 @@ SNAP_SIZE_GUARD(s5l_stub_t,        56,    "snap_stubs");
  * 44408 = 43768 + the two PL080 DMA controllers (2 x 320). Unlike level_dirty
  * this one IS in snap_mach() and the byte format DOES change, so
  * SNAPSHOT_VERSION moves with it — see the v14 note. */
-SNAP_SIZE_GUARD(s5l8900_t,         44496, "snap_mach");
+/* 44528 = 44496 + the two PL080 config-write counters (2 x 16). These ARE in
+ * snap_pl080() and the byte format DOES change, so SNAPSHOT_VERSION moves. */
+SNAP_SIZE_GUARD(s5l8900_t,         44528, "snap_mach");
 #endif
 
 /* ---------------------------------------------------------------- the IO --- */
@@ -779,6 +781,7 @@ static void snap_pl080(sn_io_t *io, s5l_pl080_t *d) {
     F64(d->items); F64(d->completions);
     F64(d->refused_flow); F64(d->refused_width); F64(d->refused_chain);
     F64(d->refused_softreq); F64(d->refused_endian);
+    F64(d->config_writes); F32(d->config_first);
     if (sn_reading(io) && io->err == SNAP_OK && !pl080_state_valid(d))
         io->err = SNAP_ERR_CORRUPT;
 }

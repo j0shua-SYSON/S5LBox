@@ -2947,6 +2947,19 @@ typedef struct {
     uint64_t refused_chain;
     uint64_t refused_softreq;
     uint64_t refused_endian;
+
+    /*
+     * WRITES to DMACConfiguration, as distinct from its VALUE.
+     *
+     * The diagnostic used to print "NEVER WRITTEN" whenever `config` was zero,
+     * and that is not the same statement: a driver that writes 0, or writes 1
+     * and later clears it, is indistinguishable from one that never touched the
+     * register. "AppleARMPL080DMAC never writes DMACConfiguration" was repeated
+     * for days on the strength of that, and it was an inference dressed as a
+     * measurement. This counter is the measurement.
+     */
+    uint64_t config_writes;
+    uint32_t config_first;   /* the first value written, whatever became of it */
 } s5l_pl080_t;
 
 void     s5l_pl080_reset(s5l_pl080_t *d);

@@ -185,6 +185,8 @@ void s5l_pl080_write(s5l_pl080_t *d, uint32_t off, uint32_t val) {
         return;
     case PL080_CONFIG:
         if (val & PL080_CONFIG_ENDIAN) d->refused_endian++;
+        if (d->config_writes == 0u) d->config_first = val;
+        d->config_writes++;
         d->config = val;
         return;
     case PL080_SYNC:

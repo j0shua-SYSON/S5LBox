@@ -22707,9 +22707,22 @@ static void dmac_report(void) {
            "    'WHAT THIS MODEL REFUSES' block in soc.h for what each means.\n");
     for (unsigned i = 0; i < 2u; i++) {
         const s5l_pl080_t *d = &G.mach->dmac[i];
-        printf("    dmac%u @ 0x%08x  config %s  items %llu  bytes %llu\n",
-               i, i == 0u ? 0x38200000u : 0x39900000u,
-               d->config ? "written" : "NEVER WRITTEN",
+        /*
+         * config is reported as WRITES and not as a value. Printing
+         * "NEVER WRITTEN" whenever the value happened to be zero was not the
+         * same claim, and it was believed for days: a driver that writes 0, or
+         * that writes 1 and later clears it, looked identical to one that never
+         * touched the register at all.
+         */
+        printf("    dmac%u @ 0x%08x  config now %08x, %llu write(s)",
+               i, i == 0u ? 0x38200000u : 0x39900000u, d->config,
+               (unsigned long long)d->config_writes);
+        if (d->config_writes)
+            printf(", first %08x%s", d->config_first,
+                   (d->config_first & PL080_CONFIG_EN) ? " [EN]" : " [enable clear]");
+        else
+            printf("  NEVER WRITTEN (measured, not inferred)");
+        printf("  items %llu  bytes %llu\n",
                (unsigned long long)d->items,
                (unsigned long long)d->bytes_moved);
         printf("           refused: flow %llu  width %llu  chain %llu  "
