@@ -563,12 +563,21 @@ static void test_dns_answers_an_a_query_from_the_host_resolver(void) {
           r.dport == 40000u, "the reply's addressing is wrong");
     const uint8_t *d = r.pay;
     CHECK(r16(d) == 0x4242u, "the transaction ID was not echoed");
-    CHECK((r16(d + 2) & 0x8000u) != 0u,
+    /*
+     * Read ONCE. The first version evaluated r16(d + 2) in the condition and
+     * again in the message, and CI printed a flags word that satisfied the
+     * condition it had just failed -- so the two reads were not seeing the
+     * same thing and the report was describing a different moment than the
+     * test. Whatever the underlying cause, a check whose message can disagree
+     * with its own condition is not evidence of anything.
+     */
+    const uint16_t reply_flags = r16(d + 2);
+    CHECK((reply_flags & 0x8000u) != 0u,
           "QR was not set: flags 0x%04x, id 0x%04x, %u octets of payload",
-          r16(d + 2), r16(d), (unsigned)r.paylen);
-    CHECK((r16(d + 2) & 0x000fu) == 0u, "RCODE is %u, expected NOERROR",
-          r16(d + 2) & 0x000fu);
-    CHECK((r16(d + 2) & 0x0100u) != 0u,
+          reply_flags, r16(d), (unsigned)r.paylen);
+    CHECK((reply_flags & 0x000fu) == 0u, "RCODE is %u, expected NOERROR",
+          reply_flags & 0x000fu);
+    CHECK((reply_flags & 0x0100u) != 0u,
           "RD was not mirrored back, so a stub resolver sees a server that "
           "ignored its recursion request");
     CHECK(r16(d + 4) == 1u && r16(d + 6) == 1u,
@@ -677,6 +686,18 @@ static void test_dns_refuses_names_it_should_not_hand_to_getaddrinfo(void) {
     qn = dns_query(q, sizeof q, "www.example.com", 1u, 1u, 1u);
     w16(q + 2, 0x8000u);
     send_udp(DNS_IP, 40009u, 53u, q, qn);
+    /*
+     * Two different faults produce one symptom here, so they are separated.
+     * dns_malformed counts the QR guard firing. If it went up, the guard saw
+     * the bit and something else queued a datagram; if it did not, the guard
+     * never ran and the bit did not survive the trip through udp_input.
+     */
+    CHECK(g_ns.stats.dns_malformed == 1u,
+          "the QR guard did not fire: dns_malformed %llu, dns_queries %llu, "
+          "ip_bad_checksum %llu -- the query carried flags 0x%04x",
+          (unsigned long long)g_ns.stats.dns_malformed,
+          (unsigned long long)g_ns.stats.dns_queries,
+          (unsigned long long)g_ns.stats.ip_bad_checksum, r16(q + 2));
     CHECK(net_output_pending(&g_ns) == 0u,
           "a DNS *response* aimed at us produced a reply, which is how a "
           "reflection loop starts (queued %u; the query we sent had flags "
