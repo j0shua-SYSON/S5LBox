@@ -41,11 +41,30 @@ typedef NS_ENUM(NSInteger, VMSettingsSection) {
     /* The first VM_OPT_GROUP_COUNT sections are the option table's own groups,
      * in its order, so a row added to VMOptions.c appears here with no edit. */
     VMSettingsSectionGeneral = VM_OPT_GROUP_COUNT,
+    VMSettingsSectionSnapshots,
     VMSettingsSectionFirmware,
     VMSettingsSectionDiagnostics,
     VMSettingsSectionCommandLine,
     VMSettingsSectionReset,
     VMSettingsSectionCount
+};
+
+/*
+ * Automatic snapshots, and this section is deliberately NOT behind developer
+ * mode. Deciding how much work you are willing to lose is an ordinary thing
+ * to want, not a diagnostic, and someone who never turns developer mode on is
+ * exactly the person who would rather not lose a boot they waited ten minutes
+ * for.
+ *
+ * The keep count only appears when pruning is on. A row that says "keep 5"
+ * above a switch that is off is a row that lies about what will happen.
+ */
+typedef NS_ENUM(NSInteger, VMSnapshotRow) {
+    VMSnapshotRowAuto = 0,
+    VMSnapshotRowInterval,
+    VMSnapshotRowPrune,
+    VMSnapshotRowKeep,
+    VMSnapshotRowCount
 };
 
 typedef NS_ENUM(NSInteger, VMGeneralRow) {
@@ -110,6 +129,15 @@ static NSString *VMStringFromC(const char *text) {
 - (void)jailbreakToggled:(UISwitch *)sender;
 - (void)inlineConsoleChanged:(UISwitch *)sender;
 - (void)developerModeToggled:(UISwitch *)sender;
+- (void)autoSnapshotToggled:(UISwitch *)sender;
+- (void)autoSnapshotPruneToggled:(UISwitch *)sender;
+- (NSString *)intervalTextFor:(NSInteger)seconds;
+- (void)presentChoices:(NSArray<NSNumber *> *)values
+                titled:(NSString *)title
+             formatter:(NSString *(^)(NSInteger))format
+               current:(NSInteger)current
+                chosen:(void (^)(NSInteger))chosen
+             fromIndex:(NSIndexPath *)indexPath;
 /* These two were missing, which the comment above says cannot happen: clang
  * late-parses method bodies inside an @implementation, so a call before the
  * definition compiles anyway and the invariant this block exists to hold was
@@ -269,6 +297,78 @@ static NSString *VMStringFromC(const char *text) {
     _banner.text = text;
 }
 
+#pragma mark - Automatic snapshots
+
+/* Minutes and hours where they read better than seconds, because the value is
+ * chosen by a person deciding how much work they can afford to lose. */
+- (NSString *)intervalTextFor:(NSInteger)seconds {
+    if (seconds % 3600 == 0 && seconds >= 3600)
+        return [NSString stringWithFormat:@"%ld hour%s",
+                (long)(seconds / 3600), seconds == 3600 ? "" : "s"];
+    if (seconds % 60 == 0 && seconds >= 60)
+        return [NSString stringWithFormat:@"%ld min", (long)(seconds / 60)];
+    return [NSString stringWithFormat:@"%ld sec", (long)seconds];
+}
+
+- (void)autoSnapshotToggled:(UISwitch *)sender {
+    [[VMSettings sharedSettings] setAutoSnapshotEnabled:sender.on];
+    /* The interval row's colour follows this switch, so the section is redrawn
+     * rather than just the switch's own cell. */
+    [self.tableView reloadData];
+}
+
+- (void)autoSnapshotPruneToggled:(UISwitch *)sender {
+    [[VMSettings sharedSettings] setAutoSnapshotPruneEnabled:sender.on];
+    /* This one adds or removes the Keep row beneath it. */
+    [self.tableView reloadData];
+}
+
+/*
+ * A short list of values in an action sheet.
+ *
+ * A stepper or a text field would let a user ask for four seconds or four
+ * hundred thousand, and VMSettings would clamp it silently -- which is the
+ * behaviour that makes a settings screen feel broken. Offering the values that
+ * are actually honoured means what is shown is what happens.
+ */
+- (void)presentChoices:(NSArray<NSNumber *> *)values
+                titled:(NSString *)title
+             formatter:(NSString *(^)(NSInteger))format
+               current:(NSInteger)current
+                chosen:(void (^)(NSInteger))chosen
+             fromIndex:(NSIndexPath *)indexPath {
+    UIAlertController *sheet = [UIAlertController
+        alertControllerWithTitle:title
+                         message:nil
+                  preferredStyle:UIAlertControllerStyleActionSheet];
+
+    for (NSNumber *v in values) {
+        NSInteger value = v.integerValue;
+        NSString *label = format(value);
+        if (value == current) label = [@"✓ " stringByAppendingString:label];
+        [sheet addAction:[UIAlertAction actionWithTitle:label
+                                                  style:UIAlertActionStyleDefault
+                                                handler:^(UIAlertAction *a) {
+            (void)a;
+            chosen(value);
+            [self.tableView reloadData];
+        }]];
+    }
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel"
+                                              style:UIAlertActionStyleCancel
+                                            handler:nil]];
+
+    /* iPad presents an action sheet as a popover and throws without an anchor. */
+    UIPopoverPresentationController *pop = sheet.popoverPresentationController;
+    if (pop) {
+        UITableViewCell *cell = [self.tableView cellForRowAtIndexPath:indexPath];
+        pop.sourceView = cell ?: self.tableView;
+        pop.sourceRect = cell ? cell.bounds : CGRectZero;
+    }
+    [self.tableView deselectRowAtIndexPath:indexPath animated:YES];
+    [self presentViewController:sheet animated:YES completion:nil];
+}
+
 - (void)developerModeToggled:(UISwitch *)sender {
     [[VMSettings sharedSettings] setDeveloperMode:sender.isOn];
     [self rebuildVisibleSections];
@@ -312,6 +412,8 @@ static NSString *VMStringFromC(const char *text) {
     BOOL dev = [[VMSettings sharedSettings] developerMode];
     NSMutableArray<NSNumber *> *v = [NSMutableArray array];
     [v addObject:@(VMSettingsSectionGeneral)];
+    /* Both modes. See the VMSnapshotRow comment. */
+    [v addObject:@(VMSettingsSectionSnapshots)];
     if (dev)
         for (NSInteger g = 0; g < VM_OPT_GROUP_COUNT; g++)
             [v addObject:@(g)];
@@ -349,6 +451,11 @@ static NSString *VMStringFromC(const char *text) {
         return rows;
     }
     switch ((VMSettingsSection)section) {
+        case VMSettingsSectionSnapshots:
+            /* The keep count is hidden while pruning is off, so the row and
+             * the behaviour cannot disagree. */
+            return [[VMSettings sharedSettings] autoSnapshotPruneEnabled]
+                 ? VMSnapshotRowCount : VMSnapshotRowCount - 1;
         case VMSettingsSectionFirmware:    return VMFirmwareRowCount;
         case VMSettingsSectionDiagnostics: return VMDiagnosticsRowCount;
         case VMSettingsSectionCommandLine: return 1;
@@ -365,6 +472,7 @@ titleForHeaderInSection:(NSInteger)section {
     if (section < VM_OPT_GROUP_COUNT)
         return VMStringFromC(vm_option_group_title((unsigned)section));
     switch ((VMSettingsSection)section) {
+        case VMSettingsSectionSnapshots:   return @"Automatic snapshots";
         case VMSettingsSectionFirmware:    return @"Firmware";
         case VMSettingsSectionDiagnostics: return @"Diagnostics";
         case VMSettingsSectionCommandLine: return @"Equivalent command line";
@@ -375,6 +483,21 @@ titleForHeaderInSection:(NSInteger)section {
 - (NSString *)tableView:(UITableView *)tableView
 titleForFooterInSection:(NSInteger)section {
     section = [self sectionAt:section];
+    if (section == VMSettingsSectionSnapshots) {
+        VMSettings *set = [VMSettings sharedSettings];
+        if (![set autoSnapshotEnabled])
+            return @"Off. A snapshot is the whole machine, about the size "
+                   @"of the guest's memory, so this is left to you rather "
+                   @"than filling the disk on its own.";
+        return [set autoSnapshotPruneEnabled]
+            ? @"Snapshots are taken while a machine is running and kept "
+              @"beside it, so they are copied and deleted with it. Only "
+              @"AUTOMATIC snapshots are deleted here — ones you take and "
+              @"name yourself are never removed."
+            : @"Snapshots are taken while a machine is running and kept "
+              @"beside it. Nothing is deleted, so they will accumulate "
+              @"until you remove them.";
+    }
     if (section == VMSettingsSectionGeneral) {
         return [[VMSettings sharedSettings] developerMode]
             ? @"Developer mode is on: the option table, the guest console and "
@@ -512,6 +635,58 @@ titleForFooterInSection:(NSInteger)section {
             [sw addTarget:self action:@selector(developerModeToggled:)
                  forControlEvents:UIControlEventValueChanged];
             cell.accessoryView = sw;
+        }
+        return cell;
+    }
+
+    if ([self sectionAt:indexPath.section] == VMSettingsSectionSnapshots) {
+        VMSettings *set = [VMSettings sharedSettings];
+        UITableViewCell *cell = [self cellWithIdentifier:kVMPlainCell
+                                                   style:UITableViewCellStyleValue1];
+        cell.accessoryView = nil;
+        cell.accessoryType = UITableViewCellAccessoryNone;
+        cell.selectionStyle = UITableViewCellSelectionStyleNone;
+        cell.detailTextLabel.text = nil;
+        cell.textLabel.textColor = [UIColor labelColor];
+
+        switch ((VMSnapshotRow)indexPath.row) {
+            case VMSnapshotRowAuto: {
+                cell.textLabel.text = @"Snapshot automatically";
+                UISwitch *sw = [[UISwitch alloc] init];
+                sw.on = [set autoSnapshotEnabled];
+                [sw addTarget:self action:@selector(autoSnapshotToggled:)
+                     forControlEvents:UIControlEventValueChanged];
+                cell.accessoryView = sw;
+                break;
+            }
+            case VMSnapshotRowInterval:
+                cell.textLabel.text = @"Every";
+                cell.detailTextLabel.text =
+                    [self intervalTextFor:[set autoSnapshotIntervalSeconds]];
+                cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+                cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+                /* Dimmed rather than hidden while automatic snapshots are off:
+                 * the setting still exists and is still what will be used when
+                 * the switch above goes on. */
+                if (![set autoSnapshotEnabled])
+                    cell.textLabel.textColor = [UIColor secondaryLabelColor];
+                break;
+            case VMSnapshotRowPrune: {
+                cell.textLabel.text = @"Delete old automatic snapshots";
+                UISwitch *sw = [[UISwitch alloc] init];
+                sw.on = [set autoSnapshotPruneEnabled];
+                [sw addTarget:self action:@selector(autoSnapshotPruneToggled:)
+                     forControlEvents:UIControlEventValueChanged];
+                cell.accessoryView = sw;
+                break;
+            }
+            default:
+                cell.textLabel.text = @"Keep";
+                cell.detailTextLabel.text = [NSString stringWithFormat:
+                    @"%ld", (long)[set autoSnapshotKeep]];
+                cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+                cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+                break;
         }
         return cell;
     }
@@ -752,6 +927,41 @@ didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
         return;
     }
     switch ((VMSettingsSection)[self sectionAt:indexPath.section]) {
+        case VMSettingsSectionSnapshots: {
+            VMSettings *set = [VMSettings sharedSettings];
+            if (indexPath.row == VMSnapshotRowInterval) {
+                if (![set autoSnapshotEnabled]) {
+                    [tableView deselectRowAtIndexPath:indexPath animated:YES];
+                    return;
+                }
+                [self presentChoices:@[@30, @60, @300, @900, @1800, @3600]
+                             titled:@"Snapshot every"
+                          formatter:^NSString *(NSInteger v) {
+                              return [self intervalTextFor:v];
+                          }
+                            current:[set autoSnapshotIntervalSeconds]
+                             chosen:^(NSInteger v) {
+                                 [set setAutoSnapshotIntervalSeconds:v];
+                             }
+                          fromIndex:indexPath];
+                return;
+            }
+            if (indexPath.row == VMSnapshotRowKeep) {
+                [self presentChoices:@[@1, @3, @5, @10, @25, @50]
+                             titled:@"Keep how many"
+                          formatter:^NSString *(NSInteger v) {
+                              return [NSString stringWithFormat:@"%ld", (long)v];
+                          }
+                            current:[set autoSnapshotKeep]
+                             chosen:^(NSInteger v) {
+                                 [set setAutoSnapshotKeep:v];
+                             }
+                          fromIndex:indexPath];
+                return;
+            }
+            [tableView deselectRowAtIndexPath:indexPath animated:YES];
+            return;
+        }
         case VMSettingsSectionFirmware:
             /* The three status rows above are still not selectable; only the
              * one row that leads somewhere does anything. */
