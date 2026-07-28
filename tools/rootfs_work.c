@@ -1443,6 +1443,38 @@ static bool host_file_stamp(host_file_t *file, file_stamp_t *stamp,
  * and is the first thing in every container path. Naming it turns a report
  * into a diagnosis.
  */
+/*
+ * HOW AN INTERMEDIATE DIRECTORY IS OPENED, and it is not O_RDONLY.
+ *
+ * The walk below descends one component at a time, holding a descriptor on
+ * each directory so the next openat() is relative to a directory that has
+ * already been checked. It only ever needs to SEARCH those directories -- it
+ * enumerates none of them -- but the first version asked for O_RDONLY, which
+ * is a request to READ them.
+ *
+ * On a sandboxed platform those are different rights and only one is granted.
+ * An iOS app can traverse /private/var/mobile/Containers/Data/Application/<id>
+ * to reach its own container and cannot read a single directory on the way;
+ * the observed failure was "source-open-failed at source-path: cannot open
+ * source directory", and the emulator was right again -- it genuinely could
+ * not open them.
+ *
+ * O_SEARCH is POSIX.1-2008 for exactly this and is what Darwin provides.
+ * O_PATH is the Linux spelling, and a descriptor from it is still usable as
+ * the dirfd of openat() and fstatat(), which is all this needs. O_RDONLY is
+ * the fallback for a platform with neither, where the two rights are not
+ * distinguished anyway.
+ *
+ * The FINAL file is still opened O_RDONLY -- it is going to be read.
+ */
+#if defined(O_SEARCH)
+#  define ROOTFS_WORK_TRAVERSE O_SEARCH
+#elif defined(O_PATH)
+#  define ROOTFS_WORK_TRAVERSE O_PATH
+#else
+#  define ROOTFS_WORK_TRAVERSE O_RDONLY
+#endif
+
 /* Copy one path component into the caller's buffer, truncated and always
  * terminated. Silent when there is no buffer, which is what the callers that
  * do not care pass. */
@@ -1469,7 +1501,8 @@ static int open_directory_no_links(const char *path, int *system_error,
         return -1;
     }
     absolute = path[0] == '/';
-    current = open(absolute ? "/" : ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    current = open(absolute ? "/" : ".",
+                   ROOTFS_WORK_TRAVERSE | O_DIRECTORY | O_CLOEXEC);
     if (current < 0) {
         *system_error = errno;
         return -1;
@@ -1487,7 +1520,7 @@ static int open_directory_no_links(const char *path, int *system_error,
         int next;
         struct stat before;
         struct stat after;
-        int flags = O_RDONLY | O_DIRECTORY | O_CLOEXEC;
+        int flags = ROOTFS_WORK_TRAVERSE | O_DIRECTORY | O_CLOEXEC;
 
         while (*cursor == '/')
             cursor++;
@@ -1624,7 +1657,9 @@ static bool posix_open_source(const char *path, host_file_t *source,
             (void)snprintf(said, sizeof said,
                            "source path traverses a symbolic link or '..'");
         else
-            (void)snprintf(said, sizeof said, "cannot open source directory");
+            (void)snprintf(said, sizeof said,
+                           "cannot open source directory: %s (errno %d)",
+                           strerror(error), error);
         result_fail(result,
                     unsafe ? ROOTFS_WORK_PATH_UNSAFE :
                              (error == ENOMEM ? ROOTFS_WORK_NO_MEMORY :
