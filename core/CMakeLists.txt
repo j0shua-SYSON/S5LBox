@@ -194,9 +194,24 @@ target_compile_definitions(test_ppp PRIVATE
     S5LBOX_RUN80_PPP="${CMAKE_CURRENT_SOURCE_DIR}/../work/run80-ppp-tty/uart4-ppp.bin")
 add_test(NAME ppp_peer COMMAND test_ppp)
 
+# The sockets behind net.c's egress table. Kept out of emucore for the same
+# reason audio_capture.c and file_block.c are: core/ must link into the iOS app
+# and run on a test runner with no network, so every socket call lives here.
+add_library(nethost STATIC ../tools/net_host.c)
+target_link_libraries(nethost PUBLIC emucore)
+target_include_directories(nethost PUBLIC ../tools)
+if(WIN32)
+    target_link_libraries(nethost PUBLIC ws2_32)
+endif()
+
 add_executable(test_net tests/test_net.c)
 target_link_libraries(test_net PRIVATE emucore)
 add_test(NAME host_ipv4_nat COMMAND test_net)
+
+add_executable(test_net_host tests/test_net_host.c)
+target_link_libraries(test_net_host PRIVATE nethost)
+add_test(NAME host_egress COMMAND test_net_host)
+
 
 add_executable(test_mtz2 tests/test_mtz2.c)
 target_link_libraries(test_mtz2 PRIVATE emucore)
