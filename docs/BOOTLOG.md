@@ -2315,6 +2315,61 @@ at 0x3cc10000(0xea9d6000)` — and uart4 still carried **zero bytes**. The
 milestone is unchanged.
 
 
+### 2026-07-28: THE LOCK SCREEN USED TO RENDER, and stopped today
+
+Every run on disk prints its final framebuffer as a non-zero byte count. Read
+as a column — which nobody had done — it says the black screen is not an
+unsolved problem. It is a **regression**, and today's.
+
+```
+  run110-surface    -n 3G   273206 of 460800     <- the lock screen
+  run111-parentlen  -n 3G   273206
+  run115-subrange   -n 3G   273206
+  run116-narrow     -n 3G      384               <- black
+  run117 … run127           384 / 1821 / 384     <- black, every one
+```
+
+273206 is 59% of the framebuffer carrying content; 384 is 0.08%, which is
+nothing. The value appears and disappears across the whole log — run85, run86-
+vram3, run89 through run93, run96, run97, run101, run105, run110, run111,
+run115 all render — so this is not drift and not a slow decay. Runs before a
+line render; runs after it do not.
+
+**It is not the instruction budget.** run110, run111, run115 and run117 all ran
+exactly 3 G. The first three render and the fourth does not. run118 ran 8 G and
+is black; run96 ran 3.55 G and renders.
+
+**The line is run116, whose name is `narrow`.** That is the run that tested
+`21ae30f soc: route narrow accesses to the data ports`. Three commits from
+today sit in that window and all three reach the panel bus:
+
+  - `21ae30f` narrow accesses to the data ports — applied to **spi0** as well
+    as spi1
+  - `edde2a1` pace DMA into a peripheral
+  - `c41454c` run the SPI shifter from the tick — **every** SPI controller
+
+and the panel is on spi0: `S5L_BRINGUP_LCD_NODE "arm-io/spi0/lcd0"`. Byte and
+half-word stores to spi0 that used to fall through to the unmapped path are now
+decoded into its FIFO, and its shifter now advances on a timer underneath a
+driver that may be polling it. Before run116 this model saw no panel traffic at
+all; after it, it acts on it.
+
+So the day reads differently in hindsight. The IOSurface capacity work was
+aimed at a screen that had been black since run116 for an unrelated reason, and
+run127's careful negative result — pool refusal real, cleared, still black —
+is exactly what that predicts.
+
+**Under test, not concluded.** Two runs are in flight:
+
+  - `run130` — today's binary, run96's exact arguments. Black confirms the
+    regression; 273206 refutes the correlation and this section is wrong.
+  - `run131` — spi0's narrow decode off and the tick shifter restricted to
+    spi1, everything else untouched. If it renders **and** still delivers all
+    54,156 Z2 octets, that is the fix rather than a trade.
+
+Nothing has been reverted. The three commits are what made the touch download
+work, and they are not being traded away on a correlation.
+
 ### 2026-07-28: sound is not "not started" — the driver attaches and never writes I2S
 
 This was measured in run121 and simply never read. Every run has printed it.
