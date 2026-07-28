@@ -1,0 +1,219 @@
+# Multi-touch: the chain from a finger to a UIKit event
+
+Everything below is measured — from `firmware/kernel.macho`, from the armv6
+dyld shared cache at `work/analysis/dsc_armv6`, and from raw guest RAM in
+`work/run96-base/snap-3.5e9.bin`. Where something is inferred it says so.
+
+The short version: **touch does not work because the multitouch controller is
+never programmed**, and everything else that looks broken is downstream of that
+one fact.
+
+---
+
+## 1. The chain, end to end
+
+```
+  MTZ2 controller (spi1 cs0)          core/src/soc/mtz2.c
+        |  reports 0xD1 0xD3 0xD9 0xD0 over control reads
+  AppleMultitouchZ2SPI                kernel, 0xc0438xxx
+        |  setProperty into its IORegistry entry
+  MultitouchSupport.framework         userspace, base 0x33cf6000
+        |  _mt_CachePropertiesForDevice caches them at device+0x10..0x2c
+        |  _mt_DefineSurfaceGrid builds the surface grid at device+0x168
+        |  _alg_InitRowColXYConvert derives the four normalisation bounds
+        |  _mt_FillMTContactDirectFromBinary normalises each contact
+  MultitouchHID.plugin                base 0x007D7000
+        |  IOHIDEventSystem -> SpringBoard -> GSSendEvent
+  __UIApplicationHandleEvent          0x324f6edc
+```
+
+## 2. The device's reports, and what the kernel does with each
+
+| report | kernel publisher | property | payload |
+|---|---|---|---|
+| `0xD1` | `0xc0438670` | `Family ID` | `[0]` |
+| `0xD3` | `0xc04386e0` | `Endianness`, `Sensor Rows`, `Sensor Columns`, `bcdVersion` | `[0]`, `[1]`, `[2]`, `[3..4]` big-endian |
+| `0xD9` | `0xc04388dc` | `Sensor Surface Width` / `Height` | two unaligned LE32 |
+| `0xD0` | `0xc043880c` | `Sensor Region Descriptor` | opaque blob |
+| `0xA1` | `0xc0438874` | `Sensor Region Param` | opaque blob |
+
+All five are vtable slots `+0x3a8`, `+0x3ac`, `+0x3b0`, `+0x3b4`, `+0x3b8` of
+the vtable at **`0xc0449f40`**, and all five are called from one gated chain in
+`publishProperties` at **`0xc043b11c`** — each call must return non-zero or the
+chain bails and *nothing* is published. The chain itself is preceded by two
+gates: `+0x3a0` (publishes `Multitouch ID`) and `+0x3a4`
+(`GET_DEVICE_INFO`, opcode `0xE2`, "Getting device info (stage 1/2)").
+
+`GET_DEVICE_INFO` validates only two things — `rx[0] == 0xE2` and a correct
+sum16 over `rx[0..13]` at `rx[14..15]` — both of which `mtz2.c` already
+satisfies. It is not the blocker.
+
+## 3. How userspace turns those bytes into pixel coordinates
+
+`_mt_CachePropertiesForDevice` (`0x33cf7cbc`) caches:
+
+| property | offset | on failure |
+|---|---|---|
+| `Multitouch ID` | `device+0x10` (64-bit) | zeroed |
+| `Family ID` | `device+0x18` | zeroed |
+| `bcdVersion` | `device+0x1c` | zeroed |
+| **`Sensor Rows`** | `device+0x20` | zeroed |
+| **`Sensor Columns`** | `device+0x24` | zeroed |
+| `Sensor Surface Width` | `device+0x28` | **5000** (`0x33cf8098`) |
+| `Sensor Surface Height` | `device+0x2c` | **7500** (`0x33cf80a0`) |
+| `Endianness` | `device+0x30` | 1 |
+
+It is a plain `IORegistryEntryCreateCFProperty` on `device+0x08`, so a NULL
+return means the key is genuinely absent.
+
+`_mt_InitializeAlgorithmsForDevice` (`0x33cf80ec`) then passes
+`device->0x20` and `device->0x24` as the rows/cols arguments to
+`_mt_DefineSurfaceGrid` (`0x33d01d70`), along with the parsed descriptor array
+at `device+0x74` (16 records of **7 bytes**, count hardwired at `0x33cf7ef8`).
+
+**The back-fill.** At `0x33d01dd0`, if `blob[7] == 0` — that is, if the second
+seven-byte record's first octet is zero — `_mt_DefineSurfaceGrid` writes the
+record itself: `desc[0]=1, desc[3]=1, desc[2]=(byte)rows, desc[5]=(byte)cols`.
+So a device that supplies no descriptor gets one synthesised from the two
+properties.
+
+`_alg_InitRowColXYConvert` (`0x33d01010`) builds two 66-entry tables **indexed
+from −1** (a real entry; both loops start `mvn r5,#0`) and derives:
+
+```
+Xmax = grid[0x26] + colTable[desc[5] - 1]      0x33d01124
+Xmin = colTable[0] - grid[0x24]                0x33d01130
+Ymax = grid[0x2a] + rowTable[desc[2] - 1]      0x33d01104
+Ymin = rowTable[0] - grid[0x28]                0x33d01110
+
+colTable[i] = (i - grid[0x3c]) * grid[0x34]*100 / grid[0x38]
+rowTable[i] =  i               * grid[0x2c]*100 / grid[0x30]
+```
+
+with `0x33d01154` setting 56/11, 36/7 and all four margins to 75, and leaving
+`grid[0x3c]` zero. So the tables are `i*5600/11` and `i*3600/7`, and
+**`desc[2]` is the row count and `desc[5]` the column count**.
+
+`grid = device + 0x168`. The four bounds live at `grid+0x148` (Xmax),
+`+0x14a` (Xmin), `+0x14c` (Ymax), `+0x14e` (Ymin).
+
+## 4. What a live guest actually holds
+
+`work/run96-base/snap-3.5e9.bin`, at the lock screen. The grid was located by
+searching for the two constant tables — they appear exactly once, 0x84 bytes
+apart, which is exactly `0xc4 - 0x40`. That fixes `device` at VA **`0x007e9000`**.
+
+```
+device+0x18 Family ID             0        (model publishes 1)
+device+0x1c bcdVersion            0        (model publishes 0x0100)
+device+0x20 Sensor Rows           0        (model publishes 15)
+device+0x24 Sensor Columns        0        (model publishes 10)
+device+0x28 Sensor Surface Width  5000     (model publishes 4800 — this is the FALLBACK)
+device+0x2c Sensor Surface Height 7500     (model publishes 7200 — the FALLBACK)
+
+desc (= blob+7)   01 00 00 01 00 00 00     <- the back-fill's fingerprint,
+                                              run with rows=0 and cols=0
+
+grid+0x148 Xmax  -434     grid+0x14a Xmin  -75
+grid+0x14c Ymax  -439     grid+0x14e Ymin  -75
+grid+0x150 -509 = colTable[-1]   grid+0x154 -514 = rowTable[-1]
+```
+
+Both spans are **negative**, so `_alg_ClipPosToScreenEdge` (`0x33d00f2c`)
+returns the maximum for every coordinate on every frame. That is the pinned
+normalised 1.0 run98 measured at `plugin+0x2114`, and it is why no step size
+ever helped: the contact never moves in pixel space at all.
+
+5000 and 7500 are not a rounding of 4800 and 7200 — they are
+MultitouchSupport's own literals for a property it could not read. **Every
+int32 property is missing.**
+
+## 5. Why they are missing: the HBPP gate
+
+`isInHBPP()` is `0xc0441008`, reached only through vtable slot `0x4d0`. Two
+callers want opposite answers:
+
+* `finishStarting()` `0xc0442670` — **DETACHES** on FALSE.
+* `attemptToBootloadDevice()` `0xc04414c4` — on TRUE logs "attempting to
+  bootload device" and pushes ~54 KB of firmware; on FALSE logs "not in HBPP,
+  so skipping bootload" and **returns 0**, which the retry loop counts as a
+  failed attempt.
+
+`core/src/soc/mtz2.c` resolves this with one monotonic bit: TRUE once (so the
+driver stays attached), FALSE thereafter (so the bootload is skipped). The file
+calls this "a bounded, named, single-bit lie that costs three cosmetic log
+lines."
+
+**run100 measured what it actually costs.** Eight kernel probes, three of them
+positive controls:
+
+| probe | captures |
+|---|---|
+| `0xc0442670` `finishStarting` | 1 (control) |
+| `0xc0441008` `isInHBPP` | 4 (control) |
+| `0xc04414c4` `attemptToBootloadDevice` | 3 (control) |
+| `0xc043b11c` `publishProperties` | **0** |
+| `0xc04385a8` `getReport` | **0** |
+| the three publishers | **0** |
+
+In two billion instructions the driver never issues a single control read.
+
+A Z2 has no flash: iOS downloads its firmware on **every boot**, which is why
+`finishStarting` insists on HBPP — at that moment the part really is an
+unprogrammed bootloader. Our device claims to be one and then refuses to be
+programmed, so it never runs application firmware, and the driver correctly
+declines to interrogate a part that has none.
+
+## 6. What has to be built
+
+`attemptToBootloadDevice` returns 1 only after `bootloadDevice()` (vtable
+`+0x74` of the bootloader vtable at **`0xc044a494`**, implementation
+`0xc0445860`) returns non-zero. That function is five virtual calls in
+sequence, each of which must return non-zero:
+
+| slot | address | what its own log calls it |
+|---|---|---|
+| `+0x8c` | `0xc0444370` | reads `fll-mval`, `cal-dl-addr`, `Firmware`, `Constructed Firmware`, `PreconstructedBootloadPacketType` |
+| `+0x9c` | `0xc0444a98` | prox calibration download ("No prox calibration data present") |
+| `+0x98` | `0xc0444dec` | calibration download ("Invalid calibration data or version.") |
+| `+0x88` | `0xc04455d0` | `MTSPIBootloader_Z2::performCalibSeq()` |
+| `+0x60` | `0xc044490c` | "about to execute" |
+
+The firmware itself comes from the kext's own property table
+(`Firmware` / `Constructed Firmware`), not from a file — which is why run65 saw
+54,156 preconstructed bytes pushed. The transfers go through the ordinary SPI
+entry `v[0x368]` (`0xc0444ff8`, `0xc0445224`, `0xc04454d0`), **not** through
+DMA: the controller only arms DMA when `this+0xf4` is non-zero
+(`0xc05a6c24`), and our 16-byte transfers run in PIO today.
+
+The driver's own narration of the sequence, in address order:
+
+```
+  "sending MT_SPI_Z2_WAKE_CMD"                          0xc0445fac
+  "Detected Z2 Version: 0x%08X. Writing to registers"   0xc0445654
+  "constructing HBPP DATA packet with %d bytes payload" 0xc0444a4c
+  "sending preconstructed firmware bytes"               0xc0445164
+  "sending unconstructed firmware bytes"                0xc0445330
+  "sending calibration bytes"                           0xc0444ea8
+  "sending prox calibration bytes"                      0xc0444b4c
+  "%s: status: 0x%08X sending DATA packet."             (x4)
+  "requesting calibration" / "Waiting for calibration to end"
+  "about to execute"                                    0xc0444988
+```
+
+**Not yet established:** the HBPP DATA packet layout, what the status word at
+"status: 0x%08X sending DATA packet" must contain, what `performCalibSeq`
+polls, and what the part must report after "about to execute" so that a later
+`isInHBPP` returns FALSE without the driver detaching. Those are the next
+reads, and they are what stands between here and a working touchscreen.
+
+## 7. Downstream, once this is unblocked
+
+* `mtz2.c` already answers 0xD1/0xD3/0xD9 with correct non-zero values, and as
+  of commit `1c9c831` answers 0xD0 with a real descriptor whose `desc[0]` is
+  non-zero — which suppresses the back-fill and makes the geometry independent
+  of the property path.
+* `to_surface()` maps the panel onto `[-75, 4656]` and `[-75, 7275]`, the
+  bounds the guest derives from 10 columns and 15 rows.
+* **Sound is downstream of touch.** `core/src/soc/pl080.c` is modelled and
+  correct but idle: nothing asks the audio stack to play at a lock screen.
