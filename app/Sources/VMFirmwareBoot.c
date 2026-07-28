@@ -123,7 +123,28 @@ void vm_firmware_boot_probe(const vm_firmware_boot_paths_t *paths,
     out->kernel_present     = out->kernel_size > 0u;
     out->devicetree_present = out->devicetree_size > 0u;
     out->rootfs_present     = out->rootfs_size > 0u;
-    out->work_present       = out->work_size > 0u;
+    /*
+     * A WORK IMAGE HAS TO BE AT LEAST AS BIG AS WHAT IT WAS COPIED FROM, and
+     * "not empty" is not that test.
+     *
+     * rootfs_work_create() copies the whole root filesystem and then grows it,
+     * so a finished one is always larger than the source -- 466,825,216 octets
+     * against 433,274,880 for 7E18. A run that was interrupted, or refused
+     * part way through, leaves a SHORT file behind, and `> 0` calls that
+     * prepared. The machine then boots a truncated HFS+ volume: it mounts, and
+     * then launchd cannot create anything on it and the boot stops dead
+     * immediately after AppleMultitouchZ2SPI with a black screen and no error
+     * anywhere. That is docs/BOOTLOG.md's "fstab wall" arriving by a different
+     * road, and it is what a user actually hit.
+     *
+     * Requiring >= the source size is the honest guard rather than an exact
+     * formula: the provisioner rounds the growth to allocation blocks, so the
+     * final size is not source + GROWTH exactly, but it is never smaller than
+     * the source.
+     */
+    out->work_present       = out->work_size > 0u &&
+                              out->rootfs_size > 0u &&
+                              out->work_size >= out->rootfs_size;
 
     if (!out->kernel_present || !out->devicetree_present ||
         !out->rootfs_present) {
@@ -159,8 +180,16 @@ void vm_firmware_boot_probe(const vm_firmware_boot_paths_t *paths,
 
     if (!out->work_present) {
         out->readiness = VM_FW_BOOT_NEEDS_WORK_IMAGE;
-        set_detail(out->detail, sizeof out->detail,
-                   "The writable root filesystem has not been prepared yet.");
+        if (out->work_size > 0u && out->work_size < out->rootfs_size)
+            /* Distinguish "not started" from "started and left short", because
+             * the second needs the stale file removed and the first does not. */
+            set_detail(out->detail, sizeof out->detail,
+                       "The writable root filesystem is incomplete: it is "
+                       "smaller than the one it was copied from, so an earlier "
+                       "attempt was interrupted. It will be made again.");
+        else
+            set_detail(out->detail, sizeof out->detail,
+                       "The writable root filesystem has not been prepared yet.");
         return;
     }
 
@@ -360,6 +389,37 @@ bool vm_firmware_boot_provision(const vm_firmware_boot_paths_t *paths,
      * is where that is said to the user.
      */
     options.ca_software_render = wanted.ca_software_render;
+
+    /*
+     * CLEAR AN INCOMPLETE ONE FIRST, AND ONLY AN INCOMPLETE ONE.
+     *
+     * rootfs_work_create() opens the destination O_CREAT|O_EXCL, so it refuses
+     * outright if anything is already there -- which is the right behaviour and
+     * is what stops it walking over a machine that already exists. But an
+     * interrupted or refused run leaves a SHORT file behind, and from then on
+     * every retry fails with EEXIST while the probe keeps asking for one. The
+     * user sits on "Preparing" for ever, or worse, boots the truncated volume.
+     *
+     * So a file smaller than the source is removed and remade. A file at least
+     * as large as the source is NOT: that is a finished work image, it is the
+     * user's machine -- everything installed in it, every setting -- and
+     * deleting it because provisioning happened to be asked again would be
+     * data loss dressed up as repair. The size test is the same one
+     * vm_firmware_boot_probe() uses to decide the image is real.
+     */
+    uint64_t existing = file_size(work_path);
+    if (existing > 0u) {
+        uint64_t source_size = file_size(source_path);
+        if (source_size > 0u && existing < source_size) {
+            if (remove(work_path) != 0) {
+                (void)snprintf(detail, detail_capacity,
+                               "An incomplete root filesystem is in the way "
+                               "and could not be removed. Delete %s and try "
+                               "again.", VM_FW_BOOT_WORK_FILE);
+                return false;
+            }
+        }
+    }
 
     rootfs_work_status_t status =
         rootfs_work_create(source_path, work_path, &options, &result);

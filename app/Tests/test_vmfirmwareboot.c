@@ -218,15 +218,45 @@ int main(void) {
         CHECK(state.rootfs_present && !state.work_present,
               "the split layout lost the shared artefacts");
 
-        /* Give the machine one, and only it counts. */
-        write_at(WORKDIR, VM_FW_BOOT_WORK_FILE, 777);
+        /*
+         * Give the machine one, and only it counts. 4777 rather than the 777
+         * this used to be: a work image is a COPY of the root filesystem plus
+         * growth, so one smaller than the 4096-octet rootfs fixture is now
+         * refused as incomplete -- see the case below. Still a distinctive
+         * number, so "the shared one was used" remains detectable.
+         */
+        write_at(WORKDIR, VM_FW_BOOT_WORK_FILE, 4777);
         vm_firmware_boot_probe(&split, &state);
         CHECK(state.readiness == VM_FW_BOOT_READY,
               "a machine with its own work image reported %d",
               (int)state.readiness);
-        CHECK(state.work_size == 777u,
+        CHECK(state.work_size == 4777u,
               "the shared work image was used instead of the machine's: %llu",
               (unsigned long long)state.work_size);
+
+        /*
+         * AND A SHORT ONE IS NOT A WORK IMAGE. An interrupted or refused
+         * provision leaves a truncated file, and treating "not empty" as
+         * "prepared" boots a truncated HFS+ volume: it mounts, launchd cannot
+         * create anything on it, and the boot stops immediately after
+         * AppleMultitouchZ2SPI with a black screen and no error anywhere. That
+         * is what a user hit, at 7.2 billion instructions of nothing.
+         */
+        remove_at(WORKDIR, VM_FW_BOOT_WORK_FILE);
+        write_at(WORKDIR, VM_FW_BOOT_WORK_FILE, 4095);   /* one short */
+        vm_firmware_boot_probe(&split, &state);
+        CHECK(state.readiness == VM_FW_BOOT_NEEDS_WORK_IMAGE,
+              "a work image one octet smaller than its source reported %d; a "
+              "truncated volume must never be called ready",
+              (int)state.readiness);
+        CHECK(!state.work_present,
+              "a short work image was counted as present");
+        CHECK(strstr(state.detail, "incomplete") != NULL,
+              "the reason does not say the image is incomplete, so the user "
+              "cannot tell it apart from one never started: \"%s\"",
+              state.detail);
+        remove_at(WORKDIR, VM_FW_BOOT_WORK_FILE);
+        write_at(WORKDIR, VM_FW_BOOT_WORK_FILE, 4777);
         remove_at(WORKDIR, VM_FW_BOOT_WORK_FILE);
         remove_file(VM_FW_BOOT_KERNEL_FILE);
         write_file(VM_FW_BOOT_KERNEL_FILE, 0);
