@@ -3,12 +3,21 @@
 //  Copyright (c) 2026 j0shua-SYSON. MIT licensed.
 //
 #import "AppDelegate.h"
+#import "VMSettings.h"
 #import "VMInstanceListViewController.h"
 
 @implementation AppDelegate
 
 - (BOOL)application:(UIApplication *)application
     didFinishLaunchingWithOptions:(NSDictionary *)launchOptions {
+    /*
+     * Before anything else, and specifically before the window exists: Files
+     * shows Documents the moment the app is installed, and a Documents with
+     * nothing in it is an empty folder. A user told to drop an IPSW in the
+     * firmware folder must be able to FIND a firmware folder.
+     */
+    [[VMSettings sharedSettings] ensureUserVisibleDirectories];
+
     (void)application; (void)launchOptions;
     self.window = [[UIWindow alloc] initWithFrame:[[UIScreen mainScreen] bounds]];
     /* The machine list is the root now, with the emulator pushed on top of it.

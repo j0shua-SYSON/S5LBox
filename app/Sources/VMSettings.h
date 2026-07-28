@@ -124,6 +124,25 @@ extern NSString *const VMFirmwareJailbreakPayloadFile;
 
 /* Where the app looks. Returned whether or not it exists, because the point of
  * printing it is to say where to put files. */
+/*
+ * Create the folders the user is expected to put things into, and return YES
+ * if they exist afterwards.
+ *
+ * This is not housekeeping. UIFileSharingEnabled shows Documents in Files, and
+ * a Documents that contains nothing shows an EMPTY folder -- so a user told to
+ * "drop an IPSW in the firmware folder" opens Files, finds no such folder, and
+ * has nowhere to put it. The folders have to exist before anyone looks, which
+ * means at launch rather than at first use.
+ *
+ * It also drops a short README beside them, because an empty folder in Files
+ * explains nothing about what belongs in it.
+ */
+- (BOOL)ensureUserVisibleDirectories;
+
+/* Every *.ipsw sitting in the firmware folder or at the top of Documents,
+ * newest first. This is what makes "detect" possible without a picker. */
+- (NSArray<NSString *> *)detectedArchivePaths;
+
 - (NSString *)firmwareDirectory;
 
 /* The full path if that file is present there, or nil. */

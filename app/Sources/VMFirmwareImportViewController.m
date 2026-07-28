@@ -32,6 +32,13 @@ typedef NS_ENUM(NSInteger, VMImportSection) {
 
 typedef NS_ENUM(NSInteger, VMImportChooseRow) {
     VMImportChooseRowPick = 0,
+    /*
+     * Whatever is sitting in the firmware folder. This is the row that makes
+     * the Files-app route work end to end: copy an IPSW into S5LBox's folder,
+     * come back here, tap once. No picker, no security-scoped URL, and no
+     * second copy of a 239 MB file.
+     */
+    VMImportChooseRowDetect,
     VMImportChooseRowAgain,      /* only once a file has been picked           */
     VMImportChooseRowCount
 };
@@ -211,12 +218,14 @@ static UIColor *VMImportStateColor(vm_fw_state_t state) {
         @"This turns an IPSW you already have into the three files the "
         @"emulator accepts: kernel.macho, devicetree.bin and rootfs.img. "
         @"Nothing is downloaded, and no firmware ships with the app.\n\n"
+        @"Two ways in. Copy the IPSW into S5LBox > firmware using the Files "
+        @"app and tap Detect IPSW below — the file is read where it lands, so "
+        @"a 239 MB archive is not copied twice. Or use Choose an IPSW to pick "
+        @"one from anywhere else.\n\n"
         @"Every payload inside a 3.x IPSW is encrypted, and the keys are not "
         @"in the archive and cannot be worked out from it. S5LBox has none of "
         @"them. Where one is needed, this screen says which file needs it and "
-        @"what kind it is, and you supply it.\n\n"
-        @"Producing the three files is all this does. The app cannot boot them "
-        @"yet.";
+        @"what kind it is, and you supply it.";
     UIView *header = [[UIView alloc] initWithFrame:CGRectZero];
     [header addSubview:_intro];
     self.tableView.tableHeaderView = header;
@@ -295,7 +304,8 @@ static UIColor *VMImportStateColor(vm_fw_state_t state) {
     if (_haveReport) [visible addObject:@(VMImportSectionReport)];
     _visible = [visible copy];
 
-    _chooseRowCount = (_pickedURL && !_running) ? VMImportChooseRowCount : 1;
+    _chooseRowCount = (_pickedURL && !_running) ? VMImportChooseRowCount
+                                                : VMImportChooseRowCount - 1;
 }
 
 /* Visible index -> VMImportSection. Out of range answers Choose, which is the
@@ -488,6 +498,30 @@ estimatedHeightForRowAtIndexPath:(NSIndexPath *)indexPath {
                 cell.selectionStyle = UITableViewCellSelectionStyleDefault;
                 return cell;
             }
+            if (row == VMImportChooseRowDetect) {
+                NSArray<NSString *> *found =
+                    [[VMSettings sharedSettings] detectedArchivePaths];
+                if (found.count == 0) {
+                    cell.textLabel.text = @"No IPSW in the firmware folder";
+                    cell.textLabel.textColor = [UIColor secondaryLabelColor];
+                    cell.detailTextLabel.text =
+                        @"copy one into S5LBox > firmware in the Files app";
+                    cell.selectionStyle = UITableViewCellSelectionStyleNone;
+                } else {
+                    cell.textLabel.text = @"Detect IPSW";
+                    cell.detailTextLabel.text = found.count == 1
+                        ? [found.firstObject lastPathComponent]
+                        : [NSString stringWithFormat:@"%@ and %lu more",
+                             [found.firstObject lastPathComponent],
+                             (unsigned long)(found.count - 1)];
+                    cell.selectionStyle = _running
+                        ? UITableViewCellSelectionStyleNone
+                        : UITableViewCellSelectionStyleDefault;
+                    if (_running)
+                        cell.textLabel.textColor = [UIColor secondaryLabelColor];
+                }
+                return cell;
+            }
             cell.textLabel.text = @"Choose an IPSW...";
             if (_running) {
                 cell.textLabel.textColor = [UIColor secondaryLabelColor];
@@ -600,6 +634,19 @@ didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     switch ((VMImportSection)[self sectionAt:indexPath.section]) {
         case VMImportSectionChoose:
             if (_running) return;
+            if (row == VMImportChooseRowDetect) {
+                NSArray<NSString *> *found =
+                    [[VMSettings sharedSettings] detectedArchivePaths];
+                if (found.count == 0) return;
+                /*
+                 * A file inside our own container, so no security scope to
+                 * start and none to stop -- that whole dance exists for files
+                 * the picker hands over from somewhere else.
+                 */
+                _pickedURL = [NSURL fileURLWithPath:found.firstObject];
+                [self startImportOfURL:_pickedURL];
+                return;
+            }
             if (row == VMImportChooseRowAgain && _chooseRowCount > 1)
                 [self startImportOfURL:_pickedURL];
             else

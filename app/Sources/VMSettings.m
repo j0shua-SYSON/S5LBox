@@ -199,6 +199,112 @@ static const uint64_t kVMInstructionCaps[] = {
 
 #pragma mark - Firmware
 
+- (NSString *)documentsDirectory {
+    NSArray<NSString *> *documents = NSSearchPathForDirectoriesInDomains(
+        NSDocumentDirectory, NSUserDomainMask, YES);
+    return documents.firstObject;
+}
+
+- (BOOL)ensureUserVisibleDirectories {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *root = [self documentsDirectory];
+    if (root.length == 0) return NO;
+
+    /*
+     * firmware/ is where the three files live and where an IPSW is dropped.
+     * Machines/ is where per-machine work images go, and it is created here
+     * too so that a user who opens Files sees the shape of the thing rather
+     * than one folder that appears later for no visible reason.
+     */
+    NSArray<NSString *> *wanted = @[
+        [root stringByAppendingPathComponent:@"firmware"],
+        [root stringByAppendingPathComponent:@"Machines"],
+    ];
+    BOOL ok = YES;
+    for (NSString *dir in wanted) {
+        NSError *error = nil;
+        if (![fm createDirectoryAtPath:dir
+           withIntermediateDirectories:YES
+                            attributes:nil
+                                 error:&error]) {
+            if (![fm fileExistsAtPath:dir]) ok = NO;
+        }
+    }
+
+    /*
+     * A README, written once and never overwritten -- if the user edits or
+     * deletes it that is their answer, and rewriting it every launch would
+     * undo that silently.
+     */
+    NSString *readme = [[wanted.firstObject
+        stringByAppendingPathComponent:@"README.txt"] copy];
+    if (readme && ![fm fileExistsAtPath:readme]) {
+        NSString *text =
+            @"S5LBox firmware folder\n"
+            @"======================\n"
+            @"\n"
+            @"Put an IPSW here. Any file ending in .ipsw in this folder (or one\n"
+            @"level up, in the S5LBox folder itself) is found by the Firmware\n"
+            @"screen's \"Detect IPSW\" row -- no file picker needed.\n"
+            @"\n"
+            @"The importer produces three files, and they end up here too:\n"
+            @"\n"
+            @"    kernel.macho      the kernelcache, decrypted and decompressed\n"
+            @"    devicetree.bin    the device tree, decrypted\n"
+            @"    rootfs.img        the root filesystem, decrypted and expanded\n"
+            @"\n"
+            @"Every payload inside a 3.x IPSW is encrypted and the keys are NOT\n"
+            @"in the archive. S5LBox ships none and cannot compute any. The\n"
+            @"Firmware screen says which artefact needs which key; you supply\n"
+            @"them, and they are held in memory for that session only.\n"
+            @"\n"
+            @"Nothing here is downloaded. Use firmware you are entitled to use.\n";
+        [text writeToFile:readme atomically:YES
+                 encoding:NSUTF8StringEncoding error:NULL];
+    }
+    return ok;
+}
+
+- (NSArray<NSString *> *)detectedArchivePaths {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *root = [self documentsDirectory];
+    if (root.length == 0) return @[];
+
+    /*
+     * Both the firmware folder and Documents itself, because a user dropping a
+     * 239 MB file into "S5LBox" in Files is at least as likely as one who
+     * navigates into firmware/ first. Looking in the obvious place and the
+     * place we asked for costs one extra directory read.
+     */
+    NSArray<NSString *> *dirs = @[
+        [root stringByAppendingPathComponent:@"firmware"],
+        root,
+    ];
+    NSMutableArray<NSString *> *found = [NSMutableArray array];
+    NSMutableSet<NSString *> *seen = [NSMutableSet set];
+    for (NSString *dir in dirs) {
+        NSArray<NSString *> *names =
+            [fm contentsOfDirectoryAtPath:dir error:NULL];
+        for (NSString *name in names) {
+            if (![name.pathExtension.lowercaseString isEqualToString:@"ipsw"])
+                continue;
+            NSString *path = [dir stringByAppendingPathComponent:name];
+            if ([seen containsObject:path]) continue;
+            [seen addObject:path];
+            [found addObject:path];
+        }
+    }
+
+    /* Newest first: the one just copied in is the one meant. */
+    [found sortUsingComparator:^NSComparisonResult(NSString *a, NSString *b) {
+        NSDate *da = [[fm attributesOfItemAtPath:a error:NULL] fileModificationDate];
+        NSDate *db = [[fm attributesOfItemAtPath:b error:NULL] fileModificationDate];
+        if (!da || !db) return NSOrderedSame;
+        return [db compare:da];
+    }];
+    return [found copy];
+}
+
 - (NSString *)firmwareDirectory {
     NSArray<NSString *> *documents = NSSearchPathForDirectoriesInDomains(
         NSDocumentDirectory, NSUserDomainMask, YES);
