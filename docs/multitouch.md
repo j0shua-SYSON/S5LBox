@@ -259,15 +259,60 @@ So the minimum a device must do to be programmed is: accept a `0x30`-marked
 DATA packet of `14 + nbytes` octets, and answer `4B C1` to the `1A A1` that
 follows it.
 
-### 6.3 Not yet established
+### 6.3 The wake, and the execute
 
-The WAKE command's wire form ("sending MT_SPI_Z2_WAKE_CMD", `0xc0445fac`);
-the version read behind "Detected Z2 Version: 0x%08X" (`0xc0445654`); what
-`performCalibSeq` polls while it logs "Waiting for calibration to end"; and
-what the part must report after "about to execute" so that a later `isInHBPP`
-returns FALSE **without** `finishStarting` having already detached. That last
-one is the ordering question the whole design turns on, and it is not
-answerable from the packet format alone.
+**`MT_SPI_Z2_WAKE_CMD` is opcode `0xEE`**, sent by `0xc0445f2c` as an ordinary
+sixteen-octet command frame — the same shape `mtz2.c` already frames for every
+other opcode:
+
+```
+   EE 00 00 00 00 00 00 00 00 00 00 00 00 00 EE 00
+   ^opcode                                   ^ LE16 sum16(tx[0..13]) = 0x00EE
+```
+
+**"About to execute" is a twelve-octet packet** built by `0xc044490c`, and it
+is the one that ends the bootload:
+
+```
+   1D 53 18 00 10 00 00 01 00 00 00 29
+   ^^^^^ marker        checksum over [2..9] ^^^^^  sum16 = 0x0029
+```
+
+Its answer is **never examined** — `0xc0444a00` returns 1 unconditionally. So
+the packet's arrival, not its reply, is the event.
+
+### 6.4 What the model has to become
+
+The current design is a probe counter: TRUE once, FALSE forever. The correct
+design is a **state machine keyed on the bootload**, which is what removes the
+lie rather than relocating it:
+
+```
+   reset            -> in HBPP.  The probe answers TRUE for as long as this
+                       lasts, so BOTH finishStarting() and
+                       attemptToBootloadDevice() get the TRUE they need.
+   0xEE             -> wake, answered like any other command frame.
+   0x30 packet      -> consume 14 + nbytes octets.
+   1A A1            -> answer 4B C1.
+   1D 53 packet     -> leave HBPP. The part is now running the firmware it was
+                       handed, so every later probe answers FALSE, which is
+                       what a real programmed Z2 does and what lets the driver
+                       go on to interrogate it.
+```
+
+That ordering is the whole point: `finishStarting` runs **before**
+`attemptToBootloadDevice` (run96's console proves it — "detected HBPP. driver
+will be kept alive" precedes the retries by thousands of lines), so a single
+TRUE-then-FALSE bit satisfies the first and starves the second. Only the
+bootload itself can separate them honestly.
+
+### 6.5 Still not established
+
+The version read behind "Detected Z2 Version: 0x%08X" (`0xc0445654`) and what
+`performCalibSeq` (`0xc04455d0`, vtable `+0x88`) polls while it logs
+"Waiting for calibration to end". Both sit **after** the firmware download in
+`bootloadDevice()`'s sequence, and both must still return non-zero for the
+bootload to be counted as successful.
 
 ## 7. Downstream, once this is unblocked
 
