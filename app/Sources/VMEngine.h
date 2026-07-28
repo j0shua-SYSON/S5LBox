@@ -245,6 +245,35 @@ typedef NS_ENUM(NSUInteger, VMButton) {
  */
 - (BOOL)sendTouchAtGuestX:(int)x y:(int)y phase:(vm_touch_phase_t)phase;
 
+#pragma mark - Snapshots
+
+/*
+ * SAVE AND RESTORE THE WHOLE MACHINE, which core/src/snapshot.c has been able
+ * to do since long before this app asked it to.
+ *
+ * Both are REQUESTS, not actions. The machine may only be read or written at a
+ * point where nothing is executing, so each one is queued and performed by the
+ * emulator thread between instruction chunks -- the same safe point touches and
+ * button edges use, and for the same reason. Neither blocks the caller, and the
+ * outcome is reported on the console rather than returned, because by the time
+ * it is known this method has long since returned.
+ *
+ * YES is "the request was accepted", not "the snapshot was written".
+ *
+ * A RESTORE IS ONLY MEANINGFUL AGAINST THE WORK IMAGE IT WAS TAKEN FROM, and
+ * nothing here can check that for you. The snapshot holds the machine -- CPU,
+ * RAM, every device -- but the root filesystem lives in the work image on disk,
+ * outside it. Restoring a machine whose guest had files open into a work image
+ * that has since moved on gives a guest whose page cache disagrees with its own
+ * disk. That is why the default path sits beside the image it belongs to.
+ */
+- (BOOL)requestSnapshotSaveTo:(NSString *)path;
+- (BOOL)requestSnapshotLoadFrom:(NSString *)path;
+
+/* Where this machine's snapshot lives by default: beside its work image, so a
+ * machine and its checkpoints are copied, backed up and deleted together. */
+- (NSString *)defaultSnapshotPath;
+
 /* Touch delivery counters, for the status line and the log. `delivered` counts
  * reports the DEVICE accepted; it is the only one of these that means the
  * guest was actually offered a frame. */

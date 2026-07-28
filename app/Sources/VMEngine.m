@@ -38,6 +38,8 @@
 #import "VMInstanceStore.h"
 #import "VMSettings.h"
 
+#include "snapshot.h"
+
 #import <mach/mach.h>
 #import <pthread.h>
 #import <time.h>
@@ -167,6 +169,19 @@ static double vm_now(void) {
     BOOL             _buttons[VMButtonCount];
     BOOL             _discardedInputLogged;
     BOOL             _droppedTouchLogged;
+
+    /*
+     * A queued snapshot request. Under _lock like every other cross-thread
+     * field here; performed on the emulator thread between chunks, because a
+     * machine may only be read or written where nothing is executing.
+     *
+     * One slot, not a queue: a second request arriving before the first is
+     * served REPLACES it. Two checkpoints a millisecond apart are the same
+     * checkpoint, and a save that silently became two files would be worse
+     * than a save that was coalesced and said so.
+     */
+    unsigned         _snapRequest;   /* 0 none, 1 save, 2 load */
+    NSString        *_snapPath;
     /*
      * Touch reports waiting to be handed to the Z2.
      *
@@ -1124,6 +1139,103 @@ static double vm_now(void) {
         @"screen and thrown away; the guest is never told. Printed once.\n"];
 }
 
+#pragma mark - Snapshots
+
+- (NSString *)defaultSnapshotPath {
+    vm_instance_paths_t paths;
+    NSString *note = nil;
+    if (![self resolveFilesInto:&paths note:&note]) return nil;
+    if (paths.work_image[0] == '\0') return nil;
+    /* Beside the work image and named after it, so a machine and its
+     * checkpoints are copied, backed up and deleted as one thing. */
+    return [[NSString stringWithUTF8String:paths.work_image]
+            stringByAppendingPathExtension:@"snapshot"];
+}
+
+- (BOOL)queueSnapshot:(unsigned)what path:(NSString *)path {
+    if (path.length == 0) return NO;
+    pthread_mutex_lock(&_lock);
+    /*
+     * Only while the machine is running. A snapshot of a machine that has
+     * halted or was never started would restore to a state the guest never
+     * occupied, and a restore into one is worse: snapshot_load() requires a
+     * live machine of identical geometry with its bridges already armed, which
+     * is precisely what -start built.
+     */
+    BOOL ok = (_state == VMEngineStateRunning);
+    if (ok) {
+        _snapRequest = what;
+        _snapPath = [path copy];
+    }
+    pthread_mutex_unlock(&_lock);
+    if (!ok)
+        [self appendConsole:
+            @"[snapshot] ignored: the machine is not running. A snapshot is of "
+            @"a live machine, and a restore needs one to restore into.\n"];
+    return ok;
+}
+
+- (BOOL)requestSnapshotSaveTo:(NSString *)path {
+    return [self queueSnapshot:1u path:path];
+}
+
+- (BOOL)requestSnapshotLoadFrom:(NSString *)path {
+    return [self queueSnapshot:2u path:path];
+}
+
+/*
+ * Runs ONLY on the emulator thread, between chunks, with nothing executing and
+ * no lock held over the machine itself. snapshot_save() is documented not to
+ * modify the machine and snapshot_load() to leave it untouched on every
+ * malformed input, so a refusal here costs the run nothing.
+ */
+- (void)drainSnapshotRequest_emulatorThread {
+    pthread_mutex_lock(&_lock);
+    unsigned what = _snapRequest;
+    NSString *path = _snapPath;
+    _snapRequest = 0u;
+    _snapPath = nil;
+    pthread_mutex_unlock(&_lock);
+    if (!what || path.length == 0) return;
+
+    const char *cpath = path.fileSystemRepresentation;
+    if (!cpath) return;
+
+    if (what == 1u) {
+        snapshot_status_t st = snapshot_save(&_machine, cpath);
+        if (st == SNAP_OK) {
+            [self appendConsole:[NSString stringWithFormat:
+                @"[snapshot] saved %@ at %llu instructions\n",
+                path.lastPathComponent,
+                (unsigned long long)_machine.cpu.cycles]];
+        } else {
+            /* The save is atomic -- core completes the bytes alongside the
+             * destination and renames -- so an earlier checkpoint is still
+             * whatever it was. Worth saying, because the natural fear on a
+             * failed save is that it took the previous one with it. */
+            [self appendConsole:[NSString stringWithFormat:
+                @"[snapshot] SAVE FAILED: %s. Any earlier checkpoint at %@ is "
+                @"untouched.\n",
+                snapshot_strerror(st), path.lastPathComponent]];
+        }
+        return;
+    }
+
+    snapshot_status_t st = snapshot_load(&_machine, cpath);
+    if (st == SNAP_OK) {
+        [self appendConsole:[NSString stringWithFormat:
+            @"[snapshot] restored %@; the machine is now at %llu instructions. "
+            @"This is only coherent against the work image it was taken from -- "
+            @"nothing here can check that.\n",
+            path.lastPathComponent,
+            (unsigned long long)_machine.cpu.cycles]];
+    } else {
+        [self appendConsole:[NSString stringWithFormat:
+            @"[snapshot] RESTORE REFUSED: %s. The machine was not modified.\n",
+            snapshot_strerror(st)]];
+    }
+}
+
 #pragma mark - Spin sampler
 
 /*
@@ -1256,6 +1368,9 @@ static bool vm_spin_already_reported(const vm_spin_t *s, uint32_t region) {
              * this thread, between chunks, with nothing executing. */
             [self drainOneTouch_emulatorThread];
             [self drainOneButton_emulatorThread];
+            /* Same safe point, same reason: the machine is between
+             * instructions and this thread owns it. */
+            [self drainSnapshotRequest_emulatorThread];
 
             retired += s5l8900_run(&_machine, kVMChunkInstructions, &status);
 
