@@ -53,6 +53,50 @@ and `ios-build` run
 [`30004015807`](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30004015807)
 both completed successfully with the faultable raw bridge.
 
+### 2026-07-28, on the phone: the app boots to launchd, and three claims were withdrawn
+
+The table above is written from desktop runs. On an actual iPhone the app had
+never got past IOKit: it reached **11.5 G instructions without launchd ever
+starting**, where the desktop is at launchd before 1.5 G. The cause was not the
+emulator. `core/src/boot/bringup.c` had no un-match step, so the app left every
+device-tree nub matched — and `bootkernel` un-matches five of them by default
+for reasons its own switch help spells out. `/arm-io/mbx` matched hangs the boot
+in the PowerVR driver's reset poll; `/arm-io/sha1` matched sends
+`cs_validate_page`'s 4096-byte digests to a register file this VM does not
+model, so **launchd's first text page fails its signature and the boot spins on
+`cs_invalid_page` having printed nothing at all.** The app's own settings screen
+had been printing `9 switches are not applied as set: mbx, sha1, …` on every
+boot for weeks. `s5l_bringup_request_t::unmatch` now carries the step in the
+portable core, and the device reaches launchd, fsck, a mounted root and
+mDNSResponder inside its first 410 M instructions.
+
+Activation was the same shape and is also fixed: `rootfs_work_activation_entries()`
+has always existed and the app simply never called it.
+
+**Three retractions**, all from probes rather than reading, all recorded in
+`docs/BOOTLOG.md`:
+
+- `AppleARMPL080DMAC` **does** register as an `IODMAController` (twice), and
+  `IODMAController::getController` returns a real controller in **ten of eleven
+  calls**. The twelve-link chain from "no DMA channel" to "a tap changes
+  nothing" is withdrawn at links 1–3. What went wrong is worth keeping: a
+  vtable slot was read as a call site, a branch scan that structurally cannot
+  see virtual dispatch was treated as confirming it, and the Thumb core was
+  disassembled as ARM.
+- IOSurface's **fallback allocator never executes** (`captured 0`), so the
+  `IOBufferMemoryDescriptor::withOptions` analysis of the black screen was
+  wasted. The refusal is in the `/vram` path: `withSubRange(offset=0x96000,
+  length=0x96000)` — exactly one framebuffer, landing exactly on the published
+  pool's end — is refused, which points at the parent descriptor being shorter
+  than `/vram:reg` says. **`S5L_BRINGUP_VRAM_SURFACES` must not be changed on
+  the strength of this**; run86 already measured that knob and found it
+  backwards, and this is why.
+- The MSVC-only DNS failure is resolved; `core-tests` is green on
+  `windows-latest`.
+
+The lesson the day actually taught: measurement settled in minutes what reading
+had got confidently wrong over days.
+
 ---
 
 ## ✅ M0 — Pipeline online
