@@ -13,6 +13,10 @@
 //
 #import "VMSettings.h"
 
+#include <limits.h>
+#include <stdlib.h>
+#include <string.h>
+
 #import "VMOptions.h"
 
 NSString *const VMSettingsDidChangeNotification =
@@ -202,7 +206,39 @@ static const uint64_t kVMInstructionCaps[] = {
 - (NSString *)documentsDirectory {
     NSArray<NSString *> *documents = NSSearchPathForDirectoriesInDomains(
         NSDocumentDirectory, NSUserDomainMask, YES);
-    return documents.firstObject;
+    NSString *raw = documents.firstObject;
+    if (raw.length == 0) return raw;
+
+    /*
+     * PHYSICALLY RESOLVED, and this is not cosmetic.
+     *
+     * On iOS this comes back as /var/mobile/Containers/Data/Application/<id>/
+     * Documents, and /var is a SYMLINK to /private/var. rootfs_work.c walks
+     * every component of a path with AT_SYMLINK_NOFOLLOW and refuses any that
+     * is a link -- which is the right rule for a path a user typed, and which
+     * refuses this one at its very first component. The observed failure was
+     * "unsafe-path at source-path: source path traverses a symbolic link or
+     * '..'", and the emulator was correct to say it.
+     *
+     * So the fix is here rather than there: hand it the physical path and the
+     * walker's guarantee is untouched. realpath() is used rather than
+     * -stringByResolvingSymlinksInPath, which Apple documents as deliberately
+     * NOT resolving /private prefixes -- the exact prefix that matters.
+     *
+     * Resolved once and cached, because it cannot change while the app is
+     * running and realpath() touches the filesystem.
+     */
+    static NSString *resolved;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        char buf[PATH_MAX];
+        const char *in = [raw fileSystemRepresentation];
+        if (in && realpath(in, buf))
+            resolved = [[NSFileManager defaultManager]
+                stringWithFileSystemRepresentation:buf length:strlen(buf)];
+        if (resolved.length == 0) resolved = raw;   /* better than nothing */
+    });
+    return resolved;
 }
 
 - (BOOL)ensureUserVisibleDirectories {
@@ -306,10 +342,11 @@ static const uint64_t kVMInstructionCaps[] = {
 }
 
 - (NSString *)firmwareDirectory {
-    NSArray<NSString *> *documents = NSSearchPathForDirectoriesInDomains(
-        NSDocumentDirectory, NSUserDomainMask, YES);
-    NSString *root = documents.firstObject;
-    if (!root) return nil;
+    /* Through -documentsDirectory, so this is the physically resolved path.
+     * Recomputing the raw one here is what put a /var symlink back into the
+     * path handed to rootfs_work.c. */
+    NSString *root = [self documentsDirectory];
+    if (root.length == 0) return nil;
     return [root stringByAppendingPathComponent:@"firmware"];
 }
 

@@ -32,6 +32,10 @@ static NSString *const kErrorDomain = @"VMInstanceStore";
     return self;
 }
 
+#include <limits.h>
+#include <stdlib.h>
+#include <string.h>
+
 #pragma mark - Paths
 
 - (NSString *)containerDirectory {
@@ -44,6 +48,26 @@ static NSString *const kErrorDomain = @"VMInstanceStore";
                              withIntermediateDirectories:YES
                                               attributes:nil
                                                    error:NULL];
+
+    /*
+     * PHYSICALLY RESOLVED, for the same reason VMSettings' documents directory
+     * is, and it must happen AFTER the directory exists because realpath()
+     * resolves a path that is really there.
+     *
+     * This is the DESTINATION half. On iOS this begins /var/mobile/..., and
+     * /var is a symlink to /private/var; rootfs_work.c walks every component
+     * with AT_SYMLINK_NOFOLLOW and refuses any that is a link. Fixing only the
+     * source path would have moved the same refusal from "unsafe-path at
+     * source-path" to "unsafe-path at destination-path" and looked like a
+     * different bug.
+     */
+    char buf[PATH_MAX];
+    const char *in = [dir fileSystemRepresentation];
+    if (in && realpath(in, buf)) {
+        NSString *real = [[NSFileManager defaultManager]
+            stringWithFileSystemRepresentation:buf length:strlen(buf)];
+        if (real.length) return real;
+    }
     return dir;
 }
 

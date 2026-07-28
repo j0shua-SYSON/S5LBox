@@ -1433,8 +1433,31 @@ static bool host_file_stamp(host_file_t *file, file_stamp_t *stamp,
     return true;
 }
 
+/*
+ * `culprit`, when not NULL, receives the component that was refused -- the
+ * '..' or the symbolic link -- truncated into a caller-supplied buffer.
+ *
+ * It exists because the message without it cost a round trip. A user on iOS
+ * saw "source path traverses a symbolic link or '..'" and could not act on it;
+ * the component was "var", which on that platform is a symlink to /private/var
+ * and is the first thing in every container path. Naming it turns a report
+ * into a diagnosis.
+ */
+/* Copy one path component into the caller's buffer, truncated and always
+ * terminated. Silent when there is no buffer, which is what the callers that
+ * do not care pass. */
+static void note_component(char *out, size_t cap, const char *name) {
+    size_t n;
+    if (!out || cap == 0u || !name) return;
+    n = strlen(name);
+    if (n >= cap) n = cap - 1u;
+    memcpy(out, name, n);
+    out[n] = '\0';
+}
+
 static int open_directory_no_links(const char *path, int *system_error,
-                                   bool *unsafe) {
+                                   bool *unsafe, char *culprit,
+                                   size_t culprit_size) {
     char *copy = NULL;
     char *cursor;
     int current = -1;
@@ -1482,6 +1505,7 @@ static int open_directory_no_links(const char *path, int *system_error,
         }
         if (strcmp(cursor, "..") == 0) {
             *unsafe = true;
+            note_component(culprit, culprit_size, cursor);
             *end = saved;
             free(copy);
             (void)close(current);
@@ -1497,6 +1521,7 @@ static int open_directory_no_links(const char *path, int *system_error,
         }
         if (S_ISLNK(before.st_mode)) {
             *unsafe = true;
+            note_component(culprit, culprit_size, cursor);
             *end = saved;
             free(copy);
             (void)close(current);
@@ -1585,15 +1610,26 @@ static bool posix_open_source(const char *path, host_file_t *source,
                     "source has no safe file name");
         return false;
     }
-    parent_fd = open_directory_no_links(parent, &error, &unsafe);
+    char culprit[64];
+    culprit[0] = '\0';
+    parent_fd = open_directory_no_links(parent, &error, &unsafe,
+                                        culprit, sizeof culprit);
     if (parent_fd < 0) {
+        char said[160];
+        if (unsafe && culprit[0])
+            (void)snprintf(said, sizeof said,
+                           "source path traverses a symbolic link or '..' at "
+                           "component \"%s\"", culprit);
+        else if (unsafe)
+            (void)snprintf(said, sizeof said,
+                           "source path traverses a symbolic link or '..'");
+        else
+            (void)snprintf(said, sizeof said, "cannot open source directory");
         result_fail(result,
                     unsafe ? ROOTFS_WORK_PATH_UNSAFE :
                              (error == ENOMEM ? ROOTFS_WORK_NO_MEMORY :
                                                 ROOTFS_WORK_SOURCE_OPEN_FAILED),
-                    ROOTFS_WORK_STAGE_SOURCE_PATH, error,
-                    unsafe ? "source path traverses a symbolic link or '..'"
-                           : "cannot open source directory");
+                    ROOTFS_WORK_STAGE_SOURCE_PATH, error, said);
         free(parent);
         free(leaf);
         return false;
@@ -1699,7 +1735,11 @@ static bool posix_open_destination(const char *path,
                     "destination has no safe file name");
         return false;
     }
-    destination->descriptor = open_directory_no_links(parent, &error, &unsafe);
+    char dculprit[64];
+    dculprit[0] = '\0';
+    destination->descriptor = open_directory_no_links(parent, &error, &unsafe,
+                                                     dculprit,
+                                                     sizeof dculprit);
     free(parent);
     if (destination->descriptor < 0) {
         result_fail(result,
@@ -1707,7 +1747,11 @@ static bool posix_open_destination(const char *path,
                              (error == ENOMEM ? ROOTFS_WORK_NO_MEMORY :
                                                 ROOTFS_WORK_DESTINATION_OPEN_FAILED),
                     ROOTFS_WORK_STAGE_DESTINATION_PATH, error,
-                    unsafe ? "destination path traverses a symbolic link or '..'"
+                    unsafe && dculprit[0]
+                        ? "destination path traverses a symbolic link or '..' "
+                          "-- see the component named in the log"
+                        : unsafe
+                        ? "destination path traverses a symbolic link or '..'"
                            : "cannot open destination directory");
         return false;
     }
