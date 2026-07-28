@@ -316,10 +316,12 @@ static bool run_item(s5l_pl080_t *d, unsigned c, const arm_bus_t *bus) {
             pend >>= 8u * dwidth;
             pend_bytes -= dwidth;
             d->bytes_moved += dwidth;
+            ch->bytes += dwidth;
         }
     }
 
     d->items++;
+    ch->runs++;
     if (ch->ctrl & PL080_CTRL_I) {
         /* Terminal count. Raw always; whether it reaches the CPU is the ITC
          * mask's business, applied in masked_tc(). */

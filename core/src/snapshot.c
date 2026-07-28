@@ -133,8 +133,8 @@ SNAP_SIZE_GUARD(s5l_mtz2_t,        600,   "snap_mtz2");
 SNAP_SIZE_GUARD(s5l_usbotg_t,      4,     "snap_usbotg");
 /* Eight channels of five registers (160), the four controller-wide words, the
  * access and unknown-offset accounting, and the work/refusal counters. */
-SNAP_SIZE_GUARD(s5l_pl080_chan_t,  20,    "snap_pl080");
-SNAP_SIZE_GUARD(s5l_pl080_t,       336,   "snap_pl080");
+SNAP_SIZE_GUARD(s5l_pl080_chan_t,  40,    "snap_pl080");
+SNAP_SIZE_GUARD(s5l_pl080_t,       496,   "snap_pl080");
 SNAP_SIZE_GUARD(s5l_nor_entry_t,   12,    "snap_nor");
 SNAP_SIZE_GUARD(s5l_nor_t,         208,   "snap_nor");
 SNAP_SIZE_GUARD(s5l_stub_t,        56,    "snap_stubs");
@@ -162,7 +162,7 @@ SNAP_SIZE_GUARD(s5l_stub_t,        56,    "snap_stubs");
  * the byte format DOES change, so SNAPSHOT_VERSION moved to 17. Measured with
  * a sizeof probe rather than arithmetic -- the first two guesses were wrong,
  * which is the entire reason this guard is a compile error. */
-SNAP_SIZE_GUARD(s5l8900_t,         44544, "snap_mach");
+SNAP_SIZE_GUARD(s5l8900_t,         44864, "snap_mach");
 #endif
 
 /* ---------------------------------------------------------------- the IO --- */
@@ -776,6 +776,7 @@ static void snap_pl080(sn_io_t *io, s5l_pl080_t *d) {
     for (unsigned i = 0; i < S5L_PL080_CHANNELS; i++) {
         F32(d->ch[i].src); F32(d->ch[i].dst); F32(d->ch[i].lli);
         F32(d->ch[i].ctrl); F32(d->ch[i].cfg);
+        F64(d->ch[i].runs); F64(d->ch[i].bytes);
     }
     F32(d->config); F32(d->sync); F32(d->raw_tc); F32(d->raw_err);
     F64(d->reads); F64(d->writes);

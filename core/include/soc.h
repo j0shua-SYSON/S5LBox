@@ -2929,9 +2929,21 @@ void     s5l_usbotg_write(s5l_usbotg_t *u, uint32_t off, uint32_t val);
 #define PL080_CTRL_DI          0x08000000u
 #define PL080_CTRL_I           0x80000000u
 
-/* The five per-channel registers, in the order the driver programs them. */
+/* The five per-channel registers, in the order the driver programs them,
+ * plus what this channel actually did.
+ *
+ * PER-CHANNEL, because the controller-wide `items` and `bytes_moved` were
+ * misread once already: run104's `dmac1 items 210 bytes 812340` was taken as
+ * evidence that the digitizer's channel was moving 812 KB into SPI1, when the
+ * figure covers every channel on the controller. A channel's own registers at
+ * rest cannot settle it either -- a PL080 clears the size and the enable bit
+ * on terminal count, so a completed transfer and one that never started look
+ * identical. These two counters are the difference.
+ */
 typedef struct {
     uint32_t src, dst, lli, ctrl, cfg;
+    uint64_t runs;    /* items this channel completed */
+    uint64_t bytes;   /* bytes it delivered to its destination */
 } s5l_pl080_chan_t;
 
 typedef struct {

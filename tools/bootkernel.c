@@ -22741,8 +22741,21 @@ static void dmac_report(void) {
         for (unsigned c = 0; c < S5L_PL080_CHANNELS; c++) {
             const s5l_pl080_chan_t *ch = &d->ch[c];
             if (!ch->src && !ch->dst && !ch->ctrl && !ch->cfg) continue;
-            printf("           ch%u src %08x dst %08x ctrl %08x cfg %08x%s\n",
+            /*
+             * runs/bytes are what this CHANNEL did. The registers beside them
+             * are only where it came to rest, and at rest a completed transfer
+             * is indistinguishable from one that never started: the part counts
+             * the size down to zero and clears its own enable bit on terminal
+             * count. run104 read exactly that state as "initialised and never
+             * ran" and it was recorded as fact. These two numbers are the
+             * difference, and the controller-wide totals cannot give it because
+             * they cover all eight channels at once.
+             */
+            printf("           ch%u src %08x dst %08x ctrl %08x cfg %08x"
+                   "  runs %llu  bytes %llu%s\n",
                    c, ch->src, ch->dst, ch->ctrl, ch->cfg,
+                   (unsigned long long)ch->runs,
+                   (unsigned long long)ch->bytes,
                    (ch->cfg & PL080_CFG_EN) ? "  ENABLED" : "");
         }
     }
