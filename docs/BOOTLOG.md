@@ -2315,6 +2315,45 @@ at 0x3cc10000(0xea9d6000)` — and uart4 still carried **zero bytes**. The
 milestone is unchanged.
 
 
+### 2026-07-28: run118 -- a bigger /vram pool does NOT fix the IOSurface refusal
+
+The A/B, with `S5L_BRINGUP_VRAM_SURFACES` at 4 instead of 2 and enough budget
+to pass the point where the warning fires:
+
+```
+  systemShutdown false
+  IOSurface warning: buffer allocation failed.  320 x 480 fmt: 42475241 size: 614400 bytes
+```
+
+**Unchanged.** So the space hypothesis is retracted, and with it the reading of
+run115 that produced it -- that both `withSubRange` calls took the same
+`0x96000` slot because only one surface fits, and a third concurrent one has
+nowhere to go. That would have been fixed by doubling the pool, and it was not.
+
+This also settles run86 in the other direction. Its "three surfaces measured
+strictly worse than two" was not a confounded result waiting to be re-run: the
+pool size is simply not the variable. `S5L_BRINGUP_VRAM_SURFACES` stays at 2,
+and the source was never committed at 4 -- only the experiment binary was.
+
+**What is actually known about the refusal, all measured:**
+
+  - the parent descriptor is the FULL pool, `0x12c000`, exactly as /vram:reg
+    publishes it (run111)
+  - `offset + length` is `0x12c000`, and the bounds test is `bhi`, strictly
+    greater -- so it PASSES (run111)
+  - both `withSubRange` calls that happen RETURN NON-NULL descriptors,
+    `c4107f00` and `c4909f00` (run115)
+  - the fallback allocator is never entered at all, `captured 0` (run110)
+  - and the warning still fires once
+
+So the failing allocation is one that never reaches `withSubRange`, in a run
+where every call that does reach it succeeds. That points at the per-region
+search above it at `0xc05243bc` deciding no region is usable -- for a reason
+that is not the pool's size, since doubling it changed nothing.
+
+The next measurement is inside that loop: what it tests per region, and which
+test fails. Not another guess about capacity.
+
 ### 2026-07-28: run121 -- the Z2 acknowledges and consumes, for the first time
 
 With the three data-path defects fixed, the digitizer's own counters move for
