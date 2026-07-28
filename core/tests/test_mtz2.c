@@ -1720,6 +1720,86 @@ static void test_machine_wires_the_device_and_its_attention_line(void) {
  * worse — a restore that reset `hbpp` to its power-on true would make the next
  * probe, which is one of attemptToBootloadDevice's, say "in HBPP".
  */
+/*
+ * TWO DATA PACKETS BACK TO BACK, which is the only way they ever actually
+ * arrive and the one case nothing tested.
+ *
+ * The bootload above sends one packet per transfer, with the framer starting
+ * from idle each time. On real hardware the driver hands the whole packetised
+ * firmware image to the DMA controller in one go -- run128 measured exactly
+ * 54,156 octets moved by ch5 with the packet headers inside that stream -- so
+ * every packet after the first begins at whatever octet the previous one
+ * ended on. If a length is off by even one, the next opcode lands one octet
+ * late, is not an opcode, and the rest of the image is read as garbage.
+ *
+ * run128's signature is consistent with exactly that: unknown-opcodes 192 with
+ * last 0x00, which is what firmware payload looks like when it is being read
+ * as commands. This test is the cheap way to find out whether the framer or
+ * the stream is at fault, without a three-billion-instruction boot.
+ */
+static unsigned build_data_packet(uint8_t *out, uint32_t addr,
+                                  const uint32_t *words, unsigned nwords) {
+    unsigned n = 0;
+    out[n++] = MTZ2_OP_HBPP_DATA; out[n++] = MTZ2_HBPP_DATA_M2;
+    out[n++] = (uint8_t)(nwords >> 8); out[n++] = (uint8_t)(nwords);
+    out[n++] = (uint8_t)(addr >> 8);  out[n++] = (uint8_t)(addr);
+    out[n++] = (uint8_t)(addr >> 24); out[n++] = (uint8_t)(addr >> 16);
+    uint16_t hsum = s5l_mtz2_sum16(out + 2, 6u);
+    out[n++] = (uint8_t)(hsum >> 8);  out[n++] = (uint8_t)(hsum);
+    const unsigned payload_start = n;
+    for (unsigned i = 0; i < nwords; i++) {
+        out[n++] = (uint8_t)(words[i] >> 8);  out[n++] = (uint8_t)(words[i]);
+        out[n++] = (uint8_t)(words[i] >> 24); out[n++] = (uint8_t)(words[i] >> 16);
+    }
+    uint32_t psum = 0;
+    for (unsigned i = payload_start; i < n; i++) psum += out[i];
+    out[n++] = (uint8_t)(psum >> 8);  out[n++] = (uint8_t)(psum);
+    out[n++] = (uint8_t)(psum >> 24); out[n++] = (uint8_t)(psum >> 16);
+    return n;
+}
+
+static void test_back_to_back_data_packets_stay_in_step(void) {
+    s5l_mtz2_t dev;
+    s5l_spi_slave_t s;
+    uint8_t tx[128], rx[128];
+    s5l_mtz2_reset(&dev);
+    s5l_mtz2_bind(&dev, &s);
+    release_reset(&dev);
+
+    /* Put the device in HBPP the way the driver does, so DATA is routed. */
+    memset(tx, 0, sizeof tx);
+    tx[0] = 0x1au; tx[1] = 0xa1u;
+    xfer(&s, tx, rx, MTZ2_ATN_PROBE);
+
+    static const uint32_t a[3] = { 0x11223344u, 0x55667788u, 0x99aabbccu };
+    static const uint32_t b[2] = { 0xdeadbeefu, 0xfeedfaceu };
+
+    unsigned n = build_data_packet(tx, 0x22000000u, a, 3u);
+    CHECK(n == 14u + 12u, "first packet is %u octets, expected 26", n);
+    unsigned n2 = build_data_packet(tx + n, 0x22000010u, b, 2u);
+    CHECK(n2 == 14u + 8u, "second packet is %u octets, expected 22", n2);
+
+    const uint64_t unknown_before = dev.unknown_opcodes;
+
+    /* ONE transfer, no gap -- exactly what the DMA controller produces. */
+    xfer(&s, tx, rx, n + n2);
+
+    CHECK(dev.hbpp_data_packets == 2u,
+          "back-to-back DATA framed %llu packet(s), expected 2",
+          (unsigned long long)dev.hbpp_data_packets);
+    CHECK(dev.hbpp_data_bytes == 20u,
+          "back-to-back DATA carried %llu payload octet(s), expected 20",
+          (unsigned long long)dev.hbpp_data_bytes);
+    CHECK(dev.unknown_opcodes == unknown_before,
+          "the framer lost step: %llu octet(s) were read as opcodes and were "
+          "not, last 0x%02x",
+          (unsigned long long)(dev.unknown_opcodes - unknown_before),
+          dev.last_unknown_op);
+    CHECK(dev.len == 0u && dev.pos == 0u,
+          "the framer ended inside a packet: len=%u pos=%u",
+          (unsigned)dev.len, (unsigned)dev.pos);
+}
+
 static void test_snapshot_carries_the_protocol_position(void) {
     s5l8900_t src, dst;
     uint8_t *blob = NULL;
@@ -1832,6 +1912,7 @@ int main(void) {
     test_mutations_are_caught();
     test_an_injection_reaches_the_cpu_through_the_cascade();
     test_machine_wires_the_device_and_its_attention_line();
+    test_back_to_back_data_packets_stay_in_step();
     test_snapshot_carries_the_protocol_position();
     test_snapshot_rejects_impossible_mtz2_state();
     printf("  %d passed, %d failed\n", g_pass, g_fail);
