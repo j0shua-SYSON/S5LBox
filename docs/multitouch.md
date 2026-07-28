@@ -420,41 +420,66 @@ neither `fll-mval` nor `cal-dl-addr`, but `0xc04443a4` defaults them to
 `0x16e4` and `0x400200`, so a missing property is not the blocker. See
 `docs/BOOTLOG.md` run101.
 
-### 6.11 Where the firmware is, and an unresolved contradiction
+### 6.11 Where the firmware is -- RETRACTED, and what run102 measured instead
 
-`bootloadDevice()`'s FIRST step is the download. `+0x8c` (`0xc0444370`) is only
-a dispatcher -- it tests `this->0x44` and tail-calls the bootloader vtable's
-`+0x90` (`0xc0445144`, "sending preconstructed firmware bytes") or `+0x94`
-(`0xc04452c8`, "sending unconstructed firmware bytes"). Both take the image
-from `this->0x20`, an OSData the property reader at `0xc04443e4` fills.
+**The claim previously in this section was wrong and is withdrawn.** It said the
+Z2 firmware is not in the kernelcache, on the grounds that `__PRELINK_INFO`
+holds no `Firmware`, `Constructed Firmware`, `Calibration Data` or
+`PreconstructedBootloadPacketType` key and no `<data>` blob larger than 1,756
+characters. Those searches were accurate; **the conclusion drawn from them was
+not**. The section noted that it contradicted run65 and said a measurement
+would decide it. It did, and run65 was right.
 
-run101 sent nothing at all, so the question is where that OSData comes from.
+**run102**, eight kernel probes:
 
-**The kernelcache does not contain it.** `__PRELINK_INFO` is 242,664 bytes of
-plist and holds **no** `<key>Firmware</key>`, `<key>Constructed Firmware</key>`,
-`<key>Calibration Data</key>` or `<key>PreconstructedBootloadPacketType</key>`.
-Its largest `<data>` blob is 1,756 characters, which is
-`HIDPointerAccelerationTable`; a 54,156-byte image would be roughly 72,000
-characters of base64 and there is nothing of that order anywhere in it.
+| probe | captures |
+|---|---|
+| `0xc0442670` `finishStarting` | 1 (control) |
+| `0xc0441008` `isInHBPP` | 4 (control) |
+| `0xc04414c4` `attemptToBootloadDevice` | **3** |
+| `0xc044153c` the object-creation result | **3** |
+| `0xc0445860` `bootloadDevice` | **3** |
+| `0xc0444370` the `+0x8c` dispatcher | **3** |
+| `0xc0445144` **the preconstructed sender** | **3** |
+| `0xc04452c8` the unconstructed sender | 0 |
 
-The N82 personality names `mt-merge-personality = Z2F52,1`, which resolves to
-`AppleMultitouchSPI.kext/PlugIns/AppleMultitouchSPIZ2F52.kext`
-(`com.apple.driver.AppleMultitouchSPIZ2F52`). That plugin IS in the cache, and
-its personality carries no firmware either.
+So `attemptToBootloadDevice` now gets its TRUE three times where it used to get
+FALSE, the bootloader object is created rather than returning NULL,
+`bootloadDevice()` is entered, the dispatcher picks the **preconstructed** arm,
+and the sender that logs "sending preconstructed firmware bytes" runs. The
+register captures confirm the chain: the sender is entered with
+`lr = 0xc0444390`, which is the dispatcher's own `ldr pc,[r3,#0x90]`.
 
-**AND THAT CONTRADICTS run65**, which watched this same driver reach
-`MTSPIBootloader_Z2::bootloadDevice() / sending preconstructed firmware bytes`
-and begin pushing. Both readings cannot be right. Either the image reaches the
-driver by a route this search did not cover -- a plugin `__DATA` section rather
-than a plist property, or the root filesystem rather than the cache -- or
-run65's log line was reached without an image behind it.
+**The firmware therefore reaches the driver by some route this project has not
+located.** A plugin `__DATA` section rather than a plist property is the
+obvious candidate; the search that failed only covered `__PRELINK_INFO`. Where
+it lives is still unknown and is no longer on the critical path, because the
+driver clearly has it.
 
-**This is recorded as an open contradiction rather than resolved by choosing
-the more convenient half.** run102 is the measurement: kernel probes on
-`attemptToBootloadDevice`, the object-creation call whose NULL return would
-bail silently (`0xc044153c`, where `r0` is the result), `bootloadDevice`, the
-dispatcher and both senders, with `isInHBPP` and `finishStarting` as positive
-controls. Whichever probe is the last to fire names the step that gives up.
+### 6.12 What is actually blocking, as of run102
+
+The sender is entered and the device receives nothing, so it stops between the
+two. There is exactly one branch there that can do that (`0xc04451b0`):
+
+```
+    ldrb r3, [r5, #0x2c]      ; the bootloader's use-DMA flag
+    cmp  r3, #0
+    beq  0xc04451f4           ; PIO   -> v[0x368] at 0xc0445224
+    cmp  r6, #0xff            ; r6 = the firmware length
+    bls  0xc04451f4           ; 255 or fewer octets -> PIO anyway
+    ...                       ; DMA   -> v[0x360] at 0xc04451ec
+```
+
+and the guest's own console says **`AppleMultitouchZ2SPI: using DMA for
+bootloading`**, which is `this->0x2c` being non-zero.
+
+`core/src/soc/mtz2.c` currently records the opposite as settled: *"It is NOT
+blocked by DMA, which was the standing objection: MTSPIBootloader_Z2 pushes
+through the ordinary SPI entry `v[0x368]`."* That reading came from the three
+`v[0x368]` sites in the calibration senders. **It missed `v[0x360]` at
+`0xc04451ec`, which is a different slot on the firmware path**, and the flag
+that chooses it is one the console announces. run103 is measuring which arm is
+taken; until it reports, this is a strong hypothesis and not a result.
 
 ### 6.10 The complete HBPP command set
 
