@@ -253,6 +253,31 @@ typedef struct {
     bool no_memory_node;      /* leave /memory reg at the template's zero */
 
     /*
+     * DEVICE-TREE NODES TO UN-MATCH, by path, before the tree is published.
+     *
+     * Un-matching is how this project says "this machine does not have that
+     * peripheral". Writing 'x' over the first byte of `compatible` leaves the
+     * node, its phandle and every reference to it exactly where they were, and
+     * only stops IOKit finding a driver for it. Nothing is deleted, so nothing
+     * that indexes the tree by offset or phandle can be thrown off.
+     *
+     * It is not cosmetic, and these are not hypothetical. /arm-io/mbx left
+     * matched is the difference between a boot and a hang: the PowerVR driver
+     * busy-polls a reset bit in a register block this VM does not model. So is
+     * /arm-io/sha1, whose hardware hook sends every exactly-4096-byte digest --
+     * the size cs_validate_page asks for -- to a register file we do not model,
+     * after which launchd's first text page fails its signature and the boot
+     * spins on cs_invalid_page forever, having printed nothing.
+     *
+     * A path that is absent, or whose node carries no `compatible`, FAILS the
+     * bring-up rather than being skipped. A caller that asked for a device to
+     * be absent and silently got it present would go on to debug a machine
+     * that is not the one it thinks it configured.
+     */
+    const char *const *unmatch;
+    unsigned unmatch_count;
+
+    /*
      * boot_args Revision and Version. Version 6 is MEASURED, not guessed:
      * pe_identify_machine() rejects anything else on this kernel. Zero here
      * means "the default", so a zeroed request is still correct.
@@ -308,6 +333,7 @@ typedef struct {
     uint32_t devicetree_va;        /* what boot_args publishes: VIRTUAL      */
     uint32_t devicetree_size;
     unsigned devicetree_patches;   /* properties actually rewritten          */
+    unsigned devicetree_unmatched; /* nodes whose compatible was struck out  */
 
     uint32_t boot_args_pa;
     uint32_t raw_bounce_pa;        /* faultable-uiomove bounce reservation   */

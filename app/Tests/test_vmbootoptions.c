@@ -132,7 +132,10 @@ static void test_applied_rows_reach_the_request(void) {
           "turning memory-reg off did not set no_memory_node");
     CHECK(!report.row[lcd].effective && !report.row[mem].effective,
           "a row turned off still reports as effective");
-    CHECK(report.applied == 2u, "%u rows applied, expected 2", report.applied);
+    /* The two request opt-outs plus the five nubs, which became applied rows
+     * when bring-up learned to un-match. Counted rather than left open so that
+     * a sixth row quietly joining them has to be a deliberate edit here. */
+    CHECK(report.applied == 7u, "%u rows applied, expected 7", report.applied);
 
     /* Nothing else in the request may be touched. no_framebuffer in
      * particular: the app never turns the display off, and a mapping that
@@ -162,17 +165,34 @@ static void test_applied_rows_reach_the_request(void) {
  * terminates PPP.
  */
 static const char *const EXPECTED_OVERRIDDEN_AT_DEFAULT[] = {
-    "mbx", "sha1", "baseband", "spi2", "usb-otg", "activate", "nat"
+    "activate", "nat"
 };
 
-static void test_untouched_installation_is_already_lying(void) {
+/*
+ * THE FIVE NUBS REACH THE MACHINE, and this is the test that says so.
+ *
+ * It used to assert the exact opposite -- that every nub stayed matched
+ * whatever its switch said -- and it passed for as long as that was true. That
+ * was not a harmless inaccuracy. Left matched, /arm-io/mbx hangs the boot in
+ * the PowerVR driver's reset poll, and /arm-io/sha1 sends cs_validate_page's
+ * 4096-byte digests to a register file this VM does not model, so launchd's
+ * first text page fails its signature. An iPhone running the app reached
+ * 11.5 G instructions without launchd ever starting, while the desktop -- which
+ * un-matches both by default -- was at launchd before 1.5 G.
+ *
+ * A test that pins a bug in place is worse than no test, because it makes the
+ * bug look like a decision. This one pins the fix.
+ */
+static void test_untouched_installation_reaches_the_machine(void) {
     bool values[VM_BOOT_OPTION_MAX];
     vm_boot_options_report_t report;
+    s5l_bringup_request_t request;
     const unsigned want = (unsigned)(sizeof EXPECTED_OVERRIDDEN_AT_DEFAULT /
                                      sizeof EXPECTED_OVERRIDDEN_AT_DEFAULT[0]);
 
     defaults_into(values);
-    vm_boot_options_apply(values, vm_option_count(), NULL, &report);
+    memset(&request, 0, sizeof request);
+    vm_boot_options_apply(values, vm_option_count(), &request, &report);
 
     CHECK(report.overridden == want,
           "%u rows are overridden at their defaults, expected %u",
@@ -192,35 +212,66 @@ static void test_untouched_installation_is_already_lying(void) {
               EXPECTED_OVERRIDDEN_AT_DEFAULT[i], report.summary);
     }
 
-    /* The five nubs stay matched, which is the ON thing, whatever is asked. */
     static const char *const NUBS[] = {
         "mbx", "sha1", "baseband", "spi2", "usb-otg"
     };
-    for (unsigned i = 0; i < sizeof NUBS / sizeof NUBS[0]; i++) {
+    const unsigned nub_n = (unsigned)(sizeof NUBS / sizeof NUBS[0]);
+
+    for (unsigned i = 0; i < nub_n; i++) {
         int index = index_of(NUBS[i]);
         if (index < 0) continue;
-        CHECK(report.row[index].outcome == VM_BOOT_OPTION_IGNORED,
-              "\"%s\" claims to reach the machine", NUBS[i]);
-        CHECK(report.row[index].effective,
-              "\"%s\" claims the nub is un-matched", NUBS[i]);
-        CHECK(report.row[index].note &&
-              strstr(report.row[index].note, "match") != NULL,
-              "\"%s\" does not say the nub stays matched: \"%s\"",
-              NUBS[i], report.row[index].note ? report.row[index].note : "");
+        CHECK(report.row[index].outcome == VM_BOOT_OPTION_APPLIED,
+              "\"%s\" does not reach the machine", NUBS[i]);
+        CHECK(report.row[index].effective == report.row[index].requested,
+              "\"%s\" is not honoured as set", NUBS[i]);
+        CHECK(!report.row[index].effective,
+              "\"%s\" is matched at its default", NUBS[i]);
+        CHECK(report.row[index].note == NULL,
+              "\"%s\" is applied and still carries a caveat", NUBS[i]);
     }
 
-    /* Turning a nub ON is the one direction that happens to be honest: the
-     * user asks for matched and gets matched. It must NOT then be counted as
-     * an override, or the warning becomes noise nobody reads. */
+    /* Cleared is the default for all five, so all five are struck, and the
+     * request points at exactly the list the report published. */
+    CHECK(report.unmatch_count == nub_n,
+          "%u nodes un-matched at defaults, expected %u",
+          report.unmatch_count, nub_n);
+    CHECK(request.unmatch_count == report.unmatch_count,
+          "the request carries %u un-match paths, the report %u",
+          request.unmatch_count, report.unmatch_count);
+    CHECK(request.unmatch == report.unmatch,
+          "the request does not point at the report's list");
+
+    /* By path, not by count: five of the wrong nodes would pass a count. */
+    static const char *const PATHS[] = {
+        "arm-io/mbx", "arm-io/sha1", "baseband", "arm-io/spi2", "arm-io/usb-otg"
+    };
+    for (unsigned i = 0; i < nub_n; i++) {
+        bool found = false;
+        for (unsigned j = 0; j < report.unmatch_count; j++)
+            if (report.unmatch[j] && !strcmp(report.unmatch[j], PATHS[i]))
+                found = true;
+        CHECK(found, "/%s is not in the un-match list", PATHS[i]);
+    }
+
+    /*
+     * Setting a nub asks for it to stay matched, and that is honoured too: it
+     * leaves the list, and it is still not an override, because the machine
+     * did what the switch said.
+     */
     defaults_into(values);
-    for (unsigned i = 0; i < sizeof NUBS / sizeof NUBS[0]; i++) {
+    for (unsigned i = 0; i < nub_n; i++) {
         int index = index_of(NUBS[i]);
         if (index >= 0) values[index] = true;
     }
-    vm_boot_options_apply(values, vm_option_count(), NULL, &report);
-    CHECK(report.overridden == want - 5u,
+    memset(&request, 0, sizeof request);
+    vm_boot_options_apply(values, vm_option_count(), &request, &report);
+    CHECK(report.unmatch_count == 0u,
+          "matching all five nubs still un-matches %u", report.unmatch_count);
+    CHECK(request.unmatch == NULL,
+          "an empty list is published as a pointer rather than NULL");
+    CHECK(report.overridden == want,
           "matching all five nubs leaves %u overrides, expected %u",
-          report.overridden, want - 5u);
+          report.overridden, want);
 }
 
 /*
@@ -431,7 +482,7 @@ int main(void) {
 
     test_map_covers_the_table();
     test_applied_rows_reach_the_request();
-    test_untouched_installation_is_already_lying();
+    test_untouched_installation_reaches_the_machine();
     test_fixed_rows();
     test_provisioned_row();
     test_missing_and_short_value_arrays();

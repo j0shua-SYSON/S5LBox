@@ -102,6 +102,18 @@ typedef struct {
     /* One line naming the overridden and provisioned rows. Empty when there is
      * nothing to say, which today never happens -- see the note above. */
     char summary[VM_BOOT_OPTIONS_SUMMARY_CAPACITY];
+    /*
+     * Backing store for s5l_bringup_request_t::unmatch, which is only a pointer
+     * and does not own what it points at. It lives here rather than in a static
+     * because two machines may be configured at once, and the report already
+     * outlives the bring-up call that reads it -- VMFirmwareBoot.c holds both
+     * across s5l_bringup().
+     *
+     * The strings themselves are literals from this file's table, so only the
+     * pointers need somewhere to sit.
+     */
+    const char *unmatch[VM_BOOT_OPTION_MAX];
+    unsigned unmatch_count;
 } vm_boot_options_report_t;
 
 /*

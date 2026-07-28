@@ -24,6 +24,9 @@ typedef enum {
     MAP_NO_MEMORY_NODE,
     /* rootfs_work_create()'s ca_software_render, at image-creation time. */
     MAP_PROVISION_CA_SOFTWARE_RENDER,
+    /* A device-tree nub. Set means "leave it matched"; clear un-matches it
+     * through s5l_bringup_request_t::unmatch. */
+    MAP_UNMATCH,
     /* Bring-up always does the thing; the switch is not consulted. */
     MAP_FIXED_ON,
     /* Nothing in the app does the thing; the switch is not consulted. */
@@ -34,30 +37,42 @@ static const struct {
     const char *name;             /* VMOptions.c's spelling, exactly */
     unsigned char kind;           /* vm_boot_map_kind_t              */
     const char *note;             /* NULL only for the two applied rows */
+    const char *path;             /* MAP_UNMATCH only: the node to strike */
 } VM_BOOT_MAP[] = {
     /*
-     * THE FIVE NUBS. core/src/boot/bringup.c has no un-match step of any kind
-     * -- grep it for "unmatch" and there is nothing to find. bootkernel.c does
-     * this with a private dt_unmatch() at line 2308 and calls it five times;
-     * none of that is in the portable core, so the app's boot leaves every one
-     * of these matched. That is the OPPOSITE of the table's own default for
-     * all five, so these are overrides on an installation nobody has touched.
+     * THE FIVE NUBS, and they are live again.
+     *
+     * This block used to read "bring-up has no un-match step -- grep it for
+     * unmatch and there is nothing to find", and that was true and it cost a
+     * boot. On an iPhone 17 the app left all five matched and the guest hung:
+     * first burning ~51 M instructions inside AppleMBX+0xb440, then reaching
+     * 11.5 G without launchd ever starting. Both are named in bootkernel's own
+     * switch help -- the PowerVR driver busy-polls a reset bit in a register
+     * block we do not model, and the sha1 hardware hook makes launchd's first
+     * text page fail its signature so the boot spins on cs_invalid_page. The
+     * desktop never saw either, because bootkernel un-matches both by default.
+     *
+     * s5l_bringup_request_t::unmatch now carries the same step in the portable
+     * core, so these are ordinary rows: set leaves the nub matched, clear
+     * strikes its `compatible`. The table's defaults already had all five
+     * clear, which is why this fix changes behaviour without changing anybody's
+     * settings.
      */
-    { "mbx", MAP_FIXED_ON,
-      "/arm-io/mbx stays matched: the app's bring-up has no device-tree "
-      "un-match step, so the PowerVR driver probes whatever this says." },
-    { "sha1", MAP_FIXED_ON,
-      "/arm-io/sha1 stays matched, for the same reason: bring-up un-matches "
-      "no nub." },
-    { "baseband", MAP_FIXED_ON,
-      "/baseband stays matched, for the same reason: bring-up un-matches no "
-      "nub." },
-    { "spi2", MAP_FIXED_ON,
-      "/arm-io/spi2 stays matched, for the same reason: bring-up un-matches "
-      "no nub." },
-    { "usb-otg", MAP_FIXED_ON,
-      "/arm-io/usb-otg stays matched, for the same reason: bring-up un-matches "
-      "no nub." },
+    /* Un-matched, the PowerVR driver never probes. Matched, it busy-polls a
+     * reset bit in a register block this VM does not model, and the boot
+     * hangs -- ~51 M instructions inside AppleMBX+0xb440 and climbing. */
+    { "mbx", MAP_UNMATCH, NULL, "arm-io/mbx" },
+    /* Matched, IOCryptoAcceleratorFamily installs a sha1_hardware_hook and
+     * every exactly-4096-byte digest -- the size cs_validate_page asks for --
+     * goes to a register file this VM does not model. launchd's first text
+     * page then fails its signature and the boot spins on cs_invalid_page,
+     * having printed nothing at all. */
+    { "sha1", MAP_UNMATCH, NULL, "arm-io/sha1" },
+    /* This machine has no modem for the driver to find. */
+    { "baseband", MAP_UNMATCH, NULL, "baseband" },
+    /* The baseband's bus. */
+    { "spi2", MAP_UNMATCH, NULL, "arm-io/spi2" },
+    { "usb-otg", MAP_UNMATCH, NULL, "arm-io/usb-otg" },
 
     /*
      * /vram:reg is published whenever the framebuffer is, and bring-up carries
@@ -68,10 +83,10 @@ static const struct {
      */
     { "vram", MAP_FIXED_ON,
       "/vram:reg is always published: bring-up ties it to the framebuffer, "
-      "which this app never turns off." },
+      "which this app never turns off.", NULL },
 
-    { "lcd-panel-id", MAP_NO_LCD_PANEL_ID, NULL },
-    { "memory-reg",   MAP_NO_MEMORY_NODE,  NULL },
+    { "lcd-panel-id", MAP_NO_LCD_PANEL_ID, NULL, NULL },
+    { "memory-reg",   MAP_NO_MEMORY_NODE,  NULL, NULL },
 
     /*
      * The IORTC halfword is entry zero of ios3_kernel_patch.c's fixed table,
@@ -82,22 +97,23 @@ static const struct {
     { "rtc-patch", MAP_FIXED_ON,
       "The IORTC wait patch is always applied: it is one entry in the kernel "
       "gate's fixed table, and the gate that installs the memory-disk sites "
-      "cannot apply part of it." },
+      "cannot apply part of it.", NULL },
 
     { "ca-software-render", MAP_PROVISION_CA_SOFTWARE_RENDER,
       "Written into this machine's work image when that image is prepared, "
       "not at boot, so changing it does nothing to a machine that already has "
-      "one. A new machine gets an image built with it as set now." },
+      "one. A new machine gets an image built with it as set now.", NULL },
 
     { "activate", MAP_FIXED_OFF,
       "Not implemented anywhere. Writing ActivationState needs a file the "
-      "imported root filesystem does not contain and nothing can yet create." },
+      "imported root filesystem does not contain and nothing can yet create.",
+      NULL },
     { "jb-codesign", MAP_FIXED_OFF,
       "Not implemented anywhere. Nothing in this app disables the guest "
-      "kernel's code-signature enforcement." },
+      "kernel's code-signature enforcement.", NULL },
     { "jb-payload", MAP_FIXED_OFF,
       "Not implemented anywhere. Nothing in this app installs a payload onto "
-      "the work image." },
+      "the work image.", NULL },
 
     /*
      * rootfs_work_options_t::ppp_launchd_job would give the guest its half.
@@ -109,7 +125,7 @@ static const struct {
     { "ppp", MAP_FIXED_OFF,
       "Not offered here. The guest half could be written into the work image, "
       "but nothing in this app terminates PPP on the host side, so the guest's "
-      "pppd would talk to a UART nobody answers." },
+      "pppd would talk to a UART nobody answers.", NULL },
     /*
      * The NAT itself is portable -- core/src/net/net.c has no socket in it and
      * tools/net_host.c needs nothing privileged -- so this one is fixed off
@@ -120,7 +136,8 @@ static const struct {
      */
     { "nat", MAP_FIXED_OFF,
       "Not offered here, because --ppp above is not. The NAT is what would "
-      "answer the guest's datagrams, and without the link there are none." }
+      "answer the guest's datagrams, and without the link there are none.",
+      NULL }
 };
 
 #define VM_BOOT_MAP_COUNT \
@@ -131,13 +148,14 @@ static const struct {
  * a row nobody has decided about; the caller must not invent a fate for it.
  */
 static bool mapped(unsigned index, unsigned char *out_kind,
-                   const char **out_note) {
+                   const char **out_note, const char **out_path) {
     const vm_option_t *option = vm_option_at(index);
     if (!option || !option->name) return false;
     for (unsigned i = 0; i < VM_BOOT_MAP_COUNT; i++) {
         if (strcmp(option->name, VM_BOOT_MAP[i].name) != 0) continue;
         if (out_kind) *out_kind = VM_BOOT_MAP[i].kind;
         if (out_note) *out_note = VM_BOOT_MAP[i].note;
+        if (out_path) *out_path = VM_BOOT_MAP[i].path;
         return true;
     }
     return false;
@@ -186,10 +204,11 @@ void vm_boot_options_apply(const bool *values, unsigned count,
         vm_boot_option_status_t *row = &report->row[i];
         unsigned char kind = MAP_FIXED_OFF;
         const char *note = NULL;
+        const char *path = NULL;
 
         row->requested = requested_value(values, count, i);
 
-        if (!mapped(i, &kind, &note)) {
+        if (!mapped(i, &kind, &note, &path)) {
             /*
              * A row nobody has decided about. Reported as ignored with an
              * explicit note rather than quietly given a plausible fate: the
@@ -219,6 +238,21 @@ void vm_boot_options_apply(const bool *values, unsigned count,
                 if (request) request->no_memory_node = !row->requested;
                 report->applied++;
                 break;
+            case MAP_UNMATCH:
+                /*
+                 * Set means "leave it matched", so the un-match list is built
+                 * from the CLEARED rows. The row is APPLIED either way: doing
+                 * nothing because the user asked for the nub to stay is the
+                 * switch working, not the switch being ignored.
+                 */
+                row->outcome = VM_BOOT_OPTION_APPLIED;
+                row->effective = row->requested;
+                if (!row->requested && path && *path &&
+                    report->unmatch_count < VM_BOOT_OPTION_MAX) {
+                    report->unmatch[report->unmatch_count++] = path;
+                }
+                report->applied++;
+                break;
             case MAP_PROVISION_CA_SOFTWARE_RENDER:
                 row->outcome = VM_BOOT_OPTION_PROVISIONED;
                 row->effective = row->requested;
@@ -237,6 +271,17 @@ void vm_boot_options_apply(const bool *values, unsigned count,
                 break;
         }
         if (row->effective != row->requested) report->overridden++;
+    }
+
+    /*
+     * Hand the list to bring-up. It points into `report`, which the caller
+     * holds across s5l_bringup() -- VMFirmwareBoot.c declares both in the same
+     * frame. NULL when empty rather than a valid pointer with a zero count, so
+     * a caller that reads one field and not the other cannot walk it.
+     */
+    if (request) {
+        request->unmatch = report->unmatch_count ? report->unmatch : NULL;
+        request->unmatch_count = report->unmatch_count;
     }
 
     /* The summary. Two clauses, both optional, because they are two different

@@ -894,6 +894,35 @@ s5l_bringup_status_t s5l_bringup(s5l8900_t *machine,
         result->devicetree_patches++;
     }
 
+    /*
+     * Un-matching, last, so every patch above read the tree as Apple shipped
+     * it. Doing it first would mean a node could be struck out and then
+     * patched, and the patch would be the one that fails -- naming the wrong
+     * cause for a configuration the caller chose deliberately.
+     */
+    for (unsigned i = 0; i < request->unmatch_count; i++) {
+        const char *path = request->unmatch ? request->unmatch[i] : NULL;
+        if (!path || !*path)
+            return result_fail(result, S5L_BRINGUP_DEVICETREE_PATCH_FAILED,
+                               S5L_BRINGUP_STAGE_DEVICETREE_PATCH,
+                               "unmatch[%u] is empty", i);
+        size_t node = dt_path(tree_ram, tree_len, path);
+        if (node == DT_NO_NODE)
+            return result_fail(result, S5L_BRINGUP_DEVICETREE_PATCH_FAILED,
+                               S5L_BRINGUP_STAGE_DEVICETREE_PATCH,
+                               "/%s cannot be un-matched: no such node", path);
+        uint32_t vl = 0;
+        uint8_t *p = dt_prop(tree_ram, tree_len, node, "compatible", &vl);
+        if (!p || !vl)
+            return result_fail(result, S5L_BRINGUP_DEVICETREE_PATCH_FAILED,
+                               S5L_BRINGUP_STAGE_DEVICETREE_PATCH,
+                               "/%s cannot be un-matched: no compatible", path);
+        /* Idempotent: striking an already-struck node is not an error, so a
+         * caller may name the same device twice without having to track it. */
+        p[0] = 'x';
+        result->devicetree_unmatched++;
+    }
+
     /* --- 6. the command line and boot_args -------------------------------- */
     const char *base_cmdline = request->cmdline ? request->cmdline
                                                 : S5L_BRINGUP_DEFAULT_CMDLINE;

@@ -788,6 +788,100 @@ static void test_executes(const uint8_t *kernel, size_t kernel_len,
     s5l8900_free(&machine);
 }
 
+/*
+ * UN-MATCHING, verified by diffing the published tree against the same
+ * bring-up without it.
+ *
+ * Counting struck nodes would pass just as happily if the code overwrote the
+ * wrong byte, moved a node, or rebuilt the blob a little shorter. What must be
+ * true is much narrower: the tree is the same size, and EXACTLY one byte per
+ * named node is different, and each of those became 'x'. Nothing is deleted,
+ * no phandle moves, and everything that indexes the tree by offset still
+ * finds what it found before.
+ */
+static void test_unmatch(const uint8_t *kernel, size_t kernel_len,
+                         const uint8_t *tree, size_t tree_len) {
+    static const char *const PATHS[] = { "arm-io/mbx", "arm-io/sha1" };
+    const unsigned want = (unsigned)(sizeof PATHS / sizeof PATHS[0]);
+    s5l8900_t machine;
+    s5l_bringup_request_t request;
+    s5l_bringup_result_t result;
+    uint8_t *baseline = NULL;
+    uint32_t published = 0u;
+
+    printf("un-matching device-tree nodes\n");
+
+    CHECK(build_machine(&machine), "s5l8900_init failed");
+    memset(&request, 0, sizeof request);
+    request.kernel = kernel;
+    request.kernel_size = kernel_len;
+    request.devicetree = tree;
+    request.devicetree_size = tree_len;
+    CHECK(s5l_bringup(&machine, &request, NULL, &result) == S5L_BRINGUP_OK,
+          "the baseline bring-up was refused: %s", result.detail);
+    CHECK_U32(result.devicetree_unmatched, 0u, "struck with nothing asked");
+    published = result.devicetree_size;
+    baseline = (uint8_t *)malloc(published ? published : 1u);
+    CHECK(baseline != NULL, "out of memory");
+    if (baseline)
+        memcpy(baseline, machine.ram + (result.devicetree_pa - 0x08000000u),
+               published);
+    s5l8900_free(&machine);
+
+    CHECK(build_machine(&machine), "s5l8900_init failed");
+    memset(&request, 0, sizeof request);
+    request.kernel = kernel;
+    request.kernel_size = kernel_len;
+    request.devicetree = tree;
+    request.devicetree_size = tree_len;
+    request.unmatch = PATHS;
+    request.unmatch_count = want;
+    CHECK(s5l_bringup(&machine, &request, NULL, &result) == S5L_BRINGUP_OK,
+          "un-matching was refused: %s", result.detail);
+    CHECK_U32(result.devicetree_unmatched, want, "nodes struck");
+    CHECK_U32(result.devicetree_size, published, "the tree changed size");
+
+    if (baseline && result.devicetree_size == published) {
+        const uint8_t *now = machine.ram + (result.devicetree_pa - 0x08000000u);
+        unsigned differs = 0u;
+        for (uint32_t i = 0; i < published; i++) {
+            if (baseline[i] == now[i]) continue;
+            differs++;
+            CHECK(now[i] == (uint8_t)'x',
+                  "byte %u became 0x%02x, not 'x'", i, now[i]);
+            CHECK(baseline[i] != (uint8_t)'x',
+                  "byte %u was already struck", i);
+        }
+        CHECK(differs == want, "%u bytes differ, expected %u", differs, want);
+    }
+    s5l8900_free(&machine);
+    free(baseline);
+
+    /*
+     * Fails closed on a node that is not there. Skipping it would hand back a
+     * machine with the device still present after the caller asked for it to
+     * be gone -- and the caller would then debug the wrong machine, which is
+     * exactly how /arm-io/mbx cost a boot in the first place.
+     */
+    {
+        static const char *const MISSING[] = { "arm-io/no-such-node" };
+        CHECK(build_machine(&machine), "s5l8900_init failed");
+        memset(&request, 0, sizeof request);
+        request.kernel = kernel;
+        request.kernel_size = kernel_len;
+        request.devicetree = tree;
+        request.devicetree_size = tree_len;
+        request.unmatch = MISSING;
+        request.unmatch_count = 1u;
+        s5l_bringup_status_t st =
+            s5l_bringup(&machine, &request, NULL, &result);
+        CHECK(st == S5L_BRINGUP_DEVICETREE_PATCH_FAILED,
+              "an absent node was accepted: %s",
+              s5l_bringup_status_name(st));
+        s5l8900_free(&machine);
+    }
+}
+
 int main(void) {
     size_t kernel_len = 0, tree_len = 0;
     uint8_t *kernel = NULL, *tree = NULL;
@@ -805,6 +899,7 @@ int main(void) {
                kernel_len, tree_len);
         test_run89_layout(kernel, kernel_len, tree, tree_len);
         test_no_root(kernel, kernel_len, tree, tree_len);
+        test_unmatch(kernel, kernel_len, tree, tree_len);
         test_executes(kernel, kernel_len, tree, tree_len);
     } else {
         printf("SKIP: no firmware in %s -- the firmware-backed cases need "

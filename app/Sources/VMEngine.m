@@ -1157,6 +1157,7 @@ static double vm_now(void) {
 #define kVMSpinShareNum    7u      /* report at >= 7/8 of a window in one    */
 #define kVMSpinShareDen    8u      /* region                                 */
 #define kVMSpinReportCap   6u      /* never turn the console into a log      */
+#define kVMSpinNarrowRegions 4u    /* <= 256 bytes of code IS a loop         */
 
 typedef struct {
     uint32_t region[kVMSpinSlots];
@@ -1264,9 +1265,23 @@ static bool vm_spin_already_reported(const vm_spin_t *s, uint32_t region) {
             if (spin.samples >= kVMSpinWindow) {
                 int hot = vm_spin_rank(&spin, 0);
                 uint32_t region = hot >= 0 ? spin.region[hot] : 0u;
-                if (hot >= 0 &&
+                /*
+                 * Two ways to be a spin, and the second was learned the hard
+                 * way. A single region taking almost the whole window is the
+                 * obvious one. But a loop that straddles a 64-byte boundary
+                 * splits across two regions, and an unrolled one across three
+                 * or four -- and testing only the hottest region called a
+                 * genuinely wedged device "not spinning" while it sat in
+                 * AppleMBX+0xb440 with 309 of 512 samples in one half and the
+                 * rest in the other. A handful of distinct regions across a
+                 * whole window IS the signal, however it splits between them.
+                 */
+                bool concentrated =
+                    hot >= 0 &&
                     (uint64_t)spin.count[hot] * kVMSpinShareDen >=
-                        (uint64_t)spin.samples * kVMSpinShareNum &&
+                        (uint64_t)spin.samples * kVMSpinShareNum;
+                bool narrow = spin.used > 0u && spin.used <= kVMSpinNarrowRegions;
+                if (hot >= 0 && (concentrated || narrow) &&
                     spin.reports < kVMSpinReportCap &&
                     !vm_spin_already_reported(&spin, region)) {
                     spin.reported[spin.reports++] = region;
@@ -1282,11 +1297,12 @@ static bool vm_spin_already_reported(const vm_spin_t *s, uint32_t region) {
                     }
                     uint32_t base = region << kVMSpinRegionShift;
                     [self appendConsole:[NSString stringWithFormat:
-                        @"[stall] at %.1f M insn the guest is in one place: "
-                        @"0x%08x-0x%08x took %u of %u samples, cpsr 0x%08x.%@%@ "
-                        @"Nothing was stopped or altered to find this. Printed "
-                        @"once per region.\n",
-                        retired / 1.0e6, base,
+                        @"[stall] at %.1f M insn the guest is looping in %u "
+                        @"region%@: 0x%08x-0x%08x took %u of %u samples, cpsr "
+                        @"0x%08x.%@%@ Nothing was stopped or altered to find "
+                        @"this. Printed once per region.\n",
+                        retired / 1.0e6, spin.used,
+                        spin.used == 1u ? @"" : @"s", base,
                         base + (1u << kVMSpinRegionShift) - 1u,
                         (unsigned)spin.count[hot], (unsigned)spin.samples,
                         _machine.cpu.cpsr,
