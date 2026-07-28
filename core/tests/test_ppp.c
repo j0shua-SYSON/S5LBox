@@ -1410,6 +1410,166 @@ static void test_the_default_addresses_are_the_documented_ones(void) {
 
 /* ======================================================================== */
 
+/* ==========================================================================
+ * The seam to the NAT.
+ *
+ * ppp_set_ip_sink()/ppp_send_ip() are the only two calls that carry a
+ * Network-Layer packet in either direction, and they are where core/src/net/
+ * net.c gets bolted on. Everything below is about the ONE rule RFC 1332 §2
+ * states and that is easy to lose: Network-Layer packets belong to the NCP's
+ * Opened state and to nothing else.
+ * ======================================================================== */
+
+typedef struct {
+    unsigned calls;
+    size_t   len;
+    uint8_t  last[1600];
+} sink_t;
+
+static void sink_fn(void *ctx, const uint8_t *pkt, size_t n) {
+    sink_t *s = ctx;
+    s->calls++;
+    s->len = n;
+    if (n <= sizeof s->last) memcpy(s->last, pkt, n);
+}
+
+/* LCP up, then IPCP all the way to Opened, using the same exchange
+ * test_ipcp_assigns_the_documented_address() walks step by step. */
+static void bring_ipcp_up(ppp_peer_t *p) {
+    tframe_t f[4];
+    uint8_t  pkt[64];
+    bring_lcp_up(p);
+
+    size_t n = drain(p, f, 4);                 /* our IPCP Configure-Request */
+    uint8_t our_id = 0u;
+    for (size_t i = 0; i < n; i++)
+        if (f[i].proto == PPP_PROTO_IPCP && f[i].info[0] == PPP_CONF_REQ)
+            our_id = f[i].info[1];
+
+    static const uint8_t req[] = { IPCP_OPT_ADDRESS, 0x06, 10, 0, 2, 15 };
+    guest_send(p, PPP_PROTO_IPCP, pkt,
+               cp(pkt, PPP_CONF_REQ, 3, req, sizeof req));
+    (void)drain(p, f, 4);                      /* our Ack of its address     */
+    guest_send(p, PPP_PROTO_IPCP, pkt,
+               cp(pkt, PPP_CONF_ACK, our_id, NULL, 0));
+}
+
+static void test_ip_is_refused_until_ipcp_is_opened(void) {
+    ppp_peer_t p;
+    sink_t s;
+    uint8_t ip[40];
+    memset(&s, 0, sizeof s);
+    memset(ip, 0, sizeof ip);
+    ip[0] = 0x45u;
+
+    /* Before anything: not even LCP. */
+    ppp_init(&p, NULL);
+    ppp_set_ip_sink(&p, sink_fn, &s);
+    CHECK(!ppp_send_ip(&p, ip, sizeof ip),
+          "a datagram was framed before the link existed");
+
+    /* LCP up but IPCP not: still refused. This is the case that matters,
+     * because the link LOOKS up and a caller could reasonably think it is. */
+    bring_lcp_up(&p);
+    ppp_set_ip_sink(&p, sink_fn, &s);
+    CHECK(!ppp_ipcp_open(&p), "IPCP was open when only LCP had come up");
+    CHECK(!ppp_send_ip(&p, ip, sizeof ip),
+          "a datagram was framed with LCP up but IPCP still negotiating");
+
+    /* And inbound: counted as dropped, never handed to the sink. */
+    guest_send(&p, PPP_PROTO_IP, ip, sizeof ip);
+    CHECK(s.calls == 0u,
+          "an IPv4 packet reached the NAT %u time(s) before IPCP opened",
+          s.calls);
+    CHECK(p.stats.ip_frames_in == 1u && p.stats.ip_frames_dropped == 1u,
+          "the early datagram was not counted as received-and-dropped "
+          "(in %llu, dropped %llu)",
+          (unsigned long long)p.stats.ip_frames_in,
+          (unsigned long long)p.stats.ip_frames_dropped);
+}
+
+static void test_ip_crosses_both_ways_once_ipcp_is_open(void) {
+    ppp_peer_t p;
+    sink_t s;
+    tframe_t f[4];
+    uint8_t ip[60];
+    memset(&s, 0, sizeof s);
+    bring_ipcp_up(&p);
+    ppp_set_ip_sink(&p, sink_fn, &s);
+    CHECK(ppp_ipcp_open(&p), "IPCP did not open: state is %s",
+          ppp_state_name(p.ipcp.state));
+    (void)drain(&p, f, 4);
+
+    /* Guest -> NAT. */
+    for (size_t i = 0; i < sizeof ip; i++) ip[i] = (uint8_t)(i * 7u + 1u);
+    ip[0] = 0x45u;
+    guest_send(&p, PPP_PROTO_IP, ip, sizeof ip);
+    CHECK(s.calls == 1u, "the sink was called %u times, expected once", s.calls);
+    CHECK(s.len == sizeof ip && memcmp(s.last, ip, sizeof ip) == 0,
+          "the datagram handed to the NAT is not the one the guest sent "
+          "(%zu octets)", s.len);
+    CHECK(p.stats.ip_frames_dropped == 0u,
+          "a delivered datagram was also counted as dropped");
+    CHECK(p.stats.ip_bytes_in == sizeof ip, "ip_bytes_in is %llu, expected %zu",
+          (unsigned long long)p.stats.ip_bytes_in, sizeof ip);
+
+    /* NAT -> guest, and it must come back out as protocol 0x0021 with an
+     * intact FCS through the test's own deframer. */
+    CHECK(ppp_send_ip(&p, ip, sizeof ip), "ppp_send_ip refused an open link");
+    size_t n = drain(&p, f, 4);
+    CHECK(n == 1u, "sending one datagram produced %zu frames", n);
+    if (n == 1u) {
+        CHECK(f[0].proto == PPP_PROTO_IP,
+              "the frame went out as protocol 0x%04x, expected 0x0021",
+              f[0].proto);
+        CHECK(f[0].fcs_ok, "the outbound datagram's FCS is wrong");
+        CHECK(f[0].len == sizeof ip && memcmp(f[0].info, ip, sizeof ip) == 0,
+              "the framed payload is not the datagram (%zu octets)", f[0].len);
+    }
+    CHECK(p.stats.ip_frames_out == 1u && p.stats.ip_bytes_out == sizeof ip,
+          "the outbound datagram was not counted");
+}
+
+static void test_a_datagram_past_the_peers_mru_is_refused(void) {
+    ppp_peer_t p;
+    uint8_t big[2048];
+    bring_ipcp_up(&p);
+    memset(big, 0x41, sizeof big);
+    big[0] = 0x45u;
+
+    /*
+     * RFC 1661 §6.1 makes the MRU a promise about what the peer can receive,
+     * not a suggestion. Framing something larger would hand the guest a
+     * datagram its own driver has no buffer for, and the failure would surface
+     * as a corrupt read a long way from here.
+     */
+    CHECK(p.peer_mru <= 1500u, "the peer MRU is %u", p.peer_mru);
+    CHECK(!ppp_send_ip(&p, big, (size_t)p.peer_mru + 1u),
+          "a datagram one octet past the peer's %u-octet MRU was framed",
+          p.peer_mru);
+    CHECK(ppp_send_ip(&p, big, p.peer_mru),
+          "a datagram of exactly the peer's MRU was refused");
+}
+
+static void test_no_sink_is_a_drop_and_not_a_crash(void) {
+    ppp_peer_t p;
+    uint8_t ip[40];
+    memset(ip, 0, sizeof ip);
+    ip[0] = 0x45u;
+    bring_ipcp_up(&p);
+    ppp_set_ip_sink(&p, NULL, NULL);       /* the N2 configuration           */
+
+    guest_send(&p, PPP_PROTO_IP, ip, sizeof ip);
+    CHECK(p.stats.ip_frames_in == 1u && p.stats.ip_frames_dropped == 1u,
+          "with no NAT installed the datagram was not counted as dropped");
+
+    /* And the null-argument forms. */
+    ppp_set_ip_sink(NULL, sink_fn, NULL);
+    CHECK(!ppp_send_ip(NULL, ip, sizeof ip), "ppp_send_ip(NULL) claimed success");
+    CHECK(!ppp_send_ip(&p, NULL, 4), "ppp_send_ip with no packet claimed success");
+    CHECK(!ppp_send_ip(&p, ip, 0), "ppp_send_ip of nothing claimed success");
+}
+
 int main(void) {
     printf("S5LBox PPP peer tests (RFC 1661 / 1662 / 1332)\n");
     test_fcs16_matches_what_the_real_pppd_computed();
@@ -1440,6 +1600,10 @@ int main(void) {
     test_the_restart_timer_retransmits_then_gives_up();
     test_time_only_moves_forward();
     test_the_default_addresses_are_the_documented_ones();
+    test_ip_is_refused_until_ipcp_is_opened();
+    test_ip_crosses_both_ways_once_ipcp_is_open();
+    test_a_datagram_past_the_peers_mru_is_refused();
+    test_no_sink_is_a_drop_and_not_a_crash();
     printf("  %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

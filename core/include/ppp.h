@@ -13,10 +13,12 @@
  * real guest really sent (work/run80-ppp-tty/uart4-ppp.bin) be replayed against
  * it in a unit test in microseconds, on a host with no phone attached.
  *
- * IT DOES NOT ROUTE ANY IP. Received IPv4 frames are counted and dropped. NAT,
- * ICMP, TCP and DNS are N0/N4/N5 and are separate work; this module stops at
- * "the link is up and the guest has an address", which is exactly where N2
- * stops.
+ * IT STILL DOES NOT ROUTE ANY IP ITSELF. What it now has is a one-function
+ * boundary: ppp_set_ip_sink() names something that wants received IPv4
+ * datagrams, and ppp_send_ip() frames one going the other way. With no sink
+ * installed the behaviour is exactly the N2 behaviour — counted and dropped —
+ * so this file still has no idea what a NAT is, and core/src/net/net.c still
+ * has no idea what HDLC is. N4 is the two of them joined by a caller.
  *
  * THREADING. None. It is a plain struct with no internal pointers, so a caller
  * that needs it on another thread copies or locks it; docs/networking.md §8.3
@@ -169,7 +171,12 @@ typedef struct {
     uint64_t aborts;            /* 0x7D immediately followed by 0x7E         */
     uint64_t unknown_protos;    /* answered with a Protocol-Reject           */
     uint64_t unknown_codes;     /* answered with a Code-Reject               */
-    uint64_t ip_frames_in;      /* counted and DROPPED — see the header note */
+    uint64_t ip_frames_in;      /* IPv4 frames the guest sent us             */
+    uint64_t ip_frames_dropped; /* ...of those, the ones with no sink to go
+                                 * to. Kept separate so a report can never
+                                 * claim delivery it did not make.           */
+    uint64_t ip_frames_out;     /* IPv4 frames framed toward the guest       */
+    uint64_t ip_bytes_in, ip_bytes_out;
     uint64_t tx_overflows;      /* frames the transmit ring could not hold   */
     uint64_t echo_replies;      /* Echo-Requests we answered                 */
 } ppp_stats_t;
@@ -196,9 +203,20 @@ typedef struct {
     bool        timer_running;
 } ppp_fsm_t;
 
+/*
+ * Where received IPv4 datagrams go. `pkt` is one whole datagram with no PPP
+ * framing left on it; it points into the peer's receive buffer and is valid
+ * only for the duration of the call, so a sink that wants to keep it copies.
+ */
+typedef void (*ppp_ip_sink_fn)(void *ctx, const uint8_t *pkt, size_t n);
+
 typedef struct {
     ppp_config_t cfg;
     ppp_stats_t  stats;
+
+    /* Installed by ppp_set_ip_sink(). NULL is the N2 behaviour. */
+    ppp_ip_sink_fn ip_sink;
+    void          *ip_ctx;
 
     ppp_fsm_t    lcp;
     ppp_fsm_t    ipcp;
@@ -283,6 +301,29 @@ void ppp_input_byte(ppp_peer_t *p, uint8_t byte);
 size_t ppp_output(ppp_peer_t *p, uint8_t *buf, size_t cap);
 int    ppp_output_byte(ppp_peer_t *p);
 size_t ppp_output_pending(const ppp_peer_t *p);
+
+/*
+ * Install (or, with fn == NULL, remove) the destination for received IPv4
+ * datagrams. Survives nothing: ppp_init() clears it, because a peer that has
+ * forgotten its whole link state should not still be handing packets to
+ * something that thinks the old link is up.
+ *
+ * A datagram is delivered ONLY while IPCP is Opened. RFC 1332 §2 is explicit
+ * that Network-Layer packets must not be sent before the NCP has reached
+ * Opened, and the receive side of that rule matters just as much here: an IP
+ * datagram arriving before the guest has an address is a guest that is
+ * confused, not a packet to route.
+ */
+void ppp_set_ip_sink(ppp_peer_t *p, ppp_ip_sink_fn fn, void *ctx);
+
+/*
+ * Frame one IPv4 datagram toward the guest. Returns false — and counts a
+ * tx_overflow — if IPCP is not Opened, if the datagram is larger than the
+ * peer's MRU, or if the transmit ring could not hold the whole frame. A
+ * partially queued frame is never produced; see the note on tx_frame() in
+ * core/src/net/ppp.c for why that matters more than it looks.
+ */
+bool ppp_send_ip(ppp_peer_t *p, const uint8_t *pkt, size_t n);
 
 /*
  * Advance the peer's notion of time to `now_ms` and run whatever the restart

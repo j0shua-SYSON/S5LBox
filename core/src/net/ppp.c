@@ -838,10 +838,19 @@ static void frame_input(ppp_peer_t *p, const uint8_t *f, size_t n) {
         case PPP_PROTO_LCP:  cp_input(p, PPP_PROTO_LCP,  f, n); return;
         case PPP_PROTO_IPCP: cp_input(p, PPP_PROTO_IPCP, f, n); return;
         case PPP_PROTO_IP:
-            /* Counted and DROPPED. Routing it is N4 and is not this milestone;
-             * a peer that silently swallowed the guest's first ping with no
-             * counter would make N4 start from zero information. */
             p->stats.ip_frames_in++;
+            p->stats.ip_bytes_in += n;
+            /*
+             * RFC 1332 §2: Network-Layer packets belong to the NCP's Opened
+             * state and nowhere else. Before that — and with no sink installed
+             * at all, which is the N2 configuration this file shipped with —
+             * the datagram is counted separately and dropped, so a report can
+             * always tell "nobody was listening" from "we routed it".
+             */
+            if (p->ip_sink && p->ipcp.state == PPP_S_OPENED)
+                p->ip_sink(p->ip_ctx, f, n);
+            else
+                p->stats.ip_frames_dropped++;
             return;
         default:
             p->stats.unknown_protos++;
@@ -993,6 +1002,27 @@ void ppp_init(ppp_peer_t *p, const ppp_config_t *cfg) {
     p->ipcp.state = PPP_S_INITIAL;
     p->lcp.next_id = 1u;
     p->ipcp.next_id = 1u;
+}
+
+void ppp_set_ip_sink(ppp_peer_t *p, ppp_ip_sink_fn fn, void *ctx) {
+    if (!p) return;
+    p->ip_sink = fn;
+    p->ip_ctx  = ctx;
+}
+
+bool ppp_send_ip(ppp_peer_t *p, const uint8_t *pkt, size_t n) {
+    if (!p || !pkt || !n) return false;
+    if (p->ipcp.state != PPP_S_OPENED) { p->stats.tx_overflows++; return false; }
+    /* The guest told us its MRU (or accepted the 1500 default), and RFC 1661
+     * §6.1 makes that a promise about what it can receive, not a suggestion. */
+    if (n > p->peer_mru) { p->stats.tx_overflows++; return false; }
+
+    uint64_t before = p->stats.frames_out;
+    tx_frame(p, PPP_PROTO_IP, pkt, n);
+    if (p->stats.frames_out == before) return false;   /* ring was full */
+    p->stats.ip_frames_out++;
+    p->stats.ip_bytes_out += n;
+    return true;
 }
 
 void ppp_open(ppp_peer_t *p) {

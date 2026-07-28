@@ -58,6 +58,13 @@ add_library(emucore STATIC
     # no platform dependency at all, not even a clock, so it is testable on any
     # runner and linkable into the iOS app unchanged.
     src/net/ppp.c
+    # The host NAT (docs/networking.md §10, N0). Same argument as ppp.c and
+    # then some: it has no socket in it at all -- every byte that must really
+    # leave the machine leaves through net_egress_t, whose only implementation
+    # is tools/net_host.c -- so it links into the iOS app unchanged and its
+    # whole test suite runs on a runner with no network.
+    src/net/net.c
+    src/net/tcp.c
 )
 target_include_directories(emucore PUBLIC include)
 
@@ -186,6 +193,10 @@ target_link_libraries(test_ppp PRIVATE emucore)
 target_compile_definitions(test_ppp PRIVATE
     S5LBOX_RUN80_PPP="${CMAKE_CURRENT_SOURCE_DIR}/../work/run80-ppp-tty/uart4-ppp.bin")
 add_test(NAME ppp_peer COMMAND test_ppp)
+
+add_executable(test_net tests/test_net.c)
+target_link_libraries(test_net PRIVATE emucore)
+add_test(NAME host_ipv4_nat COMMAND test_net)
 
 add_executable(test_mtz2 tests/test_mtz2.c)
 target_link_libraries(test_mtz2 PRIVATE emucore)
