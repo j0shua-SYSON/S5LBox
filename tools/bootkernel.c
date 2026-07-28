@@ -22,6 +22,7 @@
 
 #include "ksyms.h"
 #include "audio_capture.h"
+#include "bringup.h"
 #include "dt_inplace.h"
 #include "file_block.h"
 #include "ios3_kernel_patch.h"
@@ -2480,10 +2481,25 @@ static bool dt_memmap_matches_once(uint8_t *b, size_t len, const char *key,
  * 0xc0651f60 rejects ID zero and 0x8000 and 0xc0651770 branches on the ID's low
  * three bits. The zero in the IPSW tree is therefore only a placeholder. */
 #define N82_LCD_PANEL_ID 0x00a5c22bu
-#define N82_FB_WIDTH     320u
-#define N82_FB_HEIGHT    480u
-#define N82_FB_BPP       4u
-#define N82_FB_BYTES     (N82_FB_WIDTH * N82_FB_HEIGHT * N82_FB_BPP)
+
+/*
+ * The panel geometry and the /vram pool below are the CORE's constants, not
+ * copies of them, because this harness and core/src/boot/bringup.c publish the
+ * same two device-tree properties to the same guest kernel: bringup.c:869 sets
+ * /vram:reg from S5L_BRINGUP_VRAM_BYTES, and line 25250 here sets it from
+ * N82_VRAM_BYTES. Held apart they described one machine in two places with
+ * nothing making them agree.
+ *
+ * They did disagree, on 2026-07-28. run117, run118 and run126 were three
+ * attempts to measure a larger pool that each edited S5L_BRINGUP_VRAM_SURFACES
+ * and then ran THIS harness, so all three published the old two-surface value
+ * and answered a question nobody asked. One conclusion had to be withdrawn.
+ * Aliasing costs nothing and makes that particular morning unrepeatable.
+ */
+#define N82_FB_WIDTH     S5L_BRINGUP_FB_WIDTH
+#define N82_FB_HEIGHT    S5L_BRINGUP_FB_HEIGHT
+#define N82_FB_BPP       S5L_BRINGUP_FB_BPP
+#define N82_FB_BYTES     S5L_BRINGUP_FB_BYTES
 
 /*
  * HOW MANY SURFACES /vram MUST HOLD, and why one is not enough.
@@ -2599,8 +2615,8 @@ static bool dt_memmap_matches_once(uint8_t *b, size_t len, const char *key,
  *
  * Two is kept until those counters say what the client actually wants.
  */
-#define N82_VRAM_SURFACES 2u
-#define N82_VRAM_BYTES    (N82_FB_BYTES * N82_VRAM_SURFACES)
+#define N82_VRAM_SURFACES S5L_BRINGUP_VRAM_SURFACES
+#define N82_VRAM_BYTES    S5L_BRINGUP_VRAM_BYTES
 
 static uint16_t boot_args_get_le16(const uint8_t *bytes, size_t offset) {
     return (uint16_t)bytes[offset] |
