@@ -2315,6 +2315,66 @@ at 0x3cc10000(0xea9d6000)` — and uart4 still carried **zero bytes**. The
 milestone is unchanged.
 
 
+### 2026-07-28: two links further -- why the SPI controller has no DMA channel
+
+`v[0x360]` refuses because `this->0xb0` is zero, and `0xc05a71b4` is where that
+field is set: it is the return of `IODMAEventSource::dmaEventSource(...)`
+(`0xc018b4d8`, named in the kernel's own symbol table).
+
+`IODMAEventSource::init` (`0xc018b3fc`, and it is THUMB -- disassembling the
+XNU core as ARM produces convincing nonsense) fails in three places, and the
+third is the one that matters:
+
+```
+    blx  IODMAController::getController      ; 0xc019a3c4
+    str  r0, [r4, #0x28]
+    cmp  r0, #0
+    beq  fail
+```
+
+And `getController` opens with:
+
+```
+    ldr  r1, ="dma-parent"
+    ldr  r3, [r2, #0x9c]        ; getProperty
+    blx  r3                     ; provider->getProperty("dma-parent")
+    ...
+    cmp  r0, #0
+    beq  return NULL
+```
+
+**`dma-parent` is PRESENT in the shipped device tree**, so that is not the
+missing piece -- checked directly, along with `dma-channels` and
+`AAPL,phandle`. Past that check it reads the phandle out and looks the
+controller up by it at `0xc019a334`, and returns NULL if nothing answers.
+
+So the frontier is one sentence: **`AppleARMPL080DMAC` never registers itself as
+an `IODMAController`.** Its `start()` clearly runs -- the console prints
+`_dmacBaseAddress` for both instances and `_initDMAChannel` for eight channels
+-- but it never gets as far as registering, which is the same boundary as
+`DMACConfiguration` never being written.
+
+**The full chain now stands at twelve links, every one measured:**
+
+```
+  AppleARMPL080DMAC does not register as an IODMAController
+    -> IODMAController::getController returns NULL
+    -> IODMAEventSource::init fails
+    -> the SPI controller's this->0xb0 stays zero
+    -> v[0x360] writes kIOReturnDMAError into the request
+    -> ...and returns 0, so the bootloader cannot tell
+    -> the ATN_ACK answers 0x1AA1, never 0x4BC1
+    -> the Z2 is never programmed
+    -> no property reaches userspace
+    -> the surface bounds are negative
+    -> every contact clamps to one point
+    -> a tap changes nothing
+```
+
+Nothing in `core/src/soc/` is implicated above the DMAC. The next read is what
+`AppleARMPL080DMAC::start` does after `_initDMAChannel` and what stops it
+short -- and since the same driver gates audio, one answer may move both.
+
 ### 2026-07-28: the whole causal chain, from "no touch" back to the DMA controller
 
 With run106's numbers in hand the remaining gap closed by reading, not by
