@@ -109,9 +109,30 @@
  * fifteen being three bootload attempts times the five retries each makes. The
  * transfer then RETURNS SUCCESS — 0xc044525c, the success branch, fires all
  * fifteen times — and the acknowledgement after it still does not answer
- * 0x4BC1, because core/src/soc/spi.c has no DMA path at all and the device
- * never saw the packet. Its framer is still waiting for a sixteen-octet probe,
- * so it loops the `1A A1` back and the driver reads 0x1AA1.
+ * 0x4BC1. The device never saw the packet: its framer is still waiting for a
+ * sixteen-octet probe, so it loops the `1A A1` back and the driver reads
+ * 0x1AA1. That much is measured and stands.
+ *
+ * WHY the packet never arrives has been wrong twice, and both readings are
+ * retracted here rather than quietly edited away.
+ *
+ *   - "core/src/soc/spi.c has no DMA path at all" was the first. The SPI model
+ *     is not the obstacle: across every run the PL080 has refused nothing
+ *     (`flow 0 width 0 chain 0 softreq 0 endian 0`), and soc.h documents
+ *     /arm-io/spi1's asymmetric widths — four bytes in, one out — as modes it
+ *     runs, while the shipped tree only ever uses flow control 0-3.
+ *
+ *   - "the SPI controller holds no DMA channel, so v[0x360] refuses with
+ *     kIOReturnDMAError" was the second, and run112 killed it: the refusal at
+ *     0xc05a69ec is captured ZERO times and the success path 41, with a real
+ *     TX channel (0xc0e19400) in 40 of 41 calls. The RX channel is null, but
+ *     the request never asks for RX DMA, which is correct for a sender.
+ *
+ * What is left is the transfer itself: the channel is aimed at SPI_TXDATA and
+ * carries transfer size 0 with no Enable bit. Whether the controller's global
+ * enable is ever written is being measured properly for the first time — the
+ * old report inferred it from the register's resting value, which cannot tell
+ * "never written" from "written and cleared".
  *
  * So the work is in the SPI controller, not here. What also blocks it is that
  * the bootloader's own multi-stage protocol is unread, its failure mode is a
