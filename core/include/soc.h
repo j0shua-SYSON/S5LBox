@@ -2092,6 +2092,17 @@ typedef struct {
      * a DMA transfer does not have.
      */
     uint64_t rx_overruns;
+    /*
+     * Rising edges on SPI_SETUP_DMA, as distinct from the bit's VALUE.
+     *
+     * "SPI_SETUP bit 0x40 is never set, so SPI_SETUP_DMA -- the flag the whole
+     * fix is gated on -- is never raised by the driver" was recorded as a
+     * measurement and was not one: it came from printing the register at the
+     * END of a run, where a driver that arms DMA, transfers and disarms is
+     * indistinguishable from one that never armed it at all. Same error as the
+     * PL080's config report, found by auditing for it after that one.
+     */
+    uint64_t dma_arms;
     uint64_t unknown_reads, unknown_writes;
     uint32_t unknown_off[S5L_SPI_UNKNOWN_OFF];
     unsigned unknown_off_count;

@@ -22691,10 +22691,16 @@ static void spi_report(void) {
                (unsigned long long)b->tx_drops,
                (unsigned long long)b->rx_underruns,
                (unsigned long long)b->rx_overruns);
-        printf("          control %08x  setup %08x%s  cnt %08x  "
+        /* dma-arms is the measurement; the bit in `setup` is only where it
+         * happens to be resting when the run ended. Printing the latter alone
+         * once produced "the driver never raises SPI_SETUP_DMA", which is a
+         * claim about the whole run that the value cannot support. */
+        printf("          control %08x  setup %08x%s  dma-arms %llu  cnt %08x  "
                "tx/rx level %u/%u  slaves %u\n",
                b->control, b->setup,
-               (b->setup & SPI_SETUP_DMA) ? " [DMA]" : " [no DMA bit]",
+               (b->setup & SPI_SETUP_DMA) ? " [DMA bit set now]"
+                                          : " [DMA bit clear now]",
+               (unsigned long long)b->dma_arms,
                b->cnt, b->tx_level, b->rx_level, attached);
     }
 }

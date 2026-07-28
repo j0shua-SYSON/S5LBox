@@ -155,6 +155,15 @@ void s5l_spi_write(s5l_spi_t *bus, uint32_t off, uint32_t val) {
             bus->control = val;
             break;
         case SPI_SETUP:
+            /*
+             * The DMA bit is COUNTED, not just stored. Reporting it from the
+             * register's value at the end of a run cannot tell "the driver
+             * never asked for DMA" apart from "the driver armed DMA, ran a
+             * transfer and disarmed it" -- and the first of those was recorded
+             * as measured fact and used to retract a fix. See soc.h.
+             */
+            if ((val & SPI_SETUP_DMA) && !(bus->setup & SPI_SETUP_DMA))
+                bus->dma_arms++;
             bus->setup = val;
             break;
         case SPI_STATUS:
