@@ -2315,6 +2315,60 @@ at 0x3cc10000(0xea9d6000)` — and uart4 still carried **zero bytes**. The
 milestone is unchanged.
 
 
+### 2026-07-28: run103 -- the firmware goes out over DMA, and the SPI model has none
+
+The last step of the touch diagnosis. run102 put `attemptToBootloadDevice`,
+`bootloadDevice` and the preconstructed firmware sender all at three captures
+each, so the driver reaches the point of pushing firmware; run101 showed the
+device receiving nothing. run103 probed the one branch that can be true of both.
+
+| probe | captures |
+|---|---|
+| `0xc0445144` the sender | 3 |
+| `0xc04451c4` **the DMA path** | **15** |
+| `0xc04451ec` **`v[0x360]`, the DMA transfer** | **15** |
+| `0xc04451f4` the PIO path | **0** |
+| `0xc0445224` `v[0x368]`, the PIO transfer | **0** |
+| `0xc0445228` after the transfer | 15 |
+| `0xc044525c` **the success branch** | **15** |
+| `0xc0445290` the retry increment | 15 |
+
+Fifteen is three bootload attempts times the five retries each makes
+(`cmp r8,#5` at `0xc0445294`). **The PIO path is never taken.**
+
+**And the transfer reports SUCCESS.** `0xc0445228` is `cmp r0,#0` and
+`0xc044525c` is the `beq` target, and it fires all fifteen times -- so
+`v[0x360]` returned zero. What fails is the acknowledgement immediately after
+it: the halfword is not `0x4BC1`, so `0xc0445290` increments the retry counter
+and the whole thing goes round again.
+
+**The reason is one sentence.** `core/src/soc/spi.c` has no DMA path -- the
+only occurrence of the word in the file is a comment -- and drives the attached
+slave solely from the TXDATA FIFO write. So a DMA-armed transfer moves no bytes
+to the device at all, the SPI controller has nothing to fail on and reports
+success, and the digitizer never sees the DATA packet. Its framer is still
+waiting for a sixteen-octet probe, so the `1A A1` that follows is answered as a
+loopback and the driver reads `0x1AA1` where it wanted `0x4BC1`.
+
+That also explains run101's counters exactly: `data 0, acks 0` with `probes 7`.
+A two-octet ATN_ACK starts a sixteen-octet frame the model never completes, so
+it is never counted -- and it leaves the framer mid-packet for the next one.
+
+**This corrects a claim `core/src/soc/mtz2.c` carried as settled**: "It is NOT
+blocked by DMA ... MTSPIBootloader_Z2 pushes through the ordinary SPI entry
+`v[0x368]`." Those three `v[0x368]` sites are real and are all in the
+CALIBRATION senders. The firmware sender is a fourth site, `v[0x360]`, and the
+flag that selects it is one the guest's console has been printing since run96:
+`AppleMultitouchZ2SPI: using DMA for bootloading`.
+
+**So the remaining work for touch is in the SPI controller, not the digitizer.**
+The PL080 DMAC is already modelled (`core/src/soc/pl080.c`, 199 assertions) and
+the controller arms DMA by setting bit 0x40 when `this+0xf4` is non-zero
+(`0xc05a6c24`). What is missing is the join between them: a DMA-armed SPI
+transfer has to clock its bytes through the attached slave's `transfer()` the
+same way the FIFO path does.
+
+
 ### 2026-07-28: run101 -- the HBPP claim is fixed, and the bootload still sends nothing
 
 The first boot with `core/src/soc/mtz2.c`'s bootloader implemented. Half of it

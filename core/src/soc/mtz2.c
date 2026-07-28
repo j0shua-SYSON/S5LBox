@@ -88,12 +88,32 @@
  *
  * THE ALTERNATIVE, AND WHY NOT YET. Implementing the HBPP sink — accepting the
  * 54,156 bytes and afterwards reporting firmware resident — removes the lie
- * entirely. It is NOT blocked by DMA, which was the standing objection:
- * MTSPIBootloader_Z2 pushes through the ordinary SPI entry `v[0x368]` at
- * 0xc0444ff8, 0xc0445224 and 0xc04454d0, and the controller only arms DMA when
- * `this+0xf4` is non-zero (`ldr r5,[r4,#0xf4] / cmp r5,#0 / beq 0xc05a6cb4` at
- * 0xc05a6c24, the branch that skips `orr r2,r2,#0x40`) — which our 16-byte
- * transfers prove is zero, since they run in PIO today. What blocks it is that
+ * entirely.
+ *
+ * IT IS BLOCKED BY DMA AFTER ALL, and this paragraph used to say the opposite.
+ * The old text read: "It is NOT blocked by DMA, which was the standing
+ * objection: MTSPIBootloader_Z2 pushes through the ordinary SPI entry
+ * `v[0x368]` at 0xc0444ff8, 0xc0445224 and 0xc04454d0." Those three sites are
+ * real, and they are all in the CALIBRATION senders. The FIRMWARE sender is
+ * 0xc0445144 and it has a fourth site the survey missed — `v[0x360]` at
+ * 0xc04451ec — chosen at 0xc04451b0 on `bootloader->0x2c`, which the guest's
+ * own console announces as "AppleMultitouchZ2SPI: using DMA for bootloading".
+ *
+ * run103 measured which arm is taken, and it is not close:
+ *
+ *     0xc04451c4  the DMA path        15 captures
+ *     0xc04451ec  v[0x360], the DMA transfer   15
+ *     0xc04451f4  the PIO path         0
+ *     0xc0445224  v[0x368], the PIO transfer    0
+ *
+ * fifteen being three bootload attempts times the five retries each makes. The
+ * transfer then RETURNS SUCCESS — 0xc044525c, the success branch, fires all
+ * fifteen times — and the acknowledgement after it still does not answer
+ * 0x4BC1, because core/src/soc/spi.c has no DMA path at all and the device
+ * never saw the packet. Its framer is still waiting for a sixteen-octet probe,
+ * so it loops the `1A A1` back and the driver reads 0x1AA1.
+ *
+ * So the work is in the SPI controller, not here. What also blocks it is that
  * the bootloader's own multi-stage protocol is unread, its failure mode is a
  * hang inside commandSleep rather than an error, and the feedback loop is an
  * 18-minute boot because the timer does not fire until instruction 1.11e9. It
