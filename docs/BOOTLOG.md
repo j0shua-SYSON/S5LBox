@@ -2315,6 +2315,56 @@ at 0x3cc10000(0xea9d6000)` — and uart4 still carried **zero bytes**. The
 milestone is unchanged.
 
 
+### 2026-07-28: run112 -- the SPI controller HAS its DMA channel, and never refuses
+
+The last surviving links of the touch chain are gone too. Probes on all four
+branches of `v[0x360]`:
+
+```
+  pc 0xc05a69b4  after `ldr r3,[r0,#0xb0]`  (TX channel)   captured 41
+  pc 0xc05a69d8  after `ldr r3,[r4,#0xb4]`  (RX channel)   captured 41
+  pc 0xc05a69ec  the kIOReturnDMAError refusal             captured 0
+  pc 0xc05a69f8  the success path                          captured 41
+
+  TX channel value: c0e19400 in 40 of 41 calls, 0 in the first
+  RX channel value: 00000000 in all 41
+```
+
+**The refusal is never taken.** The controller holds a real TX DMA channel, and
+although the RX channel is null the request never asks for RX DMA, so the
+`[r5,#0x24]` test at `0xc05a69e0` sends it to the success path anyway. That is
+correct behaviour for a bootloader that only transmits.
+
+So "v[0x360] writes kIOReturnDMAError into the request and returns 0, which is
+exactly run103's 15/15/15" is RETRACTED. The 15 entries were real; the reading
+of what happened inside them was not. Together with run108/run109 this leaves
+NOTHING of the original twelve-link chain above the SPI transfer itself.
+
+**Where the bytes actually stop.** The transfer is armed and reports success 41
+times, and `spi1 words 176, tx_drops 0` -- so nothing is arriving to be shifted.
+run104's channel dump is the join:
+
+```
+  ch5  src 0bfdd38c  dst 3ce00010  ctrl 84089000  cfg 00000000
+```
+
+`dst` is `S5L8900_SPI1_BASE + 0x10`, SPI_TXDATA, so the channel is aimed
+correctly. But `ctrl & 0xfff` is the transfer size and it is ZERO, `cfg` carries
+no Enable bit, and -- measured on both controllers in run104 and run106 --
+**`DMACConfiguration (+0x030)` is NEVER WRITTEN.** A PL080 with its global
+enable clear does nothing however well its channels are programmed.
+
+The model is not the obstacle and that is now measured rather than assumed:
+across every run the PL080 has refused nothing at all (`flow 0 width 0 chain 0
+softreq 0 endian 0`), and soc.h documents that `/arm-io/spi1`'s asymmetric
+widths -- four bytes in, one byte out -- are among the modes it DOES run, while
+the shipped tree only ever uses flow control 0-3, all of which it supports.
+
+**The frontier, narrowed to one sentence:** `AppleARMPL080DMAC` programs
+channels but never sets the controller's global enable, so nothing it is told to
+move ever moves. Why that write never happens is the next measurement -- and it
+is a measurement, not a read, because every read this week has been wrong.
+
 ### 2026-07-28: run110 -- the fallback allocator is never reached, and my reading of it was wasted
 
 Probes on the three branches of IOSurface's allocation:
