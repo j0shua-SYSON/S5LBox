@@ -306,13 +306,63 @@ will be kept alive" precedes the retries by thousands of lines), so a single
 TRUE-then-FALSE bit satisfies the first and starves the second. Only the
 bootload itself can separate them honestly.
 
-### 6.5 Still not established
+### 6.5 The register primitives
 
-The version read behind "Detected Z2 Version: 0x%08X" (`0xc0445654`) and what
-`performCalibSeq` (`0xc04455d0`, vtable `+0x88`) polls while it logs
-"Waiting for calibration to end". Both sit **after** the firmware download in
-`bootloadDevice()`'s sequence, and both must still return non-zero for the
-bootload to be counted as successful.
+`performCalibSeq` drives the part through two more packet types, both built
+with the same middle-endian convention as the DATA packet.
+
+**Read** — vtable `+0x4e4`, `0xc0440a74`, eight octets:
+
+```
+   1C 73 <addr:4 middle-endian> <sum16(pkt[2..5]):2 big-endian>
+```
+
+The value does not come back in that transfer. A second call, vtable `+0x4e0`
+at `0xc0440b80` — "performing long HBPP ATN_ACK for a MemRead" — sends
+
+```
+   1A A1 18 E1 18 E1 18 E1
+```
+
+which is **the HBPP probe pattern the model already answers**, extended to
+eight octets, and the reply carries the 32-bit register value.
+
+**Write** — vtable `+0x4e8`, `0xc0440e4c`, sixteen octets:
+
+```
+   1E 33 <addr:4> <mask:4> <value:4> <sum16(pkt[2..13]):2>
+```
+
+so it is an ordinary sixteen-octet frame like every other command.
+
+### 6.6 The version trap
+
+`performCalibSeq` reads register `0x10008ffc` and compares it against
+**`0x5A020028`** at `0xc044563c`:
+
+* **equal** → the four register writes are skipped and `bootloader->0x7e4` is
+  set to **1**;
+* **not equal** → it logs "Detected Z2 Version: …", performs four writes
+  (`0x10001c04` mask `0x1fff`, `0x10001c08` value `0x840000` mask `0xff0000`,
+  `0x1000300c` value 5 mask `0x85`, `0x1000304c` value `0x20` mask all), each
+  of which must return non-zero, and leaves `0x7e4` at **0**.
+
+And `attemptToBootloadDevice` tests exactly that byte at `0xc0441568`: **zero
+returns success**, non-zero falls into the `WANTS_FRAMES_IGNORED` path that
+ends in "*** ERROR: Disabling touch ***".
+
+So the model must report a version that is **not** `0x5A020028` and must
+answer the four register writes. Reporting the "convenient" value that skips
+the writes would take the branch that disables touch — which is the sort of
+thing that only shows up as a working bootload and a dead digitizer.
+
+### 6.7 Still not established
+
+What `performCalibSeq` polls after "requesting calibration" (it builds a packet
+starting `1F 01`) while it logs "Waiting for calibration to end", and the exact
+byte order of the value returned by the long MemRead ATN_ACK. Both are needed
+before the sequence can complete, and neither is answerable from the packet
+builders alone.
 
 ## 7. Downstream, once this is unblocked
 
