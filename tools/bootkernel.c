@@ -429,6 +429,7 @@ typedef struct {
     bool kext_map;
     bool print_config;
     bool call_probe_regs;
+    bool call_probe_live;
     bool uart4_rx_irq;
 } boot_toggles_t;
 
@@ -650,6 +651,16 @@ static const boot_toggle_t BOOT_TOGGLES[] = {
       "is only being asked for its arguments; the registers are captured either\n"
       "way and only the printing is suppressed. Only meaningful with a probe\n"
       "armed, so naming it on a run with none is refused rather than ignored." },
+    { "call-probe-live", NULL, NULL, false, BOOT_GROUP_DIAGNOSTIC,
+      BOOT_FIELD(call_probe_live),
+      "print every call-probe capture AS IT HAPPENS, as well as in the ring\n"
+      "dump at exit. The dump is the right default -- it keeps the last 4096\n"
+      "captures however long the run was and costs the hot loop nothing -- but\n"
+      "it only exists once the run ENDS. A run that is killed loses every\n"
+      "capture it made, and one still walking out a long budget makes you wait\n"
+      "for an answer it already has. Both cost time on 2026-07-28. Each line is\n"
+      "flushed, and is byte-identical to the dump's, so a live capture and a\n"
+      "replayed one can be quoted against each other." },
     { "uart4-rx-irq", NULL, NULL, true, BOOT_GROUP_DIAGNOSTIC,
       BOOT_FIELD(uart4_rx_irq),
       "let uart4's receive FIFO assert VIC line 28. ON by default, because that\n"
@@ -6314,6 +6325,21 @@ static struct {
      * and the step loop pays one compare against a global that is never
      * written after startup.  See call_probe_record_t above. */
     unsigned          call_probe_n;      /* configured PCs; 0 == off */
+    /*
+     * Print each capture AS IT HAPPENS as well as at exit.
+     *
+     * The ring is dumped when the run ends, which is the right default: it
+     * keeps the last 4096 captures however long the run was, and it costs
+     * the hot loop nothing. But it means a run that is killed, or one still
+     * walking out a budget long after the interesting instant, tells you
+     * nothing at all -- twice today a measurement was complete and
+     * unreadable, once discarded entirely by stopping the run early.
+     *
+     * With this on, the answer is in the log the moment it is captured and
+     * survives a kill. Opt-in, because a probe on a hot address would
+     * otherwise write a line per hit.
+     */
+    bool              call_probe_live;
     call_probe_site_t call_probe_pc[CALL_PROBE_PC_MAX];
     unsigned          call_probe_w;      /* ring write cursor */
     uint64_t          call_probe_total;  /* captures ever made, all PCs */
@@ -16753,6 +16779,9 @@ static bool call_probe_mode_matches(call_probe_mode_t mode, uint32_t cpsr) {
  * cost when no probe is configured is the G.call_probe_n test at the call site,
  * and nothing of this body is allowed to grow the loop body around it.
  */
+/* Defined below, next to the stack-word formatter it uses. */
+static void call_probe_print_one(const call_probe_record_t *rec);
+
 static BOOTKERNEL_NOINLINE void call_probe_note(
         arm_cpu_t *cpu, uint64_t at, uint32_t pc) {
     if (!cpu) return;
@@ -16815,6 +16844,13 @@ static BOOTKERNEL_NOINLINE void call_probe_note(
 
     G.call_probe_w = (k + 1u) % CALL_PROBE_RING;
     G.call_probe_total++;
+
+    if (G.call_probe_live) {
+        call_probe_print_one(rec);
+        /* Flushed, not buffered. The whole point is that a run which never
+         * reaches its own exit still leaves the measurement behind. */
+        fflush(stdout);
+    }
 }
 
 /* Format one stack word, or say why it could not be read. */
@@ -16837,6 +16873,7 @@ static void call_probe_word_text(const call_probe_record_t *rec, unsigned index,
         snprintf(out, size, "<no-ram>");
 }
 
+
 /*
  * Which register bank a capture's r8-r14 came from, named rather than left as a
  * CPSR the reader has to decode.  This is the difference between reading the
@@ -16854,6 +16891,30 @@ static const char *call_probe_bank_text(uint32_t cpsr) {
     case ARM_MODE_SYS: return "sys";
     default:           return "???";   /* not a mode this core implements */
     }
+}
+
+/*
+ * ONE CAPTURE, in the exact form the end-of-run dump has always used.
+ *
+ * Factored out so a live capture and a replayed one are byte-identical. Every
+ * BOOTLOG entry in this project quotes these lines, and a second format would
+ * make half of them unquotable against the other half.
+ */
+static void call_probe_print_one(const call_probe_record_t *rec) {
+    char w0[16], w1[16];
+    call_probe_word_text(rec, 0u, w0, sizeof w0);
+    call_probe_word_text(rec, 1u, w1, sizeof w1);
+    printf("    @%-12llu pc %08x lr %08x sp %08x  "
+           "r0 %08x r1 %08x r2 %08x r3 %08x  [sp+0] %-8s [sp+4] %-8s\n",
+           (unsigned long long)rec->at, rec->pc, rec->lr, rec->sp,
+           rec->r[0], rec->r[1], rec->r[2], rec->r[3], w0, w1);
+    if (!G.call_probe_regs) return;
+    printf("        r4 %08x r5 %08x r6 %08x r7 %08x r8 %08x r9 %08x "
+           "r10 %08x r11 %08x r12 %08x  cpsr %08x %s%s\n",
+           rec->r[4], rec->r[5], rec->r[6], rec->r[7], rec->r[8],
+           rec->r[9], rec->r[10], rec->r[11], rec->r[12], rec->cpsr,
+           call_probe_bank_text(rec->cpsr),
+           (rec->cpsr & ARM_CPSR_T) ? "/thumb" : "");
 }
 
 /*
@@ -16946,20 +17007,8 @@ static void call_probe_report(void) {
     for (unsigned i = 0; i < cnt; i++) {
         const call_probe_record_t *rec =
             &G.call_probe_log[(start + i) % CALL_PROBE_RING];
-        char w0[16], w1[16];
-        call_probe_word_text(rec, 0u, w0, sizeof w0);
-        call_probe_word_text(rec, 1u, w1, sizeof w1);
-        printf("    @%-12llu pc %08x lr %08x sp %08x  "
-               "r0 %08x r1 %08x r2 %08x r3 %08x  [sp+0] %-8s [sp+4] %-8s\n",
-               (unsigned long long)rec->at, rec->pc, rec->lr, rec->sp,
-               rec->r[0], rec->r[1], rec->r[2], rec->r[3], w0, w1);
+        call_probe_print_one(rec);
         if (!G.call_probe_regs) continue;
-        printf("        r4 %08x r5 %08x r6 %08x r7 %08x r8 %08x r9 %08x "
-               "r10 %08x r11 %08x r12 %08x  cpsr %08x %s%s\n",
-               rec->r[4], rec->r[5], rec->r[6], rec->r[7], rec->r[8],
-               rec->r[9], rec->r[10], rec->r[11], rec->r[12], rec->cpsr,
-               call_probe_bank_text(rec->cpsr),
-               (rec->cpsr & ARM_CPSR_T) ? "/thumb" : "");
         /*
          * r13/r14/r15 are the sp/lr/pc on the line above -- same bank, same
          * capture -- so printing them again would be one number under two
@@ -25732,6 +25781,7 @@ external_md_work_ready:
      * it is still written after spy_install() for the same reason everything
      * else here is: G is memset there. */
     G.call_probe_regs = cfg.v.call_probe_regs;
+    G.call_probe_live = cfg.v.call_probe_live;
     G.call_probe_n = call_probe_n;
     /*
      * The taps, for the same reason and with the same ordering rule: G is

@@ -132,6 +132,9 @@ static const vm_option_omission_t VM_OMITTED[] = {
     { "call-probe-regs",
       "formats the terminal report for --call-probe, and this app offers no "
       "way to arm a probe in the first place" },
+    { "call-probe-live",
+      "streams --call-probe captures to stdout as they happen, for the same "
+      "absent probe and the same absent terminal" },
     { "uart4-rx-irq",
       "a control for one bisection of the uart4 receive path, and it only "
       "means anything alongside --ppp, which this app does not offer" },
