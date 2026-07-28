@@ -2315,6 +2315,51 @@ at 0x3cc10000(0xea9d6000)` — and uart4 still carried **zero bytes**. The
 milestone is unchanged.
 
 
+### 2026-07-28: the black screen is a CACHE MODE mismatch, and IOSurface says so itself
+
+The refusal has a message, and it was three feet from where the search had been
+looking. The error branch of the per-region loop at `0xc05243f8` calls IOLog
+with the string at `0xc052d140`:
+
+```
+  IOSurface::allocate() - requested cache mode %08x incompatible with
+                          memory region cache mode %08x
+```
+
+and then returns `0xe00002c2`, which is `kIOReturnBadArgument`.
+
+**That explains every measurement that did not fit a space problem.** Doubling
+the pool changed nothing (run118). The bounds test passes, because the parent
+IS the whole pool (run111). Every `withSubRange` that is reached returns a real
+descriptor (run115). The fallback allocator is never entered (run110). None of
+that is a machine running out of room; it is a machine rejecting the room it
+has, on a property of the memory rather than its size.
+
+The comparisons in the loop are IOKit cache modes, `kIOMapCacheShift = 8`:
+
+```
+  c05243d8  cmp r0, #0x100     ; region: kIOMapInhibitCache
+  c05243e0  cmp r0, #0x400     ; region: kIOMapWriteCombineCache
+  c05243ec  cmp r6, #0x300     ; requested: kIOMapCopybackCache
+  c05243f0  cmpne r6, #0x200   ; requested: kIOMapWriteThruCache
+```
+
+So an uncached or write-combined REGION cannot serve a cached REQUEST, and
+IOSurface refuses rather than handing back memory whose coherency it cannot
+promise. That is correct behaviour on its part.
+
+**What this retracts.** Every hypothesis this project has had about the black
+screen since run107 was about capacity: that the parent descriptor was one
+framebuffer instead of two, that the pool held the scanout plus only one
+surface, that a third concurrent surface had nowhere to go, and that run86's
+"three is worse" was a confounded result worth re-running. All four are wrong,
+and the last one is wrong in a useful way: `S5L_BRINGUP_VRAM_SURFACES` was
+never the lever, so run86 measured noise around a knob that does not matter.
+
+run122 measures the actual pair — the region's mode from the virtual call at
+`0xc05243d4`, and the requested mode from `[r5+0x80]` — so the fix is aimed at
+a number rather than at a guess about which side is wrong.
+
 ### 2026-07-28: run118 -- a bigger /vram pool does NOT fix the IOSurface refusal
 
 The A/B, with `S5L_BRINGUP_VRAM_SURFACES` at 4 instead of 2 and enough budget
