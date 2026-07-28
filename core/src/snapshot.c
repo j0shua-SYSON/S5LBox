@@ -120,7 +120,7 @@ SNAP_SIZE_GUARD(s5l_i2c_t,         320,   "snap_i2c");
 SNAP_SIZE_GUARD(s5l_pcf50635_t,    600,   "snap_pmu");
 SNAP_SIZE_GUARD(s5l_wm8991_t,      496,   "snap_codec");
 SNAP_SIZE_GUARD(s5l_i2s_t,         104,   "snap_i2s");
-SNAP_SIZE_GUARD(s5l_spi_t,         200,   "snap_spi");
+SNAP_SIZE_GUARD(s5l_spi_t,         208,   "snap_spi");
 /* Four register banks, plus what the board is driving and which lines it
  * drives at all -- see the `driven` note in soc.h. */
 SNAP_SIZE_GUARD(s5l_gpioic_t,      224,   "snap_gpioic");
@@ -155,7 +155,7 @@ SNAP_SIZE_GUARD(s5l_stub_t,        56,    "snap_stubs");
  * 44408 = 43768 + the two PL080 DMA controllers (2 x 320). Unlike level_dirty
  * this one IS in snap_mach() and the byte format DOES change, so
  * SNAPSHOT_VERSION moves with it — see the v14 note. */
-SNAP_SIZE_GUARD(s5l8900_t,         44480, "snap_mach");
+SNAP_SIZE_GUARD(s5l8900_t,         44496, "snap_mach");
 #endif
 
 /* ---------------------------------------------------------------- the IO --- */
@@ -723,6 +723,10 @@ static void snap_spi(sn_io_t *io, s5l_spi_t *s) {
     FBYTES(s->rx, S5L_SPI_FIFO_DEPTH);
     F8(s->tx_level); F8(s->rx_level); F8(s->cs);
     F64(s->words); F64(s->tx_drops); F64(s->rx_underruns);
+    /* Travels with the rest: a restored machine whose overrun count reset
+     * would under-report exactly the loss this counter exists to make
+     * visible. */
+    F64(s->rx_overruns);
     F64(s->unknown_reads); F64(s->unknown_writes);
     FA32(s->unknown_off, S5L_SPI_UNKNOWN_OFF);
     F32(s->unknown_off_count);

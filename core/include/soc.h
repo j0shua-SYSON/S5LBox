@@ -2082,6 +2082,16 @@ typedef struct {
     uint64_t words;         /* completed shifts                               */
     uint64_t tx_drops;      /* TXDATA stores into a full transmit FIFO        */
     uint64_t rx_underruns;  /* RXDATA loads from an empty receive FIFO        */
+    /*
+     * Bytes shifted OUT whose answer had nowhere to go: the receive FIFO was
+     * full and nothing was draining it. Only reachable in DMA mode -- see
+     * spi_shift() -- and it is the honest name for what silicon does there,
+     * which is overrun rather than stall. run104 is why it exists: a
+     * transmit-only DMA burst of 812,340 octets delivered sixteen and counted
+     * the rest in tx_drops, because the shifter was waiting for a reader that
+     * a DMA transfer does not have.
+     */
+    uint64_t rx_overruns;
     uint64_t unknown_reads, unknown_writes;
     uint32_t unknown_off[S5L_SPI_UNKNOWN_OFF];
     unsigned unknown_off_count;

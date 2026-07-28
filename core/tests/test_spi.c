@@ -463,6 +463,87 @@ static void test_interrupt_enable_holds_the_line_through_the_prefill(void) {
  * inventing a reply for it would be fabricating the value the guest is waiting
  * for, which is the one thing this core's unmodelled windows may not do.
  */
+/*
+ * A TRANSMIT-ONLY DMA BURST, which is how the Z2's firmware is downloaded and
+ * the reason none of it ever arrived.
+ *
+ * The receive FIFO is eight deep and, in DMA, nothing empties it: the DMAC's
+ * destination is TXDATA and there is no second channel reading RXDATA back.
+ * The shifter used to stall on that, so a burst delivered eight octets, left
+ * eight more in the transmit FIFO, and counted every write after those in
+ * tx_drops. run104 measured it at the extreme -- 812,340 octets moved by the
+ * DMAC into SPI1, sixteen of them reaching the device.
+ *
+ * Silicon overruns rather than stalls, and this checks both halves of that:
+ * everything is delivered in DMA, and NOTHING about the PIO path changes,
+ * because there the CPU really is the reader and stalling is what makes a
+ * sixteen-octet command work against an eight-deep FIFO.
+ */
+static void test_a_dma_burst_is_not_stalled_by_a_full_receive_fifo(void) {
+    s5l_spi_t bus;
+    s5l_spi_slave_t slave;
+    echo_t echo;
+    const unsigned N = 200u;         /* far past both FIFOs */
+
+    /* --- PIO first: the stall is load-bearing and must survive. --- */
+    s5l_spi_reset(&bus);
+    memset(&echo, 0, sizeof echo);
+    bind_echo(&slave, &echo);
+    s5l_spi_attach(&bus, 0u, &slave);
+    s5l_spi_write(&bus, SPI_SETUP, SPI_SETUP_BASE);      /* no DMA bit */
+    for (unsigned i = 0; i < N; i++)
+        s5l_spi_write(&bus, SPI_TXDATA, (uint8_t)i);
+
+    CHECK(bus.words == S5L_SPI_FIFO_DEPTH,
+          "PIO shifted %llu octets into a full receive FIFO; it must stop at "
+          "%u and wait for a reader, or a sixteen-octet command loses half its "
+          "reply", (unsigned long long)bus.words,
+          (unsigned)S5L_SPI_FIFO_DEPTH);
+    CHECK(bus.rx_overruns == 0u,
+          "PIO overran the receive FIFO %llu times; it is supposed to stall",
+          (unsigned long long)bus.rx_overruns);
+    CHECK(bus.tx_drops > 0u,
+          "PIO accepted all %u octets, so the transmit FIFO is not bounded", N);
+
+    /* And draining RXDATA restarts it, one octet at a time. */
+    uint64_t before = bus.words;
+    (void)s5l_spi_read(&bus, SPI_RXDATA);
+    CHECK(bus.words == before + 1u,
+          "a RXDATA read did not restart the shifter exactly once (%llu -> %llu)",
+          (unsigned long long)before, (unsigned long long)bus.words);
+
+    /* --- DMA: the same burst, and now all of it must land. --- */
+    s5l_spi_reset(&bus);
+    memset(&echo, 0, sizeof echo);
+    bind_echo(&slave, &echo);
+    s5l_spi_attach(&bus, 0u, &slave);
+    s5l_spi_write(&bus, SPI_SETUP, SPI_SETUP_BASE | SPI_SETUP_DMA);
+    for (unsigned i = 0; i < N; i++)
+        s5l_spi_write(&bus, SPI_TXDATA, (uint8_t)i);
+
+    CHECK(bus.words == N,
+          "a DMA burst delivered %llu of %u octets -- this is the Z2 firmware "
+          "download, and short-changing it is why the bootload never sent a "
+          "packet", (unsigned long long)bus.words, N);
+    CHECK(bus.tx_drops == 0u,
+          "%llu octets of a DMA burst were dropped at the transmit FIFO",
+          (unsigned long long)bus.tx_drops);
+    CHECK(echo.words == N,
+          "the device saw %u octets, not %u", echo.words, N);
+
+    /*
+     * The answers that had nowhere to go are COUNTED, not pretended away. The
+     * first eight fit; the rest overran.
+     */
+    CHECK(bus.rx_level == S5L_SPI_FIFO_DEPTH,
+          "the receive FIFO holds %u octets, expected it full at %u",
+          bus.rx_level, (unsigned)S5L_SPI_FIFO_DEPTH);
+    CHECK(bus.rx_overruns == N - S5L_SPI_FIFO_DEPTH,
+          "%llu overruns counted, expected %u -- every discarded answer must "
+          "be visible", (unsigned long long)bus.rx_overruns,
+          N - S5L_SPI_FIFO_DEPTH);
+}
+
 static void test_a_bus_with_no_device_shifts_nothing(void) {
     s5l_spi_t bus;
     s5l_spi_reset(&bus);
@@ -956,6 +1037,7 @@ int main(void) {
     test_register_file_and_word_count();
     test_interrupt_requires_a_byte_the_handler_can_drain();
     test_interrupt_enable_holds_the_line_through_the_prefill();
+    test_a_dma_burst_is_not_stalled_by_a_full_receive_fifo();
     test_a_bus_with_no_device_shifts_nothing();
     test_null_device_answers_zero();
     test_machine_routes_spi_windows_and_irq_lines();

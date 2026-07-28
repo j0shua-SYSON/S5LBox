@@ -66,9 +66,33 @@ static void spi_shift(s5l_spi_t *bus) {
         bus->cs < S5L_SPI_SLAVES ? &bus->slaves[bus->cs] : NULL;
     if (!slave || !slave->transfer) return;
 
-    while (bus->tx_level && bus->rx_level < S5L_SPI_FIFO_DEPTH) {
+    /*
+     * WHETHER A FULL RECEIVE FIFO STOPS THE SHIFTER, and it depends on who is
+     * meant to be emptying it.
+     *
+     * In PIO the CPU is, one RXDATA load at a time, and stalling is what makes
+     * a sixteen-octet command work against an eight-deep FIFO: the driver
+     * writes sixteen, the first eight shift, the rest wait in the transmit
+     * FIFO, and each RXDATA read makes room for one more. Shifting regardless
+     * there would throw away half of every reply.
+     *
+     * In DMA there is NO reader. run104 measured what that costs: the DMAC
+     * moved 812,340 octets into this port from a channel whose destination is
+     * SPI1's TXDATA, and the digitizer received sixteen of them -- eight
+     * shifted, eight sat in the transmit FIFO, and every write after that was
+     * counted in tx_drops and discarded. The Z2 firmware download is exactly
+     * that shape, which is why the bootload has never delivered a packet.
+     *
+     * Silicon does not stall a shifter on a full receive FIFO; it overruns.
+     * So in DMA mode this does too, and the answer that had nowhere to go is
+     * counted rather than pretended away.
+     */
+    const bool dma = (bus->setup & SPI_SETUP_DMA) != 0u;
+    while (bus->tx_level && (dma || bus->rx_level < S5L_SPI_FIFO_DEPTH)) {
         uint8_t out = fifo_pop(bus->tx, &bus->tx_level);
-        bus->rx[bus->rx_level++] = slave->transfer(slave->ctx, out);
+        uint8_t in  = slave->transfer(slave->ctx, out);
+        if (bus->rx_level < S5L_SPI_FIFO_DEPTH) bus->rx[bus->rx_level++] = in;
+        else                                    bus->rx_overruns++;
         bus->words++;
         if (bus->words_left) bus->words_left--;
         /*
