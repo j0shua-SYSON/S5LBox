@@ -2409,7 +2409,53 @@ aimed at a screen that had been black since run116 for an unrelated reason, and
 run127's careful negative result — pool refusal real, cleared, still black —
 is exactly what that predicts.
 
-**Under test, not concluded.** Two runs are in flight:
+**CONFIRMED, 2026-07-29.** `run130` ran today's clean-source binary against
+run96's exact arguments and came back **1821** where run96 came back **273206**.
+Same command line, same firmware, same work-image recipe, different code. The
+black screen is a regression.
+
+**And my first two suspects were wrong.** `run131` restricted spi0's narrow
+decode and the tick shifter to the touch bus and stayed black at 1821. So
+neither `21ae30f`'s spi0 decode nor `c41454c`'s tick shifter is the cause, at
+least not alone. That guess is retracted; it was pattern-matching on a commit
+name, which is the same mistake as reading a vtable slot as a call site.
+
+**What the evidence actually says.** The consoles of run115 (renders, 273206)
+and run116 (black, 384) are byte-identical except for one line, and it is
+absent from the BLACK one:
+
+```
+  IOSurface warning: buffer allocation failed.  320 x 480 fmt: 42475241 size: 614400 bytes
+```
+
+So the guest reaches the same places and does the same things. It is not
+stalling. What differs is the CLCD, in exactly two bits:
+
+```
+  run115 renders:  irq-status=00000000  mask=00003f01
+  run116 black:    irq-status=00000001  mask=00003f00
+```
+
+The rendering run has the frame interrupt **enabled and acknowledged**. The
+black run has it **masked with the interrupt still pending** — the display
+driver stopped servicing frames. That is an interrupt-delivery difference, not
+a memory or surface one, and it explains why every IOSurface theory this
+project chased came back negative.
+
+Also retracted: the suggestion that `buffer allocation failed` marks the runs
+that got far enough to ask for a surface. run130 is black and prints it once.
+It does not discriminate.
+
+**Two runs are settling what remains:**
+
+  - `run133` — run96's ORIGINAL preserved binary at `work/run96-base/bin/`,
+    against today's firmware and work-image recipe. This is the control that
+    should have run before any counterfactual: 273206 means the regression is
+    in our code and a real bisect follows; 1821 means something outside the
+    code changed and the whole framing above is wrong.
+  - `run132` — the in-flight-packet diagnostic, at 800 M rather than 3 G.
+
+**Superseded below:** the two runs originally listed here as in flight.
 
   - `run130` — today's binary, run96's exact arguments. Black confirms the
     regression; 273206 refutes the correlation and this section is wrong.
