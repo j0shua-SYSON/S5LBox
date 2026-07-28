@@ -638,17 +638,51 @@ static void test_machine_routes_spi_windows_and_irq_lines(void) {
     CHECK(conflict && strcmp(conflict->name, "spi1") == 0,
           "RAM conflict did not identify spi1");
 
-    /* Only aligned 32-bit accesses decode; anything else stays counted. */
+    /*
+     * ALIGNMENT AND BOUNDS still gate the decode. WIDTH no longer does, for the
+     * data ports, and that is a fix rather than a relaxation.
+     *
+     * This block used to assert "only aligned 32-bit accesses decode", and the
+     * SPI window was decoded with mmio_word(). But /arm-io/spi1's own
+     * dma-channels template is 0x00089000 -- four-byte source, ONE-BYTE
+     * destination -- so every DMA store into this port was a write8 that the
+     * decode threw away. run114 measured the cost: channel 5 `runs 210 bytes
+     * 812340` into SPI1's TXDATA, against `spi1 words 176, tx-drops 0` and
+     * `unmapped writes 813135`. The Z2 firmware download had never once
+     * reached the device, and every explanation this project wrote for that
+     * looked at the guest instead.
+     *
+     * The narrow stores are aimed at spi0, which nothing else here uses, so
+     * spi1's FIFO stays pristine for the loopback below. spi0 has no slave
+     * attached, so a byte simply sits in the transmit FIFO where it can be
+     * counted.
+     */
     uint64_t ur = m.unmapped_reads, uw = m.unmapped_writes;
+
+    unsigned tx0 = m.spi[0].tx_level;
+    m.bus.write8(m.bus.ctx, S5L8900_SPI0_BASE + SPI_TXDATA, 0xaau);
+    m.bus.write16(m.bus.ctx, S5L8900_SPI0_BASE + SPI_TXDATA, 0xbbccu);
+    CHECK(m.spi[0].tx_level == tx0 + 2u,
+          "narrow stores to a data port did not reach the model: tx level %u",
+          m.spi[0].tx_level);
+    CHECK(m.unmapped_writes == uw,
+          "a narrow store to a data port still took the unmapped path");
+    /* A narrow READ decodes too, and answers the low half of the register. */
+    uint32_t st32 = m.bus.read32(m.bus.ctx, S5L8900_SPI0_BASE + SPI_STATUS);
+    uint32_t st16 = m.bus.read16(m.bus.ctx, S5L8900_SPI0_BASE + SPI_STATUS);
+    CHECK(st16 == (st32 & 0xffffu),
+          "a halfword read of STATUS gave %#x, not the low half of %#x",
+          st16, st32);
+    CHECK(m.unmapped_reads == ur,
+          "a narrow read of a data port still took the unmapped path");
+
+    /* Unaligned and out-of-window are unchanged, and still mutate nothing. */
     s5l_spi_t before = m.spi[1];
-    m.bus.write8(m.bus.ctx, S5L8900_SPI1_BASE + SPI_TXDATA, 0xaau);
-    m.bus.write16(m.bus.ctx, S5L8900_SPI1_BASE + SPI_TXDATA, 0xbbccu);
     m.bus.write32(m.bus.ctx, S5L8900_SPI1_BASE + 1u, 0xdeadbeefu);
-    (void)m.bus.read16(m.bus.ctx, S5L8900_SPI1_BASE + SPI_STATUS);
     (void)m.bus.read32(m.bus.ctx, S5L8900_SPI1_BASE + S5L8900_DEV_SIZE - 2u);
     CHECK(memcmp(&before, &m.spi[1], sizeof before) == 0,
-          "an invalid-width or unaligned access mutated the controller");
-    CHECK(m.unmapped_writes == uw + 3u && m.unmapped_reads == ur + 2u,
+          "an unaligned or out-of-window access mutated the controller");
+    CHECK(m.unmapped_writes == uw + 1u && m.unmapped_reads == ur + 1u,
           "malformed MMIO counts r=%llu w=%llu",
           (unsigned long long)(m.unmapped_reads - ur),
           (unsigned long long)(m.unmapped_writes - uw));

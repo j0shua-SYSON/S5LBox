@@ -155,6 +155,35 @@ static inline bool mmio_word(uint32_t a, unsigned bytes,
                              uint32_t base, uint32_t size) {
     return bytes == 4u && (a & 3u) == 0u && in_window(a, bytes, base, size);
 }
+/*
+ * THE DATA PORTS: SPI and I2S, which are DMA destinations and therefore see
+ * accesses NARROWER THAN A WORD.
+ *
+ * mmio_word() demands bytes == 4, and for a control register that is right --
+ * the CPU only ever reads and writes those a word at a time, and admitting a
+ * narrow access would hide a guest doing something surprising. But a DMA
+ * destination is not a control register. /arm-io/spi1's own dma-channels
+ * template is 0x00089000: four-byte source, ONE-BYTE destination. So the DMAC
+ * issues write8, mmio_word() rejects every one of them, and they fall past
+ * every device to m->unmapped_writes.
+ *
+ * That was not theoretical. run114 measured the Z2 firmware download landing
+ * there in full: channel 5, destination 0x3ce00010 which is SPI1's TXDATA,
+ * `runs 210 bytes 812340` -- against `spi1 words 176, tx-drops 0`, and
+ * `unmapped writes 813135` with 0x3ce00000 named in the outside-the-map list.
+ * The controller did its work, the port never heard a byte of it, and the
+ * digitizer has been echoing its idle pattern ever since. Every explanation
+ * this project wrote for that -- and there were several -- looked at the guest.
+ *
+ * Natural alignment rather than word alignment, because that is what the width
+ * means. An offset this device does not decode still reaches its own switch and
+ * is counted there, so a surprising access is visible rather than dropped.
+ */
+static inline bool mmio_data(uint32_t a, unsigned bytes,
+                             uint32_t base, uint32_t size) {
+    return (bytes == 1u || bytes == 2u || bytes == 4u) &&
+           (a & (bytes - 1u)) == 0u && in_window(a, bytes, base, size);
+}
 /* The timer is the one peripheral that does not fit the uniform 4 KB window:
  * its interrupt-status alias sits at offset 0x10000. */
 static inline bool in_power(uint32_t a, unsigned bytes) {
@@ -345,15 +374,15 @@ static uint32_t bus_read(void *ctx, uint32_t addr, unsigned bytes) {
         v = s5l_i2c_read(&m->i2c[0], addr - S5L8900_I2C0_BASE);
     } else if (mmio_word(addr, bytes, S5L8900_I2C1_BASE, S5L8900_DEV_SIZE)) {
         v = s5l_i2c_read(&m->i2c[1], addr - S5L8900_I2C1_BASE);
-    } else if (mmio_word(addr, bytes, S5L8900_I2S0_BASE, S5L8900_DEV_SIZE)) {
+    } else if (mmio_data(addr, bytes, S5L8900_I2S0_BASE, S5L8900_DEV_SIZE)) {
         /* Word accesses only, as for the I2C controllers: the stock accessors
          * are a bare `ldr`/`str` of a 32-bit word at a byte offset. */
         v = s5l_i2s_read(&m->i2s[0], addr - S5L8900_I2S0_BASE);
-    } else if (mmio_word(addr, bytes, S5L8900_I2S1_BASE, S5L8900_DEV_SIZE)) {
+    } else if (mmio_data(addr, bytes, S5L8900_I2S1_BASE, S5L8900_DEV_SIZE)) {
         v = s5l_i2s_read(&m->i2s[1], addr - S5L8900_I2S1_BASE);
-    } else if (mmio_word(addr, bytes, S5L8900_SPI0_BASE, S5L8900_DEV_SIZE)) {
+    } else if (mmio_data(addr, bytes, S5L8900_SPI0_BASE, S5L8900_DEV_SIZE)) {
         v = s5l_spi_read(&m->spi[0], addr - S5L8900_SPI0_BASE);
-    } else if (mmio_word(addr, bytes, S5L8900_SPI1_BASE, S5L8900_DEV_SIZE)) {
+    } else if (mmio_data(addr, bytes, S5L8900_SPI1_BASE, S5L8900_DEV_SIZE)) {
         v = s5l_spi_read(&m->spi[1], addr - S5L8900_SPI1_BASE);
     } else if (mmio_word(addr, bytes, S5L8900_USB_OTG_BASE, S5L8900_DEV_SIZE)) {
         /* Word accesses only, as for the VICs, the CLCD and the I2C
@@ -473,22 +502,22 @@ static void bus_write(void *ctx, uint32_t addr, uint32_t val, unsigned bytes) {
         s5l_i2c_write(&m->i2c[1], addr - S5L8900_I2C1_BASE, val);
         return;
     }
-    if (mmio_word(addr, bytes, S5L8900_I2S0_BASE, S5L8900_DEV_SIZE)) {
+    if (mmio_data(addr, bytes, S5L8900_I2S0_BASE, S5L8900_DEV_SIZE)) {
         note_device(m, addr, val, true);
         s5l_i2s_write(&m->i2s[0], addr - S5L8900_I2S0_BASE, val);
         return;
     }
-    if (mmio_word(addr, bytes, S5L8900_I2S1_BASE, S5L8900_DEV_SIZE)) {
+    if (mmio_data(addr, bytes, S5L8900_I2S1_BASE, S5L8900_DEV_SIZE)) {
         note_device(m, addr, val, true);
         s5l_i2s_write(&m->i2s[1], addr - S5L8900_I2S1_BASE, val);
         return;
     }
-    if (mmio_word(addr, bytes, S5L8900_SPI0_BASE, S5L8900_DEV_SIZE)) {
+    if (mmio_data(addr, bytes, S5L8900_SPI0_BASE, S5L8900_DEV_SIZE)) {
         note_device(m, addr, val, true);
         s5l_spi_write(&m->spi[0], addr - S5L8900_SPI0_BASE, val);
         return;
     }
-    if (mmio_word(addr, bytes, S5L8900_SPI1_BASE, S5L8900_DEV_SIZE)) {
+    if (mmio_data(addr, bytes, S5L8900_SPI1_BASE, S5L8900_DEV_SIZE)) {
         note_device(m, addr, val, true);
         s5l_spi_write(&m->spi[1], addr - S5L8900_SPI1_BASE, val);
         return;

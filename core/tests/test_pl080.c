@@ -823,15 +823,27 @@ static void test_a_dma_store_lands_where_a_cpu_store_lands(void) {
           "the I2S model did not count the DMA store as a write");
 
     /*
-     * And the finding this test exists to pin as much as to celebrate. The
-     * device tree programs the FIFOs at SIXTEEN bits (Control[23:18] of
-     * 0x00249000), but machine.c decodes the I2S window with mmio_word(), which
-     * takes 32-bit accesses only. So a DMA store to 0x3ca00010 lands exactly
-     * where a CPU halfword store to 0x3ca00010 lands — on the unmapped path.
-     * That is the correct answer for this machine today and it is also the next
-     * thing to fix if the FIFO is ever modelled.
+     * THE NARROW ACCESS, which this test used to pin in its broken form.
+     *
+     * The device tree programs these FIFOs at SIXTEEN bits (Control[23:18] of
+     * 0x00249000) and /arm-io/spi1's template asks for EIGHT. machine.c used to
+     * decode both windows with mmio_word(), which takes 32-bit accesses only,
+     * so every narrow DMA store fell past every device onto the unmapped path.
+     * The comment here called that "the correct answer for this machine today
+     * and also the next thing to fix if the FIFO is ever modelled".
+     *
+     * It was not merely latent. run114 measured the Z2 firmware download dying
+     * in exactly this gap: channel 5, destination SPI1's TXDATA, `runs 210
+     * bytes 812340`, against `spi1 words 176` and `unmapped writes 813135`.
+     * The DMA controller did all of its work and the port never heard a byte,
+     * which is why the digitizer has only ever echoed its idle pattern.
+     *
+     * So the invariant this test is named for is unchanged and is now asserted
+     * the right way round: a DMA store lands where a CPU store lands, and both
+     * of them reach the peripheral.
      */
-    uint64_t before = m.unmapped_writes;
+    uint64_t before   = m.unmapped_writes;
+    uint64_t i2swrote = m.i2s[0].writes;
     m.bus.write32(m.bus.ctx, S5L8900_DMAC0_BASE + CH(1, R_SRC), 0x200u);
     m.bus.write32(m.bus.ctx, S5L8900_DMAC0_BASE + CH(1, R_DST),
                   S5L8900_I2S0_BASE + 0x10u);
@@ -844,10 +856,21 @@ static void test_a_dma_store_lands_where_a_cpu_store_lands(void) {
     CHECK(m.dmac[0].bytes_moved == 4u + 8u,
           "the 16-bit transfer to the transmit FIFO did not run: %llu bytes",
           (unsigned long long)m.dmac[0].bytes_moved);
-    CHECK(m.unmapped_writes == before + 4u,
-          "expected the four halfword stores to 0x3ca00010 to take the "
-          "unmapped path, as a CPU halfword store to it does: %llu new",
+    CHECK(m.unmapped_writes == before,
+          "%llu halfword store(s) to 0x3ca00010 still took the unmapped path",
           (unsigned long long)(m.unmapped_writes - before));
+    CHECK(m.i2s[0].writes == i2swrote + 4u,
+          "the I2S model saw %llu of the four halfword DMA stores",
+          (unsigned long long)(m.i2s[0].writes - i2swrote));
+
+    /* And the other half of the invariant, measured rather than assumed: the
+     * CPU's own halfword store to that address reaches the device too. */
+    uint64_t cpu_before = m.unmapped_writes, cpu_wrote = m.i2s[0].writes;
+    m.bus.write16(m.bus.ctx, S5L8900_I2S0_BASE + 0x10u, 0x1234u);
+    CHECK(m.unmapped_writes == cpu_before,
+          "a CPU halfword store to 0x3ca00010 took the unmapped path");
+    CHECK(m.i2s[0].writes == cpu_wrote + 1u,
+          "a CPU halfword store to 0x3ca00010 did not reach the I2S model");
 
     s5l8900_free(&m);
 }

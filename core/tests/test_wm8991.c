@@ -545,15 +545,41 @@ static void test_machine_routes_the_codec_and_both_windows(void) {
     CHECK(m.unmapped_reads == ur && m.unmapped_writes == uw,
           "valid I2S MMIO was classified unmapped");
 
-    /* Word accesses only, exactly as for the I2C controllers. */
+    /*
+     * NOT word accesses only, and the difference matters for audio.
+     *
+     * I2S is a DMA destination: the device tree programs these FIFOs at
+     * SIXTEEN bits (Control[23:18] of the 0x00249000 template), so the DMAC
+     * stores halfwords into them. While machine.c decoded this window with
+     * mmio_word() every one of those stores fell through to the unmapped path
+     * -- the same defect that was measured destroying the touch controller's
+     * firmware download in run114, and the reason it is fixed for both ports
+     * at once rather than only the one that was caught.
+     *
+     * Alignment and window bounds still gate the decode; only width stopped
+     * doing so.
+     */
     s5l_i2s_t before = m.i2s[0];
     m.bus.write8(m.bus.ctx, S5L8900_I2S0_BASE + 0x08u, 0xaau);
+    CHECK(m.i2s[0].regs[2] == 0xaau,
+          "a byte store to the I2S window did not reach the model: %#x",
+          m.i2s[0].regs[2]);
     m.bus.write16(m.bus.ctx, S5L8900_I2S0_BASE + 0x08u, 0xbbccu);
+    CHECK(m.i2s[0].regs[2] == 0xbbccu,
+          "a halfword store to the I2S window did not reach the model: %#x",
+          m.i2s[0].regs[2]);
+    CHECK(m.bus.read16(m.bus.ctx, S5L8900_I2S0_BASE + 0x08u) == 0xbbccu,
+          "a halfword read of the I2S window did not answer from the model");
+
+    /* Unaligned is still refused, and still mutates nothing. */
+    before = m.i2s[0];
     m.bus.write32(m.bus.ctx, S5L8900_I2S0_BASE + 1u, 0xdeadbeefu);
-    (void)m.bus.read16(m.bus.ctx, S5L8900_I2S0_BASE + 0x08u);
     CHECK(memcmp(&before, &m.i2s[0], sizeof before) == 0,
-          "an invalid-width or unaligned access mutated the I2S window");
-    CHECK(m.unmapped_writes == uw + 3u && m.unmapped_reads == ur + 1u,
+          "an unaligned access mutated the I2S window");
+    /* One unmapped write now, not three: the byte and halfword stores decode,
+     * and only the unaligned word does not. No unmapped reads at all, because
+     * the halfword read decodes too. */
+    CHECK(m.unmapped_writes == uw + 1u && m.unmapped_reads == ur,
           "malformed I2S MMIO counts r=%llu w=%llu",
           (unsigned long long)(m.unmapped_reads - ur),
           (unsigned long long)(m.unmapped_writes - uw));
