@@ -12,7 +12,7 @@
          S5L8950X, and a name tied to one OS version would go stale the moment
          that lands.
 
-         CFBundleName follows PRODUCT_NAME, which is now S5LBox as well -- the
+         CFBundleName follows PRODUCT_NAME, which is now S5LBox as well – the
          Xcode target, the .app, the .ipa and the entitlements file were all
          renamed once the CI workflow that pinned them could be edited. The
          only thing still called iOS3-VM is the working directory on disk,
@@ -34,6 +34,32 @@
     <string>0.0.1</string>
     <key>CFBundleVersion</key>
     <string>1</string>
+    <!-- The app's Documents folder appears in Files under "On My iPhone",
+         which is how a 239 MB IPSW gets in without going through a document
+         picker: copy it into S5LBox's folder and the Firmware screen finds it
+         where it already is.
+
+         WHAT THIS EXPOSES, stated because it is not only the firmware. The
+         same folder holds Machines/<id>/rootfs-work.img – a whole per-machine
+         work image, around 445 MB each – and those become visible, movable
+         and deletable. That is deliberate: a work image the user cannot copy
+         off the device is a VM they cannot back up, and every emulator that
+         ships on iOS makes the same trade.
+
+         It also means the canonical firmware inputs can be overwritten by the
+         user. That is already handled rather than newly risky: VMFirmwareBoot
+         gates every one of the three on size AND SHA-256 before it is opened,
+         so a replaced or truncated input is refused by name instead of being
+         booted. The gate existed before this key did.
+
+         LSSupportsOpeningDocumentsInPlace lets the importer read an archive
+         where it sits rather than copying it into the container first, which
+         on a 64 GB phone is the difference between needing 239 MB free and
+         needing 478 MB. -->
+    <key>UIFileSharingEnabled</key>
+    <true/>
+    <key>LSSupportsOpeningDocumentsInPlace</key>
+    <true/>
     <key>LSRequiresIPhoneOS</key>
     <true/>
     <key>MinimumOSVersion</key>

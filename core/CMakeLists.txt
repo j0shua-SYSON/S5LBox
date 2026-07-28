@@ -834,6 +834,16 @@ add_test(NAME boot_option_resolution
 # expectation, so both can be edited together and still be short a toggle.
 # This runs both binaries and requires bootkernel's live table to partition
 # into the mirrored rows and the deliberately-omitted ones.
+# app/Info.plist carried an illegal XML comment for an unknown length of time --
+# XML forbids "--" inside one, and a comment used it as a dash. Nothing read the
+# file, and a malformed plist fails at build or launch, a long way from the
+# punctuation. Narrow on purpose: plutil -lint on a macOS runner is the real
+# validator; this is the part that runs wherever CTest does.
+add_test(NAME app_info_plist
+    COMMAND ${CMAKE_COMMAND}
+            -DPLIST=${CMAKE_CURRENT_SOURCE_DIR}/../app/Info.plist
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_info_plist.cmake)
+
 add_test(NAME app_option_mirror
     COMMAND ${CMAKE_COMMAND}
             -DBOOTKERNEL=$<TARGET_FILE:bootkernel>
