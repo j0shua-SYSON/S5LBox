@@ -206,8 +206,26 @@ static BOOL VMProbeFirmware(vm_firmware_boot_state_t *out) {
     NSString *dir = [[VMSettings sharedSettings] firmwareDirectory];
     if (dir.length == 0) return NO;
 
+    /*
+     * SPLIT, with an EMPTY work directory, and that is the whole correction.
+     *
+     * The first version used vm_firmware_boot_paths_shared(), which looks for
+     * the writable work image in the firmware folder. That answers a question
+     * nobody asked: the work image belongs to ONE machine and lives in that
+     * machine's directory, so a shared probe can report READY about a machine
+     * that does not exist yet. It did, and the machine then said "Preparing
+     * iPhone OS" -- which is correct behaviour contradicting a promise this
+     * screen had just made.
+     *
+     * VMEngine's own +firmwareReadinessSummary already got this right and says
+     * why: claiming READY here would be claiming a fact about a machine the
+     * caller has not identified. An empty work directory makes the probe
+     * report NEEDS_WORK_IMAGE, which is exactly true of every machine that has
+     * not been opened yet, and the row words it as that.
+     */
     vm_firmware_boot_paths_t paths;
-    if (!vm_firmware_boot_paths_shared(&paths, [dir fileSystemRepresentation]))
+    if (!vm_firmware_boot_paths_split(&paths, [dir fileSystemRepresentation],
+                                      ""))
         return NO;
     vm_firmware_boot_probe(&paths, out);
     return YES;
@@ -425,8 +443,13 @@ titleForFooterInSection:(NSInteger)section {
         case VMImportSectionReadiness:
             return @"The emulator boots Apple firmware whenever all three "
                     "files are present and the right size -- there is nothing "
-                    "to switch on. If they are not, it runs a small synthetic "
-                    "guest instead, which is what this row exists to tell you.";
+                    "to switch on. If they are not, it runs a small test guest "
+                    "instead, which is what this row exists to tell you.\n\n"
+                    "This row is about the three SHARED files. Each machine "
+                    "also needs its own writable copy of the root filesystem, "
+                    "made once when you first open it; a screen with no "
+                    "machine selected cannot say whether any particular "
+                    "machine has one yet.";
 
         case VMImportSectionKeys:
             return @"These are yours, not the app's. S5LBox ships no keys, "
@@ -547,19 +570,23 @@ estimatedHeightForRowAtIndexPath:(NSIndexPath *)indexPath {
                 return cell;
             }
             switch (st.readiness) {
+                /*
+                 * Both mean the same thing from here, because this screen
+                 * cannot see a machine: the three shared files are present.
+                 * What happens NEXT is per-machine, and saying so plainly is
+                 * what stops "Preparing iPhone OS" reading as a fault.
+                 */
                 case VM_FW_BOOT_READY:
-                    cell.textLabel.text = @"Ready to boot Apple firmware";
-                    cell.textLabel.textColor = [UIColor systemGreenColor];
-                    cell.detailTextLabel.text =
-                        @"Start a machine and it boots this, not the synthetic "
-                        @"guest. There is no separate button.";
-                    break;
                 case VM_FW_BOOT_NEEDS_WORK_IMAGE:
-                    cell.textLabel.text = @"Ready, first boot will be slow";
+                    cell.textLabel.text = @"Firmware imported";
                     cell.textLabel.textColor = [UIColor systemGreenColor];
                     cell.detailTextLabel.text =
-                        @"All three files are here. Starting a machine copies "
-                        @"about 450 MB once to make its writable image.";
+                        @"The first time you open a machine it copies about "
+                        @"450 MB to make that machine's own writable root "
+                        @"filesystem, and shows \u201cPreparing iPhone OS\u201d "
+                        @"while it does. The test guest runs meanwhile. Close "
+                        @"and reopen the machine when it finishes and it boots "
+                        @"iPhone OS 3.1.3.";
                     break;
                 case VM_FW_BOOT_INCOMPLETE:
                 default:
