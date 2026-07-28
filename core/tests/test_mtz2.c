@@ -197,21 +197,51 @@ static bool userspace_accepts_frame(const uint8_t *p, unsigned len,
  * it and not the way the model computed it:
  *   X   = (int32)LE32(rec+4) >> 8          _MTProcess_0xCC_Data
  *   Y   = (int32)LE32(rec+8) >> 8
- *   nx  = (X - xMin) / (xMax - xMin)       _MTSurface_getBounds_mm
+ *   clamp X into [xMin, xMax]              _alg_ClipPosToScreenEdge 0x33d00f2c
+ *   nx  = (X - xMin) / (xMax - xMin)       _mt_FillMTContactDirectFromBinary
  *   px  = nx * W                           MultitouchHID
  *   py  = H * (1 - ny)                     MultitouchHID -- note the flip
- * with xMin/yMin zero and xMax/yMax the surface size reported in 0xD9.
+ *
+ * THE BOUNDS ARE NOT REPORT 0xD9's SURFACE SIZE, and this function said they
+ * were until run96's snapshot was read directly. _alg_InitRowColXYConvert
+ * (0x33d01010) builds them out of the Sensor Region Descriptor's ELECTRODE
+ * COUNTS and never looks at 0xD9 at all:
+ *
+ *     xMax = 75 + (columns - 1) * 5600/11        xMin = 0 - 75
+ *     yMax = 75 + (rows    - 1) * 3600/7         yMin = 0 - 75
+ *
+ * The 5600/11 and 3600/7 are grid[0x34]*100/grid[0x38] and
+ * grid[0x2c]*100/grid[0x30], and the 75 is the margin, all four set by
+ * 0x33d01154; the truncating divide is the guest's own __divsi3, so the
+ * integer division here is not a convenience. Both tables are indexed from -1,
+ * which is why a descriptor of zeroes yields a NEGATIVE span rather than a
+ * degenerate one, and why every contact then clamps to the same point.
+ *
+ * The device object at VA 0x007e9000 in work/run96-base/snap-3.5e9.bin holds
+ * grid+0x148..0x14e = -434 / -75 / -439 / -75, which is that failure measured
+ * rather than argued.
  */
-static void decode_contact_pixel(const uint8_t *rec, uint32_t surface_w,
-                                 uint32_t surface_h, int *px, int *py) {
+#define MT_TEST_MARGIN 75      /* grid[0x24..0x2a], all four, 0x33d011a0 */
+
+static void decode_contact_pixel(const uint8_t *rec, unsigned rows,
+                                 unsigned columns, int *px, int *py) {
+    int32_t x_min = -(int32_t)MT_TEST_MARGIN;
+    int32_t y_min = -(int32_t)MT_TEST_MARGIN;
+    int32_t x_max = (int32_t)MT_TEST_MARGIN +
+                    (int32_t)((columns ? columns - 1u : 0u) * 5600u / 11u);
+    int32_t y_max = (int32_t)MT_TEST_MARGIN +
+                    (int32_t)((rows ? rows - 1u : 0u) * 3600u / 7u);
     int32_t rx32 = (int32_t)((uint32_t)rec[4] | ((uint32_t)rec[5] << 8) |
                              ((uint32_t)rec[6] << 16) | ((uint32_t)rec[7] << 24));
     int32_t ry32 = (int32_t)((uint32_t)rec[8] | ((uint32_t)rec[9] << 8) |
                              ((uint32_t)rec[10] << 16) | ((uint32_t)rec[11] << 24));
-    double x = (double)(rx32 >> 8);
-    double y = (double)(ry32 >> 8);
-    double nx = x / (double)surface_w;
-    double ny = y / (double)surface_h;
+    int32_t x = rx32 >> 8, y = ry32 >> 8;
+    if (x < x_min) x = x_min;
+    if (x > x_max) x = x_max;
+    if (y < y_min) y = y_min;
+    if (y > y_max) y = y_max;
+    double nx = (double)(x - x_min) / (double)(x_max - x_min);
+    double ny = (double)(y - y_min) / (double)(y_max - y_min);
     *px = (int)(nx * (double)S5L_MT_PANEL_W);
     *py = (int)((double)S5L_MT_PANEL_H * (1.0 - ny));
 }
@@ -570,28 +600,122 @@ static void test_get_report_info_satisfies_isbootloaded(void) {
     CHECK(driver_accepts_reply(tx, rx) && rx[3] == 0u && rx[4] == 0u,
           "an unknown report id produced a malformed reply");
 
-    /* Every report the driver interrogates announces the length it will then
-     * read, and every one fits the short form the driver picks below 12. */
-    static const struct { uint8_t id; unsigned len; const char *what; } R[] = {
-        { MTZ2_REPORT_FAMILY_ID,    1u, "Family ID"               },
-        { MTZ2_REPORT_GEOMETRY,     5u, "Rows/Columns/bcdVersion" },
-        { MTZ2_REPORT_BUTTONS,      1u, "Buttons"                 },
-        { MTZ2_REPORT_SURFACE,      8u, "Sensor Surface W/H"      },
-        { MTZ2_REPORT_REGION_DESC,  8u, "Region Descriptor"       },
-        { MTZ2_REPORT_REGION_PARAM, 8u, "Region Param"            },
+    /*
+     * Every report the driver interrogates announces the length it will then
+     * read, and that announced length is also what CHOOSES the control-read
+     * form: 0xc0442e10 compares it against 11 and dispatches through vtable
+     * slot 0x4bc (0xE6, the short form) at or below, and slot 0x4c0 (0xE7, the
+     * long form) above. So `form` below is not a second opinion about the
+     * length — it is the driver's own branch, restated so that a report which
+     * crosses 11 in either direction fails here rather than silently changing
+     * which packet the model has to frame.
+     */
+    static const struct {
+        uint8_t id; unsigned len; uint8_t form; const char *what;
+    } R[] = {
+        { MTZ2_REPORT_FAMILY_ID,    1u,  MTZ2_OP_READ_SHORT, "Family ID"    },
+        { MTZ2_REPORT_GEOMETRY,     5u,  MTZ2_OP_READ_SHORT,
+          "Rows/Columns/bcdVersion" },
+        { MTZ2_REPORT_BUTTONS,      1u,  MTZ2_OP_READ_SHORT, "Buttons"      },
+        { MTZ2_REPORT_SURFACE,      8u,  MTZ2_OP_READ_SHORT,
+          "Sensor Surface W/H" },
+        { MTZ2_REPORT_REGION_DESC,  14u, MTZ2_OP_READ_LONG,
+          "Region Descriptor"  },
+        { MTZ2_REPORT_REGION_PARAM, 8u,  MTZ2_OP_READ_SHORT, "Region Param" },
     };
     for (unsigned i = 0; i < sizeof R / sizeof R[0]; i++) {
         build_frame(tx, MTZ2_OP_REPORT_INFO, R[i].id);
         xfer(&s, tx, rx, MTZ2_FRAME_LEN);
         unsigned len = (unsigned)rx[3] | ((unsigned)rx[4] << 8);
+        uint8_t form = len > MTZ2_PAYLOAD_MAX ? MTZ2_OP_READ_LONG
+                                              : MTZ2_OP_READ_SHORT;
         CHECK(driver_accepts_reply(tx, rx) && len == R[i].len,
               "%s (0x%02x) announced %u bytes, expected %u",
               R[i].what, R[i].id, len, R[i].len);
-        CHECK(len <= MTZ2_PAYLOAD_MAX,
-              "%s does not fit the short control-read form (%u > %u), so the "
-              "driver would use 0xE7 and a longer frame than this model builds",
-              R[i].what, len, (unsigned)MTZ2_PAYLOAD_MAX);
+        CHECK(form == R[i].form,
+              "%s announced %u bytes, so the driver picks 0x%02x and not the "
+              "0x%02x this report is expected to use",
+              R[i].what, len, form, R[i].form);
+        /* 0xc0442dc4 refuses anything above 512 before it ever picks a form. */
+        CHECK(len <= 0x200u,
+              "%s announced %u bytes, above the 512 the driver rejects "
+              "outright", R[i].what, len);
     }
+}
+
+/*
+ * THE LONG CONTROL READ, DRIVEN END TO END, because the Region Descriptor is
+ * the first report this device publishes that does not fit the short form and
+ * a model that framed it wrongly would desynchronise the bus for the rest of
+ * the boot with nothing in the log to read it off.
+ *
+ * Both stages are built the way 0xc0441ba0 builds them, including the quirk
+ * that stage 2 MOVES the stage-1 checksum to its new position rather than
+ * recomputing it (0xc0441d10 zeroes [14..15], and the sum was computed over
+ * five bytes at 0xc0441bf0). The two acceptance tests are the driver's own, at
+ * 0xc0441db0 and 0xc0441e08.
+ */
+static void test_the_long_control_read_carries_the_descriptor(void) {
+    s5l_mtz2_t dev;
+    s5l_spi_slave_t s;
+    uint8_t tx[MTZ2_FRAME_LEN + MTZ2_PAYLOAD_LIMIT + 8];
+    uint8_t rx[MTZ2_FRAME_LEN + MTZ2_PAYLOAD_LIMIT + 8];
+    uint8_t probe[MTZ2_FRAME_LEN];
+    const unsigned L = MTZ2_REGION_RECORD * MTZ2_REGION_RECORDS;   /* 14 */
+    const unsigned total = L + 5u;
+
+    s5l_mtz2_reset(&dev);
+    s5l_mtz2_bind(&dev, &s);
+    release_reset(&dev);
+    build_hbpp_probe(probe);
+    xfer(&s, probe, rx, MTZ2_FRAME_LEN);
+
+    /* Stage 1: sixteen bytes, the length stated at tx[3..4], checksum over
+     * FIVE bytes and parked at [14..15]. The answer is not examined. */
+    memset(tx, 0, sizeof tx);
+    tx[0] = MTZ2_OP_READ_LONG;
+    tx[1] = MTZ2_REPORT_REGION_DESC;
+    tx[2] = 0u;
+    tx[3] = (uint8_t)(L & 0xffu);
+    tx[4] = (uint8_t)(L >> 8);
+    uint16_t stage1 = ref_sum16(tx, 5u);
+    tx[14] = (uint8_t)(stage1 & 0xffu);
+    tx[15] = (uint8_t)(stage1 >> 8);
+    xfer(&s, tx, rx, MTZ2_FRAME_LEN);
+
+    /* Stage 2: L + 5 bytes, tx[2] = 1, and the SAME checksum moved to sit
+     * immediately after the payload. */
+    memset(tx, 0, sizeof tx);
+    tx[0] = MTZ2_OP_READ_LONG;
+    tx[1] = MTZ2_REPORT_REGION_DESC;
+    tx[2] = 1u;
+    tx[3] = (uint8_t)(L & 0xffu);
+    tx[4] = (uint8_t)(L >> 8);
+    tx[L + 3u] = (uint8_t)(stage1 & 0xffu);
+    tx[L + 4u] = (uint8_t)(stage1 >> 8);
+    xfer(&s, tx, rx, total);
+
+    CHECK(rx[0] == tx[0],
+          "rx[0] came back 0x%02x, not the 0x%02x the driver echoes-tests "
+          "at 0xc0441db0", rx[0], tx[0]);
+    uint16_t carried = (uint16_t)(rx[L + 3u] | (rx[L + 4u] << 8));
+    CHECK(carried == ref_sum16(rx, L + 3u),
+          "the long reply's checksum is 0x%04x over %u bytes, expected 0x%04x",
+          carried, L + 3u, ref_sum16(rx, L + 3u));
+
+    /* memcpy(desc + 1, rx + 3, length) at 0xc0441e24 — the payload is exactly
+     * rx[3 .. 3+L), which is what the kernel then publishes as OSData. */
+    const uint8_t *blob = &rx[MTZ2_PAYLOAD_AT];
+    const uint8_t *desc = &blob[MTZ2_REGION_RECORD];   /* _mt_DefineSurfaceGrid
+                                                        * takes blob + 7 */
+    CHECK(desc[0] != 0u,
+          "desc[0] is zero, so _mt_DefineSurfaceGrid's back-fill at 0x33d01dd0 "
+          "would overwrite desc[2] and desc[5] with its own arguments and this "
+          "report would decide nothing");
+    CHECK(desc[2] == 15u && desc[5] == 10u,
+          "the descriptor carries rows/columns %u/%u, expected 15/10 — these "
+          "are the two bytes _alg_InitRowColXYConvert indexes its tables with",
+          desc[2], desc[5]);
 }
 
 /*
@@ -899,14 +1023,22 @@ static void test_the_payload_is_the_frame_userspace_parses(void) {
     CHECK(r[3] == 1u, "hand id is %u, expected one hand", r[3]);
 
     /*
-     * 160 of 320 across a 4800-unit surface is 160*15 + 7 = 2407, and the
-     * field is that scaled by 256 because the parser shifts right by eight.
-     * 240 of 480 down a 7200-unit surface is FLIPPED: 7200 - 240*15 - 7 =
-     * 3593. Written out as arithmetic rather than as a constant so that a
-     * changed surface size changes this expectation too.
+     * The surface a contact is measured against is the one the GUEST derives
+     * from the electrode counts, [-75, 4656] across and [-75, 7275] down, and
+     * not the 4800x7200 report 0xD9 publishes — see decode_contact_pixel().
+     *
+     * 160 of 320: the centre of the pixel is (2*160 + 1) * 4731 / (2*320) =
+     * 2372 units above the lower bound, so -75 + 2372 = 2297, and the field is
+     * that scaled by 256 because the parser shifts right by eight. 240 of 480
+     * is FLIPPED, measured down from the upper bound: (2*240 + 1) * 7350 /
+     * (2*480) = 3682, so 7275 - 3682 = 3593.
+     *
+     * Both are written as the numbers themselves rather than by re-running the
+     * encoder's formula, which would make this check agree with the model by
+     * construction instead of by arithmetic.
      */
-    uint32_t want_x = (uint32_t)(160u * 15u + 7u) << 8;
-    uint32_t want_y = (uint32_t)(7200u - 240u * 15u - 7u) << 8;
+    uint32_t want_x = (uint32_t)(-75 + 2372) << 8;
+    uint32_t want_y = (uint32_t)(7275 - 3682) << 8;
     uint32_t got_x = (uint32_t)r[4] | ((uint32_t)r[5] << 8) |
                      ((uint32_t)r[6] << 16) | ((uint32_t)r[7] << 24);
     uint32_t got_y = (uint32_t)r[8] | ((uint32_t)r[9] << 8) |
@@ -953,7 +1085,7 @@ static void test_a_coordinate_maps_back_to_the_pixel_it_came_from(void) {
         int px = -1, py = -1;
         CHECK(s5l_mtz2_encode(&dev, &c, 1u, 1u, 16u, out) == 42u,
               "encoding (%u,%u) failed", P[i].x, P[i].y);
-        decode_contact_pixel(&out[10], dev.surface_width, dev.surface_height,
+        decode_contact_pixel(&out[10], dev.rows, dev.columns,
                              &px, &py);
         CHECK(px == (int)P[i].x && py == (int)P[i].y,
               "pixel (%u,%u) came back as (%d,%d) through the guest's own "
@@ -1051,8 +1183,8 @@ static void test_five_contacts_fit_and_survive_the_wire(void) {
           "the parser found %u contacts in a five-contact frame", count);
     for (unsigned i = 0; i < MTZ2_CONTACT_MAX; i++) {
         int px = -1, py = -1;
-        decode_contact_pixel(&payload[10 + i * 32], dev.surface_width,
-                             dev.surface_height, &px, &py);
+        decode_contact_pixel(&payload[10 + i * 32], dev.rows,
+                             dev.columns, &px, &py);
         CHECK(payload[10 + i * 32] == (uint8_t)(i + 1u),
               "contact %u carries id %u", i, payload[10 + i * 32]);
         CHECK(px == (int)c[i].x && py == (int)c[i].y,
@@ -1147,7 +1279,7 @@ static void test_mutations_are_caught(void) {
         s5l_mt_contact_t top = one_finger(0u, 0u, MTZ2_PHASE_TOUCHING);
         CHECK(s5l_mtz2_encode(&dev, &top, 1u, 1u, 16u, out) == 42u,
               "encoding the top-left corner failed");
-        decode_contact_pixel(&out[10], dev.surface_width, dev.surface_height,
+        decode_contact_pixel(&out[10], dev.rows, dev.columns,
                              &px, &py);
         CHECK(px == 0 && py == 0,
               "the top-left pixel decoded to (%d,%d)", px, py);
@@ -1159,13 +1291,15 @@ static void test_mutations_are_caught(void) {
          * proves nothing.
          */
         {
-            uint32_t unflipped = (uint32_t)(0u * 15u + 7u) << 8;
+            /* The same pixel centre measured from the LOWER bound instead of
+             * the upper one: -75 + (2*0 + 1) * 7350 / (2*480) = -75 + 7. */
+            uint32_t unflipped = (uint32_t)(int32_t)(-75 + 7) << 8;
             out[10 + 8]  = (uint8_t)(unflipped & 0xffu);
             out[10 + 9]  = (uint8_t)((unflipped >> 8) & 0xffu);
             out[10 + 10] = (uint8_t)((unflipped >> 16) & 0xffu);
             out[10 + 11] = (uint8_t)((unflipped >> 24) & 0xffu);
-            decode_contact_pixel(&out[10], dev.surface_width,
-                                 dev.surface_height, &px, &py);
+            decode_contact_pixel(&out[10], dev.rows,
+                                 dev.columns, &px, &py);
             CHECK(py == (int)S5L_MT_PANEL_H - 1,
                   "un-flipping Y put the top-left pixel at row %d; a mirrored "
                   "digitizer should put it at %u", py, S5L_MT_PANEL_H - 1u);
@@ -1452,6 +1586,7 @@ int main(void) {
     test_the_whole_bring_up_sequence();
     test_the_driver_tests_both_halfwords();
     test_get_report_info_satisfies_isbootloaded();
+    test_the_long_control_read_carries_the_descriptor();
     test_control_read_returns_the_report_body();
     test_the_other_opcodes_are_well_formed();
     test_framing_survives_without_a_chip_select();

@@ -2169,9 +2169,71 @@ void     s5l_spi_null_bind(s5l_spi_slave_t *slave);
 #define MTZ2_FRAME_LEN       16u
 /* A control read's payload begins at rx[3]: three prologue bytes, then the
  * body, then the two checksum bytes. 16 - 3 - 2 = 11, which is exactly the
- * `length <= 11 -> short form` cut the driver applies at 0xc0442aac. */
+ * `length <= 11 -> short form` cut the driver applies at 0xc0442e10. */
 #define MTZ2_PAYLOAD_AT      3u
 #define MTZ2_PAYLOAD_MAX     (MTZ2_FRAME_LEN - MTZ2_PAYLOAD_AT - 2u)
+
+/* ==================================================== the long control read ===
+ *
+ * 0xE7 is 0xE6 with the frame stretched, and that is not a simplification —
+ * the short form IS this form evaluated at length 11.
+ *
+ * WHICH FORM, decided at 0xc0442e0c against the length GET_REPORT_INFO just
+ * announced, with the same halfword already bounded at 0xc0442dc4:
+ *
+ *     ldrh r1, [sp, #0x36]        <- the announced report length
+ *     cmp  r1, #0x200             (0xc0442dc4) above 512 the read is refused
+ *     ldrh r1, [sp, #0x36]
+ *     cmp  r1, #0xb               (0xc0442e10)
+ *     bhi  #0xc0442e3c            <- 12 and up: vtable slot 0x4c0
+ *     ...  ldr pc, [ip, #0x4bc]   <- 11 and under: slot 0x4bc, the 0xE6 form
+ *     ...  ldr pc, [ip, #0x4c0]
+ *
+ * Slot 0x4c0 is 0xc0441ba0, and it opens `mvn r3, #0x18 / strb r3, [r2]` —
+ * 0xE7. (Slot 0x4bc at 0xc0441ea4 is `mvn r3, #0x19` = 0xE6, and the two
+ * control WRITES beside them are 0x4c4 -> 0xE4 and 0x4c8 -> 0xE5. Slot 0x4d0
+ * in the same block is 0xc0441008, isInHBPP, which is what fixes the vtable
+ * base at 0xc0449f40.)
+ *
+ * BOTH STAGES, from 0xc0441ba0. `length` is the announced length, in r1:
+ *
+ *   STAGE 1, sixteen bytes (`mov r5,#0x10` at 0xc0441be8, handed to the SPI
+ *   entry at 0xc0441c70):
+ *       tx[0]      = 0xE7
+ *       tx[1]      = report id
+ *       tx[2]      = 0
+ *       tx[3..4]   = LE16 length          <- the host states the frame size
+ *       tx[14..15] = LE16 sum16(tx, 5)    <- FIVE bytes, `mov r1,#5` 0xc0441bf0
+ *   The answer is not examined: 0xc0441cb4 tests only the SPI call's return.
+ *
+ *   STAGE 2, length + 5 bytes (`add r5, r8, #5` at 0xc0441d18):
+ *       tx[2]              = 1
+ *       tx[14..15]         = 0            (0xc0441d10/0xc0441d1c)
+ *       tx[length+3..+4]   = the STAGE 1 checksum, moved rather than recomputed
+ *   which is the same stale-checksum quirk the short form has at 0xc0441ff8 —
+ *   there it needs no move because length 11 already puts it at [14..15].
+ *
+ * WHAT THE ANSWER MUST SATISFY, at 0xc0441da0-0xc0441e08, and it is two things:
+ *       rx[0] == tx[0]                                   (0xc0441db0)
+ *       LE16(rx[length+3..length+4]) == sum16(rx, length+3)
+ * and then `memcpy(desc + 1, rx + 3, length)` at 0xc0441e24 with
+ * `desc->length = length` at 0xc0441e2c. So the payload is rx[3 .. 3+length),
+ * the checksum is the two bytes after it, and at length 11 every one of those
+ * positions is the short form's. One rule serves both, which is why mtz2.c has
+ * no second composer.
+ */
+
+/*
+ * The longest report body this device publishes, and the size of the buffer
+ * s5l_mtz2_report() writes into. It is the Sensor Region Descriptor's two
+ * seven-byte records: the driver's own ceiling is 512 (0xc0442dc4) and this
+ * device is nowhere near it, but the number must be the DEVICE's longest
+ * report rather than a round one, because a report longer than the reply
+ * buffer is a frame the model announces and then cannot drive.
+ */
+#define MTZ2_REGION_RECORD   7u
+#define MTZ2_REGION_RECORDS  2u
+#define MTZ2_REPORT_MAX      (MTZ2_REGION_RECORD * MTZ2_REGION_RECORDS)
 
 /* Longest COMMAND packet this model frames, and the size of the received-byte
  * buffer. Nothing the driver sends exceeds a 16-byte frame — a frame read's
@@ -2377,7 +2439,9 @@ uint16_t s5l_mtz2_sum16(const uint8_t *p, unsigned n);
 /*
  * The body of one report, as this device would return it. Returns its length
  * (0 for a report this device does not have) and writes at most
- * MTZ2_PAYLOAD_MAX bytes.
+ * MTZ2_REPORT_MAX bytes — which is more than the short control-read form can
+ * carry, deliberately: the Sensor Region Descriptor is 14 bytes and the driver
+ * fetches anything over 11 with the 0xE7 form instead.
  */
 unsigned s5l_mtz2_report(const s5l_mtz2_t *dev, uint8_t id, uint8_t *out);
 /*

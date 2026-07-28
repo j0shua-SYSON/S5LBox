@@ -158,7 +158,7 @@ uint16_t s5l_mtz2_sum16(const uint8_t *p, unsigned n) {
  */
 unsigned s5l_mtz2_report(const s5l_mtz2_t *dev, uint8_t id, uint8_t *out) {
     if (!dev || !out) return 0u;
-    memset(out, 0, MTZ2_PAYLOAD_MAX);
+    memset(out, 0, MTZ2_REPORT_MAX);
     switch (id) {
         case MTZ2_REPORT_FAMILY_ID:
             /* 0xc0438670 reads data[0] and publishes it as "Family ID". */
@@ -199,16 +199,101 @@ unsigned s5l_mtz2_report(const s5l_mtz2_t *dev, uint8_t id, uint8_t *out) {
             out[7] = (uint8_t)(dev->surface_height >> 24);
             return 8u;
         case MTZ2_REPORT_REGION_DESC:
+            /*
+             * THE BYTES THE NORMALISER READS — and, measured rather than
+             * argued, NOT the reason every touch lands in the same place.
+             * Both halves of that sentence are load-bearing, so both are set
+             * out here.
+             *
+             * 0xc043880c publishes this blob verbatim as OSData under "Sensor
+             * Region Descriptor" and READS NO FIELD OF IT. Userspace is the
+             * consumer. _mt_CachePropertiesForDevice parses it into a
+             * sixteen-entry array of SEVEN-byte records at device+0x74 (the
+             * count is hardwired to 16 at 0x33cf7ef8, the destination set at
+             * 0x33cf7f00), and _mt_DefineSurfaceGrid hands record 1 —
+             * `blob + 7`, stored at 0x33d01dc8 — to _alg_InitRowColXYConvert
+             * (0x33d01010) as `desc`. That function builds two 66-entry tables
+             * INDEXED FROM MINUS ONE — a real, deliberately computed entry and
+             * not an overrun; both loops start at `mvn r5,#0`, at 0x33d01040
+             * and 0x33d01088 — and then derives the four bounds every contact
+             * is normalised against:
+             *
+             *     Xmax = grid[0x26] + colTable[desc[5] - 1]   0x33d01124
+             *     Xmin = colTable[0] - grid[0x24]             0x33d01130
+             *     Ymax = grid[0x2a] + rowTable[desc[2] - 1]   0x33d01104
+             *     Ymin = rowTable[0] - grid[0x28]             0x33d01110
+             *
+             * with colTable[i] = (i - grid[0x3c]) * grid[0x34]*100 / grid[0x38]
+             * and rowTable[i] = i * grid[0x2c]*100 / grid[0x30]. For this part
+             * 0x33d01154 sets 56 and 11, 36 and 7, and all four margins to
+             * 0x4b, and leaves grid[0x3c] zero — so the tables are i*5600/11
+             * and i*3600/7 and every margin is 75.
+             *
+             * SO desc[2] IS THE ROW COUNT AND desc[5] THE COLUMN COUNT, and at
+             * zero both tables are read at index -1 and BOTH SPANS GO NEGATIVE.
+             * The clamp at 0x33d00f2c then returns the maximum for every
+             * coordinate on every frame, which is the pinned normalised 1.0
+             * run98 measured at plugin+0x2114 across a 208-pixel drag.
+             *
+             * ALL OF THAT IS NOW READ OUT OF A GUEST rather than inferred.
+             * run96's snapshot at instruction 3.5e9 puts the device object at
+             * VA 0x007e9000 and its grid at +0x168:
+             *
+             *     grid+0x148 Xmax -434     grid+0x14a Xmin  -75
+             *     grid+0x14c Ymax -439     grid+0x14e Ymin  -75
+             *     grid+0x150 -509 = colTable[-1]
+             *     grid+0x154 -514 = rowTable[-1]
+             *
+             * AND THE LEVER IS NOT IN THIS REPORT. The same snapshot has desc
+             * holding `01 00 00 01 00 00 00`, which is not this device's answer
+             * at all — it is the exact fingerprint of the BACK-FILL at
+             * 0x33d01dd0, which fires when `blob[7] == 0` and writes desc[0]=1,
+             * desc[3]=1, desc[2]=(byte)rows and desc[5]=(byte)cols from its own
+             * arguments. Those arguments are device+0x20 and device+0x24, which
+             * are the "Sensor Rows" and "Sensor Columns" IORegistry properties
+             * (fetched at 0x33cf7d48 and 0x33cf7d64), and in that snapshot both
+             * are ZERO — as are "Family ID" and "bcdVersion", while "Sensor
+             * Surface Width" and "Sensor Surface Height" hold 5000 and 7500,
+             * which are not this device's 4800 and 7200 but MultitouchSupport's
+             * OWN FALLBACKS for a property it could not read (0x33cf8098 and
+             * 0x33cf80a0). Every int32 property this model publishes through
+             * reports 0xD1 and 0xD3 is missing from the registry entry
+             * userspace queries. THAT is the fault, it is upstream of this
+             * report, and it cannot be repaired from here.
+             *
+             * WHY THESE BYTES ARE SET ANYWAY, stated as justification and not
+             * as a result: the back-fill only runs when desc[0] is zero. A part
+             * that answers with a real descriptor suppresses it and supplies
+             * the counts itself, which is what silicon does, and it makes this
+             * model's geometry independent of a property path that is at this
+             * moment broken. The record is written in EXACTLY the shape the
+             * back-fill would have produced with correct arguments, because
+             * that is the only descriptor layout anything in this system is on
+             * record as accepting; inventing a different one would be a guess
+             * standing where a measurement is available. It has not yet been
+             * shown to change what a guest does — while the property path is
+             * broken this blob does not reach userspace either.
+             *
+             * NOT ESTABLISHED: the remaining bytes of a record; what records 2
+             * and 3 are for, though grid+0x10 and grid+0x0c point at them; and
+             * whether [2] and [5] are electrode counts or table indices that
+             * merely coincide with them on a 10x15 panel. desc[5] at blob
+             * offset 12 is what makes this reply fourteen bytes and so forces
+             * the 0xE7 long control read.
+             */
+            out[MTZ2_REGION_RECORD + 0u] = 1u;
+            out[MTZ2_REGION_RECORD + 2u] = dev->rows;
+            out[MTZ2_REGION_RECORD + 3u] = 1u;
+            out[MTZ2_REGION_RECORD + 5u] = dev->columns;
+            return MTZ2_REGION_RECORD * MTZ2_REGION_RECORDS;
         case MTZ2_REPORT_REGION_PARAM:
             /*
-             * 0xc043880c and 0xc0438874 publish the whole blob as OSData under
-             * "Sensor Region Descriptor" and "Sensor Region Param" and read no
-             * field of it. Eight zero bytes is a well-formed answer of the
-             * right shape; what the contents MEAN is part of the frame payload
-             * format, which is the one genuine unknown left and belongs to the
-             * step that reverses _MT_ParsedMultitouchFrameRepCreate. Answering
-             * with a length rather than refusing keeps the driver's property
-             * table complete without claiming to know the encoding.
+             * 0xc0438874 publishes this one as OSData under "Sensor Region
+             * Param" and, like the descriptor, reads no field of it. Unlike the
+             * descriptor, no userspace consumer of it has been found either, so
+             * eight zero bytes stays: it is a well-formed answer of the right
+             * shape, and inventing contents for a blob whose reader is unknown
+             * is the mistake this file has already paid for once.
              */
             return 8u;
         default:
@@ -279,6 +364,23 @@ static unsigned frame_len(const s5l_mtz2_t *dev, uint8_t op) {
     }
 }
 
+/*
+ * How many payload bytes fit in the control-read frame currently being framed:
+ * everything between the prologue at rx[3] and the two checksum bytes the
+ * frame ends with.
+ *
+ * ONE RULE FOR BOTH FORMS, and that is a fact about the driver rather than a
+ * convenience. The short form's frame is a fixed sixteen bytes, so this is
+ * 16 - 3 - 2 = 11 — which is exactly MTZ2_PAYLOAD_MAX and exactly the
+ * `cmp r1,#0xb` cut at 0xc0442e10. The long form's frame is length + 5, so it
+ * is `length`. The 0xE6 form IS the 0xE7 form evaluated at eleven, so a second
+ * composer would only be able to disagree with this one.
+ */
+static unsigned payload_room(const s5l_mtz2_t *dev) {
+    unsigned len = dev->len;
+    return len > MTZ2_PAYLOAD_AT + 2u ? len - MTZ2_PAYLOAD_AT - 2u : 0u;
+}
+
 /* Finish a reply: zero the tail and stamp the little-endian checksum. */
 static void seal(s5l_mtz2_t *dev) {
     if (dev->len < 3u) return;
@@ -295,7 +397,7 @@ static void seal(s5l_mtz2_t *dev) {
  * not yet been driven.
  */
 static void compose(s5l_mtz2_t *dev) {
-    uint8_t body[MTZ2_PAYLOAD_MAX];
+    uint8_t body[MTZ2_REPORT_MAX];
     unsigned n;
     memset(dev->rsp, 0, sizeof dev->rsp);
 
@@ -330,15 +432,24 @@ static void compose(s5l_mtz2_t *dev) {
             dev->rsp[4] = (uint8_t)(n >> 8);
             break;
         case MTZ2_OP_READ_SHORT:
-        case MTZ2_OP_READ_LONG:
-            /* The payload begins at rx[3]; the two bytes before it are never
-             * loaded. Every report this device publishes is at most
-             * MTZ2_PAYLOAD_MAX bytes, which is exactly the driver's own
-             * short-form cut, so the long form never carries a longer one. */
+        case MTZ2_OP_READ_LONG: {
+            /*
+             * The payload begins at rx[3] in BOTH control-read forms and the
+             * two bytes before it are never loaded (0xc0441e18 for 0xE7,
+             * `add r0,r0,#3`; the short form's is at 0xc04420e0). The only
+             * thing that differs is how much room there is, which
+             * payload_room() reads off the frame the framer has settled on —
+             * so a long read composed before its length has arrived simply
+             * writes the eleven bytes a short frame holds and is composed again
+             * when tx[4] lands. Nothing here needs to know which form it is.
+             */
+            unsigned room;
             n = s5l_mtz2_report(dev, dev->req[1], body);
-            if (n > MTZ2_PAYLOAD_MAX) n = MTZ2_PAYLOAD_MAX;
+            room = payload_room(dev);
+            if (n > room) n = room;
             memcpy(&dev->rsp[MTZ2_PAYLOAD_AT], body, n);
             break;
+        }
         case MTZ2_OP_FRAME_Z1:
         case MTZ2_OP_FRAME_Z2: {
             unsigned L = wire_len(dev);
@@ -486,6 +597,46 @@ static uint8_t mtz2_transfer(void *ctx, uint8_t out) {
         }
         compose(dev);
     }
+    /*
+     * tx[4] has landed, which completes the LE16 frame length a LONG CONTROL
+     * READ carries at tx[3..4], and tx[2] one byte earlier has already said
+     * which of its two stages this is. Stage 1 is sixteen bytes like every
+     * other command (`mov r5,#0x10` at 0xc0441be8); stage 2 is length + 5
+     * (`add r5,r8,#5` at 0xc0441d18), and that is the frame the payload and
+     * its checksum have to fit.
+     *
+     * THE LENGTH COMES FROM THE HOST AND NOT FROM THE REPORT, and that is the
+     * one design decision here. A slave clocks out exactly as many bytes as the
+     * master clocks in; the master's tx[3..4] is a direct statement of how many
+     * that will be, and it is the only number that can keep the framer in step.
+     * Deriving it instead from s5l_mtz2_report()'s own length would be the same
+     * number in every reachable case — the driver passes back the length this
+     * device announced through GET_REPORT_INFO — but a disagreement would
+     * desynchronise the bus for the rest of the boot with nothing to read it
+     * off. The frame read above has no such byte to follow and therefore no
+     * choice; this one does.
+     *
+     * Position 4 is early enough for every frame the driver can ask for: the
+     * short form is not routed here at all, so `length` is at least 12 and the
+     * frame at least 17, and even a degenerate length of 0 leaves a 5-byte
+     * frame that ends after this byte rather than before it.
+     */
+    if (dev->pos == 4u && dev->op == MTZ2_OP_READ_LONG && dev->req[2] == 1u) {
+        unsigned total = ((unsigned)dev->req[3] |
+                          ((unsigned)dev->req[4] << 8)) + 5u;
+        /*
+         * Longer than this device can drive is unreachable by construction —
+         * the host only ever asks for a length s5l_mtz2_report() announced, and
+         * MTZ2_REPORT_MAX is a small fraction of the reply buffer. Clamping
+         * rather than trusting it keeps the framer inside the invariant
+         * mtz2_state_valid() enforces on every snapshot, so a model bug that
+         * ever did announce an unservable report shows up as a desynchronised
+         * bus and not as a buffer overrun.
+         */
+        if (total > S5L_MTZ2_RSP) total = S5L_MTZ2_RSP;
+        dev->len = (uint8_t)total;
+        compose(dev);
+    }
 
     uint8_t v = drive(dev, out, dev->pos);
     dev->pos++;
@@ -569,6 +720,22 @@ void s5l_mtz2_reset(s5l_mtz2_t *dev) {
      * Sensor 10 columns by 15 rows: the same 2:3 ratio as the surface and the
      * panel, and a ~4.8 mm electrode pitch, which is the right order for this
      * generation of part.
+     *
+     * TWO OF THOSE THREE JUSTIFICATIONS ARE NOW KNOWN NOT TO APPLY TO WHERE A
+     * TAP LANDS, and saying so is worth more than quietly rewriting them.
+     * run98 established that the normaliser every contact passes through takes
+     * its bounds from the Sensor Region Descriptor's electrode counts and not
+     * from this width and height at all — see the bounds block above
+     * to_surface(). So the exact-integer-scale and equal-scale arguments buy
+     * nothing for tap accuracy; what they still buy is a physically sane
+     * "Sensor Surface Width" property for anything that reads report 0xD9 as
+     * millimetres, which is the third argument and the one that survives.
+     *
+     * The ROW AND COLUMN COUNTS, by contrast, turned out to be load-bearing in
+     * a way nothing here anticipated: they are the two bytes the descriptor
+     * carries, so they set the bounds, so they decide where every touch lands.
+     * They keep the values they already had — this is not a number chosen to
+     * make an answer come out.
      */
     dev->surface_width  = 4800u;
     dev->surface_height = 7200u;
@@ -758,15 +925,80 @@ void s5l_mtz2_power_pin(void *ctx, bool level) {
  * of four, so what userspace measures is 44 and both bounds hold with room.
  */
 
-/*
- * A panel pixel in the surface units report 0xD9 published, hundredths of a
- * millimetre.
+/* ================================================== the normaliser's bounds ===
  *
- * Exact by construction: the surface is 15x the panel in both axes, so this is
- * an integer multiply with no rounding rule to get wrong, and the half-step
- * puts the reported point at the CENTRE of the pixel rather than its top-left
- * corner — which is what stops a tap on pixel 0 from reading as "just off the
- * edge" to anything that rounds.
+ * THE SURFACE A CONTACT IS MEASURED AGAINST IS NOT THE ONE REPORT 0xD9
+ * PUBLISHES, and getting that backwards is what run98 measured.
+ *
+ * _mt_FillMTContactDirectFromBinary (0x33cfdac4) normalises each raw coordinate
+ * as `(v - min) / (max - min)`, and the four bounds come from
+ * _alg_InitRowColXYConvert (0x33d01010), which builds them out of the Sensor
+ * Region Descriptor's electrode counts and never looks at 0xD9's width and
+ * height at all. See s5l_mtz2_report()'s MTZ2_REPORT_REGION_DESC case for the
+ * derivation and for what about it is not established; the two numbers this
+ * device's 10 columns and 15 rows produce are:
+ *
+ *     x in [-75, 4656]     span 4731     14.784375 units per pixel across 320
+ *     y in [-75, 7275]     span 7350     15.3125   units per pixel down   480
+ *
+ * TWO CONSEQUENCES, and the second is the reason this arithmetic changed rather
+ * than only the descriptor:
+ *
+ *   - The spans are not equal, and neither is 15x the panel. The device's own
+ *     two statements about its width — 4800 hundredths of a millimetre in
+ *     report 0xD9 and 4731 implied by the descriptor — DISAGREE by 1.5%. That
+ *     disagreement is real and is left visible rather than papered over: 0xD9's
+ *     value has the exact-integer-scale property this file argues for at
+ *     length, no consumer of it has been found on the boot path, and changing
+ *     it would be a second unmeasured guess in the same breath as the first.
+ *     The ellipse below still scales through 0xD9 for the same reason: it is a
+ *     LENGTH in hundredths of a millimetre, which is precisely the quantity
+ *     "Sensor Surface Width" names.
+ *
+ *   - Mapping the panel onto 0..4800 and then normalising against -75..4656
+ *     does not merely offset the result, it runs OFF THE END. Pixel 319 came
+ *     out at 4792, above an Xmax of 4656, so the clamp at 0x33d00f2c pinned it
+ *     — the right five pixels of the screen were unreachable, on top of a ~+6
+ *     px offset and a 1.5% stretch everywhere else. Mapping onto the bounds
+ *     themselves removes all three at once.
+ */
+#define MTZ2_SURFACE_MARGIN 75
+
+/*
+ * The far edge of each axis, from the same table _alg_InitRowColXYConvert
+ * indexes: 5600/11 units per column step and 3600/7 per row step — about
+ * 5.09 mm and 5.14 mm of electrode pitch — plus a margin of 75 beyond the
+ * outermost electrode, mirrored by the -75 at the near edge.
+ *
+ * A device with no electrodes on an axis would index the table at -1 and hand
+ * the guest the negative span that caused all this. It cannot happen — reset()
+ * sets both counts — so the guard here reads as index 0 and yields a small
+ * POSITIVE span, which is a degenerate surface rather than an inverted one.
+ */
+static int32_t mtz2_axis_max(unsigned electrodes, unsigned num, unsigned den) {
+    unsigned i = electrodes ? electrodes - 1u : 0u;
+    return (int32_t)MTZ2_SURFACE_MARGIN + (int32_t)(i * num / den);
+}
+static int32_t mtz2_x_max(const s5l_mtz2_t *dev) {
+    return mtz2_axis_max(dev->columns, 5600u, 11u);
+}
+static int32_t mtz2_y_max(const s5l_mtz2_t *dev) {
+    return mtz2_axis_max(dev->rows, 3600u, 7u);
+}
+
+/*
+ * A panel pixel placed inside [lo, hi], at the CENTRE of the pixel rather than
+ * at its near corner — which is what stops a tap on pixel 0 from reading as
+ * "just off the edge" to anything that rounds, and what makes the guest's own
+ * conversion land back on the pixel it came from for every one of the 320 and
+ * 480. Written as (2*pixel + 1) half-steps so there is ONE divide and therefore
+ * one rounding rule to get wrong instead of two.
+ *
+ * The result is SIGNED and really can be negative — pixel 0 is 7.4 units inside
+ * a lower bound of -75, so it lands at -68. The wire field is a 32-bit value
+ * the parser arithmetic-shifts right by eight, so a negative coordinate
+ * round-trips; a uint16 would have clamped it to zero and quietly moved the
+ * left edge of the screen inward.
  *
  * `flip` exists because the two coordinate systems disagree about which way Y
  * runs. MultitouchHID converts a normalised contact to a pixel row with
@@ -778,20 +1010,13 @@ void s5l_mtz2_power_pin(void *ctx, bool level) {
  * mirrored Y is the failure that would look exactly like "the tap went
  * somewhere else" rather than like a bug.
  */
-static uint16_t to_surface(uint32_t pixel, uint32_t span_pixels,
-                           uint32_t span_units, bool flip) {
-    uint32_t scale = span_pixels ? span_units / span_pixels : 0u;
-    uint32_t v;
-    if (flip) {
-        /* The centre of the pixel counted from the far edge. Written as one
-         * subtraction from the span so that pixel 0 and pixel H-1 land the
-         * same distance from their respective edges. */
-        v = span_units - pixel * scale - scale / 2u;
-    } else {
-        v = pixel * scale + scale / 2u;
-    }
-    if (v > 0x7fffu) v = 0x7fffu;   /* the wire field is s16 */
-    return (uint16_t)v;
+static int32_t to_surface(uint32_t pixel, uint32_t span_pixels,
+                          int32_t lo, int32_t hi, bool flip) {
+    uint32_t span, step;
+    if (!span_pixels || hi <= lo) return lo;
+    span = (uint32_t)(hi - lo);
+    step = (2u * pixel + 1u) * span / (2u * span_pixels);
+    return flip ? hi - (int32_t)step : lo + (int32_t)step;
 }
 
 static void put16(uint8_t *p, uint16_t v) {
@@ -847,15 +1072,17 @@ unsigned s5l_mtz2_encode(const s5l_mtz2_t *dev, const s5l_mt_contact_t *c,
 
     for (unsigned i = 0; i < n; i++) {
         uint8_t *r = &out[MTZ2_FRAME_HEADER + i * MTZ2_CONTACT_STRIDE];
-        uint16_t sx, sy;
+        int32_t sx, sy;
         /* 1..11 is the path-identifier range _mt_getPathLifeCycle accepts
          * (0x33cfd5f4); this device never reports more than five fingers, so
          * the tighter bound is the honest one to enforce. */
         if (!c[i].id || c[i].id > MTZ2_CONTACT_MAX) return 0u;
         if (c[i].phase > MTZ2_PHASE_OUT_OF_RANGE) return 0u;
         if (c[i].x >= S5L_MT_PANEL_W || c[i].y >= S5L_MT_PANEL_H) return 0u;
-        sx = to_surface(c[i].x, S5L_MT_PANEL_W, dev->surface_width, false);
-        sy = to_surface(c[i].y, S5L_MT_PANEL_H, dev->surface_height, true);
+        sx = to_surface(c[i].x, S5L_MT_PANEL_W,
+                        -MTZ2_SURFACE_MARGIN, mtz2_x_max(dev), false);
+        sy = to_surface(c[i].y, S5L_MT_PANEL_H,
+                        -MTZ2_SURFACE_MARGIN, mtz2_y_max(dev), true);
 
         r[0] = c[i].id;            /* path identifier                        */
         r[1] = c[i].phase;         /* path stage; 0..7, see MTZ2_PHASE_*      */
@@ -865,9 +1092,13 @@ unsigned s5l_mtz2_encode(const s5l_mtz2_t *dev, const s5l_mt_contact_t *c,
          * X and Y. This family stores them as 32-bit values that the parser
          * arithmetic-shifts right by eight, so the low byte is a fractional
          * part: the coordinate written here is the surface value scaled by
-         * 256. The velocities beside them are shifted right by NINE and are
-         * zero, because this device reports position only and a fabricated
-         * velocity would be a number the guest could act on.
+         * 256. The cast to uint32_t before the shift is what makes a NEGATIVE
+         * coordinate legal — pixel 0 sits at -68, inside the bounds and below
+         * zero — since shifting a negative signed value left is undefined while
+         * the two's-complement pattern is exactly what the parser's arithmetic
+         * right shift undoes. The velocities beside them are shifted right by
+         * NINE and are zero, because this device reports position only and a
+         * fabricated velocity would be a number the guest could act on.
          */
         put32(&r[4],  (uint32_t)sx << 8);
         put32(&r[8],  (uint32_t)sy << 8);

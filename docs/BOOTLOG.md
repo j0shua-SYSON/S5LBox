@@ -2315,6 +2315,107 @@ at 0x3cc10000(0xea9d6000)` — and uart4 still carried **zero bytes**. The
 milestone is unchanged.
 
 
+### 2026-07-28: the touch bounds read out of a guest — and the lever is **not** the descriptor
+
+run98 left one question standing, and it was the right one to stand on: does
+`_mt_DefineSurfaceGrid` back-fill the Sensor Region Descriptor itself, in which
+case the descriptor is not what decides where a touch lands? That entry said
+**settle this before changing `mtz2.c`**.
+
+It is settled, and the answer is **yes — the back-fill runs, and the descriptor
+was never the lever.** No new boot was needed. The evidence is `run96-base/`'s
+existing v14 snapshot, which contains raw guest RAM, plus exact disassembly of
+the armv6 shared cache already extracted at `work/analysis/dsc_armv6`.
+
+**Finding the structure.** `_alg_InitRowColXYConvert` (0x33d01010) builds two
+66-entry tables at fixed offsets inside the grid. Their contents depend only on
+constants, so they are a signature: `i*3600/7` for i = -1..64 at `grid+0xc4`,
+and `i*5600/11` at `grid+0x40`. Both appear **exactly once** in the snapshot,
+0x84 bytes apart — precisely `0xc4 - 0x40`. That fixes the grid, and the call
+site at 0x33d002a0 (`add r6, r4, #0x168`) plus the blob copy at 0x33d002bc
+(`device + 0xf8`) fix the device object at **VA 0x007e9000**.
+
+**The bounds, read directly:**
+
+| field | value | should be |
+|---|---|---|
+| `grid+0x148` Xmax | **-434** | 4656 |
+| `grid+0x14a` Xmin | -75 | -75 |
+| `grid+0x14c` Ymax | **-439** | 7275 |
+| `grid+0x14e` Ymin | -75 | -75 |
+| `grid+0x150` | -509 = `colTable[-1]` | `colTable[9]` |
+| `grid+0x154` | -514 = `rowTable[-1]` | `rowTable[14]` |
+
+Both spans negative. That is run98's pinned normalised 1.0, now observed as
+state rather than inferred from a probe count. One correction to run98 while we
+are here: index -1 is a **real, deliberately computed table entry** — both loops
+start at `mvn r5,#0` — not an out-of-bounds read.
+
+**The fingerprint.** The descriptor `_alg_InitRowColXYConvert` reads is
+`grid->0x08`, and in the snapshot it holds `01 00 00 01 00 00 00`. That is not
+this model's answer — this model returned eight zero bytes. It is the exact
+output of the **back-fill at 0x33d01dd0**, which fires when `blob[7] == 0` and
+writes `desc[0]=1`, `desc[3]=1`, `desc[2]=(byte)rows`, `desc[5]=(byte)cols` from
+its own arguments. Those arguments are `device+0x20` and `device+0x24`, and both
+are zero.
+
+**So the uncommitted fix in the tree could not have worked.** It set
+`blob[9]=rows` and `blob[12]=cols` but left `blob[7]` at zero, so the back-fill
+would have run anyway and overwritten both with zero. It would have cost a
+cold boot to learn nothing.
+
+**And the real fault is further upstream than touch.** `device+0x20` and
+`device+0x24` are the **"Sensor Rows"** and **"Sensor Columns"** IORegistry
+properties (`_mt_CachePropertiesForDevice`, fetches at 0x33cf7d48 / 0x33cf7d64).
+Every int32 property in that object tells the same story:
+
+| property | in the guest | this model publishes |
+|---|---|---|
+| Multitouch ID | 0 | — |
+| Family ID | 0 | 1 |
+| bcdVersion | 0 | 0x0100 |
+| Sensor Rows | **0** | 15 |
+| Sensor Columns | **0** | 10 |
+| Sensor Surface Width | **5000** | 4800 |
+| Sensor Surface Height | **7500** | 7200 |
+
+5000 and 7500 are not a rounding of 4800 and 7200. They are the literals at
+0x33cf8098 and 0x33cf80a0 — **MultitouchSupport's own fallbacks for a property
+it could not read**. `_mt_DeviceGetInt32Property` is a plain
+`IORegistryEntryCreateCFProperty` on `device+0x08`, so a NULL return means the
+key is genuinely absent. **Not one int32 property reaches userspace**, even
+though the kernel publishes them from reports 0xD1 and 0xD3 (0xc0438670 and
+0xc04386e0) and this model answers both with correct non-zero values.
+
+Report 0xD3's payload layout, from the publisher: `[0]` Endianness, `[1]`
+**Sensor Rows**, `[2]` **Sensor Columns**, `[3..4]` bcdVersion big-endian —
+which is exactly what `s5l_mtz2_report()` already returns. GET_REPORT_INFO is
+not the fault either: the driver tests `record[0]` against zero at 0xc0442db4
+and **zero is the accepting value**, which is what the model sends.
+
+**Changed in `mtz2.c` on the strength of this.** The Region Descriptor now
+answers with `desc[0]=1, desc[2]=rows, desc[3]=1, desc[5]=cols` — the shape the
+back-fill itself produces, which is the only descriptor layout anything in this
+system is on record as accepting. A non-zero `desc[0]` suppresses the back-fill,
+so a part that describes itself stops depending on the property path. **This has
+not been shown to change what a guest does**, and while the property path is
+broken it cannot: the descriptor is published by the same mechanism that is
+failing.
+
+`to_surface()` now maps the panel onto the bounds the guest actually derives,
+`[-75, 4656]` across and `[-75, 7275]` down, instead of onto report 0xD9's
+4800×7200. The old mapping ran pixel 319 to 4792, past an Xmax of 4656, so the
+right five pixels of the screen were unreachable on top of a ~+6 px offset and a
+1.5% stretch. `test_mtz2.c`'s inverse conversion was carrying the same wrong
+model and is corrected to the measured one; a new test drives the 0xE7 two-stage
+long control read end to end, since the descriptor at 14 bytes is the first
+report that does not fit the short form. 46/46 suites pass.
+
+**Still open, and it is now the whole of touch:** why no int32 property reaches
+the registry entry userspace queries. That is a question about driver
+initialisation, not about geometry, and sound sits downstream of it.
+
+
 ### 2026-07-28: run98 — every touch lands in the same place, and why
 
 **The root cause of the touch failure, measured rather than reasoned.** Six
