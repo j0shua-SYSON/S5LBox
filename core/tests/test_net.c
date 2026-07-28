@@ -563,7 +563,9 @@ static void test_dns_answers_an_a_query_from_the_host_resolver(void) {
           r.dport == 40000u, "the reply's addressing is wrong");
     const uint8_t *d = r.pay;
     CHECK(r16(d) == 0x4242u, "the transaction ID was not echoed");
-    CHECK((r16(d + 2) & 0x8000u) != 0u, "QR was not set");
+    CHECK((r16(d + 2) & 0x8000u) != 0u,
+          "QR was not set: flags 0x%04x, id 0x%04x, %u octets of payload",
+          r16(d + 2), r16(d), (unsigned)r.paylen);
     CHECK((r16(d + 2) & 0x000fu) == 0u, "RCODE is %u, expected NOERROR",
           r16(d + 2) & 0x000fu);
     CHECK((r16(d + 2) & 0x0100u) != 0u,
@@ -677,7 +679,9 @@ static void test_dns_refuses_names_it_should_not_hand_to_getaddrinfo(void) {
     send_udp(DNS_IP, 40009u, 53u, q, qn);
     CHECK(net_output_pending(&g_ns) == 0u,
           "a DNS *response* aimed at us produced a reply, which is how a "
-          "reflection loop starts");
+          "reflection loop starts (queued %u; the query we sent had flags "
+          "0x%04x at offset 2, and dns_input tests that against 0x8000)",
+          (unsigned)net_output_pending(&g_ns), r16(q + 2));
 }
 
 /* ==========================================================================

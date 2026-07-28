@@ -21,6 +21,19 @@
  *
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed.
  */
+/*
+ * fseeko()/off_t are POSIX, not C11, and this target is built with
+ * C_EXTENSIONS NO -- so on a strict-conformance Linux build neither is
+ * declared unless the feature test macro asks for them. The Windows arm uses
+ * _fseeki64 and needs none of this.
+ */
+#if !defined(_WIN32)
+#  ifndef _POSIX_C_SOURCE
+#    define _POSIX_C_SOURCE 200809L
+#  endif
+#  include <sys/types.h>
+#endif
+
 #include "VMFirmwareImport.h"
 
 #include <stdio.h>
@@ -52,6 +65,7 @@ static const char *state_name(vm_fw_state_t st) {
         case VM_FW_STATE_EXTRACTED:       return "extracted";
         case VM_FW_STATE_VERIFIED:        return "VERIFIED against known-good";
         case VM_FW_STATE_MISMATCH:        return "MISMATCH";
+        case VM_FW_STATE_FAILED:          return "FAILED";
     }
     return "?";
 }
