@@ -59,12 +59,23 @@ typedef enum {
     VM_OPT_GROUP_COUNT
 } vm_option_group_t;
 
-/* How much of a row exists anywhere. The UI has to be able to tell "works on
- * the desktop, not here" apart from "nobody has written this yet", because
- * they are different promises. */
+/*
+ * Whether a row is implemented ANYWHERE, which is a different question from
+ * whether it reaches this particular boot. The second question is answered per
+ * row at runtime by vm_boot_options_report_t::outcome, and the settings screen
+ * counts that rather than this field -- so this field only has to separate
+ * "somebody wrote this" from "nobody has".
+ *
+ * The HARNESS name is historical and was once literally true: these rows were
+ * bootkernel-only and the app could not perform them. That stopped being the
+ * shape of the project when the app began booting through the same
+ * core/src/boot/bringup.c the harness does, and the device-tree un-match that
+ * fixed the on-device hang on 2026-07-28 is in the shared core, not the tool.
+ * Read it as "implemented", not as "desktop only".
+ */
 typedef enum {
-    VM_OPT_IMPL_HARNESS = 0,   /* implemented in tools/bootkernel, never in-app */
-    VM_OPT_IMPL_NOWHERE        /* not implemented in either, and says so         */
+    VM_OPT_IMPL_HARNESS = 0,   /* implemented -- in the harness, the shared core, or both */
+    VM_OPT_IMPL_NOWHERE        /* not implemented in either, and says so                  */
 } vm_option_impl_t;
 
 typedef struct {

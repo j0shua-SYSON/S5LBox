@@ -55,9 +55,10 @@ static const vm_option_t VM_OPTIONS[] = {
       false, VM_OPT_GROUP_PATCH, VM_OPT_IMPL_HARNESS },
 
     { "activate", "Activation",
-      "On, and NOT IMPLEMENTED ANYWHERE: writing ActivationState needs a file "
-      "the source root filesystem does not contain and nothing can yet create.",
-      true, VM_OPT_GROUP_GUEST_STATE, VM_OPT_IMPL_NOWHERE },
+      "On, and applied when the work image is made, not at boot: provisions "
+      "data_ark.plist with FactoryActivated. Offline -- no record is applied "
+      "and none is verified. Toggling it later needs a fresh work image.",
+      true, VM_OPT_GROUP_GUEST_STATE, VM_OPT_IMPL_HARNESS },
     { "jb-codesign", "Jailbreak: kernel half",
       "Off, and NOT IMPLEMENTED ANYWHERE: would disable the guest kernel's own "
       "code-signature enforcement. No exploit is involved; we load the kernel.",
@@ -94,10 +95,12 @@ static const char *const VM_OPTION_GROUP_NOTE[VM_OPT_GROUP_COUNT] = {
     "straight to the kernel. Each patch has its own switch so a boot can be "
     "bisected against it.",
 
-    "Persistent changes to the guest or its work image. Activation and both "
-    "jailbreak halves exist in no part of this project: the desktop harness "
-    "prints \"requested but NOT APPLIED\" for exactly those rows, and so does "
-    "this screen. Guest networking exists on the desktop only."
+    "Persistent changes to the guest or its work image. Both jailbreak halves "
+    "exist in no part of this project: the desktop harness prints \"requested "
+    "but NOT APPLIED\" for exactly those rows, and so does this screen. "
+    "Activation is no longer one of them -- it is applied while the work image "
+    "is being built, which is why it reports separately from the switches that "
+    "act at boot. Guest networking exists on the desktop only."
 };
 
 /*

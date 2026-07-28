@@ -44,7 +44,11 @@ static const struct {
     { "memory-reg",         true,  VM_OPT_GROUP_PATCH,       VM_OPT_IMPL_HARNESS },
     { "rtc-patch",          true,  VM_OPT_GROUP_PATCH,       VM_OPT_IMPL_HARNESS },
     { "ca-software-render", false, VM_OPT_GROUP_PATCH,       VM_OPT_IMPL_HARNESS },
-    { "activate",           true,  VM_OPT_GROUP_GUEST_STATE, VM_OPT_IMPL_NOWHERE },
+    /* activate was NOWHERE until the app grew MAP_PROVISION_ACTIVATE and
+     * VMFirmwareBoot.c began passing rootfs_work_activation_entries(). Its row
+     * text claimed "NOT IMPLEMENTED ANYWHERE" while the app's own boot report
+     * listed it as applied, in the same build. */
+    { "activate",           true,  VM_OPT_GROUP_GUEST_STATE, VM_OPT_IMPL_HARNESS },
     { "jb-codesign",        false, VM_OPT_GROUP_GUEST_STATE, VM_OPT_IMPL_NOWHERE },
     { "jb-payload",         false, VM_OPT_GROUP_GUEST_STATE, VM_OPT_IMPL_NOWHERE },
     { "ppp",                false, VM_OPT_GROUP_GUEST_STATE, VM_OPT_IMPL_HARNESS },
