@@ -2365,6 +2365,104 @@ Not yet claimed: that a default route is *sufficient*. It gives the guest
 somewhere to send; whether any daemon then sends is a separate measurement, and
 mDNSResponder's multicast is not obviously something this NAT should carry.
 
+### 2026-07-29: run148 -- the octets finally balance, and a select edge cut the header in half
+
+run148 ran the §6.9 idle-word fix with the digitizer matched. The fix worked as
+far as it went: `18 e1` stopped desynchronising the framer, `18:2` appears as a
+real two-octet packet, and the ledger balances --
+`octets seen 54236 = reset 48 + unknown 179 + in-packet 54009`.
+
+It was not enough, and the transaction ledger says why:
+
+```
+transactions: 0 0 16 0 16 0 16 0 16 0 16 8 54148 0
+```
+
+The last two brackets are **one HBPP DATA packet cut in half** by a chip-select
+edge six octets into its ten-octet header. `6 + 54148 = 54154 = 14 + 4*0x34df`,
+exactly what the header declares; `2 + 54154 = 54156`, exactly the firmware
+image. **This is the first time every octet of the Z2 bootload has been
+accounted for.**
+
+`s5l_mtz2_select_pin()` discarded part-received packets at every edge, justified
+in its own comment as *"a chip-select edge means no transfer is in flight, so
+discarding a part-received packet at one is always safe."* That is false for
+this driver. Throwing the header away left the framer re-syncing onto ARM
+payload words, whose `0xe` condition nibble reads as this protocol's own
+opcodes -- `e1:16 ea:16 ea:16 e2:16 e2:16 e2:16 30:17538`, `data 2 (18408
+bytes)` against a 54,156-byte image, `exec 0`.
+
+Fixed in `65e704e`, narrowed to HBPP DATA only, with a test that reproduces the
+split. run151 is the verification, at run140's exact 3.55 G budget.
+
+**run148's black screen proves nothing about the fix.** It ran 3.0 G against
+run140's 3.55 G -- the identical confound that made run143 look like a
+counterexample to the display finding. Two runs in one day misread for the same
+reason.
+
+**Superseded:** run142's "nothing on the wire delimits the bootload" was read
+off a ledger that had recorded only its first eight transactions. The transfer
+*is* bracketed; the ledger had not reached it. That misreading is why the
+framing work went to opcodes instead of select edges.
+
+### 2026-07-29: the app is not broken, and the multitouch switch was never the app's problem
+
+The user reported the touchscreen toggle OFF and the phone still stuck at
+15.4 G. Fingerprinting their guest log against both desktop runs settles it:
+strip the 14 host self-test lines, normalise hex, and it differs from run147
+(multitouch OFF, app defaults) by 34 lines -- every one a re-ordered driver
+block or a timestamp -- and from run148 (multitouch ON) by 66. Their SPI bases
+(`spi1=0xea94e000 spi0=0xea955000`) match run147 exactly.
+
+**The switch worked. The digitizer was un-matched. It was not the blocker.**
+
+Re-reading the runs at *equal budget* shows why the earlier attribution was
+wrong:
+
+| run | ca-sw-render | usb-otg | multitouch | budget | pixels |
+|---|---|---|---|---|---|
+| run140 | 1 | 1 | 0 | 3.55 G | **273,206** |
+| run145 | 0 | 0 | 0 | 3.55 G | 1,890 |
+
+Both had the digitizer off. run140's display was credited to the multitouch
+change when run140 differed from the app's configuration in **three** ways.
+run149 and run150 isolate the other two. Note `ca-software-render` is
+`VM_BOOT_OPTION_PROVISIONED` -- baked into the work image at creation, so
+flipping it in the app requires the image be remade.
+
+### 2026-07-29: internet -- the link is built and unexercised, not broken
+
+Re-scoped the same way sound was, and for the same kind of reason.
+
+What is measured: PPP reaches `LCP Opened / IPCP Opened / phase open`, pppd
+reports `local IP address 10.0.2.15`, `remote IP address 10.0.2.2`, and logs no
+error. `/etc/ppp/options` carrying `defaultroute` is in the work image, and
+pppd *started* -- it refuses to run on an unrecognised option in that file, so
+the option was accepted.
+
+And every NAT counter is zero:
+
+```
+icmp  in 0  echo-replies 0  unsupported 0
+udp   in 0  out 0  dns q 0  answered 0  nxdomain 0  failed 0  malformed 0
+tcp   in 0  out 0  syns 0  established 0  refused 0  rst out/in 0/0
+```
+
+Zero *out* is the informative half: the guest never tries. Reading the image's
+HFS+ catalog (`tools/hfsx_extract.py`, read-only) finds **no** `ping`, `nc`,
+`curl`, `wget`, `telnet` or `ftp` -- it is a phone, not a Unix box. The only
+network-capable daemons in `/System/Library/LaunchDaemons` are `configd`,
+`mDNSResponder`, `mDNSResponderHelper`, `racoon` and `wifiFirmwareLoader`.
+configd does not originate traffic; racoon is on-demand; there is no Wi-Fi
+hardware; and mDNSResponder's multicast has no business on a point-to-point
+link.
+
+So there is nothing in this guest that would send a packet unprompted, and the
+zero counters are the expected result rather than a defect. **Not claimed: that
+the path works end to end.** That needs a guest that actually originates a
+connection, which realistically means a usable UI -- putting internet behind the
+display, exactly where sound already sits.
+
 ### 2026-07-29: run144 -- THE FIRMWARE IS ONE WELL-FORMED PACKET, and we stepped over its header
 
 After three boundary theories came back empty, run144 stopped asking where the
