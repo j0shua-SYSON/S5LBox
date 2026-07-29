@@ -408,6 +408,7 @@ typedef struct {
     bool baseband;
     bool spi2;
     bool usb_otg;
+    bool multitouch;
     bool framebuffer;
     bool iomfb_display;
     /* compatibility patches: iBoot's job, done here */
@@ -493,6 +494,27 @@ static const boot_toggle_t BOOT_TOGGLES[] = {
       "8.73e9 instructions. Un-matching it costs boot progress -- daemons\n"
       "retry against absent USB -- but it is the only configuration observed\n"
       "to run past that panic." },
+    { "multitouch", NULL, NULL, true, BOOT_GROUP_HARDWARE,
+      BOOT_FIELD(multitouch),
+      "leave /arm-io/spi1/multi-touch matched. THE ONLY ROW IN THIS GROUP\n"
+      "THAT DEFAULTS ON, because un-matching it is a loss rather than a fix:\n"
+      "the digitizer is the point of the exercise. It exists because on\n"
+      "2026-07-29 the touch driver is what stops the boot.\n"
+      "\n"
+      "21ae30f made narrow stores into SPI1's data port decode, so the Z2\n"
+      "firmware download began actually transferring -- 54,156 octets, the\n"
+      "exact image. The bootload then never reaches EXEC, and the driver waits\n"
+      "for a part that never runs. Userspace stops just after `systemShutdown\n"
+      "false`: no IOSurface is allocated, no MobileMail launches, the CLCD's\n"
+      "frame interrupt is never enabled, and nothing is composited. The same\n"
+      "boot with that one commit reverted reaches all four.\n"
+      "\n"
+      "So this is the switch that trades the digitizer for the screen while\n"
+      "the bootload is unfinished. Every other nub here is off because leaving\n"
+      "it matched hangs or panics a boot; this one is on because it SHOULD be,\n"
+      "and turning it off is a way to see a lock screen in the meantime.\n"
+      "Delete this row when the bootload completes -- do not keep it as a\n"
+      "workaround." },
     { "framebuffer", "-F", NULL, false, BOOT_GROUP_HARDWARE,
       BOOT_FIELD(framebuffer),
       "reserve a 320x480x32 Boot_Video buffer, seed an iBoot-compatible N82\n"
@@ -25560,6 +25582,22 @@ external_md_work_ready:
             dt_unmatch(dt, dt_n, "baseband");
         if (!want_spi2)
             dt_unmatch(dt, dt_n, "arm-io/spi2");
+        /*
+         * The digitizer, and this un-match runs the other way round: it is
+         * requested by --no-multitouch rather than being the default, because
+         * a matched touch controller is what this project is FOR. See the
+         * toggle's help text for why the switch exists at all.
+         *
+         * /arm-io/spi1 itself stays matched. Un-matching the controller would
+         * take the bus with it, and spi1 is where AppleMultitouchZ2SPI's own
+         * provider lives -- the child is the nub that carries `multi-touch,
+         * n82`, and it is the one the driver personality matches against.
+         */
+        if (!cfg.v.multitouch) {
+            dt_unmatch(dt, dt_n, "arm-io/spi1/multi-touch");
+            printf("  dt: /arm-io/spi1/multi-touch UN-MATCHED -- no digitizer "
+                   "this boot, which is what --no-multitouch asks for\n");
+        }
         if (want_baseband != want_spi2)
             printf("  dt: NOTE /baseband and /arm-io/spi2 differ "
                    "(--baseband=%d --spi2=%d); the modem's SPI transport and "

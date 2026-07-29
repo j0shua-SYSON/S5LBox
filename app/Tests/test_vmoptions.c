@@ -39,6 +39,10 @@ static const struct {
     { "baseband",           false, VM_OPT_GROUP_HARDWARE,    VM_OPT_IMPL_HARNESS },
     { "spi2",               false, VM_OPT_GROUP_HARDWARE,    VM_OPT_IMPL_HARNESS },
     { "usb-otg",            false, VM_OPT_GROUP_HARDWARE,    VM_OPT_IMPL_HARNESS },
+    /* Defaults ON, unlike every other nub: un-matching the digitizer is a
+     * loss, not a fix. It exists because the unfinished Z2 bootload stops the
+     * boot before anything composites. */
+    { "multitouch",         true,  VM_OPT_GROUP_HARDWARE,    VM_OPT_IMPL_HARNESS },
     { "vram",               true,  VM_OPT_GROUP_PATCH,       VM_OPT_IMPL_HARNESS },
     { "lcd-panel-id",       true,  VM_OPT_GROUP_PATCH,       VM_OPT_IMPL_HARNESS },
     { "memory-reg",         true,  VM_OPT_GROUP_PATCH,       VM_OPT_IMPL_HARNESS },

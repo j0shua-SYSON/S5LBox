@@ -75,6 +75,14 @@ static const struct {
     /* The baseband's bus. */
     { "spi2", MAP_UNMATCH, NULL, "arm-io/spi2" },
     { "usb-otg", MAP_UNMATCH, NULL, "arm-io/usb-otg" },
+    /*
+     * The digitizer, and the only nub here whose default is MATCHED -- the
+     * touch controller is the point of the exercise, not a hazard to hide.
+     * Cleared, it trades touch for a screen while the Z2 bootload is
+     * unfinished: on 2026-07-29 the download transfers all 54,156 octets and
+     * never reaches EXEC, and userspace stops before it composites anything.
+     */
+    { "multitouch", MAP_UNMATCH, NULL, "arm-io/spi1/multi-touch" },
 
     /*
      * /vram:reg is published whenever the framebuffer is, and bring-up carries

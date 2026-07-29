@@ -139,10 +139,13 @@ static void test_applied_rows_reach_the_request(void) {
           "turning memory-reg off did not set no_memory_node");
     CHECK(!report.row[lcd].effective && !report.row[mem].effective,
           "a row turned off still reports as effective");
-    /* The two request opt-outs plus the five nubs, which became applied rows
+    /* The two request opt-outs plus the SIX nubs, which became applied rows
      * when bring-up learned to un-match. Counted rather than left open so that
-     * a sixth row quietly joining them has to be a deliberate edit here. */
-    CHECK(report.applied == 7u, "%u rows applied, expected 7", report.applied);
+     * a row quietly joining them has to be a deliberate edit here -- which is
+     * what this is: `multitouch` was added on 2026-07-29 and it is applied
+     * like the rest, even at its default, because "left matched because you
+     * asked for it" is the switch working rather than being ignored. */
+    CHECK(report.applied == 8u, "%u rows applied, expected 8", report.applied);
 
     /* Nothing else in the request may be touched. no_framebuffer in
      * particular: the app never turns the display off, and a mapping that
