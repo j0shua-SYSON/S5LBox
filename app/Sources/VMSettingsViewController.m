@@ -7,6 +7,7 @@
 
 #import "VMBootOptions.h"       /* what each switch actually does, per row */
 #import "VMEngine.h"            /* +firmwareReadinessSummary, used below */
+#import "VMJitProbe.h"          /* the explicit, recoverable execution test */
 #import "VMFirmwareImportViewController.h"
 #import "VMOptions.h"
 #import "VMManualViewController.h"
@@ -69,6 +70,10 @@ typedef NS_ENUM(NSInteger, VMDiagnosticsRow) {
     VMDiagnosticsRowInstructionCap = 0,
     VMDiagnosticsRowPauseInBackground,
     VMDiagnosticsRowInlineConsole,
+    /* Explicit, never automatic. See VMJitProbe.h -- this is the one control in
+     * the app that can legitimately take the process down, so it may only ever
+     * run because somebody tapped it. */
+    VMDiagnosticsRowJitProbe,
     VMDiagnosticsRowCount
 };
 
@@ -651,6 +656,17 @@ titleForFooterInSection:(NSInteger)section {
                 return cell;
             }
 
+            if (indexPath.row == VMDiagnosticsRowJitProbe) {
+                UITableViewCell *cell = [self cellWithIdentifier:kVMValueCell
+                                                           style:UITableViewCellStyleSubtitle];
+                cell.textLabel.text = @"JIT execution test";
+                cell.detailTextLabel.text = [self jitProbeSubtitle];
+                cell.selectionStyle = vm_jit_probe_supported()
+                    ? UITableViewCellSelectionStyleDefault
+                    : UITableViewCellSelectionStyleNone;
+                return cell;
+            }
+
             if (indexPath.row == VMDiagnosticsRowInlineConsole) {
                 UITableViewCell *cell = [self cellWithIdentifier:kVMSwitchCell
                                                            style:UITableViewCellStyleSubtitle];
@@ -763,6 +779,10 @@ didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
             return;
 
         case VMSettingsSectionDiagnostics:
+            if (indexPath.row == VMDiagnosticsRowJitProbe) {
+                [self confirmAndRunJitProbeAt:indexPath inTable:tableView];
+                return;
+            }
             if (indexPath.row != VMDiagnosticsRowInstructionCap) return;
             [_settings setInstructionCap:[_settings nextInstructionCap]];
             [tableView reloadRowsAtIndexPaths:@[indexPath]
@@ -809,6 +829,134 @@ didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     [_settings resetToDefaults];
     _copiedCommandLine = NO;
     [self.tableView reloadData];
+}
+
+#pragma mark - JIT execution test
+
+/*
+ * Two keys, and the first one is the whole safety story.
+ *
+ * VMJitProbe.c installs handlers for the four signals a refused branch can
+ * raise, which covers a fault. It cannot cover a kernel that KILLS the process
+ * for a code-signing violation -- no handler runs for SIGKILL, and the probe
+ * does not outlive that to record anything.
+ *
+ * So the breadcrumb is written and FLUSHED before each strategy runs, and
+ * removed after it returns. Finding one at launch is proof that the strategy it
+ * names took the app down, and that strategy is then never offered again. This
+ * is what stops a policy mismatch turning into the crash loop
+ * EmulatorViewController's comment warns about.
+ */
+static NSString *const kVMJitBreadcrumbKey = @"VMJitProbeStrategyInFlight";
+static NSString *const kVMJitResultsKey    = @"VMJitProbeResultsByStrategy";
+
+/* -1 when nothing is recorded. */
+- (NSInteger)jitCrashedStrategy {
+    NSNumber *n = [[NSUserDefaults standardUserDefaults]
+                      objectForKey:kVMJitBreadcrumbKey];
+    return [n isKindOfClass:[NSNumber class]] ? n.integerValue : -1;
+}
+
+- (NSDictionary<NSString *, NSNumber *> *)jitResults {
+    NSDictionary *d = [[NSUserDefaults standardUserDefaults]
+                          objectForKey:kVMJitResultsKey];
+    return [d isKindOfClass:[NSDictionary class]] ? d : @{};
+}
+
+- (NSString *)jitProbeSubtitle {
+    if (!vm_jit_probe_supported())
+        return @"Not available in this build -- no probe for this "
+               @"architecture. Nothing to run.";
+
+    NSInteger crashed = [self jitCrashedStrategy];
+    if (crashed >= 0)
+        return [NSString stringWithFormat:
+            @"\"%s\" ended the app last time it ran. That IS the answer for "
+            @"that strategy, and it will not be offered again.",
+            vm_jit_strategy_name((vm_jit_strategy_t)crashed)];
+
+    NSDictionary<NSString *, NSNumber *> *results = [self jitResults];
+    if (results.count == 0)
+        return @"Not run. Writes a two-instruction function, calls it, and "
+               @"reports what iOS did. Decides whether a JIT is possible at "
+               @"all on this device. Tap to run.";
+
+    NSMutableArray<NSString *> *parts = [NSMutableArray array];
+    for (int i = 0; i < (int)VM_JIT_STRATEGY_COUNT; i++) {
+        const char *name = vm_jit_strategy_name((vm_jit_strategy_t)i);
+        NSNumber *r = results[[NSString stringWithUTF8String:name]];
+        if (!r) continue;
+        [parts addObject:[NSString stringWithFormat:@"%s: %s", name,
+            vm_jit_result_text((vm_jit_result_t)r.intValue)]];
+    }
+    [parts addObject:@"Tap to run again."];
+    return [parts componentsJoinedByString:@"\n"];
+}
+
+- (void)confirmAndRunJitProbeAt:(NSIndexPath *)indexPath
+                        inTable:(UITableView *)tableView {
+    if (!vm_jit_probe_supported()) return;
+
+    UIAlertController *confirm = [UIAlertController
+        alertControllerWithTitle:@"Run the JIT execution test?"
+                         message:@"This writes a tiny function into memory and "
+                                  "calls it, to find out whether iOS lets this "
+                                  "app run code it generated.\n\nIf the system "
+                                  "refuses, the test reports that. If the "
+                                  "system ends the app instead, that is also an "
+                                  "answer -- it is recorded before the test "
+                                  "runs, and that method will not be tried "
+                                  "again."
+                  preferredStyle:UIAlertControllerStyleAlert];
+
+    __weak VMSettingsViewController *weakSelf = self;
+    [confirm addAction:[UIAlertAction actionWithTitle:@"Cancel"
+                                                style:UIAlertActionStyleCancel
+                                              handler:nil]];
+    [confirm addAction:[UIAlertAction
+        actionWithTitle:@"Run test"
+                  style:UIAlertActionStyleDestructive
+                handler:^(UIAlertAction *a) {
+        (void)a;
+        VMSettingsViewController *self2 = weakSelf;
+        if (!self2) return;
+        [self2 runJitProbe];
+        [tableView reloadRowsAtIndexPaths:@[indexPath]
+                         withRowAnimation:UITableViewRowAnimationNone];
+    }]];
+    [self presentViewController:confirm animated:YES completion:nil];
+}
+
+- (void)runJitProbe {
+    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+    NSMutableDictionary<NSString *, NSNumber *> *results =
+        [[self jitResults] mutableCopy];
+    const NSInteger alreadyCrashed = [self jitCrashedStrategy];
+
+    for (int i = 0; i < (int)VM_JIT_STRATEGY_COUNT; i++) {
+        const char *name = vm_jit_strategy_name((vm_jit_strategy_t)i);
+        NSString *key = [NSString stringWithUTF8String:name];
+
+        /* Never re-run something that has already killed the app once. */
+        if (alreadyCrashed == (NSInteger)i) continue;
+
+        /*
+         * Write the breadcrumb and FLUSH it. -synchronize is deprecated and is
+         * used deliberately: the point is that the value is on disk before the
+         * next line runs, and normal deferred writes would be lost with the
+         * process. There is no non-deprecated way to demand that.
+         */
+        [ud setObject:@(i) forKey:kVMJitBreadcrumbKey];
+        [ud synchronize];
+
+        uint32_t observed = 0u;
+        vm_jit_result_t r = vm_jit_probe_run((vm_jit_strategy_t)i, &observed);
+
+        [ud removeObjectForKey:kVMJitBreadcrumbKey];
+        results[key] = @((int)r);
+        [ud setObject:results forKey:kVMJitResultsKey];
+        [ud synchronize];
+    }
 }
 
 @end

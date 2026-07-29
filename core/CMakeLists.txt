@@ -360,6 +360,33 @@ else()
 endif()
 add_test(NAME app_boot_options COMMAND test_vmbootoptions)
 
+# Whether a device will branch into a page this process just wrote. Every
+# throughput number in docs/dynarec.md §10.3 is conditional on that answer and
+# it has never been measured -- `RWX mmap: YES` from a user's stock iOS 26.1
+# phone proves the MAPPING was granted, not that executing it is permitted.
+#
+# The test cannot assert the policy without becoming a test of whichever host
+# ran it; it asserts that every strategy is SURVIVABLE and self-consistent,
+# which is the property that lets this ship to a phone. The bytes are really
+# executed on the core-tests matrix: x86-64 Linux takes the x86 payload and
+# arm64 macOS the aarch64 one. Links no core symbols.
+add_executable(test_vmjitprobe
+    ../app/Tests/test_vmjitprobe.c
+    ../app/Sources/VMJitProbe.c
+)
+target_include_directories(test_vmjitprobe PRIVATE ../app/Sources)
+set_target_properties(test_vmjitprobe PROPERTIES
+    C_STANDARD 11
+    C_STANDARD_REQUIRED YES
+    C_EXTENSIONS NO)
+if(MSVC)
+    target_compile_options(test_vmjitprobe PRIVATE /W4 /WX)
+else()
+    target_compile_options(test_vmjitprobe PRIVATE
+        -Wall -Wextra -Werror -pedantic -Wformat=2 -Wshadow)
+endif()
+add_test(NAME app_jit_probe COMMAND test_vmjitprobe)
+
 # Which files belong to which machine.  The identifier from the machine list
 # becomes a PATH COMPONENT here, so the check that admits only sixteen
 # lower-case hex digits is a security boundary and not a formatting rule; and
