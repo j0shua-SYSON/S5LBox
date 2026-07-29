@@ -2365,6 +2365,52 @@ Not yet claimed: that a default route is *sufficient*. It gives the guest
 somewhere to send; whether any daemon then sends is a separate measurement, and
 mDNSResponder's multicast is not obviously something this NAT should carry.
 
+### 2026-07-30: run158 -- THE DIGITIZER NO LONGER COSTS THE SCREEN
+
+The `SPI_CNT` receive flush landed and the deadlock is gone. run140 and run151
+and run158 are the same configuration but for the switch and the fix:
+
+| run | multitouch | pixels |
+|---|---|---|
+| run140 | 0 | 273,206 |
+| run151 | **1** | 1,821 |
+| **run158** | **1** | **273,206** |
+
+**Identical to the no-digitizer runs, to the byte.** The trade this project has
+been paying since 2026-07-29 -- touch OR a screen, never both -- is no longer
+being charged.
+
+The bootload also stopped being a stuck two-octet write and became a real
+conversation:
+
+```
+hbpp: probes 7  acks 24  data 18 (327144 bytes)  rd 6  wr 6  calib 0  exec 0
+packets: 1a:16 1a:16 18:2 30:54154 1a:2 18:2 30:142 1a:2 18:2 30:270 1a:2
+         1c:8 1a:8 1e:16 1a:16 18:2 30:54154 1a:2 18:2 30:270 1a:2 ...
+```
+
+`acks 0 -> 24`, `data 1 -> 18`, and `rd`/`wr` are non-zero for the first time --
+the driver is now reaching §6.5's register primitives, which it could never do
+before. The ATN_ACK probes tell the same story: `c0445270` entered **6** times
+and `c0445274` reached **6** times, with `c0445290` at **0**. Every
+acknowledgement matched `0x4BC1` first try; not one retry.
+
+**What is still wrong: `exec 0`, and the sequence REPEATS.** Read the packet
+list again -- `30:54154 ... 1c:8 1a:8 1e:16` and then `1a:16 1a:16 18:2
+30:54154` all over. The driver downloads the firmware, acknowledges it, sends
+two smaller DATA packets, reads and writes registers, and then starts the whole
+bootload again. `reset-edges` went 5 -> 7. It is not stuck; it is dissatisfied.
+
+So the part never leaves HBPP (`in-hbpp 1`), and the injected tap is still
+refused for the whole run (`NEVER ACCEPTED refused 1050000000`). **Touch does
+not work.** What changed is that it no longer costs the display while not
+working.
+
+Next: what those six register reads ask for and what this model answers. §6.6's
+version trap is the obvious suspect -- a driver that reads an identity register,
+dislikes the answer and re-bootloads is exactly this shape -- but that is a
+hypothesis, and today has already killed four of those.
+
 ### 2026-07-29: run151 -- the framing is FIXED, and the next blocker is the acknowledgement
 
 The select-edge fix (`65e704e`) works, and run144's prediction is confirmed to
