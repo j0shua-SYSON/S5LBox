@@ -697,11 +697,29 @@ the completion the driver is waiting on. run154 probes all eight addresses above
 to confirm the call is entered and never returns, rather than leaving that as
 the last inference standing.
 
-**Not yet claimed:** which completion. `masked_tc()` in `pl080.c` only raises a
-terminal-count interrupt for a channel whose `cfg` carries `PL080_CFG_ITC`, and
-neither DMAC line (IRQ 16, 17) is enabled in the VIC at the end of run151 -- but
-that is an end-state reading of a register the driver may clear, and it is not
-evidence about what was true during the transfer.
+**Which completion: the SPI interrupt, not the DMA controller's.** run151's VIC
+enable masks are `VIC0 en=c004269f`, `VIC1 en=000404c3`, which decode to lines
+`0 1 2 3 4 7 9 10 13 18 30 31 32 33 38 39 42 50`. **SPI0 is IRQ 9 and SPI1 is
+IRQ 10 and both are enabled; DMAC0 and DMAC1 are IRQ 16 and 17 and neither is.**
+So the driver arms the DMA, sleeps, and expects to be woken through spi1's line
+-- which matches `s5l_spi_irq()`'s own note in `core/src/soc/spi.c`: the stock
+filter's action is what runs `finishTransfer`, and `finishTransfer` is what calls
+`commandWakeup`. A bootload that never wakes is a `commandSleep` that was never
+answered.
+
+And spi1's line is not asserted. run151 ends with `VIC0 raw=00000000` -- no line
+raised at all -- while `s5l_spi_irq()` requires three terms together: the SETUP
+interrupt bits, a latched STATUS event, and a non-empty receive FIFO. The FIFO
+term is satisfied and then some (`tx/rx level 2/8`, full, with 54,148 overruns),
+and `setup 000011be` carries the 0x180 the driver sets, so the term that is
+failing is the latched STATUS event.
+
+**Still not claimed:** why it is not latched. The end-state registers cannot say
+whether the event was never set during the DMA transfer or was set and then
+cleared by the filter's own acknowledge, and those need different fixes. The
+overruns are a symptom to explain, not yet a cause: silicon does not stall a
+shifter on a full receive FIFO, so overrunning is correct behaviour for a
+write-only transfer and `spi.c` says so at line 86.
 
 ## 7. Downstream, once this is unblocked
 
