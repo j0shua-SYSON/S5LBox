@@ -1231,6 +1231,8 @@ void s5l8900_tick(s5l8900_t *m, uint32_t ticks) {
     /* SPI words complete inside the store that pushes them, for the same reason
      * and with the same consequence: a zero-tick refresh is all WFI needs to
      * observe both the assertion and the guest's W1C acknowledge. */
+    s5l_spi_irq_note(&m->spi[0]);
+    s5l_spi_irq_note(&m->spi[1]);
     s5l_vic_set_line(&m->vic[0], S5L8900_IRQ_SPI0, s5l_spi_irq(&m->spi[0]));
     s5l_vic_set_line(&m->vic[0], S5L8900_IRQ_SPI1, s5l_spi_irq(&m->spi[1]));
 

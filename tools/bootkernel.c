@@ -23017,6 +23017,20 @@ static void spi_report(void) {
                                           : " [DMA bit clear now]",
                (unsigned long long)b->dma_arms,
                b->cnt, b->tx_level, b->rx_level, attached);
+        /*
+         * Who drains the receive FIFO, and whether this model ever asks them
+         * to. run156 left `tx/rx level 2/8` with the bootload stalled on a
+         * two-octet ATN_ACK that could not shift past a full FIFO, and the
+         * end-state registers cannot say whether the guest declined to read it
+         * or was never given an interrupt to read it from -- STATUS is cleared
+         * by the guest's own acknowledge, so both look identical afterwards.
+         */
+        printf("          rxdata-reads %llu  irq rising-edges %llu%s\n",
+               (unsigned long long)b->rx_reads,
+               (unsigned long long)b->irq_rises,
+               (b->rx_reads == 0u && b->rx_level != 0u)
+                   ? "   <-- FIFO holds octets nothing ever read"
+                   : "");
     }
 }
 

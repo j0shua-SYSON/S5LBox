@@ -167,6 +167,7 @@ uint32_t s5l_spi_read(s5l_spi_t *bus, uint32_t off) {
         case SPI_RXDATA: {
             if (!bus->rx_level) { bus->rx_underruns++; return 0u; }
             uint32_t v = fifo_pop(bus->rx, &bus->rx_level);
+            bus->rx_reads++;           /* somebody IS draining it; see soc.h  */
             spi_shift(bus);            /* the room this just made restarts it */
             return v;
         }
@@ -291,6 +292,25 @@ bool s5l_spi_irq(const s5l_spi_t *bus) {
      */
     return bus && (bus->setup & SPI_SETUP_IRQ) != 0u &&
            (bus->status & SPI_STATUS_EVENTS) != 0u && bus->rx_level != 0u;
+}
+
+void s5l_spi_irq_note(s5l_spi_t *bus) {
+    /*
+     * Count the RISING EDGES of the line, because the end-state registers
+     * cannot answer the question run156 raised. `status` is cleared by the
+     * guest's own acknowledge, so a line that asserted and was serviced looks
+     * exactly like one that never asserted at all. See the rx_reads/irq_rises
+     * note in soc.h.
+     *
+     * Separate from s5l_spi_irq() so that predicate stays const and free of
+     * side effects -- the machine calls it from its interrupt cascade, which
+     * may re-derive levels more than once per instruction, and counting there
+     * would measure the cascade rather than the device.
+     */
+    if (!bus) return;
+    const bool now = s5l_spi_irq(bus);
+    if (now && !bus->irq_last) bus->irq_rises++;
+    bus->irq_last = now;
 }
 
 /* --------------------------------------------------------- the null device --- */

@@ -120,7 +120,7 @@ SNAP_SIZE_GUARD(s5l_i2c_t,         320,   "snap_i2c");
 SNAP_SIZE_GUARD(s5l_pcf50635_t,    600,   "snap_pmu");
 SNAP_SIZE_GUARD(s5l_wm8991_t,      496,   "snap_codec");
 SNAP_SIZE_GUARD(s5l_i2s_t,         104,   "snap_i2s");
-SNAP_SIZE_GUARD(s5l_spi_t,         216,   "snap_spi");
+SNAP_SIZE_GUARD(s5l_spi_t,         240,   "snap_spi");
 /* Four register banks, plus what the board is driving and which lines it
  * drives at all -- see the `driven` note in soc.h. */
 SNAP_SIZE_GUARD(s5l_gpioic_t,      224,   "snap_gpioic");
@@ -162,7 +162,7 @@ SNAP_SIZE_GUARD(s5l_stub_t,        56,    "snap_stubs");
  * the byte format DOES change, so SNAPSHOT_VERSION moved to 17. Measured with
  * a sizeof probe rather than arithmetic -- the first two guesses were wrong,
  * which is the entire reason this guard is a compile error. */
-SNAP_SIZE_GUARD(s5l8900_t,         110776, "snap_mach");
+SNAP_SIZE_GUARD(s5l8900_t,         110824, "snap_mach");
 #endif
 
 /* ---------------------------------------------------------------- the IO --- */
@@ -768,6 +768,14 @@ static void snap_spi(sn_io_t *io, s5l_spi_t *s) {
      * would under-report exactly the loss this counter exists to make
      * visible. */
     F64(s->rx_overruns); F64(s->dma_arms);
+    /* Same reason as rx_overruns: a restored machine that reset these would
+     * under-report the very thing they were added to settle -- whether the
+     * guest ever reads the receive FIFO, and whether this model ever raises
+     * the line that would make it. irq_last is the edge detector; restoring it
+     * wrong would only miscount the first edge after a restore, but a counter
+     * that is right except at the seam is the kind that gets trusted and then
+     * quietly misleads. */
+    F64(s->rx_reads); F64(s->irq_rises); FB(s->irq_last);
     F64(s->unknown_reads); F64(s->unknown_writes);
     FA32(s->unknown_off, S5L_SPI_UNKNOWN_OFF);
     F32(s->unknown_off_count);

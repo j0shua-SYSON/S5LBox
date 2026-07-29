@@ -2093,6 +2093,31 @@ typedef struct {
      */
     uint64_t rx_overruns;
     /*
+     * WHO, IF ANYONE, IS EMPTYING THE RECEIVE FIFO -- and whether this model
+     * ever gives them the chance.
+     *
+     * run156 fixed the DMA burst so it queues nothing, and the bus deadlocked
+     * anyway: `tx/rx level 2/8`, unchanged. The eight octets are not the DMA's
+     * at all. The transaction ledger reads `... 16 0 16 8 54148 0`, and that
+     * 8-octet PIO transaction fills the FIFO before the burst even starts.
+     * Nothing drains it, the following PIO ATN_ACK cannot shift while it is
+     * full, and the bootload stops there.
+     *
+     * Two hypotheses fit that equally well and need different fixes:
+     *
+     *   - the guest never reads RXDATA, so silicon must be discarding or
+     *     flushing these somewhere this model keeps them; or
+     *   - the guest WOULD read them from its interrupt filter, and this model
+     *     never raises the line, so it is never asked to.
+     *
+     * The end-state registers cannot separate those -- `status` is cleared by
+     * the guest's own acknowledge, so a line that fired and one that never did
+     * look identical afterwards. These count the events instead of the state.
+     */
+    uint64_t rx_reads;      /* RXDATA loads that returned a real octet         */
+    uint64_t irq_rises;     /* transitions of s5l_spi_irq() from false to true */
+    bool     irq_last;      /* edge detector for the above; not guest-visible  */
+    /*
      * Rising edges on SPI_SETUP_DMA, as distinct from the bit's VALUE.
      *
      * "SPI_SETUP bit 0x40 is never set, so SPI_SETUP_DMA -- the flag the whole
@@ -2128,6 +2153,10 @@ void     s5l_spi_write(s5l_spi_t *bus, uint32_t off, uint32_t val);
  * the receive FIFO holds a byte. See "THE ONE RULE THAT MATTERS" and the SETUP
  * note above; neither term is a decoration. */
 bool     s5l_spi_irq(const s5l_spi_t *bus);
+/* Sample the line and count its rising edges into irq_rises. Call once per
+ * tick, from one place; see the note beside irq_rises for why the level alone
+ * cannot answer the question this exists for. */
+void     s5l_spi_irq_note(s5l_spi_t *bus);
 /*
  * Run the shifter, from the tick rather than from a register access.
  *
