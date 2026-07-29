@@ -685,11 +685,31 @@ run151 shows `data 1` -- one packet -- with `acks 0`, `probes 2` and no retry.
 So the driver never reached `c0445290` at all. It is not looping, not failing,
 and not giving up.
 
-**What that leaves.** The call at `c04451ec` has not returned. The driver is
-blocked inside the DMA send, which is consistent with everything else run151
-measured: the transaction ledger stops dead after the transfer, the bus goes
-silent, and the last 200 instructions of the run are in userspace rather than
-spinning in the kext -- a sleeping kernel thread, not a hung one.
+**What that leaves — and it was WRONG.** The reasoning above concluded that the
+call at `c04451ec` had not returned and the driver was blocked inside the DMA
+send. Every step of it was sound and the conclusion was false. run155 probed all
+eight addresses and measured the opposite:
+
+```
+c04451ec  the DMA send call        entered  @1,111,780,316
+c04451f0  its return point         REACHED  @1,111,844,336   r0 = 0 (success)
+c0445270  the ATN_ACK call         entered  @1,111,844,345
+c0445274  after the ATN_ACK        NEVER REACHED
+c0445290  the retry counter        never reached
+```
+
+The DMA send returned, and returned *successfully*. The driver then called the
+ATN_ACK nine instructions later, and **that** is what never came back. The
+elimination argument was correct that the retry loop was never reached; it just
+picked the wrong one of the two calls that could explain it.
+
+The lesson is cheap to state and was expensive to learn: an elimination argument
+over a control-flow graph narrows the candidates, it does not choose between
+them. Probing all eight addresses cost one run and settled in one line what an
+hour of reading could not.
+
+**The real cause, and it was in the SPI report all along: `tx/rx level 2/8`.**
+See §6.15.
 
 The model moves every octet (`dmac1 ch5 ... runs 14 bytes 54156`, and the device
 frames all 54,154 of them as one packet), so what is missing is not the data but
@@ -720,6 +740,43 @@ cleared by the filter's own acknowledge, and those need different fixes. The
 overruns are a symptom to explain, not yet a cause: silicon does not stall a
 shifter on a full receive FIFO, so overrunning is correct behaviour for a
 write-only transfer and `spi.c` says so at line 86.
+
+### 6.15 The receive FIFO the bootload left full (run155)
+
+The ATN_ACK is a two-octet PIO transfer. `spi_shift()` will only move an octet in
+PIO mode when `rx_level < S5L_SPI_FIFO_DEPTH`, and that stall is load-bearing:
+it is what lets a sixteen-octet command work against an eight-deep FIFO, because
+each `RXDATA` read makes room for one more.
+
+The Z2 bootload runs immediately before it, and it is **memory-to-peripheral on
+dmac1 ch5 alone** — `src 0bfdd38c dst 3ce00010`, nothing moving the other way.
+Nothing is configured to drain a receive FIFO. `spi_shift()` filled one anyway:
+the first eight answers stored, the other 54,148 counted as overruns, leaving
+`rx_level` at 8 when the burst ended.
+
+So the ATN_ACK could never shift. Its two octets sat in the transmit FIFO for
+**2.44 G instructions** — that is the `tx/rx level 2/8` the report had been
+printing since the transfer started working — the device never saw `1A A1`
+(`acks 0`), and the driver slept inside a call with no way to complete.
+
+Nothing was ever going to drain those eight: **91 register reads against 54,351
+writes** on spi1 across the entire run.
+
+**Fix (`a6f3520`):** in DMA mode the answer is dropped rather than queued, and
+still counted. The existing principle that no discarded octet may be invisible is
+kept — the unit test's 200-octet burst now counts 200 overruns instead of 192.
+
+**INFERRED:** that a TX-only DMA transfer has no receive consumer and therefore
+queues nothing. **MEASURED:** that queueing it deadlocks the bus permanently, and
+that nothing drains it. Whatever silicon does with those bytes it cannot be
+"wedge the bus until reset", because the shipped driver runs this exact sequence
+on real hardware and goes on to finish the bootload.
+
+`test_spi` now asserts `rx_level == 0` after a DMA burst and, more to the point,
+that a PIO transfer *following* a DMA burst still shifts. The PIO stall itself is
+untouched and still asserted.
+
+**Not claimed:** that this completes the bootload. run156 is the test.
 
 ## 7. Downstream, once this is unblocked
 
