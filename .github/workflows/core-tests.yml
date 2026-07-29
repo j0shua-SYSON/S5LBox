@@ -7,8 +7,23 @@ on:
     paths:
       - 'core/**'
       - 'tools/**'
-      - 'app/Sources/VMGuest.c'
-      - 'app/Sources/VMGuest.h'
+      # app/Sources WHOLESALE, and not the three or four files that happen to
+      # be compiled here today.
+      #
+      # This list used to name 'app/Sources/VMGuest.c' and its header, which was
+      # precise and wrong: core/CMakeLists.txt also builds VMBootOptions.c,
+      # VMOptions.c and VMJitProbe.c into test targets, and none of them were
+      # here. On 2026-07-29 a fix to VMJitProbe.c ran ios-build only -- the one
+      # job that does NOT compile it for Linux -- so the -Werror=clobbered
+      # failure it was fixing could not be re-tested at all, and the push looked
+      # like it had passed.
+      #
+      # A filter that has to be kept in lockstep with another file's target
+      # definitions will drift, silently, in the direction of testing less. The
+      # cost of the wildcard is some Objective-C edits running a matrix that
+      # cannot observe them; the cost of the old form was a build-breaking
+      # change no job compiled.
+      - 'app/Sources/**'
       - 'app/Tests/**'
       - 'CMakeLists.txt'
       - '.github/workflows/core-tests.yml'
