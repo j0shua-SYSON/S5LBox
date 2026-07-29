@@ -2211,6 +2211,32 @@ void     s5l_spi_null_bind(s5l_spi_slave_t *slave);
 #define MTZ2_OP_HBPP_EXEC    0x1du   /* 1D 53 …,                     12 bytes */
 #define MTZ2_OP_HBPP_WRREG   0x1eu   /* 1E 33 <addr><mask><val><sum>,16 bytes */
 #define MTZ2_OP_HBPP_CALIB   0x1fu   /* 1F 01,                        2 bytes */
+/*
+ * THE IDLE ATTENTION WORD, 0x18E1, framed as a two-octet packet.
+ *
+ * run144 dumped the stream the bootloader actually receives and found this
+ * sitting between the probe and the firmware:
+ *
+ *   18 e1 | 30 01 34 df 00 00 00 00 01 13 ...
+ *
+ * The right-hand side is a perfectly-formed HBPP DATA header -- opcode, M2,
+ * 13,535 words big-endian, address zero, and a header checksum of 0x0113 that
+ * verifies exactly against sum16 of the six bytes before it. 13,535 words is
+ * 54,140 octets, and with 14 of framing that is the whole 54,156-octet image
+ * in ONE packet.
+ *
+ * So the firmware was never raw ARM code. The framer simply never saw its
+ * header, because 0x18 is not an opcode it knows: it ate the 0x18 as unknown
+ * and then read the 0xE1 as GET_CMD_STATUS, a sixteen-octet frame that
+ * swallowed the DATA header whole. Everything after that was ARM instructions
+ * being read as commands -- which is why e5/ea/e2 (LDR/STR, B, data-processing)
+ * appeared as WRITE_LONG/FRAME_Z1/DEVICE_INFO.
+ *
+ * 0x18E1 is one of the seven words isInHBPP's own accept-set contains
+ * (0xc0440658), so a device seeing it between packets is seeing an attention
+ * word and not a command. Two octets, and it loops back like the probe does.
+ */
+#define MTZ2_OP_HBPP_IDLE    0x18u   /* 18 E1, two octets, loops back        */
 #define MTZ2_OP_HBPP_DATA    0x30u   /* 30 01 <count:2> <addr:4> …,14+4W bytes */
 
 /* The second octet of each, which the driver hard-codes and this model checks

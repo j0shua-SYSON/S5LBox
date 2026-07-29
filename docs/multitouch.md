@@ -374,6 +374,54 @@ The long MemRead ATN_ACK's reply carries the value at `rx[2..5]` in the same
 middle-endian order as everything else — `0xc0440c5c`-`0xc0440c74` assemble it
 as `(rx[2]<<8 | rx[3]) | (rx[4]<<8 | rx[5]) << 16`.
 
+### 6.9 The idle attention word, and the two octets that broke everything
+
+**Measured 2026-07-29, run144.** §6.8 above frames the three `1A A1` forms by
+context, and that reasoning is sound. It is also not the whole framing problem,
+because a FOURTH thing appears on this wire and it does not begin with `1A A1`.
+
+The device's own stream, dumped after the probes:
+
+```
+  18 e1 | 30 01 34 df 00 00 00 00 01 13 | f0 18 e5 9f ...
+  ^^^^^   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^   ^^^^^^^^^^^
+  idle    a DATA header, exactly as 6.1    the payload
+          specifies                        (ARM code)
+```
+
+Read the header against §6.1: `0x30`, `0x01`, word count `0x34df` big-endian =
+**13,535**, address zero in the middle-endian order, and `hdrsum = 0x0113`.
+Check it: `sum16(0x34, 0xdf, 0, 0, 0, 0) = 0x113`. **It verifies exactly.**
+13,535 words is 54,140 octets, plus 14 of framing is 54,154 — the whole 54,156
+octet image **in one DATA packet**.
+
+So §6.1 was right in every detail and the bootload was well-formed the entire
+time. What went wrong is two octets in front of it.
+
+`0x18` is not an opcode this model knew. Between packets the framer therefore
+consumed the `18` as an unknown byte and read the following `E1` as
+`GET_CMD_STATUS` — a sixteen-octet frame, which swallowed the DATA header
+whole. From there it was parsing ARM instructions as commands, and because
+ARM's `AL` condition nibble IS `0xe` while the command opcodes are `0xe1`..
+`0xee`, it found "commands" constantly: `e5` (LDR/STR) as WRITE_LONG, `ea` (B)
+as FRAME_Z1, `e2` (data-processing) as DEVICE_INFO.
+
+`0x18E1` is one of the seven words `isInHBPP`'s accept-set holds
+(`0xc0440658`), so a device seeing it between packets is seeing an attention
+word rather than a command. It is two octets and it loops back, like the probe.
+
+**What this retracts.** Three days of framing theories were aimed at the wrong
+question. All of these were measured and all of them were beside the point:
+
+  - opcode framing cannot survive an ARM image (run138) — true, and irrelevant,
+    because the image is not framed by opcode; it is one packet with a length
+  - the chip select brackets the 16-octet probes and not the image (run142)
+  - `SPI_CNT` is written zero by the DMA path and `SPI_PIN` sees only a
+    power-on zero, so neither delimits anything
+
+None of that was wrong. It was all an answer to "where does the image end?",
+and the image carried its own length in a header the framer stepped over.
+
 ### 6.8 The framing problem, and how to resolve it
 
 `isInHBPP` (`0xc0441008`) builds its probe as `0x1A 0xA1` followed by seven

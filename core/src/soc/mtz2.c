@@ -394,6 +394,11 @@ static unsigned frame_len(const s5l_mtz2_t *dev, uint8_t op) {
              * the previous packet set, and docs/multitouch.md §6.8.
              */
             return dev->atn_len ? dev->atn_len : MTZ2_ATN_PROBE;
+        case MTZ2_OP_HBPP_IDLE:
+            /* 18 E1. See soc.h: without this the framer eats the 0x18 as an
+             * unknown octet and reads the 0xE1 as GET_CMD_STATUS, whose
+             * sixteen octets swallow the DATA header that follows. */
+            return 2u;
         case MTZ2_OP_HBPP_CALIB:
             return 2u;   /* 1F 01 — "requesting calibration", 0xc0445750     */
         case MTZ2_OP_HBPP_RDREG:
@@ -647,6 +652,11 @@ static uint8_t drive(const s5l_mtz2_t *dev, uint8_t out, unsigned pos) {
     if (dev->op == MTZ2_OP_HBPP && dev->len == MTZ2_ATN_PROBE &&
         dev->hbpp_mode)
         return out;
+
+    /* The idle attention word loops back too: it is the same signalling as the
+     * probe, cut to one word, and a device that answered zeros to it would
+     * fail the same accept-set test. */
+    if (dev->op == MTZ2_OP_HBPP_IDLE && dev->hbpp_mode) return out;
     return pos < S5L_MTZ2_RSP ? dev->rsp[pos] : 0u;
 }
 

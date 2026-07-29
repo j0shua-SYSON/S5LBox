@@ -2365,6 +2365,63 @@ Not yet claimed: that a default route is *sufficient*. It gives the guest
 somewhere to send; whether any daemon then sends is a separate measurement, and
 mDNSResponder's multicast is not obviously something this NAT should carry.
 
+### 2026-07-29: run144 -- THE FIRMWARE IS ONE WELL-FORMED PACKET, and we stepped over its header
+
+After three boundary theories came back empty, run144 stopped asking where the
+image ENDS and dumped what is actually in it:
+
+```
+  stream head after the probes:
+    0000: 18 e1 30 01 34 df 00 00 00 00 01 13 f0 18 e5 9f
+    0016: f0 18 e5 9f f0 18 e5 9f f0 18 e5 9f f0 18 e5 9f
+```
+
+Read from offset 2 against docs/multitouch.md §6.1, which specifies the DATA
+packet from `0xc0445dcc`'s own disassembly:
+
+```
+  30       DATA marker          01       M2
+  34 df    word count, BE       = 13,535
+  00 00 00 00                   address zero, middle-endian
+  01 13    header checksum
+```
+
+**The checksum verifies exactly**: `sum16(0x34, 0xdf, 0, 0, 0, 0) = 0x113`, and
+the header carries `01 13`. **And the size matches**: 13,535 words is 54,140
+octets, plus 14 of framing is 54,154, against a 54,156-octet image. Neither of
+those is a coincidence a wrong reading survives -- the checksum alone is one
+chance in 65,536.
+
+**So the firmware was never raw ARM code.** It is ONE well-formed HBPP DATA
+packet, and §6.1 described it correctly all along.
+
+**What actually broke it is two octets.** `18 E1` sits between the probe and
+the header. `0x18` was not an opcode this model knew, so the framer ate it as
+an unknown byte and read the following `E1` as GET_CMD_STATUS -- a sixteen-octet
+frame, which swallowed the DATA header whole. Everything after that was ARM
+instructions being read as commands, which is why `e5`/`ea`/`e2` (LDR/STR, B,
+data-processing) surfaced as WRITE_LONG/FRAME_Z1/DEVICE_INFO: ARM's `AL`
+condition nibble IS `0xe`, and the command opcodes are `0xe1`..`0xee`.
+
+`0x18E1` is one of the seven words `isInHBPP`'s accept-set holds
+(`0xc0440658`), so a device seeing it between packets is seeing an attention
+word, not a command. Two octets, and it loops back like the probe.
+
+**Every framing theory in this log was aimed one layer too low.** run138's
+opcode collision, run142's chip-select shape, `SPI_CNT` and `SPI_PIN` -- all
+correctly measured, all answers to "where does the image end?", and the image
+carried its own length in a header the framer stepped over. The lesson is not
+"measure more", which was already the rule; it is that four negative results
+about boundaries should have prompted the CONTENT question far sooner than they
+did.
+
+**NOT YET A FIX.** `MTZ2_OP_HBPP_IDLE` is added and 49/49 pass, but framing the
+packet correctly is necessary, not obviously sufficient: the device still has
+to answer the DATA packet, then the acknowledgement, then receive and act on
+EXEC. run146 tests the prediction, which is falsifiable -- the packet list
+should collapse to a single `30:54154`, `unknown-opcodes` should fall away from
+192, and `exec` gets its first chance to leave zero.
+
 ### 2026-07-29: run142 -- NOTHING on the wire delimits the bootload
 
 run141 said the chip select is driven 14 times, which looked like the framing
