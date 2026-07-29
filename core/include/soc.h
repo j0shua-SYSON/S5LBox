@@ -2547,6 +2547,25 @@ typedef struct {
     uint64_t txn_mark;
     uint32_t txn_octets[24];
     unsigned txn_n;
+    /*
+     * THE FIRST OCTETS OF THE STREAM ITSELF, which is the one thing about this
+     * bootload nobody has actually looked at.
+     *
+     * Three ways of DELIMITING the image have now been eliminated by
+     * measurement -- opcode framing (run138: ARM's AL nibble is 0xe and the
+     * commands are 0xe1..0xee), the chip select (run142: it brackets the
+     * 16-octet probes, not the image), and SPI_CNT/SPI_PIN (the DMA path
+     * writes CNT zero and PIN sees only a power-on zero). Nothing on the wire
+     * carries the length.
+     *
+     * Which means a real Z2 cannot be told where the image ends either, so it
+     * must parse the stream -- so the image IS structured and our reading of
+     * that structure is what is wrong. This records the first 64 octets after
+     * the probes, because every theory so far has been about boundaries and
+     * none has been about content.
+     */
+    uint8_t  head[64];
+    unsigned head_n;
 
     /*
      * Bounded diagnostics, as on I2C and SPI, and two of these are load-bearing

@@ -672,6 +672,13 @@ static uint8_t mtz2_transfer(void *ctx, uint8_t out) {
      */
     dev->octets++;
 
+    /* The stream itself, once the probes are behind us. See `head` in soc.h:
+     * every theory so far has been about where the image ENDS, and none about
+     * what is actually in it. */
+    if (dev->hbpp_probes >= 2u && !dev->in_reset &&
+        dev->head_n < sizeof dev->head)
+        dev->head[dev->head_n++] = out;
+
     if (dev->in_reset) {
         dev->reset_bytes++;
         (void)out;

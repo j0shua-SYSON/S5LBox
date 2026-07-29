@@ -17320,6 +17320,21 @@ static void mtz2_device_report(const s5l_mtz2_t *d) {
      * writes itself; if the image shares a transaction with commands, it does
      * not, and the select alone is not enough.
      */
+    /*
+     * The first octets of the stream, as hex. This is the content question,
+     * asked after three boundary questions all came back negative. If these
+     * are a recognisable HBPP header the framer is starting in the wrong
+     * place; if they are ARM code, the image really is raw and the driver is
+     * doing something else entirely with it.
+     */
+    if (d->head_n) {
+        printf("            stream head after the probes:");
+        for (unsigned i = 0; i < d->head_n; i++) {
+            if (i % 16u == 0u) printf("\n                    %04u:", i);
+            printf(" %02x", d->head[i]);
+        }
+        printf("\n");
+    }
     if (d->txn_n) {
         printf("            transactions (octets between select edges):");
         for (unsigned i = 0; i < d->txn_n; i++) {
