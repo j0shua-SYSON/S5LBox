@@ -92,6 +92,32 @@ jobs:
           fi
           "$bin" --insns 20000000 --reps 5
 
+      # JIT executability. A MEASUREMENT, NOT A GATE — for the same reason as
+      # the step above: it reports a host POLICY, and asserting one would make
+      # this a test of the runner rather than of the code. ctest already gates
+      # the contract (survivable, self-consistent) and suppresses the output of
+      # a test that passes, so the verdict itself was going unrecorded.
+      #
+      # docs/dynarec.md §0.1: every throughput number in §10.3 is conditional on
+      # whether a device will branch into a page the process wrote, and that has
+      # only ever been asked of the phone. These runners cannot answer for iOS —
+      # macOS policy is far more permissive, and Linux is a different OS
+      # entirely — but they do show the probe working on arm64 Apple hardware
+      # before it is trusted on a user's device, which is worth having written
+      # down rather than assumed.
+      - name: JIT executability probe (measurement, not a gate)
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -uo pipefail
+          bin=$(find build -name 'test_vmjitprobe*' -type f -perm -u+x | head -1)
+          if [ -z "$bin" ]; then
+            echo "test_vmjitprobe was not built" >&2
+            exit 1
+          fi
+          uname -sm || true
+          "$bin"
+
   jit:
     # The dynamic recompiler (docs/dynarec.md). It is off in the default build,
     # so it needs a job of its own or it would never be compiled at all.
