@@ -2365,6 +2365,46 @@ Not yet claimed: that a default route is *sufficient*. It gives the guest
 somewhere to send; whether any daemon then sends is a separate measurement, and
 mDNSResponder's multicast is not obviously something this NAT should carry.
 
+### 2026-07-29: run142 -- NOTHING on the wire delimits the bootload
+
+run141 said the chip select is driven 14 times, which looked like the framing
+the fix needed. run142 asked the next question -- what SHAPE those transactions
+have -- and the answer removes the option entirely:
+
+```
+  select-edges 14
+  transactions (octets between select edges): 0 0 16 0 16 0 16 0
+```
+
+Every bounded transaction is a 16-octet PIO command or empty. The 54,156-octet
+firmware stream is in the final, never-closed one. **The select brackets the
+probes and not the image.**
+
+So the rule that was about to be written -- "a transaction whose first octet is
+not an HBPP opcode is firmware until the select moves" -- had no boundary to
+hang on, and would have failed as a subtle framing bug rather than as a wrong
+premise. That is the fifth time in two days that measuring first has replaced a
+confident wrong answer, and the first time it cost nothing but one run.
+
+**The other two hardware candidates are dead too**, and this model's own
+comments say so from earlier disassembly:
+
+  - `SPI_PIN`, the controller's internal chip select: "The only store this
+    register sees on the touch path is the zero written at power-on."
+  - `SPI_CNT`, the word count: "the driver's own DMA path stores zero here
+    (0xc05a6b10)", and "the filter decides a transfer is over from its own
+    three software counters and never tests a hardware done bit".
+
+**Nothing on the wire carries the length.** It exists only in the driver's
+software. A real Z2 therefore cannot be told where the image ends either -- so
+it must parse the stream itself, which means the image IS structured and our
+reading of its structure is what is wrong, not our reading of its boundaries.
+
+That reframes the remaining work. It is not "find the delimiter"; there is
+none. It is "find what the driver actually sends", which is a question for
+MTSPIBootloader_Z2's own code and for the first octets of the stream, not for
+another framing rule.
+
 ### 2026-07-29: THE ROOT CAUSE -- ARM code is being read as touch protocol
 
 run138 printed the packet list and it names the bug outright:
