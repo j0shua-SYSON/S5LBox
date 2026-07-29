@@ -836,10 +836,31 @@ static const NSUInteger kConsoleScrollback = 12000;
     BOOL rwx = (page != MAP_FAILED);
     [self append:[NSString stringWithFormat:@"RWX mmap    : %@",
                   rwx ? @"YES" : @"no"]];
+    /*
+     * Three states, not two. The previous form printed "capability preflight
+     * failed" whenever CS_DEBUGGED was clear, which on a STOCK phone is always
+     * -- so a device that mapped RWX successfully was reported the same way as
+     * one that could not map it at all. That is backwards: an RWX page on a
+     * stock iOS 26.1 iPhone17,2 is the interesting result, and it was being
+     * filed under "failed". Measured 2026-07-29 from a user's own run.
+     *
+     * What each state actually means:
+     *   no RWX          - the mapping was refused; no JIT without a different
+     *                     strategy entirely.
+     *   RWX, debugged   - both hints are green and an execution test can run.
+     *   RWX, not debugged - the MAPPING succeeded and executability is UNKNOWN.
+     *                     iOS may still enforce W^X at fault time, so a
+     *                     successful mmap is not permission to branch into it.
+     *                     This needs the explicit recoverable diagnostic the
+     *                     comment above describes, which does not exist yet.
+     */
+    NSString *jitState;
+    if (!rwx)          jitState = @"RWX refused -- no JIT on this device";
+    else if (debugged) jitState = @"RWX + CS_DEBUGGED; execution test can run";
+    else               jitState = @"RWX mapped, executability UNKNOWN "
+                                  @"(stock policy; mmap success is not proof)";
     [self append:[NSString stringWithFormat:
-        @"JIT execute : not run at startup (%@)",
-        (rwx && debugged) ? @"manual diagnostic required"
-                          : @"capability preflight failed"]];
+        @"JIT execute : not run at startup (%@)", jitState]];
     if (rwx) munmap(page, 4096);
 
     [self append:[NSString stringWithFormat:@"footprint   : %.1f MB at launch",
