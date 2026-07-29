@@ -348,6 +348,31 @@ static double vm_now(void) {
                 if (switches.length)
                     [self appendConsole:[NSString stringWithFormat:
                         @"[vm] settings: %@\n", switches]];
+                /*
+                 * WHICH NUBS THIS BOOT HID, by name and from the list bring-up
+                 * was actually handed -- not from the settings table, which is
+                 * what the user set rather than what the guest got.
+                 *
+                 * This exists because on 2026-07-29 a phone log could not
+                 * answer "is this the build with the touchscreen fix?". The
+                 * summary above lists only switches whose outcome DISAGREES
+                 * with the request, so a nub working exactly as asked appeared
+                 * nowhere at all, and an old binary and a new one printed the
+                 * same lines. A boot that hides a device should say which.
+                 */
+                if (report.options.unmatch_count) {
+                    NSMutableString *nubs = [NSMutableString string];
+                    for (unsigned i = 0; i < report.options.unmatch_count; i++) {
+                        const char *path = report.options.unmatch[i];
+                        if (!path) continue;
+                        if (nubs.length) [nubs appendString:@", "];
+                        [nubs appendString:
+                            [NSString stringWithUTF8String:path] ?: @"?"];
+                    }
+                    [self appendConsole:[NSString stringWithFormat:
+                        @"[vm] device tree: %u nub(s) hidden from the guest: "
+                        @"%@\n", report.options.unmatch_count, nubs]];
+                }
                 /* Actionable, not merely alarming: the settings screen is
                  * where each of these now says what happens instead. */
                 NSString *said = switches.length
