@@ -1960,6 +1960,10 @@ static void test_page_translation_fault_precedes_page_domain_fault(void) {
 
     /* Once the L2 descriptor is valid, the same disabled domain is reported. */
     m_w32(NULL, l2, 0x00030000u | (3u << 4) | 2u);
+    /* The descriptor just changed under a cache that now exists. ARMv6
+     * requires CP15 c8 maintenance after a table edit for exactly this
+     * reason; a guest that skips it reads stale on hardware too. */
+    arm_mmu_tlb_flush(&c);
     f = arm_mmu_translate(&c, 0x80000000u, ARM_ACCESS_READ, true, &pa);
     CHECK((f & 0xfu) == ARM_FSR_PAGE_DOMAIN,
           "valid L2 plus disabled domain produced fsr=%x, expect page domain", f);
@@ -2028,6 +2032,10 @@ static void test_force_access_flag_faults_precede_domain_permissions(void) {
           "invalid L2 with FA produced fsr=%x, expect page translation", fsr);
 
     m_w32(NULL, 0x8004u, 0x00060000u | 2u);    /* small page, AP[0]=0 */
+    /* The descriptor just changed under a cache that now exists. ARMv6
+     * requires CP15 c8 maintenance after a table edit for exactly this
+     * reason; a guest that skips it reads stale on hardware too. */
+    arm_mmu_tlb_flush(&c);
     g_watch_addr = 0x00060000u;
     g_watch_reads32 = g_watch_writes32 = 0u;
     pa = 0xdeadbeefu;

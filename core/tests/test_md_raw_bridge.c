@@ -3,12 +3,22 @@
  *
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed.
  */
+#include <stddef.h>
 #include "md_raw_bridge.h"
 
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+
+/*
+ * The architectural CPU state. arm_cpu_t gained a translation cache on
+ * 2026-07-29, placed after vfp_s precisely so a rollback check can stop before
+ * it: a cache filled by translating is not a register the guest can observe,
+ * and comparing it would report "the CPU changed" for work that changed
+ * nothing.
+ */
+#define CPU_ARCH_BYTES offsetof(arm_cpu_t, tlb)
 
 #define TEST_RAM_SIZE UINT32_C(1048576)
 #define TEST_MEDIA_SIZE UINT32_C(131072)
@@ -321,11 +331,29 @@ static void fixture_init(void) {
 }
 
 static arm_svc_result_t invoke_entry_raw(void) {
+    /*
+     * A guest arriving at this SVC has, between calls, done whatever page-table
+     * work these tests do with put_u32(l2, ...) -- and on ARMv6 that work
+     * carries CP15 c8 maintenance with it. The model gained a translation
+     * cache on 2026-07-29, so the tests have to observe the same discipline a
+     * guest does; without it, test_completion_failures_and_partial_errno reads
+     * a remapped page through the mapping it replaced.
+     */
+    arm_mmu_tlb_flush(&fixture.cpu);
     return md_raw_bridge_handle_svc(&fixture.bridge, &fixture.cpu,
                                     TEST_RAW_PC, TEST_RAW_SVC);
 }
 
 static arm_svc_result_t invoke_completion(void) {
+    /*
+     * A guest arriving at this SVC has, between calls, done whatever page-table
+     * work these tests do with put_u32(l2, ...) -- and on ARMv6 that work
+     * carries CP15 c8 maintenance with it. The model gained a translation
+     * cache on 2026-07-29, so the tests have to observe the same discipline a
+     * guest does; without it, test_completion_failures_and_partial_errno reads
+     * a remapped page through the mapping it replaced.
+     */
+    arm_mmu_tlb_flush(&fixture.cpu);
     return md_raw_bridge_handle_svc(&fixture.bridge, &fixture.cpu,
                                     TEST_RAW_COMPLETION_PC,
                                     TEST_RAW_COMPLETION_SVC);
@@ -1732,7 +1760,7 @@ static void test_exact_svc_pair_redirect_and_halt_rollback(void) {
     CHECK(status == ARM_OK && fixture.cpu.r[0] == 0u &&
           fixture.cpu.r[15] == UINT32_C(0x00003500) &&
           fixture.cpu.cycles == before.cycles + 1u &&
-          memcmp(&normalized, &before, sizeof before) == 0,
+          memcmp(&normalized, &before, CPU_ARCH_BYTES) == 0,
           "direct SVC did not redirect past completion to the saved caller");
 
     /*
@@ -1785,7 +1813,7 @@ static void test_exact_svc_pair_redirect_and_halt_rollback(void) {
     before = fixture.cpu;
     status = arm_step(&fixture.cpu);
     CHECK(status == ARM_HALT &&
-          memcmp(&fixture.cpu, &before, sizeof before) == 0 &&
+          memcmp(&fixture.cpu, &before, CPU_ARCH_BYTES) == 0 &&
           fixture.bridge.last_error.code == MD_RAW_BRIDGE_ERROR_BLOCK_IO,
           "backend error did not halt with exact CPU rollback");
 }

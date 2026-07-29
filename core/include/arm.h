@@ -302,6 +302,19 @@ typedef enum {
     ARM_ARCH_V7_SWIFT   = 1   /* S5L8950X / iPhone 5, ARMv7s -- roadmap P2   */
 } arm_arch_t;
 
+/*
+ * Direct-mapped, power of two so the index is a mask rather than a modulo.
+ *
+ * KEYED AT 1 KB, NOT 4 KB, and that is not a tuning choice. ARMv6 legacy small
+ * pages carry FOUR sets of AP bits, one per 1 KB subpage, so two addresses in
+ * the same 4 KB page can have different permissions. A 4 KB-keyed cache
+ * answers one subpage's verdict for another -- which is exactly what
+ * test_legacy_subpage_permissions caught on the first attempt, on the COW and
+ * user-denied paths where it matters most. 1 KB is the finest granularity the
+ * architecture has, so it is the only key that cannot be wrong.
+ */
+#define ARM_TLB_ENTRIES 4096u
+
 typedef struct arm_cpu {
     uint32_t r[16];      /* r0–r15; r15 is PC (address of current instruction) */
     arm_arch_t arch;     /* zero => ARM1176, so existing callers are unchanged */
@@ -346,6 +359,58 @@ typedef struct arm_cpu {
      * copy that could drift. There is no d16-d31 on this part; see vfp.c.
      */
     uint32_t vfp_s[32];
+
+    /*
+     * THE TRANSLATION CACHE, and why the model went without one for so long.
+     *
+     * arm_mmu_translate() walks the guest's page tables on EVERY fetch and
+     * EVERY data access, which costs two bus reads each because there was
+     * nothing remembering the last answer. insnbench measures the price
+     * directly: 9.15 Minsn/s with the MMU off against 4.32 with 4 KB pages,
+     * so a guest kernel -- which runs with the MMU on permanently -- pays
+     * better than 2x for address translation alone.
+     *
+     * This is a CACHE and nothing else. A hit returns exactly what a walk
+     * would have returned, including the fault code, so no behaviour depends
+     * on whether an entry was present. That is the property that makes it
+     * safe to flush at any time and to restore a snapshot with it empty.
+     *
+     * ARCHITECTURALLY THIS MAKES THE MODEL MORE FAITHFUL, NOT LESS. Real
+     * ARMv6 has a TLB, so the guest is already obliged to issue CP15 c8
+     * maintenance after editing a descriptor -- and c8 was a documented no-op
+     * here precisely because there was no TLB to maintain. A guest that edits
+     * tables without invalidating was always broken on hardware; now it is
+     * broken here too, which is the correct behaviour to model.
+     *
+     * Keyed on the 4 KB page AND on the access kind and privilege, because
+     * permission depends on both and caching a translation without them would
+     * answer a fetch with a load's verdict. Sections and supersections simply
+     * occupy several entries; correctness does not depend on page size.
+     */
+    struct {
+        uint32_t gen;    /* the flush generation this entry was filled in    */
+        uint32_t tag;    /* (va >> 10) << 3 | acc << 1 | priv                */
+        uint32_t pa;     /* 1 KB-aligned base, already masked                */
+        uint32_t fsr;    /* what the walk returned, faults included          */
+    } tlb[ARM_TLB_ENTRIES];
+    uint32_t tlb_gen;
+    /*
+     * The registers a cached translation is only valid under, kept so the
+     * cache can notice them changing BY ANY ROUTE rather than only through
+     * MCR. The CP15 write path flushes explicitly, but three things mutate
+     * these directly: snapshot restore, the memory-disk bridges, and every
+     * MMU test in core/tests/test_arm.c -- 54 translations that set SCTLR.S,
+     * SCTLR.FA or DACR on the struct and expect the verdict to follow. Those
+     * tests are right to: they are testing translation, not TLB discipline.
+     *
+     * Six compares per translation is nothing against the two bus reads of a
+     * walk, and it makes a stale answer structurally impossible instead of
+     * dependent on every future writer remembering to invalidate.
+     */
+    struct {
+        uint32_t sctlr, ttbr0, ttbr1, ttbcr, dacr, context_id;
+    } tlb_stamp;
+    uint64_t tlb_hits, tlb_misses, tlb_flushes;
 } arm_cpu_t;
 
 /*
@@ -373,6 +438,15 @@ typedef enum {
  */
 uint32_t arm_mmu_translate(arm_cpu_t *cpu, uint32_t va, arm_access_t acc,
                            bool priv, uint32_t *pa);
+
+/*
+ * Drop every cached translation. Call this wherever the guest does something
+ * that could change what a walk would return: CP15 c8 maintenance (which is
+ * what the architecture requires of it), a TTBR/TTBCR/DACR/SCTLR write, or a
+ * context-ID change. Flushing more than strictly necessary is always correct;
+ * flushing less is a stale mapping that surfaces days later as a wild store.
+ */
+void     arm_mmu_tlb_flush(arm_cpu_t *cpu);
 
 /* Which bank a CPSR mode value selects (USR and SYS share ARM_BANK_USR). */
 arm_bank_t arm_bank_of_mode(uint32_t mode);

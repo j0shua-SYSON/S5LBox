@@ -14,6 +14,7 @@
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed.
  */
 #include "arm.h"
+#include <string.h>
 #include "vfp.h"
 
 #include <stddef.h>
@@ -704,7 +705,8 @@ static arm_status_t exec_coprocessor(arm_cpu_t *c, uint32_t pc, uint32_t insn) {
                  * the legacy align-down-and-rotate one, which corrupts loaded
                  * data instead of faulting. */
                 if (crm == 0) {
-                    if (opc2 == 0) p->sctlr = v; else if (opc2 == 1) p->actlr = v;
+                    if (opc2 == 0) { p->sctlr = v; arm_mmu_tlb_flush(c); }
+                    else if (opc2 == 1) p->actlr = v;
                     else if (opc2 == 2) p->cpacr = v;
                 }
                 break;
@@ -716,16 +718,29 @@ static arm_status_t exec_coprocessor(arm_cpu_t *c, uint32_t pc, uint32_t insn) {
                 if (crm == 0) {
                     if (opc2 == 0) p->ttbr0 = v; else if (opc2 == 1) p->ttbr1 = v;
                     else if (opc2 == 2) p->ttbcr = v & 0x37u;
+                    /* Any of the three re-points or re-splits the walk. This is
+                     * the one that matters most in practice: pmap_switch loads
+                     * a new user pmap into TTBR0 on every context switch. */
+                    arm_mmu_tlb_flush(c);
                 }
                 break;
-            case 3:  p->dacr = v; break;
+            case 3:  p->dacr = v; arm_mmu_tlb_flush(c); break;
             case 5:  if (opc2 == 1) p->ifsr = v; else p->dfsr = v; break;
             case 6:  if (opc2 == 2) p->ifar = v; else p->dfar = v; break;
             case 7:  break;                     /* cache maintenance: no-op */
-            case 8:  break;                     /* TLB maintenance: no-op   */
+            /*
+             * TLB maintenance. This was a documented no-op for as long as
+             * there was no TLB to maintain; now it is the architecture's own
+             * hook and the guest is already obliged to use it. Every c8
+             * operation -- invalidate all, by MVA, by ASID, D-side, I-side --
+             * is honoured as a full flush. Over-flushing is always correct.
+             */
+            case 8:  arm_mmu_tlb_flush(c); break;
             case 13:
                 switch (opc2) {
-                    case 1:  p->context_id = v; break;
+                    /* The ASID. Translations cached under the old one may not
+                     * answer for the new address space. */
+                    case 1:  p->context_id = v; arm_mmu_tlb_flush(c); break;
                     case 2:  p->tpidrurw   = v; break;
                     case 3:  p->tpidruro   = v; break;
                     case 4:  p->tpidrprw   = v; break;
@@ -745,6 +760,16 @@ void arm_reset(arm_cpu_t *cpu, const arm_bus_t *bus) {
     }
     for (int i = 0; i < 5; i++) { cpu->fiq_r8_12[i] = 0; cpu->usr_r8_12[i] = 0; }
     { arm_cp15_t z = {0}; cpu->cp15 = z; }   /* MMU off, low vectors */
+    /*
+     * Generation 1, never 0. Entries carry the generation they were filled in
+     * and a hit needs a match; a zeroed cpu has every entry at 0, so starting
+     * the counter at 0 would make an empty table read as 4096 valid entries
+     * mapping virtual 0. Reset already zeroes the table, so this alone makes
+     * it empty.
+     */
+    memset(cpu->tlb, 0, sizeof cpu->tlb);
+    cpu->tlb_gen = 1u;
+    cpu->tlb_hits = cpu->tlb_misses = cpu->tlb_flushes = 0;
     cpu->abort_pending = false;
     cpu->abort_fsr = 0;
     cpu->abort_far = 0;

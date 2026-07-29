@@ -13,6 +13,7 @@
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed.
  */
 #include "arm.h"
+#include <string.h>
 
 /*
  * Pack an ARMv6 fault status register value: status in [3:0], domain in [7:4],
@@ -166,8 +167,102 @@ static bool xn_forbids_fetch(const arm_cpu_t *c, arm_access_t acc, unsigned dac,
         && (c->cp15.sctlr & ARM_SCTLR_XP) != 0u;
 }
 
+static uint32_t mmu_walk(arm_cpu_t *c, uint32_t va, arm_access_t acc,
+                         bool priv, uint32_t *pa);
+
+/*
+ * Flush is a generation bump, not a memset. The guest flushes on every context
+ * switch -- pmap_switch writes TTBR0 -- so an O(entries) flush would put a
+ * 48 KB clear on a path the kernel takes constantly, and hand back much of
+ * what the cache saves. Wraparound is the one case that must still clear:
+ * after 2^32 flushes generation 0 would match stale entries left from the
+ * very first one.
+ */
+void arm_mmu_tlb_flush(arm_cpu_t *c) {
+    if (!c) return;
+    c->tlb_flushes++;
+    if (++c->tlb_gen == 0u) {
+        memset(c->tlb, 0, sizeof c->tlb);
+        c->tlb_gen = 1u;
+    }
+}
+
+/*
+ * The cached front end. A hit must be indistinguishable from a walk -- same
+ * physical address, same fault code -- or something will eventually depend on
+ * the difference and be impossible to find.
+ *
+ * The MMU-off case is deliberately NOT cached. It is already a single compare
+ * and an assignment, and caching it would mean flushing on the SCTLR.M edge
+ * for no gain.
+ */
 uint32_t arm_mmu_translate(arm_cpu_t *c, uint32_t va, arm_access_t acc,
                            bool priv, uint32_t *pa) {
+    if (!(c->cp15.sctlr & ARM_SCTLR_M)) { *pa = va; return 0; }
+
+    /*
+     * GENERATION 0 MEANS "NOT INITIALISED", and it must never match.
+     *
+     * arm_reset() sets this to 1, but plenty of code makes an arm_cpu_t by
+     * zeroing memory instead -- both memory-disk bridge fixtures do exactly
+     * that, and so would any future caller. A zeroed struct has tlb_gen 0 AND
+     * every entry at generation 0, so without this the empty table reads as
+     * 4096 valid translations of virtual zero. It cost two test suites to
+     * find; fixing it here rather than in the callers means it cannot come
+     * back through a caller nobody has written yet.
+     */
+    if (c->tlb_gen == 0u) c->tlb_gen = 1u;
+
+    /* Every cached entry is valid only under the registers it was walked
+     * under. See tlb_stamp: this catches a change made by any route, not just
+     * by MCR, which is what keeps direct mutation from reading stale. */
+    if (c->tlb_stamp.sctlr      != c->cp15.sctlr  ||
+        c->tlb_stamp.ttbr0      != c->cp15.ttbr0  ||
+        c->tlb_stamp.ttbr1      != c->cp15.ttbr1  ||
+        c->tlb_stamp.ttbcr      != c->cp15.ttbcr  ||
+        c->tlb_stamp.dacr       != c->cp15.dacr   ||
+        c->tlb_stamp.context_id != c->cp15.context_id) {
+        arm_mmu_tlb_flush(c);
+        c->tlb_stamp.sctlr      = c->cp15.sctlr;
+        c->tlb_stamp.ttbr0      = c->cp15.ttbr0;
+        c->tlb_stamp.ttbr1      = c->cp15.ttbr1;
+        c->tlb_stamp.ttbcr      = c->cp15.ttbcr;
+        c->tlb_stamp.dacr       = c->cp15.dacr;
+        c->tlb_stamp.context_id = c->cp15.context_id;
+    }
+
+    /* 1 KB key: see ARM_TLB_ENTRIES for why it cannot be the 4 KB page. */
+    const uint32_t tag  = ((va >> 10) << 3) | ((uint32_t)acc << 1) |
+                          (priv ? 1u : 0u);
+    const unsigned slot = (va >> 10) & (ARM_TLB_ENTRIES - 1u);
+
+    /*
+     * A FAULTING TRANSLATION MUST LEAVE *pa UNTOUCHED, on a hit exactly as on
+     * a walk. The walk returns before assigning it, and callers rely on that:
+     * test_mmu_ttbcr_pd_bits_suppress_selected_walk seeds 0xdeadbeef and
+     * checks it survives a PD0 fault. A first draft assigned unconditionally
+     * and turned that into a zero, which is the kind of difference between a
+     * hit and a miss that this cache exists to never have.
+     */
+    if (c->tlb[slot].gen == c->tlb_gen && c->tlb[slot].tag == tag) {
+        c->tlb_hits++;
+        if (c->tlb[slot].fsr == 0u) *pa = c->tlb[slot].pa | (va & 0x3ffu);
+        return c->tlb[slot].fsr;
+    }
+
+    c->tlb_misses++;
+    /* Straight into the caller's pa, so the untouched-on-fault contract is the
+     * walk's own rather than something restated here. */
+    uint32_t fsr = mmu_walk(c, va, acc, priv, pa);
+    c->tlb[slot].gen = c->tlb_gen;
+    c->tlb[slot].tag = tag;
+    c->tlb[slot].fsr = fsr;
+    c->tlb[slot].pa  = (fsr == 0u) ? (*pa & ~0x3ffu) : 0u;
+    return fsr;
+}
+
+static uint32_t mmu_walk(arm_cpu_t *c, uint32_t va, arm_access_t acc,
+                         bool priv, uint32_t *pa) {
     /* Only a store sets WnR. A fetch is checked against XN, never against WnR:
      * IFSR has no such field. */
     bool write = (acc == ARM_ACCESS_WRITE);

@@ -106,7 +106,7 @@
         "update this number, and bump SNAPSHOT_VERSION in snapshot.h.")
 
 SNAP_SIZE_GUARD(arm_cp15_t,        64,    "snap_cpu");
-SNAP_SIZE_GUARD(arm_cpu_t,         424,   "snap_cpu");
+SNAP_SIZE_GUARD(arm_cpu_t,         66008,   "snap_cpu");
 SNAP_SIZE_GUARD(s5l_uart_t,        8280,  "snap_uart");
 SNAP_SIZE_GUARD(s5l_vic_t,         16,    "snap_vic");
 SNAP_SIZE_GUARD(s5l_timer_t,       40,    "snap_timer");
@@ -162,7 +162,7 @@ SNAP_SIZE_GUARD(s5l_stub_t,        56,    "snap_stubs");
  * the byte format DOES change, so SNAPSHOT_VERSION moved to 17. Measured with
  * a sizeof probe rather than arithmetic -- the first two guesses were wrong,
  * which is the entire reason this guard is a compile error. */
-SNAP_SIZE_GUARD(s5l8900_t,         45128, "snap_mach");
+SNAP_SIZE_GUARD(s5l8900_t,         110712, "snap_mach");
 #endif
 
 /* ---------------------------------------------------------------- the IO --- */
@@ -379,6 +379,33 @@ static void snap_cpu(sn_io_t *io, arm_cpu_t *c) {
     /* s0-s31. d0-d15 alias these and so need no separate entry — that is the
      * point of storing the file once (see arm_cpu_t.vfp_s). */
     FA32(c->vfp_s, 32);
+    /*
+     * THE TLB IS DELIBERATELY NOT STORED, and the size guard above is what
+     * forces anyone adding to arm_cpu_t to read this rather than assume it.
+     *
+     * It is a cache whose every entry is derivable from the page tables in
+     * guest RAM, which the snapshot DOES carry. Restoring it empty therefore
+     * loses nothing: the first access to each page walks and refills, and a
+     * walk and a hit return the same physical address and the same fault code
+     * by construction. Storing it would add 12 KB per snapshot to save work
+     * that costs microseconds to redo.
+     *
+     * Clearing on restore is also the SAFE direction. A stored TLB could
+     * outlive the tables it was derived from if a snapshot were ever restored
+     * onto edited memory, and a stale translation is a wild store that
+     * surfaces nowhere near its cause. An empty one cannot be wrong.
+     *
+     * The counters travel, because they are measurements of the run rather
+     * than state of the machine, and a restored run that reported zero hits
+     * would misdescribe what it did.
+     */
+    if (sn_reading(io)) {
+        memset(c->tlb, 0, sizeof c->tlb);
+        /* And generation 1, for the same reason arm_reset does: an entry at
+         * generation 0 in a table whose counter is also 0 is a false hit. */
+        c->tlb_gen = 1u;
+    }
+    F64(c->tlb_hits); F64(c->tlb_misses); F64(c->tlb_flushes);
 }
 
 /* The UART's whole transmit capture is saved, not just its used prefix: the

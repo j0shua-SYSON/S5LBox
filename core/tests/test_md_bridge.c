@@ -9,12 +9,25 @@
  *
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed.
  */
+#include <stddef.h>
 #include "md_bridge.h"
 
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+
+/*
+ * The architectural CPU state, deliberately NOT sizeof(arm_cpu_t).
+ *
+ * arm_cpu_t gained a translation cache on 2026-07-29 -- tlb[], its generation,
+ * the register stamp it is valid under, and hit/miss counters -- all placed
+ * after vfp_s so this comparison can stop before them. A cache is not state:
+ * a service that translates an address legitimately fills it, and a
+ * whole-struct memcmp would report that as "changed CPU state" when nothing
+ * the guest can observe has moved.
+ */
+#define CPU_ARCH_BYTES offsetof(arm_cpu_t, tlb)
 
 #define TEST_RAM_SIZE UINT32_C(65536)
 #define TEST_MEDIA_CAPACITY UINT32_C(8192)
@@ -381,7 +394,7 @@ static void test_success_and_cpu_immutability(void) {
           "valid read service was not handled");
     CHECK(memcmp(fixture.ram.bytes + TEST_GUEST, source_copy,
                  sizeof(source_copy)) == 0, "read copied wrong bytes");
-    CHECK(memcmp(&fixture.cpu, &before, sizeof(before)) == 0,
+    CHECK(memcmp(&fixture.cpu, &before, CPU_ARCH_BYTES) == 0,
           "read service changed CPU registers at an LR-dead site");
     CHECK(fixture.bridge.stats.successful_reads == 1u &&
           fixture.bridge.stats.bytes_read == sizeof(source_copy) &&
@@ -407,7 +420,7 @@ static void test_success_and_cpu_immutability(void) {
                  sizeof(source_copy)) == 0, "write copied wrong bytes");
     CHECK(memcmp(fixture.ram.bytes + TEST_GUEST, source_copy,
                  sizeof(source_copy)) == 0, "write mutated guest source");
-    CHECK(memcmp(&fixture.cpu, &before, sizeof(before)) == 0,
+    CHECK(memcmp(&fixture.cpu, &before, CPU_ARCH_BYTES) == 0,
           "write service changed CPU registers at an LR-dead site");
     CHECK(fixture.bridge.stats.successful_writes == 1u &&
           fixture.bridge.stats.bytes_written == sizeof(source_copy),
@@ -765,7 +778,7 @@ static void test_real_ram_base_translation_and_bulk_offsets(void) {
     CHECK(fixture.ram.read32_calls == 1u &&
           fixture.ram.read8_calls == 0u && fixture.ram.write8_calls == 0u,
           "nonzero RAM-base bulk transfer escaped the direct byte aperture");
-    CHECK(memcmp(&fixture.cpu, &before, sizeof(before)) == 0,
+    CHECK(memcmp(&fixture.cpu, &before, CPU_ARCH_BYTES) == 0,
           "translated nonzero-base service changed CPU state");
 }
 
@@ -1093,7 +1106,7 @@ static void test_arm_step_success_and_error(void) {
     before = fixture.cpu;
     status = arm_step(&fixture.cpu);
     CHECK(status == ARM_HALT, "backend failure did not produce ARM_HALT");
-    CHECK(memcmp(&fixture.cpu, &before, sizeof(before)) == 0,
+    CHECK(memcmp(&fixture.cpu, &before, CPU_ARCH_BYTES) == 0,
           "ARM_HALT did not restore exact CPU state (including wraparound)");
     CHECK(fixture.bridge.last_error.code == MD_BRIDGE_ERROR_BLOCK_IO &&
           fixture.bridge.last_error.block_status == VM_BLOCK_STATUS_BACKEND,
