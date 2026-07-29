@@ -1045,6 +1045,14 @@ void s5l_mtz2_select_pin(void *ctx, bool level) {
      */
     (void)level;
     dev->select_edges++;
+    /* The transaction that just ended, measured rather than assumed. See the
+     * txn_octets note in soc.h for why the shape decides the bootload fix. */
+    if (dev->txn_n < sizeof dev->txn_octets / sizeof dev->txn_octets[0]) {
+        uint64_t n = dev->octets - dev->txn_mark;
+        dev->txn_octets[dev->txn_n++] = n > 0xffffffffu ? 0xffffffffu
+                                                        : (uint32_t)n;
+    }
+    dev->txn_mark = dev->octets;
     dev->pos = 0u;
     dev->len = 0u;
     dev->frame_phase = 0xffu;

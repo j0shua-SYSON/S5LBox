@@ -17314,6 +17314,21 @@ static void mtz2_device_report(const s5l_mtz2_t *d) {
                ? "   <- NO chip-select framing available from this guest"
                : "");
     /*
+     * THE SHAPE OF THE TRANSACTIONS, which is what decides the bootload fix.
+     * A command is 16 octets (or 2, 8, 12 in the HBPP forms); the firmware is
+     * 54,156. If those arrive as separate select-bounded transactions the rule
+     * writes itself; if the image shares a transaction with commands, it does
+     * not, and the select alone is not enough.
+     */
+    if (d->txn_n) {
+        printf("            transactions (octets between select edges):");
+        for (unsigned i = 0; i < d->txn_n; i++) {
+            if (i && i % 8u == 0u) printf("\n                                     ");
+            printf(" %u", (unsigned)d->txn_octets[i]);
+        }
+        printf("\n");
+    }
+    /*
      * The bootload, step by step. A download that never started and one that
      * stopped after two packets look identical in the guest's log, which prints
      * nothing per packet -- so this is the only place the difference shows.

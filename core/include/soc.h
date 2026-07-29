@@ -2527,6 +2527,26 @@ typedef struct {
      * guest and the boundary rule has to come from somewhere else.
      */
     uint64_t select_edges;
+    /*
+     * HOW LONG EACH TRANSACTION IS, which is the fact the bootload fix needs
+     * and the one nobody has.
+     *
+     * run138 proved the firmware cannot be framed by opcode -- ARM's AL
+     * nibble is 0xe and the command opcodes are 0xe1..0xee. run141 proved the
+     * chip select is driven, 14 times. What is still unknown is the SHAPE:
+     * whether a transaction is one command, one DMA chunk, or the whole image,
+     * and no rule for telling firmware from commands can be written without
+     * it. Guessing that shape is exactly the mistake that has been retracted
+     * four times in this log.
+     *
+     * `txn_mark` is `octets` at the last select edge; each entry is the octet
+     * count of one completed transaction. A run of {16, 16, 3868, 3868, ...}
+     * makes the rule obvious; {16, 16, 54156} makes it a different rule; and
+     * anything interleaved says the select alone is not enough.
+     */
+    uint64_t txn_mark;
+    uint32_t txn_octets[24];
+    unsigned txn_n;
 
     /*
      * Bounded diagnostics, as on I2C and SPI, and two of these are load-bearing
