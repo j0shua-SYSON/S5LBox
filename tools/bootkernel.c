@@ -17635,8 +17635,26 @@ static void drag_report(void) {
 }
 
 static void touch_report(void) {
-    if (!G.touch_n && !G.drag_n) return;
     const s5l_mtz2_t *d = G.mach ? &G.mach->mtz2 : NULL;
+    /*
+     * THE DEVICE REPORT IS NOT GATED ON THE TAP SCHEDULE, and that gate cost a
+     * run.
+     *
+     * This function used to begin `if (!G.touch_n && !G.drag_n) return;`, so
+     * everything below -- the HBPP counters, the packet list, the octet
+     * ledger, the register conversation -- appeared only when something had
+     * been injected. But the Z2 bootload runs whenever the digitizer is
+     * MATCHED, injection or not. run159 was launched specifically to read the
+     * register log, without --touch because it was meant to be short, and
+     * printed nothing at all; the bootload had run three times and the data
+     * was there, discarded on the way out.
+     *
+     * A schedule says what we put in. The device report says what the part
+     * did. Only the first of those has any business depending on --touch.
+     */
+    const bool have_device =
+        d && (d->octets || d->packets || d->resets || d->power_edges);
+    if (!G.touch_n && !G.drag_n && !have_device) return;
 
     if (G.touch_n) {
         printf("\n=== TOUCH: SCHEDULED TAPS (%u) ===\n", G.touch_n);
