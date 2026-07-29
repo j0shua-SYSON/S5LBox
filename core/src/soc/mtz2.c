@@ -510,8 +510,12 @@ static void compose(s5l_mtz2_t *dev) {
          * send after five tries, so a part that answers anything else cannot
          * be programmed. Assembled big-endian at 0xc0440d5c.
          */
-        dev->rsp[0] = (uint8_t)(MTZ2_HBPP_ATN_OK >> 8);
-        dev->rsp[1] = (uint8_t)(MTZ2_HBPP_ATN_OK & 0xffu);
+        {
+            const uint16_t ack = dev->atn_val ? dev->atn_val
+                                              : (uint16_t)MTZ2_HBPP_ATN_OK;
+            dev->rsp[0] = (uint8_t)(ack >> 8);
+            dev->rsp[1] = (uint8_t)(ack & 0xffu);
+        }
         if (dev->len == MTZ2_ATN_MEMREAD) {
             /*
              * A MemRead's value rides at rx[2..5] in the same middle-endian
@@ -840,11 +844,13 @@ static uint8_t mtz2_transfer(void *ctx, uint8_t out) {
                 if (dev->len == MTZ2_ATN_PROBE) dev->hbpp_probes++;
                 else                            dev->hbpp_atn_acks++;
                 dev->atn_len = MTZ2_ATN_PROBE;
+                dev->atn_val = MTZ2_HBPP_ATN_OK;
                 break;
             case MTZ2_OP_HBPP_DATA:
                 dev->hbpp_data_packets++;
                 dev->hbpp_data_bytes += dev->len > 14u ? dev->len - 14u : 0u;
                 dev->atn_len = MTZ2_ATN_SHORT;
+                dev->atn_val = MTZ2_HBPP_ATN_OK;
                 break;
             case MTZ2_OP_HBPP_RDREG:
                 dev->hbpp_reg_reads++;
@@ -862,6 +868,7 @@ static uint8_t mtz2_transfer(void *ctx, uint8_t out) {
                                  ? (uint32_t)MTZ2_HBPP_VERSION : 0u,
                              false);
                 dev->atn_len = MTZ2_ATN_MEMREAD;
+                dev->atn_val = MTZ2_HBPP_ATN_OK;
                 break;
             case MTZ2_OP_HBPP_WRREG:
                 dev->hbpp_reg_writes++;
@@ -903,10 +910,13 @@ static uint8_t mtz2_transfer(void *ctx, uint8_t out) {
                  * was the error, not the rule.
                  */
                 dev->atn_len = MTZ2_ATN_SHORT;
+                /* ...and a DIFFERENT number. See MTZ2_HBPP_ATN_WROK. */
+                dev->atn_val = MTZ2_HBPP_ATN_WROK;
                 break;
             case MTZ2_OP_HBPP_CALIB:
                 dev->hbpp_calibs++;
                 dev->atn_len = MTZ2_ATN_SHORT;
+                dev->atn_val = MTZ2_HBPP_ATN_OK;
                 break;
             case MTZ2_OP_HBPP_EXEC:
                 /*
@@ -919,9 +929,11 @@ static uint8_t mtz2_transfer(void *ctx, uint8_t out) {
                 dev->hbpp_execs++;
                 dev->hbpp_mode = false;
                 dev->atn_len = MTZ2_ATN_PROBE;
+                dev->atn_val = MTZ2_HBPP_ATN_OK;
                 break;
             default:
                 dev->atn_len = MTZ2_ATN_PROBE;
+                dev->atn_val = MTZ2_HBPP_ATN_OK;
                 break;
         }
         /*

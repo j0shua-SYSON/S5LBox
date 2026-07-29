@@ -959,12 +959,25 @@ static void test_the_hbpp_bootload_runs_to_completion(void) {
         uint8_t wrx[MTZ2_ATN_SHORT];
         memset(wrx, 0xff, sizeof wrx);
         xfer(&s, wack, wrx, MTZ2_ATN_SHORT);
-        CHECK(((wrx[0] << 8) | wrx[1]) == MTZ2_HBPP_ATN_OK,
+        /*
+         * 0x4AD1, NOT the DATA sender's 0x4BC1. When this case was first
+         * written it asserted 0x4BC1, because that is the number §6.2 names
+         * and it was assumed to be the only one. It is not: they are different
+         * functions with different literals.
+         *
+         *   the DATA sender     0xc0445144 compares at 0xc0445284 -> 0x4BC1
+         *   the WRITE helper    0xc0440e4c compares at 0xc0440f94 -> 0x4AD1
+         *
+         * run162 measured the consequence directly: `pc c044568c r1=10001c04
+         * r2=000016e4 r3=00001fff` going in, `pc c0445690 r0=00000000` coming
+         * back, then `pc c0445810` -- the failure return -- three times over.
+         */
+        CHECK(((wrx[0] << 8) | wrx[1]) == MTZ2_HBPP_ATN_WROK,
               "the acknowledgement after register write %u answered 0x%04x, "
-              "not 0x%04x -- performCalibSeq treats that as a failed write and "
-              "abandons the bootload", i,
+              "not 0x%04x -- 0xc0440f94 compares against that literal and "
+              "performCalibSeq abandons the bootload when it misses", i,
               (unsigned)((wrx[0] << 8) | wrx[1]),
-              (unsigned)MTZ2_HBPP_ATN_OK);
+              (unsigned)MTZ2_HBPP_ATN_WROK);
     }
     CHECK(dev.hbpp_reg_writes == 4u, "%llu register writes were seen",
           (unsigned long long)dev.hbpp_reg_writes);

@@ -2282,6 +2282,30 @@ void     s5l_spi_null_bind(s5l_spi_slave_t *slave);
  * big-endian: rx[0] = 0x4B, rx[1] = 0xC1.
  */
 #define MTZ2_HBPP_ATN_OK     0x4bc1u
+/*
+ * ...AND A REGISTER WRITE EXPECTS A DIFFERENT NUMBER. Measured 2026-07-30 by
+ * disassembling the two senders, after run161 changed the write's
+ * acknowledgement from a sixteen-octet probe to a correct two-octet 0x4BC1 and
+ * the driver behaved identically.
+ *
+ * They are different functions with different literals:
+ *
+ *   the DATA sender, 0xc0445144, compares at 0xc0445284 against 0x00004BC1
+ *     (the literal sits at 0xc04452c4)
+ *   the register-WRITE helper, 0xc0440e4c, compares at 0xc0440f94 against
+ *     0x00004AD1 (the literal sits at 0xc0440ffc)
+ *
+ * Answering 0x4BC1 to a write's acknowledgement therefore fails its compare,
+ * 0xc0440f98's `addeq` never runs, the helper returns 0, and performCalibSeq
+ * bails at 0xc0445810 having made ONE of its four writes -- which is precisely
+ * what run160 and run161 recorded, six identical cycles of
+ * `RD 10008ffc / WR 10001c04` and then the whole bootload again.
+ *
+ * The read helper is not affected: its long MemRead acknowledgement carries
+ * the register value and the driver takes it, which is why reads have worked
+ * throughout.
+ */
+#define MTZ2_HBPP_ATN_WROK   0x4ad1u
 
 /*
  * The register performCalibSeq reads at 0xc044562c, and the value it must NOT
@@ -2492,6 +2516,10 @@ typedef struct {
      * by whichever command precedes it; MTZ2_ATN_PROBE when nothing has.
      */
     uint8_t  atn_len;
+    /* What that acknowledgement must ANSWER, which is not one number: see
+     * MTZ2_HBPP_ATN_WROK. Set beside atn_len by the same switch, because the
+     * command that came before is the only thing that decides either. */
+    uint16_t atn_val;
     /* Where a MemRead acknowledgement's answer comes from: the address the
      * preceding 1C 73 named, resolved once so the reply is pure arithmetic. */
     uint32_t rdreg_addr;
