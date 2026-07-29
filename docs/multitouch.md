@@ -642,6 +642,67 @@ counterexample to the display finding.
 drawn from a ledger that had recorded only its first eight transactions. The
 transfer is bracketed; the ledger just had not reached it.
 
+### 6.14 The sender's own retry loop says where the driver is stuck (run151)
+
+§6.2 described the acknowledgement from the driver's log strings. Here is the
+sender disassembled, `0xc0445144` onward, ARM (prelinked kexts are ARM; only the
+XNU core is Thumb):
+
+```
+c04451b0  ldrb r3, [r5, #0x2c]     ; <- the retry target
+c04451bc  cmp  r6, #0xff           ; payload > 255 octets?
+c04451c0  bls  #0xc04451f4         ;   no  -> the byte-at-a-time path, vtable+0x7c
+c04451ec  ldr  pc, [ip, #0x360]    ;   yes -> THE DMA SEND. 54,156 octets go here
+c04451f0  b    #0xc0445228         ; <- where it returns to
+
+c0445228  cmp  r0, #0              ; the DMA send's result
+c0445230  beq  #0xc044525c         ;   0 -> acknowledge
+c0445254  blx  r3                  ; non-0 -> log the error, then fall through
+c0445258  b    #0xc0445290         ;          to the retry counter
+
+c044525c  add  r1, sp, #0x10
+c0445260  strh r0, [r1, #-2]!      ; park a zero halfword to receive into
+c0445270  ldr  pc, [r3, #0x4d4]    ; THE ATN_ACK -- exactly the vtable slot 6.2 names
+c0445274  cmp  r0, #0
+c0445278  bne  #0xc0445290         ; transfer failed -> retry
+c044527c  ldrh r2, [sp, #0xe]      ; what came back
+c0445284  cmp  r2, r3              ; against the 0x4BC1 literal
+c045288   addeq r0, r0, #1
+c044528c  beq  #0xc04452a0         ; match -> return 1, the packet is delivered
+
+c0445290  add  r8, r8, #1          ; the retry counter
+c0445294  cmp  r8, #5
+c0445298  bne  #0xc04451b0         ; ...five times, re-sending the whole packet
+c044529c  mov  r0, #0              ; then the send fails
+```
+
+**What this rules out.** Every path out of the DMA send passes through
+`c0445290`, and every one of them re-sends the packet up to five times. A run
+where the device answered the ATN_ACK wrongly, or where the DMA send reported an
+error, would therefore show **five DATA packets** and at least one ATN_ACK.
+
+run151 shows `data 1` -- one packet -- with `acks 0`, `probes 2` and no retry.
+So the driver never reached `c0445290` at all. It is not looping, not failing,
+and not giving up.
+
+**What that leaves.** The call at `c04451ec` has not returned. The driver is
+blocked inside the DMA send, which is consistent with everything else run151
+measured: the transaction ledger stops dead after the transfer, the bus goes
+silent, and the last 200 instructions of the run are in userspace rather than
+spinning in the kext -- a sleeping kernel thread, not a hung one.
+
+The model moves every octet (`dmac1 ch5 ... runs 14 bytes 54156`, and the device
+frames all 54,154 of them as one packet), so what is missing is not the data but
+the completion the driver is waiting on. run154 probes all eight addresses above
+to confirm the call is entered and never returns, rather than leaving that as
+the last inference standing.
+
+**Not yet claimed:** which completion. `masked_tc()` in `pl080.c` only raises a
+terminal-count interrupt for a channel whose `cfg` carries `PL080_CFG_ITC`, and
+neither DMAC line (IRQ 16, 17) is enabled in the VIC at the end of run151 -- but
+that is an end-state reading of a register the driver may clear, and it is not
+evidence about what was true during the transfer.
+
 ## 7. Downstream, once this is unblocked
 
 * `mtz2.c` already answers 0xD1/0xD3/0xD9 with correct non-zero values, and as
