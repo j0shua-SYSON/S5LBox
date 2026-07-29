@@ -129,7 +129,7 @@ SNAP_SIZE_GUARD(s5l_gpioic_t,      224,   "snap_gpioic");
 SNAP_SIZE_GUARD(s5l_gpio_t,        4192,  "snap_gpio");
 /* One held-button byte and three counters, padded to 8-byte alignment. */
 SNAP_SIZE_GUARD(s5l_buttons_t,     32,    "snap_buttons");
-SNAP_SIZE_GUARD(s5l_mtz2_t,        928,   "snap_mtz2");
+SNAP_SIZE_GUARD(s5l_mtz2_t,        1072,  "snap_mtz2");
 SNAP_SIZE_GUARD(s5l_usbotg_t,      4,     "snap_usbotg");
 /* Eight channels of five registers (160), the four controller-wide words, the
  * access and unknown-offset accounting, and the work/refusal counters. */
@@ -162,7 +162,7 @@ SNAP_SIZE_GUARD(s5l_stub_t,        56,    "snap_stubs");
  * the byte format DOES change, so SNAPSHOT_VERSION moved to 17. Measured with
  * a sizeof probe rather than arithmetic -- the first two guesses were wrong,
  * which is the entire reason this guard is a compile error. */
-SNAP_SIZE_GUARD(s5l8900_t,         110824, "snap_mach");
+SNAP_SIZE_GUARD(s5l8900_t,         110968, "snap_mach");
 #endif
 
 /* ---------------------------------------------------------------- the IO --- */
@@ -567,6 +567,11 @@ static void snap_mtz2(sn_io_t *io, s5l_mtz2_t *d) {
      * the bus for the rest of the boot.
      */
     F8 (d->atn_len); F32(d->rdreg_addr);
+    /* The register conversation travels for the same reason the packet list
+     * does: a restored machine that lost it would report a bootload's second
+     * half as if it were the whole thing. */
+    FA32(d->reg_log_addr, 16); FA32(d->reg_log_val, 16);
+    FBYTES(d->reg_log_write, 16); F8(d->reg_log_n);
     F32(d->pos); F32(d->len); F8(d->op); F8(d->frame_phase);
     FBYTES(d->req, S5L_MTZ2_BUF);
     FBYTES(d->rsp, S5L_MTZ2_RSP);

@@ -17413,6 +17413,24 @@ static void mtz2_device_report(const s5l_mtz2_t *d) {
      * stopped after two packets look identical in the guest's log, which prints
      * nothing per packet -- so this is the only place the difference shows.
      */
+    /*
+     * The register conversation itself. `rd 6 wr 6` cannot tell "asked for six
+     * registers and got six sensible answers" apart from "asked for the same
+     * one six times because the answer was wrong", and run158 needs exactly
+     * that distinction: the driver reached these primitives for the first time
+     * and then re-ran the whole bootload instead of sending EXEC.
+     */
+    if (d->reg_log_n) {
+        printf("            registers, in order:\n");
+        for (unsigned r = 0; r < d->reg_log_n; r++)
+            printf("              %-2u %s %08x %s %08x%s\n", r,
+                   d->reg_log_write[r] ? "WR" : "RD",
+                   d->reg_log_addr[r],
+                   d->reg_log_write[r] ? "<-" : "->",
+                   d->reg_log_val[r],
+                   d->reg_log_addr[r] == MTZ2_HBPP_VERSION_REG
+                       ? "   <- the version register (6.6)" : "");
+    }
     printf("    hbpp:   probes %llu  acks %llu  data %llu (%llu bytes)  "
            "rd %llu  wr %llu  calib %llu  exec %llu\n",
            (unsigned long long)d->hbpp_probes,

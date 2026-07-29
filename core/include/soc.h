@@ -2496,6 +2496,26 @@ typedef struct {
      * preceding 1C 73 named, resolved once so the reply is pure arithmetic. */
     uint32_t rdreg_addr;
     /*
+     * THE REGISTER CONVERSATION, bounded.
+     *
+     * run158 got the driver as far as §6.5's primitives for the first time --
+     * `rd 6  wr 6`, where every previous run had 0/0 -- and it then re-ran the
+     * whole bootload instead of sending EXEC. The packet list shows the shape
+     * (`... 30:270 1a:2 1c:8 1a:8 1e:16` and then `1a:16 1a:16 18:2 30:54154`
+     * all over again) but not the CONTENT, and the content is what decides
+     * whether the driver dislikes an answer this model invented.
+     *
+     * `rd 6 wr 6` cannot distinguish "asked for six registers and got six
+     * sensible answers" from "asked for the same one six times because the
+     * answer was wrong". These record which address, which direction, and the
+     * value that crossed -- for a read, what this model ANSWERED, which is the
+     * half a bus trace of the guest could never show.
+     */
+    uint32_t reg_log_addr[16];
+    uint32_t reg_log_val[16];
+    uint8_t  reg_log_write[16];   /* 1 = WRREG, 0 = RDREG                   */
+    uint8_t  reg_log_n;
+    /*
      * WIDER THAN A BYTE, because an HBPP DATA packet is 14 + 4W octets and the
      * driver only reaches for DMA above 255 (0xc04451bc) -- so a PIO packet is
      * already allowed to be longer than a uint8_t can frame, and the firmware

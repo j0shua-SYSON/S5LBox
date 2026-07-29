@@ -356,6 +356,21 @@ static unsigned wire_len(const s5l_mtz2_t *dev) {
 
 /* How many bytes the packet starting with `op` occupies. Zero means "not an
  * opcode this device answers". */
+/* Record one register access. Bounded: the ring stops at its capacity rather
+ * than wrapping, because the FIRST accesses of a bootload are the ones that
+ * decide it and a driver that loops would otherwise overwrite them with the
+ * third identical cycle. See reg_log_* in soc.h. */
+static void mtz2_reg_log(s5l_mtz2_t *dev, uint32_t addr, uint32_t val,
+                         bool is_write) {
+    const unsigned cap = (unsigned)(sizeof dev->reg_log_addr /
+                                    sizeof dev->reg_log_addr[0]);
+    if (dev->reg_log_n >= cap) return;
+    dev->reg_log_addr[dev->reg_log_n]  = addr;
+    dev->reg_log_val[dev->reg_log_n]   = val;
+    dev->reg_log_write[dev->reg_log_n] = is_write ? 1u : 0u;
+    dev->reg_log_n++;
+}
+
 static unsigned frame_len(const s5l_mtz2_t *dev, uint8_t op) {
     switch (op) {
         case MTZ2_OP_CMD_STATUS:
@@ -840,10 +855,28 @@ static uint8_t mtz2_transfer(void *ctx, uint8_t out) {
                                   (uint32_t)dev->req[3] |
                                   ((uint32_t)dev->req[4] << 24) |
                                   ((uint32_t)dev->req[5] << 16);
+                /* Log the ANSWER, not just the question -- see reg_log_* in
+                 * soc.h. This is the same value drive() will hand back. */
+                mtz2_reg_log(dev, dev->rdreg_addr,
+                             dev->rdreg_addr == MTZ2_HBPP_VERSION_REG
+                                 ? (uint32_t)MTZ2_HBPP_VERSION : 0u,
+                             false);
                 dev->atn_len = MTZ2_ATN_MEMREAD;
                 break;
             case MTZ2_OP_HBPP_WRREG:
                 dev->hbpp_reg_writes++;
+                /* 1E 33 <addr:4> <mask:4> <val:4> <sum:2>, all middle-endian
+                 * like every other 32-bit field in this protocol. */
+                mtz2_reg_log(dev,
+                             ((uint32_t)dev->req[2] << 8) |
+                             (uint32_t)dev->req[3] |
+                             ((uint32_t)dev->req[4] << 24) |
+                             ((uint32_t)dev->req[5] << 16),
+                             ((uint32_t)dev->req[10] << 8) |
+                             (uint32_t)dev->req[11] |
+                             ((uint32_t)dev->req[12] << 24) |
+                             ((uint32_t)dev->req[13] << 16),
+                             true);
                 dev->atn_len = MTZ2_ATN_PROBE;
                 break;
             case MTZ2_OP_HBPP_CALIB:
