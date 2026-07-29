@@ -581,6 +581,67 @@ Everything the model has to answer, in one place:
 
 with register `0x10008ffc` reporting anything **except** `0x5A020028`.
 
+### 6.13 The select edge that cut the header in half (run148)
+
+§6.9 fixed the idle attention word, and it worked: `18 e1` stopped desynchronising
+the framer. It was not enough, and run148 says exactly why.
+
+The transaction ledger — octets between chip-select edges — came back:
+
+```
+transactions: 0 0 16 0 16 0 16 0 16 0 16 8 54148 0
+                                          ─┬─ ──┬──
+```
+
+Six 16-octet brackets are the probes. The last two are **one HBPP DATA packet cut
+in half**:
+
+```
+    8 octets:  18 e1 │ 30 01 34 df 00 00
+               ^idle   ^six of the ten header octets
+54148 octets:  00 00 01 13 │ <54140 payload> │ <4-octet sum>
+               ^rest of addr, then hdrsum
+```
+
+The arithmetic closes with nothing left over, which had not happened before:
+
+| quantity | value |
+|---|---|
+| header states | `0x34df` = 13,535 words |
+| packet length | `14 + 4×13535` = **54,154** |
+| octets delivered | `6 + 54,148` = **54,154** ✓ |
+| plus the idle word | `2 + 54,154` = **54,156** = the firmware image ✓ |
+
+`s5l_mtz2_select_pin()` discarded any part-received packet at every edge, on the
+stated reasoning that *"a chip-select edge means no transfer is in flight, so
+discarding a part-received packet at one is always safe."* That assumption is
+false for this driver. Throwing the header away left the framer re-syncing onto
+ARM payload words, whose `0xe` condition nibble reads as this protocol's own
+command opcodes (§6.9) — producing run148's
+
+```
+packets: 1a:16 1a:16 18:2 ×6 e1:16 ea:16 ea:16 e2:16 e2:16 e2:16 30:17538 …
+hbpp:    probes 6  acks 0  data 2 (18408 bytes)  rd 0  wr 0  calib 0  exec 0
+```
+
+18,408 booked against a 54,156-byte image, and `exec 0`.
+
+**Fix (commit `65e704e`):** an HBPP DATA packet whose length is known and not yet
+complete survives the edge. Deliberately narrower than "any in-flight packet" —
+an ordinary command frame cut by a select edge is still discarded, because
+`test_framing_survives_without_a_chip_select` asserts it and no evidence shows
+the real driver ever does that. `test_an_hbpp_data_packet_survives_a_select_edge`
+reproduces the split in miniature.
+
+**Not claimed:** that this makes touch work or restores the display. run151 is
+the test. run148's black screen is *not* evidence either way — it ran a 3.0 G
+budget against run140's 3.55 G, the same confound that made run143 look like a
+counterexample to the display finding.
+
+**Superseded:** run142's reading that "chip-select brackets only the probes" was
+drawn from a ledger that had recorded only its first eight transactions. The
+transfer is bracketed; the ledger just had not reached it.
+
 ## 7. Downstream, once this is unblocked
 
 * `mtz2.c` already answers 0xD1/0xD3/0xD9 with correct non-zero values, and as
