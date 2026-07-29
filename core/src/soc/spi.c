@@ -102,8 +102,37 @@ static void spi_shift(s5l_spi_t *bus) {
     while (bus->tx_level && (dma || bus->rx_level < S5L_SPI_FIFO_DEPTH)) {
         uint8_t out = fifo_pop(bus->tx, &bus->tx_level);
         uint8_t in  = slave->transfer(slave->ctx, out);
-        if (bus->rx_level < S5L_SPI_FIFO_DEPTH) bus->rx[bus->rx_level++] = in;
-        else                                    bus->rx_overruns++;
+        /*
+         * A DMA transfer with no receive channel does not QUEUE what comes
+         * back, and getting this wrong deadlocked the bus permanently.
+         *
+         * run155 measured it. The Z2 bootload is memory-to-peripheral on dmac1
+         * ch5 alone -- `src 0bfdd38c dst 3ce00010`, nothing moving the other
+         * way -- so nothing is configured to drain a receive FIFO. This loop
+         * filled it anyway: the first eight answers were stored and the other
+         * 54,148 counted as overruns, leaving `rx level 8` when the transfer
+         * ended.
+         *
+         * The next transfer is the ATN_ACK, and it is PIO, so it needs
+         * `rx_level < DEPTH` to shift at all. It never could. Its two octets
+         * sat in the transmit FIFO for 2.44 G instructions -- `tx/rx level
+         * 2/8` in the report -- the device never saw `1A A1`, and the driver
+         * slept forever inside a call that had no way to complete. Probed at
+         * 0xc0445270 with no matching return at 0xc0445274.
+         *
+         * So in DMA mode the answer is DROPPED rather than queued, and still
+         * counted. Whatever silicon does with those bytes, it cannot be
+         * "wedge the bus until reset", because the shipped driver runs this
+         * exact sequence on real hardware and goes on to finish the bootload.
+         *
+         * INFERRED, not read off a datasheet: that a TX-only DMA transfer has
+         * no receive consumer and therefore queues nothing. What is MEASURED
+         * is that queueing it deadlocks, and that the driver never drains it
+         * -- 91 reads against 54,351 writes on spi1 across the whole run.
+         */
+        if (dma)                                     bus->rx_overruns++;
+        else if (bus->rx_level < S5L_SPI_FIFO_DEPTH) bus->rx[bus->rx_level++] = in;
+        else                                         bus->rx_overruns++;
         bus->words++;
         if (bus->words_left) bus->words_left--;
         /*

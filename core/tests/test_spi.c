@@ -532,16 +532,49 @@ static void test_a_dma_burst_is_not_stalled_by_a_full_receive_fifo(void) {
           "the device saw %u octets, not %u", echo.words, N);
 
     /*
-     * The answers that had nowhere to go are COUNTED, not pretended away. The
-     * first eight fit; the rest overran.
+     * The answers that had nowhere to go are COUNTED, not pretended away --
+     * and NONE of them are queued.
+     *
+     * This block used to expect the first eight to fit, on the reasoning that
+     * a receive FIFO fills before it overruns. run155 measured what that costs.
+     * A TX-only DMA burst left `rx level 8`, and the very next transfer is the
+     * ATN_ACK, which is PIO and therefore needs `rx_level < DEPTH` to shift at
+     * all. It never could: its two octets sat in the transmit FIFO for 2.44 G
+     * instructions, the device never saw `1A A1`, and the driver slept forever
+     * in a call that had no way to complete.
+     *
+     * Nothing drains those eight, either -- 91 register reads against 54,351
+     * writes on spi1 across the whole run. So queueing them does not model a
+     * FIFO, it wedges the bus, and the shipped driver plainly runs this exact
+     * sequence on real hardware.
      */
-    CHECK(bus.rx_level == S5L_SPI_FIFO_DEPTH,
-          "the receive FIFO holds %u octets, expected it full at %u",
-          bus.rx_level, (unsigned)S5L_SPI_FIFO_DEPTH);
-    CHECK(bus.rx_overruns == N - S5L_SPI_FIFO_DEPTH,
+    CHECK(bus.rx_level == 0u,
+          "a DMA burst queued %u octets into the receive FIFO; with no receive "
+          "channel there is nothing to drain them and the next PIO transfer "
+          "can never shift", bus.rx_level);
+    CHECK(bus.rx_overruns == N,
           "%llu overruns counted, expected %u -- every discarded answer must "
-          "be visible", (unsigned long long)bus.rx_overruns,
-          N - S5L_SPI_FIFO_DEPTH);
+          "still be visible", (unsigned long long)bus.rx_overruns, N);
+
+    /*
+     * THE PROPERTY THE ABOVE EXISTS FOR: the bus still works afterwards.
+     *
+     * This is the regression test for run155's deadlock. A PIO transfer
+     * following a DMA burst must shift, because that is the ATN_ACK the whole
+     * Z2 bootload waits on.
+     */
+    s5l_spi_write(&bus, SPI_SETUP, SPI_SETUP_BASE);   /* DMA bit cleared */
+    const unsigned echoed_before = echo.words;
+    s5l_spi_write(&bus, SPI_TXDATA, 0x1au);
+    s5l_spi_write(&bus, SPI_TXDATA, 0xa1u);
+    CHECK(echo.words == echoed_before + 2u,
+          "after a DMA burst the device saw %u more octets, expected 2 -- a "
+          "PIO transfer following DMA cannot shift, which is exactly the "
+          "ATN_ACK deadlock run155 measured",
+          echo.words - echoed_before);
+    CHECK(bus.tx_level == 0u,
+          "%u octet(s) of the following PIO transfer are stuck in the transmit "
+          "FIFO", bus.tx_level);
 }
 
 static void test_a_bus_with_no_device_shifts_nothing(void) {
