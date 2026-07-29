@@ -2365,6 +2365,69 @@ Not yet claimed: that a default route is *sufficient*. It gives the guest
 somewhere to send; whether any daemon then sends is a separate measurement, and
 mDNSResponder's multicast is not obviously something this NAT should carry.
 
+### 2026-07-29: THE ROOT CAUSE -- ARM code is being read as touch protocol
+
+run138 printed the packet list and it names the bug outright:
+
+```
+  packets, in order (op:len): 1a:16 1a:16 e5:16 e5:16 ea:16 ea:16
+                              e2:16 e2:16 e2:16 30:17538 1a:2 1a:16
+                              1a:16 1a:16 30:898
+  those 15 packet(s) are 18630 octet(s) of the 53996 booked
+```
+
+`e5`, `ea` and `e2` are ARM encodings -- LDR/STR, B, and data-processing
+immediate. **The device is framing the raw Z2 firmware as protocol.**
+
+WHY IT IS SYSTEMATIC. The command opcodes occupy 0xe1..0xee:
+
+```
+  0xe1 CMD_STATUS  0xe2 DEVICE_INFO  0xe3 REPORT_INFO  0xe4 WRITE_SHORT
+  0xe5 WRITE_LONG  0xe6 READ_SHORT   0xe7 READ_LONG    0xea FRAME_Z1
+```
+
+and in ARM the `AL` condition nibble IS 0xe. Nearly every unconditional ARM
+instruction begins with it, so the three commonest encodings in any ARM binary
+land exactly on WRITE_LONG, FRAME_Z1 and DEVICE_INFO. Streaming an ARM image
+through an opcode-framed parser cannot work; it is not bad luck.
+
+THE CHAIN, end to end and each link measured:
+
+  1. the driver probes HBPP -- 2 x 16 octets, PIO, correct
+  2. it DMAs the raw 54,156-octet image; the console says so in its own words,
+     `AppleMultitouchZ2SPI: using DMA for bootloading`
+  3. the device frames that image as commands, inventing two DATA packets of
+     17,538 and 898 octets out of instruction bytes
+  4. it answers those with nonsense
+  5. the driver never sees a real completion, so EXEC is never sent -- `exec 0`
+  6. SpringBoard blocks behind the touch driver
+  7. nothing composites; the CLCD frame interrupt is never even enabled
+
+So `21ae30f` broke nothing. It made the firmware actually ARRIVE -- before it,
+every narrow store into SPI1's data port was discarded -- and that exposed
+this. varB proves the link: reverting only SPI1's narrow decode drops the
+device from 54,236 octets to 304, the bootload is abandoned, and the same build
+renders 273206.
+
+WHAT THE FIX NEEDS, and why it is not written yet. Framing a raw stream needs a
+boundary the stream does not carry. On this board the chip select is a GPIO
+(`/arm-io/spi1 function-spi_cs0`, pin 0x1800) which this device already
+watches, and run141 measured the driver driving it **14 times** -- so the
+boundary exists.
+
+The obstacle is a documented assumption in the opposite direction.
+`s5l_mtz2_select_pin()` says the select is a resync and not the framing itself,
+"because the framer already knows every packet's length from its opcode". True
+for commands, false for an image. And `hbpp_mode` is TRUE from reset -- an
+unprogrammed part has no flash -- so "ordinary opcodes are not valid in HBPP"
+cannot be the discriminator either: every command test in the suite runs in
+HBPP, and gating on it fails 54 of them.
+
+A first attempt did exactly that and is kept as `work/tmp/bulk-framing.patch`
+rather than committed. The discriminator has to work per TRANSACTION, and
+whichever rule wins, the contract that `test_framing_survives_without_a_chip_
+select` asserts has to be restated rather than quietly broken.
+
 ### 2026-07-29: run133 and run135 — the regression is ours, and nothing is composited
 
 **run133 is the control that should have come first.** run96's own preserved
