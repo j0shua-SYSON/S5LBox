@@ -223,7 +223,13 @@ static void test_untouched_installation_reaches_the_machine(void) {
     }
 
     static const char *const NUBS[] = {
-        "mbx", "sha1", "baseband", "spi2", "usb-otg"
+        "mbx", "sha1", "baseband", "spi2", "usb-otg",
+        /* Added 2026-07-29, and it is the odd one out: the five above are
+         * hidden because matching them hangs or panics a boot, this one
+         * because the Z2 bootload is unfinished and a matched digitizer costs
+         * the whole display while returning no touch. It leaves this list the
+         * day the bootload completes. */
+        "multitouch"
     };
     const unsigned nub_n = (unsigned)(sizeof NUBS / sizeof NUBS[0]);
 
@@ -253,7 +259,8 @@ static void test_untouched_installation_reaches_the_machine(void) {
 
     /* By path, not by count: five of the wrong nodes would pass a count. */
     static const char *const PATHS[] = {
-        "arm-io/mbx", "arm-io/sha1", "baseband", "arm-io/spi2", "arm-io/usb-otg"
+        "arm-io/mbx", "arm-io/sha1", "baseband", "arm-io/spi2",
+        "arm-io/usb-otg", "arm-io/spi1/multi-touch"
     };
     for (unsigned i = 0; i < nub_n; i++) {
         bool found = false;
@@ -276,7 +283,7 @@ static void test_untouched_installation_reaches_the_machine(void) {
     memset(&request, 0, sizeof request);
     vm_boot_options_apply(values, vm_option_count(), &request, &report);
     CHECK(report.unmatch_count == 0u,
-          "matching all five nubs still un-matches %u", report.unmatch_count);
+          "matching every nub still un-matches %u", report.unmatch_count);
     CHECK(request.unmatch == NULL,
           "an empty list is published as a pointer rather than NULL");
     CHECK(report.overridden == want,

@@ -494,12 +494,18 @@ static const boot_toggle_t BOOT_TOGGLES[] = {
       "8.73e9 instructions. Un-matching it costs boot progress -- daemons\n"
       "retry against absent USB -- but it is the only configuration observed\n"
       "to run past that panic." },
-    { "multitouch", NULL, NULL, true, BOOT_GROUP_HARDWARE,
+    { "multitouch", NULL, NULL, false, BOOT_GROUP_HARDWARE,
       BOOT_FIELD(multitouch),
-      "leave /arm-io/spi1/multi-touch matched. THE ONLY ROW IN THIS GROUP\n"
-      "THAT DEFAULTS ON, because un-matching it is a loss rather than a fix:\n"
-      "the digitizer is the point of the exercise. It exists because on\n"
-      "2026-07-29 the touch driver is what stops the boot.\n"
+      "leave /arm-io/spi1/multi-touch matched. OFF BY DEFAULT SINCE\n"
+      "2026-07-29, and that default is a temporary loss taken deliberately:\n"
+      "the digitizer is the point of the exercise, and turning it off is\n"
+      "giving up a feature to get a machine that boots at all.\n"
+      "\n"
+      "run140 is why. With this nub matched the guest reaches `systemShutdown\n"
+      "false` and stops: 1821 of 460800 framebuffer bytes, no IOSurface, no\n"
+      "MobileMail, the CLCD frame interrupt never enabled. Un-matched, the\n"
+      "same build renders the lock screen at 273206. Matched buys nothing --\n"
+      "touch does not work either way -- and costs the entire display.\n"
       "\n"
       "21ae30f made narrow stores into SPI1's data port decode, so the Z2\n"
       "firmware download began actually transferring -- 54,156 octets, the\n"

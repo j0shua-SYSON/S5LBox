@@ -33,11 +33,12 @@ static const vm_option_t VM_OPTIONS[] = {
       "derives a self-inconsistent endpoint count and panics.",
       false, VM_OPT_GROUP_HARDWARE, VM_OPT_IMPL_HARNESS },
     { "multitouch", "Touchscreen  ·  /arm-io/spi1/multi-touch",
-      "ON, and the only row here that is: the digitizer is the point, not a "
-      "hazard. Turn it OFF to get a screen back while the touch firmware "
-      "download is unfinished -- it currently sends all 54,156 bytes and never "
-      "starts the part, and the boot stops before anything is drawn.",
-      true, VM_OPT_GROUP_HARDWARE, VM_OPT_IMPL_HARNESS },
+      "Off, and this one is a loss rather than a hazard: the touchscreen is "
+      "the point. Matched, the firmware download sends all 54,156 bytes, never "
+      "starts the part, and the boot stops before anything is drawn -- a black "
+      "screen and no touch. Un-matched, the same build reaches the lock "
+      "screen. Turn it ON to work on touch; expect no picture while you do.",
+      false, VM_OPT_GROUP_HARDWARE, VM_OPT_IMPL_HARNESS },
 
     { "vram", "Publish /vram:reg",
       "On: this is the fix that made the guest render. Without it SpringBoard's "

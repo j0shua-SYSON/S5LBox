@@ -39,10 +39,10 @@ static const struct {
     { "baseband",           false, VM_OPT_GROUP_HARDWARE,    VM_OPT_IMPL_HARNESS },
     { "spi2",               false, VM_OPT_GROUP_HARDWARE,    VM_OPT_IMPL_HARNESS },
     { "usb-otg",            false, VM_OPT_GROUP_HARDWARE,    VM_OPT_IMPL_HARNESS },
-    /* Defaults ON, unlike every other nub: un-matching the digitizer is a
-     * loss, not a fix. It exists because the unfinished Z2 bootload stops the
-     * boot before anything composites. */
-    { "multitouch",         true,  VM_OPT_GROUP_HARDWARE,    VM_OPT_IMPL_HARNESS },
+    /* Off, and unlike the others this default is a LOSS taken deliberately.
+     * run140: matched gives 1821 framebuffer bytes and no touch; un-matched
+     * gives 273206 and no touch. Flip it back the day the bootload completes. */
+    { "multitouch",         false, VM_OPT_GROUP_HARDWARE,    VM_OPT_IMPL_HARNESS },
     { "vram",               true,  VM_OPT_GROUP_PATCH,       VM_OPT_IMPL_HARNESS },
     { "lcd-panel-id",       true,  VM_OPT_GROUP_PATCH,       VM_OPT_IMPL_HARNESS },
     { "memory-reg",         true,  VM_OPT_GROUP_PATCH,       VM_OPT_IMPL_HARNESS },

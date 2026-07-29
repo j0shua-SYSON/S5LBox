@@ -129,7 +129,13 @@ static void test_app_settings_reach_the_guest(const uint8_t *kernel,
                                               const uint8_t *tree,
                                               size_t tree_len) {
     static const char *const NUBS[] = {
-        "mbx", "sha1", "baseband", "spi2", "usb-otg"
+        "mbx", "sha1", "baseband", "spi2", "usb-otg",
+        /* Added 2026-07-29. Unlike the five above, this nub is not hidden
+         * because matching it hangs a boot -- it is hidden because the Z2
+         * bootload is unfinished, and a matched digitizer costs the whole
+         * display for no touch in return. It belongs in this list only until
+         * that is fixed. */
+        "multitouch"
     };
     const unsigned want = (unsigned)(sizeof NUBS / sizeof NUBS[0]);
     bool values[VM_BOOT_OPTION_MAX];
