@@ -6423,6 +6423,34 @@ static struct {
      * button_n is the hot-loop gate, exactly as touch_n is. */
     unsigned          button_n;
     button_press_t    button[BUTTON_PRESS_MAX];
+
+    /*
+     * --- the HBPP bootload's clock; armed whenever the digitizer is matched --
+     *
+     * run151 left one question un-answerable from its own report. The framing
+     * is correct -- one `30:54154` packet, every octet booked -- and then the
+     * driver stops: `acks 0`, `exec 0`, and the bus goes quiet. Two very
+     * different stories fit that: the driver ABANDONED the bootload, or it is
+     * simply between steps and the run ended first. The report counts events
+     * and never says WHEN, so it cannot tell them apart.
+     *
+     * These are the instruction at which each milestone first became true, so
+     * the silence after the transfer can be measured instead of guessed. Zero
+     * means "never happened", which is why the transfer's own stamp is the one
+     * that matters: a DATA packet finishing at 3.4 G with 150 M left is a run
+     * that ran out of road, and one finishing at 1.2 G with 2.3 G of nothing
+     * after it is a driver that gave up.
+     *
+     * hbpp_watch is the hot-loop gate, exactly as touch_n is. Purely
+     * observational -- nothing here touches the device. */
+    bool              hbpp_watch;
+    uint64_t          hbpp_data_at;     /* first DATA packet consumed         */
+    uint64_t          hbpp_ack_at;      /* first ATN_ACK answered             */
+    uint64_t          hbpp_exec_at;     /* first "about to execute" packet    */
+    uint64_t          hbpp_left_at;     /* the part stopped claiming HBPP     */
+    uint64_t          hbpp_last_octet_at; /* newest octet seen on the bus     */
+    uint64_t          hbpp_last_octets;   /* the count that stamp belongs to  */
+    uint64_t          hbpp_now;           /* newest instruction observed      */
 } G;
 
 /*
@@ -17084,6 +17112,33 @@ static void call_probe_report(void) {
 }
 
 /*
+ * Stamp the HBPP bootload's milestones. Observational only -- every field read
+ * here is a counter the device keeps for its own report, and nothing is
+ * written back to it.
+ *
+ * Not inlined, for the same reason touch_tap_step() is not: the step loop's
+ * whole cost when the digitizer is un-matched is one test of a global that is
+ * never written after startup.
+ */
+static BOOTKERNEL_NOINLINE void hbpp_stamp_step(uint64_t n) {
+    if (!G.mach) return;
+    const s5l_mtz2_t *d = &G.mach->mtz2;
+    G.hbpp_now = n;
+    if (!G.hbpp_data_at && d->hbpp_data_packets) G.hbpp_data_at = n;
+    if (!G.hbpp_ack_at  && d->hbpp_atn_acks)     G.hbpp_ack_at  = n;
+    if (!G.hbpp_exec_at && d->hbpp_execs)        G.hbpp_exec_at = n;
+    /* hbpp_mode starts TRUE on a part with no firmware, so this one is a
+     * falling edge and cannot be tested the same way as the others. */
+    if (!G.hbpp_left_at && !d->hbpp_mode)        G.hbpp_left_at = n;
+    /* The bus's own heartbeat. The gap between this and hbpp_data_at is the
+     * silence the report could not previously measure. */
+    if (d->octets != G.hbpp_last_octets) {
+        G.hbpp_last_octets   = d->octets;
+        G.hbpp_last_octet_at = n;
+    }
+}
+
+/*
  * Advance every scheduled tap by one instruction.
  *
  * Deliberately never inlined, for the same reason call_probe_note() is not:
@@ -17358,6 +17413,27 @@ static void mtz2_device_report(const s5l_mtz2_t *d) {
            (unsigned long long)d->hbpp_reg_writes,
            (unsigned long long)d->hbpp_calibs,
            (unsigned long long)d->hbpp_execs);
+    /*
+     * WHEN, not just how many. run151's report said the framing was perfect and
+     * the bootload still stopped, and could not distinguish "the driver
+     * abandoned it" from "the run ended between two of its steps". The gap
+     * between the last octet and the end of the run is that distinction.
+     */
+    if (G.hbpp_watch) {
+        printf("            timing: data @%llu  ack @%llu  exec @%llu  "
+               "left-hbpp @%llu   (0 = never)\n",
+               (unsigned long long)G.hbpp_data_at,
+               (unsigned long long)G.hbpp_ack_at,
+               (unsigned long long)G.hbpp_exec_at,
+               (unsigned long long)G.hbpp_left_at);
+        printf("            last octet on the bus @%llu",
+               (unsigned long long)G.hbpp_last_octet_at);
+        if (G.hbpp_now > G.hbpp_last_octet_at)
+            printf("  -- then %llu instruction(s) of silence to the end of "
+                   "the run",
+                   (unsigned long long)(G.hbpp_now - G.hbpp_last_octet_at));
+        printf("\n");
+    }
     /*
      * THE OCTETS THE LINE ABOVE DOES NOT ACCOUNT FOR, which on 2026-07-28 were
      * most of them. run121 shifted 54,236 octets through spi1 and framed 18,436
@@ -25647,6 +25723,11 @@ external_md_work_ready:
             dt_unmatch(dt, dt_n, "arm-io/spi1/multi-touch");
             printf("  dt: /arm-io/spi1/multi-touch UN-MATCHED -- no digitizer "
                    "this boot, which is what --no-multitouch asks for\n");
+        } else {
+            /* The digitizer is matched, so there is a bootload to time. See
+             * the hbpp_* block in G for what this answers that the counters
+             * cannot. */
+            G.hbpp_watch = true;
         }
         if (want_baseband != want_spi2)
             printf("  dt: NOTE /baseband and /arm-io/spi2 differ "
@@ -26786,6 +26867,7 @@ external_md_work_ready:
             thread_exception_return_gate_va, sp_before);
         s5l8900_tick(&mach, 1);
         if (G.touch_n) touch_tap_step(n);
+        if (G.hbpp_watch) hbpp_stamp_step(n);
         if (G.drag_n) touch_drag_step(n);
         if (G.button_n) button_press_step(n);
         /* The host's PPP peer. Gated on the same one-word test as the three
