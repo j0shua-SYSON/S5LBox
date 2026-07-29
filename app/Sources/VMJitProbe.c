@@ -226,8 +226,23 @@ vm_jit_result_t vm_jit_probe_run(vm_jit_strategy_t strategy,
                                  uint32_t *observed) {
     const size_t   code_len = sizeof PROBE_CODE;
     const size_t   len      = 4096u;
-    vm_jit_result_t result  = VM_JIT_RESULT_UNTESTED;
-    void          *page     = MAP_FAILED;
+    /*
+     * volatile, and not as a formality.
+     *
+     * A local that is modified between sigsetjmp() and the siglongjmp() has an
+     * INDETERMINATE value afterwards unless it is volatile -- the compiler is
+     * entitled to keep it in a call-saved register the unwind restores. `page`
+     * is read after the block to unmap it, so on the fault path -- the exact
+     * path a device that refuses execution takes -- the munmap() could be
+     * handed a garbage address. `result` is assigned in both branches and read
+     * after, and has the same problem.
+     *
+     * GCC caught this as -Werror=clobbered. It is a real defect, not a
+     * diagnostic to appease, and it would only ever have misfired on the
+     * devices this probe exists to identify.
+     */
+    void * volatile page    = MAP_FAILED;
+    volatile vm_jit_result_t result = VM_JIT_RESULT_UNTESTED;
     int            prot     = PROT_READ | PROT_WRITE;
     int            flags    = MAP_PRIVATE | MAP_ANON;
 #if VM_JIT_HAVE_WP_TOGGLE
