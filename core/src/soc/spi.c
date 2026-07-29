@@ -256,9 +256,48 @@ void s5l_spi_write(s5l_spi_t *bus, uint32_t off, uint32_t val) {
              * controller it went on to use. A count this model misread into a
              * gate would stall a transfer the guest is asleep waiting for,
              * which is the failure being fixed.
+             *
+             * IT DOES, HOWEVER, START ONE -- and a transfer that begins with
+             * the previous one's answers still in the receive FIFO cannot
+             * return its own.
+             *
+             * run157 measured the whole shape of this. `rxdata-reads 80` with
+             * five 16-octet transactions in the ledger is every one of those
+             * commands drained exactly (5 x 16 = 80); the driver's flow control
+             * works and this model was never the problem there. The transaction
+             * it does NOT drain is the 8-octet header that opens the Z2
+             * download, and it has no reason to: a firmware download is
+             * write-only and its answers are meaningless.
+             *
+             * Those eight then sat in the FIFO. The next transfer is the
+             * ATN_ACK, whose two octets could not shift past a full FIFO in
+             * PIO mode, so the device never saw `1A A1`, `acks 0`, and the
+             * driver slept in it for 2.44 G instructions.
+             *
+             * On real silicon that cannot happen, and not merely because the
+             * bus keeps working: 0xc0445284 compares the ATN_ACK's REPLY
+             * against 0x4BC1, read back at `ldrh r2, [sp, #0xe]`. A FIFO still
+             * holding the header's answers would hand it stale octets and the
+             * compare would fail even on hardware that shifted fine. So the
+             * controller must present a clean receive path at the start of a
+             * transfer, and the driver demonstrably does not do it by hand --
+             * it never reads those eight at all.
+             *
+             * INFERRED: that writing the count is what marks that boundary.
+             * It is the per-transfer register -- max(txLen, rxLen), written at
+             * 0xc05a6b3c before the data moves -- so it is the one store that
+             * happens exactly once per transfer and always before it. MEASURED:
+             * that without a flush here the bus deadlocks permanently, that the
+             * guest never drains the stale octets, and that every reply it DOES
+             * want it already reads.
+             *
+             * Deliberately not a flush of the transmit side: nothing has been
+             * measured about pending output at this point, and discarding an
+             * octet the guest queued is the failure this model exists to end.
              */
             bus->cnt = val;
             bus->words_left = val;
+            bus->rx_level = 0u;
             break;
         case SPI_IDD:
             bus->idd = val;

@@ -479,6 +479,63 @@ static void test_interrupt_enable_holds_the_line_through_the_prefill(void) {
  * because there the CPU really is the reader and stalling is what makes a
  * sixteen-octet command work against an eight-deep FIFO.
  */
+/*
+ * A transfer that begins with the previous one's answers still queued cannot
+ * return its own — and run157 showed the guest will not clear them by hand.
+ *
+ * The Z2 download opens with an 8-octet write-only header. Its replies are
+ * meaningless, so the driver never reads them; `rxdata-reads 80` against five
+ * 16-octet transactions is every command it DOES care about drained exactly.
+ * Those eight then blocked the two-octet ATN_ACK that follows, which is PIO and
+ * cannot shift past a full receive FIFO, and the bootload stopped there for
+ * 2.44 G instructions.
+ *
+ * This is that sequence in miniature, plus the reason it matters beyond the
+ * deadlock: 0xc0445284 compares the ATN_ACK's reply against 0x4BC1, so stale
+ * octets would fail the compare even on hardware that shifted fine.
+ */
+static void test_a_new_transfer_does_not_inherit_the_last_ones_answers(void) {
+    s5l_spi_t bus;
+    s5l_spi_slave_t slave;
+    echo_t echo;
+
+    s5l_spi_reset(&bus);
+    memset(&echo, 0, sizeof echo);
+    bind_echo(&slave, &echo);
+    s5l_spi_attach(&bus, 0u, &slave);
+    s5l_spi_write(&bus, SPI_SETUP, SPI_SETUP_BASE);
+
+    /* A write-only transfer whose answers nobody reads. */
+    s5l_spi_write(&bus, SPI_CNT, 8u);
+    for (unsigned i = 0; i < 8u; i++)
+        s5l_spi_write(&bus, SPI_TXDATA, (uint8_t)(0xa0u + i));
+    CHECK(bus.rx_level == S5L_SPI_FIFO_DEPTH,
+          "the write-only transfer left %u octets queued, expected the FIFO "
+          "full at %u", bus.rx_level, (unsigned)S5L_SPI_FIFO_DEPTH);
+
+    /* Now the next transfer starts. Writing the count is the boundary. */
+    s5l_spi_write(&bus, SPI_CNT, 2u);
+    CHECK(bus.rx_level == 0u,
+          "starting a transfer left %u stale octet(s) in the receive FIFO; the "
+          "ATN_ACK would read those instead of the device's 0x4BC1",
+          bus.rx_level);
+
+    /* And it can actually move. */
+    const unsigned seen_before = echo.words;
+    s5l_spi_write(&bus, SPI_TXDATA, 0x1au);
+    s5l_spi_write(&bus, SPI_TXDATA, 0xa1u);
+    CHECK(echo.words == seen_before + 2u,
+          "the device saw %u octets of the following transfer, expected 2 -- "
+          "this is the ATN_ACK deadlock run156 measured",
+          echo.words - seen_before);
+    CHECK(bus.tx_level == 0u,
+          "%u octet(s) stuck in the transmit FIFO after the flush",
+          bus.tx_level);
+    CHECK(bus.rx_level == 2u,
+          "the receive FIFO holds %u octets, expected exactly the 2 this "
+          "transfer produced", bus.rx_level);
+}
+
 static void test_a_dma_burst_is_not_stalled_by_a_full_receive_fifo(void) {
     s5l_spi_t bus;
     s5l_spi_slave_t slave;
@@ -1105,6 +1162,7 @@ int main(void) {
     test_interrupt_requires_a_byte_the_handler_can_drain();
     test_interrupt_enable_holds_the_line_through_the_prefill();
     test_a_dma_burst_is_not_stalled_by_a_full_receive_fifo();
+    test_a_new_transfer_does_not_inherit_the_last_ones_answers();
     test_a_bus_with_no_device_shifts_nothing();
     test_null_device_answers_zero();
     test_machine_routes_spi_windows_and_irq_lines();
