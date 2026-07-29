@@ -2365,6 +2365,83 @@ Not yet claimed: that a default route is *sufficient*. It gives the guest
 somewhere to send; whether any daemon then sends is a separate measurement, and
 mDNSResponder's multicast is not obviously something this NAT should carry.
 
+### 2026-07-29: run151 -- the framing is FIXED, and the next blocker is the acknowledgement
+
+The select-edge fix (`65e704e`) works, and run144's prediction is confirmed to
+the octet:
+
+```
+packets, in order (op:len): 1a:16 1a:16 18:2 30:54154
+those 4 packet(s) are 54188 octet(s) of the 54188 booked
+octets seen 54236 = reset 48 + unknown 0 + in-packet 54188   [balances]
+hbpp: probes 2  acks 0  data 1 (54140 bytes)  rd 0  wr 0  calib 0  exec 0
+```
+
+`unknown-opcodes 0`, down from 179. One DATA packet carrying the entire
+54,140-byte payload. Four packets, every octet accounted for. **Three days of
+framing bugs are closed.**
+
+The bootload still does not complete: `acks 0`, `exec 0`. Per §6.2 the driver
+must follow the DATA packet with a two-octet `1A A1` and read `4B C1`; the model
+is already armed for it (`atn_len = MTZ2_ATN_SHORT` is set when DATA
+completes). The driver never sends it -- `probes 2` (down from 6, because it is
+no longer retrying a garbled transfer) and the transaction ledger simply stops
+after `... 8 54148 0`. It transferred the firmware and went quiet.
+
+**The lead, and it is not new.** `spi1 words 54236 tx-drops 0 rx-underruns 0
+rx-overruns 54148` -- one RX overrun per payload octet, exactly the big
+transaction's length. The driver announces `AppleMultitouchZ2SPI: using DMA for
+bootloading`, and dmac1 moved `items 14 bytes 54156`, but nothing drains the RX
+side. **Identical in run148 (54148), so this predates the select-edge fix and
+was not caused by it**; run140 shows 0 only because the digitizer was never
+matched there. Whether the driver reads that overrun as failure and abandons
+the bootload is the next thing to measure, not yet a claim.
+
+**The digitizer must stay un-matched for now.** run140 and run151 are a clean
+pair -- both `ca-software-render=1 usb-otg=1`, both 3.55 G, differing only in
+multitouch:
+
+| run | multitouch | pixels |
+|---|---|---|
+| run140 | 0 | 273,206 |
+| run151 | 1 | 1,821 |
+
+Correct framing alone does not buy the display back. The `multitouch` default
+stays off until EXEC lands.
+
+### 2026-07-29: run149/run150 -- ca-software-render is necessary AND sufficient
+
+The 2x2 that should have been run before any of the touch work:
+
+| run | ca-sw-render | usb-otg | multitouch | budget | pixels | slot 1 |
+|---|---|---|---|---|---|---|
+| run140 | 1 | 1 | 0 | 3.55 G | 273,206 | 426,806 |
+| run149 | 1 | **0** | 0 | 3.55 G | **273,206** | 426,806 |
+| run150 | 0 | 1 | 0 | 3.55 G | 1,890 | 0 |
+| run145 | 0 | 0 | 0 | 3.55 G | 1,890 | 0 |
+
+`ca-software-render` alone decides it. `usb-otg` is irrelevant to the display.
+
+**And bootkernel's own `--help` has said so all along:** *"Without it
+CA::WindowServer defaults to MBX2D, whose global context is NULL because this VM
+un-matches the GPU, and SpringBoard dies in _mbx2DDisable forever."* We
+un-match `mbx` by default, so the renderer override is required by our own
+default configuration -- and its default was never flipped to match. run147
+showed the consequence exactly: SpringBoard reaches `window-created`,
+`orderFront-call`, `makeKey-return`, then composites nothing for 1.55 G more
+instructions.
+
+**Refuted:** `irq mask/status` as a render predictor. run150 carries the
+"renders" signature `00003f01/00000000` and is black. The heuristic is dead.
+
+**Why the default is not simply flipped.** `ca_software_render` is read as the
+*effective* value, so a default-on would refuse `--mbx`, refuse `--no-vram`, and
+refuse every run without `--external-md`. The app cannot hit any of those, but
+app and bootkernel defaults are deliberately identical so the app can render a
+comparable desktop command line -- the invariant `test_vmoptions.c` enforces.
+The correct fix is to make those three guards fire on *explicit* request rather
+than on an unchosen default, then flip both.
+
 ### 2026-07-29: run148 -- the octets finally balance, and a select edge cut the header in half
 
 run148 ran the §6.9 idle-word fix with the digitizer matched. The fix worked as
