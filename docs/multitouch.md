@@ -778,6 +778,51 @@ untouched and still asserted.
 
 **Not claimed:** that this completes the bootload. run156 is the test.
 
+### 6.16 It was never the DMA's eight octets (run156, run157)
+
+run156 shipped that fix and deadlocked identically -- `tx/rx level 2/8`,
+`rx-overruns 54148`, `acks 0`. The fix is real (`test_spi` proves the DMA path
+queues nothing now) and it changed nothing, because **those eight octets were
+never the DMA's.**
+
+The ledger had already said so: `... 16 0 16 8 54148 0`. The **8-octet PIO
+transaction fills the FIFO before the burst starts**. With the fix the burst
+drops all 54,148; without it the FIFO was already full so they all overran
+anyway. Identical counters either way, which is why the numbers could not
+distinguish a landed fix from an absent one.
+
+run157 then settled who was at fault, with two counters added for the purpose:
+
+```
+rxdata-reads 80    irq rising-edges 10
+```
+
+Both of the standing hypotheses died at once. **The guest does read the receive
+FIFO, and this model does raise the line.** And the arithmetic names the
+exception: the ledger holds five 16-octet transactions, and 5 x 16 = 80. Every
+command the driver cares about is drained exactly -- its flow control was never
+the problem. The one transaction it never reads is the 8-octet header opening
+the Z2 download, and it has no reason to: a firmware download is write-only and
+its answers are meaningless.
+
+**Why silicon cannot leave them there.** `0xc0445284` compares the ATN_ACK's
+REPLY against `0x4BC1`, read back at `ldrh r2, [sp, #0xe]`. A receive FIFO still
+holding the header's answers would hand it stale octets and fail that compare
+*even on hardware that shifted perfectly*. So the controller must present a
+clean receive path at the start of a transfer, and the driver demonstrably does
+not do it by hand.
+
+**Fix:** writing `SPI_CNT` clears the receive FIFO. It is the per-transfer
+register -- `max(txLen, rxLen)`, written at `0xc05a6b3c` before the data moves
+-- so it is the one store that happens exactly once per transfer and always
+before it. INFERRED that this marks the boundary; MEASURED that without it the
+bus deadlocks permanently, that the guest never drains the stale octets, and
+that every reply it does want it already reads. Not a transmit-side flush:
+nothing is measured about pending output there.
+
+**Not claimed:** that this completes the bootload. run158 is the test, and the
+three predictions of that kind made before it were all wrong.
+
 ## 7. Downstream, once this is unblocked
 
 * `mtz2.c` already answers 0xD1/0xD3/0xD9 with correct non-zero values, and as
