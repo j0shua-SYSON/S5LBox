@@ -370,6 +370,15 @@ add_test(NAME app_boot_options COMMAND test_vmbootoptions)
 # which is the property that lets this ship to a phone. The bytes are really
 # executed on the core-tests matrix: x86-64 Linux takes the x86 payload and
 # arm64 macOS the aarch64 one. Links no core symbols.
+#
+# A WARNING FOR ANYONE EDITING VMJitProbe.c FROM WINDOWS. There is no mmap on
+# MinGW, so VM_JIT_POSIX is 0 and the ENTIRE mechanism -- the mapping, the
+# signal handlers, the call -- is preprocessed away. A green local run says
+# nothing about that code. The first push of this file passed 50/50 here and
+# failed CI three ways: a pedantic object-to-function pointer cast, an unused
+# variable where the MAP_JIT blocks compile out, and
+# pthread_jit_write_protect_np being unavailable on iOS. Push and read CI;
+# local green is not evidence for this one file.
 add_executable(test_vmjitprobe
     ../app/Tests/test_vmjitprobe.c
     ../app/Sources/VMJitProbe.c

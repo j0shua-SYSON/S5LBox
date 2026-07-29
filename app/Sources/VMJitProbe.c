@@ -41,6 +41,34 @@
 #  include <TargetConditionals.h>
 #endif
 
+/*
+ * MAP_JIT's write-protect toggle is macOS-only, and finding that out is itself
+ * a result worth keeping.
+ *
+ * `pthread_jit_write_protect_np` is declared unavailable on iOS -- the arm64
+ * iphoneos build fails outright on the call, which is how this was learned. So
+ * the two Apple platforms need different shapes for the same strategy:
+ *
+ *   macOS  - map MAP_JIT, toggle write protection off, write, toggle it back.
+ *   iOS    - there is no toggle. A MAP_JIT mapping is either writable AND
+ *            executable for this process or the mapping is refused, and which
+ *            of those happens is exactly what the probe is here to find out.
+ *
+ * So on iOS this strategy differs from plain RWX only by the MAP_JIT flag,
+ * which is the honest test: it asks whether the flag changes the verdict.
+ */
+#if defined(__APPLE__) && defined(MAP_JIT)
+#  if defined(TARGET_OS_OSX) && TARGET_OS_OSX
+#    define VM_JIT_HAVE_WP_TOGGLE 1
+#  else
+#    define VM_JIT_HAVE_WP_TOGGLE 0
+#  endif
+#  define VM_JIT_HAVE_MAP_JIT 1
+#else
+#  define VM_JIT_HAVE_WP_TOGGLE 0
+#  define VM_JIT_HAVE_MAP_JIT 0
+#endif
+
 /* --------------------------------------------------------------- the payload --- */
 
 /*
@@ -202,7 +230,11 @@ vm_jit_result_t vm_jit_probe_run(vm_jit_strategy_t strategy,
     void          *page     = MAP_FAILED;
     int            prot     = PROT_READ | PROT_WRITE;
     int            flags    = MAP_PRIVATE | MAP_ANON;
+#if VM_JIT_HAVE_WP_TOGGLE
+    /* Declared only where it is read. On Linux the MAP_JIT blocks compile out
+     * entirely and an always-false flag is an -Werror=unused-variable. */
     bool           jit_wp   = false;
+#endif
 
     if (strategy < 0 || strategy >= VM_JIT_STRATEGY_COUNT)
         return VM_JIT_RESULT_UNSUPPORTED;
@@ -212,10 +244,12 @@ vm_jit_result_t vm_jit_probe_run(vm_jit_strategy_t strategy,
             prot |= PROT_EXEC;
             break;
         case VM_JIT_STRATEGY_MAP_JIT:
-#if defined(__APPLE__) && defined(MAP_JIT)
+#if VM_JIT_HAVE_MAP_JIT
             prot  |= PROT_EXEC;
             flags |= MAP_JIT;
+#  if VM_JIT_HAVE_WP_TOGGLE
             jit_wp = true;
+#  endif
 #else
             return VM_JIT_RESULT_UNSUPPORTED;
 #endif
@@ -233,17 +267,17 @@ vm_jit_result_t vm_jit_probe_run(vm_jit_strategy_t strategy,
     if (page == MAP_FAILED)
         return VM_JIT_RESULT_MAP_REFUSED;
 
-#if defined(__APPLE__) && defined(MAP_JIT)
-    /* MAP_JIT pages start execute-only for this thread; the toggle is what
-     * makes them writable. Without the dynamic-codesigning entitlement the
-     * call is documented to abort rather than fail, which is precisely why
+#if VM_JIT_HAVE_WP_TOGGLE
+    /* macOS only. MAP_JIT pages start execute-only for this thread; the toggle
+     * is what makes them writable. Without the dynamic-codesigning entitlement
+     * the call is documented to abort rather than fail, which is precisely why
      * this strategy is opt-in and breadcrumbed like the others. */
     if (jit_wp) pthread_jit_write_protect_np(0);
 #endif
 
     memcpy(page, PROBE_CODE, code_len);
 
-#if defined(__APPLE__) && defined(MAP_JIT)
+#if VM_JIT_HAVE_WP_TOGGLE
     if (jit_wp) pthread_jit_write_protect_np(1);
 #endif
 
@@ -265,8 +299,16 @@ vm_jit_result_t vm_jit_probe_run(vm_jit_strategy_t strategy,
 
         g_probe_armed = 1;
         if (sigsetjmp(g_probe_jmp, 1) == 0) {
-            probe_fn_t fn = (probe_fn_t)page;
-            uint32_t   got = fn();
+            /*
+             * ISO C forbids casting an object pointer to a function pointer,
+             * and these targets build -pedantic -Werror. POSIX requires the
+             * conversion to work anyway -- it is what dlsym()'s return value
+             * is for -- so it goes through a union, which is the documented
+             * way to say "I mean this" without the diagnostic.
+             */
+            union { void *obj; probe_fn_t fn; } launder;
+            launder.obj = page;
+            uint32_t got = launder.fn();
             g_probe_armed = 0;
             if (observed) *observed = got;
             result = (got == VM_JIT_PROBE_SENTINEL) ? VM_JIT_RESULT_OK
