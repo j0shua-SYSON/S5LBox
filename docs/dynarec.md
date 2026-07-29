@@ -57,6 +57,34 @@ default build and the boot path are untouched):
 | `core/src/jit/a64_emit.c` — AArch64 emitter | **works in structural and macOS arm64 execution tests**, including an exhaustive check of the bitmask-immediate encoder against an independent `DecodeBitMasks` |
 | `core/src/jit/jit_translate.c` — block translator | **works in tests** for a narrow ARM subset **and a measured-useful Thumb-1 subset**; unsupported forms are declined |
 | `core/src/jit/jit_mem.c` — code-buffer shim | supports plain RWX on arm64 iOS/Linux and `MAP_JIT` + `pthread_jit_write_protect_np` on macOS; CI executes the macOS policy and structurally tests the allocator elsewhere, while the iOS workflow only compile-checks this module. The app target does not link or dispatch it, and no target-phone execution result is recorded |
+| `app/Sources/VMJitProbe.c` — the executability probe | **new 2026-07-29.** Answers the question the row above leaves open, on the device itself. See §0.1 |
+
+### 0.1 The question every number in §10.3 depends on
+
+**None of this document's throughput estimates mean anything if the phone will
+not branch into a page the process wrote.** That has never been measured, and it
+cannot be inferred from the mapping call: a user's stock iOS 26.1 iPhone17,2
+reported `RWX mmap: YES`, which proves only that the MAPPING was granted. iOS may
+still enforce W^X at fault time.
+
+`VMJitProbe.c` measures it directly — Settings → Diagnostics → "JIT execution
+test", explicit and never at startup, with signal handlers for the fault case and
+a disk-flushed breadcrumb for the case where the kernel kills the process
+instead. It reports three strategies separately, because *which* one works
+decides what `jit_mem.c` must do.
+
+**CONFIRMED 2026-07-29, and it changes the table above.**
+`pthread_jit_write_protect_np` is declared **unavailable on iOS** — the arm64
+iphoneos build fails outright on the call, which is how this was found. So the
+`MAP_JIT` + toggle policy is macOS-only *as a matter of compilation*, not merely
+of preference, and the row above is right to list plain RWX for iOS. Anyone
+planning J3 around the macOS shape should know it does not build for the phone,
+let alone run there.
+
+**Still UNMEASURED:** what the phone actually answers. Until the probe is run on
+the target device, §10.3's 0.15–0.45x band is conditional on an assumption
+nobody has tested, and a refusal would invalidate the dispatch design rather
+than slow it down.
 | §3.4 dispatch, §3.5 chaining, §3.6 invalidation | **not built.** There is no code cache, so nothing calls the translator yet |
 | §6.1 software TLB (J1) | **not built.** Loads and stores go through a helper that calls `arm_mmu_translate` directly |
 | Thumb (J4) | **broad Thumb-1 subset translated**, covering 93.54% of retired Thumb instructions in the recorded sample (see below); excluded forms remain |
