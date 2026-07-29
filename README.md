@@ -2,14 +2,14 @@
 
 # S5LBox
 
-### Project goal: boot **real iPhone OS 3** — Apple's actual kernel, `launchd`, and SpringBoard — inside an app on a modern, jailbroken iPhone.
+### Project goal: boot **real iPhone OS 3** — Apple's actual kernel, `launchd`, and SpringBoard — inside an app on a modern iPhone. **No jailbreak required** — see *Requirements*.
 
 *A from-scratch emulator of the 2007 iPhone's chip, written in portable C.*
 
 [![core-tests](https://github.com/j0shua-SYSON/S5LBox/actions/workflows/core-tests.yml/badge.svg)](https://github.com/j0shua-SYSON/S5LBox/actions/workflows/core-tests.yml)
 [![ios-build](https://github.com/j0shua-SYSON/S5LBox/actions/workflows/ios-build.yml/badge.svg)](https://github.com/j0shua-SYSON/S5LBox/actions/workflows/ios-build.yml)
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-![platform](https://img.shields.io/badge/host-iOS%2015%20·%20A9%20·%20jailbroken-black)
+![platform](https://img.shields.io/badge/host-iOS%20·%20arm64%20·%20no%20jailbreak-black)
 ![guest](https://img.shields.io/badge/guest-iPhone%20OS%203.1.3%20·%20S5L8900-lightgrey)
 
 </div>
@@ -291,8 +291,9 @@ so historical 768 MiB experiments are not valid recipes.
 **Get the app:** on a matching push or manual dispatch, the `ios-build` workflow
 produces an ad-hoc (`ldid` fake-signed) `S5LBox.ipa` as a temporary GitHub
 Actions artifact. CI builds, signs and packages it; it does not install or launch
-it. Installing needs a method compatible with your device's jailbreak, such as
-AppSync or TrollStore. No Apple Developer account is involved.
+it. Installing it is your affair. The emulator asks nothing of the host beyond
+an ordinary app sandbox, so any method that gets a fake-signed `.ipa` onto
+your device will do. No Apple Developer account is involved.
 
 **Supply firmware:** put your **own** iPhone OS 3.1.3 files and the documented
 decryption keys in the git-ignored `firmware/` directory — see
@@ -303,10 +304,25 @@ No Apple firmware is committed or bundled.
 
 ## Requirements
 
-- **First validation host:** a **jailbroken iPhone 6s Plus** (Apple A9) on iOS
-  15, plus a compatible signing/jailbreak setup to install with. The runtime code
-  translator is not active; a separate opt-in on-device check must confirm that
-  generated code can execute before it is enabled.
+- **Host: a modern iPhone. A jailbreak is NOT required.** Corrected
+  2026-07-29 against a measurement rather than an assumption: the app has been
+  run on a **stock iPhone 17 (iPhone17,2) on iOS 26.1**, which reports
+  `CS_DEBUGGED : no` in its own on-device self-test and boots the guest kernel
+  anyway. This project was developed against a jailbroken iPhone 6s Plus (A9,
+  iOS 15), and the README stated that as a requirement when it was only the
+  first host it happened to run on.
+
+  It asks nothing special of the host because it is a pure **interpreter**. No
+  generated code is executed, so nothing has to be made writable-then-executable
+  and no debug entitlement is needed. That changes if the code translator is
+  ever finished: JIT execution needs both an executable mapping and a process
+  the kernel will let run it, which is exactly what `CS_DEBUGGED : no` denies.
+  The self-test already reports `JIT execute : not run at startup (capability
+  preflight failed)` on that stock device, and the translator stays off unless
+  an opt-in on-device check confirms generated code really can run.
+
+  NOT established: which iOS versions or devices this works on in general. Two
+  hosts are two data points, not a compatibility matrix.
 - **Firmware:** your own iPhone OS 3.1.3 image and keys. **No Apple firmware
   image or decryption key is bundled.**
 

@@ -667,7 +667,7 @@ See [BOOT_CHAIN.md](BOOT_CHAIN.md) for how the firmware actually boots, and
         ├─ core-tests.yml   ubuntu + macOS: cmake + ctest   (seconds)
         └─ ios-build.yml    macOS runner: xcodebuild → ldid fake-sign → .ipa
         ▼
-  download .ipa  ──►  install demo app on jailbroken iPhone 6s Plus
+  download .ipa  ──►  install demo app on an iPhone (no jailbreak needed)
 ```
 
 No macOS, Xcode, or WSL is needed on the development machine — a hosted macOS
