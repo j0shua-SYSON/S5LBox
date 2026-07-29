@@ -40,8 +40,14 @@ static const struct {
     { "spi2",               false, VM_OPT_GROUP_HARDWARE,    VM_OPT_IMPL_HARNESS },
     { "usb-otg",            false, VM_OPT_GROUP_HARDWARE,    VM_OPT_IMPL_HARNESS },
     /* Off, and unlike the others this default is a LOSS taken deliberately.
-     * run140: matched gives 1821 framebuffer bytes and no touch; un-matched
-     * gives 273206 and no touch. Flip it back the day the bootload completes. */
+     * run140 and run151 are the clean pair -- same ca-software-render, same
+     * usb-otg, same budget, differing only here: un-matched renders at 273206
+     * framebuffer bytes, matched stops at 1821. Neither has touch.
+     *
+     * run151 also settles what was an open question: it carries the fixed HBPP
+     * framing (one 30:54154 packet, zero unknown opcodes) and STILL costs the
+     * display, so correct framing alone does not earn this switch back. Flip it
+     * the day the bootload reaches EXEC, not before. */
     { "multitouch",         false, VM_OPT_GROUP_HARDWARE,    VM_OPT_IMPL_HARNESS },
     { "vram",               true,  VM_OPT_GROUP_PATCH,       VM_OPT_IMPL_HARNESS },
     { "lcd-panel-id",       true,  VM_OPT_GROUP_PATCH,       VM_OPT_IMPL_HARNESS },

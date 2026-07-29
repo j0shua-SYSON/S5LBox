@@ -80,8 +80,19 @@ static void spi_shift(s5l_spi_t *bus) {
      * moved 812,340 octets into this port from a channel whose destination is
      * SPI1's TXDATA, and the digitizer received sixteen of them -- eight
      * shifted, eight sat in the transmit FIFO, and every write after that was
-     * counted in tx_drops and discarded. The Z2 firmware download is exactly
-     * that shape, which is why the bootload has never delivered a packet.
+     * counted in tx_drops and discarded.
+     *
+     * That is why this loop does not stall in DMA mode, and it worked: as of
+     * run151 the download delivers. `spi1 words 54236 tx-drops 0` -- nothing
+     * discarded -- and the device frames all 54,154 octets as ONE HBPP DATA
+     * packet. An earlier version of this comment ended "which is why the
+     * bootload has never delivered a packet", and that sentence outlived the
+     * problem it described by three commits.
+     *
+     * The bootload still does not COMPLETE, but the reason is no longer here:
+     * the driver sleeps after the transfer waiting for spi1's interrupt to run
+     * finishTransfer and call commandWakeup. See s5l_spi_irq() below, and
+     * docs/multitouch.md 6.14.
      *
      * Silicon does not stall a shifter on a full receive FIFO; it overruns.
      * So in DMA mode this does too, and the answer that had nowhere to go is
