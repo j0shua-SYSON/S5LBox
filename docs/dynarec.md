@@ -81,10 +81,35 @@ of preference, and the row above is right to list plain RWX for iOS. Anyone
 planning J3 around the macOS shape should know it does not build for the phone,
 let alone run there.
 
-**Still UNMEASURED:** what the phone actually answers. Until the probe is run on
-the target device, §10.3's 0.15–0.45x band is conditional on an assumption
-nobody has tested, and a refusal would invalidate the dispatch design rather
-than slow it down.
+**CONFIRMED 2026-07-29, from the probe's own CI step** (`core-tests`, run
+30462374994 — a measurement step, not a gate, for the same reason as §1.1's):
+
+| host | RWX mmap | MAP_JIT | mprotect RW→RX |
+|---|---|---|---|
+| macOS arm64 (Apple Silicon) | **REFUSED — the mapping was denied** | **OK** | **OK** |
+| Linux x86-64 | OK | n/a — no `MAP_JIT` | OK |
+| Windows x86-64 | n/a — no `mmap` | n/a | n/a |
+
+Two things fall out, and the first is not what the app's old preflight implied:
+
+1. **Apple Silicon macOS refuses a plain RWX mapping outright.** Not a fault on
+   execution — the `mmap` itself is denied. Yet the user's stock iOS 26.1
+   iPhone17,2 reported `RWX mmap: YES` for the same call. iOS granted what macOS
+   refuses, which means the phone's answer genuinely cannot be predicted from
+   the closest hardware available in CI, and makes running the probe there the
+   only way to know.
+2. **The W^X path works on Apple arm64 without `MAP_JIT`.** `mprotect` RW→RX
+   executed correctly. If that also holds on iOS it is a JIT strategy needing no
+   entitlement and no RWX page, and it is the one to design `jit_mem.c` around
+   first — §0's row lists only plain RWX for iOS, which is now the *least*
+   likely of the three to be permitted.
+
+**Still UNMEASURED:** what the phone answers. §10.3's 0.15–0.45x band remains
+conditional on an assumption nobody has tested on the target, and a refusal
+would invalidate the dispatch design rather than slow it down. What CI has
+established is that the probe distinguishes a denied mapping from a successful
+execution on real Apple arm64 hardware, so its verdict on the phone can be
+trusted when it arrives.
 | §3.4 dispatch, §3.5 chaining, §3.6 invalidation | **not built.** There is no code cache, so nothing calls the translator yet |
 | §6.1 software TLB (J1) | **not built.** Loads and stores go through a helper that calls `arm_mmu_translate` directly |
 | Thumb (J4) | **broad Thumb-1 subset translated**, covering 93.54% of retired Thumb instructions in the recorded sample (see below); excluded forms remain |
