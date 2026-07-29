@@ -1044,6 +1044,7 @@ void s5l_mtz2_select_pin(void *ctx, bool level) {
      * absence. That is why this is a resync and not the framing itself.
      */
     (void)level;
+    dev->select_edges++;
     dev->pos = 0u;
     dev->len = 0u;
     dev->frame_phase = 0xffu;

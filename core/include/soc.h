@@ -2508,6 +2508,25 @@ typedef struct {
      */
     bool     power_level;
     uint64_t power_edges;
+    /*
+     * SELECT EDGES, and whether this device has any packet framing at all.
+     *
+     * s5l_mtz2_select_pin() has resynchronised the framer since it was
+     * written, on the stated assumption that "the framer already knows every
+     * packet's length from its opcode, [so] a driver that never drives this
+     * pin is not broken by its absence". run138 showed that assumption is
+     * false for the one transfer that matters: the Z2 bootload streams a raw
+     * ARM image, and no octet in it carries a length. The framer read that
+     * image as commands -- e5, ea, e2 are LDR/STR, B and data-processing, and
+     * they collide exactly with WRITE_LONG, FRAME_Z1 and DEVICE_INFO because
+     * ARM's AL condition nibble IS 0xe.
+     *
+     * Framing the bootload therefore needs the select, and the select is only
+     * usable if the driver drives it. Nothing counted that, so it was never
+     * knowable. This counts it: zero means CS framing is not available on this
+     * guest and the boundary rule has to come from somewhere else.
+     */
+    uint64_t select_edges;
 
     /*
      * Bounded diagnostics, as on I2C and SPI, and two of these are load-bearing

@@ -17294,6 +17294,20 @@ static void mtz2_device_report(const s5l_mtz2_t *d) {
            d->power_level ? 1u : 0u, d->in_reset ? 1u : 0u,
            d->hbpp_mode ? 1u : 0u);
     /*
+     * SELECT EDGES decide whether this device can frame the bootload at all.
+     * run138 proved the framer cannot: the Z2 image is raw ARM code and gets
+     * read as commands, because ARM's AL condition nibble is 0xe and the
+     * command opcodes are 0xe1..0xee. Framing it needs the chip select, which
+     * on this board is a GPIO (/arm-io/spi1 function-spi_cs0, pin 0x1800) that
+     * this device already watches. Whether the DRIVER drives it was never
+     * counted, so it was never knowable -- and the whole fix depends on it.
+     */
+    printf("            select-edges %llu%s\n",
+           (unsigned long long)d->select_edges,
+           d->select_edges == 0u
+               ? "   <- NO chip-select framing available from this guest"
+               : "");
+    /*
      * The bootload, step by step. A download that never started and one that
      * stopped after two packets look identical in the guest's log, which prints
      * nothing per packet -- so this is the only place the difference shows.
