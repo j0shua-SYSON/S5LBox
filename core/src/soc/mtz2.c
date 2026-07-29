@@ -1053,13 +1053,6 @@ void s5l_mtz2_reset_pin(void *ctx, bool level) {
 void s5l_mtz2_select_pin(void *ctx, bool level) {
     s5l_mtz2_t *dev = ctx;
     if (!dev) return;
-    /*
-     * Resynchronise the framer, and nothing else. A chip-select edge means no
-     * transfer is in flight, so discarding a part-received packet at one is
-     * always safe — and because the framer already knows every packet's length
-     * from its opcode, a driver that never drives this pin is not broken by its
-     * absence. That is why this is a resync and not the framing itself.
-     */
     (void)level;
     dev->select_edges++;
     /* The transaction that just ended, measured rather than assumed. See the
@@ -1070,6 +1063,40 @@ void s5l_mtz2_select_pin(void *ctx, bool level) {
                                                         : (uint32_t)n;
     }
     dev->txn_mark = dev->octets;
+
+    /*
+     * Resynchronise the framer — but only when nothing is in flight.
+     *
+     * This used to reset unconditionally, and the comment justifying it read
+     * "a chip-select edge means no transfer is in flight, so discarding a
+     * part-received packet at one is always safe". run148's transaction ledger
+     * refutes that. The Z2 bootload arrives as `... 16 0 16 8 54148 0`, and
+     * those two brackets are ONE HBPP DATA packet cut in half:
+     *
+     *       8 octets:  18 e1 | 30 01 34 df 00 00
+     *                  ^idle   ^six of the ten header octets
+     *   54148 octets:  00 00 01 13 | <54140 payload> | <4-octet sum>
+     *                  ^rest of addr, then hdrsum
+     *
+     * 6 + 54148 = 54154 = 14 + 4*0x34df, exactly what the header declares, and
+     * 2 + 54154 = 54156, exactly the firmware image. Discarding at the edge
+     * threw the header away and left the framer re-syncing onto ARM payload
+     * words, whose 0xe condition nibble reads as this protocol's own command
+     * opcodes -- docs/multitouch.md §6.9. That is where `e1:16 ea:16 ea:16
+     * e2:16 ...` and the bogus `30:17538` in run148's packet list came from.
+     *
+     * The exemption is deliberately narrower than "any in-flight packet": it
+     * is only the HBPP DATA packet, which is the only case measured. A select
+     * edge part-way through an ordinary command frame still discards it --
+     * test_framing_survives_without_a_chip_select asserts that, we have no
+     * evidence the real driver ever does it, and widening the rule to cover a
+     * case nothing has exercised would trade a known-good behaviour for a
+     * guess. An unknown opcode leaves `len` at zero and is unaffected either
+     * way.
+     */
+    if (dev->hbpp_mode && dev->op == MTZ2_OP_HBPP_DATA &&
+        dev->len && dev->pos && dev->pos < dev->len) return;
+
     dev->pos = 0u;
     dev->len = 0u;
     dev->frame_phase = 0xffu;

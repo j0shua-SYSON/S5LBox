@@ -1078,6 +1078,77 @@ static void test_framing_survives_without_a_chip_select(void) {
           "the two-byte wakeup was framed as something longer");
 }
 
+/*
+ * ...but an HBPP DATA packet cut in half by a select edge survives it.
+ *
+ * run148 measured the real bootload's chip-select shape as `... 16 0 16 8
+ * 54148 0`: the driver ends a transaction six octets into the ten-octet DATA
+ * header and sends the rest -- the last two address octets, the header sum,
+ * 54140 payload octets and the four-octet sum -- in the next one. 6 + 54148 =
+ * 54154 = 14 + 4*0x34df, exactly the length the header declares.
+ *
+ * Discarding at that edge is what left the framer re-syncing onto ARM payload
+ * words and reporting `e1:16 ea:16 ea:16 e2:16 ... 30:17538` instead of one
+ * packet, and the bootload never reached EXEC. This is that split, in
+ * miniature: the same six octets, then the edge, then the remaining twenty.
+ */
+static void test_an_hbpp_data_packet_survives_a_select_edge(void) {
+    s5l_mtz2_t dev;
+    s5l_spi_slave_t s;
+    uint8_t tx[64], rx[64], probe[MTZ2_FRAME_LEN];
+
+    s5l_mtz2_reset(&dev);
+    s5l_mtz2_bind(&dev, &s);
+    release_reset(&dev);
+    build_hbpp_probe(probe);
+    xfer(&s, probe, rx, MTZ2_FRAME_LEN);
+
+    /* The same three-word packet at 0x22000000 the transcription test builds. */
+    static const uint32_t words[3] = { 0x11223344u, 0x55667788u, 0x99aabbccu };
+    const uint32_t addr = 0x22000000u;
+    unsigned n = 0;
+    memset(tx, 0, sizeof tx);
+    tx[n++] = MTZ2_OP_HBPP_DATA; tx[n++] = MTZ2_HBPP_DATA_M2;
+    tx[n++] = 0u; tx[n++] = 3u;                     /* word count, big-endian */
+    tx[n++] = (uint8_t)(addr >> 8);  tx[n++] = (uint8_t)(addr);
+    tx[n++] = (uint8_t)(addr >> 24); tx[n++] = (uint8_t)(addr >> 16);
+    uint16_t hsum = s5l_mtz2_sum16(tx + 2, 6u);
+    tx[n++] = (uint8_t)(hsum >> 8);  tx[n++] = (uint8_t)(hsum);
+    for (unsigned i = 0; i < 3u; i++) {
+        tx[n++] = (uint8_t)(words[i] >> 8);  tx[n++] = (uint8_t)(words[i]);
+        tx[n++] = (uint8_t)(words[i] >> 24); tx[n++] = (uint8_t)(words[i] >> 16);
+    }
+    uint32_t psum = 0;
+    for (unsigned i = 10; i < 22u; i++) psum += tx[i];
+    tx[n++] = (uint8_t)(psum >> 8);  tx[n++] = (uint8_t)(psum);
+    tx[n++] = (uint8_t)(psum >> 24); tx[n++] = (uint8_t)(psum >> 16);
+
+    /* Transaction one: six octets, ending mid-header exactly as run148's did. */
+    for (unsigned i = 0; i < 6u; i++) rx[i] = s.transfer(s.ctx, tx[i]);
+    CHECK(dev.len == 14u + 12u,
+          "the header did not state its length before the edge: len=%u",
+          (unsigned)dev.len);
+    s5l_mtz2_select_pin(&dev, false);
+    CHECK(dev.len == 14u + 12u && dev.pos == 6u,
+          "the select edge discarded the DATA packet: len=%u pos=%u",
+          (unsigned)dev.len, (unsigned)dev.pos);
+
+    /* Transaction two: the remaining twenty. */
+    for (unsigned i = 6u; i < n; i++) rx[i] = s.transfer(s.ctx, tx[i]);
+
+    CHECK(dev.hbpp_data_packets == 1u && dev.hbpp_data_bytes == 12u,
+          "the split DATA packet was not consumed as one packet of 12 payload "
+          "octets: %llu packet(s), %llu byte(s)",
+          (unsigned long long)dev.hbpp_data_packets,
+          (unsigned long long)dev.hbpp_data_bytes);
+    CHECK(dev.len == 0u && dev.pos == 0u,
+          "the framer is still inside the split DATA packet: len=%u pos=%u",
+          (unsigned)dev.len, (unsigned)dev.pos);
+    CHECK(dev.unknown_opcodes == 0u,
+          "%llu octet(s) of the split packet were re-framed as opcodes",
+          (unsigned long long)dev.unknown_opcodes);
+}
+
 /* The attention line, and the state step 4 will drive. */
 static void test_attention_line_is_quiet_until_a_frame_exists(void) {
     s5l_mtz2_t dev;
@@ -1902,6 +1973,7 @@ int main(void) {
     test_the_hbpp_bootload_runs_to_completion();
     test_the_other_opcodes_are_well_formed();
     test_framing_survives_without_a_chip_select();
+    test_an_hbpp_data_packet_survives_a_select_edge();
     test_attention_line_is_quiet_until_a_frame_exists();
     test_an_idle_device_answers_a_length_read_with_zero();
     test_an_injected_contact_is_delivered_over_the_wire();
