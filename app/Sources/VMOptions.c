@@ -57,9 +57,14 @@ static const vm_option_t VM_OPTIONS[] = {
       "failure stays visible instead of costing a 30-second stall.",
       true, VM_OPT_GROUP_PATCH, VM_OPT_IMPL_HARNESS },
     { "ca-software-render", "QuartzCore software renderer",
-      "Off: sets CA_ENABLE_MBX2D=0 for SpringBoard, which is how QuartzCore "
-      "picks its own software path. Needs a writable work image.",
-      false, VM_OPT_GROUP_PATCH, VM_OPT_IMPL_HARNESS },
+      "On, and applied when the work image is made, not at boot: sets "
+      "CA_ENABLE_MBX2D=0 for SpringBoard, which is how QuartzCore picks its "
+      "own software path. This machine un-matches the GPU, so without it "
+      "CA::WindowServer takes MBX2D, whose global context is NULL, and "
+      "SpringBoard composites nothing -- measured 2026-07-29 as run149's "
+      "273206 drawn bytes against run150's 1890. Toggling it later needs a "
+      "fresh work image.",
+      true, VM_OPT_GROUP_PATCH, VM_OPT_IMPL_HARNESS },
 
     { "activate", "Activation",
       "On, and applied when the work image is made, not at boot: provisions "

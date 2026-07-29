@@ -102,6 +102,34 @@ expect_config(jailbreak_codesign_half_alone
     "jb-codesign=1|jb-payload=0|jailbreak  : code-signing half APPLIED|applied, NOT demonstrated"
     absent-kernel --jb-codesign --print-config)
 
+# --ca-software-render defaults ON as of 2026-07-29, because this VM un-matches
+# /arm-io/mbx and without the override CA::WindowServer takes MBX2D, whose
+# global context is NULL for exactly that reason. run149 and run150 differ in
+# this flag alone, at the same budget, and draw 273206 bytes against 1890.
+#
+# It is written into a work image, so with no --external-md there is nowhere to
+# put it and the default resolves to off -- SILENTLY, because this layer's rule
+# is that a default is never grounds for a rejection. The defaults_resolve case
+# above pins that half (it asks for no work image and expects
+# ca-software-render=0); these pin the rest.
+expect_config(software_render_on_by_default_with_a_work_image
+    "ca-software-render=1"
+    absent-kernel -d absent-tree --external-md absent-source new-work --print-config)
+# Un-asked-for and inapplicable resolves to off instead of refusing. Each of
+# these would be an ERROR if it had been requested by name -- see the three
+# expect_refused cases below, which still pass exactly those command lines.
+expect_config(software_render_default_yields_to_a_matched_gpu
+    "mbx=1|ca-software-render=0"
+    absent-kernel -d absent-tree --external-md absent-source new-work --mbx --print-config)
+expect_config(software_render_default_yields_to_no_vram
+    "vram=0|ca-software-render=0"
+    absent-kernel -F -d absent-tree --external-md absent-source new-work --no-vram --print-config)
+# And it is still a DEFAULT, not something the command line asked for: the
+# resolution moves the value, never the provenance.
+expect_config(software_render_default_is_not_claimed_as_cli
+    "config-cli : print-config"
+    absent-kernel -d absent-tree --external-md absent-source new-work --print-config)
+
 # --------------------------------------------------------------------------
 # 2. --no- overrides a default.
 expect_config(no_form_overrides_default

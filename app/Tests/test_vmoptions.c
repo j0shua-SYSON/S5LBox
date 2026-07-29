@@ -47,7 +47,13 @@ static const struct {
     { "lcd-panel-id",       true,  VM_OPT_GROUP_PATCH,       VM_OPT_IMPL_HARNESS },
     { "memory-reg",         true,  VM_OPT_GROUP_PATCH,       VM_OPT_IMPL_HARNESS },
     { "rtc-patch",          true,  VM_OPT_GROUP_PATCH,       VM_OPT_IMPL_HARNESS },
-    { "ca-software-render", false, VM_OPT_GROUP_PATCH,       VM_OPT_IMPL_HARNESS },
+    /* On since 2026-07-29. This machine un-matches /arm-io/mbx, and without
+     * the renderer override CA::WindowServer takes MBX2D, whose global context
+     * is NULL for exactly that reason, so SpringBoard composites nothing.
+     * run149 and run150 differ in this flag alone, at the same budget, and
+     * draw 273206 bytes against 1890. A default that guarantees a black screen
+     * was not a neutral choice. */
+    { "ca-software-render", true,  VM_OPT_GROUP_PATCH,       VM_OPT_IMPL_HARNESS },
     /* activate was NOWHERE until the app grew MAP_PROVISION_ACTIVATE and
      * VMFirmwareBoot.c began passing rootfs_work_activation_entries(). Its row
      * text claimed "NOT IMPLEMENTED ANYWHERE" while the app's own boot report

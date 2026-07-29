@@ -379,16 +379,25 @@ static void test_provisioned_row(void) {
           report.summary);
 
     /* And it must reach the provisioner, both ways. This is the switch that
-     * was previously forced on no matter what the screen showed. */
+     * was previously forced on no matter what the screen showed.
+     *
+     * Written against the row's own default rather than a literal polarity.
+     * The default moved on 2026-07-29 -- run149 and run150 differ in this flag
+     * alone, at the same budget, and draw 273206 bytes against 1890 -- and a
+     * test that hardcodes one side has to be edited every time that happens,
+     * which is how a test quietly stops checking the thing it is named for. */
+    const bool ca_def = vm_option_at((unsigned)ca)->def;
     defaults_into(values);
     vm_boot_options_for_provisioning(values, vm_option_count(), &provision);
-    CHECK(!provision.ca_software_render,
-          "the default (off) reached the provisioner as on");
+    CHECK(provision.ca_software_render == ca_def,
+          "the default (%s) did not reach the provisioner",
+          ca_def ? "on" : "off");
 
-    values[ca] = true;
+    values[ca] = !ca_def;
     vm_boot_options_for_provisioning(values, vm_option_count(), &provision);
-    CHECK(provision.ca_software_render,
-          "turning ca-software-render on did not reach the provisioner");
+    CHECK(provision.ca_software_render == !ca_def,
+          "flipping ca-software-render off its default did not reach the "
+          "provisioner");
 
     /* NULL means the table's defaults, never all-false-by-accident. */
     vm_boot_options_for_provisioning(NULL, 0u, &provision);

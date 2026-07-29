@@ -568,7 +568,7 @@ static const boot_toggle_t BOOT_TOGGLES[] = {
       "line). The stock record names disk0s1/disk0s2, which live behind a\n"
       "NAND FTL this machine does not have, so launchd's fsck fails and it\n"
       "halts. --no-fstab-fixup (== --keep-fstab) reproduces that halt." },
-    { "ca-software-render", NULL, NULL, false, BOOT_GROUP_PATCH,
+    { "ca-software-render", NULL, NULL, true, BOOT_GROUP_PATCH,
       BOOT_FIELD(ca_software_render),
       "add EnvironmentVariables CA_ENABLE_MBX2D=0 to SpringBoard's\n"
       "LaunchDaemon plist in this run's work image, which is how QuartzCore's\n"
@@ -24416,9 +24416,49 @@ int main(int argc, char **argv) {
         }
     }
 
+    /*
+     * Resolve --ca-software-render's DEFAULT against the machine it would run
+     * on, before anything below can refuse it.
+     *
+     * The flag defaults ON because this VM un-matches /arm-io/mbx by default.
+     * Without the override CA::WindowServer selects MBX2D, whose global
+     * context is NULL precisely because the GPU is un-matched, and SpringBoard
+     * dies in _mbx2DDisable forever. That is not a prediction: run149 and
+     * run150 differ in this flag and nothing else, at the same 3.55 G budget,
+     * and draw 273206 bytes versus 1890. run147 shows the shape of the
+     * failure -- SpringBoard reaches window-created, orderFront and makeKey,
+     * then composites nothing for 1.55 G more instructions.
+     *
+     * But the override cannot apply everywhere: it is written into a work
+     * image, it contradicts a matched GPU, and it contradicts --no-vram. This
+     * block's own rule is that "a default is never grounds for a rejection",
+     * so an unchosen default that cannot apply resolves silently to off
+     * instead of failing the run. Only an EXPLICIT --ca-software-render
+     * against one of those three still refuses -- which is exactly what the
+     * three expect_refused() cases in check_bootkernel_options.cmake pass, so
+     * they keep asserting what they always did.
+     *
+     * cfg.v is updated alongside, so --print-config keeps describing the run
+     * that would actually happen rather than the flag's table value.
+     */
+    {
+        int i_ca    = boot_toggle_index("ca-software-render");
+        int i_vramr = boot_toggle_index("vram");
+        if (i_ca < 0 || i_vramr < 0) {
+            fprintf(stderr, "internal error: toggle table lost a row\n");
+            return 2;
+        }
+        if (ca_software_render && cfg.req[i_ca] < 1 &&
+            (!external_md || cfg.v.mbx || cfg.req[i_vramr] == 0)) {
+            ca_software_render       = false;
+            cfg.v.ca_software_render = false;
+        }
+    }
+
     /* The plist rewrite lives in the work-image provisioner, and only
      * --external-md runs that. Accepting the flag anywhere else would let a
-     * run claim a renderer selection it never made. */
+     * run claim a renderer selection it never made. Only reachable now when
+     * the flag was asked for by name; see the resolution above. */
     if (ca_software_render && !external_md) {
         fprintf(stderr, "--ca-software-render requires --external-md\n");
         return 1;
