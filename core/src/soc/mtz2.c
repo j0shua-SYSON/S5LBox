@@ -877,7 +877,32 @@ static uint8_t mtz2_transfer(void *ctx, uint8_t out) {
                              ((uint32_t)dev->req[12] << 24) |
                              ((uint32_t)dev->req[13] << 16),
                              true);
-                dev->atn_len = MTZ2_ATN_PROBE;
+                /*
+                 * A WRITE IS ACKNOWLEDGED LIKE EVERY OTHER COMMAND, and this
+                 * was MTZ2_ATN_PROBE until run160 measured what that cost.
+                 *
+                 * §6.2 is explicit that the sender acknowledges after each
+                 * packet, and the packet list shows every other opcode getting
+                 * the right length -- `30:...` then `1a:2`, `1c:8` then
+                 * `1a:8`. Only `1e:16` was followed by `1a:16`, a sixteen-octet
+                 * probe answering the probe pattern, where 0xc0445284 is
+                 * comparing against the literal 0x4BC1. So the write reported
+                 * failure.
+                 *
+                 * performCalibSeq checks every write and bails on the first
+                 * one that fails -- `cmp r0, #0 / beq 0xc0445810` after each
+                 * of the four -- and run160 caught exactly that: one write to
+                 * 0x10001c04, never the other three at 0x10001c08, 0x1000300c
+                 * and 0x1000304c, then the entire bootload again. Three
+                 * identical cycles, so deterministic rather than a race.
+                 *
+                 * The old value was not arbitrary: the rule above is "every
+                 * command that is followed by an acknowledgement says which
+                 * kind it expects; everything else leaves the probe", and
+                 * WRREG had been classed as expecting none. That classification
+                 * was the error, not the rule.
+                 */
+                dev->atn_len = MTZ2_ATN_SHORT;
                 break;
             case MTZ2_OP_HBPP_CALIB:
                 dev->hbpp_calibs++;

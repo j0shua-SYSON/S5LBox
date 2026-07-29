@@ -941,6 +941,30 @@ static void test_the_hbpp_bootload_runs_to_completion(void) {
         hsum = s5l_mtz2_sum16(tx + 2, 12u);
         tx[14] = (uint8_t)(hsum >> 8); tx[15] = (uint8_t)(hsum);
         xfer(&s, tx, rx, MTZ2_FRAME_LEN);
+
+        /*
+         * AND EACH WRITE IS ACKNOWLEDGED. This loop used to send the four
+         * back-to-back with nothing between them, which is why the model
+         * classing WRREG as "expects no acknowledgement" survived: the case
+         * transcribed the driver's writes and omitted the reply each one gets.
+         *
+         * run160 measured the cost. The device answered the probe pattern to
+         * the `1A A1` that follows a write, 0xc0445284 compared it against
+         * 0x4BC1 and failed, and performCalibSeq -- which checks every write
+         * and bails on the first failure at 0xc0445810 -- stopped after ONE of
+         * these four and re-ran the entire bootload. Three identical cycles in
+         * a 2 G run, `wr 3`, never once reaching 0x10001c08.
+         */
+        uint8_t wack[MTZ2_ATN_SHORT] = { 0x1au, 0xa1u };
+        uint8_t wrx[MTZ2_ATN_SHORT];
+        memset(wrx, 0xff, sizeof wrx);
+        xfer(&s, wack, wrx, MTZ2_ATN_SHORT);
+        CHECK(((wrx[0] << 8) | wrx[1]) == MTZ2_HBPP_ATN_OK,
+              "the acknowledgement after register write %u answered 0x%04x, "
+              "not 0x%04x -- performCalibSeq treats that as a failed write and "
+              "abandons the bootload", i,
+              (unsigned)((wrx[0] << 8) | wrx[1]),
+              (unsigned)MTZ2_HBPP_ATN_OK);
     }
     CHECK(dev.hbpp_reg_writes == 4u, "%llu register writes were seen",
           (unsigned long long)dev.hbpp_reg_writes);
