@@ -225,6 +225,20 @@ typedef struct arm_bus {
      * Nothing derived from it may be snapshotted -- a host address means
      * nothing in another process -- which is why the fetch cache below is
      * zeroed rather than serialised.
+     *
+     * READS MAY USE THIS. WRITES MAY NOT, and the reason is not obvious:
+     * a frontend can interpose on this bus, and bootkernel does so
+     * unconditionally. Its read hook ignores RAM -- `if (!is_ram(...))` -- so
+     * bypassing it for a plain-RAM read observes nothing it wanted. Its WRITE
+     * hook does not: it carries the live scanout observer, which exists
+     * precisely to watch writes landing in the framebuffer, and the
+     * framebuffer is RAM. A write that went straight to the host pointer
+     * would be invisible to it, and the counter would under-report by exactly
+     * the traffic it was built to measure while still printing a number.
+     *
+     * So a store fast path needs the frontend's consent, not just a pointer.
+     * Anything adding one -- a JIT's memory path will want to -- has to give
+     * the interposer a way to see it, or ask whether one is installed.
      */
     uint8_t *(*host_ram)(void *ctx, uint32_t pa, uint32_t len);
 
