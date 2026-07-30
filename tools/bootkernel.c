@@ -25671,6 +25671,54 @@ int main(int argc, char **argv) {
             goto external_md_work_ready;
         }
 
+        /*
+         * Every entry, not one path. The /etc/ppp/options guard caught r200's
+         * stale binary because it printed the BYTES rather than a sentence
+         * about them -- but it only covered that one file, so when r204 added
+         * /private/var/run/resolv.conf the log said nothing about it, and
+         * "dns q 0" could not be read as either "the fix landed and did not
+         * work" or "the fix never landed". Those need opposite responses, and
+         * distinguishing them afterwards meant extracting files out of a
+         * 466 MB image with a tool that matches on leaf name and returns the
+         * first hit -- which, for resolv.conf, is the /etc symlink rather than
+         * the file being asked about.
+         *
+         * Printing what is about to be written costs nothing and removes a
+         * whole class of inconclusive run.
+         */
+        printf("provisioning: %zu entr%s into %s\n", options.entry_count,
+               options.entry_count == 1u ? "y" : "ies", external_md_work);
+        for (size_t pi = 0; pi < options.entry_count; pi++) {
+            const rootfs_work_entry_t *e = &options.entries[pi];
+            const char *kind = e->kind == ROOTFS_WORK_ENTRY_DIRECTORY ? "dir "
+                             : e->kind == ROOTFS_WORK_ENTRY_SYMLINK   ? "link"
+                                                                      : "file";
+            /* Bodies are printed only when they are small and textual: a
+             * payload carries megabytes of Mach-O and the point here is the
+             * plan, not the contents. */
+            bool printable = e->kind != ROOTFS_WORK_ENTRY_DIRECTORY &&
+                             e->content && e->content_size > 0u &&
+                             e->content_size <= 96u;
+            if (printable)
+                for (size_t bi = 0; bi < e->content_size; bi++)
+                    if (!isprint((unsigned char)e->content[bi]) &&
+                        e->content[bi] != '\n') { printable = false; break; }
+            if (options.entry_count > 24u && pi == 12u) {
+                printf("              ... %zu more entries not listed\n",
+                       options.entry_count - 12u);
+                break;   /* a payload's 776 rows would bury everything else */
+            }
+            printf("              %s %04o %-40s", kind,
+                   (unsigned)e->permissions, e->path ? e->path : "(null)");
+            if (printable) {
+                printf(" <- ");
+                for (size_t bi = 0; bi < e->content_size; bi++)
+                    putchar(e->content[bi] == '\n' ? ' ' : (int)e->content[bi]);
+            }
+            printf("\n");
+        }
+        fflush(stdout);
+
         rootfs_work_status_t root_status =
             rootfs_work_create(external_md_source, external_md_work,
                                &options, &result);
