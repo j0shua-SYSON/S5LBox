@@ -234,7 +234,27 @@ uint32_t arm_mmu_translate(arm_cpu_t *c, uint32_t va, arm_access_t acc,
     /* 1 KB key: see ARM_TLB_ENTRIES for why it cannot be the 4 KB page. */
     const uint32_t tag  = ((va >> 10) << 3) | ((uint32_t)acc << 1) |
                           (priv ? 1u : 0u);
-    const unsigned slot = (va >> 10) & (ARM_TLB_ENTRIES - 1u);
+    /*
+     * THE INDEX MUST SEPARATE WHAT THE TAG SEPARATES.
+     *
+     * This was `(va >> 10) & (ARM_TLB_ENTRIES - 1u)`, which ignores `acc`
+     * while the tag above includes it. So a FETCH and a data READ of the same
+     * 1 KB region hash to one slot, carry different tags, and evict each
+     * other -- every time, forever, in a direct-mapped table.
+     *
+     * Thumb is 68.95% of retired instructions and `LDR Rd,[PC,#imm8*4]` has a
+     * 0-1020 byte reach, so a large share of literal-pool loads land in the
+     * very block their code is executing from. Each one costs two walks: the
+     * load evicts the fetch entry, then the next fetch evicts the load's.
+     *
+     * Offsetting each access class by a quarter of the table keeps the full
+     * virtual-address entropy within a class while giving the three classes
+     * disjoint regions. Purely an index change -- the tag at `tag` above
+     * already carries `acc`, so no hit that was correct can become incorrect
+     * and no fault behaviour moves. It is a cache; only eviction changes.
+     */
+    const unsigned slot = ((va >> 10) + (unsigned)acc * (ARM_TLB_ENTRIES / 4u))
+                          & (ARM_TLB_ENTRIES - 1u);
 
     /*
      * A FAULTING TRANSLATION MUST LEAVE *pa UNTOUCHED, on a hit exactly as on

@@ -27289,6 +27289,26 @@ external_md_work_ready:
     mach.uart0.tx[mach.uart0.tx_len] = '\0';
     printf("stopped after %" PRIu64 " instructions: %s\n",
            mach.cpu.cycles, status_name(st));
+    /*
+     * THE TLB, which had no way to report itself.
+     *
+     * The counters have existed since dcbab59 and nothing ever printed them,
+     * so the software TLB's hit rate on real kernel code has never been
+     * observed -- only its effect on a synthetic insnbench loop. A hit rate is
+     * a property of the instruction stream, not of the host, so unlike a
+     * throughput number it is exact and immune to whatever else is running.
+     */
+    {
+        const uint64_t hits = mach.cpu.tlb_hits, misses = mach.cpu.tlb_misses;
+        const uint64_t look = hits + misses;
+        printf("  tlb            : %" PRIu64 " hits, %" PRIu64 " misses, "
+               "%" PRIu64 " flushes", hits, misses, mach.cpu.tlb_flushes);
+        if (look) printf("   hit rate %.3f%%  (%.2f lookups/insn)",
+                         100.0 * (double)hits / (double)look,
+                         mach.cpu.cycles
+                             ? (double)look / (double)mach.cpu.cycles : 0.0);
+        printf("\n");
+    }
     uint32_t final_reported_pc = last_pc & ~1u;
     diagnostic_pc_space_t final_pc_space = diagnostic_pc_observe(
         last_pc, last_cpsr, last_mmu_enabled, &final_reported_pc);
