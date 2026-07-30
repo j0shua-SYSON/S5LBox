@@ -6315,6 +6315,30 @@ static struct {
         uint64_t hits;
     } pc_hist[PCHASH];
 
+    /* --- WHICH ADDRESS SPACE THE USER SAMPLES CAME FROM -------------------
+     * A profile that says 92% [userspace] does not say 92% of WHAT. r206
+     * windowed the unlock drag expecting SpringBoard compositing and found
+     * 57% of the window in CryptKit modular exponentiation -- gshiftright,
+     * grammarSquare, mulg, normal_subg -- which is not something a lock-screen
+     * animation does. Either the frame really is dominated by RSA, or another
+     * process was running in the same window, and the profile could not tell
+     * those apart.
+     *
+     * TTBR0 separates them for one register read. It is the page-table base,
+     * so it is per address space, and it is already in the CPU state the
+     * sampler holds -- no kernel structure walk, nothing to get wrong, and
+     * cheap enough to do on every sample. Naming the process needs the
+     * identity machinery; distinguishing them does not, and distinguishing is
+     * what decides whether an HLE target is on the frame's critical path.
+     */
+    unsigned    as_n;
+    uint64_t    as_dropped;
+    struct {
+        uint32_t base;          /* TTBR0 translation-table base            */
+        uint64_t hits;
+    } as_hist[16];
+
+
     /* --- DIAGNOSTIC: the single hottest unmodelled MMIO page ---------------
      * One physical page absorbs ~2% of every instruction in a 200M boot. This
      * probe answers, for that page alone: which word offsets, from which PCs,
@@ -16846,6 +16870,25 @@ static void prof_sample(const arm_cpu_t *cpu, uint32_t pc) {
     diagnostic_pc_space_t space = diagnostic_pc_observe(
         pc, cpsr, mmu_enabled, &reported_pc);
     pc_sample(reported_pc, space);
+    /* Only user-mode samples: kernel PCs are one address space by definition
+     * and would swamp the table with the idle thread's. */
+    if (space == DIAGNOSTIC_PC_USER && cpu) {
+        uint32_t base = diagnostic_ttbr0_base(cpu);
+        unsigned slot;
+        for (slot = 0; slot < G.as_n; slot++)
+            if (G.as_hist[slot].base == base) break;
+        if (slot == G.as_n) {
+            if (G.as_n < (sizeof G.as_hist / sizeof G.as_hist[0])) {
+                G.as_hist[G.as_n].base = base;
+                G.as_hist[G.as_n].hits = 0;
+                G.as_n++;
+            } else {
+                G.as_dropped++;          /* never silently: reported */
+                slot = (unsigned)-1;
+            }
+        }
+        if (slot != (unsigned)-1) G.as_hist[slot].hits++;
+    }
     const char *nm = diagnostic_pc_name(space, reported_pc);
     const char *bar = strchr(nm, '+');
     static char names[PROF_MAX][96];
@@ -28176,6 +28219,36 @@ external_md_work_ready:
      * com.apple.driver.AppleMBX+0x122 — an address to disassemble rather than
      * a mystery to bisect.
      */
+    /*
+     * Which address spaces the user samples came from. Unnamed on purpose:
+     * TTBR0 is free and exact, whereas turning it into a process name needs the
+     * identity walk and can fail. The question this answers is whether the hot
+     * user code sits in ONE address space or several -- which is what decides
+     * whether a candidate HLE target is on the frame's critical path or belongs
+     * to some other process that happened to run in the same window.
+     */
+    printf("\n=== USER SAMPLES BY ADDRESS SPACE (TTBR0 base) ===\n");
+    {
+        uint64_t total = 0;
+        for (unsigned i = 0; i < G.as_n; i++) total += G.as_hist[i].hits;
+        printf("    %" PRIu64 " user samples over %u address space(s)\n",
+               total, G.as_n);
+        if (G.as_dropped)
+            printf("    WARNING: %" PRIu64 " samples from further address "
+                   "spaces were dropped (table full)\n", G.as_dropped);
+        for (unsigned rank = 0; rank < G.as_n; rank++) {
+            uint64_t best = 0;
+            unsigned bi = G.as_n;
+            for (unsigned i = 0; i < G.as_n; i++)
+                if (G.as_hist[i].hits > best) { best = G.as_hist[i].hits; bi = i; }
+            if (bi == G.as_n || !best) break;
+            printf("    %5.1f%%  ttbr0 0x%08x   %" PRIu64 " samples\n",
+                   total ? 100.0 * (double)best / (double)total : 0.0,
+                   G.as_hist[bi].base, best);
+            G.as_hist[bi].hits = 0;   /* consume */
+        }
+    }
+
     printf("\n=== HOTTEST INDIVIDUAL PCs (same samples, exact address) ===\n");
     {
         uint64_t total = 0;
