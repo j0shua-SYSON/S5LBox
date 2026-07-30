@@ -25485,6 +25485,25 @@ int main(int argc, char **argv) {
             }
             options.entries = provision_entries;
             options.entry_count = have + want;
+            /*
+             * Print the BYTES, not a sentence about them. r200 spent thirty
+             * minutes measuring DNS against a binary built one second before
+             * the usepeerdns commit landed; its banner said "defaultroute"
+             * while the source said "defaultroute and usepeerdns", and that
+             * one-word difference was the only evidence the run was already
+             * invalid. A hand-written banner describes what the author meant.
+             * This describes what the guest will actually read.
+             */
+            for (unsigned pi = 0; pi < have + want; pi++) {
+                const char *path = provision_entries[pi].path;
+                if (!path || !strstr(path, "/etc/ppp/options")) continue;
+                printf("ppp        : %s <- ", path);
+                const uint8_t *body = provision_entries[pi].content;
+                size_t body_n = (size_t)provision_entries[pi].content_size;
+                for (size_t bi = 0; bi < body_n; bi++)
+                    putchar(body[bi] == '\n' ? ' ' : (int)body[bi]);
+                printf("(%u bytes)\n", (unsigned)body_n);
+            }
             printf("ppp        : /etc/ppp/options will be provisioned with "
                    "defaultroute and usepeerdns\n"
                    "             (run129: the link opened and the guest had no "
