@@ -396,6 +396,36 @@ else()
 endif()
 add_test(NAME app_jit_probe COMMAND test_vmjitprobe)
 
+# Guest-function HLE (tools/ios3_hle.c). The composited-pixel work the guest
+# does only because this VM un-matches the GPU is the one cost no interpreter
+# speed absorbs, and intercepting a leaf blit is how it stops being executed.
+# It needs no JIT: the replacement is compiled C in this binary's signed
+# __TEXT and the interception is a PC compare, so nothing is generated at
+# runtime and there is nothing for iOS to refuse.
+#
+# The tests are almost all REFUSALS -- no prologue, wrong bytes, unreadable
+# bytes, wrong address space, handler declines -- because a facility that
+# replaces functions inside a running OS is dangerous in proportion to how
+# willing it is to fire. Whether a replacement computes the same PIXELS cannot
+# be unit-tested; that needs a frame diff of a real run armed and disarmed,
+# which is the oracle named in the header's contract.
+add_executable(test_ios3_hle
+    tests/test_ios3_hle.c
+    ../tools/ios3_hle.c
+)
+target_include_directories(test_ios3_hle PRIVATE ../tools include)
+set_target_properties(test_ios3_hle PROPERTIES
+    C_STANDARD 11
+    C_STANDARD_REQUIRED YES
+    C_EXTENSIONS NO)
+if(MSVC)
+    target_compile_options(test_ios3_hle PRIVATE /W4 /WX)
+else()
+    target_compile_options(test_ios3_hle PRIVATE
+        -Wall -Wextra -Werror -pedantic -Wformat=2 -Wshadow)
+endif()
+add_test(NAME ios3_hle COMMAND test_ios3_hle)
+
 # Which files belong to which machine.  The identifier from the machine list
 # becomes a PATH COMPONENT here, so the check that admits only sixteen
 # lower-case hex digits is a security boundary and not a formatting rule; and
