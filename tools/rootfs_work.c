@@ -5574,13 +5574,42 @@ static const char PPP_OPTIONS_FILE[] = "defaultroute\nusepeerdns\n";
  * is the same shape as provisioning /etc/ppp/options -- a static file the
  * guest cannot write for itself, holding the address ppp.c already hands out.
  *
- * NOT YET DEMONSTRATED that a page loads. This gives the resolver a
- * nameserver; whether the query, the answer and then a TCP connection all
- * complete is the measurement, and dns_queries is where it shows.
- *
  * /private/var/run ships on the stock volume, so only the FILE is created.
  * Asking for the parent as well is what made the first /etc/ppp attempt refuse
  * the whole plan instead of one entry.
+ *
+ * r204 RAN THIS AND IT DID NOT WORK, and the entry is kept anyway. The file is
+ * provisioned -- the per-entry provisioning dump added after this run prints
+ *
+ *     file 0644 /private/var/run/resolv.conf  <- nameserver 10.0.2.3
+ *
+ * and r204 reported no provisioning error -- and the guest still sent zero UDP
+ * and zero DNS queries. So this is a real negative, not an unreadable one, and
+ * it eliminates the last "the guest was never told a nameserver" explanation:
+ * pppd asks (six IPCP DNS options in r203), the peer answers (two Acked, four
+ * Naked with 10.0.2.3), and now the file the /etc symlink points at exists and
+ * names the same address. Three separate places all say 10.0.2.3 and nothing
+ * sends a packet.
+ *
+ * What that leaves is the CONSUMER. Safari resolves through CFNetwork into
+ * mDNSResponder, and mDNSResponder on Darwin takes its servers from configd's
+ * dynamic store rather than by reading resolv.conf -- the store is populated by
+ * the SystemConfiguration PPP controller, which this image does not run: it
+ * gets a bare pppd on uart4 instead. A resolver holding zero servers fails its
+ * caller immediately without touching a socket, which is exactly the observed
+ * signature of zero ATTEMPTS rather than zero answers.
+ *
+ * That is an explanation consistent with every measurement so far, and it is
+ * NOT yet a demonstrated cause. The next diagnostic is a trace of what the
+ * guest actually opens and what mDNSResponder is holding -- not a fourth
+ * speculative file. Three fixes have now been aimed at layers that were already
+ * correct (defaultroute, usepeerdns, this), each costing a ~35-minute run,
+ * while the six-line IPCP counter in core/src/net/ppp.c is what actually
+ * located the fault.
+ *
+ * The entry stays because it is correct and cheap: a resolver that DOES fall
+ * back to the file will find the right address there, and removing it would
+ * only put back an absence that had to be measured once already.
  */
 static const char RESOLV_CONF_FILE[] = "nameserver 10.0.2.3\n";
 
