@@ -221,6 +221,23 @@ sits exactly where it should between these: real code is branchier and more
 Thumb-heavy than a four-instruction loop, and it is presumably from an optimised
 build.
 
+> **STALE as a description of today, 2026-07-30.** That 6.5 figure predates
+> both the tick early-out and the software TLB, and it is still the number this
+> document is read against — it was quoted back to me twice this week as the
+> current rate. The nearest real-code measurement after the tick fix is 300 M
+> instructions in 48.8 s = **6.15 M/s**, taken the day BEFORE the TLB landed,
+> and two changes have gone in since:
+>
+> | change | measured |
+> |---|---|
+> | TLB index de-aliased (`acc` was in the tag, not the index) | 11,096,237 → 130,477 misses over a 300 M boot; throughput not isolated |
+> | instruction-fetch block cache (host pointer, 1 KB) | TLB lookups 1.10 → 0.12 per instruction; **~8%** wall clock |
+>
+> So the honest current figure is "somewhere above 6.15 M/s and not measured on
+> a quiet machine". Every ratio in this document that divides by 6.5 is
+> therefore approximate in an unknown direction. Re-measure before planning
+> against it.
+
 The first conclusion was uncomfortable and has since been acted on: **the
 committed CMake configuration was leaving a 3x on the table.** `CMAKE_BUILD_TYPE`
 was empty and the compile line carried no `-O` flag. Since `b3940fa` the
@@ -290,6 +307,22 @@ do per instruction:
    > shipping caller does it per instruction (`bootkernel`, `s5l8900_run`,
    > `runfw`, `snapboot`). And **§1.5's "tick once per batch ≈ 1.2×" is
    > superseded**: on this loop it is worth roughly 8×.
+   >
+   > **TAKEN 2026-07-28, and this is the sentence two readers missed.** The
+   > 6.3× above is a measurement of what deferring the tick WOULD be worth. It
+   > has since been done: `core/src/soc/machine.c:1204` early-outs when nothing
+   > is pending, and `core/include/soc.h` records the result — insnbench's
+   > tick=yes rows went **1.58 → 7.89 M/s** with the 4 KB MMU, a real 300 M
+   > instruction boot went **189.1 s → 48.8 s**, and the guest console,
+   > framebuffer and machine snapshot came out byte-identical. **The tick now
+   > costs 3.4% of the MMU row, not 76% of it. There is no 6.3× left here.**
+   >
+   > Left standing because the measurement is real and the reasoning is worth
+   > keeping — but on 2026-07-30 two independent research agents read this
+   > section, quoted "6.3×, the largest non-JIT win available" as work still on
+   > the table, and built recommendations on it. A figure that describes a
+   > closed opportunity has to say so where the figure is, not only in the
+   > commit that closed it.
    >
    > Note also that the no-tick rows here are far above the historical table
    > (41.86 vs 8.59 M/s for alu/branch). Those older figures were taken on a
