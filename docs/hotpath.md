@@ -106,3 +106,51 @@ times in r195 and does not appear in the profile at all. Executing a guest secon
 per host second was never the requirement; only per-frame work is. The
 load-bearing unknown is **instructions per composited frame**, which r187 put a
 floor under at 111,337 (its minimum gap between composites).
+
+## The SHA-1 site, disassembled
+
+Capstone lives at `work/tools/capstone-python` (see `tools/dscmap.py` for the
+`sys.path` line). `__TEXT` maps `vm 0xc0008000 -> file 0x0`, so a kernel VA in
+that segment is at file offset `VA - 0xc0008000`.
+
+**It is Thumb, and that was measured rather than assumed:** over the 0x13fc-byte
+region, Thumb decodes 2,541 instructions with 1 undecodable byte and ARM decodes
+1,279 with 154. Not a close call.
+
+Candidate function entries in the region, by prologue:
+
+| VA | offset | prologue |
+|---|---|---|
+| `0xc01704a8` | +0x0 | (none -- leaf) `SHA1Init`, zeroes a context at +0x5c |
+| `0xc01704dc` | +0x34 | `push {r4, r5, r6, r7, lr}` |
+| `0xc0170534` | +0x8c | `push {r4, r5, r6, lr}` |
+| `0xc017053c` | +0x94 | `push {r4, r5, r6}` |
+| `0xc01716e0` | +0x1238 | `push {r4, r5, r6, r7, lr}` |
+| `0xc01717c4` | +0x131c | `push {r4, r5, r6, r7, lr}` |
+| `0xc0171840` | +0x1398 | `push {r4, r5, r6, r7, lr}` |
+| `0xc0171894` | +0x13ec | `push {r7, lr}` |
+
+The profile's hot window (+0x10e8..+0x1120) falls between +0x94 and +0x1238, so
+the function containing it spans roughly `0xc017053c..0xc01716e0` -- about 4,516
+bytes with no backward branch. That is **the SHA-1 compression function, fully
+unrolled**: 80 rounds at ~56 bytes each.
+
+The round structure is visible in the window and confirms the identification
+without needing the whole listing:
+
+* `rors` by `#2`   -- ROTL30, applied to `b`
+* `rors` by `#0x1b` -- ROTL5, applied to `a`
+* `rors` by `#0x1f` -- ROTL1, over a four-way `eors` chain: the message
+  schedule `W[t] = ROTL1(W[t-3] ^ W[t-8] ^ W[t-14] ^ W[t-16])`
+
+**Still to do before arming.** The exact entry of the compression function is not
+yet pinned -- `0xc0170534` and `0xc017053c` are 8 bytes apart and only one is the
+true entry; the other is reached by a branch. Its ABI (whether it takes
+`(state, block)` or a whole `SHA1_CTX`) has to be read off the call sites, not
+guessed. Intercepting the compression function is preferable to intercepting
+`SHA1Update`, because it is pure: 5 words of state in, 64 bytes of block in, 5
+words out, no buffering and no length bookkeeping to reproduce.
+
+An HLE that computes a real SHA-1 over the real input is not fabrication -- it is
+the same answer by a faster route -- but it must be proved so: run both paths on
+the first N blocks and compare digests before the native path is trusted.
