@@ -244,6 +244,36 @@ static const uint32_t g_prog_ldst[] = {
     0x1afffffau    /* BNE  loop        */
 };
 
+/*  THUMB alu/branch -- the same five-instruction loop, in the other encoding.
+ *
+ *      loop:  ADDS r0, #1      3001
+ *             ADDS r1, #7      3107
+ *             ADDS r3, #1      3301
+ *             SUBS r2, #1      3A01
+ *             BNE  loop        D1FA
+ *
+ * WHY THIS ROW EXISTS, AND WHY IT SHOULD HAVE FROM THE START. Every throughput
+ * number this file has ever produced was measured on ARM, and §1.3 says real
+ * guest code is 68.95% THUMB. So the whole basis for "the interpreter runs at
+ * N M insn/s" was an encoding the guest mostly does not use, and the 3x gap
+ * between these synthetic rows and a real boot (11.27 vs 3.82 M insn/s) had no
+ * way to distinguish "real code is branchier" from "the Thumb decoder is
+ * slower". Same loop, same registers, same iteration count, one encoding
+ * different: whatever this row differs by IS the encoding.
+ *
+ * Format-3 ADD/SUB immediate always sets the flags in Thumb, unlike the ARM
+ * row's plain ADDs. It changes nothing here because the BNE tests the Z from
+ * the SUBS that immediately precedes it either way.
+ *
+ * Packed two halfwords per word so the existing poke32 loader is unchanged;
+ * the sixth halfword is padding and is never reached.
+ */
+static const uint32_t g_prog_thumb[] = {
+    0x31073001u,   /* ADDS r0,#1 ; ADDS r1,#7 */
+    0x3A013301u,   /* ADDS r3,#1 ; SUBS r2,#1 */
+    0x0000D1FAu    /* BNE  loop  ; (padding)  */
+};
+
 #define BENCH_LOOP_INSNS 5u
 
 /* Every checked end-state value is folded in here and the result is printed, so
@@ -259,16 +289,21 @@ typedef struct {
     bool        mmu_on;
     bool        small_pages;
     bool        do_tick;
+    bool        thumb;       /* enter with CPSR.T set                   */
 } bench_cfg_t;
 
 static const bench_cfg_t g_configs[] = {
     /* loop          mmu             tick    prog          words                    mmu_on small  tick */
-    { "alu/branch",  "off",          "no",   g_prog_alu,  (unsigned)(sizeof g_prog_alu  / 4), false, false, false },
-    { "load/store",  "off",          "no",   g_prog_ldst, (unsigned)(sizeof g_prog_ldst / 4), false, false, false },
-    { "load/store",  "off",          "yes",  g_prog_ldst, (unsigned)(sizeof g_prog_ldst / 4), false, false, true  },
-    { "load/store",  "sections-1M",  "no",   g_prog_ldst, (unsigned)(sizeof g_prog_ldst / 4), true,  false, false },
-    { "load/store",  "pages-4K",     "no",   g_prog_ldst, (unsigned)(sizeof g_prog_ldst / 4), true,  true,  false },
-    { "load/store",  "pages-4K",     "yes",  g_prog_ldst, (unsigned)(sizeof g_prog_ldst / 4), true,  true,  true  }
+    { "alu/branch",  "off",          "no",   g_prog_alu,  (unsigned)(sizeof g_prog_alu  / 4), false, false, false, false },
+    { "load/store",  "off",          "no",   g_prog_ldst, (unsigned)(sizeof g_prog_ldst / 4), false, false, false, false },
+    { "load/store",  "off",          "yes",  g_prog_ldst, (unsigned)(sizeof g_prog_ldst / 4), false, false, true,  false },
+    { "load/store",  "sections-1M",  "no",   g_prog_ldst, (unsigned)(sizeof g_prog_ldst / 4), true,  false, false, false },
+    { "load/store",  "pages-4K",     "no",   g_prog_ldst, (unsigned)(sizeof g_prog_ldst / 4), true,  true,  false, false },
+    { "load/store",  "pages-4K",     "yes",  g_prog_ldst, (unsigned)(sizeof g_prog_ldst / 4), true,  true,  true,  false },
+    /* The encoding real code actually uses. Paired with the ARM row above it
+     * and with the MMU row, so the comparison is one variable at a time. */
+    { "alu/branch T","off",          "no",   g_prog_thumb,(unsigned)(sizeof g_prog_thumb/ 4), false, false, false, true  },
+    { "alu/branch T","pages-4K",     "yes",  g_prog_thumb,(unsigned)(sizeof g_prog_thumb/ 4), true,  true,  true,  true  }
 };
 #define BENCH_CONFIG_COUNT (sizeof g_configs / sizeof g_configs[0])
 
@@ -397,6 +432,10 @@ static bool setup(s5l8900_t *m, const bench_cfg_t *cfg) {
     cpu->r[3] = 0;
     cpu->r[4] = BENCH_DATA_VA;
     cpu->r[15] = BENCH_CODE_VA;
+    /* Thumb state is a CPSR bit, not an address bit: r15 stays even and the
+     * interpreter's fetch width follows T. Set AFTER the mode/CPSR setup above
+     * so nothing there clears it. */
+    if (cfg->thumb) cpu->cpsr |= ARM_CPSR_T;
 
     if (cfg->mmu_on && !check_map(m, cfg->small_pages)) return false;
     return true;
@@ -470,7 +509,7 @@ static bool verify(s5l8900_t *m, const bench_cfg_t *cfg, uint64_t retired) {
         ok = false;
     }
 
-    if (cfg->prog == g_prog_alu) {
+    if (cfg->prog == g_prog_alu || cfg->prog == g_prog_thumb) {
         if (cpu->r[0] != it32) {
             printf("  ERROR: r0=%u, expected %u\n", cpu->r[0], it32);
             ok = false;
