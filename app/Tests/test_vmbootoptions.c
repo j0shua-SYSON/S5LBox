@@ -222,14 +222,19 @@ static void test_untouched_installation_reaches_the_machine(void) {
               EXPECTED_OVERRIDDEN_AT_DEFAULT[i], report.summary);
     }
 
+    /*
+     * `multitouch` LEFT THIS LIST on 2026-07-30, which the entry that used to
+     * sit here said it would do "the day the bootload completes". It did:
+     * run163 drove every stage of the HBPP state machine once and in order,
+     * and r181/r182 slid the lock screen open. It no longer costs the display
+     * either -- matched and un-matched both render 273,206 bytes -- so the
+     * trade it was hidden for does not exist any more. It is asserted as
+     * MATCHED below rather than simply deleted, because "it quietly stopped
+     * being applied" and "it is now on by default" would otherwise look the
+     * same here.
+     */
     static const char *const NUBS[] = {
-        "mbx", "sha1", "baseband", "spi2", "usb-otg",
-        /* Added 2026-07-29, and it is the odd one out: the five above are
-         * hidden because matching them hangs or panics a boot, this one
-         * because the Z2 bootload is unfinished and a matched digitizer costs
-         * the whole display while returning no touch. It leaves this list the
-         * day the bootload completes. */
-        "multitouch"
+        "mbx", "sha1", "baseband", "spi2", "usb-otg"
     };
     const unsigned nub_n = (unsigned)(sizeof NUBS / sizeof NUBS[0]);
 
@@ -257,10 +262,34 @@ static void test_untouched_installation_reaches_the_machine(void) {
     CHECK(request.unmatch == report.unmatch,
           "the request does not point at the report's list");
 
+    /*
+     * The digitizer is the other half of that change: still APPLIED, so the
+     * switch reaches the machine, but now effective at its default and
+     * therefore absent from the un-match list. Checked explicitly, because a
+     * row that silently stopped being applied would also produce a shorter
+     * list.
+     */
+    {
+        int mt = index_of("multitouch");
+        CHECK(mt >= 0, "the multitouch row is gone from the table");
+        if (mt >= 0) {
+            CHECK(report.row[mt].outcome == VM_BOOT_OPTION_APPLIED,
+                  "\"multitouch\" does not reach the machine");
+            CHECK(report.row[mt].effective,
+                  "\"multitouch\" is un-matched at its default; the bootload "
+                  "completes and a slide-to-unlock works, so the digitizer "
+                  "should be present");
+            for (unsigned j = 0; j < report.unmatch_count; j++)
+                CHECK(!report.unmatch[j] ||
+                          strcmp(report.unmatch[j], "arm-io/spi1/multi-touch"),
+                      "the digitizer is still being struck from the tree");
+        }
+    }
+
     /* By path, not by count: five of the wrong nodes would pass a count. */
     static const char *const PATHS[] = {
         "arm-io/mbx", "arm-io/sha1", "baseband", "arm-io/spi2",
-        "arm-io/usb-otg", "arm-io/spi1/multi-touch"
+        "arm-io/usb-otg"
     };
     for (unsigned i = 0; i < nub_n; i++) {
         bool found = false;

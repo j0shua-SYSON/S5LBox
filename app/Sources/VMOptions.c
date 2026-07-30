@@ -33,12 +33,12 @@ static const vm_option_t VM_OPTIONS[] = {
       "derives a self-inconsistent endpoint count and panics.",
       false, VM_OPT_GROUP_HARDWARE, VM_OPT_IMPL_HARNESS },
     { "multitouch", "Touchscreen  ·  /arm-io/spi1/multi-touch",
-      "Off, and this one is a loss rather than a hazard: the touchscreen is "
-      "the point. Matched, the firmware download sends all 54,156 bytes, never "
-      "starts the part, and the boot stops before anything is drawn -- a black "
-      "screen and no touch. Un-matched, the same build reaches the lock "
-      "screen. Turn it ON to work on touch; expect no picture while you do.",
-      false, VM_OPT_GROUP_HARDWARE, VM_OPT_IMPL_HARNESS },
+      "On. The digitizer is bootloaded exactly as the real part is -- Apple's "
+      "own driver reports \"downloaded 54156 bytes of firmware data in "
+      "106ms\" -- and a slide-to-unlock reaches the home screen. It no longer "
+      "costs the picture either: matched and un-matched both render the same "
+      "273,206 bytes. Off leaves the guest with no touchscreen at all.",
+      true, VM_OPT_GROUP_HARDWARE, VM_OPT_IMPL_HARNESS },
 
     { "vram", "Publish /vram:reg",
       "On: this is the fix that made the guest render. Without it SpringBoard's "

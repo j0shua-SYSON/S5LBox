@@ -48,7 +48,11 @@ static const struct {
      * framing (one 30:54154 packet, zero unknown opcodes) and STILL costs the
      * display, so correct framing alone does not earn this switch back. Flip it
      * the day the bootload reaches EXEC, not before. */
-    { "multitouch",         false, VM_OPT_GROUP_HARDWARE,    VM_OPT_IMPL_HARNESS },
+    /* Default flipped ON 2026-07-30: the bootload completes (run163) and a
+     * slide-to-unlock reaches the home screen (r181/r182). The old OFF default
+     * was a trade against a black screen that no longer exists -- matched and
+     * un-matched both render 273,206 bytes. */
+    { "multitouch",         true,  VM_OPT_GROUP_HARDWARE,    VM_OPT_IMPL_HARNESS },
     { "vram",               true,  VM_OPT_GROUP_PATCH,       VM_OPT_IMPL_HARNESS },
     { "lcd-panel-id",       true,  VM_OPT_GROUP_PATCH,       VM_OPT_IMPL_HARNESS },
     { "memory-reg",         true,  VM_OPT_GROUP_PATCH,       VM_OPT_IMPL_HARNESS },
