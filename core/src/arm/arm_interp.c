@@ -1875,7 +1875,77 @@ static arm_status_t exec_media(arm_cpu_t *c, uint32_t pc, uint32_t insn) {
         return ARM_OK;
     }
 
-    return ARM_UNDEFINED;                  /* PKH, SEL, USAT, SMLAD, ... */
+    /*
+     * PKHBT and PKHTB — pack halfword.
+     *
+     *   cccc 0110 1000 nnnn dddd iiiii t01 mmmm      t: 0 = BT, 1 = TB
+     *
+     * WHY THIS IS HERE: r205 stopped on `PKHTB r4, r4, r3, ASR #16`
+     * (0xe6844853) at 0x33922c78 in pid 38, roughly 340 M instructions after a
+     * tap that opened Notes. Nothing before it had ever executed a media
+     * instruction from this family, so the gap survived every earlier boot; it
+     * is reached the moment userspace runs halfword-packing code.
+     *
+     * BT takes the BOTTOM halfword of Rn and the TOP of the shifted Rm; TB is
+     * the reverse. The shift applies to Rm only, LSL for BT and ASR for TB, and
+     * for TB an imm5 of zero encodes ASR #32 rather than no shift — an
+     * arithmetic shift of 32 leaves every bit equal to the sign bit, which is
+     * why it is computed rather than shifted (a C shift by 32 on a 32-bit type
+     * is undefined behaviour).
+     *
+     * The halves are combined AFTER shifting, so nothing can bleed between them.
+     */
+    if ((insn & 0x0ff00030u) == 0x06800010u) {
+        unsigned rn = (insn >> 16) & 0xfu;
+        unsigned rd = (insn >> 12) & 0xfu;
+        unsigned rm = insn & 0xfu;
+        unsigned imm5 = (insn >> 7) & 0x1fu;
+        bool tb = ((insn >> 6) & 1u) != 0u;
+        if (rd == 15u || rn == 15u || rm == 15u) return ARM_UNDEFINED;
+
+        uint32_t n = reg_read(c, pc, rn);
+        uint32_t m = reg_read(c, pc, rm);
+        uint32_t shifted;
+        if (tb) {
+            /* ASR, with imm5 == 0 meaning #32: every bit becomes the sign. */
+            shifted = imm5 ? (uint32_t)((int32_t)m >> imm5)
+                           : (uint32_t)((int32_t)m >> 31);
+            c->r[rd] = (n & 0xffff0000u) | (shifted & 0x0000ffffu);
+        } else {
+            shifted = imm5 ? (m << imm5) : m;
+            c->r[rd] = (n & 0x0000ffffu) | (shifted & 0xffff0000u);
+        }
+        return ARM_OK;
+    }
+
+    /*
+     * SEL — select bytes using the GE flags.
+     *
+     *   cccc 0110 1000 nnnn dddd 1111 1011 mmmm
+     *
+     * Implemented alongside PKH rather than after the next stop, for the reason
+     * the parallel add/sub family above states: SEL is what READS the GE bits
+     * those instructions write, so the producer being present and the consumer
+     * trapping is a gap of exactly one instruction in the middle of working
+     * code. Each GE bit picks one byte lane from Rn, otherwise from Rm.
+     */
+    if ((insn & 0x0ff00ff0u) == 0x06800fb0u) {
+        unsigned rn = (insn >> 16) & 0xfu;
+        unsigned rd = (insn >> 12) & 0xfu;
+        unsigned rm = insn & 0xfu;
+        if (rd == 15u || rn == 15u || rm == 15u) return ARM_UNDEFINED;
+        uint32_t n = reg_read(c, pc, rn), m = reg_read(c, pc, rm);
+        uint32_t ge = (c->cpsr >> 16) & 0xfu;
+        uint32_t out = 0u;
+        for (unsigned lane = 0; lane < 4u; lane++) {
+            uint32_t mask = UINT32_C(0xff) << (lane * 8u);
+            out |= ((ge >> lane) & 1u) ? (n & mask) : (m & mask);
+        }
+        c->r[rd] = out;
+        return ARM_OK;
+    }
+
+    return ARM_UNDEFINED;                  /* USAT, SSAT, SMLAD, ... */
 }
 
 static arm_status_t exec_multiply(arm_cpu_t *c, uint32_t pc, uint32_t insn) {

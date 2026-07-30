@@ -1793,11 +1793,26 @@ static void test_arm_media_reverse_edges(void) {
 }
 
 static void test_unimplemented_media_still_traps(void) {
-    /* SEL is media-space but not implemented; it must still be named rather
-     * than silently mis-executed as a load/store. */
-    uint32_t sel[] = { 0xe6800fb1 };   /* SEL r0,r0,r1 */
-    arm_cpu_t c; arm_status_t st = run_status(&c, sel, 1, 1);
-    CHECK(st == ARM_UNDEFINED, "status=%d expect ARM_UNDEFINED for SEL", (int)st);
+    /*
+     * This guard used to name SEL. SEL is implemented now -- see
+     * test_pack_halfword_and_select -- so the guard moves to encodings that are
+     * still absent, because its point is not any particular instruction: it is
+     * that media space must be REFUSED by name rather than falling through into
+     * the load/store decode and being executed as something else.
+     *
+     * SSAT and USAT are the natural successors: same 011 space, same bit 4, and
+     * the decoder's catch-all still lists them.
+     */
+    struct { uint32_t insn; const char *what; } v[] = {
+        { 0xe6a01011u, "SSAT r1, #1, r1, LSL #0" },
+        { 0xe6e01011u, "USAT r1, #0, r1, LSL #0" },
+    };
+    for (unsigned i = 0; i < sizeof v / sizeof v[0]; i++) {
+        arm_cpu_t c;
+        arm_status_t st = run_status(&c, &v[i].insn, 1, 1);
+        CHECK(st == ARM_UNDEFINED, "%s: status=%d expect ARM_UNDEFINED",
+              v[i].what, (int)st);
+    }
 }
 
 static void test_apx_makes_mapping_read_only(void) {
@@ -3490,7 +3505,7 @@ static void test_non_vfp_undefined_still_halts(void) {
      * trapped deliberately and we want to see where. */
     struct { uint32_t insn; const char *what; } v[] = {
         { 0xe7ffdefeu, "BKPT (0xE7FFDEFE)"           },
-        { 0xe6800010u, "PKHBT (unimplemented media)" },
+        { 0xe6a01011u, "SSAT (unimplemented media)" },
         { 0xf1010200u, "SETEND BE"                   },
         { 0xee000d10u, "MCR p13 (a coprocessor we do not model)" },
     };
@@ -4674,6 +4689,91 @@ static void test_parallel_add_sub_family(void) {
     }
 }
 
+/*
+ * PKHBT / PKHTB / SEL -- the media instructions r205 stopped on.
+ *
+ * r205 halted with UNDEFINED INSTRUCTION on 0xe6844853, `PKHTB r4, r4, r3,
+ * ASR #16`, at 0x33922c78 in pid 38, about 340 M instructions after a tap that
+ * opened Notes. Every earlier boot missed it because nothing had run
+ * halfword-packing code; the decoder's catch-all named PKH in a comment and
+ * returned UNDEFINED.
+ *
+ * SEL is tested here rather than after the next stop because the parallel
+ * add/sub family above already WRITES the GE flags and SEL is what reads them:
+ * producer present, consumer trapping, is a one-instruction hole in the middle
+ * of otherwise working code.
+ */
+static void test_pack_halfword_and_select(void) {
+    arm_cpu_t c;
+    static const struct {
+        uint32_t insn, rn, rm, ge, expect;
+        const char *what;
+    } CASES[] = {
+        /* PKHTB r2, r1, r0, ASR #16: top half from Rn, low half from Rm >> 16.
+         * Rm is negative, so the arithmetic shift fills with ones and the low
+         * half is its top half. */
+        { 0xe6812850u, 0xaaaa1111u, 0xbbbb2222u, 0u, 0xaaaabbbbu,
+          "PKHTB takes Rn top and shifted Rm bottom" },
+        /* PKHBT r2, r1, r0, LSL #8: low half from Rn, top half from Rm << 8. */
+        { 0xe6812410u, 0xaaaa1111u, 0x0000bb22u, 0u, 0x00bb1111u,
+          "PKHBT takes Rn bottom and shifted Rm top" },
+        /* PKHTB with imm5 == 0 encodes ASR #32, not "no shift": every bit of
+         * the result becomes Rm's sign, so the low half is all ones here. */
+        { 0xe6812050u, 0xaaaa1111u, 0x80000000u, 0u, 0xaaaaffffu,
+          "PKHTB imm5 zero is ASR #32" },
+        /* ...and the same encoding with a non-negative Rm gives all zeroes,
+         * which distinguishes ASR #32 from a shift that was skipped. */
+        { 0xe6812050u, 0xaaaa1111u, 0x7fffffffu, 0u, 0xaaaa0000u,
+          "PKHTB ASR #32 of a positive Rm is zero" },
+        /* SEL r2, r1, r0: each GE bit picks that byte lane from Rn, else Rm. */
+        { 0xe6812fb0u, 0xaabbccddu, 0x11223344u, 0xau, 0xaa22cc44u,
+          "SEL picks lanes by GE" },
+        { 0xe6812fb0u, 0xaabbccddu, 0x11223344u, 0xfu, 0xaabbccddu,
+          "SEL all GE set takes Rn entirely" },
+        { 0xe6812fb0u, 0xaabbccddu, 0x11223344u, 0x0u, 0x11223344u,
+          "SEL no GE set takes Rm entirely" },
+    };
+
+    for (size_t i = 0; i < sizeof CASES / sizeof CASES[0]; i++) {
+        uint32_t prog[] = { CASES[i].insn };
+        memset(g_ram, 0, sizeof g_ram);
+        m_w32(NULL, 0, prog[0]);
+        arm_reset(&c, &g_bus);
+        c.cpsr = ((c.cpsr & ~0x1fu) | ARM_MODE_SYS) | (CASES[i].ge << 16);
+        c.r[1] = CASES[i].rn;
+        c.r[0] = CASES[i].rm;
+        CHECK(arm_step(&c) == ARM_OK, "%s: refused", CASES[i].what);
+        CHECK(c.r[2] == CASES[i].expect, "%s: got %08x expected %08x",
+              CASES[i].what, c.r[2], CASES[i].expect);
+    }
+
+    /* The exact encoding that stopped r205, with its own registers. */
+    {
+        uint32_t prog[] = { 0xe6844853u };      /* PKHTB r4, r4, r3, ASR #16 */
+        memset(g_ram, 0, sizeof g_ram);
+        m_w32(NULL, 0, prog[0]);
+        arm_reset(&c, &g_bus);
+        c.cpsr = (c.cpsr & ~0x1fu) | ARM_MODE_SYS;
+        c.r[4] = 0x638bff00u;                   /* r4 as r205 recorded it */
+        c.r[3] = 0x556289ffu;                   /* r3 as r205 recorded it */
+        CHECK(arm_step(&c) == ARM_OK, "the r205 encoding must not be UNDEFINED");
+        CHECK(c.r[4] == 0x638b5562u, "r205 encoding: got %08x expected %08x",
+              c.r[4], 0x638b5562u);
+    }
+
+    /* PC operands are UNPREDICTABLE and must refuse rather than branch. */
+    {
+        uint32_t prog[] = { 0xe681f850u };      /* PKHTB pc, r1, r0, ASR #16 */
+        CHECK(run_status(&c, prog, 1, 1) == ARM_UNDEFINED,
+              "PKHTB with Rd == PC must refuse");
+    }
+    {
+        uint32_t prog[] = { 0xe681ffb0u };      /* SEL pc, r1, r0 */
+        CHECK(run_status(&c, prog, 1, 1) == ARM_UNDEFINED,
+              "SEL with Rd == PC must refuse");
+    }
+}
+
 static void test_integer_divide_is_armv7_only(void) {
     /* SDIV/UDIV do not exist on the ARM1176. The first half of this test is the
      * important half: it pins the CURRENT target's behaviour, so adding a second
@@ -5284,6 +5384,7 @@ int main(void) {
     test_unaligned_access_spanning_two_pages();
     test_unaligned_access_faulting_on_the_second_page();
     test_parallel_add_sub_family();
+    test_pack_halfword_and_select();
     test_integer_divide_is_armv7_only();
     test_movw_movt_are_armv7_only();
     test_srs_and_rfe_stop_after_the_first_fault();
