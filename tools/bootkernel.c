@@ -24369,7 +24369,19 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "-n")) {
             if (!parse_u64_arg("-n", argv[++i], &steps)) return 1;
         }
-        else if (!strcmp(argv[i], "-T")) ktail     = (unsigned)strtoul(argv[++i], NULL, 0);
+        else if (!strcmp(argv[i], "-T")) {
+            /* Clamped to the ring, and SAID so. The ring holds 4096 entries
+             * (see KTRACE); asking for more used to be honoured by a ring
+             * large enough to swamp the cache on every instruction of every
+             * run. Silently printing fewer lines than asked for is the kind
+             * of quiet shortfall this tool exists to not do. */
+            ktail = (unsigned)strtoul(argv[++i], NULL, 0);
+            if (ktail > (1u << 12)) {
+                fprintf(stderr, "-T %u exceeds the %u-entry trace ring; "
+                        "using %u\n", ktail, 1u << 12, 1u << 12);
+                ktail = 1u << 12;
+            }
+        }
         else if (!strcmp(argv[i], "-d")) dtpath    = argv[++i];
         else if (!strcmp(argv[i], "-c")) cmdline   = argv[++i];
         else if (!strcmp(argv[i], "-b")) ba_rev    = (unsigned)strtoul(argv[++i], NULL, 0);
@@ -26634,7 +26646,30 @@ external_md_work_ready:
      * instructions that led there, not the state a few million instructions
      * later once it is spinning in a handler.
      */
-#define KTRACE (1u << 18)
+/*
+ * SIZED TO WHAT IS READ BACK, which is 64x less than it used to hold.
+ *
+ * This was 1u << 18 -- 262,144 entries of 72 bytes, about 19 MB -- and every
+ * retired instruction writes one: three stores and a 64-byte memcpy. Streaming
+ * 64 bytes per instruction through a 19 MB ring means each write lands in a
+ * cold line, so the cost is not the memcpy but the cache it evicts, on every
+ * instruction of every run.
+ *
+ * Nothing reads that much. There are three consumers: the end-of-run "distinct
+ * functions" summary, which walks the last 65536 and is how run163's hot loop
+ * was identified at all; the recent call path, at most 4096; and the abort
+ * tail, `ktail`, default 512. 65536 covers all three exactly, and 65536 * 72
+ * is about 4.7 MB against the old 19 MB.
+ *
+ * Sized at 4096 first, on a survey of consumers that had been truncated by a
+ * `head -12` and so missed the 65536 one. That silently cut the summary's
+ * depth 16x -- caught only because the run diff printed "over the last 4096"
+ * where it had said 65536. A ring may be shrunk to what is read; it must be
+ * read for first.
+ *
+ * -T above the ring is clamped rather than silently truncated; see the parse.
+ */
+#define KTRACE (1u << 16)
     static struct {
         uint32_t pc, cpsr, r[16];
         bool mmu_enabled;
