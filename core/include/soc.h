@@ -2738,8 +2738,28 @@ typedef struct {
      *
      * Fifteen packets is a list, not a statistic. This records it.
      */
-    uint8_t  pkt_op[24];
-    uint32_t pkt_len[24];
+    /*
+     * TWENTY-FOUR WAS EXACTLY THE BOOTLOAD, which stopped being the
+     * interesting part on 2026-07-30.
+     *
+     * run164 framed 103 packets and this list held the first 24 -- and those
+     * 24 are precisely the bootload, ending at the `1d:12` execute. The 79
+     * that follow are what the driver does with a part it has just programmed:
+     * whether it interrogates the device for `Sensor Rows`/`Sensor Columns`
+     * (0xD1/0xD3/0xD9/0xD0/0xA1) and therefore whether the surface bounds are
+     * real this time. run96 measured those bounds NEGATIVE -- Xmax -434, Xmin
+     * -75 -- because the properties were missing, because the driver never
+     * interrogated a part that had never been programmed. That precondition
+     * has changed and the evidence was being truncated away.
+     *
+     * 128 covers run164's 103 with room. Still first-N rather than a ring: the
+     * order matters more than recency here, and a ring that wrapped would make
+     * "the bootload ran twice" indistinguishable from "the bootload ran once
+     * and the driver talked a lot afterwards" -- which is the exact question
+     * of run158 versus run163.
+     */
+    uint8_t  pkt_op[128];
+    uint32_t pkt_len[128];
     unsigned pkt_n;
     uint64_t frames_queued, frames_read, length_reads, data_reads;
     uint64_t injects_refused;
