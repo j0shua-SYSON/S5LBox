@@ -59,11 +59,12 @@ bytes non-zero, 92,145 non-black pixels in 44,087 colours. Reached by giving
 
 <div align="center">
 
-<img src="docs/images/r181-unlocked-home-screen.png" width="240" alt="iPhone OS 3.1.3's home screen after a slide-to-unlock: status bar, the Edit Home Screen tip, and the dock with Phone, Mail, Safari and iPod.">
+<img src="docs/images/r194-home-screen-icons.png" width="240" alt="iPhone OS 3.1.3's home screen: Messages, Calendar, Photos, Camera, YouTube, Stocks, Maps, Weather, Voice Memos, Notes, Clock, Calculator, Settings, iTunes, App Store, and the dock.">
 
-*r181 — the home screen, reached by a slide-to-unlock the emulator delivered.
-278,331 of 460,800 framebuffer bytes non-zero; 80.8% of the screen differs from
-the lock screen. Reproduced by r182 with a different gesture.*
+*r194 — the home screen, reached by a slide-to-unlock and then a tap on
+*Dismiss*, both delivered by the emulator. Every icon composited by Apple's own
+software renderer. Its control r195 — same build, same instruction count, no
+tap — still has the dialog on screen.*
 
 </div>
 
@@ -76,6 +77,11 @@ every boot — and says so itself: *"downloaded 54156 bytes of firmware data
 where it **drags the unlock knob and opens the phone**. The knob tracks the
 finger: measured at centre 57.5, 80.5 and 156.5 as the contact advances.
 
+**A tap works too, and it has a control.** r194 taps *Dismiss* on Apple's
+first-run dialog and the dialog goes. r195 is the same build at the same
+instruction count with no tap, and the dialog is still on screen. The two runs
+are deterministic apart from that one contact, so the tap is what dismissed it.
+
 **What is not real, and this is the honest remainder:**
 
 - **Two fingers reach userspace; no two-finger gesture has moved anything yet.**
@@ -85,9 +91,6 @@ finger: measured at centre 57.5, 80.5 and 156.5 as the contact advances.
   simultaneous contacts do traverse the device, the driver and the normaliser.
   What has *not* been shown is an app responding to one, because a pinch on the
   home screen has nothing to zoom.
-- **A tap has not yet moved a control.** The slide works; a tap on a button is
-  still being chased, and the first attempt was invalid — it held the finger down
-  for 40 instructions, about 13 microseconds of guest time.
 - **No sound has been produced.** Apple's audio drivers start
   (`AppleWM8991Audio::start`, both I²S controllers) and **zero** words have ever
   reached the transmit FIFO.
