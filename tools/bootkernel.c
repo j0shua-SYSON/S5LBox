@@ -6476,6 +6476,32 @@ static struct {
     uint64_t          hbpp_last_octet_at; /* newest octet seen on the bus     */
     uint64_t          hbpp_last_octets;   /* the count that stamp belongs to  */
     uint64_t          hbpp_now;           /* newest instruction observed      */
+
+    /*
+     * --- INSTRUCTIONS PER FRAME, the number everything rests on -------------
+     *
+     * docs/dynarec.md projects frame rates, this session argued about them at
+     * length, and not one measurement of what a frame COSTS exists. Without it
+     * "30 fps needs 6 M insn/s" and "30 fps needs 60 M insn/s" are equally
+     * defensible, and they lead to completely different projects.
+     *
+     * A window update is the guest deciding to redraw -- CLCD_UPDATE written
+     * 2, the head of every update. The gap between consecutive ones is what a
+     * frame cost, in the only currency that matters here.
+     *
+     * Kept as a ring of the most recent gaps rather than a mean, because the
+     * mean is the one statistic guaranteed to mislead: a resting screen and a
+     * full-screen transition differ by orders of magnitude and average into a
+     * number describing neither. frame_watch is the hot-loop gate, as touch_n
+     * is; observational only.
+     */
+    bool              frame_watch;
+    uint64_t          frame_seen;         /* clcd.updates when last sampled   */
+    uint64_t          frame_last_at;      /* instruction of the last update   */
+    uint64_t          frame_n;            /* updates observed in total        */
+    uint32_t          frame_gap[64];      /* the most recent gaps, in order   */
+    unsigned          frame_gap_n;        /* how many of them are filled      */
+    unsigned          frame_gap_w;        /* write cursor; the ring wraps     */
 } G;
 
 /*
@@ -17162,6 +17188,28 @@ static void call_probe_report(void) {
  * whole cost when the digitizer is un-matched is one test of a global that is
  * never written after startup.
  */
+/*
+ * Time one guest window update against the next. Observational: reads a
+ * counter the CLCD keeps for its own report and writes nothing back.
+ */
+static BOOTKERNEL_NOINLINE void frame_stamp_step(uint64_t n) {
+    if (!G.mach) return;
+    const uint64_t u = G.mach->clcd.updates;
+    if (u == G.frame_seen) return;
+    G.frame_seen = u;
+    if (G.frame_n) {                    /* the first update has no predecessor */
+        uint64_t gap = n - G.frame_last_at;
+        G.frame_gap[G.frame_gap_w] = gap > 0xffffffffu ? 0xffffffffu
+                                                       : (uint32_t)gap;
+        G.frame_gap_w = (G.frame_gap_w + 1u) %
+                        (unsigned)(sizeof G.frame_gap / sizeof G.frame_gap[0]);
+        if (G.frame_gap_n < sizeof G.frame_gap / sizeof G.frame_gap[0])
+            G.frame_gap_n++;
+    }
+    G.frame_last_at = n;
+    G.frame_n++;
+}
+
 static BOOTKERNEL_NOINLINE void hbpp_stamp_step(uint64_t n) {
     if (!G.mach) return;
     const s5l_mtz2_t *d = &G.mach->mtz2;
@@ -25873,6 +25921,8 @@ external_md_work_ready:
              * cannot. */
             G.hbpp_watch = true;
         }
+        /* A framebuffer run has frames to time. See the frame_* block in G. */
+        if (want_fb) G.frame_watch = true;
         if (want_baseband != want_spi2)
             printf("  dt: NOTE /baseband and /arm-io/spi2 differ "
                    "(--baseband=%d --spi2=%d); the modem's SPI transport and "
@@ -27035,6 +27085,7 @@ external_md_work_ready:
         s5l8900_tick(&mach, 1);
         if (G.touch_n) touch_tap_step(n);
         if (G.hbpp_watch) hbpp_stamp_step(n);
+        if (G.frame_watch) frame_stamp_step(n);
         if (G.drag_n) touch_drag_step(n);
         if (G.button_n) button_press_step(n);
         /* The host's PPP peer. Gated on the same one-word test as the three
@@ -28156,6 +28207,43 @@ external_md_work_ready:
             printf("\nframebuffer: CLCD window %u, %ux%u, "
                    "%zu of %zu RGB bytes non-zero\n",
                    active, out_w, out_h, nonzero, out_n);
+            /*
+             * WHAT A FRAME COST, which nothing in this project has measured.
+             * Gaps rather than a mean: a resting screen and a full-screen
+             * transition differ by orders of magnitude, and their average
+             * describes neither.
+             */
+            if (G.frame_n) {
+                printf("  guest window updates: %llu",
+                       (unsigned long long)G.frame_n);
+                if (G.frame_gap_n) {
+                    uint32_t lo = 0xffffffffu, hi = 0; uint64_t sum = 0;
+                    for (unsigned i = 0; i < G.frame_gap_n; i++) {
+                        uint32_t g = G.frame_gap[i];
+                        if (g < lo) lo = g;
+                        if (g > hi) hi = g;
+                        sum += g;
+                    }
+                    printf("   last %u gaps: min %u  mean %llu  max %u "
+                           "instructions/frame",
+                           G.frame_gap_n, lo,
+                           (unsigned long long)(sum / G.frame_gap_n), hi);
+                }
+                printf("\n");
+                if (G.frame_gap_n) {
+                    printf("  gaps, oldest first:");
+                    for (unsigned i = 0; i < G.frame_gap_n; i++) {
+                        unsigned k = (G.frame_gap_w + G.frame_gap_n - i) %
+                                     (unsigned)(sizeof G.frame_gap /
+                                                sizeof G.frame_gap[0]);
+                        printf(" %u", G.frame_gap[k]);
+                    }
+                    printf("\n");
+                }
+            } else {
+                printf("  guest window updates: NONE -- the guest never "
+                       "submitted a frame, so no frame cost exists to report\n");
+            }
             /*
              * EVERY SLOT IN THE POOL, not just the one being scanned out.
              *

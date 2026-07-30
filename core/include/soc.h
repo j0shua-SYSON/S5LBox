@@ -1385,6 +1385,17 @@ typedef struct {
     uint32_t frame_ticks;     /* timebase ticks per frame; 0 disables the VBL  */
     uint32_t frame_accum;
     uint64_t frames;          /* elapsed VBL boundaries (host visibility)      */
+    /*
+     * Window updates the GUEST submitted, as distinct from `frames`, which is
+     * VBL boundaries the model manufactured. run76/83 measured 289 VBLANKs
+     * against 150 swaps, so the two are not the same number and only this one
+     * says how often the guest actually redrew.
+     *
+     * It exists to make instructions-per-frame measurable. Every claim in this
+     * project about reachable frame rate -- with a JIT or without -- rests on
+     * that number, and nothing has ever measured it.
+     */
+    uint64_t updates;
 } s5l_clcd_t;
 
 void     s5l_clcd_reset(s5l_clcd_t *c);

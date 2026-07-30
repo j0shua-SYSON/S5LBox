@@ -112,7 +112,7 @@ SNAP_SIZE_GUARD(s5l_vic_t,         16,    "snap_vic");
 SNAP_SIZE_GUARD(s5l_timer_t,       40,    "snap_timer");
 SNAP_SIZE_GUARD(s5l_power_t,       24,    "snap_power");
 SNAP_SIZE_GUARD(s5l_clcd_window_t, 24,    "snap_clcd");
-SNAP_SIZE_GUARD(s5l_clcd_t,        3360,  "snap_clcd");
+SNAP_SIZE_GUARD(s5l_clcd_t,        3368,  "snap_clcd");
 SNAP_SIZE_GUARD(s5l_tvout_t,       12304, "snap_tvout");
 /* I2C/PMU guards are intentionally adjacent to their visitors. These values
  * describe host ABI layout only; the file format remains field-by-field. */
@@ -162,7 +162,7 @@ SNAP_SIZE_GUARD(s5l_stub_t,        56,    "snap_stubs");
  * the byte format DOES change, so SNAPSHOT_VERSION moved to 17. Measured with
  * a sizeof probe rather than arithmetic -- the first two guesses were wrong,
  * which is the entire reason this guard is a compile error. */
-SNAP_SIZE_GUARD(s5l8900_t,         111008, "snap_mach");
+SNAP_SIZE_GUARD(s5l8900_t,         111016, "snap_mach");
 #endif
 
 /* ---------------------------------------------------------------- the IO --- */
@@ -877,6 +877,10 @@ static void snap_clcd(sn_io_t *io, s5l_clcd_t *c) {
     F32(c->frame_ticks);
     F32(c->frame_accum);
     F64(c->frames);
+    /* Guest window updates travel with the machine for the same reason
+     * frames does: a restored run that reset them would report the tail
+     * of a boot as though it were the whole thing. */
+    F64(c->updates);
 }
 
 static bool tvout_state_valid(const s5l_tvout_t *t) {

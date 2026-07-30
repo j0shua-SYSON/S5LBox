@@ -301,7 +301,17 @@ void s5l_clcd_write(s5l_clcd_t *c, uint32_t off, uint32_t val) {
         case CLCD_REG1C:     c->reg1c     = val; return;
         case CLCD_PREENABLE: c->preenable = val; return;
         case CLCD_BACKDROP:  c->backdrop  = val; return;
-        case CLCD_UPDATE:    c->update    = val; return;
+        case CLCD_UPDATE:
+            /*
+             * The head of a window update, and the only per-FRAME event this
+             * model can see. Counting it is what makes instructions-per-frame
+             * measurable: nothing in this project has ever measured that, and
+             * every estimate of what frame rate is reachable -- with a JIT or
+             * without one -- rests on it. See the frame_* block in bootkernel.
+             */
+            if (val == 2u) c->updates++;
+            c->update = val;
+            return;
         case CLCD_UPDATE2:   c->update2   = val; return;
         case CLCD_GATE:      c->gate      = val; return;
         /* Read-only: the driver never writes it, and inventing a way for it to
