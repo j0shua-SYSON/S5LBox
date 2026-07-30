@@ -130,12 +130,33 @@ static const struct {
       "Written into this machine's work image when that image is prepared, "
       "not at boot, so changing it does nothing to a machine that already has "
       "one. A new machine gets an image built with it as set now.", NULL },
+    /*
+     * Both halves stay off here, but the reasons are no longer the same and
+     * neither is "not implemented anywhere" any more.
+     *
+     * The code-signing half IS implemented in bootkernel -- the boot args gain
+     * cs_enforcement_disable, amfi_get_out_of_my_way and
+     * amfi_allow_any_signature, and /chosen/debug-enabled is set. It has never
+     * been DEMONSTRATED: nothing unsigned has been executed under it. Offering
+     * a switch labelled "jailbreak" that has never once produced a jailbreak is
+     * the declared-but-silent failure this project refuses elsewhere, so it
+     * stays off until an unsigned binary actually runs.
+     *
+     * The payload half is implemented in the shared provisioner as of the
+     * commit that added it: tools/payload_tar.c reads the archive and
+     * bootkernel concatenates its entries onto --activate's and --ppp's. This
+     * app links the same libraries and simply is not asking yet -- and it
+     * cannot ask until there is a way to GET a payload onto the device, which
+     * is an import flow this app does not have. Installing a payload the guest
+     * would then refuse to execute would also be premature.
+     */
     { "jb-codesign", MAP_FIXED_OFF,
-      "Not implemented anywhere. Nothing in this app disables the guest "
-      "kernel's code-signature enforcement.", NULL },
+      "Implemented for the desktop harness but never demonstrated: no unsigned "
+      "binary has been executed under it. Stays off here until one does.", NULL },
     { "jb-payload", MAP_FIXED_OFF,
-      "Not implemented anywhere. Nothing in this app installs a payload onto "
-      "the work image.", NULL },
+      "The provisioner this app links can install a payload, but the app has no "
+      "way to import one yet, and the code-signing half it depends on has not "
+      "been demonstrated.", NULL },
 
     /*
      * rootfs_work_options_t::ppp_launchd_job would give the guest its half.
