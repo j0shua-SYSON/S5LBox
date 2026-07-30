@@ -28241,8 +28241,25 @@ external_md_work_ready:
                     printf("\n");
                 }
             } else {
-                printf("  guest window updates: NONE -- the guest never "
-                       "submitted a frame, so no frame cost exists to report\n");
+                /*
+                 * NOT "no frames happened". run168 rendered 273,206 bytes with
+                 * this counter at zero, so the honest statement is narrower:
+                 * this guest does not submit frames through CLCD_UPDATE.
+                 *
+                 * AppleH1CLCD adopts the framebuffer iBoot left and scans it
+                 * out continuously -- 58 register writes to the whole CLCD
+                 * block across a 4 G run -- while userspace composites into
+                 * the surface underneath it. There is no per-frame register
+                 * write to count, so the per-frame event has to be observed in
+                 * userspace instead: CABackingStoreUpdate at 0x311c9cdc, which
+                 * a --call-probe already timestamps and whose r1/r2 carry the
+                 * dirty rectangle's width and height.
+                 */
+                printf("  guest window updates: none via CLCD_UPDATE. That is "
+                       "NOT 'no frames' -- this guest composites into a "
+                       "continuously scanned surface and never writes the "
+                       "register. Time CABackingStoreUpdate (0x311c9cdc) with "
+                       "--call-probe instead; r1/r2 are the dirty rect.\n");
             }
             /*
              * EVERY SLOT IN THE POOL, not just the one being scanned out.

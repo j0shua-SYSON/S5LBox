@@ -2365,6 +2365,64 @@ Not yet claimed: that a default route is *sufficient*. It gives the guest
 somewhere to send; whether any daemon then sends is a separate measurement, and
 mDNSResponder's multicast is not obviously something this NAT should carry.
 
+### 2026-07-30: run168 -- what a frame costs, and why CoreGraphics HLE is not the answer
+
+The number every frame-rate claim in this project rested on, measured for the
+first time. `--call-probe` on four userspace addresses, 4 G instructions, lock
+screen rendered (273,206 bytes).
+
+```
+CABackingStoreUpdate  0x311c9cdc   75 calls
+CGBlt_fillBytes       0x338f61b0   43 calls
+_CGSFillDRAM8by1      0x338f63e8   43 calls
+CATransaction::flush  0x311c82f8    7 calls
+```
+
+Because a call probe timestamps every hit and captures r0-r3, those 75 records
+are the frame ledger:
+
+| | |
+|---|---|
+| composites | 75 over 1.18 G instructions |
+| gap between them | median **25,599,048** instructions (min 19,983, max 87,441,534) |
+| dirty rect (r1 × r2) | median **4,830 px** = 3.1% of the 153,600-pixel screen |
+| largest rect | 320×96 = 30,720 px |
+| **total pixel work, whole phase** | **2.39 full screens** |
+
+**Three things fall out, and two of them retract earlier readings.**
+
+**CoreAnimation IS doing dirty rectangles.** §6-era analysis concluded from
+run59's aggregates that the delivery pass touches the whole screen every update
+and that per-frame cost is therefore flat. Individual calls with their arguments
+say otherwise: the median update is 3% of the screen.
+
+**Compositing is not the cost on this screen.** 2.39 screens of pixel work
+across the entire rendering phase, and a median 25.6 M instructions between
+composites -- seconds of wall time at current speed. The guest is not trying to
+render continuously; it is static, and the gaps are filled by everything except
+drawing. run165 named that: dyld symbol binding and `objc_msgSend`'s slow path.
+
+**So `CGBlt_*` leaf HLE is not justified.** 43 calls. The plan was to spend
+weeks making 0.1% of the run faster. `tools/ios3_hle.c` exists and is correct,
+arms nothing, and now waits for a target with evidence behind it.
+
+**NOT measured, and it is the case that matters:** what a frame costs during a
+scroll or a transition. That needs a UI responding to input, which needs touch.
+The prediction stands that the hard case and the interesting case are the same
+case -- a resting screen is cheap and tells you nothing about a moving one.
+
+**Also retired:** the `CLCD_UPDATE == 2` frame counter added earlier the same
+day. It reported zero while the screen rendered, because this guest never
+writes that register -- `AppleH1CLCD` adopts iBoot's framebuffer and scans it
+continuously (58 writes to the whole CLCD block in 4 G instructions) while
+userspace composites underneath. The counter's message now says that instead of
+"the guest never submitted a frame", which was false.
+
+**And one number deliberately not quoted:** instructions-per-pixel. The gap
+between composites contains all the non-drawing work, so dividing it by pixels
+drawn measures nothing. It came out as a plausible-looking 5,661 and was
+discarded.
+
 ### 2026-07-30: run163 -- THE BOOTLOAD COMPLETES AND THE GUEST READS A TOUCH
 
 ```
