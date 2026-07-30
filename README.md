@@ -100,7 +100,8 @@ Two smaller things the picture shows honestly. The clock reads 4:00 on
 31 December because the real-time clock answers with a placeholder nobody has
 connected to anything. "Searching…" is the status bar correctly reporting no
 baseband, which is one of five pieces of hardware deliberately hidden from the
-guest. There is also no audio and no graphics chip.
+guest. There is no graphics chip either, and while the audio hardware is
+modelled, nothing has ever played through it — see the table below.
 
 <div align="center">
 
