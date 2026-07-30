@@ -234,7 +234,7 @@ expire when the next run lands. The prose version is
   in-place rewrite of an inert LaunchDaemon plist — one that points at a
   binary this image does not contain, so nothing is displaced. launchd spawns
   the job (measured, instruction 557,124,470), `pppd` runs, and then exits;
-  see `docs/AGENT_HANDOFF.md` §23.10 and the run entries in
+  see `docs/derivations.md` §23.10 and the run entries in
   `docs/BOOTLOG.md`. **No host-side PPP peer exists**, so even a `pppd` that
   transmits will get no answer: LCP will retransmit and time out. Every part
   of it is honest emulation — the UART is real

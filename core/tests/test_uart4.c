@@ -533,7 +533,7 @@ static void test_receive_fifo_is_ordered_and_bounded(void) {
 static void test_a_utrstat_store_cannot_discard_a_queued_byte(void) {
     /*
      * AppleS5L8900XSerial's interrupt filter reads +0x10, masks, and writes the
-     * result back (docs/AGENT_HANDOFF.md §23.5.1), so a real driver WILL store
+     * result back (docs/derivations.md §23.5.1), so a real driver WILL store
      * a word with bit 0 set while a byte is still queued. If that store cleared
      * the ready bit, the byte would be stranded in the FIFO with nothing left to
      * announce it — the exact silent loss this model refuses.
@@ -569,7 +569,7 @@ static void test_uart4_asserts_vic_line_28_for_a_waiting_byte(void) {
     CHECK(!m.cpu.irq_line, "arming the line alone raised an interrupt");
 
     /* A host peer delivers one byte between run slices, which is the only way
-     * this can ever happen (docs/AGENT_HANDOFF.md §23.5.1). The push cannot set
+     * this can ever happen (docs/derivations.md §23.5.1). The push cannot set
      * `level_dirty` — it takes a port, not a machine — so this also pins that
      * the NEXT tick still notices, through ext_inputs()'s witness. */
     CHECK(s5l_uart_rx_push(&m.uart4, 0xffu), "push into an empty FIFO failed");

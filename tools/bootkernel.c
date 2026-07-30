@@ -6388,7 +6388,7 @@ static struct {
      * UTXH is fed into ppp_input_byte() from the bus interposer (pure
      * computation -- it never touches the machine), and ppp_pump_step() moves
      * whatever the peer produced into uart4's receive FIFO from the STEP LOOP,
-     * between instructions, which is where docs/AGENT_HANDOFF.md §23.5.1
+     * between instructions, which is where docs/derivations.md §23.5.1
      * requires the host->guest direction to happen.
      *
      * ppp_peer_armed is separate from the --ppp flag because the peer is opened
@@ -18296,7 +18296,7 @@ static void audio_tap_store(uint32_t addr, uint32_t val) {
  * machine on behalf of the peer.
  *
  * Called from the step loop after s5l8900_tick(), which is "on the CPU thread,
- * between run slices" as docs/AGENT_HANDOFF.md §23.5.1 requires. Two things
+ * between run slices" as docs/derivations.md §23.5.1 requires. Two things
  * happen here and nowhere else:
  *
  * TIME. The peer's restart timer (RFC 1661 §4.6, three seconds) runs on GUEST
@@ -25430,7 +25430,7 @@ int main(int argc, char **argv) {
          * rewrites it to `Unactivated` on every boot (0xd4f8/0xd50c), while
          * `FactoryActivated` survives (0xd508). No Apple signature is consulted
          * on this path; verify_activation_record is reached only when applying
-         * a record. Derivation in docs/AGENT_HANDOFF.md section 23.3.
+         * a record. Derivation in docs/derivations.md section 23.3.
          *
          * The file cannot be rewritten in place because it does not exist --
          * the pristine image has /private/var/root/Library with no Lockdown
@@ -26758,7 +26758,7 @@ external_md_work_ready:
     /*
      * The scheduled presses, with the SAME ordering rule and for the same
      * reason: G is zeroed by spy_install(), so button_n is set LAST and is
-     * what arms the step loop. AGENT_HANDOFF 23.4a records a 27-minute boot
+     * what arms the step loop. docs/derivations.md 23.4a records a 27-minute boot
      * lost to exactly this mistake with a different option.
      */
     for (unsigned q = 0; q < button_n; q++) G.button[q] = button_presses[q];
@@ -26806,7 +26806,7 @@ external_md_work_ready:
     /*
      * The PPP scan says so in the header, for the reason every other armed-on
      * line here exists: a run whose header does not carry it is a run that
-     * did nothing, and AGENT_HANDOFF 23.4a records a 27-minute boot lost to
+     * did nothing, and docs/derivations.md 23.4a records a 27-minute boot lost to
      * exactly that -- an option parsed into G, which spy_install() memsets,
      * and which therefore silently did not arm. This line is read AFTER the
      * install for that reason.

@@ -1,5 +1,6 @@
 <!--
-  Extracted from docs/AGENT_HANDOFF.md section 23.9 on 2026-07-31, unchanged
+  Extracted from the retired docs/AGENT_HANDOFF.md, section 23.9, on
+  2026-07-31, unchanged
   apart from heading depth. It was the newest material in that file and had
   never been committed: 224 of the 235 uncommitted lines in the handoff were
   this section. It is the only record of the audio work anywhere in the tree,

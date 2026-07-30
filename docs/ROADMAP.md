@@ -1197,7 +1197,7 @@ The current immediate gates are:
    rather than the SoC-driven `bb_rst`/`mrdy` lines, which suggests hardware
    with no modem fitted would not fire interrupt 75 either — so the emulator's
    zero callbacks may be faithful, and the edge must **not** be fabricated. See
-   `AGENT_HANDOFF.md` §13.0a;
+   `docs/derivations.md` §13.0a;
 3. determine where CommCenter's startup is actually gated relative to its
    `bootstrap_check_in` for `com.apple.commcenter`, and identify the senders
    behind the five queued reply ports;

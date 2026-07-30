@@ -425,7 +425,7 @@ const char *rootfs_work_stage_name(rootfs_work_stage_t stage);
  * key is the global-domain composed form lockdownd reads, FactoryActivated is
  * the one activation state that survives lockdownd's boot recompute, and
  * -BrickState keeps the fix in force on a device that does not report as a
- * phone.  docs/AGENT_HANDOFF.md 23.3 has the derivation.
+ * phone.  docs/derivations.md 23.3 has the derivation.
  *
  * Returns the number of entries required (2).  Fills `entries` only when
  * `capacity` is at least that, so a caller can size an array from the return

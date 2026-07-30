@@ -761,7 +761,7 @@ static s5l_wake_kind_t wake_edge_gpio(const s5l8900_t *m, uint32_t *ticks) {
 }
 
 /*
- * uart4's receive line, and the answer docs/AGENT_HANDOFF.md §23.5.1 asked for:
+ * uart4's receive line, and the answer docs/derivations.md §23.5.1 asked for:
  * "S5L_WAKE_NEVER when the RX FIFO is empty and an immediate edge when it is
  * not". Both halves of that sentence are NEVER here, and the difference is only
  * in who catches the second half.

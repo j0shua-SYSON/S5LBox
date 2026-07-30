@@ -4920,7 +4920,7 @@ Two hazards worth recording before they cost a run:
 
 And a gate that may block the slide-to-unlock experiment outright:
 `MultitouchHID` drops every frame while `UILocked` is set, and that flag
-**initialises to 1** (`docs/AGENT_HANDOFF.md` §23.4d — repo-recorded, not
+**initialises to 1** (`docs/derivations.md` §23.4d — repo-recorded, not
 re-verified). The probe pair is what tells us whether that is what swallows an
 injected swipe, rather than guessing.
 
@@ -5118,7 +5118,7 @@ checkpoint to its own block's arm point separates perfectly: everything gen 6
 reached is ≤ +150,991,263, everything reading `hits=0` is ≥ +244,691,624. Gen 6
 was running the same sequence *faster* than gen 1 and simply ran out of room.
 
-The rule this violates is already written down, in AGENT_HANDOFF §17, added after
+The rule this violates is already written down, in docs/derivations.md §17, added after
 the same trap was retracted the first time. This was the third occurrence. Two
 consequences follow. Compare the heartbeat pc stream **before** reading any
 divergence into differing checkpoint counters — it closes the question in one

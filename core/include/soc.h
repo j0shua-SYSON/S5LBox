@@ -207,7 +207,7 @@
  * only a host that calls s5l_uart_rx_push() can put a byte in either.
  *
  * REGISTER SEMANTICS, read out of AppleS5L8900XSerial rather than guessed
- * (docs/AGENT_HANDOFF.md §23.5.1):
+ * (docs/derivations.md §23.5.1):
  *
  *   UFSTAT (+0x18)  bits[3:0] receive count, bit 8 receive full,
  *                   bits[7:4] transmit count, bit 9 transmit full.
@@ -222,7 +222,7 @@
  *
  * s5l_uart_rx_push() is the ONLY way a byte enters the receive FIFO. Nothing
  * inside core/ ever calls it: a host that has attached a peer calls it between
- * run slices, which is the handoff docs/AGENT_HANDOFF.md §23.5.1 requires
+ * run slices, which is the handoff docs/derivations.md §23.5.1 requires
  * (never from a socket callback — core/ has no threading vocabulary). So on
  * every run without a peer the FIFO is empty at every instant, and the three
  * registers below answer exactly what they answered when this model was
@@ -746,7 +746,7 @@ void     s5l_power_write(s5l_power_t *p, uint32_t off, uint32_t val);
  * The window this machine decodes starts at S5L8900_GPIOIC_BASE (0x39a00080),
  * because power.c owns 0x00-0x7F of the same physical page. The driver,
  * however, programs against the page base — its four accessors take an offset
- * from object+0x6c, which the pin-accessor decoding in AGENT_HANDOFF §13.0d
+ * from object+0x6c, which the pin-accessor decoding in docs/derivations.md §13.0d
  * resolves to 0x39a00000 — so the constants below are the driver's own and
  * s5l_gpioic_read()/write() take an offset from S5L8900_GPIOIC_PAGE. Rebasing
  * them onto the window would make every one of them differ from the
@@ -935,7 +935,7 @@ unsigned s5l_gpioic_cascade(unsigned group);
  * group = id >> 8, bit = id & 0xff (AppleS5L8900X's accessor at 0xc05a4494:
  * `lsr r1,r5,#8 / lsl r1,r1,#5 / add r1,r1,#4` then `and r1,r5,#0xff /
  * lsr r0,r0,r1 / and r0,r0,#1`), and the level READS BACK from
- * S5L8900_GPIO_BASE + group*32 + 4. AGENT_HANDOFF §13.0d establishes that the
+ * S5L8900_GPIO_BASE + group*32 + 4. docs/derivations.md §13.0d establishes that the
  * accessor used is the object+0x68 one, i.e. this block and not the gpioic
  * page — a distinction that matters because lcd0's pins are in groups 0 and 3,
  * which would otherwise land inside power.c's claim.
