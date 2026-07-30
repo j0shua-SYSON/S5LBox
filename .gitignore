@@ -44,10 +44,10 @@ keys.json
 *.img
 ios3vm_nand_*.img
 
-# Python wheels an agent may fetch to cross-check semantics (e.g. unicorn)
+# Python wheels fetched to cross-check semantics (e.g. unicorn)
 *.whl
 
-# Agent scratch worktrees (created inside the repo by isolated subagents)
+# Scratch worktrees created inside the repo by isolated tooling
 /.claude/worktrees/
 
 # Editor / OS cruft
@@ -60,7 +60,7 @@ ios3vm_nand_*.img
 *.exe
 compile_commands.json
 
-# Agent scratch config (codex CLI)
+# Scratch tool config (codex CLI)
 /.codex/
 
 # Guest console tee, written into the CWD by -F runs (see the CONSOLE CAPTURE block)

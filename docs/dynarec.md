@@ -365,7 +365,7 @@ do per instruction:
    > costs 3.4% of the MMU row, not 76% of it. There is no 6.3× left here.**
    >
    > Left standing because the measurement is real and the reasoning is worth
-   > keeping — but on 2026-07-30 two independent research agents read this
+   > keeping — but on 2026-07-30 two independent research passes read this
    > section, quoted "6.3×, the largest non-JIT win available" as work still on
    > the table, and built recommendations on it. A figure that describes a
    > closed opportunity has to say so where the figure is, not only in the
