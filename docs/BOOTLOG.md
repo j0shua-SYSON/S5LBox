@@ -2365,6 +2365,59 @@ Not yet claimed: that a default route is *sufficient*. It gives the guest
 somewhere to send; whether any daemon then sends is a separate measurement, and
 mDNSResponder's multicast is not obviously something this NAT should carry.
 
+### 2026-07-30: run163 -- THE BOOTLOAD COMPLETES AND THE GUEST READS A TOUCH
+
+```
+registers, in order:
+  0  RD 10008ffc -> 5a030028      the version answer
+  1  WR 10001c04 <- 000016e4
+  2  WR 10001c08 <- 00840000
+  3  WR 1000300c <- 00000005
+  4  WR 1000304c <- 00000020      ALL FOUR, for the first time
+
+hbpp: probes 5  acks 9  data 3 (54524 bytes)  rd 1  wr 4  calib 1  exec 1
+frames: packets 55  unknown-opcodes 0
+packets: 1a:16 1a:16 18:2 30:54154 1a:2 18:2 30:142 1a:2 18:2 30:270 1a:2
+         1c:8 1a:8 1e:16 1a:2 1e:16 1a:2 1e:16 1a:2 1e:16 1a:2 1f:2 1a:2 1d:12
+
+pins:   ... in-hbpp 0
+device: queued 2  length-reads 2  data-reads 2  read 2  refused 0
+tap 0   (160,240)  down @2500000000  up @2524000000  refused 0
+framebuffer: 273206 of 460800; slot 0 and slot 1 both 426806 of 614400
+```
+
+Every stage of §6.4's state machine, in order and once: probe, firmware, two
+smaller DATA packets, the register read, four register writes each
+acknowledged, `1f:2` the calibration request, and **`1d:12` the execute**.
+`exec 1`. `in-hbpp 0` -- the part stopped being a bootloader.
+
+`unknown-opcodes 0`, one cycle, no restarts, `wr 4` not `wr 6`.
+
+**And the guest read the touch.** `queued 2 / read 2 / refused 0` is both halves
+of the tap accepted by the device AND clocked out by the driver -- the
+distinction `mtz2_device_report` exists to make. The screen renders 273,206 with
+both compositing slots full.
+
+**What this claims:** the Z2 bootload runs to completion and the digitizer's
+reports reach the driver, with the display working at the same time.
+
+**What it does not claim:** that SpringBoard acted on the tap. A press at
+(160,240) on a lock screen has nothing to do, and the framebuffer is unchanged
+from the no-touch runs. Whether a *drag* unlocks it is the next measurement,
+and `--drag` already exists for it.
+
+The four fixes that got here, all measured rather than reasoned:
+
+| run | what it found |
+|---|---|
+| run151 | a select edge cut the DATA header in half; the framer discarded it |
+| run155 | the driver was blocked in the ATN_ACK, not the DMA send |
+| run157/158 | a write-only PIO transfer left the RX FIFO full; `SPI_CNT` must clear it |
+| run160/162 | the write helper compares against **0x4AD1**, not the DATA sender's 0x4BC1 |
+
+The last one is the one that would never have been reasoned out. Two senders in
+the same driver, two different literals, and §6.2 documents only one of them.
+
 ### 2026-07-30: run158 -- THE DIGITIZER NO LONGER COSTS THE SCREEN
 
 The `SPI_CNT` receive flush landed and the deadlock is gone. run140 and run151
