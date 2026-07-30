@@ -2365,6 +2365,56 @@ Not yet claimed: that a default route is *sufficient*. It gives the guest
 somewhere to send; whether any daemon then sends is a separate measurement, and
 mDNSResponder's multicast is not obviously something this NAT should carry.
 
+### 2026-07-30: run169 -- the display sleeps on a timer, and Apple's driver confirms the bootload
+
+**A correction first.** run167 ended with no active RGB window at 8 G, and its
+UART read:
+
+```
+AppleSynopsysOTGDevice::handleUSBCableDisconnect
+AppleMerlotLCD::_lcdEnable: enable: 0
+```
+
+I concluded the USB stack was reporting a disconnect and the phone was sleeping
+its screen for want of external power -- plausible, and stated with more
+confidence than one correlated pair of lines supports. run169 is the control:
+same 8 G, **no `--usb-otg` at all**, `handleUSBCableDisconnect` count **zero**,
+and the display slept anyway (`_lcdEnable: enable: 0`, once).
+
+So the disconnect was **correlation, not cause**. What actually precedes the
+LCD going off differs per run -- USB in run167, `MobileMail` launching in
+run169 -- and the constant is elapsed idle time. It is a plain sleep timeout at
+somewhere between 13 and 19 guest-seconds, which is a locked iPhone behaving
+correctly. **Omitting USB does not extend the measurement window**, and any
+display or touch measurement must land before roughly 5.5 G.
+
+**And the guest confirms the bootload in its own words:**
+
+```
+AppleMultitouchZ2SPI: downloaded 54156 bytes of firmware data ("0x0049.bin") in 106ms.
+AppleMultitouchZ2SPI:  Could not detect HBPP. Response: 0x00 x16
+```
+
+54,156 bytes is the exact image size. That is Apple's driver, not our counters,
+saying the download worked -- present in run163, run164 and run169 alike, and
+independent of the ledger, the packet list and `exec 1`.
+
+`Could not detect HBPP` is the DESIRED answer, not a failure. §6.4 specifies
+it: after the execute packet the part leaves the bootloader, "so every later
+probe answers FALSE, which is what a real programmed Z2 does and what lets the
+driver go on to interrogate it." All-zeros is the model's deliberate definite
+rejection -- the driver tests BE16(rx[0..1]) and BE16(rx[2..3]) against a set
+containing neither 0x0000 nor 0x1A00.
+
+run169's counters agree: `exec 1`, `in-hbpp 0`, `queued 26 / read 26 /
+refused 0`.
+
+**So the digitizer is programmed and running, confirmed three independent
+ways** -- our counters, the packet ledger, and the guest's own log. The open
+question is now exactly one thing: whether the driver goes on to INTERROGATE
+it, which decides whether the surface bounds are real this time or still
+run96's negative garbage.
+
 ### 2026-07-30: run168 -- what a frame costs, and why CoreGraphics HLE is not the answer
 
 The number every frame-rate claim in this project rested on, measured for the
