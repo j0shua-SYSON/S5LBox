@@ -97,7 +97,74 @@ with `0x33d01154` setting 56/11, 36/7 and all four margins to 75, and leaving
 `grid = device + 0x168`. The four bounds live at `grid+0x148` (Xmax),
 `+0x14a` (Xmin), `+0x14c` (Ymax), `+0x14e` (Ymin).
 
-## 4. What a live guest actually holds
+### 3.1 The normalisation, and the two conventions that leave MultitouchHID
+
+Re-read from the binaries on 2026-07-30, because the Y direction was the one
+step in this chain that had a single reader behind it and it is the step that
+decides where a tap lands. Everything below was disassembled, not inferred:
+
+```
+python tools/hfsx_extract.py <retained work image> dyld_shared_cache_armv6 work/mthid/dsc_armv6
+python tools/hfsx_extract.py <retained work image> MultitouchHID            work/mthid/MultitouchHID
+python tools/dscmap.py work/mthid/dsc_armv6 0x33cfdac4 --count 90
+python tools/udis.py   work/mthid/MultitouchHID 0x3308 0x120 arm      # NB: ARM, not Thumb
+```
+
+**`_mt_FillMTContactDirectFromBinary` (`0x33cfdac4`) does not flip anything.**
+The raw pair is at `binary+4` (X) and `binary+6` (Y), each clamped by
+`0x33d00f2c` against the bounds above, then normalised identically:
+
+```
+33cfdccc  rsb r0, r2, r0     ; x - Xmin          33cfdd00  rsb r0, r2, r1     ; y - Ymin
+33cfdce4  rsb r3, r2, r3     ; Xmax - Xmin       33cfdd08  rsb r0, r2, r3     ; Ymax - Ymin
+33cfdcf0  vdiv.f32                               33cfdd18  vdiv.f32
+33cfdcf4  vstr s15, [r4,#0x1c]  -> path->normX   33cfdd1c  vstr s15, [r4,#0x20]  -> path->normY
+```
+
+**The flip is one layer up, in the plugin**, and it is real —
+`_mthm_FilterContactForScreenUI` (MultitouchHID `+0x3308`):
+
+```
+00003368  vldr     s15, [r5]        ; gScreenSize.width
+00003374  vmul.f32 s12, s14, s15    ; px = normX * W
+00003378  vldr     s15, [r5, #4]    ; gScreenSize.height
+0000337c  vldr     s14, [r6, #0x20] ; normY
+0000338c  vmls.f32 s15, s15, s14    ; VMLS: Sd = Sd - Sn*Sm  =>  py = H*(1 - normY)
+00003410  stm      r8, {sl, fp}     ; -> *arg4 = {px, py}
+```
+
+`0xee477ac7` decodes as `Sd=s15, Sn=s15, Sm=s14` (D=1, N=1, M=0, sz=0), so the
+subtraction is `H - H*normY`. That is the `py = H * (1 - norm.y)` `to_surface()`
+was written against, and `to_surface(420, 480, -75, 7275, flip=true)` = 837
+normalises back to row 420.4. **The model and this function agree.**
+
+**But two conventions leave this plugin, and only one of them is flipped.**
+`_hthm_CreateDigitizerChildEventForPath` (`+0x46f8`) builds the IOHIDEvent from
+the *same* path fields, unflipped, with only an additive offset:
+
+```
+00004754  vldr     s16, [r4, #0x1c]   ; normX          (path+0x1c, NOT the pixel pair)
+00004758  vldr     s17, [r4, #0x20]   ; normY
+000047b4  vadd.f32 s15, s16, s18      ; + dx
+000047d8  vadd.f32 s15, s17, s19      ; + dy
+000047fc  vstr     s15, [sp, #0xc]    ; -> the event constructor at 0x8eec
+```
+
+`_mthm_FilterContactForScreenUI` writes its flipped pixel pair to a caller
+buffer and **never stores it back into the path**, so the event that reaches
+SpringBoard carries the unflipped normalised Y.
+
+**NOT ESTABLISHED, and this is the open question:** which convention decides
+where UIKit puts the touch. If the consumer above IOHIDEvent applies its own
+`1 - y`, `flip=true` is right; if it uses the normalised value directly, every
+contact this project has ever injected is vertically mirrored and a drag aimed
+at the unlock knob lands near the status bar — which is indistinguishable, from
+the funnel counters alone, from the working case. run170 delivered 26 contacts
+to `__UIApplicationHandleEvent` with no visible effect, which is exactly what
+both hypotheses predict. Static reading cannot separate them, because the
+answer depends on which physical edge of the sensor is row zero, and in this
+emulator that is *our* choice rather than something to be read off Apple's
+code. The separating experiment is a mirrored drag (§6.17).
 
 `work/run96-base/snap-3.5e9.bin`, at the lock screen. The grid was located by
 searching for the two constant tables — they appear exactly once, 0x84 bytes
