@@ -476,13 +476,13 @@ int main(void) {
     /* Provisioning refuses a directory it cannot use, and says why. */
     {
         char detail[VM_FW_BOOT_DETAIL_CAPACITY];
-        CHECK(!vm_firmware_boot_provision(NULL, NULL, 0u, detail, sizeof detail),
+        CHECK(!vm_firmware_boot_provision(NULL, NULL, 0u, NULL, NULL, detail, sizeof detail),
               "provisioning a NULL directory succeeded");
         CHECK(detail[0] != '\0', "provisioning must explain its refusal");
         /* An existing work image is never replaced, so a second boot cannot
          * silently discard the guest's writes from the first. */
         write_file(VM_FW_BOOT_WORK_FILE, 8192);
-        CHECK(!vm_firmware_boot_provision(&SHARED, NULL, 0u,
+        CHECK(!vm_firmware_boot_provision(&SHARED, NULL, 0u, NULL, NULL,
                                           detail, sizeof detail),
               "provisioning overwrote an existing work image");
         printf("  (existing work image refused: %s)\n", detail);
@@ -490,7 +490,7 @@ int main(void) {
         /* And with the destination clear, the fixture's rootfs.img -- 4 KB of
          * 0x5a, not an HFS volume -- is refused on its own merits. */
         remove_file(VM_FW_BOOT_WORK_FILE);
-        CHECK(!vm_firmware_boot_provision(&SHARED, NULL, 0u,
+        CHECK(!vm_firmware_boot_provision(&SHARED, NULL, 0u, NULL, NULL,
                                           detail, sizeof detail),
               "provisioning accepted a rootfs.img that is not a volume");
         CHECK(detail[0] != '\0', "provisioning must explain its refusal");
@@ -505,7 +505,7 @@ int main(void) {
         CHECK(vm_firmware_boot_paths_split(&missing, DIR,
                                            "vmfwboot-no-such-machine"),
               "the split layout was refused");
-        CHECK(!vm_firmware_boot_provision(&missing, NULL, 0u,
+        CHECK(!vm_firmware_boot_provision(&missing, NULL, 0u, NULL, NULL,
                                           detail, sizeof detail),
               "provisioning into a directory that does not exist succeeded");
         CHECK(detail[0] != '\0', "provisioning must explain its refusal");

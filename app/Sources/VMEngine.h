@@ -145,6 +145,18 @@ typedef NS_ENUM(NSUInteger, VMButton) {
 - (BOOL)isPreparingRootFilesystem;
 
 /*
+ * How far the one slow first-boot step has got, 0.0..1.0, or -1.0 when it is
+ * not running or has not reported yet.
+ *
+ * REAL PROGRESS, not a timer. It is the byte count rootfs_work.c reports as it
+ * copies the ~433 MB source, so a stalled copy shows a stalled bar rather than
+ * an animation that keeps promising. -1.0 rather than 0.0 for "unknown" so a
+ * caller can show an indeterminate spinner instead of a bar frozen at the left
+ * edge, which reads as broken.
+ */
+- (double)rootFilesystemProgress;
+
+/*
  * What a machine WOULD do if it were opened now, without opening one. For the
  * machine list and the settings screen, so neither has to keep its own idea of
  * what firmware is present.

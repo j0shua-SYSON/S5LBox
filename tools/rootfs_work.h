@@ -331,6 +331,29 @@ typedef struct rootfs_work_options {
      * when required is false; the observed digest is still reported.
      */
     rootfs_work_source_identity_t source_identity;
+
+    /*
+     * OPTIONAL PROGRESS OBSERVER, and it exists because this call takes long
+     * enough that a user is entitled to be told.  Creating a work image copies
+     * ~433 MB and then grows the volume; on a phone that is tens of seconds
+     * during which the app could only say "Preparing iPhone OS" and hope.
+     *
+     * Called during the copy with the bytes done and the total, and once more
+     * at completion so a bar can reach its end rather than stopping at 99%.
+     * `total` is the source size and never changes within one call.
+     *
+     * RATE-LIMITED BY THE CALLER'S BUFFER, not by a timer: it fires once per
+     * I/O chunk, which at the default buffer is a few hundred calls over the
+     * whole copy -- frequent enough to look smooth, rare enough that a
+     * callback doing UI work cannot dominate the copy it is reporting on.
+     *
+     * MUST NOT touch the image, must not block for long, and must tolerate
+     * being called from whatever thread the caller used.  It cannot cancel:
+     * returning nothing keeps this a report rather than a control, so a
+     * progress bar cannot leave a half-built image behind.
+     */
+    void (*progress)(void *ctx, uint64_t done, uint64_t total);
+    void  *progress_ctx;
 } rootfs_work_options_t;
 
 typedef struct rootfs_work_result {

@@ -353,6 +353,9 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
 
 bool vm_firmware_boot_provision(const vm_firmware_boot_paths_t *paths,
                                 const bool *values, unsigned value_count,
+                                void (*progress)(void *ctx, uint64_t done,
+                                                 uint64_t total),
+                                void *progress_ctx,
                                 char *detail, size_t detail_capacity) {
     char source_path[VM_FW_BOOT_PATH_CAPACITY + 64u];
     char work_path[VM_FW_BOOT_PATH_CAPACITY + 64u];
@@ -447,6 +450,10 @@ bool vm_firmware_boot_provision(const vm_firmware_boot_paths_t *paths,
             }
         }
     }
+
+    /* The caller's bar. NULL is fine and means nobody is watching. */
+    options.progress     = progress;
+    options.progress_ctx = progress_ctx;
 
     rootfs_work_status_t status =
         rootfs_work_create(source_path, work_path, &options, &result);

@@ -5548,8 +5548,14 @@ static bool copy_source(host_file_t *source, host_file_t *temporary,
                         uint64_t source_size, uint8_t *buffer,
                         size_t buffer_size,
                         ios3_sha256_context_t *source_sha256,
-                        rootfs_work_result_t *result) {
+                        rootfs_work_result_t *result,
+                        void (*progress)(void *, uint64_t, uint64_t),
+                        void *progress_ctx) {
     uint64_t offset = 0;
+
+    /* Report zero before the first chunk, so a bar appears immediately rather
+     * than after the first few megabytes have already gone by. */
+    if (progress) progress(progress_ctx, 0u, source_size);
 
     while (offset < source_size) {
         uint64_t remaining = source_size - offset;
@@ -5570,6 +5576,7 @@ static bool copy_source(host_file_t *source, host_file_t *temporary,
             return false;
         offset += amount;
         result->bytes_copied = offset;
+        if (progress) progress(progress_ctx, offset, source_size);
     }
     return true;
 }
@@ -5785,7 +5792,8 @@ rootfs_work_status_t rootfs_work_create(const char *source_path,
         goto done;
     }
     if (!copy_source(&source, &temporary, source_before.size, buffer,
-                     selected.io_buffer_bytes, &source_sha256, result))
+                     selected.io_buffer_bytes, &source_sha256, result,
+                     selected.progress, selected.progress_ctx))
         goto done;
     if (!host_file_stamp(&source, &source_after, &error)) {
         result_fail(result, ROOTFS_WORK_SOURCE_CHANGED,

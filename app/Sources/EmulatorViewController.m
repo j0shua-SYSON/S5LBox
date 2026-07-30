@@ -111,6 +111,20 @@ static const NSUInteger kConsoleScrollback = 12000;
 
 @implementation EmulatorViewController {
     VMFramebufferView *_screen;
+    /*
+     * THE PREPARING OVERLAY. Shown over the guest screen while the one slow
+     * first-boot step runs, because "Preparing iPhone OS -- close and reopen it
+     * after finishing" told the user to wait without saying for how long, and
+     * offered no way to tell a working copy from a stuck one.
+     *
+     * A real bar, driven by the byte count rootfs_work.c reports as it copies
+     * the ~433 MB source. When the copy has not reported yet the bar is hidden
+     * and the label alone shows, rather than a bar pinned at zero -- which
+     * reads as broken rather than as starting.
+     */
+    UIView            *_prepareScrim;
+    UILabel           *_prepareLabel;
+    UIProgressView    *_prepareBar;
     VMButtonBar       *_keys;
     UILabel           *_stats;
     UITextView        *_console;
@@ -164,6 +178,27 @@ static const NSUInteger kConsoleScrollback = 12000;
      * -framebufferView:touchAtGuestX:guestY:phase:. */
     _screen.touchDelegate = self;
     [self.view addSubview:_screen];
+
+    /* Over the screen and nothing else: the toolbar stays live so a user can
+     * still leave, and the console stays readable. */
+    _prepareScrim = [[UIView alloc] initWithFrame:CGRectZero];
+    _prepareScrim.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.72];
+    _prepareScrim.hidden = YES;
+    [self.view addSubview:_prepareScrim];
+
+    _prepareLabel = [[UILabel alloc] initWithFrame:CGRectZero];
+    _prepareLabel.backgroundColor = [UIColor clearColor];
+    _prepareLabel.textColor = [UIColor whiteColor];
+    _prepareLabel.textAlignment = NSTextAlignmentCenter;
+    _prepareLabel.numberOfLines = 3;
+    _prepareLabel.font = [UIFont systemFontOfSize:13];
+    _prepareLabel.text = @"Preparing iPhone OS…";
+    [_prepareScrim addSubview:_prepareLabel];
+
+    _prepareBar = [[UIProgressView alloc]
+                      initWithProgressViewStyle:UIProgressViewStyleDefault];
+    _prepareBar.progress = 0.0f;
+    [_prepareScrim addSubview:_prepareBar];
 
     _keys = [[VMButtonBar alloc] initWithFrame:CGRectZero];
     _keys.delegate = self;
@@ -539,6 +574,37 @@ static const NSUInteger kConsoleScrollback = 12000;
 
 #pragma mark - Layout
 
+/*
+ * The preparing overlay, refreshed on the same throttled tick as the status
+ * line -- eight frames is far finer than a 433 MB copy changes on.
+ *
+ * -1.0 from the engine means "running but nothing reported yet": the label
+ * shows and the bar is hidden, because a bar stuck at the left edge looks like
+ * a failure rather than a beginning. The label carries the byte figures too, so
+ * a user can see it moving even when the bar is only a few pixels along.
+ */
+- (void)refreshPrepareOverlay {
+    BOOL preparing = [_engine isPreparingRootFilesystem];
+    _prepareScrim.hidden = !preparing;
+    if (!preparing) return;
+
+    double f = [_engine rootFilesystemProgress];
+    if (f < 0.0) {
+        _prepareBar.hidden = YES;
+        _prepareLabel.text = @"Preparing iPhone OS…
+Copying the root filesystem";
+        return;
+    }
+    if (f > 1.0) f = 1.0;
+    _prepareBar.hidden = NO;
+    _prepareBar.progress = (float)f;
+    _prepareLabel.text = [NSString stringWithFormat:
+        @"Preparing iPhone OS…
+%.0f%% — copying the root filesystem
+"
+         "You can leave this screen; it keeps going.", f * 100.0];
+}
+
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
 
@@ -588,6 +654,15 @@ static const NSUInteger kConsoleScrollback = 12000;
     CGFloat h = floor((CGFloat)VM_FB_HEIGHT * scale);
     _screen.frame = CGRectMake(floor((b.size.width - w) * 0.5),
                                top + floor((band - h) * 0.5), w, h);
+
+    /* Exactly over the picture, so it reads as "this machine is busy" rather
+     * than as a modal covering the whole app. */
+    _prepareScrim.frame = _screen.frame;
+    CGFloat pw = floor(_screen.frame.size.width * 0.78);
+    CGFloat px = floor((_screen.frame.size.width - pw) * 0.5);
+    CGFloat pcy = floor(_screen.frame.size.height * 0.5);
+    _prepareLabel.frame = CGRectMake(px, pcy - 42.0, pw, 40.0);
+    _prepareBar.frame   = CGRectMake(px, pcy + 4.0,  pw, 4.0);
 
     CGFloat y = top + band + 6.0;
     _keys.frame = CGRectMake(0.0, y, b.size.width, keysH);
@@ -656,6 +731,8 @@ static const NSUInteger kConsoleScrollback = 12000;
          * this reports each distinct thing once and does not re-alert on the
          * same sentence every eight frames.
          */
+        [self refreshPrepareOverlay];
+
         NSString *note = [_engine bringUpNote];
         if (note.length && ![note isEqualToString:_lastBringUpNote]) {
             _lastBringUpNote = note;

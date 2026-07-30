@@ -218,8 +218,18 @@ void vm_firmware_boot_destroy(vm_firmware_boot_t **boot);
  * The directory paths->work names must already exist; nothing here creates
  * directories, because C has no portable way to.
  */
+/*
+ * `progress` is optional and may be NULL. It is called during the ~433 MB copy
+ * with the bytes done and the total, on THIS thread -- which is a background
+ * thread, never the UI one, so an implementation that touches UIKit has to
+ * hop to the main queue itself. It cannot cancel: this is a report, so a
+ * progress bar can never leave a half-built image behind.
+ */
 bool vm_firmware_boot_provision(const vm_firmware_boot_paths_t *paths,
                                 const bool *options, unsigned option_count,
+                                void (*progress)(void *ctx, uint64_t done,
+                                                 uint64_t total),
+                                void *progress_ctx,
                                 char *detail, size_t detail_capacity);
 
 #ifdef __cplusplus

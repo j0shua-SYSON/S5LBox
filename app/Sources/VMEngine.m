@@ -111,6 +111,9 @@ static double vm_now(void) {
 
 @implementation VMEngine {
     s5l8900_t        _machine;
+    /* The provisioning copy's byte counters; see -rootFilesystemProgress. */
+    uint64_t         _prepareDone;
+    uint64_t         _prepareTotal;
     BOOL             _machineReady;
 
     /*
@@ -408,8 +411,16 @@ static double vm_now(void) {
          * and this machine gets the demo guest. Reopening the machine after it
          * finishes boots the real kernel.
          */
-        note = @"Preparing this machine's writable root filesystem (first boot "
-               @"only). Close and reopen this machine when it has finished.";
+        /* Says what the bar means and what happens next, and NOTHING MORE.
+         * A first draft of this string promised "iPhone OS starts by itself
+         * when the copy finishes"; it does not -- the completion path below
+         * says "Reopen it to boot iPhone OS" -- and a message that tells a
+         * user to wait for something that never happens is worse than the
+         * vague one it replaced. */
+        note = @"Preparing this machine's writable root filesystem — first "
+               @"boot only. The bar on the screen is the real copy progress "
+               @"and keeps going if you leave. Reopen this machine when it "
+               @"reaches the end.";
         BOOL alreadyRunning;
         pthread_mutex_lock(&_lock);
         alreadyRunning = _preparingRootFS;
@@ -503,6 +514,8 @@ static double vm_now(void) {
 
         BOOL ok = havePaths
             ? vm_firmware_boot_provision(&paths, values, (unsigned)count,
+                                         vm_engine_prepare_progress,
+                                         (__bridge void *)self,
                                          detail, sizeof detail)
             : NO;
         if (!havePaths)
@@ -1625,6 +1638,35 @@ static bool vm_spin_already_reported(const vm_spin_t *s, uint32_t region) {
     BOOL preparing = _preparingRootFS;
     pthread_mutex_unlock(&_lock);
     return preparing;
+}
+
+- (double)rootFilesystemProgress {
+    pthread_mutex_lock(&_lock);
+    double f = _prepareTotal ? (double)_prepareDone / (double)_prepareTotal
+                             : -1.0;
+    pthread_mutex_unlock(&_lock);
+    return f;
+}
+
+/*
+ * Called from rootfs_work.c's copy loop, on the PROVISIONING thread -- never
+ * the UI one. It therefore does the least possible: takes the same lock every
+ * other engine field uses and stores two integers. The view polls; nothing is
+ * dispatched from here, because a callback that hopped to the main queue a few
+ * hundred times would be a UI storm reporting on a disk copy.
+ */
+static void vm_engine_prepare_progress(void *ctx, uint64_t done,
+                                       uint64_t total) {
+    VMEngine *engine = (__bridge VMEngine *)ctx;
+    if (!engine) return;
+    /* Direct ivar access rather than a message send: this is the same
+     * translation unit, and a selector declared below the callback would need
+     * a forward declaration for no benefit. Two stores under the lock every
+     * engine field already uses. */
+    pthread_mutex_lock(&engine->_lock);
+    engine->_prepareDone  = done;
+    engine->_prepareTotal = total;
+    pthread_mutex_unlock(&engine->_lock);
 }
 
 /*
