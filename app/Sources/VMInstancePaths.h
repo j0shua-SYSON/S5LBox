@@ -76,6 +76,20 @@ typedef struct {
     char machine[VM_FW_BOOT_PATH_CAPACITY];
     /* machine/rootfs-work.img */
     char work_image[VM_FW_BOOT_PATH_CAPACITY];
+    /*
+     * The suspend-to-disk pair and their partial names -- "later, its
+     * snapshots" from the comment above, arrived. See VMFirmwareBoot.h for why
+     * there is no image sidecar and why the partial names exist.
+     *
+     * Derived here rather than built at the call site so that the resume path,
+     * the pause path and the "discard a stale snapshot" path cannot disagree
+     * about where the file is; three string joins in three files is how a
+     * machine ends up resuming from another machine's state.
+     */
+    char state[VM_FW_BOOT_PATH_CAPACITY];
+    char state_md[VM_FW_BOOT_PATH_CAPACITY];
+    char state_tmp[VM_FW_BOOT_PATH_CAPACITY];
+    char state_md_tmp[VM_FW_BOOT_PATH_CAPACITY];
     /* firmware/rootfs-work.img — the pre-instance location, which exists only
      * on an installation that ran an older build. */
     char legacy_work_image[VM_FW_BOOT_PATH_CAPACITY];

@@ -50,6 +50,28 @@ extern "C" {
 #define VM_FW_BOOT_DEVICETREE_FILE  "devicetree.bin"
 #define VM_FW_BOOT_ROOTFS_FILE      "rootfs.img"
 #define VM_FW_BOOT_WORK_FILE        "rootfs-work.img"
+/*
+ * The suspend-to-disk pair, written when the machine is paused and read
+ * instead of booting.
+ *
+ * WHY THIS IS TWO FILES AND NOT THREE. bootkernel writes a 466 MB `.mdimage`
+ * sidecar beside every snapshot because it builds a FRESH work image on every
+ * run, so a restore has to carry the disk with it. A machine in this app keeps
+ * VM_FW_BOOT_WORK_FILE for its whole life, so the snapshot and the disk are
+ * coherent by construction and only the host-side bridge state -- counters and
+ * the allocation-tail overlay, about 131 KB -- has to travel.
+ *
+ * THE TEMP NAME IS NOT A CONVENIENCE. A snapshot is ~100 MB and iOS may
+ * suspend the app part-way through writing one. A truncated file that got
+ * loaded would restore a machine whose RAM disagrees with its disk, which
+ * corrupts the guest filesystem quietly -- the exact failure fsck exists to
+ * catch and which a resume never runs fsck to catch. So the write goes to
+ * VM_FW_BOOT_STATE_TMP and is renamed only once complete.
+ */
+#define VM_FW_BOOT_STATE_FILE       "state.snap"
+#define VM_FW_BOOT_STATE_MD_FILE    "state.snap.mdstate"
+#define VM_FW_BOOT_STATE_TMP        "state.snap.partial"
+#define VM_FW_BOOT_STATE_MD_TMP     "state.snap.mdstate.partial"
 
 /* How much free space rootfs_work_create() adds to the volume. The stock
  * rootfs ships with ZERO free blocks, so without this launchd can create

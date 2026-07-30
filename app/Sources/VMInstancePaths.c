@@ -105,6 +105,14 @@ vm_instance_paths_derive(const char *firmware_directory,
               instance_id) ||
         !join(out->work_image, sizeof out->work_image, out->machine,
               VM_FW_BOOT_WORK_FILE) ||
+        !join(out->state, sizeof out->state, out->machine,
+              VM_FW_BOOT_STATE_FILE) ||
+        !join(out->state_md, sizeof out->state_md, out->machine,
+              VM_FW_BOOT_STATE_MD_FILE) ||
+        !join(out->state_tmp, sizeof out->state_tmp, out->machine,
+              VM_FW_BOOT_STATE_TMP) ||
+        !join(out->state_md_tmp, sizeof out->state_md_tmp, out->machine,
+              VM_FW_BOOT_STATE_MD_TMP) ||
         !join(out->legacy_work_image, sizeof out->legacy_work_image,
               firmware_directory, VM_FW_BOOT_WORK_FILE)) {
         memset(out, 0, sizeof *out);

@@ -94,13 +94,34 @@
  * a layer, and run86's "three is worse than two" was measured on a workload
  * that never asked for three.
  *
- * Four rather than three: run127 measured the region gate returning 1 for four
- * and 0 for two, and the refused request is offset 0x12c000 + length 0x96000,
- * which ends exactly at the three-surface boundary -- leaving a three-surface
- * pool with no room for the NEXT one. The cost is 614,400 bytes per surface of
- * guest DRAM.
+ * FOUR WAS NOT ENOUGH, and the failure counts say the pool was never sized for
+ * an interactive machine at all. Counting "buffer allocation failed" in the
+ * guest's own console across today's runs:
+ *
+ *     run170   drag that did NOT unlock                    1
+ *     r181     unlocked                                   11
+ *     r184/r189/r191  unlocked, NO TAP                     12
+ *     r190/r188       unlocked + tap, 2 surfaces        19-20
+ *     r193     unlocked + swipe, 4 surfaces               14
+ *
+ * Two things follow. The home screen ALONE starves the pool -- the no-tap
+ * controls fail twelve times each, so this is not a tap-specific bug but a
+ * continuous one, and on a real device it shows as the screen blinking as the
+ * compositor loses and regains its backing store. And the display only DIES
+ * around 19-20 failures: at 12 it still renders, so this is a threshold rather
+ * than a cliff, which is why every static-screen measurement before today
+ * missed it entirely.
+ *
+ * run86's "three measured worse than two" and run127's "three is the observed
+ * minimum" were both taken on workloads that never asked for a third surface,
+ * and neither generalises to a machine somebody is touching.
+ *
+ * The cost is 614,400 bytes of guest DRAM per surface against 128 MB, so the
+ * old caution was buying almost nothing. UNDER MEASUREMENT at sixteen (r194):
+ * if the failures reach zero the minimum can be walked back down, and this
+ * comment should record the number that did rather than the first one tried.
  */
-#define S5L_BRINGUP_VRAM_SURFACES  4u
+#define S5L_BRINGUP_VRAM_SURFACES  16u
 #define S5L_BRINGUP_VRAM_BYTES     (S5L_BRINGUP_FB_BYTES * S5L_BRINGUP_VRAM_SURFACES)
 
 /*

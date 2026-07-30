@@ -178,6 +178,35 @@ static void test_two_machines_are_two_machines(void) {
           "the work image is not inside the machine's directory: %s",
           a.work_image);
 
+    /*
+     * THE SNAPSHOT PAIR, held to the same property as the disk: one machine's
+     * suspended state must never resolve to another's. Restoring machine B's
+     * RAM on top of machine A's filesystem would corrupt A's volume silently,
+     * and a resume never runs fsck to notice.
+     */
+    CHECK(strcmp(a.state, b.state) != 0,
+          "two machines share one snapshot: %s", a.state);
+    CHECK(strcmp(a.state_md, b.state_md) != 0,
+          "two machines share one bridge state: %s", a.state_md);
+    CHECK(strstr(a.state, ID_A) != NULL && strstr(a.state_md, ID_A) != NULL,
+          "the snapshot is not inside the machine's directory: %s", a.state);
+    CHECK(ends_with(a.state, VM_FW_BOOT_STATE_FILE),
+          "the snapshot is not %s: %s", VM_FW_BOOT_STATE_FILE, a.state);
+    /*
+     * And the partial names must differ from the final ones, or the atomic
+     * rename degrades into writing straight over the good snapshot -- which
+     * is the failure the temp file exists to prevent, so it is worth a check
+     * rather than a comment.
+     */
+    CHECK(strcmp(a.state, a.state_tmp) != 0,
+          "the partial snapshot has the same name as the finished one: %s",
+          a.state);
+    CHECK(strcmp(a.state_md, a.state_md_tmp) != 0,
+          "the partial bridge state has the same name as the finished one: %s",
+          a.state_md);
+    CHECK(strcmp(a.state, a.state_md) != 0,
+          "the snapshot and the bridge state are the same file: %s", a.state);
+
     /* A trailing separator on the caller's directory must not double up. */
     vm_instance_paths_t slashed;
     char with_slash[256];
