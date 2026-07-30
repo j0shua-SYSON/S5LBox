@@ -361,7 +361,7 @@ static bool boot_option_takes_value(const char *option) {
         "-D", "-W", "-Z", "-p", "--restore", "-V", "-n", "-T",
         "-d", "-c", "-b", "-w", "-r", "--fstab", "--grow", "-R",
         "-X", "-H", "--call-probe", "--call-probe-kernel",
-        "--jailbreak-payload", "--touch", "--drag", "--button"
+        "--jailbreak-payload", "--touch", "--drag", "--pinch", "--button"
     };
 
     if (!option) return false;
@@ -5982,6 +5982,42 @@ typedef struct {
     uint64_t  refusals;   /* device said no; see s5l_mtz2_set_contacts     */
 } touch_drag_t;
 
+/* --- DIAGNOSTIC: the scheduled two-finger gesture (--pinch) -----------------
+ *
+ * WHY THIS EXISTS SEPARATELY FROM --drag. Both --touch and --drag inject
+ * exactly ONE contact per frame (`s5l_mtz2_set_contacts(..., 1u)`), so no
+ * amount of scheduling them together produces two fingers DOWN AT ONCE: it
+ * produces two one-finger frames in a row, which is a different gesture and is
+ * what every "multitouch" claim in this project rested on until now. The device
+ * has always carried up to MTZ2_CONTACT_MAX contacts and s5l_mtz2_encode()
+ * has always packed n of them; the harness was the limit.
+ *
+ * Two mt_drag_t gestures stepped in LOCKSTEP and emitted in ONE frame. Report k
+ * of each is built by the same mt_drag_contact() the single-finger path uses,
+ * so the phase sequence, the pressure/phase agreement and the interpolation are
+ * shared code rather than a second implementation that could disagree.
+ *
+ * The two fingers necessarily share a schedule: one frame carries both, so
+ * there is one `accepted` index and a refusal delays both halves together. A
+ * gesture whose fingers could drift apart in time would not be a pinch.
+ *
+ * Path identifiers are 1 and 2. _mt_getPathLifeCycle accepts 1..11 and this
+ * device reports at most MTZ2_CONTACT_MAX, so two is inside both bounds.
+ */
+#define TOUCH_PINCH_MAX 4u
+
+typedef struct {
+    mt_drag_t g[2];       /* one shape per finger; see mt_drag.h           */
+    uint64_t  at;         /* first instruction at which the landing is tried */
+    uint64_t  gap;        /* nominal instructions between reports          */
+    unsigned  reports;    /* total reports; both fingers agree by validation */
+    unsigned  accepted;   /* frames the DEVICE took; also the next index   */
+    uint64_t  last_at;    /* instruction of the most recent acceptance     */
+    uint64_t  down_at;    /* instruction at which the landing was ACCEPTED */
+    uint64_t  up_at;      /* ... and the lift. Only meaningful when done   */
+    uint64_t  refusals;   /* device said no; see s5l_mtz2_set_contacts     */
+} touch_pinch_t;
+
 /* --- DIAGNOSTIC: the scheduled button press (--button) ----------------------
  *
  * WHAT THIS IS AND IS NOT. It moves a physical switch on the emulated board at
@@ -6443,6 +6479,11 @@ static struct {
      * from the taps on purpose: a drag must cost one slot, not one per point. */
     unsigned          drag_n;
     touch_drag_t      drag[TOUCH_DRAG_MAX];
+
+    /* --- the scheduled two-finger gesture; --pinch ------------------------
+     * pinch_n is the hot-loop gate, exactly as drag_n is. */
+    unsigned          pinch_n;
+    touch_pinch_t     pinch[TOUCH_PINCH_MAX];
 
     /* --- the scheduled button press; --button ----------------------------
      * button_n is the hot-loop gate, exactly as touch_n is. */
@@ -17336,6 +17377,49 @@ static BOOTKERNEL_NOINLINE void touch_drag_step(uint64_t n) {
 }
 
 /*
+ * Advance every scheduled two-finger gesture by one instruction.
+ *
+ * The single difference from touch_drag_step() that matters: BOTH contacts go
+ * into ONE s5l_mtz2_set_contacts() call, so the guest parses one frame holding
+ * two paths. Injecting them as two calls would be two frames, each with one
+ * finger, which is precisely the thing this exists to stop claiming.
+ *
+ * Everything else is the drag's discipline unchanged -- one frame in flight,
+ * report k+1 never attempted before k was accepted, refusals counted and
+ * charged to the whole gesture rather than to one finger.
+ */
+static BOOTKERNEL_NOINLINE void touch_pinch_step(uint64_t n) {
+    if (!G.mach) return;
+    for (unsigned i = 0; i < G.pinch_n; i++) {
+        touch_pinch_t *p = &G.pinch[i];
+        s5l_mt_contact_t c[2];
+        uint64_t due;
+
+        if (p->accepted >= p->reports) continue;          /* completed */
+        due = p->accepted == 0u ? p->at : p->last_at + p->gap;
+        if (n < due) continue;
+
+        if (!mt_drag_contact(&p->g[0], p->accepted, &c[0])) continue;
+        if (!mt_drag_contact(&p->g[1], p->accepted, &c[1])) continue;
+        /* mt_drag_contact() stamps every contact with MT_DRAG_CONTACT_ID,
+         * which is right for one finger and wrong for two: the parser tracks
+         * a path per identifier, so two fingers sharing one would read as a
+         * single finger teleporting between them every frame. */
+        c[1].id = (uint8_t)(MT_DRAG_CONTACT_ID + 1u);
+
+        if (!s5l_mtz2_set_contacts(&G.mach->mtz2, c, 2u)) {
+            p->refusals++;
+            continue;      /* the device is busy or not ready; try next step */
+        }
+        s5l8900_tick(G.mach, 0);        /* as touch_tap_step(); see soc.h */
+        if (p->accepted == 0u) p->down_at = n;
+        p->last_at = n;
+        p->accepted++;
+        if (p->accepted == p->reports) p->up_at = n;
+    }
+}
+
+/*
  * Advance every scheduled button press by one instruction. Not inlined, for the
  * same reason touch_tap_step() is not: the step loop's whole cost when no press
  * is configured is one test of a global that is never written after startup.
@@ -17639,6 +17723,51 @@ static void mtz2_device_report(const s5l_mtz2_t *d) {
  *   COMPLETED        every report was accepted, in order. Still not a claim
  *                    that the guest saw any of it -- see the device block.
  */
+/*
+ * The two-finger gestures. Deliberately reports the CONTACTS PER FRAME, because
+ * that single number is the whole difference between this and two --drags: the
+ * device parsed one frame carrying two paths, not two frames carrying one each.
+ */
+static void pinch_report(void) {
+    printf("\n=== TOUCH: SCHEDULED TWO-FINGER GESTURES (%u) ===\n", G.pinch_n);
+    printf("    Both fingers ride ONE frame -- s5l_mtz2_set_contacts(.., 2).\n"
+           "    Path identifiers %u and %u; one schedule, so a refusal delays\n"
+           "    both halves and they cannot drift apart.\n",
+           MT_DRAG_CONTACT_ID, MT_DRAG_CONTACT_ID + 1u);
+    for (unsigned i = 0; i < G.pinch_n; i++) {
+        const touch_pinch_t *p = &G.pinch[i];
+        printf("    pinch %u at %llu  A(%u,%u)->(%u,%u)  B(%u,%u)->(%u,%u)"
+               "  steps %u  span %llu  gap %llu\n",
+               i, (unsigned long long)p->at,
+               p->g[0].x0, p->g[0].y0, p->g[0].x1, p->g[0].y1,
+               p->g[1].x0, p->g[1].y0, p->g[1].x1, p->g[1].y1,
+               p->g[0].steps, (unsigned long long)p->g[0].span,
+               (unsigned long long)p->gap);
+        printf("            ");
+        if (p->accepted < p->reports)
+            printf("INCOMPLETE at frame %u/%u", p->accepted + 1u, p->reports);
+        else
+            printf("COMPLETED");
+        printf("  accepted %u/%u frames (= %u contacts)  refused %llu\n",
+               p->accepted, p->reports, p->accepted * 2u,
+               (unsigned long long)p->refusals);
+        if (p->accepted)
+            printf("            down @%llu", (unsigned long long)p->down_at);
+        if (p->accepted >= p->reports)
+            printf("  up @%llu  measured span %llu (nominal %llu)",
+                   (unsigned long long)p->up_at,
+                   (unsigned long long)(p->up_at - p->down_at),
+                   (unsigned long long)p->g[0].span);
+        if (p->accepted) printf("\n");
+    }
+    if (G.drag_n || G.touch_n)
+        printf("    NOTE: a --drag or --touch is also armed and drives path\n"
+               "          identifier %u, which finger A also uses. Overlapping\n"
+               "          windows would show the guest one path driven by two\n"
+               "          schedules; separate them in time to read either.\n",
+               MT_DRAG_CONTACT_ID);
+}
+
 static void drag_report(void) {
     printf("\n=== TOUCH: SCHEDULED DRAGS (%u) ===\n", G.drag_n);
     printf("    A drag is ONE contact reported many times, every report on path\n"
@@ -17760,6 +17889,7 @@ static void touch_report(void) {
         }
     }
     if (G.drag_n) drag_report();
+    if (G.pinch_n) pinch_report();
     if (!d) return;
     mtz2_device_report(d);
 }
@@ -23530,6 +23660,8 @@ static void boot_print_usage(FILE *stream, const char *argv0) {
             "          [--call-probe-kernel <kernel-mode-pc>] ...\n"
             "          [--touch <at>:<x>:<y>[:<hold>]] ...\n"
             "          [--drag <at>:<x0>:<y0>:<x1>:<y1>[:<steps>[:<span>]]] ...\n"
+            "          [--pinch <at>:<ax0>:<ay0>:<ax1>:<ay1>:<bx0>:<by0>:"
+            "<bx1>:<by1>[:<steps>[:<span>]]] ...\n"
             "          [--button <name>:<at>[:<hold>]] ...\n"
             "          [--external-md <immutable-source.img> <new-work.img>]\n"
             "          [--jailbreak-payload <path>]\n"
@@ -23761,6 +23893,10 @@ int main(int argc, char **argv) {
     touch_drag_t drags[TOUCH_DRAG_MAX];
     unsigned drag_n = 0;
     memset(drags, 0, sizeof drags);
+    /* --pinch, for exactly the same reason and with the same trap. */
+    touch_pinch_t pinches[TOUCH_PINCH_MAX];
+    unsigned pinch_n = 0;
+    memset(pinches, 0, sizeof pinches);
     /* --button, for exactly the same reason and with the same trap. */
     button_press_t button_presses[BUTTON_PRESS_MAX];
     unsigned button_n = 0;
@@ -24408,6 +24544,100 @@ int main(int argc, char **argv) {
             fprintf(stderr,
                     "--drag: expected <at>:<x0>:<y0>:<x1>:<y1>[:<steps>"
                     "[:<span>]], got '%s'\n", argv[i]);
+            return 1;
+        }
+        else if (!strcmp(argv[i], "--pinch")) {
+            /*
+             * --pinch <at>:<ax0>:<ay0>:<ax1>:<ay1>:<bx0>:<by0>:<bx1>:<by1>
+             *         [:<steps>[:<span>]]
+             *
+             * Two fingers, one frame. Finger A runs (ax0,ay0)->(ax1,ay1) while
+             * finger B runs (bx0,by0)->(bx1,by1); both share `steps` and
+             * `span` because one frame carries both and a schedule per finger
+             * would let them drift apart, which is not a two-finger gesture.
+             */
+            const char *spec = argv[++i];
+            char *end = NULL;
+            uint64_t f[9];
+            uint64_t steps_p = MT_DRAG_STEPS_MIN, span_p = 0;
+            bool span_given_p = false;
+            mt_drag_t ga, gb;
+
+            if (!spec) { fprintf(stderr, "--pinch: missing value\n"); return 1; }
+            if (pinch_n >= TOUCH_PINCH_MAX) {
+                fprintf(stderr, "--pinch: at most %u gestures\n",
+                        TOUCH_PINCH_MAX);
+                return 1;
+            }
+            for (unsigned k = 0; k < 9u; k++) {
+                const char *p = (k == 0u) ? spec : end + 1;
+                if (k && *end != ':') goto pinch_bad;
+                f[k] = strtoull(p, &end, 0);
+                if (end == p) goto pinch_bad;
+            }
+            if (*end == ':') {
+                const char *p = end + 1;
+                steps_p = strtoull(p, &end, 0);
+                if (end == p) goto pinch_bad;
+                if (*end == ':') {
+                    p = end + 1;
+                    span_p = strtoull(p, &end, 0);
+                    if (end == p) goto pinch_bad;
+                    span_given_p = true;
+                }
+            }
+            if (*end != '\0') goto pinch_bad;
+
+            for (unsigned k = 1; k < 9u; k += 2u) {
+                if (f[k] >= S5L_MT_PANEL_W || f[k + 1u] >= S5L_MT_PANEL_H) {
+                    fprintf(stderr,
+                            "--pinch: (%llu,%llu) leaves a %ux%u panel\n",
+                            (unsigned long long)f[k],
+                            (unsigned long long)f[k + 1u],
+                            S5L_MT_PANEL_W, S5L_MT_PANEL_H);
+                    return 1;
+                }
+            }
+            if (steps_p < MT_DRAG_STEPS_MIN || steps_p > MT_DRAG_STEPS_MAX) {
+                fprintf(stderr, "--pinch: steps must be %u..%u\n",
+                        MT_DRAG_STEPS_MIN, MT_DRAG_STEPS_MAX);
+                return 1;
+            }
+            if (!span_given_p) span_p = mt_drag_span_default((unsigned)steps_p);
+
+            memset(&ga, 0, sizeof ga); memset(&gb, 0, sizeof gb);
+            ga.x0 = (uint16_t)f[1]; ga.y0 = (uint16_t)f[2];
+            ga.x1 = (uint16_t)f[3]; ga.y1 = (uint16_t)f[4];
+            gb.x0 = (uint16_t)f[5]; gb.y0 = (uint16_t)f[6];
+            gb.x1 = (uint16_t)f[7]; gb.y1 = (uint16_t)f[8];
+            ga.steps = gb.steps = (unsigned)steps_p;
+            ga.span  = gb.span  = span_p;
+            if (!mt_drag_valid(&ga) || !mt_drag_valid(&gb)) {
+                fprintf(stderr, "--pinch: '%s' is not a gesture this harness "
+                                "can emit\n", argv[i]);
+                return 1;
+            }
+            /* One index drives both fingers, so a mismatch here would silently
+             * lift one finger before the other. Equal by construction above;
+             * asserted because the construction could change. */
+            if (mt_drag_reports(&ga) != mt_drag_reports(&gb)) {
+                fprintf(stderr, "--pinch: the two fingers disagree on report "
+                                "count (%u vs %u)\n",
+                        mt_drag_reports(&ga), mt_drag_reports(&gb));
+                return 1;
+            }
+            pinches[pinch_n].g[0]   = ga;
+            pinches[pinch_n].g[1]   = gb;
+            pinches[pinch_n].at      = f[0];
+            pinches[pinch_n].gap     = mt_drag_gap(&ga);
+            pinches[pinch_n].reports = mt_drag_reports(&ga);
+            pinch_n++;
+            continue;
+        pinch_bad:
+            fprintf(stderr,
+                    "--pinch: expected <at>:<ax0>:<ay0>:<ax1>:<ay1>:<bx0>:"
+                    "<by0>:<bx1>:<by1>[:<steps>[:<span>]], got '%s'\n",
+                    argv[i]);
             return 1;
         }
         else if (!strcmp(argv[i], "--restore")) restore_path = argv[++i];
@@ -26384,6 +26614,9 @@ external_md_work_ready:
      * reason: drag_n is set LAST and is what arms the step loop. */
     for (unsigned q = 0; q < drag_n; q++) G.drag[q] = drags[q];
     G.drag_n = drag_n;
+    /* The scheduled two-finger gestures, same ordering rule: pinch_n LAST. */
+    for (unsigned q = 0; q < pinch_n; q++) G.pinch[q] = pinches[q];
+    G.pinch_n = pinch_n;
     /*
      * The scheduled presses, with the SAME ordering rule and for the same
      * reason: G is zeroed by spy_install(), so button_n is set LAST and is
@@ -27087,6 +27320,7 @@ external_md_work_ready:
         if (G.hbpp_watch) hbpp_stamp_step(n);
         if (G.frame_watch) frame_stamp_step(n);
         if (G.drag_n) touch_drag_step(n);
+        if (G.pinch_n) touch_pinch_step(n);
         if (G.button_n) button_press_step(n);
         /* The host's PPP peer. Gated on the same one-word test as the three
          * above, and inert until the guest's first octet opens the link. */
