@@ -4774,6 +4774,106 @@ static void test_pack_halfword_and_select(void) {
     }
 }
 
+/*
+ * The ARMv6 signed dual multiplies, and the multiply-accumulate media space
+ * around them. r207 stopped on SMLAD (0xe7088e12) one billion instructions
+ * further than r205's PKHTB, which is what argued for implementing the whole
+ * family rather than discovering each member at forty minutes a run.
+ */
+static void test_signed_dual_multiply_family(void) {
+    arm_cpu_t c;
+    static const struct {
+        uint32_t insn, rn, rm, ra, expect;
+        bool     expect_q;
+        const char *what;
+    } CASES[] = {
+        /* SMLAD r2,r1,r0,r3: 3*5 + 2*4 + 100 = 123. */
+        { 0xe7023011u, 0x00020003u, 0x00040005u, 100u, 123u, false,
+          "SMLAD adds both products and the accumulator" },
+        /* SMUAD is the Ra == 15 encoding: same products, no accumulator. */
+        { 0xe702f011u, 0x00020003u, 0x00040005u, 0u, 23u, false,
+          "SMUAD has no accumulator" },
+        /* SMLSD subtracts the high product from the low one. */
+        { 0xe7023051u, 0x00020003u, 0x00040005u, 100u, 107u, false,
+          "SMLSD subtracts the high product" },
+        { 0xe702f051u, 0x00020003u, 0x00040005u, 0u, 7u, false,
+          "SMUSD subtracts without an accumulator" },
+        /* The X form swaps Rm's halves first: 3*4 + 2*5 + 100 = 122. */
+        { 0xe7023031u, 0x00020003u, 0x00040005u, 100u, 122u, false,
+          "SMLADX swaps the Rm halves" },
+        /* Halves are SIGNED: 2*4 + (-1)*3 = 5, not 2*4 + 65535*3. */
+        { 0xe702f011u, 0xffff0002u, 0x00030004u, 0u, 5u, false,
+          "dual products sign-extend their halves" },
+        /* Q is set when the full-precision result does not fit in 32 bits. */
+        { 0xe7023011u, 0x7fff7fffu, 0x7fff7fffu, 0x7fffffffu, 0xfffe0001u, true,
+          "SMLAD sets Q on overflow and keeps the low word" },
+        /* SMMUL keeps the TOP word of a 32x32 product. */
+        { 0xe752f011u, 0x40000000u, 0x40000000u, 0u, 0x10000000u, false,
+          "SMMUL keeps the high word" },
+        /* SMMLA adds Ra at bit 32 before taking the top word. */
+        { 0xe7523011u, 0x40000000u, 0x40000000u, 1u, 0x10000001u, false,
+          "SMMLA accumulates into the high word" },
+        /* USAD8 sums |a-b| per byte: 3+1+1+3 = 8. */
+        { 0xe782f011u, 0x01020304u, 0x04030201u, 0u, 8u, false,
+          "USAD8 sums absolute byte differences" },
+        /* USADA8 adds Ra to that sum. */
+        { 0xe7823011u, 0x01020304u, 0x04030201u, 10u, 18u, false,
+          "USADA8 adds the accumulator" },
+    };
+
+    for (size_t i = 0; i < sizeof CASES / sizeof CASES[0]; i++) {
+        uint32_t prog[] = { CASES[i].insn };
+        memset(g_ram, 0, sizeof g_ram);
+        m_w32(NULL, 0, prog[0]);
+        arm_reset(&c, &g_bus);
+        c.cpsr = (c.cpsr & ~0x1fu) | ARM_MODE_SYS;
+        c.cpsr &= ~ARM_CPSR_Q;
+        c.r[1] = CASES[i].rn;
+        c.r[0] = CASES[i].rm;
+        c.r[3] = CASES[i].ra;
+        CHECK(arm_step(&c) == ARM_OK, "%s: refused", CASES[i].what);
+        CHECK(c.r[2] == CASES[i].expect, "%s: got %08x expected %08x",
+              CASES[i].what, c.r[2], CASES[i].expect);
+        CHECK(((c.cpsr & ARM_CPSR_Q) != 0u) == CASES[i].expect_q,
+              "%s: Q was %d", CASES[i].what,
+              (c.cpsr & ARM_CPSR_Q) != 0u);
+    }
+
+    /* The exact encoding and register values r207 recorded. */
+    {
+        uint32_t prog[] = { 0xe7088e12u };      /* SMLAD r8, r2, lr, r8 */
+        memset(g_ram, 0, sizeof g_ram);
+        m_w32(NULL, 0, prog[0]);
+        arm_reset(&c, &g_bus);
+        c.cpsr = (c.cpsr & ~0x1fu) | ARM_MODE_SYS;
+        c.r[2]  = 0x00020001u;
+        c.r[14] = 0x10c23294u;
+        c.r[8]  = 0x00002000u;
+        CHECK(arm_step(&c) == ARM_OK, "the r207 encoding must not be UNDEFINED");
+        CHECK(c.r[8] == 0x00007418u, "r207 encoding: got %08x expected %08x",
+              c.r[8], 0x00007418u);
+    }
+
+    /* Q is sticky: a later non-overflowing operation must not clear it. */
+    {
+        uint32_t prog[] = { 0xe702f011u };      /* SMUAD r2, r1, r0 */
+        memset(g_ram, 0, sizeof g_ram);
+        m_w32(NULL, 0, prog[0]);
+        arm_reset(&c, &g_bus);
+        c.cpsr = ((c.cpsr & ~0x1fu) | ARM_MODE_SYS) | ARM_CPSR_Q;
+        c.r[1] = 0x00010001u; c.r[0] = 0x00010001u;
+        CHECK(arm_step(&c) == ARM_OK, "SMUAD refused");
+        CHECK((c.cpsr & ARM_CPSR_Q) != 0u, "Q must be sticky");
+    }
+
+    /* PC operands are UNPREDICTABLE and must refuse rather than branch. */
+    {
+        uint32_t prog[] = { 0xe70f3011u };      /* SMLAD pc, r1, r0, r3 */
+        CHECK(run_status(&c, prog, 1, 1) == ARM_UNDEFINED,
+              "SMLAD with Rd == PC must refuse");
+    }
+}
+
 static void test_integer_divide_is_armv7_only(void) {
     /* SDIV/UDIV do not exist on the ARM1176. The first half of this test is the
      * important half: it pins the CURRENT target's behaviour, so adding a second
@@ -5385,6 +5485,7 @@ int main(void) {
     test_unaligned_access_faulting_on_the_second_page();
     test_parallel_add_sub_family();
     test_pack_halfword_and_select();
+    test_signed_dual_multiply_family();
     test_integer_divide_is_armv7_only();
     test_movw_movt_are_armv7_only();
     test_srs_and_rfe_stop_after_the_first_fault();

@@ -1945,7 +1945,108 @@ static arm_status_t exec_media(arm_cpu_t *c, uint32_t pc, uint32_t insn) {
         return ARM_OK;
     }
 
-    return ARM_UNDEFINED;                  /* USAT, SSAT, SMLAD, ... */
+    /*
+     * ARMv6 signed dual multiplies, and the rest of the multiply-accumulate
+     * media space with them.
+     *
+     * r207 stopped on `SMLAD r8, r2, lr, r8` (0xe7088e12) at 0x33932dfc, one
+     * billion instructions FURTHER than r205 reached -- so implementing PKH
+     * bought real progress and then landed on the next member of the same
+     * unimplemented space. Each of these costs a forty-minute run to discover
+     * one at a time, which is precisely the argument the parallel add/sub
+     * family above already makes for implementing a family together: the
+     * neighbours differ only in how the lane products are reduced, so leaving
+     * them to trap hides the next stop behind an identical shape.
+     *
+     * Four encodings, all with bit 4 set in the 011 space:
+     *
+     *   0x70  SMLAD SMUAD SMLSD SMUSD   dual 16x16, added or subtracted
+     *   0x74  SMLALD SMLSLD             the same, accumulating into 64 bits
+     *   0x75  SMMUL SMMLA SMMLS         32x32 keeping the TOP word
+     *   0x78  USAD8 USADA8              sum of absolute byte differences
+     *
+     * Ra == 15 is what distinguishes the accumulating form from the plain one
+     * (SMLAD/SMUAD, SMMLA/SMMUL, USADA8/USAD8); it is an encoding field, not a
+     * register read, so it is tested before reading anything.
+     *
+     * Products are formed in int64 and narrowed once, so a lane can never carry
+     * into its neighbour, and Q is set from whether the full-precision result
+     * fitted -- sticky, never cleared here.
+     */
+    if ((insn & 0x0ff00090u) == 0x07000010u) {        /* SMLAD SMUAD SMLSD SMUSD */
+        unsigned rd = (insn >> 16) & 0xfu, ra = (insn >> 12) & 0xfu;
+        unsigned rm = (insn >> 8) & 0xfu, rn = insn & 0xfu;
+        bool sub  = ((insn >> 6) & 1u) != 0u;
+        bool swap = ((insn >> 5) & 1u) != 0u;
+        if (rd == 15u || rm == 15u || rn == 15u) return ARM_UNDEFINED;
+        uint32_t n = reg_read(c, pc, rn), m = reg_read(c, pc, rm);
+        if (swap) m = (m >> 16) | (m << 16);          /* the X forms */
+        int64_t p1 = (int64_t)(int16_t)(uint16_t)(n & 0xffffu) *
+                     (int16_t)(uint16_t)(m & 0xffffu);
+        int64_t p2 = (int64_t)(int16_t)(uint16_t)(n >> 16) *
+                     (int16_t)(uint16_t)(m >> 16);
+        int64_t acc = sub ? (p1 - p2) : (p1 + p2);
+        if (ra != 15u) acc += (int64_t)(int32_t)reg_read(c, pc, ra);
+        if (acc != (int64_t)(int32_t)acc) c->cpsr |= ARM_CPSR_Q;
+        c->r[rd] = (uint32_t)((uint64_t)acc & UINT64_C(0xffffffff));
+        return ARM_OK;
+    }
+    if ((insn & 0x0ff00090u) == 0x07400010u) {        /* SMLALD SMLSLD */
+        unsigned rdhi = (insn >> 16) & 0xfu, rdlo = (insn >> 12) & 0xfu;
+        unsigned rm = (insn >> 8) & 0xfu, rn = insn & 0xfu;
+        bool sub  = ((insn >> 6) & 1u) != 0u;
+        bool swap = ((insn >> 5) & 1u) != 0u;
+        if (rdhi == 15u || rdlo == 15u || rm == 15u || rn == 15u ||
+            rdhi == rdlo)
+            return ARM_UNDEFINED;
+        uint32_t n = reg_read(c, pc, rn), m = reg_read(c, pc, rm);
+        if (swap) m = (m >> 16) | (m << 16);
+        int64_t p1 = (int64_t)(int16_t)(uint16_t)(n & 0xffffu) *
+                     (int16_t)(uint16_t)(m & 0xffffu);
+        int64_t p2 = (int64_t)(int16_t)(uint16_t)(n >> 16) *
+                     (int16_t)(uint16_t)(m >> 16);
+        uint64_t wide = ((uint64_t)reg_read(c, pc, rdhi) << 32) |
+                        reg_read(c, pc, rdlo);
+        int64_t acc = (int64_t)wide + (sub ? (p1 - p2) : (p1 + p2));
+        c->r[rdlo] = (uint32_t)((uint64_t)acc & UINT64_C(0xffffffff));
+        c->r[rdhi] = (uint32_t)((uint64_t)acc >> 32);
+        return ARM_OK;
+    }
+    if ((insn & 0x0ff00010u) == 0x07500010u) {        /* SMMUL SMMLA SMMLS */
+        unsigned sel = (insn >> 6) & 3u;              /* 00 add, 11 subtract */
+        if (sel != 0u && sel != 3u) return ARM_UNDEFINED;
+        unsigned rd = (insn >> 16) & 0xfu, ra = (insn >> 12) & 0xfu;
+        unsigned rm = (insn >> 8) & 0xfu, rn = insn & 0xfu;
+        bool sub = (sel == 3u), round = ((insn >> 5) & 1u) != 0u;
+        if (rd == 15u || rm == 15u || rn == 15u) return ARM_UNDEFINED;
+        /* SMMUL has no accumulator and is the Ra == 15 encoding; SMMLS with
+         * Ra == 15 is not an encoding at all. */
+        if (sub && ra == 15u) return ARM_UNDEFINED;
+        int64_t prod = (int64_t)(int32_t)reg_read(c, pc, rn) *
+                       (int32_t)reg_read(c, pc, rm);
+        int64_t acc = (ra == 15u)
+            ? 0 : ((int64_t)(int32_t)reg_read(c, pc, ra) << 32);
+        int64_t res = sub ? (acc - prod) : (acc + prod);
+        if (round) res += INT64_C(0x80000000);
+        c->r[rd] = (uint32_t)((uint64_t)res >> 32);
+        return ARM_OK;
+    }
+    if ((insn & 0x0ff000f0u) == 0x07800010u) {        /* USAD8 USADA8 */
+        unsigned rd = (insn >> 16) & 0xfu, ra = (insn >> 12) & 0xfu;
+        unsigned rm = (insn >> 8) & 0xfu, rn = insn & 0xfu;
+        if (rd == 15u || rm == 15u || rn == 15u) return ARM_UNDEFINED;
+        uint32_t n = reg_read(c, pc, rn), m = reg_read(c, pc, rm);
+        uint32_t sum = (ra == 15u) ? 0u : reg_read(c, pc, ra);
+        for (unsigned lane = 0; lane < 4u; lane++) {
+            uint32_t a = (n >> (lane * 8u)) & 0xffu;
+            uint32_t b = (m >> (lane * 8u)) & 0xffu;
+            sum += (a > b) ? (a - b) : (b - a);   /* unsigned, so no negatives */
+        }
+        c->r[rd] = sum;
+        return ARM_OK;
+    }
+
+    return ARM_UNDEFINED;                  /* USAT, SSAT, ... */
 }
 
 static arm_status_t exec_multiply(arm_cpu_t *c, uint32_t pc, uint32_t insn) {
