@@ -856,6 +856,35 @@ add_test(NAME hfs_catalog_provisioning COMMAND test_rootfs_provision)
 set_tests_properties(hfs_catalog_provisioning PROPERTIES
     WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
 
+# The jailbreak payload reader (tools/payload_tar.c). Turns a user-supplied tar
+# into the rootfs_work_entry_t array the provisioner above already knows how to
+# apply -- the piece that was missing, not the provisioner. Every fixture the
+# test uses is a tar it writes itself, so this needs no payload and runs on
+# every host runner.
+add_library(host_payload_tar STATIC ../tools/payload_tar.c)
+target_include_directories(host_payload_tar PUBLIC ../tools)
+target_link_libraries(host_payload_tar PUBLIC host_rootfs_work)
+set_target_properties(host_payload_tar PROPERTIES
+    C_STANDARD 11
+    C_STANDARD_REQUIRED YES
+    C_EXTENSIONS NO)
+
+add_executable(test_payload_tar tests/test_payload_tar.c)
+target_link_libraries(test_payload_tar PRIVATE host_payload_tar)
+set_target_properties(test_payload_tar PROPERTIES
+    C_STANDARD 11
+    C_STANDARD_REQUIRED YES
+    C_EXTENSIONS NO)
+if(MSVC)
+    target_compile_options(test_payload_tar PRIVATE /W4 /WX)
+else()
+    target_compile_options(test_payload_tar PRIVATE
+        -Wall -Wextra -Werror -pedantic)
+endif()
+add_test(NAME jailbreak_payload_tar COMMAND test_payload_tar)
+set_tests_properties(jailbreak_payload_tar PROPERTIES
+    WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+
 # img3dump points the real parser at real firmware, so inspecting an IPSW also
 # validates our format handling.
 add_executable(img3dump ../tools/img3dump.c)
