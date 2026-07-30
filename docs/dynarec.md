@@ -114,6 +114,42 @@ trusted when it arrives.
 | §6.1 software TLB (J1) | **partly built, and the two halves are not the same job.** Translation *is* cached: the interpreter carries a 4096-entry TLB keyed on the 1 KB block, access kind and privilege. What a TLB hit does **not** avoid is the access itself, and that is where the time was. The instruction fetch and the data **read** now resolve to a host pointer and skip the bus dispatch entirely. **Stores still go through `bus->write*`, deliberately** — see below |
 | Thumb (J4) | **broad Thumb-1 subset translated**, covering 93.54% of retired Thumb instructions in the recorded sample (see below); excluded forms remain |
 
+**THE DATA-READ CACHE BOUGHT NOTHING, AND THAT IS THE MOST IMPORTANT NUMBER ON
+THIS PAGE.** Measured 2026-07-30, interleaved A/B/A/B on an idle box, 300 M
+instructions of real kernel boot per run:
+
+| build | mean of 3 | spread |
+|---|---|---|
+| data-read cache on | **95.5 s** | 7.5 s |
+| `-DS5LBOX_NO_DREAD` | **95.9 s** | 2.6 s |
+
+**1.004x.** The difference is a fifth of the run-to-run spread. This is despite
+a 95.151% hit rate and TLB lookups falling 0.44 -> 0.20 per instruction, both
+independently confirmed — so the cache does everything it claims and the claim
+does not matter.
+
+(A first, sequential measurement said the cache was 1.38x **slower**. It was
+confounded: the instrumented build ran while two emulator runs were still
+executing and the control ran after they exited. Interleaving is not a nicety.)
+
+**This falsifies the premise §6 opens with.** "Every guest access costs
+`arm_mmu_translate` plus a `bus_read` dispatch chain plus a `memcpy`. Measured
+cost: half the interpreter (§1.2)." Removing that entire cost from 95% of reads
+changed nothing measurable, so either loads are not half the interpreter, or the
+part removed was not the expensive part. **Every projection on this page that
+draws on §1.2's memory share is therefore suspect — including J1's 1.8-2.2x and
+the memory component of J3's 3-5x.** The honest state is that nobody has
+profiled the *host* to find where interpreter time actually goes; §1.2 measured
+guest-side attribution, which is not the same question. That profile is the
+prerequisite for any further memory work, and it should happen before, not
+after.
+
+Kept rather than reverted, with the null result recorded here so it cannot be
+mistaken for a win: it is correctness-validated (§9.5's differential is exact
+over 4,582 lines), the target host is an A9 with a different memory hierarchy
+than the x86 box this was measured on, and the emitted fast path of §6.2 needs
+this shape to exist anyway. None of those is evidence that it helps.
+
 **Why stores are not on the fast path, and it is not an oversight.** A frontend
 can interpose on the bus and bootkernel does so unconditionally. Its *read* hook
 early-outs for RAM (`if (!is_ram(...))`), so bypassing it for a plain-RAM read
