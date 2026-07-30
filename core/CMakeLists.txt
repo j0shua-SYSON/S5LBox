@@ -409,6 +409,23 @@ add_test(NAME app_jit_probe COMMAND test_vmjitprobe)
 # willing it is to fire. Whether a replacement computes the same PIXELS cannot
 # be unit-tested; that needs a frame diff of a real run armed and disarmed,
 # which is the oracle named in the header's contract.
+# The same translation unit as a library, so a real run can arm these sites.
+# It was reachable only from its own test binary, which meant the facility
+# could be verified but never USED: nothing in a boot could count a site, let
+# alone replace one. OBSERVE mode is worthless if it cannot observe a guest.
+add_library(host_ios3_hle STATIC ../tools/ios3_hle.c)
+target_include_directories(host_ios3_hle PUBLIC ../tools include)
+set_target_properties(host_ios3_hle PROPERTIES
+    C_STANDARD 11
+    C_STANDARD_REQUIRED YES
+    C_EXTENSIONS NO)
+if(MSVC)
+    target_compile_options(host_ios3_hle PRIVATE /W4 /WX)
+else()
+    target_compile_options(host_ios3_hle PRIVATE
+        -Wall -Wextra -Werror -pedantic -Wformat=2 -Wshadow)
+endif()
+
 add_executable(test_ios3_hle
     tests/test_ios3_hle.c
     ../tools/ios3_hle.c
@@ -904,8 +921,8 @@ target_link_libraries(machoinfo PRIVATE emucore)
 add_executable(bootkernel ../tools/bootkernel.c)
 target_link_libraries(bootkernel PRIVATE
     emucore host_audio_capture host_file_block host_guest_patch
-    host_ios3_kernel_patch host_mt_drag host_payload_tar host_rootfs_work
-    nethost)
+    host_ios3_hle host_ios3_kernel_patch host_mt_drag host_payload_tar
+    host_rootfs_work nethost)
 
 # Public CI cannot contain Apple's firmware, but it can still exercise the
 # external-md parser's fail-closed boundary before any file is opened. These
