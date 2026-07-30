@@ -59,22 +59,72 @@ static void poke(uint32_t va, uint32_t word) {
 }
 
 /*
- * A site with no recorded prologue must NOT arm. This is the state every site
- * ships in until somebody disassembles the cache at its address, and it is the
- * difference between "identity verified" and "address looked plausible".
+ * A site with no recorded prologue must NOT arm -- the difference between
+ * "identity verified" and "address looked plausible".
+ *
+ * This has to blank the prologues deliberately now. The shipped sites carry
+ * real ones as of 2026-07-30, so simply arming against a zeroed page would
+ * refuse for the WRONG reason (bytes mismatched) and the test would still
+ * pass while checking nothing it claims to.
  */
 static void test_a_site_without_a_prologue_refuses_to_arm(void) {
     memset(g_fake, 0, sizeof g_fake);
     g_fail_reads = false;
+
+    const uint32_t *saved_p[8];
+    unsigned saved_n[8], n = ios3_hle_site_count();
+    CHECK(n <= 8u, "more sites (%u) than this test can save", n);
+    for (unsigned i = 0; i < n && i < 8u; i++) {
+        ios3_hle_site_t *s = ios3_hle_site_at(i);
+        saved_p[i] = s->prologue; saved_n[i] = s->prologue_n;
+        s->prologue = NULL; s->prologue_n = 0u;
+    }
+
     unsigned armed = ios3_hle_arm(&FAKE, 0x1000u);
     CHECK(armed == 0u,
           "%u site(s) armed with no recorded prologue; an unverified address "
           "is not an identity", armed);
-    for (unsigned i = 0; i < ios3_hle_site_count(); i++) {
+    for (unsigned i = 0; i < n; i++) {
         ios3_hle_site_t *s = ios3_hle_site_at(i);
         CHECK(!s->armed, "%s armed without a prologue", s->name);
         CHECK(s->identity_failed, "%s did not record its identity failure",
               s->name);
+    }
+
+    for (unsigned i = 0; i < n && i < 8u; i++) {
+        ios3_hle_site_t *s = ios3_hle_site_at(i);
+        s->prologue = saved_p[i]; s->prologue_n = saved_n[i];
+    }
+}
+
+/*
+ * The shipped sites must actually carry the bytes somebody read out of the
+ * cache, and enough of them to tell the sites APART.
+ *
+ * Both CoreGraphics sites open with the identical
+ * `push {r4,r5,r6,r7,lr}; add r7,sp,#0xc`, so a two-word prologue matches
+ * either one. That is not a hypothetical: it is why four words were recorded.
+ * This pins both facts, so blanking a prologue or trimming it back to the
+ * ambiguous prefix fails here rather than silently in a run.
+ */
+static void test_the_shipped_sites_carry_a_distinguishing_prologue(void) {
+    for (unsigned i = 0; i < ios3_hle_site_count(); i++) {
+        ios3_hle_site_t *a = ios3_hle_site_at(i);
+        CHECK(a->prologue && a->prologue_n >= 4u,
+              "%s ships %u prologue word(s); it needs at least 4 to be an "
+              "identity rather than a guess", a->name, a->prologue_n);
+        for (unsigned j = i + 1u; j < ios3_hle_site_count(); j++) {
+            ios3_hle_site_t *b = ios3_hle_site_at(j);
+            if (!a->prologue || !b->prologue) continue;
+            unsigned lim = a->prologue_n < b->prologue_n ? a->prologue_n
+                                                         : b->prologue_n;
+            bool differ = false;
+            for (unsigned k = 0; k < lim; k++)
+                if (a->prologue[k] != b->prologue[k]) { differ = true; break; }
+            CHECK(differ,
+                  "%s and %s share their whole recorded prologue; the identity "
+                  "check cannot tell them apart", a->name, b->name);
+        }
     }
 }
 
@@ -216,6 +266,7 @@ static void test_declining_is_safe(void) {
 int main(void) {
     printf("S5LBox iPhone OS 3 userspace HLE tests\n");
     test_a_site_without_a_prologue_refuses_to_arm();
+    test_the_shipped_sites_carry_a_distinguishing_prologue();
     test_nothing_armed_never_intercepts();
     test_identity_is_checked_word_for_word();
     test_the_wrong_address_space_is_refused_and_counted();

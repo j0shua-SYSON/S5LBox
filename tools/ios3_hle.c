@@ -17,25 +17,60 @@
  * what makes PC interception viable at all and also why the address-space
  * check in ios3_hle_step() is not optional.
  *
- * PROLOGUES ARE EMPTY UNTIL READ OUT OF THE CACHE. A prologue invented from
- * what a compiler "would" emit is not an identity check, it is a guess that
- * fails open the first time it is wrong. A site with prologue_n == 0 refuses
- * to arm; filling these in requires disassembling the extracted cache at each
- * address, which is a deliberate separate step.
+ * A prologue invented from what a compiler "would" emit is not an identity
+ * check, it is a guess that fails open the first time it is wrong. A site with
+ * prologue_n == 0 refuses to arm.
+ *
+ * READ OUT OF THE CACHE on 2026-07-30, which is what these sites were waiting
+ * for. Both addresses resolve to a symbol at `va is +0x0` -- an exact function
+ * start, not an address that merely landed inside one:
+ *
+ *   python tools/hfsx_extract.py <work.img> dyld_shared_cache_armv6 <cache>
+ *   python tools/dscmap.py <cache> 0x338f61b0 --count 10   -> _CGBlt_fillBytes
+ *   python tools/dscmap.py <cache> 0x338f63e8 --count 10   -> _CGSFillDRAM8by1
+ *
+ * FOUR words each, not two: both functions open with the identical
+ * `push {r4,r5,r6,r7,lr}; add r7,sp,#0xc`, so a two-word prologue would match
+ * either site -- and a check that cannot tell two neighbouring functions apart
+ * is not an identity check. They first differ at word three.
  */
 
-/* CoreGraphics, the leaf fill. run59 counted CGBlt_fillBytes 61,289 times in
- * one run, and it is the sole caller of _CGSFillDRAM8by1 -- a tight
- * `stm fp!, {r1,r2,r3,r4,r5,r6,r8,sl}` loop moving 32 bytes per instruction.
- * Leaf, pure, explicit src/dst/length: the easiest thing here to verify, and
- * the reason it is first. */
-static const uint32_t PROLOGUE_CGBLT_FILLBYTES[] = { 0 };
-static const uint32_t PROLOGUE_CGSFILLDRAM8BY1[] = { 0 };
+/*
+ * CoreGraphics, the leaf fill. It is the sole caller of _CGSFillDRAM8by1 -- a
+ * tight `stm fp!, {r1,r2,r3,r4,r5,r6,r8,sl}` loop moving 32 bytes per
+ * instruction. Leaf, pure, explicit src/dst/length: the easiest thing here to
+ * verify, and the reason it is first.
+ *
+ * THE CALL COUNT THAT MADE IT LOOK URGENT DOES NOT SURVIVE. run59's 61,289
+ * calls were a whole cold boot; run168 measured the window that actually
+ * decides frame rate -- 75 composites over 1.18 G instructions -- and counted
+ * CGBlt_fillBytes just 43 times in it. So replacing this is NOT an fps win on
+ * the evidence available, and these sites stay IOS3_HLE_OBSERVE. What the
+ * recorded prologues buy is that they can now arm and COUNT, which turns a
+ * dead site into instrumentation that can confirm or refute run168 at the
+ * site itself rather than through a profiler bucket.
+ */
+static const uint32_t PROLOGUE_CGBLT_FILLBYTES[] = {
+    0xe92d40f0u,   /* push {r4, r5, r6, r7, lr} */
+    0xe28d700cu,   /* add  r7, sp, #0xc         */
+    0xe24dd008u,   /* sub  sp, sp, #8           */
+    0xe3510000u,   /* cmp  r1, #0               */
+};
+static const uint32_t PROLOGUE_CGSFILLDRAM8BY1[] = {
+    0xe92d40f0u,   /* push {r4, r5, r6, r7, lr} */
+    0xe28d700cu,   /* add  r7, sp, #0xc         */
+    0xe92d0d00u,   /* push {r8, sl, fp}         */
+    0xe24dd010u,   /* sub  sp, sp, #0x10        */
+};
 
 static ios3_hle_site_t g_sites[] = {
-    { "CGBlt_fillBytes",    0x338f61b0u, PROLOGUE_CGBLT_FILLBYTES,  0u,
+    { "CGBlt_fillBytes",    0x338f61b0u, PROLOGUE_CGBLT_FILLBYTES,
+      (unsigned)(sizeof PROLOGUE_CGBLT_FILLBYTES /
+                 sizeof PROLOGUE_CGBLT_FILLBYTES[0]),
       NULL, IOS3_HLE_OBSERVE, false, false, 0, 0, 0, 0 },
-    { "_CGSFillDRAM8by1",   0x338f63e8u, PROLOGUE_CGSFILLDRAM8BY1, 0u,
+    { "_CGSFillDRAM8by1",   0x338f63e8u, PROLOGUE_CGSFILLDRAM8BY1,
+      (unsigned)(sizeof PROLOGUE_CGSFILLDRAM8BY1 /
+                 sizeof PROLOGUE_CGSFILLDRAM8BY1[0]),
       NULL, IOS3_HLE_OBSERVE, false, false, 0, 0, 0, 0 },
 };
 
