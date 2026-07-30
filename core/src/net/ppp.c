@@ -413,12 +413,14 @@ static opt_verdict_t ipcp_review(ppp_peer_t *p, const uint8_t *o, uint8_t olen,
              * address for a server that does not exist is better than Rejecting
              * an option we intend to support. */
             if (olen != 6u) return OPT_REJ;
+            p->stats.ipcp_dns_requests++;
             uint32_t want = get_be32(o + 2);
             uint32_t have = type == IPCP_OPT_DNS1 ? p->cfg.dns1 : p->cfg.dns2;
-            if (want == have) return OPT_ACK;
+            if (want == have) { p->stats.ipcp_dns_acked++; return OPT_ACK; }
             nak[0] = type; nak[1] = 6u;
             put_be32(nak + 2, have);
             *nak_len = 6u;
+            p->stats.ipcp_dns_naked++;
             return OPT_NAK;
         }
 

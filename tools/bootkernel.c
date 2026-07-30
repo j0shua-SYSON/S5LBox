@@ -28496,6 +28496,22 @@ external_md_work_ready:
                        (unsigned long long)s->unknown_protos,
                        (unsigned long long)s->unknown_codes,
                        (unsigned long long)s->echo_replies);
+                /*
+                 * The line r198, r200 and r202 each needed and none had. All
+                 * three showed a fully open link and zero packets, and the
+                 * question they could not answer was whether the guest's pppd
+                 * ever ASKED for a nameserver. Zero here means usepeerdns is
+                 * not reaching pppd; non-zero means it asked, we answered, and
+                 * the fault is somewhere else. Those need opposite fixes.
+                 */
+                printf("    IPCP DNS: %llu request(s) seen, %llu acked, "
+                       "%llu naked with our address%s\n",
+                       (unsigned long long)s->ipcp_dns_requests,
+                       (unsigned long long)s->ipcp_dns_acked,
+                       (unsigned long long)s->ipcp_dns_naked,
+                       s->ipcp_dns_requests == 0
+                           ? "  <- the guest never asked for a nameserver"
+                           : "");
                 printf("    LCP  %-9s   IPCP %-9s   phase %s\n",
                        ppp_state_name(G.ppp_peer.lcp.state),
                        ppp_state_name(G.ppp_peer.ipcp.state),

@@ -179,6 +179,20 @@ typedef struct {
     uint64_t ip_bytes_in, ip_bytes_out;
     uint64_t tx_overflows;      /* frames the transmit ring could not hold   */
     uint64_t echo_replies;      /* Echo-Requests we answered                 */
+    /*
+     * IPCP DNS options RECEIVED from the guest (RFC 1877). pppd sends these
+     * only with `usepeerdns`, so these two counters separate the two worlds
+     * r202 could not tell apart: the guest never asked (the option is not
+     * reaching pppd), versus it asked and was answered and the failure lies
+     * somewhere else entirely. Those need opposite fixes, and r198/r200/r202
+     * were each spent guessing between them.
+     *
+     * Counted where the option is classified, so they count what arrived --
+     * not what we intended to offer.
+     */
+    uint64_t ipcp_dns_requests; /* DNS1/DNS2 options seen in a Config-Request */
+    uint64_t ipcp_dns_acked;    /* ...answered Ack (the guest already agreed) */
+    uint64_t ipcp_dns_naked;    /* ...answered Nak (we offered our address)   */
 } ppp_stats_t;
 
 /*
