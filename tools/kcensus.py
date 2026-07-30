@@ -20,6 +20,20 @@ from capstone import Cs, CS_ARCH_ARM, CS_MODE_THUMB
 
 TEXT_OFF, TEXT_LEN, TEXT_VA = 0x1000, 3760128 - 0x1000, 0x80001000
 
+# These offsets describe the iOS 8 ARMv7s kernel named in the docstring, and
+# ONLY that one. They are not the 7E18 ARMv6 kernel this project boots, whose
+# __TEXT starts at file offset 0 and VA 0xC0008000 (see tools/kdisasm.py).
+# Handing this the wrong kernel reads past __TEXT into __DATA and produces a
+# mnemonic histogram of data, which looks like a result rather than an error --
+# so refuse instead of guessing.
+#
+# A size FLOOR alone does not catch this, and I checked: the 7E18 kernel is
+# 7,942,144 bytes -- larger than this window, so it sails past a minimum and
+# decodes __DATA as instructions. It yields "506 distinct mnemonics", which is
+# the tell, but only if somebody notices. So the check is a band.
+EXPECT_END = TEXT_OFF + TEXT_LEN
+EXPECT_MAX = EXPECT_END * 3 // 2
+
 # Families the ARM1176 already provides; anything else is new work for P2.
 ARMV6 = set("""
 adc add adds and ands asr asrs b bl blx bx bic bics cmp cmn eor eors ldm ldmia
@@ -31,7 +45,16 @@ tbb tbh dmb dsb isb pld mrc mcr mrrc mcrr cdp stc ldc bfi bfc ubfx sbfx
 """.split())
 
 def main():
-    blob = open(sys.argv[1], "rb").read()[TEXT_OFF:TEXT_OFF + TEXT_LEN]
+    raw = open(sys.argv[1], "rb").read()
+    if not (EXPECT_END <= len(raw) <= EXPECT_MAX):
+        sys.exit("kcensus: %s is %d bytes, outside the %d..%d band this tool's "
+                 "hardcoded iOS 8 ARMv7s __TEXT window implies. It is NOT for "
+                 "the 7E18 ARMv6 kernel (7,942,144 bytes, __TEXT at offset 0, "
+                 "VA 0xC0008000 -- see tools/kdisasm.py); handing it that reads "
+                 "__DATA as instructions and prints a histogram of data that "
+                 "looks like a result. See the note beside TEXT_OFF."
+                 % (sys.argv[1], len(raw), EXPECT_END, EXPECT_MAX))
+    blob = raw[TEXT_OFF:TEXT_OFF + TEXT_LEN]
     md = Cs(CS_ARCH_ARM, CS_MODE_THUMB)
     md.skipdata = True
     hist = collections.Counter()

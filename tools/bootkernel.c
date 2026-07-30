@@ -6230,8 +6230,23 @@ static struct {
      * "where did it crash" but "what is it doing instead", and a call-path
      * snapshot at an arbitrary stopping point does not answer that. */
     unsigned    prof_n;
+/*
+ * HOW MANY DISTINCT NAMES THE PROFILE CAN HOLD, and why 1024 was not enough.
+ *
+ * The table is first-come and never evicts. run163 loaded 11,430 kernel
+ * symbols across 103 kexts, so early boot exhausts 1024 slots long before
+ * launchd runs -- and then every later sample is dropped. Measured on
+ * run163: 1,991,991 of 3,466,797 samples discarded, 57.5%, with the log's own
+ * warning printed and nobody reading it. The profile said "all the time is in
+ * early boot" because that is the only era that could get a slot.
+ *
+ * Worse, the name that mattered most could never be registered at all.
+ * Userspace is 53% of that run and 80% of a longer one, and it arrives late,
+ * so `[userspace]` lost the race every time. See prof_seed_userspace().
+ */
+#define PROF_MAX 4096u
     uint64_t    prof_dropped;
-    struct { const char *fn; uint64_t hits; } prof[1024];
+    struct { const char *fn; uint64_t hits; } prof[PROF_MAX];
 
     /*
      * The same samples keyed by EXACT pc, not by function.
@@ -16736,6 +16751,15 @@ static void upc_sample(uint32_t va) {
 /* Attribute one sample to a function, keeping the table small and exact.
  * User and unproven low PCs remain explicit buckets rather than being
  * numerically folded into an unrelated high kernel symbol. */
+/* Claim slot 0 for the userspace bucket. `storage` is the caller's names[0];
+ * the entry points at it so the table's ownership rule is unchanged. */
+static void prof_seed_userspace(char *storage) {
+    snprintf(storage, 96, "%s", "[userspace]");
+    G.prof[0].fn = storage;
+    G.prof[0].hits = 0;
+    G.prof_n = 1;
+}
+
 static void prof_sample(const arm_cpu_t *cpu, uint32_t pc) {
     uint32_t reported_pc = pc & ~1u;
     bool mmu_enabled = cpu && (cpu->cp15.sctlr & ARM_SCTLR_M) != 0u;
@@ -16745,16 +16769,24 @@ static void prof_sample(const arm_cpu_t *cpu, uint32_t pc) {
     pc_sample(reported_pc, space);
     const char *nm = diagnostic_pc_name(space, reported_pc);
     const char *bar = strchr(nm, '+');
-    static char names[1024][96];
+    static char names[PROF_MAX][96];
     char base[96];
     snprintf(base, sizeof base, "%.*s",
              bar ? (int)(bar - nm) : (int)strlen(nm), nm);
+    /*
+     * SLOT 0 IS RESERVED FOR USERSPACE and is seeded before the first sample,
+     * so it cannot lose the race for a slot. It is the single most important
+     * row in this report -- 53% of run163's instructions and 80% of a longer
+     * run -- and it arrives after early boot has already claimed every slot.
+     * A bigger table alone would not fix that; it would only postpone it.
+     */
+    if (!G.prof_n) prof_seed_userspace(names[0]);
     for (unsigned i = 0; i < G.prof_n; i++)
         if (!strcmp(G.prof[i].fn, base)) { G.prof[i].hits++; return; }
     /* Never drop silently: a profile that quietly stops counting new
      * functions looks like "all the time is in early boot" when in fact the
      * later work simply had nowhere to go. */
-    if (G.prof_n >= 1024) { G.prof_dropped++; return; }
+    if (G.prof_n >= PROF_MAX) { G.prof_dropped++; return; }
     snprintf(names[G.prof_n], 96, "%s", base);
     G.prof[G.prof_n].fn = names[G.prof_n];
     G.prof[G.prof_n].hits = 1;
