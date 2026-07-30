@@ -191,6 +191,15 @@ void arm_mmu_tlb_flush(arm_cpu_t *c) {
     c->fetch_host = NULL;
     if (++c->tlb_gen == 0u) {
         memset(c->tlb, 0, sizeof c->tlb);
+        /*
+         * The data-read block cache dies here too, and ONLY here. It carries a
+         * generation like the TLB, so an ordinary flush costs it nothing --
+         * but this wrap resets tlb_gen to 1, and an entry filled under an
+         * earlier generation 1 would match a stale block. The fetch cache
+         * clears its single pointer on every flush because that is free; a
+         * 1 KB array is not, and a flush happens on every context switch.
+         */
+        memset(c->dread, 0, sizeof c->dread);
         c->tlb_gen = 1u;
     }
 }

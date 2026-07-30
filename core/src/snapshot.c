@@ -106,7 +106,15 @@
         "update this number, and bump SNAPSHOT_VERSION in snapshot.h.")
 
 SNAP_SIZE_GUARD(arm_cp15_t,        64,    "snap_cpu");
-SNAP_SIZE_GUARD(arm_cpu_t,         66032,   "snap_cpu");
+/* 67072 = 66032 + the data-read block cache (64 x 16), its two counters (16)
+ * and the padding its
+ * 8-byte alignment adds after fetch_priv. Like the fetch cache it holds HOST
+ * pointers, so it is NOT in snap_cpu(), snap_cpu() clears it on read, and the
+ * bytes on disk are identical to a file written before it existed --
+ * SNAPSHOT_VERSION therefore does not move. Same exception as level_dirty
+ * below, and justified the same way. Measured with a sizeof probe, not
+ * arithmetic; the padding is exactly why. */
+SNAP_SIZE_GUARD(arm_cpu_t,         67072,   "snap_cpu");
 SNAP_SIZE_GUARD(s5l_uart_t,        8280,  "snap_uart");
 SNAP_SIZE_GUARD(s5l_vic_t,         16,    "snap_vic");
 SNAP_SIZE_GUARD(s5l_timer_t,       40,    "snap_timer");
@@ -162,7 +170,9 @@ SNAP_SIZE_GUARD(s5l_stub_t,        56,    "snap_stubs");
  * the byte format DOES change, so SNAPSHOT_VERSION moved to 17. Measured with
  * a sizeof probe rather than arithmetic -- the first two guesses were wrong,
  * which is the entire reason this guard is a compile error. */
-SNAP_SIZE_GUARD(s5l8900_t,         111536, "snap_mach");
+/* 112576 = 111536 + the CPU's data-read block cache and counters, which this struct
+ * contains. Not serialised, byte format unchanged; see the arm_cpu_t note. */
+SNAP_SIZE_GUARD(s5l8900_t,         112576, "snap_mach");
 #endif
 
 /* ---------------------------------------------------------------- the IO --- */
@@ -423,6 +433,9 @@ static void snap_cpu(sn_io_t *io, arm_cpu_t *c) {
         c->fetch_blk  = 0u;
         c->fetch_gen  = 0u;
         c->fetch_priv = false;
+        /* The data-read block cache holds host addresses for the same reason
+         * and is unsafe to carry across a restore for the same reason. */
+        memset(c->dread, 0, sizeof c->dread);
     }
 }
 

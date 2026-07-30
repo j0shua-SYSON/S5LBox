@@ -111,8 +111,19 @@ established is that the probe distinguishes a denied mapping from a successful
 execution on real Apple arm64 hardware, so its verdict on the phone can be
 trusted when it arrives.
 | §3.4 dispatch, §3.5 chaining, §3.6 invalidation | **not built.** There is no code cache, so nothing calls the translator yet |
-| §6.1 software TLB (J1) | **not built.** Loads and stores go through a helper that calls `arm_mmu_translate` directly |
+| §6.1 software TLB (J1) | **partly built, and the two halves are not the same job.** Translation *is* cached: the interpreter carries a 4096-entry TLB keyed on the 1 KB block, access kind and privilege. What a TLB hit does **not** avoid is the access itself, and that is where the time was. The instruction fetch and the data **read** now resolve to a host pointer and skip the bus dispatch entirely. **Stores still go through `bus->write*`, deliberately** — see below |
 | Thumb (J4) | **broad Thumb-1 subset translated**, covering 93.54% of retired Thumb instructions in the recorded sample (see below); excluded forms remain |
+
+**Why stores are not on the fast path, and it is not an oversight.** A frontend
+can interpose on the bus and bootkernel does so unconditionally. Its *read* hook
+early-outs for RAM (`if (!is_ram(...))`), so bypassing it for a plain-RAM read
+observes nothing it wanted — which is exactly what makes the read path safe.
+Its *write* hook does not early-out: it carries the live scanout observer, and
+the framebuffer is RAM. A store that went straight to the host pointer would be
+invisible to it, and the counter would under-report by precisely the traffic it
+exists to measure while still printing a number. A store fast path therefore
+needs the frontend's consent, not just a pointer, and that is a separate change
+with its own oracle. The same trap is waiting for the JIT's memory path.
 
 ARM coverage is deliberately narrow: data-processing with a rotated immediate
 or an immediate-shifted register, `LDR`/`STR` word and byte with an immediate

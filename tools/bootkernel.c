@@ -27395,6 +27395,26 @@ external_md_work_ready:
                              ? (double)look / (double)mach.cpu.cycles : 0.0);
         printf("\n");
     }
+    /*
+     * The data-read block cache. Printed next to the TLB because it answers a
+     * different question: the TLB says how often a translation was reused, this
+     * says how often the READ ITSELF skipped the bus dispatch and the memcpy.
+     * A TLB hit does not imply this one -- that is the whole point of it.
+     *
+     * A build with -DS5LBOX_NO_DREAD reports every access as a miss, which is
+     * the differential oracle of docs/dynarec.md §9.5: the two runs must retire
+     * identical instructions and emit identical UART.
+     */
+    {
+        const uint64_t dh = mach.cpu.dread_hits, dm = mach.cpu.dread_misses;
+        const uint64_t dtot = dh + dm;
+        printf("  data-read cache: %" PRIu64 " hits, %" PRIu64 " misses", dh, dm);
+        if (dtot) printf("   hit rate %.3f%%  (%.2f reads/insn)",
+                         100.0 * (double)dh / (double)dtot,
+                         mach.cpu.cycles
+                             ? (double)dtot / (double)mach.cpu.cycles : 0.0);
+        printf("\n");
+    }
     uint32_t final_reported_pc = last_pc & ~1u;
     diagnostic_pc_space_t final_pc_space = diagnostic_pc_observe(
         last_pc, last_cpsr, last_mmu_enabled, &final_reported_pc);

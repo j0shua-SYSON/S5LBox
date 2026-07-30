@@ -347,6 +347,13 @@ typedef enum {
  */
 #define ARM_TLB_ENTRIES 4096u
 
+/*
+ * Data-read block cache entries: 64 x 16 bytes = 1 KB, half per privilege.
+ * Small on purpose -- it wants to stay in L1 alongside the guest's working
+ * set, and unlike the 4096-entry TLB it caches only plain RAM.
+ */
+#define ARM_DREAD_ENTRIES 64u
+
 typedef struct arm_cpu {
     uint32_t r[16];      /* r0–r15; r15 is PC (address of current instruction) */
     arm_arch_t arch;     /* zero => ARM1176, so existing callers are unchanged */
@@ -458,6 +465,45 @@ typedef struct arm_cpu {
     uint32_t fetch_gen;    /* the tlb_gen it was resolved under               */
     bool     fetch_priv;   /* and the privilege, which changes permission     */
     /*
+     * THE DATA-READ BLOCK CACHE — the same trick as the fetch cache above,
+     * applied to the other half of §6.1 of docs/dynarec.md.
+     *
+     * A load that HITS the TLB still pays an indirect call through
+     * bus->read32, a chain of range comparisons, and a runtime-variable
+     * memcpy, because the TLB caches a PHYSICAL address and none of that
+     * second half depends on translation. This caches the host pointer
+     * instead, so a load into an already-resolved block is a compare and a
+     * load.
+     *
+     * READS ONLY, and that restriction is load-bearing rather than laziness.
+     * See host_ram's contract: bootkernel's read hook ignores RAM, so
+     * bypassing it observes nothing it wanted; its WRITE hook carries the live
+     * scanout observer and the framebuffer is RAM, so a store fast path would
+     * silently under-report exactly the traffic it exists to measure. A store
+     * path needs the frontend's consent, which is a separate change.
+     *
+     * DIRECT-MAPPED, AND SPLIT BY PRIVILEGE THE WAY THE TAG IS. The TLB above
+     * was once indexed on the page alone while its tag also carried the access
+     * kind, so four tags competed for one slot and 11.1 M of 11.2 M lookups
+     * missed. Privilege is folded into the index here for that reason, not for
+     * symmetry: the tag distinguishes it, so the index must too.
+     *
+     * Unlike a fetch, a data access is not guaranteed aligned (SCTLR.U=1
+     * permits unaligned ordinary accesses), so it CAN straddle the end of a
+     * block. The fast path is therefore taken only when the access lies wholly
+     * inside one, which also keeps it inside the range host_ram vouched for --
+     * the last block of RAM would otherwise be read four bytes past its end,
+     * where bus_read would have fallen through to the device decode instead.
+     *
+     * NOT SNAPSHOTTED, for the same reason as the fetch cache: these are host
+     * addresses. Cleared on read, on reset, and on the tlb_gen wrap.
+     */
+    struct {
+        uint8_t *host;     /* host pointer to the block's first byte, or NULL */
+        uint32_t tag;      /* 1 KB-aligned VA | privilege in bit 0            */
+        uint32_t gen;      /* the tlb_gen it was resolved under               */
+    } dread[ARM_DREAD_ENTRIES];
+    /*
      * The registers a cached translation is only valid under, kept so the
      * cache can notice them changing BY ANY ROUTE rather than only through
      * MCR. The CP15 write path flushes explicitly, but three things mutate
@@ -474,6 +520,18 @@ typedef struct arm_cpu {
         uint32_t sctlr, ttbr0, ttbr1, ttbcr, dacr, context_id;
     } tlb_stamp;
     uint64_t tlb_hits, tlb_misses, tlb_flushes;
+    /*
+     * Data-read block cache accounting. A pure cache passes a bit-identical
+     * differential run whether it works or does nothing at all, so without
+     * these a dead cache and a live one are indistinguishable -- which has
+     * already happened once in this tree, when a fix and its absence produced
+     * identical counters and neither could be told from the other.
+     *
+     * A miss counts every reason for taking the slow path, including an access
+     * that straddles the block and a page that is not RAM, because those are
+     * slow-path traffic too and hiding them would flatter the hit rate.
+     */
+    uint64_t dread_hits, dread_misses;
 } arm_cpu_t;
 
 /*

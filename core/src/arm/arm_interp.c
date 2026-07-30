@@ -189,6 +189,73 @@ static void mem_write_crossing(arm_cpu_t *c, uint32_t va, unsigned n, uint32_t v
     }
 }
 
+/*
+ * The data-read block cache. See the dread[] comment in arm.h for why this is
+ * reads-only and why privilege is in the index as well as the tag.
+ */
+#define ARM_DREAD_BLK_MASK 0x3ffu
+
+static inline unsigned dread_slot(uint32_t va, bool priv) {
+    return (unsigned)(((va >> 10) + (priv ? ARM_DREAD_ENTRIES / 2u : 0u))
+                      & (ARM_DREAD_ENTRIES - 1u));
+}
+static inline uint32_t dread_tag(uint32_t va, bool priv) {
+    return (va & ~ARM_DREAD_BLK_MASK) | (priv ? 1u : 0u);
+}
+
+/*
+ * A host pointer for an n-byte read at va, or NULL to take the slow path.
+ *
+ * Refuses an access that leaves the block, which is both a permission
+ * question (ARMv6 legacy small pages carry one set of AP bits per 1 KB
+ * subpage) and a bounds one (host_ram only vouched for these 0x400 bytes, and
+ * the last block of RAM has nothing valid after it).
+ *
+ * Never latches an abort and never installs anything: filling is the slow
+ * path's job, because only the slow path has done the walk that proves the
+ * access is permitted at all.
+ */
+static inline const uint8_t *dread_hit(arm_cpu_t *c, uint32_t va, unsigned n,
+                                       bool priv) {
+#ifdef S5LBOX_NO_DREAD
+    /* §9.5's oracle: a pure cache must not change a single retired
+     * instruction, so a build with it disabled is the comparison. */
+    (void)va; (void)n; (void)priv;
+    c->dread_misses++;
+    return NULL;
+#else
+    if (((va & ARM_DREAD_BLK_MASK) + n) > (ARM_DREAD_BLK_MASK + 1u))
+        { c->dread_misses++; return NULL; }
+    const unsigned slot = dread_slot(va, priv);
+    if (!c->dread[slot].host ||
+        c->dread[slot].tag != dread_tag(va, priv) ||
+        c->dread[slot].gen != c->tlb_gen)
+        { c->dread_misses++; return NULL; }
+    c->dread_hits++;
+    return c->dread[slot].host + (va & ARM_DREAD_BLK_MASK);
+#endif
+}
+
+/* Install the block a successful walk just resolved, when it is plain RAM.
+ * `pa` keeps va's low bits, so the offset within the block is the same on
+ * both sides and the pointer lands exactly where bus_read would have. */
+static inline void dread_fill(arm_cpu_t *c, uint32_t va, uint32_t pa,
+                              bool priv) {
+#ifdef S5LBOX_NO_DREAD
+    (void)c; (void)va; (void)pa; (void)priv;
+    return;
+#else
+    if (!c->bus->host_ram) return;
+    uint8_t *blk = c->bus->host_ram(c->bus->ctx, pa & ~ARM_DREAD_BLK_MASK,
+                                    ARM_DREAD_BLK_MASK + 1u);
+    if (!blk) return;
+    const unsigned slot = dread_slot(va, priv);
+    c->dread[slot].host = blk;
+    c->dread[slot].tag  = dread_tag(va, priv);
+    c->dread[slot].gen  = c->tlb_gen;
+#endif
+}
+
 #define MEM_READ(bits)                                                        \
     static uint##bits##_t mem_r##bits##_as(arm_cpu_t *c, uint32_t va, bool priv) { \
         uint32_t original = va;                                               \
@@ -203,9 +270,16 @@ static void mem_write_crossing(arm_cpu_t *c, uint32_t va, unsigned n, uint32_t v
         if (mem_crosses_page(va, (bits) / 8u))                               \
             value = (uint##bits##_t)mem_read_crossing(c, va, (bits) / 8u, priv); \
         else {                                                                \
-            uint32_t pa, f = arm_mmu_translate(c, va, ARM_ACCESS_READ, priv, &pa);\
-            if (f) { note_abort(c, f, va); return 0; }                        \
-            value = c->bus->read##bits(c->bus->ctx, pa);                     \
+            const uint8_t *dh = dread_hit(c, va, (bits) / 8u, priv);          \
+            if (dh) {                                                         \
+                memcpy(&value, dh, (bits) / 8u);                              \
+            } else {                                                          \
+                uint32_t pa, f = arm_mmu_translate(c, va, ARM_ACCESS_READ,    \
+                                                   priv, &pa);                \
+                if (f) { note_abort(c, f, va); return 0; }                    \
+                value = c->bus->read##bits(c->bus->ctx, pa);                 \
+                dread_fill(c, va, pa, priv);                                  \
+            }                                                                 \
         }                                                                     \
         if ((bits) == 32 && original != va)                                  \
             value = (uint##bits##_t)legacy_rotate_word((uint32_t)value, original & 3u); \
@@ -775,7 +849,10 @@ void arm_reset(arm_cpu_t *cpu, const arm_bus_t *bus) {
     cpu->fetch_blk  = 0u;
     cpu->fetch_gen  = 0u;
     cpu->fetch_priv = false;
+    /* And the data-read block cache, which holds the same kind of pointer. */
+    memset(cpu->dread, 0, sizeof cpu->dread);
     cpu->tlb_hits = cpu->tlb_misses = cpu->tlb_flushes = 0;
+    cpu->dread_hits = cpu->dread_misses = 0;
     cpu->abort_pending = false;
     cpu->abort_fsr = 0;
     cpu->abort_far = 0;
