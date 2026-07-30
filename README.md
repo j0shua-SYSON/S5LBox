@@ -36,16 +36,16 @@ root filesystem mounts, and the real background programs run: `launchd`,
 `lockbot`, `CommCenter`, SpringBoard. The clearest evidence that this is
 genuinely Apple's stack and not a reimplementation of it: when SpringBoard
 crashed, the guest's **own** crash reporter wrote real crash reports into its
-own filesystem, and that is how the current blocker was diagnosed. The project
+own filesystem, and that is how that blocker was diagnosed. The project
 ships no Apple firmware and never modifies the files you supply.
 
-**What it reaches:** as of run85 the guest draws its **lock screen** — status
-bar, clock, the Earth wallpaper and *slide to unlock* — composited by Apple's
-own software renderer onto the emulated panel.
+**What it reaches:** as of 2026-07-30 a host-delivered gesture **slides the lock
+screen open and reaches the home screen** — icons, the dock, and Apple's own
+first-run tip — composited by Apple's software renderer onto the emulated panel.
 
-Both frames on this page were drawn by the guest's own SpringBoard through
+Every frame on this page was drawn by the guest's own SpringBoard through
 Apple's CPU compositor and scanned out through the emulated display
-controller. Nothing in either is drawn by the host.
+controller. Nothing in any of them is drawn by the host.
 
 <div align="center">
 
@@ -57,16 +57,44 @@ bytes non-zero, 92,145 non-black pixels in 44,087 colours. Reached by giving
 
 </div>
 
-**What is not real:** the single most visible property of an iPhone — that it
-displays a home screen **you can touch** — is still not demonstrated here. What
-is on screen is the lock screen, and the next step past it is a swipe.
+<div align="center">
 
-Touch reaches the driver and nothing above it. run77 shows the emulated
-controller delivering four reports that Apple's own `AppleMultitouchZ2SPI`
-reads and whose payload checksums it accepts — but no userspace client had
-subscribed, so nothing was delivered to an application, and **no tap has ever
-reached SpringBoard**. Until one does, the lock screen cannot be unlocked from
-inside the emulator.
+<img src="docs/images/r181-unlocked-home-screen.png" width="240" alt="iPhone OS 3.1.3's home screen after a slide-to-unlock: status bar, the Edit Home Screen tip, and the dock with Phone, Mail, Safari and iPod.">
+
+*r181 — the home screen, reached by a slide-to-unlock the emulator delivered.
+278,331 of 460,800 framebuffer bytes non-zero; 80.8% of the screen differs from
+the lock screen. Reproduced by r182 with a different gesture.*
+
+</div>
+
+**Touch works, end to end.** The emulated Z2 digitizer has no flash, so Apple's
+driver downloads its 54,156-byte firmware over the undocumented HBPP protocol on
+every boot — and says so itself: *"downloaded 54156 bytes of firmware data
+("0x0049.bin") in 106ms"*. A gesture the host then injects is read by
+`AppleMultitouchZ2SPI`, normalised by MultitouchSupport, turned into an
+`IOHIDEvent` by Apple's MultitouchHID plugin, and delivered to SpringBoard,
+where it **drags the unlock knob and opens the phone**. The knob tracks the
+finger: measured at centre 57.5, 80.5 and 156.5 as the contact advances.
+
+**What is not real, and this is the honest remainder:**
+
+- **Two fingers reach userspace; no two-finger gesture has moved anything yet.**
+  A pinch delivered 26 frames carrying **two contacts each**, and Apple's
+  `_mt_FillMTContactDirectFromBinary` — called once per contact — was entered
+  exactly 78 times: 26 for the one-finger unlock plus 52 for the pinch. So
+  simultaneous contacts do traverse the device, the driver and the normaliser.
+  What has *not* been shown is an app responding to one, because a pinch on the
+  home screen has nothing to zoom.
+- **A tap has not yet moved a control.** The slide works; a tap on a button is
+  still being chased, and the first attempt was invalid — it held the finger down
+  for 40 instructions, about 13 microseconds of guest time.
+- **No sound has been produced.** Apple's audio drivers start
+  (`AppleWM8991Audio::start`, both I²S controllers) and **zero** words have ever
+  reached the transmit FIFO.
+- **No packet has been carried.** The PPP link comes up — `IPCP Opened`,
+  `10.0.2.15` — and every NAT counter is still zero.
+- **Frame rate is unmeasured.** No cost-per-frame measurement exists for the
+  frames that decide it; see *Speed*.
 
 Two smaller things the picture shows honestly. The clock reads 4:00 on
 31 December because the real-time clock answers with a placeholder nobody has
@@ -90,8 +118,9 @@ userspace received the framebuffer read-only and faulted on its first store.*
 | **Real Apple software** | Your own unmodified 3.1.3 (7E18) firmware: the XNU 1357.5.30 kernel, Apple's own drivers, the real root filesystem, and the real background programs listed above. No Apple firmware is shipped, and the files you supply are never modified on disk. |
 | **CPU** | ARM, Thumb and VFPv2 floating point — over the code the boot has actually reached, not the whole architecture. The ARMv6 rules for unaligned memory access are honoured, memory translation enforces no-execute pages, and the system-control coprocessor is modelled. Runs are bit-exact reproducible. |
 | **Hardware modelled** | Serial ports, timers, both interrupt controllers, the GPIO controller, display controller, SPI, the multitouch controller, the power-management chip and its I2C bus, and the USB controller's configuration registers. |
-| **Touch: the device works, the path does not** | The Z2 touchscreen is modelled on SPI, and Apple's own `AppleMultitouchZ2SPI` drives it: run77 delivered four reports that the driver read and whose payload checksums it accepted (probe `0xc04413e8`, reachable only through the branch taken after `cmp r5,r0`). That proves the wire format and one direction of one bus. It does **not** mean touch works — no userspace client had subscribed, so no frame was handed to an application, and no tap has ever reached SpringBoard. |
-| **Not modelled at all** | No audio. No cellular. No Wi-Fi. No Bluetooth. No camera. No accelerometer. No GPU. |
+| **Touch: works, one finger** | The Z2 is modelled on SPI and **bootloaded exactly as the real part is** — it has no flash, so its 54,156-byte firmware is downloaded on every boot over Apple's HBPP protocol, which had to be reverse-engineered before anything could work. Apple's driver confirms it in its own words: *"downloaded 54156 bytes of firmware data ("0x0049.bin") in 106ms"*. The part then leaves the bootloader, answers interrogation, and streams touch reports. A host gesture reaches SpringBoard and **completes a slide-to-unlock**. Measured through the whole stack: surface bounds `-75..4656` and `-75..7275` read out of the running guest and matching the model exactly, reports paced at 16.000 ms (62.5 Hz), and the knob tracking the contact linearly. Two simultaneous contacts also reach userspace — a pinch's 26 two-contact frames entered Apple's per-contact normaliser exactly 52 times — but no two-finger gesture has yet produced a visible response, and no tap has yet moved a control. |
+| **Not modelled at all** | No cellular. No Wi-Fi. No Bluetooth. No camera. No accelerometer. No GPU. |
+| **Audio: modelled, never heard** | The WM8991 codec, both I²S controllers and the PL080 DMA engine are modelled and unit-tested, and Apple's `AppleWM8991Audio` starts against them. That is the whole of it: **zero** words have ever reached the transmit FIFO and the DMA has never been enabled, because nothing asks a locked phone to play anything. There is also no host playback path, so even a guest that produced samples would not reach a speaker yet. |
 | **Networking: a temporary substitution** | The guest's own stock `pppd` runs on an emulated second serial port and, as of run80, transmits a complete LCP Configure-Request — `7E FF 7D 23 C0 21 …`, 47 bytes, RFC 1662 framing, RFC 1661 options. **Nothing answers it.** There is no host-side PPP endpoint, no address is negotiated, and no packet has been carried; what is proven is one direction of one link layer. It is honest emulation — real modelled silicon, Apple's own binary, and a protocol fully specified in public RFCs — but **a real iPhone 3G never connected this way**; it used Wi-Fi over SDIO or the cellular baseband. The guest gets a `ppp0` interface rather than real wireless. This is a deliberate workaround, chosen because the Wi-Fi part runs undocumented firmware whose behaviour would have to be fabricated wholesale — and a fabricated device is one whose success proves nothing, because the emulator would only be agreeing with itself. Where this project cannot avoid choosing an unmeasured value, it chooses a **constant**, records it in this table as unmeasured, and leaves it replaceable by a real measurement; see *Invented register values* and *Speed* below. That is the line, and it is a narrower claim than the one this row used to make — it previously said inventing behaviour is not something this project does, which the two rows below it contradict. Modelling the real radio and controllers remains the goal. |
 | **Hidden from the guest** | Five pieces of hardware a real iPhone has are deliberately declared absent, by editing the in-memory copy of the device tree — the hardware inventory the emulator hands the kernel at boot — so Apple's drivers for them never start: the PowerVR MBX graphics chip, the SHA-1 hashing accelerator, the cellular baseband, the serial link to that baseband, and the USB controller. The firmware on disk is never modified; only the loaded copy is edited. Each omission has a documented reason, but the net effect is that the guest is told it is running on a machine with less hardware than a real iPhone. |
 | **Invented register values** | The USB controller's three configuration registers (`GHWCFG1`/`GHWCFG2`/`GHWCFG4`) hold a legal and sufficient configuration. They are **not** measured from real S5L8900 silicon. This is one of the two exceptions the networking row above draws its line around: three constants, named here so nobody has to discover them, and replaceable the day somebody reads the real part. |
@@ -102,7 +131,7 @@ userspace received the framebuffer read-only and faulted on its first store.*
 | **Boot chain** | No secure boot chain is executed. The kernel is loaded directly; the boot ROM, the low-level bootloader and iBoot are not run. Apple's firmware container format has been parsed and an extracted bootloader payload executed, but separately, never as a chain. |
 | **Optional substitution** | Off by default: one of the guest's service-configuration files is rewritten in the work copy, without changing its size, to add `CA_ENABLE_MBX2D=0`. |
 | **Rendering reached, use not** | run59 draws real frames — 14,264,987 changed scanout bytes, 97,510 of 460,800 framebuffer bytes non-zero, against 384 (the pre-guest seed) in every earlier run. What is on screen is the **activation** UI, because that run's guest is unactivated. |
-| **Activation does not produce a home screen** | Provisioning `ActivationState = FactoryActivated` clears the lockout — the iTunes-connect artwork is gone — and what replaces it is the boot spinner, not a home screen. run66 ran 12 billion instructions with it: `CATransaction-flush` was called **0** times, the last scanout write was at instruction 1,887,035,649, and the final frame held 1,833 of 460,800 non-zero bytes. SpringBoard opens the touchscreen's IOKit user client and blocks in the fourth method it calls. Why is under measurement; it is not yet known. |
+| **Activation, and the home screen** | Provisioning `ActivationState = FactoryActivated` into the work image clears the lockout. That alone used to leave a boot spinner; with the digitizer bootload finished the guest reaches the lock screen and, given a gesture, the home screen. The historical dead ends behind that sentence — a SpringBoard crash loop, a read-only framebuffer, a stalled HBPP download, and a coordinate theory that turned out to be wrong — are in [`docs/BOOTLOG.md`](docs/BOOTLOG.md). |
 
 > The evidence behind every claim above — what was measured, in which run, and
 > what each result does *not* prove — is in
@@ -133,7 +162,9 @@ matched the emulated hardware — evidence the guest reached those drivers, not
 that every device behind them is complete.
 
 Milestone 5 — `launchd` starts SpringBoard, the home screen renders, and you tap
-it — is **in progress and not reached.**
+it — is **substantially reached: the home screen renders and a gesture drives
+it.** Three blockers were cleared to get there, and the fourth turned out not to
+exist.
 
 The first blocker is fixed. SpringBoard used to die and be restarted roughly
 every 470 million instructions — 30 times in a single run — because Apple's
@@ -160,12 +191,28 @@ above: **14,264,987 changed scanout bytes**, where every previous run changed
 zero. SpringBoard was still compositing when the run hit its cap.
 
 That run's device is **unactivated**, so what SpringBoard draws is the
-activation screen. Activating it does not produce a home screen either:
-`ActivationState = FactoryActivated` is provisioned into the work image and
-clears the lockout, and what appears instead is the boot spinner. SpringBoard
-opens the touchscreen's IOKit user client and blocks in the fourth method it
-calls, having flushed no CoreAnimation transaction at all. That block is
-located but not yet explained.
+activation screen. Provisioning `ActivationState = FactoryActivated` into the
+work image clears the lockout and the guest reaches the lock screen.
+
+The third blocker was the touchscreen itself, and it was the hardest. A Z2
+digitizer has no flash: the host must download its firmware over Apple's
+undocumented HBPP protocol on **every** boot, and until that completes the part
+never runs application firmware, so the driver correctly refuses to interrogate
+it. Reverse-engineering that protocol took four separate fixes — a chip-select
+edge that split a packet header in half, a receive FIFO left full by a
+transmit-only DMA burst, an acknowledgement literal that differs between two
+senders in the same driver, and one wrong inference that a call probe refuted.
+
+The fourth blocker did not exist. With touch delivered end to end, a drag on the
+unlock slider still appeared to do nothing — and five runs were spent hunting a
+coordinate bug that was not there. Every screenshot had been captured about four
+guest-seconds **after** the finger lifted, and iOS springs the knob back when a
+slide falls short, so a working gesture and no gesture rendered the same frame.
+Photographing the screen *during* the drag showed the knob tracking the finger
+all along; the drag simply ended too early to cross the threshold. The lesson,
+recorded in [`docs/multitouch.md`](docs/multitouch.md) §6.17.1, is that "no
+difference from baseline" is a null result until the instrument is shown capable
+of registering a change.
 
 Milestones are tracked in [`docs/ROADMAP.md`](docs/ROADMAP.md), the run-by-run
 history including every dead end in [`docs/BOOTLOG.md`](docs/BOOTLOG.md), and
