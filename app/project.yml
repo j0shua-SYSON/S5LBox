@@ -84,6 +84,23 @@ targets:
           - $(SRCROOT)/../core/include
           - $(SRCROOT)/../tools
         GCC_C_LANGUAGE_STANDARD: c11
+        # THE APP WAS SHIPPING AT -Os, AND NOTHING HERE SAID SO.
+        #
+        # This file set no optimisation level at all, so the Release build
+        # inherited Xcode's default GCC_OPTIMIZATION_LEVEL = s. For an
+        # interpreter that is close to the worst available choice: -Os exists
+        # to suppress the inlining and unrolling that a hot dispatch loop is
+        # made of, and this app's entire workload is one such loop --
+        # arm_step() plus s5l8900_tick(), a hundred thousand times per chunk.
+        #
+        # The desktop harness has always been built -O2 or better by
+        # core/CMakeLists.txt, so every throughput number this project has
+        # published was measured on a build the phone was not getting.
+        GCC_OPTIMIZATION_LEVEL: 3
+        # s5l8900_run() calls arm_step() and s5l8900_tick() across translation
+        # units; without link-time optimisation neither can be inlined into the
+        # loop that calls them once per guest instruction.
+        LLVM_LTO: YES
         # tools/file_block.c does 64-bit random access into a ~450 MB work
         # image. iOS's off_t is already 64-bit, so this is belt rather than
         # braces -- but core/CMakeLists.txt sets it for the same file on every
