@@ -2365,6 +2365,43 @@ Not yet claimed: that a default route is *sufficient*. It gives the guest
 somewhere to send; whether any daemon then sends is a separate measurement, and
 mDNSResponder's multicast is not obviously something this NAT should carry.
 
+### 2026-07-30: run170 -- THE TOUCH FUNNEL IS OPEN, END TO END
+
+A 24-step `--drag` on the unlock slider, probed at every stage `run90` named:
+
+| stage | run90 | **run170** |
+|---|---|---|
+| `0xc043d6b8` kernel, events enqueued to userspace | 16 | **28** |
+| `0x33cfb3ec` user, frames crossed into userspace | 17 | **27** |
+| `0x33cfdac4` `_mt_FillMTContactDirectFromBinary` | -- | **26** |
+| `0x33cfdee0` reached the MultitouchHID plugin | 9 | **26** |
+| `0x324f6edc` **`__UIApplicationHandleEvent`** | **2** | **31** |
+
+`device: queued 26 / read 26 / refused 0` going in, 26 contacts arriving at
+UIKit's event handler. **Nothing is dropped at any layer.** Touch is delivered.
+
+Two things had to be true at once for this, and neither was until today. The
+gesture had to be well formed -- one contact, MakeTouch then Touching then
+BreakTouch, which is what `--drag` emits and what run90 identified as the fix
+after eight `--touch` points were correctly discarded as eight fingers. And the
+digitizer had to be PROGRAMMED, which needed the four HBPP fixes: the split
+DATA header, the ATN_ACK misdiagnosis, the receive FIFO the bootload left full,
+and the write helper's 0x4AD1 acknowledgement.
+
+**The screen is still 273,206 bytes, unchanged.** So the remaining problem is
+not plumbing, it is WHERE the touch lands. UIKit is receiving the events; the
+lock screen is not reacting.
+
+That points at the one named candidate left: `run96` measured the surface
+bounds NEGATIVE -- `Xmax -434` where it should be `4656`, `Ymax -439` where it
+should be `7275` -- because `Sensor Rows` and `Sensor Columns` were missing,
+because the driver never interrogated a part that had never been programmed. A
+contact normalised against those bounds arrives at a nonsense position, and
+UIKit would handle it perfectly and land it on nothing.
+
+run171 reads whether the driver interrogates the part now that it is
+programmed. That is the last question standing.
+
 ### 2026-07-30: run169 -- the display sleeps on a timer, and Apple's driver confirms the bootload
 
 **A correction first.** run167 ended with no active RGB window at 8 G, and its
