@@ -5551,6 +5551,39 @@ size_t rootfs_work_activation_entries(rootfs_work_entry_t *entries,
  */
 static const char PPP_OPTIONS_FILE[] = "defaultroute\nusepeerdns\n";
 
+/*
+ * r203 measured what r198 could only assume, and the assumption above --
+ * "there is no static file to provision" -- is what it refutes.
+ *
+ * usepeerdns works. The guest ASKS: r203 counted six IPCP DNS options
+ * arriving, four answered Nak with 10.0.2.3 and two finally Acked, so DNS1 and
+ * DNS2 both converged and negotiation ended with the guest holding our
+ * resolver address. And it still sent zero UDP. Not a failed query -- no
+ * attempt at all.
+ *
+ * The reason is one level down. /etc/resolv.conf on this image is a symlink,
+ * twenty bytes, whose target reads exactly "/var/run/resolv.conf" -- and that
+ * target is the only resolv.conf in the volume. Nothing creates the file the
+ * symlink points at. A resolver with no nameserver fails locally and never
+ * reaches a socket, which is precisely the signature: zero attempts rather
+ * than zero answers.
+ *
+ * So the negotiated address never becomes resolver configuration. On a real
+ * device configd bridges that gap; this image runs pppd without the
+ * SystemConfiguration machinery that would. Provisioning the target directly
+ * is the same shape as provisioning /etc/ppp/options -- a static file the
+ * guest cannot write for itself, holding the address ppp.c already hands out.
+ *
+ * NOT YET DEMONSTRATED that a page loads. This gives the resolver a
+ * nameserver; whether the query, the answer and then a TCP connection all
+ * complete is the measurement, and dns_queries is where it shows.
+ *
+ * /private/var/run ships on the stock volume, so only the FILE is created.
+ * Asking for the parent as well is what made the first /etc/ppp attempt refuse
+ * the whole plan instead of one entry.
+ */
+static const char RESOLV_CONF_FILE[] = "nameserver 10.0.2.3\n";
+
 size_t rootfs_work_ppp_entries(rootfs_work_entry_t *entries, size_t capacity) {
     if (entries && capacity >= 1u) {
         memset(entries, 0, sizeof(*entries));
@@ -5568,7 +5601,15 @@ size_t rootfs_work_ppp_entries(rootfs_work_entry_t *entries, size_t capacity) {
         entries[0].content_size = sizeof(PPP_OPTIONS_FILE) - 1u;
         entries[0].permissions = 0644u;
     }
-    return 1u;
+    if (entries && capacity >= 2u) {
+        memset(entries + 1, 0, sizeof(*entries));
+        entries[1].kind = ROOTFS_WORK_ENTRY_FILE;
+        entries[1].path = "/private/var/run/resolv.conf";
+        entries[1].content = (const uint8_t *)RESOLV_CONF_FILE;
+        entries[1].content_size = sizeof(RESOLV_CONF_FILE) - 1u;
+        entries[1].permissions = 0644u;
+    }
+    return 2u;
 }
 
 static bool copy_source(host_file_t *source, host_file_t *temporary,
