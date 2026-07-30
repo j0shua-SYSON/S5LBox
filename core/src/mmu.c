@@ -181,6 +181,14 @@ static uint32_t mmu_walk(arm_cpu_t *c, uint32_t va, arm_access_t acc,
 void arm_mmu_tlb_flush(arm_cpu_t *c) {
     if (!c) return;
     c->tlb_flushes++;
+    /*
+     * The fetch-block cache dies with the TLB. It carries its own generation,
+     * so the compare below would usually catch this -- but the wrap path in
+     * this very function resets tlb_gen to 1, and an entry filled under an
+     * earlier generation 1 would then match a stale block. Clearing the
+     * pointer is unconditional and costs nothing next to a flush.
+     */
+    c->fetch_host = NULL;
     if (++c->tlb_gen == 0u) {
         memset(c->tlb, 0, sizeof c->tlb);
         c->tlb_gen = 1u;

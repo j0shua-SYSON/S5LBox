@@ -211,6 +211,24 @@ typedef struct arm_bus {
     void     (*write8 )(void *ctx, uint32_t addr, uint8_t  val);
 
     /*
+     * OPTIONAL. A host pointer for [pa, pa+len) when that whole range is plain
+     * writable RAM, and NULL for anything else -- MMIO, NOR, a stub window, or
+     * a range that straddles the end of RAM.
+     *
+     * It exists so a translation can be turned into a pointer once and reused,
+     * instead of paying an indirect call through read32() plus a bounds check
+     * plus a runtime-variable memcpy on every access. NULL is always a correct
+     * answer and simply keeps the caller on the slow path; the flat-RAM test
+     * harnesses leave this unset.
+     *
+     * The pointer must stay valid until the next reset or snapshot restore.
+     * Nothing derived from it may be snapshotted -- a host address means
+     * nothing in another process -- which is why the fetch cache below is
+     * zeroed rather than serialised.
+     */
+    uint8_t *(*host_ram)(void *ctx, uint32_t pa, uint32_t len);
+
+    /*
      * Optional platform hook for the ARM1176 CP15 Wait For Interrupt
      * operation.  A system model can synchronously advance its autonomous
      * devices to the first interrupt edge and return true.  Returning false
@@ -394,6 +412,37 @@ typedef struct arm_cpu {
         uint32_t fsr;    /* what the walk returned, faults included          */
     } tlb[ARM_TLB_ENTRIES];
     uint32_t tlb_gen;
+    /*
+     * THE INSTRUCTION-FETCH BLOCK CACHE.
+     *
+     * Every retired instruction pays one fetch, and a fetch inside a 1 KB
+     * block repeats work it already did up to 1024 times: the SCTLR test, the
+     * generation test, six stamp compares, the hash, the tag compare, and then
+     * -- even on a hit -- an indirect call through bus->read32 into a bounds
+     * check and a runtime-variable memcpy. The TLB caches a PHYSICAL address,
+     * so a hit does not avoid any of the second half.
+     *
+     * This caches the host pointer for the block the last fetch resolved to,
+     * so a fetch that stays inside it is a compare and a load. The block is
+     * 1 KB, matching the TLB's key, because ARMv6 legacy small pages carry
+     * four independent sets of AP bits -- one per 1 KB subpage -- and a 4 KB
+     * cache would answer one subpage's fetch with another's permission.
+     *
+     * Instructions are aligned, so a fetch never straddles the block: ARM at
+     * offset 1020 spans to 1024, Thumb at 1022 to 1024.
+     *
+     * Coherency is free rather than assumed. The pointer aliases the same host
+     * memory bus writes land in, so guest stores -- including a kext being
+     * paged in over this very block -- are visible with no invalidation. Only
+     * plain RAM is ever cached, so MMIO fetches keep the slow path.
+     *
+     * NOT SNAPSHOTTED. A host address is meaningless in another process, so
+     * snap_cpu writes zeros and the cache refills on the first fetch.
+     */
+    uint8_t *fetch_host;   /* host pointer to fetch_blk's first byte, or NULL */
+    uint32_t fetch_blk;    /* the 1 KB-aligned VA it covers                   */
+    uint32_t fetch_gen;    /* the tlb_gen it was resolved under               */
+    bool     fetch_priv;   /* and the privilege, which changes permission     */
     /*
      * The registers a cached translation is only valid under, kept so the
      * cache can notice them changing BY ANY ROUTE rather than only through

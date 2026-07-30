@@ -106,7 +106,7 @@
         "update this number, and bump SNAPSHOT_VERSION in snapshot.h.")
 
 SNAP_SIZE_GUARD(arm_cp15_t,        64,    "snap_cpu");
-SNAP_SIZE_GUARD(arm_cpu_t,         66008,   "snap_cpu");
+SNAP_SIZE_GUARD(arm_cpu_t,         66032,   "snap_cpu");
 SNAP_SIZE_GUARD(s5l_uart_t,        8280,  "snap_uart");
 SNAP_SIZE_GUARD(s5l_vic_t,         16,    "snap_vic");
 SNAP_SIZE_GUARD(s5l_timer_t,       40,    "snap_timer");
@@ -162,7 +162,7 @@ SNAP_SIZE_GUARD(s5l_stub_t,        56,    "snap_stubs");
  * the byte format DOES change, so SNAPSHOT_VERSION moved to 17. Measured with
  * a sizeof probe rather than arithmetic -- the first two guesses were wrong,
  * which is the entire reason this guard is a compile error. */
-SNAP_SIZE_GUARD(s5l8900_t,         110976, "snap_mach");
+SNAP_SIZE_GUARD(s5l8900_t,         111008, "snap_mach");
 #endif
 
 /* ---------------------------------------------------------------- the IO --- */
@@ -406,6 +406,24 @@ static void snap_cpu(sn_io_t *io, arm_cpu_t *c) {
         c->tlb_gen = 1u;
     }
     F64(c->tlb_hits); F64(c->tlb_misses); F64(c->tlb_flushes);
+    /*
+     * THE FETCH-BLOCK CACHE IS NOT SERIALISED, deliberately, and this is the
+     * one field in the CPU where writing it out would be actively unsafe:
+     * fetch_host is a HOST address. Restored into another process -- or the
+     * same process after the RAM allocation moved -- it would point at
+     * whatever now lives there, and the interpreter would execute it as guest
+     * instructions with no fault and no diagnostic.
+     *
+     * So nothing is written and the fields are cleared on read. The stream's
+     * bytes are unchanged; a restored machine simply refills the cache from
+     * its own RAM on its first fetch. See the fetch_* block in arm.h.
+     */
+    if (sn_reading(io)) {
+        c->fetch_host = NULL;
+        c->fetch_blk  = 0u;
+        c->fetch_gen  = 0u;
+        c->fetch_priv = false;
+    }
 }
 
 /* The UART's whole transmit capture is saved, not just its used prefix: the

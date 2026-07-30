@@ -297,6 +297,27 @@ static void note_device(s5l8900_t *m, uint32_t addr, uint32_t val, bool is_write
  * reached 0x28000000 and swallowed the NOR: every NOR read returned RAM-disk
  * bytes, no fault, no log, nothing to find.
  */
+/*
+ * A host pointer for a physical range, but ONLY when it is plain DRAM.
+ *
+ * The caller uses this to turn a translation into a pointer once and reuse it,
+ * skipping the indirect bus call, the range check and the variable-size memcpy
+ * that a fetch otherwise pays on every instruction. Returning NULL is always
+ * correct and simply keeps it on the slow path.
+ *
+ * in_ram() is the same predicate bus_read uses, and it is deliberately reused
+ * rather than restated: it already widens to 64 bits so a length that would
+ * wrap a 32-bit sum cannot pass. Anything that is not DRAM -- MMIO, NOR, a
+ * stub window, or a range running off the end -- gets NULL, which is what
+ * keeps device semantics on the path that models them.
+ */
+static uint8_t *machine_host_ram(void *ctx, uint32_t pa, uint32_t len) {
+    s5l8900_t *m = ctx;
+    if (!m || !m->ram || !len) return NULL;
+    if (!in_ram(m, pa, len)) return NULL;
+    return m->ram + (pa - m->ram_base);
+}
+
 static uint32_t bus_read(void *ctx, uint32_t addr, unsigned bytes) {
     s5l8900_t *m = ctx;
 
@@ -1117,6 +1138,7 @@ bool s5l8900_init(s5l8900_t *m, uint32_t ram_base, uint32_t ram_size) {
     m->bus.read32 = r32; m->bus.read16 = r16; m->bus.read8 = r8;
     m->bus.write32 = w32; m->bus.write16 = w16; m->bus.write8 = w8;
     m->bus.wait_for_interrupt = machine_wait_for_interrupt;
+    m->bus.host_ram = machine_host_ram;
 
     arm_reset(&m->cpu, &m->bus);
     return true;

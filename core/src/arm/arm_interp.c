@@ -769,6 +769,12 @@ void arm_reset(arm_cpu_t *cpu, const arm_bus_t *bus) {
      */
     memset(cpu->tlb, 0, sizeof cpu->tlb);
     cpu->tlb_gen = 1u;
+    /* And the fetch-block cache, which holds a host pointer into the previous
+     * machine's RAM. See the fetch_* fields in arm.h. */
+    cpu->fetch_host = NULL;
+    cpu->fetch_blk  = 0u;
+    cpu->fetch_gen  = 0u;
+    cpu->fetch_priv = false;
     cpu->tlb_hits = cpu->tlb_misses = cpu->tlb_flushes = 0;
     cpu->abort_pending = false;
     cpu->abort_fsr = 0;
@@ -2375,22 +2381,61 @@ arm_status_t arm_step(arm_cpu_t *c) {
      * ARM_ACCESS_FETCH rather than "a read": it is what lets the walker check
      * XN, so branching into a data page dies here with IFAR pointing at the
      * branch target instead of executing whatever the data happened to be. */
-    uint32_t fetch_pa;
-    uint32_t fetch_fsr = arm_mmu_translate(c, pc, ARM_ACCESS_FETCH,
-                                           cpu_is_priv(c), &fetch_pa);
-    if (fetch_fsr) {
-        uint32_t vec;
-        c->cycles++;
-        c->cp15.ifsr = fetch_fsr;
-        c->cp15.ifar = pc;
-        take_exception(c, ARM_VEC_PREFETCH, ARM_MODE_ABT, pc + 4, false, &vec);
-        c->r[15] = vec;
-        return ARM_OK;
+    uint32_t fetch_pa = 0u;
+    /*
+     * The fetch-block fast path. See the fetch_* fields in arm.h for why this
+     * exists; in short, every instruction pays a translate and an indirect bus
+     * call, and inside a 1 KB block both answer the same thing up to 1024
+     * times running.
+     *
+     * A hit requires the same block, the same flush generation and the same
+     * privilege -- the three things that can change what a fetch resolves to
+     * or whether it is permitted. On a miss the ORIGINAL path runs unchanged,
+     * fault behaviour included, and the cache is refilled only if the block is
+     * plain RAM.
+     */
+    const bool fetch_priv = cpu_is_priv(c);
+    const uint32_t fetch_blk = pc & ~0x3ffu;
+    const uint8_t *fetch_host = NULL;
+
+    if (c->fetch_host && c->fetch_blk == fetch_blk &&
+        c->fetch_gen == c->tlb_gen && c->fetch_priv == fetch_priv) {
+        fetch_host = c->fetch_host + (pc - fetch_blk);
+    } else {
+        uint32_t fetch_fsr = arm_mmu_translate(c, pc, ARM_ACCESS_FETCH,
+                                               fetch_priv, &fetch_pa);
+        if (fetch_fsr) {
+            uint32_t vec;
+            c->cycles++;
+            c->cp15.ifsr = fetch_fsr;
+            c->cp15.ifar = pc;
+            take_exception(c, ARM_VEC_PREFETCH, ARM_MODE_ABT, pc + 4, false,
+                           &vec);
+            c->r[15] = vec;
+            return ARM_OK;
+        }
+        if (c->bus->host_ram) {
+            uint8_t *blk = c->bus->host_ram(c->bus->ctx, fetch_pa & ~0x3ffu,
+                                            0x400u);
+            if (blk) {
+                c->fetch_host = blk;
+                c->fetch_blk  = fetch_blk;
+                c->fetch_gen  = c->tlb_gen;
+                c->fetch_priv = fetch_priv;
+                fetch_host    = blk + (pc - fetch_blk);
+            }
+        }
     }
     /* Thumb: 16-bit instructions, PC advances by 2. Dispatch before the ARM
      * decoder — the two instruction sets share every helper below. */
     if (c->cpsr & ARM_CPSR_T) {
-        uint16_t tinsn = c->bus->read16(c->bus->ctx, fetch_pa);
+        /* Assembled from bytes rather than memcpy'd, so it does not depend on
+         * the host's endianness; the bus contract is little-endian either
+         * way. Instructions are aligned, so a fetch never leaves the block. */
+        uint16_t tinsn = fetch_host
+            ? (uint16_t)((uint16_t)fetch_host[0] |
+                         ((uint16_t)fetch_host[1] << 8))
+            : c->bus->read16(c->bus->ctx, fetch_pa);
         uint32_t tnext = pc + 2;
         c->cycles++;
         arm_status_t tst = thumb_step(c, pc, tinsn, &tnext);
@@ -2403,7 +2448,10 @@ arm_status_t arm_step(arm_cpu_t *c) {
         return tst;
     }
 
-    uint32_t insn = c->bus->read32(c->bus->ctx, fetch_pa);
+    uint32_t insn = fetch_host
+        ? ((uint32_t)fetch_host[0] | ((uint32_t)fetch_host[1] << 8) |
+           ((uint32_t)fetch_host[2] << 16) | ((uint32_t)fetch_host[3] << 24))
+        : c->bus->read32(c->bus->ctx, fetch_pa);
     uint32_t next = pc + 4;
     arm_status_t st = ARM_OK;
 
