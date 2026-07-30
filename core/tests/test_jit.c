@@ -40,8 +40,21 @@ static uint8_t  m_r8 (void *c, uint32_t a){ (void)c; g_read8_calls++; return g_r
 static void m_w32(void *c, uint32_t a, uint32_t v){ (void)c; g_write32_calls++; memcpy(&g_ram[a&(RAM_SIZE-1)],&v,4); }
 static void m_w16(void *c, uint32_t a, uint16_t v){ (void)c; g_write16_calls++; memcpy(&g_ram[a&(RAM_SIZE-1)],&v,2); }
 static void m_w8 (void *c, uint32_t a, uint8_t  v){ (void)c; g_write8_calls++; g_ram[a&(RAM_SIZE-1)]=v; }
+/*
+ * Designated initialisers, so adding an optional hook to arm_bus_t cannot break
+ * this file again. The positional form listed ten members and the struct has
+ * since grown host_ram, wait_for_interrupt, privileged_svc and
+ * privileged_svc_ctx; -Werror=missing-field-initializers caught the shortfall
+ * on the CI job that enables it, and nowhere else, which is why it sat red for
+ * a dozen commits while every other job stayed green.
+ *
+ * Every omitted member is a NULL optional hook, which is the same thing the
+ * trailing NULLs used to say -- this states it once instead of by counting.
+ */
 static const arm_bus_t g_bus = {
-    NULL, m_r32, m_r16, m_r8, m_w32, m_w16, m_w8, NULL, NULL, NULL
+    .ctx     = NULL,
+    .read32  = m_r32, .read16  = m_r16, .read8  = m_r8,
+    .write32 = m_w32, .write16 = m_w16, .write8 = m_w8,
 };
 
 #define CODE_WORDS 4096

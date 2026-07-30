@@ -291,8 +291,15 @@ static uint8_t  m_r8 (void *c, uint32_t a){ (void)c; return g_ram[a&(RAM_SIZE-1)
 static void m_w32(void *c, uint32_t a, uint32_t v){ (void)c; memcpy(&g_ram[a&(RAM_SIZE-1)],&v,4); }
 static void m_w16(void *c, uint32_t a, uint16_t v){ (void)c; memcpy(&g_ram[a&(RAM_SIZE-1)],&v,2); }
 static void m_w8 (void *c, uint32_t a, uint8_t  v){ (void)c; g_ram[a&(RAM_SIZE-1)]=v; }
+/* Designated, so a new optional hook on arm_bus_t cannot break this file: the
+ * positional form listed ten members and the struct has grown four. Every
+ * omitted member is a NULL optional hook, which is what the trailing NULLs
+ * meant. See test_jit.c for how this stayed red on one CI job for a dozen
+ * commits. */
 static const arm_bus_t g_bus = {
-    NULL, m_r32, m_r16, m_r8, m_w32, m_w16, m_w8, NULL, NULL, NULL
+    .ctx     = NULL,
+    .read32  = m_r32, .read16  = m_r16, .read8  = m_r8,
+    .write32 = m_w32, .write16 = m_w16, .write8 = m_w8,
 };
 
 /*
