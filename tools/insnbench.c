@@ -274,7 +274,58 @@ static const uint32_t g_prog_thumb[] = {
     0x0000D1FAu    /* BNE  loop  ; (padding)  */
 };
 
-#define BENCH_LOOP_INSNS 5u
+/*  MIXED -- ten instructions that land in TEN DIFFERENT PLACES in the ARM
+ *  decoder, instead of the same one over and over.
+ *
+ * WHY THIS ROW EXISTS. Every other row in this file is a homogeneous loop: the
+ * same handful of encodings, forever. The ARM decoder in arm_interp.c is not a
+ * jump table -- it is a long chain of `if ((insn & mask) == value)` tests -- so
+ * a homogeneous loop settles into ONE position in that chain and the host's
+ * branch predictor learns it perfectly. Real guest code does not. That makes
+ * every synthetic number in this file a best case for the decoder specifically,
+ * which is exactly the component under suspicion.
+ *
+ * The 7.3x gap between the synthetic rows and a real boot (30.92 vs 4.21 M
+ * insn/s) has two candidate explanations that the existing rows cannot tell
+ * apart: real code is BRANCHIER AND COLDER (i-cache, TLB, indirect targets), or
+ * real code is DECODE-SCATTERED. This row changes only the second one -- same
+ * loop shape, same tight working set, same host cache behaviour, ten decode
+ * positions instead of one. Whatever it costs relative to the load/store row IS
+ * the price of walking the chain.
+ *
+ *      loop:  LDR   r3, [r4]        single data transfer, immediate
+ *             ADD   r3, r3, #1      data processing, immediate
+ *             STR   r3, [r4]        single data transfer, store
+ *             MOV   r5, r3, LSL #1  data processing, immediate-shifted register
+ *             MUL   r6, r3, r3      multiply (bits[7:4] == 1001)
+ *             EOR   r5, r5, r6      data processing, plain register
+ *             LDRB  r7, [r4]        byte load
+ *             STRH  r7, [r4, #4]    misc load/store (bits[7:4] == 1011)
+ *             SUBS  r2, r2, #1
+ *             BNE   loop
+ *
+ * MUL's Rd differs from its Rm, so it is not the UNPREDICTABLE Rd==Rm form.
+ * STRH writes to DATA+4, clear of the word the read-modify-write owns, so the
+ * two end-state assertions stay independent.
+ */
+static const uint32_t g_prog_mixed[] = {
+    0xe5943000u,   /* LDR   r3, [r4]       */
+    0xe2833001u,   /* ADD   r3, r3, #1     */
+    0xe5843000u,   /* STR   r3, [r4]       */
+    0xe1a05083u,   /* MOV   r5, r3, LSL #1 */
+    0xe0060393u,   /* MUL   r6, r3, r3     */
+    0xe0255006u,   /* EOR   r5, r5, r6     */
+    0xe5d47000u,   /* LDRB  r7, [r4]       */
+    0xe1c470b4u,   /* STRH  r7, [r4, #4]   */
+    0xe2522001u,   /* SUBS  r2, r2, #1     */
+    0x1afffff5u    /* BNE   loop           */
+};
+
+/* Every configuration's loop length divides this, so one rounded instruction
+ * budget ends every configuration exactly at the top of its loop. Rows carry
+ * their own length in bench_cfg_t::loop_insns; this is only the budget's
+ * granularity. */
+#define BENCH_LOOP_LCM   10u
 
 /* Every checked end-state value is folded in here and the result is printed, so
  * no part of the workload or its verification is dead code. */
@@ -286,24 +337,52 @@ typedef struct {
     const char *tick;        /* "no" | "yes"                            */
     const uint32_t *prog;
     unsigned    prog_words;
+    unsigned    loop_insns;  /* instructions per iteration; divides the LCM  */
     bool        mmu_on;
     bool        small_pages;
     bool        do_tick;
     bool        thumb;       /* enter with CPSR.T set                   */
 } bench_cfg_t;
 
+/* Designated initialisers deliberately: this table gained a field once and
+ * every positional row would have shifted silently. core-tests spent twelve
+ * commits red for exactly that mistake in the arm_bus_t initialisers. */
 static const bench_cfg_t g_configs[] = {
-    /* loop          mmu             tick    prog          words                    mmu_on small  tick */
-    { "alu/branch",  "off",          "no",   g_prog_alu,  (unsigned)(sizeof g_prog_alu  / 4), false, false, false, false },
-    { "load/store",  "off",          "no",   g_prog_ldst, (unsigned)(sizeof g_prog_ldst / 4), false, false, false, false },
-    { "load/store",  "off",          "yes",  g_prog_ldst, (unsigned)(sizeof g_prog_ldst / 4), false, false, true,  false },
-    { "load/store",  "sections-1M",  "no",   g_prog_ldst, (unsigned)(sizeof g_prog_ldst / 4), true,  false, false, false },
-    { "load/store",  "pages-4K",     "no",   g_prog_ldst, (unsigned)(sizeof g_prog_ldst / 4), true,  true,  false, false },
-    { "load/store",  "pages-4K",     "yes",  g_prog_ldst, (unsigned)(sizeof g_prog_ldst / 4), true,  true,  true,  false },
+    { .loop = "alu/branch",  .mmu = "off",         .tick = "no",
+      .prog = g_prog_alu,   .prog_words = (unsigned)(sizeof g_prog_alu   / 4),
+      .loop_insns = 5u },
+    { .loop = "load/store",  .mmu = "off",         .tick = "no",
+      .prog = g_prog_ldst,  .prog_words = (unsigned)(sizeof g_prog_ldst  / 4),
+      .loop_insns = 5u },
+    { .loop = "load/store",  .mmu = "off",         .tick = "yes",
+      .prog = g_prog_ldst,  .prog_words = (unsigned)(sizeof g_prog_ldst  / 4),
+      .loop_insns = 5u, .do_tick = true },
+    { .loop = "load/store",  .mmu = "sections-1M", .tick = "no",
+      .prog = g_prog_ldst,  .prog_words = (unsigned)(sizeof g_prog_ldst  / 4),
+      .loop_insns = 5u, .mmu_on = true },
+    { .loop = "load/store",  .mmu = "pages-4K",    .tick = "no",
+      .prog = g_prog_ldst,  .prog_words = (unsigned)(sizeof g_prog_ldst  / 4),
+      .loop_insns = 5u, .mmu_on = true, .small_pages = true },
+    { .loop = "load/store",  .mmu = "pages-4K",    .tick = "yes",
+      .prog = g_prog_ldst,  .prog_words = (unsigned)(sizeof g_prog_ldst  / 4),
+      .loop_insns = 5u, .mmu_on = true, .small_pages = true, .do_tick = true },
     /* The encoding real code actually uses. Paired with the ARM row above it
      * and with the MMU row, so the comparison is one variable at a time. */
-    { "alu/branch T","off",          "no",   g_prog_thumb,(unsigned)(sizeof g_prog_thumb/ 4), false, false, false, true  },
-    { "alu/branch T","pages-4K",     "yes",  g_prog_thumb,(unsigned)(sizeof g_prog_thumb/ 4), true,  true,  true,  true  }
+    { .loop = "alu/branch T",.mmu = "off",         .tick = "no",
+      .prog = g_prog_thumb, .prog_words = (unsigned)(sizeof g_prog_thumb / 4),
+      .loop_insns = 5u, .thumb = true },
+    { .loop = "alu/branch T",.mmu = "pages-4K",    .tick = "yes",
+      .prog = g_prog_thumb, .prog_words = (unsigned)(sizeof g_prog_thumb / 4),
+      .loop_insns = 5u, .mmu_on = true, .small_pages = true, .do_tick = true,
+      .thumb = true },
+    /* Decode scatter. Paired with the "load/store off/no" row: same working
+     * set, same host cache behaviour, ten decoder positions instead of one. */
+    { .loop = "mixed x10",   .mmu = "off",         .tick = "no",
+      .prog = g_prog_mixed, .prog_words = (unsigned)(sizeof g_prog_mixed / 4),
+      .loop_insns = 10u },
+    { .loop = "mixed x10",   .mmu = "pages-4K",    .tick = "yes",
+      .prog = g_prog_mixed, .prog_words = (unsigned)(sizeof g_prog_mixed / 4),
+      .loop_insns = 10u, .mmu_on = true, .small_pages = true, .do_tick = true }
 };
 #define BENCH_CONFIG_COUNT (sizeof g_configs / sizeof g_configs[0])
 
@@ -480,13 +559,13 @@ static bool run_burst(s5l8900_t *m, bool do_tick, uint64_t insns,
  */
 static bool verify(s5l8900_t *m, const bench_cfg_t *cfg, uint64_t retired) {
     const arm_cpu_t *cpu = &m->cpu;
-    uint64_t iters = retired / BENCH_LOOP_INSNS;
+    uint64_t iters = retired / cfg->loop_insns;
     uint32_t it32 = (uint32_t)iters;
     bool ok = true;
 
-    if (retired % BENCH_LOOP_INSNS != 0) {
+    if (retired % cfg->loop_insns != 0) {
         printf("  ERROR: retired %" PRIu64 " is not a whole number of %u-instruction iterations\n",
-               retired, BENCH_LOOP_INSNS);
+               retired, cfg->loop_insns);
         ok = false;
     }
     if (cpu->r[15] != BENCH_CODE_VA) {
@@ -536,6 +615,35 @@ static bool verify(s5l8900_t *m, const bench_cfg_t *cfg, uint64_t retired) {
             ok = false;
         }
         g_sink += (uint64_t)cpu->r[3] + mem;
+
+        /* The six extra encodings the mixed row adds. Checking them is what
+         * makes "ten decoder positions" a claim about work that provably
+         * happened rather than about bytes that were merely present. */
+        if (cfg->prog == g_prog_mixed) {
+            uint32_t want_r6 = it32 * it32;              /* MUL  r6, r3, r3   */
+            uint32_t want_r5 = (it32 << 1) ^ want_r6;    /* MOV/LSL then EOR  */
+            uint32_t want_r7 = it32 & 0xffu;             /* LDRB of the word  */
+            uint32_t half    = peek32(m, BENCH_DATA_VA + 4u) & 0xffffu;
+            if (cpu->r[6] != want_r6) {
+                printf("  ERROR: r6=%u, expected %u -- MUL\n", cpu->r[6], want_r6);
+                ok = false;
+            }
+            if (cpu->r[5] != want_r5) {
+                printf("  ERROR: r5=%u, expected %u -- MOV/LSL then EOR\n",
+                       cpu->r[5], want_r5);
+                ok = false;
+            }
+            if (cpu->r[7] != want_r7) {
+                printf("  ERROR: r7=%u, expected %u -- LDRB\n", cpu->r[7], want_r7);
+                ok = false;
+            }
+            if (half != want_r7) {
+                printf("  ERROR: halfword at 0x%08x holds %u, expected %u -- STRH\n",
+                       (unsigned)(BENCH_DATA_VA + 4u), half, want_r7);
+                ok = false;
+            }
+            g_sink += (uint64_t)cpu->r[5] + cpu->r[6] + cpu->r[7] + half;
+        }
     }
     g_sink += cpu->r[2];
     return ok;
@@ -551,13 +659,13 @@ static void usage(const char *argv0) {
            "\n"
            "  --insns N   guest instructions per repetition (default 20000000,\n"
            "              the sample size docs/dynarec.md section 1.1 used; rounded up\n"
-           "              to a whole number of %u-instruction loop iterations)\n"
+           "              to a multiple of %u so every row ends at the top of its loop)\n"
            "  --reps  N   repetitions per configuration (default 5)\n"
            "\n"
            "Prints M instructions/sec per configuration. This is a measurement,\n"
            "not a test: it has no pass threshold and is not registered with\n"
            "ctest. It exits non-zero only if a run failed its end-state check.\n",
-           argv0, BENCH_LOOP_INSNS);
+           argv0, BENCH_LOOP_LCM);
 }
 
 int main(int argc, char **argv) {
@@ -578,10 +686,12 @@ int main(int argc, char **argv) {
             return 2;
         }
     }
-    if (insns < BENCH_LOOP_INSNS) insns = BENCH_LOOP_INSNS;
+    if (insns < BENCH_LOOP_LCM) insns = BENCH_LOOP_LCM;
     /* Round up so a run always ends exactly at the top of the loop, which is
-     * what lets the end state be an exact equality rather than a range. */
-    insns = ((insns + BENCH_LOOP_INSNS - 1u) / BENCH_LOOP_INSNS) * BENCH_LOOP_INSNS;
+     * what lets the end state be an exact equality rather than a range. The
+     * LCM rather than one row's length: every row runs the same budget, and it
+     * has to divide evenly for all of them. */
+    insns = ((insns + BENCH_LOOP_LCM - 1u) / BENCH_LOOP_LCM) * BENCH_LOOP_LCM;
     if (reps < 1u) reps = 1u;
 
     double *rates = calloc((size_t)BENCH_CONFIG_COUNT * reps, sizeof *rates);
@@ -604,7 +714,7 @@ int main(int argc, char **argv) {
     printf("INSNBENCH-METHOD timer=%s insns_per_rep=%" PRIu64 " reps=%u headline=median "
            "order=interleaved ram=%uMB loop_insns=%u\n",
            INSNBENCH_TIMER, insns, reps,
-           (unsigned)(BENCH_RAM_SIZE >> 20), BENCH_LOOP_INSNS);
+           (unsigned)(BENCH_RAM_SIZE >> 20), BENCH_LOOP_LCM);
     /*
      * WHY THE MEDIAN IS THE HEADLINE, AND NOT BEST-OF-N.
      *
