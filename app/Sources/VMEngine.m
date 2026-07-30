@@ -109,6 +109,36 @@ static double vm_now(void) {
 - (NSUInteger)copyOptionValuesInto:(bool *)values capacity:(NSUInteger)capacity;
 @end
 
+/*
+ * A sampled signature of the frame, not a complete hash.
+ *
+ * Hashing all 460,800 bytes at up to 60 Hz would be ~27 MB/s of pure
+ * measurement overhead on the very phone whose speed is in question, which
+ * would make the counter change the number it reports. The 397-byte stride is
+ * coprime with the 1,280-byte row pitch, so successive samples walk across
+ * rows rather than re-reading one column of every row.
+ *
+ * Sampling can only ever MISS a change, never invent one, so this undercounts
+ * frames that differ in fewer than ~1,160 sampled words -- a cursor-sized
+ * change on an otherwise still screen. It is accurate for the animations the
+ * 30fps target is about, and the direction of its error is known.
+ */
+static uint64_t vm_engine_fb_signature(const uint8_t *fb, size_t n) {
+    uint64_t h = 1469598103934665603ull;
+    for (size_t i = 0; i + 4u <= n; i += 397u) {
+        uint32_t w = (uint32_t)fb[i] | ((uint32_t)fb[i + 1] << 8) |
+                     ((uint32_t)fb[i + 2] << 16) | ((uint32_t)fb[i + 3] << 24);
+        h = (h ^ (uint64_t)w) * 1099511628211ull;
+    }
+    return h;
+}
+
+static double vm_engine_now_seconds(void) {
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0.0;
+    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+}
+
 @implementation VMEngine {
     s5l8900_t        _machine;
     /* The provisioning copy's byte counters; see -rootFilesystemProgress. */
@@ -152,6 +182,24 @@ static double vm_now(void) {
     BOOL             _snapshotFresh;
     BOOL             _snapshotARGB;  // byte order of the snapshot's pixels
     BOOL             _snapshotBlank;
+    /* Frame rate, measured rather than assumed.
+     *
+     * The goal for this project is "30fps+", and until now the app could not
+     * report it: the status line showed M insn/s, which is not a frame rate
+     * and cannot be converted into one without knowing the per-frame cost.
+     * Every fps figure quoted so far has been extrapolated on a desktop.
+     *
+     * What is counted is a CHANGED published frame, not a publish and not a
+     * guest composite. That is deliberately the user-visible quantity: this
+     * guest composites into a continuously scanned surface and never writes
+     * CLCD_UPDATE, so there is no register edge to count, and publishing an
+     * identical frame is not a frame anyone can see.
+     */
+    uint64_t         _fbSignature;
+    BOOL             _fbSignatureValid;
+    uint64_t         _fpsWindowFrames;
+    double           _fpsWindowStart;
+    double           _fps;
     /* The geometry the display controller was scanning out when the snapshot
      * was taken. Published with the pixels rather than assumed by the reader:
      * the buffer is a fixed VM_FB_BYTES, but what is IN it is whatever window
@@ -1506,6 +1554,24 @@ static bool vm_spin_already_reported(const vm_spin_t *s, uint32_t region) {
         if (fbBytes < VM_FB_BYTES)
             memset(_snapshot + fbBytes, 0, VM_FB_BYTES - fbBytes);
         memcpy(_snapshot, fb, fbBytes);
+        /* Counted here, where a frame actually becomes visible, and only when
+         * its contents differ from the one before it. */
+        uint64_t sig = vm_engine_fb_signature(fb, fbBytes);
+        if (!_fbSignatureValid || sig != _fbSignature) {
+            _fbSignature = sig;
+            _fbSignatureValid = YES;
+            _fpsWindowFrames++;
+        }
+        double nowSec = vm_engine_now_seconds();
+        if (_fpsWindowStart <= 0.0) {
+            _fpsWindowStart = nowSec;
+        } else if (nowSec - _fpsWindowStart >= 0.5) {
+            /* A half-second window: long enough that one slow frame does not
+             * dominate, short enough to follow a stutter the user can feel. */
+            _fps = (double)_fpsWindowFrames / (nowSec - _fpsWindowStart);
+            _fpsWindowFrames = 0;
+            _fpsWindowStart = nowSec;
+        }
         _snapshotARGB = (order == VM_ORDER_ARGB);
         /* Published with the pixels. The reader must not assume 320x480: this
          * geometry came out of whichever CLCD window the guest enabled, and it
@@ -1596,16 +1662,22 @@ static bool vm_spin_already_reported(const vm_spin_t *s, uint32_t region) {
     double rate = _rate;
     NSString *status = _status;
     NSString *mode = _mode;
+    double fps = _fps;
+    BOOL haveFps = _fbSignatureValid;
     pthread_mutex_unlock(&_lock);
 
+    /* "--" until a frame has actually been published. Printing "0 fps" before
+     * anything has rendered would report a stall that is not happening. */
+    NSString *fpsText = haveFps ? [NSString stringWithFormat:@"%.0f fps", fps]
+                                : @"-- fps";
     double footprintMB = [VMEngine physFootprintBytes] / 1048576.0;
     /* The mode leads, because "3.2 M insn/s" means something different
      * depending on what is retiring them, and a user who cannot see which
      * guest is running has no way to tell. */
     return [NSString stringWithFormat:
-            @"%@%@  ·  %.1f M insn  ·  %.2f M insn/s  ·  %.0f MB",
+            @"%@%@  ·  %.1f M insn  ·  %.2f M insn/s  ·  %@  ·  %.0f MB",
             mode.length ? [mode stringByAppendingString:@"  ·  "] : @"",
-            status, retired / 1.0e6, rate / 1.0e6, footprintMB];
+            status, retired / 1.0e6, rate / 1.0e6, fpsText, footprintMB];
 }
 
 - (NSString *)modeDescription {
