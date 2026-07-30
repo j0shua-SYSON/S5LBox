@@ -28021,7 +28021,24 @@ external_md_work_ready:
             printf("    WARNING: %" PRIu64
                    " samples dropped (hash full) — this list is "
                    "NOT complete\n", G.pc_dropped);
-        for (unsigned rank = 0; rank < 16; rank++) {
+        /*
+         * SIXTY-FOUR, NOT SIXTEEN. Sixteen was enough while the question was
+         * "which kext", because a kext bucket names itself. It is not enough
+         * for userspace, which diagnostic_pc_name() prints as the single
+         * literal "[userspace]" -- 65.3% of r195's samples arrived under that
+         * one name. The addresses were always here; only the depth was short.
+         *
+         * Sixteen rows of r195 turned out to be sixteen consecutive words of
+         * ONE loop, 0x3145ad4c..0x3145ada4, which tools/dscmap.py resolves to
+         * _mulg_common in Security.framework. A list that a single hot loop
+         * can fill to the brim cannot show what is second, so it cannot be
+         * used to rank anything -- and ranking is the only thing it is for.
+         *
+         * Feed the addresses to tools/dscmap.py to name them; the shared cache
+         * maps at a fixed address in every iPhone OS 3 process, so a userspace
+         * VA is resolvable without knowing which process was running.
+         */
+        for (unsigned rank = 0; rank < 64; rank++) {
             uint64_t best = 0;
             unsigned bi = PCHASH;
             for (unsigned i = 0; i < PCHASH; i++)
