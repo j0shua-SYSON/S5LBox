@@ -591,17 +591,20 @@ static const NSUInteger kConsoleScrollback = 12000;
     double f = [_engine rootFilesystemProgress];
     if (f < 0.0) {
         _prepareBar.hidden = YES;
-        _prepareLabel.text = @"Preparing iPhone OS…
-Copying the root filesystem";
+        _prepareLabel.text =
+            @"Preparing iPhone OS\nCopying the root filesystem";
         return;
     }
     if (f > 1.0) f = 1.0;
     _prepareBar.hidden = NO;
     _prepareBar.progress = (float)f;
+    /* ASCII only, deliberately. The first version of these two literals was
+     * written through a shell heredoc that turned every "\n" into a real
+     * newline, which left the string unterminated and dropped an em dash into
+     * code -- "error: unexpected character <U+2014>". Plain ASCII and explicit
+     * escapes cannot fail that way, and no glyph here needed to be typographic. */
     _prepareLabel.text = [NSString stringWithFormat:
-        @"Preparing iPhone OS…
-%.0f%% — copying the root filesystem
-"
+        @"Preparing iPhone OS\n%.0f%% - copying the root filesystem\n"
          "You can leave this screen; it keeps going.", f * 100.0];
 }
 
