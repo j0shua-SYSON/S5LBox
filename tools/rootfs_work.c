@@ -1487,9 +1487,9 @@ static void note_component(char *out, size_t cap, const char *name) {
     out[n] = '\0';
 }
 
-static int open_directory_no_links(const char *path, int *system_error,
-                                   bool *unsafe, char *culprit,
-                                   size_t culprit_size) {
+static int open_directory_walk(const char *path, int *system_error,
+                               bool *unsafe, char *culprit,
+                               size_t culprit_size) {
     char *copy = NULL;
     char *cursor;
     int current = -1;
@@ -1596,6 +1596,72 @@ static int open_directory_no_links(const char *path, int *system_error,
     }
     free(copy);
     return current;
+}
+
+/*
+ * THE SANDBOX FALLBACK, and it exists because a real device said no.
+ *
+ * open_directory_walk() opens every component starting at "/", which is what
+ * makes its no-symlink guarantee checkable. On iOS an app may not open the
+ * container directories on the way to its OWN Documents folder -- not even to
+ * search them -- so the walk dies with EPERM several components above anything
+ * the app owns. ROOTFS_WORK_TRAVERSE (O_SEARCH) was supposed to settle that and
+ * does not: measured on an iPhone 6s Plus, importing firmware into
+ * Documents/firmware still failed with "cannot open source directory:
+ * Operation not permitted (errno 1)".
+ *
+ * A sandboxed process CAN open the full path in one call -- the sandbox
+ * evaluates the destination, not every ancestor. So on a refusal that is
+ * clearly the sandbox (EPERM/EACCES) rather than a malformed path, open the
+ * directory directly and re-establish the property the walk provided:
+ * realpath() resolves every symlink, so if the resolved path equals the
+ * requested one, no component was a link. A path that does traverse a symlink
+ * gets the same refusal it always did.
+ *
+ * Strictly a FALLBACK. The walk runs first and its verdict wins whenever it
+ * reaches one, including "unsafe" -- hence the immediate return on *unsafe.
+ */
+#if defined(__APPLE__)
+static int open_directory_sandbox(const char *path, int *system_error,
+                                  bool *unsafe) {
+    char *resolved;
+    int fd, flags = O_DIRECTORY | O_CLOEXEC;
+
+    resolved = realpath(path, NULL);
+    if (!resolved) { *system_error = errno; return -1; }
+    if (strcmp(resolved, path) != 0) {
+        free(resolved);
+        *unsafe = true;
+        return -1;
+    }
+    free(resolved);
+#ifdef O_NOFOLLOW
+    flags |= O_NOFOLLOW;
+#endif
+    fd = open(path, ROOTFS_WORK_TRAVERSE | flags);
+    if (fd < 0) { *system_error = errno; return -1; }
+    return fd;
+}
+#endif
+
+static int open_directory_no_links(const char *path, int *system_error,
+                                   bool *unsafe, char *culprit,
+                                   size_t culprit_size) {
+    int fd = open_directory_walk(path, system_error, unsafe, culprit,
+                                 culprit_size);
+    if (fd >= 0 || *unsafe) return fd;
+#if defined(__APPLE__)
+    if (*system_error == EPERM || *system_error == EACCES) {
+        int alt_error = 0;
+        bool alt_unsafe = false;
+        int alt = open_directory_sandbox(path, &alt_error, &alt_unsafe);
+        if (alt >= 0) { *system_error = 0; return alt; }
+        if (alt_unsafe) { *unsafe = true; return -1; }
+        /* Keep the walk's errno: it names the component that was refused,
+         * which is more useful than the second attempt's. */
+    }
+#endif
+    return fd;
 }
 
 static bool split_path(const char *path, char **parent, char **leaf) {
