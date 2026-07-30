@@ -23660,6 +23660,7 @@ static void boot_print_usage(FILE *stream, const char *argv0) {
             "          [--call-probe-kernel <kernel-mode-pc>] ...\n"
             "          [--touch <at>:<x>:<y>[:<hold>]] ...\n"
             "          [--drag <at>:<x0>:<y0>:<x1>:<y1>[:<steps>[:<span>]]] ...\n"
+            "          [--fast]\n"
             "          [--pinch <at>:<ax0>:<ay0>:<ax1>:<ay1>:<bx0>:<by0>:"
             "<bx1>:<by1>[:<steps>[:<span>]]] ...\n"
             "          [--button <name>:<at>[:<hold>]] ...\n"
@@ -23901,6 +23902,9 @@ int main(int argc, char **argv) {
     button_press_t button_presses[BUTTON_PRESS_MAX];
     unsigned button_n = 0;
     memset(button_presses, 0, sizeof button_presses);
+    /* --fast: skip the per-instruction observational block in the hot loop.
+     * Throughput mode. See the block itself for what is given up. */
+    bool fast_hot = false;
     uint64_t steps = UINT64_C(2000000);
     const char *dtpath = NULL;
     const char *cmdline = "debug=0x8 serial=1";
@@ -24157,6 +24161,17 @@ int main(int argc, char **argv) {
             boot_print_usage(stdout, argv[0]);
             return 0;
         }
+        /* --fast is a harness toggle, not a machine one: it changes what this
+         * program OBSERVES, never what the guest executes, so it is deliberately
+         * not in BOOT_TOGGLES (which is the emulated-configuration table and is
+         * echoed as such).
+         *
+         * SET HERE, not further down this loop. The first attempt accepted the
+         * flag with a bare `continue` and set fast_hot in a later branch of the
+         * SAME loop, which the continue had already skipped -- so --fast parsed,
+         * suppressed nothing, and produced a report byte-identical to a normal
+         * run. That identical report is what caught it. */
+        if (!strcmp(argv[i], "--fast")) { fast_hot = true; continue; }
         /* Every boolean, in one line, driven by BOOT_TOGGLES. */
         switch (boot_toggle_parse(argv[i], &cfg)) {
         case BOOT_TOGGLE_ACCEPTED: continue;
@@ -27037,6 +27052,26 @@ external_md_work_ready:
         last_cpsr = mach.cpu.cpsr;
         last_mmu_enabled =
             (mach.cpu.cp15.sctlr & ARM_SCTLR_M) != 0u;
+        /*
+         * THE OBSERVATIONAL BLOCK, and --fast is the only thing that turns it
+         * off. Every line of it runs on EVERY retired instruction, and the
+         * first one is a 64-byte memcpy: over a 300 M-instruction boot the
+         * trace ring alone moves 19 GB. insnbench puts this interpreter at
+         * 11.27 M insn/s on a realistic load/store+MMU+tick loop while a real
+         * boot through this harness manages 3.14, and this block is the
+         * leading candidate for that 3.6x.
+         *
+         * NONE OF IT CHANGES WHAT THE GUEST DOES -- these are observers, which
+         * is exactly why skipping them has to produce a bit-identical run. The
+         * oracle is the same one §9.5 uses for the TLB: same UART, same retired
+         * count, same final pc.
+         *
+         * The cost of --fast is the diagnostics: no trace ring for a crash
+         * context, no mode histogram, no syscall or lifecycle capture. It is
+         * for measuring throughput and for long unattended runs whose report
+         * nobody will read, NOT for debugging -- which is why it is opt-in.
+         */
+        if (!fast_hot) {
         tr[tw].pc = last_pc;
         tr[tw].cpsr = last_cpsr;
         tr[tw].mmu_enabled = last_mmu_enabled;
@@ -27050,6 +27085,7 @@ external_md_work_ready:
         commcenter_watch_note_instruction(&mach.cpu, n, last_pc);
         commcenter_wait_note_pc(&mach.cpu, n, last_pc);
         applebaseband_note_instruction(&mach.cpu, n, last_pc);
+        }
 
         /* How far down the console-init chain did we get? Each milestone is
          * matched at its virtual address and at its pre-MMU physical alias. */
@@ -27123,7 +27159,7 @@ external_md_work_ready:
          * CPSR mode is 0x10, and a sampled version of that answers "probably
          * none" when the truthful answer is "exactly none".
          */
-        {
+        if (!fast_hot) {
             unsigned md = mach.cpu.cpsr & ARM_CPSR_MODE_MASK;
             bool thumb = (mach.cpu.cpsr & ARM_CPSR_T) != 0;
             G.mode_all[md]++;
@@ -27140,7 +27176,7 @@ external_md_work_ready:
          * a process can be killed by another process or by the kernel without
          * issuing exit itself.  Shipped xnu-1357.5.30 passes proc/rv/retval to exit1
          * and proc/signum to psignal in r0/r1/r2 at these entry instructions. */
-        {
+        if (!fast_hot) {
             uint32_t p = last_pc & ~1u;
             if (exit1_va && pc_matches_vm_or_pre_mmu_alias(
                                 &mach.cpu, p, exit1_va, exit1_pa)) {
@@ -27163,7 +27199,7 @@ external_md_work_ready:
          * the user PC that issued the SWI is lr-4 (ARM) or lr-2 (Thumb), and
          * SPSR.T says which.
          */
-        if (fleh_swi_va && pc_matches_vm_or_pre_mmu_alias(
+        if (!fast_hot && fleh_swi_va && pc_matches_vm_or_pre_mmu_alias(
                                 &mach.cpu, last_pc, fleh_swi_va, fleh_swi_pa)) {
             lifecycle_note_syscall(&mach.cpu, n);
             if (G.sc_n < 512) {
@@ -27188,7 +27224,7 @@ external_md_work_ready:
         }
 
         /* Did we just land on one of the failure entry points? */
-        for (unsigned w = 0; w < nwps; w++) {
+        for (unsigned w = 0; !fast_hot && w < nwps; w++) {
             uint32_t va = wps[w].va;
             if (!va) continue;
             uint32_t pa = va - virt_base + phys_base;
