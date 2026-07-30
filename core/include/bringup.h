@@ -77,8 +77,30 @@
  * refusal renders anything -- run127 reached the same console milestone as the
  * two-surface boots -- so the value stays at the one whose output is measured
  * until a run earns the change. tools/bootkernel.c reads THIS constant.
+ *
+ * 2026-07-30: A RUN EARNED THE CHANGE, and it took an interactive UI to do it.
+ * Every earlier measurement was a boot that reached a STATIC screen, which asks
+ * for two surfaces and stops. r190 unlocked the phone and tapped a button; the
+ * transition that followed asked for a third and the guest said so seven times:
+ *
+ *     IOSurface warning: buffer allocation failed.
+ *                        320 x 480 fmt: 42475241 size: 614400 bytes
+ *
+ * The compositor then had no backing store and the display lost its active RGB
+ * window entirely -- the run ends with "running CLCD has no active RGB window"
+ * where its no-tap control (r191, same checkpoint, same instruction count,
+ * deterministic apart from the tap) still shows the screen. So a two-surface
+ * pool is not merely conservative, it breaks the first UI animation that needs
+ * a layer, and run86's "three is worse than two" was measured on a workload
+ * that never asked for three.
+ *
+ * Four rather than three: run127 measured the region gate returning 1 for four
+ * and 0 for two, and the refused request is offset 0x12c000 + length 0x96000,
+ * which ends exactly at the three-surface boundary -- leaving a three-surface
+ * pool with no room for the NEXT one. The cost is 614,400 bytes per surface of
+ * guest DRAM.
  */
-#define S5L_BRINGUP_VRAM_SURFACES  2u
+#define S5L_BRINGUP_VRAM_SURFACES  4u
 #define S5L_BRINGUP_VRAM_BYTES     (S5L_BRINGUP_FB_BYTES * S5L_BRINGUP_VRAM_SURFACES)
 
 /*

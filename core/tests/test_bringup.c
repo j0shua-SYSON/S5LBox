@@ -143,10 +143,20 @@ static vm_block_t sparse_media(uint64_t size) {
 #define WANT_DT_PA           UINT32_C(0x087d1000)
 #define WANT_DT_SIZE         UINT32_C(40544)
 #define WANT_BOOT_ARGS_PA    UINT32_C(0x087db000)
-#define WANT_TOKD_PA         UINT32_C(0x08988000)
-#define WANT_TOKD_VA         UINT32_C(0xc0988000)
 #define WANT_FB_PA           UINT32_C(0x0885c000)
-#define WANT_VRAM_BYTES      UINT32_C(0x0012c000)
+/*
+ * DERIVED from S5L_BRINGUP_VRAM_SURFACES, not written out, because these three
+ * numbers move together whenever the pool is resized and a hand-copied set
+ * fails as six separate mysteries. The relationship is what is worth pinning:
+ * the pool is exactly N framebuffers, and topOfKernelData sits directly above
+ * it, 16 KiB aligned. The pool's SIZE is a deliberate choice justified in
+ * bringup.h; that it is a whole number of surfaces and that nothing overlaps
+ * it are properties this test owns.
+ */
+#define WANT_VRAM_BYTES      ((uint32_t)S5L_BRINGUP_VRAM_BYTES)
+#define WANT_TOKD_PA         ((WANT_FB_PA + WANT_VRAM_BYTES + 0x3fffu) & ~0x3fffu)
+#define WANT_TOKD_VA         (WANT_TOKD_PA - UINT32_C(0x08000000) + \
+                              UINT32_C(0xc0000000))
 #define WANT_BOUNCE_PA       UINT32_C(0x087dc000)
 #define WANT_CMDLINE  "debug=0x8 serial=1 nand-enable-adm=0 rd=md0"
 
@@ -232,9 +242,20 @@ static void test_run89_layout(const uint8_t *kernel, size_t kernel_len,
     CHECK(result.free_pool_bytes >= 0x11000u,
           "free page pool is only 0x%x bytes", result.free_pool_bytes);
 
-    /* Two framebuffers, not one and not three. */
-    CHECK_U32(result.vram_bytes, 2u * 320u * 480u * 4u,
-              "/vram must hold exactly two surfaces");
+    /*
+     * A WHOLE number of framebuffers, and at least the two that made run59
+     * composite at all. The exact count is bringup.h's call -- it went to four
+     * on 2026-07-30 when r190 showed a two-surface pool starving the first UI
+     * animation of a layer -- but a pool that is not a multiple of the surface
+     * size means IOSurface's last allocation runs off the end, and that is this
+     * test's business rather than bringup.h's.
+     */
+    CHECK_U32(result.vram_bytes,
+              (uint32_t)S5L_BRINGUP_VRAM_SURFACES * 320u * 480u * 4u,
+              "/vram must hold a whole number of surfaces");
+    CHECK(S5L_BRINGUP_VRAM_SURFACES >= 2u,
+          "/vram holds %u surface(s); one is what made run76 composite nothing",
+          (unsigned)S5L_BRINGUP_VRAM_SURFACES);
 
     CHECK(strcmp(result.cmdline, WANT_CMDLINE) == 0,
           "cmdline: got \"%s\" want \"%s\"", result.cmdline, WANT_CMDLINE);
