@@ -25486,9 +25486,15 @@ int main(int argc, char **argv) {
             options.entries = provision_entries;
             options.entry_count = have + want;
             printf("ppp        : /etc/ppp/options will be provisioned with "
-                   "defaultroute\n"
+                   "defaultroute and usepeerdns\n"
                    "             (run129: the link opened and the guest had no "
-                   "route pointing at it)\n");
+                   "route pointing at it;\n"
+                   "              r198: the route existed and Safari still "
+                   "failed with EINVAL because\n"
+                   "              nothing told the guest a nameserver -- "
+                   "/etc/resolv.conf is a symlink to\n"
+                   "              runtime state, so pppd has to learn 10.0.2.3 "
+                   "from the peer)\n");
         }
 
         /*

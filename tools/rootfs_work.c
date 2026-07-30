@@ -5522,7 +5522,34 @@ size_t rootfs_work_activation_entries(rootfs_work_entry_t *entries,
  * it looks at argv -- so this composes with the five arguments the launchd job
  * already passes rather than replacing them.
  */
-static const char PPP_OPTIONS_FILE[] = "defaultroute\n";
+/*
+ * `usepeerdns` joined `defaultroute` on 2026-07-30, and r198 is why.
+ *
+ * That run tapped Safari's Apple bookmark on a guest whose link was fully up --
+ * "Using interface ppp0", "local IP address 10.0.2.15", "remote IP address
+ * 10.0.2.2" -- with defaultroute already provisioned. Safari still failed:
+ *
+ *     Cannot Open Page. The error was: "Operation could not be completed.
+ *     Invalid argument".
+ *
+ * immediately, with every NAT counter still at zero. Not a timeout and not a
+ * missing route: the guest had nowhere to send a QUERY. /etc/resolv.conf on
+ * this image is a symlink to /var/run/resolv.conf, which configd and
+ * mDNSResponder own at runtime, so there is no static file to provision and no
+ * nameserver for the resolver to use.
+ *
+ * pppd asks its peer for DNS servers (RFC 1877) only when told to, and the peer
+ * has been ready the whole time: core/src/net/ppp.c answers IPCP_OPT_DNS1 with
+ * cfg->dns1 = 10.0.2.3, and core/src/net/net.c is the resolver at that address.
+ * One word makes the guest ask, and pppd then hands the answer to configd,
+ * which is the path a real device uses.
+ *
+ * NOT YET DEMONSTRATED: that a page loads. This makes the guest ask for a
+ * nameserver; whether the query, the answer and then a TCP connection all
+ * complete is the measurement, and dns_queries in the NAT report is where it
+ * shows.
+ */
+static const char PPP_OPTIONS_FILE[] = "defaultroute\nusepeerdns\n";
 
 size_t rootfs_work_ppp_entries(rootfs_work_entry_t *entries, size_t capacity) {
     if (entries && capacity >= 1u) {
