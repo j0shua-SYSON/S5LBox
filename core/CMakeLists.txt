@@ -904,7 +904,8 @@ target_link_libraries(machoinfo PRIVATE emucore)
 add_executable(bootkernel ../tools/bootkernel.c)
 target_link_libraries(bootkernel PRIVATE
     emucore host_audio_capture host_file_block host_guest_patch
-    host_ios3_kernel_patch host_mt_drag host_rootfs_work nethost)
+    host_ios3_kernel_patch host_mt_drag host_payload_tar host_rootfs_work
+    nethost)
 
 # Public CI cannot contain Apple's firmware, but it can still exercise the
 # external-md parser's fail-closed boundary before any file is opened. These

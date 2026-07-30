@@ -32,6 +32,18 @@
 #include "mt_drag.h"
 #include "ppp.h"
 #include "net.h"
+#include "payload_tar.h"
+
+/*
+ * The jailbreak payload archive and the merged provisioning table.
+ *
+ * File scope because rootfs_work_entry_t::content for every payload entry
+ * points INTO the archive payload_tar_open() read, so the archive has to
+ * outlive rootfs_work_create(). Freeing either at the end of the block that
+ * builds them would hand the provisioner hundreds of dangling pointers.
+ */
+static payload_tar_t *g_jb_tar = NULL;
+static rootfs_work_entry_t *g_jb_entries = NULL;
 #include "net_host.h"
 #include "rootfs_work.h"
 #include "sha256.h"
@@ -25517,6 +25529,80 @@ int main(int argc, char **argv) {
         }
 
         /*
+         * --jb-payload: the FILESYSTEM half of the jailbreak, and the half
+         * that was a documented no-op until now.
+         *
+         * No exploit is involved, and none is possible: the surfaces every
+         * historical tool attacked do not exist here. There is no SecureROM,
+         * no LLB and no iBoot -- bootkernel jumps straight to the kernel -- no
+         * DFU or recovery mode, no usbmux, and no iTunes restore path. A
+         * jailbreak exists to obtain privileged code execution on hardware
+         * someone else controls. We write the boot args, we own the disk, and
+         * we place files in the volume before the kernel's first instruction.
+         * There is nothing left to escalate to.
+         *
+         * So the payload is INSTALLED, not injected: the same catalog
+         * provisioner --activate and --ppp use, given more entries.
+         *
+         * The entries point INTO the archive that payload_tar_open() mapped,
+         * so `jb_tar` has to outlive rootfs_work_create(). Both it and the
+         * merged array are file-static for that reason and are released after
+         * provisioning returns, not here.
+         */
+        if (cfg.v.jb_payload) {
+            if (!jailbreak_payload) {
+                fprintf(stderr, "jailbreak: --jb-payload needs "
+                                "--jailbreak-payload <tar>\n");
+                free(dt); s5l8900_free(&mach); ksyms_free(&KS); free(img);
+                return 1;
+            }
+            char jb_detail[256] = {0};
+            g_jb_tar = payload_tar_open(jailbreak_payload, NULL,
+                                        jb_detail, sizeof jb_detail);
+            if (!g_jb_tar) {
+                fprintf(stderr, "jailbreak: %s: %s\n",
+                        jailbreak_payload,
+                        jb_detail[0] ? jb_detail : "payload refused");
+                free(dt); s5l8900_free(&mach); ksyms_free(&KS); free(img);
+                return 1;
+            }
+            const rootfs_work_entry_t *pe = payload_tar_entries(g_jb_tar);
+            size_t pn = payload_tar_entry_count(g_jb_tar);
+            size_t have = options.entry_count;
+            /*
+             * Concatenated onto whatever --activate and --ppp already planned,
+             * exactly as --ppp concatenates onto --activate. An assignment
+             * here would silently drop them, and all three are on together in
+             * the app's default jailbreak configuration.
+             */
+            g_jb_entries = calloc(have + pn, sizeof *g_jb_entries);
+            if (!g_jb_entries) {
+                fprintf(stderr, "jailbreak: out of memory merging %zu "
+                                "provisioning entries\n", have + pn);
+                payload_tar_close(&g_jb_tar);
+                free(dt); s5l8900_free(&mach); ksyms_free(&KS); free(img);
+                return 1;
+            }
+            for (size_t i = 0; i < have; i++)
+                g_jb_entries[i] = options.entries[i];
+            for (size_t i = 0; i < pn; i++)
+                g_jb_entries[have + i] = pe[i];
+            options.entries = g_jb_entries;
+            options.entry_count = have + pn;
+
+            payload_tar_stats_t st;
+            payload_tar_get_stats(g_jb_tar, &st);
+            printf("jailbreak  : payload %s\n"
+                   "jailbreak  : %zu entries -- %zu files, %zu directories, "
+                   "%zu symlinks, %zu hardlinks materialised, %" PRIu64
+                   " content bytes\n"
+                   "jailbreak  : merged onto %zu existing entries -> %zu total\n",
+                   jailbreak_payload, pn, st.files, st.directories, st.symlinks,
+                   st.hardlinks_materialised, st.content_bytes,
+                   have, have + pn);
+        }
+
+        /*
          * A restore must reproduce the disk exactly as it stood at the
          * checkpoint, so it copies the sidecar image instead of re-deriving a
          * fresh volume from the immutable source. Re-provisioning would give a
@@ -25588,6 +25674,18 @@ int main(int argc, char **argv) {
         rootfs_work_status_t root_status =
             rootfs_work_create(external_md_source, external_md_work,
                                &options, &result);
+        /*
+         * Safe here and nowhere earlier: rootfs_work_create() has copied
+         * every byte it needed out of the archive, so the entries may stop
+         * pointing at valid memory now. options.entries is left dangling
+         * deliberately -- nothing reads it past this point, and clearing it
+         * would suggest the table is reusable when its storage is gone.
+         */
+        if (g_jb_tar) {
+            payload_tar_close(&g_jb_tar);
+            free(g_jb_entries);
+            g_jb_entries = NULL;
+        }
         if (root_status != ROOTFS_WORK_OK || !result.published ||
             !result.source_identity_verified) {
             fprintf(stderr,
