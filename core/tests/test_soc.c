@@ -2325,6 +2325,58 @@ static void test_clcd_status_never_defers_the_swap(void) {
  * the actual VIDTCON timing registers are 0x20c..0x218. Read-back is the
  * contract for both groups.
  */
+/*
+ * The per-frame event, and only that event.
+ *
+ * `updates` exists so instructions-per-frame can be measured -- nothing in
+ * this project has ever measured it, and every projected frame rate rests on
+ * it. A counter that over-counts would make frames look cheap and a dynarec
+ * look unnecessary, so what does NOT increment it matters as much as what
+ * does: CLCD_UPDATE is written with values other than 2, and the neighbouring
+ * CLCD_UPDATE2 is a different register entirely.
+ *
+ * It is also distinct from `frames`, which counts VBL boundaries this model
+ * manufactures. run76/83 measured 289 VBLANKs against 150 swaps.
+ */
+static void test_clcd_counts_only_real_window_updates(void) {
+    s5l_clcd_t c; s5l_clcd_reset(&c);
+    CHECK(c.updates == 0u, "a reset CLCD claims %llu updates",
+          (unsigned long long)c.updates);
+
+    s5l_clcd_write(&c, CLCD_UPDATE, 2u);
+    s5l_clcd_write(&c, CLCD_UPDATE, 2u);
+    CHECK(c.updates == 2u, "two update heads counted as %llu",
+          (unsigned long long)c.updates);
+
+    /* Not every store to the register is the head of an update. */
+    s5l_clcd_write(&c, CLCD_UPDATE, 0u);
+    s5l_clcd_write(&c, CLCD_UPDATE, 1u);
+    s5l_clcd_write(&c, CLCD_UPDATE, 3u);
+    CHECK(c.updates == 2u,
+          "a non-2 store to CLCD_UPDATE was counted as a frame (%llu)",
+          (unsigned long long)c.updates);
+
+    /* And CLCD_UPDATE2 is a different register, not a second head. */
+    s5l_clcd_write(&c, CLCD_UPDATE2, 2u);
+    CHECK(c.updates == 2u,
+          "CLCD_UPDATE2 was counted as a window update (%llu)",
+          (unsigned long long)c.updates);
+
+    /* The register still reads back whatever was last stored. */
+    CHECK(s5l_clcd_read(&c, CLCD_UPDATE) == 3u,
+          "CLCD_UPDATE read back %08x, not the 3 last written",
+          s5l_clcd_read(&c, CLCD_UPDATE));
+
+    /* VBL boundaries are a different thing and must not move it. */
+    const uint64_t before = c.updates;
+    c.scanning = true; c.ctrl = CLCD_CTRL_ENABLE; c.gate = 1u;
+    c.frame_ticks = 4u; c.frame_accum = 3u;
+    (void)s5l_clcd_tick(&c, 8u);
+    CHECK(c.updates == before,
+          "a VBL boundary incremented the guest update count (%llu -> %llu)",
+          (unsigned long long)before, (unsigned long long)c.updates);
+}
+
 static void test_clcd_saved_registers_read_back(void) {
     s5l_clcd_t c; s5l_clcd_reset(&c);
     static const uint32_t OFFS[] = {
@@ -2856,6 +2908,7 @@ int main(void) {
     test_clcd_line_is_gated_by_the_mask();
     test_clcd_status_never_defers_the_swap();
     test_clcd_saved_registers_read_back();
+    test_clcd_counts_only_real_window_updates();
     test_clcd_seed_is_visible_to_the_guest();
     test_clcd_seed_rejects_invalid_layouts_atomically();
     test_clcd_active_window_follows_the_drivers_order();
