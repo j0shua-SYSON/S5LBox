@@ -154,17 +154,22 @@ the *same* path fields, unflipped, with only an additive offset:
 buffer and **never stores it back into the path**, so the event that reaches
 SpringBoard carries the unflipped normalised Y.
 
-**NOT ESTABLISHED, and this is the open question:** which convention decides
-where UIKit puts the touch. If the consumer above IOHIDEvent applies its own
-`1 - y`, `flip=true` is right; if it uses the normalised value directly, every
-contact this project has ever injected is vertically mirrored and a drag aimed
-at the unlock knob lands near the status bar — which is indistinguishable, from
-the funnel counters alone, from the working case. run170 delivered 26 contacts
-to `__UIApplicationHandleEvent` with no visible effect, which is exactly what
-both hypotheses predict. Static reading cannot separate them, because the
-answer depends on which physical edge of the sensor is row zero, and in this
-emulator that is *our* choice rather than something to be read off Apple's
-code. The separating experiment is a mirrored drag (§6.17).
+**RESOLVED, and `flip=true` is correct.** This paragraph previously said the
+question was open and named a mirrored drag as the separating experiment. Both
+statements were wrong, and wrong for the same reason: they rested on "run170
+delivered 26 contacts with no visible effect", which was never a measurement.
+See §6.17. The slider tracks the finger — knob centre 57.5 → 80.5 → 156.5 as
+the contact advances — so the convention leaving MultitouchHID places touches
+exactly where this model intends them, and every value in this section was
+confirmed in the running guest:
+
+| | measured (r177/run174) | this model intends |
+|---|---|---|
+| Xmin / Xmax | `ffffffb5` / `00001230` = −75 / 4656 | −75 / 4656 |
+| Ymin / Ymax | `ffffffb5` / `00001c6b` = −75 / 7275 | −75 / 7275 |
+| clamped X | `2e9` = 745, advancing ~124/report | 745 → 3850 |
+| clamped Y | `345` = 837 | 837 |
+| `gScreenSize` | `43f00000` = 480.0f | 480 |
 
 `work/run96-base/snap-3.5e9.bin`, at the lock screen. The grid was located by
 searching for the two constant tables — they appear exactly once, 0x84 bytes
@@ -890,13 +895,103 @@ nothing is measured about pending output there.
 **Not claimed:** that this completes the bootload. run158 is the test, and the
 three predictions of that kind made before it were all wrong.
 
-## 7. Downstream, once this is unblocked
+### 6.17 THE PHONE UNLOCKS (r181, r182)
+
+**A slide-to-unlock gesture completes and the home screen appears.**
+`docs/images/r181-unlocked-home-screen.png`: the iPhone OS 3 home screen with
+the status bar, the first-run *Edit Home Screen* tip, and the dock — Phone,
+Mail, Safari, iPod.
+
+Reproduced twice with different gestures, so this is not a one-off:
+
+| run | gesture | reports | result |
+|---|---|---|---|
+| r181 | (57,431) → (305,431), 24 steps | 26/26, refused 0 | **unlocked**, 278,331 non-zero bytes |
+| r182 | (57,431) → (310,431), 48 steps | 50/50, refused 0 | **unlocked**, 213,073 (same screen, mid-fade) |
+
+Against the lock screen's 273,206, and 80.756% of pixels differ.
+
+**The only thing ever wrong with the gesture was its length.** Earlier drags
+stopped at x=265; the knob lags the contact by ~8 px, leaving it short of the
+threshold, so iOS sprang it home — correct behaviour, faithfully emulated,
+and indistinguishable in an after-the-fact screenshot from no touch at all.
+
+### 6.17.1 The failure that was not happening (run170-r180)
+
+**The slider was tracking the finger the whole time.** Measured at three points
+in one gesture, by locating the knob's bright column run over rows 410..453:
+
+| frame | finger x | knob columns | knob centre |
+|---|---|---|---|
+| run170, 5.5 G (after the lift) | — | 24..91 | 57.5 |
+| r180, 4.03 G (~5 reports in) | 88.6 | 47..114 | **80.5** |
+| r179, 4.09 G (~14 reports in) | 164.2 | 123..190 | **156.5** |
+
+Same 67-pixel width, translated, tracking the contact linearly with a constant
+~8 px grab offset. 4,245 pixels differ between r180 and run170 and every one of
+them lies in x 22..272, y 410..456 — the track and the fading "slide to unlock"
+text.
+
+**Why five runs were spent on a failure that did not exist, because the
+mechanism is worth more than the result.** Every screenshot compared before
+r180 was captured at 5.5 G, roughly four guest-seconds after the finger lifted
+at 4.165 G. A slide that does not cross the unlock threshold springs the knob
+back to its origin, so *a successful drag and no drag at all render the same
+frame*. The instrument could not detect the thing it was pointed at, and
+"identical to baseline" was read as "nothing happened" rather than as "this
+measurement is uninformative".
+
+Three claims in this document and in BOOTLOG were drawn from that non-evidence
+and are retracted: that the knob never moved; that the events therefore had to
+be landing somewhere else; and that a mirrored drag would separate the two Y
+conventions. run173's mirrored drag could not have separated anything — both of
+its candidate outcomes render an identical sprung-back frame.
+
+**The tell was already in run170 and was read backwards.** 26 of 26 contacts
+reached `__UIApplicationHandleEvent`. Six consecutive layers — bootload,
+interrogation, bounds, 16.000 ms pacing, Z amplitude 160, the touch flag — each
+came back correct, and each was read as "not here, look further up". The
+correct inference from a long run of passing layers is not that the fault is
+higher up; it is to ask whether the fault is real.
+
+**The rule this earns.** For anything animated or transient, capture DURING the
+event, not after it. `--drag` at 4.0 G with `-n 4.09e9` costs four minutes from
+the checkpoint (§6.18) and answers what six 76-minute runs could not. And treat
+"no difference from baseline" as a null result until the instrument has been
+shown capable of registering the change — a control that *should* differ.
+
+### 6.18 Replaying from a checkpoint
+
+`--snapshot-at 3900000000 work/snap/pre-drag.bin` from a cold boot, then
+`--restore` for each experiment. A restore must repeat the cold boot's `-d`,
+`-c` and `-R` and gets a fresh work image every time; `work/bin/replay.ps1`
+encodes both rules. Validated exactly: r177 (replay) and run174 (cold boot)
+produced identical register captures at identical instruction counts.
+
+**4.4 minutes instead of ~76.** Every finding in §6.17 depended on it.
+
+## 7. Downstream — and as of §6.17 it is no longer blocked
 
 * `mtz2.c` already answers 0xD1/0xD3/0xD9 with correct non-zero values, and as
   of commit `1c9c831` answers 0xD0 with a real descriptor whose `desc[0]` is
   non-zero — which suppresses the back-fill and makes the geometry independent
   of the property path.
-* `to_surface()` maps the panel onto `[-75, 4656]` and `[-75, 7275]`, the
-  bounds the guest derives from 10 columns and 15 rows.
+* `to_surface()` maps the panel onto `[-75, 4656]` and `[-75, 7275]`, and both
+  pairs were then read out of the running guest and matched exactly (§3.1).
+* **A single contact drives a real UIKit control**, confirmed by the knob
+  tracking it (§6.17). What that establishes is *tracking*; whether a slide
+  crosses the unlock threshold is a separate measurement.
+* **Multiple simultaneous contacts are built but unexercised.** The device
+  carries up to `MTZ2_CONTACT_MAX` and `s5l_mtz2_encode()` handles n of them
+  under distinct path identifiers, with unit coverage — but no run has yet put
+  two fingers down at once, so "multitouch works" is not a claim this document
+  makes.
 * **Sound is downstream of touch.** `core/src/soc/pl080.c` is modelled and
-  correct but idle: nothing asks the audio stack to play at a lock screen.
+  correct but idle: nothing asks the audio stack to play at a lock screen. The
+  drivers start (`AppleWM8991Audio::start`, both I2S controllers) and zero words
+  ever reach the TX FIFO.
+* **Internet is downstream of *something that originates traffic*, which may or
+  may not be touch.** The link is up (`IPCP Opened`, 10.0.2.15) with every NAT
+  counter zero, and the image carries no `ping`/`nc`/`curl`. run169 showed
+  MobileMail launching unattended, so an app may originate traffic without a
+  gesture; untested either way.

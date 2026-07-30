@@ -2365,6 +2365,76 @@ Not yet claimed: that a default route is *sufficient*. It gives the guest
 somewhere to send; whether any daemon then sends is a separate measurement, and
 mDNSResponder's multicast is not obviously something this NAT should carry.
 
+### 2026-07-30: r181/r182 -- THE PHONE UNLOCKS
+
+**A slide-to-unlock gesture completes and iPhone OS 3's home screen appears** --
+status bar, the first-run *Edit Home Screen* tip, and the dock with Phone, Mail,
+Safari and iPod. `docs/images/r181-unlocked-home-screen.png`.
+
+| run | gesture | reports | result |
+|---|---|---|---|
+| r181 | (57,431) -> (305,431), 24 steps | 26/26, refused 0 | **unlocked**, 278,331 non-zero |
+| r182 | (57,431) -> (310,431), 48 steps | 50/50, refused 0 | **unlocked**, 213,073 (same screen, mid-fade) |
+
+Against the lock screen's 273,206; 80.756% of pixels differ, whole-screen, and
+the slider band is replaced by four evenly spaced ~57 px icon blocks.
+
+**The only defect was the gesture's length.** Every earlier drag ended at
+x=265. The knob lags the contact by ~8 px, so it stopped short of the unlock
+threshold and iOS sprang it home -- correct behaviour, faithfully emulated, and
+identical in an after-the-fact screenshot to no touch at all. Driving the
+contact to x=305 crosses it.
+
+Both runs replayed from the 3.9 G checkpoint: ~8 minutes each including the
+post-gesture animation, against ~76 for a cold boot.
+
+### 2026-07-30: r179/r180 -- THE SLIDER WAS TRACKING ALL ALONG
+
+**Touch works.** The unlock knob follows the finger. Measured by locating its
+bright column run over rows 410..453, at three points in one gesture:
+
+| frame | finger x | knob columns | knob centre |
+|---|---|---|---|
+| run170, 5.5 G (after the lift) | — | 24..91 | 57.5 |
+| r180, 4.03 G (~5 reports in) | 88.6 | 47..114 | **80.5** |
+| r179, 4.09 G (~14 reports in) | 164.2 | 123..190 | **156.5** |
+
+Same 67-pixel width, translated linearly with the contact at a constant ~8 px
+grab offset. The 4,245 pixels that differ between r180 and run170 all lie in
+x 22..272, y 410..456: the track plus the fading "slide to unlock" text.
+
+**Five runs were spent on a failure that was not occurring, and the mechanism
+matters more than the count.** Every screenshot before r180 was captured at
+5.5 G -- about four guest-seconds after the finger lifted at 4.165 G. iOS
+springs the knob home when a slide does not cross the threshold, so a working
+drag and no drag at all produce the SAME FRAME. "Identical to baseline" was
+read as "nothing happened" when it actually meant "this instrument cannot see
+the thing it is aimed at".
+
+Retracted, all drawn from that non-evidence: that the knob never moved; that
+the contacts must therefore be landing elsewhere; and that run173's mirrored
+drag would separate the two Y conventions -- it could not, because both of its
+outcomes render the same sprung-back frame.
+
+**Everything those five runs measured came back correct**, which is exactly why
+the wrong conclusion survived: bounds `-75/4656/-75/7275` exact (r177, run174),
+clamped X 745 advancing ~124/report and Y 837 exact, report spacing 16.000 ms
+across all 25 intervals, Z amplitude `0xa0` = 160 arriving intact, the
+MultitouchHID touch flag set to 1 (r178), the drag starting inside the knob's
+measured box x 24..91 / y 410..453. Six passing layers in a row were each read
+as "not here, look higher". The correct inference from a long run of passing
+layers is to ask whether the fault is real -- run170's own 26-of-26 contacts at
+`__UIApplicationHandleEvent` had already said it was not.
+
+**Method, now standing:** for anything animated, capture DURING the event. Treat
+"no difference from baseline" as a null result until a control that *should*
+differ has shown the instrument can register a change.
+
+This was affordable only because of the 3.9 G checkpoint: 4.4 minutes per
+experiment against ~76 for a cold boot, and validated exactly -- r177 (replay)
+and run174 (cold boot) produced identical registers at identical instruction
+counts. See multitouch.md §6.17 and §6.18.
+
 ### 2026-07-30: run170 -- THE TOUCH FUNNEL IS OPEN, END TO END
 
 A 24-step `--drag` on the unlock slider, probed at every stage `run90` named:
