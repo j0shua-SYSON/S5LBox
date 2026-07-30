@@ -116,10 +116,21 @@
  * minimum" were both taken on workloads that never asked for a third surface,
  * and neither generalises to a machine somebody is touching.
  *
- * The cost is 614,400 bytes of guest DRAM per surface against 128 MB, so the
- * old caution was buying almost nothing. UNDER MEASUREMENT at sixteen (r194):
- * if the failures reach zero the minimum can be walked back down, and this
- * comment should record the number that did rather than the first one tried.
+ * SIXTEEN, and r194 is why. Cold boot, unlock, tap -- the exact sequence that
+ * lost the display at two and at four:
+ *
+ *      2 surfaces   19-20 failures   display lost
+ *      4 surfaces      14 failures   display lost
+ *     16 surfaces       0 failures   renders, 238,252 bytes non-zero
+ *
+ * Zero, not merely fewer. The cost is 614,400 bytes of guest DRAM per surface
+ * against 128 MB -- 9.8 MB at sixteen -- so the old caution was protecting
+ * almost nothing and cost the first interactive screen.
+ *
+ * NOT the measured minimum: sixteen is the first value tried that reached zero,
+ * and the true floor is somewhere in 5..16. Walking it down costs a cold boot
+ * per candidate and buys back a few MB of a 128 MB machine, which is why it has
+ * not been done. If DRAM ever gets tight, that is the experiment.
  */
 #define S5L_BRINGUP_VRAM_SURFACES  16u
 #define S5L_BRINGUP_VRAM_BYTES     (S5L_BRINGUP_FB_BYTES * S5L_BRINGUP_VRAM_SURFACES)
