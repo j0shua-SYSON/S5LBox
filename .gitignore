@@ -47,8 +47,11 @@ ios3vm_nand_*.img
 # Python wheels fetched to cross-check semantics (e.g. unicorn)
 *.whl
 
-# Scratch worktrees created inside the repo by isolated tooling
+# Local scratch directories that some editors and command-line tools create
+# inside a checkout. Listed only so they stay out of `git status`; nothing in
+# this project requires or assumes any of them.
 /.claude/worktrees/
+/.codex/
 
 # Editor / OS cruft
 .DS_Store
@@ -59,9 +62,6 @@ ios3vm_nand_*.img
 *.a
 *.exe
 compile_commands.json
-
-# Scratch tool config (codex CLI)
-/.codex/
 
 # Guest console tee, written into the CWD by -F runs (see the CONSOLE CAPTURE block)
 uart-console.log
