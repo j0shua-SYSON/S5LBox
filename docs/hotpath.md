@@ -914,3 +914,57 @@ one move this file's header forbids, and the reset bug is the argument for the
 rule rather than against it: the fix landed because a counter said which register
 and the driver's own code said which bit, and the previous guess -- a 2D command
 processor -- would have been weeks of work aimed at the wrong thing.
+
+
+## Two blockers found while trying to validate a replacement
+
+### The MBX2D surface words are KERNEL pointers
+
+r253 followed the surface descriptors the context points at and every word read
+back as unreadable:
+
+    hle-trace   src@c54bca00 +00=?? +04=?? ... +1c=??
+    hle-trace   dst@c54bc980 +00=?? +04=?? ... +1c=??
+
+That is not a bug in the tracer. hle_mem_read goes through
+guest_read_user_bytes, which translates UNPRIVILEGED and through the MMU on
+purpose (contract item 4), and 0xc54bca00 is above 0xc0000000 -- kernel space.
+So the first word of each surface is a kernel object address that the compositing
+process cannot itself dereference, which also rules out the reading that it is a
+pixel base the library walks.
+
+The consequence for a native blit is concrete: the pixel base is not reachable
+from the arguments plus the context alone. Either the descriptor has to be read
+with kernel privilege -- a deliberate widening of what an HLE site may touch, and
+not one to make casually -- or the base has to come from somewhere else entirely,
+such as the IOSurface the kext already knows about. Until that is settled,
+mbx2DCtxBlitCopy stays TRACE.
+
+### A restored window does not exercise the rasteriser
+
+Four framebuffer-diff attempts over restored windows (r249, r254, r255, r256)
+all reported
+
+    armed to: NOTHING -- no registered site was ever reached in user mode
+
+and the report is right to phrase it that way, because the naive reading of the
+accompanying "RESULT: IDENTICAL" is that the replacement is pixel-exact. It is
+not: with nothing armed, both arms of the diff run identical code, so identical
+output is guaranteed and means nothing. The same trap sits one level down --
+r240's screen dump was blank (384 of 460,800 bytes non-zero), and a blank
+compares equal to a blank.
+
+What the windows actually contained, measured rather than assumed:
+
+  * 5.8e9..6.0e9 and 5.8e9..6.4e9 -- keygen. The report says "no SWI ever
+    executed", which is exactly what a bignum loop looks like.
+  * 5.8e9..6.75e9 with drags at 6.45e9 and 6.6e9 -- 893 SWIs, so user processes
+    ARE running, and still no site reached. Nothing composites in that window.
+
+So a rasteriser diff needs a window in which SpringBoard demonstrably redraws,
+and "there is a picture on screen" does not establish that -- a restored
+framebuffer shows the snapshot's pixels whether or not anything has rendered
+since. The snapshot at 5.8e9 is good (312,474 of 460,800 bytes non-zero, the
+same figure r187 produced), and the harness works; what is missing is a window
+with rendering in it, and that has to be found by instrumenting when the sites
+are hit rather than by choosing a plausible-looking range.
