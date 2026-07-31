@@ -866,3 +866,51 @@ the guest is, and it is easy to read a story into that. 44% on three PCs was
 read as "resetting repeatedly because work never finishes" when it meant "stuck
 in one wait". The instrument that could tell those apart was a counter, and it
 cost about forty lines.
+
+
+## Where MBX2D stands after the reset fix (r246)
+
+The reset fix works, and the size of the change is the evidence:
+
+    r242 (before)   328,111,117 reads,  46 writes   -- 328,111,110 of them on 0x1020
+    r246 (after)             37 reads,  99 writes
+
+The spin is gone and the driver goes much further. It now programs eight buffer
+addresses rather than one repeated value (0x0d981000, 0x0d7c0000, 0x0d8ff000 ...
+where before every slot held 0x09676000), submits work three times, and reaches
+registers it had never touched: 0x830, 0x834, 0x1024, 0x1028. It attaches, powers
+up, adds AppleH1CLCD and AppleH1TVOut as swap devices, and the boot proceeds to
+launching applications.
+
+IT STILL DOES NOT WORK, and it now says why in its own words:
+
+    AppleMBXDevice: Graphics Recovery Event
+    Free slots=100, IntStatus=00000000
+    2DIdle=0, 3DIdle=1, 3dblit=0, TAStatus=0
+    CompletedIntStatus=00000000
+
+ONE recovery event, not a loop, and no SpringBoard after it. 3D reports idle and
+2D does not, so the driver concludes the 2D core is wedged. This is the "work
+submitted never completes" state that r240 was wrongly said to be in -- it is
+real now, and it was not real then.
+
+WHAT THE NEXT ANSWER IS CONSTRAINED BY, which is the useful part. The histogram
+says only THREE offsets are ever read in the entire run: 0x012c (13), 0x1020
+(23), 0xf00 (1). Whatever supplies 2DIdle is a bit in one of those, and nowhere
+else. Two further facts are read out of the driver rather than guessed:
+
+  * 0xc078306c polls 0x1020 and does `tst r0, #0x1000000` -- BIT 24 is a busy
+    flag, spun on while SET with a 50-try budget. The model returns it clear, so
+    that particular wait already passes.
+  * 0xc077f388..0xc077f428 WRITES single bits to 0x012c (0x400, 0x10, 0x8, 0x4,
+    0x40) through a helper that is a plain store (`str r2,[r1,r3]`), not a
+    read-modify-write. The model currently serves reads of 0x012c out of its own
+    status word and drops those writes entirely, so whatever they mean is not
+    modelled.
+
+That last point is the most likely place for the next gate and it is deliberately
+NOT acted on here. Setting a bit because it would make a driver proceed is the
+one move this file's header forbids, and the reset bug is the argument for the
+rule rather than against it: the fix landed because a counter said which register
+and the driver's own code said which bit, and the previous guess -- a 2D command
+processor -- would have been weeks of work aimed at the wrong thing.
