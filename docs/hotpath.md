@@ -116,6 +116,8 @@ reason.
 | Thumb decoder is slower | refuted | Thumb is 1.46x *faster* on the same loop |
 | CoreGraphics leaf HLE is the fps lever | refuted | run168: `CGBlt_fillBytes` 43 times across 75 composites |
 | device tick is free | **false, still standing** | 16.8% (14.18 -> 11.80 with tick on) |
+| the tick's cost is `ext_inputs()` | refuted | early-out ratio 0.804 with, 0.802 without |
+| UTM SE reaches 60 fps without a JIT | **false premise** | it is the SLOW edition; TCTI trades speed for App Store legality |
 
 ## The framing error underneath all of it
 
@@ -503,3 +505,68 @@ correction came from a measurement rather than from re-reading the previous
 argument, and none of them was acted on in code. That is the only reason the
 cost of being wrong four times was four analyses instead of four runs plus a
 fix built on the wrong one.
+
+## The instruction RATE is a second lever, and it was never examined (2026-07-31)
+
+`fps = rate / instructions_per_frame`. Everything above attacks the
+denominator. The numerator has its own headroom, and insnbench measures it:
+
+| configuration | M insn/s |
+|---|---|
+| ARM alu/branch, mmu off, no tick | 16.92 |
+| **Thumb** alu/branch, mmu off, no tick | **27.54** |
+| load/store, tick OFF | 17.34 |
+| load/store, tick ON | 13.95 |
+| load/store, mmu off -> pages-4K | 17.34 -> 16.90 |
+
+Three readings, in order of size:
+
+**ARM interpretation is 1.63x slower than Thumb** on comparable loops. Thumb
+decodes through `switch (insn >> 12)`; ARM walks a linear masked-`if` chain in
+which data processing -- the most common class there is -- is the LAST arm,
+about 25 comparisons deep, while LDR/STR exits at 6. Note this does NOT
+contradict "decode scatter is free": scatter-freedom says WHICH instruction
+you decode does not matter, and this says the ARM path as a whole is dearer.
+ARM also pays for conditional execution and barrel-shifted operands on every
+instruction, so the gap is not all decode.
+
+**The device tick costs 20%**, and its early-out is already good -- it
+short-circuits 68 of every 69 calls. What remains is the cost of reaching it.
+
+**The MMU costs 2.5%**, so the TLB is working. The insnbench legend claiming
+"there is no TLB" is stale: a full ARMv6 walk per fetch and per access could
+not possibly cost 2.5%.
+
+### What the tick's 20% is NOT
+
+`ext_inputs()` -- three loads, two shifts and a compare per instruction --
+looked like the obvious suspect, and removing it from the early-out is safe in
+principle: the full path already runs whenever `tb_accum >= cpu_hz`, i.e. every
+69 instructions, so dropping the term can only DELAY host input by <69
+instructions (~2.8 us) and can never lose it.
+
+It buys nothing. Measured by the ratio, which is robust to the machine noise
+that moved both rows: 13.95/17.34 = 0.804 before, 13.42/16.73 = 0.802 after.
+The change was reverted rather than kept, because a behaviour change that
+cannot be measured is a liability with no asset against it. The remaining
+suspect is the 64-bit multiply-accumulate `tb_accum += ticks * tb_hz`, which
+runs per instruction and cannot be constant-folded because `ticks` is a
+parameter.
+
+### On UTM SE, since it comes up
+
+UTM SE does not reach 60 fps and is not evidence that a fast no-JIT emulator is
+easy. SE is the SLOW edition: it uses QEMU's TCTI threaded interpreter
+specifically to be legal on the App Store, and UTM's own framing is that this
+"results in a rather slow experience even by the standards of the emulated
+hardware". Fast UTM on iOS needs JIT; fast UTM on Apple Silicon uses
+Virtualization.framework, which is same-architecture hardware virtualisation
+and not emulation at all.
+
+The TECHNIQUE, though, is the right one and is not yet used here. TCG
+translates a basic block ONCE into an IR and caches it, then interprets the
+cached ops. No code is generated, nothing is mapped PROT_EXEC, and there is
+nothing for iOS to refuse -- the same property that makes `ios3_hle.c` legal.
+Against a decoder that re-decodes every instruction every time, that is
+precisely the ARM-vs-Thumb gap above, and it is the most promising route to
+the ~1.7x still missing after the two frame-cost fixes.
