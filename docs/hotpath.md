@@ -438,3 +438,34 @@ reuses one candidate buffer and mutates its contents, so the pointer would
 repeat either way. Distinguishing "restarts from scratch each wake-up" from
 "resumes and is preempted" needs the candidate VALUE at r0, not its address.
 That is the next measurement, and it should come before any fix is attempted.
+
+### The leading hypothesis: the prime search has no entropy
+
+Two facts found while checking why a periodic search never converges:
+
+* **Nothing in the SoC models a randomness source.** `grep -rn "random|entropy|RNG"`
+  across `core/src/soc/*.c` and `core/src/*.c` returns three hits, all of them
+  unrelated -- a comment about virtual-address entropy in `mmu.c`, and two file
+  banners for the block and byte-source backends. There is no RNG device.
+* **The guest re-initialises its PRNG constantly.** `_prngInitialize` carries
+  17,865 samples, 0.2% of a whole run. A PRNG seeded once does not appear in a
+  profile at all.
+
+That fits every observation together: a candidate generator with no entropy
+returns the SAME number each time, that number is composite, `_isGiantPrime`
+rejects it, and the search re-enters on its timer forever. It explains the
+non-convergence after 801 tests, the fixed candidate buffer, the identical
+`sp`, and the metronome period, without needing any of them to be coincidence.
+
+WHY THIS IS THE RIGHT KIND OF FIX. `tools/ios3_hle.c` draws the line: "It is
+not a way around a bug in a device model. If something is SLOW, it is a
+candidate; if something is BROKEN, the model gets fixed." Missing entropy is a
+model gap, so the answer is to model the source, not to high-level-emulate the
+primality test -- and HLE'ing `_isGiantPrime` would have made a non-terminating
+search reject candidates faster, which is the 2026-07-30 lesson again.
+
+IT IS STILL A HYPOTHESIS. Three of its cousins were wrong today. The decisive
+measurement is unchanged: read the candidate VALUE at r0 across two separate
+bursts. Identical values across bursts confirms it; progressing values refute
+it and send the search back to being genuinely slow. That measurement comes
+before any entropy source is written.
