@@ -402,3 +402,39 @@ a polygon means. But `sw_sample_nearest_BGRA8` is entered FEWER times than
 these functions rather than between them. That matters for REPLACE: the leaf
 to replace is a span sampler, not a pixel sampler, and its cost per call is
 therefore large and variable rather than small and fixed.
+
+### It is periodic, not a search making progress (r216 timings)
+
+The 801 `_isGiantPrime` calls are not evenly spread. Sorted gaps between
+consecutive tests:
+
+| | instructions |
+|---|---|
+| min | 940,766 |
+| median | 1,027,056 |
+| max | 479,318,931 |
+
+Tests cluster ~1.0 M apart -- one primality test -- in BURSTS, and the bursts
+are separated by a gap that recurs at **~20.9 M instructions with under 1%
+variance**, over and over for billions of instructions. That regularity is the
+finding. A CPU-bound prime search does not pause on a metronome; a timer does.
+At the device's 25 M insn/s, 20.9 M is about 0.84 s -- a once-a-second wake-up.
+
+Every one of the 801 calls is entered with **`sp` = 0x002ff42c**, identical
+across 6.2e9 instructions, so it is the same call path at the same depth every
+time, and `r1` is 16 on all of them.
+
+WHAT THIS RETIRES. "Key generation that terminates, and should be snapshotted
+past rather than fixed" was recorded here earlier as the likely reading of
+r216's entry-point counts. The timings refute it. 801 candidate tests is
+already more than a 512-bit prime search should need -- the density of primes
+near 2^512 gives roughly one in 355 odd candidates -- so a search that has
+tested 801 and not finished is not converging. Nothing waits this out, and
+there is no key to persist because none is ever produced.
+
+WHAT IS STILL NOT ESTABLISHED. Why the periodic task re-enters. A constant
+`r0` is NOT evidence of a restart on its own: a prime search legitimately
+reuses one candidate buffer and mutates its contents, so the pointer would
+repeat either way. Distinguishing "restarts from scratch each wake-up" from
+"resumes and is preempted" needs the candidate VALUE at r0, not its address.
+That is the next measurement, and it should come before any fix is attempted.
