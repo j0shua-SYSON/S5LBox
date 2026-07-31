@@ -627,6 +627,23 @@ static const NSUInteger kConsoleScrollback = 12000;
            @"memory back while leaving its disk where it is now.";
 }
 
+- (NSString *)snapshotListTakeUnavailableReason:(VMSnapshotListViewController *)list {
+    (void)list;
+    /*
+     * Saving is blocked on the same missing piece as opening, and the reason
+     * is worth stating plainly rather than hiding behind "not available":
+     * writing only the CPU and RAM would produce a file that RESTORES wrong
+     * later, which is a worse outcome than refusing now. Whether the machine
+     * is running has nothing to do with it, and this used to say it did.
+     */
+    return @"Saving is not available yet — this is about the app, not about "
+           @"your machine, which is running fine. A saved state also has to "
+           @"record the host side of the disk bridge, and that part is still "
+           @"being built. Writing the file without it would give you a "
+           @"snapshot that restores into a machine whose disk disagrees with "
+           @"its memory, so it refuses instead of saving something broken.";
+}
+
 #pragma mark - Layout
 
 /*

@@ -286,8 +286,15 @@ didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
 - (void)takeSnapshot {
     if (![self.delegate respondsToSelector:
              @selector(snapshotList:takeSnapshotWithProgress:completion:)]) {
+        /* Ask the delegate why. Guessing here is what produced a running
+         * machine being told it was not running. */
+        NSString *why = nil;
+        if ([self.delegate respondsToSelector:
+                 @selector(snapshotListTakeUnavailableReason:)])
+            why = [self.delegate snapshotListTakeUnavailableReason:self];
         [self report:@"Not available"
-             message:@"This machine is not running, so there is nothing to save."];
+             message:why.length ? why
+                                : @"Saving is not wired up in this build."];
         return;
     }
     [self setBusy:YES stage:@"Saving the machine"];

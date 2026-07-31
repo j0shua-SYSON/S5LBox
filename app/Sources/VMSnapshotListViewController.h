@@ -57,6 +57,19 @@
  */
 - (NSString *)snapshotListOpenUnavailableReason:(VMSnapshotListViewController *)list;
 
+/*
+ * The same question for taking, and it exists because the answer that was
+ * inferred here was WRONG. This class used to decide for itself: if the
+ * delegate did not implement the take selector it reported "This machine is
+ * not running, so there is nothing to save." That tests whether a METHOD
+ * EXISTS and then announces a fact about the MACHINE, which are unrelated --
+ * so a perfectly healthy running machine was told it was stopped, and the one
+ * person who could act on the real reason was told a fiction instead.
+ *
+ * A view controller cannot know why saving is unavailable. The delegate can.
+ */
+- (NSString *)snapshotListTakeUnavailableReason:(VMSnapshotListViewController *)list;
+
 @end
 
 @interface VMSnapshotListViewController : UITableViewController
