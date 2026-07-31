@@ -76,6 +76,12 @@ uint32_t s5l_mbx_read(s5l_mbx_t *m, uint32_t off) {
         return m->reset_done ? (v | S5L_MBX_RESET_DONE) : v;
     }
     if (off == S5L_MBX_STATUS) return m->status;
+    /*
+     * Identity, and it is read-only: the guest never writes here, so serving
+     * it out of the register file would return the zero that made
+     * AppleMBXDevice::start reject this device as unrecognised silicon.
+     */
+    if (off == S5L_MBX_REVISION) return S5L_MBX_REVISION_ID;
     return m->reg[off / 4u];
 }
 

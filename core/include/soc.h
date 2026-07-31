@@ -785,6 +785,37 @@ void     s5l_power_write(s5l_power_t *p, uint32_t off, uint32_t val);
 /* The last register of the kick sequence, so writing it is the "go". */
 #define S5L_MBX_KICK         0x000006d8u
 
+/*
+ * THE CORE REVISION REGISTER, and the reason AppleMBXDevice::start gave up
+ * even after both handshakes were modelled. From AppleMBX+0x8eb8:
+ *
+ *     ldr r3, [r5, #0xd8]      ; the register base
+ *     ldr r3, [r3, #0xf00]     ; read offset 0xf00
+ *     lsr r4, r3, #0x18
+ *     cmp r4, #1               ; byte 3 must be 0x01
+ *     bne fail
+ *     and r3, r3, #0xff0000
+ *     cmp r3, #0x20000         ; byte 2 must be 0x02
+ *     bne fail                 ; -> cleanup, start() returns false
+ *
+ * So the driver identifies its silicon and declines anything it does not
+ * recognise. Reporting zero is what made it decline, silently -- there is no
+ * console message on that path, which is why the failure looked like a
+ * mystery teardown rather than a rejection.
+ *
+ * The value is therefore constrained by the driver's own test and by nothing
+ * else: bits 31-24 = 0x01, bits 23-16 = 0x02. The low half is unconstrained
+ * by anything observed, so it is zero rather than invented -- if some later
+ * code reads a minor revision out of it, that will surface as a NEW failure
+ * at a new site, which is the same discipline the rest of this block follows.
+ *
+ * This is a statement of identity, not of behaviour: the device tree already
+ * declares `compatible = "mbx,s5l8900x"`, and this is the register through
+ * which that same claim is made to the driver.
+ */
+#define S5L_MBX_REVISION     0x00000f00u
+#define S5L_MBX_REVISION_ID  0x01020000u
+
 typedef struct {
     uint32_t reg[S5L_MBX_SIZE / 4u];
     uint32_t status;          /* 0x12c; write-one-to-clear via 0x134        */
