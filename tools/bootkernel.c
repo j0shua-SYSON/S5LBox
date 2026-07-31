@@ -6344,6 +6344,12 @@ static struct {
          * for as long as that process lives. */
         uint32_t pid;
         bool     pid_valid;
+        /* The BSD proc for that pid, kept so the report can go looking for
+         * p_comm. Stored rather than re-derived: by report time the guest is
+         * stopped and the thread that owned this space may be long gone, but
+         * the proc pointer captured at first sight still names the right
+         * structure. */
+        uint32_t proc;
     } as_hist[16];
 
 
@@ -16837,6 +16843,49 @@ static void lifecycle_note_kernel_entry(arm_cpu_t *cpu, uint64_t at,
  * splitting its entries per-process would scatter each kernel symbol across as
  * many buckets as there are running tasks.
  */
+/*
+ * Search a BSD proc for something shaped like p_comm and report where it was
+ * found. Bounded, read-only, and fail-quiet: a proc that yields nothing simply
+ * has no name printed.
+ *
+ * "Shaped like" is deliberately strict. A process name is short, starts with a
+ * letter, holds only printable non-space characters, and is NUL-terminated
+ * within MAXCOMLEN+1. Loose rules would match the first pointer that happened
+ * to look like text and produce a confident wrong answer, which is worse than
+ * no answer for the one question this exists to settle.
+ */
+static bool proc_name_scan(arm_cpu_t *cpu, uint32_t proc,
+                           char *out, size_t capacity, uint32_t *found_offset) {
+    if (!cpu || !proc || !out || capacity < 18u) return false;
+    for (uint32_t off = 0; off <= 0x400u; off += 4u) {
+        char name[17];
+        size_t n = 0;
+        bool terminated = false, bad = false;
+        for (uint32_t w = 0; w < 5u && !terminated && !bad; w++) {
+            uint32_t word = 0, fva = 0, ffsr = 0;
+            if (!springboard_child_read_field(cpu, proc, off + w * 4u,
+                                              &word, &fva, &ffsr)) { bad = true; break; }
+            for (unsigned b = 0; b < 4u; b++) {
+                unsigned char ch = (unsigned char)((word >> (b * 8u)) & 0xffu);
+                if (ch == 0u) { terminated = true; break; }
+                if (ch < 0x21u || ch > 0x7eu) { bad = true; break; }
+                if (n >= sizeof name - 1u) { bad = true; break; }
+                name[n++] = (char)ch;
+            }
+        }
+        if (bad || !terminated || n < 2u) continue;
+        /* A name starts with a letter; a pointer that happens to be printable
+         * usually does not. */
+        if (!((name[0] >= 'a' && name[0] <= 'z') ||
+              (name[0] >= 'A' && name[0] <= 'Z'))) continue;
+        name[n] = '\0';
+        memcpy(out, name, n + 1u);
+        if (found_offset) *found_offset = off;
+        return true;
+    }
+    return false;
+}
+
 static void pc_sample(uint32_t va, diagnostic_pc_space_t space, uint32_t as) {
     va &= ~1u;
     uint32_t h = va * 2654435761u ^
@@ -16925,6 +16974,8 @@ static void prof_sample(const arm_cpu_t *cpu, uint32_t pc) {
                     G.as_hist[G.as_n].pid =
                         who.effective_valid ? who.effective_pid : who.task_pid;
                     G.as_hist[G.as_n].pid_valid = true;
+                    G.as_hist[G.as_n].proc =
+                        who.effective_valid ? who.effective_proc : who.task_proc;
                 }
                 G.as_n++;
             } else {
@@ -28272,6 +28323,22 @@ external_md_work_ready:
      * whether a candidate HLE target is on the frame's critical path or belongs
      * to some other process that happened to run in the same window.
      */
+    /*
+     * Look for p_comm inside a BSD proc, by shape rather than by a hardcoded
+     * offset.
+     *
+     * The offset is not derivable from a symbol the way thread/task/proc/pid
+     * were: those came out of accessor code that this build already
+     * byte-matches, and there is no equivalent accessor whose disassembly
+     * spells out p_comm. Guessing a number from a kernel that merely resembles
+     * this one is exactly the failure mode this project refuses elsewhere.
+     *
+     * So the offset is not asserted at all -- it is REPORTED. Each proc is
+     * scanned for a short NUL-terminated printable name, and the offset that
+     * produced it is printed beside it. Two unrelated processes agreeing on an
+     * offset is the corroboration; two disagreeing says plainly that the scan
+     * found something else, which is far better than a confident wrong name.
+     */
     printf("\n=== USER SAMPLES BY ADDRESS SPACE (TTBR0 base) ===\n");
     {
         uint64_t total = 0;
@@ -28287,11 +28354,19 @@ external_md_work_ready:
             for (unsigned i = 0; i < G.as_n; i++)
                 if (G.as_hist[i].hits > best) { best = G.as_hist[i].hits; bi = i; }
             if (bi == G.as_n || !best) break;
-            if (G.as_hist[bi].pid_valid)
+            if (G.as_hist[bi].pid_valid) {
+                char name[24];
+                uint32_t at = 0;
+                bool named = proc_name_scan(&mach.cpu, G.as_hist[bi].proc,
+                                            name, sizeof name, &at);
                 printf("    %5.1f%%  ttbr0 0x%08x  pid %-5u %" PRIu64
-                       " samples\n",
+                       " samples",
                        total ? 100.0 * (double)best / (double)total : 0.0,
                        G.as_hist[bi].base, G.as_hist[bi].pid, best);
+                if (named)
+                    printf("  \"%s\" (proc+0x%x)", name, at);
+                printf("\n");
+            }
             else
                 printf("    %5.1f%%  ttbr0 0x%08x  pid ?     %" PRIu64
                        " samples  (identity unavailable when first seen)\n",
