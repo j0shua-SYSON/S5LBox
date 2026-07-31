@@ -216,6 +216,38 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
  *
  * False if the path does not fit; the previous setting is then unchanged.
  */
+/*
+ * The RAW media descriptor, bypassing any overlay.
+ *
+ * Replay writes historical contents back over the image. Routing that through
+ * the overlay would record every block it restores as if the guest had just
+ * changed it -- the restore would append its own undo to the snapshot it is
+ * restoring from.
+ */
+const vm_block_t *vm_firmware_boot_media(const vm_firmware_boot_t *boot);
+
+/*
+ * Point recording at a different overlay: after taking a snapshot, so writes
+ * accrue to the new one, and after restoring, so they accrue to the one just
+ * restored. Closes the current adapter first -- two over one file would each
+ * keep a private bitmap, and the second would append a newer, wrong copy of a
+ * block the first already held, which replay applies last.
+ *
+ * NULL or "" disarms.
+ */
+bool vm_firmware_boot_rearm_overlay(vm_firmware_boot_t *boot,
+                                    const char *overlay_path,
+                                    char *detail, size_t capacity);
+
+/* Overlay then image, in that order. See VMSnapshotCow.h.
+ *
+ * These report bool rather than the overlay layer's own status: this header
+ * is included BY VMSnapshotStore.h, which VMSnapshotCow.h includes in turn,
+ * so naming that type here is a cycle. It is also the wrong layering -- the
+ * boot object reports whether IT succeeded, and puts the underlying reason
+ * in `detail`. */
+bool vm_firmware_boot_flush_overlay(vm_firmware_boot_t *boot);
+
 bool vm_firmware_boot_arm_overlay(vm_firmware_boot_t *boot,
                                   const char *overlay_path);
 

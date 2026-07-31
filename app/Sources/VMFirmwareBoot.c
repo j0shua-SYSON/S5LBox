@@ -236,6 +236,42 @@ bool vm_firmware_boot_arm_overlay(vm_firmware_boot_t *boot,
     return true;
 }
 
+const vm_block_t *vm_firmware_boot_media(const vm_firmware_boot_t *boot) {
+    if (!boot || !boot->media) return NULL;
+    /* The RAW descriptor, deliberately: replay writes historical contents back
+     * over the image, and routing that through the overlay would record the
+     * blocks it is restoring as if the guest had just changed them. */
+    return file_block_get(boot->media);
+}
+
+bool vm_firmware_boot_rearm_overlay(vm_firmware_boot_t *boot,
+                                    const char *overlay_path,
+                                    char *detail, size_t capacity) {
+    if (!boot || !boot->media) return false;
+    /* Close first. Two adapters over one file would each hold a private
+     * bitmap, and the second would re-save blocks the first already had --
+     * appending a newer, wrong copy that replay would apply last. */
+    if (boot->cow) (void)vm_cow_close(&boot->cow);
+    if (!overlay_path || !*overlay_path) {
+        boot->overlay[0] = '\0';
+        boot->overlay_armed = false;
+        return true;
+    }
+    if (!vm_firmware_boot_arm_overlay(boot, overlay_path)) return false;
+    vm_cow_status_t st = vm_cow_open(&boot->cow, file_block_get(boot->media),
+                                     boot->overlay, detail, capacity);
+    if (st != VM_COW_OK && detail && capacity && !detail[0])
+        (void)snprintf(detail, capacity, "%s", vm_cow_status_text(st));
+    return st == VM_COW_OK;
+}
+
+bool vm_firmware_boot_flush_overlay(vm_firmware_boot_t *boot) {
+    if (!boot) return false;
+    if (!boot->cow)
+        return file_block_flush(boot->media) == FILE_BLOCK_STATUS_OK;
+    return vm_cow_flush(boot->cow) == VM_COW_OK;
+}
+
 void vm_firmware_boot_destroy(vm_firmware_boot_t **slot) {
     if (!slot || !*slot) return;
     vm_firmware_boot_t *boot = *slot;
