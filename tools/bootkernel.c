@@ -3098,10 +3098,49 @@ static bool hle_mem_read(void *ctx, uint32_t va, void *dst, uint32_t len) {
                                  (size_t)len, NULL, NULL);
 }
 
+/*
+ * The write half, and it is deliberately the mirror of guest_read_user_bytes
+ * rather than a memcpy: UNPRIVILEGED, through the MMU, one page at a time.
+ *
+ * Contract item 4 is the reason. A pixel buffer is a user virtual address and
+ * is NOT guaranteed physically contiguous, so a host memcpy across a buffer
+ * that spans two non-adjacent frames would corrupt whatever follows the first.
+ * Translating every byte is slower than it needs to be and is correct, which
+ * is the right order to do those in.
+ *
+ * ANY refusal returns false rather than writing part of the range, because a
+ * partial write is the one outcome that is worse than declining: the handler
+ * would report failure while the guest's buffer already held half a result.
+ * A caller that gets false must decline the whole call and let the guest run
+ * its own code, which is contract item 5.
+ */
 static bool hle_mem_write(void *ctx, uint32_t va, const void *src,
                           uint32_t len) {
-    (void)ctx; (void)va; (void)src; (void)len;
-    return false;
+    arm_cpu_t *cpu = (arm_cpu_t *)ctx;
+    const uint8_t *bytes = (const uint8_t *)src;
+
+    if (!cpu || !bytes || !len || !g_mach || !g_mach->ram || !va) return false;
+    if ((uint64_t)va + len - 1u > UINT32_MAX) return false;
+
+    /*
+     * Translate the WHOLE range before storing a single byte. Checking as we
+     * go would leave a prefix written when a later page faults, which is the
+     * partial write this refuses to produce.
+     */
+    for (uint32_t i = 0; i < len; i++) {
+        uint32_t pa = 0;
+        if (arm_mmu_translate(cpu, va + i, ARM_ACCESS_WRITE, false, &pa))
+            return false;
+        if (pa < g_mach->ram_base ||
+            (uint64_t)pa - g_mach->ram_base >= g_mach->ram_size)
+            return false;
+    }
+    for (uint32_t i = 0; i < len; i++) {
+        uint32_t pa = 0;
+        (void)arm_mmu_translate(cpu, va + i, ARM_ACCESS_WRITE, false, &pa);
+        g_mach->ram[pa - g_mach->ram_base] = bytes[i];
+    }
+    return true;
 }
 
 /*
