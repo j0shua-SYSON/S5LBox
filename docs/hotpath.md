@@ -243,7 +243,7 @@ That is a hypothesis. It has not been measured, and the measurement is to name
 the two address spaces above — which is what the pid column in the address-space
 table is for.
 
-## The largest consumer of a frame is a daemon in a spin (2026-07-31)
+## The largest consumer of a frame is a daemon doing endless RSA (2026-07-31)
 
 `lockdownd`.
 
@@ -258,16 +258,74 @@ Measured in r213 (address-space split) and named in r214. Within its 51.9%,
 which is modular exponentiation, which is RSA. It renders nothing and serves
 nothing; no host is attached over USB.
 
-**A daemon doing only RSA, forever, is spinning.** So the single largest
-consumer of the frame budget is a bug rather than work, and removing it is
-worth ~2x on frame rate for no rendering effort at all:
+So the single largest consumer of the frame budget renders nothing, and
+removing it would be worth ~2x on frame rate for no rendering effort at all:
 
 | step | per frame | fps |
 |---|---|---|
 | today | 16.7 M | 1.5 |
-| stop the spin | 8.0 M | 3.1 |
+| stop the RSA | 8.0 M | 3.1 |
 | + rasteriser HLE | ~1.1 M | ~22 |
 | + MBX2D geometry | | 30 plausible |
+
+### "Spinning" was the wrong word, and the call chain says why (r215)
+
+An earlier revision of this file said "a daemon doing only RSA, forever, is
+spinning". Half of that survived contact with the call chain and half did not.
+
+**Survived: it does not stop.** `--call-probe` on `_mulg_common` captured
+**141,377** entries. The last 4096 of them span instruction 5,550,086,584 to
+5,599,995,809 -- the final instruction of a run capped at 5.6e9. It is 82
+captures per million instructions over that closing window against 25 per
+million averaged across the whole run, so the rate at the end is ~3x the
+run-long average and still climbing. Nothing about it converges.
+
+**Did not survive: that the code is a busy-wait.** The three call sites that
+actually executed resolve to a chain of correct, efficient arithmetic:
+
+```
+_mulg_common  <- _modg_via_recip (0x3145b54c, 0x3145b568)   Barrett reduction
+              <- _rmulg          (0x3145b618)               multiply-then-reduce
+_rmulg        <- _powermodg      (0x3145be6c)               modular exponentiation
+```
+
+The two equal-count sites inside `_modg_via_recip` are the two multiplies of
+one Barrett reduction -- `q = floor(x*recip)`, then `q*n`. That is textbook
+bignum code doing real work. The waste is not inside the arithmetic; it is
+that something above keeps asking for more of it.
+
+`_powermodg` has exactly six static callers:
+
+| caller | what a call means |
+|---|---|
+| `_isGiantPrime` | primality testing, i.e. **key generation** |
+| `_DH_GenParameters`, `_DH_GenKeyPair`, `_DH_ComputeKey` | Diffie-Hellman |
+| `_RSA_Encrypt`, `_RSA_SigVerify` | public-key ops, small exponent |
+
+`_RSA_Decrypt` and `_RSA_Sign` are **not** among them, so whatever this is, it
+is not a private-key operation. That matters for the remedy: sustained
+~1024-bit exponentiation reaching `_isGiantPrime` would be key generation,
+which is one-time and **terminates**, and the fix is to let it finish once and
+persist the result. Reaching `_RSA_SigVerify` repeatedly would be a rejected
+credential being retried, and the fix is upstream in activation. The two have
+nothing in common except the arithmetic they burn.
+
+Which one it is, and whether it ever ends, is r216: all six entry points probed
+in one run, extended to 8e9 so termination is observable rather than assumed.
+
+### How the upward walk was done without six more runs
+
+`tools/dscxref.py`. Walking a call chain with `--call-probe` costs one ~35-minute
+run per level and only ever sees the callers a particular boot exercised. A BL
+is in the image whether or not it ran, so the static answer is cheaper and more
+complete -- at the price of not knowing which sites are live.
+
+It was validated against ground truth before being trusted: r215 measured
+`_mulg_common`'s callers as returning to `0x3145b550`, `0x3145b56c` and
+`0x3145b61c`, and the static scan independently found call sites at
+`0x3145b54c`, `0x3145b568` and `0x3145b618` -- each exactly 4 bytes earlier,
+which is a BL and its return address. It also found 11 sites this boot never
+took, which is the expected difference and not a discrepancy.
 
 ### How the process names were trusted
 
@@ -281,23 +339,30 @@ that was measured before the name was known.
 
 ### What is NOT established
 
-Why it spins. `lockdownd` owns activation, pairing and device services, and RSA
-is what it does for activation records and pairing handshakes. This project
+Why it does it. `lockdownd` owns activation, pairing and device services, and
+RSA is what it does for activation records and pairing handshakes. This project
 provisions activation OFFLINE -- `ActivationState = FactoryActivated` and
 `BrickState = false` written straight into `data_ark.plist`, with no Apple
 record applied and none verified -- so "it rejects that record and retries
 forever" is the obvious guess.
 
-It is a guess. Three of its cousins were wrong today (`defaultroute`,
+It is still a guess, and the call chain has since made it a less likely one:
+the six functions that can reach `_powermodg` do not include a private-key
+operation, and half of them are key or parameter GENERATION, which terminates
+on its own. Three cousins of this guess were wrong today (`defaultroute`,
 `usepeerdns`, `resolv.conf`), each costing a ~35-minute run, and each time the
-cheap diagnostic that would have settled it came second. The measurement that
-settles this one is which call site re-enters the giants code and whether it is
-reached from the activation path or the pairing path.
+cheap diagnostic that would have settled it came second. So it is not being
+acted on: r216 probes all six entry points at once and runs long enough for
+termination to be observed rather than inferred.
+
+Whether it terminates decides which fix is even the right shape. A generation
+that completes is not a bug and must not be "fixed" -- it is a one-time cost to
+be paid once and snapshotted past, which is what the snapshot work is for.
 
 ### Corrections this supersedes
 
-"Crypto is an HLE target" was wrong twice. HLE of a spin loop makes the
-spinning faster; had it been built first it would have shipped a ~1.5x that
-masked a 2x bug. Hashing and RSA were also never one answer: `_SHA1Init` is
+"Crypto is an HLE target" was wrong twice. Making a loop faster is not the same
+as stopping a loop that should not be running at all; had the HLE been built
+first it would have shipped a ~1.5x that masked a 2x bug. Hashing and RSA were also never one answer: `_SHA1Init` is
 17.8% of a whole run and 3.1% inside a frame, so page hashing is a boot cost,
 while the giants go the other way.
