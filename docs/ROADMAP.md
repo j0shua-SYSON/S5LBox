@@ -1767,3 +1767,49 @@ De-risk the GPU question → ARMv7s + NEON in the interpreter (pure and
 CI-testable) → S5L8950X SoC → boot. Not before M5 renders and takes a tap: a
 finished first target is what makes the second tractable rather than miserable,
 and every tool it produced is reused directly.
+
+## Frame rate, as measured on 2026-07-31
+
+Every number here is measured, not projected, except where marked.
+
+| stage | insns/frame | fps @ 25 M insn/s |
+|---|---|---|
+| as reported from the device | 16.7 M | 1.5 |
+| keygen paid once (r219; key pair on disk) | 8.1 M | 3.1 |
+| + interpreter fixes (r231: 2.56x on rendering) | -- | **~7.9** |
+| + rasteriser removed (not yet possible) | ~1.4 M | ~18 |
+| 30 fps | 833 k | -- |
+
+**~5x is banked**: keygen self-repairs after one ~4.2-minute session and the
+interpreter work is committed and green.
+
+### The two problems left, and there are only two
+
+THE RASTERISER, 83% of the post-keygen frame. Two routes, both projects:
+
+* MBX2D. The kext now ATTACHES -- four gates modelled from the driver's own
+  code -- but it does not work: with it enabled the driver cycles reset
+  forever, because submitted work never completes. Needs a 2D command
+  processor. Native C, but a project.
+* Rasteriser HLE. Sites armed and counted (sw_scanline 84,983 hits). Needs
+  pixel-exact native replacements and a framebuffer diff.
+
+THE RESIDUAL, and this is why even a perfect rasteriser fix lands near 18 and
+not 30. After lockdownd and the rasteriser, r214's page census is DIFFUSE:
+1.2%, 0.4%, 0.4%, 0.3%, 0.3%, 0.2% ... across hundreds of pages. There is no
+third concentrated site to attack. Closing the last ~1.7x therefore means
+making the interpreter broadly faster rather than removing any one thing --
+and the one broad idea with evidence behind it is the TCTI-shaped decoded
+block cache, since ARM still measures 0.87 of Thumb after two hoists and real
+code has 51,752 distinct PCs in a single frame window.
+
+### What NOT to re-derive
+
+* The profile counts INSTRUCTIONS, not time. Windows matter: r223 measured the
+  interpreter fixes against keygen and found nothing; r231 measured them
+  against rendering and found 2.56x.
+* Snapshots make a frame experiment cost ~90 s instead of ~25 min. Capture one
+  BEFORE any change to machine state -- adding MBX state bumped
+  SNAPSHOT_VERSION twice and invalidated every existing snapshot.
+* The MBX driver's whole lifecycle is done by ~239 M instructions, so MBX runs
+  need -n 300000000, not 1.2e9.
