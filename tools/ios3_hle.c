@@ -184,6 +184,97 @@ static const uint32_t PROLOGUE_OGL_POLY_SCAN[] = {
     0xe24ddfb9u,   /* sub   sp, sp, #0x2e4         */
 };
 
+/*
+ * The native sw_sample_nearest_BGRA8, transcribed from the decode above.
+ *
+ * ATTACHED BUT NOT ARMED. The site below stays IOS3_HLE_OBSERVE, so
+ * ios3_hle_step never calls this: contract item 6 requires a framebuffer diff
+ * against the same run with the site disarmed BEFORE a replacement may draw,
+ * and that diff has not been run. Shipping the code and arming it are two
+ * decisions, and this is only the first.
+ *
+ * Every guest access goes through mem->read / mem->write, which translate one
+ * page at a time, unprivileged. Any refusal returns false for the WHOLE call
+ * so the guest runs its own code -- contract item 5. Declining is always safe;
+ * a half-written span is not.
+ */
+static bool read_u32(const ios3_hle_mem_t *mem, uint32_t va, uint32_t *out) {
+    return mem->read(mem->ctx, va, out, 4u);
+}
+
+static bool read_f32(const ios3_hle_mem_t *mem, uint32_t va, float *out) {
+    uint32_t bits;
+    if (!mem->read(mem->ctx, va, &bits, 4u)) return false;
+    memcpy(out, &bits, sizeof bits);
+    return true;
+}
+
+static bool hle_sw_sample_nearest_bgra8(arm_cpu_t *cpu,
+                                        const ios3_hle_mem_t *mem) {
+    uint32_t tex = cpu->r[0], unit = cpu->r[1], start = cpu->r[3];
+    uint32_t sp = cpu->r[13];
+    uint32_t delta = 0, count = 0, out = 0;
+    uint32_t base = 0, pitch = 0;
+    uint32_t max_x = 0, max_y = 0;
+    float w = 0.0f, dw = 0.0f;
+    float su = 0.0f, sv = 0.0f, du_f = 0.0f, dv_f = 0.0f;
+    int32_t u, v, du, dv;
+
+    if (!mem || !mem->read || !mem->write) return false;
+
+    /* AAPCS: args 5-9 are at the entry sp, which is where this fires. */
+    if (!read_u32(mem, sp + 0x00u, &delta) ||
+        !read_u32(mem, sp + 0x0cu, &count) ||
+        !read_u32(mem, sp + 0x10u, &out))
+        return false;
+
+    if (!read_u32(mem, tex + 0x00u, &base)  ||
+        !read_u32(mem, tex + 0x04u, &pitch) ||
+        !read_u32(mem, tex + 0x08u, &max_x) ||
+        !read_u32(mem, tex + 0x0cu, &max_y))
+        return false;
+
+    if (!read_f32(mem, start + 0x0cu, &w)  ||
+        !read_f32(mem, delta + 0x0cu, &dw) ||
+        !read_f32(mem, start + 0x20u + unit * 8u,        &su) ||
+        !read_f32(mem, start + 0x20u + unit * 8u + 4u,   &sv) ||
+        !read_f32(mem, delta + 0x20u + unit * 8u,        &du_f) ||
+        !read_f32(mem, delta + 0x20u + unit * 8u + 4u,   &dv_f))
+        return false;
+
+    u  = (int32_t)(su   * 65536.0f);
+    v  = (int32_t)(sv   * 65536.0f);
+    du = (int32_t)(du_f * 65536.0f);
+    dv = (int32_t)(dv_f * 65536.0f);
+
+    for (uint32_t k = 0; k < count; k++) {
+        float inv = 1.0f / w;
+        int32_t x = (int32_t)((float)u * inv);
+        int32_t y = (int32_t)((float)v * inv);
+        uint32_t texel = 0, addr;
+
+        /* `bic rd, rn, rn asr #31` is "zero if negative", not abs(). */
+        if (x < 0) x = 0;
+        if (y < 0) y = 0;
+        /* movge, so these saturate AT the limit rather than one below it. */
+        if ((uint32_t)y >= max_y) y = (int32_t)max_y;
+        if ((uint32_t)x >= max_x) x = (int32_t)max_x;
+
+        addr = base + pitch * (uint32_t)(y >> 16) +
+               (((uint32_t)(x >> 16)) << 2);
+        if (!read_u32(mem, addr, &texel)) return false;
+        if (!mem->write(mem->ctx, out + k * 4u, &texel, 4u)) return false;
+
+        u += du; v += dv; w += dw;
+    }
+
+    /* Returned to LR without executing the body, which is what makes the
+     * caller skip the instruction. r0-r3 are caller-saved and the guest's
+     * own routine returns nothing, so nothing else needs restoring. */
+    cpu->r[15] = cpu->r[14];
+    return true;
+}
+
 static ios3_hle_site_t g_sites[] = {
     { "CGBlt_fillBytes",    0x338f61b0u, PROLOGUE_CGBLT_FILLBYTES,
       (unsigned)(sizeof PROLOGUE_CGBLT_FILLBYTES /
@@ -197,7 +288,7 @@ static ios3_hle_site_t g_sites[] = {
       PROLOGUE_SW_SAMPLE_NEAREST_BGRA8,
       (unsigned)(sizeof PROLOGUE_SW_SAMPLE_NEAREST_BGRA8 /
                  sizeof PROLOGUE_SW_SAMPLE_NEAREST_BGRA8[0]),
-      NULL, IOS3_HLE_OBSERVE, false, false, 0, 0, 0, 0 },
+      hle_sw_sample_nearest_bgra8, IOS3_HLE_OBSERVE, false, false, 0, 0, 0, 0 },
     { "sw_scanline",        0x3122d180u, PROLOGUE_SW_SCANLINE,
       (unsigned)(sizeof PROLOGUE_SW_SCANLINE /
                  sizeof PROLOGUE_SW_SCANLINE[0]),
