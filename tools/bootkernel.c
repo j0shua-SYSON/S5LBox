@@ -23644,67 +23644,6 @@ static void mode_report(uint64_t win_lo, uint64_t win_hi) {
         printf("    NO USER-MODE INSTRUCTION IN THE WINDOW — whatever is\n"
                "    spinning or sleeping, it is inside the kernel.\n");
 
-    /*
-     * The same samples, bucketed by 4 KB page, printed BEFORE the per-PC list
-     * because it answers a question the per-PC list actively misleads on.
-     *
-     * A hot function spreads its samples across every instruction it contains.
-     * r208's top sixty-four exact PCs summed to 55% of a swipe window and the
-     * remaining 45% looked "diffuse over 11,625 PCs" -- but the hottest PC in
-     * CA::OGL::sw_scanline sits about 2,956 bytes into that one function, so a
-     * single routine can occupy hundreds of rows and never appear concentrated.
-     * Ranking exact PCs measures how UNROLLED the hot code is as much as where
-     * the time goes.
-     *
-     * Pages are the cheapest grouping that fixes it: no symbol table, no shared
-     * cache, no guesswork about where a function starts. Whether high-level
-     * emulation can pay for itself is entirely a question of concentration, and
-     * this is the view that shows it honestly.
-     */
-    {
-        struct { uint32_t page; uint64_t hits; } pages[512];
-        unsigned pn = 0;
-        uint64_t total = 0, spilled = 0;
-        for (unsigned i = 0; i < UPCHASH; i++) {
-            if (!G.upc_hist[i].hits) continue;
-            total += G.upc_hist[i].hits;
-            uint32_t pg = G.upc_hist[i].va >> 12;
-            unsigned j = 0;
-            while (j < pn && pages[j].page != pg) j++;
-            if (j == pn) {
-                if (pn == (unsigned)(sizeof pages / sizeof pages[0])) {
-                    spilled += G.upc_hist[i].hits;
-                    continue;
-                }
-                pages[pn].page = pg;
-                pages[pn].hits = 0;
-                pn++;
-            }
-            pages[j].hits += G.upc_hist[i].hits;
-        }
-        printf("\n=== HOTTEST USER-MODE 4K PAGES (same samples, grouped) ===\n");
-        printf("    %" PRIu64 " user samples over %u page(s)%s\n", total, pn,
-               spilled ? " -- TABLE FULL, list is incomplete" : "");
-        if (spilled)
-            printf("    WARNING: %" PRIu64 " samples fell outside the %u "
-                   "tracked pages\n", spilled,
-                   (unsigned)(sizeof pages / sizeof pages[0]));
-        uint64_t running = 0;
-        for (unsigned rank = 0; rank < 24u && rank < pn; rank++) {
-            uint64_t best = 0; unsigned bi = pn;
-            for (unsigned i = 0; i < pn; i++)
-                if (pages[i].hits > best) { best = pages[i].hits; bi = i; }
-            if (bi == pn || !best) break;
-            running += best;
-            printf("    %5.1f%%  0x%08x..0x%08x  %" PRIu64 " samples"
-                   "  (cumulative %.1f%%)\n",
-                   total ? 100.0 * (double)best / (double)total : 0.0,
-                   pages[bi].page << 12, (pages[bi].page << 12) + 0xfffu, best,
-                   total ? 100.0 * (double)running / (double)total : 0.0);
-            pages[bi].hits = 0;   /* consume */
-        }
-    }
-
     printf("\n=== HOTTEST USER-MODE PCs (every user instruction sampled) ===\n");
     if (!G.upc_n) { printf("    (none)\n"); return; }
     printf("    %u distinct user PCs%s\n", G.upc_n,
@@ -28339,6 +28278,75 @@ external_md_work_ready:
                        total ? 100.0 * (double)best / (double)total : 0.0,
                        G.as_hist[bi].base, best);
             G.as_hist[bi].hits = 0;   /* consume */
+        }
+    }
+
+    /*
+     * User samples bucketed by 4 KB page, printed BEFORE the per-PC list
+     * because it answers a question the per-PC list actively misleads on.
+     *
+     * A hot function spreads its samples across every instruction it contains.
+     * r208's top sixty-four exact PCs summed to 55% of a swipe window and the
+     * remaining 45% read as "diffuse over 11,625 PCs" -- but the hottest PC in
+     * CA::OGL::sw_scanline sits about 2,956 bytes into that ONE function, so a
+     * single routine can occupy hundreds of rows and never look concentrated.
+     * Ranking exact PCs measures how UNROLLED the hot code is at least as much
+     * as where the time goes, and whether high-level emulation can pay for
+     * itself is purely a question of concentration.
+     *
+     * Built from pc_hist rather than upc_hist, and that is not a detail: it is
+     * the correction to the first attempt. upc_sample() lives inside
+     * `if (!fast_hot)`, so --fast switches it off entirely -- and every profile
+     * run uses --fast, because without it a run is three times slower. The
+     * first version of this view was therefore empty in exactly the runs it
+     * existed to serve, and reported "0 user samples" beside an address-space
+     * table holding 187,624 of them. pc_hist is sampled every 1024
+     * instructions regardless of --fast and carries the space tag needed to
+     * keep kernel PCs out.
+     */
+    printf("\n=== HOTTEST USER-MODE 4K PAGES (same samples, grouped) ===\n");
+    {
+        struct { uint32_t page; uint64_t hits; } pages[512];
+        unsigned pn = 0;
+        uint64_t total = 0, spilled = 0;
+        for (unsigned i = 0; i < PCHASH; i++) {
+            if (!G.pc_hist[i].hits) continue;
+            if (G.pc_hist[i].space != DIAGNOSTIC_PC_USER) continue;
+            total += G.pc_hist[i].hits;
+            uint32_t pg = G.pc_hist[i].va >> 12;
+            unsigned j = 0;
+            while (j < pn && pages[j].page != pg) j++;
+            if (j == pn) {
+                if (pn == (unsigned)(sizeof pages / sizeof pages[0])) {
+                    spilled += G.pc_hist[i].hits;
+                    continue;
+                }
+                pages[pn].page = pg;
+                pages[pn].hits = 0;
+                pn++;
+            }
+            pages[j].hits += G.pc_hist[i].hits;
+        }
+        printf("    %" PRIu64 " user samples over %u page(s)%s\n", total, pn,
+               spilled ? "  -- TABLE FULL, list is incomplete" : "");
+        if (spilled)
+            printf("    WARNING: %" PRIu64 " samples fell outside the %u "
+                   "tracked pages\n", spilled,
+                   (unsigned)(sizeof pages / sizeof pages[0]));
+        uint64_t running = 0;
+        for (unsigned rank = 0; rank < 24u && rank < pn; rank++) {
+            uint64_t best = 0;
+            unsigned bi = pn;
+            for (unsigned i = 0; i < pn; i++)
+                if (pages[i].hits > best) { best = pages[i].hits; bi = i; }
+            if (bi == pn || !best) break;
+            running += best;
+            printf("    %5.1f%%  0x%08x..0x%08x  %" PRIu64 " samples"
+                   "  (cumulative %.1f%%)\n",
+                   total ? 100.0 * (double)best / (double)total : 0.0,
+                   pages[bi].page << 12, (pages[bi].page << 12) + 0xfffu, best,
+                   total ? 100.0 * (double)running / (double)total : 0.0);
+            pages[bi].hits = 0;   /* consume */
         }
     }
 
