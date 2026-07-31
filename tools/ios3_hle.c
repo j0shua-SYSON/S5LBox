@@ -444,9 +444,25 @@ static bool trace_args(const char *what, arm_cpu_t *cpu,
  * stride is a small multiple of the width, and a format is one of two constants.
  */
 static void trace_ctx(const ios3_hle_mem_t *mem, uint32_t ctx) {
+    /*
+     * +0x20 IS THE BLEND EQUATION, NOT AN ADDRESS. The first reading of r248
+     * took 0x090ff000 for a framebuffer base because it looks like one and sits
+     * in the guest's DRAM range. mbx2DCtxSetBlendEquation says otherwise: it
+     * stores `dst_factor | src_factor | (alpha << 12)` there, so the 0xff000 is
+     * an alpha of 0xff shifted up and the rest are factor bits. It also sets
+     * +0x34 to 1 for the one factor pair it treats as simple, and
+     * copyDispatchEVT2 branches on +0x34 and +0x35.
+     *
+     * That distinction decides whether a native replacement is allowed to be a
+     * copy at all: a blit carrying a real alpha blend is not a memcpy, and
+     * replacing it with one would put opaque pixels where translucency belongs.
+     * So the blend words are dumped alongside the surfaces, and the complex
+     * form at +0x24..+0x30 with them.
+     */
     static const unsigned off[] = { 0x00, 0x04, 0x08, 0x0c, 0x10, 0x14, 0x18,
-                                    0x1c, 0x20, 0x38, 0x3c, 0x40, 0x44, 0x4c,
-                                    0x50, 0x5c, 0x60 };
+                                    0x1c, 0x20, 0x24, 0x28, 0x2c, 0x30, 0x34,
+                                    0x38, 0x3c, 0x40, 0x44, 0x4c, 0x50, 0x54,
+                                    0x5c, 0x60 };
     unsigned i;
 
     fprintf(stderr, "hle-trace   ctx=%08x", ctx);
