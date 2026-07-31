@@ -291,13 +291,13 @@ didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
         return;
     }
     [self setBusy:YES stage:@"Saving the machine"];
-    __weak typeof(self) weakSelf = self;
+    __weak VMSnapshotListViewController *weakSelf = self;
     [self.delegate snapshotList:self
        takeSnapshotWithProgress:^(double fraction, NSString *stage) {
            [weakSelf updateProgress:fraction stage:stage];
        }
                      completion:^(BOOL ok, NSString *message) {
-           typeof(self) strongSelf = weakSelf;
+           VMSnapshotListViewController *strongSelf = weakSelf;
            if (!strongSelf) return;
            [strongSelf setBusy:NO stage:nil];
            if (!ok) [strongSelf report:@"Could not save" message:message];
@@ -312,14 +312,14 @@ didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
         return;
     }
     [self setBusy:YES stage:@"Restoring the machine"];
-    __weak typeof(self) weakSelf = self;
+    __weak VMSnapshotListViewController *weakSelf = self;
     [self.delegate snapshotList:self
                  openSnapshotId:snapshotId
                        progress:^(double fraction, NSString *stage) {
            [weakSelf updateProgress:fraction stage:stage];
        }
                      completion:^(BOOL ok, NSString *message) {
-           typeof(self) strongSelf = weakSelf;
+           VMSnapshotListViewController *strongSelf = weakSelf;
            if (!strongSelf) return;
            [strongSelf setBusy:NO stage:nil];
            if (!ok) { [strongSelf report:@"Could not open" message:message]; return; }
