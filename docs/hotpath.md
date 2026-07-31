@@ -778,3 +778,48 @@ The alternative route to the same 83% is the rasteriser HLE, whose sites are
 already armed and counted (sw_scanline 84,983 hits), and which needs
 pixel-exact native replacements rather than a command processor. Neither is
 cheap. Both are bounded, and this file now says which is which.
+
+
+## The memoised decode cache, measured and rejected
+
+The hoisted data-processing arm in `arm_interp.c` carries a note asking for a
+follow-up: "the rest of the chain is still linear, and the principled fix is to
+dispatch on bits 27-25 the way the Thumb decoder dispatches on insn>>12". That
+follow-up was built and measured, and it is SLOWER. It is written down here so
+it is not built a second time.
+
+WHAT WAS BUILT. Which arm of the decode chain an instruction leaves by is a pure
+function of the instruction word: it reads no register, no mode and no memory,
+and `arm_cond_passed()` has already run before the chain starts. So the answer
+can be memoised. An 8192-entry direct-mapped table keyed on the full instruction
+word held the arm that ran, each arm recording itself so the cached answer could
+not drift from a second copy of the decode logic. Entries were a single 64-bit
+word -- tag in the low half, arm in the high half -- so a racing writer could
+never pair one instruction's tag with another's arm. On a hit, a switch
+dispatched straight to the handler; on a miss, the chain ran unchanged. 54/54
+tests passed, so this is a performance result and not a correctness one.
+
+WHAT IT MEASURED, base and cached binaries built from the same tree and run
+INTERLEAVED so host drift could not be read as a difference:
+
+    loop           base            cached     
+    mixed x10      13.70 / 14.29   11.09       -20%
+    load/store     13.38 / 14.49   10.31       -26%
+    ldm/stm x4      6.61 /  6.52    6.15        -6%
+    vfp mul/add    10.53 /  9.89   10.67        noise
+    alu/branch     17.24 / 17.12   17.00        noise
+
+WHY IT LOSES, which is the part worth keeping. The DP hoist already paid down
+the depth that made depth expensive. What remains for the hot classes is one to
+six comparisons of DIRECT, correctly-predicted branches -- the branch predictor
+learns a loop's decode path exactly. The cache replaces that with a multiply, a
+load from a 64 KB table, a compare and an INDIRECT switch. The indirect jump
+mispredicts where the chain did not, and the table evicts live data from L1. So
+the trade is a handful of free branches for one expensive one plus cache
+pressure, and it loses on every loop that leaves the chain early.
+
+The earlier result in this file still stands and is not in tension with this:
+"scatter is free, depth is not". Both remain true. What this adds is the third
+term -- depth is only worth removing while it is DEEP, and after the hoist it no
+longer is. There is no further win available from restructuring the ARM decode
+dispatch, and the residual 1.7x will have to come from somewhere else.
