@@ -28,6 +28,7 @@ add_library(emucore STATIC
     src/soc/uart.c
     src/soc/vic.c
     src/soc/timer.c
+    src/soc/mbx.c
     src/soc/power.c
     src/soc/clcd.c
     src/soc/tvout.c

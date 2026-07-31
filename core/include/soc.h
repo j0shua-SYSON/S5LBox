@@ -738,6 +738,40 @@ void     s5l_power_reset(s5l_power_t *p);
 uint32_t s5l_power_read(s5l_power_t *p, uint32_t off);
 void     s5l_power_write(s5l_power_t *p, uint32_t off, uint32_t val);
 
+/* ------------------------------------------------------ PowerVR MBX block ---
+ *
+ * /arm-io/mbx, which this VM un-matched by default because
+ * com.apple.driver.AppleMBX starts, requests a reset, and then spins forever
+ * waiting for an acknowledgement no register could give it. r226 counted the
+ * spin exactly: 82,521,473 reads of one offset, against a single write of 1.
+ *
+ * It matters for frame rate because QuartzCore's MBXServer DEFAULTS to the
+ * MBX2D hardware path and only falls back to compositing every pixel on the
+ * CPU -- 40.2% of a swipe's instructions -- when this kext failed to give it
+ * an IOKit connection.
+ *
+ * TWO PAGES, and both are real: r226 saw traffic on 0x3b000000 (offsets 0x080,
+ * 0x12c, 0x134) and on 0x3b001000 (0x000-0x01c taking DRAM addresses, and
+ * 0x020 taking the reset). One window covers both.
+ */
+#define S5L8900_MBX_BASE     0x3b000000u
+#define S5L_MBX_SIZE         0x00002000u   /* the two pages r226 observed */
+/* Offset of the reset register within the block, i.e. 0x3b001020. Read out of
+ * the driver's own literal pool at 0xc078348c, and independently confirmed by
+ * r226 finding the spin at page 0x3b001000 offset 0x020. */
+#define S5L_MBX_RESET        0x00001020u
+/* The bit AppleMBX+0xb478 tests with `tst r0, #0x10000`, looping while clear. */
+#define S5L_MBX_RESET_DONE   (1u << 16)
+
+typedef struct {
+    uint32_t reg[S5L_MBX_SIZE / 4u];
+    bool     reset_done;      /* set by a reset REQUEST, never self-asserted */
+} s5l_mbx_t;
+
+void     s5l_mbx_reset(s5l_mbx_t *m);
+uint32_t s5l_mbx_read(s5l_mbx_t *m, uint32_t off);
+void     s5l_mbx_write(s5l_mbx_t *m, uint32_t off, uint32_t val);
+
 /* --------------------------------------------- GPIO interrupt controller ---
  * The upper part of the 0x39a00000 page: AppleS5L8900XGPIOIC, a seven-group
  * cascade in front of both VICs. See core/src/soc/gpioic.c for the model.
@@ -3317,6 +3351,7 @@ typedef struct {
     s5l_vic_t   vic[S5L8900_VIC_COUNT];
     s5l_timer_t timer;
     s5l_power_t power;
+    s5l_mbx_t   mbx;
     s5l_clcd_t  clcd;
     s5l_tvout_t tvout;
     s5l_i2c_t   i2c[S5L8900_I2C_COUNT];

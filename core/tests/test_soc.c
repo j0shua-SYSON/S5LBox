@@ -1149,22 +1149,26 @@ static void test_stub_window_stores_and_counts(void) {
     s5l8900_t m;
     CHECK(s5l8900_init(&m, 0, 1u << 20), "machine init failed");
 
-    CHECK(s5l8900_add_stub(&m, 0x3b000000u, 0x1000u, "unknown-3b0"),
+    /* 0x3b000000 used to be the address here, chosen because nothing
+     * modelled it. The PowerVR MBX block does now, and add_stub
+     * correctly refuses to shadow a device window, so this moved to an
+     * address that is still unclaimed -- above every S5L8900_*_BASE. */
+    CHECK(s5l8900_add_stub(&m, 0x3f800000u, 0x1000u, "unknown-3f8"),
           "declaring a stub window should succeed");
     /* The machine declares its own stubs at init, so this one is not index 0.
      * Look it up by name rather than by position — an index that silently
      * points at the wrong window would make every assertion below vacuous. */
     s5l_stub_t *mine = NULL;
     for (unsigned i = 0; i < m.stub_count; i++)
-        if (!strcmp(m.stubs[i].name, "unknown-3b0")) mine = &m.stubs[i];
+        if (!strcmp(m.stubs[i].name, "unknown-3f8")) mine = &m.stubs[i];
     CHECK(mine != NULL, "the stub just declared should be in the table");
     if (!mine) { s5l8900_free(&m); return; }
 
     /* Reads return what was written, not zero. */
-    m.bus.write32(m.bus.ctx, 0x3b000010u, 0xa5a5a5a5u);
-    CHECK(m.bus.read32(m.bus.ctx, 0x3b000010u) == 0xa5a5a5a5u,
+    m.bus.write32(m.bus.ctx, 0x3f800010u, 0xa5a5a5a5u);
+    CHECK(m.bus.read32(m.bus.ctx, 0x3f800010u) == 0xa5a5a5a5u,
           "stub read=%08x expect the value written",
-          m.bus.read32(m.bus.ctx, 0x3b000010u));
+          m.bus.read32(m.bus.ctx, 0x3f800010u));
 
     /* Stubbed traffic must not be counted as unmapped — it is accounted to the
      * window so it shows up by name in the report. */
@@ -1181,15 +1185,15 @@ static void test_stub_window_stores_and_counts(void) {
      * 0x404 (CLOCK0 ADJ2) — so both were counted but not stored, and the stub
      * silently failed to be honest storage for exactly the registers that
      * mattered. */
-    m.bus.write32(m.bus.ctx, 0x3b000320u, 0x0006070fu);
-    CHECK(m.bus.read32(m.bus.ctx, 0x3b000320u) == 0x0006070fu,
+    m.bus.write32(m.bus.ctx, 0x3f800320u, 0x0006070fu);
+    CHECK(m.bus.read32(m.bus.ctx, 0x3f800320u) == 0x0006070fu,
           "off 0x320 read=%08x expect the value written (whole window backed)",
-          m.bus.read32(m.bus.ctx, 0x3b000320u));
+          m.bus.read32(m.bus.ctx, 0x3f800320u));
     CHECK(mine->oob == 0, "an in-window access must not count as oob");
 
     /* Past the declared window is a different matter: still counted, not
      * stored, so the shortfall stays visible instead of being pretended away. */
-    (void)m.bus.read32(m.bus.ctx, 0x3b000000u + 0x1000u - 4u);
+    (void)m.bus.read32(m.bus.ctx, 0x3f800000u + 0x1000u - 4u);
     CHECK(mine->oob == 0, "the final in-window word must still be backed");
 
     /* Overlap must be refused: silently shadowing a modelled device would be
@@ -2079,9 +2083,11 @@ static void test_tvout_machine_routing_and_irq30(void) {
      * stopped being stubs, from 15 to 17 when the two halves of /arm-io/gpio
      * did, from 17 to 18 when uart4 became the guest's PPP line, from 18 to 20
      * when the two I2S controllers landed with the WM8991 codec, and from 20 to
-     * 22 with the two PL080 DMA controllers that feed those I2S FIFOs. */
-    CHECK(nw == m.stub_count + 22u,
-          "fixed device-window count=%u expect 22 (+%u stubs)",
+     * 22 with the two PL080 DMA controllers that feed those I2S FIFOs,
+     * and from 22 to 23 when the PowerVR MBX block was modelled so its
+     * kext could get past its reset handshake. */
+    CHECK(nw == m.stub_count + 23u,
+          "fixed device-window count=%u expect 23 (+%u stubs)",
           nw - m.stub_count, m.stub_count);
     bool have_ctrl = false, have_mixer = false, have_sdo = false;
     for (unsigned i = 0; i < nw && i < S5L_WINDOW_MAX; i++) {

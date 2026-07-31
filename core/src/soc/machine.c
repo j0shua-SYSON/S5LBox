@@ -30,6 +30,7 @@ static const s5l_window_t DEVICE_WINDOWS[] = {
     { S5L8900_TVOUT_CTRL_BASE,  S5L_TVOUT_BANK_SIZE, "tvout-control" },
     { S5L8900_TVOUT_MIXER_BASE, S5L_TVOUT_BANK_SIZE, "tvout-mixer"   },
     { S5L8900_TVOUT_SDO_BASE,   S5L_TVOUT_BANK_SIZE, "tvout-sdo"     },
+    { S5L8900_MBX_BASE,   S5L_MBX_SIZE,       "mbx"   },
     { S5L8900_I2C0_BASE,  S5L8900_DEV_SIZE,   "i2c0"  },
     { S5L8900_I2C1_BASE,  S5L8900_DEV_SIZE,   "i2c1"  },
     /*
@@ -188,6 +189,9 @@ static inline bool mmio_data(uint32_t a, unsigned bytes,
  * its interrupt-status alias sits at offset 0x10000. */
 static inline bool in_power(uint32_t a, unsigned bytes) {
     return mmio_word(a, bytes, S5L8900_POWER_BASE, S5L8900_POWER_SIZE);
+}
+static inline bool in_mbx(uint32_t a, unsigned bytes) {
+    return mmio_word(a, bytes, S5L8900_MBX_BASE, S5L_MBX_SIZE);
 }
 static inline bool in_gpioic(uint32_t a, unsigned bytes) {
     return mmio_word(a, bytes, S5L8900_GPIOIC_BASE, S5L8900_GPIOIC_SIZE);
@@ -383,6 +387,8 @@ static uint32_t bus_read(void *ctx, uint32_t addr, unsigned bytes) {
         v = s5l_timer_read(&m->timer, addr - S5L8900_TIMER_BASE);
     } else if (in_power(addr, bytes)) {
         v = s5l_power_read(&m->power, addr - S5L8900_POWER_BASE);
+    } else if (in_mbx(addr, bytes)) {
+        v = s5l_mbx_read(&m->mbx, addr - S5L8900_MBX_BASE);
     } else if (in_gpioic(addr, bytes)) {
         /* Offset from the PAGE, not from the window: the driver's own
          * 0x80/0xA0/0xC0/0xE0 are page-relative and rebasing them onto the
@@ -500,6 +506,11 @@ static void bus_write(void *ctx, uint32_t addr, uint32_t val, unsigned bytes) {
     if (in_power(addr, bytes)) {
         note_device(m, addr, val, true);
         s5l_power_write(&m->power, addr - S5L8900_POWER_BASE, val);
+        return;
+    }
+    if (in_mbx(addr, bytes)) {
+        note_device(m, addr, val, true);
+        s5l_mbx_write(&m->mbx, addr - S5L8900_MBX_BASE, val);
         return;
     }
     if (in_gpioic(addr, bytes)) {
@@ -980,6 +991,7 @@ bool s5l8900_init(s5l8900_t *m, uint32_t ram_base, uint32_t ram_size) {
     for (unsigned i = 0; i < S5L8900_VIC_COUNT; i++) s5l_vic_reset(&m->vic[i]);
     s5l_timer_reset(&m->timer);
     s5l_power_reset(&m->power);
+    s5l_mbx_reset(&m->mbx);
     s5l_clcd_reset(&m->clcd);
     s5l_tvout_reset(&m->tvout, m->tb_hz);
     for (unsigned i = 0; i < S5L8900_I2C_COUNT; i++)

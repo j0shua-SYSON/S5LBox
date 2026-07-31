@@ -119,6 +119,7 @@ SNAP_SIZE_GUARD(s5l_uart_t,        8280,  "snap_uart");
 SNAP_SIZE_GUARD(s5l_vic_t,         16,    "snap_vic");
 SNAP_SIZE_GUARD(s5l_timer_t,       40,    "snap_timer");
 SNAP_SIZE_GUARD(s5l_power_t,       24,    "snap_power");
+SNAP_SIZE_GUARD(s5l_mbx_t,         8196,  "snap_mbx");
 SNAP_SIZE_GUARD(s5l_clcd_window_t, 24,    "snap_clcd");
 SNAP_SIZE_GUARD(s5l_clcd_t,        3368,  "snap_clcd");
 SNAP_SIZE_GUARD(s5l_tvout_t,       12304, "snap_tvout");
@@ -172,7 +173,7 @@ SNAP_SIZE_GUARD(s5l_stub_t,        56,    "snap_stubs");
  * which is the entire reason this guard is a compile error. */
 /* 112576 = 111536 + the CPU's data-read block cache and counters, which this struct
  * contains. Not serialised, byte format unchanged; see the arm_cpu_t note. */
-SNAP_SIZE_GUARD(s5l8900_t,         112576, "snap_mach");
+SNAP_SIZE_GUARD(s5l8900_t,         120776, "snap_mach");
 #endif
 
 /* ---------------------------------------------------------------- the IO --- */
@@ -500,6 +501,17 @@ static void snap_timer(sn_io_t *io, s5l_timer_t *t) {
 static void snap_power(sn_io_t *io, s5l_power_t *p) {
     F32(p->state); F32(p->cfg0); F32(p->cfg1);
     F32(p->sram);  F32(p->cfg24); F32(p->cfg28);
+}
+
+/*
+ * The MBX register file. reset_done travels because it is DEVICE state, not
+ * host bookkeeping: a restore that dropped it would put the machine back with
+ * AppleMBX believing its reset had completed while the block said otherwise,
+ * and the driver would spin on an acknowledgement it had already been given.
+ */
+static void snap_mbx(sn_io_t *io, s5l_mbx_t *m) {
+    for (unsigned i = 0; i < S5L_MBX_SIZE / 4u; i++) F32(m->reg[i]);
+    FB(m->reset_done);
 }
 
 /*
@@ -985,6 +997,7 @@ static void snap_mach(sn_io_t *io, s5l8900_t *m) {
     for (unsigned i = 0; i < S5L8900_VIC_COUNT; i++) snap_vic(io, &m->vic[i]);
     snap_timer(io, &m->timer);
     snap_power(io, &m->power);
+    snap_mbx(io, &m->mbx);
     snap_clcd (io, &m->clcd);
     snap_tvout(io, &m->tvout);
     for (unsigned i = 0; i < S5L8900_I2C_COUNT; i++)
