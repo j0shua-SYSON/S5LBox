@@ -201,6 +201,19 @@ uint32_t s5l_mbx_read(s5l_mbx_t *m, uint32_t off) {
     return v;
 }
 
+/*
+ * The interrupt output. See the declaration in soc.h for why it exists and why
+ * it is a level rather than a pulse.
+ *
+ * It reports the status word and nothing else, so it cannot assert without a
+ * kick having set a bit and cannot stay asserted once the driver has
+ * acknowledged. A device that raised its line on its own would be exactly the
+ * fabrication the header of this file refuses.
+ */
+bool s5l_mbx_irq(const s5l_mbx_t *m) {
+    return m && m->status != 0u;
+}
+
 void s5l_mbx_write(s5l_mbx_t *m, uint32_t off, uint32_t val) {
     if (!m || off >= S5L_MBX_SIZE) return;
 

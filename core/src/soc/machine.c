@@ -1249,6 +1249,14 @@ void s5l8900_tick(s5l8900_t *m, uint32_t ticks) {
     bool clcd_irq = s5l_clcd_tick(&m->clcd, tb);
     s5l_vic_set_line(&m->vic[0], S5L8900_IRQ_CLCD, clcd_irq);
 
+    /*
+     * The MBX completion line. Like i2c and spi below, the device completes
+     * inside the store that kicks it, so the status is already pending by the
+     * time this runs and a zero-tick refresh is enough for the guest to see
+     * both the assertion and its own acknowledge.
+     */
+    s5l_vic_set_line(&m->vic[0], S5L8900_IRQ_MBX, s5l_mbx_irq(&m->mbx));
+
     bool tvout_irq = s5l_tvout_tick(&m->tvout, tb);
     s5l_vic_set_line(&m->vic[0], S5L8900_IRQ_TVOUT, tvout_irq);
 

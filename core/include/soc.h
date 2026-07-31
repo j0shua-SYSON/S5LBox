@@ -826,6 +826,28 @@ void     s5l_mbx_reset(s5l_mbx_t *m);
 uint32_t s5l_mbx_read(s5l_mbx_t *m, uint32_t off);
 void     s5l_mbx_write(s5l_mbx_t *m, uint32_t off, uint32_t val);
 
+/*
+ * THE LINE THE DEVICE TREE SAYS THIS DEVICE HAS. /arm-io/mbx carries
+ * `interrupts = {0x0c}`, and nothing in this machine was driving it -- the
+ * model raised its status bit on a kick and then told no one.
+ *
+ * That is the shape of the r246 failure. The driver reaches exactly ONE
+ * Graphics Recovery Event and reports `2DIdle=0, 3DIdle=1`, and the histogram
+ * says only 0x012c, 0x1020 and 0xf00 are ever READ in the whole run -- far too
+ * few reads for a driver polling for completion. So 2DIdle is the driver's own
+ * bookkeeping: marked busy when work is submitted, cleared when the completion
+ * INTERRUPT arrives. No interrupt, no clear, and the watchdog concludes the 2D
+ * core is wedged.
+ *
+ * Asserted while a status bit is pending and dropped when the driver clears it
+ * through the write-one-to-clear at S5L_MBX_STATUS_ACK. That is a level, and it
+ * is deliberately the same rule i2c and spi already follow here rather than a
+ * new one invented for this device: the status word and its acknowledge were
+ * already modelled, and this only connects them to the controller.
+ */
+#define S5L8900_IRQ_MBX   12u   /* /arm-io/mbx `interrupts` = {0x0c} */
+bool     s5l_mbx_irq(const s5l_mbx_t *m);
+
 /* --------------------------------------------- GPIO interrupt controller ---
  * The upper part of the 0x39a00000 page: AppleS5L8900XGPIOIC, a seven-group
  * cascade in front of both VICs. See core/src/soc/gpioic.c for the model.
