@@ -22,5 +22,18 @@
 //
 #import <UIKit/UIKit.h>
 
+@class VMSnapshotListViewController;
+@protocol VMSnapshotListDelegate;
+
 @interface VMSettingsViewController : UITableViewController
+
+/*
+ * Supplied by whoever presents this screen, because Settings is built with a
+ * plain -init and owns no machine. Both are passed straight through to the
+ * snapshots list; a nil directory means nobody said which machine, and the
+ * list then shows nothing rather than guessing at one.
+ */
+@property (nonatomic, copy) NSString *snapshotsDirectory;
+@property (nonatomic, weak) id<VMSnapshotListDelegate> snapshotDelegate;
+
 @end

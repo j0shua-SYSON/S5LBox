@@ -35,6 +35,9 @@
 #import "VMGuest.h"
 #import "VMSettings.h"
 #import "VMSettingsViewController.h"
+#import "VMSnapshotListViewController.h"
+#import "VMInstanceStore.h"
+#include "VMSnapshotStore.h"
 #import "VMTouchMap.h"
 
 #import <QuartzCore/QuartzCore.h>
@@ -66,7 +69,9 @@ static const NSUInteger kConsoleScrollback = 12000;
 
 // Declared up front so every call below is checked against a prototype.
 @interface EmulatorViewController () <VMButtonBarDelegate,
-                                      VMFramebufferViewTouchDelegate>
+                                      VMFramebufferViewTouchDelegate,
+                                      VMSnapshotListDelegate>
+- (NSString *)snapshotsDirectory;
 - (void)startEmulator;
 - (void)launchEngine;
 - (void)reportBringUpProblem:(NSString *)reason;
@@ -562,6 +567,12 @@ static const NSUInteger kConsoleScrollback = 12000;
     (void)sender;
 
     VMSettingsViewController *settings = [[VMSettingsViewController alloc] init];
+    /* Settings owns no machine, so the snapshots screen is given this one's
+     * directory here. Derived from the same instance id the engine was built
+     * with, rather than joined by hand: two places that build the path is how
+     * a machine ends up listing another machine's saved states. */
+    settings.snapshotsDirectory = [self snapshotsDirectory];
+    settings.snapshotDelegate = self;
     UINavigationController *nav = [[UINavigationController alloc]
         initWithRootViewController:settings];
     // The emulator screen is black; a white sheet over it would be a jolt.
@@ -570,6 +581,50 @@ static const NSUInteger kConsoleScrollback = 12000;
      * NSUserDefaults immediately and posts VMSettingsDidChangeNotification, so
      * a swipe-to-dismiss and the Done button are the same thing. */
     [self presentViewController:nav animated:YES completion:nil];
+}
+
+#pragma mark - Snapshots
+
+/*
+ * Derived from the same instance id the engine was built with, through the
+ * same store that CREATES the machine's directory, rather than joined by hand
+ * here. VMEngine.m states the rule this follows: one derivation, and the C
+ * half is the one that can be tested and the one that refuses an identifier
+ * which is not sixteen hex digits.
+ *
+ * nil when there is no identity, which the list treats as "no snapshots" --
+ * the correct answer for the built-in demo guest, which has no disk of its own
+ * and therefore nothing a saved state could be about.
+ */
+- (NSString *)snapshotsDirectory {
+    if (!self.instanceID.length) return nil;
+    NSString *machine =
+        [[VMInstanceStore sharedStore] directoryForInstanceWithID:self.instanceID];
+    if (!machine.length) return nil;
+    char out[VM_FW_BOOT_PATH_CAPACITY];
+    if (vm_snapshot_dir(machine.fileSystemRepresentation, out, sizeof out)
+            != VM_SNAPSHOT_OK)
+        return nil;
+    return [NSString stringWithUTF8String:out];
+}
+
+/*
+ * Deliberately the ONLY delegate method implemented so far.
+ *
+ * -takeSnapshot... and -openSnapshot... are optional, and leaving them absent
+ * makes the list say "not available" instead of offering a control that would
+ * half-work. Restoring an older saved state needs the copy-on-write overlay in
+ * VMSnapshotCow.h, and without it a restore writes RAM from one moment over a
+ * disk from another -- the quiet guest-filesystem corruption VMFirmwareBoot.h
+ * warns about, which fsck exists to catch and which a resume never runs fsck
+ * to catch. A stub that silently succeeded would be the worst of the options.
+ */
+- (NSString *)snapshotListOpenUnavailableReason:(VMSnapshotListViewController *)list {
+    (void)list;
+    return @"Opening a saved state is not available yet. The part that "
+           @"remembers what the guest's disk looked like at the time is still "
+           @"being built, and without it a restore would put this machine's "
+           @"memory back while leaving its disk where it is now.";
 }
 
 #pragma mark - Layout

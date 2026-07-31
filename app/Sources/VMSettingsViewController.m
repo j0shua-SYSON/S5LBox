@@ -11,6 +11,7 @@
 #import "VMFirmwareImportViewController.h"
 #import "VMOptions.h"
 #import "VMManualViewController.h"
+#import "VMSnapshotListViewController.h"
 #import "VMSettings.h"
 
 #import <math.h>
@@ -49,10 +50,15 @@ typedef NS_ENUM(NSInteger, VMSettingsSection) {
     VMSettingsSectionCount
 };
 
+/* Snapshots is APPENDED rather than placed next to Manual, which would read
+ * better. The existing indices are load-bearing in the cell builder's
+ * if/else chain and in the selection handler, and moving them to improve an
+ * ordering is how a switch ends up wired to the row above it. */
 typedef NS_ENUM(NSInteger, VMGeneralRow) {
     VMGeneralRowManual = 0,
     VMGeneralRowJailbreak,
     VMGeneralRowDeveloperMode,
+    VMGeneralRowSnapshots,
     VMGeneralRowCount
 };
 
@@ -508,7 +514,7 @@ titleForFooterInSection:(NSInteger)section {
             [sw addTarget:self action:@selector(jailbreakToggled:)
                  forControlEvents:UIControlEventValueChanged];
             cell.accessoryView = sw;
-        } else {
+        } else if (indexPath.row == VMGeneralRowDeveloperMode) {
             cell.textLabel.text = @"Developer Mode";
             cell.accessoryType = UITableViewCellAccessoryNone;
             cell.selectionStyle = UITableViewCellSelectionStyleNone;
@@ -517,6 +523,10 @@ titleForFooterInSection:(NSInteger)section {
             [sw addTarget:self action:@selector(developerModeToggled:)
                  forControlEvents:UIControlEventValueChanged];
             cell.accessoryView = sw;
+        } else {
+            cell.textLabel.text = @"Snapshots";
+            cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+            cell.selectionStyle = UITableViewCellSelectionStyleDefault;
         }
         return cell;
     }
@@ -764,6 +774,17 @@ didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
             VMManualViewController *m = [[VMManualViewController alloc] init];
             if (self.navigationController)
                 [self.navigationController pushViewController:m animated:YES];
+        } else if (indexPath.row == VMGeneralRowSnapshots) {
+            VMSnapshotListViewController *list =
+                [[VMSnapshotListViewController alloc] init];
+            /* Both come from whoever presented this screen. Settings is built
+             * with a plain -init and holds no machine of its own, so a nil
+             * directory here means "nobody told us which machine", and the
+             * list shows an empty screen rather than another machine's. */
+            list.snapshotsDirectory = self.snapshotsDirectory;
+            list.delegate = self.snapshotDelegate;
+            if (self.navigationController)
+                [self.navigationController pushViewController:list animated:YES];
         }
         return;
     }
