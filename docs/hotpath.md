@@ -738,3 +738,43 @@ should transfer at least as well on arm64, where the replacement is a single
 mrs of FPSR against a libc call, but that is an expectation and not a
 measurement. And 2.56x is the ratio over this window, which contains some
 work that is not rendering.
+
+## MBX2D attaches but does not work, and that is a real result (r240)
+
+Four gates were modelled from the driver's own code -- reset assert (bit 16 of
+0x1020), completion (bit 6 of 0x12c), core revision (0x0102xxxx at 0xf00) and
+reset deassert. AppleMBX now starts, powers up and binds the display:
+
+    AppleMBXDevice::setPowerState(1)
+    AppleMBX: Added swap device: AppleH1CLCD
+    AppleMBX: Using AppleH1CLCD as legacy swap device
+
+That is the kext ATTACHED. It is not the kext WORKING, and r240 is the
+difference. Booting with MBX2D enabled and no --ca-software-render:
+
+* the boot never reaches SpringBoard -- it stalls during the multitouch
+  firmware download;
+* the framebuffer is blank, 384 of 460,800 bytes non-zero;
+* the profile reports ZERO user-mode samples, with 44% of all samples on
+  three adjacent kernel PCs (AppleMBX+0xb0dc/0xb0e0/0xb0e4) plus 12.8% on the
+  register write helper at +0x1fb4.
+
+The driver is cycling reset assert and deassert without end. That is what a
+GPU driver does when work it submitted never completes: it assumes a hung
+engine and resets it. Nothing here executes a command, so nothing ever
+completes, so it resets forever.
+
+WHAT THIS COSTS AND WHAT IT BUYS. The software path still works and is the
+one to ship -- --ca-software-render remains the default for good reason. What
+the four gates buy is that the remaining work is now NAMED: implement the 2D
+command stream, so submitted work completes. That is native C against a
+framebuffer rather than reverse engineering, but it is a project rather than
+a gate, and it cannot be estimated from here.
+
+THE HONEST CONSEQUENCE FOR 30 FPS. The arithmetic that made MBX2D attractive
+still holds -- the rasteriser is 83% of the post-keygen frame, so removing it
+is worth ~5.8x -- but the route to removing it is longer than four registers.
+The alternative route to the same 83% is the rasteriser HLE, whose sites are
+already armed and counted (sw_scanline 84,983 hits), and which needs
+pixel-exact native replacements rather than a command processor. Neither is
+cheap. Both are bounded, and this file now says which is which.
