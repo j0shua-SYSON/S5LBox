@@ -321,6 +321,31 @@ static const uint32_t g_prog_mixed[] = {
     0x1afffff5u    /* BNE   loop           */
 };
 
+/*
+ * VFP, because a composited frame is full of it.
+ *
+ * The QuartzCore software rasteriser this project is trying to get past does
+ * its texture-coordinate stepping in single-precision floating point --
+ * CA::OGL::sw_sample_nearest_BGRA8 opens with vldr/vmul.f32/vcvt.s32.f32 and
+ * has a vdiv.f32 in its span setup. Every one of those is interpreted here,
+ * and until this row existed the bench measured integer work exclusively, so
+ * the cost of the instructions the frame is actually made of was unmeasured.
+ *
+ * The values are chosen to be a fixed point of the loop: s0 = 2.0 and
+ * s1 = 1.0 give s2 = 2.0, s3 = 3.0 and s4 = 3 on every iteration. Nothing
+ * grows, so nothing reaches an infinity or a denormal and the row cannot
+ * accidentally become a measurement of the slow paths in vfp.c instead of the
+ * ordinary ones. Every word below was verified by disassembling it with
+ * Capstone rather than trusted from a manual.
+ */
+static const uint32_t g_prog_vfp[] = {
+    0xee201a20u,   /* VMUL.F32     s2, s0, s1 */
+    0xee711a20u,   /* VADD.F32     s3, s2, s1 */
+    0xeebd2ae1u,   /* VCVT.S32.F32 s4, s3     */
+    0xe2522001u,   /* SUBS         r2, r2, #1 */
+    0x1afffffau    /* BNE          loop       */
+};
+
 /* Every configuration's loop length divides this, so one rounded instruction
  * budget ends every configuration exactly at the top of its loop. Rows carry
  * their own length in bench_cfg_t::loop_insns; this is only the budget's
@@ -338,6 +363,7 @@ typedef struct {
     const uint32_t *prog;
     unsigned    prog_words;
     unsigned    loop_insns;  /* instructions per iteration; divides the LCM  */
+    bool        vfp;         /* enable CP10/CP11 and FPEXC.EN, seed s0/s1    */
     bool        mmu_on;
     bool        small_pages;
     bool        do_tick;
@@ -382,7 +408,17 @@ static const bench_cfg_t g_configs[] = {
       .loop_insns = 10u },
     { .loop = "mixed x10",   .mmu = "pages-4K",    .tick = "yes",
       .prog = g_prog_mixed, .prog_words = (unsigned)(sizeof g_prog_mixed / 4),
-      .loop_insns = 10u, .mmu_on = true, .small_pages = true, .do_tick = true }
+      .loop_insns = 10u, .mmu_on = true, .small_pages = true, .do_tick = true },
+
+    /* VFP. The frame's rasteriser is float-heavy, so the integer rows above
+     * do not price the instructions it is actually made of. */
+    { .loop = "vfp mul/add/cvt", .mmu = "off",      .tick = "no",
+      .prog = g_prog_vfp,   .prog_words = (unsigned)(sizeof g_prog_vfp / 4),
+      .loop_insns = 5u, .vfp = true },
+    { .loop = "vfp mul/add/cvt", .mmu = "pages-4K", .tick = "yes",
+      .prog = g_prog_vfp,   .prog_words = (unsigned)(sizeof g_prog_vfp / 4),
+      .loop_insns = 5u, .mmu_on = true, .small_pages = true, .do_tick = true,
+      .vfp = true }
 };
 #define BENCH_CONFIG_COUNT (sizeof g_configs / sizeof g_configs[0])
 
@@ -516,6 +552,20 @@ static bool setup(s5l8900_t *m, const bench_cfg_t *cfg) {
      * so nothing there clears it. */
     if (cfg->thumb) cpu->cpsr |= ARM_CPSR_T;
 
+    /*
+     * VFP is off out of reset and a disabled unit makes every one of these
+     * instructions UNDEFINED, which would turn this row into a measurement of
+     * the exception path. XNU's _init_vfp grants CP10 and CP11 full access and
+     * then gates per thread with FPEXC.EN; both halves are needed here for the
+     * same reason they are needed there.
+     */
+    if (cfg->vfp) {
+        cpu->cp15.cpacr |= 0xfu << ARM_CPACR_CP10_SHIFT;
+        cpu->vfp_fpexc  |= ARM_FPEXC_EN;
+        cpu->vfp_s[0] = 0x40000000u;   /* 2.0f */
+        cpu->vfp_s[1] = 0x3f800000u;   /* 1.0f */
+    }
+
     if (cfg->mmu_on && !check_map(m, cfg->small_pages)) return false;
     return true;
 }
@@ -588,7 +638,30 @@ static bool verify(s5l8900_t *m, const bench_cfg_t *cfg, uint64_t retired) {
         ok = false;
     }
 
-    if (cfg->prog == g_prog_alu || cfg->prog == g_prog_thumb) {
+    if (cfg->prog == g_prog_vfp) {
+        /*
+         * The loop is a fixed point, so these are the same after one iteration
+         * as after twenty million -- which is exactly what makes them a
+         * witness that the VFP unit was ENABLED and executing. A trapped,
+         * undefined VFP instruction leaves s2 at zero and would be caught
+         * here rather than silently timing the exception path.
+         */
+        if (cpu->vfp_s[2] != 0x40000000u) {
+            printf("  ERROR: s2=0x%08x, expected 0x40000000 (2.0f)\n",
+                   cpu->vfp_s[2]);
+            ok = false;
+        }
+        if (cpu->vfp_s[3] != 0x40400000u) {
+            printf("  ERROR: s3=0x%08x, expected 0x40400000 (3.0f)\n",
+                   cpu->vfp_s[3]);
+            ok = false;
+        }
+        if (cpu->vfp_s[4] != 3u) {
+            printf("  ERROR: s4=%u, expected 3\n", cpu->vfp_s[4]);
+            ok = false;
+        }
+        g_sink += (uint64_t)cpu->vfp_s[2] + cpu->vfp_s[3] + cpu->vfp_s[4];
+    } else if (cfg->prog == g_prog_alu || cfg->prog == g_prog_thumb) {
         if (cpu->r[0] != it32) {
             printf("  ERROR: r0=%u, expected %u\n", cpu->r[0], it32);
             ok = false;
