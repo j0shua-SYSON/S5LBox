@@ -218,6 +218,19 @@ FLOOR for QuartzCore's real share, not an estimate of it.
 
 ## Method notes that cost real runs to learn
 
+* **The PC profile counts INSTRUCTIONS, not TIME.** `prof_sample` fires on
+  `(n & 0x3ff) == 0` where n is the retired-instruction counter, so every share
+  in this file is a share of instructions executed and NOT of seconds spent.
+  That distinction was got wrong once here, and it cuts both ways: because VFP
+  instructions were 5.5x dearer than integer ones before they were fixed, the
+  VFP-dense rasteriser was a LARGER share of frame time than its 40.2% of
+  instructions, and integer-bignum lockdownd a SMALLER one than its 51.5%.
+  A consequence worth knowing before running the experiment: a change that
+  makes instructions cheaper cannot show up in this profile at all. r221 ran
+  the same window with VFP 4.9x faster and produced a page table byte-for-byte
+  identical to r214's, which is the instrument working correctly, not a null
+  result. Measuring that kind of win needs a wall clock.
+
 * Window the profile before drawing an fps conclusion. A whole-run profile
   answers a different question and reads plausibly while doing so.
 * Attribute samples to an address space before deciding a hot function is on the
