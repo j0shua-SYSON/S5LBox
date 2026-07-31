@@ -469,3 +469,37 @@ measurement is unchanged: read the candidate VALUE at r0 across two separate
 bursts. Identical values across bursts confirms it; progressing values refute
 it and send the search back to being genuinely slow. That measurement comes
 before any entropy source is written.
+
+### The entropy hypothesis is refuted, and so is "non-converging"
+
+Refuted before it was acted on, by the cheapest available test rather than the
+one proposed. If the same composite were tested 801 times, the work per test
+would be IDENTICAL -- the emulator is deterministic -- so the instruction gaps
+between consecutive tests would repeat exactly. They do not: of 644 intra-burst
+gaps, **641 are distinct values**, with three coincidental pairs.
+
+So the candidates differ, and the search is doing real work on real numbers.
+No entropy source is missing, and `_prngInitialize`'s 17,865 samples are the
+cost of a PRNG being drawn from, not re-seeded from nothing.
+
+**"It never converges" was also over-stated.** 801 candidates is only unusual
+against a 512-bit prime, where the density near 2^512 predicts ~355 odd
+candidates per prime. For 1024-bit primes the expectation is ~710 EACH, so 801
+total is an ordinary mid-search position rather than evidence of a loop. And a
+~20.9 M period with tiny variance is what a low-priority background thread
+looks like when it gets one scheduler slice per timer tick -- which is normal
+OS behaviour, not a metronome driving a retry.
+
+WHERE THIS LEAVES IT. The reading that now fits every measurement is the
+simplest one: lockdownd is generating an RSA key pair, legitimately, at low
+priority, and 25 M insn/s is slow enough that it had not finished within 8e9
+instructions. That restores the remedy retired earlier today -- pay it once and
+persist or snapshot past it -- and the decisive test is no longer a register
+value but simply a longer run: if `_isGiantPrime` stops, it terminates.
+
+FOUR READINGS OF ONE MEASUREMENT, in one day: a spin, a terminating keygen, a
+non-converging periodic search, and now a genuine keygen in progress. Each
+correction came from a measurement rather than from re-reading the previous
+argument, and none of them was acted on in code. That is the only reason the
+cost of being wrong four times was four analyses instead of four runs plus a
+fix built on the wrong one.
