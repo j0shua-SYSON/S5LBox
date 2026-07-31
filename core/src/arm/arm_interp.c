@@ -2889,7 +2889,39 @@ arm_status_t arm_step(arm_cpu_t *c) {
     /* Coarse top-level decode. This intentionally covers only the encodings
      * M1 implements; anything else returns ARM_UNDEFINED so the harness/log
      * can show us exactly which instruction to implement next. */
-    if ((insn & 0x0f000000u) == 0x0a000000u ||
+    /*
+     * DATA PROCESSING WITH AN IMMEDIATE, HOISTED, BECAUSE CHAIN DEPTH COSTS.
+     *
+     * Data processing is the commonest class of ARM instruction there is, and
+     * before this it was the LAST arm below -- about twenty-five comparisons
+     * deep, where LDR/STR leaves at six. Thumb dispatches through a switch on
+     * insn>>12 instead of a chain, and insnbench measured ARM at 0.58 of Thumb
+     * on comparable loops. Hoisting this one arm moved that to 0.86: the same
+     * loop went 10.95 -> 17.01 M insn/s, about 1.48x, with 54 tests passing.
+     *
+     * SO DEPTH IS A REAL COST, and that is worth stating carefully because it
+     * looks at first like it contradicts a result already recorded in
+     * docs/hotpath.md -- "decode scatter is free", measured as a ten-position
+     * mixed loop running no slower than a one-position loop. It does not.
+     * That experiment varied WHICH arm each instruction leaves by, holding the
+     * distances roughly alike; this one changes HOW FAR the commonest arm is.
+     * Scatter is free. Depth is not. Both are true.
+     *
+     * The guard is exact rather than approximate: bits 27-25 == 001 is the
+     * immediate form, and the ONLY encoding inside it that is not data
+     * processing is opcode 10xx with S clear -- the MSR-immediate and
+     * undefined space -- which the second test excludes. So this cannot
+     * capture an encoding the chain below would have decoded differently, and
+     * anything it does not capture still reaches its original arm unchanged.
+     *
+     * This is a first cut at the shape, not the end of it. The rest of the
+     * chain is still linear, and the principled fix is to dispatch on bits
+     * 27-25 the way the Thumb decoder dispatches on insn>>12.
+     */
+    if ((insn & 0x0e000000u) == 0x02000000u &&
+        (insn & 0x01900000u) != 0x01000000u) {
+        st = exec_data_processing(c, pc, insn, &next);
+    } else if ((insn & 0x0f000000u) == 0x0a000000u ||
         (insn & 0x0f000000u) == 0x0b000000u) {           /* B / BL */
         st = exec_branch(c, pc, insn, &next);
     } else if ((insn & 0x0fc000f0u) == 0x00000090u) {     /* MUL / MLA */
