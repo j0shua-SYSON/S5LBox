@@ -823,3 +823,46 @@ The earlier result in this file still stands and is not in tension with this:
 term -- depth is only worth removing while it is DEEP, and after the hoist it no
 longer is. There is no further win available from restructuring the ARM decode
 dispatch, and the residual 1.7x will have to come from somewhere else.
+
+
+## Correction: r240 was not waiting for a command processor
+
+The MBX2D section above concludes that the driver "is cycling reset assert and
+deassert without end", that this "is what a GPU driver does when work it
+submitted never completes", and that the remaining work is therefore to
+"implement the 2D command stream". The first clause is close, the second and
+third are wrong, and r242 measured why.
+
+A per-offset access histogram (S5LBOX_MBX_TRACE=1) over a full MBX boot:
+
+    off 0x1020  reads 328,111,110  writes 3   last-write 0x00010000
+    everything else in the block   46 writes total, single-digit reads
+
+The driver is not cycling. It is stuck in ONE reset, in the deassert half, and
+it never submitted anything for a command processor to complete -- 0x6d8 took
+two writes in the entire run. The three adjacent kernel PCs that held 44% of
+samples are that single spin, not a loop over repeated resets.
+
+The cause was in this tree, not in the guest. The driver deasserts by
+read-modify-write: it reads 0x1020 while bit 16 is set, clears bit 0, and writes
+the rest back, which puts 0x00010000 into the model's register file. The read
+path ORed the completion bit onto the stored value without masking it first, so
+the guest's own write held bit 16 set permanently and
+
+    ands r0, r0, #0x10000
+    bne  loop                  ; spin while bit 16 is SET
+
+had no exit. Masking before the overlay fixes it: bit 0 is the request the guest
+writes, bit 16 is the answer the model owns, and neither can be forged by the
+other.
+
+WHAT THIS CHANGES ABOUT THE PLAN. "Needs a 2D command processor" was an estimate
+built on a misread, and it is withdrawn. Whether MBX2D works now is a question
+for the next run rather than a project, and the honest position until that run
+reports is that one register bug is fixed and nothing further is proven.
+
+The general lesson is the one this file keeps re-learning: a profile says WHERE
+the guest is, and it is easy to read a story into that. 44% on three PCs was
+read as "resetting repeatedly because work never finishes" when it meant "stuck
+in one wait". The instrument that could tell those apart was a counter, and it
+cost about forty lines.
