@@ -202,6 +202,23 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
                             vm_firmware_boot_report_t *report);
 
 /* Close the work image and release the bridge storage. Safe on a NULL slot. */
+/*
+ * Arm copy-on-write recording into `overlay_path`, between _create() and
+ * _start(). Pass NULL or "" to disarm.
+ *
+ * Armed only when a snapshot exists to protect: a machine with no saved
+ * states pays nothing at all, because no block is read before it is written
+ * and the bringup gets the file adapter's own descriptor.
+ *
+ * If arming fails, _start() FAILS. Running on unrecorded writes while the
+ * snapshots still claim to be restorable would be discovered by the user at
+ * the exact moment that claim mattered.
+ *
+ * False if the path does not fit; the previous setting is then unchanged.
+ */
+bool vm_firmware_boot_arm_overlay(vm_firmware_boot_t *boot,
+                                  const char *overlay_path);
+
 void vm_firmware_boot_destroy(vm_firmware_boot_t **boot);
 
 /*

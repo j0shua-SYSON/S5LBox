@@ -314,6 +314,7 @@ add_test(NAME app_vmguest_bridge COMMAND test_vmguest)
 add_executable(test_vmfirmwareboot
     ../app/Tests/test_vmfirmwareboot.c
     ../app/Sources/VMFirmwareBoot.c
+    ../app/Sources/VMSnapshotCow.c
     ../app/Sources/VMBootOptions.c
     ../app/Sources/VMOptions.c
 )
@@ -455,6 +456,7 @@ add_executable(test_vminstancepaths
     ../app/Sources/VMInstancePaths.c
     ../app/Sources/VMInstances.c
     ../app/Sources/VMFirmwareBoot.c
+    ../app/Sources/VMSnapshotCow.c
     ../app/Sources/VMBootOptions.c
     ../app/Sources/VMOptions.c
 )

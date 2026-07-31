@@ -2,6 +2,7 @@
 #include "VMFirmwareBoot.h"
 
 #include "file_block.h"
+#include "VMSnapshotCow.h"
 #include "ios3_bringup_gate.h"
 #include "rootfs_work.h"
 
@@ -12,6 +13,15 @@
 struct vm_firmware_boot {
     file_block_t     *media;
     s5l_bringup_md_t *bridges;   /* ~300 KiB; heap, never a thread stack */
+    /*
+     * Copy-on-write recording, armed only when a snapshot exists to
+     * protect. A machine with no saved states pays nothing: no overlay is
+     * opened, no block is read before it is written, and the descriptor
+     * handed to the bringup is the file adapter's own.
+     */
+    vm_cow_t         *cow;
+    char              overlay[VM_FW_BOOT_PATH_CAPACITY];
+    bool              overlay_armed;
 };
 
 /* -------------------------------------------------------------------------- */
@@ -211,9 +221,32 @@ vm_firmware_boot_t *vm_firmware_boot_create(void) {
     return boot;
 }
 
+bool vm_firmware_boot_arm_overlay(vm_firmware_boot_t *boot,
+                                  const char *overlay_path) {
+    if (!boot) return false;
+    if (!overlay_path || !*overlay_path) {
+        boot->overlay[0] = '\0';
+        boot->overlay_armed = false;
+        return true;
+    }
+    size_t n = strlen(overlay_path);
+    if (n >= sizeof boot->overlay) return false;
+    memcpy(boot->overlay, overlay_path, n + 1u);
+    boot->overlay_armed = true;
+    return true;
+}
+
 void vm_firmware_boot_destroy(vm_firmware_boot_t **slot) {
     if (!slot || !*slot) return;
     vm_firmware_boot_t *boot = *slot;
+    /*
+     * The overlay closes BEFORE the media, and that order is not tidiness. The
+     * adapter holds a copy of the file descriptor and its close is where a
+     * buffered record finally reaches disk; letting the media go first would
+     * flush an image whose history is still in a stdio buffer, which is the
+     * one state a later restore would trust and be wrong about.
+     */
+    if (boot->cow) (void)vm_cow_close(&boot->cow);
     if (boot->media) {
         /* The bridges borrowed this descriptor, so every borrow must have
          * ended -- which it has, because the caller frees the machine first. */
@@ -304,7 +337,36 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
     request.kernel_size = kernel_size;
     request.devicetree = tree;
     request.devicetree_size = tree_size;
+    /*
+     * The one seam copy-on-write needs. With no snapshot to protect the
+     * bringup gets the file adapter's own descriptor and nothing changes; with
+     * one armed it gets the overlay's facade instead, and every write from
+     * here on saves what it is about to destroy.
+     *
+     * A failure to arm is FATAL rather than a fallback to the bare descriptor.
+     * Carrying on would run a machine whose writes are not being recorded
+     * while its snapshots still claim to be restorable, and the user would
+     * find out at the moment they most needed it to be true.
+     */
     request.root_media = file_block_get(boot->media);
+    if (boot->overlay_armed) {
+        char why[192] = {0};
+        vm_cow_status_t st = vm_cow_open(&boot->cow, request.root_media,
+                                         boot->overlay, why, sizeof why);
+        if (st != VM_COW_OK) {
+            free(kernel);
+            free(tree);
+            (void)file_block_close(boot->media);
+            (void)snprintf(report->detail, sizeof report->detail,
+                           "Cannot record changes for the saved states: %s.",
+                           why[0] ? why : vm_cow_status_text(st));
+            report->detail[sizeof report->detail - 1u] = '\0';
+            set_detail(report->summary, sizeof report->summary,
+                       "snapshot history unavailable");
+            return false;
+        }
+        request.root_media = vm_cow_block(boot->cow);
+    }
     /* One place decides both which kernel is acceptable and where its
      * memory-disk call sites are, so the bridges can never be armed against a
      * kernel that was authorized somewhere else. */
