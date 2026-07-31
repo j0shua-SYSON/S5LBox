@@ -6312,6 +6312,7 @@ static struct {
     struct {
         uint32_t va;
         diagnostic_pc_space_t space;
+        uint32_t as;            /* TTBR0 base for user PCs, 0 otherwise */
         uint64_t hits;
     } pc_hist[PCHASH];
 
@@ -16822,19 +16823,36 @@ static void lifecycle_note_kernel_entry(arm_cpu_t *cpu, uint64_t at,
 
 /* Attribute one sample to an exact PC. Cheap: no name is resolved here, only
  * at report time. */
-static void pc_sample(uint32_t va, diagnostic_pc_space_t space) {
+/*
+ * `as` is the TTBR0 base for user samples and 0 for everything else.
+ *
+ * It has to be part of the KEY, not merely recorded alongside it. The dyld
+ * shared cache maps at the same address in every iPhone OS 3 process, so
+ * 0x3145ad70 is _mulg_common in all of them; keying on the VA alone merges
+ * every process's samples for that address into one bucket, which is exactly
+ * the merge that made r212 unable to say whether 51.5% of a frame was one
+ * process spinning on RSA or two processes sharing the load.
+ *
+ * Kernel samples deliberately pass 0. The kernel is one address space, and
+ * splitting its entries per-process would scatter each kernel symbol across as
+ * many buckets as there are running tasks.
+ */
+static void pc_sample(uint32_t va, diagnostic_pc_space_t space, uint32_t as) {
     va &= ~1u;
     uint32_t h = va * 2654435761u ^
-                 (uint32_t)space * UINT32_C(2246822519);
+                 (uint32_t)space * UINT32_C(2246822519) ^
+                 as * UINT32_C(2166136261);
     for (unsigned probe = 0; probe < 64; probe++) {
         unsigned i = (h >> 13) + probe;
         i &= PCHASH - 1u;
         if (G.pc_hist[i].hits &&
-            (G.pc_hist[i].va != va || G.pc_hist[i].space != space))
+            (G.pc_hist[i].va != va || G.pc_hist[i].space != space ||
+             G.pc_hist[i].as != as))
             continue;
         if (!G.pc_hist[i].hits) {
             G.pc_hist[i].va = va;
             G.pc_hist[i].space = space;
+            G.pc_hist[i].as = as;
             G.pc_n++;
         }
         G.pc_hist[i].hits++;
@@ -16876,7 +16894,9 @@ static void prof_sample(const arm_cpu_t *cpu, uint32_t pc) {
     uint32_t cpsr = cpu ? cpu->cpsr : ARM_MODE_USR;
     diagnostic_pc_space_t space = diagnostic_pc_observe(
         pc, cpsr, mmu_enabled, &reported_pc);
-    pc_sample(reported_pc, space);
+    pc_sample(reported_pc, space,
+              (space == DIAGNOSTIC_PC_USER && cpu)
+                  ? diagnostic_ttbr0_base(cpu) : 0u);
     /* Only user-mode samples: kernel PCs are one address space by definition
      * and would swamp the table with the idle thread's. */
     if (space == DIAGNOSTIC_PC_USER && cpu) {
@@ -28306,7 +28326,10 @@ external_md_work_ready:
      */
     printf("\n=== HOTTEST USER-MODE 4K PAGES (same samples, grouped) ===\n");
     {
-        struct { uint32_t page; uint64_t hits; } pages[512];
+        /* Keyed by (page, address space), because one hot page in two
+         * processes and one process running hot are the same row otherwise --
+         * and they call for opposite responses. */
+        struct { uint32_t page; uint32_t as; uint64_t hits; } pages[512];
         unsigned pn = 0;
         uint64_t total = 0, spilled = 0;
         for (unsigned i = 0; i < PCHASH; i++) {
@@ -28314,14 +28337,16 @@ external_md_work_ready:
             if (G.pc_hist[i].space != DIAGNOSTIC_PC_USER) continue;
             total += G.pc_hist[i].hits;
             uint32_t pg = G.pc_hist[i].va >> 12;
+            uint32_t as = G.pc_hist[i].as;
             unsigned j = 0;
-            while (j < pn && pages[j].page != pg) j++;
+            while (j < pn && (pages[j].page != pg || pages[j].as != as)) j++;
             if (j == pn) {
                 if (pn == (unsigned)(sizeof pages / sizeof pages[0])) {
                     spilled += G.pc_hist[i].hits;
                     continue;
                 }
                 pages[pn].page = pg;
+                pages[pn].as = as;
                 pages[pn].hits = 0;
                 pn++;
             }
@@ -28341,10 +28366,11 @@ external_md_work_ready:
                 if (pages[i].hits > best) { best = pages[i].hits; bi = i; }
             if (bi == pn || !best) break;
             running += best;
-            printf("    %5.1f%%  0x%08x..0x%08x  %" PRIu64 " samples"
-                   "  (cumulative %.1f%%)\n",
+            printf("    %5.1f%%  0x%08x..0x%08x  ttbr0 0x%08x  %" PRIu64
+                   " samples  (cumulative %.1f%%)\n",
                    total ? 100.0 * (double)best / (double)total : 0.0,
-                   pages[bi].page << 12, (pages[bi].page << 12) + 0xfffu, best,
+                   pages[bi].page << 12, (pages[bi].page << 12) + 0xfffu,
+                   pages[bi].as, best,
                    total ? 100.0 * (double)running / (double)total : 0.0);
             pages[bi].hits = 0;   /* consume */
         }
