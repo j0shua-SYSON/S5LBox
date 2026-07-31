@@ -600,3 +600,51 @@ bug to fix. The lesson for the next such report is that at these frame rates
 the UI cannot be judged by whether it responds, only by whether it responds
 EVENTUALLY, and the status line now prints the board's own delivered/refused
 counters so that question can be answered without waiting for an animation.
+
+## The key generation TERMINATES, at ~6.4e9 instructions (r219, decisive)
+
+r219 ran to a 30,000,000,000-instruction cap -- "stopped after 30000000000
+instructions: OK" -- probing `_isGiantPrime` the whole way. 598 captures, and
+the last of them at instruction **6,368,479,883**.
+
+**23.6 billion instructions with not one primality test after it.** The search
+completes and never runs again. Every earlier reading of this is now settled:
+
+| reading | verdict |
+|---|---|
+| a spin | wrong -- the code is correct Barrett reduction |
+| a terminating keygen | **right, and now measured** |
+| non-converging periodic search | wrong -- 8e9 was simply too short a horizon |
+| no entropy, same composite forever | wrong -- refuted by cost variance |
+
+WHAT THIS MEANS FOR FRAME RATE, and it is the largest single result in this
+file. lockdownd's ~51% of a frame is a ONE-TIME first-boot cost that pays off
+at about 6.4e9 instructions. At the device's measured 25 M insn/s that is
+roughly **4.2 minutes** of running. After it, that half of the frame budget is
+free permanently, and the machine should be about twice as fast without a
+single line of code changing.
+
+It also makes persistence load-bearing rather than a convenience. lockdownd
+writes its key under /var/root/Library/Lockdown, so a work image that survives
+across launches keeps it and later boots skip the generation entirely. A work
+image thrown away each launch pays the 4.2 minutes every time.
+
+THE REMEDY IS THEREFORE NOT A FIX. Nothing here is a bug: it is real work that
+a real iPhone also does once, on a CPU perhaps forty times faster. The correct
+responses are to let it finish once and keep the result, and -- if a faster
+first launch is wanted -- to provision a key the way data_ark.plist is already
+provisioned, which is a choice about setup rather than a repair.
+
+## Buttons, confirmed at the board (r220)
+
+```
+press 0  menu  down @4200000000  up @4224000000  refused 0
+press 1  menu  down @4600000000  up @4624000000  refused 0
+board:  sets 4  refused 0  edges driven 4
+gpioic group 1: en 0x00003f00  level 0x00003900  type 0x00003f00
+```
+
+Zero refusals, four edges driven, and INTEN carrying every button line. This
+is the emulator's own account agreeing with the device report that Power put
+the guest to sleep. There is no input bug; see the section above on why 1-2
+fps makes a working button look dead.
