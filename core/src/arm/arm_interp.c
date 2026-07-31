@@ -2907,19 +2907,37 @@ arm_status_t arm_step(arm_cpu_t *c) {
      * distances roughly alike; this one changes HOW FAR the commonest arm is.
      * Scatter is free. Depth is not. Both are true.
      *
-     * The guard is exact rather than approximate: bits 27-25 == 001 is the
-     * immediate form, and the ONLY encoding inside it that is not data
-     * processing is opcode 10xx with S clear -- the MSR-immediate and
-     * undefined space -- which the second test excludes. So this cannot
-     * capture an encoding the chain below would have decoded differently, and
-     * anything it does not capture still reaches its original arm unchanged.
+     * BOTH FORMS ARE HOISTED, immediate and register, because the register
+     * form was no better off: it sat behind the whole LDREX/STREX/SWP family,
+     * about twelve further comparisons, and `MOV rd, rn, LSL #1` is every bit
+     * as common as `ADD rd, rn, #1`.
+     *
+     * THE GUARD IS EXACT, and it is the ARM decode rule written out rather
+     * than an approximation of it. Bits 27-26 == 00 is the data-processing
+     * encoding space. Exactly two things live inside it that are not data
+     * processing, and each is excluded by name:
+     *
+     *   - the MISCELLANEOUS space, op1 == 10xx0, i.e. bit24 set with bit23 and
+     *     bit20 clear. That is MSR, MRS, BX, BLX(reg), CLZ, the saturating
+     *     add/subtracts, the DSP multiplies and BKPT.
+     *   - MULTIPLY and EXTRA LOAD/STORE, which are bits 7 and 4 both set, in
+     *     the register half only. That is MUL, UMULL, LDRH/STRH/LDRD/STRD,
+     *     the exclusives and SWP.
+     *
+     * Every arm between here and the original catch-all that could match bits
+     * 27-25 == 000 was checked to require (insn & 0x90) == 0x90, so none of
+     * them can be swallowed. Anything this declines reaches its original arm
+     * unchanged, which is what makes the hoist a reordering rather than a
+     * reinterpretation.
      *
      * This is a first cut at the shape, not the end of it. The rest of the
      * chain is still linear, and the principled fix is to dispatch on bits
      * 27-25 the way the Thumb decoder dispatches on insn>>12.
      */
-    if ((insn & 0x0e000000u) == 0x02000000u &&
-        (insn & 0x01900000u) != 0x01000000u) {
+    if ((insn & 0x0c000000u) == 0x00000000u &&        /* the DP encoding space */
+        (insn & 0x01900000u) != 0x01000000u &&        /* not misc: MSR/BX/CLZ/DSP */
+        !((insn & 0x0e000000u) == 0x00000000u &&
+          (insn & 0x00000090u) == 0x00000090u)) {     /* not multiply/extra-ls */
         st = exec_data_processing(c, pc, insn, &next);
     } else if ((insn & 0x0f000000u) == 0x0a000000u ||
         (insn & 0x0f000000u) == 0x0b000000u) {           /* B / BL */
