@@ -99,7 +99,24 @@ typedef enum {
     /* Count and measure; the guest still runs its own code. */
     IOS3_HLE_OBSERVE = 0,
     /* Do the work natively and return to LR without executing the body. */
-    IOS3_HLE_REPLACE
+    IOS3_HLE_REPLACE,
+    /*
+     * Run the handler for its SIDE EFFECTS ONLY and then let the guest execute
+     * anyway. The handler's return value is discarded and the site never
+     * reports "handled", so the guest's behaviour is bit-for-bit what it would
+     * be with the site absent.
+     *
+     * This exists because OBSERVE cannot answer the question that actually
+     * gates a replacement. A hit count says a site is on the path; it does not
+     * say what the arguments MEAN, and the order-of-work rule requires "an
+     * argument shape taken at the site itself" before anything is replaced.
+     * OBSERVE never calls the handler, so there was nowhere to read r0-r3 and
+     * the incoming stack words from.
+     *
+     * Appended rather than inserted, so IOS3_HLE_REPLACE keeps its value and no
+     * existing comparison changes meaning.
+     */
+    IOS3_HLE_TRACE
 } ios3_hle_mode_t;
 
 /*

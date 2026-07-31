@@ -6,6 +6,7 @@
  */
 #include "ios3_hle.h"
 
+#include <stdio.h>
 #include <string.h>
 
 /* --------------------------------------------------------------- the sites --- */
@@ -369,6 +370,65 @@ static bool hle_sw_sample_nearest_bgra8(arm_cpu_t *cpu,
     return true;
 }
 
+/*
+ * THE ARGUMENT-SHAPE TRACERS. Each prints the first few calls and returns
+ * false, which under IOS3_HLE_TRACE is discarded anyway -- the guest runs its
+ * own body every time, so nothing here can change what the screen shows.
+ *
+ * The static analysis got as far as the CALL SHAPE and stops there.
+ * CA::RenderMBX2D::blit_copy_simple builds six arguments out of coordinate
+ * differences on its CA::Render::Data --
+ *
+ *   a0 = d->[0x78] - d->[0x50]      a3 = d->[0x7c] - d->[0x18]
+ *   a1 = d->[0x7c] - d->[0x54]      a4 = d->[0x80]
+ *   a2 = d->[0x78] - d->[0x14]      a5 = d->[0x84]
+ *
+ * -- which fixes how many arguments there are and that four of them are
+ * differences of a right/bottom against a left/top. It does NOT say which pair
+ * is the destination origin, which is the source origin, and which is the
+ * extent, and guessing between those three is exactly how a blit ends up
+ * transposed or offset in a way that still looks plausible. Real values
+ * separate them immediately: an extent is small and positive, an origin tracks
+ * where the layer is on screen, and a stride-like number is large.
+ */
+static unsigned g_trace_budget[8];
+
+static bool trace_args(const char *what, arm_cpu_t *cpu,
+                       const ios3_hle_mem_t *mem, unsigned slot, unsigned nstack) {
+    uint32_t sp = cpu->r[13];
+    unsigned i;
+
+    if (slot >= (unsigned)(sizeof g_trace_budget / sizeof g_trace_budget[0]))
+        return false;
+    if (g_trace_budget[slot] >= 12u) return false;
+    g_trace_budget[slot]++;
+
+    fprintf(stderr, "hle-trace %-20s r0=%08x r1=%08x r2=%08x r3=%08x lr=%08x",
+            what, cpu->r[0], cpu->r[1], cpu->r[2], cpu->r[3], cpu->r[14]);
+    for (i = 0; i < nstack; i++) {
+        uint32_t w = 0;
+        if (!read_u32(mem, sp + i * 4u, &w)) { fprintf(stderr, " sp+%u=??", i * 4u); continue; }
+        fprintf(stderr, " sp+%u=%08x", i * 4u, w);
+    }
+    fprintf(stderr, "\n");
+    return false;
+}
+
+/* The two thunks take the context in r0 and the operation's own arguments
+ * after it, so the stack words are the 5th argument onward. */
+static bool hle_trace_blit_copy(arm_cpu_t *cpu, const ios3_hle_mem_t *mem) {
+    return trace_args("mbx2DCtxBlitCopy", cpu, mem, 0, 3);
+}
+static bool hle_trace_blit_color(arm_cpu_t *cpu, const ios3_hle_mem_t *mem) {
+    return trace_args("mbx2DCtxBlitColor", cpu, mem, 1, 2);
+}
+static bool hle_trace_conn_open(arm_cpu_t *cpu, const ios3_hle_mem_t *mem) {
+    return trace_args("mbxConnectionOpen", cpu, mem, 2, 0);
+}
+static bool hle_trace_ctx_init(arm_cpu_t *cpu, const ios3_hle_mem_t *mem) {
+    return trace_args("mbx2DCtxInitialize", cpu, mem, 3, 0);
+}
+
 static ios3_hle_site_t g_sites[] = {
     { "CGBlt_fillBytes",    0x338f61b0u, PROLOGUE_CGBLT_FILLBYTES,
       (unsigned)(sizeof PROLOGUE_CGBLT_FILLBYTES /
@@ -394,19 +454,19 @@ static ios3_hle_site_t g_sites[] = {
     { "mbxConnectionOpen",  0x30e1fc90u, PROLOGUE_MBX_CONNECTION_OPEN,
       (unsigned)(sizeof PROLOGUE_MBX_CONNECTION_OPEN /
                  sizeof PROLOGUE_MBX_CONNECTION_OPEN[0]),
-      NULL, IOS3_HLE_OBSERVE, false, false, 0, 0, 0, 0 },
+      hle_trace_conn_open, IOS3_HLE_TRACE, false, false, 0, 0, 0, 0 },
     { "mbx2DCtxInitialize", 0x30e1abe4u, PROLOGUE_MBX2D_CTX_INITIALIZE,
       (unsigned)(sizeof PROLOGUE_MBX2D_CTX_INITIALIZE /
                  sizeof PROLOGUE_MBX2D_CTX_INITIALIZE[0]),
-      NULL, IOS3_HLE_OBSERVE, false, false, 0, 0, 0, 0 },
+      hle_trace_ctx_init, IOS3_HLE_TRACE, false, false, 0, 0, 0, 0 },
     { "mbx2DCtxBlitColor",  0x30e1ad6cu, PROLOGUE_MBX2D_CTX_BLIT_COLOR,
       (unsigned)(sizeof PROLOGUE_MBX2D_CTX_BLIT_COLOR /
                  sizeof PROLOGUE_MBX2D_CTX_BLIT_COLOR[0]),
-      NULL, IOS3_HLE_OBSERVE, false, false, 0, 0, 0, 0 },
+      hle_trace_blit_color, IOS3_HLE_TRACE, false, false, 0, 0, 0, 0 },
     { "mbx2DCtxBlitCopy",   0x30e1adc0u, PROLOGUE_MBX2D_CTX_BLIT_COPY,
       (unsigned)(sizeof PROLOGUE_MBX2D_CTX_BLIT_COPY /
                  sizeof PROLOGUE_MBX2D_CTX_BLIT_COPY[0]),
-      NULL, IOS3_HLE_OBSERVE, false, false, 0, 0, 0, 0 },
+      hle_trace_blit_copy, IOS3_HLE_TRACE, false, false, 0, 0, 0, 0 },
 };
 
 #define SITE_N ((unsigned)(sizeof g_sites / sizeof g_sites[0]))
@@ -479,6 +539,18 @@ bool ios3_hle_step(arm_cpu_t *cpu, const ios3_hle_mem_t *mem, uint32_t pc,
     if (g_ttbr0 && ttbr0 != g_ttbr0) { s->wrong_space++; return false; }
 
     s->hits++;
+
+    /*
+     * TRACE runs the handler and throws its answer away. The guest executes its
+     * own body either way, so this cannot change behaviour -- which is the
+     * point: it is how an argument shape gets read at the site without the site
+     * yet being trusted to do the work.
+     */
+    if (s->mode == IOS3_HLE_TRACE) {
+        if (s->handler) (void)s->handler(cpu, mem);
+        return false;
+    }
+
     if (s->mode != IOS3_HLE_REPLACE || !s->handler) return false;
 
     if (!s->handler(cpu, mem)) { s->declined++; return false; }
