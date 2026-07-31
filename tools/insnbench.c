@@ -188,6 +188,9 @@ static double now_seconds(void) {
 #define BENCH_L2_PA     (BENCH_RAM_BASE + 0x00004000u)
 #define BENCH_CODE_VA   (BENCH_RAM_BASE + 0x00010000u)
 #define BENCH_DATA_VA   (BENCH_RAM_BASE + 0x00020000u)
+/* Grows DOWN, so it runs away from the data page below it rather than into it.
+ * Only the ldm/stm row uses it; every other row leaves sp where reset left it. */
+#define BENCH_STACK_VA  (BENCH_RAM_BASE + 0x00030000u)
 #define BENCH_SECTIONS  (BENCH_RAM_SIZE >> 20)          /* 16 */
 
 /* The loop counter's start value. Both loops decrement it once per iteration
@@ -346,6 +349,30 @@ static const uint32_t g_prog_vfp[] = {
     0x1afffffau    /* BNE          loop       */
 };
 
+/*
+ * BLOCK TRANSFER, because every function in the guest begins and ends with one.
+ *
+ * `push {r4-r7}` is ONE instruction and FOUR memory accesses, and if each of
+ * those takes the full translate-and-dispatch path then a prologue costs four
+ * times what its instruction count suggests. Real ARM code is dense with these
+ * -- they are how the ABI saves registers -- so a per-access cost here is
+ * multiplied across every call the guest makes, which no other row prices:
+ * load/store measures ONE access per instruction by construction.
+ *
+ * The pair is push-then-pop so sp returns to where it started on every
+ * iteration. That keeps the working set to four words, matching the load/store
+ * row's cache behaviour, and means the row cannot drift into unmapped memory
+ * however many iterations it runs. The stack sits clear of both the code and
+ * the data page, and grows DOWN from BENCH_STACK_VA, away from both.
+ */
+static const uint32_t g_prog_ldmstm[] = {
+    0xe92d00f0u,   /* PUSH {r4, r5, r6, r7} */
+    0xe8bd00f0u,   /* POP  {r4, r5, r6, r7} */
+    0xe2833001u,   /* ADD  r3, r3, #1       */
+    0xe2522001u,   /* SUBS r2, r2, #1       */
+    0x1afffffau    /* BNE  loop             */
+};
+
 /* Every configuration's loop length divides this, so one rounded instruction
  * budget ends every configuration exactly at the top of its loop. Rows carry
  * their own length in bench_cfg_t::loop_insns; this is only the budget's
@@ -364,6 +391,7 @@ typedef struct {
     unsigned    prog_words;
     unsigned    loop_insns;  /* instructions per iteration; divides the LCM  */
     bool        vfp;         /* enable CP10/CP11 and FPEXC.EN, seed s0/s1    */
+    bool        stack;       /* point sp at BENCH_STACK_VA (ldm/stm only)    */
     bool        mmu_on;
     bool        small_pages;
     bool        do_tick;
@@ -418,7 +446,17 @@ static const bench_cfg_t g_configs[] = {
     { .loop = "vfp mul/add/cvt", .mmu = "pages-4K", .tick = "yes",
       .prog = g_prog_vfp,   .prog_words = (unsigned)(sizeof g_prog_vfp / 4),
       .loop_insns = 5u, .mmu_on = true, .small_pages = true, .do_tick = true,
-      .vfp = true }
+      .vfp = true },
+
+    /* Block transfer: one instruction, four accesses. Every guest function
+     * prologue and epilogue is one of these. */
+    { .loop = "ldm/stm x4",  .mmu = "off",      .tick = "no",
+      .prog = g_prog_ldmstm, .prog_words = (unsigned)(sizeof g_prog_ldmstm / 4),
+      .loop_insns = 5u, .stack = true },
+    { .loop = "ldm/stm x4",  .mmu = "pages-4K", .tick = "yes",
+      .prog = g_prog_ldmstm, .prog_words = (unsigned)(sizeof g_prog_ldmstm / 4),
+      .loop_insns = 5u, .mmu_on = true, .small_pages = true, .do_tick = true,
+      .stack = true }
 };
 #define BENCH_CONFIG_COUNT (sizeof g_configs / sizeof g_configs[0])
 
@@ -559,6 +597,8 @@ static bool setup(s5l8900_t *m, const bench_cfg_t *cfg) {
      * then gates per thread with FPEXC.EN; both halves are needed here for the
      * same reason they are needed there.
      */
+    if (cfg->stack) cpu->r[13] = BENCH_STACK_VA;
+
     if (cfg->vfp) {
         cpu->cp15.cpacr |= 0xfu << ARM_CPACR_CP10_SHIFT;
         cpu->vfp_fpexc  |= ARM_FPEXC_EN;
@@ -638,7 +678,20 @@ static bool verify(s5l8900_t *m, const bench_cfg_t *cfg, uint64_t retired) {
         ok = false;
     }
 
-    if (cfg->prog == g_prog_vfp) {
+    if (cfg->prog == g_prog_ldmstm) {
+        /* sp back at its start is the witness that every push was matched by
+         * its pop -- a partial block transfer would leave it displaced. */
+        if (cpu->r[13] != BENCH_STACK_VA) {
+            printf("  ERROR: sp=0x%08x, expected 0x%08x\n",
+                   cpu->r[13], (unsigned)BENCH_STACK_VA);
+            ok = false;
+        }
+        if (cpu->r[3] != it32) {
+            printf("  ERROR: r3=%u, expected %u\n", cpu->r[3], it32);
+            ok = false;
+        }
+        g_sink += (uint64_t)cpu->r[13] + cpu->r[3];
+    } else if (cfg->prog == g_prog_vfp) {
         /*
          * The loop is a fixed point, so these are the same after one iteration
          * as after twenty million -- which is exactly what makes them a
