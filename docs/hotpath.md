@@ -242,3 +242,62 @@ fixing it is worth more than any HLE site.
 That is a hypothesis. It has not been measured, and the measurement is to name
 the two address spaces above — which is what the pid column in the address-space
 table is for.
+
+## The largest consumer of a frame is a daemon in a spin (2026-07-31)
+
+`lockdownd`.
+
+```
+51.9%  ttbr0 0x0b441000  pid 12  "lockdownd"    (proc+0x14c)
+48.1%  ttbr0 0x0bf1b000  pid 20  "SpringBoard"  (proc+0x14c)
+```
+
+Measured in r213 (address-space split) and named in r214. Within its 51.9%,
+`lockdownd` spends **99.2%** inside Security's giant-number arithmetic --
+`_mulg_common`, `_grammarSquare_common`, `_gshiftright`, `_normal_subg` --
+which is modular exponentiation, which is RSA. It renders nothing and serves
+nothing; no host is attached over USB.
+
+**A daemon doing only RSA, forever, is spinning.** So the single largest
+consumer of the frame budget is a bug rather than work, and removing it is
+worth ~2x on frame rate for no rendering effort at all:
+
+| step | per frame | fps |
+|---|---|---|
+| today | 16.7 M | 1.5 |
+| stop the spin | 8.0 M | 3.1 |
+| + rasteriser HLE | ~1.1 M | ~22 |
+| + MBX2D geometry | | 30 plausible |
+
+### How the process names were trusted
+
+`p_comm`'s offset is not derivable from an accessor this build byte-matches,
+the way thread/task/proc/pid were. So it was not asserted: each proc is scanned
+for a short NUL-terminated printable name and **the offset is printed beside
+it**. Both processes yielded a name at the same `proc+0x14c`, which is the
+corroboration. Independently, the profile already showed pid 20 doing QuartzCore
+rasterising and the scan returned "SpringBoard" -- the name matches behaviour
+that was measured before the name was known.
+
+### What is NOT established
+
+Why it spins. `lockdownd` owns activation, pairing and device services, and RSA
+is what it does for activation records and pairing handshakes. This project
+provisions activation OFFLINE -- `ActivationState = FactoryActivated` and
+`BrickState = false` written straight into `data_ark.plist`, with no Apple
+record applied and none verified -- so "it rejects that record and retries
+forever" is the obvious guess.
+
+It is a guess. Three of its cousins were wrong today (`defaultroute`,
+`usepeerdns`, `resolv.conf`), each costing a ~35-minute run, and each time the
+cheap diagnostic that would have settled it came second. The measurement that
+settles this one is which call site re-enters the giants code and whether it is
+reached from the activation path or the pairing path.
+
+### Corrections this supersedes
+
+"Crypto is an HLE target" was wrong twice. HLE of a spin loop makes the
+spinning faster; had it been built first it would have shipped a ~1.5x that
+masked a 2x bug. Hashing and RSA were also never one answer: `_SHA1Init` is
+17.8% of a whole run and 3.1% inside a frame, so page hashing is a boot cost,
+while the giants go the other way.
