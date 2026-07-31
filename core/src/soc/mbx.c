@@ -159,8 +159,30 @@ uint32_t s5l_mbx_read(s5l_mbx_t *m, uint32_t off) {
          * The acknowledgement. Bit 16 reads set only once the reset has been
          * requested, so the driver's spin ends because of something it did,
          * not because of a constant this file chose.
+         *
+         * BIT 16 IS OURS, AND THE STORED VALUE MUST NOT BE ABLE TO SUPPLY IT.
+         * This used to OR reset_done onto whatever the register file held,
+         * which is wrong the moment the guest writes the bit back -- and the
+         * driver does exactly that. It deasserts by READ-MODIFY-WRITE: it reads
+         * this register while bit 16 is set, clears bit 0, and writes the rest
+         * back, so 0x00010000 lands in the register file. The old read then
+         * returned that stored bit forever, and the deassert wait at
+         * AppleMBX+0xb0c0 --
+         *
+         *     ands r0, r0, #0x10000
+         *     bne  loop                  ; spin while bit 16 is SET
+         *
+         * -- could never end. r242 measured the consequence: 328,111,110 reads
+         * of this one offset against 46 writes to the whole block, with the
+         * last write to it being 0x00010000. That is not a driver polling for
+         * progress, it is a driver that will never be told the reset finished.
+         *
+         * Masking first makes the bit a STATUS the model owns in both
+         * directions: written bit 0 is the request, and bit 16 is the answer,
+         * which is the coupling the driver expects and the one power.c holds
+         * itself to.
          */
-        v = m->reg[off / 4u];
+        v = m->reg[off / 4u] & ~S5L_MBX_RESET_DONE;
         if (m->reset_done) v |= S5L_MBX_RESET_DONE;
     } else if (off == S5L_MBX_STATUS) {
         v = m->status;
