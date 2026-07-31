@@ -3068,6 +3068,29 @@ static uint32_t diagnostic_ttbr0_base(const arm_cpu_t *cpu);
 
 static bool g_hle_enabled;
 static uint32_t g_hle_space;     /* TTBR0 armed to; 0 == not armed yet */
+static bool g_hle_pending;       /* a site failed identity and may yet arm */
+
+/*
+ * WHY ARMING HAPPENS MORE THAN ONCE. Identity is verified by reading the
+ * prologue out of guest memory, and a page that is not resident cannot be
+ * read. Arming is triggered by the first site reached, which in r217 was
+ * CoreGraphics' CGBlt_fillBytes -- and at that instant QuartzCore's rasteriser
+ * pages had never been touched, so all three of those sites failed identity
+ * and, with one-shot arming, stayed dead for the whole run while the profile
+ * insisted they were 39.8% of a frame.
+ *
+ * The retry condition is the one that cannot be wrong: a site whose address
+ * the PC has just arrived at is resident by definition, because the next thing
+ * that happens is executing it. ios3_hle_arm() re-verifies every site from
+ * scratch and leaves the hit counters alone, so re-calling it is safe.
+ */
+static void hle_note_pending(void) {
+    g_hle_pending = false;
+    for (unsigned i = 0; i < ios3_hle_site_count(); i++) {
+        const ios3_hle_site_t *s = ios3_hle_site_at(i);
+        if (s && !s->armed) { g_hle_pending = true; return; }
+    }
+}
 
 static bool hle_mem_read(void *ctx, uint32_t va, void *dst, uint32_t len) {
     if (!ctx || !dst || !len) return false;
@@ -3104,11 +3127,25 @@ static bool hle_took_call(arm_cpu_t *cpu) {
         for (unsigned i = 0; i < ios3_hle_site_count(); i++) {
             const ios3_hle_site_t *s = ios3_hle_site_at(i);
             if (s && s->va == pc) {
-                if (ios3_hle_arm(&mem, as)) g_hle_space = as;
+                if (ios3_hle_arm(&mem, as)) {
+                    g_hle_space = as;
+                    hle_note_pending();
+                }
                 break;
             }
         }
         if (!g_hle_space) return false;
+    } else if (g_hle_pending && as == g_hle_space) {
+        /* Only while something is still unarmed, so the common case stays a
+         * single predictable branch rather than a scan of the whole table. */
+        for (unsigned i = 0; i < ios3_hle_site_count(); i++) {
+            const ios3_hle_site_t *s = ios3_hle_site_at(i);
+            if (s && !s->armed && s->va == pc) {
+                ios3_hle_arm(&mem, g_hle_space);
+                hle_note_pending();
+                break;
+            }
+        }
     }
     return ios3_hle_step(cpu, &mem, pc, as);
 }
