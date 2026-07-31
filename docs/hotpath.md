@@ -1,20 +1,45 @@
 # Where the guest actually spends its instructions
 
-Measured 2026-07-30. This file exists because the answer was recorded nowhere and
-was assumed wrongly for weeks.
+Measured 2026-07-30, **substantially corrected 2026-07-31**. This file exists
+because the answer was recorded nowhere and was assumed wrongly for weeks; the
+first version of it then got the headline wrong in its own way, which is why the
+correction is at the top rather than buried at the end.
 
-## The short version
+## The short version, as it now stands
 
-The largest single expense is **verifying Apple's code signatures**, not drawing.
+Everything below the horizontal rule was measured on a WHOLE RUN. A whole run is
+dominated by boot, and boot is not what decides frame rate. Windowing the
+profile to an actual animation (`-W`, which the tool had all along) changes the
+answer completely:
 
-| slice | share of r195 | instructions |
+| slice | whole run (r195) | inside a frame window |
 |---|---|---|
-| `_SHA1Init` (kernel, 5 KB blob) | 17.8% | ~880,000,000 |
-| `[userspace]`, of which the top 16 PCs are one loop | 65.3% | — |
-| everything else in the kernel | ~2% | nothing above 1.5% |
+| `_SHA1Init` — page hashing | 17.8% | **3.1%** (r206) |
+| Security giants — RSA modular exponentiation | ~12.5% | **40.6%** (r208) |
+| QuartzCore `CA::OGL::sw_scanline`, `sw_sample_nearest_BGRA8` | not visible | **14.4%** (r208) |
 
-r195 retired 4,950,000,000 instructions and sampled every 1024, so a sample is
-1024 instructions and the percentages are instruction shares, not time guesses.
+So "crypto" was never one answer. **Hashing is a boot cost and irrelevant to
+fps.** **RSA is the largest single consumer during a home-screen swipe**, which
+is not something a real iPhone does while swiping and is therefore suspected to
+be pathological rather than necessary — see the open question at the end.
+
+The graphics path is now identified rather than guessed: `CA::OGL::sw_*` is Core
+Animation's software rasteriser, the path taken because this VM un-matches the
+MBX and the guest therefore composites every pixel on the CPU.
+
+**The number that governs everything**, measured on the target device rather
+than extrapolated: 25 M insn/s at 1–2 fps gives **~16.7 M instructions per
+composited frame**, about 109 guest instructions per pixel. 30 fps needs ~500 M
+insn/s, a **20× gap**. Concentrated work in the swipe window totals 55%, so
+high-level emulation of *both* hot regions caps out near **2.2×**.
+
+A superseded figure that should not be reused: an earlier per-frame cost of
+141,596 instructions was wrong by ~100×. It came from the median gap between
+consecutive `CABackingStoreUpdate` calls, and that function fires once per
+BACKING STORE, not once per frame — a single composited frame updates many
+layers, so the gap measured one layer update.
+
+---
 
 ## How the userspace bucket was opened
 
@@ -154,3 +179,66 @@ words out, no buffering and no length bookkeeping to reproduce.
 An HLE that computes a real SHA-1 over the real input is not fabrication -- it is
 the same answer by a faster route -- but it must be proved so: run both paths on
 the first N blocks and compare digests before the native path is trusted.
+
+## The frame window, and what it actually contains (2026-07-31)
+
+`-W <lo>[:<hi>]` confines the sampler to an instruction range. It existed the
+whole time this file's first version was being written from whole-run data.
+
+**r206**, windowed over the unlock drag (4.0–4.2 G): 92.0% userspace, `_SHA1Init`
+down to 3.1%, nothing else in the kernel above 1%. Every one of the top sixty-
+four PCs fell inside a 2 KB span that `dscmap.py` resolves to `_gshiftright`,
+`_grammarSquare_common`, `_mulg_common` and `_normal_subg` — shift, square,
+multiply, subtract, which together are modular exponentiation.
+
+**r208**, windowed over a home-screen swipe (5.3–5.5 G), with per-address-space
+attribution added first so the result could be interpreted:
+
+```
+187624 user samples over 2 address space(s)
+51.9%  ttbr0 0x0b441000
+48.1%  ttbr0 0x0bf1b000
+```
+
+and by region, over the top sixty-four PCs (55% of the window in total):
+
+| region | share |
+|---|---|
+| Security giants — RSA | 40.6% |
+| QuartzCore software rasteriser | 14.4% |
+| everything else, over 11,625 further PCs | ~45%, diffuse |
+
+The QuartzCore entries resolve to
+`CA::OGL::sw_sample_nearest_BGRA8` (texture sampling) and `CA::OGL::sw_scanline`
+(scanline rasterising). The hot PC inside `sw_scanline` sits ~2,956 bytes into
+the function, so its samples spread across many PCs and the 14.4% figure is a
+FLOOR for QuartzCore's real share, not an estimate of it.
+
+## Method notes that cost real runs to learn
+
+* Window the profile before drawing an fps conclusion. A whole-run profile
+  answers a different question and reads plausibly while doing so.
+* Attribute samples to an address space before deciding a hot function is on the
+  frame's critical path. Two processes at ~50/50 are indistinguishable from one
+  process doing everything, in a profile that only reports PCs.
+* `CABackingStoreUpdate` is per layer, not per frame. Anything derived from the
+  gap between its calls is a per-layer number.
+* Per-frame cost in INSTRUCTIONS is host-independent, so it may be combined with
+  a rate measured under different conditions. Wall-clock rates may not: r201 ran
+  at 1.21 M insn/s because it ran without `--fast` and alongside another run,
+  and dividing by that would have understated frame rate by ~3.5×.
+
+## The open question this file exists to hand over
+
+**Why is 40.6% of a home-screen swipe spent in RSA?**
+
+A real device does none. The leading hypothesis is a retry loop, and the most
+likely thing being retried is a network operation, because nothing in this guest
+can resolve a hostname (see the networking notes: the PPP link opens, IPCP
+negotiates DNS successfully, and zero packets are ever sent). If that is right,
+the broken networking and a large share of the frame cost are the same bug, and
+fixing it is worth more than any HLE site.
+
+That is a hypothesis. It has not been measured, and the measurement is to name
+the two address spaces above — which is what the pid column in the address-space
+table is for.
