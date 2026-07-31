@@ -49,7 +49,93 @@
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed.
  */
 #include "soc.h"
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+
+/*
+ * THE INSTRUMENT FOR THE NEXT STALL, and the file predicted needing it: "if the
+ * driver later reads the region and depends on an effect that never happened,
+ * it will stall or complain at a NEW address". Finding that address is a
+ * counting problem, and the existing device log cannot count it -- it keeps the
+ * FIRST S5L_DEVLOG accesses, and r225 measured 157 million reads on one page,
+ * so the log is full of the reset spin before the driver has even started.
+ *
+ * A per-offset histogram answers it directly: whatever the driver is spinning
+ * on is whatever has a count in the millions once the reset handshake is done.
+ * The ring holds the last few accesses so the spin's SHAPE is visible too --
+ * one offset read forever is a poll, a repeating group is a command sequence.
+ *
+ * This is deliberately file-static rather than a member of s5l_mbx_t. It is a
+ * diagnostic and not machine state, so it must not enter a snapshot; keeping it
+ * out of the struct also keeps sizeof(s5l_mbx_t), its SNAP_SIZE_GUARD and
+ * SNAPSHOT_VERSION untouched, and a version bump would invalidate every
+ * existing snapshot including one being captured while this was written.
+ *
+ * It counts and prints. It changes no value the guest can observe.
+ */
+#define MBX_SLOTS      (S5L_MBX_SIZE / 4u)
+#define MBX_RING       64u
+
+static uint64_t mbx_rd[MBX_SLOTS];
+static uint64_t mbx_wr[MBX_SLOTS];
+static uint32_t mbx_last_val[MBX_SLOTS];
+static uint32_t mbx_ring_off[MBX_RING];
+static uint32_t mbx_ring_val[MBX_RING];
+static uint8_t  mbx_ring_wr[MBX_RING];
+static uint64_t mbx_ring_n;
+static int      mbx_trace_state;   /* 0 unknown, 1 on, -1 off */
+
+static void mbx_trace_dump(void) {
+    uint64_t total_r = 0, total_w = 0;
+    unsigned i;
+
+    fprintf(stderr, "\n=== MBX access histogram ===\n");
+    for (i = 0; i < MBX_SLOTS; i++) {
+        if (!mbx_rd[i] && !mbx_wr[i]) continue;
+        total_r += mbx_rd[i];
+        total_w += mbx_wr[i];
+        fprintf(stderr, "  off 0x%04x  reads %-14llu writes %-8llu last-write 0x%08x\n",
+                i * 4u, (unsigned long long)mbx_rd[i],
+                (unsigned long long)mbx_wr[i], mbx_last_val[i]);
+    }
+    fprintf(stderr, "  TOTAL reads %llu writes %llu\n",
+            (unsigned long long)total_r, (unsigned long long)total_w);
+
+    fprintf(stderr, "=== MBX last %u accesses (oldest first) ===\n",
+            (unsigned)(mbx_ring_n < MBX_RING ? mbx_ring_n : MBX_RING));
+    {
+        uint64_t start = mbx_ring_n > MBX_RING ? mbx_ring_n - MBX_RING : 0;
+        uint64_t k;
+        for (k = start; k < mbx_ring_n; k++) {
+            unsigned s = (unsigned)(k % MBX_RING);
+            fprintf(stderr, "  %s off 0x%04x val 0x%08x\n",
+                    mbx_ring_wr[s] ? "W" : "R", mbx_ring_off[s],
+                    mbx_ring_val[s]);
+        }
+    }
+    fflush(stderr);
+}
+
+static void mbx_trace(uint32_t off, uint32_t val, bool is_write) {
+    unsigned s;
+
+    if (mbx_trace_state == 0) {
+        const char *e = getenv("S5LBOX_MBX_TRACE");
+        mbx_trace_state = (e && *e && *e != '0') ? 1 : -1;
+        if (mbx_trace_state == 1) atexit(mbx_trace_dump);
+    }
+    if (mbx_trace_state != 1) return;
+
+    if (is_write) { mbx_wr[off / 4u]++; mbx_last_val[off / 4u] = val; }
+    else            mbx_rd[off / 4u]++;
+
+    s = (unsigned)(mbx_ring_n % MBX_RING);
+    mbx_ring_off[s] = off;
+    mbx_ring_val[s] = val;
+    mbx_ring_wr[s]  = is_write ? 1u : 0u;
+    mbx_ring_n++;
+}
 
 void s5l_mbx_reset(s5l_mbx_t *m) {
     if (!m) return;
@@ -64,6 +150,8 @@ void s5l_mbx_reset(s5l_mbx_t *m) {
 }
 
 uint32_t s5l_mbx_read(s5l_mbx_t *m, uint32_t off) {
+    uint32_t v;
+
     if (!m || off >= S5L_MBX_SIZE) return 0;
 
     if (off == S5L_MBX_RESET) {
@@ -72,21 +160,29 @@ uint32_t s5l_mbx_read(s5l_mbx_t *m, uint32_t off) {
          * requested, so the driver's spin ends because of something it did,
          * not because of a constant this file chose.
          */
-        uint32_t v = m->reg[off / 4u];
-        return m->reset_done ? (v | S5L_MBX_RESET_DONE) : v;
+        v = m->reg[off / 4u];
+        if (m->reset_done) v |= S5L_MBX_RESET_DONE;
+    } else if (off == S5L_MBX_STATUS) {
+        v = m->status;
+    } else if (off == S5L_MBX_REVISION) {
+        /*
+         * Identity, and it is read-only: the guest never writes here, so
+         * serving it out of the register file would return the zero that made
+         * AppleMBXDevice::start reject this device as unrecognised silicon.
+         */
+        v = S5L_MBX_REVISION_ID;
+    } else {
+        v = m->reg[off / 4u];
     }
-    if (off == S5L_MBX_STATUS) return m->status;
-    /*
-     * Identity, and it is read-only: the guest never writes here, so serving
-     * it out of the register file would return the zero that made
-     * AppleMBXDevice::start reject this device as unrecognised silicon.
-     */
-    if (off == S5L_MBX_REVISION) return S5L_MBX_REVISION_ID;
-    return m->reg[off / 4u];
+
+    mbx_trace(off, v, false);
+    return v;
 }
 
 void s5l_mbx_write(s5l_mbx_t *m, uint32_t off, uint32_t val) {
     if (!m || off >= S5L_MBX_SIZE) return;
+
+    mbx_trace(off, val, true);
 
     m->reg[off / 4u] = val;
 
