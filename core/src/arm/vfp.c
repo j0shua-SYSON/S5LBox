@@ -322,6 +322,77 @@ static double dn_out64(double d, uint32_t fpscr) {
     return d;
 }
 
+/*
+ * READING THE HOST'S STICKY FLAGS, CHEAPLY.
+ *
+ * <fenv.h> is the portable way and it was the only way here until it was
+ * priced. feclearexcept()/fetestexcept() are opaque library calls, and this
+ * unit makes BOTH of them around every single arithmetic operation, so a guest
+ * multiply costs two function calls plus a multiply. tools/insnbench.c row
+ * "vfp mul/add/cvt" measures what that is worth: 3.59 M insn/s with them
+ * against 15.36 without, on a host managing 19.06 for integer work. The fenv
+ * calls, not the arithmetic and not the volatile staging, are essentially the
+ * entire cost of emulating VFP.
+ *
+ * The flags live in one register on every host this runs on, so the fast paths
+ * below read and clear that register directly. SEMANTICS ARE UNCHANGED: the
+ * same flags are sampled at the same two points around the same operation.
+ * This is not the deferred-harvest trick, which would be faster still and
+ * would be wrong -- any host floating point performed between two guest
+ * instructions would leak into the guest's FPSCR, and FE_INEXACT is raised by
+ * almost every operation, so that leak would not be rare.
+ *
+ * Portability is preserved by construction: an unrecognised host keeps the
+ * <fenv.h> path, which is still correct, merely slower. i386 deliberately does
+ * NOT take the SSE path -- a 32-bit x86 build may carry float arithmetic in
+ * x87, whose flags are in a different register entirely (see the double
+ * rounding note at the top of this file).
+ */
+#if defined(__x86_64__) || defined(_M_X64)
+#  include <xmmintrin.h>
+#  define VFP_HOST_FLAGS "mxcsr"
+/* MXCSR exception flags: IE0 DE1 ZE2 OE3 UE4 PE5. DE (denormal) has no ARM
+ * equivalent among the cumulative bits and is deliberately dropped. */
+static inline void host_exceptions_clear(void) {
+    _mm_setcsr(_mm_getcsr() & ~0x3fu);
+}
+static inline uint32_t host_exceptions(void) {
+    unsigned csr = _mm_getcsr();
+    uint32_t f = 0;
+    if (csr & (1u << 0)) f |= ARM_FPSCR_IOC;
+    if (csr & (1u << 2)) f |= ARM_FPSCR_DZC;
+    if (csr & (1u << 3)) f |= ARM_FPSCR_OFC;
+    if (csr & (1u << 4)) f |= ARM_FPSCR_UFC;
+    if (csr & (1u << 5)) f |= ARM_FPSCR_IXC;
+    return f;
+}
+#elif defined(__aarch64__) && (defined(__GNUC__) || defined(__clang__))
+#  define VFP_HOST_FLAGS "fpsr"
+/*
+ * ARMv8 FPSR carries IOC/DZC/OFC/UFC/IXC in bits 0-4, which is exactly where
+ * ARMv6 FPSCR carries them, so the mask IS the translation. This is the path
+ * the iPhone takes.
+ */
+#  define VFP_FPSR_CUMULATIVE 0x1fu
+static inline uint32_t vfp_read_fpsr(void) {
+    uint64_t v;
+    __asm__ __volatile__("mrs %0, fpsr" : "=r"(v));
+    return (uint32_t)v;
+}
+static inline void host_exceptions_clear(void) {
+    uint64_t v;
+    __asm__ __volatile__("mrs %0, fpsr" : "=r"(v));
+    v &= ~(uint64_t)VFP_FPSR_CUMULATIVE;
+    __asm__ __volatile__("msr fpsr, %0" :: "r"(v));
+}
+static inline uint32_t host_exceptions(void) {
+    return vfp_read_fpsr() & VFP_FPSR_CUMULATIVE;
+}
+#else
+#  define VFP_HOST_FLAGS "fenv"
+static inline void host_exceptions_clear(void) {
+    feclearexcept(FE_ALL_EXCEPT);
+}
 static uint32_t host_exceptions(void) {
     int raised = fetestexcept(FE_ALL_EXCEPT);
     uint32_t f = 0;
@@ -332,6 +403,7 @@ static uint32_t host_exceptions(void) {
     if (raised & FE_INEXACT)   f |= ARM_FPSCR_IXC;
     return f;
 }
+#endif
 
 /*
  * One rounding step, with its exception flags captured.
@@ -352,7 +424,7 @@ static float f32_do(fop_t op, float a, float b, uint32_t fpscr, uint32_t *exc) {
 
     if (fpscr & ARM_FPSCR_FZ) { a = fz_in32(a, &e); b = fz_in32(b, &e); }
     va = a; vb = b;
-    feclearexcept(FE_ALL_EXCEPT);
+    host_exceptions_clear();
     x = va; y = vb;
     switch (op) {
         case OP_ADD: r = x + y;    break;
@@ -385,7 +457,7 @@ static double f64_do(fop_t op, double a, double b, uint32_t fpscr, uint32_t *exc
 
     if (fpscr & ARM_FPSCR_FZ) { a = fz_in64(a, &e); b = fz_in64(b, &e); }
     va = a; vb = b;
-    feclearexcept(FE_ALL_EXCEPT);
+    host_exceptions_clear();
     x = va; y = vb;
     switch (op) {
         case OP_ADD: r = x + y;   break;
@@ -960,7 +1032,7 @@ static arm_status_t vfp_dp_other(arm_cpu_t *c, uint32_t pc, uint32_t insn) {
             s = u2d(vfp_get_d(c, vm));
             if (c->vfp_fpscr & ARM_FPSCR_FZ) s = fz_in64(s, &exc);
             {   volatile double vs = s; double x;
-                feclearexcept(FE_ALL_EXCEPT);
+                host_exceptions_clear();
                 x = vs; vr = (float)x;
                 exc |= host_exceptions();
             }
@@ -975,7 +1047,7 @@ static arm_status_t vfp_dp_other(arm_cpu_t *c, uint32_t pc, uint32_t insn) {
             s = u2f(vfp_get_s(c, SREG(vm, M)));
             if (c->vfp_fpscr & ARM_FPSCR_FZ) s = fz_in32(s, &exc);
             {   volatile float vs = s; float x;
-                feclearexcept(FE_ALL_EXCEPT);
+                host_exceptions_clear();
                 x = vs; vr = (double)x;
                 exc |= host_exceptions();
             }
@@ -1014,7 +1086,7 @@ static arm_status_t vfp_dp_other(arm_cpu_t *c, uint32_t pc, uint32_t insn) {
             double exact = top ? (double)(int32_t)raw : (double)raw;
             volatile float vr;
             {   volatile double vs = exact; double x;
-                feclearexcept(FE_ALL_EXCEPT);
+                host_exceptions_clear();
                 x = vs; vr = (float)x;
                 exc |= host_exceptions();
             }
