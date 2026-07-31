@@ -365,6 +365,28 @@ static const uint32_t g_prog_vfp[] = {
  * however many iterations it runs. The stack sits clear of both the code and
  * the data page, and grows DOWN from BENCH_STACK_VA, away from both.
  */
+/*
+ * VFP LOAD/STORE, which is a DIFFERENT path from VFP arithmetic and had to be
+ * priced separately. vfp_execute_inner() routes the CDP form to vfp_dp() and
+ * the LDC/STC form to vfp_ldst(); fixing the arithmetic path says nothing
+ * about this one.
+ *
+ * It earns a row because the rasteriser is denser in these than in arithmetic:
+ * CA::OGL::sw_sample_nearest_BGRA8's opening dozen instructions are mostly
+ * vldr, pulling texture coordinates and vertex fields out of memory.
+ *
+ * The loaded word is the zero this harness pokes into BENCH_DATA_VA, so the
+ * value moving through s0 is +0.0f -- an ordinary number, not a denormal or a
+ * NaN, so the row measures the ordinary path rather than vfp.c's slow ones.
+ */
+static const uint32_t g_prog_vfpldst[] = {
+    0xed940a00u,   /* VLDR s0, [r4]     */
+    0xed840a01u,   /* VSTR s0, [r4, #4] */
+    0xe2833001u,   /* ADD  r3, r3, #1   */
+    0xe2522001u,   /* SUBS r2, r2, #1   */
+    0x1afffffau    /* BNE  loop         */
+};
+
 static const uint32_t g_prog_ldmstm[] = {
     0xe92d00f0u,   /* PUSH {r4, r5, r6, r7} */
     0xe8bd00f0u,   /* POP  {r4, r5, r6, r7} */
@@ -445,6 +467,16 @@ static const bench_cfg_t g_configs[] = {
       .loop_insns = 5u, .vfp = true },
     { .loop = "vfp mul/add/cvt", .mmu = "pages-4K", .tick = "yes",
       .prog = g_prog_vfp,   .prog_words = (unsigned)(sizeof g_prog_vfp / 4),
+      .loop_insns = 5u, .mmu_on = true, .small_pages = true, .do_tick = true,
+      .vfp = true },
+
+    /* VFP load/store, a different vfp.c path from VFP arithmetic, and the
+     * one the rasteriser's opening instructions are dense in. */
+    { .loop = "vfp ldr/str",  .mmu = "off",      .tick = "no",
+      .prog = g_prog_vfpldst, .prog_words = (unsigned)(sizeof g_prog_vfpldst / 4),
+      .loop_insns = 5u, .vfp = true },
+    { .loop = "vfp ldr/str",  .mmu = "pages-4K", .tick = "yes",
+      .prog = g_prog_vfpldst, .prog_words = (unsigned)(sizeof g_prog_vfpldst / 4),
       .loop_insns = 5u, .mmu_on = true, .small_pages = true, .do_tick = true,
       .vfp = true },
 
@@ -678,7 +710,20 @@ static bool verify(s5l8900_t *m, const bench_cfg_t *cfg, uint64_t retired) {
         ok = false;
     }
 
-    if (cfg->prog == g_prog_ldmstm) {
+    if (cfg->prog == g_prog_vfpldst) {
+        /* r3 counts iterations and the stored word is the loaded one, so a
+         * transfer that moved nothing would show up as a mismatch here. */
+        uint32_t mem = peek32(m, BENCH_DATA_VA + 4u);
+        if (cpu->r[3] != it32) {
+            printf("  ERROR: r3=%u, expected %u\n", cpu->r[3], it32);
+            ok = false;
+        }
+        if (mem != 0u) {
+            printf("  ERROR: [DATA+4]=0x%08x, expected 0\n", mem);
+            ok = false;
+        }
+        g_sink += (uint64_t)cpu->r[3] + mem + cpu->vfp_s[0];
+    } else if (cfg->prog == g_prog_ldmstm) {
         /* sp back at its start is the witness that every push was matched by
          * its pop -- a partial block transfer would leave it displaced. */
         if (cpu->r[13] != BENCH_STACK_VA) {
