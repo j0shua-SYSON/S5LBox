@@ -71,10 +71,10 @@ static void test_a_site_without_a_prologue_refuses_to_arm(void) {
     memset(g_fake, 0, sizeof g_fake);
     g_fail_reads = false;
 
-    const uint32_t *saved_p[8];
-    unsigned saved_n[8], n = ios3_hle_site_count();
-    CHECK(n <= 8u, "more sites (%u) than this test can save", n);
-    for (unsigned i = 0; i < n && i < 8u; i++) {
+    const uint32_t *saved_p[16];
+    unsigned saved_n[16], n = ios3_hle_site_count();
+    CHECK(n <= 16u, "more sites (%u) than this test can save", n);
+    for (unsigned i = 0; i < n && i < 16u; i++) {
         ios3_hle_site_t *s = ios3_hle_site_at(i);
         saved_p[i] = s->prologue; saved_n[i] = s->prologue_n;
         s->prologue = NULL; s->prologue_n = 0u;
@@ -91,7 +91,7 @@ static void test_a_site_without_a_prologue_refuses_to_arm(void) {
               s->name);
     }
 
-    for (unsigned i = 0; i < n && i < 8u; i++) {
+    for (unsigned i = 0; i < n && i < 16u; i++) {
         ios3_hle_site_t *s = ios3_hle_site_at(i);
         s->prologue = saved_p[i]; s->prologue_n = saved_n[i];
     }

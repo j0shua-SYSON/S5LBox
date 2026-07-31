@@ -185,6 +185,100 @@ static const uint32_t PROLOGUE_OGL_POLY_SCAN[] = {
 };
 
 /*
+ * MBX2D, WHICH IS A BETTER PLACE TO STAND THAN THE RASTERISER.
+ *
+ * The three sites above are the software rasteriser, and they were chosen
+ * because a profile said they were expensive. They are also the WRONG LAYER,
+ * and sizing the remaining two said so: sw_sample_nearest_BGRA8 transcribed in
+ * 64 instructions, but sw_scanline is multi-path with a dozen context fields,
+ * and ogl_poly_scan is ~3 KB with six calls out and a literal pool in the
+ * middle. Neither is a transcription. Continuing down that road means hand-
+ * porting a float rasteriser and diffing it pixel by pixel.
+ *
+ * The rasteriser only runs at all because CA_ENABLE_MBX2D=0 forces it. A real
+ * iPhone composites through MBX2D, and THAT interface is small: the whole 2D
+ * API is a handful of state setters and two operations. Measured from the
+ * cache's own symbol table -- mbx2DCtxSetSourceSurface is 5 instructions,
+ * SetScissor 7, SetDestinationSurface 7, and the two blits dispatch through a
+ * function pointer in the context. So the same technique applied one layer up
+ * replaces ALL of the rasteriser rather than a fraction of it, and does so at
+ * an interface with names and an argument shape instead of a register file.
+ *
+ * WHAT THE DECODE ESTABLISHED, all of it read rather than assumed:
+ *
+ *   mbx2DCtxBlitColor  ldr ip,[r0,#0x5c] ; bx ip   -> ctx->fill_dispatch
+ *   mbx2DCtxBlitCopy   ldr ip,[r0,#0x60] ; bx ip   -> ctx->copy_dispatch
+ *
+ * Both are two-instruction thunks, and the global-context entry points
+ * (mbx2DBlitColor, mbx2DBlitCopy) reach the work by calling them, so one site
+ * on each thunk catches every caller of either form. The dispatch targets are
+ * installed by generateProfile() and on EVT2 they route into the 3D core --
+ * mbx3DCtxBlitCopy alone is 890 instructions -- which is the size of what
+ * standing here skips.
+ *
+ * mbx2DCtxInitialize allocates a 124-byte context, and its FIRST act is
+ * `r4 = mbxConnectionOpen(); if (r4) return NULL`. That single call is why
+ * mbx2DGlobalContext is NULL in this VM and why SpringBoard dies in
+ * _mbx2DDisable: no connection, no context, no hardware path. It is included
+ * here so the connection's behaviour is observed rather than guessed at.
+ *
+ * THESE ARE OBSERVE, under the same order-of-work rule as everything above.
+ * What they buy first is a call count and an argument shape taken at the site
+ * itself -- whether the connection is even attempted, whether it succeeds now
+ * that the kext attaches, and whether any blit follows. A replacement needs
+ * that evidence first, and then still has to satisfy contract items 4 and 6:
+ * every pixel through the guest MMU, and a framebuffer diff against the same
+ * run with the site disarmed.
+ */
+static const uint32_t PROLOGUE_MBX_CONNECTION_OPEN[] = {
+    0xe92d40f0u,   /* push {r4, r5, r6, r7, lr}    */
+    0xe28d700cu,   /* add  r7, sp, #0xc            */
+    0xe92d0500u,   /* push {r8, sl}                */
+    0xe24dd014u,   /* sub  sp, sp, #0x14           */
+    0xe59f027cu,   /* ldr  r0, [pc, #0x27c]        */
+};
+
+/*
+ * Two instructions is the WHOLE function for both thunks, which collides with
+ * the four-word minimum the test enforces -- and the test is right to enforce
+ * it, so the prologue is extended rather than the rule relaxed.
+ *
+ * Words three and four are therefore the opening of the NEXT function
+ * (mbx2DBlitColor at +0x8, mbx2DBlitCopy at +0x8). That is deliberate and it
+ * makes the check STRONGER, not weaker: the claim being verified becomes "this
+ * thunk, immediately followed by that function's frame setup", which is a
+ * statement about the layout of the image and not just about two words. The
+ * bytes are as fixed as any others here -- the shared cache maps at a constant
+ * address and is never written.
+ *
+ * The two sites remain distinguishable despite sharing words three and four,
+ * because word ONE is the context offset the thunk loads -- 0x5c for the fill
+ * dispatch, 0x60 for the copy dispatch -- and that is what a mixed-up pair
+ * would have to get past.
+ */
+static const uint32_t PROLOGUE_MBX2D_CTX_BLIT_COLOR[] = {
+    0xe590c05cu,   /* ldr  ip, [r0, #0x5c]         */
+    0xe12fff1cu,   /* bx   ip                      */
+    0xe92d4080u,   /* push {r7, lr}   (mbx2DBlitColor) */
+    0xe28d7000u,   /* add  r7, sp, #0              */
+};
+
+static const uint32_t PROLOGUE_MBX2D_CTX_BLIT_COPY[] = {
+    0xe590c060u,   /* ldr  ip, [r0, #0x60]         */
+    0xe12fff1cu,   /* bx   ip                      */
+    0xe92d4080u,   /* push {r7, lr}   (mbx2DBlitCopy)  */
+    0xe28d7000u,   /* add  r7, sp, #0              */
+};
+
+static const uint32_t PROLOGUE_MBX2D_CTX_INITIALIZE[] = {
+    0xe92d40f0u,   /* push {r4, r5, r6, r7, lr}    */
+    0xe28d700cu,   /* add  r7, sp, #0xc            */
+    0xe3a0007cu,   /* mov  r0, #0x7c  (sizeof ctx) */
+    0xeb0016bcu,   /* bl   operator new            */
+    0xe1a05000u,   /* mov  r5, r0                  */
+};
+
+/*
  * The native sw_sample_nearest_BGRA8, transcribed from the decode above.
  *
  * ATTACHED BUT NOT ARMED. The site below stays IOS3_HLE_OBSERVE, so
@@ -296,6 +390,22 @@ static ios3_hle_site_t g_sites[] = {
     { "ogl_poly_scan",      0x311e2100u, PROLOGUE_OGL_POLY_SCAN,
       (unsigned)(sizeof PROLOGUE_OGL_POLY_SCAN /
                  sizeof PROLOGUE_OGL_POLY_SCAN[0]),
+      NULL, IOS3_HLE_OBSERVE, false, false, 0, 0, 0, 0 },
+    { "mbxConnectionOpen",  0x30e1fc90u, PROLOGUE_MBX_CONNECTION_OPEN,
+      (unsigned)(sizeof PROLOGUE_MBX_CONNECTION_OPEN /
+                 sizeof PROLOGUE_MBX_CONNECTION_OPEN[0]),
+      NULL, IOS3_HLE_OBSERVE, false, false, 0, 0, 0, 0 },
+    { "mbx2DCtxInitialize", 0x30e1abe4u, PROLOGUE_MBX2D_CTX_INITIALIZE,
+      (unsigned)(sizeof PROLOGUE_MBX2D_CTX_INITIALIZE /
+                 sizeof PROLOGUE_MBX2D_CTX_INITIALIZE[0]),
+      NULL, IOS3_HLE_OBSERVE, false, false, 0, 0, 0, 0 },
+    { "mbx2DCtxBlitColor",  0x30e1ad6cu, PROLOGUE_MBX2D_CTX_BLIT_COLOR,
+      (unsigned)(sizeof PROLOGUE_MBX2D_CTX_BLIT_COLOR /
+                 sizeof PROLOGUE_MBX2D_CTX_BLIT_COLOR[0]),
+      NULL, IOS3_HLE_OBSERVE, false, false, 0, 0, 0, 0 },
+    { "mbx2DCtxBlitCopy",   0x30e1adc0u, PROLOGUE_MBX2D_CTX_BLIT_COPY,
+      (unsigned)(sizeof PROLOGUE_MBX2D_CTX_BLIT_COPY /
+                 sizeof PROLOGUE_MBX2D_CTX_BLIT_COPY[0]),
       NULL, IOS3_HLE_OBSERVE, false, false, 0, 0, 0, 0 },
 };
 
