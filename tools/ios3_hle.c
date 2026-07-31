@@ -99,6 +99,69 @@ static const uint32_t PROLOGUE_CGSFILLDRAM8BY1[] = {
  * gate is therefore five words deep, not three: the fourth word is where they
  * separate (a shift, a one-register vpush, and a five-register vpush).
  */
+/*
+ * sw_sample_nearest_BGRA8, FULLY DECODED. All 64 instructions, so the native
+ * replacement is now transcription rather than reverse engineering.
+ *
+ * C++ signature, demangled:
+ *   sw_sample_nearest_BGRA8(SWTexture *tex, int unit, int unused,
+ *                           const ogl_poly_vert *start,
+ *                           const ogl_poly_vert *delta,
+ *                           const ogl_poly_vert *, const ogl_poly_vert *,
+ *                           unsigned count, unsigned *out)
+ *
+ * `unit` is a TEXTURE UNIT INDEX, not a vertex index: the code computes
+ * unit*8 and adds it to a vert pointer before reading +0x20/+0x24, so a vert
+ * carries an ARRAY of (u,v) float pairs at +0x20 with an 8-byte stride. Args
+ * 3, 6 and 7 are never read. This was the one thing that could not be guessed
+ * from the signature and is why the shape looked wrong at first.
+ *
+ * SWTexture, from the four loads at entry:
+ *   +0x00  uint8_t *base      pixel data
+ *   +0x04  uint32_t pitch     BYTES per row (used as base + pitch*row)
+ *   +0x08  int32_t  max_x     clamp, 16.16 fixed point
+ *   +0x0c  int32_t  max_y     clamp, 16.16 fixed point
+ *
+ * ogl_poly_vert, only the fields this routine touches:
+ *   +0x0c  float    w         perspective divisor
+ *   +0x20  float[2] uv[unit]  texture coordinates, 8-byte stride
+ *
+ * Constants, read from the literal pool rather than assumed:
+ *   0x3122b9c4 = 65536.0f     float -> 16.16 fixed point
+ *   0x3122b9c8 = 1.0f         numerator of the reciprocal
+ *
+ * The whole routine, with u/v as 16.16 accumulators and w as a float:
+ *
+ *   u  = (int)(start->uv[unit][0] * 65536.0f);
+ *   v  = (int)(start->uv[unit][1] * 65536.0f);
+ *   du = (int)(delta->uv[unit][0] * 65536.0f);
+ *   dv = (int)(delta->uv[unit][1] * 65536.0f);
+ *   w  = start->w;  dw = delta->w;
+ *   for (k = 0; k < count; k++) {
+ *       float inv = 1.0f / w;
+ *       int x = (int)((float)u * inv);
+ *       int y = (int)((float)v * inv);
+ *       x = x < 0 ? 0 : x;                  // bic rd, rn, rn asr #31
+ *       y = y < 0 ? 0 : y;
+ *       if (y >= max_y) y = max_y;          // movge, so CLAMPS AT max_y
+ *       if (x >= max_x) x = max_x;          // and this one clamps too
+ *       out[k] = *(uint32_t *)(base + pitch * (y >> 16) + ((x >> 16) << 2));
+ *       u += du;  v += dv;  w += dw;
+ *   }
+ *
+ * PERSPECTIVE-CORRECT, which is the part that must not be simplified away:
+ * the divide is per pixel, not per span, so dropping it would drift on any
+ * transformed layer. The clamps saturate AT the limit rather than one below
+ * it, and the negative clamp is `bic rd, rn, rn asr #31`, which is
+ * "0 if negative else unchanged" -- not an absolute value.
+ *
+ * WHAT REMAINS BEFORE THIS CAN BE REPLACE. Three things, none of them
+ * unknowns: read every operand through the guest MMU page by page (contract
+ * item 4), decline rather than fault when a page is not mapped (item 5), and
+ * diff the framebuffer against the same run with the site disarmed (item 6).
+ * The rounding is float-to-int truncation on both axes, which C's cast gives
+ * exactly, so there is no rounding mode to match.
+ */
 static const uint32_t PROLOGUE_SW_SAMPLE_NEAREST_BGRA8[] = {
     0xe92d40f0u,   /* push  {r4, r5, r6, r7, lr} */
     0xe28d700cu,   /* add   r7, sp, #0xc         */
