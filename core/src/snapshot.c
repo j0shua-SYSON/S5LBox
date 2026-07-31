@@ -119,7 +119,7 @@ SNAP_SIZE_GUARD(s5l_uart_t,        8280,  "snap_uart");
 SNAP_SIZE_GUARD(s5l_vic_t,         16,    "snap_vic");
 SNAP_SIZE_GUARD(s5l_timer_t,       40,    "snap_timer");
 SNAP_SIZE_GUARD(s5l_power_t,       24,    "snap_power");
-SNAP_SIZE_GUARD(s5l_mbx_t,         8196,  "snap_mbx");
+SNAP_SIZE_GUARD(s5l_mbx_t,         8200,  "snap_mbx");
 SNAP_SIZE_GUARD(s5l_clcd_window_t, 24,    "snap_clcd");
 SNAP_SIZE_GUARD(s5l_clcd_t,        3368,  "snap_clcd");
 SNAP_SIZE_GUARD(s5l_tvout_t,       12304, "snap_tvout");
@@ -511,6 +511,7 @@ static void snap_power(sn_io_t *io, s5l_power_t *p) {
  */
 static void snap_mbx(sn_io_t *io, s5l_mbx_t *m) {
     for (unsigned i = 0; i < S5L_MBX_SIZE / 4u; i++) F32(m->reg[i]);
+    F32(m->status);
     FB(m->reset_done);
 }
 

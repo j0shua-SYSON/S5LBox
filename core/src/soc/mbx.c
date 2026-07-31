@@ -75,6 +75,7 @@ uint32_t s5l_mbx_read(s5l_mbx_t *m, uint32_t off) {
         uint32_t v = m->reg[off / 4u];
         return m->reset_done ? (v | S5L_MBX_RESET_DONE) : v;
     }
+    if (off == S5L_MBX_STATUS) return m->status;
     return m->reg[off / 4u];
 }
 
@@ -92,4 +93,37 @@ void s5l_mbx_write(s5l_mbx_t *m, uint32_t off, uint32_t val) {
      * evidence behind it.
      */
     if (off == S5L_MBX_RESET && (val & 1u)) m->reset_done = true;
+
+    /*
+     * Write-one-to-clear on the status word, taken from the driver's own
+     * acknowledgement: it clears exactly the bit it waited on (0x40), and
+     * clears 0x7ff during init to drop everything pending at once.
+     */
+    if (off == S5L_MBX_STATUS_ACK) m->status &= ~val;
+
+    /*
+     * The completion this file CAN honestly assert, and the line it will not
+     * cross.
+     *
+     * The driver programs an enable, a size and an address, then waits for bit
+     * 6. Writing the address is the last step, so it is the go. Raising the
+     * bit there models the COUPLING the driver expects -- the same thing
+     * power.c does when it moves STATE only in response to ONCTRL/OFFCTRL, and
+     * for the same reason: a status that never moves is a spin, and a status
+     * that moves on its own is a fiction.
+     *
+     * WHAT IS NOT CLAIMED. Whatever transfer 0x838/0x83c/0x6d8 describe is NOT
+     * performed. No byte is moved, nothing is written to 0x09000000, and this
+     * file does not know whether the operation is a clear, a copy or a
+     * self-test. Saying "done" is therefore a statement about the handshake
+     * and not about memory.
+     *
+     * That is safe only because it invents no DATA. If the driver later reads
+     * the region and depends on an effect that never happened, it will stall
+     * or complain at a NEW address, which is observable and diagnosable --
+     * unlike a fabricated buffer, which would look like success and be found
+     * days later. The moment such a stall appears, the operation gets modelled
+     * properly rather than acknowledged.
+     */
+    if (off == S5L_MBX_KICK) m->status |= S5L_MBX_STATUS_DONE;
 }

@@ -763,8 +763,31 @@ void     s5l_power_write(s5l_power_t *p, uint32_t off, uint32_t val);
 /* The bit AppleMBX+0xb478 tests with `tst r0, #0x10000`, looping while clear. */
 #define S5L_MBX_RESET_DONE   (1u << 16)
 
+/*
+ * The second handshake, from AppleMBX+0x68a0. Having cleared reset the driver
+ * programs three registers and then waits on a status bit:
+ *
+ *     write(0x838, 1);            enable
+ *     write(0x83c, 0x00100000);   a size -- 1 MiB
+ *     write(0x6d8, 0x09000000);   a DRAM address, and the last one written
+ *   loop:
+ *     r3 = read(0x12c);
+ *     tst r3, #0x40;  beq loop    spin while bit 6 is CLEAR
+ *     write(0x134, 0x40);         then acknowledge exactly that bit
+ *
+ * So 0x12c is a status word and 0x134 is its write-one-to-clear
+ * acknowledgement -- which is corroborated by the driver writing 0x7ff to
+ * 0x134 during init, i.e. clearing every pending bit before it starts.
+ */
+#define S5L_MBX_STATUS       0x0000012cu
+#define S5L_MBX_STATUS_ACK   0x00000134u
+#define S5L_MBX_STATUS_DONE  (1u << 6)
+/* The last register of the kick sequence, so writing it is the "go". */
+#define S5L_MBX_KICK         0x000006d8u
+
 typedef struct {
     uint32_t reg[S5L_MBX_SIZE / 4u];
+    uint32_t status;          /* 0x12c; write-one-to-clear via 0x134        */
     bool     reset_done;      /* set by a reset REQUEST, never self-asserted */
 } s5l_mbx_t;
 
