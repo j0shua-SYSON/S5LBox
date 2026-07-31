@@ -661,3 +661,37 @@ Zero refusals, four edges driven, and INTEN carrying every button line. This
 is the emulator's own account agreeing with the device report that Power put
 the guest to sleep. There is no input bug; see the section above on why 1-2
 fps makes a working button look dead.
+
+## The keygen is paid ONCE, and the proof is on the disk
+
+r219 established that lockdownd's prime search ends at instruction
+6,368,479,883 and never returns. The remaining question was whether that cost
+recurs on every launch, because a one-time cost that is re-paid every boot is
+not one-time in any way a user experiences.
+
+It does not recur. Comparing the source rootfs against r219's work image,
+which ran to 3e10 and so is long past the end of the search:
+
+| file | source | after keygen |
+|---|---|---|
+| `device_private_key.pem` | absent | **present** |
+| `device_public_key.pem` | absent | **present** |
+
+Those are lockdownd's device key pair, and they are what 6.4e9 instructions of
+primality testing produced. They are written into the work image, which the
+app deliberately preserves -- VMFirmwareBoot.c removes an INCOMPLETE work
+image and refuses to touch a finished one, on the grounds that it "is the
+user's machine ... deleting it because provisioning happened to be asked again
+would be data loss dressed up as repair."
+
+SO THE FRAME BUDGET REPAIRS ITSELF, PERMANENTLY, WITH NO CODE. A first launch
+pays about 4.2 minutes at the device's measured 25 M insn/s; every launch
+after that finds the keys and skips the search entirely. The ~51% of frame
+instructions attributed to lockdownd in r213 is therefore a FIRST-BOOT cost
+and not a steady-state one.
+
+WHAT THIS MEANS FOR THE 1-2 FPS FIGURE. That measurement was taken during the
+search, so it is the worst case rather than the typical one. Steady state
+should be roughly twice it before anything else is changed, which is a
+prediction this file is making and which a five-minute run on the device can
+confirm or refute.
