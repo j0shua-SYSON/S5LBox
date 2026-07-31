@@ -570,3 +570,33 @@ nothing for iOS to refuse -- the same property that makes `ios3_hle.c` legal.
 Against a decoder that re-decodes every instruction every time, that is
 precisely the ARM-vs-Thumb gap above, and it is the most promising route to
 the ~1.7x still missing after the two frame-cost fixes.
+
+## Buttons were never broken; they were slow (2026-07-31)
+
+Reported from the device as "the buttons don't seem to work", then resolved by
+the reporter's own next observation: pressing Power turned the guest's screen
+black while the app kept running. That is not a failure, it is iPhone OS 3
+going to sleep, which is precisely what Power does -- so the whole chain works
+end to end:
+
+    tap -> VMEngine queue -> emulator thread -> s5l_buttons_set -> GPIO pin
+        -> interrupt controller -> AppleM68Buttons -> SpringBoard -> sleep
+
+Nothing was wrong with the app path, which matches a static review that failed
+to find a defect in it: the bar is enabled, the transition is queued, the
+app-to-core enum translation is correct, the drain runs between chunks, and
+buttons.c's own header already recorded run86 measuring the guest ARMING all
+five lines at instruction 238,689,154 (INTEN group 1 = 0x00002f00).
+
+WHY IT LOOKED BROKEN, and why this belongs in the frame-rate file rather than
+an input one. At 1-2 fps a frame is 0.5-1 SECOND. SpringBoard answers Home
+with an animation, which is many frames, so a press produces no visible change
+for ten seconds or more -- indistinguishable from a dead button. Power looked
+different only because its response is a single state change with no animation
+to sit through: one frame, and the screen is off.
+
+So "input is broken" was a frame-rate symptom, and there is no separate input
+bug to fix. The lesson for the next such report is that at these frame rates
+the UI cannot be judged by whether it responds, only by whether it responds
+EVENTUALLY, and the status line now prints the board's own delivered/refused
+counters so that question can be answered without waiting for an animation.
