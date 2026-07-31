@@ -918,6 +918,28 @@ target_link_libraries(unlzss PRIVATE emucore)
 add_executable(machoinfo ../tools/machoinfo.c)
 target_link_libraries(machoinfo PRIVATE emucore)
 
+# The snapshot store (app/Sources/VMSnapshotStore.c). Plain C11 rather than
+# Objective-C because a snapshot id becomes a PATH COMPONENT and arrives from
+# a directory listing, so the same shape rules have to hold on the host tests
+# and on the device. Almost every test is a refusal for that reason.
+add_executable(test_snapshot_store
+    tests/test_snapshot_store.c
+    ../app/Sources/VMSnapshotStore.c
+)
+target_include_directories(test_snapshot_store PRIVATE
+    ../app/Sources ../tools include)
+set_target_properties(test_snapshot_store PROPERTIES
+    C_STANDARD 11
+    C_STANDARD_REQUIRED YES
+    C_EXTENSIONS NO)
+if(MSVC)
+    target_compile_options(test_snapshot_store PRIVATE /W4 /WX)
+else()
+    target_compile_options(test_snapshot_store PRIVATE
+        -Wall -Wextra -Werror -pedantic -Wformat=2 -Wshadow)
+endif()
+add_test(NAME snapshot_store COMMAND test_snapshot_store)
+
 add_executable(bootkernel ../tools/bootkernel.c)
 target_link_libraries(bootkernel PRIVATE
     emucore host_audio_capture host_file_block host_guest_patch
