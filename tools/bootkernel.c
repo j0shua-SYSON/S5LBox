@@ -6336,6 +6336,13 @@ static struct {
     struct {
         uint32_t base;          /* TTBR0 translation-table base            */
         uint64_t hits;
+        /* Resolved ONCE, when the space is first seen, not per sample: the
+         * identity walk reads guest memory through the MMU and is far too
+         * expensive to run at sampling rate. A pid recorded at first sight is
+         * still the right answer, because TTBR0 identifies the address space
+         * for as long as that process lives. */
+        uint32_t pid;
+        bool     pid_valid;
     } as_hist[16];
 
 
@@ -16881,6 +16888,24 @@ static void prof_sample(const arm_cpu_t *cpu, uint32_t pc) {
             if (G.as_n < (sizeof G.as_hist / sizeof G.as_hist[0])) {
                 G.as_hist[G.as_n].base = base;
                 G.as_hist[G.as_n].hits = 0;
+                G.as_hist[G.as_n].pid = 0;
+                G.as_hist[G.as_n].pid_valid = false;
+                /*
+                 * Name it here, at first sight, and never again. The walk can
+                 * fail -- the structures may not be reachable at this instant,
+                 * or the child config may not be armed -- and a failure is
+                 * recorded as "unnamed" rather than guessed, because the whole
+                 * point of the table is to stop attributing work to a process
+                 * on the strength of an assumption.
+                 */
+                diagnostic_thread_identity_t who;
+                diagnostic_read_thread_identity(
+                    (arm_cpu_t *)cpu, cpu->cp15.tpidrprw, &who);
+                if (who.task_valid) {
+                    G.as_hist[G.as_n].pid =
+                        who.effective_valid ? who.effective_pid : who.task_pid;
+                    G.as_hist[G.as_n].pid_valid = true;
+                }
                 G.as_n++;
             } else {
                 G.as_dropped++;          /* never silently: reported */
@@ -28242,9 +28267,16 @@ external_md_work_ready:
             for (unsigned i = 0; i < G.as_n; i++)
                 if (G.as_hist[i].hits > best) { best = G.as_hist[i].hits; bi = i; }
             if (bi == G.as_n || !best) break;
-            printf("    %5.1f%%  ttbr0 0x%08x   %" PRIu64 " samples\n",
-                   total ? 100.0 * (double)best / (double)total : 0.0,
-                   G.as_hist[bi].base, best);
+            if (G.as_hist[bi].pid_valid)
+                printf("    %5.1f%%  ttbr0 0x%08x  pid %-5u %" PRIu64
+                       " samples\n",
+                       total ? 100.0 * (double)best / (double)total : 0.0,
+                       G.as_hist[bi].base, G.as_hist[bi].pid, best);
+            else
+                printf("    %5.1f%%  ttbr0 0x%08x  pid ?     %" PRIu64
+                       " samples  (identity unavailable when first seen)\n",
+                       total ? 100.0 * (double)best / (double)total : 0.0,
+                       G.as_hist[bi].base, best);
             G.as_hist[bi].hits = 0;   /* consume */
         }
     }
