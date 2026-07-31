@@ -98,7 +98,22 @@ void s5l_mbx_write(s5l_mbx_t *m, uint32_t off, uint32_t val) {
      * inventing a way to un-complete a reset would be a behaviour with no
      * evidence behind it.
      */
-    if (off == S5L_MBX_RESET && (val & 1u)) m->reset_done = true;
+    /*
+     * BIT 16 FOLLOWS THE REQUEST; it does not latch. The first version of this
+     * file set it on a request and never cleared it, with the comment that
+     * "nothing observed shows the driver taking a reset back". That was true
+     * of the evidence then and false of the device, and the driver said so:
+     * AppleMBX+0xb0c0 writes 0 to this same register and then spins
+     *
+     *     ands r0, r0, #0x10000
+     *     bne  loop                  ; wait while bit 16 is SET
+     *
+     * which is the exact mirror of the assert wait at AppleMBX+0xb440. A latch
+     * that never cleared turned that into an infinite loop -- the driver
+     * attached, bound the display, and then hung here, which is how it was
+     * found. So the bit tracks the request in both directions.
+     */
+    if (off == S5L_MBX_RESET) m->reset_done = (val & 1u) != 0u;
 
     /*
      * Write-one-to-clear on the status word, taken from the driver's own
