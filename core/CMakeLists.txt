@@ -922,6 +922,28 @@ target_link_libraries(machoinfo PRIVATE emucore)
 # Objective-C because a snapshot id becomes a PATH COMPONENT and arrives from
 # a directory listing, so the same shape rules have to hold on the host tests
 # and on the device. Almost every test is a refusal for that reason.
+# The copy-on-write overlay. Tested against a RAM disk that deliberately
+# satisfies only PART of alternate requests, because the real block adapter
+# may do the same and code that assumes otherwise records a block padded with
+# stale scratch -- a corruption that surfaces only at restore time.
+add_executable(test_snapshot_cow
+    tests/test_snapshot_cow.c
+    ../app/Sources/VMSnapshotCow.c
+)
+target_include_directories(test_snapshot_cow PRIVATE
+    ../app/Sources ../tools include)
+set_target_properties(test_snapshot_cow PROPERTIES
+    C_STANDARD 11
+    C_STANDARD_REQUIRED YES
+    C_EXTENSIONS NO)
+if(MSVC)
+    target_compile_options(test_snapshot_cow PRIVATE /W4 /WX)
+else()
+    target_compile_options(test_snapshot_cow PRIVATE
+        -Wall -Wextra -Werror -pedantic -Wformat=2 -Wshadow)
+endif()
+add_test(NAME snapshot_cow COMMAND test_snapshot_cow)
+
 add_executable(test_snapshot_store
     tests/test_snapshot_store.c
     ../app/Sources/VMSnapshotStore.c
