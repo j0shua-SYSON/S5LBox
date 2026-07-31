@@ -130,6 +130,11 @@ static const vm_option_omission_t VM_OMITTED[] = {
       "it with nothing to show" },
     { "iomfb-display",
       "meaningful only alongside --framebuffer, which this app does not offer" },
+    { "hle",
+      "every high-level-emulation site is OBSERVE today, so arming them counts "
+      "calls and changes nothing a phone user could see. This becomes a real "
+      "setting -- probably a default rather than a toggle -- on the day a site "
+      "becomes REPLACE and starts drawing scanlines natively" },
     { "fstab-fixup",
       "turning it off halts the boot at fsck by design, which is a bisection "
       "step rather than a setting" },

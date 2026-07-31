@@ -25,6 +25,7 @@
 #include "bringup.h"
 #include "dt_inplace.h"
 #include "file_block.h"
+#include "ios3_hle.h"
 #include "ios3_kernel_patch.h"
 #include "macho.h"
 #include "md_bridge.h"
@@ -444,6 +445,7 @@ typedef struct {
     bool print_config;
     bool call_probe_regs;
     bool call_probe_live;
+    bool hle;
     bool uart4_rx_irq;
 } boot_toggles_t;
 
@@ -609,6 +611,14 @@ static const boot_toggle_t BOOT_TOGGLES[] = {
       "only -- it cannot create one. ON by default anyway, so the day the\n"
       "provisioner lands no command line has to change; until then every run\n"
       "header says, in as many words, that it was requested and not applied." },
+    { "hle", NULL, NULL, false, BOOT_GROUP_DIAGNOSTIC,
+      BOOT_FIELD(hle),
+      "arm the userspace high-level-emulation sites in tools/ios3_hle.c and\n"
+      "count them. Every site is OBSERVE today, so the guest still executes\n"
+      "its own code and the only effect is the report -- but the retired\n"
+      "instruction count is unchanged only for that reason, and any future\n"
+      "REPLACE site makes runs with and without this flag incomparable.\n"
+      "OFF by default for exactly that reason." },
     { "jb-codesign", NULL, NULL, false, BOOT_GROUP_GUEST_STATE,
       BOOT_FIELD(jb_codesign),
       "the kernel half of --jailbreak: disable the guest's code-signature\n"
@@ -3029,6 +3039,78 @@ static bool guest_read_user_bytes(arm_cpu_t *cpu, uint32_t va,
         out[i] = g_mach->ram[pa - g_mach->ram_base];
     }
     return true;
+}
+
+/* --- HLE: driving tools/ios3_hle.c from a real run ------------------------
+ *
+ * The library has been linkable and unit-tested for some time without any run
+ * ever calling it, which made its sites unreachable instrumentation. This is
+ * the seam that fixes that.
+ *
+ * WHICH ADDRESS SPACE. ios3_hle_arm() takes the TTBR0 sites are restricted to,
+ * and a shared-cache address exists in every process, so that restriction is
+ * load-bearing rather than decorative. SpringBoard's TTBR0 is not known until
+ * it launches, so arming is deferred: the FIRST user-mode instruction that
+ * lands exactly on a registered site selects the space, and everything arms to
+ * it. That is self-configuring and needs no name resolution, but it is an
+ * inference, so the chosen TTBR0 is printed in the report next to the hit
+ * counts -- and any later hit from a different space is counted as wrong_space
+ * rather than silently folded in. If those two disagree, the report says so.
+ *
+ * WRITES FAIL CLOSED. Every registered site is OBSERVE and has a NULL handler,
+ * so nothing can write yet; the write adapter therefore refuses rather than
+ * pretending. The day a REPLACE site lands it needs a real writer that goes
+ * through the MMU page by page, and a refusal here is a loud, early failure
+ * instead of a silently half-written scanline.
+ */
+/* Defined with the rest of the address-space diagnostics, far below. */
+static uint32_t diagnostic_ttbr0_base(const arm_cpu_t *cpu);
+
+static bool g_hle_enabled;
+static uint32_t g_hle_space;     /* TTBR0 armed to; 0 == not armed yet */
+
+static bool hle_mem_read(void *ctx, uint32_t va, void *dst, uint32_t len) {
+    if (!ctx || !dst || !len) return false;
+    return guest_read_user_bytes((arm_cpu_t *)ctx, va, (uint8_t *)dst,
+                                 (size_t)len, NULL, NULL);
+}
+
+static bool hle_mem_write(void *ctx, uint32_t va, const void *src,
+                          uint32_t len) {
+    (void)ctx; (void)va; (void)src; (void)len;
+    return false;
+}
+
+/*
+ * Returns true only when a handler did the whole job and set the CPU up to
+ * return, in which case the caller must NOT step this instruction. Every site
+ * is OBSERVE today, so this returns false always and the guest keeps running
+ * its own code -- the counters move, the behaviour does not.
+ */
+static bool hle_took_call(arm_cpu_t *cpu) {
+    ios3_hle_mem_t mem;
+    uint32_t as, pc;
+
+    if (!g_hle_enabled || !cpu) return false;
+    if ((cpu->cpsr & ARM_CPSR_MODE_MASK) != ARM_MODE_USR) return false;
+
+    mem.ctx = cpu;
+    mem.read = hle_mem_read;
+    mem.write = hle_mem_write;
+    as = diagnostic_ttbr0_base(cpu);
+    pc = cpu->r[15] & ~1u;
+
+    if (!g_hle_space) {
+        for (unsigned i = 0; i < ios3_hle_site_count(); i++) {
+            const ios3_hle_site_t *s = ios3_hle_site_at(i);
+            if (s && s->va == pc) {
+                if (ios3_hle_arm(&mem, as)) g_hle_space = as;
+                break;
+            }
+        }
+        if (!g_hle_space) return false;
+    }
+    return ios3_hle_step(cpu, &mem, pc, as);
 }
 
 static lifecycle_path_status_t
@@ -17313,6 +17395,38 @@ static bool call_probe_ring_selfcheck(void) {
     return CALL_PROBE_PC_MAX >= 1u;
 }
 
+static void hle_report(void) {
+    if (!g_hle_enabled) return;
+
+    printf("\n=== USERSPACE HLE SITES ===\n");
+    if (!g_hle_space)
+        printf("    armed to: NOTHING -- no registered site was ever reached\n"
+               "    in user mode, so no address space was ever chosen. Zero\n"
+               "    hits below is THAT, and not a measurement of zero.\n");
+    else
+        printf("    armed to: ttbr0 0x%08x, chosen by the first site reached\n",
+               g_hle_space);
+
+    printf("    %-26s %12s %10s %10s %9s\n",
+           "site", "hits", "handled", "declined", "wrong-as");
+    for (unsigned i = 0; i < ios3_hle_site_count(); i++) {
+        const ios3_hle_site_t *s = ios3_hle_site_at(i);
+        if (!s) continue;
+        printf("    %-26s %12llu %10llu %10llu %9llu%s\n",
+               s->name,
+               (unsigned long long)s->hits,
+               (unsigned long long)s->handled,
+               (unsigned long long)s->declined,
+               (unsigned long long)s->wrong_space,
+               s->identity_failed ? "  IDENTITY FAILED"
+                                  : (s->armed ? "" : "  not armed"));
+    }
+    printf("    Hits with no handled is OBSERVE working as intended: the site\n"
+           "    was counted and the guest still ran its own code. IDENTITY\n"
+           "    FAILED means the bytes there are not the recorded prologue,\n"
+           "    so the site refused to arm rather than guessing.\n");
+}
+
 static void call_probe_report(void) {
     if (!G.call_probe_n) return;
 
@@ -26923,6 +27037,7 @@ external_md_work_ready:
      * it is still written after spy_install() for the same reason everything
      * else here is: G is memset there. */
     G.call_probe_regs = cfg.v.call_probe_regs;
+    g_hle_enabled = cfg.v.hle;
     G.call_probe_live = cfg.v.call_probe_live;
     G.call_probe_n = call_probe_n;
     /*
@@ -27641,7 +27756,21 @@ external_md_work_ready:
             if ((n & 0xffffu) == 0) vm_sample(n, steps);
         }
 
-        st = arm_step(&mach.cpu);
+        /*
+         * Deliberately OUTSIDE the !fast_hot gate. The observational block
+         * above is diagnostics and --fast exists to switch it off; this is a
+         * candidate speedup, and a speedup that only works in the slow mode is
+         * not one. It costs a mode compare per instruction while disarmed.
+         */
+        if (hle_took_call(&mach.cpu)) {
+            /* A handler did the job and set PC; the instruction must not run.
+             * No site does this yet -- every one is OBSERVE -- so this branch
+             * is unreachable today and is here so that the day one becomes
+             * REPLACE, the skip is already correct rather than retrofitted. */
+            st = ARM_OK;
+        } else {
+            st = arm_step(&mach.cpu);
+        }
         springboard_return_note_post_step(&mach.cpu, n, st);
         springboard_exec_trace_note_user_post_step(&mach.cpu, n, st);
         springboard_framebuffer_note_post_step(&mach.cpu, n, st);
@@ -28163,6 +28292,7 @@ external_md_work_ready:
 
     /* ------------------------------------------- the user-mode call probe --- */
     call_probe_report();
+    hle_report();
     touch_report();
     button_report();
 
