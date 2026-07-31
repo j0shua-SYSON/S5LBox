@@ -460,12 +460,48 @@ static void trace_ctx(const ios3_hle_mem_t *mem, uint32_t ctx) {
     fprintf(stderr, "\n");
 }
 
+/*
+ * FOLLOW THE SURFACE POINTERS, because the first dump proved they are pointers.
+ *
+ * r248 gave source (+00,+04,+08) = (0xc54bca00, 0x500, 0x60000) and destination
+ * (+10,+14,+18) = (0xc54bc980, 0x500, 0x60000). The middle word reads as a
+ * stride immediately -- 0x500 is 1280, which is 320 pixels at 4 bytes, and a
+ * narrower source in the same run carries 0x340, which is 208 at 4 bytes. The
+ * last is a format, one of the constants copyDispatchEVT2 tests.
+ *
+ * The FIRST word is not a pixel base, and the values say so: 0xc54bca00 and
+ * 0xc54bc980 are 0x80 apart, and two 320x480 framebuffers cannot be 128 bytes
+ * apart. They are descriptors in a table. So the base has to be read out of the
+ * object, which is what this does -- eight words is enough to show which slot
+ * holds an address in guest DRAM (0x08000000..0x10000000, where ctx+0x20's
+ * 0x090ff000 already sits) and which hold width, height and flags.
+ */
+static void trace_surface(const ios3_hle_mem_t *mem, const char *tag,
+                          uint32_t p) {
+    unsigned i;
+    if (!p) return;
+    fprintf(stderr, "hle-trace   %s@%08x", tag, p);
+    for (i = 0; i < 8u; i++) {
+        uint32_t w = 0;
+        if (read_u32(mem, p + i * 4u, &w))
+            fprintf(stderr, " +%02x=%08x", i * 4u, w);
+        else
+            fprintf(stderr, " +%02x=??", i * 4u);
+    }
+    fprintf(stderr, "\n");
+}
+
 /* The two thunks take the context in r0 and the operation's own arguments
  * after it, so the stack words are the 5th argument onward. */
 static bool hle_trace_blit_copy(arm_cpu_t *cpu, const ios3_hle_mem_t *mem) {
     bool first = g_trace_budget[0] < 12u;
     (void)trace_args("mbx2DCtxBlitCopy", cpu, mem, 0, 3);
-    if (first) trace_ctx(mem, cpu->r[0]);
+    if (first) {
+        uint32_t src = 0, dst = 0;
+        trace_ctx(mem, cpu->r[0]);
+        if (read_u32(mem, cpu->r[0] + 0x00u, &src)) trace_surface(mem, "src", src);
+        if (read_u32(mem, cpu->r[0] + 0x10u, &dst)) trace_surface(mem, "dst", dst);
+    }
     return false;
 }
 static bool hle_trace_blit_color(arm_cpu_t *cpu, const ios3_hle_mem_t *mem) {
