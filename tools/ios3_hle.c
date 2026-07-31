@@ -414,10 +414,59 @@ static bool trace_args(const char *what, arm_cpu_t *cpu,
     return false;
 }
 
+/*
+ * THE CONTEXT DUMP, which is the other half of what a native blit needs.
+ *
+ * r247 settled the argument shape from the values alone: the first call is
+ * (0,0)->(0,0) 0x140 x 0x1e0, which is 320x480, the whole screen; a later one is
+ * 320x96 at y=384, which is the dock. So the operation is
+ *
+ *   mbx2DCtxBlitCopy(ctx, srcX, srcY, dstX, dstY, width, height)
+ *
+ * and that agrees with how CA::RenderMBX2D::blit_copy_simple builds its six
+ * arguments, with d->[0x80] and d->[0x84] as the extent. Source origin is always
+ * (0,0) because each layer sets its own surface first.
+ *
+ * What the arguments do NOT say is where the pixels ARE. That lives in the
+ * context, whose layout is read out of the setters:
+ *
+ *   ctx+0x00/04/08/0c   source surface      (SetSourceSurface's r1,r2,r3,byte)
+ *   ctx+0x10/14/18/1c   destination surface (SetDestinationSurface, same shape)
+ *   ctx+0x38/3c/40/44   scissor x,y,w,h
+ *   ctx+0x4c/50/54      scaleX, scaleY (1.0f at init), "not unity" flag
+ *   ctx+0x5c/60         fill and copy dispatch pointers
+ *
+ * Two of those words per surface are a base and a stride and one is a format
+ * (it is compared against 0x68000 and 0x70000 in copyDispatchEVT2), but WHICH is
+ * which cannot be read off the setters -- they only store. Printing the live
+ * context at the moment of a blit answers it the same way the argument values
+ * did: a base address is a large aligned number in the guest's address space, a
+ * stride is a small multiple of the width, and a format is one of two constants.
+ */
+static void trace_ctx(const ios3_hle_mem_t *mem, uint32_t ctx) {
+    static const unsigned off[] = { 0x00, 0x04, 0x08, 0x0c, 0x10, 0x14, 0x18,
+                                    0x1c, 0x20, 0x38, 0x3c, 0x40, 0x44, 0x4c,
+                                    0x50, 0x5c, 0x60 };
+    unsigned i;
+
+    fprintf(stderr, "hle-trace   ctx=%08x", ctx);
+    for (i = 0; i < (unsigned)(sizeof off / sizeof off[0]); i++) {
+        uint32_t w = 0;
+        if (read_u32(mem, ctx + off[i], &w))
+            fprintf(stderr, " +%02x=%08x", off[i], w);
+        else
+            fprintf(stderr, " +%02x=??", off[i]);
+    }
+    fprintf(stderr, "\n");
+}
+
 /* The two thunks take the context in r0 and the operation's own arguments
  * after it, so the stack words are the 5th argument onward. */
 static bool hle_trace_blit_copy(arm_cpu_t *cpu, const ios3_hle_mem_t *mem) {
-    return trace_args("mbx2DCtxBlitCopy", cpu, mem, 0, 3);
+    bool first = g_trace_budget[0] < 12u;
+    (void)trace_args("mbx2DCtxBlitCopy", cpu, mem, 0, 3);
+    if (first) trace_ctx(mem, cpu->r[0]);
+    return false;
 }
 static bool hle_trace_blit_color(arm_cpu_t *cpu, const ios3_hle_mem_t *mem) {
     return trace_args("mbx2DCtxBlitColor", cpu, mem, 1, 2);
