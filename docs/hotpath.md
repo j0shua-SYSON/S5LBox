@@ -366,3 +366,39 @@ as stopping a loop that should not be running at all; had the HLE been built
 first it would have shipped a ~1.5x that masked a 2x bug. Hashing and RSA were also never one answer: `_SHA1Init` is
 17.8% of a whole run and 3.1% inside a frame, so page hashing is a boot cost,
 while the giants go the other way.
+
+## The rasteriser sites are live, and the counts corroborate the profile (r218)
+
+`--hle` now arms the three QuartzCore sites and counts them. r218, whole run,
+all in SpringBoard's space with zero wrong-address-space hits:
+
+| site | hits |
+|---|---|
+| `sw_scanline` | 84,983 |
+| `sw_sample_nearest_BGRA8` | 60,125 |
+| `CGBlt_fillBytes` | 20,901 |
+| `_CGSFillDRAM8by1` | 20,901 |
+| `ogl_poly_scan` | 1,571 |
+
+This is the calls-times-cost check the header demands before a site may become
+REPLACE, and it is the check `CGBlt_fillBytes` failed: 20,901 calls across a
+whole boot, against 43 inside the window that decides frame rate.
+
+TWO INDEPENDENT INSTRUMENTS NOW AGREE. The profile bucketed a swipe by page
+and attributed 39.8% of user samples to three pages; the site counter, which
+knows nothing about the profile, finds those same three functions entered tens
+of thousands of times in the right process. Neither could have produced the
+other.
+
+WHAT THESE COUNTS DO NOT SAY. They are whole-run, and `CGBlt_fillBytes` is the
+standing proof that a whole-run count and a frame-window count can disagree by
+enough to reverse a decision. The window evidence here is the profile's 39.8%,
+not these numbers.
+
+THE SHAPE OF THE CALL TREE. `ogl_poly_scan` is entered 1,571 times and
+`sw_scanline` 84,983 -- about 54 scanlines per polygon, which is what scanning
+a polygon means. But `sw_sample_nearest_BGRA8` is entered FEWER times than
+`sw_scanline`, so it is not a per-pixel call; the per-pixel loop lives inside
+these functions rather than between them. That matters for REPLACE: the leaf
+to replace is a span sampler, not a pixel sampler, and its cost per call is
+therefore large and variable rather than small and fixed.
