@@ -217,7 +217,7 @@ static const NSUInteger kConsoleScrollback = 12000;
     _stats.textColor = [UIColor colorWithWhite:0.62 alpha:1.0];
     _stats.font = [UIFont fontWithName:@"Menlo" size:10]
                   ?: [UIFont systemFontOfSize:10];
-    _stats.numberOfLines = 2;
+    _stats.numberOfLines = 3;
     _stats.text = @"starting…";
     [self.view addSubview:_stats];
 
@@ -694,7 +694,7 @@ static const NSUInteger kConsoleScrollback = 12000;
 
     const CGFloat top     = safe.top + 8.0;
     const CGFloat keysH   = [VMButtonBar preferredHeight];
-    const CGFloat statsH  = 28.0;
+    const CGFloat statsH  = 40.0;   /* three lines of 10pt: machine, touch, keys */
     const CGFloat chrome  = 6.0 + keysH + 6.0 + statsH + 4.0;
 
     /* The guest's screen gets ALL the space the fixed chrome does not need.
@@ -854,7 +854,38 @@ static const NSUInteger kConsoleScrollback = 12000;
                  reason];
     }
 
-    _stats.text = [NSString stringWithFormat:@"%@\n%@", machine, input];
+    /*
+     * The button path's own account of itself, which until now was computed
+     * and then never shown. A press that the board refuses looked exactly like
+     * a press that was never wired up: nothing happened and nothing was said.
+     *
+     * "delivered" means the emulated board TOOK the transition, not that the
+     * guest acted on it -- the same limit the touch line above states. The
+     * refusal count is the interesting number, because s5l_buttons_set()
+     * refuses for one specific, diagnosable reason: the guest has not armed
+     * that interrupt line, so AppleM68Buttons is not listening yet.
+     */
+    NSString *buttons;
+    if (_engine) {
+        NSString *why = [_engine buttonUnavailableReason];
+        uint64_t delivered = 0, refused = 0;
+        [_engine buttonCountersQueued:NULL delivered:&delivered
+                              refused:&refused dropped:NULL];
+        if (why.length)
+            buttons = [NSString stringWithFormat:
+                       @"keys   ·  NOT delivered: %@  (%llu refused)", why,
+                       (unsigned long long)refused];
+        else
+            buttons = [NSString stringWithFormat:
+                       @"keys   ·  %llu taken by the board, %llu refused",
+                       (unsigned long long)delivered,
+                       (unsigned long long)refused];
+    } else {
+        buttons = @"keys   ·  no machine";
+    }
+
+    _stats.text = [NSString stringWithFormat:@"%@\n%@\n%@",
+                   machine, input, buttons];
 }
 
 - (void)append:(NSString *)line {
