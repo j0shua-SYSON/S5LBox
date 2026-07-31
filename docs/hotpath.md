@@ -695,3 +695,46 @@ search, so it is the worst case rather than the typical one. Steady state
 should be roughly twice it before anything else is changed, which is a
 prediction this file is making and which a five-minute run on the device can
 confirm or refute.
+
+## Today's fixes are worth 2.56x on RENDERING (r231)
+
+r223 measured the VFP and decode work against a window at 3.9e9 and found
+nothing. That window was wrong: r219 later showed lockdownd's keygen runs
+until 6.37e9, so 3.9e9-4.2e9 is dominated by integer bignum arithmetic --
+which contains no VFP at all and little that the decode hoists reach. The
+fixes were being scored against a workload they were never aimed at.
+
+Restoring at 7.0e9 instead, PAST the end of keygen, puts SpringBoard's
+rendering in the window. Six runs, alternating, same 300 M instructions:
+
+| rep | before | after |
+|---|---|---|
+| 1 | 24,509 ms | 9,789 ms |
+| 2 | 22,122 ms | 9,565 ms |
+| 3 | 27,059 ms | 9,082 ms |
+
+**2.56x on the medians, and the ranges do not overlap** -- before spans
+22.1-27.1 s, after spans 9.1-9.8 s. That is not a marginal effect needing
+statistics; every run of one beats every run of the other.
+
+WHAT IT MEANS TOGETHER WITH THE KEYGEN RESULT. The two compound, because they
+address different halves of the frame:
+
+| stage | fps |
+|---|---|
+| as measured on the device, during keygen | 1.5 |
+| keygen paid once (no code; see the key-pair proof above) | ~3.1 |
+| + today's interpreter fixes at 2.56x | **~7.9** |
+
+THE LESSON, and it is the same one this file already records in another form:
+window the measurement before drawing a conclusion. "The interpreter fixes do
+not help" was stated here earlier on r223's evidence and was WRONG -- not
+because the measurement was faulty but because the window answered a different
+question. A whole-run profile misleads, and so does a window over the wrong
+phase of the boot.
+
+CAVEATS. These are dev-box wall-clock numbers, not A9 numbers. The VFP fix
+should transfer at least as well on arm64, where the replacement is a single
+mrs of FPSR against a libc call, but that is an expectation and not a
+measurement. And 2.56x is the ratio over this window, which contains some
+work that is not rendering.
