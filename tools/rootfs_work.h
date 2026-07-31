@@ -26,7 +26,47 @@ extern "C" {
 #define ROOTFS_WORK_MAX_IO_BUFFER (1024u * 1024u)
 #define ROOTFS_WORK_DETAIL_CAPACITY 256u
 
-#define ROOTFS_WORK_DEFAULT_FSTAB "/dev/md0 / hfs rw,update 0 1"
+/*
+ * The record written over the guest's own. The last field is the fsck PASS
+ * NUMBER, and it is 0 -- "never check at boot" -- rather than the 1 a real
+ * iPhone carries. That is a deliberate difference from the hardware, so here
+ * is the whole reason.
+ *
+ * THE VOLUME IS NOT JOURNALED. The HFS+ volume header at byte 1024 of the
+ * source image reads attributes 0x00000100: kHFSVolumeUnmountedBit set,
+ * kHFSVolumeJournaledBit CLEAR. On real hardware a dirty mount replays a
+ * journal in moments; with no journal there is nothing to replay, so fsck_hfs
+ * falls back to a full structural scan of all 445 MB.
+ *
+ * AND THE VOLUME IS ALWAYS DIRTY AFTER THE FIRST RUN. Closing the app does not
+ * unmount the guest's root filesystem -- there is no guest shutdown path yet --
+ * so every launch after the first inherits an uncleanly-mounted volume and
+ * pays that full scan at emulator speed before anything can happen. A first
+ * launch is fast because it starts from a pristine copy; the second is not,
+ * which is exactly the shape of the problem as reported.
+ *
+ * WHAT IS GIVEN UP. A volume that really is damaged will no longer be repaired
+ * automatically at boot. That is a genuine loss and is accepted knowingly: the
+ * cost being avoided is minutes on EVERY launch, against a repair pass that
+ * cannot fix a torn write in a 445 MB image any better than recreating it can.
+ * VMFirmwareBoot.c already deletes and remakes an INCOMPLETE work image, which
+ * is the failure this project actually produces.
+ *
+ * THE BETTER FIXES, in the order they should replace this one: unmount cleanly
+ * on exit, or resume from a snapshot so the volume is never left dirty at all.
+ * Both need work that does not exist yet; this is one character and available
+ * now.
+ *
+ * SIZE-NEUTRAL, which is load-bearing. rootfs_work rewrites the fstab record
+ * in place and cannot change its length, so 1 -> 0 keeps the record byte count
+ * identical. Any longer replacement would be refused.
+ *
+ * bootkernel keeps its own literal and is deliberately NOT changed: its runs
+ * each create a fresh work image, so their volumes are clean and their fsck is
+ * already quick, and every instruction index recorded in docs/BOOTLOG.md was
+ * taken with pass 1.
+ */
+#define ROOTFS_WORK_DEFAULT_FSTAB "/dev/md0 / hfs rw,update 0 0"
 
 /*
  * Bounds for the catalog provisioner below.  Every one of them is a policy cap
