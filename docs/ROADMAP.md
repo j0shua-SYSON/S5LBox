@@ -1768,24 +1768,35 @@ CI-testable) → S5L8950X SoC → boot. Not before M5 renders and takes a tap: a
 finished first target is what makes the second tractable rather than miserable,
 and every tool it produced is reused directly.
 
-## Frame rate, as measured on 2026-07-31
+## Frame-rate evidence, corrected 2026-08-02
 
-Every number here is measured, not projected, except where marked.
+The earlier version of this section called ~7.9 fps measured. It was not. A
+2026-08-02 audit found that every r231 timing run exited during restore before
+executing the requested guest window: the three baseline runs had a snapshot
+format mismatch, and the three comparison runs restored only far enough to
+reject `-F` because the checkpoint had no active CLCD window. The harness did
+not check exit status. r241's armed/disarmed pair failed at the same CLCD gate.
 
 | stage | insns/frame | fps @ 25 M insn/s |
 |---|---|---|
-| as reported from the device | 16.7 M | 1.5 |
-| keygen paid once (r219; key pair on disk) | 8.1 M | 3.1 |
-| + interpreter fixes (r231: 2.56x on rendering) | -- | **~7.9** |
-| + rasteriser removed (not yet possible) | ~1.4 M | ~18 |
-| 30 fps | 833 k | -- |
+| device report during one-time keygen | 16.7 M | 1.5 measured |
+| keygen absent (r213 share applied) | ~8.1 M | ~3.1 projected, not cadence-tested |
+| + interpreter fixes | unknown | **unknown; r231 did not run** |
+| + current rasteriser HLE | unknown | **unknown; fixed-instruction desktop runs are not FPS** |
+| 30 fps target at that rate | <=833 k | 30 |
 
-**~5x is banked**: keygen self-repairs after one ~4.2-minute session and the
-interpreter work is committed and green.
+What is banked is narrower: r219 proved that key generation terminates and the
+key pair persists, and the interpreter/HLE changes are committed and green.
+Their combined steady-state FPS is not yet measured. **30 fps remains
+unproven.**
 
-### The two problems left, and there are only two
+### Known performance questions
 
-THE RASTERISER, 83% of the post-keygen frame. Two routes, both projects:
+THE RASTERISER. r214 measured the three hot raster pages as 39.8% of all user
+samples while SpringBoard was 48.1% of that mixed keygen/render window; 39.8 /
+48.1 is the source of the 83% figure. That is a useful conditional instruction-
+share estimate for SpringBoard's slice, not a measured post-keygen frame rate.
+Two routes remain projects:
 
 * MBX2D. The kext now ATTACHES -- four gates modelled from the driver's own
   code -- but it does not work: with it enabled the driver cycles reset
@@ -1794,8 +1805,8 @@ THE RASTERISER, 83% of the post-keygen frame. Two routes, both projects:
 * Rasteriser HLE. Sites armed and counted (sw_scanline 84,983 hits). Needs
   pixel-exact native replacements and a framebuffer diff.
 
-THE RESIDUAL, and this is why even a perfect rasteriser fix lands near 18 and
-not 30. After lockdownd and the rasteriser, r214's page census is DIFFUSE:
+THE RESIDUAL. After lockdownd and the raster pages, r214's page census is
+DIFFUSE:
 1.2%, 0.4%, 0.4%, 0.3%, 0.3%, 0.2% ... across hundreds of pages. There is no
 third concentrated site to attack. Closing the last ~1.7x therefore means
 making the interpreter broadly faster rather than removing any one thing --
@@ -1805,21 +1816,24 @@ code has 51,752 distinct PCs in a single frame window.
 
 ### What NOT to re-derive
 
-* The profile counts INSTRUCTIONS, not time. Windows matter: r223 measured the
-  interpreter fixes against keygen and found nothing; r231 measured them
-  against rendering and found 2.56x.
-* Snapshots make a frame experiment cost ~90 s instead of ~25 min. Capture one
-  BEFORE any change to machine state -- adding MBX state bumped
-  SNAPSHOT_VERSION twice and invalidated every existing snapshot.
+* The profile counts INSTRUCTIONS, not time. Windows and successful exits both
+  matter: r223 measured the interpreter fixes against keygen, while r231's
+  supposed rendering benchmark never executed its requested window.
+* Snapshots can shorten a frame experiment substantially, but a restore is not
+  valid merely because a wrapper printed `done`. Require exit status zero, a
+  normal terminal report, and the expected active framebuffer. Capture a
+  checkpoint before changing machine state; adding MBX state bumped
+  `SNAPSHOT_VERSION` twice and invalidated older snapshots.
 * The MBX driver's whole lifecycle is done by ~239 M instructions, so MBX runs
   need -n 300000000, not 1.2e9.
 
 
 ## The plan to 30 fps, and the arithmetic that picks it
 
-Measured position: ~7.9 fps. 30 needs 3.8x. Everything below follows from that
-one number, and the point of writing it down is that two of the available levers
-CANNOT reach it and it is easy to spend a week on them anyway.
+The steady-state position is currently unknown. The previous ~7.9 fps baseline
+and the derived 3.8x gap are retracted with r231. The relative shares below can
+still rank work, but they cannot honestly predict an absolute FPS until a valid
+post-keygen run and target-app cadence measurement exist.
 
 ### What each lever is worth
 
@@ -1830,18 +1844,19 @@ space hold 39.8% of all user samples:
     13.7%   0x3122d000   sw_sample_color + sw_scanline
      6.5%   0x311e2000   ogl_poly_scan
 
-Replacing ALL THREE caps at 1/(1-0.398) = 1.66x, which is about 13 fps. That is
-worth having and it is not 30. The rasteriser as a whole is 83% of the
-post-keygen frame, and removing that is 1/(1-0.83) = 5.9x, about 46 fps. So the
-only lever that reaches the goal is the one that removes the whole rasteriser,
-and that is MBX2D.
+Replacing ALL THREE has an Amdahl upper bound of 1/(1-0.398) = 1.66x for the
+r214 instruction mix. Treating the raster pages as 83% of SpringBoard's slice
+gives a conditional upper bound of 1/(1-0.83) = 5.9x for that slice. The old
+~13 and ~46 fps values multiplied those ratios by the invalid r231 baseline and
+are withdrawn. Neither this evidence nor the current desktop fixed-instruction
+runs prove which lever reaches 30 fps.
 
 Two things already tried are closed and must not be re-attempted: a memoised
 decode cache (measured, 20-26% SLOWER, see hotpath.md) and any expectation that
 interpreter work alone will do it -- without a JIT the ceiling is roughly 1.5x
 and the decode-cache result says the easy part of that is already taken.
 
-### Line A -- MBX2D, the one that reaches 30
+### Line A -- MBX2D, a whole-rasteriser route
 
 Ordered, each step gated on the previous one reporting:
 

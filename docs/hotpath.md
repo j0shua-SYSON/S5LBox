@@ -696,7 +696,20 @@ should be roughly twice it before anything else is changed, which is a
 prediction this file is making and which a five-minute run on the device can
 confirm or refute.
 
-## Today's fixes are worth 2.56x on RENDERING (r231)
+## RETRACTED: r231 did not execute the claimed rendering window
+
+**Correction (2026-08-02): the 2.56x result in this section is invalid.** The
+raw logs were re-audited before reusing the checkpoint. All three `before`
+runs end with `snapshot format version mismatch`. All three `after` runs load
+the snapshot header and then end with `restore: -F was requested but the
+snapshot has no active CLCD window`. None prints a normal `stopped after ...:
+OK`, a profile, a touch report, or an HLE report. The shell harness printed
+`done` and recorded elapsed time without checking the emulator's exit status.
+
+The six numbers below therefore measure image provisioning, snapshot parsing,
+and two different restore failures. They measure **zero guest instructions in
+the requested 7.0--7.3 B window**. They are retained as failed evidence so the
+same mistake is not repeated; they must not be cited as a rendering speedup.
 
 r223 measured the VFP and decode work against a window at 3.9e9 and found
 nothing. That window was wrong: r219 later showed lockdownd's keygen runs
@@ -713,31 +726,30 @@ rendering in the window. Six runs, alternating, same 300 M instructions:
 | 2 | 22,122 ms | 9,565 ms |
 | 3 | 27,059 ms | 9,082 ms |
 
-**2.56x on the medians, and the ranges do not overlap** -- before spans
-22.1-27.1 s, after spans 9.1-9.8 s. That is not a marginal effect needing
-statistics; every run of one beats every run of the other.
+The medians differ by 2.56x and the ranges do not overlap, but that comparison
+is meaningless because the two executables failed at different restore gates.
 
-WHAT IT MEANS TOGETHER WITH THE KEYGEN RESULT. The two compound, because they
-address different halves of the frame:
+The FPS arithmetic originally derived from this failed comparison is also
+retracted:
 
 | stage | fps |
 |---|---|
 | as measured on the device, during keygen | 1.5 |
 | keygen paid once (no code; see the key-pair proof above) | ~3.1 |
-| + today's interpreter fixes at 2.56x | **~7.9** |
+| + today's interpreter fixes | **unknown; r231 did not run** |
 
-THE LESSON, and it is the same one this file already records in another form:
-window the measurement before drawing a conclusion. "The interpreter fixes do
-not help" was stated here earlier on r223's evidence and was WRONG -- not
-because the measurement was faulty but because the window answered a different
-question. A whole-run profile misleads, and so does a window over the wrong
-phase of the boot.
+THE LESSON is stricter than the one this section originally claimed: a timed
+wrapper is not a benchmark until the child exit code and the emulator's normal
+terminal report are checked. r223 answered the wrong workload question; r231
+answered no workload question at all. The steady-state effect of the interpreter
+fixes remains unmeasured.
 
-CAVEATS. These are dev-box wall-clock numbers, not A9 numbers. The VFP fix
-should transfer at least as well on arm64, where the replacement is a single
-mrs of FPSR against a libc call, but that is an expectation and not a
-measurement. And 2.56x is the ratio over this window, which contains some
-work that is not rendering.
+CAVEATS. The r219 facts still stand: key generation ends at instruction
+6,368,479,883 and its keys persist in the work image. The r213/r214 instruction
+shares also remain useful observations of the mixed keygen/render window. What
+does not stand is any r231 wall-clock speedup, the derived ~7.9 fps baseline, or
+an absolute FPS projection built on either. A new framebuffer-active,
+post-keygen checkpoint and an exit-checked A/B are required.
 
 ## MBX2D attaches but does not work, and that is a real result (r240)
 
@@ -771,13 +783,14 @@ command stream, so submitted work completes. That is native C against a
 framebuffer rather than reverse engineering, but it is a project rather than
 a gate, and it cannot be estimated from here.
 
-THE HONEST CONSEQUENCE FOR 30 FPS. The arithmetic that made MBX2D attractive
-still holds -- the rasteriser is 83% of the post-keygen frame, so removing it
-is worth ~5.8x -- but the route to removing it is longer than four registers.
-The alternative route to the same 83% is the rasteriser HLE, whose sites are
-already armed and counted (sw_scanline 84,983 hits), and which needs
-pixel-exact native replacements rather than a command processor. Neither is
-cheap. Both are bounded, and this file now says which is which.
+THE HONEST CONSEQUENCE FOR 30 FPS. r214's mixed-window instruction census gives
+the raster pages 39.8% of all user samples and SpringBoard 48.1%; treating that
+ratio as SpringBoard's rendering share gives a conditional Amdahl bound near
+5.8x. It does **not** establish post-keygen FPS, and r231 cannot supply the
+missing baseline. The alternative route to the same raster subtree is the
+rasteriser HLE, whose sites are already armed and counted (sw_scanline 84,983
+hits), and which needs pixel-exact native replacements rather than a command
+processor. Neither route is cheap, and neither has proved 30 fps.
 
 
 ## The memoised decode cache, measured and rejected
