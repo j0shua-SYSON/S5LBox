@@ -782,6 +782,33 @@ void     s5l_power_write(s5l_power_t *p, uint32_t off, uint32_t val);
 #define S5L_MBX_STATUS       0x0000012cu
 #define S5L_MBX_STATUS_ACK   0x00000134u
 #define S5L_MBX_STATUS_DONE  (1u << 6)
+/*
+ * THE 2D COMPLETION, and it is the bit the driver's own interrupt handler
+ * tests. AppleMBX+0x804d4 is the ISR, and it reads as:
+ *
+ *     ldr  r3, [r2, #0x12c]     ; status
+ *     ldr  r2, [r0, #0x148]     ; the driver's shadow of the enable mask
+ *     and  r5, r3, r2           ; pending = status & mask
+ *     bl   write(this, 0x134, pending)   ; acknowledge exactly those
+ *     ands r2, r5, #0x400
+ *     ...  strb r6, [r4, #0x120]         ; 2DIdle = 1
+ *
+ * So 2DIdle is a DRIVER FIELD at this+0x120, not a register -- which is why
+ * the histogram could see only three offsets ever read and still have the
+ * driver believe the 2D core was wedged. It is set from bit 10 and from
+ * nowhere else, and the recovery diagnostic writing 0x400 to 0x12c is the
+ * same bit being cleared.
+ *
+ * Bit 6 is a different signal and both are real: the submit path at
+ * AppleMBX+0xe854 polls 0x12c for bit 6 SYNCHRONOUSLY and acknowledges 0x40,
+ * so a completed operation is observable two ways. A kick therefore raises
+ * both, which is what the driver is written to expect.
+ */
+#define S5L_MBX_STATUS_2D    (1u << 10)
+/* 0x130 is the interrupt ENABLE. The driver writes its this+0x148 shadow
+ * there, and its ISR masks the status with that same shadow, so the line must
+ * be gated on it rather than on any pending bit. */
+#define S5L_MBX_INTMASK      0x00000130u
 /* The last register of the kick sequence, so writing it is the "go". */
 #define S5L_MBX_KICK         0x000006d8u
 

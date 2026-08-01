@@ -225,7 +225,11 @@ uint32_t s5l_mbx_read(s5l_mbx_t *m, uint32_t off) {
  * fabrication the header of this file refuses.
  */
 bool s5l_mbx_irq(const s5l_mbx_t *m) {
-    return m && m->status != 0u;
+    /* status & mask, exactly as the driver's ISR computes `pending`. A
+     * line that asserted on an unmasked bit would interrupt for something
+     * the driver has not asked about and cannot acknowledge. */
+    if (!m) return false;
+    return (m->status & m->reg[S5L_MBX_INTMASK / 4u]) != 0u;
 }
 
 void s5l_mbx_write(s5l_mbx_t *m, uint32_t off, uint32_t val) {
@@ -301,5 +305,6 @@ void s5l_mbx_write(s5l_mbx_t *m, uint32_t off, uint32_t val) {
      * days later. The moment such a stall appears, the operation gets modelled
      * properly rather than acknowledged.
      */
-    if (off == S5L_MBX_KICK) m->status |= S5L_MBX_STATUS_DONE;
+    if (off == S5L_MBX_KICK)
+        m->status |= S5L_MBX_STATUS_DONE | S5L_MBX_STATUS_2D;
 }
