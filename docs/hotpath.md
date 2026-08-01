@@ -1147,7 +1147,54 @@ WHAT IT DOES NOT PROVE: it does not supply a correct native transcription, show
 that every argument shape is understood, establish pixel equality, or raise the
 measured frame rate by one frame. Returning early at the root would merely omit
 drawing. The site is therefore TRACE, not REPLACE. It records the eight incoming
-arguments plus a bounded polygon header and first/last vertex while Apple's code
-still performs every draw. As of this checkpoint that tracer is unit-tested but
-has not yet produced a cold-guest trace; the next retained run is the ABI
-measurement, not a performance claim.
+arguments plus a bounded polygon dump while Apple's code still performs every
+draw.
+
+### r270: the live ABI agrees, and still no speed claim
+
+r270 was a fresh 6.0 B-instruction cold run of commit `efa85aa`, using the r257
+software-render/touch schedule. It exited 0 after 2,903.8 host seconds with a
+normal cap stop at 5,999,943,780 retired instructions, zero external-md bridge
+failures, and a nonblank frame (453,081 of 460,800 RGB bytes nonzero).
+
+The HLE counts reproduced r257 exactly where the replacement matters:
+
+    ogl_poly_scan                  2,095 hits
+    sw_scanline                   95,758 hits
+    sw_sample_nearest_BGRA8       56,325 hits / 56,220 handled / 105 declined
+
+All 13 retained root records carried `sp+8=0x3122d180`, the exact `sw_scanline`
+entry. `sp+12` took four live context values. The first polygons were four-vertex
+quads with flags 0x030b, `w=1`, and bounds such as (0,0)..(320,480). That is
+runtime confirmation of the static ownership chain, not a transcription of it.
+
+The final PPM SHA-256 was
+`F327259A64EAA6471046EC4E5477822ACD6D6DA82151C9FB5CDB549346926DFC`, byte-for-byte
+the same as both r257's armed and disarmed PPMs. That equality proves the TRACE
+checkpoint did not perturb this run's final framebuffer. It does not validate a
+root replacement, because no root call was handled and the guest executed the
+whole rasteriser as before.
+
+One diagnostic defect is retained rather than hidden: the tracer claimed a
+12-call budget and printed 13. `ios3_hle_arm()` is deliberately retried when a
+shared-cache page becomes resident; `efa85aa` reset every trace budget on each
+retry. The follow-up keeps a budget across re-arms in the same address space.
+
+### Snapshot speed without snapshot theatre
+
+r270 itself was mistakenly launched without `--snapshot-at`, so it cannot be
+retroactively turned into a valid emulator checkpoint. A Windows process dump
+would lack the external-md image/state sidecars and is not a substitute.
+
+The two available shortcuts were checked rather than trusted. The useful old
+3.5 B pre-drag checkpoint fails current restore with `snapshot format version
+mismatch`. The current 5.8 B checkpoint restores, but r254-r256 already ran it
+as far as 6.75 B with scheduled drags and reached zero HLE sites; its inherited
+nonblank framebuffer is not evidence of a redraw. Both are faster and invalid
+for this question.
+
+The next necessary cold run must print each root hit's `cpu.cycles` and save a
+current-version checkpoint before a measured redraw. A restored development
+window is accepted only with nonzero `ogl_poly_scan` hits, a live nonblank CLCD
+frame, and a clean stop. Final replacement acceptance remains a cold armed/
+disarmed pair, because that is the test that has already caught zero-work diffs.

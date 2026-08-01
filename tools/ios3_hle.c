@@ -542,8 +542,10 @@ static bool trace_args(const char *what, arm_cpu_t *cpu,
     if (g_trace_budget[slot] >= 12u) return false;
     g_trace_budget[slot]++;
 
-    fprintf(stderr, "hle-trace %-20s r0=%08x r1=%08x r2=%08x r3=%08x lr=%08x",
-            what, cpu->r[0], cpu->r[1], cpu->r[2], cpu->r[3], cpu->r[14]);
+    fprintf(stderr,
+            "hle-trace %-20s at=%llu r0=%08x r1=%08x r2=%08x r3=%08x lr=%08x",
+            what, (unsigned long long)cpu->cycles,
+            cpu->r[0], cpu->r[1], cpu->r[2], cpu->r[3], cpu->r[14]);
     for (i = 0; i < nstack; i++) {
         uint32_t w = 0;
         if (!read_u32(mem, sp + i * 4u, &w)) { fprintf(stderr, " sp+%u=??", i * 4u); continue; }
@@ -573,19 +575,31 @@ static bool trace_args(const char *what, arm_cpu_t *cpu,
  * the x/y/w fields below are read directly from ogl_poly_scan's entry code.
  */
 static void trace_poly_vert(const ios3_hle_mem_t *mem, uint32_t poly,
-                            unsigned index, const char *which) {
+                            unsigned index) {
     uint64_t wide = (uint64_t)poly + 4u + (uint64_t)index * 0x38u;
-    float x = 0.0f, y = 0.0f, w = 0.0f;
+    float f[14];
+    unsigned i;
 
-    if (wide > (uint64_t)UINT32_MAX - 0x0cu ||
-        !read_f32(mem, (uint32_t)wide + 0x00u, &x) ||
-        !read_f32(mem, (uint32_t)wide + 0x04u, &y) ||
-        !read_f32(mem, (uint32_t)wide + 0x0cu, &w)) {
-        fprintf(stderr, "hle-trace   poly.%s=unreadable\n", which);
+    if (wide > (uint64_t)UINT32_MAX - 0x34u) {
+        fprintf(stderr, "hle-trace   poly.v[%u]=unreadable\n", index);
         return;
     }
-    fprintf(stderr, "hle-trace   poly.%s[%u] x=%.9g y=%.9g w=%.9g\n",
-            which, index, (double)x, (double)y, (double)w);
+    for (i = 0; i < 14u; i++) {
+        if (!read_f32(mem, (uint32_t)wide + i * 4u, &f[i])) {
+            fprintf(stderr, "hle-trace   poly.v[%u]=unreadable@+%02x\n",
+                    index, i * 4u);
+            return;
+        }
+    }
+    fprintf(stderr,
+            "hle-trace   poly.v[%u] xyzw=(%.9g,%.9g,%.9g,%.9g)"
+            " rgba=(%.9g,%.9g,%.9g,%.9g)"
+            " uv0=(%.9g,%.9g) uv1=(%.9g,%.9g) uv2=(%.9g,%.9g)\n",
+            index,
+            (double)f[0], (double)f[1], (double)f[2], (double)f[3],
+            (double)f[4], (double)f[5], (double)f[6], (double)f[7],
+            (double)f[8], (double)f[9], (double)f[10], (double)f[11],
+            (double)f[12], (double)f[13]);
 }
 
 static bool hle_trace_ogl_poly_scan(arm_cpu_t *cpu,
@@ -605,9 +619,9 @@ static bool hle_trace_ogl_poly_scan(arm_cpu_t *cpu,
     fprintf(stderr, "hle-trace   poly.count=%u flags=%04x\n",
             (unsigned)count, (unsigned)flags);
     if (count > 0u && count <= 10u) {
-        trace_poly_vert(mem, cpu->r[0], 0u, "first");
-        if (count > 1u)
-            trace_poly_vert(mem, cpu->r[0], (unsigned)count - 1u, "last");
+        unsigned i;
+        for (i = 0; i < (unsigned)count; i++)
+            trace_poly_vert(mem, cpu->r[0], i);
     }
     return false;
 }
@@ -943,9 +957,14 @@ static bool identity_ok(const ios3_hle_mem_t *mem, ios3_hle_site_t *s) {
 }
 
 unsigned ios3_hle_arm(const ios3_hle_mem_t *mem, uint32_t ttbr0) {
+    /* bootkernel retries identity checks as shared-cache pages become resident.
+     * That is still one trace session, so a retry in the SAME address space must
+     * not reopen every diagnostic budget. r270 promised 12 polygon records and
+     * printed 13 because this reset was unconditional. */
+    if (g_ttbr0 != ttbr0)
+        memset(g_trace_budget, 0, sizeof g_trace_budget);
     g_ttbr0 = ttbr0;
     g_armed_n = 0u;
-    memset(g_trace_budget, 0, sizeof g_trace_budget);
     for (unsigned i = 0; i < SITE_N; i++) {
         ios3_hle_site_t *s = &g_sites[i];
         s->armed = identity_ok(mem, s);
@@ -957,7 +976,9 @@ unsigned ios3_hle_arm(const ios3_hle_mem_t *mem, uint32_t ttbr0) {
 
 void ios3_hle_disarm(void) {
     for (unsigned i = 0; i < SITE_N; i++) g_sites[i].armed = false;
+    g_ttbr0 = 0u;
     g_armed_n = 0u;
+    memset(g_trace_budget, 0, sizeof g_trace_budget);
 }
 
 /* -------------------------------------------------------------- the step --- */
