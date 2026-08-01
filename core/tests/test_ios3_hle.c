@@ -789,6 +789,11 @@ static void test_rect_root_replaces_textured_and_solid_rows_atomically(void) {
     static const uint32_t solid_expected[2] = {
         UINT32_C(0xff123456), UINT32_C(0xff020202)
     };
+    static const uint32_t mode_two_expected[6] = {
+        UINT32_C(0xdeb9d713), UINT32_C(0xe4c8e316),
+        UINT32_C(0xead8ef19), UINT32_C(0xf1e7fc1c),
+        UINT32_C(0xdfbcd811), UINT32_C(0xe5cbe414)
+    };
     ios3_hle_site_t *site = site_named("ogl_poly_scan");
     arm_cpu_t cpu;
 
@@ -848,6 +853,30 @@ static void test_rect_root_replaces_textured_and_solid_rows_atomically(void) {
                           solid_expected[pass],
                       "solid pass %u row %u pixel %u is %08x", pass, row, x,
                       scan_peek32(SCAN_OUT + 4u + row * 16u + x * 4u));
+    }
+
+    reset_scan_fixture(site);
+    configure_rect_root(&cpu, 0x030bu);
+    scan_poke32(SCAN_CTX + 0x64u, UINT32_C(0xb4b4b4b4));
+    scan_poke32(SCAN_STATE + 0x08u, 2u);
+    scan_poke32(SCAN_STATE + 0x3cu, 0x12u);
+    if (arm_only(site)) {
+        CHECK(ios3_hle_step(&cpu, &SCAN_MEM, site->va, 0x0bf1b000u),
+              "mode-two rectangle root declined");
+        CHECK(g_scan_write_calls == 0u && g_scan_writev_calls == 1u &&
+              g_scan_writev_span_count == 2u,
+              "mode-two root published scalar=%u vector=%u/%u",
+              g_scan_write_calls, g_scan_writev_calls,
+              g_scan_writev_span_count);
+        for (uint32_t row = 0; row < 2u; row++)
+            for (uint32_t x = 0; x < 3u; x++) {
+                uint32_t index = row * 3u + x;
+                uint32_t actual =
+                    scan_peek32(SCAN_OUT + 4u + row * 16u + x * 4u);
+                CHECK(actual == mode_two_expected[index],
+                      "mode-two row %u pixel %u is %08x, expected %08x",
+                      row, x, actual, mode_two_expected[index]);
+            }
     }
     ios3_hle_disarm();
 }
@@ -1114,6 +1143,65 @@ static void configure_live_bgra_blend(arm_cpu_t *cpu) {
     scan_poke32(SCAN_OUT + 28u, 0xff112233u);
 }
 
+static void configure_live_mode_two(arm_cpu_t *cpu, uint32_t sampler,
+                                    uint32_t color) {
+    configure_live_bgra_blend(cpu);
+    scan_poke32(SCAN_CTX + 0x14u, sampler);
+    scan_poke32(SCAN_CTX + 0x18u, sampler);
+    scan_poke32(SCAN_CTX + 0x64u, color);
+    scan_poke32(SCAN_STATE + 0x08u, 2u);
+}
+
+static void test_live_mode_two_modulates_then_blends(void) {
+    static const uint32_t sampler[2] = { SAMPLE_BGRA8, SAMPLE_BGRX8 };
+    static const uint32_t color[2] = {
+        UINT32_C(0x7f804020), UINT32_C(0xfdfdfdfd)
+    };
+    static const uint32_t expected[2][3] = {
+        { UINT32_C(0x10293846), UINT32_C(0x9f9898aa),
+          UINT32_C(0xff091119) },
+        { UINT32_C(0xfd112233), UINT32_C(0xfe412212),
+          UINT32_C(0xff010203) }
+    };
+    ios3_hle_site_t *site = site_named("sw_scanline");
+
+    for (uint32_t pass = 0; pass < 2u; pass++) {
+        arm_cpu_t cpu;
+        reset_scan_fixture(site);
+        configure_live_mode_two(&cpu, sampler[pass], color[pass]);
+        if (!arm_only(site)) continue;
+        CHECK(ios3_hle_step(&cpu, &SCAN_MEM, site->va, 0x0bf1b000u),
+              "mode-two %s scanline declined", pass ? "BGRX" : "BGRA");
+        CHECK(cpu.r[15] == cpu.r[14],
+              "mode-two scanline returned to %08x, not LR", cpu.r[15]);
+        CHECK(g_scan_write_calls == 1u &&
+              g_scan_write_va == SCAN_OUT + 20u && g_scan_write_len == 12u,
+              "mode-two span published as %u write(s) at %08x len %u",
+              g_scan_write_calls, g_scan_write_va, g_scan_write_len);
+        for (uint32_t i = 0; i < 3u; i++)
+            CHECK(scan_peek32(SCAN_OUT + 20u + i * 4u) == expected[pass][i],
+                  "mode-two pass %u pixel %u is %08x, expected %08x",
+                  pass, i, scan_peek32(SCAN_OUT + 20u + i * 4u),
+                  expected[pass][i]);
+    }
+
+    reset_scan_fixture(site);
+    {
+        arm_cpu_t cpu;
+        configure_live_mode_two(&cpu, SAMPLE_BGRA8,
+                                UINT32_C(0x7f804020));
+        scan_poke32(SCAN_STACK + 0x0cu, 0x0318u);
+        if (arm_only(site)) {
+            CHECK(!ios3_hle_step(&cpu, &SCAN_MEM, site->va, 0x0bf1b000u),
+                  "mode two accepted an interpolated-colour mask");
+            CHECK(g_scan_write_calls == 0u,
+                  "interpolated mode two published %u write(s)",
+                  g_scan_write_calls);
+        }
+    }
+    ios3_hle_disarm();
+}
+
 static void test_live_bgra_blend_matches_arm_packed_selector_two(void) {
     static const uint32_t expected[3] = {
         0x10315273u, 0xc0908080u, 0xff010203u
@@ -1169,7 +1257,7 @@ static void test_live_bgra_blend_faults_and_unproved_shapes_decline(void) {
         configure_live_bgra_blend(&cpu);
         switch (which) {
         case 0: scan_poke32(SCAN_STATE + 0x3cu, 0x13u); break;
-        case 1: scan_poke32(SCAN_STATE + 0x08u, 2u); break;
+        case 1: scan_poke32(SCAN_STATE + 0x08u, 3u); break;
         case 2:
             scan_poke32(SCAN_CTX + 0x14u, SAMPLE_BGRX8);
             scan_poke32(SCAN_CTX + 0x18u, SAMPLE_BGRX8);
@@ -1463,6 +1551,7 @@ int main(void) {
     test_blended_solid_scanline_covers_the_measured_display_width();
     test_solid_scanline_unknown_shapes_and_faults_decline();
     test_live_bgra_blend_matches_arm_packed_selector_two();
+    test_live_mode_two_modulates_then_blends();
     test_live_bgra_blend_faults_and_unproved_shapes_decline();
     test_direct_scanline_faults_and_unknown_states_decline_cleanly();
     test_nearest_leaf_sites_match_the_decoded_32bit_formats();

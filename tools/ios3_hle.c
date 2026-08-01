@@ -635,8 +635,12 @@ static bool hle_sw_sample_nearest_bgrx8(arm_cpu_t *cpu,
  * is the BGRA transcription plus the guest's single `orr #0xff000000`.
  * r273 also proved one compositing arm: state byte 0x12, mode byte 1 and
  * nearest-BGRA8 enter blend selector 2 at 0x3122dcf4. That loop is the packed
- * premultiplied source-over transcription below. No other blend selector is
- * inferred.
+ * premultiplied source-over transcription below. r293 then measured mode byte
+ * 2 with mask 0x0308 and a constant colour at ctx+0x64. Its loop at
+ * 0x3122d744..0x3122d7c0 modulates each sampled channel as
+ * `colour * (texture + 1) >> 8` before entering that same selector. Both BGRA
+ * and alpha-forced BGRX samplers occur in the retained trace. No interpolated
+ * colour, other mode, or other blend selector is inferred.
  *
  * The zero-texture direct arm is smaller still. At 0x3122d26c..0x3122d2f8,
  * state 0x02 plus mask 0x0008 loads the constant pixel from ctx+0x64, calls
@@ -664,6 +668,19 @@ static uint32_t sw_blend_premultiplied_over(uint32_t dst, uint32_t src) {
     /* ARM ADD wraps. Valid premultiplied pixels do not overflow a lane, but
      * uint32_t also preserves the guest result for every possible input. */
     return (even_scaled | odd_scaled) + src;
+}
+
+/* 0x3122d744..0x3122d7ac, including the guest's +colour rounding bias. */
+static uint32_t sw_modulate_texture_color(uint32_t texture, uint32_t color) {
+    uint32_t blue = (((texture & UINT32_C(0xff)) + 1u) *
+                     (color & UINT32_C(0xff))) >> 8;
+    uint32_t green = ((((texture >> 8) & UINT32_C(0xff)) + 1u) *
+                      ((color >> 8) & UINT32_C(0xff))) >> 8;
+    uint32_t red = ((((texture >> 16) & UINT32_C(0xff)) + 1u) *
+                    ((color >> 16) & UINT32_C(0xff))) >> 8;
+    uint32_t alpha = (((texture >> 24) + 1u) * (color >> 24)) >> 8;
+
+    return blue | (green << 8) | (red << 16) | (alpha << 24);
 }
 
 #define SW_SCANLINE_CHUNK_MAX 256u
@@ -759,7 +776,6 @@ static bool hle_sw_scanline_known_paths(arm_cpu_t *cpu,
     }
 
     if (ctx_units != 1u || mask != 0x0308u ||
-        sentinel != UINT32_MAX ||
         !read_u32_at(mem, ctx, 0x14u, &min_sampler) ||
         !read_u32_at(mem, ctx, 0x18u, &mag_sampler) ||
         min_sampler != mag_sampler)
@@ -771,7 +787,7 @@ static bool hle_sw_scanline_known_paths(arm_cpu_t *cpu,
     (void)dy1;
 
     if ((state_flags & 0x10u) == 0u) {
-        if (count > SW_SPAN_MAX) return false;
+        if (count > SW_SPAN_MAX || sentinel != UINT32_MAX) return false;
         if (min_sampler == SW_SAMPLE_NEAREST_BGRA8)
             force_opaque = false;
         else if (min_sampler == SW_SAMPLE_NEAREST_BGRX8)
@@ -785,21 +801,43 @@ static bool hle_sw_scanline_known_paths(arm_cpu_t *cpu,
             (count && !mem->write(mem->ctx, out, pixels, count * 4u)))
             return false;
     } else {
-        /* This is the one blended shape observed in r273. In the guest,
-         * state_flags 0x12 selects temporary BGRA sampling followed by jump-
-         * table arm 2. An auxiliary surface would add unproved side effects. */
+        /* These are the two blended shapes proved in r273/r293. State flags
+         * 0x12 select temporary sampling followed by jump-table arm 2. Mode 1
+         * uses the BGRA span directly; mode 2 first applies the exact constant
+         * colour modulation above. An auxiliary surface would add unproved
+         * side effects. Keep the guest's actual 256-pixel temporary bound. */
         if (count > SW_SCANLINE_CHUNK_MAX ||
             state_flags != 0x12u || aux != 0u ||
-            min_sampler != SW_SAMPLE_NEAREST_BGRA8 ||
-            !read_u8_at(mem, state, 0x08u, &state_mode) || state_mode != 1u ||
+            !read_u8_at(mem, state, 0x08u, &state_mode) ||
             ctx > UINT32_MAX - 0x04u ||
-            !hle_sample_nearest_32_pixels(mem, ctx + 0x04u, 0u, start, delta,
-                                          count, out, false, pixels) ||
+            (state_mode == 1u &&
+             (sentinel != UINT32_MAX ||
+              min_sampler != SW_SAMPLE_NEAREST_BGRA8)))
+            return false;
+
+        if (state_mode == 2u) {
+            if (min_sampler == SW_SAMPLE_NEAREST_BGRA8)
+                force_opaque = false;
+            else if (min_sampler == SW_SAMPLE_NEAREST_BGRX8)
+                force_opaque = true;
+            else
+                return false;
+        } else if (state_mode == 1u) {
+            force_opaque = false;
+        } else {
+            return false;
+        }
+
+        if (!hle_sample_nearest_32_pixels(mem, ctx + 0x04u, 0u, start, delta,
+                                          count, out, force_opaque, pixels) ||
             (count && !mem->read(mem->ctx, out, dst_pixels, count * 4u)))
             return false;
 
-        for (uint32_t i = 0; i < count; i++)
+        for (uint32_t i = 0; i < count; i++) {
+            if (state_mode == 2u)
+                pixels[i] = sw_modulate_texture_color(pixels[i], sentinel);
             pixels[i] = sw_blend_premultiplied_over(dst_pixels[i], pixels[i]);
+        }
         if (count && !mem->write(mem->ctx, out, pixels, count * 4u))
             return false;
     }
