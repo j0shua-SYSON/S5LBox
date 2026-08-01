@@ -30,7 +30,7 @@ static const s5l_window_t DEVICE_WINDOWS[] = {
     { S5L8900_TVOUT_CTRL_BASE,  S5L_TVOUT_BANK_SIZE, "tvout-control" },
     { S5L8900_TVOUT_MIXER_BASE, S5L_TVOUT_BANK_SIZE, "tvout-mixer"   },
     { S5L8900_TVOUT_SDO_BASE,   S5L_TVOUT_BANK_SIZE, "tvout-sdo"     },
-    { S5L8900_MBX_BASE,   S5L_MBX_SIZE,       "mbx"   },
+    { S5L8900_MBX_BASE,   S5L_MBX_APERTURE,   "mbx"   },
     { S5L8900_I2C0_BASE,  S5L8900_DEV_SIZE,   "i2c0"  },
     { S5L8900_I2C1_BASE,  S5L8900_DEV_SIZE,   "i2c1"  },
     /*
@@ -983,7 +983,13 @@ bool s5l8900_init(s5l8900_t *m, uint32_t ram_base, uint32_t ram_size) {
     /* The MBX aperture's edram, owned here like RAM. See S5L_MBX_APERTURE.
      * A failure is handled below with the RAM failure, not ignored. */
     m->mbx.edram = calloc(S5L_MBX_EDRAM_SIZE, 1);
-    if (!m->ram) return false;
+    if (!m->ram || !m->mbx.edram) {
+        free(m->ram);
+        m->ram = NULL;
+        free(m->mbx.edram);
+        m->mbx.edram = NULL;
+        return false;
+    }
     m->ram_base = ram_base;
     m->ram_size = ram_size;
     m->cpu_hz   = S5L8900_CPU_HZ;
@@ -1097,7 +1103,13 @@ bool s5l8900_init(s5l8900_t *m, uint32_t ram_base, uint32_t ram_size) {
     /* Refresh in the guest's own time: the CLCD is ticked with timebase ticks,
      * so the period is expressed in them. */
     m->clcd.frame_ticks = m->tb_hz / S5L_CLCD_REFRESH_HZ;
-    if (!s5l_nor_init(&m->nor, S5L8900_NOR_SIZE)) { free(m->ram); m->ram = NULL; return false; }
+    if (!s5l_nor_init(&m->nor, S5L8900_NOR_SIZE)) {
+        free(m->ram);
+        m->ram = NULL;
+        free(m->mbx.edram);
+        m->mbx.edram = NULL;
+        return false;
+    }
 
     /*
      * Peripheral windows we have identified but not modelled. Each base was
@@ -1174,6 +1186,8 @@ void s5l8900_free(s5l8900_t *m) {
     m->stub_count = 0;
     free(m->ram);
     m->ram = NULL;
+    free(m->mbx.edram);
+    m->mbx.edram = NULL;
     s5l_nor_free(&m->nor);
 }
 

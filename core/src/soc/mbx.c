@@ -140,14 +140,16 @@ static void mbx_trace(uint32_t off, uint32_t val, bool is_write) {
 void s5l_mbx_reset(s5l_mbx_t *m) {
     if (!m) return;
     /*
-     * Total, like every other reset here: valid on a poisoned stack object.
-     * Zero is also the honest power-on value for the one register whose
+     * Unlike the pointer-free device resets, this requires an initialized
+     * machine-owned block: edram is an allocation that must survive a device
+     * reset. Zero is the honest power-on value for the one register whose
      * meaning is known -- reset has NOT completed until it is asked for, and
      * a device that reported completion before the request would let the
      * driver past a handshake that never happened.
+     *
+     * The buffer belongs to the machine and outlives a device reset; its
+     * CONTENTS are cleared, which is what a powered-down edram holds.
      */
-    /* The buffer belongs to the machine and outlives a device reset; its
-     * CONTENTS are cleared, which is what a powered-down edram holds. */
     uint8_t *edram = m->edram;
     memset(m, 0, sizeof *m);
     m->edram = edram;

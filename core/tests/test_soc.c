@@ -1139,6 +1139,58 @@ static void test_skipped_refresh_is_invisible_to_the_guest(void) {
 }
 
 /*
+ * The device tree exposes /arm-io/mbx as one 16 MiB aperture: 8 KiB of
+ * registers followed by EDRAM. The bus already decodes that whole span, so the
+ * machine's window inventory, conflict detector, allocation and teardown must
+ * describe the same object. A shorter advertised window is not cosmetic: it
+ * permits a RAM/stub declaration to shadow live EDRAM, while a missing free
+ * leaks almost 16 MiB for every machine a test constructs.
+ */
+static void test_mbx_edram_owns_and_declares_the_full_aperture(void) {
+    s5l8900_t m;
+    CHECK(s5l8900_init(&m, 0, 1u << 20), "machine init failed");
+    CHECK(m.mbx.edram != NULL, "machine init left the MBX EDRAM unallocated");
+    if (!m.mbx.edram) { s5l8900_free(&m); return; }
+
+    const uint32_t first = S5L8900_MBX_BASE + S5L_MBX_SIZE;
+    const uint32_t last = S5L8900_MBX_BASE + S5L_MBX_APERTURE - 4u;
+    uint64_t ur = m.unmapped_reads, uw = m.unmapped_writes;
+    m.bus.write32(m.bus.ctx, first, 0x11223344u);
+    m.bus.write32(m.bus.ctx, last, 0xa5c35a7eu);
+    CHECK(m.bus.read32(m.bus.ctx, first) == 0x11223344u &&
+          m.bus.read32(m.bus.ctx, last) == 0xa5c35a7eu,
+          "the first/last EDRAM words did not round-trip");
+    CHECK(m.unmapped_reads == ur && m.unmapped_writes == uw,
+          "in-aperture EDRAM traffic was counted as unmapped");
+
+    s5l_window_t windows[S5L_WINDOW_MAX];
+    unsigned nw = s5l8900_windows(&m, windows, S5L_WINDOW_MAX);
+    const s5l_window_t *mbx = NULL;
+    for (unsigned i = 0; i < nw && i < S5L_WINDOW_MAX; i++)
+        if (windows[i].base == S5L8900_MBX_BASE) mbx = &windows[i];
+    CHECK(mbx && mbx->size == S5L_MBX_APERTURE &&
+          strcmp(mbx->name, "mbx") == 0,
+          "window inventory does not declare the full MBX aperture");
+
+    const s5l_window_t *conflict = s5l8900_ram_conflict(last, 4u);
+    CHECK(conflict && strcmp(conflict->name, "mbx") == 0,
+          "RAM conflict detection permits the high end of MBX EDRAM");
+    CHECK(!s5l8900_add_stub(&m, last, 4u, "over-mbx-edram"),
+          "a stub was allowed to shadow the high end of MBX EDRAM");
+
+    uint8_t *allocation = m.mbx.edram;
+    s5l_mbx_reset(&m.mbx);
+    CHECK(m.mbx.edram == allocation,
+          "device reset dropped or replaced the machine-owned EDRAM");
+    CHECK(m.bus.read32(m.bus.ctx, first) == 0u &&
+          m.bus.read32(m.bus.ctx, last) == 0u,
+          "device reset did not clear the EDRAM contents");
+
+    s5l8900_free(&m);
+    CHECK(m.mbx.edram == NULL, "machine teardown retained the EDRAM pointer");
+}
+
+/*
  * Stub windows are honest storage, not invented behaviour. The properties that
  * matter are that they read back what was written (rather than the 0 that an
  * unmapped read returns, which is what made a driver spin 3.9 million times),
@@ -2929,6 +2981,7 @@ int main(void) {
     test_timebase_runs_without_a_timer();
     test_timebase_runs_at_the_guest_ratio();
     test_skipped_refresh_is_invisible_to_the_guest();
+    test_mbx_edram_owns_and_declares_the_full_aperture();
     test_timer_period_is_exact();
     test_timer_ack_mask_matches_the_kernels();
     test_timer_lump_matches_literal_countdown();
