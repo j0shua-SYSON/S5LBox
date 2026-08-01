@@ -604,15 +604,40 @@ static void trace_surface(const ios3_hle_mem_t *mem, const char *tag,
      * emulating the device rather than granting the guest anything, and for the
      * rule it does not relax: pixels still go through the unprivileged path.
      */
+    uint32_t next = 0;
+    bool got_next = false;
+
     fprintf(stderr, "hle-trace   %s@%08x", tag, p);
-    for (i = 0; i < 12u; i++) {
+    for (i = 0; i < 16u; i++) {
         uint32_t w = 0;
         bool ok = mem->read_priv ? mem->read_priv(mem->ctx, p + i * 4u, &w, 4u)
                                  : read_u32(mem, p + i * 4u, &w);
         if (ok) fprintf(stderr, " +%02x=%08x", i * 4u, w);
         else    fprintf(stderr, " +%02x=??", i * 4u);
+        if (ok && i == 3u) { next = w; got_next = true; }
     }
     fprintf(stderr, "\n");
+
+    /*
+     * ONE MORE LEVEL, because r263 showed the descriptor is itself a handle:
+     * every other word was zero or 0xffffffff and +0x0c held another kernel
+     * pointer (source -> 0xc54bcb00, destination -> 0xc3954240, and the two
+     * land in different regions). A pixel base is not in the first object, so
+     * the chain gets followed rather than guessed at -- the same discipline
+     * that stopped the first surface word being read as a base.
+     */
+    if (got_next && next) {
+        fprintf(stderr, "hle-trace   %s->%08x", tag, next);
+        for (i = 0; i < 16u; i++) {
+            uint32_t w = 0;
+            bool ok = mem->read_priv
+                        ? mem->read_priv(mem->ctx, next + i * 4u, &w, 4u)
+                        : read_u32(mem, next + i * 4u, &w);
+            if (ok) fprintf(stderr, " +%02x=%08x", i * 4u, w);
+            else    fprintf(stderr, " +%02x=??", i * 4u);
+        }
+        fprintf(stderr, "\n");
+    }
 }
 
 /* The two thunks take the context in r0 and the operation's own arguments
