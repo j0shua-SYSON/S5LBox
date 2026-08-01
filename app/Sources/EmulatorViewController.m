@@ -208,8 +208,11 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
     [self blockSystemPopGestures];
 }
 
-- (void)viewWillDisappear:(BOOL)animated {
-    [super viewWillDisappear:animated];
+- (void)viewDidDisappear:(BOOL)animated {
+    [super viewDidDisappear:animated];
+    /* Do not restore during an interactive transition. If a system gesture
+     * somehow starts and is later cancelled, viewWillDisappear: still runs;
+     * restoring there would re-enable that gesture under its own transition. */
     [self restoreSystemPopGestures];
 }
 
