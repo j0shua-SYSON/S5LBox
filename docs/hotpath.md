@@ -1198,3 +1198,47 @@ current-version checkpoint before a measured redraw. A restored development
 window is accepted only with nonzero `ogl_poly_scan` hits, a live nonblank CLCD
 frame, and a clean stop. Final replacement acceptance remains a cold armed/
 disarmed pair, because that is the test that has already caught zero-work diffs.
+
+### r271/r273: a current redraw checkpoint is now validated
+
+r271 paid the cold-boot cost at the then-current snapshot format. It wrote
+checkpoints at 3.5 B and 3.9 B retired instructions, scheduled the same 26-report
+drag at 4.0 B, and stopped normally at 4,399,991,513. The 3.9--4.4 B region was
+not guessed to contain rendering: the whole cold run counted 324
+`ogl_poly_scan` calls and 19,124 `sw_scanline` calls, the drag was accepted and
+read 26/26, the external-media bridge reported zero failures, and the final
+per-run PPM was nonblack with SHA-256
+`E0CE0EB1C117527ECDFF2C2C4A4549FCF48AB0F9E151AB7CBE13965849F7CEC8`.
+
+r273 then restored the 3.9 B checkpoint with exact host commit `1749c77` and a
+fresh external-media work image. It stopped normally at 4,399,995,184 with:
+
+* 183 `ogl_poly_scan` and 13,812 `sw_scanline` hits after restore;
+* 4,818 nearest-BGRA hits, of which 4,816 were handled and two safely declined;
+* live CLCD window 0, scanning/running 1/1, and 3,825 of 460,800 RGB bytes
+  nonzero;
+* all 26 drag reports accepted, queued, and read, with none refused;
+* zero external-media failures, two raw redirects/completions, and zero pending;
+* a per-run PPM byte-identical to r271, including the SHA-256 above.
+
+That accepts the checkpoint as the fast functional iteration path. The cold run
+took 1,967.2 seconds; r273 took about 254 seconds by process/log timestamps, even
+though both cover the same post-checkpoint guest work. The shortcut is therefore
+roughly 7.7x faster here. It is not a substitute for the final cold armed versus
+disarmed validation: a checkpoint inherits guest state, and neither run has a
+native root replacement or a measured 30 fps result yet.
+
+The first restored callback records also settle the live `sw_scanline` ABI:
+
+    r0=x, r1=y, r2=count, r3=start
+    [sp+0]=dx, [sp+4]=dy0, [sp+8]=dy1,
+    [sp+12]=active-field mask, [sp+16]=scan context
+
+The first observed span was x=114, y=417..428, count=161, mask `0x0308`, with
+`dy0=dy1=NULL`. Its context points to the render object and render state that the
+static decode reads. The live contexts select one texture unit and use both
+nearest-BGRX (`0x3122b698`) and nearest-BGRA (`0x3122b8bc`) samplers; claiming
+only the already replaced BGRA path would therefore omit a measured case. Those
+two are the bounded common path worth implementing first. All other texture
+counts, combine modes, blend modes, formats, or unreadable operands must decline
+to Apple's original code until separately decoded and pixel-diffed.
