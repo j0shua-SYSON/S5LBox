@@ -93,6 +93,9 @@ static uint8_t  g_scan_code[64];
 static uint32_t g_scan_code_va;
 static uint32_t g_scan_code_len;
 static uint32_t g_scan_fail_read_va;
+static unsigned g_scan_texel_read_calls;
+static uint32_t g_scan_texel_read_bytes;
+static uint32_t g_scan_texel_max_read_len;
 static bool     g_scan_fail_write;
 static unsigned g_scan_write_calls;
 static uint32_t g_scan_write_va;
@@ -114,6 +117,11 @@ static bool scan_region(uint32_t base, uint32_t size, uint32_t va,
 static bool scan_read(void *ctx, uint32_t va, void *dst, uint32_t len) {
     uint32_t off;
     (void)ctx;
+    if (scan_region(SCAN_TEXELS, 0x1000u, va, len, &off)) {
+        g_scan_texel_read_calls++;
+        g_scan_texel_read_bytes += len;
+        if (len > g_scan_texel_max_read_len) g_scan_texel_max_read_len = len;
+    }
     if (g_scan_fail_read_va && va <= g_scan_fail_read_va &&
         (uint64_t)va + len > g_scan_fail_read_va)
         return false;
@@ -220,6 +228,9 @@ static void scan_select_code(ios3_hle_site_t *site) {
 static void reset_scan_fixture(ios3_hle_site_t *site) {
     memset(g_scan_mem, 0, sizeof g_scan_mem);
     g_scan_fail_read_va = 0u;
+    g_scan_texel_read_calls = 0u;
+    g_scan_texel_read_bytes = 0u;
+    g_scan_texel_max_read_len = 0u;
     g_scan_fail_write = false;
     g_scan_write_calls = 0u;
     g_scan_write_va = 0u;
@@ -668,6 +679,12 @@ static void test_direct_scanline_preserves_bgra_and_forces_bgrx_alpha(void) {
               g_scan_write_va == SCAN_OUT + 20u && g_scan_write_len == 12u,
               "direct span published as %u write(s) at %08x len %u",
               g_scan_write_calls, g_scan_write_va, g_scan_write_len);
+        CHECK(g_scan_texel_read_calls == 1u &&
+              g_scan_texel_read_bytes == 12u &&
+              g_scan_texel_max_read_len == 12u,
+              "direct span used %u texture reads totalling %u, max %u",
+              g_scan_texel_read_calls, g_scan_texel_read_bytes,
+              g_scan_texel_max_read_len);
         CHECK(scan_peek32(SCAN_OUT + 20u) == (0x00112233u | alpha[pass]),
               "pixel 0 mismatch in pass %u", pass);
         CHECK(scan_peek32(SCAN_OUT + 24u) == (0x44556677u | alpha[pass]),
@@ -706,6 +723,12 @@ static void test_direct_scanline_accepts_the_measured_full_width_bound(void) {
               g_scan_write_len == 1280u,
               "full-width span published as %u write(s) at %08x len %u",
               g_scan_write_calls, g_scan_write_va, g_scan_write_len);
+        CHECK(g_scan_texel_read_calls == 1u &&
+              g_scan_texel_read_bytes == 1280u &&
+              g_scan_texel_max_read_len == 1280u,
+              "full-width span used %u texture reads totalling %u, max %u",
+              g_scan_texel_read_calls, g_scan_texel_read_bytes,
+              g_scan_texel_max_read_len);
         CHECK(scan_peek32(SCAN_OUT) == UINT32_C(0x80000000),
               "full-width first pixel is %08x", scan_peek32(SCAN_OUT));
         CHECK(scan_peek32(SCAN_OUT + 319u * 4u) == UINT32_C(0x8000013f),
@@ -812,6 +835,12 @@ static void test_rect_root_replaces_textured_and_solid_rows_atomically(void) {
               "textured rectangle published scalar=%u vector=%u/%u",
               g_scan_write_calls, g_scan_writev_calls,
               g_scan_writev_span_count);
+        CHECK(g_scan_texel_read_calls == 2u &&
+              g_scan_texel_read_bytes == 24u &&
+              g_scan_texel_max_read_len == 12u,
+              "textured rectangle used %u texture reads totalling %u, max %u",
+              g_scan_texel_read_calls, g_scan_texel_read_bytes,
+              g_scan_texel_max_read_len);
         CHECK(g_scan_writev_va[0] == SCAN_OUT + 4u &&
               g_scan_writev_va[1] == SCAN_OUT + 20u &&
               g_scan_writev_len[0] == 12u && g_scan_writev_len[1] == 12u,
@@ -1373,6 +1402,12 @@ static void test_nearest_leaf_sites_match_the_decoded_32bit_formats(void) {
               g_scan_write_len == 12u,
               "%s published as %u write(s) at %08x len %u", names[pass],
               g_scan_write_calls, g_scan_write_va, g_scan_write_len);
+        CHECK(g_scan_texel_read_calls == 1u &&
+              g_scan_texel_read_bytes == 12u &&
+              g_scan_texel_max_read_len == 12u,
+              "%s used %u texture reads totalling %u, max %u", names[pass],
+              g_scan_texel_read_calls, g_scan_texel_read_bytes,
+              g_scan_texel_max_read_len);
         CHECK(scan_peek32(SCAN_OUT + 0x40u) ==
                   (0x00112233u | alpha[pass]),
               "%s pixel 0 mismatch", names[pass]);

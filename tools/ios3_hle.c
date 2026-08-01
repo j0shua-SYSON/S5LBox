@@ -477,6 +477,50 @@ static bool f32_to_i32(float value, int32_t *out) {
     return true;
 }
 
+/*
+ * The rectangle root feeds this sampler the common 1:1 case: w=1, constant
+ * v, and u advancing by exactly one texel.  Once the fixed-point coordinates
+ * are on an integer or half-integer texel, every conversion in the guest loop
+ * is exact: those values are multiples of 2^15, which binary32 represents
+ * exactly throughout the signed 32-bit range.  If the row also stays below
+ * the guest's clamp limits, its per-pixel addresses are therefore one proven
+ * contiguous byte range.
+ *
+ * This predicate is deliberately narrow.  A false result falls through to
+ * the instruction-for-instruction sampler below; it never changes pixels.
+ */
+static bool hle_identity_texture_row(uint32_t base, uint32_t pitch,
+                                     uint32_t max_x, uint32_t max_y,
+                                     float w, float dw,
+                                     int32_t u, int32_t v,
+                                     int32_t du, int32_t dv,
+                                     uint32_t count, uint32_t out,
+                                     uint32_t *source) {
+    int64_t last_u;
+    uint64_t address, bytes;
+
+    if (!source || !count || w != 1.0f || dw != 0.0f ||
+        du != 65536 || dv != 0 || u < 0 || v < 0 ||
+        ((uint32_t)u & UINT32_C(0x7fff)) != 0u ||
+        ((uint32_t)v & UINT32_C(0x7fff)) != 0u)
+        return false;
+
+    last_u = (int64_t)u + (int64_t)(count - 1u) * 65536;
+    if (last_u > INT32_MAX || (uint32_t)last_u >= max_x ||
+        (uint32_t)v >= max_y)
+        return false;
+
+    address = (uint64_t)base + (uint64_t)pitch * ((uint32_t)v >> 16) +
+              ((uint32_t)u >> 16) * 4u;
+    bytes = (uint64_t)count * 4u;
+    if (address + bytes > UINT64_C(0x100000000) ||
+        (address < (uint64_t)out + bytes && (uint64_t)out < address + bytes))
+        return false;
+
+    *source = (uint32_t)address;
+    return true;
+}
+
 /* Compute the complete span before publishing any byte to guest memory. */
 static bool hle_sample_nearest_32_pixels(
         const ios3_hle_mem_t *mem, uint32_t tex, uint32_t unit,
@@ -488,6 +532,7 @@ static bool hle_sample_nearest_32_pixels(
     float su = 0.0f, sv = 0.0f, du_f = 0.0f, dv_f = 0.0f;
     int32_t u, v, du, dv;
     uint32_t ubits, vbits, dubits, dvbits;
+    uint32_t identity_source = 0;
     uint64_t uv_off;
 
     if (!mem || !mem->read || !pixels || count > SW_SPAN_MAX || unit > 2u)
@@ -526,6 +571,19 @@ static bool hle_sample_nearest_32_pixels(
     memcpy(&vbits, &v, sizeof vbits);
     memcpy(&dubits, &du, sizeof dubits);
     memcpy(&dvbits, &dv, sizeof dvbits);
+
+    if (count == 0u) return true;
+    if (hle_identity_texture_row(base, pitch, max_x, max_y, w, dw,
+                                 u, v, du, dv, count, out,
+                                 &identity_source)) {
+        if (!mem->read(mem->ctx, identity_source, pixels, count * 4u))
+            return false;
+        if (force_opaque) {
+            for (uint32_t k = 0; k < count; k++)
+                pixels[k] |= UINT32_C(0xff000000);
+        }
+        return true;
+    }
 
     for (uint32_t k = 0; k < count; k++) {
         int32_t uk, vk, x, y;

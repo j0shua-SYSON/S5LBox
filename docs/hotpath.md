@@ -1650,6 +1650,27 @@ stopwatch, not displayed cadence. **30 fps has not been demonstrated.** Final
 acceptance still needs a cold armed/disarmed pair and an actual frame-cadence
 measurement.
 
+The contiguous-read change is now a separate checkpoint. It does not broaden
+the set of guest spans that HLE will replace and it does not change the pixel
+algorithm. It recognizes only a nearest-neighbour 1:1 row with `w == 1`,
+`dw == 0`, `du == 1 texel`, constant `v`, exactly representable integer or
+half-integer 16.16 coordinates, no clamp, no 32-bit address overflow, and no
+source/destination overlap. That row is read into the existing private pixel
+buffer with one host callback instead of up to 320 four-byte callbacks. Every
+other row still uses the instruction-for-instruction sampler. The boot host's
+guest-memory callback retains the existing 1 KiB translated chunks, so a
+single HLE callback does not assume physical or page-table contiguity.
+
+The focused fixtures prove one 12-byte read for both BGRA and alpha-forced
+BGRX leaves, one 1,280-byte read for a full-width row, and two 12-byte reads
+for a transactional two-row root. They also retain the alias, source-fault and
+destination-fault refusals. The strict local binary passes 5,350 checks and the
+complete strict tree passes 58/58 tests. The live evidence is still the r294
+183-span smoke and the r299b combined 19,030-span oracle with zero failures.
+There is deliberately no stand-alone timing claim: no identity-read-only full
+replacement run was completed. The only measured gain remains r300's combined
+6.5%, and **neither that number nor this callback reduction proves 30 fps**.
+
 The next bounded rasterizer case is visible in r299b's refusal log: 320-wide
 mode-2 BGRA and BGRX roots. Apple's root chunks those rows around the
 scanline's 256-pixel temporary. The native root must reproduce that chunking
