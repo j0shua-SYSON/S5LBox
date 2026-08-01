@@ -2783,12 +2783,11 @@ typedef struct {
     uint32_t frame_ms;
     /*
      * The power LDO, /arm-io/spi1/multi-touch's `function-power_ldo`
-     * {phandle, 'GPIO', 0x0701, 0x00000101}. Tracked as the pin's LEVEL, and
-     * deliberately NOT used to gate anything: the device tree's fourth word is
-     * the platform-function argument block and this project has not decoded
-     * which byte of it names the polarity, so calling level-0 "off" would be a
-     * guess that could silently refuse every injection. `power_edges` says the
-     * subscription is live; the level says what the guest last drove.
+     * {phandle, 'GPIO', 0x0701, 0x00000101}. Byte 1 of that platform-function
+     * argument is the polarity, decoded at 0xc05a459c/0xc05a45d8: this line is
+     * ACTIVE HIGH. Each real edge clears the volatile protocol/application
+     * state and returns this flashless part to HBPP for the next powered
+     * session; `power_edges` also proves the GPIO subscription is live.
      */
     bool     power_level;
     uint64_t power_edges;
@@ -2943,7 +2942,7 @@ typedef struct {
  *   function-spi_cs0   {phandle, 'GPIO', 0x1800, 0x00000001}   (on spi1)
  */
 #define MTZ2_PIN_RESET  0x0606u  /* multi-touch function-reset, ACTIVE LOW  */
-#define MTZ2_PIN_POWER  0x0701u  /* multi-touch function-power_ldo          */
+#define MTZ2_PIN_POWER  0x0701u  /* multi-touch function-power_ldo, ACT HIGH */
 #define MTZ2_PIN_SELECT 0x1800u  /* /arm-io/spi1 function-spi_cs0           */
 
 /*
@@ -2990,7 +2989,9 @@ void     s5l_mtz2_reset_pin(void *ctx, bool level);
  */
 void     s5l_mtz2_select_pin(void *ctx, bool level);
 /*
- * The power LDO moved. Recorded, not acted on — see `power_level`.
+ * The active-high power LDO moved. A real edge discards the flashless part's
+ * downloaded image and volatile protocol state; a repeated same-level write
+ * does not. See `power_level` and s5l_mtz2_power_pin().
  */
 void     s5l_mtz2_power_pin(void *ctx, bool level);
 

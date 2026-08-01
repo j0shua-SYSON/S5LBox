@@ -294,6 +294,7 @@ static void test_reset_is_total_and_null_safe(void) {
     s5l_mtz2_bind(&dev, NULL);
     s5l_mtz2_reset(NULL);
     s5l_mtz2_reset_pin(NULL, true);
+    s5l_mtz2_power_pin(NULL, true);
     s5l_mtz2_select_pin(NULL, true);
     CHECK(!s5l_mtz2_irq(NULL), "NULL interrupt query unsafe");
     CHECK(s5l_mtz2_sum16(NULL, 4u) == 0u, "NULL checksum unsafe");
@@ -496,6 +497,62 @@ static void test_the_reset_pin_does_not_unprogram_the_part(void) {
     CHECK(dev.hbpp_mode,
           "a power-on reset left the part claiming to be programmed -- a part "
           "with no flash has lost its firmware and IS a bootloader again");
+}
+
+/*
+ * The failure reproduced after the guest's idle timeout was not timing or an
+ * XNU crash: sleep removed the Z2's LDO power, but the model kept the already
+ * executed firmware state. The next finishStarting() probe therefore got the
+ * programmed-mode zero response and logged "Could not detect HBPP".
+ *
+ * Reproduce the driver's exact restart ordering. The reset pin alone must not
+ * unprogram the part (the preceding test owns that rule); the LDO edge must.
+ */
+static void test_a_power_cycle_returns_the_flashless_part_to_hbpp(void) {
+    s5l_mtz2_t dev;
+    s5l_spi_slave_t s;
+    uint8_t probe[MTZ2_FRAME_LEN], rx[MTZ2_FRAME_LEN];
+    static const uint8_t exec[12] = {
+        0x1du, 0x53u, 0x18u, 0x00u, 0x10u, 0x00u,
+        0x00u, 0x01u, 0x00u, 0x00u, 0x00u, 0x29u
+    };
+
+    s5l_mtz2_reset(&dev);
+    s5l_mtz2_bind(&dev, &s);
+    s5l_mtz2_power_pin(&dev, true);       /* enabling power */
+    release_reset(&dev);
+    build_hbpp_probe(probe);
+    xfer(&s, probe, rx, sizeof probe);
+    CHECK(driver_says_in_hbpp(rx), "setup: the first HBPP probe failed");
+    xfer(&s, exec, rx, sizeof exec);
+    CHECK(!dev.hbpp_mode && dev.hbpp_execs == 1u,
+          "setup: EXEC did not leave HBPP");
+
+    /* Rewriting an already-high output is not a power cycle. */
+    s5l_mtz2_power_pin(&dev, true);
+    CHECK(!dev.hbpp_mode && dev.power_edges == 1u,
+          "a same-level LDO write erased the downloaded image");
+
+    /* AppleMultitouchZ2SPI's sleep/restart order. */
+    assert_reset(&dev);                   /* Asserting reset line */
+    s5l_mtz2_power_pin(&dev, false);      /* disabled power       */
+    s5l_mtz2_power_pin(&dev, true);       /* enabling power       */
+    memset(rx, 0xff, sizeof rx);
+    xfer(&s, probe, rx, sizeof probe);    /* dummy while reset    */
+    for (unsigned i = 0; i < sizeof rx; i++)
+        CHECK(rx[i] == 0u, "powered restart dummy byte %u drove %02x", i, rx[i]);
+    release_reset(&dev);
+    memset(rx, 0xff, sizeof rx);
+    xfer(&s, probe, rx, sizeof probe);
+
+    CHECK(driver_says_in_hbpp(rx),
+          "the post-power-cycle probe reproduced Could not detect HBPP: "
+          "%02x %02x %02x %02x", rx[0], rx[1], rx[2], rx[3]);
+    CHECK(dev.hbpp_mode && dev.hbpp_execs == 1u && dev.power_edges == 3u,
+          "power-on reset erased diagnostics or did not re-arm HBPP "
+          "(hbpp=%u exec=%llu edges=%llu)", dev.hbpp_mode ? 1u : 0u,
+          (unsigned long long)dev.hbpp_execs,
+          (unsigned long long)dev.power_edges);
 }
 
 /*
@@ -2002,6 +2059,7 @@ int main(void) {
     test_the_part_stays_a_bootloader_until_it_is_executed();
     test_the_dummy_transfer_is_not_observable();
     test_the_reset_pin_does_not_unprogram_the_part();
+    test_a_power_cycle_returns_the_flashless_part_to_hbpp();
     test_the_whole_bring_up_sequence();
     test_the_driver_tests_both_halfwords();
     test_get_report_info_satisfies_isbootloaded();

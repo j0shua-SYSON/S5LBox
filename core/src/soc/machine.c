@@ -1087,12 +1087,12 @@ bool s5l8900_init(s5l8900_t *m, uint32_t ram_base, uint32_t ram_size) {
      * `function-reset` (GPIO 0x0606 = group 6 bit 6) and `function-power_ldo`
      * (0x0701 = group 7 bit 1) are /arm-io/spi1/multi-touch's own;
      * `function-spi_cs0` (0x1800 = group 24 bit 0) is /arm-io/spi1's. Only the
-     * reset line changes behaviour — it is what tells resetDevice's dummy
-     * transfer from the probe that follows it. The select is a framer resync
-     * the device does not need, and the power line is recorded and not acted
-     * on (see s5l_mtz2_power_pin). A failure to subscribe is folded into the
-     * same counter a refused stub declaration is, rather than refusing to build
-     * a machine over a diagnostic.
+     * reset line distinguishes resetDevice's dummy transfer from the probe
+     * that follows it. The select resynchronises command framing, and a power
+     * edge discards the flashless Z2's downloaded image so its next probe sees
+     * HBPP again (see s5l_mtz2_power_pin). A failure to subscribe is folded
+     * into the same counter a refused stub declaration is, rather than
+     * refusing to build a machine over a diagnostic.
      */
     if (!s5l_gpio_watch(&m->gpio, MTZ2_PIN_RESET, &m->mtz2, s5l_mtz2_reset_pin))
         m->stub_declare_failures++;

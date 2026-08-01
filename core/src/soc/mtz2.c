@@ -962,6 +962,42 @@ static uint8_t mtz2_transfer(void *ctx, uint8_t out) {
 
 /* ============================================================== lifecycle === */
 
+/*
+ * What a loss of LDO power erases.
+ *
+ * The Z2 is flashless: the twelve-octet EXEC packet leaves HBPP only because
+ * the guest has just downloaded the application image into volatile memory.
+ * Removing power loses that image, so the next powered session starts in
+ * HBPP again.  This is deliberately narrower than s5l_mtz2_reset(): geometry
+ * describes the physical panel, and the bounded counters/logs are evidence
+ * across a sleep/wake cycle rather than device state to throw away.
+ *
+ * `in_reset` is also left alone.  It is the independent level of the active-
+ * low reset pin and the guest keeps it asserted across the LDO transition.
+ */
+static void mtz2_power_on_reset(s5l_mtz2_t *dev) {
+    dev->hbpp_mode   = true;
+    dev->atn_len     = MTZ2_ATN_PROBE;
+    dev->atn_val     = MTZ2_HBPP_ATN_OK;
+    dev->rdreg_addr  = 0u;
+    dev->pos         = 0u;
+    dev->len         = 0u;
+    dev->op          = 0u;
+    dev->frame_phase = 0xffu;
+    memset(dev->req, 0, sizeof dev->req);
+    memset(dev->rsp, 0, sizeof dev->rsp);
+
+    dev->atn      = false;
+    dev->contacts = 0u;
+    dev->frame_len = 0u;
+    dev->frame_seq = 0u;
+    dev->frame_ms  = 0u;
+    memset(dev->frame, 0, sizeof dev->frame);
+
+    /* Do not make the transaction ledger span a power boundary. */
+    dev->txn_mark = dev->octets;
+}
+
 void s5l_mtz2_reset(s5l_mtz2_t *dev) {
     if (!dev) return;
     memset(dev, 0, sizeof *dev);
@@ -981,12 +1017,8 @@ void s5l_mtz2_reset(s5l_mtz2_t *dev) {
      * first store to this pin writes level 0 — no change, so no watch callback
      * — and only the later release produces an edge.
      */
-    dev->in_reset      = true;
-    dev->hbpp_mode     = true;
-    dev->atn_len       = MTZ2_ATN_PROBE;
-    dev->rdreg_addr    = 0u;
-    /* Not zero: zero is the LENGTH read's tx[2]. See the framer. */
-    dev->frame_phase   = 0xffu;
+    dev->in_reset = true;
+    mtz2_power_on_reset(dev);
 
     /*
      * THE GEOMETRY. None of this is in the device tree, so all of it is our
@@ -1179,27 +1211,27 @@ void s5l_mtz2_power_pin(void *ctx, bool level) {
     s5l_mtz2_t *dev = ctx;
     if (!dev) return;
     /*
-     * MTZ2_PIN_POWER, group 7 bit 1, and RECORDED RATHER THAN ACTED ON.
+     * MTZ2_PIN_POWER, group 7 bit 1, ACTIVE HIGH.
      *
      * The device tree gives `function-power_ldo {phandle, 'GPIO', 0x0701,
      * 0x00000101}`; the reset line beside it is `{..., 0x0606, 0x00010001}`
-     * and /arm-io/spi1's chip select is `{..., 0x1800, 0x00000001}`. Those
-     * fourth words are the platform-function argument block, and which byte of
-     * it names the polarity is not established anywhere this project can read
-     * — the baseband node uses the SAME 0x00000101 for `function-bb_rst`,
-     * which is a reset and not a supply, so the obvious "0x0101 means active
-     * high" reading is already contradicted.
+     * and /arm-io/spi1's chip select is `{..., 0x1800, 0x00000001}`. The
+     * AppleS5L8900X platform-function implementation at 0xc05a459c/0xc05a45d8
+     * reads byte 1 as the polarity: one is active-high and zero active-low.
+     * The reset property's zero agrees with the independently measured reset
+     * sequence, so this is decoded evidence rather than a convenient guess.
      *
-     * The reset line's polarity was settled by MEASUREMENT (fsel 0x0006060e at
-     * 220,635,069 straddling the dummy transfer), not by reading the tree, and
-     * nothing equivalent has been measured for this pin. Gating frame delivery
-     * on a guessed polarity would mean a wrong guess refuses every injection
-     * for the whole boot with the device looking healthy — the exact silent
-     * failure this file keeps being corrected for. So the level is tracked and
-     * published, and `s5l_mtz2_set_contacts` does not consult it.
+     * A LEVEL WRITE WITH NO EDGE IS NOT A RESET. GPIO watchers normally report
+     * only edges, but keeping that rule here prevents a repeated write of 1
+     * from erasing firmware. A real edge, in either direction, ends the current
+     * protocol conversation; after power returns the flashless part is in HBPP
+     * and must be downloaded again. The guest holds reset low while power is
+     * disabled, so that existing reset gate is what keeps the SPI bus quiet.
      */
-    if (dev->power_level != level) dev->power_edges++;
+    if (dev->power_level == level) return;
     dev->power_level = level;
+    dev->power_edges++;
+    mtz2_power_on_reset(dev);
 }
 
 /* ======================================================== host injection ===
