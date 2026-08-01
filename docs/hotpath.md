@@ -1876,3 +1876,80 @@ changed-published-frame FPS counter. This checkpoint still does **not** prove
 30 fps. Final performance acceptance remains an actual app cadence measurement
 on target hardware plus a cold armed/disarmed pair; the 3.9 B snapshot remains
 an iteration accelerator, not cold-boot evidence.
+
+### r315--r320: the 320-to-1 row is bilinear, and four roots are now exact
+
+The first implementation of the next refusal was wrong in a useful but
+important way. The polygon geometry really is a 320-pixel rectangle with a
+texture extent of only `[0,1)`, and retained disassembly does show binary64 to
+binary32 root deltas, pixel-centre starts, and non-fused VFPv2 chunk advances.
+But the initial fixture supplied nearest BGRA. The live context instead points
+at `0x3122bad8`, a different sampler. r315's bounded run showed zero failures,
+but its apparent counter increase was not a clean like-for-like proof. r316's
+full isolated run was decisive: it ended with the same 167 attempted / 137
+prepared / 137 passed roots as r310, while the refusal moved only from
+`texture-map` to `scanline`. The patch had **not handled the live row**. That
+local commit was never pushed and was amended rather than preserving an
+overclaim in public history.
+
+r317 added trace-only descriptor output and stopped just after the first live
+call. It is diagnosis, not acceptance. The captured context was:
+
+    sampler       0x3122bad8 / 0x3122bad8
+    texture base  0x031b3000
+    pitch         32 bytes
+    max x/y       0x0000ffff / 0x005fffff
+
+Disassembly of `0x3122bad8..0x3122bce0` identifies a bilinear BGRA routine. It
+subtracts half a pixel in 16.16 space, clamps a 2x2 neighbourhood, loads all
+four taps, and interpolates packed byte lanes. For this exact descriptor there
+is only one texel column, so both horizontal taps always clamp to column zero.
+The retained rectangle reaches every row at an exact vertical pixel centre;
+the two vertical taps are either distinct with interpolation weight zero or
+the last row clamps both taps together. Its result is therefore exactly the
+upper texel, although the lower address still has to be readable to preserve
+the native fault boundary.
+
+The replacement is deliberately scoped to that proof. It accepts the exact
+bilinear function only through the transactional rectangle-root memory facade,
+requires `max_x == 0x0000ffff`, `w == 1`, `dw == 0`, non-wrapping positive u
+progression and constant v across the row, reads both vertical tap addresses,
+and refuses overlap with the current destination chunk. Ordinary leaf and
+stand-alone scanline calls still decline. A two-column descriptor and
+same-chunk alias also decline. The focused fixture models two rows and both
+256+64 chunks, including the next-row probe and last-row clamp; it passes
+21,520 checks.
+
+r319 was the shortest exact-commit live gate, stopping at 4.218 B. It changed
+the first scaled root from declined to prepared, but stopped before Apple's
+routine returned: 84 attempted / 84 prepared / 83 passed, verifier depth one.
+It had zero failures, but it is **not a correctness pass**. Extending that
+bounded run would duplicate most of the required full replay, so r320 went
+straight to the complete 3.9--4.4 B oracle from the clean checkpoint.
+
+r320 used detached exact commit
+`ee89b20700ef64ec9a0029dcfbde80953c67972c`; its fresh RelWithDebInfo emulator
+SHA-256 was
+`0C644BA14C15841E9E098820B06C0BC55D19504F350F87A979EAD666A6872835`, and all
+54 standard tests passed. The full oracle completed in 356.107 seconds with:
+
+    nearest BGRX leaf        4,830 attempted / 4,830 exact passes
+    nearest BGRA leaf        4,818 attempted / 4,816 exact passes
+    sw_scanline             13,333 attempted / 9,277 exact passes
+    ogl_poly_scan              167 attempted /   141 exact passes
+    total prepared          19,064 / 65,536; 0 failures
+
+All comparisons resolved. Relative to r310, exactly four additional roots are
+prepared and byte-exact while every leaf and scanline count is unchanged. The
+run consumed all 26 touch reports, reported zero external-media failures and
+2/2 raw redirects/completions, retained 69 H1 swap-handler calls, and produced
+the accepted framebuffer SHA-256
+`E0CE0EB1C117527ECDFF2C2C4A4549FCF48AB0F9E151AB7CBE13965849F7CEC8`.
+GitHub Actions also passed iOS build `30707858469` and all eight core-test jobs
+in `30707858484` for that exact commit.
+
+There is no replacement timing result in this checkpoint yet. r320 is a
+differential correctness run, not a benchmark, and its 356-second wall time is
+not guest FPS. **30 fps remains unproven.** A clean replacement run is still
+needed for a local performance signal; final acceptance still requires actual
+published-frame cadence in the iOS app and a cold armed/disarmed comparison.
