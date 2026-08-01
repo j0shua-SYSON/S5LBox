@@ -58,6 +58,20 @@ extern int csops(pid_t pid, unsigned int ops, void *useraddr, size_t usersize);
 // forever, so this cannot be unbounded.
 static const NSUInteger kConsoleScrollback = 12000;
 
+/*
+ * iOS 26 added UINavigationController's content-wide interactive pop gesture
+ * alongside the older leading-edge gesture.  Keep the lookup dynamic so this
+ * iOS 13-deployment app still compiles with an older SDK and runs on an older
+ * UIKit; respondsToSelector: is the runtime availability gate.
+ */
+static UIGestureRecognizer *VMContentPopGestureRecognizer(
+        UINavigationController *navigationController) {
+    SEL selector = NSSelectorFromString(@"interactiveContentPopGestureRecognizer");
+    if (!navigationController ||
+        ![navigationController respondsToSelector:selector]) return nil;
+    return [navigationController valueForKey:NSStringFromSelector(selector)];
+}
+
 @class EmulatorViewController;
 
 /* CADisplayLink retains its target. Keeping only a weak edge back to the view
@@ -86,6 +100,8 @@ static const NSUInteger kConsoleScrollback = 12000;
 - (void)appWillResignActive:(NSNotification *)notification;
 - (void)appDidBecomeActive:(NSNotification *)notification;
 - (void)settingsDidChange:(NSNotification *)notification;
+- (void)blockSystemPopGestures;
+- (void)restoreSystemPopGestures;
 - (void)applyPauseState;
 - (void)applySettingsToEngine;
 - (void)refreshRunControls;
@@ -165,9 +181,65 @@ static const NSUInteger kConsoleScrollback = 12000;
     BOOL               _haveTouch;
     int                _touchX;
     int                _touchY;
+
+    /*
+     * A horizontal guest swipe must reach the emulated touchscreen, not pop
+     * this controller and tear down the machine.  Preserve each recognizer's
+     * prior state rather than blindly enabling it on exit: the navigation
+     * controller or another screen may already have disabled one.
+     */
+    __weak UIGestureRecognizer *_blockedEdgePopGesture;
+    __weak UIGestureRecognizer *_blockedContentPopGesture;
+    BOOL _edgePopGestureWasEnabled;
+    BOOL _contentPopGestureWasEnabled;
 }
 
 #pragma mark - Lifecycle
+
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    [self blockSystemPopGestures];
+}
+
+- (void)viewDidAppear:(BOOL)animated {
+    [super viewDidAppear:animated];
+    /* UINavigationController may finish installing its iOS 26 recognizer as
+     * the push completes. Re-run the idempotent block after that transition. */
+    [self blockSystemPopGestures];
+}
+
+- (void)viewWillDisappear:(BOOL)animated {
+    [super viewWillDisappear:animated];
+    [self restoreSystemPopGestures];
+}
+
+- (void)blockSystemPopGestures {
+    UINavigationController *navigationController = self.navigationController;
+    UIGestureRecognizer *edge = navigationController.interactivePopGestureRecognizer;
+    UIGestureRecognizer *content =
+        VMContentPopGestureRecognizer(navigationController);
+
+    if (edge && !_blockedEdgePopGesture) {
+        _blockedEdgePopGesture = edge;
+        _edgePopGestureWasEnabled = edge.enabled;
+    }
+    if (content && content != edge && !_blockedContentPopGesture) {
+        _blockedContentPopGesture = content;
+        _contentPopGestureWasEnabled = content.enabled;
+    }
+
+    _blockedEdgePopGesture.enabled = NO;
+    _blockedContentPopGesture.enabled = NO;
+}
+
+- (void)restoreSystemPopGestures {
+    UIGestureRecognizer *edge = _blockedEdgePopGesture;
+    UIGestureRecognizer *content = _blockedContentPopGesture;
+    if (edge) edge.enabled = _edgePopGestureWasEnabled;
+    if (content) content.enabled = _contentPopGestureWasEnabled;
+    _blockedEdgePopGesture = nil;
+    _blockedContentPopGesture = nil;
+}
 
 - (void)viewDidLoad {
     [super viewDidLoad];
@@ -366,6 +438,7 @@ static const NSUInteger kConsoleScrollback = 12000;
 }
 
 - (void)dealloc {
+    [self restoreSystemPopGestures];
     [[NSNotificationCenter defaultCenter] removeObserver:self];
     [_link invalidate];
     [_engine stop];
