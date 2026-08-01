@@ -131,10 +131,13 @@ static const vm_option_omission_t VM_OMITTED[] = {
     { "iomfb-display",
       "meaningful only alongside --framebuffer, which this app does not offer" },
     { "hle",
-      "every high-level-emulation site is OBSERVE today, so arming them counts "
-      "calls and changes nothing a phone user could see. This becomes a real "
-      "setting -- probably a default rather than a toggle -- on the day a site "
-      "becomes REPLACE and starts drawing scanlines natively" },
+      "native rasterizer replacements are still an opt-in host experiment. "
+      "They belong in the app as a verified default, not a user-facing switch, "
+      "only after live pixel equivalence and the no-JIT speed target pass" },
+    { "hle-verify",
+      "a developer differential oracle that deliberately executes Apple's "
+      "routine and emits a terminal report; it is a validation run, not a "
+      "phone boot setting" },
     { "fstab-fixup",
       "turning it off halts the boot at fsck by design, which is a bisection "
       "step rather than a setting" },

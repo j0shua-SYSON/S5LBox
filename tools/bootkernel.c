@@ -446,6 +446,7 @@ typedef struct {
     bool call_probe_regs;
     bool call_probe_live;
     bool hle;
+    bool hle_verify;
     bool uart4_rx_irq;
 } boot_toggles_t;
 
@@ -613,12 +614,17 @@ static const boot_toggle_t BOOT_TOGGLES[] = {
       "header says, in as many words, that it was requested and not applied." },
     { "hle", NULL, NULL, false, BOOT_GROUP_DIAGNOSTIC,
       BOOT_FIELD(hle),
-      "arm the userspace high-level-emulation sites in tools/ios3_hle.c and\n"
-      "count them. Every site is OBSERVE today, so the guest still executes\n"
-      "its own code and the only effect is the report -- but the retired\n"
-      "instruction count is unchanged only for that reason, and any future\n"
-      "REPLACE site makes runs with and without this flag incomparable.\n"
-      "OFF by default for exactly that reason." },
+      "arm userspace high-level-emulation sites in tools/ios3_hle.c. A\n"
+      "proved REPLACE arm executes natively and skips the guest routine;\n"
+      "OBSERVE/TRACE and declined shapes still execute guest code. This makes\n"
+      "retired-instruction indices incomparable with a disarmed run. OFF by\n"
+      "default; use --hle-verify before accepting a new replacement." },
+    { "hle-verify", NULL, NULL, false, BOOT_GROUP_DIAGNOSTIC,
+      BOOT_FIELD(hle_verify),
+      "differentially verify REPLACE handlers without replacing anything:\n"
+      "capture the native span, execute Apple's routine unchanged, then\n"
+      "compare its exact destination bytes at return. Mutually exclusive\n"
+      "with --hle, and intentionally slower than a throughput run." },
     { "jb-codesign", NULL, NULL, false, BOOT_GROUP_GUEST_STATE,
       BOOT_FIELD(jb_codesign),
       "the kernel half of --jailbreak: disable the guest's code-signature\n"
@@ -3057,18 +3063,36 @@ static bool guest_read_user_bytes(arm_cpu_t *cpu, uint32_t va,
  * counts -- and any later hit from a different space is counted as wrong_space
  * rather than silently folded in. If those two disagree, the report says so.
  *
- * WRITES FAIL CLOSED. Every registered site is OBSERVE and has a NULL handler,
- * so nothing can write yet; the write adapter therefore refuses rather than
- * pretending. The day a REPLACE site lands it needs a real writer that goes
- * through the MMU page by page, and a refusal here is a loud, early failure
- * instead of a silently half-written scanline.
+ * WRITES FAIL CLOSED. REPLACE sites use the writer below, which first translates
+ * the complete range through the guest MMU and only then publishes bytes. A
+ * fault therefore declines the native call without leaving a half-written
+ * scanline for the guest implementation to inherit.
  */
 /* Defined with the rest of the address-space diagnostics, far below. */
 static uint32_t diagnostic_ttbr0_base(const arm_cpu_t *cpu);
 
 static bool g_hle_enabled;
+static bool g_hle_verify;
 static uint32_t g_hle_space;     /* TTBR0 armed to; 0 == not armed yet */
 static bool g_hle_pending;       /* a site failed identity and may yet arm */
+
+#define HLE_VERIFY_SITE_MAX 32u
+#define HLE_VERIFY_LIMIT    4096u
+#define HLE_VERIFY_DEPTH_MAX 8u
+typedef struct {
+    uint64_t begin_at[HLE_VERIFY_DEPTH_MAX];
+    ios3_hle_oracle_t pending[HLE_VERIFY_DEPTH_MAX];
+    unsigned depth;
+    uint64_t attempts[HLE_VERIFY_SITE_MAX];
+    uint64_t prepared[HLE_VERIFY_SITE_MAX];
+    uint64_t passed[HLE_VERIFY_SITE_MAX];
+    uint64_t mismatched[HLE_VERIFY_SITE_MAX];
+    uint64_t unreadable[HLE_VERIFY_SITE_MAX];
+    uint64_t prepared_total;
+    unsigned pass_logs;
+    unsigned failure_logs;
+} hle_verify_state_t;
+static hle_verify_state_t g_hle_verifier;
 
 /*
  * WHY ARMING HAPPENS MORE THAN ONCE. Identity is verified by reading the
@@ -3199,24 +3223,17 @@ static bool hle_mem_write(void *ctx, uint32_t va, const void *src,
     return true;
 }
 
-/*
- * Returns true only when a handler did the whole job and set the CPU up to
- * return, in which case the caller must NOT step this instruction. Every site
- * is OBSERVE today, so this returns false always and the guest keeps running
- * its own code -- the counters move, the behaviour does not.
- */
-static bool hle_took_call(arm_cpu_t *cpu) {
-    ios3_hle_mem_t mem;
+static bool hle_prepare(arm_cpu_t *cpu, ios3_hle_mem_t *mem,
+                        uint32_t *pc_out, uint32_t *as_out) {
     uint32_t as, pc;
-
     if (!g_hle_enabled || !cpu) return false;
     if ((cpu->cpsr & ARM_CPSR_MODE_MASK) != ARM_MODE_USR) return false;
 
-    mem.ctx = cpu;
-    mem.read = hle_mem_read;
-    mem.write = hle_mem_write;
-    mem.read_priv = hle_mem_read_priv;
-    mem.read_phys = hle_mem_read_phys;
+    mem->ctx = cpu;
+    mem->read = hle_mem_read;
+    mem->write = hle_mem_write;
+    mem->read_priv = hle_mem_read_priv;
+    mem->read_phys = hle_mem_read_phys;
     as = diagnostic_ttbr0_base(cpu);
     pc = cpu->r[15] & ~1u;
 
@@ -3224,7 +3241,7 @@ static bool hle_took_call(arm_cpu_t *cpu) {
         for (unsigned i = 0; i < ios3_hle_site_count(); i++) {
             const ios3_hle_site_t *s = ios3_hle_site_at(i);
             if (s && s->va == pc) {
-                if (ios3_hle_arm(&mem, as)) {
+                if (ios3_hle_arm(mem, as)) {
                     g_hle_space = as;
                     hle_note_pending();
                 }
@@ -3238,13 +3255,113 @@ static bool hle_took_call(arm_cpu_t *cpu) {
         for (unsigned i = 0; i < ios3_hle_site_count(); i++) {
             const ios3_hle_site_t *s = ios3_hle_site_at(i);
             if (s && !s->armed && s->va == pc) {
-                ios3_hle_arm(&mem, g_hle_space);
+                ios3_hle_arm(mem, g_hle_space);
                 hle_note_pending();
                 break;
             }
         }
     }
+    if (pc_out) *pc_out = pc;
+    if (as_out) *as_out = as;
+    return true;
+}
+
+/*
+ * Returns true only when a handler did the whole job and set the CPU up to
+ * return, in which case the caller must NOT step this instruction. OBSERVE and
+ * TRACE sites still return false; a REPLACE handler that cannot prove its
+ * argument shape or complete every access also returns false and the guest runs
+ * the original routine.
+ */
+static bool hle_took_call(arm_cpu_t *cpu) {
+    ios3_hle_mem_t mem;
+    uint32_t as, pc;
+    if (!hle_prepare(cpu, &mem, &pc, &as)) return false;
     return ios3_hle_step(cpu, &mem, pc, as);
+}
+
+/* Prepare a native result without publishing it. A bounded LIFO is necessary:
+ * sw_scanline calls a nearest sampler, and verifying only the outer return
+ * would leave the leaf replacements unproved. Guest calls nest in return order,
+ * so the top expected span is always the first one eligible to compare. */
+static void hle_verify_begin(arm_cpu_t *cpu, uint64_t at) {
+    ios3_hle_mem_t mem;
+    ios3_hle_oracle_t candidate;
+    uint32_t as, pc, index;
+    bool ready;
+
+    if (!g_hle_verify || g_hle_verifier.depth >= HLE_VERIFY_DEPTH_MAX ||
+        g_hle_verifier.prepared_total >= HLE_VERIFY_LIMIT)
+        return;
+    if (!hle_prepare(cpu, &mem, &pc, &as)) return;
+
+    ready = ios3_hle_oracle_prepare(cpu, &mem, pc, as, &candidate);
+    if (candidate.site_index == UINT32_MAX) return;
+    index = candidate.site_index;
+    if (index >= HLE_VERIFY_SITE_MAX) {
+        if (g_hle_verifier.failure_logs++ == 0u)
+            fprintf(stderr,
+                    "hle-verify: site index %u exceeds verifier capacity %u\n",
+                    index, HLE_VERIFY_SITE_MAX);
+        return;
+    }
+    g_hle_verifier.attempts[index]++;
+    if (!ready) return;
+
+    g_hle_verifier.pending[g_hle_verifier.depth] = candidate;
+    g_hle_verifier.begin_at[g_hle_verifier.depth] = at;
+    g_hle_verifier.depth++;
+    g_hle_verifier.prepared[index]++;
+    g_hle_verifier.prepared_total++;
+}
+
+static void hle_verify_note_post_step(arm_cpu_t *cpu, uint64_t at) {
+    uint8_t actual[IOS3_HLE_ORACLE_MAX_BYTES];
+    ios3_hle_oracle_t *expected;
+    uint64_t begin_at;
+    uint32_t index, first = 0u;
+
+    if (!g_hle_verify || g_hle_verifier.depth == 0u || !cpu)
+        return;
+    expected = &g_hle_verifier.pending[g_hle_verifier.depth - 1u];
+    begin_at = g_hle_verifier.begin_at[g_hle_verifier.depth - 1u];
+    if ((cpu->cpsr & ARM_CPSR_MODE_MASK) != ARM_MODE_USR ||
+        (g_hle_space && diagnostic_ttbr0_base(cpu) != g_hle_space) ||
+        (cpu->r[15] & ~1u) != (expected->return_pc & ~1u) ||
+        cpu->r[13] != expected->return_sp)
+        return;
+
+    index = expected->site_index;
+    if (!hle_mem_read(cpu, expected->out_va, actual, expected->out_len)) {
+        g_hle_verifier.unreadable[index]++;
+        if (g_hle_verifier.failure_logs++ < 8u)
+            fprintf(stderr,
+                    "hle-verify UNREADABLE %s span=%08x+%u begin=%llu return=%llu\n",
+                    expected->site_name, expected->out_va, expected->out_len,
+                    (unsigned long long)begin_at,
+                    (unsigned long long)at);
+    } else if (memcmp(actual, expected->expected, expected->out_len) != 0) {
+        while (first < expected->out_len &&
+               actual[first] == expected->expected[first])
+            first++;
+        g_hle_verifier.mismatched[index]++;
+        if (g_hle_verifier.failure_logs++ < 8u)
+            fprintf(stderr,
+                    "hle-verify MISMATCH %s span=%08x+%u first=+%u "
+                    "native=%02x guest=%02x begin=%llu return=%llu\n",
+                    expected->site_name, expected->out_va, expected->out_len,
+                    first, expected->expected[first], actual[first],
+                    (unsigned long long)begin_at,
+                    (unsigned long long)at);
+    } else {
+        g_hle_verifier.passed[index]++;
+        if (g_hle_verifier.pass_logs++ < 12u)
+            printf("hle-verify PASS %s span=%08x+%u begin=%llu return=%llu\n",
+                   expected->site_name, expected->out_va, expected->out_len,
+                   (unsigned long long)begin_at,
+                   (unsigned long long)at);
+    }
+    g_hle_verifier.depth--;
 }
 
 static lifecycle_path_status_t
@@ -17529,10 +17646,21 @@ static bool call_probe_ring_selfcheck(void) {
     return CALL_PROBE_PC_MAX >= 1u;
 }
 
+static uint64_t hle_verify_failures(void) {
+    uint64_t total = 0u;
+    for (unsigned i = 0; i < HLE_VERIFY_SITE_MAX; i++) {
+        total += g_hle_verifier.mismatched[i];
+        total += g_hle_verifier.unreadable[i];
+    }
+    return total;
+}
+
 static void hle_report(void) {
     if (!g_hle_enabled) return;
 
-    printf("\n=== USERSPACE HLE SITES ===\n");
+    printf("\n=== USERSPACE HLE SITES (%s) ===\n",
+           g_hle_verify ? "VERIFY ONLY; GUEST CODE EXECUTED"
+                        : "REPLACEMENT ENABLED");
     if (!g_hle_space)
         printf("    armed to: NOTHING -- no registered site was ever reached\n"
                "    in user mode, so no address space was ever chosen. Zero\n"
@@ -17559,6 +17687,35 @@ static void hle_report(void) {
            "    was counted and the guest still ran its own code. IDENTITY\n"
            "    FAILED means the bytes there are not the recorded prologue,\n"
            "    so the site refused to arm rather than guessing.\n");
+
+    if (g_hle_verify) {
+        printf("\n    live differential oracle (native shadow vs Apple routine):\n");
+        printf("    %-26s %10s %10s %10s %10s %10s\n",
+               "site", "attempted", "prepared", "passed", "mismatch",
+               "unreadable");
+        for (unsigned i = 0; i < ios3_hle_site_count() &&
+                             i < HLE_VERIFY_SITE_MAX; i++) {
+            const ios3_hle_site_t *s = ios3_hle_site_at(i);
+            if (!s || g_hle_verifier.attempts[i] == 0u) continue;
+            printf("    %-26s %10llu %10llu %10llu %10llu %10llu\n",
+                   s->name,
+                   (unsigned long long)g_hle_verifier.attempts[i],
+                   (unsigned long long)g_hle_verifier.prepared[i],
+                   (unsigned long long)g_hle_verifier.passed[i],
+                   (unsigned long long)g_hle_verifier.mismatched[i],
+                   (unsigned long long)g_hle_verifier.unreadable[i]);
+        }
+        printf("    prepared total: %llu / %u limit; failures: %llu\n",
+               (unsigned long long)g_hle_verifier.prepared_total,
+               HLE_VERIFY_LIMIT,
+               (unsigned long long)hle_verify_failures());
+        if (g_hle_verifier.depth != 0u)
+            printf("    unresolved comparison depth at stop: %u\n",
+                   g_hle_verifier.depth);
+        printf("    A prepared pass compares the exact native destination span\n"
+               "    immediately after the unmodified guest routine returns.\n"
+               "    attempted-prepared are deliberately declined shapes.\n");
+    }
 }
 
 static void call_probe_report(void) {
@@ -25579,6 +25736,13 @@ int main(int argc, char **argv) {
     resolved.ppp          = ppp;
     resolved.nat          = nat;
 
+    if (cfg.v.hle && cfg.v.hle_verify) {
+        fprintf(stderr,
+                "--hle and --hle-verify are mutually exclusive: one replaces "
+                "guest routines and the other must execute them unchanged\n");
+        return 1;
+    }
+
     /* --print-config: report and stop, before the kernel, the tree, the rootfs
      * or the work image is opened. Nothing on disk is read or written. */
     if (cfg.v.print_config) {
@@ -27171,7 +27335,9 @@ external_md_work_ready:
      * it is still written after spy_install() for the same reason everything
      * else here is: G is memset there. */
     G.call_probe_regs = cfg.v.call_probe_regs;
-    g_hle_enabled = cfg.v.hle;
+    g_hle_verify = cfg.v.hle_verify;
+    g_hle_enabled = cfg.v.hle || g_hle_verify;
+    memset(&g_hle_verifier, 0, sizeof g_hle_verifier);
     G.call_probe_live = cfg.v.call_probe_live;
     G.call_probe_n = call_probe_n;
     /*
@@ -27896,15 +28062,17 @@ external_md_work_ready:
          * candidate speedup, and a speedup that only works in the slow mode is
          * not one. It costs a mode compare per instruction while disarmed.
          */
-        if (hle_took_call(&mach.cpu)) {
-            /* A handler did the job and set PC; the instruction must not run.
-             * No site does this yet -- every one is OBSERVE -- so this branch
-             * is unreachable today and is here so that the day one becomes
-             * REPLACE, the skip is already correct rather than retrofitted. */
+        if (g_hle_verify) {
+            hle_verify_begin(&mach.cpu, n);
+            st = arm_step(&mach.cpu);
+        } else if (hle_took_call(&mach.cpu)) {
+            /* A handler did the whole job and set PC; do not execute the first
+             * guest instruction as well. */
             st = ARM_OK;
         } else {
             st = arm_step(&mach.cpu);
         }
+        hle_verify_note_post_step(&mach.cpu, n);
         springboard_return_note_post_step(&mach.cpu, n, st);
         springboard_exec_trace_note_user_post_step(&mach.cpu, n, st);
         springboard_framebuffer_note_post_step(&mach.cpu, n, st);
@@ -29427,6 +29595,12 @@ external_md_work_ready:
                 "continuation(s) pending\n",
                 external_raw_pending);
         exit_code = 12;
+    }
+    if (g_hle_verify && hle_verify_failures() != 0u && exit_code == 0) {
+        fprintf(stderr,
+                "hle-verify: %llu differential comparison failure(s)\n",
+                (unsigned long long)hle_verify_failures());
+        exit_code = 13;
     }
 
     if (external_md) {

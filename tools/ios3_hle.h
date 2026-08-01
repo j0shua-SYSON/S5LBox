@@ -53,10 +53,11 @@
  *    0x00621000. A handler that cannot reproduce the fault must decline the
  *    call and let the guest run its own code.
  *
- * 6. AN ORACLE. Pixel-exactness is not assumed, it is diffed: the same run
- *    with the site armed and disarmed must produce identical framebuffers.
- *    clcd.c states the doctrine -- "a wrong picture drawn confidently is worse
- *    than no picture."
+ * 6. AN ORACLE. Pixel-exactness is not assumed, it is diffed. A replacement
+ *    is first run in shadow memory while Apple's routine still executes, and
+ *    its exact destination span is compared at return. Final acceptance still
+ *    requires cold armed/disarmed framebuffers. clcd.c states the doctrine --
+ *    "a wrong picture drawn confidently is worse than no picture."
  *
  * 7. DETERMINISM, and this one is a project-level cost rather than a bug.
  *    Replacing guest code changes the retired-instruction count, so every
@@ -200,6 +201,35 @@ void ios3_hle_disarm(void);
  */
 bool ios3_hle_step(arm_cpu_t *cpu, const ios3_hle_mem_t *mem, uint32_t pc,
                    uint32_t ttbr0);
+
+/*
+ * Live differential oracle for a REPLACE site.
+ *
+ * This runs the native handler against a private CPU and a write-capturing
+ * memory facade. Guest memory is not changed. On success, `expected` describes
+ * the one contiguous span the handler would have published; the caller can let
+ * Apple's routine execute and compare that span when it returns to `return_pc`.
+ * A false result is a refusal, exactly like ios3_hle_step(), and `site_index`
+ * remains UINT32_MAX when `pc` was not an armed REPLACE site in this address
+ * space. Counters are deliberately untouched so verification cannot masquerade
+ * as replacement work in the run report.
+ */
+#define IOS3_HLE_ORACLE_MAX_BYTES 1280u
+
+typedef struct {
+    uint32_t site_index;
+    const char *site_name;
+    uint32_t return_pc;
+    uint32_t return_sp;
+    uint32_t out_va;
+    uint32_t out_len;
+    uint8_t expected[IOS3_HLE_ORACLE_MAX_BYTES];
+} ios3_hle_oracle_t;
+
+bool ios3_hle_oracle_prepare(const arm_cpu_t *cpu,
+                             const ios3_hle_mem_t *mem,
+                             uint32_t pc, uint32_t ttbr0,
+                             ios3_hle_oracle_t *out);
 
 #ifdef __cplusplus
 }

@@ -86,14 +86,14 @@ static const uint32_t PROLOGUE_CGSFILLDRAM8BY1[] = {
  * software path this VM has no GPU for, and the interpreter then walks it one
  * guest instruction per pixel.
  *
- * THEY ARE OBSERVE, and the order-of-work rule in the header is the reason.
- * 39.8% of a profile is what a sampler attributes to three pages; it is not the
- * same number as "calls times cost", and the CGBlt sites are the standing proof
- * that those two can disagree by enough to reverse a decision. What these buy
- * first is a call count and an argument shape taken at the site itself. Only
- * then is there a basis for replacing one, and a replacement must additionally
- * satisfy contract items 4 and 6 -- every pixel touched through the guest MMU,
- * and a framebuffer diff against the same run with the site disarmed.
+ * THEY ENTERED AS OBSERVE, and the order-of-work rule in the header is the
+ * reason. 39.8% of a profile is what a sampler attributes to three pages; it is
+ * not the same number as "calls times cost", and the CGBlt sites are the
+ * standing proof that those two can disagree by enough to reverse a decision.
+ * r271/r273 subsequently supplied the site-level call counts, live callback
+ * ABI, state and sampler targets needed for the bounded replacements below.
+ * They are still opt-in behind `--hle`, and a real armed/disarmed framebuffer
+ * oracle remains mandatory before their pixels can be accepted.
  *
  * The first three prologue words are IDENTICAL for all three of these AND for
  * _CGSFillDRAM8by1 above, because they are the same compiler's frame setup. The
@@ -156,19 +156,27 @@ static const uint32_t PROLOGUE_CGSFILLDRAM8BY1[] = {
  * it, and the negative clamp is `bic rd, rn, rn asr #31`, which is
  * "0 if negative else unchanged" -- not an absolute value.
  *
- * WHAT REMAINS BEFORE THIS CAN BE REPLACE. Three things, none of them
- * unknowns: read every operand through the guest MMU page by page (contract
- * item 4), decline rather than fault when a page is not mapped (item 5), and
- * diff the framebuffer against the same run with the site disarmed (item 6).
+ * The native transcription below now implements the MMU and fault gates from
+ * contract items 4 and 5. Its remaining acceptance gate is item 6: a real
+ * framebuffer diff against the same binary and checkpoint with `--hle` absent.
  * The rounding is float-to-int truncation on both axes, which C's cast gives
  * exactly, so there is no rounding mode to match.
  */
+static const uint32_t PROLOGUE_SW_SAMPLE_NEAREST_BGRX8[] = {
+    0xe92d40f0u,   /* push  {r4, r5, r6, r7, lr} */
+    0xe28d700cu,   /* add   r7, sp, #0xc         */
+    0xe92d0d00u,   /* push  {r8, sl, fp}         */
+    0xe1a01181u,   /* lsl   r1, r1, #3           */
+    0xe0812003u,   /* add   r2, r1, r3           */
+    0xed9f7a3cu,   /* vldr  s14, [pc, #0xf0]     */
+};
 static const uint32_t PROLOGUE_SW_SAMPLE_NEAREST_BGRA8[] = {
     0xe92d40f0u,   /* push  {r4, r5, r6, r7, lr} */
     0xe28d700cu,   /* add   r7, sp, #0xc         */
     0xe92d0d00u,   /* push  {r8, sl, fp}         */
     0xe1a01181u,   /* lsl   r1, r1, #3           */
     0xe0812003u,   /* add   r2, r1, r3           */
+    0xed9f7a3bu,   /* vldr  s14, [pc, #0xec]     */
 };
 static const uint32_t PROLOGUE_SW_SCANLINE[] = {
     0xe92d40f0u,   /* push  {r4, r5, r6, r7, lr} */
@@ -323,18 +331,13 @@ static const uint32_t PROLOGUE_MBX2D_CTX_INITIALIZE[] = {
 };
 
 /*
- * The native sw_sample_nearest_BGRA8, transcribed from the decode above.
+ * Native nearest-32-bit samplers, transcribed from the decode above.
  *
- * ATTACHED BUT NOT ARMED. The site below stays IOS3_HLE_OBSERVE, so
- * ios3_hle_step never calls this: contract item 6 requires a framebuffer diff
- * against the same run with the site disarmed BEFORE a replacement may draw,
- * and that diff has not been run. Shipping the code and arming it are two
- * decisions, and this is only the first.
- *
- * Every guest access goes through mem->read / mem->write, which translate one
- * page at a time, unprivileged. Any refusal returns false for the WHOLE call
- * so the guest runs its own code -- contract item 5. Declining is always safe;
- * a half-written span is not.
+ * Every guest access goes through mem->read / mem->write, which translate
+ * unprivileged through the guest MMU. Any refusal returns false for the WHOLE
+ * call so the guest runs its own code -- contract item 5. Source texels are
+ * collected before the atomic destination write; a source/destination alias
+ * declines because buffering would otherwise change the guest's interleaving.
  */
 static bool read_u32(const ios3_hle_mem_t *mem, uint32_t va, uint32_t *out) {
     return mem->read(mem->ctx, va, out, 4u);
@@ -344,11 +347,33 @@ static bool read_u16(const ios3_hle_mem_t *mem, uint32_t va, uint16_t *out) {
     return mem->read(mem->ctx, va, out, 2u);
 }
 
+static bool read_u8(const ios3_hle_mem_t *mem, uint32_t va, uint8_t *out) {
+    return mem->read(mem->ctx, va, out, 1u);
+}
+
+static bool read_u32_at(const ios3_hle_mem_t *mem, uint32_t base,
+                        uint32_t offset, uint32_t *out) {
+    if (base > UINT32_MAX - offset) return false;
+    return read_u32(mem, base + offset, out);
+}
+
+static bool read_u8_at(const ios3_hle_mem_t *mem, uint32_t base,
+                       uint32_t offset, uint8_t *out) {
+    if (base > UINT32_MAX - offset) return false;
+    return read_u8(mem, base + offset, out);
+}
+
 static bool read_f32(const ios3_hle_mem_t *mem, uint32_t va, float *out) {
     uint32_t bits;
     if (!mem->read(mem->ctx, va, &bits, 4u)) return false;
     memcpy(out, &bits, sizeof bits);
     return true;
+}
+
+static bool read_f32_at(const ios3_hle_mem_t *mem, uint32_t base,
+                        uint32_t offset, float *out) {
+    if (base > UINT32_MAX - offset) return false;
+    return read_f32(mem, base + offset, out);
 }
 
 /*
@@ -443,68 +468,304 @@ static bool hle_sw_sample_color(arm_cpu_t *cpu, const ios3_hle_mem_t *mem) {
     return true;
 }
 
-static bool hle_sw_sample_nearest_bgra8(arm_cpu_t *cpu,
-                                        const ios3_hle_mem_t *mem) {
-    uint32_t tex = cpu->r[0], unit = cpu->r[1], start = cpu->r[3];
-    uint32_t sp = cpu->r[13];
-    uint32_t delta = 0, count = 0, out = 0;
+#define SW_SPAN_MAX 320u
+
+static bool f32_to_i32(float value, int32_t *out) {
+    double d = (double)value;
+    if (!out || !(d >= -2147483648.0 && d < 2147483648.0)) return false;
+    *out = (int32_t)value;
+    return true;
+}
+
+/* Compute the complete span before publishing any byte to guest memory. */
+static bool hle_sample_nearest_32_pixels(
+        const ios3_hle_mem_t *mem, uint32_t tex, uint32_t unit,
+        uint32_t start, uint32_t delta, uint32_t count, uint32_t out,
+        bool force_opaque, uint32_t pixels[SW_SPAN_MAX]) {
     uint32_t base = 0, pitch = 0;
     uint32_t max_x = 0, max_y = 0;
     float w = 0.0f, dw = 0.0f;
     float su = 0.0f, sv = 0.0f, du_f = 0.0f, dv_f = 0.0f;
     int32_t u, v, du, dv;
+    uint32_t ubits, vbits, dubits, dvbits;
+    uint64_t uv_off;
 
-    if (!mem || !mem->read || !mem->write) return false;
-
-    /* AAPCS: args 5-9 are at the entry sp, which is where this fires. */
-    if (!read_u32(mem, sp + 0x00u, &delta) ||
-        !read_u32(mem, sp + 0x0cu, &count) ||
-        !read_u32(mem, sp + 0x10u, &out))
+    if (!mem || !mem->read || !pixels || count > SW_SPAN_MAX || unit > 2u)
+        return false;
+    if ((uint64_t)tex + 0x0fu > UINT32_MAX ||
+        (count && (uint64_t)out + (uint64_t)count * 4u >
+                      UINT64_C(0x100000000)))
         return false;
 
-    if (!read_u32(mem, tex + 0x00u, &base)  ||
-        !read_u32(mem, tex + 0x04u, &pitch) ||
-        !read_u32(mem, tex + 0x08u, &max_x) ||
-        !read_u32(mem, tex + 0x0cu, &max_y))
+    if (!read_u32_at(mem, tex, 0x00u, &base)  ||
+        !read_u32_at(mem, tex, 0x04u, &pitch) ||
+        !read_u32_at(mem, tex, 0x08u, &max_x) ||
+        !read_u32_at(mem, tex, 0x0cu, &max_y))
+        return false;
+    if (max_x > 0x7fffffffu || max_y > 0x7fffffffu) return false;
+
+    uv_off = 0x20u + (uint64_t)unit * 8u;
+    if ((uint64_t)start + uv_off + 7u > UINT32_MAX ||
+        (uint64_t)delta + uv_off + 7u > UINT32_MAX ||
+        (uint64_t)start + 0x0fu > UINT32_MAX ||
+        (uint64_t)delta + 0x0fu > UINT32_MAX)
+        return false;
+    if (!read_f32_at(mem, start, 0x0cu, &w)  ||
+        !read_f32_at(mem, delta, 0x0cu, &dw) ||
+        !read_f32_at(mem, start, (uint32_t)uv_off, &su) ||
+        !read_f32_at(mem, start, (uint32_t)uv_off + 4u, &sv) ||
+        !read_f32_at(mem, delta, (uint32_t)uv_off, &du_f) ||
+        !read_f32_at(mem, delta, (uint32_t)uv_off + 4u, &dv_f) ||
+        !f32_to_i32(su * 65536.0f, &u) ||
+        !f32_to_i32(sv * 65536.0f, &v) ||
+        !f32_to_i32(du_f * 65536.0f, &du) ||
+        !f32_to_i32(dv_f * 65536.0f, &dv))
         return false;
 
-    if (!read_f32(mem, start + 0x0cu, &w)  ||
-        !read_f32(mem, delta + 0x0cu, &dw) ||
-        !read_f32(mem, start + 0x20u + unit * 8u,        &su) ||
-        !read_f32(mem, start + 0x20u + unit * 8u + 4u,   &sv) ||
-        !read_f32(mem, delta + 0x20u + unit * 8u,        &du_f) ||
-        !read_f32(mem, delta + 0x20u + unit * 8u + 4u,   &dv_f))
-        return false;
-
-    u  = (int32_t)(su   * 65536.0f);
-    v  = (int32_t)(sv   * 65536.0f);
-    du = (int32_t)(du_f * 65536.0f);
-    dv = (int32_t)(dv_f * 65536.0f);
+    memcpy(&ubits, &u, sizeof ubits);
+    memcpy(&vbits, &v, sizeof vbits);
+    memcpy(&dubits, &du, sizeof dubits);
+    memcpy(&dvbits, &dv, sizeof dvbits);
 
     for (uint32_t k = 0; k < count; k++) {
-        float inv = 1.0f / w;
-        int32_t x = (int32_t)((float)u * inv);
-        int32_t y = (int32_t)((float)v * inv);
-        uint32_t texel = 0, addr;
+        int32_t uk, vk, x, y;
+        float inv;
+        uint32_t texel = 0;
+        uint64_t addr;
+
+        memcpy(&uk, &ubits, sizeof uk);
+        memcpy(&vk, &vbits, sizeof vk);
+        if (w == 0.0f) return false;
+        inv = 1.0f / w;
+        if (!f32_to_i32((float)uk * inv, &x) ||
+            !f32_to_i32((float)vk * inv, &y))
+            return false;
 
         /* `bic rd, rn, rn asr #31` is "zero if negative", not abs(). */
         if (x < 0) x = 0;
         if (y < 0) y = 0;
         /* movge, so these saturate AT the limit rather than one below it. */
-        if ((uint32_t)y >= max_y) y = (int32_t)max_y;
-        if ((uint32_t)x >= max_x) x = (int32_t)max_x;
+        if (y >= (int32_t)max_y) y = (int32_t)max_y;
+        if (x >= (int32_t)max_x) x = (int32_t)max_x;
 
-        addr = base + pitch * (uint32_t)(y >> 16) +
-               (((uint32_t)(x >> 16)) << 2);
-        if (!read_u32(mem, addr, &texel)) return false;
-        if (!mem->write(mem->ctx, out + k * 4u, &texel, 4u)) return false;
+        addr = (uint64_t)base + (uint64_t)pitch * (uint32_t)(y >> 16) +
+               (uint64_t)(uint32_t)(x >> 16) * 4u;
+        if (addr + 3u > UINT32_MAX ||
+            (count && addr < (uint64_t)out + (uint64_t)count * 4u &&
+             (uint64_t)out < addr + 4u) ||
+            !read_u32(mem, (uint32_t)addr, &texel))
+            return false;
+        if (force_opaque) texel |= 0xff000000u;
+        pixels[k] = texel;
 
-        u += du; v += dv; w += dw;
+        /* ARM adds wrap; unsigned arithmetic reproduces it without C UB. */
+        ubits += dubits;
+        vbits += dvbits;
+        w += dw;
     }
+
+    return true;
+}
+
+static bool hle_sw_sample_nearest_bgra8(arm_cpu_t *cpu,
+                                        const ios3_hle_mem_t *mem) {
+    uint32_t tex = cpu->r[0], unit = cpu->r[1], start = cpu->r[3];
+    uint32_t sp = cpu->r[13];
+    uint32_t delta = 0, count = 0, out = 0;
+    uint32_t pixels[SW_SPAN_MAX];
+
+    if (!mem || !mem->read || !mem->write) return false;
+
+    /* AAPCS: args 5-9 are at the entry sp, which is where this fires. */
+    if (!read_u32_at(mem, sp, 0x00u, &delta) ||
+        !read_u32_at(mem, sp, 0x0cu, &count) ||
+        !read_u32_at(mem, sp, 0x10u, &out) || count > SW_SPAN_MAX ||
+        (count && (uint64_t)out + (uint64_t)count * 4u - 1u > UINT32_MAX))
+        return false;
+
+    if (!hle_sample_nearest_32_pixels(mem, tex, unit, start, delta, count, out,
+                                      false, pixels) ||
+        (count && !mem->write(mem->ctx, out, pixels, count * 4u)))
+        return false;
 
     /* Returned to LR without executing the body, which is what makes the
      * caller skip the instruction. r0-r3 are caller-saved and the guest's
      * own routine returns nothing, so nothing else needs restoring. */
+    cpu->r[15] = cpu->r[14];
+    return true;
+}
+
+static bool hle_sw_sample_nearest_bgrx8(arm_cpu_t *cpu,
+                                        const ios3_hle_mem_t *mem) {
+    uint32_t tex = cpu->r[0], unit = cpu->r[1], start = cpu->r[3];
+    uint32_t sp = cpu->r[13];
+    uint32_t delta = 0, count = 0, out = 0;
+    uint32_t pixels[SW_SPAN_MAX];
+
+    if (!mem || !mem->read || !mem->write) return false;
+    if (!read_u32_at(mem, sp, 0x00u, &delta) ||
+        !read_u32_at(mem, sp, 0x0cu, &count) ||
+        !read_u32_at(mem, sp, 0x10u, &out) || count > SW_SPAN_MAX ||
+        (count && (uint64_t)out + (uint64_t)count * 4u - 1u > UINT32_MAX))
+        return false;
+
+    if (!hle_sample_nearest_32_pixels(mem, tex, unit, start, delta, count, out,
+                                      true, pixels) ||
+        (count && !mem->write(mem->ctx, out, pixels, count * 4u)))
+        return false;
+
+    cpu->r[15] = cpu->r[14];
+    return true;
+}
+
+/*
+ * The proved hot arms of sw_scanline.
+ *
+ * This is not a rewrite of the 1,116-instruction function. It is the early
+ * tail-call at 0x3122d2fc..0x3122d394, transcribed condition for condition:
+ * one texture, no interpolated colour, a direct four-byte destination, no
+ * auxiliary state bit, and the context's sentinel colour. In that arm the
+ * guest does no blending at all; it calls sw_sample_texture directly into the
+ * destination span and returns. r273 exercised this exact shape with both
+ * nearest-BGRX8 and nearest-BGRA8 contexts.
+ *
+ * The dispatcher is bypassed only when its minification and magnification
+ * function pointers are identical. That is the dispatcher's own first test at
+ * 0x3122cf24, and means no derivative-dependent choice is being guessed. BGRX
+ * is the BGRA transcription plus the guest's single `orr #0xff000000`.
+ * r273 also proved one compositing arm: state byte 0x12, mode byte 1 and
+ * nearest-BGRA8 enter blend selector 2 at 0x3122dcf4. That loop is the packed
+ * premultiplied source-over transcription below. No other blend selector is
+ * inferred. Everything else declines to Apple's code.
+ */
+#define SW_SAMPLE_NEAREST_BGRX8 UINT32_C(0x3122b698)
+#define SW_SAMPLE_NEAREST_BGRA8 UINT32_C(0x3122b8bc)
+
+static uint32_t ror8(uint32_t value) {
+    return (value >> 8) | (value << 24);
+}
+
+/* 0x3122dcf4..0x3122dd3c, instruction for instruction in packed lanes. */
+static uint32_t sw_blend_premultiplied_over(uint32_t dst, uint32_t src) {
+    uint32_t inv = 256u - (src >> 24);
+    uint32_t even = (dst & UINT32_C(0x00ff00ff)) * inv;
+    uint32_t even_scaled = ror8(even) & UINT32_C(0x00ff00ff);
+    uint32_t odd = (ror8(dst) & UINT32_C(0x00ff00ff)) * inv;
+    uint32_t odd_scaled = odd & UINT32_C(0xff00ff00);
+
+    /* ARM ADD wraps. Valid premultiplied pixels do not overflow a lane, but
+     * uint32_t also preserves the guest result for every possible input. */
+    return (even_scaled | odd_scaled) + src;
+}
+
+#define SW_SCANLINE_CHUNK_MAX 256u
+
+static bool hle_sw_scanline_known_texture(arm_cpu_t *cpu,
+                                          const ios3_hle_mem_t *mem) {
+    uint32_t x = cpu->r[0], y = cpu->r[1], count = cpu->r[2];
+    uint32_t start = cpu->r[3], sp = cpu->r[13];
+    uint32_t delta = 0, dy0 = 0, dy1 = 0, mask = 0, ctx = 0;
+    uint32_t render = 0, state = 0, ctx_units = 0, sentinel = 0;
+    uint32_t out_base = 0, aux = 0, pitch = 0, aux_pitch = 0;
+    uint32_t x_origin = 0, y_origin = 0, width = 0, height = 0;
+    uint32_t bytes_per_pixel = 0, out = 0;
+    uint32_t min_sampler = 0, mag_sampler = 0;
+    uint32_t pixels[SW_SPAN_MAX], dst_pixels[SW_SPAN_MAX];
+    uint64_t out_wide;
+    uint8_t state_flags = 0, state_mode = 0;
+    bool force_opaque;
+
+    if (!mem || !mem->read || !mem->write) return false;
+
+    if (!read_u32_at(mem, sp, 0x00u, &delta) ||
+        !read_u32_at(mem, sp, 0x04u, &dy0) ||
+        !read_u32_at(mem, sp, 0x08u, &dy1) ||
+        !read_u32_at(mem, sp, 0x0cu, &mask) ||
+        !read_u32_at(mem, sp, 0x10u, &ctx) ||
+        !read_u32_at(mem, ctx, 0x00u, &render) ||
+        !read_u32_at(mem, render, 0x04u, &state) ||
+        !read_u32_at(mem, render, 0xfcu, &out_base))
+        return false;
+
+    /* The guest reads the auxiliary destination even though this fast arm
+     * never consumes it. Preserve the same fault boundary before replacing. */
+    if (!read_u32_at(mem, render, 0x100u, &aux)) return false;
+
+    if (!out_base ||
+        !read_u32_at(mem, render, 0x104u, &pitch) ||
+        !read_u32_at(mem, render, 0x10cu, &bytes_per_pixel) ||
+        !read_u32_at(mem, render, 0x110u, &x_origin) ||
+        !read_u32_at(mem, render, 0x114u, &width) ||
+        !read_u32_at(mem, render, 0x118u, &y_origin) ||
+        !read_u32_at(mem, render, 0x11cu, &height))
+        return false;
+
+    if (x < x_origin || y < y_origin || y - y_origin >= height ||
+        (uint64_t)(x - x_origin) + count > width)
+        return false;
+    out_wide = (uint64_t)out_base + (uint64_t)pitch * (y - y_origin) +
+               (uint64_t)bytes_per_pixel * (x - x_origin);
+    if (out_wide > UINT32_MAX) return false;
+    out = (uint32_t)out_wide;
+
+    if (aux) {
+        uint64_t aux_address;
+        if (!read_u32_at(mem, render, 0x108u, &aux_pitch)) return false;
+        aux_address = (uint64_t)aux + (uint64_t)aux_pitch *
+                      (y - y_origin) + (x - x_origin);
+        if (aux_address > UINT32_MAX) return false;
+    }
+
+    if (!read_u32_at(mem, ctx, 0x68u, &ctx_units) ||
+        !read_u8_at(mem, state, 0x3cu, &state_flags) ||
+        !read_u32_at(mem, ctx, 0x64u, &sentinel) ||
+        !read_u32_at(mem, ctx, 0x14u, &min_sampler) ||
+        !read_u32_at(mem, ctx, 0x18u, &mag_sampler))
+        return false;
+
+    if (bytes_per_pixel != 4u || count > SW_SCANLINE_CHUNK_MAX ||
+        (count && (uint64_t)out + (uint64_t)count * 4u - 1u > UINT32_MAX) ||
+        ctx_units != 1u || mask != 0x0308u ||
+        sentinel != UINT32_MAX || min_sampler != mag_sampler)
+        return false;
+
+    /* dy0/dy1 are deliberately unused here. Equal sampler pointers make the
+     * guest dispatcher skip the derivative test that would dereference them. */
+    (void)dy0;
+    (void)dy1;
+
+    if ((state_flags & 0x10u) == 0u) {
+        if (min_sampler == SW_SAMPLE_NEAREST_BGRA8)
+            force_opaque = false;
+        else if (min_sampler == SW_SAMPLE_NEAREST_BGRX8)
+            force_opaque = true;
+        else
+            return false;
+
+        if (ctx > UINT32_MAX - 0x04u ||
+            !hle_sample_nearest_32_pixels(mem, ctx + 0x04u, 0u, start, delta,
+                                          count, out, force_opaque, pixels) ||
+            (count && !mem->write(mem->ctx, out, pixels, count * 4u)))
+            return false;
+    } else {
+        /* This is the one blended shape observed in r273. In the guest,
+         * state_flags 0x12 selects temporary BGRA sampling followed by jump-
+         * table arm 2. An auxiliary surface would add unproved side effects. */
+        if (state_flags != 0x12u || aux != 0u ||
+            min_sampler != SW_SAMPLE_NEAREST_BGRA8 ||
+            !read_u8_at(mem, state, 0x08u, &state_mode) || state_mode != 1u ||
+            ctx > UINT32_MAX - 0x04u ||
+            !hle_sample_nearest_32_pixels(mem, ctx + 0x04u, 0u, start, delta,
+                                          count, out, false, pixels) ||
+            (count && !mem->read(mem->ctx, out, dst_pixels, count * 4u)))
+            return false;
+
+        for (uint32_t i = 0; i < count; i++)
+            pixels[i] = sw_blend_premultiplied_over(dst_pixels[i], pixels[i]);
+        if (count && !mem->write(mem->ctx, out, pixels, count * 4u))
+            return false;
+    }
+
     cpu->r[15] = cpu->r[14];
     return true;
 }
@@ -531,8 +792,6 @@ static bool hle_sw_sample_nearest_bgra8(arm_cpu_t *cpu,
  * where the layer is on screen, and a stride-like number is large.
  */
 static unsigned g_trace_budget[8];
-static uint32_t g_sw_ctx_seen[8];
-static unsigned g_sw_ctx_seen_n;
 
 static bool trace_args(const char *what, arm_cpu_t *cpu,
                        const ios3_hle_mem_t *mem, unsigned slot, unsigned nstack) {
@@ -554,117 +813,6 @@ static bool trace_args(const char *what, arm_cpu_t *cpu,
         fprintf(stderr, " sp+%u=%08x", i * 4u, w);
     }
     fprintf(stderr, "\n");
-    return false;
-}
-
-static void trace_words(const ios3_hle_mem_t *mem, const char *what,
-                        uint32_t base, const unsigned *off, unsigned n) {
-    unsigned i;
-
-    fprintf(stderr, "hle-trace   %s@%08x", what, base);
-    for (i = 0; i < n; i++) {
-        uint32_t w = 0;
-        uint64_t va = (uint64_t)base + off[i];
-        if (va <= UINT32_MAX && read_u32(mem, (uint32_t)va, &w))
-            fprintf(stderr, " +%03x=%08x", off[i], w);
-        else
-            fprintf(stderr, " +%03x=??", off[i]);
-    }
-    fprintf(stderr, "\n");
-}
-
-static void trace_ogl_vert(const ios3_hle_mem_t *mem, const char *what,
-                           uint32_t va) {
-    float f[14];
-    unsigned i;
-
-    if (!va) {
-        fprintf(stderr, "hle-trace   %s=NULL\n", what);
-        return;
-    }
-    for (i = 0; i < 14u; i++) {
-        uint64_t p = (uint64_t)va + (uint64_t)i * 4u;
-        if (p > UINT32_MAX || !read_f32(mem, (uint32_t)p, &f[i])) {
-            fprintf(stderr, "hle-trace   %s@%08x=unreadable@+%02x\n",
-                    what, va, i * 4u);
-            return;
-        }
-    }
-    fprintf(stderr,
-            "hle-trace   %s@%08x xyzw=(%.9g,%.9g,%.9g,%.9g)"
-            " rgba=(%.9g,%.9g,%.9g,%.9g)"
-            " uv0=(%.9g,%.9g) uv1=(%.9g,%.9g) uv2=(%.9g,%.9g)\n",
-            what, va,
-            (double)f[0], (double)f[1], (double)f[2], (double)f[3],
-            (double)f[4], (double)f[5], (double)f[6], (double)f[7],
-            (double)f[8], (double)f[9], (double)f[10], (double)f[11],
-            (double)f[12], (double)f[13]);
-}
-
-/*
- * The root trace proves which polygon enters the scan converter. This one
- * records what the converter hands to its only callback: x/y/count, the four
- * interpolant vectors, the active-field mask and the SW scan state. The first
- * twelve calls show the per-line evolution; each distinct context is dumped
- * once so a run with several texture units does not spend the whole budget on
- * the first one.
- */
-static bool hle_trace_sw_scanline(arm_cpu_t *cpu,
-                                  const ios3_hle_mem_t *mem) {
-    static const unsigned CTX_OFF[] = {
-        0x00, 0x04, 0x08, 0x0c, 0x10, 0x14, 0x18, 0x1c,
-        0x20, 0x24, 0x28, 0x2c, 0x30, 0x34, 0x38, 0x3c,
-        0x40, 0x44, 0x48, 0x4c, 0x50, 0x54, 0x58, 0x5c,
-        0x60, 0x64, 0x68
-    };
-    static const unsigned RENDER_OFF[] = {
-        0x00, 0x04, 0x08, 0x0c, 0x10, 0x14, 0x18, 0x1c,
-        0x20, 0x24, 0x28, 0x2c, 0x30, 0x34, 0x38, 0x3c,
-        0xf8, 0xfc, 0x100, 0x104, 0x108, 0x10c, 0x110,
-        0x114, 0x118, 0x11c
-    };
-    static const unsigned STATE_OFF[] = {
-        0x00, 0x04, 0x08, 0x0c, 0x10, 0x14, 0x18, 0x1c,
-        0x20, 0x24, 0x28, 0x2c, 0x30, 0x34, 0x38, 0x3c,
-        0x40, 0x44, 0x48, 0x4c, 0x50, 0x54, 0x58, 0x5c,
-        0x60, 0x64, 0x68, 0x6c, 0x70, 0x74, 0x78, 0x7c
-    };
-    bool first = g_trace_budget[5] < 12u;
-    uint32_t stack[5] = { 0, 0, 0, 0, 0 };
-    uint32_t render = 0, state = 0;
-    unsigned i;
-
-    (void)trace_args("sw_scanline", cpu, mem, 5, 5);
-    for (i = 0; i < 5u; i++) {
-        uint64_t va = (uint64_t)cpu->r[13] + (uint64_t)i * 4u;
-        if (va <= UINT32_MAX)
-            (void)read_u32(mem, (uint32_t)va, &stack[i]);
-    }
-
-    if (first) {
-        trace_ogl_vert(mem, "scan.start", cpu->r[3]);
-        trace_ogl_vert(mem, "scan.dx", stack[0]);
-        trace_ogl_vert(mem, "scan.dy0", stack[1]);
-        trace_ogl_vert(mem, "scan.dy1", stack[2]);
-    }
-
-    for (i = 0; i < g_sw_ctx_seen_n; i++)
-        if (g_sw_ctx_seen[i] == stack[4]) return false;
-    if (!stack[4] || g_sw_ctx_seen_n >=
-            (unsigned)(sizeof g_sw_ctx_seen / sizeof g_sw_ctx_seen[0]))
-        return false;
-    g_sw_ctx_seen[g_sw_ctx_seen_n++] = stack[4];
-
-    trace_words(mem, "scan.ctx", stack[4], CTX_OFF,
-                (unsigned)(sizeof CTX_OFF / sizeof CTX_OFF[0]));
-    if (read_u32(mem, stack[4], &render) && render) {
-        trace_words(mem, "scan.render", render, RENDER_OFF,
-                    (unsigned)(sizeof RENDER_OFF / sizeof RENDER_OFF[0]));
-        if (render <= UINT32_MAX - 4u &&
-            read_u32(mem, render + 4u, &state) && state)
-            trace_words(mem, "scan.state", state, STATE_OFF,
-                        (unsigned)(sizeof STATE_OFF / sizeof STATE_OFF[0]));
-    }
     return false;
 }
 
@@ -976,6 +1124,12 @@ static ios3_hle_site_t g_sites[] = {
       (unsigned)(sizeof PROLOGUE_CGSFILLDRAM8BY1 /
                  sizeof PROLOGUE_CGSFILLDRAM8BY1[0]),
       NULL, IOS3_HLE_OBSERVE, false, false, 0, 0, 0, 0 },
+    { "sw_sample_nearest_BGRX8", 0x3122b698u,
+      PROLOGUE_SW_SAMPLE_NEAREST_BGRX8,
+      (unsigned)(sizeof PROLOGUE_SW_SAMPLE_NEAREST_BGRX8 /
+                 sizeof PROLOGUE_SW_SAMPLE_NEAREST_BGRX8[0]),
+      hle_sw_sample_nearest_bgrx8, IOS3_HLE_REPLACE,
+      false, false, 0, 0, 0, 0 },
     { "sw_sample_nearest_BGRA8", 0x3122b8bcu,
       PROLOGUE_SW_SAMPLE_NEAREST_BGRA8,
       (unsigned)(sizeof PROLOGUE_SW_SAMPLE_NEAREST_BGRA8 /
@@ -1000,7 +1154,8 @@ static ios3_hle_site_t g_sites[] = {
     { "sw_scanline",        0x3122d180u, PROLOGUE_SW_SCANLINE,
       (unsigned)(sizeof PROLOGUE_SW_SCANLINE /
                   sizeof PROLOGUE_SW_SCANLINE[0]),
-      hle_trace_sw_scanline, IOS3_HLE_TRACE, false, false, 0, 0, 0, 0 },
+      hle_sw_scanline_known_texture, IOS3_HLE_REPLACE,
+      false, false, 0, 0, 0, 0 },
     { "ogl_poly_scan",      0x311e2100u, PROLOGUE_OGL_POLY_SCAN,
       (unsigned)(sizeof PROLOGUE_OGL_POLY_SCAN /
                  sizeof PROLOGUE_OGL_POLY_SCAN[0]),
@@ -1076,10 +1231,6 @@ unsigned ios3_hle_arm(const ios3_hle_mem_t *mem, uint32_t ttbr0) {
      * printed 13 because this reset was unconditional. */
     if (g_ttbr0 != ttbr0)
         memset(g_trace_budget, 0, sizeof g_trace_budget);
-    if (g_ttbr0 != ttbr0) {
-        memset(g_sw_ctx_seen, 0, sizeof g_sw_ctx_seen);
-        g_sw_ctx_seen_n = 0u;
-    }
     g_ttbr0 = ttbr0;
     g_armed_n = 0u;
     for (unsigned i = 0; i < SITE_N; i++) {
@@ -1096,8 +1247,6 @@ void ios3_hle_disarm(void) {
     g_ttbr0 = 0u;
     g_armed_n = 0u;
     memset(g_trace_budget, 0, sizeof g_trace_budget);
-    memset(g_sw_ctx_seen, 0, sizeof g_sw_ctx_seen);
-    g_sw_ctx_seen_n = 0u;
 }
 
 /* -------------------------------------------------------------- the step --- */
@@ -1142,5 +1291,91 @@ bool ios3_hle_step(arm_cpu_t *cpu, const ios3_hle_mem_t *mem, uint32_t pc,
 
     if (!s->handler(cpu, mem)) { s->declined++; return false; }
     s->handled++;
+    return true;
+}
+
+/* ------------------------------------------------------- differential oracle --- */
+
+typedef struct {
+    const ios3_hle_mem_t *source;
+    ios3_hle_oracle_t *result;
+    unsigned writes;
+} oracle_mem_t;
+
+static bool oracle_read(void *ctx, uint32_t va, void *dst, uint32_t len) {
+    oracle_mem_t *o = (oracle_mem_t *)ctx;
+    return o && o->source && o->source->read &&
+           o->source->read(o->source->ctx, va, dst, len);
+}
+
+static bool oracle_read_priv(void *ctx, uint32_t va, void *dst, uint32_t len) {
+    oracle_mem_t *o = (oracle_mem_t *)ctx;
+    return o && o->source && o->source->read_priv &&
+           o->source->read_priv(o->source->ctx, va, dst, len);
+}
+
+static bool oracle_read_phys(void *ctx, uint32_t pa, void *dst, uint32_t len) {
+    oracle_mem_t *o = (oracle_mem_t *)ctx;
+    return o && o->source && o->source->read_phys &&
+           o->source->read_phys(o->source->ctx, pa, dst, len);
+}
+
+static bool oracle_capture_write(void *ctx, uint32_t va, const void *src,
+                                 uint32_t len) {
+    oracle_mem_t *o = (oracle_mem_t *)ctx;
+    if (!o || !o->result || !src || !len || o->writes != 0u ||
+        len > IOS3_HLE_ORACLE_MAX_BYTES ||
+        (uint64_t)va + len - 1u > UINT32_MAX)
+        return false;
+    memcpy(o->result->expected, src, len);
+    o->result->out_va = va;
+    o->result->out_len = len;
+    o->writes = 1u;
+    return true;
+}
+
+bool ios3_hle_oracle_prepare(const arm_cpu_t *cpu,
+                             const ios3_hle_mem_t *mem,
+                             uint32_t pc, uint32_t ttbr0,
+                             ios3_hle_oracle_t *out) {
+    ios3_hle_site_t *site = NULL;
+    arm_cpu_t private_cpu;
+    ios3_hle_mem_t private_mem;
+    oracle_mem_t oracle;
+    unsigned site_index = 0u;
+
+    if (!out) return false;
+    memset(out, 0, sizeof *out);
+    out->site_index = UINT32_MAX;
+    if (!g_armed_n || !cpu || !mem || !mem->read) return false;
+
+    for (unsigned i = 0; i < SITE_N; i++) {
+        if (g_sites[i].armed && g_sites[i].va == pc) {
+            site = &g_sites[i];
+            site_index = i;
+            break;
+        }
+    }
+    if (!site || site->mode != IOS3_HLE_REPLACE || !site->handler ||
+        (g_ttbr0 && ttbr0 != g_ttbr0))
+        return false;
+
+    out->site_index = site_index;
+    out->site_name = site->name;
+    out->return_pc = cpu->r[14];
+    out->return_sp = cpu->r[13];
+    private_cpu = *cpu;
+    oracle.source = mem;
+    oracle.result = out;
+    oracle.writes = 0u;
+    private_mem.ctx = &oracle;
+    private_mem.read = oracle_read;
+    private_mem.write = oracle_capture_write;
+    private_mem.read_priv = oracle_read_priv;
+    private_mem.read_phys = oracle_read_phys;
+
+    if (!site->handler(&private_cpu, &private_mem) || oracle.writes != 1u ||
+        private_cpu.r[15] != private_cpu.r[14])
+        return false;
     return true;
 }

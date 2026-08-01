@@ -274,9 +274,9 @@ static void test_command_line_truncation_and_nulls(void) {
  * somebody dropped to make a build pass.
  */
 static const char *const EXPECTED_OMISSIONS[] = {
-    "framebuffer", "iomfb-display", "hle", "fstab-fixup", "ramdisk-low",
-    "stop-on-abort", "kext-map", "print-config", "call-probe-regs",
-    "call-probe-live", "uart4-rx-irq",
+    "framebuffer", "iomfb-display", "hle", "hle-verify", "fstab-fixup",
+    "ramdisk-low", "stop-on-abort", "kext-map", "print-config",
+    "call-probe-regs", "call-probe-live", "uart4-rx-irq",
 };
 
 static void test_omissions(void) {

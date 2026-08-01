@@ -1222,11 +1222,19 @@ fresh external-media work image. It stopped normally at 4,399,995,184 with:
 * a per-run PPM byte-identical to r271, including the SHA-256 above.
 
 That accepts the checkpoint as the fast functional iteration path. The cold run
-took 1,967.2 seconds; r273 took about 254 seconds by process/log timestamps, even
-though both cover the same post-checkpoint guest work. The shortcut is therefore
-roughly 7.7x faster here. It is not a substitute for the final cold armed versus
-disarmed validation: a checkpoint inherits guest state, and neither run has a
-native root replacement or a measured 30 fps result yet.
+took 1,967.2 seconds; r273 took 256.260 seconds by a host stopwatch, even though
+both cover the same post-checkpoint guest work. The shortcut is therefore roughly
+7.7x faster here. It is not a substitute for the final cold armed versus disarmed
+validation: a checkpoint inherits guest state, and neither run has a native root
+replacement or a measured 30 fps result yet.
+
+Two earlier restore attempts are not part of that comparison. r272 failed before
+guest execution because its isolated run
+directory lacked the required `firmware/` framebuffer-output directory. r272b
+accidentally ran two CPU-bound restores concurrently; stopping the duplicate
+also stopped the retained process around 4.181 B, so its partial log and elapsed
+time prove nothing. r273 first established a single emulator process and then
+completed normally.
 
 The first restored callback records also settle the live `sw_scanline` ABI:
 
@@ -1242,3 +1250,92 @@ only the already replaced BGRA path would therefore omit a measured case. Those
 two are the bounded common path worth implementing first. All other texture
 counts, combine modes, blend modes, formats, or unreadable operands must decline
 to Apple's original code until separately decoded and pixel-diffed.
+
+The polygon mask is `0x030b`; the callback mask drops bits 0 and 1 because x and
+y are passed as integers. The enabled interpolants are therefore w/u0/v0. The
+other printed float slots are disabled scratch data, not malformed colours.
+The enabled sequence is coherent: u0/v0 starts at `(114.5,417.5)`, `dx` advances
+u0 by one per pixel, and successive scanlines advance v0 by one.
+
+### r274--r279: two scanline arms are native, not the rasteriser
+
+The first implementation does not pretend to cover the 1,116-instruction
+`sw_scanline`. It transcribes two exact paths and refuses the rest:
+
+* the early no-blend tail call at `0x3122d2fc..0x3122d394`, for one texture,
+  mask `0x0308`, a direct four-byte destination, the sentinel colour, equal
+  min/mag sampler pointers, and nearest BGRX or BGRA;
+* the observed BGRA compositing case with state byte `0x12`, mode byte `1`, and
+  jump-table selector 2 at `0x3122dcf4`. Its result is the literal packed ARM
+  arithmetic `src + dst * (256 - src_alpha) / 256`, including 32-bit wrap and
+  the guest's lane placement.
+
+Both samplers compute the complete source span before one guest-MMU write. The
+blended path also reads the complete destination before publishing anything.
+Unreadable operands, an alias that would change buffering semantics, a source
+or destination fault, a different mask/format/sampler/state, an auxiliary
+surface, and scanlines beyond the guest's 256-pixel chunk all decline. BGRX's
+one distinguishing instruction forces alpha to `0xff`; BGRA preserves it.
+
+r274 was the direct-only 3.9--3.95 B checkpoint smoke. Of 180 `sw_scanline`
+calls, it handled 60 and declined the 120 live BGRA-blended calls; those fell
+through to the already native BGRA leaf. r275 added only the decoded selector-2
+arm. It handled 180/180 scanlines, reached neither leaf, stopped cleanly at the
+same cap, and produced the exact r274 framebuffer SHA-256
+`5B6B71F632896AF923BF7D0CEC74AB57CBB34DD4C0A3493E4B6F04CDEA568900`.
+That is useful whole-frame evidence, but a final hash can miss a transient
+wrong pixel that is later overwritten.
+
+`--hle-verify` closes that gap without replacing guest code. At a proved
+REPLACE entry it runs the native handler against write-capturing shadow memory,
+executes Apple's routine unchanged, and compares the exact destination span at
+the matching user-mode return PC, stack pointer, and TTBR0. A bounded LIFO
+tracks nested scanline/sampler calls. It exits nonzero on a mismatch or an
+unreadable result and reports attempted, prepared, passed, and declined shapes
+separately. It is deliberately omitted from the app: this is a terminal
+validation mode, not a phone setting.
+
+r279 exercised the hardened verifier over the same short restored window:
+
+    nearest BGRX leaf       60 prepared / 60 exact passes
+    nearest BGRA leaf      120 prepared / 120 exact passes
+    enclosing scanline     180 prepared / 180 exact passes
+    total                  360 prepared / 360 passes / 0 failures
+
+Each outer comparison covered 644 bytes, exactly 161 BGRA pixels. The guest
+executed every original routine, the final PPM retained the SHA-256 above, the
+external-media bridge had zero failures, and the stop was normal. This is the
+strongest pixel evidence for these two arms; it is still evidence only for the
+shapes the handler accepted.
+
+r276 restored 3.9 B, scheduled the established 26-report drag at 4.0 B, and ran
+the replacement to 4.4 B. It stopped normally at 4,399,988,869 with live CLCD
+window 0, scanning/running 1/1, all 26 reports accepted and read, zero
+external-media failures, and a final PPM byte-identical to both r271's cold
+baseline and r273:
+
+`E0CE0EB1C117527ECDFF2C2C4A4549FCF48AB0F9E151AB7CBE13965849F7CEC8`.
+
+The later-window coverage is the limiting result, not a footnote:
+
+    sw_scanline             15,727 hits / 3,615 handled / 12,112 declined
+    nearest BGRX leaf        4,660 hits / 4,660 handled
+    nearest BGRA leaf        2,858 hits / 2,856 handled / 2 declined
+    ogl_poly_scan              186 hits / 0 handled
+
+Only 23.0% of `sw_scanline` calls were native; 77.0% safely ran Apple's body.
+The leaf replacements recovered another 7,516 calls beneath those declines,
+but the generic scanline and the root remain guest code. r276 took 229.545 host
+seconds versus r273's 256.260, a 10.4% lower wall time. That is directional
+evidence, not a controlled FPS result: replacement changes the retired-
+instruction schedule, the two host commits do not execute an identical stream,
+and neither run measures displayed frames per second.
+
+The native fixtures now pass 1,417 checks and the complete core suite passes
+54/54. Those tests pin ABI refusal, exact BGRX/BGRA pixels, packed selector-2
+blend boundaries, atomic publication, alias/fault behaviour, and a non-mutating
+oracle. They do not establish 30 fps. No native `ogl_poly_scan` exists, no cold
+armed/disarmed replacement pair has been run, and `--hle` remains an opt-in host
+experiment rather than an app default. The next performance lever is still the
+root or the dominant declined scanline shape, not optimistic wording around a
+10% checkpoint-time reduction.
