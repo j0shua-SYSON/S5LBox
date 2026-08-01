@@ -1813,3 +1813,84 @@ code has 51,752 distinct PCs in a single frame window.
   SNAPSHOT_VERSION twice and invalidated every existing snapshot.
 * The MBX driver's whole lifecycle is done by ~239 M instructions, so MBX runs
   need -n 300000000, not 1.2e9.
+
+
+## The plan to 30 fps, and the arithmetic that picks it
+
+Measured position: ~7.9 fps. 30 needs 3.8x. Everything below follows from that
+one number, and the point of writing it down is that two of the available levers
+CANNOT reach it and it is easy to spend a week on them anyway.
+
+### What each lever is worth
+
+r212/r213 bucketed a home-screen swipe by 4K page. Three pages in SpringBoard's
+space hold 39.8% of all user samples:
+
+    19.6%   0x3122b000   sw_sample_nearest_BGRA8   SHIPPED, validated by r257
+    13.7%   0x3122d000   sw_sample_color + sw_scanline
+     6.5%   0x311e2000   ogl_poly_scan
+
+Replacing ALL THREE caps at 1/(1-0.398) = 1.66x, which is about 13 fps. That is
+worth having and it is not 30. The rasteriser as a whole is 83% of the
+post-keygen frame, and removing that is 1/(1-0.83) = 5.9x, about 46 fps. So the
+only lever that reaches the goal is the one that removes the whole rasteriser,
+and that is MBX2D.
+
+Two things already tried are closed and must not be re-attempted: a memoised
+decode cache (measured, 20-26% SLOWER, see hotpath.md) and any expectation that
+interpreter work alone will do it -- without a JIT the ceiling is roughly 1.5x
+and the decode-cache result says the easy part of that is already taken.
+
+### Line A -- MBX2D, the one that reaches 30
+
+Ordered, each step gated on the previous one reporting:
+
+  A1. DONE. Reset handshake fixed (bit 16 is model-owned). 328,111,117 register
+      reads -> 37, and the driver now attaches, powers, submits, and reaches
+      application launch.
+  A2. DONE. The library path is live: mbxConnectionOpen once, mbx2DCtxInitialize
+      once, mbx2DCtxBlitCopy twelve times, all in one address space.
+  A3. DONE. Signature settled from traced values --
+      mbx2DCtxBlitCopy(ctx, srcX, srcY, dstX, dstY, w, h) -- and the context
+      mapped: surfaces at +0x00/+0x10 as (descriptor, stride, format, flag),
+      blend at +0x20, scissor at +0x38, scale at +0x4c, dispatch at +0x5c/+0x60.
+  A4. IN FLIGHT. The surface descriptors are KERNEL pointers, unreadable
+      unprivileged, so read_priv was added for descriptors only. r263 is running
+      to read one and find the pixel base.
+  A5. Implement the native blit: source and destination bases plus strides from
+      the descriptors, rect from the arguments, every pixel written through the
+      guest MMU. DECLINE any blend, scale, scissor, rotation or format not
+      already observed -- declining is free and a wrong composite is not.
+  A6. Validate with the cold-boot framebuffer diff (see below). Then measure.
+
+If A4 or A5 turns out to be blocked, the fallback is NOT to abandon MBX2D but to
+do the blit in the DEVICE model instead of the library: the kext programs
+physical addresses into 0x824/0x83c and 0x1000..0x101c, and physical addresses
+need no MMU and no privilege. That route needs the 2DIdle gate cleared first,
+which is still open -- wiring IRQ 12 (which the device tree declares and nothing
+was driving) did NOT clear it, measured, and the recovery output is byte
+identical with and without the line.
+
+### Line B -- the sampler family, banked incrementally while A proceeds
+
+Same technique each time, ~80 instructions each, all validated the same way:
+
+  B1. DONE. sw_sample_nearest_BGRA8.
+  B2. sw_sample_color, transcribed; diff running.
+  B3. sw_sample_circle (81 insns), sw_sample_square (81 insns).
+  B4. sw_scanline is 1,116 instructions and multi-path -- LAST, and only if the
+      cheaper ones do not make it moot.
+      sw_sample_texture is a dispatcher, not a sampler: it computes |du|+|dv|
+      and picks a path, so replacing it buys little.
+
+### The only validation that counts
+
+A COLD BOOT PAIR, disarmed vs armed, differing solely by --hle, comparing
+w.img.screen.ppm. Restored windows do not work -- four attempts (r249, r254,
+r255, r256) all reported "armed to: NOTHING" and printed "RESULT: IDENTICAL"
+anyway, which is worthless because both arms then run identical code.
+
+A pass requires THREE things, and any one missing makes it meaningless:
+  * non-zero `handled` in the site report,
+  * a screen that is not blank (r257: 453,081 of 460,800 bytes non-zero),
+  * byte-identical framebuffers.
