@@ -146,13 +146,27 @@ void s5l_mbx_reset(s5l_mbx_t *m) {
      * a device that reported completion before the request would let the
      * driver past a handshake that never happened.
      */
+    /* The buffer belongs to the machine and outlives a device reset; its
+     * CONTENTS are cleared, which is what a powered-down edram holds. */
+    uint8_t *edram = m->edram;
     memset(m, 0, sizeof *m);
+    m->edram = edram;
+    if (edram) memset(edram, 0, S5L_MBX_EDRAM_SIZE);
 }
 
 uint32_t s5l_mbx_read(s5l_mbx_t *m, uint32_t off) {
     uint32_t v;
 
-    if (!m || off >= S5L_MBX_SIZE) return 0;
+    if (!m || off >= S5L_MBX_APERTURE) return 0;
+
+    /* Above the register block the aperture is edram: plain storage. */
+    if (off >= S5L_MBX_SIZE) {
+        uint32_t o = off - S5L_MBX_SIZE;
+        if (!m->edram || o + 4u > S5L_MBX_EDRAM_SIZE) return 0;
+        return (uint32_t)m->edram[o] | ((uint32_t)m->edram[o + 1u] << 8) |
+               ((uint32_t)m->edram[o + 2u] << 16) |
+               ((uint32_t)m->edram[o + 3u] << 24);
+    }
 
     if (off == S5L_MBX_RESET) {
         /*
@@ -215,7 +229,17 @@ bool s5l_mbx_irq(const s5l_mbx_t *m) {
 }
 
 void s5l_mbx_write(s5l_mbx_t *m, uint32_t off, uint32_t val) {
-    if (!m || off >= S5L_MBX_SIZE) return;
+    if (!m || off >= S5L_MBX_APERTURE) return;
+
+    if (off >= S5L_MBX_SIZE) {
+        uint32_t o = off - S5L_MBX_SIZE;
+        if (!m->edram || o + 4u > S5L_MBX_EDRAM_SIZE) return;
+        m->edram[o]      = (uint8_t)(val & 0xffu);
+        m->edram[o + 1u] = (uint8_t)((val >> 8) & 0xffu);
+        m->edram[o + 2u] = (uint8_t)((val >> 16) & 0xffu);
+        m->edram[o + 3u] = (uint8_t)((val >> 24) & 0xffu);
+        return;
+    }
 
     mbx_trace(off, val, true);
 

@@ -191,7 +191,7 @@ static inline bool in_power(uint32_t a, unsigned bytes) {
     return mmio_word(a, bytes, S5L8900_POWER_BASE, S5L8900_POWER_SIZE);
 }
 static inline bool in_mbx(uint32_t a, unsigned bytes) {
-    return mmio_word(a, bytes, S5L8900_MBX_BASE, S5L_MBX_SIZE);
+    return mmio_word(a, bytes, S5L8900_MBX_BASE, S5L_MBX_APERTURE);
 }
 static inline bool in_gpioic(uint32_t a, unsigned bytes) {
     return mmio_word(a, bytes, S5L8900_GPIOIC_BASE, S5L8900_GPIOIC_SIZE);
@@ -980,6 +980,9 @@ bool s5l8900_init(s5l8900_t *m, uint32_t ram_base, uint32_t ram_size) {
         s5l8900_ram_conflict(ram_base, ram_size)) return false;
 
     m->ram = calloc(ram_size, 1);
+    /* The MBX aperture's edram, owned here like RAM. See S5L_MBX_APERTURE.
+     * A failure is handled below with the RAM failure, not ignored. */
+    m->mbx.edram = calloc(S5L_MBX_EDRAM_SIZE, 1);
     if (!m->ram) return false;
     m->ram_base = ram_base;
     m->ram_size = ram_size;
@@ -1021,6 +1024,8 @@ bool s5l8900_init(s5l8900_t *m, uint32_t ram_base, uint32_t ram_size) {
         if (!s5l_i2c_attach(&m->i2c[0], &pmu)) {
             free(m->ram);
             m->ram = NULL;
+            free(m->mbx.edram);
+            m->mbx.edram = NULL;
             return false;
         }
         /*
@@ -1038,6 +1043,8 @@ bool s5l8900_init(s5l8900_t *m, uint32_t ram_base, uint32_t ram_size) {
         if (!s5l_i2c_attach(&m->i2c[0], &codec)) {
             free(m->ram);
             m->ram = NULL;
+            free(m->mbx.edram);
+            m->mbx.edram = NULL;
             return false;
         }
     }
@@ -1063,6 +1070,8 @@ bool s5l8900_init(s5l8900_t *m, uint32_t ram_base, uint32_t ram_size) {
         if (!s5l_spi_attach(&m->spi[1], 0u, &touch)) {
             free(m->ram);
             m->ram = NULL;
+            free(m->mbx.edram);
+            m->mbx.edram = NULL;
             return false;
         }
     }

@@ -119,7 +119,7 @@ SNAP_SIZE_GUARD(s5l_uart_t,        8280,  "snap_uart");
 SNAP_SIZE_GUARD(s5l_vic_t,         16,    "snap_vic");
 SNAP_SIZE_GUARD(s5l_timer_t,       40,    "snap_timer");
 SNAP_SIZE_GUARD(s5l_power_t,       24,    "snap_power");
-SNAP_SIZE_GUARD(s5l_mbx_t,         8200,  "snap_mbx");
+SNAP_SIZE_GUARD(s5l_mbx_t,         8208,  "snap_mbx");
 SNAP_SIZE_GUARD(s5l_clcd_window_t, 24,    "snap_clcd");
 SNAP_SIZE_GUARD(s5l_clcd_t,        3368,  "snap_clcd");
 SNAP_SIZE_GUARD(s5l_tvout_t,       12304, "snap_tvout");
@@ -173,7 +173,7 @@ SNAP_SIZE_GUARD(s5l_stub_t,        56,    "snap_stubs");
  * which is the entire reason this guard is a compile error. */
 /* 112576 = 111536 + the CPU's data-read block cache and counters, which this struct
  * contains. Not serialised, byte format unchanged; see the arm_cpu_t note. */
-SNAP_SIZE_GUARD(s5l8900_t,         120776, "snap_mach");
+SNAP_SIZE_GUARD(s5l8900_t,         120784, "snap_mach");
 #endif
 
 /* ---------------------------------------------------------------- the IO --- */
@@ -513,6 +513,19 @@ static void snap_mbx(sn_io_t *io, s5l_mbx_t *m) {
     for (unsigned i = 0; i < S5L_MBX_SIZE / 4u; i++) F32(m->reg[i]);
     F32(m->status);
     FB(m->reset_done);
+    /*
+     * The edram, which is guest-visible memory and therefore machine state.
+     * It is 16 MB and it is NOT part of s5l_mbx_t's bytes -- the struct holds
+     * a pointer the machine owns, exactly as it does for RAM -- so it is
+     * streamed here rather than covered by the size guard.
+     *
+     * Unconditional on purpose: s5l8900_init() allocates it with the RAM and
+     * fails the machine if it cannot, so a NULL here is a machine that was
+     * never built. Making the field optional would make the snapshot's LENGTH
+     * depend on it, and a format whose size varies with a pointer is how a
+     * restore silently reads the next section's bytes.
+     */
+    FBYTES(m->edram, S5L_MBX_EDRAM_SIZE);
 }
 
 /*

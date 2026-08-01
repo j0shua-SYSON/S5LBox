@@ -1210,23 +1210,27 @@ static void test_stub_window_stores_and_counts(void) {
 static void test_mmio_width_alignment_and_window_edges(void) {
     s5l8900_t m;
     CHECK(s5l8900_init(&m, 0, 1u << 20), "machine init failed");
-    CHECK(s5l8900_add_stub(&m, 0x3b100000u, 8u, "lanes"),
+    /* 0x3f100000, not 0x3b100000: the MBX aperture is the 16 MB the device tree
+     * declares, so the old address is now inside a real device and a stub there
+     * is correctly refused. This test is about stub LANE addressing, so it just
+     * needs somewhere genuinely unclaimed. */
+    CHECK(s5l8900_add_stub(&m, 0x3f100000u, 8u, "lanes"),
           "small stub declaration failed");
 
     /* Stub storage is byte-addressable and little-endian, including an
      * unaligned halfword that spans two backing uint32_t values. */
-    m.bus.write32(m.bus.ctx, 0x3b100000u, 0x11223344u);
-    m.bus.write8(m.bus.ctx, 0x3b100001u, 0xaau);
-    CHECK(m.bus.read32(m.bus.ctx, 0x3b100000u) == 0x1122aa44u,
+    m.bus.write32(m.bus.ctx, 0x3f100000u, 0x11223344u);
+    m.bus.write8(m.bus.ctx, 0x3f100001u, 0xaau);
+    CHECK(m.bus.read32(m.bus.ctx, 0x3f100000u) == 0x1122aa44u,
           "byte write updated the wrong register lane");
-    m.bus.write16(m.bus.ctx, 0x3b100003u, 0xbeefu);
-    CHECK(m.bus.read16(m.bus.ctx, 0x3b100003u) == 0xbeefu,
+    m.bus.write16(m.bus.ctx, 0x3f100003u, 0xbeefu);
+    CHECK(m.bus.read16(m.bus.ctx, 0x3f100003u) == 0xbeefu,
           "unaligned cross-register halfword did not round-trip");
 
     /* An access must fit wholly inside its window. Starting in the last byte
      * is not permission to spill into the next physical region. */
     uint64_t before = m.unmapped_reads;
-    (void)m.bus.read16(m.bus.ctx, 0x3b100007u);
+    (void)m.bus.read16(m.bus.ctx, 0x3f100007u);
     CHECK(m.unmapped_reads == before + 1u,
           "cross-boundary stub read was treated as mapped");
     before = m.unmapped_reads;

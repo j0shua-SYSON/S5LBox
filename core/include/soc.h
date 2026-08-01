@@ -816,10 +816,43 @@ void     s5l_power_write(s5l_power_t *p, uint32_t off, uint32_t val);
 #define S5L_MBX_REVISION     0x00000f00u
 #define S5L_MBX_REVISION_ID  0x01020000u
 
+/*
+ * THE REST OF THE APERTURE IS MEMORY, and leaving it unmodelled is why MBX2D
+ * has nothing to composite from.
+ *
+ * S5L_MBX_SIZE is 8 KB because that is what r226 saw ACCESSED, but the device
+ * tree declares /arm-io/mbx with `reg = {0x03000000, 0x01000000}` -- sixteen
+ * megabytes -- and the boot log says what the rest of it is: "IOSurfaceDevice-
+ * MemoryRegion: edram was powered on at boot". It is the GPU's local video
+ * memory, and MBX2D allocates its surfaces there.
+ *
+ * The evidence that this is the gap, from runs that had already been taken:
+ * r265 followed the blit's source surface down to an IOGeneralMemoryDescriptor
+ * whose range is {0x03a8a000, 0x97000}, which is ~10 MB into this aperture and
+ * far past the 8 KB modelled; and every MBX run's own report lists 0x3ba00000
+ * among the pages "touched outside the memory map", against 10,030 unmapped
+ * reads. Those reads return zero, so a surface read yields nothing -- which is
+ * exactly what a compositor with no pixels looks like.
+ *
+ * So the register block keeps the low 8 KB and everything above it is plain
+ * storage. That invents no behaviour: memory that returns what was written to
+ * it is the least a RAM aperture can do, and anything the device is supposed to
+ * DO with those bytes still has to be modelled separately and still fails
+ * loudly if it is not.
+ */
+#define S5L_MBX_APERTURE     0x01000000u   /* /arm-io/mbx reg size, 16 MB */
+#define S5L_MBX_EDRAM_SIZE   (S5L_MBX_APERTURE - S5L_MBX_SIZE)
+
 typedef struct {
     uint32_t reg[S5L_MBX_SIZE / 4u];
     uint32_t status;          /* 0x12c; write-one-to-clear via 0x134        */
     bool     reset_done;      /* set by a reset REQUEST, never self-asserted */
+    /*
+     * Owned by the machine, exactly as m->ram is, and NOT part of this struct's
+     * bytes -- 16 MB inside a snapshot-guarded struct would be absurd. Survives
+     * s5l_mbx_reset(), which zeroes the contents rather than dropping them.
+     */
+    uint8_t *edram;
 } s5l_mbx_t;
 
 void     s5l_mbx_reset(s5l_mbx_t *m);
