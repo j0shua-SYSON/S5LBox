@@ -531,6 +531,8 @@ static bool hle_sw_sample_nearest_bgra8(arm_cpu_t *cpu,
  * where the layer is on screen, and a stride-like number is large.
  */
 static unsigned g_trace_budget[8];
+static uint32_t g_sw_ctx_seen[8];
+static unsigned g_sw_ctx_seen_n;
 
 static bool trace_args(const char *what, arm_cpu_t *cpu,
                        const ios3_hle_mem_t *mem, unsigned slot, unsigned nstack) {
@@ -552,6 +554,117 @@ static bool trace_args(const char *what, arm_cpu_t *cpu,
         fprintf(stderr, " sp+%u=%08x", i * 4u, w);
     }
     fprintf(stderr, "\n");
+    return false;
+}
+
+static void trace_words(const ios3_hle_mem_t *mem, const char *what,
+                        uint32_t base, const unsigned *off, unsigned n) {
+    unsigned i;
+
+    fprintf(stderr, "hle-trace   %s@%08x", what, base);
+    for (i = 0; i < n; i++) {
+        uint32_t w = 0;
+        uint64_t va = (uint64_t)base + off[i];
+        if (va <= UINT32_MAX && read_u32(mem, (uint32_t)va, &w))
+            fprintf(stderr, " +%03x=%08x", off[i], w);
+        else
+            fprintf(stderr, " +%03x=??", off[i]);
+    }
+    fprintf(stderr, "\n");
+}
+
+static void trace_ogl_vert(const ios3_hle_mem_t *mem, const char *what,
+                           uint32_t va) {
+    float f[14];
+    unsigned i;
+
+    if (!va) {
+        fprintf(stderr, "hle-trace   %s=NULL\n", what);
+        return;
+    }
+    for (i = 0; i < 14u; i++) {
+        uint64_t p = (uint64_t)va + i * 4u;
+        if (p > UINT32_MAX || !read_f32(mem, (uint32_t)p, &f[i])) {
+            fprintf(stderr, "hle-trace   %s@%08x=unreadable@+%02x\n",
+                    what, va, i * 4u);
+            return;
+        }
+    }
+    fprintf(stderr,
+            "hle-trace   %s@%08x xyzw=(%.9g,%.9g,%.9g,%.9g)"
+            " rgba=(%.9g,%.9g,%.9g,%.9g)"
+            " uv0=(%.9g,%.9g) uv1=(%.9g,%.9g) uv2=(%.9g,%.9g)\n",
+            what, va,
+            (double)f[0], (double)f[1], (double)f[2], (double)f[3],
+            (double)f[4], (double)f[5], (double)f[6], (double)f[7],
+            (double)f[8], (double)f[9], (double)f[10], (double)f[11],
+            (double)f[12], (double)f[13]);
+}
+
+/*
+ * The root trace proves which polygon enters the scan converter. This one
+ * records what the converter hands to its only callback: x/y/count, the four
+ * interpolant vectors, the active-field mask and the SW scan state. The first
+ * twelve calls show the per-line evolution; each distinct context is dumped
+ * once so a run with several texture units does not spend the whole budget on
+ * the first one.
+ */
+static bool hle_trace_sw_scanline(arm_cpu_t *cpu,
+                                  const ios3_hle_mem_t *mem) {
+    static const unsigned CTX_OFF[] = {
+        0x00, 0x04, 0x08, 0x0c, 0x10, 0x14, 0x18, 0x1c,
+        0x20, 0x24, 0x28, 0x2c, 0x30, 0x34, 0x38, 0x3c,
+        0x40, 0x44, 0x48, 0x4c, 0x50, 0x54, 0x58, 0x5c,
+        0x60, 0x64, 0x68
+    };
+    static const unsigned RENDER_OFF[] = {
+        0x00, 0x04, 0x08, 0x0c, 0x10, 0x14, 0x18, 0x1c,
+        0x20, 0x24, 0x28, 0x2c, 0x30, 0x34, 0x38, 0x3c,
+        0xf8, 0xfc, 0x100, 0x104, 0x108, 0x10c, 0x110,
+        0x114, 0x118, 0x11c
+    };
+    static const unsigned STATE_OFF[] = {
+        0x00, 0x04, 0x08, 0x0c, 0x10, 0x14, 0x18, 0x1c,
+        0x20, 0x24, 0x28, 0x2c, 0x30, 0x34, 0x38, 0x3c,
+        0x40, 0x44, 0x48, 0x4c, 0x50, 0x54, 0x58, 0x5c,
+        0x60, 0x64, 0x68, 0x6c, 0x70, 0x74, 0x78, 0x7c
+    };
+    bool first = g_trace_budget[5] < 12u;
+    uint32_t stack[5] = { 0, 0, 0, 0, 0 };
+    uint32_t render = 0, state = 0;
+    unsigned i;
+
+    (void)trace_args("sw_scanline", cpu, mem, 5, 5);
+    for (i = 0; i < 5u; i++) {
+        uint64_t va = (uint64_t)cpu->r[13] + i * 4u;
+        if (va <= UINT32_MAX)
+            (void)read_u32(mem, (uint32_t)va, &stack[i]);
+    }
+
+    if (first) {
+        trace_ogl_vert(mem, "scan.start", cpu->r[3]);
+        trace_ogl_vert(mem, "scan.dx", stack[0]);
+        trace_ogl_vert(mem, "scan.dy0", stack[1]);
+        trace_ogl_vert(mem, "scan.dy1", stack[2]);
+    }
+
+    for (i = 0; i < g_sw_ctx_seen_n; i++)
+        if (g_sw_ctx_seen[i] == stack[4]) return false;
+    if (!stack[4] || g_sw_ctx_seen_n >=
+            (unsigned)(sizeof g_sw_ctx_seen / sizeof g_sw_ctx_seen[0]))
+        return false;
+    g_sw_ctx_seen[g_sw_ctx_seen_n++] = stack[4];
+
+    trace_words(mem, "scan.ctx", stack[4], CTX_OFF,
+                (unsigned)(sizeof CTX_OFF / sizeof CTX_OFF[0]));
+    if (read_u32(mem, stack[4], &render) && render) {
+        trace_words(mem, "scan.render", render, RENDER_OFF,
+                    (unsigned)(sizeof RENDER_OFF / sizeof RENDER_OFF[0]));
+        if (render <= UINT32_MAX - 4u &&
+            read_u32(mem, render + 4u, &state) && state)
+            trace_words(mem, "scan.state", state, STATE_OFF,
+                        (unsigned)(sizeof STATE_OFF / sizeof STATE_OFF[0]));
+    }
     return false;
 }
 
@@ -886,8 +999,8 @@ static ios3_hle_site_t g_sites[] = {
       NULL, IOS3_HLE_OBSERVE, false, false, 0, 0, 0, 0 },
     { "sw_scanline",        0x3122d180u, PROLOGUE_SW_SCANLINE,
       (unsigned)(sizeof PROLOGUE_SW_SCANLINE /
-                 sizeof PROLOGUE_SW_SCANLINE[0]),
-      NULL, IOS3_HLE_OBSERVE, false, false, 0, 0, 0, 0 },
+                  sizeof PROLOGUE_SW_SCANLINE[0]),
+      hle_trace_sw_scanline, IOS3_HLE_TRACE, false, false, 0, 0, 0, 0 },
     { "ogl_poly_scan",      0x311e2100u, PROLOGUE_OGL_POLY_SCAN,
       (unsigned)(sizeof PROLOGUE_OGL_POLY_SCAN /
                  sizeof PROLOGUE_OGL_POLY_SCAN[0]),
@@ -963,6 +1076,10 @@ unsigned ios3_hle_arm(const ios3_hle_mem_t *mem, uint32_t ttbr0) {
      * printed 13 because this reset was unconditional. */
     if (g_ttbr0 != ttbr0)
         memset(g_trace_budget, 0, sizeof g_trace_budget);
+    if (g_ttbr0 != ttbr0) {
+        memset(g_sw_ctx_seen, 0, sizeof g_sw_ctx_seen);
+        g_sw_ctx_seen_n = 0u;
+    }
     g_ttbr0 = ttbr0;
     g_armed_n = 0u;
     for (unsigned i = 0; i < SITE_N; i++) {
@@ -979,6 +1096,8 @@ void ios3_hle_disarm(void) {
     g_ttbr0 = 0u;
     g_armed_n = 0u;
     memset(g_trace_budget, 0, sizeof g_trace_budget);
+    memset(g_sw_ctx_seen, 0, sizeof g_sw_ctx_seen);
+    g_sw_ctx_seen_n = 0u;
 }
 
 /* -------------------------------------------------------------- the step --- */
