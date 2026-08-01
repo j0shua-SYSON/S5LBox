@@ -1953,3 +1953,30 @@ differential correctness run, not a benchmark, and its 356-second wall time is
 not guest FPS. **30 fps remains unproven.** A clean replacement run is still
 needed for a local performance signal; final acceptance still requires actual
 published-frame cadence in the iOS app and a cold armed/disarmed comparison.
+
+r321 supplies that missing local replacement signal, and it is negative. It
+used the same detached `ee89b20700ef64ec9a0029dcfbde80953c67972c`
+RelWithDebInfo executable and clean pre-drag checkpoint as r320, but selected
+`--hle` rather than `--hle-verify`. The executable hash remained
+`0C644BA14C15841E9E098820B06C0BC55D19504F350F87A979EAD666A6872835`.
+The emulator produced its complete report and self-reported a normal
+`stopped after 4399999702 instructions: OK`; the PowerShell wrapper did not
+retain a numeric child `ExitCode`, so that field is unavailable rather than
+silently asserted. Wall time was **271.818 seconds**, with:
+
+    ogl_poly_scan              313 hits / 260 handled /   53 declined
+    sw_scanline              1,831 hits /   0 handled / 1,831 declined
+    nearest BGRA leaf           40 hits /  38 handled /    2 declined
+    nearest BGRX leaf             0 hits
+
+The final framebuffer still matched
+`E0CE0EB1C117527ECDFF2C2C4A4549FCF48AB0F9E151AB7CBE13965849F7CEC8`.
+All 26 touch reports were accepted and read, external storage reported zero
+failures with 2/2 raw redirects/completions, and the desktop proxies remained
+61 H1 window updates and 69 swap-handler calls. Compared with r311b, r321
+handled 15 more whole roots and left 1,440 fewer guest `sw_scanline` entries,
+but took **15.846 seconds or about 6.2% longer**. This single run cannot separate
+host variance from the changed guest work admitted by replacement under the
+fixed retired-instruction cap. It nevertheless provides no evidence that this
+new shortcut made the measured workload faster. It is still not an FPS result,
+and **30 fps remains unproven**.
