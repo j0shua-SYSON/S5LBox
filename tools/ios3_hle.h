@@ -114,6 +114,20 @@ typedef struct {
      * itself would write.
      */
     bool (*read_priv)(void *ctx, uint32_t va, void *dst, uint32_t len);
+    /*
+     * A PHYSICAL read. May be NULL. Also not for guest-authored pixels.
+     *
+     * The MBX surface descriptors carry PHYSICAL addresses -- r265 read the
+     * destination as {0x0885c000, 0x960000}, which is the /vram pool, and the
+     * source as {0x03a8a000, 0x97000}, which is not a CPU physical at all.
+     * Neither can be reached through a virtual mapping, because neither is one.
+     * The device reads memory this way; so does this.
+     *
+     * It exists to SETTLE the address-space question rather than to assume it:
+     * with it, both candidate readings of a source address can be dumped and
+     * the one holding pixels wins, instead of a blit being written on a guess.
+     */
+    bool (*read_phys)(void *ctx, uint32_t pa, void *dst, uint32_t len);
 } ios3_hle_mem_t;
 
 typedef enum {

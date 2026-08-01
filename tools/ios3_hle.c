@@ -706,6 +706,51 @@ static void trace_surface(const ios3_hle_mem_t *mem, const char *tag,
             }
             fprintf(stderr, "\n");
         }
+
+        /*
+         * SETTLE THE ADDRESS SPACE WITH DATA, not with an argument.
+         *
+         * An IOGeneralMemoryDescriptor's inline range sits at +0x34 as
+         * {address, length}, which for the destination read {0x0885c000,
+         * 0x960000} -- the /vram pool, a raw CPU physical. The source reads
+         * {0x03a8a000, 0x97000}, and nothing is mapped at 0x03a8a000. The
+         * device tree declares the aperture at CHILD address 0x03000000 while
+         * this machine puts its registers at 0x3b000000, so the candidate
+         * rebase is +0x38000000 -- and a blit written on the wrong one would
+         * read pixels from a plausible wrong place.
+         *
+         * So both are dumped. Whichever holds pixels is the answer: a 32-bit
+         * ARGB surface is mostly non-zero with 0xff alpha bytes, and an
+         * unmapped or wrong region reads as a run of zeros.
+         */
+        {
+            uint32_t range = 0;
+            if ((mem->read_priv &&
+                 mem->read_priv(mem->ctx, next + 0x34u, &range, 4u)) && range) {
+                /* 0x3b000000 spelled out rather than included: this file
+                 * deliberately does not depend on soc.h, and the number is the
+                 * aperture base the machine already uses. */
+                static const uint32_t REBASE = 0x3b000000u;
+                uint32_t cand[2];
+                unsigned c;
+                cand[0] = range;
+                cand[1] = (range >= 0x03000000u && range < 0x04000000u)
+                            ? (range - 0x03000000u) + REBASE : 0u;
+                for (c = 0; c < 2u; c++) {
+                    if (!cand[c]) continue;
+                    fprintf(stderr, "hle-trace   %s pix@%08x", tag, cand[c]);
+                    for (i = 0; i < 8u; i++) {
+                        uint32_t w = 0;
+                        bool ok = mem->read_phys &&
+                                  mem->read_phys(mem->ctx, cand[c] + i * 4u,
+                                                 &w, 4u);
+                        if (ok) fprintf(stderr, " %08x", w);
+                        else    fprintf(stderr, " ????????");
+                    }
+                    fprintf(stderr, "\n");
+                }
+            }
+        }
     }
 }
 

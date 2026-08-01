@@ -3104,6 +3104,34 @@ static bool hle_mem_read(void *ctx, uint32_t va, void *dst, uint32_t len) {
  * This translates with privilege so a kernel-side descriptor -- an IOSurface
  * the device itself reads -- can be inspected, and it is read-only.
  */
+/*
+ * A physical read, for descriptor-supplied addresses. See
+ * ios3_hle_mem_t::read_phys. Serves guest DRAM and the MBX aperture's edram,
+ * which are the only two regions a surface can live in, and refuses anything
+ * else rather than inventing bytes for a device window.
+ */
+static bool hle_mem_read_phys(void *ctx, uint32_t pa, void *dst, uint32_t len) {
+    uint8_t *out = (uint8_t *)dst;
+    (void)ctx;
+
+    if (!out || !len || !g_mach) return false;
+    if ((uint64_t)pa + len - 1u > UINT32_MAX) return false;
+
+    if (g_mach->ram && pa >= g_mach->ram_base &&
+        (uint64_t)pa - g_mach->ram_base + len <= g_mach->ram_size) {
+        memcpy(out, g_mach->ram + (pa - g_mach->ram_base), len);
+        return true;
+    }
+    if (g_mach->mbx.edram && pa >= S5L8900_MBX_BASE + S5L_MBX_SIZE &&
+        (uint64_t)pa - (S5L8900_MBX_BASE + S5L_MBX_SIZE) + len
+            <= S5L_MBX_EDRAM_SIZE) {
+        memcpy(out, g_mach->mbx.edram +
+                    (pa - (S5L8900_MBX_BASE + S5L_MBX_SIZE)), len);
+        return true;
+    }
+    return false;
+}
+
 static bool hle_mem_read_priv(void *ctx, uint32_t va, void *dst, uint32_t len) {
     arm_cpu_t *cpu = (arm_cpu_t *)ctx;
     uint8_t *out = (uint8_t *)dst;
@@ -3188,6 +3216,7 @@ static bool hle_took_call(arm_cpu_t *cpu) {
     mem.read = hle_mem_read;
     mem.write = hle_mem_write;
     mem.read_priv = hle_mem_read_priv;
+    mem.read_phys = hle_mem_read_phys;
     as = diagnostic_ttbr0_base(cpu);
     pc = cpu->r[15] & ~1u;
 
