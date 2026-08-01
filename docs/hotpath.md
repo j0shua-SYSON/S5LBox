@@ -1023,3 +1023,56 @@ puts its registers at 0x3b000000, so the consistent reading is that surface
 descriptors carry CHILD-RELATIVE addresses and a blit must rebase them. That
 rebase is a rule, and it has not been verified yet -- writing a blit on an
 unverified base is how pixels come from a plausible wrong place.
+
+
+## 2DIdle, decoded completely
+
+It is not a register, which is why three runs of register work moved it by
+nothing. AppleMBX+0xf274 formats the recovery line out of OBJECT FIELDS:
+
+    ldrb r1, [r4, #0x143]    ; TAStatus
+    ldr  r0, [r4, #0x124]    ; 3dblit
+    ldrb r3, [r4, #0x121]    ; 3DIdle
+    ldrb r2, [r4, #0x120]    ; 2DIdle
+
+That reconciles the two things that looked contradictory: the histogram showing
+only 0x012c, 0x1020 and 0xf00 ever READ -- 37 reads in a whole run -- while the
+driver insisted the 2D core was wedged. It was reading its own memory.
+
+The ISR at AppleMBX+0x804d4 is where the field comes from:
+
+    ldr  r3, [r0, #0x264]
+    cmp  r3, #2
+    bne  <return 0, doing nothing at all>
+    ldr  r3, [r2, #0x12c]     ; status
+    ldr  r2, [r0, #0x148]     ; the driver's shadow of the enable mask
+    and  r5, r3, r2           ; pending = status & mask
+    bl   write(this, 0x134, pending)
+    ands r2, r5, #0x400
+    ...  strb r6, [r4, #0x120]         ; 2DIdle = 1
+
+So bit 10 of the status word is 2D completion, and the model raised only bit 6 --
+which the submit path at AppleMBX+0xe854 polls and acknowledges SYNCHRONOUSLY,
+so nothing ever reached the handler. Raising bit 10 as well, and gating the
+interrupt line on `status & the enable at 0x130` the way the ISR gates its own
+`pending`, is what the driver is written to expect.
+
+WHAT THAT CHANGED, measured: CompletedIntStatus went 0x00000000 -> 0x00000400.
+That field is a live read of 0x12c, so the completion bit now genuinely reaches
+the driver, where before there was nothing to see.
+
+WHAT IT DID NOT CHANGE: 2DIdle is still 0 and the recovery event still fires.
+And the value being STILL SET at recovery time is itself the evidence for why --
+the ISR acknowledges through 0x134 as its first act, so an unacknowledged 0x400
+means the handler did not run its body. The `[0x264] == 2` gate is not
+satisfied, and the other branch returns immediately without acknowledging or
+touching 2DIdle.
+
+[0x264] is a driver STATE, not a constant: it has nine writers, and
+AppleMBX+0xff58 shows the transition -- state 1 is incremented to 2, and another
+path stores 2 directly, both around virtual calls at vtable+0x350/+0x354. So
+what remains is a state machine that has not reached "running", and the next
+question is which of those two paths the driver is failing to take. That is a
+question about what the device has not done yet, and it is the same shape as the
+reset bug: read the code, model what it waited for, do not choose a value
+because it would make the driver proceed.
