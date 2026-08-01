@@ -2037,3 +2037,81 @@ declines them at the child scanline. A general multi-column bilinear
 transcription is therefore the next renderer case. r323's 388.602 seconds is
 verifier overhead, not a replacement timing result or displayed cadence.
 **30 fps remains unproven.**
+
+### r324--r325: pixel-aligned wider bilinear rows are exact; timing is mixed
+
+The next implementation is deliberately **not** a general bilinear sampler.
+The retained wider r323 rows start u at a texel centre and advance by exactly
+one texel per destination pixel. After `0x3122bad8` subtracts half a pixel,
+their eight-bit horizontal weight is zero. The replacement accepts only that
+case (or two fixed coordinates made identical by clamping); any genuine
+horizontal blend still runs Apple.
+
+The wider path preserves the sampler's native top-left, bottom-left,
+top-right, bottom-right load order and requires all four four-byte reads to
+succeed, even though the zero-weight right pair cannot affect the result. It
+retains the root-only facade, non-wrapping fixed-coordinate bounds, current-
+chunk source/destination alias refusal, and the exact packed vertical blend.
+The old one-column path remains a separate two-read constant-row shortcut.
+
+The focused alternating-texel fixture covers two 320-pixel rows, the 256+64
+chunk boundary, four native taps per pixel, and the quarter-pixel 192/256
+vertical blend. It records 2,560 scalar texture reads totalling 10,240 bytes
+and passes with the complete **27,605 checks / 0 failures**. The strict target
+passes too. Detached exact commit
+`047094f637f73c83f510ae98ab942cf1d1194b40` passed all 54 tests from a fresh
+RelWithDebInfo build; its emulator SHA-256 is
+`5558F8FC6038F42B4117A90C4909A27D47975FCEC64CA2DD1050DED313A36336`.
+GitHub Actions passed iOS build `30710588193` and all eight core-test jobs in
+`30710588199` for that exact source commit.
+
+r324 was the complete 3.9--4.4 B live differential oracle from the retained
+clean checkpoint. It exited zero in 348.239 seconds and stopped exactly at
+4,400,000,000 instructions with:
+
+    nearest BGRX leaf        4,830 attempted / 4,830 exact passes
+    nearest BGRA leaf        4,818 attempted / 4,816 exact passes
+    sw_scanline             13,333 attempted / 9,277 exact passes
+    ogl_poly_scan              167 attempted /   163 exact passes
+    total prepared          19,086 / 65,536; 0 failures
+
+Every prepared result resolved: zero mismatches and zero unreadable cases.
+This adds **19** exact roots over r323 without changing any leaf or scanline
+count. Of the four remaining root attempts, one declined on a real texture
+read failure at `0x04572000`, two were outside the bounded rectangle geometry,
+and one clipped to empty. The run accepted and consumed all 26 touch reports,
+reported zero external-media failures and 2/2 raw redirects/completions,
+retained 45 H1 window updates and 69 swap-handler calls, and produced the same
+nonblack framebuffer SHA-256 as r323:
+`E0CE0EB1C117527ECDFF2C2C4A4549FCF48AB0F9E151AB7CBE13965849F7CEC8`.
+
+r325 then used the same executable, checkpoint, drag and instruction cap with
+`--hle` instead of `--hle-verify`. It exited zero after 4,399,999,637 retired
+instructions in **267.587 seconds**:
+
+    ogl_poly_scan              336 hits / 325 handled /  11 declined
+    sw_scanline                270 hits /   0 handled / 270 declined
+    nearest BGRA leaf           40 hits /  38 handled /   2 declined
+    nearest BGRX leaf            0 hits
+
+The coverage signal is strong: relative to r321, 65 more roots were handled,
+42 fewer roots declined, and 1,561 fewer child scanlines entered Apple. H1
+window-update calls rose from 61 to 65 at the same instruction budget, while
+swap-handler calls stayed at 69. Touch remained 26/26 accepted and consumed;
+storage again had zero failures and 2/2 raw redirects/completions.
+
+The timing signal is weak and conflicting. r325 was 4.231 seconds (about 1.6%)
+faster than r321's 271.818 seconds, but remained 11.615 seconds (about 4.5%)
+slower than r311b's 255.972 seconds. Its final framebuffer also changed to
+`07C2CD8201AF1B2384775F16227DCA4BB06B4031EFDB399F742FF6F3A0A6D97A`.
+Visual inspection shows a complete `Searching...` / time / battery status bar
+where r321 captured only the beginning of `Sear`, which is consistent with
+additional composite progress, but that interpretation is an inference. A
+different endpoint is not itself a speed proof.
+
+Therefore this checkpoint proves substantially broader byte-exact renderer
+replacement, **not 30 fps**. The 3.9 B snapshot remains a fast, faithful
+iteration oracle; it is not a substitute for final cold-boot acceptance. The
+next performance decision needs actual published-frame cadence in the target
+iOS app (and ultimately a cold armed/disarmed pair), not another claim based
+only on fixed-instruction stopwatch time.
