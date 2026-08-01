@@ -1820,3 +1820,59 @@ r309 timing cannot be attributed to this patch. A clean detached build of the
 exact commit must repeat the strict suite and full oracle/replacement pair.
 Until then, this is expanded exact coverage plus a confounded timing signal,
 **not a 30 fps result** and not final acceptance.
+
+### r310--r311b: the clip result survives clean isolation; 30 fps still is not measured
+
+The required isolation repeat used a detached worktree at exact commit
+`65d405607cf78b9f6b95595621ab4c0ab4027046`. Its tracked tree was clean, its
+fresh RelWithDebInfo build passed all 54 standard tests, and the resulting
+`bootkernel.exe` SHA-256 was
+`7928A6301B85554257BB877ACA780625DBF9ABD3FA07A8EA4C2074B56D681E82`.
+GitHub Actions independently passed core-tests run `30702303205` and iOS build
+run `30702303219` for that exact commit.
+
+r310 repeated the complete 3.9--4.4 B live differential oracle with that clean
+executable:
+
+    nearest BGRX leaf        4,830 attempted / 4,830 exact passes
+    nearest BGRA leaf        4,818 attempted / 4,816 exact passes
+    sw_scanline             13,333 attempted / 9,277 exact passes
+    ogl_poly_scan              167 attempted /   137 exact passes
+    total prepared          19,060 / 65,536; 0 failures
+
+Every prepared comparison resolved. The run exited zero after exactly 4.4 B
+instructions in 355.553 host seconds, consumed the drag 26/26, reported zero
+storage failures and 2/2 raw redirects/completions, and produced the accepted
+`E0CE0EB1C117527ECDFF2C2C4A4549FCF48AB0F9E151AB7CBE13965849F7CEC8`
+framebuffer hash. These counters exactly match r308. That removes the dirty
+executable ambiguity from the correctness result: clip handling and mode-1
+chunking are byte-exact on the isolated source commit.
+
+The first directory named r311 is **not a benchmark result**. Its PowerShell
+wrapper promoted an intentional HLE diagnostic on native stderr to a terminating
+`NativeCommandError` around 4.18 B instructions. It has no completion record and
+must not be timed or compared. r311b used process-level raw stdout/stderr capture
+and is the valid clean replacement run. It exited zero in **255.972 seconds**,
+stopping normally at 4,399,999,717 with:
+
+    ogl_poly_scan              313 hits / 245 handled /   68 declined
+    sw_scanline              3,271 hits /   0 handled / 3,271 declined
+    nearest BGRA leaf           40 hits /  38 handled /    2 declined
+    nearest BGRX leaf             0 hits
+
+It also retained 61 H1 window updates, 69 swap-handler calls, 26/26 accepted and
+read touch reports, zero storage failures, 2/2 raw completions, and the same
+accepted framebuffer hash. Against the immediate r306b result of 278.072
+seconds, the clean run is 22.100 seconds or about **7.9% lower**. Against the
+best historical r300 result of 253.476 seconds, it is 2.496 seconds or about
+**1.0% higher**. The clean evidence therefore supports a real reduction from
+the immediate pre-clip configuration, while also showing no new best time.
+Single-run host variance and the different amount of guest work admitted under
+a fixed retired-instruction cap prevent stronger attribution.
+
+Most importantly, neither number is displayed frame cadence. The desktop H1
+swap-handler count is a non-invasive activity proxy, not the iOS app's
+changed-published-frame FPS counter. This checkpoint still does **not** prove
+30 fps. Final performance acceptance remains an actual app cadence measurement
+on target hardware plus a cold armed/disarmed pair; the 3.9 B snapshot remains
+an iteration accelerator, not cold-boot evidence.
