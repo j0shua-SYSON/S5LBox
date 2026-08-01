@@ -136,10 +136,11 @@ typedef enum {
     /* Do the work natively and return to LR without executing the body. */
     IOS3_HLE_REPLACE,
     /*
-     * Run the handler for its SIDE EFFECTS ONLY and then let the guest execute
-     * anyway. The handler's return value is discarded and the site never
-     * reports "handled", so the guest's behaviour is bit-for-bit what it would
-     * be with the site absent.
+     * Run the handler for HOST-SIDE DIAGNOSTIC SIDE EFFECTS ONLY and then let
+     * the guest execute anyway. The handler receives a private CPU copy and a
+     * memory interface whose write callback always refuses. Its return value is
+     * discarded and the site never reports "handled", so the guest's behaviour
+     * is bit-for-bit what it would be with the site absent.
      *
      * This exists because OBSERVE cannot answer the question that actually
      * gates a replacement. A hit count says a site is on the path; it does not

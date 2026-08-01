@@ -157,6 +157,19 @@ static bool test_handler(arm_cpu_t *cpu, const ios3_hle_mem_t *mem) {
     return true;
 }
 
+static bool g_trace_write_succeeded;
+
+static bool mutating_trace_handler(arm_cpu_t *cpu,
+                                   const ios3_hle_mem_t *mem) {
+    const uint32_t poison = 0xdeadbeefu;
+    g_handler_calls++;
+    cpu->r[0] = poison;
+    cpu->r[15] = cpu->r[14];
+    g_trace_write_succeeded = mem->write &&
+        mem->write(mem->ctx, FAKE_BASE + 0x100u, &poison, sizeof poison);
+    return true;
+}
+
 static ios3_hle_site_t *install_test_site(ios3_hle_mode_t mode) {
     ios3_hle_site_t *s = ios3_hle_site_at(0);
     g_test_prologue[0] = 0xe92d4010u;   /* push {r4, lr} */
@@ -245,6 +258,46 @@ static void test_observe_mode_never_takes_the_call(void) {
     CHECK(cpu.r[15] == 0u, "an OBSERVE site moved the program counter");
 }
 
+/*
+ * TRACE is allowed to print host diagnostics, not to perturb the experiment it
+ * is measuring. Prove that even a badly behaved tracer sees a private CPU and
+ * a write-denied guest-memory interface; merely discarding its bool is not
+ * enough, because the handler could otherwise have changed both before return.
+ */
+static void test_trace_cannot_mutate_or_intercept_the_guest(void) {
+    arm_cpu_t cpu, before;
+    uint32_t memory_before = 0x12345678u, memory_after = 0u;
+    ios3_hle_site_t *s;
+
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[0] = 0x11111111u;
+    cpu.r[14] = 0xc0debabeu;
+    cpu.r[15] = 0x22222222u;
+    before = cpu;
+    s = install_test_site(IOS3_HLE_TRACE);
+    s->handler = mutating_trace_handler;
+    g_handler_calls = 0u;
+    g_trace_write_succeeded = false;
+    poke(FAKE_BASE + 0x100u, memory_before);
+
+    CHECK(ios3_hle_arm(&FAKE, 0x1000u) == 1u, "setup: site did not arm");
+    CHECK(!ios3_hle_step(&cpu, &FAKE, s->va, 0x1000u),
+          "a TRACE site intercepted the guest call");
+    CHECK(g_handler_calls == 1u, "the TRACE handler did not run");
+    CHECK(memcmp(&cpu, &before, sizeof cpu) == 0,
+          "a TRACE handler changed the live CPU state");
+    CHECK(!g_trace_write_succeeded,
+          "a TRACE handler's guest-memory write was accepted");
+    CHECK(fake_read(NULL, FAKE_BASE + 0x100u, &memory_after,
+                    sizeof memory_after) && memory_after == memory_before,
+          "TRACE changed guest memory from %08x to %08x",
+          memory_before, memory_after);
+    CHECK(s->hits == 1u && s->handled == 0u && s->declined == 0u,
+          "TRACE accounting wrong: hits %llu handled %llu declined %llu",
+          (unsigned long long)s->hits, (unsigned long long)s->handled,
+          (unsigned long long)s->declined);
+}
+
 /* A handler that declines leaves the guest to run its own code. */
 static void test_declining_is_safe(void) {
     arm_cpu_t cpu; memset(&cpu, 0, sizeof cpu);
@@ -271,6 +324,7 @@ int main(void) {
     test_identity_is_checked_word_for_word();
     test_the_wrong_address_space_is_refused_and_counted();
     test_observe_mode_never_takes_the_call();
+    test_trace_cannot_mutate_or_intercept_the_guest();
     test_declining_is_safe();
     printf("== ios3 hle: %u checks, %u failure(s) ==\n", checks, failures);
     return failures ? 1 : 0;

@@ -1102,3 +1102,52 @@ site captures registers, and r4 there is the AppleMBXDevice, so the actual value
 of [0x260] and [0x264] at the moment the watchdog fires answer in one run which
 transition never happened. That is the same move that ended the reset bug: stop
 arguing about which register, count what the driver actually did.
+
+## 2026-08-01 corrections: the state gate and the rasteriser root
+
+The state-gate inference immediately above did not survive its measurement.
+r269 hit the ISR entry and its `[0x264] == 2` body twice, hit the store that sets
+`2DIdle = 1` twice, and captured state 2 at both points. The interrupt is
+delivered, the state gate passes, and the field is set. The later unacknowledged
+0x400 was a new submission after an earlier completion, not proof that the ISR
+body never ran. Keep the derivation above because it explains why the probe was
+necessary; do not keep its conclusion. The remaining MBX fact is narrower:
+12 observed copy blits produced only two completions, so submission coverage is
+incomplete and the reason is not yet known.
+
+### `ogl_poly_scan` is the rasteriser root, statically proved
+
+The call-count shape previously suggested this tree:
+
+    ogl_poly_scan -> sw_scanline -> sw_sample_*
+
+It is no longer only a count-based hypothesis. A read-only walk of the retained
+`work/cache/dsc_armv6` established all of the following:
+
+* `_ogl_poly_scan` is exactly `0x311e2100..0x311e2d04` (3,076 bytes).
+  QuartzCore contains exactly one direct caller, at `0x3122cdbc` inside
+  `CA::OGL::SWContext::draw_elements`.
+* Immediately before that call, the caller materialises `pc + 0x3d8` and stores
+  it at incoming `sp+8`. The ARM PC value at that add is `0x3122cda8`, so the
+  result is `0x3122d180`, the exact symbol start of `sw_scanline`.
+* `_ogl_poly_scan` loads that seventh argument and invokes it with the sole
+  indirect `blx` in the function, at `0x311e2c04`. Its other calls resolve to
+  clipping/interpolation helpers, `memcpy`, `ceilf`, and `floorf`.
+* `sw_scanline` spans `0x3122d180..0x3122e2f0` (4,464 bytes). Its reachable
+  control flow calls `sw_sample_texture` and `sw_sample_color`;
+  `sw_sample_texture` selects and tail-calls the concrete sampler through the
+  SWTexture function pointer.
+
+WHAT THIS PROVES: a complete native replacement at `ogl_poly_scan` can own the
+scanline and sampler work beneath it, so it reaches the whole-rasteriser lever
+rather than only the root's 6.5% self time. This is the shortest currently known
+non-JIT route that is arithmetically capable of crossing 30 fps.
+
+WHAT IT DOES NOT PROVE: it does not supply a correct native transcription, show
+that every argument shape is understood, establish pixel equality, or raise the
+measured frame rate by one frame. Returning early at the root would merely omit
+drawing. The site is therefore TRACE, not REPLACE. It records the eight incoming
+arguments plus a bounded polygon header and first/last vertex while Apple's code
+still performs every draw. As of this checkpoint that tracer is unit-tested but
+has not yet produced a cold-guest trace; the next retained run is the ABI
+measurement, not a performance claim.

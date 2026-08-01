@@ -340,6 +340,10 @@ static bool read_u32(const ios3_hle_mem_t *mem, uint32_t va, uint32_t *out) {
     return mem->read(mem->ctx, va, out, 4u);
 }
 
+static bool read_u16(const ios3_hle_mem_t *mem, uint32_t va, uint16_t *out) {
+    return mem->read(mem->ctx, va, out, 2u);
+}
+
 static bool read_f32(const ios3_hle_mem_t *mem, uint32_t va, float *out) {
     uint32_t bits;
     if (!mem->read(mem->ctx, va, &bits, 4u)) return false;
@@ -546,6 +550,65 @@ static bool trace_args(const char *what, arm_cpu_t *cpu,
         fprintf(stderr, " sp+%u=%08x", i * 4u, w);
     }
     fprintf(stderr, "\n");
+    return false;
+}
+
+/*
+ * THE RASTERISER ROOT, no longer a call-count inference.
+ *
+ * The 2026-08-01 cache walk found exactly one direct caller of ogl_poly_scan:
+ * CA::OGL::SWContext::draw_elements at 0x3122cdbc. Immediately before the BL,
+ * it stores pc+0x3d8 = 0x3122d180 at incoming sp+8. That address is the exact
+ * start of sw_scanline. ogl_poly_scan later loads that seventh argument from
+ * its frame and invokes it at 0x311e2c04 with `blx ip`; it is the root callback,
+ * not an unrelated helper. sw_scanline in turn calls sw_sample_texture and
+ * sw_sample_color, and sw_sample_texture tail-calls the selected texture
+ * sampler through its SWTexture function pointer.
+ *
+ * Therefore a COMPLETE native ogl_poly_scan replacement would subsume the hot
+ * scanline and sampler subtree. Merely returning from this site would skip the
+ * drawing and is not a replacement. This TRACE records the ABI and bounded
+ * polygon shape while the guest still performs every draw. The first argument
+ * is a header followed by at most ten 0x38-byte vertices; that count limit and
+ * the x/y/w fields below are read directly from ogl_poly_scan's entry code.
+ */
+static void trace_poly_vert(const ios3_hle_mem_t *mem, uint32_t poly,
+                            unsigned index, const char *which) {
+    uint64_t wide = (uint64_t)poly + 4u + (uint64_t)index * 0x38u;
+    float x = 0.0f, y = 0.0f, w = 0.0f;
+
+    if (wide > (uint64_t)UINT32_MAX - 0x0cu ||
+        !read_f32(mem, (uint32_t)wide + 0x00u, &x) ||
+        !read_f32(mem, (uint32_t)wide + 0x04u, &y) ||
+        !read_f32(mem, (uint32_t)wide + 0x0cu, &w)) {
+        fprintf(stderr, "hle-trace   poly.%s=unreadable\n", which);
+        return;
+    }
+    fprintf(stderr, "hle-trace   poly.%s[%u] x=%.9g y=%.9g w=%.9g\n",
+            which, index, (double)x, (double)y, (double)w);
+}
+
+static bool hle_trace_ogl_poly_scan(arm_cpu_t *cpu,
+                                    const ios3_hle_mem_t *mem) {
+    bool first = g_trace_budget[4] < 12u;
+    uint16_t count = 0, flags = 0;
+
+    (void)trace_args("ogl_poly_scan", cpu, mem, 4, 4);
+    if (!first) return false;
+
+    if (cpu->r[0] > UINT32_MAX - 2u ||
+        !read_u16(mem, cpu->r[0] + 0u, &count) ||
+        !read_u16(mem, cpu->r[0] + 2u, &flags)) {
+        fprintf(stderr, "hle-trace   poly.header=unreadable\n");
+        return false;
+    }
+    fprintf(stderr, "hle-trace   poly.count=%u flags=%04x\n",
+            (unsigned)count, (unsigned)flags);
+    if (count > 0u && count <= 10u) {
+        trace_poly_vert(mem, cpu->r[0], 0u, "first");
+        if (count > 1u)
+            trace_poly_vert(mem, cpu->r[0], (unsigned)count - 1u, "last");
+    }
     return false;
 }
 
@@ -814,7 +877,8 @@ static ios3_hle_site_t g_sites[] = {
     { "ogl_poly_scan",      0x311e2100u, PROLOGUE_OGL_POLY_SCAN,
       (unsigned)(sizeof PROLOGUE_OGL_POLY_SCAN /
                  sizeof PROLOGUE_OGL_POLY_SCAN[0]),
-      NULL, IOS3_HLE_OBSERVE, false, false, 0, 0, 0, 0 },
+      hle_trace_ogl_poly_scan, IOS3_HLE_TRACE,
+      false, false, 0, 0, 0, 0 },
     { "mbxConnectionOpen",  0x30e1fc90u, PROLOGUE_MBX_CONNECTION_OPEN,
       (unsigned)(sizeof PROLOGUE_MBX_CONNECTION_OPEN /
                  sizeof PROLOGUE_MBX_CONNECTION_OPEN[0]),
@@ -837,6 +901,19 @@ static ios3_hle_site_t g_sites[] = {
 
 static uint32_t g_ttbr0;      /* the address space sites are restricted to */
 static unsigned g_armed_n;    /* hot-path gate: zero means do nothing      */
+
+/* TRACE may inspect but cannot write guest memory. Passing a private CPU copy
+ * below also prevents a diagnostic handler from changing registers. This makes
+ * the header's "guest behaviour is bit-for-bit" promise an enforced boundary,
+ * rather than a convention each new tracer has to remember. */
+static bool trace_write_denied(void *ctx, uint32_t va, const void *src,
+                               uint32_t len) {
+    (void)ctx;
+    (void)va;
+    (void)src;
+    (void)len;
+    return false;
+}
 
 unsigned ios3_hle_site_count(void) { return SITE_N; }
 
@@ -868,6 +945,7 @@ static bool identity_ok(const ios3_hle_mem_t *mem, ios3_hle_site_t *s) {
 unsigned ios3_hle_arm(const ios3_hle_mem_t *mem, uint32_t ttbr0) {
     g_ttbr0 = ttbr0;
     g_armed_n = 0u;
+    memset(g_trace_budget, 0, sizeof g_trace_budget);
     for (unsigned i = 0; i < SITE_N; i++) {
         ios3_hle_site_t *s = &g_sites[i];
         s->armed = identity_ok(mem, s);
@@ -911,7 +989,12 @@ bool ios3_hle_step(arm_cpu_t *cpu, const ios3_hle_mem_t *mem, uint32_t pc,
      * yet being trusted to do the work.
      */
     if (s->mode == IOS3_HLE_TRACE) {
-        if (s->handler) (void)s->handler(cpu, mem);
+        if (s->handler && mem) {
+            arm_cpu_t trace_cpu = *cpu;
+            ios3_hle_mem_t trace_mem = *mem;
+            trace_mem.write = trace_write_denied;
+            (void)s->handler(&trace_cpu, &trace_mem);
+        }
         return false;
     }
 
