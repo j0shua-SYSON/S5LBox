@@ -583,7 +583,7 @@ static void trace_ogl_vert(const ios3_hle_mem_t *mem, const char *what,
         return;
     }
     for (i = 0; i < 14u; i++) {
-        uint64_t p = (uint64_t)va + i * 4u;
+        uint64_t p = (uint64_t)va + (uint64_t)i * 4u;
         if (p > UINT32_MAX || !read_f32(mem, (uint32_t)p, &f[i])) {
             fprintf(stderr, "hle-trace   %s@%08x=unreadable@+%02x\n",
                     what, va, i * 4u);
@@ -636,7 +636,7 @@ static bool hle_trace_sw_scanline(arm_cpu_t *cpu,
 
     (void)trace_args("sw_scanline", cpu, mem, 5, 5);
     for (i = 0; i < 5u; i++) {
-        uint64_t va = (uint64_t)cpu->r[13] + i * 4u;
+        uint64_t va = (uint64_t)cpu->r[13] + (uint64_t)i * 4u;
         if (va <= UINT32_MAX)
             (void)read_u32(mem, (uint32_t)va, &stack[i]);
     }
