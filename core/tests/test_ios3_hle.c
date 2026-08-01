@@ -1251,7 +1251,7 @@ static void test_rect_root_chunks_measured_full_width_mode_two(void) {
     scan_poke32(SCAN_STATE + 0x08u, 1u);
     if (arm_only(site)) {
         CHECK(!ios3_hle_step(&cpu, &SCAN_MEM, site->va, 0x0bf1b000u),
-              "bilinear shortcut accepted a two-column descriptor");
+              "bilinear shortcut accepted a scaled two-column descriptor");
         CHECK(g_scan_write_calls == 0u && g_scan_writev_calls == 0u,
               "two-column refusal published scalar=%u vector=%u",
               g_scan_write_calls, g_scan_writev_calls);
@@ -1341,6 +1341,15 @@ static void test_rect_root_matches_fractional_bilinear_rows(void) {
     const uint32_t top = UINT32_C(0x10203040);
     const uint32_t bottom = UINT32_C(0x90a0b0c0);
     const uint32_t blended = UINT32_C(0x708090a0);
+    static const uint32_t wide_top[2] = {
+        UINT32_C(0x10203040), UINT32_C(0x20304050)
+    };
+    static const uint32_t wide_bottom[2] = {
+        UINT32_C(0x90a0b0c0), UINT32_C(0xa0b0c0d0)
+    };
+    static const uint32_t wide_blended[2] = {
+        UINT32_C(0x708090a0), UINT32_C(0x8090a0b0)
+    };
     ios3_hle_site_t *site = site_named("ogl_poly_scan");
     arm_cpu_t cpu;
 
@@ -1393,6 +1402,60 @@ static void test_rect_root_matches_fractional_bilinear_rows(void) {
                   scan_peek32(SCAN_OUT + i * 4u));
             CHECK(scan_peek32(SCAN_OUT + 1280u + i * 4u) == blended,
                   "fractional blended pixel %u is %08x", i,
+                  scan_peek32(SCAN_OUT + 1280u + i * 4u));
+        }
+    }
+
+    /* The remaining r323 rows use wider descriptors, but their root mapping
+     * starts u at a pixel centre and advances by exactly one texel. The native
+     * sampler still reads all four taps; horizontal weight zero leaves the
+     * exact packed vertical blend from the left pair. Alternating texels prove
+     * that the shortcut advances across the row rather than repeating one. */
+    reset_scan_fixture(site);
+    configure_full_width_mode_two_root(&cpu, SAMPLE_BILINEAR_BGRA8);
+    for (uint32_t i = 0; i < 4u; i++) {
+        uint32_t base = SCAN_POLY + 4u + i * 0x38u;
+        scan_pokef(base + 0x04u, i < 2u ? 0.25f : 2.25f);
+        scan_pokef(base + 0x24u, i < 2u ? 0.0f : 2.0f);
+    }
+    scan_poke32(SCAN_CTX + 0x10u, UINT32_C(0x0001ffff));
+    scan_poke32(SCAN_RENDER + 0x11cu, 2u);
+    scan_poke32(SCAN_STATE + 0x08u, 1u);
+    for (uint32_t i = 0; i < 320u; i++) {
+        scan_poke32(SCAN_TEXELS + i * 4u, wide_top[i & 1u]);
+        scan_poke32(SCAN_TEXELS + 1280u + i * 4u,
+                    wide_bottom[i & 1u]);
+        scan_poke32(SCAN_OUT + i * 4u, 0u);
+        scan_poke32(SCAN_OUT + 1280u + i * 4u, 0u);
+    }
+    if (arm_only(site)) {
+        CHECK(ios3_hle_step(&cpu, &SCAN_MEM, site->va, 0x0bf1b000u),
+              "fractional pixel-aligned bilinear root declined");
+        CHECK(g_scan_write_calls == 0u && g_scan_writev_calls == 1u &&
+              g_scan_writev_span_count == 2u &&
+              g_scan_writev_va[0] == SCAN_OUT &&
+              g_scan_writev_va[1] == SCAN_OUT + 1280u &&
+              g_scan_writev_len[0] == 1280u &&
+              g_scan_writev_len[1] == 1280u,
+              "wide fractional root published scalar=%u vector=%u/%u at "
+              "%08x/%u and %08x/%u",
+              g_scan_write_calls, g_scan_writev_calls,
+              g_scan_writev_span_count, g_scan_writev_va[0],
+              g_scan_writev_len[0], g_scan_writev_va[1],
+              g_scan_writev_len[1]);
+        CHECK(g_scan_texel_read_calls == 2560u &&
+              g_scan_texel_read_bytes == 10240u &&
+              g_scan_texel_max_read_len == 4u,
+              "wide fractional root used %u reads totalling %u, max %u",
+              g_scan_texel_read_calls, g_scan_texel_read_bytes,
+              g_scan_texel_max_read_len);
+        for (uint32_t i = 0; i < 320u; i++) {
+            CHECK(scan_peek32(SCAN_OUT + i * 4u) == wide_top[i & 1u],
+                  "wide fractional top pixel %u is %08x", i,
+                  scan_peek32(SCAN_OUT + i * 4u));
+            CHECK(scan_peek32(SCAN_OUT + 1280u + i * 4u) ==
+                      wide_blended[i & 1u],
+                  "wide fractional blended pixel %u is %08x", i,
                   scan_peek32(SCAN_OUT + 1280u + i * 4u));
         }
     }

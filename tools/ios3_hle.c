@@ -693,17 +693,22 @@ static bool hle_sample_nearest_32_pixels(
 /*
  * The live 320-to-1 polygon uses QuartzCore's bilinear BGRA sampler, not the
  * nearby nearest sampler. Its descriptor has one 16.16 texel column
- * (max_x == 0x0000ffff). After the sampler's half-pixel subtraction and
- * clamping, both horizontal taps therefore address column zero for every u.
- * Horizontal interpolation is therefore an identity, but a vertically
- * translated rectangle can still blend two rows. 0x3122bc08..0x3122bcb4 does
- * that blend in two packed byte lanes with wrapping 32-bit multiply/adds and
- * logical shifts; the helper below preserves those operations exactly.
+ * (max_x == 0x0000ffff), so both horizontal taps clamp to column zero.
+ * r323 also retained wider descriptors whose rectangle mapping advances by
+ * exactly one texel and starts at a pixel centre. After the sampler subtracts
+ * half a pixel, their horizontal interpolation weight is exactly zero.
  *
- * Keep this shortcut root-only. We still read both vertical taps before
- * filling scratch, preserving the native routine's fault boundary; any source
- * overlap with the destination declines because the native loop interleaves
- * reads and writes while the transactional root does not.
+ * A vertically translated rectangle can still blend two rows.
+ * 0x3122bc08..0x3122bcb4 does that blend in two packed byte lanes with
+ * wrapping 32-bit multiply/adds and logical shifts; the helper below preserves
+ * those operations exactly. Wider rows also perform all four native loads in
+ * top-left, bottom-left, top-right, bottom-right order even though the right
+ * pair has zero weight.
+ *
+ * Keep this shortcut root-only. The one-column case reads both distinct
+ * vertical addresses once; a wider row reads every native tap. Any source
+ * overlap with the current destination chunk declines because the native loop
+ * interleaves reads and writes while the transactional root does not.
  */
 static uint32_t hle_bilinear_bgra8_vertical(uint32_t top, uint32_t bottom,
                                             uint32_t weight) {
@@ -720,7 +725,7 @@ static uint32_t hle_bilinear_bgra8_vertical(uint32_t top, uint32_t bottom,
     return (even & lanes) | ((odd & lanes) << 8);
 }
 
-static bool hle_sample_bilinear_bgra8_one_column_pixels(
+static bool hle_sample_bilinear_bgra8_root_pixels(
         const ios3_hle_mem_t *mem, uint32_t tex, uint32_t unit,
         uint32_t start, uint32_t delta, uint32_t count, uint32_t out,
         uint32_t pixels[SW_SPAN_MAX]) {
@@ -746,7 +751,7 @@ static bool hle_sample_bilinear_bgra8_one_column_pixels(
         !read_u32_at(mem, tex, 0x04u, &pitch) ||
         !read_u32_at(mem, tex, 0x08u, &max_x) ||
         !read_u32_at(mem, tex, 0x0cu, &max_y) ||
-        max_x != UINT32_C(0x0000ffff) || max_y > INT32_MAX)
+        max_x > INT32_MAX || max_y > INT32_MAX)
         return false;
 
     uv_off = 0x20u + (uint64_t)unit * 8u;
@@ -788,18 +793,70 @@ static bool hle_sample_bilinear_bgra8_one_column_pixels(
     top_address = (uint64_t)base + (uint64_t)pitch * y0;
     bottom_address = (uint64_t)base + (uint64_t)pitch * y1;
     out_end = (uint64_t)out + (uint64_t)count * 4u;
-    if (top_address + 4u > UINT64_C(0x100000000) ||
-        bottom_address + 4u > UINT64_C(0x100000000) ||
-        (top_address < out_end && (uint64_t)out < top_address + 4u) ||
-        (bottom_address < out_end &&
-         (uint64_t)out < bottom_address + 4u) ||
-        !mem->read(mem->ctx, (uint32_t)top_address, &top, 4u) ||
-        !mem->read(mem->ctx, (uint32_t)bottom_address, &bottom, 4u))
+
+    if (max_x == UINT32_C(0x0000ffff)) {
+        if (top_address + 4u > UINT64_C(0x100000000) ||
+            bottom_address + 4u > UINT64_C(0x100000000) ||
+            (top_address < out_end &&
+             (uint64_t)out < top_address + 4u) ||
+            (bottom_address < out_end &&
+             (uint64_t)out < bottom_address + 4u) ||
+            !mem->read(mem->ctx, (uint32_t)top_address, &top, 4u) ||
+            !mem->read(mem->ctx, (uint32_t)bottom_address, &bottom, 4u))
+            return false;
+
+        if (y0 != y1 && y_weight != 0u)
+            top = hle_bilinear_bgra8_vertical(top, bottom, y_weight);
+        for (uint32_t k = 0; k < count; k++) pixels[k] = top;
+        return true;
+    }
+
+    /* r323's wider rows are identity-mapped. Keep coordinates far enough
+     * below INT32_MAX that the native raw+0x10000 neighbour cannot wrap. */
+    if (max_x < UINT32_C(0x00010000) || du != 65536 ||
+        last_u > (int64_t)INT32_MAX - 32768)
         return false;
 
-    if (y0 != y1 && y_weight != 0u)
-        top = hle_bilinear_bgra8_vertical(top, bottom, y_weight);
-    for (uint32_t k = 0; k < count; k++) pixels[k] = top;
+    for (uint32_t k = 0; k < count; k++) {
+        int64_t current_u = (int64_t)u + (int64_t)k * 65536;
+        int64_t raw_x = current_u - INT64_C(32768);
+        uint32_t x0_fixed, x1_fixed, x_weight;
+        uint64_t address[4];
+        uint32_t tap[4] = {0};
+
+        x0_fixed = raw_x < 0 ? 0u :
+                   (uint64_t)raw_x > max_x ? max_x : (uint32_t)raw_x;
+        raw_x += INT64_C(65536);
+        x1_fixed = raw_x < 0 ? 0u :
+                   (uint64_t)raw_x > max_x ? max_x : (uint32_t)raw_x;
+        x_weight = (x0_fixed & UINT32_C(0xffff)) >> 8;
+
+        /* Only the measured zero-weight horizontal interpolation is proved.
+         * Equal fixed coordinates are also exact because both tap pairs are
+         * byte-identical after clamping. */
+        if (x0_fixed != x1_fixed && x_weight != 0u) return false;
+
+        address[0] = top_address + (uint64_t)(x0_fixed >> 16) * 4u;
+        address[1] = bottom_address + (uint64_t)(x0_fixed >> 16) * 4u;
+        address[2] = top_address + (uint64_t)(x1_fixed >> 16) * 4u;
+        address[3] = bottom_address + (uint64_t)(x1_fixed >> 16) * 4u;
+        for (uint32_t i = 0; i < 4u; i++) {
+            if (address[i] + 4u > UINT64_C(0x100000000) ||
+                (address[i] < out_end &&
+                 (uint64_t)out < address[i] + 4u))
+                return false;
+        }
+        if (!mem->read(mem->ctx, (uint32_t)address[0], &tap[0], 4u) ||
+            !mem->read(mem->ctx, (uint32_t)address[1], &tap[1], 4u) ||
+            !mem->read(mem->ctx, (uint32_t)address[2], &tap[2], 4u) ||
+            !mem->read(mem->ctx, (uint32_t)address[3], &tap[3], 4u))
+            return false;
+
+        top = tap[0];
+        if (y0 != y1 && y_weight != 0u)
+            top = hle_bilinear_bgra8_vertical(top, tap[1], y_weight);
+        pixels[k] = top;
+    }
     return true;
 }
 
@@ -1073,7 +1130,7 @@ static bool hle_sw_scanline_known_paths(arm_cpu_t *cpu,
         }
 
         if (min_sampler == SW_SAMPLE_BILINEAR_BGRA8)
-            sampled = hle_sample_bilinear_bgra8_one_column_pixels(
+            sampled = hle_sample_bilinear_bgra8_root_pixels(
                 mem, ctx + 0x04u, 0u, start, delta, count, out, pixels);
         else
             sampled = hle_sample_nearest_32_pixels(
