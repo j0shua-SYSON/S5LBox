@@ -1492,9 +1492,10 @@ baseline, all 26 touch reports were consumed, and storage remained clean.
 The performance result is negative. r292 took 270.864 host seconds, versus
 about 269.1 seconds for r288: approximately **0.7% slower**, which is noise-level
 but certainly not a speed victory. Worse for reproducibility, the r290--r292
-executable also contained a separate, still-uncommitted 1 KiB HLE MMU batching
-experiment in `bootkernel.c`; the time cannot be attributed to this root commit
-alone. Even with that batching present, no wall-time gain appeared. A fixed
+executable also contained a separate 1 KiB HLE MMU batching experiment in
+`bootkernel.c` that was uncommitted during those runs and later landed as
+`aa67a45`; the time cannot be attributed to this root commit alone. Even with
+that batching present, no wall-time gain appeared. A fixed
 retired-instruction run is not displayed FPS, and replacement changes how much
 guest work fits inside the cap, so this does not prove zero frame-rate benefit
 either. It proves only that **30 fps has not been demonstrated**.
@@ -1505,3 +1506,76 @@ clip origins, and a full-width `0x000b` solid rectangle whose child state still
 declines. Each needs an exact reason and its own live oracle; broadening the
 guard from geometry alone would repeat the r282 mistake. Final acceptance still
 requires a cold armed/disarmed pair plus an actual frame-cadence measurement.
+
+### r293--r297: four full-screen solid roots are exact, still not 30 fps
+
+The first refusal trace above was not specific enough: it showed geometry but
+not which scanline guard rejected it. A read-only diagnostic now names the root
+stage and, for child refusal, records the render/context state of the failed
+row. r293b identified two distinct cases instead of treating all rectangles as
+interchangeable:
+
+* The repeated 161x30 textured fade uses state `0x12`, mode 2, nearest BGRA,
+  and a changing non-sentinel value at `ctx+0x64`. That is an unimplemented
+  modulation/combine path. It remains declined; mode 1 selector-2 source-over
+  is not evidence for mode 2.
+* The 320x460 `0x000b` solid root uses state `0x12`, source `0xfd000000`, no
+  auxiliary surface, and the already decoded selector-2 blend. Its first row
+  was rejected only because the guest's internal temporary is chunked at 256
+  while the callback receives 320 pixels. The native arrays already cover 320,
+  and each solid output pixel is independent.
+
+The solid candidate therefore changes only that branch's bound from 256 to the
+measured 320-pixel display width. A 320-pixel fixture pins every result to
+`0xff020202` over `0xdeadbeef`; 321 still refuses. The focused suite now passes
+5,062 checks.
+
+r294 used the explicitly development-only early-drag schedule to reach the
+branch sooner and found zero verifier failures. r295 then repeated the original
+4.0 B drag to the same 4.21 B stop as pre-change r293b. This made the delta
+unambiguous:
+
+    pre-change r293b  root 76/83 exact; scanline 3,730/4,514 exact
+    candidate r295    root 77/83 exact; scanline 4,190/4,514 exact
+
+Exactly one additional root and exactly 460 additional rows prepared and
+passed, with no mismatch or unreadable span. r296 paid for the full accepted
+3.9--4.4 B oracle rather than extrapolating from that one call:
+
+    nearest BGRX leaf        4,830 attempted / 4,830 exact passes
+    nearest BGRA leaf        4,818 attempted / 4,816 exact passes
+    sw_scanline             13,333 attempted / 9,019 exact passes
+    ogl_poly_scan              167 attempted /    96 exact passes
+    total prepared          18,761 / 65,536; 0 failures
+
+Relative to r291, this is exactly four more roots and 1,840 more exact rows.
+The drag was accepted/read 26/26, external media again reported zero failures
+and 2/2 raw completions, and the framebuffer remained the accepted
+`E0CE0EB1C117527ECDFF2C2C4A4549FCF48AB0F9E151AB7CBE13965849F7CEC8`.
+
+r297 enabled replacement. Because native roots let more guest work fit inside
+the same retired-instruction cap, its counts are not a one-for-one replay of
+r292, but the later-window coverage moved in the intended direction:
+
+    ogl_poly_scan              213 hits /  106 handled /  107 declined
+    sw_scanline              7,447 hits /  483 handled / 6,964 declined
+    nearest BGRX leaf        6,440 hits / 6,440 handled
+    nearest BGRA leaf        3,850 hits / 3,848 handled / 2 declined
+
+The screen hash, 26/26 touch consumption, and storage result were unchanged.
+The stopwatch result was not: 271.237 seconds, versus 270.864 for r292 and
+about 269.1 for r288. That is again effectively flat and **not a 30 fps result**.
+The root is doing materially more correct work, but a fixed instruction cap is
+not frame cadence and the current replacement overhead/remaining mode-2 work
+still dominates any wall-time saving.
+
+A new late diagnostic checkpoint was considered to shorten these iterations.
+The host correctly refused `--restore` plus `--snapshot-at` with external media;
+composing those states is not implemented safely and requires a cold boot. The
+clean 3.9 B checkpoint was retained untouched. Paying a new 45-minute cold boot
+solely for this branch diagnosis was unnecessary because the restored oracle
+is already validated; final acceptance remains cold.
+
+The highest-value next case is now the measured mode-2 textured modulation,
+not the ABI/normalized-UV declines. It must be decoded from the guest's actual
+selector and proved with the same oracle before it may replace anything.

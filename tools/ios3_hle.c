@@ -739,7 +739,11 @@ static bool hle_sw_scanline_known_paths(arm_cpu_t *cpu,
             if (count > SW_SPAN_MAX) return false;
             for (uint32_t i = 0; i < count; i++) pixels[i] = sentinel;
         } else if (state_flags == 0x12u) {
-            if (aux != 0u || count > SW_SCANLINE_CHUNK_MAX ||
+            /* Apple's temporary is chunked at 256, but this solid selector is
+             * pixel-independent and the native arrays cover the measured
+             * 320-pixel display width. The root oracle still proves the whole
+             * returned span against Apple's two chunks before acceptance. */
+            if (aux != 0u || count > SW_SPAN_MAX ||
                 (count && !mem->read(mem->ctx, out, dst_pixels, count * 4u)))
                 return false;
             for (uint32_t i = 0; i < count; i++)
@@ -1126,14 +1130,59 @@ static bool ogl_rect_render_row(const ios3_hle_mem_t *mem, uint32_t ctx,
     return true;
 }
 
+static void ogl_rect_trace_row_decline(const ios3_hle_mem_t *mem,
+                                        uint32_t ctx, uint32_t mask,
+                                        uint32_t x, uint32_t y,
+                                        uint32_t count, uint32_t row,
+                                        float u, float v) {
+    uint32_t render = 0, state = 0, units = 0, sentinel = 0;
+    uint32_t min_sampler = 0, mag_sampler = 0;
+    uint32_t out = 0, aux = 0, pitch = 0, bpp = 0;
+    uint32_t x_origin = 0, width = 0, y_origin = 0, height = 0;
+    uint8_t state_flags = 0, state_mode = 0;
+    bool readable;
+
+    if (g_trace_budget[4] >= 12u) return;
+    readable = read_u32_at(mem, ctx, 0x00u, &render) &&
+               read_u32_at(mem, ctx, 0x14u, &min_sampler) &&
+               read_u32_at(mem, ctx, 0x18u, &mag_sampler) &&
+               read_u32_at(mem, ctx, 0x64u, &sentinel) &&
+               read_u32_at(mem, ctx, 0x68u, &units) &&
+               read_u32_at(mem, render, 0x04u, &state) &&
+               read_u32_at(mem, render, 0xfcu, &out) &&
+               read_u32_at(mem, render, 0x100u, &aux) &&
+               read_u32_at(mem, render, 0x104u, &pitch) &&
+               read_u32_at(mem, render, 0x10cu, &bpp) &&
+               read_u32_at(mem, render, 0x110u, &x_origin) &&
+               read_u32_at(mem, render, 0x114u, &width) &&
+               read_u32_at(mem, render, 0x118u, &y_origin) &&
+               read_u32_at(mem, render, 0x11cu, &height) &&
+               read_u8_at(mem, state, 0x08u, &state_mode) &&
+               read_u8_at(mem, state, 0x3cu, &state_flags);
+    fprintf(stderr,
+            "hle-trace   root.row[%u] xy/count=%u/%u/%u mask=%04x "
+            "uv=(%.9g,%.9g) readable=%u ctx=%08x render=%08x state=%08x "
+            "units=%u flags=%02x mode=%u sentinel=%08x "
+            "sampler=%08x/%08x out=%08x aux=%08x pitch=%u bpp=%u "
+            "bounds=%u,%u+%u,%u\n",
+            row, x, y, count, mask, (double)u, (double)v,
+            readable ? 1u : 0u, ctx, render, state, units,
+            (unsigned)state_flags, (unsigned)state_mode, sentinel,
+            min_sampler, mag_sampler, out, aux, pitch, bpp,
+            x_origin, y_origin, width, height);
+}
+
 static bool hle_ogl_poly_scan_known_rect(arm_cpu_t *cpu,
                                          const ios3_hle_mem_t *mem) {
     ogl_rect_vert_t vertex[4];
     int32_t x[4], y[4], u[4], v[4];
     uint32_t sp, xmax = 0, ymax = 0, callback = 0, ctx = 0;
     uint32_t width, height, mask;
+    uint32_t decline_detail = UINT32_MAX;
     uint16_t count = 0, flags = 0;
     bool textured;
+    bool trace_row = false;
+    const char *decline_reason = "abi";
 
     if (!cpu || !mem || !mem->read || !mem->writev) return false;
     sp = cpu->r[13];
@@ -1152,6 +1201,7 @@ static bool hle_ogl_poly_scan_known_rect(arm_cpu_t *cpu,
         goto decline;
 
     textured = flags == 0x030bu;
+    decline_reason = "vertex";
     for (uint32_t i = 0; i < 4u; i++) {
         if (!ogl_rect_read_vert(mem, cpu->r[0], i, textured, &vertex[i]) ||
             vertex[i].w != 1.0f ||
@@ -1160,15 +1210,20 @@ static bool hle_ogl_poly_scan_known_rect(arm_cpu_t *cpu,
             (textured &&
              (!ogl_rect_exact_i32(vertex[i].u, &u[i]) ||
               !ogl_rect_exact_i32(vertex[i].v, &v[i]))))
+        {
+            decline_detail = i;
             goto decline;
+        }
     }
 
+    decline_reason = "geometry";
     if (x[0] != x[3] || x[1] != x[2] ||
         y[0] != y[1] || y[2] != y[3] ||
         x[0] < 0 || y[0] < 0 || x[1] <= x[0] || y[2] <= y[0] ||
         x[1] > (int32_t)OGL_RECT_MAX_WIDTH ||
         y[2] > (int32_t)OGL_RECT_MAX_HEIGHT)
         goto decline;
+    decline_reason = "texture-map";
     if (textured &&
         (u[0] != u[3] || u[1] != u[2] ||
          v[0] != v[1] || v[2] != v[3] ||
@@ -1176,6 +1231,7 @@ static bool hle_ogl_poly_scan_known_rect(arm_cpu_t *cpu,
          v[2] - v[0] != y[2] - y[0]))
         goto decline;
 
+    decline_reason = "dimensions";
     width = (uint32_t)(x[1] - x[0]);
     height = (uint32_t)(y[2] - y[0]);
     if (!width || width > OGL_RECT_MAX_WIDTH || !height ||
@@ -1190,24 +1246,46 @@ static bool hle_ogl_poly_scan_known_rect(arm_cpu_t *cpu,
         if (!ogl_rect_render_row(mem, ctx, mask, (uint32_t)x[0],
                                   (uint32_t)y[0] + row, width, row, row,
                                   row_u, row_v, &out_va, &out_len) ||
-            out_len != width * 4u)
+            out_len != width * 4u) {
+            decline_reason = "scanline";
+            decline_detail = row;
+            trace_row = true;
             goto decline;
+        }
         for (uint32_t prior = 0; prior < row; prior++) {
             if (ogl_rect_ranges_overlap(out_va, out_len,
                                         g_ogl_rect_spans[prior].va,
-                                        g_ogl_rect_spans[prior].len))
+                                        g_ogl_rect_spans[prior].len)) {
+                decline_reason = "row-overlap";
+                decline_detail = row;
                 goto decline;
+            }
         }
         g_ogl_rect_spans[row].va = out_va;
         g_ogl_rect_spans[row].src = g_ogl_rect_pixels[row];
         g_ogl_rect_spans[row].len = out_len;
     }
 
+    decline_reason = "publish";
+    decline_detail = height;
     if (!mem->writev(mem->ctx, g_ogl_rect_spans, height)) goto decline;
     cpu->r[15] = cpu->r[14];
     return true;
 
 decline:
+    if (g_trace_budget[4] < 12u) {
+        fprintf(stderr, "hle-trace   root.decline=%s detail=%u\n",
+                decline_reason, decline_detail);
+        if (trace_row && decline_detail < OGL_RECT_MAX_HEIGHT) {
+            float row_u = textured ? (float)u[0] + 0.5f : 0.0f;
+            float row_v = textured ? (float)v[0] + 0.5f +
+                                     (float)decline_detail : 0.0f;
+            ogl_rect_trace_row_decline(
+                mem, ctx, mask, (uint32_t)x[0],
+                (uint32_t)y[0] + decline_detail, width, decline_detail,
+                row_u, row_v);
+        }
+    }
     (void)hle_trace_ogl_poly_scan(cpu, mem);
     return false;
 }

@@ -1025,6 +1025,52 @@ static void test_blended_solid_scanline_matches_selector_two(void) {
     ios3_hle_disarm();
 }
 
+static void test_blended_solid_scanline_covers_the_measured_display_width(void) {
+    ios3_hle_site_t *site = site_named("sw_scanline");
+    arm_cpu_t cpu;
+
+    reset_scan_fixture(site);
+    configure_solid_scanline(&cpu, UINT32_C(0xfd000000));
+    cpu.r[0] = 0u;
+    cpu.r[1] = 0u;
+    cpu.r[2] = 320u;
+    scan_poke32(SCAN_STATE + 0x3cu, 0x12u);
+    scan_poke32(SCAN_RENDER + 0x104u, 1280u);
+    scan_poke32(SCAN_RENDER + 0x114u, 320u);
+    scan_poke32(SCAN_RENDER + 0x11cu, 1u);
+    for (uint32_t i = 0; i < 320u; i++)
+        scan_poke32(SCAN_OUT + i * 4u, UINT32_C(0xdeadbeef));
+    if (arm_only(site)) {
+        CHECK(ios3_hle_step(&cpu, &SCAN_MEM, site->va, 0x0bf1b000u),
+              "blended full-width solid scanline declined");
+        CHECK(g_scan_write_calls == 1u && g_scan_write_va == SCAN_OUT &&
+              g_scan_write_len == 1280u,
+              "full-width solid published as %u write(s) at %08x len %u",
+              g_scan_write_calls, g_scan_write_va, g_scan_write_len);
+        for (uint32_t i = 0; i < 320u; i++)
+            CHECK(scan_peek32(SCAN_OUT + i * 4u) == UINT32_C(0xff020202),
+                  "full-width solid pixel %u is %08x", i,
+                  scan_peek32(SCAN_OUT + i * 4u));
+    }
+
+    reset_scan_fixture(site);
+    configure_solid_scanline(&cpu, UINT32_C(0xfd000000));
+    cpu.r[0] = 0u;
+    cpu.r[1] = 0u;
+    cpu.r[2] = 321u;
+    scan_poke32(SCAN_STATE + 0x3cu, 0x12u);
+    scan_poke32(SCAN_RENDER + 0x104u, 1284u);
+    scan_poke32(SCAN_RENDER + 0x114u, 321u);
+    if (arm_only(site)) {
+        CHECK(!ios3_hle_step(&cpu, &SCAN_MEM, site->va, 0x0bf1b000u),
+              "blended solid accepted 321 pixels past its host bound");
+        CHECK(g_scan_write_calls == 0u,
+              "oversize blended solid published %u write(s)",
+              g_scan_write_calls);
+    }
+    ios3_hle_disarm();
+}
+
 static void test_solid_scanline_unknown_shapes_and_faults_decline(void) {
     ios3_hle_site_t *site = site_named("sw_scanline");
     arm_cpu_t cpu;
@@ -1414,6 +1460,7 @@ int main(void) {
     test_rect_root_refuses_unproved_or_nonatomic_shapes();
     test_rect_root_oracle_captures_two_rows_without_publication();
     test_blended_solid_scanline_matches_selector_two();
+    test_blended_solid_scanline_covers_the_measured_display_width();
     test_solid_scanline_unknown_shapes_and_faults_decline();
     test_live_bgra_blend_matches_arm_packed_selector_two();
     test_live_bgra_blend_faults_and_unproved_shapes_decline();
