@@ -239,6 +239,41 @@ static const uint32_t PROLOGUE_SW_SAMPLE_COLOR[] = {
     0xedd17a04u,   /* vldr  s15, [r1, #0x10]       */
 };
 
+/*
+ * THE REST OF THE SAMPLER FAMILY, AS OBSERVE FIRST -- and sw_sample_color is
+ * why. It was transcribed on the strength of a PAGE profile (13.7% on
+ * 0x3122d000) and r261 then counted it ZERO times in a whole boot: the page's
+ * cost is entirely sw_scanline, which shares it. The transcription is correct
+ * and worth nothing, and with no calls the framebuffer diff never exercised it
+ * either, so it goes back to OBSERVE rather than shipping on no evidence.
+ *
+ * So these three get counted before anyone transcribes them. sw_sample_texture
+ * is included even though it is a DISPATCHER rather than a sampler -- it
+ * computes |du|+|dv| and picks a path -- because its count says how often the
+ * family is entered at all.
+ */
+static const uint32_t PROLOGUE_SW_SAMPLE_TEXTURE[] = {
+    0xe92d40f0u,   /* push {r4, r5, r6, r7, lr}    */
+    0xe28d700cu,   /* add  r7, sp, #0xc            */
+    0xe92d0d00u,   /* push {r8, sl, fp}            */
+    0xe24dd004u,   /* sub  sp, sp, #4              */
+    0xe1a08003u,   /* mov  r8, r3                  */
+};
+static const uint32_t PROLOGUE_SW_SAMPLE_CIRCLE[] = {
+    0xe92d4080u,   /* push {r7, lr}                */
+    0xe28d7000u,   /* add  r7, sp, #0              */
+    0xe1a01181u,   /* lsl  r1, r1, #3              */
+    0xe0812003u,   /* add  r2, r1, r3              */
+    0xe59de008u,   /* ldr  lr, [sp, #8]            */
+};
+static const uint32_t PROLOGUE_SW_SAMPLE_SQUARE[] = {
+    0xe92d4080u,   /* push {r7, lr}                */
+    0xe28d7000u,   /* add  r7, sp, #0              */
+    0xed2d8b02u,   /* vpush {d8}                   */
+    0xe1a01181u,   /* lsl  r1, r1, #3              */
+    0xe0812003u,   /* add  r2, r1, r3              */
+};
+
 static const uint32_t PROLOGUE_MBX_CONNECTION_OPEN[] = {
     0xe92d40f0u,   /* push {r4, r5, r6, r7, lr}    */
     0xe28d700cu,   /* add  r7, sp, #0xc            */
@@ -680,7 +715,19 @@ static ios3_hle_site_t g_sites[] = {
     { "sw_sample_color",    0x3122d02cu, PROLOGUE_SW_SAMPLE_COLOR,
       (unsigned)(sizeof PROLOGUE_SW_SAMPLE_COLOR /
                  sizeof PROLOGUE_SW_SAMPLE_COLOR[0]),
-      hle_sw_sample_color, IOS3_HLE_REPLACE, false, false, 0, 0, 0, 0 },
+      hle_sw_sample_color, IOS3_HLE_OBSERVE, false, false, 0, 0, 0, 0 },
+    { "sw_sample_texture",  0x3122cefcu, PROLOGUE_SW_SAMPLE_TEXTURE,
+      (unsigned)(sizeof PROLOGUE_SW_SAMPLE_TEXTURE /
+                 sizeof PROLOGUE_SW_SAMPLE_TEXTURE[0]),
+      NULL, IOS3_HLE_OBSERVE, false, false, 0, 0, 0, 0 },
+    { "sw_sample_circle",   0x3122e2f0u, PROLOGUE_SW_SAMPLE_CIRCLE,
+      (unsigned)(sizeof PROLOGUE_SW_SAMPLE_CIRCLE /
+                 sizeof PROLOGUE_SW_SAMPLE_CIRCLE[0]),
+      NULL, IOS3_HLE_OBSERVE, false, false, 0, 0, 0, 0 },
+    { "sw_sample_square",   0x3122e434u, PROLOGUE_SW_SAMPLE_SQUARE,
+      (unsigned)(sizeof PROLOGUE_SW_SAMPLE_SQUARE /
+                 sizeof PROLOGUE_SW_SAMPLE_SQUARE[0]),
+      NULL, IOS3_HLE_OBSERVE, false, false, 0, 0, 0, 0 },
     { "sw_scanline",        0x3122d180u, PROLOGUE_SW_SCANLINE,
       (unsigned)(sizeof PROLOGUE_SW_SCANLINE /
                  sizeof PROLOGUE_SW_SCANLINE[0]),
