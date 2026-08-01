@@ -1076,3 +1076,29 @@ question is which of those two paths the driver is failing to take. That is a
 question about what the device has not done yet, and it is the same shape as the
 reset bug: read the code, model what it waited for, do not choose a value
 because it would make the driver proceed.
+
+### The state chain, and where static reading stops paying
+
+Traced from the ISR's gate downward:
+
+    [0x260] != 0  -->  [0x264] = 1  -->  [0x264] = 2  -->  ISR services
+                                                            -->  2DIdle = 1
+
+  * AppleMBX+0xd3cc gates on `[0x260] != 0`, then `mov r6,#1` / `str r6,[r4,#0x264]`
+    -- the 0 -> 1 transition.
+  * AppleMBX+0xd16c requires `[0x264] == 1`, calls vtable+0x354, then stores 2.
+    AppleMBX+0xff58 is the same step written as an increment.
+  * The ISR at +0x804d4 requires 2 and otherwise returns without acknowledging,
+    which is why CompletedIntStatus stays 0x400.
+
+[0x260] is written 0x3c on one path (AppleMBX+0xe534) and
+`min(vtable[0x64](), const)` on another (+0x80026c), so it is probably already
+non-zero and the gate that fails is further along. That is where reading stops
+paying: four levels of static descent have each cost a disassembly round and the
+last one did not narrow anything.
+
+THE NEXT STEP IS A MEASUREMENT, not a fifth level. --call-probe on the recovery
+site captures registers, and r4 there is the AppleMBXDevice, so the actual values
+of [0x260] and [0x264] at the moment the watchdog fires answer in one run which
+transition never happened. That is the same move that ended the reset bug: stop
+arguing about which register, count what the driver actually did.
