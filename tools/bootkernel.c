@@ -25446,12 +25446,16 @@ int main(int argc, char **argv) {
          * The freshness rule is unchanged: a restore still writes a new,
          * uniquely named work image and still refuses to overwrite anything.
          */
-        if (restore_path && nsnaps) {
-            fprintf(stderr,
-                    "--external-md: combining --restore with --snapshot-at is "
-                    "not supported yet; take checkpoints from a cold boot\n");
-            return 1;
-        }
+        /*
+         * A restored run may checkpoint again. The restore path first creates
+         * a fresh work image from <restore>.mdimage, then opens that image
+         * through the same block adapter a cold run uses. At the trigger,
+         * external_md_sidecar_save() flushes and copies that LIVE adapter and
+         * records the already-restored bridge counters/guard tail. Therefore
+         * the new three-file checkpoint describes the current machine and
+         * disk, not the older checkpoint it was derived from. Pending native
+         * uiomove continuations still fail closed in the saver.
+         */
         if (no_kpatch || !patch_memnode || rd_low || saw_rd_address_form ||
             !fstab_fixup || want_kextmap) {
             fprintf(stderr,

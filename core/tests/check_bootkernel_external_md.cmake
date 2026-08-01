@@ -35,11 +35,14 @@ expect_rejected(legacy_ramdisk "cannot be combined with -r"
 # <snap>.mdstate beside a checkpoint and provisions a restore's work image from
 # them, so --snapshot-at and --restore are each accepted on their own and this
 # invocation now falls through to the ordinary missing-kernel open failure.
-# What is still refused is taking checkpoints during a restore.
+# A restored run may checkpoint again: its fresh work image is the live source
+# for the new .mdimage, and its restored bridge state is carried forward into
+# the new .mdstate. With no real inputs both forms therefore reach the ordinary
+# missing-kernel failure.
 expect_rejected(snapshot_alone_is_allowed "open"
     absent-kernel -d absent-tree --external-md absent-source new-work
     --snapshot-at 1 absent-snapshot)
-expect_rejected(restore_plus_snapshot "not supported yet"
+expect_rejected(restore_plus_snapshot_is_allowed "open"
     absent-kernel -d absent-tree --external-md absent-source new-work
     --restore absent-snapshot --snapshot-at 1 absent-snapshot2)
 expect_rejected(wrong_ram "effective -R 128"

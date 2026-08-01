@@ -197,6 +197,16 @@ Three things about it will bite if you do not know them:
 - **A restored run needs the same `-d` / `-r` / `-R` / `-p` / `-V` as the run that
   saved it.** `snapshot_load` checks geometry first and refuses with
   `SNAP_ERR_GEOMETRY` before a single register moves.
+- **External-media checkpoints are chainable.** With `--external-md`, every core
+  snapshot has a same-name `.mdimage` and `.mdstate`; a restore creates a fresh
+  work image from those sidecars, and that restored run may take another
+  checkpoint. The saver flushes and copies the *live* work image and refuses a
+  pending native `uiomove`, so chaining does not silently reuse stale media.
+  r327/r328 proved the real path at 6,800,001,000 instructions: the live image,
+  derived sidecar, and second-restore work image were all 466,825,216 bytes with
+  SHA-256 `a36b0a8d70f4de344ac888e7556b638e51d7956192901aaae999c1aeee095a77`;
+  both continuations stopped normally with zero bridge failures and zero pending
+  native I/O.
 - **The trigger point is absolute.** `--snapshot-at` compares against the
   machine's own retired-instruction counter, which is itself part of the
   snapshot — so a run that restored at 200 M still fires `--snapshot-at 300000000`
