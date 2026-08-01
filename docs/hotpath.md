@@ -1273,9 +1273,11 @@ The first implementation does not pretend to cover the 1,116-instruction
 Both samplers compute the complete source span before one guest-MMU write. The
 blended path also reads the complete destination before publishing anything.
 Unreadable operands, an alias that would change buffering semantics, a source
-or destination fault, a different mask/format/sampler/state, an auxiliary
-surface, and scanlines beyond the guest's 256-pixel chunk all decline. BGRX's
-one distinguishing instruction forces alpha to `0xff`; BGRA preserves it.
+or destination fault, a different mask/format/sampler/state, and an auxiliary
+surface all decline. Textured and blended spans beyond the guest's 256-pixel
+temporary chunk also decline; the direct solid fill has no temporary and may
+cover the measured 320-pixel display width. BGRX's one distinguishing
+instruction forces alpha to `0xff`; BGRA preserves it.
 
 r274 was the direct-only 3.9--3.95 B checkpoint smoke. Of 180 `sw_scanline`
 calls, it handled 60 and declined the 120 live BGRA-blended calls; those fell
@@ -1339,3 +1341,74 @@ armed/disarmed replacement pair has been run, and `--hle` remains an opt-in host
 experiment rather than an app default. The next performance lever is still the
 root or the dominant declined scanline shape, not optimistic wording around a
 10% checkpoint-time reduction.
+
+### r280--r288: the full oracle caught a wrong live-mask assumption
+
+The first full verifier replay exposed a diagnostic limit before it exposed a
+pixel bug. r276 had more than 22,000 replaceable nested scanline/sampler entries,
+while the verifier silently stopped preparing after 4,096. Commit `d63712e`
+raises that ceiling to 65,536. r280 then replayed the accepted 3.9--4.4 B window
+with Apple's routines still executing and reported:
+
+    nearest BGRX leaf        4,830 attempted / 4,830 exact passes
+    nearest BGRA leaf        4,818 attempted / 4,816 exact passes
+    sw_scanline             13,333 attempted / 3,546 exact passes
+    total prepared          13,192 / 65,536; 0 failures
+
+The drag was accepted and read 26/26, external media had zero failures, and the
+final framebuffer retained the cold-baseline SHA-256
+`E0CE0EB1C117527ECDFF2C2C4A4549FCF48AB0F9E151AB7CBE13965849F7CEC8`.
+That proved the previously shipped texture paths across the full window. It
+also showed that 9,787 scanline shapes still had no native candidate.
+
+The first zero-texture implementation was wrong despite passing its synthetic
+fixtures. Static decoding correctly identified the direct `_CGBlt_fillBytes`
+arm and the selector-2 solid blend, but the fixture inherited textured mask
+`0x0308`. r282 ran that code through the same full oracle and reproduced r280's
+coverage exactly: 3,546/13,333 scanlines prepared. In other words, the new code
+handled **zero measured solid calls**. Passing 1,950 local checks did not make
+that a live implementation.
+
+r285 added a bounded refusal probe rather than broadening the guard. The first
+live solid call arrived at instruction 4,201,269,152 with x=0, y=20, count=320,
+state `0x02`, colour `0xff000000`, and active mask **`0x0008`**. The next 15
+rows had the same shape. That is the missing fact: a solid polygon carries only
+w after x/y are removed; it does not carry unused u/v interpolants. The final
+handler accepts only this measured solid mask. It repeats `ctx+0x64` directly
+for state `0x02`, or applies the already decoded packed selector-2 blend for
+state `0x12`; other masks and states still fall through to Apple.
+
+r286 moved the identical 26-report drag to the 3.9 B restore boundary as a
+targeted development shortcut. All reports were accepted and read and the
+oracle had zero failures. This shortened branch discovery, but it is not the
+accepted baseline because the touch schedule differs. r287 therefore restored
+the original 4.0 B drag and ran to 4.4 B:
+
+    nearest BGRX leaf        4,830 attempted / 4,830 exact passes
+    nearest BGRA leaf        4,818 attempted / 4,816 exact passes
+    sw_scanline             13,333 attempted / 7,119 exact passes
+    total prepared          16,765 / 65,536; 0 failures
+
+The extra **3,573** scanline results were compared at the real Apple return.
+The verifier logged the first four full-width spans explicitly: each was 1,280
+bytes and matched exactly. The run stopped normally, touch was accepted and
+read 26/26, external media reported zero failures with 2/2 raw redirects and
+completions, CLCD was scanning/running, and the final framebuffer was still the
+baseline hash above. Coverage improved to 53.4%; 6,214 attempted scanlines
+(46.6%) still declined.
+
+r288 exercised replacement rather than shadow comparison. It stopped normally
+at 4,399,982,889 instructions with 8,179/16,870 scanlines handled, 26/26 touch
+reports consumed, zero external-media failures, and the same baseline hash.
+Its run-directory timestamps span about 269.1 seconds. That is slower than
+r276's 229.545 seconds and r273's 256.260 seconds, not a speed victory. The
+host workload was not controlled and native replacement changed how much guest
+work fit before the absolute instruction cap, so none of these times is FPS.
+
+The fixtures now pass 1,959 checks and the complete suite remains 54/54. The
+solid arms are pixel-proved and functionally stable, but this milestone still
+does **not** establish 30 fps: replacement coverage is 48.5% in r288, the root
+is still TRACE, and no cold armed/disarmed performance pair exists. The next
+lever remains a bounded `ogl_poly_scan` replacement that subsumes the callback
+tree; polishing the scanline percentage cannot satisfy the arithmetic by
+itself.

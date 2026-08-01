@@ -536,6 +536,95 @@ static void test_direct_scanline_preserves_bgra_and_forces_bgrx_alpha(void) {
     ios3_hle_disarm();
 }
 
+static void configure_solid_scanline(arm_cpu_t *cpu, uint32_t pixel) {
+    configure_direct_scanline(cpu, SAMPLE_BGRA8);
+    scan_poke32(SCAN_STACK + 0x0cu, 0x0008u);
+    scan_poke32(SCAN_CTX + 0x14u, 0u);
+    scan_poke32(SCAN_CTX + 0x18u, 0u);
+    scan_poke32(SCAN_CTX + 0x64u, pixel);
+    scan_poke32(SCAN_CTX + 0x68u, 0u);
+    scan_poke32(SCAN_STATE + 0x3cu, 0x02u);
+}
+
+static void test_direct_solid_scanline_repeats_the_context_pixel(void) {
+    static const uint32_t colors[2] = { 0xff000000u, 0xfd000000u };
+    ios3_hle_site_t *site = site_named("sw_scanline");
+
+    for (unsigned pass = 0; pass < 2u; pass++) {
+        arm_cpu_t cpu;
+        reset_scan_fixture(site);
+        configure_solid_scanline(&cpu, colors[pass]);
+        if (!arm_only(site)) continue;
+
+        CHECK(ios3_hle_step(&cpu, &SCAN_MEM, site->va, 0x0bf1b000u),
+              "solid scanline %u declined", pass);
+        CHECK(cpu.r[15] == cpu.r[14],
+              "solid scanline returned to %08x, not LR", cpu.r[15]);
+        CHECK(g_scan_write_calls == 1u &&
+              g_scan_write_va == SCAN_OUT + 20u && g_scan_write_len == 12u,
+              "solid span published as %u write(s) at %08x len %u",
+              g_scan_write_calls, g_scan_write_va, g_scan_write_len);
+        for (unsigned i = 0; i < 3u; i++)
+            CHECK(scan_peek32(SCAN_OUT + 20u + i * 4u) == colors[pass],
+                  "solid pass %u pixel %u is %08x", pass, i,
+                  scan_peek32(SCAN_OUT + 20u + i * 4u));
+        CHECK(scan_peek32(SCAN_OUT + 16u) == 0xdeadbeefu,
+              "solid pass %u overwrote the preceding pixel", pass);
+    }
+    ios3_hle_disarm();
+}
+
+static void test_blended_solid_scanline_matches_selector_two(void) {
+    ios3_hle_site_t *site = site_named("sw_scanline");
+    arm_cpu_t cpu;
+
+    reset_scan_fixture(site);
+    configure_solid_scanline(&cpu, 0xfd000000u);
+    scan_poke32(SCAN_STATE + 0x3cu, 0x12u);
+    if (arm_only(site)) {
+        CHECK(ios3_hle_step(&cpu, &SCAN_MEM, site->va, 0x0bf1b000u),
+              "blended solid scanline declined");
+        CHECK(cpu.r[15] == cpu.r[14],
+              "blended solid returned to %08x, not LR", cpu.r[15]);
+        CHECK(g_scan_write_calls == 1u &&
+              g_scan_write_va == SCAN_OUT + 20u && g_scan_write_len == 12u,
+              "blended solid span published as %u write(s) at %08x len %u",
+              g_scan_write_calls, g_scan_write_va, g_scan_write_len);
+        for (unsigned i = 0; i < 3u; i++)
+            CHECK(scan_peek32(SCAN_OUT + 20u + i * 4u) == 0xff020202u,
+                  "blended solid pixel %u is %08x", i,
+                  scan_peek32(SCAN_OUT + 20u + i * 4u));
+    }
+    ios3_hle_disarm();
+}
+
+static void test_solid_scanline_unknown_shapes_and_faults_decline(void) {
+    ios3_hle_site_t *site = site_named("sw_scanline");
+    arm_cpu_t cpu;
+
+    for (unsigned which = 0; which < 4u; which++) {
+        reset_scan_fixture(site);
+        configure_solid_scanline(&cpu, 0xff123456u);
+        switch (which) {
+        case 0: scan_poke32(SCAN_STATE + 0x3cu, 0x00u); break;
+        case 1: scan_poke32(SCAN_STACK + 0x0cu, 0x0308u); break;
+        case 2: scan_poke32(SCAN_RENDER + 0x10cu, 2u); break;
+        default: g_scan_fail_write = true; break;
+        }
+        if (!arm_only(site)) continue;
+        CHECK(!ios3_hle_step(&cpu, &SCAN_MEM, site->va, 0x0bf1b000u),
+              "unproved/faulting solid state %u was handled", which);
+        CHECK(g_scan_write_calls == (which == 3u ? 1u : 0u),
+              "solid state %u attempted %u writes", which,
+              g_scan_write_calls);
+        CHECK(scan_peek32(SCAN_OUT + 20u) == 0xdeadbeefu,
+              "solid state %u changed the destination", which);
+        CHECK(cpu.r[15] == site->va,
+              "solid state %u moved PC to %08x", which, cpu.r[15]);
+    }
+    ios3_hle_disarm();
+}
+
 static void configure_live_bgra_blend(arm_cpu_t *cpu) {
     configure_direct_scanline(cpu, SAMPLE_BGRA8);
     scan_poke32(SCAN_STATE + 0x08u, 1u);
@@ -830,6 +919,44 @@ static void test_live_oracle_captures_without_touching_the_guest(void) {
     ios3_hle_disarm();
 }
 
+static void test_live_oracle_captures_direct_and_blended_solids(void) {
+    static const uint32_t colors[2] = { 0xff123456u, 0xfd000000u };
+    static const uint32_t expected[2] = { 0xff123456u, 0xff020202u };
+    ios3_hle_site_t *site = site_named("sw_scanline");
+
+    for (unsigned pass = 0; pass < 2u; pass++) {
+        ios3_hle_oracle_t oracle;
+        arm_cpu_t cpu, before;
+
+        reset_scan_fixture(site);
+        configure_solid_scanline(&cpu, colors[pass]);
+        if (pass) scan_poke32(SCAN_STATE + 0x3cu, 0x12u);
+        before = cpu;
+        if (!arm_only(site)) continue;
+
+        CHECK(ios3_hle_oracle_prepare(&cpu, &SCAN_MEM, site->va,
+                                      0x0bf1b000u, &oracle),
+              "oracle declined solid pass %u", pass);
+        CHECK(oracle.out_va == SCAN_OUT + 20u && oracle.out_len == 12u,
+              "solid oracle pass %u captured %08x/%u", pass,
+              oracle.out_va, oracle.out_len);
+        for (unsigned i = 0; i < 3u; i++) {
+            uint32_t got = 0u;
+            memcpy(&got, oracle.expected + i * 4u, sizeof got);
+            CHECK(got == expected[pass],
+                  "solid oracle pass %u pixel %u is %08x", pass, i, got);
+        }
+        CHECK(memcmp(&cpu, &before, sizeof cpu) == 0,
+              "solid oracle pass %u changed the CPU", pass);
+        CHECK(g_scan_write_calls == 0u,
+              "solid oracle pass %u forwarded %u write(s)", pass,
+              g_scan_write_calls);
+        CHECK(scan_peek32(SCAN_OUT + 20u) == 0xdeadbeefu,
+              "solid oracle pass %u changed guest memory", pass);
+    }
+    ios3_hle_disarm();
+}
+
 int main(void) {
     printf("S5LBox iPhone OS 3 userspace HLE tests\n");
     test_a_site_without_a_prologue_refuses_to_arm();
@@ -841,12 +968,16 @@ int main(void) {
     test_trace_cannot_mutate_or_intercept_the_guest();
     test_declining_is_safe();
     test_direct_scanline_preserves_bgra_and_forces_bgrx_alpha();
+    test_direct_solid_scanline_repeats_the_context_pixel();
+    test_blended_solid_scanline_matches_selector_two();
+    test_solid_scanline_unknown_shapes_and_faults_decline();
     test_live_bgra_blend_matches_arm_packed_selector_two();
     test_live_bgra_blend_faults_and_unproved_shapes_decline();
     test_direct_scanline_faults_and_unknown_states_decline_cleanly();
     test_nearest_leaf_sites_match_the_decoded_32bit_formats();
     test_buffering_never_changes_alias_or_write_fault_semantics();
     test_live_oracle_captures_without_touching_the_guest();
+    test_live_oracle_captures_direct_and_blended_solids();
     printf("== ios3 hle: %u checks, %u failure(s) ==\n", checks, failures);
     return failures ? 1 : 0;
 }

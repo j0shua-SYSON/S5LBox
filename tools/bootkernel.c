@@ -3093,6 +3093,7 @@ typedef struct {
     uint64_t unreadable[HLE_VERIFY_SITE_MAX];
     uint64_t prepared_total;
     unsigned pass_logs;
+    unsigned full_scanline_pass_logs;
     unsigned failure_logs;
 } hle_verify_state_t;
 static hle_verify_state_t g_hle_verifier;
@@ -3358,7 +3359,11 @@ static void hle_verify_note_post_step(arm_cpu_t *cpu, uint64_t at) {
                     (unsigned long long)at);
     } else {
         g_hle_verifier.passed[index]++;
-        if (g_hle_verifier.pass_logs++ < 12u)
+        if (g_hle_verifier.pass_logs++ < 12u ||
+            (expected->site_name &&
+             strcmp(expected->site_name, "sw_scanline") == 0 &&
+             expected->out_len == IOS3_HLE_ORACLE_MAX_BYTES &&
+             g_hle_verifier.full_scanline_pass_logs++ < 4u))
             printf("hle-verify PASS %s span=%08x+%u begin=%llu return=%llu\n",
                    expected->site_name, expected->out_va, expected->out_len,
                    (unsigned long long)begin_at,

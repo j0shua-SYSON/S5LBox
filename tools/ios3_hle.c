@@ -636,7 +636,15 @@ static bool hle_sw_sample_nearest_bgrx8(arm_cpu_t *cpu,
  * r273 also proved one compositing arm: state byte 0x12, mode byte 1 and
  * nearest-BGRA8 enter blend selector 2 at 0x3122dcf4. That loop is the packed
  * premultiplied source-over transcription below. No other blend selector is
- * inferred. Everything else declines to Apple's code.
+ * inferred.
+ *
+ * The zero-texture direct arm is smaller still. At 0x3122d26c..0x3122d2f8,
+ * state 0x02 plus mask 0x0008 loads the constant pixel from ctx+0x64, calls
+ * QuartzCore's import stub for _CGBlt_fillBytes, and returns. The retained
+ * direct context uses 0xff000000. A second zero-texture context has state 0x12:
+ * the guest expands its 0xfd000000 constant into a temporary span and enters
+ * the same selector-2 blend. No interpolant is consumed in either case.
+ * Everything else declines to Apple's code.
  */
 #define SW_SAMPLE_NEAREST_BGRX8 UINT32_C(0x3122b698)
 #define SW_SAMPLE_NEAREST_BGRA8 UINT32_C(0x3122b8bc)
@@ -660,8 +668,8 @@ static uint32_t sw_blend_premultiplied_over(uint32_t dst, uint32_t src) {
 
 #define SW_SCANLINE_CHUNK_MAX 256u
 
-static bool hle_sw_scanline_known_texture(arm_cpu_t *cpu,
-                                          const ios3_hle_mem_t *mem) {
+static bool hle_sw_scanline_known_paths(arm_cpu_t *cpu,
+                                        const ios3_hle_mem_t *mem) {
     uint32_t x = cpu->r[0], y = cpu->r[1], count = cpu->r[2];
     uint32_t start = cpu->r[3], sp = cpu->r[13];
     uint32_t delta = 0, dy0 = 0, dy1 = 0, mask = 0, ctx = 0;
@@ -718,15 +726,40 @@ static bool hle_sw_scanline_known_texture(arm_cpu_t *cpu,
 
     if (!read_u32_at(mem, ctx, 0x68u, &ctx_units) ||
         !read_u8_at(mem, state, 0x3cu, &state_flags) ||
-        !read_u32_at(mem, ctx, 0x64u, &sentinel) ||
-        !read_u32_at(mem, ctx, 0x14u, &min_sampler) ||
-        !read_u32_at(mem, ctx, 0x18u, &mag_sampler))
+        !read_u32_at(mem, ctx, 0x64u, &sentinel))
         return false;
 
-    if (bytes_per_pixel != 4u || count > SW_SCANLINE_CHUNK_MAX ||
-        (count && (uint64_t)out + (uint64_t)count * 4u - 1u > UINT32_MAX) ||
-        ctx_units != 1u || mask != 0x0308u ||
-        sentinel != UINT32_MAX || min_sampler != mag_sampler)
+    if (bytes_per_pixel != 4u ||
+        (count && (uint64_t)out + (uint64_t)count * 4u - 1u > UINT32_MAX))
+        return false;
+
+    if (ctx_units == 0u) {
+        if (mask != 0x0008u) return false;
+        if (state_flags == 0x02u) {
+            if (count > SW_SPAN_MAX) return false;
+            for (uint32_t i = 0; i < count; i++) pixels[i] = sentinel;
+        } else if (state_flags == 0x12u) {
+            if (aux != 0u || count > SW_SCANLINE_CHUNK_MAX ||
+                (count && !mem->read(mem->ctx, out, dst_pixels, count * 4u)))
+                return false;
+            for (uint32_t i = 0; i < count; i++)
+                pixels[i] = sw_blend_premultiplied_over(dst_pixels[i],
+                                                        sentinel);
+        } else {
+            return false;
+        }
+        if (count && !mem->write(mem->ctx, out, pixels, count * 4u))
+            return false;
+        cpu->r[15] = cpu->r[14];
+        return true;
+    }
+
+    if (ctx_units != 1u || mask != 0x0308u ||
+        count > SW_SCANLINE_CHUNK_MAX ||
+        sentinel != UINT32_MAX ||
+        !read_u32_at(mem, ctx, 0x14u, &min_sampler) ||
+        !read_u32_at(mem, ctx, 0x18u, &mag_sampler) ||
+        min_sampler != mag_sampler)
         return false;
 
     /* dy0/dy1 are deliberately unused here. Equal sampler pointers make the
@@ -1154,7 +1187,7 @@ static ios3_hle_site_t g_sites[] = {
     { "sw_scanline",        0x3122d180u, PROLOGUE_SW_SCANLINE,
       (unsigned)(sizeof PROLOGUE_SW_SCANLINE /
                   sizeof PROLOGUE_SW_SCANLINE[0]),
-      hle_sw_scanline_known_texture, IOS3_HLE_REPLACE,
+      hle_sw_scanline_known_paths, IOS3_HLE_REPLACE,
       false, false, 0, 0, 0, 0 },
     { "ogl_poly_scan",      0x311e2100u, PROLOGUE_OGL_POLY_SCAN,
       (unsigned)(sizeof PROLOGUE_OGL_POLY_SCAN /
