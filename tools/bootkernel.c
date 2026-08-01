@@ -3099,6 +3099,34 @@ static bool hle_mem_read(void *ctx, uint32_t va, void *dst, uint32_t len) {
 }
 
 /*
+ * The privileged read. See ios3_hle_mem_t::read_priv for why it exists and for
+ * the rule it does NOT relax: pixels still go through the unprivileged path.
+ * This translates with privilege so a kernel-side descriptor -- an IOSurface
+ * the device itself reads -- can be inspected, and it is read-only.
+ */
+static bool hle_mem_read_priv(void *ctx, uint32_t va, void *dst, uint32_t len) {
+    arm_cpu_t *cpu = (arm_cpu_t *)ctx;
+    uint8_t *out = (uint8_t *)dst;
+
+    if (!cpu || !out || !len || !g_mach || !g_mach->ram || !va) return false;
+    if ((uint64_t)va + len - 1u > UINT32_MAX) return false;
+
+    for (uint32_t i = 0; i < len; i++) {
+        uint32_t pa = 0;
+        if (arm_mmu_translate(cpu, va + i, ARM_ACCESS_READ, true, &pa))
+            return false;
+        /* The same DRAM bound guest_read_user_bytes applies, for the same
+         * reason: anything that is not plain RAM is a device, and a device
+         * read is a side effect this must never cause. */
+        if (pa < g_mach->ram_base ||
+            (uint64_t)pa - g_mach->ram_base >= g_mach->ram_size)
+            return false;
+        out[i] = g_mach->ram[pa - g_mach->ram_base];
+    }
+    return true;
+}
+
+/*
  * The write half, and it is deliberately the mirror of guest_read_user_bytes
  * rather than a memcpy: UNPRIVILEGED, through the MMU, one page at a time.
  *
@@ -3159,6 +3187,7 @@ static bool hle_took_call(arm_cpu_t *cpu) {
     mem.ctx = cpu;
     mem.read = hle_mem_read;
     mem.write = hle_mem_write;
+    mem.read_priv = hle_mem_read_priv;
     as = diagnostic_ttbr0_base(cpu);
     pc = cpu->r[15] & ~1u;
 

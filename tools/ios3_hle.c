@@ -231,6 +231,14 @@ static const uint32_t PROLOGUE_OGL_POLY_SCAN[] = {
  * every pixel through the guest MMU, and a framebuffer diff against the same
  * run with the site disarmed.
  */
+static const uint32_t PROLOGUE_SW_SAMPLE_COLOR[] = {
+    0xe92d40f0u,   /* push  {r4, r5, r6, r7, lr}   */
+    0xe28d700cu,   /* add   r7, sp, #0xc           */
+    0xe92d0d00u,   /* push  {r8, sl, fp}           */
+    0xed9f7a4du,   /* vldr  s14, [pc, #0x134]      */
+    0xedd17a04u,   /* vldr  s15, [r1, #0x10]       */
+};
+
 static const uint32_t PROLOGUE_MBX_CONNECTION_OPEN[] = {
     0xe92d40f0u,   /* push {r4, r5, r6, r7, lr}    */
     0xe28d700cu,   /* add  r7, sp, #0xc            */
@@ -301,6 +309,98 @@ static bool read_f32(const ios3_hle_mem_t *mem, uint32_t va, float *out) {
     uint32_t bits;
     if (!mem->read(mem->ctx, va, &bits, 4u)) return false;
     memcpy(out, &bits, sizeof bits);
+    return true;
+}
+
+/*
+ * sw_sample_color, FULLY DECODED. All 85 instructions.
+ *
+ * CA::OGL::sw_sample_color(unsigned, const ogl_poly_vert *start,
+ *                          const ogl_poly_vert *delta, unsigned count,
+ *                          unsigned *out)
+ *
+ * The first argument is never read. Arguments 1-4 are r0-r3 and `out` is the
+ * fifth, which at entry is [sp+0]: the function's own [sp,#0x20] references are
+ * AFTER it pushes 0x20 bytes, and this fires before any of that has happened.
+ *
+ * A sibling of the sampler above and the same span shape -- walk `count`
+ * pixels, divide by w per pixel, write one word each -- but it interpolates a
+ * COLOUR rather than reading a texture, so no memory is read inside the loop at
+ * all. It sits at 0x3122d02c, inside the 0x3122d000 page the profile put at
+ * 13.7% of a swipe.
+ *
+ * ogl_poly_vert, the fields this one uses:
+ *   +0x0c  float w         perspective divisor
+ *   +0x10  float c[4]      colour components, in the order R, G, B, A
+ *
+ * Constants read from the literal pool rather than assumed:
+ *   0x3122d174 = 0x4b7f0000 = 16711680.0f   which is 255.0f * 65536.0f
+ *   0x3122d178 = 0x3f800000 = 1.0f          numerator of the reciprocal
+ *   0x3122d17c = 0xffff0000                 the packing mask
+ *
+ * So a component is carried as 16.16 fixed point scaled to 0..255, and the
+ * pack drops each one's fraction:
+ *
+ *   px = (r & 0xffff0000) | (b >> 16) | ((a >> 16) << 24) | ((g >> 16) << 8)
+ *
+ * which is 0xAARRGGBB -- the driver's own 'ARGB', matching what clcd.c decodes
+ * a 32-bit window as. The R term is MASKED rather than shifted because its
+ * integer part already sits at bits 16-23.
+ *
+ * THE SHIFTS ARE ARITHMETIC AND THERE IS NO CLAMP, which is the one thing that
+ * must not be tidied up. The sampler above saturates with `bic`/`movge`; this
+ * routine does not, so a component that goes negative sign-extends into the
+ * neighbouring channel and that is the behaviour to reproduce exactly. Writing
+ * the "obviously intended" clamp here would produce a different pixel from the
+ * guest's on any span that overshoots, which is precisely what the framebuffer
+ * diff would then catch -- and it is cheaper to be right than to be caught.
+ */
+static bool hle_sw_sample_color(arm_cpu_t *cpu, const ios3_hle_mem_t *mem) {
+    const float K = 16711680.0f;          /* 255.0f * 65536.0f */
+    uint32_t start = cpu->r[1], delta = cpu->r[2], count = cpu->r[3];
+    uint32_t sp = cpu->r[13];
+    uint32_t out = 0;
+    float w = 0.0f, dw = 0.0f;
+    float sc[4], dc[4];
+    int32_t c[4], d[4];
+    unsigned i;
+
+    if (!mem || !mem->read || !mem->write) return false;
+
+    if (!read_u32(mem, sp + 0x00u, &out)) return false;
+
+    if (!read_f32(mem, start + 0x0cu, &w) ||
+        !read_f32(mem, delta + 0x0cu, &dw))
+        return false;
+
+    for (i = 0; i < 4u; i++) {
+        if (!read_f32(mem, start + 0x10u + i * 4u, &sc[i]) ||
+            !read_f32(mem, delta + 0x10u + i * 4u, &dc[i]))
+            return false;
+        c[i] = (int32_t)(sc[i] * K);
+        d[i] = (int32_t)(dc[i] * K);
+    }
+
+    for (uint32_t k = 0; k < count; k++) {
+        float inv = 1.0f / w;
+        int32_t r = (int32_t)((float)c[0] * inv);
+        int32_t g = (int32_t)((float)c[1] * inv);
+        int32_t b = (int32_t)((float)c[2] * inv);
+        int32_t a = (int32_t)((float)c[3] * inv);
+        uint32_t px;
+
+        /* Exactly the guest's OR chain, arithmetic shifts included. */
+        px  = ((uint32_t)r & 0xffff0000u) | (uint32_t)(b >> 16);
+        px |= (uint32_t)(a >> 16) << 24;
+        px |= (uint32_t)(g >> 16) << 8;
+
+        if (!mem->write(mem->ctx, out + k * 4u, &px, 4u)) return false;
+
+        c[0] += d[0]; c[1] += d[1]; c[2] += d[2]; c[3] += d[3];
+        w += dw;
+    }
+
+    cpu->r[15] = cpu->r[14];
     return true;
 }
 
@@ -496,13 +596,21 @@ static void trace_surface(const ios3_hle_mem_t *mem, const char *tag,
                           uint32_t p) {
     unsigned i;
     if (!p) return;
+    /*
+     * Read PRIVILEGED. r253 proved the unprivileged path cannot see these at
+     * all -- every word came back "??" because 0xc54bca00 is kernel space and
+     * the compositing process genuinely cannot dereference it. See
+     * ios3_hle_mem_t::read_priv for why reading a descriptor this way is
+     * emulating the device rather than granting the guest anything, and for the
+     * rule it does not relax: pixels still go through the unprivileged path.
+     */
     fprintf(stderr, "hle-trace   %s@%08x", tag, p);
-    for (i = 0; i < 8u; i++) {
+    for (i = 0; i < 12u; i++) {
         uint32_t w = 0;
-        if (read_u32(mem, p + i * 4u, &w))
-            fprintf(stderr, " +%02x=%08x", i * 4u, w);
-        else
-            fprintf(stderr, " +%02x=??", i * 4u);
+        bool ok = mem->read_priv ? mem->read_priv(mem->ctx, p + i * 4u, &w, 4u)
+                                 : read_u32(mem, p + i * 4u, &w);
+        if (ok) fprintf(stderr, " +%02x=%08x", i * 4u, w);
+        else    fprintf(stderr, " +%02x=??", i * 4u);
     }
     fprintf(stderr, "\n");
 }
@@ -544,6 +652,10 @@ static ios3_hle_site_t g_sites[] = {
       (unsigned)(sizeof PROLOGUE_SW_SAMPLE_NEAREST_BGRA8 /
                  sizeof PROLOGUE_SW_SAMPLE_NEAREST_BGRA8[0]),
       hle_sw_sample_nearest_bgra8, IOS3_HLE_REPLACE, false, false, 0, 0, 0, 0 },
+    { "sw_sample_color",    0x3122d02cu, PROLOGUE_SW_SAMPLE_COLOR,
+      (unsigned)(sizeof PROLOGUE_SW_SAMPLE_COLOR /
+                 sizeof PROLOGUE_SW_SAMPLE_COLOR[0]),
+      hle_sw_sample_color, IOS3_HLE_REPLACE, false, false, 0, 0, 0, 0 },
     { "sw_scanline",        0x3122d180u, PROLOGUE_SW_SCANLINE,
       (unsigned)(sizeof PROLOGUE_SW_SCANLINE /
                  sizeof PROLOGUE_SW_SCANLINE[0]),

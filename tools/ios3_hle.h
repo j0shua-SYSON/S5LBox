@@ -93,6 +93,27 @@ typedef struct {
     void *ctx;
     bool (*read)(void *ctx, uint32_t va, void *dst, uint32_t len);
     bool (*write)(void *ctx, uint32_t va, const void *src, uint32_t len);
+    /*
+     * A PRIVILEGED read, for KERNEL-SIDE DESCRIPTORS ONLY. May be NULL.
+     *
+     * `read` and `write` translate unprivileged on purpose -- contract item 4
+     * says a pixel is a user virtual address and must go through the guest's
+     * own mapping, so a handler that touched pixels any other way could write
+     * where the process cannot. That rule is not relaxed here and this must
+     * never be used for pixels.
+     *
+     * It exists because r253 found something the unprivileged path cannot
+     * reach at all: MBX2D's context holds its source and destination surfaces
+     * as pointers into KERNEL space (0xc54bca00, 0xc54bc980), and every word
+     * read back as unreadable because the compositing process genuinely cannot
+     * dereference them. The pixel base a native blit needs lives inside those
+     * objects. The hardware being modelled reads them too -- an IOSurface is
+     * shared with the GPU -- so reading them is emulating the device rather
+     * than granting the guest a new power: nothing the guest can observe
+     * changes, and no guest-visible mapping is bypassed for anything the guest
+     * itself would write.
+     */
+    bool (*read_priv)(void *ctx, uint32_t va, void *dst, uint32_t len);
 } ios3_hle_mem_t;
 
 typedef enum {

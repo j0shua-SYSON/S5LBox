@@ -52,7 +52,7 @@ static bool fake_write(void *ctx, uint32_t va, const void *src, uint32_t len) {
     memcpy(&g_fake[va - FAKE_BASE], src, len);
     return true;
 }
-static const ios3_hle_mem_t FAKE = { NULL, fake_read, fake_write };
+static const ios3_hle_mem_t FAKE = { NULL, fake_read, fake_write, NULL };
 
 static void poke(uint32_t va, uint32_t word) {
     (void)fake_write(NULL, va, &word, 4u);
