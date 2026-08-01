@@ -3122,10 +3122,43 @@ static void hle_note_pending(void) {
     }
 }
 
+/*
+ * ARMv6 legacy small pages may assign different access permissions to each
+ * 1 KiB subpage, and tiny pages are themselves 1 KiB.  That is therefore the
+ * largest interval for which one successful translation proves both access
+ * and a contiguous physical mapping.  Staying inside it removes hundreds of
+ * thousands of redundant translations from a full-screen HLE publication
+ * without weakening the bytewise path's fail-closed permission semantics.
+ */
+#define HLE_USER_MMU_CHUNK_BYTES 1024u
+
+static uint32_t hle_user_mmu_chunk(uint32_t va, uint32_t remaining) {
+    uint32_t to_boundary = HLE_USER_MMU_CHUNK_BYTES -
+                           (va & (HLE_USER_MMU_CHUNK_BYTES - 1u));
+    return remaining < to_boundary ? remaining : to_boundary;
+}
+
 static bool hle_mem_read(void *ctx, uint32_t va, void *dst, uint32_t len) {
-    if (!ctx || !dst || !len) return false;
-    return guest_read_user_bytes((arm_cpu_t *)ctx, va, (uint8_t *)dst,
-                                 (size_t)len, NULL, NULL);
+    arm_cpu_t *cpu = (arm_cpu_t *)ctx;
+    uint8_t *out = (uint8_t *)dst;
+
+    if (!cpu || !out || !len || !g_mach || !g_mach->ram || !va)
+        return false;
+    if ((uint64_t)va + len > UINT64_C(0x100000000)) return false;
+
+    for (uint32_t done = 0; done < len;) {
+        uint32_t current = va + done;
+        uint32_t chunk = hle_user_mmu_chunk(current, len - done);
+        uint32_t pa = 0;
+        if (arm_mmu_translate(cpu, current, ARM_ACCESS_READ, false, &pa))
+            return false;
+        if (pa < g_mach->ram_base ||
+            (uint64_t)pa - g_mach->ram_base + chunk > g_mach->ram_size)
+            return false;
+        memcpy(out + done, g_mach->ram + (pa - g_mach->ram_base), chunk);
+        done += chunk;
+    }
+    return true;
 }
 
 /*
@@ -3185,14 +3218,17 @@ static bool hle_mem_read_priv(void *ctx, uint32_t va, void *dst, uint32_t len) {
 }
 
 /*
- * The write half, and it is deliberately the mirror of guest_read_user_bytes
- * rather than a memcpy: UNPRIVILEGED, through the MMU, one page at a time.
+ * The write half is UNPRIVILEGED and goes through the MMU one proven 1 KiB
+ * mapping interval at a time. It may memcpy only inside that interval; crossing
+ * one without translating again could skip an ARMv6 subpage permission change
+ * or assume that two independently mapped physical pages are adjacent.
  *
  * Contract item 4 is the reason. A pixel buffer is a user virtual address and
  * is NOT guaranteed physically contiguous, so a host memcpy across a buffer
  * that spans two non-adjacent frames would corrupt whatever follows the first.
- * Translating every byte is slower than it needs to be and is correct, which
- * is the right order to do those in.
+ * The complete transaction is still preflighted before publication. The
+ * second walk observes the identical CPU/page-table state immediately after
+ * preflight, with no guest instruction between the two passes.
  *
  * ANY refusal returns false rather than writing part of the range, because a
  * partial write is the one outcome that is worse than declining: the handler
@@ -3217,24 +3253,30 @@ static bool hle_mem_writev(void *ctx, const ios3_hle_write_span_t *spans,
         if (!spans[s].src || spans[s].len == 0u || !spans[s].va ||
             (uint64_t)spans[s].va + spans[s].len > UINT64_C(0x100000000))
             return false;
-        for (uint32_t i = 0; i < spans[s].len; i++) {
+        for (uint32_t done = 0; done < spans[s].len;) {
+            uint32_t current = spans[s].va + done;
+            uint32_t chunk = hle_user_mmu_chunk(
+                current, spans[s].len - done);
             uint32_t pa = 0;
-            if (arm_mmu_translate(cpu, spans[s].va + i, ARM_ACCESS_WRITE,
-                                  false, &pa))
+            if (arm_mmu_translate(cpu, current, ARM_ACCESS_WRITE, false, &pa))
                 return false;
             if (pa < g_mach->ram_base ||
-                (uint64_t)pa - g_mach->ram_base >= g_mach->ram_size)
+                (uint64_t)pa - g_mach->ram_base + chunk > g_mach->ram_size)
                 return false;
+            done += chunk;
         }
     }
 
     for (uint32_t s = 0; s < count; s++) {
         const uint8_t *bytes = (const uint8_t *)spans[s].src;
-        for (uint32_t i = 0; i < spans[s].len; i++) {
+        for (uint32_t done = 0; done < spans[s].len;) {
+            uint32_t current = spans[s].va + done;
+            uint32_t chunk = hle_user_mmu_chunk(
+                current, spans[s].len - done);
             uint32_t pa = 0;
-            (void)arm_mmu_translate(cpu, spans[s].va + i, ARM_ACCESS_WRITE,
-                                    false, &pa);
-            g_mach->ram[pa - g_mach->ram_base] = bytes[i];
+            (void)arm_mmu_translate(cpu, current, ARM_ACCESS_WRITE, false, &pa);
+            memcpy(g_mach->ram + (pa - g_mach->ram_base), bytes + done, chunk);
+            done += chunk;
         }
     }
     return true;
