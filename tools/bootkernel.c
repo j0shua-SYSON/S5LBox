@@ -3077,7 +3077,10 @@ static uint32_t g_hle_space;     /* TTBR0 armed to; 0 == not armed yet */
 static bool g_hle_pending;       /* a site failed identity and may yet arm */
 
 #define HLE_VERIFY_SITE_MAX 32u
-#define HLE_VERIFY_LIMIT    4096u
+/* r276 observed more than 22,000 replaceable nested scanline/sampler calls in
+ * the 3.9--4.4 B touch window. Keep the verifier exhaustive for that accepted
+ * regression window instead of silently stopping before the interaction. */
+#define HLE_VERIFY_LIMIT    65536u
 #define HLE_VERIFY_DEPTH_MAX 8u
 typedef struct {
     uint64_t begin_at[HLE_VERIFY_DEPTH_MAX];
