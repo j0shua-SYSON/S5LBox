@@ -1284,18 +1284,21 @@ static bool ogl_rect_exact_i32(float value, int32_t *out) {
 
 /*
  * sw_scanline's outer loop at 0x3122d4a8..0x3122e2d8 clamps each temporary
- * to 256 pixels, calls _ogl_poly_scan_increment_n with that count, advances
- * the destination and repeats. Keep this initial root expansion restricted to
- * the two 320-wide mode-2 shapes retained in r299b; the per-chunk scanline
- * handler still rechecks the complete context before producing any bytes.
+ * to 256 pixels before it dispatches mode 1 or mode 2, calls
+ * _ogl_poly_scan_increment_n with that count, advances the destination and
+ * repeats. The retained calls measure mode-1 widths 300/304/320 and mode-2
+ * width 320. The static loop makes every remainder through the display bound
+ * equivalent; the per-chunk handler still rechecks the complete context before
+ * producing any bytes, and modes other than the two proved paths still refuse.
  */
-static bool ogl_rect_mode_two_chunks(const ios3_hle_mem_t *mem, uint32_t ctx,
+static bool ogl_rect_textured_chunks(const ios3_hle_mem_t *mem, uint32_t ctx,
                                      uint32_t mask, uint32_t count) {
     uint32_t render = 0, state = 0, units = 0, aux = 0;
     uint32_t min_sampler = 0, mag_sampler = 0;
     uint8_t state_flags = 0, state_mode = 0;
 
-    if (!mem || mask != 0x0308u || count != OGL_RECT_MAX_WIDTH ||
+    if (!mem || mask != 0x0308u || count <= SW_SCANLINE_CHUNK_MAX ||
+        count > OGL_RECT_MAX_WIDTH ||
         !read_u32_at(mem, ctx, 0x00u, &render) ||
         !read_u32_at(mem, ctx, 0x14u, &min_sampler) ||
         !read_u32_at(mem, ctx, 0x18u, &mag_sampler) ||
@@ -1307,7 +1310,8 @@ static bool ogl_rect_mode_two_chunks(const ios3_hle_mem_t *mem, uint32_t ctx,
         return false;
 
     return units == 1u && aux == 0u && state_flags == 0x12u &&
-           state_mode == 2u && min_sampler == mag_sampler &&
+           (state_mode == 1u || state_mode == 2u) &&
+           min_sampler == mag_sampler &&
            (min_sampler == SW_SAMPLE_NEAREST_BGRA8 ||
             min_sampler == SW_SAMPLE_NEAREST_BGRX8);
 }
@@ -1324,7 +1328,7 @@ static bool ogl_rect_render_row(const ios3_hle_mem_t *mem, uint32_t ctx,
 
     memset(&shadow, 0, sizeof shadow);
     if (count > SW_SCANLINE_CHUNK_MAX &&
-        ogl_rect_mode_two_chunks(mem, ctx, mask, count)) {
+        ogl_rect_textured_chunks(mem, ctx, mask, count)) {
         chunks = 2u;
     }
     shadow.source = mem;
@@ -1433,7 +1437,9 @@ static bool hle_ogl_poly_scan_known_rect(arm_cpu_t *cpu,
                                          const ios3_hle_mem_t *mem) {
     ogl_rect_vert_t vertex[4];
     int32_t x[4] = {0}, y[4] = {0}, u[4] = {0}, v[4] = {0};
-    uint32_t sp, xmax = 0, ymax = 0, callback = 0, ctx = 0;
+    int32_t draw_x = 0, draw_y = 0, draw_xmax = 0, draw_ymax = 0;
+    uint32_t sp, clip_xmin = 0, clip_ymin = 0;
+    uint32_t clip_xmax = 0, clip_ymax = 0, callback = 0, ctx = 0;
     uint32_t width = 0, height = 0, mask = 0;
     uint32_t decline_detail = UINT32_MAX;
     uint16_t count = 0, flags = 0;
@@ -1443,13 +1449,16 @@ static bool hle_ogl_poly_scan_known_rect(arm_cpu_t *cpu,
 
     if (!cpu || !mem || !mem->read || !mem->writev) return false;
     sp = cpu->r[13];
+    clip_xmin = cpu->r[2];
+    clip_ymin = cpu->r[3];
     if (cpu->r[0] >= OGL_RECT_REAL_LIMIT ||
-        !read_u32_at(mem, sp, 0x00u, &xmax) ||
-        !read_u32_at(mem, sp, 0x04u, &ymax) ||
+        !read_u32_at(mem, sp, 0x00u, &clip_xmax) ||
+        !read_u32_at(mem, sp, 0x04u, &clip_ymax) ||
         !read_u32_at(mem, sp, 0x08u, &callback) ||
         !read_u32_at(mem, sp, 0x0cu, &ctx) ||
-        cpu->r[1] != 0u || cpu->r[2] != 0u || cpu->r[3] != 0u ||
-        xmax != OGL_RECT_MAX_WIDTH || ymax != OGL_RECT_MAX_HEIGHT ||
+        cpu->r[1] != 0u || clip_xmin >= clip_xmax ||
+        clip_ymin >= clip_ymax || clip_xmax > OGL_RECT_MAX_WIDTH ||
+        clip_ymax > OGL_RECT_MAX_HEIGHT ||
         callback != UINT32_C(0x3122d180) || !ctx ||
         ctx >= OGL_RECT_REAL_LIMIT ||
         !read_u16(mem, cpu->r[0], &count) ||
@@ -1488,20 +1497,32 @@ static bool hle_ogl_poly_scan_known_rect(arm_cpu_t *cpu,
          v[2] - v[0] != y[2] - y[0]))
         goto decline;
 
-    decline_reason = "dimensions";
-    width = (uint32_t)(x[1] - x[0]);
-    height = (uint32_t)(y[2] - y[0]);
-    if (!width || width > OGL_RECT_MAX_WIDTH || !height ||
-        height > OGL_RECT_MAX_HEIGHT)
+    /* ogl_poly_scan converts r2/r3 and incoming stack words 0/4 with signed
+     * vcvt at 0x311e221c..0x311e2258. Its scan loop clamps x to
+     * [r2, stack0) at 0x311e2900..0x311e2928 and y to [r3, stack4) at
+     * 0x311e281c/0x311e2cb4. For an integer axis-aligned rectangle, that is an
+     * exact integer intersection. Advance u/v by the removed left/top pixels;
+     * merely allowing a nonzero origin would sample and publish the wrong
+     * rectangle (the retained 16..97 row clipped to 20..97 proves this case). */
+    decline_reason = "clip";
+    draw_x = x[0] > (int32_t)clip_xmin ? x[0] : (int32_t)clip_xmin;
+    draw_y = y[0] > (int32_t)clip_ymin ? y[0] : (int32_t)clip_ymin;
+    draw_xmax = x[1] < (int32_t)clip_xmax ? x[1] : (int32_t)clip_xmax;
+    draw_ymax = y[2] < (int32_t)clip_ymax ? y[2] : (int32_t)clip_ymax;
+    if (draw_x >= draw_xmax || draw_y >= draw_ymax)
         goto decline;
+    width = (uint32_t)(draw_xmax - draw_x);
+    height = (uint32_t)(draw_ymax - draw_y);
     mask = (uint32_t)flags & ~UINT32_C(3);
 
     for (uint32_t row = 0; row < height; row++) {
         uint32_t out_va = 0, out_len = 0;
-        float row_u = textured ? (float)u[0] + 0.5f : 0.0f;
-        float row_v = textured ? (float)v[0] + 0.5f + (float)row : 0.0f;
-        if (!ogl_rect_render_row(mem, ctx, mask, (uint32_t)x[0],
-                                  (uint32_t)y[0] + row, width, row, row,
+        float row_u = textured ? (float)u[0] + 0.5f +
+                                 (float)(draw_x - x[0]) : 0.0f;
+        float row_v = textured ? (float)v[0] + 0.5f +
+                                 (float)(draw_y - y[0]) + (float)row : 0.0f;
+        if (!ogl_rect_render_row(mem, ctx, mask, (uint32_t)draw_x,
+                                  (uint32_t)draw_y + row, width, row, row,
                                   row_u, row_v, &out_va, &out_len) ||
             out_len != width * 4u) {
             decline_reason = "scanline";
@@ -1534,12 +1555,14 @@ decline:
         fprintf(stderr, "hle-trace   root.decline=%s detail=%u\n",
                 decline_reason, decline_detail);
         if (trace_row && decline_detail < OGL_RECT_MAX_HEIGHT) {
-            float row_u = textured ? (float)u[0] + 0.5f : 0.0f;
+            float row_u = textured ? (float)u[0] + 0.5f +
+                                     (float)(draw_x - x[0]) : 0.0f;
             float row_v = textured ? (float)v[0] + 0.5f +
+                                     (float)(draw_y - y[0]) +
                                      (float)decline_detail : 0.0f;
             ogl_rect_trace_row_decline(
-                mem, ctx, mask, (uint32_t)x[0],
-                (uint32_t)y[0] + decline_detail, width, decline_detail,
+                mem, ctx, mask, (uint32_t)draw_x,
+                (uint32_t)draw_y + decline_detail, width, decline_detail,
                 row_u, row_v);
         }
     }

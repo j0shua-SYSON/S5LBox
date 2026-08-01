@@ -1752,3 +1752,71 @@ The chunk path is correct and broadens proved coverage, but **30 fps remains
 unproven**. Final performance acceptance still requires an actual frame-cadence
 measurement and a cold armed/disarmed pair; the clean snapshot is an iteration
 tool, not cold-boot evidence.
+
+### r307--r309: clip bounds remove more subtrees; timing is confounded
+
+The next apparent ABI refusal was decoded before its guard was widened. At
+entry `ogl_poly_scan` converts r2/r3 with signed `vcvt` and does the same to
+incoming stack words 0/4. The scan loop clamps x to `[r2, stack0)` at
+`0x311e2900..0x311e2928` and y to `[r3, stack4)` at
+`0x311e281c`/`0x311e2cb4`. These are clip minima and maxima, not a requirement
+that every rectangle begin at zero. The distinction affects pixels: one live
+polygon spans y=16..97 but has a y clip of 20, so accepting r3 without advancing
+v would draw four extra rows from the wrong texels.
+
+The native root now intersects only its already-proved integer, axis-aligned,
+one-to-one rectangle with an in-panel integer clip. Removed left/top pixels
+advance u/v by the exact integer distance. Empty clips and the still-unknown r1
+path decline. A fixture clips all four sides of a 3x2 texture to one pixel,
+checks the source texel and destination address independently, and proves every
+other destination pixel stayed untouched.
+
+r307 was the fast 3.9--4.23 B differential replay. At the identical cap, r302
+had 83/83 completed root comparisons; r307 completed 89/89, so six newly
+clipped roots were byte-exact. It prepared a seventh root at the cap, however,
+and stopped with verifier depth 2: root 96 attempted / 90 prepared / 89 passed,
+with its enclosing scanline also one short. The zero failure counter is not a
+complete pass when work is unresolved. r307 is useful bounded evidence, not
+acceptance.
+
+That run also showed why several clipped calls still refused. Their mode-1
+widths were 300, 304 and 320, over the child handler's 256-pixel temporary.
+Static code makes this generic rather than another guessed shape:
+`sw_scanline` chooses `min(remaining, 256)` before it dispatches mode 1 or mode
+2, then uses the same `increment_n` and destination advance for both. The root
+therefore applies 256 + remainder to the already-proved `0x0308`, state `0x12`,
+single-texture BGRA/BGRX mode-1 and mode-2 paths up to the 320-pixel display
+bound. A 257-pixel 256+1 fixture pins the boundary; mode 3 remains refused. The
+focused binary passes 14,441 checks.
+
+r308 then completed the full 3.9--4.4 B oracle:
+
+    nearest BGRX leaf        4,830 attempted / 4,830 exact passes
+    nearest BGRA leaf        4,818 attempted / 4,816 exact passes
+    sw_scanline             13,333 attempted / 9,277 exact passes
+    ogl_poly_scan              167 attempted /   137 exact passes
+    total prepared          19,060 / 65,536; 0 failures
+
+All comparisons resolved, all 26 touch reports were accepted/read, storage had
+zero failures with 2/2 raw redirects/completions, and the final hash was the
+accepted `E0CE...CEC8`. Relative to r305, clipping plus proved mode-1 chunking
+adds 24 exact whole roots. The remaining early declines are materially
+different: normalized texture extents, fractional animated geometry, and the
+known demand-paged mode-2 row.
+
+r309 replacement completed normally with the same accepted hash and device
+results. It handled 245/313 roots versus r306b's 150/295, while nested handled
+scanlines fell from 1,035 to zero and handled BGRA leaves from 7,478 to 38. The
+IOMFB swap handler still fired 69 times. Wall time moved from r306b's 278.072
+seconds to 264.020 seconds, 14.052 seconds or about 5.1% lower. It still did not
+beat r300's 253.476 seconds; it was 10.544 seconds or about 4.2% slower.
+
+There is a serious attribution limit. Between r307 and the r308 build, another
+concurrent process modified the app, button/GPIO/PMU model, related tests, and
+`bootkernel.c`. Ninja rebuilt those dirty sources into r308/r309. The r308
+same-binary differential result still directly compares this HLE output with
+Apple's output, but the full executable is not an isolated checkout and the
+r309 timing cannot be attributed to this patch. A clean detached build of the
+exact commit must repeat the strict suite and full oracle/replacement pair.
+Until then, this is expanded exact coverage plus a confounded timing signal,
+**not a 30 fps result** and not final acceptance.

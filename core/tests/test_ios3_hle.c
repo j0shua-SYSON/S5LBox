@@ -1078,14 +1078,102 @@ static void test_rect_root_chunks_measured_full_width_mode_two(void) {
               "second-chunk fault changed the guest destination");
     }
 
+    for (uint32_t pass = 0; pass < 2u; pass++) {
+        uint32_t count = pass ? 257u : 320u;
+
+        reset_scan_fixture(site);
+        configure_full_width_mode_two_root(&cpu, SAMPLE_BGRA8);
+        scan_poke32(SCAN_STATE + 0x08u, 1u);
+        if (count != 320u) {
+            uint32_t right = SCAN_POLY + 4u + 0x38u;
+            uint32_t bottom_right = SCAN_POLY + 4u + 2u * 0x38u;
+            scan_pokef(right + 0x00u, (float)count);
+            scan_pokef(right + 0x20u, (float)count);
+            scan_pokef(bottom_right + 0x00u, (float)count);
+            scan_pokef(bottom_right + 0x20u, (float)count);
+        }
+        if (!arm_only(site)) continue;
+        CHECK(ios3_hle_step(&cpu, &SCAN_MEM, site->va, 0x0bf1b000u),
+              "mode-one %u-pixel chunked root declined", count);
+        CHECK(g_scan_write_calls == 0u && g_scan_writev_calls == 1u &&
+              g_scan_writev_span_count == 1u &&
+              g_scan_writev_va[0] == SCAN_OUT &&
+              g_scan_writev_len[0] == count * 4u,
+              "mode-one %u root published scalar=%u vector=%u/%u at %08x/%u",
+              count, g_scan_write_calls, g_scan_writev_calls,
+              g_scan_writev_span_count, g_scan_writev_va[0],
+              g_scan_writev_len[0]);
+        CHECK(g_scan_texel_read_calls == 2u &&
+              g_scan_texel_read_bytes == count * 4u &&
+              g_scan_texel_max_read_len == 1024u,
+              "mode-one %u root used %u reads totalling %u, max %u", count,
+              g_scan_texel_read_calls, g_scan_texel_read_bytes,
+              g_scan_texel_max_read_len);
+        for (uint32_t i = 0; i < count; i++)
+            CHECK(scan_peek32(SCAN_OUT + i * 4u) ==
+                      (UINT32_C(0xff000000) | i),
+                  "mode-one %u root pixel %u is %08x", count, i,
+                  scan_peek32(SCAN_OUT + i * 4u));
+    }
+
     reset_scan_fixture(site);
     configure_full_width_mode_two_root(&cpu, SAMPLE_BGRA8);
-    scan_poke32(SCAN_STATE + 0x08u, 1u);
+    scan_poke32(SCAN_STATE + 0x08u, 3u);
     if (arm_only(site)) {
         CHECK(!ios3_hle_step(&cpu, &SCAN_MEM, site->va, 0x0bf1b000u),
-              "root broadened the 320-pixel chunk path to unmeasured mode one");
+              "root broadened the 320-pixel chunk path to unmeasured mode three");
         CHECK(g_scan_write_calls == 0u && g_scan_writev_calls == 0u,
-              "unmeasured full-width mode one published scalar=%u vector=%u",
+              "unmeasured full-width mode three published scalar=%u vector=%u",
+              g_scan_write_calls, g_scan_writev_calls);
+    }
+    ios3_hle_disarm();
+}
+
+static void test_rect_root_applies_integer_clip_bounds(void) {
+    ios3_hle_site_t *site = site_named("ogl_poly_scan");
+    arm_cpu_t cpu;
+
+    reset_scan_fixture(site);
+    configure_rect_root(&cpu, 0x030bu);
+    /* The polygon covers x=[1,4), y=[0,2), with matching texture coordinates.
+     * Clip all four sides to x=[2,3), y=[1,2). The surviving pixel is source
+     * row one, column one and destination row one, x two. */
+    cpu.r[2] = 2u;
+    cpu.r[3] = 1u;
+    scan_poke32(SCAN_STACK + 0x00u, 3u);
+    scan_poke32(SCAN_STACK + 0x04u, 2u);
+    if (arm_only(site)) {
+        CHECK(ios3_hle_step(&cpu, &SCAN_MEM, site->va, 0x0bf1b000u),
+              "integer-clipped rectangle root declined");
+        CHECK(cpu.r[15] == cpu.r[14],
+              "integer-clipped root returned to %08x, not LR", cpu.r[15]);
+        CHECK(g_scan_write_calls == 0u && g_scan_writev_calls == 1u &&
+              g_scan_writev_span_count == 1u &&
+              g_scan_writev_va[0] == SCAN_OUT + 24u &&
+              g_scan_writev_len[0] == 4u,
+              "integer clip published scalar=%u vector=%u/%u at %08x/%u",
+              g_scan_write_calls, g_scan_writev_calls,
+              g_scan_writev_span_count, g_scan_writev_va[0],
+              g_scan_writev_len[0]);
+        CHECK(scan_peek32(SCAN_OUT + 24u) == UINT32_C(0x10203040),
+              "integer clip sampled %08x, expected row-one column-one texel",
+              scan_peek32(SCAN_OUT + 24u));
+        for (uint32_t i = 0; i < 8u; i++) {
+            if (i == 6u) continue;
+            CHECK(scan_peek32(SCAN_OUT + i * 4u) == UINT32_C(0xdeadbeef),
+                  "integer clip changed destination pixel %u", i);
+        }
+    }
+
+    reset_scan_fixture(site);
+    configure_rect_root(&cpu, 0x030bu);
+    cpu.r[2] = 4u;
+    scan_poke32(SCAN_STACK + 0x00u, 4u);
+    if (arm_only(site)) {
+        CHECK(!ios3_hle_step(&cpu, &SCAN_MEM, site->va, 0x0bf1b000u),
+              "empty clip rectangle was handled");
+        CHECK(g_scan_write_calls == 0u && g_scan_writev_calls == 0u,
+              "empty clip published scalar=%u vector=%u",
               g_scan_write_calls, g_scan_writev_calls);
     }
     ios3_hle_disarm();
@@ -1129,7 +1217,7 @@ static void test_rect_root_refuses_unproved_or_nonatomic_shapes(void) {
         configure_rect_root(&cpu, 0x030bu);
         switch (which) {
         case 0: scan_poke32(SCAN_STACK + 0x08u, UINT32_C(0x3122d184)); break;
-        case 1: cpu.r[3] = 0x10u; break;
+        case 1: cpu.r[1] = 1u; break;
         case 2: scan_pokef(SCAN_POLY + 4u, 1.25f); break;
         case 3: scan_pokef(SCAN_POLY + 4u + 0x38u + 0x20u, 2.0f); break;
         case 4: scan_poke16(SCAN_POLY + 0x02u, 0x030fu); break;
@@ -1762,6 +1850,7 @@ int main(void) {
     test_direct_solid_scanline_repeats_the_context_pixel();
     test_rect_root_replaces_textured_and_solid_rows_atomically();
     test_rect_root_chunks_measured_full_width_mode_two();
+    test_rect_root_applies_integer_clip_bounds();
     test_rect_root_preserves_prior_row_alias_semantics();
     test_rect_root_refuses_unproved_or_nonatomic_shapes();
     test_rect_root_oracle_captures_two_rows_without_publication();
