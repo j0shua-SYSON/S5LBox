@@ -662,6 +662,9 @@ static void trace_surface(const ios3_hle_mem_t *mem, const char *tag,
      * that stopped the first surface word being read as a base.
      */
     if (got_next && next) {
+        uint32_t parent = 0;
+        bool got_parent = false;
+
         fprintf(stderr, "hle-trace   %s->%08x", tag, next);
         for (i = 0; i < 16u; i++) {
             uint32_t w = 0;
@@ -670,8 +673,39 @@ static void trace_surface(const ios3_hle_mem_t *mem, const char *tag,
                         : read_u32(mem, next + i * 4u, &w);
             if (ok) fprintf(stderr, " +%02x=%08x", i * 4u, w);
             else    fprintf(stderr, " +%02x=??", i * 4u);
+            if (ok && i == 9u) { parent = w; got_parent = true; }
         }
         fprintf(stderr, "\n");
+
+        /*
+         * ONE MORE, and this time the object is NAMED rather than guessed at.
+         * r264's vtable pointers resolve in the kernel's own symbol table:
+         *
+         *   0xc01fc6b0 -> __ZTV25IOGeneralMemoryDescriptor+0x8
+         *   0xc01fcb18 -> __ZTV21IOSubMemoryDescriptor+0x8
+         *
+         * so the layout is IOKit's, not an inference. The destination reads as
+         * a sub-range -- _length 0x96000 at +0x1c, which is exactly 320*480*4,
+         * _parent at +0x24 and _start 0x1c2000 at +0x28 -- and that cross-checks
+         * against the /vram survey independently: the pool starts at 0x0885c000
+         * with 16 slots 0x96000 apart, and 0x0885c000 + 0x1c2000 is 0x08a1e000,
+         * which the survey reports as slot 3 holding 606,681 non-zero bytes.
+         *
+         * So the base a blit needs is the PARENT's, plus _start. This follows
+         * +0x24 to get it.
+         */
+        if (got_parent && parent) {
+            fprintf(stderr, "hle-trace   %s=>%08x", tag, parent);
+            for (i = 0; i < 16u; i++) {
+                uint32_t w = 0;
+                bool ok = mem->read_priv
+                            ? mem->read_priv(mem->ctx, parent + i * 4u, &w, 4u)
+                            : read_u32(mem, parent + i * 4u, &w);
+                if (ok) fprintf(stderr, " +%02x=%08x", i * 4u, w);
+                else    fprintf(stderr, " +%02x=??", i * 4u);
+            }
+            fprintf(stderr, "\n");
+        }
     }
 }
 
