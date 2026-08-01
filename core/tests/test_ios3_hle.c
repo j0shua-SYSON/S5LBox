@@ -599,6 +599,7 @@ static void test_oracle_captures_disjoint_transactional_spans(void) {
 
 #define SAMPLE_BGRX8 0x3122b698u
 #define SAMPLE_BGRA8 0x3122b8bcu
+#define SAMPLE_BILINEAR_BGRA8 0x3122bad8u
 
 static void configure_direct_scanline(arm_cpu_t *cpu, uint32_t sampler) {
     memset(cpu, 0, sizeof *cpu);
@@ -1114,6 +1115,163 @@ static void test_rect_root_chunks_measured_full_width_mode_two(void) {
                       (UINT32_C(0xff000000) | i),
                   "mode-one %u root pixel %u is %08x", count, i,
                   scan_peek32(SCAN_OUT + i * 4u));
+    }
+
+    /* A synthetic nearest-sampler counterpart to the live 320-to-1 shape.
+     * Pin both Apple's pixel-centre interpolation and the second-chunk start. */
+    reset_scan_fixture(site);
+    configure_full_width_mode_two_root(&cpu, SAMPLE_BGRA8);
+    scan_pokef(SCAN_POLY + 4u + 0x38u + 0x20u, 1.0f);
+    scan_pokef(SCAN_POLY + 4u + 2u * 0x38u + 0x20u, 1.0f);
+    scan_poke32(SCAN_TEXELS, UINT32_C(0xff335577));
+    if (arm_only(site)) {
+        CHECK(ios3_hle_step(&cpu, &SCAN_MEM, site->va, 0x0bf1b000u),
+              "measured 320-to-1 textured root declined");
+        CHECK(g_scan_write_calls == 0u && g_scan_writev_calls == 1u &&
+              g_scan_writev_span_count == 1u &&
+              g_scan_writev_va[0] == SCAN_OUT &&
+              g_scan_writev_len[0] == 1280u,
+              "320-to-1 root published scalar=%u vector=%u/%u at %08x/%u",
+              g_scan_write_calls, g_scan_writev_calls,
+              g_scan_writev_span_count, g_scan_writev_va[0],
+              g_scan_writev_len[0]);
+        CHECK(g_scan_texel_read_calls == 2u &&
+              g_scan_texel_read_bytes == 8u &&
+              g_scan_texel_max_read_len == 4u,
+              "320-to-1 root used %u reads totalling %u, max %u",
+              g_scan_texel_read_calls, g_scan_texel_read_bytes,
+              g_scan_texel_max_read_len);
+        for (uint32_t i = 0; i < 320u; i++)
+            CHECK(scan_peek32(SCAN_OUT + i * 4u) == UINT32_C(0xff335577),
+                  "320-to-1 root pixel %u is %08x", i,
+                  scan_peek32(SCAN_OUT + i * 4u));
+    }
+
+    reset_scan_fixture(site);
+    configure_full_width_mode_two_root(&cpu, SAMPLE_BGRA8);
+    scan_pokef(SCAN_POLY + 4u + 0x38u + 0x20u, 1.0f);
+    scan_pokef(SCAN_POLY + 4u + 2u * 0x38u + 0x20u, 1.0f);
+    scan_poke32(SCAN_STATE + 0x3cu, 0u);
+    scan_poke32(SCAN_TEXELS, UINT32_C(0xff775533));
+    if (arm_only(site)) {
+        CHECK(ios3_hle_step(&cpu, &SCAN_MEM, site->va, 0x0bf1b000u),
+              "direct 320-to-1 textured root declined");
+        CHECK(g_scan_write_calls == 0u && g_scan_writev_calls == 1u &&
+              g_scan_writev_span_count == 1u,
+              "direct 320-to-1 root published scalar=%u vector=%u/%u",
+              g_scan_write_calls, g_scan_writev_calls,
+              g_scan_writev_span_count);
+        CHECK(g_scan_texel_read_calls == 1u &&
+              g_scan_texel_read_bytes == 4u &&
+              g_scan_texel_max_read_len == 4u,
+              "direct 320-to-1 root used %u reads totalling %u, max %u",
+              g_scan_texel_read_calls, g_scan_texel_read_bytes,
+              g_scan_texel_max_read_len);
+        for (uint32_t i = 0; i < 320u; i++)
+            CHECK(scan_peek32(SCAN_OUT + i * 4u) == UINT32_C(0xff775533),
+                  "direct 320-to-1 root pixel %u is %08x", i,
+                  scan_peek32(SCAN_OUT + i * 4u));
+    }
+
+    reset_scan_fixture(site);
+    configure_full_width_mode_two_root(&cpu, SAMPLE_BGRA8);
+    scan_pokef(SCAN_POLY + 4u + 0x38u + 0x20u, 1.0f);
+    scan_pokef(SCAN_POLY + 4u + 2u * 0x38u + 0x20u, 1.0f);
+    scan_poke32(SCAN_CTX + 0x04u, SCAN_OUT);
+    if (arm_only(site)) {
+        CHECK(!ios3_hle_step(&cpu, &SCAN_MEM, site->va, 0x0bf1b000u),
+              "320-to-1 same-row alias was buffered and handled");
+        CHECK(g_scan_write_calls == 0u && g_scan_writev_calls == 0u,
+              "320-to-1 alias published scalar=%u vector=%u",
+              g_scan_write_calls, g_scan_writev_calls);
+        CHECK(scan_peek32(SCAN_OUT) == 0u &&
+              scan_peek32(SCAN_OUT + 319u * 4u) == 0u,
+              "320-to-1 alias changed its destination");
+    }
+
+    /* r317 identified the real scaled surface: bilinear BGRA, one 16.16
+     * texel column, and exact vertical pixel centres. Exercise two rows so
+     * the first probes its next row and the last clamps that probe in place. */
+    reset_scan_fixture(site);
+    configure_full_width_mode_two_root(&cpu, SAMPLE_BILINEAR_BGRA8);
+    scan_pokef(SCAN_POLY + 4u + 0x38u + 0x20u, 1.0f);
+    scan_pokef(SCAN_POLY + 4u + 2u * 0x38u + 0x04u, 2.0f);
+    scan_pokef(SCAN_POLY + 4u + 2u * 0x38u + 0x20u, 1.0f);
+    scan_pokef(SCAN_POLY + 4u + 2u * 0x38u + 0x24u, 2.0f);
+    scan_pokef(SCAN_POLY + 4u + 3u * 0x38u + 0x04u, 2.0f);
+    scan_pokef(SCAN_POLY + 4u + 3u * 0x38u + 0x24u, 2.0f);
+    scan_poke32(SCAN_CTX + 0x08u, 4u);
+    scan_poke32(SCAN_CTX + 0x0cu, UINT32_C(0x0000ffff));
+    scan_poke32(SCAN_CTX + 0x10u, UINT32_C(0x0001ffff));
+    scan_poke32(SCAN_RENDER + 0x104u, 1280u);
+    scan_poke32(SCAN_RENDER + 0x11cu, 2u);
+    scan_poke32(SCAN_STATE + 0x08u, 1u);
+    scan_poke32(SCAN_TEXELS + 0u, UINT32_C(0xff335577));
+    scan_poke32(SCAN_TEXELS + 4u, UINT32_C(0xff775533));
+    if (arm_only(site)) {
+        CHECK(ios3_hle_step(&cpu, &SCAN_MEM, site->va, 0x0bf1b000u),
+              "live one-column bilinear root declined");
+        CHECK(g_scan_write_calls == 0u && g_scan_writev_calls == 1u &&
+              g_scan_writev_span_count == 2u &&
+              g_scan_writev_va[0] == SCAN_OUT &&
+              g_scan_writev_va[1] == SCAN_OUT + 1280u &&
+              g_scan_writev_len[0] == 1280u &&
+              g_scan_writev_len[1] == 1280u,
+              "bilinear root published scalar=%u vector=%u/%u at "
+              "%08x/%u and %08x/%u",
+              g_scan_write_calls, g_scan_writev_calls,
+              g_scan_writev_span_count, g_scan_writev_va[0],
+              g_scan_writev_len[0], g_scan_writev_va[1],
+              g_scan_writev_len[1]);
+        CHECK(g_scan_texel_read_calls == 8u &&
+              g_scan_texel_read_bytes == 32u &&
+              g_scan_texel_max_read_len == 4u,
+              "bilinear root used %u reads totalling %u, max %u",
+              g_scan_texel_read_calls, g_scan_texel_read_bytes,
+              g_scan_texel_max_read_len);
+        for (uint32_t i = 0; i < 320u; i++) {
+            CHECK(scan_peek32(SCAN_OUT + i * 4u) ==
+                      UINT32_C(0xff335577),
+                  "bilinear row zero pixel %u is %08x", i,
+                  scan_peek32(SCAN_OUT + i * 4u));
+            CHECK(scan_peek32(SCAN_OUT + 1280u + i * 4u) ==
+                      UINT32_C(0xff775533),
+                  "bilinear row one pixel %u is %08x", i,
+                  scan_peek32(SCAN_OUT + 1280u + i * 4u));
+        }
+    }
+
+    reset_scan_fixture(site);
+    configure_full_width_mode_two_root(&cpu, SAMPLE_BILINEAR_BGRA8);
+    scan_pokef(SCAN_POLY + 4u + 0x38u + 0x20u, 1.0f);
+    scan_pokef(SCAN_POLY + 4u + 2u * 0x38u + 0x20u, 1.0f);
+    scan_poke32(SCAN_CTX + 0x08u, 8u);
+    scan_poke32(SCAN_CTX + 0x0cu, UINT32_C(0x0001ffff));
+    scan_poke32(SCAN_CTX + 0x10u, UINT32_C(0x0000ffff));
+    scan_poke32(SCAN_STATE + 0x08u, 1u);
+    if (arm_only(site)) {
+        CHECK(!ios3_hle_step(&cpu, &SCAN_MEM, site->va, 0x0bf1b000u),
+              "bilinear shortcut accepted a two-column descriptor");
+        CHECK(g_scan_write_calls == 0u && g_scan_writev_calls == 0u,
+              "two-column refusal published scalar=%u vector=%u",
+              g_scan_write_calls, g_scan_writev_calls);
+    }
+
+    reset_scan_fixture(site);
+    configure_full_width_mode_two_root(&cpu, SAMPLE_BILINEAR_BGRA8);
+    scan_pokef(SCAN_POLY + 4u + 0x38u + 0x20u, 1.0f);
+    scan_pokef(SCAN_POLY + 4u + 2u * 0x38u + 0x20u, 1.0f);
+    scan_poke32(SCAN_CTX + 0x04u, SCAN_OUT);
+    scan_poke32(SCAN_CTX + 0x08u, 4u);
+    scan_poke32(SCAN_CTX + 0x0cu, UINT32_C(0x0000ffff));
+    scan_poke32(SCAN_CTX + 0x10u, UINT32_C(0x0000ffff));
+    scan_poke32(SCAN_STATE + 0x08u, 1u);
+    if (arm_only(site)) {
+        CHECK(!ios3_hle_step(&cpu, &SCAN_MEM, site->va, 0x0bf1b000u),
+              "bilinear same-row alias was buffered and handled");
+        CHECK(g_scan_write_calls == 0u && g_scan_writev_calls == 0u,
+              "bilinear alias published scalar=%u vector=%u",
+              g_scan_write_calls, g_scan_writev_calls);
     }
 
     reset_scan_fixture(site);
