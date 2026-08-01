@@ -1672,7 +1672,83 @@ replacement run was completed. The only measured gain remains r300's combined
 6.5%, and **neither that number nor this callback reduction proves 30 fps**.
 
 The next bounded rasterizer case is visible in r299b's refusal log: 320-wide
-mode-2 BGRA and BGRX roots. Apple's root chunks those rows around the
-scanline's 256-pixel temporary. The native root must reproduce that chunking
-and prove the combined row transaction; simply deleting the bound would be an
-unmeasured semantic change.
+mode-2 BGRA and BGRX roots. `sw_scanline` chunks those rows around its
+256-pixel temporary. The native root must reproduce that chunking and prove
+the combined row transaction; simply deleting the bound would be an unmeasured
+semantic change.
+
+### r301--r306b: measured 320-wide chunking is exact, but slower in this run
+
+The retained armv6 cache corrected an important wording error above. The root
+does not call `sw_scanline` twice. It calls it once with 320 pixels at
+`0x311e2c04`; `sw_scanline` itself selects `min(remaining, 256)` at
+`0x3122d4a8..0x3122d4d4`, publishes that chunk, advances the selected start
+attributes through `_ogl_poly_scan_increment_n`, and loops at
+`0x3122e25c..0x3122e2d8`. For the measured `0x0308` mask those attributes are
+w/u/v and the root delta is exactly 0/1/0. The native root now reproduces only
+the retained 320-wide, one-texture, no-auxiliary, mode-2 `0x12` BGRA/BGRX
+shape as 256 + 64 pixels. All other over-256 scanlines keep their old path.
+Both chunks remain private until the entire rectangle can be published by one
+transactional `writev`.
+
+The implementation also preserves Apple's within-row visibility. A later
+chunk can read bytes written by an earlier chunk, including a read that
+straddles old guest bytes and captured bytes. A conservatively refused bulk
+texture read falls back to the exact four-byte texel loop before the root gives
+up; no destination byte has been published at that point. Fixtures cover BGRA
+and BGRX 256/64 reads, a mixed old/prior-chunk alias, second-chunk rollback, the
+bulk-to-scalar fallback, and refusal of an unmeasured 320-wide mode-1 row.
+
+The path to accepted evidence was not clean:
+
+* r301 is invalid. It ran from the result directory, so the relative
+  `firmware/screen.ppm` invalidation failed before guest execution.
+* r301b and r302 had zero verifier mismatches, but an initial implementation
+  incorrectly split every over-256 root row. Their clean-looking summaries do
+  not validate the final code. The target BGRA root still declined on row 15.
+* r303's bounded diagnostic exposed both facts: ordinary full-width rows were
+  being split despite expecting one write, and the target's second chunk could
+  not read `0x04572000`.
+* r304 temporarily instrumented that exact translation. Both the 256-byte bulk
+  access and a four-byte scalar access returned ARMv6 FSR 7: the page is
+  unmapped, not merely non-contiguous. The instrumentation was then removed.
+  Apple's guest execution can fault that page in; HLE cannot skip that side
+  effect, so this first BGRA occurrence must continue through Apple. r304 is
+  diagnosis, not acceptance.
+
+r305 is the final non-instrumented, full 3.9--4.4 B oracle from the retained
+clean pre-drag checkpoint and original 26-report drag:
+
+    nearest BGRX leaf        4,830 attempted / 4,830 exact passes
+    nearest BGRA leaf        4,818 attempted / 4,816 exact passes
+    sw_scanline             13,333 attempted / 9,277 exact passes
+    ogl_poly_scan              167 attempted /   113 exact passes
+    total prepared          19,036 / 65,536; 0 failures
+
+That is six more exact roots than r299b, with no change to the leaf or guest
+scanline counts. The demand-paged BGRA row still declined with the bounded
+`failure=3@04572000+4` breadcrumb. The run exited normally, accepted and read
+all 26 touch reports, recorded zero external-media failures with 2/2 raw
+redirects/completions, and retained the accepted final SHA-256
+`E0CE0EB1C117527ECDFF2C2C4A4549FCF48AB0F9E151AB7CBE13965849F7CEC8`.
+
+The first replacement wrapper, r306, is also invalid. PowerShell promoted the
+expected decline breadcrumb on stderr to a terminating error and killed the
+emulator near 4.18 B; it produced neither a final report nor a framebuffer.
+r306b used process-level redirection and completed normally at 4,399,991,337:
+
+    ogl_poly_scan              295 hits /  150 handled /  145 declined
+    sw_scanline              7,863 hits / 1,035 handled / 6,828 declined
+    nearest BGRX leaf            0 hits /     0 handled
+    nearest BGRA leaf        7,480 hits / 7,478 handled /     2 declined
+
+Touch, storage, the demand-page refusal and final framebuffer hash all matched
+r305. The performance result is negative: r306b took 278.072 seconds, versus
+r300's 253.476 seconds, **24.596 seconds or about 9.7% slower**. This is one
+full run rather than a variance study, and replacement changes how much guest
+work fits under the retired-instruction cap, so it does not isolate the cost of
+six newly eligible roots. It absolutely does not justify claiming a speedup.
+The chunk path is correct and broadens proved coverage, but **30 fps remains
+unproven**. Final performance acceptance still requires an actual frame-cadence
+measurement and a cold armed/disarmed pair; the clean snapshot is an iteration
+tool, not cold-boot evidence.

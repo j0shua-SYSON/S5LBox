@@ -93,6 +93,8 @@ static uint8_t  g_scan_code[64];
 static uint32_t g_scan_code_va;
 static uint32_t g_scan_code_len;
 static uint32_t g_scan_fail_read_va;
+static bool     g_scan_refuse_cross_page_reads;
+static unsigned g_scan_cross_page_refusals;
 static unsigned g_scan_texel_read_calls;
 static uint32_t g_scan_texel_read_bytes;
 static uint32_t g_scan_texel_max_read_len;
@@ -121,6 +123,11 @@ static bool scan_read(void *ctx, uint32_t va, void *dst, uint32_t len) {
         g_scan_texel_read_calls++;
         g_scan_texel_read_bytes += len;
         if (len > g_scan_texel_max_read_len) g_scan_texel_max_read_len = len;
+    }
+    if (g_scan_refuse_cross_page_reads && len &&
+        (va >> 12) != ((uint32_t)((uint64_t)va + len - 1u) >> 12)) {
+        g_scan_cross_page_refusals++;
+        return false;
     }
     if (g_scan_fail_read_va && va <= g_scan_fail_read_va &&
         (uint64_t)va + len > g_scan_fail_read_va)
@@ -228,6 +235,8 @@ static void scan_select_code(ios3_hle_site_t *site) {
 static void reset_scan_fixture(ios3_hle_site_t *site) {
     memset(g_scan_mem, 0, sizeof g_scan_mem);
     g_scan_fail_read_va = 0u;
+    g_scan_refuse_cross_page_reads = false;
+    g_scan_cross_page_refusals = 0u;
     g_scan_texel_read_calls = 0u;
     g_scan_texel_read_bytes = 0u;
     g_scan_texel_max_read_len = 0u;
@@ -753,6 +762,50 @@ static void test_direct_scanline_accepts_the_measured_full_width_bound(void) {
     ios3_hle_disarm();
 }
 
+static void test_identity_bulk_read_falls_back_to_exact_texels(void) {
+    const uint32_t source = SCAN_MEM_BASE + 0x8f80u;
+    const uint32_t output = SCAN_MEM_BASE + 0xa000u;
+    ios3_hle_site_t *site = site_named("sw_scanline");
+    arm_cpu_t cpu;
+
+    reset_scan_fixture(site);
+    configure_direct_scanline(&cpu, SAMPLE_BGRA8);
+    cpu.r[0] = 0u;
+    cpu.r[1] = 0u;
+    cpu.r[2] = 64u;
+    scan_poke32(SCAN_CTX + 0x04u, source);
+    scan_poke32(SCAN_CTX + 0x08u, 256u);
+    scan_poke32(SCAN_CTX + 0x0cu, UINT32_C(0x003fffff));
+    scan_poke32(SCAN_CTX + 0x10u, UINT32_C(0x0000ffff));
+    scan_poke32(SCAN_RENDER + 0xfcu, output);
+    scan_poke32(SCAN_RENDER + 0x104u, 256u);
+    scan_poke32(SCAN_RENDER + 0x114u, 64u);
+    scan_poke32(SCAN_RENDER + 0x11cu, 1u);
+    for (uint32_t i = 0; i < 64u; i++) {
+        scan_poke32(source + i * 4u, UINT32_C(0xff000000) | i);
+        scan_poke32(output + i * 4u, 0u);
+    }
+    g_scan_refuse_cross_page_reads = true;
+
+    if (arm_only(site)) {
+        CHECK(ios3_hle_step(&cpu, &SCAN_MEM, site->va, 0x0bf1b000u),
+              "identity sampler declined after its bulk read was refused");
+        CHECK(g_scan_cross_page_refusals == 1u,
+              "identity sampler observed %u cross-page bulk refusals",
+              g_scan_cross_page_refusals);
+        CHECK(g_scan_write_calls == 1u && g_scan_write_va == output &&
+              g_scan_write_len == 256u,
+              "scalar fallback published %u write(s) at %08x/%u",
+              g_scan_write_calls, g_scan_write_va, g_scan_write_len);
+        for (uint32_t i = 0; i < 64u; i++)
+            CHECK(scan_peek32(output + i * 4u) ==
+                      (UINT32_C(0xff000000) | i),
+                  "scalar fallback pixel %u is %08x", i,
+                  scan_peek32(output + i * 4u));
+    }
+    ios3_hle_disarm();
+}
+
 static void configure_solid_scanline(arm_cpu_t *cpu, uint32_t pixel) {
     configure_direct_scanline(cpu, SAMPLE_BGRA8);
     scan_poke32(SCAN_STACK + 0x0cu, 0x0008u);
@@ -798,6 +851,42 @@ static void configure_rect_root(arm_cpu_t *cpu, uint16_t flags) {
     cpu->r[13] = SCAN_STACK;
     cpu->r[14] = UINT32_C(0xc0dec0de);
     cpu->r[15] = UINT32_C(0x311e2100);
+}
+
+static void configure_full_width_mode_two_root(arm_cpu_t *cpu,
+                                                uint32_t sampler) {
+    static const float vertex[4][4] = {
+        {   0.0f, 0.0f,   0.0f, 0.0f },
+        { 320.0f, 0.0f, 320.0f, 0.0f },
+        { 320.0f, 1.0f, 320.0f, 1.0f },
+        {   0.0f, 1.0f,   0.0f, 1.0f }
+    };
+    uint32_t input_alpha = sampler == SAMPLE_BGRX8 ? 0u : UINT32_C(0xff000000);
+
+    configure_rect_root(cpu, 0x030bu);
+    for (uint32_t i = 0; i < 4u; i++) {
+        uint32_t base = SCAN_POLY + 4u + i * 0x38u;
+        scan_pokef(base + 0x00u, vertex[i][0]);
+        scan_pokef(base + 0x04u, vertex[i][1]);
+        scan_pokef(base + 0x20u, vertex[i][2]);
+        scan_pokef(base + 0x24u, vertex[i][3]);
+    }
+    scan_poke32(SCAN_CTX + 0x08u, 1280u);
+    scan_poke32(SCAN_CTX + 0x0cu, UINT32_C(0x013fffff));
+    scan_poke32(SCAN_CTX + 0x10u, UINT32_C(0x0000ffff));
+    scan_poke32(SCAN_CTX + 0x14u, sampler);
+    scan_poke32(SCAN_CTX + 0x18u, sampler);
+    scan_poke32(SCAN_CTX + 0x64u, UINT32_MAX);
+    scan_poke32(SCAN_CTX + 0x68u, 1u);
+    scan_poke32(SCAN_RENDER + 0x104u, 1280u);
+    scan_poke32(SCAN_RENDER + 0x114u, 320u);
+    scan_poke32(SCAN_RENDER + 0x11cu, 1u);
+    scan_poke32(SCAN_STATE + 0x08u, 2u);
+    scan_poke32(SCAN_STATE + 0x3cu, 0x12u);
+    for (uint32_t i = 0; i < 320u; i++) {
+        scan_poke32(SCAN_TEXELS + i * 4u, input_alpha | i);
+        scan_poke32(SCAN_OUT + i * 4u, 0u);
+    }
 }
 
 static void test_rect_root_replaces_textured_and_solid_rows_atomically(void) {
@@ -906,6 +995,98 @@ static void test_rect_root_replaces_textured_and_solid_rows_atomically(void) {
                       "mode-two row %u pixel %u is %08x, expected %08x",
                       row, x, actual, mode_two_expected[index]);
             }
+    }
+    ios3_hle_disarm();
+}
+
+static void test_rect_root_chunks_measured_full_width_mode_two(void) {
+    static const uint32_t sampler[2] = { SAMPLE_BGRA8, SAMPLE_BGRX8 };
+    ios3_hle_site_t *site = site_named("ogl_poly_scan");
+    arm_cpu_t cpu;
+
+    for (uint32_t pass = 0; pass < 2u; pass++) {
+        reset_scan_fixture(site);
+        configure_full_width_mode_two_root(&cpu, sampler[pass]);
+        if (!arm_only(site)) continue;
+        CHECK(ios3_hle_step(&cpu, &SCAN_MEM, site->va, 0x0bf1b000u),
+              "full-width mode-two %s root declined",
+              pass ? "BGRX" : "BGRA");
+        CHECK(cpu.r[15] == cpu.r[14],
+              "full-width mode-two root returned to %08x, not LR", cpu.r[15]);
+        CHECK(g_scan_write_calls == 0u && g_scan_writev_calls == 1u &&
+              g_scan_writev_span_count == 1u &&
+              g_scan_writev_va[0] == SCAN_OUT &&
+              g_scan_writev_len[0] == 1280u,
+              "full-width mode-two root published scalar=%u vector=%u/%u "
+              "at %08x/%u", g_scan_write_calls, g_scan_writev_calls,
+              g_scan_writev_span_count, g_scan_writev_va[0],
+              g_scan_writev_len[0]);
+        CHECK(g_scan_texel_read_calls == 2u &&
+              g_scan_texel_read_bytes == 1280u &&
+              g_scan_texel_max_read_len == 1024u,
+              "full-width mode-two root used %u reads totalling %u, max %u",
+              g_scan_texel_read_calls, g_scan_texel_read_bytes,
+              g_scan_texel_max_read_len);
+        for (uint32_t i = 0; i < 320u; i++) {
+            uint32_t expected = UINT32_C(0xff000000) | i;
+            CHECK(scan_peek32(SCAN_OUT + i * 4u) == expected,
+                  "full-width mode-two pass %u pixel %u is %08x, expected %08x",
+                  pass, i, scan_peek32(SCAN_OUT + i * 4u), expected);
+        }
+    }
+
+    /* Apple exposes the first 256-pixel result before sampling the remainder.
+     * Shift the texture back by 288 pixels so the second bulk read straddles
+     * 32 untouched source pixels and 32 pixels produced by the first chunk.
+     * The root still publishes only after both chunks have succeeded. */
+    reset_scan_fixture(site);
+    configure_full_width_mode_two_root(&cpu, SAMPLE_BGRA8);
+    scan_poke32(SCAN_CTX + 0x04u, SCAN_OUT - 1152u);
+    for (uint32_t i = 0; i < 288u; i++)
+        scan_poke32(SCAN_OUT - 1152u + i * 4u,
+                    UINT32_C(0xff000000) | i);
+    if (arm_only(site)) {
+        CHECK(ios3_hle_step(&cpu, &SCAN_MEM, site->va, 0x0bf1b000u),
+              "full-width prior-chunk alias root declined");
+        CHECK(g_scan_writev_calls == 1u && g_scan_writev_span_count == 1u,
+              "prior-chunk alias published %u transaction(s) / %u span(s)",
+              g_scan_writev_calls, g_scan_writev_span_count);
+        CHECK(g_scan_texel_read_calls == 1u &&
+              g_scan_texel_read_bytes == 1024u,
+              "mixed prior-chunk read used %u counted call(s) / %u bytes",
+              g_scan_texel_read_calls, g_scan_texel_read_bytes);
+        for (uint32_t i = 0; i < 320u; i++) {
+            uint32_t source_index = i < 288u ? i : i - 288u;
+            uint32_t expected = UINT32_C(0xff000000) | source_index;
+            CHECK(scan_peek32(SCAN_OUT + i * 4u) == expected,
+                  "mixed prior-chunk pixel %u is %08x, expected %08x", i,
+                  scan_peek32(SCAN_OUT + i * 4u), expected);
+        }
+    }
+
+    reset_scan_fixture(site);
+    configure_full_width_mode_two_root(&cpu, SAMPLE_BGRA8);
+    g_scan_fail_read_va = SCAN_TEXELS + 1024u;
+    if (arm_only(site)) {
+        CHECK(!ios3_hle_step(&cpu, &SCAN_MEM, site->va, 0x0bf1b000u),
+              "root handled although its second mode-two chunk faulted");
+        CHECK(g_scan_write_calls == 0u && g_scan_writev_calls == 0u,
+              "second-chunk fault published scalar=%u vector=%u",
+              g_scan_write_calls, g_scan_writev_calls);
+        CHECK(scan_peek32(SCAN_OUT) == 0u &&
+              scan_peek32(SCAN_OUT + 319u * 4u) == 0u,
+              "second-chunk fault changed the guest destination");
+    }
+
+    reset_scan_fixture(site);
+    configure_full_width_mode_two_root(&cpu, SAMPLE_BGRA8);
+    scan_poke32(SCAN_STATE + 0x08u, 1u);
+    if (arm_only(site)) {
+        CHECK(!ios3_hle_step(&cpu, &SCAN_MEM, site->va, 0x0bf1b000u),
+              "root broadened the 320-pixel chunk path to unmeasured mode one");
+        CHECK(g_scan_write_calls == 0u && g_scan_writev_calls == 0u,
+              "unmeasured full-width mode one published scalar=%u vector=%u",
+              g_scan_write_calls, g_scan_writev_calls);
     }
     ios3_hle_disarm();
 }
@@ -1577,8 +1758,10 @@ int main(void) {
     test_oracle_captures_disjoint_transactional_spans();
     test_direct_scanline_preserves_bgra_and_forces_bgrx_alpha();
     test_direct_scanline_accepts_the_measured_full_width_bound();
+    test_identity_bulk_read_falls_back_to_exact_texels();
     test_direct_solid_scanline_repeats_the_context_pixel();
     test_rect_root_replaces_textured_and_solid_rows_atomically();
+    test_rect_root_chunks_measured_full_width_mode_two();
     test_rect_root_preserves_prior_row_alias_semantics();
     test_rect_root_refuses_unproved_or_nonatomic_shapes();
     test_rect_root_oracle_captures_two_rows_without_publication();

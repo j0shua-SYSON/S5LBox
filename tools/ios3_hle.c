@@ -576,13 +576,16 @@ static bool hle_sample_nearest_32_pixels(
     if (hle_identity_texture_row(base, pitch, max_x, max_y, w, dw,
                                  u, v, du, dv, count, out,
                                  &identity_source)) {
-        if (!mem->read(mem->ctx, identity_source, pixels, count * 4u))
-            return false;
-        if (force_opaque) {
-            for (uint32_t k = 0; k < count; k++)
-                pixels[k] |= UINT32_C(0xff000000);
+        if (mem->read(mem->ctx, identity_source, pixels, count * 4u)) {
+            if (force_opaque) {
+                for (uint32_t k = 0; k < count; k++)
+                    pixels[k] |= UINT32_C(0xff000000);
+            }
+            return true;
         }
-        return true;
+        /* A bulk callback can conservatively refuse a range that the guest's
+         * individual texel loads can read (for example at a mapping boundary).
+         * No guest byte has been published, so retry the exact scalar loop. */
     }
 
     for (uint32_t k = 0; k < count; k++) {
@@ -1053,8 +1056,12 @@ typedef struct {
     uint32_t row;
     uint32_t prior_rows;
     uint32_t expected_len;
+    uint32_t expected_writes;
     uint32_t write_va;
     uint32_t write_len;
+    uint32_t failure_kind;
+    uint32_t failure_va;
+    uint32_t failure_len;
     unsigned writes;
 } ogl_rect_scan_mem_t;
 
@@ -1071,17 +1078,39 @@ static bool ogl_rect_range_contains(uint32_t base, uint32_t size,
 }
 
 static bool ogl_rect_ranges_overlap(uint32_t a_va, uint32_t a_len,
-                                    uint32_t b_va, uint32_t b_len) {
+                                     uint32_t b_va, uint32_t b_len) {
     return (uint64_t)a_va < (uint64_t)b_va + b_len &&
            (uint64_t)b_va < (uint64_t)a_va + a_len;
+}
+
+static void ogl_rect_overlay_bytes(uint32_t request_va, uint32_t request_len,
+                                    void *request, uint32_t overlay_va,
+                                    uint32_t overlay_len,
+                                    const void *overlay) {
+    uint64_t start = request_va > overlay_va ? request_va : overlay_va;
+    uint64_t request_end = (uint64_t)request_va + request_len;
+    uint64_t overlay_end = (uint64_t)overlay_va + overlay_len;
+    uint64_t end = request_end < overlay_end ? request_end : overlay_end;
+
+    if (!request || !overlay || start >= end) return;
+    memcpy((uint8_t *)request + (uint32_t)(start - request_va),
+           (const uint8_t *)overlay + (uint32_t)(start - overlay_va),
+           (size_t)(end - start));
 }
 
 static bool ogl_rect_scan_read(void *ctx, uint32_t va, void *dst,
                                uint32_t len) {
     ogl_rect_scan_mem_t *shadow = (ogl_rect_scan_mem_t *)ctx;
     uint32_t offset = 0;
+    bool overlaps_scratch = false;
 
-    if (!shadow || !dst || !len) return false;
+    if (!shadow) return false;
+    if (!dst || !len) {
+        shadow->failure_kind = 1u;
+        shadow->failure_va = va;
+        shadow->failure_len = len;
+        return false;
+    }
     if (ogl_rect_range_contains(OGL_RECT_FAKE_STACK,
                                 (uint32_t)sizeof shadow->stack,
                                 va, len, &offset)) {
@@ -1104,46 +1133,120 @@ static bool ogl_rect_scan_read(void *ctx, uint32_t va, void *dst,
     /* A malformed read that merely overlaps scratch must not fall through to
      * a coincidentally mapped guest address. Measured guest operands are below
      * 0x40000000; the reserved scratch page is intentionally above it. */
-    if ((uint64_t)va + len > OGL_RECT_REAL_LIMIT) return false;
+    if ((uint64_t)va + len > OGL_RECT_REAL_LIMIT) {
+        shadow->failure_kind = 2u;
+        shadow->failure_va = va;
+        shadow->failure_len = len;
+        return false;
+    }
+
+    /* sw_scanline publishes each 256-pixel chunk before advancing its start
+     * attributes. Expose a completed chunk to the next one. A texture read may
+     * straddle captured and untouched bytes, so begin with the guest's old
+     * contents and overlay every earlier write in Apple's top-to-bottom order. */
+    if (shadow->write_len) {
+        if (ogl_rect_range_contains(shadow->write_va, shadow->write_len,
+                                    va, len, &offset)) {
+            memcpy(dst, (const uint8_t *)g_ogl_rect_pixels[shadow->row] +
+                        offset, len);
+            return true;
+        }
+        if (ogl_rect_ranges_overlap(shadow->write_va, shadow->write_len,
+                                    va, len))
+            overlaps_scratch = true;
+    }
 
     for (uint32_t i = 0; i < shadow->prior_rows; i++) {
         const ios3_hle_write_span_t *span = &g_ogl_rect_spans[i];
-        if (ogl_rect_range_contains(span->va, span->len, va, len, &offset)) {
+        if (!overlaps_scratch &&
+            ogl_rect_range_contains(span->va, span->len, va, len, &offset)) {
             memcpy(dst, (const uint8_t *)span->src + offset, len);
             return true;
         }
         if (ogl_rect_ranges_overlap(span->va, span->len, va, len))
-            return false;
+            overlaps_scratch = true;
     }
-    return shadow->source && shadow->source->read &&
-           shadow->source->read(shadow->source->ctx, va, dst, len);
+
+    if (!shadow->source || !shadow->source->read ||
+        !shadow->source->read(shadow->source->ctx, va, dst, len)) {
+        shadow->failure_kind = 3u;
+        shadow->failure_va = va;
+        shadow->failure_len = len;
+        return false;
+    }
+    if (!overlaps_scratch) return true;
+
+    for (uint32_t i = 0; i < shadow->prior_rows; i++) {
+        const ios3_hle_write_span_t *span = &g_ogl_rect_spans[i];
+        ogl_rect_overlay_bytes(va, len, dst, span->va, span->len, span->src);
+    }
+    if (shadow->write_len)
+        ogl_rect_overlay_bytes(va, len, dst, shadow->write_va,
+                               shadow->write_len,
+                               g_ogl_rect_pixels[shadow->row]);
+    return true;
 }
 
 static bool ogl_rect_scan_read_priv(void *ctx, uint32_t va, void *dst,
-                                    uint32_t len) {
+                                     uint32_t len) {
     ogl_rect_scan_mem_t *shadow = (ogl_rect_scan_mem_t *)ctx;
-    return shadow && shadow->source && shadow->source->read_priv &&
-           shadow->source->read_priv(shadow->source->ctx, va, dst, len);
+    if (shadow && shadow->source && shadow->source->read_priv &&
+        shadow->source->read_priv(shadow->source->ctx, va, dst, len))
+        return true;
+    if (shadow) {
+        shadow->failure_kind = 4u;
+        shadow->failure_va = va;
+        shadow->failure_len = len;
+    }
+    return false;
 }
 
 static bool ogl_rect_scan_read_phys(void *ctx, uint32_t pa, void *dst,
-                                    uint32_t len) {
+                                     uint32_t len) {
     ogl_rect_scan_mem_t *shadow = (ogl_rect_scan_mem_t *)ctx;
-    return shadow && shadow->source && shadow->source->read_phys &&
-           shadow->source->read_phys(shadow->source->ctx, pa, dst, len);
+    if (shadow && shadow->source && shadow->source->read_phys &&
+        shadow->source->read_phys(shadow->source->ctx, pa, dst, len))
+        return true;
+    if (shadow) {
+        shadow->failure_kind = 5u;
+        shadow->failure_va = pa;
+        shadow->failure_len = len;
+    }
+    return false;
 }
 
 static bool ogl_rect_scan_write(void *ctx, uint32_t va, const void *src,
-                                uint32_t len) {
+                                 uint32_t len) {
     ogl_rect_scan_mem_t *shadow = (ogl_rect_scan_mem_t *)ctx;
-    if (!shadow || !src || shadow->writes != 0u ||
-        len != shadow->expected_len ||
-        (uint64_t)va + len > OGL_RECT_REAL_LIMIT)
+    uint64_t next_va;
+
+    if (!shadow) return false;
+    if (!src || !len ||
+        shadow->row >= OGL_RECT_MAX_HEIGHT ||
+        shadow->writes >= shadow->expected_writes ||
+        shadow->write_len > shadow->expected_len ||
+        len > shadow->expected_len - shadow->write_len ||
+        (uint64_t)va + len > OGL_RECT_REAL_LIMIT) {
+        shadow->failure_kind = 6u;
+        shadow->failure_va = va;
+        shadow->failure_len = len;
         return false;
-    memcpy(g_ogl_rect_pixels[shadow->row], src, len);
-    shadow->write_va = va;
-    shadow->write_len = len;
-    shadow->writes = 1u;
+    }
+
+    next_va = (uint64_t)shadow->write_va + shadow->write_len;
+    if (shadow->writes != 0u &&
+        (next_va > UINT32_MAX || va != (uint32_t)next_va)) {
+        shadow->failure_kind = 7u;
+        shadow->failure_va = va;
+        shadow->failure_len = len;
+        return false;
+    }
+
+    memcpy((uint8_t *)g_ogl_rect_pixels[shadow->row] + shadow->write_len,
+           src, len);
+    if (shadow->writes == 0u) shadow->write_va = va;
+    shadow->write_len += len;
+    shadow->writes++;
     return true;
 }
 
@@ -1179,27 +1282,59 @@ static bool ogl_rect_exact_i32(float value, int32_t *out) {
     return true;
 }
 
+/*
+ * sw_scanline's outer loop at 0x3122d4a8..0x3122e2d8 clamps each temporary
+ * to 256 pixels, calls _ogl_poly_scan_increment_n with that count, advances
+ * the destination and repeats. Keep this initial root expansion restricted to
+ * the two 320-wide mode-2 shapes retained in r299b; the per-chunk scanline
+ * handler still rechecks the complete context before producing any bytes.
+ */
+static bool ogl_rect_mode_two_chunks(const ios3_hle_mem_t *mem, uint32_t ctx,
+                                     uint32_t mask, uint32_t count) {
+    uint32_t render = 0, state = 0, units = 0, aux = 0;
+    uint32_t min_sampler = 0, mag_sampler = 0;
+    uint8_t state_flags = 0, state_mode = 0;
+
+    if (!mem || mask != 0x0308u || count != OGL_RECT_MAX_WIDTH ||
+        !read_u32_at(mem, ctx, 0x00u, &render) ||
+        !read_u32_at(mem, ctx, 0x14u, &min_sampler) ||
+        !read_u32_at(mem, ctx, 0x18u, &mag_sampler) ||
+        !read_u32_at(mem, ctx, 0x68u, &units) ||
+        !read_u32_at(mem, render, 0x04u, &state) ||
+        !read_u32_at(mem, render, 0x100u, &aux) ||
+        !read_u8_at(mem, state, 0x08u, &state_mode) ||
+        !read_u8_at(mem, state, 0x3cu, &state_flags))
+        return false;
+
+    return units == 1u && aux == 0u && state_flags == 0x12u &&
+           state_mode == 2u && min_sampler == mag_sampler &&
+           (min_sampler == SW_SAMPLE_NEAREST_BGRA8 ||
+            min_sampler == SW_SAMPLE_NEAREST_BGRX8);
+}
+
 static bool ogl_rect_render_row(const ios3_hle_mem_t *mem, uint32_t ctx,
-                                uint32_t mask, uint32_t x, uint32_t y,
+                                 uint32_t mask, uint32_t x, uint32_t y,
                                 uint32_t count, uint32_t row,
                                 uint32_t prior_rows, float u, float v,
                                 uint32_t *out_va, uint32_t *out_len) {
     ogl_rect_scan_mem_t shadow;
     ios3_hle_mem_t row_mem;
     arm_cpu_t row_cpu;
+    uint32_t chunks = 1u, offset = 0u;
 
     memset(&shadow, 0, sizeof shadow);
-    memset(&row_cpu, 0, sizeof row_cpu);
+    if (count > SW_SCANLINE_CHUNK_MAX &&
+        ogl_rect_mode_two_chunks(mem, ctx, mask, count)) {
+        chunks = 2u;
+    }
     shadow.source = mem;
     shadow.row = row;
     shadow.prior_rows = prior_rows;
     shadow.expected_len = count * 4u;
+    shadow.expected_writes = chunks;
     shadow.stack[0] = OGL_RECT_FAKE_DELTA;
     shadow.stack[3] = mask;
     shadow.stack[4] = ctx;
-    shadow.start[3] = 1.0f;
-    shadow.start[8] = u;
-    shadow.start[9] = v;
     shadow.delta[8] = (mask & 0x0100u) ? 1.0f : 0.0f;
 
     row_mem = *mem;
@@ -1210,16 +1345,42 @@ static bool ogl_rect_render_row(const ios3_hle_mem_t *mem, uint32_t ctx,
     row_mem.read_phys = ogl_rect_scan_read_phys;
     row_mem.writev = ogl_rect_scan_writev;
 
-    row_cpu.r[0] = x;
-    row_cpu.r[1] = y;
-    row_cpu.r[2] = count;
-    row_cpu.r[3] = OGL_RECT_FAKE_START;
-    row_cpu.r[13] = OGL_RECT_FAKE_STACK;
-    row_cpu.r[14] = UINT32_C(0x7fffd300);
-    row_cpu.r[15] = UINT32_C(0x3122d180);
+    while (offset < count) {
+        uint32_t chunk = count - offset;
+        if (chunks > 1u && chunk > SW_SCANLINE_CHUNK_MAX)
+            chunk = SW_SCANLINE_CHUNK_MAX;
 
-    if (!hle_sw_scanline_known_paths(&row_cpu, &row_mem) ||
-        row_cpu.r[15] != row_cpu.r[14] || shadow.writes != 1u)
+        /* mask 0x0308 selects w/u/v. The root's decoded delta is 0/1/0,
+         * exactly matching increment_n(start, delta, mask, offset). */
+        shadow.start[3] = 1.0f;
+        shadow.start[8] = u + (float)offset;
+        shadow.start[9] = v;
+
+        memset(&row_cpu, 0, sizeof row_cpu);
+        row_cpu.r[0] = x + offset;
+        row_cpu.r[1] = y;
+        row_cpu.r[2] = chunk;
+        row_cpu.r[3] = OGL_RECT_FAKE_START;
+        row_cpu.r[13] = OGL_RECT_FAKE_STACK;
+        row_cpu.r[14] = UINT32_C(0x7fffd300);
+        row_cpu.r[15] = UINT32_C(0x3122d180);
+
+        if (!hle_sw_scanline_known_paths(&row_cpu, &row_mem) ||
+            row_cpu.r[15] != row_cpu.r[14]) {
+            if (g_trace_budget[4] < 12u) {
+                fprintf(stderr,
+                        "hle-trace   root.chunk row=%u offset=%u count=%u "
+                        "writes=%u/%u bytes=%u/%u failure=%u@%08x+%u\n",
+                        row, offset, chunk, shadow.writes,
+                        shadow.expected_writes, shadow.write_len,
+                        shadow.expected_len, shadow.failure_kind,
+                        shadow.failure_va, shadow.failure_len);
+            }
+            return false;
+        }
+        offset += chunk;
+    }
+    if (shadow.writes != chunks || shadow.write_len != shadow.expected_len)
         return false;
     if (out_va) *out_va = shadow.write_va;
     if (out_len) *out_len = shadow.write_len;
