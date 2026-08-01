@@ -1175,12 +1175,12 @@ static void ogl_rect_trace_row_decline(const ios3_hle_mem_t *mem,
 static bool hle_ogl_poly_scan_known_rect(arm_cpu_t *cpu,
                                          const ios3_hle_mem_t *mem) {
     ogl_rect_vert_t vertex[4];
-    int32_t x[4], y[4], u[4], v[4];
+    int32_t x[4] = {0}, y[4] = {0}, u[4] = {0}, v[4] = {0};
     uint32_t sp, xmax = 0, ymax = 0, callback = 0, ctx = 0;
-    uint32_t width, height, mask;
+    uint32_t width = 0, height = 0, mask = 0;
     uint32_t decline_detail = UINT32_MAX;
     uint16_t count = 0, flags = 0;
-    bool textured;
+    bool textured = false;
     bool trace_row = false;
     const char *decline_reason = "abi";
 
