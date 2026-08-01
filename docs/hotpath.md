@@ -968,3 +968,58 @@ since. The snapshot at 5.8e9 is good (312,474 of 460,800 bytes non-zero, the
 same figure r187 produced), and the harness works; what is missing is a window
 with rendering in it, and that has to be found by instrumenting when the sites
 are hit rather than by choosing a plausible-looking range.
+
+
+## MBX2D: what edram fixed, and what it did not
+
+The 16 MB aperture is now modelled (S5L_MBX_APERTURE), and r266 measures the
+effect against r263 on an otherwise identical run:
+
+    unmapped pages   r263: ... 0x3c400000  0x3ba00000
+                     r266: ... 0x3c400000              <- gone
+    unmapped writes  r263: 812        r266: 795
+
+So the guest's accesses to MBX-local memory are real, they are 0x3b-based, and
+they were previously falling through to "unmapped, returns zero". That is fixed
+and it is a genuine model gap closed.
+
+IT DID NOT CLEAR THE 2DIdle GATE. r266 still reaches exactly one Graphics
+Recovery Event with `2DIdle=0, 3DIdle=1` and never reaches SpringBoard -- the
+output is byte-identical to r246 and r259. So edram was necessary and is not
+sufficient, and the same is true of the interrupt line: wiring IRQ 12, which the
+device tree declares and nothing was driving, ALSO changed nothing observable.
+Both are correct changes. Neither is the cause.
+
+TWO NEGATIVES WORTH KEEPING, because each looked like the answer beforehand:
+
+  * The completion interrupt cannot fire as modelled. s5l_mbx_irq() reports the
+    status word, and the driver's submit path polls 0x12c for bit 6 and
+    acknowledges through 0x134 SYNCHRONOUSLY, inside the same call. By the time
+    a tick samples the status it is already zero, so the line never asserts. An
+    interrupt that is always low is indistinguishable from no interrupt, which
+    is exactly what the measurement showed.
+  * The string that would name the answer cannot be found statically. The
+    driver's own "2DIdle=%d, 3DIdle=%d..." lives at 0xc0788918 and NOTHING in
+    the kernel references it by absolute address -- a whole-file scan for the
+    4-byte value returns nothing, and the pc-relative forms (ldr+add, ADR) do
+    not resolve to it either. So where 2DIdle comes from is still open, and the
+    histogram's constraint stands: only 0x012c, 0x1020 and 0xf00 are ever READ,
+    37 reads in the whole run, which is far too few for a polled status.
+
+The live hypothesis, unproven and NOT acted on: 0x012c is written single bits by
+the driver (0x400, 0x10, 0x8, 0x4, 0x40) through a plain store, and the model
+serves its reads out of an unrelated status word and drops those writes. If a
+2D-idle bit lives there, it reads as zero forever. Acting on that means choosing
+a bit, and choosing a bit because it would make a driver proceed is the one move
+this file's header forbids.
+
+### The address-space question the blit still has to answer
+
+r265's descriptors give the destination as {0x0885c000, 0x960000} -- a raw CPU
+physical in DRAM, cross-checked against the /vram pool -- and the source as
+{0x03a8a000, 0x97000}, which is NOT a CPU physical: nothing is mapped there. The
+device tree declares the aperture as child address 0x03000000 while this machine
+puts its registers at 0x3b000000, so the consistent reading is that surface
+descriptors carry CHILD-RELATIVE addresses and a blit must rebase them. That
+rebase is a rule, and it has not been verified yet -- writing a blit on an
+unverified base is how pixels come from a plausible wrong place.
