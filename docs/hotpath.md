@@ -1412,3 +1412,31 @@ is still TRACE, and no cold armed/disarmed performance pair exists. The next
 lever remains a bounded `ogl_poly_scan` replacement that subsumes the callback
 tree; polishing the scanline percentage cannot satisfy the arithmetic by
 itself.
+
+### r289: atomic multi-row groundwork is not a root replacement
+
+`ogl_poly_scan` cannot safely publish one row at a time. If row 200 faults
+after rows 0--199 were written, returning false would run Apple's routine over
+an already half-mutated destination. The HLE memory contract now has an
+optional transactional scatter write: it translates and validates every byte
+of every span before publishing the first. TRACE receives a write-denied
+version of both the scalar and scatter interfaces.
+
+The differential oracle now captures up to 480 disjoint spans and 614,400
+bytes, enough for a 320x480x4 framebuffer. Expected bytes live in caller-owned
+storage rather than a 600 KiB automatic object. `bootkernel` reserves eight
+depth slots (4,915,200 bytes of static storage) for nested verification and
+compares returned guest memory in 4 KiB chunks. Overlapping spans, insufficient
+storage, range wrap, or any empty span decline before capture.
+
+The fixtures exercise two-span capture, overlap/capacity refusal, TRACE writev
+denial, and non-mutation, bringing the focused total to 1,972 checks. All 54
+tests and the strict-warning build pass. r289 then replayed the 3.9--3.95 B
+checkpoint oracle and reproduced all 360 nested exact passes with zero failures
+and the accepted SHA-256
+`5B6B71F632896AF923BF7D0CEC74AB57CBB34DD4C0A3493E4B6F04CDEA568900`.
+
+This milestone changes verifier/publication plumbing only. `ogl_poly_scan`
+remains TRACE, no multi-row replacement calls writev yet, and there is no new
+performance result. Its value is narrower: the first root arm can now fail
+atomically and be compared row for row instead of relying on a final screenshot.

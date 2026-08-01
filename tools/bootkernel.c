@@ -3082,9 +3082,11 @@ static bool g_hle_pending;       /* a site failed identity and may yet arm */
  * regression window instead of silently stopping before the interaction. */
 #define HLE_VERIFY_LIMIT    65536u
 #define HLE_VERIFY_DEPTH_MAX 8u
+#define HLE_VERIFY_FULL_SCANLINE_BYTES 1280u
 typedef struct {
     uint64_t begin_at[HLE_VERIFY_DEPTH_MAX];
     ios3_hle_oracle_t pending[HLE_VERIFY_DEPTH_MAX];
+    uint8_t expected[HLE_VERIFY_DEPTH_MAX][IOS3_HLE_ORACLE_MAX_BYTES];
     unsigned depth;
     uint64_t attempts[HLE_VERIFY_SITE_MAX];
     uint64_t prepared[HLE_VERIFY_SITE_MAX];
@@ -3198,33 +3200,50 @@ static bool hle_mem_read_priv(void *ctx, uint32_t va, void *dst, uint32_t len) {
  * A caller that gets false must decline the whole call and let the guest run
  * its own code, which is contract item 5.
  */
-static bool hle_mem_write(void *ctx, uint32_t va, const void *src,
-                          uint32_t len) {
+static bool hle_mem_writev(void *ctx, const ios3_hle_write_span_t *spans,
+                           uint32_t count) {
     arm_cpu_t *cpu = (arm_cpu_t *)ctx;
-    const uint8_t *bytes = (const uint8_t *)src;
 
-    if (!cpu || !bytes || !len || !g_mach || !g_mach->ram || !va) return false;
-    if ((uint64_t)va + len - 1u > UINT32_MAX) return false;
+    if (!cpu || !spans || count == 0u ||
+        count > IOS3_HLE_ORACLE_MAX_SPANS || !g_mach || !g_mach->ram)
+        return false;
 
     /*
-     * Translate the WHOLE range before storing a single byte. Checking as we
-     * go would leave a prefix written when a later page faults, which is the
-     * partial write this refuses to produce.
+     * Translate EVERY range before storing a single byte. Checking row by row
+     * would leave an upper prefix written when a later row faults, which is
+     * the partial polygon this interface exists to forbid.
      */
-    for (uint32_t i = 0; i < len; i++) {
-        uint32_t pa = 0;
-        if (arm_mmu_translate(cpu, va + i, ARM_ACCESS_WRITE, false, &pa))
+    for (uint32_t s = 0; s < count; s++) {
+        if (!spans[s].src || spans[s].len == 0u || !spans[s].va ||
+            (uint64_t)spans[s].va + spans[s].len > UINT64_C(0x100000000))
             return false;
-        if (pa < g_mach->ram_base ||
-            (uint64_t)pa - g_mach->ram_base >= g_mach->ram_size)
-            return false;
+        for (uint32_t i = 0; i < spans[s].len; i++) {
+            uint32_t pa = 0;
+            if (arm_mmu_translate(cpu, spans[s].va + i, ARM_ACCESS_WRITE,
+                                  false, &pa))
+                return false;
+            if (pa < g_mach->ram_base ||
+                (uint64_t)pa - g_mach->ram_base >= g_mach->ram_size)
+                return false;
+        }
     }
-    for (uint32_t i = 0; i < len; i++) {
-        uint32_t pa = 0;
-        (void)arm_mmu_translate(cpu, va + i, ARM_ACCESS_WRITE, false, &pa);
-        g_mach->ram[pa - g_mach->ram_base] = bytes[i];
+
+    for (uint32_t s = 0; s < count; s++) {
+        const uint8_t *bytes = (const uint8_t *)spans[s].src;
+        for (uint32_t i = 0; i < spans[s].len; i++) {
+            uint32_t pa = 0;
+            (void)arm_mmu_translate(cpu, spans[s].va + i, ARM_ACCESS_WRITE,
+                                    false, &pa);
+            g_mach->ram[pa - g_mach->ram_base] = bytes[i];
+        }
     }
     return true;
+}
+
+static bool hle_mem_write(void *ctx, uint32_t va, const void *src,
+                          uint32_t len) {
+    ios3_hle_write_span_t span = { va, src, len };
+    return hle_mem_writev(ctx, &span, 1u);
 }
 
 static bool hle_prepare(arm_cpu_t *cpu, ios3_hle_mem_t *mem,
@@ -3238,6 +3257,7 @@ static bool hle_prepare(arm_cpu_t *cpu, ios3_hle_mem_t *mem,
     mem->write = hle_mem_write;
     mem->read_priv = hle_mem_read_priv;
     mem->read_phys = hle_mem_read_phys;
+    mem->writev = hle_mem_writev;
     as = diagnostic_ttbr0_base(cpu);
     pc = cpu->r[15] & ~1u;
 
@@ -3299,7 +3319,10 @@ static void hle_verify_begin(arm_cpu_t *cpu, uint64_t at) {
         return;
     if (!hle_prepare(cpu, &mem, &pc, &as)) return;
 
-    ready = ios3_hle_oracle_prepare(cpu, &mem, pc, as, &candidate);
+    ready = ios3_hle_oracle_prepare(
+        cpu, &mem, pc, as, &candidate,
+        g_hle_verifier.expected[g_hle_verifier.depth],
+        (uint32_t)sizeof g_hle_verifier.expected[g_hle_verifier.depth]);
     if (candidate.site_index == UINT32_MAX) return;
     index = candidate.site_index;
     if (index >= HLE_VERIFY_SITE_MAX) {
@@ -3320,10 +3343,12 @@ static void hle_verify_begin(arm_cpu_t *cpu, uint64_t at) {
 }
 
 static void hle_verify_note_post_step(arm_cpu_t *cpu, uint64_t at) {
-    uint8_t actual[IOS3_HLE_ORACLE_MAX_BYTES];
+    uint8_t actual[4096];
     ios3_hle_oracle_t *expected;
     uint64_t begin_at;
-    uint32_t index, first = 0u;
+    uint32_t index, bad_span = 0u, bad_offset = 0u;
+    uint8_t native_byte = 0u, guest_byte = 0u;
+    bool unreadable = false, mismatch = false;
 
     if (!g_hle_verify || g_hle_verifier.depth == 0u || !cpu)
         return;
@@ -3336,25 +3361,58 @@ static void hle_verify_note_post_step(arm_cpu_t *cpu, uint64_t at) {
         return;
 
     index = expected->site_index;
-    if (!hle_mem_read(cpu, expected->out_va, actual, expected->out_len)) {
+    for (uint32_t s = 0; s < expected->span_count && !unreadable && !mismatch;
+         s++) {
+        const ios3_hle_oracle_span_t *span = &expected->spans[s];
+        for (uint32_t offset = 0; offset < span->len;) {
+            uint32_t left = span->len - offset;
+            uint32_t chunk = left < sizeof actual ? left
+                                                  : (uint32_t)sizeof actual;
+            const uint8_t *native = expected->expected +
+                                    span->expected_offset + offset;
+            if (!hle_mem_read(cpu, span->va + offset, actual, chunk)) {
+                unreadable = true;
+                bad_span = s;
+                bad_offset = offset;
+                break;
+            }
+            for (uint32_t i = 0; i < chunk; i++) {
+                if (actual[i] != native[i]) {
+                    mismatch = true;
+                    bad_span = s;
+                    bad_offset = offset + i;
+                    native_byte = native[i];
+                    guest_byte = actual[i];
+                    break;
+                }
+            }
+            if (mismatch) break;
+            offset += chunk;
+        }
+    }
+
+    if (unreadable) {
         g_hle_verifier.unreadable[index]++;
         if (g_hle_verifier.failure_logs++ < 8u)
             fprintf(stderr,
-                    "hle-verify UNREADABLE %s span=%08x+%u begin=%llu return=%llu\n",
-                    expected->site_name, expected->out_va, expected->out_len,
+                    "hle-verify UNREADABLE %s spans=%u bytes=%u "
+                    "at=%08x+%u begin=%llu return=%llu\n",
+                    expected->site_name, expected->span_count,
+                    expected->expected_len, expected->spans[bad_span].va,
+                    bad_offset,
                     (unsigned long long)begin_at,
                     (unsigned long long)at);
-    } else if (memcmp(actual, expected->expected, expected->out_len) != 0) {
-        while (first < expected->out_len &&
-               actual[first] == expected->expected[first])
-            first++;
+    } else if (mismatch) {
         g_hle_verifier.mismatched[index]++;
         if (g_hle_verifier.failure_logs++ < 8u)
             fprintf(stderr,
-                    "hle-verify MISMATCH %s span=%08x+%u first=+%u "
+                    "hle-verify MISMATCH %s spans=%u bytes=%u "
+                    "span=%u at=%08x+%u "
                     "native=%02x guest=%02x begin=%llu return=%llu\n",
-                    expected->site_name, expected->out_va, expected->out_len,
-                    first, expected->expected[first], actual[first],
+                    expected->site_name, expected->span_count,
+                    expected->expected_len, bad_span,
+                    expected->spans[bad_span].va, bad_offset,
+                    native_byte, guest_byte,
                     (unsigned long long)begin_at,
                     (unsigned long long)at);
     } else {
@@ -3362,12 +3420,25 @@ static void hle_verify_note_post_step(arm_cpu_t *cpu, uint64_t at) {
         if (g_hle_verifier.pass_logs++ < 12u ||
             (expected->site_name &&
              strcmp(expected->site_name, "sw_scanline") == 0 &&
-             expected->out_len == IOS3_HLE_ORACLE_MAX_BYTES &&
-             g_hle_verifier.full_scanline_pass_logs++ < 4u))
-            printf("hle-verify PASS %s span=%08x+%u begin=%llu return=%llu\n",
-                   expected->site_name, expected->out_va, expected->out_len,
-                   (unsigned long long)begin_at,
-                   (unsigned long long)at);
+             expected->span_count == 1u &&
+             expected->spans[0].len == HLE_VERIFY_FULL_SCANLINE_BYTES &&
+             g_hle_verifier.full_scanline_pass_logs++ < 4u)) {
+            if (expected->span_count == 1u)
+                printf("hle-verify PASS %s span=%08x+%u "
+                       "begin=%llu return=%llu\n",
+                       expected->site_name, expected->spans[0].va,
+                       expected->spans[0].len,
+                       (unsigned long long)begin_at,
+                       (unsigned long long)at);
+            else
+                printf("hle-verify PASS %s spans=%u bytes=%u "
+                       "first=%08x+%u begin=%llu return=%llu\n",
+                       expected->site_name, expected->span_count,
+                       expected->expected_len, expected->spans[0].va,
+                       expected->spans[0].len,
+                       (unsigned long long)begin_at,
+                       (unsigned long long)at);
+        }
     }
     g_hle_verifier.depth--;
 }

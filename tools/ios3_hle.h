@@ -91,6 +91,12 @@ extern "C" {
  * treat as "decline and let the guest do it" rather than as a zero.
  */
 typedef struct {
+    uint32_t va;
+    const void *src;
+    uint32_t len;
+} ios3_hle_write_span_t;
+
+typedef struct {
     void *ctx;
     bool (*read)(void *ctx, uint32_t va, void *dst, uint32_t len);
     bool (*write)(void *ctx, uint32_t va, const void *src, uint32_t len);
@@ -129,6 +135,14 @@ typedef struct {
      * the one holding pixels wins, instead of a blit being written on a guess.
      */
     bool (*read_phys)(void *ctx, uint32_t pa, void *dst, uint32_t len);
+    /*
+     * Publish several disjoint spans as one transaction. May be NULL.
+     * Implementations must validate EVERY span before writing the first byte;
+     * false therefore means no guest byte changed. A multi-row replacement
+     * requires this instead of issuing row writes that can fail halfway down.
+     */
+    bool (*writev)(void *ctx, const ios3_hle_write_span_t *spans,
+                   uint32_t count);
 } ios3_hle_mem_t;
 
 typedef enum {
@@ -206,30 +220,41 @@ bool ios3_hle_step(arm_cpu_t *cpu, const ios3_hle_mem_t *mem, uint32_t pc,
  * Live differential oracle for a REPLACE site.
  *
  * This runs the native handler against a private CPU and a write-capturing
- * memory facade. Guest memory is not changed. On success, `expected` describes
- * the one contiguous span the handler would have published; the caller can let
- * Apple's routine execute and compare that span when it returns to `return_pc`.
- * A false result is a refusal, exactly like ios3_hle_step(), and `site_index`
- * remains UINT32_MAX when `pc` was not an armed REPLACE site in this address
- * space. Counters are deliberately untouched so verification cannot masquerade
- * as replacement work in the run report.
+ * memory facade. Guest memory is not changed. On success, `spans` describes
+ * one or more disjoint publications and `expected` points into caller-owned
+ * storage containing their bytes. The caller can let Apple's routine execute
+ * and compare every span when it returns to `return_pc`. A false result is a
+ * refusal, exactly like ios3_hle_step(), and `site_index` remains UINT32_MAX
+ * when `pc` was not an armed REPLACE site in this address space. Counters are
+ * deliberately untouched so verification cannot masquerade as replacement
+ * work in the run report.
  */
-#define IOS3_HLE_ORACLE_MAX_BYTES 1280u
+#define IOS3_HLE_ORACLE_MAX_SPANS 480u
+#define IOS3_HLE_ORACLE_MAX_BYTES (320u * 480u * 4u)
+
+typedef struct {
+    uint32_t va;
+    uint32_t len;
+    uint32_t expected_offset;
+} ios3_hle_oracle_span_t;
 
 typedef struct {
     uint32_t site_index;
     const char *site_name;
     uint32_t return_pc;
     uint32_t return_sp;
-    uint32_t out_va;
-    uint32_t out_len;
-    uint8_t expected[IOS3_HLE_ORACLE_MAX_BYTES];
+    uint32_t span_count;
+    uint32_t expected_len;
+    ios3_hle_oracle_span_t spans[IOS3_HLE_ORACLE_MAX_SPANS];
+    uint8_t *expected;
+    uint32_t expected_capacity;
 } ios3_hle_oracle_t;
 
 bool ios3_hle_oracle_prepare(const arm_cpu_t *cpu,
                              const ios3_hle_mem_t *mem,
                              uint32_t pc, uint32_t ttbr0,
-                             ios3_hle_oracle_t *out);
+                             ios3_hle_oracle_t *out,
+                             uint8_t *expected, uint32_t expected_capacity);
 
 #ifdef __cplusplus
 }

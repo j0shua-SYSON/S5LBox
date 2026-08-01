@@ -52,7 +52,23 @@ static bool fake_write(void *ctx, uint32_t va, const void *src, uint32_t len) {
     memcpy(&g_fake[va - FAKE_BASE], src, len);
     return true;
 }
-static const ios3_hle_mem_t FAKE = { NULL, fake_read, fake_write, NULL, NULL };
+static bool fake_writev(void *ctx, const ios3_hle_write_span_t *spans,
+                        uint32_t count) {
+    (void)ctx;
+    if (!spans || count == 0u) return false;
+    for (uint32_t i = 0; i < count; i++) {
+        if (!spans[i].src || spans[i].len == 0u ||
+            spans[i].va < FAKE_BASE ||
+            (uint64_t)(spans[i].va - FAKE_BASE) + spans[i].len > FAKE_LEN)
+            return false;
+    }
+    for (uint32_t i = 0; i < count; i++)
+        (void)fake_write(NULL, spans[i].va, spans[i].src, spans[i].len);
+    return true;
+}
+static const ios3_hle_mem_t FAKE = {
+    NULL, fake_read, fake_write, NULL, NULL, fake_writev
+};
 
 static void poke(uint32_t va, uint32_t word) {
     (void)fake_write(NULL, va, &word, 4u);
@@ -118,7 +134,7 @@ static bool scan_write(void *ctx, uint32_t va, const void *src, uint32_t len) {
 }
 
 static const ios3_hle_mem_t SCAN_MEM = {
-    NULL, scan_read, scan_write, NULL, NULL
+    NULL, scan_read, scan_write, NULL, NULL, NULL
 };
 
 static ios3_hle_site_t *site_named(const char *name) {
@@ -275,6 +291,8 @@ static bool test_handler(arm_cpu_t *cpu, const ios3_hle_mem_t *mem) {
 }
 
 static bool g_trace_write_succeeded;
+static bool g_trace_writev_succeeded;
+static bool g_multiwrite_overlap;
 
 static bool mutating_trace_handler(arm_cpu_t *cpu,
                                    const ios3_hle_mem_t *mem) {
@@ -284,6 +302,28 @@ static bool mutating_trace_handler(arm_cpu_t *cpu,
     cpu->r[15] = cpu->r[14];
     g_trace_write_succeeded = mem->write &&
         mem->write(mem->ctx, FAKE_BASE + 0x100u, &poison, sizeof poison);
+    if (mem->writev) {
+        ios3_hle_write_span_t span = {
+            FAKE_BASE + 0x104u, &poison, sizeof poison
+        };
+        g_trace_writev_succeeded = mem->writev(mem->ctx, &span, 1u);
+    }
+    return true;
+}
+
+static bool multiwrite_handler(arm_cpu_t *cpu,
+                               const ios3_hle_mem_t *mem) {
+    static const uint32_t first = 0x11223344u;
+    static const uint32_t second = 0xaabbccddu;
+    ios3_hle_write_span_t spans[2] = {
+        { FAKE_BASE + 0x200u, &first, sizeof first },
+        { FAKE_BASE + (g_multiwrite_overlap ? 0x202u : 0x208u),
+          &second, sizeof second }
+    };
+
+    if (!mem || !mem->writev || !mem->writev(mem->ctx, spans, 2u))
+        return false;
+    cpu->r[15] = cpu->r[14];
     return true;
 }
 
@@ -395,6 +435,7 @@ static void test_trace_cannot_mutate_or_intercept_the_guest(void) {
     s->handler = mutating_trace_handler;
     g_handler_calls = 0u;
     g_trace_write_succeeded = false;
+    g_trace_writev_succeeded = false;
     poke(FAKE_BASE + 0x100u, memory_before);
 
     CHECK(ios3_hle_arm(&FAKE, 0x1000u) == 1u, "setup: site did not arm");
@@ -405,6 +446,8 @@ static void test_trace_cannot_mutate_or_intercept_the_guest(void) {
           "a TRACE handler changed the live CPU state");
     CHECK(!g_trace_write_succeeded,
           "a TRACE handler's guest-memory write was accepted");
+    CHECK(!g_trace_writev_succeeded,
+          "a TRACE handler's transactional guest-memory write was accepted");
     CHECK(fake_read(NULL, FAKE_BASE + 0x100u, &memory_after,
                     sizeof memory_after) && memory_after == memory_before,
           "TRACE changed guest memory from %08x to %08x",
@@ -431,6 +474,64 @@ static void test_declining_is_safe(void) {
           (unsigned long long)s->declined, (unsigned long long)s->handled);
     CHECK(cpu.r[15] == 0x1234u,
           "a declined call moved the program counter to %08x", cpu.r[15]);
+}
+
+static void test_oracle_captures_disjoint_transactional_spans(void) {
+    ios3_hle_oracle_t oracle;
+    ios3_hle_site_t *s;
+    arm_cpu_t cpu;
+    uint8_t expected[8];
+    uint32_t first = 0u, second = 0u, guest = UINT32_MAX;
+
+    memset(&cpu, 0, sizeof cpu);
+    cpu.r[13] = FAKE_BASE + 0x800u;
+    cpu.r[14] = 0xc0dec0deu;
+    s = install_test_site(IOS3_HLE_REPLACE);
+    s->handler = multiwrite_handler;
+    g_multiwrite_overlap = false;
+    CHECK(ios3_hle_arm(&FAKE, 0x1000u) == 1u,
+          "setup: multi-span site did not arm");
+    CHECK(ios3_hle_oracle_prepare(&cpu, &FAKE, s->va, 0x1000u, &oracle,
+                                  expected, (uint32_t)sizeof expected),
+          "oracle declined two disjoint transactional spans");
+    CHECK(oracle.span_count == 2u && oracle.expected_len == sizeof expected,
+          "multi-span oracle captured %u span(s) / %u bytes",
+          oracle.span_count, oracle.expected_len);
+    CHECK(oracle.spans[0].va == FAKE_BASE + 0x200u &&
+          oracle.spans[0].len == 4u &&
+          oracle.spans[0].expected_offset == 0u &&
+          oracle.spans[1].va == FAKE_BASE + 0x208u &&
+          oracle.spans[1].len == 4u &&
+          oracle.spans[1].expected_offset == 4u,
+          "multi-span oracle metadata is wrong");
+    memcpy(&first, expected, sizeof first);
+    memcpy(&second, expected + 4u, sizeof second);
+    CHECK(first == 0x11223344u && second == 0xaabbccddu,
+          "multi-span oracle bytes are %08x/%08x", first, second);
+    CHECK(fake_read(NULL, FAKE_BASE + 0x200u, &guest, sizeof guest) &&
+          guest == 0u,
+          "multi-span oracle changed guest memory to %08x", guest);
+    CHECK(s->hits == 0u && s->handled == 0u && s->declined == 0u,
+          "multi-span oracle polluted replacement counters");
+
+    s = install_test_site(IOS3_HLE_REPLACE);
+    s->handler = multiwrite_handler;
+    g_multiwrite_overlap = true;
+    CHECK(ios3_hle_arm(&FAKE, 0x1000u) == 1u,
+          "setup: overlap-refusal site did not arm");
+    CHECK(!ios3_hle_oracle_prepare(&cpu, &FAKE, s->va, 0x1000u, &oracle,
+                                   expected, (uint32_t)sizeof expected),
+          "oracle accepted overlapping transactional spans");
+    CHECK(oracle.site_index != UINT32_MAX && oracle.span_count == 0u,
+          "overlap refusal left %u captured span(s)", oracle.span_count);
+
+    g_multiwrite_overlap = false;
+    CHECK(!ios3_hle_oracle_prepare(&cpu, &FAKE, s->va, 0x1000u, &oracle,
+                                   expected, 4u),
+          "oracle accepted a transaction larger than its storage");
+    CHECK(oracle.span_count == 0u,
+          "capacity refusal left %u captured span(s)", oracle.span_count);
+    ios3_hle_disarm();
 }
 
 #define SAMPLE_BGRX8 0x3122b698u
@@ -864,6 +965,7 @@ static void test_live_oracle_captures_without_touching_the_guest(void) {
     };
     ios3_hle_site_t *site = site_named("sw_scanline");
     ios3_hle_oracle_t oracle;
+    uint8_t oracle_bytes[1280];
     arm_cpu_t cpu, before;
 
     reset_scan_fixture(site);
@@ -871,7 +973,8 @@ static void test_live_oracle_captures_without_touching_the_guest(void) {
     before = cpu;
     if (arm_only(site)) {
         CHECK(ios3_hle_oracle_prepare(&cpu, &SCAN_MEM, site->va,
-                                      0x0bf1b000u, &oracle),
+                                      0x0bf1b000u, &oracle, oracle_bytes,
+                                      (uint32_t)sizeof oracle_bytes),
               "live oracle declined the proved direct scanline");
         CHECK(oracle.site_index != UINT32_MAX &&
               oracle.site_name && strcmp(oracle.site_name, "sw_scanline") == 0,
@@ -882,9 +985,12 @@ static void test_live_oracle_captures_without_touching_the_guest(void) {
         CHECK(oracle.return_sp == cpu.r[13],
               "oracle return SP is %08x, expected %08x",
               oracle.return_sp, cpu.r[13]);
-        CHECK(oracle.out_va == SCAN_OUT + 20u && oracle.out_len == 12u,
-              "oracle captured %08x/%u, expected %08x/12",
-              oracle.out_va, oracle.out_len, SCAN_OUT + 20u);
+        CHECK(oracle.span_count == 1u &&
+              oracle.spans[0].va == SCAN_OUT + 20u &&
+              oracle.spans[0].len == 12u && oracle.expected_len == 12u,
+              "oracle captured %u span(s), first %08x/%u, total %u",
+              oracle.span_count, oracle.spans[0].va, oracle.spans[0].len,
+              oracle.expected_len);
         CHECK(memcmp(&cpu, &before, sizeof cpu) == 0,
               "oracle changed the live CPU");
         CHECK(g_scan_write_calls == 0u,
@@ -904,14 +1010,16 @@ static void test_live_oracle_captures_without_touching_the_guest(void) {
     scan_poke32(SCAN_STACK + 0x0cu, 0x0309u);
     if (arm_only(site)) {
         CHECK(!ios3_hle_oracle_prepare(&cpu, &SCAN_MEM, site->va,
-                                       0x0bf1b000u, &oracle),
+                                       0x0bf1b000u, &oracle, oracle_bytes,
+                                       (uint32_t)sizeof oracle_bytes),
               "oracle accepted an unproved callback mask");
         CHECK(oracle.site_index != UINT32_MAX,
               "oracle did not distinguish handler refusal from no site");
         CHECK(g_scan_write_calls == 0u,
               "declining oracle touched guest memory");
         CHECK(!ios3_hle_oracle_prepare(&cpu, &SCAN_MEM, site->va,
-                                       0x0bad0000u, &oracle),
+                                       0x0bad0000u, &oracle, oracle_bytes,
+                                       (uint32_t)sizeof oracle_bytes),
               "oracle ran in the wrong address space");
         CHECK(oracle.site_index == UINT32_MAX,
               "wrong-space oracle exposed a candidate site");
@@ -926,6 +1034,7 @@ static void test_live_oracle_captures_direct_and_blended_solids(void) {
 
     for (unsigned pass = 0; pass < 2u; pass++) {
         ios3_hle_oracle_t oracle;
+        uint8_t oracle_bytes[1280];
         arm_cpu_t cpu, before;
 
         reset_scan_fixture(site);
@@ -935,11 +1044,14 @@ static void test_live_oracle_captures_direct_and_blended_solids(void) {
         if (!arm_only(site)) continue;
 
         CHECK(ios3_hle_oracle_prepare(&cpu, &SCAN_MEM, site->va,
-                                      0x0bf1b000u, &oracle),
+                                      0x0bf1b000u, &oracle, oracle_bytes,
+                                      (uint32_t)sizeof oracle_bytes),
               "oracle declined solid pass %u", pass);
-        CHECK(oracle.out_va == SCAN_OUT + 20u && oracle.out_len == 12u,
-              "solid oracle pass %u captured %08x/%u", pass,
-              oracle.out_va, oracle.out_len);
+        CHECK(oracle.span_count == 1u &&
+              oracle.spans[0].va == SCAN_OUT + 20u &&
+              oracle.spans[0].len == 12u && oracle.expected_len == 12u,
+              "solid oracle pass %u captured %u span(s), first %08x/%u", pass,
+              oracle.span_count, oracle.spans[0].va, oracle.spans[0].len);
         for (unsigned i = 0; i < 3u; i++) {
             uint32_t got = 0u;
             memcpy(&got, oracle.expected + i * 4u, sizeof got);
@@ -967,6 +1079,7 @@ int main(void) {
     test_observe_mode_never_takes_the_call();
     test_trace_cannot_mutate_or_intercept_the_guest();
     test_declining_is_safe();
+    test_oracle_captures_disjoint_transactional_spans();
     test_direct_scanline_preserves_bgra_and_forces_bgrx_alpha();
     test_direct_solid_scanline_repeats_the_context_pixel();
     test_blended_solid_scanline_matches_selector_two();

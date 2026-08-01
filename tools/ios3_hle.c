@@ -1230,6 +1230,15 @@ static bool trace_write_denied(void *ctx, uint32_t va, const void *src,
     return false;
 }
 
+static bool trace_writev_denied(void *ctx,
+                                const ios3_hle_write_span_t *spans,
+                                uint32_t count) {
+    (void)ctx;
+    (void)spans;
+    (void)count;
+    return false;
+}
+
 unsigned ios3_hle_site_count(void) { return SITE_N; }
 
 ios3_hle_site_t *ios3_hle_site_at(unsigned i) {
@@ -1315,6 +1324,7 @@ bool ios3_hle_step(arm_cpu_t *cpu, const ios3_hle_mem_t *mem, uint32_t pc,
             arm_cpu_t trace_cpu = *cpu;
             ios3_hle_mem_t trace_mem = *mem;
             trace_mem.write = trace_write_denied;
+            trace_mem.writev = trace_writev_denied;
             (void)s->handler(&trace_cpu, &trace_mem);
         }
         return false;
@@ -1332,7 +1342,6 @@ bool ios3_hle_step(arm_cpu_t *cpu, const ios3_hle_mem_t *mem, uint32_t pc,
 typedef struct {
     const ios3_hle_mem_t *source;
     ios3_hle_oracle_t *result;
-    unsigned writes;
 } oracle_mem_t;
 
 static bool oracle_read(void *ctx, uint32_t va, void *dst, uint32_t len) {
@@ -1353,24 +1362,72 @@ static bool oracle_read_phys(void *ctx, uint32_t pa, void *dst, uint32_t len) {
            o->source->read_phys(o->source->ctx, pa, dst, len);
 }
 
+static bool oracle_ranges_overlap(uint32_t a_va, uint32_t a_len,
+                                  uint32_t b_va, uint32_t b_len) {
+    uint64_t a_end = (uint64_t)a_va + a_len;
+    uint64_t b_end = (uint64_t)b_va + b_len;
+    return (uint64_t)a_va < b_end && (uint64_t)b_va < a_end;
+}
+
+static bool oracle_capture_writev(void *ctx,
+                                  const ios3_hle_write_span_t *spans,
+                                  uint32_t count) {
+    oracle_mem_t *o = (oracle_mem_t *)ctx;
+    ios3_hle_oracle_t *result;
+    uint64_t total;
+
+    if (!o || !o->result || !spans || count == 0u)
+        return false;
+    result = o->result;
+    if (!result->expected ||
+        count > IOS3_HLE_ORACLE_MAX_SPANS - result->span_count)
+        return false;
+
+    total = result->expected_len;
+    for (uint32_t i = 0; i < count; i++) {
+        if (!spans[i].src || spans[i].len == 0u ||
+            (uint64_t)spans[i].va + spans[i].len > UINT64_C(0x100000000) ||
+            total + spans[i].len > result->expected_capacity ||
+            total + spans[i].len > IOS3_HLE_ORACLE_MAX_BYTES)
+            return false;
+        for (uint32_t j = 0; j < result->span_count; j++) {
+            if (oracle_ranges_overlap(spans[i].va, spans[i].len,
+                                      result->spans[j].va,
+                                      result->spans[j].len))
+                return false;
+        }
+        for (uint32_t j = 0; j < i; j++) {
+            if (oracle_ranges_overlap(spans[i].va, spans[i].len,
+                                      spans[j].va, spans[j].len))
+                return false;
+        }
+        total += spans[i].len;
+    }
+
+    for (uint32_t i = 0; i < count; i++) {
+        ios3_hle_oracle_span_t *captured =
+            &result->spans[result->span_count++];
+        captured->va = spans[i].va;
+        captured->len = spans[i].len;
+        captured->expected_offset = result->expected_len;
+        memcpy(result->expected + result->expected_len,
+               spans[i].src, spans[i].len);
+        result->expected_len += spans[i].len;
+    }
+    return true;
+}
+
 static bool oracle_capture_write(void *ctx, uint32_t va, const void *src,
                                  uint32_t len) {
-    oracle_mem_t *o = (oracle_mem_t *)ctx;
-    if (!o || !o->result || !src || !len || o->writes != 0u ||
-        len > IOS3_HLE_ORACLE_MAX_BYTES ||
-        (uint64_t)va + len - 1u > UINT32_MAX)
-        return false;
-    memcpy(o->result->expected, src, len);
-    o->result->out_va = va;
-    o->result->out_len = len;
-    o->writes = 1u;
-    return true;
+    ios3_hle_write_span_t span = { va, src, len };
+    return oracle_capture_writev(ctx, &span, 1u);
 }
 
 bool ios3_hle_oracle_prepare(const arm_cpu_t *cpu,
                              const ios3_hle_mem_t *mem,
                              uint32_t pc, uint32_t ttbr0,
-                             ios3_hle_oracle_t *out) {
+                             ios3_hle_oracle_t *out,
+                             uint8_t *expected, uint32_t expected_capacity) {
     ios3_hle_site_t *site = NULL;
     arm_cpu_t private_cpu;
     ios3_hle_mem_t private_mem;
@@ -1380,7 +1437,12 @@ bool ios3_hle_oracle_prepare(const arm_cpu_t *cpu,
     if (!out) return false;
     memset(out, 0, sizeof *out);
     out->site_index = UINT32_MAX;
-    if (!g_armed_n || !cpu || !mem || !mem->read) return false;
+    out->expected = expected;
+    out->expected_capacity = expected_capacity;
+    if (!g_armed_n || !cpu || !mem || !mem->read || !expected ||
+        expected_capacity == 0u ||
+        expected_capacity > IOS3_HLE_ORACLE_MAX_BYTES)
+        return false;
 
     for (unsigned i = 0; i < SITE_N; i++) {
         if (g_sites[i].armed && g_sites[i].va == pc) {
@@ -1400,14 +1462,15 @@ bool ios3_hle_oracle_prepare(const arm_cpu_t *cpu,
     private_cpu = *cpu;
     oracle.source = mem;
     oracle.result = out;
-    oracle.writes = 0u;
+    private_mem = *mem;
     private_mem.ctx = &oracle;
     private_mem.read = oracle_read;
     private_mem.write = oracle_capture_write;
     private_mem.read_priv = oracle_read_priv;
     private_mem.read_phys = oracle_read_phys;
+    private_mem.writev = oracle_capture_writev;
 
-    if (!site->handler(&private_cpu, &private_mem) || oracle.writes != 1u ||
+    if (!site->handler(&private_cpu, &private_mem) || out->span_count == 0u ||
         private_cpu.r[15] != private_cpu.r[14])
         return false;
     return true;
