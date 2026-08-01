@@ -1440,3 +1440,68 @@ This milestone changes verifier/publication plumbing only. `ogl_poly_scan`
 remains TRACE, no multi-row replacement calls writev yet, and there is no new
 performance result. Its value is narrower: the first root arm can now fail
 atomically and be compared row for row instead of relying on a final screenshot.
+
+### r290--r292: the first root arm is exact, and it is not fast enough
+
+The first `ogl_poly_scan` replacement accepts one deliberately narrow shape:
+four vertices in the measured TL/TR/BR/BL order, integer on-screen x/y, w=1,
+the exact 320x480 bounds and `sw_scanline` callback, and either mask `0x030b`
+with axis-aligned one-texel-per-pixel u0/v0 or mask `0x000b`. It renders every
+row through the already proved scanline arms into host scratch, rejects
+overlapping destination rows, and publishes all rows with one transactional
+`writev`. A later source read that aliases an earlier destination row sees the
+scratch result, preserving Apple's top-to-bottom dependency without exposing a
+half-written guest buffer. Everything outside that shape runs Apple.
+
+The strict fixture now passes 3,981 checks. In addition to the existing leaf
+and scanline cases it pins the 320-pixel direct bound, textured/direct-solid/
+blended-solid two-row roots, second-row source and publication faults, oracle
+capacity failure, same-row alias refusal, and prior-row alias visibility. The
+complete suite remains 54/54.
+
+r290 first replayed only 3.9--3.91 B. All three eligible root calls prepared and
+matched Apple's returned rows exactly. That was a smoke test, not sufficient
+coverage. r291 therefore replayed the accepted 3.9--4.4 B drag window with the
+guest routine still executing:
+
+    nearest BGRX leaf        4,830 attempted / 4,830 exact passes
+    nearest BGRA leaf        4,818 attempted / 4,816 exact passes
+    sw_scanline             13,333 attempted / 7,179 exact passes
+    ogl_poly_scan              167 attempted /    92 exact passes
+    total prepared          16,917 / 65,536; 0 failures
+
+All 92 prepared roots matched every captured row byte. The other 75 calls were
+not errors: they failed the narrow guard or a proved child shape and executed
+Apple. The run stopped normally at 4.4 B, touch was accepted and read 26/26,
+external media had zero failures with 2/2 raw redirects/completions, and the
+framebuffer retained the accepted SHA-256
+`E0CE0EB1C117527ECDFF2C2C4A4549FCF48AB0F9E151AB7CBE13965849F7CEC8`.
+
+r292 then enabled replacement over the same checkpoint and touch schedule. It
+stopped normally at 4,399,990,620 with:
+
+    ogl_poly_scan              187 hits /   94 handled /   93 declined
+    sw_scanline              9,096 hits /  414 handled / 8,682 declined
+    nearest BGRX leaf        5,520 hits / 5,520 handled
+    nearest BGRA leaf        3,354 hits / 3,352 handled / 2 declined
+
+The root therefore removed roughly 7,800 nested scanline entries from this
+fixed-instruction window. The final framebuffer was again byte-identical to the
+baseline, all 26 touch reports were consumed, and storage remained clean.
+
+The performance result is negative. r292 took 270.864 host seconds, versus
+about 269.1 seconds for r288: approximately **0.7% slower**, which is noise-level
+but certainly not a speed victory. Worse for reproducibility, the r290--r292
+executable also contained a separate, still-uncommitted 1 KiB HLE MMU batching
+experiment in `bootkernel.c`; the time cannot be attributed to this root commit
+alone. Even with that batching present, no wall-time gain appeared. A fixed
+retired-instruction run is not displayed FPS, and replacement changes how much
+guest work fits inside the cap, so this does not prove zero frame-rate benefit
+either. It proves only that **30 fps has not been demonstrated**.
+
+The next lever is the 93 declined roots. The retained refusal traces already
+show at least three distinct causes: normalized texture extents, nonzero r2/r3
+clip origins, and a full-width `0x000b` solid rectangle whose child state still
+declines. Each needs an exact reason and its own live oracle; broadening the
+guard from geometry alone would repeat the r282 mistake. Final acceptance still
+requires a cold armed/disarmed pair plus an actual frame-cadence measurement.

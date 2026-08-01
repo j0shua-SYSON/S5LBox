@@ -85,6 +85,8 @@ static void poke(uint32_t va, uint32_t word) {
 #define SCAN_DELTA    (SCAN_MEM_BASE + 0x4100u)
 #define SCAN_TEXELS   (SCAN_MEM_BASE + 0x5000u)
 #define SCAN_OUT      (SCAN_MEM_BASE + 0x6000u)
+#define SCAN_POLY     (SCAN_MEM_BASE + 0x7000u)
+#define SCAN_WRITEV_MAX 480u
 
 static uint8_t  g_scan_mem[SCAN_MEM_LEN];
 static uint8_t  g_scan_code[64];
@@ -95,6 +97,11 @@ static bool     g_scan_fail_write;
 static unsigned g_scan_write_calls;
 static uint32_t g_scan_write_va;
 static uint32_t g_scan_write_len;
+static unsigned g_scan_writev_calls;
+static uint32_t g_scan_writev_span_count;
+static uint32_t g_scan_writev_va[SCAN_WRITEV_MAX];
+static uint32_t g_scan_writev_len[SCAN_WRITEV_MAX];
+static uint32_t g_scan_fail_writev_span;
 
 static bool scan_region(uint32_t base, uint32_t size, uint32_t va,
                         uint32_t len, uint32_t *offset) {
@@ -133,8 +140,31 @@ static bool scan_write(void *ctx, uint32_t va, const void *src, uint32_t len) {
     return true;
 }
 
+static bool scan_writev(void *ctx, const ios3_hle_write_span_t *spans,
+                        uint32_t count) {
+    uint32_t offsets[SCAN_WRITEV_MAX];
+    (void)ctx;
+    g_scan_writev_calls++;
+    g_scan_writev_span_count = count;
+    if (!spans || !count || count > SCAN_WRITEV_MAX || g_scan_fail_write)
+        return false;
+
+    /* Validate the complete transaction before changing the pretend guest. */
+    for (uint32_t i = 0; i < count; i++) {
+        g_scan_writev_va[i] = spans[i].va;
+        g_scan_writev_len[i] = spans[i].len;
+        if (i == g_scan_fail_writev_span || !spans[i].src || !spans[i].len ||
+            !scan_region(SCAN_MEM_BASE, SCAN_MEM_LEN, spans[i].va,
+                         spans[i].len, &offsets[i]))
+            return false;
+    }
+    for (uint32_t i = 0; i < count; i++)
+        memcpy(g_scan_mem + offsets[i], spans[i].src, spans[i].len);
+    return true;
+}
+
 static const ios3_hle_mem_t SCAN_MEM = {
-    NULL, scan_read, scan_write, NULL, NULL, NULL
+    NULL, scan_read, scan_write, NULL, NULL, scan_writev
 };
 
 static ios3_hle_site_t *site_named(const char *name) {
@@ -151,6 +181,14 @@ static void scan_poke32(uint32_t va, uint32_t word) {
           "fixture word %08x is outside scan memory", va);
     if (scan_region(SCAN_MEM_BASE, SCAN_MEM_LEN, va, 4u, &off))
         memcpy(g_scan_mem + off, &word, sizeof word);
+}
+
+static void scan_poke16(uint32_t va, uint16_t halfword) {
+    uint32_t off;
+    CHECK(scan_region(SCAN_MEM_BASE, SCAN_MEM_LEN, va, 2u, &off),
+          "fixture halfword %08x is outside scan memory", va);
+    if (scan_region(SCAN_MEM_BASE, SCAN_MEM_LEN, va, 2u, &off))
+        memcpy(g_scan_mem + off, &halfword, sizeof halfword);
 }
 
 static uint32_t scan_peek32(uint32_t va) {
@@ -186,6 +224,11 @@ static void reset_scan_fixture(ios3_hle_site_t *site) {
     g_scan_write_calls = 0u;
     g_scan_write_va = 0u;
     g_scan_write_len = 0u;
+    g_scan_writev_calls = 0u;
+    g_scan_writev_span_count = 0u;
+    memset(g_scan_writev_va, 0, sizeof g_scan_writev_va);
+    memset(g_scan_writev_len, 0, sizeof g_scan_writev_len);
+    g_scan_fail_writev_span = UINT32_MAX;
     scan_select_code(site);
     if (site)
         site->hits = site->handled = site->declined = site->wrong_space = 0u;
@@ -637,6 +680,56 @@ static void test_direct_scanline_preserves_bgra_and_forces_bgrx_alpha(void) {
     ios3_hle_disarm();
 }
 
+static void test_direct_scanline_accepts_the_measured_full_width_bound(void) {
+    ios3_hle_site_t *site = site_named("sw_scanline");
+    arm_cpu_t cpu;
+
+    reset_scan_fixture(site);
+    configure_direct_scanline(&cpu, SAMPLE_BGRA8);
+    cpu.r[0] = 0u;
+    cpu.r[1] = 0u;
+    cpu.r[2] = 320u;
+    scan_poke32(SCAN_CTX + 0x08u, 1280u);
+    scan_poke32(SCAN_CTX + 0x0cu, 0x013fffffu);
+    scan_poke32(SCAN_CTX + 0x10u, 0x0000ffffu);
+    scan_poke32(SCAN_RENDER + 0x104u, 1280u);
+    scan_poke32(SCAN_RENDER + 0x114u, 320u);
+    scan_poke32(SCAN_RENDER + 0x11cu, 1u);
+    for (uint32_t i = 0; i < 320u; i++) {
+        scan_poke32(SCAN_TEXELS + i * 4u, UINT32_C(0x80000000) | i);
+        scan_poke32(SCAN_OUT + i * 4u, UINT32_C(0xdeadbeef));
+    }
+    if (arm_only(site)) {
+        CHECK(ios3_hle_step(&cpu, &SCAN_MEM, site->va, 0x0bf1b000u),
+              "direct 320-pixel scanline declined");
+        CHECK(g_scan_write_calls == 1u && g_scan_write_va == SCAN_OUT &&
+              g_scan_write_len == 1280u,
+              "full-width span published as %u write(s) at %08x len %u",
+              g_scan_write_calls, g_scan_write_va, g_scan_write_len);
+        CHECK(scan_peek32(SCAN_OUT) == UINT32_C(0x80000000),
+              "full-width first pixel is %08x", scan_peek32(SCAN_OUT));
+        CHECK(scan_peek32(SCAN_OUT + 319u * 4u) == UINT32_C(0x8000013f),
+              "full-width last pixel is %08x",
+              scan_peek32(SCAN_OUT + 319u * 4u));
+    }
+
+    reset_scan_fixture(site);
+    configure_direct_scanline(&cpu, SAMPLE_BGRA8);
+    cpu.r[0] = 0u;
+    cpu.r[1] = 0u;
+    cpu.r[2] = 321u;
+    scan_poke32(SCAN_RENDER + 0x104u, 1284u);
+    scan_poke32(SCAN_RENDER + 0x114u, 321u);
+    if (arm_only(site)) {
+        CHECK(!ios3_hle_step(&cpu, &SCAN_MEM, site->va, 0x0bf1b000u),
+              "direct scanline accepted 321 pixels past its host bound");
+        CHECK(g_scan_write_calls == 0u,
+              "oversize direct scanline published %u write(s)",
+              g_scan_write_calls);
+    }
+    ios3_hle_disarm();
+}
+
 static void configure_solid_scanline(arm_cpu_t *cpu, uint32_t pixel) {
     configure_direct_scanline(cpu, SAMPLE_BGRA8);
     scan_poke32(SCAN_STACK + 0x0cu, 0x0008u);
@@ -645,6 +738,239 @@ static void configure_solid_scanline(arm_cpu_t *cpu, uint32_t pixel) {
     scan_poke32(SCAN_CTX + 0x64u, pixel);
     scan_poke32(SCAN_CTX + 0x68u, 0u);
     scan_poke32(SCAN_STATE + 0x3cu, 0x02u);
+}
+
+static void configure_rect_root(arm_cpu_t *cpu, uint16_t flags) {
+    static const float vertex[4][4] = {
+        { 1.0f, 0.0f, 0.0f, 0.0f },
+        { 4.0f, 0.0f, 3.0f, 0.0f },
+        { 4.0f, 2.0f, 3.0f, 2.0f },
+        { 1.0f, 2.0f, 0.0f, 2.0f }
+    };
+
+    configure_direct_scanline(cpu, SAMPLE_BGRA8);
+    scan_poke32(SCAN_TEXELS + 0x10u, UINT32_C(0xccddeeff));
+    scan_poke32(SCAN_TEXELS + 0x14u, UINT32_C(0x10203040));
+    scan_poke32(SCAN_TEXELS + 0x18u, UINT32_C(0x50607080));
+    scan_poke32(SCAN_TEXELS + 0x1cu, UINT32_C(0x90a0b0c0));
+    scan_poke16(SCAN_POLY + 0x00u, 4u);
+    scan_poke16(SCAN_POLY + 0x02u, flags);
+    for (uint32_t i = 0; i < 4u; i++) {
+        uint32_t base = SCAN_POLY + 4u + i * 0x38u;
+        scan_pokef(base + 0x00u, vertex[i][0]);
+        scan_pokef(base + 0x04u, vertex[i][1]);
+        scan_pokef(base + 0x0cu, 1.0f);
+        scan_pokef(base + 0x20u, vertex[i][2]);
+        scan_pokef(base + 0x24u, vertex[i][3]);
+    }
+    scan_poke32(SCAN_STACK + 0x00u, 320u);
+    scan_poke32(SCAN_STACK + 0x04u, 480u);
+    scan_poke32(SCAN_STACK + 0x08u, UINT32_C(0x3122d180));
+    scan_poke32(SCAN_STACK + 0x0cu, SCAN_CTX);
+
+    cpu->r[0] = SCAN_POLY;
+    cpu->r[1] = 0u;
+    cpu->r[2] = 0u;
+    cpu->r[3] = 0u;
+    cpu->r[13] = SCAN_STACK;
+    cpu->r[14] = UINT32_C(0xc0dec0de);
+    cpu->r[15] = UINT32_C(0x311e2100);
+}
+
+static void test_rect_root_replaces_textured_and_solid_rows_atomically(void) {
+    static const uint32_t textured[6] = {
+        UINT32_C(0x00112233), UINT32_C(0x44556677),
+        UINT32_C(0x8899aabb), UINT32_C(0xccddeeff),
+        UINT32_C(0x10203040), UINT32_C(0x50607080)
+    };
+    static const uint32_t solid_source[2] = {
+        UINT32_C(0xff123456), UINT32_C(0xfd000000)
+    };
+    static const uint32_t solid_expected[2] = {
+        UINT32_C(0xff123456), UINT32_C(0xff020202)
+    };
+    ios3_hle_site_t *site = site_named("ogl_poly_scan");
+    arm_cpu_t cpu;
+
+    CHECK(site != NULL, "ogl_poly_scan site is missing");
+    CHECK(site && site->mode == IOS3_HLE_REPLACE,
+          "bounded rectangle root is not in REPLACE mode");
+    reset_scan_fixture(site);
+    configure_rect_root(&cpu, 0x030bu);
+    if (arm_only(site)) {
+        CHECK(ios3_hle_step(&cpu, &SCAN_MEM, site->va, 0x0bf1b000u),
+              "textured rectangle root declined");
+        CHECK(cpu.r[15] == cpu.r[14],
+              "textured rectangle returned to %08x, not LR", cpu.r[15]);
+        CHECK(g_scan_write_calls == 0u && g_scan_writev_calls == 1u &&
+              g_scan_writev_span_count == 2u,
+              "textured rectangle published scalar=%u vector=%u/%u",
+              g_scan_write_calls, g_scan_writev_calls,
+              g_scan_writev_span_count);
+        CHECK(g_scan_writev_va[0] == SCAN_OUT + 4u &&
+              g_scan_writev_va[1] == SCAN_OUT + 20u &&
+              g_scan_writev_len[0] == 12u && g_scan_writev_len[1] == 12u,
+              "textured rectangle spans are %08x/%u and %08x/%u",
+              g_scan_writev_va[0], g_scan_writev_len[0],
+              g_scan_writev_va[1], g_scan_writev_len[1]);
+        for (uint32_t i = 0; i < 3u; i++) {
+            CHECK(scan_peek32(SCAN_OUT + 4u + i * 4u) == textured[i],
+                  "textured row 0 pixel %u is %08x", i,
+                  scan_peek32(SCAN_OUT + 4u + i * 4u));
+            CHECK(scan_peek32(SCAN_OUT + 20u + i * 4u) == textured[i + 3u],
+                  "textured row 1 pixel %u is %08x", i,
+                  scan_peek32(SCAN_OUT + 20u + i * 4u));
+        }
+        CHECK(scan_peek32(SCAN_OUT) == UINT32_C(0xdeadbeef) &&
+              scan_peek32(SCAN_OUT + 16u) == UINT32_C(0xdeadbeef),
+              "textured rectangle changed a pixel outside its two spans");
+    }
+
+    for (uint32_t pass = 0; pass < 2u; pass++) {
+        reset_scan_fixture(site);
+        configure_rect_root(&cpu, 0x000bu);
+        scan_poke32(SCAN_CTX + 0x14u, 0u);
+        scan_poke32(SCAN_CTX + 0x18u, 0u);
+        scan_poke32(SCAN_CTX + 0x64u, solid_source[pass]);
+        scan_poke32(SCAN_CTX + 0x68u, 0u);
+        scan_poke32(SCAN_STATE + 0x3cu, pass ? 0x12u : 0x02u);
+        if (!arm_only(site)) continue;
+        CHECK(ios3_hle_step(&cpu, &SCAN_MEM, site->va, 0x0bf1b000u),
+              "solid rectangle root pass %u declined", pass);
+        CHECK(g_scan_write_calls == 0u && g_scan_writev_calls == 1u &&
+              g_scan_writev_span_count == 2u,
+              "solid rectangle pass %u published scalar=%u vector=%u/%u",
+              pass, g_scan_write_calls, g_scan_writev_calls,
+              g_scan_writev_span_count);
+        for (uint32_t row = 0; row < 2u; row++)
+            for (uint32_t x = 0; x < 3u; x++)
+                CHECK(scan_peek32(SCAN_OUT + 4u + row * 16u + x * 4u) ==
+                          solid_expected[pass],
+                      "solid pass %u row %u pixel %u is %08x", pass, row, x,
+                      scan_peek32(SCAN_OUT + 4u + row * 16u + x * 4u));
+    }
+    ios3_hle_disarm();
+}
+
+static void test_rect_root_preserves_prior_row_alias_semantics(void) {
+    static const uint32_t expected[3] = {
+        UINT32_C(0x80112233), UINT32_C(0x80445566),
+        UINT32_C(0x80778899)
+    };
+    ios3_hle_site_t *site = site_named("ogl_poly_scan");
+    arm_cpu_t cpu;
+
+    reset_scan_fixture(site);
+    configure_rect_root(&cpu, 0x030bu);
+    /* Row zero reads a separate source. Row one then reads row zero's output.
+     * Apple's top-to-bottom writes make the new pixels visible to row one; the
+     * transactional host scratch must preserve that dependency. */
+    scan_poke32(SCAN_CTX + 0x04u, SCAN_OUT - 12u);
+    for (uint32_t i = 0; i < 3u; i++)
+        scan_poke32(SCAN_OUT - 12u + i * 4u, expected[i]);
+    if (arm_only(site)) {
+        CHECK(ios3_hle_step(&cpu, &SCAN_MEM, site->va, 0x0bf1b000u),
+              "prior-row alias rectangle declined");
+        for (uint32_t row = 0; row < 2u; row++)
+            for (uint32_t x = 0; x < 3u; x++)
+                CHECK(scan_peek32(SCAN_OUT + 4u + row * 16u + x * 4u) ==
+                          expected[x],
+                      "alias row %u pixel %u is %08x", row, x,
+                      scan_peek32(SCAN_OUT + 4u + row * 16u + x * 4u));
+    }
+    ios3_hle_disarm();
+}
+
+static void test_rect_root_refuses_unproved_or_nonatomic_shapes(void) {
+    ios3_hle_site_t *site = site_named("ogl_poly_scan");
+    arm_cpu_t cpu;
+
+    for (uint32_t which = 0; which < 8u; which++) {
+        reset_scan_fixture(site);
+        configure_rect_root(&cpu, 0x030bu);
+        switch (which) {
+        case 0: scan_poke32(SCAN_STACK + 0x08u, UINT32_C(0x3122d184)); break;
+        case 1: cpu.r[3] = 0x10u; break;
+        case 2: scan_pokef(SCAN_POLY + 4u, 1.25f); break;
+        case 3: scan_pokef(SCAN_POLY + 4u + 0x38u + 0x20u, 2.0f); break;
+        case 4: scan_poke16(SCAN_POLY + 0x02u, 0x030fu); break;
+        case 5: g_scan_fail_read_va = SCAN_TEXELS + 0x10u; break;
+        case 6: g_scan_fail_writev_span = 1u; break;
+        default:
+            /* The leaf refuses same-row source/destination aliasing. */
+            scan_poke32(SCAN_CTX + 0x04u, SCAN_OUT + 4u);
+            break;
+        }
+        if (!arm_only(site)) continue;
+        CHECK(!ios3_hle_step(&cpu, &SCAN_MEM, site->va, 0x0bf1b000u),
+              "unproved/faulting rectangle %u was handled", which);
+        CHECK(g_scan_write_calls == 0u,
+              "declining rectangle %u made %u scalar write(s)", which,
+              g_scan_write_calls);
+        CHECK(g_scan_writev_calls == (which == 6u ? 1u : 0u),
+              "declining rectangle %u made %u vector write(s)", which,
+              g_scan_writev_calls);
+        for (uint32_t i = 0; i < 8u; i++)
+            CHECK(scan_peek32(SCAN_OUT + i * 4u) == UINT32_C(0xdeadbeef),
+                  "declining rectangle %u changed destination pixel %u",
+                  which, i);
+        CHECK(cpu.r[15] == site->va,
+              "declining rectangle %u moved PC to %08x", which, cpu.r[15]);
+        CHECK(site->handled == 0u && site->declined == 1u,
+              "declining rectangle %u accounting is handled=%llu declined=%llu",
+              which, (unsigned long long)site->handled,
+              (unsigned long long)site->declined);
+    }
+    ios3_hle_disarm();
+}
+
+static void test_rect_root_oracle_captures_two_rows_without_publication(void) {
+    static const uint32_t expected[6] = {
+        UINT32_C(0x00112233), UINT32_C(0x44556677),
+        UINT32_C(0x8899aabb), UINT32_C(0xccddeeff),
+        UINT32_C(0x10203040), UINT32_C(0x50607080)
+    };
+    ios3_hle_site_t *site = site_named("ogl_poly_scan");
+    ios3_hle_oracle_t oracle;
+    uint8_t oracle_bytes[64];
+    arm_cpu_t cpu, before;
+
+    reset_scan_fixture(site);
+    configure_rect_root(&cpu, 0x030bu);
+    before = cpu;
+    if (arm_only(site)) {
+        CHECK(ios3_hle_oracle_prepare(&cpu, &SCAN_MEM, site->va,
+                                      0x0bf1b000u, &oracle, oracle_bytes,
+                                      (uint32_t)sizeof oracle_bytes),
+              "rectangle oracle declined the proved two-row fixture");
+        CHECK(oracle.site_name &&
+              strcmp(oracle.site_name, "ogl_poly_scan") == 0,
+              "rectangle oracle selected the wrong site");
+        CHECK(oracle.span_count == 2u && oracle.expected_len == 24u &&
+              oracle.spans[0].va == SCAN_OUT + 4u &&
+              oracle.spans[1].va == SCAN_OUT + 20u &&
+              oracle.spans[0].len == 12u && oracle.spans[1].len == 12u,
+              "rectangle oracle captured %u spans totalling %u bytes",
+              oracle.span_count, oracle.expected_len);
+        CHECK(memcmp(oracle.expected, expected, sizeof expected) == 0,
+              "rectangle oracle captured the wrong row bytes");
+        CHECK(memcmp(&cpu, &before, sizeof cpu) == 0,
+              "rectangle oracle changed the live CPU");
+        CHECK(g_scan_write_calls == 0u && g_scan_writev_calls == 0u,
+              "rectangle oracle forwarded scalar=%u vector=%u writes",
+              g_scan_write_calls, g_scan_writev_calls);
+        for (uint32_t i = 0; i < 8u; i++)
+            CHECK(scan_peek32(SCAN_OUT + i * 4u) == UINT32_C(0xdeadbeef),
+                  "rectangle oracle changed destination pixel %u", i);
+
+        CHECK(!ios3_hle_oracle_prepare(&cpu, &SCAN_MEM, site->va,
+                                       0x0bf1b000u, &oracle, oracle_bytes,
+                                       20u),
+              "rectangle oracle accepted storage smaller than both rows");
+        CHECK(memcmp(&cpu, &before, sizeof cpu) == 0,
+              "capacity-refusing rectangle oracle changed the CPU");
+    }
+    ios3_hle_disarm();
 }
 
 static void test_direct_solid_scanline_repeats_the_context_pixel(void) {
@@ -1081,7 +1407,12 @@ int main(void) {
     test_declining_is_safe();
     test_oracle_captures_disjoint_transactional_spans();
     test_direct_scanline_preserves_bgra_and_forces_bgrx_alpha();
+    test_direct_scanline_accepts_the_measured_full_width_bound();
     test_direct_solid_scanline_repeats_the_context_pixel();
+    test_rect_root_replaces_textured_and_solid_rows_atomically();
+    test_rect_root_preserves_prior_row_alias_semantics();
+    test_rect_root_refuses_unproved_or_nonatomic_shapes();
+    test_rect_root_oracle_captures_two_rows_without_publication();
     test_blended_solid_scanline_matches_selector_two();
     test_solid_scanline_unknown_shapes_and_faults_decline();
     test_live_bgra_blend_matches_arm_packed_selector_two();

@@ -755,7 +755,6 @@ static bool hle_sw_scanline_known_paths(arm_cpu_t *cpu,
     }
 
     if (ctx_units != 1u || mask != 0x0308u ||
-        count > SW_SCANLINE_CHUNK_MAX ||
         sentinel != UINT32_MAX ||
         !read_u32_at(mem, ctx, 0x14u, &min_sampler) ||
         !read_u32_at(mem, ctx, 0x18u, &mag_sampler) ||
@@ -768,6 +767,7 @@ static bool hle_sw_scanline_known_paths(arm_cpu_t *cpu,
     (void)dy1;
 
     if ((state_flags & 0x10u) == 0u) {
+        if (count > SW_SPAN_MAX) return false;
         if (min_sampler == SW_SAMPLE_NEAREST_BGRA8)
             force_opaque = false;
         else if (min_sampler == SW_SAMPLE_NEAREST_BGRX8)
@@ -784,7 +784,8 @@ static bool hle_sw_scanline_known_paths(arm_cpu_t *cpu,
         /* This is the one blended shape observed in r273. In the guest,
          * state_flags 0x12 selects temporary BGRA sampling followed by jump-
          * table arm 2. An auxiliary surface would add unproved side effects. */
-        if (state_flags != 0x12u || aux != 0u ||
+        if (count > SW_SCANLINE_CHUNK_MAX ||
+            state_flags != 0x12u || aux != 0u ||
             min_sampler != SW_SAMPLE_NEAREST_BGRA8 ||
             !read_u8_at(mem, state, 0x08u, &state_mode) || state_mode != 1u ||
             ctx > UINT32_MAX - 0x04u ||
@@ -917,6 +918,297 @@ static bool hle_trace_ogl_poly_scan(arm_cpu_t *cpu,
         for (i = 0; i < (unsigned)count; i++)
             trace_poly_vert(mem, cpu->r[0], i);
     }
+    return false;
+}
+
+/*
+ * The first native rasteriser-root shape is deliberately much narrower than
+ * ogl_poly_scan itself. The retained r270/r273 polygons are four-vertex,
+ * integer, axis-aligned rectangles with w=1. Textured rectangles carry mask
+ * 0x030b and pixel-for-pixel u0/v0; solid rectangles carry 0x000b. Mode zero
+ * makes both edge-delta pointers NULL. Every other polygon still runs Apple.
+ *
+ * Rows are rendered into host scratch first and published through writev only
+ * after every callback succeeded. The read facade exposes completed scratch
+ * rows to later source reads, preserving Apple's top-to-bottom behaviour even
+ * if a texture aliases an earlier destination row. Same-row alias remains the
+ * scanline handler's existing refusal.
+ */
+#define OGL_RECT_MAX_WIDTH  320u
+#define OGL_RECT_MAX_HEIGHT 480u
+#define OGL_RECT_REAL_LIMIT UINT32_C(0x40000000)
+#define OGL_RECT_FAKE_STACK UINT32_C(0x7fffd000)
+#define OGL_RECT_FAKE_START UINT32_C(0x7fffd100)
+#define OGL_RECT_FAKE_DELTA UINT32_C(0x7fffd200)
+
+typedef struct {
+    float x, y, w, u, v;
+} ogl_rect_vert_t;
+
+typedef struct {
+    const ios3_hle_mem_t *source;
+    uint32_t stack[5];
+    float start[14];
+    float delta[14];
+    uint32_t row;
+    uint32_t prior_rows;
+    uint32_t expected_len;
+    uint32_t write_va;
+    uint32_t write_len;
+    unsigned writes;
+} ogl_rect_scan_mem_t;
+
+static uint32_t g_ogl_rect_pixels[OGL_RECT_MAX_HEIGHT][OGL_RECT_MAX_WIDTH];
+static ios3_hle_write_span_t g_ogl_rect_spans[OGL_RECT_MAX_HEIGHT];
+
+static bool ogl_rect_range_contains(uint32_t base, uint32_t size,
+                                    uint32_t va, uint32_t len,
+                                    uint32_t *offset) {
+    uint64_t end = (uint64_t)va + len;
+    if (va < base || end > (uint64_t)base + size) return false;
+    if (offset) *offset = va - base;
+    return true;
+}
+
+static bool ogl_rect_ranges_overlap(uint32_t a_va, uint32_t a_len,
+                                    uint32_t b_va, uint32_t b_len) {
+    return (uint64_t)a_va < (uint64_t)b_va + b_len &&
+           (uint64_t)b_va < (uint64_t)a_va + a_len;
+}
+
+static bool ogl_rect_scan_read(void *ctx, uint32_t va, void *dst,
+                               uint32_t len) {
+    ogl_rect_scan_mem_t *shadow = (ogl_rect_scan_mem_t *)ctx;
+    uint32_t offset = 0;
+
+    if (!shadow || !dst || !len) return false;
+    if (ogl_rect_range_contains(OGL_RECT_FAKE_STACK,
+                                (uint32_t)sizeof shadow->stack,
+                                va, len, &offset)) {
+        memcpy(dst, (const uint8_t *)shadow->stack + offset, len);
+        return true;
+    }
+    if (ogl_rect_range_contains(OGL_RECT_FAKE_START,
+                                (uint32_t)sizeof shadow->start,
+                                va, len, &offset)) {
+        memcpy(dst, (const uint8_t *)shadow->start + offset, len);
+        return true;
+    }
+    if (ogl_rect_range_contains(OGL_RECT_FAKE_DELTA,
+                                (uint32_t)sizeof shadow->delta,
+                                va, len, &offset)) {
+        memcpy(dst, (const uint8_t *)shadow->delta + offset, len);
+        return true;
+    }
+
+    /* A malformed read that merely overlaps scratch must not fall through to
+     * a coincidentally mapped guest address. Measured guest operands are below
+     * 0x40000000; the reserved scratch page is intentionally above it. */
+    if ((uint64_t)va + len > OGL_RECT_REAL_LIMIT) return false;
+
+    for (uint32_t i = 0; i < shadow->prior_rows; i++) {
+        const ios3_hle_write_span_t *span = &g_ogl_rect_spans[i];
+        if (ogl_rect_range_contains(span->va, span->len, va, len, &offset)) {
+            memcpy(dst, (const uint8_t *)span->src + offset, len);
+            return true;
+        }
+        if (ogl_rect_ranges_overlap(span->va, span->len, va, len))
+            return false;
+    }
+    return shadow->source && shadow->source->read &&
+           shadow->source->read(shadow->source->ctx, va, dst, len);
+}
+
+static bool ogl_rect_scan_read_priv(void *ctx, uint32_t va, void *dst,
+                                    uint32_t len) {
+    ogl_rect_scan_mem_t *shadow = (ogl_rect_scan_mem_t *)ctx;
+    return shadow && shadow->source && shadow->source->read_priv &&
+           shadow->source->read_priv(shadow->source->ctx, va, dst, len);
+}
+
+static bool ogl_rect_scan_read_phys(void *ctx, uint32_t pa, void *dst,
+                                    uint32_t len) {
+    ogl_rect_scan_mem_t *shadow = (ogl_rect_scan_mem_t *)ctx;
+    return shadow && shadow->source && shadow->source->read_phys &&
+           shadow->source->read_phys(shadow->source->ctx, pa, dst, len);
+}
+
+static bool ogl_rect_scan_write(void *ctx, uint32_t va, const void *src,
+                                uint32_t len) {
+    ogl_rect_scan_mem_t *shadow = (ogl_rect_scan_mem_t *)ctx;
+    if (!shadow || !src || shadow->writes != 0u ||
+        len != shadow->expected_len ||
+        (uint64_t)va + len > OGL_RECT_REAL_LIMIT)
+        return false;
+    memcpy(g_ogl_rect_pixels[shadow->row], src, len);
+    shadow->write_va = va;
+    shadow->write_len = len;
+    shadow->writes = 1u;
+    return true;
+}
+
+static bool ogl_rect_scan_writev(void *ctx,
+                                 const ios3_hle_write_span_t *spans,
+                                 uint32_t count) {
+    return spans && count == 1u &&
+           ogl_rect_scan_write(ctx, spans[0].va, spans[0].src, spans[0].len);
+}
+
+static bool ogl_rect_read_vert(const ios3_hle_mem_t *mem, uint32_t poly,
+                               uint32_t index, bool textured,
+                               ogl_rect_vert_t *out) {
+    uint64_t base = (uint64_t)poly + 4u + (uint64_t)index * 0x38u;
+    if (!out || base + 0x0fu > UINT32_MAX ||
+        !read_f32(mem, (uint32_t)base + 0x00u, &out->x) ||
+        !read_f32(mem, (uint32_t)base + 0x04u, &out->y) ||
+        !read_f32(mem, (uint32_t)base + 0x0cu, &out->w))
+        return false;
+    out->u = out->v = 0.0f;
+    return !textured ||
+           (base + 0x27u <= UINT32_MAX &&
+            read_f32(mem, (uint32_t)base + 0x20u, &out->u) &&
+            read_f32(mem, (uint32_t)base + 0x24u, &out->v));
+}
+
+static bool ogl_rect_exact_i32(float value, int32_t *out) {
+    int32_t converted;
+    if (!out || !(value >= -32768.0f && value <= 32768.0f)) return false;
+    converted = (int32_t)value;
+    if ((float)converted != value) return false;
+    *out = converted;
+    return true;
+}
+
+static bool ogl_rect_render_row(const ios3_hle_mem_t *mem, uint32_t ctx,
+                                uint32_t mask, uint32_t x, uint32_t y,
+                                uint32_t count, uint32_t row,
+                                uint32_t prior_rows, float u, float v,
+                                uint32_t *out_va, uint32_t *out_len) {
+    ogl_rect_scan_mem_t shadow;
+    ios3_hle_mem_t row_mem;
+    arm_cpu_t row_cpu;
+
+    memset(&shadow, 0, sizeof shadow);
+    memset(&row_cpu, 0, sizeof row_cpu);
+    shadow.source = mem;
+    shadow.row = row;
+    shadow.prior_rows = prior_rows;
+    shadow.expected_len = count * 4u;
+    shadow.stack[0] = OGL_RECT_FAKE_DELTA;
+    shadow.stack[3] = mask;
+    shadow.stack[4] = ctx;
+    shadow.start[3] = 1.0f;
+    shadow.start[8] = u;
+    shadow.start[9] = v;
+    shadow.delta[8] = (mask & 0x0100u) ? 1.0f : 0.0f;
+
+    row_mem = *mem;
+    row_mem.ctx = &shadow;
+    row_mem.read = ogl_rect_scan_read;
+    row_mem.write = ogl_rect_scan_write;
+    row_mem.read_priv = ogl_rect_scan_read_priv;
+    row_mem.read_phys = ogl_rect_scan_read_phys;
+    row_mem.writev = ogl_rect_scan_writev;
+
+    row_cpu.r[0] = x;
+    row_cpu.r[1] = y;
+    row_cpu.r[2] = count;
+    row_cpu.r[3] = OGL_RECT_FAKE_START;
+    row_cpu.r[13] = OGL_RECT_FAKE_STACK;
+    row_cpu.r[14] = UINT32_C(0x7fffd300);
+    row_cpu.r[15] = UINT32_C(0x3122d180);
+
+    if (!hle_sw_scanline_known_paths(&row_cpu, &row_mem) ||
+        row_cpu.r[15] != row_cpu.r[14] || shadow.writes != 1u)
+        return false;
+    if (out_va) *out_va = shadow.write_va;
+    if (out_len) *out_len = shadow.write_len;
+    return true;
+}
+
+static bool hle_ogl_poly_scan_known_rect(arm_cpu_t *cpu,
+                                         const ios3_hle_mem_t *mem) {
+    ogl_rect_vert_t vertex[4];
+    int32_t x[4], y[4], u[4], v[4];
+    uint32_t sp, xmax = 0, ymax = 0, callback = 0, ctx = 0;
+    uint32_t width, height, mask;
+    uint16_t count = 0, flags = 0;
+    bool textured;
+
+    if (!cpu || !mem || !mem->read || !mem->writev) return false;
+    sp = cpu->r[13];
+    if (cpu->r[0] >= OGL_RECT_REAL_LIMIT ||
+        !read_u32_at(mem, sp, 0x00u, &xmax) ||
+        !read_u32_at(mem, sp, 0x04u, &ymax) ||
+        !read_u32_at(mem, sp, 0x08u, &callback) ||
+        !read_u32_at(mem, sp, 0x0cu, &ctx) ||
+        cpu->r[1] != 0u || cpu->r[2] != 0u || cpu->r[3] != 0u ||
+        xmax != OGL_RECT_MAX_WIDTH || ymax != OGL_RECT_MAX_HEIGHT ||
+        callback != UINT32_C(0x3122d180) || !ctx ||
+        ctx >= OGL_RECT_REAL_LIMIT ||
+        !read_u16(mem, cpu->r[0], &count) ||
+        !read_u16(mem, cpu->r[0] + 2u, &flags) || count != 4u ||
+        (flags != 0x000bu && flags != 0x030bu))
+        goto decline;
+
+    textured = flags == 0x030bu;
+    for (uint32_t i = 0; i < 4u; i++) {
+        if (!ogl_rect_read_vert(mem, cpu->r[0], i, textured, &vertex[i]) ||
+            vertex[i].w != 1.0f ||
+            !ogl_rect_exact_i32(vertex[i].x, &x[i]) ||
+            !ogl_rect_exact_i32(vertex[i].y, &y[i]) ||
+            (textured &&
+             (!ogl_rect_exact_i32(vertex[i].u, &u[i]) ||
+              !ogl_rect_exact_i32(vertex[i].v, &v[i]))))
+            goto decline;
+    }
+
+    if (x[0] != x[3] || x[1] != x[2] ||
+        y[0] != y[1] || y[2] != y[3] ||
+        x[0] < 0 || y[0] < 0 || x[1] <= x[0] || y[2] <= y[0] ||
+        x[1] > (int32_t)OGL_RECT_MAX_WIDTH ||
+        y[2] > (int32_t)OGL_RECT_MAX_HEIGHT)
+        goto decline;
+    if (textured &&
+        (u[0] != u[3] || u[1] != u[2] ||
+         v[0] != v[1] || v[2] != v[3] ||
+         u[1] - u[0] != x[1] - x[0] ||
+         v[2] - v[0] != y[2] - y[0]))
+        goto decline;
+
+    width = (uint32_t)(x[1] - x[0]);
+    height = (uint32_t)(y[2] - y[0]);
+    if (!width || width > OGL_RECT_MAX_WIDTH || !height ||
+        height > OGL_RECT_MAX_HEIGHT)
+        goto decline;
+    mask = (uint32_t)flags & ~UINT32_C(3);
+
+    for (uint32_t row = 0; row < height; row++) {
+        uint32_t out_va = 0, out_len = 0;
+        float row_u = textured ? (float)u[0] + 0.5f : 0.0f;
+        float row_v = textured ? (float)v[0] + 0.5f + (float)row : 0.0f;
+        if (!ogl_rect_render_row(mem, ctx, mask, (uint32_t)x[0],
+                                  (uint32_t)y[0] + row, width, row, row,
+                                  row_u, row_v, &out_va, &out_len) ||
+            out_len != width * 4u)
+            goto decline;
+        for (uint32_t prior = 0; prior < row; prior++) {
+            if (ogl_rect_ranges_overlap(out_va, out_len,
+                                        g_ogl_rect_spans[prior].va,
+                                        g_ogl_rect_spans[prior].len))
+                goto decline;
+        }
+        g_ogl_rect_spans[row].va = out_va;
+        g_ogl_rect_spans[row].src = g_ogl_rect_pixels[row];
+        g_ogl_rect_spans[row].len = out_len;
+    }
+
+    if (!mem->writev(mem->ctx, g_ogl_rect_spans, height)) goto decline;
+    cpu->r[15] = cpu->r[14];
+    return true;
+
+decline:
+    (void)hle_trace_ogl_poly_scan(cpu, mem);
     return false;
 }
 
@@ -1192,7 +1484,7 @@ static ios3_hle_site_t g_sites[] = {
     { "ogl_poly_scan",      0x311e2100u, PROLOGUE_OGL_POLY_SCAN,
       (unsigned)(sizeof PROLOGUE_OGL_POLY_SCAN /
                  sizeof PROLOGUE_OGL_POLY_SCAN[0]),
-      hle_trace_ogl_poly_scan, IOS3_HLE_TRACE,
+      hle_ogl_poly_scan_known_rect, IOS3_HLE_REPLACE,
       false, false, 0, 0, 0, 0 },
     { "mbxConnectionOpen",  0x30e1fc90u, PROLOGUE_MBX_CONNECTION_OPEN,
       (unsigned)(sizeof PROLOGUE_MBX_CONNECTION_OPEN /
