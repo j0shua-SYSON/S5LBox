@@ -1337,6 +1337,83 @@ static void test_rect_root_applies_integer_clip_bounds(void) {
     ios3_hle_disarm();
 }
 
+static void test_rect_root_matches_fractional_bilinear_rows(void) {
+    const uint32_t top = UINT32_C(0x10203040);
+    const uint32_t bottom = UINT32_C(0x90a0b0c0);
+    const uint32_t blended = UINT32_C(0x708090a0);
+    ios3_hle_site_t *site = site_named("ogl_poly_scan");
+    arm_cpu_t cpu;
+
+    /* A measured-style 320-to-1 surface translated by one quarter pixel.
+     * Apple's y coverage selects rows 0 and 1. Their pixel-centre v values are
+     * 0.25 and 1.25, so the second row uses the packed sampler's 192/256 blend. */
+    reset_scan_fixture(site);
+    configure_full_width_mode_two_root(&cpu, SAMPLE_BILINEAR_BGRA8);
+    for (uint32_t i = 0; i < 4u; i++) {
+        uint32_t base = SCAN_POLY + 4u + i * 0x38u;
+        scan_pokef(base + 0x04u, i < 2u ? 0.25f : 2.25f);
+        scan_pokef(base + 0x24u, i < 2u ? 0.0f : 2.0f);
+    }
+    scan_pokef(SCAN_POLY + 4u + 0x38u + 0x20u, 1.0f);
+    scan_pokef(SCAN_POLY + 4u + 2u * 0x38u + 0x20u, 1.0f);
+    scan_poke32(SCAN_CTX + 0x08u, 4u);
+    scan_poke32(SCAN_CTX + 0x0cu, UINT32_C(0x0000ffff));
+    scan_poke32(SCAN_CTX + 0x10u, UINT32_C(0x0001ffff));
+    scan_poke32(SCAN_RENDER + 0x104u, 1280u);
+    scan_poke32(SCAN_RENDER + 0x11cu, 2u);
+    scan_poke32(SCAN_STATE + 0x08u, 1u);
+    scan_poke32(SCAN_TEXELS + 0u, top);
+    scan_poke32(SCAN_TEXELS + 4u, bottom);
+    for (uint32_t i = 0; i < 640u; i++)
+        scan_poke32(SCAN_OUT + i * 4u, 0u);
+    if (arm_only(site)) {
+        CHECK(ios3_hle_step(&cpu, &SCAN_MEM, site->va, 0x0bf1b000u),
+              "fractional bilinear rectangle root declined");
+        CHECK(g_scan_write_calls == 0u && g_scan_writev_calls == 1u &&
+              g_scan_writev_span_count == 2u &&
+              g_scan_writev_va[0] == SCAN_OUT &&
+              g_scan_writev_va[1] == SCAN_OUT + 1280u &&
+              g_scan_writev_len[0] == 1280u &&
+              g_scan_writev_len[1] == 1280u,
+              "fractional root published scalar=%u vector=%u/%u at "
+              "%08x/%u and %08x/%u",
+              g_scan_write_calls, g_scan_writev_calls,
+              g_scan_writev_span_count, g_scan_writev_va[0],
+              g_scan_writev_len[0], g_scan_writev_va[1],
+              g_scan_writev_len[1]);
+        CHECK(g_scan_texel_read_calls == 8u &&
+              g_scan_texel_read_bytes == 32u &&
+              g_scan_texel_max_read_len == 4u,
+              "fractional bilinear root used %u reads totalling %u, max %u",
+              g_scan_texel_read_calls, g_scan_texel_read_bytes,
+              g_scan_texel_max_read_len);
+        for (uint32_t i = 0; i < 320u; i++) {
+            CHECK(scan_peek32(SCAN_OUT + i * 4u) == top,
+                  "fractional top pixel %u is %08x", i,
+                  scan_peek32(SCAN_OUT + i * 4u));
+            CHECK(scan_peek32(SCAN_OUT + 1280u + i * 4u) == blended,
+                  "fractional blended pixel %u is %08x", i,
+                  scan_peek32(SCAN_OUT + 1280u + i * 4u));
+        }
+    }
+
+    /* Fractional solid geometry was not observed and remains outside scope. */
+    reset_scan_fixture(site);
+    configure_rect_root(&cpu, 0x000bu);
+    for (uint32_t i = 0; i < 4u; i++) {
+        uint32_t base = SCAN_POLY + 4u + i * 0x38u;
+        scan_pokef(base + 0x04u, i < 2u ? 0.25f : 2.25f);
+    }
+    if (arm_only(site)) {
+        CHECK(!ios3_hle_step(&cpu, &SCAN_MEM, site->va, 0x0bf1b000u),
+              "fractional solid rectangle was handled");
+        CHECK(g_scan_write_calls == 0u && g_scan_writev_calls == 0u,
+              "fractional solid published scalar=%u vector=%u",
+              g_scan_write_calls, g_scan_writev_calls);
+    }
+    ios3_hle_disarm();
+}
+
 static void test_rect_root_preserves_prior_row_alias_semantics(void) {
     static const uint32_t expected[3] = {
         UINT32_C(0x80112233), UINT32_C(0x80445566),
@@ -2009,6 +2086,7 @@ int main(void) {
     test_rect_root_replaces_textured_and_solid_rows_atomically();
     test_rect_root_chunks_measured_full_width_mode_two();
     test_rect_root_applies_integer_clip_bounds();
+    test_rect_root_matches_fractional_bilinear_rows();
     test_rect_root_preserves_prior_row_alias_semantics();
     test_rect_root_refuses_unproved_or_nonatomic_shapes();
     test_rect_root_oracle_captures_two_rows_without_publication();
