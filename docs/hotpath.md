@@ -1980,3 +1980,60 @@ host variance from the changed guest work admitted by replacement under the
 fixed retired-instruction cap. It nevertheless provides no evidence that this
 new shortcut made the measured workload faster. It is still not an FPS result,
 and **30 fps remains unproven**.
+
+### r323: fractional one-column rows are exact; most remaining rows are wider
+
+The next refusal was fractional vertical geometry, but accepting `float` y
+coordinates by rounding them on the host would not have been a valid fix.
+Retained `_ogl_poly_scan` code shows two distinct edge rules. Its first active
+edge computes `ceilf(y - 0.5f)` and advances an exact half tie at
+`0x311e24d0..0x311e2510`; later edge bounds use `floorf(y + 0.5f)` at
+`0x311e2638..0x311e264c`. Initial attributes are computed through binary64 and
+rounded to binary32, while skipped and completed rows advance with repeated
+binary32 adds at `0x311e2c3c..0x311e2c98`. Recomputing a clipped row directly
+would be algebraically similar but could have different low bits.
+
+The bounded root now accepts only textured, axis-aligned rectangles whose x,
+u and v coordinates remain integer and whose fractional y span is still an
+exact integer height. It reproduces those decoded scan bounds and accumulated
+row advances; fractional solid geometry remains refused. The one-column BGRA
+sampler was also extended from zero-weight rows to the exact packed vertical
+interpolation at `0x3122bc08..0x3122bcb4`. Its wrapping 32-bit lane
+subtractions, multiplies, logical shifts and byte extraction are transcribed,
+not replaced with an approximate per-channel float blend. The existing
+one-column descriptor, root-only memory facade, two-tap fault and alias guards
+remain mandatory.
+
+The focused fixture translates a 320-to-1 two-row texture by one quarter pixel
+and pins the native 192/256 packed blend. It also pins fractional-solid refusal;
+the focused binary passes 24,287 checks. Detached exact commit
+`11d253464e4ad4acddca379b5142a084294a3473` then passed all 54 standard tests.
+Its fresh RelWithDebInfo emulator SHA-256 was
+`DAB92254645B63862FC954643A0E4BEB8B881329E83FE9848B9960716156686D`.
+
+r323 was the complete 3.9--4.4 B native-vs-HLE oracle from the retained clean
+checkpoint. It exited zero and stopped exactly at 4,400,000,000 instructions in
+388.602 host seconds with:
+
+    nearest BGRX leaf        4,830 attempted / 4,830 exact passes
+    nearest BGRA leaf        4,818 attempted / 4,816 exact passes
+    sw_scanline             13,333 attempted / 9,277 exact passes
+    ogl_poly_scan              167 attempted /   144 exact passes
+    total prepared          19,067 / 65,536; 0 failures
+
+Every prepared comparison resolved with zero mismatch or unreadable result.
+The run consumed all 26 touch reports, reported zero external-media failures
+and 2/2 raw redirects/completions, retained 69 H1 swap-handler calls, and
+produced the accepted framebuffer SHA-256
+`E0CE0EB1C117527ECDFF2C2C4A4549FCF48AB0F9E151AB7CBE13965849F7CEC8`.
+GitHub Actions passed iOS build `30709876859` and all eight core-test jobs in
+`30709876824` for the exact source commit.
+
+The gain is **three** exact roots over r320's 141, not every fractional root.
+The refusal trace explains the gap: the remaining translated 71/203/300/304/320
+pixel rows still select `0x3122bad8`, but their descriptors expose multiple
+texture columns. The implementation's proved one-column shortcut correctly
+declines them at the child scanline. A general multi-column bilinear
+transcription is therefore the next renderer case. r323's 388.602 seconds is
+verifier overhead, not a replacement timing result or displayed cadence.
+**30 fps remains unproven.**
