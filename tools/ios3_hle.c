@@ -543,7 +543,7 @@ static ios3_hle_site_t g_sites[] = {
       PROLOGUE_SW_SAMPLE_NEAREST_BGRA8,
       (unsigned)(sizeof PROLOGUE_SW_SAMPLE_NEAREST_BGRA8 /
                  sizeof PROLOGUE_SW_SAMPLE_NEAREST_BGRA8[0]),
-      hle_sw_sample_nearest_bgra8, IOS3_HLE_OBSERVE, false, false, 0, 0, 0, 0 },
+      hle_sw_sample_nearest_bgra8, IOS3_HLE_REPLACE, false, false, 0, 0, 0, 0 },
     { "sw_scanline",        0x3122d180u, PROLOGUE_SW_SCANLINE,
       (unsigned)(sizeof PROLOGUE_SW_SCANLINE /
                  sizeof PROLOGUE_SW_SCANLINE[0]),
