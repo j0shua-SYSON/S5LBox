@@ -2656,5 +2656,7 @@ The r374 diagnostic snapshot is reproducible but is not a final-acceptance check
 
 Local verification for this checkpoint is 63/63 focused MBX assertions, 55/55 full
 tests, a clean strict `-Werror -pedantic -Wshadow` build, the exact offline padlock
-replay above, and the live r374 run. Hosted exact-SHA results remain pending until this
-source checkpoint is committed and pushed.
+replay above, and the live r374 run. Exact source SHA
+`259cf7f8534915b79984bcad29f20ccf93dfb421` is also green in hosted core Actions run
+`30741441156` (all matrices, including strict and sanitizers) and iOS Actions run
+`30741441167` (ad-hoc-signed IPA).
