@@ -3009,3 +3009,92 @@ warnings-as-errors build. Graphics are still not complete: r397 contains one rec
 caused by the now-decoded split clear, no run in this chain has displayed the home screen,
 no rejection-free instruction-zero cold boot has reproduced the extended path, and no
 frame-publication cadence or 30 FPS result has been measured.
+
+### r398-r407: the guest reaches a tutorial-free home screen; acceptance is still pending
+
+r398 consumed the split clear live and advanced from 5.4 B to 5.6 B. Its two-dimensional
+work was clean (`52 / 52 / 0`, 2,641,728 bytes), but its final three-dimensional battery
+tail was rejected (`4 / 3 / 1`). The visible frame at that stop contained only the status
+bar: 955 nonblack pixels, PPM SHA-256
+`07C2CD8201AF1B2384775F16227DCA4BB06B4031EFDB399F742FF6F3A0A6D97A`. That frame was a
+coherent intermediate surface after the guest cleared the lower screen, not random PNG
+corruption and not a home-screen result.
+
+The retained object exposed a second list word for an otherwise familiar top-band
+battery tail. Form dispatch now includes the measured third list word, then validates the
+whole list again. Three top-band variants were subsequently observed on literal targets
+`0x00a41000`, `0x00998000`, and `0x00897000`. Each uses the same 21-by-4 source rows
+16..19 at `0x00986000`; all 84 source pixels were independently measured as exactly zero
+BGRA, and the implementation rejects a nonzero source. Each retained replay completed
+84 pixels and raised `0x4c`.
+
+r399 resumed the first completion to 5.8 B and displayed the real iPhone OS 3 home screen
+with the `Edit Home Screen` tutorial. It exited zero, had no media failures, and produced:
+
+    work/r399-derived-resume-5800m/w.img.screen.ppm
+      SHA-256 BCF55ECBB9FC83074D1F230BD8E1F83C9D84C7FFA755C21C0CA02CDF6B24ED3D
+    work/r399-derived-resume-5800m/screen.png
+      SHA-256 0846D85F283D04E79B2E0F7C031E5581BE90EC957331B9D86ED2CA26DAAD4A6E
+
+This is visual progress, not a performance result. r399 still logged a Graphics Recovery
+Event. r400 then injected one tap at `(160,335)` over `Dismiss`: down and up were accepted
+at 5,810,000,000 and 5,834,000,000 instructions, zero attempts were refused, and all 28
+device reports were read. The guest reacted by submitting new render work. That proves
+this specific touch reached SpringBoard; it does not prove every coordinate, gesture, or
+the iOS host-app input path.
+
+The tutorial dismissal exposed literal three-dimensional layers rather than a generic
+unknown raster operation:
+
+| retained run | exact layer | destination | source and measured constraint | replayed pixels |
+|---|---|---:|---|---:|
+| r402 | lower-screen dim mask | `0,20 320x460` | `0x00b12080`, rows 20..479, stride `0x500`, alpha-only premultiplied BGRA, vertex alpha exactly `0xb7` | 147,200 |
+| r403 | popup panel | `18,130 284x241` | `0x00ba9080`, stride `0x480`, zero premultiplication violations, vertex alpha exactly `0x05` | 68,444 |
+| r404 | `Edit Home Screen` title | `30,145 260x23` | `0x00bed080`, stride `0x420`, coherent text texture, vertex alpha exactly `0x05` | 5,980 |
+| r405 | instructional body | `30,175 260x121` | `0x00bf3080`, stride `0x420`, coherent six-line text texture, vertex alpha exactly `0x05` | 31,460 |
+| r406 | `Dismiss` button | `29,312 262x43` | `0x00c2b080`, stride `0x420`, coherent button texture, vertex alpha exactly `0x05` | 11,266 |
+
+The source widths and row counts above are not guesses from the visible frame. Reading
+the popup beyond row 240 reaches unrelated data and premultiplication failures; the exact
+284-by-241 crop does not. For the title, stride `0x420` yields coherent text and zero
+premultiplication violations, while the plausible `0x440` and `0x480` interpretations do
+not. The focused fixture also had to model GART root 3 because the body texture crosses
+GPU VA `0x00c00000`; the first root-2-only fixture failed and was corrected before replay.
+Only the captured `0xb7` and `0x05` vertex words are accepted. Unlike the multiply observed
+slider opacity, these single captures are not generalized to arbitrary alpha.
+
+r407 consumed the final completion and ran 10 M more instructions with no decoder
+rejection:
+
+| measured r407 result | value |
+|---|---:|
+| 2D candidates / completed / rejected | 136 / 136 / 0 |
+| 2D bytes committed | 3,012,184 |
+| 3D candidates / completed / rejected | 15 / 15 / 0 |
+| 3D pixels blended | 32,396 |
+| external-media failures | 0 |
+| process exit | 0 |
+
+Its final CLCD frame is a coherent tutorial-free home screen with 80,312 nonblack pixels
+and 238,252 nonzero RGB bytes:
+
+    work/r407-derived-dismiss-next-6100m/w.img.screen.ppm
+      SHA-256 A667640D78E19A8CB1DDBB20155EB4C6697C837B29B2CC894E06749ADCE4355E
+    work/r407-derived-dismiss-next-6100m/screen.png
+      SHA-256 C8EDB47A32AD8AD70118412D8E8599C7F8503BCFDCEEA239CDF8BFBD9EFA0986
+
+Local verification at this checkpoint is 367/367 focused MBX assertions, 55/55 CTest
+targets, and 367/367 again in the independent strict warnings-as-errors build.
+
+The uncomfortable part matters: r407 still contains one Graphics Recovery Event with
+`CompletedIntStatus=0x00000400`. That is compatible with delayed watchdog state carried
+from the preceding rejected-command checkpoint, but r407 alone cannot prove that cause.
+Therefore the result is **not** described as recovery-free. A clean resumed interaction
+must show that the event does not recur, and an instruction-zero cold boot must reproduce
+the entire path without any rejection or recovery before graphics can be called fixed.
+
+The r400/r401 frame-meter probes each saw only their initial signature because rendering
+stalled at the then-unknown form; their means (`0.042` and `0.039` fps) are stall evidence,
+not steady-state home-screen cadence. They do not establish the emulator's current FPS.
+No measured 30 FPS result exists yet. Network, sound, and iOS-app completion remain behind
+that graphics acceptance gate.

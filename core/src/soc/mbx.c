@@ -1354,14 +1354,20 @@ struct mbx_3d_status_form {
 /* These are literal transcriptions of the live object streams. Words 2 and 5
  * are address fields and are validated separately against each form's control
  * bits and FBSTART; every other word must match exactly. A zero target accepts
- * either surface used by the earlier status forms. The slider label is the one
- * exception: r385/r387/r389 measured the same word at all four vertices while
- * its high byte stepped b4, 8a, 61, 37 and its low 24 bits stayed zero. Only
- * those four words may vary, must remain identical, and are consumed as the
- * per-vertex alpha established by the software-renderer pixel oracle. The
- * transparent transition transfer has two complete, separately captured quad
- * streams from r391/r392. They differ in two setup words and all four vertex
- * alpha words, so the alternatives are matched atomically; mixtures fail. */
+ * either surface used by the earlier status forms. Forms with the same clip
+ * and target can carry different third list words, so that measured word is
+ * also part of form selection before the complete list is checked again.
+ *
+ * The slider label is the one variable-alpha exception: r385/r387/r389
+ * measured the same word at all four vertices while its high byte stepped b4,
+ * 8a, 61, 37 and its low 24 bits stayed zero. Only those four words may vary,
+ * must remain identical, and are consumed as the per-vertex alpha established
+ * by the software-renderer pixel oracle. r402-r406's tutorial layers retain
+ * their literal b7/05 alpha words; one capture is not treated as proof of an
+ * arbitrary opacity range. The transparent transition transfer has two
+ * complete, separately captured quad streams from r391/r392. They differ in
+ * two setup words and all four vertex-alpha words, so the alternatives are
+ * matched atomically; mixtures fail. */
 static const struct mbx_3d_status_form mbx_3d_status_forms[] = {
     {
         .xclip = 0x00a80098u, .yclip = 0x00200000u,
@@ -1529,6 +1535,196 @@ static const struct mbx_3d_status_form mbx_3d_status_forms[] = {
         },
     },
     {
+        .xclip = 0x01400000u, .yclip = 0x00200000u,
+        .target = 0x00a41000u,
+        .list_word = 0x612000a8u,
+        .boundary_override = true, .source_must_be_zero = true,
+        .tile_x0 = 0u, .tile_x1 = 0x27u,
+        .tile_y0 = 0u, .tile_y1 = 1u,
+        .left = 296u, .top = 16u, .width = 21u, .height = 4u,
+        .source_row0 = 16u,
+        .source_stride = 0x60u, .source_control = 0x0e040000u,
+        .boundary = {
+            0x00000000u, 0x41a00000u, 0x00000000u, 0x00000000u,
+            0x43a00000u, 0x41a00000u, 0x43a00000u, 0x00000000u,
+        },
+        .quad = {
+            0xe0000000u, 0xa2218001u, 0u, 0xcd206c40u,
+            0xa7718000u, 0u, 0xae504ea0u, 0x22250e80u,
+            0x43940000u, 0x41a00000u, 0x43940000u, 0x00000000u,
+            0x439e8000u, 0x41a00000u, 0x439e8000u, 0x00000000u,
+            0u, 0u, 0u, 0u,
+            0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+            0xbf000000u, 0x00000000u, 0x3f200000u, 0x3e940000u,
+            0x3ca00000u, 0xbf000000u, 0x00000000u, 0x00000000u,
+            0x3e940000u, 0x00000000u, 0xbf000000u, 0x3f280000u,
+            0x3f200000u, 0x3e9e8000u, 0x3ca00000u, 0xbf000000u,
+            0x3f280000u, 0x00000000u, 0x3e9e8000u, 0x00000000u,
+        },
+    },
+    {
+        .xclip = 0x01400000u, .yclip = 0x00200000u,
+        .target = 0x00998000u,
+        .list_word = 0x612000a8u,
+        .boundary_override = true, .source_must_be_zero = true,
+        .tile_x0 = 0u, .tile_x1 = 0x27u,
+        .tile_y0 = 0u, .tile_y1 = 1u,
+        .left = 296u, .top = 16u, .width = 21u, .height = 4u,
+        .source_row0 = 16u,
+        .source_stride = 0x60u, .source_control = 0x0e040000u,
+        .boundary = {
+            0x00000000u, 0x41a00000u, 0x00000000u, 0x00000000u,
+            0x43a00000u, 0x41a00000u, 0x43a00000u, 0x00000000u,
+        },
+        .quad = {
+            0xe0000000u, 0xa2218001u, 0u, 0xcd206c40u,
+            0xa7718000u, 0u, 0xae504ea0u, 0x22250e80u,
+            0x43940000u, 0x41a00000u, 0x43940000u, 0x00000000u,
+            0x439e8000u, 0x41a00000u, 0x439e8000u, 0x00000000u,
+            0u, 0u, 0u, 0u,
+            0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+            0xbf000000u, 0x00000000u, 0x3f200000u, 0x3e940000u,
+            0x3ca00000u, 0xbf000000u, 0x00000000u, 0x00000000u,
+            0x3e940000u, 0x00000000u, 0xbf000000u, 0x3f280000u,
+            0x3f200000u, 0x3e9e8000u, 0x3ca00000u, 0xbf000000u,
+            0x3f280000u, 0x00000000u, 0x3e9e8000u, 0x00000000u,
+        },
+    },
+    {
+        .xclip = 0x01400000u, .yclip = 0x00200000u,
+        .target = 0x00897000u,
+        .list_word = 0x612000a8u,
+        .boundary_override = true, .source_must_be_zero = true,
+        .tile_x0 = 0u, .tile_x1 = 0x27u,
+        .tile_y0 = 0u, .tile_y1 = 1u,
+        .left = 296u, .top = 16u, .width = 21u, .height = 4u,
+        .source_row0 = 16u,
+        .source_stride = 0x60u, .source_control = 0x0e040000u,
+        .boundary = {
+            0x00000000u, 0x41a00000u, 0x00000000u, 0x00000000u,
+            0x43a00000u, 0x41a00000u, 0x43a00000u, 0x00000000u,
+        },
+        .quad = {
+            0xe0000000u, 0xa2218001u, 0u, 0xcd206c40u,
+            0xa7718000u, 0u, 0xae504ea0u, 0x22250e80u,
+            0x43940000u, 0x41a00000u, 0x43940000u, 0x00000000u,
+            0x439e8000u, 0x41a00000u, 0x439e8000u, 0x00000000u,
+            0u, 0u, 0u, 0u,
+            0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+            0xbf000000u, 0x00000000u, 0x3f200000u, 0x3e940000u,
+            0x3ca00000u, 0xbf000000u, 0x00000000u, 0x00000000u,
+            0x3e940000u, 0x00000000u, 0xbf000000u, 0x3f280000u,
+            0x3f200000u, 0x3e9e8000u, 0x3ca00000u, 0xbf000000u,
+            0x3f280000u, 0x00000000u, 0x3e9e8000u, 0x00000000u,
+        },
+    },
+    {
+        .xclip = 0x01400000u, .yclip = 0x01e00010u,
+        .target = 0x00a41000u,
+        .tile_x0 = 0u, .tile_x1 = 0x27u,
+        .tile_y0 = 1u, .tile_y1 = 0x1du,
+        .left = 0u, .top = 20u, .width = 320u, .height = 460u,
+        .source_row0 = 20u,
+        .source_stride = 0x500u, .source_control = 0x0e500000u,
+        .quad = {
+            0xe0000000u, 0xa6618000u, 0u, 0xcd206c40u,
+            0xa7718000u, 0u, 0xae504ea0u, 0x22250e80u,
+            0x00000000u, 0x43f00000u, 0x00000000u, 0x41a00000u,
+            0x43a00000u, 0x43f00000u, 0x43a00000u, 0x41a00000u,
+            0u, 0u, 0u, 0u,
+            0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+            0xb7000000u, 0x00000000u, 0x3f700000u, 0x00000000u,
+            0x3ef00000u, 0xb7000000u, 0x00000000u, 0x3d200000u,
+            0x00000000u, 0x3ca00000u, 0xb7000000u, 0x3f200000u,
+            0x3f700000u, 0x3ea00000u, 0x3ef00000u, 0xb7000000u,
+            0x3f200000u, 0x3d200000u, 0x3ea00000u, 0x3ca00000u,
+        },
+    },
+    {
+        .xclip = 0x01300010u, .yclip = 0x01800080u,
+        .target = 0x00a41000u,
+        .tile_x0 = 2u, .tile_x1 = 0x25u,
+        .tile_y0 = 8u, .tile_y1 = 0x17u,
+        .left = 18u, .top = 130u, .width = 284u, .height = 241u,
+        .source_stride = 0x480u, .source_control = 0x0e480000u,
+        .quad = {
+            0xe0000000u, 0xa6518000u, 0u, 0xcd206c40u,
+            0xa7718000u, 0u, 0xae504ea0u, 0x22250e80u,
+            0x41900000u, 0x43b98000u, 0x41900000u, 0x43020000u,
+            0x43970000u, 0x43b98000u, 0x43970000u, 0x43020000u,
+            0u, 0u, 0u, 0u,
+            0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+            0x05000000u, 0x00000000u, 0x3f710000u, 0x3c900000u,
+            0x3eb98000u, 0x05000000u, 0x00000000u, 0x00000000u,
+            0x3c900000u, 0x3e020000u, 0x05000000u, 0x3f0e0000u,
+            0x3f710000u, 0x3e970000u, 0x3eb98000u, 0x05000000u,
+            0x3f0e0000u, 0x00000000u, 0x3e970000u, 0x3e020000u,
+        },
+    },
+    {
+        .xclip = 0x01280018u, .yclip = 0x00b00090u,
+        .target = 0x00a41000u,
+        .tile_x0 = 3u, .tile_x1 = 0x24u,
+        .tile_y0 = 9u, .tile_y1 = 0x0au,
+        .left = 30u, .top = 145u, .width = 260u, .height = 23u,
+        .source_stride = 0x420u, .source_control = 0x0e400000u,
+        .quad = {
+            0xe0000000u, 0xa6218001u, 0u, 0xcd206c40u,
+            0xa7718000u, 0u, 0xae504ea0u, 0x22250e80u,
+            0x41f00000u, 0x43280000u, 0x41f00000u, 0x43110000u,
+            0x43910000u, 0x43280000u, 0x43910000u, 0x43110000u,
+            0u, 0u, 0u, 0u,
+            0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+            0x05000000u, 0x00000000u, 0x3f380000u, 0x3cf00000u,
+            0x3e280000u, 0x05000000u, 0x00000000u, 0x00000000u,
+            0x3cf00000u, 0x3e110000u, 0x05000000u, 0x3f020000u,
+            0x3f380000u, 0x3e910000u, 0x3e280000u, 0x05000000u,
+            0x3f020000u, 0x00000000u, 0x3e910000u, 0x3e110000u,
+        },
+    },
+    {
+        .xclip = 0x01280018u, .yclip = 0x013000a0u,
+        .target = 0x00a41000u,
+        .tile_x0 = 3u, .tile_x1 = 0x24u,
+        .tile_y0 = 0x0au, .tile_y1 = 0x12u,
+        .left = 30u, .top = 175u, .width = 260u, .height = 121u,
+        .source_stride = 0x420u, .source_control = 0x0e400000u,
+        .quad = {
+            0xe0000000u, 0xa6418001u, 0u, 0xcd206c40u,
+            0xa7718000u, 0u, 0xae504ea0u, 0x22250e80u,
+            0x41f00000u, 0x43940000u, 0x41f00000u, 0x432f0000u,
+            0x43910000u, 0x43940000u, 0x43910000u, 0x432f0000u,
+            0u, 0u, 0u, 0u,
+            0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+            0x05000000u, 0x00000000u, 0x3f720000u, 0x3cf00000u,
+            0x3e940000u, 0x05000000u, 0x00000000u, 0x00000000u,
+            0x3cf00000u, 0x3e2f0000u, 0x05000000u, 0x3f020000u,
+            0x3f720000u, 0x3e910000u, 0x3e940000u, 0x05000000u,
+            0x3f020000u, 0x00000000u, 0x3e910000u, 0x3e2f0000u,
+        },
+    },
+    {
+        .xclip = 0x01280018u, .yclip = 0x01700130u,
+        .target = 0x00a41000u,
+        .tile_x0 = 3u, .tile_x1 = 0x24u,
+        .tile_y0 = 0x13u, .tile_y1 = 0x16u,
+        .left = 29u, .top = 312u, .width = 262u, .height = 43u,
+        .source_stride = 0x420u, .source_control = 0x0e400000u,
+        .quad = {
+            0xe0000000u, 0xa6318001u, 0u, 0xcd206c40u,
+            0xa7718000u, 0u, 0xae504ea0u, 0x22250e80u,
+            0x41e80000u, 0x43b18000u, 0x41e80000u, 0x439c0000u,
+            0x43918000u, 0x43b18000u, 0x43918000u, 0x439c0000u,
+            0u, 0u, 0u, 0u,
+            0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+            0x05000000u, 0x00000000u, 0x3f2c0000u, 0x3ce80000u,
+            0x3eb18000u, 0x05000000u, 0x00000000u, 0x00000000u,
+            0x3ce80000u, 0x3e9c0000u, 0x05000000u, 0x3f030000u,
+            0x3f2c0000u, 0x3e918000u, 0x3eb18000u, 0x05000000u,
+            0x3f030000u, 0x00000000u, 0x3e918000u, 0x3e9c0000u,
+        },
+    },
+    {
         .xclip = 0x01400000u, .yclip = 0x01e00010u,
         .target = 0x00897000u, .blend_surface = 0x00998000u,
         .list_word = 0x612000a8u,
@@ -1667,15 +1863,18 @@ static const struct mbx_3d_status_form mbx_3d_status_forms[] = {
 };
 
 static const struct mbx_3d_status_form *
-mbx_3d_find_status_form(const s5l_mbx_t *m) {
+mbx_3d_find_status_form(const s5l_mbx_t *m, uint32_t list_word) {
     uint32_t xclip = m->reg[S5L_MBX_FBXCLIP / 4u];
     uint32_t yclip = m->reg[S5L_MBX_FBYCLIP / 4u];
     uint32_t target = m->reg[S5L_MBX_FBSTART / 4u];
     for (unsigned i = 0;
          i < sizeof mbx_3d_status_forms / sizeof mbx_3d_status_forms[0]; i++) {
         const struct mbx_3d_status_form *form = &mbx_3d_status_forms[i];
+        uint32_t expected_list_word = form->list_word
+            ? form->list_word : 0x61a0007cu;
         if (form->xclip == xclip && form->yclip == yclip &&
-            (!form->target || form->target == target))
+            (!form->target || form->target == target) &&
+            expected_list_word == list_word)
             return form;
     }
     return NULL;
@@ -1718,7 +1917,11 @@ static bool mbx_execute_status_sprite(s5l_mbx_t *m,
         if (why) *why = "status-sprite region, object, or framebuffer base is invalid";
         return false;
     }
-    const struct mbx_3d_status_form *form = mbx_3d_find_status_form(m);
+    uint32_t observed_list_word;
+    if (!mbx_gart_u32(m, bus, object + 0x70u, &observed_list_word, why))
+        return false;
+    const struct mbx_3d_status_form *form =
+        mbx_3d_find_status_form(m, observed_list_word);
     if (m->reg[S5L_MBX_3DPIXSAMP / 4u] != 0x00020007u ||
         m->reg[S5L_MBX_FBCTL / 4u] != 0x00000006u ||
         m->reg[S5L_MBX_FBLINESTRIDE / 4u] != MBX_3D_WIDTH || !form) {

@@ -13,6 +13,7 @@
  */
 #include "soc.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static int g_pass, g_fail;
@@ -47,6 +48,7 @@ static int g_pass, g_fail;
 #define REG_RENDER     0x00000680u
 #define REG_GART0      0x00001000u
 #define REG_GART2      0x00001008u
+#define REG_GART3      0x0000100cu
 #define RING           0x00a00000u
 #define GART_TABLE     0x08001000u
 #define SRC_GPU        0x00800080u
@@ -1135,17 +1137,18 @@ struct mbx_test_status_form {
 };
 
 static void test_captured_status_form(const struct mbx_test_status_form *form) {
-    enum { TARGET_STRIDE = 0x500u, MAX_PIXELS = 320u * 20u };
+    enum { TARGET_STRIDE = 0x500u, MAX_PIXELS = 320u * 480u };
     const uint32_t table0 = 0x08003000u;
     const uint32_t table2 = 0x08004000u;
+    const uint32_t table3 = 0x08005000u;
     const uint32_t region = 0x00001000u;
     const uint32_t object = 0x00014000u;
     const uint32_t target = form->target ? form->target : 0x00897000u;
     const uint32_t region_pa = 0x08010000u;
     const uint32_t object_pa = 0x08014000u;
-    const uint32_t source_pa = 0x08016000u;
-    const uint32_t target_pa = 0x08030000u;
-    const uint32_t blend_pa = 0x08100000u;
+    const uint32_t source_pa = 0x08020000u;
+    const uint32_t target_pa = 0x080c0000u;
+    const uint32_t blend_pa = 0x08160000u;
     const uint32_t blend_surface = form->blend_surface
         ? form->blend_surface : target;
     const uint32_t tile_count =
@@ -1159,6 +1162,7 @@ static void test_captured_status_form(const struct mbx_test_status_form *form) {
 
     m.bus.write32(m.bus.ctx, MBX_BASE + REG_GART0, table0);
     m.bus.write32(m.bus.ctx, MBX_BASE + REG_GART2, table2);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_GART3, table3);
     uint32_t region_page0 = region & ~0xfffu;
     uint32_t region_last = region + tile_count * 8u - 1u;
     for (uint32_t page = region_page0; page <= (region_last & ~0xfffu);
@@ -1172,26 +1176,32 @@ static void test_captured_status_form(const struct mbx_test_status_form *form) {
                                form->source_stride +
                            form->width * 4u - 1u;
     for (uint32_t page = source_page0; page <= (source_last & ~0xfffu);
-         page += 0x1000u)
-        test_map_gpu_page(&m, table2, page,
+         page += 0x1000u) {
+        uint32_t table = (page >> 22) == 2u ? table2 : table3;
+        test_map_gpu_page(&m, table, page,
                           source_pa + (page - source_page0));
+    }
     uint32_t target_page0 = target & ~0xfffu;
     uint32_t target_last = target +
                            (form->top + form->height) * TARGET_STRIDE +
                            (form->left + form->width) * 4u - 1u;
     for (uint32_t page = target_page0; page <= (target_last & ~0xfffu);
-         page += 0x1000u)
-        test_map_gpu_page(&m, table2, page,
+         page += 0x1000u) {
+        uint32_t table = (page >> 22) == 2u ? table2 : table3;
+        test_map_gpu_page(&m, table, page,
                           target_pa + (page - target_page0));
+    }
     if (blend_surface != target) {
         uint32_t blend_page0 = blend_surface & ~0xfffu;
         uint32_t blend_last = blend_surface +
                               (form->top + form->height - 1u) * TARGET_STRIDE +
                               (form->left + form->width) * 4u - 1u;
         for (uint32_t page = blend_page0; page <= (blend_last & ~0xfffu);
-             page += 0x1000u)
-            test_map_gpu_page(&m, table2, page,
+             page += 0x1000u) {
+            uint32_t table = (page >> 22) == 2u ? table2 : table3;
+            test_map_gpu_page(&m, table, page,
                               blend_pa + (page - blend_page0));
+        }
     }
 
     uint32_t list = object + 0x68u;
@@ -1275,7 +1285,19 @@ static void test_captured_status_form(const struct mbx_test_status_form *form) {
         test_gpu_write32(&m, object + 0x1f0u + i * 4u, value);
     }
 
-    uint32_t expected[MAX_PIXELS];
+    uint64_t pixel_count = (uint64_t)form->width * form->height;
+    CHECK(pixel_count <= MAX_PIXELS, "%s fixture rectangle is too large",
+          form->name);
+    if (pixel_count > MAX_PIXELS) {
+        s5l8900_free(&m);
+        return;
+    }
+    uint32_t *expected = malloc((size_t)pixel_count * sizeof *expected);
+    CHECK(expected != NULL, "%s expected-pixel allocation failed", form->name);
+    if (!expected) {
+        s5l8900_free(&m);
+        return;
+    }
     for (uint32_t y = 0; y < form->height; y++) {
         for (uint32_t x = 0; x < form->width; x++) {
             uint32_t alpha = 0x40u + ((x * 11u + y * 7u) & 0xbfu);
@@ -1429,6 +1451,7 @@ static void test_captured_status_form(const struct mbx_test_status_form *form) {
     CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
           "%s unknown control raised completion", form->name);
 
+    free(expected);
     s5l8900_free(&m);
 }
 
@@ -1588,6 +1611,208 @@ static void test_later_tiled_status_sprites(void) {
                 0x00000000u, 0x00000000u, 0xbf000000u, 0x3f200000u,
                 0x3f200000u, 0x3ea00000u, 0x3ca00000u, 0xbf000000u,
                 0x3f200000u, 0x00000000u, 0x3ea00000u, 0x00000000u,
+            },
+        },
+        {
+            .name = "transparent clipped battery tail on transition surface",
+            .xclip = 0x01400000u, .yclip = 0x00200000u,
+            .target = 0x00a41000u,
+            .list_word = 0x612000a8u,
+            .boundary_override = true, .source_must_be_zero = true,
+            .tile_x0 = 0u, .tile_x1 = 0x27u,
+            .tile_y0 = 0u, .tile_y1 = 1u,
+            .left = 296u, .top = 16u, .width = 21u, .height = 4u,
+            .source = 0x00986000u, .source_row0 = 16u,
+            .source_stride = 0x60u, .source_control = 0x0e040000u,
+            .boundary = {
+                0x00000000u, 0x41a00000u, 0x00000000u, 0x00000000u,
+                0x43a00000u, 0x41a00000u, 0x43a00000u, 0x00000000u,
+            },
+            .quad = {
+                0xe0000000u, 0xa2218001u, 0u, 0xcd206c40u,
+                0xa7718000u, 0u, 0xae504ea0u, 0x22250e80u,
+                0x43940000u, 0x41a00000u, 0x43940000u, 0x00000000u,
+                0x439e8000u, 0x41a00000u, 0x439e8000u, 0x00000000u,
+                0u, 0u, 0u, 0u,
+                0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+                0xbf000000u, 0x00000000u, 0x3f200000u, 0x3e940000u,
+                0x3ca00000u, 0xbf000000u, 0x00000000u, 0x00000000u,
+                0x3e940000u, 0x00000000u, 0xbf000000u, 0x3f280000u,
+                0x3f200000u, 0x3e9e8000u, 0x3ca00000u, 0xbf000000u,
+                0x3f280000u, 0x00000000u, 0x3e9e8000u, 0x00000000u,
+            },
+        },
+        {
+            .name = "transparent clipped battery tail on middle surface",
+            .xclip = 0x01400000u, .yclip = 0x00200000u,
+            .target = 0x00998000u,
+            .list_word = 0x612000a8u,
+            .boundary_override = true, .source_must_be_zero = true,
+            .tile_x0 = 0u, .tile_x1 = 0x27u,
+            .tile_y0 = 0u, .tile_y1 = 1u,
+            .left = 296u, .top = 16u, .width = 21u, .height = 4u,
+            .source = 0x00986000u, .source_row0 = 16u,
+            .source_stride = 0x60u, .source_control = 0x0e040000u,
+            .boundary = {
+                0x00000000u, 0x41a00000u, 0x00000000u, 0x00000000u,
+                0x43a00000u, 0x41a00000u, 0x43a00000u, 0x00000000u,
+            },
+            .quad = {
+                0xe0000000u, 0xa2218001u, 0u, 0xcd206c40u,
+                0xa7718000u, 0u, 0xae504ea0u, 0x22250e80u,
+                0x43940000u, 0x41a00000u, 0x43940000u, 0x00000000u,
+                0x439e8000u, 0x41a00000u, 0x439e8000u, 0x00000000u,
+                0u, 0u, 0u, 0u,
+                0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+                0xbf000000u, 0x00000000u, 0x3f200000u, 0x3e940000u,
+                0x3ca00000u, 0xbf000000u, 0x00000000u, 0x00000000u,
+                0x3e940000u, 0x00000000u, 0xbf000000u, 0x3f280000u,
+                0x3f200000u, 0x3e9e8000u, 0x3ca00000u, 0xbf000000u,
+                0x3f280000u, 0x00000000u, 0x3e9e8000u, 0x00000000u,
+            },
+        },
+        {
+            .name = "transparent clipped battery tail on CLCD surface",
+            .xclip = 0x01400000u, .yclip = 0x00200000u,
+            .target = 0x00897000u,
+            .list_word = 0x612000a8u,
+            .boundary_override = true, .source_must_be_zero = true,
+            .tile_x0 = 0u, .tile_x1 = 0x27u,
+            .tile_y0 = 0u, .tile_y1 = 1u,
+            .left = 296u, .top = 16u, .width = 21u, .height = 4u,
+            .source = 0x00986000u, .source_row0 = 16u,
+            .source_stride = 0x60u, .source_control = 0x0e040000u,
+            .boundary = {
+                0x00000000u, 0x41a00000u, 0x00000000u, 0x00000000u,
+                0x43a00000u, 0x41a00000u, 0x43a00000u, 0x00000000u,
+            },
+            .quad = {
+                0xe0000000u, 0xa2218001u, 0u, 0xcd206c40u,
+                0xa7718000u, 0u, 0xae504ea0u, 0x22250e80u,
+                0x43940000u, 0x41a00000u, 0x43940000u, 0x00000000u,
+                0x439e8000u, 0x41a00000u, 0x439e8000u, 0x00000000u,
+                0u, 0u, 0u, 0u,
+                0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+                0xbf000000u, 0x00000000u, 0x3f200000u, 0x3e940000u,
+                0x3ca00000u, 0xbf000000u, 0x00000000u, 0x00000000u,
+                0x3e940000u, 0x00000000u, 0xbf000000u, 0x3f280000u,
+                0x3f200000u, 0x3e9e8000u, 0x3ca00000u, 0xbf000000u,
+                0x3f280000u, 0x00000000u, 0x3e9e8000u, 0x00000000u,
+            },
+        },
+        {
+            .name = "lower-screen opacity composite on transition surface",
+            .xclip = 0x01400000u, .yclip = 0x01e00010u,
+            .target = 0x00a41000u,
+            .tile_x0 = 0u, .tile_x1 = 0x27u,
+            .tile_y0 = 1u, .tile_y1 = 0x1du,
+            .left = 0u, .top = 20u, .width = 320u, .height = 460u,
+            .source = 0x00b12080u, .source_row0 = 20u,
+            .source_stride = 0x500u, .source_control = 0x0e500000u,
+            .quad = {
+                0xe0000000u, 0xa6618000u, 0u, 0xcd206c40u,
+                0xa7718000u, 0u, 0xae504ea0u, 0x22250e80u,
+                0x00000000u, 0x43f00000u, 0x00000000u, 0x41a00000u,
+                0x43a00000u, 0x43f00000u, 0x43a00000u, 0x41a00000u,
+                0u, 0u, 0u, 0u,
+                0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+                0xb7000000u, 0x00000000u, 0x3f700000u, 0x00000000u,
+                0x3ef00000u, 0xb7000000u, 0x00000000u, 0x3d200000u,
+                0x00000000u, 0x3ca00000u, 0xb7000000u, 0x3f200000u,
+                0x3f700000u, 0x3ea00000u, 0x3ef00000u, 0xb7000000u,
+                0x3f200000u, 0x3d200000u, 0x3ea00000u, 0x3ca00000u,
+            },
+        },
+        {
+            .name = "tutorial popup on transition surface",
+            .xclip = 0x01300010u, .yclip = 0x01800080u,
+            .target = 0x00a41000u,
+            .tile_x0 = 2u, .tile_x1 = 0x25u,
+            .tile_y0 = 8u, .tile_y1 = 0x17u,
+            .left = 18u, .top = 130u, .width = 284u, .height = 241u,
+            .source = 0x00ba9080u,
+            .source_stride = 0x480u, .source_control = 0x0e480000u,
+            .quad = {
+                0xe0000000u, 0xa6518000u, 0u, 0xcd206c40u,
+                0xa7718000u, 0u, 0xae504ea0u, 0x22250e80u,
+                0x41900000u, 0x43b98000u, 0x41900000u, 0x43020000u,
+                0x43970000u, 0x43b98000u, 0x43970000u, 0x43020000u,
+                0u, 0u, 0u, 0u,
+                0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+                0x05000000u, 0x00000000u, 0x3f710000u, 0x3c900000u,
+                0x3eb98000u, 0x05000000u, 0x00000000u, 0x00000000u,
+                0x3c900000u, 0x3e020000u, 0x05000000u, 0x3f0e0000u,
+                0x3f710000u, 0x3e970000u, 0x3eb98000u, 0x05000000u,
+                0x3f0e0000u, 0x00000000u, 0x3e970000u, 0x3e020000u,
+            },
+        },
+        {
+            .name = "tutorial title on transition surface",
+            .xclip = 0x01280018u, .yclip = 0x00b00090u,
+            .target = 0x00a41000u,
+            .tile_x0 = 3u, .tile_x1 = 0x24u,
+            .tile_y0 = 9u, .tile_y1 = 0x0au,
+            .left = 30u, .top = 145u, .width = 260u, .height = 23u,
+            .source = 0x00bed080u,
+            .source_stride = 0x420u, .source_control = 0x0e400000u,
+            .quad = {
+                0xe0000000u, 0xa6218001u, 0u, 0xcd206c40u,
+                0xa7718000u, 0u, 0xae504ea0u, 0x22250e80u,
+                0x41f00000u, 0x43280000u, 0x41f00000u, 0x43110000u,
+                0x43910000u, 0x43280000u, 0x43910000u, 0x43110000u,
+                0u, 0u, 0u, 0u,
+                0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+                0x05000000u, 0x00000000u, 0x3f380000u, 0x3cf00000u,
+                0x3e280000u, 0x05000000u, 0x00000000u, 0x00000000u,
+                0x3cf00000u, 0x3e110000u, 0x05000000u, 0x3f020000u,
+                0x3f380000u, 0x3e910000u, 0x3e280000u, 0x05000000u,
+                0x3f020000u, 0x00000000u, 0x3e910000u, 0x3e110000u,
+            },
+        },
+        {
+            .name = "tutorial body on transition surface",
+            .xclip = 0x01280018u, .yclip = 0x013000a0u,
+            .target = 0x00a41000u,
+            .tile_x0 = 3u, .tile_x1 = 0x24u,
+            .tile_y0 = 0x0au, .tile_y1 = 0x12u,
+            .left = 30u, .top = 175u, .width = 260u, .height = 121u,
+            .source = 0x00bf3080u,
+            .source_stride = 0x420u, .source_control = 0x0e400000u,
+            .quad = {
+                0xe0000000u, 0xa6418001u, 0u, 0xcd206c40u,
+                0xa7718000u, 0u, 0xae504ea0u, 0x22250e80u,
+                0x41f00000u, 0x43940000u, 0x41f00000u, 0x432f0000u,
+                0x43910000u, 0x43940000u, 0x43910000u, 0x432f0000u,
+                0u, 0u, 0u, 0u,
+                0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+                0x05000000u, 0x00000000u, 0x3f720000u, 0x3cf00000u,
+                0x3e940000u, 0x05000000u, 0x00000000u, 0x00000000u,
+                0x3cf00000u, 0x3e2f0000u, 0x05000000u, 0x3f020000u,
+                0x3f720000u, 0x3e910000u, 0x3e940000u, 0x05000000u,
+                0x3f020000u, 0x00000000u, 0x3e910000u, 0x3e2f0000u,
+            },
+        },
+        {
+            .name = "tutorial dismiss button on transition surface",
+            .xclip = 0x01280018u, .yclip = 0x01700130u,
+            .target = 0x00a41000u,
+            .tile_x0 = 3u, .tile_x1 = 0x24u,
+            .tile_y0 = 0x13u, .tile_y1 = 0x16u,
+            .left = 29u, .top = 312u, .width = 262u, .height = 43u,
+            .source = 0x00c2b080u,
+            .source_stride = 0x420u, .source_control = 0x0e400000u,
+            .quad = {
+                0xe0000000u, 0xa6318001u, 0u, 0xcd206c40u,
+                0xa7718000u, 0u, 0xae504ea0u, 0x22250e80u,
+                0x41e80000u, 0x43b18000u, 0x41e80000u, 0x439c0000u,
+                0x43918000u, 0x43b18000u, 0x43918000u, 0x439c0000u,
+                0u, 0u, 0u, 0u,
+                0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+                0x05000000u, 0x00000000u, 0x3f2c0000u, 0x3ce80000u,
+                0x3eb18000u, 0x05000000u, 0x00000000u, 0x00000000u,
+                0x3ce80000u, 0x3e9c0000u, 0x05000000u, 0x3f030000u,
+                0x3f2c0000u, 0x3e918000u, 0x3eb18000u, 0x05000000u,
+                0x3f030000u, 0x00000000u, 0x3e918000u, 0x3e9c0000u,
             },
         },
         {
