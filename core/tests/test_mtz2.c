@@ -1803,8 +1803,12 @@ static void test_machine_wires_the_device_and_its_attention_line(void) {
           m.spi[1].slaves[0].ctx == &m.mtz2,
           "the touch controller is not on spi1 chip select 0");
     CHECK(m.spi[1].slaves[1].transfer == NULL &&
-          m.spi[0].slaves[0].transfer == NULL,
-          "something else was attached to an SPI bus");
+          m.spi[0].slaves[0].transfer == NULL &&
+          m.spi[0].slaves[S5L_SPI0_LCD_CS].transfer != NULL &&
+          m.spi[0].slaves[S5L_SPI0_LCD_CS].ctx == &m.spi[0] &&
+          m.spi[0].cs == S5L_SPI0_LCD_CS,
+          "SPI board wiring does not match touch cs0 plus lcd0 cs%u",
+          S5L_SPI0_LCD_CS);
     CHECK(m.mtz2.hbpp_mode && m.mtz2.in_reset,
           "the machine's device did not power on as a bootloader held in "
           "reset: hbpp=%d in_reset=%d",

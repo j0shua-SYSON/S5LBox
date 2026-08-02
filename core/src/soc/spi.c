@@ -57,13 +57,16 @@ static uint8_t fifo_pop(uint8_t *fifo, uint8_t *level) {
  * A chip select with no attached device does NOT shift. Answering for a device
  * this machine does not have would be fabricating exactly the value the guest
  * is waiting for, which is the one thing this core's storage windows are
- * forbidden to do — and it would change spi0, whose panel is unmodelled and
- * which today stalls in precisely this way. Attaching a slave is the
- * declaration that a device exists; see s5l_spi_null_bind().
+ * forbidden to do. Attaching a slave is the declaration that a device exists;
+ * see s5l_spi_null_bind() and s5l_spi_lcd_bind().
  */
 static void spi_shift(s5l_spi_t *bus) {
+    const uint8_t invalid_cs =
+        (uint8_t)~(S5L_SPI_CS_ROUTE_MASK | S5L_SPI_LCD_READ_PENDING);
+    if ((bus->cs & invalid_cs) != 0u) return;
+    const unsigned route = bus->cs & S5L_SPI_CS_ROUTE_MASK;
     const s5l_spi_slave_t *slave =
-        bus->cs < S5L_SPI_SLAVES ? &bus->slaves[bus->cs] : NULL;
+        route < S5L_SPI_SLAVES ? &bus->slaves[route] : NULL;
     if (!slave || !slave->transfer) return;
 
     /*
@@ -298,6 +301,9 @@ void s5l_spi_write(s5l_spi_t *bus, uint32_t off, uint32_t val) {
             bus->cnt = val;
             bus->words_left = val;
             bus->rx_level = 0u;
+            /* A new transfer abandons any half-issued panel register read. The
+             * low route bits are untouched. */
+            bus->cs &= (uint8_t)~S5L_SPI_LCD_READ_PENDING;
             break;
         case SPI_IDD:
             bus->idd = val;
@@ -363,4 +369,43 @@ void s5l_spi_null_bind(s5l_spi_slave_t *slave) {
     if (!slave) return;
     memset(slave, 0, sizeof *slave);
     slave->transfer = null_transfer;
+}
+
+/* ------------------------------------------------- Merlot LCD transport --- */
+
+static uint8_t lcd_transfer(void *ctx, uint8_t out) {
+    s5l_spi_t *bus = ctx;
+    if (!bus) return 0x00u;
+
+    /*
+     * AppleMerlotLCD's read helper sends { 0x80 | reg, 0xff }, ignores the
+     * first received octet, and returns the second. The enable path repeatedly
+     * reads register 0x15 until bit 0 becomes one. The real driver drains that
+     * first octet before it queues the dummy clock, so the receive FIFO cannot
+     * carry the phase. S5L_SPI_LCD_READ_PENDING does: it is an explicit bit in
+     * the already-serialized `cs` byte and survives a checkpoint even when the
+     * FIFO is empty.
+     *
+     * These conditions are exact rather than heuristic. A one-byte command, a
+     * write, a different register read, or a transfer with different framing
+     * still receives zero.
+     */
+    if (bus->cnt == 2u && bus->words_left == 2u && bus->rx_level == 0u &&
+        out == 0x95u) {
+        bus->cs |= S5L_SPI_LCD_READ_PENDING;
+        return 0x00u;
+    }
+    if ((bus->cs & S5L_SPI_LCD_READ_PENDING) != 0u &&
+        bus->cnt == 2u && bus->words_left == 1u) {
+        bus->cs &= (uint8_t)~S5L_SPI_LCD_READ_PENDING;
+        return out == 0xffu ? 0x01u : 0x00u;
+    }
+    return 0x00u;
+}
+
+void s5l_spi_lcd_bind(s5l_spi_slave_t *slave, s5l_spi_t *bus) {
+    if (!slave) return;
+    memset(slave, 0, sizeof *slave);
+    slave->ctx = bus;
+    slave->transfer = lcd_transfer;
 }

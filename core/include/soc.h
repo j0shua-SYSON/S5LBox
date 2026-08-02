@@ -2217,6 +2217,17 @@ uint32_t s5l_i2s_fifo_pa(unsigned index, s5l_i2s_fifo_t which);
  * configuration word with `and r3, r3, #3` (0xc05a64c0) and indexes a table at
  * this+0x84 by it. spi0 really does carry two devices, nor-flash and lcd0. */
 #define S5L_SPI_SLAVES      4u
+/* reg[0] of /arm-io/spi0/lcd0. The NOR is reg[0] == 0 but is exposed through
+ * its dedicated memory window; controller traffic on the modelled board is the
+ * Merlot panel path. */
+#define S5L_SPI0_LCD_CS      1u
+/* The low bits select one of the four routes. Bit 7 is endpoint-private,
+ * serialized state for a Merlot register read whose second clock has not yet
+ * happened. It lives in `cs` because that byte already travels across a
+ * checkpoint and the route itself occupies only two bits; it is never exposed
+ * through an SPI register. */
+#define S5L_SPI_CS_ROUTE_MASK       (S5L_SPI_SLAVES - 1u)
+#define S5L_SPI_LCD_READ_PENDING    0x80u
 #define S5L_SPI_UNKNOWN_OFF 8u
 
 /*
@@ -2247,14 +2258,14 @@ typedef struct {
     uint8_t  rx[S5L_SPI_FIFO_DEPTH];
     uint8_t  tx_level, rx_level;
     /*
-     * Which chip select words are routed to. Nothing writes it yet, and that is
-     * the honest state of the board rather than an oversight: the select lines
-     * are GPIO functions this machine models as storage, so the controller
-     * cannot see them move. The touch device's select is 0 — there is no
-     * `chip-select` property anywhere in the shipped tree; the number is
-     * reg[0] of /arm-io/spi1/multi-touch, whose reg begins {0, 0xa6, ...} —
-     * so that is where a device attached at reset is. When the GPIO block
-     * becomes a model, this field is what it drives and nothing else changes.
+     * Which chip select words are routed to, in the low two bits. The real
+     * select lines are GPIO platform functions and the controller cannot
+     * observe them yet. Board construction therefore selects the only
+     * controller-backed device on each modelled bus: spi0 lcd0 at select 1 and
+     * spi1 multi-touch at select 0. The NOR at spi0 select 0 is already exposed
+     * through its dedicated memory window. Bit 7 is the explicitly named LCD
+     * transaction flag above, not part of the route. When GPIO chip-select
+     * routing is modelled, it drives only the low route bits.
      */
     uint8_t  cs;
 
@@ -2364,6 +2375,20 @@ void     s5l_spi_step(s5l_spi_t *bus);
  * later.
  */
 void     s5l_spi_null_bind(s5l_spi_slave_t *slave);
+
+/*
+ * The deliberately small endpoint for /arm-io/spi0/lcd0 (lcd,merlot). It
+ * supplies the full-duplex receive clocks required to finish transmit-only
+ * requests and the one status fact AppleMerlotLCD has been measured polling:
+ * register 0x15 bit 0 says that the attached panel is ready. Every other
+ * semantic reply remains zero. This is not a command-level panel model and it
+ * does not change CLCD scanout state.
+ *
+ * The controller is the context because S5L_SPI_LCD_READ_PENDING in its
+ * serialized `cs` byte carries the read phase between the two words, including
+ * across a checkpoint. It must be the controller the slave is attached to.
+ */
+void     s5l_spi_lcd_bind(s5l_spi_slave_t *slave, s5l_spi_t *bus);
 
 /* ---------------------------------------- AppleMultitouchZ2SPI's device ---
  * The touch controller on /arm-io/spi1 chip select 0. See core/src/soc/mtz2.c

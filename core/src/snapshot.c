@@ -807,22 +807,34 @@ static void snap_i2s(sn_io_t *io, s5l_i2s_t *s) {
 
 static bool spi_state_valid(const s5l_spi_t *s) {
     /* Only what the model itself can produce. The FIFO levels bound the arrays
-     * they index, `cs` bounds the slave table the shifter routes through, and
-     * the status word carries nothing but the four event latches — the two
-     * level fields are computed on read and are never stored. */
+     * they index, the low `cs` bits bound the slave table, its one high bit is
+     * only valid between the two words of lcd0's status read, and the status
+     * word carries nothing but the four event latches — the two level fields
+     * are computed on read and are never stored. */
     if (!s || s->tx_level > S5L_SPI_FIFO_DEPTH ||
         s->rx_level > S5L_SPI_FIFO_DEPTH ||
-        s->cs >= S5L_SPI_SLAVES ||
+        (s->cs & ~(S5L_SPI_CS_ROUTE_MASK |
+                   S5L_SPI_LCD_READ_PENDING)) != 0u ||
+        (s->cs & S5L_SPI_CS_ROUTE_MASK) >= S5L_SPI_SLAVES ||
         (s->status & ~(uint32_t)SPI_STATUS_EVENTS) != 0u ||
         s->unknown_off_count > S5L_SPI_UNKNOWN_OFF)
+        return false;
+    if ((s->cs & S5L_SPI_LCD_READ_PENDING) != 0u &&
+        ((s->cs & S5L_SPI_CS_ROUTE_MASK) != S5L_SPI0_LCD_CS ||
+         s->cnt != 2u || s->words_left != 1u))
         return false;
     return true;
 }
 
 /*
  * An SPI controller. The attached devices are host wiring and are deliberately
- * not serialized, exactly as the I2C slave table is not; `cs` is guest-facing
- * routing state and does travel.
+ * not serialized, exactly as the I2C slave table is not; `cs` travels so an
+ * in-flight transfer remains coherent. Its low bits are the route and bit 7 is
+ * lcd0's pending-register-read phase. This does not change the byte layout or
+ * any previously valid value: an older reader safely rejects a new mid-read
+ * value as corrupt, while a new reader interprets an old clear bit as no
+ * pending read. snap_apply() reasserts spi0's current low board route so
+ * checkpoints made before the lcd0 endpoint existed can resume.
  */
 static void snap_spi(sn_io_t *io, s5l_spi_t *s) {
     F32(s->control); F32(s->setup); F32(s->pin);
@@ -1309,15 +1321,21 @@ static bool snap_machine_valid(const s5l8900_t *m) {
         m->i2c[1].slave_count != 0u ||
         m->pmu.tick_hz != m->tb_hz)
         return false;
-    /* The SPI board wiring, for the same reason: spi1 chip select 0 carries the
-     * touch controller and nothing else is attached anywhere. Restoring a
-     * receive FIFO into a controller with no device behind it would resume a
-     * transfer that can never finish, and restoring the Z2's protocol position
-     * behind a DIFFERENT device would resume it into the wrong one. */
+    /* The SPI board wiring, for the same reason: spi0 chip select 1 carries the
+     * transport-only Merlot panel endpoint and spi1 chip select 0 carries the
+     * touch controller. Restoring a receive FIFO into a controller with no
+     * device behind it would resume a transfer that can never finish, and
+     * restoring the Z2's protocol position behind a DIFFERENT device would
+     * resume it into the wrong one. */
+    if (m->spi[0].slaves[S5L_SPI0_LCD_CS].transfer == NULL ||
+        m->spi[0].slaves[S5L_SPI0_LCD_CS].ctx != (void *)&m->spi[0])
+        return false;
     for (unsigned cs = 0; cs < S5L_SPI_SLAVES; cs++)
-        if (m->spi[0].slaves[cs].transfer != NULL) return false;
+        if (cs != S5L_SPI0_LCD_CS &&
+            m->spi[0].slaves[cs].transfer != NULL) return false;
     if (m->spi[1].slaves[0].transfer == NULL ||
-        m->spi[1].slaves[0].ctx != (void *)&m->mtz2) return false;
+        m->spi[1].slaves[0].ctx != (void *)&m->mtz2 ||
+        (m->spi[1].cs & S5L_SPI_LCD_READ_PENDING) != 0u) return false;
     for (unsigned cs = 1; cs < S5L_SPI_SLAVES; cs++)
         if (m->spi[1].slaves[cs].transfer != NULL) return false;
     if (!mtz2_state_valid(&m->mtz2)) return false;
@@ -1491,6 +1509,11 @@ static snapshot_status_t snap_apply(s5l8900_t *m, FILE *f,
      * interposed bus (bootkernel's tracing wrapper) work. */
     m->cpu.bus = &m->bus;
     m->bus.ctx = m;
+    /* Old checkpoints legitimately contain zero here: before lcd0 was wired,
+     * no model ever selected a different SPI0 target. Host wiring is supplied
+     * by the current board, so resume on its proven device-tree route. */
+    m->spi[0].cs = (uint8_t)(S5L_SPI0_LCD_CS |
+        (m->spi[0].cs & S5L_SPI_LCD_READ_PENDING));
     /* Every device in this machine was just replaced, so nothing the previous
      * tick derived about its levels still holds. Setting rather than restoring
      * this is what keeps it out of the file format — see `level_dirty` in

@@ -1055,6 +1055,33 @@ bool s5l8900_init(s5l8900_t *m, uint32_t ram_base, uint32_t ram_size) {
         }
     }
     /*
+     * /arm-io/spi0/lcd0 is the Merlot panel at reg[0] == 1. The first late
+     * transaction measured from AppleMerlotLCD::_lcdEnable is the transmit-only
+     * pair 55 02. Even a transmit-only SPI word clocks a receive word into this
+     * controller, and its stock interrupt filter must drain that word before it
+     * calls finishTransfer and wakes the synchronous requester.
+     *
+     * The endpoint also exposes the only panel status contract measured in the
+     * driver: the enable path reads register 0x15 until bit 0 says ready. It
+     * does not otherwise interpret commands or alter CLCD scanout. The NOR at
+     * select 0 remains the separate memory window. Until the GPIO
+     * platform-function selects are routed into s5l_spi_t, all modelled SPI0
+     * controller traffic therefore uses lcd0's device-tree select explicitly.
+     */
+    {
+        s5l_spi_slave_t lcd;
+        s5l_spi_lcd_bind(&lcd, &m->spi[0]);
+        if (!s5l_spi_attach(&m->spi[0], S5L_SPI0_LCD_CS, &lcd)) {
+            free(m->ram);
+            m->ram = NULL;
+            free(m->mbx.edram);
+            m->mbx.edram = NULL;
+            return false;
+        }
+        m->spi[0].cs = S5L_SPI0_LCD_CS;
+    }
+
+    /*
      * The touch controller on spi1 chip select 0 — where
      * /arm-io/spi1/multi-touch is; the select is reg[0] of that node, since
      * there is no `chip-select` property anywhere in the shipped tree. It
@@ -1062,12 +1089,6 @@ bool s5l8900_init(s5l8900_t *m, uint32_t ram_base, uint32_t ram_size) {
      * every word with 0x00, which made AppleMultitouchZ2SPI's HBPP probe
      * complete and fail cleanly instead of sleeping with no deadline, but a
      * clean failure still detaches the driver.
-     *
-     * spi0 gets nothing on purpose. Its devices — the NOR, which this machine
-     * exposes as a memory window instead, and the lcd0 panel — are unmodelled,
-     * and a controller with no attached device shifts no words, so spi0 behaves
-     * exactly as its storage stub did rather than answering the panel driver
-     * with a byte no device sent.
      */
     s5l_mtz2_reset(&m->mtz2);
     {

@@ -94,6 +94,7 @@ static void test_reset_and_attachment_are_bounded(void) {
           "NULL controller helpers were unsafe");
     s5l_spi_write(NULL, SPI_CONTROL, 0u);
     s5l_spi_null_bind(NULL);
+    s5l_spi_lcd_bind(NULL, NULL);
 }
 
 /*
@@ -701,6 +702,58 @@ static void test_null_device_answers_zero(void) {
 }
 
 /*
+ * lcd0 is deliberately not a command-level panel model. This pins the two
+ * narrow contracts measured in AppleMerlotLCD: transmit-only requests still
+ * clock disposable receive bytes, and register 0x15 bit 0 reports ready. No
+ * unrelated register is fabricated as ready.
+ */
+static void test_lcd_transport_clocks_receive_bytes(void) {
+    s5l_spi_t bus;
+    s5l_spi_slave_t lcd;
+    s5l_spi_reset(&bus);
+    s5l_spi_lcd_bind(&lcd, &bus);
+    CHECK(lcd.transfer != NULL && lcd.ctx == &bus,
+          "the lcd0 transport endpoint was not bound");
+    CHECK(s5l_spi_attach(&bus, S5L_SPI0_LCD_CS, &lcd),
+          "lcd0 refused its device-tree chip select");
+    bus.cs = S5L_SPI0_LCD_CS;
+
+    s5l_spi_write(&bus, SPI_CNT, 2u);
+    s5l_spi_write(&bus, SPI_TXDATA, 0x55u);
+    s5l_spi_write(&bus, SPI_TXDATA, 0x02u);
+    CHECK(bus.words == 2u && bus.tx_level == 0u && bus.rx_level == 2u,
+          "lcd0 did not clock the 55 02 request: words=%llu tx=%u rx=%u",
+          (unsigned long long)bus.words, bus.tx_level, bus.rx_level);
+    CHECK(s5l_spi_read(&bus, SPI_RXDATA) == 0u &&
+          s5l_spi_read(&bus, SPI_RXDATA) == 0u && bus.rx_level == 0u,
+          "lcd0 exposed a semantic reply to a transmit-only request");
+
+    s5l_spi_write(&bus, SPI_CNT, 2u);
+    s5l_spi_write(&bus, SPI_TXDATA, 0x95u);
+    CHECK(bus.words_left == 1u && bus.rx_level == 1u && bus.rx[0] == 0u &&
+          (bus.cs & S5L_SPI_LCD_READ_PENDING) != 0u,
+          "lcd0 did not retain the register-0x15 phase in serialized state");
+    /* The real interrupt filter drains the ignored first byte before the API
+     * queues its dummy clock. The pending bit, not that FIFO byte, must carry
+     * the register identity across the gap. */
+    CHECK(s5l_spi_read(&bus, SPI_RXDATA) == 0u && bus.rx_level == 0u &&
+          (bus.cs & S5L_SPI_LCD_READ_PENDING) != 0u,
+          "draining the ignored byte lost the pending LCD read");
+    s5l_spi_write(&bus, SPI_TXDATA, 0xffu);
+    CHECK(s5l_spi_read(&bus, SPI_RXDATA) == 0x01u &&
+          (bus.cs & S5L_SPI_LCD_READ_PENDING) == 0u,
+          "lcd0 did not report register 0x15 bit 0 ready");
+
+    s5l_spi_write(&bus, SPI_CNT, 2u);
+    s5l_spi_write(&bus, SPI_TXDATA, 0x96u);
+    CHECK(s5l_spi_read(&bus, SPI_RXDATA) == 0u,
+          "lcd0 fabricated the ignored byte of an unrelated read");
+    s5l_spi_write(&bus, SPI_TXDATA, 0xffu);
+    CHECK(s5l_spi_read(&bus, SPI_RXDATA) == 0u,
+          "lcd0 fabricated a reply for unrelated register 0x16");
+}
+
+/*
  * The whole path, through the machine: the window decodes, a completed word
  * reaches VIC0 line 10, an idle core in WFI wakes on it, and the guest's W1C
  * acknowledge drops it again.
@@ -710,6 +763,14 @@ static void test_machine_routes_spi_windows_and_irq_lines(void) {
     CHECK(s5l8900_init(&m, 0u, 1u << 20), "machine init failed");
     CHECK(m.stub_declare_failures == 0u,
           "%u stub declarations were refused", m.stub_declare_failures);
+    CHECK(m.spi[0].cs == S5L_SPI0_LCD_CS &&
+          m.spi[0].slaves[S5L_SPI0_LCD_CS].transfer != NULL &&
+          m.spi[0].slaves[S5L_SPI0_LCD_CS].ctx == &m.spi[0],
+          "spi0 is not routed to lcd0 chip select %u", S5L_SPI0_LCD_CS);
+    for (unsigned cs = 0; cs < S5L_SPI_SLAVES; cs++)
+        if (cs != S5L_SPI0_LCD_CS)
+            CHECK(m.spi[0].slaves[cs].transfer == NULL,
+                  "unexpected spi0 device on chip select %u", cs);
 
     s5l_window_t windows[S5L_WINDOW_MAX];
     unsigned count = s5l8900_windows(&m, windows, S5L_WINDOW_MAX);
@@ -743,18 +804,20 @@ static void test_machine_routes_spi_windows_and_irq_lines(void) {
      * looked at the guest instead.
      *
      * The narrow stores are aimed at spi0, which nothing else here uses, so
-     * spi1's FIFO stays pristine for the loopback below. spi0 has no slave
-     * attached, so a byte simply sits in the transmit FIFO where it can be
-     * counted.
+     * spi1's FIFO stays pristine for the loopback below. lcd0 is attached now,
+     * so each access completes one word and leaves one disposable receive byte.
      */
     uint64_t ur = m.unmapped_reads, uw = m.unmapped_writes;
 
-    unsigned tx0 = m.spi[0].tx_level;
+    uint64_t words0 = m.spi[0].words;
+    unsigned rx0 = m.spi[0].rx_level;
     m.bus.write8(m.bus.ctx, S5L8900_SPI0_BASE + SPI_TXDATA, 0xaau);
     m.bus.write16(m.bus.ctx, S5L8900_SPI0_BASE + SPI_TXDATA, 0xbbccu);
-    CHECK(m.spi[0].tx_level == tx0 + 2u,
-          "narrow stores to a data port did not reach the model: tx level %u",
-          m.spi[0].tx_level);
+    CHECK(m.spi[0].words == words0 + 2u && m.spi[0].tx_level == 0u &&
+          m.spi[0].rx_level == rx0 + 2u,
+          "narrow stores did not complete through lcd0: words=%llu tx=%u rx=%u",
+          (unsigned long long)(m.spi[0].words - words0),
+          m.spi[0].tx_level, m.spi[0].rx_level);
     CHECK(m.unmapped_writes == uw,
           "a narrow store to a data port still took the unmapped path");
     /* A narrow READ decodes too, and answers the low half of the register. */
@@ -867,17 +930,46 @@ static void test_machine_routes_spi_windows_and_irq_lines(void) {
     CHECK((m.vic[0].raw & (1u << S5L8900_IRQ_SPI1)) == 0u && !m.cpu.irq_line,
           "the W1C acknowledge did not deassert IRQ10 and the CPU");
 
-    /* spi0 has no device, so the same sequence must change nothing at all —
-     * exactly the stall run59 recorded, and not a regression on the panel. */
+    /*
+     * The late AppleMerlotLCD::_lcdEnable request that exposed the real bug:
+     * 55 02, transmit-only, synchronous. The stock filter still needs two
+     * receive FIFO bytes to run and wake that requester. Drain them exactly as
+     * the filter does, then prove its acknowledge drops line 9 again.
+     */
     s5l_vic_write(&m.vic[0], VIC_INTENABLE, 1u << S5L8900_IRQ_SPI0);
+    m.bus.write32(m.bus.ctx, S5L8900_SPI0_BASE + SPI_STATUS, SPI_STATUS_EVENTS);
+    m.bus.write32(m.bus.ctx, S5L8900_SPI0_BASE + SPI_CNT, 2u);
     m.bus.write32(m.bus.ctx, S5L8900_SPI0_BASE + SPI_CONTROL, SPI_CONTROL_START);
     m.bus.write32(m.bus.ctx, S5L8900_SPI0_BASE + SPI_SETUP,
+                  SPI_SETUP_BASE | SPI_SETUP_ARM);
+    uint64_t panel_before = m.spi[0].words;
+    m.bus.write32(m.bus.ctx, S5L8900_SPI0_BASE + SPI_TXDATA, 0x55u);
+    m.bus.write32(m.bus.ctx, S5L8900_SPI0_BASE + SPI_TXDATA, 0x02u);
+    m.bus.write32(m.bus.ctx, S5L8900_SPI0_BASE + SPI_SETUP,
                   SPI_SETUP_BASE | SPI_SETUP_ARM | SPI_SETUP_GO);
-    for (unsigned i = 0; i < 2u; i++)
-        m.bus.write32(m.bus.ctx, S5L8900_SPI0_BASE + SPI_TXDATA, 0xa0u + i);
     s5l8900_tick(&m, 0u);
-    CHECK((m.vic[0].raw & (1u << S5L8900_IRQ_SPI0)) == 0u && m.spi[0].words == 0u,
-          "spi0 answered for a device this machine does not model");
+    CHECK((m.vic[0].raw & (1u << S5L8900_IRQ_SPI0)) != 0u &&
+          m.spi[0].words == panel_before + 2u && m.spi[0].rx_level == 2u,
+          "lcd0 completion did not assert line 9: words=%llu rx=%u",
+          (unsigned long long)(m.spi[0].words - panel_before),
+          m.spi[0].rx_level);
+    uint32_t panel_status =
+        m.bus.read32(m.bus.ctx, S5L8900_SPI0_BASE + SPI_STATUS);
+    unsigned panel_rx =
+        (panel_status >> SPI_STATUS_RX_SHIFT) & SPI_STATUS_LEVEL;
+    CHECK(panel_rx == 2u, "the stock filter would see %u lcd0 bytes, not 2",
+          panel_rx);
+    bool panel_zero = true;
+    for (unsigned i = 0; i < panel_rx; i++)
+        if (m.bus.read32(m.bus.ctx, S5L8900_SPI0_BASE + SPI_RXDATA) != 0u)
+            panel_zero = false;
+    CHECK(panel_zero, "a transmit-only lcd0 request exposed semantic reply data");
+    m.bus.write32(m.bus.ctx, S5L8900_SPI0_BASE + SPI_STATUS, panel_status);
+    m.bus.write32(m.bus.ctx, S5L8900_SPI0_BASE + SPI_SETUP, SPI_SETUP_BASE);
+    s5l8900_tick(&m, 0u);
+    CHECK((m.vic[0].raw & (1u << S5L8900_IRQ_SPI0)) == 0u &&
+          m.spi[0].rx_level == 0u,
+          "the completed lcd0 request left line 9 or receive data pending");
 
     s5l8900_free(&m);
 }
@@ -1074,6 +1166,18 @@ static void test_snapshot_carries_an_in_flight_transfer(void) {
           "the source is not mid-transfer: rx=%u tx=%u",
           src.spi[1].rx_level, src.spi[1].tx_level);
 
+    /* Stop an LCD register read between its selector and dummy word, after the
+     * ignored first response has already been drained exactly as it is in the
+     * guest. The explicit pending bit travels, while the callback context must
+     * still point at the destination controller after restore. */
+    src.bus.write32(src.bus.ctx, S5L8900_SPI0_BASE + SPI_CNT, 2u);
+    src.bus.write32(src.bus.ctx, S5L8900_SPI0_BASE + SPI_TXDATA, 0x95u);
+    CHECK(src.bus.read32(src.bus.ctx,
+                         S5L8900_SPI0_BASE + SPI_RXDATA) == 0u &&
+          src.spi[0].words_left == 1u && src.spi[0].rx_level == 0u &&
+          (src.spi[0].cs & S5L_SPI_LCD_READ_PENDING) != 0u,
+          "the source is not between the two LCD register-read words");
+
     uint8_t *blob = NULL;
     size_t blob_len = 0;
     CHECK(snapshot_save_mem(&src, &blob, &blob_len) == SNAP_OK,
@@ -1089,6 +1193,20 @@ static void test_snapshot_carries_an_in_flight_transfer(void) {
           "the in-flight transfer did not survive the round trip");
     CHECK(dst.spi[1].slaves[0].transfer != NULL,
           "the restored controller lost its device");
+    CHECK((dst.spi[0].cs & S5L_SPI_CS_ROUTE_MASK) == S5L_SPI0_LCD_CS &&
+          (dst.spi[0].cs & S5L_SPI_LCD_READ_PENDING) != 0u &&
+          dst.spi[0].slaves[S5L_SPI0_LCD_CS].transfer != NULL &&
+          dst.spi[0].slaves[S5L_SPI0_LCD_CS].ctx == &dst.spi[0],
+          "the restored machine lost lcd0's board route");
+
+    dst.bus.write32(dst.bus.ctx, S5L8900_SPI0_BASE + SPI_TXDATA, 0xffu);
+    CHECK(dst.bus.read32(dst.bus.ctx, S5L8900_SPI0_BASE + SPI_RXDATA) ==
+              0x01u &&
+          (dst.spi[0].cs & S5L_SPI_LCD_READ_PENDING) == 0u,
+          "the restored LCD register read did not resume with ready status");
+    CHECK(src.spi[0].words_left == 1u && src.spi[0].rx_level == 0u &&
+          (src.spi[0].cs & S5L_SPI_LCD_READ_PENDING) != 0u,
+          "the restored LCD read mutated the source controller");
 
     /* The restored transfer resumes into the destination and asserts the
      * destination's own line. */
@@ -1128,6 +1246,19 @@ static void test_snapshot_rejects_impossible_spi_state(void) {
           "an out-of-range chip select was snapshotted");
     m.spi[1].cs = 0u;
 
+    m.spi[0].cs |= S5L_SPI_LCD_READ_PENDING;
+    CHECK(snapshot_save_mem(&m, &out, &out_len) == SNAP_ERR_CORRUPT,
+          "an LCD pending bit outside a two-word read was snapshotted");
+    m.spi[0].cs &= (uint8_t)~S5L_SPI_LCD_READ_PENDING;
+
+    m.spi[1].cnt = 2u;
+    m.spi[1].words_left = 1u;
+    m.spi[1].cs |= S5L_SPI_LCD_READ_PENDING;
+    CHECK(snapshot_save_mem(&m, &out, &out_len) == SNAP_ERR_CORRUPT,
+          "the LCD pending bit was accepted on the touch controller");
+    m.spi[1].cs = 0u;
+    m.spi[1].cnt = m.spi[1].words_left = 0u;
+
     /* The level fields are computed on read and never stored, so a status word
      * carrying one is a state the model cannot have produced. */
     m.spi[1].status = 1u << SPI_STATUS_RX_SHIFT;
@@ -1143,6 +1274,13 @@ static void test_snapshot_rejects_impossible_spi_state(void) {
     /* Board wiring is host state the file never carries, so it has to match on
      * both sides: a receive FIFO restored behind a controller with no device
      * would resume a transfer that can never finish. */
+    s5l_spi_slave_t lcd = m.spi[0].slaves[S5L_SPI0_LCD_CS];
+    memset(&m.spi[0].slaves[S5L_SPI0_LCD_CS], 0,
+           sizeof m.spi[0].slaves[S5L_SPI0_LCD_CS]);
+    CHECK(snapshot_save_mem(&m, &out, &out_len) == SNAP_ERR_CORRUPT,
+          "a machine with no lcd0 endpoint was snapshotted");
+    m.spi[0].slaves[S5L_SPI0_LCD_CS] = lcd;
+
     memset(&m.spi[1].slaves[0], 0, sizeof m.spi[1].slaves[0]);
     CHECK(snapshot_save_mem(&m, &out, &out_len) == SNAP_ERR_CORRUPT,
           "a machine with no device on spi1 chip select 0 was snapshotted");
@@ -1165,6 +1303,7 @@ int main(void) {
     test_a_new_transfer_does_not_inherit_the_last_ones_answers();
     test_a_bus_with_no_device_shifts_nothing();
     test_null_device_answers_zero();
+    test_lcd_transport_clocks_receive_bytes();
     test_machine_routes_spi_windows_and_irq_lines();
     test_the_stock_filter_algorithm_terminates();
     test_wake_sources_declare_lines_nine_and_ten();
