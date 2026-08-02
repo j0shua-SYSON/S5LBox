@@ -411,7 +411,7 @@ static void test_springboard_settings_black_fill_batch(void) {
         { 136u, 375u, 178u, 385u },
     };
     static const uint32_t packet_template[16] = {
-        0xa0060500u, target, 0x94060500u, 0x00000000u,
+        0xa0060500u, 0x00897000u, 0x94060500u, 0x00000000u,
         0x30000000u, 0x60800200u, 0x8000f0f0u, 0xff000000u,
         0u, 0u, 0x70000000u, 0x70000000u,
         0x70000000u, 0x70000000u, 0x70000000u, 0x70000000u,
