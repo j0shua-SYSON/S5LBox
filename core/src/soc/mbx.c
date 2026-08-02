@@ -2013,14 +2013,16 @@ static int32_t mbx_3d_ceil_to_i32(float value) {
  *
  * This decoder follows that pointer, then requires the independently encoded
  * main geometry, normalized coordinates, boundary object, clip registers and
- * row-major tile list to agree.  Four trailing parameter records must carry
- * one uniform colour and the exact captured controls.  The current state word
- * is only unambiguous for an opaque A8R8G8B8 fill, so translucent colours and
- * non-axis-aligned quads remain rejected rather than guessed. */
-static bool mbx_execute_opaque_solid_quad(s5l_mbx_t *m,
-                                          const arm_bus_t *bus,
-                                          const char **why,
-                                          uint32_t *pixels_filled) {
+ * row-major tile list to agree.  Disassembly of the shipped _mbx3DQuadColor
+ * wrapper and producer proves that its second argument is copied to the main
+ * record before every normalized vertex pair.  Those four words must be one
+ * uniform premultiplied A8R8G8B8 colour.  The four trailing parameter records
+ * carry fixed all-one words and exact controls; they are not the quad colour.
+ * Non-axis-aligned quads remain rejected. */
+static bool mbx_execute_solid_quad(s5l_mbx_t *m,
+                                   const arm_bus_t *bus,
+                                   const char **why,
+                                   uint32_t *pixels_filled) {
     uint32_t region = m->reg[S5L_MBX_RGNBASE / 4u];
     uint32_t object = m->reg[S5L_MBX_OBJBASE / 4u];
     uint32_t target = m->reg[S5L_MBX_FBSTART / 4u];
@@ -2106,15 +2108,23 @@ static bool mbx_execute_opaque_solid_quad(s5l_mbx_t *m,
 
     static const unsigned x_words[4] = {5u, 7u, 9u, 11u};
     static const unsigned y_words[4] = {6u, 8u, 10u, 12u};
+    uint32_t colour = main[21];
+    uint32_t alpha = colour >> 24;
+    if ((colour & 0xffu) > alpha || ((colour >> 8) & 0xffu) > alpha ||
+        ((colour >> 16) & 0xffu) > alpha) {
+        if (why) *why = "solid-quad colour is not premultiplied A8R8G8B8";
+        return false;
+    }
     for (unsigned vertex = 0; vertex < 4u; vertex++) {
         float x, y;
         unsigned attribute = 21u + vertex * 3u;
         if (!mbx_3d_word_to_nonnegative_float(main[x_words[vertex]], &x) ||
             !mbx_3d_word_to_nonnegative_float(main[y_words[vertex]], &y) ||
-            main[attribute] != 0u ||
+            main[attribute] != colour ||
             main[attribute + 1u] != mbx_3d_float_to_word(x / 1024.0f) ||
             main[attribute + 2u] != mbx_3d_float_to_word(y / 1024.0f)) {
-            if (why) *why = "solid-quad normalized coordinates disagree with its geometry";
+            if (why) *why =
+                "solid-quad colour or normalized coordinates differ between vertices";
             return false;
         }
     }
@@ -2212,8 +2222,6 @@ static bool mbx_execute_opaque_solid_quad(s5l_mbx_t *m,
     static const uint32_t parameter_controls[4] = {
         0x22620ea0u, 0x46622ea0u, 0x66622ea0u, 0x82622ea0u
     };
-    uint32_t colour = 0u;
-    bool colour_seen = false;
     for (unsigned record = 0; record < 4u; record++) {
         uint32_t base = solid + (record + 1u) * 33u * 4u;
         for (unsigned i = 0; i < 33u; i++) {
@@ -2225,22 +2233,13 @@ static bool mbx_execute_opaque_solid_quad(s5l_mbx_t *m,
             else if (i == 3u) expected = 0x86084610u;
             else if (i == 4u) expected = parameter_controls[record];
             else if (i >= 17u && i <= 20u) expected = 0x3f800000u;
-            else if (i >= 21u && (i - 21u) % 3u == 0u) {
-                if (!colour_seen) {
-                    colour = value;
-                    colour_seen = true;
-                }
-                expected = colour;
-            }
+            else if (i >= 21u && (i - 21u) % 3u == 0u)
+                expected = 0xffffffffu;
             if (value != expected) {
                 if (why) *why = "solid-quad parameter records are inconsistent";
                 return false;
             }
         }
-    }
-    if (!colour_seen || (colour >> 24) != 0xffu) {
-        if (why) *why = "solid-quad colour is not the proven opaque form";
-        return false;
     }
 
     uint32_t width = right - left;
@@ -2265,13 +2264,21 @@ static bool mbx_execute_opaque_solid_quad(s5l_mbx_t *m,
         if (why) *why = "host allocation for staged solid quad failed";
         return false;
     }
-    for (uint32_t i = 0; i < total; i += 4u) {
-        pixels[i] = (uint8_t)colour;
-        pixels[i + 1u] = (uint8_t)(colour >> 8);
-        pixels[i + 2u] = (uint8_t)(colour >> 16);
-        pixels[i + 3u] = (uint8_t)(colour >> 24);
-    }
     bool ok = true;
+    for (uint32_t row = 0; row < height && ok; row++) {
+        uint32_t dst = target + (top + row) * MBX_3D_TARGET_STRIDE +
+                       left * 4u;
+        ok = mbx_gart_read(m, bus, dst, pixels + row * row_bytes,
+                           row_bytes, why);
+    }
+    for (uint32_t i = 0; i < total && ok; i += 4u) {
+        uint32_t blended = mbx_premultiplied_over(
+            mbx_load_le32(pixels + i), colour);
+        pixels[i] = (uint8_t)blended;
+        pixels[i + 1u] = (uint8_t)(blended >> 8);
+        pixels[i + 2u] = (uint8_t)(blended >> 16);
+        pixels[i + 3u] = (uint8_t)(blended >> 24);
+    }
     for (uint32_t row = 0; row < height && ok; row++) {
         uint32_t dst = target + (top + row) * MBX_3D_TARGET_STRIDE +
                        left * 4u;
@@ -2433,8 +2440,9 @@ static bool mbx_execute_axis_aligned_sprite(s5l_mbx_t *m,
     /* These are the exact positive float literals loaded at 0x30e1d258/25c
      * by _mbx3DCtxQuadCopyPerspective before VCVT.U32.F32 and subsequent 8x16
      * tile alignment. The producer first intersects its float extrema with the
-     * 0..320 x 0..480 render bounds; doing that here also avoids relying on a C
-     * conversion whose negative-input behaviour differs from ARM saturation. */
+     * context bounds. The surface intersection below avoids relying on a C
+     * conversion whose negative-input behaviour differs from ARM saturation;
+     * the boundary object then supplies any stricter integer context scissor. */
     const float lower_bias = 0.468505859375f; /* 0x3eefe000 */
     const float upper_bias = 0.531494140625f; /* 0x3f081000 */
     const float epsilon = 0.0009765625f;
@@ -2463,10 +2471,62 @@ static bool mbx_execute_axis_aligned_sprite(s5l_mbx_t *m,
         if (why) *why = "sprite does not intersect the 320x480 surface";
         return false;
     }
-    uint32_t guard_left = (uint32_t)(bounded_x0 + lower_bias);
-    uint32_t guard_top = (uint32_t)(bounded_y0 + lower_bias);
-    uint32_t guard_right = (uint32_t)(bounded_x1 + upper_bias);
-    uint32_t guard_bottom = (uint32_t)(bounded_y1 + upper_bias);
+
+    uint32_t natural_left = (uint32_t)bounded_x0;
+    uint32_t natural_top = (uint32_t)bounded_y0;
+    uint32_t natural_right = (uint32_t)bounded_x1 +
+        ((float)(uint32_t)bounded_x1 != bounded_x1);
+    uint32_t natural_bottom = (uint32_t)bounded_y1 +
+        ((float)(uint32_t)bounded_y1 != bounded_y1);
+    uint32_t boundary[8] = {0};
+    for (uint32_t off = 0x80u; off < 0x1f0u; off += 4u) {
+        uint32_t value;
+        if (!mbx_gart_u32(m, bus, object + off, &value, why)) return false;
+        if (off >= 0x0b8u && off <= 0x0d4u) {
+            float coordinate;
+            if (!mbx_3d_word_to_nonnegative_float(value, &coordinate) ||
+                coordinate > 480.0f ||
+                coordinate != (float)(uint32_t)coordinate) {
+                if (why) *why =
+                    "sprite boundary object is not an integer clipped quad";
+                return false;
+            }
+            boundary[(off - 0x0b8u) / 4u] = (uint32_t)coordinate;
+        } else if (value != mbx_3d_boundary_fixed_expected(off)) {
+            if (why) *why = "sprite boundary object setup is unknown";
+            return false;
+        }
+    }
+    uint32_t boundary_left = boundary[0];
+    uint32_t boundary_bottom = boundary[1];
+    uint32_t boundary_top = boundary[3];
+    uint32_t boundary_right = boundary[4];
+    if (boundary[2] != boundary_left || boundary[5] != boundary_bottom ||
+        boundary[6] != boundary_right || boundary[7] != boundary_top ||
+        boundary_left >= boundary_right || boundary_top >= boundary_bottom ||
+        boundary_right > MBX_3D_WIDTH || boundary_bottom > 480u ||
+        boundary_left < natural_left || boundary_top < natural_top ||
+        boundary_right > natural_right || boundary_bottom > natural_bottom) {
+        if (why) *why =
+            "sprite boundary object is not a clipped subset of its quad";
+        return false;
+    }
+
+    /* An inward edge is the integer context scissor measured in r418. Natural
+     * floor/ceil edges retain the original float extrema so the producer's
+     * asymmetric guard rounding remains independently checkable. */
+    float producer_x0 = boundary_left > natural_left
+        ? (float)boundary_left : bounded_x0;
+    float producer_y0 = boundary_top > natural_top
+        ? (float)boundary_top : bounded_y0;
+    float producer_x1 = boundary_right < natural_right
+        ? (float)boundary_right : bounded_x1;
+    float producer_y1 = boundary_bottom < natural_bottom
+        ? (float)boundary_bottom : bounded_y1;
+    uint32_t guard_left = (uint32_t)(producer_x0 + lower_bias);
+    uint32_t guard_top = (uint32_t)(producer_y0 + lower_bias);
+    uint32_t guard_right = (uint32_t)(producer_x1 + upper_bias);
+    uint32_t guard_bottom = (uint32_t)(producer_y1 + upper_bias);
     if (guard_left >= guard_right || guard_top >= guard_bottom ||
         guard_right > MBX_3D_WIDTH || guard_bottom > 480u) {
         if (why) *why = "sprite producer bounds leave the 320x480 surface";
@@ -2490,6 +2550,14 @@ static bool mbx_execute_axis_aligned_sprite(s5l_mbx_t *m,
         ? (int32_t)MBX_3D_WIDTH : raster_right_unclipped;
     int32_t raster_bottom = raster_bottom_unclipped > 480
         ? 480 : raster_bottom_unclipped;
+    if (raster_left < (int32_t)boundary_left)
+        raster_left = (int32_t)boundary_left;
+    if (raster_top < (int32_t)boundary_top)
+        raster_top = (int32_t)boundary_top;
+    if (raster_right > (int32_t)boundary_right)
+        raster_right = (int32_t)boundary_right;
+    if (raster_bottom > (int32_t)boundary_bottom)
+        raster_bottom = (int32_t)boundary_bottom;
     if (raster_left >= raster_right || raster_top >= raster_bottom) {
         if (why) *why = "sprite has no covered pixel centres on the surface";
         return false;
@@ -2501,28 +2569,33 @@ static bool mbx_execute_axis_aligned_sprite(s5l_mbx_t *m,
     uint32_t width = right - left;
     uint32_t height = bottom - top;
 
-    /* This is deliberately narrower than a texture sampler. The measured
-     * producer submitted a unity-scale copy, and its first clipped capture
-     * removes sixteen integer columns at the left edge. A one-sided screen
-     * intersection therefore selects the equally sized contiguous edge of the
-     * source; an uncut axis must retain the full source extent. Sprites crossing
-     * both edges, guard-band expansion and any resampling remain rejected until
-     * a physical-MBX oracle establishes their pixel rule. */
-    bool clipped_on_left = raster_left_unclipped < 0;
-    bool clipped_on_right =
-        raster_right_unclipped > (int32_t)MBX_3D_WIDTH;
-    bool clipped_on_top = raster_top_unclipped < 0;
-    bool clipped_on_bottom = raster_bottom_unclipped > 480;
-    if ((clipped_on_left && clipped_on_right) ||
-        (clipped_on_top && clipped_on_bottom) ||
-        width > source_width || height > source_height ||
-        (!clipped_on_left && !clipped_on_right && width != source_width) ||
-        (!clipped_on_top && !clipped_on_bottom && height != source_height)) {
-        if (why) *why = "sprite intersection is not a measured one-to-one edge crop";
+    /* This is deliberately narrower than a texture sampler. Pixel-centre
+     * coverage of an integer-sized unity transform must span the full source;
+     * intersecting it with the surface and context boundary then selects the
+     * same contiguous source subrectangle. Scaling and resampling still reject. */
+    int32_t full_raster_width =
+        raster_right_unclipped - raster_left_unclipped;
+    int32_t full_raster_height =
+        raster_bottom_unclipped - raster_top_unclipped;
+    if (full_raster_width != (int32_t)source_width ||
+        full_raster_height != (int32_t)source_height ||
+        raster_left < raster_left_unclipped ||
+        raster_top < raster_top_unclipped ||
+        raster_right > raster_right_unclipped ||
+        raster_bottom > raster_bottom_unclipped) {
+        if (why) *why =
+            "sprite pixel-centre coverage is not a contiguous 1:1 crop";
         return false;
     }
-    uint32_t source_x0 = clipped_on_left ? source_width - width : 0u;
-    uint32_t source_y0 = clipped_on_top ? source_height - height : 0u;
+    uint32_t source_x0 =
+        (uint32_t)(raster_left - raster_left_unclipped);
+    uint32_t source_y0 =
+        (uint32_t)(raster_top - raster_top_unclipped);
+    if (source_x0 + width > source_width ||
+        source_y0 + height > source_height) {
+        if (why) *why = "sprite source crop exceeds its unity transform";
+        return false;
+    }
 
     uint32_t texture_width = 8u, texture_height = 8u;
     uint32_t width_field = 0u, height_field = 0u;
@@ -2620,29 +2693,6 @@ static bool mbx_execute_axis_aligned_sprite(s5l_mbx_t *m,
         }
     }
 
-    uint32_t boundary_left = (uint32_t)bounded_x0;
-    uint32_t boundary_top = (uint32_t)bounded_y0;
-    uint32_t boundary_right = (uint32_t)bounded_x1 +
-        ((float)(uint32_t)bounded_x1 != bounded_x1);
-    uint32_t boundary_bottom = (uint32_t)bounded_y1 +
-        ((float)(uint32_t)bounded_y1 != bounded_y1);
-    const uint32_t boundary[8] = {
-        boundary_left, boundary_bottom, boundary_left, boundary_top,
-        boundary_right, boundary_bottom, boundary_right, boundary_top,
-    };
-    for (uint32_t off = 0x80u; off < 0x1f0u; off += 4u) {
-        uint32_t value;
-        if (!mbx_gart_u32(m, bus, object + off, &value, why)) return false;
-        uint32_t expected = mbx_3d_boundary_fixed_expected(off);
-        if (off >= 0x0b8u && off <= 0x0d4u)
-            expected = mbx_3d_float_to_word(
-                (float)boundary[(off - 0x0b8u) / 4u]);
-        if (value != expected) {
-            if (why) *why = "sprite boundary object disagrees with its quad";
-            return false;
-        }
-    }
-
     uint32_t row_bytes = width * 4u;
     uint32_t total = row_bytes * height;
     uint64_t source_end = (uint64_t)source +
@@ -2725,7 +2775,7 @@ bool s5l_mbx_process_3d(s5l_mbx_t *m, const arm_bus_t *bus,
     if (!mbx_execute_first_tiled_over(m, bus, &why, &pixels) &&
         !mbx_execute_status_sprite(m, bus, &why, &pixels) &&
         !mbx_execute_axis_aligned_sprite(m, bus, &why, &pixels) &&
-        !mbx_execute_opaque_solid_quad(m, bus, &why, &pixels)) {
+        !mbx_execute_solid_quad(m, bus, &why, &pixels)) {
         mbx_3d_rejected++;
         if (mbx_trace_state == 1)
             fprintf(stderr, "MBX3D reject STARTRENDER: %s\n", why);

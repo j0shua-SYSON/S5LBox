@@ -1200,14 +1200,14 @@ static void test_second_tiled_status_glyph(void) {
     s5l8900_free(&m);
 }
 
-static void test_write_opaque_solid_quad(s5l8900_t *m,
-                                         uint32_t region,
-                                         uint32_t object,
-                                         uint32_t target,
-                                         uint32_t solid_offset,
-                                         float x0, float y0,
-                                         float x1, float y1,
-                                         uint32_t colour) {
+static void test_write_solid_quad(s5l8900_t *m,
+                                  uint32_t region,
+                                  uint32_t object,
+                                  uint32_t target,
+                                  uint32_t solid_offset,
+                                  float x0, float y0,
+                                  float x1, float y1,
+                                  uint32_t colour) {
     for (uint32_t off = 0u; off < 0x700u; off += 4u)
         test_gpu_write32(m, object + off, 0u);
 
@@ -1275,6 +1275,7 @@ static void test_write_opaque_solid_quad(s5l8900_t *m,
         test_float_word(vertices[i]);
     for (unsigned vertex = 0; vertex < 4u; vertex++) {
         unsigned attribute = 21u + vertex * 3u;
+        main[attribute] = colour;
         main[attribute + 1u] = test_float_word(
             vertices[vertex * 2u] / 1024.0f);
         main[attribute + 2u] = test_float_word(
@@ -1295,7 +1296,8 @@ static void test_write_opaque_solid_quad(s5l8900_t *m,
             else if (i == 3u) value = 0x86084610u;
             else if (i == 4u) value = parameter_controls[record];
             else if (i >= 17u && i <= 20u) value = 0x3f800000u;
-            else if (i >= 21u && (i - 21u) % 3u == 0u) value = colour;
+            else if (i >= 21u && (i - 21u) % 3u == 0u)
+                value = 0xffffffffu;
             test_gpu_write32(m, base + i * 4u, value);
         }
     }
@@ -1339,7 +1341,7 @@ static void test_write_opaque_solid_quad(s5l8900_t *m,
     m->bus.write32(m->bus.ctx, MBX_BASE + REG_FBSTRIDE, 320u);
 }
 
-static void test_pointer_selected_opaque_solid_quad(void) {
+static void test_pointer_selected_solid_quad(void) {
     enum { TARGET_STRIDE = 0x500u };
     const uint32_t table0 = 0x08003000u;
     const uint32_t table2 = 0x08004000u;
@@ -1364,10 +1366,11 @@ static void test_pointer_selected_opaque_solid_quad(void) {
                           target_pa + (page - target_page0));
 
     /* Exact r414 form.  The poisoned +0x1f0 texture is stale by construction;
-     * only the 0x612... pointer-selected colour object at +0x2a0 may execute. */
-    test_write_opaque_solid_quad(&m, region, object, target, 0x2a0u,
-                                 159.0f, 239.0f, 161.0f, 241.0f,
-                                 0xffffffffu);
+     * only the 0x612... pointer-selected transparent colour object at +0x2a0
+     * may execute and complete without changing its destination. */
+    test_write_solid_quad(&m, region, object, target, 0x2a0u,
+                          159.0f, 239.0f, 161.0f, 241.0f,
+                          0x00000000u);
     for (unsigned i = 0; i < 44u; i++)
         test_gpu_write32(&m, object + 0x1f0u + i * 4u,
                          0xdead0000u + i);
@@ -1382,9 +1385,9 @@ static void test_pointer_selected_opaque_solid_quad(void) {
     for (uint32_t y = 239u; y < 241u; y++)
         for (uint32_t x = 159u; x < 161u; x++)
             mismatches += test_gpu_read32(
-                &m, target + y * TARGET_STRIDE + x * 4u) != 0xffffffffu;
+                &m, target + y * TARGET_STRIDE + x * 4u) != 0xff102030u;
     CHECK(mismatches == 0u,
-          "r414 pointer-selected solid quad mismatched %u pixels", mismatches);
+          "r414 transparent solid quad changed %u pixels", mismatches);
     CHECK(test_gpu_read32(&m, outside) == 0xff123456u,
           "r414 solid quad changed a pixel outside its rectangle");
     CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0x4cu,
@@ -1393,9 +1396,9 @@ static void test_pointer_selected_opaque_solid_quad(void) {
 
     /* A deliberately synthetic second address, size, position and colour
      * proves that neither 0xa8 nor the centre pixel rectangle is a whitelist. */
-    test_write_opaque_solid_quad(&m, region, object, target, 0x300u,
-                                 23.0f, 33.0f, 47.0f, 41.0f,
-                                 0xff336699u);
+    test_write_solid_quad(&m, region, object, target, 0x300u,
+                          23.0f, 33.0f, 47.0f, 41.0f,
+                          0xff336699u);
     for (uint32_t y = 33u; y < 41u; y++)
         for (uint32_t x = 23u; x < 47u; x++)
             test_gpu_write32(&m, target + y * TARGET_STRIDE + x * 4u,
@@ -1414,6 +1417,17 @@ static void test_pointer_selected_opaque_solid_quad(void) {
     m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x4cu);
 
     uint32_t first = target + 33u * TARGET_STRIDE + 23u * 4u;
+    uint32_t second_colour = object + 0x300u + 24u * 4u;
+    uint32_t second_colour_value = test_gpu_read32(&m, second_colour);
+    test_gpu_write32(&m, first, 0xffabcdefu);
+    test_gpu_write32(&m, second_colour,
+                     second_colour_value ^ 0x01000000u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
+    CHECK(test_gpu_read32(&m, first) == 0xffabcdefu &&
+          m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
+          "per-vertex solid-colour mismatch was not rejected atomically");
+    test_gpu_write32(&m, second_colour, second_colour_value);
+
     test_gpu_write32(&m, first, 0xffabcdefu);
     uint32_t normalized = object + 0x300u + 22u * 4u;
     uint32_t normalized_value = test_gpu_read32(&m, normalized);
@@ -1424,26 +1438,51 @@ static void test_pointer_selected_opaque_solid_quad(void) {
           "normalized-coordinate mutation was not rejected atomically");
     test_gpu_write32(&m, normalized, normalized_value);
 
-    uint32_t late_colour = object + 0x300u + 4u * 33u * 4u + 30u * 4u;
-    test_gpu_write32(&m, late_colour, 0xff336698u);
+    uint32_t late_parameter =
+        object + 0x300u + 4u * 33u * 4u + 30u * 4u;
+    test_gpu_write32(&m, late_parameter, 0xfffffffeu);
     m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
     CHECK(test_gpu_read32(&m, first) == 0xffabcdefu &&
           m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
           "late solid-parameter mutation was not rejected atomically");
-    test_gpu_write32(&m, late_colour, 0xff336699u);
+    test_gpu_write32(&m, late_parameter, 0xffffffffu);
 
-    test_write_opaque_solid_quad(&m, region, object, target, 0x300u,
-                                 23.0f, 33.0f, 47.0f, 41.0f,
-                                 0x80332211u);
+    test_write_solid_quad(&m, region, object, target, 0x300u,
+                          23.0f, 33.0f, 47.0f, 41.0f,
+                          0x80332211u);
+    test_gpu_write32(&m, first, 0xffabcdefu);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
+    CHECK(test_gpu_read32(&m, first) ==
+              test_over(0xffabcdefu, 0x80332211u) &&
+          m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0x4cu,
+          "premultiplied translucent solid did not blend and complete");
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x4cu);
+
+    /* Exact r419 geometry and exported _mbx3DQuadColor argument. */
+    test_write_solid_quad(&m, region, object, target, 0x2a0u,
+                          145.0f, 218.0f, 175.0f, 262.0f,
+                          0x17000000u);
+    uint32_t r419_first = target + 218u * TARGET_STRIDE + 145u * 4u;
+    test_gpu_write32(&m, r419_first, 0xff8090a0u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
+    CHECK(test_gpu_read32(&m, r419_first) ==
+              test_over(0xff8090a0u, 0x17000000u) &&
+          m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0x4cu,
+          "r419 translucent-black solid did not blend and complete");
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x4cu);
+
+    test_write_solid_quad(&m, region, object, target, 0x300u,
+                          23.0f, 33.0f, 47.0f, 41.0f,
+                          0x80112299u);
     test_gpu_write32(&m, first, 0xffabcdefu);
     m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
     CHECK(test_gpu_read32(&m, first) == 0xffabcdefu &&
           m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
-          "unproven translucent solid colour was not rejected atomically");
+          "non-premultiplied solid colour was not rejected atomically");
 
-    test_write_opaque_solid_quad(&m, region, object, target, 0x300u,
-                                 23.0f, 33.0f, 47.0f, 41.0f,
-                                 0xff336699u);
+    test_write_solid_quad(&m, region, object, target, 0x300u,
+                          23.0f, 33.0f, 47.0f, 41.0f,
+                          0xff336699u);
     test_gpu_write32(&m, first, 0xffabcdefu);
     uint32_t last = target + 40u * TARGET_STRIDE + 46u * 4u;
     uint32_t late_page = last & ~0xfffu;
@@ -2332,6 +2371,35 @@ static void test_later_tiled_status_sprites(void) {
             },
         },
         {
+            .name = "r418 dock-clipped Settings label on middle surface",
+            .xclip = 0x00480000u, .yclip = 0x01900170u,
+            .target = 0x00998000u,
+            .semantic_sprite = true,
+            .boundary_override = true,
+            .tile_x0 = 0u, .tile_x1 = 8u,
+            .tile_y0 = 0x17u, .tile_y1 = 0x18u,
+            .left = 0u, .top = 380u, .width = 71u, .height = 9u,
+            .source = 0x0097e080u, .source_x0 = 15u,
+            .source_stride = 0x160u, .source_control = 0x8e140000u,
+            .boundary = {
+                0x00000000u, 0x43c28000u, 0x00000000u, 0x43be0000u,
+                0x428e0000u, 0x43c28000u, 0x428e0000u, 0x43be0000u,
+            },
+            .quad = {
+                0xe0000000u, 0xa4118001u, 0u, 0xcd206c40u,
+                0xa7718000u, 0u, 0xae504ea0u, 0x22250e80u,
+                0xc170e2f4u, 0x43be09cau, 0x428de3a2u, 0x43be09cau,
+                0xc170e2f4u, 0x43c489cau, 0x428de3a2u, 0x43c489cau,
+                0u, 0u, 0u, 0u,
+                0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+                0xbd000000u, 0u, 0u, 0xbc70e2f4u,
+                0x3ebe09cau, 0xbd000000u, 0x3f2b0000u, 0u,
+                0x3d8de3a2u, 0x3ebe09cau, 0xbd000000u, 0u,
+                0x3f480000u, 0xbc70e2f4u, 0x3ec489cau, 0xbd000000u,
+                0x3f2b0000u, 0x3f480000u, 0x3d8de3a2u, 0x3ec489cau,
+            },
+        },
+        {
             .name = "slider label on CLCD surface",
             .xclip = 0x01180070u, .yclip = 0x01c001a0u,
             .target = 0x00897000u,
@@ -2458,7 +2526,7 @@ int main(void) {
     test_ordered_atomic_2d_batches();
     test_first_tiled_premultiplied_over();
     test_second_tiled_status_glyph();
-    test_pointer_selected_opaque_solid_quad();
+    test_pointer_selected_solid_quad();
     test_later_tiled_status_sprites();
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

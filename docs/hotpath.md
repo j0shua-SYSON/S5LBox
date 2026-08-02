@@ -3344,12 +3344,35 @@ object-list word are a word offset from `OBJBASE`: `0x61a0007c` selects the text
 `+0x1f0` is stale and must not execute. Five older `0x612` status forms had made exactly
 that mistake and were removed rather than preserved as compatibility cases. The bounded
 solid decoder now follows the pointer and cross-checks the five records against geometry,
-normalized coordinates, boundary, clip, tiles, target mapping, and one uniform opaque
-colour. Translucent and non-axis-aligned forms still reject. Exact r414 replay filled the
-2x2 centre quad, changed 4 pixels / 12 bytes only inside it, raised `0 -> 0x4c`, and saved:
+normalized coordinates, boundary, clip, tiles, target mapping, and one uniform colour.
+
+**Correction found after r419:** the first implementation misidentified the quad colour.
+It treated fixed `0xffffffff` words in the four trailing parameter records as colour and
+required the main per-vertex word to be zero. That made r414 paint four white pixels and
+was pushed in `307c017`. Disassembly of the live `_mbx3DQuadColor` binding proves this was
+wrong: SpringBoard's lazy pointer `0x38189904` resolves to wrapper `0x30e1ba94`, which
+passes its second exported argument in `r2` to producer `0x30e1b468`; the producer stores
+that value at staging offset `+0x48`, and the serializer repeats it before all four
+normalized vertex pairs. r414's actual argument is `0x00000000`, so it is a transparent
+no-op. Corrected exact replay raises `0 -> 0x4c` while leaving the target hash unchanged
+at `f8c6aee0461c0993`, with zero changed bytes or pixels:
+
+    work/r414-derived-complete-transparent-center-6420m/post-transparent-center-6420m.bin
+      SHA-256 8322C3BC41FE76904AE0B8B81D34B07C5664E8AF63284D3C2A02071C1B998015
+    work/r414-derived-complete-transparent-center-6420m/screen.ppm
+      SHA-256 99A9E5CBEF89A9973D7081E1EB1F75A8A22150E9B031FEF0C90FFB9D91EF6AE9
+
+The earlier artifact below is retained only as failed evidence. It is pixel-incorrect and
+must not be used as a resume point:
 
     work/r414-derived-complete-solid-center-6420m/post-solid-center-6420m.bin
       SHA-256 E63FED314F1CA7FEBAD9601C2D81D0B5F793D9FE7BAA8186C3CAC5DBA3AD756D
+
+Consequently, the r415-r419 chain originally resumed from that invalid checkpoint. Its
+command order, completion counts, and producer-format discoveries remain diagnostic
+evidence because the error changed only four target pixels, not device state or guest
+control flow. Its pixel hashes and visual checkpoints are contaminated and are not final
+evidence; the chain must be regenerated from the corrected r414 checkpoint.
 
 r415 resumed that checkpoint from 6.42 B to 6.44 B. It completed 4/4 2D submissions
 (523,552 bytes) and 3/4 3D submissions (8,036 pixels) before a page-indicator sprite on
@@ -3406,7 +3429,30 @@ guard-only row or anywhere outside `(58,163)-(144,176)`:
     work/r417-derived-complete-stocks-label-6480m/screen.ppm
       SHA-256 1406CA871236E0B2384B37E23EBDA1F61805F17CDAAC22319C0BA3580A14D87E
 
-The current strict focused result is 533/533 assertions and the full strict suite is
+r418 completed 13/14 further sprites (29,606 pixels) before a partly off-left Settings
+label. Its geometry extends to y=`393.0765`, but the boundary object stops at integer
+y=`389`, the top of the dock. This is the context intersection visible in the shipped
+producer, not another texture layout. The sprite decoder now accepts an integer context
+scissor only when it is a nonempty subset of the independently encoded quad and surface;
+it intersects pixel-centre coverage with that boundary, derives the same contiguous
+source crop, and still requires guard-rounded clip registers and tiles to agree. Exact
+replay covered 71x9 pixels, changed 216 pixels / 648 bytes, and touched nothing outside
+`(0,380)-(71,389)`:
+
+    work/r418-derived-complete-clipped-settings-label-6500m/post-settings-label-6500m.bin
+      SHA-256 37E4F47AA1A68D0D72B2116B5762FC13AD85D54C591B27E356871A2E4432E7DA
+
+r419 then completed 13/14 3D submissions (30,556 pixels) and 2/2 2D commands
+(232,960 bytes) before another `0x612` object. The same producer mapping above proves its
+uniform main colour is premultiplied translucent black `0x17000000`; the trailing
+`0xffffffff` words remain fixed parameters. A direct replay completes 1,320 covered
+pixels. Its current target rectangle is already opaque black, so the correct blend changes
+zero bytes; that no-change result is not independent proof of the blend equation, which
+is instead covered by synthetic nonblack-destination tests. This r419 run still descends
+from the invalid four-pixel checkpoint and must be repeated before it becomes final pixel
+evidence.
+
+The current strict focused result is 560/560 assertions and the full strict suite is
 59/59 targets. This checkpoint replaces several literal mistakes with producer and
 raster invariants, but the end-to-end verdict remains **not fixed**: recovery recurs at
 the next unsupported command, the measured scanout is nowhere near 30 FPS, Settings has
