@@ -1519,6 +1519,96 @@ static void test_captured_status_form(const struct mbx_test_status_form *form) {
         test_gpu_write32(&m, first_source, 0u);
     }
 
+    if ((form->quad[3] == 0xa6884710u ||
+         form->quad[3] == 0xcd206c40u) &&
+        (form->source_control & 0x80000000u)) {
+        uint32_t word_address = object + 0x1f0u + 27u * 4u;
+        uint32_t saved_word = test_gpu_read32(&m, word_address);
+        test_gpu_write32(&m, first, 0x89abcdefu);
+        test_gpu_write32(&m, word_address, saved_word ^ 1u);
+        m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
+        CHECK(test_gpu_read32(&m, first) == 0x89abcdefu,
+              "%s inconsistent normalized position changed the destination",
+              form->name);
+        CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
+              "%s inconsistent normalized position raised completion",
+              form->name);
+        test_gpu_write32(&m, word_address, saved_word);
+
+        word_address = object + 0x1f0u + 29u * 4u;
+        saved_word = test_gpu_read32(&m, word_address);
+        test_gpu_write32(&m, first, 0x89abcdefu);
+        test_gpu_write32(&m, word_address, saved_word ^ 0x01000000u);
+        m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
+        CHECK(test_gpu_read32(&m, first) == 0x89abcdefu,
+              "%s mismatched app vertex alpha changed the destination",
+              form->name);
+        CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
+              "%s mismatched app vertex alpha raised completion", form->name);
+        test_gpu_write32(&m, word_address, saved_word);
+
+        word_address = object + 0x1f0u + 30u * 4u;
+        saved_word = test_gpu_read32(&m, word_address);
+        test_gpu_write32(&m, first, 0x89abcdefu);
+        test_gpu_write32(&m, word_address, saved_word ^ 1u);
+        m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
+        CHECK(test_gpu_read32(&m, first) == 0x89abcdefu,
+              "%s inconsistent UV extent changed the destination", form->name);
+        CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
+              "%s inconsistent UV extent raised completion", form->name);
+        test_gpu_write32(&m, word_address, saved_word);
+
+        word_address = object + 0x1f0u + 2u * 4u;
+        saved_word = test_gpu_read32(&m, word_address);
+        test_gpu_write32(&m, first, 0x89abcdefu);
+        test_gpu_write32(&m, word_address, saved_word ^ 0x00040000u);
+        m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
+        CHECK(test_gpu_read32(&m, first) == 0x89abcdefu,
+              "%s inconsistent split pitch changed the destination", form->name);
+        CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
+              "%s inconsistent split pitch raised completion", form->name);
+        test_gpu_write32(&m, word_address, saved_word);
+
+        test_gpu_write32(&m, first, 0x89abcdefu);
+        m.bus.write32(m.bus.ctx, MBX_BASE + REG_FBXCLIP,
+                      form->xclip ^ 8u);
+        m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
+        CHECK(test_gpu_read32(&m, first) == 0x89abcdefu,
+              "%s inconsistent clip changed the destination", form->name);
+        CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
+              "%s inconsistent clip raised completion", form->name);
+        m.bus.write32(m.bus.ctx, MBX_BASE + REG_FBXCLIP, form->xclip);
+
+        uint32_t first_region_word = test_gpu_read32(&m, region);
+        test_gpu_write32(&m, first, 0x89abcdefu);
+        test_gpu_write32(&m, region, first_region_word ^ 1u);
+        m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
+        CHECK(test_gpu_read32(&m, first) == 0x89abcdefu,
+              "%s inconsistent tile region changed the destination", form->name);
+        CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
+              "%s inconsistent tile region raised completion", form->name);
+        test_gpu_write32(&m, region, first_region_word);
+
+        uint32_t last_source = form->source +
+            (form->height - 1u) * form->source_stride +
+            (form->width - 1u) * 4u;
+        uint32_t last_destination = target +
+            (form->top + form->height - 1u) * TARGET_STRIDE +
+            (form->left + form->width - 1u) * 4u;
+        uint32_t saved_source = test_gpu_read32(&m, last_source);
+        test_gpu_write32(&m, first, 0x89abcdefu);
+        test_gpu_write32(&m, last_destination, 0x76543210u);
+        test_gpu_write32(&m, last_source, 0x01000002u);
+        m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
+        CHECK(test_gpu_read32(&m, first) == 0x89abcdefu &&
+              test_gpu_read32(&m, last_destination) == 0x76543210u,
+              "%s non-premultiplied final texel partially committed",
+              form->name);
+        CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
+              "%s non-premultiplied final texel raised completion", form->name);
+        test_gpu_write32(&m, last_source, saved_source);
+    }
+
     test_gpu_write32(&m, first, 0x89abcdefu);
     test_gpu_write32(&m, object + 0x1f4u, form->quad[1] ^ 1u);
     m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
@@ -2001,6 +2091,66 @@ static void test_later_tiled_status_sprites(void) {
                 0x3e16f5c1u, 0x3cfef7fau, 0xff000000u, 0u,
                 0x3f760000u, 0x3db7eb82u, 0x3dbbbdfeu, 0xff000000u,
                 0x3f6a0000u, 0x3f760000u, 0x3e16f5c1u, 0x3dbbbdfeu,
+            },
+        },
+        {
+            .name = "Stocks label with producer alpha modulation",
+            .xclip = 0x00a80048u, .yclip = 0x00d000b0u,
+            .target = 0x00a41000u,
+            .boundary_override = true,
+            .tile_x0 = 9u, .tile_x1 = 0x14u,
+            .tile_y0 = 0x0bu, .tile_y1 = 0x0cu,
+            .left = 79u, .top = 182u, .width = 86u, .height = 13u,
+            .source = 0x00954080u,
+            .source_stride = 0x160u, .source_control = 0x8e140000u,
+            .boundary = {
+                0x429c0000u, 0x43430000u, 0x429c0000u, 0x43350000u,
+                0x43250000u, 0x43430000u, 0x43250000u, 0x43350000u,
+            },
+            .quad = {
+                0xe0000000u, 0xa4118001u, 0u, 0xcd206c40u,
+                0xa7718000u, 0u, 0xae504ea0u, 0x22250e80u,
+                0x429dcd84u, 0x4335e866u, 0x4324e6c2u, 0x4335e866u,
+                0x429dcd84u, 0x4342e866u, 0x4324e6c2u, 0x4342e866u,
+                0u, 0u, 0u, 0u,
+                0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+                0xfe000000u, 0u, 0u, 0x3d9dcd84u,
+                0x3e35e866u, 0xfe000000u, 0x3f2b0000u, 0u,
+                0x3e24e6c2u, 0x3e35e866u, 0xfe000000u, 0u,
+                0x3f480000u, 0x3d9dcd84u, 0x3e42e866u, 0xfe000000u,
+                0x3f2b0000u, 0x3f480000u, 0x3e24e6c2u, 0x3e42e866u,
+            },
+        },
+        /* This is intentionally not described as a capture. It is constructed
+         * from the recovered producer equations with a third size, pitch and
+         * position, so a decoder that merely moved the four app literals into
+         * conditionals cannot pass it. */
+        {
+            .name = "producer-consistent 24x8 app sprite",
+            .xclip = 0x00e000c8u, .yclip = 0x00800070u,
+            .target = 0x00a41000u,
+            .boundary_override = true,
+            .tile_x0 = 25u, .tile_x1 = 27u,
+            .tile_y0 = 7u, .tile_y1 = 7u,
+            .left = 200u, .top = 120u, .width = 24u, .height = 8u,
+            .source = 0x0093b000u,
+            .source_stride = 0x60u, .source_control = 0x8e040000u,
+            .boundary = {
+                0x43480000u, 0x43000000u, 0x43480000u, 0x42f00000u,
+                0x43600000u, 0x43000000u, 0x43600000u, 0x42f00000u,
+            },
+            .quad = {
+                0xe0000000u, 0xa2018001u, 0u, 0xa6884710u,
+                0xa7718000u, 0u, 0xae504ea0u, 0x22250e80u,
+                0x43480000u, 0x42f00000u, 0x43600000u, 0x42f00000u,
+                0x43480000u, 0x43000000u, 0x43600000u, 0x43000000u,
+                0u, 0u, 0u, 0u,
+                0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+                0xff000000u, 0u, 0u, 0x3e480000u,
+                0x3df00000u, 0xff000000u, 0x3f3c0000u, 0u,
+                0x3e600000u, 0x3df00000u, 0xff000000u, 0u,
+                0x3f700000u, 0x3e480000u, 0x3e000000u, 0xff000000u,
+                0x3f3c0000u, 0x3f700000u, 0x3e600000u, 0x3e000000u,
             },
         },
         {

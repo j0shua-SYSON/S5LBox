@@ -3244,3 +3244,93 @@ Local verification is now 413/413 focused MBX assertions, 55/55 CTest targets, a
 transition by two literal forms; it does **not** fix the transition, recovery, Settings
 launch, or 30 FPS acceptance. More layers are still expected, and a clean interaction
 plus instruction-zero cold boot remain mandatory after the command frontier is cleared.
+
+### r413-r414: replace the app-by-app literals with one producer-derived sprite decoder
+
+The r409-r412 implementation was useful as an exact oracle, but it was also an obvious
+scaling failure: one runtime table entry per icon or label is controlled whack-a-mole.
+Those four app-specific entries have therefore been removed from the decoder. Their raw
+commands remain in the tests and retained checkpoints, where they are evidence rather
+than an implementation strategy.
+
+Static analysis of the shipped MBX2D producer closes enough fields to decode this family
+semantically. `_mbx3DCtxQuadCopyPerspective` is at `0x30e1cb68`; its exported wrapper is
+at `0x30e1d6e8`. The producer finds the four transformed extrema, adds exact float
+literals `0x3eefe000` / `0x3f081000`, converts them to integer bounds, then aligns x to
+8-pixel tiles and y to 16-pixel tiles. Texture-header nibbles encode
+`log2(power-of-two dimension)-3`. Linear pitch is split across two words because the GPU
+address occupies bits 0..17: the high bits of `pitch_bytes/16` remain in source-control
+bits 18..23, while bit 1 is relocated to texture-header bit 0. That equation independently
+reconstructs every measured stride: `0x40`, `0x140`, `0x160`, `0x2a0`, `0x420`, `0x480`,
+and `0x500`.
+
+The new bounded app-grid decoder requires all of those encodings to agree. It accepts only
+the measured transition target `0x00a41000`, BGRA8 source-over setup, axis-aligned 1:1
+geometry, origin-zero `(width-0.5)/pow2` UVs, normalized destination coordinates, the
+producer-derived clip, a matching row-major tile list, an eight-pixel padded source pitch,
+uniform vertex alpha, premultiplied source pixels, and a fully mapped 320x480 destination.
+All source and destination rows are validated and staged before any write. Perspective,
+scaling, coloured vertices, other targets, inconsistent redundant fields, and partial
+GART mappings fail without completion or writes. The second measured sampler uses the
+uniform-alpha equation already pinned against QuartzCore's software compositor; the
+producer itself writes that one context byte to all four vertices.
+
+The four retained r409-r412 commands now replay through this decoder with byte-identical
+results, not through literal fallback:
+
+| form | target hash after replay | changed pixels / bytes | outside |
+|---|---|---:|---:|
+| Messages label | `6e88cb664d1f8e5d` | 333 / 999 | 0 |
+| Messages icon | `8ab6affc47bc7754` | 3,191 / 9,257 | 0 |
+| Calendar label | `9c022d948d4114cb` | 276 / 828 | 0 |
+| Calendar icon base | `69d963d33ba27dbc` | 3,191 / 9,573 | 0 |
+
+A fifth test is intentionally synthetic and labelled as such: it constructs a
+producer-consistent 24x8 sprite at a third position and pitch. It exists to prevent the
+four removed literals from merely reappearing as conditionals. Adversarial tests mutate
+normalized positions, UV extent, split pitch, vertex alpha, clip registers, region tiles,
+header controls, and the final source texel. Every case rejects atomically. Focused and
+strict builds now pass 517/517 assertions; the full suite passes 55/55 targets.
+
+r413 resumed the completed Calendar checkpoint at 6.36 B and stopped at 6.40 B. It saw
+eight 3D submissions and completed seven previously unseen ones, blending 18,694 pixels,
+before rejecting the second sampler form. The resulting target contained Messages,
+Calendar including its date, Photos, Camera, YouTube, and the dock. It was not yet the
+complete grid. The next source was independently dumped as the 86x13 `Stocks` label at GPU
+VA `0x00954080`, stride `0x160`; it has zero premultiplication violations:
+
+    work/r413-semantic-app-grid-6400m/source-00954080-86x13.ppm
+      SHA-256 97260CD89E9575291CD0984EAFE292C05A2B483E93F64F256281160A94AAF04E
+
+Its packet uses the same semantic geometry and pitch fields, sampler word `0xcd206c40`,
+and uniform vertex alpha `0xfe`. Exact replay through the generalized modulation path
+blended 1,118 pixels, changed 219 pixels / 657 bytes, changed nothing outside
+`(79,182)-(165,195)`, and moved the target hash
+`075cde4b1a5a5d74 -> ea7aa2c98c3cc544`:
+
+    work/r413-derived-complete-stocks-label-6400m/post-stocks-label-6400m.bin
+      SHA-256 EC6565D6D66345F78B73A76B2475E78CAD6BF50202A2F4B04BC543F7797A14FC
+
+r414 is the falsification test for the semantic claim. It resumed that completed Stocks
+checkpoint from 6.40 B to 6.42 B and completed **19/20 previously unseen 3D submissions**
+(46,642 blended pixels) plus 10/10 2D commands (309,376 committed bytes) before the next
+rejection. The target is now a visually coherent complete stock home-screen grid and dock:
+
+    work/r414-semantic-modulation-6420m/transition.ppm
+      SHA-256 99A9E5CBEF89A9973D7081E1EB1F75A8A22150E9B031FEF0C90FFB9D91EF6AE9
+
+That is substantial evidence that this decoder represents a command family rather than
+an app-name whitelist. It is still not end-to-end success. The rejected command changes
+the third object-list word from `0x61a0007c` to `0x612000a8`. Its clip and first boundary
+object describe only `(159,239)-(161,241)`, while its textured quad lies at roughly
+`(168,296)-(227,358)`. Treating the list word as interchangeable and blending the whole
+quad would therefore be fabricated behaviour. The next work is to decode the list/object
+relationship from the producer and retained stream, not add an App Store-specific form.
+
+Both r413 and r414 still logged one Graphics Recovery Event after their final rejection,
+and both live CLCD frames remained the old coherent home surface with SHA-256
+`C3A60DB2...`. r414's frame meter saw 103 publications but only its initial sampled
+signature changed; its mean/max were `0.184` / `1.836` fps. Those are rejection-stall
+measurements, not useful animation cadence. Settings has not been shown open, no 30 FPS
+result exists, and the final clean interaction plus instruction-zero cold boot remain
+mandatory. Network, sound, and iOS-app completion remain behind that graphics gate.

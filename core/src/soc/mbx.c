@@ -1114,10 +1114,7 @@ mbx_3d_find_background_form(const s5l_mbx_t *m) {
     return NULL;
 }
 
-static uint32_t mbx_3d_background_boundary_expected(
-    const struct mbx_3d_background_form *form, uint32_t off) {
-    if (off >= 0x0b8u && off <= 0x0d4u)
-        return form->boundary[(off - 0x0b8u) / 4u];
+static uint32_t mbx_3d_boundary_fixed_expected(uint32_t off) {
     static const struct mbx_3d_word nonzero[] = {
         {0x080u, 0x22206f80u}, {0x088u, 0x45800000u},
         {0x094u, 0x45800000u}, {0x098u, 0x45800000u},
@@ -1133,6 +1130,13 @@ static uint32_t mbx_3d_background_boundary_expected(
     for (unsigned i = 0; i < sizeof nonzero / sizeof nonzero[0]; i++)
         if (nonzero[i].off == off) return nonzero[i].value;
     return 0u;
+}
+
+static uint32_t mbx_3d_background_boundary_expected(
+    const struct mbx_3d_background_form *form, uint32_t off) {
+    if (off >= 0x0b8u && off <= 0x0d4u)
+        return form->boundary[(off - 0x0b8u) / 4u];
+    return mbx_3d_boundary_fixed_expected(off);
 }
 
 static bool mbx_execute_first_tiled_over(s5l_mbx_t *m,
@@ -1801,110 +1805,6 @@ static const struct mbx_3d_status_form mbx_3d_status_forms[] = {
         },
     },
     {
-        .xclip = 0x00600000u, .yclip = 0x00700050u,
-        .target = 0x00a41000u,
-        .boundary_override = true,
-        .tile_x0 = 0u, .tile_x1 = 0x0bu,
-        .tile_y0 = 5u, .tile_y1 = 6u,
-        .left = 3u, .top = 94u, .width = 86u, .height = 13u,
-        .source_stride = 0x160u, .source_control = 0x8e140000u,
-        .boundary = {
-            0x40000000u, 0x42d60000u, 0x40000000u, 0x42ba0000u,
-            0x42b20000u, 0x42d60000u, 0x42b20000u, 0x42ba0000u,
-        },
-        .quad = {
-            0xe0000000u, 0xa4118001u, 0u, 0xa6884710u,
-            0xa7718000u, 0u, 0xae504ea0u, 0x22250e80u,
-            0x403a2398u, 0x42bbcd39u, 0x42b1d11du, 0x42bbcd39u,
-            0x403a2398u, 0x42d5cd39u, 0x42b1d11du, 0x42d5cd39u,
-            0u, 0u, 0u, 0u,
-            0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
-            0xff000000u, 0u, 0u, 0x3b3a2398u,
-            0x3dbbcd39u, 0xff000000u, 0x3f2b0000u, 0u,
-            0x3db1d11du, 0x3dbbcd39u, 0xff000000u, 0u,
-            0x3f480000u, 0x3b3a2398u, 0x3dd5cd39u, 0xff000000u,
-            0x3f2b0000u, 0x3f480000u, 0x3db1d11du, 0x3dd5cd39u,
-        },
-    },
-    {
-        .xclip = 0x00500010u, .yclip = 0x00600020u,
-        .target = 0x00a41000u,
-        .boundary_override = true,
-        .tile_x0 = 2u, .tile_x1 = 9u,
-        .tile_y0 = 2u, .tile_y1 = 5u,
-        .left = 16u, .top = 32u, .width = 59u, .height = 62u,
-        .source_stride = 0x100u, .source_control = 0x8e100000u,
-        .boundary = {
-            0x41700000u, 0x42bc0000u, 0x41700000u, 0x41f80000u,
-            0x42960000u, 0x42bc0000u, 0x42960000u, 0x41f80000u,
-        },
-        .quad = {
-            0xe0000000u, 0xa3318000u, 0u, 0xa6884710u,
-            0xa7718000u, 0u, 0xae504ea0u, 0x22250e80u,
-            0x417e88e6u, 0x41ff34e4u, 0x4295d11du, 0x41ff34e4u,
-            0x417e88e6u, 0x42bbcd39u, 0x4295d11du, 0x42bbcd39u,
-            0u, 0u, 0u, 0u,
-            0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
-            0xff000000u, 0u, 0u, 0x3c7e88e6u,
-            0x3cff34e4u, 0xff000000u, 0x3f6a0000u, 0u,
-            0x3d95d11du, 0x3cff34e4u, 0xff000000u, 0u,
-            0x3f760000u, 0x3c7e88e6u, 0x3dbbcd39u, 0xff000000u,
-            0x3f6a0000u, 0x3f760000u, 0x3d95d11du, 0x3dbbcd39u,
-        },
-    },
-    {
-        .xclip = 0x00a80048u, .yclip = 0x00700050u,
-        .target = 0x00a41000u,
-        .boundary_override = true,
-        .tile_x0 = 9u, .tile_x1 = 0x14u,
-        .tile_y0 = 5u, .tile_y1 = 6u,
-        .left = 79u, .top = 94u, .width = 86u, .height = 13u,
-        .source_stride = 0x160u, .source_control = 0x8e140000u,
-        .boundary = {
-            0x429c0000u, 0x42d60000u, 0x429c0000u, 0x42ba0000u,
-            0x43250000u, 0x42d60000u, 0x43250000u, 0x42ba0000u,
-        },
-        .quad = {
-            0xe0000000u, 0xa4118001u, 0u, 0xa6884710u,
-            0xa7718000u, 0u, 0xae504ea0u, 0x22250e80u,
-            0x429deb82u, 0x42bbbdfeu, 0x4324f5c1u, 0x42bbbdfeu,
-            0x429deb82u, 0x42d5bdfeu, 0x4324f5c1u, 0x42d5bdfeu,
-            0u, 0u, 0u, 0u,
-            0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
-            0xff000000u, 0u, 0u, 0x3d9deb82u,
-            0x3dbbbdfeu, 0xff000000u, 0x3f2b0000u, 0u,
-            0x3e24f5c1u, 0x3dbbbdfeu, 0xff000000u, 0u,
-            0x3f480000u, 0x3d9deb82u, 0x3dd5bdfeu, 0xff000000u,
-            0x3f2b0000u, 0x3f480000u, 0x3e24f5c1u, 0x3dd5bdfeu,
-        },
-    },
-    {
-        .xclip = 0x00980058u, .yclip = 0x00600020u,
-        .target = 0x00a41000u,
-        .boundary_override = true,
-        .tile_x0 = 0x0bu, .tile_x1 = 0x12u,
-        .tile_y0 = 2u, .tile_y1 = 5u,
-        .left = 92u, .top = 32u, .width = 59u, .height = 62u,
-        .source_stride = 0x100u, .source_control = 0x8e100000u,
-        .boundary = {
-            0x42b60000u, 0x42bc0000u, 0x42b60000u, 0x41f80000u,
-            0x43170000u, 0x42bc0000u, 0x43170000u, 0x41f80000u,
-        },
-        .quad = {
-            0xe0000000u, 0xa3318000u, 0u, 0xa6884710u,
-            0xa7718000u, 0u, 0xae504ea0u, 0x22250e80u,
-            0x42b7eb82u, 0x41fef7fau, 0x4316f5c1u, 0x41fef7fau,
-            0x42b7eb82u, 0x42bbbdfeu, 0x4316f5c1u, 0x42bbbdfeu,
-            0u, 0u, 0u, 0u,
-            0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
-            0xff000000u, 0u, 0u, 0x3db7eb82u,
-            0x3cfef7fau, 0xff000000u, 0x3f6a0000u, 0u,
-            0x3e16f5c1u, 0x3cfef7fau, 0xff000000u, 0u,
-            0x3f760000u, 0x3db7eb82u, 0x3dbbbdfeu, 0xff000000u,
-            0x3f6a0000u, 0x3f760000u, 0x3e16f5c1u, 0x3dbbbdfeu,
-        },
-    },
-    {
         .xclip = 0x01180070u, .yclip = 0x01c001a0u,
         .target = 0x00897000u,
         .variable_vertex_alpha = true,
@@ -1997,21 +1897,7 @@ mbx_3d_status_boundary_expected(const struct mbx_3d_status_form *form,
         return form->boundary_override
             ? form->boundary[(off - 0x0b8u) / 4u]
             : form->quad[8u + (off - 0x0b8u) / 4u];
-    static const struct mbx_3d_word nonzero[] = {
-        {0x080u, 0x22206f80u}, {0x088u, 0x45800000u},
-        {0x094u, 0x45800000u}, {0x098u, 0x45800000u},
-        {0x09cu, 0x45800000u}, {0x0b4u, 0x22207f80u},
-        {0x0e8u, 0xe0000000u}, {0x0f4u, 0xa6887610u},
-        {0x0f8u, 0x22220e80u}, {0x12cu, 0x3f800000u},
-        {0x130u, 0x3f800000u}, {0x134u, 0x3f800000u},
-        {0x138u, 0x3f800000u}, {0x198u, 0xe0000000u},
-        {0x19cu, 0x22200e80u}, {0x1d0u, 0x3f800000u},
-        {0x1d4u, 0x3f800000u}, {0x1d8u, 0x3f800000u},
-        {0x1dcu, 0x3f800000u},
-    };
-    for (unsigned i = 0; i < sizeof nonzero / sizeof nonzero[0]; i++)
-        if (nonzero[i].off == off) return nonzero[i].value;
-    return 0u;
+    return mbx_3d_boundary_fixed_expected(off);
 }
 
 static bool mbx_execute_status_sprite(s5l_mbx_t *m,
@@ -2259,6 +2145,372 @@ static bool mbx_execute_status_sprite(s5l_mbx_t *m,
     return ok;
 }
 
+/* r409-r412 initially supplied four literal app-icon/label forms. Reading the
+ * shipped _mbx3DCtxQuadCopyPerspective producer explains the shared packet
+ * instead: it is a 1:1, axis-aligned BGRA8 sprite whose independently encoded
+ * destination, UV, texture-power, pitch, clip and tile rectangles must agree.
+ *
+ * The texture header stores log2(power-of-two dimension)-3 in nibbles 6 and 5.
+ * Linear pitch is split because the source address consumes bits 0..17 of its
+ * word: pitch_bytes/16 bits 2..7 remain in source-control bits 18..23, while
+ * bit 1 is relocated to texture-header bit 0. All measured linear textures
+ * use an eight-pixel padded pitch, and that reconstruction yields every
+ * captured 0x40..0x500 stride exactly. This decoder accepts that semantic
+ * family on the measured transition surface. The producer's second captured
+ * sampler carries one uniform alpha byte, which uses the already recovered
+ * channel-modulation equation. This is not a perspective/scaling rasterizer;
+ * clipping, coloured vertices and other targets remain rejected. */
+static bool mbx_3d_word_to_nonnegative_float(uint32_t word, float *value) {
+    if ((word & 0x80000000u) ||
+        (word & 0x7f800000u) == 0x7f800000u ||
+        sizeof *value != sizeof word)
+        return false;
+    memcpy(value, &word, sizeof *value);
+    return true;
+}
+
+static uint32_t mbx_3d_float_to_word(float value) {
+    uint32_t word = 0u;
+    memcpy(&word, &value, sizeof word);
+    return word;
+}
+
+static bool mbx_execute_app_grid_sprite(s5l_mbx_t *m,
+                                        const arm_bus_t *bus,
+                                        const char **why,
+                                        uint32_t *pixels_blended) {
+    uint32_t region = m->reg[S5L_MBX_RGNBASE / 4u];
+    uint32_t object = m->reg[S5L_MBX_OBJBASE / 4u];
+    uint32_t target = m->reg[S5L_MBX_FBSTART / 4u];
+    if ((region & 3u) || (object & 3u) || (target & 3u) ||
+        object > UINT32_MAX - 0x2a0u) {
+        if (why) *why = "app-sprite region, object, or framebuffer base is invalid";
+        return false;
+    }
+    if (m->reg[S5L_MBX_3DPIXSAMP / 4u] != 0x00020007u ||
+        m->reg[S5L_MBX_FBCTL / 4u] != 0x00000006u ||
+        m->reg[S5L_MBX_FBLINESTRIDE / 4u] != MBX_3D_WIDTH ||
+        target != 0x00a41000u) {
+        if (why) *why = "render registers are not the measured app-grid sprite family";
+        return false;
+    }
+
+    uint32_t list = object + 0x68u;
+    static const uint32_t list_words[4] = {
+        0x60200020u, 0x6020002du, 0x61a0007cu, 0xf0000000u
+    };
+    for (unsigned i = 0; i < 4u; i++) {
+        uint32_t value;
+        if (!mbx_gart_u32(m, bus, list + i * 4u, &value, why)) return false;
+        if (value != list_words[i]) {
+            if (why) *why = "app-sprite list is not the measured three-object list";
+            return false;
+        }
+    }
+
+    static const uint32_t background[26] = {
+        0xe0000000u, 0xa7718000u, 0u, 0xd6887610u,
+        0x22220e80u, 0u, 0u, 0x45000000u,
+        0u, 0u, 0x45000000u, 0x3f800000u,
+        0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+        0x3f800000u, 0u, 0u, 0u,
+        0u, 0x40000000u, 0u, 0u,
+        0u, 0x40000000u,
+    };
+    for (unsigned i = 0; i < 26u; i++) {
+        uint32_t value;
+        if (!mbx_gart_u32(m, bus, object + i * 4u, &value, why)) return false;
+        if (i == 2u) {
+            if ((value & ~MBX_3D_ADDRESS_MASK) != 0x0e500000u ||
+                mbx_3d_decode_address(value) != target) {
+                if (why) *why = "app-sprite background does not resolve to FBSTART";
+                return false;
+            }
+        } else if (value != background[i]) {
+            if (why) *why = "app-sprite background object is unknown";
+            return false;
+        }
+    }
+
+    uint32_t quad[44];
+    for (unsigned i = 0; i < 44u; i++)
+        if (!mbx_gart_u32(m, bus, object + 0x1f0u + i * 4u,
+                          &quad[i], why))
+            return false;
+    bool direct_sampler = quad[3] == 0xa6884710u;
+    bool modulated_sampler = quad[3] == 0xcd206c40u;
+    if (quad[0] != 0xe0000000u ||
+        (!direct_sampler && !modulated_sampler) ||
+        quad[4] != 0xa7718000u || quad[6] != 0xae504ea0u ||
+        quad[7] != 0x22250e80u) {
+        if (why) *why = "app-sprite quad setup is not the measured BGRA8 source-over form";
+        return false;
+    }
+    if ((quad[5] & ~MBX_3D_ADDRESS_MASK) != 0x0e500000u ||
+        mbx_3d_decode_address(quad[5]) != target) {
+        if (why) *why = "app-sprite blend surface differs from FBSTART";
+        return false;
+    }
+    for (unsigned i = 16u; i < 20u; i++) {
+        if (quad[i] != 0u) {
+            if (why) *why = "app-sprite perspective terms are nonzero";
+            return false;
+        }
+    }
+    for (unsigned i = 20u; i < 24u; i++) {
+        if (quad[i] != 0x3f800000u) {
+            if (why) *why = "app-sprite perspective divisors are not one";
+            return false;
+        }
+    }
+    static const unsigned alpha_words[4] = {24u, 29u, 34u, 39u};
+    uint32_t vertex_alpha_word = quad[alpha_words[0]];
+    if ((vertex_alpha_word & 0x00ffffffu) ||
+        (direct_sampler && vertex_alpha_word != 0xff000000u)) {
+        if (why) *why = "app-sprite vertex modulation is invalid for its sampler";
+        return false;
+    }
+    for (unsigned i = 1u; i < 4u; i++) {
+        if (quad[alpha_words[i]] != vertex_alpha_word) {
+            if (why) *why = "app-sprite vertex modulation differs between vertices";
+            return false;
+        }
+    }
+
+    if (quad[8] != quad[12] || quad[10] != quad[14] ||
+        quad[9] != quad[11] || quad[13] != quad[15]) {
+        if (why) *why = "app-sprite destination is not an axis-aligned quad";
+        return false;
+    }
+    float x0, y0, x1, y1;
+    if (!mbx_3d_word_to_nonnegative_float(quad[8], &x0) ||
+        !mbx_3d_word_to_nonnegative_float(quad[9], &y0) ||
+        !mbx_3d_word_to_nonnegative_float(quad[10], &x1) ||
+        !mbx_3d_word_to_nonnegative_float(quad[13], &y1) ||
+        x0 >= x1 || y0 >= y1 || x1 > 321.0f || y1 > 481.0f) {
+        if (why) *why = "app-sprite destination coordinates are invalid";
+        return false;
+    }
+
+    static const unsigned destination_words[8] = {
+        8u, 9u, 10u, 11u, 12u, 13u, 14u, 15u
+    };
+    static const unsigned normalized_words[8] = {
+        27u, 28u, 32u, 33u, 37u, 38u, 42u, 43u
+    };
+    for (unsigned i = 0; i < 8u; i++) {
+        float coordinate;
+        if (!mbx_3d_word_to_nonnegative_float(
+                quad[destination_words[i]], &coordinate) ||
+            quad[normalized_words[i]] !=
+                mbx_3d_float_to_word(coordinate / 1024.0f)) {
+            if (why) *why = "app-sprite normalized destination disagrees with its quad";
+            return false;
+        }
+    }
+
+    /* These are the exact positive float literals used by the producer before
+     * its VCVT-to-integer bounds and subsequent 8x16 tile alignment. */
+    const float lower_bias = 0.468505859375f; /* 0x3eefe000 */
+    const float upper_bias = 0.531494140625f; /* 0x3f081000 */
+    uint32_t left = (uint32_t)(x0 + lower_bias);
+    uint32_t top = (uint32_t)(y0 + lower_bias);
+    uint32_t right = (uint32_t)(x1 + upper_bias);
+    uint32_t bottom = (uint32_t)(y1 + upper_bias);
+    if (left >= right || top >= bottom || right > MBX_3D_WIDTH ||
+        bottom > 480u) {
+        if (why) *why = "app-sprite producer bounds leave the 320x480 surface";
+        return false;
+    }
+    uint32_t width = right - left;
+    uint32_t height = bottom - top;
+    const float epsilon = 0.0009765625f;
+    float dx = x1 - x0;
+    float dy = y1 - y0;
+    if (dx < (float)width - epsilon || dx > (float)width + epsilon ||
+        dy < (float)height - epsilon || dy > (float)height + epsilon) {
+        if (why) *why = "app-sprite transform is not a measured 1:1 copy";
+        return false;
+    }
+
+    uint32_t texture_width = 8u, texture_height = 8u;
+    uint32_t width_field = 0u, height_field = 0u;
+    while (texture_width < width) {
+        texture_width <<= 1;
+        width_field++;
+    }
+    while (texture_height < height) {
+        texture_height <<= 1;
+        height_field++;
+    }
+    if (texture_width > 512u || texture_height > 512u) {
+        if (why) *why = "app-sprite texture power exceeds the measured screen bounds";
+        return false;
+    }
+    uint32_t padded_width = (width + 7u) & ~7u;
+    uint32_t source_stride = padded_width * 4u;
+    uint32_t pitch_units = source_stride / 16u;
+    uint32_t expected_header = 0xa0018000u |
+        (width_field << 24) | (height_field << 20) |
+        ((pitch_units & 2u) >> 1);
+    uint32_t expected_source_control = 0x8e000000u |
+        ((pitch_units & ~3u) << 16);
+    if (quad[1] != expected_header ||
+        (quad[2] & ~MBX_3D_ADDRESS_MASK) != expected_source_control) {
+        if (why) *why = "app-sprite texture dimensions or split pitch are inconsistent";
+        return false;
+    }
+    uint32_t source = mbx_3d_decode_address(quad[2]);
+    if (!source) {
+        if (why) *why = "app-sprite source resolves to GPU address zero";
+        return false;
+    }
+
+    uint32_t expected_u = mbx_3d_float_to_word(
+        ((float)width - 0.5f) / (float)texture_width);
+    uint32_t expected_v = mbx_3d_float_to_word(
+        ((float)height - 0.5f) / (float)texture_height);
+    if (quad[25] != 0u || quad[26] != 0u || quad[30] != expected_u ||
+        quad[31] != 0u || quad[35] != 0u || quad[36] != expected_v ||
+        quad[40] != expected_u || quad[41] != expected_v) {
+        if (why) *why = "app-sprite UV rectangle disagrees with its 1:1 source size";
+        return false;
+    }
+
+    uint32_t clip_left = left & ~7u;
+    uint32_t clip_right = (right + 7u) & ~7u;
+    uint32_t clip_top = top & ~15u;
+    uint32_t clip_bottom = (bottom + 15u) & ~15u;
+    uint32_t expected_xclip = (clip_right << 16) | clip_left;
+    uint32_t expected_yclip = (clip_bottom << 16) | clip_top;
+    if (m->reg[S5L_MBX_FBXCLIP / 4u] != expected_xclip ||
+        m->reg[S5L_MBX_FBYCLIP / 4u] != expected_yclip) {
+        if (why) *why = "app-sprite clip registers disagree with producer geometry";
+        return false;
+    }
+
+    uint32_t tile_x0 = clip_left / 8u;
+    uint32_t tile_x1 = clip_right / 8u - 1u;
+    uint32_t tile_y0 = clip_top / 16u;
+    uint32_t tile_y1 = clip_bottom / 16u - 1u;
+    uint32_t tile_count = (tile_x1 - tile_x0 + 1u) *
+                          (tile_y1 - tile_y0 + 1u);
+    if (!tile_count || tile_count > 40u * 30u ||
+        (uint64_t)region + (uint64_t)tile_count * 8u > UINT32_MAX) {
+        if (why) *why = "app-sprite tile rectangle is invalid";
+        return false;
+    }
+    uint32_t tile_index = 0u;
+    for (uint32_t y = tile_y0; y <= tile_y1; y++) {
+        for (uint32_t x = tile_x0; x <= tile_x1; x++) {
+            uint32_t code, pointer;
+            if (!mbx_gart_u32(m, bus, region + tile_index * 8u,
+                              &code, why) ||
+                !mbx_gart_u32(m, bus, region + tile_index * 8u + 4u,
+                              &pointer, why))
+                return false;
+            uint32_t expected = (y << 8) | x;
+            if (tile_index + 1u == tile_count) expected |= 0x80000000u;
+            if (code != expected || pointer != list) {
+                if (why) *why = "app-sprite region list disagrees with its clip tiles";
+                return false;
+            }
+            tile_index++;
+        }
+    }
+
+    uint32_t boundary_left = (uint32_t)x0;
+    uint32_t boundary_top = (uint32_t)y0;
+    uint32_t boundary_right = (uint32_t)x1 +
+        ((float)(uint32_t)x1 != x1);
+    uint32_t boundary_bottom = (uint32_t)y1 +
+        ((float)(uint32_t)y1 != y1);
+    const uint32_t boundary[8] = {
+        boundary_left, boundary_bottom, boundary_left, boundary_top,
+        boundary_right, boundary_bottom, boundary_right, boundary_top,
+    };
+    for (uint32_t off = 0x80u; off < 0x1f0u; off += 4u) {
+        uint32_t value;
+        if (!mbx_gart_u32(m, bus, object + off, &value, why)) return false;
+        uint32_t expected = mbx_3d_boundary_fixed_expected(off);
+        if (off >= 0x0b8u && off <= 0x0d4u)
+            expected = mbx_3d_float_to_word(
+                (float)boundary[(off - 0x0b8u) / 4u]);
+        if (value != expected) {
+            if (why) *why = "app-sprite boundary object disagrees with its quad";
+            return false;
+        }
+    }
+
+    uint32_t row_bytes = width * 4u;
+    uint32_t total = row_bytes * height;
+    uint64_t source_end = (uint64_t)source +
+        (uint64_t)(height - 1u) * source_stride + row_bytes;
+    uint64_t target_end = (uint64_t)target +
+        (uint64_t)(top + height - 1u) * MBX_3D_TARGET_STRIDE +
+        (uint64_t)(left + width) * 4u;
+    if (row_bytes > source_stride || source_end > UINT32_MAX ||
+        target_end > UINT32_MAX) {
+        if (why) *why = "app-sprite source or destination rectangle overflows";
+        return false;
+    }
+    for (uint32_t row = 0; row < height; row++) {
+        uint32_t src = source + row * source_stride;
+        uint32_t dst = target + (top + row) * MBX_3D_TARGET_STRIDE +
+                       left * 4u;
+        if (!mbx_gart_validate(m, bus, src, row_bytes, why) ||
+            !mbx_gart_validate(m, bus, dst, row_bytes, why))
+            return false;
+    }
+
+    uint8_t *source_pixels = malloc(total);
+    uint8_t *pixels = malloc(total);
+    if (!source_pixels || !pixels) {
+        free(source_pixels);
+        free(pixels);
+        if (why) *why = "host allocation for staged app sprite failed";
+        return false;
+    }
+    bool ok = true;
+    for (uint32_t row = 0; row < height && ok; row++) {
+        uint32_t src = source + row * source_stride;
+        uint32_t dst = target + (top + row) * MBX_3D_TARGET_STRIDE +
+                       left * 4u;
+        ok = mbx_gart_read(m, bus, src,
+                           source_pixels + row * row_bytes,
+                           row_bytes, why) &&
+             mbx_gart_read(m, bus, dst, pixels + row * row_bytes,
+                           row_bytes, why);
+    }
+    for (uint32_t i = 0; i < total && ok; i += 4u) {
+        uint32_t src = mbx_load_le32(source_pixels + i);
+        uint32_t alpha = src >> 24;
+        if ((src & 0xffu) > alpha || ((src >> 8) & 0xffu) > alpha ||
+            ((src >> 16) & 0xffu) > alpha) {
+            if (why) *why = "app-sprite source is not premultiplied BGRA8";
+            ok = false;
+            break;
+        }
+        src = mbx_modulate_vertex_alpha(src, vertex_alpha_word >> 24);
+        uint32_t blended = mbx_premultiplied_over(
+            mbx_load_le32(pixels + i), src);
+        pixels[i] = (uint8_t)blended;
+        pixels[i + 1u] = (uint8_t)(blended >> 8);
+        pixels[i + 2u] = (uint8_t)(blended >> 16);
+        pixels[i + 3u] = (uint8_t)(blended >> 24);
+    }
+    for (uint32_t row = 0; row < height && ok; row++) {
+        uint32_t dst = target + (top + row) * MBX_3D_TARGET_STRIDE +
+                       left * 4u;
+        ok = mbx_gart_write(m, bus, dst, pixels + row * row_bytes,
+                            row_bytes, why);
+    }
+    free(source_pixels);
+    free(pixels);
+    if (ok && pixels_blended) *pixels_blended = width * height;
+    return ok;
+}
+
 bool s5l_mbx_process_3d(s5l_mbx_t *m, const arm_bus_t *bus,
                         uint32_t written_off, uint32_t value) {
     if (!m || written_off != S5L_MBX_STARTRENDER || value != 1u) return false;
@@ -2267,7 +2519,8 @@ bool s5l_mbx_process_3d(s5l_mbx_t *m, const arm_bus_t *bus,
     const char *why = "unknown rejection";
     uint32_t pixels = 0u;
     if (!mbx_execute_first_tiled_over(m, bus, &why, &pixels) &&
-        !mbx_execute_status_sprite(m, bus, &why, &pixels)) {
+        !mbx_execute_status_sprite(m, bus, &why, &pixels) &&
+        !mbx_execute_app_grid_sprite(m, bus, &why, &pixels)) {
         mbx_3d_rejected++;
         if (mbx_trace_state == 1)
             fprintf(stderr, "MBX3D reject STARTRENDER: %s\n", why);
