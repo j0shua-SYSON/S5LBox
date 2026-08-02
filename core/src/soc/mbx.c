@@ -104,6 +104,17 @@ static uint64_t mbx_2d_completed;
 static uint64_t mbx_2d_rejected;
 static uint64_t mbx_2d_bytes;
 
+static void mbx_trace_dump(void);
+
+static bool mbx_trace_enabled(void) {
+    if (mbx_trace_state == 0) {
+        const char *e = getenv("S5LBOX_MBX_TRACE");
+        mbx_trace_state = (e && *e && *e != '0') ? 1 : -1;
+        if (mbx_trace_state == 1) atexit(mbx_trace_dump);
+    }
+    return mbx_trace_state == 1;
+}
+
 static void mbx_trace_dump(void) {
     uint64_t total_r = 0, total_w = 0;
     unsigned i;
@@ -144,12 +155,7 @@ static void mbx_trace_dump(void) {
 static void mbx_trace(uint32_t off, uint32_t val, bool is_write) {
     unsigned s;
 
-    if (mbx_trace_state == 0) {
-        const char *e = getenv("S5LBOX_MBX_TRACE");
-        mbx_trace_state = (e && *e && *e != '0') ? 1 : -1;
-        if (mbx_trace_state == 1) atexit(mbx_trace_dump);
-    }
-    if (mbx_trace_state != 1) return;
+    if (!mbx_trace_enabled()) return;
 
     if (is_write) { mbx_wr[off / 4u]++; mbx_last_val[off / 4u] = val; }
     else            mbx_rd[off / 4u]++;
@@ -513,6 +519,19 @@ void s5l_mbx_write(s5l_mbx_t *m, uint32_t off, uint32_t val) {
         m->edram[o + 1u] = (uint8_t)((val >> 8) & 0xffu);
         m->edram[o + 2u] = (uint8_t)((val >> 16) & 0xffu);
         m->edram[o + 3u] = (uint8_t)((val >> 24) & 0xffu);
+        /* The register histogram deliberately covers only the 8 KiB register
+         * block. The command ring is 64 KiB inside the much larger EDRAM
+         * aperture, so record its sparse live writes separately when the same
+         * opt-in trace is enabled. r366 proved that a complete packet can be
+         * present in a checkpoint while the execution trigger reports zero
+         * candidates; exact offset/value order is the missing fact. */
+        if (off >= MBX_2D_RING_BASE &&
+            off < MBX_2D_RING_BASE + MBX_2D_RING_SIZE &&
+            mbx_trace_enabled()) {
+            fprintf(stderr, "MBX2D ring write +0x%04x = 0x%08x\n",
+                    off - MBX_2D_RING_BASE, val);
+            fflush(stderr);
+        }
         return;
     }
 
