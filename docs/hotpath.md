@@ -2723,5 +2723,7 @@ r376 is a fast diagnostic checkpoint, not cold acceptance:
       SHA-256 9E04A3550B0EE0A0E7972D01842599FC5506A3D9E90A61E25031F64AEC08F611
 
 Local verification is 75/75 focused MBX assertions, 55/55 full tests, a clean strict
-warnings-as-errors build, exact battery replay, and the live r376 evidence above. Hosted
-exact-SHA CI remains pending until this checkpoint is committed and pushed.
+warnings-as-errors build, exact battery replay, and the live r376 evidence above. Exact
+source SHA `1b42a7b02f31dd7013055a65448c0c0365aa12f4` is green in hosted core run
+`30742470038` (all matrices, including strict and sanitizers) and iOS run `30742469992`
+(ad-hoc-signed IPA).
