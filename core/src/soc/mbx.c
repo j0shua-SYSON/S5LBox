@@ -576,38 +576,30 @@ static bool mbx_stage_simple_copy(s5l_mbx_t *m, const arm_bus_t *bus,
     return true;
 }
 
-static bool mbx_stage_lower_black_fill(s5l_mbx_t *m,
-                                       const arm_bus_t *bus,
-                                       uint32_t packet_off,
-                                       uint32_t shadow_target,
-                                       uint8_t *shadow,
-                                       struct mbx_2d_job *job,
-                                       const char **why) {
+static bool mbx_stage_black_rect_fill(s5l_mbx_t *m,
+                                      const arm_bus_t *bus,
+                                      uint32_t packet_off,
+                                      uint32_t shadow_target,
+                                      uint8_t *shadow,
+                                      struct mbx_2d_job *job,
+                                      const char **why) {
     memset(job, 0, sizeof *job);
     uint32_t w[MBX_2D_COPY_WORDS];
     for (unsigned i = 0; i < MBX_2D_COPY_WORDS; i++)
         w[i] = mbx_edram_word(m, packet_off + i * 4u);
 
-    /* r391's first post-unlock packet clears the complete display below the
-     * 20-pixel status bar. r397 captured the same clear divided atomically at
-     * row 389. Accept those three literal rectangles and no other colour,
-     * raster operation, or geometry. */
-    uint32_t top = 0u, bottom = 0u;
-    if (w[8] == 0x00000014u && w[9] == 0x014001e0u) {
-        top = 20u;
-        bottom = 480u;
-    } else if (w[8] == 0x00000014u && w[9] == 0x01400185u) {
-        top = 20u;
-        bottom = 389u;
-    } else if (w[8] == 0x00000185u && w[9] == 0x014001e0u) {
-        top = 389u;
-        bottom = 480u;
-    }
+    /* _pack2DCtxBlitColor at 0x30e1b080..0x30e1b0b4 packs (x, y) and
+     * (x + width, y + height), masking each component with the literal
+     * 0x1fff/0x1fff0000 pair. r408 then measured six non-full-width instances
+     * with this same mode and black colour. Geometry is therefore decoded,
+     * while colour, raster operation, surface format and bounds remain closed
+     * to the captured iPhone OS 3 form. */
     if ((w[0] != MBX_2D_COMMAND_HEADER && w[0] != MBX_2D_SUBMIT) ||
         w[2] != 0x94060500u || w[3] != 0u || w[4] != 0x30000000u ||
         w[5] != 0x60800200u || w[6] != MBX_2D_FILL_MODE ||
-        w[7] != MBX_2D_FILL_COLOR || !top) {
-        if (why) *why = "packet is not the captured lower-screen black fill";
+        w[7] != MBX_2D_FILL_COLOR ||
+        (w[8] & ~0x1fff1fffu) || (w[9] & ~0x1fff1fffu)) {
+        if (why) *why = "packet is not the measured bounded black fill";
         return false;
     }
     for (unsigned i = 10; i < MBX_2D_COPY_WORDS; i++) {
@@ -615,6 +607,15 @@ static bool mbx_stage_lower_black_fill(s5l_mbx_t *m,
             if (why) *why = "solid-fill packet terminators are incomplete";
             return false;
         }
+    }
+    uint32_t left = (w[8] >> 16) & 0x1fffu;
+    uint32_t top = w[8] & 0x1fffu;
+    uint32_t right = (w[9] >> 16) & 0x1fffu;
+    uint32_t bottom = w[9] & 0x1fffu;
+    if (right <= left || bottom <= top || right > MBX_2D_WIDTH ||
+        bottom > MBX_2D_HEIGHT) {
+        if (why) *why = "solid-fill rectangle is empty, reversed, or outside 320x480";
+        return false;
     }
     if ((w[1] & 3u) ||
         (uint64_t)w[1] + MBX_2D_SURFACE_BYTES >
@@ -624,11 +625,13 @@ static bool mbx_stage_lower_black_fill(s5l_mbx_t *m,
         return false;
     }
 
+    const uint32_t width = right - left;
     const uint32_t height = bottom - top;
-    const uint32_t total = MBX_2D_BGRA_STRIDE * height;
+    const uint32_t row_bytes = width * 4u;
+    const uint32_t total = row_bytes * height;
     for (uint32_t row = 0; row < height; row++) {
-        uint32_t dst = w[1] + (top + row) * MBX_2D_BGRA_STRIDE;
-        if (!mbx_gart_validate(m, bus, dst, MBX_2D_BGRA_STRIDE, why))
+        uint32_t dst = w[1] + (top + row) * MBX_2D_BGRA_STRIDE + left * 4u;
+        if (!mbx_gart_validate(m, bus, dst, row_bytes, why))
             return false;
     }
 
@@ -643,15 +646,18 @@ static bool mbx_stage_lower_black_fill(s5l_mbx_t *m,
         pixels[i + 2u] = 0u;
         pixels[i + 3u] = 0xffu;
     }
-    if (shadow)
-        memcpy(shadow + top * MBX_2D_BGRA_STRIDE, pixels, total);
+    if (shadow) {
+        for (uint32_t row = 0; row < height; row++)
+            memcpy(shadow + (top + row) * MBX_2D_BGRA_STRIDE + left * 4u,
+                   pixels + row * row_bytes, row_bytes);
+    }
 
     job->target = w[1];
-    job->dst_x = 0u;
+    job->dst_x = left;
     job->dst_y = top;
-    job->width = MBX_2D_WIDTH;
+    job->width = width;
     job->height = height;
-    job->row_bytes = MBX_2D_BGRA_STRIDE;
+    job->row_bytes = row_bytes;
     job->total = total;
     job->pixels = pixels;
     return true;
@@ -849,7 +855,7 @@ static bool mbx_stage_2d_packet(s5l_mbx_t *m, const arm_bus_t *bus,
         *packet_words = MBX_2D_BLEND_WORDS;
     } else if (mbx_edram_word(m, packet_off + 6u * 4u) ==
                MBX_2D_FILL_MODE) {
-        if (!mbx_stage_lower_black_fill(m, bus, packet_off,
+        if (!mbx_stage_black_rect_fill(m, bus, packet_off,
                                         shadow_target, shadow, job, why))
             return false;
         *packet_words = MBX_2D_COPY_WORDS;
@@ -1792,6 +1798,58 @@ static const struct mbx_3d_status_form mbx_3d_status_forms[] = {
             0x3e940000u, 0x00000000u, 0xbf000000u, 0x3f280000u,
             0x3f200000u, 0x3e9e8000u, 0x3ca00000u, 0xbf000000u,
             0x3f280000u, 0x00000000u, 0x3e9e8000u, 0x00000000u,
+        },
+    },
+    {
+        .xclip = 0x00600000u, .yclip = 0x00700050u,
+        .target = 0x00a41000u,
+        .boundary_override = true,
+        .tile_x0 = 0u, .tile_x1 = 0x0bu,
+        .tile_y0 = 5u, .tile_y1 = 6u,
+        .left = 3u, .top = 94u, .width = 86u, .height = 13u,
+        .source_stride = 0x160u, .source_control = 0x8e140000u,
+        .boundary = {
+            0x40000000u, 0x42d60000u, 0x40000000u, 0x42ba0000u,
+            0x42b20000u, 0x42d60000u, 0x42b20000u, 0x42ba0000u,
+        },
+        .quad = {
+            0xe0000000u, 0xa4118001u, 0u, 0xa6884710u,
+            0xa7718000u, 0u, 0xae504ea0u, 0x22250e80u,
+            0x403a2398u, 0x42bbcd39u, 0x42b1d11du, 0x42bbcd39u,
+            0x403a2398u, 0x42d5cd39u, 0x42b1d11du, 0x42d5cd39u,
+            0u, 0u, 0u, 0u,
+            0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+            0xff000000u, 0u, 0u, 0x3b3a2398u,
+            0x3dbbcd39u, 0xff000000u, 0x3f2b0000u, 0u,
+            0x3db1d11du, 0x3dbbcd39u, 0xff000000u, 0u,
+            0x3f480000u, 0x3b3a2398u, 0x3dd5cd39u, 0xff000000u,
+            0x3f2b0000u, 0x3f480000u, 0x3db1d11du, 0x3dd5cd39u,
+        },
+    },
+    {
+        .xclip = 0x00500010u, .yclip = 0x00600020u,
+        .target = 0x00a41000u,
+        .boundary_override = true,
+        .tile_x0 = 2u, .tile_x1 = 9u,
+        .tile_y0 = 2u, .tile_y1 = 5u,
+        .left = 16u, .top = 32u, .width = 59u, .height = 62u,
+        .source_stride = 0x100u, .source_control = 0x8e100000u,
+        .boundary = {
+            0x41700000u, 0x42bc0000u, 0x41700000u, 0x41f80000u,
+            0x42960000u, 0x42bc0000u, 0x42960000u, 0x41f80000u,
+        },
+        .quad = {
+            0xe0000000u, 0xa3318000u, 0u, 0xa6884710u,
+            0xa7718000u, 0u, 0xae504ea0u, 0x22250e80u,
+            0x417e88e6u, 0x41ff34e4u, 0x4295d11du, 0x41ff34e4u,
+            0x417e88e6u, 0x42bbcd39u, 0x4295d11du, 0x42bbcd39u,
+            0u, 0u, 0u, 0u,
+            0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+            0xff000000u, 0u, 0u, 0x3c7e88e6u,
+            0x3cff34e4u, 0xff000000u, 0x3f6a0000u, 0u,
+            0x3d95d11du, 0x3cff34e4u, 0xff000000u, 0u,
+            0x3f760000u, 0x3c7e88e6u, 0x3dbbcd39u, 0xff000000u,
+            0x3f6a0000u, 0x3f760000u, 0x3d95d11du, 0x3dbbcd39u,
         },
     },
     {

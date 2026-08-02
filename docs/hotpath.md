@@ -3098,3 +3098,87 @@ stalled at the then-unknown form; their means (`0.042` and `0.039` fps) are stal
 not steady-state home-screen cadence. They do not establish the emulator's current FPS.
 No measured 30 FPS result exists yet. Network, sound, and iOS-app completion remain behind
 that graphics acceptance gate.
+
+### r408-r410: Settings launch advances through bounded fills and two exact home-screen layers
+
+r408 started from the tutorial-free r407 checkpoint and injected the measured Settings
+tap. The guest accepted the touch and reached a 50-command 2D submission, but the decoder
+rejected its first previously unseen rectangle. Therefore r408 did **not** prove that
+Settings opened. The useful result was a complete retained batch: six black fills, 42
+premultiplied blends, and two plain copies, ending at `ring+0xbc60`.
+
+The earlier fill implementation admitted only the full-width `(0,20)-(320,480)` clear and
+its one measured split at row 389. Static disassembly closed the geometry ambiguity:
+`_pack2DCtxBlitColor` at `0x30e1b080..0x30e1b0b4` packs `(x,y)` and
+`(x+width,y+height)` into words 8 and 9, using literal masks `0x1fff` and
+`0x1fff0000`. The decoder now accepts non-empty rectangles within 320x480, but remains
+restricted to the captured command headers, surface form, mode `0x8000f0f0`, and black
+color `0xff000000`. It validates every destination row before staging any pixel. The six
+r408 rectangles were:
+
+| left | top | right | bottom |
+|---:|---:|---:|---:|
+| 3 | 32 | 317 | 107 |
+| 79 | 107 | 165 | 108 |
+| 3 | 120 | 317 | 195 |
+| 3 | 208 | 317 | 283 |
+| 3 | 296 | 241 | 371 |
+| 136 | 375 | 178 | 385 |
+
+The focused test checks all six interiors, four adjacent outside sentinels, exact completion,
+and a second batch whose last rectangle ends at x=321. That late-invalid batch produces no
+completion and commits none of its earlier valid jobs. This is evidence for bounds and
+atomicity, not support for arbitrary MBX2D fills.
+
+Exact offline replay of the retained r408 batch completed all 50 commands and committed
+879,232 bytes. It changed 4,146 pixels / 12,438 bytes on target `0x00897000`, with target
+hash `9a728040559961b7 -> dbc63ef0fa1cd707` and status `0 -> 0x400`:
+
+    work/r408-derived-complete-settings-batch-6200m/post-settings-batch-6200m.bin
+      SHA-256 7A7484A991B387F3BFED67D06A5FD385B06A60BE1F5E8DF433D16AA809AA1CDC
+    work/r408-derived-complete-settings-batch-6200m/screen.ppm
+      SHA-256 C03EC02E1B99DA083F37A9E8B1056A1AE7E0277531050E6E2B046894CE131A2E
+
+r409 resumed that completed batch from 6.2 to 6.3 billion retired instructions. It
+completed 12/12 2D commands (389,500 bytes) and 3/4 3D renders (8,036 pixels), then stopped
+at a new exact form. The retained source at GPU VA `0x00931080`, stride `0x160`, is a
+coherent 86x13 `Messages` label: 333 nonzero-RGB pixels, 1,075 nonopaque pixels, and zero
+premultiplication violations. The captured destination is `(3,94)` with size 86x13 on
+target `0x00a41000`. Exact replay blended 1,118 destination pixels, changed 333 pixels /
+999 bytes, changed nothing outside the rectangle, and moved the target hash
+`6ec3a306a886257f -> 6e88cb664d1f8e5d`:
+
+    work/r409-derived-complete-messages-6300m/post-messages-6300m.bin
+      SHA-256 D98182022706F4993374CDF05C8ADA72408F8A9F120B858352F94F374E9D2F4E
+
+r410 resumed that completed form from 6.3 to 6.32 billion instructions and stopped at the
+next exact 3D form. Its source at GPU VA `0x00933000`, stride `0x100`, is a coherent 59x62
+Messages icon: 3,191 nonzero pixels, 535 nonopaque pixels, and zero premultiplication
+violations. Its destination is `(16,32)` with size 59x62 on the same transition target.
+An independently retained r408 2D packet names the same source, stride, and destination,
+which supports the interpretation without broadening it to other icons. Exact replay
+blended 3,658 destination pixels, changed 3,191 pixels / 9,257 bytes, changed nothing
+outside the rectangle, and moved the target hash
+`6e88cb664d1f8e5d -> 8ab6affc47bc7754`:
+
+    work/r410-derived-complete-messages-icon-6320m/post-messages-icon-6320m.bin
+      SHA-256 51EC8AA004B4962C4A7F664821C9222E440DDF453EF487202D2833383FD6404C
+    work/r410-derived-complete-messages-icon-6320m/screen.ppm
+      SHA-256 014EFE85944CD00D48CE8DBAD35C3B8FA318B57F9D2E990473804A020C547DDB
+
+The r409 and r410 live runs each still logged one Graphics Recovery Event with completed
+status `0x400`. Each final CLCD image remained the coherent home screen; neither showed an
+opened Settings application. The r409 frame meter saw 500 publications but only its first
+signature changed (`0.044` mean / `1.896` maximum fps), while r410 saw 102 publications and
+the same single-change pattern (`0.182` mean / `1.820` maximum fps). Those numbers measure
+decoder stalls, not useful steady-state animation, and make no 30 FPS claim.
+
+At this checkpoint, the previously rejected 2D batch and two immediately subsequent 3D
+forms are implemented and exactly replayed. The Settings launch as a whole is **not fixed**:
+the guest is still exposing one unsupported command at a time, recovery still recurs, and
+the screen has not transitioned into Settings. A clean resumed interaction and a final
+instruction-zero cold boot remain mandatory. Network, sound, and iOS-app completion have
+not started because the graphics acceptance gate is still open.
+
+Local verification after both forms is 393/393 focused MBX assertions, 55/55 CTest
+targets, and 393/393 again in the independent strict warnings-as-errors build.

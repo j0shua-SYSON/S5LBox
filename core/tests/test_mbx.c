@@ -397,6 +397,82 @@ static void test_split_lower_surface_black_fill(void) {
     s5l8900_free(&m);
 }
 
+static void test_springboard_settings_black_fill_batch(void) {
+    enum { STRIDE = 0x500u, WIDTH = 320u, HEIGHT = 480u };
+    const uint32_t table2 = 0x08003000u;
+    const uint32_t target = 0x00897000u;
+    const uint32_t target_pa = 0x08040000u;
+    static const uint16_t rects[6][4] = {
+        { 3u, 32u, 317u, 107u },
+        { 79u, 107u, 165u, 108u },
+        { 3u, 120u, 317u, 195u },
+        { 3u, 208u, 317u, 283u },
+        { 3u, 296u, 241u, 371u },
+        { 136u, 375u, 178u, 385u },
+    };
+    static const uint32_t packet_template[16] = {
+        0xa0060500u, target, 0x94060500u, 0x00000000u,
+        0x30000000u, 0x60800200u, 0x8000f0f0u, 0xff000000u,
+        0u, 0u, 0x70000000u, 0x70000000u,
+        0x70000000u, 0x70000000u, 0x70000000u, 0x70000000u,
+    };
+    uint32_t packets[6][16];
+
+    s5l8900_t m;
+    CHECK(s5l8900_init(&m, RAM_BASE, RAM_SIZE),
+          "Settings-fill machine init failed");
+    if (!m.ram) return;
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_GART2, table2);
+    for (uint32_t page = 0; page < STRIDE * HEIGHT; page += 0x1000u)
+        test_map_gpu_page(&m, table2, target + page, target_pa + page);
+
+    for (unsigned i = 0; i < 6u; i++) {
+        memcpy(packets[i], packet_template, sizeof packet_template);
+        packets[i][8] = ((uint32_t)rects[i][0] << 16) | rects[i][1];
+        packets[i][9] = ((uint32_t)rects[i][2] << 16) | rects[i][3];
+        write_packet(&m, RING + i * 0x40u, packets[i], 16u);
+    }
+    test_gpu_write32(&m, target + 31u * STRIDE + 3u * 4u, 0xff112233u);
+    test_gpu_write32(&m, target + 32u * STRIDE + 2u * 4u, 0xff445566u);
+    test_gpu_write32(&m, target + 32u * STRIDE + 317u * 4u, 0xff778899u);
+    test_gpu_write32(&m, target + 107u * STRIDE + 3u * 4u, 0xffaabbccu);
+    m.bus.write32(m.bus.ctx, MBX_BASE + RING, 0xf0000000u);
+
+    uint32_t mismatches = 0u;
+    for (unsigned i = 0; i < 6u; i++) {
+        for (uint32_t y = rects[i][1]; y < rects[i][3]; y++) {
+            for (uint32_t x = rects[i][0]; x < rects[i][2]; x++) {
+                mismatches += test_gpu_read32(
+                    &m, target + y * STRIDE + x * 4u) != 0xff000000u;
+            }
+        }
+    }
+    CHECK(mismatches == 0u,
+          "measured Settings fill batch left %u non-black pixels", mismatches);
+    CHECK(test_gpu_read32(&m, target + 31u * STRIDE + 3u * 4u) == 0xff112233u &&
+          test_gpu_read32(&m, target + 32u * STRIDE + 2u * 4u) == 0xff445566u &&
+          test_gpu_read32(&m, target + 32u * STRIDE + 317u * 4u) == 0xff778899u &&
+          test_gpu_read32(&m, target + 107u * STRIDE + 3u * 4u) == 0xffaabbccu,
+          "bounded Settings fills changed pixels outside their rectangles");
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0x400u,
+          "Settings fill batch did not raise exactly 2D completion");
+
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x400u);
+    test_gpu_write32(&m, target + 32u * STRIDE + 3u * 4u, 0xff123456u);
+    test_gpu_write32(&m, target + 375u * STRIDE + 136u * 4u, 0xffabcdefu);
+    packets[5][9] = (321u << 16) | 385u;
+    for (unsigned i = 0; i < 6u; i++)
+        write_packet(&m, RING + 0x200u + i * 0x40u, packets[i], 16u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + RING, 0xf0000000u);
+    CHECK(test_gpu_read32(&m, target + 32u * STRIDE + 3u * 4u) == 0xff123456u &&
+          test_gpu_read32(&m, target + 375u * STRIDE + 136u * 4u) == 0xffabcdefu,
+          "out-of-bounds late Settings fill committed part of the batch");
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
+          "out-of-bounds Settings fill raised completion");
+
+    s5l8900_free(&m);
+}
+
 static void test_premultiplied_2d_clock_form(void) {
     const uint32_t table2 = 0x08003000u;
     const uint32_t source = 0x00900000u;
@@ -1816,6 +1892,62 @@ static void test_later_tiled_status_sprites(void) {
             },
         },
         {
+            .name = "Messages label on transition surface",
+            .xclip = 0x00600000u, .yclip = 0x00700050u,
+            .target = 0x00a41000u,
+            .boundary_override = true,
+            .tile_x0 = 0u, .tile_x1 = 0x0bu,
+            .tile_y0 = 5u, .tile_y1 = 6u,
+            .left = 3u, .top = 94u, .width = 86u, .height = 13u,
+            .source = 0x00931080u,
+            .source_stride = 0x160u, .source_control = 0x8e140000u,
+            .boundary = {
+                0x40000000u, 0x42d60000u, 0x40000000u, 0x42ba0000u,
+                0x42b20000u, 0x42d60000u, 0x42b20000u, 0x42ba0000u,
+            },
+            .quad = {
+                0xe0000000u, 0xa4118001u, 0u, 0xa6884710u,
+                0xa7718000u, 0u, 0xae504ea0u, 0x22250e80u,
+                0x403a2398u, 0x42bbcd39u, 0x42b1d11du, 0x42bbcd39u,
+                0x403a2398u, 0x42d5cd39u, 0x42b1d11du, 0x42d5cd39u,
+                0u, 0u, 0u, 0u,
+                0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+                0xff000000u, 0u, 0u, 0x3b3a2398u,
+                0x3dbbcd39u, 0xff000000u, 0x3f2b0000u, 0u,
+                0x3db1d11du, 0x3dbbcd39u, 0xff000000u, 0u,
+                0x3f480000u, 0x3b3a2398u, 0x3dd5cd39u, 0xff000000u,
+                0x3f2b0000u, 0x3f480000u, 0x3db1d11du, 0x3dd5cd39u,
+            },
+        },
+        {
+            .name = "Messages icon on transition surface",
+            .xclip = 0x00500010u, .yclip = 0x00600020u,
+            .target = 0x00a41000u,
+            .boundary_override = true,
+            .tile_x0 = 2u, .tile_x1 = 9u,
+            .tile_y0 = 2u, .tile_y1 = 5u,
+            .left = 16u, .top = 32u, .width = 59u, .height = 62u,
+            .source = 0x00933000u,
+            .source_stride = 0x100u, .source_control = 0x8e100000u,
+            .boundary = {
+                0x41700000u, 0x42bc0000u, 0x41700000u, 0x41f80000u,
+                0x42960000u, 0x42bc0000u, 0x42960000u, 0x41f80000u,
+            },
+            .quad = {
+                0xe0000000u, 0xa3318000u, 0u, 0xa6884710u,
+                0xa7718000u, 0u, 0xae504ea0u, 0x22250e80u,
+                0x417e88e6u, 0x41ff34e4u, 0x4295d11du, 0x41ff34e4u,
+                0x417e88e6u, 0x42bbcd39u, 0x4295d11du, 0x42bbcd39u,
+                0u, 0u, 0u, 0u,
+                0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+                0xff000000u, 0u, 0u, 0x3c7e88e6u,
+                0x3cff34e4u, 0xff000000u, 0x3f6a0000u, 0u,
+                0x3d95d11du, 0x3cff34e4u, 0xff000000u, 0u,
+                0x3f760000u, 0x3c7e88e6u, 0x3dbbcd39u, 0xff000000u,
+                0x3f6a0000u, 0x3f760000u, 0x3d95d11du, 0x3dbbcd39u,
+            },
+        },
+        {
             .name = "transparent clipped battery transfer",
             .xclip = 0x01400000u, .yclip = 0x01e00010u,
             .target = 0x00897000u, .blend_surface = 0x00998000u,
@@ -2007,6 +2139,7 @@ int main(void) {
     test_unknown_packet_and_bad_gart_are_atomic();
     test_full_lower_surface_black_fill();
     test_split_lower_surface_black_fill();
+    test_springboard_settings_black_fill_batch();
     test_status_write_to_set_and_ack();
     test_premultiplied_2d_clock_form();
     test_opaque_global_alpha_2d_form();
