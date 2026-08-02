@@ -156,6 +156,15 @@ expect_config(short_S_is_sha1
     "sha1=1" absent-kernel -S --print-config)
 expect_config(short_F_is_framebuffer
     "framebuffer=1|iomfb-display=0" absent-kernel -F --print-config)
+# The changed-frame meter observes the live CLCD surface and has no honest
+# answer without one. It is host-only (like --fast), so the relaunch line is
+# its provenance rather than the emulated-machine toggle table.
+expect_config(frame_meter_requires_and_accepts_framebuffer
+    "framebuffer=1|--frame-meter"
+    absent-kernel -F --frame-meter --print-config)
+expect_refused(frame_meter_without_framebuffer
+    "--frame-meter requires --framebuffer"
+    absent-kernel --frame-meter --print-config)
 # -g was never a pure --mbx: it has always implied -F and v_display=1 as well.
 expect_config(short_g_is_the_whole_graphics_experiment
     "framebuffer=1|iomfb-display=1|mbx=1"

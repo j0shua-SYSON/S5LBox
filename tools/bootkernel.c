@@ -58,6 +58,7 @@ static rootfs_work_entry_t *g_jb_entries = NULL;
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 #ifdef _WIN32
 #include <io.h>
 #else
@@ -385,7 +386,7 @@ static bool boot_option_takes_value(const char *option) {
 
 /* --------------------------------------------------------- boot toggles ----
  *
- * Every boolean setting bootkernel has, in one table.
+ * Every emulated-machine boolean setting bootkernel has, in one table.
  *
  * The flags grew one letter at a time and stopped agreeing with themselves:
  * -g and -S RE-ENABLE deliberately hidden device-tree nodes, -M and -K DISABLE
@@ -2566,6 +2567,383 @@ static bool dt_memmap_matches_once(uint8_t *b, size_t len, const char *key,
 #define N82_FB_HEIGHT    S5L_BRINGUP_FB_HEIGHT
 #define N82_FB_BPP       S5L_BRINGUP_FB_BPP
 #define N82_FB_BYTES     S5L_BRINGUP_FB_BYTES
+
+/* ------------------------------------------------ changed-frame meter ----
+ *
+ * The iOS app's status line measures changed PUBLISHED frames. It does not
+ * count CABackingStoreUpdate (one call per layer), CLCD register writes (this
+ * guest continuously scans a surface), or the H1 interrupt handler (a display
+ * boundary, not proof that any pixel changed). The desktop harness used to
+ * expose all three tempting proxies and none of the quantity the app reports.
+ *
+ * This opt-in meter deliberately transcribes VMEngine.m's publication path:
+ *
+ *   - execution is checked after each 100,000-instruction host chunk;
+ *   - regular publication is capped at 30 Hz on host wall time, with the same
+ *     unconditional terminal publication the app makes at an instruction cap;
+ *   - the complete 614,400-byte raw surface is copied, as the app copies it;
+ *   - one little-endian word every 397 bytes feeds the same sampled FNV-style
+ *     signature; and
+ *   - changed signatures are reported over windows of at least 0.5 seconds.
+ *
+ * It is still NOT target-device FPS. bootkernel has diagnostic overhead the
+ * app does not, the host CPU is different, and this does not reproduce UIKit's
+ * concurrent CGImage work. The report says that prominently. What it buys is
+ * a fast, exit-checked way to reject a supposed FPS improvement when the same
+ * changed-publication definition does not improve even on the desktop.
+ */
+#define FRAME_METER_CHUNK_INSTRUCTIONS UINT64_C(100000)
+#define FRAME_METER_PUBLISH_INTERVAL   (1.0 / 30.0)
+#define FRAME_METER_WINDOW_SECONDS     0.5
+
+/* Same portable clock selection as insnbench. The MSVC fallback is UTC rather
+ * than monotonic, so a backwards step invalidates the measurement instead of
+ * quietly producing a flattering rate. The compiled choice is printed. */
+#if defined(CLOCK_MONOTONIC)
+#  define FRAME_METER_TIMER "clock_gettime(CLOCK_MONOTONIC)"
+static double frame_meter_now_seconds(void) {
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return -1.0;
+    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+}
+#elif defined(TIME_UTC)
+#  define FRAME_METER_TIMER "timespec_get(TIME_UTC; non-monotonic fallback)"
+static double frame_meter_now_seconds(void) {
+    struct timespec ts;
+    if (timespec_get(&ts, TIME_UTC) != TIME_UTC) return -1.0;
+    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+}
+#else
+#  define FRAME_METER_TIMER "clock() fallback"
+static double frame_meter_now_seconds(void) {
+    return (double)clock() / (double)CLOCKS_PER_SEC;
+}
+#endif
+
+typedef struct {
+    bool enabled;
+    bool failed;
+    bool signature_valid;
+    bool snapshot_blank;
+    uint8_t *snapshot;
+
+    uint64_t start_at;
+    uint64_t stop_at;
+    uint64_t next_chunk_at;
+    double started_sec;
+    double stopped_sec;
+    double last_publish_sec;
+    double window_start_sec;
+
+    uint64_t signature;
+    uint64_t publications;
+    uint64_t valid_publications;
+    uint64_t unavailable_publications;
+    uint64_t changed_frames;
+    uint64_t window_frames;
+    uint64_t completed_windows;
+    uint64_t zero_windows;
+    uint64_t thirty_fps_windows;
+    double last_window_fps;
+    double min_window_fps;
+    double max_window_fps;
+    double sum_window_fps;
+    double min_window_seconds;
+    double max_window_seconds;
+    double sum_window_seconds;
+
+    uint64_t first_changed_at;
+    uint64_t last_changed_at;
+    uint64_t min_changed_insn_gap;
+    uint64_t max_changed_insn_gap;
+    uint64_t sum_changed_insn_gap;
+    double first_changed_sec;
+    double last_changed_sec;
+    double min_changed_wall_gap;
+    double max_changed_wall_gap;
+    double sum_changed_wall_gap;
+} frame_meter_t;
+
+static uint64_t frame_meter_signature(const uint8_t *fb, size_t n) {
+    uint64_t h = UINT64_C(1469598103934665603);
+    for (size_t i = 0; i + 4u <= n; i += 397u) {
+        uint32_t w = (uint32_t)fb[i] | ((uint32_t)fb[i + 1u] << 8) |
+                     ((uint32_t)fb[i + 2u] << 16) |
+                     ((uint32_t)fb[i + 3u] << 24);
+        h = (h ^ (uint64_t)w) * UINT64_C(1099511628211);
+    }
+    return h;
+}
+
+static bool frame_meter_signature_selfcheck(void) {
+    uint8_t bytes[800];
+    for (size_t i = 0; i < sizeof bytes; i++)
+        bytes[i] = (uint8_t)(i * 37u + 11u);
+
+    uint64_t original = frame_meter_signature(bytes, sizeof bytes);
+    if (original != UINT64_C(0x86ecc86db789e123)) return false;
+
+    /* The error direction is pinned too: an unsampled change can be missed,
+     * while a sampled word must change the signature. The meter can undercount
+     * a tiny update; it cannot invent one. */
+    bytes[5] ^= UINT8_C(1);
+    if (frame_meter_signature(bytes, sizeof bytes) != original) return false;
+    bytes[397] ^= UINT8_C(1);
+    return frame_meter_signature(bytes, sizeof bytes) ==
+           UINT64_C(0x86eeac6db78a3466);
+}
+
+static const uint8_t *frame_meter_live_display(
+        const s5l8900_t *mach, size_t *bytes_out) {
+    if (bytes_out) *bytes_out = 0;
+    if (!mach || !mach->ram || !s5l_clcd_running(&mach->clcd)) return NULL;
+
+    uint32_t active = s5l_clcd_active_window(&mach->clcd);
+    uint32_t fb = 0, width = 0, height = 0, stride = 0, format = 0;
+    if (active == CLCD_WIN_NONE ||
+        !s5l_clcd_window(&mach->clcd, active, &fb, &width, &height,
+                         &stride, &format, NULL) ||
+        !CLCD_FMT_IS_32BPP(format) ||
+        width != N82_FB_WIDTH || height != N82_FB_HEIGHT ||
+        stride < width * N82_FB_BPP || fb < mach->ram_base)
+        return NULL;
+
+    uint64_t offset = (uint64_t)fb - mach->ram_base;
+    uint64_t bytes = (uint64_t)stride * height;
+    if (!bytes || bytes > N82_FB_BYTES ||
+        offset > mach->ram_size || bytes > mach->ram_size - offset)
+        return NULL;
+
+    if (bytes_out) *bytes_out = (size_t)bytes;
+    return mach->ram + (size_t)offset;
+}
+
+static bool frame_meter_start(frame_meter_t *meter, uint64_t at) {
+    if (!meter || at > UINT64_MAX - FRAME_METER_CHUNK_INSTRUCTIONS)
+        return false;
+    memset(meter, 0, sizeof *meter);
+    meter->snapshot = calloc(1, N82_FB_BYTES);
+    if (!meter->snapshot) return false;
+
+    double now = frame_meter_now_seconds();
+    if (now < 0.0) {
+        free(meter->snapshot);
+        meter->snapshot = NULL;
+        return false;
+    }
+    meter->enabled = true;
+    meter->snapshot_blank = true;
+    meter->start_at = at;
+    meter->stop_at = at;
+    meter->next_chunk_at = at + FRAME_METER_CHUNK_INSTRUCTIONS;
+    meter->started_sec = now;
+    meter->stopped_sec = now;
+    meter->last_publish_sec = now;
+    return true;
+}
+
+static void frame_meter_advance_chunk(frame_meter_t *meter, uint64_t at) {
+    if (!meter) return;
+    while (meter->next_chunk_at <= at) {
+        if (meter->next_chunk_at >
+                UINT64_MAX - FRAME_METER_CHUNK_INSTRUCTIONS) {
+            meter->next_chunk_at = UINT64_MAX;
+            return;
+        }
+        meter->next_chunk_at += FRAME_METER_CHUNK_INSTRUCTIONS;
+    }
+}
+
+static void frame_meter_record_window(frame_meter_t *meter, double now) {
+    if (!meter) return;
+    if (meter->window_start_sec <= 0.0) {
+        meter->window_start_sec = now;
+        return;
+    }
+    double elapsed = now - meter->window_start_sec;
+    if (elapsed < FRAME_METER_WINDOW_SECONDS) return;
+
+    double fps = (double)meter->window_frames / elapsed;
+    if (!meter->completed_windows || fps < meter->min_window_fps)
+        meter->min_window_fps = fps;
+    if (!meter->completed_windows || fps > meter->max_window_fps)
+        meter->max_window_fps = fps;
+    if (!meter->completed_windows || elapsed < meter->min_window_seconds)
+        meter->min_window_seconds = elapsed;
+    if (!meter->completed_windows || elapsed > meter->max_window_seconds)
+        meter->max_window_seconds = elapsed;
+    meter->completed_windows++;
+    if (!meter->window_frames) meter->zero_windows++;
+    if (fps >= 30.0) meter->thirty_fps_windows++;
+    meter->last_window_fps = fps;
+    meter->sum_window_fps += fps;
+    meter->sum_window_seconds += elapsed;
+    meter->window_frames = 0;
+    meter->window_start_sec = now;
+}
+
+static bool frame_meter_publish(frame_meter_t *meter, const s5l8900_t *mach,
+                                uint64_t at, double now) {
+    if (!meter || !meter->enabled || meter->failed) return false;
+    if (now < 0.0 || now < meter->last_publish_sec || now < meter->started_sec) {
+        meter->failed = true;
+        return false;
+    }
+    meter->last_publish_sec = now;
+    meter->publications++;
+
+    size_t fb_bytes = 0;
+    const uint8_t *fb = frame_meter_live_display(mach, &fb_bytes);
+    if (!fb) {
+        meter->unavailable_publications++;
+        if (!meter->snapshot_blank) {
+            memset(meter->snapshot, 0, N82_FB_BYTES);
+            meter->snapshot_blank = true;
+        }
+        return true;
+    }
+
+    meter->valid_publications++;
+    if (fb_bytes < N82_FB_BYTES)
+        memset(meter->snapshot + fb_bytes, 0, N82_FB_BYTES - fb_bytes);
+    memcpy(meter->snapshot, fb, fb_bytes);
+    meter->snapshot_blank = false;
+
+    uint64_t signature = frame_meter_signature(fb, fb_bytes);
+    if (!meter->signature_valid || signature != meter->signature) {
+        if (!meter->changed_frames) {
+            meter->first_changed_at = at;
+            meter->first_changed_sec = now;
+        } else {
+            uint64_t insn_gap = at - meter->last_changed_at;
+            double wall_gap = now - meter->last_changed_sec;
+            if (meter->changed_frames == 1u ||
+                insn_gap < meter->min_changed_insn_gap)
+                meter->min_changed_insn_gap = insn_gap;
+            if (meter->changed_frames == 1u ||
+                insn_gap > meter->max_changed_insn_gap)
+                meter->max_changed_insn_gap = insn_gap;
+            if (meter->changed_frames == 1u ||
+                wall_gap < meter->min_changed_wall_gap)
+                meter->min_changed_wall_gap = wall_gap;
+            if (meter->changed_frames == 1u ||
+                wall_gap > meter->max_changed_wall_gap)
+                meter->max_changed_wall_gap = wall_gap;
+            meter->sum_changed_insn_gap += insn_gap;
+            meter->sum_changed_wall_gap += wall_gap;
+        }
+        meter->signature = signature;
+        meter->signature_valid = true;
+        meter->changed_frames++;
+        meter->window_frames++;
+        meter->last_changed_at = at;
+        meter->last_changed_sec = now;
+    }
+    frame_meter_record_window(meter, now);
+    return true;
+}
+
+static bool frame_meter_poll(frame_meter_t *meter, const s5l8900_t *mach,
+                             uint64_t at) {
+    if (!meter || !meter->enabled || meter->failed ||
+        at < meter->next_chunk_at)
+        return meter && !meter->failed;
+    frame_meter_advance_chunk(meter, at);
+
+    double now = frame_meter_now_seconds();
+    if (now < 0.0 || now < meter->last_publish_sec) {
+        meter->failed = true;
+        return false;
+    }
+    if (now - meter->last_publish_sec < FRAME_METER_PUBLISH_INTERVAL)
+        return true;
+    return frame_meter_publish(meter, mach, at, now);
+}
+
+static bool frame_meter_finish(frame_meter_t *meter, const s5l8900_t *mach,
+                               uint64_t at) {
+    if (!meter || !meter->enabled) return false;
+    double now = frame_meter_now_seconds();
+    if (!meter->failed &&
+        !frame_meter_publish(meter, mach, at, now))
+        meter->failed = true;
+    if (now >= meter->started_sec) meter->stopped_sec = now;
+    meter->stop_at = at;
+    return !meter->failed;
+}
+
+static void frame_meter_report(const frame_meter_t *meter) {
+    if (!meter || !meter->enabled) return;
+    double wall = meter->stopped_sec - meter->started_sec;
+    printf("\n=== APP-EQUIVALENT CHANGED-SCANOUT METER ===\n");
+    printf("  IMPORTANT: this is desktop bootkernel cadence, NOT measured "
+           "iOS-device FPS and not a composite count. It mirrors the app's "
+           "emulator-thread publication/counter path, not UIKit drawing.\n");
+    printf("  validity: %s; timer=%s\n",
+           meter->failed ? "INVALID (clock/allocation failure)" : "valid",
+           FRAME_METER_TIMER);
+    printf("  contract: 100000-instruction schedule (<=1023-instruction "
+           "harness quantization), regular <=30 Hz plus terminal publication, "
+           "614400-byte copies, 397-byte sampled-signature stride, >=0.5 s "
+           "windows\n");
+    printf("  span: @%" PRIu64 "..@%" PRIu64 " in %.6f host s",
+           meter->start_at, meter->stop_at, wall);
+    if (wall > 0.0)
+        printf(" = %.3f M guest retired/s",
+               (double)(meter->stop_at - meter->start_at) / wall / 1e6);
+    printf("\n");
+    printf("  publications: %" PRIu64 " total; %" PRIu64
+           " live-scanout / %" PRIu64 " unavailable; changed signatures=%"
+           PRIu64 " (the first live signature counts, exactly as in the app)\n",
+           meter->publications, meter->valid_publications,
+           meter->unavailable_publications, meter->changed_frames);
+    printf("  signature work: 1548 sampled words / 6192 touched bytes per "
+           "live publication; a small unsampled change can be missed, never "
+           "invented\n");
+    if (meter->completed_windows) {
+        printf("  completed windows: %" PRIu64
+               "; fps last/min/mean/max=%.3f/%.3f/%.3f/%.3f; "
+               "zero/>=30=%" PRIu64 "/%" PRIu64 "\n",
+               meter->completed_windows, meter->last_window_fps,
+               meter->min_window_fps,
+               meter->sum_window_fps / (double)meter->completed_windows,
+               meter->max_window_fps, meter->zero_windows,
+               meter->thirty_fps_windows);
+        printf("  window seconds min/mean/max=%.6f/%.6f/%.6f; "
+               "pending changed frames=%" PRIu64 "\n",
+               meter->min_window_seconds,
+               meter->sum_window_seconds /
+                   (double)meter->completed_windows,
+               meter->max_window_seconds, meter->window_frames);
+    } else {
+        printf("  completed windows: 0; no FPS value exists for this run "
+               "(pending changed frames=%" PRIu64 ")\n",
+               meter->window_frames);
+    }
+    if (meter->changed_frames) {
+        printf("  first/last changed publication: @%" PRIu64 "/@%" PRIu64,
+               meter->first_changed_at, meter->last_changed_at);
+        if (meter->changed_frames > 1u) {
+            double gaps = (double)(meter->changed_frames - 1u);
+            printf("\n  changed gaps: instructions min/mean/max=%" PRIu64
+                   "/%.1f/%" PRIu64 "; host s min/mean/max="
+                   "%.6f/%.6f/%.6f",
+                   meter->min_changed_insn_gap,
+                   (double)meter->sum_changed_insn_gap / gaps,
+                   meter->max_changed_insn_gap,
+                   meter->min_changed_wall_gap,
+                   meter->sum_changed_wall_gap / gaps,
+                   meter->max_changed_wall_gap);
+        }
+        printf("\n");
+    }
+}
+
+static void frame_meter_destroy(frame_meter_t *meter) {
+    if (!meter) return;
+    free(meter->snapshot);
+    meter->snapshot = NULL;
+}
 
 /*
  * HOW MANY SURFACES /vram MUST HOLD, and why one is not enough.
@@ -24337,7 +24715,7 @@ static void boot_print_usage(FILE *stream, const char *argv0) {
             "          [--call-probe-kernel <kernel-mode-pc>] ...\n"
             "          [--touch <at>:<x>:<y>[:<hold>]] ...\n"
             "          [--drag <at>:<x0>:<y0>:<x1>:<y1>[:<steps>[:<span>]]] ...\n"
-            "          [--fast]\n"
+            "          [--fast] [--frame-meter]\n"
             "          [--pinch <at>:<ax0>:<ay0>:<ax1>:<ay1>:<bx0>:<by0>:"
             "<bx1>:<by1>[:<steps>[:<span>]]] ...\n"
             "          [--button <name>:<at>[:<hold>]] ...\n"
@@ -24347,11 +24725,24 @@ static void boot_print_usage(FILE *stream, const char *argv0) {
             "          [--snapshot-at <insn> <file>] ... [--restore <file>]\n"
             "          [--print-config] [-h|--help]\n"
             "\n"
-            "Every boolean setting has the same shape: --<name> enables it and\n"
-            "--no-<name> disables it. The historical short flags below still\n"
+            "Every emulated-machine boolean has the same shape: --<name>\n"
+            "enables it and --no-<name> disables it. The historical short\n"
+            "flags below still\n"
             "work and mean exactly what they always did. --print-config prints\n"
             "the resolved configuration and exits; every run's header records\n"
             "it too, on the config: and config-cli: lines.\n"
+            "\n"
+            "host-only execution/measurement switches  (enable-only)\n"
+            "  --fast  skip the expensive per-instruction trace block. This\n"
+            "      changes host overhead, not emulated hardware; diagnostic\n"
+            "      reports are intentionally reduced.\n"
+            "  --frame-meter  mirror the iOS app's changed-published-frame\n"
+            "      counter: check after 100000-instruction chunks, regularly\n"
+            "      publish at most 30 Hz plus the app's terminal publication,\n"
+            "      copy the complete live raw framebuffer, and\n"
+            "      report changed sampled signatures over >=0.5 s host-time\n"
+            "      windows. Requires --framebuffer (-F). This is a desktop\n"
+            "      proxy, never a target-iOS FPS acceptance result.\n"
             "\n"
             "value-taking options\n"
             "  --snapshot-at <insn> <file>\n"
@@ -24582,6 +24973,9 @@ int main(int argc, char **argv) {
     /* --fast: skip the per-instruction observational block in the hot loop.
      * Throughput mode. See the block itself for what is given up. */
     bool fast_hot = false;
+    /* --frame-meter: host-only publication observer beside --fast, not an
+     * emulated-machine toggle and therefore not snapshot state. */
+    bool frame_meter_requested = false;
     uint64_t steps = UINT64_C(2000000);
     const char *dtpath = NULL;
     const char *cmdline = "debug=0x8 serial=1";
@@ -24849,6 +25243,10 @@ int main(int argc, char **argv) {
          * suppressed nothing, and produced a report byte-identical to a normal
          * run. That identical report is what caught it. */
         if (!strcmp(argv[i], "--fast")) { fast_hot = true; continue; }
+        if (!strcmp(argv[i], "--frame-meter")) {
+            frame_meter_requested = true;
+            continue;
+        }
         /* Every boolean, in one line, driven by BOOT_TOGGLES. */
         switch (boot_toggle_parse(argv[i], &cfg)) {
         case BOOT_TOGGLE_ACCEPTED: continue;
@@ -25411,6 +25809,13 @@ int main(int argc, char **argv) {
     stop_on_abort      = cfg.v.stop_on_abort;
     want_kextmap       = cfg.v.kext_map;
 
+    if (frame_meter_requested && !want_fb) {
+        fprintf(stderr,
+                "--frame-meter requires --framebuffer (-F); without a live "
+                "CLCD surface every publication would be unavailable\n");
+        return 1;
+    }
+
     enum {
         BOOT_STORAGE_NONE = 0,
         BOOT_STORAGE_GUEST_RAM,
@@ -25772,6 +26177,11 @@ int main(int argc, char **argv) {
     if (!boot_memory_layout_selfcheck()) {
         fprintf(stderr,
                 "internal error: boot memory layout self-check failed\n");
+        return 2;
+    }
+    if (!frame_meter_signature_selfcheck()) {
+        fprintf(stderr,
+                "internal error: changed-frame signature self-check failed\n");
         return 2;
     }
     if (!diagnostic_pc_classifier_selfcheck()) {
@@ -27865,6 +28275,15 @@ external_md_work_ready:
      * boot it is zero and this is the old `n = 0`.
      */
     uint64_t n = mach.cpu.cycles;
+    frame_meter_t frame_meter;
+    memset(&frame_meter, 0, sizeof frame_meter);
+    if (frame_meter_requested &&
+        !frame_meter_start(&frame_meter, mach.cpu.cycles)) {
+        fprintf(stderr,
+                "--frame-meter: cannot allocate its publication buffer or "
+                "start %s\n", FRAME_METER_TIMER);
+        return 2;
+    }
     uint32_t last_pc = restore_path ? mach.cpu.r[15] : entry_pa;
     uint32_t last_cpsr = mach.cpu.cpsr;
     bool last_mmu_enabled =
@@ -28179,6 +28598,15 @@ external_md_work_ready:
             if (n >= win_lo && n < win_hi)
                 prof_sample(&mach.cpu, last_pc);
             if ((n & 0xffffu) == 0) vm_sample(n, steps);
+            /* VMEngine checks host time only after a 100,000-instruction
+             * s5l8900_run() chunk. This loop is instruction-at-a-time for its
+             * diagnostics, so use the already-existing 1/1024 sampling gate
+             * to get within 1,023 instructions without adding another branch
+             * to every emulated instruction. */
+            if (frame_meter.enabled && !frame_meter.failed &&
+                mach.cpu.cycles >= frame_meter.next_chunk_at)
+                (void)frame_meter_poll(
+                    &frame_meter, &mach, mach.cpu.cycles);
         }
 
         /*
@@ -28357,6 +28785,9 @@ external_md_work_ready:
 
     }
 
+    if (frame_meter.enabled)
+        (void)frame_meter_finish(&frame_meter, &mach, mach.cpu.cycles);
+
     bool strategy_bridge_halt_failure =
         external_md && st == ARM_HALT &&
         external_bridge.stats.failures != 0u;
@@ -28511,6 +28942,7 @@ external_md_work_ready:
     mach.uart0.tx[mach.uart0.tx_len] = '\0';
     printf("stopped after %" PRIu64 " instructions: %s\n",
            mach.cpu.cycles, status_name(st));
+    frame_meter_report(&frame_meter);
     /*
      * THE TLB, which had no way to report itself.
      *
@@ -29727,6 +30159,12 @@ external_md_work_ready:
                 (unsigned long long)hle_verify_failures());
         exit_code = 13;
     }
+    if (frame_meter.failed && exit_code == 0) {
+        fprintf(stderr,
+                "frame-meter: host clock/allocation failure invalidated the "
+                "measurement\n");
+        exit_code = 14;
+    }
 
     if (external_md) {
         uint64_t total_reads =
@@ -29834,6 +30272,7 @@ external_md_work_ready:
         }
     }
 
+    frame_meter_destroy(&frame_meter);
     s5l8900_free(&mach);
     ksyms_free(&KS);
     free(img);
