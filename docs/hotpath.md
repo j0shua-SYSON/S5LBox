@@ -2345,24 +2345,52 @@ startup-transfer helper. That helper programs `0x824/0x828/0x82c/0x838/0x83c`,
 writes `0x09000000` to `0x6d8`, polls status bit 6, and acknowledges it. They
 are not one call site per userspace blit.
 
-The real userspace path is named and much less speculative:
+The real userspace path is named and much less speculative, but submission is
+buffered rather than one direct call chain:
 
     mbx2DCtxBlitCopy -> copyDispatchEVT2 -> mbx3DCtxBlitCopy
-      -> mbxSubmitCommand -> mbxSubmitBuffer_no_lock
+      -> pack2DCtxBlitCopy -> mbxGetCommandSpace -> mbxSubmitCommand
+    shared-buffer flush -> mbxSubmitBuffer_no_lock
       -> IOConnectMethodScalarIScalarO(selector 3)
 
-The matching kernel command-copy helper at `AppleMBX+0x2188` copies a variable
-packet into the mapped MBX EDRAM ring and advances the producer by writing
-`0x12c`. Twelve layer blits were therefore batched into one 1 KiB submission.
-The old phrase "12 blits, only 2 completions" compared different layers of the
-stack and is withdrawn.
+The kernel command-copy helper is at `0xc077a188` (`+0x2188` from the prelink
+executable address, or `+0x1188` from its `__TEXT` address). A byte-level read
+corrects the first interpretation of it: **it does not write `0x12c`**. It
+reads bits 16..23 of `0x12c`, computes `0x7b - consumer` as the available
+space, waits until the packet fits, then copies `length / 4` words into the
+mapped EDRAM command ring at `mapped_base + 0xa00000 + software_cursor`. It
+advances the software cursor stored at `0xc078b1bc`, wrapping it at 64 KiB.
 
-The current model couples both bit-6 startup completion and bit-10 2D
-completion to `0x6d8`. It also serves reads of `0x12c` solely from `m->status`,
-so the guest's real producer write is not retained in the value it reads back.
-That explains the measured sequence without pretending it renders anything:
-AppleMBX reaches Graphics Recovery with `2DIdle=0` and
-`CompletedIntStatus=0x400`.
+The one observed write of `0x400` to `0x12c` is instead explicit recovery code
+at `0xc077f394..0xc077f3a0`: after testing the driver's `2DIdle` byte at object
+offset `0x120`, it injects bit 10 only when that byte is zero. It is not a
+producer value and `0x400` is not a byte count. Therefore the claim that twelve
+blits were proved to be one 1 KiB producer update is withdrawn. The userspace
+shared command buffer can batch work, but this run did not measure how those
+twelve API calls were grouped at selector 3, so a submission/completion ratio
+cannot honestly be inferred from these counts.
+
+The snapshot does contain one real 64-byte packet at aperture offset
+`0xa00000`, with only 29 nonzero bytes in the first MiB of that ring:
+
+    f0000000 00897000 94060500 00800080
+    30000000 60800200 8000cccc ffffffff
+    00000000 014001e0 70000000 70000000
+    70000000 70000000 70000000 70000000
+
+The `_pack2DCtxBlitCopy` disassembly accounts for those fields: `0x94060500`
+is the source-format/stride word, `0x30000000` is the zero source coordinate,
+`0x60800200` is unity scale, and `0x014001e0` is the 320x480 destination
+rectangle. The packet's `0x00800080` source and `0x00897000` destination are
+GPU virtual addresses. Treating either as a direct EDRAM aperture offset reads
+all zero bytes, as does the previously suspected `0x00a8a000` surface.
+
+The real model gap is now narrower and harder: S5LBox has no MBX command
+consumer and no GPU-MMU translation for those addresses. The current model
+also couples both bit-6 startup completion and bit-10 2D completion to every
+`0x6d8` startup kick. Raising completion on the recovery write or on an
+unexecuted packet would let the driver proceed while moving zero pixels; that
+would be a fake graphics fix.
 
 The screen is not merely slow. It is black: 384 of 460,800 RGB bytes are
 nonzero, destination vram slot 3 contains zero nonzero bytes, and visual
