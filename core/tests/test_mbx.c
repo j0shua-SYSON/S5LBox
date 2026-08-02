@@ -185,10 +185,48 @@ static void test_unknown_packet_and_bad_gart_are_atomic(void) {
     s5l8900_free(&m);
 }
 
+static void test_status_write_to_set_and_ack(void) {
+    s5l8900_t m;
+    CHECK(s5l8900_init(&m, RAM_BASE, RAM_SIZE), "machine init failed");
+    if (!m.ram) return;
+
+    /* AppleMBX recovery injects the three missing 3D events by writing them
+     * separately to status. Each write must accumulate even while masked. */
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_STATUS, 0x08u); /* ISP */
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0x08u,
+          "first status write did not set ISP");
+    CHECK(!s5l_mbx_irq(&m.mbx),
+          "masked status write asserted the MBX interrupt");
+
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_STATUS, 0x04u); /* render */
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_STATUS, 0x40u); /* EVM */
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0x4cu,
+          "consecutive status writes did not accumulate all 3D events");
+
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_MASK, 0x4cu);
+    CHECK(s5l_mbx_irq(&m.mbx),
+          "unmasking accumulated status did not assert the interrupt");
+
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x04u);
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0x48u,
+          "selective acknowledge cleared more than render-complete");
+    CHECK(s5l_mbx_irq(&m.mbx),
+          "interrupt fell while unacknowledged status remained");
+
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x48u);
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
+          "final acknowledge left recovery status pending");
+    CHECK(!s5l_mbx_irq(&m.mbx),
+          "fully acknowledged recovery status left IRQ asserted");
+
+    s5l8900_free(&m);
+}
+
 int main(void) {
     printf("PowerVR MBX2D tests\n");
     test_translated_copy_and_completion_boundary();
     test_unknown_packet_and_bad_gart_are_atomic();
+    test_status_write_to_set_and_ack();
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
 }

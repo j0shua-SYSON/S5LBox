@@ -426,8 +426,8 @@ bool s5l_mbx_process_2d(s5l_mbx_t *m, const arm_bus_t *bus,
     }
 
     /* Completion belongs to the packet whose pixels were just committed, not
-     * to the unrelated startup-transfer kick at 0x6d8. */
-    m->status |= S5L_MBX_STATUS_2D;
+     * to the unrelated startup BACKGROUND_TAG write at 0x6d8. */
+    m->status |= S5L_MBX_STATUS_2D_SYNC;
     mbx_2d_completed++;
     mbx_2d_bytes += copied;
     if (mbx_trace_state == 1)
@@ -588,16 +588,18 @@ void s5l_mbx_write(s5l_mbx_t *m, uint32_t off, uint32_t val) {
      */
     if (off == S5L_MBX_RESET) m->reset_done = (val & 1u) != 0u;
 
-    /*
-     * Write-one-to-clear on the status word, taken from the driver's own
-     * acknowledgement: it clears exactly the bit it waited on (0x40), and
-     * clears 0x7ff during init to drop everything pending at once.
-     */
+    /* 0x12c is write-one-to-set as well as readable status. AppleMBX recovery
+     * injects missing 0x08, 0x04 and 0x40 events here in consecutive writes;
+     * OR preserves the accumulated word that it subsequently reads. 0x134 is
+     * the separate write-one-to-clear acknowledgement: it clears exactly the
+     * bit the driver waited on (0x40), or 0x7ff during initialization. */
+    if (off == S5L_MBX_STATUS) m->status |= val;
     if (off == S5L_MBX_STATUS_ACK) m->status &= ~val;
 
-    /* AppleMBX+0xe854 programs 0x824..0x83c, writes this kick, waits for bit 6
-     * and acknowledges it synchronously. r365 proved those writes are startup
-     * transfers, not 2D submissions. Bit 10 is therefore raised only by
-     * s5l_mbx_process_2d(), after a decoded packet has moved its pixels. */
-    if (off == S5L_MBX_KICK) m->status |= S5L_MBX_STATUS_DONE;
+    /* AppleMBX+0xe854 programs 0x824..0x83c, writes BACKGROUND_TAG, waits for
+     * EVM_DALLOC and acknowledges it synchronously. r365 proved those writes
+     * are startup transfers, not 2D submissions. 2D_SYNC is therefore raised
+     * only by s5l_mbx_process_2d(), after a decoded packet moved its pixels. */
+    if (off == S5L_MBX_BACKGROUND_TAG)
+        m->status |= S5L_MBX_STATUS_EVM_DALLOC;
 }

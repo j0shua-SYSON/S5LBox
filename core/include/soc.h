@@ -778,10 +778,31 @@ void     s5l_power_write(s5l_power_t *p, uint32_t off, uint32_t val);
  * So 0x12c is a status word and 0x134 is its write-one-to-clear
  * acknowledgement -- which is corroborated by the driver writing 0x7ff to
  * 0x134 during init, i.e. clearing every pending bit before it starts.
+ *
+ * It is also write-one-to-SET. AppleMBX's recovery routine at
+ * 0xc077f3e4..0xc077f428 writes missing ISP, render-complete and EVM-deallocate
+ * bits directly to 0x12c, then reads the accumulated word and acknowledges it
+ * through 0x134. The three writes are consecutive, so replacing the word on
+ * each write would lose two of the events; they must OR into pending status.
+ * r370 caught the old model accepting those writes into reg[] while reads of
+ * 0x12c still returned the separate, unchanged status field.
  */
 #define S5L_MBX_STATUS       0x0000012cu
 #define S5L_MBX_STATUS_ACK   0x00000134u
-#define S5L_MBX_STATUS_DONE  (1u << 6)
+/* Names and bit positions from the PowerVR MBX register definitions used by
+ * the same hardware family. They also match the branches in AppleMBX's ISR at
+ * 0xc07804dc. Keep the names specific: these are independent events, not one
+ * generic completion flag. */
+#define S5L_MBX_STATUS_CMDPROC          (1u << 0)
+#define S5L_MBX_STATUS_RENDER_COMPLETE  (1u << 2)
+#define S5L_MBX_STATUS_ISP              (1u << 3)
+#define S5L_MBX_STATUS_TA_COMPLETE      (1u << 4)
+#define S5L_MBX_STATUS_TA_OVERFLOW      (1u << 5)
+#define S5L_MBX_STATUS_EVM_DALLOC       (1u << 6)
+#define S5L_MBX_STATUS_TA_TIMEOUT       (1u << 7)
+#define S5L_MBX_STATUS_TA_CONTEXT       (1u << 8)
+#define S5L_MBX_STATUS_TA_STREAM_ERROR  (1u << 9)
+#define S5L_MBX_STATUS_2D_SYNC          (1u << 10)
 /*
  * THE 2D COMPLETION, and it is the bit the driver's own interrupt handler
  * tests. AppleMBX+0x804d4 is the ISR, and it reads as:
@@ -799,18 +820,21 @@ void     s5l_power_write(s5l_power_t *p, uint32_t off, uint32_t val);
  * nowhere else, and the recovery diagnostic writing 0x400 to 0x12c is the
  * same bit being cleared.
  *
- * Bit 6 is a different signal and both are real: the submit path at
- * AppleMBX+0xe854 polls 0x12c for bit 6 SYNCHRONOUSLY and acknowledges 0x40,
- * so a completed operation is observable two ways. A kick therefore raises
- * both, which is what the driver is written to expect.
+ * Bit 6 is a different signal and both are real: the startup path at
+ * AppleMBX+0xe854 polls 0x12c for bit 6 SYNCHRONOUSLY and acknowledges 0x40.
+ * r365 disproved the old shortcut that raised both on BACKGROUND_TAG: that
+ * startup write raises EVM_DALLOC, while a decoded 2D packet raises 2D_SYNC
+ * only after its pixels have actually moved.
  */
-#define S5L_MBX_STATUS_2D    (1u << 10)
 /* 0x130 is the interrupt ENABLE. The driver writes its this+0x148 shadow
  * there, and its ISR masks the status with that same shadow, so the line must
  * be gated on it rather than on any pending bit. */
 #define S5L_MBX_INTMASK      0x00000130u
-/* The last register of the kick sequence, so writing it is the "go". */
-#define S5L_MBX_KICK         0x000006d8u
+/* The public register map names 0x6d8 BACKGROUND_TAG. AppleMBX's measured
+ * startup helper writes it last, waits synchronously for EVM_DALLOC, and then
+ * acknowledges that bit. The model preserves that measured coupling without
+ * pretending this register is a generic 2D/3D submission doorbell. */
+#define S5L_MBX_BACKGROUND_TAG 0x000006d8u
 
 /*
  * THE CORE REVISION REGISTER, and the reason AppleMBXDevice::start gave up
@@ -877,7 +901,7 @@ void     s5l_power_write(s5l_power_t *p, uint32_t off, uint32_t val);
 
 typedef struct {
     uint32_t reg[S5L_MBX_SIZE / 4u];
-    uint32_t status;          /* 0x12c; write-one-to-clear via 0x134        */
+    uint32_t status;          /* 0x12c W1S; write-one-to-clear via 0x134   */
     bool     reset_done;      /* set by a reset REQUEST, never self-asserted */
     /*
      * Owned by the machine, exactly as m->ram is, and NOT part of this struct's

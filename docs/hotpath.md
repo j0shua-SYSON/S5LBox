@@ -2410,3 +2410,173 @@ normal r350/r354 checkpoints and is not acceptance evidence:
       SHA-256 24A24F0A440A7F8AD3F56CED76ED935CA19165E459B7A1194D4D54E286413B40
     work/r365-cold-mbx-submit-paths-5600m/post-5600m.bin.mdstate
       SHA-256 172A1C351583EA6D93C19D57A771670E10047CB79AEFA3C54FD7AC586076C82F
+
+### r366: the first packet has a real GART-backed consumer, but cold proof is pending
+
+The GPU addresses are no longer opaque. `AppleMBXMMU::map` at
+`0xc0783570..0xc0783650` writes each physical page base into a table selected
+by the top of the GPU address. Its index arithmetic is:
+
+    chunk    = gpu_va >> 22
+    table_pa = MBX[0x1000 + chunk*4]
+    pte_pa   = table_pa + (((gpu_va >> 12) & 0x3ff) * 4)
+    phys     = PTE[pte_pa] + (gpu_va & 0xfff)
+
+That is eight 4 KiB roots, one per 4 MiB GPU-VA chunk, with 1024 raw physical
+page bases in each root. It is not an inferred page-table shape: the kext's
+store at `0xc0783650` writes the physical address at exactly that computed
+index.
+
+Applying it to r365 resolves the packet rather than merely renaming it. GPU
+source `0x00800080` uses root register `0x1008 = 0x0d9ca000`, PTE 0
+`0x0e283000`, and begins at physical `0x0e283080`. GPU destination
+`0x00897000` uses PTE 0x97 `0x08a1e000`. Across the packet's 0x96000-byte
+320x480 surface, the source has **311,918 nonzero bytes** and all 256 byte
+values; the destination has **zero**. The source is real image data and the
+destination is exactly vram slot 3, not an EDRAM-offset coincidence.
+
+Commit `39b96ae` implements only the format that evidence supports:
+
+- header `0xf0000000`;
+- BGRA8 source descriptor `0x9406xxxx` with measured 0x500-byte stride;
+- source coordinates packed as `_pack2DCtxBlitCopy` does;
+- exact unity scale `0x60800200` and simple-copy mode `0x8000cccc`;
+- a destination rectangle within the measured 320x480 surfaces;
+- all six `0x70000000` terminators.
+
+AppleMBX's helper stores words sequentially, so the sixth terminator is the
+first point at which all sixteen words are known complete. At that store the
+model validates every source and destination PTE and every translated target
+as plain DRAM, stages the whole rectangle, commits destination words through
+the observer-aware machine bus, and only then raises status bit 10. A missing
+late PTE therefore changes zero destination bytes. Unknown formats, strides,
+scales, blends, geometry, unaligned entries and non-DRAM targets receive no
+pixels and no completion. Register `0x6d8` now raises only its measured
+synchronous startup bit 6; it no longer fabricates a 2D completion.
+
+Fast validation is strong but not acceptance:
+
+| check | result |
+|---|---|
+| focused machine/MBX tests | 2/2 pass |
+| full local suite | 55/55 pass |
+| strict MinGW compile | `-Werror -pedantic -Wshadow`, pass |
+| r365 snapshot replay | executed 1; destination nonzero 0 -> 311,918; byte mismatches 0; status 0x400 |
+| exact-SHA hosted core | run 30733981870 green, including strict + ASan/UBSan + Linux/macOS/Windows |
+| exact-SHA iOS build | run 30733981862 green |
+
+The replay uses the real cold snapshot's packet, registers, PTEs and pixels,
+so it proves the copy engine against real machine state. It does **not** prove
+live submission timing, interrupt servicing, later packet formats, a visible
+screen, animation correctness, or frame rate. A fresh cold run is required
+before calling the black-screen defect fixed; that r366 run is intentionally
+being captured separately instead of laundering a post-recovery snapshot into
+acceptance evidence.
+
+### r367-r370: live 2D completion is proved; the display is still black
+
+The last paragraph above is now superseded by a cold run and two checkpoint
+continuations. The conclusion is narrower than hoped: the one decoded 2D copy
+works live, but it copies only the base wallpaper. A separate tiled 3D render
+never executes, so the black-screen bug is **not fixed**.
+
+r366 cold-booted the `39b96ae` consumer to 3.3 B instructions. The complete
+packet was present in the terminal snapshot, yet the model counted zero
+candidates and destination slot 3 stayed zero. r367 continued that state to
+5.6 B, but the ring was not written again. The failed trigger hypothesis was
+the sixth terminator: it is sufficient for a synthetic sequential unit test,
+not the boundary used by the live submitter.
+
+Commit `9f0b42a` traced the ring writes, and r368 measured the exact order:
+
+    ring+0x00 = a0060500       relocation token
+    ring+0x04..0x3c           the remaining fifteen packet words
+    ring+0x00 = f0000000       final header rewrite
+
+Commit `4a4cabc` therefore executes only the measured
+`0xa0060500 -> 0xf0000000` word-zero transition after validating the complete
+body. r369 resumed the r368 pre-submit checkpoint and produced:
+
+- one candidate, one completion, zero rejections, 614,400 bytes copied;
+- destination slot 3 changed from zero to 311,918 nonzero bytes;
+- the destination exactly matched the source across all 614,400 bytes;
+- status bit `0x400` became visible, AppleMBX entered its ISR, stored
+  `2DIdle=1`, and acknowledged the bit.
+
+That is live proof for this one packet format, not a generic PowerVR claim.
+The CLCD output remained visually black: only 384 of 460,800 RGB bytes were
+nonzero. Direct inspection of the copied BGRA surface shows the black lock
+screen wallpaper and Earth image, but no status bar, clock, date, or slider.
+Copying it correctly is necessary and visibly insufficient.
+
+The same r369 state contains a second, real render submission. AppleMBX writes
+`1` to `0x680` (`STARTRENDER`) after programming:
+
+    RGNBASE=00001000  OBJBASE=00014000
+    FBSTART=00897000  FBLINESTRIDE=00000140
+    FBXCLIP=01400000  FBYCLIP=00800010
+
+Both region and object bases are GART virtual addresses, not EDRAM-relative
+offsets. The region stream has 40 columns by 7 rows of tiles covering
+`x=0..320, y=16..128`; every tile points at object list `0x14068`, whose words
+are `60200020 6020002d 61a0007c f0000000`. The referenced object records
+contain coherent screen-space rectangles and texture/colour data. This is not
+an idle register sequence or another plain copy. It is the next renderer that
+must be decoded and executed.
+
+r370 continued the post-copy state to 5.6 B. No second 2D packet appeared and
+the copied destination stayed intact. AppleMBX instead reported:
+
+    2DIdle=1, 3DIdle=0, 3dblit=1
+    CompletedIntStatus=00000000
+
+That moves the measured stall from 2D to 3D; it does not move the screen.
+
+Two public PowerVR MBX register headers remove ambiguity from the interrupt
+and register names. `mbx1defs.h` names bit `0x04` RENDER_COMPLETE, `0x08` ISP,
+`0x10` TA_COMPLETE, `0x40` EVM_DALLOC, and `0x400` 2DSYNC. The companion
+register map names `0x680` STARTRENDER and `0x6d8` BACKGROUND_TAG. These names
+match AppleMBX's code: its submit path clears `3DIdle` then writes STARTRENDER;
+its ISR sets `3DIdle` only after ISP, RENDER_COMPLETE, and EVM_DALLOC have all
+been observed. Sources:
+
+- [PowerVR MBX interrupt definitions](https://github.com/fergy/iPhone_kernel_26/blob/3841858a6bafa3f6a6cc41fd7c114864b31b64a8/drivers/gpu/mbx/mbx1defs.h)
+- [PowerVR MBX register offsets](https://github.com/R0-Developers/YP-R0_Kernel/blob/5beb98d00ae08e758a382b39e31ef3cabb463d26/linux-2.6.24-2.4.2-base/drivers/tinywmr/tinywhimory/mx37_registers.h)
+
+r370 also exposed an independent register-model defect. AppleMBX recovery
+writes missing `0x08`, `0x04`, and `0x40` events directly to status `0x12c`,
+then reads the accumulated word and acknowledges it through `0x134`. The old
+model stored those writes in `reg[]` while status reads came from a separate
+field, so the guest read zero. This source checkpoint models `0x12c` as
+write-one-to-set and `0x134` as write-one-to-clear, with mask-gated IRQ tests.
+That is accurate recovery behaviour; it is **not** a substitute for executing
+the render and cannot be counted as a graphics fix.
+
+The r368 pre-submit trio is the fastest accurate checkpoint for iterating on
+the first live STARTRENDER without paying for another cold boot:
+
+    work/r368-cold-mbx-ring-order-3300m/pre-2900m.bin
+      SHA-256 9AC91432DB59E911E5885B65574AE76A596B2D9402C43AB91A4DE0F42F8D9EFC
+    work/r368-cold-mbx-ring-order-3300m/pre-2900m.bin.mdimage
+      SHA-256 EC8675922B60D36C38FA2DF6FA56096477B8EB53A5AE309C04BECD3C5D2AD9DE
+    work/r368-cold-mbx-ring-order-3300m/pre-2900m.bin.mdstate
+      SHA-256 CFD31092C2954C4BD230E2A7D4FA7EBAE3A74EF433254B5B056D5828E2DB22D2
+
+The r369 post-copy trio is useful for recovery/late-stall inspection:
+
+    work/r369-resume-reloc-trigger-3300m/post-3300m.bin
+      SHA-256 41E8484F6201F27C3B7218809FCAC91E16377E65C31C27DB758A5616BDCF53D0
+    work/r369-resume-reloc-trigger-3300m/post-3300m.bin.mdimage
+      SHA-256 5895ADD3ECFD61F594DB396A7734D2637894C00C1C9E111F92270051698400F2
+    work/r369-resume-reloc-trigger-3300m/post-3300m.bin.mdstate
+      SHA-256 9E04A3550B0EE0A0E7972D01842599FC5506A3D9E90A61E25031F64AEC08F611
+
+Both are diagnostic checkpoints. They make iteration faster without weakening
+the evidence, because the relevant pre-submit/post-copy machine and external
+media state is serialized. They do not replace the final cold boot, real iOS
+app validation, or a measured 30 FPS acceptance run.
+
+Local verification for the status-register checkpoint is 40/40 focused MBX
+assertions, 55/55 full tests, and a clean warnings-as-errors build. Hosted
+exact-SHA results must still be checked after the commit is pushed; local green
+is not being substituted for CI.
