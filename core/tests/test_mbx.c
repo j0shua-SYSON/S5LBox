@@ -1150,6 +1150,28 @@ static void test_later_tiled_status_sprites(void) {
                 0x3f200000u, 0x3f000000u, 0x3e250000u, 0x3c800000u,
             },
         },
+        {
+            .name = "clipped battery tail",
+            .xclip = 0x01400128u, .yclip = 0x00200010u,
+            .tile_x0 = 0x25u, .tile_x1 = 0x27u,
+            .tile_y0 = 1u, .tile_y1 = 1u,
+            .left = 296u, .top = 16u, .width = 21u, .height = 4u,
+            .source = 0x00997000u, .source_row0 = 16u,
+            .source_stride = 0x60u, .source_control = 0x0e040000u,
+            .quad = {
+                0xe0000000u, 0xa2218001u, 0u, 0xcd206c40u,
+                0xa7718000u, 0u, 0xae504ea0u, 0x22250e80u,
+                0x43940000u, 0x41a00000u, 0x43940000u, 0x41800000u,
+                0x439e8000u, 0x41a00000u, 0x439e8000u, 0x41800000u,
+                0u, 0u, 0u, 0u,
+                0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+                0xbf000000u, 0x00000000u, 0x3f200000u, 0x3e940000u,
+                0x3ca00000u, 0xbf000000u, 0x00000000u, 0x3f000000u,
+                0x3e940000u, 0x3c800000u, 0xbf000000u, 0x3f280000u,
+                0x3f200000u, 0x3e9e8000u, 0x3ca00000u, 0xbf000000u,
+                0x3f280000u, 0x3f000000u, 0x3e9e8000u, 0x3c800000u,
+            },
+        },
     };
     for (unsigned i = 0; i < sizeof forms / sizeof forms[0]; i++)
         test_captured_status_form(&forms[i]);

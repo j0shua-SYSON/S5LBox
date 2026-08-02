@@ -140,9 +140,9 @@
 #define MBX_3D_ADDRESS_MASK    0x0003ffffu
 
 /* Later _mbx3DCtxQuadCopyPerspective records and live object streams recover
- * the padlock, `Searching...`, and battery status sprites, plus a clipped
- * padlock redraw. Their texture-control words encode different padded
- * dimensions/strides. Bit 18 is control rather than GPU address bit 18, so
+ * the padlock, `Searching...`, and battery status sprites, plus clipped
+ * padlock and battery redraws. Their texture-control words encode different
+ * padded dimensions/strides. Bit 18 is control rather than GPU address bit 18, so
  * all forms use the same exact 18-bit address field recovered above. */
 
 static uint64_t mbx_rd[MBX_SLOTS];
@@ -1301,6 +1301,27 @@ static const struct mbx_3d_status_form mbx_3d_status_forms[] = {
             0x3e1b0000u, 0x3c800000u, 0xbf000000u, 0x3f200000u,
             0x3f200000u, 0x3e250000u, 0x3ca00000u, 0xbf000000u,
             0x3f200000u, 0x3f000000u, 0x3e250000u, 0x3c800000u,
+        },
+    },
+    {
+        .xclip = 0x01400128u, .yclip = 0x00200010u,
+        .tile_x0 = 0x25u, .tile_x1 = 0x27u,
+        .tile_y0 = 1u, .tile_y1 = 1u,
+        .left = 296u, .top = 16u, .width = 21u, .height = 4u,
+        .source_row0 = 16u,
+        .source_stride = 0x60u, .source_control = 0x0e040000u,
+        .quad = {
+            0xe0000000u, 0xa2218001u, 0u, 0xcd206c40u,
+            0xa7718000u, 0u, 0xae504ea0u, 0x22250e80u,
+            0x43940000u, 0x41a00000u, 0x43940000u, 0x41800000u,
+            0x439e8000u, 0x41a00000u, 0x439e8000u, 0x41800000u,
+            0u, 0u, 0u, 0u,
+            0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+            0xbf000000u, 0x00000000u, 0x3f200000u, 0x3e940000u,
+            0x3ca00000u, 0xbf000000u, 0x00000000u, 0x3f000000u,
+            0x3e940000u, 0x3c800000u, 0xbf000000u, 0x3f280000u,
+            0x3f200000u, 0x3e9e8000u, 0x3ca00000u, 0xbf000000u,
+            0x3f280000u, 0x3f000000u, 0x3e9e8000u, 0x3c800000u,
         },
     },
 };

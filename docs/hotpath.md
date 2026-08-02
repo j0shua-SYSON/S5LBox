@@ -2866,3 +2866,62 @@ object stream was overwritten by the time the 3.5 B snapshot was saved. The fina
 snapshot therefore cannot honestly identify it. The next step is one more temporary
 rejection-dump replay, followed by removal of that instrumentation. Graphics are still
 not fixed; cold-boot and publication-cadence acceptance remain pending.
+
+### r381-r382: the 3.5 B checkpoint path is rejection- and recovery-free
+
+r381 used the same temporary read-only dump procedure for r380's single overwritten
+rejection, then removed it and verified tracked MBX source was clean. The captured form
+is the battery analogue of the padlock tail: framebuffer clip
+`x=296..320, y=16..32`, tiles `x=37..39, y=1`, destination rectangle
+`x=296..317, y=16..20`, and source rows 16..19 from the existing battery surface at
+GPU `0x00997000`. Its complete object differs from the full 21-by-20 battery form in the
+clip, one tile row, lower boundary/geometry, and vertical source coordinates.
+
+The renderer now recognizes only that literal 21-by-4 descriptor. The shared status-form
+path validates its clip, three tiles, boundary, all non-address object words, source and
+target controls, GART spans, premultiplied pixels, and source-row offset before staging
+and committing 84 pixels. The focused suite is 102/102; all 55 repository tests pass;
+the warnings-as-errors build passes; and direct `-pedantic -Wformat=2 -Wshadow`
+compilation of implementation and tests passes.
+
+r382 resumed the trusted cold-derived r368 pre-2.9 B checkpoint to 3.5 B in 190.642
+seconds and exited zero. This time every observed hardware-path operation completed:
+
+| measured result | r382 |
+|---|---:|
+| 2D packets completed / rejected | 84 / 0 |
+| 2D bytes committed | 3,364,632 |
+| 3D renders completed / rejected | 15 / 0 |
+| 3D pixels blended | 97,172 |
+| `Graphics Recovery Event` lines | 0 |
+| process exit | 0 |
+
+The formerly rejected battery tail completed exactly 84 pixels. There is no recovery
+record to reinterpret: `Graphics Recovery Event`, `2DIdle`, and recovery
+`CompletedIntStatus` are absent from the r382 guest log. This clears the measured
+checkpoint recovery boundary through 3.5 B retired instructions.
+
+The visible CLCD frame is byte-identical to r380, remains coherent, and still contains
+92,145 nonblack pixels / 273,206 nonzero RGB bytes:
+
+    work/r382-resume-clipped-battery-3500m/w.img.screen.ppm
+      SHA-256 F61FA4ABD7C246B10D7A04B42167DFA0DD73E333B00227B7B2A01EFCC80766DB
+    work/r382-resume-clipped-battery-3500m/scanout.png
+      SHA-256 C72433BB87A2D17C045C8005BFA19A3556CDE2C2E09D6FCBFB79DED0D2C80E2B
+
+r382's post-run checkpoint preserves the new no-recovery guest path:
+
+    post-3500m.bin
+      SHA-256 95DBA9359A8CEE989981CAF0763257D6C4F3F95BDF1824E629B557972A405209
+    post-3500m.bin.mdimage
+      SHA-256 B22766BD9F123AB41C8FEDADACF1F79CCF977FB7F71FD90384A2C085ED896AC4
+    post-3500m.bin.mdstate
+      SHA-256 9E04A3550B0EE0A0E7972D01842599FC5506A3D9E90A61E25031F64AEC08F611
+
+This is the strongest graphics result so far, but it is still not the project's final
+graphics or performance acceptance. r382 restored a cold-derived checkpoint, so a new
+instruction-zero cold boot must reproduce the rejection-free path. It also measured
+completed packets/renders, not guest frame-publication cadence; no FPS number, especially
+no 30 FPS claim, follows from these counters. The next phase is cold acceptance plus an
+explicit cadence measurement, after this source checkpoint is pushed and exact-SHA CI is
+green.
