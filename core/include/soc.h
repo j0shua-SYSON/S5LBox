@@ -869,6 +869,11 @@ void     s5l_power_write(s5l_power_t *p, uint32_t off, uint32_t val);
  */
 #define S5L_MBX_APERTURE     0x01000000u   /* /arm-io/mbx reg size, 16 MB */
 #define S5L_MBX_EDRAM_SIZE   (S5L_MBX_APERTURE - S5L_MBX_SIZE)
+/* AppleMBX+0x1188 copies submitted 2D words into this aperture-relative
+ * 64 KiB ring. These are public because the machine bus must preserve the old
+ * ring word across a store without adding a read to unrelated EDRAM traffic. */
+#define S5L_MBX_2D_RING_BASE 0x00a00000u
+#define S5L_MBX_2D_RING_SIZE 0x00010000u
 
 typedef struct {
     uint32_t reg[S5L_MBX_SIZE / 4u];
@@ -887,12 +892,15 @@ uint32_t s5l_mbx_read(s5l_mbx_t *m, uint32_t off);
 void     s5l_mbx_write(s5l_mbx_t *m, uint32_t off, uint32_t val);
 
 /* Attempt the one decoded MBX2D packet after the CPU has written an EDRAM
- * word. The machine supplies its bus because the MBX struct deliberately owns
- * no host pointers except EDRAM, and destination writes must remain visible to
- * a frontend bus observer. Returns true only after validated pixels moved and
- * bit-10 completion was raised. */
+ * word. `previous` is the word value that was present before that store: the
+ * measured submitter copies a relocation token first and rewrites it to the
+ * final packet header only after the body is complete. The machine supplies
+ * its bus because the MBX struct deliberately owns no host pointers except
+ * EDRAM, and destination writes must remain visible to a frontend bus
+ * observer. Returns true only after validated pixels moved and bit-10
+ * completion was raised. */
 bool     s5l_mbx_process_2d(s5l_mbx_t *m, const arm_bus_t *bus,
-                            uint32_t written_off);
+                            uint32_t written_off, uint32_t previous);
 
 /*
  * THE LINE THE DEVICE TREE SAYS THIS DEVICE HAS. /arm-io/mbx carries

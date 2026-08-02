@@ -115,6 +115,36 @@ static void test_translated_copy_and_completion_boundary(void) {
     m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x400u);
     CHECK(!s5l_mbx_irq(&m.mbx), "2D acknowledge did not lower IRQ");
 
+    /* The exact live order recovered in r368 is not the simple path above.
+     * AppleMBX copies a relocation token at the head, copies the remaining
+     * fifteen words, then rewrites only the head to its final opcode. The
+     * terminators must not execute the token-headed packet; the rewrite must. */
+    for (unsigned i = 0; i < 4; i++) {
+        m.bus.write32(m.bus.ctx, dst0 + i * 4u, 0u);
+        m.bus.write32(m.bus.ctx, dst1 + i * 4u, 0u);
+    }
+    uint32_t relocating[16];
+    memcpy(relocating, PACKET, sizeof relocating);
+    relocating[0] = 0xa0060500u;
+    write_packet(&m, RING + 0x40u, relocating, 16u);
+    CHECK(m.bus.read32(m.bus.ctx, dst0) == 0u &&
+          m.bus.read32(m.bus.ctx, dst1) == 0u,
+          "relocation-token terminators executed before the header rewrite");
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
+          "relocation-token packet raised completion before final header");
+
+    m.bus.write32(m.bus.ctx, MBX_BASE + RING + 0x40u, PACKET[0]);
+    for (unsigned i = 0; i < 4; i++) {
+        CHECK(m.bus.read32(m.bus.ctx, dst0 + i * 4u) == row0[i],
+              "relocated row 0 pixel %u did not cross the GART", i);
+        CHECK(m.bus.read32(m.bus.ctx, dst1 + i * 4u) == row1[i],
+              "relocated row 1 pixel %u did not cross the GART", i);
+    }
+    status = m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS);
+    CHECK((status & 0x400u) != 0u,
+          "final header rewrite did not raise 2D completion: %08x", status);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x400u);
+
     s5l8900_free(&m);
 }
 

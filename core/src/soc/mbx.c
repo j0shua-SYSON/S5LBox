@@ -78,11 +78,11 @@
 #define MBX_RING       64u
 
 /* AppleMBX+0x1188 copies submitted words into this 64 KiB hardware ring. */
-#define MBX_2D_RING_BASE       0x00a00000u
-#define MBX_2D_RING_SIZE       0x00010000u
 #define MBX_2D_PACKET_WORDS    16u
 #define MBX_2D_PACKET_BYTES    (MBX_2D_PACKET_WORDS * 4u)
 #define MBX_2D_END             0x70000000u
+#define MBX_2D_RELOC_HEADER    0xa0060500u
+#define MBX_2D_FINAL_HEADER    0xf0000000u
 
 /* The first proved packet is a 320-pixel BGRA8 surface. There is no decoded
  * destination-stride field in its post-relocation packet, so widening this is
@@ -380,15 +380,39 @@ static bool mbx_execute_simple_copy(s5l_mbx_t *m, const arm_bus_t *bus,
 }
 
 bool s5l_mbx_process_2d(s5l_mbx_t *m, const arm_bus_t *bus,
-                        uint32_t written_off) {
-    if (!m || !m->edram ||
-        written_off < MBX_2D_RING_BASE + MBX_2D_PACKET_BYTES - 4u ||
-        written_off >= MBX_2D_RING_BASE + MBX_2D_RING_SIZE ||
-        mbx_edram_word(m, written_off) != MBX_2D_END)
-        return false;
+                        uint32_t written_off, uint32_t previous) {
+    if (!m || !m->edram) return false;
 
-    uint32_t packet_off = written_off - (MBX_2D_PACKET_BYTES - 4u);
-    if (mbx_edram_word(m, packet_off) != 0xf0000000u) return false;
+    uint32_t packet_off;
+    uint32_t written = 0u;
+    if (written_off >= S5L_MBX_2D_RING_BASE + MBX_2D_PACKET_BYTES - 4u &&
+        written_off < S5L_MBX_2D_RING_BASE + S5L_MBX_2D_RING_SIZE) {
+        written = mbx_edram_word(m, written_off);
+    }
+    if (written == MBX_2D_END) {
+        /* A producer that copies an already-relocated packet completes it at
+         * the last word. This is the original focused-test path. */
+        packet_off = written_off - (MBX_2D_PACKET_BYTES - 4u);
+        if (mbx_edram_word(m, packet_off) != MBX_2D_FINAL_HEADER)
+            return false;
+    } else if (written_off >= S5L_MBX_2D_RING_BASE &&
+               written_off <= S5L_MBX_2D_RING_BASE + S5L_MBX_2D_RING_SIZE -
+                                  MBX_2D_PACKET_BYTES &&
+               (written_off & 3u) == 0u &&
+               previous == MBX_2D_RELOC_HEADER &&
+               mbx_edram_word(m, written_off) == MBX_2D_FINAL_HEADER) {
+        /* r368 measured the real kernel order: 0xa0060500 at word zero,
+         * complete words 1..15, then a rewrite to 0xf0000000. Requiring that
+         * exact old value prevents a final header written first over a stale
+         * ring body from executing prematurely. */
+        packet_off = written_off;
+        for (unsigned i = 10u; i < MBX_2D_PACKET_WORDS; i++) {
+            if (mbx_edram_word(m, packet_off + i * 4u) != MBX_2D_END)
+                return false;
+        }
+    } else {
+        return false;
+    }
 
     mbx_2d_candidates++;
     const char *why = "unknown rejection";
@@ -397,7 +421,7 @@ bool s5l_mbx_process_2d(s5l_mbx_t *m, const arm_bus_t *bus,
         mbx_2d_rejected++;
         if (mbx_trace_state == 1)
             fprintf(stderr, "MBX2D reject ring+0x%04x: %s\n",
-                    packet_off - MBX_2D_RING_BASE, why);
+                    packet_off - S5L_MBX_2D_RING_BASE, why);
         return false;
     }
 
@@ -408,7 +432,7 @@ bool s5l_mbx_process_2d(s5l_mbx_t *m, const arm_bus_t *bus,
     mbx_2d_bytes += copied;
     if (mbx_trace_state == 1)
         fprintf(stderr, "MBX2D complete ring+0x%04x: %u bytes\n",
-                packet_off - MBX_2D_RING_BASE, copied);
+                packet_off - S5L_MBX_2D_RING_BASE, copied);
     return true;
 }
 
@@ -525,11 +549,11 @@ void s5l_mbx_write(s5l_mbx_t *m, uint32_t off, uint32_t val) {
          * opt-in trace is enabled. r366 proved that a complete packet can be
          * present in a checkpoint while the execution trigger reports zero
          * candidates; exact offset/value order is the missing fact. */
-        if (off >= MBX_2D_RING_BASE &&
-            off < MBX_2D_RING_BASE + MBX_2D_RING_SIZE &&
+        if (off >= S5L_MBX_2D_RING_BASE &&
+            off < S5L_MBX_2D_RING_BASE + S5L_MBX_2D_RING_SIZE &&
             mbx_trace_enabled()) {
             fprintf(stderr, "MBX2D ring write +0x%04x = 0x%08x\n",
-                    off - MBX_2D_RING_BASE, val);
+                    off - S5L_MBX_2D_RING_BASE, val);
             fflush(stderr);
         }
         return;
