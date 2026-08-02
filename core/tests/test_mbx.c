@@ -256,6 +256,12 @@ static uint32_t test_gpu_read32(s5l8900_t *m, uint32_t gpu) {
     return m->bus.read32(m->bus.ctx, test_gpu_pa(m, gpu));
 }
 
+static uint32_t test_float_word(float value) {
+    uint32_t word = 0u;
+    memcpy(&word, &value, sizeof word);
+    return word;
+}
+
 static uint32_t test_over(uint32_t dst, uint32_t src) {
     uint32_t inv = 256u - (src >> 24);
     uint32_t out = 0u;
@@ -1194,22 +1200,277 @@ static void test_second_tiled_status_glyph(void) {
     s5l8900_free(&m);
 }
 
+static void test_write_opaque_solid_quad(s5l8900_t *m,
+                                         uint32_t region,
+                                         uint32_t object,
+                                         uint32_t target,
+                                         uint32_t solid_offset,
+                                         float x0, float y0,
+                                         float x1, float y1,
+                                         uint32_t colour) {
+    for (uint32_t off = 0u; off < 0x700u; off += 4u)
+        test_gpu_write32(m, object + off, 0u);
+
+    static const uint32_t background[26] = {
+        0xe0000000u, 0xa7718000u, 0u, 0xd6887610u,
+        0x22220e80u, 0u, 0u, 0x45000000u,
+        0u, 0u, 0x45000000u, 0x3f800000u,
+        0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+        0x3f800000u, 0u, 0u, 0u,
+        0u, 0x40000000u, 0u, 0u,
+        0u, 0x40000000u,
+    };
+    for (unsigned i = 0; i < 26u; i++) {
+        uint32_t value = i == 2u
+            ? 0x0e500000u | (target >> 7) : background[i];
+        test_gpu_write32(m, object + i * 4u, value);
+    }
+
+    uint32_t list = object + 0x68u;
+    static const uint32_t fixed_list[2] = {0x60200020u, 0x6020002du};
+    test_gpu_write32(m, list, fixed_list[0]);
+    test_gpu_write32(m, list + 4u, fixed_list[1]);
+    test_gpu_write32(m, list + 8u,
+                     0x61200000u | (solid_offset / 4u));
+    test_gpu_write32(m, list + 12u, 0xf0000000u);
+
+    static const struct {
+        uint16_t off;
+        uint32_t value;
+    } boundary_fixed[] = {
+        {0x080u, 0x22206f80u}, {0x088u, 0x45800000u},
+        {0x094u, 0x45800000u}, {0x098u, 0x45800000u},
+        {0x09cu, 0x45800000u}, {0x0b4u, 0x22207f80u},
+        {0x0e8u, 0xe0000000u}, {0x0f4u, 0xa6887610u},
+        {0x0f8u, 0x22220e80u}, {0x12cu, 0x3f800000u},
+        {0x130u, 0x3f800000u}, {0x134u, 0x3f800000u},
+        {0x138u, 0x3f800000u}, {0x198u, 0xe0000000u},
+        {0x19cu, 0x22200e80u}, {0x1d0u, 0x3f800000u},
+        {0x1d4u, 0x3f800000u}, {0x1d8u, 0x3f800000u},
+        {0x1dcu, 0x3f800000u},
+    };
+    for (unsigned i = 0;
+         i < sizeof boundary_fixed / sizeof boundary_fixed[0]; i++)
+        test_gpu_write32(m, object + boundary_fixed[i].off,
+                         boundary_fixed[i].value);
+    const float vertices[8] = {
+        x0, y1, x0, y0, x1, y1, x1, y0,
+    };
+    for (unsigned i = 0; i < 8u; i++)
+        test_gpu_write32(m, object + 0x0b8u + i * 4u,
+                         test_float_word(vertices[i]));
+
+    uint32_t main[33] = {
+        [0] = 0xe0000000u,
+        [1] = 0xa7718000u,
+        [2] = 0x0e500000u | (target >> 7),
+        [3] = 0xa6104620u,
+        [4] = 0x22220e80u,
+        [17] = 0x3f800000u,
+        [18] = 0x3f800000u,
+        [19] = 0x3f800000u,
+        [20] = 0x3f800000u,
+    };
+    for (unsigned i = 0; i < 8u; i++) main[5u + i] =
+        test_float_word(vertices[i]);
+    for (unsigned vertex = 0; vertex < 4u; vertex++) {
+        unsigned attribute = 21u + vertex * 3u;
+        main[attribute + 1u] = test_float_word(
+            vertices[vertex * 2u] / 1024.0f);
+        main[attribute + 2u] = test_float_word(
+            vertices[vertex * 2u + 1u] / 1024.0f);
+    }
+    for (unsigned i = 0; i < 33u; i++)
+        test_gpu_write32(m, object + solid_offset + i * 4u, main[i]);
+
+    static const uint32_t parameter_controls[4] = {
+        0x22620ea0u, 0x46622ea0u, 0x66622ea0u, 0x82622ea0u
+    };
+    for (unsigned record = 0; record < 4u; record++) {
+        uint32_t base = object + solid_offset +
+                        (record + 1u) * 33u * 4u;
+        for (unsigned i = 0; i < 33u; i++) {
+            uint32_t value = 0u;
+            if (i == 0u) value = 0xe0000000u;
+            else if (i == 3u) value = 0x86084610u;
+            else if (i == 4u) value = parameter_controls[record];
+            else if (i >= 17u && i <= 20u) value = 0x3f800000u;
+            else if (i >= 21u && (i - 21u) % 3u == 0u) value = colour;
+            test_gpu_write32(m, base + i * 4u, value);
+        }
+    }
+
+    const float lower_bias = 0.468505859375f;
+    const float upper_bias = 0.531494140625f;
+    uint32_t left = (uint32_t)(x0 + lower_bias);
+    uint32_t top = (uint32_t)(y0 + lower_bias);
+    uint32_t right = (uint32_t)(x1 + upper_bias);
+    uint32_t bottom = (uint32_t)(y1 + upper_bias);
+    uint32_t clip_left = left & ~7u;
+    uint32_t clip_right = (right + 7u) & ~7u;
+    uint32_t clip_top = top & ~15u;
+    uint32_t clip_bottom = (bottom + 15u) & ~15u;
+    uint32_t tile_x0 = clip_left / 8u;
+    uint32_t tile_x1 = clip_right / 8u - 1u;
+    uint32_t tile_y0 = clip_top / 16u;
+    uint32_t tile_y1 = clip_bottom / 16u - 1u;
+    uint32_t tile_count = (tile_x1 - tile_x0 + 1u) *
+                          (tile_y1 - tile_y0 + 1u);
+    uint32_t tile_index = 0u;
+    for (uint32_t y = tile_y0; y <= tile_y1; y++) {
+        for (uint32_t x = tile_x0; x <= tile_x1; x++) {
+            uint32_t code = (y << 8) | x;
+            if (tile_index + 1u == tile_count) code |= 0x80000000u;
+            test_gpu_write32(m, region + tile_index * 8u, code);
+            test_gpu_write32(m, region + tile_index * 8u + 4u, list);
+            tile_index++;
+        }
+    }
+
+    m->bus.write32(m->bus.ctx, MBX_BASE + REG_RGNBASE, region);
+    m->bus.write32(m->bus.ctx, MBX_BASE + REG_OBJBASE, object);
+    m->bus.write32(m->bus.ctx, MBX_BASE + REG_PIXSAMP, 0x00020007u);
+    m->bus.write32(m->bus.ctx, MBX_BASE + REG_FBCTL, 6u);
+    m->bus.write32(m->bus.ctx, MBX_BASE + REG_FBXCLIP,
+                   (clip_right << 16) | clip_left);
+    m->bus.write32(m->bus.ctx, MBX_BASE + REG_FBYCLIP,
+                   (clip_bottom << 16) | clip_top);
+    m->bus.write32(m->bus.ctx, MBX_BASE + REG_FBSTART, target);
+    m->bus.write32(m->bus.ctx, MBX_BASE + REG_FBSTRIDE, 320u);
+}
+
+static void test_pointer_selected_opaque_solid_quad(void) {
+    enum { TARGET_STRIDE = 0x500u };
+    const uint32_t table0 = 0x08003000u;
+    const uint32_t table2 = 0x08004000u;
+    const uint32_t region = 0x00001000u;
+    const uint32_t object = 0x00014000u;
+    const uint32_t target = 0x00a41000u;
+    const uint32_t region_pa = 0x08010000u;
+    const uint32_t object_pa = 0x08014000u;
+    const uint32_t target_pa = 0x08040000u;
+    const uint32_t target_page0 = target & ~0xfffu;
+
+    s5l8900_t m;
+    CHECK(s5l8900_init(&m, RAM_BASE, RAM_SIZE), "solid-quad machine init failed");
+    if (!m.ram) return;
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_GART0, table0);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_GART2, table2);
+    test_map_gpu_page(&m, table0, region, region_pa);
+    test_map_gpu_page(&m, table0, object, object_pa);
+    for (uint32_t page = target_page0;
+         page < target_page0 + 320u * 480u * 4u; page += 0x1000u)
+        test_map_gpu_page(&m, table2, page,
+                          target_pa + (page - target_page0));
+
+    /* Exact r414 form.  The poisoned +0x1f0 texture is stale by construction;
+     * only the 0x612... pointer-selected colour object at +0x2a0 may execute. */
+    test_write_opaque_solid_quad(&m, region, object, target, 0x2a0u,
+                                 159.0f, 239.0f, 161.0f, 241.0f,
+                                 0xffffffffu);
+    for (unsigned i = 0; i < 44u; i++)
+        test_gpu_write32(&m, object + 0x1f0u + i * 4u,
+                         0xdead0000u + i);
+    for (uint32_t y = 239u; y < 241u; y++)
+        for (uint32_t x = 159u; x < 161u; x++)
+            test_gpu_write32(&m, target + y * TARGET_STRIDE + x * 4u,
+                             0xff102030u);
+    uint32_t outside = target + 239u * TARGET_STRIDE + 158u * 4u;
+    test_gpu_write32(&m, outside, 0xff123456u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
+    uint32_t mismatches = 0u;
+    for (uint32_t y = 239u; y < 241u; y++)
+        for (uint32_t x = 159u; x < 161u; x++)
+            mismatches += test_gpu_read32(
+                &m, target + y * TARGET_STRIDE + x * 4u) != 0xffffffffu;
+    CHECK(mismatches == 0u,
+          "r414 pointer-selected solid quad mismatched %u pixels", mismatches);
+    CHECK(test_gpu_read32(&m, outside) == 0xff123456u,
+          "r414 solid quad changed a pixel outside its rectangle");
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0x4cu,
+          "r414 solid quad did not raise all three 3D events");
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x4cu);
+
+    /* A deliberately synthetic second address, size, position and colour
+     * proves that neither 0xa8 nor the centre pixel rectangle is a whitelist. */
+    test_write_opaque_solid_quad(&m, region, object, target, 0x300u,
+                                 23.0f, 33.0f, 47.0f, 41.0f,
+                                 0xff336699u);
+    for (uint32_t y = 33u; y < 41u; y++)
+        for (uint32_t x = 23u; x < 47u; x++)
+            test_gpu_write32(&m, target + y * TARGET_STRIDE + x * 4u,
+                             0xff102030u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
+    mismatches = 0u;
+    for (uint32_t y = 33u; y < 41u; y++)
+        for (uint32_t x = 23u; x < 47u; x++)
+            mismatches += test_gpu_read32(
+                &m, target + y * TARGET_STRIDE + x * 4u) != 0xff336699u;
+    CHECK(mismatches == 0u,
+          "synthetic pointer-selected solid quad mismatched %u pixels",
+          mismatches);
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0x4cu,
+          "synthetic solid quad did not complete");
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x4cu);
+
+    uint32_t first = target + 33u * TARGET_STRIDE + 23u * 4u;
+    test_gpu_write32(&m, first, 0xffabcdefu);
+    uint32_t normalized = object + 0x300u + 22u * 4u;
+    uint32_t normalized_value = test_gpu_read32(&m, normalized);
+    test_gpu_write32(&m, normalized, normalized_value ^ 1u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
+    CHECK(test_gpu_read32(&m, first) == 0xffabcdefu &&
+          m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
+          "normalized-coordinate mutation was not rejected atomically");
+    test_gpu_write32(&m, normalized, normalized_value);
+
+    uint32_t late_colour = object + 0x300u + 4u * 33u * 4u + 30u * 4u;
+    test_gpu_write32(&m, late_colour, 0xff336698u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
+    CHECK(test_gpu_read32(&m, first) == 0xffabcdefu &&
+          m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
+          "late solid-parameter mutation was not rejected atomically");
+    test_gpu_write32(&m, late_colour, 0xff336699u);
+
+    test_write_opaque_solid_quad(&m, region, object, target, 0x300u,
+                                 23.0f, 33.0f, 47.0f, 41.0f,
+                                 0x80332211u);
+    test_gpu_write32(&m, first, 0xffabcdefu);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
+    CHECK(test_gpu_read32(&m, first) == 0xffabcdefu &&
+          m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
+          "unproven translucent solid colour was not rejected atomically");
+
+    test_write_opaque_solid_quad(&m, region, object, target, 0x300u,
+                                 23.0f, 33.0f, 47.0f, 41.0f,
+                                 0xff336699u);
+    test_gpu_write32(&m, first, 0xffabcdefu);
+    uint32_t last = target + 40u * TARGET_STRIDE + 46u * 4u;
+    uint32_t late_page = last & ~0xfffu;
+    uint32_t late_entry = table2 + (((late_page >> 12) & 0x3ffu) * 4u);
+    m.bus.write32(m.bus.ctx, late_entry, 0u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
+    CHECK(test_gpu_read32(&m, first) == 0xffabcdefu &&
+          m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
+          "late missing solid-quad PTE left a partial fill or completion");
+    test_map_gpu_page(&m, table2, late_page,
+                      target_pa + (late_page - target_page0));
+
+    s5l8900_free(&m);
+}
+
 struct mbx_test_status_form {
     const char *name;
     uint32_t xclip, yclip;
     uint32_t target;
-    uint32_t blend_surface;
-    uint32_t list_word;
+    bool semantic_sprite;
     bool variable_vertex_alpha;
-    bool has_quad_variant;
     bool boundary_override;
-    bool source_must_be_zero;
     uint32_t tile_x0, tile_x1, tile_y0, tile_y1;
     uint32_t left, top, width, height;
-    uint32_t source, source_row0, source_stride, source_control;
+    uint32_t source, source_x0, source_row0, source_stride, source_control;
     uint32_t boundary[8];
     uint32_t quad[44];
-    uint32_t quad_variant[44];
 };
 
 static void test_captured_status_form(const struct mbx_test_status_form *form) {
@@ -1224,9 +1485,6 @@ static void test_captured_status_form(const struct mbx_test_status_form *form) {
     const uint32_t object_pa = 0x08014000u;
     const uint32_t source_pa = 0x08020000u;
     const uint32_t target_pa = 0x080c0000u;
-    const uint32_t blend_pa = 0x08160000u;
-    const uint32_t blend_surface = form->blend_surface
-        ? form->blend_surface : target;
     const uint32_t tile_count =
         (form->tile_x1 - form->tile_x0 + 1u) *
         (form->tile_y1 - form->tile_y0 + 1u);
@@ -1250,7 +1508,7 @@ static void test_captured_status_form(const struct mbx_test_status_form *form) {
     uint32_t source_last = form->source +
                            (form->source_row0 + form->height - 1u) *
                                form->source_stride +
-                           form->width * 4u - 1u;
+                           (form->source_x0 + form->width) * 4u - 1u;
     for (uint32_t page = source_page0; page <= (source_last & ~0xfffu);
          page += 0x1000u) {
         uint32_t table = (page >> 22) == 2u ? table2 : table3;
@@ -1267,19 +1525,6 @@ static void test_captured_status_form(const struct mbx_test_status_form *form) {
         test_map_gpu_page(&m, table, page,
                           target_pa + (page - target_page0));
     }
-    if (blend_surface != target) {
-        uint32_t blend_page0 = blend_surface & ~0xfffu;
-        uint32_t blend_last = blend_surface +
-                              (form->top + form->height - 1u) * TARGET_STRIDE +
-                              (form->left + form->width) * 4u - 1u;
-        for (uint32_t page = blend_page0; page <= (blend_last & ~0xfffu);
-             page += 0x1000u) {
-            uint32_t table = (page >> 22) == 2u ? table2 : table3;
-            test_map_gpu_page(&m, table, page,
-                              blend_pa + (page - blend_page0));
-        }
-    }
-
     uint32_t list = object + 0x68u;
     uint32_t tile_index = 0u;
     for (uint32_t y = form->tile_y0; y <= form->tile_y1; y++) {
@@ -1311,9 +1556,7 @@ static void test_captured_status_form(const struct mbx_test_status_form *form) {
           "%s region fixture has %u mismatched words",
           form->name, region_mismatches);
     const uint32_t list_words[4] = {
-        0x60200020u, 0x6020002du,
-        form->list_word ? form->list_word : 0x61a0007cu,
-        0xf0000000u
+        0x60200020u, 0x6020002du, 0x61a0007cu, 0xf0000000u
     };
     for (unsigned i = 0; i < 4u; i++)
         test_gpu_write32(&m, list + i * 4u, list_words[i]);
@@ -1357,7 +1600,7 @@ static void test_captured_status_form(const struct mbx_test_status_form *form) {
     for (unsigned i = 0; i < 44u; i++) {
         uint32_t value = form->quad[i];
         if (i == 2u) value = form->source_control | (form->source >> 7);
-        if (i == 5u) value = 0x0e500000u | (blend_surface >> 7);
+        if (i == 5u) value = 0x0e500000u | (target >> 7);
         test_gpu_write32(&m, object + 0x1f0u + i * 4u, value);
     }
 
@@ -1377,25 +1620,19 @@ static void test_captured_status_form(const struct mbx_test_status_form *form) {
     for (uint32_t y = 0; y < form->height; y++) {
         for (uint32_t x = 0; x < form->width; x++) {
             uint32_t alpha = 0x40u + ((x * 11u + y * 7u) & 0xbfu);
-            uint32_t src = form->source_must_be_zero ? 0u :
-                (alpha << 24) | ((alpha * 3u / 4u) << 16) |
+            uint32_t src = (alpha << 24) |
+                ((alpha * 3u / 4u) << 16) |
                 ((alpha / 2u) << 8) | (alpha / 4u);
             uint32_t dst = 0xff102030u + y * 0x00010101u + x;
-            uint32_t background = blend_surface == target ? dst :
-                0xff405060u + y * 0x00010101u + x;
             test_gpu_write32(&m,
                 form->source + (form->source_row0 + y) *
-                    form->source_stride + x * 4u, src);
+                    form->source_stride + (form->source_x0 + x) * 4u, src);
             test_gpu_write32(&m,
                 target + (form->top + y) * TARGET_STRIDE +
                     (form->left + x) * 4u, dst);
-            if (blend_surface != target)
-                test_gpu_write32(&m,
-                    blend_surface + (form->top + y) * TARGET_STRIDE +
-                        (form->left + x) * 4u, background);
             uint32_t modulated = test_modulate_vertex_alpha(
                 src, form->quad[24] >> 24);
-            expected[y * form->width + x] = test_over(background, modulated);
+            expected[y * form->width + x] = test_over(dst, modulated);
         }
     }
     bool before_below = form->left == 0u;
@@ -1438,55 +1675,6 @@ static void test_captured_status_form(const struct mbx_test_status_form *form) {
 
     m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x4cu);
     uint32_t first = target + form->top * TARGET_STRIDE + form->left * 4u;
-    if (form->has_quad_variant) {
-        CHECK(form->source_must_be_zero && blend_surface != target,
-              "%s variant fixture cannot verify its pixels safely", form->name);
-        for (unsigned i = 0; i < 44u; i++) {
-            uint32_t value = form->quad_variant[i];
-            if (i == 2u)
-                value = form->source_control | (form->source >> 7);
-            if (i == 5u)
-                value = 0x0e500000u | (blend_surface >> 7);
-            test_gpu_write32(&m, object + 0x1f0u + i * 4u, value);
-        }
-        test_gpu_write32(&m, first, 0x89abcdefu);
-        m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
-        CHECK(test_gpu_read32(&m, first) == expected[0],
-              "%s captured quad variant rendered the wrong pixel", form->name);
-        CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0x4cu,
-              "%s captured quad variant did not complete", form->name);
-        m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x4cu);
-
-        unsigned differing_words = 0u;
-        unsigned mixed_word = 44u;
-        for (unsigned i = 0; i < 44u; i++) {
-            if (i != 2u && i != 5u &&
-                form->quad[i] != form->quad_variant[i]) {
-                if (mixed_word == 44u) mixed_word = i;
-                differing_words++;
-            }
-        }
-        CHECK(differing_words > 1u,
-              "%s quad variants do not have a testable mixture", form->name);
-        if (mixed_word < 44u)
-            test_gpu_write32(&m, object + 0x1f0u + mixed_word * 4u,
-                             form->quad[mixed_word]);
-        test_gpu_write32(&m, first, 0x89abcdefu);
-        m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
-        CHECK(test_gpu_read32(&m, first) == 0x89abcdefu,
-              "%s mixed quad variants changed the destination", form->name);
-        CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
-              "%s mixed quad variants raised completion", form->name);
-
-        for (unsigned i = 0; i < 44u; i++) {
-            uint32_t value = form->quad[i];
-            if (i == 2u)
-                value = form->source_control | (form->source >> 7);
-            if (i == 5u)
-                value = 0x0e500000u | (blend_surface >> 7);
-            test_gpu_write32(&m, object + 0x1f0u + i * 4u, value);
-        }
-    }
     if (form->variable_vertex_alpha) {
         test_gpu_write32(&m, first, 0x89abcdefu);
         test_gpu_write32(&m, object + 0x264u, form->quad[29] ^ 0x01000000u);
@@ -1505,23 +1693,7 @@ static void test_captured_status_form(const struct mbx_test_status_form *form) {
               "%s vertex colour bits raised completion", form->name);
         test_gpu_write32(&m, object + 0x250u, form->quad[24]);
     }
-    if (form->source_must_be_zero) {
-        test_gpu_write32(&m, first, 0x89abcdefu);
-        uint32_t first_source = form->source +
-                                form->source_row0 * form->source_stride;
-        test_gpu_write32(&m, first_source, 0x01010101u);
-        m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
-        CHECK(test_gpu_read32(&m, first) == 0x89abcdefu,
-              "%s nonzero transparent source changed the destination",
-              form->name);
-        CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
-              "%s nonzero transparent source raised completion", form->name);
-        test_gpu_write32(&m, first_source, 0u);
-    }
-
-    if ((form->quad[3] == 0xa6884710u ||
-         form->quad[3] == 0xcd206c40u) &&
-        (form->source_control & 0x80000000u)) {
+    if (form->semantic_sprite) {
         uint32_t word_address = object + 0x1f0u + 27u * 4u;
         uint32_t saved_word = test_gpu_read32(&m, word_address);
         test_gpu_write32(&m, first, 0x89abcdefu);
@@ -1590,8 +1762,8 @@ static void test_captured_status_form(const struct mbx_test_status_form *form) {
         test_gpu_write32(&m, region, first_region_word);
 
         uint32_t last_source = form->source +
-            (form->height - 1u) * form->source_stride +
-            (form->width - 1u) * 4u;
+            (form->source_row0 + form->height - 1u) * form->source_stride +
+            (form->source_x0 + form->width - 1u) * 4u;
         uint32_t last_destination = target +
             (form->top + form->height - 1u) * TARGET_STRIDE +
             (form->left + form->width - 1u) * 4u;
@@ -1780,93 +1952,6 @@ static void test_later_tiled_status_sprites(void) {
             },
         },
         {
-            .name = "transparent clipped battery tail on transition surface",
-            .xclip = 0x01400000u, .yclip = 0x00200000u,
-            .target = 0x00a41000u,
-            .list_word = 0x612000a8u,
-            .boundary_override = true, .source_must_be_zero = true,
-            .tile_x0 = 0u, .tile_x1 = 0x27u,
-            .tile_y0 = 0u, .tile_y1 = 1u,
-            .left = 296u, .top = 16u, .width = 21u, .height = 4u,
-            .source = 0x00986000u, .source_row0 = 16u,
-            .source_stride = 0x60u, .source_control = 0x0e040000u,
-            .boundary = {
-                0x00000000u, 0x41a00000u, 0x00000000u, 0x00000000u,
-                0x43a00000u, 0x41a00000u, 0x43a00000u, 0x00000000u,
-            },
-            .quad = {
-                0xe0000000u, 0xa2218001u, 0u, 0xcd206c40u,
-                0xa7718000u, 0u, 0xae504ea0u, 0x22250e80u,
-                0x43940000u, 0x41a00000u, 0x43940000u, 0x00000000u,
-                0x439e8000u, 0x41a00000u, 0x439e8000u, 0x00000000u,
-                0u, 0u, 0u, 0u,
-                0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
-                0xbf000000u, 0x00000000u, 0x3f200000u, 0x3e940000u,
-                0x3ca00000u, 0xbf000000u, 0x00000000u, 0x00000000u,
-                0x3e940000u, 0x00000000u, 0xbf000000u, 0x3f280000u,
-                0x3f200000u, 0x3e9e8000u, 0x3ca00000u, 0xbf000000u,
-                0x3f280000u, 0x00000000u, 0x3e9e8000u, 0x00000000u,
-            },
-        },
-        {
-            .name = "transparent clipped battery tail on middle surface",
-            .xclip = 0x01400000u, .yclip = 0x00200000u,
-            .target = 0x00998000u,
-            .list_word = 0x612000a8u,
-            .boundary_override = true, .source_must_be_zero = true,
-            .tile_x0 = 0u, .tile_x1 = 0x27u,
-            .tile_y0 = 0u, .tile_y1 = 1u,
-            .left = 296u, .top = 16u, .width = 21u, .height = 4u,
-            .source = 0x00986000u, .source_row0 = 16u,
-            .source_stride = 0x60u, .source_control = 0x0e040000u,
-            .boundary = {
-                0x00000000u, 0x41a00000u, 0x00000000u, 0x00000000u,
-                0x43a00000u, 0x41a00000u, 0x43a00000u, 0x00000000u,
-            },
-            .quad = {
-                0xe0000000u, 0xa2218001u, 0u, 0xcd206c40u,
-                0xa7718000u, 0u, 0xae504ea0u, 0x22250e80u,
-                0x43940000u, 0x41a00000u, 0x43940000u, 0x00000000u,
-                0x439e8000u, 0x41a00000u, 0x439e8000u, 0x00000000u,
-                0u, 0u, 0u, 0u,
-                0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
-                0xbf000000u, 0x00000000u, 0x3f200000u, 0x3e940000u,
-                0x3ca00000u, 0xbf000000u, 0x00000000u, 0x00000000u,
-                0x3e940000u, 0x00000000u, 0xbf000000u, 0x3f280000u,
-                0x3f200000u, 0x3e9e8000u, 0x3ca00000u, 0xbf000000u,
-                0x3f280000u, 0x00000000u, 0x3e9e8000u, 0x00000000u,
-            },
-        },
-        {
-            .name = "transparent clipped battery tail on CLCD surface",
-            .xclip = 0x01400000u, .yclip = 0x00200000u,
-            .target = 0x00897000u,
-            .list_word = 0x612000a8u,
-            .boundary_override = true, .source_must_be_zero = true,
-            .tile_x0 = 0u, .tile_x1 = 0x27u,
-            .tile_y0 = 0u, .tile_y1 = 1u,
-            .left = 296u, .top = 16u, .width = 21u, .height = 4u,
-            .source = 0x00986000u, .source_row0 = 16u,
-            .source_stride = 0x60u, .source_control = 0x0e040000u,
-            .boundary = {
-                0x00000000u, 0x41a00000u, 0x00000000u, 0x00000000u,
-                0x43a00000u, 0x41a00000u, 0x43a00000u, 0x00000000u,
-            },
-            .quad = {
-                0xe0000000u, 0xa2218001u, 0u, 0xcd206c40u,
-                0xa7718000u, 0u, 0xae504ea0u, 0x22250e80u,
-                0x43940000u, 0x41a00000u, 0x43940000u, 0x00000000u,
-                0x439e8000u, 0x41a00000u, 0x439e8000u, 0x00000000u,
-                0u, 0u, 0u, 0u,
-                0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
-                0xbf000000u, 0x00000000u, 0x3f200000u, 0x3e940000u,
-                0x3ca00000u, 0xbf000000u, 0x00000000u, 0x00000000u,
-                0x3e940000u, 0x00000000u, 0xbf000000u, 0x3f280000u,
-                0x3f200000u, 0x3e9e8000u, 0x3ca00000u, 0xbf000000u,
-                0x3f280000u, 0x00000000u, 0x3e9e8000u, 0x00000000u,
-            },
-        },
-        {
             .name = "lower-screen opacity composite on transition surface",
             .xclip = 0x01400000u, .yclip = 0x01e00010u,
             .target = 0x00a41000u,
@@ -1985,6 +2070,7 @@ static void test_later_tiled_status_sprites(void) {
             .name = "Messages label on transition surface",
             .xclip = 0x00600000u, .yclip = 0x00700050u,
             .target = 0x00a41000u,
+            .semantic_sprite = true,
             .boundary_override = true,
             .tile_x0 = 0u, .tile_x1 = 0x0bu,
             .tile_y0 = 5u, .tile_y1 = 6u,
@@ -2013,6 +2099,7 @@ static void test_later_tiled_status_sprites(void) {
             .name = "Messages icon on transition surface",
             .xclip = 0x00500010u, .yclip = 0x00600020u,
             .target = 0x00a41000u,
+            .semantic_sprite = true,
             .boundary_override = true,
             .tile_x0 = 2u, .tile_x1 = 9u,
             .tile_y0 = 2u, .tile_y1 = 5u,
@@ -2041,6 +2128,7 @@ static void test_later_tiled_status_sprites(void) {
             .name = "Calendar label on transition surface",
             .xclip = 0x00a80048u, .yclip = 0x00700050u,
             .target = 0x00a41000u,
+            .semantic_sprite = true,
             .boundary_override = true,
             .tile_x0 = 9u, .tile_x1 = 0x14u,
             .tile_y0 = 5u, .tile_y1 = 6u,
@@ -2069,6 +2157,7 @@ static void test_later_tiled_status_sprites(void) {
             .name = "Calendar icon base on transition surface",
             .xclip = 0x00980058u, .yclip = 0x00600020u,
             .target = 0x00a41000u,
+            .semantic_sprite = true,
             .boundary_override = true,
             .tile_x0 = 0x0bu, .tile_x1 = 0x12u,
             .tile_y0 = 2u, .tile_y1 = 5u,
@@ -2097,6 +2186,7 @@ static void test_later_tiled_status_sprites(void) {
             .name = "Stocks label with producer alpha modulation",
             .xclip = 0x00a80048u, .yclip = 0x00d000b0u,
             .target = 0x00a41000u,
+            .semantic_sprite = true,
             .boundary_override = true,
             .tile_x0 = 9u, .tile_x1 = 0x14u,
             .tile_y0 = 0x0bu, .tile_y1 = 0x0cu,
@@ -2122,13 +2212,14 @@ static void test_later_tiled_status_sprites(void) {
             },
         },
         /* This is intentionally not described as a capture. It is constructed
-         * from the recovered producer equations with a third size, pitch and
-         * position, so a decoder that merely moved the four app literals into
-         * conditionals cannot pass it. */
+         * from the recovered producer equations with a third size, pitch,
+         * position and an otherwise unseen target, so a decoder that merely
+         * moved the app or target literals into conditionals cannot pass it. */
         {
-            .name = "producer-consistent 24x8 app sprite",
+            .name = "producer-consistent 24x8 generic sprite",
             .xclip = 0x00e000c8u, .yclip = 0x00800070u,
-            .target = 0x00a41000u,
+            .target = 0x009b0000u,
+            .semantic_sprite = true,
             .boundary_override = true,
             .tile_x0 = 25u, .tile_x1 = 27u,
             .tile_y0 = 7u, .tile_y1 = 7u,
@@ -2154,75 +2245,90 @@ static void test_later_tiled_status_sprites(void) {
             },
         },
         {
-            .name = "transparent clipped battery transfer",
-            .xclip = 0x01400000u, .yclip = 0x01e00010u,
-            .target = 0x00897000u, .blend_surface = 0x00998000u,
-            .list_word = 0x612000a8u,
-            .has_quad_variant = true,
-            .boundary_override = true, .source_must_be_zero = true,
-            .tile_x0 = 0u, .tile_x1 = 0x27u,
-            .tile_y0 = 1u, .tile_y1 = 0x1du,
-            .left = 296u, .top = 16u, .width = 21u, .height = 4u,
-            .source = 0x00986000u, .source_row0 = 16u,
-            .source_stride = 0x60u, .source_control = 0x0e040000u,
+            .name = "r415 page indicator on middle surface",
+            .xclip = 0x00980088u, .yclip = 0x01900170u,
+            .target = 0x00998000u,
+            .semantic_sprite = true,
+            .boundary_override = true,
+            .tile_x0 = 0x11u, .tile_x1 = 0x12u,
+            .tile_y0 = 0x17u, .tile_y1 = 0x18u,
+            .left = 136u, .top = 375u, .width = 10u, .height = 10u,
+            .source = 0x0092e000u,
+            .source_stride = 0x40u, .source_control = 0x0e040000u,
             .boundary = {
-                0x00000000u, 0x43f00000u, 0x00000000u, 0x41a00000u,
-                0x43a00000u, 0x43f00000u, 0x43a00000u, 0x41a00000u,
+                0x43080000u, 0x43c08000u, 0x43080000u, 0x43bb8000u,
+                0x43120000u, 0x43c08000u, 0x43120000u, 0x43bb8000u,
             },
             .quad = {
-                0xe0000000u, 0xa2218001u, 0u, 0xd6887610u,
-                0xa7718000u, 0u, 0xab504a90u, 0x22250e80u,
-                0x43940000u, 0x41a00000u, 0x43940000u, 0x00000000u,
-                0x439e8000u, 0x41a00000u, 0x439e8000u, 0x00000000u,
-                0u, 0u, 0u, 0u,
-                0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
-                0x00000000u, 0x00000000u, 0x3f200000u, 0x3e940000u,
-                0x3ca00000u, 0x00000000u, 0x00000000u, 0x00000000u,
-                0x3e940000u, 0x00000000u, 0x00000000u, 0x3f280000u,
-                0x3f200000u, 0x3e9e8000u, 0x3ca00000u, 0x00000000u,
-                0x3f280000u, 0x00000000u, 0x3e9e8000u, 0x00000000u,
-            },
-            .quad_variant = {
-                0xe0000000u, 0xa2218001u, 0u, 0xcd206c40u,
+                0xe0000000u, 0xa1118000u, 0u, 0xcd206c40u,
                 0xa7718000u, 0u, 0xae504ea0u, 0x22250e80u,
-                0x43940000u, 0x41a00000u, 0x43940000u, 0x00000000u,
-                0x439e8000u, 0x41a00000u, 0x439e8000u, 0x00000000u,
+                0x43080000u, 0x43c08000u, 0x43080000u, 0x43bb8000u,
+                0x43120000u, 0x43c08000u, 0x43120000u, 0x43bb8000u,
                 0u, 0u, 0u, 0u,
                 0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
-                0xbf000000u, 0x00000000u, 0x3f200000u, 0x3e940000u,
-                0x3ca00000u, 0xbf000000u, 0x00000000u, 0x00000000u,
-                0x3e940000u, 0x00000000u, 0xbf000000u, 0x3f280000u,
-                0x3f200000u, 0x3e9e8000u, 0x3ca00000u, 0xbf000000u,
-                0x3f280000u, 0x00000000u, 0x3e9e8000u, 0x00000000u,
+                0xdd000000u, 0u, 0x3f200000u, 0x3e080000u,
+                0x3ec08000u, 0xdd000000u, 0u, 0u,
+                0x3e080000u, 0x3ebb8000u, 0xdd000000u, 0x3f200000u,
+                0x3f200000u, 0x3e120000u, 0x3ec08000u, 0xdd000000u,
+                0x3f200000u, 0u, 0x3e120000u, 0x3ebb8000u,
             },
         },
         {
-            .name = "transparent clipped battery transfer to new surface",
-            .xclip = 0x01400000u, .yclip = 0x01e00010u,
-            .target = 0x00a41000u, .blend_surface = 0x00897000u,
-            .list_word = 0x612000a8u,
-            .boundary_override = true, .source_must_be_zero = true,
-            .tile_x0 = 0u, .tile_x1 = 0x27u,
-            .tile_y0 = 1u, .tile_y1 = 0x1du,
-            .left = 296u, .top = 16u, .width = 21u, .height = 4u,
-            .source = 0x00986000u, .source_row0 = 16u,
-            .source_stride = 0x60u, .source_control = 0x0e040000u,
+            .name = "r416 clipped Messages label on middle surface",
+            .xclip = 0x00480000u, .yclip = 0x00600040u,
+            .target = 0x00998000u,
+            .semantic_sprite = true,
+            .boundary_override = true,
+            .tile_x0 = 0u, .tile_x1 = 8u,
+            .tile_y0 = 4u, .tile_y1 = 5u,
+            .left = 0u, .top = 73u, .width = 70u, .height = 13u,
+            .source = 0x00931080u, .source_x0 = 16u,
+            .source_stride = 0x160u, .source_control = 0x8e140000u,
             .boundary = {
-                0x00000000u, 0x43f00000u, 0x00000000u, 0x41a00000u,
-                0x43a00000u, 0x43f00000u, 0x43a00000u, 0x41a00000u,
+                0x00000000u, 0x42ae0000u, 0x00000000u, 0x42920000u,
+                0x428c0000u, 0x42ae0000u, 0x428c0000u, 0x42920000u,
             },
             .quad = {
-                0xe0000000u, 0xa2218001u, 0u, 0xcd206c40u,
+                0xe0000000u, 0xa4118001u, 0u, 0xa6884710u,
                 0xa7718000u, 0u, 0xae504ea0u, 0x22250e80u,
-                0x43940000u, 0x41a00000u, 0x43940000u, 0x00000000u,
-                0x439e8000u, 0x41a00000u, 0x439e8000u, 0x00000000u,
+                0xc182c84cu, 0x42921807u, 0x428b4dedu, 0x42921807u,
+                0xc182c84cu, 0x42ac1807u, 0x428b4dedu, 0x42ac1807u,
                 0u, 0u, 0u, 0u,
                 0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
-                0xbf000000u, 0x00000000u, 0x3f200000u, 0x3e940000u,
-                0x3ca00000u, 0xbf000000u, 0x00000000u, 0x00000000u,
-                0x3e940000u, 0x00000000u, 0xbf000000u, 0x3f280000u,
-                0x3f200000u, 0x3e9e8000u, 0x3ca00000u, 0xbf000000u,
-                0x3f280000u, 0x00000000u, 0x3e9e8000u, 0x00000000u,
+                0xff000000u, 0u, 0u, 0xbc82c84cu,
+                0x3d921807u, 0xff000000u, 0x3f2b0000u, 0u,
+                0x3d8b4dedu, 0x3d921807u, 0xff000000u, 0u,
+                0x3f480000u, 0xbc82c84cu, 0x3dac1807u, 0xff000000u,
+                0x3f2b0000u, 0x3f480000u, 0x3d8b4dedu, 0x3dac1807u,
+            },
+        },
+        {
+            .name = "r417 guard-expanded Stocks label on middle surface",
+            .xclip = 0x00900038u, .yclip = 0x00b000a0u,
+            .target = 0x00998000u,
+            .semantic_sprite = true,
+            .boundary_override = true,
+            .tile_x0 = 7u, .tile_x1 = 0x11u,
+            .tile_y0 = 0x0au, .tile_y1 = 0x0au,
+            .left = 58u, .top = 163u, .width = 86u, .height = 13u,
+            .source = 0x00954080u,
+            .source_stride = 0x160u, .source_control = 0x8e140000u,
+            .boundary = {
+                0x42680000u, 0x43300000u, 0x42680000u, 0x43220000u,
+                0x43110000u, 0x43300000u, 0x43110000u, 0x43220000u,
+            },
+            .quad = {
+                0xe0000000u, 0xa4118001u, 0u, 0xcd206c40u,
+                0xa7718000u, 0u, 0xae504ea0u, 0x22250e80u,
+                0x4268aca2u, 0x43228572u, 0x43102b28u, 0x43228572u,
+                0x4268aca2u, 0x432f8572u, 0x43102b28u, 0x432f8572u,
+                0u, 0u, 0u, 0u,
+                0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+                0xbd000000u, 0u, 0u, 0x3d68aca2u,
+                0x3e228572u, 0xbd000000u, 0x3f2b0000u, 0u,
+                0x3e102b28u, 0x3e228572u, 0xbd000000u, 0u,
+                0x3f480000u, 0x3d68aca2u, 0x3e2f8572u, 0xbd000000u,
+                0x3f2b0000u, 0x3f480000u, 0x3e102b28u, 0x3e2f8572u,
             },
         },
         {
@@ -2352,6 +2458,7 @@ int main(void) {
     test_ordered_atomic_2d_batches();
     test_first_tiled_premultiplied_over();
     test_second_tiled_status_glyph();
+    test_pointer_selected_opaque_solid_quad();
     test_later_tiled_status_sprites();
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

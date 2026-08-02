@@ -3334,3 +3334,81 @@ signature changed; its mean/max were `0.184` / `1.836` fps. Those are rejection-
 measurements, not useful animation cadence. Settings has not been shown open, no 30 FPS
 result exists, and the final clean interaction plus instruction-zero cold boot remain
 mandatory. Network, sound, and iOS-app completion remain behind that graphics gate.
+
+### r415-r417: object pointers, screen clipping, and guard bounds are now semantic
+
+The r414 rejection did not describe another app sprite. The low twenty bits of the third
+object-list word are a word offset from `OBJBASE`: `0x61a0007c` selects the texture at
+`+0x1f0`, while `0x612000a8` selects a different object at `+0x2a0`. The latter is five
+33-word records emitted by `_mbx3DCtxQuadColor`; the visually suggestive texture still at
+`+0x1f0` is stale and must not execute. Five older `0x612` status forms had made exactly
+that mistake and were removed rather than preserved as compatibility cases. The bounded
+solid decoder now follows the pointer and cross-checks the five records against geometry,
+normalized coordinates, boundary, clip, tiles, target mapping, and one uniform opaque
+colour. Translucent and non-axis-aligned forms still reject. Exact r414 replay filled the
+2x2 centre quad, changed 4 pixels / 12 bytes only inside it, raised `0 -> 0x4c`, and saved:
+
+    work/r414-derived-complete-solid-center-6420m/post-solid-center-6420m.bin
+      SHA-256 E63FED314F1CA7FEBAD9601C2D81D0B5F793D9FE7BAA8186C3CAC5DBA3AD756D
+
+r415 resumed that checkpoint from 6.42 B to 6.44 B. It completed 4/4 2D submissions
+(523,552 bytes) and 3/4 3D submissions (8,036 pixels) before a page-indicator sprite on
+target `0x00998000`. This capture established a second producer layout: source control
+`0x0e...` uses the alternate vertex order and full `width/pow2`, `height/pow2` UV extents;
+the earlier `0x8e...` order uses half-texel extents. The sprite decoder no longer
+whitelists one transition address. Instead the background object, blend object, and
+`FBSTART` must independently resolve to the same fully mapped target. Exact replay of the
+10x10 page indicator blended 100 pixels, changed its 36 nontransparent pixels / 108
+bytes, changed nothing outside `(136,375)-(146,385)`, and saved:
+
+    work/r415-derived-complete-page-indicator-6440m/post-page-indicator-6440m.bin
+      SHA-256 E0DFABDBAABAE16D16D6DACECE7E1BE8AAA5EEBB08C20DB0C87A1102684ABBEA
+
+r416 restored that completion from 6.44 B to 6.46 B. MBX tracing was accidentally omitted
+from this one run, so there is no honest per-command completion count. The final snapshot
+does prove that the guest consumed the page-indicator completion and submitted the next
+command: status returned to zero and the object changed to a partly off-left Messages
+label. Its quad is `(-16.3478,73.0469)-(69.6522,86.0469)`, while its source is the full
+86x13 label at GPU VA `0x00931080`, stride `0x160`. Disassembly of the shipped
+`_mbx3DCtxQuadCopyPerspective` at `0x30e1cb68` shows that it intersects float extrema with
+the context bounds before adding constants `0x3eefe000` / `0x3f081000`, converting with
+`VCVT.U32.F32`, and aligning x/y to 8x16 tiles. The decoder now models only a one-sided,
+unity-scale edge crop; general filtering, scaling, and sprites crossing both screen edges
+remain unsupported. Exact replay selected source columns 16..85, blended 910 pixels,
+changed 333 pixels / 999 bytes, touched nothing outside `(0,73)-(70,86)`, and saved a
+reload-verified checkpoint whose external-media sidecars are hard links on F::
+
+    work/r416-derived-complete-clipped-messages-6460m/post-clipped-messages-6460m.bin
+      SHA-256 EF137DC1F18018691C6725AE6105164EC27508647620EA233CC25BBD1E373A59
+    work/r416-derived-complete-clipped-messages-6460m/screen.ppm
+      SHA-256 1CD46F842EBA9AA6C502B298E424D120A7D79C5D138DD3CA21822E62BA8EEFCA
+
+r417 restored that checkpoint from 6.46 B to 6.48 B with tracing enabled. It submitted 11
+new 3D renders and completed 10 of them (25,616 blended pixels) before reaching the next
+Stocks-label packet. That is real command-family progress, but it did not produce moving
+scanout: 100 publications changed only at the first publication; 8/9 completed windows
+were zero, with `0.213` mean / `1.914` maximum changed-publication fps. The run exited
+zero, had zero external-media failures, and still logged one Graphics Recovery Event.
+Its clean live home-screen image is byte-identical to r416
+(`FE689B05888C85C7A2DCD8E158BE1370EDE2A4353A4961A728854807E2929383`); Settings
+still has not opened.
+
+The r417 packet exposed a latent geometry error rather than a new format. Its 13-pixel
+quad spans y=`162.5213..175.5213`, but the producer's asymmetric biases conservatively
+encode guard bounds y=`162..176` (14 rows). Fragment coverage is instead the pixel-centre
+interval `[ceil(min-0.5), ceil(max-0.5))`, y=`163..176` (13 rows). The decoder now keeps
+guard/tile bounds and raster coverage separate. Exact replay blended 1,118 pixels, changed
+the 219 nontransparent Stocks pixels / 657 bytes, and changed zero pixels in the extra
+guard-only row or anywhere outside `(58,163)-(144,176)`:
+
+    work/r417-derived-complete-stocks-label-6480m/post-stocks-label-6480m.bin
+      SHA-256 F745B43369DFE68095104F66025C48A2F640A7ACEE7883B98433F6D171849AE3
+    work/r417-derived-complete-stocks-label-6480m/screen.ppm
+      SHA-256 1406CA871236E0B2384B37E23EBDA1F61805F17CDAAC22319C0BA3580A14D87E
+
+The current strict focused result is 533/533 assertions and the full strict suite is
+59/59 targets. This checkpoint replaces several literal mistakes with producer and
+raster invariants, but the end-to-end verdict remains **not fixed**: recovery recurs at
+the next unsupported command, the measured scanout is nowhere near 30 FPS, Settings has
+not opened, and no final cold boot has run. Network, sound, and iOS-app completion remain
+behind the still-open graphics gate.
