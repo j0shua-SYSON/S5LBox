@@ -2128,3 +2128,79 @@ iteration oracle; it is not a substitute for final cold-boot acceptance. The
 next performance decision needs actual published-frame cadence in the target
 iOS app (and ultimately a cold armed/disarmed pair), not another claim based
 only on fixed-instruction stopwatch time.
+
+### r338--r356: LCD wake is fixed; the first post-keygen HLE A/B is negative
+
+The apparent power-management deadlock was narrower than the PMU hypotheses
+that preceded it. The guest entered the framebuffer driver's power-state
+method and waited for AppleMerlotLCD's SPI transaction to finish. SPI0 had no
+panel endpoint, so the driver's register `0x15` readiness read never returned
+the value that lets the enable/disable sequence complete. Commit `823d4f3`
+models that exact two-byte read phase on SPI0 CS1 and preserves an in-flight
+phase across snapshots. It does not invent a general LCD register file.
+
+The result is measured in both directions. r339 reached the end of the LCD
+disable path and stopped CLCD. r343 reached the enable completion; r344 then
+ran without injected input from 7.00 to 7.15 B and ended with CLCD window 0
+active at 320x480. r347 continued the same state to 9.35 B and observed the
+guest's next ordinary sleep around 9.01 B, ending with CLCD off. The 9.35 B
+snapshot is therefore structurally valid but useless as a rendering
+checkpoint. A sleeping guest comparing equal to another sleeping guest would
+repeat the blank-frame mistake this document already retracts.
+
+Detached exact `823d4f3204be416e99c3bf57a4f3b5bf50659cac` passed all 54
+tests. Its RelWithDebInfo `bootkernel.exe` SHA-256 is
+`5580A222089DA198B2A6BAC6E57D9C492009A90CFBD17B989E76FDA6D4033562`.
+GitHub Actions passed iOS build `30726680450` and all core-test jobs in
+`30726680469` for that exact SHA.
+
+The preferred fast post-keygen checkpoint is now r350:
+
+    work/r350-settled-cancel-7360m/post-7360m.bin
+      SHA-256 6F793352665908C336572F0303A1A66CF890F8959B951B7645636078041E4458
+    work/r350-settled-cancel-7360m/post-7360m.bin.mdimage
+      SHA-256 94D0E05B2DEF54AE5C26F6DA4CF8C6FAB68AF3ED4BE8E9C41C5F29596E46B8EF
+    work/r350-settled-cancel-7360m/post-7360m.bin.mdstate
+      SHA-256 A0BA9C6BB61D6C6BBA9B800337F4606E7528B5BAE8946FE48375342027945BA8
+
+It was created with HLE off from an exact-build restore, exited zero, retained
+an active 320x480 CLCD window, captured 283,872/460,800 non-zero RGB bytes, and
+reported zero storage failures with 2/2 raw redirects/completions. The actual
+per-run image is the normal lock screen. That makes it a faithful and useful
+iteration checkpoint, **not a target-app acceptance checkpoint**. Cold boot is
+still required for final acceptance.
+
+Two failed harness runs are retained because omitting them would make the next
+numbers look cleaner than they are. r351 stopped after the display powered off;
+PowerShell converted the final `-F` stderr diagnostic into a wrapper error
+before preserving the numeric child exit code, so r351 has no trustworthy exit
+status. r353 requested an exact HLE snapshot at 7.64 B, but an HLE return skipped
+over that exact retired-instruction value; the harness correctly exited 5 for
+an unreached snapshot. Neither run is part of the comparison below.
+
+r354 is a native, HLE-off seed taken at 7.54 B just after the scheduled finger
+lift, while the lock-screen slider animation was still publishing. r355 and
+r356 restored that same seed and ran the same 100 M-instruction, no-input
+window with the same executable, screen capture, call probe, and external-media
+setup. They differed behaviorally only by `--hle`; neither wrote an output
+snapshot. Both child exit codes were retained and were zero.
+
+| arm | host wall | CABackingStoreUpdate | H1 window-update | H1 swap-handler | end state |
+|---|---:|---:|---:|---:|---|
+| r355 native | 38.494 s | 59 | 174 | 234 | CLCD active; 273,158/460,800 RGB bytes non-zero |
+| r356 HLE | 41.323 s | 63 | 187 | 248 | CLCD off; stale capture correctly refused |
+
+r356 handled all 184 `ogl_poly_scan` entries it saw. It was nevertheless
+**2.829 seconds, or about 7.35%, slower** than native and reached the display-off
+transition before the same instruction cap. The layer-update gaps also changed:
+native recorded 1.522--2.382 M instructions (1.703 M mean), while HLE recorded
+0.828--3.365 M (1.056 M mean). That is different guest scheduling/progress, not
+an equivalent endpoint that can be divided into a speedup.
+
+These counts are deliberately not labelled frames. `CABackingStoreUpdate` is
+per layer; the H1 handler runs at display boundaries; and fixed-instruction
+desktop wall time is throughput evidence only. The current replacement has no
+post-keygen speed win in this valid pair and does not preserve a comparable end
+state under a fixed cap. **30 fps remains unproven.** The next measurement tool
+must count changed scanout publications (and timestamp them on host wall time)
+before another renderer optimization can be judged as FPS work.
