@@ -676,6 +676,225 @@ static void test_second_tiled_status_glyph(void) {
     s5l8900_free(&m);
 }
 
+struct mbx_test_status_form {
+    const char *name;
+    uint32_t xclip;
+    uint32_t tile_x0, tile_x1, tile_y0, tile_y1;
+    uint32_t left, top, width, height;
+    uint32_t source, source_stride, source_control;
+    uint32_t quad[44];
+};
+
+static void test_captured_status_form(const struct mbx_test_status_form *form) {
+    enum { TARGET_STRIDE = 0x500u, MAX_PIXELS = 76u * 20u };
+    const uint32_t table0 = 0x08003000u;
+    const uint32_t table2 = 0x08004000u;
+    const uint32_t region = 0x00001000u;
+    const uint32_t object = 0x00014000u;
+    const uint32_t target = 0x00897000u;
+    const uint32_t region_pa = 0x08010000u;
+    const uint32_t object_pa = 0x08011000u;
+    const uint32_t source_pa = 0x08012000u;
+    const uint32_t target_pa = 0x08020000u;
+
+    s5l8900_t m;
+    CHECK(s5l8900_init(&m, RAM_BASE, RAM_SIZE), "%s machine init failed",
+          form->name);
+    if (!m.ram) return;
+
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_GART0, table0);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_GART2, table2);
+    test_map_gpu_page(&m, table0, region, region_pa);
+    test_map_gpu_page(&m, table0, object, object_pa);
+    uint32_t source_page0 = form->source & ~0xfffu;
+    uint32_t source_last = form->source +
+                           (form->height - 1u) * form->source_stride +
+                           form->width * 4u - 1u;
+    for (uint32_t page = source_page0; page <= (source_last & ~0xfffu);
+         page += 0x1000u)
+        test_map_gpu_page(&m, table2, page,
+                          source_pa + (page - source_page0));
+    for (uint32_t page = 0; page < 8u; page++)
+        test_map_gpu_page(&m, table2, target + page * 0x1000u,
+                          target_pa + page * 0x1000u);
+
+    uint32_t list = object + 0x68u;
+    uint32_t tile_count = (form->tile_x1 - form->tile_x0 + 1u) *
+                          (form->tile_y1 - form->tile_y0 + 1u);
+    uint32_t tile_index = 0u;
+    for (uint32_t y = form->tile_y0; y <= form->tile_y1; y++) {
+        for (uint32_t x = form->tile_x0; x <= form->tile_x1; x++) {
+            uint32_t code = (y << 8) | x;
+            if (tile_index + 1u == tile_count) code |= 0x80000000u;
+            test_gpu_write32(&m, region + tile_index * 8u, code);
+            test_gpu_write32(&m, region + tile_index * 8u + 4u, list);
+            tile_index++;
+        }
+    }
+    static const uint32_t list_words[4] = {
+        0x60200020u, 0x6020002du, 0x61a0007cu, 0xf0000000u
+    };
+    for (unsigned i = 0; i < 4u; i++)
+        test_gpu_write32(&m, list + i * 4u, list_words[i]);
+
+    static const uint32_t background[26] = {
+        0xe0000000u, 0xa7718000u, 0u, 0xd6887610u,
+        0x22220e80u, 0u, 0u, 0x45000000u,
+        0u, 0u, 0x45000000u, 0x3f800000u,
+        0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+        0x3f800000u, 0u, 0u, 0u,
+        0u, 0x40000000u, 0u, 0u,
+        0u, 0x40000000u,
+    };
+    for (unsigned i = 0; i < 26u; i++) {
+        uint32_t value = i == 2u
+            ? 0x0e500000u | (target >> 7) : background[i];
+        test_gpu_write32(&m, object + i * 4u, value);
+    }
+
+    static const struct mbx_test_word {
+        uint16_t off;
+        uint32_t value;
+    } boundary[] = {
+        {0x080u, 0x22206f80u}, {0x088u, 0x45800000u},
+        {0x094u, 0x45800000u}, {0x098u, 0x45800000u},
+        {0x09cu, 0x45800000u}, {0x0b4u, 0x22207f80u},
+        {0x0e8u, 0xe0000000u}, {0x0f4u, 0xa6887610u},
+        {0x0f8u, 0x22220e80u}, {0x12cu, 0x3f800000u},
+        {0x130u, 0x3f800000u}, {0x134u, 0x3f800000u},
+        {0x138u, 0x3f800000u}, {0x198u, 0xe0000000u},
+        {0x19cu, 0x22200e80u}, {0x1d0u, 0x3f800000u},
+        {0x1d4u, 0x3f800000u}, {0x1d8u, 0x3f800000u},
+        {0x1dcu, 0x3f800000u},
+    };
+    for (unsigned i = 0; i < sizeof boundary / sizeof boundary[0]; i++)
+        test_gpu_write32(&m, object + boundary[i].off, boundary[i].value);
+    test_gpu_write32(&m, object + 0x0b8u, form->quad[8]);
+    test_gpu_write32(&m, object + 0x0bcu, form->quad[9]);
+    test_gpu_write32(&m, object + 0x0c0u, form->quad[10]);
+    test_gpu_write32(&m, object + 0x0c4u, form->quad[11]);
+    test_gpu_write32(&m, object + 0x0c8u, form->quad[12]);
+    test_gpu_write32(&m, object + 0x0ccu, form->quad[13]);
+    test_gpu_write32(&m, object + 0x0d0u, form->quad[14]);
+    test_gpu_write32(&m, object + 0x0d4u, form->quad[15]);
+
+    for (unsigned i = 0; i < 44u; i++) {
+        uint32_t value = form->quad[i];
+        if (i == 2u) value = form->source_control | (form->source >> 7);
+        if (i == 5u) value = 0x0e500000u | (target >> 7);
+        test_gpu_write32(&m, object + 0x1f0u + i * 4u, value);
+    }
+
+    uint32_t expected[MAX_PIXELS];
+    for (uint32_t y = 0; y < form->height; y++) {
+        for (uint32_t x = 0; x < form->width; x++) {
+            uint32_t alpha = 0x40u + ((x * 11u + y * 7u) & 0xbfu);
+            uint32_t src = (alpha << 24) | ((alpha * 3u / 4u) << 16) |
+                           ((alpha / 2u) << 8) | (alpha / 4u);
+            uint32_t dst = 0xff102030u + y * 0x00010101u + x;
+            test_gpu_write32(&m,
+                form->source + y * form->source_stride + x * 4u, src);
+            test_gpu_write32(&m,
+                target + (form->top + y) * TARGET_STRIDE +
+                    (form->left + x) * 4u, dst);
+            expected[y * form->width + x] = test_over(dst, src);
+        }
+    }
+    uint32_t before = target + form->top * TARGET_STRIDE +
+                      (form->left - 1u) * 4u;
+    uint32_t after = target + (form->top + form->height) * TARGET_STRIDE +
+                     form->left * 4u;
+    test_gpu_write32(&m, before, 0x11223344u);
+    test_gpu_write32(&m, after, 0x55667788u);
+
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_RGNBASE, region);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_OBJBASE, object);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_PIXSAMP, 0x00020007u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_FBCTL, 6u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_FBXCLIP, form->xclip);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_FBYCLIP, 0x00200000u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_FBSTART, target);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_FBSTRIDE, 320u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
+
+    uint32_t mismatches = 0u;
+    for (uint32_t y = 0; y < form->height; y++) {
+        for (uint32_t x = 0; x < form->width; x++) {
+            uint32_t actual = test_gpu_read32(&m,
+                target + (form->top + y) * TARGET_STRIDE +
+                    (form->left + x) * 4u);
+            mismatches += actual != expected[y * form->width + x];
+        }
+    }
+    CHECK(mismatches == 0u, "%s: %u pixels mismatched",
+          form->name, mismatches);
+    CHECK(test_gpu_read32(&m, before) == 0x11223344u &&
+          test_gpu_read32(&m, after) == 0x55667788u,
+          "%s changed a pixel outside its rectangle", form->name);
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0x4cu,
+          "%s did not raise all three completion events", form->name);
+
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x4cu);
+    uint32_t first = target + form->top * TARGET_STRIDE + form->left * 4u;
+    test_gpu_write32(&m, first, 0x89abcdefu);
+    test_gpu_write32(&m, object + 0x1f4u, form->quad[1] ^ 1u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
+    CHECK(test_gpu_read32(&m, first) == 0x89abcdefu,
+          "%s unknown control changed the destination", form->name);
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
+          "%s unknown control raised completion", form->name);
+
+    s5l8900_free(&m);
+}
+
+static void test_later_tiled_status_sprites(void) {
+    static const struct mbx_test_status_form forms[] = {
+        {
+            .name = "Searching status sprite", .xclip = 0x00500000u,
+            .tile_x0 = 0u, .tile_x1 = 9u, .tile_y0 = 0u, .tile_y1 = 1u,
+            .left = 4u, .top = 1u, .width = 76u, .height = 16u,
+            .source = 0x00995080u, .source_stride = 0x140u,
+            .source_control = 0x0e140000u,
+            .quad = {
+                0xe0000000u, 0xa4118000u, 0u, 0xcd206c40u,
+                0xa7718000u, 0u, 0xae504ea0u, 0x22250e80u,
+                0x40800000u, 0x41880000u, 0x40800000u, 0x3f800000u,
+                0x42a00000u, 0x41880000u, 0x42a00000u, 0x3f800000u,
+                0u, 0u, 0u, 0u,
+                0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+                0xbf000000u, 0x00000000u, 0x3f800000u, 0x3b800000u,
+                0x3c880000u, 0xbf000000u, 0x00000000u, 0x00000000u,
+                0x3b800000u, 0x3a800000u, 0xbf000000u, 0x3f180000u,
+                0x3f800000u, 0x3da00000u, 0x3c880000u, 0xbf000000u,
+                0x3f180000u, 0x00000000u, 0x3da00000u, 0x3a800000u,
+            },
+        },
+        {
+            .name = "battery status sprite", .xclip = 0x01400128u,
+            .tile_x0 = 0x25u, .tile_x1 = 0x27u,
+            .tile_y0 = 0u, .tile_y1 = 1u,
+            .left = 296u, .top = 0u, .width = 21u, .height = 20u,
+            .source = 0x00997000u, .source_stride = 0x60u,
+            .source_control = 0x0e040000u,
+            .quad = {
+                0xe0000000u, 0xa2218001u, 0u, 0xcd206c40u,
+                0xa7718000u, 0u, 0xae504ea0u, 0x22250e80u,
+                0x43940000u, 0x41a00000u, 0x43940000u, 0x00000000u,
+                0x439e8000u, 0x41a00000u, 0x439e8000u, 0x00000000u,
+                0u, 0u, 0u, 0u,
+                0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+                0xbf000000u, 0x00000000u, 0x3f200000u, 0x3e940000u,
+                0x3ca00000u, 0xbf000000u, 0x00000000u, 0x00000000u,
+                0x3e940000u, 0x00000000u, 0xbf000000u, 0x3f280000u,
+                0x3f200000u, 0x3e9e8000u, 0x3ca00000u, 0xbf000000u,
+                0x3f280000u, 0x00000000u, 0x3e9e8000u, 0x00000000u,
+            },
+        },
+    };
+    for (unsigned i = 0; i < sizeof forms / sizeof forms[0]; i++)
+        test_captured_status_form(&forms[i]);
+}
+
 int main(void) {
     printf("PowerVR MBX2D tests\n");
     test_translated_copy_and_completion_boundary();
@@ -684,6 +903,7 @@ int main(void) {
     test_premultiplied_2d_clock_form();
     test_first_tiled_premultiplied_over();
     test_second_tiled_status_glyph();
+    test_later_tiled_status_sprites();
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
 }

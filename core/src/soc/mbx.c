@@ -128,17 +128,11 @@
 #define MBX_3D_TARGET_STRIDE   0x500u
 #define MBX_3D_ADDRESS_MASK    0x0003ffffu
 
-/* The next captured render is the 10x20 premultiplied status glyph at the
- * horizontal centre of the 320-pixel target. _mbx3DCtxQuadCopyPerspective
- * records a 16x32 padded texture, a 0x40-byte source stride and source
- * coordinates 0..10 by 0..20; the live backing bytes decode to a padlock.
- * Bit 18 of its address word is a texture-control bit, not GPU address bit 18,
- * which is why the recovered address field is exactly 18 bits. */
-#define MBX_3D_GLYPH_LEFT          155u
-#define MBX_3D_GLYPH_TOP           0u
-#define MBX_3D_GLYPH_WIDTH         10u
-#define MBX_3D_GLYPH_HEIGHT        20u
-#define MBX_3D_GLYPH_SOURCE_STRIDE 0x40u
+/* Three later _mbx3DCtxQuadCopyPerspective records and live object streams
+ * recover the padlock, `Searching...`, and battery status sprites. Their
+ * texture-control words encode different padded dimensions/strides. Bit 18
+ * is control rather than GPU address bit 18, so all three use the same exact
+ * 18-bit address field recovered above. */
 
 static uint64_t mbx_rd[MBX_SLOTS];
 static uint64_t mbx_wr[MBX_SLOTS];
@@ -880,14 +874,109 @@ static bool mbx_execute_first_tiled_over(s5l_mbx_t *m,
     return ok;
 }
 
-static uint32_t mbx_3d_glyph_boundary_expected(uint32_t off) {
+struct mbx_3d_status_form {
+    uint32_t xclip;
+    uint32_t tile_x0, tile_x1, tile_y0, tile_y1;
+    uint32_t left, top, width, height;
+    uint32_t source_stride;
+    uint32_t source_control;
+    uint32_t quad[44];
+};
+
+/* These are literal transcriptions of the three live object streams. Words 2
+ * and 5 are address fields and are validated separately against each form's
+ * control bits and FBSTART; every other word must match exactly. */
+static const struct mbx_3d_status_form mbx_3d_status_forms[] = {
+    {
+        .xclip = 0x00a80098u,
+        .tile_x0 = 0x13u, .tile_x1 = 0x14u,
+        .tile_y0 = 0u, .tile_y1 = 1u,
+        .left = 155u, .top = 0u, .width = 10u, .height = 20u,
+        .source_stride = 0x40u, .source_control = 0x0e040000u,
+        .quad = {
+            0xe0000000u, 0xa1218000u, 0u, 0xcd206c40u,
+            0xa7718000u, 0u, 0xae504ea0u, 0x22250e80u,
+            0x431b0000u, 0x41a00000u, 0x431b0000u, 0x00000000u,
+            0x43250000u, 0x41a00000u, 0x43250000u, 0x00000000u,
+            0u, 0u, 0u, 0u,
+            0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+            0xbf000000u, 0x00000000u, 0x3f200000u, 0x3e1b0000u,
+            0x3ca00000u, 0xbf000000u, 0x00000000u, 0x00000000u,
+            0x3e1b0000u, 0x00000000u, 0xbf000000u, 0x3f200000u,
+            0x3f200000u, 0x3e250000u, 0x3ca00000u, 0xbf000000u,
+            0x3f200000u, 0x00000000u, 0x3e250000u, 0x00000000u,
+        },
+    },
+    {
+        .xclip = 0x00500000u,
+        .tile_x0 = 0u, .tile_x1 = 9u,
+        .tile_y0 = 0u, .tile_y1 = 1u,
+        .left = 4u, .top = 1u, .width = 76u, .height = 16u,
+        .source_stride = 0x140u, .source_control = 0x0e140000u,
+        .quad = {
+            0xe0000000u, 0xa4118000u, 0u, 0xcd206c40u,
+            0xa7718000u, 0u, 0xae504ea0u, 0x22250e80u,
+            0x40800000u, 0x41880000u, 0x40800000u, 0x3f800000u,
+            0x42a00000u, 0x41880000u, 0x42a00000u, 0x3f800000u,
+            0u, 0u, 0u, 0u,
+            0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+            0xbf000000u, 0x00000000u, 0x3f800000u, 0x3b800000u,
+            0x3c880000u, 0xbf000000u, 0x00000000u, 0x00000000u,
+            0x3b800000u, 0x3a800000u, 0xbf000000u, 0x3f180000u,
+            0x3f800000u, 0x3da00000u, 0x3c880000u, 0xbf000000u,
+            0x3f180000u, 0x00000000u, 0x3da00000u, 0x3a800000u,
+        },
+    },
+    {
+        .xclip = 0x01400128u,
+        .tile_x0 = 0x25u, .tile_x1 = 0x27u,
+        .tile_y0 = 0u, .tile_y1 = 1u,
+        .left = 296u, .top = 0u, .width = 21u, .height = 20u,
+        .source_stride = 0x60u, .source_control = 0x0e040000u,
+        .quad = {
+            0xe0000000u, 0xa2218001u, 0u, 0xcd206c40u,
+            0xa7718000u, 0u, 0xae504ea0u, 0x22250e80u,
+            0x43940000u, 0x41a00000u, 0x43940000u, 0x00000000u,
+            0x439e8000u, 0x41a00000u, 0x439e8000u, 0x00000000u,
+            0u, 0u, 0u, 0u,
+            0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+            0xbf000000u, 0x00000000u, 0x3f200000u, 0x3e940000u,
+            0x3ca00000u, 0xbf000000u, 0x00000000u, 0x00000000u,
+            0x3e940000u, 0x00000000u, 0xbf000000u, 0x3f280000u,
+            0x3f200000u, 0x3e9e8000u, 0x3ca00000u, 0xbf000000u,
+            0x3f280000u, 0x00000000u, 0x3e9e8000u, 0x00000000u,
+        },
+    },
+};
+
+static const struct mbx_3d_status_form *
+mbx_3d_find_status_form(const s5l_mbx_t *m) {
+    uint32_t xclip = m->reg[S5L_MBX_FBXCLIP / 4u];
+    for (unsigned i = 0;
+         i < sizeof mbx_3d_status_forms / sizeof mbx_3d_status_forms[0]; i++)
+        if (mbx_3d_status_forms[i].xclip == xclip)
+            return &mbx_3d_status_forms[i];
+    return NULL;
+}
+
+static uint32_t
+mbx_3d_status_boundary_expected(const struct mbx_3d_status_form *form,
+                                uint32_t off) {
+    switch (off) {
+    case 0x0b8u: return form->quad[8];
+    case 0x0bcu: return form->quad[9];
+    case 0x0c0u: return form->quad[10];
+    case 0x0c4u: return form->quad[11];
+    case 0x0c8u: return form->quad[12];
+    case 0x0ccu: return form->quad[13];
+    case 0x0d0u: return form->quad[14];
+    case 0x0d4u: return form->quad[15];
+    default: break;
+    }
     static const struct mbx_3d_word nonzero[] = {
         {0x080u, 0x22206f80u}, {0x088u, 0x45800000u},
         {0x094u, 0x45800000u}, {0x098u, 0x45800000u},
         {0x09cu, 0x45800000u}, {0x0b4u, 0x22207f80u},
-        {0x0b8u, 0x431b0000u}, {0x0bcu, 0x41a00000u},
-        {0x0c0u, 0x431b0000u}, {0x0c8u, 0x43250000u},
-        {0x0ccu, 0x41a00000u}, {0x0d0u, 0x43250000u},
         {0x0e8u, 0xe0000000u}, {0x0f4u, 0xa6887610u},
         {0x0f8u, 0x22220e80u}, {0x12cu, 0x3f800000u},
         {0x130u, 0x3f800000u}, {0x134u, 0x3f800000u},
@@ -901,40 +990,47 @@ static uint32_t mbx_3d_glyph_boundary_expected(uint32_t off) {
     return 0u;
 }
 
-static bool mbx_execute_second_status_glyph(s5l_mbx_t *m,
-                                             const arm_bus_t *bus,
-                                             const char **why,
-                                             uint32_t *pixels_blended) {
+static bool mbx_execute_status_sprite(s5l_mbx_t *m,
+                                      const arm_bus_t *bus,
+                                      const char **why,
+                                      uint32_t *pixels_blended) {
     uint32_t region = m->reg[S5L_MBX_RGNBASE / 4u];
     uint32_t object = m->reg[S5L_MBX_OBJBASE / 4u];
     uint32_t target = m->reg[S5L_MBX_FBSTART / 4u];
 
     if ((region & 3u) || (object & 3u) || (target & 3u) ||
         object > UINT32_MAX - 0x2a0u) {
-        if (why) *why = "glyph region, object, or framebuffer base is invalid";
+        if (why) *why = "status-sprite region, object, or framebuffer base is invalid";
         return false;
     }
+    const struct mbx_3d_status_form *form = mbx_3d_find_status_form(m);
     if (m->reg[S5L_MBX_3DPIXSAMP / 4u] != 0x00020007u ||
         m->reg[S5L_MBX_FBCTL / 4u] != 0x00000006u ||
-        m->reg[S5L_MBX_FBXCLIP / 4u] != 0x00a80098u ||
         m->reg[S5L_MBX_FBYCLIP / 4u] != 0x00200000u ||
-        m->reg[S5L_MBX_FBLINESTRIDE / 4u] != MBX_3D_WIDTH) {
-        if (why) *why = "render registers are not the captured 10x20 glyph form";
+        m->reg[S5L_MBX_FBLINESTRIDE / 4u] != MBX_3D_WIDTH || !form) {
+        if (why) *why = "render registers are not a captured status-sprite form";
         return false;
     }
 
     uint32_t list = object + 0x68u;
-    static const uint32_t tile_codes[4] = {
-        0x00000013u, 0x00000014u, 0x00000113u, 0x80000114u
-    };
-    for (unsigned i = 0; i < 4u; i++) {
-        uint32_t code, pointer;
-        if (!mbx_gart_u32(m, bus, region + i * 8u, &code, why) ||
-            !mbx_gart_u32(m, bus, region + i * 8u + 4u, &pointer, why))
-            return false;
-        if (code != tile_codes[i] || pointer != list) {
-            if (why) *why = "glyph region list differs from the captured four tiles";
-            return false;
+    uint32_t tile_count = (form->tile_x1 - form->tile_x0 + 1u) *
+                          (form->tile_y1 - form->tile_y0 + 1u);
+    uint32_t tile_index = 0u;
+    for (uint32_t y = form->tile_y0; y <= form->tile_y1; y++) {
+        for (uint32_t x = form->tile_x0; x <= form->tile_x1; x++) {
+            uint32_t code, pointer;
+            if (!mbx_gart_u32(m, bus, region + tile_index * 8u,
+                              &code, why) ||
+                !mbx_gart_u32(m, bus, region + tile_index * 8u + 4u,
+                              &pointer, why))
+                return false;
+            uint32_t expected = (y << 8) | x;
+            if (tile_index + 1u == tile_count) expected |= 0x80000000u;
+            if (code != expected || pointer != list) {
+                if (why) *why = "status-sprite region list differs from its captured tiles";
+                return false;
+            }
+            tile_index++;
         }
     }
 
@@ -945,7 +1041,7 @@ static bool mbx_execute_second_status_glyph(s5l_mbx_t *m,
         uint32_t value;
         if (!mbx_gart_u32(m, bus, list + i * 4u, &value, why)) return false;
         if (value != list_words[i]) {
-            if (why) *why = "glyph object list is not the captured three-object list";
+            if (why) *why = "status-sprite list is not the captured three-object list";
             return false;
         }
     }
@@ -965,11 +1061,11 @@ static bool mbx_execute_second_status_glyph(s5l_mbx_t *m,
         if (i == 2u) {
             if ((value & ~MBX_3D_ADDRESS_MASK) != 0x0e500000u ||
                 mbx_3d_decode_address(value) != target) {
-                if (why) *why = "glyph background does not resolve to FBSTART";
+                if (why) *why = "status background does not resolve to FBSTART";
                 return false;
             }
         } else if (value != background[i]) {
-            if (why) *why = "glyph background object differs from the captured form";
+            if (why) *why = "status background object differs from the captured form";
             return false;
         }
     }
@@ -977,25 +1073,12 @@ static bool mbx_execute_second_status_glyph(s5l_mbx_t *m,
     for (uint32_t off = 0x80u; off < 0x1f0u; off += 4u) {
         uint32_t value;
         if (!mbx_gart_u32(m, bus, object + off, &value, why)) return false;
-        if (value != mbx_3d_glyph_boundary_expected(off)) {
-            if (why) *why = "glyph boundary object differs from the captured form";
+        if (value != mbx_3d_status_boundary_expected(form, off)) {
+            if (why) *why = "status boundary object differs from the captured form";
             return false;
         }
     }
 
-    static const uint32_t quad[44] = {
-        0xe0000000u, 0xa1218000u, 0u, 0xcd206c40u,
-        0xa7718000u, 0u, 0xae504ea0u, 0x22250e80u,
-        0x431b0000u, 0x41a00000u, 0x431b0000u, 0x00000000u,
-        0x43250000u, 0x41a00000u, 0x43250000u, 0x00000000u,
-        0u, 0u, 0u, 0u,
-        0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
-        0xbf000000u, 0x00000000u, 0x3f200000u, 0x3e1b0000u,
-        0x3ca00000u, 0xbf000000u, 0x00000000u, 0x00000000u,
-        0x3e1b0000u, 0x00000000u, 0xbf000000u, 0x3f200000u,
-        0x3f200000u, 0x3e250000u, 0x3ca00000u, 0xbf000000u,
-        0x3f200000u, 0x00000000u, 0x3e250000u, 0x00000000u,
-    };
     uint32_t source = 0u;
     for (unsigned i = 0; i < 44u; i++) {
         uint32_t value;
@@ -1003,8 +1086,8 @@ static bool mbx_execute_second_status_glyph(s5l_mbx_t *m,
                           &value, why))
             return false;
         if (i == 2u) {
-            if ((value & ~MBX_3D_ADDRESS_MASK) != 0x0e040000u) {
-                if (why) *why = "glyph source address word has an unknown format";
+            if ((value & ~MBX_3D_ADDRESS_MASK) != form->source_control) {
+                if (why) *why = "status source address word has an unknown format";
                 return false;
             }
             source = mbx_3d_decode_address(value);
@@ -1014,22 +1097,34 @@ static bool mbx_execute_second_status_glyph(s5l_mbx_t *m,
                 if (why) *why = "glyph destination does not resolve to FBSTART";
                 return false;
             }
-        } else if (value != quad[i]) {
-            if (why) *why = "textured glyph differs from the captured source-over form";
+        } else if (value != form->quad[i]) {
+            if (why) *why = "textured status sprite differs from its captured form";
             return false;
         }
     }
     if (!source) {
-        if (why) *why = "glyph source resolves to GPU address zero";
+        if (why) *why = "status source resolves to GPU address zero";
         return false;
     }
 
-    uint32_t row_bytes = MBX_3D_GLYPH_WIDTH * 4u;
-    uint32_t total = row_bytes * MBX_3D_GLYPH_HEIGHT;
-    for (uint32_t row = 0; row < MBX_3D_GLYPH_HEIGHT; row++) {
-        uint32_t src = source + row * MBX_3D_GLYPH_SOURCE_STRIDE;
-        uint32_t dst = target + (MBX_3D_GLYPH_TOP + row) *
-                       MBX_3D_TARGET_STRIDE + MBX_3D_GLYPH_LEFT * 4u;
+    uint32_t row_bytes = form->width * 4u;
+    uint32_t total = row_bytes * form->height;
+    uint64_t source_end = (uint64_t)source +
+                          (uint64_t)(form->height - 1u) *
+                              form->source_stride + row_bytes;
+    uint64_t target_end = (uint64_t)target +
+                          (uint64_t)(form->top + form->height - 1u) *
+                              MBX_3D_TARGET_STRIDE +
+                          (uint64_t)(form->left + form->width) * 4u;
+    if (row_bytes > form->source_stride || source_end > UINT32_MAX ||
+        target_end > UINT32_MAX) {
+        if (why) *why = "status source or destination rectangle overflows";
+        return false;
+    }
+    for (uint32_t row = 0; row < form->height; row++) {
+        uint32_t src = source + row * form->source_stride;
+        uint32_t dst = target + (form->top + row) * MBX_3D_TARGET_STRIDE +
+                       form->left * 4u;
         if (!mbx_gart_validate(m, bus, src, row_bytes, why) ||
             !mbx_gart_validate(m, bus, dst, row_bytes, why))
             return false;
@@ -1040,14 +1135,14 @@ static bool mbx_execute_second_status_glyph(s5l_mbx_t *m,
     if (!source_pixels || !pixels) {
         free(source_pixels);
         free(pixels);
-        if (why) *why = "host allocation for staged glyph failed";
+        if (why) *why = "host allocation for staged status sprite failed";
         return false;
     }
     bool ok = true;
-    for (uint32_t row = 0; row < MBX_3D_GLYPH_HEIGHT && ok; row++) {
-        uint32_t src = source + row * MBX_3D_GLYPH_SOURCE_STRIDE;
-        uint32_t dst = target + row * MBX_3D_TARGET_STRIDE +
-                       MBX_3D_GLYPH_LEFT * 4u;
+    for (uint32_t row = 0; row < form->height && ok; row++) {
+        uint32_t src = source + row * form->source_stride;
+        uint32_t dst = target + (form->top + row) * MBX_3D_TARGET_STRIDE +
+                       form->left * 4u;
         ok = mbx_gart_read(m, bus, src, source_pixels + row * row_bytes,
                            row_bytes, why) &&
              mbx_gart_read(m, bus, dst, pixels + row * row_bytes,
@@ -1058,7 +1153,7 @@ static bool mbx_execute_second_status_glyph(s5l_mbx_t *m,
         uint32_t alpha = src >> 24;
         if ((src & 0xffu) > alpha || ((src >> 8) & 0xffu) > alpha ||
             ((src >> 16) & 0xffu) > alpha) {
-            if (why) *why = "glyph source is not premultiplied BGRA8";
+            if (why) *why = "status source is not premultiplied BGRA8";
             ok = false;
             break;
         }
@@ -1069,16 +1164,16 @@ static bool mbx_execute_second_status_glyph(s5l_mbx_t *m,
         pixels[i + 2u] = (uint8_t)(blended >> 16);
         pixels[i + 3u] = (uint8_t)(blended >> 24);
     }
-    for (uint32_t row = 0; row < MBX_3D_GLYPH_HEIGHT && ok; row++) {
-        uint32_t dst = target + row * MBX_3D_TARGET_STRIDE +
-                       MBX_3D_GLYPH_LEFT * 4u;
+    for (uint32_t row = 0; row < form->height && ok; row++) {
+        uint32_t dst = target + (form->top + row) * MBX_3D_TARGET_STRIDE +
+                       form->left * 4u;
         ok = mbx_gart_write(m, bus, dst, pixels + row * row_bytes,
                             row_bytes, why);
     }
     free(source_pixels);
     free(pixels);
     if (ok && pixels_blended)
-        *pixels_blended = MBX_3D_GLYPH_WIDTH * MBX_3D_GLYPH_HEIGHT;
+        *pixels_blended = form->width * form->height;
     return ok;
 }
 
@@ -1090,7 +1185,7 @@ bool s5l_mbx_process_3d(s5l_mbx_t *m, const arm_bus_t *bus,
     const char *why = "unknown rejection";
     uint32_t pixels = 0u;
     if (!mbx_execute_first_tiled_over(m, bus, &why, &pixels) &&
-        !mbx_execute_second_status_glyph(m, bus, &why, &pixels)) {
+        !mbx_execute_status_sprite(m, bus, &why, &pixels)) {
         mbx_3d_rejected++;
         if (mbx_trace_state == 1)
             fprintf(stderr, "MBX3D reject STARTRENDER: %s\n", why);

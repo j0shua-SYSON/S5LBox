@@ -2660,3 +2660,68 @@ replay above, and the live r374 run. Exact source SHA
 `259cf7f8534915b79984bcad29f20ccf93dfb421` is also green in hosted core Actions run
 `30741441156` (all matrices, including strict and sanitizers) and iOS Actions run
 `30741441167` (ad-hoc-signed IPA).
+
+### r375-r376: the first real hardware-path lock-screen frame is visible
+
+r375 used a temporary trace, removed immediately after the run, to preserve the two
+object streams that r374's following render overwrote. It proved the exact `Searching...`
+tile grid is `x=0..9, y=0..1` with rectangle `x=4..80, y=1..17`, and independently
+confirmed the battery grid is `x=37..39, y=0..1` with rectangle
+`x=296..317, y=0..20`. Every object word through `+0x29c` was captured for both.
+
+The renderer now recognizes exactly three status-sprite descriptors: padlock,
+`Searching...`, and battery. Selection requires an exact framebuffer clip; each form
+then requires its exact tile grid, common three-object list, boundary object, 44-word
+textured quad, source-control bits, target address, dimensions, and stride. GART spans
+are validated and source pixels must be premultiplied BGRA8 before staged source-over
+pixels commit. This is still a three-form decoder, not a general MBX renderer.
+
+Offline replay of r375's retained final battery object executed successfully, raised
+status `0x4c`, changed 138 pixels / 414 bytes inside `x=296..317, y=0..20`, changed zero
+pixels outside, and changed the full-target FNV-1a hash
+`e912fb3ab60f85a5 -> f6ccaf1fec9d17f5`.
+
+r376 resumed the trusted cold-derived r368 pre-2.9 B checkpoint and reached 3.5 B in
+185.342 seconds, exit zero. The first lock-screen sequence completed all nine 2D packets
+and all four known 3D renders. The four 3D pixel counts were exactly 30,720, 200, 1,216,
+and 420. That allowed the guest to program CLCD with a real, nonblack frame for the first
+time on this hardware path. Visual inspection shows the Earth wallpaper and clean status
+bar with `Searching...`, padlock, and battery. The PPM contains 69,894 nonblack pixels
+(206,453 nonzero RGB bytes of 460,800):
+
+    work/r376-resume-all-status-3500m/w.img.screen.ppm
+      SHA-256 7D810155C44E303932FF5672FB67B0EE57C2345E1480B5EDE2AFBDB72ED02CF7
+    work/r376-resume-all-status-3500m/scanout.png
+      SHA-256 868C24F0A38242F94325F62D3115F56694C458C87C27F396B25510DD64FEEE00
+
+That is a visible-screen breakthrough, not a completed graphics fix. The frame has no
+clock, date, or slider. Once the first sequence completed, r376 exposed later work that
+the deliberately narrow model rejects:
+
+- eight contiguous 18-word blended commands at ring `+0x02c0..+0x04ff` arrived under
+  one fixed ring-zero submit;
+- four contiguous 16-word simple-copy commands at `+0x0500..+0x05ff` likewise arrived
+  under one submit;
+- a ninth STARTRENDER did not match any of the four decoded forms.
+
+The previous single-pending-head model correctly failed closed on both batches instead
+of executing only one command. Its terminal `12/10/2` 2D counters count fixed-submit
+candidates, not the 22 copied command heads; that metric must be corrected with the batch
+model. 3D ended `9/8/1`, 65,112 pixels blended. Two guest recovery events followed, both
+with `2DIdle=0`, `3DIdle=1`, and `CompletedIntStatus=0x00000400`. The immediate next task
+is an ordered, rejection-atomic multi-command 2D submit; only then should the ninth 3D
+object be captured. No FPS result is claimed, and final acceptance still requires a cold
+boot plus measured publication cadence.
+
+r376 is a fast diagnostic checkpoint, not cold acceptance:
+
+    work/r376-resume-all-status-3500m/post-3500m.bin
+      SHA-256 CEAC45BA47CCC68BAF180BF02F9B44CE88222395CFFB8348B1A7BDAC4AA96E8E
+    work/r376-resume-all-status-3500m/post-3500m.bin.mdimage
+      SHA-256 364D2C8BF2BBA996D7E6C09D087DFF76E7EACDEBE59F857E2905235C5B0FC6C6
+    work/r376-resume-all-status-3500m/post-3500m.bin.mdstate
+      SHA-256 9E04A3550B0EE0A0E7972D01842599FC5506A3D9E90A61E25031F64AEC08F611
+
+Local verification is 75/75 focused MBX assertions, 55/55 full tests, a clean strict
+warnings-as-errors build, exact battery replay, and the live r376 evidence above. Hosted
+exact-SHA CI remains pending until this checkpoint is committed and pushed.
