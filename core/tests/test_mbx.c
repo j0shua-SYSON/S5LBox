@@ -615,14 +615,72 @@ static void test_first_tiled_premultiplied_over(void) {
     CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
           "late missing 3D PTE raised completion");
 
-    /* r377's next render reused this exact quad and texture but narrowed the
-     * tile stream to x=1..38, y=6 and the boundary to x=8..312, y=97..109.
-     * Restore the deliberately removed PTE, then prove the source-row offset
-     * and the exact dirty rectangle rather than treating it as another full
-     * 320x96 pass. */
+    /* r379 captured the overwritten render before r377's retained one. It
+     * reused this exact quad/source, but narrowed the tiles to y=1..6 and the
+     * boundary to y=20..97. Restore the deliberately removed PTE, then prove
+     * that exact 320x77 write before testing the following inset rectangle. */
     uint32_t late_page = late & ~0xfffu;
     test_map_gpu_page(&m, table2, late_page,
                       target_pa + (late_page - target));
+    for (uint32_t y = 1u; y <= 6u; y++) {
+        for (uint32_t x = 0u; x < 40u; x++) {
+            uint32_t pair = ((y - 1u) * 40u + x) * 8u;
+            uint32_t code = (y << 8) | x;
+            if (y == 6u && x == 39u) code |= 0x80000000u;
+            test_gpu_write32(&m, region + pair, code);
+            test_gpu_write32(&m, region + pair + 4u, list);
+        }
+    }
+    static const uint32_t upper_boundary[8] = {
+        0x00000000u, 0x42c20000u, 0x00000000u, 0x41a00000u,
+        0x43a00000u, 0x42c20000u, 0x43a00000u, 0x41a00000u,
+    };
+    for (unsigned i = 0; i < 8u; i++)
+        test_gpu_write32(&m, object + 0x0b8u + i * 4u,
+                         upper_boundary[i]);
+
+    enum { UPPER_HEIGHT = 77u };
+    uint32_t upper_expected[UPPER_HEIGHT];
+    for (uint32_t row = 0; row < UPPER_HEIGHT; row++) {
+        uint32_t src = ((0x80u + (row & 0x3fu)) << 24) |
+                       ((0x30u + (row & 0x0fu)) << 16) |
+                       ((0x20u + (row & 0x0fu)) << 8) |
+                       (0x10u + (row & 0x0fu));
+        uint32_t dst = 0xff305070u + row;
+        upper_expected[row] = test_over(dst, src);
+        for (uint32_t x = 0; x < WIDTH; x++)
+            test_gpu_write32(&m,
+                target + (TOP + row) * TARGET_STRIDE + x * 4u, dst);
+    }
+    uint32_t upper_above = target + (TOP - 1u) * TARGET_STRIDE;
+    uint32_t upper_after = target + (TOP + UPPER_HEIGHT) * TARGET_STRIDE;
+    test_gpu_write32(&m, upper_above, 0x11223344u);
+    test_gpu_write32(&m, upper_after, 0x55667788u);
+
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_FBXCLIP, 0x01400000u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_FBYCLIP, 0x00700010u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
+    mismatches = 0u;
+    for (uint32_t row = 0; row < UPPER_HEIGHT; row++) {
+        for (uint32_t x = 0; x < WIDTH; x++) {
+            uint32_t actual = test_gpu_read32(&m,
+                target + (TOP + row) * TARGET_STRIDE + x * 4u);
+            mismatches += actual != upper_expected[row];
+        }
+    }
+    CHECK(mismatches == 0u,
+          "%u upper clipped-background pixels mismatched", mismatches);
+    CHECK(test_gpu_read32(&m, upper_above) == 0x11223344u &&
+          test_gpu_read32(&m, upper_after) == 0x55667788u,
+          "upper clipped background changed a pixel outside its boundary");
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0x4cu,
+          "upper clipped background did not raise all three 3D events");
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x4cu);
+
+    /* The immediately following render narrows the stream again to x=1..38,
+     * y=6 and the boundary to x=8..312, y=97..109. Prove its source-row
+     * offset and exact dirty rectangle rather than treating either redraw as
+     * another full 320x96 pass. */
     for (uint32_t x = 1u; x <= 38u; x++) {
         uint32_t pair = (x - 1u) * 8u;
         uint32_t code = (6u << 8) | x;
@@ -854,10 +912,10 @@ static void test_second_tiled_status_glyph(void) {
 
 struct mbx_test_status_form {
     const char *name;
-    uint32_t xclip;
+    uint32_t xclip, yclip;
     uint32_t tile_x0, tile_x1, tile_y0, tile_y1;
     uint32_t left, top, width, height;
-    uint32_t source, source_stride, source_control;
+    uint32_t source, source_row0, source_stride, source_control;
     uint32_t quad[44];
 };
 
@@ -884,7 +942,8 @@ static void test_captured_status_form(const struct mbx_test_status_form *form) {
     test_map_gpu_page(&m, table0, object, object_pa);
     uint32_t source_page0 = form->source & ~0xfffu;
     uint32_t source_last = form->source +
-                           (form->height - 1u) * form->source_stride +
+                           (form->source_row0 + form->height - 1u) *
+                               form->source_stride +
                            form->width * 4u - 1u;
     for (uint32_t page = source_page0; page <= (source_last & ~0xfffu);
          page += 0x1000u)
@@ -969,7 +1028,8 @@ static void test_captured_status_form(const struct mbx_test_status_form *form) {
                            ((alpha / 2u) << 8) | (alpha / 4u);
             uint32_t dst = 0xff102030u + y * 0x00010101u + x;
             test_gpu_write32(&m,
-                form->source + y * form->source_stride + x * 4u, src);
+                form->source + (form->source_row0 + y) *
+                    form->source_stride + x * 4u, src);
             test_gpu_write32(&m,
                 target + (form->top + y) * TARGET_STRIDE +
                     (form->left + x) * 4u, dst);
@@ -988,7 +1048,7 @@ static void test_captured_status_form(const struct mbx_test_status_form *form) {
     m.bus.write32(m.bus.ctx, MBX_BASE + REG_PIXSAMP, 0x00020007u);
     m.bus.write32(m.bus.ctx, MBX_BASE + REG_FBCTL, 6u);
     m.bus.write32(m.bus.ctx, MBX_BASE + REG_FBXCLIP, form->xclip);
-    m.bus.write32(m.bus.ctx, MBX_BASE + REG_FBYCLIP, 0x00200000u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_FBYCLIP, form->yclip);
     m.bus.write32(m.bus.ctx, MBX_BASE + REG_FBSTART, target);
     m.bus.write32(m.bus.ctx, MBX_BASE + REG_FBSTRIDE, 320u);
     m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
@@ -1026,7 +1086,8 @@ static void test_captured_status_form(const struct mbx_test_status_form *form) {
 static void test_later_tiled_status_sprites(void) {
     static const struct mbx_test_status_form forms[] = {
         {
-            .name = "Searching status sprite", .xclip = 0x00500000u,
+            .name = "Searching status sprite",
+            .xclip = 0x00500000u, .yclip = 0x00200000u,
             .tile_x0 = 0u, .tile_x1 = 9u, .tile_y0 = 0u, .tile_y1 = 1u,
             .left = 4u, .top = 1u, .width = 76u, .height = 16u,
             .source = 0x00995080u, .source_stride = 0x140u,
@@ -1046,7 +1107,8 @@ static void test_later_tiled_status_sprites(void) {
             },
         },
         {
-            .name = "battery status sprite", .xclip = 0x01400128u,
+            .name = "battery status sprite",
+            .xclip = 0x01400128u, .yclip = 0x00200000u,
             .tile_x0 = 0x25u, .tile_x1 = 0x27u,
             .tile_y0 = 0u, .tile_y1 = 1u,
             .left = 296u, .top = 0u, .width = 21u, .height = 20u,
@@ -1064,6 +1126,28 @@ static void test_later_tiled_status_sprites(void) {
                 0x3e940000u, 0x00000000u, 0xbf000000u, 0x3f280000u,
                 0x3f200000u, 0x3e9e8000u, 0x3ca00000u, 0xbf000000u,
                 0x3f280000u, 0x00000000u, 0x3e9e8000u, 0x00000000u,
+            },
+        },
+        {
+            .name = "clipped padlock tail",
+            .xclip = 0x00a80098u, .yclip = 0x00200010u,
+            .tile_x0 = 0x13u, .tile_x1 = 0x14u,
+            .tile_y0 = 1u, .tile_y1 = 1u,
+            .left = 155u, .top = 16u, .width = 10u, .height = 4u,
+            .source = 0x00994000u, .source_row0 = 16u,
+            .source_stride = 0x40u, .source_control = 0x0e040000u,
+            .quad = {
+                0xe0000000u, 0xa1218000u, 0u, 0xcd206c40u,
+                0xa7718000u, 0u, 0xae504ea0u, 0x22250e80u,
+                0x431b0000u, 0x41a00000u, 0x431b0000u, 0x41800000u,
+                0x43250000u, 0x41a00000u, 0x43250000u, 0x41800000u,
+                0u, 0u, 0u, 0u,
+                0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+                0xbf000000u, 0x00000000u, 0x3f200000u, 0x3e1b0000u,
+                0x3ca00000u, 0xbf000000u, 0x00000000u, 0x3f000000u,
+                0x3e1b0000u, 0x3c800000u, 0xbf000000u, 0x3f200000u,
+                0x3f200000u, 0x3e250000u, 0x3ca00000u, 0xbf000000u,
+                0x3f200000u, 0x3f000000u, 0x3e250000u, 0x3c800000u,
             },
         },
     };

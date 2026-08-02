@@ -2804,3 +2804,65 @@ The atomic-batch source checkpoint is
 `75f2b0d28ea6da4eb4972cff54031a2049aed8ad`; exact-SHA core run `30743393592`
 and iOS run `30743393574` are green. The clipped-background changes described above
 remain a separate checkpoint until their own local and hosted verification completes.
+
+### r379-r380: both retained rejects clear; one newly exposed form remains
+
+r379 repeated the trusted r368-to-3.5 B replay with a temporary read-only rejection dump.
+The dump read registers and GART-backed command memory without changing guest state and
+was removed before the capture was interpreted. The run reproduced r378's counters and
+recovery exactly, so the instrument did not alter the observed submission sequence.
+
+The previously overwritten render is another exact dirty rectangle over the recovered
+background quad and source: clip `x=0..320, y=16..112`, tiles `x=0..39, y=1..6`,
+boundary/write rectangle `x=0..320, y=20..97`, and source rows 0..76. The retained final
+r378 render is a clipped padlock tail: clip `x=152..168, y=16..32`, tiles
+`x=19..20, y=1`, write rectangle `x=155..165, y=16..20`, and source rows 16..19. Both
+implementations require their literal clips, tile streams, boundaries, complete object
+words, addresses, and source offsets. They do not broaden the renderer beyond the two
+captured forms.
+
+Focused tests now contain 96 assertions. They prove the first form writes exactly 24,640
+pixels and the second exactly 40 pixels, use the measured source rows, preserve adjacent
+pixels, raise completion only after commit, and reject mutated object words. All 96 pass;
+all 55 repository tests pass; the `-Wall -Wextra -Werror` build passes; and direct
+`-pedantic -Wformat=2 -Wshadow` compilation of both implementation and test passes.
+
+r380 then resumed r368's cold-derived pre-2.9 B checkpoint to 3.5 B in 167.375 seconds,
+exit zero. Both former rejections completed live at exactly 24,640 and 40 pixels. The
+guest advanced through three more 1,216-pixel `Searching...` redraws and additional 2D
+work before stopping at one newly exposed unknown 3D form:
+
+| measured result | r380 |
+|---|---:|
+| 2D packets completed / rejected | 42 / 0 |
+| 2D bytes committed | 2,553,192 |
+| 3D renders completed / rejected | 14 / 1 |
+| 3D pixels blended | 97,088 |
+| process exit | 0 |
+| AppleMBX recovery | one event; `2DIdle=1`, `3DIdle=0`, `3dblit=1` |
+| recovery `CompletedIntStatus` | `0x0000000c` |
+
+The CLCD frame remains visually coherent and has the same 92,145 nonblack pixels and
+273,206 nonzero RGB bytes as r377. It is not byte-identical: 347 pixels changed, all in
+the slider-label bounding box `x=114..272, y=422..440`. That localized guest update is
+not random full-screen PNG corruption. It also is not an FPS result.
+
+    work/r380-resume-all-current-3d-3500m/w.img.screen.ppm
+      SHA-256 F61FA4ABD7C246B10D7A04B42167DFA0DD73E333B00227B7B2A01EFCC80766DB
+    work/r380-resume-all-current-3d-3500m/scanout.png
+      SHA-256 C72433BB87A2D17C045C8005BFA19A3556CDE2C2E09D6FCBFB79DED0D2C80E2B
+
+r380's final snapshot is a valid next diagnostic checkpoint:
+
+    post-3500m.bin
+      SHA-256 385E1F1B50405AC8FE487489448F0C505E1EC0C3B03DD84B16F42AF57A6CF568
+    post-3500m.bin.mdimage
+      SHA-256 AD846CB58DFF21718B7CABDBB94788C82936CC38C05496C5D69E8E569FD08515
+    post-3500m.bin.mdstate
+      SHA-256 9E04A3550B0EE0A0E7972D01842599FC5506A3D9E90A61E25031F64AEC08F611
+
+The single rejection happened before two later known `Searching...` submissions, so its
+object stream was overwritten by the time the 3.5 B snapshot was saved. The final
+snapshot therefore cannot honestly identify it. The next step is one more temporary
+rejection-dump replay, followed by removal of that instrumentation. Graphics are still
+not fixed; cold-boot and publication-cadence acceptance remain pending.

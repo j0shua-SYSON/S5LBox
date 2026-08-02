@@ -139,11 +139,11 @@
 #define MBX_3D_TARGET_STRIDE   0x500u
 #define MBX_3D_ADDRESS_MASK    0x0003ffffu
 
-/* Three later _mbx3DCtxQuadCopyPerspective records and live object streams
- * recover the padlock, `Searching...`, and battery status sprites. Their
- * texture-control words encode different padded dimensions/strides. Bit 18
- * is control rather than GPU address bit 18, so all three use the same exact
- * 18-bit address field recovered above. */
+/* Later _mbx3DCtxQuadCopyPerspective records and live object streams recover
+ * the padlock, `Searching...`, and battery status sprites, plus a clipped
+ * padlock redraw. Their texture-control words encode different padded
+ * dimensions/strides. Bit 18 is control rather than GPU address bit 18, so
+ * all forms use the same exact 18-bit address field recovered above. */
 
 static uint64_t mbx_rd[MBX_SLOTS];
 static uint64_t mbx_wr[MBX_SLOTS];
@@ -929,11 +929,11 @@ struct mbx_3d_background_form {
     uint32_t boundary[8];
 };
 
-/* The first entry is r369's full 320x96 overlay. The second is r377's exact
- * retry after the repaired 2D batch: the same quad/source, but a one-tile-row
- * dirty clip whose boundary object narrows the write to x=8..312, y=97..109.
- * Keeping both literal forms makes clipped redraws possible without accepting
- * arbitrary tile streams or inferring a generic PowerVR rasterizer. */
+/* The first entry is r369's full 320x96 overlay. r379 captured the next redraw
+ * as two literal dirty rectangles over the same quad/source: source rows 0..76
+ * across the full width, then rows 77..88 inset by eight pixels. Keeping all
+ * three forms exact makes those clipped redraws possible without accepting an
+ * arbitrary tile stream or inferring a generic PowerVR rasterizer. */
 static const struct mbx_3d_background_form mbx_3d_background_forms[] = {
     {
         .xclip = 0x01400000u, .yclip = 0x00800010u,
@@ -944,6 +944,17 @@ static const struct mbx_3d_background_form mbx_3d_background_forms[] = {
         .boundary = {
             0x00000000u, 0x42e80000u, 0x00000000u, 0x41a00000u,
             0x43a00000u, 0x42e80000u, 0x43a00000u, 0x41a00000u,
+        },
+    },
+    {
+        .xclip = 0x01400000u, .yclip = 0x00700010u,
+        .tile_x0 = 0u, .tile_x1 = 39u,
+        .tile_y0 = 1u, .tile_y1 = 6u,
+        .left = 0u, .top = 20u, .width = 320u, .height = 77u,
+        .source_row0 = 0u,
+        .boundary = {
+            0x00000000u, 0x42c20000u, 0x00000000u, 0x41a00000u,
+            0x43a00000u, 0x42c20000u, 0x43a00000u, 0x41a00000u,
         },
     },
     {
@@ -1198,20 +1209,21 @@ static bool mbx_execute_first_tiled_over(s5l_mbx_t *m,
 }
 
 struct mbx_3d_status_form {
-    uint32_t xclip;
+    uint32_t xclip, yclip;
     uint32_t tile_x0, tile_x1, tile_y0, tile_y1;
     uint32_t left, top, width, height;
+    uint32_t source_row0;
     uint32_t source_stride;
     uint32_t source_control;
     uint32_t quad[44];
 };
 
-/* These are literal transcriptions of the three live object streams. Words 2
- * and 5 are address fields and are validated separately against each form's
- * control bits and FBSTART; every other word must match exactly. */
+/* These are literal transcriptions of the live object streams. Words 2 and 5
+ * are address fields and are validated separately against each form's control
+ * bits and FBSTART; every other word must match exactly. */
 static const struct mbx_3d_status_form mbx_3d_status_forms[] = {
     {
-        .xclip = 0x00a80098u,
+        .xclip = 0x00a80098u, .yclip = 0x00200000u,
         .tile_x0 = 0x13u, .tile_x1 = 0x14u,
         .tile_y0 = 0u, .tile_y1 = 1u,
         .left = 155u, .top = 0u, .width = 10u, .height = 20u,
@@ -1231,7 +1243,7 @@ static const struct mbx_3d_status_form mbx_3d_status_forms[] = {
         },
     },
     {
-        .xclip = 0x00500000u,
+        .xclip = 0x00500000u, .yclip = 0x00200000u,
         .tile_x0 = 0u, .tile_x1 = 9u,
         .tile_y0 = 0u, .tile_y1 = 1u,
         .left = 4u, .top = 1u, .width = 76u, .height = 16u,
@@ -1251,7 +1263,7 @@ static const struct mbx_3d_status_form mbx_3d_status_forms[] = {
         },
     },
     {
-        .xclip = 0x01400128u,
+        .xclip = 0x01400128u, .yclip = 0x00200000u,
         .tile_x0 = 0x25u, .tile_x1 = 0x27u,
         .tile_y0 = 0u, .tile_y1 = 1u,
         .left = 296u, .top = 0u, .width = 21u, .height = 20u,
@@ -1270,14 +1282,37 @@ static const struct mbx_3d_status_form mbx_3d_status_forms[] = {
             0x3f280000u, 0x00000000u, 0x3e9e8000u, 0x00000000u,
         },
     },
+    {
+        .xclip = 0x00a80098u, .yclip = 0x00200010u,
+        .tile_x0 = 0x13u, .tile_x1 = 0x14u,
+        .tile_y0 = 1u, .tile_y1 = 1u,
+        .left = 155u, .top = 16u, .width = 10u, .height = 4u,
+        .source_row0 = 16u,
+        .source_stride = 0x40u, .source_control = 0x0e040000u,
+        .quad = {
+            0xe0000000u, 0xa1218000u, 0u, 0xcd206c40u,
+            0xa7718000u, 0u, 0xae504ea0u, 0x22250e80u,
+            0x431b0000u, 0x41a00000u, 0x431b0000u, 0x41800000u,
+            0x43250000u, 0x41a00000u, 0x43250000u, 0x41800000u,
+            0u, 0u, 0u, 0u,
+            0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+            0xbf000000u, 0x00000000u, 0x3f200000u, 0x3e1b0000u,
+            0x3ca00000u, 0xbf000000u, 0x00000000u, 0x3f000000u,
+            0x3e1b0000u, 0x3c800000u, 0xbf000000u, 0x3f200000u,
+            0x3f200000u, 0x3e250000u, 0x3ca00000u, 0xbf000000u,
+            0x3f200000u, 0x3f000000u, 0x3e250000u, 0x3c800000u,
+        },
+    },
 };
 
 static const struct mbx_3d_status_form *
 mbx_3d_find_status_form(const s5l_mbx_t *m) {
     uint32_t xclip = m->reg[S5L_MBX_FBXCLIP / 4u];
+    uint32_t yclip = m->reg[S5L_MBX_FBYCLIP / 4u];
     for (unsigned i = 0;
          i < sizeof mbx_3d_status_forms / sizeof mbx_3d_status_forms[0]; i++)
-        if (mbx_3d_status_forms[i].xclip == xclip)
+        if (mbx_3d_status_forms[i].xclip == xclip &&
+            mbx_3d_status_forms[i].yclip == yclip)
             return &mbx_3d_status_forms[i];
     return NULL;
 }
@@ -1329,7 +1364,6 @@ static bool mbx_execute_status_sprite(s5l_mbx_t *m,
     const struct mbx_3d_status_form *form = mbx_3d_find_status_form(m);
     if (m->reg[S5L_MBX_3DPIXSAMP / 4u] != 0x00020007u ||
         m->reg[S5L_MBX_FBCTL / 4u] != 0x00000006u ||
-        m->reg[S5L_MBX_FBYCLIP / 4u] != 0x00200000u ||
         m->reg[S5L_MBX_FBLINESTRIDE / 4u] != MBX_3D_WIDTH || !form) {
         if (why) *why = "render registers are not a captured status-sprite form";
         return false;
@@ -1433,7 +1467,7 @@ static bool mbx_execute_status_sprite(s5l_mbx_t *m,
     uint32_t row_bytes = form->width * 4u;
     uint32_t total = row_bytes * form->height;
     uint64_t source_end = (uint64_t)source +
-                          (uint64_t)(form->height - 1u) *
+                          (uint64_t)(form->source_row0 + form->height - 1u) *
                               form->source_stride + row_bytes;
     uint64_t target_end = (uint64_t)target +
                           (uint64_t)(form->top + form->height - 1u) *
@@ -1445,7 +1479,8 @@ static bool mbx_execute_status_sprite(s5l_mbx_t *m,
         return false;
     }
     for (uint32_t row = 0; row < form->height; row++) {
-        uint32_t src = source + row * form->source_stride;
+        uint32_t src = source +
+                       (form->source_row0 + row) * form->source_stride;
         uint32_t dst = target + (form->top + row) * MBX_3D_TARGET_STRIDE +
                        form->left * 4u;
         if (!mbx_gart_validate(m, bus, src, row_bytes, why) ||
@@ -1463,7 +1498,8 @@ static bool mbx_execute_status_sprite(s5l_mbx_t *m,
     }
     bool ok = true;
     for (uint32_t row = 0; row < form->height && ok; row++) {
-        uint32_t src = source + row * form->source_stride;
+        uint32_t src = source +
+                       (form->source_row0 + row) * form->source_stride;
         uint32_t dst = target + (form->top + row) * MBX_3D_TARGET_STRIDE +
                        form->left * 4u;
         ok = mbx_gart_read(m, bus, src, source_pixels + row * row_bytes,
