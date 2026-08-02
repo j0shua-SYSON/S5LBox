@@ -101,14 +101,24 @@
  * guest-visible, while snap_mbx() already serialises every reg[] word. That
  * preserves a snapshot taken between the command copy and the submit store
  * without changing the v32 format or stealing a real readable register.
- * A second command head before one submit is detected and rejected; no live
- * batch has yet contained more than one packet, so silently skipping one would
- * be a fake extension.
+ * r376 then caught two real multi-command submits: eight blended packets and
+ * four simple copies were each followed by one fixed doorbell. Preserve both
+ * the first ring word and the number of copied heads. A zero count is reserved
+ * as the fail-closed overflow marker after 255 heads; the measured batches are
+ * far smaller, and pretending to know where a larger one ends would be worse
+ * than rejecting it.
  */
-#define MBX_2D_PENDING_MAGIC    0x4d420000u
-#define MBX_2D_PENDING_MAGIC_M  0xffff0000u
-#define MBX_2D_PENDING_MULTI    0x00004000u
-#define MBX_2D_PENDING_WORD_M   0x00003fffu
+#define MBX_2D_PENDING_MAGIC       0xb5c00000u
+#define MBX_2D_PENDING_MAGIC_M     0xffc00000u
+#define MBX_2D_PENDING_COUNT_SHIFT 14u
+#define MBX_2D_PENDING_COUNT_M     0x003fc000u
+#define MBX_2D_PENDING_WORD_M      0x00003fffu
+/* v32 snapshots made before r376 used a one-head/multiple marker. Decode a
+ * saved single head exactly; an old multiple marker has lost the true count
+ * and therefore remains a rejection rather than being guessed. */
+#define MBX_2D_PENDING_V1_MAGIC    0x4d420000u
+#define MBX_2D_PENDING_V1_MAGIC_M  0xffff0000u
+#define MBX_2D_PENDING_V1_MULTI    0x00004000u
 
 /* The first proved packet is a 320-pixel BGRA8 surface. There is no decoded
  * destination-stride field in its post-relocation packet, so widening this is
@@ -116,6 +126,7 @@
 #define MBX_2D_BGRA_STRIDE     0x500u
 #define MBX_2D_WIDTH           320u
 #define MBX_2D_HEIGHT          480u
+#define MBX_2D_SURFACE_BYTES   (MBX_2D_BGRA_STRIDE * MBX_2D_HEIGHT)
 
 /* The first tiled render captured in r369. The source is an 8x128 BGRA8
  * texture with a 32-byte stride; the object samples its first column over a
@@ -235,25 +246,51 @@ static uint32_t *mbx_2d_pending_slot(s5l_mbx_t *m) {
 }
 
 static bool mbx_2d_pending_get(const s5l_mbx_t *m, uint32_t *packet_off,
-                               bool *multiple) {
+                               uint32_t *command_count) {
     uint32_t state = m->reg[S5L_MBX_STATUS / 4u];
-    if ((state & MBX_2D_PENDING_MAGIC_M) != MBX_2D_PENDING_MAGIC) return false;
+    bool current =
+        (state & MBX_2D_PENDING_MAGIC_M) == MBX_2D_PENDING_MAGIC;
+    bool v1 = (state & MBX_2D_PENDING_V1_MAGIC_M) ==
+              MBX_2D_PENDING_V1_MAGIC;
+    if (!current && !v1) return false;
     if (packet_off)
         *packet_off = S5L_MBX_2D_RING_BASE +
                       (state & MBX_2D_PENDING_WORD_M) * 4u;
-    if (multiple) *multiple = (state & MBX_2D_PENDING_MULTI) != 0u;
+    if (command_count) {
+        if (current)
+            *command_count = (state & MBX_2D_PENDING_COUNT_M) >>
+                             MBX_2D_PENDING_COUNT_SHIFT;
+        else
+            *command_count = (state & MBX_2D_PENDING_V1_MULTI) ? 0u : 1u;
+    }
     return true;
 }
 
 static void mbx_2d_pending_note(s5l_mbx_t *m, uint32_t packet_off) {
-    uint32_t old;
-    bool multiple;
-    if (mbx_2d_pending_get(m, &old, &multiple)) {
-        *mbx_2d_pending_slot(m) |= MBX_2D_PENDING_MULTI;
+    uint32_t old, count;
+    if (mbx_2d_pending_get(m, &old, &count)) {
+        if (count == 0u) return; /* already overflowed */
+        if ((*mbx_2d_pending_slot(m) & MBX_2D_PENDING_MAGIC_M) !=
+            MBX_2D_PENDING_MAGIC) {
+            uint32_t words = (old - S5L_MBX_2D_RING_BASE) / 4u;
+            *mbx_2d_pending_slot(m) = MBX_2D_PENDING_MAGIC |
+                (2u << MBX_2D_PENDING_COUNT_SHIFT) | words;
+            return;
+        }
+        if (count == 255u) {
+            /* Count zero with a valid magic is the explicit overflow state. */
+            *mbx_2d_pending_slot(m) &= ~MBX_2D_PENDING_COUNT_M;
+            return;
+        }
+        count++;
+        *mbx_2d_pending_slot(m) =
+            (*mbx_2d_pending_slot(m) & ~MBX_2D_PENDING_COUNT_M) |
+            (count << MBX_2D_PENDING_COUNT_SHIFT);
         return;
     }
     uint32_t words = (packet_off - S5L_MBX_2D_RING_BASE) / 4u;
-    *mbx_2d_pending_slot(m) = MBX_2D_PENDING_MAGIC | words;
+    *mbx_2d_pending_slot(m) = MBX_2D_PENDING_MAGIC |
+                              (1u << MBX_2D_PENDING_COUNT_SHIFT) | words;
 }
 
 static void mbx_2d_pending_clear(s5l_mbx_t *m) {
@@ -374,9 +411,59 @@ static bool mbx_gart_write(const s5l_mbx_t *m, const arm_bus_t *bus,
 
 static uint32_t mbx_premultiplied_over(uint32_t dst, uint32_t src);
 
-static bool mbx_execute_simple_copy(s5l_mbx_t *m, const arm_bus_t *bus,
-                                     uint32_t packet_off, const char **why,
-                                     uint32_t *copied) {
+struct mbx_2d_job {
+    uint32_t target;
+    uint32_t dst_x, dst_y;
+    uint32_t width, height;
+    uint32_t row_bytes, total;
+    uint8_t *pixels;
+};
+
+static void mbx_2d_job_dispose(struct mbx_2d_job *job) {
+    if (!job) return;
+    free(job->pixels);
+    memset(job, 0, sizeof *job);
+}
+
+static bool mbx_2d_ranges_overlap(uint32_t a, uint32_t a_len,
+                                  uint32_t b, uint32_t b_len) {
+    uint64_t a_end = (uint64_t)a + a_len;
+    uint64_t b_end = (uint64_t)b + b_len;
+    return (uint64_t)a < b_end && (uint64_t)b < a_end;
+}
+
+static bool mbx_2d_shadow_source_ok(uint32_t source, uint32_t len,
+                                    uint32_t target, const char **why) {
+    if (mbx_2d_ranges_overlap(source, len, target, MBX_2D_SURFACE_BYTES)) {
+        /* No captured batch reads its own render target. Rejecting that case
+         * avoids silently choosing between pre-batch and sequential reads. */
+        if (why) *why = "batched source aliases the destination surface";
+        return false;
+    }
+    return true;
+}
+
+static bool mbx_2d_job_commit(const s5l_mbx_t *m, const arm_bus_t *bus,
+                              const struct mbx_2d_job *job,
+                              const char **why) {
+    for (uint32_t row = 0; row < job->height; row++) {
+        uint32_t dst = job->target +
+                       (job->dst_y + row) * MBX_2D_BGRA_STRIDE +
+                       job->dst_x * 4u;
+        if (!mbx_gart_write(m, bus, dst,
+                            job->pixels + row * job->row_bytes,
+                            job->row_bytes, why))
+            return false;
+    }
+    return true;
+}
+
+static bool mbx_stage_simple_copy(s5l_mbx_t *m, const arm_bus_t *bus,
+                                  uint32_t packet_off,
+                                  uint32_t shadow_target, uint8_t *shadow,
+                                  struct mbx_2d_job *job,
+                                  const char **why) {
+    memset(job, 0, sizeof *job);
     uint32_t w[MBX_2D_COPY_WORDS];
     for (unsigned i = 0; i < MBX_2D_COPY_WORDS; i++)
         w[i] = mbx_edram_word(m, packet_off + i * 4u);
@@ -427,9 +514,15 @@ static bool mbx_execute_simple_copy(s5l_mbx_t *m, const arm_bus_t *bus,
         if (why) *why = "source or destination GPU base is not word aligned";
         return false;
     }
+    if (shadow && w[1] != shadow_target) {
+        if (why) *why = "batched commands do not share one destination surface";
+        return false;
+    }
 
-    /* Validate every destination before changing one byte. A bad late PTE
-     * must not leave a half-rendered frame and then withhold completion. */
+    /* Validate every source and destination before changing one byte. A bad
+     * late PTE must not leave a half-rendered frame and then withhold
+     * completion. Batch staging also rejects unmeasured target-as-source
+     * semantics before it mutates the private shadow. */
     for (uint32_t row = 0; row < height; row++) {
         uint64_t src64 = (uint64_t)w[3] +
                          (uint64_t)(src_y + row) * MBX_2D_BGRA_STRIDE +
@@ -437,7 +530,10 @@ static bool mbx_execute_simple_copy(s5l_mbx_t *m, const arm_bus_t *bus,
         uint64_t dst64 = (uint64_t)w[1] +
                          (uint64_t)(dst_y + row) * MBX_2D_BGRA_STRIDE +
                          (uint64_t)dst_x * 4u;
-        if (src64 > UINT32_MAX || dst64 > UINT32_MAX ||
+        if (src64 + row_bytes > (uint64_t)UINT32_MAX + 1u ||
+            dst64 + row_bytes > (uint64_t)UINT32_MAX + 1u ||
+            (shadow && !mbx_2d_shadow_source_ok(
+                (uint32_t)src64, row_bytes, shadow_target, why)) ||
             !mbx_gart_validate(m, bus, (uint32_t)src64, row_bytes, why) ||
             !mbx_gart_validate(m, bus, (uint32_t)dst64, row_bytes, why))
             return false;
@@ -454,21 +550,35 @@ static bool mbx_execute_simple_copy(s5l_mbx_t *m, const arm_bus_t *bus,
         ok = mbx_gart_read(m, bus, src, pixels + row * row_bytes,
                            row_bytes, why);
     }
-    for (uint32_t row = 0; row < height && ok; row++) {
-        uint32_t dst = w[1] + (dst_y + row) * MBX_2D_BGRA_STRIDE + dst_x * 4u;
-        ok = mbx_gart_write(m, bus, dst, pixels + row * row_bytes,
-                            row_bytes, why);
+    if (!ok) {
+        free(pixels);
+        return false;
     }
-    free(pixels);
-    if (ok && copied) *copied = total;
-    return ok;
+    if (shadow) {
+        for (uint32_t row = 0; row < height; row++)
+            memcpy(shadow + (dst_y + row) * MBX_2D_BGRA_STRIDE + dst_x * 4u,
+                   pixels + row * row_bytes, row_bytes);
+    }
+
+    job->target = w[1];
+    job->dst_x = dst_x;
+    job->dst_y = dst_y;
+    job->width = width;
+    job->height = height;
+    job->row_bytes = row_bytes;
+    job->total = total;
+    job->pixels = pixels;
+    return true;
 }
 
-static bool mbx_execute_premultiplied_copy(s5l_mbx_t *m,
-                                            const arm_bus_t *bus,
-                                            uint32_t packet_off,
-                                            const char **why,
-                                            uint32_t *committed) {
+static bool mbx_stage_premultiplied_copy(s5l_mbx_t *m,
+                                         const arm_bus_t *bus,
+                                         uint32_t packet_off,
+                                         uint32_t shadow_target,
+                                         uint8_t *shadow,
+                                         struct mbx_2d_job *job,
+                                         const char **why) {
+    memset(job, 0, sizeof *job);
     uint32_t w[MBX_2D_BLEND_WORDS];
     for (unsigned i = 0; i < MBX_2D_BLEND_WORDS; i++)
         w[i] = mbx_edram_word(m, packet_off + i * 4u);
@@ -517,6 +627,10 @@ static bool mbx_execute_premultiplied_copy(s5l_mbx_t *m,
         if (why) *why = "blend source or destination GPU base is unaligned";
         return false;
     }
+    if (shadow && w[1] != shadow_target) {
+        if (why) *why = "batched commands do not share one destination surface";
+        return false;
+    }
 
     uint32_t row_bytes = width * 4u;
     uint32_t total = row_bytes * height;
@@ -527,7 +641,10 @@ static bool mbx_execute_premultiplied_copy(s5l_mbx_t *m,
         uint64_t dst64 = (uint64_t)w[1] +
                          (uint64_t)(dst_y + row) * MBX_2D_BGRA_STRIDE +
                          (uint64_t)dst_x * 4u;
-        if (src64 > UINT32_MAX || dst64 > UINT32_MAX ||
+        if (src64 + row_bytes > (uint64_t)UINT32_MAX + 1u ||
+            dst64 + row_bytes > (uint64_t)UINT32_MAX + 1u ||
+            (shadow && !mbx_2d_shadow_source_ok(
+                (uint32_t)src64, row_bytes, shadow_target, why)) ||
             !mbx_gart_validate(m, bus, (uint32_t)src64, row_bytes, why) ||
             !mbx_gart_validate(m, bus, (uint32_t)dst64, row_bytes, why))
             return false;
@@ -546,9 +663,14 @@ static bool mbx_execute_premultiplied_copy(s5l_mbx_t *m,
         uint32_t src = w[3] + (src_y + row) * source_stride + src_x * 4u;
         uint32_t dst = w[1] + (dst_y + row) * MBX_2D_BGRA_STRIDE + dst_x * 4u;
         ok = mbx_gart_read(m, bus, src, source + row * row_bytes,
-                           row_bytes, why) &&
-             mbx_gart_read(m, bus, dst, pixels + row * row_bytes,
                            row_bytes, why);
+        if (ok && shadow)
+            memcpy(pixels + row * row_bytes,
+                   shadow + (dst_y + row) * MBX_2D_BGRA_STRIDE + dst_x * 4u,
+                   row_bytes);
+        else if (ok)
+            ok = mbx_gart_read(m, bus, dst, pixels + row * row_bytes,
+                               row_bytes, why);
     }
     for (uint32_t i = 0; i < total && ok; i += 4u) {
         uint32_t src = mbx_load_le32(source + i);
@@ -566,14 +688,150 @@ static bool mbx_execute_premultiplied_copy(s5l_mbx_t *m,
         pixels[i + 2u] = (uint8_t)(blended >> 16);
         pixels[i + 3u] = (uint8_t)(blended >> 24);
     }
-    for (uint32_t row = 0; row < height && ok; row++) {
-        uint32_t dst = w[1] + (dst_y + row) * MBX_2D_BGRA_STRIDE + dst_x * 4u;
-        ok = mbx_gart_write(m, bus, dst, pixels + row * row_bytes,
-                            row_bytes, why);
+    if (!ok) {
+        free(source);
+        free(pixels);
+        return false;
     }
+    if (shadow) {
+        for (uint32_t row = 0; row < height; row++)
+            memcpy(shadow + (dst_y + row) * MBX_2D_BGRA_STRIDE + dst_x * 4u,
+                   pixels + row * row_bytes, row_bytes);
+    }
+
     free(source);
-    free(pixels);
-    if (ok && committed) *committed = total;
+    job->target = w[1];
+    job->dst_x = dst_x;
+    job->dst_y = dst_y;
+    job->width = width;
+    job->height = height;
+    job->row_bytes = row_bytes;
+    job->total = total;
+    job->pixels = pixels;
+    return true;
+}
+
+static bool mbx_stage_2d_packet(s5l_mbx_t *m, const arm_bus_t *bus,
+                                uint32_t packet_off,
+                                uint32_t shadow_target, uint8_t *shadow,
+                                struct mbx_2d_job *job,
+                                uint32_t *packet_words,
+                                const char **why) {
+    const uint32_t ring_end = S5L_MBX_2D_RING_BASE + S5L_MBX_2D_RING_SIZE;
+    if (packet_off < S5L_MBX_2D_RING_BASE ||
+        packet_off > ring_end - MBX_2D_COPY_WORDS * 4u) {
+        if (why) *why = "2D packet crosses the observed 64 KiB ring";
+        return false;
+    }
+
+    /* Only packet zero aliases the fixed doorbell. Every other counted head
+     * must still be present exactly where the preceding decoded length puts
+     * it; this rejects gaps, reordering and ring wrap rather than inventing a
+     * command-list format. */
+    uint32_t expected_head = packet_off == S5L_MBX_2D_RING_BASE
+        ? MBX_2D_SUBMIT : MBX_2D_COMMAND_HEADER;
+    if (mbx_edram_word(m, packet_off) != expected_head) {
+        if (why) *why = "counted command heads are not contiguous and ordered";
+        return false;
+    }
+
+    if (mbx_edram_word(m, packet_off + 5u * 4u) == MBX_2D_BLEND_TAG) {
+        if (packet_off > ring_end - MBX_2D_BLEND_WORDS * 4u) {
+            if (why) *why = "blended 2D packet crosses the observed 64 KiB ring";
+            return false;
+        }
+        if (!mbx_stage_premultiplied_copy(m, bus, packet_off,
+                                           shadow_target, shadow, job, why))
+            return false;
+        *packet_words = MBX_2D_BLEND_WORDS;
+    } else {
+        if (!mbx_stage_simple_copy(m, bus, packet_off,
+                                   shadow_target, shadow, job, why))
+            return false;
+        *packet_words = MBX_2D_COPY_WORDS;
+    }
+    return true;
+}
+
+static bool mbx_execute_2d_submit(s5l_mbx_t *m, const arm_bus_t *bus,
+                                  uint32_t packet_off,
+                                  uint32_t command_count,
+                                  const char **why,
+                                  uint64_t *committed) {
+    *committed = 0u;
+    if (!command_count) {
+        if (why) *why = "pending batch exceeded 255 heads or came from an old count-less snapshot";
+        return false;
+    }
+
+    if (command_count == 1u) {
+        struct mbx_2d_job job;
+        uint32_t packet_words;
+        if (!mbx_stage_2d_packet(m, bus, packet_off, 0u, NULL,
+                                 &job, &packet_words, why))
+            return false;
+        bool ok = mbx_2d_job_commit(m, bus, &job, why);
+        if (ok) *committed = job.total;
+        mbx_2d_job_dispose(&job);
+        return ok;
+    }
+
+    const uint32_t ring_end = S5L_MBX_2D_RING_BASE + S5L_MBX_2D_RING_SIZE;
+    if (packet_off > ring_end - MBX_2D_COPY_WORDS * 4u) {
+        if (why) *why = "batched 2D packet starts beyond the observed ring";
+        return false;
+    }
+    uint32_t target = mbx_edram_word(m, packet_off + 4u);
+    if ((target & 3u) ||
+        (uint64_t)target + MBX_2D_SURFACE_BYTES >
+            (uint64_t)UINT32_MAX + 1u) {
+        if (why) *why = "batched destination surface is unaligned or wraps";
+        return false;
+    }
+
+    struct mbx_2d_job *jobs = calloc(command_count, sizeof *jobs);
+    uint8_t *shadow = malloc(MBX_2D_SURFACE_BYTES);
+    if (!jobs || !shadow) {
+        free(jobs);
+        free(shadow);
+        if (why) *why = "host allocation for atomic 2D batch failed";
+        return false;
+    }
+    if (!mbx_gart_read(m, bus, target, shadow, MBX_2D_SURFACE_BYTES, why)) {
+        free(jobs);
+        free(shadow);
+        return false;
+    }
+
+    bool ok = true;
+    uint32_t staged = 0u;
+    uint32_t cursor = packet_off;
+    uint64_t total = 0u;
+    for (; staged < command_count; staged++) {
+        uint32_t packet_words = 0u;
+        if (!mbx_stage_2d_packet(m, bus, cursor, target, shadow,
+                                 &jobs[staged], &packet_words, why)) {
+            ok = false;
+            break;
+        }
+        cursor += packet_words * 4u;
+        total += jobs[staged].total;
+    }
+
+    /* Every packet has now parsed, every source pixel is known, every target
+     * PTE has validated, and sequential overlaps have been evaluated in the
+     * private shadow. Only now may guest RAM change. Since the handler is
+     * synchronous, the validated GART cannot mutate between staging and these
+     * ordered writes. Each job retains its post-command rectangle, preserving
+     * intermediate overlap semantics and the scanout write observer. */
+    for (uint32_t i = 0; i < command_count && ok; i++)
+        ok = mbx_2d_job_commit(m, bus, &jobs[i], why);
+
+    for (uint32_t i = 0; i < command_count; i++)
+        mbx_2d_job_dispose(&jobs[i]);
+    free(jobs);
+    free(shadow);
+    if (ok) *committed = total;
     return ok;
 }
 
@@ -584,58 +842,50 @@ bool s5l_mbx_process_2d(s5l_mbx_t *m, const arm_bus_t *bus,
         (written_off & 3u))
         return false;
 
-    /* AppleMBX+0x1188 copies one observed command per selector-3 submission.
-     * Remember its head, but do not execute while the body is still arriving. */
+    /* AppleMBX+0x1188 copies one or more commands per selector-3 submission.
+     * Count their heads, but do not execute while any body is still arriving. */
     if (value == MBX_2D_COMMAND_HEADER) {
         mbx_2d_pending_note(m, written_off);
         return false;
     }
 
-    /* AppleMBX+0x1f58 performs this fixed ring+0 write after the copy. It is
-     * the measured execution boundary for both +0 and +0x40 packets. */
+    /* AppleMBX+0x1f58 performs this fixed ring+0 write after the complete
+     * command sequence. r376 measured the same boundary for 1, 4 and 8 heads. */
     if (written_off != S5L_MBX_2D_RING_BASE || value != MBX_2D_SUBMIT)
         return false;
 
-    uint32_t packet_off;
-    bool multiple;
-    if (!mbx_2d_pending_get(m, &packet_off, &multiple)) return false;
+    uint32_t packet_off, command_count;
+    if (!mbx_2d_pending_get(m, &packet_off, &command_count)) return false;
     mbx_2d_pending_clear(m);
-    mbx_2d_candidates++;
+
+    /* Count zero is the explicit >=256/legacy-unknown marker. Recording 256
+     * is a truthful lower bound; normal measured batches retain exact counts. */
+    uint32_t metric_count = command_count ? command_count : 256u;
+    mbx_2d_candidates += metric_count;
 
     const char *why = "unknown rejection";
-    uint32_t committed = 0u;
-    bool ok = false;
-    if (multiple) {
-        why = "more than one command head arrived in an unmodelled batch";
-    } else if (packet_off > S5L_MBX_2D_RING_BASE +
-                            S5L_MBX_2D_RING_SIZE - MBX_2D_COPY_WORDS * 4u) {
-        why = "2D packet crosses the observed 64 KiB ring";
-    } else if (mbx_edram_word(m, packet_off + 5u * 4u) == MBX_2D_BLEND_TAG) {
-        if (packet_off > S5L_MBX_2D_RING_BASE +
-                         S5L_MBX_2D_RING_SIZE - MBX_2D_BLEND_WORDS * 4u)
-            why = "blended 2D packet crosses the observed 64 KiB ring";
-        else
-            ok = mbx_execute_premultiplied_copy(m, bus, packet_off, &why,
-                                                &committed);
-    } else {
-        ok = mbx_execute_simple_copy(m, bus, packet_off, &why, &committed);
-    }
+    uint64_t committed = 0u;
+    bool ok = mbx_execute_2d_submit(m, bus, packet_off, command_count,
+                                    &why, &committed);
     if (!ok) {
-        mbx_2d_rejected++;
+        mbx_2d_rejected += metric_count;
         if (mbx_trace_state == 1)
-            fprintf(stderr, "MBX2D reject ring+0x%04x: %s\n",
-                    packet_off - S5L_MBX_2D_RING_BASE, why);
+            fprintf(stderr, "MBX2D reject ring+0x%04x (%u commands): %s\n",
+                    packet_off - S5L_MBX_2D_RING_BASE,
+                    metric_count, why);
         return false;
     }
 
-    /* Completion belongs to the packet whose pixels were just committed, not
-     * to the unrelated startup BACKGROUND_TAG write at 0x6d8. */
+    /* Completion belongs to the whole atomic submit whose pixels were just
+     * committed, not to the unrelated startup BACKGROUND_TAG write at 0x6d8. */
     m->status |= S5L_MBX_STATUS_2D_SYNC;
-    mbx_2d_completed++;
+    mbx_2d_completed += command_count;
     mbx_2d_bytes += committed;
     if (mbx_trace_state == 1)
-        fprintf(stderr, "MBX2D complete ring+0x%04x: %u bytes\n",
-                packet_off - S5L_MBX_2D_RING_BASE, committed);
+        fprintf(stderr,
+                "MBX2D complete ring+0x%04x (%u commands): %llu bytes\n",
+                packet_off - S5L_MBX_2D_RING_BASE, command_count,
+                (unsigned long long)committed);
     return true;
 }
 

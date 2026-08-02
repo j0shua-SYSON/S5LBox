@@ -354,6 +354,103 @@ static void test_premultiplied_2d_clock_form(void) {
     s5l8900_free(&m);
 }
 
+static void test_ordered_atomic_2d_batches(void) {
+    enum {
+        TARGET_STRIDE = 0x500u,
+        TARGET_HEIGHT = 480u,
+        TARGET_BYTES = TARGET_STRIDE * TARGET_HEIGHT,
+    };
+    const uint32_t table2 = 0x08003000u;
+    const uint32_t source = 0x00900000u;
+    const uint32_t target = 0x00810000u;
+    const uint32_t source_pa = 0x08130000u;
+    const uint32_t target_pa = 0x08080000u;
+    const uint32_t destination = target + 10u * TARGET_STRIDE + 10u * 4u;
+    const uint32_t original = 0xff102030u;
+    const uint32_t first_source = 0x80804020u;
+    const uint32_t second_source = 0x40201008u;
+    uint32_t first[18] = {
+        0xa0060500u, target, 0x94060010u, source,
+        0x30000000u, 0x20000004u, 0x095ff000u, 0x60800200u,
+        0x8002ccccu, 0xffffffffu, 0x000a000au, 0x000b000bu,
+        0x70000000u, 0x70000000u, 0x70000000u, 0x70000000u,
+        0x70000000u, 0x70000000u,
+    };
+    uint32_t second[18];
+    memcpy(second, first, sizeof second);
+    second[4] = 0x30004000u; /* source x=1, same destination pixel */
+
+    s5l8900_t m;
+    CHECK(s5l8900_init(&m, RAM_BASE, RAM_SIZE), "machine init failed");
+    if (!m.ram) return;
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_GART2, table2);
+    test_map_gpu_page(&m, table2, source, source_pa);
+    for (uint32_t page = 0; page < (TARGET_BYTES + 0xfffu) / 0x1000u;
+         page++)
+        test_map_gpu_page(&m, table2, target + page * 0x1000u,
+                          target_pa + page * 0x1000u);
+
+    test_gpu_write32(&m, source, first_source);
+    test_gpu_write32(&m, source + 4u, second_source);
+    test_gpu_write32(&m, destination, original);
+
+    /* r376's first newly exposed submit used eight adjacent 18-word blend
+     * packets. Two overlapping packets are enough to prove the critical
+     * ordering property: command two must see command one's result. */
+    write_packet(&m, RING + 0x2c0u, first, 18u);
+    write_packet(&m, RING + 0x308u, second, 18u);
+    CHECK(test_gpu_read32(&m, destination) == original,
+          "batched blend executed before the fixed submit store");
+    m.bus.write32(m.bus.ctx, MBX_BASE + RING, 0xf0000000u);
+    CHECK(test_gpu_read32(&m, destination) ==
+              test_over(test_over(original, first_source), second_source),
+          "overlapping blend batch did not execute in copied order");
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0x400u,
+          "completed blend batch did not raise exactly 2D_SYNC");
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x400u);
+
+    /* A later invalid command must reject the whole submit. If the first
+     * command leaks through, this pixel changes and the test catches the
+     * non-atomic implementation directly. */
+    test_gpu_write32(&m, destination, original);
+    second[6] ^= 1u;
+    write_packet(&m, RING + 0x2c0u, first, 18u);
+    write_packet(&m, RING + 0x308u, second, 18u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + RING, 0xf0000000u);
+    CHECK(test_gpu_read32(&m, destination) == original,
+          "rejected blend batch committed an earlier command");
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
+          "rejected blend batch raised completion");
+
+    /* The second r376 batch used adjacent 16-word simple copies. Exercise its
+     * different cursor length instead of relying on the live replay alone. */
+    uint32_t simple_first[16] = {
+        0xa0060500u, target, 0x94060500u, source,
+        0x30000000u, 0x60800200u, 0x8000ccccu, 0xffffffffu,
+        0x00140014u, 0x00150015u, 0x70000000u, 0x70000000u,
+        0x70000000u, 0x70000000u, 0x70000000u, 0x70000000u,
+    };
+    uint32_t simple_second[16];
+    memcpy(simple_second, simple_first, sizeof simple_second);
+    simple_second[4] = 0x30004000u;
+    simple_second[8] = 0x00150014u;
+    simple_second[9] = 0x00160015u;
+    uint32_t simple_dst0 = target + 20u * TARGET_STRIDE + 20u * 4u;
+    uint32_t simple_dst1 = simple_dst0 + 4u;
+    test_gpu_write32(&m, simple_dst0, 0u);
+    test_gpu_write32(&m, simple_dst1, 0u);
+    write_packet(&m, RING + 0x500u, simple_first, 16u);
+    write_packet(&m, RING + 0x540u, simple_second, 16u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + RING, 0xf0000000u);
+    CHECK(test_gpu_read32(&m, simple_dst0) == first_source &&
+          test_gpu_read32(&m, simple_dst1) == second_source,
+          "adjacent simple-copy batch did not copy both packets");
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0x400u,
+          "completed simple-copy batch did not raise exactly 2D_SYNC");
+
+    s5l8900_free(&m);
+}
+
 static void test_first_tiled_premultiplied_over(void) {
     enum {
         WIDTH = 320u, TOP = 20u, HEIGHT = 96u,
@@ -901,6 +998,7 @@ int main(void) {
     test_unknown_packet_and_bad_gart_are_atomic();
     test_status_write_to_set_and_ack();
     test_premultiplied_2d_clock_form();
+    test_ordered_atomic_2d_batches();
     test_first_tiled_premultiplied_over();
     test_second_tiled_status_glyph();
     test_later_tiled_status_sprites();
