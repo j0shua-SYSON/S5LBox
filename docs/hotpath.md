@@ -2727,3 +2727,80 @@ warnings-as-errors build, exact battery replay, and the live r376 evidence above
 source SHA `1b42a7b02f31dd7013055a65448c0c0365aa12f4` is green in hosted core run
 `30742470038` (all matrices, including strict and sanitizers) and iOS run `30742469992`
 (ad-hoc-signed IPA).
+
+### r377-r378: a complete lock-screen frame, with two 3D rejects still live
+
+The 2D consumer now executes each measured multi-command submit as one ordered,
+rejection-atomic transaction. It first parses and validates every contiguous command,
+evaluates overlapping copies and blends against a staged destination shadow in packet
+order, and commits no guest bytes until the entire batch is known. Source aliases of the
+destination remain rejected because no live submission has established their semantics.
+The pending snapshot marker retains the first ring word plus the exact command count;
+the previous v32 single-head marker is decoded compatibly, while its countless
+multiple-head state still fails closed. Metrics now count command packets rather than
+fixed ring-zero doorbells.
+
+r377 resumed the cold-derived r368 pre-2.9 B checkpoint to 3.5 B in 174.664 seconds and
+exited zero. Both batches completed: eight blended commands committed 393,028 bytes and
+four simple copies committed 142,152 bytes. Terminal 2D counters were `22/22/0` and
+2,157,008 committed bytes. The guest consequently published a coherent 320-by-480 lock
+screen containing the status bar, `4:00`, `Wednesday, December 31`, Earth wallpaper,
+padlock, and `slide to unlock`. The real CLCD output contains 92,145 nonblack pixels and
+273,206 nonzero RGB bytes:
+
+    work/r377-resume-atomic-batches-3500m/w.img.screen.ppm
+      SHA-256 5B5946B85048FB7D1ECC63C238BB26C8D65B07989942C8ABB4C9EFE14F4F3A34
+    work/r377-resume-atomic-batches-3500m/scanout.png
+      SHA-256 C3BB8CD5CA8A78D0D23A990AC8047CFBBB0A3167F58E079066F556755EDA9966
+
+This is a complete visible frame, not a completed graphics implementation. `Searching...`
+is the guest's current cellular state; the displayed date/time is the guest's current
+clock state. More importantly, r377 still measured 3D `10/8/2`, 65,112 blended pixels,
+and one Graphics Recovery Event with `2DIdle=1`, `3DIdle=0`, `3dblit=1`, and
+`CompletedIntStatus=0x0000000c`. No publication cadence or FPS was measured.
+
+The next retained submission reused the first background quad and texture but narrowed
+the dirty region to tiles `x=1..38, y=6`, boundary `x=8..312, y=97..109`, and source rows
+77..88. The renderer now recognizes that literal second form and blends only its 304-by-12
+rectangle. Focused tests prove its source-row offset, exact boundary, outside preservation,
+and rejection of a one-word boundary mutation. This is another exact captured form, not
+a generic tiled rasterizer.
+
+r378 replayed the same trusted checkpoint to 3.5 B in 176.908 seconds. The clipped form
+completed 3,648 pixels live and allowed a newly exposed eight-command blended 2D batch at
+ring `+0x0600..+0x083f` to complete 260,200 bytes. Terminal counters became 2D `30/30/0`,
+2,417,208 bytes, and 3D `11/9/2`, 68,760 pixels. Its PPM is byte-identical to r377, which
+shows that the odd-looking state is repeatable guest output rather than random host image
+corruption. It does not show that the remaining GPU work is irrelevant: one unknown 3D
+form precedes the clipped background, a second follows the new 2D batch, and the same
+single recovery event remains.
+
+The final r378 snapshot retains the later rejection. Its registers and object stream show
+an exact clipped padlock update: clip `x=152..168, y=16..32`, two tiles `x=19..20, y=1`,
+and geometry `x=155..165, y=16..20`. That measured description is not yet an implemented
+claim. The earlier rejected form was overwritten by the following background command and
+must be captured during a temporary trace replay. A snapshot replay is appropriate for
+that decoding work; final graphics/FPS acceptance still requires a cold boot.
+
+r377 diagnostic checkpoint:
+
+    post-3500m.bin
+      SHA-256 1FF401399BB024EE41904A4D6E7C6BCE3F93C8759E33E28A81D95AAF91DD64FE
+    post-3500m.bin.mdimage
+      SHA-256 812577CF60542D49476D82FEEF351C9BC16599D75212C7F8D4782C432D95F173
+    post-3500m.bin.mdstate
+      SHA-256 9E04A3550B0EE0A0E7972D01842599FC5506A3D9E90A61E25031F64AEC08F611
+
+r378 diagnostic checkpoint:
+
+    post-3500m.bin
+      SHA-256 BB24F64166ED9EC53BF6A3F373924E26E6AE32CA5CE81B6C0D96DCD76FCFF812
+    post-3500m.bin.mdimage
+      SHA-256 812577CF60542D49476D82FEEF351C9BC16599D75212C7F8D4782C432D95F173
+    post-3500m.bin.mdstate
+      SHA-256 9E04A3550B0EE0A0E7972D01842599FC5506A3D9E90A61E25031F64AEC08F611
+
+The atomic-batch source checkpoint is
+`75f2b0d28ea6da4eb4972cff54031a2049aed8ad`; exact-SHA core run `30743393592`
+and iOS run `30743393574` are green. The clipped-background changes described above
+remain a separate checkpoint until their own local and hosted verification completes.

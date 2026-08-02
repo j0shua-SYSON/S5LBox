@@ -921,14 +921,66 @@ struct mbx_3d_word {
     uint32_t value;
 };
 
-static uint32_t mbx_3d_first_boundary_expected(uint32_t off) {
+struct mbx_3d_background_form {
+    uint32_t xclip, yclip;
+    uint32_t tile_x0, tile_x1, tile_y0, tile_y1;
+    uint32_t left, top, width, height;
+    uint32_t source_row0;
+    uint32_t boundary[8];
+};
+
+/* The first entry is r369's full 320x96 overlay. The second is r377's exact
+ * retry after the repaired 2D batch: the same quad/source, but a one-tile-row
+ * dirty clip whose boundary object narrows the write to x=8..312, y=97..109.
+ * Keeping both literal forms makes clipped redraws possible without accepting
+ * arbitrary tile streams or inferring a generic PowerVR rasterizer. */
+static const struct mbx_3d_background_form mbx_3d_background_forms[] = {
+    {
+        .xclip = 0x01400000u, .yclip = 0x00800010u,
+        .tile_x0 = 0u, .tile_x1 = 39u,
+        .tile_y0 = 1u, .tile_y1 = 7u,
+        .left = 0u, .top = 20u, .width = 320u, .height = 96u,
+        .source_row0 = 0u,
+        .boundary = {
+            0x00000000u, 0x42e80000u, 0x00000000u, 0x41a00000u,
+            0x43a00000u, 0x42e80000u, 0x43a00000u, 0x41a00000u,
+        },
+    },
+    {
+        .xclip = 0x01380008u, .yclip = 0x00700060u,
+        .tile_x0 = 1u, .tile_x1 = 38u,
+        .tile_y0 = 6u, .tile_y1 = 6u,
+        .left = 8u, .top = 97u, .width = 304u, .height = 12u,
+        .source_row0 = 77u,
+        .boundary = {
+            0x41000000u, 0x42da0000u, 0x41000000u, 0x42c20000u,
+            0x439c0000u, 0x42da0000u, 0x439c0000u, 0x42c20000u,
+        },
+    },
+};
+
+static const struct mbx_3d_background_form *
+mbx_3d_find_background_form(const s5l_mbx_t *m) {
+    uint32_t xclip = m->reg[S5L_MBX_FBXCLIP / 4u];
+    uint32_t yclip = m->reg[S5L_MBX_FBYCLIP / 4u];
+    for (unsigned i = 0;
+         i < sizeof mbx_3d_background_forms /
+             sizeof mbx_3d_background_forms[0]; i++) {
+        const struct mbx_3d_background_form *form =
+            &mbx_3d_background_forms[i];
+        if (form->xclip == xclip && form->yclip == yclip) return form;
+    }
+    return NULL;
+}
+
+static uint32_t mbx_3d_background_boundary_expected(
+    const struct mbx_3d_background_form *form, uint32_t off) {
+    if (off >= 0x0b8u && off <= 0x0d4u)
+        return form->boundary[(off - 0x0b8u) / 4u];
     static const struct mbx_3d_word nonzero[] = {
         {0x080u, 0x22206f80u}, {0x088u, 0x45800000u},
         {0x094u, 0x45800000u}, {0x098u, 0x45800000u},
         {0x09cu, 0x45800000u}, {0x0b4u, 0x22207f80u},
-        {0x0bcu, 0x42e80000u}, {0x0c4u, 0x41a00000u},
-        {0x0c8u, 0x43a00000u}, {0x0ccu, 0x42e80000u},
-        {0x0d0u, 0x43a00000u}, {0x0d4u, 0x41a00000u},
         {0x0e8u, 0xe0000000u}, {0x0f4u, 0xa6887610u},
         {0x0f8u, 0x22220e80u}, {0x12cu, 0x3f800000u},
         {0x130u, 0x3f800000u}, {0x134u, 0x3f800000u},
@@ -949,6 +1001,8 @@ static bool mbx_execute_first_tiled_over(s5l_mbx_t *m,
     uint32_t region = m->reg[S5L_MBX_RGNBASE / 4u];
     uint32_t object = m->reg[S5L_MBX_OBJBASE / 4u];
     uint32_t target = m->reg[S5L_MBX_FBSTART / 4u];
+    const struct mbx_3d_background_form *form =
+        mbx_3d_find_background_form(m);
 
     if ((region & 3u) || (object & 3u) || (target & 3u) ||
         object > UINT32_MAX - 0x2a0u) {
@@ -957,29 +1011,31 @@ static bool mbx_execute_first_tiled_over(s5l_mbx_t *m,
     }
     if (m->reg[S5L_MBX_3DPIXSAMP / 4u] != 0x00020007u ||
         m->reg[S5L_MBX_FBCTL / 4u] != 0x00000006u ||
-        m->reg[S5L_MBX_FBXCLIP / 4u] != 0x01400000u ||
-        m->reg[S5L_MBX_FBYCLIP / 4u] != 0x00800010u ||
-        m->reg[S5L_MBX_FBLINESTRIDE / 4u] != MBX_3D_WIDTH) {
-        if (why) *why = "render registers are not the captured BGRA8 320x96 form";
+        m->reg[S5L_MBX_FBLINESTRIDE / 4u] != MBX_3D_WIDTH || !form) {
+        if (why) *why = "render registers are not a captured BGRA8 background form";
         return false;
     }
 
-    /* r369 contains 40 columns by seven 8x16 tiles, y=1..7. Every tile points
-     * at the same list, and only the final tile carries bit 31. */
+    /* Each captured form is an ordered rectangle of 8x16 tiles. Every tile
+     * points at the same list, and only the final tile carries bit 31. */
     uint32_t list = object + 0x68u;
-    for (uint32_t y = 1u; y <= 7u; y++) {
-        for (uint32_t x = 0u; x < 40u; x++) {
-            uint32_t pair = ((y - 1u) * 40u + x) * 8u;
+    uint32_t tile_count = (form->tile_x1 - form->tile_x0 + 1u) *
+                          (form->tile_y1 - form->tile_y0 + 1u);
+    uint32_t tile_index = 0u;
+    for (uint32_t y = form->tile_y0; y <= form->tile_y1; y++) {
+        for (uint32_t x = form->tile_x0; x <= form->tile_x1; x++) {
+            uint32_t pair = tile_index * 8u;
             uint32_t code, pointer;
             if (!mbx_gart_u32(m, bus, region + pair, &code, why) ||
                 !mbx_gart_u32(m, bus, region + pair + 4u, &pointer, why))
                 return false;
             uint32_t expected = (y << 8) | x;
-            if (y == 7u && x == 39u) expected |= 0x80000000u;
+            if (tile_index + 1u == tile_count) expected |= 0x80000000u;
             if (code != expected || pointer != list) {
-                if (why) *why = "region tile list differs from the captured 40x7 stream";
+                if (why) *why = "region tile list differs from its captured background stream";
                 return false;
             }
+            tile_index++;
         }
     }
 
@@ -1025,7 +1081,7 @@ static bool mbx_execute_first_tiled_over(s5l_mbx_t *m,
     for (uint32_t off = 0x80u; off < 0x1f0u; off += 4u) {
         uint32_t value;
         if (!mbx_gart_u32(m, bus, object + off, &value, why)) return false;
-        if (value != mbx_3d_first_boundary_expected(off)) {
+        if (value != mbx_3d_background_boundary_expected(form, off)) {
             if (why) *why = "rectangle boundary object differs from the captured form";
             return false;
         }
@@ -1072,11 +1128,24 @@ static bool mbx_execute_first_tiled_over(s5l_mbx_t *m,
         return false;
     }
 
-    uint32_t row_bytes = MBX_3D_WIDTH * 4u;
-    uint32_t total = row_bytes * MBX_3D_HEIGHT;
-    for (uint32_t row = 0; row < MBX_3D_HEIGHT; row++) {
-        uint32_t src = source + row * MBX_3D_SOURCE_STRIDE;
-        uint32_t dst = target + (MBX_3D_TOP + row) * MBX_3D_TARGET_STRIDE;
+    uint32_t row_bytes = form->width * 4u;
+    uint32_t total = row_bytes * form->height;
+    uint64_t source_end = (uint64_t)source +
+                          (uint64_t)(form->source_row0 + form->height - 1u) *
+                              MBX_3D_SOURCE_STRIDE + 4u;
+    uint64_t target_end = (uint64_t)target +
+                          (uint64_t)(form->top + form->height - 1u) *
+                              MBX_3D_TARGET_STRIDE +
+                          (uint64_t)(form->left + form->width) * 4u;
+    if (source_end > UINT32_MAX || target_end > UINT32_MAX) {
+        if (why) *why = "captured background rectangle overflows its surface";
+        return false;
+    }
+    for (uint32_t row = 0; row < form->height; row++) {
+        uint32_t src = source +
+                       (form->source_row0 + row) * MBX_3D_SOURCE_STRIDE;
+        uint32_t dst = target + (form->top + row) * MBX_3D_TARGET_STRIDE +
+                       form->left * 4u;
         if (!mbx_gart_validate(m, bus, src, 4u, why) ||
             !mbx_gart_validate(m, bus, dst, row_bytes, why))
             return false;
@@ -1088,11 +1157,14 @@ static bool mbx_execute_first_tiled_over(s5l_mbx_t *m,
         return false;
     }
     bool ok = true;
-    for (uint32_t row = 0; row < MBX_3D_HEIGHT && ok; row++) {
+    for (uint32_t row = 0; row < form->height && ok; row++) {
         uint8_t src_bytes[4];
-        uint32_t dst = target + (MBX_3D_TOP + row) * MBX_3D_TARGET_STRIDE;
-        ok = mbx_gart_read(m, bus, source + row * MBX_3D_SOURCE_STRIDE,
-                           src_bytes, sizeof src_bytes, why) &&
+        uint32_t src_addr = source +
+                            (form->source_row0 + row) * MBX_3D_SOURCE_STRIDE;
+        uint32_t dst = target + (form->top + row) * MBX_3D_TARGET_STRIDE +
+                       form->left * 4u;
+        ok = mbx_gart_read(m, bus, src_addr, src_bytes,
+                           sizeof src_bytes, why) &&
              mbx_gart_read(m, bus, dst, pixels + row * row_bytes,
                            row_bytes, why);
         if (!ok) break;
@@ -1104,7 +1176,7 @@ static bool mbx_execute_first_tiled_over(s5l_mbx_t *m,
             ok = false;
             break;
         }
-        for (uint32_t x = 0; x < MBX_3D_WIDTH; x++) {
+        for (uint32_t x = 0; x < form->width; x++) {
             uint8_t *pixel = pixels + row * row_bytes + x * 4u;
             uint32_t blended = mbx_premultiplied_over(
                 mbx_load_le32(pixel), src);
@@ -1114,13 +1186,14 @@ static bool mbx_execute_first_tiled_over(s5l_mbx_t *m,
             pixel[3] = (uint8_t)(blended >> 24);
         }
     }
-    for (uint32_t row = 0; row < MBX_3D_HEIGHT && ok; row++) {
-        uint32_t dst = target + (MBX_3D_TOP + row) * MBX_3D_TARGET_STRIDE;
+    for (uint32_t row = 0; row < form->height && ok; row++) {
+        uint32_t dst = target + (form->top + row) * MBX_3D_TARGET_STRIDE +
+                       form->left * 4u;
         ok = mbx_gart_write(m, bus, dst, pixels + row * row_bytes,
                             row_bytes, why);
     }
     free(pixels);
-    if (ok && pixels_blended) *pixels_blended = MBX_3D_WIDTH * MBX_3D_HEIGHT;
+    if (ok && pixels_blended) *pixels_blended = form->width * form->height;
     return ok;
 }
 

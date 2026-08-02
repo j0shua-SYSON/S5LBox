@@ -615,6 +615,85 @@ static void test_first_tiled_premultiplied_over(void) {
     CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
           "late missing 3D PTE raised completion");
 
+    /* r377's next render reused this exact quad and texture but narrowed the
+     * tile stream to x=1..38, y=6 and the boundary to x=8..312, y=97..109.
+     * Restore the deliberately removed PTE, then prove the source-row offset
+     * and the exact dirty rectangle rather than treating it as another full
+     * 320x96 pass. */
+    uint32_t late_page = late & ~0xfffu;
+    test_map_gpu_page(&m, table2, late_page,
+                      target_pa + (late_page - target));
+    for (uint32_t x = 1u; x <= 38u; x++) {
+        uint32_t pair = (x - 1u) * 8u;
+        uint32_t code = (6u << 8) | x;
+        if (x == 38u) code |= 0x80000000u;
+        test_gpu_write32(&m, region + pair, code);
+        test_gpu_write32(&m, region + pair + 4u, list);
+    }
+    static const uint32_t partial_boundary[8] = {
+        0x41000000u, 0x42da0000u, 0x41000000u, 0x42c20000u,
+        0x439c0000u, 0x42da0000u, 0x439c0000u, 0x42c20000u,
+    };
+    for (unsigned i = 0; i < 8u; i++)
+        test_gpu_write32(&m, object + 0x0b8u + i * 4u,
+                         partial_boundary[i]);
+
+    enum {
+        PARTIAL_LEFT = 8u, PARTIAL_TOP = 97u,
+        PARTIAL_WIDTH = 304u, PARTIAL_HEIGHT = 12u,
+        PARTIAL_SOURCE_ROW = 77u,
+    };
+    uint32_t partial_expected[PARTIAL_HEIGHT];
+    for (uint32_t row = 0; row < PARTIAL_HEIGHT; row++) {
+        uint32_t source_row = PARTIAL_SOURCE_ROW + row;
+        uint32_t src = ((0x80u + (source_row & 0x3fu)) << 24) |
+                       ((0x30u + (source_row & 0x0fu)) << 16) |
+                       ((0x20u + (source_row & 0x0fu)) << 8) |
+                       (0x10u + (source_row & 0x0fu));
+        partial_expected[row] = test_over(expected[source_row], src);
+    }
+    uint32_t partial_before = target + PARTIAL_TOP * TARGET_STRIDE +
+                              (PARTIAL_LEFT - 1u) * 4u;
+    uint32_t partial_above = target + (PARTIAL_TOP - 1u) * TARGET_STRIDE +
+                             PARTIAL_LEFT * 4u;
+    uint32_t partial_after = target +
+                             (PARTIAL_TOP + PARTIAL_HEIGHT) * TARGET_STRIDE +
+                             PARTIAL_LEFT * 4u;
+    test_gpu_write32(&m, partial_before, 0x11223344u);
+    test_gpu_write32(&m, partial_above, 0x55667788u);
+    test_gpu_write32(&m, partial_after, 0x99aabbccu);
+
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_FBXCLIP, 0x01380008u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_FBYCLIP, 0x00700060u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
+    mismatches = 0u;
+    for (uint32_t row = 0; row < PARTIAL_HEIGHT; row++) {
+        for (uint32_t x = 0; x < PARTIAL_WIDTH; x++) {
+            uint32_t actual = test_gpu_read32(&m,
+                target + (PARTIAL_TOP + row) * TARGET_STRIDE +
+                    (PARTIAL_LEFT + x) * 4u);
+            mismatches += actual != partial_expected[row];
+        }
+    }
+    CHECK(mismatches == 0u,
+          "%u clipped background-overlay pixels mismatched", mismatches);
+    CHECK(test_gpu_read32(&m, partial_before) == 0x11223344u &&
+          test_gpu_read32(&m, partial_above) == 0x55667788u &&
+          test_gpu_read32(&m, partial_after) == 0x99aabbccu,
+          "clipped background overlay changed a pixel outside its boundary");
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0x4cu,
+          "clipped background overlay did not raise all three 3D events");
+
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x4cu);
+    uint32_t partial_first = target + PARTIAL_TOP * TARGET_STRIDE +
+                             PARTIAL_LEFT * 4u;
+    test_gpu_write32(&m, partial_first, 0x89abcdefu);
+    test_gpu_write32(&m, object + 0x0b8u, partial_boundary[0] ^ 1u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
+    CHECK(test_gpu_read32(&m, partial_first) == 0x89abcdefu &&
+          m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
+          "unknown clipped boundary changed pixels or raised completion");
+
     s5l8900_free(&m);
 }
 
