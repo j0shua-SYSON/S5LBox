@@ -886,6 +886,14 @@ void     s5l_mbx_reset(s5l_mbx_t *m);
 uint32_t s5l_mbx_read(s5l_mbx_t *m, uint32_t off);
 void     s5l_mbx_write(s5l_mbx_t *m, uint32_t off, uint32_t val);
 
+/* Attempt the one decoded MBX2D packet after the CPU has written an EDRAM
+ * word. The machine supplies its bus because the MBX struct deliberately owns
+ * no host pointers except EDRAM, and destination writes must remain visible to
+ * a frontend bus observer. Returns true only after validated pixels moved and
+ * bit-10 completion was raised. */
+bool     s5l_mbx_process_2d(s5l_mbx_t *m, const arm_bus_t *bus,
+                            uint32_t written_off);
+
 /*
  * THE LINE THE DEVICE TREE SAYS THIS DEVICE HAS. /arm-io/mbx carries
  * `interrupts = {0x0c}`, and nothing in this machine was driving it -- the

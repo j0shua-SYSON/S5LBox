@@ -510,7 +510,11 @@ static void bus_write(void *ctx, uint32_t addr, uint32_t val, unsigned bytes) {
     }
     if (in_mbx(addr, bytes)) {
         note_device(m, addr, val, true);
-        s5l_mbx_write(&m->mbx, addr - S5L8900_MBX_BASE, val);
+        uint32_t off = addr - S5L8900_MBX_BASE;
+        s5l_mbx_write(&m->mbx, off, val);
+        /* The MBX owns its register/EDRAM aperture; the machine owns DRAM and
+         * the observer-aware bus. Keep that ownership boundary explicit. */
+        (void)s5l_mbx_process_2d(&m->mbx, &m->bus, off);
         return;
     }
     if (in_gpioic(addr, bytes)) {
