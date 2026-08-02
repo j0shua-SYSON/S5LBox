@@ -2204,3 +2204,79 @@ post-keygen speed win in this valid pair and does not preserve a comparable end
 state under a fixed cap. **30 fps remains unproven.** The next measurement tool
 must count changed scanout publications (and timestamp them on host wall time)
 before another renderer optimization can be judged as FPS work.
+
+### r360--r361: changed publications are finally counted; this slider is not 30 fps
+
+Commit `f6ef5c70b7e4d4887ab161cae21e23cc6d171e99` adds the missing
+`--frame-meter` observer. It follows the app's implemented publication path,
+not the tempting desktop proxies: schedule a host check after each 100,000
+guest instructions, regularly publish at no more than 30 Hz plus the app's
+terminal publication, copy all 614,400 raw scanout bytes, and feed one
+little-endian word every 397 bytes into the same sampled signature. That is
+1,548 sampled words / 6,192 touched bytes per live publication. Changed
+signatures are accumulated in the same at-least-0.5-second windows as the app.
+
+One source comment beside the app counter is wrong and should not be used for
+arithmetic: it says 460,800 bytes at up to 60 Hz and roughly 1,160 sampled
+words. The executed definitions say 614,400 bytes, 30 Hz, and 1,548 words. The
+desktop meter follows the executed code. The signature's error direction is
+also pinned by a startup self-check: an unsampled tiny change can be missed,
+but the observer cannot invent a changed frame.
+
+This is still a desktop proxy. `bootkernel` has host diagnostic overhead the
+app does not, the CPUs differ, and it does not reproduce UIKit's concurrent
+CGImage work. Its report states all three limits before printing a number. The
+100,000-instruction schedule is checked inside the harness's existing 1/1,024
+gate, so an observation can be up to 1,023 guest instructions late; the report
+states that quantisation too. A host clock failure or backwards step makes the
+run exit nonzero instead of returning a flattering rate.
+
+The clean detached RelWithDebInfo binary for that exact commit has SHA-256
+`67F8AC16F9309AF11D686DC66A3740306D76167808C55F642F7F86DFBA4C7074`.
+The local suite passed 54/54. GitHub Actions independently passed every core
+matrix in run `30729123340` (including sanitizers and warnings-as-errors) and
+the ad-hoc iOS IPA build in `30729123349`, both at that exact SHA.
+
+r360 restored the native, HLE-off r354 animation seed at 7.54 B, used that
+exact binary, injected no input, and stopped at exactly 7.55 B with exit 0.
+The meter covered 10 M guest instructions in 2.330352 host seconds, or 4.291 M
+guest instructions/s in this diagnostic harness. All 50 publications found a
+live CLCD surface. Six had a changed sampled signature, at deterministic guest
+positions from 7,540,200,448 through 7,548,800,000:
+
+| measurement | r360 |
+|---|---:|
+| changed-publication instruction gap, min / mean / max | 1,200,128 / 1,719,910.4 / 1,999,872 |
+| host-time gap, min / mean / max | 0.270964 / 0.401318 / 0.458028 s |
+| completed 0.5 s windows | 4 |
+| app-style FPS, last / min / mean / max | 1.990 / 1.958 / 2.916 / 3.995 |
+| windows at 30 fps or more | 0 |
+
+The window mean includes the app's deliberate first-live-signature count and
+is therefore not the reciprocal of the five inter-change gaps. The gap mean
+is the cleaner steady cadence for this short sample: at a hypothetical fixed
+30 changes/s it corresponds to about **51.6 M guest instructions/s**. Applying
+the older target-device report of 25 M/s linearly would project about 14.5
+changes/s, but that is an inference from an older key-generation run, not a
+current target measurement. Neither number may be labelled iPhone FPS.
+
+r361 is the exact same executable, snapshot, media setup, cap and no-input
+window with only `--frame-meter` omitted. Both arms ended at the same PC/CPSR,
+the same active CLCD state and frame counter, zero storage failures, and 2/2 raw
+redirects/completions. Their per-run framebuffer PPMs are byte-identical at
+SHA-256
+`0B24F372055080E78C7770A90B45CA8328B275212765B7FB05E465B61B545A51`;
+their final 466,825,216-byte work images are byte-identical at
+`94D0E05B2DEF54AE5C26F6DA4CF8C6FAB68AF3ED4BE8E9C41C5F29596E46B8EF`.
+That proves the observer did not change those checked guest outputs. It does
+not prove every byte of machine RAM was equal because this pair did not write
+terminal machine snapshots.
+
+The brutal conclusion is narrower and more useful than either earlier story.
+This post-keygen lock-slider return really is a changed-frame workload, and on
+this desktop harness it is a roughly 2--4 fps workload, not 30. Its observed
+instruction cost is about ten times smaller than the old 16.7 M/frame
+home-screen-swipe figure, so it does **not** validate or invalidate that other
+workload. Final acceptance still requires the counter in the real iOS app on
+the target device and a cold armed/disarmed pair. Snapshots remain the right
+fast iteration tool; they are not cold-boot acceptance evidence.
