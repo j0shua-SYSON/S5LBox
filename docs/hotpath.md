@@ -2280,3 +2280,105 @@ home-screen-swipe figure, so it does **not** validate or invalidate that other
 workload. Final acceptance still requires the counter in the real iOS app on
 the target device and a cold armed/disarmed pair. Snapshots remain the right
 fast iteration tool; they are not cold-boot acceptance evidence.
+
+### r362--r364: HLE changes guest cadence, but it is still nowhere near 30 fps
+
+r362 and r363 repeated r360's exact r354 restore, no-input window, media setup,
+frame meter and 7.55 B cap with the exact `f6ef5c7` binary. The only behavioural
+change was `--hle`. Both runs exited zero, handled all 24 `ogl_poly_scan` roots,
+kept the CLCD active, ended at the same PC/CPSR and guest frame counter, and
+produced the same terminal PPM. More importantly, their changed-publication
+positions were guest-deterministic: both recorded nine changes at exactly the
+same instruction counts from 7,540,200,448 through 7,549,200,360.
+
+| measurement | r360 native | r362 HLE | r363 HLE repeat |
+|---|---:|---:|---:|
+| host span | 2.330352 s | 2.774689 s | 2.744383 s |
+| guest retired/s | 4.291 M | 3.604 M | 3.644 M |
+| changed signatures | 6 | 9 | 9 |
+| mean instruction gap | 1,719,910.4 | 1,124,989.0 | 1,124,989.0 |
+| mean host-time gap | 0.401318 s | 0.312201 s | 0.308342 s |
+| app-style window mean / max | 2.916 / 3.995 | 3.385 / 5.627 | 3.454 / 5.664 |
+| windows at least 30 fps | 0 | 0 | 0 |
+
+This is a real guest-progress improvement and a host-throughput regression at
+the same time: the HLE arm needs about 22.2% fewer guest instructions between
+changed publications, but executes guest instructions about 15% more slowly.
+It is not a 30 fps result. The repeat proves the instruction positions, not the
+host timings, are deterministic.
+
+r364 then probed the four hottest CoreGraphics leaves in the same HLE window.
+`_argb32_sample_ARGB32` was live 267 times; `_argb32_image_mark` and
+`_argb32_image_mark_RGB32` were each live nine times, and
+`_CGSBlendRGBA8888toRGBA8888` was live eight times. The probe overhead makes
+r364's wall time unsuitable for a speed comparison. It does establish that the
+sampler is the next live leaf; it does not establish that transcribing its large
+multi-path body will be a net win.
+
+One product gap remains separate from those numbers: `tools/ios3_hle.c` is
+linked into `bootkernel`, but the iOS app does not compile or drive it. These are
+desktop experiments until that integration exists and the target app measures
+them. A desktop HLE result must not be reported as an app improvement.
+
+### r365: the MBX submit story was wrong, and the hardware path is still black
+
+r365 paid for the required exact cold run because every retained fast graphics
+checkpoint was created on the software-renderer path. It used `--mbx`, kept HLE
+off, probed the three addresses previously called kernel submit sites plus
+`mbx2DCtxBlitCopy`, enabled the MBX register histogram, and stopped exactly at
+5.6 B. The child exited zero after 1,896.241 seconds. Storage reported zero
+failures and 2/2 raw redirects/completions.
+
+The result corrects the inherited diagnosis:
+
+| event | count |
+|---|---:|
+| userspace `mbx2DCtxBlitCopy` | 12 |
+| kernel `0xc077eb2c` | 0 |
+| kernel `0xc077f374` | 1 |
+| kernel `0xc077ffe8` | 2 |
+| writes to `0x6d8` | 4, not 3 |
+| writes to `0x12c` | 1, value `0x00000400` |
+
+The three kernel addresses are calls to the same `AppleMBX+0xe854` synchronous
+startup-transfer helper. That helper programs `0x824/0x828/0x82c/0x838/0x83c`,
+writes `0x09000000` to `0x6d8`, polls status bit 6, and acknowledges it. They
+are not one call site per userspace blit.
+
+The real userspace path is named and much less speculative:
+
+    mbx2DCtxBlitCopy -> copyDispatchEVT2 -> mbx3DCtxBlitCopy
+      -> mbxSubmitCommand -> mbxSubmitBuffer_no_lock
+      -> IOConnectMethodScalarIScalarO(selector 3)
+
+The matching kernel command-copy helper at `AppleMBX+0x2188` copies a variable
+packet into the mapped MBX EDRAM ring and advances the producer by writing
+`0x12c`. Twelve layer blits were therefore batched into one 1 KiB submission.
+The old phrase "12 blits, only 2 completions" compared different layers of the
+stack and is withdrawn.
+
+The current model couples both bit-6 startup completion and bit-10 2D
+completion to `0x6d8`. It also serves reads of `0x12c` solely from `m->status`,
+so the guest's real producer write is not retained in the value it reads back.
+That explains the measured sequence without pretending it renders anything:
+AppleMBX reaches Graphics Recovery with `2DIdle=0` and
+`CompletedIntStatus=0x400`.
+
+The screen is not merely slow. It is black: 384 of 460,800 RGB bytes are
+nonzero, destination vram slot 3 contains zero nonzero bytes, and visual
+inspection confirms a black frame. Raising a completion on the newly identified
+write would make the driver proceed while moving zero pixels. That is not a
+graphics fix and must not be presented as one. The next honest implementation
+must either execute the submitted command data before completing it, or replace
+the named MBX2D blit with a validated native operation and compare its pixels
+against the software-renderer result.
+
+r365 also created a separate diagnostic checkpoint; it does not replace the
+normal r350/r354 checkpoints and is not acceptance evidence:
+
+    work/r365-cold-mbx-submit-paths-5600m/post-5600m.bin
+      SHA-256 E3ACDD25A1A72EB210CBE6CEEADDCE1774A4462A3E444BABFAD0C47F33B6EA28
+    work/r365-cold-mbx-submit-paths-5600m/post-5600m.bin.mdimage
+      SHA-256 24A24F0A440A7F8AD3F56CED76ED935CA19165E459B7A1194D4D54E286413B40
+    work/r365-cold-mbx-submit-paths-5600m/post-5600m.bin.mdstate
+      SHA-256 172A1C351583EA6D93C19D57A771670E10047CB79AEFA3C54FD7AC586076C82F
