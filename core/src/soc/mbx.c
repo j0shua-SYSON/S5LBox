@@ -86,7 +86,11 @@
 #define MBX_2D_SUBMIT          0xf0000000u
 #define MBX_2D_BLEND_TAG       0x20000004u
 #define MBX_2D_BLEND_EQUATION  0x095ff000u
+#define MBX_2D_OPAQUE_GLOBAL_FACTORS 0x0d500000u
+#define MBX_2D_GLOBAL_ALPHA_MASK     0x000ff000u
 #define MBX_2D_BLEND_MODE      0x8002ccccu
+#define MBX_2D_FILL_MODE       0x8000f0f0u
+#define MBX_2D_FILL_COLOR      0xff000000u
 
 /*
  * The command-copy helper advances a software cursor, but the actual submit
@@ -410,6 +414,7 @@ static bool mbx_gart_write(const s5l_mbx_t *m, const arm_bus_t *bus,
 }
 
 static uint32_t mbx_premultiplied_over(uint32_t dst, uint32_t src);
+static uint32_t mbx_modulate_vertex_alpha(uint32_t src, uint32_t alpha);
 
 struct mbx_2d_job {
     uint32_t target;
@@ -571,6 +576,87 @@ static bool mbx_stage_simple_copy(s5l_mbx_t *m, const arm_bus_t *bus,
     return true;
 }
 
+static bool mbx_stage_lower_black_fill(s5l_mbx_t *m,
+                                       const arm_bus_t *bus,
+                                       uint32_t packet_off,
+                                       uint32_t shadow_target,
+                                       uint8_t *shadow,
+                                       struct mbx_2d_job *job,
+                                       const char **why) {
+    memset(job, 0, sizeof *job);
+    uint32_t w[MBX_2D_COPY_WORDS];
+    for (unsigned i = 0; i < MBX_2D_COPY_WORDS; i++)
+        w[i] = mbx_edram_word(m, packet_off + i * 4u);
+
+    /* r391's first post-unlock packet clears the complete display below the
+     * 20-pixel status bar. r397 captured the same clear divided atomically at
+     * row 389. Accept those three literal rectangles and no other colour,
+     * raster operation, or geometry. */
+    uint32_t top = 0u, bottom = 0u;
+    if (w[8] == 0x00000014u && w[9] == 0x014001e0u) {
+        top = 20u;
+        bottom = 480u;
+    } else if (w[8] == 0x00000014u && w[9] == 0x01400185u) {
+        top = 20u;
+        bottom = 389u;
+    } else if (w[8] == 0x00000185u && w[9] == 0x014001e0u) {
+        top = 389u;
+        bottom = 480u;
+    }
+    if ((w[0] != MBX_2D_COMMAND_HEADER && w[0] != MBX_2D_SUBMIT) ||
+        w[2] != 0x94060500u || w[3] != 0u || w[4] != 0x30000000u ||
+        w[5] != 0x60800200u || w[6] != MBX_2D_FILL_MODE ||
+        w[7] != MBX_2D_FILL_COLOR || !top) {
+        if (why) *why = "packet is not the captured lower-screen black fill";
+        return false;
+    }
+    for (unsigned i = 10; i < MBX_2D_COPY_WORDS; i++) {
+        if (w[i] != MBX_2D_END) {
+            if (why) *why = "solid-fill packet terminators are incomplete";
+            return false;
+        }
+    }
+    if ((w[1] & 3u) ||
+        (uint64_t)w[1] + MBX_2D_SURFACE_BYTES >
+            (uint64_t)UINT32_MAX + 1u ||
+        (shadow && w[1] != shadow_target)) {
+        if (why) *why = "solid-fill target is unaligned or differs within a batch";
+        return false;
+    }
+
+    const uint32_t height = bottom - top;
+    const uint32_t total = MBX_2D_BGRA_STRIDE * height;
+    for (uint32_t row = 0; row < height; row++) {
+        uint32_t dst = w[1] + (top + row) * MBX_2D_BGRA_STRIDE;
+        if (!mbx_gart_validate(m, bus, dst, MBX_2D_BGRA_STRIDE, why))
+            return false;
+    }
+
+    uint8_t *pixels = malloc(total);
+    if (!pixels) {
+        if (why) *why = "host allocation for staged solid fill failed";
+        return false;
+    }
+    for (uint32_t i = 0; i < total; i += 4u) {
+        pixels[i] = 0u;
+        pixels[i + 1u] = 0u;
+        pixels[i + 2u] = 0u;
+        pixels[i + 3u] = 0xffu;
+    }
+    if (shadow)
+        memcpy(shadow + top * MBX_2D_BGRA_STRIDE, pixels, total);
+
+    job->target = w[1];
+    job->dst_x = 0u;
+    job->dst_y = top;
+    job->width = MBX_2D_WIDTH;
+    job->height = height;
+    job->row_bytes = MBX_2D_BGRA_STRIDE;
+    job->total = total;
+    job->pixels = pixels;
+    return true;
+}
+
 static bool mbx_stage_premultiplied_copy(s5l_mbx_t *m,
                                          const arm_bus_t *bus,
                                          uint32_t packet_off,
@@ -584,17 +670,25 @@ static bool mbx_stage_premultiplied_copy(s5l_mbx_t *m,
         w[i] = mbx_edram_word(m, packet_off + i * 4u);
 
     /* _pack2DCtxBlitCopy at 0x30e1c3c4 inserts the two extra words only when
-     * ctx+0x35 enables blending. The retained clock/date packets carry the
-     * same factors QuartzCore passed to _mbx2DSetBlendEquation: source ONE,
-     * destination ONE_MINUS_SRC_ALPHA, and global alpha 255. */
+     * ctx+0x35 enables blending. The retained clock/date packets use the
+     * 0x095 factors at global alpha 255. r395 exposed QuartzCore's other
+     * simple branch from RenderMBX2D::set_tex_blend_mode (0x3123a9c8): fixed
+     * 0x0d5 factors plus a variable byte at bits 12..19. Its captured source
+     * is wholly opaque, so that branch is staged only as global-alpha
+     * modulation followed by premultiplied source-over. */
+    bool premultiplied_over = w[6] == MBX_2D_BLEND_EQUATION;
+    bool opaque_global =
+        (w[6] & ~MBX_2D_GLOBAL_ALPHA_MASK) ==
+        MBX_2D_OPAQUE_GLOBAL_FACTORS;
     if ((w[0] != MBX_2D_COMMAND_HEADER && w[0] != MBX_2D_SUBMIT) ||
         (w[2] & 0xffff8000u) != 0x94060000u ||
         (w[4] & 0xf8002000u) != 0x30000000u ||
-        w[5] != MBX_2D_BLEND_TAG || w[6] != MBX_2D_BLEND_EQUATION ||
+        w[5] != MBX_2D_BLEND_TAG ||
+        (!premultiplied_over && !opaque_global) ||
         w[7] != 0x60800200u || w[8] != MBX_2D_BLEND_MODE ||
         w[9] != 0xffffffffu ||
         (w[10] & ~0x1fff1fffu) || (w[11] & ~0x1fff1fffu)) {
-        if (why) *why = "packet is not the decoded premultiplied-over copy form";
+        if (why) *why = "packet is not a decoded blended-copy form";
         return false;
     }
     for (unsigned i = 12; i < MBX_2D_BLEND_WORDS; i++) {
@@ -675,12 +769,21 @@ static bool mbx_stage_premultiplied_copy(s5l_mbx_t *m,
     for (uint32_t i = 0; i < total && ok; i += 4u) {
         uint32_t src = mbx_load_le32(source + i);
         uint32_t alpha = src >> 24;
-        if ((src & 0xffu) > alpha || ((src >> 8) & 0xffu) > alpha ||
-            ((src >> 16) & 0xffu) > alpha) {
+        if (opaque_global && alpha != 0xffu) {
+            if (why) *why = "global-alpha 2D source is not opaque BGRA8";
+            ok = false;
+            break;
+        }
+        if (!opaque_global &&
+            ((src & 0xffu) > alpha || ((src >> 8) & 0xffu) > alpha ||
+             ((src >> 16) & 0xffu) > alpha)) {
             if (why) *why = "2D source is not premultiplied BGRA8";
             ok = false;
             break;
         }
+        if (opaque_global)
+            src = mbx_modulate_vertex_alpha(
+                src, (w[6] & MBX_2D_GLOBAL_ALPHA_MASK) >> 12);
         uint32_t blended = mbx_premultiplied_over(
             mbx_load_le32(pixels + i), src);
         pixels[i] = (uint8_t)blended;
@@ -744,6 +847,12 @@ static bool mbx_stage_2d_packet(s5l_mbx_t *m, const arm_bus_t *bus,
                                            shadow_target, shadow, job, why))
             return false;
         *packet_words = MBX_2D_BLEND_WORDS;
+    } else if (mbx_edram_word(m, packet_off + 6u * 4u) ==
+               MBX_2D_FILL_MODE) {
+        if (!mbx_stage_lower_black_fill(m, bus, packet_off,
+                                        shadow_target, shadow, job, why))
+            return false;
+        *packet_words = MBX_2D_COPY_WORDS;
     } else {
         if (!mbx_stage_simple_copy(m, bus, packet_off,
                                    shadow_target, shadow, job, why))
@@ -912,6 +1021,21 @@ static uint32_t mbx_premultiplied_over(uint32_t dst, uint32_t src) {
         uint32_t s = (src >> shift) & 0xffu;
         uint32_t d = (dst >> shift) & 0xffu;
         out |= (s + ((d * inv) >> 8)) << shift;
+    }
+    return out;
+}
+
+/* QuartzCore's software rasterizer modulates a sampled channel as
+ * `vertex * (texture + 1) >> 8`. The r180 software frame and r382 MBX frame
+ * independently pin that equation for these status sprites: an unmodulated
+ * source channel 255 becomes 191 under the captured 0xbf vertex alpha, and
+ * 183 becomes 137. Applying one alpha to every premultiplied BGRA8 channel
+ * preserves the source-over invariant and the identity endpoint at 255. */
+static uint32_t mbx_modulate_vertex_alpha(uint32_t src, uint32_t alpha) {
+    uint32_t out = 0u;
+    for (unsigned shift = 0; shift < 32u; shift += 8u) {
+        uint32_t component = (src >> shift) & 0xffu;
+        out |= (((component + 1u) * alpha) >> 8) << shift;
     }
     return out;
 }
@@ -1210,17 +1334,34 @@ static bool mbx_execute_first_tiled_over(s5l_mbx_t *m,
 
 struct mbx_3d_status_form {
     uint32_t xclip, yclip;
+    uint32_t target;
+    uint32_t blend_surface;
+    uint32_t list_word;
+    bool variable_vertex_alpha;
+    bool has_quad_variant;
+    bool boundary_override;
+    bool source_must_be_zero;
     uint32_t tile_x0, tile_x1, tile_y0, tile_y1;
     uint32_t left, top, width, height;
     uint32_t source_row0;
     uint32_t source_stride;
     uint32_t source_control;
+    uint32_t boundary[8];
     uint32_t quad[44];
+    uint32_t quad_variant[44];
 };
 
 /* These are literal transcriptions of the live object streams. Words 2 and 5
  * are address fields and are validated separately against each form's control
- * bits and FBSTART; every other word must match exactly. */
+ * bits and FBSTART; every other word must match exactly. A zero target accepts
+ * either surface used by the earlier status forms. The slider label is the one
+ * exception: r385/r387/r389 measured the same word at all four vertices while
+ * its high byte stepped b4, 8a, 61, 37 and its low 24 bits stayed zero. Only
+ * those four words may vary, must remain identical, and are consumed as the
+ * per-vertex alpha established by the software-renderer pixel oracle. The
+ * transparent transition transfer has two complete, separately captured quad
+ * streams from r391/r392. They differ in two setup words and all four vertex
+ * alpha words, so the alternatives are matched atomically; mixtures fail. */
 static const struct mbx_3d_status_form mbx_3d_status_forms[] = {
     {
         .xclip = 0x00a80098u, .yclip = 0x00200000u,
@@ -1324,34 +1465,229 @@ static const struct mbx_3d_status_form mbx_3d_status_forms[] = {
             0x3f280000u, 0x3f000000u, 0x3e9e8000u, 0x3c800000u,
         },
     },
+    {
+        .xclip = 0x01400000u, .yclip = 0x00200000u,
+        .target = 0x00998000u,
+        .tile_x0 = 0u, .tile_x1 = 0x27u,
+        .tile_y0 = 0u, .tile_y1 = 1u,
+        .left = 0u, .top = 0u, .width = 320u, .height = 20u,
+        .source_stride = 0x500u, .source_control = 0x0e500000u,
+        .quad = {
+            0xe0000000u, 0xa6218000u, 0u, 0xcd206c40u,
+            0xa7718000u, 0u, 0xae504ea0u, 0x22250e80u,
+            0x00000000u, 0x41a00000u, 0x00000000u, 0x00000000u,
+            0x43a00000u, 0x41a00000u, 0x43a00000u, 0x00000000u,
+            0u, 0u, 0u, 0u,
+            0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+            0xbf000000u, 0x00000000u, 0x3f200000u, 0x00000000u,
+            0x3ca00000u, 0xbf000000u, 0x00000000u, 0x00000000u,
+            0x00000000u, 0x00000000u, 0xbf000000u, 0x3f200000u,
+            0x3f200000u, 0x3ea00000u, 0x3ca00000u, 0xbf000000u,
+            0x3f200000u, 0x00000000u, 0x3ea00000u, 0x00000000u,
+        },
+    },
+    {
+        .xclip = 0x01400000u, .yclip = 0x00200000u,
+        .target = 0x00897000u,
+        .tile_x0 = 0u, .tile_x1 = 0x27u,
+        .tile_y0 = 0u, .tile_y1 = 1u,
+        .left = 0u, .top = 0u, .width = 320u, .height = 20u,
+        .source_stride = 0x500u, .source_control = 0x0e500000u,
+        .quad = {
+            0xe0000000u, 0xa6218000u, 0u, 0xcd206c40u,
+            0xa7718000u, 0u, 0xae504ea0u, 0x22250e80u,
+            0x00000000u, 0x41a00000u, 0x00000000u, 0x00000000u,
+            0x43a00000u, 0x41a00000u, 0x43a00000u, 0x00000000u,
+            0u, 0u, 0u, 0u,
+            0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+            0xbf000000u, 0x00000000u, 0x3f200000u, 0x00000000u,
+            0x3ca00000u, 0xbf000000u, 0x00000000u, 0x00000000u,
+            0x00000000u, 0x00000000u, 0xbf000000u, 0x3f200000u,
+            0x3f200000u, 0x3ea00000u, 0x3ca00000u, 0xbf000000u,
+            0x3f200000u, 0x00000000u, 0x3ea00000u, 0x00000000u,
+        },
+    },
+    {
+        .xclip = 0x01400000u, .yclip = 0x00200000u,
+        .target = 0x00a41000u,
+        .tile_x0 = 0u, .tile_x1 = 0x27u,
+        .tile_y0 = 0u, .tile_y1 = 1u,
+        .left = 0u, .top = 0u, .width = 320u, .height = 20u,
+        .source_stride = 0x500u, .source_control = 0x0e500000u,
+        .quad = {
+            0xe0000000u, 0xa6218000u, 0u, 0xcd206c40u,
+            0xa7718000u, 0u, 0xae504ea0u, 0x22250e80u,
+            0x00000000u, 0x41a00000u, 0x00000000u, 0x00000000u,
+            0x43a00000u, 0x41a00000u, 0x43a00000u, 0x00000000u,
+            0u, 0u, 0u, 0u,
+            0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+            0xbf000000u, 0x00000000u, 0x3f200000u, 0x00000000u,
+            0x3ca00000u, 0xbf000000u, 0x00000000u, 0x00000000u,
+            0x00000000u, 0x00000000u, 0xbf000000u, 0x3f200000u,
+            0x3f200000u, 0x3ea00000u, 0x3ca00000u, 0xbf000000u,
+            0x3f200000u, 0x00000000u, 0x3ea00000u, 0x00000000u,
+        },
+    },
+    {
+        .xclip = 0x01400000u, .yclip = 0x01e00010u,
+        .target = 0x00897000u, .blend_surface = 0x00998000u,
+        .list_word = 0x612000a8u,
+        .has_quad_variant = true,
+        .boundary_override = true, .source_must_be_zero = true,
+        .tile_x0 = 0u, .tile_x1 = 0x27u,
+        .tile_y0 = 1u, .tile_y1 = 0x1du,
+        .left = 296u, .top = 16u, .width = 21u, .height = 4u,
+        .source_row0 = 16u,
+        .source_stride = 0x60u, .source_control = 0x0e040000u,
+        .boundary = {
+            0x00000000u, 0x43f00000u, 0x00000000u, 0x41a00000u,
+            0x43a00000u, 0x43f00000u, 0x43a00000u, 0x41a00000u,
+        },
+        .quad = {
+            0xe0000000u, 0xa2218001u, 0u, 0xd6887610u,
+            0xa7718000u, 0u, 0xab504a90u, 0x22250e80u,
+            0x43940000u, 0x41a00000u, 0x43940000u, 0x00000000u,
+            0x439e8000u, 0x41a00000u, 0x439e8000u, 0x00000000u,
+            0u, 0u, 0u, 0u,
+            0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+            0x00000000u, 0x00000000u, 0x3f200000u, 0x3e940000u,
+            0x3ca00000u, 0x00000000u, 0x00000000u, 0x00000000u,
+            0x3e940000u, 0x00000000u, 0x00000000u, 0x3f280000u,
+            0x3f200000u, 0x3e9e8000u, 0x3ca00000u, 0x00000000u,
+            0x3f280000u, 0x00000000u, 0x3e9e8000u, 0x00000000u,
+        },
+        .quad_variant = {
+            0xe0000000u, 0xa2218001u, 0u, 0xcd206c40u,
+            0xa7718000u, 0u, 0xae504ea0u, 0x22250e80u,
+            0x43940000u, 0x41a00000u, 0x43940000u, 0x00000000u,
+            0x439e8000u, 0x41a00000u, 0x439e8000u, 0x00000000u,
+            0u, 0u, 0u, 0u,
+            0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+            0xbf000000u, 0x00000000u, 0x3f200000u, 0x3e940000u,
+            0x3ca00000u, 0xbf000000u, 0x00000000u, 0x00000000u,
+            0x3e940000u, 0x00000000u, 0xbf000000u, 0x3f280000u,
+            0x3f200000u, 0x3e9e8000u, 0x3ca00000u, 0xbf000000u,
+            0x3f280000u, 0x00000000u, 0x3e9e8000u, 0x00000000u,
+        },
+    },
+    {
+        .xclip = 0x01400000u, .yclip = 0x01e00010u,
+        .target = 0x00a41000u, .blend_surface = 0x00897000u,
+        .list_word = 0x612000a8u,
+        .boundary_override = true, .source_must_be_zero = true,
+        .tile_x0 = 0u, .tile_x1 = 0x27u,
+        .tile_y0 = 1u, .tile_y1 = 0x1du,
+        .left = 296u, .top = 16u, .width = 21u, .height = 4u,
+        .source_row0 = 16u,
+        .source_stride = 0x60u, .source_control = 0x0e040000u,
+        .boundary = {
+            0x00000000u, 0x43f00000u, 0x00000000u, 0x41a00000u,
+            0x43a00000u, 0x43f00000u, 0x43a00000u, 0x41a00000u,
+        },
+        .quad = {
+            0xe0000000u, 0xa2218001u, 0u, 0xcd206c40u,
+            0xa7718000u, 0u, 0xae504ea0u, 0x22250e80u,
+            0x43940000u, 0x41a00000u, 0x43940000u, 0x00000000u,
+            0x439e8000u, 0x41a00000u, 0x439e8000u, 0x00000000u,
+            0u, 0u, 0u, 0u,
+            0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+            0xbf000000u, 0x00000000u, 0x3f200000u, 0x3e940000u,
+            0x3ca00000u, 0xbf000000u, 0x00000000u, 0x00000000u,
+            0x3e940000u, 0x00000000u, 0xbf000000u, 0x3f280000u,
+            0x3f200000u, 0x3e9e8000u, 0x3ca00000u, 0xbf000000u,
+            0x3f280000u, 0x00000000u, 0x3e9e8000u, 0x00000000u,
+        },
+    },
+    {
+        .xclip = 0x01180070u, .yclip = 0x01c001a0u,
+        .target = 0x00897000u,
+        .variable_vertex_alpha = true,
+        .tile_x0 = 0x0eu, .tile_x1 = 0x22u,
+        .tile_y0 = 0x1au, .tile_y1 = 0x1bu,
+        .left = 114u, .top = 417u, .width = 161u, .height = 30u,
+        .source_stride = 0x2a0u, .source_control = 0x0e280000u,
+        .quad = {
+            0xe0000000u, 0xa5218001u, 0u, 0xcd206c40u,
+            0xa7718000u, 0u, 0xae504ea0u, 0x22250e80u,
+            0x42e40000u, 0x43df8000u, 0x42e40000u, 0x43d08000u,
+            0x43898000u, 0x43df8000u, 0x43898000u, 0x43d08000u,
+            0u, 0u, 0u, 0u,
+            0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+            0u, 0u, 0x3f700000u, 0x3de40000u,
+            0x3edf8000u, 0u, 0u, 0u,
+            0x3de40000u, 0x3ed08000u, 0u, 0x3f210000u,
+            0x3f700000u, 0x3e898000u, 0x3edf8000u, 0u,
+            0x3f210000u, 0u, 0x3e898000u, 0x3ed08000u,
+        },
+    },
+    {
+        .xclip = 0x01180070u, .yclip = 0x01c001a0u,
+        .target = 0x00a33000u,
+        .variable_vertex_alpha = true,
+        .tile_x0 = 0x0eu, .tile_x1 = 0x22u,
+        .tile_y0 = 0x1au, .tile_y1 = 0x1bu,
+        .left = 114u, .top = 417u, .width = 161u, .height = 30u,
+        .source_stride = 0x2a0u, .source_control = 0x0e280000u,
+        .quad = {
+            0xe0000000u, 0xa5218001u, 0u, 0xcd206c40u,
+            0xa7718000u, 0u, 0xae504ea0u, 0x22250e80u,
+            0x42e40000u, 0x43df8000u, 0x42e40000u, 0x43d08000u,
+            0x43898000u, 0x43df8000u, 0x43898000u, 0x43d08000u,
+            0u, 0u, 0u, 0u,
+            0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+            0u, 0u, 0x3f700000u, 0x3de40000u,
+            0x3edf8000u, 0u, 0u, 0u,
+            0x3de40000u, 0x3ed08000u, 0u, 0x3f210000u,
+            0x3f700000u, 0x3e898000u, 0x3edf8000u, 0u,
+            0x3f210000u, 0u, 0x3e898000u, 0x3ed08000u,
+        },
+    },
+    {
+        .xclip = 0x01180070u, .yclip = 0x01c001a0u,
+        .target = 0x00998000u,
+        .variable_vertex_alpha = true,
+        .tile_x0 = 0x0eu, .tile_x1 = 0x22u,
+        .tile_y0 = 0x1au, .tile_y1 = 0x1bu,
+        .left = 114u, .top = 417u, .width = 161u, .height = 30u,
+        .source_stride = 0x2a0u, .source_control = 0x0e280000u,
+        .quad = {
+            0xe0000000u, 0xa5218001u, 0u, 0xcd206c40u,
+            0xa7718000u, 0u, 0xae504ea0u, 0x22250e80u,
+            0x42e40000u, 0x43df8000u, 0x42e40000u, 0x43d08000u,
+            0x43898000u, 0x43df8000u, 0x43898000u, 0x43d08000u,
+            0u, 0u, 0u, 0u,
+            0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+            0u, 0u, 0x3f700000u, 0x3de40000u,
+            0x3edf8000u, 0u, 0u, 0u,
+            0x3de40000u, 0x3ed08000u, 0u, 0x3f210000u,
+            0x3f700000u, 0x3e898000u, 0x3edf8000u, 0u,
+            0x3f210000u, 0u, 0x3e898000u, 0x3ed08000u,
+        },
+    },
 };
 
 static const struct mbx_3d_status_form *
 mbx_3d_find_status_form(const s5l_mbx_t *m) {
     uint32_t xclip = m->reg[S5L_MBX_FBXCLIP / 4u];
     uint32_t yclip = m->reg[S5L_MBX_FBYCLIP / 4u];
+    uint32_t target = m->reg[S5L_MBX_FBSTART / 4u];
     for (unsigned i = 0;
-         i < sizeof mbx_3d_status_forms / sizeof mbx_3d_status_forms[0]; i++)
-        if (mbx_3d_status_forms[i].xclip == xclip &&
-            mbx_3d_status_forms[i].yclip == yclip)
-            return &mbx_3d_status_forms[i];
+         i < sizeof mbx_3d_status_forms / sizeof mbx_3d_status_forms[0]; i++) {
+        const struct mbx_3d_status_form *form = &mbx_3d_status_forms[i];
+        if (form->xclip == xclip && form->yclip == yclip &&
+            (!form->target || form->target == target))
+            return form;
+    }
     return NULL;
 }
 
 static uint32_t
 mbx_3d_status_boundary_expected(const struct mbx_3d_status_form *form,
-                                uint32_t off) {
-    switch (off) {
-    case 0x0b8u: return form->quad[8];
-    case 0x0bcu: return form->quad[9];
-    case 0x0c0u: return form->quad[10];
-    case 0x0c4u: return form->quad[11];
-    case 0x0c8u: return form->quad[12];
-    case 0x0ccu: return form->quad[13];
-    case 0x0d0u: return form->quad[14];
-    case 0x0d4u: return form->quad[15];
-    default: break;
-    }
+                                 uint32_t off) {
+    if (off >= 0x0b8u && off <= 0x0d4u)
+        return form->boundary_override
+            ? form->boundary[(off - 0x0b8u) / 4u]
+            : form->quad[8u + (off - 0x0b8u) / 4u];
     static const struct mbx_3d_word nonzero[] = {
         {0x080u, 0x22206f80u}, {0x088u, 0x45800000u},
         {0x094u, 0x45800000u}, {0x098u, 0x45800000u},
@@ -1412,8 +1748,10 @@ static bool mbx_execute_status_sprite(s5l_mbx_t *m,
         }
     }
 
-    static const uint32_t list_words[4] = {
-        0x60200020u, 0x6020002du, 0x61a0007cu, 0xf0000000u
+    const uint32_t list_words[4] = {
+        0x60200020u, 0x6020002du,
+        form->list_word ? form->list_word : 0x61a0007cu,
+        0xf0000000u
     };
     for (unsigned i = 0; i < 4u; i++) {
         uint32_t value;
@@ -1458,6 +1796,12 @@ static bool mbx_execute_status_sprite(s5l_mbx_t *m,
     }
 
     uint32_t source = 0u;
+    uint32_t blend_surface = form->blend_surface
+        ? form->blend_surface : target;
+    uint32_t vertex_alpha_word = 0u;
+    bool vertex_alpha_seen = false;
+    bool quad_matches = true;
+    bool quad_variant_matches = form->has_quad_variant;
     for (unsigned i = 0; i < 44u; i++) {
         uint32_t value;
         if (!mbx_gart_u32(m, bus, object + 0x1f0u + i * 4u,
@@ -1471,17 +1815,47 @@ static bool mbx_execute_status_sprite(s5l_mbx_t *m,
             source = mbx_3d_decode_address(value);
         } else if (i == 5u) {
             if ((value & ~MBX_3D_ADDRESS_MASK) != 0x0e500000u ||
-                mbx_3d_decode_address(value) != target) {
-                if (why) *why = "glyph destination does not resolve to FBSTART";
+                mbx_3d_decode_address(value) != blend_surface) {
+                if (why) *why = "status blend surface differs from the captured form";
                 return false;
             }
-        } else if (value != form->quad[i]) {
-            if (why) *why = "textured status sprite differs from its captured form";
-            return false;
+        } else if (i == 24u || i == 29u || i == 34u || i == 39u) {
+            if (!vertex_alpha_seen) {
+                vertex_alpha_word = value;
+                vertex_alpha_seen = true;
+            }
+            if (form->variable_vertex_alpha) {
+                if (value & 0x00ffffffu) {
+                    if (why)
+                        *why = "status vertex alpha has nonzero colour bits";
+                    return false;
+                }
+                if (value != vertex_alpha_word) {
+                    if (why)
+                        *why = "status vertex alpha differs between vertices";
+                    return false;
+                }
+            } else {
+                quad_matches = quad_matches && value == form->quad[i];
+                quad_variant_matches = quad_variant_matches &&
+                    value == form->quad_variant[i];
+            }
+        } else {
+            quad_matches = quad_matches && value == form->quad[i];
+            quad_variant_matches = quad_variant_matches &&
+                value == form->quad_variant[i];
         }
     }
     if (!source) {
         if (why) *why = "status source resolves to GPU address zero";
+        return false;
+    }
+    if (!vertex_alpha_seen) {
+        if (why) *why = "status sprite has no vertex alpha";
+        return false;
+    }
+    if (!quad_matches && !quad_variant_matches) {
+        if (why) *why = "textured status sprite differs from its captured form";
         return false;
     }
 
@@ -1493,9 +1867,13 @@ static bool mbx_execute_status_sprite(s5l_mbx_t *m,
     uint64_t target_end = (uint64_t)target +
                           (uint64_t)(form->top + form->height - 1u) *
                               MBX_3D_TARGET_STRIDE +
-                          (uint64_t)(form->left + form->width) * 4u;
+                           (uint64_t)(form->left + form->width) * 4u;
+    uint64_t blend_end = (uint64_t)blend_surface +
+                         (uint64_t)(form->top + form->height - 1u) *
+                             MBX_3D_TARGET_STRIDE +
+                         (uint64_t)(form->left + form->width) * 4u;
     if (row_bytes > form->source_stride || source_end > UINT32_MAX ||
-        target_end > UINT32_MAX) {
+        target_end > UINT32_MAX || blend_end > UINT32_MAX) {
         if (why) *why = "status source or destination rectangle overflows";
         return false;
     }
@@ -1504,7 +1882,11 @@ static bool mbx_execute_status_sprite(s5l_mbx_t *m,
                        (form->source_row0 + row) * form->source_stride;
         uint32_t dst = target + (form->top + row) * MBX_3D_TARGET_STRIDE +
                        form->left * 4u;
+        uint32_t background = blend_surface +
+                              (form->top + row) * MBX_3D_TARGET_STRIDE +
+                              form->left * 4u;
         if (!mbx_gart_validate(m, bus, src, row_bytes, why) ||
+            !mbx_gart_validate(m, bus, background, row_bytes, why) ||
             !mbx_gart_validate(m, bus, dst, row_bytes, why))
             return false;
     }
@@ -1521,15 +1903,21 @@ static bool mbx_execute_status_sprite(s5l_mbx_t *m,
     for (uint32_t row = 0; row < form->height && ok; row++) {
         uint32_t src = source +
                        (form->source_row0 + row) * form->source_stride;
-        uint32_t dst = target + (form->top + row) * MBX_3D_TARGET_STRIDE +
-                       form->left * 4u;
+        uint32_t background = blend_surface +
+                              (form->top + row) * MBX_3D_TARGET_STRIDE +
+                              form->left * 4u;
         ok = mbx_gart_read(m, bus, src, source_pixels + row * row_bytes,
                            row_bytes, why) &&
-             mbx_gart_read(m, bus, dst, pixels + row * row_bytes,
+             mbx_gart_read(m, bus, background, pixels + row * row_bytes,
                            row_bytes, why);
     }
     for (uint32_t i = 0; i < total && ok; i += 4u) {
         uint32_t src = mbx_load_le32(source_pixels + i);
+        if (form->source_must_be_zero && src != 0u) {
+            if (why) *why = "captured transparent status source is nonzero";
+            ok = false;
+            break;
+        }
         uint32_t alpha = src >> 24;
         if ((src & 0xffu) > alpha || ((src >> 8) & 0xffu) > alpha ||
             ((src >> 16) & 0xffu) > alpha) {
@@ -1537,6 +1925,7 @@ static bool mbx_execute_status_sprite(s5l_mbx_t *m,
             ok = false;
             break;
         }
+        src = mbx_modulate_vertex_alpha(src, vertex_alpha_word >> 24);
         uint32_t blended = mbx_premultiplied_over(
             mbx_load_le32(pixels + i), src);
         pixels[i] = (uint8_t)blended;

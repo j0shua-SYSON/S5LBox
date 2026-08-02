@@ -935,14 +935,16 @@ void     s5l_mbx_write(s5l_mbx_t *m, uint32_t off, uint32_t val);
  * separate, fixed write 0xf0000000 to ring+0. The machine supplies its bus
  * because the MBX struct deliberately owns no host pointers except EDRAM, and
  * destination writes must remain visible to a frontend bus observer. Returns
- * true only after a decoded command committed pixels and raised 2D_SYNC. */
+ * true only after a decoded copy, measured premultiplied/global-alpha blend,
+ * or captured lower-screen black fill committed pixels and raised 2D_SYNC. */
 bool     s5l_mbx_process_2d(s5l_mbx_t *m, const arm_bus_t *bus,
                             uint32_t written_off, uint32_t value);
 
 /* Attempt an exactly decoded tiled 3D object after a STARTRENDER write. The
  * accepted forms are the captured 320x96 premultiplied source-over rectangle
- * plus the padlock, `Searching...`, and battery status sprites, including
- * their tile lists, object words, formats, coordinates and GART resources.
+ * plus the padlock, `Searching...`, battery, unlock-slider label, status-bar
+ * time, and transparent clipped surface-transfer forms, including their tile
+ * lists, object words, formats, coordinates and GART resources.
  * Returns true only after staged pixels commit and the three events AppleMBX
  * requires for 3DIdle (ISP, render complete, EVM deallocate) rise. */
 bool     s5l_mbx_process_3d(s5l_mbx_t *m, const arm_bus_t *bus,

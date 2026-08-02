@@ -265,10 +265,134 @@ static uint32_t test_over(uint32_t dst, uint32_t src) {
     return out;
 }
 
+static uint32_t test_modulate_vertex_alpha(uint32_t src, uint32_t alpha) {
+    uint32_t out = 0u;
+    for (unsigned shift = 0; shift < 32u; shift += 8u) {
+        uint32_t component = (src >> shift) & 0xffu;
+        out |= (((component + 1u) * alpha) >> 8) << shift;
+    }
+    return out;
+}
+
 static void test_map_gpu_page(s5l8900_t *m, uint32_t table,
                               uint32_t gpu, uint32_t pa) {
     m->bus.write32(m->bus.ctx,
         table + (((gpu >> 12) & 0x3ffu) * 4u), pa);
+}
+
+static void test_full_lower_surface_black_fill(void) {
+    enum { STRIDE = 0x500u, WIDTH = 320u, HEIGHT = 480u, TOP = 20u };
+    const uint32_t table2 = 0x08003000u;
+    const uint32_t target = 0x00897000u;
+    const uint32_t target_pa = 0x08040000u;
+    uint32_t packet[16] = {
+        0xa0060500u, target, 0x94060500u, 0x00000000u,
+        0x30000000u, 0x60800200u, 0x8000f0f0u, 0xff000000u,
+        0x00000014u, 0x014001e0u, 0x70000000u, 0x70000000u,
+        0x70000000u, 0x70000000u, 0x70000000u, 0x70000000u,
+    };
+
+    s5l8900_t m;
+    CHECK(s5l8900_init(&m, RAM_BASE, RAM_SIZE), "solid-fill machine init failed");
+    if (!m.ram) return;
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_GART2, table2);
+    for (uint32_t page = 0; page < STRIDE * HEIGHT; page += 0x1000u)
+        test_map_gpu_page(&m, table2, target + page, target_pa + page);
+
+    test_gpu_write32(&m, target + (TOP - 1u) * STRIDE, 0xff112233u);
+    test_gpu_write32(&m, target + (TOP - 1u) * STRIDE +
+                     (WIDTH - 1u) * 4u, 0xff445566u);
+    test_gpu_write32(&m, target + TOP * STRIDE, 0xffabcdefu);
+    test_gpu_write32(&m, target + (HEIGHT - 1u) * STRIDE +
+                     (WIDTH - 1u) * 4u, 0xff123456u);
+
+    write_packet(&m, RING, packet, 16u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + RING, 0xf0000000u);
+
+    uint32_t mismatches = 0u;
+    for (uint32_t y = TOP; y < HEIGHT; y++)
+        for (uint32_t x = 0; x < WIDTH; x++)
+            mismatches += test_gpu_read32(&m,
+                target + y * STRIDE + x * 4u) != 0xff000000u;
+    CHECK(mismatches == 0u,
+          "captured lower-screen fill left %u non-black pixels", mismatches);
+    CHECK(test_gpu_read32(&m, target + (TOP - 1u) * STRIDE) == 0xff112233u &&
+          test_gpu_read32(&m, target + (TOP - 1u) * STRIDE +
+                          (WIDTH - 1u) * 4u) == 0xff445566u,
+          "lower-screen fill changed the status-bar row");
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0x400u,
+          "lower-screen fill did not raise exactly 2D completion");
+
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x400u);
+    test_gpu_write32(&m, target + TOP * STRIDE, 0x89abcdefu);
+    packet[7] ^= 1u;
+    write_packet(&m, RING + 0x40u, packet, 16u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + RING, 0xf0000000u);
+    CHECK(test_gpu_read32(&m, target + TOP * STRIDE) == 0x89abcdefu,
+          "unknown solid colour changed the destination");
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
+          "unknown solid colour raised completion");
+
+    s5l8900_free(&m);
+}
+
+static void test_split_lower_surface_black_fill(void) {
+    enum { STRIDE = 0x500u, WIDTH = 320u, HEIGHT = 480u, TOP = 20u };
+    const uint32_t table2 = 0x08003000u;
+    const uint32_t target = 0x00998000u;
+    const uint32_t target_pa = 0x08040000u;
+    uint32_t first[16] = {
+        0xa0060500u, target, 0x94060500u, 0x00000000u,
+        0x30000000u, 0x60800200u, 0x8000f0f0u, 0xff000000u,
+        0x00000014u, 0x01400185u, 0x70000000u, 0x70000000u,
+        0x70000000u, 0x70000000u, 0x70000000u, 0x70000000u,
+    };
+    uint32_t second[16];
+    memcpy(second, first, sizeof second);
+    second[8] = 0x00000185u;
+    second[9] = 0x014001e0u;
+
+    s5l8900_t m;
+    CHECK(s5l8900_init(&m, RAM_BASE, RAM_SIZE),
+          "split-fill machine init failed");
+    if (!m.ram) return;
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_GART2, table2);
+    for (uint32_t page = 0; page < STRIDE * HEIGHT; page += 0x1000u)
+        test_map_gpu_page(&m, table2, target + page, target_pa + page);
+
+    test_gpu_write32(&m, target + (TOP - 1u) * STRIDE, 0xff112233u);
+    write_packet(&m, RING + 0x40u, first, 16u);
+    write_packet(&m, RING + 0x80u, second, 16u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + RING, 0xf0000000u);
+
+    uint32_t mismatches = 0u;
+    for (uint32_t y = TOP; y < HEIGHT; y++)
+        for (uint32_t x = 0; x < WIDTH; x++)
+            mismatches += test_gpu_read32(
+                &m, target + y * STRIDE + x * 4u) != 0xff000000u;
+    CHECK(mismatches == 0u,
+          "captured split fill left %u non-black pixels", mismatches);
+    CHECK(test_gpu_read32(&m, target + (TOP - 1u) * STRIDE) == 0xff112233u,
+          "split fill changed the status-bar row");
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0x400u,
+          "split fill batch did not raise exactly 2D completion");
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x400u);
+
+    uint32_t upper = target + TOP * STRIDE;
+    uint32_t lower = target + 389u * STRIDE;
+    test_gpu_write32(&m, upper, 0xffabcdefu);
+    test_gpu_write32(&m, lower, 0xff123456u);
+    second[9] ^= 1u;
+    write_packet(&m, RING + 0xc0u, first, 16u);
+    write_packet(&m, RING + 0x100u, second, 16u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + RING, 0xf0000000u);
+    CHECK(test_gpu_read32(&m, upper) == 0xffabcdefu &&
+          test_gpu_read32(&m, lower) == 0xff123456u,
+          "rejected split fill committed part of the batch");
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
+          "rejected split fill raised completion");
+
+    s5l8900_free(&m);
 }
 
 static void test_premultiplied_2d_clock_form(void) {
@@ -350,6 +474,87 @@ static void test_premultiplied_2d_clock_form(void) {
           "unknown 2D blend equation changed the destination");
     CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
           "unknown 2D blend equation raised completion");
+
+    s5l8900_free(&m);
+}
+
+static void test_opaque_global_alpha_2d_form(void) {
+    const uint32_t table2 = 0x08003000u;
+    const uint32_t source = 0x00900000u;
+    const uint32_t target = 0x00810000u;
+    const uint32_t source_pa = 0x08070000u;
+    const uint32_t target_pa = 0x08080000u;
+    static const uint32_t source_pixels[4] = {
+        0xff804020u, 0xff000000u, 0xffffffffu, 0xff201008u
+    };
+    static const uint32_t destination_pixels[4] = {
+        0xff102030u, 0x80405060u, 0xff708090u, 0x40a0b0c0u
+    };
+    uint32_t packet[18] = {
+        0xa0060500u, target, 0x94060010u, source,
+        0x30004000u, 0x20000004u, 0x0d5f8000u, 0x60800200u,
+        0x8002ccccu, 0xffffffffu, 0x00020003u, 0x00040005u,
+        0x70000000u, 0x70000000u, 0x70000000u, 0x70000000u,
+        0x70000000u, 0x70000000u,
+    };
+
+    s5l8900_t m;
+    CHECK(s5l8900_init(&m, RAM_BASE, RAM_SIZE),
+          "opaque-global machine init failed");
+    if (!m.ram) return;
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_GART2, table2);
+    test_map_gpu_page(&m, table2, source, source_pa);
+    test_map_gpu_page(&m, table2, target, target_pa);
+    test_map_gpu_page(&m, table2, target + 0x1000u, target_pa + 0x1000u);
+
+    for (unsigned i = 0; i < 2u; i++) {
+        test_gpu_write32(&m, source + 4u + i * 4u, source_pixels[i]);
+        test_gpu_write32(&m, source + 0x10u + 4u + i * 4u,
+                         source_pixels[2u + i]);
+        test_gpu_write32(&m, target + 3u * 0x500u + (2u + i) * 4u,
+                         destination_pixels[i]);
+        test_gpu_write32(&m, target + 4u * 0x500u + (2u + i) * 4u,
+                         destination_pixels[2u + i]);
+    }
+
+    write_packet(&m, RING + 0x40u, packet, 18u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + RING, 0xf0000000u);
+    uint32_t mismatches = 0u;
+    for (unsigned i = 0; i < 2u; i++) {
+        uint32_t modulated = test_modulate_vertex_alpha(source_pixels[i],
+                                                         0xf8u);
+        mismatches += test_gpu_read32(
+            &m, target + 3u * 0x500u + (2u + i) * 4u) !=
+            test_over(destination_pixels[i], modulated);
+        modulated = test_modulate_vertex_alpha(source_pixels[2u + i], 0xf8u);
+        mismatches += test_gpu_read32(
+            &m, target + 4u * 0x500u + (2u + i) * 4u) !=
+            test_over(destination_pixels[2u + i], modulated);
+    }
+    CHECK(mismatches == 0u,
+          "%u opaque global-alpha 2D pixels mismatched", mismatches);
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0x400u,
+          "opaque global-alpha blend did not raise exactly 2D completion");
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x400u);
+
+    uint32_t first = target + 3u * 0x500u + 2u * 4u;
+    test_gpu_write32(&m, first, 0x89abcdefu);
+    test_gpu_write32(&m, source + 4u, 0x80804020u);
+    write_packet(&m, RING + 0x88u, packet, 18u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + RING, 0xf0000000u);
+    CHECK(test_gpu_read32(&m, first) == 0x89abcdefu,
+          "non-opaque global-alpha source changed the destination");
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
+          "non-opaque global-alpha source raised completion");
+
+    test_gpu_write32(&m, source + 4u, source_pixels[0]);
+    packet[6] ^= 0x00100000u;
+    write_packet(&m, RING + 0xd0u, packet, 18u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + RING, 0xf0000000u);
+    CHECK(test_gpu_read32(&m, first) == 0x89abcdefu,
+          "unknown global-alpha factors changed the destination");
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
+          "unknown global-alpha factors raised completion");
 
     s5l8900_free(&m);
 }
@@ -864,7 +1069,8 @@ static void test_second_tiled_status_glyph(void) {
             test_gpu_write32(&m, source + y * SOURCE_STRIDE + x * 4u, src);
             test_gpu_write32(&m,
                 target + y * TARGET_STRIDE + (LEFT + x) * 4u, dst);
-            expected[y * WIDTH + x] = test_over(dst, src);
+            expected[y * WIDTH + x] = test_over(
+                dst, test_modulate_vertex_alpha(src, quad[24] >> 24));
         }
     }
     test_gpu_write32(&m, target + (LEFT - 1u) * 4u, 0x11223344u);
@@ -913,23 +1119,38 @@ static void test_second_tiled_status_glyph(void) {
 struct mbx_test_status_form {
     const char *name;
     uint32_t xclip, yclip;
+    uint32_t target;
+    uint32_t blend_surface;
+    uint32_t list_word;
+    bool variable_vertex_alpha;
+    bool has_quad_variant;
+    bool boundary_override;
+    bool source_must_be_zero;
     uint32_t tile_x0, tile_x1, tile_y0, tile_y1;
     uint32_t left, top, width, height;
     uint32_t source, source_row0, source_stride, source_control;
+    uint32_t boundary[8];
     uint32_t quad[44];
+    uint32_t quad_variant[44];
 };
 
 static void test_captured_status_form(const struct mbx_test_status_form *form) {
-    enum { TARGET_STRIDE = 0x500u, MAX_PIXELS = 76u * 20u };
+    enum { TARGET_STRIDE = 0x500u, MAX_PIXELS = 320u * 20u };
     const uint32_t table0 = 0x08003000u;
     const uint32_t table2 = 0x08004000u;
     const uint32_t region = 0x00001000u;
     const uint32_t object = 0x00014000u;
-    const uint32_t target = 0x00897000u;
+    const uint32_t target = form->target ? form->target : 0x00897000u;
     const uint32_t region_pa = 0x08010000u;
-    const uint32_t object_pa = 0x08011000u;
-    const uint32_t source_pa = 0x08012000u;
-    const uint32_t target_pa = 0x08020000u;
+    const uint32_t object_pa = 0x08014000u;
+    const uint32_t source_pa = 0x08016000u;
+    const uint32_t target_pa = 0x08030000u;
+    const uint32_t blend_pa = 0x08100000u;
+    const uint32_t blend_surface = form->blend_surface
+        ? form->blend_surface : target;
+    const uint32_t tile_count =
+        (form->tile_x1 - form->tile_x0 + 1u) *
+        (form->tile_y1 - form->tile_y0 + 1u);
 
     s5l8900_t m;
     CHECK(s5l8900_init(&m, RAM_BASE, RAM_SIZE), "%s machine init failed",
@@ -938,7 +1159,12 @@ static void test_captured_status_form(const struct mbx_test_status_form *form) {
 
     m.bus.write32(m.bus.ctx, MBX_BASE + REG_GART0, table0);
     m.bus.write32(m.bus.ctx, MBX_BASE + REG_GART2, table2);
-    test_map_gpu_page(&m, table0, region, region_pa);
+    uint32_t region_page0 = region & ~0xfffu;
+    uint32_t region_last = region + tile_count * 8u - 1u;
+    for (uint32_t page = region_page0; page <= (region_last & ~0xfffu);
+         page += 0x1000u)
+        test_map_gpu_page(&m, table0, page,
+                          region_pa + (page - region_page0));
     test_map_gpu_page(&m, table0, object, object_pa);
     uint32_t source_page0 = form->source & ~0xfffu;
     uint32_t source_last = form->source +
@@ -949,13 +1175,26 @@ static void test_captured_status_form(const struct mbx_test_status_form *form) {
          page += 0x1000u)
         test_map_gpu_page(&m, table2, page,
                           source_pa + (page - source_page0));
-    for (uint32_t page = 0; page < 8u; page++)
-        test_map_gpu_page(&m, table2, target + page * 0x1000u,
-                          target_pa + page * 0x1000u);
+    uint32_t target_page0 = target & ~0xfffu;
+    uint32_t target_last = target +
+                           (form->top + form->height) * TARGET_STRIDE +
+                           (form->left + form->width) * 4u - 1u;
+    for (uint32_t page = target_page0; page <= (target_last & ~0xfffu);
+         page += 0x1000u)
+        test_map_gpu_page(&m, table2, page,
+                          target_pa + (page - target_page0));
+    if (blend_surface != target) {
+        uint32_t blend_page0 = blend_surface & ~0xfffu;
+        uint32_t blend_last = blend_surface +
+                              (form->top + form->height - 1u) * TARGET_STRIDE +
+                              (form->left + form->width) * 4u - 1u;
+        for (uint32_t page = blend_page0; page <= (blend_last & ~0xfffu);
+             page += 0x1000u)
+            test_map_gpu_page(&m, table2, page,
+                              blend_pa + (page - blend_page0));
+    }
 
     uint32_t list = object + 0x68u;
-    uint32_t tile_count = (form->tile_x1 - form->tile_x0 + 1u) *
-                          (form->tile_y1 - form->tile_y0 + 1u);
     uint32_t tile_index = 0u;
     for (uint32_t y = form->tile_y0; y <= form->tile_y1; y++) {
         for (uint32_t x = form->tile_x0; x <= form->tile_x1; x++) {
@@ -966,8 +1205,29 @@ static void test_captured_status_form(const struct mbx_test_status_form *form) {
             tile_index++;
         }
     }
-    static const uint32_t list_words[4] = {
-        0x60200020u, 0x6020002du, 0x61a0007cu, 0xf0000000u
+    CHECK(test_gpu_read32(&m, region) ==
+              ((form->tile_y0 << 8) | form->tile_x0) &&
+          test_gpu_read32(&m, region + (tile_count - 1u) * 8u) ==
+              (0x80000000u | (form->tile_y1 << 8) | form->tile_x1),
+          "%s region fixture lost its first or final tile", form->name);
+    uint32_t region_mismatches = 0u;
+    for (uint32_t i = 0; i < tile_count; i++) {
+        uint32_t x = form->tile_x0 +
+                     (i % (form->tile_x1 - form->tile_x0 + 1u));
+        uint32_t y = form->tile_y0 +
+                     (i / (form->tile_x1 - form->tile_x0 + 1u));
+        uint32_t code = (y << 8) | x;
+        if (i + 1u == tile_count) code |= 0x80000000u;
+        region_mismatches += test_gpu_read32(&m, region + i * 8u) != code;
+        region_mismatches += test_gpu_read32(&m, region + i * 8u + 4u) != list;
+    }
+    CHECK(region_mismatches == 0u,
+          "%s region fixture has %u mismatched words",
+          form->name, region_mismatches);
+    const uint32_t list_words[4] = {
+        0x60200020u, 0x6020002du,
+        form->list_word ? form->list_word : 0x61a0007cu,
+        0xf0000000u
     };
     for (unsigned i = 0; i < 4u; i++)
         test_gpu_write32(&m, list + i * 4u, list_words[i]);
@@ -1004,19 +1264,14 @@ static void test_captured_status_form(const struct mbx_test_status_form *form) {
     };
     for (unsigned i = 0; i < sizeof boundary / sizeof boundary[0]; i++)
         test_gpu_write32(&m, object + boundary[i].off, boundary[i].value);
-    test_gpu_write32(&m, object + 0x0b8u, form->quad[8]);
-    test_gpu_write32(&m, object + 0x0bcu, form->quad[9]);
-    test_gpu_write32(&m, object + 0x0c0u, form->quad[10]);
-    test_gpu_write32(&m, object + 0x0c4u, form->quad[11]);
-    test_gpu_write32(&m, object + 0x0c8u, form->quad[12]);
-    test_gpu_write32(&m, object + 0x0ccu, form->quad[13]);
-    test_gpu_write32(&m, object + 0x0d0u, form->quad[14]);
-    test_gpu_write32(&m, object + 0x0d4u, form->quad[15]);
+    for (unsigned i = 0; i < 8u; i++)
+        test_gpu_write32(&m, object + 0x0b8u + i * 4u,
+            form->boundary_override ? form->boundary[i] : form->quad[8u + i]);
 
     for (unsigned i = 0; i < 44u; i++) {
         uint32_t value = form->quad[i];
         if (i == 2u) value = form->source_control | (form->source >> 7);
-        if (i == 5u) value = 0x0e500000u | (target >> 7);
+        if (i == 5u) value = 0x0e500000u | (blend_surface >> 7);
         test_gpu_write32(&m, object + 0x1f0u + i * 4u, value);
     }
 
@@ -1024,22 +1279,35 @@ static void test_captured_status_form(const struct mbx_test_status_form *form) {
     for (uint32_t y = 0; y < form->height; y++) {
         for (uint32_t x = 0; x < form->width; x++) {
             uint32_t alpha = 0x40u + ((x * 11u + y * 7u) & 0xbfu);
-            uint32_t src = (alpha << 24) | ((alpha * 3u / 4u) << 16) |
-                           ((alpha / 2u) << 8) | (alpha / 4u);
+            uint32_t src = form->source_must_be_zero ? 0u :
+                (alpha << 24) | ((alpha * 3u / 4u) << 16) |
+                ((alpha / 2u) << 8) | (alpha / 4u);
             uint32_t dst = 0xff102030u + y * 0x00010101u + x;
+            uint32_t background = blend_surface == target ? dst :
+                0xff405060u + y * 0x00010101u + x;
             test_gpu_write32(&m,
                 form->source + (form->source_row0 + y) *
                     form->source_stride + x * 4u, src);
             test_gpu_write32(&m,
                 target + (form->top + y) * TARGET_STRIDE +
                     (form->left + x) * 4u, dst);
-            expected[y * form->width + x] = test_over(dst, src);
+            if (blend_surface != target)
+                test_gpu_write32(&m,
+                    blend_surface + (form->top + y) * TARGET_STRIDE +
+                        (form->left + x) * 4u, background);
+            uint32_t modulated = test_modulate_vertex_alpha(
+                src, form->quad[24] >> 24);
+            expected[y * form->width + x] = test_over(background, modulated);
         }
     }
-    uint32_t before = target + form->top * TARGET_STRIDE +
-                      (form->left - 1u) * 4u;
+    bool before_below = form->left == 0u;
+    uint32_t before = target + (form->top + form->height) * TARGET_STRIDE +
+                      form->left * 4u;
+    if (!before_below)
+        before = target + form->top * TARGET_STRIDE +
+                 (form->left - 1u) * 4u;
     uint32_t after = target + (form->top + form->height) * TARGET_STRIDE +
-                     form->left * 4u;
+                     (form->left + (before_below ? 1u : 0u)) * 4u;
     test_gpu_write32(&m, before, 0x11223344u);
     test_gpu_write32(&m, after, 0x55667788u);
 
@@ -1072,6 +1340,87 @@ static void test_captured_status_form(const struct mbx_test_status_form *form) {
 
     m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x4cu);
     uint32_t first = target + form->top * TARGET_STRIDE + form->left * 4u;
+    if (form->has_quad_variant) {
+        CHECK(form->source_must_be_zero && blend_surface != target,
+              "%s variant fixture cannot verify its pixels safely", form->name);
+        for (unsigned i = 0; i < 44u; i++) {
+            uint32_t value = form->quad_variant[i];
+            if (i == 2u)
+                value = form->source_control | (form->source >> 7);
+            if (i == 5u)
+                value = 0x0e500000u | (blend_surface >> 7);
+            test_gpu_write32(&m, object + 0x1f0u + i * 4u, value);
+        }
+        test_gpu_write32(&m, first, 0x89abcdefu);
+        m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
+        CHECK(test_gpu_read32(&m, first) == expected[0],
+              "%s captured quad variant rendered the wrong pixel", form->name);
+        CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0x4cu,
+              "%s captured quad variant did not complete", form->name);
+        m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x4cu);
+
+        unsigned differing_words = 0u;
+        unsigned mixed_word = 44u;
+        for (unsigned i = 0; i < 44u; i++) {
+            if (i != 2u && i != 5u &&
+                form->quad[i] != form->quad_variant[i]) {
+                if (mixed_word == 44u) mixed_word = i;
+                differing_words++;
+            }
+        }
+        CHECK(differing_words > 1u,
+              "%s quad variants do not have a testable mixture", form->name);
+        if (mixed_word < 44u)
+            test_gpu_write32(&m, object + 0x1f0u + mixed_word * 4u,
+                             form->quad[mixed_word]);
+        test_gpu_write32(&m, first, 0x89abcdefu);
+        m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
+        CHECK(test_gpu_read32(&m, first) == 0x89abcdefu,
+              "%s mixed quad variants changed the destination", form->name);
+        CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
+              "%s mixed quad variants raised completion", form->name);
+
+        for (unsigned i = 0; i < 44u; i++) {
+            uint32_t value = form->quad[i];
+            if (i == 2u)
+                value = form->source_control | (form->source >> 7);
+            if (i == 5u)
+                value = 0x0e500000u | (blend_surface >> 7);
+            test_gpu_write32(&m, object + 0x1f0u + i * 4u, value);
+        }
+    }
+    if (form->variable_vertex_alpha) {
+        test_gpu_write32(&m, first, 0x89abcdefu);
+        test_gpu_write32(&m, object + 0x264u, form->quad[29] ^ 0x01000000u);
+        m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
+        CHECK(test_gpu_read32(&m, first) == 0x89abcdefu,
+              "%s mismatched vertex alpha changed the destination", form->name);
+        CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
+              "%s mismatched vertex alpha raised completion", form->name);
+        test_gpu_write32(&m, object + 0x264u, form->quad[29]);
+
+        test_gpu_write32(&m, object + 0x250u, form->quad[24] | 1u);
+        m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
+        CHECK(test_gpu_read32(&m, first) == 0x89abcdefu,
+              "%s vertex colour bits changed the destination", form->name);
+        CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
+              "%s vertex colour bits raised completion", form->name);
+        test_gpu_write32(&m, object + 0x250u, form->quad[24]);
+    }
+    if (form->source_must_be_zero) {
+        test_gpu_write32(&m, first, 0x89abcdefu);
+        uint32_t first_source = form->source +
+                                form->source_row0 * form->source_stride;
+        test_gpu_write32(&m, first_source, 0x01010101u);
+        m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
+        CHECK(test_gpu_read32(&m, first) == 0x89abcdefu,
+              "%s nonzero transparent source changed the destination",
+              form->name);
+        CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
+              "%s nonzero transparent source raised completion", form->name);
+        test_gpu_write32(&m, first_source, 0u);
+    }
+
     test_gpu_write32(&m, first, 0x89abcdefu);
     test_gpu_write32(&m, object + 0x1f4u, form->quad[1] ^ 1u);
     m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
@@ -1172,17 +1521,270 @@ static void test_later_tiled_status_sprites(void) {
                 0x3f280000u, 0x3f000000u, 0x3e9e8000u, 0x3c800000u,
             },
         },
+        {
+            .name = "full-width status-bar time sprite",
+            .xclip = 0x01400000u, .yclip = 0x00200000u,
+            .target = 0x00998000u,
+            .tile_x0 = 0u, .tile_x1 = 0x27u,
+            .tile_y0 = 0u, .tile_y1 = 1u,
+            .left = 0u, .top = 0u, .width = 320u, .height = 20u,
+            .source = 0x00a3a080u, .source_stride = 0x500u,
+            .source_control = 0x0e500000u,
+            .quad = {
+                0xe0000000u, 0xa6218000u, 0u, 0xcd206c40u,
+                0xa7718000u, 0u, 0xae504ea0u, 0x22250e80u,
+                0x00000000u, 0x41a00000u, 0x00000000u, 0x00000000u,
+                0x43a00000u, 0x41a00000u, 0x43a00000u, 0x00000000u,
+                0u, 0u, 0u, 0u,
+                0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+                0xbf000000u, 0x00000000u, 0x3f200000u, 0x00000000u,
+                0x3ca00000u, 0xbf000000u, 0x00000000u, 0x00000000u,
+                0x00000000u, 0x00000000u, 0xbf000000u, 0x3f200000u,
+                0x3f200000u, 0x3ea00000u, 0x3ca00000u, 0xbf000000u,
+                0x3f200000u, 0x00000000u, 0x3ea00000u, 0x00000000u,
+            },
+        },
+        {
+            .name = "full-width status-bar time sprite on CLCD surface",
+            .xclip = 0x01400000u, .yclip = 0x00200000u,
+            .target = 0x00897000u,
+            .tile_x0 = 0u, .tile_x1 = 0x27u,
+            .tile_y0 = 0u, .tile_y1 = 1u,
+            .left = 0u, .top = 0u, .width = 320u, .height = 20u,
+            .source = 0x00a3a080u, .source_stride = 0x500u,
+            .source_control = 0x0e500000u,
+            .quad = {
+                0xe0000000u, 0xa6218000u, 0u, 0xcd206c40u,
+                0xa7718000u, 0u, 0xae504ea0u, 0x22250e80u,
+                0x00000000u, 0x41a00000u, 0x00000000u, 0x00000000u,
+                0x43a00000u, 0x41a00000u, 0x43a00000u, 0x00000000u,
+                0u, 0u, 0u, 0u,
+                0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+                0xbf000000u, 0x00000000u, 0x3f200000u, 0x00000000u,
+                0x3ca00000u, 0xbf000000u, 0x00000000u, 0x00000000u,
+                0x00000000u, 0x00000000u, 0xbf000000u, 0x3f200000u,
+                0x3f200000u, 0x3ea00000u, 0x3ca00000u, 0xbf000000u,
+                0x3f200000u, 0x00000000u, 0x3ea00000u, 0x00000000u,
+            },
+        },
+        {
+            .name = "full-width status-bar time sprite on transition surface",
+            .xclip = 0x01400000u, .yclip = 0x00200000u,
+            .target = 0x00a41000u,
+            .tile_x0 = 0u, .tile_x1 = 0x27u,
+            .tile_y0 = 0u, .tile_y1 = 1u,
+            .left = 0u, .top = 0u, .width = 320u, .height = 20u,
+            .source = 0x00a3a080u, .source_stride = 0x500u,
+            .source_control = 0x0e500000u,
+            .quad = {
+                0xe0000000u, 0xa6218000u, 0u, 0xcd206c40u,
+                0xa7718000u, 0u, 0xae504ea0u, 0x22250e80u,
+                0x00000000u, 0x41a00000u, 0x00000000u, 0x00000000u,
+                0x43a00000u, 0x41a00000u, 0x43a00000u, 0x00000000u,
+                0u, 0u, 0u, 0u,
+                0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+                0xbf000000u, 0x00000000u, 0x3f200000u, 0x00000000u,
+                0x3ca00000u, 0xbf000000u, 0x00000000u, 0x00000000u,
+                0x00000000u, 0x00000000u, 0xbf000000u, 0x3f200000u,
+                0x3f200000u, 0x3ea00000u, 0x3ca00000u, 0xbf000000u,
+                0x3f200000u, 0x00000000u, 0x3ea00000u, 0x00000000u,
+            },
+        },
+        {
+            .name = "transparent clipped battery transfer",
+            .xclip = 0x01400000u, .yclip = 0x01e00010u,
+            .target = 0x00897000u, .blend_surface = 0x00998000u,
+            .list_word = 0x612000a8u,
+            .has_quad_variant = true,
+            .boundary_override = true, .source_must_be_zero = true,
+            .tile_x0 = 0u, .tile_x1 = 0x27u,
+            .tile_y0 = 1u, .tile_y1 = 0x1du,
+            .left = 296u, .top = 16u, .width = 21u, .height = 4u,
+            .source = 0x00986000u, .source_row0 = 16u,
+            .source_stride = 0x60u, .source_control = 0x0e040000u,
+            .boundary = {
+                0x00000000u, 0x43f00000u, 0x00000000u, 0x41a00000u,
+                0x43a00000u, 0x43f00000u, 0x43a00000u, 0x41a00000u,
+            },
+            .quad = {
+                0xe0000000u, 0xa2218001u, 0u, 0xd6887610u,
+                0xa7718000u, 0u, 0xab504a90u, 0x22250e80u,
+                0x43940000u, 0x41a00000u, 0x43940000u, 0x00000000u,
+                0x439e8000u, 0x41a00000u, 0x439e8000u, 0x00000000u,
+                0u, 0u, 0u, 0u,
+                0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+                0x00000000u, 0x00000000u, 0x3f200000u, 0x3e940000u,
+                0x3ca00000u, 0x00000000u, 0x00000000u, 0x00000000u,
+                0x3e940000u, 0x00000000u, 0x00000000u, 0x3f280000u,
+                0x3f200000u, 0x3e9e8000u, 0x3ca00000u, 0x00000000u,
+                0x3f280000u, 0x00000000u, 0x3e9e8000u, 0x00000000u,
+            },
+            .quad_variant = {
+                0xe0000000u, 0xa2218001u, 0u, 0xcd206c40u,
+                0xa7718000u, 0u, 0xae504ea0u, 0x22250e80u,
+                0x43940000u, 0x41a00000u, 0x43940000u, 0x00000000u,
+                0x439e8000u, 0x41a00000u, 0x439e8000u, 0x00000000u,
+                0u, 0u, 0u, 0u,
+                0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+                0xbf000000u, 0x00000000u, 0x3f200000u, 0x3e940000u,
+                0x3ca00000u, 0xbf000000u, 0x00000000u, 0x00000000u,
+                0x3e940000u, 0x00000000u, 0xbf000000u, 0x3f280000u,
+                0x3f200000u, 0x3e9e8000u, 0x3ca00000u, 0xbf000000u,
+                0x3f280000u, 0x00000000u, 0x3e9e8000u, 0x00000000u,
+            },
+        },
+        {
+            .name = "transparent clipped battery transfer to new surface",
+            .xclip = 0x01400000u, .yclip = 0x01e00010u,
+            .target = 0x00a41000u, .blend_surface = 0x00897000u,
+            .list_word = 0x612000a8u,
+            .boundary_override = true, .source_must_be_zero = true,
+            .tile_x0 = 0u, .tile_x1 = 0x27u,
+            .tile_y0 = 1u, .tile_y1 = 0x1du,
+            .left = 296u, .top = 16u, .width = 21u, .height = 4u,
+            .source = 0x00986000u, .source_row0 = 16u,
+            .source_stride = 0x60u, .source_control = 0x0e040000u,
+            .boundary = {
+                0x00000000u, 0x43f00000u, 0x00000000u, 0x41a00000u,
+                0x43a00000u, 0x43f00000u, 0x43a00000u, 0x41a00000u,
+            },
+            .quad = {
+                0xe0000000u, 0xa2218001u, 0u, 0xcd206c40u,
+                0xa7718000u, 0u, 0xae504ea0u, 0x22250e80u,
+                0x43940000u, 0x41a00000u, 0x43940000u, 0x00000000u,
+                0x439e8000u, 0x41a00000u, 0x439e8000u, 0x00000000u,
+                0u, 0u, 0u, 0u,
+                0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+                0xbf000000u, 0x00000000u, 0x3f200000u, 0x3e940000u,
+                0x3ca00000u, 0xbf000000u, 0x00000000u, 0x00000000u,
+                0x3e940000u, 0x00000000u, 0xbf000000u, 0x3f280000u,
+                0x3f200000u, 0x3e9e8000u, 0x3ca00000u, 0xbf000000u,
+                0x3f280000u, 0x00000000u, 0x3e9e8000u, 0x00000000u,
+            },
+        },
+        {
+            .name = "slider label on CLCD surface",
+            .xclip = 0x01180070u, .yclip = 0x01c001a0u,
+            .target = 0x00897000u,
+            .variable_vertex_alpha = true,
+            .tile_x0 = 0x0eu, .tile_x1 = 0x22u,
+            .tile_y0 = 0x1au, .tile_y1 = 0x1bu,
+            .left = 114u, .top = 417u, .width = 161u, .height = 30u,
+            .source = 0x00a2e080u, .source_stride = 0x2a0u,
+            .source_control = 0x0e280000u,
+            .quad = {
+                0xe0000000u, 0xa5218001u, 0u, 0xcd206c40u,
+                0xa7718000u, 0u, 0xae504ea0u, 0x22250e80u,
+                0x42e40000u, 0x43df8000u, 0x42e40000u, 0x43d08000u,
+                0x43898000u, 0x43df8000u, 0x43898000u, 0x43d08000u,
+                0u, 0u, 0u, 0u,
+                0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+                0xb4000000u, 0u, 0x3f700000u, 0x3de40000u,
+                0x3edf8000u, 0xb4000000u, 0u, 0u,
+                0x3de40000u, 0x3ed08000u, 0xb4000000u, 0x3f210000u,
+                0x3f700000u, 0x3e898000u, 0x3edf8000u, 0xb4000000u,
+                0x3f210000u, 0u, 0x3e898000u, 0x3ed08000u,
+            },
+        },
+        {
+            .name = "slider label on back surface",
+            .xclip = 0x01180070u, .yclip = 0x01c001a0u,
+            .target = 0x00a33000u,
+            .variable_vertex_alpha = true,
+            .tile_x0 = 0x0eu, .tile_x1 = 0x22u,
+            .tile_y0 = 0x1au, .tile_y1 = 0x1bu,
+            .left = 114u, .top = 417u, .width = 161u, .height = 30u,
+            .source = 0x00a2e080u, .source_stride = 0x2a0u,
+            .source_control = 0x0e280000u,
+            .quad = {
+                0xe0000000u, 0xa5218001u, 0u, 0xcd206c40u,
+                0xa7718000u, 0u, 0xae504ea0u, 0x22250e80u,
+                0x42e40000u, 0x43df8000u, 0x42e40000u, 0x43d08000u,
+                0x43898000u, 0x43df8000u, 0x43898000u, 0x43d08000u,
+                0u, 0u, 0u, 0u,
+                0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+                0x8a000000u, 0u, 0x3f700000u, 0x3de40000u,
+                0x3edf8000u, 0x8a000000u, 0u, 0u,
+                0x3de40000u, 0x3ed08000u, 0x8a000000u, 0x3f210000u,
+                0x3f700000u, 0x3e898000u, 0x3edf8000u, 0x8a000000u,
+                0x3f210000u, 0u, 0x3e898000u, 0x3ed08000u,
+            },
+        },
+        {
+            .name = "slider label on middle surface",
+            .xclip = 0x01180070u, .yclip = 0x01c001a0u,
+            .target = 0x00998000u,
+            .variable_vertex_alpha = true,
+            .tile_x0 = 0x0eu, .tile_x1 = 0x22u,
+            .tile_y0 = 0x1au, .tile_y1 = 0x1bu,
+            .left = 114u, .top = 417u, .width = 161u, .height = 30u,
+            .source = 0x00a2e080u, .source_stride = 0x2a0u,
+            .source_control = 0x0e280000u,
+            .quad = {
+                0xe0000000u, 0xa5218001u, 0u, 0xcd206c40u,
+                0xa7718000u, 0u, 0xae504ea0u, 0x22250e80u,
+                0x42e40000u, 0x43df8000u, 0x42e40000u, 0x43d08000u,
+                0x43898000u, 0x43df8000u, 0x43898000u, 0x43d08000u,
+                0u, 0u, 0u, 0u,
+                0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+                0x8a000000u, 0u, 0x3f700000u, 0x3de40000u,
+                0x3edf8000u, 0x8a000000u, 0u, 0u,
+                0x3de40000u, 0x3ed08000u, 0x8a000000u, 0x3f210000u,
+                0x3f700000u, 0x3e898000u, 0x3edf8000u, 0x8a000000u,
+                0x3f210000u, 0u, 0x3e898000u, 0x3ed08000u,
+            },
+        },
+        {
+            .name = "slider label progressed back surface",
+            .xclip = 0x01180070u, .yclip = 0x01c001a0u,
+            .target = 0x00a33000u,
+            .variable_vertex_alpha = true,
+            .tile_x0 = 0x0eu, .tile_x1 = 0x22u,
+            .tile_y0 = 0x1au, .tile_y1 = 0x1bu,
+            .left = 114u, .top = 417u, .width = 161u, .height = 30u,
+            .source = 0x00a2e080u, .source_stride = 0x2a0u,
+            .source_control = 0x0e280000u,
+            .quad = {
+                0xe0000000u, 0xa5218001u, 0u, 0xcd206c40u,
+                0xa7718000u, 0u, 0xae504ea0u, 0x22250e80u,
+                0x42e40000u, 0x43df8000u, 0x42e40000u, 0x43d08000u,
+                0x43898000u, 0x43df8000u, 0x43898000u, 0x43d08000u,
+                0u, 0u, 0u, 0u,
+                0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+                0x61000000u, 0u, 0x3f700000u, 0x3de40000u,
+                0x3edf8000u, 0x61000000u, 0u, 0u,
+                0x3de40000u, 0x3ed08000u, 0x61000000u, 0x3f210000u,
+                0x3f700000u, 0x3e898000u, 0x3edf8000u, 0x61000000u,
+                0x3f210000u, 0u, 0x3e898000u, 0x3ed08000u,
+            },
+        },
     };
     for (unsigned i = 0; i < sizeof forms / sizeof forms[0]; i++)
         test_captured_status_form(&forms[i]);
+
+    struct mbx_test_status_form phase =
+        forms[sizeof forms / sizeof forms[0] - 1u];
+    phase.name = "slider label later back-surface phase";
+    phase.quad[24] = phase.quad[29] = phase.quad[34] = phase.quad[39] =
+        0x37000000u;
+    test_captured_status_form(&phase);
+
+    phase.name = "slider label progressed CLCD-surface phase";
+    phase.target = 0x00897000u;
+    phase.quad[24] = phase.quad[29] = phase.quad[34] = phase.quad[39] =
+        0x61000000u;
+    test_captured_status_form(&phase);
 }
 
 int main(void) {
     printf("PowerVR MBX2D tests\n");
     test_translated_copy_and_completion_boundary();
     test_unknown_packet_and_bad_gart_are_atomic();
+    test_full_lower_surface_black_fill();
+    test_split_lower_surface_black_fill();
     test_status_write_to_set_and_ack();
     test_premultiplied_2d_clock_form();
+    test_opaque_global_alpha_2d_form();
     test_ordered_atomic_2d_batches();
     test_first_tiled_premultiplied_over();
     test_second_tiled_status_glyph();

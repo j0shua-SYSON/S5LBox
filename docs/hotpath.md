@@ -2925,3 +2925,87 @@ completed packets/renders, not guest frame-publication cadence; no FPS number, e
 no 30 FPS claim, follows from these counters. The next phase is cold acceptance plus an
 explicit cadence measurement, after this source checkpoint is pushed and exact-SHA CI is
 green.
+
+### r383-r397: the unlock transition advances, but it is not finished
+
+The rejection-free statement above was true only through r382's 3.5 B frontier. Extending
+the exact full drag (`57,431 -> 305,431`, 24 steps) past that point exposed more command
+forms. Fast iterations below restore a checkpoint derived from the instruction-zero cold
+run, preserve its exact external-media sidecars, and then execute only a retained command
+whose complete stream was already in the snapshot. That is valid diagnostic replay; it is
+not a substitute for the still-pending final cold acceptance.
+
+r392 established a second complete 44-word stream for the clipped transition quad. The
+old and new streams differ in two setup words and all four vertex-alpha words. They are
+accepted as two whole alternatives; a mixture is rejected. The `0xbf000000` words are
+per-vertex alpha, not Z values -- the first interpretation was wrong and was corrected
+before implementation. r393 then retained a full-width 320-by-20 status-time sprite on
+GPU target `0x00897000`; r394 retained the clipped 21-by-4 transparent battery transfer
+onto new target `0x00a41000`. Each form requires its literal target, clip, tiles, list,
+boundary, quad, source control, and GART spans. r393 accidentally ran without
+`S5LBOX_MBX_TRACE=1`, so it has no live counter claim; its retained command completed in
+offline replay and the following traced run consumed the resulting checkpoint.
+
+The screen during this work was sometimes visually incomplete, but not random host PNG
+corruption. r392 was a coherent lock screen. r394 deliberately cleared the Earth layer
+and left the lower surface black after the next command was rejected. Calling that frame
+"fixed" or "home" would be false.
+
+The later traced runs form a strict expose-decode-replay chain:
+
+| run | absolute stop | wall time | 2D candidate/completed/rejected | 3D candidate/completed/rejected | result at the stop |
+|---|---:|---:|---:|---:|---|
+| r394 | 4.8 B | 64.273 s | 1 / 1 / 0 | 3 / 2 / 1 | coherent partial transition; one retained battery transfer |
+| r395 | 5.0 B | 64.542 s | 1 / 0 / 1 | 0 / 0 / 0 | new opaque global-alpha 2D copy rejected |
+| r396 | 5.2 B | 61.292 s | 7 / 7 / 0 | 2 / 1 / 1 | global-alpha form is live; new status-time target rejected |
+| r397 | 5.4 B | 61.279 s | 2 / 0 / 2 | 2 / 2 / 0 | status target is live; two-command split clear rejected atomically |
+
+r395's 18-word packet uses equation `0x0d5f8000`, global alpha 248, source
+`0x00800080`, and target `0x00a41000`. This was not generalized from its visual result.
+`CA::RenderMBX2D::set_tex_blend_mode` at `0x3123a968` has a literal branch that passes
+factors `0x00500000` and `0x0d000000` plus a variable byte to
+`_mbx2DSetBlendEquation`; `_mbx2DCtxSetBlendEquation` stores those factors with the byte
+shifted by 12. The retained 320-by-480 source independently contains zero non-opaque
+pixels and zero premultiplication violations. The implementation therefore accepts only
+those factor bits, requires every source pixel to be opaque BGRA8, modulates every channel
+with the already oracle-checked `(component + 1) * alpha >> 8` rule, and then performs
+premultiplied source-over. A non-opaque source or altered factor remains a rejection.
+
+Offline replay of the untouched r395 packet completed one command, committed 588,800
+bytes, raised `0x400`, and produced a clean Earth-on-black destination. r396 then proved
+that result live: all seven subsequent 2D commands completed. Its final 3D rejection was
+not new geometry at all; it was the already captured full-width status-time object on the
+third exact target, `0x00a41000`. The source at `0x00a3a080` contains 378 nonzero,
+premultiplied pixels spelling `4:00 PM`. Offline replay completed 6,400 pixels and changed
+exactly those 378 RGB pixels, all inside rows 0..19. The resulting off-screen surface is a
+coherent complete lock screen -- status bar, clock, date, Earth, and slider.
+
+r397 consumed that completion and rendered both following 3D objects without rejection.
+Its visible CLCD frame is likewise a coherent lock screen, not the home screen:
+
+    work/r397-derived-resume-5400m/w.img.screen.ppm
+      SHA-256 A0C40DBF678F3EDA5F8FBFAC39E79B42E8A31E4EAB5C8139655C37E95365D158
+    work/r397-derived-resume-5400m/screen.png
+      SHA-256 04CCF7ED9A4A2850AEB3C21B21AF6C7E517CDED9673E088163694F150B99230B
+
+The next submit divided the known opaque-black clear into two literal rectangles on
+target `0x00998000`: rows 20..388 and 389..479. Both arrived under one doorbell. The
+model now accepts those two rectangles plus the previously captured unsplit 20..479
+rectangle, while preserving ordered all-or-nothing batch staging. Offline replay completed
+both packets, committed 588,800 bytes, left rows 0..19 intact, and made every RGB byte in
+rows 20..479 zero. Its latest derived diagnostic checkpoint is:
+
+    work/r397-derived-complete-split-fill-5400m/post-fill-5400m.bin
+      SHA-256 7A8AE5B2884FD9BAC3676869721DFB897BAC94517C1B333C69E20C77FB64B23C
+    post-fill-5400m.bin.mdimage
+      SHA-256 F26E566043AB20E1EB6BFF2673B319147E4556C0F9F7E88E6CCAD7698768C3EE
+    post-fill-5400m.bin.mdstate
+      SHA-256 C2BD6D07AA799BF6B3B3E2E82BA5630B884667086E0839E40F4D79BCCD7AD669
+
+That final split-clear implementation has offline exact-command evidence but has not yet
+been consumed by a resumed guest at this checkpoint. The current local verification is
+251/251 focused MBX assertions, 55/55 CTest targets, and 251/251 again in the strict
+warnings-as-errors build. Graphics are still not complete: r397 contains one recovery
+caused by the now-decoded split clear, no run in this chain has displayed the home screen,
+no rejection-free instruction-zero cold boot has reproduced the extended path, and no
+frame-publication cadence or 30 FPS result has been measured.
