@@ -3182,3 +3182,65 @@ not started because the graphics acceptance gate is still open.
 
 Local verification after both forms is 393/393 focused MBX assertions, 55/55 CTest
 targets, and 393/393 again in the independent strict warnings-as-errors build.
+
+### r411-r412: Calendar label and icon base are exact; the transition is still incomplete
+
+r411 restored the completed Messages-icon checkpoint at 6.32 B and ran to 6.34 B retired
+instructions. It submitted no 2D work and stopped at one new rejected 3D form. The exact
+register tuple was `xclip=0x00a80048`, `yclip=0x00700050`, target `0x00a41000`; its region
+list covered tiles x=9..20, y=5..6. Decoding source word `0x8e1526e1` gives GPU VA
+`0x00937080`, and the captured control retains the already measured `0x160` stride. The
+86x13 source is visibly the `Calendar` label. It contains 276 nonzero-RGB pixels, 1,079
+nonopaque pixels, and zero premultiplication violations:
+
+    work/r411-derived-messages-next-6340m/source-00937080-86x13.ppm
+      SHA-256 839528E9A333AD8FCD1FFF1CEFD1873B6FC05C58E55AE98D2B2F35820C4D53D5
+
+The complete retained boundary and 44-word quad resolve to destination `(79,94)` at
+86x13. Exact replay blended 1,118 destination pixels, changed 276 pixels / 828 bytes,
+changed zero pixels outside `(79,94)-(165,107)`, raised status `0 -> 0x4c`, and moved the
+target hash `8ab6affc47bc7754 -> 9c022d948d4114cb`:
+
+    work/r411-derived-complete-calendar-label-6340m/post-calendar-label-6340m.bin
+      SHA-256 053E011E639E05A54454204A7C332622710E70B14EA4489ABCDE27778FD509EF
+
+r412 restored that completed form at 6.34 B and ran to 6.36 B. Again it submitted no 2D
+work and stopped at one new rejected 3D form. The registers were
+`xclip=0x00980058`, `yclip=0x00600020`, target `0x00a41000`; the region list covered tiles
+x=11..18, y=2..5. Source word `0x8e112720` decodes to GPU VA `0x00939000` with captured
+stride `0x100`. The 59x62 source is a coherent red-header/white-page Calendar icon base,
+not the complete dated icon: its date text is absent and must be a later layer. It has
+3,191 nonzero-RGB pixels, 535 nonopaque pixels, and zero premultiplication violations:
+
+    work/r412-derived-calendar-next-6360m/source-00939000-59x62.ppm
+      SHA-256 A87D0A32EC7E0F7624A93D62283A841EE665CDCC4C2011356C2ADA0806CDB5D0
+
+The complete retained form resolves to destination `(92,32)` at 59x62. Exact replay
+blended 3,658 destination pixels, changed 3,191 pixels / 9,573 bytes, changed zero pixels
+outside `(92,32)-(151,94)`, raised status `0 -> 0x4c`, and moved the target hash
+`9c022d948d4114cb -> 69d963d33ba27dbc`. The resulting transition surface is visually
+coherent but deliberately partial: it contains the Messages icon/label, Calendar icon
+base/label, page dots, and dock over black, not a completed screen:
+
+    work/r412-derived-complete-calendar-icon-base-6360m/post-calendar-icon-base-6360m.bin
+      SHA-256 C30E16B8434196B4C5B2F28A9EB5865F9D930818CF8342FDD24E7A346C5CE0D9
+    work/r412-derived-complete-calendar-icon-base-6360m/post-calendar-icon-base-6360m.bin.mdimage
+      SHA-256 0DD614CBEFD79920B120BD2A15AEE2A5CE9B93391FBC65BA10EA5E3FF93214D4
+    work/r412-derived-complete-calendar-icon-base-6360m/post-calendar-icon-base-6360m.bin.mdstate
+      SHA-256 A4BB46262AF2CB8B592B2DAF4C721593717788C52B3FBAA0868F6B9E4AB627AE
+    work/r412-derived-complete-calendar-icon-base-6360m/screen.ppm
+      SHA-256 6F3CAC312AE6554F1B30C1F4EB62A92953F1B83E98381ADDB78484E2DF98460F
+
+Both live runs exited zero and reported zero external-media failures, but each still
+logged one Graphics Recovery Event with completed status `0x400`. Their final live CLCD
+frames were byte-identical coherent home screens (`C3A60DB2...`), not the partial target
+above and not an opened Settings application. Each frame-meter run published 101 scans
+but changed only its first sampled signature. r411 reported `0.206` mean / `1.851`
+maximum fps and r412 `0.221` mean / `1.992` maximum fps. These are decoder-stall results,
+not steady-state performance measurements.
+
+Local verification is now 413/413 focused MBX assertions, 55/55 CTest targets, and
+413/413 in the independent strict warnings-as-errors build. This advances the retained
+transition by two literal forms; it does **not** fix the transition, recovery, Settings
+launch, or 30 FPS acceptance. More layers are still expected, and a clean interaction
+plus instruction-zero cold boot remain mandatory after the command frontier is cleared.
