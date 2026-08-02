@@ -2580,3 +2580,81 @@ Local verification for the status-register checkpoint is 40/40 focused MBX
 assertions, 55/55 full tests, and a clean warnings-as-errors build. Hosted
 exact-SHA results must still be checked after the commit is pushed; local green
 is not being substituted for CI.
+
+### r371-r374: two tiled renders work, but the hardware display is still black
+
+The earlier r368 interpretation of the 2D submit boundary was wrong. It looked as if
+AppleMBX rewrote each packet head from `0xa0060500` to `0xf0000000` because the first
+packet happened to begin at ring offset zero. r372 observed a second command beginning
+at `+0x40` followed by the same `0xf0000000` store to **ring offset zero**. Static reading
+of AppleMBX's helper at `+0x1f58` agrees: this is a fixed submit/doorbell write, not a
+relocation of the current packet head. The old per-packet-rewrite claim is withdrawn.
+
+The corrected consumer remembers the one measured `0xa0060500` command head while its
+body is copied and executes it only when the fixed ring-zero submit arrives. More than
+one pending head fails closed because no live batch has established that case. It also
+implements the measured 18-word premultiplied 2D copy used by the clock, date, slider,
+and related lock-screen layers. Source and destination mappings are prevalidated, source
+pixels must satisfy premultiplied BGRA8, pixels are staged, and completion is raised only
+after commit. r373 then measured nine candidates, nine completions, zero rejections, and
+1,007,428 committed bytes: the base simple copy plus eight blended packets.
+
+The first tiled 3D consumer validates the complete captured 40-by-7 region stream, its
+three-object list, all object words, the two GART resources, framebuffer registers, and
+the 320-by-96 geometry before applying the recovered fixed-point source-over equation.
+r371 and later replays completed 30,720 pixels live. This is an exact captured form, not
+a general PowerVR implementation.
+
+The next `_mbx3DCtxQuadCopyPerspective` record and its final live object stream identify
+a 10-by-20 premultiplied padlock at destination `x=155..165, y=0..20`. The model likewise
+checks all four tiles, all three objects, address-control bits, 0x40-byte source stride,
+coordinates, and target before blending. Offline r373 replay changed 108 visible pixels
+(324 bytes), changed nothing outside the rectangle, and changed the target FNV-1a hash
+from `56c627a0e4adae82` to `e912fb3ab60f85a5`. r374 completed the same 200-pixel render
+live.
+
+r374 is progress, not a screen fix:
+
+| measured result | r374 |
+|---|---:|
+| 2D candidates / completed / rejected | 9 / 9 / 0 |
+| 2D bytes committed | 1,007,428 |
+| 3D candidates / completed / rejected | 4 / 2 / 2 |
+| 3D pixels blended | 30,920 |
+| process exit | 0 |
+| AppleMBX recovery | one event; `2DIdle=1`, `3DIdle=0` |
+| recovery `CompletedIntStatus` | `0x0000000c` |
+
+Directly dumping GPU target `0x00897000` now produces a coherent lock screen with its
+padlock. The actual CLCD scanout is still black. A briefly generated "cursed" diagnostic
+PNG was the source texture interpreted with an exploratory tiled layout; the captured
+status textures are linear and that PNG was never evidence of guest-screen corruption.
+
+The two rejected renders are no longer opaque. Their retained command records and GART
+resources decode linearly as:
+
+- a 76-by-16 `Searching...` sprite, source `0x00995080`, 0x140-byte stride, destination
+  `x=4..80, y=1..17`;
+- a 21-by-20 battery-outline sprite, source `0x00997000`, 0x60-byte stride, destination
+  `x=296..317, y=0..20`.
+
+Those labels are visual observations of the extracted source pixels. Their object streams
+have not both been captured and validated yet, so completing them speculatively would be
+the same fake-completion mistake this work is intended to remove. The next task is to
+capture/validate both exact object forms and rerun from the trusted r368 pre-submit
+checkpoint. Final graphics and FPS acceptance still require a cold boot; no FPS result is
+claimed from r374.
+
+The r374 diagnostic snapshot is reproducible but is not a final-acceptance checkpoint:
+
+    work/r374-resume-second-mbx3d-3500m/post-3500m.bin
+      SHA-256 A0E3E4D33093B4FD9879AF6A2C9202E65D62E42CB32A7E5339F3ECFD8E2C41BF
+    work/r374-resume-second-mbx3d-3500m/post-3500m.bin.mdimage
+      SHA-256 E059FA6A616CC536FB9F9BDF52FE37712CCDDD09455DEFFAD643969BDA67AD4B
+    work/r374-resume-second-mbx3d-3500m/post-3500m.bin.mdstate
+      SHA-256 9E04A3550B0EE0A0E7972D01842599FC5506A3D9E90A61E25031F64AEC08F611
+
+Local verification for this checkpoint is 63/63 focused MBX assertions, 55/55 full
+tests, a clean strict `-Werror -pedantic -Wshadow` build, the exact offline padlock
+replay above, and the live r374 run. Hosted exact-SHA results remain pending until this
+source checkpoint is committed and pushed.

@@ -836,6 +836,21 @@ void     s5l_power_write(s5l_power_t *p, uint32_t off, uint32_t val);
  * pretending this register is a generic 2D/3D submission doorbell. */
 #define S5L_MBX_BACKGROUND_TAG 0x000006d8u
 
+/* The first measured tiled-render register set. The names come from the
+ * PowerVR MBX register definitions and match AppleMBX's stores immediately
+ * before it writes STARTRENDER. Values remain ordinary register storage;
+ * STARTRENDER is only completed when the captured object family validates and
+ * commits pixels through s5l_mbx_process_3d(). */
+#define S5L_MBX_RGNBASE        0x00000608u
+#define S5L_MBX_OBJBASE        0x0000060cu
+#define S5L_MBX_3DPIXSAMP      0x0000061cu
+#define S5L_MBX_FBCTL          0x00000650u
+#define S5L_MBX_FBXCLIP        0x00000654u
+#define S5L_MBX_FBYCLIP        0x00000658u
+#define S5L_MBX_FBSTART        0x0000065cu
+#define S5L_MBX_FBLINESTRIDE   0x00000660u
+#define S5L_MBX_STARTRENDER    0x00000680u
+
 /*
  * THE CORE REVISION REGISTER, and the reason AppleMBXDevice::start gave up
  * even after both handshakes were modelled. From AppleMBX+0x8eb8:
@@ -915,16 +930,23 @@ void     s5l_mbx_reset(s5l_mbx_t *m);
 uint32_t s5l_mbx_read(s5l_mbx_t *m, uint32_t off);
 void     s5l_mbx_write(s5l_mbx_t *m, uint32_t off, uint32_t val);
 
-/* Attempt the one decoded MBX2D packet after the CPU has written an EDRAM
- * word. `previous` is the word value that was present before that store: the
- * measured submitter copies a relocation token first and rewrites it to the
- * final packet header only after the body is complete. The machine supplies
- * its bus because the MBX struct deliberately owns no host pointers except
- * EDRAM, and destination writes must remain visible to a frontend bus
- * observer. Returns true only after validated pixels moved and bit-10
- * completion was raised. */
+/* Observe one CPU write to the MBX2D command ring. AppleMBX+0x1188 copies a
+ * command beginning with 0xa0060500; AppleMBX+0x1f58 then submits it with the
+ * separate, fixed write 0xf0000000 to ring+0. The machine supplies its bus
+ * because the MBX struct deliberately owns no host pointers except EDRAM, and
+ * destination writes must remain visible to a frontend bus observer. Returns
+ * true only after a decoded command committed pixels and raised 2D_SYNC. */
 bool     s5l_mbx_process_2d(s5l_mbx_t *m, const arm_bus_t *bus,
-                            uint32_t written_off, uint32_t previous);
+                            uint32_t written_off, uint32_t value);
+
+/* Attempt an exactly decoded tiled 3D object after a STARTRENDER write. The
+ * accepted forms are the captured 320x96 premultiplied source-over rectangle
+ * and 10x20 status-bar padlock, including their tile lists, object words,
+ * formats, coordinates and GART resources. Returns true only after staged
+ * pixels commit and the three events AppleMBX requires for 3DIdle (ISP,
+ * render complete, EVM deallocate) rise. */
+bool     s5l_mbx_process_3d(s5l_mbx_t *m, const arm_bus_t *bus,
+                            uint32_t written_off, uint32_t value);
 
 /*
  * THE LINE THE DEVICE TREE SAYS THIS DEVICE HAS. /arm-io/mbx carries

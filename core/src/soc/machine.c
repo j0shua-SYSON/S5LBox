@@ -511,19 +511,11 @@ static void bus_write(void *ctx, uint32_t addr, uint32_t val, unsigned bytes) {
     if (in_mbx(addr, bytes)) {
         note_device(m, addr, val, true);
         uint32_t off = addr - S5L8900_MBX_BASE;
-        /* Preserve the old EDRAM word across the store. The measured command
-         * submitter copies 0xa0060500 at the packet head, copies the complete
-         * body, then rewrites that head to 0xf0000000. The transition, not the
-         * sixth terminator, is the live completion boundary. Register writes
-         * do not use the old value. */
-        uint32_t previous =
-            off >= S5L_MBX_2D_RING_BASE &&
-            off < S5L_MBX_2D_RING_BASE + S5L_MBX_2D_RING_SIZE
-                ? s5l_mbx_read(&m->mbx, off) : 0u;
         s5l_mbx_write(&m->mbx, off, val);
         /* The MBX owns its register/EDRAM aperture; the machine owns DRAM and
          * the observer-aware bus. Keep that ownership boundary explicit. */
-        (void)s5l_mbx_process_2d(&m->mbx, &m->bus, off, previous);
+        (void)s5l_mbx_process_2d(&m->mbx, &m->bus, off, val);
+        (void)s5l_mbx_process_3d(&m->mbx, &m->bus, off, val);
         return;
     }
     if (in_gpioic(addr, bytes)) {

@@ -40,8 +40,9 @@
  * WHAT THIS STILL IS NOT. It is not a general PowerVR renderer. The later
  * command consumer implements one packet family whose producer, bit fields,
  * MMU tables and pixels have all been recovered from the shipped binaries and
- * an exact cold snapshot. Unknown formats, scaling, blending and geometry are
- * rejected without completion. Everything else remains a fresh question to
+ * exact cold snapshots. One premultiplied source-over blend is decoded;
+ * unknown formats, scaling, blend equations and geometry are rejected without
+ * completion. Everything else remains a fresh question to
  * answer the same way -- observe it, read its producer, then model it. A
  * driver that needs an unknown operation must stop loudly instead of quietly
  * proceeding on fabricated pixels.
@@ -78,11 +79,36 @@
 #define MBX_RING       64u
 
 /* AppleMBX+0x1188 copies submitted words into this 64 KiB hardware ring. */
-#define MBX_2D_PACKET_WORDS    16u
-#define MBX_2D_PACKET_BYTES    (MBX_2D_PACKET_WORDS * 4u)
+#define MBX_2D_COPY_WORDS      16u
+#define MBX_2D_BLEND_WORDS     18u
 #define MBX_2D_END             0x70000000u
-#define MBX_2D_RELOC_HEADER    0xa0060500u
-#define MBX_2D_FINAL_HEADER    0xf0000000u
+#define MBX_2D_COMMAND_HEADER  0xa0060500u
+#define MBX_2D_SUBMIT          0xf0000000u
+#define MBX_2D_BLEND_TAG       0x20000004u
+#define MBX_2D_BLEND_EQUATION  0x095ff000u
+#define MBX_2D_BLEND_MODE      0x8002ccccu
+
+/*
+ * The command-copy helper advances a software cursor, but the actual submit
+ * boundary is a fixed write of 0xf0000000 to ring+0 by AppleMBX+0x1f58. r372
+ * caught that same fixed store after packets beginning at +0 and +0x40, so
+ * the earlier "rewrite this packet's header" interpretation was accidental:
+ * packet zero merely aliases the doorbell.
+ *
+ * Between those writes the device has to remember where the copied command
+ * began. Keep that state in the otherwise unread backing slot for STATUS:
+ * s5l_mbx_read() serves the independent `status` field, so this marker is not
+ * guest-visible, while snap_mbx() already serialises every reg[] word. That
+ * preserves a snapshot taken between the command copy and the submit store
+ * without changing the v32 format or stealing a real readable register.
+ * A second command head before one submit is detected and rejected; no live
+ * batch has yet contained more than one packet, so silently skipping one would
+ * be a fake extension.
+ */
+#define MBX_2D_PENDING_MAGIC    0x4d420000u
+#define MBX_2D_PENDING_MAGIC_M  0xffff0000u
+#define MBX_2D_PENDING_MULTI    0x00004000u
+#define MBX_2D_PENDING_WORD_M   0x00003fffu
 
 /* The first proved packet is a 320-pixel BGRA8 surface. There is no decoded
  * destination-stride field in its post-relocation packet, so widening this is
@@ -90,6 +116,29 @@
 #define MBX_2D_BGRA_STRIDE     0x500u
 #define MBX_2D_WIDTH           320u
 #define MBX_2D_HEIGHT          480u
+
+/* The first tiled render captured in r369. The source is an 8x128 BGRA8
+ * texture with a 32-byte stride; the object samples its first column over a
+ * 320x96 destination rectangle. Texture coordinates and the tile/object
+ * stream below independently encode the same dimensions. */
+#define MBX_3D_WIDTH           320u
+#define MBX_3D_TOP             20u
+#define MBX_3D_HEIGHT          96u
+#define MBX_3D_SOURCE_STRIDE   0x20u
+#define MBX_3D_TARGET_STRIDE   0x500u
+#define MBX_3D_ADDRESS_MASK    0x0003ffffu
+
+/* The next captured render is the 10x20 premultiplied status glyph at the
+ * horizontal centre of the 320-pixel target. _mbx3DCtxQuadCopyPerspective
+ * records a 16x32 padded texture, a 0x40-byte source stride and source
+ * coordinates 0..10 by 0..20; the live backing bytes decode to a padlock.
+ * Bit 18 of its address word is a texture-control bit, not GPU address bit 18,
+ * which is why the recovered address field is exactly 18 bits. */
+#define MBX_3D_GLYPH_LEFT          155u
+#define MBX_3D_GLYPH_TOP           0u
+#define MBX_3D_GLYPH_WIDTH         10u
+#define MBX_3D_GLYPH_HEIGHT        20u
+#define MBX_3D_GLYPH_SOURCE_STRIDE 0x40u
 
 static uint64_t mbx_rd[MBX_SLOTS];
 static uint64_t mbx_wr[MBX_SLOTS];
@@ -103,6 +152,10 @@ static uint64_t mbx_2d_candidates;
 static uint64_t mbx_2d_completed;
 static uint64_t mbx_2d_rejected;
 static uint64_t mbx_2d_bytes;
+static uint64_t mbx_3d_candidates;
+static uint64_t mbx_3d_completed;
+static uint64_t mbx_3d_rejected;
+static uint64_t mbx_3d_pixels;
 
 static void mbx_trace_dump(void);
 
@@ -131,11 +184,17 @@ static void mbx_trace_dump(void) {
     fprintf(stderr, "  TOTAL reads %llu writes %llu\n",
             (unsigned long long)total_r, (unsigned long long)total_w);
     fprintf(stderr, "  2D packets candidates %llu completed %llu rejected %llu"
-                    " bytes-copied %llu\n",
+                    " bytes-committed %llu\n",
             (unsigned long long)mbx_2d_candidates,
             (unsigned long long)mbx_2d_completed,
             (unsigned long long)mbx_2d_rejected,
             (unsigned long long)mbx_2d_bytes);
+    fprintf(stderr, "  3D renders candidates %llu completed %llu rejected %llu"
+                    " pixels-blended %llu\n",
+            (unsigned long long)mbx_3d_candidates,
+            (unsigned long long)mbx_3d_completed,
+            (unsigned long long)mbx_3d_rejected,
+            (unsigned long long)mbx_3d_pixels);
 
     fprintf(stderr, "=== MBX last %u accesses (oldest first) ===\n",
             (unsigned)(mbx_ring_n < MBX_RING ? mbx_ring_n : MBX_RING));
@@ -175,6 +234,36 @@ static uint32_t mbx_load_le32(const uint8_t *p) {
 static uint32_t mbx_edram_word(const s5l_mbx_t *m, uint32_t aperture_off) {
     uint32_t o = aperture_off - S5L_MBX_SIZE;
     return mbx_load_le32(m->edram + o);
+}
+
+static uint32_t *mbx_2d_pending_slot(s5l_mbx_t *m) {
+    return &m->reg[S5L_MBX_STATUS / 4u];
+}
+
+static bool mbx_2d_pending_get(const s5l_mbx_t *m, uint32_t *packet_off,
+                               bool *multiple) {
+    uint32_t state = m->reg[S5L_MBX_STATUS / 4u];
+    if ((state & MBX_2D_PENDING_MAGIC_M) != MBX_2D_PENDING_MAGIC) return false;
+    if (packet_off)
+        *packet_off = S5L_MBX_2D_RING_BASE +
+                      (state & MBX_2D_PENDING_WORD_M) * 4u;
+    if (multiple) *multiple = (state & MBX_2D_PENDING_MULTI) != 0u;
+    return true;
+}
+
+static void mbx_2d_pending_note(s5l_mbx_t *m, uint32_t packet_off) {
+    uint32_t old;
+    bool multiple;
+    if (mbx_2d_pending_get(m, &old, &multiple)) {
+        *mbx_2d_pending_slot(m) |= MBX_2D_PENDING_MULTI;
+        return;
+    }
+    uint32_t words = (packet_off - S5L_MBX_2D_RING_BASE) / 4u;
+    *mbx_2d_pending_slot(m) = MBX_2D_PENDING_MAGIC | words;
+}
+
+static void mbx_2d_pending_clear(s5l_mbx_t *m) {
+    *mbx_2d_pending_slot(m) = 0u;
 }
 
 /*
@@ -289,18 +378,20 @@ static bool mbx_gart_write(const s5l_mbx_t *m, const arm_bus_t *bus,
     return true;
 }
 
+static uint32_t mbx_premultiplied_over(uint32_t dst, uint32_t src);
+
 static bool mbx_execute_simple_copy(s5l_mbx_t *m, const arm_bus_t *bus,
-                                    uint32_t packet_off, const char **why,
-                                    uint32_t *copied) {
-    uint32_t w[MBX_2D_PACKET_WORDS];
-    for (unsigned i = 0; i < MBX_2D_PACKET_WORDS; i++)
+                                     uint32_t packet_off, const char **why,
+                                     uint32_t *copied) {
+    uint32_t w[MBX_2D_COPY_WORDS];
+    for (unsigned i = 0; i < MBX_2D_COPY_WORDS; i++)
         w[i] = mbx_edram_word(m, packet_off + i * 4u);
 
     /* These constants and masks are the stores/literal pool in
      * _pack2DCtxBlitCopy at 0x30e1c2ac..0x30e1c5a4. This deliberately accepts
      * coordinates but only the captured BGRA8, unity-scale, simple-copy mode.
      */
-    if (w[0] != 0xf0000000u ||
+    if ((w[0] != MBX_2D_COMMAND_HEADER && w[0] != MBX_2D_SUBMIT) ||
         (w[2] & 0xffff8000u) != 0x94060000u ||
         (w[2] & 0x7fffu) != MBX_2D_BGRA_STRIDE ||
         (w[4] & 0xf8002000u) != 0x30000000u ||
@@ -310,7 +401,7 @@ static bool mbx_execute_simple_copy(s5l_mbx_t *m, const arm_bus_t *bus,
         if (why) *why = "packet is not the decoded BGRA8 unity simple-copy form";
         return false;
     }
-    for (unsigned i = 10; i < MBX_2D_PACKET_WORDS; i++) {
+    for (unsigned i = 10; i < MBX_2D_COPY_WORDS; i++) {
         if (w[i] != MBX_2D_END) {
             if (why) *why = "packet terminators are incomplete";
             return false;
@@ -379,45 +470,163 @@ static bool mbx_execute_simple_copy(s5l_mbx_t *m, const arm_bus_t *bus,
     return ok;
 }
 
-bool s5l_mbx_process_2d(s5l_mbx_t *m, const arm_bus_t *bus,
-                        uint32_t written_off, uint32_t previous) {
-    if (!m || !m->edram) return false;
+static bool mbx_execute_premultiplied_copy(s5l_mbx_t *m,
+                                            const arm_bus_t *bus,
+                                            uint32_t packet_off,
+                                            const char **why,
+                                            uint32_t *committed) {
+    uint32_t w[MBX_2D_BLEND_WORDS];
+    for (unsigned i = 0; i < MBX_2D_BLEND_WORDS; i++)
+        w[i] = mbx_edram_word(m, packet_off + i * 4u);
 
-    uint32_t packet_off;
-    uint32_t written = 0u;
-    if (written_off >= S5L_MBX_2D_RING_BASE + MBX_2D_PACKET_BYTES - 4u &&
-        written_off < S5L_MBX_2D_RING_BASE + S5L_MBX_2D_RING_SIZE) {
-        written = mbx_edram_word(m, written_off);
+    /* _pack2DCtxBlitCopy at 0x30e1c3c4 inserts the two extra words only when
+     * ctx+0x35 enables blending. The retained clock/date packets carry the
+     * same factors QuartzCore passed to _mbx2DSetBlendEquation: source ONE,
+     * destination ONE_MINUS_SRC_ALPHA, and global alpha 255. */
+    if ((w[0] != MBX_2D_COMMAND_HEADER && w[0] != MBX_2D_SUBMIT) ||
+        (w[2] & 0xffff8000u) != 0x94060000u ||
+        (w[4] & 0xf8002000u) != 0x30000000u ||
+        w[5] != MBX_2D_BLEND_TAG || w[6] != MBX_2D_BLEND_EQUATION ||
+        w[7] != 0x60800200u || w[8] != MBX_2D_BLEND_MODE ||
+        w[9] != 0xffffffffu ||
+        (w[10] & ~0x1fff1fffu) || (w[11] & ~0x1fff1fffu)) {
+        if (why) *why = "packet is not the decoded premultiplied-over copy form";
+        return false;
     }
-    if (written == MBX_2D_END) {
-        /* A producer that copies an already-relocated packet completes it at
-         * the last word. This is the original focused-test path. */
-        packet_off = written_off - (MBX_2D_PACKET_BYTES - 4u);
-        if (mbx_edram_word(m, packet_off) != MBX_2D_FINAL_HEADER)
+    for (unsigned i = 12; i < MBX_2D_BLEND_WORDS; i++) {
+        if (w[i] != MBX_2D_END) {
+            if (why) *why = "premultiplied packet terminators are incomplete";
             return false;
-    } else if (written_off >= S5L_MBX_2D_RING_BASE &&
-               written_off <= S5L_MBX_2D_RING_BASE + S5L_MBX_2D_RING_SIZE -
-                                  MBX_2D_PACKET_BYTES &&
-               (written_off & 3u) == 0u &&
-               previous == MBX_2D_RELOC_HEADER &&
-               mbx_edram_word(m, written_off) == MBX_2D_FINAL_HEADER) {
-        /* r368 measured the real kernel order: 0xa0060500 at word zero,
-         * complete words 1..15, then a rewrite to 0xf0000000. Requiring that
-         * exact old value prevents a final header written first over a stale
-         * ring body from executing prematurely. */
-        packet_off = written_off;
-        for (unsigned i = 10u; i < MBX_2D_PACKET_WORDS; i++) {
-            if (mbx_edram_word(m, packet_off + i * 4u) != MBX_2D_END)
-                return false;
         }
-    } else {
+    }
+
+    uint32_t source_stride = w[2] & 0x7fffu;
+    uint32_t src_x = (w[4] >> 14) & 0x1fffu;
+    uint32_t src_y = w[4] & 0x1fffu;
+    uint32_t dst_x = (w[10] >> 16) & 0x1fffu;
+    uint32_t dst_y = w[10] & 0x1fffu;
+    uint32_t dst_x1 = (w[11] >> 16) & 0x1fffu;
+    uint32_t dst_y1 = w[11] & 0x1fffu;
+    if (!source_stride || (source_stride & 3u) ||
+        dst_x1 <= dst_x || dst_y1 <= dst_y) {
+        if (why) *why = "source stride or destination rectangle is invalid";
+        return false;
+    }
+    uint32_t width = dst_x1 - dst_x;
+    uint32_t height = dst_y1 - dst_y;
+    if (dst_x1 > MBX_2D_WIDTH || dst_y1 > MBX_2D_HEIGHT ||
+        src_x > source_stride / 4u || width > source_stride / 4u - src_x) {
+        if (why) *why = "blend rectangle exceeds a measured surface";
+        return false;
+    }
+    if ((w[1] & 3u) || (w[3] & 3u)) {
+        if (why) *why = "blend source or destination GPU base is unaligned";
         return false;
     }
 
+    uint32_t row_bytes = width * 4u;
+    uint32_t total = row_bytes * height;
+    for (uint32_t row = 0; row < height; row++) {
+        uint64_t src64 = (uint64_t)w[3] +
+                         (uint64_t)(src_y + row) * source_stride +
+                         (uint64_t)src_x * 4u;
+        uint64_t dst64 = (uint64_t)w[1] +
+                         (uint64_t)(dst_y + row) * MBX_2D_BGRA_STRIDE +
+                         (uint64_t)dst_x * 4u;
+        if (src64 > UINT32_MAX || dst64 > UINT32_MAX ||
+            !mbx_gart_validate(m, bus, (uint32_t)src64, row_bytes, why) ||
+            !mbx_gart_validate(m, bus, (uint32_t)dst64, row_bytes, why))
+            return false;
+    }
+
+    uint8_t *source = malloc(total);
+    uint8_t *pixels = malloc(total);
+    if (!source || !pixels) {
+        free(source);
+        free(pixels);
+        if (why) *why = "host allocation for staged blend failed";
+        return false;
+    }
+    bool ok = true;
+    for (uint32_t row = 0; row < height && ok; row++) {
+        uint32_t src = w[3] + (src_y + row) * source_stride + src_x * 4u;
+        uint32_t dst = w[1] + (dst_y + row) * MBX_2D_BGRA_STRIDE + dst_x * 4u;
+        ok = mbx_gart_read(m, bus, src, source + row * row_bytes,
+                           row_bytes, why) &&
+             mbx_gart_read(m, bus, dst, pixels + row * row_bytes,
+                           row_bytes, why);
+    }
+    for (uint32_t i = 0; i < total && ok; i += 4u) {
+        uint32_t src = mbx_load_le32(source + i);
+        uint32_t alpha = src >> 24;
+        if ((src & 0xffu) > alpha || ((src >> 8) & 0xffu) > alpha ||
+            ((src >> 16) & 0xffu) > alpha) {
+            if (why) *why = "2D source is not premultiplied BGRA8";
+            ok = false;
+            break;
+        }
+        uint32_t blended = mbx_premultiplied_over(
+            mbx_load_le32(pixels + i), src);
+        pixels[i] = (uint8_t)blended;
+        pixels[i + 1u] = (uint8_t)(blended >> 8);
+        pixels[i + 2u] = (uint8_t)(blended >> 16);
+        pixels[i + 3u] = (uint8_t)(blended >> 24);
+    }
+    for (uint32_t row = 0; row < height && ok; row++) {
+        uint32_t dst = w[1] + (dst_y + row) * MBX_2D_BGRA_STRIDE + dst_x * 4u;
+        ok = mbx_gart_write(m, bus, dst, pixels + row * row_bytes,
+                            row_bytes, why);
+    }
+    free(source);
+    free(pixels);
+    if (ok && committed) *committed = total;
+    return ok;
+}
+
+bool s5l_mbx_process_2d(s5l_mbx_t *m, const arm_bus_t *bus,
+                        uint32_t written_off, uint32_t value) {
+    if (!m || !m->edram || written_off < S5L_MBX_2D_RING_BASE ||
+        written_off >= S5L_MBX_2D_RING_BASE + S5L_MBX_2D_RING_SIZE ||
+        (written_off & 3u))
+        return false;
+
+    /* AppleMBX+0x1188 copies one observed command per selector-3 submission.
+     * Remember its head, but do not execute while the body is still arriving. */
+    if (value == MBX_2D_COMMAND_HEADER) {
+        mbx_2d_pending_note(m, written_off);
+        return false;
+    }
+
+    /* AppleMBX+0x1f58 performs this fixed ring+0 write after the copy. It is
+     * the measured execution boundary for both +0 and +0x40 packets. */
+    if (written_off != S5L_MBX_2D_RING_BASE || value != MBX_2D_SUBMIT)
+        return false;
+
+    uint32_t packet_off;
+    bool multiple;
+    if (!mbx_2d_pending_get(m, &packet_off, &multiple)) return false;
+    mbx_2d_pending_clear(m);
     mbx_2d_candidates++;
+
     const char *why = "unknown rejection";
-    uint32_t copied = 0;
-    if (!mbx_execute_simple_copy(m, bus, packet_off, &why, &copied)) {
+    uint32_t committed = 0u;
+    bool ok = false;
+    if (multiple) {
+        why = "more than one command head arrived in an unmodelled batch";
+    } else if (packet_off > S5L_MBX_2D_RING_BASE +
+                            S5L_MBX_2D_RING_SIZE - MBX_2D_COPY_WORDS * 4u) {
+        why = "2D packet crosses the observed 64 KiB ring";
+    } else if (mbx_edram_word(m, packet_off + 5u * 4u) == MBX_2D_BLEND_TAG) {
+        if (packet_off > S5L_MBX_2D_RING_BASE +
+                         S5L_MBX_2D_RING_SIZE - MBX_2D_BLEND_WORDS * 4u)
+            why = "blended 2D packet crosses the observed 64 KiB ring";
+        else
+            ok = mbx_execute_premultiplied_copy(m, bus, packet_off, &why,
+                                                &committed);
+    } else {
+        ok = mbx_execute_simple_copy(m, bus, packet_off, &why, &committed);
+    }
+    if (!ok) {
         mbx_2d_rejected++;
         if (mbx_trace_state == 1)
             fprintf(stderr, "MBX2D reject ring+0x%04x: %s\n",
@@ -429,10 +638,475 @@ bool s5l_mbx_process_2d(s5l_mbx_t *m, const arm_bus_t *bus,
      * to the unrelated startup BACKGROUND_TAG write at 0x6d8. */
     m->status |= S5L_MBX_STATUS_2D_SYNC;
     mbx_2d_completed++;
-    mbx_2d_bytes += copied;
+    mbx_2d_bytes += committed;
     if (mbx_trace_state == 1)
         fprintf(stderr, "MBX2D complete ring+0x%04x: %u bytes\n",
-                packet_off - S5L_MBX_2D_RING_BASE, copied);
+                packet_off - S5L_MBX_2D_RING_BASE, committed);
+    return true;
+}
+
+static bool mbx_gart_u32(const s5l_mbx_t *m, const arm_bus_t *bus,
+                         uint32_t gpu_va, uint32_t *value,
+                         const char **why) {
+    uint8_t bytes[4];
+    if (!mbx_gart_read(m, bus, gpu_va, bytes, sizeof bytes, why)) return false;
+    *value = mbx_load_le32(bytes);
+    return true;
+}
+
+static uint32_t mbx_3d_decode_address(uint32_t word) {
+    return (word & MBX_3D_ADDRESS_MASK) << 7;
+}
+
+/* QuartzCore selects source ONE and destination ONE_MINUS_SRC_ALPHA for this
+ * object. Its shipped software compositor at 0x3122dcf4 uses the same 8-bit
+ * fixed-point equation, with 256-alpha rather than an inferred /255 rule. */
+static uint32_t mbx_premultiplied_over(uint32_t dst, uint32_t src) {
+    uint32_t inv = 256u - (src >> 24);
+    uint32_t out = 0u;
+    for (unsigned shift = 0; shift < 32u; shift += 8u) {
+        uint32_t s = (src >> shift) & 0xffu;
+        uint32_t d = (dst >> shift) & 0xffu;
+        out |= (s + ((d * inv) >> 8)) << shift;
+    }
+    return out;
+}
+
+struct mbx_3d_word {
+    uint16_t off;
+    uint32_t value;
+};
+
+static uint32_t mbx_3d_first_boundary_expected(uint32_t off) {
+    static const struct mbx_3d_word nonzero[] = {
+        {0x080u, 0x22206f80u}, {0x088u, 0x45800000u},
+        {0x094u, 0x45800000u}, {0x098u, 0x45800000u},
+        {0x09cu, 0x45800000u}, {0x0b4u, 0x22207f80u},
+        {0x0bcu, 0x42e80000u}, {0x0c4u, 0x41a00000u},
+        {0x0c8u, 0x43a00000u}, {0x0ccu, 0x42e80000u},
+        {0x0d0u, 0x43a00000u}, {0x0d4u, 0x41a00000u},
+        {0x0e8u, 0xe0000000u}, {0x0f4u, 0xa6887610u},
+        {0x0f8u, 0x22220e80u}, {0x12cu, 0x3f800000u},
+        {0x130u, 0x3f800000u}, {0x134u, 0x3f800000u},
+        {0x138u, 0x3f800000u}, {0x198u, 0xe0000000u},
+        {0x19cu, 0x22200e80u}, {0x1d0u, 0x3f800000u},
+        {0x1d4u, 0x3f800000u}, {0x1d8u, 0x3f800000u},
+        {0x1dcu, 0x3f800000u},
+    };
+    for (unsigned i = 0; i < sizeof nonzero / sizeof nonzero[0]; i++)
+        if (nonzero[i].off == off) return nonzero[i].value;
+    return 0u;
+}
+
+static bool mbx_execute_first_tiled_over(s5l_mbx_t *m,
+                                         const arm_bus_t *bus,
+                                         const char **why,
+                                         uint32_t *pixels_blended) {
+    uint32_t region = m->reg[S5L_MBX_RGNBASE / 4u];
+    uint32_t object = m->reg[S5L_MBX_OBJBASE / 4u];
+    uint32_t target = m->reg[S5L_MBX_FBSTART / 4u];
+
+    if ((region & 3u) || (object & 3u) || (target & 3u) ||
+        object > UINT32_MAX - 0x2a0u) {
+        if (why) *why = "region, object, or framebuffer base is invalid";
+        return false;
+    }
+    if (m->reg[S5L_MBX_3DPIXSAMP / 4u] != 0x00020007u ||
+        m->reg[S5L_MBX_FBCTL / 4u] != 0x00000006u ||
+        m->reg[S5L_MBX_FBXCLIP / 4u] != 0x01400000u ||
+        m->reg[S5L_MBX_FBYCLIP / 4u] != 0x00800010u ||
+        m->reg[S5L_MBX_FBLINESTRIDE / 4u] != MBX_3D_WIDTH) {
+        if (why) *why = "render registers are not the captured BGRA8 320x96 form";
+        return false;
+    }
+
+    /* r369 contains 40 columns by seven 8x16 tiles, y=1..7. Every tile points
+     * at the same list, and only the final tile carries bit 31. */
+    uint32_t list = object + 0x68u;
+    for (uint32_t y = 1u; y <= 7u; y++) {
+        for (uint32_t x = 0u; x < 40u; x++) {
+            uint32_t pair = ((y - 1u) * 40u + x) * 8u;
+            uint32_t code, pointer;
+            if (!mbx_gart_u32(m, bus, region + pair, &code, why) ||
+                !mbx_gart_u32(m, bus, region + pair + 4u, &pointer, why))
+                return false;
+            uint32_t expected = (y << 8) | x;
+            if (y == 7u && x == 39u) expected |= 0x80000000u;
+            if (code != expected || pointer != list) {
+                if (why) *why = "region tile list differs from the captured 40x7 stream";
+                return false;
+            }
+        }
+    }
+
+    static const uint32_t list_words[4] = {
+        0x60200020u, 0x6020002du, 0x61a0007cu, 0xf0000000u
+    };
+    for (unsigned i = 0; i < 4u; i++) {
+        uint32_t value;
+        if (!mbx_gart_u32(m, bus, list + i * 4u, &value, why)) return false;
+        if (value != list_words[i]) {
+            if (why) *why = "object list is not the captured three-object list";
+            return false;
+        }
+    }
+
+    static const uint32_t background[26] = {
+        0xe0000000u, 0xa7718000u, 0u, 0xd6887610u,
+        0x22220e80u, 0u, 0u, 0x45000000u,
+        0u, 0u, 0x45000000u, 0x3f800000u,
+        0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+        0x3f800000u, 0u, 0u, 0u,
+        0u, 0x40000000u, 0u, 0u,
+        0u, 0x40000000u,
+    };
+    for (unsigned i = 0; i < 26u; i++) {
+        uint32_t value;
+        if (!mbx_gart_u32(m, bus, object + i * 4u, &value, why)) return false;
+        if (i == 2u) {
+            if ((value & ~MBX_3D_ADDRESS_MASK) != 0x0e500000u ||
+                mbx_3d_decode_address(value) != target) {
+                if (why) *why = "background texture does not resolve to FBSTART";
+                return false;
+            }
+        } else if (value != background[i]) {
+            if (why) *why = "background object differs from the captured form";
+            return false;
+        }
+    }
+
+    /* The first two list entries are the rectangle's fixed boundary objects.
+     * Check every word, including the measured zero padding, before accepting
+     * the final textured quad. */
+    for (uint32_t off = 0x80u; off < 0x1f0u; off += 4u) {
+        uint32_t value;
+        if (!mbx_gart_u32(m, bus, object + off, &value, why)) return false;
+        if (value != mbx_3d_first_boundary_expected(off)) {
+            if (why) *why = "rectangle boundary object differs from the captured form";
+            return false;
+        }
+    }
+
+    static const uint32_t quad[44] = {
+        0xe0000000u, 0xa0418001u, 0u, 0xa6884710u,
+        0xa7718000u, 0u, 0xae504ea0u, 0x22250e80u,
+        0x00000000u, 0x41a00000u, 0x43a00000u, 0x41a00000u,
+        0x00000000u, 0x42e80000u, 0x43a00000u, 0x42e80000u,
+        0u, 0u, 0u, 0u,
+        0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+        0xff000000u, 0x00000000u, 0x00000000u, 0x00000000u,
+        0x3ca00000u, 0xff000000u, 0x3d800000u, 0x00000000u,
+        0x3ea00000u, 0x3ca00000u, 0xff000000u, 0x00000000u,
+        0x3f400000u, 0x00000000u, 0x3de80000u, 0xff000000u,
+        0x3d800000u, 0x3f400000u, 0x3ea00000u, 0x3de80000u,
+    };
+    uint32_t source = 0u;
+    for (unsigned i = 0; i < 44u; i++) {
+        uint32_t value;
+        if (!mbx_gart_u32(m, bus, object + 0x1f0u + i * 4u,
+                          &value, why))
+            return false;
+        if (i == 2u) {
+            if ((value & ~MBX_3D_ADDRESS_MASK) != 0x8e000000u) {
+                if (why) *why = "source texture address word has an unknown format";
+                return false;
+            }
+            source = mbx_3d_decode_address(value);
+        } else if (i == 5u) {
+            if ((value & ~MBX_3D_ADDRESS_MASK) != 0x0e500000u ||
+                mbx_3d_decode_address(value) != target) {
+                if (why) *why = "destination texture does not resolve to FBSTART";
+                return false;
+            }
+        } else if (value != quad[i]) {
+            if (why) *why = "textured quad differs from the captured source-over form";
+            return false;
+        }
+    }
+    if (!source) {
+        if (why) *why = "source texture resolves to GPU address zero";
+        return false;
+    }
+
+    uint32_t row_bytes = MBX_3D_WIDTH * 4u;
+    uint32_t total = row_bytes * MBX_3D_HEIGHT;
+    for (uint32_t row = 0; row < MBX_3D_HEIGHT; row++) {
+        uint32_t src = source + row * MBX_3D_SOURCE_STRIDE;
+        uint32_t dst = target + (MBX_3D_TOP + row) * MBX_3D_TARGET_STRIDE;
+        if (!mbx_gart_validate(m, bus, src, 4u, why) ||
+            !mbx_gart_validate(m, bus, dst, row_bytes, why))
+            return false;
+    }
+
+    uint8_t *pixels = malloc(total);
+    if (!pixels) {
+        if (why) *why = "host allocation for staged 3D pixels failed";
+        return false;
+    }
+    bool ok = true;
+    for (uint32_t row = 0; row < MBX_3D_HEIGHT && ok; row++) {
+        uint8_t src_bytes[4];
+        uint32_t dst = target + (MBX_3D_TOP + row) * MBX_3D_TARGET_STRIDE;
+        ok = mbx_gart_read(m, bus, source + row * MBX_3D_SOURCE_STRIDE,
+                           src_bytes, sizeof src_bytes, why) &&
+             mbx_gart_read(m, bus, dst, pixels + row * row_bytes,
+                           row_bytes, why);
+        if (!ok) break;
+        uint32_t src = mbx_load_le32(src_bytes);
+        uint32_t alpha = src >> 24;
+        if ((src & 0xffu) > alpha || ((src >> 8) & 0xffu) > alpha ||
+            ((src >> 16) & 0xffu) > alpha) {
+            if (why) *why = "source texture is not premultiplied BGRA8";
+            ok = false;
+            break;
+        }
+        for (uint32_t x = 0; x < MBX_3D_WIDTH; x++) {
+            uint8_t *pixel = pixels + row * row_bytes + x * 4u;
+            uint32_t blended = mbx_premultiplied_over(
+                mbx_load_le32(pixel), src);
+            pixel[0] = (uint8_t)blended;
+            pixel[1] = (uint8_t)(blended >> 8);
+            pixel[2] = (uint8_t)(blended >> 16);
+            pixel[3] = (uint8_t)(blended >> 24);
+        }
+    }
+    for (uint32_t row = 0; row < MBX_3D_HEIGHT && ok; row++) {
+        uint32_t dst = target + (MBX_3D_TOP + row) * MBX_3D_TARGET_STRIDE;
+        ok = mbx_gart_write(m, bus, dst, pixels + row * row_bytes,
+                            row_bytes, why);
+    }
+    free(pixels);
+    if (ok && pixels_blended) *pixels_blended = MBX_3D_WIDTH * MBX_3D_HEIGHT;
+    return ok;
+}
+
+static uint32_t mbx_3d_glyph_boundary_expected(uint32_t off) {
+    static const struct mbx_3d_word nonzero[] = {
+        {0x080u, 0x22206f80u}, {0x088u, 0x45800000u},
+        {0x094u, 0x45800000u}, {0x098u, 0x45800000u},
+        {0x09cu, 0x45800000u}, {0x0b4u, 0x22207f80u},
+        {0x0b8u, 0x431b0000u}, {0x0bcu, 0x41a00000u},
+        {0x0c0u, 0x431b0000u}, {0x0c8u, 0x43250000u},
+        {0x0ccu, 0x41a00000u}, {0x0d0u, 0x43250000u},
+        {0x0e8u, 0xe0000000u}, {0x0f4u, 0xa6887610u},
+        {0x0f8u, 0x22220e80u}, {0x12cu, 0x3f800000u},
+        {0x130u, 0x3f800000u}, {0x134u, 0x3f800000u},
+        {0x138u, 0x3f800000u}, {0x198u, 0xe0000000u},
+        {0x19cu, 0x22200e80u}, {0x1d0u, 0x3f800000u},
+        {0x1d4u, 0x3f800000u}, {0x1d8u, 0x3f800000u},
+        {0x1dcu, 0x3f800000u},
+    };
+    for (unsigned i = 0; i < sizeof nonzero / sizeof nonzero[0]; i++)
+        if (nonzero[i].off == off) return nonzero[i].value;
+    return 0u;
+}
+
+static bool mbx_execute_second_status_glyph(s5l_mbx_t *m,
+                                             const arm_bus_t *bus,
+                                             const char **why,
+                                             uint32_t *pixels_blended) {
+    uint32_t region = m->reg[S5L_MBX_RGNBASE / 4u];
+    uint32_t object = m->reg[S5L_MBX_OBJBASE / 4u];
+    uint32_t target = m->reg[S5L_MBX_FBSTART / 4u];
+
+    if ((region & 3u) || (object & 3u) || (target & 3u) ||
+        object > UINT32_MAX - 0x2a0u) {
+        if (why) *why = "glyph region, object, or framebuffer base is invalid";
+        return false;
+    }
+    if (m->reg[S5L_MBX_3DPIXSAMP / 4u] != 0x00020007u ||
+        m->reg[S5L_MBX_FBCTL / 4u] != 0x00000006u ||
+        m->reg[S5L_MBX_FBXCLIP / 4u] != 0x00a80098u ||
+        m->reg[S5L_MBX_FBYCLIP / 4u] != 0x00200000u ||
+        m->reg[S5L_MBX_FBLINESTRIDE / 4u] != MBX_3D_WIDTH) {
+        if (why) *why = "render registers are not the captured 10x20 glyph form";
+        return false;
+    }
+
+    uint32_t list = object + 0x68u;
+    static const uint32_t tile_codes[4] = {
+        0x00000013u, 0x00000014u, 0x00000113u, 0x80000114u
+    };
+    for (unsigned i = 0; i < 4u; i++) {
+        uint32_t code, pointer;
+        if (!mbx_gart_u32(m, bus, region + i * 8u, &code, why) ||
+            !mbx_gart_u32(m, bus, region + i * 8u + 4u, &pointer, why))
+            return false;
+        if (code != tile_codes[i] || pointer != list) {
+            if (why) *why = "glyph region list differs from the captured four tiles";
+            return false;
+        }
+    }
+
+    static const uint32_t list_words[4] = {
+        0x60200020u, 0x6020002du, 0x61a0007cu, 0xf0000000u
+    };
+    for (unsigned i = 0; i < 4u; i++) {
+        uint32_t value;
+        if (!mbx_gart_u32(m, bus, list + i * 4u, &value, why)) return false;
+        if (value != list_words[i]) {
+            if (why) *why = "glyph object list is not the captured three-object list";
+            return false;
+        }
+    }
+
+    static const uint32_t background[26] = {
+        0xe0000000u, 0xa7718000u, 0u, 0xd6887610u,
+        0x22220e80u, 0u, 0u, 0x45000000u,
+        0u, 0u, 0x45000000u, 0x3f800000u,
+        0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+        0x3f800000u, 0u, 0u, 0u,
+        0u, 0x40000000u, 0u, 0u,
+        0u, 0x40000000u,
+    };
+    for (unsigned i = 0; i < 26u; i++) {
+        uint32_t value;
+        if (!mbx_gart_u32(m, bus, object + i * 4u, &value, why)) return false;
+        if (i == 2u) {
+            if ((value & ~MBX_3D_ADDRESS_MASK) != 0x0e500000u ||
+                mbx_3d_decode_address(value) != target) {
+                if (why) *why = "glyph background does not resolve to FBSTART";
+                return false;
+            }
+        } else if (value != background[i]) {
+            if (why) *why = "glyph background object differs from the captured form";
+            return false;
+        }
+    }
+
+    for (uint32_t off = 0x80u; off < 0x1f0u; off += 4u) {
+        uint32_t value;
+        if (!mbx_gart_u32(m, bus, object + off, &value, why)) return false;
+        if (value != mbx_3d_glyph_boundary_expected(off)) {
+            if (why) *why = "glyph boundary object differs from the captured form";
+            return false;
+        }
+    }
+
+    static const uint32_t quad[44] = {
+        0xe0000000u, 0xa1218000u, 0u, 0xcd206c40u,
+        0xa7718000u, 0u, 0xae504ea0u, 0x22250e80u,
+        0x431b0000u, 0x41a00000u, 0x431b0000u, 0x00000000u,
+        0x43250000u, 0x41a00000u, 0x43250000u, 0x00000000u,
+        0u, 0u, 0u, 0u,
+        0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+        0xbf000000u, 0x00000000u, 0x3f200000u, 0x3e1b0000u,
+        0x3ca00000u, 0xbf000000u, 0x00000000u, 0x00000000u,
+        0x3e1b0000u, 0x00000000u, 0xbf000000u, 0x3f200000u,
+        0x3f200000u, 0x3e250000u, 0x3ca00000u, 0xbf000000u,
+        0x3f200000u, 0x00000000u, 0x3e250000u, 0x00000000u,
+    };
+    uint32_t source = 0u;
+    for (unsigned i = 0; i < 44u; i++) {
+        uint32_t value;
+        if (!mbx_gart_u32(m, bus, object + 0x1f0u + i * 4u,
+                          &value, why))
+            return false;
+        if (i == 2u) {
+            if ((value & ~MBX_3D_ADDRESS_MASK) != 0x0e040000u) {
+                if (why) *why = "glyph source address word has an unknown format";
+                return false;
+            }
+            source = mbx_3d_decode_address(value);
+        } else if (i == 5u) {
+            if ((value & ~MBX_3D_ADDRESS_MASK) != 0x0e500000u ||
+                mbx_3d_decode_address(value) != target) {
+                if (why) *why = "glyph destination does not resolve to FBSTART";
+                return false;
+            }
+        } else if (value != quad[i]) {
+            if (why) *why = "textured glyph differs from the captured source-over form";
+            return false;
+        }
+    }
+    if (!source) {
+        if (why) *why = "glyph source resolves to GPU address zero";
+        return false;
+    }
+
+    uint32_t row_bytes = MBX_3D_GLYPH_WIDTH * 4u;
+    uint32_t total = row_bytes * MBX_3D_GLYPH_HEIGHT;
+    for (uint32_t row = 0; row < MBX_3D_GLYPH_HEIGHT; row++) {
+        uint32_t src = source + row * MBX_3D_GLYPH_SOURCE_STRIDE;
+        uint32_t dst = target + (MBX_3D_GLYPH_TOP + row) *
+                       MBX_3D_TARGET_STRIDE + MBX_3D_GLYPH_LEFT * 4u;
+        if (!mbx_gart_validate(m, bus, src, row_bytes, why) ||
+            !mbx_gart_validate(m, bus, dst, row_bytes, why))
+            return false;
+    }
+
+    uint8_t *source_pixels = malloc(total);
+    uint8_t *pixels = malloc(total);
+    if (!source_pixels || !pixels) {
+        free(source_pixels);
+        free(pixels);
+        if (why) *why = "host allocation for staged glyph failed";
+        return false;
+    }
+    bool ok = true;
+    for (uint32_t row = 0; row < MBX_3D_GLYPH_HEIGHT && ok; row++) {
+        uint32_t src = source + row * MBX_3D_GLYPH_SOURCE_STRIDE;
+        uint32_t dst = target + row * MBX_3D_TARGET_STRIDE +
+                       MBX_3D_GLYPH_LEFT * 4u;
+        ok = mbx_gart_read(m, bus, src, source_pixels + row * row_bytes,
+                           row_bytes, why) &&
+             mbx_gart_read(m, bus, dst, pixels + row * row_bytes,
+                           row_bytes, why);
+    }
+    for (uint32_t i = 0; i < total && ok; i += 4u) {
+        uint32_t src = mbx_load_le32(source_pixels + i);
+        uint32_t alpha = src >> 24;
+        if ((src & 0xffu) > alpha || ((src >> 8) & 0xffu) > alpha ||
+            ((src >> 16) & 0xffu) > alpha) {
+            if (why) *why = "glyph source is not premultiplied BGRA8";
+            ok = false;
+            break;
+        }
+        uint32_t blended = mbx_premultiplied_over(
+            mbx_load_le32(pixels + i), src);
+        pixels[i] = (uint8_t)blended;
+        pixels[i + 1u] = (uint8_t)(blended >> 8);
+        pixels[i + 2u] = (uint8_t)(blended >> 16);
+        pixels[i + 3u] = (uint8_t)(blended >> 24);
+    }
+    for (uint32_t row = 0; row < MBX_3D_GLYPH_HEIGHT && ok; row++) {
+        uint32_t dst = target + row * MBX_3D_TARGET_STRIDE +
+                       MBX_3D_GLYPH_LEFT * 4u;
+        ok = mbx_gart_write(m, bus, dst, pixels + row * row_bytes,
+                            row_bytes, why);
+    }
+    free(source_pixels);
+    free(pixels);
+    if (ok && pixels_blended)
+        *pixels_blended = MBX_3D_GLYPH_WIDTH * MBX_3D_GLYPH_HEIGHT;
+    return ok;
+}
+
+bool s5l_mbx_process_3d(s5l_mbx_t *m, const arm_bus_t *bus,
+                        uint32_t written_off, uint32_t value) {
+    if (!m || written_off != S5L_MBX_STARTRENDER || value != 1u) return false;
+
+    mbx_3d_candidates++;
+    const char *why = "unknown rejection";
+    uint32_t pixels = 0u;
+    if (!mbx_execute_first_tiled_over(m, bus, &why, &pixels) &&
+        !mbx_execute_second_status_glyph(m, bus, &why, &pixels)) {
+        mbx_3d_rejected++;
+        if (mbx_trace_state == 1)
+            fprintf(stderr, "MBX3D reject STARTRENDER: %s\n", why);
+        return false;
+    }
+
+    /* AppleMBX's ISR records these independently and declares 3DIdle only
+     * after all three have arrived. None is raised until the pixels above have
+     * crossed the GART and committed through the observer-aware bus. */
+    m->status |= S5L_MBX_STATUS_ISP |
+                 S5L_MBX_STATUS_RENDER_COMPLETE |
+                 S5L_MBX_STATUS_EVM_DALLOC;
+    mbx_3d_completed++;
+    mbx_3d_pixels += pixels;
+    if (mbx_trace_state == 1)
+        fprintf(stderr, "MBX3D complete STARTRENDER: %u pixels\n", pixels);
     return true;
 }
 
@@ -561,7 +1235,10 @@ void s5l_mbx_write(s5l_mbx_t *m, uint32_t off, uint32_t val) {
 
     mbx_trace(off, val, true);
 
-    m->reg[off / 4u] = val;
+    /* STATUS reads come from m->status. Its otherwise unreachable reg[] slot
+     * carries the snapshotted pending-2D marker described above, so a recovery
+     * W1S must not overwrite that private state between packet copy and submit. */
+    if (off != S5L_MBX_STATUS) m->reg[off / 4u] = val;
 
     /*
      * Bit 0 is the request, and it is treated as the trigger because it is
