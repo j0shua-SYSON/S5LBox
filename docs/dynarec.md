@@ -26,8 +26,10 @@ expect:
 > **1. A measured 3x build win landed; further non-JIT gains are projected.** ~~The
 > historical `65c9240` baseline compiled the core with *no optimiser at all*.~~ **Taken:** the
 > top-level `CMakeLists.txt` has defaulted to `Release` since `b3940fa`, worth a
-> measured **3.0x on a real kernel boot**. The software TLB and tick batching are
-> still design estimates; they must not be folded into current throughput.
+> measured **3.0x on a real kernel boot**. The software TLB has since landed;
+> the first semantics-exact outer-runner tick-batching prototype was measured
+> and rejected in r469 (section 7.6). Neither may be folded into a current speed
+> claim beyond the live measurements that actually include it.
 >
 > **2. The tested translator foundation is not a reason to enable boot dispatch.
 > First establish the shared real-guest session; continue using the
@@ -1198,11 +1200,39 @@ in `pc+12`, with differential tests covering the distinction.
 
 ### 7.6 Instruction → timebase tick accounting
 
-Today: `s5l8900_run` calls `s5l8900_tick(m, 1)` per instruction, and each call
-performs a 64-bit divide and modulo. Measured cost: **21% of
-interpreter throughput** (§1.2).
+**2026-08-03 correction: the 20% premise below is historical, and the first
+literal implementation lost.** The current `s5l8900_tick(m, 1)` has an early
+out: on the ordinary 412:6 clock ratio it accumulates and compares on most
+instructions, but reaches the divide and full refresh only at a timebase edge
+or a changed device level. In the post-keygen SpringBoard profile,
+`s5l8900_run` accounted for 5.24% and `s5l8900_refresh` for 0.84%, not 20%.
 
-**Plan, in three parts:**
+r469 batched the runner only as far as the next exact timebase edge, stopped
+after guest MMIO or changed host input, retained one-step fallbacks for unusual
+clock shapes, and flushed preceding retirements before WFI inspected device
+deadlines. Its differential test passed 5,844 assertions, including WFI in the
+middle of a batch and a refused instruction after a successful predecessor.
+It was nevertheless slower. In interleaved control rows, the pushed runner was
+8.3% faster than the literal `arm_step` + `tick(1)` loop (11.49 versus 10.61
+Minsn/s), while the batched candidate was 3.6% slower than its literal control
+(13.40 versus 13.90 Minsn/s). Absolute rates moved with the host and are not
+compared across the two sessions; the within-session reversal is the result.
+The prototype was removed in full.
+
+Generated x86-64 code gives a plausible explanation, not a measured cause: the
+WFI-safe context forced a pending counter through the stack on every
+instruction, enlarged the runner substantially, and replaced the compiler's
+inlined constant-one path with a variable-count call. Do not repeat that outer
+loop design. A decoded block engine can still carry a tick budget without this
+escape by ending blocks before WFI and observable device boundaries, but that
+is a different implementation and still has to win a real-guest gate.
+
+Historical baseline: `s5l8900_run` called `s5l8900_tick(m, 1)` per instruction
+through a path measured at **21% of interpreter throughput** (§1.2). The call
+still exists, but its current early-out and live profile supersede that cost
+model as described above.
+
+**Historical plan, retained so the rejected premise stays visible:**
 
 1. **Batch.** Each block adds its retired-instruction count to a budget in the
    CPU struct at its epilogue (`ldr`/`add`/`str`, hoisted so chained forward
@@ -1219,8 +1249,11 @@ interpreter throughput** (§1.2).
    increments on exception entry, since
    the differential harness compares it.
 
-**Do the batching in the interpreter first (J1).** It is a 20% interpreter win
-*and* it is what makes the two engines comparable (§9.3).
+**Do not treat batching alone as a 20% interpreter win.** r469 disproved that
+for the current runner. Tick accounting still belongs at an exact block/sync
+boundary so two engines remain comparable (§9.3), but it must arrive as part of
+a block engine that removes other repeated per-instruction work rather than as
+another wrapper around `arm_step()`.
 
 ### 7.7 Self-modifying code, kexts, and paging
 

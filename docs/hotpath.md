@@ -4236,3 +4236,72 @@ roughly 0--4 fps phone result remains the only real-device result and therefore 
 the product truth until an exact IPA reports both Minsn/s and changed-frame FPS on a
 fresh software-render machine and a fresh MBX machine. The final graphics acceptance
 still requires a cold boot.
+
+### r465-r469: build flags do not close the gap; steady state is ARM; runner batching loses
+
+The app was already ahead of the ordinary desktop comparison in one mundane way:
+`app/project.yml` compiles the core at `-O3` with LLVM LTO. A separate GCC Release +
+LTO build therefore tested whether r461/r463's `-O2` desktop meter understated the
+available interpreter speed. All 55 exact tests passed. In the first adjacent restored
+pair, the same 100 M-instruction interval improved from 13.866741 to 15.148466 Minsn/s
+(+9.24%). The reverse pair cannot supply a symmetric multiplier: the LTO repeat stayed
+at 15.150482 Minsn/s while the following `-O2` process collapsed to 10.813955 Minsn/s.
+That is host drift, not a 22.8% optimisation claim.
+
+The direct LTO frame run makes the practical conclusion unambiguous. Over the same
+7.100--7.320 B MBX interval it retired 11.368339 Minsn/s inside the core calls and saw
+501 publications, 193 changed signatures, mean 9.932 changed fps, maximum 13.996, and
+zero windows at 30. Its immediate no-meter control was 12.499616 Minsn/s; both were in
+a slow host period. LTO is already in the iOS app and ordinary build optimisation does
+not plausibly supply the remaining roughly 2.725x desktop factor.
+
+r468 then counted every instruction in a 10 M-instruction restored steady-state
+interval rather than carrying forward the early-kernel mix from `docs/dynarec.md`:
+
+| state / mode | instructions | share |
+|---|---:|---:|
+| ARM state | 8,644,952 | **86.44952%** |
+| Thumb state | 1,355,048 | 13.55048% |
+| User | 6,713,186 | 67.13186% |
+| SVC | 2,898,732 | 28.98732% |
+| IRQ | 384,873 | 3.84873% |
+| FIQ / ABT / UND combined | 3,209 | 0.03209% |
+
+The counts sum to exactly 10,000,000. They describe this post-keygen
+SpringBoard/MBX interval, not the whole boot, but they settle the next architecture for
+the target workload: a portable block interpreter must prioritise ARM first. Building
+Thumb first from the old 68.95% early-kernel sample would optimise the wrong phase.
+
+r469 tested the prerequisite that looked cheapest: batching the public runner's device
+ticks only to the next mathematically exact timebase edge. Guest MMIO and host input
+ended a batch at the exact instruction; inverted, zero and invalid clock shapes retained
+the one-step path; WFI first received every preceding retirement before asking devices
+for a wake edge. The expanded differential suite passed 5,844 assertions. Correctness
+was not the rejection reason.
+
+Performance was. Separate-process `old,new,new,old` medians moved with the host
+(14.56, 14.47, 14.73, 13.43 Minsn/s), so they do not support a causal delta. The useful
+control is inside `insnbench`, which interleaves the app-facing `tick=run` row with the
+literal `arm_step` + `tick(1)` row in the same process:
+
+| binary | literal tick row | app-facing runner | runner versus literal |
+|---|---:|---:|---:|
+| pushed `9f81e86` | 10.61 Minsn/s | 11.49 Minsn/s | **+8.3%** |
+| r469 batch prototype | 13.90 Minsn/s | 13.40 Minsn/s | **-3.6%** |
+
+The absolute columns cannot be compared across sessions because the no-tick controls
+also moved from 13.49 to 16.92 Minsn/s. The within-session reversal is enough: the
+prototype gave back roughly eleven percentage points relative to its own control.
+Disassembly showed a much larger runner, a stack-resident pending count updated every
+instruction, thread-local WFI coordination, and a variable-count tick call. That is a
+plausible mechanism; the regression itself is measured. The implementation and its test
+additions were removed completely.
+
+This closes outer-loop tick batching as an independent speed fix. The current live
+profile gives `s5l8900_run` 5.24% and the refresh 0.84%, so even deleting both cannot
+bridge 2.725x. The next implementation must remove repeated work inside `arm_step`
+across multiple instructions: an ARM-first, semantics-checked decoded-basic-block
+interpreter whose blocks end before WFI, device-observable memory, state changes and
+the exact tick/interrupt boundary. That is structural work, not another decode-chain
+reordering, and it still earns its place only by passing differential, restored-real-
+guest, and eventual cold-boot gates.
