@@ -4121,3 +4121,62 @@ throughput does not include the iOS app's framebuffer conversion, main-thread
 publication, or device-specific host speed. A user-observed 0–4 fps phone result must
 not be replaced by a desktop-derived estimate; the app needs its own low-overhead
 execution/publication measurements. The 30 fps target and final cold boot remain open.
+
+### r459-r460: a smaller opcode-class dispatcher is substantially slower
+
+r459 repeated the sampling-only live profile after r458. It restored the same 7.102 B
+checkpoint, retired 300 M instructions through the app-equivalent loop, stopped exactly
+at 7.402 B with zero failures, and measured 13.626505 Minsn/s in the profiling build.
+The important result is the new distribution, not that build-specific rate:
+
+| function | sampled time after r458 |
+|---|---:|
+| `arm_step` | 32.96% |
+| `exec_data_processing` | 8.43% |
+| `vfp_execute_inner` | 5.67% |
+| `s5l8900_run` | 5.24% |
+| `arm_mmu_translate` | 5.17% |
+| `mbx_execute_textured_sprite` | 4.75% |
+| `thumb_step` | 3.76% |
+| `arm_cond_passed` | 2.27% |
+
+The AL bypass therefore did what its source change says: condition checking fell from
+5.58% to 2.27%, while the body of `arm_step` remained the largest target. r460 tested
+the principled-looking next rewrite already named in this file: dispatch first on ARM
+instruction bits 27--25, sending the seven non-overlapping classes directly to their
+existing executors and leaving only class 000 in the old overlap chain.
+
+The rewrite was semantically clean. Exact and strict builds passed 55/55 and 59/59
+tests. GNU `nm` measured `arm_step` shrinking from 11,568 to 10,416 host-code bytes. A
+200 M-instruction candidate run also produced byte-identical machine, media, bridge,
+work-image and framebuffer artifacts at 7.302 B; their hashes are the r458 hashes above.
+
+The short performance gate was inconclusive. In `old,new,new,old` order its two paired
+deltas were -0.1514% and +4.2687%; the symmetric means suggested +2.1213%, but a result
+that loses one pair is not repeatable evidence. A fixed-affinity follow-up was discarded
+after the first baseline collapsed to 7.563682 Minsn/s and the following candidate ran
+12.810375 Minsn/s. Pinning one logical processor exposed host scheduling/frequency noise;
+it did not control it.
+
+The longer gate retired 500 M instructions per restore over the same 7.102--7.602 B
+SpringBoard interval. This was decisive:
+
+| order | build | timed seconds | rate |
+|---:|---|---:|---:|
+| 1 | r458 baseline | 40.411359 | 12.372759 Minsn/s |
+| 2 | opcode-class switch | 56.259667 | 8.887361 Minsn/s |
+| 3 | opcode-class switch | 46.878429 | 10.665886 Minsn/s |
+| 4 | r458 baseline | 38.525074 | 12.978560 Minsn/s |
+
+The candidate lost both long pairs, by 28.1699% and 17.8192%. Its mean was 9.776624
+Minsn/s against 12.675660 for the baseline, a **22.8709% regression**. The shorter
+200 M interval simply did not include the full instruction mix that exposed it. Smaller
+host code is not faster code here; the indirect class dispatch is worse than the host
+branch predictor's handling of the deliberately ordered comparisons. That explanation
+is an inference, while the regression is measured.
+
+The class switch was removed in full. No production decoder change remains from r460.
+This closes the top-level-switch hypothesis rather than leaving another marginal layer
+in `arm_step`. Reaching the phone's 30 fps target now requires a structural change that
+also removes repeated work, such as a semantics-checked decoded-basic-block interpreter;
+rearranging the same per-instruction comparisons is not enough.
