@@ -23,7 +23,7 @@ typedef struct {
 }
 
 - (instancetype)init {
-    self = [super initWithStyle:UITableViewStyleGrouped];
+    self = [super initWithStyle:UITableViewStyleInsetGrouped];
     if (!self) return nil;
     self.title = @"Manual";
     return self;
@@ -81,10 +81,12 @@ typedef struct {
               @"the same boot arguments the desktop version of this project "
               @"uses. The status line under the screen says which of the two "
               @"is running, and it is never a guess — it reports what was "
-              @"actually installed.\n\nOn the desktop that boot reaches the "
-              @"iPhone OS 3 lock screen. How far it gets here has not been "
-              @"measured on a phone yet, and this manual will not claim a "
-              @"number it has not seen." }];
+              @"actually installed.\n\nOn-device runs have booted Apple's "
+              @"kernel and launchd. The newest complete SpringBoard and MBX "
+              @"graphics evidence still comes from the desktop harness, and "
+              @"no current phone run has demonstrated 30 fps. Those are two "
+              @"open measurements, not accomplishments this manual will "
+              @"borrow from another host." }];
 
     [e addObject:@{ @"h": @"Machines",
         @"b": @"The first screen is a list of machines. Each one has its own "
@@ -97,14 +99,18 @@ typedef struct {
               @"copies the settings, not the disk: the copy builds its own the "
               @"first time you open it. Delete removes that machine's disk too, "
               @"which is most of the space it uses.\n\n"
-              @"Tap one to open it.\n\nOnly one machine runs at a time. Each "
+              @"The gear on this screen opens Settings and firmware import "
+              @"without starting a machine first. Tap a machine to open it."
+              @"\n\nOnly one machine runs at a time. Each "
               @"needs 128 MB of memory to itself, and the emulator core runs "
               @"one machine per thread by design — so this is a limit of how it "
               @"is built, not a setting." }];
 
     [e addObject:@{ @"h": @"The screen and the buttons",
         @"b": @"The picture is the guest's own display, copied out of emulated "
-              @"video memory about thirty times a second. Nothing on it is "
+              @"video memory when its pixels change and published at most "
+              @"thirty times a second. Thirty is a host-side cap, not a claim "
+              @"that the guest currently produces 30 fps. Nothing on it is "
               @"drawn by iOS.\n\nThe buttons below it are the five an iPhone 3G "
               @"has: Home, Power, Volume Up, Volume Down and the Ringer switch. "
               @"Touching the screen is passed to the guest as a real touch "
@@ -125,29 +131,41 @@ typedef struct {
     [e addObject:@{ @"h": @"Settings",
         @"b": dev
             ? @"Developer mode is ON, so Settings shows the full option table: "
-              @"fourteen switches that mirror the desktop tool exactly, plus "
-              @"the instruction cap and the diagnostics pages.\n\nMOST OF THEM "
-              @"STILL DO NOTHING HERE, and each one now says so under itself, "
-              @"in its own words, rather than leaving you to read one blanket "
-              @"warning at the top. A few do reach a real firmware boot. None "
+              @"sixteen switches that mirror the desktop tool exactly, plus "
+              @"the instruction cap and the diagnostics pages.\n\nEach row says "
+              @"whether it reaches the boot, is fixed into a work image, or "
+              @"is unavailable here. That answer comes from the same mapping "
+              @"the engine uses rather than a separate UI promise. None "
               @"of them changes the built-in test program, which has no device "
               @"tree to configure.\n\nThe screen also renders them as a command "
-              @"line you can run on the desktop, where all fourteen work."
+              @"line you can run on the desktop, where all sixteen are resolved."
             : @"Settings is deliberately short. The switches that control how a "
               @"real firmware boot is set up — which pieces of hardware the "
               @"guest is told about, which compatibility fixes are applied — "
               @"live behind Developer Mode.\n\nThey are not hidden because they "
-              @"are dangerous. Most of them still do nothing in this app, and "
-              @"the ones that do only matter once you have imported firmware. "
+              @"are dangerous. Some are experiments, some describe hardware "
+              @"that remains absent, and they only matter once you have "
+              @"imported firmware. "
               @"They are hidden because the first thing you meet should not be "
               @"a list of device-tree paths." }];
 
     [e addObject:@{ @"h": @"Developer mode",
-        @"b": @"Turning it on adds: the full fourteen-switch option table, the "
+        @"b": @"Turning it on adds: the full sixteen-switch option table, the "
               @"raw guest console, the instruction cap, and diagnostics showing "
               @"what the emulated machine has actually done.\n\nIt changes what "
               @"you can see and set. It does not unlock a faster or more "
               @"complete emulator — there is only one engine." }];
+
+    [e addObject:@{ @"h": @"Graphics status",
+        @"b": @"The default remains Apple's CPU software renderer because it "
+              @"has the strongest cold-boot history. Developer Mode exposes "
+              @"the experimental MBX path. The current model completes the "
+              @"measured reset, command-ring, 2D and 3D workloads, including "
+              @"a live 1,388/1,388 2D and 8,888/8,888 3D interval with no "
+              @"decoder rejection or recovery.\n\nThat is substantial graphics "
+              @"coverage. It is still not the required final cold boot and it "
+              @"is not a measured 30 fps phone result, so the app does not "
+              @"silently make it the default." }];
 
     if (dev) {
         [e addObject:@{ @"h": @"Console",
@@ -200,7 +218,8 @@ titleForHeaderInSection:(NSInteger)section {
     /* numberOfLines = 0 plus an automatic row height is what makes a paragraph
      * render as a paragraph instead of one clipped line. */
     cell.textLabel.numberOfLines = 0;
-    cell.textLabel.font = [UIFont systemFontOfSize:15.0];
+    cell.textLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
+    cell.textLabel.adjustsFontForContentSizeCategory = YES;
     cell.textLabel.text = _entries[(NSUInteger)indexPath.section][@"b"];
     cell.selectionStyle = UITableViewCellSelectionStyleNone;
     return cell;

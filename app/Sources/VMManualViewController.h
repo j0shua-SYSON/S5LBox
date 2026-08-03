@@ -2,7 +2,7 @@
 //  S5LBox — the manual.
 //
 //  The settings screen is a faithful mirror of the desktop harness's option
-//  table: fourteen rows, each titled with a device-tree path, each carrying a
+//  table: sixteen rows, each titled with a device-tree path, each carrying a
 //  paragraph about what it does to a kernel. That is the right screen for
 //  somebody bisecting a boot and the wrong one to meet first, and there was
 //  nothing else to read.

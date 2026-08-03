@@ -12,9 +12,12 @@
  * name the observed failure rather than a policy: "hangs the boot" is checkable
  * against docs/BOOTLOG.md, "recommended" is not. */
 static const vm_option_t VM_OPTIONS[] = {
-    { "mbx", "MBX GPU  ·  /arm-io/mbx",
-      "Off: the PowerVR driver busy-polls a reset bit in a register block this "
-      "VM does not model, and the boot hangs there.",
+    { "mbx", "MBX graphics (experimental)  ·  /arm-io/mbx",
+      "Off by default pending final cold-boot and 30 fps acceptance. On leaves "
+      "the PowerVR driver matched and uses the VM's reset, ring, 2D and 3D "
+      "models. A live checkpoint completed 1,388/1,388 2D jobs and 8,888/8,888 "
+      "3D renders with no decoder rejection or recovery, but that is not yet "
+      "a cold product-level proof.",
       false, VM_OPT_GROUP_HARDWARE, VM_OPT_IMPL_HARNESS },
     { "sha1", "SHA-1 engine  ·  /arm-io/sha1",
       "Off: matched, every 4096-byte cs_validate_page digest goes to an "
@@ -57,13 +60,10 @@ static const vm_option_t VM_OPTIONS[] = {
       "failure stays visible instead of costing a 30-second stall.",
       true, VM_OPT_GROUP_PATCH, VM_OPT_IMPL_HARNESS },
     { "ca-software-render", "QuartzCore software renderer",
-      "On, and applied when the work image is made, not at boot: sets "
-      "CA_ENABLE_MBX2D=0 for SpringBoard, which is how QuartzCore picks its "
-      "own software path. This machine un-matches the GPU, so without it "
-      "CA::WindowServer takes MBX2D, whose global context is NULL, and "
-      "SpringBoard composites nothing -- measured 2026-07-29 as run149's "
-      "273206 drawn bytes against run150's 1890. Toggling it later needs a "
-      "fresh work image.",
+      "On is the conservative default, applied when the work image is made: "
+      "CA_ENABLE_MBX2D=0 selects Apple's CPU renderer while MBX remains off. "
+      "Turn it off in a fresh machine to exercise the experimental MBX path. "
+      "Changing it later cannot rewrite an existing work image.",
       true, VM_OPT_GROUP_PATCH, VM_OPT_IMPL_HARNESS },
 
     { "activate", "Activation",
@@ -72,13 +72,15 @@ static const vm_option_t VM_OPTIONS[] = {
       "and none is verified. Toggling it later needs a fresh work image.",
       true, VM_OPT_GROUP_GUEST_STATE, VM_OPT_IMPL_HARNESS },
     { "jb-codesign", "Jailbreak: kernel half",
-      "Off, and NOT IMPLEMENTED ANYWHERE: would disable the guest kernel's own "
-      "code-signature enforcement. No exploit is involved; we load the kernel.",
-      false, VM_OPT_GROUP_GUEST_STATE, VM_OPT_IMPL_NOWHERE },
+      "Off in this app. The desktop harness can request relaxed guest code "
+      "signing, but no unsigned binary has been demonstrated under it, so the "
+      "phone does not present that experiment as a working jailbreak.",
+      false, VM_OPT_GROUP_GUEST_STATE, VM_OPT_IMPL_HARNESS },
     { "jb-payload", "Jailbreak: filesystem half",
-      "Off, and NOT IMPLEMENTED ANYWHERE: would install the payload named below "
-      "onto the work image, and waits on the same file provisioner.",
-      false, VM_OPT_GROUP_GUEST_STATE, VM_OPT_IMPL_NOWHERE },
+      "Off in this app. The shared provisioner can install a payload, but the "
+      "app has no payload import flow and the guest code-signing half it needs "
+      "has not been demonstrated.",
+      false, VM_OPT_GROUP_GUEST_STATE, VM_OPT_IMPL_HARNESS },
     { "ppp", "Guest networking (PPP over uart4)",
       "Off, and explicitly temporary: runs the guest's own pppd over an "
       "emulated UART until real drivers exist. Needs a writable work image.",
@@ -99,20 +101,21 @@ static const char *const VM_OPTION_GROUP_TITLE[VM_OPT_GROUP_COUNT] = {
 };
 
 static const char *const VM_OPTION_GROUP_NOTE[VM_OPT_GROUP_COUNT] = {
-    "Device-tree nubs this VM hides from the guest by default. Each one is "
-    "hidden because leaving it matched is known to hang or panic a real boot, "
-    "so the guest is told it has less hardware than a real iPhone.",
+    "Device-tree hardware presented to the guest. Touch is present by default. "
+    "MBX is now a working but not finally accepted experiment; SHA-1, baseband, "
+    "SPI2 and USB remain hidden because their individual rows name measured "
+    "boot failures. The guest therefore still sees less hardware than a real "
+    "iPhone in the default configuration.",
 
     "Work iBoot would have done, done by the emulator instead because it jumps "
     "straight to the kernel. Each patch has its own switch so a boot can be "
     "bisected against it.",
 
-    "Persistent changes to the guest or its work image. Both jailbreak halves "
-    "exist in no part of this project: the desktop harness prints \"requested "
-    "but NOT APPLIED\" for exactly those rows, and so does this screen. "
-    "Activation is no longer one of them -- it is applied while the work image "
-    "is being built, which is why it reports separately from the switches that "
-    "act at boot. Guest networking exists on the desktop only."
+    "Persistent changes to the guest or its work image. Activation is applied "
+    "while a work image is built. The desktop harness has partial jailbreak "
+    "and networking implementations, but this app deliberately does not offer "
+    "either until their complete paths are demonstrated here; each row says "
+    "what is missing."
 };
 
 /*

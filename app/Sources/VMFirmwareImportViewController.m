@@ -266,7 +266,8 @@ static BOOL VMProbeFirmware(vm_firmware_boot_state_t *out) {
     /* The first thing on the screen is what this cannot do. */
     _intro = [[UILabel alloc] initWithFrame:CGRectZero];
     _intro.numberOfLines = 0;
-    _intro.font = [UIFont systemFontOfSize:13.0];
+    _intro.font = [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote];
+    _intro.adjustsFontForContentSizeCategory = YES;
     _intro.textColor = [UIColor secondaryLabelColor];
     _intro.text =
         @"This turns an IPSW you already have into the three files the "
@@ -509,11 +510,14 @@ estimatedHeightForRowAtIndexPath:(NSIndexPath *)indexPath {
     cell.accessoryType = UITableViewCellAccessoryNone;
     cell.selectionStyle = UITableViewCellSelectionStyleNone;
     cell.textLabel.numberOfLines = 0;
-    cell.textLabel.font = [UIFont systemFontOfSize:16.0];
+    cell.textLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
+    cell.textLabel.adjustsFontForContentSizeCategory = YES;
     cell.textLabel.textColor = [UIColor labelColor];
     cell.textLabel.text = nil;
     cell.detailTextLabel.numberOfLines = 0;
-    cell.detailTextLabel.font = [UIFont systemFontOfSize:12.0];
+    cell.detailTextLabel.font =
+        [UIFont preferredFontForTextStyle:UIFontTextStyleCaption1];
+    cell.detailTextLabel.adjustsFontForContentSizeCategory = YES;
     cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
     cell.detailTextLabel.text = nil;
     return cell;
@@ -521,12 +525,15 @@ estimatedHeightForRowAtIndexPath:(NSIndexPath *)indexPath {
 
 - (void)configureProgressCell:(VMImportProgressCell *)cell {
     cell.textLabel.numberOfLines = 1;
-    cell.textLabel.font = [UIFont systemFontOfSize:16.0];
+    cell.textLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
+    cell.textLabel.adjustsFontForContentSizeCategory = YES;
     cell.textLabel.textColor = [UIColor labelColor];
     cell.textLabel.text =
         VMCapitalizeFirst(VMStringFromC(vm_fw_stage_name(_stage)));
     cell.detailTextLabel.numberOfLines = 1;
-    cell.detailTextLabel.font = [UIFont systemFontOfSize:12.0];
+    cell.detailTextLabel.font =
+        [UIFont preferredFontForTextStyle:UIFontTextStyleCaption1];
+    cell.detailTextLabel.adjustsFontForContentSizeCategory = YES;
     cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
 
     if (_fraction >= 0.0) {

@@ -153,9 +153,10 @@ static NSString *VMStringFromC(const char *text) {
 
     _settings = [VMSettings sharedSettings];
     self.title = @"Settings";
-    /* The emulator screen is black by policy, so this one follows rather than
-     * flashing white over it when the phone is in light mode. */
-    self.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
+    self.navigationController.navigationBar.prefersLargeTitles = YES;
+    /* When presented by the black emulator, its navigation controller already
+     * opts into dark appearance. From the machine list, follow the person's
+     * system appearance instead of forcing a dark settings sheet globally. */
 
     self.navigationItem.rightBarButtonItem =
         [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemDone
@@ -183,7 +184,8 @@ static NSString *VMStringFromC(const char *text) {
     /* The first thing on the screen is the limitation, not the switches. */
     _banner = [[UILabel alloc] initWithFrame:CGRectZero];
     _banner.numberOfLines = 0;
-    _banner.font = [UIFont systemFontOfSize:13.0];
+    _banner.font = [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote];
+    _banner.adjustsFontForContentSizeCategory = YES;
     _banner.textColor = [UIColor systemOrangeColor];
     [self refreshBanner];
     UIView *header = [[UIView alloc] initWithFrame:CGRectZero];
@@ -309,7 +311,7 @@ static NSString *VMStringFromC(const char *text) {
  * WHICH SECTIONS EXIST, AND WHY THIS IS A MAP RATHER THAN AN if.
  *
  * Off developer mode this screen shows General, Firmware and Reset: three
- * short lists of things a person can decide. On, it also shows the fourteen
+ * short lists of things a person can decide. On, it also shows the sixteen
  * option-table rows, the diagnostics, and the rendered command line.
  *
  * The table's delegate methods are indexed by VISIBLE section, and every one
@@ -389,8 +391,8 @@ titleForFooterInSection:(NSInteger)section {
     if (section == VMSettingsSectionGeneral) {
         return [[VMSettings sharedSettings] developerMode]
             ? @"Developer mode is on: the option table, the guest console and "
-              @"the diagnostics are shown. Most of the option switches change "
-              @"nothing; each one says, under itself, what it does."
+              @"the diagnostics are shown. Each option says whether it reaches "
+              @"the boot, is fixed into a work image, or is unavailable here."
             : @"New here? Read the manual first.\n\n"
               @"Jailbreak disables the guest's signature checking and installs "
               @"Cydia into that machine's own files. It applies to a real "
@@ -450,10 +452,9 @@ titleForFooterInSection:(NSInteger)section {
                     [_settings firmwareDirectory] ?: @"(no documents directory)",
                     [VMEngine firmwareReadinessSummary]];
         case VMSettingsSectionDiagnostics:
-            return @"These two are applied. The cap stops the emulator thread "
-                    "at a chosen instruction count and leaves the last frame on "
-                    "screen; pausing in the background is on by default because "
-                    "iOS terminates apps that keep a core busy while hidden.";
+            return @"The instruction cap, background pause and inline console "
+                    "are applied by the app. The JIT row is an explicit host "
+                    "capability test, not an emulator speed switch.";
         case VMSettingsSectionCommandLine:
             return @"What these switches would spell on a tools/bootkernel "
                     "command line, so a phone session and a desktop session can "
@@ -479,11 +480,14 @@ titleForFooterInSection:(NSInteger)section {
     cell.accessoryType = UITableViewCellAccessoryNone;
     cell.selectionStyle = UITableViewCellSelectionStyleNone;
     cell.textLabel.numberOfLines = 0;
-    cell.textLabel.font = [UIFont systemFontOfSize:16.0];
+    cell.textLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
+    cell.textLabel.adjustsFontForContentSizeCategory = YES;
     cell.textLabel.textColor = [UIColor labelColor];
     cell.textLabel.text = nil;
     cell.detailTextLabel.numberOfLines = 0;
-    cell.detailTextLabel.font = [UIFont systemFontOfSize:12.0];
+    cell.detailTextLabel.font =
+        [UIFont preferredFontForTextStyle:UIFontTextStyleCaption1];
+    cell.detailTextLabel.adjustsFontForContentSizeCategory = YES;
     cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
     cell.detailTextLabel.text = nil;
     return cell;
@@ -501,6 +505,12 @@ titleForFooterInSection:(NSInteger)section {
                        initWithStyle:UITableViewCellStyleDefault
                      reuseIdentifier:@"general"];
         cell.accessoryView = nil;
+        cell.textLabel.font =
+            [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
+        cell.textLabel.adjustsFontForContentSizeCategory = YES;
+        cell.textLabel.textColor = [UIColor labelColor];
+        cell.accessoryType = UITableViewCellAccessoryNone;
+        cell.selectionStyle = UITableViewCellSelectionStyleNone;
         if (indexPath.row == VMGeneralRowManual) {
             cell.textLabel.text = @"Manual";
             cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
@@ -524,9 +534,17 @@ titleForFooterInSection:(NSInteger)section {
                  forControlEvents:UIControlEventValueChanged];
             cell.accessoryView = sw;
         } else {
-            cell.textLabel.text = @"Snapshots";
-            cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
-            cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+            BOOL hasMachine = self.snapshotsDirectory.length > 0;
+            cell.textLabel.text = hasMachine ? @"Snapshots"
+                                             : @"Snapshots — open a machine first";
+            cell.textLabel.textColor = hasMachine ? [UIColor labelColor]
+                                                  : [UIColor secondaryLabelColor];
+            cell.accessoryType = hasMachine
+                ? UITableViewCellAccessoryDisclosureIndicator
+                : UITableViewCellAccessoryNone;
+            cell.selectionStyle = hasMachine
+                ? UITableViewCellSelectionStyleDefault
+                : UITableViewCellSelectionStyleNone;
         }
         return cell;
     }
@@ -588,6 +606,7 @@ titleForFooterInSection:(NSInteger)section {
         UISwitch *toggle = [[UISwitch alloc] initWithFrame:CGRectZero];
         toggle.tag = (NSInteger)index;
         toggle.on = [_settings valueForOptionIndex:index];
+        toggle.accessibilityLabel = VMStringFromC(option->title);
         /*
          * Grey for a row the machine does not read, the system tint for one it
          * does. That distinction did not exist when nothing was applied and
@@ -712,8 +731,12 @@ titleForFooterInSection:(NSInteger)section {
         case VMSettingsSectionCommandLine: {
             UITableViewCell *cell = [self cellWithIdentifier:kVMValueCell
                                                        style:UITableViewCellStyleSubtitle];
-            cell.textLabel.font = [UIFont fontWithName:@"Menlo" size:12]
-                                  ?: [UIFont systemFontOfSize:12];
+            UIFont *mono = [UIFont monospacedSystemFontOfSize:12.0
+                                                       weight:UIFontWeightRegular];
+            cell.textLabel.font =
+                [[UIFontMetrics metricsForTextStyle:UIFontTextStyleCaption1]
+                    scaledFontForFont:mono];
+            cell.textLabel.adjustsFontForContentSizeCategory = YES;
             cell.textLabel.text = [_settings equivalentToggleArguments];
             cell.detailTextLabel.text = _copiedCommandLine
                 ? @"copied to the clipboard" : @"tap to copy";
@@ -775,6 +798,7 @@ didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
             if (self.navigationController)
                 [self.navigationController pushViewController:m animated:YES];
         } else if (indexPath.row == VMGeneralRowSnapshots) {
+            if (self.snapshotsDirectory.length == 0) return;
             VMSnapshotListViewController *list =
                 [[VMSnapshotListViewController alloc] init];
             /* Both come from whoever presented this screen. Settings is built

@@ -79,14 +79,15 @@ extern NSString *const VMFirmwareJailbreakPayloadFile;
  * this is.
  *
  * Off, the app shows a screen, five buttons, and a short settings list whose
- * rows are things a person can decide. On, it additionally shows the fourteen
+ * rows are things a person can decide. On, it additionally shows the sixteen
  * device-tree and kernel-patch toggles that mirror the desktop harness, the
  * instruction cap, the raw guest console, and the diagnostics pages.
  *
- * Those fourteen rows are not hidden because they are dangerous -- none of
- * them does anything in this app yet -- but because leading with "MBX GPU ·
- * /arm-io/mbx" answers a question almost nobody arrived with. The desktop
- * harness is where bisecting a boot happens; this is a phone.
+ * Those rows are not hidden because they are dangerous. Several now reach the
+ * real bring-up or work-image provisioner and the rest state their limits;
+ * they stay behind Developer Mode because leading with device-tree paths and
+ * experimental MBX controls answers a question almost nobody arrived with.
+ * The desktop harness is where bisecting a boot happens; this is a phone.
  */
 /*
  * JAILBREAK, as one switch.

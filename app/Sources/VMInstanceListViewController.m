@@ -9,13 +9,14 @@
 #import "VMEngine.h"
 #import "VMInstanceStore.h"
 #import "VMInstances.h"
+#import "VMSettingsViewController.h"
 
 static NSString *const kCell = @"machine";
 
 @implementation VMInstanceListViewController
 
 - (instancetype)init {
-    self = [super initWithStyle:UITableViewStyleGrouped];
+    self = [super initWithStyle:UITableViewStyleInsetGrouped];
     if (!self) return nil;
     self.title = @"Machines";
     return self;
@@ -24,10 +25,22 @@ static NSString *const kCell = @"machine";
 - (void)viewDidLoad {
     [super viewDidLoad];
 
-    self.navigationItem.rightBarButtonItem =
-        [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemAdd
-                                                      target:self
-                                                      action:@selector(addTapped)];
+    self.navigationItem.largeTitleDisplayMode =
+        UINavigationItemLargeTitleDisplayModeAlways;
+
+    UIBarButtonItem *add = [[UIBarButtonItem alloc]
+        initWithBarButtonSystemItem:UIBarButtonSystemItemAdd
+                             target:self action:@selector(addTapped)];
+    UIBarButtonItem *settings = [[UIBarButtonItem alloc]
+        initWithImage:[UIImage systemImageNamed:@"gearshape"]
+                 style:UIBarButtonItemStylePlain
+                target:self action:@selector(settingsTapped)];
+    settings.accessibilityLabel = @"Settings";
+    /* The first item is nearest the trailing edge. Keep Create in the familiar
+     * top-right position and put global app setup beside it. Previously the
+     * only route to firmware import was to open a machine and start its engine
+     * first, which made initial setup feel backwards. */
+    self.navigationItem.rightBarButtonItems = @[ add, settings ];
     self.navigationItem.leftBarButtonItem = self.editButtonItem;
 
     [[NSNotificationCenter defaultCenter]
@@ -121,6 +134,15 @@ static NSString *const kCell = @"machine";
         if (![[VMInstanceStore sharedStore] createInstanceNamed:name error:&err])
             [self showError:err doing:@"Could not create the machine"];
     }];
+}
+
+- (void)settingsTapped {
+    VMSettingsViewController *settings =
+        [[VMSettingsViewController alloc] init];
+    UINavigationController *nav = [[UINavigationController alloc]
+        initWithRootViewController:settings];
+    nav.navigationBar.prefersLargeTitles = YES;
+    [self presentViewController:nav animated:YES completion:nil];
 }
 
 - (void)renameAtIndex:(NSUInteger)index {
@@ -227,7 +249,11 @@ titleForFooterInSection:(NSInteger)section {
         [[VMInstanceStore sharedStore] instanceAtIndex:(NSUInteger)indexPath.row];
 
     cell.textLabel.text = row[@"name"] ?: @"?";
+    cell.textLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleHeadline];
+    cell.textLabel.adjustsFontForContentSizeCategory = YES;
     cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+    cell.imageView.image = [UIImage systemImageNamed:@"iphone"];
+    cell.imageView.tintColor = [UIColor systemBlueColor];
 
     /* The subtitle is the machine's history, and it says "never opened"
      * rather than showing a 1970 date for a zero stamp. */
@@ -248,6 +274,11 @@ titleForFooterInSection:(NSInteger)section {
         : [NSString stringWithFormat:@" · %.2f B instructions",
            (double)retired / 1e9];
     cell.detailTextLabel.text = [when stringByAppendingString:work];
+    cell.detailTextLabel.font =
+        [UIFont preferredFontForTextStyle:UIFontTextStyleSubheadline];
+    cell.detailTextLabel.adjustsFontForContentSizeCategory = YES;
+    cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
+    cell.accessibilityHint = @"Opens this machine.";
     return cell;
 }
 

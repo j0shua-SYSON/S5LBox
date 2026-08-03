@@ -38,9 +38,8 @@
  * app/Sources/VMBootOptions.c is the answer instead. It maps every row of this
  * table onto what a bring-up request can express, and its test fails when a
  * row has no map entry -- so "does this switch do anything" is a fact with a
- * test attached rather than a paragraph that rots. Today two rows reach the
- * request, one is written into the work image, and eleven do not reach the
- * machine at all; the settings screen shows that per row, from the same C.
+ * test attached rather than a paragraph that rots. The settings screen shows
+ * the current answer per row from the same C; tests pin the live counts.
  *
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed.
  */

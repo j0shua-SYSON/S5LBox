@@ -60,9 +60,11 @@ static const struct {
      * clear, which is why this fix changes behaviour without changing anybody's
      * settings.
      */
-    /* Un-matched, the PowerVR driver never probes. Matched, it busy-polls a
-     * reset bit in a register block this VM does not model, and the boot
-     * hangs -- ~51 M instructions inside AppleMBX+0xb440 and climbing. */
+    /* Un-matched, the PowerVR driver never probes and QuartzCore uses its
+     * software path. The old reason for this default -- an unmodelled reset
+     * poll -- is historical: the current MBX model now completes the measured
+     * reset, ring, 2D and 3D families. It remains opt-in until a final cold
+     * boot and a measured product-level cadence close the graphics gate. */
     { "mbx", MAP_UNMATCH, NULL, "arm-io/mbx" },
     /* Matched, IOCryptoAcceleratorFamily installs a sha1_hardware_hook and
      * every exactly-4096-byte digest -- the size cs_validate_page asks for --

@@ -3,7 +3,7 @@
 //
 //  A table of configured machines: tap one to open it, swipe for rename,
 //  duplicate and delete, plus at the top of the screen the one sentence that
-//  matters most about this app — that none of these machines boots Apple's
+//  matters most about this app — whether these machines can boot Apple's
 //  firmware yet. The list is a real list; what it lists is a synthetic guest.
 //  Saying so on the first screen is cheaper than letting somebody create six
 //  machines before finding out.

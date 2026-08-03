@@ -26,7 +26,7 @@ typedef NS_ENUM(NSInteger, VMSnapshotSection) {
 @implementation VMSnapshotListViewController
 
 - (instancetype)init {
-    self = [super initWithStyle:UITableViewStyleGrouped];
+    self = [super initWithStyle:UITableViewStyleInsetGrouped];
     if (self) {
         _snapshots = [NSMutableArray array];
         self.title = @"Snapshots";
@@ -158,8 +158,13 @@ titleForFooterInSection:(NSInteger)section {
                        initWithStyle:UITableViewCellStyleDefault
                      reuseIdentifier:@"action"];
         cell.textLabel.text = @"Take Snapshot";
+        cell.textLabel.font =
+            [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
+        cell.textLabel.adjustsFontForContentSizeCategory = YES;
         cell.textLabel.textColor = self.busy ? [UIColor systemGrayColor]
                                              : [UIColor systemBlueColor];
+        cell.imageView.image = [UIImage systemImageNamed:@"plus.circle.fill"];
+        cell.imageView.tintColor = cell.textLabel.textColor;
         cell.selectionStyle = self.busy ? UITableViewCellSelectionStyleNone
                                         : UITableViewCellSelectionStyleDefault;
         cell.accessoryType = UITableViewCellAccessoryNone;
@@ -174,8 +179,16 @@ titleForFooterInSection:(NSInteger)section {
                  reuseIdentifier:@"snapshot"];
     NSDictionary *s = self.snapshots[(NSUInteger)indexPath.row];
     cell.textLabel.text = [self describeDate:s[@"when"]];
+    cell.textLabel.font =
+        [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
+    cell.textLabel.adjustsFontForContentSizeCategory = YES;
     cell.detailTextLabel.text =
         [self describeBytes:[s[@"bytes"] unsignedLongLongValue]];
+    cell.detailTextLabel.font =
+        [UIFont preferredFontForTextStyle:UIFontTextStyleCaption1];
+    cell.detailTextLabel.adjustsFontForContentSizeCategory = YES;
+    cell.imageView.image = [UIImage systemImageNamed:@"clock"];
+    cell.imageView.tintColor = [UIColor secondaryLabelColor];
     cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
     return cell;
 }
@@ -360,7 +373,9 @@ didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     self.progressLabel.textColor = [UIColor whiteColor];
     self.progressLabel.textAlignment = NSTextAlignmentCenter;
     self.progressLabel.numberOfLines = 0;
-    self.progressLabel.font = [UIFont systemFontOfSize:15.0];
+    self.progressLabel.font =
+        [UIFont preferredFontForTextStyle:UIFontTextStyleHeadline];
+    self.progressLabel.adjustsFontForContentSizeCategory = YES;
     self.progressLabel.translatesAutoresizingMaskIntoConstraints = NO;
 
     self.progressBar = [[UIProgressView alloc]

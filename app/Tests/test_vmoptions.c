@@ -69,8 +69,8 @@ static const struct {
      * text claimed "NOT IMPLEMENTED ANYWHERE" while the app's own boot report
      * listed it as applied, in the same build. */
     { "activate",           true,  VM_OPT_GROUP_GUEST_STATE, VM_OPT_IMPL_HARNESS },
-    { "jb-codesign",        false, VM_OPT_GROUP_GUEST_STATE, VM_OPT_IMPL_NOWHERE },
-    { "jb-payload",         false, VM_OPT_GROUP_GUEST_STATE, VM_OPT_IMPL_NOWHERE },
+    { "jb-codesign",        false, VM_OPT_GROUP_GUEST_STATE, VM_OPT_IMPL_HARNESS },
+    { "jb-payload",          false, VM_OPT_GROUP_GUEST_STATE, VM_OPT_IMPL_HARNESS },
     { "ppp",                false, VM_OPT_GROUP_GUEST_STATE, VM_OPT_IMPL_HARNESS },
     { "nat",                true,  VM_OPT_GROUP_GUEST_STATE, VM_OPT_IMPL_HARNESS }
 };

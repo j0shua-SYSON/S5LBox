@@ -116,11 +116,17 @@ static UIGestureRecognizer *VMNavigationContentPopGestureRecognizer(
 
     (void)application; (void)launchOptions;
     self.window = [[UIWindow alloc] initWithFrame:[[UIScreen mainScreen] bounds]];
+    /* Keep the shell native rather than painting a second design system over
+     * UIKit.  One explicit accent and large navigation titles are enough to
+     * make the app read like a current iOS utility, while semantic system
+     * colours continue to follow light mode, dark mode and increased contrast. */
+    self.window.tintColor = [UIColor systemBlueColor];
     /* The machine list is the root now, with the emulator pushed on top of it.
      * A navigation stack rather than a modal presentation because going back
      * to the list is the common action once there is more than one machine. */
     UINavigationController *nav = [[VMNavigationController alloc]
         initWithRootViewController:[[VMInstanceListViewController alloc] init]];
+    nav.navigationBar.prefersLargeTitles = YES;
     self.window.rootViewController = nav;
     [self.window makeKeyAndVisible];
     return YES;

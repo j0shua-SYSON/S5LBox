@@ -26,8 +26,11 @@
 
     _view = [[UITextView alloc] initWithFrame:CGRectZero];
     _view.editable = NO;
-    _view.font = [UIFont monospacedSystemFontOfSize:11.0
-                                             weight:UIFontWeightRegular];
+    UIFont *consoleBase = [UIFont monospacedSystemFontOfSize:11.0
+                                                      weight:UIFontWeightRegular];
+    _view.font = [[UIFontMetrics metricsForTextStyle:UIFontTextStyleFootnote]
+        scaledFontForFont:consoleBase];
+    _view.adjustsFontForContentSizeCategory = YES;
     _view.alwaysBounceVertical = YES;
     _view.autoresizingMask =
         UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
@@ -42,7 +45,8 @@
     _empty.numberOfLines = 0;
     _empty.textAlignment = NSTextAlignmentCenter;
     _empty.textColor = [UIColor secondaryLabelColor];
-    _empty.font = [UIFont systemFontOfSize:14.0];
+    _empty.font = [UIFont preferredFontForTextStyle:UIFontTextStyleSubheadline];
+    _empty.adjustsFontForContentSizeCategory = YES;
     _empty.text = @"Nothing printed yet.\n\nThis is the guest's serial port — "
                   @"where a real iPhone's kernel log goes. The built-in test "
                   @"program prints a short banner and little else, so an almost "
@@ -56,6 +60,7 @@
         [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemAction
                                                       target:self
                                                       action:@selector(share)];
+    self.navigationItem.rightBarButtonItem.accessibilityLabel = @"Share console";
     [self refresh];
 }
 

@@ -1,6 +1,6 @@
 /*
  * Host-side tests for app/Sources/VMBootOptions.c — the join between the
- * settings screen's fourteen switches and the bring-up request.
+ * settings screen's sixteen switches and the bring-up request.
  *
  * The property being defended is not "the right switches work". It is that the
  * app cannot show a switch in one position while the machine honours the
@@ -183,12 +183,15 @@ static const char *const EXPECTED_OVERRIDDEN_AT_DEFAULT[] = {
  *
  * It used to assert the exact opposite -- that every nub stayed matched
  * whatever its switch said -- and it passed for as long as that was true. That
- * was not a harmless inaccuracy. Left matched, /arm-io/mbx hangs the boot in
- * the PowerVR driver's reset poll, and /arm-io/sha1 sends cs_validate_page's
- * 4096-byte digests to a register file this VM does not model, so launchd's
- * first text page fails its signature. An iPhone running the app reached
+ * was not a harmless inaccuracy. At the time, /arm-io/mbx hung the boot in the
+ * PowerVR driver's reset poll, and /arm-io/sha1 sent cs_validate_page's
+ * 4096-byte digests to a register file this VM did not model, so launchd's
+ * first text page failed its signature. An iPhone running the app reached
  * 11.5 G instructions without launchd ever starting, while the desktop -- which
- * un-matches both by default -- was at launchd before 1.5 G.
+ * un-matched both by default -- was at launchd before 1.5 G. MBX is modelled
+ * much further now, but its accepted default stays off until final cold/FPS
+ * validation; this test still verifies that the requested default reaches the
+ * device tree rather than being ignored.
  *
  * A test that pins a bug in place is worse than no test, because it makes the
  * bug look like a decision. This one pins the fix.

@@ -2,7 +2,7 @@
  * S5LBox — what the settings screen's switches do to a real bring-up, and what
  * they demonstrably do not.
  *
- * WHY THIS FILE EXISTS. VMOptions.c records fourteen toggles and
+ * WHY THIS FILE EXISTS. VMOptions.c records sixteen toggles and
  * core/include/bringup.h accepts a request with three opt-outs on it. Between
  * those two facts sat a gap nobody could see from either side: the switches
  * were stored, shown, rendered back as a bootkernel command line, and never
@@ -10,9 +10,10 @@
  * that the join is CHECKABLE — every row of the option table has exactly one
  * entry in the map below, and the test fails when a row has none.
  *
- * IT IS ALSO WHERE THE APP ADMITS WHAT IT CANNOT DO. Only two of the fourteen
- * rows correspond to a field the bring-up request actually has. The rest fall
- * into three kinds, and the difference between them is the whole point:
+ * IT IS ALSO WHERE THE APP ADMITS WHAT IT CANNOT DO. Eight rows currently
+ * reach the bring-up request, two are provisioned into a work image, and six
+ * are fixed or unavailable here. They fall into three kinds, and the
+ * difference between them is the whole point:
  *
  *   APPLIED      the request now carries this row's value, both ways.
  *   PROVISIONED  it is not a boot-time decision at all: it is written into the
@@ -21,12 +22,13 @@
  *   IGNORED      nothing in this app reads it. The machine does one fixed
  *                thing, which may or may not be what the switch says.
  *
- * The last of those is why `effective` exists next to `requested`. Five rows
- * default to OFF and the app's bring-up does the ON thing regardless -- it has
- * no device-tree un-match step at all, so /arm-io/mbx and the four nubs beside
- * it stay matched whatever the user chose, INCLUDING when they chose the
- * default. A report that only listed rows the user had changed would call that
- * configuration correct. This one counts it as an override and names it.
+ * The last of those is why `effective` exists next to `requested`. The app once
+ * lacked the device-tree un-match step, so five OFF rows silently stayed ON;
+ * that bug is fixed and all six hardware rows now reach bring-up. Fixed rows
+ * still need the distinction: NAT, for example, defaults ON in the option
+ * mirror but is effectively OFF because this app has no PPP endpoint. A report
+ * that showed only the requested value would still lie, so the override is
+ * counted and named.
  *
  * PLAIN C11, and for the usual reason: no Objective-C is compilable by a host
  * CI runner, and "which switch reached the machine" is exactly the claim a UI
