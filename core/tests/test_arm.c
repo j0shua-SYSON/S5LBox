@@ -169,6 +169,93 @@ static void test_adds_overflow(void) {
     CHECK((c.cpsr & ARM_CPSR_N) != 0, "N should be set");
 }
 
+static void test_nzcv_updates_preserve_the_rest_of_cpsr(void) {
+    static const struct {
+        const char *name;
+        uint32_t insn, a, b;
+        uint32_t addend, cin;
+        bool input_carry;
+    } arithmetic[] = {
+        /* ADDS r0,r1,r2: positive overflow without carry. */
+        { "ADDS", 0xe0910002u, 0x7fffffffu, 1u,          1u,          0u, false },
+        /* ADCS r0,r1,r2: the incoming carry produces zero and carry-out. */
+        { "ADCS", 0xe0b10002u, 0xffffffffu, 0u,          0u,          1u, true  },
+        /* SUBS r0,r1,r2 is implemented as a + ~b + 1. */
+        { "SUBS", 0xe0510002u, 0u,          1u,          0xfffffffeu, 1u, false },
+        /* SBCS with C clear subtracts the extra one and crosses INT32_MIN. */
+        { "SBCS", 0xe0d10002u, 0x80000000u, 0u,          0xffffffffu, 0u, false },
+    };
+    const uint32_t nzcv_mask = ARM_CPSR_N | ARM_CPSR_Z |
+                               ARM_CPSR_C | ARM_CPSR_V;
+    const uint32_t preserved = ARM_MODE_SYS | ARM_CPSR_Q | ARM_CPSR_A |
+                               ARM_CPSR_E | ARM_CPSR_I | ARM_CPSR_F |
+                               0x000f0000u; /* GE[3:0] */
+
+    for (size_t i = 0; i < sizeof arithmetic / sizeof arithmetic[0]; i++) {
+        memset(g_ram, 0, sizeof g_ram);
+        m_w32(NULL, 0u, arithmetic[i].insn);
+        arm_cpu_t c;
+        arm_reset(&c, &g_bus);
+        c.cpsr = preserved | ARM_CPSR_N | ARM_CPSR_Z | ARM_CPSR_V |
+                 (arithmetic[i].input_carry ? ARM_CPSR_C : 0u);
+        c.r[1] = arithmetic[i].a;
+        c.r[2] = arithmetic[i].b;
+
+        uint64_t wide = (uint64_t)arithmetic[i].a +
+                        (uint64_t)arithmetic[i].addend + arithmetic[i].cin;
+        int64_t signed_wide = (int64_t)(int32_t)arithmetic[i].a +
+                              (int64_t)(int32_t)arithmetic[i].addend +
+                              arithmetic[i].cin;
+        uint32_t result = (uint32_t)wide;
+        uint32_t expected_flags = (result & ARM_CPSR_N)
+                                | (result == 0u ? ARM_CPSR_Z : 0u)
+                                | ((wide >> 32) != 0u ? ARM_CPSR_C : 0u)
+                                | (signed_wide > 2147483647ll ||
+                                   signed_wide < -2147483648ll ? ARM_CPSR_V : 0u);
+
+        CHECK(arm_step(&c) == ARM_OK && c.r[0] == result,
+              "%s result=%08x expect %08x", arithmetic[i].name, c.r[0], result);
+        CHECK(c.cpsr == (preserved | expected_flags),
+              "%s CPSR=%08x expect %08x (changed non-NZCV bits=%08x)",
+              arithmetic[i].name, c.cpsr, preserved | expected_flags,
+              (c.cpsr ^ preserved) & ~nzcv_mask);
+    }
+
+    static const struct {
+        const char *name;
+        uint32_t insn, r1, r2, result, nzc;
+        bool input_carry;
+    } logical[] = {
+        /* MOVS r0,r2,LSL #1 takes C from bit 31 of r2. */
+        { "MOVS zero", 0xe1b00082u, 0u, 0x80000000u, 0u,
+          ARM_CPSR_Z | ARM_CPSR_C, false },
+        { "MOVS negative", 0xe1b00082u, 0u, 0x40000000u, 0x80000000u,
+          ARM_CPSR_N, true },
+        /* ANDS with LSL #0 preserves the incoming shifter carry. */
+        { "ANDS", 0xe0110002u, 0xf0u, 0x0fu, 0u,
+          ARM_CPSR_Z | ARM_CPSR_C, true },
+    };
+
+    for (size_t i = 0; i < sizeof logical / sizeof logical[0]; i++) {
+        memset(g_ram, 0, sizeof g_ram);
+        m_w32(NULL, 0u, logical[i].insn);
+        arm_cpu_t c;
+        arm_reset(&c, &g_bus);
+        c.cpsr = preserved | ARM_CPSR_V |
+                 ((~logical[i].nzc) & (ARM_CPSR_N | ARM_CPSR_Z)) |
+                 (logical[i].input_carry ? ARM_CPSR_C : 0u);
+        c.r[1] = logical[i].r1;
+        c.r[2] = logical[i].r2;
+
+        CHECK(arm_step(&c) == ARM_OK && c.r[0] == logical[i].result,
+              "%s result=%08x expect %08x", logical[i].name,
+              c.r[0], logical[i].result);
+        CHECK(c.cpsr == (preserved | ARM_CPSR_V | logical[i].nzc),
+              "%s CPSR=%08x expect %08x", logical[i].name, c.cpsr,
+              preserved | ARM_CPSR_V | logical[i].nzc);
+    }
+}
+
 static void test_barrel_lsl(void) {
     /* MOV r1,#1 ; MOV r0, r1, LSL #4 -> 16 */
     uint32_t p[] = { 0xe3a01001, 0xe1a00201 };
@@ -5331,6 +5418,7 @@ int main(void) {
     test_sub_flags();
     test_subs_negative();
     test_adds_overflow();
+    test_nzcv_updates_preserve_the_rest_of_cpsr();
     test_barrel_lsl();
     test_register_shifted_pc_operands_are_unpredictable();
     test_branch();

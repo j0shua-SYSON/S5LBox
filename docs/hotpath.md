@@ -3930,3 +3930,73 @@ older reported 25 M/s would yield only about 26.9 M/s, and that extrapolation cr
 hosts, compilers, and workloads. An exact iOS build and the eventual final cold boot are
 still required. Network, sound, and app completion remain behind the unpassed graphics
 gate.
+
+### r449-r454: packed NZCV wins the microbenchmarks and loses the real-guest gate
+
+r450's sampling-only Thumb benchmark put `alu_add` at 9.44% of samples. The old
+helper updates N, Z, C, and V through four `set_flag()` read/modify/write decisions,
+so replacing those with one masked CPSR write was a plausible generic interpreter
+optimization. A new boundary suite checked ADDS, ADCS, SUBS, SBCS, MOVS, and
+ANDS results and exact flags while seeding Q, GE[3:0], A, E, I, F, V, and the mode;
+both exact and warnings-as-errors builds passed 1,010/1,010 assertions.
+
+The first packed implementation looked excellent in the workload that suggested it.
+Twenty order-balanced pairs of 20 M instructions raised the flag-heavy Thumb median
+from 41.915 to 45.335 M/s (+8.2%; median paired delta +8.8%). It also made GCC inline
+the flag calculation everywhere, however, growing host text by 1,116 bytes and slowing
+the decoder-scattered, no-MMU mixed row. r452 therefore kept the packed helper inline
+only where Thumb flags are unconditional and left ARM's dynamic-S wrapper out of line.
+That reduced the text growth to 636 bytes and made `exec_data_processing()` 16 bytes
+smaller than baseline. Twelve order-balanced 20 M-instruction pairs per row gave:
+
+| benchmark row | pushed `9242a16` | r452 | independent-median change | paired-median change |
+|---|---:|---:|---:|---:|
+| Thumb ALU, MMU off | 47.635 M/s | 49.675 M/s | +4.3% | +4.1% |
+| Thumb ALU, 4 KiB MMU + tick | 32.785 M/s | 36.520 M/s | +11.4% | +10.5% |
+| mixed ARM, MMU off | 30.635 M/s | 29.995 M/s | **-2.1%** | **-1.1%** |
+| mixed ARM, 4 KiB MMU + tick | 23.770 M/s | 24.270 M/s | +2.1% | +2.4% |
+| load/store through `s5l8900_run()` | 24.910 M/s | 25.980 M/s | +4.3% | +5.3% |
+
+Those are real synthetic gains, including the regression; they are not evidence that
+the live guest becomes faster. r453 tested that distinction. The pushed baseline and
+r452 each restored the same r448 checkpoint and retired the same 100 M instructions
+twice, in old-new then new-old order. Every run exited zero with 15,626 external-media
+reads, 469 writes, and zero failures. All four copies of every retained artifact are
+byte-identical:
+
+| artifact | bytes | SHA-256 (all four runs) |
+|---|---:|---|
+| machine snapshot | 122,015,066 | `7DC65F9C627EAF4EAA687794A2474FD74ED3D03A469A5DCFB2EEB54C658CE79E` |
+| snapshot media image | 466,825,216 | `8A59C388C481165F460984926AA5FFB1B72A0E9030216CD0038DE9B3264B79FE` |
+| snapshot bridge state | 131,248 | `A3D8E6DC89261FD57A257FF098301331C4C6D447CCBF79B93DF74AE3A358B133` |
+| terminal framebuffer | 460,815 | `1C8A5E2BA060F35424B643D4F93AA6CBE55572E8BEEA78AB2A3696198B35F581` |
+
+The raw r453 times appeared to favour r452: old was 77.897 and 58.323 seconds while
+new was 65.042 and 60.239 seconds. That apparent roughly 8% median improvement is
+**discarded**. The monotonic host/cache warm-up is larger than the proposed effect;
+the first old run occupied the uniquely cold position and the final old run beat both
+new runs.
+
+r454 is the performance gate. After one discarded warm-up per binary, it ran eight
+independent 50 M-instruction restores in the symmetric order
+`old,new,new,old,new,old,old,new`. Old therefore occupied positions 1/4/6/7 and new
+2/3/5/8; both have the same mean order position, cancelling a linear host drift.
+
+| build | elapsed seconds | mean |
+|---|---|---:|
+| pushed `9242a16` | 20.969, 19.342, 20.295, 19.389 | **19.999** |
+| packed NZCV r452 | 20.232, 19.463, 20.364, 19.896 | **19.989** |
+
+The time difference is +0.05%, effectively zero; averaging the individually derived
+rates instead gives old 2.5029 versus new 2.5022 M/s, fractionally in the opposite
+direction. Setup, tracing, device work, and reporting are included identically in both,
+so neither calculation supports a live-guest speed claim. The packed implementation
+was therefore rejected and removed. Its independent CPSR preservation tests remain as
+correctness coverage, but production flag handling is unchanged from `9242a16`.
+
+This failed hypothesis is useful: a hot function in a flag-saturated synthetic Thumb
+loop can show a reproducible 4-11% local win and still contribute nothing measurable to
+this SpringBoard interval. The retained semantics checkpoint is
+`work/r453-real-guest-flags-ab/pair2-new/post-7202m.bin`. It is a checkpoint, not a
+30 fps result. The 30 fps target, current-device measurement, and final cold boot all
+remain open.
