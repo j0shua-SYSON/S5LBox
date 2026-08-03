@@ -53,6 +53,7 @@
 #include "soc.h"          /* pulls in arm.h */
 
 #include <inttypes.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -408,7 +409,7 @@ static uint64_t g_sink;
 typedef struct {
     const char *loop;        /* "alu/branch" or "load/store"            */
     const char *mmu;         /* "off" | "sections-1M" | "pages-4K"      */
-    const char *tick;        /* "no" | "yes"                            */
+    const char *tick;        /* "no" | "yes" | "run"                    */
     const uint32_t *prog;
     unsigned    prog_words;
     unsigned    loop_insns;  /* instructions per iteration; divides the LCM  */
@@ -417,6 +418,7 @@ typedef struct {
     bool        mmu_on;
     bool        small_pages;
     bool        do_tick;
+    bool        run_api;     /* execute through app-facing s5l8900_run() */
     bool        thumb;       /* enter with CPSR.T set                   */
 } bench_cfg_t;
 
@@ -442,6 +444,13 @@ static const bench_cfg_t g_configs[] = {
     { .loop = "load/store",  .mmu = "pages-4K",    .tick = "yes",
       .prog = g_prog_ldst,  .prog_words = (unsigned)(sizeof g_prog_ldst  / 4),
       .loop_insns = 5u, .mmu_on = true, .small_pages = true, .do_tick = true },
+    /* The iOS app enters the interpreter through s5l8900_run(), not through
+     * this benchmark's hand-written arm_step/tick loop. Keep both rows so an
+     * optimization in that API has an honest before/after measurement without
+     * rewriting the historical tick=yes series into a different workload. */
+    { .loop = "load/store",  .mmu = "pages-4K",    .tick = "run",
+      .prog = g_prog_ldst,  .prog_words = (unsigned)(sizeof g_prog_ldst  / 4),
+      .loop_insns = 5u, .mmu_on = true, .small_pages = true, .run_api = true },
     /* The encoding real code actually uses. Paired with the ARM row above it
      * and with the MMU row, so the comparison is one variable at a time. */
     { .loop = "alu/branch T",.mmu = "off",         .tick = "no",
@@ -644,17 +653,27 @@ static bool setup(s5l8900_t *m, const bench_cfg_t *cfg) {
 
 /* ---------------------------------------------------------- the timed run ---
  *
- * Two loops rather than one with a branch in it, so the `tick=no` rows do not
- * pay for a per-instruction test of a flag that never changes.
+ * Separate paths rather than one per-instruction mode branch, so the `tick=no`
+ * rows do not pay for a flag that never changes. `tick=run` measures the exact
+ * app-facing machine loop, including its status and retirement accounting.
  */
-static bool run_burst(s5l8900_t *m, bool do_tick, uint64_t insns,
+static bool run_burst(s5l8900_t *m, const bench_cfg_t *cfg, uint64_t insns,
                       uint64_t *retired, double *seconds) {
     arm_cpu_t *cpu = &m->cpu;
     uint64_t before = cpu->cycles;
     bool ok = true;
 
     double t0 = now_seconds();
-    if (do_tick) {
+    if (cfg->run_api) {
+        uint64_t remaining = insns;
+        while (remaining != 0u) {
+            unsigned chunk = remaining > UINT_MAX ? UINT_MAX : (unsigned)remaining;
+            arm_status_t status = ARM_OK;
+            unsigned ran = s5l8900_run(m, chunk, &status);
+            if (status != ARM_OK || ran != chunk) { ok = false; break; }
+            remaining -= ran;
+        }
+    } else if (cfg->do_tick) {
         for (uint64_t i = 0; i < insns; i++) {
             if (arm_step(cpu) != ARM_OK) { ok = false; break; }
             s5l8900_tick(m, 1u);
@@ -947,7 +966,7 @@ int main(int argc, char **argv) {
 
             uint64_t retired = 0;
             double seconds = 0.0;
-            bool stepped = run_burst(&m, cfg->do_tick, insns, &retired, &seconds);
+            bool stepped = run_burst(&m, cfg, insns, &retired, &seconds);
 
             if (!stepped) {
                 printf("  ERROR: arm_step returned a non-OK status after %" PRIu64
