@@ -3753,3 +3753,72 @@ mode and provide an honest animated workload. Focused exact and strict verificat
 785/785 assertions; the full exact and strict suites pass 55/55 and 59/59 tests,
 including the independent `-Wall -Wextra -Werror` build. Final cold boot, 30 fps,
 network, sound, and iOS-app completion remain open.
+
+### r434-r439: measured affine sprite families clear; 30 fps still fails
+
+r434 replayed r433 from 5.20 B to 5.80 B with one stationary contact at `(45,62)`.
+All 66 scheduled reports were accepted and the device completed 94/94 queued reports,
+but the old decoder rejected the first non-axis-aligned filtered sprite. There was no
+Graphics Recovery Event; the guest simply waited on the missing 3D completion. Its
+frame-meter result is therefore invalid as an animation measurement: 3/4 3D renders
+completed and only two sampled signatures changed.
+
+The retained object is not an arbitrary four-point warp. Its corners close to a
+parallelogram within `0.000008` pixels, its perspective terms are zero, and its edge
+vectors are orthogonal, positive-orientation, rigid 1:1 transforms of an 86x13 source.
+The decoder now inverse-maps covered destination pixel centres into the existing clamped
+16.16 bilinear kernel. It accepts only the direct sampler's rigid transform, rejects
+shear/nonuniform scale/reversed orientation atomically, and leaves boundary-box pixels
+outside the parallelogram untouched. Exact offline replay changed completion status from
+zero to `0x4c`; only 288 visible pixels changed, all inside `(28,466)-(62,476)`, and the
+resulting `Phone` label is coherent:
+
+    work/r434-stationary-longpress-5800m/post-longpress-5800m.bin
+      SHA-256 F08A241ECB9CF59BE262A13DED60ADABBC11E5393EF41E82DB32925C5A15E50E
+    work/r434-derived-complete-affine-5800m/post-affine-5800m.bin
+      SHA-256 DACC89F991EE3B6254ED32F9720669F1935335E601476B09B783DE791603E59F
+
+A fresh full gesture in r437 then completed 119/120 3D renders and 28/28 2D commands
+before exposing the same filtered label producer at uniform axis-aligned scale
+`1.0066147904 x 1.0066146851`, with uniform vertex alpha `0xfc`. This measured form
+justifies positive uniform scale for the modulated sampler; the alternate sampler remains
+minification-only. Its exact replay raised `0x4c` and changed 423 visible pixels only
+inside `(19,96)-(72,106)`:
+
+    work/r437-affine-longpress-5800m/post-longpress-5800m.bin
+      SHA-256 ED081E568793773E157BE3C4D7210AE6AA752F94FB7B4A066B8D49F5B64D9DB7
+    work/r437-derived-complete-scale-5800m/post-scale-5800m.bin
+      SHA-256 42A93B2BA8657657A9D1C70D39FD877DA97A14C5A5D876A34641C77A57A1D837
+
+r438 continued from that derived completion and cleared 77/78 further renders before a
+rotated, uniformly magnified instance of the same modulated producer. Its two edge scales
+are `1.2500000003 x 1.2499997437`, its dot product is `0.0000162`, and its closure error
+is below `0.000008` pixels. The implemented similarity path still rejects shear,
+nonuniform scale, perspective and four-point warps. Offline replay raised `0x4c`, changed
+671 visible pixels only inside `(14,102)-(80,114)`, and produced a coherent rotated
+`Messages` label:
+
+    work/r438-scale-resume-6000m/post-resume-6000m.bin
+      SHA-256 263EAE5FB1AFB3D79F3D99F5622AD7F4C74E64B1D3FD3D9464F9065E253B9E42
+    work/r438-derived-complete-similarity-6000m/post-similarity-6000m.bin
+      SHA-256 62DCAD1ED31616A2ACEA486D3972476866E9DD06FF677FE44FAE2E19B96D25C7
+
+r439 is the broad live check rather than another single-packet replay. From 6.00 B to
+6.20 B it completed **78/78 2D commands** (7,499,000 bytes) and **508/508 3D renders**
+(1,243,477 blended pixels), with zero decoder rejection, zero Graphics Recovery Event,
+zero external-media failure and process exit zero. The terminal Home screen is coherent:
+
+    work/r439-similarity-resume-6200m/post-resume-6200m.bin
+      SHA-256 BCF33A2756C0B28A3DC4FFA47180AEFB6012E88E788BFE7664DBB826AFDE8C38
+    work/r439-similarity-resume-6200m/w.img.screen.ppm
+      SHA-256 C17DAC8E3F223AC2CD3B78AE5DE12BAC74E7EC3295A1AB971FC78FBA4BD69368
+
+This is a substantial correctness boundary, not a performance success. r439 retired
+3.485 M guest instructions/s over the meter's 57.396 host seconds. Of 1,006 live
+publications, only 13 sampled signatures changed. Its 94 completed windows had mean
+`0.260`, maximum `3.733`, 82 zero windows and none at or above 30 changed-publication
+fps. The sparse signature can miss a small change but cannot invent one; these data do
+not support a 30 fps claim. Focused exact and strict verification are 938/938 assertions;
+the full exact and warnings-as-errors suites pass 55/55 and 59/59 tests. A final cold
+boot remains mandatory after performance work. Network, sound and iOS-app completion
+remain downstream of the still-open 30 fps priority.

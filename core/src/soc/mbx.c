@@ -1081,6 +1081,27 @@ struct mbx_bilinear_axis {
     uint32_t weight;
 };
 
+static bool mbx_bilinear_coordinate(float coordinate, uint32_t dimension,
+                                    struct mbx_bilinear_axis *axis) {
+    if (!axis || !dimension || dimension > 512u || coordinate < 0.0f)
+        return false;
+    float fixed_float = coordinate * 65536.0f;
+    if (fixed_float > (float)INT32_MAX) return false;
+
+    int64_t raw = (int64_t)(int32_t)fixed_float - INT64_C(32768);
+    int64_t neighbour = raw + INT64_C(65536);
+    uint32_t maximum = (dimension << 16) - 1u;
+    uint32_t first_fixed = raw < 0 ? 0u :
+        (uint64_t)raw > maximum ? maximum : (uint32_t)raw;
+    uint32_t second_fixed = neighbour < 0 ? 0u :
+        (uint64_t)neighbour > maximum ? maximum : (uint32_t)neighbour;
+
+    axis->first = first_fixed >> 16;
+    axis->second = second_fixed >> 16;
+    axis->weight = (first_fixed & UINT32_C(0xffff)) >> 8;
+    return true;
+}
+
 /* Convert one covered destination pixel centre into the same clamped 16.16
  * tap pair consumed by QuartzCore's software sampler.  The MBX interpolator's
  * undocumented sub-LSB precision cannot be hardware-oracled here; binary32
@@ -1097,21 +1118,7 @@ static bool mbx_bilinear_axis(float origin, float span,
     float step = texel_span / span;
     float coordinate = texel_origin +
                        ((float)pixel + 0.5f - origin) * step;
-    float fixed_float = coordinate * 65536.0f;
-    if (fixed_float < 0.0f || fixed_float > (float)INT32_MAX) return false;
-
-    int64_t raw = (int64_t)(int32_t)fixed_float - INT64_C(32768);
-    int64_t neighbour = raw + INT64_C(65536);
-    uint32_t maximum = (dimension << 16) - 1u;
-    uint32_t first_fixed = raw < 0 ? 0u :
-        (uint64_t)raw > maximum ? maximum : (uint32_t)raw;
-    uint32_t second_fixed = neighbour < 0 ? 0u :
-        (uint64_t)neighbour > maximum ? maximum : (uint32_t)neighbour;
-
-    axis->first = first_fixed >> 16;
-    axis->second = second_fixed >> 16;
-    axis->weight = (first_fixed & UINT32_C(0xffff)) >> 8;
-    return true;
+    return mbx_bilinear_coordinate(coordinate, dimension, axis);
 }
 
 struct mbx_3d_word {
@@ -2028,8 +2035,8 @@ static bool mbx_execute_status_sprite(s5l_mbx_t *m,
 
 /* r409-r412 initially supplied four literal app-icon/label forms. Reading the
  * shipped _mbx3DCtxQuadCopyPerspective producer explains the shared packet
- * instead: it is an axis-aligned BGRA8 sprite whose independently encoded
- * destination, UV, texture-power, pitch, clip and tile rectangles must agree.
+ * instead: it is a BGRA8 textured sprite whose independently encoded
+ * destination, UV, texture-power, pitch, clip and tile bounds must agree.
  *
  * The texture header stores log2(power-of-two dimension)-3 in nibbles 6 and 5.
  * Linear pitch is split because the source address consumes bits 0..17 of its
@@ -2043,15 +2050,17 @@ static bool mbx_execute_status_sprite(s5l_mbx_t *m,
  * the co-shipped software sampler supplies the clamped 8-bit bilinear kernel.
  * r420 then contributes one exact uniformly minified 320x460 form and a third
  * measured state pair. Both vertex orders redundantly encode the same
- * axis-aligned destination and are checked in full. The captured samplers carry
+ * destination and are checked in full. r434 and r438 add the filtered affine
+ * subset: the direct sampler remains rigid 1:1, while the modulated sampler may
+ * apply a positive uniform similarity transform. The captured samplers carry
  * one uniform alpha byte, which uses the already recovered channel-modulation
  * equation. The background object, blend object and FBSTART must all resolve to
  * the same mapped target, but its GPU address is not a rendering semantic and
- * is therefore not whitelisted. This is still not a perspective or general
- * scaling rasterizer: magnification, nonuniform scale and coloured vertices
- * remain rejected. r416's partly off-screen label is filtered only when its
- * normalized coordinates, integer boundary, clip and tiles all independently
- * agree. */
+ * is therefore not whitelisted. This is still not a perspective or arbitrary
+ * affine rasterizer: shear, nonuniform affine scale, four-point warps and
+ * coloured vertices remain rejected. r416's partly off-screen label is
+ * filtered only when its normalized coordinates, integer boundary, clip and
+ * tiles all independently agree. */
 static bool mbx_3d_word_to_finite_float(uint32_t word, float *value) {
     if ((word & 0x7f800000u) == 0x7f800000u ||
         sizeof *value != sizeof word)
@@ -2074,6 +2083,32 @@ static uint32_t mbx_3d_float_to_word(float value) {
 static int32_t mbx_3d_ceil_to_i32(float value) {
     int32_t integer = (int32_t)value;
     return integer + ((float)integer < value);
+}
+
+struct mbx_affine_transform {
+    float origin_x, origin_y;
+    float u_x, u_y;
+    float v_x, v_y;
+    float determinant;
+};
+
+static bool mbx_affine_pixel(const struct mbx_affine_transform *transform,
+                             uint32_t x, uint32_t y,
+                             float *u_fraction, float *v_fraction) {
+    if (!transform || !u_fraction || !v_fraction ||
+        transform->determinant <= 0.0f)
+        return false;
+    float dx = (float)x + 0.5f - transform->origin_x;
+    float dy = (float)y + 0.5f - transform->origin_y;
+    float u = (dx * transform->v_y - dy * transform->v_x) /
+              transform->determinant;
+    float v = (transform->u_x * dy - transform->u_y * dx) /
+              transform->determinant;
+    if (u < 0.0f || v < 0.0f || u >= 1.0f || v >= 1.0f)
+        return false;
+    *u_fraction = u;
+    *v_fraction = v;
+    return true;
 }
 
 /* r414 exposed why the object-list word is not merely another packet
@@ -2362,10 +2397,10 @@ static bool mbx_execute_solid_quad(s5l_mbx_t *m,
     return ok;
 }
 
-static bool mbx_execute_axis_aligned_sprite(s5l_mbx_t *m,
-                                            const arm_bus_t *bus,
-                                            const char **why,
-                                            uint32_t *pixels_blended) {
+static bool mbx_execute_textured_sprite(s5l_mbx_t *m,
+                                        const arm_bus_t *bus,
+                                        const char **why,
+                                        uint32_t *pixels_blended) {
     uint32_t region = m->reg[S5L_MBX_RGNBASE / 4u];
     uint32_t object = m->reg[S5L_MBX_OBJBASE / 4u];
     uint32_t target = m->reg[S5L_MBX_FBSTART / 4u];
@@ -2377,7 +2412,8 @@ static bool mbx_execute_axis_aligned_sprite(s5l_mbx_t *m,
     if (m->reg[S5L_MBX_3DPIXSAMP / 4u] != 0x00020007u ||
         m->reg[S5L_MBX_FBCTL / 4u] != 0x00000006u ||
         m->reg[S5L_MBX_FBLINESTRIDE / 4u] != MBX_3D_WIDTH) {
-        if (why) *why = "render registers are not the measured 1:1 sprite family";
+        if (why) *why =
+            "render registers are not the measured textured-sprite family";
         return false;
     }
 
@@ -2473,25 +2509,82 @@ static bool mbx_execute_axis_aligned_sprite(s5l_mbx_t *m,
         if (why) *why = "full-extent sprite layout has an unmeasured sampler";
         return false;
     }
+    const float epsilon = 0.0009765625f;
+    float destination_x[4], destination_y[4];
+    for (unsigned i = 0; i < 4u; i++) {
+        if (!mbx_3d_word_to_finite_float(quad[8u + i * 2u],
+                                         &destination_x[i]) ||
+            !mbx_3d_word_to_finite_float(quad[9u + i * 2u],
+                                         &destination_y[i])) {
+            if (why) *why = "sprite destination coordinates are not finite";
+            return false;
+        }
+    }
     bool axis_aligned = half_texel_layout
         ? quad[8] == quad[12] && quad[10] == quad[14] &&
           quad[9] == quad[11] && quad[13] == quad[15]
         : quad[8] == quad[10] && quad[12] == quad[14] &&
           quad[9] == quad[13] && quad[11] == quad[15];
-    if (!axis_aligned) {
-        if (why) *why = "sprite destination is not an axis-aligned quad";
-        return false;
+    unsigned p00 = half_texel_layout ? 0u : 1u;
+    unsigned p10 = half_texel_layout ? 1u : 3u;
+    unsigned p01 = half_texel_layout ? 2u : 0u;
+    unsigned p11 = half_texel_layout ? 3u : 2u;
+    float x0 = destination_x[p00], y0 = destination_y[p00];
+    float x1 = destination_x[p11], y1 = destination_y[p11];
+    struct mbx_affine_transform affine = {0};
+    bool affine_sprite = !axis_aligned;
+    if (axis_aligned) {
+        if (x0 >= x1 || y0 >= y1) {
+            if (why) *why = "sprite destination coordinates are invalid";
+            return false;
+        }
+    } else {
+        /* r434's first wiggle-mode render is a rigid affine instance of the
+         * direct filtered producer. r438 contributes the modulated producer's
+         * uniformly scaled affine form. Both have zero perspective and four
+         * corners that close to a parallelogram. Keep unfiltered, alternate-
+         * sampler, perspective, shear, and arbitrary four-point warps
+         * rejected. */
+        float closure_x = destination_x[p00] + destination_x[p11] -
+                          destination_x[p10] - destination_x[p01];
+        float closure_y = destination_y[p00] + destination_y[p11] -
+                          destination_y[p10] - destination_y[p01];
+        if (!half_texel_layout ||
+            (!direct_sampler && !modulated_sampler) ||
+            closure_x < -epsilon || closure_x > epsilon ||
+            closure_y < -epsilon || closure_y > epsilon) {
+            if (why) *why =
+                "sprite destination is neither axis-aligned nor a measured affine quad";
+            return false;
+        }
+        affine.origin_x = destination_x[p00];
+        affine.origin_y = destination_y[p00];
+        affine.u_x = destination_x[p10] - destination_x[p00];
+        affine.u_y = destination_y[p10] - destination_y[p00];
+        affine.v_x = destination_x[p01] - destination_x[p00];
+        affine.v_y = destination_y[p01] - destination_y[p00];
+        affine.determinant = affine.u_x * affine.v_y -
+                             affine.u_y * affine.v_x;
+        if (affine.determinant <= 0.0f) {
+            if (why) *why = "affine sprite orientation is degenerate or reversed";
+            return false;
+        }
+        x0 = x1 = destination_x[0];
+        y0 = y1 = destination_y[0];
+        for (unsigned i = 1u; i < 4u; i++) {
+            if (destination_x[i] < x0) x0 = destination_x[i];
+            if (destination_x[i] > x1) x1 = destination_x[i];
+            if (destination_y[i] < y0) y0 = destination_y[i];
+            if (destination_y[i] > y1) y1 = destination_y[i];
+        }
+        if (x0 >= x1 || y0 >= y1) {
+            if (why) *why = "affine sprite has empty destination bounds";
+            return false;
+        }
     }
-    uint32_t x0_word = quad[8];
-    uint32_t y0_word = half_texel_layout ? quad[9] : quad[11];
-    uint32_t x1_word = half_texel_layout ? quad[10] : quad[12];
-    uint32_t y1_word = half_texel_layout ? quad[13] : quad[9];
-    float x0, y0, x1, y1;
-    if (!mbx_3d_word_to_finite_float(x0_word, &x0) ||
-        !mbx_3d_word_to_finite_float(y0_word, &y0) ||
-        !mbx_3d_word_to_finite_float(x1_word, &x1) ||
-        !mbx_3d_word_to_finite_float(y1_word, &y1) ||
-        x0 >= x1 || y0 >= y1) {
+
+    if (x0 <= -(float)INT32_MAX || y0 <= -(float)INT32_MAX ||
+        x1 >= (float)INT32_MAX || y1 >= (float)INT32_MAX) {
         if (why) *why = "sprite destination coordinates are invalid";
         return false;
     }
@@ -2521,12 +2614,11 @@ static bool mbx_execute_axis_aligned_sprite(s5l_mbx_t *m,
      * the boundary object then supplies any stricter integer context scissor. */
     const float lower_bias = 0.468505859375f; /* 0x3eefe000 */
     const float upper_bias = 0.531494140625f; /* 0x3f081000 */
-    const float epsilon = 0.0009765625f;
     float dx = x1 - x0;
     float dy = y1 - y0;
     if (dx < 1.0f - epsilon || dy < 1.0f - epsilon ||
         dx > 512.0f + epsilon || dy > 512.0f + epsilon) {
-        if (why) *why = "sprite transform is outside the bounded axis-aligned family";
+        if (why) *why = "sprite transform is outside the bounded textured family";
         return false;
     }
 
@@ -2627,32 +2719,83 @@ static bool mbx_execute_axis_aligned_sprite(s5l_mbx_t *m,
         return false;
     }
 
-    bool unity_transform =
-        dx >= (float)source_width - epsilon &&
-        dx <= (float)source_width + epsilon &&
-        dy >= (float)source_height - epsilon &&
-        dy <= (float)source_height + epsilon;
-    if (!unity_transform) {
-        float scale_x = dx / (float)source_width;
-        float scale_y = dy / (float)source_height;
-        float scale_difference = scale_x > scale_y
-            ? scale_x - scale_y : scale_y - scale_x;
-        bool direct_magnification = direct_sampler && half_texel_layout &&
-            scale_x >= 1.0f - epsilon && scale_y >= 1.0f - epsilon;
-        bool measured_minification = !direct_sampler && half_texel_layout &&
-            (modulated_sampler || scaled_sampler) &&
-            scale_x > 0.0f && scale_y > 0.0f &&
-            scale_x <= 1.0f + epsilon && scale_y <= 1.0f + epsilon &&
-            scale_difference <= 0.00001f;
-        if (source_width > MBX_3D_WIDTH || source_height > 480u ||
-            (!direct_magnification && !measured_minification)) {
-            if (why) *why =
-                "filtered transform is neither measured magnification nor uniform minification";
+    if (affine_sprite) {
+        float expected_u2 = (float)source_width * (float)source_width;
+        float expected_v2 = (float)source_height * (float)source_height;
+        float expected_det = (float)source_width * (float)source_height;
+        float u2 = affine.u_x * affine.u_x + affine.u_y * affine.u_y;
+        float v2 = affine.v_x * affine.v_x + affine.v_y * affine.v_y;
+        float dot = affine.u_x * affine.v_x + affine.u_y * affine.v_y;
+        if (dot < 0.0f) dot = -dot;
+        if (source_width > MBX_3D_WIDTH || source_height > 480u) {
+            if (why) *why = "affine sprite source is outside measured bounds";
             return false;
         }
-    } else if (scaled_sampler) {
-        if (why) *why = "alternate filtered state lacks its measured minification";
-        return false;
+        if (direct_sampler) {
+            float u_error = u2 - expected_u2;
+            float v_error = v2 - expected_v2;
+            float det_error = affine.determinant - expected_det;
+            float tolerance =
+                ((float)source_width + (float)source_height) * epsilon;
+            if (u_error < 0.0f) u_error = -u_error;
+            if (v_error < 0.0f) v_error = -v_error;
+            if (det_error < 0.0f) det_error = -det_error;
+            if (u_error > tolerance || v_error > tolerance ||
+                dot > tolerance || det_error > tolerance) {
+                if (why) *why =
+                    "direct affine sprite is not the measured rigid unity transform";
+                return false;
+            }
+        } else {
+            float scale2 = u2 / expected_u2;
+            float v_error = v2 - expected_v2 * scale2;
+            float det_error = affine.determinant - expected_det * scale2;
+            float tolerance =
+                ((float)source_width + (float)source_height) * epsilon *
+                (scale2 > 1.0f ? scale2 : 1.0f);
+            if (v_error < 0.0f) v_error = -v_error;
+            if (det_error < 0.0f) det_error = -det_error;
+            if (scale2 <= 0.0f || v_error > tolerance ||
+                dot > tolerance || det_error > tolerance) {
+                if (why) *why =
+                    "modulated affine sprite is not a measured uniform similarity transform";
+                return false;
+            }
+        }
+    } else {
+        bool unity_transform =
+            dx >= (float)source_width - epsilon &&
+            dx <= (float)source_width + epsilon &&
+            dy >= (float)source_height - epsilon &&
+            dy <= (float)source_height + epsilon;
+        if (!unity_transform) {
+            float scale_x = dx / (float)source_width;
+            float scale_y = dy / (float)source_height;
+            float scale_difference = scale_x > scale_y
+                ? scale_x - scale_y : scale_y - scale_x;
+            bool direct_magnification = direct_sampler && half_texel_layout &&
+                scale_x >= 1.0f - epsilon && scale_y >= 1.0f - epsilon;
+            bool modulated_uniform_scale =
+                modulated_sampler && half_texel_layout &&
+                scale_x > 0.0f && scale_y > 0.0f &&
+                scale_difference <= 0.00001f;
+            bool alternate_uniform_minification =
+                scaled_sampler && half_texel_layout &&
+                scale_x > 0.0f && scale_y > 0.0f &&
+                scale_x <= 1.0f + epsilon && scale_y <= 1.0f + epsilon &&
+                scale_difference <= 0.00001f;
+            if (source_width > MBX_3D_WIDTH || source_height > 480u ||
+                (!direct_magnification && !modulated_uniform_scale &&
+                 !alternate_uniform_minification)) {
+                if (why) *why =
+                    "filtered transform is outside its measured sampler scale family";
+                return false;
+            }
+        } else if (scaled_sampler) {
+            if (why) *why =
+                "alternate filtered state lacks its measured minification";
+            return false;
+        }
     }
     float bounded_x0 = x0 < 0.0f ? 0.0f : x0;
     float bounded_y0 = y0 < 0.0f ? 0.0f : y0;
@@ -2726,8 +2869,9 @@ static bool mbx_execute_axis_aligned_sprite(s5l_mbx_t *m,
     }
 
     /* The values above are conservative tile/clip bounds, not fragment
-     * coverage. Standard pixel-centre coverage for the axis-aligned producer
-     * quad is [ceil(min - 0.5), ceil(max - 0.5)). r417 is the first capture
+     * coverage. Standard pixel-centre bounding coverage for the producer quad
+     * is [ceil(min - 0.5), ceil(max - 0.5)); affine fragments are subsequently
+     * tested by inverse mapping inside that box. r417 is the first capture
      * where the producer's asymmetric guard biases add a row that this raster
      * interval does not cover. Keep the two rectangles independent. */
     int32_t raster_left_unclipped = mbx_3d_ceil_to_i32(x0 - 0.5f);
@@ -2871,28 +3015,68 @@ static bool mbx_execute_axis_aligned_sprite(s5l_mbx_t *m,
     uint32_t source_stage_y0 = source_y0;
     uint32_t source_stage_width = width;
     uint32_t source_stage_height = height;
+    uint32_t affine_covered_pixels = 0u;
     if (half_texel_layout) {
         uint32_t minimum_x = UINT32_MAX, minimum_y = UINT32_MAX;
         uint32_t maximum_x = 0u, maximum_y = 0u;
-        for (uint32_t x = 0; x < width; x++) {
-            if (!mbx_bilinear_axis(x0, dx, u_texel_start, u_texel_span,
-                                   left + x, source_pitch_pixels,
-                                   &x_axis[x])) {
-                if (why) *why = "filtered sprite has an invalid horizontal sample";
+        if (!affine_sprite) {
+            for (uint32_t x = 0; x < width; x++) {
+                if (!mbx_bilinear_axis(x0, dx, u_texel_start, u_texel_span,
+                                       left + x, source_pitch_pixels,
+                                       &x_axis[x])) {
+                    if (why) *why =
+                        "filtered sprite has an invalid horizontal sample";
+                    return false;
+                }
+                if (x_axis[x].first < minimum_x) minimum_x = x_axis[x].first;
+                if (x_axis[x].second > maximum_x) maximum_x = x_axis[x].second;
+            }
+            for (uint32_t y = 0; y < height; y++) {
+                if (!mbx_bilinear_axis(y0, dy, v_texel_start, v_texel_span,
+                                       top + y, header_texture_height,
+                                       &y_axis[y])) {
+                    if (why) *why =
+                        "filtered sprite has an invalid vertical sample";
+                    return false;
+                }
+                if (y_axis[y].first < minimum_y) minimum_y = y_axis[y].first;
+                if (y_axis[y].second > maximum_y) maximum_y = y_axis[y].second;
+            }
+        } else {
+            for (uint32_t y = 0; y < height; y++) {
+                for (uint32_t x = 0; x < width; x++) {
+                    float u_fraction, v_fraction;
+                    if (!mbx_affine_pixel(&affine, left + x, top + y,
+                                          &u_fraction, &v_fraction))
+                        continue;
+                    struct mbx_bilinear_axis affine_x, affine_y;
+                    float u_coordinate =
+                        u_texel_start + u_fraction * u_texel_span;
+                    float v_coordinate =
+                        v_texel_start + v_fraction * v_texel_span;
+                    if (!mbx_bilinear_coordinate(
+                            u_coordinate, source_pitch_pixels, &affine_x) ||
+                        !mbx_bilinear_coordinate(
+                            v_coordinate, header_texture_height, &affine_y)) {
+                        if (why) *why =
+                            "affine sprite has an invalid filtered sample";
+                        return false;
+                    }
+                    if (affine_x.first < minimum_x)
+                        minimum_x = affine_x.first;
+                    if (affine_x.second > maximum_x)
+                        maximum_x = affine_x.second;
+                    if (affine_y.first < minimum_y)
+                        minimum_y = affine_y.first;
+                    if (affine_y.second > maximum_y)
+                        maximum_y = affine_y.second;
+                    affine_covered_pixels++;
+                }
+            }
+            if (!affine_covered_pixels) {
+                if (why) *why = "affine sprite covers no destination pixel centres";
                 return false;
             }
-            if (x_axis[x].first < minimum_x) minimum_x = x_axis[x].first;
-            if (x_axis[x].second > maximum_x) maximum_x = x_axis[x].second;
-        }
-        for (uint32_t y = 0; y < height; y++) {
-            if (!mbx_bilinear_axis(y0, dy, v_texel_start, v_texel_span,
-                                   top + y, header_texture_height,
-                                   &y_axis[y])) {
-                if (why) *why = "filtered sprite has an invalid vertical sample";
-                return false;
-            }
-            if (y_axis[y].first < minimum_y) minimum_y = y_axis[y].first;
-            if (y_axis[y].second > maximum_y) maximum_y = y_axis[y].second;
         }
         source_stage_x0 = minimum_x;
         source_stage_y0 = minimum_y;
@@ -2947,14 +3131,40 @@ static bool mbx_execute_axis_aligned_sprite(s5l_mbx_t *m,
             break;
         }
     }
+    uint32_t affine_rendered_pixels = 0u;
     for (uint32_t y = 0; y < height && ok; y++) {
         for (uint32_t x = 0; x < width; x++) {
             uint32_t src;
             if (half_texel_layout) {
-                uint32_t x0_offset = x_axis[x].first - source_stage_x0;
-                uint32_t x1_offset = x_axis[x].second - source_stage_x0;
-                uint32_t y0_offset = y_axis[y].first - source_stage_y0;
-                uint32_t y1_offset = y_axis[y].second - source_stage_y0;
+                struct mbx_bilinear_axis affine_x, affine_y;
+                const struct mbx_bilinear_axis *sample_x = &x_axis[x];
+                const struct mbx_bilinear_axis *sample_y = &y_axis[y];
+                if (affine_sprite) {
+                    float u_fraction, v_fraction;
+                    if (!mbx_affine_pixel(&affine, left + x, top + y,
+                                          &u_fraction, &v_fraction))
+                        continue;
+                    float u_coordinate =
+                        u_texel_start + u_fraction * u_texel_span;
+                    float v_coordinate =
+                        v_texel_start + v_fraction * v_texel_span;
+                    if (!mbx_bilinear_coordinate(
+                            u_coordinate, source_pitch_pixels, &affine_x) ||
+                        !mbx_bilinear_coordinate(
+                            v_coordinate, header_texture_height, &affine_y)) {
+                        if (why) *why =
+                            "affine sprite sample changed during staging";
+                        ok = false;
+                        break;
+                    }
+                    sample_x = &affine_x;
+                    sample_y = &affine_y;
+                    affine_rendered_pixels++;
+                }
+                uint32_t x0_offset = sample_x->first - source_stage_x0;
+                uint32_t x1_offset = sample_x->second - source_stage_x0;
+                uint32_t y0_offset = sample_y->first - source_stage_y0;
+                uint32_t y1_offset = sample_y->second - source_stage_y0;
                 uint32_t top_left = mbx_load_le32(source_pixels +
                     y0_offset * source_row_bytes + x0_offset * 4u);
                 uint32_t bottom_left = mbx_load_le32(source_pixels +
@@ -2964,11 +3174,11 @@ static bool mbx_execute_axis_aligned_sprite(s5l_mbx_t *m,
                 uint32_t bottom_right = mbx_load_le32(source_pixels +
                     y1_offset * source_row_bytes + x1_offset * 4u);
                 uint32_t vertical_left = mbx_linear_bgra8(
-                    top_left, bottom_left, y_axis[y].weight);
+                    top_left, bottom_left, sample_y->weight);
                 uint32_t vertical_right = mbx_linear_bgra8(
-                    top_right, bottom_right, y_axis[y].weight);
+                    top_right, bottom_right, sample_y->weight);
                 src = mbx_linear_bgra8(
-                    vertical_left, vertical_right, x_axis[x].weight);
+                    vertical_left, vertical_right, sample_x->weight);
             } else {
                 src = mbx_load_le32(source_pixels + y * source_row_bytes +
                                     x * 4u);
@@ -2983,6 +3193,11 @@ static bool mbx_execute_axis_aligned_sprite(s5l_mbx_t *m,
             pixels[pixel_offset + 3u] = (uint8_t)(blended >> 24);
         }
     }
+    if (ok && affine_sprite &&
+        affine_rendered_pixels != affine_covered_pixels) {
+        if (why) *why = "affine sprite coverage changed during staging";
+        ok = false;
+    }
     for (uint32_t row = 0; row < height && ok; row++) {
         uint32_t dst = target + (top + row) * MBX_3D_TARGET_STRIDE +
                        left * 4u;
@@ -2991,7 +3206,10 @@ static bool mbx_execute_axis_aligned_sprite(s5l_mbx_t *m,
     }
     free(source_pixels);
     free(pixels);
-    if (ok && pixels_blended) *pixels_blended = width * height;
+    if (ok && pixels_blended) {
+        *pixels_blended = affine_sprite
+            ? affine_covered_pixels : width * height;
+    }
     return ok;
 }
 
@@ -3004,7 +3222,7 @@ bool s5l_mbx_process_3d(s5l_mbx_t *m, const arm_bus_t *bus,
     uint32_t pixels = 0u;
     if (!mbx_execute_first_tiled_over(m, bus, &why, &pixels) &&
         !mbx_execute_status_sprite(m, bus, &why, &pixels) &&
-        !mbx_execute_axis_aligned_sprite(m, bus, &why, &pixels) &&
+        !mbx_execute_textured_sprite(m, bus, &why, &pixels) &&
         !mbx_execute_solid_quad(m, bus, &why, &pixels)) {
         mbx_3d_rejected++;
         if (mbx_trace_state == 1)
