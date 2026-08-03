@@ -4016,11 +4016,13 @@ semantic comparisons and a valid rejection of packed NZCV in that harness; their
 iOS app's current chunk size, and times only those calls. It retains CPU, MMU, device
 tick, framebuffer, MBX, and external-media execution. A pending snapshot shortens the
 next chunk, so an absolute `--snapshot-at` boundary stays exact and checkpoint I/O is
-outside the timed calls. Features that require an instruction callback are refused
-rather than silently lost: scheduled input, HLE, frame metering, call probes, PPP,
-stop-on-abort, and the per-instruction diagnostic windows. Default NAT remains accepted
-because it is inert while PPP is off; the first live preflight incorrectly rejected
-that ordinary configuration, and its regression test now fixes the distinction.
+outside the timed calls. At this checkpoint, features that required an instruction
+callback were refused rather than silently lost: scheduled input, HLE, frame metering,
+call probes, PPP, stop-on-abort, and the per-instruction diagnostic windows. Default NAT
+remained accepted because it is inert while PPP is off; the first live preflight
+incorrectly rejected that ordinary configuration, and its regression test now fixes
+the distinction. r461 later moved frame metering onto exact app-shaped chunk
+boundaries; the other refusals remain.
 
 r456 restored r448's 7.102 B checkpoint and retired 100 M instructions through this
 path. It made 1,000 calls in 6.371434 timed seconds, or **15.695053 M instructions/s**,
@@ -4180,3 +4182,57 @@ This closes the top-level-switch hypothesis rather than leaving another marginal
 in `arm_step`. Reaching the phone's 30 fps target now requires a structural change that
 also removes repeated work, such as a semantics-checked decoded-basic-block interpreter;
 rearranging the same per-instruction comparisons is not enough.
+
+### r461-r464: measure publication on the app-shaped fast loop
+
+The earlier throughput-to-FPS estimate crossed two runs with different observers. r461
+removes that avoidable uncertainty. `--run-api --frame-meter` now keeps the app's exact
+100,000-instruction `s5l8900_run()` chunks, shortens a chunk when a meter boundary is
+next, and polls only after that exact boundary. It still refuses every feature that
+really needs per-instruction observation. The option contract has a regression test,
+and the report distinguishes exact app-shaped boundaries from the older diagnostic
+loop's at-most-1,023-instruction quantisation.
+
+All four measurements restored
+`work/r445-keygen-finish-check-7100m/post-check-7100m.bin`, ran the experimental MBX
+machine from 7.100 B through 7.320 B retired instructions, and exited zero with no
+external-media failure and 2/2 raw-media redirects/completions. The order bracketed
+each metered run with a nearby no-meter run, but it was not a fully symmetric benchmark:
+
+| run | frame observer | timed `s5l8900_run()` calls | full meter span | publications / changed | changed-FPS min / mean / max |
+|---|---|---:|---:|---:|---:|
+| r461 | on | 16.874757 s / 13.037225 Minsn/s | 17.020960 s / 12.925 Minsn/s | 446 / 193 | 9.435 / 11.449 / 13.572 |
+| r462 | off | 16.170016 s / 13.605429 Minsn/s | not measured | not applicable | not applicable |
+| r463 | on | 17.792820 s / 12.364538 Minsn/s | 17.950490 s / 12.256 Minsn/s | 470 / 193 | 5.729 / 10.816 / 13.954 |
+| r464 | off | 16.503285 s / 13.330679 Minsn/s | not measured | not applicable | not applicable |
+
+Neither metered run had a window at or above 30. Both nevertheless counted exactly 193
+changed signatures. Their mean instruction gaps were 1,143,750.0 and 1,143,229.2, a
+stable mean of **1,143,489.6 retired instructions per detectable change** despite host
+wall-time drift. If that guest-instruction cadence remains fixed, 30 changes/s projects
+to **34.304688 Minsn/s**. Against the two full metered rates' 12.5905 Minsn/s mean, the
+remaining desktop factor is about **2.725x**. This is a linear capacity projection, not
+a promise: a structural optimisation can also change guest timing, and the sampled
+signature can miss a small unsampled update.
+
+The observer is not free. The adjacent metered/control core-rate gaps were 5.00% and
+8.06%; host drift and cache state were not controlled well enough to call all of that a
+causal meter penalty. Within the metered runs, time outside the timed core calls was
+0.146203 s (0.859% of the full span) and 0.157670 s (0.878%). Those two facts bound the
+measurement distortion honestly: it is measurable and noisy, but it cannot explain a
+2.725x gap.
+
+The checked guest outputs rule out a functional divergence in this interval. All four
+live work images have SHA-256
+`06AAAA84FB4BFEAE5A647290C9B50BEBE7640F420457089F40BDBED961D6992D`; all four final
+PPMs have SHA-256
+`E357B88F7DCB1533B88A62DADF85D97FB8BCCF1EA54520B5AECE048C18B5D6D9`. No end-machine
+snapshots were written, so this is **not** a claim that every diagnostic counter or
+serialized byte of machine state was compared.
+
+Finally, these are desktop bootkernel changed-scanout measurements. They exclude UIKit
+conversion/drawing and are not measurements from the user's iPhone. The reported
+roughly 0--4 fps phone result remains the only real-device result and therefore remains
+the product truth until an exact IPA reports both Minsn/s and changed-frame FPS on a
+fresh software-render machine and a fresh MBX machine. The final graphics acceptance
+still requires a cold boot.

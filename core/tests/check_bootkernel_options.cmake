@@ -177,6 +177,11 @@ expect_config(run_api_accepts_exact_checkpoints
     "snapshot-at count    1|--run-api"
     absent-kernel --run-api -n 100 --snapshot-at 100 absent-snapshot
     --print-config)
+# Frame publication is chunk-boundary work in the app too, so it is the one
+# observer that can coexist with this path without losing its contract.
+expect_config(run_api_accepts_frame_meter
+    "framebuffer=1|--run-api|--frame-meter"
+    absent-kernel -F --run-api --frame-meter --print-config)
 # By contrast these need work at a particular instruction. Refusing them is
 # what prevents a fast run from silently executing a different request.
 expect_refused(run_api_refuses_scheduled_input
@@ -185,9 +190,6 @@ expect_refused(run_api_refuses_scheduled_input
 expect_refused(run_api_refuses_hle
     "--run-api cannot be combined"
     absent-kernel --run-api --hle --print-config)
-expect_refused(run_api_refuses_frame_meter
-    "--run-api cannot be combined"
-    absent-kernel -F --run-api --frame-meter --print-config)
 # -g was never a pure --mbx: it has always implied -F and v_display=1 as well.
 expect_config(short_g_is_the_whole_graphics_experiment
     "framebuffer=1|iomfb-display=1|mbx=1"

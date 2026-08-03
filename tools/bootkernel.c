@@ -2623,6 +2623,7 @@ static double frame_meter_now_seconds(void) {
 typedef struct {
     bool enabled;
     bool failed;
+    bool exact_chunk_schedule;
     bool signature_valid;
     bool snapshot_blank;
     uint8_t *snapshot;
@@ -2718,7 +2719,8 @@ static const uint8_t *frame_meter_live_display(
     return mach->ram + (size_t)offset;
 }
 
-static bool frame_meter_start(frame_meter_t *meter, uint64_t at) {
+static bool frame_meter_start(frame_meter_t *meter, uint64_t at,
+                              bool exact_chunk_schedule) {
     if (!meter || at > UINT64_MAX - FRAME_METER_CHUNK_INSTRUCTIONS)
         return false;
     memset(meter, 0, sizeof *meter);
@@ -2732,6 +2734,7 @@ static bool frame_meter_start(frame_meter_t *meter, uint64_t at) {
         return false;
     }
     meter->enabled = true;
+    meter->exact_chunk_schedule = exact_chunk_schedule;
     meter->snapshot_blank = true;
     meter->start_at = at;
     meter->stop_at = at;
@@ -2882,10 +2885,13 @@ static void frame_meter_report(const frame_meter_t *meter) {
     printf("  validity: %s; timer=%s\n",
            meter->failed ? "INVALID (clock/allocation failure)" : "valid",
            FRAME_METER_TIMER);
-    printf("  contract: 100000-instruction schedule (<=1023-instruction "
-           "harness quantization), regular <=30 Hz plus terminal publication, "
+    printf("  contract: 100000-instruction schedule (%s), regular <=30 Hz "
+           "plus terminal publication, "
            "614400-byte copies, 397-byte sampled-signature stride, >=0.5 s "
-           "windows\n");
+           "windows\n",
+           meter->exact_chunk_schedule
+               ? "exact app-shaped chunk boundaries"
+               : "<=1023-instruction diagnostic-loop quantization");
     printf("  span: @%" PRIu64 "..@%" PRIu64 " in %.6f host s",
            meter->start_at, meter->stop_at, wall);
     if (wall > 0.0)
@@ -24740,9 +24746,9 @@ static void boot_print_usage(FILE *stream, const char *argv0) {
             "      s5l8900_run() chunks and time only those chunks. This skips\n"
             "      every per-instruction host observer while retaining CPU,\n"
             "      MMU, device tick, framebuffer, MBX, and external-md guest\n"
-            "      behavior. Exact --snapshot-at boundaries are supported, but\n"
-            "      scheduled input, HLE, PPP/NAT, frame-meter, call probes, and\n"
-            "      per-instruction diagnostic requests are refused rather than\n"
+            "      behavior. Exact --snapshot-at boundaries and --frame-meter\n"
+            "      are supported, but scheduled input, HLE, PPP/NAT, call probes,\n"
+            "      and per-instruction diagnostic requests are refused rather than\n"
             "      silently ignored. The final diagnostic report is necessarily\n"
             "      sparse; TLB counters omit observer translations and therefore\n"
             "      differ from a literal diagnostic run even when guest state is\n"
@@ -26299,18 +26305,19 @@ int main(int argc, char **argv) {
     }
 
     /* s5l8900_run() deliberately has no instruction-boundary callback. Every
-     * item below either changes guest state between instructions or promises a
+     * item below changes guest state between instructions or promises a
      * diagnostic at that boundary, so accepting it here would make --run-api
-     * fast by quietly doing less than the command line requested. Snapshot
-     * boundaries remain exact: the runner shortens a chunk to the next one. */
+     * fast by quietly doing less than requested. Snapshots and frame-meter are
+     * different: both are app-chunk-boundary work, and the runner shortens its
+     * next chunk to land on their exact absolute boundary. */
     if (run_api_hot &&
-        (frame_meter_requested || call_probe_n || touch_n || drag_n ||
-         pinch_n || button_n || cfg.v.hle || cfg.v.hle_verify || ppp ||
+        (call_probe_n || touch_n || drag_n || pinch_n || button_n ||
+         cfg.v.hle || cfg.v.hle_verify || ppp ||
          stop_on_abort || heartbeat || hot_page_given || win_lo != 0u ||
          win_hi != UINT64_MAX || ktail != 512u)) {
         fprintf(stderr,
-                "--run-api cannot be combined with frame-meter, call probes, "
-                "scheduled input, HLE, PPP/NAT, stop-on-abort, -Z, -H, -W, "
+                "--run-api cannot be combined with call probes, scheduled "
+                "input, HLE, PPP/NAT, stop-on-abort, -Z, -H, -W, "
                 "or a non-default -T: those require per-instruction host "
                 "observation\n");
         return 1;
@@ -28316,7 +28323,7 @@ external_md_work_ready:
     frame_meter_t frame_meter;
     memset(&frame_meter, 0, sizeof frame_meter);
     if (frame_meter_requested &&
-        !frame_meter_start(&frame_meter, mach.cpu.cycles)) {
+        !frame_meter_start(&frame_meter, mach.cpu.cycles, run_api_hot)) {
         fprintf(stderr,
                 "--frame-meter: cannot allocate its publication buffer or "
                 "start %s\n", FRAME_METER_TIMER);
@@ -28376,6 +28383,9 @@ external_md_work_ready:
                 if (!snaps[s].done && snaps[s].at < boundary)
                     boundary = snaps[s].at;
             }
+            if (frame_meter.enabled && !frame_meter.failed &&
+                frame_meter.next_chunk_at < boundary)
+                boundary = frame_meter.next_chunk_at;
 
             if (boundary == mach.cpu.cycles) {
                 if (!save_due_snapshots(&mach, snaps, nsnaps)) return 4;
@@ -28394,6 +28404,9 @@ external_md_work_ready:
             else if (timing_valid) run_seconds += after - before;
 
             n = mach.cpu.cycles;
+            if (frame_meter.enabled && !frame_meter.failed &&
+                mach.cpu.cycles >= frame_meter.next_chunk_at)
+                (void)frame_meter_poll(&frame_meter, &mach, mach.cpu.cycles);
             if (!save_due_snapshots(&mach, snaps, nsnaps)) return 4;
             if (ran != chunk) break;
         }
