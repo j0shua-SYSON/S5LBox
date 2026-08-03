@@ -96,12 +96,13 @@ are deterministic apart from that one contact, so the tap is what dismissed it.
   reached the transmit FIFO.
 - **No packet has been carried.** The PPP link comes up — `IPCP Opened`,
   `10.0.2.15` — and every NAT counter is still zero.
-- **30 fps is not established.** r446's instrumented desktop meter observed
-  3.088 changed scanouts/s on average and 5.984 at best. The cleaner
-  app-equivalent loop now runs the same SpringBoard interval at 14.57 M guest
-  instructions/s; combining that with r446's mean frame gap projects about
-  15.1 changes/s, but that crosses runs and is not a measured phone FPS result.
-  See *Speed* and [`docs/hotpath.md`](docs/hotpath.md).
+- **30 fps is not established.** The currently installed iOS app is reported at
+  roughly **0–4 fps**. That is a field observation, not yet an exact-SHA,
+  counter-backed benchmark, but it is the only phone result and it is far below
+  the target. r458's cleaner desktop app-equivalent loop reaches 15.69 M guest
+  instructions/s; it does not include the phone's framebuffer publication path
+  and must not be converted into iOS-app FPS. See *Speed* and
+  [`docs/hotpath.md`](docs/hotpath.md).
 
 Two smaller things the picture shows honestly. The clock reads 4:00 on
 31 December because the real-time clock answers with a placeholder nobody has
@@ -135,7 +136,7 @@ userspace received the framebuffer read-only and faulted on its first store.*
 | **Hidden from the guest by default** | SHA-1 acceleration, cellular/baseband transport and USB are deliberately declared absent by editing only the in-memory device tree, because their rows name measured boot failures. MBX is also hidden in the accepted default, but is now an opt-in experiment rather than an unmodelled register hole. The firmware files on disk are never modified. |
 | **Invented register values** | The USB controller's three configuration registers (`GHWCFG1`/`GHWCFG2`/`GHWCFG4`) hold a legal and sufficient configuration. They are **not** measured from real S5L8900 silicon. This is one of the two exceptions the networking row above draws its line around: three constants, named here so nobody has to discover them, and replaceable the day somebody reads the real part. |
 | **Rendering** | The accepted default sets `CA_ENABLE_MBX2D=0` in a new work image so QuartzCore uses Apple's CPU renderer. The experimental path leaves MBX matched and now completes a live interval of 1,388/1,388 2D jobs and 8,888/8,888 3D renders with zero decoder rejection or recovery. That interval is checkpoint-derived; final cold-boot and 30 fps acceptance are still open, so MBX is not silently promoted to the default. |
-| **Speed** | Not cycle-accurate and not yet 30 fps. The cleanest current desktop measurement executes 500 M real SpringBoard instructions through the same `s5l8900_run()` API and 100,000-instruction chunks as the app at **14.570925 M instructions/s**. r446's instrumented scanout meter observed **3.088** changed scanouts/s on average and **5.984** maximum; combining its instruction gap with the cleaner rate projects about **15.1 changes/s**, but that crosses runs and is not measured phone FPS. A previously measured iPhone 6s Plus synthetic app loop reached 16.69 M/s; it is not a real-firmware result. The guest clock still uses an invented 412 MHz : 6 MHz instruction-to-tick ratio rather than cycle timing. |
+| **Speed** | Not cycle-accurate and not yet 30 fps. r458's symmetric live SpringBoard A/B measured **15.694844 M instructions/s** for the new desktop app-equivalent loop versus 14.854045 M/s for its baseline, a repeatable +5.66%. That measures guest execution only. The currently installed phone app is reported at roughly **0–4 fps**; the build and execution/publication split are not yet instrumented, so it is not a controlled benchmark, but it is the honest current phone result. r446's older instrumented desktop harness observed **3.088** changed scanouts/s on average and **5.984** maximum. A previously measured iPhone 6s Plus synthetic app loop reached 16.69 M/s; it is not a real-firmware result. No cross-run desktop projection is treated as phone FPS. The guest clock still uses an invented 412 MHz : 6 MHz instruction-to-tick ratio rather than cycle timing. |
 | **Kernel patches** | The kernel is modified in memory as it loads: a real-time-clock timeout is forced to zero, the root-device lookup is redirected to the emulator's fake disk, and hooks are installed so the guest's disk access reaches the host. Applied only after checking a SHA-256 hash and a nine-segment layout check of the exact 7,942,144-byte kernel. |
 | **Storage** | Not flash memory. The desktop harness can create a fresh writable work image per run; the app keeps one persistent work image per machine. Snapshot storage and copy-on-write layers exist and are host-tested, but the current app controller still refuses Take/Open because their lifecycle wiring is unfinished, so app snapshots are not claimed working. The canonical imported root filesystem is read-only. |
 | **Boot chain** | No secure boot chain is executed. The kernel is loaded directly; the boot ROM, the low-level bootloader and iBoot are not run. Apple's firmware container format has been parsed and an extracted bootloader payload executed, but separately, never as a chain. |
@@ -258,8 +259,9 @@ but it has no code cache or dispatcher, the boot loop never calls it, and the iO
 app excludes it. The interpreter therefore does all work today. That is a product
 constraint, not a temporary benchmark choice: stock iOS does not generally grant
 JIT execution, and the 30 fps target must be met without it. The app's JIT probe
-is explicit and never runs at startup. The current clean real-guest desktop rate
-is 14.57 M instructions/s; there is no current matching phone rate and no measured
+is explicit and never runs at startup. The current live-guest desktop loop averages
+15.69 M instructions/s after r458. The current phone report is roughly 0–4 fps,
+without an exact-build execution/publication breakdown; it is nowhere near a measured
 30 fps result.
 
 ## Build & run

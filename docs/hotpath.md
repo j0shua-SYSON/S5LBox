@@ -4073,3 +4073,51 @@ only a throughput-derived estimate. The latest direct r446 measurement remains 3
 mean / 5.984 maximum changes/s in the instrumented desktop harness. Neither number is
 iOS-device FPS, neither proves the current app cadence, and neither meets 30. A direct
 app-equivalent publication measurement and the final cold boot remain required.
+
+### r458: do not decode CPSR flags for unconditional ARM instructions
+
+r457 selected this test from the live profile rather than from a synthetic hot loop.
+`arm_step()` used to call `arm_cond_passed()` for every ordinary ARM instruction. For
+the common `AL` condition, that helper still extracted N, Z, C and V and entered a
+16-way switch only to return true. r458 bypasses the helper when `cond == 0xe`; the
+`cond == 0xf` unconditional instruction space is still intercepted earlier, and every
+conditional instruction follows the old path unchanged.
+
+Both local configurations rebuilt cleanly. The exact configuration passed 55/55 tests
+and the stricter JIT-enabled configuration passed 59/59. That is necessary semantic
+coverage, not a speed result. The live gate restored r448's same 7.102 B SpringBoard
+checkpoint four times, retired 200 M instructions per restore through `--run-api`, and
+used the symmetric order `old,new,new,old` to expose host drift:
+
+| order | build | timed seconds | rate |
+|---:|---|---:|---:|
+| 1 | pushed baseline | 13.002677 | 15.381448 Minsn/s |
+| 2 | r458 | 12.447926 | 16.066934 Minsn/s |
+| 3 | r458 | 13.052484 | 15.322754 Minsn/s |
+| 4 | pushed baseline | 13.960006 | 14.326641 Minsn/s |
+
+Absolute host speed visibly fell across the sequence, so the fastest single number is
+not the claim. r458 won both neighbouring comparisons: +4.4566% in the first pair and
++6.9529% in the reverse-order pair. Mean rates were 14.854045 Minsn/s old versus
+15.694844 Minsn/s new, a **+5.6604%** gain. The timer covers only the 2,000 public
+`s5l8900_run()` calls in each run; setup, reporting and checkpoint I/O are excluded.
+Every run stopped exactly at 7.302 B, exited zero, and reported zero external-media
+failures.
+
+The first old/new pair also wrote complete end checkpoints. All retained artifacts are
+byte-identical across the code change:
+
+| artifact | SHA-256 |
+|---|---|
+| machine snapshot | `9321F91D5F40CA0380484763E91CB4318E7A6188B6F4170432AE08B2D06FA9E2` |
+| snapshot media / live work image | `06AAAA84FB4BFEAE5A647290C9B50BEBE7640F420457089F40BDBED961D6992D` |
+| snapshot bridge state | `C152E63315BE0F62ECB81E55C2A1B9CE7394708360AB00069210A7DCD7969CB8` |
+| terminal framebuffer | `E7A1487C8546EED5CA61542DB473DDDA67EA3CC56715E83DE6C09D5C044A1F36` |
+
+The retained candidate checkpoint is
+`work/r458-cond-fast-ab/new1/post-7302m.bin`. This is a repeatable generic interpreter
+win on a live guest, not a frame-rate result. In particular, desktop instruction
+throughput does not include the iOS app's framebuffer conversion, main-thread
+publication, or device-specific host speed. A user-observed 0–4 fps phone result must
+not be replaced by a desktop-derived estimate; the app needs its own low-overhead
+execution/publication measurements. The 30 fps target and final cold boot remain open.

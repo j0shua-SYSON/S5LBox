@@ -2884,7 +2884,12 @@ arm_status_t arm_step(arm_cpu_t *c) {
         return undefined_instruction(c, pc, insn);
     }
 
-    if (!arm_cond_passed(c, cond)) { c->r[15] = next; return ARM_OK; }
+    /* AL is overwhelmingly the common case and cannot depend on CPSR.  Avoid
+     * extracting all four flags and entering the condition switch for it. */
+    if (cond != 0xeu && !arm_cond_passed(c, cond)) {
+        c->r[15] = next;
+        return ARM_OK;
+    }
 
     /* Coarse top-level decode. This intentionally covers only the encodings
      * M1 implements; anything else returns ARM_UNDEFINED so the harness/log
