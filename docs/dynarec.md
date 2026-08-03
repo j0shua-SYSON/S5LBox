@@ -1282,6 +1282,35 @@ needs a profile-backed dispatch strategy and substantially more work removed per
 successful entry before another restored gate is justified. `docs/hotpath.md` r470-r471
 contains the full rates, counters and hashes. The rejected source was removed in full.
 
+#### 7.6.2 r472 bounds the next portable shape
+
+A full 10 M-entry restored census now explains the low coverage rather than merely
+repeating it. Of 9,999,489 actual fetches, ordinary non-PC-writing ARM data processing
+was only 30.13%; single load/store was 19.22%, VFP 17.10%, Thumb 13.55% and B/BL 12.02%.
+The DP-only runs averaged 1.635 instructions, while complete sequential-PC runs averaged
+7.799 and contained 82.64% of all fetches in runs of at least five. The leading mixed
+edges were VFP-to-VFP, DP-to-DP, Thumb-to-Thumb, load/store-to-DP, DP-to-branch and
+load/store-to-load/store. A second DP-only block cache is therefore ruled out by the
+guest stream, not just by the first implementation's timings.
+
+The same profile saw 29,000 exact physical instruction sites and only 6,690 safe-DP
+sites. A simplified site-cache simulation hit far more often than r471's actual block
+cache, but it did not model block construction or calls. It is evidence that the guest
+working set alone does not explain the 16.59% hit rate; it is **not** evidence that a
+larger cache fixes it. Any new cache must count its own collision, validation, negative,
+unsupported-shape and self-modification misses separately before its size becomes a
+variable.
+
+The justified portable prototype is consequently broader and harder. It must predecode
+the dominant mixed ARM sequences, including exact VFP and RAM load/store semantics,
+while checking interrupt/tick visibility at every retirement. Stores cannot run past a
+cached future instruction until the poisoned-code-page invalidation in the next section
+is real for CPU and DMA writes; MMIO, callbacks, WFI, PC/CPSR changes and exceptions are
+explicit exits. Reusing the old semantic helpers without removing enough fetch/decode/
+runner work is also insufficient. These are design gates, not a claim that the broader
+engine will be fast: synthetic ALU and load/store rows, differential state, restored
+real-guest timing and eventual cold/on-device acceptance still decide whether it lives.
+
 ### 7.7 Self-modifying code, kexts, and paging
 
 Covered by §3.6. The point worth repeating: the dangerous case in this project is

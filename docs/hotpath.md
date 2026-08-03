@@ -4255,10 +4255,10 @@ zero windows at 30. Its immediate no-meter control was 12.499616 Minsn/s; both w
 a slow host period. LTO is already in the iOS app and ordinary build optimisation does
 not plausibly supply the remaining roughly 2.725x desktop factor.
 
-r468 then counted every instruction in a 10 M-instruction restored steady-state
+r468 then counted every literal-runner entry in a 10 M-entry restored steady-state
 interval rather than carrying forward the early-kernel mix from `docs/dynarec.md`:
 
-| state / mode | instructions | share |
+| state / mode at runner entry | entries | share |
 |---|---:|---:|
 | ARM state | 8,644,952 | **86.44952%** |
 | Thumb state | 1,355,048 | 13.55048% |
@@ -4267,10 +4267,14 @@ interval rather than carrying forward the early-kernel mix from `docs/dynarec.md
 | IRQ | 384,873 | 3.84873% |
 | FIQ / ABT / UND combined | 3,209 | 0.03209% |
 
-The counts sum to exactly 10,000,000. They describe this post-keygen
-SpringBoard/MBX interval, not the whole boot, but they settle the next architecture for
-the target workload: a portable block interpreter must prioritise ARM first. Building
-Thumb first from the old 68.95% early-kernel sample would optimise the wrong phase.
+The counts sum to exactly 10,000,000. r472 later found that 511 of those entries took a
+pending interrupt before fetching an instruction; one of the 511 arrived while CPSR.T
+was set. The fetched mix is therefore 8,644,442 ARM and 1,355,047 Thumb instructions,
+86.44884% and 13.55116% of 9,999,489 fetches. That correction is tiny but real. The
+interval describes post-keygen SpringBoard/MBX rather than the whole boot, and its
+architecture decision remains unchanged: a portable block interpreter must prioritise
+ARM first. Building Thumb first from the old 68.95% early-kernel sample would optimise
+the wrong phase.
 
 r469 tested the prerequisite that looked cheapest: batching the public runner's device
 ticks only to the next mathematically exact timebase edge. Guest MMIO and host input
@@ -4367,3 +4371,73 @@ short blocks. The implementation, runtime switch, counters and differential addi
 were removed completely. The matched ALU `tick=run` benchmark stays because future
 runner work must report both it and load/store instead of choosing whichever flatters
 the change.
+
+### r472: full dynamic sequences explain why the narrow block shape lost
+
+The first block prototype established its own low coverage, but not the instruction
+stream around the misses. r472 adds an explicit `bootkernel --sequence-profile` mode
+and reruns exactly 10 M literal steps from
+`work/r445-keygen-finish-check-7100m/post-check-7100m.bin`. The observer resolves the
+live fetch mapping before `arm_step()`, distinguishes pending-interrupt entry from an
+actual fetch, and aggregates physical sites, raw encodings, raw pairs, classes and run
+lengths in host memory. It implies `--fast` and refuses `--run-api` and
+`--frame-meter`: its extra translation perturbs the software TLB and host time, so its
+throughput is deliberately not evidence.
+
+The accounting is exact: 10,000,000 entries were 9,999,489 fetched instructions plus
+511 pending-interrupt entries, with zero fetch failures. The fetched instruction mix
+was:
+
+| class | fetched instructions | share |
+|---|---:|---:|
+| ordinary ARM data processing, not writing PC | 3,013,148 | **30.133%** |
+| ARM single load/store | 1,921,650 | **19.217%** |
+| ARM VFP | 1,709,378 | **17.095%** |
+| Thumb | 1,355,047 | **13.551%** |
+| ARM B/BL | 1,201,691 | **12.018%** |
+| ARM block load/store | 397,373 | 3.974% |
+| ARM other | 204,915 | 2.049% |
+| coprocessor / extra-sync / multiply / media / SVC / unconditional / DP-to-PC | 196,287 | 1.963% |
+
+This is the direct explanation for r470-r471. Its safe class covered only 30.13% of
+fetches. Those data-processing instructions formed 1,842,492 runs averaging just 1.635
+instructions; 87.60% of them were in runs of four or fewer. A terminal B/BL followed
+857,973 runs. That shape is consistent with the rejected engine retiring only 31.83%
+in blocks at 2.68 instructions per successful call. It was paying a whole-run lookup
+tax to accelerate short islands occupying less than one third of the stream.
+
+The broader stream has a very different shape. There were 8,717,390 sequential virtual
+edges (87.178% of fetched edges), and 8,710,945 were also physically contiguous.
+Sequential-PC runs averaged 7.799 instructions, reached 260, and 82.64% of fetched
+instructions belonged to runs of at least five. The leading sequential class pairs
+were VFP-to-VFP (15.948% of all sequential edges), DP-to-DP (13.429%), Thumb-to-Thumb
+(12.945%), load/store-to-DP (9.857%), DP-to-B/BL (9.842%), load/store-to-load/store
+(8.531%) and DP-to-load/store (6.559%). A second portable engine cannot remain DP-only:
+it must span the exact VFP and RAM load/store semantics that separate those islands
+while retaining an interrupt/tick boundary at every retirement and stopping safely for
+control/state changes, MMIO, callbacks and self-modifying-code hazards.
+
+The working set also prevents a different bad conclusion. The profile saw only 29,000
+exact physical instruction sites, 11,444 raw encodings and 20,671 sequential raw pairs;
+none of the aggregate tables dropped an entry. For the 3,013,148 safe-DP accesses there
+were 6,690 distinct physical sites. A deliberately simpler direct-mapped *site*
+simulation hit 69.85% at 1,024 entries, 88.75% at 4,096 and 96.55% at 16,384. Those are
+not the rejected engine's block-call hit rates and do not justify resizing its cache.
+They do establish that its measured 16.59% hit rate cannot be attributed to the guest's
+instruction-site working set alone; any future cache must instrument its actual miss
+causes before its size is changed.
+
+Nor does the profile justify narrow site-specific fusion. The hottest exact site was
+0.984% of fetches and the hottest 24 sites together were only 5.687%. The hottest raw
+pair was 1.129% of sequential edges. There is no handful of PCs or pairs here with a
+credible 2.7x desktop ceiling. The next justified prototype is broad, long-lived
+predecode across the dominant mixed ARM sequences, not another special case.
+
+The observer did not change the checked guest outputs. r468 and r472 both stopped at
+7.110 B with final pre/post PCs `0x312092b8`/`0x312092bc`, zero external-media failures,
+byte-identical 466,825,216-byte work images at SHA-256
+`8A59C388C481165F460984926AA5FFB1B72A0E9030216CD0038DE9B3264B79FE`, and byte-identical
+460,815-byte final PPMs at
+`1EF63FFE3EEFD976416E17120A36BA074BF295EA0955D716E2D345FCC5EA0A9E`. No end snapshots
+were written, and the profiler intentionally changes derived TLB counters, so this is
+not a serialized-machine-state equality claim.

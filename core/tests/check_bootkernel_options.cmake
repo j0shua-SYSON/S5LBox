@@ -190,6 +190,17 @@ expect_refused(run_api_refuses_scheduled_input
 expect_refused(run_api_refuses_hle
     "--run-api cannot be combined"
     absent-kernel --run-api --hle --print-config)
+# Full sequence profiling requires the literal instruction boundary. It is a
+# host observer, so the relaunch line (not the machine-toggle table) records it.
+expect_config(sequence_profile_is_explicit
+    "--sequence-profile"
+    absent-kernel --sequence-profile --print-config)
+expect_refused(sequence_profile_refuses_run_api
+    "--sequence-profile requires the literal runner"
+    absent-kernel --sequence-profile --run-api --print-config)
+expect_refused(sequence_profile_refuses_frame_meter
+    "--sequence-profile requires the literal runner"
+    absent-kernel -F --sequence-profile --frame-meter --print-config)
 # -g was never a pure --mbx: it has always implied -F and v_display=1 as well.
 expect_config(short_g_is_the_whole_graphics_experiment
     "framebuffer=1|iomfb-display=1|mbx=1"

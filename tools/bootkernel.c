@@ -24648,6 +24648,745 @@ static const char *status_name(arm_status_t s) {
     }
 }
 
+/* -------------------------------------------------------------------------
+ * --sequence-profile
+ *
+ * A full dynamic instruction-sequence census for restored performance work.
+ * This is intentionally a bootkernel-only observer, not an interpreter cache:
+ * it resolves the live fetch mapping before arm_step(), aggregates in host
+ * memory, and never changes architectural state.  The extra translation can
+ * warm or displace software-TLB entries, so its wall-clock rate and the normal
+ * TLB counters are NOT performance evidence.  Instruction/class/run counts are
+ * the evidence this mode exists to collect.
+ * ------------------------------------------------------------------------- */
+#define SEQUENCE_SITE_CAP        (1u << 18)
+#define SEQUENCE_RAW_CAP         (1u << 18)
+#define SEQUENCE_PAIR_CAP        (1u << 18)
+#define SEQUENCE_RUN_BUCKETS     65u
+#define SEQUENCE_CACHE_LEVELS    4u
+
+typedef enum {
+    SEQUENCE_ARM_DP = 0,
+    SEQUENCE_ARM_DP_PC,
+    SEQUENCE_ARM_BRANCH,
+    SEQUENCE_ARM_SINGLE_LS,
+    SEQUENCE_ARM_BLOCK_LS,
+    SEQUENCE_ARM_EXTRA_SYNC,
+    SEQUENCE_ARM_MULTIPLY,
+    SEQUENCE_ARM_MEDIA,
+    SEQUENCE_ARM_VFP,
+    SEQUENCE_ARM_COPROC,
+    SEQUENCE_ARM_SVC,
+    SEQUENCE_ARM_UNCONDITIONAL,
+    SEQUENCE_ARM_OTHER,
+    SEQUENCE_THUMB,
+    SEQUENCE_CLASS_COUNT
+} sequence_class_t;
+
+static const char *const SEQUENCE_CLASS_NAMES[SEQUENCE_CLASS_COUNT] = {
+    "ARM data-processing", "ARM data-processing -> pc", "ARM B/BL",
+    "ARM single load/store", "ARM block load/store", "ARM extra/sync",
+    "ARM multiply", "ARM media", "ARM VFP", "ARM coprocessor",
+    "ARM SVC", "ARM unconditional", "ARM other", "Thumb"
+};
+
+typedef struct {
+    uint32_t pa;
+    uint32_t raw;
+    uint32_t sample_va;
+    uint32_t sample_cpsr;
+    uint64_t hits;
+    uint64_t sequential_out;
+    uint64_t safe_dp_hits;
+    bool sample_mmu;
+    bool thumb;
+    bool occupied;
+} sequence_site_t;
+
+typedef struct {
+    uint32_t raw;
+    uint64_t hits;
+    bool thumb;
+    bool occupied;
+} sequence_raw_t;
+
+typedef struct {
+    uint32_t first;
+    uint32_t second;
+    uint64_t hits;
+    bool thumb;
+    bool occupied;
+} sequence_pair_t;
+
+typedef struct {
+    uint32_t pa;
+    uint32_t raw;
+    bool valid;
+} sequence_cache_entry_t;
+
+typedef struct {
+    bool enabled;
+    sequence_site_t *sites;
+    sequence_raw_t *raws;
+    sequence_pair_t *pairs;
+    sequence_cache_entry_t *cache[SEQUENCE_CACHE_LEVELS];
+    size_t cache_size[SEQUENCE_CACHE_LEVELS];
+    uint64_t cache_hits[SEQUENCE_CACHE_LEVELS];
+    uint64_t cache_accesses;
+
+    uint64_t observations;
+    uint64_t fetched;
+    uint64_t interrupt_entries;
+    uint64_t fetch_failures;
+    uint64_t site_distinct;
+    uint64_t site_dropped;
+    uint64_t raw_distinct;
+    uint64_t raw_dropped;
+    uint64_t pair_distinct;
+    uint64_t pair_dropped;
+    uint64_t class_hits[SEQUENCE_CLASS_COUNT];
+    uint64_t class_pairs[SEQUENCE_CLASS_COUNT][SEQUENCE_CLASS_COUNT];
+    uint64_t condition_hits[16];
+    uint64_t condition_failed[16];
+    uint64_t dp_opcode[16];
+    uint64_t dp_immediate;
+    uint64_t dp_register;
+    uint64_t dp_sets_flags;
+    uint64_t safe_dp_total;
+    uint64_t terminal_branch_after_dp;
+    uint64_t sequential_links;
+    uint64_t physical_sequential_links;
+
+    uint64_t flow_runs[SEQUENCE_RUN_BUCKETS];
+    uint64_t flow_run_instructions[SEQUENCE_RUN_BUCKETS];
+    uint64_t flow_run_length;
+    uint64_t flow_run_max;
+    uint64_t dp_runs[SEQUENCE_RUN_BUCKETS];
+    uint64_t dp_run_instructions[SEQUENCE_RUN_BUCKETS];
+    uint64_t dp_run_length;
+    uint64_t dp_run_max;
+
+    bool have_previous;
+    bool previous_thumb;
+    bool previous_safe_dp;
+    uint32_t previous_pc;
+    uint32_t previous_pa;
+    uint32_t previous_raw;
+    unsigned previous_width;
+    sequence_class_t previous_class;
+    size_t previous_site;
+} sequence_profile_t;
+
+static uint64_t sequence_mix64(uint64_t value) {
+    value ^= value >> 30;
+    value *= UINT64_C(0xbf58476d1ce4e5b9);
+    value ^= value >> 27;
+    value *= UINT64_C(0x94d049bb133111eb);
+    value ^= value >> 31;
+    return value;
+}
+
+static bool sequence_dp_encoding(uint32_t insn) {
+    return (insn & UINT32_C(0x0c000000)) == 0u &&
+           (insn & UINT32_C(0x01900000)) != UINT32_C(0x01000000) &&
+           !((insn & UINT32_C(0x0e000000)) == 0u &&
+             (insn & UINT32_C(0x00000090)) == UINT32_C(0x00000090));
+}
+
+static bool sequence_dp_writes_pc(uint32_t insn) {
+    unsigned opcode = (insn >> 21) & 15u;
+    bool writes = opcode < 8u || opcode > 11u;
+    return writes && ((insn >> 12) & 15u) == 15u;
+}
+
+static sequence_class_t sequence_classify_arm(uint32_t insn) {
+    if ((insn >> 28) == 15u) return SEQUENCE_ARM_UNCONDITIONAL;
+    if (sequence_dp_encoding(insn))
+        return sequence_dp_writes_pc(insn)
+             ? SEQUENCE_ARM_DP_PC : SEQUENCE_ARM_DP;
+    if ((insn & UINT32_C(0x0f000000)) == UINT32_C(0x0a000000) ||
+        (insn & UINT32_C(0x0f000000)) == UINT32_C(0x0b000000))
+        return SEQUENCE_ARM_BRANCH;
+    if ((insn & UINT32_C(0x0fc000f0)) == UINT32_C(0x00000090) ||
+        (insn & UINT32_C(0x0f8000f0)) == UINT32_C(0x00800090) ||
+        (insn & UINT32_C(0x0f900090)) == UINT32_C(0x01000080))
+        return SEQUENCE_ARM_MULTIPLY;
+    if ((insn & UINT32_C(0x0e000000)) == UINT32_C(0x06000000) &&
+        (insn & UINT32_C(0x00000010)) != 0u)
+        return SEQUENCE_ARM_MEDIA;
+    if ((insn & UINT32_C(0x0c000000)) == UINT32_C(0x04000000))
+        return SEQUENCE_ARM_SINGLE_LS;
+    if ((insn & UINT32_C(0x0e000000)) == UINT32_C(0x08000000))
+        return SEQUENCE_ARM_BLOCK_LS;
+    if ((insn & UINT32_C(0x0e000000)) == 0u &&
+        (insn & UINT32_C(0x00000090)) == UINT32_C(0x00000090))
+        return SEQUENCE_ARM_EXTRA_SYNC;
+    if ((insn & UINT32_C(0x0f000010)) == UINT32_C(0x0e000010)) {
+        unsigned coprocessor = (insn >> 8) & 15u;
+        return coprocessor == 10u || coprocessor == 11u
+             ? SEQUENCE_ARM_VFP : SEQUENCE_ARM_COPROC;
+    }
+    if ((insn & UINT32_C(0x0f000e10)) == UINT32_C(0x0e000a00) ||
+        (insn & UINT32_C(0x0e000e00)) == UINT32_C(0x0c000a00))
+        return SEQUENCE_ARM_VFP;
+    if ((insn & UINT32_C(0x0f000000)) == UINT32_C(0x0f000000))
+        return SEQUENCE_ARM_SVC;
+    if ((insn & UINT32_C(0x0c000000)) == 0u)
+        return SEQUENCE_ARM_OTHER;
+    return SEQUENCE_ARM_OTHER;
+}
+
+static void sequence_close_run(uint64_t *counts, uint64_t *instructions,
+                               uint64_t *length, uint64_t *maximum) {
+    if (!*length) return;
+    size_t bucket = *length < SEQUENCE_RUN_BUCKETS
+                  ? (size_t)*length : SEQUENCE_RUN_BUCKETS - 1u;
+    counts[bucket]++;
+    instructions[bucket] += *length;
+    if (*length > *maximum) *maximum = *length;
+    *length = 0u;
+}
+
+static void sequence_profile_break(sequence_profile_t *profile) {
+    sequence_close_run(profile->flow_runs, profile->flow_run_instructions,
+                       &profile->flow_run_length, &profile->flow_run_max);
+    sequence_close_run(profile->dp_runs, profile->dp_run_instructions,
+                       &profile->dp_run_length, &profile->dp_run_max);
+    profile->have_previous = false;
+}
+
+static bool sequence_fetch(arm_cpu_t *cpu, uint32_t pc, bool thumb,
+                           uint32_t *pa_out, uint32_t *raw_out) {
+    uint32_t pa = 0u;
+    bool privileged = (cpu->cpsr & ARM_CPSR_MODE_MASK) != ARM_MODE_USR;
+    uint32_t fsr = arm_mmu_translate(cpu, pc, ARM_ACCESS_FETCH,
+                                     privileged, &pa);
+    unsigned width = thumb ? 2u : 4u;
+    if (fsr) return false;
+
+    const uint8_t *bytes = NULL;
+    if (pa >= g_mach->ram_base) {
+        uint64_t offset = (uint64_t)pa - g_mach->ram_base;
+        if (offset <= g_mach->ram_size &&
+            g_mach->ram_size - (size_t)offset >= width)
+            bytes = g_mach->ram + (size_t)offset;
+    }
+    if (!bytes && cpu->bus->host_ram)
+        bytes = cpu->bus->host_ram(cpu->bus->ctx, pa, width);
+    if (!bytes) return false;
+
+    *pa_out = pa;
+    *raw_out = thumb
+        ? (uint32_t)((uint32_t)bytes[0] | ((uint32_t)bytes[1] << 8))
+        : ((uint32_t)bytes[0] | ((uint32_t)bytes[1] << 8) |
+           ((uint32_t)bytes[2] << 16) | ((uint32_t)bytes[3] << 24));
+    return true;
+}
+
+static size_t sequence_site_find(sequence_profile_t *profile,
+                                 uint32_t pa, uint32_t raw, bool thumb) {
+    uint64_t key = ((uint64_t)pa << 32) ^ raw ^
+                   (thumb ? UINT64_C(0x9e3779b97f4a7c15) : 0u);
+    size_t slot = (size_t)sequence_mix64(key) & (SEQUENCE_SITE_CAP - 1u);
+    for (size_t probe = 0; probe < SEQUENCE_SITE_CAP; probe++) {
+        sequence_site_t *entry = &profile->sites[slot];
+        if (!entry->occupied) {
+            memset(entry, 0, sizeof *entry);
+            entry->occupied = true;
+            entry->pa = pa;
+            entry->raw = raw;
+            entry->thumb = thumb;
+            profile->site_distinct++;
+            return slot;
+        }
+        if (entry->pa == pa && entry->raw == raw && entry->thumb == thumb)
+            return slot;
+        slot = (slot + 1u) & (SEQUENCE_SITE_CAP - 1u);
+    }
+    profile->site_dropped++;
+    return SEQUENCE_SITE_CAP;
+}
+
+static void sequence_raw_note(sequence_profile_t *profile, uint32_t raw,
+                              bool thumb) {
+    uint64_t key = raw ^ (thumb ? UINT64_C(0xd6e8feb86659fd93) : 0u);
+    size_t slot = (size_t)sequence_mix64(key) & (SEQUENCE_RAW_CAP - 1u);
+    for (size_t probe = 0; probe < SEQUENCE_RAW_CAP; probe++) {
+        sequence_raw_t *entry = &profile->raws[slot];
+        if (!entry->occupied) {
+            entry->occupied = true;
+            entry->raw = raw;
+            entry->thumb = thumb;
+            entry->hits = 1u;
+            profile->raw_distinct++;
+            return;
+        }
+        if (entry->raw == raw && entry->thumb == thumb) {
+            entry->hits++;
+            return;
+        }
+        slot = (slot + 1u) & (SEQUENCE_RAW_CAP - 1u);
+    }
+    profile->raw_dropped++;
+}
+
+static void sequence_pair_note(sequence_profile_t *profile,
+                               uint32_t first, uint32_t second, bool thumb) {
+    uint64_t key = ((uint64_t)first << 32) | second;
+    if (thumb) key ^= UINT64_C(0xa0761d6478bd642f);
+    size_t slot = (size_t)sequence_mix64(key) & (SEQUENCE_PAIR_CAP - 1u);
+    for (size_t probe = 0; probe < SEQUENCE_PAIR_CAP; probe++) {
+        sequence_pair_t *entry = &profile->pairs[slot];
+        if (!entry->occupied) {
+            entry->occupied = true;
+            entry->first = first;
+            entry->second = second;
+            entry->thumb = thumb;
+            entry->hits = 1u;
+            profile->pair_distinct++;
+            return;
+        }
+        if (entry->first == first && entry->second == second &&
+            entry->thumb == thumb) {
+            entry->hits++;
+            return;
+        }
+        slot = (slot + 1u) & (SEQUENCE_PAIR_CAP - 1u);
+    }
+    profile->pair_dropped++;
+}
+
+static void sequence_cache_note(sequence_profile_t *profile,
+                                uint32_t pa, uint32_t raw) {
+    uint64_t key = ((uint64_t)pa << 32) | raw;
+    uint64_t hash = sequence_mix64(key);
+    profile->cache_accesses++;
+    for (unsigned i = 0; i < SEQUENCE_CACHE_LEVELS; i++) {
+        size_t slot = (size_t)hash & (profile->cache_size[i] - 1u);
+        sequence_cache_entry_t *entry = &profile->cache[i][slot];
+        if (entry->valid && entry->pa == pa && entry->raw == raw)
+            profile->cache_hits[i]++;
+        else {
+            entry->valid = true;
+            entry->pa = pa;
+            entry->raw = raw;
+        }
+    }
+}
+
+static void sequence_profile_destroy(sequence_profile_t *profile) {
+    if (!profile) return;
+    free(profile->sites);
+    free(profile->raws);
+    free(profile->pairs);
+    for (unsigned i = 0; i < SEQUENCE_CACHE_LEVELS; i++)
+        free(profile->cache[i]);
+    memset(profile, 0, sizeof *profile);
+}
+
+static bool sequence_profile_start(sequence_profile_t *profile) {
+    static const size_t CACHE_SIZES[SEQUENCE_CACHE_LEVELS] = {
+        1024u, 4096u, 16384u, 65536u
+    };
+    if (!profile) return false;
+    memset(profile, 0, sizeof *profile);
+    profile->sites = calloc(SEQUENCE_SITE_CAP, sizeof *profile->sites);
+    profile->raws = calloc(SEQUENCE_RAW_CAP, sizeof *profile->raws);
+    profile->pairs = calloc(SEQUENCE_PAIR_CAP, sizeof *profile->pairs);
+    for (unsigned i = 0; i < SEQUENCE_CACHE_LEVELS; i++) {
+        profile->cache_size[i] = CACHE_SIZES[i];
+        profile->cache[i] = calloc(CACHE_SIZES[i], sizeof *profile->cache[i]);
+    }
+    if (!profile->sites || !profile->raws || !profile->pairs) {
+        sequence_profile_destroy(profile);
+        return false;
+    }
+    for (unsigned i = 0; i < SEQUENCE_CACHE_LEVELS; i++) {
+        if (!profile->cache[i]) {
+            sequence_profile_destroy(profile);
+            return false;
+        }
+    }
+    profile->enabled = true;
+    return true;
+}
+
+static void sequence_profile_observe(sequence_profile_t *profile,
+                                     arm_cpu_t *cpu) {
+    if (!profile || !profile->enabled || !cpu) return;
+    profile->observations++;
+
+    if ((cpu->fiq_line && !(cpu->cpsr & ARM_CPSR_F)) ||
+        (cpu->irq_line && !(cpu->cpsr & ARM_CPSR_I))) {
+        profile->interrupt_entries++;
+        sequence_profile_break(profile);
+        return;
+    }
+
+    uint32_t pc = cpu->r[15];
+    bool thumb = (cpu->cpsr & ARM_CPSR_T) != 0u;
+    unsigned width = thumb ? 2u : 4u;
+    uint32_t pa = 0u, raw = 0u;
+    if (!sequence_fetch(cpu, pc, thumb, &pa, &raw)) {
+        profile->fetch_failures++;
+        sequence_profile_break(profile);
+        return;
+    }
+
+    profile->fetched++;
+    sequence_class_t instruction_class = thumb
+        ? SEQUENCE_THUMB : sequence_classify_arm(raw);
+    profile->class_hits[instruction_class]++;
+
+    bool sequential = profile->have_previous &&
+                      profile->previous_thumb == thumb &&
+                      profile->previous_pc <= UINT32_MAX -
+                          profile->previous_width &&
+                      pc == profile->previous_pc + profile->previous_width;
+    if (sequential) {
+        profile->sequential_links++;
+        if (profile->previous_pa <= UINT32_MAX - profile->previous_width &&
+            pa == profile->previous_pa + profile->previous_width)
+            profile->physical_sequential_links++;
+        profile->class_pairs[profile->previous_class][instruction_class]++;
+        sequence_pair_note(profile, profile->previous_raw, raw, thumb);
+        if (profile->previous_site < SEQUENCE_SITE_CAP)
+            profile->sites[profile->previous_site].sequential_out++;
+        profile->flow_run_length++;
+    } else {
+        sequence_close_run(profile->flow_runs,
+                           profile->flow_run_instructions,
+                           &profile->flow_run_length,
+                           &profile->flow_run_max);
+        profile->flow_run_length = 1u;
+    }
+
+    bool safe_dp = instruction_class == SEQUENCE_ARM_DP;
+    if (safe_dp) {
+        profile->safe_dp_total++;
+        if (sequential && profile->previous_safe_dp)
+            profile->dp_run_length++;
+        else {
+            sequence_close_run(profile->dp_runs,
+                               profile->dp_run_instructions,
+                               &profile->dp_run_length,
+                               &profile->dp_run_max);
+            profile->dp_run_length = 1u;
+        }
+        sequence_cache_note(profile, pa, raw);
+    } else {
+        if (instruction_class == SEQUENCE_ARM_BRANCH && sequential &&
+            profile->previous_safe_dp)
+            profile->terminal_branch_after_dp++;
+        sequence_close_run(profile->dp_runs,
+                           profile->dp_run_instructions,
+                           &profile->dp_run_length,
+                           &profile->dp_run_max);
+    }
+
+    if (!thumb) {
+        unsigned condition = raw >> 28;
+        profile->condition_hits[condition]++;
+        if (condition < 14u && !arm_cond_passed(cpu, condition))
+            profile->condition_failed[condition]++;
+        if (instruction_class == SEQUENCE_ARM_DP ||
+            instruction_class == SEQUENCE_ARM_DP_PC) {
+            unsigned opcode = (raw >> 21) & 15u;
+            profile->dp_opcode[opcode]++;
+            if (raw & (1u << 25)) profile->dp_immediate++;
+            else                  profile->dp_register++;
+            if (raw & (1u << 20)) profile->dp_sets_flags++;
+        }
+    }
+
+    size_t site = sequence_site_find(profile, pa, raw, thumb);
+    if (site < SEQUENCE_SITE_CAP) {
+        sequence_site_t *entry = &profile->sites[site];
+        if (!entry->hits) {
+            entry->sample_va = pc;
+            entry->sample_cpsr = cpu->cpsr;
+            entry->sample_mmu = (cpu->cp15.sctlr & ARM_SCTLR_M) != 0u;
+        }
+        entry->hits++;
+        if (safe_dp) entry->safe_dp_hits++;
+    }
+    sequence_raw_note(profile, raw, thumb);
+
+    profile->have_previous = true;
+    profile->previous_thumb = thumb;
+    profile->previous_safe_dp = safe_dp;
+    profile->previous_pc = pc;
+    profile->previous_pa = pa;
+    profile->previous_raw = raw;
+    profile->previous_width = width;
+    profile->previous_class = instruction_class;
+    profile->previous_site = site;
+}
+
+static void sequence_profile_finish(sequence_profile_t *profile) {
+    if (!profile || !profile->enabled) return;
+    sequence_profile_break(profile);
+}
+
+static void sequence_profile_print_run_group(
+        const char *name, const uint64_t *runs, const uint64_t *instructions,
+        unsigned first, unsigned last, uint64_t total_instructions) {
+    uint64_t group_runs = 0u, group_instructions = 0u;
+    for (unsigned i = first; i <= last; i++) {
+        group_runs += runs[i];
+        group_instructions += instructions[i];
+    }
+    if (!group_runs) return;
+    printf("    %-9s %12" PRIu64 " runs  %12" PRIu64
+           " insns  %6.2f%%\n",
+           name, group_runs, group_instructions,
+           total_instructions
+               ? 100.0 * (double)group_instructions /
+                     (double)total_instructions : 0.0);
+}
+
+static void sequence_profile_report(sequence_profile_t *profile) {
+    static const char *const DP_OPS[16] = {
+        "AND", "EOR", "SUB", "RSB", "ADD", "ADC", "SBC", "RSC",
+        "TST", "TEQ", "CMP", "CMN", "ORR", "MOV", "BIC", "MVN"
+    };
+    if (!profile || !profile->enabled) return;
+
+    uint64_t class_total = 0u;
+    for (unsigned i = 0; i < SEQUENCE_CLASS_COUNT; i++)
+        class_total += profile->class_hits[i];
+    uint64_t safe_distinct = 0u;
+    for (size_t i = 0; i < SEQUENCE_SITE_CAP; i++)
+        if (profile->sites[i].occupied && profile->sites[i].safe_dp_hits)
+            safe_distinct++;
+
+    printf("\n=== FULL DYNAMIC SEQUENCE PROFILE ===\n");
+    printf("    WARNING: one extra live fetch translation per fetched entry; "
+           "wall-clock rates and ordinary TLB counters are invalid here.\n");
+    printf("    observations=%" PRIu64 " fetched=%" PRIu64
+           " interrupt-entry=%" PRIu64 " fetch-fail=%" PRIu64 "\n",
+           profile->observations, profile->fetched,
+           profile->interrupt_entries, profile->fetch_failures);
+    printf("    accounting: classes=%" PRIu64
+           " classes+interrupt+fail=%" PRIu64 "%s\n",
+           class_total,
+           class_total + profile->interrupt_entries + profile->fetch_failures,
+           class_total + profile->interrupt_entries + profile->fetch_failures ==
+                   profile->observations ? " EXACT" : " MISMATCH");
+
+    printf("\n  instruction classes\n");
+    for (unsigned i = 0; i < SEQUENCE_CLASS_COUNT; i++) {
+        if (!profile->class_hits[i]) continue;
+        printf("    %-28s %12" PRIu64 "  %7.3f%%\n",
+               SEQUENCE_CLASS_NAMES[i], profile->class_hits[i],
+               profile->fetched
+                   ? 100.0 * (double)profile->class_hits[i] /
+                         (double)profile->fetched : 0.0);
+    }
+
+    printf("\n  ARM conditions (failed means architecturally skipped)\n");
+    for (unsigned i = 0; i < 16u; i++) {
+        if (!profile->condition_hits[i]) continue;
+        printf("    cond %X  %12" PRIu64 "  failed %12" PRIu64
+               "  %7.3f%%\n", i, profile->condition_hits[i],
+               profile->condition_failed[i],
+               profile->condition_hits[i]
+                   ? 100.0 * (double)profile->condition_failed[i] /
+                         (double)profile->condition_hits[i] : 0.0);
+    }
+
+    printf("\n  ARM data-processing opcodes\n");
+    for (unsigned i = 0; i < 16u; i++) {
+        if (!profile->dp_opcode[i]) continue;
+        printf("    %-4s %12" PRIu64 "\n", DP_OPS[i], profile->dp_opcode[i]);
+    }
+    printf("    immediate/register=%" PRIu64 "/%" PRIu64
+           "  S-bit=%" PRIu64 "\n",
+           profile->dp_immediate, profile->dp_register,
+           profile->dp_sets_flags);
+
+    uint64_t flow_instructions = 0u, flow_runs = 0u;
+    uint64_t dp_instructions = 0u, dp_runs = 0u;
+    for (unsigned i = 1; i < SEQUENCE_RUN_BUCKETS; i++) {
+        flow_instructions += profile->flow_run_instructions[i];
+        flow_runs += profile->flow_runs[i];
+        dp_instructions += profile->dp_run_instructions[i];
+        dp_runs += profile->dp_runs[i];
+    }
+    printf("\n  actual sequential-PC runs: %" PRIu64
+           " runs, %" PRIu64 " instructions, mean %.3f, max %" PRIu64
+           "\n", flow_runs, flow_instructions,
+           flow_runs ? (double)flow_instructions / (double)flow_runs : 0.0,
+           profile->flow_run_max);
+    sequence_profile_print_run_group("1", profile->flow_runs,
+        profile->flow_run_instructions, 1u, 1u, flow_instructions);
+    sequence_profile_print_run_group("2-4", profile->flow_runs,
+        profile->flow_run_instructions, 2u, 4u, flow_instructions);
+    sequence_profile_print_run_group("5-8", profile->flow_runs,
+        profile->flow_run_instructions, 5u, 8u, flow_instructions);
+    sequence_profile_print_run_group("9-16", profile->flow_runs,
+        profile->flow_run_instructions, 9u, 16u, flow_instructions);
+    sequence_profile_print_run_group("17-32", profile->flow_runs,
+        profile->flow_run_instructions, 17u, 32u, flow_instructions);
+    sequence_profile_print_run_group("33-63", profile->flow_runs,
+        profile->flow_run_instructions, 33u, 63u, flow_instructions);
+    sequence_profile_print_run_group("64+", profile->flow_runs,
+        profile->flow_run_instructions, 64u, 64u, flow_instructions);
+    printf("    sequential links=%" PRIu64 " (%.3f%% of fetched edges); "
+           "also physically contiguous=%" PRIu64 "\n",
+           profile->sequential_links,
+           profile->fetched > 1u
+               ? 100.0 * (double)profile->sequential_links /
+                     (double)(profile->fetched - 1u) : 0.0,
+           profile->physical_sequential_links);
+
+    printf("\n  safe ARM data-processing runs: %" PRIu64
+           " runs, %" PRIu64 " instructions, mean %.3f, max %" PRIu64
+           "\n", dp_runs, dp_instructions,
+           dp_runs ? (double)dp_instructions / (double)dp_runs : 0.0,
+           profile->dp_run_max);
+    sequence_profile_print_run_group("1", profile->dp_runs,
+        profile->dp_run_instructions, 1u, 1u, dp_instructions);
+    sequence_profile_print_run_group("2-4", profile->dp_runs,
+        profile->dp_run_instructions, 2u, 4u, dp_instructions);
+    sequence_profile_print_run_group("5-8", profile->dp_runs,
+        profile->dp_run_instructions, 5u, 8u, dp_instructions);
+    sequence_profile_print_run_group("9-16", profile->dp_runs,
+        profile->dp_run_instructions, 9u, 16u, dp_instructions);
+    sequence_profile_print_run_group("17-32", profile->dp_runs,
+        profile->dp_run_instructions, 17u, 32u, dp_instructions);
+    sequence_profile_print_run_group("33-63", profile->dp_runs,
+        profile->dp_run_instructions, 33u, 63u, dp_instructions);
+    sequence_profile_print_run_group("64+", profile->dp_runs,
+        profile->dp_run_instructions, 64u, 64u, dp_instructions);
+    printf("    safe DP=%" PRIu64 " (%.3f%% fetched); terminal B/BL after "
+           "a safe run=%" PRIu64 "\n",
+           profile->safe_dp_total,
+           profile->fetched
+               ? 100.0 * (double)profile->safe_dp_total /
+                     (double)profile->fetched : 0.0,
+           profile->terminal_branch_after_dp);
+
+    printf("\n  exact physical instruction-site working set\n");
+    printf("    distinct=%" PRIu64 " dropped=%" PRIu64
+           " raw-distinct=%" PRIu64 " raw-dropped=%" PRIu64
+           " pair-distinct=%" PRIu64 " pair-dropped=%" PRIu64 "\n",
+           profile->site_distinct, profile->site_dropped,
+           profile->raw_distinct, profile->raw_dropped,
+           profile->pair_distinct, profile->pair_dropped);
+    printf("    safe-DP accesses=%" PRIu64 " distinct sites=%" PRIu64
+           " unbounded repeat upper bound=%.3f%%\n",
+           profile->cache_accesses, safe_distinct,
+           profile->cache_accesses
+               ? 100.0 * (double)(profile->cache_accesses - safe_distinct) /
+                     (double)profile->cache_accesses : 0.0);
+    printf("    direct-mapped safe-DP-site simulation (not block-call hit rate):\n");
+    for (unsigned i = 0; i < SEQUENCE_CACHE_LEVELS; i++)
+        printf("      %6zu entries  %12" PRIu64 " hits  %7.3f%%\n",
+               profile->cache_size[i], profile->cache_hits[i],
+               profile->cache_accesses
+                   ? 100.0 * (double)profile->cache_hits[i] /
+                         (double)profile->cache_accesses : 0.0);
+
+    printf("\n  hottest exact physical instruction sites\n");
+    uint64_t cumulative = 0u;
+    for (unsigned rank = 0; rank < 24u; rank++) {
+        size_t best = SEQUENCE_SITE_CAP;
+        uint64_t best_hits = 0u;
+        for (size_t i = 0; i < SEQUENCE_SITE_CAP; i++) {
+            if (profile->sites[i].occupied &&
+                profile->sites[i].hits > best_hits) {
+                best = i;
+                best_hits = profile->sites[i].hits;
+            }
+        }
+        if (best == SEQUENCE_SITE_CAP) break;
+        sequence_site_t *entry = &profile->sites[best];
+        cumulative += entry->hits;
+        printf("    %2u  va=%08x pa=%08x %c raw=%08x  %10" PRIu64
+               " %6.3f%% cum=%6.3f%% seq-out=%6.2f%%  %s\n",
+               rank + 1u, entry->sample_va, entry->pa,
+               entry->thumb ? 'T' : 'A', entry->raw, entry->hits,
+               profile->fetched
+                   ? 100.0 * (double)entry->hits / (double)profile->fetched : 0.0,
+               profile->fetched
+                   ? 100.0 * (double)cumulative / (double)profile->fetched : 0.0,
+               entry->hits
+                   ? 100.0 * (double)entry->sequential_out /
+                         (double)entry->hits : 0.0,
+               diagnostic_pc_context_name(
+                   entry->sample_va, entry->sample_cpsr,
+                   entry->sample_mmu, NULL));
+        entry->hits = 0u;
+    }
+
+    printf("\n  hottest raw encodings\n");
+    for (unsigned rank = 0; rank < 16u; rank++) {
+        size_t best = SEQUENCE_RAW_CAP;
+        uint64_t best_hits = 0u;
+        for (size_t i = 0; i < SEQUENCE_RAW_CAP; i++) {
+            if (profile->raws[i].occupied &&
+                profile->raws[i].hits > best_hits) {
+                best = i;
+                best_hits = profile->raws[i].hits;
+            }
+        }
+        if (best == SEQUENCE_RAW_CAP) break;
+        sequence_raw_t *entry = &profile->raws[best];
+        printf("    %2u  %c raw=%08x  %12" PRIu64 "  %7.3f%%\n",
+               rank + 1u, entry->thumb ? 'T' : 'A', entry->raw,
+               entry->hits,
+               profile->fetched
+                   ? 100.0 * (double)entry->hits /
+                         (double)profile->fetched : 0.0);
+        entry->hits = 0u;
+    }
+
+    printf("\n  hottest sequential raw pairs\n");
+    for (unsigned rank = 0; rank < 16u; rank++) {
+        size_t best = SEQUENCE_PAIR_CAP;
+        uint64_t best_hits = 0u;
+        for (size_t i = 0; i < SEQUENCE_PAIR_CAP; i++) {
+            if (profile->pairs[i].occupied &&
+                profile->pairs[i].hits > best_hits) {
+                best = i;
+                best_hits = profile->pairs[i].hits;
+            }
+        }
+        if (best == SEQUENCE_PAIR_CAP) break;
+        sequence_pair_t *entry = &profile->pairs[best];
+        printf("    %2u  %c %08x -> %08x  %12" PRIu64 "  %7.3f%%\n",
+               rank + 1u, entry->thumb ? 'T' : 'A',
+               entry->first, entry->second, entry->hits,
+               profile->sequential_links
+                   ? 100.0 * (double)entry->hits /
+                         (double)profile->sequential_links : 0.0);
+        entry->hits = 0u;
+    }
+
+    printf("\n  hottest sequential class pairs\n");
+    for (unsigned rank = 0; rank < 16u; rank++) {
+        unsigned best_from = SEQUENCE_CLASS_COUNT;
+        unsigned best_to = SEQUENCE_CLASS_COUNT;
+        uint64_t best_hits = 0u;
+        for (unsigned from = 0; from < SEQUENCE_CLASS_COUNT; from++)
+            for (unsigned to = 0; to < SEQUENCE_CLASS_COUNT; to++)
+                if (profile->class_pairs[from][to] > best_hits) {
+                    best_from = from;
+                    best_to = to;
+                    best_hits = profile->class_pairs[from][to];
+                }
+        if (best_from == SEQUENCE_CLASS_COUNT) break;
+        printf("    %2u  %-28s -> %-28s %12" PRIu64 "  %7.3f%%\n",
+               rank + 1u, SEQUENCE_CLASS_NAMES[best_from],
+               SEQUENCE_CLASS_NAMES[best_to], best_hits,
+               profile->sequential_links
+                   ? 100.0 * (double)best_hits /
+                         (double)profile->sequential_links : 0.0);
+        profile->class_pairs[best_from][best_to] = 0u;
+    }
+}
+
 typedef struct {
     md_bridge_t *strategy;
     md_raw_bridge_t *raw;
@@ -24722,6 +25461,7 @@ static void boot_print_usage(FILE *stream, const char *argv0) {
             "          [--touch <at>:<x>:<y>[:<hold>]] ...\n"
             "          [--drag <at>:<x0>:<y0>:<x1>:<y1>[:<steps>[:<span>]]] ...\n"
             "          [--fast] [--run-api] [--frame-meter]\n"
+            "          [--sequence-profile]\n"
             "          [--pinch <at>:<ax0>:<ay0>:<ax1>:<ay1>:<bx0>:<by0>:"
             "<bx1>:<by1>[:<steps>[:<span>]]] ...\n"
             "          [--button <name>:<at>[:<hold>]] ...\n"
@@ -24760,6 +25500,12 @@ static void boot_print_usage(FILE *stream, const char *argv0) {
             "      report changed sampled signatures over >=0.5 s host-time\n"
             "      windows. Requires --framebuffer (-F). This is a desktop\n"
             "      proxy, never a target-iOS FPS acceptance result.\n"
+            "  --sequence-profile  count every live fetched instruction,\n"
+            "      sequential run, exact physical instruction site and raw\n"
+            "      pair. It implies --fast and cannot be combined with\n"
+            "      --run-api or --frame-meter. Its extra fetch translation\n"
+            "      makes wall-clock rates and ordinary TLB counters invalid;\n"
+            "      use its exact dynamic counts, not its speed.\n"
             "\n"
             "value-taking options\n"
             "  --snapshot-at <insn> <file>\n"
@@ -24997,6 +25743,9 @@ int main(int argc, char **argv) {
     /* --frame-meter: host-only publication observer beside --fast, not an
      * emulated-machine toggle and therefore not snapshot state. */
     bool frame_meter_requested = false;
+    /* --sequence-profile: full instruction-entry aggregation in the literal
+     * runner. It implies --fast so no unrelated observer dominates the run. */
+    bool sequence_profile_requested = false;
     uint64_t steps = UINT64_C(2000000);
     const char *dtpath = NULL;
     const char *cmdline = "debug=0x8 serial=1";
@@ -25271,6 +26020,11 @@ int main(int argc, char **argv) {
         }
         if (!strcmp(argv[i], "--frame-meter")) {
             frame_meter_requested = true;
+            continue;
+        }
+        if (!strcmp(argv[i], "--sequence-profile")) {
+            sequence_profile_requested = true;
+            fast_hot = true;
             continue;
         }
         /* Every boolean, in one line, driven by BOOT_TOGGLES. */
@@ -25839,6 +26593,14 @@ int main(int argc, char **argv) {
         fprintf(stderr,
                 "--frame-meter requires --framebuffer (-F); without a live "
                 "CLCD surface every publication would be unavailable\n");
+        return 1;
+    }
+    if (sequence_profile_requested &&
+        (run_api_hot || frame_meter_requested)) {
+        fprintf(stderr,
+                "--sequence-profile requires the literal runner and cannot "
+                "be combined with --run-api or --frame-meter; profiling "
+                "overhead would make their throughput/FPS output false\n");
         return 1;
     }
 
@@ -28329,6 +29091,20 @@ external_md_work_ready:
                 "start %s\n", FRAME_METER_TIMER);
         return 2;
     }
+    sequence_profile_t sequence_profile;
+    memset(&sequence_profile, 0, sizeof sequence_profile);
+    if (sequence_profile_requested &&
+        !sequence_profile_start(&sequence_profile)) {
+        fprintf(stderr,
+                "--sequence-profile: cannot allocate its aggregate tables\n");
+        frame_meter_destroy(&frame_meter);
+        return 2;
+    }
+    if (sequence_profile.enabled) {
+        printf("sequence profile: full dynamic aggregation enabled; "
+               "throughput and TLB totals are intentionally invalid\n");
+        fflush(stdout);
+    }
     uint32_t last_pc = restore_path ? mach.cpu.r[15] : entry_pa;
     uint32_t last_cpsr = mach.cpu.cpsr;
     bool last_mmu_enabled =
@@ -28435,6 +29211,7 @@ external_md_work_ready:
         last_cpsr = mach.cpu.cpsr;
         last_mmu_enabled =
             (mach.cpu.cp15.sctlr & ARM_SCTLR_M) != 0u;
+        sequence_profile_observe(&sequence_profile, &mach.cpu);
         /*
          * THE OBSERVATIONAL BLOCK, and --fast is the only thing that turns it
          * off. Every line of it runs on EVERY retired instruction, and the
@@ -28902,6 +29679,7 @@ external_md_work_ready:
 
     if (frame_meter.enabled)
         (void)frame_meter_finish(&frame_meter, &mach, mach.cpu.cycles);
+    sequence_profile_finish(&sequence_profile);
 
     bool strategy_bridge_halt_failure =
         external_md && st == ARM_HALT &&
@@ -29058,6 +29836,7 @@ external_md_work_ready:
     printf("stopped after %" PRIu64 " instructions: %s\n",
            mach.cpu.cycles, status_name(st));
     frame_meter_report(&frame_meter);
+    sequence_profile_report(&sequence_profile);
     /*
      * THE TLB, which had no way to report itself.
      *
@@ -30387,6 +31166,7 @@ external_md_work_ready:
         }
     }
 
+    sequence_profile_destroy(&sequence_profile);
     frame_meter_destroy(&frame_meter);
     s5l8900_free(&mach);
     ksyms_free(&KS);
