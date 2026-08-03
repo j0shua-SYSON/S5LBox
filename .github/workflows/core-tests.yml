@@ -188,7 +188,7 @@ jobs:
             grep -Fq 'SKIP: not an arm64 host' <<<"$output"
           fi
 
-      - name: Native-semantics ceiling (measurement, not a gate)
+      - name: Native/static-semantics ceilings (measurement, not a gate)
         if: runner.arch == 'ARM64'
         continue-on-error: true
         run: ./build-jit/core/jitbench --insns 500000000 --reps 3

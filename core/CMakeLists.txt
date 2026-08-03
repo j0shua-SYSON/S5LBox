@@ -136,8 +136,39 @@ if(S5LBOX_JIT)
     # compares synthetic interpreter blocks with the existing register-pinned
     # native translator only to establish a ceiling for deeper no-JIT work;
     # tools/jitbench.c states the missing real-machine costs in its output.
-    add_executable(jitbench ../tools/jitbench.c)
+    add_executable(jitbench
+        ../tools/jitbench.c
+        ../tools/a64_static.c
+    )
+    target_include_directories(jitbench PRIVATE ../tools)
     target_link_libraries(jitbench PRIVATE emucore)
+
+    # The static-semantic proof is ordinary signed AArch64 text, generated at
+    # build time from ISA/register combinations only. x86 hosts still compile
+    # and validate its portable decoder, then report a structural skip.
+    string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" S5LBOX_HOST_PROCESSOR)
+    if(S5LBOX_HOST_PROCESSOR MATCHES "^(arm64|aarch64)$")
+        enable_language(ASM)
+        find_package(Python3 REQUIRED COMPONENTS Interpreter)
+        set(A64_STATIC_ASM
+            "${CMAKE_CURRENT_BINARY_DIR}/generated/a64_static_handlers.S")
+        add_custom_command(
+            OUTPUT "${A64_STATIC_ASM}"
+            COMMAND "${Python3_EXECUTABLE}"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/../tools/gen_a64_static.py"
+                    "${A64_STATIC_ASM}"
+            DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/../tools/gen_a64_static.py"
+            VERBATIM
+        )
+        set_source_files_properties("${A64_STATIC_ASM}" PROPERTIES GENERATED TRUE)
+        target_sources(jitbench PRIVATE "${A64_STATIC_ASM}")
+        target_compile_definitions(jitbench PRIVATE S5LBOX_STATIC_A64_NATIVE=1)
+    endif()
+    # Structural decode on x86; generated signed-handler execution plus exact
+    # state comparison on Apple arm64. The sample is deliberately too short to
+    # be performance evidence--the longer non-gating workflow step owns that.
+    add_test(NAME static_semantic_execution
+             COMMAND jitbench --insns 1600000 --reps 1)
 endif()
 
 # --- unit tests -------------------------------------------------------------

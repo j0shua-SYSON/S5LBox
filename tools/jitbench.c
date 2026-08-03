@@ -3,22 +3,25 @@
  *
  * This is deliberately NOT a product-performance claim and not a JIT
  * dispatcher. It translates one small synthetic block once, then compares
- * repeated interpreter execution with repeated entry into that already-built
- * block. The useful question is narrow: can the repository's existing
- * register-pinned AArch64 semantics clear the interpreter by a large factor on
- * the Apple-Silicon runner at all?
+ * repeated interpreter execution with both that already-built block and a
+ * firmware-independent static-threaded proof. The proof's 2,577 generic
+ * ISA/register handlers are compiled and signed with the executable; runtime
+ * decoding creates data records only.
  *
  * The answer is only a feasibility bound. There is no device tick, MMIO,
  * interrupt sampling, cache lookup, translation, chaining, framebuffer
  * publication, UIKit, or real iOS instruction mix here. In particular, a
- * positive result cannot be reported as phone FPS or as proof that a static
- * no-JIT interpreter will have the same speed. A negative result is useful:
- * this generated block specializes more than a static handler can, so a weak
- * result would make that larger implementation hard to justify.
+ * positive result cannot be reported as phone FPS or as proof that a complete
+ * no-JIT interpreter will have the same speed. The static proof covers only the
+ * four synthetic blocks, flat power-of-two RAM, r0-r7 and SP-relative memory;
+ * it has no conditions, MMU, faults, timer, IRQ, MMIO, cache, framebuffer or
+ * UI path. Its inner repetition also avoids real block lookup. Those omissions
+ * are why it is an architecture gate, not an emulator speed claim.
  *
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed.
  */
 #include "jit.h"
+#include "a64_static.h"
 
 #include <inttypes.h>
 #include <stdbool.h>
@@ -242,6 +245,21 @@ static bool run_native(const bench_case_t *bc, const jit_buf_t *arena,
     return i == blocks && exit_reason == JIT_EXIT_NEXT && *seconds > 0.0;
 }
 
+static bool run_static(const bench_case_t *bc,
+                       const a64_static_block_t *block, uint64_t blocks,
+                       final_state_t *out, double *seconds) {
+    arm_cpu_t cpu;
+    double start, end;
+
+    seed_cpu(&cpu, bc);
+    start = now_seconds();
+    bool ran = a64_static_run(&cpu, block, blocks, g_ram, sizeof g_ram);
+    end = now_seconds();
+    capture_state(out, &cpu, ARM_OK, JIT_EXIT_NEXT);
+    *seconds = end - start;
+    return ran && *seconds > 0.0;
+}
+
 static int cmp_double(const void *lhs, const void *rhs) {
     double a = *(const double *)lhs, b = *(const double *)rhs;
     return (a > b) - (a < b);
@@ -251,9 +269,10 @@ static bool bench_one(const bench_case_t *bc, uint64_t requested,
                       unsigned reps) {
     jit_buf_t arena;
     jit_block_t block;
+    a64_static_block_t static_block;
     arm_cpu_t translate_cpu;
     uint32_t *code;
-    double *interp_rates = NULL, *native_rates = NULL;
+    double *interp_rates = NULL, *static_rates = NULL, *native_rates = NULL;
     uint64_t blocks = (requested + bc->insns - 1u) / bc->insns;
     uint64_t total = blocks * bc->insns;
     bool ok = false;
@@ -261,6 +280,12 @@ static bool bench_one(const bench_case_t *bc, uint64_t requested,
 
     memset(&arena, 0, sizeof arena);
     memset(&block, 0, sizeof block);
+    memset(&static_block, 0, sizeof static_block);
+    if (!a64_static_decode(bc->program, bc->insns, bc->thumb,
+                           &static_block)) {
+        fprintf(stderr, "jitbench: static decode failed for %s\n", bc->name);
+        return false;
+    }
     if (!jit_buf_alloc(&arena, 1u << 20)) {
         fprintf(stderr, "jitbench: executable arena unavailable for %s\n", bc->name);
         return false;
@@ -283,52 +308,71 @@ static bool bench_one(const bench_case_t *bc, uint64_t requested,
     }
 
     interp_rates = (double *)calloc(reps, sizeof *interp_rates);
+    static_rates = (double *)calloc(reps, sizeof *static_rates);
     native_rates = (double *)calloc(reps, sizeof *native_rates);
-    if (!interp_rates || !native_rates) {
+    if (!interp_rates || !static_rates || !native_rates) {
         fprintf(stderr, "jitbench: out of memory\n");
         goto done;
     }
 
     for (rep = 0; rep < reps; rep++) {
-        final_state_t interp, native;
-        double interp_s = 0.0, native_s = 0.0;
+        final_state_t interp, statik, native;
+        double interp_s = 0.0, static_s = 0.0, native_s = 0.0;
         bool ran;
+        const char *order;
 
-        /* Reverse alternate repetitions to reduce monotonic frequency/thermal
-         * drift without pretending a shared CI host is a stable lab. */
-        if ((rep & 1u) == 0u) {
+        /* Rotate all three arms to reduce monotonic frequency/thermal drift
+         * without pretending a shared CI host is a stable lab. */
+        if (rep % 3u == 0u) {
+            order = "interp-static-native";
             ran = run_interpreter(bc, total, &interp, &interp_s) &&
+                  run_static(bc, &static_block, blocks, &statik, &static_s) &&
                   run_native(bc, &arena, &block, blocks, &native, &native_s);
-        } else {
-            ran = run_native(bc, &arena, &block, blocks, &native, &native_s) &&
+        } else if (rep % 3u == 1u) {
+            order = "static-native-interp";
+            ran = run_static(bc, &static_block, blocks, &statik, &static_s) &&
+                  run_native(bc, &arena, &block, blocks, &native, &native_s) &&
                   run_interpreter(bc, total, &interp, &interp_s);
+        } else {
+            order = "native-interp-static";
+            ran = run_native(bc, &arena, &block, blocks, &native, &native_s) &&
+                  run_interpreter(bc, total, &interp, &interp_s) &&
+                  run_static(bc, &static_block, blocks, &statik, &static_s);
         }
-        if (!ran || !states_equal(&interp, &native)) {
+        if (!ran || !states_equal(&interp, &native) ||
+            !states_equal(&interp, &statik)) {
             fprintf(stderr,
                     "jitbench: %s repetition %u failed state/exit equality\n",
                     bc->name, rep + 1u);
             goto done;
         }
         interp_rates[rep] = (double)total / interp_s / 1.0e6;
+        static_rates[rep] = (double)total / static_s / 1.0e6;
         native_rates[rep] = (double)total / native_s / 1.0e6;
         printf("NATIVE-CEILING-SAMPLE case=%s rep=%u order=%s "
-               "interpreter=%.3f native-block=%.3f Minsn/s\n",
-               bc->name, rep + 1u, (rep & 1u) ? "native-first" : "interp-first",
-               interp_rates[rep], native_rates[rep]);
+               "interpreter=%.3f static-threaded=%.3f "
+               "native-block=%.3f Minsn/s\n",
+               bc->name, rep + 1u, order, interp_rates[rep],
+               static_rates[rep], native_rates[rep]);
     }
 
     qsort(interp_rates, reps, sizeof *interp_rates, cmp_double);
+    qsort(static_rates, reps, sizeof *static_rates, cmp_double);
     qsort(native_rates, reps, sizeof *native_rates, cmp_double);
     printf("NATIVE-CEILING case=%s guest-insns=%" PRIu64
            " block-insns=%u reps=%u interpreter-median=%.3f "
-           "native-block-median=%.3f speedup=%.3fx\n",
+           "static-threaded-median=%.3f static-speedup=%.3fx "
+           "native-block-median=%.3f native-speedup=%.3fx\n",
            bc->name, total, bc->insns, reps,
-           interp_rates[reps / 2u], native_rates[reps / 2u],
+           interp_rates[reps / 2u], static_rates[reps / 2u],
+           static_rates[reps / 2u] / interp_rates[reps / 2u],
+           native_rates[reps / 2u],
            native_rates[reps / 2u] / interp_rates[reps / 2u]);
     ok = true;
 
 done:
     free(interp_rates);
+    free(static_rates);
     free(native_rates);
     if (!jit_buf_free(&arena)) {
         fprintf(stderr, "jitbench: could not release executable arena\n");
@@ -357,10 +401,12 @@ static bool parse_unsigned(const char *s, unsigned *out) {
 static bool validate_case_translation(const bench_case_t *bc) {
     arm_cpu_t cpu;
     jit_block_t block;
+    a64_static_block_t static_block;
     uint32_t code[CODE_WORDS];
 
     seed_cpu(&cpu, bc);
     memset(&block, 0, sizeof block);
+    memset(&static_block, 0, sizeof static_block);
     if (!jit_translate(&cpu, 0u, code, CODE_WORDS, &block) ||
         block.insn_count != bc->insns || block.native_count != bc->insns ||
         block.end_reason != JIT_END_BRANCH) {
@@ -371,8 +417,17 @@ static bool validate_case_translation(const bench_case_t *bc) {
                 (int)block.end_reason);
         return false;
     }
-    printf("NATIVE-CEILING-STRUCTURAL case=%s block-insns=%u native=%u\n",
-           bc->name, block.insn_count, block.native_count);
+    if (!a64_static_decode(bc->program, bc->insns, bc->thumb,
+                           &static_block) ||
+        static_block.insn_count != bc->insns) {
+        fprintf(stderr, "jitbench: structural static decode failed for %s\n",
+                bc->name);
+        return false;
+    }
+    printf("NATIVE-CEILING-STRUCTURAL case=%s block-insns=%u native=%u "
+           "static-uops=%u handlers=%u\n",
+           bc->name, block.insn_count, block.native_count,
+           static_block.insn_count, A64_STATIC_HANDLER_COUNT);
     return true;
 }
 
@@ -398,15 +453,20 @@ int main(int argc, char **argv) {
         }
     }
 
-    printf("Apple-arm64 native-semantics ceiling benchmark\n");
-    printf("NOT PHONE FPS: synthetic blocks; no tick/MMIO/interrupt/cache/"
-           "framebuffer/UI path.\n");
+    printf("Apple-arm64 native/static-semantics ceiling benchmark\n");
+    printf("NOT PHONE FPS: four synthetic subset blocks; static arm has flat "
+           "RAM and no condition/MMU/fault/tick/IRQ/MMIO/cache/framebuffer/UI "
+           "path or real block lookup.\n");
     for (i = 0u; i < sizeof CASES / sizeof CASES[0]; i++) {
         if (!validate_case_translation(&CASES[i])) return 1;
     }
     if (!jit_host_can_execute()) {
         printf("SKIP: not an arm64 execution host.\n");
         return 0;
+    }
+    if (!a64_static_host_available()) {
+        fprintf(stderr, "jitbench: arm64 host lacks static handler build\n");
+        return 1;
     }
 
     for (i = 0u; i < sizeof CASES / sizeof CASES[0]; i++) {
