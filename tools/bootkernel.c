@@ -24664,6 +24664,8 @@ static const char *status_name(arm_status_t s) {
 #define SEQUENCE_PAIR_CAP        (1u << 18)
 #define SEQUENCE_RUN_BUCKETS     65u
 #define SEQUENCE_CACHE_LEVELS    4u
+#define SEQUENCE_BLOCK_LEVELS    4u
+#define SEQUENCE_BLOCK_HALFWORDS 512u
 
 typedef enum {
     SEQUENCE_ARM_DP = 0,
@@ -24724,6 +24726,20 @@ typedef struct {
     bool valid;
 } sequence_cache_entry_t;
 
+/*
+ * Capacity/reuse model for a lazy, physical-1-KiB predecode cache.  This is
+ * deliberately an observer rather than an implementation: it tells us whether
+ * a proposed cache can retain the real guest's decoded sites before we add any
+ * interpreter machinery.  ARM and Thumb keep separate raw words because the
+ * same halfword address can be entered in either instruction set.
+ */
+typedef struct {
+    uint32_t pa_block;
+    uint32_t raw[2][SEQUENCE_BLOCK_HALFWORDS];
+    uint8_t  valid_mode[SEQUENCE_BLOCK_HALFWORDS];
+    bool     valid;
+} sequence_block_cache_entry_t;
+
 typedef struct {
     bool enabled;
     sequence_site_t *sites;
@@ -24733,6 +24749,20 @@ typedef struct {
     size_t cache_size[SEQUENCE_CACHE_LEVELS];
     uint64_t cache_hits[SEQUENCE_CACHE_LEVELS];
     uint64_t cache_accesses;
+    sequence_block_cache_entry_t *block_cache[SEQUENCE_BLOCK_LEVELS];
+    size_t block_cache_size[SEQUENCE_BLOCK_LEVELS];
+    uint64_t block_lookups;
+    uint64_t block_hits[SEQUENCE_BLOCK_LEVELS];
+    uint64_t block_fills[SEQUENCE_BLOCK_LEVELS];
+    uint64_t block_uop_accesses;
+    uint64_t block_uop_hits[SEQUENCE_BLOCK_LEVELS];
+    uint64_t block_uop_builds[SEQUENCE_BLOCK_LEVELS];
+    uint64_t block_raw_changes[SEQUENCE_BLOCK_LEVELS];
+    bool block_mapping_valid;
+    bool block_mapping_privileged;
+    uint32_t block_mapping_va;
+    uint32_t block_mapping_pa;
+    uint32_t block_mapping_tlb_gen;
 
     uint64_t observations;
     uint64_t fetched;
@@ -25037,6 +25067,64 @@ static void sequence_cache_note(sequence_profile_t *profile,
     }
 }
 
+static void sequence_block_cache_note(sequence_profile_t *profile,
+                                      const arm_cpu_t *cpu, uint32_t va,
+                                      uint32_t pa, uint32_t raw, bool thumb) {
+    const uint32_t va_block = va & ~UINT32_C(0x3ff);
+    const uint32_t pa_block = pa & ~UINT32_C(0x3ff);
+    const bool privileged =
+        (cpu->cpsr & ARM_CPSR_MODE_MASK) != ARM_MODE_USR;
+    const bool mapping_change = !profile->block_mapping_valid ||
+        profile->block_mapping_va != va_block ||
+        profile->block_mapping_pa != pa_block ||
+        profile->block_mapping_tlb_gen != cpu->tlb_gen ||
+        profile->block_mapping_privileged != privileged;
+    const uint64_t hash = sequence_mix64(pa_block);
+    const unsigned mode = thumb ? 1u : 0u;
+    const uint8_t mode_bit = (uint8_t)(1u << mode);
+    const size_t halfword = (size_t)((pa & UINT32_C(0x3ff)) >> 1);
+
+    if (mapping_change) {
+        profile->block_lookups++;
+        profile->block_mapping_valid = true;
+        profile->block_mapping_privileged = privileged;
+        profile->block_mapping_va = va_block;
+        profile->block_mapping_pa = pa_block;
+        profile->block_mapping_tlb_gen = cpu->tlb_gen;
+        for (unsigned i = 0; i < SEQUENCE_BLOCK_LEVELS; i++) {
+            const size_t slot =
+                (size_t)hash & (profile->block_cache_size[i] - 1u);
+            sequence_block_cache_entry_t *entry =
+                &profile->block_cache[i][slot];
+            if (entry->valid && entry->pa_block == pa_block) {
+                profile->block_hits[i]++;
+            } else {
+                entry->valid = true;
+                entry->pa_block = pa_block;
+                memset(entry->valid_mode, 0, sizeof entry->valid_mode);
+                profile->block_fills[i]++;
+            }
+        }
+    }
+
+    profile->block_uop_accesses++;
+    for (unsigned i = 0; i < SEQUENCE_BLOCK_LEVELS; i++) {
+        const size_t slot =
+            (size_t)hash & (profile->block_cache_size[i] - 1u);
+        sequence_block_cache_entry_t *entry = &profile->block_cache[i][slot];
+        if ((entry->valid_mode[halfword] & mode_bit) != 0u &&
+            entry->raw[mode][halfword] == raw) {
+            profile->block_uop_hits[i]++;
+        } else {
+            if ((entry->valid_mode[halfword] & mode_bit) != 0u)
+                profile->block_raw_changes[i]++;
+            entry->raw[mode][halfword] = raw;
+            entry->valid_mode[halfword] |= mode_bit;
+            profile->block_uop_builds[i]++;
+        }
+    }
+}
+
 static void sequence_profile_destroy(sequence_profile_t *profile) {
     if (!profile) return;
     free(profile->sites);
@@ -25044,12 +25132,17 @@ static void sequence_profile_destroy(sequence_profile_t *profile) {
     free(profile->pairs);
     for (unsigned i = 0; i < SEQUENCE_CACHE_LEVELS; i++)
         free(profile->cache[i]);
+    for (unsigned i = 0; i < SEQUENCE_BLOCK_LEVELS; i++)
+        free(profile->block_cache[i]);
     memset(profile, 0, sizeof *profile);
 }
 
 static bool sequence_profile_start(sequence_profile_t *profile) {
     static const size_t CACHE_SIZES[SEQUENCE_CACHE_LEVELS] = {
         1024u, 4096u, 16384u, 65536u
+    };
+    static const size_t BLOCK_CACHE_SIZES[SEQUENCE_BLOCK_LEVELS] = {
+        64u, 256u, 1024u, 4096u
     };
     if (!profile) return false;
     memset(profile, 0, sizeof *profile);
@@ -25060,12 +25153,23 @@ static bool sequence_profile_start(sequence_profile_t *profile) {
         profile->cache_size[i] = CACHE_SIZES[i];
         profile->cache[i] = calloc(CACHE_SIZES[i], sizeof *profile->cache[i]);
     }
+    for (unsigned i = 0; i < SEQUENCE_BLOCK_LEVELS; i++) {
+        profile->block_cache_size[i] = BLOCK_CACHE_SIZES[i];
+        profile->block_cache[i] = calloc(BLOCK_CACHE_SIZES[i],
+                                         sizeof *profile->block_cache[i]);
+    }
     if (!profile->sites || !profile->raws || !profile->pairs) {
         sequence_profile_destroy(profile);
         return false;
     }
     for (unsigned i = 0; i < SEQUENCE_CACHE_LEVELS; i++) {
         if (!profile->cache[i]) {
+            sequence_profile_destroy(profile);
+            return false;
+        }
+    }
+    for (unsigned i = 0; i < SEQUENCE_BLOCK_LEVELS; i++) {
+        if (!profile->block_cache[i]) {
             sequence_profile_destroy(profile);
             return false;
         }
@@ -25097,6 +25201,7 @@ static void sequence_profile_observe(sequence_profile_t *profile,
     }
 
     profile->fetched++;
+    sequence_block_cache_note(profile, cpu, pc, pa, raw, thumb);
     sequence_class_t instruction_class = thumb
         ? SEQUENCE_THUMB : sequence_classify_arm(raw);
     profile->class_hits[instruction_class]++;
@@ -25452,8 +25557,31 @@ static void sequence_profile_report(sequence_profile_t *profile) {
         printf("      %6zu entries  %12" PRIu64 " hits  %7.3f%%\n",
                profile->cache_size[i], profile->cache_hits[i],
                profile->cache_accesses
-                   ? 100.0 * (double)profile->cache_hits[i] /
-                         (double)profile->cache_accesses : 0.0);
+                    ? 100.0 * (double)profile->cache_hits[i] /
+                          (double)profile->cache_accesses : 0.0);
+
+    printf("\n  physical 1 KiB lazy-predecode cache simulation\n");
+    printf("    Capacity/reuse upper bound only: no write invalidation and no "
+           "execution-speed claim. Mapping lookups=%" PRIu64
+           ", decoded-site accesses=%" PRIu64 "\n",
+           profile->block_lookups, profile->block_uop_accesses);
+    for (unsigned i = 0; i < SEQUENCE_BLOCK_LEVELS; i++) {
+        printf("      %4zu blocks  block hit=%12" PRIu64 "/%12" PRIu64
+               " %7.3f%%  uop hit=%12" PRIu64 "/%12" PRIu64
+               " %7.3f%%  fills=%" PRIu64 " builds=%" PRIu64
+               " raw-change=%" PRIu64 "\n",
+               profile->block_cache_size[i], profile->block_hits[i],
+               profile->block_lookups,
+               profile->block_lookups
+                   ? 100.0 * (double)profile->block_hits[i] /
+                         (double)profile->block_lookups : 0.0,
+               profile->block_uop_hits[i], profile->block_uop_accesses,
+               profile->block_uop_accesses
+                   ? 100.0 * (double)profile->block_uop_hits[i] /
+                         (double)profile->block_uop_accesses : 0.0,
+               profile->block_fills[i], profile->block_uop_builds[i],
+               profile->block_raw_changes[i]);
+    }
 
     printf("\n  hottest exact physical instruction sites\n");
     uint64_t cumulative = 0u;
