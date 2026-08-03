@@ -1139,6 +1139,135 @@ static void test_skipped_refresh_is_invisible_to_the_guest(void) {
 }
 
 /*
+ * s5l8900_run() calls the now-small public converter with a constant one-
+ * retirement tick, allowing an optimizing compiler to inline the conversion
+ * and early-out while leaving the large refresh body out of line. This is an
+ * equivalence test, not merely a timer spot-check: run that API beside the
+ * literal public arm_step()+s5l8900_tick(1) contract and compare the CPU,
+ * clock phase, interrupt-visible state, and every device whose state can
+ * advance in a refresh.
+ *
+ * Normal and fractional phases exercise the common skip; 1:1 forces a refresh
+ * every instruction; guest MMIO makes level_dirty true inside the run; the
+ * direct button change is the host-behind-the-bus case ext_inputs() watches.
+ * Inverted/zero rates and an invalid accumulator pin the public API's general
+ * semantics instead of letting a benchmark-only assumption become behavior.
+ */
+struct run_tick_case {
+    const char *name;
+    uint32_t cpu_hz, tb_hz;
+    uint64_t tb_accum;
+    unsigned steps;
+    bool dirty_mmio;
+    bool external_input;
+};
+
+static bool setup_run_tick_case(s5l8900_t *m, const struct run_tick_case *tc) {
+    if (!s5l8900_init(m, 0, 1u << 20)) return false;
+
+    static const uint32_t spin = 0xeafffffeu;       /* B . */
+    static const uint32_t dirty_loop[] = {
+        0xe5801000u,                               /* STR r1,[r0] */
+        0xeafffffdu                                /* B 0         */
+    };
+    if (tc->dirty_mmio) {
+        s5l8900_load(m, 0, dirty_loop, sizeof dirty_loop);
+        m->cpu.r[0] = S5L8900_VIC0_BASE + VIC_SOFTINT;
+        m->cpu.r[1] = 1u << 3;
+    } else {
+        s5l8900_load(m, 0, &spin, sizeof spin);
+    }
+
+    arm_a_live_machine(m);
+    m->cpu_hz = tc->cpu_hz;
+    m->tb_hz = tc->tb_hz;
+    m->tb_accum = tc->tb_accum;
+    m->cpu.r[15] = 0u;
+    m->cpu.cpsr = ARM_MODE_SVC | ARM_CPSR_I | ARM_CPSR_F;
+
+    /* Deliberately bypass the bus: this models the host changing the board
+     * through the s5l_buttons_t pointer it is publicly handed. The next tick
+     * must notice it even when no guest MMIO made level_dirty true. */
+    if (tc->external_input)
+        m->buttons.pressed = (uint8_t)(1u << S5L_BUTTON_MENU);
+    return true;
+}
+
+static void test_run_tick_path_matches_public_contract(void) {
+    static const struct run_tick_case cases[] = {
+        { "real ratio",       S5L8900_CPU_HZ, S5L8900_TB_HZ,
+                                                        0u, 1000u, false, false },
+        { "fractional phase",            4u,       1u, 3u,  257u, false, false },
+        { "one to one",                  1u,       1u, 0u,  257u, false, false },
+        { "dirty guest MMIO",            4u,       1u, 2u,  258u, true,  false },
+        { "external button",             4u,       1u, 2u,  257u, false, true  },
+        { "inverted fallback",           1u,       4u, 0u,  257u, false, false },
+        { "zero CPU fallback",           0u,       1u, 7u,  257u, false, false },
+        { "zero timebase fallback",      4u,       0u, 3u,  257u, false, false },
+        { "invalid phase fallback",      4u,       1u, 5u,  257u, false, false }
+    };
+
+    for (unsigned c = 0; c < sizeof cases / sizeof cases[0]; c++) {
+        const struct run_tick_case *tc = &cases[c];
+        s5l8900_t fast, reference;
+        bool fast_ok = setup_run_tick_case(&fast, tc);
+        bool reference_ok = setup_run_tick_case(&reference, tc);
+        CHECK(fast_ok && reference_ok, "%s: machine init failed", tc->name);
+        if (!fast_ok || !reference_ok) {
+            if (fast_ok) s5l8900_free(&fast);
+            if (reference_ok) s5l8900_free(&reference);
+            continue;
+        }
+
+        arm_status_t reference_status = ARM_OK;
+        unsigned reference_ran = 0u;
+        for (; reference_ran < tc->steps; reference_ran++) {
+            reference_status = arm_step(&reference.cpu);
+            if (reference_status != ARM_OK) break;
+            s5l8900_tick(&reference, 1u);
+        }
+
+        arm_status_t fast_status = ARM_OK;
+        unsigned fast_ran = s5l8900_run(&fast, tc->steps, &fast_status);
+        uint32_t a[VISIBLE_WORDS], b[VISIBLE_WORDS];
+        machine_visible_state(&fast, a);
+        machine_visible_state(&reference, b);
+
+        CHECK(fast_status == reference_status && fast_ran == reference_ran,
+              "%s: status/ran fast=%d/%u reference=%d/%u", tc->name,
+              (int)fast_status, fast_ran, (int)reference_status, reference_ran);
+        CHECK(fast.cpu.r[15] == reference.cpu.r[15] &&
+              fast.cpu.cpsr == reference.cpu.cpsr &&
+              fast.cpu.cycles == reference.cpu.cycles,
+              "%s: CPU diverged pc=%08x/%08x cpsr=%08x/%08x cycles=%llu/%llu",
+              tc->name, fast.cpu.r[15], reference.cpu.r[15], fast.cpu.cpsr,
+              reference.cpu.cpsr, (unsigned long long)fast.cpu.cycles,
+              (unsigned long long)reference.cpu.cycles);
+        CHECK(fast.tb_accum == reference.tb_accum &&
+              fast.level_dirty == reference.level_dirty &&
+              fast.ext_seen == reference.ext_seen,
+              "%s: converter/refresh phase differs accum=%llu/%llu dirty=%d/%d "
+              "external=%08x/%08x", tc->name,
+              (unsigned long long)fast.tb_accum,
+              (unsigned long long)reference.tb_accum,
+              (int)fast.level_dirty, (int)reference.level_dirty,
+              fast.ext_seen, reference.ext_seen);
+        CHECK(memcmp(a, b, sizeof a) == 0,
+              "%s: guest-visible machine state diverged", tc->name);
+        CHECK(memcmp(&fast.timer, &reference.timer, sizeof fast.timer) == 0 &&
+              memcmp(&fast.clcd, &reference.clcd, sizeof fast.clcd) == 0 &&
+              memcmp(&fast.tvout, &reference.tvout, sizeof fast.tvout) == 0 &&
+              memcmp(&fast.vic, &reference.vic, sizeof fast.vic) == 0 &&
+              memcmp(&fast.gpioic, &reference.gpioic, sizeof fast.gpioic) == 0 &&
+              memcmp(&fast.buttons, &reference.buttons, sizeof fast.buttons) == 0,
+              "%s: refreshed device state diverged", tc->name);
+
+        s5l8900_free(&fast);
+        s5l8900_free(&reference);
+    }
+}
+
+/*
  * The device tree exposes /arm-io/mbx as one 16 MiB aperture: 8 KiB of
  * registers followed by EDRAM. The bus already decodes that whole span, so the
  * machine's window inventory, conflict detector, allocation and teardown must
@@ -2981,6 +3110,7 @@ int main(void) {
     test_timebase_runs_without_a_timer();
     test_timebase_runs_at_the_guest_ratio();
     test_skipped_refresh_is_invisible_to_the_guest();
+    test_run_tick_path_matches_public_contract();
     test_mbx_edram_owns_and_declares_the_full_aperture();
     test_timer_period_is_exact();
     test_timer_ack_mask_matches_the_kernels();

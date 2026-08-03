@@ -1241,6 +1241,8 @@ static uint32_t ext_inputs(const s5l8900_t *m) {
          | ((uint32_t)(m->mtz2.atn ? 1u : 0u) << 16);
 }
 
+static void s5l8900_refresh(s5l8900_t *m, uint32_t tb);
+
 void s5l8900_tick(s5l8900_t *m, uint32_t ticks) {
     /*
      * Convert elapsed emulated CPU-clock ticks into timebase ticks at the
@@ -1289,6 +1291,16 @@ void s5l8900_tick(s5l8900_t *m, uint32_t ticks) {
         tb = (uint32_t)(m->tb_accum / m->cpu_hz);
         m->tb_accum %= m->cpu_hz;
     }
+
+    s5l8900_refresh(m, tb);
+}
+
+/* One implementation of the observable device work, kept out of the public
+ * clock converter's common path. Besides avoiding duplication, this split
+ * leaves s5l8900_tick() small enough for an optimizing compiler to inline its
+ * ticks=1 conversion and early-out into s5l8900_run() without also pulling the
+ * entire device graph into the interpreter loop. */
+static void s5l8900_refresh(s5l8900_t *m, uint32_t tb) {
     m->level_dirty = false;
 
     /* Devices advance, then the controllers recompute what the CPU sees. */
@@ -1435,7 +1447,7 @@ unsigned s5l8900_run(s5l8900_t *m, unsigned max_steps, arm_status_t *status) {
     for (; n < max_steps; n++) {
         st = arm_step(&m->cpu);
         if (st != ARM_OK) break;
-        s5l8900_tick(m, 1);
+        s5l8900_tick(m, 1u);
     }
     if (status) *status = st;
     return n;

@@ -844,13 +844,23 @@ static int cmp_double(const void *a, const void *b) {
     return (x > y) - (x < y);
 }
 
+static bool config_matches(const bench_cfg_t *cfg, const char *filter) {
+    if (!filter) return true;
+    char description[160];
+    (void)snprintf(description, sizeof description, "loop=%s mmu=%s tick=%s",
+                   cfg->loop, cfg->mmu, cfg->tick);
+    return strstr(description, filter) != NULL;
+}
+
 static void usage(const char *argv0) {
-    printf("usage: %s [--insns N] [--reps N]\n"
+    printf("usage: %s [--insns N] [--reps N] [--filter TEXT]\n"
            "\n"
            "  --insns N   guest instructions per repetition (default 20000000,\n"
            "              the sample size docs/dynarec.md section 1.1 used; rounded up\n"
            "              to a multiple of %u so every row ends at the top of its loop)\n"
            "  --reps  N   repetitions per configuration (default 5)\n"
+           "  --filter T  run only rows whose printed loop/mmu/tick description\n"
+           "              contains T (for example, --filter tick=run)\n"
            "\n"
            "Prints M instructions/sec per configuration. This is a measurement,\n"
            "not a test: it has no pass threshold and is not registered with\n"
@@ -861,6 +871,7 @@ static void usage(const char *argv0) {
 int main(int argc, char **argv) {
     uint64_t insns = 20000000u;
     unsigned reps = 5u;
+    const char *filter = NULL;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
@@ -870,6 +881,8 @@ int main(int argc, char **argv) {
             insns = strtoull(argv[++i], NULL, 0);
         } else if (strcmp(argv[i], "--reps") == 0 && i + 1 < argc) {
             reps = (unsigned)strtoul(argv[++i], NULL, 0);
+        } else if (strcmp(argv[i], "--filter") == 0 && i + 1 < argc) {
+            filter = argv[++i];
         } else {
             fprintf(stderr, "insnbench: unknown option '%s'\n", argv[i]);
             usage(argv[0]);
@@ -887,24 +900,35 @@ int main(int argc, char **argv) {
     double *rates = calloc((size_t)BENCH_CONFIG_COUNT * reps, sizeof *rates);
     double *sorted = calloc(reps, sizeof *sorted);
     bool cfg_ok[BENCH_CONFIG_COUNT];
+    bool selected[BENCH_CONFIG_COUNT];
     uint64_t retired_first[BENCH_CONFIG_COUNT];
     if (!rates || !sorted) {
         fprintf(stderr, "insnbench: out of memory\n");
         free(rates); free(sorted);
         return 1;
     }
+    unsigned selected_count = 0u;
     for (size_t c = 0; c < BENCH_CONFIG_COUNT; c++) {
+        selected[c] = config_matches(&g_configs[c], filter);
+        selected_count += selected[c] ? 1u : 0u;
         cfg_ok[c] = true;
         retired_first[c] = 0;
+    }
+    if (selected_count == 0u) {
+        fprintf(stderr, "insnbench: filter '%s' selected no configurations\n",
+                filter ? filter : "");
+        free(rates); free(sorted);
+        return 2;
     }
 
     printf("INSNBENCH-HOST arch=%s os=%s compiler=\"%s\" opt=%s %s cmake_build_type=%s\n",
            INSNBENCH_ARCH, INSNBENCH_OS, INSNBENCH_CC,
            INSNBENCH_OPT, INSNBENCH_NDEBUG, INSNBENCH_BUILD_TYPE);
     printf("INSNBENCH-METHOD timer=%s insns_per_rep=%" PRIu64 " reps=%u headline=median "
-           "order=interleaved ram=%uMB loop_insns=%u\n",
+           "order=interleaved ram=%uMB loop_insns=%u filter=\"%s\"\n",
            INSNBENCH_TIMER, insns, reps,
-           (unsigned)(BENCH_RAM_SIZE >> 20), BENCH_LOOP_LCM);
+           (unsigned)(BENCH_RAM_SIZE >> 20), BENCH_LOOP_LCM,
+           filter ? filter : "all");
     /*
      * WHY THE MEDIAN IS THE HEADLINE, AND NOT BEST-OF-N.
      *
@@ -953,6 +977,7 @@ int main(int argc, char **argv) {
     for (unsigned r = 0; r < reps; r++) {
         for (size_t c = 0; c < BENCH_CONFIG_COUNT; c++) {
             const bench_cfg_t *cfg = &g_configs[c];
+            if (!selected[c]) continue;
             if (!cfg_ok[c]) continue;
 
             s5l8900_t m;
@@ -996,6 +1021,7 @@ int main(int argc, char **argv) {
 
     for (size_t c = 0; c < BENCH_CONFIG_COUNT; c++) {
         const bench_cfg_t *cfg = &g_configs[c];
+        if (!selected[c]) continue;
         if (!cfg_ok[c]) {
             printf("INSNBENCH loop=%-10s mmu=%-11s tick=%-3s FAILED\n",
                    cfg->loop, cfg->mmu, cfg->tick);

@@ -3822,3 +3822,111 @@ not support a 30 fps claim. Focused exact and strict verification are 938/938 as
 the full exact and warnings-as-errors suites pass 55/55 and 59/59 tests. A final cold
 boot remains mandatory after performance work. Network, sound and iOS-app completion
 remain downstream of the still-open 30 fps priority.
+
+### r440-r447: first-boot RSA separated from steady state; run-loop tick tax reduced
+
+r439's rate and sparse updates were not a steady-state result after all. Sampling-only
+`gprof` runs (link-time `-pg`, but no per-function entry instrumentation) showed
+lockdownd spending 96% of its user samples in Security.framework giant-number
+arithmetic. The first fully instrumented profile was discarded: `_mcount_private` and
+`__fentry__` consumed 60.79% of its samples, so it measured the profiler. Disabling
+ASLR and sampling an otherwise ordinary `-O2` build produced usable addresses.
+
+The checkpoint names below preserve the run record, not the conclusions guessed while
+they were made. r443's `keygen-complete` label was wrong, and r444 seeing no new entry to
+`_isGiantPrime` did not prove the already-entered final operation had returned:
+
+    work/r443-keygen-complete-6500m/post-keygen-6500m.bin
+      SHA-256 8DF692FE21BA264C52A7EBFDF9A6C1D36745AA8E1F001142E651A3B3C40FE19B
+    work/r444-keygen-probe-6800m/post-probe-6800m.bin
+      SHA-256 5EE1ABF1ADB871498D6F4255F84E496910250EDD8D1D544B914397852955CD95
+
+r445 is the first defensible post-keygen checkpoint. Its final 100 M-instruction sample
+was 98.2% SpringBoard, with lockdownd absent:
+
+    work/r445-keygen-finish-check-7100m/post-check-7100m.bin
+      SHA-256 3E8FABD1DB75D8E843B68BE5A30846DA1B58C3791E097D0BBD5A8BBE4F36F2F5
+
+r446 restored that checkpoint and applied one controlled 26-report swipe over 220 M
+instructions. All 26 reports were accepted; the device completed 120/120 length/data
+reads. Graphics completed **1,388/1,388 2D candidates** (130,348,168 bytes) and
+**8,888/8,888 3D renders** (22,126,457 pixels), with zero decoder rejection, zero
+Graphics Recovery Event, and zero storage failure. This is the evidence that ends the
+packet whack-a-mole phase: the live family is broad and clean enough that inventing
+another packet decoder without a rejection would be unjustified.
+
+The valid steady-state frame result still fails the target. r446 published 1,531 sampled
+scanouts and changed 228 signatures over 220 M instructions. Its 141 completed windows
+had mean `3.088`, maximum `5.984`, and none at or above 30 changes/s. Changed signatures
+were separated by 399,360 / 967,838 / 3,099,648 guest instructions (minimum / mean /
+maximum). At a fixed cadence, the mean implies about **29.0 M guest instructions/s** for
+30 changed scanouts/s. That is an inference from sampled scanout changes, not measured
+iOS-device FPS. The desktop harness itself retired only 2.689 M instructions/s because
+it includes tracing and host-side observation; it is not the app's execution rate.
+
+The guest profile explains why another renderer packet is not the next lever. Its user
+samples were SpringBoard QuartzCore render-tree, geometry, and command-building work
+(`CA::Render::Updater::prepare_layer`, `prepare_layer0`, path conversion, transforms,
+and `CA::RenderMBX2D::render_layer_bg`). Every observed MBX command completed. The r446
+PPM was later losslessly converted for inspection. The apparent grid wobble is real and
+is the guest's edit-mode animation: r433's non-edit icons occupy identical 57x57 boxes
+at exact grid origins, while r446's independently shifted/rotated boxes extend by one or
+two pixels and Calculator has moved into the dragged slot. This does not license wobble
+outside edit mode. The fixed Settings crop is not darker numerically: its mean RGB is
+`(136.10,136.90,138.02)` in r433 and `(136.32,137.10,138.20)` in r446. The crop is not
+byte-identical because rotation changes its antialiased boundary, so those means are a
+brightness check, not a claim that the two rendered icons are geometrically identical.
+
+The remaining generic cost was measurable in `s5l8900_run()`. At commit `370b252`, its
+assembly called the large public `s5l8900_tick(m, 1)` once per instruction. The accepted
+change moves the identical observable device-refresh body into one private
+`s5l8900_refresh()` function. This leaves the public converter small enough for GCC to
+inline it into the run loop and constant-fold `ticks * tb_hz` into one add on the common
+path, while the full refresh remains out of line. No device or external-input check is
+deleted. A hand-written ratio-specialized alternative was tested first and rejected:
+in its first controlled five-repetition build it ran at 24.50 M/s while the same
+binary's literal public-tick row reached 25.88 M/s. Extra code and a second loop were a
+loss, not an optimization.
+
+Whole-suite timing then became thermally unstable, so it was not used to price the
+accepted change. `insnbench --filter tick=run` now selects only the app-facing row. An
+old `370b252` worktree and the candidate were built with the same GCC 15.2.0,
+RelWithDebInfo flags, and identical benchmark source, then run in both orders at nine
+repetitions of 20 M instructions:
+
+| order | old median | refresh-split median | change |
+|---|---:|---:|---:|
+| old then new | 16.89 M/s | 18.26 M/s | +8.1% |
+| new then old | 17.67 M/s | 18.92 M/s | +7.1% |
+| mean of medians | 17.28 M/s | 18.59 M/s | **+7.6%** |
+
+All 720 M benchmark instructions retired and passed their architectural end-state
+checks. The differential machine test also compares `s5l8900_run()` with literal
+`arm_step()+s5l8900_tick(1)` across the real ratio, fractional phase, 1:1 clocks, dirty
+guest MMIO, a host-side button change, inverted and zero clocks, and an invalid phase;
+the focused machine binary passes 5,832/5,832 assertions.
+
+r448 is the real-guest semantics check. Both the old `370b252` bootkernel and the
+refresh-split build restored r445, retired the same 2 M instructions, and stopped at
+7.102 B with exit zero, 15,626 external-media reads, 469 writes, and zero failures. All
+five retained outputs are byte-identical old versus new:
+
+| artifact | bytes | SHA-256 (both builds) |
+|---|---:|---|
+| machine snapshot | 122,015,066 | `1E15E32EE78C2E5667B1A35B30328E05EF35CD46B2FA4609AFDF7C6E32625E67` |
+| snapshot media image | 466,825,216 | `8A59C388C481165F460984926AA5FFB1B72A0E9030216CD0038DE9B3264B79FE` |
+| snapshot bridge state | 131,248 | `A3D8E6DC89261FD57A257FF098301331C4C6D447CCBF79B93DF74AE3A358B133` |
+| live work image | 466,825,216 | `8A59C388C481165F460984926AA5FFB1B72A0E9030216CD0038DE9B3264B79FE` |
+| terminal framebuffer | 460,815 | `988BD8DC0625EA85A90A7A587C66F0C7418A8BEC2FD54E5EB66576AAB4406E72` |
+
+The retained new checkpoint is
+`work/r448-tick-refresh-ab/new/post-7102m.bin`. This proves the refactor did not
+perturb this live guest trajectory. It does not measure the optimization: bootkernel's
+debug loop intentionally uses literal `arm_step()+s5l8900_tick(1)` so it can inject and
+observe at exact instruction boundaries.
+
+This is a real generic interpreter-loop improvement, not 30 fps. Applying 7.6% to the
+older reported 25 M/s would yield only about 26.9 M/s, and that extrapolation crosses
+hosts, compilers, and workloads. An exact iOS build and the eventual final cold boot are
+still required. Network, sound, and app completion remain behind the unpassed graphics
+gate.
