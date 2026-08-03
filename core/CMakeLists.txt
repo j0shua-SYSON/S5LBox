@@ -130,6 +130,14 @@ if(S5LBOX_JIT)
     # Deliberately do not set PASS_ or SKIP_REGULAR_EXPRESSION: either can
     # override a non-zero process result. The workflow separately validates
     # that macOS really executed MAP_JIT code instead of taking a skip path.
+
+    # Non-gating Apple-arm64 feasibility measurement. This deliberately lives
+    # outside ctest: a shared runner's speed is not a pass/fail property. It
+    # compares synthetic interpreter blocks with the existing register-pinned
+    # native translator only to establish a ceiling for deeper no-JIT work;
+    # tools/jitbench.c states the missing real-machine costs in its output.
+    add_executable(jitbench ../tools/jitbench.c)
+    target_link_libraries(jitbench PRIVATE emucore)
 endif()
 
 # --- unit tests -------------------------------------------------------------
