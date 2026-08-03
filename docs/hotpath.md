@@ -4685,3 +4685,53 @@ predecode cache in front of the same helpers is now a repeatedly measured dead e
 an open optimisation. A credible next experiment must remove semantic-helper and
 per-instruction dispatch work across long mixed sequences, remain interrupt/timer exact,
 and clear a substantial restored A/B gate before reaching the iOS app.
+
+### r485: the current Release/LTO profile leaves no small 30 FPS lever
+
+r485 refreshed the host-cost profile after all rejected r482/r484 code had been removed.
+It used the shipping-shaped GCC Release configuration (`-O3`, LTO), added only link-time
+`-pg` sampling with ASLR disabled, restored the exact r445 7.100 B checkpoint and retired
+500 M instructions through `--run-api`. The 5,000 timed core calls took 31.781004 seconds,
+or **15.732668 M/s**, and stopped exactly at 7.600 B with empty stderr and zero external-
+media failures. This run had no frame observer, so it measured no FPS.
+
+The flat profile's leading self samples were:
+
+| function | sampled executable time |
+|---|---:|
+| `arm_step` | 32.84% |
+| `exec_data_processing` | 10.01% |
+| `mbx_execute_textured_sprite` | 6.46% |
+| `main` | 6.07% |
+| `vfp_execute_inner` | 5.77% |
+| `mem_r32_as` | 4.68% |
+| `thumb_step` | 4.34% |
+| `arm_mmu_translate` | 4.09% |
+| `bus_write` | 3.35% |
+| `sw32` | 2.86% |
+| `s5l8900_refresh` | 2.71% |
+| `arm_cond_passed` | 2.61% |
+
+This is a sampling profile, not exact wall-time attribution. It covers the whole process,
+so `main` includes harness work outside the timed calls; Windows/system time can also be
+absent from the named executable samples. Memory/bus routines can serve devices as well
+as CPU instructions. The percentages therefore must not be inserted blindly into an
+Amdahl calculation. They do establish the architectural shape: decode/semantics plus
+translation and memory dominate, while no remaining individual helper has anything like
+the required ceiling.
+
+Applying the stable r461/r463 cadence of 1,143,489.6 retired instructions per detectable
+change still projects 34.304688 M/s for 30 changes/s. Against this current unmetered LTO
+rate, that is a **2.18x** throughput gap; the real iPhone result remains the reported
+0--4 FPS and can be worse. Eliminating `arm_cond_passed`, the refresh, or any other small
+row cannot close it. Nor can another cache in front of the same calls, as r474-r479 and
+r484 already measured.
+
+The only remaining credible no-JIT core experiment is materially larger: a static,
+multi-instruction semantic engine whose compact decoded operations execute dominant ARM
+classes without returning to `arm_step`, retain hot guest state across a sequence, and
+exit at the exact timer, interrupt, MMIO, fault, state-change and self-modifying-code
+boundaries. Static threaded handlers are signed app code; only decoded data is built at
+runtime, so that architecture does not require executable writable memory. This profile
+justifies investigating that architecture. It does not prove that it will be fast enough,
+and it does not justify shipping a partial or marginal implementation.
