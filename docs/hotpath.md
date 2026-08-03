@@ -4622,3 +4622,66 @@ the projected 34.304688 M/s needed for 30 changed frames/s, and keeping 338 line
 experimental surface for it would repeat r481's marginal-optimisation mistake. The loop,
 stats and tool reporting were therefore removed in full. No r482 performance code ships,
 and neither the verified desktop cadence nor the phone's reported 0--4 FPS changes.
+
+### r483-r484: physical predecode has high reuse and is still slower
+
+r483 measured the proposed cache before implementing it. Over the exact r445 7.100--7.110
+B restored interval, a simulated direct-mapped cache of 1,024 physical 1 KiB blocks saw
+621,224/638,696 block hits (**97.264%**) and 9,356,267/9,999,489 decoded-site hits
+(**93.567%**), with 17,472 block fills, 643,222 uop builds and zero observed raw-word
+changes on hits. That was useful capacity evidence, not a speed result and not a complete
+self-modifying-code proof. The read-only observer remains; it changes no guest state.
+
+r484 then tested exactly one implementation and one profile-directed refinement. The
+default-off experiment used 1,024 direct-mapped physical blocks, 256 lazy A32 uops per
+block, one architectural retirement per call, and the existing semantic helpers. It was
+about 2 MiB plus a 512 KiB exact physical-block presence bitmap. Thumb stayed literal.
+Every direct RAM publication path was audited: CPU and DMA stores, host load, snapshot
+restore, IMG3 load, both md bridges, boot HLE writes and the bring-up kernel callback.
+Stale-code tests covered those paths. A deterministic oracle executed 8,192 generated
+instructions twice with different state and compared status, CPU, RAM, counters and the
+final serialized machine. After the bitmap refinement, the unchanged build passed 59/59
+tests and the gated build passed 55/55.
+
+The first LTO restored `off,on,on,off` bracket exposed the original implementation's
+failure:
+
+| arm | literal control | physical predecode |
+|---:|---:|---:|
+| first | 17.432912 M/s | 16.370694 M/s |
+| reverse | 17.504613 M/s | 16.370307 M/s |
+| mean | 17.468763 M/s | 16.370501 M/s (**-6.29%**) |
+
+It had entered the invalidator for every ordinary RAM write: 38,577,243 calls and zero
+populated blocks actually invalidated. The exact presence bitmap reduced that tax to
+nine calls in the same 100 M-instruction interval. That fixed the diagnosed problem, but
+did not rescue the design:
+
+| order | runtime path | rate |
+|---:|---|---:|
+| 1 | literal control | 16.289164 M/s |
+| 2 | physical predecode | 15.863551 M/s |
+| 3 | physical predecode | 15.755698 M/s |
+| 4 | literal control | 16.763929 M/s |
+| mean | literal / predecode | 16.526547 / 15.809625 M/s (**-4.34%**) |
+
+Both enabled arms recorded the same 4,946,909/5,000,546 block hits and
+75,482,698/77,786,877 uop hits, so this was not a low-coverage result. The final synthetic
+rows were mixed in the same direction as the underlying implementation: ALU/branch rose
+from 43.28 to 48.16 M/s (**+11.3%**), while load/store fell from 27.81 to 22.22 M/s
+(**-20.1%**). Removing almost all invalidation traffic still left cache lookup, uop
+dispatch and calls into per-instruction helpers more expensive than literal decode on the
+real mixed guest.
+
+Every restored arm stopped at exactly 7.200 B with status OK and empty stderr. All work
+images matched SHA-256
+`8A59C388C481165F460984926AA5FFB1B72A0E9030216CD0038DE9B3264B79FE`; all final PPMs
+matched `2EAE64986CFA1A34E25FC0D67DACC9E220E2262E9214BE2DAD775FD4518B266A`.
+No end snapshot was written, so this is not a complete serialized-state comparison.
+
+The implementation, coherency hooks, counters and tests were removed in full. No r484
+performance code ships. High cache reuse is therefore not enough: another portable
+predecode cache in front of the same helpers is now a repeatedly measured dead end, not
+an open optimisation. A credible next experiment must remove semantic-helper and
+per-instruction dispatch work across long mixed sequences, remain interrupt/timer exact,
+and clear a substantial restored A/B gate before reaching the iOS app.
