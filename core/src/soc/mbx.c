@@ -829,15 +829,19 @@ static bool mbx_stage_2d_packet(s5l_mbx_t *m, const arm_bus_t *bus,
                                 const char **why) {
     const uint32_t ring_end = S5L_MBX_2D_RING_BASE + S5L_MBX_2D_RING_SIZE;
     if (packet_off < S5L_MBX_2D_RING_BASE ||
-        packet_off > ring_end - MBX_2D_COPY_WORDS * 4u) {
-        if (why) *why = "2D packet crosses the observed 64 KiB ring";
+        packet_off >= ring_end ||
+        packet_off > S5L_MBX_APERTURE - MBX_2D_COPY_WORDS * 4u) {
+        if (why) *why = "2D packet head is outside the observed ring";
         return false;
     }
 
     /* Only packet zero aliases the fixed doorbell. Every other counted head
      * must still be present exactly where the preceding decoded length puts
-     * it; this rejects gaps, reordering and ring wrap rather than inventing a
-     * command-list format. */
+     * it. AppleMBX+0x2188 copies the whole command contiguously before testing
+     * whether its updated cursor reached 64 KiB. r432 caught a command starting
+     * at +0xfff8: its first two words remain in the nominal ring and its body
+     * continues in the following EDRAM bytes. Only the *next* head wraps to
+     * +0x0000. */
     uint32_t expected_head = packet_off == S5L_MBX_2D_RING_BASE
         ? MBX_2D_SUBMIT : MBX_2D_COMMAND_HEADER;
     if (mbx_edram_word(m, packet_off) != expected_head) {
@@ -846,8 +850,8 @@ static bool mbx_stage_2d_packet(s5l_mbx_t *m, const arm_bus_t *bus,
     }
 
     if (mbx_edram_word(m, packet_off + 5u * 4u) == MBX_2D_BLEND_TAG) {
-        if (packet_off > ring_end - MBX_2D_BLEND_WORDS * 4u) {
-            if (why) *why = "blended 2D packet crosses the observed 64 KiB ring";
+        if (packet_off > S5L_MBX_APERTURE - MBX_2D_BLEND_WORDS * 4u) {
+            if (why) *why = "blended 2D packet crosses the MBX aperture";
             return false;
         }
         if (!mbx_stage_premultiplied_copy(m, bus, packet_off,
@@ -893,8 +897,9 @@ static bool mbx_execute_2d_submit(s5l_mbx_t *m, const arm_bus_t *bus,
     }
 
     const uint32_t ring_end = S5L_MBX_2D_RING_BASE + S5L_MBX_2D_RING_SIZE;
-    if (packet_off > ring_end - MBX_2D_COPY_WORDS * 4u) {
-        if (why) *why = "batched 2D packet starts beyond the observed ring";
+    if (packet_off < S5L_MBX_2D_RING_BASE || packet_off >= ring_end ||
+        packet_off > S5L_MBX_APERTURE - MBX_2D_COPY_WORDS * 4u) {
+        if (why) *why = "batched 2D packet head is outside the observed ring";
         return false;
     }
     uint32_t target = mbx_edram_word(m, packet_off + 4u);
@@ -930,7 +935,11 @@ static bool mbx_execute_2d_submit(s5l_mbx_t *m, const arm_bus_t *bus,
             ok = false;
             break;
         }
-        cursor += packet_words * 4u;
+        uint32_t next = cursor + packet_words * 4u;
+        /* The producer resets the software cursor to zero after a command
+         * reaches or crosses 64 KiB; it does not carry the overrun modulo the
+         * ring and it does not split the current command. */
+        cursor = next >= ring_end ? S5L_MBX_2D_RING_BASE : next;
         total += jobs[staged].total;
     }
 

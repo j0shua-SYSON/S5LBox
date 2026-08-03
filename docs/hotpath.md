@@ -3693,3 +3693,63 @@ not support a 30 FPS claim. Focused verification is 782/782 assertions; full exa
 strict verification pass 55/55 and 59/59 tests respectively, including the independent
 `-Wall -Wextra -Werror` build. Final cold boot, 30 fps, network, sound, and iOS-app
 completion remain open.
+
+### r432-r433: the 2D producer crosses 64 KiB before wrapping its cursor
+
+r432 injected a real Z2 tap at `(160,334)` to dismiss the first-run Home-screen tip.
+The device queued, length-read, data-read, and completed all 28 reports with zero
+refusals. UIKit began the dismissal, 58/58 3D renders completed (1,687,152 pixels), and
+320 2D commands completed (8,026,096 bytes) before one 44-command 2D submit rejected.
+There was no Graphics Recovery Event. The translucent terminal frame is the alert's
+partly rendered dismissal, not a completed UI or an acceptable visual checkpoint.
+
+The rejection exposed a ring-lifecycle assumption rather than a new pixel operation.
+The batch begins at ring `+0xff70`. After valid commands at `+0xff70` and `+0xffb0`,
+another begins at `+0xfff8`: its header and target are the last two words inside the
+nominal 64 KiB ring, while its remaining words continue contiguously in the following
+EDRAM bytes. The next complete command begins at `+0x0000`.
+
+Static AppleMBX code independently specifies that behaviour. The command-copy helper at
+`0xc077a188` loads the cursor at `0xc078b1bc`, copies all `length / 4` words with a
+post-incrementing store, and only after the copy adds the length, compares the updated
+cursor with `0x10000`, and resets the next cursor to zero when it is greater or equal.
+It neither splits the crossing command modulo the ring nor discards it. The decoder now
+allows a command body to continue contiguously beyond the nominal ring inside the MBX
+aperture, then resets only the next command head to ring zero. Heads must still begin
+inside the measured 64 KiB range and remain contiguous in the producer's exact order.
+
+The focused boundary test places a simple copy at `+0xfff8` and another at `+0x0000`.
+Both destinations must remain unchanged before the fixed doorbell store and both must
+change afterward; splitting, skipping, or carrying the overrun modulo the ring fails the
+test. Exact replay of r432's retained batch then completed all 44 commands, committed
+969,928 bytes, and changed status from `0` to `0x400`. Its opaque destination surface
+changed 109,919 pixels / 309,867 RGB bytes, all inside `(0,33)-(320,480)`:
+
+    work/r432-derived-complete-ring-wrap-5000m/post-wrap-5000m.bin
+      SHA-256 02D31D57622F32509937FAC99305F94FB2B3329A993981CA7610BDFEA30F8E6A
+    work/r432-derived-complete-ring-wrap-5000m/target-before.ppm
+      SHA-256 CD48E247062675FE25D50DE4F4E354E74BA068AF0D20C4D1B533CC0EC0BE998B
+    work/r432-derived-complete-ring-wrap-5000m/target-after.ppm
+      SHA-256 ECDA2D7412E0C498BAA3E51EC93AEE86E114A2B491DE95DF8A2E9C21BA0FA559
+
+r433 supplied that completion to the live guest and continued from 5.00 B to 5.20 B. It
+cleared 11 further 2D submits containing **230/230 commands** (5,105,640 bytes) and
+**49/49 3D renders** (666,660 pixels), with zero decoder rejections, zero recovery
+events, zero raw external-media guest errors, and exit zero. The alert is fully gone;
+the terminal frame is the coherent tutorial-free Home screen and is byte-identical to
+the independently reached r407 reference:
+
+    work/r433-live-after-ring-wrap-5200m/post-resume-5200m.bin
+      SHA-256 EEE6F21EF507EEF2D021D83F5DF489B49FB6D5486F0E1410E8BA539343CD74D9
+    work/r433-live-after-ring-wrap-5200m/w.img.screen.ppm
+      SHA-256 A667640D78E19A8CB1DDBB20155EB4C6697C837B29B2CC894E06749ADCE4355E
+
+This still is not a performance win. r433's mostly static post-dismiss window produced
+1,006 publications but only nine changed sampled signatures. Its 90 completed windows
+had mean `0.191`, maximum `1.990`, 81 zero windows, and none at or above 30 fps. That
+workload cannot expose a renderer's frame ceiling because SpringBoard has no reason to
+redraw a static Home screen. A sustained stationary contact will next enter icon-wiggle
+mode and provide an honest animated workload. Focused exact and strict verification are
+785/785 assertions; the full exact and strict suites pass 55/55 and 59/59 tests,
+including the independent `-Wall -Wextra -Werror` build. Final cold boot, 30 fps,
+network, sound, and iOS-app completion remain open.

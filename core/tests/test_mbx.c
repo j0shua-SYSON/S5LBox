@@ -806,6 +806,26 @@ static void test_ordered_atomic_2d_batches(void) {
           "adjacent simple-copy batch did not copy both packets");
     CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0x400u,
           "completed simple-copy batch did not raise exactly 2D_SYNC");
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x400u);
+
+    /* r432 reaches the end of AppleMBX's 64 KiB software cursor with a
+     * command at +0xfff8. The kernel helper copies that command contiguously
+     * into the EDRAM bytes beyond the nominal ring, then resets the *next*
+     * command head to +0. Exercise both sides of that boundary; modulo-splitting
+     * the first command or skipping it makes at least one pixel mismatch. */
+    test_gpu_write32(&m, simple_dst0, 0u);
+    test_gpu_write32(&m, simple_dst1, 0u);
+    write_packet(&m, RING + 0xfff8u, simple_first, 16u);
+    write_packet(&m, RING, simple_second, 16u);
+    CHECK(test_gpu_read32(&m, simple_dst0) == 0u &&
+          test_gpu_read32(&m, simple_dst1) == 0u,
+          "ring-crossing batch executed before the fixed submit store");
+    m.bus.write32(m.bus.ctx, MBX_BASE + RING, 0xf0000000u);
+    CHECK(test_gpu_read32(&m, simple_dst0) == first_source &&
+          test_gpu_read32(&m, simple_dst1) == second_source,
+          "ring-crossing batch did not preserve both command copies");
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0x400u,
+          "ring-crossing batch did not raise exactly 2D_SYNC");
 
     s5l8900_free(&m);
 }
