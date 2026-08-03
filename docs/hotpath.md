@@ -3458,3 +3458,91 @@ raster invariants, but the end-to-end verdict remains **not fixed**: recovery re
 the next unsupported command, the measured scanout is nowhere near 30 FPS, Settings has
 not opened, and no final cold boot has run. Network, sound, and iOS-app completion remain
 behind the still-open graphics gate.
+
+### r420-r423: `0x8e` is filtered, and the first uniform minification family clears
+
+There is another material correction to the pixel evidence above. The `0x8e` texture
+order is not a contiguous row copy. QuartzCore's
+`CA::RenderMBX2D::transform_filter_bits` at `0x31239dc0` returns fractional-transform
+bits 0/3. `emit_pattern` calls it at `0x3123b744`, reduces `result & 9` to one boolean in
+`Data+0x76` bit 0, and `CA::RenderMBX2D::blit_persp` passes that boolean to
+`_mbx3DQuadCopyPerspective`. The MBX producer turns it into the `0x8e...` source-control
+layout. This is direct shipped-code evidence that the earlier fractional icons and labels
+were filtered subpixel draws. Their command completion and control-flow progress remain
+real, but their direct-copy pixel hashes are approximations. In particular, the r416 and
+r418 claims about selecting one exact contiguous source crop are superseded.
+
+The co-shipped software reference is
+`CA::OGL::sw_sample_linear_BGRA8` at `0x3122bad8..0x3122bce0`. It converts interpolated
+coordinates to 16.16, subtracts half a texel, clamps a 2x2 tap set, takes eight-bit
+fractions, then interpolates top-left/bottom-left and top-right/bottom-right vertically
+before the final horizontal interpolation. Its packed `0x00ff00ff` unsigned
+multiply/add sequence is now transcribed in the MBX path. The decoder stages the complete
+sample window and destination before validating premultiplication and committing any
+write. Missing late PTEs and a non-premultiplied final sampled tap therefore reject
+atomically.
+
+This is stronger than the old row copy, but it is not honestly hardware-bit-exact. No
+PowerVR MBX hardware oracle is available for the interpolator's undocumented sub-LSB
+precision. The implementation uses binary32 producer coordinates and Apple's own
+software filter kernel. That is the best local reference available; the limitation is
+explicit rather than hidden behind an exact-looking hash.
+
+The first r420 run, from corrected r414 at 6.42 B to 6.44 B, cleared 46/47 3D submissions
+and 6/6 2D commands. Its control-flow result remains useful, but its target pixels used
+the now-disproved row-copy approximation and are not a resume base for acceptance. The
+new exact packet at that frontier samples a coherent opaque 320x460 pinstripe/home
+surface from GPU VA `0x00bad080`, stride `0x500`, into a
+`(145.5945,220.1924)-(174.4055,261.6083)` quad with uniform alpha `0x17`. Its scale is
+uniform to about `4.2e-8` absolute between axes. Direct filtered replay covers 28x42 =
+1,176 pixels, changes all 1,176 on the retained target, touches zero outside
+`(146,220)-(174,262)`, and raises status `0 -> 0x4c`.
+
+r421 therefore regenerated the chain from the corrected transparent r414 checkpoint,
+not from r420's approximate output. It reached 6.44 B with 51/52 3D completions (107,213
+pixels) and 7/7 2D completions (782,112 bytes), then stopped at another uniformly scaled
+packet. This one is a coherent 320x20 transparent status strip containing `4:00 PM`.
+It uses the already measured `0xcd206c40` / `0xae504ea0` modulated source-over state, so
+scale is a transform/filter semantic rather than a third-state-only property. Exact
+replay covers 28 pixels; only three destination pixels change because almost all sampled
+source pixels are transparent, and none changes outside `(146,219)-(174,220)`:
+
+    work/r421-filtered-chain-6440m/post-resume-6440m.bin
+      SHA-256 C1BFE9409D1FE65FDE79D3F7B3C98879A75C86AB2EDDAD586C4EA2371DDE3DCF
+    work/r421-derived-complete-status-strip-6440m/post-status-strip-6440m.bin
+      SHA-256 D6E5B5BB0486046EEB550D95D023888298377493988CAE96FBB988053A1C6DC6
+
+r422 exposed one more incorrect assumption in dimension recovery. Its 76x16 source has
+encoded texel maxima `(75.5,16.0)`: one axis ends on a texel centre and the other on the
+texture edge. Unconditionally adding 0.5 was wrong. The semantic rule is now to retain
+the exact encoded texel extent and recover the addressable source rectangle with
+`ceil(extent)` on each axis. Header powers, split pitch, UV record order, source bounds,
+geometry, scale, boundary, clip, and tiles must still agree independently. This is not a
+literal exception for 76x16. Exact replay covers seven pixels, changes five, touches zero
+outside `(146,219)-(153,220)`, and yields the verified derived checkpoint:
+
+    work/r422-derived-complete-mixed-edge-6460m/post-mixed-edge-6460m.bin
+      SHA-256 39FAA477B3353E689D8329489ABA02D09194ACBE8CCECB87DCD686DEEF973C5D
+
+The family then cleared rather than producing another literal chase. r423 resumed that
+checkpoint from 6.46 B to 6.48 B and completed **13/13 3D submissions** (317,734 pixels)
+plus **15/15 2D commands** (1,875,472 bytes), with zero decoder rejections and zero
+external-media failures. The live scanout rose from 238,243 to 460,266 nonzero RGB bytes
+and is visually coherent: `Searching...`, `4:00 PM`, a battery icon, and the native
+pinstripe backing surface. It is not random/cursed memory, but it is also not proof that
+Settings finished opening; app content is still absent. One Graphics Recovery Event
+still occurs, so graphics is not fixed.
+
+    work/r423-filtered-chain-6480m/post-resume-6480m.bin
+      SHA-256 3E32204D7307BDE2BDEEEFDA9904C8FE8946DA488818C0E2CB5C70F5C1E9C36C
+    work/r423-filtered-chain-6480m/w.img.screen.ppm
+      SHA-256 B140DB30F707921DE0E884500A9368D3BCDD0D080D68546414C0DB228DB1A558
+
+The performance verdict remains bad. r423's desktop app-equivalent meter saw four changed
+sampled signatures in 100 publications: nine completed windows had mean `0.862` and
+maximum `3.995` changed-publication fps, six windows were zero, and none reached 30 FPS.
+This is neither an iOS-device FPS measurement nor a compositor count, but it is enough to
+reject any 30 FPS success claim. Strict focused verification is now 699/699 assertions;
+the warnings-as-errors build and all 59/59 CTest targets pass. Direct-state scaling,
+magnification, nonuniform scale, perspective, coloured vertices, final cold boot, stable
+app presentation, network, sound, and iOS-app completion all remain open.

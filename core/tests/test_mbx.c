@@ -282,6 +282,74 @@ static uint32_t test_modulate_vertex_alpha(uint32_t src, uint32_t alpha) {
     return out;
 }
 
+static float test_float_value(uint32_t word) {
+    float value = 0.0f;
+    memcpy(&value, &word, sizeof value);
+    return value;
+}
+
+static uint32_t test_sprite_source_pixel(uint32_t x, uint32_t y) {
+    uint32_t alpha = 0x40u + ((x * 11u + y * 7u) & 0xbfu);
+    return (alpha << 24) | ((alpha * 3u / 4u) << 16) |
+           ((alpha / 2u) << 8) | (alpha / 4u);
+}
+
+struct test_bilinear_axis {
+    uint32_t first, second, weight;
+};
+
+static bool test_bilinear_axis(float origin, float span, float texel_extent,
+                               uint32_t pixel, uint32_t dimension,
+                               struct test_bilinear_axis *axis) {
+    if (!axis || !dimension || span <= 0.0f) return false;
+    float coordinate = ((float)pixel + 0.5f - origin) *
+                       (texel_extent / span);
+    float fixed_float = coordinate * 65536.0f;
+    if (fixed_float < 0.0f || fixed_float > (float)INT32_MAX) return false;
+    int64_t raw = (int64_t)(int32_t)fixed_float - INT64_C(32768);
+    int64_t neighbour = raw + INT64_C(65536);
+    uint32_t maximum = (dimension << 16) - 1u;
+    uint32_t first_fixed = raw < 0 ? 0u :
+        (uint64_t)raw > maximum ? maximum : (uint32_t)raw;
+    uint32_t second_fixed = neighbour < 0 ? 0u :
+        (uint64_t)neighbour > maximum ? maximum : (uint32_t)neighbour;
+    axis->first = first_fixed >> 16;
+    axis->second = second_fixed >> 16;
+    axis->weight = (first_fixed & 0xffffu) >> 8;
+    return true;
+}
+
+/* Independent scalar reference for QuartzCore's packed interpolation.  Signed
+ * floor division is written out so this test does not merely copy the packed
+ * production implementation it is meant to check. */
+static uint32_t test_linear_bgra8(uint32_t first, uint32_t second,
+                                  uint32_t weight) {
+    uint32_t out = 0u;
+    for (unsigned shift = 0; shift < 32u; shift += 8u) {
+        int32_t a = (int32_t)((first >> shift) & 0xffu);
+        int32_t b = (int32_t)((second >> shift) & 0xffu);
+        int32_t product = (int32_t)weight * (b - a);
+        int32_t quotient = product >= 0
+            ? product / 256 : -((-product + 255) / 256);
+        out |= (uint32_t)((a + quotient) & 0xff) << shift;
+    }
+    return out;
+}
+
+static uint32_t test_bilinear_sprite_pixel(
+        const struct test_bilinear_axis *x,
+        const struct test_bilinear_axis *y) {
+    uint32_t top_left = test_sprite_source_pixel(x->first, y->first);
+    uint32_t bottom_left = test_sprite_source_pixel(x->first, y->second);
+    uint32_t top_right = test_sprite_source_pixel(x->second, y->first);
+    uint32_t bottom_right = test_sprite_source_pixel(x->second, y->second);
+    uint32_t vertical_left =
+        test_linear_bgra8(top_left, bottom_left, y->weight);
+    uint32_t vertical_right =
+        test_linear_bgra8(top_right, bottom_right, y->weight);
+    return test_linear_bgra8(vertical_left, vertical_right, x->weight);
+}
+
 static void test_map_gpu_page(s5l8900_t *m, uint32_t table,
                               uint32_t gpu, uint32_t pa) {
     m->bus.write32(m->bus.ctx,
@@ -1503,11 +1571,13 @@ struct mbx_test_status_form {
     uint32_t xclip, yclip;
     uint32_t target;
     bool semantic_sprite;
+    bool scaled_sprite;
     bool variable_vertex_alpha;
     bool boundary_override;
     uint32_t tile_x0, tile_x1, tile_y0, tile_y1;
     uint32_t left, top, width, height;
     uint32_t source, source_x0, source_row0, source_stride, source_control;
+    uint32_t source_width, source_height;
     uint32_t boundary[8];
     uint32_t quad[44];
 };
@@ -1527,6 +1597,16 @@ static void test_captured_status_form(const struct mbx_test_status_form *form) {
     const uint32_t tile_count =
         (form->tile_x1 - form->tile_x0 + 1u) *
         (form->tile_y1 - form->tile_y0 + 1u);
+    const bool filtered_sprite = form->semantic_sprite &&
+        (form->source_control & 0x80000000u) != 0u;
+    const uint32_t mapped_source_x0 =
+        filtered_sprite ? 0u : form->source_x0;
+    const uint32_t mapped_source_y0 =
+        filtered_sprite ? 0u : form->source_row0;
+    const uint32_t mapped_source_width =
+        filtered_sprite ? form->source_width : form->width;
+    const uint32_t mapped_source_height =
+        filtered_sprite ? form->source_height : form->height;
 
     s5l8900_t m;
     CHECK(s5l8900_init(&m, RAM_BASE, RAM_SIZE), "%s machine init failed",
@@ -1543,11 +1623,17 @@ static void test_captured_status_form(const struct mbx_test_status_form *form) {
         test_map_gpu_page(&m, table0, page,
                           region_pa + (page - region_page0));
     test_map_gpu_page(&m, table0, object, object_pa);
+    CHECK(mapped_source_width != 0u && mapped_source_height != 0u,
+          "%s has no source dimensions", form->name);
+    if (!mapped_source_width || !mapped_source_height) {
+        s5l8900_free(&m);
+        return;
+    }
     uint32_t source_page0 = form->source & ~0xfffu;
     uint32_t source_last = form->source +
-                           (form->source_row0 + form->height - 1u) *
+                           (mapped_source_y0 + mapped_source_height - 1u) *
                                form->source_stride +
-                           (form->source_x0 + form->width) * 4u - 1u;
+                           (mapped_source_x0 + mapped_source_width) * 4u - 1u;
     for (uint32_t page = source_page0; page <= (source_last & ~0xfffu);
          page += 0x1000u) {
         uint32_t table = (page >> 22) == 2u ? table2 : table3;
@@ -1656,16 +1742,58 @@ static void test_captured_status_form(const struct mbx_test_status_form *form) {
         s5l8900_free(&m);
         return;
     }
+    float filter_x0 = 0.0f, filter_y0 = 0.0f;
+    float filter_dx = 0.0f, filter_dy = 0.0f;
+    float filter_u_extent = 0.0f, filter_v_extent = 0.0f;
+    if (filtered_sprite) {
+        filter_x0 = test_float_value(form->quad[8]);
+        filter_y0 = test_float_value(form->quad[9]);
+        filter_dx = test_float_value(form->quad[10]) - filter_x0;
+        filter_dy = test_float_value(form->quad[13]) - filter_y0;
+        uint32_t texture_width = 8u << ((form->quad[1] >> 24) & 7u);
+        uint32_t texture_height = 8u << ((form->quad[1] >> 20) & 7u);
+        filter_u_extent = test_float_value(form->quad[30]) * texture_width;
+        filter_v_extent = test_float_value(form->quad[36]) * texture_height;
+        uint32_t inferred_width = (uint32_t)filter_u_extent;
+        uint32_t inferred_height = (uint32_t)filter_v_extent;
+        inferred_width += (float)inferred_width < filter_u_extent;
+        inferred_height += (float)inferred_height < filter_v_extent;
+        CHECK(inferred_width == form->source_width &&
+              inferred_height == form->source_height,
+              "%s explicit source dimensions disagree with its UV extents",
+              form->name);
+        CHECK(form->source_stride >= form->source_width * 4u,
+              "%s source stride is smaller than its filtered width", form->name);
+        for (uint32_t y = 0; y < form->source_height; y++) {
+            for (uint32_t x = 0; x < form->source_width; x++) {
+                test_gpu_write32(&m,
+                    form->source + y * form->source_stride + x * 4u,
+                    test_sprite_source_pixel(x, y));
+            }
+        }
+    }
     for (uint32_t y = 0; y < form->height; y++) {
         for (uint32_t x = 0; x < form->width; x++) {
-            uint32_t alpha = 0x40u + ((x * 11u + y * 7u) & 0xbfu);
-            uint32_t src = (alpha << 24) |
-                ((alpha * 3u / 4u) << 16) |
-                ((alpha / 2u) << 8) | (alpha / 4u);
+            uint32_t src;
+            if (filtered_sprite) {
+                struct test_bilinear_axis x_axis, y_axis;
+                bool axes_ok = test_bilinear_axis(
+                    filter_x0, filter_dx, filter_u_extent,
+                    form->left + x, form->source_width, &x_axis) &&
+                    test_bilinear_axis(
+                        filter_y0, filter_dy, filter_v_extent,
+                        form->top + y, form->source_height, &y_axis);
+                if (!axes_ok)
+                    CHECK(false, "%s expected filter axis is invalid", form->name);
+                src = axes_ok
+                    ? test_bilinear_sprite_pixel(&x_axis, &y_axis) : 0u;
+            } else {
+                src = test_sprite_source_pixel(x, y);
+                test_gpu_write32(&m,
+                    form->source + (form->source_row0 + y) *
+                        form->source_stride + (form->source_x0 + x) * 4u, src);
+            }
             uint32_t dst = 0xff102030u + y * 0x00010101u + x;
-            test_gpu_write32(&m,
-                form->source + (form->source_row0 + y) *
-                    form->source_stride + (form->source_x0 + x) * 4u, src);
             test_gpu_write32(&m,
                 target + (form->top + y) * TARGET_STRIDE +
                     (form->left + x) * 4u, dst);
@@ -1800,9 +1928,27 @@ static void test_captured_status_form(const struct mbx_test_status_form *form) {
               "%s inconsistent tile region raised completion", form->name);
         test_gpu_write32(&m, region, first_region_word);
 
-        uint32_t last_source = form->source +
-            (form->source_row0 + form->height - 1u) * form->source_stride +
-            (form->source_x0 + form->width - 1u) * 4u;
+        uint32_t sampled_x = form->source_x0 + form->width - 1u;
+        uint32_t sampled_y = form->source_row0 + form->height - 1u;
+        if (filtered_sprite) {
+            struct test_bilinear_axis x_axis, y_axis;
+            bool axes_ok = test_bilinear_axis(
+                filter_x0, filter_dx, filter_u_extent,
+                form->left + form->width - 1u,
+                form->source_width, &x_axis) &&
+                test_bilinear_axis(
+                    filter_y0, filter_dy, filter_v_extent,
+                    form->top + form->height - 1u,
+                    form->source_height, &y_axis);
+            if (!axes_ok)
+                CHECK(false, "%s final sampled tap is invalid", form->name);
+            if (axes_ok) {
+                sampled_x = x_axis.second;
+                sampled_y = y_axis.second;
+            }
+        }
+        uint32_t last_source = form->source + sampled_y * form->source_stride +
+                               sampled_x * 4u;
         uint32_t last_destination = target +
             (form->top + form->height - 1u) * TARGET_STRIDE +
             (form->left + form->width - 1u) * 4u;
@@ -1818,6 +1964,52 @@ static void test_captured_status_form(const struct mbx_test_status_form *form) {
         CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
               "%s non-premultiplied final texel raised completion", form->name);
         test_gpu_write32(&m, last_source, saved_source);
+
+        if (form->scaled_sprite) {
+            /* Keep geometry and normalized records mutually consistent while
+             * making only X scale differ.  A literal-packet whitelist or an
+             * unchecked generic scaler would both miss this rejection. */
+            uint32_t changed_x1 = test_float_word(
+                test_float_value(form->quad[10]) + 0.25f);
+            uint32_t changed_normalized = test_float_word(
+                test_float_value(changed_x1) / 1024.0f);
+            test_gpu_write32(&m, first, 0x89abcdefu);
+            test_gpu_write32(&m, object + 0x1f0u + 10u * 4u, changed_x1);
+            test_gpu_write32(&m, object + 0x1f0u + 14u * 4u, changed_x1);
+            test_gpu_write32(&m, object + 0x1f0u + 32u * 4u,
+                             changed_normalized);
+            test_gpu_write32(&m, object + 0x1f0u + 42u * 4u,
+                             changed_normalized);
+            m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
+            CHECK(test_gpu_read32(&m, first) == 0x89abcdefu,
+                  "%s nonuniform filtered scale changed the destination",
+                  form->name);
+            CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
+                  "%s nonuniform filtered scale raised completion", form->name);
+            test_gpu_write32(&m, object + 0x1f0u + 10u * 4u, form->quad[10]);
+            test_gpu_write32(&m, object + 0x1f0u + 14u * 4u, form->quad[14]);
+            test_gpu_write32(&m, object + 0x1f0u + 32u * 4u, form->quad[32]);
+            test_gpu_write32(&m, object + 0x1f0u + 42u * 4u, form->quad[42]);
+
+            uint32_t source_table = m.bus.read32(m.bus.ctx,
+                MBX_BASE + REG_GART0 + (last_source >> 22) * 4u);
+            uint32_t source_pte_address = source_table +
+                (((last_source >> 12) & 0x3ffu) * 4u);
+            uint32_t source_pte =
+                m.bus.read32(m.bus.ctx, source_pte_address);
+            test_gpu_write32(&m, first, 0x89abcdefu);
+            test_gpu_write32(&m, last_destination, 0x76543210u);
+            m.bus.write32(m.bus.ctx, source_pte_address, 0u);
+            m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
+            CHECK(test_gpu_read32(&m, first) == 0x89abcdefu &&
+                  test_gpu_read32(&m, last_destination) == 0x76543210u,
+                  "%s late missing filtered source PTE partially committed",
+                  form->name);
+            CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
+                  "%s late missing filtered source PTE raised completion",
+                  form->name);
+            m.bus.write32(m.bus.ctx, source_pte_address, source_pte);
+        }
     }
 
     test_gpu_write32(&m, first, 0x89abcdefu);
@@ -2116,6 +2308,7 @@ static void test_later_tiled_status_sprites(void) {
             .left = 3u, .top = 94u, .width = 86u, .height = 13u,
             .source = 0x00931080u,
             .source_stride = 0x160u, .source_control = 0x8e140000u,
+            .source_width = 86u, .source_height = 13u,
             .boundary = {
                 0x40000000u, 0x42d60000u, 0x40000000u, 0x42ba0000u,
                 0x42b20000u, 0x42d60000u, 0x42b20000u, 0x42ba0000u,
@@ -2145,6 +2338,7 @@ static void test_later_tiled_status_sprites(void) {
             .left = 16u, .top = 32u, .width = 59u, .height = 62u,
             .source = 0x00933000u,
             .source_stride = 0x100u, .source_control = 0x8e100000u,
+            .source_width = 59u, .source_height = 62u,
             .boundary = {
                 0x41700000u, 0x42bc0000u, 0x41700000u, 0x41f80000u,
                 0x42960000u, 0x42bc0000u, 0x42960000u, 0x41f80000u,
@@ -2174,6 +2368,7 @@ static void test_later_tiled_status_sprites(void) {
             .left = 79u, .top = 94u, .width = 86u, .height = 13u,
             .source = 0x00937080u,
             .source_stride = 0x160u, .source_control = 0x8e140000u,
+            .source_width = 86u, .source_height = 13u,
             .boundary = {
                 0x429c0000u, 0x42d60000u, 0x429c0000u, 0x42ba0000u,
                 0x43250000u, 0x42d60000u, 0x43250000u, 0x42ba0000u,
@@ -2203,6 +2398,7 @@ static void test_later_tiled_status_sprites(void) {
             .left = 92u, .top = 32u, .width = 59u, .height = 62u,
             .source = 0x00939000u,
             .source_stride = 0x100u, .source_control = 0x8e100000u,
+            .source_width = 59u, .source_height = 62u,
             .boundary = {
                 0x42b60000u, 0x42bc0000u, 0x42b60000u, 0x41f80000u,
                 0x43170000u, 0x42bc0000u, 0x43170000u, 0x41f80000u,
@@ -2232,6 +2428,7 @@ static void test_later_tiled_status_sprites(void) {
             .left = 79u, .top = 182u, .width = 86u, .height = 13u,
             .source = 0x00954080u,
             .source_stride = 0x160u, .source_control = 0x8e140000u,
+            .source_width = 86u, .source_height = 13u,
             .boundary = {
                 0x429c0000u, 0x43430000u, 0x429c0000u, 0x43350000u,
                 0x43250000u, 0x43430000u, 0x43250000u, 0x43350000u,
@@ -2265,6 +2462,7 @@ static void test_later_tiled_status_sprites(void) {
             .left = 200u, .top = 120u, .width = 24u, .height = 8u,
             .source = 0x0093b000u,
             .source_stride = 0x60u, .source_control = 0x8e040000u,
+            .source_width = 24u, .source_height = 8u,
             .boundary = {
                 0x43480000u, 0x43000000u, 0x43480000u, 0x42f00000u,
                 0x43600000u, 0x43000000u, 0x43600000u, 0x42f00000u,
@@ -2323,6 +2521,7 @@ static void test_later_tiled_status_sprites(void) {
             .left = 0u, .top = 73u, .width = 70u, .height = 13u,
             .source = 0x00931080u, .source_x0 = 16u,
             .source_stride = 0x160u, .source_control = 0x8e140000u,
+            .source_width = 86u, .source_height = 13u,
             .boundary = {
                 0x00000000u, 0x42ae0000u, 0x00000000u, 0x42920000u,
                 0x428c0000u, 0x42ae0000u, 0x428c0000u, 0x42920000u,
@@ -2352,6 +2551,7 @@ static void test_later_tiled_status_sprites(void) {
             .left = 58u, .top = 163u, .width = 86u, .height = 13u,
             .source = 0x00954080u,
             .source_stride = 0x160u, .source_control = 0x8e140000u,
+            .source_width = 86u, .source_height = 13u,
             .boundary = {
                 0x42680000u, 0x43300000u, 0x42680000u, 0x43220000u,
                 0x43110000u, 0x43300000u, 0x43110000u, 0x43220000u,
@@ -2381,6 +2581,7 @@ static void test_later_tiled_status_sprites(void) {
             .left = 0u, .top = 380u, .width = 71u, .height = 9u,
             .source = 0x0097e080u, .source_x0 = 15u,
             .source_stride = 0x160u, .source_control = 0x8e140000u,
+            .source_width = 86u, .source_height = 13u,
             .boundary = {
                 0x00000000u, 0x43c28000u, 0x00000000u, 0x43be0000u,
                 0x428e0000u, 0x43c28000u, 0x428e0000u, 0x43be0000u,
@@ -2397,6 +2598,99 @@ static void test_later_tiled_status_sprites(void) {
                 0x3d8de3a2u, 0x3ebe09cau, 0xbd000000u, 0u,
                 0x3f480000u, 0xbc70e2f4u, 0x3ec489cau, 0xbd000000u,
                 0x3f2b0000u, 0x3f480000u, 0x3d8de3a2u, 0x3ec489cau,
+            },
+        },
+        {
+            .name = "r420 scaled filtered background on middle surface",
+            .xclip = 0x00b00090u, .yclip = 0x011000d0u,
+            .target = 0x00998000u,
+            .semantic_sprite = true,
+            .scaled_sprite = true,
+            .boundary_override = true,
+            .tile_x0 = 0x12u, .tile_x1 = 0x15u,
+            .tile_y0 = 0x0du, .tile_y1 = 0x10u,
+            .left = 146u, .top = 220u, .width = 28u, .height = 42u,
+            .source = 0x00bad080u,
+            .source_stride = 0x500u, .source_control = 0x8e500000u,
+            .source_width = 320u, .source_height = 460u,
+            .boundary = {
+                0x43110000u, 0x43830000u, 0x43110000u, 0x435c0000u,
+                0x432f0000u, 0x43830000u, 0x432f0000u, 0x435c0000u,
+            },
+            .quad = {
+                0xe0000000u, 0xa6618000u, 0u, 0xd6887610u,
+                0xa7718000u, 0u, 0xa3104620u, 0x22250e80u,
+                0x4311982eu, 0x435c313fu, 0x432e67d2u, 0x435c313fu,
+                0x4311982eu, 0x4382cddeu, 0x432e67d2u, 0x4382cddeu,
+                0u, 0u, 0u, 0u,
+                0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+                0x17000000u, 0u, 0u, 0x3e11982eu,
+                0x3e5c313fu, 0x17000000u, 0x3f1fc000u, 0u,
+                0x3e2e67d2u, 0x3e5c313fu, 0x17000000u, 0u,
+                0x3f65c000u, 0x3e11982eu, 0x3e82cddeu, 0x17000000u,
+                0x3f1fc000u, 0x3f65c000u, 0x3e2e67d2u, 0x3e82cddeu,
+            },
+        },
+        {
+            .name = "r421 scaled filtered status strip on middle surface",
+            .xclip = 0x00b00090u, .yclip = 0x00e000d0u,
+            .target = 0x00998000u,
+            .semantic_sprite = true,
+            .scaled_sprite = true,
+            .boundary_override = true,
+            .tile_x0 = 0x12u, .tile_x1 = 0x15u,
+            .tile_y0 = 0x0du, .tile_y1 = 0x0du,
+            .left = 146u, .top = 219u, .width = 28u, .height = 1u,
+            .source = 0x00c44080u,
+            .source_stride = 0x500u, .source_control = 0x8e500000u,
+            .source_width = 320u, .source_height = 20u,
+            .boundary = {
+                0x43110000u, 0x435d0000u, 0x43110000u, 0x435a0000u,
+                0x432f0000u, 0x435d0000u, 0x432f0000u, 0x435a0000u,
+            },
+            .quad = {
+                0xe0000000u, 0xa6218000u, 0u, 0xcd206c40u,
+                0xa7718000u, 0u, 0xae504ea0u, 0x22250e80u,
+                0x4311982eu, 0x435a99e7u, 0x432e67d2u, 0x435a99e7u,
+                0x4311982eu, 0x435c66e1u, 0x432e67d2u, 0x435c66e1u,
+                0u, 0u, 0u, 0u,
+                0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+                0x17000000u, 0u, 0u, 0x3e11982eu,
+                0x3e5a99e7u, 0x17000000u, 0x3f1fc000u, 0u,
+                0x3e2e67d2u, 0x3e5a99e7u, 0x17000000u, 0u,
+                0x3f1c0000u, 0x3e11982eu, 0x3e5c66e1u, 0x17000000u,
+                0x3f1fc000u, 0x3f1c0000u, 0x3e2e67d2u, 0x3e5c66e1u,
+            },
+        },
+        {
+            .name = "r422 mixed-edge filtered status sprite on middle surface",
+            .xclip = 0x00a00090u, .yclip = 0x00e000d0u,
+            .target = 0x00998000u,
+            .semantic_sprite = true,
+            .scaled_sprite = true,
+            .boundary_override = true,
+            .tile_x0 = 0x12u, .tile_x1 = 0x13u,
+            .tile_y0 = 0x0du, .tile_y1 = 0x0du,
+            .left = 146u, .top = 219u, .width = 7u, .height = 1u,
+            .source = 0x00981080u,
+            .source_stride = 0x140u, .source_control = 0x8e140000u,
+            .source_width = 76u, .source_height = 16u,
+            .boundary = {
+                0x43110000u, 0x435d0000u, 0x43110000u, 0x435a0000u,
+                0x43190000u, 0x435d0000u, 0x43190000u, 0x435a0000u,
+            },
+            .quad = {
+                0xe0000000u, 0xa4118000u, 0u, 0xcd206c40u,
+                0xa7718000u, 0u, 0xae504ea0u, 0x22250e80u,
+                0x4311f460u, 0x435ab0f4u, 0x4318cc17u, 0x435ab0f4u,
+                0x4311f460u, 0x435c21bcu, 0x4318cc17u, 0x435c21bcu,
+                0u, 0u, 0u, 0u,
+                0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+                0x17000000u, 0u, 0u, 0x3e11f460u,
+                0x3e5ab0f4u, 0x17000000u, 0x3f170000u, 0u,
+                0x3e18cc17u, 0x3e5ab0f4u, 0x17000000u, 0u,
+                0x3f800000u, 0x3e11f460u, 0x3e5c21bcu, 0x17000000u,
+                0x3f170000u, 0x3f800000u, 0x3e18cc17u, 0x3e5c21bcu,
             },
         },
         {

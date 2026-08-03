@@ -40,8 +40,9 @@
  * WHAT THIS STILL IS NOT. It is not a general PowerVR renderer. The later
  * command consumer implements one packet family whose producer, bit fields,
  * MMU tables and pixels have all been recovered from the shipped binaries and
- * exact cold snapshots. One premultiplied source-over blend is decoded;
- * unknown formats, scaling, blend equations and geometry are rejected without
+ * exact cold snapshots. Premultiplied source-over, filtered unity sprites and
+ * one uniformly minified form are decoded; unknown formats, perspective,
+ * nonuniform scaling, blend equations and geometry are rejected without
  * completion. Everything else remains a fresh question to
  * answer the same way -- observe it, read its producer, then model it. A
  * driver that needs an unknown operation must stop loudly instead of quietly
@@ -1046,6 +1047,62 @@ static uint32_t mbx_modulate_vertex_alpha(uint32_t src, uint32_t alpha) {
     return out;
 }
 
+/* QuartzCore's shipped sw_sample_linear_BGRA8 implementation at
+ * 0x3122bc08..0x3122bcb4 interpolates BGRA8 in two packed byte lanes.  Keep
+ * the unsigned wrapping multiply/adds: for a descending channel they are what
+ * reproduces the native floor-toward-minus-infinity result after the mask. */
+static uint32_t mbx_linear_bgra8(uint32_t first, uint32_t second,
+                                 uint32_t weight) {
+    const uint32_t lanes = UINT32_C(0x00ff00ff);
+    uint32_t first_even = first & lanes;
+    uint32_t second_even = second & lanes;
+    uint32_t first_odd = (first >> 8) & lanes;
+    uint32_t second_odd = (second >> 8) & lanes;
+    uint32_t even = first_even +
+                    ((weight * (second_even - first_even)) >> 8);
+    uint32_t odd = first_odd +
+                   ((weight * (second_odd - first_odd)) >> 8);
+
+    return (even & lanes) | ((odd & lanes) << 8);
+}
+
+struct mbx_bilinear_axis {
+    uint32_t first;
+    uint32_t second;
+    uint32_t weight;
+};
+
+/* Convert one covered destination pixel centre into the same clamped 16.16
+ * tap pair consumed by QuartzCore's software sampler.  The MBX interpolator's
+ * undocumented sub-LSB precision cannot be hardware-oracled here; binary32
+ * interpolation is the producer/software-renderer reference and is kept
+ * explicit instead of pretending the old contiguous-row shortcut was exact. */
+static bool mbx_bilinear_axis(float origin, float span, float texel_extent,
+                              uint32_t pixel, uint32_t dimension,
+                              struct mbx_bilinear_axis *axis) {
+    if (!axis || !dimension || dimension > 512u || span <= 0.0f ||
+        texel_extent < 0.0f)
+        return false;
+
+    float step = texel_extent / span;
+    float coordinate = ((float)pixel + 0.5f - origin) * step;
+    float fixed_float = coordinate * 65536.0f;
+    if (fixed_float < 0.0f || fixed_float > (float)INT32_MAX) return false;
+
+    int64_t raw = (int64_t)(int32_t)fixed_float - INT64_C(32768);
+    int64_t neighbour = raw + INT64_C(65536);
+    uint32_t maximum = (dimension << 16) - 1u;
+    uint32_t first_fixed = raw < 0 ? 0u :
+        (uint64_t)raw > maximum ? maximum : (uint32_t)raw;
+    uint32_t second_fixed = neighbour < 0 ? 0u :
+        (uint64_t)neighbour > maximum ? maximum : (uint32_t)neighbour;
+
+    axis->first = first_fixed >> 16;
+    axis->second = second_fixed >> 16;
+    axis->weight = (first_fixed & UINT32_C(0xffff)) >> 8;
+    return true;
+}
+
 struct mbx_3d_word {
     uint16_t off;
     uint32_t value;
@@ -1899,11 +1956,11 @@ static bool mbx_execute_status_sprite(s5l_mbx_t *m,
                        (form->source_row0 + row) * form->source_stride;
         uint32_t dst = target + (form->top + row) * MBX_3D_TARGET_STRIDE +
                        form->left * 4u;
-        uint32_t background = target +
-                              (form->top + row) * MBX_3D_TARGET_STRIDE +
-                              form->left * 4u;
+        uint32_t background_address = target +
+                                      (form->top + row) * MBX_3D_TARGET_STRIDE +
+                                      form->left * 4u;
         if (!mbx_gart_validate(m, bus, src, row_bytes, why) ||
-            !mbx_gart_validate(m, bus, background, row_bytes, why) ||
+            !mbx_gart_validate(m, bus, background_address, row_bytes, why) ||
             !mbx_gart_validate(m, bus, dst, row_bytes, why))
             return false;
     }
@@ -1920,12 +1977,12 @@ static bool mbx_execute_status_sprite(s5l_mbx_t *m,
     for (uint32_t row = 0; row < form->height && ok; row++) {
         uint32_t src = source +
                        (form->source_row0 + row) * form->source_stride;
-        uint32_t background = target +
-                              (form->top + row) * MBX_3D_TARGET_STRIDE +
-                              form->left * 4u;
+        uint32_t background_address = target +
+                                      (form->top + row) * MBX_3D_TARGET_STRIDE +
+                                      form->left * 4u;
         ok = mbx_gart_read(m, bus, src, source_pixels + row * row_bytes,
                            row_bytes, why) &&
-             mbx_gart_read(m, bus, background, pixels + row * row_bytes,
+             mbx_gart_read(m, bus, background_address, pixels + row * row_bytes,
                            row_bytes, why);
     }
     for (uint32_t i = 0; i < total && ok; i += 4u) {
@@ -1960,7 +2017,7 @@ static bool mbx_execute_status_sprite(s5l_mbx_t *m,
 
 /* r409-r412 initially supplied four literal app-icon/label forms. Reading the
  * shipped _mbx3DCtxQuadCopyPerspective producer explains the shared packet
- * instead: it is a 1:1, axis-aligned BGRA8 sprite whose independently encoded
+ * instead: it is an axis-aligned BGRA8 sprite whose independently encoded
  * destination, UV, texture-power, pitch, clip and tile rectangles must agree.
  *
  * The texture header stores log2(power-of-two dimension)-3 in nibbles 6 and 5.
@@ -1970,16 +2027,20 @@ static bool mbx_execute_status_sprite(s5l_mbx_t *m,
  * use an eight-pixel padded pitch, and that reconstruction yields every
  * captured 0x40..0x500 stride exactly. r415 adds the producer's second vertex
  * order: control 0x0e uses full width/power and height/power UV extents, while
- * control 0x8e uses the previously recovered half-texel extents. Both orders
- * redundantly encode the same axis-aligned destination and are checked in
- * full. The second captured sampler carries one uniform alpha byte, which uses
- * the already recovered channel-modulation equation. The background object,
- * blend object and FBSTART must all resolve to the same mapped target, but its
- * GPU address is not a rendering semantic and is therefore not whitelisted.
- * This is not a perspective/scaling rasterizer; coloured vertices remain
- * rejected. r416's partly off-screen label is clipped only when normalized
- * coordinates, a strict one-to-one edge crop, integer boundary, clip and tiles
- * all independently agree. */
+ * control 0x8e uses the previously recovered half-texel extents. QuartzCore's
+ * transform_filter_bits path proves that the latter is its filtered form, and
+ * the co-shipped software sampler supplies the clamped 8-bit bilinear kernel.
+ * r420 then contributes one exact uniformly minified 320x460 form and a third
+ * measured state pair. Both vertex orders redundantly encode the same
+ * axis-aligned destination and are checked in full. The captured samplers carry
+ * one uniform alpha byte, which uses the already recovered channel-modulation
+ * equation. The background object, blend object and FBSTART must all resolve to
+ * the same mapped target, but its GPU address is not a rendering semantic and
+ * is therefore not whitelisted. This is still not a perspective or general
+ * scaling rasterizer: magnification, nonuniform scale and coloured vertices
+ * remain rejected. r416's partly off-screen label is filtered only when its
+ * normalized coordinates, integer boundary, clip and tiles all independently
+ * agree. */
 static bool mbx_3d_word_to_finite_float(uint32_t word, float *value) {
     if ((word & 0x7f800000u) == 0x7f800000u ||
         sizeof *value != sizeof word)
@@ -2351,11 +2412,15 @@ static bool mbx_execute_axis_aligned_sprite(s5l_mbx_t *m,
         if (!mbx_gart_u32(m, bus, object + 0x1f0u + i * 4u,
                           &quad[i], why))
             return false;
-    bool direct_sampler = quad[3] == 0xa6884710u;
-    bool modulated_sampler = quad[3] == 0xcd206c40u;
+    bool direct_sampler = quad[3] == 0xa6884710u &&
+                          quad[6] == 0xae504ea0u;
+    bool modulated_sampler = quad[3] == 0xcd206c40u &&
+                             quad[6] == 0xae504ea0u;
+    bool scaled_sampler = quad[3] == 0xd6887610u &&
+                          quad[6] == 0xa3104620u;
     if (quad[0] != 0xe0000000u ||
-        (!direct_sampler && !modulated_sampler) ||
-        quad[4] != 0xa7718000u || quad[6] != 0xae504ea0u ||
+        (!direct_sampler && !modulated_sampler && !scaled_sampler) ||
+        quad[4] != 0xa7718000u ||
         quad[7] != 0x22250e80u) {
         if (why) *why = "sprite quad setup is not the measured BGRA8 source-over form";
         return false;
@@ -2450,16 +2515,105 @@ static bool mbx_execute_axis_aligned_sprite(s5l_mbx_t *m,
     float dy = y1 - y0;
     if (dx < 1.0f - epsilon || dy < 1.0f - epsilon ||
         dx > 512.0f + epsilon || dy > 512.0f + epsilon) {
-        if (why) *why = "sprite transform is outside the bounded 1:1 family";
+        if (why) *why = "sprite transform is outside the bounded axis-aligned family";
         return false;
     }
-    uint32_t source_width = (uint32_t)(dx + 0.5f);
-    uint32_t source_height = (uint32_t)(dy + 0.5f);
-    if (dx < (float)source_width - epsilon ||
-        dx > (float)source_width + epsilon ||
-        dy < (float)source_height - epsilon ||
-        dy > (float)source_height + epsilon) {
-        if (why) *why = "sprite transform is not a measured 1:1 copy";
+
+    /* Source dimensions are encoded independently of destination geometry.
+     * Invert the producer's normalized UV extent first, then reconstruct the
+     * power-of-two header and split pitch exactly.  This is what distinguishes
+     * r420's 320x460 texture from its 28.8x41.4 destination. */
+    uint32_t header_width_field = (quad[1] >> 24) & 7u;
+    uint32_t header_height_field = (quad[1] >> 20) & 7u;
+    uint32_t header_texture_width = 8u << header_width_field;
+    uint32_t header_texture_height = 8u << header_height_field;
+    uint32_t u_word = half_texel_layout ? quad[30] : quad[35];
+    uint32_t v_word = half_texel_layout ? quad[36] : quad[26];
+    float normalized_u, normalized_v;
+    if (!mbx_3d_word_to_nonnegative_float(u_word, &normalized_u) ||
+        !mbx_3d_word_to_nonnegative_float(v_word, &normalized_v)) {
+        if (why) *why = "sprite UV extents are not finite nonnegative floats";
+        return false;
+    }
+    float u_texel_extent =
+        normalized_u * (float)header_texture_width;
+    float v_texel_extent =
+        normalized_v * (float)header_texture_height;
+    if (u_texel_extent <= 0.0f || v_texel_extent <= 0.0f ||
+        u_texel_extent > 512.0f || v_texel_extent > 512.0f) {
+        if (why) *why = "sprite UV extents leave the supported texture bounds";
+        return false;
+    }
+    uint32_t source_width = (uint32_t)u_texel_extent;
+    uint32_t source_height = (uint32_t)v_texel_extent;
+    source_width += (float)source_width < u_texel_extent;
+    source_height += (float)source_height < v_texel_extent;
+
+    uint32_t texture_width = 8u, texture_height = 8u;
+    uint32_t width_field = 0u, height_field = 0u;
+    while (texture_width < source_width) {
+        texture_width <<= 1;
+        width_field++;
+    }
+    while (texture_height < source_height) {
+        texture_height <<= 1;
+        height_field++;
+    }
+    uint32_t padded_width = (source_width + 7u) & ~7u;
+    uint32_t source_stride = padded_width * 4u;
+    uint32_t pitch_units = source_stride / 16u;
+    uint32_t expected_header = 0xa0018000u |
+        (width_field << 24) | (height_field << 20) |
+        ((pitch_units & 2u) >> 1);
+    uint32_t expected_source_control =
+        (half_texel_layout ? 0x8e000000u : 0x0e000000u) |
+        ((pitch_units & ~3u) << 16);
+    if (quad[1] != expected_header ||
+        (quad[2] & ~MBX_3D_ADDRESS_MASK) != expected_source_control) {
+        if (why) *why = "sprite texture dimensions or split pitch are inconsistent";
+        return false;
+    }
+
+    uint32_t expected_u = mbx_3d_float_to_word(
+        u_texel_extent / (float)texture_width);
+    uint32_t expected_v = mbx_3d_float_to_word(
+        v_texel_extent / (float)texture_height);
+    bool uv_matches = half_texel_layout
+        ? quad[25] == 0u && quad[26] == 0u &&
+          quad[30] == expected_u && quad[31] == 0u &&
+          quad[35] == 0u && quad[36] == expected_v &&
+          quad[40] == expected_u && quad[41] == expected_v
+        : quad[25] == 0u && quad[26] == expected_v &&
+          quad[30] == 0u && quad[31] == 0u &&
+          quad[35] == expected_u && quad[36] == expected_v &&
+          quad[40] == expected_u && quad[41] == 0u;
+    if (!uv_matches) {
+        if (why) *why = "sprite UV rectangle disagrees with its source size";
+        return false;
+    }
+
+    bool unity_transform =
+        dx >= (float)source_width - epsilon &&
+        dx <= (float)source_width + epsilon &&
+        dy >= (float)source_height - epsilon &&
+        dy <= (float)source_height + epsilon;
+    if (!unity_transform) {
+        float scale_x = dx / (float)source_width;
+        float scale_y = dy / (float)source_height;
+        float scale_difference = scale_x > scale_y
+            ? scale_x - scale_y : scale_y - scale_x;
+        if (!half_texel_layout || direct_sampler ||
+            (!modulated_sampler && !scaled_sampler) ||
+            source_width > MBX_3D_WIDTH ||
+            source_height > 480u || scale_x <= 0.0f || scale_y <= 0.0f ||
+            scale_x > 1.0f + epsilon || scale_y > 1.0f + epsilon ||
+            scale_difference > 0.00001f) {
+            if (why) *why =
+                "scaled sprite is not the measured uniform filtered minification";
+            return false;
+        }
+    } else if (scaled_sampler) {
+        if (why) *why = "alternate filtered state lacks its measured minification";
         return false;
     }
     float bounded_x0 = x0 < 0.0f ? 0.0f : x0;
@@ -2569,85 +2723,36 @@ static bool mbx_execute_axis_aligned_sprite(s5l_mbx_t *m,
     uint32_t width = right - left;
     uint32_t height = bottom - top;
 
-    /* This is deliberately narrower than a texture sampler. Pixel-centre
-     * coverage of an integer-sized unity transform must span the full source;
-     * intersecting it with the surface and context boundary then selects the
-     * same contiguous source subrectangle. Scaling and resampling still reject. */
-    int32_t full_raster_width =
-        raster_right_unclipped - raster_left_unclipped;
-    int32_t full_raster_height =
-        raster_bottom_unclipped - raster_top_unclipped;
-    if (full_raster_width != (int32_t)source_width ||
-        full_raster_height != (int32_t)source_height ||
-        raster_left < raster_left_unclipped ||
-        raster_top < raster_top_unclipped ||
-        raster_right > raster_right_unclipped ||
-        raster_bottom > raster_bottom_unclipped) {
-        if (why) *why =
-            "sprite pixel-centre coverage is not a contiguous 1:1 crop";
-        return false;
-    }
-    uint32_t source_x0 =
-        (uint32_t)(raster_left - raster_left_unclipped);
-    uint32_t source_y0 =
-        (uint32_t)(raster_top - raster_top_unclipped);
-    if (source_x0 + width > source_width ||
-        source_y0 + height > source_height) {
-        if (why) *why = "sprite source crop exceeds its unity transform";
-        return false;
+    uint32_t source_x0 = 0u, source_y0 = 0u;
+    if (!half_texel_layout) {
+        /* The 0x0e producer order is unfiltered.  Its integer-sized unity
+         * transform must still select one strict contiguous source crop. */
+        int32_t full_raster_width =
+            raster_right_unclipped - raster_left_unclipped;
+        int32_t full_raster_height =
+            raster_bottom_unclipped - raster_top_unclipped;
+        if (full_raster_width != (int32_t)source_width ||
+            full_raster_height != (int32_t)source_height ||
+            raster_left < raster_left_unclipped ||
+            raster_top < raster_top_unclipped ||
+            raster_right > raster_right_unclipped ||
+            raster_bottom > raster_bottom_unclipped) {
+            if (why) *why =
+                "unfiltered sprite coverage is not a contiguous 1:1 crop";
+            return false;
+        }
+        source_x0 = (uint32_t)(raster_left - raster_left_unclipped);
+        source_y0 = (uint32_t)(raster_top - raster_top_unclipped);
+        if (source_x0 + width > source_width ||
+            source_y0 + height > source_height) {
+            if (why) *why = "unfiltered sprite crop exceeds its source";
+            return false;
+        }
     }
 
-    uint32_t texture_width = 8u, texture_height = 8u;
-    uint32_t width_field = 0u, height_field = 0u;
-    while (texture_width < source_width) {
-        texture_width <<= 1;
-        width_field++;
-    }
-    while (texture_height < source_height) {
-        texture_height <<= 1;
-        height_field++;
-    }
-    if (texture_width > 512u || texture_height > 512u) {
-        if (why) *why = "sprite texture power exceeds the measured screen bounds";
-        return false;
-    }
-    uint32_t padded_width = (source_width + 7u) & ~7u;
-    uint32_t source_stride = padded_width * 4u;
-    uint32_t pitch_units = source_stride / 16u;
-    uint32_t expected_header = 0xa0018000u |
-        (width_field << 24) | (height_field << 20) |
-        ((pitch_units & 2u) >> 1);
-    uint32_t expected_source_control =
-        (half_texel_layout ? 0x8e000000u : 0x0e000000u) |
-        ((pitch_units & ~3u) << 16);
-    if (quad[1] != expected_header ||
-        (quad[2] & ~MBX_3D_ADDRESS_MASK) != expected_source_control) {
-        if (why) *why = "sprite texture dimensions or split pitch are inconsistent";
-        return false;
-    }
     uint32_t source = mbx_3d_decode_address(quad[2]);
     if (!source) {
         if (why) *why = "sprite source resolves to GPU address zero";
-        return false;
-    }
-
-    float u = half_texel_layout
-        ? (float)source_width - 0.5f : (float)source_width;
-    float v = half_texel_layout
-        ? (float)source_height - 0.5f : (float)source_height;
-    uint32_t expected_u = mbx_3d_float_to_word(u / (float)texture_width);
-    uint32_t expected_v = mbx_3d_float_to_word(v / (float)texture_height);
-    bool uv_matches = half_texel_layout
-        ? quad[25] == 0u && quad[26] == 0u &&
-          quad[30] == expected_u && quad[31] == 0u &&
-          quad[35] == 0u && quad[36] == expected_v &&
-          quad[40] == expected_u && quad[41] == expected_v
-        : quad[25] == 0u && quad[26] == expected_v &&
-          quad[30] == 0u && quad[31] == 0u &&
-          quad[35] == expected_u && quad[36] == expected_v &&
-          quad[40] == expected_u && quad[41] == 0u;
-    if (!uv_matches) {
-        if (why) *why = "sprite UV rectangle disagrees with its 1:1 source size";
         return false;
     }
 
@@ -2695,28 +2800,69 @@ static bool mbx_execute_axis_aligned_sprite(s5l_mbx_t *m,
 
     uint32_t row_bytes = width * 4u;
     uint32_t total = row_bytes * height;
-    uint64_t source_end = (uint64_t)source +
-        (uint64_t)(source_y0 + height - 1u) * source_stride +
-        (uint64_t)(source_x0 + width) * 4u;
     uint64_t target_end = (uint64_t)target +
         (uint64_t)(top + height - 1u) * MBX_3D_TARGET_STRIDE +
         (uint64_t)(left + width) * 4u;
-    if (row_bytes > source_stride || source_end > UINT32_MAX ||
-        target_end > UINT32_MAX) {
-        if (why) *why = "sprite source or destination rectangle overflows";
+    if (target_end > UINT32_MAX) {
+        if (why) *why = "sprite destination rectangle overflows";
         return false;
     }
     for (uint32_t row = 0; row < height; row++) {
-        uint32_t src = source + (source_y0 + row) * source_stride +
-                       source_x0 * 4u;
         uint32_t dst = target + (top + row) * MBX_3D_TARGET_STRIDE +
                        left * 4u;
-        if (!mbx_gart_validate(m, bus, src, row_bytes, why) ||
-            !mbx_gart_validate(m, bus, dst, row_bytes, why))
+        if (!mbx_gart_validate(m, bus, dst, row_bytes, why))
             return false;
     }
 
-    uint8_t *source_pixels = malloc(total);
+    struct mbx_bilinear_axis x_axis[MBX_3D_WIDTH];
+    struct mbx_bilinear_axis y_axis[480u];
+    uint32_t source_stage_x0 = source_x0;
+    uint32_t source_stage_y0 = source_y0;
+    uint32_t source_stage_width = width;
+    uint32_t source_stage_height = height;
+    if (half_texel_layout) {
+        uint32_t minimum_x = UINT32_MAX, minimum_y = UINT32_MAX;
+        uint32_t maximum_x = 0u, maximum_y = 0u;
+        for (uint32_t x = 0; x < width; x++) {
+            if (!mbx_bilinear_axis(x0, dx, u_texel_extent, left + x,
+                                   source_width, &x_axis[x])) {
+                if (why) *why = "filtered sprite has an invalid horizontal sample";
+                return false;
+            }
+            if (x_axis[x].first < minimum_x) minimum_x = x_axis[x].first;
+            if (x_axis[x].second > maximum_x) maximum_x = x_axis[x].second;
+        }
+        for (uint32_t y = 0; y < height; y++) {
+            if (!mbx_bilinear_axis(y0, dy, v_texel_extent, top + y,
+                                   source_height, &y_axis[y])) {
+                if (why) *why = "filtered sprite has an invalid vertical sample";
+                return false;
+            }
+            if (y_axis[y].first < minimum_y) minimum_y = y_axis[y].first;
+            if (y_axis[y].second > maximum_y) maximum_y = y_axis[y].second;
+        }
+        source_stage_x0 = minimum_x;
+        source_stage_y0 = minimum_y;
+        source_stage_width = maximum_x - minimum_x + 1u;
+        source_stage_height = maximum_y - minimum_y + 1u;
+    }
+
+    uint32_t source_row_bytes = source_stage_width * 4u;
+    uint32_t source_total = source_row_bytes * source_stage_height;
+    uint64_t source_end = (uint64_t)source +
+        (uint64_t)(source_stage_y0 + source_stage_height - 1u) * source_stride +
+        (uint64_t)(source_stage_x0 + source_stage_width) * 4u;
+    if (source_row_bytes > source_stride || source_end > UINT32_MAX) {
+        if (why) *why = "sprite source sample window overflows";
+        return false;
+    }
+    for (uint32_t row = 0; row < source_stage_height; row++) {
+        uint32_t src = source + (source_stage_y0 + row) * source_stride +
+                       source_stage_x0 * 4u;
+        if (!mbx_gart_validate(m, bus, src, source_row_bytes, why)) return false;
+    }
+
+    uint8_t *source_pixels = malloc(source_total);
     uint8_t *pixels = malloc(total);
     if (!source_pixels || !pixels) {
         free(source_pixels);
@@ -2725,18 +2871,20 @@ static bool mbx_execute_axis_aligned_sprite(s5l_mbx_t *m,
         return false;
     }
     bool ok = true;
+    for (uint32_t row = 0; row < source_stage_height && ok; row++) {
+        uint32_t src = source + (source_stage_y0 + row) * source_stride +
+                       source_stage_x0 * 4u;
+        ok = mbx_gart_read(m, bus, src,
+                           source_pixels + row * source_row_bytes,
+                           source_row_bytes, why);
+    }
     for (uint32_t row = 0; row < height && ok; row++) {
-        uint32_t src = source + (source_y0 + row) * source_stride +
-                       source_x0 * 4u;
         uint32_t dst = target + (top + row) * MBX_3D_TARGET_STRIDE +
                        left * 4u;
-        ok = mbx_gart_read(m, bus, src,
-                           source_pixels + row * row_bytes,
-                           row_bytes, why) &&
-             mbx_gart_read(m, bus, dst, pixels + row * row_bytes,
+        ok = mbx_gart_read(m, bus, dst, pixels + row * row_bytes,
                            row_bytes, why);
     }
-    for (uint32_t i = 0; i < total && ok; i += 4u) {
+    for (uint32_t i = 0; i < source_total && ok; i += 4u) {
         uint32_t src = mbx_load_le32(source_pixels + i);
         uint32_t alpha = src >> 24;
         if ((src & 0xffu) > alpha || ((src >> 8) & 0xffu) > alpha ||
@@ -2745,13 +2893,42 @@ static bool mbx_execute_axis_aligned_sprite(s5l_mbx_t *m,
             ok = false;
             break;
         }
-        src = mbx_modulate_vertex_alpha(src, vertex_alpha_word >> 24);
-        uint32_t blended = mbx_premultiplied_over(
-            mbx_load_le32(pixels + i), src);
-        pixels[i] = (uint8_t)blended;
-        pixels[i + 1u] = (uint8_t)(blended >> 8);
-        pixels[i + 2u] = (uint8_t)(blended >> 16);
-        pixels[i + 3u] = (uint8_t)(blended >> 24);
+    }
+    for (uint32_t y = 0; y < height && ok; y++) {
+        for (uint32_t x = 0; x < width; x++) {
+            uint32_t src;
+            if (half_texel_layout) {
+                uint32_t x0_offset = x_axis[x].first - source_stage_x0;
+                uint32_t x1_offset = x_axis[x].second - source_stage_x0;
+                uint32_t y0_offset = y_axis[y].first - source_stage_y0;
+                uint32_t y1_offset = y_axis[y].second - source_stage_y0;
+                uint32_t top_left = mbx_load_le32(source_pixels +
+                    y0_offset * source_row_bytes + x0_offset * 4u);
+                uint32_t bottom_left = mbx_load_le32(source_pixels +
+                    y1_offset * source_row_bytes + x0_offset * 4u);
+                uint32_t top_right = mbx_load_le32(source_pixels +
+                    y0_offset * source_row_bytes + x1_offset * 4u);
+                uint32_t bottom_right = mbx_load_le32(source_pixels +
+                    y1_offset * source_row_bytes + x1_offset * 4u);
+                uint32_t vertical_left = mbx_linear_bgra8(
+                    top_left, bottom_left, y_axis[y].weight);
+                uint32_t vertical_right = mbx_linear_bgra8(
+                    top_right, bottom_right, y_axis[y].weight);
+                src = mbx_linear_bgra8(
+                    vertical_left, vertical_right, x_axis[x].weight);
+            } else {
+                src = mbx_load_le32(source_pixels + y * source_row_bytes +
+                                    x * 4u);
+            }
+            src = mbx_modulate_vertex_alpha(src, vertex_alpha_word >> 24);
+            uint32_t pixel_offset = y * row_bytes + x * 4u;
+            uint32_t blended = mbx_premultiplied_over(
+                mbx_load_le32(pixels + pixel_offset), src);
+            pixels[pixel_offset] = (uint8_t)blended;
+            pixels[pixel_offset + 1u] = (uint8_t)(blended >> 8);
+            pixels[pixel_offset + 2u] = (uint8_t)(blended >> 16);
+            pixels[pixel_offset + 3u] = (uint8_t)(blended >> 24);
+        }
     }
     for (uint32_t row = 0; row < height && ok; row++) {
         uint32_t dst = target + (top + row) * MBX_3D_TARGET_STRIDE +
