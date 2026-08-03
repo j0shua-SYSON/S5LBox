@@ -903,7 +903,7 @@ didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
         if (!self_) return;
         [self_->_settings setGraphicsModeForNewMachines:VMGraphicsModeSoftware];
         self_->_copiedCommandLine = NO;
-        [self_->tableView reloadData];
+        [self_.tableView reloadData];
     }]];
     [picker addAction:[UIAlertAction actionWithTitle:mbxTitle
                                                style:UIAlertActionStyleDefault
@@ -914,7 +914,7 @@ didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
         [self_->_settings
             setGraphicsModeForNewMachines:VMGraphicsModeExperimentalMBX];
         self_->_copiedCommandLine = NO;
-        [self_->tableView reloadData];
+        [self_.tableView reloadData];
     }]];
     [picker addAction:[UIAlertAction actionWithTitle:@"Cancel"
                                                style:UIAlertActionStyleCancel
