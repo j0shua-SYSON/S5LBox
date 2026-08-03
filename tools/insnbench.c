@@ -445,9 +445,13 @@ static const bench_cfg_t g_configs[] = {
       .prog = g_prog_ldst,  .prog_words = (unsigned)(sizeof g_prog_ldst  / 4),
       .loop_insns = 5u, .mmu_on = true, .small_pages = true, .do_tick = true },
     /* The iOS app enters the interpreter through s5l8900_run(), not through
-     * this benchmark's hand-written arm_step/tick loop. Keep both rows so an
-     * optimization in that API has an honest before/after measurement without
-     * rewriting the historical tick=yes series into a different workload. */
+     * this benchmark's hand-written arm_step/tick loop. Keep both historical
+     * load/store rows and add the matched ALU row: a block runner is expected
+     * to help straight-line arithmetic and may hurt a memory-heavy loop, and
+     * measuring only one side would let either result misdescribe the app. */
+    { .loop = "alu/branch",   .mmu = "pages-4K",    .tick = "run",
+      .prog = g_prog_alu,   .prog_words = (unsigned)(sizeof g_prog_alu   / 4),
+      .loop_insns = 5u, .mmu_on = true, .small_pages = true, .run_api = true },
     { .loop = "load/store",  .mmu = "pages-4K",    .tick = "run",
       .prog = g_prog_ldst,  .prog_words = (unsigned)(sizeof g_prog_ldst  / 4),
       .loop_insns = 5u, .mmu_on = true, .small_pages = true, .run_api = true },

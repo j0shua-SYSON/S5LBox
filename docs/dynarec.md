@@ -1255,6 +1255,33 @@ boundary so two engines remain comparable (§9.3), but it must arrive as part of
 a block engine that removes other repeated per-instruction work rather than as
 another wrapper around `arm_step()`.
 
+#### 7.6.1 The first portable block interpreter also lost (r470-r471)
+
+The first non-JIT decoded-block implementation was narrower than this document's
+eventual translator: ARM data processing plus terminal B/BL only, with exact existing
+semantic helpers. It stopped before memory, Thumb, WFI, CP15, exceptions and state
+changes; the machine stopped it again at the first exact timebase edge. Cached entries
+were keyed by resolved host RAM and validated against live raw words. The exercised-path
+differential and snapshot tests passed, and restored ON/OFF arms produced identical work
+images and final screens.
+
+It was still a large real-guest regression. Across two bracketed 100 M-instruction runs,
+the first version was 43.9% and 19.4% slower than its adjacent literal controls. Removing
+the global TLB generation from the cache key--safe because translation still resolved
+the host block and raw words were still checked--did not fix it: the second series was
+22.4% and 15.8% slower. It retired only 31.83% of the interval in blocks, averaged 2.68
+instructions per successful block call, and hit 6.77 M of 40.81 M lookups. The key
+change reduced 34.09 M builds by only 0.15%, directly refuting the proposed TLB-epoch
+explanation.
+
+Do not repeat this design by merely enlarging its 1,024-entry direct-mapped cache. The
+remaining collision/working-set cause was not measured, and cache-size tuning would not
+remove the more fundamental cost of probing the whole runner to accelerate less than a
+third of it through the same per-instruction helpers. A future portable block engine
+needs a profile-backed dispatch strategy and substantially more work removed per
+successful entry before another restored gate is justified. `docs/hotpath.md` r470-r471
+contains the full rates, counters and hashes. The rejected source was removed in full.
+
 ### 7.7 Self-modifying code, kexts, and paging
 
 Covered by §3.6. The point worth repeating: the dangerous case in this project is

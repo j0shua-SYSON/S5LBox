@@ -4305,3 +4305,65 @@ interpreter whose blocks end before WFI, device-observable memory, state changes
 the exact tick/interrupt boundary. That is structural work, not another decode-chain
 reordering, and it still earns its place only by passing differential, restored-real-
 guest, and eventual cold-boot gates.
+
+### r470-r471: the first portable decoded-block interpreter is rejected
+
+The next prototype implemented the structural idea above rather than another decoder
+reordering. It was compile-time experimental and default-off, emitted no host code, and
+kept the literal runner in the same binary. Blocks were ARM-only and contained ordinary
+data processing plus an optional terminal B/BL. Thumb, memory, WFI, CP15, state changes,
+exceptions and host callbacks stayed on `arm_step`. The machine capped every block at
+the next exact timebase edge and forced one-step execution for dirty device state,
+changed external input and unusual clocks. Entries were tied to resolved host RAM and
+validated against the live raw words, so self-modifying code could not execute a stale
+decode.
+
+The correctness work was real but did not rescue the performance result. The expanded
+SoC differential exercised mid-block tick cuts, flags and conditions, a masked pending
+IRQ and a modified cached instruction; it and the snapshot suite passed. Both 100 M-
+instruction restored A/B series exited zero. In r471 all four writable media images were
+byte-identical at SHA-256
+`8A59C388C481165F460984926AA5FFB1B72A0E9030216CD0038DE9B3264B79FE`, and all four
+final PPMs were byte-identical at
+`2EAE64986CFA1A34E25FC0D67DACC9E220E2262E9214BE2DAD775FD4518B266A`. No end-machine
+snapshots were written, so this is not a claim that derived counters matched.
+
+The first in-process synthetic control already showed the wrong shape:
+
+| app-shaped row | blocks | literal control | delta |
+|---|---:|---:|---:|
+| five-instruction ALU/branch | 25.65 Minsn/s | 21.26 Minsn/s | **+20.6%** |
+| matched load/store | 12.88 Minsn/s | 16.83 Minsn/s | **-23.5%** |
+
+Caching proven one-word/negative starts removed repeated full block probes. In the next
+30 M x 9 interleaved session the ALU pair was effectively tied (17.95 versus 17.93) and
+the load/store loss shrank but remained (10.78 versus 11.34, **-4.9%**). Absolute rates
+moved badly with host load; only the paired direction is used here.
+
+The restored SpringBoard interval was decisive. Every arm restored
+`post-check-7100m.bin`, used the app's 100,000-instruction `s5l8900_run()` chunks, and
+stopped at 7.200 B:
+
+| series | block arm | adjacent literal arm | delta |
+|---|---:|---:|---:|
+| r470 first bracket | 6.400148 | 11.404148 | **-43.9%** |
+| r470 reverse bracket | 10.771980 | 13.371798 | **-19.4%** |
+| r471 host-key first bracket | 10.843156 | 13.978594 | **-22.4%** |
+| r471 host-key reverse bracket | 9.541273 | 11.333318 | **-15.8%** |
+
+The unit is Minsn/s. Host drift explains the absolute spread, not four same-direction
+losses. r471 attempted 40,811,597 block lookups, hit only 6,770,588 (**16.59%**), built
+34,041,009 entries and retired just 31,832,490 instructions in blocks (**31.83%**) at
+2.68 instructions per successful call. Removing the global TLB generation from the
+decoded key was correct--translation still resolved the host block and every hit still
+validated raw words--but cut builds by only 51,215 (**0.15%**). The hypothesis that
+normal address-space switches were destroying most reuse was therefore refuted.
+
+The remaining miss mechanism was not isolated, and guessing a larger cache would be
+cache-size whack-a-mole. What is established is enough to reject this shape: it pays
+lookup/build/validation costs across the whole runner, accelerates less than one third
+of the real interval, and calls existing per-instruction semantic helpers inside very
+short blocks. The implementation, runtime switch, counters and differential additions
+were removed completely. The matched ALU `tick=run` benchmark stays because future
+runner work must report both it and load/store instead of choosing whichever flatters
+the change.
