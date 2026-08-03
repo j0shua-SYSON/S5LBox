@@ -4564,3 +4564,61 @@ prototype must remove work across the dominant mixed stream--for example by fusi
 specializing semantics rather than putting another cache in front of the existing
 per-instruction helpers--and must earn its keep in restored A/B measurements before it
 can reach the app.
+
+### r482: a cacheless mixed literal loop is correct, broad, and still only marginal
+
+r482 tested a materially different shape from r470-r479. It cached neither decoded
+instructions nor host code. While the PC remained inside the already validated 1 KiB
+fetch mapping, it reread the live raw instruction and executed common ARM, Thumb, VFP,
+load/store and branch semantics in one C loop. The machine capped each call at the next
+exact timebase edge and stopped after device-visible work. This removed cache lookup,
+build, validation and uop-dispatch costs while retaining self-modifying-code visibility.
+It was compile-time experimental and emitted no JIT code.
+
+The public run/tick differential passed, followed by the full **55/55** default suite.
+Synthetic app-facing rows initially looked substantial in non-LTO `-O3` builds:
+
+| row | baseline mean | cacheless mean | delta |
+|---|---:|---:|---:|
+| ALU/branch + 4 KiB MMU + `s5l8900_run` | 32.815 M/s | 42.990 M/s | **+31.0%** |
+| load/store + 4 KiB MMU + `s5l8900_run` | 24.105 M/s | 27.200 M/s | **+12.8%** |
+
+That was not the guest result. A non-LTO restored `old,new,new,old` bracket moved badly
+with the host: the first candidate lost 35.8%, the reverse candidate won 13.2%, and the
+symmetric means were 12.983856 M/s baseline versus 11.005270 M/s candidate (**-15.2%**).
+The opposing pairs make the short non-LTO series noisy, but they also disprove using the
+synthetic gain as a product claim.
+
+The shipping iOS core uses `-O3` and LTO, so a second pair used CMake's proven
+whole-program-optimization configuration. LTO reduced the synthetic mean deltas to
++17.4% for ALU/branch and +4.3% for load/store. The decisive restored bracket used the
+same r445 7.100 B MBX checkpoint and retired 100 M instructions per arm:
+
+| order | build | rate | adjacent delta |
+|---:|---|---:|---:|
+| 1 | LTO baseline | 16.924587 M/s | control |
+| 2 | LTO cacheless loop | 17.331551 M/s | +2.40% |
+| 3 | LTO cacheless loop | 17.506433 M/s | +2.03% vs following control |
+| 4 | LTO baseline | 17.157879 M/s | control |
+| mean | LTO baseline / cacheless | 17.041233 / 17.418992 M/s | **+2.22%** |
+
+The exact counters explain why broad coverage did not become a broad speedup. Each
+candidate arm retired 89,308,320 instructions in the loop and 10,691,680 literally:
+**89.308% coverage**, but only 10.995 instructions per successful batch. There were
+8,122,359 batches and 10,439,220 zero-prefix attempts. In the non-LTO binaries, adding a
+second caller also changed compiler inlining: `arm_step` shrank from 11,872 to 6,176 host
+bytes while several helpers became out-of-line. That is a plausible mechanism for the
+non-LTO loss, not a measured attribution; LTO is the relevant final comparison.
+
+Every restored arm stopped at exactly 7.200 B with status OK and empty stderr. All eight
+non-LTO/LTO work images matched SHA-256
+`8A59C388C481165F460984926AA5FFB1B72A0E9030216CD0038DE9B3264B79FE`; all eight final
+PPMs matched
+`2EAE64986CFA1A34E25FC0D67DACC9E220E2262E9214BE2DAD775FD4518B266A`. No end-machine
+snapshot was written, so this is not a serialized-counter equality claim.
+
+The roughly 2% shipping-shaped gain is real but not substantial. It does not approach
+the projected 34.304688 M/s needed for 30 changed frames/s, and keeping 338 lines of
+experimental surface for it would repeat r481's marginal-optimisation mistake. The loop,
+stats and tool reporting were therefore removed in full. No r482 performance code ships,
+and neither the verified desktop cadence nor the phone's reported 0--4 FPS changes.
