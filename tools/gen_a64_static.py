@@ -29,6 +29,7 @@ def build_handlers() -> list[tuple[str, list[str]]]:
     handlers: list[tuple[str, list[str]]] = []
 
     handlers.append((".La64s_end", [
+        "    ldur w12, [x13, #-4]",
         "    sub x15, x15, #1",
         "    cbz x15, .La64s_exit",
         "    mov x13, x14",
@@ -183,7 +184,7 @@ def render() -> str:
         "    stp w23, w24, [x0, #16]",
         "    stp w25, w26, [x0, #24]",
         "    str w27, [x0, #52]",
-        "    str wzr, [x0, #60]",
+        "    str w12, [x0, #60]",
         "    mrs x9, nzcv",
         "    ldr w10, [x1]",
         "    ubfx w9, w9, #28, #4",

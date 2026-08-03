@@ -139,6 +139,46 @@ static const uint16_t THUMB_MIXED[] = {
     0x3002u, 0x3901u, 0x3201u, 0xe7efu,
 };
 
+/* Short blocks exercise the product-facing block contract independently of
+ * the 16-instruction benchmark loops: variable length, natural fallthrough,
+ * and a terminal branch whose destination is not the block start. */
+static const uint32_t A32_SHORT_FALL[] = {
+    0xe2800001u, 0xe2811003u, 0xe2422001u,
+};
+
+static const uint32_t A32_SHORT_BRANCH[] = {
+    0xe2800001u, 0xea00000du, /* branch at 0x1004 -> 0x1040 */
+};
+
+static const uint16_t THUMB_SHORT_FALL[] = {
+    0x3001u, 0x3103u, 0x3a01u,
+};
+
+static const uint16_t THUMB_SHORT_BRANCH[] = {
+    0x3001u, 0xe00du, /* branch at 0x0202 -> 0x0220 */
+};
+
+typedef struct {
+    const char *name;
+    const void *program;
+    unsigned insns;
+    bool thumb;
+    uint32_t pc;
+    uint32_t exit_pc;
+    unsigned uops;
+} static_case_t;
+
+static const static_case_t STATIC_CASES[] = {
+    { "a32-fallthrough", A32_SHORT_FALL, 3u, false,
+      0x1000u, 0x100cu, 4u },
+    { "a32-branch-target", A32_SHORT_BRANCH, 2u, false,
+      0x1000u, 0x1040u, 2u },
+    { "thumb-fallthrough", THUMB_SHORT_FALL, 3u, true,
+      0x0200u, 0x0206u, 4u },
+    { "thumb-branch-target", THUMB_SHORT_BRANCH, 2u, true,
+      0x0200u, 0x0220u, 2u },
+};
+
 static const bench_case_t CASES[] = {
     { "a32-alu", A32_ALU, 16u, false },
     { "a32-mixed", A32_MIXED, 16u, false },
@@ -168,25 +208,30 @@ static uint64_t hash_ram(void) {
     return hash;
 }
 
-static void seed_cpu(arm_cpu_t *cpu, const bench_case_t *bc) {
+static void seed_cpu_at(arm_cpu_t *cpu, const void *program, unsigned insns,
+                        bool thumb, uint32_t pc) {
     unsigned i;
     memset(g_ram, 0, sizeof g_ram);
-    if (bc->thumb) {
-        const uint16_t *program = (const uint16_t *)bc->program;
-        for (i = 0; i < bc->insns; i++) mem_w16(NULL, i * 2u, program[i]);
+    if (thumb) {
+        const uint16_t *code = (const uint16_t *)program;
+        for (i = 0; i < insns; i++) mem_w16(NULL, pc + i * 2u, code[i]);
     } else {
-        const uint32_t *program = (const uint32_t *)bc->program;
-        for (i = 0; i < bc->insns; i++) mem_w32(NULL, i * 4u, program[i]);
+        const uint32_t *code = (const uint32_t *)program;
+        for (i = 0; i < insns; i++) mem_w32(NULL, pc + i * 4u, code[i]);
     }
 
     arm_reset(cpu, &g_bus);
     cpu->cpsr = (cpu->cpsr & ~(ARM_CPSR_MODE_MASK | ARM_CPSR_T)) |
-                ARM_MODE_SYS | (bc->thumb ? ARM_CPSR_T : 0u) | ARM_CPSR_C;
+                ARM_MODE_SYS | (thumb ? ARM_CPSR_T : 0u) | ARM_CPSR_C;
     for (i = 0; i < 13u; i++) cpu->r[i] = 0x10203040u + i * 0x01010101u;
     cpu->r[7] = DATA_BASE;
     cpu->r[13] = STACK_BASE;
     cpu->r[14] = 0xdead0000u;
-    cpu->r[15] = 0u;
+    cpu->r[15] = pc;
+}
+
+static void seed_cpu(arm_cpu_t *cpu, const bench_case_t *bc) {
+    seed_cpu_at(cpu, bc->program, bc->insns, bc->thumb, 0u);
 }
 
 static void capture_state(final_state_t *out, const arm_cpu_t *cpu,
@@ -199,11 +244,94 @@ static void capture_state(final_state_t *out, const arm_cpu_t *cpu,
     out->jit_exit = jit_exit;
 }
 
-static bool states_equal(const final_state_t *a, const final_state_t *b) {
+static bool architectural_states_equal(const final_state_t *a,
+                                       const final_state_t *b) {
     return memcmp(a->r, b->r, sizeof a->r) == 0 &&
            a->cpsr == b->cpsr && a->cycles == b->cycles &&
-           a->ram_hash == b->ram_hash &&
+           a->ram_hash == b->ram_hash && a->status == b->status;
+}
+
+static bool states_equal(const final_state_t *a, const final_state_t *b) {
+    return architectural_states_equal(a, b) &&
            a->status == ARM_OK && b->jit_exit == JIT_EXIT_NEXT;
+}
+
+static bool validate_static_shapes(void) {
+    static const uint32_t MID_BLOCK_BRANCH[] = {
+        0xea000000u, 0xe2800001u,
+    };
+    a64_static_block_t block;
+    unsigned i;
+
+    for (i = 0u; i < sizeof STATIC_CASES / sizeof STATIC_CASES[0]; i++) {
+        const static_case_t *sc = &STATIC_CASES[i];
+        memset(&block, 0, sizeof block);
+        if (!a64_static_decode_at(sc->program, sc->insns, sc->thumb,
+                                  sc->pc, &block) ||
+            block.insn_count != sc->insns || block.uop_count != sc->uops ||
+            block.start_pc != sc->pc || block.exit_pc != sc->exit_pc ||
+            block.thumb != sc->thumb ||
+            block.uops[block.uop_count - 1u].handler != 0u ||
+            block.uops[block.uop_count - 1u].immediate != sc->exit_pc) {
+            fprintf(stderr, "jitbench: static shape failed for %s\n", sc->name);
+            return false;
+        }
+        printf("STATIC-BLOCK-SHAPE case=%s pc=%08" PRIx32
+               " exit=%08" PRIx32 " insns=%u uops=%u\n",
+               sc->name, block.start_pc, block.exit_pc,
+               block.insn_count, block.uop_count);
+    }
+
+    if (a64_static_decode_at(A32_SHORT_FALL, 0u, false, 0u, &block) ||
+        a64_static_decode_at(A32_SHORT_FALL, A64_STATIC_MAX_INSNS + 1u,
+                             false, 0u, &block) ||
+        a64_static_decode_at(A32_SHORT_FALL, 1u, false, 2u, &block) ||
+        a64_static_decode_at(MID_BLOCK_BRANCH, 2u, false, 0u, &block)) {
+        fprintf(stderr, "jitbench: static decoder accepted an invalid shape\n");
+        return false;
+    }
+    return true;
+}
+
+static bool validate_static_oracles(void) {
+    unsigned i;
+    for (i = 0u; i < sizeof STATIC_CASES / sizeof STATIC_CASES[0]; i++) {
+        const static_case_t *sc = &STATIC_CASES[i];
+        a64_static_block_t block;
+        arm_cpu_t cpu;
+        final_state_t interp, statik;
+        arm_status_t status = ARM_OK;
+        unsigned retired;
+
+        if (!a64_static_decode_at(sc->program, sc->insns, sc->thumb,
+                                  sc->pc, &block))
+            return false;
+        seed_cpu_at(&cpu, sc->program, sc->insns, sc->thumb, sc->pc);
+        for (retired = 0u; retired < sc->insns; retired++) {
+            status = arm_step(&cpu);
+            if (status != ARM_OK) break;
+        }
+        capture_state(&interp, &cpu, status, JIT_EXIT_NEXT);
+
+        seed_cpu_at(&cpu, sc->program, sc->insns, sc->thumb, sc->pc);
+        if (!a64_static_run(&cpu, &block, 1u, g_ram, sizeof g_ram)) {
+            fprintf(stderr, "jitbench: static execution failed for %s\n",
+                    sc->name);
+            return false;
+        }
+        capture_state(&statik, &cpu, ARM_OK, JIT_EXIT_NEXT);
+        if (retired != sc->insns ||
+            !architectural_states_equal(&interp, &statik)) {
+            fprintf(stderr,
+                    "jitbench: static/interpreter oracle mismatch for %s\n",
+                    sc->name);
+            return false;
+        }
+        printf("STATIC-BLOCK-ORACLE case=%s exact=yes pc=%08" PRIx32
+               " cycles=%" PRIu64 "\n",
+               sc->name, statik.r[15], statik.cycles);
+    }
+    return true;
 }
 
 static bool run_interpreter(const bench_case_t *bc, uint64_t total,
@@ -419,7 +547,9 @@ static bool validate_case_translation(const bench_case_t *bc) {
     }
     if (!a64_static_decode(bc->program, bc->insns, bc->thumb,
                            &static_block) ||
-        static_block.insn_count != bc->insns) {
+        static_block.insn_count != bc->insns ||
+        static_block.uop_count != bc->insns ||
+        static_block.start_pc != 0u || static_block.exit_pc != 0u) {
         fprintf(stderr, "jitbench: structural static decode failed for %s\n",
                 bc->name);
         return false;
@@ -427,7 +557,7 @@ static bool validate_case_translation(const bench_case_t *bc) {
     printf("NATIVE-CEILING-STRUCTURAL case=%s block-insns=%u native=%u "
            "static-uops=%u handlers=%u\n",
            bc->name, block.insn_count, block.native_count,
-           static_block.insn_count, A64_STATIC_HANDLER_COUNT);
+           static_block.uop_count, A64_STATIC_HANDLER_COUNT);
     return true;
 }
 
@@ -457,6 +587,7 @@ int main(int argc, char **argv) {
     printf("NOT PHONE FPS: four synthetic subset blocks; static arm has flat "
            "RAM and no condition/MMU/fault/tick/IRQ/MMIO/cache/framebuffer/UI "
            "path or real block lookup.\n");
+    if (!validate_static_shapes()) return 1;
     for (i = 0u; i < sizeof CASES / sizeof CASES[0]; i++) {
         if (!validate_case_translation(&CASES[i])) return 1;
     }
@@ -468,6 +599,7 @@ int main(int argc, char **argv) {
         fprintf(stderr, "jitbench: arm64 host lacks static handler build\n");
         return 1;
     }
+    if (!validate_static_oracles()) return 1;
 
     for (i = 0u; i < sizeof CASES / sizeof CASES[0]; i++) {
         if (!bench_one(&CASES[i], insns, reps)) return 1;

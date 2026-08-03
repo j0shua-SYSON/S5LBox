@@ -40,21 +40,20 @@ static uint32_t rr(unsigned base, unsigned rd, unsigned rn) {
     return base + rd * 8u + rn;
 }
 
-static bool decode_arm(uint32_t insn, unsigned index,
+static bool decode_arm(uint32_t insn, unsigned index, unsigned insns,
+                       uint32_t pc,
                        a64_static_uop_t *out) {
     if ((insn >> 28) != 14u) return false;
 
     if ((insn & UINT32_C(0x0e000000)) == UINT32_C(0x0a000000)) {
         int32_t displacement;
         uint32_t target;
-        if ((insn & (1u << 24)) != 0u ||
-            index + 1u != A64_STATIC_MAX_INSNS)
+        if ((insn & (1u << 24)) != 0u || index + 1u != insns)
             return false;
         displacement = (int32_t)(insn << 8) >> 6;
-        target = index * 4u + 8u + (uint32_t)displacement;
-        if (target != 0u) return false;
+        target = pc + index * 4u + 8u + (uint32_t)displacement;
         out->handler = A64S_END;
-        out->immediate = 0u;
+        out->immediate = target;
         return true;
     }
 
@@ -113,15 +112,15 @@ static bool decode_arm(uint32_t insn, unsigned index,
     return false;
 }
 
-static bool decode_thumb(uint16_t insn, unsigned index,
+static bool decode_thumb(uint16_t insn, unsigned index, unsigned insns,
+                         uint32_t pc,
                          a64_static_uop_t *out) {
     if ((insn & UINT16_C(0xf800)) == UINT16_C(0xe000)) {
         int32_t displacement = (int32_t)((uint32_t)(insn & 0x07ffu) << 21) >> 20;
-        uint32_t target = index * 2u + 4u + (uint32_t)displacement;
-        if (index + 1u != A64_STATIC_MAX_INSNS || target != 0u)
-            return false;
+        uint32_t target = pc + index * 2u + 4u + (uint32_t)displacement;
+        if (index + 1u != insns) return false;
         out->handler = A64S_END;
-        out->immediate = 0u;
+        out->immediate = target;
         return true;
     }
 
@@ -154,14 +153,20 @@ static bool decode_thumb(uint16_t insn, unsigned index,
     return false;
 }
 
-bool a64_static_decode(const void *program, unsigned insns, bool thumb,
-                       a64_static_block_t *out) {
-    if (!program || !out || insns != A64_STATIC_MAX_INSNS) return false;
+bool a64_static_decode_at(const void *program, unsigned insns, bool thumb,
+                          uint32_t pc, a64_static_block_t *out) {
+    unsigned uop_count;
+    uint32_t fallthrough;
+    if (!program || !out || !insns || insns > A64_STATIC_MAX_INSNS ||
+        (pc & (thumb ? 1u : 3u)) != 0u)
+        return false;
     memset(out, 0, sizeof *out);
     for (unsigned i = 0; i < insns; i++) {
         bool ok = thumb
-            ? decode_thumb(((const uint16_t *)program)[i], i, &out->uops[i])
-            : decode_arm(((const uint32_t *)program)[i], i, &out->uops[i]);
+            ? decode_thumb(((const uint16_t *)program)[i], i, insns, pc,
+                           &out->uops[i])
+            : decode_arm(((const uint32_t *)program)[i], i, insns, pc,
+                         &out->uops[i]);
         if (!ok || out->uops[i].handler >= A64S_HANDLER_COUNT) {
             memset(out, 0, sizeof *out);
             return false;
@@ -171,13 +176,24 @@ bool a64_static_decode(const void *program, unsigned insns, bool thumb,
             return false;
         }
     }
+    uop_count = insns;
+    fallthrough = pc + insns * (thumb ? 2u : 4u);
     if (out->uops[insns - 1u].handler != A64S_END) {
-        memset(out, 0, sizeof *out);
-        return false;
+        out->uops[uop_count].handler = A64S_END;
+        out->uops[uop_count].immediate = fallthrough;
+        uop_count++;
     }
     out->insn_count = insns;
+    out->uop_count = uop_count;
+    out->start_pc = pc;
+    out->exit_pc = out->uops[uop_count - 1u].immediate;
     out->thumb = thumb;
     return true;
+}
+
+bool a64_static_decode(const void *program, unsigned insns, bool thumb,
+                       a64_static_block_t *out) {
+    return a64_static_decode_at(program, insns, thumb, 0u, out);
 }
 
 bool a64_static_host_available(void) {
@@ -199,10 +215,22 @@ extern int a64_static_execute(uint32_t *regs, uint32_t *cpsr,
 bool a64_static_run(arm_cpu_t *cpu, const a64_static_block_t *block,
                     uint64_t blocks, uint8_t *ram, size_t ram_size) {
     if (!cpu || !block || !blocks || !ram ||
-        block->insn_count != A64_STATIC_MAX_INSNS ||
+        !block->insn_count || block->insn_count > A64_STATIC_MAX_INSNS ||
+        (block->uop_count != block->insn_count &&
+         block->uop_count != block->insn_count + 1u) ||
+        block->uop_count > A64_STATIC_MAX_UOPS ||
+        block->uops[block->uop_count - 1u].handler != A64S_END ||
+        block->uops[block->uop_count - 1u].immediate != block->exit_pc ||
+        cpu->r[15] != block->start_pc ||
+        ((cpu->cpsr & ARM_CPSR_T) != 0u) != block->thumb ||
+        (blocks > 1u && block->exit_pc != block->start_pc) ||
         !ram_size || (ram_size & (ram_size - 1u)) != 0u ||
         ram_size - 1u > UINT32_MAX)
         return false;
+    for (unsigned i = 0; i < block->uop_count - 1u; i++)
+        if (block->uops[i].handler == A64S_END ||
+            block->uops[i].handler >= A64S_HANDLER_COUNT)
+            return false;
 #if defined(S5LBOX_STATIC_A64_NATIVE)
     return a64_static_execute(cpu->r, &cpu->cpsr, &cpu->cycles,
                               block->uops, blocks, ram,
