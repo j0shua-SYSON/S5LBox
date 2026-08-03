@@ -3546,3 +3546,97 @@ reject any 30 FPS success claim. Strict focused verification is now 699/699 asse
 the warnings-as-errors build and all 59/59 CTest targets pass. Direct-state scaling,
 magnification, nonuniform scale, perspective, coloured vertices, final cold boot, stable
 app presentation, network, sound, and iOS-app completion all remain open.
+
+### r424-r429: Settings presents, but recovery and performance remain open
+
+r424 extended r423 from 6.48 B to 6.50 B without a new MBX submission and with a
+byte-identical screen. Its terminal profile made Preferences look stuck in libobjc:
+PID 38 owned 76.6% of user samples, concentrated around `_method_list_nth` and
+`_getMethodNoSuper_nolock`. That interpretation did not survive a progress probe.
+r425 continued the same state to 6.52 B and recorded 111
+`_getMethodNoSuper_nolock` calls, three `_argb32_mark_pixelshape` calls, and 14
+`_CABackingStoreUpdate` calls. The selectors included `drawLayer:inContext:`,
+`drawRect:`, text, separator, highlight, and colour work; the profile moved into
+zlib/CoreGraphics and Preferences fell to 57.5%. This was finite Settings view
+construction, not one libobjc loop:
+
+    work/r425-preferences-progress-6520m/post-resume-6520m.bin
+      SHA-256 99C52588194E8605CD2EE2F523A90CED2E34AA5DCAE1005E8E69B18B2AC21556
+
+r426 then submitted five valid 2D commands and rejected one 3D sprite. The retained
+packet draws a 5x27 UV rectangle from a 16x32 allocation with a 64-byte row pitch.
+The old decoder incorrectly required the allocation to be the smallest power of two
+around the UV extent. Static producer evidence contradicts that rule:
+`_mbx3DCtxQuadCopyPerspective` at `0x30e1cb68` derives the texture header from its
+allocation arguments while the row pitch arrives independently through context
+offset `+0x14`. The decoder now reconstructs the allocation width from the split
+pitch/header encoding and requires the complete UV rectangle to stay inside it.
+
+This correction also invalidated an old negative test. Flipping one pitch bit can
+describe another valid padded allocation; it is not necessarily malformed. The test
+now breaks the redundant header-width/pitch relationship instead of assuming a
+minimal stride. That failed test was corrected rather than weakened or hidden.
+
+r427 proved the padded allocation live: the formerly rejected packet completed 135
+pixels. The immediately following packet exposed the actual remaining transform: a
+nonzero UV interval `u=5..6`, `v=0..27` magnified into a 63x27 destination. The
+renderer now decodes all four redundant corners of an axis-aligned UV rectangle,
+samples from that origin with the already transcribed Apple software bilinear kernel,
+and clamps taps to the encoded allocation. Direct filtered magnification is accepted
+only when both axes magnify; direct minification, a mixed minify/magnify transform,
+perspective, and unfiltered nonzero-origin copies still reject. Alternate/modulated
+filtered state remains limited to the previously measured uniform minification.
+
+This is a semantic generalisation rather than a literal two-packet whitelist. r428
+replayed the same r425 input and, after the two captured forms, completed five more 3D
+renders and 41 more 2D commands without another decoder change:
+
+| measured r428 result | value |
+|---|---:|
+| 2D commands completed / rejected | 46 / 0 |
+| 2D bytes committed | 758,720 |
+| 3D renders completed / rejected | 7 / 0 |
+| 3D pixels blended | 3,379 |
+| external-media failures | 0 |
+| process exit | 0 |
+
+The display changed for the first time in this chain. Against r423-r427, exactly
+112,573 of 153,600 pixels changed (73.290%), inside `(9,32)-(317,479)`. Visual
+inspection shows a coherent, populated native Settings screen: title, Airplane Mode,
+Wi-Fi, Sounds, Brightness, Wallpaper, General, Mail/Contacts/Calendars, and Phone.
+It is not the earlier blank pinstripe surface and not random/cursed memory:
+
+    work/r428-uv-subrect-6540m/post-resume-6540m.bin
+      SHA-256 2E5A7923C02B790BCFF2B50D597081BC8835E9E105528989ED314DBB5102AA03
+    work/r428-uv-subrect-6540m/w.img.screen.ppm
+      SHA-256 4C7634FDF7543B975C131F036AA3D1F3684897B5AC4AA3920CF57BC45837382E
+
+That is a visible Settings-presentation fix at this checkpoint, not final graphics
+acceptance. r428's desktop meter saw 121 publications and only two changed sampled
+signatures. Its 12 completed windows had mean `0.307`, maximum `1.851`, ten zero
+windows, and none at or above 30 fps.
+
+r429 extended the exact r428 snapshot by another 20 M instructions. It exited zero,
+had zero media failures, submitted no 2D or 3D command, and changed zero framebuffer
+pixels; the PPM stayed byte-identical. Its 101 publications again contained only the
+initial signature (`0.189` mean / `1.888` maximum, nine of ten windows zero, none at
+30 fps). Stability therefore does not become an FPS claim.
+
+More importantly, recovery is still unresolved. r429's fresh MBX trace contains one
+interrupt-mask write, `0x130 <- 0`, and its guest log reports a Graphics Recovery Event
+with `2DIdle=0`, `3DIdle=1`, and `CompletedIntStatus=0x400`, despite no new command in
+that window. The state descends from a chain that previously rejected commands, so this
+run cannot distinguish inherited poisoned driver state from a current completion/
+lifecycle defect. It does prove that clearing the sprite decoder is not sufficient to
+call recovery fixed. A clean pre-recovery continuation and ultimately an
+instruction-zero cold boot remain mandatory:
+
+    work/r429-settings-settle-6560m-retry/post-resume-6560m.bin
+      SHA-256 FC5CB82DB0AD931E23A901DCC35B4C7DE4F1DBF6793BCFADB6B10F57D8F265FD
+
+Current local verification is 753/753 focused MBX assertions, the independent strict
+warnings-as-errors build is green, and all 55/55 tests in the currently configured
+exact suite pass. The PowerVR interpolator still has no hardware bit-exact oracle;
+binary32 producer coordinates plus Apple's co-shipped software kernel remain the stated
+reference. Graphics recovery, 30 fps, a clean cold reproduction, network, sound, and
+iOS-app completion all remain open.

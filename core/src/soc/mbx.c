@@ -1077,15 +1077,17 @@ struct mbx_bilinear_axis {
  * undocumented sub-LSB precision cannot be hardware-oracled here; binary32
  * interpolation is the producer/software-renderer reference and is kept
  * explicit instead of pretending the old contiguous-row shortcut was exact. */
-static bool mbx_bilinear_axis(float origin, float span, float texel_extent,
+static bool mbx_bilinear_axis(float origin, float span,
+                              float texel_origin, float texel_span,
                               uint32_t pixel, uint32_t dimension,
                               struct mbx_bilinear_axis *axis) {
     if (!axis || !dimension || dimension > 512u || span <= 0.0f ||
-        texel_extent < 0.0f)
+        texel_origin < 0.0f || texel_span <= 0.0f)
         return false;
 
-    float step = texel_extent / span;
-    float coordinate = ((float)pixel + 0.5f - origin) * step;
+    float step = texel_span / span;
+    float coordinate = texel_origin +
+                       ((float)pixel + 0.5f - origin) * step;
     float fixed_float = coordinate * 65536.0f;
     if (fixed_float < 0.0f || fixed_float > (float)INT32_MAX) return false;
 
@@ -2527,68 +2529,92 @@ static bool mbx_execute_axis_aligned_sprite(s5l_mbx_t *m,
     uint32_t header_height_field = (quad[1] >> 20) & 7u;
     uint32_t header_texture_width = 8u << header_width_field;
     uint32_t header_texture_height = 8u << header_height_field;
-    uint32_t u_word = half_texel_layout ? quad[30] : quad[35];
-    uint32_t v_word = half_texel_layout ? quad[36] : quad[26];
-    float normalized_u, normalized_v;
-    if (!mbx_3d_word_to_nonnegative_float(u_word, &normalized_u) ||
-        !mbx_3d_word_to_nonnegative_float(v_word, &normalized_v)) {
-        if (why) *why = "sprite UV extents are not finite nonnegative floats";
+    uint32_t u0_word = quad[25];
+    uint32_t v0_word = half_texel_layout ? quad[26] : quad[31];
+    uint32_t u1_word = half_texel_layout ? quad[30] : quad[35];
+    uint32_t v1_word = half_texel_layout ? quad[36] : quad[26];
+    bool uv_rectangle = half_texel_layout
+        ? quad[35] == u0_word && quad[31] == v0_word &&
+          quad[40] == u1_word && quad[41] == v1_word
+        : quad[30] == u0_word && quad[41] == v0_word &&
+          quad[40] == u1_word && quad[36] == v1_word;
+    float normalized_u0, normalized_v0, normalized_u1, normalized_v1;
+    if (!uv_rectangle ||
+        !mbx_3d_word_to_nonnegative_float(u0_word, &normalized_u0) ||
+        !mbx_3d_word_to_nonnegative_float(v0_word, &normalized_v0) ||
+        !mbx_3d_word_to_nonnegative_float(u1_word, &normalized_u1) ||
+        !mbx_3d_word_to_nonnegative_float(v1_word, &normalized_v1)) {
+        if (why) *why =
+            "sprite UVs are not an axis-aligned finite rectangle";
         return false;
     }
-    float u_texel_extent =
-        normalized_u * (float)header_texture_width;
-    float v_texel_extent =
-        normalized_v * (float)header_texture_height;
-    if (u_texel_extent <= 0.0f || v_texel_extent <= 0.0f ||
-        u_texel_extent > 512.0f || v_texel_extent > 512.0f) {
-        if (why) *why = "sprite UV extents leave the supported texture bounds";
+    float u_texel_start =
+        normalized_u0 * (float)header_texture_width;
+    float v_texel_start =
+        normalized_v0 * (float)header_texture_height;
+    float u_texel_end =
+        normalized_u1 * (float)header_texture_width;
+    float v_texel_end =
+        normalized_v1 * (float)header_texture_height;
+    if (u_texel_start >= u_texel_end ||
+        v_texel_start >= v_texel_end ||
+        u_texel_end > 512.0f || v_texel_end > 512.0f ||
+        u_texel_end > (float)header_texture_width ||
+        v_texel_end > (float)header_texture_height) {
+        if (why) *why = "sprite UV rectangle leaves the supported texture bounds";
         return false;
     }
-    uint32_t source_width = (uint32_t)u_texel_extent;
-    uint32_t source_height = (uint32_t)v_texel_extent;
-    source_width += (float)source_width < u_texel_extent;
-    source_height += (float)source_height < v_texel_extent;
+    uint32_t source_left = (uint32_t)u_texel_start;
+    uint32_t source_top = (uint32_t)v_texel_start;
+    uint32_t source_right = (uint32_t)u_texel_end;
+    uint32_t source_bottom = (uint32_t)v_texel_end;
+    source_right += (float)source_right < u_texel_end;
+    source_bottom += (float)source_bottom < v_texel_end;
+    uint32_t source_width = source_right - source_left;
+    uint32_t source_height = source_bottom - source_top;
+    float u_texel_span = u_texel_end - u_texel_start;
+    float v_texel_span = v_texel_end - v_texel_start;
 
-    uint32_t texture_width = 8u, texture_height = 8u;
-    uint32_t width_field = 0u, height_field = 0u;
-    while (texture_width < source_width) {
+    /* The texture allocation and the UV rectangle are independent producer
+     * inputs.  _mbx3DCtxQuadCopyPerspective derives the header power from its
+     * surface-width argument at 0x30e1ced4..0x30e1cf18, while the linear row
+     * bytes arrive independently through context+0x14.  r426 is the first
+     * retained packet whose 5x27 UV rectangle occupies only part of a 16x32,
+     * 64-byte-pitch texture.  Reconstruct the allocation width from the split
+     * pitch; requiring the smallest allocation around the UVs rejects valid
+     * sub-rectangles.
+     *
+     * BGRA8 rows are eight-pixel aligned, so pitch_bytes/16 is even.  Bits
+     * 2..7 stay in source-control bits 18..23 and bit 1 moves to header bit 0.
+     * Bit 0 is consequently zero rather than an omitted unknown. */
+    uint32_t pitch_units = ((source_control >> 16) & 0xfcu) |
+                           ((quad[1] & 1u) << 1);
+    uint32_t source_stride = pitch_units * 16u;
+    uint32_t source_pitch_pixels = source_stride / 4u;
+    uint32_t texture_width = 8u;
+    uint32_t width_field = 0u;
+    while (texture_width < source_pitch_pixels) {
         texture_width <<= 1;
         width_field++;
     }
-    while (texture_height < source_height) {
-        texture_height <<= 1;
-        height_field++;
+    if (!pitch_units || width_field > 7u ||
+        source_pitch_pixels > 512u || header_texture_height > 512u ||
+        source_right > source_pitch_pixels ||
+        source_bottom > header_texture_height) {
+        if (why) *why =
+            "sprite UV rectangle exceeds its encoded texture allocation";
+        return false;
     }
-    uint32_t padded_width = (source_width + 7u) & ~7u;
-    uint32_t source_stride = padded_width * 4u;
-    uint32_t pitch_units = source_stride / 16u;
     uint32_t expected_header = 0xa0018000u |
-        (width_field << 24) | (height_field << 20) |
+        (width_field << 24) | (header_height_field << 20) |
         ((pitch_units & 2u) >> 1);
     uint32_t expected_source_control =
         (half_texel_layout ? 0x8e000000u : 0x0e000000u) |
         ((pitch_units & ~3u) << 16);
     if (quad[1] != expected_header ||
         (quad[2] & ~MBX_3D_ADDRESS_MASK) != expected_source_control) {
-        if (why) *why = "sprite texture dimensions or split pitch are inconsistent";
-        return false;
-    }
-
-    uint32_t expected_u = mbx_3d_float_to_word(
-        u_texel_extent / (float)texture_width);
-    uint32_t expected_v = mbx_3d_float_to_word(
-        v_texel_extent / (float)texture_height);
-    bool uv_matches = half_texel_layout
-        ? quad[25] == 0u && quad[26] == 0u &&
-          quad[30] == expected_u && quad[31] == 0u &&
-          quad[35] == 0u && quad[36] == expected_v &&
-          quad[40] == expected_u && quad[41] == expected_v
-        : quad[25] == 0u && quad[26] == expected_v &&
-          quad[30] == 0u && quad[31] == 0u &&
-          quad[35] == expected_u && quad[36] == expected_v &&
-          quad[40] == expected_u && quad[41] == 0u;
-    if (!uv_matches) {
-        if (why) *why = "sprite UV rectangle disagrees with its source size";
+        if (why) *why =
+            "sprite texture allocation or split pitch is inconsistent";
         return false;
     }
 
@@ -2602,14 +2628,17 @@ static bool mbx_execute_axis_aligned_sprite(s5l_mbx_t *m,
         float scale_y = dy / (float)source_height;
         float scale_difference = scale_x > scale_y
             ? scale_x - scale_y : scale_y - scale_x;
-        if (!half_texel_layout || direct_sampler ||
-            (!modulated_sampler && !scaled_sampler) ||
-            source_width > MBX_3D_WIDTH ||
-            source_height > 480u || scale_x <= 0.0f || scale_y <= 0.0f ||
-            scale_x > 1.0f + epsilon || scale_y > 1.0f + epsilon ||
-            scale_difference > 0.00001f) {
+        bool direct_magnification = direct_sampler && half_texel_layout &&
+            scale_x >= 1.0f - epsilon && scale_y >= 1.0f - epsilon;
+        bool measured_minification = !direct_sampler && half_texel_layout &&
+            (modulated_sampler || scaled_sampler) &&
+            scale_x > 0.0f && scale_y > 0.0f &&
+            scale_x <= 1.0f + epsilon && scale_y <= 1.0f + epsilon &&
+            scale_difference <= 0.00001f;
+        if (source_width > MBX_3D_WIDTH || source_height > 480u ||
+            (!direct_magnification && !measured_minification)) {
             if (why) *why =
-                "scaled sprite is not the measured uniform filtered minification";
+                "filtered transform is neither measured magnification nor uniform minification";
             return false;
         }
     } else if (scaled_sampler) {
@@ -2731,7 +2760,8 @@ static bool mbx_execute_axis_aligned_sprite(s5l_mbx_t *m,
             raster_right_unclipped - raster_left_unclipped;
         int32_t full_raster_height =
             raster_bottom_unclipped - raster_top_unclipped;
-        if (full_raster_width != (int32_t)source_width ||
+        if (source_left != 0u || source_top != 0u ||
+            full_raster_width != (int32_t)source_width ||
             full_raster_height != (int32_t)source_height ||
             raster_left < raster_left_unclipped ||
             raster_top < raster_top_unclipped ||
@@ -2824,8 +2854,9 @@ static bool mbx_execute_axis_aligned_sprite(s5l_mbx_t *m,
         uint32_t minimum_x = UINT32_MAX, minimum_y = UINT32_MAX;
         uint32_t maximum_x = 0u, maximum_y = 0u;
         for (uint32_t x = 0; x < width; x++) {
-            if (!mbx_bilinear_axis(x0, dx, u_texel_extent, left + x,
-                                   source_width, &x_axis[x])) {
+            if (!mbx_bilinear_axis(x0, dx, u_texel_start, u_texel_span,
+                                   left + x, source_pitch_pixels,
+                                   &x_axis[x])) {
                 if (why) *why = "filtered sprite has an invalid horizontal sample";
                 return false;
             }
@@ -2833,8 +2864,9 @@ static bool mbx_execute_axis_aligned_sprite(s5l_mbx_t *m,
             if (x_axis[x].second > maximum_x) maximum_x = x_axis[x].second;
         }
         for (uint32_t y = 0; y < height; y++) {
-            if (!mbx_bilinear_axis(y0, dy, v_texel_extent, top + y,
-                                   source_height, &y_axis[y])) {
+            if (!mbx_bilinear_axis(y0, dy, v_texel_start, v_texel_span,
+                                   top + y, header_texture_height,
+                                   &y_axis[y])) {
                 if (why) *why = "filtered sprite has an invalid vertical sample";
                 return false;
             }
