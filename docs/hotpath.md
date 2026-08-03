@@ -4843,3 +4843,67 @@ validate them with code-page generations instead of a live comparison per word, 
 both ARM and Thumb, keep common semantics inside the trace, and clear a double-digit
 restored A/B gate. A trace cache that still calls `arm_step` or validates every word is
 already contradicted by r474--r486 and should not be built.
+
+### r488: the cap-16 generation-validated trace is correct and 20.73% slower
+
+r488 implemented the exact experiment r487 justified, behind a default-off compile and
+runtime gate. A direct-mapped 4,096-entry cache held up to sixteen decoded operations per
+physical trace head. Each traced 1 KiB RAM block had a 64-bit write generation and an
+active byte; ordinary RAM writes advanced only active generations, so a trace performed
+one coherency comparison at entry rather than one live raw comparison per instruction.
+The runner used direct computed-goto handlers for common ARM data-processing, branch and
+single-transfer forms, retained multiply/media/block/extra/VFP helpers inside the trace,
+and executed Thumb through its decoded helper without returning to `arm_step`. Timer,
+interrupt, MMIO, fault, mapping/state and self-modifying-code boundaries remained exact.
+Because the external-media bridges can copy directly into guest RAM inside a privileged
+SVC callback, every host SVC conservatively flushed decoded data before the callback.
+
+The correctness work again found no excuse for the speed result. The strict gated build
+was warning-clean and passed 55/55 tests. Its differential oracle completed 8,192 A32
+encodings under two generated CPU states plus 4,096 Thumb encodings, repeatedly rewrote
+the same physical code block, compared CPU/RAM/unmapped/dirty state after every step,
+compared the final serialized machines, and executed a real sixteen-instruction batch.
+Focused coherency cases proved both difficult paths: a guest store rewrote the next
+already-decoded instruction, and a privileged SVC directly bypassed the bus to rewrite
+the next instruction. Both executed the new word, not stale metadata. The final machine
+test reported 5,848 assertions and zero failures.
+
+The same-binary Release/LTO restored bracket used the exact r445 7.100 B checkpoint and
+retired 100 M instructions per arm:
+
+| order | runtime path | rate |
+|---:|---|---:|
+| 1 | literal control | 17.465669 M/s |
+| 2 | cap-16 trace | 13.605587 M/s |
+| 3 | cap-16 trace | 13.544812 M/s |
+| 4 | literal control | 16.784660 M/s |
+| mean | literal / trace | 17.125165 / 13.575200 M/s (**-20.73%**) |
+
+The counters explain why the optimistic model did not become an implementation result.
+Each enabled arm retired 94,580,945 instructions inside the runner, including 13,951,813
+Thumb instructions, but required 23,562,386 entries: only **4.014 retirements per entry**,
+not r487's modeled 6.752. The cache hit 19,540,250/23,557,347 lookups (**82.95%**), built
+4,017,097 traces, took 9,284,886 literal exits and flushed 2,098 times. It observed
+38,577,243 RAM-write notifications and exactly zero active-code-page invalidations. Thus
+real self-modification was not destroying reuse; short semantic boundaries, head
+diversity/collisions, trace construction, generation bookkeeping, computed dispatch and
+the still-per-instruction semantic helpers cost far more than fetch/decode elimination
+saved.
+
+Every arm stopped at exactly 7.200 B with status OK and empty stderr. All work images
+matched SHA-256
+`8A59C388C481165F460984926AA5FFB1B72A0E9030216CD0038DE9B3264B79FE`; every PPM matched
+`2EAE64986CFA1A34E25FC0D67DACC9E220E2262E9214BE2DAD775FD4518B266A`. No real-workload
+end snapshot was written, so the hashes are not a complete serialized-state claim.
+
+The trace engine, generation arrays, machine hooks, counters and tests were removed in
+full. No r488 performance code ships, and phone FPS remains the reported 0--4. This is
+stronger negative evidence than r486: even broad ARM/Thumb coverage and page-generation
+coherency make this portable C trace-over-existing-helpers shape dramatically worse.
+Tweaking associativity, cap length or the inactive-write check would be whack-a-mole
+against a 20.73% loss and the still-unclosed 2.18x target gap. A credible no-JIT successor
+must replace, not wrap, the per-instruction semantic/memory machinery--most plausibly a
+host-specific static AArch64 interpreter with guest registers and fast memory state held
+in host registers. That is a substantially larger and device-dependent project. No
+current measurement proves it can reach 30 FPS, and optimism should now be lower, not
+higher.
