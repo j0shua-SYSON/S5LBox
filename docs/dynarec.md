@@ -1319,6 +1319,34 @@ runner work is also insufficient. These are design gates, not a claim that the b
 engine will be fast: synthetic ALU and load/store rows, differential state, restored
 real-guest timing and eventual cold/on-device acceptance still decide whether it lives.
 
+#### 7.6.3 r476-r479 reject the broad helper-calling engine too
+
+The r473 shape was implemented once, behind a default-off compile gate. It used 4-way
+4,096-entry caching, 16-word blocks, live raw-word validation, 1 KiB fetch boundaries,
+terminal stores/branches, immediate MMIO exits and an exact next-timebase-edge budget.
+It covered safe DP, multiply/media, non-PC single/block loads and VFP
+compute/register/load through the interpreter's existing exact helpers. Synthetic
+differential checks passed 74/74; the complete gated/default-off suites passed 56/56
+and 59/59.
+
+The actual `--run-api` restored gate rejected it. The literal r476 control ran at
+14.607785 M/s. The broad engine ran at 13.501772 M/s (**-7.57%**). Removing the known
+Thumb dispatch tax and executing classified one-uop/terminal entries raised coverage to
+8,136,439 of 10 M instructions (81.364%) but r478 still managed only 13.559337 M/s
+(**-7.18%**). A final disabled control reached 15.535040 M/s; host drift does not rescue
+the candidate because both controls beat both tightly grouped engine runs.
+
+All compared runs stopped OK at the same PC/CPSR with byte-identical work-image and PPM
+hashes and zero media failures. No end snapshot was written, so the evidence is not a
+whole-machine serialization comparison. The engine source was removed in full.
+
+This closes the loophole left by r471. Coverage was no longer narrow; cached helper uops
+owned most of the interval and still lost because lookup, raw validation, uop dispatch
+and the same semantic-helper calls outweighed fetch/top-level-decode savings. Do not
+build a third portable helper-calling cache by adding more opcodes or entries. A new
+non-JIT execution strategy must remove materially more per-instruction semantic and
+dispatch work before another restored gate is justified.
+
 ### 7.7 Self-modifying code, kexts, and paging
 
 Covered by §3.6. The point worth repeating: the dangerous case in this project is

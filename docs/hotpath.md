@@ -4457,3 +4457,58 @@ byte-identical 466,825,216-byte work images at SHA-256
 `1EF63FFE3EEFD976416E17120A36BA074BF295EA0955D716E2D345FCC5EA0A9E`. No end snapshots
 were written, and the profiler intentionally changes derived TLB counters, so this is
 not a serialized-machine-state equality claim.
+
+### r474-r479: the broad mixed ARM block engine is correct and still slower
+
+r473 justified exactly one broader portable prototype. It was built behind a default-off
+compile gate with a same-binary runtime switch, not slipped into the shipping interpreter.
+The cache was 4-way/4,096-entry, capped blocks at 16 A32 words, validated every live raw
+word on a hit, stopped at the 1 KiB fetch-permission boundary, treated every branch and
+store as terminal, exited immediately after an MMIO access raised `level_dirty`, and let
+the machine cap every call at the next exact timebase edge. Its uops called the existing
+DP, multiply, media, load/store, VFP and branch semantic helpers. A dedicated same-binary
+differential suite passed 74/74 checks, the complete gated build passed 56/56 tests, and
+the unchanged default-off strict/JIT build passed 59/59.
+
+The first timing pair, r474-r475, is **invalid as an engine comparison** and is retained
+to prevent its attractive false result being reused. The default `bootkernel` diagnostic
+loop calls `arm_step()` directly so it can observe every boundary; both runs reported
+zero block calls. Their 71.36 s versus 12.81 s wall times were cold/warm host setup and
+file-cache noise, not a 5.57x emulator gain. `--run-api` is the app-facing path that
+actually calls `s5l8900_run()` and times only its 100,000-instruction chunks.
+
+The valid restored results, all from the exact r445 7.100 B checkpoint through 7.110 B,
+were:
+
+| run | path | rate | change versus r476 |
+|---|---|---:|---:|
+| r476 | same binary, engine disabled | 14.607785 M/s | control |
+| r477 | broad mixed engine | 13.501772 M/s | **-7.57%** |
+| r478 | skip Thumb dispatch; execute classified one-uop/terminal entries | 13.559337 M/s | **-7.18%** |
+| r479 | same binary, engine disabled, repeated last | 15.535040 M/s | +6.35% control drift |
+
+The two controls moved with host frequency/load, but both were faster than both engine
+runs; the engine runs themselves differed by only 0.43%. r478 made 3,058,496 engine
+calls and retired 8,136,439 of the 10 M instructions through cached uops (**81.364%**),
+including 2,111,246 terminal instructions. It recorded 2,852,633 cache hits, 205,863
+misses/builds, 482,821 negative hits, 201,767 replacements, 28,137 MMIO exits, 2,096,905
+control exits and 508,003 literal fallbacks. This is not another low-coverage failure:
+predecode covered most of the interval and still lost. Cache lookup, raw validation,
+uop dispatch and calls back into the same per-instruction semantic helpers cost more than
+the removed fetch/top-level-decode/runner work.
+
+Correctness checks passed at the available boundary. Every valid A/B retired exactly
+10 M instructions with status OK, final PC/CPSR `0x312092bc`/`0x20000010`, zero external
+media failures, byte-identical 466,825,216-byte work images at SHA-256
+`8A59C388C481165F460984926AA5FFB1B72A0E9030216CD0038DE9B3264B79FE`, and byte-identical
+460,815-byte PPMs at
+`1EF63FFE3EEFD976416E17120A36BA074BF295EA0955D716E2D345FCC5EA0A9E`. No end snapshot was
+written, so this is not a whole-serialized-machine equality claim.
+
+The broad engine, gate, cache, counters and tests were removed in full. r472-r473's
+profiler remains because it answers a real workload question. The rejected conclusion
+is now stronger: a third portable block cache that merely predecodes more instructions
+and calls the same interpreter helpers is not a credible route to 30 FPS. Another
+attempt requires a materially different way to remove semantic-helper and dispatch work,
+plus the same restored and eventual on-device/cold-boot gates. Current desktop cadence
+and the phone's observed 0-4 FPS are unchanged by this rejected experiment.
