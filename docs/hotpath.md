@@ -4512,3 +4512,55 @@ and calls the same interpreter helpers is not a credible route to 30 FPS. Anothe
 attempt requires a materially different way to remove semantic-helper and dispatch work,
 plus the same restored and eventual on-device/cold-boot gates. Current desktop cadence
 and the phone's observed 0-4 FPS are unchanged by this rejected experiment.
+
+### r480-r481: the iOS binary is optimized, but the measured renderer was not named
+
+r480 audited the exact hosted iOS artifact at commit
+`3a8f11b292d3a647172b40785d314ef562069c1e`, rather than inferring its build mode from
+project files. The archive used the Release configuration, the device `iphoneos` SDK and
+the arm64 architecture; the compiler response and scan commands contained `-O3` and
+`-flto`. The 0-4 FPS seen on the phone therefore cannot honestly be blamed on an
+accidental Debug or stale `-Os` build.
+
+The app already keeps raw interpreter throughput and visual cadence separate. It calls
+`s5l8900_run()` in 100,000-instruction chunks, publishes at most 30 status updates per
+second, reports raw Minsn/s, and counts a frame only when its sampled framebuffer
+signature changes. That change test happens on the emulator thread before the UIKit
+presentation copies. The presentation path is not free, but it cannot explain away a
+counter that already observed only 0-4 changed guest frames per second.
+
+There is a more important comparability problem: a new app machine defaults to the CPU
+software renderer (`mbx=false`, `ca-software-render=true`). The desktop restored cadence
+used MBX. Selecting **Experimental MBX** in Settings affects machines created afterward;
+the choice is written into the new work image, so changing the setting does not convert
+an existing machine. The phone's 0-4 FPS remains the real user-visible result, but it is
+not a valid measurement of the MBX path until a genuinely new Experimental-MBX machine
+reports both Minsn/s and FPS. MBX is not made the default on this evidence alone: it still
+owes a real-device run and the mandatory final cold-boot acceptance.
+
+r481 tested one profile-backed but deliberately small core change while waiting for that
+device split. All valid VFP groups, 17.095% of the measured restored stream, were checked
+before the long block/extra/exclusive/SWP decode tail while retaining the same
+`vfp_execute()` semantics. The full default suite passed 55/55. Four isolated 100 M
+restored arms from 7.100 B to 7.200 B produced:
+
+| bracket | original order | VFP-first order | VFP-first delta |
+|---|---:|---:|---:|
+| first | 17.328997 M/s | 17.494201 M/s | +0.95% |
+| reverse | 16.549839 M/s | 17.050470 M/s | +3.02% |
+| arithmetic mean | 16.939418 M/s | 17.272336 M/s | **+1.97%** |
+
+Every valid arm retired exactly 100 M instructions with status OK and zero external-media
+failures. All work images matched SHA-256
+`8A59C388C481165F460984926AA5FFB1B72A0E9030216CD0038DE9B3264B79FE`; all final PPMs
+matched `2EAE64986CFA1A34E25FC0D67DACC9E220E2262E9214BE2DAD775FD4518B266A`.
+One earlier invocation never ran because the harness correctly refused to overwrite an
+existing work image, and is excluded rather than presented as a failed candidate run.
+
+The dispatch reorder was reverted completely. Roughly 2% is correct but not substantial,
+does not move either measured platform close to 30 FPS, and does not justify another
+decode-order whack-a-mole series. No r481 candidate source remains. The next core
+prototype must remove work across the dominant mixed stream--for example by fusing or
+specializing semantics rather than putting another cache in front of the existing
+per-instruction helpers--and must earn its keep in restored A/B measurements before it
+can reach the app.
