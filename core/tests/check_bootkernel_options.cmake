@@ -165,6 +165,29 @@ expect_config(frame_meter_requires_and_accepts_framebuffer
 expect_refused(frame_meter_without_framebuffer
     "--frame-meter requires --framebuffer"
     absent-kernel --frame-meter --print-config)
+# The app-facing throughput path is host-only too. NAT defaults on but is inert
+# while PPP is off, so the ordinary configuration must remain accepted; the
+# first live attempt caught an over-broad gate that rejected this exact case.
+expect_config(run_api_accepts_the_default_inert_nat
+    "nat=1|ppp=0|--run-api"
+    absent-kernel --run-api --print-config)
+# Checkpoints do not need an instruction callback: the runner shortens its next
+# 100000-instruction chunk to land on the exact absolute boundary.
+expect_config(run_api_accepts_exact_checkpoints
+    "snapshot-at count    1|--run-api"
+    absent-kernel --run-api -n 100 --snapshot-at 100 absent-snapshot
+    --print-config)
+# By contrast these need work at a particular instruction. Refusing them is
+# what prevents a fast run from silently executing a different request.
+expect_refused(run_api_refuses_scheduled_input
+    "--run-api cannot be combined"
+    absent-kernel --run-api --touch 1000:160:240 --print-config)
+expect_refused(run_api_refuses_hle
+    "--run-api cannot be combined"
+    absent-kernel --run-api --hle --print-config)
+expect_refused(run_api_refuses_frame_meter
+    "--run-api cannot be combined"
+    absent-kernel -F --run-api --frame-meter --print-config)
 # -g was never a pure --mbx: it has always implied -F and v_display=1 as well.
 expect_config(short_g_is_the_whole_graphics_experiment
     "framebuffer=1|iomfb-display=1|mbx=1"

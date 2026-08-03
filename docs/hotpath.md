@@ -4000,3 +4000,76 @@ this SpringBoard interval. The retained semantics checkpoint is
 `work/r453-real-guest-flags-ab/pair2-new/post-7202m.bin`. It is a checkpoint, not a
 30 fps result. The 30 fps target, current-device measurement, and final cold boot all
 remain open.
+
+### r455-r457: measure the app loop, not bootkernel's observers
+
+r455's first real-guest sampling profile exposed a flaw in the performance gate above.
+Even with `--fast`, 48.51% of samples landed in `bootkernel`'s `main`, including
+unconditional PC naming and diagnostic bookkeeping around every instruction. That tool
+loop is valuable when the requested evidence needs instruction boundaries, but its
+elapsed time is not the app's interpreter time. Consequently r453/r454 remain valid
+semantic comparisons and a valid rejection of packed NZCV in that harness; their raw
+2.5 M-instruction/s rates do **not** describe `VMEngine`.
+
+`bootkernel --run-api` closes that measurement error. It calls the public
+`s5l8900_run()` entry point in at most 100,000-instruction chunks, exactly matching the
+iOS app's current chunk size, and times only those calls. It retains CPU, MMU, device
+tick, framebuffer, MBX, and external-media execution. A pending snapshot shortens the
+next chunk, so an absolute `--snapshot-at` boundary stays exact and checkpoint I/O is
+outside the timed calls. Features that require an instruction callback are refused
+rather than silently lost: scheduled input, HLE, frame metering, call probes, PPP,
+stop-on-abort, and the per-instruction diagnostic windows. Default NAT remains accepted
+because it is inert while PPP is off; the first live preflight incorrectly rejected
+that ordinary configuration, and its regression test now fixes the distinction.
+
+r456 restored r448's 7.102 B checkpoint and retired 100 M instructions through this
+path. It made 1,000 calls in 6.371434 timed seconds, or **15.695053 M instructions/s**,
+and stopped exactly at 7.202 B with exit zero, 15,626 external-media reads, 469 writes,
+and zero failures. The media image, bridge sidecar, live work image, and framebuffer
+are byte-identical to r453's literal-step reference:
+
+| artifact | SHA-256 |
+|---|---|
+| snapshot media / live work image | `8A59C388C481165F460984926AA5FFB1B72A0E9030216CD0038DE9B3264B79FE` |
+| snapshot bridge state | `A3D8E6DC89261FD57A257FF098301331C4C6D447CCBF79B93DF74AE3A358B133` |
+| terminal framebuffer | `1C8A5E2BA060F35424B643D4F93AA6CBE55572E8BEEA78AB2A3696198B35F581` |
+
+The machine snapshot is deliberately not called byte-identical. A byte comparison
+found differences only in serialized TLB counters and the final snapshot checksum:
+the diagnostic reference has 838,477,965 hits / 18,170,600 misses / 138,584 flushes,
+while `--run-api` has 838,433,853 / 18,170,596 / 138,584. The extra 44,112 hits and
+four misses came from diagnostic observer translations; they are measurements, not
+architectural guest state. The `--run-api` snapshot itself is retained at
+`work/r456-run-api-equivalence/post-7202m.bin` with SHA-256
+`0AF1F236B5F817C81ABE10664B545F1B6EB2DAA0144D2FC1BF29BFA3DCB875E4`.
+
+r457 then restored the same 7.102 B state and sampled 500 M instructions through the
+new path. Its 5,000 calls took 34.314912 timed seconds, or **14.570925 M
+instructions/s**. The lean flat profile is no longer dominated by the tool:
+
+| function | sampled time |
+|---|---:|
+| `arm_step` | 34.39% |
+| `exec_data_processing` | 7.16% |
+| `vfp_execute_inner` | 5.81% |
+| `arm_cond_passed` | 5.58% |
+| `mbx_execute_textured_sprite` | 5.34% |
+| `s5l8900_run` | 5.25% |
+| `thumb_step` | 5.07% |
+| `arm_mmu_translate` | 4.09% |
+| `alu_add` | 1.49% |
+| `s5l8900_refresh` | 0.84% |
+
+This profile explains the packed-NZCV null result: even eliminating `alu_add` entirely
+could recover only 1.49% of this interval. It also selects a more plausible generic
+next test: the current ARM loop calls `arm_cond_passed()` for every ordinary ARM
+instruction, including unconditional `AL` instructions, and the helper extracts all
+four flags before dispatching its condition.
+
+No FPS was measured in r456 or r457 because `--run-api` intentionally has no scanout
+observer. Dividing 14.570925 M instructions/s by r446's 0.967838 M-instruction mean
+changed-scanout gap projects roughly **15.1 changes/s**, but that crosses runs and is
+only a throughput-derived estimate. The latest direct r446 measurement remains 3.088
+mean / 5.984 maximum changes/s in the instrumented desktop harness. Neither number is
+iOS-device FPS, neither proves the current app cadence, and neither meets 30. A direct
+app-equivalent publication measurement and the final cold boot remain required.

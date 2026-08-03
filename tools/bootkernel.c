@@ -24715,7 +24715,7 @@ static void boot_print_usage(FILE *stream, const char *argv0) {
             "          [--call-probe-kernel <kernel-mode-pc>] ...\n"
             "          [--touch <at>:<x>:<y>[:<hold>]] ...\n"
             "          [--drag <at>:<x0>:<y0>:<x1>:<y1>[:<steps>[:<span>]]] ...\n"
-            "          [--fast] [--frame-meter]\n"
+            "          [--fast] [--run-api] [--frame-meter]\n"
             "          [--pinch <at>:<ax0>:<ay0>:<ax1>:<ay1>:<bx0>:<by0>:"
             "<bx1>:<by1>[:<steps>[:<span>]]] ...\n"
             "          [--button <name>:<at>[:<hold>]] ...\n"
@@ -24736,6 +24736,17 @@ static void boot_print_usage(FILE *stream, const char *argv0) {
             "  --fast  skip the expensive per-instruction trace block. This\n"
             "      changes host overhead, not emulated hardware; diagnostic\n"
             "      reports are intentionally reduced.\n"
+            "  --run-api  execute in the app's 100000-instruction\n"
+            "      s5l8900_run() chunks and time only those chunks. This skips\n"
+            "      every per-instruction host observer while retaining CPU,\n"
+            "      MMU, device tick, framebuffer, MBX, and external-md guest\n"
+            "      behavior. Exact --snapshot-at boundaries are supported, but\n"
+            "      scheduled input, HLE, PPP/NAT, frame-meter, call probes, and\n"
+            "      per-instruction diagnostic requests are refused rather than\n"
+            "      silently ignored. The final diagnostic report is necessarily\n"
+            "      sparse; TLB counters omit observer translations and therefore\n"
+            "      differ from a literal diagnostic run even when guest state is\n"
+            "      identical. This mode is for app-facing throughput A/B tests.\n"
             "  --frame-meter  mirror the iOS app's changed-published-frame\n"
             "      counter: check after 100000-instruction chunks, regularly\n"
             "      publish at most 30 Hz plus the app's terminal publication,\n"
@@ -24973,6 +24984,10 @@ int main(int argc, char **argv) {
     /* --fast: skip the per-instruction observational block in the hot loop.
      * Throughput mode. See the block itself for what is given up. */
     bool fast_hot = false;
+    /* --run-api: use the same interpreter entry point and chunk size as the
+     * iOS app. Unlike --fast, this bypasses every instruction-granularity host
+     * observer; the coherence gate below refuses features that need one. */
+    bool run_api_hot = false;
     /* --frame-meter: host-only publication observer beside --fast, not an
      * emulated-machine toggle and therefore not snapshot state. */
     bool frame_meter_requested = false;
@@ -25243,6 +25258,11 @@ int main(int argc, char **argv) {
          * suppressed nothing, and produced a report byte-identical to a normal
          * run. That identical report is what caught it. */
         if (!strcmp(argv[i], "--fast")) { fast_hot = true; continue; }
+        if (!strcmp(argv[i], "--run-api")) {
+            run_api_hot = true;
+            fast_hot = true;
+            continue;
+        }
         if (!strcmp(argv[i], "--frame-meter")) {
             frame_meter_requested = true;
             continue;
@@ -26275,6 +26295,24 @@ int main(int argc, char **argv) {
         fprintf(stderr,
                 "--hle and --hle-verify are mutually exclusive: one replaces "
                 "guest routines and the other must execute them unchanged\n");
+        return 1;
+    }
+
+    /* s5l8900_run() deliberately has no instruction-boundary callback. Every
+     * item below either changes guest state between instructions or promises a
+     * diagnostic at that boundary, so accepting it here would make --run-api
+     * fast by quietly doing less than the command line requested. Snapshot
+     * boundaries remain exact: the runner shortens a chunk to the next one. */
+    if (run_api_hot &&
+        (frame_meter_requested || call_probe_n || touch_n || drag_n ||
+         pinch_n || button_n || cfg.v.hle || cfg.v.hle_verify || ppp ||
+         stop_on_abort || heartbeat || hot_page_given || win_lo != 0u ||
+         win_hi != UINT64_MAX || ktail != 512u)) {
+        fprintf(stderr,
+                "--run-api cannot be combined with frame-meter, call probes, "
+                "scheduled input, HLE, PPP/NAT, stop-on-abort, -Z, -H, -W, "
+                "or a non-default -T: those require per-instruction host "
+                "observation\n");
         return 1;
     }
 
@@ -28315,7 +28353,70 @@ external_md_work_ready:
      * struct that every observer in the loop could in principle have written.
      */
     const bool call_probe_active = G.call_probe_n != 0u;
-    for (; n < steps; n++) {
+    if (run_api_hot) {
+        /* VMEngine.m uses this exact chunk size. Keep the benchmark on the
+         * public app entry point instead of inventing a larger desktop-only
+         * batch that might make call overhead disappear. A pending snapshot
+         * shortens one chunk so its architectural boundary remains exact. */
+        const unsigned app_chunk =
+            (unsigned)FRAME_METER_CHUNK_INSTRUCTIONS;
+        uint64_t run_calls = 0u;
+        uint64_t run_retired = 0u;
+        double run_seconds = 0.0;
+        bool timing_valid = true;
+
+        printf("run api    : s5l8900_run chunks <= %u; timer %s; "
+               "per-instruction host observers disabled\n",
+               app_chunk, FRAME_METER_TIMER);
+        fflush(stdout);
+
+        while (mach.cpu.cycles < steps) {
+            uint64_t boundary = steps;
+            for (unsigned s = 0; s < nsnaps; s++) {
+                if (!snaps[s].done && snaps[s].at < boundary)
+                    boundary = snaps[s].at;
+            }
+
+            if (boundary == mach.cpu.cycles) {
+                if (!save_due_snapshots(&mach, snaps, nsnaps)) return 4;
+                continue;
+            }
+
+            uint64_t remaining = boundary - mach.cpu.cycles;
+            unsigned chunk = remaining > app_chunk
+                           ? app_chunk : (unsigned)remaining;
+            double before = frame_meter_now_seconds();
+            unsigned ran = s5l8900_run(&mach, chunk, &st);
+            double after = frame_meter_now_seconds();
+            run_calls++;
+            run_retired += ran;
+            if (before < 0.0 || after < before) timing_valid = false;
+            else if (timing_valid) run_seconds += after - before;
+
+            n = mach.cpu.cycles;
+            if (!save_due_snapshots(&mach, snaps, nsnaps)) return 4;
+            if (ran != chunk) break;
+        }
+
+        G.hot_now = mach.cpu.cycles;
+        last_pc = mach.cpu.r[15];
+        last_cpsr = mach.cpu.cpsr;
+        last_mmu_enabled =
+            (mach.cpu.cp15.sctlr & ARM_SCTLR_M) != 0u;
+        if (timing_valid && run_seconds > 0.0) {
+            printf("run api    : calls=%" PRIu64 " retired=%" PRIu64
+                   " timed=%.6f s rate=%.6f Minsn/s%s\n",
+                   run_calls, run_retired, run_seconds,
+                   (double)run_retired / run_seconds / 1000000.0,
+                   nsnaps ? " (checkpoint I/O excluded from timed calls)" : "");
+        } else {
+            printf("run api    : calls=%" PRIu64 " retired=%" PRIu64
+                   " timing INVALID (%s)\n",
+                   run_calls, run_retired, FRAME_METER_TIMER);
+        }
+        fflush(stdout);
+    } else {
+        for (; n < steps; n++) {
         G.hot_now = n;
         last_pc = mach.cpu.r[15];
         last_cpsr = mach.cpu.cpsr;
@@ -28783,6 +28884,7 @@ external_md_work_ready:
             if (stop_on_abort) { n++; break; }
         }
 
+        }
     }
 
     if (frame_meter.enabled)
