@@ -2755,12 +2755,22 @@ static bool mbx_execute_axis_aligned_sprite(s5l_mbx_t *m,
     uint32_t source_x0 = 0u, source_y0 = 0u;
     if (!half_texel_layout) {
         /* The 0x0e producer order is unfiltered.  Its integer-sized unity
-         * transform must still select one strict contiguous source crop. */
+         * transform must still select one strict contiguous source crop.
+         * The crop does not have to begin at texture origin: r430 copies
+         * source rows 20..479 to destination rows 20..479 from a 320x480
+         * surface inside a 512x512 allocation.  Require integer UV edges so
+         * this remains a direct texel copy rather than inventing nearest-
+         * neighbour semantics for fractional unfiltered coordinates. */
         int32_t full_raster_width =
             raster_right_unclipped - raster_left_unclipped;
         int32_t full_raster_height =
             raster_bottom_unclipped - raster_top_unclipped;
-        if (source_left != 0u || source_top != 0u ||
+        bool integer_source_rectangle =
+            u_texel_start == (float)source_left &&
+            v_texel_start == (float)source_top &&
+            u_texel_end == (float)source_right &&
+            v_texel_end == (float)source_bottom;
+        if (!integer_source_rectangle ||
             full_raster_width != (int32_t)source_width ||
             full_raster_height != (int32_t)source_height ||
             raster_left < raster_left_unclipped ||
@@ -2771,10 +2781,12 @@ static bool mbx_execute_axis_aligned_sprite(s5l_mbx_t *m,
                 "unfiltered sprite coverage is not a contiguous 1:1 crop";
             return false;
         }
-        source_x0 = (uint32_t)(raster_left - raster_left_unclipped);
-        source_y0 = (uint32_t)(raster_top - raster_top_unclipped);
-        if (source_x0 + width > source_width ||
-            source_y0 + height > source_height) {
+        source_x0 = source_left +
+                    (uint32_t)(raster_left - raster_left_unclipped);
+        source_y0 = source_top +
+                    (uint32_t)(raster_top - raster_top_unclipped);
+        if (source_x0 + width > source_right ||
+            source_y0 + height > source_bottom) {
             if (why) *why = "unfiltered sprite crop exceeds its source";
             return false;
         }

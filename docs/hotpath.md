@@ -3640,3 +3640,56 @@ exact suite pass. The PowerVR interpolator still has no hardware bit-exact oracl
 binary32 producer coordinates plus Apple's co-shipped software kernel remain the stated
 reference. Graphics recovery, 30 fps, a clean cold reproduction, network, sound, and
 iOS-app completion all remain open.
+
+### r430-r431: clean replay clears the unfiltered integer-crop family
+
+r429 could not distinguish a current lifecycle fault from recovery state inherited from
+earlier rejected commands. r430 therefore restarted from r384's instruction-zero,
+cold-derived pre-drag checkpoint at 3.90 B, before that lineage had recorded a Graphics
+Recovery Event. Replaying the same unlock drag through 4.60 B completed 259/259 2D
+commands (28,658,364 bytes) and 114/115 3D renders (3,517,009 pixels) without a recovery
+event. The one retained rejection was real: an unfiltered 1:1 sprite selected source
+rows 20..479 and destination rows 20..479 from a 320x480 surface stored inside a 512x512
+allocation. The old decoder incorrectly required every unfiltered crop to begin at
+texture origin.
+
+The decoder now accepts an unfiltered nonzero-origin rectangle only when all four UV
+edges are exact integers, the full raster is 1:1 with that rectangle, and the clipped
+copy remains inside the independently recovered source bounds. Fractional unfiltered
+coordinates still reject atomically; there is no guessed nearest-neighbour rule. The
+retained source had alpha 0..127 and uniform vertex alpha `0x01`, so Apple's measured
+eight-bit modulation makes the command a pixel no-op. Exact offline replay left all
+153,600 target pixels byte-identical while changing completion status from `0` to
+`0x4c`. That unchanged image is expected arithmetic, not proof obtained by ignoring the
+command:
+
+    work/r430-clean-unlock-replay-4600m/post-replay-4600m.bin
+      SHA-256 696D31F4488F671A695CDE42B54082AD169AD6765DFBFF9B9C214E6110160202
+    work/r430-derived-complete-lower-crop-4600m/post-crop-4600m.bin
+      SHA-256 60246426A34D7E9B5B52524A0259DE4ACF7F4015A956CA3D60D1DCBCF3D97710
+
+r431 resumed that derived completion with the corrected live binary through 4.80 B. It
+did not stop at the next literal packet: it completed **40/40 2D commands**
+(16,716,880 bytes) and **384/384 3D renders** (2,862,526 pixels), with zero decoder
+rejections, zero Graphics Recovery Events, zero raw external-media guest errors, and a
+zero process exit. Against r430's status-bar-only frame, 110,826 pixels changed inside
+`(0,3)-(320,480)` and nonblack pixels rose from 955 to 110,823. Visual inspection shows
+a coherent native Home screen with icons, dock, status bar, and the `Edit Home Screen`
+alert. This is broad live-family progress and clean-state evidence against r429's
+inherited-recovery interpretation; it is not yet a final cold-boot proof that recovery
+can never recur:
+
+    work/r431-clean-after-lower-crop-4800m/post-resume-4800m.bin
+      SHA-256 41946051A1EA97B28874935D4DE2E4F83E1B555B9BF18E074B3E9FAD45D52D81
+    work/r431-clean-after-lower-crop-4800m/w.img.screen.ppm
+      SHA-256 F4D5F756A02A66C134A165548095440B87C666653EAF2D17D71D57C35C67AC84
+
+The performance result is still unacceptable. Over 200 M guest instructions, the
+desktop app-equivalent meter observed 1,006 publications and 15 changed sampled
+signatures. Its 91 completed windows had mean `0.311`, maximum `3.711`, 77 zero windows,
+and none at or above 30 changed-publication fps. The guest retired 3.559 M instructions/s
+over the measured 56.189 host seconds. This is not iOS-device FPS, but it decisively does
+not support a 30 FPS claim. Focused verification is 782/782 assertions; full exact and
+strict verification pass 55/55 and 59/59 tests respectively, including the independent
+`-Wall -Wextra -Werror` build. Final cold boot, 30 fps, network, sound, and iOS-app
+completion remain open.

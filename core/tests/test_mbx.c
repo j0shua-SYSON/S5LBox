@@ -1915,6 +1915,33 @@ static void test_captured_status_form(const struct mbx_test_status_form *form) {
               "%s inconsistent UV extent raised completion", form->name);
         test_gpu_write32(&m, word_address, saved_word);
 
+        if (!filtered_sprite) {
+            /* A half-texel UV origin has the same floor/ceil source bounds as
+             * the captured integer crop.  Keep both redundant corners in
+             * agreement so rejection proves the unfiltered path did not
+             * silently invent nearest-neighbour rounding. */
+            uint32_t first_v_word = object + 0x1f0u + 31u * 4u;
+            uint32_t second_v_word = object + 0x1f0u + 41u * 4u;
+            uint32_t first_v = test_gpu_read32(&m, first_v_word);
+            uint32_t second_v = test_gpu_read32(&m, second_v_word);
+            uint32_t texture_height =
+                8u << ((form->quad[1] >> 20) & 7u);
+            uint32_t fractional_v = test_float_word(
+                test_float_value(first_v) + 0.5f / (float)texture_height);
+            test_gpu_write32(&m, first, 0x89abcdefu);
+            test_gpu_write32(&m, first_v_word, fractional_v);
+            test_gpu_write32(&m, second_v_word, fractional_v);
+            m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
+            CHECK(test_gpu_read32(&m, first) == 0x89abcdefu,
+                  "%s fractional unfiltered origin changed the destination",
+                  form->name);
+            CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
+                  "%s fractional unfiltered origin raised completion",
+                  form->name);
+            test_gpu_write32(&m, first_v_word, first_v);
+            test_gpu_write32(&m, second_v_word, second_v);
+        }
+
         /* A different split pitch can be a valid padded allocation when it
          * remains inside the same power-of-two header.  Break the redundant
          * width/pitch relationship instead of assuming the minimal stride. */
@@ -2226,6 +2253,31 @@ static void test_later_tiled_status_sprites(void) {
                 0x3ef00000u, 0xb7000000u, 0x00000000u, 0x3d200000u,
                 0x00000000u, 0x3ca00000u, 0xb7000000u, 0x3f200000u,
                 0x3f700000u, 0x3ea00000u, 0x3ef00000u, 0xb7000000u,
+                0x3f200000u, 0x3d200000u, 0x3ea00000u, 0x3ca00000u,
+            },
+        },
+        {
+            .name = "r430 unfiltered lower-screen crop on middle surface",
+            .xclip = 0x01400000u, .yclip = 0x01e00010u,
+            .target = 0x00998000u,
+            .semantic_sprite = true,
+            .tile_x0 = 0u, .tile_x1 = 0x27u,
+            .tile_y0 = 1u, .tile_y1 = 0x1du,
+            .left = 0u, .top = 20u, .width = 320u, .height = 460u,
+            .source = 0x00a41080u, .source_row0 = 20u,
+            .source_stride = 0x500u, .source_control = 0x0e500000u,
+            .source_width = 320u, .source_height = 460u,
+            .quad = {
+                0xe0000000u, 0xa6618000u, 0u, 0xcd206c40u,
+                0xa7718000u, 0u, 0xae504ea0u, 0x22250e80u,
+                0x00000000u, 0x43f00000u, 0x00000000u, 0x41a00000u,
+                0x43a00000u, 0x43f00000u, 0x43a00000u, 0x41a00000u,
+                0u, 0u, 0u, 0u,
+                0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+                0x01000000u, 0x00000000u, 0x3f700000u, 0x00000000u,
+                0x3ef00000u, 0x01000000u, 0x00000000u, 0x3d200000u,
+                0x00000000u, 0x3ca00000u, 0x01000000u, 0x3f200000u,
+                0x3f700000u, 0x3ea00000u, 0x3ef00000u, 0x01000000u,
                 0x3f200000u, 0x3d200000u, 0x3ea00000u, 0x3ca00000u,
             },
         },
