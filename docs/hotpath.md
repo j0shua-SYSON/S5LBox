@@ -4907,3 +4907,99 @@ host-specific static AArch64 interpreter with guest registers and fast memory st
 in host registers. That is a substantially larger and device-dependent project. No
 current measurement proves it can reach 30 FPS, and optimism should now be lower, not
 higher.
+
+### r489: native AArch64 semantics have ceiling; static no-JIT retention is unproved
+
+r489 first made the repository's existing register-pinned AArch64 translator answer a
+narrow feasibility question on the two hosted Apple-Silicon runners. `jitbench` translates
+one synthetic sixteen-instruction block once, then interleaves repeated `arm_step()` and
+native-block execution. It compares all sixteen registers, CPSR, retired cycles, the full
+1 MiB RAM hash and the block exit after every arm. The mixed blocks use four memory
+operations out of sixteen (25%, near the historical 22.6% guest share). The tool is not
+linked into the app, does not change the default core, and prints its limitations before
+its numbers.
+
+The first 20 M-instruction invocation was directionally large but too short: native arms
+finished in tens of milliseconds and macOS-15's interpreter samples ranged from 30.001 to
+58.804 M/s in one row. Those ratios were rejected as decision-quality evidence rather
+than promoted. The exact same executable shape was rerun at 500 M guest instructions per
+arm, three reversed-order repetitions. The medians were:
+
+| runner / synthetic block | interpreter M/s | native block M/s | ratio |
+|---|---:|---:|---:|
+| macOS-14 arm64 / A32 ALU | 79.671 | 2,223.487 | 27.908x |
+| macOS-14 arm64 / A32 25%-memory mixed | 74.743 | 722.426 | 9.666x |
+| macOS-14 arm64 / Thumb ALU | 141.183 | 2,151.583 | 15.240x |
+| macOS-14 arm64 / Thumb 25%-memory mixed | 128.051 | 711.520 | **5.557x** |
+| macOS-15 arm64 / A32 ALU | 69.013 | 2,150.686 | 31.163x |
+| macOS-15 arm64 / A32 25%-memory mixed | 64.101 | 586.127 | 9.144x |
+| macOS-15 arm64 / Thumb ALU | 121.027 | 1,775.991 | 14.674x |
+| macOS-15 arm64 / Thumb 25%-memory mixed | 108.943 | 565.045 | **5.187x** |
+
+All twenty-four paired repetitions (forty-eight timed arms) passed the state comparison.
+GitHub Actions core run
+`30829906322` and manually dispatched iOS build `30829914814` both passed at exact commit
+`b3f93607d3450e9e7c8a7281e14899319c0dfe24`.
+
+This is real AArch64 execution and substantial ceiling evidence. It is still **not a
+speedup in the emulator**. The block specializes guest register numbers, immediates and
+control flow; it performs no runtime translation/cache lookup, timer tick, interrupt
+sample, MMIO, device work, framebuffer publication or UIKit presentation. A static
+no-JIT handler must dynamically select registers and operations from decoded data, while
+the measured native block has already compiled those choices away. Therefore 5.187x is
+not an expected static-engine multiplier and none of these rates is phone FPS. Current
+shipping FPS remains 0--4.
+
+The result changes one decision: native semantics are not ruled out by their raw cost,
+so a host-specific design is worth investigating. It does not justify writing a generic
+assembly interpreter blind. The next read-only gate is concentration of the real cap-16
+trace heads and raw sequences. A small dominant set could support signed, precompiled
+superblocks for the exact supported firmware; a diffuse set would rule that out before
+another large implementation.
+
+### r490: exact trace heads are moderately reusable, not a shippable AOT catalog
+
+r490 extended only the read-only sequence observer. For each completed cap-16 dynamic
+slice it attributes the call and retired instructions to the exact physical head tuple
+`(pa, first raw instruction, ARM/Thumb)`. A slice closes at a physical discontinuity,
+interrupt/fetch exit or the cap. Variable lengths at one head remain visible; the counter
+does not pretend that a head proves one immutable full block. It is not in the CPU or app
+path and its extra host allocation and lookups invalidate wall-clock performance.
+
+The exact r445 7.100--7.110 B restored interval accounted for all **1,480,884** modeled
+cap-16 calls and all **9,999,489** fetched instructions across **4,438** distinct heads,
+with zero dropped calls or instructions:
+
+| hottest exact heads | calls covered | fetched instructions covered |
+|---:|---:|---:|
+| 1 | 6.639% | 1.969% |
+| 10 | 12.526% | 9.115% |
+| 100 | 25.677% | 31.438% |
+| 1,000 | 75.106% | **85.451%** |
+| all 4,438 | 100.000% | 100.000% |
+
+The largest head is the two-instruction `_cpu_idle` loop and covers only 1.969% of fetched
+instructions. The next entries mix AppleMBX, other kernel routines and userspace; the top
+sixteen together cover 11.378%. This is meaningful reuse, but it is not a tiny set that
+can be hand-specialized. One thousand generated blocks might have acceptable code size,
+yet that observation does not make them a product architecture. The repository ships no
+Apple firmware, the app imports the user's firmware after its executable has already been
+signed, and physical placements plus interactive workloads are not established invariant
+by one restored window. A firmware-derived catalog therefore cannot be generated on the
+phone and is incompatible with the current distributable app unless Apple-derived
+semantics are baked into the signed binary. That boundary is not being crossed.
+
+Correctness matched r487 exactly: the run stopped at 7.110 B with status OK, empty stderr
+and zero external-media failures. The work image SHA-256 was
+`8A59C388C481165F460984926AA5FFB1B72A0E9030216CD0038DE9B3264B79FE`; the per-run PPM was
+`1EF63FFE3EEFD976416E17120A36BA074BF295EA0955D716E2D345FCC5EA0A9E`.
+
+This rejects firmware-specific precompiled superblocks as the default app route; it does
+not reject static multi-instruction execution. A universal decoded cache can easily hold
+4,438 heads, but r488 already proved that cache plus portable per-instruction helpers is
+20.73% slower. The remaining credible experiment is therefore narrower and harder: a
+signed, host-specific AArch64 semantic loop that consumes runtime-decoded data while
+keeping hot guest registers and fast-memory state in host registers. It must first clear
+a semantics-exact synthetic gate by substantially more than the 2.18x desktop capacity
+gap before any real-emulator integration is justified. Product code and phone FPS remain
+unchanged at the reported 0--4.

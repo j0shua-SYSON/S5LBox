@@ -24668,6 +24668,9 @@ static const char *status_name(arm_status_t s) {
 #define SEQUENCE_BLOCK_HALFWORDS 512u
 #define SEQUENCE_TRACE_LEVELS    5u
 #define SEQUENCE_TRACE_CACHES    3u
+#define SEQUENCE_TRACE_HEAD_CAP  (1u << 18)
+#define SEQUENCE_TRACE_HEAD_LEN  16u
+#define SEQUENCE_TRACE_HEAD_LEVEL 2u
 
 static const unsigned SEQUENCE_TRACE_CAPS[SEQUENCE_TRACE_LEVELS] = {
     4u, 8u, 16u, 32u, 64u
@@ -24743,6 +24746,20 @@ typedef struct {
     bool valid;
 } sequence_trace_cache_entry_t;
 
+typedef struct {
+    uint32_t pa;
+    uint32_t raw;
+    uint32_t sample_va;
+    uint32_t sample_cpsr;
+    uint64_t calls;
+    uint64_t instructions;
+    uint8_t minimum_length;
+    uint8_t maximum_length;
+    bool sample_mmu;
+    bool thumb;
+    bool occupied;
+} sequence_trace_head_t;
+
 /*
  * Capacity/reuse model for a lazy, physical-1-KiB predecode cache.  This is
  * deliberately an observer rather than an implementation: it tells us whether
@@ -24785,6 +24802,14 @@ typedef struct {
     uint64_t trace_calls[SEQUENCE_TRACE_LEVELS];
     uint64_t trace_hits[SEQUENCE_TRACE_LEVELS][SEQUENCE_TRACE_CACHES];
     uint64_t trace_run_length;
+    sequence_trace_head_t *trace_heads;
+    uint64_t trace_head_distinct;
+    uint64_t trace_head_calls;
+    uint64_t trace_head_instructions;
+    uint64_t trace_head_dropped_calls;
+    uint64_t trace_head_dropped_instructions;
+    size_t current_trace_head;
+    uint32_t current_trace_length;
 
     uint64_t observations;
     uint64_t fetched;
@@ -24854,6 +24879,71 @@ static uint64_t sequence_mix64(uint64_t value) {
     value *= UINT64_C(0x94d049bb133111eb);
     value ^= value >> 31;
     return value;
+}
+
+static size_t sequence_trace_head_find(sequence_profile_t *profile,
+                                       uint32_t va, uint32_t pa,
+                                       uint32_t raw, bool thumb,
+                                       const arm_cpu_t *cpu) {
+    uint64_t key = ((uint64_t)pa << 32) | raw;
+    if (thumb) key ^= UINT64_C(0xd6e8feb86659fd93);
+    size_t slot = (size_t)sequence_mix64(key) &
+                  (SEQUENCE_TRACE_HEAD_CAP - 1u);
+    for (size_t probe = 0; probe < SEQUENCE_TRACE_HEAD_CAP; probe++) {
+        sequence_trace_head_t *entry = &profile->trace_heads[slot];
+        if (!entry->occupied) {
+            memset(entry, 0, sizeof *entry);
+            entry->occupied = true;
+            entry->pa = pa;
+            entry->raw = raw;
+            entry->sample_va = va;
+            entry->sample_cpsr = cpu->cpsr;
+            entry->sample_mmu = (cpu->cp15.sctlr & ARM_SCTLR_M) != 0u;
+            entry->thumb = thumb;
+            profile->trace_head_distinct++;
+            return slot;
+        }
+        if (entry->pa == pa && entry->raw == raw &&
+            entry->thumb == thumb)
+            return slot;
+        slot = (slot + 1u) & (SEQUENCE_TRACE_HEAD_CAP - 1u);
+    }
+    return SEQUENCE_TRACE_HEAD_CAP;
+}
+
+static void sequence_trace_head_close(sequence_profile_t *profile) {
+    if (!profile->current_trace_length) return;
+    profile->trace_head_calls++;
+    profile->trace_head_instructions += profile->current_trace_length;
+    if (profile->current_trace_head < SEQUENCE_TRACE_HEAD_CAP) {
+        sequence_trace_head_t *entry =
+            &profile->trace_heads[profile->current_trace_head];
+        entry->calls++;
+        entry->instructions += profile->current_trace_length;
+        if (!entry->minimum_length ||
+            profile->current_trace_length < entry->minimum_length)
+            entry->minimum_length = (uint8_t)profile->current_trace_length;
+        if (profile->current_trace_length > entry->maximum_length)
+            entry->maximum_length = (uint8_t)profile->current_trace_length;
+    } else {
+        profile->trace_head_dropped_calls++;
+        profile->trace_head_dropped_instructions +=
+            profile->current_trace_length;
+    }
+    profile->current_trace_length = 0u;
+    profile->current_trace_head = SEQUENCE_TRACE_HEAD_CAP;
+}
+
+static int sequence_trace_head_compare(const void *left, const void *right) {
+    const sequence_trace_head_t *const *a = left;
+    const sequence_trace_head_t *const *b = right;
+    if ((*a)->instructions < (*b)->instructions) return 1;
+    if ((*a)->instructions > (*b)->instructions) return -1;
+    if ((*a)->calls < (*b)->calls) return 1;
+    if ((*a)->calls > (*b)->calls) return -1;
+    if ((*a)->pa < (*b)->pa) return -1;
+    if ((*a)->pa > (*b)->pa) return 1;
+    return 0;
 }
 
 static bool sequence_dp_encoding(uint32_t insn) {
@@ -24959,6 +25049,7 @@ static void sequence_close_run(uint64_t *counts, uint64_t *instructions,
 }
 
 static void sequence_profile_break(sequence_profile_t *profile) {
+    sequence_trace_head_close(profile);
     sequence_close_run(profile->flow_runs, profile->flow_run_instructions,
                        &profile->flow_run_length, &profile->flow_run_max);
     sequence_close_run(profile->dp_runs, profile->dp_run_instructions,
@@ -25178,6 +25269,7 @@ static void sequence_profile_destroy(sequence_profile_t *profile) {
     free(profile->sites);
     free(profile->raws);
     free(profile->pairs);
+    free(profile->trace_heads);
     for (unsigned i = 0; i < SEQUENCE_CACHE_LEVELS; i++)
         free(profile->cache[i]);
     for (unsigned i = 0; i < SEQUENCE_BLOCK_LEVELS; i++)
@@ -25200,6 +25292,8 @@ static bool sequence_profile_start(sequence_profile_t *profile) {
     profile->sites = calloc(SEQUENCE_SITE_CAP, sizeof *profile->sites);
     profile->raws = calloc(SEQUENCE_RAW_CAP, sizeof *profile->raws);
     profile->pairs = calloc(SEQUENCE_PAIR_CAP, sizeof *profile->pairs);
+    profile->trace_heads = calloc(SEQUENCE_TRACE_HEAD_CAP,
+                                  sizeof *profile->trace_heads);
     for (unsigned i = 0; i < SEQUENCE_CACHE_LEVELS; i++) {
         profile->cache_size[i] = CACHE_SIZES[i];
         profile->cache[i] = calloc(CACHE_SIZES[i], sizeof *profile->cache[i]);
@@ -25216,7 +25310,8 @@ static bool sequence_profile_start(sequence_profile_t *profile) {
                 sizeof *profile->trace_cache[i][j]);
         }
     }
-    if (!profile->sites || !profile->raws || !profile->pairs) {
+    if (!profile->sites || !profile->raws || !profile->pairs ||
+        !profile->trace_heads) {
         sequence_profile_destroy(profile);
         return false;
     }
@@ -25240,6 +25335,7 @@ static bool sequence_profile_start(sequence_profile_t *profile) {
             }
         }
     }
+    profile->current_trace_head = SEQUENCE_TRACE_HEAD_CAP;
     profile->enabled = true;
     return true;
 }
@@ -25310,6 +25406,15 @@ static void sequence_profile_observe(sequence_profile_t *profile,
     for (unsigned i = 0; i < SEQUENCE_TRACE_LEVELS; i++) {
         if ((profile->trace_run_length - 1u) % SEQUENCE_TRACE_CAPS[i] == 0u)
             sequence_trace_cache_note(profile, i, pa, raw, thumb);
+    }
+    if (!physical_sequential ||
+        profile->current_trace_length == SEQUENCE_TRACE_HEAD_LEN) {
+        sequence_trace_head_close(profile);
+        profile->current_trace_head = sequence_trace_head_find(
+            profile, pc, pa, raw, thumb, cpu);
+        profile->current_trace_length = 1u;
+    } else {
+        profile->current_trace_length++;
     }
 
     bool safe_dp = instruction_class == SEQUENCE_ARM_DP;
@@ -25453,6 +25558,104 @@ static void sequence_profile_print_run_group(
                      (double)total_instructions : 0.0);
 }
 
+static void sequence_profile_report_trace_heads(
+        const sequence_profile_t *profile) {
+    static const size_t MILESTONES[] = {1u, 10u, 100u, 1000u};
+    const size_t distinct = (size_t)profile->trace_head_distinct;
+
+    printf("\n  exact cap-%u physical trace-head concentration\n",
+           SEQUENCE_TRACE_HEAD_LEN);
+    printf("    Completed dynamic slices split at physical discontinuities, "
+           "interrupt/fetch exits, or the cap. A head identifies its physical "
+           "address, first raw instruction and ISA mode; it does not prove a "
+           "fixed-length or immutable full block.\n");
+    printf("    calls=%" PRIu64 " model-calls=%" PRIu64
+           " instructions=%" PRIu64 " fetched=%" PRIu64
+           " distinct=%" PRIu64 " dropped=%" PRIu64 "/%" PRIu64
+           "  %s\n",
+           profile->trace_head_calls,
+           profile->trace_calls[SEQUENCE_TRACE_HEAD_LEVEL],
+           profile->trace_head_instructions, profile->fetched,
+           profile->trace_head_distinct,
+           profile->trace_head_dropped_calls,
+           profile->trace_head_dropped_instructions,
+           profile->trace_head_calls ==
+                   profile->trace_calls[SEQUENCE_TRACE_HEAD_LEVEL] &&
+               profile->trace_head_instructions == profile->fetched
+               ? "EXACT" : "MISMATCH");
+
+    if (!distinct) return;
+    const sequence_trace_head_t **ranked = malloc(distinct * sizeof *ranked);
+    if (!ranked) {
+        printf("    ranking unavailable: host allocation failed\n");
+        return;
+    }
+
+    size_t occupied = 0u;
+    for (size_t i = 0; i < SEQUENCE_TRACE_HEAD_CAP; i++)
+        if (profile->trace_heads[i].occupied)
+            ranked[occupied++] = &profile->trace_heads[i];
+    qsort(ranked, occupied, sizeof *ranked, sequence_trace_head_compare);
+
+    printf("    cumulative dynamic coverage by hottest exact heads\n");
+    uint64_t cumulative_calls = 0u;
+    uint64_t cumulative_instructions = 0u;
+    size_t milestone = 0u;
+    for (size_t i = 0; i < occupied; i++) {
+        cumulative_calls += ranked[i]->calls;
+        cumulative_instructions += ranked[i]->instructions;
+        if (milestone < sizeof MILESTONES / sizeof MILESTONES[0] &&
+            i + 1u == MILESTONES[milestone]) {
+            printf("      top %-6zu calls=%10" PRIu64 " %7.3f%%  "
+                   "instructions=%10" PRIu64 " %7.3f%%\n",
+                   i + 1u, cumulative_calls,
+                   profile->trace_head_calls
+                       ? 100.0 * (double)cumulative_calls /
+                             (double)profile->trace_head_calls : 0.0,
+                   cumulative_instructions,
+                   profile->trace_head_instructions
+                       ? 100.0 * (double)cumulative_instructions /
+                             (double)profile->trace_head_instructions : 0.0);
+            milestone++;
+        }
+    }
+    printf("      all %-6zu calls=%10" PRIu64 " %7.3f%%  "
+           "instructions=%10" PRIu64 " %7.3f%%\n",
+           occupied, cumulative_calls,
+           profile->trace_head_calls
+               ? 100.0 * (double)cumulative_calls /
+                     (double)profile->trace_head_calls : 0.0,
+           cumulative_instructions,
+           profile->trace_head_instructions
+               ? 100.0 * (double)cumulative_instructions /
+                     (double)profile->trace_head_instructions : 0.0);
+
+    printf("    hottest exact heads (ranked by covered instructions)\n");
+    cumulative_instructions = 0u;
+    size_t shown = occupied < 16u ? occupied : 16u;
+    for (size_t i = 0; i < shown; i++) {
+        const sequence_trace_head_t *entry = ranked[i];
+        cumulative_instructions += entry->instructions;
+        printf("      %2zu  va=%08x pa=%08x %c raw=%08x  calls=%9" PRIu64
+               " insns=%10" PRIu64 " mean=%5.2f len=%u-%u "
+               "cum=%6.3f%%  %s\n",
+               i + 1u, entry->sample_va, entry->pa,
+               entry->thumb ? 'T' : 'A', entry->raw, entry->calls,
+               entry->instructions,
+               entry->calls
+                   ? (double)entry->instructions / (double)entry->calls : 0.0,
+               (unsigned)entry->minimum_length,
+               (unsigned)entry->maximum_length,
+               profile->trace_head_instructions
+                   ? 100.0 * (double)cumulative_instructions /
+                         (double)profile->trace_head_instructions : 0.0,
+               diagnostic_pc_context_name(
+                   entry->sample_va, entry->sample_cpsr,
+                   entry->sample_mmu, NULL));
+    }
+    free(ranked);
+}
+
 static void sequence_profile_report(sequence_profile_t *profile) {
     static const char *const DP_OPS[16] = {
         "AND", "EOR", "SUB", "RSB", "ADD", "ADC", "SBC", "RSC",
@@ -25585,6 +25788,7 @@ static void sequence_profile_report(sequence_profile_t *profile) {
         }
         printf("\n");
     }
+    sequence_profile_report_trace_heads(profile);
 
     printf("\n  safe ARM data-processing runs: %" PRIu64
            " runs, %" PRIu64 " instructions, mean %.3f, max %" PRIu64
