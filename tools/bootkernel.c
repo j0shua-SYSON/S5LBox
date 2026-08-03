@@ -24754,6 +24754,16 @@ typedef struct {
     uint64_t dp_sets_flags;
     uint64_t safe_dp_total;
     uint64_t terminal_branch_after_dp;
+    uint64_t single_load;
+    uint64_t single_store;
+    uint64_t single_load_pc;
+    uint64_t block_load;
+    uint64_t block_store;
+    uint64_t block_load_pc;
+    uint64_t vfp_compute;
+    uint64_t vfp_register;
+    uint64_t vfp_memory_load;
+    uint64_t vfp_memory_store;
     uint64_t sequential_links;
     uint64_t physical_sequential_links;
 
@@ -24765,10 +24775,18 @@ typedef struct {
     uint64_t dp_run_instructions[SEQUENCE_RUN_BUCKETS];
     uint64_t dp_run_length;
     uint64_t dp_run_max;
+    uint64_t mixed_runs[SEQUENCE_RUN_BUCKETS];
+    uint64_t mixed_run_instructions[SEQUENCE_RUN_BUCKETS];
+    uint64_t mixed_run_length;
+    uint64_t mixed_run_max;
+    uint64_t mixed_body_total;
+    uint64_t mixed_terminal_branch;
+    uint64_t mixed_terminal_store;
 
     bool have_previous;
     bool previous_thumb;
     bool previous_safe_dp;
+    bool previous_mixed_body;
     uint32_t previous_pc;
     uint32_t previous_pa;
     uint32_t previous_raw;
@@ -24836,6 +24854,47 @@ static sequence_class_t sequence_classify_arm(uint32_t insn) {
     return SEQUENCE_ARM_OTHER;
 }
 
+static bool sequence_vfp_memory(uint32_t insn) {
+    if ((insn & UINT32_C(0x0fe00e00)) == UINT32_C(0x0c400a00))
+        return false; /* MCRR/MRRC is a register transfer, tested first by VFP. */
+    return (insn & UINT32_C(0x0e000e00)) == UINT32_C(0x0c000a00);
+}
+
+/* The widest portable block body that can avoid a cached-future-instruction
+ * SMC hazard without a code-page write-generation scheme. Ordinary CPU/VFP
+ * compute and non-PC loads may continue. Stores are terminal (even when they
+ * probably target data), as are branches and state/control instructions.
+ * Runtime MMIO loads would additionally exit after level_dirty becomes true;
+ * this static profile is an upper bound, stated as such in the report. */
+static bool sequence_mixed_body(uint32_t insn, sequence_class_t cls) {
+    switch (cls) {
+    case SEQUENCE_ARM_DP:
+    case SEQUENCE_ARM_MULTIPLY:
+    case SEQUENCE_ARM_MEDIA:
+        return true;
+    case SEQUENCE_ARM_SINGLE_LS:
+        return (insn & (1u << 20)) != 0u &&
+               ((insn >> 12) & 15u) != 15u;
+    case SEQUENCE_ARM_BLOCK_LS:
+        return (insn & (1u << 20)) != 0u &&
+               (insn & (1u << 15)) == 0u;
+    case SEQUENCE_ARM_VFP:
+        return !sequence_vfp_memory(insn) || (insn & (1u << 20)) != 0u;
+    default:
+        return false;
+    }
+}
+
+static bool sequence_mixed_terminal_store(uint32_t insn,
+                                          sequence_class_t cls) {
+    if (cls == SEQUENCE_ARM_SINGLE_LS ||
+        cls == SEQUENCE_ARM_BLOCK_LS)
+        return (insn & (1u << 20)) == 0u;
+    if (cls == SEQUENCE_ARM_VFP && sequence_vfp_memory(insn))
+        return (insn & (1u << 20)) == 0u;
+    return false;
+}
+
 static void sequence_close_run(uint64_t *counts, uint64_t *instructions,
                                uint64_t *length, uint64_t *maximum) {
     if (!*length) return;
@@ -24852,6 +24911,10 @@ static void sequence_profile_break(sequence_profile_t *profile) {
                        &profile->flow_run_length, &profile->flow_run_max);
     sequence_close_run(profile->dp_runs, profile->dp_run_instructions,
                        &profile->dp_run_length, &profile->dp_run_max);
+    sequence_close_run(profile->mixed_runs,
+                       profile->mixed_run_instructions,
+                       &profile->mixed_run_length,
+                       &profile->mixed_run_max);
     profile->have_previous = false;
 }
 
@@ -25084,6 +25147,32 @@ static void sequence_profile_observe(sequence_profile_t *profile,
                            &profile->dp_run_max);
     }
 
+    bool mixed_body = !thumb && sequence_mixed_body(raw, instruction_class);
+    bool mixed_store = !thumb &&
+                       sequence_mixed_terminal_store(raw, instruction_class);
+    if (mixed_body) {
+        profile->mixed_body_total++;
+        if (sequential && profile->previous_mixed_body)
+            profile->mixed_run_length++;
+        else {
+            sequence_close_run(profile->mixed_runs,
+                               profile->mixed_run_instructions,
+                               &profile->mixed_run_length,
+                               &profile->mixed_run_max);
+            profile->mixed_run_length = 1u;
+        }
+    } else {
+        if (sequential && profile->previous_mixed_body) {
+            if (instruction_class == SEQUENCE_ARM_BRANCH)
+                profile->mixed_terminal_branch++;
+            if (mixed_store) profile->mixed_terminal_store++;
+        }
+        sequence_close_run(profile->mixed_runs,
+                           profile->mixed_run_instructions,
+                           &profile->mixed_run_length,
+                           &profile->mixed_run_max);
+    }
+
     if (!thumb) {
         unsigned condition = raw >> 28;
         profile->condition_hits[condition]++;
@@ -25096,6 +25185,36 @@ static void sequence_profile_observe(sequence_profile_t *profile,
             if (raw & (1u << 25)) profile->dp_immediate++;
             else                  profile->dp_register++;
             if (raw & (1u << 20)) profile->dp_sets_flags++;
+        }
+        if (instruction_class == SEQUENCE_ARM_SINGLE_LS) {
+            if (raw & (1u << 20)) {
+                profile->single_load++;
+                if (((raw >> 12) & 15u) == 15u)
+                    profile->single_load_pc++;
+            } else {
+                profile->single_store++;
+            }
+        }
+        if (instruction_class == SEQUENCE_ARM_BLOCK_LS) {
+            if (raw & (1u << 20)) {
+                profile->block_load++;
+                if (raw & (1u << 15)) profile->block_load_pc++;
+            } else {
+                profile->block_store++;
+            }
+        }
+        if (instruction_class == SEQUENCE_ARM_VFP) {
+            if (sequence_vfp_memory(raw)) {
+                if (raw & (1u << 20)) profile->vfp_memory_load++;
+                else                  profile->vfp_memory_store++;
+            } else if ((raw & UINT32_C(0x0f000e10)) ==
+                           UINT32_C(0x0e000a10) ||
+                       (raw & UINT32_C(0x0fe00e00)) ==
+                           UINT32_C(0x0c400a00)) {
+                profile->vfp_register++;
+            } else {
+                profile->vfp_compute++;
+            }
         }
     }
 
@@ -25115,6 +25234,7 @@ static void sequence_profile_observe(sequence_profile_t *profile,
     profile->have_previous = true;
     profile->previous_thumb = thumb;
     profile->previous_safe_dp = safe_dp;
+    profile->previous_mixed_body = mixed_body;
     profile->previous_pc = pc;
     profile->previous_pa = pa;
     profile->previous_raw = raw;
@@ -25204,14 +25324,29 @@ static void sequence_profile_report(sequence_profile_t *profile) {
            "  S-bit=%" PRIu64 "\n",
            profile->dp_immediate, profile->dp_register,
            profile->dp_sets_flags);
+    printf("    single load/store=%" PRIu64 "/%" PRIu64
+           " (loads to pc=%" PRIu64 ")\n",
+           profile->single_load, profile->single_store,
+           profile->single_load_pc);
+    printf("    block load/store=%" PRIu64 "/%" PRIu64
+           " (loads including pc=%" PRIu64 ")\n",
+           profile->block_load, profile->block_store,
+           profile->block_load_pc);
+    printf("    VFP compute/register/memory-load/memory-store="
+           "%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64 "\n",
+           profile->vfp_compute, profile->vfp_register,
+           profile->vfp_memory_load, profile->vfp_memory_store);
 
     uint64_t flow_instructions = 0u, flow_runs = 0u;
     uint64_t dp_instructions = 0u, dp_runs = 0u;
+    uint64_t mixed_instructions = 0u, mixed_runs = 0u;
     for (unsigned i = 1; i < SEQUENCE_RUN_BUCKETS; i++) {
         flow_instructions += profile->flow_run_instructions[i];
         flow_runs += profile->flow_runs[i];
         dp_instructions += profile->dp_run_instructions[i];
         dp_runs += profile->dp_runs[i];
+        mixed_instructions += profile->mixed_run_instructions[i];
+        mixed_runs += profile->mixed_runs[i];
     }
     printf("\n  actual sequential-PC runs: %" PRIu64
            " runs, %" PRIu64 " instructions, mean %.3f, max %" PRIu64
@@ -25266,6 +25401,38 @@ static void sequence_profile_report(sequence_profile_t *profile) {
                ? 100.0 * (double)profile->safe_dp_total /
                      (double)profile->fetched : 0.0,
            profile->terminal_branch_after_dp);
+
+    printf("\n  mixed ARM compute/VFP/load upper-bound runs: %" PRIu64
+           " runs, %" PRIu64 " instructions, mean %.3f, max %" PRIu64
+           "\n", mixed_runs, mixed_instructions,
+           mixed_runs
+               ? (double)mixed_instructions / (double)mixed_runs : 0.0,
+           profile->mixed_run_max);
+    printf("    Static body: safe DP, multiply/media, VFP compute/register/load, "
+           "and non-PC single/block loads. Runtime MMIO loads would exit; "
+           "stores and control are terminal.\n");
+    sequence_profile_print_run_group("1", profile->mixed_runs,
+        profile->mixed_run_instructions, 1u, 1u, mixed_instructions);
+    sequence_profile_print_run_group("2-4", profile->mixed_runs,
+        profile->mixed_run_instructions, 2u, 4u, mixed_instructions);
+    sequence_profile_print_run_group("5-8", profile->mixed_runs,
+        profile->mixed_run_instructions, 5u, 8u, mixed_instructions);
+    sequence_profile_print_run_group("9-16", profile->mixed_runs,
+        profile->mixed_run_instructions, 9u, 16u, mixed_instructions);
+    sequence_profile_print_run_group("17-32", profile->mixed_runs,
+        profile->mixed_run_instructions, 17u, 32u, mixed_instructions);
+    sequence_profile_print_run_group("33-63", profile->mixed_runs,
+        profile->mixed_run_instructions, 33u, 63u, mixed_instructions);
+    sequence_profile_print_run_group("64+", profile->mixed_runs,
+        profile->mixed_run_instructions, 64u, 64u, mixed_instructions);
+    printf("    mixed body=%" PRIu64 " (%.3f%% fetched); terminal branch/store "
+           "after body=%" PRIu64 "/%" PRIu64 "\n",
+           profile->mixed_body_total,
+           profile->fetched
+               ? 100.0 * (double)profile->mixed_body_total /
+                     (double)profile->fetched : 0.0,
+           profile->mixed_terminal_branch,
+           profile->mixed_terminal_store);
 
     printf("\n  exact physical instruction-site working set\n");
     printf("    distinct=%" PRIu64 " dropped=%" PRIu64

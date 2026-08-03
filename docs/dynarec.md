@@ -1282,7 +1282,7 @@ needs a profile-backed dispatch strategy and substantially more work removed per
 successful entry before another restored gate is justified. `docs/hotpath.md` r470-r471
 contains the full rates, counters and hashes. The rejected source was removed in full.
 
-#### 7.6.2 r472 bounds the next portable shape
+#### 7.6.2 r472-r473 bound the next portable shape
 
 A full 10 M-entry restored census now explains the low coverage rather than merely
 repeating it. Of 9,999,489 actual fetches, ordinary non-PC-writing ARM data processing
@@ -1292,6 +1292,14 @@ The DP-only runs averaged 1.635 instructions, while complete sequential-PC runs 
 edges were VFP-to-VFP, DP-to-DP, Thumb-to-Thumb, load/store-to-DP, DP-to-branch and
 load/store-to-load/store. A second DP-only block cache is therefore ruled out by the
 guest stream, not just by the first implementation's timings.
+
+r473 applies conservative static boundaries to that same stream. Compute, VFP
+compute/register/load and non-PC ARM loads cover 60.255% in runs averaging 3.013.
+Executing the immediately following branch or store as a terminal raises the static
+upper bound to 77.183% and 3.860 instructions per candidate call. MMIO loads, timebase
+edges, exceptions and actual cache misses reduce that ceiling. The improvement over
+r471's 31.83%/2.68 shape is enough to justify one gated prototype, not enough to predict
+a speedup.
 
 The same profile saw 29,000 exact physical instruction sites and only 6,690 safe-DP
 sites. A simplified site-cache simulation hit far more often than r471's actual block

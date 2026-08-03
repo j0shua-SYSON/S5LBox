@@ -4372,7 +4372,7 @@ were removed completely. The matched ALU `tick=run` benchmark stays because futu
 runner work must report both it and load/store instead of choosing whichever flatters
 the change.
 
-### r472: full dynamic sequences explain why the narrow block shape lost
+### r472-r473: full dynamic sequences explain why the narrow block shape lost
 
 The first block prototype established its own low coverage, but not the instruction
 stream around the misses. r472 adds an explicit `bootkernel --sequence-profile` mode
@@ -4398,6 +4398,22 @@ was:
 | ARM block load/store | 397,373 | 3.974% |
 | ARM other | 204,915 | 2.049% |
 | coprocessor / extra-sync / multiply / media / SVC / unconditional / DP-to-PC | 196,287 | 1.963% |
+
+r473 then split the mixed classes at the exact boundaries a conservative second
+prototype can use without a code-page write-generation scheme. Single transfers were
+1,369,860 loads and 551,790 stores, with 44,249 loads writing PC. Block transfers were
+212,290 loads and 185,083 stores, with 111,453 loads including PC. VFP was 796,804
+compute, 248,014 register-transfer, 491,878 memory-load and 172,682 memory-store
+instructions.
+
+Allowing safe DP, multiply/media, VFP compute/register/load, and non-PC single/block
+loads produces 6,025,193 body instructions (**60.255%**) in 1,999,450 runs averaging
+3.013 and reaching 68. A branch followed 1,057,409 of those runs and a store followed
+635,262. If each is executed as a terminal instruction, the static upper bound becomes
+7,717,864 fetched instructions (**77.183%**) at 3.860 instructions per candidate call.
+Runtime MMIO loads, exceptions, state changes, timebase edges and cache misses can only
+lower those numbers. This is materially broader than r471; it is not a prediction that
+the broader engine will win.
 
 This is the direct explanation for r470-r471. Its safe class covered only 30.13% of
 fetches. Those data-processing instructions formed 1,842,492 runs averaging just 1.635
@@ -4433,7 +4449,7 @@ pair was 1.129% of sequential edges. There is no handful of PCs or pairs here wi
 credible 2.7x desktop ceiling. The next justified prototype is broad, long-lived
 predecode across the dominant mixed ARM sequences, not another special case.
 
-The observer did not change the checked guest outputs. r468 and r472 both stopped at
+The observer did not change the checked guest outputs. r468, r472 and r473 all stopped at
 7.110 B with final pre/post PCs `0x312092b8`/`0x312092bc`, zero external-media failures,
 byte-identical 466,825,216-byte work images at SHA-256
 `8A59C388C481165F460984926AA5FFB1B72A0E9030216CD0038DE9B3264B79FE`, and byte-identical
