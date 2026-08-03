@@ -50,12 +50,12 @@ typedef NS_ENUM(NSInteger, VMSettingsSection) {
     VMSettingsSectionCount
 };
 
-/* Snapshots is APPENDED rather than placed next to Manual, which would read
- * better. The existing indices are load-bearing in the cell builder's
- * if/else chain and in the selection handler, and moving them to improve an
- * ordering is how a switch ends up wired to the row above it. */
+/* Keep this order mirrored explicitly in both the cell builder and selection
+ * handler. Graphics mode sits before the switches because it is the one
+ * performance choice a non-developer needs before opening a new machine. */
 typedef NS_ENUM(NSInteger, VMGeneralRow) {
     VMGeneralRowManual = 0,
+    VMGeneralRowGraphicsMode,
     VMGeneralRowJailbreak,
     VMGeneralRowDeveloperMode,
     VMGeneralRowSnapshots,
@@ -121,6 +121,7 @@ static NSString *VMStringFromC(const char *text) {
 - (void)jailbreakToggled:(UISwitch *)sender;
 - (void)inlineConsoleChanged:(UISwitch *)sender;
 - (void)developerModeToggled:(UISwitch *)sender;
+- (void)chooseGraphicsMode;
 /* These two were missing, which the comment above says cannot happen: clang
  * late-parses method bodies inside an @implementation, so a call before the
  * definition compiles anyway and the invariant this block exists to hold was
@@ -498,21 +499,24 @@ titleForFooterInSection:(NSInteger)section {
     (void)tableView;
     const NSInteger section = [self sectionAt:indexPath.section];
     if (section == VMSettingsSectionGeneral) {
-        UITableViewCell *cell =
-            [tableView dequeueReusableCellWithIdentifier:@"general"];
-        if (!cell)
-            cell = [[UITableViewCell alloc]
-                       initWithStyle:UITableViewCellStyleDefault
-                     reuseIdentifier:@"general"];
-        cell.accessoryView = nil;
-        cell.textLabel.font =
-            [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
-        cell.textLabel.adjustsFontForContentSizeCategory = YES;
-        cell.textLabel.textColor = [UIColor labelColor];
-        cell.accessoryType = UITableViewCellAccessoryNone;
-        cell.selectionStyle = UITableViewCellSelectionStyleNone;
+        UITableViewCell *cell = [self cellWithIdentifier:@"general"
+                                                   style:UITableViewCellStyleSubtitle];
         if (indexPath.row == VMGeneralRowManual) {
             cell.textLabel.text = @"Manual";
+            cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+            cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+        } else if (indexPath.row == VMGeneralRowGraphicsMode) {
+            VMGraphicsMode mode = [_settings graphicsModeForNewMachines];
+            cell.textLabel.text = @"Graphics for new machines";
+            if (mode == VMGraphicsModeSoftware)
+                cell.detailTextLabel.text =
+                    @"CPU software renderer; MBX off (compatible default)";
+            else if (mode == VMGraphicsModeExperimentalMBX)
+                cell.detailTextLabel.text =
+                    @"MBX on; CPU software renderer off (experimental)";
+            else
+                cell.detailTextLabel.text =
+                    @"Custom developer switches; not a controlled test mode";
             cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
             cell.selectionStyle = UITableViewCellSelectionStyleDefault;
         } else if (indexPath.row == VMGeneralRowJailbreak) {
@@ -533,7 +537,7 @@ titleForFooterInSection:(NSInteger)section {
             [sw addTarget:self action:@selector(developerModeToggled:)
                  forControlEvents:UIControlEventValueChanged];
             cell.accessoryView = sw;
-        } else {
+        } else if (indexPath.row == VMGeneralRowSnapshots) {
             BOOL hasMachine = self.snapshotsDirectory.length > 0;
             cell.textLabel.text = hasMachine ? @"Snapshots"
                                              : @"Snapshots — open a machine first";
@@ -797,6 +801,8 @@ didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
             VMManualViewController *m = [[VMManualViewController alloc] init];
             if (self.navigationController)
                 [self.navigationController pushViewController:m animated:YES];
+        } else if (indexPath.row == VMGeneralRowGraphicsMode) {
+            [self chooseGraphicsMode];
         } else if (indexPath.row == VMGeneralRowSnapshots) {
             if (self.snapshotsDirectory.length == 0) return;
             VMSnapshotListViewController *list =
@@ -868,6 +874,52 @@ didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
         default:
             return;
     }
+}
+
+- (void)chooseGraphicsMode {
+    VMGraphicsMode current = [_settings graphicsModeForNewMachines];
+    NSString *message =
+        @"Choose before opening a new machine for the first time. This changes "
+        @"the settings used when its writable image is prepared. Existing "
+        @"machines keep their image-time renderer value even though the MBX "
+        @"boot switch follows Settings, so they are not a controlled test "
+        @"after a change.\n\nMBX is the performance candidate, but "
+        @"it has not yet passed the final cold-boot or 30 FPS phone test.";
+    UIAlertController *picker = [UIAlertController
+        alertControllerWithTitle:@"Graphics for new machines"
+                         message:message
+                  preferredStyle:UIAlertControllerStyleAlert];
+
+    NSString *softwareTitle = current == VMGraphicsModeSoftware
+        ? @"CPU software (current)" : @"CPU software";
+    NSString *mbxTitle = current == VMGraphicsModeExperimentalMBX
+        ? @"Experimental MBX (current)" : @"Experimental MBX";
+    __weak VMSettingsViewController *weakSelf = self;
+    [picker addAction:[UIAlertAction actionWithTitle:softwareTitle
+                                               style:UIAlertActionStyleDefault
+                                             handler:^(UIAlertAction *action) {
+        (void)action;
+        VMSettingsViewController *self_ = weakSelf;
+        if (!self_) return;
+        [self_->_settings setGraphicsModeForNewMachines:VMGraphicsModeSoftware];
+        self_->_copiedCommandLine = NO;
+        [self_->tableView reloadData];
+    }]];
+    [picker addAction:[UIAlertAction actionWithTitle:mbxTitle
+                                               style:UIAlertActionStyleDefault
+                                             handler:^(UIAlertAction *action) {
+        (void)action;
+        VMSettingsViewController *self_ = weakSelf;
+        if (!self_) return;
+        [self_->_settings
+            setGraphicsModeForNewMachines:VMGraphicsModeExperimentalMBX];
+        self_->_copiedCommandLine = NO;
+        [self_->tableView reloadData];
+    }]];
+    [picker addAction:[UIAlertAction actionWithTitle:@"Cancel"
+                                               style:UIAlertActionStyleCancel
+                                             handler:nil]];
+    [self presentViewController:picker animated:YES completion:nil];
 }
 
 - (void)performReset {

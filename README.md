@@ -360,6 +360,14 @@ you already possess, asks only for keys absent from that archive, and validates
 the three produced artefacts. Nothing is downloaded, no key list is bundled,
 and no Apple firmware is committed or shipped.
 
+For a controlled graphics comparison, choose **Graphics for new machines** in
+Settings *before* opening a newly created machine for the first time. **CPU
+software** is the accepted default; **Experimental MBX** pairs MBX-on with the
+CPU-renderer override off. That choice is written into the machine's writable
+image when it is prepared. Changing the setting afterwards does not convert an
+existing machine: the boot-time MBX switch can move, but the image-time renderer
+value cannot. Results from such a hybrid do not test the newly selected mode.
+
 ## Requirements
 
 - **Host: a modern iPhone. A jailbreak is NOT required.** Corrected

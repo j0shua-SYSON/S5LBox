@@ -47,6 +47,24 @@ extern NSString *const VMFirmwareDeviceTreeFile;
 extern NSString *const VMFirmwareRootFilesystemFile;
 extern NSString *const VMFirmwareJailbreakPayloadFile;
 
+/*
+ * The two renderer switches are one decision for an ordinary app user:
+ *
+ *   SOFTWARE: mbx off, QuartzCore's CPU renderer on.
+ *   MBX:      mbx on,  QuartzCore's CPU renderer off.
+ *
+ * Developer Mode still exposes both raw switches. If they are moved into one
+ * of the two other combinations, report CUSTOM rather than pretending that a
+ * controlled renderer mode was selected. Most importantly, this is a choice
+ * for a work image that has NOT BEEN MADE YET; it cannot describe or rewrite
+ * the value already stored inside an existing machine's image.
+ */
+typedef NS_ENUM(NSInteger, VMGraphicsMode) {
+    VMGraphicsModeSoftware = 0,
+    VMGraphicsModeExperimentalMBX,
+    VMGraphicsModeCustom,
+};
+
 @interface VMSettings : NSObject
 
 + (instancetype)sharedSettings;
@@ -62,6 +80,11 @@ extern NSString *const VMFirmwareJailbreakPayloadFile;
 /* The bootkernel arguments these switches correspond to, or a stated
  * "everything is at its default" when they correspond to none. */
 - (NSString *)equivalentToggleArguments;
+
+/* A paired view of `mbx` and `ca-software-render`, for new work images. The
+ * setter changes both values before publishing one settings notification. */
+- (VMGraphicsMode)graphicsModeForNewMachines;
+- (void)setGraphicsModeForNewMachines:(VMGraphicsMode)mode;
 
 #pragma mark - Applied
 

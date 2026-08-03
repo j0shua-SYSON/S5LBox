@@ -103,6 +103,41 @@ static const uint64_t kVMInstructionCaps[] = {
     [self publishChange];
 }
 
+- (VMGraphicsMode)graphicsModeForNewMachines {
+    int mbx = vm_option_index("mbx");
+    int ca = vm_option_index("ca-software-render");
+    if (mbx < 0 || ca < 0) return VMGraphicsModeCustom;
+
+    BOOL mbxEnabled = [self valueForOptionIndex:(NSUInteger)mbx];
+    BOOL softwareEnabled = [self valueForOptionIndex:(NSUInteger)ca];
+    if (!mbxEnabled && softwareEnabled) return VMGraphicsModeSoftware;
+    if (mbxEnabled && !softwareEnabled)
+        return VMGraphicsModeExperimentalMBX;
+    return VMGraphicsModeCustom;
+}
+
+- (void)setGraphicsModeForNewMachines:(VMGraphicsMode)mode {
+    if (mode != VMGraphicsModeSoftware &&
+        mode != VMGraphicsModeExperimentalMBX) return;
+
+    int mbx = vm_option_index("mbx");
+    int ca = vm_option_index("ca-software-render");
+    if (mbx < 0 || ca < 0) return;
+
+    NSString *mbxKey = [self keyForOptionIndex:(NSUInteger)mbx];
+    NSString *caKey = [self keyForOptionIndex:(NSUInteger)ca];
+    if (!mbxKey || !caKey) return;
+
+    /* One observer-visible change, not the transient mbx-on/software-on state
+     * produced by calling -setValue: twice. NSUserDefaults writes themselves
+     * are synchronous in this process; publish only after both are present. */
+    BOOL useMBX = mode == VMGraphicsModeExperimentalMBX;
+    NSUserDefaults *defaults = [self defaults];
+    [defaults setBool:useMBX forKey:mbxKey];
+    [defaults setBool:!useMBX forKey:caKey];
+    [self publishChange];
+}
+
 - (NSString *)equivalentToggleArguments {
     const unsigned count = vm_option_count();
     if (count == 0) return @"(no options)";

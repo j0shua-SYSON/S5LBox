@@ -158,8 +158,14 @@ typedef struct {
 
     [e addObject:@{ @"h": @"Graphics status",
         @"b": @"The default remains Apple's CPU software renderer because it "
-              @"has the strongest cold-boot history. Developer Mode exposes "
-              @"the experimental MBX path. The current model completes the "
+              @"has the strongest cold-boot history. Settings now pairs the "
+              @"two controls as Graphics for new machines: CPU software, or "
+              @"experimental MBX. Choose before opening a new machine for the "
+              @"first time. The choice is written into that machine's work "
+              @"image. On an existing machine, the MBX boot switch can change "
+              @"while the stored renderer value cannot, so changing Settings "
+              @"later does not convert it and is not a controlled comparison.\n\n"
+              @"The current MBX model completes the "
               @"measured reset, command-ring, 2D and 3D workloads, including "
               @"a live 1,388/1,388 2D and 8,888/8,888 3D interval with no "
               @"decoder rejection or recovery.\n\nThat is substantial graphics "
