@@ -4735,3 +4735,71 @@ boundaries. Static threaded handlers are signed app code; only decoded data is b
 runtime, so that architecture does not require executable writable memory. This profile
 justifies investigating that architecture. It does not prove that it will be fast enough,
 and it does not justify shipping a partial or marginal implementation.
+
+### r486: the first static threaded semantic engine is correct and slower
+
+r486 implemented that larger experiment behind a compile-time gate and a default-off
+runtime switch. It emitted no host code: 1,024 direct-mapped physical 1 KiB blocks held
+only decoded data, every cached word was compared with live RAM, and GNU computed-goto
+handlers remained inside one signed C function across mixed ARM instructions. Dominant
+data-processing, branch and single-transfer forms ran directly; multiply, media, block
+and extra transfers, and VFP stayed inside the sequence through existing semantic
+helpers. CP15, unconditional space, Thumb and residual encodings returned to the literal
+decoder. The machine capped each sequence at the exact next timebase refresh and exited
+after an MMIO-dirtying retirement, pending interrupt, fault or state change.
+
+The correctness gate was useful before it was green. A deterministic oracle rewrote one
+physical code site with 8,192 encodings and ran every encoding under two independently
+generated register/flag states. It found two real prototype defects: a generic fallback
+charged `cycles` before `arm_step` charged it again, and an over-broad residual decode
+turned reserved word `0xE047BC96` into an ALU operation. Both were fixed without weakening
+the comparison. The final oracle completed all 16,384 executions, compared CPU state,
+RAM, unmapped counters and the final serialized machine, and the gated strict build then
+passed 55/55 tests with `-Wall -Wextra -Werror`.
+
+The matched Release/LTO synthetic bracket looked promising and was still not product
+evidence:
+
+| loop | literal symmetric mean | threaded symmetric mean | change |
+|---|---:|---:|---:|
+| ALU/branch, 4 KiB MMU, `tick=run` | 31.525 M/s | 43.515 M/s | **+38.0%** |
+| load/store, 4 KiB MMU, `tick=run` | 24.720 M/s | 30.270 M/s | **+22.5%** |
+
+The controls themselves drifted heavily, from 27.21 to 35.84 M/s on ALU/branch and from
+21.59 to 27.85 M/s on load/store. The symmetric means reduce order bias; they do not make
+the synthetic loops representative of iOS.
+
+The decisive same-binary restored bracket used the exact r445 7.100 B checkpoint and
+retired 100 M instructions per arm through `--run-api`:
+
+| order | runtime path | rate |
+|---:|---|---:|
+| 1 | literal control | 17.152419 M/s |
+| 2 | static threaded | 16.649385 M/s |
+| 3 | static threaded | 16.956785 M/s |
+| 4 | literal control | 17.418559 M/s |
+| mean | literal / threaded | 17.285489 / 16.803085 M/s (**-2.79%**) |
+
+This was not a coverage miss. Each enabled arm retired 80,427,723 of the 100 M
+instructions inside the threaded engine. It recorded 88,312,843/90,831,112 decoded-word
+hits, 15,223,571/15,277,208 block hits, 2,518,269 uop builds, zero raw-word changes and
+25,905,282 engine entries. That last number is the practical failure: only 3.10 threaded
+retirements occurred per entry on average, while 24,448,994 exits still returned to the
+literal path. Cache lookup, live-word validation, architectural-state traffic and short
+mixed sequences consumed more than the avoided decode/dispatch work saved.
+
+Every restored arm stopped at exactly 7.200 B with status OK and empty stderr. All work
+images matched SHA-256
+`8A59C388C481165F460984926AA5FFB1B72A0E9030216CD0038DE9B3264B79FE`; every per-run and
+tool-relative PPM matched
+`2EAE64986CFA1A34E25FC0D67DACC9E220E2262E9214BE2DAD775FD4518B266A`. No real-workload
+end snapshot was written, so those hashes are not a complete serialized-state claim.
+
+The engine, cache, runtime hooks, counters and oracle were removed in full. No r486
+performance code reaches the desktop or iOS product, and the reported phone result
+remains 0--4 FPS. The honest conclusion is narrower than "threaded interpretation cannot
+work": this shallow per-instruction-uop shape, with live raw validation and frequent
+literal exits, cannot. A successor would need genuinely longer fused operations or
+traces, hot guest registers held outside `arm_cpu_t`, direct memory fast paths and far
+fewer semantic/literal boundaries. Merely tuning this cache would be another marginal
+whack-a-mole pass, not a plausible route across the remaining 2.18x gap.
