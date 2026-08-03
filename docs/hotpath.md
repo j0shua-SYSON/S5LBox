@@ -5003,3 +5003,56 @@ keeping hot guest registers and fast-memory state in host registers. It must fir
 a semantics-exact synthetic gate by substantially more than the 2.18x desktop capacity
 gap before any real-emulator integration is justified. Product code and phone FPS remain
 unchanged at the reported 0--4.
+
+### r491: firmware-independent signed AArch64 semantics clear the synthetic gate
+
+r491 implements the narrow gate r490 required. A deterministic build-time generator
+enumerates **2,577 generic ISA/register handler variants**; it reads no firmware, profile
+or guest opcode stream. The resulting AArch64 assembly is ordinary signed executable text.
+Runtime decoding creates only eight-byte data records containing a handler index and an
+immediate, so this path never generates code and never asks for writable executable
+memory. Guest r0--r7 and SP remain in AArch64 callee-saved registers across the entire
+run, and direct threading stays inside the signed function between guest instructions.
+
+This is deliberately a benchmark subset, not an emulator engine. It implements exactly
+the A32 ALU/load/store and Thumb ALU/SP-relative load/store forms used by the four r489
+synthetic blocks, with the final unconditional branch returning to address zero. The
+decoder refuses every unsupported bit. Apple-arm64 ctest executes 1.6 M instructions per
+case and compares the same state as the long benchmark; x86 builds validate all sixteen
+uops per case and report an execution skip.
+
+The long measurement used 500 M guest instructions per arm and three rotated orderings.
+Every one of twenty-four static arms matched the interpreter's sixteen registers, CPSR,
+cycles, full 1 MiB RAM hash, status and exit state:
+
+| runner / synthetic block | interpreter M/s | static signed M/s | ratio |
+|---|---:|---:|---:|
+| macOS-14 arm64 / A32 ALU | 80.315 | 2,484.929 | 30.940x |
+| macOS-14 arm64 / A32 25%-memory mixed | 71.923 | 2,915.129 | 40.531x |
+| macOS-14 arm64 / Thumb ALU | 132.253 | 2,493.107 | 18.851x |
+| macOS-14 arm64 / Thumb 25%-memory mixed | 121.478 | 2,156.213 | **17.750x** |
+| macOS-15 arm64 / A32 ALU | 61.387 | 2,029.147 | 33.055x |
+| macOS-15 arm64 / A32 25%-memory mixed | 60.077 | 2,683.469 | 44.667x |
+| macOS-15 arm64 / Thumb ALU | 112.619 | 2,186.758 | 19.417x |
+| macOS-15 arm64 / Thumb 25%-memory mixed | 109.236 | 1,865.101 | **17.074x** |
+
+Exact commit `b038b7311b2abb460ee41decf3e6f9333f3092c9` passed core-tests run
+`30832792761`, including both Apple execution gates, and iOS build `30832792876`.
+
+The large ratios are real for the stated loop and extremely optimistic for the product.
+Each block is a fixed sixteen instructions rather than r487's real 6.752 mean; data memory
+is a masked flat host pointer rather than the guest MMU/TLB/MMIO path; one native call
+repeats all blocks without cache lookup, raw/generation validation, timer budgeting,
+interrupt sampling, faults or device exits. This also explains why the static mixed rows
+beat the JIT rows: the JIT benchmark re-enters a generated function per block and its
+memory path retains helper/policy costs, while the static proof amortises its prologue and
+uses direct RAM. It would be false to project 17.074x onto the emulator or call any value
+above phone FPS.
+
+The decision is nevertheless positive. The weakest exact static ratio exceeds the 2.18x
+desktop capacity gap by enough margin that a real, default-off integration is now
+justified. Its next gate must pay the costs this proof avoided: real decoded-block lookup
+and coherency, variable/short exits, conditions, r8--r12 and PC semantics, MMU/TLB-backed
+loads/stores, timer/interrupt boundaries, faults and fallback. Only a same-binary restored
+firmware A/B can promote it. Shipping phone FPS remains the measured 0--4 until that gate
+passes and the iOS app is rebuilt and measured.
