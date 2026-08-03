@@ -24666,6 +24666,16 @@ static const char *status_name(arm_status_t s) {
 #define SEQUENCE_CACHE_LEVELS    4u
 #define SEQUENCE_BLOCK_LEVELS    4u
 #define SEQUENCE_BLOCK_HALFWORDS 512u
+#define SEQUENCE_TRACE_LEVELS    5u
+#define SEQUENCE_TRACE_CACHES    3u
+
+static const unsigned SEQUENCE_TRACE_CAPS[SEQUENCE_TRACE_LEVELS] = {
+    4u, 8u, 16u, 32u, 64u
+};
+
+static const size_t SEQUENCE_TRACE_CACHE_SIZES[SEQUENCE_TRACE_CACHES] = {
+    1024u, 4096u, 16384u
+};
 
 typedef enum {
     SEQUENCE_ARM_DP = 0,
@@ -24726,6 +24736,13 @@ typedef struct {
     bool valid;
 } sequence_cache_entry_t;
 
+typedef struct {
+    uint32_t pa;
+    uint32_t raw;
+    bool thumb;
+    bool valid;
+} sequence_trace_cache_entry_t;
+
 /*
  * Capacity/reuse model for a lazy, physical-1-KiB predecode cache.  This is
  * deliberately an observer rather than an implementation: it tells us whether
@@ -24763,6 +24780,11 @@ typedef struct {
     uint32_t block_mapping_va;
     uint32_t block_mapping_pa;
     uint32_t block_mapping_tlb_gen;
+    sequence_trace_cache_entry_t
+        *trace_cache[SEQUENCE_TRACE_LEVELS][SEQUENCE_TRACE_CACHES];
+    uint64_t trace_calls[SEQUENCE_TRACE_LEVELS];
+    uint64_t trace_hits[SEQUENCE_TRACE_LEVELS][SEQUENCE_TRACE_CACHES];
+    uint64_t trace_run_length;
 
     uint64_t observations;
     uint64_t fetched;
@@ -25067,6 +25089,32 @@ static void sequence_cache_note(sequence_profile_t *profile,
     }
 }
 
+static void sequence_trace_cache_note(sequence_profile_t *profile,
+                                      unsigned trace_level,
+                                      uint32_t pa, uint32_t raw,
+                                      bool thumb) {
+    uint64_t key = ((uint64_t)pa << 32) | raw;
+    if (thumb) key ^= UINT64_C(0xd6e8feb86659fd93);
+    uint64_t hash = sequence_mix64(key);
+    profile->trace_calls[trace_level]++;
+
+    for (unsigned i = 0; i < SEQUENCE_TRACE_CACHES; i++) {
+        size_t slot = (size_t)hash &
+            (SEQUENCE_TRACE_CACHE_SIZES[i] - 1u);
+        sequence_trace_cache_entry_t *entry =
+            &profile->trace_cache[trace_level][i][slot];
+        if (entry->valid && entry->pa == pa && entry->raw == raw &&
+            entry->thumb == thumb) {
+            profile->trace_hits[trace_level][i]++;
+        } else {
+            entry->valid = true;
+            entry->pa = pa;
+            entry->raw = raw;
+            entry->thumb = thumb;
+        }
+    }
+}
+
 static void sequence_block_cache_note(sequence_profile_t *profile,
                                       const arm_cpu_t *cpu, uint32_t va,
                                       uint32_t pa, uint32_t raw, bool thumb) {
@@ -25134,6 +25182,9 @@ static void sequence_profile_destroy(sequence_profile_t *profile) {
         free(profile->cache[i]);
     for (unsigned i = 0; i < SEQUENCE_BLOCK_LEVELS; i++)
         free(profile->block_cache[i]);
+    for (unsigned i = 0; i < SEQUENCE_TRACE_LEVELS; i++)
+        for (unsigned j = 0; j < SEQUENCE_TRACE_CACHES; j++)
+            free(profile->trace_cache[i][j]);
     memset(profile, 0, sizeof *profile);
 }
 
@@ -25158,6 +25209,13 @@ static bool sequence_profile_start(sequence_profile_t *profile) {
         profile->block_cache[i] = calloc(BLOCK_CACHE_SIZES[i],
                                          sizeof *profile->block_cache[i]);
     }
+    for (unsigned i = 0; i < SEQUENCE_TRACE_LEVELS; i++) {
+        for (unsigned j = 0; j < SEQUENCE_TRACE_CACHES; j++) {
+            profile->trace_cache[i][j] = calloc(
+                SEQUENCE_TRACE_CACHE_SIZES[j],
+                sizeof *profile->trace_cache[i][j]);
+        }
+    }
     if (!profile->sites || !profile->raws || !profile->pairs) {
         sequence_profile_destroy(profile);
         return false;
@@ -25172,6 +25230,14 @@ static bool sequence_profile_start(sequence_profile_t *profile) {
         if (!profile->block_cache[i]) {
             sequence_profile_destroy(profile);
             return false;
+        }
+    }
+    for (unsigned i = 0; i < SEQUENCE_TRACE_LEVELS; i++) {
+        for (unsigned j = 0; j < SEQUENCE_TRACE_CACHES; j++) {
+            if (!profile->trace_cache[i][j]) {
+                sequence_profile_destroy(profile);
+                return false;
+            }
         }
     }
     profile->enabled = true;
@@ -25211,11 +25277,14 @@ static void sequence_profile_observe(sequence_profile_t *profile,
                       profile->previous_pc <= UINT32_MAX -
                           profile->previous_width &&
                       pc == profile->previous_pc + profile->previous_width;
+    bool physical_sequential = false;
     if (sequential) {
         profile->sequential_links++;
         if (profile->previous_pa <= UINT32_MAX - profile->previous_width &&
-            pa == profile->previous_pa + profile->previous_width)
+            pa == profile->previous_pa + profile->previous_width) {
             profile->physical_sequential_links++;
+            physical_sequential = true;
+        }
         profile->class_pairs[profile->previous_class][instruction_class]++;
         sequence_pair_note(profile, profile->previous_raw, raw, thumb);
         if (profile->previous_site < SEQUENCE_SITE_CAP)
@@ -25227,6 +25296,20 @@ static void sequence_profile_observe(sequence_profile_t *profile,
                            &profile->flow_run_length,
                            &profile->flow_run_max);
         profile->flow_run_length = 1u;
+    }
+
+    /* Optimistic whole-trace model: split the actual dynamic stream only at a
+     * physical discontinuity or the selected cap. This deliberately spans
+     * every semantic class, including Thumb, stores and not-taken branches.
+     * It is therefore a ceiling for an engine that implements all of them,
+     * not a claim that the current interpreter can use these lengths. */
+    if (physical_sequential)
+        profile->trace_run_length++;
+    else
+        profile->trace_run_length = 1u;
+    for (unsigned i = 0; i < SEQUENCE_TRACE_LEVELS; i++) {
+        if ((profile->trace_run_length - 1u) % SEQUENCE_TRACE_CAPS[i] == 0u)
+            sequence_trace_cache_note(profile, i, pa, raw, thumb);
     }
 
     bool safe_dp = instruction_class == SEQUENCE_ARM_DP;
@@ -25479,6 +25562,29 @@ static void sequence_profile_report(sequence_profile_t *profile) {
                ? 100.0 * (double)profile->sequential_links /
                      (double)(profile->fetched - 1u) : 0.0,
            profile->physical_sequential_links);
+
+    printf("\n  optimistic whole-trace call and head-cache model\n");
+    printf("    Actual dynamic physical-contiguous flow split only at the cap. "
+           "This assumes every ARM/Thumb semantic is implemented, ignores "
+           "timer/MMIO exits, and validates only the trace head; it is a "
+           "reuse/dispatch ceiling, not a speed prediction.\n");
+    for (unsigned i = 0; i < SEQUENCE_TRACE_LEVELS; i++) {
+        uint64_t calls = profile->trace_calls[i];
+        printf("      cap=%2u calls=%10" PRIu64 " mean=%6.3f "
+               "entry-reduction=%6.2f%%",
+               SEQUENCE_TRACE_CAPS[i], calls,
+               calls ? (double)profile->fetched / (double)calls : 0.0,
+               profile->fetched
+                   ? 100.0 * (1.0 - (double)calls /
+                                      (double)profile->fetched) : 0.0);
+        for (unsigned j = 0; j < SEQUENCE_TRACE_CACHES; j++) {
+            printf("  %zu=%6.2f%%",
+                   SEQUENCE_TRACE_CACHE_SIZES[j],
+                   calls ? 100.0 * (double)profile->trace_hits[i][j] /
+                                   (double)calls : 0.0);
+        }
+        printf("\n");
+    }
 
     printf("\n  safe ARM data-processing runs: %" PRIu64
            " runs, %" PRIu64 " instructions, mean %.3f, max %" PRIu64

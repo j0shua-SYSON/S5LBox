@@ -4803,3 +4803,43 @@ literal exits, cannot. A successor would need genuinely longer fused operations 
 traces, hot guest registers held outside `arm_cpu_t`, direct memory fast paths and far
 fewer semantic/literal boundaries. Merely tuning this cache would be another marginal
 whack-a-mole pass, not a plausible route across the remaining 2.18x gap.
+
+### r487: whole-trace reuse has headroom; dispatch reduction alone does not close 2.18x
+
+r487 extended the existing read-only `--sequence-profile` observer instead of building
+another engine. For trace caps 4, 8, 16, 32 and 64 it splits the actual dynamic stream at
+physical discontinuities and the selected cap, counts the resulting calls, and simulates
+direct-mapped trace-head caches with 1,024, 4,096 and 16,384 entries. It changes no guest
+state. The model deliberately assumes every ARM and Thumb semantic is available, spans
+stores and not-taken branches, ignores extra timer/MMIO exits, and validates only the
+head word. It is therefore an optimistic reuse and dispatch ceiling, not a speed result
+and not a coherency proof.
+
+The exact r445 7.100--7.110 B restored interval produced:
+
+| max trace instructions | modeled calls | mean instructions/call | entry reduction | 1K / 4K / 16K head hit rate |
+|---:|---:|---:|---:|---:|
+| 4 | 2,983,252 | 3.352 | 70.17% | 64.78% / 86.02% / 95.07% |
+| 8 | 1,923,837 | 5.198 | 80.76% | 74.87% / 90.96% / 96.98% |
+| 16 | 1,480,884 | **6.752** | **85.19%** | 79.80% / **93.08%** / 97.46% |
+| 32 | 1,330,784 | 7.514 | 86.69% | 81.36% / 93.59% / 97.57% |
+| 64 | 1,299,329 | 7.696 | 87.01% | 82.17% / 93.78% / 97.56% |
+
+The accounting remained exact at 10,000,000 observations: 9,999,489 fetched
+instructions, 511 pending-interrupt entries and zero fetch failures. Execution stopped
+at exactly 7.110 B with status OK, empty stderr and zero external-media failures. The
+466,825,216-byte work image matched SHA-256
+`8A59C388C481165F460984926AA5FFB1B72A0E9030216CD0038DE9B3264B79FE`; both final PPMs
+matched `1EF63FFE3EEFD976416E17120A36BA074BF295EA0955D716E2D345FCC5EA0A9E`.
+
+This changes the next experiment, but not the FPS status. Cap 16 captures most of the
+available dynamic length; doubling to 32 buys only 0.762 more instructions per modeled
+entry. A 4K head cache already models 93.08% reuse, so enlarging a shallow cache is not
+the missing breakthrough. Compared with r486's 3.10 internal retirements per entry, a
+whole trace can plausibly remove far more lookup and re-entry work. It still cannot make
+the other sampled costs disappear: instruction semantics, VFP, translation, memory and
+devices remain. A justified prototype must therefore cache complete cap-16 traces,
+validate them with code-page generations instead of a live comparison per word, span
+both ARM and Thumb, keep common semantics inside the trace, and clear a double-digit
+restored A/B gate. A trace cache that still calls `arm_step` or validates every word is
+already contradicted by r474--r486 and should not be built.
