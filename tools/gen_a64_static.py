@@ -19,7 +19,7 @@ CONDITIONS = (
     "eq", "ne", "cs", "cc", "mi", "pl", "vs", "vc",
     "hi", "ls", "ge", "lt", "gt", "le",
 )
-EXPECTED_HANDLERS = 24050
+EXPECTED_HANDLERS = 24612
 
 READ_KINDS = (
     ("word", "ldr", 4),
@@ -51,6 +51,12 @@ def result_register(rd: int) -> tuple[str, list[str]]:
     if rd in PINNED:
         return f"w{PINNED[rd]}", []
     return "w12", [f"    str w12, [x0, #{rd * 4}]"]
+
+
+def write_guest_register(reg: int, value: str) -> list[str]:
+    if reg in PINNED:
+        return [f"    mov w{PINNED[reg]}, {value}"]
+    return [f"    str {value}, [x0, #{reg * 4}]"]
 
 
 def logic_flags(result: str) -> list[str]:
@@ -434,6 +440,184 @@ def direct_read_body(mnemonic: str, width: int, rd: int) -> list[str]:
     return body
 
 
+def vfp_gate(kind: str) -> list[str]:
+    """Preserve guest NZCV and fail before any VFP-visible state change.
+
+    Access is precomputed from the live CPACR and privilege at each block run.
+    FPEXC is read through its pointer for every instruction because VMSR FPEXC
+    can enable or disable the following VFP instruction in the same block.
+    """
+    body = [
+        "    mrs x7, nzcv",
+        "    cbnz x3, 1f",
+        "    b .La64s_direct_miss",
+        "1:",
+        "    ldr w4, [x3, #48]",
+        "    cbnz w4, 1f",
+        "    b .La64s_direct_miss",
+        "1:",
+    ]
+    if kind == "priv":
+        body.extend([
+            "    ldr w4, [x3, #20]",
+            "    cbnz w4, 1f",
+            "    b .La64s_direct_miss",
+            "1:",
+        ])
+    elif kind == "fpsid":
+        body.extend([
+            "    ldr x4, [x3, #32]",
+            "    ldr w4, [x4]",
+            "    tbnz w4, #30, 1f",
+            "    ldr w4, [x3, #20]",
+            "    cbnz w4, 1f",
+            "    b .La64s_direct_miss",
+            "1:",
+        ])
+    else:
+        body.extend([
+            "    ldr x4, [x3, #32]",
+            "    ldr w4, [x4]",
+            "    tbnz w4, #30, 1f",
+            "    b .La64s_direct_miss",
+            "1:",
+        ])
+        if kind == "exact":
+            body.extend([
+                "    ldr x4, [x3, #40]",
+                "    ldr w4, [x4]",
+                "    tst w4, #0x70000",
+                "    b.eq 1f",
+                "    b .La64s_direct_miss",
+                "1:",
+            ])
+    return body
+
+
+def vfp_finish() -> list[str]:
+    return ["    msr nzcv, x7", *next_dispatch()]
+
+
+def vfp_core_to_s_body(rt: int) -> list[str]:
+    body = vfp_gate("enabled")
+    loads, source = read_guest_register(rt, 10)
+    body.extend(loads)
+    body.extend([
+        "    ldur w9, [x13, #-12]",
+        "    ldr x4, [x3, #24]",
+        f"    str {source}, [x4, w9, uxtw #2]",
+        *vfp_finish(),
+    ])
+    return body
+
+
+def vfp_s_to_core_body(rt: int) -> list[str]:
+    result, stores = result_register(rt)
+    return [
+        *vfp_gate("enabled"),
+        "    ldur w9, [x13, #-12]",
+        "    ldr x4, [x3, #24]",
+        f"    ldr {result}, [x4, w9, uxtw #2]",
+        *stores,
+        *vfp_finish(),
+    ]
+
+
+def vfp_core_to_pair_body(rt: int, rt2: int) -> list[str]:
+    body = vfp_gate("enabled")
+    loads, first = read_guest_register(rt, 4)
+    body.extend(loads)
+    loads, second = read_guest_register(rt2, 5)
+    body.extend(loads)
+    body.extend([
+        "    ldur w9, [x13, #-12]",
+        "    ldr x6, [x3, #24]",
+        "    add x6, x6, w9, uxtw #2",
+        f"    stp {first}, {second}, [x6]",
+        *vfp_finish(),
+    ])
+    return body
+
+
+def vfp_pair_to_core_body(rt: int, rt2: int) -> list[str]:
+    return [
+        *vfp_gate("enabled"),
+        "    ldur w9, [x13, #-12]",
+        "    ldr x6, [x3, #24]",
+        "    add x6, x6, w9, uxtw #2",
+        "    ldp w4, w5, [x6]",
+        *write_guest_register(rt, "w4"),
+        *write_guest_register(rt2, "w5"),
+        *vfp_finish(),
+    ]
+
+
+def vfp_system_read_body(kind: str, rt: int) -> list[str]:
+    result, stores = result_register(rt)
+    gate = "fpsid" if kind == "fpsid" else (
+        "priv" if kind == "fpexc" else "enabled"
+    )
+    body = vfp_gate(gate)
+    if kind == "fpsid":
+        body.extend([
+            f"    mov {result}, #0x20b4",
+            f"    movk {result}, #0x4101, lsl #16",
+        ])
+    else:
+        offset = 32 if kind == "fpexc" else 40
+        body.extend([
+            f"    ldr x4, [x3, #{offset}]",
+            f"    ldr {result}, [x4]",
+        ])
+    body.extend([*stores, *vfp_finish()])
+    return body
+
+
+def vfp_system_write_body(kind: str, rt: int) -> list[str]:
+    gate = "priv" if kind == "fpexc" else "enabled"
+    body = vfp_gate(gate)
+    loads, source = read_guest_register(rt, 10)
+    body.extend(loads)
+    offset = 32 if kind == "fpexc" else 40
+    body.append(f"    ldr x6, [x3, #{offset}]")
+    if kind == "fpscr":
+        body.extend([
+            "    mov w5, #0x9f9f",
+            "    movk w5, #0xf3f7, lsl #16",
+            f"    and w4, {source}, w5",
+            "    str w4, [x6]",
+        ])
+    else:
+        body.append(f"    str {source}, [x6]")
+    body.extend(vfp_finish())
+    return body
+
+
+def vfp_unary_body(operation: str, width: int) -> list[str]:
+    reg = "w5" if width == 4 else "x5"
+    body = [
+        *vfp_gate("exact"),
+        "    ldur w9, [x13, #-12]",
+        "    and w10, w9, #0xff",
+        "    ubfx w9, w9, #8, #8",
+        "    ldr x4, [x3, #24]",
+        "    add x6, x4, w9, uxtw #2",
+        f"    ldr {reg}, [x6]",
+    ]
+    if operation == "abs":
+        mask = "0x7fffffff" if width == 4 else "0x7fffffffffffffff"
+        body.append(f"    and {reg}, {reg}, #{mask}")
+    elif operation == "neg":
+        mask = "0x80000000" if width == 4 else "0x8000000000000000"
+        body.append(f"    eor {reg}, {reg}, #{mask}")
+    body.extend([
+        "    add x6, x4, w10, uxtw #2",
+        f"    str {reg}, [x6]",
+        *vfp_finish(),
+    ])
+    return body
+
+
 def build_handlers() -> list[tuple[str, list[str]]]:
     handlers: list[tuple[str, list[str]]] = []
 
@@ -642,6 +826,48 @@ def build_handlers() -> list[tuple[str, list[str]]]:
             handlers.append((label,
                              direct_read_body(mnemonic, width, rd)))
 
+    # VFP register and system-state operations are ordinary signed text too.
+    # Only core-register operands need enumerated handlers; VFP register
+    # numbers remain data-record immediates because the register file is not
+    # pinned in host registers.
+    for rt in range(15):
+        handlers.append((f".La64s_vfp_core_to_s_{rt}",
+                         vfp_core_to_s_body(rt)))
+    for rt in range(15):
+        handlers.append((f".La64s_vfp_s_to_core_{rt}",
+                         vfp_s_to_core_body(rt)))
+    for rt in range(15):
+        for rt2 in range(15):
+            handlers.append((f".La64s_vfp_core_to_pair_{rt}_{rt2}",
+                             vfp_core_to_pair_body(rt, rt2)))
+    for rt in range(15):
+        for rt2 in range(15):
+            handlers.append((f".La64s_vfp_pair_to_core_{rt}_{rt2}",
+                             vfp_pair_to_core_body(rt, rt2)))
+    for kind in ("fpsid", "fpscr", "fpexc"):
+        for rt in range(15):
+            handlers.append((f".La64s_vfp_vmrs_{kind}_{rt}",
+                             vfp_system_read_body(kind, rt)))
+    handlers.append((".La64s_vfp_vmrs_apsr", [
+        *vfp_gate("enabled"),
+        "    ldr x4, [x3, #40]",
+        "    ldr w4, [x4]",
+        # This instruction intentionally replaces guest NZCV instead of
+        # restoring x7; all other CPSR bits stay in the C-side cpsr word.
+        "    msr nzcv, x4",
+        *next_dispatch(),
+    ]))
+    for kind in ("fpscr", "fpexc"):
+        for rt in range(15):
+            handlers.append((f".La64s_vfp_vmsr_{kind}_{rt}",
+                             vfp_system_write_body(kind, rt)))
+    for operation in ("mov", "abs", "neg"):
+        handlers.append((f".La64s_vfp_{operation}_32",
+                         vfp_unary_body(operation, 4)))
+    for operation in ("mov", "abs", "neg"):
+        handlers.append((f".La64s_vfp_{operation}_64",
+                         vfp_unary_body(operation, 8)))
+
     if len(handlers) != EXPECTED_HANDLERS:
         raise RuntimeError(
             f"generated {len(handlers)} handlers, expected {EXPECTED_HANDLERS}"
@@ -686,7 +912,8 @@ def render() -> str:
         "    mov x13, x3",
         "    mov x15, x4",
         # The ninth AAPCS64 argument lives at the entry SP. The 96-byte
-        # prologue moves that slot to [sp,#96]; it is NULL for the flat proof.
+        # prologue moves that slot to [sp,#96]; it is NULL for the flat proof
+        # and carries both DREAD and VFP live-state pointers in the product.
         "    ldr x3, [sp, #96]",
         # ADR also reaches only +/-1 MiB. Use the platform's page-relative
         # relocation spelling so handler growth cannot invalidate the entry.

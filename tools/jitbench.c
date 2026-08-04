@@ -4,10 +4,11 @@
  * This is deliberately NOT a product-performance claim and not a JIT
  * dispatcher. It translates one small synthetic block once, then compares
  * repeated interpreter execution with both that already-built block and a
- * firmware-independent static-threaded proof. The proof's 24,050 generic
+ * firmware-independent static-threaded proof. The proof's 24,612 generic
  * ISA/register handlers are compiled and signed with the executable; runtime
- * decoding creates data records only. The table now has 24,050 handlers,
- * including a product-only guarded read-cache path.
+ * decoding creates data records only. The table now has 24,612 handlers,
+ * including product-only guarded read-cache and exact VFP register/system
+ * transfer paths.
  *
  * The answer is only a feasibility bound. There is no device tick, MMIO,
  * interrupt sampling, cache lookup, translation, chaining, framebuffer
@@ -26,6 +27,7 @@
  */
 #include "jit.h"
 #include "a64_static.h"
+#include "vfp.h"
 
 #include <inttypes.h>
 #include <stdbool.h>
@@ -236,6 +238,33 @@ static const uint16_t THUMB_INTEGER_MISC[] = {
      ((uint32_t)(load) << 20) | ((uint32_t)(rn) << 16) |                   \
      ((uint32_t)(rd) << 12) | (uint32_t)(offset))
 
+#define VFP_SV(n) ((uint32_t)(n) >> 1)
+#define VFP_SB(n) ((uint32_t)(n) & 1u)
+#define VFP_DP(p,q,r,D,vn,vd,sz,N,s,M,vm)                                  \
+    (UINT32_C(0xee000a00) | ((uint32_t)(p) << 23) |                        \
+     ((uint32_t)(D) << 22) | ((uint32_t)(q) << 21) |                      \
+     ((uint32_t)(r) << 20) | ((uint32_t)(vn) << 16) |                     \
+     ((uint32_t)(vd) << 12) | ((uint32_t)(sz) << 8) |                     \
+     ((uint32_t)(N) << 7) | ((uint32_t)(s) << 6) |                        \
+     ((uint32_t)(M) << 5) | (uint32_t)(vm))
+#define VFP_UN_S(opc2, top, sd, sm)                                        \
+    VFP_DP(1, 1, 1, VFP_SB(sd), (opc2), VFP_SV(sd), 0, (top), 1,          \
+           VFP_SB(sm), VFP_SV(sm))
+#define VFP_UN_D(opc2, top, dd, dm)                                        \
+    VFP_DP(1, 1, 1, 0, (opc2), (dd), 1, (top), 1, 0, (dm))
+#define VFP_VMRS(rt, crn)                                                  \
+    (UINT32_C(0xeef00a10) | ((uint32_t)(crn) << 16) |                     \
+     ((uint32_t)(rt) << 12))
+#define VFP_VMSR(crn, rt)                                                  \
+    (UINT32_C(0xeee00a10) | ((uint32_t)(crn) << 16) |                     \
+     ((uint32_t)(rt) << 12))
+#define VFP_VMOV_S_R(sn, rt)                                               \
+    (UINT32_C(0xee000a10) | (VFP_SV(sn) << 16) |                          \
+     ((uint32_t)(rt) << 12) | (VFP_SB(sn) << 7))
+#define VFP_VMOV_R_S(rt, sn)                                               \
+    (UINT32_C(0xee100a10) | (VFP_SV(sn) << 16) |                          \
+     ((uint32_t)(rt) << 12) | (VFP_SB(sn) << 7))
+
 /* All sixteen A32 immediate data-processing opcodes. This deliberately uses
  * r8-r14, PC as an input, arithmetic and logical flag writes, both rotated and
  * unrotated immediates, and carry-consuming operations. */
@@ -391,6 +420,28 @@ static const uint16_t THUMB_READ_ZERO_PREFIX[] = {
     0x6800u, /* LDR r0,[r0,#0] */
 };
 
+/* Exact raw VFPv2 state operations. These span pinned and memory-backed ARM
+ * registers, S/D aliasing, both two-core transfer forms, FPSCR flag transfer
+ * and every non-arithmetic unary bit operation. */
+static const uint32_t VFP_REGISTER_OPS[] = {
+    VFP_VMOV_S_R(5, 0),                  /* VMOV s5,r0 */
+    VFP_VMOV_R_S(1, 5),                  /* VMOV r1,s5 */
+    UINT32_C(0xee272b10),                /* VMOV d7[63:32],r2 */
+    UINT32_C(0xee373b10),                /* VMOV r3,d7[63:32] */
+    UINT32_C(0xec454b10),                /* VMOV d0,r4,r5 */
+    UINT32_C(0xec576b10),                /* VMOV r6,r7,d0 */
+    UINT32_C(0xec498a11),                /* VMOV s2,s3,r8,r9 */
+    UINT32_C(0xec5baa11),                /* VMOV r10,r11,s2,s3 */
+    VFP_VMSR(1, 12),                     /* VMSR FPSCR,r12 */
+    VFP_VMRS(14, 1),                     /* VMRS lr,FPSCR */
+    VFP_VMRS(15, 1),                     /* VMRS APSR_nzcv,FPSCR */
+    VFP_UN_S(0, 0, 13, 12),              /* VMOV.F32 s13,s12 */
+    VFP_UN_S(0, 1, 14, 12),              /* VABS.F32 s14,s12 */
+    VFP_UN_S(1, 0, 15, 12),              /* VNEG.F32 s15,s12 */
+    VFP_UN_D(0, 1, 5, 4),                /* VABS.F64 d5,d4 */
+    VFP_UN_D(1, 0, 6, 4),                /* VNEG.F64 d6,d4 */
+};
+
 typedef struct {
     const char *name;
     const void *program;
@@ -544,6 +595,16 @@ static bool validate_static_shapes(void) {
         0xdf00u, /* SVC */
         0xf000u, /* BL first half */
     };
+    static const uint32_t INVALID_PRODUCT_VFP[] = {
+        UINT32_C(0xee300a00), /* VADD.F32: arithmetic is a later tranche */
+        VFP_UN_S(1, 1, 0, 1), /* VSQRT.F32 */
+        UINT32_C(0xeeb00b00), /* VMOV.F64 immediate: VFPv3 */
+        UINT32_C(0xee000a11), /* VMOV core transfer reserved bit */
+        VFP_VMRS(15, 0),      /* PC is valid only with FPSCR */
+        VFP_VMSR(0, 0),       /* FPSID is read-only */
+        VFP_VMRS(0, 7),       /* unimplemented MVFR0 */
+        UINT32_C(0xec4f0b10), /* PC in a two-core transfer */
+    };
     /* Deliberately unaligned guest byte stream: ADD r0,r0,#1. */
     static const uint8_t UNALIGNED_A32[] = {
         0xffu, 0x01u, 0x00u, 0x80u, 0xe2u,
@@ -551,6 +612,7 @@ static bool validate_static_shapes(void) {
     a64_static_block_t block;
     uint8_t read_bytes[sizeof A32_READ_HITS];
     uint8_t thumb_read_bytes[sizeof THUMB_READ_HITS];
+    uint8_t vfp_bytes[sizeof VFP_REGISTER_OPS];
     unsigned i;
 
     for (i = 0u; i < sizeof A32_READ_HITS / sizeof A32_READ_HITS[0]; i++) {
@@ -564,6 +626,14 @@ static bool validate_static_shapes(void) {
         uint16_t value = THUMB_READ_HITS[i];
         thumb_read_bytes[i * 2u + 0u] = (uint8_t)value;
         thumb_read_bytes[i * 2u + 1u] = (uint8_t)(value >> 8);
+    }
+    for (i = 0u; i < sizeof VFP_REGISTER_OPS / sizeof VFP_REGISTER_OPS[0];
+         i++) {
+        uint32_t value = VFP_REGISTER_OPS[i];
+        vfp_bytes[i * 4u + 0u] = (uint8_t)value;
+        vfp_bytes[i * 4u + 1u] = (uint8_t)(value >> 8);
+        vfp_bytes[i * 4u + 2u] = (uint8_t)(value >> 16);
+        vfp_bytes[i * 4u + 3u] = (uint8_t)(value >> 24);
     }
 
     for (i = 0u; i < sizeof STATIC_CASES / sizeof STATIC_CASES[0]; i++) {
@@ -624,6 +694,22 @@ static bool validate_static_shapes(void) {
            "handlers=%u\n", block.insn_count, block.uop_count,
            A64_STATIC_HANDLER_COUNT);
 
+    if (!a64_static_decode_read_hits_bytes_at(
+            vfp_bytes, (unsigned)(sizeof VFP_REGISTER_OPS /
+                                  sizeof VFP_REGISTER_OPS[0]),
+            false, 0xe400u, &block) ||
+        block.insn_count != sizeof VFP_REGISTER_OPS /
+                            sizeof VFP_REGISTER_OPS[0] ||
+        block.uop_count != 17u || block.start_pc != 0xe400u ||
+        block.exit_pc != 0xe440u || block.touches_memory ||
+        block.direct_reads || !block.runtime_guards || !block.vfp) {
+        fprintf(stderr, "jitbench: product VFP register shape failed\n");
+        return false;
+    }
+    printf("STATIC-VFP-REGISTER-SHAPE exact=yes insns=%u uops=%u "
+           "handlers=%u\n", block.insn_count, block.uop_count,
+           A64_STATIC_HANDLER_COUNT);
+
     for (i = 0u; i < sizeof INVALID_READ_HITS /
                          sizeof INVALID_READ_HITS[0]; i++) {
         uint32_t value = INVALID_READ_HITS[i];
@@ -648,6 +734,22 @@ static bool validate_static_shapes(void) {
                                                  &block)) {
             fprintf(stderr,
                     "jitbench: product decoder accepted invalid Thumb %u\n",
+                    i);
+            return false;
+        }
+    }
+
+    for (i = 0u; i < sizeof INVALID_PRODUCT_VFP /
+                         sizeof INVALID_PRODUCT_VFP[0]; i++) {
+        uint32_t value = INVALID_PRODUCT_VFP[i];
+        uint8_t bytes[4] = {
+            (uint8_t)value, (uint8_t)(value >> 8),
+            (uint8_t)(value >> 16), (uint8_t)(value >> 24)
+        };
+        if (a64_static_decode_read_hits_bytes_at(bytes, 1u, false, 0xe800u,
+                                                 &block)) {
+            fprintf(stderr,
+                    "jitbench: product decoder accepted invalid VFP %u\n",
                     i);
             return false;
         }
@@ -851,6 +953,146 @@ static bool validate_static_read_oracles(void) {
 
     printf("STATIC-READ-ORACLE exact=yes hits=18 thumb=yes zero-prefix=yes "
            "partial-prefix=yes\n");
+    return true;
+}
+
+static void seed_vfp_oracle(arm_cpu_t *cpu, const uint32_t *program,
+                            unsigned insns, uint32_t pc, bool enabled) {
+    seed_cpu_at(cpu, program, insns, false, pc);
+    cpu->cp15.cpacr |= 0xfu << ARM_CPACR_CP10_SHIFT;
+    cpu->vfp_fpexc = enabled ? ARM_FPEXC_EN : 0u;
+    cpu->vfp_fpscr = 0u;
+    for (unsigned i = 0u; i < 32u; i++)
+        cpu->vfp_s[i] = UINT32_C(0x80000000) ^
+                        (UINT32_C(0x01020304) * (i + 1u));
+    cpu->vfp_s[12] = UINT32_C(0xff800001); /* signalling NaN payload */
+}
+
+static bool static_vfp_states_equal(const arm_cpu_t *a,
+                                    const arm_cpu_t *b) {
+    return memcmp(a->r, b->r, sizeof a->r) == 0 &&
+           a->cpsr == b->cpsr && a->cycles == b->cycles &&
+           a->vfp_fpexc == b->vfp_fpexc &&
+           a->vfp_fpscr == b->vfp_fpscr &&
+           memcmp(a->vfp_s, b->vfp_s, sizeof a->vfp_s) == 0 &&
+           a->dread_hits == b->dread_hits &&
+           a->dread_misses == b->dread_misses;
+}
+
+static bool validate_static_vfp_register_oracles(void) {
+    static const uint32_t LAZY_ENABLE[] = {
+        VFP_VMRS(0, 0),                 /* FPSID while disabled */
+        VFP_VMRS(1, 8),                 /* FPEXC while disabled */
+        VFP_VMSR(8, 2),                 /* enable VFP */
+        VFP_VMRS(3, 1),                 /* FPSCR after enable */
+        VFP_VMOV_S_R(0, 4),             /* ordinary transfer after enable */
+    };
+    static const uint32_t PARTIAL_DISABLED[] = {
+        VFP_VMRS(0, 0),                 /* privileged FPSID succeeds */
+        VFP_VMOV_S_R(0, 1),             /* ordinary VFP must fall back */
+    };
+    static const uint32_t LEN_GUARD[] = {
+        VFP_UN_S(0, 0, 1, 0),           /* VMOV.F32 with Len != 0 */
+    };
+    a64_static_block_t block;
+    arm_cpu_t reference, statik, before;
+    unsigned completed = 0u;
+    arm_status_t status = ARM_OK;
+
+    if (!a64_static_host_available()) {
+        printf("STATIC-VFP-REGISTER-ORACLE SKIP: no signed AArch64 "
+               "handlers\n");
+        return true;
+    }
+
+    seed_vfp_oracle(&reference, VFP_REGISTER_OPS,
+                    (unsigned)(sizeof VFP_REGISTER_OPS /
+                               sizeof VFP_REGISTER_OPS[0]),
+                    0xe400u, true);
+    statik = reference;
+    if (!a64_static_decode_read_hits_bytes_at(
+            &g_ram[0xe400u],
+            (unsigned)(sizeof VFP_REGISTER_OPS /
+                       sizeof VFP_REGISTER_OPS[0]),
+            false, 0xe400u, &block))
+        return false;
+    for (unsigned i = 0u; i < block.insn_count; i++) {
+        status = arm_step(&reference);
+        if (status != ARM_OK) break;
+    }
+    if (!a64_static_run_read_hits(&statik, &block, g_ram, sizeof g_ram,
+                                  &completed) || status != ARM_OK ||
+        completed != block.insn_count ||
+        !static_vfp_states_equal(&reference, &statik)) {
+        fprintf(stderr, "jitbench: VFP register oracle mismatch\n");
+        return false;
+    }
+
+    seed_vfp_oracle(&reference, LAZY_ENABLE,
+                    (unsigned)(sizeof LAZY_ENABLE / sizeof LAZY_ENABLE[0]),
+                    0xe600u, false);
+    reference.r[2] = ARM_FPEXC_EN;
+    statik = reference;
+    if (!a64_static_decode_read_hits_bytes_at(
+            &g_ram[0xe600u],
+            (unsigned)(sizeof LAZY_ENABLE / sizeof LAZY_ENABLE[0]),
+            false, 0xe600u, &block))
+        return false;
+    for (unsigned i = 0u; i < block.insn_count; i++) {
+        status = arm_step(&reference);
+        if (status != ARM_OK) break;
+    }
+    if (!a64_static_run_read_hits(&statik, &block, g_ram, sizeof g_ram,
+                                  &completed) || status != ARM_OK ||
+        completed != block.insn_count ||
+        !static_vfp_states_equal(&reference, &statik)) {
+        fprintf(stderr, "jitbench: VFP lazy-enable oracle mismatch\n");
+        return false;
+    }
+
+    seed_vfp_oracle(&reference, PARTIAL_DISABLED, 2u, 0xe700u, false);
+    statik = reference;
+    if (!a64_static_decode_read_hits_bytes_at(&g_ram[0xe700u], 2u, false,
+                                              0xe700u, &block) ||
+        arm_step(&reference) != ARM_OK ||
+        !a64_static_run_read_hits(&statik, &block, g_ram, sizeof g_ram,
+                                  &completed) || completed != 1u ||
+        !static_vfp_states_equal(&reference, &statik)) {
+        fprintf(stderr, "jitbench: VFP partial-prefix guard mismatch\n");
+        return false;
+    }
+
+    seed_vfp_oracle(&statik, LEN_GUARD, 1u, 0xe800u, true);
+    statik.vfp_fpscr = ARM_FPSCR_LEN;
+    before = statik;
+    if (!a64_static_decode_read_hits_bytes_at(&g_ram[0xe800u], 1u, false,
+                                              0xe800u, &block) ||
+        !a64_static_run_read_hits(&statik, &block, g_ram, sizeof g_ram,
+                                  &completed) || completed != 0u ||
+        !static_vfp_states_equal(&before, &statik)) {
+        fprintf(stderr, "jitbench: VFP Len guard changed state\n");
+        return false;
+    }
+
+    /* A failed ARM condition retires without consulting CPACR/FPEXC. */
+    {
+        uint32_t condition_skip = VFP_VMOV_S_R(0, 0) & UINT32_C(0x0fffffff);
+        seed_vfp_oracle(&reference, &condition_skip, 1u, 0xe900u, false);
+        reference.cp15.cpacr = 0u;
+        statik = reference;
+        if (!a64_static_decode_read_hits_bytes_at(&g_ram[0xe900u], 1u,
+                                                  false, 0xe900u, &block) ||
+            arm_step(&reference) != ARM_OK ||
+            !a64_static_run_read_hits(&statik, &block, g_ram, sizeof g_ram,
+                                      &completed) || completed != 1u ||
+            !static_vfp_states_equal(&reference, &statik)) {
+            fprintf(stderr, "jitbench: conditional VFP skip mismatch\n");
+            return false;
+        }
+    }
+
+    printf("STATIC-VFP-REGISTER-ORACLE exact=yes ops=16 lazy=yes "
+           "zero-prefix=yes partial-prefix=yes\n");
     return true;
 }
 
@@ -1162,6 +1404,7 @@ int main(int argc, char **argv) {
         return 1;
     }
     if (!validate_static_read_oracles()) return 1;
+    if (!validate_static_vfp_register_oracles()) return 1;
     if (!validate_static_oracles()) return 1;
 
     for (i = 0u; i < sizeof CASES / sizeof CASES[0]; i++) {

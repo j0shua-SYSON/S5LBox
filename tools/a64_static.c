@@ -1,5 +1,6 @@
 /* See a64_static.h. Copyright (c) 2026 j0shua-SYSON. MIT licensed. */
 #include "a64_static.h"
+#include "vfp.h"
 
 #include <limits.h>
 #include <string.h>
@@ -38,7 +39,19 @@ enum {
     A64S_ADDR_IMM = A64S_DP_REG + 16u * 2u * 15u * 16u,
     A64S_ADDR_REG = A64S_ADDR_IMM + 2u * 16u,
     A64S_DIRECT_READ = A64S_ADDR_REG + 2u * 16u,
-    A64S_HANDLER_COUNT = A64S_DIRECT_READ + A64S_READ_KIND_COUNT * 15u
+    A64S_VFP_CORE_TO_S = A64S_DIRECT_READ + A64S_READ_KIND_COUNT * 15u,
+    A64S_VFP_S_TO_CORE = A64S_VFP_CORE_TO_S + 15u,
+    A64S_VFP_CORE_TO_PAIR = A64S_VFP_S_TO_CORE + 15u,
+    A64S_VFP_PAIR_TO_CORE = A64S_VFP_CORE_TO_PAIR + 15u * 15u,
+    A64S_VFP_VMRS_FPSID = A64S_VFP_PAIR_TO_CORE + 15u * 15u,
+    A64S_VFP_VMRS_FPSCR = A64S_VFP_VMRS_FPSID + 15u,
+    A64S_VFP_VMRS_FPEXC = A64S_VFP_VMRS_FPSCR + 15u,
+    A64S_VFP_VMRS_APSR = A64S_VFP_VMRS_FPEXC + 15u,
+    A64S_VFP_VMSR_FPSCR = A64S_VFP_VMRS_APSR + 1u,
+    A64S_VFP_VMSR_FPEXC = A64S_VFP_VMSR_FPSCR + 15u,
+    A64S_VFP_UNARY32 = A64S_VFP_VMSR_FPEXC + 15u,
+    A64S_VFP_UNARY64 = A64S_VFP_UNARY32 + 3u,
+    A64S_HANDLER_COUNT = A64S_VFP_UNARY64 + 3u
 };
 
 enum {
@@ -61,6 +74,10 @@ typedef struct {
     uint64_t *hits;
     uint32_t generation;
     uint32_t privilege;
+    uint32_t *vfp_s;
+    uint32_t *vfp_fpexc;
+    uint32_t *vfp_fpscr;
+    uint32_t vfp_access;
 } a64_static_read_context_t;
 
 _Static_assert(offsetof(arm_cpu_t, r) == 0u,
@@ -73,12 +90,21 @@ _Static_assert(sizeof(((arm_cpu_t *)0)->dread[0]) == 16u &&
                offsetof(arm_cpu_t, dread[0].gen) ==
                    offsetof(arm_cpu_t, dread) + 12u,
                "signed handlers and data-read cache layout disagree");
-_Static_assert(sizeof(a64_static_read_context_t) == 24u &&
+_Static_assert(sizeof(a64_static_read_context_t) == 56u &&
                offsetof(a64_static_read_context_t, dread) == 0u &&
                offsetof(a64_static_read_context_t, hits) == 8u &&
                offsetof(a64_static_read_context_t, generation) == 16u &&
-               offsetof(a64_static_read_context_t, privilege) == 20u,
+               offsetof(a64_static_read_context_t, privilege) == 20u &&
+               offsetof(a64_static_read_context_t, vfp_s) == 24u &&
+               offsetof(a64_static_read_context_t, vfp_fpexc) == 32u &&
+               offsetof(a64_static_read_context_t, vfp_fpscr) == 40u &&
+               offsetof(a64_static_read_context_t, vfp_access) == 48u,
                "signed read context layout changed");
+_Static_assert(ARM1176_FPSID == UINT32_C(0x410120b4) &&
+               ARM_FPEXC_EN == (1u << 30) &&
+               ARM_FPSCR_LEN == UINT32_C(0x00070000) &&
+               ARM_FPSCR_WMASK == UINT32_C(0xf3f79f9f),
+               "generated VFP constants disagree with the interpreter");
 
 static uint32_t ror32(uint32_t value, unsigned amount) {
     amount &= 31u;
@@ -154,6 +180,22 @@ static uint32_t direct_read(unsigned kind, unsigned rd) {
     return A64S_DIRECT_READ + kind * 15u + rd;
 }
 
+static uint32_t vfp_core_to_s(unsigned rt) {
+    return A64S_VFP_CORE_TO_S + rt;
+}
+
+static uint32_t vfp_s_to_core(unsigned rt) {
+    return A64S_VFP_S_TO_CORE + rt;
+}
+
+static uint32_t vfp_core_to_pair(unsigned rt, unsigned rt2) {
+    return A64S_VFP_CORE_TO_PAIR + rt * 15u + rt2;
+}
+
+static uint32_t vfp_pair_to_core(unsigned rt, unsigned rt2) {
+    return A64S_VFP_PAIR_TO_CORE + rt * 15u + rt2;
+}
+
 static bool handler_is_condition(uint32_t handler) {
     return handler >= A64S_COND && handler < A64S_DP_IMM;
 }
@@ -175,7 +217,15 @@ static bool handler_is_addr_reg(uint32_t handler) {
 }
 
 static bool handler_is_direct_read(uint32_t handler) {
-    return handler >= A64S_DIRECT_READ && handler < A64S_HANDLER_COUNT;
+    return handler >= A64S_DIRECT_READ && handler < A64S_VFP_CORE_TO_S;
+}
+
+static bool handler_is_vfp(uint32_t handler) {
+    return handler >= A64S_VFP_CORE_TO_S && handler < A64S_HANDLER_COUNT;
+}
+
+static bool handler_is_runtime_guarded(uint32_t handler) {
+    return handler_is_direct_read(handler) || handler_is_vfp(handler);
 }
 
 static bool arm_dp_encoding(uint32_t insn) {
@@ -187,6 +237,137 @@ static bool arm_dp_encoding(uint32_t insn) {
 
 static bool handler_touches_memory(uint32_t handler) {
     return handler >= A64S_LDR && handler < A64S_COND;
+}
+
+enum {
+    A64S_VFP_MOV = 0u,
+    A64S_VFP_ABS = 1u,
+    A64S_VFP_NEG = 2u
+};
+
+/* Decode only VFPv2 operations whose semantics are raw register/system-state
+ * transfers. Floating arithmetic and memory stay outside this tranche. Every
+ * admitted handler rechecks the live VFP access state before touching guest
+ * state, because a decoded block can outlive a thread's lazy-VFP context. */
+static bool decode_vfp_transfer(uint32_t insn, a64_static_uop_t *op,
+                                unsigned *written) {
+    if (!op || !written) return false;
+
+    /* MCR/MRC: core <-> single/double word and VMRS/VMSR. */
+    if ((insn & UINT32_C(0x0f000e10)) == UINT32_C(0x0e000a10)) {
+        unsigned opc1 = (insn >> 21) & 7u;
+        bool load = (insn & (1u << 20)) != 0u;
+        bool cp11 = (insn & (1u << 8)) != 0u;
+        unsigned vn = (insn >> 16) & 15u;
+        unsigned rt = (insn >> 12) & 15u;
+
+        if (!cp11 && opc1 == 0u) {
+            if ((insn & UINT32_C(0x0000006f)) != 0u || rt == 15u)
+                return false;
+            op->handler = load ? vfp_s_to_core(rt) : vfp_core_to_s(rt);
+            op->immediate = vn * 2u + ((insn >> 7) & 1u);
+            *written = 1u;
+            return true;
+        }
+        if (cp11 && opc1 <= 1u) {
+            if ((insn & (1u << 7)) != 0u ||
+                (insn & UINT32_C(0x0000006f)) != 0u || rt == 15u)
+                return false;
+            op->handler = load ? vfp_s_to_core(rt) : vfp_core_to_s(rt);
+            op->immediate = vn * 2u + opc1;
+            *written = 1u;
+            return true;
+        }
+        if (cp11 || opc1 != 7u ||
+            (insn & UINT32_C(0x000000ef)) != 0u)
+            return false;
+        if (load) {
+            if (vn == 1u && rt == 15u)
+                op->handler = A64S_VFP_VMRS_APSR;
+            else if (rt == 15u)
+                return false;
+            else if (vn == 0u)
+                op->handler = A64S_VFP_VMRS_FPSID + rt;
+            else if (vn == 1u)
+                op->handler = A64S_VFP_VMRS_FPSCR + rt;
+            else if (vn == 8u)
+                op->handler = A64S_VFP_VMRS_FPEXC + rt;
+            else
+                return false;
+        } else {
+            if (rt == 15u) return false;
+            if (vn == 1u)
+                op->handler = A64S_VFP_VMSR_FPSCR + rt;
+            else if (vn == 8u)
+                op->handler = A64S_VFP_VMSR_FPEXC + rt;
+            else
+                return false;
+        }
+        *written = 1u;
+        return true;
+    }
+
+    /* MCRR/MRRC: a core-register pair <-> one D register or two S regs. */
+    if ((insn & UINT32_C(0x0fe00e00)) == UINT32_C(0x0c400a00)) {
+        bool load = (insn & (1u << 20)) != 0u;
+        bool dbl = (insn & (1u << 8)) != 0u;
+        bool m = (insn & (1u << 5)) != 0u;
+        unsigned rt2 = (insn >> 16) & 15u;
+        unsigned rt = (insn >> 12) & 15u;
+        unsigned vm = insn & 15u;
+        unsigned first;
+        if ((insn & UINT32_C(0x000000c0)) != 0u ||
+            rt == 15u || rt2 == 15u)
+            return false;
+        if (dbl) {
+            if (m) return false;
+            first = vm * 2u;
+        } else {
+            first = vm * 2u + (m ? 1u : 0u);
+            if (first == 31u) return false;
+        }
+        op->handler = load ? vfp_pair_to_core(rt, rt2)
+                           : vfp_core_to_pair(rt, rt2);
+        op->immediate = first;
+        *written = 1u;
+        return true;
+    }
+
+    /* CDP "other" group: raw same-width VMOV/VABS/VNEG only. */
+    if ((insn & UINT32_C(0x0f000e10)) == UINT32_C(0x0e000a00)) {
+        unsigned family = (((insn >> 23) & 1u) << 2) |
+                          (((insn >> 21) & 1u) << 1) |
+                          ((insn >> 20) & 1u);
+        unsigned opc2 = (insn >> 16) & 15u;
+        bool top = (insn & (1u << 7)) != 0u;
+        bool dbl = (insn & (1u << 8)) != 0u;
+        unsigned operation;
+        unsigned rd;
+        unsigned rm;
+        if (family != 7u || (insn & (1u << 6)) == 0u)
+            return false;
+        if (opc2 == 0u)
+            operation = top ? A64S_VFP_ABS : A64S_VFP_MOV;
+        else if (opc2 == 1u && !top)
+            operation = A64S_VFP_NEG;
+        else
+            return false;
+        if (dbl) {
+            if ((insn & ((1u << 22) | (1u << 5))) != 0u)
+                return false;
+            rd = ((insn >> 12) & 15u) * 2u;
+            rm = (insn & 15u) * 2u;
+            op->handler = A64S_VFP_UNARY64 + operation;
+        } else {
+            rd = ((insn >> 12) & 15u) * 2u + ((insn >> 22) & 1u);
+            rm = (insn & 15u) * 2u + ((insn >> 5) & 1u);
+            op->handler = A64S_VFP_UNARY32 + operation;
+        }
+        op->immediate = rd | (rm << 8);
+        *written = 1u;
+        return true;
+    }
+    return false;
 }
 
 static bool decode_arm(uint32_t insn, unsigned index, unsigned insns,
@@ -221,6 +402,12 @@ static bool decode_arm(uint32_t insn, unsigned index, unsigned insns,
         op->handler = A64S_COND + condition;
         op++;
         count++;
+    }
+
+    if (read_hits && decode_vfp_transfer(insn, op, written)) {
+        if (guard) guard->metadata = *written;
+        *written += count;
+        return true;
     }
 
     if ((insn & UINT32_C(0x0c000000)) == UINT32_C(0x04000000)) {
@@ -662,14 +849,18 @@ static bool decode_program_at(const void *program, unsigned insns, bool thumb,
             }
             if (handler_touches_memory(handler))
                 out->touches_memory = true;
-            if (handler_is_direct_read(handler)) {
-                out->touches_memory = true;
-                out->direct_reads = true;
+            if (handler_is_runtime_guarded(handler)) {
+                out->runtime_guards = true;
                 out->uops[uop_count + j].pc_value =
                     pc + i * (thumb ? 2u : 4u);
                 out->uops[uop_count + j].metadata =
                     ((i + 1u) << 8) | (insns - i);
             }
+            if (handler_is_direct_read(handler)) {
+                out->touches_memory = true;
+                out->direct_reads = true;
+            }
+            if (handler_is_vfp(handler)) out->vfp = true;
         }
         uop_count += added;
     }
@@ -759,6 +950,7 @@ static unsigned semantic_span(const a64_static_block_t *block, unsigned i,
     if (handler_is_dp_reg(handler) || handler_is_addr_reg(handler) ||
         handler_is_direct_read(handler))
         return 0u;
+    if (handler_is_vfp(handler)) return 1u;
     return 1u;
 }
 
@@ -771,6 +963,8 @@ static bool validate_run(const arm_cpu_t *cpu,
     unsigned end;
     bool saw_flat_memory = false;
     bool saw_direct_read = false;
+    bool saw_runtime_guard = false;
+    bool saw_vfp = false;
 
     if (!cpu || !block || !blocks || !ram ||
         !block->insn_count || block->insn_count > A64_STATIC_MAX_INSNS ||
@@ -793,12 +987,12 @@ static bool validate_run(const arm_cpu_t *cpu,
         if (handler == A64S_END || handler >= A64S_HANDLER_COUNT)
             return false;
         if (handler_touches_memory(handler)) saw_flat_memory = true;
-        if (handler_is_direct_read(handler)) {
+        if (handler_is_runtime_guarded(handler)) {
             uint32_t metadata = block->uops[j].metadata;
             unsigned remaining = metadata & 255u;
             unsigned completed_plus_one = (metadata >> 8) & 255u;
             unsigned completed;
-            saw_direct_read = true;
+            saw_runtime_guard = true;
             if ((metadata >> 16) != 0u || !remaining ||
                 !completed_plus_one)
                 return false;
@@ -809,6 +1003,8 @@ static bool validate_run(const arm_cpu_t *cpu,
                     block->start_pc + completed * (block->thumb ? 2u : 4u))
                 return false;
         }
+        if (handler_is_direct_read(handler)) saw_direct_read = true;
+        if (handler_is_vfp(handler)) saw_vfp = true;
         if (handler >= A64S_DP_IMM && handler < A64S_SHIFT_IMM &&
             block->uops[j].metadata > A64S_CARRY_SET)
             return false;
@@ -816,7 +1012,10 @@ static bool validate_run(const arm_cpu_t *cpu,
 
     if (block->touches_memory != (saw_flat_memory || saw_direct_read) ||
         block->direct_reads != saw_direct_read ||
+        block->runtime_guards != saw_runtime_guard ||
+        block->vfp != saw_vfp ||
         (kind == A64S_RUN_FLAT && saw_direct_read) ||
+        (kind == A64S_RUN_FLAT && saw_vfp) ||
         (kind == A64S_RUN_READ_HITS && saw_flat_memory))
         return false;
 
@@ -869,7 +1068,11 @@ bool a64_static_run_read_hits(arm_cpu_t *cpu,
         cpu->dread,
         &cpu->dread_hits,
         cpu->tlb_gen,
-        (cpu->cpsr & ARM_CPSR_MODE_MASK) != ARM_MODE_USR ? 1u : 0u
+        (cpu->cpsr & ARM_CPSR_MODE_MASK) != ARM_MODE_USR ? 1u : 0u,
+        cpu->vfp_s,
+        &cpu->vfp_fpexc,
+        &cpu->vfp_fpscr,
+        vfp_cpacr_permits(cpu) ? 1u : 0u
     };
     int result = a64_static_execute(cpu->r, &cpu->cpsr, &cpu->cycles,
                                     block->uops, 1u, ram,

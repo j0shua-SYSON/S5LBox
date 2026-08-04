@@ -52,6 +52,7 @@ static rootfs_work_entry_t *g_jb_entries = NULL;
 #include "soc.h"
 #if defined(S5LBOX_STATIC_A64_ENGINE)
 #include "a64_static.h"
+#include "vfp.h"
 #endif
 #include <ctype.h>
 #include <errno.h>
@@ -25217,6 +25218,36 @@ static bool sequence_signed_terminal(uint32_t raw, bool thumb) {
            (raw & UINT32_C(0x0f000000)) == UINT32_C(0x0a000000);
 }
 
+/* Read-only mirror of the signed VFP handlers' live guard. The decoder proves
+ * the encoding; this helper proves whether that exact instruction could retire
+ * through signed text in the current lazy-VFP context. */
+static bool sequence_vfp_guard_passes(const arm_cpu_t *cpu, uint32_t insn) {
+    bool enabled;
+    bool privileged;
+    if (!cpu || !vfp_cpacr_permits(cpu)) return false;
+    enabled = vfp_enabled(cpu);
+    privileged = (cpu->cpsr & ARM_CPSR_MODE_MASK) != ARM_MODE_USR;
+
+    if ((insn & UINT32_C(0x0f000e10)) == UINT32_C(0x0e000a10) &&
+        ((insn >> 21) & 7u) == 7u &&
+        (insn & (1u << 8)) == 0u) {
+        unsigned vn = (insn >> 16) & 15u;
+        if (vn == 8u) return privileged;
+        if (vn == 0u) return enabled || privileged;
+        return enabled; /* the decoder admits only FPSCR here */
+    }
+
+    if (!enabled) return false;
+    if ((insn & UINT32_C(0x0f000e10)) == UINT32_C(0x0e000a00)) {
+        unsigned family = (((insn >> 23) & 1u) << 2) |
+                          (((insn >> 21) & 1u) << 1) |
+                          ((insn >> 20) & 1u);
+        if (family == 7u && (insn & (1u << 6)) != 0u)
+            return (cpu->vfp_fpscr & ARM_FPSCR_LEN) == 0u;
+    }
+    return true;
+}
+
 /* Ask the product decoder about exactly one live instruction. A direct-read
  * record is retirement-eligible only if its condition skips the read or the
  * current interpreter DREAD entry satisfies the handler's exact guard. The
@@ -25237,6 +25268,17 @@ static sequence_signed_classification_t sequence_signed_classify(
         return result;
 
     result.terminal = sequence_signed_terminal(raw, thumb);
+
+    unsigned condition = thumb ? 14u : raw >> 28;
+    if (block.runtime_guards && condition < 14u &&
+        !arm_cond_passed(cpu, condition)) {
+        result.outcome = SEQUENCE_SIGNED_READ_SKIPPED;
+        return result;
+    }
+    if (block.vfp && !sequence_vfp_guard_passes(cpu, raw)) {
+        result.outcome = SEQUENCE_SIGNED_READ_GUARD;
+        return result;
+    }
     if (!block.direct_reads) {
         result.outcome = SEQUENCE_SIGNED_PLAIN;
         return result;
@@ -25256,12 +25298,6 @@ static sequence_signed_classification_t sequence_signed_classify(
         result.outcome = sequence_dread_would_hit(
             cpu, cache_va, width, priv)
             ? SEQUENCE_SIGNED_READ_HIT : SEQUENCE_SIGNED_READ_MISS;
-        return result;
-    }
-
-    unsigned condition = raw >> 28;
-    if (condition < 14u && !arm_cond_passed(cpu, condition)) {
-        result.outcome = SEQUENCE_SIGNED_READ_SKIPPED;
         return result;
     }
 

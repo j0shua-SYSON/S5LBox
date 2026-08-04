@@ -191,11 +191,13 @@ jobs:
             grep -Fq 'code buffer policy: MAP_JIT + pthread_jit_write_protect_np' <<<"$output"
             grep -Eq '[1-9][0-9]* passed, 0 failed' <<<"$output"
             grep -Eq 'STATIC-A64-SOC-ORACLE exact=yes retired=[1-9][0-9]* smc=yes' <<<"$soc_output"
+            grep -Eq 'STATIC-A64-VFP-REGISTER-ORACLE exact=yes retired=[1-9][0-9]*' <<<"$soc_output"
             grep -Eq 'STATIC-A64-THUMB-ORACLE exact=yes retired=[1-9][0-9]*' <<<"$soc_output"
             grep -Eq 'STATIC-A64-THUMB-READ-ORACLE exact=yes retired=[1-9][0-9]*' <<<"$soc_output"
           else
             grep -Fq 'SKIP: not an arm64 host' <<<"$output"
             grep -Fq 'STATIC-A64-SOC-ORACLE SKIP: no signed AArch64 handlers' <<<"$soc_output"
+            grep -Fq 'STATIC-A64-VFP-REGISTER-ORACLE SKIP: no signed AArch64 handlers' <<<"$soc_output"
             grep -Fq 'STATIC-A64-THUMB-ORACLE SKIP: no signed AArch64 handlers' <<<"$soc_output"
             grep -Fq 'STATIC-A64-THUMB-READ-ORACLE SKIP: no signed AArch64 handlers' <<<"$soc_output"
           fi
