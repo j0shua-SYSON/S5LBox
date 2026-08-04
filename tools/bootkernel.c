@@ -24929,8 +24929,11 @@ typedef struct {
     uint64_t signed_call_length;
     uint64_t signed_call_max;
     uint64_t signed_call_remaining;
+    uint64_t signed_call_blocks;
     uint64_t signed_modeled_retired;
     uint64_t signed_chain_transitions;
+    uint64_t signed_call_shapes[SEQUENCE_SIGNED_CAP + 1u]
+                               [SEQUENCE_SIGNED_CAP + 1u];
     uint64_t signed_stops[SEQUENCE_SIGNED_STOP_COUNT];
     sequence_signed_stop_t signed_budget_stop;
     uint32_t signed_chain_pc;
@@ -25488,7 +25491,16 @@ static void sequence_signed_close(sequence_profile_t *profile,
                                   sequence_signed_stop_t why) {
     if (!profile) return;
     profile->signed_chain_pending = false;
-    if (!profile->signed_call_length) return;
+    if (!profile->signed_call_length) {
+        profile->signed_call_blocks = 0u;
+        return;
+    }
+    if (profile->signed_call_length <= SEQUENCE_SIGNED_CAP &&
+        profile->signed_call_blocks != 0u &&
+        profile->signed_call_blocks <= profile->signed_call_length) {
+        profile->signed_call_shapes[profile->signed_call_length]
+                                   [profile->signed_call_blocks]++;
+    }
     sequence_close_run(profile->signed_calls,
                        profile->signed_call_instructions,
                        &profile->signed_call_length,
@@ -25496,6 +25508,7 @@ static void sequence_signed_close(sequence_profile_t *profile,
     if ((unsigned)why < SEQUENCE_SIGNED_STOP_COUNT)
         profile->signed_stops[why]++;
     profile->signed_call_remaining = 0u;
+    profile->signed_call_blocks = 0u;
 }
 
 /* Reproduce every read-only entry gate available to bootkernel. The native
@@ -25607,13 +25620,16 @@ static bool sequence_signed_observe(sequence_profile_t *profile,
         }
         profile->signed_call_remaining = budget;
         profile->signed_budget_stop = budget_stop;
+        profile->signed_call_blocks = 1u;
     }
 
     profile->signed_call_length++;
     profile->signed_modeled_retired++;
     profile->signed_class_modeled[instruction_class]++;
-    if (chained_head)
+    if (chained_head) {
         profile->signed_chain_transitions++;
+        profile->signed_call_blocks++;
+    }
     if (profile->signed_call_remaining)
         profile->signed_call_remaining--;
 
@@ -27094,6 +27110,37 @@ static void sequence_profile_report(sequence_profile_t *profile) {
                    signed_calls, signed_instructions,
                    histogram_calls == signed_calls &&
                            histogram_instructions == signed_instructions
+                       ? "EXACT" : "MISMATCH");
+        }
+        {
+            uint64_t shape_calls = 0u;
+            uint64_t shape_instructions = 0u;
+            uint64_t shape_blocks = 0u;
+            printf("    exact modeled call shape (length: blocks=calls)\n");
+            for (unsigned length = 1u; length <= SEQUENCE_SIGNED_CAP;
+                 length++) {
+                printf("      length=%2u", length);
+                for (unsigned blocks = 1u; blocks <= length; blocks++) {
+                    uint64_t calls =
+                        profile->signed_call_shapes[length][blocks];
+                    if (!calls) continue;
+                    printf("  %u=%" PRIu64, blocks, calls);
+                    shape_calls += calls;
+                    shape_instructions += calls * length;
+                    shape_blocks += calls * blocks;
+                }
+                putchar('\n');
+            }
+            printf("    exact shape calls/instructions/blocks=%" PRIu64
+                   "/%" PRIu64 "/%" PRIu64 " model=%" PRIu64
+                   "/%" PRIu64 "/%" PRIu64 "  %s\n",
+                   shape_calls, shape_instructions, shape_blocks,
+                   signed_calls, signed_instructions,
+                   signed_calls + profile->signed_chain_transitions,
+                   shape_calls == signed_calls &&
+                           shape_instructions == signed_instructions &&
+                           shape_blocks == signed_calls +
+                                               profile->signed_chain_transitions
                        ? "EXACT" : "MISMATCH");
         }
         printf("    stops cap/timer/caller/branch/flow/fetch-block/"
