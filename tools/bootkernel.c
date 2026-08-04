@@ -25244,8 +25244,13 @@ typedef struct {
 static bool sequence_signed_terminal(uint32_t raw, bool thumb) {
     if (thumb)
         return (raw & UINT32_C(0xf800)) == UINT32_C(0xe000);
-    return (raw >> 28) == 14u &&
-           (raw & UINT32_C(0x0f000000)) == UINT32_C(0x0a000000);
+    /* Every admitted A32 immediate B/BL exits the current signed invocation,
+     * including a failed conditional branch that selects fallthrough. The
+     * profiler must not merge that fallthrough into the same call until the
+     * product actually implements branch-to-target chaining. cond=0xf remains
+     * the rejected unconditional instruction space. */
+    return (raw >> 28) < 15u &&
+           (raw & UINT32_C(0x0e000000)) == UINT32_C(0x0a000000);
 }
 
 /* Read-only mirror of the signed VFP handlers' live guard. The decoder proves
