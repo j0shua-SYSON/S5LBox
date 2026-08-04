@@ -24,6 +24,7 @@
  * read record. The final slot is the fixed block exit. */
 #define A64_STATIC_MAX_UOPS (A64_STATIC_MAX_INSNS * 4u + 1u)
 #define A64_STATIC_HANDLER_COUNT 24646u
+#define A64_STATIC_GRAPH_SLOTS 512u
 
 typedef struct {
     uint32_t handler;
@@ -45,6 +46,27 @@ typedef struct {
     bool runtime_guards;
     bool vfp;
 } a64_static_block_t;
+
+/* Fixed-layout, data-only head descriptor for callback-free signed chaining.
+ * The owner pointer is never dereferenced by generated assembly; it lets the C
+ * cache invalidate a descriptor before its inline block storage is reused.
+ * A 128-byte stride keeps the native lookup independent of private cache-entry
+ * layout and makes every field offset compile-time auditable. */
+typedef struct {
+    const void *owner;
+    const uint8_t *fetch_host;
+    const a64_static_uop_t *uops;
+    uint32_t pc;
+    uint32_t fetch_gen;
+    uint32_t insn_count;
+    uint32_t raw_len;
+    uint8_t raw[A64_STATIC_MAX_INSNS * 4u];
+    uint8_t fetch_priv;
+    uint8_t thumb;
+    uint8_t valid;
+    uint8_t supported;
+    uint8_t reserved[20];
+} a64_static_graph_node_t;
 
 /* A product chain validates its next guest PC outside the generated handler
  * text. The callback may return only an immutable block owned by its caller;

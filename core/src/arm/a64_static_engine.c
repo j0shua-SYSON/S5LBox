@@ -41,6 +41,7 @@ typedef struct {
     uint64_t chained_blocks;
     uint64_t persistent_chained_blocks;
     static_a64_entry_t cache[STATIC_A64_CACHE_ENTRIES];
+    a64_static_graph_node_t graph[A64_STATIC_GRAPH_SLOTS];
 } static_a64_state_t;
 
 static static_a64_state_t *static_state(const s5l8900_t *m) {
@@ -76,10 +77,48 @@ static bool decode_longest(const uint8_t *bytes, unsigned candidate_insns,
     return false;
 }
 
-static void decode_entry(static_a64_entry_t *entry, const arm_cpu_t *cpu,
+static unsigned graph_index(uint32_t pc, bool thumb) {
+    return (pc & UINT32_C(0x3ff)) >> (thumb ? 1u : 2u);
+}
+
+static void invalidate_entry(static_a64_state_t *state,
+                             static_a64_entry_t *entry) {
+    if (!state || !entry) return;
+    a64_static_graph_node_t *node =
+        &state->graph[graph_index(entry->pc, entry->thumb)];
+    if (node->owner == entry) {
+        node->valid = 0u;
+        node->supported = 0u;
+    }
+    entry->valid = false;
+}
+
+static void publish_graph_node(static_a64_state_t *state,
+                               static_a64_entry_t *entry) {
+    a64_static_graph_node_t *node;
+    if (!state || !entry) return;
+    node = &state->graph[graph_index(entry->pc, entry->thumb)];
+    memset(node, 0, sizeof *node);
+    node->owner = entry;
+    node->fetch_host = entry->fetch_host;
+    node->uops = entry->block.uops;
+    node->pc = entry->pc;
+    node->fetch_gen = entry->fetch_gen;
+    node->insn_count = entry->block.insn_count;
+    node->raw_len = entry->raw_len;
+    memcpy(node->raw, entry->raw, entry->raw_len);
+    node->fetch_priv = entry->fetch_priv ? 1u : 0u;
+    node->thumb = entry->thumb ? 1u : 0u;
+    node->valid = entry->valid ? 1u : 0u;
+    node->supported = entry->supported ? 1u : 0u;
+}
+
+static void decode_entry(static_a64_state_t *state, static_a64_entry_t *entry,
+                         const arm_cpu_t *cpu,
                          const uint8_t *bytes, uint32_t pc, bool thumb,
                          bool priv, unsigned candidate_insns,
                          unsigned raw_len) {
+    invalidate_entry(state, entry);
     memset(entry, 0, sizeof *entry);
     entry->fetch_host = cpu->fetch_host;
     entry->pc = pc;
@@ -92,10 +131,9 @@ static void decode_entry(static_a64_entry_t *entry, const arm_cpu_t *cpu,
 
     /* Decode the longest exact prefix. Product loads carry a guarded DREAD hit;
      * stores and unsupported forms still shorten to an earlier exact prefix. */
-    if (decode_longest(bytes, candidate_insns, thumb, pc, &entry->block)) {
+    if (decode_longest(bytes, candidate_insns, thumb, pc, &entry->block))
         entry->supported = true;
-        return;
-    }
+    publish_graph_node(state, entry);
 }
 
 typedef struct {
@@ -154,7 +192,7 @@ static const a64_static_block_t *select_persistent_block(
     entry = &context->state->cache[
         cache_index(pc, thumb, cpu->fetch_gen)];
     if (!entry_matches(entry, cpu, bytes, pc, thumb, priv, raw_len))
-        decode_entry(entry, cpu, bytes, pc, thumb, priv,
+        decode_entry(context->state, entry, cpu, bytes, pc, thumb, priv,
                      candidate_insns, raw_len);
     context->last_entry = entry;
     if (!entry->supported) return NULL;
@@ -273,7 +311,8 @@ static unsigned try_persistent(s5l8900_t *m, static_a64_state_t *state,
                                         &completed, &blocks)) {
         /* A pre-execution contract mismatch must not become a sticky cache
          * hit. Runtime read/VFP misses are successful exact-prefix returns. */
-        if (context.last_entry) context.last_entry->valid = false;
+        if (context.last_entry)
+            invalidate_entry(state, context.last_entry);
         return 0u;
     }
     state->retired += completed;
@@ -351,7 +390,7 @@ unsigned s5l8900_static_a64_try(s5l8900_t *m, unsigned max_insns) {
 
         entry = &state->cache[cache_index(pc, thumb, cpu->fetch_gen)];
         if (!entry_matches(entry, cpu, bytes, pc, thumb, priv, raw_len))
-            decode_entry(entry, cpu, bytes, pc, thumb, priv,
+            decode_entry(state, entry, cpu, bytes, pc, thumb, priv,
                          candidate_insns, raw_len);
         if (!entry->supported) break;
         run_block = &entry->block;
@@ -368,7 +407,7 @@ unsigned s5l8900_static_a64_try(s5l8900_t *m, unsigned max_insns) {
                                               m->ram_size, &completed)) {
             /* Fail closed, and make a transient contract mismatch re-decode.
              * The decoded runner refuses before changing guest state. */
-            entry->valid = false;
+            invalidate_entry(state, entry);
             break;
         }
         if (!completed) break;

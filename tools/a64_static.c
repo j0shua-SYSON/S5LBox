@@ -1045,6 +1045,27 @@ _Static_assert(offsetof(a64_static_chain_context_t, ram_mask) == 40u,
                "chain RAM-mask ABI offset");
 _Static_assert(offsetof(a64_static_chain_context_t, final_pc) == 60u,
                "chain final-PC ABI offset");
+_Static_assert(sizeof(a64_static_graph_node_t) == 128u,
+               "graph node ABI size");
+_Static_assert(offsetof(a64_static_graph_node_t, fetch_host) == 8u,
+               "graph fetch-host ABI offset");
+_Static_assert(offsetof(a64_static_graph_node_t, uops) == 16u,
+               "graph uops ABI offset");
+_Static_assert(offsetof(a64_static_graph_node_t, pc) == 24u,
+               "graph PC ABI offset");
+_Static_assert(offsetof(a64_static_graph_node_t, fetch_gen) == 28u,
+               "graph generation ABI offset");
+_Static_assert(offsetof(a64_static_graph_node_t, insn_count) == 32u,
+               "graph instruction-count ABI offset");
+_Static_assert(offsetof(a64_static_graph_node_t, raw_len) == 36u,
+               "graph raw-length ABI offset");
+_Static_assert(offsetof(a64_static_graph_node_t, raw) == 40u,
+               "graph raw-witness ABI offset");
+_Static_assert(offsetof(a64_static_graph_node_t, fetch_priv) == 104u &&
+               offsetof(a64_static_graph_node_t, thumb) == 105u &&
+               offsetof(a64_static_graph_node_t, valid) == 106u &&
+               offsetof(a64_static_graph_node_t, supported) == 107u,
+               "graph flag ABI offsets");
 
 typedef enum {
     A64S_RUN_FLAT,
