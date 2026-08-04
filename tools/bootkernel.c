@@ -24934,6 +24934,12 @@ typedef struct {
     uint64_t signed_chain_transitions;
     uint64_t signed_call_shapes[SEQUENCE_SIGNED_CAP + 1u]
                                [SEQUENCE_SIGNED_CAP + 1u];
+    uint64_t signed_unique_shapes[SEQUENCE_SIGNED_CAP + 1u]
+                                 [SEQUENCE_SIGNED_CAP + 1u];
+    uint64_t signed_reused_graph_heads;
+    uint32_t signed_call_unique_pc[SEQUENCE_SIGNED_CAP];
+    bool signed_call_unique_thumb[SEQUENCE_SIGNED_CAP];
+    unsigned signed_call_unique_blocks;
     uint64_t signed_stops[SEQUENCE_SIGNED_STOP_COUNT];
     sequence_signed_stop_t signed_budget_stop;
     uint32_t signed_chain_pc;
@@ -25487,12 +25493,30 @@ static void sequence_close_run(uint64_t *counts, uint64_t *instructions,
 }
 
 #if defined(S5LBOX_STATIC_A64_ENGINE)
+static void sequence_signed_note_block_head(sequence_profile_t *profile,
+                                            uint32_t pc, bool thumb) {
+    if (!profile) return;
+    for (unsigned i = 0u; i < profile->signed_call_unique_blocks; i++) {
+        if (profile->signed_call_unique_pc[i] == pc &&
+            profile->signed_call_unique_thumb[i] == thumb) {
+            profile->signed_reused_graph_heads++;
+            return;
+        }
+    }
+    if (profile->signed_call_unique_blocks >= SEQUENCE_SIGNED_CAP)
+        return;
+    unsigned slot = profile->signed_call_unique_blocks++;
+    profile->signed_call_unique_pc[slot] = pc;
+    profile->signed_call_unique_thumb[slot] = thumb;
+}
+
 static void sequence_signed_close(sequence_profile_t *profile,
                                   sequence_signed_stop_t why) {
     if (!profile) return;
     profile->signed_chain_pending = false;
     if (!profile->signed_call_length) {
         profile->signed_call_blocks = 0u;
+        profile->signed_call_unique_blocks = 0u;
         return;
     }
     if (profile->signed_call_length <= SEQUENCE_SIGNED_CAP &&
@@ -25500,6 +25524,12 @@ static void sequence_signed_close(sequence_profile_t *profile,
         profile->signed_call_blocks <= profile->signed_call_length) {
         profile->signed_call_shapes[profile->signed_call_length]
                                    [profile->signed_call_blocks]++;
+    }
+    if (profile->signed_call_blocks <= SEQUENCE_SIGNED_CAP &&
+        profile->signed_call_unique_blocks != 0u &&
+        profile->signed_call_unique_blocks <= profile->signed_call_blocks) {
+        profile->signed_unique_shapes[profile->signed_call_blocks]
+                                      [profile->signed_call_unique_blocks]++;
     }
     sequence_close_run(profile->signed_calls,
                        profile->signed_call_instructions,
@@ -25509,6 +25539,7 @@ static void sequence_signed_close(sequence_profile_t *profile,
         profile->signed_stops[why]++;
     profile->signed_call_remaining = 0u;
     profile->signed_call_blocks = 0u;
+    profile->signed_call_unique_blocks = 0u;
 }
 
 /* Reproduce every read-only entry gate available to bootkernel. The native
@@ -25621,6 +25652,7 @@ static bool sequence_signed_observe(sequence_profile_t *profile,
         profile->signed_call_remaining = budget;
         profile->signed_budget_stop = budget_stop;
         profile->signed_call_blocks = 1u;
+        sequence_signed_note_block_head(profile, pc, thumb);
     }
 
     profile->signed_call_length++;
@@ -25629,6 +25661,7 @@ static bool sequence_signed_observe(sequence_profile_t *profile,
     if (chained_head) {
         profile->signed_chain_transitions++;
         profile->signed_call_blocks++;
+        sequence_signed_note_block_head(profile, pc, thumb);
     }
     if (profile->signed_call_remaining)
         profile->signed_call_remaining--;
@@ -27141,6 +27174,45 @@ static void sequence_profile_report(sequence_profile_t *profile) {
                            shape_instructions == signed_instructions &&
                            shape_blocks == signed_calls +
                                                profile->signed_chain_transitions
+                        ? "EXACT" : "MISMATCH");
+        }
+        {
+            uint64_t reuse_calls = 0u;
+            uint64_t unique_heads = 0u;
+            uint64_t block_heads = 0u;
+            printf("    exact modeled graph-head reuse "
+                   "(blocks: unique-heads=calls)\n");
+            for (unsigned blocks = 1u; blocks <= SEQUENCE_SIGNED_CAP;
+                 blocks++) {
+                printf("      blocks=%2u", blocks);
+                for (unsigned unique = 1u; unique <= blocks; unique++) {
+                    uint64_t calls =
+                        profile->signed_unique_shapes[blocks][unique];
+                    if (!calls) continue;
+                    printf("  %u=%" PRIu64, unique, calls);
+                    reuse_calls += calls;
+                    unique_heads += calls * unique;
+                    block_heads += calls * blocks;
+                }
+                putchar('\n');
+            }
+            uint64_t current_native_checks =
+                block_heads >= reuse_calls ? block_heads - reuse_calls : 0u;
+            uint64_t token_native_checks =
+                unique_heads >= reuse_calls ? unique_heads - reuse_calls : 0u;
+            uint64_t reusable_heads =
+                block_heads >= unique_heads ? block_heads - unique_heads : 0u;
+            printf("    exact graph validation calls/heads/unique="
+                   "%" PRIu64 "/%" PRIu64 "/%" PRIu64
+                   " current-native/token-native/reusable=%" PRIu64
+                   "/%" PRIu64 "/%" PRIu64 "  %s\n",
+                   reuse_calls, block_heads, unique_heads,
+                   current_native_checks, token_native_checks,
+                   reusable_heads,
+                   reuse_calls == signed_calls &&
+                           block_heads == signed_calls +
+                                              profile->signed_chain_transitions &&
+                           reusable_heads == profile->signed_reused_graph_heads
                        ? "EXACT" : "MISMATCH");
         }
         printf("    stops cap/timer/caller/branch/flow/fetch-block/"
