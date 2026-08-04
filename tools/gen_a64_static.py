@@ -19,7 +19,7 @@ CONDITIONS = (
     "eq", "ne", "cs", "cc", "mi", "pl", "vs", "vc",
     "hi", "ls", "ge", "lt", "gt", "le",
 )
-EXPECTED_HANDLERS = 24646
+EXPECTED_HANDLERS = 27110
 
 READ_KINDS = (
     ("word", "ldr", 4),
@@ -463,6 +463,35 @@ def direct_read_body(mnemonic: str, width: int, rd: int) -> list[str]:
     return body
 
 
+def fused_address_imm_prefix(up: bool, rn: int,
+                             packed_vfp: bool = False) -> list[str]:
+    body = ["    ldur w9, [x13, #-12]"]
+    if packed_vfp:
+        body.append("    and w9, w9, #0xffff")
+    if rn == 15:
+        # Fused Thumb PC-relative reads are deliberately not decoded. The
+        # record keeps the instruction PC for exact miss return, so rebuild
+        # the A32 architectural PC+8 operand here.
+        body.extend([
+            "    ldur w10, [x13, #-8]",
+            "    add w10, w10, #8",
+        ])
+        source = "w10"
+    else:
+        loads, source = read_guest_register(rn, 10)
+        body.extend(loads)
+    body.append(f"    {'add' if up else 'sub'} w17, {source}, w9")
+    return body
+
+
+def fused_read_imm_body(up: bool, rn: int, mnemonic: str,
+                        width: int, rd: int) -> list[str]:
+    return [
+        *fused_address_imm_prefix(up, rn),
+        *direct_read_body(mnemonic, width, rd),
+    ]
+
+
 def vfp_gate(kind: str) -> list[str]:
     """Preserve guest NZCV and fail before any VFP-visible state change.
 
@@ -836,7 +865,8 @@ def vfp_widen_body() -> list[str]:
     ]
 
 
-def vfp_direct_read_body(width: int) -> list[str]:
+def vfp_direct_read_body(width: int,
+                         packed_immediate: bool = False) -> list[str]:
     reg = "w5" if width == 4 else "x5"
     body = [
         *vfp_gate("enabled"),
@@ -888,6 +918,7 @@ def vfp_direct_read_body(width: int) -> list[str]:
         "    and w4, w17, #0x3ff",
         "    add x16, x16, w4, uxtw",
         "    ldur w9, [x13, #-12]",
+        *(["    lsr w9, w9, #16"] if packed_immediate else []),
         "    ldr x4, [x3, #24]",
         "    add x4, x4, w9, uxtw #2",
         f"    ldr {reg}, [x16]",
@@ -901,6 +932,13 @@ def vfp_direct_read_body(width: int) -> list[str]:
         *vfp_finish(),
     ])
     return body
+
+
+def fused_vfp_read_imm_body(up: bool, rn: int, width: int) -> list[str]:
+    return [
+        *fused_address_imm_prefix(up, rn, packed_vfp=True),
+        *vfp_direct_read_body(width, packed_immediate=True),
+    ]
 
 
 def build_handlers() -> list[tuple[str, list[str]]]:
@@ -1115,6 +1153,22 @@ def build_handlers() -> list[tuple[str, list[str]]]:
             handlers.append((label,
                              direct_read_body(mnemonic, width, rd)))
 
+    # Benchmark-only universal fusion candidates. The handler dimensions are
+    # ISA operands, never firmware/profile data. Keeping the old address/read
+    # handlers permits an exact same-binary baseline. Thumb Rn=PC remains on
+    # that baseline because its aligned PC+4 base differs from A32 PC+8.
+    for up in (False, True):
+        for rn in range(16):
+            for kind, mnemonic, width in READ_KINDS:
+                for rd in range(15):
+                    label = (
+                        f".La64s_fused_read_imm_{int(up)}_{rn}_{kind}_{rd}"
+                    )
+                    handlers.append((
+                        label,
+                        fused_read_imm_body(up, rn, mnemonic, width, rd),
+                    ))
+
     # VFP register and system-state operations are ordinary signed text too.
     # Only core-register operands need enumerated handlers; VFP register
     # numbers remain data-record immediates because the register file is not
@@ -1163,6 +1217,14 @@ def build_handlers() -> list[tuple[str, list[str]]]:
                      vfp_direct_read_body(4)))
     handlers.append((".La64s_vfp_direct_read_64",
                      vfp_direct_read_body(8)))
+
+    for up in (False, True):
+        for rn in range(16):
+            for width in (4, 8):
+                handlers.append((
+                    f".La64s_fused_vfp_read_imm_{int(up)}_{rn}_{width}",
+                    fused_vfp_read_imm_body(up, rn, width),
+                ))
 
     # Terminal A32 immediate branches leave the threaded block directly. An
     # unconditional B already uses the compact END record; these fourteen

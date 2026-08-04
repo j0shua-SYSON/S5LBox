@@ -4,11 +4,11 @@
  * This is deliberately NOT a product-performance claim and not a JIT
  * dispatcher. It translates one small synthetic block once, then compares
  * repeated interpreter execution with both that already-built block and a
- * firmware-independent static-threaded proof. The proof's 24,646 generic
- * ISA/register handlers are compiled and signed with the executable; runtime
- * decoding creates data records only. The table includes product-only guarded
- * read-cache, exact VFP register/system transfer and terminal A32 immediate
- * branch/link paths.
+ * firmware-independent static-threaded proof. Its 24,646 product handlers and
+ * 2,464 benchmark-only immediate-read fusion candidates are compiled and
+ * signed with the executable; runtime decoding creates data records only. The
+ * table includes product-only guarded read-cache, exact VFP register/system
+ * transfer and terminal A32 immediate branch/link paths.
  *
  * The answer is only a feasibility bound. The native and direct product-entry
  * rows have no device tick, MMIO, interrupt sampling, cache lookup,
@@ -134,6 +134,18 @@ static const uint32_t A32_MIXED[] = {
     0xe2833001u, 0xe0244003u, 0xe2855001u, 0xe0466005u,
     0xe5874008u, 0xe5975008u, 0xe0866005u, 0xe0200006u,
     0xe2811001u, 0xe2422001u, 0xe0833002u, 0xeaffffefu,
+};
+
+/* A deliberately favorable dispatch ceiling for immediate-read fusion:
+ * fifteen warmed word loads from one DREAD block and a branch back to zero.
+ * It is not a firmware mix. Reusing pinned r1-r7 destinations makes this a
+ * stronger rejection gate: a weak result here cannot justify shipping 2,464
+ * additional signed handlers. */
+static const uint32_t A32_FUSED_READ_LOOP[] = {
+    0xe5901000u, 0xe5902004u, 0xe5903008u, 0xe590400cu,
+    0xe5905010u, 0xe5906014u, 0xe5907018u, 0xe590101cu,
+    0xe5902020u, 0xe5903024u, 0xe5904028u, 0xe590502cu,
+    0xe5906030u, 0xe5907034u, 0xe5901038u, 0xeaffffefu,
 };
 
 static const uint16_t THUMB_ALU[] = {
@@ -703,7 +715,9 @@ static bool validate_static_shapes(void) {
         0xffu, 0x01u, 0x00u, 0x80u, 0xe2u,
     };
     a64_static_block_t block;
+    a64_static_block_t fused_block;
     uint8_t read_bytes[sizeof A32_READ_HITS];
+    uint8_t fused_read_bytes[sizeof A32_FUSED_READ_LOOP];
     uint8_t thumb_read_bytes[sizeof THUMB_READ_HITS];
     uint8_t vfp_bytes[sizeof VFP_REGISTER_OPS];
     uint8_t vfp_compare_bytes[sizeof VFP_COMPARE_OPS];
@@ -719,6 +733,14 @@ static bool validate_static_shapes(void) {
         read_bytes[i * 4u + 1u] = (uint8_t)(value >> 8);
         read_bytes[i * 4u + 2u] = (uint8_t)(value >> 16);
         read_bytes[i * 4u + 3u] = (uint8_t)(value >> 24);
+    }
+    for (i = 0u; i < sizeof A32_FUSED_READ_LOOP /
+                         sizeof A32_FUSED_READ_LOOP[0]; i++) {
+        uint32_t value = A32_FUSED_READ_LOOP[i];
+        fused_read_bytes[i * 4u + 0u] = (uint8_t)value;
+        fused_read_bytes[i * 4u + 1u] = (uint8_t)(value >> 8);
+        fused_read_bytes[i * 4u + 2u] = (uint8_t)(value >> 16);
+        fused_read_bytes[i * 4u + 3u] = (uint8_t)(value >> 24);
     }
     for (i = 0u; i < sizeof THUMB_READ_HITS / sizeof THUMB_READ_HITS[0]; i++) {
         uint16_t value = THUMB_READ_HITS[i];
@@ -863,6 +885,31 @@ static bool validate_static_shapes(void) {
     }
     printf("STATIC-READ-SHAPE exact=yes insns=%u uops=%u handlers=%u\n",
            block.insn_count, block.uop_count, A64_STATIC_HANDLER_COUNT);
+
+    if (!a64_static_decode_read_hits_bytes_at(
+            fused_read_bytes,
+            (unsigned)(sizeof A32_FUSED_READ_LOOP /
+                       sizeof A32_FUSED_READ_LOOP[0]),
+            false, 0u, &block) ||
+        !a64_static_decode_fused_read_hits_bytes_at(
+            fused_read_bytes,
+            (unsigned)(sizeof A32_FUSED_READ_LOOP /
+                       sizeof A32_FUSED_READ_LOOP[0]),
+            false, 0u, &fused_block) ||
+        block.insn_count != 16u || fused_block.insn_count != 16u ||
+        block.uop_count != 31u || fused_block.uop_count != 16u ||
+        block.start_pc != 0u || fused_block.start_pc != 0u ||
+        block.exit_pc != 0u || fused_block.exit_pc != 0u ||
+        !block.touches_memory || !fused_block.touches_memory ||
+        !block.direct_reads || !fused_block.direct_reads ||
+        !block.runtime_guards || !fused_block.runtime_guards ||
+        block.vfp || fused_block.vfp ||
+        block.dynamic_exit || fused_block.dynamic_exit) {
+        fprintf(stderr, "jitbench: fused-read ceiling shape failed\n");
+        return false;
+    }
+    printf("STATIC-FUSED-READ-SHAPE exact=yes insns=16 baseline-uops=31 "
+           "fused-uops=16 handlers=%u\n", A64_STATIC_HANDLER_COUNT);
 
     if (!a64_static_decode_read_hits_bytes_at(
             thumb_read_bytes, (unsigned)(sizeof THUMB_READ_HITS /
@@ -1781,6 +1828,146 @@ static bool validate_static_vfp_read_oracles(void) {
     return true;
 }
 
+/* Prove the benchmark-only immediate-read fusion against both the unchanged
+ * product decoder and arm_step(). The three blocks cover scalar A32 (including
+ * PC base and both condition outcomes), Thumb immediate/register mixes, VFP
+ * single/double/PC loads, and a zero-prefix miss. */
+static bool validate_static_fused_read_oracles(void) {
+    a64_static_block_t baseline, fused;
+    arm_cpu_t reference, baseline_cpu, fused_cpu, before;
+    final_state_t reference_state, baseline_state, fused_state;
+    arm_status_t status = ARM_OK;
+    unsigned baseline_completed = 0u;
+    unsigned fused_completed = 0u;
+    unsigned baseline_uops = 0u;
+    unsigned fused_uops = 0u;
+
+    seed_read_oracle(&reference, A32_READ_HITS,
+                     (unsigned)(sizeof A32_READ_HITS /
+                                sizeof A32_READ_HITS[0]),
+                     0xb000u, true);
+    baseline_cpu = reference;
+    fused_cpu = reference;
+    if (!a64_static_decode_read_hits_bytes_at(
+            &g_ram[0xb000u],
+            (unsigned)(sizeof A32_READ_HITS / sizeof A32_READ_HITS[0]),
+            false, 0xb000u, &baseline) ||
+        !a64_static_decode_fused_read_hits_bytes_at(
+            &g_ram[0xb000u],
+            (unsigned)(sizeof A32_READ_HITS / sizeof A32_READ_HITS[0]),
+            false, 0xb000u, &fused) ||
+        fused.uop_count >= baseline.uop_count)
+        return false;
+    for (unsigned i = 0u; i < baseline.insn_count; i++) {
+        status = arm_step(&reference);
+        if (status != ARM_OK) break;
+    }
+    if (!a64_static_run_read_hits(&baseline_cpu, &baseline, g_ram,
+                                  sizeof g_ram, &baseline_completed) ||
+        !a64_static_run_read_hits(&fused_cpu, &fused, g_ram,
+                                  sizeof g_ram, &fused_completed))
+        return false;
+    capture_state(&reference_state, &reference, status, JIT_EXIT_NEXT);
+    capture_state(&baseline_state, &baseline_cpu, ARM_OK, JIT_EXIT_NEXT);
+    capture_state(&fused_state, &fused_cpu, ARM_OK, JIT_EXIT_NEXT);
+    if (status != ARM_OK || baseline_completed != baseline.insn_count ||
+        fused_completed != fused.insn_count ||
+        !architectural_states_equal(&reference_state, &baseline_state) ||
+        !architectural_states_equal(&reference_state, &fused_state) ||
+        reference.dread_hits != baseline_cpu.dread_hits ||
+        reference.dread_hits != fused_cpu.dread_hits)
+        return false;
+    baseline_uops += baseline.uop_count;
+    fused_uops += fused.uop_count;
+
+    seed_thumb_read_oracle(&reference, true);
+    baseline_cpu = reference;
+    fused_cpu = reference;
+    status = ARM_OK;
+    if (!a64_static_decode_read_hits_bytes_at(
+            &g_ram[0xe200u],
+            (unsigned)(sizeof THUMB_READ_HITS /
+                       sizeof THUMB_READ_HITS[0]),
+            true, 0xe200u, &baseline) ||
+        !a64_static_decode_fused_read_hits_bytes_at(
+            &g_ram[0xe200u],
+            (unsigned)(sizeof THUMB_READ_HITS /
+                       sizeof THUMB_READ_HITS[0]),
+            true, 0xe200u, &fused) ||
+        fused.uop_count >= baseline.uop_count)
+        return false;
+    for (unsigned i = 0u; i < baseline.insn_count; i++) {
+        status = arm_step(&reference);
+        if (status != ARM_OK) break;
+    }
+    if (!a64_static_run_read_hits(&baseline_cpu, &baseline, g_ram,
+                                  sizeof g_ram, &baseline_completed) ||
+        !a64_static_run_read_hits(&fused_cpu, &fused, g_ram,
+                                  sizeof g_ram, &fused_completed))
+        return false;
+    capture_state(&reference_state, &reference, status, JIT_EXIT_NEXT);
+    capture_state(&baseline_state, &baseline_cpu, ARM_OK, JIT_EXIT_NEXT);
+    capture_state(&fused_state, &fused_cpu, ARM_OK, JIT_EXIT_NEXT);
+    if (status != ARM_OK || baseline_completed != baseline.insn_count ||
+        fused_completed != fused.insn_count ||
+        !architectural_states_equal(&reference_state, &baseline_state) ||
+        !architectural_states_equal(&reference_state, &fused_state) ||
+        reference.dread_hits != baseline_cpu.dread_hits ||
+        reference.dread_hits != fused_cpu.dread_hits)
+        return false;
+    baseline_uops += baseline.uop_count;
+    fused_uops += fused.uop_count;
+
+    seed_vfp_read_oracle(&reference, true);
+    baseline_cpu = reference;
+    fused_cpu = reference;
+    status = ARM_OK;
+    if (!a64_static_decode_read_hits_bytes_at(
+            &g_ram[0xf000u],
+            (unsigned)(sizeof VFP_READ_HITS / sizeof VFP_READ_HITS[0]),
+            false, 0xf000u, &baseline) ||
+        !a64_static_decode_fused_read_hits_bytes_at(
+            &g_ram[0xf000u],
+            (unsigned)(sizeof VFP_READ_HITS / sizeof VFP_READ_HITS[0]),
+            false, 0xf000u, &fused) ||
+        fused.uop_count >= baseline.uop_count)
+        return false;
+    for (unsigned i = 0u; i < baseline.insn_count; i++) {
+        status = arm_step(&reference);
+        if (status != ARM_OK) break;
+    }
+    if (!a64_static_run_read_hits(&baseline_cpu, &baseline, g_ram,
+                                  sizeof g_ram, &baseline_completed) ||
+        !a64_static_run_read_hits(&fused_cpu, &fused, g_ram,
+                                  sizeof g_ram, &fused_completed) ||
+        status != ARM_OK || baseline_completed != baseline.insn_count ||
+        fused_completed != fused.insn_count ||
+        !static_vfp_states_equal(&reference, &baseline_cpu) ||
+        !static_vfp_states_equal(&reference, &fused_cpu))
+        return false;
+    baseline_uops += baseline.uop_count;
+    fused_uops += fused.uop_count;
+
+    seed_read_oracle(&fused_cpu, A32_READ_ZERO_PREFIX, 1u, 0xd000u, false);
+    before = fused_cpu;
+    if (!a64_static_decode_fused_read_hits_bytes_at(
+            &g_ram[0xd000u], 1u, false, 0xd000u, &fused) ||
+        !a64_static_run_read_hits(&fused_cpu, &fused, g_ram,
+                                  sizeof g_ram, &fused_completed) ||
+        fused_completed != 0u ||
+        memcmp(fused_cpu.r, before.r, sizeof fused_cpu.r) != 0 ||
+        fused_cpu.cpsr != before.cpsr ||
+        fused_cpu.cycles != before.cycles ||
+        fused_cpu.dread_hits != before.dread_hits ||
+        fused_cpu.dread_misses != before.dread_misses)
+        return false;
+
+    printf("STATIC-FUSED-READ-ORACLE exact=yes a32=yes thumb=yes vfp=yes "
+           "zero-prefix=yes baseline-uops=%u fused-uops=%u handlers=%u\n",
+           baseline_uops, fused_uops, A64_STATIC_HANDLER_COUNT);
+    return true;
+}
+
 static bool validate_static_oracles(void) {
     unsigned i;
     for (i = 0u; i < sizeof STATIC_CASES / sizeof STATIC_CASES[0]; i++) {
@@ -2053,6 +2240,204 @@ static bool run_product_entry(const bench_case_t *bc,
 static int cmp_double(const void *lhs, const void *rhs) {
     double a = *(const double *)lhs, b = *(const double *)rhs;
     return (a > b) - (a < b);
+}
+
+typedef enum {
+    FUSED_READ_REFERENCE,
+    FUSED_READ_BASELINE,
+    FUSED_READ_FUSED
+} fused_read_path_t;
+
+typedef struct {
+    final_state_t state;
+    uint64_t dread_hits;
+    uint64_t dread_misses;
+    double seconds;
+} fused_read_result_t;
+
+static void seed_fused_read_bench(arm_cpu_t *cpu) {
+    seed_cpu_at(cpu, A32_FUSED_READ_LOOP,
+                (unsigned)(sizeof A32_FUSED_READ_LOOP /
+                           sizeof A32_FUSED_READ_LOOP[0]),
+                false, 0u);
+    cpu->r[0] = DATA_BASE;
+    for (unsigned i = 0u; i + 1u <
+             sizeof A32_FUSED_READ_LOOP / sizeof A32_FUSED_READ_LOOP[0];
+         i++) {
+        mem_w32(NULL, DATA_BASE + i * 4u,
+                UINT32_C(0x10203040) ^
+                (UINT32_C(0x01020408) * (i + 1u)));
+    }
+    oracle_warm_dread(cpu, DATA_BASE);
+}
+
+static bool run_fused_read_path(fused_read_path_t path,
+                                const a64_static_block_t *baseline,
+                                const a64_static_block_t *fused,
+                                uint64_t blocks,
+                                fused_read_result_t *out) {
+    const unsigned block_insns =
+        (unsigned)(sizeof A32_FUSED_READ_LOOP /
+                   sizeof A32_FUSED_READ_LOOP[0]);
+    const uint64_t total = blocks * block_insns;
+    arm_cpu_t cpu;
+    arm_status_t status = ARM_OK;
+    double start, end;
+
+    if (!blocks || !out) return false;
+    memset(out, 0, sizeof *out);
+    seed_fused_read_bench(&cpu);
+    start = now_seconds();
+    if (path == FUSED_READ_REFERENCE) {
+        uint64_t i;
+        for (i = 0u; i < total; i++) {
+            status = arm_step(&cpu);
+            if (status != ARM_OK) break;
+        }
+        if (i != total || status != ARM_OK) return false;
+    } else {
+        const a64_static_block_t *block =
+            path == FUSED_READ_BASELINE ? baseline : fused;
+        uint64_t i;
+        for (i = 0u; i < blocks; i++) {
+            unsigned completed = 0u;
+            if (!block ||
+                !a64_static_run_read_hits_decoded(
+                    &cpu, block, g_ram, sizeof g_ram, &completed) ||
+                completed != block_insns)
+                break;
+        }
+        if (i != blocks) return false;
+    }
+    end = now_seconds();
+    out->seconds = end - start;
+    capture_state(&out->state, &cpu, status, JIT_EXIT_NEXT);
+    out->dread_hits = cpu.dread_hits;
+    out->dread_misses = cpu.dread_misses;
+    return out->seconds > 0.0;
+}
+
+/* This is intentionally the friendliest possible scalar-read workload, not a
+ * guest-performance forecast. It measures the unchanged and fused decoders in
+ * one executable through the same decoded public wrapper, rotates run order,
+ * and requires exact interpreter state plus DREAD accounting on every sample.
+ * Only a clear win here can justify testing the larger handler family in the
+ * full SoC engine. */
+static bool bench_static_fused_reads(uint64_t requested, unsigned reps) {
+    const unsigned block_insns =
+        (unsigned)(sizeof A32_FUSED_READ_LOOP /
+                   sizeof A32_FUSED_READ_LOOP[0]);
+    a64_static_block_t baseline, fused;
+    arm_cpu_t seed;
+    double *reference_rates = NULL;
+    double *baseline_rates = NULL;
+    double *fused_rates = NULL;
+    uint64_t blocks, total, expected_hits;
+    bool ok = false;
+
+    if (!requested || requested > UINT64_MAX - (block_insns - 1u))
+        return false;
+    blocks = (requested + block_insns - 1u) / block_insns;
+    total = blocks * block_insns;
+    expected_hits = blocks * (block_insns - 1u);
+
+    seed_fused_read_bench(&seed);
+    if (!a64_static_decode_read_hits_bytes_at(
+            g_ram, block_insns, false, 0u, &baseline) ||
+        !a64_static_decode_fused_read_hits_bytes_at(
+            g_ram, block_insns, false, 0u, &fused) ||
+        baseline.insn_count != block_insns ||
+        fused.insn_count != block_insns ||
+        baseline.uop_count != 31u || fused.uop_count != 16u ||
+        baseline.exit_pc != 0u || fused.exit_pc != 0u) {
+        fprintf(stderr, "jitbench: fused-read benchmark shape failed\n");
+        return false;
+    }
+
+    reference_rates = (double *)calloc(reps, sizeof *reference_rates);
+    baseline_rates = (double *)calloc(reps, sizeof *baseline_rates);
+    fused_rates = (double *)calloc(reps, sizeof *fused_rates);
+    if (!reference_rates || !baseline_rates || !fused_rates) {
+        fprintf(stderr, "jitbench: fused-read benchmark out of memory\n");
+        goto done;
+    }
+
+    for (unsigned rep = 0u; rep < reps; rep++) {
+        fused_read_result_t reference, baseline_result, fused_result;
+        const char *order;
+        bool ran;
+
+        if (rep % 3u == 0u) {
+            order = "reference-baseline-fused";
+            ran = run_fused_read_path(FUSED_READ_REFERENCE, &baseline,
+                                      &fused, blocks, &reference) &&
+                  run_fused_read_path(FUSED_READ_BASELINE, &baseline,
+                                      &fused, blocks, &baseline_result) &&
+                  run_fused_read_path(FUSED_READ_FUSED, &baseline,
+                                      &fused, blocks, &fused_result);
+        } else if (rep % 3u == 1u) {
+            order = "baseline-fused-reference";
+            ran = run_fused_read_path(FUSED_READ_BASELINE, &baseline,
+                                      &fused, blocks, &baseline_result) &&
+                  run_fused_read_path(FUSED_READ_FUSED, &baseline,
+                                      &fused, blocks, &fused_result) &&
+                  run_fused_read_path(FUSED_READ_REFERENCE, &baseline,
+                                      &fused, blocks, &reference);
+        } else {
+            order = "fused-reference-baseline";
+            ran = run_fused_read_path(FUSED_READ_FUSED, &baseline,
+                                      &fused, blocks, &fused_result) &&
+                  run_fused_read_path(FUSED_READ_REFERENCE, &baseline,
+                                      &fused, blocks, &reference) &&
+                  run_fused_read_path(FUSED_READ_BASELINE, &baseline,
+                                      &fused, blocks, &baseline_result);
+        }
+        if (!ran ||
+            !architectural_states_equal(&reference.state,
+                                        &baseline_result.state) ||
+            !architectural_states_equal(&reference.state,
+                                        &fused_result.state) ||
+            reference.dread_hits != expected_hits ||
+            baseline_result.dread_hits != expected_hits ||
+            fused_result.dread_hits != expected_hits ||
+            reference.dread_misses != 0u ||
+            baseline_result.dread_misses != 0u ||
+            fused_result.dread_misses != 0u) {
+            fprintf(stderr,
+                    "jitbench: fused-read repetition %u failed exact "
+                    "state/accounting\n", rep + 1u);
+            goto done;
+        }
+        reference_rates[rep] = (double)total / reference.seconds / 1.0e6;
+        baseline_rates[rep] =
+            (double)total / baseline_result.seconds / 1.0e6;
+        fused_rates[rep] = (double)total / fused_result.seconds / 1.0e6;
+        printf("STATIC-FUSED-READ-SAMPLE rep=%u order=%s "
+               "reference=%.3f baseline=%.3f fused=%.3f Minsn/s "
+               "exact=yes\n",
+               rep + 1u, order, reference_rates[rep], baseline_rates[rep],
+               fused_rates[rep]);
+    }
+
+    qsort(reference_rates, reps, sizeof *reference_rates, cmp_double);
+    qsort(baseline_rates, reps, sizeof *baseline_rates, cmp_double);
+    qsort(fused_rates, reps, sizeof *fused_rates, cmp_double);
+    printf("STATIC-FUSED-READ-CURVE guest-insns=%" PRIu64
+           " block-insns=%u baseline-uops=%u fused-uops=%u reps=%u "
+           "read-share=93.750%% same-binary=yes decoded-wrapper=yes "
+           "reference-median=%.3f baseline-median=%.3f fused-median=%.3f "
+           "fused-over-baseline=%.3fx exact=yes\n",
+           total, block_insns, baseline.uop_count, fused.uop_count, reps,
+           reference_rates[reps / 2u], baseline_rates[reps / 2u],
+           fused_rates[reps / 2u],
+           fused_rates[reps / 2u] / baseline_rates[reps / 2u]);
+    ok = true;
+
+done:
+    free(reference_rates);
+    free(baseline_rates);
+    free(fused_rates);
+    return ok;
 }
 
 /* Measure the wrapper the SoC actually calls once per cached product block.
@@ -2689,8 +3074,10 @@ int main(int argc, char **argv) {
     if (!validate_static_vfp_compare_oracles()) return 1;
     if (!validate_static_vfp_widen_oracles()) return 1;
     if (!validate_static_vfp_read_oracles()) return 1;
+    if (!validate_static_fused_read_oracles()) return 1;
     if (!validate_static_branch_oracles()) return 1;
     if (!validate_static_oracles()) return 1;
+    if (!bench_static_fused_reads(soc_insns, reps)) return 1;
 
     for (i = 0u; i < sizeof CASES / sizeof CASES[0]; i++) {
         if (!bench_one(&CASES[i], insns, reps)) return 1;

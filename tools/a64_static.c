@@ -39,7 +39,10 @@ enum {
     A64S_ADDR_IMM = A64S_DP_REG + 16u * 2u * 15u * 16u,
     A64S_ADDR_REG = A64S_ADDR_IMM + 2u * 16u,
     A64S_DIRECT_READ = A64S_ADDR_REG + 2u * 16u,
-    A64S_VFP_CORE_TO_S = A64S_DIRECT_READ + A64S_READ_KIND_COUNT * 15u,
+    A64S_FUSED_READ_IMM =
+        A64S_DIRECT_READ + A64S_READ_KIND_COUNT * 15u,
+    A64S_VFP_CORE_TO_S = A64S_FUSED_READ_IMM +
+        2u * 16u * A64S_READ_KIND_COUNT * 15u,
     A64S_VFP_S_TO_CORE = A64S_VFP_CORE_TO_S + 15u,
     A64S_VFP_CORE_TO_PAIR = A64S_VFP_S_TO_CORE + 15u,
     A64S_VFP_PAIR_TO_CORE = A64S_VFP_CORE_TO_PAIR + 15u * 15u,
@@ -56,7 +59,8 @@ enum {
     A64S_VFP_WIDEN32 = A64S_VFP_COMPARE64 + 1u,
     A64S_VFP_DIRECT_READ32 = A64S_VFP_WIDEN32 + 1u,
     A64S_VFP_DIRECT_READ64 = A64S_VFP_DIRECT_READ32 + 1u,
-    A64S_BRANCH_COND = A64S_VFP_DIRECT_READ64 + 1u,
+    A64S_FUSED_VFP_READ_IMM = A64S_VFP_DIRECT_READ64 + 1u,
+    A64S_BRANCH_COND = A64S_FUSED_VFP_READ_IMM + 2u * 16u * 2u,
     A64S_BRANCH_LINK = A64S_BRANCH_COND + 14u,
     A64S_HANDLER_COUNT = A64S_BRANCH_LINK + 15u
 };
@@ -192,6 +196,18 @@ static uint32_t direct_read(unsigned kind, unsigned rd) {
     return A64S_DIRECT_READ + kind * 15u + rd;
 }
 
+static uint32_t fused_read_imm(uint32_t address, uint32_t read) {
+    return A64S_FUSED_READ_IMM +
+           (address - A64S_ADDR_IMM) * A64S_READ_KIND_COUNT * 15u +
+           (read - A64S_DIRECT_READ);
+}
+
+static uint32_t fused_vfp_read_imm(uint32_t address, uint32_t read) {
+    return A64S_FUSED_VFP_READ_IMM +
+           (address - A64S_ADDR_IMM) * 2u +
+           (read - A64S_VFP_DIRECT_READ32);
+}
+
 static uint32_t vfp_core_to_s(unsigned rt) {
     return A64S_VFP_CORE_TO_S + rt;
 }
@@ -240,12 +256,19 @@ static bool handler_is_direct_read(uint32_t handler) {
     return (handler >= A64S_DIRECT_READ &&
             handler < A64S_VFP_CORE_TO_S) ||
            (handler >= A64S_VFP_DIRECT_READ32 &&
-            handler <= A64S_VFP_DIRECT_READ64);
+            handler < A64S_BRANCH_COND);
 }
 
 static bool handler_is_vfp(uint32_t handler) {
     return handler >= A64S_VFP_CORE_TO_S &&
-           handler <= A64S_VFP_DIRECT_READ64;
+           handler < A64S_BRANCH_COND;
+}
+
+static bool handler_is_fused_read(uint32_t handler) {
+    return (handler >= A64S_FUSED_READ_IMM &&
+            handler < A64S_VFP_CORE_TO_S) ||
+           (handler >= A64S_FUSED_VFP_READ_IMM &&
+            handler < A64S_BRANCH_COND);
 }
 
 static bool handler_is_terminal_branch(uint32_t handler) {
@@ -895,9 +918,66 @@ static bool decode_thumb(uint16_t insn, unsigned index, unsigned insns,
     return false;
 }
 
+/* Collapse only the bounded immediate-address read families. The fused record
+ * keeps the read record's instruction PC and live-miss metadata. Its handler
+ * reconstructs an A32 PC base when Rn==15, so Thumb PC-relative loads remain
+ * deliberately unfused. A packed VFP record uses the low sixteen immediate
+ * bits for the byte offset and the high sixteen for the S/D destination. */
+static bool fuse_immediate_read_records(a64_static_block_t *block) {
+    unsigned i = 0u;
+    if (!block || !block->uop_count) return false;
+    while (i + 1u < block->uop_count) {
+        uint32_t address = block->uops[i].handler;
+        uint32_t read = block->uops[i + 1u].handler;
+        bool address_immediate =
+            address >= A64S_ADDR_IMM && address < A64S_ADDR_REG;
+        bool scalar = read >= A64S_DIRECT_READ &&
+                      read < A64S_FUSED_READ_IMM;
+        bool vfp = read >= A64S_VFP_DIRECT_READ32 &&
+                   read <= A64S_VFP_DIRECT_READ64;
+        unsigned rn;
+        a64_static_uop_t fused;
+
+        if (!address_immediate || (!scalar && !vfp)) {
+            i++;
+            continue;
+        }
+        rn = (address - A64S_ADDR_IMM) & 15u;
+        if (scalar && block->thumb && rn == 15u) {
+            i++;
+            continue;
+        }
+        if (i != 0u && handler_is_condition(block->uops[i - 1u].handler)) {
+            if (block->uops[i - 1u].metadata != 2u) return false;
+            block->uops[i - 1u].metadata = 1u;
+        }
+
+        fused = block->uops[i];
+        fused.pc_value = block->uops[i + 1u].pc_value;
+        fused.metadata = block->uops[i + 1u].metadata;
+        if (scalar) {
+            fused.handler = fused_read_imm(address, read);
+        } else {
+            if (fused.immediate > UINT16_MAX ||
+                block->uops[i + 1u].immediate > UINT16_MAX)
+                return false;
+            fused.handler = fused_vfp_read_imm(address, read);
+            fused.immediate |= block->uops[i + 1u].immediate << 16;
+        }
+        block->uops[i] = fused;
+        memmove(&block->uops[i + 1u], &block->uops[i + 2u],
+                (block->uop_count - i - 2u) * sizeof block->uops[0]);
+        block->uop_count--;
+        memset(&block->uops[block->uop_count], 0,
+               sizeof block->uops[0]);
+        i++;
+    }
+    return true;
+}
+
 static bool decode_program_at(const void *program, unsigned insns, bool thumb,
                               uint32_t pc, bool guest_bytes, bool read_hits,
-                              a64_static_block_t *out) {
+                              bool fused_reads, a64_static_block_t *out) {
     const uint8_t *bytes = (const uint8_t *)program;
     unsigned uop_count = 0u;
     uint32_t fallthrough;
@@ -974,25 +1054,39 @@ static bool decode_program_at(const void *program, unsigned insns, bool thumb,
     out->start_pc = pc;
     out->exit_pc = out->uops[uop_count - 1u].immediate;
     out->thumb = thumb;
+    if (fused_reads && !fuse_immediate_read_records(out)) {
+        memset(out, 0, sizeof *out);
+        return false;
+    }
     return true;
 }
 
 bool a64_static_decode_at(const void *program, unsigned insns, bool thumb,
                           uint32_t pc, a64_static_block_t *out) {
-    return decode_program_at(program, insns, thumb, pc, false, false, out);
+    return decode_program_at(program, insns, thumb, pc, false, false, false,
+                             out);
 }
 
 bool a64_static_decode_bytes_at(const uint8_t *program, unsigned insns,
                                 bool thumb, uint32_t pc,
                                 a64_static_block_t *out) {
-    return decode_program_at(program, insns, thumb, pc, true, false, out);
+    return decode_program_at(program, insns, thumb, pc, true, false, false,
+                             out);
 }
 
 bool a64_static_decode_read_hits_bytes_at(const uint8_t *program,
                                           unsigned insns, bool thumb,
                                           uint32_t pc,
                                           a64_static_block_t *out) {
-    return decode_program_at(program, insns, thumb, pc, true, true, out);
+    return decode_program_at(program, insns, thumb, pc, true, true, false,
+                             out);
+}
+
+bool a64_static_decode_fused_read_hits_bytes_at(
+        const uint8_t *program, unsigned insns, bool thumb, uint32_t pc,
+        a64_static_block_t *out) {
+    return decode_program_at(program, insns, thumb, pc, true, true, true,
+                             out);
 }
 
 bool a64_static_decode(const void *program, unsigned insns, bool thumb,
@@ -1097,6 +1191,7 @@ static unsigned semantic_span(const a64_static_block_t *block, unsigned i,
     if (handler_is_terminal_branch(handler)) return 1u;
     if (handler_is_condition(handler) || handler == A64S_END)
         return 0u;
+    if (handler_is_fused_read(handler)) return 1u;
     if (handler_is_shift(handler)) {
         if (i + 1u < end && handler_is_dp_reg(block->uops[i + 1u].handler))
             return 2u;

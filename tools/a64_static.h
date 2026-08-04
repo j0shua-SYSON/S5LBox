@@ -23,7 +23,7 @@
 /* A conditional register-offset A32 load uses a guard, shifter, address and
  * read record. The final slot is the fixed block exit. */
 #define A64_STATIC_MAX_UOPS (A64_STATIC_MAX_INSNS * 4u + 1u)
-#define A64_STATIC_HANDLER_COUNT 24646u
+#define A64_STATIC_HANDLER_COUNT 27110u
 #define A64_STATIC_GRAPH_SLOTS 512u
 
 typedef struct {
@@ -113,6 +113,16 @@ bool a64_static_decode_read_hits_bytes_at(const uint8_t *program,
                                           unsigned insns, bool thumb,
                                           uint32_t pc,
                                           a64_static_block_t *out);
+
+/* Experimental benchmark decoder for the same product subset. It combines
+ * only immediate address-generation + scalar/VFP read pairs into universal,
+ * build-time-signed handlers. Register-offset reads, conditions and every
+ * other semantic remain separate. The shipping SoC cache deliberately keeps
+ * using the baseline decoder until a same-binary Apple-host gate proves this
+ * larger signed-text family worthwhile. */
+bool a64_static_decode_fused_read_hits_bytes_at(
+    const uint8_t *program, unsigned insns, bool thumb, uint32_t pc,
+    a64_static_block_t *out);
 
 /* Compatibility shorthand for a block beginning at address zero. */
 bool a64_static_decode(const void *program, unsigned insns, bool thumb,
