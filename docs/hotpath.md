@@ -6391,3 +6391,105 @@ onto SpringBoard would now contradict the exact restored call shape. The only ph
 remains roughly 0--4 FPS. A fresh instruction-zero MBX boot is still required for final graphics
 correctness, while speed requires an exact-build physical-iPhone run or a larger architectural
 lever than another graph-boundary or record-dispatch micro-optimization.
+
+### 2026-08-05: signed plain-RAM stores remove a real interpreter boundary
+
+The extended graph still had one categorical break: every store returned to `arm_step()`. Commit
+`d98b03d07c6304d5b172f549d69a1bcc24852087` first built the permission boundary rather than
+putting stores directly into signed text. A separate `host_ram_write` callback is the frontend's
+consent to bypass RAM-write observers; ordinary readable host RAM is not consent. The canonical
+iOS machine bus opts in. `bootkernel` explicitly opts out before installing its live framebuffer
+observer. Any interposed bus fails closed, and changing consent clears every derived pointer.
+
+The interpreter then owns a 1 KiB virtual write-block cache with the same privilege, MMU-generation
+and range witness as the read cache. A miss performs the complete architectural path first--MMU
+write permission, alignment, fault and bus callback--and only then fills a direct pointer for later
+plain-RAM hits. The cache is cleared on reset, restore, MMU invalidation and consent changes and is
+never serialized. The implementation therefore does not infer that MMIO is RAM, does not bypass a
+frontend observer, and does not create executable memory. Exact-SHA core run `30920076009` and iOS
+run `30920076338` are green.
+
+Observer commit `eb8b789009db2ba5ffa26719a875d834cfbc9ad7` tested the proposed store
+families against the unchanged 7.100--7.110 B restored interval before adding signed handlers. Its
+independent literal oracle reconstructed every expected physical write and compared it with the
+real interpreter callback stream: 1,032,111/1,032,111 candidate matches, zero mismatches, zero
+non-literal steps, zero abandoned validations, and 1,736,595/1,736,595 expected/observed write
+events. The modeled DWRITE cache made 988,657 block lookups, with 955,195 hits (96.615%). Exact-SHA
+core run `30917374174` and iOS run `30917408775` are green. This broad model was a ceiling, not a
+claim that all five families had shipped:
+
+| store family | candidates | condition skips | direct hits | miss/fill | fault or non-RAM |
+|---|---:|---:|---:|---:|---:|
+| A32 single | 551,790 | 38,713 | 485,501 | 13,235 | 14,341 |
+| A32 block | 185,083 | 3,320 | 181,040 | 723 | 0 |
+| A32 VFP | 172,682 | 3,126 | 169,503 | 27 | 0 |
+| Thumb single | 73,506 | 0 | 68,741 | 4,765 | 0 |
+| Thumb multi | 49,050 | 0 | 48,679 | 371 | 0 |
+
+Commit `4084b570686c019fc15a7a66b27deace033da85a` implements only the two
+single-register rows: A32 `STR`/`STRB` across addressing mode 2 and Thumb register, immediate and
+SP-relative `STR`/`STRB`/`STRH`. A separate memory decoder preserves the old store-rejecting read
+API. A store is always the last semantic instruction in a decoded head. A failed condition can
+retire without memory; a live aligned cache hit can write and retire; a miss, fault-sensitive
+alignment, MMIO target or unavailable consent returns before the store so literal `arm_step()` owns
+the complete operation. A32 writeback occurs only after a successful direct write, translation
+forms preserve forced-user privilege, and a word store from PC uses the interpreter's PC+12 value.
+The next graph head still verifies raw instruction bytes, so a store into code cannot run a stale
+successor.
+
+The generated build-time-signed family grows from 24,646 to 26,198 handlers (+1,552, or 6.297%).
+It remains ordinary signed executable text: no JIT, runtime code generation, executable allocation
+or writable-executable page. The exact Apple oracle covers fifteen store cases, conditional and
+partial prefixes, PC source, writeback, unprivileged transfers and Thumb forms. A second SoC oracle
+proves one direct-write hit, a terminal store, byte-identical state and a self-modifying-code witness
+with zero stale graph edges. Exact-SHA core run `30923998672` is green in all eight jobs; iOS run
+`30924000123` builds and packages the arm64 app.
+
+Commit `2522e0723faa6b2f78a7a31fdfbb91f46f66a3a5` then measures the boundary in one
+binary instead of comparing unrelated hosted runs. Three separately initialized machines execute
+the same sixteen-instruction A32 loop through `s5l8900_run()`: interpreter reference, extended graph
+with direct-write consent off, and the same graph with consent on. The loop deliberately contains
+four stores and two loads, uses warm flat RAM with the MMU off, and rotates execution order over
+three repetitions. Setup and warming stay outside timing. Cache lookup, raw-byte witness, entry
+gates, timebase splitting and device ticks stay inside. Every arm must serialize to the same complete
+machine snapshot.
+
+| Apple arm64 runner | reference median | graph/store off | graph/store on | on/reference | on/off |
+|---|---:|---:|---:|---:|---:|
+| macOS 14 | 35.579 Minsn/s | 21.332 Minsn/s | 121.321 Minsn/s | **3.410x** | **5.687x** |
+| macOS 15 | 30.030 Minsn/s | 21.695 Minsn/s | 103.643 Minsn/s | **3.451x** | **4.777x** |
+
+Both long runs retire 20,000,000/20,000,000 instructions in signed text with consent on, record
+5,000,000 direct-write hits and zero timed misses, and remain byte-identical to the interpreter.
+With consent off, the graph retires 15,000,000/20,000,000 instructions in signed text and returns
+for each store. Exact-SHA core run `30925475192` is green in all eight jobs. Unlike the earlier ALU
+layout noise, the direction is large and consistent on both hosts and survives the complete SoC
+entry path. It justifies retaining this architectural boundary removal.
+
+The synthetic ratio is not the firmware ratio. Commit
+`7cbc280325cf69604244ef7b1dc2491c3e45f1a7` makes the restored observer report the shipped
+single-store subset separately from the broad ceiling. `work/r528-implemented-store-10m` restores
+the trusted 7.100 B checkpoint, stops at exactly 7.110 B with status `OK`, empty stderr and 1,590
+frames, and preserves both reference hashes: work image
+`8A59C388C481165F460984926AA5FFB1B72A0E9030216CD0038DE9B3264B79FE` and screen
+`1EF63FFE3EEFD976416E17120A36BA074BF295EA0955D716E2D345FCC5EA0A9E`.
+Both local suites pass 60/60, the strict build is clean, and exact-SHA core run `30927010290` is
+green in all eight jobs. That observer-only commit does not change the iOS target, so the packaged
+app evidence remains implementation run `30924000123` rather than a redundant new IPA.
+
+The implemented rows contain 625,296 candidates and 592,955 retirement-eligible stores, or 5.930%
+of the fetched interval. The exact continuity model changes 4,810,600 current runner entries to
+3,892,377, removing **918,223 (19.087%)**. Both the implemented and broad histograms close exactly.
+All three remaining families together can lower the modeled entry count only another 359,312, or
+7.469% of the current count; the old 26.557% figure remains that broader ceiling, not current app
+coverage.
+
+Brutal status: **this is substantial no-JIT core evidence, but it is still not a physical-phone FPS
+result and it does not prove that 30 FPS is close**. The 3.410x--3.451x synthetic speedup comes from
+a loop with stores in 25% of its instructions; stores are retirement-eligible in only 5.930% of the
+measured firmware interval. The 19.087% figure counts modeled runner entries removed, not elapsed
+time, frames or scanout publications, and cannot be multiplied into the older 0--4 FPS phone report.
+The exact IPA containing these handlers has not been installed on a physical iPhone. That install
+and an execution/publication breakdown are now more informative than reflexively implementing the
+remaining store families, whose combined entry-removal ceiling is only another 7.469% before code
+size and end-to-end timing are considered.
