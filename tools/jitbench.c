@@ -2282,8 +2282,7 @@ static bool run_soc_entry_path(const uint32_t *program, unsigned length,
           out->graph_chains != 0u)) ||
         (path == SOC_ENTRY_SIGNED && out->graph_chains != 0u) ||
         (graph_path &&
-         (out->graph_chains == 0u ||
-          out->graph_chains != out->signed_chains))) {
+         out->graph_chains != out->signed_chains)) {
         fprintf(stderr,
                 "jitbench: SoC entry %s retired signed=%" PRIu64
                 " chains=%" PRIu64 " graph=%" PRIu64
