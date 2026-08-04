@@ -172,8 +172,11 @@ SNAP_SIZE_GUARD(s5l_stub_t,        56,    "snap_stubs");
  * a sizeof probe rather than arithmetic -- the first two guesses were wrong,
  * which is the entire reason this guard is a compile error. */
 /* 112576 = 111536 + the CPU's data-read block cache and counters, which this struct
- * contains. Not serialised, byte format unchanged; see the arm_cpu_t note. */
-SNAP_SIZE_GUARD(s5l8900_t,         120784, "snap_mach");
+ * contains. Not serialised, byte format unchanged; see the arm_cpu_t note.
+ * 120792 adds one host-only pointer for the signed-static decode cache. Like
+ * fetch_host it is derivable, process-local and deliberately absent from the
+ * stream, so SNAPSHOT_VERSION and the bytes on disk do not move. */
+SNAP_SIZE_GUARD(s5l8900_t,         120792, "snap_mach");
 #endif
 
 /* ---------------------------------------------------------------- the IO --- */

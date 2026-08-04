@@ -3708,6 +3708,12 @@ typedef struct {
      * the only acceptable value after init; a non-zero count means a window we
      * meant to name is silently unmapped instead. */
     unsigned   stub_declare_failures;
+
+    /* Host-only decode cache for the optional build-time-signed AArch64
+     * engine. Never serialised: it contains host pointers and is derivable
+     * from guest RAM. The public enable call owns it; s5l8900_free releases
+     * it. Keeping one per machine avoids cross-VM code/data aliases. */
+    void      *static_a64_state;
 } s5l8900_t;
 
 /*
@@ -3891,6 +3897,16 @@ void s5l8900_free(s5l8900_t *m);
 
 /* Copy a blob into guest RAM at a physical address. */
 void s5l8900_load(s5l8900_t *m, uint32_t addr, const void *data, size_t len);
+
+/* Optional signed-static AArch64 engine. It uses ordinary executable text
+ * produced at build time: no runtime code generation and no writable/executable
+ * pages. The feature is compile-time OFF by default and enabling it can fail
+ * when the build or host architecture does not provide the signed handlers.
+ * `m` must be an initialised machine. The retired count is a host diagnostic,
+ * not guest state and not part of a snapshot. */
+bool s5l8900_static_a64_available(void);
+bool s5l8900_static_a64_set_enabled(s5l8900_t *m, bool enabled);
+uint64_t s5l8900_static_a64_retired(const s5l8900_t *m);
 
 /* Run up to max_steps instructions, stopping early on a non-OK status.
  * Returns the number of instructions retired. */

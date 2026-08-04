@@ -9,7 +9,9 @@
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed.
  */
 #include "soc.h"
+#include "snapshot.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static int g_pass = 0, g_fail = 0;
@@ -3065,6 +3067,102 @@ static void test_timer_interrupt_reaches_handler(void) {
     s5l8900_free(&m);
 }
 
+/*
+ * The first real-machine contract for the signed-static engine. Both machines
+ * execute the same SoC run loop, clock ratio and device refreshes; only one is
+ * opted into signed handlers. The final serialized machine must be byte exact.
+ * Replacing an instruction after its block was cached also proves that direct
+ * RAM/self-modifying writes are observed through the raw-byte witness rather
+ * than a missing invalidation notification.
+ */
+static void test_signed_static_a64_soc_oracle(void) {
+    static const uint32_t add_loop[16] = {
+        0xe2800001u, 0xe2800001u, 0xe2800001u, 0xe2800001u,
+        0xe2800001u, 0xe2800001u, 0xe2800001u, 0xe2800001u,
+        0xe2800001u, 0xe2800001u, 0xe2800001u, 0xe2800001u,
+        0xe2800001u, 0xe2800001u, 0xe2800001u, 0xeaffffefu
+    };
+    s5l8900_t fast = {0};
+    s5l8900_t reference = {0};
+    uint8_t *fast_snapshot = NULL;
+    uint8_t *reference_snapshot = NULL;
+    size_t fast_len = 0u;
+    size_t reference_len = 0u;
+    arm_status_t fast_status = ARM_OK;
+    arm_status_t reference_status = ARM_OK;
+    bool fast_ok;
+    bool reference_ok;
+
+    if (!s5l8900_static_a64_available()) {
+        printf("  STATIC-A64-SOC-ORACLE SKIP: no signed AArch64 handlers\n");
+        return;
+    }
+
+    fast_ok = s5l8900_init(&fast, 0u, 1u << 20);
+    reference_ok = s5l8900_init(&reference, 0u, 1u << 20);
+    CHECK(fast_ok && reference_ok, "machine init failed");
+    if (!fast_ok || !reference_ok) {
+        if (fast_ok) s5l8900_free(&fast);
+        if (reference_ok) s5l8900_free(&reference);
+        return;
+    }
+
+    s5l8900_load(&fast, 0u, add_loop, sizeof add_loop);
+    s5l8900_load(&reference, 0u, add_loop, sizeof add_loop);
+    /* An intentionally non-integral ratio makes the run cross many device
+     * boundaries, rather than proving only a timer-free straight line. */
+    fast.cpu_hz = reference.cpu_hz = 1000u;
+    fast.tb_hz = reference.tb_hz = 7u;
+    s5l8900_tick(&fast, 0u);
+    s5l8900_tick(&reference, 0u);
+
+    CHECK(s5l8900_static_a64_set_enabled(&fast, true),
+          "signed engine refused an available host");
+    CHECK(s5l8900_run(&fast, 20000u, &fast_status) == 20000u,
+          "signed run stopped early with status=%d", (int)fast_status);
+    CHECK(s5l8900_run(&reference, 20000u, &reference_status) == 20000u,
+          "reference run stopped early with status=%d", (int)reference_status);
+
+    /* Keep the fetch pointer and decode cache live, but change the bytes they
+     * alias. 0xe2400001 is SUB r0,r0,#1, still inside the signed subset. */
+    {
+        const uint32_t subtract = UINT32_C(0xe2400001);
+        s5l8900_load(&fast, 0u, &subtract, sizeof subtract);
+        s5l8900_load(&reference, 0u, &subtract, sizeof subtract);
+    }
+    CHECK(s5l8900_run(&fast, 4096u, &fast_status) == 4096u,
+          "signed SMC run stopped early with status=%d", (int)fast_status);
+    CHECK(s5l8900_run(&reference, 4096u, &reference_status) == 4096u,
+          "reference SMC run stopped early with status=%d",
+          (int)reference_status);
+
+    CHECK(fast_status == reference_status,
+          "status differs: signed=%d reference=%d",
+          (int)fast_status, (int)reference_status);
+    CHECK(s5l8900_static_a64_retired(&fast) != 0u,
+          "available signed engine retired no instructions");
+    CHECK(snapshot_save_mem(&fast, &fast_snapshot, &fast_len) == SNAP_OK,
+          "could not serialize signed machine");
+    CHECK(snapshot_save_mem(&reference, &reference_snapshot, &reference_len) ==
+              SNAP_OK,
+          "could not serialize reference machine");
+    CHECK(fast_snapshot && reference_snapshot && fast_len == reference_len &&
+              memcmp(fast_snapshot, reference_snapshot, fast_len) == 0,
+          "signed and reference machine snapshots differ");
+
+    if (fast_snapshot && reference_snapshot && fast_len == reference_len &&
+        memcmp(fast_snapshot, reference_snapshot, fast_len) == 0 &&
+        s5l8900_static_a64_retired(&fast) != 0u) {
+        printf("  STATIC-A64-SOC-ORACLE exact=yes retired=%llu smc=yes\n",
+               (unsigned long long)s5l8900_static_a64_retired(&fast));
+    }
+
+    free(fast_snapshot);
+    free(reference_snapshot);
+    s5l8900_free(&fast);
+    s5l8900_free(&reference);
+}
+
 int main(void) {
     printf("S5LBox S5L8900 machine tests\n");
     test_ram_readback();
@@ -3072,6 +3170,7 @@ int main(void) {
     test_unmapped_access_counted();
     test_bounds_check_cannot_overflow();
     test_bare_metal_uart_hello();
+    test_signed_static_a64_soc_oracle();
     test_stub_window_stores_and_counts();
     test_mmio_width_alignment_and_window_edges();
     test_address_space_wrap_is_refused();

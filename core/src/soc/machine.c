@@ -9,6 +9,7 @@
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed.
  */
 #include "soc.h"
+#include "../arm/a64_static_engine.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -1205,6 +1206,9 @@ bool s5l8900_init(s5l8900_t *m, uint32_t ram_base, uint32_t ram_size) {
 
 void s5l8900_free(s5l8900_t *m) {
     if (!m) return;
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    s5l8900_static_a64_dispose(m);
+#endif
     for (unsigned i = 0; i < m->stub_count; i++) {
         free(m->stubs[i].regs);
         m->stubs[i].regs = NULL;
@@ -1441,12 +1445,44 @@ static void s5l8900_refresh(s5l8900_t *m, uint32_t tb) {
     m->ext_seen = ext_inputs(m);
 }
 
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+/* The signed engine may retire several guest instructions before returning to
+ * the device graph, but never across the first timebase edge the literal loop
+ * would have observed. Its current semantic subset performs no guest memory
+ * access, so no device or timebase register can be sampled inside the batch.
+ * Dirty levels and host inputs force the ordinary one-instruction path first.
+ */
+static unsigned static_a64_batch_limit(const s5l8900_t *m,
+                                       unsigned remaining) {
+    uint64_t until_edge;
+    if (!remaining || g_tick_eager || m->level_dirty ||
+        ext_inputs(m) != m->ext_seen || !m->cpu_hz || !m->tb_hz ||
+        m->tb_hz > m->cpu_hz || m->tb_accum >= m->cpu_hz)
+        return 0u;
+
+    until_edge = ((uint64_t)m->cpu_hz - m->tb_accum + m->tb_hz - 1u) /
+                 m->tb_hz;
+    if (until_edge < remaining) remaining = (unsigned)until_edge;
+    return remaining;
+}
+#endif
+
 unsigned s5l8900_run(s5l8900_t *m, unsigned max_steps, arm_status_t *status) {
     arm_status_t st = ARM_OK;
     unsigned n = 0;
-    for (; n < max_steps; n++) {
+    while (n < max_steps) {
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+        unsigned batch = static_a64_batch_limit(m, max_steps - n);
+        if (batch) batch = s5l8900_static_a64_try(m, batch);
+        if (batch) {
+            n += batch;
+            s5l8900_tick(m, batch);
+            continue;
+        }
+#endif
         st = arm_step(&m->cpu);
         if (st != ARM_OK) break;
+        n++;
         s5l8900_tick(m, 1u);
     }
     if (status) *status = st;

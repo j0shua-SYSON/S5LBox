@@ -150,8 +150,10 @@ jobs:
       - name: Report host architecture
         run: uname -m
 
-      - name: Configure (JIT on)
-        run: cmake -S . -B build-jit -DCMAKE_BUILD_TYPE=Release -DS5LBOX_JIT=ON
+      - name: Configure (JIT and signed-static engine on)
+        run: >-
+          cmake -S . -B build-jit -DCMAKE_BUILD_TYPE=Release
+          -DS5LBOX_JIT=ON -DS5LBOX_STATIC_A64_ENGINE=ON
 
       - name: Build
         run: cmake --build build-jit --config Release
@@ -159,7 +161,7 @@ jobs:
       - name: Test
         run: ctest --test-dir build-jit --output-on-failure
 
-      - name: Verify the JIT memory and execution verdicts
+      - name: Verify JIT and signed-static execution verdicts
         run: |
           set -euo pipefail
           set +e
@@ -167,11 +169,15 @@ jobs:
           memory_status=$?
           output="$(./build-jit/core/test_jit_exec 2>&1)"
           status=$?
+          soc_output="$(./build-jit/core/test_soc 2>&1)"
+          soc_status=$?
           set -e
           printf '%s\n' "$memory_output"
           printf '%s\n' "$output"
+          printf '%s\n' "$soc_output"
           test "$memory_status" -eq 0
           test "$status" -eq 0
+          test "$soc_status" -eq 0
           grep -Eq '[1-9][0-9]* passed, 0 failed' <<<"$memory_output"
           if [ "$RUNNER_OS" = "macOS" ]; then
             if grep -Fq 'SKIP:' <<<"$memory_output"; then
@@ -184,8 +190,10 @@ jobs:
             fi
             grep -Fq 'code buffer policy: MAP_JIT + pthread_jit_write_protect_np' <<<"$output"
             grep -Eq '[1-9][0-9]* passed, 0 failed' <<<"$output"
+            grep -Eq 'STATIC-A64-SOC-ORACLE exact=yes retired=[1-9][0-9]* smc=yes' <<<"$soc_output"
           else
             grep -Fq 'SKIP: not an arm64 host' <<<"$output"
+            grep -Fq 'STATIC-A64-SOC-ORACLE SKIP: no signed AArch64 handlers' <<<"$soc_output"
           fi
 
       - name: Native/static-semantics ceilings (measurement, not a gate)
@@ -216,6 +224,7 @@ jobs:
           cmake -S . -B build-san \
             -DCMAKE_BUILD_TYPE=Debug \
             -DS5LBOX_JIT=ON \
+            -DS5LBOX_STATIC_A64_ENGINE=ON \
             -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all"
 
       - name: Build
@@ -241,6 +250,7 @@ jobs:
           cmake -S . -B build-strict \
             -DCMAKE_BUILD_TYPE=Debug \
             -DS5LBOX_JIT=ON \
+            -DS5LBOX_STATIC_A64_ENGINE=ON \
             -DCMAKE_C_FLAGS="-Wall -Wextra -Werror"
 
       - name: Build

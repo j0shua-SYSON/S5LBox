@@ -1,13 +1,13 @@
 /*
- * S5LBox -- benchmark-only static AArch64 semantic-thread proof.
+ * S5LBox -- signed static AArch64 semantic-thread contract.
  *
  * The native handlers are ordinary build-time-generated, signed text. Runtime
  * decoding creates only eight-byte data records (handler id + immediate); it
  * never emits code and never requests writable executable memory.
  *
- * This is deliberately not an emulator engine yet. It covers the bounded
- * ARM/Thumb forms used by jitbench so the register-pinned architecture can be
- * measured and its block contract made exact before product integration.
+ * This remains a deliberately bounded semantic subset. The benchmark uses the
+ * complete contract, while the optional SoC engine accepts only the part it
+ * can prove exact against translated guest RAM and device-time boundaries.
  */
 #ifndef S5LBOX_A64_STATIC_H
 #define S5LBOX_A64_STATIC_H
@@ -34,14 +34,23 @@ typedef struct {
     uint32_t start_pc;
     uint32_t exit_pc;
     bool thumb;
+    bool touches_memory;
 } a64_static_block_t;
 
-/* Decode one block beginning at `pc`. A terminal unconditional branch may
- * target any address; otherwise the block exits at its natural fallthrough.
- * Supported data operands are r0-r7 plus Thumb SP-relative word loads/stores;
- * every unsupported bit causes a clean false return. */
+/* Decode one host-native uint32_t/uint16_t instruction array beginning at
+ * `pc`. A terminal unconditional branch may target any address; otherwise the
+ * block exits at its natural fallthrough. Supported data operands are r0-r7
+ * plus Thumb SP-relative word loads/stores; every unsupported bit causes a
+ * clean false return. */
 bool a64_static_decode_at(const void *program, unsigned insns, bool thumb,
                           uint32_t pc, a64_static_block_t *out);
+
+/* Same contract for an unaligned guest little-endian byte stream. This is the
+ * entry point for translated machine RAM; keeping it distinct preserves the
+ * benchmark-array API on a big-endian host. */
+bool a64_static_decode_bytes_at(const uint8_t *program, unsigned insns,
+                                bool thumb, uint32_t pc,
+                                a64_static_block_t *out);
 
 /* Compatibility shorthand for a block beginning at address zero. */
 bool a64_static_decode(const void *program, unsigned insns, bool thumb,

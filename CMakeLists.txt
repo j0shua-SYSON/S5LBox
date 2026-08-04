@@ -26,5 +26,11 @@ endif()
 # emitted code — skips itself at runtime unless the host is arm64.
 option(S5LBOX_JIT "Build the ARMv6 -> arm64 dynamic recompiler" OFF)
 
+# Ordinary build-time-signed AArch64 handlers: no runtime code generation and
+# no writable/executable pages. OFF until real restored-workload equivalence
+# and performance are both measured; the interpreter remains the default.
+option(S5LBOX_STATIC_A64_ENGINE
+       "Build the optional signed-static AArch64 SoC engine" OFF)
+
 enable_testing()
 add_subdirectory(core)

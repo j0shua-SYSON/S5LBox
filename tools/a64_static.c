@@ -32,6 +32,27 @@ static uint32_t ror32(uint32_t value, unsigned amount) {
     return (value >> amount) | (value << (32u - amount));
 }
 
+static uint16_t read_le16(const uint8_t *p) {
+    return (uint16_t)((uint16_t)p[0] | ((uint16_t)p[1] << 8));
+}
+
+static uint32_t read_le32(const uint8_t *p) {
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static uint16_t read_native16(const uint8_t *p) {
+    uint16_t value;
+    memcpy(&value, p, sizeof value);
+    return value;
+}
+
+static uint32_t read_native32(const uint8_t *p) {
+    uint32_t value;
+    memcpy(&value, p, sizeof value);
+    return value;
+}
+
 static uint32_t rrr(unsigned base, unsigned rd, unsigned rn, unsigned rm) {
     return base + rd * 64u + rn * 8u + rm;
 }
@@ -153,8 +174,10 @@ static bool decode_thumb(uint16_t insn, unsigned index, unsigned insns,
     return false;
 }
 
-bool a64_static_decode_at(const void *program, unsigned insns, bool thumb,
-                          uint32_t pc, a64_static_block_t *out) {
+static bool decode_program_at(const void *program, unsigned insns, bool thumb,
+                              uint32_t pc, bool guest_bytes,
+                              a64_static_block_t *out) {
+    const uint8_t *bytes = (const uint8_t *)program;
     unsigned uop_count;
     uint32_t fallthrough;
     if (!program || !out || !insns || insns > A64_STATIC_MAX_INSNS ||
@@ -162,15 +185,22 @@ bool a64_static_decode_at(const void *program, unsigned insns, bool thumb,
         return false;
     memset(out, 0, sizeof *out);
     for (unsigned i = 0; i < insns; i++) {
-        bool ok = thumb
-            ? decode_thumb(((const uint16_t *)program)[i], i, insns, pc,
-                           &out->uops[i])
-            : decode_arm(((const uint32_t *)program)[i], i, insns, pc,
-                         &out->uops[i]);
+        bool ok;
+        if (thumb) {
+            const uint8_t *p = bytes + i * 2u;
+            ok = decode_thumb(guest_bytes ? read_le16(p) : read_native16(p),
+                              i, insns, pc, &out->uops[i]);
+        } else {
+            const uint8_t *p = bytes + i * 4u;
+            ok = decode_arm(guest_bytes ? read_le32(p) : read_native32(p),
+                            i, insns, pc, &out->uops[i]);
+        }
         if (!ok || out->uops[i].handler >= A64S_HANDLER_COUNT) {
             memset(out, 0, sizeof *out);
             return false;
         }
+        if (out->uops[i].handler >= A64S_LDR)
+            out->touches_memory = true;
         if (i + 1u != insns && out->uops[i].handler == A64S_END) {
             memset(out, 0, sizeof *out);
             return false;
@@ -189,6 +219,17 @@ bool a64_static_decode_at(const void *program, unsigned insns, bool thumb,
     out->exit_pc = out->uops[uop_count - 1u].immediate;
     out->thumb = thumb;
     return true;
+}
+
+bool a64_static_decode_at(const void *program, unsigned insns, bool thumb,
+                          uint32_t pc, a64_static_block_t *out) {
+    return decode_program_at(program, insns, thumb, pc, false, out);
+}
+
+bool a64_static_decode_bytes_at(const uint8_t *program, unsigned insns,
+                                bool thumb, uint32_t pc,
+                                a64_static_block_t *out) {
+    return decode_program_at(program, insns, thumb, pc, true, out);
 }
 
 bool a64_static_decode(const void *program, unsigned insns, bool thumb,

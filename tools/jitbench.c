@@ -47,6 +47,7 @@ typedef struct {
     const void *program;
     unsigned insns;
     bool thumb;
+    bool touches_memory;
 } bench_case_t;
 
 typedef struct {
@@ -180,10 +181,10 @@ static const static_case_t STATIC_CASES[] = {
 };
 
 static const bench_case_t CASES[] = {
-    { "a32-alu", A32_ALU, 16u, false },
-    { "a32-mixed", A32_MIXED, 16u, false },
-    { "thumb-alu", THUMB_ALU, 16u, true },
-    { "thumb-mixed", THUMB_MIXED, 16u, true },
+    { "a32-alu", A32_ALU, 16u, false, false },
+    { "a32-mixed", A32_MIXED, 16u, false, true },
+    { "thumb-alu", THUMB_ALU, 16u, true, false },
+    { "thumb-mixed", THUMB_MIXED, 16u, true, true },
 };
 
 static double now_seconds(void) {
@@ -260,6 +261,10 @@ static bool validate_static_shapes(void) {
     static const uint32_t MID_BLOCK_BRANCH[] = {
         0xea000000u, 0xe2800001u,
     };
+    /* Deliberately unaligned guest byte stream: ADD r0,r0,#1. */
+    static const uint8_t UNALIGNED_A32[] = {
+        0xffu, 0x01u, 0x00u, 0x80u, 0xe2u,
+    };
     a64_static_block_t block;
     unsigned i;
 
@@ -270,7 +275,7 @@ static bool validate_static_shapes(void) {
                                   sc->pc, &block) ||
             block.insn_count != sc->insns || block.uop_count != sc->uops ||
             block.start_pc != sc->pc || block.exit_pc != sc->exit_pc ||
-            block.thumb != sc->thumb ||
+            block.thumb != sc->thumb || block.touches_memory ||
             block.uops[block.uop_count - 1u].handler != 0u ||
             block.uops[block.uop_count - 1u].immediate != sc->exit_pc) {
             fprintf(stderr, "jitbench: static shape failed for %s\n", sc->name);
@@ -286,7 +291,11 @@ static bool validate_static_shapes(void) {
         a64_static_decode_at(A32_SHORT_FALL, A64_STATIC_MAX_INSNS + 1u,
                              false, 0u, &block) ||
         a64_static_decode_at(A32_SHORT_FALL, 1u, false, 2u, &block) ||
-        a64_static_decode_at(MID_BLOCK_BRANCH, 2u, false, 0u, &block)) {
+        a64_static_decode_at(MID_BLOCK_BRANCH, 2u, false, 0u, &block) ||
+        !a64_static_decode_bytes_at(&UNALIGNED_A32[1], 1u, false, 0x1000u,
+                                    &block) ||
+        block.start_pc != 0x1000u || block.exit_pc != 0x1004u ||
+        block.insn_count != 1u || block.touches_memory) {
         fprintf(stderr, "jitbench: static decoder accepted an invalid shape\n");
         return false;
     }
@@ -549,7 +558,8 @@ static bool validate_case_translation(const bench_case_t *bc) {
                            &static_block) ||
         static_block.insn_count != bc->insns ||
         static_block.uop_count != bc->insns ||
-        static_block.start_pc != 0u || static_block.exit_pc != 0u) {
+        static_block.start_pc != 0u || static_block.exit_pc != 0u ||
+        static_block.touches_memory != bc->touches_memory) {
         fprintf(stderr, "jitbench: structural static decode failed for %s\n",
                 bc->name);
         return false;
