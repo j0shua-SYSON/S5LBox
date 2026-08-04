@@ -37,11 +37,13 @@ typedef struct {
 typedef struct {
     bool enabled;
     bool persistent;
+    bool graph_enabled;
     uint64_t retired;
     uint64_t chained_blocks;
     uint64_t persistent_chained_blocks;
+    uint64_t graph_chained_blocks;
     static_a64_entry_t cache[STATIC_A64_CACHE_ENTRIES];
-    a64_static_graph_node_t graph[A64_STATIC_GRAPH_SLOTS];
+    a64_static_graph_node_t graph_nodes[A64_STATIC_GRAPH_SLOTS];
 } static_a64_state_t;
 
 static static_a64_state_t *static_state(const s5l8900_t *m) {
@@ -85,7 +87,7 @@ static void invalidate_entry(static_a64_state_t *state,
                              static_a64_entry_t *entry) {
     if (!state || !entry) return;
     a64_static_graph_node_t *node =
-        &state->graph[graph_index(entry->pc, entry->thumb)];
+        &state->graph_nodes[graph_index(entry->pc, entry->thumb)];
     if (node->owner == entry) {
         node->valid = 0u;
         node->supported = 0u;
@@ -97,7 +99,7 @@ static void publish_graph_node(static_a64_state_t *state,
                                static_a64_entry_t *entry) {
     a64_static_graph_node_t *node;
     if (!state || !entry) return;
-    node = &state->graph[graph_index(entry->pc, entry->thumb)];
+    node = &state->graph_nodes[graph_index(entry->pc, entry->thumb)];
     memset(node, 0, sizeof *node);
     node->owner = entry;
     node->fetch_host = entry->fetch_host;
@@ -253,7 +255,27 @@ bool s5l8900_static_a64_set_persistent(s5l8900_t *m, bool enabled) {
     }
     if (!state || !state->enabled || !a64_static_host_available())
         return false;
+    state->graph_enabled = false;
     state->persistent = true;
+    return true;
+#else
+    (void)enabled;
+    return false;
+#endif
+}
+
+bool s5l8900_static_a64_set_graph(s5l8900_t *m, bool enabled) {
+    if (!m) return false;
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    static_a64_state_t *state = static_state(m);
+    if (!enabled) {
+        if (state) state->graph_enabled = false;
+        return true;
+    }
+    if (!state || !state->enabled || !a64_static_host_available())
+        return false;
+    state->persistent = false;
+    state->graph_enabled = true;
     return true;
 #else
     (void)enabled;
@@ -291,6 +313,16 @@ uint64_t s5l8900_static_a64_persistent_chained_blocks(const s5l8900_t *m) {
 #endif
 }
 
+uint64_t s5l8900_static_a64_graph_chained_blocks(const s5l8900_t *m) {
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    const static_a64_state_t *state = static_state(m);
+    return state ? state->graph_chained_blocks : 0u;
+#else
+    (void)m;
+    return 0u;
+#endif
+}
+
 #if defined(S5LBOX_STATIC_A64_ENGINE)
 static unsigned try_persistent(s5l8900_t *m, static_a64_state_t *state,
                                unsigned budget) {
@@ -322,6 +354,41 @@ static unsigned try_persistent(s5l8900_t *m, static_a64_state_t *state,
     }
     return completed;
 }
+
+static unsigned try_graph(s5l8900_t *m, static_a64_state_t *state,
+                          unsigned budget) {
+    arm_cpu_t *cpu = &m->cpu;
+    static_a64_chain_context_t context = {
+        .state = state,
+        .machine = m,
+        .fetch_block = cpu->r[15] & ~UINT32_C(0x3ff)
+    };
+    const a64_static_block_t *first =
+        select_persistent_block(&context, cpu->r[15], budget);
+    unsigned completed = 0u;
+    unsigned blocks = 0u;
+
+    if (!first) return 0u;
+    /* The direct table is intentionally scoped by offset, so a descriptor at
+     * the same offset in another 1 KiB fetch block may have replaced this
+     * cache entry's node. Republish the C-validated first head even on a cache
+     * hit. This lets a returning hot block rebuild its local graph instead of
+     * suffering a permanent validation miss after a legitimate collision. */
+    publish_graph_node(state, context.last_entry);
+    if (!a64_static_run_read_hits_graph(cpu, first, m->ram, m->ram_size,
+                                        budget, state->graph_nodes, &completed,
+                                        &blocks)) {
+        if (context.last_entry)
+            invalidate_entry(state, context.last_entry);
+        return 0u;
+    }
+    state->retired += completed;
+    if (blocks > 1u) {
+        state->chained_blocks += blocks - 1u;
+        state->graph_chained_blocks += blocks - 1u;
+    }
+    return completed;
+}
 #endif
 
 unsigned s5l8900_static_a64_try(s5l8900_t *m, unsigned max_insns) {
@@ -340,6 +407,7 @@ unsigned s5l8900_static_a64_try(s5l8900_t *m, unsigned max_insns) {
     cpu = &m->cpu;
     budget = max_insns < STATIC_A64_CHAIN_INSNS
            ? max_insns : STATIC_A64_CHAIN_INSNS;
+    if (state->graph_enabled) return try_graph(m, state, budget);
     if (state->persistent) return try_persistent(m, state, budget);
 
     while (retired < budget) {

@@ -164,4 +164,16 @@ bool a64_static_run_read_hits_chain(arm_cpu_t *cpu,
                                     void *opaque, unsigned *completed,
                                     unsigned *blocks);
 
+/* Callback-free variant. `nodes` is the engine's fixed 512-slot table for the
+ * current direct-offset head index. Generated assembly accepts a next head
+ * only when its PC/fetch pointer/generation/privilege/state fields and complete
+ * raw-byte witness match, and otherwise returns the exact completed prefix.
+ * Stable interrupt/MMU facts are proved by the caller before entry; the signed
+ * subset cannot mutate them and no device ticks occur inside the bounded run. */
+bool a64_static_run_read_hits_graph(
+    arm_cpu_t *cpu, const a64_static_block_t *first,
+    uint8_t *ram, size_t ram_size, unsigned budget,
+    const a64_static_graph_node_t nodes[A64_STATIC_GRAPH_SLOTS],
+    unsigned *completed, unsigned *blocks);
+
 #endif /* S5LBOX_A64_STATIC_H */

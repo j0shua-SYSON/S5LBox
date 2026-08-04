@@ -3909,9 +3909,13 @@ bool s5l8900_static_a64_set_enabled(s5l8900_t *m, bool enabled);
 /* Experimental same-binary control for the persistent native-context path.
  * It can be enabled only after the signed engine itself is live. */
 bool s5l8900_static_a64_set_persistent(s5l8900_t *m, bool enabled);
+/* Experimental callback-free descriptor lookup; mutually exclusive with the
+ * callback scaffold above and still compile-time/app-default off. */
+bool s5l8900_static_a64_set_graph(s5l8900_t *m, bool enabled);
 uint64_t s5l8900_static_a64_retired(const s5l8900_t *m);
 uint64_t s5l8900_static_a64_chained_blocks(const s5l8900_t *m);
 uint64_t s5l8900_static_a64_persistent_chained_blocks(const s5l8900_t *m);
+uint64_t s5l8900_static_a64_graph_chained_blocks(const s5l8900_t *m);
 
 /* Run up to max_steps instructions, stopping early on a non-OK status.
  * Returns the number of instructions retired. */

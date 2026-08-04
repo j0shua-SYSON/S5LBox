@@ -1034,6 +1034,11 @@ typedef struct {
     uint32_t blocks;
     uint32_t final_pc;
     bool thumb;
+    const a64_static_graph_node_t *graph_nodes;
+    const uint8_t *graph_fetch_host;
+    uint32_t graph_fetch_block;
+    uint32_t graph_fetch_gen;
+    uint32_t graph_fetch_priv;
 } a64_static_chain_context_t;
 
 /* These offsets are consumed by the build-time assembly generator. Keep the
@@ -1045,6 +1050,18 @@ _Static_assert(offsetof(a64_static_chain_context_t, ram_mask) == 40u,
                "chain RAM-mask ABI offset");
 _Static_assert(offsetof(a64_static_chain_context_t, final_pc) == 60u,
                "chain final-PC ABI offset");
+_Static_assert(offsetof(a64_static_chain_context_t, thumb) == 64u,
+               "chain Thumb ABI offset");
+_Static_assert(offsetof(a64_static_chain_context_t, graph_nodes) == 72u,
+               "chain graph-node ABI offset");
+_Static_assert(offsetof(a64_static_chain_context_t, graph_fetch_host) == 80u,
+               "chain graph-fetch-host ABI offset");
+_Static_assert(offsetof(a64_static_chain_context_t, graph_fetch_block) == 88u,
+               "chain graph-fetch-block ABI offset");
+_Static_assert(offsetof(a64_static_chain_context_t, graph_fetch_gen) == 92u,
+               "chain graph-generation ABI offset");
+_Static_assert(offsetof(a64_static_chain_context_t, graph_fetch_priv) == 96u,
+               "chain graph-privilege ABI offset");
 _Static_assert(sizeof(a64_static_graph_node_t) == 128u,
                "graph node ABI size");
 _Static_assert(offsetof(a64_static_graph_node_t, fetch_host) == 8u,
@@ -1340,22 +1357,32 @@ void a64_static_chain_partial(a64_static_chain_context_t *context,
 }
 #endif
 
-bool a64_static_run_read_hits_chain(arm_cpu_t *cpu,
-                                    const a64_static_block_t *first,
-                                    uint8_t *ram, size_t ram_size,
-                                    unsigned budget,
-                                    a64_static_chain_next_fn next,
-                                    void *opaque, unsigned *completed,
-                                    unsigned *blocks) {
+static bool run_read_hits_chain(arm_cpu_t *cpu,
+                                const a64_static_block_t *first,
+                                uint8_t *ram, size_t ram_size,
+                                unsigned budget,
+                                a64_static_chain_next_fn next,
+                                void *opaque,
+                                const a64_static_graph_node_t *graph_nodes,
+                                unsigned *completed, unsigned *blocks) {
+    bool thumb;
+    bool priv;
     if (!completed || !blocks) return false;
     *completed = 0u;
     *blocks = 0u;
-    if (!cpu || !ram || !budget ||
+    if (!cpu) return false;
+    thumb = (cpu->cpsr & ARM_CPSR_T) != 0u;
+    priv = (cpu->cpsr & ARM_CPSR_MODE_MASK) != ARM_MODE_USR;
+    if (!ram || !budget ||
         budget > A64_STATIC_MAX_INSNS || !ram_size ||
         (ram_size & (ram_size - 1u)) != 0u ||
         ram_size - 1u > UINT32_MAX ||
         !validate_decoded_read_hits_at(
-            first, cpu->r[15], (cpu->cpsr & ARM_CPSR_T) != 0u, budget))
+            first, cpu->r[15], thumb, budget) ||
+        (graph_nodes &&
+         (!cpu->fetch_host ||
+          cpu->fetch_blk != (cpu->r[15] & ~UINT32_C(0x3ff)) ||
+          cpu->fetch_gen != cpu->tlb_gen || cpu->fetch_priv != priv)))
         return false;
 #if defined(S5LBOX_STATIC_A64_NATIVE)
     a64_static_read_context_t read_context = {
@@ -1376,7 +1403,12 @@ bool a64_static_run_read_hits_chain(arm_cpu_t *cpu,
         .ram_mask = (uint64_t)ram_size - 1u,
         .budget = budget,
         .final_pc = cpu->r[15],
-        .thumb = (cpu->cpsr & ARM_CPSR_T) != 0u
+        .thumb = thumb,
+        .graph_nodes = graph_nodes,
+        .graph_fetch_host = cpu->fetch_host,
+        .graph_fetch_block = cpu->fetch_blk,
+        .graph_fetch_gen = cpu->fetch_gen,
+        .graph_fetch_priv = priv ? 1u : 0u
     };
     int result = a64_static_execute(cpu->r, &cpu->cpsr, &cpu->cycles,
                                     first->uops, 1u, ram,
@@ -1390,6 +1422,28 @@ bool a64_static_run_read_hits_chain(arm_cpu_t *cpu,
     (void)first;
     (void)next;
     (void)opaque;
+    (void)graph_nodes;
     return false;
 #endif
+}
+
+bool a64_static_run_read_hits_chain(arm_cpu_t *cpu,
+                                    const a64_static_block_t *first,
+                                    uint8_t *ram, size_t ram_size,
+                                    unsigned budget,
+                                    a64_static_chain_next_fn next,
+                                    void *opaque, unsigned *completed,
+                                    unsigned *blocks) {
+    return run_read_hits_chain(cpu, first, ram, ram_size, budget, next, opaque,
+                               NULL, completed, blocks);
+}
+
+bool a64_static_run_read_hits_graph(
+    arm_cpu_t *cpu, const a64_static_block_t *first,
+    uint8_t *ram, size_t ram_size, unsigned budget,
+    const a64_static_graph_node_t nodes[A64_STATIC_GRAPH_SLOTS],
+    unsigned *completed, unsigned *blocks) {
+    if (!nodes) return false;
+    return run_read_hits_chain(cpu, first, ram, ram_size, budget, NULL, NULL,
+                               nodes, completed, blocks);
 }
