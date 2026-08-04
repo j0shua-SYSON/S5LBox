@@ -19,6 +19,7 @@
 
 #define STATIC_A64_CACHE_ENTRIES 1024u
 #define STATIC_A64_RAW_BYTES (A64_STATIC_MAX_INSNS * 4u)
+#define STATIC_A64_CHAIN_INSNS A64_STATIC_MAX_INSNS
 
 typedef struct {
     const uint8_t *fetch_host;
@@ -36,6 +37,7 @@ typedef struct {
 typedef struct {
     bool enabled;
     uint64_t retired;
+    uint64_t chained_blocks;
     static_a64_entry_t cache[STATIC_A64_CACHE_ENTRIES];
 } static_a64_state_t;
 
@@ -135,23 +137,23 @@ uint64_t s5l8900_static_a64_retired(const s5l8900_t *m) {
 #endif
 }
 
+uint64_t s5l8900_static_a64_chained_blocks(const s5l8900_t *m) {
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    const static_a64_state_t *state = static_state(m);
+    return state ? state->chained_blocks : 0u;
+#else
+    (void)m;
+    return 0u;
+#endif
+}
+
 unsigned s5l8900_static_a64_try(s5l8900_t *m, unsigned max_insns) {
 #if defined(S5LBOX_STATIC_A64_ENGINE)
     static_a64_state_t *state = static_state(m);
     arm_cpu_t *cpu;
-    uint32_t pc;
-    uint32_t fetch_block;
-    unsigned width;
-    unsigned offset;
-    unsigned candidate_insns;
-    unsigned raw_len;
-    bool thumb;
-    bool priv;
-    const uint8_t *bytes;
-    static_a64_entry_t *entry;
-    a64_static_block_t bounded_block;
-    const a64_static_block_t *run_block;
-    unsigned completed = 0u;
+    unsigned budget;
+    unsigned retired = 0u;
+    unsigned executed_blocks = 0u;
 
     if (!state || !state->enabled || !max_insns ||
         !a64_static_host_available() || !m->ram || !m->ram_size ||
@@ -159,57 +161,86 @@ unsigned s5l8900_static_a64_try(s5l8900_t *m, unsigned max_insns) {
         return 0u;
 
     cpu = &m->cpu;
-    if (cpu->arch != ARM_ARCH_V6_ARM1176 || !arm_mode_is_valid(cpu->cpsr) ||
-        cpu->abort_pending ||
-        (cpu->fiq_line && !(cpu->cpsr & ARM_CPSR_F)) ||
-        (cpu->irq_line && !(cpu->cpsr & ARM_CPSR_I)))
-        return 0u;
+    budget = max_insns < STATIC_A64_CHAIN_INSNS
+           ? max_insns : STATIC_A64_CHAIN_INSNS;
 
-    pc = cpu->r[15];
-    thumb = (cpu->cpsr & ARM_CPSR_T) != 0u;
-    priv = (cpu->cpsr & ARM_CPSR_MODE_MASK) != ARM_MODE_USR;
-    width = thumb ? 2u : 4u;
-    if ((pc & (width - 1u)) != 0u) return 0u;
+    while (retired < budget) {
+        uint32_t pc;
+        uint32_t fetch_block;
+        unsigned width;
+        unsigned offset;
+        unsigned candidate_insns;
+        unsigned raw_len;
+        unsigned remaining = budget - retired;
+        unsigned completed = 0u;
+        bool thumb;
+        bool priv;
+        const uint8_t *bytes;
+        static_a64_entry_t *entry;
+        a64_static_block_t bounded_block;
+        const a64_static_block_t *run_block;
 
-    fetch_block = pc & ~UINT32_C(0x3ff);
-    if (!cpu->fetch_host || cpu->fetch_blk != fetch_block ||
-        cpu->fetch_gen != cpu->tlb_gen || cpu->fetch_priv != priv)
-        return 0u;
+        /* Recheck every head. Signed instructions cannot change the MMU,
+         * privilege, interrupt masks or instruction state, but keeping these
+         * gates local makes that invariant fail closed if the subset grows. */
+        if (cpu->arch != ARM_ARCH_V6_ARM1176 ||
+            !arm_mode_is_valid(cpu->cpsr) || cpu->abort_pending ||
+            (cpu->fiq_line && !(cpu->cpsr & ARM_CPSR_F)) ||
+            (cpu->irq_line && !(cpu->cpsr & ARM_CPSR_I)))
+            break;
 
-    offset = pc - fetch_block;
-    candidate_insns = (0x400u - offset) / width;
-    if (candidate_insns > A64_STATIC_MAX_INSNS)
-        candidate_insns = A64_STATIC_MAX_INSNS;
-    if (!candidate_insns) return 0u;
-    raw_len = candidate_insns * width;
-    bytes = cpu->fetch_host + offset;
+        pc = cpu->r[15];
+        thumb = (cpu->cpsr & ARM_CPSR_T) != 0u;
+        priv = (cpu->cpsr & ARM_CPSR_MODE_MASK) != ARM_MODE_USR;
+        width = thumb ? 2u : 4u;
+        if ((pc & (width - 1u)) != 0u) break;
 
-    entry = &state->cache[cache_index(pc, thumb, cpu->fetch_gen)];
-    if (!entry_matches(entry, cpu, bytes, pc, thumb, priv, raw_len))
-        decode_entry(entry, cpu, bytes, pc, thumb, priv, candidate_insns,
-                     raw_len);
-    if (!entry->supported) return 0u;
-    run_block = &entry->block;
-    if (run_block->insn_count > max_insns) {
-        /* The next exact device edge (or the caller's remaining budget) may
-         * be nearer than the cached longest block. Decode one bounded prefix
-         * instead of falling back instruction-by-instruction until the edge.
-         * This occurs at most once per edge and never mutates the cache. */
-        if (!decode_longest(bytes, max_insns, thumb, pc, &bounded_block))
-            return 0u;
-        run_block = &bounded_block;
+        fetch_block = pc & ~UINT32_C(0x3ff);
+        /* A cross-block target must return to arm_step(), which alone owns
+         * instruction translation, MMU faults and the new fetch witness. */
+        if (!cpu->fetch_host || cpu->fetch_blk != fetch_block ||
+            cpu->fetch_gen != cpu->tlb_gen || cpu->fetch_priv != priv)
+            break;
+
+        offset = pc - fetch_block;
+        candidate_insns = (0x400u - offset) / width;
+        if (candidate_insns > A64_STATIC_MAX_INSNS)
+            candidate_insns = A64_STATIC_MAX_INSNS;
+        if (!candidate_insns) break;
+        raw_len = candidate_insns * width;
+        bytes = cpu->fetch_host + offset;
+
+        entry = &state->cache[cache_index(pc, thumb, cpu->fetch_gen)];
+        if (!entry_matches(entry, cpu, bytes, pc, thumb, priv, raw_len))
+            decode_entry(entry, cpu, bytes, pc, thumb, priv,
+                         candidate_insns, raw_len);
+        if (!entry->supported) break;
+        run_block = &entry->block;
+        if (run_block->insn_count > remaining) {
+            /* The total chain never crosses its caller/time/device budget.
+             * Decode an exact bounded prefix without mutating the cache. */
+            if (!decode_longest(bytes, remaining, thumb, pc,
+                                &bounded_block))
+                break;
+            run_block = &bounded_block;
+        }
+
+        if (!a64_static_run_read_hits_decoded(cpu, run_block, m->ram,
+                                              m->ram_size, &completed)) {
+            /* Fail closed, and make a transient contract mismatch re-decode.
+             * The decoded runner refuses before changing guest state. */
+            entry->valid = false;
+            break;
+        }
+        if (!completed) break;
+        if (executed_blocks) state->chained_blocks++;
+        executed_blocks++;
+        retired += completed;
+        if (completed != run_block->insn_count) break;
     }
 
-    if (!a64_static_run_read_hits_decoded(cpu, run_block, m->ram,
-                                          m->ram_size, &completed)) {
-        /* Fail closed, and make a transient contract mismatch re-decode rather
-         * than becoming a permanent false hit. Guest state is unchanged when
-         * the decoded-contract runner refuses a block. */
-        entry->valid = false;
-        return 0u;
-    }
-    state->retired += completed;
-    return completed;
+    state->retired += retired;
+    return retired;
 #else
     (void)m;
     (void)max_insns;

@@ -24930,8 +24930,12 @@ typedef struct {
     uint64_t signed_call_max;
     uint64_t signed_call_remaining;
     uint64_t signed_modeled_retired;
+    uint64_t signed_chain_transitions;
     uint64_t signed_stops[SEQUENCE_SIGNED_STOP_COUNT];
     sequence_signed_stop_t signed_budget_stop;
+    uint32_t signed_chain_pc;
+    bool signed_chain_pending;
+    bool signed_chain_thumb;
     bool signed_tick_eager;
 
     bool have_previous;
@@ -25238,6 +25242,7 @@ static bool sequence_dread_would_hit(const arm_cpu_t *cpu, uint32_t va,
 #if defined(S5LBOX_STATIC_A64_ENGINE)
 typedef struct {
     sequence_signed_outcome_t outcome;
+    uint32_t exit_pc;
     bool terminal;
 } sequence_signed_classification_t;
 
@@ -25290,7 +25295,7 @@ static bool sequence_vfp_guard_passes(const arm_cpu_t *cpu, uint32_t insn) {
 static sequence_signed_classification_t sequence_signed_classify(
         const arm_cpu_t *cpu, uint32_t pc, uint32_t raw, bool thumb) {
     sequence_signed_classification_t result = {
-        SEQUENCE_SIGNED_REJECTED, false
+        SEQUENCE_SIGNED_REJECTED, 0u, false
     };
     uint8_t bytes[4] = {
         (uint8_t)raw, (uint8_t)(raw >> 8),
@@ -25303,6 +25308,22 @@ static sequence_signed_classification_t sequence_signed_classify(
         return result;
 
     result.terminal = sequence_signed_terminal(raw, thumb);
+    if (result.terminal) {
+        if (thumb) {
+            int32_t displacement =
+                (int32_t)((raw & UINT32_C(0x7ff)) << 21) >> 20;
+            result.exit_pc = pc + 4u + (uint32_t)displacement;
+        } else {
+            unsigned condition = raw >> 28;
+            if (condition < 14u && !arm_cond_passed(cpu, condition)) {
+                result.exit_pc = pc + 4u;
+            } else {
+                int32_t displacement = (int32_t)(raw << 8) >> 6;
+                result.exit_pc =
+                    (pc + 8u + (uint32_t)displacement) & ~UINT32_C(3);
+            }
+        }
+    }
 
     unsigned condition = thumb ? 14u : raw >> 28;
     if (block.runtime_guards && condition < 14u &&
@@ -25465,7 +25486,9 @@ static void sequence_close_run(uint64_t *counts, uint64_t *instructions,
 #if defined(S5LBOX_STATIC_A64_ENGINE)
 static void sequence_signed_close(sequence_profile_t *profile,
                                   sequence_signed_stop_t why) {
-    if (!profile || !profile->signed_call_length) return;
+    if (!profile) return;
+    profile->signed_chain_pending = false;
+    if (!profile->signed_call_length) return;
     sequence_close_run(profile->signed_calls,
                        profile->signed_call_instructions,
                        &profile->signed_call_length,
@@ -25540,6 +25563,7 @@ static bool sequence_signed_observe(sequence_profile_t *profile,
                                     uint32_t pc, uint32_t raw,
                                     bool thumb, bool physical_sequential,
                                     sequence_class_t instruction_class) {
+    bool chained_head = false;
     sequence_signed_classification_t classification =
         sequence_signed_classify(&mach->cpu, pc, raw, thumb);
     profile->signed_outcomes[classification.outcome]++;
@@ -25547,7 +25571,13 @@ static bool sequence_signed_observe(sequence_profile_t *profile,
                                   [classification.outcome]++;
 
     if (profile->signed_call_length) {
-        if (!physical_sequential) {
+        if (profile->signed_chain_pending) {
+            chained_head = pc == profile->signed_chain_pc &&
+                           thumb == profile->signed_chain_thumb;
+            profile->signed_chain_pending = false;
+            if (!chained_head)
+                sequence_signed_close(profile, SEQUENCE_SIGNED_STOP_FLOW);
+        } else if (!physical_sequential) {
             sequence_signed_close(profile, SEQUENCE_SIGNED_STOP_FLOW);
         } else if ((profile->previous_pc & ~UINT32_C(0x3ff)) !=
                    (pc & ~UINT32_C(0x3ff))) {
@@ -25582,11 +25612,23 @@ static bool sequence_signed_observe(sequence_profile_t *profile,
     profile->signed_call_length++;
     profile->signed_modeled_retired++;
     profile->signed_class_modeled[instruction_class]++;
+    if (chained_head)
+        profile->signed_chain_transitions++;
     if (profile->signed_call_remaining)
         profile->signed_call_remaining--;
 
     if (classification.terminal) {
-        sequence_signed_close(profile, SEQUENCE_SIGNED_STOP_BRANCH);
+        if (!profile->signed_call_remaining) {
+            sequence_signed_close(profile, profile->signed_budget_stop);
+        } else if ((pc & ~UINT32_C(0x3ff)) !=
+                   (classification.exit_pc & ~UINT32_C(0x3ff))) {
+            sequence_signed_close(profile,
+                                  SEQUENCE_SIGNED_STOP_FETCH_BLOCK);
+        } else {
+            profile->signed_chain_pc = classification.exit_pc;
+            profile->signed_chain_thumb = thumb;
+            profile->signed_chain_pending = true;
+        }
     } else if (!profile->signed_call_remaining) {
         sequence_signed_close(profile, profile->signed_budget_stop);
     }
@@ -26997,9 +27039,10 @@ static void sequence_profile_report(sequence_profile_t *profile) {
                                       signed_gate_refusals
                    ? "EXACT" : "MISMATCH");
         printf("    modeled calls=%" PRIu64 " instructions=%" PRIu64
-               " mean=%.3f max=%" PRIu64
+               " chained-heads=%" PRIu64 " mean=%.3f max=%" PRIu64
                " calls/stops=%" PRIu64 "/%" PRIu64 "  %s\n",
                signed_calls, signed_instructions,
+               profile->signed_chain_transitions,
                signed_calls
                    ? (double)signed_instructions / (double)signed_calls : 0.0,
                profile->signed_call_max, signed_calls, signed_stops,

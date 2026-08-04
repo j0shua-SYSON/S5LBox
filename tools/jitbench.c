@@ -2160,6 +2160,7 @@ typedef struct {
     uint8_t *snapshot;
     size_t snapshot_len;
     uint64_t signed_retired;
+    uint64_t signed_chains;
     double seconds;
 } soc_run_result_t;
 
@@ -2183,6 +2184,8 @@ static bool run_soc_entry_path(const uint32_t *program, unsigned length,
     uint64_t remaining = total;
     uint64_t retired_before;
     uint64_t retired_after;
+    uint64_t chains_before;
+    uint64_t chains_after;
     double start, end;
     bool initialized = false;
     bool ok = false;
@@ -2219,6 +2222,7 @@ static bool run_soc_entry_path(const uint32_t *program, unsigned length,
     }
 
     retired_before = s5l8900_static_a64_retired(&machine);
+    chains_before = s5l8900_static_a64_chained_blocks(&machine);
     start = now_seconds();
     while (remaining != 0u) {
         unsigned chunk = remaining > (uint64_t)UINT_MAX
@@ -2230,6 +2234,7 @@ static bool run_soc_entry_path(const uint32_t *program, unsigned length,
     }
     end = now_seconds();
     retired_after = s5l8900_static_a64_retired(&machine);
+    chains_after = s5l8900_static_a64_chained_blocks(&machine);
     if (remaining != 0u || status != ARM_OK || end <= start ||
         machine.cpu.r[15] != 0u) {
         fprintf(stderr,
@@ -2240,13 +2245,16 @@ static bool run_soc_entry_path(const uint32_t *program, unsigned length,
         goto done;
     }
     out->signed_retired = retired_after - retired_before;
+    out->signed_chains = chains_after - chains_before;
     if ((signed_path && out->signed_retired != total) ||
-        (!signed_path && out->signed_retired != 0u)) {
+        (!signed_path &&
+         (out->signed_retired != 0u || out->signed_chains != 0u))) {
         fprintf(stderr,
                 "jitbench: SoC entry %s retired signed=%" PRIu64
-                " expected=%" PRIu64 "\n",
+                " chains=%" PRIu64 " expected=%" PRIu64 "\n",
                 signed_path ? "signed" : "reference",
-                out->signed_retired, signed_path ? total : UINT64_C(0));
+                out->signed_retired, out->signed_chains,
+                signed_path ? total : UINT64_C(0));
         goto done;
     }
     out->seconds = end - start;
@@ -2278,6 +2286,7 @@ static bool bench_soc_entry(unsigned length, uint64_t requested,
     double *reference_rates = NULL;
     double *signed_rates = NULL;
     uint64_t total;
+    uint64_t signed_chains = 0u;
     bool ok = false;
 
     if (requested > UINT64_MAX - (uint64_t)(length - 1u) ||
@@ -2325,12 +2334,23 @@ static bool bench_soc_entry(unsigned length, uint64_t requested,
             free_soc_run_result(&signed_result);
             goto done;
         }
+        if (rep == 0u) {
+            signed_chains = signed_result.signed_chains;
+        } else if (signed_chains != signed_result.signed_chains) {
+            fprintf(stderr,
+                    "jitbench: SoC entry length %u chain count changed "
+                    "across repetitions\n", length);
+            free_soc_run_result(&reference);
+            free_soc_run_result(&signed_result);
+            goto done;
+        }
         reference_rates[rep] = (double)total / reference.seconds / 1.0e6;
         signed_rates[rep] = (double)total / signed_result.seconds / 1.0e6;
         printf("SOC-ENTRY-SAMPLE length=%u rep=%u order=%s "
-               "reference=%.3f signed=%.3f Minsn/s exact-snapshot=yes\n",
+               "reference=%.3f signed=%.3f Minsn/s chains=%" PRIu64
+               " exact-snapshot=yes\n",
                length, rep + 1u, order, reference_rates[rep],
-               signed_rates[rep]);
+               signed_rates[rep], signed_result.signed_chains);
         free_soc_run_result(&reference);
         free_soc_run_result(&signed_result);
     }
@@ -2341,8 +2361,9 @@ static bool bench_soc_entry(unsigned length, uint64_t requested,
            " reps=%u run-api=yes cache-lookup=yes raw-witness=yes "
            "entry-gates=yes timer-boundaries=yes device-tick=yes "
            "head-cache=warm mmu=off exact-snapshot=yes signed-retired=%" PRIu64
-           " reference-median=%.3f signed-median=%.3f speedup=%.3fx\n",
-           length, shape.uop_count, total, reps, total,
+           " signed-chains=%" PRIu64 " reference-median=%.3f "
+           "signed-median=%.3f speedup=%.3fx\n",
+           length, shape.uop_count, total, reps, total, signed_chains,
            reference_rates[reps / 2u], signed_rates[reps / 2u],
            signed_rates[reps / 2u] / reference_rates[reps / 2u]);
     ok = true;

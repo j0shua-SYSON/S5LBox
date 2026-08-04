@@ -4,7 +4,9 @@
 
 #include "soc.h"
 
-/* Try one already-translated, time-bounded block. Zero means fall back to the
+/* Try an already-translated, time-bounded chain of at most sixteen guest
+ * instructions. Every chained head remains inside the current proven fetch
+ * block and repeats the cache/raw-byte witness. Zero means fall back to the
  * architectural interpreter without changing guest state. */
 unsigned s5l8900_static_a64_try(s5l8900_t *m, unsigned max_insns);
 

@@ -3240,6 +3240,7 @@ static void test_signed_static_a64_branch_oracle(void) {
     bool fast_ok;
     bool reference_ok;
     uint64_t retired;
+    uint64_t chains;
 
     if (!s5l8900_static_a64_available()) {
         printf("  STATIC-A64-BRANCH-SOC-ORACLE SKIP: no signed AArch64 "
@@ -3270,9 +3271,11 @@ static void test_signed_static_a64_branch_oracle(void) {
           (int)reference_status);
 
     retired = s5l8900_static_a64_retired(&fast);
+    chains = s5l8900_static_a64_chained_blocks(&fast);
     CHECK(retired > total * 3u / 4u,
           "signed branch loop retired only %llu/%llu instructions",
           (unsigned long long)retired, (unsigned long long)total);
+    CHECK(chains != 0u, "signed branch loop chained no target blocks");
     CHECK(fast_status == reference_status,
           "status differs: signed=%d reference=%d",
           (int)fast_status, (int)reference_status);
@@ -3292,10 +3295,12 @@ static void test_signed_static_a64_branch_oracle(void) {
 
     if (fast_snapshot && reference_snapshot && fast_len == reference_len &&
         memcmp(fast_snapshot, reference_snapshot, fast_len) == 0 &&
-        retired > total * 3u / 4u) {
+        retired > total * 3u / 4u && chains != 0u) {
         printf("  STATIC-A64-BRANCH-SOC-ORACLE exact=yes retired=%llu "
-               "conditional=yes link=yes taken=yes fallthrough=yes\n",
-               (unsigned long long)retired);
+               "chains=%llu conditional=yes link=yes taken=yes "
+               "fallthrough=yes\n",
+               (unsigned long long)retired,
+               (unsigned long long)chains);
     }
 
     free(fast_snapshot);

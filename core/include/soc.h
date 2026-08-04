@@ -3902,11 +3902,12 @@ void s5l8900_load(s5l8900_t *m, uint32_t addr, const void *data, size_t len);
  * produced at build time: no runtime code generation and no writable/executable
  * pages. The feature is compile-time OFF by default and enabling it can fail
  * when the build or host architecture does not provide the signed handlers.
- * `m` must be an initialised machine. The retired count is a host diagnostic,
- * not guest state and not part of a snapshot. */
+ * `m` must be an initialised machine. The retired and chained-block counts are
+ * host diagnostics, not guest state and not part of a snapshot. */
 bool s5l8900_static_a64_available(void);
 bool s5l8900_static_a64_set_enabled(s5l8900_t *m, bool enabled);
 uint64_t s5l8900_static_a64_retired(const s5l8900_t *m);
+uint64_t s5l8900_static_a64_chained_blocks(const s5l8900_t *m);
 
 /* Run up to max_steps instructions, stopping early on a non-OK status.
  * Returns the number of instructions retired. */
