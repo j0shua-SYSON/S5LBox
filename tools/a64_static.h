@@ -23,7 +23,7 @@
 /* A conditional register-offset A32 load uses a guard, shifter, address and
  * read record. The final slot is the fixed block exit. */
 #define A64_STATIC_MAX_UOPS (A64_STATIC_MAX_INSNS * 4u + 1u)
-#define A64_STATIC_HANDLER_COUNT 24005u
+#define A64_STATIC_HANDLER_COUNT 24050u
 
 typedef struct {
     uint32_t handler;
@@ -63,11 +63,13 @@ bool a64_static_decode_bytes_at(const uint8_t *program, unsigned insns,
                                 a64_static_block_t *out);
 
 /* Product decoder for the real SoC path. It admits the non-memory contract and
- * replaces only exact A32 pre-indexed, no-writeback loads with read-cache
- * records. Flat-proof memory handlers, stores, PC loads, writeback/post-index
- * forms and every other unsupported instruction refuse cleanly. Runtime cache
- * misses still return to arm_step(), which alone walks the MMU, raises faults
- * and handles MMIO. */
+ * replaces exact A32 pre-indexed, no-writeback loads and ordinary Thumb
+ * PC/register/immediate/SP-relative loads with read-cache records. Thumb word,
+ * byte, halfword, signed-byte and signed-halfword results are covered; dynamic
+ * alignment cases refuse at runtime before touching guest state. Flat-proof
+ * memory handlers, stores, PC loads, writeback/post-index forms and every other
+ * unsupported instruction refuse cleanly. Runtime cache misses still return
+ * to arm_step(), which alone walks the MMU, raises faults and handles MMIO. */
 bool a64_static_decode_read_hits_bytes_at(const uint8_t *program,
                                           unsigned insns, bool thumb,
                                           uint32_t pc,

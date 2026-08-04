@@ -19,7 +19,15 @@ CONDITIONS = (
     "eq", "ne", "cs", "cc", "mi", "pl", "vs", "vc",
     "hi", "ls", "ge", "lt", "gt", "le",
 )
-EXPECTED_HANDLERS = 24005
+EXPECTED_HANDLERS = 24050
+
+READ_KINDS = (
+    ("word", "ldr", 4),
+    ("byte", "ldrb", 1),
+    ("half", "ldrh", 2),
+    ("signed_byte", "ldrsb", 1),
+    ("signed_half", "ldrsh", 2),
+)
 
 
 def next_dispatch() -> list[str]:
@@ -361,7 +369,7 @@ def address_body(up: bool, rn: int, register_offset: bool) -> list[str]:
     return body
 
 
-def direct_read_body(byte: bool, rd: int) -> list[str]:
+def direct_read_body(mnemonic: str, width: int, rd: int) -> list[str]:
     result, stores = result_register(rd)
     body = [
         # Every comparison below uses host NZCV. Preserve the guest flags even
@@ -371,12 +379,13 @@ def direct_read_body(byte: bool, rd: int) -> list[str]:
         "    b .La64s_direct_miss",
         "1:",
     ]
-    if not byte:
-        # The observed boot window had no unaligned candidate. Refusing it is
-        # nevertheless essential: arm_step owns SCTLR.A/U faults and legacy
-        # rotate semantics, while an aligned word cannot cross a 1 KiB block.
+    if width > 1:
+        # Refusing unaligned accesses is essential: arm_step owns SCTLR.A/U
+        # faults, legacy word rotate semantics and legacy halfword
+        # UNPREDICTABLE behavior. An aligned word or halfword cannot cross a
+        # 1 KiB cache block.
         body.extend([
-            "    tst w17, #3",
+            f"    tst w17, #{width - 1}",
             "    b.eq 1f",
             "    b .La64s_direct_miss",
             "1:",
@@ -411,7 +420,7 @@ def direct_read_body(byte: bool, rd: int) -> list[str]:
         "1:",
         "    and w4, w17, #0x3ff",
         "    add x16, x16, w4, uxtw",
-        f"    {'ldrb' if byte else 'ldr'} {result}, [x16]",
+        f"    {mnemonic} {result}, [x16]",
         *stores,
         # Match dread_hit(): one hit for each successful direct access and no
         # counter change at all on a miss left for the literal slow path.
@@ -624,12 +633,14 @@ def build_handlers() -> list[tuple[str, list[str]]]:
             label = f".La64s_addr_reg_{int(up)}_{rn}"
             handlers.append((label, address_body(up, rn, True)))
 
-    # Loads to PC remain literal. Byte/word and r0-r14 need only thirty direct
-    # handlers because the address record has already produced the exact VA.
-    for byte in (False, True):
+    # Loads to PC remain literal. Five result widths/sign modes across r0-r14
+    # need seventy-five direct handlers because the address record has already
+    # produced the exact VA.
+    for kind, mnemonic, width in READ_KINDS:
         for rd in range(15):
-            label = f".La64s_direct_read_{int(byte)}_{rd}"
-            handlers.append((label, direct_read_body(byte, rd)))
+            label = f".La64s_direct_read_{kind}_{rd}"
+            handlers.append((label,
+                             direct_read_body(mnemonic, width, rd)))
 
     if len(handlers) != EXPECTED_HANDLERS:
         raise RuntimeError(

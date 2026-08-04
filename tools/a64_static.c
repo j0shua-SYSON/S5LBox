@@ -5,6 +5,15 @@
 #include <string.h>
 
 enum {
+    A64S_READ_WORD = 0u,
+    A64S_READ_BYTE = 1u,
+    A64S_READ_HALF = 2u,
+    A64S_READ_SIGNED_BYTE = 3u,
+    A64S_READ_SIGNED_HALF = 4u,
+    A64S_READ_KIND_COUNT = 5u
+};
+
+enum {
     A64S_END = 0u,
     A64S_ADD_RRR = 1u,
     A64S_SUB_RRR = A64S_ADD_RRR + 512u,
@@ -29,7 +38,7 @@ enum {
     A64S_ADDR_IMM = A64S_DP_REG + 16u * 2u * 15u * 16u,
     A64S_ADDR_REG = A64S_ADDR_IMM + 2u * 16u,
     A64S_DIRECT_READ = A64S_ADDR_REG + 2u * 16u,
-    A64S_HANDLER_COUNT = A64S_DIRECT_READ + 2u * 15u
+    A64S_HANDLER_COUNT = A64S_DIRECT_READ + A64S_READ_KIND_COUNT * 15u
 };
 
 enum {
@@ -141,8 +150,8 @@ static uint32_t addr_reg(bool up, unsigned rn) {
     return A64S_ADDR_REG + (up ? 16u : 0u) + rn;
 }
 
-static uint32_t direct_read(bool byte, unsigned rd) {
-    return A64S_DIRECT_READ + (byte ? 15u : 0u) + rd;
+static uint32_t direct_read(unsigned kind, unsigned rd) {
+    return A64S_DIRECT_READ + kind * 15u + rd;
 }
 
 static bool handler_is_condition(uint32_t handler) {
@@ -363,8 +372,27 @@ static void thumb_emit_shift(a64_static_uop_t *out, bool register_shift,
     out[1].pc_value = pc_value;
 }
 
+static void thumb_emit_read_imm(a64_static_uop_t *out, unsigned kind,
+                                unsigned rd, unsigned rn, uint32_t offset,
+                                uint32_t pc_value) {
+    out[0].handler = addr_imm(true, rn);
+    out[0].immediate = offset;
+    out[0].pc_value = pc_value;
+    out[1].handler = direct_read(kind, rd);
+}
+
+static void thumb_emit_read_reg(a64_static_uop_t *out, unsigned kind,
+                                unsigned rd, unsigned rn, unsigned rm,
+                                uint32_t pc_value) {
+    out[0].handler = shift_imm(false, 0u, rm, 0u);
+    out[0].pc_value = pc_value;
+    out[1].handler = addr_reg(true, rn);
+    out[1].pc_value = pc_value;
+    out[2].handler = direct_read(kind, rd);
+}
+
 static bool decode_thumb(uint16_t insn, unsigned index, unsigned insns,
-                         uint32_t pc, a64_static_uop_t *out,
+                         uint32_t pc, bool read_hits, a64_static_uop_t *out,
                          unsigned *written) {
     uint32_t pc_value = pc + index * 2u + 4u;
     if (!written) return false;
@@ -498,9 +526,71 @@ static bool decode_thumb(uint16_t insn, unsigned index, unsigned insns,
         return true;
     }
 
+    if ((insn & UINT16_C(0xf800)) == UINT16_C(0x4800)) {
+        unsigned rd = (insn >> 8) & 7u;
+        if (!read_hits) return false;
+        thumb_emit_read_imm(out, A64S_READ_WORD, rd, 15u,
+                            (uint32_t)(insn & 255u) * 4u,
+                            pc_value & ~UINT32_C(3));
+        *written = 2u;
+        return true;
+    }
+
+    if ((insn & UINT16_C(0xf000)) == UINT16_C(0x5000)) {
+        unsigned rd = insn & 7u;
+        unsigned rn = (insn >> 3) & 7u;
+        unsigned rm = (insn >> 6) & 7u;
+        unsigned kind;
+        if (!read_hits) return false;
+        if ((insn & (1u << 9)) != 0u) {
+            switch ((insn >> 10) & 3u) {
+            case 1u: kind = A64S_READ_SIGNED_BYTE; break;
+            case 2u: kind = A64S_READ_HALF; break;
+            case 3u: kind = A64S_READ_SIGNED_HALF; break;
+            default: return false; /* STRH */
+            }
+        } else {
+            if ((insn & (1u << 11)) == 0u) return false;
+            kind = (insn & (1u << 10)) != 0u
+                ? A64S_READ_BYTE : A64S_READ_WORD;
+        }
+        thumb_emit_read_reg(out, kind, rd, rn, rm, pc_value);
+        *written = 3u;
+        return true;
+    }
+
+    if ((insn & UINT16_C(0xe000)) == UINT16_C(0x6000)) {
+        unsigned rd = insn & 7u;
+        unsigned rn = (insn >> 3) & 7u;
+        unsigned offset = (insn >> 6) & 31u;
+        bool byte = (insn & (1u << 12)) != 0u;
+        if (!read_hits || (insn & (1u << 11)) == 0u) return false;
+        thumb_emit_read_imm(out, byte ? A64S_READ_BYTE : A64S_READ_WORD,
+                            rd, rn, byte ? offset : offset * 4u, pc_value);
+        *written = 2u;
+        return true;
+    }
+
+    if ((insn & UINT16_C(0xf000)) == UINT16_C(0x8000)) {
+        unsigned rd = insn & 7u;
+        unsigned rn = (insn >> 3) & 7u;
+        unsigned offset = ((insn >> 6) & 31u) * 2u;
+        if (!read_hits || (insn & (1u << 11)) == 0u) return false;
+        thumb_emit_read_imm(out, A64S_READ_HALF, rd, rn, offset, pc_value);
+        *written = 2u;
+        return true;
+    }
+
     if ((insn & UINT16_C(0xf000)) == UINT16_C(0x9000)) {
         unsigned rd = (insn >> 8) & 7u;
         bool load = (insn & UINT16_C(0x0800)) != 0u;
+        if (read_hits) {
+            if (!load) return false;
+            thumb_emit_read_imm(out, A64S_READ_WORD, rd, 13u,
+                                (uint32_t)(insn & 255u) * 4u, pc_value);
+            *written = 2u;
+            return true;
+        }
         out->handler = (load ? A64S_LDR_SP : A64S_STR_SP) + rd;
         out->immediate = (uint32_t)(insn & 255u) * 4u;
         out->pc_value = pc_value;
@@ -546,7 +636,8 @@ static bool decode_program_at(const void *program, unsigned insns, bool thumb,
         if (thumb) {
             const uint8_t *p = bytes + i * 2u;
             ok = decode_thumb(guest_bytes ? read_le16(p) : read_native16(p),
-                              i, insns, pc, &out->uops[uop_count], &added);
+                              i, insns, pc, read_hits,
+                              &out->uops[uop_count], &added);
             if (ok && read_hits)
                 for (unsigned j = 0u; j < added; j++)
                     if (handler_touches_memory(

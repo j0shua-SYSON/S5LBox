@@ -25122,6 +25122,67 @@ static sequence_load_address_t sequence_single_load_address(
     return SEQUENCE_LOAD_ADDRESS;
 }
 
+/* Read-only counterpart of the product Thumb DREAD decoder. It reconstructs
+ * only the ordinary single-load forms admitted by a64_static.c and applies the
+ * same conservative alignment guard as the signed handlers. Signedness changes
+ * the loaded value, not the address, width or cache lookup. */
+static sequence_load_address_t sequence_thumb_load_address(
+        const arm_cpu_t *cpu, uint32_t pc, uint16_t insn,
+        uint32_t *cache_va, unsigned *width, bool *priv) {
+    uint32_t address;
+    unsigned access_width;
+
+    if (!cpu || !cache_va || !width || !priv)
+        return SEQUENCE_LOAD_INVALID;
+
+    if ((insn & UINT16_C(0xf800)) == UINT16_C(0x4800)) {
+        address = ((pc + 4u) & ~UINT32_C(3)) +
+                  (uint32_t)(insn & 255u) * 4u;
+        access_width = 4u;
+    } else if ((insn & UINT16_C(0xf000)) == UINT16_C(0x5000)) {
+        unsigned rn = (insn >> 3) & 7u;
+        unsigned rm = (insn >> 6) & 7u;
+        if ((insn & (1u << 9)) != 0u) {
+            unsigned operation = (insn >> 10) & 3u;
+            if (operation == 0u) return SEQUENCE_LOAD_INVALID; /* STRH */
+            access_width = operation == 1u ? 1u : 2u;
+        } else {
+            if ((insn & (1u << 11)) == 0u)
+                return SEQUENCE_LOAD_INVALID;
+            access_width = (insn & (1u << 10)) != 0u ? 1u : 4u;
+        }
+        address = cpu->r[rn] + cpu->r[rm];
+    } else if ((insn & UINT16_C(0xe000)) == UINT16_C(0x6000)) {
+        unsigned rn = (insn >> 3) & 7u;
+        unsigned offset = (insn >> 6) & 31u;
+        bool byte = (insn & (1u << 12)) != 0u;
+        if ((insn & (1u << 11)) == 0u)
+            return SEQUENCE_LOAD_INVALID;
+        access_width = byte ? 1u : 4u;
+        address = cpu->r[rn] + (byte ? offset : offset * 4u);
+    } else if ((insn & UINT16_C(0xf000)) == UINT16_C(0x8000)) {
+        unsigned rn = (insn >> 3) & 7u;
+        if ((insn & (1u << 11)) == 0u)
+            return SEQUENCE_LOAD_INVALID;
+        access_width = 2u;
+        address = cpu->r[rn] + ((uint32_t)((insn >> 6) & 31u) * 2u);
+    } else if ((insn & UINT16_C(0xf000)) == UINT16_C(0x9000)) {
+        if ((insn & (1u << 11)) == 0u)
+            return SEQUENCE_LOAD_INVALID;
+        access_width = 4u;
+        address = cpu->r[13] + (uint32_t)(insn & 255u) * 4u;
+    } else {
+        return SEQUENCE_LOAD_INVALID;
+    }
+
+    if (access_width > 1u && (address & (access_width - 1u)) != 0u)
+        return SEQUENCE_LOAD_ALIGNMENT;
+    *cache_va = address;
+    *width = access_width;
+    *priv = (cpu->cpsr & ARM_CPSR_MODE_MASK) != ARM_MODE_USR;
+    return SEQUENCE_LOAD_ADDRESS;
+}
+
 static unsigned sequence_single_load_form(uint32_t insn) {
     return ((insn >> 25) & 1u) |
            (((insn >> 24) & 1u) << 1) |
@@ -25181,11 +25242,20 @@ static sequence_signed_classification_t sequence_signed_classify(
         return result;
     }
 
-    /* Product direct-read records are currently A32-only. Keep this explicit
-     * so a later Thumb read implementation cannot silently inherit an A32
-     * address model. */
     if (thumb) {
-        result.outcome = SEQUENCE_SIGNED_READ_GUARD;
+        uint32_t cache_va = 0u;
+        unsigned width = 0u;
+        bool priv = false;
+        sequence_load_address_t address_status =
+            sequence_thumb_load_address(cpu, pc, (uint16_t)raw,
+                                        &cache_va, &width, &priv);
+        if (address_status != SEQUENCE_LOAD_ADDRESS) {
+            result.outcome = SEQUENCE_SIGNED_READ_GUARD;
+            return result;
+        }
+        result.outcome = sequence_dread_would_hit(
+            cpu, cache_va, width, priv)
+            ? SEQUENCE_SIGNED_READ_HIT : SEQUENCE_SIGNED_READ_MISS;
         return result;
     }
 

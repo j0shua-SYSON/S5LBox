@@ -4,9 +4,9 @@
  * This is deliberately NOT a product-performance claim and not a JIT
  * dispatcher. It translates one small synthetic block once, then compares
  * repeated interpreter execution with both that already-built block and a
- * firmware-independent static-threaded proof. The proof's 24,005 generic
+ * firmware-independent static-threaded proof. The proof's 24,050 generic
  * ISA/register handlers are compiled and signed with the executable; runtime
- * decoding creates data records only. The table now has 24,005 handlers,
+ * decoding creates data records only. The table now has 24,050 handlers,
  * including a product-only guarded read-cache path.
  *
  * The answer is only a feasibility bound. There is no device tick, MMIO,
@@ -371,6 +371,26 @@ static const uint32_t A32_READ_ZERO_PREFIX[] = {
     A32_SINGLE(14, 0, 1, 0, 1, 7, 8, 0),
 };
 
+/* Product-only Thumb DREAD loads. The ordering keeps r0/r1/r2 intact until
+ * every register-offset form has consumed them, then deliberately permits
+ * load destinations to replace those base values. */
+static const uint16_t THUMB_READ_HITS[] = {
+    0x4f40u, /* LDR   r7,[pc,#0x100] */
+    0x5843u, /* LDR   r3,[r0,r1]     */
+    0x5c44u, /* LDRB  r4,[r0,r1]     */
+    0x5645u, /* LDRSB r5,[r0,r1]     */
+    0x5a46u, /* LDRH  r6,[r0,r1]     */
+    0x5e47u, /* LDRSH r7,[r0,r1]     */
+    0x6850u, /* LDR   r0,[r2,#4]     */
+    0x7891u, /* LDRB  r1,[r2,#2]     */
+    0x88d2u, /* LDRH  r2,[r2,#6]     */
+    0x9b02u, /* LDR   r3,[sp,#8]     */
+};
+
+static const uint16_t THUMB_READ_ZERO_PREFIX[] = {
+    0x6800u, /* LDR r0,[r0,#0] */
+};
+
 typedef struct {
     const char *name;
     const void *program;
@@ -516,7 +536,9 @@ static bool validate_static_shapes(void) {
         0x4487u, /* ADD pc,r0 */
         0x4687u, /* MOV pc,r0 */
         0x4700u, /* BX r0 */
-        0x6800u, /* LDR r0,[r0] -- no Thumb DREAD record yet */
+        0x6000u, /* STR r0,[r0] */
+        0x8000u, /* STRH r0,[r0] */
+        0x9000u, /* STR r0,[sp] */
         0xb401u, /* PUSH {r0} */
         0xd000u, /* conditional branch */
         0xdf00u, /* SVC */
@@ -528,6 +550,7 @@ static bool validate_static_shapes(void) {
     };
     a64_static_block_t block;
     uint8_t read_bytes[sizeof A32_READ_HITS];
+    uint8_t thumb_read_bytes[sizeof THUMB_READ_HITS];
     unsigned i;
 
     for (i = 0u; i < sizeof A32_READ_HITS / sizeof A32_READ_HITS[0]; i++) {
@@ -536,6 +559,11 @@ static bool validate_static_shapes(void) {
         read_bytes[i * 4u + 1u] = (uint8_t)(value >> 8);
         read_bytes[i * 4u + 2u] = (uint8_t)(value >> 16);
         read_bytes[i * 4u + 3u] = (uint8_t)(value >> 24);
+    }
+    for (i = 0u; i < sizeof THUMB_READ_HITS / sizeof THUMB_READ_HITS[0]; i++) {
+        uint16_t value = THUMB_READ_HITS[i];
+        thumb_read_bytes[i * 2u + 0u] = (uint8_t)value;
+        thumb_read_bytes[i * 2u + 1u] = (uint8_t)(value >> 8);
     }
 
     for (i = 0u; i < sizeof STATIC_CASES / sizeof STATIC_CASES[0]; i++) {
@@ -579,6 +607,22 @@ static bool validate_static_shapes(void) {
     }
     printf("STATIC-READ-SHAPE exact=yes insns=%u uops=%u handlers=%u\n",
            block.insn_count, block.uop_count, A64_STATIC_HANDLER_COUNT);
+
+    if (!a64_static_decode_read_hits_bytes_at(
+            thumb_read_bytes, (unsigned)(sizeof THUMB_READ_HITS /
+                                         sizeof THUMB_READ_HITS[0]),
+            true, 0xe200u, &block) ||
+        block.insn_count != sizeof THUMB_READ_HITS /
+                            sizeof THUMB_READ_HITS[0] ||
+        block.uop_count != 26u || block.start_pc != 0xe200u ||
+        block.exit_pc != 0xe214u || !block.touches_memory ||
+        !block.direct_reads) {
+        fprintf(stderr, "jitbench: product Thumb read-hit shape failed\n");
+        return false;
+    }
+    printf("STATIC-THUMB-READ-SHAPE exact=yes insns=%u uops=%u "
+           "handlers=%u\n", block.insn_count, block.uop_count,
+           A64_STATIC_HANDLER_COUNT);
 
     for (i = 0u; i < sizeof INVALID_READ_HITS /
                          sizeof INVALID_READ_HITS[0]; i++) {
@@ -666,6 +710,28 @@ static void seed_read_oracle(arm_cpu_t *cpu, const uint32_t *program,
     }
 }
 
+static void seed_thumb_read_oracle(arm_cpu_t *cpu, bool warm) {
+    seed_cpu_at(cpu, THUMB_READ_HITS,
+                (unsigned)(sizeof THUMB_READ_HITS /
+                           sizeof THUMB_READ_HITS[0]),
+                true, 0xe200u);
+    cpu->r[0] = DATA_BASE;
+    cpu->r[1] = 4u;
+    cpu->r[2] = DATA_BASE + 0x20u;
+    cpu->r[13] = STACK_BASE;
+    mem_w32(NULL, DATA_BASE + 4u, UINT32_C(0x1234ff80));
+    mem_w8(NULL, DATA_BASE + 0x22u, 0x5au);
+    mem_w32(NULL, DATA_BASE + 0x24u, UINT32_C(0x11223344));
+    mem_w16(NULL, DATA_BASE + 0x26u, UINT16_C(0x7abc));
+    mem_w32(NULL, STACK_BASE + 8u, UINT32_C(0xdeadbeef));
+    mem_w32(NULL, 0xe304u, UINT32_C(0xcafef00d));
+    if (warm) {
+        oracle_warm_dread(cpu, DATA_BASE);
+        oracle_warm_dread(cpu, STACK_BASE);
+        oracle_warm_dread(cpu, 0xe304u);
+    }
+}
+
 static bool validate_static_read_oracles(void) {
     a64_static_block_t block;
     arm_cpu_t reference, statik, before;
@@ -740,7 +806,50 @@ static bool validate_static_read_oracles(void) {
         return false;
     }
 
-    printf("STATIC-READ-ORACLE exact=yes hits=8 zero-prefix=yes "
+    seed_thumb_read_oracle(&reference, true);
+    statik = reference;
+    if (!a64_static_decode_read_hits_bytes_at(
+            &g_ram[0xe200u],
+            (unsigned)(sizeof THUMB_READ_HITS /
+                       sizeof THUMB_READ_HITS[0]),
+            true, 0xe200u, &block))
+        return false;
+    for (unsigned i = 0u; i < block.insn_count; i++) {
+        status = arm_step(&reference);
+        if (status != ARM_OK) break;
+    }
+    if (!a64_static_run_read_hits(&statik, &block, g_ram, sizeof g_ram,
+                                  &completed)) {
+        fprintf(stderr, "jitbench: product Thumb read-hit execution refused\n");
+        return false;
+    }
+    capture_state(&reference_state, &reference, status, JIT_EXIT_NEXT);
+    capture_state(&static_state, &statik, ARM_OK, JIT_EXIT_NEXT);
+    if (status != ARM_OK || completed != block.insn_count ||
+        !architectural_states_equal(&reference_state, &static_state) ||
+        reference.dread_hits != statik.dread_hits ||
+        reference.dread_misses != statik.dread_misses ||
+        statik.dread_hits != 10u || statik.dread_misses != 0u) {
+        fprintf(stderr, "jitbench: product Thumb read-hit oracle mismatch\n");
+        return false;
+    }
+
+    seed_cpu_at(&statik, THUMB_READ_ZERO_PREFIX, 1u, true, 0xd200u);
+    statik.r[0] = DATA_BASE;
+    before = statik;
+    if (!a64_static_decode_read_hits_bytes_at(&g_ram[0xd200u], 1u, true,
+                                              0xd200u, &block) ||
+        !a64_static_run_read_hits(&statik, &block, g_ram, sizeof g_ram,
+                                  &completed) ||
+        completed != 0u || memcmp(statik.r, before.r, sizeof statik.r) != 0 ||
+        statik.cpsr != before.cpsr || statik.cycles != before.cycles ||
+        statik.dread_hits != before.dread_hits ||
+        statik.dread_misses != before.dread_misses) {
+        fprintf(stderr, "jitbench: zero-prefix Thumb read miss changed state\n");
+        return false;
+    }
+
+    printf("STATIC-READ-ORACLE exact=yes hits=18 thumb=yes zero-prefix=yes "
            "partial-prefix=yes\n");
     return true;
 }
