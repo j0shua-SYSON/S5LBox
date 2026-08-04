@@ -3142,6 +3142,20 @@ static void test_signed_static_a64_soc_oracle(void) {
     CHECK(s5l8900_run(&reference, 20000u, &reference_status) == 20000u,
           "reference run stopped early with status=%d", (int)reference_status);
 
+    /* 20,000 is an exact multiple of the loop length, so fast is back at PC 0
+     * with a cached sixteen-instruction block and a warm load. A one-step
+     * caller budget must execute a signed one-instruction prefix rather than
+     * refusing the whole cache entry and falling back to arm_step(). */
+    {
+        uint64_t retired_before = s5l8900_static_a64_retired(&fast);
+        CHECK(s5l8900_run(&fast, 1u, &fast_status) == 1u,
+              "signed bounded-prefix run stopped early");
+        CHECK(s5l8900_run(&reference, 1u, &reference_status) == 1u,
+              "reference bounded-prefix run stopped early");
+        CHECK(s5l8900_static_a64_retired(&fast) == retired_before + 1u,
+              "one-instruction budget bypassed the signed bounded prefix");
+    }
+
     /* Keep the fetch pointer and decode cache live, but change the bytes they
      * alias. MOV r8,#1 remains inside the signed subset and reverses which
      * of the following EQ/NE operations executes. */

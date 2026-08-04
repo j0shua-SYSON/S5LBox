@@ -61,6 +61,17 @@ static bool entry_matches(const static_a64_entry_t *entry,
            memcmp(entry->raw, bytes, raw_len) == 0;
 }
 
+static bool decode_longest(const uint8_t *bytes, unsigned candidate_insns,
+                           bool thumb, uint32_t pc,
+                           a64_static_block_t *out) {
+    for (unsigned count = candidate_insns; count != 0u; count--) {
+        if (a64_static_decode_read_hits_bytes_at(bytes, count, thumb, pc,
+                                                 out))
+            return true;
+    }
+    return false;
+}
+
 static void decode_entry(static_a64_entry_t *entry, const arm_cpu_t *cpu,
                          const uint8_t *bytes, uint32_t pc, bool thumb,
                          bool priv, unsigned candidate_insns,
@@ -77,14 +88,9 @@ static void decode_entry(static_a64_entry_t *entry, const arm_cpu_t *cpu,
 
     /* Decode the longest exact prefix. Product loads carry a guarded DREAD hit;
      * stores and unsupported forms still shorten to an earlier exact prefix. */
-    for (unsigned count = candidate_insns; count != 0u; count--) {
-        a64_static_block_t block;
-        if (a64_static_decode_read_hits_bytes_at(bytes, count, thumb, pc,
-                                                 &block)) {
-            entry->block = block;
-            entry->supported = true;
-            return;
-        }
+    if (decode_longest(bytes, candidate_insns, thumb, pc, &entry->block)) {
+        entry->supported = true;
+        return;
     }
 }
 #endif
@@ -143,6 +149,8 @@ unsigned s5l8900_static_a64_try(s5l8900_t *m, unsigned max_insns) {
     bool priv;
     const uint8_t *bytes;
     static_a64_entry_t *entry;
+    a64_static_block_t bounded_block;
+    const a64_static_block_t *run_block;
     unsigned completed = 0u;
 
     if (!state || !state->enabled || !max_insns ||
@@ -180,10 +188,19 @@ unsigned s5l8900_static_a64_try(s5l8900_t *m, unsigned max_insns) {
     if (!entry_matches(entry, cpu, bytes, pc, thumb, priv, raw_len))
         decode_entry(entry, cpu, bytes, pc, thumb, priv, candidate_insns,
                      raw_len);
-    if (!entry->supported || entry->block.insn_count > max_insns)
-        return 0u;
+    if (!entry->supported) return 0u;
+    run_block = &entry->block;
+    if (run_block->insn_count > max_insns) {
+        /* The next exact device edge (or the caller's remaining budget) may
+         * be nearer than the cached longest block. Decode one bounded prefix
+         * instead of falling back instruction-by-instruction until the edge.
+         * This occurs at most once per edge and never mutates the cache. */
+        if (!decode_longest(bytes, max_insns, thumb, pc, &bounded_block))
+            return 0u;
+        run_block = &bounded_block;
+    }
 
-    if (!a64_static_run_read_hits(cpu, &entry->block, m->ram, m->ram_size,
+    if (!a64_static_run_read_hits(cpu, run_block, m->ram, m->ram_size,
                                   &completed)) {
         /* Fail closed, and make a transient contract mismatch re-decode rather
          * than becoming a permanent false hit. Guest state is unchanged when
