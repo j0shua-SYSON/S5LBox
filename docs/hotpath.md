@@ -5612,3 +5612,64 @@ out of the normal iOS app, and the phone therefore remains at the reported 0--4 
 next tranche must address a broad remaining family and demonstrate both exact Apple-arm64
 semantics and actual native throughput; merely adding another hot encoding is no longer
 enough.
+
+### r506-r508: product-entry timing rejects coverage-only and removes repeated validation
+
+r506 times the public product runner once per already-decoded block instead of repeating a
+single native call internally. That distinction is load-bearing: the real engine enters the
+runner once for every modeled signed call, and r505 averages only 2.365 guest instructions per
+call. The benchmark includes native entry/exit, context construction and the same public block
+validation the product used. It deliberately excludes SoC cache lookup, decode misses, timer and
+IRQ gates, device ticks, framebuffer publication and UIKit, so it remains a ceiling rather than
+phone or emulator FPS.
+
+The fully validated wrapper does not approach the 12.970x covered-region speedup required by the
+r505 residency model. Across the two long Apple-arm64 measurements its speedup is below 1x for a
+one-instruction block, about 1.07x for length two, 1.43--1.71x for length three, 1.71--1.77x for
+length four, 2.01--2.11x for length eight and 1.98--2.12x for length sixteen. Even the most
+favourable synthetic row reaches only **2.121x**. Coverage alone therefore cannot rescue the
+existing entry architecture; that is a measured rejection of the previous plan, not a tuning
+opinion.
+
+r507 isolates the cost by adding a cache-owned decoded-block contract. It shares the identical
+native execution and context path, but does not rescan every uop on every hot entry. The contract
+is deliberately narrow: only an owned, unmodified result of the exact decoder may use it, and it
+still checks dynamic CPU state, PC/T state, RAM shape, block bounds and the final exit record.
+The benchmark compares interpreter, fully validated and decoded-contract architectural state on
+every repetition. Long-run medians were:
+
+| block length | macOS 14 validated | macOS 14 decoded | macOS 15 validated | macOS 15 decoded |
+|---:|---:|---:|---:|---:|
+| 1 | 0.635x | 0.878x | 0.564x | 0.831x |
+| 2 | 1.077x | 1.981x | 1.073x | 2.025x |
+| 3 | 1.432x | 3.085x | 1.708x | 3.656x |
+| 4 | 1.706x | 4.345x | 1.766x | 4.801x |
+| 8 | 2.009x | 8.958x | 2.114x | 8.636x |
+| 16 | 1.980x | 15.361x | 2.121x | 18.265x |
+
+This is a substantial and internally consistent result: repeated validation was a real
+bottleneck, and eliminating it increasingly matters as blocks grow. It also makes the remaining
+problem more explicit. One-instruction entries are still slower than interpretation; two are
+only about 2x; and the real modeled stream is dominated by short calls. It would be dishonest to
+apply the length-sixteen number to a 2.365-instruction mean or to claim that this curve predicts
+an FPS value.
+
+r508 switches the default-off whole-SoC engine to that decoded contract. The cache still compares
+the live fetch host, PC, translation generation, privilege, instruction state and raw bytes before
+calling it, preserving self-modifying-code invalidation. Exact commit
+`a959e2ba5b17741ebfc684bf0e32b2a7fa2da15a` passes core run `30881750130` and iOS run
+`30881750150`. Both Apple runners report
+`STATIC-A64-SOC-ORACLE exact=yes retired=24095 smc=yes decoded=yes`; the signed and interpreter
+machines serialize byte-identically after timer crossings, a bounded one-instruction prefix and
+a live code mutation. Strict warnings, sanitizers and every platform matrix job are green. The
+preceding measurement commits `c53fbdeabdfba3022546ee6263d9c06e0337263e` and
+`3f1bd9699da793f65a68fdc9e00080f3cf5e5c46` also passed their exact-SHA core and iOS runs.
+
+Brutal status: **this is a proven engine optimization, but still not a measured emulator or
+iPhone FPS improvement**. The normal iOS app still builds the engine out, the only physical-phone
+report remains 0--4 FPS, and there has been no same-binary restored A/B or cold boot. The decoded
+ceiling is nowhere near 12.970x at the short lengths the trace currently forms. The next test must
+measure the complete `s5l8900_run()` path at lengths 1, 2, 3, 4, 8 and 16, including the real
+cache/raw-byte witness, entry gates and device-time boundaries, then combine that curve with an
+exact per-length replay histogram. That evidence will decide whether cache/gate work and block
+chaining can close the gap or whether broader Thumb/VFP coverage must first create longer runs.
