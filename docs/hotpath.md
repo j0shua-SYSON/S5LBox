@@ -5817,3 +5817,103 @@ fallthrough merge shows why its accounting and tests must be explicit. The next 
 preserve the caller/timer budget, target fetch translation, cache/raw-byte witness, privilege and
 generation keys, interrupt gates and exact interpreter state; a faster chain that skips any of
 those boundaries is not an optimization this project will accept.
+
+### r513: bounded branch chaining removes outer calls but exposes the native-entry wall
+
+r513 implements the justified branch-to-target chain in the real product engine. One
+`s5l8900_static_a64_try()` invocation may now execute several decoded blocks, but its total remains
+bounded to sixteen guest instructions and to the nearer caller or device-time edge. Every new head
+rechecks CPU/interrupt state, privilege, fetch translation generation, the 1 KiB fetch block, the
+direct-mapped cache key and the complete raw-byte witness. A target outside the currently proved
+fetch block returns to `arm_step()`, which still owns translation, MMU faults and MMIO. No cached
+host pointer is followed speculatively and no runtime code is generated.
+
+The first pushed workflow for exact implementation commit
+`694d88aaedb0bfff9a979b681962b5eb62b739e9` failed both Apple native jobs even though all 60 tests,
+5,892 SoC assertions and the new branch snapshot comparison passed. The failed check expected a
+synthetic length-sixteen loop to report zero chains. That expectation was wrong: once a timer edge
+ends a call partway through the loop, the next sixteen-instruction call can legitimately execute
+the tail, branch, and chain into the head while still retiring exactly sixteen total instructions.
+This was a test-design error, not an engine-semantic failure, and it was not hidden by rerunning.
+
+Commit `6e390f090a74d7c94142288630dbc6b0c2bdc19e` replaces that proxy with a direct native caller-bound
+oracle. After one literal fetch warm-up, a one-step public call must retire one signed self-branch
+and chain zero blocks; a sixteen-step call must retire sixteen and chain exactly fifteen. Each end
+state must serialize byte-identically to a literal machine. Both macOS-14 and macOS-15 report:
+
+```
+STATIC-A64-BRANCH-SOC-ORACLE exact=yes retired=19999 chains=11801 conditional=yes link=yes taken=yes fallthrough=yes
+STATIC-A64-CHAIN-BOUND-ORACLE exact=yes one-retired=1 one-chains=0 sixteen-retired=16 sixteen-chains=15
+```
+
+Exact-SHA core run `30887778520` is fully green across both Apple native jobs, Linux, Windows,
+ASan/UBSan, warnings-as-errors and the default-off rebuild. Exact-SHA iOS run `30887778528` built
+and packaged the ad-hoc-signed app. The earlier implementation SHA's iOS run `30887357924` was also
+green; its core run `30887357906` remains correctly red because of the invalid zero-chain workflow
+assertion above.
+
+The independently relinked `work/r513-branch-chain-10m` replay restored the identical r445 7.100 B
+checkpoint and stopped at exactly 7.110 B with status OK in 32.7 host seconds. Stderr was empty,
+external-media failures were zero and CLCD remained at 1,590 frames. The 466,825,216-byte work
+image and 460,815-byte PPM retained the exact SHA-256 values
+`8A59C388C481165F460984926AA5FFB1B72A0E9030216CD0038DE9B3264B79FE` and
+`1EF63FFE3EEFD976416E17120A36BA074BF295EA0955D716E2D345FCC5EA0A9E`.
+
+Coverage correctly does not change: 7,532,985/9,999,489 fetched instructions decode and 6,956,087
+(69.564%) are modeled as signed retirement. What changes is call shape:
+
+| length | modeled calls | modeled instructions | modeled share |
+|---:|---:|---:|---:|
+| 1 | 574,613 | 574,613 | 8.261% |
+| 2 | 388,832 | 777,664 | 11.180% |
+| 3 | 241,130 | 723,390 | 10.399% |
+| 4 | 158,206 | 632,824 | 9.097% |
+| 5 | 95,554 | 477,770 | 6.868% |
+| 6 | 82,579 | 495,474 | 7.123% |
+| 7 | 53,335 | 373,345 | 5.367% |
+| 8 | 42,485 | 339,880 | 4.886% |
+| 9 | 28,197 | 253,773 | 3.648% |
+| 10 | 24,186 | 241,860 | 3.477% |
+| 11 | 18,108 | 199,188 | 2.864% |
+| 12 | 14,156 | 169,872 | 2.442% |
+| 13 | 16,755 | 217,815 | 3.131% |
+| 14 | 12,654 | 177,156 | 2.547% |
+| 15 | 8,857 | 132,855 | 1.910% |
+| 16 | 73,038 | 1,168,608 | 16.800% |
+
+All 1,832,685 calls and all 6,956,087 modeled instructions close exactly. Relative to r512,
+outer calls fall by 796,126 (**30.285%**) and mean length rises from 2.646 to **3.796**. Modeled
+work in length-one/two calls falls from 32.441% to **19.441%**; length nine-through-sixteen rises
+from 8.534% to **36.819%**. The model observed 841,386 successfully chained heads. Consequently,
+the native runner would still be entered 2,674,071 times: **1.459 blocks per outer call** and
+2.601 instructions per native block. That is 45,260 (**1.722%**) more native block entries than
+r512 even while outer machine calls fall sharply. Stop accounting remains exact at
+73,038/101,007/73/0/4,345/201,722/1,452,500/0 for
+cap/timer/caller/branch/flow/fetch-block/ineligible/observer.
+
+The long three-repetition Apple SoC curves explain why the native-block distinction is
+load-bearing. Selected pre-chain (`30885962821`) versus r513 speedups are:
+
+| synthetic block length | macOS 14 pre / chained | macOS 15 pre / chained |
+|---:|---:|---:|
+| 1 | 0.492x / **0.608x** | 0.637x / **0.705x** |
+| 2 | 1.104x / **1.270x** | **1.404x** / 1.328x |
+| 3 | **1.576x** / 1.536x | **1.691x** / 1.413x |
+| 4 | **2.066x** / 1.890x | 2.124x / **2.226x** |
+| 8 | **3.508x** / 2.234x | **3.346x** / 2.693x |
+| 16 | **4.218x** / 2.080x | **4.484x** / 2.264x |
+
+The one-instruction case improves on both hosts because one outer call can amortize device and
+machine-loop work across many blocks. Long synthetic loops regress because a timer-created
+mid-loop phase persists: repeated tail-plus-head chains pay the full generated native
+prologue/epilogue twice per outer call instead of returning at the branch and realigning. Host
+rates also drift between workflow runs, so these are architecture diagnostics, not a clean A/B.
+
+Brutal status: **r513 is exact and materially reduces modeled outer dispatch, but it still does
+not prove a firmware, emulator or iPhone FPS gain**. Applying the old call-length curve to the new
+histogram would be false because equal-length calls can contain different numbers of native
+blocks. The normal iOS app still compiles the engine out and the only phone observation remains
+0--4 FPS. The next architectural measurement must retain both instructions and internal block
+count, and the next serious prototype must keep guest registers/native context live across
+validated block heads. More isolated opcode additions or a flattering length-only weighting
+would be whack-a-mole, not a credible path to 30 FPS.
