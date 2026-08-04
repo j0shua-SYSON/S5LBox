@@ -1793,8 +1793,8 @@ static bool run_static(const bench_case_t *bc,
 
 static bool run_product_entry(const bench_case_t *bc,
                               const a64_static_block_t *block,
-                              uint64_t blocks, final_state_t *out,
-                              double *seconds) {
+                              uint64_t blocks, bool decoded,
+                              final_state_t *out, double *seconds) {
     arm_cpu_t cpu;
     uint64_t i;
     unsigned completed = 0u;
@@ -1804,8 +1804,12 @@ static bool run_product_entry(const bench_case_t *bc,
     start = now_seconds();
     for (i = 0u; i < blocks; i++) {
         completed = 0u;
-        if (!a64_static_run_read_hits(&cpu, block, g_ram, sizeof g_ram,
-                                      &completed) ||
+        bool ran = decoded
+                       ? a64_static_run_read_hits_decoded(
+                             &cpu, block, g_ram, sizeof g_ram, &completed)
+                       : a64_static_run_read_hits(
+                             &cpu, block, g_ram, sizeof g_ram, &completed);
+        if (!ran ||
             completed != block->insn_count)
             break;
     }
@@ -1822,16 +1826,18 @@ static int cmp_double(const void *lhs, const void *rhs) {
 
 /* Measure the wrapper the SoC actually calls once per cached product block.
  * The program is already decoded and every access hits one cache entry, so
- * this includes public-contract validation, context construction and native
- * entry/exit but deliberately excludes the SoC cache lookup, timer/IRQ gates
- * and decode misses. It is therefore still a ceiling, just a much less
- * flattering one than a single native call repeating 16-instruction blocks. */
+ * this compares full public-contract validation with the cache-owned decoded
+ * contract. Both include context construction and native entry/exit, and both
+ * deliberately exclude the SoC cache lookup, timer/IRQ gates and decode
+ * misses. They are still ceilings, just much less flattering ones than a
+ * single native call repeating 16-instruction blocks. */
 static bool bench_product_entry(unsigned length, uint64_t requested,
                                 unsigned reps) {
     uint32_t program[A64_STATIC_MAX_INSNS];
     bench_case_t bc = {"a32-product-entry", program, length, false, false};
     a64_static_block_t block;
-    double *interp_rates = NULL, *product_rates = NULL;
+    double *interp_rates = NULL, *validated_rates = NULL;
+    double *decoded_rates = NULL;
     uint64_t blocks, total;
     bool ok = false;
 
@@ -1844,57 +1850,78 @@ static bool bench_product_entry(unsigned length, uint64_t requested,
     blocks = (requested + length - 1u) / length;
     total = blocks * length;
     interp_rates = (double *)calloc(reps, sizeof *interp_rates);
-    product_rates = (double *)calloc(reps, sizeof *product_rates);
-    if (!interp_rates || !product_rates) {
+    validated_rates = (double *)calloc(reps, sizeof *validated_rates);
+    decoded_rates = (double *)calloc(reps, sizeof *decoded_rates);
+    if (!interp_rates || !validated_rates || !decoded_rates) {
         fprintf(stderr, "jitbench: out of memory\n");
         goto done;
     }
 
     for (unsigned rep = 0u; rep < reps; rep++) {
-        final_state_t interp, product;
-        double interp_s = 0.0, product_s = 0.0;
+        final_state_t interp, validated, decoded;
+        double interp_s = 0.0, validated_s = 0.0, decoded_s = 0.0;
         bool ran;
         const char *order;
 
-        if ((rep & 1u) == 0u) {
-            order = "interp-product";
+        if (rep % 3u == 0u) {
+            order = "interp-validated-decoded";
             ran = run_interpreter(&bc, total, &interp, &interp_s) &&
-                  run_product_entry(&bc, &block, blocks, &product,
-                                    &product_s);
-        } else {
-            order = "product-interp";
-            ran = run_product_entry(&bc, &block, blocks, &product,
-                                    &product_s) &&
+                  run_product_entry(&bc, &block, blocks, false, &validated,
+                                    &validated_s) &&
+                  run_product_entry(&bc, &block, blocks, true, &decoded,
+                                    &decoded_s);
+        } else if (rep % 3u == 1u) {
+            order = "validated-decoded-interp";
+            ran = run_product_entry(&bc, &block, blocks, false, &validated,
+                                    &validated_s) &&
+                  run_product_entry(&bc, &block, blocks, true, &decoded,
+                                    &decoded_s) &&
                   run_interpreter(&bc, total, &interp, &interp_s);
+        } else {
+            order = "decoded-interp-validated";
+            ran = run_product_entry(&bc, &block, blocks, true, &decoded,
+                                    &decoded_s) &&
+                  run_interpreter(&bc, total, &interp, &interp_s) &&
+                  run_product_entry(&bc, &block, blocks, false, &validated,
+                                    &validated_s);
         }
-        if (!ran || !architectural_states_equal(&interp, &product)) {
+        if (!ran || !architectural_states_equal(&interp, &validated) ||
+            !architectural_states_equal(&interp, &decoded)) {
             fprintf(stderr,
                     "jitbench: product-entry length %u repetition %u failed\n",
                     length, rep + 1u);
             goto done;
         }
         interp_rates[rep] = (double)total / interp_s / 1.0e6;
-        product_rates[rep] = (double)total / product_s / 1.0e6;
+        validated_rates[rep] = (double)total / validated_s / 1.0e6;
+        decoded_rates[rep] = (double)total / decoded_s / 1.0e6;
         printf("PRODUCT-ENTRY-SAMPLE length=%u rep=%u order=%s "
-               "interpreter=%.3f signed-product=%.3f Minsn/s\n",
+               "interpreter=%.3f validated=%.3f decoded=%.3f Minsn/s\n",
                length, rep + 1u, order, interp_rates[rep],
-               product_rates[rep]);
+               validated_rates[rep], decoded_rates[rep]);
     }
 
     qsort(interp_rates, reps, sizeof *interp_rates, cmp_double);
-    qsort(product_rates, reps, sizeof *product_rates, cmp_double);
+    qsort(validated_rates, reps, sizeof *validated_rates, cmp_double);
+    qsort(decoded_rates, reps, sizeof *decoded_rates, cmp_double);
     printf("PRODUCT-ENTRY-CEILING length=%u uops=%u guest-insns=%" PRIu64
-           " reps=%u predecoded=yes wrapper-validation=yes cache-lookup=no "
-           "interpreter-median=%.3f signed-product-median=%.3f "
-           "speedup=%.3fx\n",
+           " reps=%u predecoded=yes validated-wrapper=yes "
+           "decoded-contract=yes cache-lookup=no interpreter-median=%.3f "
+           "validated-median=%.3f decoded-median=%.3f "
+           "validated-speedup=%.3fx decoded-speedup=%.3fx "
+           "decoded-over-validated=%.3fx\n",
            length, block.uop_count, total, reps,
-           interp_rates[reps / 2u], product_rates[reps / 2u],
-           product_rates[reps / 2u] / interp_rates[reps / 2u]);
+           interp_rates[reps / 2u], validated_rates[reps / 2u],
+           decoded_rates[reps / 2u],
+           validated_rates[reps / 2u] / interp_rates[reps / 2u],
+           decoded_rates[reps / 2u] / interp_rates[reps / 2u],
+           decoded_rates[reps / 2u] / validated_rates[reps / 2u]);
     ok = true;
 
 done:
     free(interp_rates);
-    free(product_rates);
+    free(validated_rates);
+    free(decoded_rates);
     return ok;
 }
 
@@ -2102,9 +2129,9 @@ int main(int argc, char **argv) {
     printf("NOT PHONE FPS: four synthetic timed blocks; static arm has flat "
            "RAM and no MMU/fault/tick/IRQ/MMIO/cache/framebuffer/UI "
            "path or real block lookup.\n");
-    printf("Product-entry rows use predecoded hot blocks and include the "
-           "public wrapper validation/context/native call, but still exclude "
-           "SoC cache lookup and device gates.\n");
+    printf("Product-entry rows use predecoded hot blocks and compare full "
+           "wrapper validation with a cache-owned decoded contract; both "
+           "still exclude SoC cache lookup and device gates.\n");
     if (!validate_static_shapes()) return 1;
     for (i = 0u; i < sizeof CASES / sizeof CASES[0]; i++) {
         if (!validate_case_translation(&CASES[i])) return 1;

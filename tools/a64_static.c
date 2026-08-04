@@ -1123,14 +1123,10 @@ bool a64_static_run(arm_cpu_t *cpu, const a64_static_block_t *block,
 #endif
 }
 
-bool a64_static_run_read_hits(arm_cpu_t *cpu,
+static bool execute_read_hits(arm_cpu_t *cpu,
                               const a64_static_block_t *block,
                               uint8_t *ram, size_t ram_size,
                               unsigned *completed) {
-    if (!completed ||
-        !validate_run(cpu, block, 1u, ram, ram_size,
-                      A64S_RUN_READ_HITS))
-        return false;
 #if defined(S5LBOX_STATIC_A64_NATIVE)
     a64_static_read_context_t context = {
         cpu->dread,
@@ -1155,6 +1151,36 @@ bool a64_static_run_read_hits(arm_cpu_t *cpu,
     (void)block;
     (void)ram;
     (void)ram_size;
+    (void)completed;
     return false;
 #endif
+}
+
+bool a64_static_run_read_hits(arm_cpu_t *cpu,
+                              const a64_static_block_t *block,
+                              uint8_t *ram, size_t ram_size,
+                              unsigned *completed) {
+    if (!completed ||
+        !validate_run(cpu, block, 1u, ram, ram_size,
+                      A64S_RUN_READ_HITS))
+        return false;
+    return execute_read_hits(cpu, block, ram, ram_size, completed);
+}
+
+bool a64_static_run_read_hits_decoded(arm_cpu_t *cpu,
+                                      const a64_static_block_t *block,
+                                      uint8_t *ram, size_t ram_size,
+                                      unsigned *completed) {
+    if (!cpu || !block || !ram || !completed || !block->insn_count ||
+        block->insn_count > A64_STATIC_MAX_INSNS || !block->uop_count ||
+        block->uop_count > A64_STATIC_MAX_UOPS ||
+        block->uops[block->uop_count - 1u].handler != A64S_END ||
+        block->uops[block->uop_count - 1u].immediate != block->exit_pc ||
+        cpu->r[15] != block->start_pc ||
+        ((cpu->cpsr & ARM_CPSR_T) != 0u) != block->thumb ||
+        (block->touches_memory && !block->direct_reads) || !ram_size ||
+        (ram_size & (ram_size - 1u)) != 0u ||
+        ram_size - 1u > UINT32_MAX)
+        return false;
+    return execute_read_hits(cpu, block, ram, ram_size, completed);
 }

@@ -107,4 +107,14 @@ bool a64_static_run_read_hits(arm_cpu_t *cpu,
                               uint8_t *ram, size_t ram_size,
                               unsigned *completed);
 
+/* Execute an unmodified block returned by
+ * a64_static_decode_read_hits_bytes_at(). This retains the dynamic CPU/PC,
+ * RAM and final-record checks but skips the full per-uop structural rescan;
+ * callers must own the decoded block and must not mutate it. It exists so a
+ * decode cache can validate structure once rather than on every hot hit. */
+bool a64_static_run_read_hits_decoded(arm_cpu_t *cpu,
+                                      const a64_static_block_t *block,
+                                      uint8_t *ram, size_t ram_size,
+                                      unsigned *completed);
+
 #endif /* S5LBOX_A64_STATIC_H */
