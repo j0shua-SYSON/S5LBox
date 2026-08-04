@@ -63,7 +63,11 @@ enum {
     A64S_VFP_DIRECT_READ64 = A64S_VFP_DIRECT_READ32 + 1u,
     A64S_BRANCH_COND = A64S_VFP_DIRECT_READ64 + 1u,
     A64S_BRANCH_LINK = A64S_BRANCH_COND + 14u,
-    A64S_HANDLER_COUNT = A64S_BRANCH_LINK + 15u
+    A64S_ARM_BX = A64S_BRANCH_LINK + 15u,
+    A64S_ARM_BLX = A64S_ARM_BX + 16u,
+    A64S_THUMB_BX = A64S_ARM_BLX + 15u,
+    A64S_THUMB_BLX = A64S_THUMB_BX + 16u,
+    A64S_HANDLER_COUNT = A64S_THUMB_BLX + 15u
 };
 
 enum {
@@ -252,6 +256,22 @@ static uint32_t branch_link(unsigned condition) {
     return A64S_BRANCH_LINK + condition;
 }
 
+static uint32_t arm_bx(unsigned rm) {
+    return A64S_ARM_BX + rm;
+}
+
+static uint32_t arm_blx(unsigned rm) {
+    return A64S_ARM_BLX + rm;
+}
+
+static uint32_t thumb_bx(unsigned rm) {
+    return A64S_THUMB_BX + rm;
+}
+
+static uint32_t thumb_blx(unsigned rm) {
+    return A64S_THUMB_BLX + rm;
+}
+
 static bool handler_is_condition(uint32_t handler) {
     return handler >= A64S_COND && handler < A64S_DP_IMM;
 }
@@ -308,9 +328,14 @@ static bool handler_is_terminal_branch(uint32_t handler) {
     return handler >= A64S_BRANCH_COND && handler < A64S_HANDLER_COUNT;
 }
 
+static bool handler_is_indirect_branch(uint32_t handler) {
+    return handler >= A64S_ARM_BX && handler < A64S_HANDLER_COUNT;
+}
+
 static bool handler_is_runtime_guarded(uint32_t handler) {
     return handler_is_direct_read(handler) ||
-           handler_is_direct_write(handler) || handler_is_vfp(handler);
+           handler_is_direct_write(handler) || handler_is_vfp(handler) ||
+           handler_is_indirect_branch(handler);
 }
 
 static bool arm_dp_encoding(uint32_t insn) {
@@ -548,6 +573,17 @@ static bool decode_arm(uint32_t insn, unsigned index, unsigned insns,
         count++;
     }
 
+    if ((insn & UINT32_C(0x0ffffff0)) == UINT32_C(0x012fff10) ||
+        (insn & UINT32_C(0x0ffffff0)) == UINT32_C(0x012fff30)) {
+        unsigned rm = insn & 15u;
+        bool link = (insn & UINT32_C(0x20)) != 0u;
+        if (index + 1u != insns || (link && rm == 15u)) return false;
+        op->handler = link ? arm_blx(rm) : arm_bx(rm);
+        if (guard) guard->metadata = 1u;
+        *written = count + 1u;
+        return true;
+    }
+
     if (read_hits && decode_vfp_transfer(
             insn, pc + index * 4u + 8u, op, written)) {
         if (guard) guard->metadata = *written;
@@ -777,6 +813,15 @@ static bool decode_thumb(uint16_t insn, unsigned index, unsigned insns,
         if (index + 1u != insns) return false;
         out->handler = A64S_END;
         out->immediate = target;
+        *written = 1u;
+        return true;
+    }
+
+    if ((insn & UINT16_C(0xff00)) == UINT16_C(0x4700)) {
+        unsigned rm = (insn >> 3) & 15u;
+        bool link = (insn & (1u << 7)) != 0u;
+        if (index + 1u != insns || (link && rm == 15u)) return false;
+        out->handler = link ? thumb_blx(rm) : thumb_bx(rm);
         *written = 1u;
         return true;
     }
@@ -1267,6 +1312,24 @@ static unsigned semantic_span(const a64_static_block_t *block, unsigned i,
     return 1u;
 }
 
+static bool terminal_branch_shape_valid(const a64_static_block_t *block,
+                                        uint32_t handler,
+                                        const a64_static_uop_t *op) {
+    uint32_t width;
+    uint32_t instruction_pc;
+    if (!block || !op || !block->insn_count) return false;
+    width = block->thumb ? 2u : 4u;
+    instruction_pc = block->start_pc + (block->insn_count - 1u) * width;
+    if (handler_is_indirect_branch(handler)) {
+        return op->immediate == 0u && op->pc_value == instruction_pc &&
+               op->metadata == (block->insn_count << 8 | 1u) &&
+               block->exit_pc == block->start_pc + block->insn_count * width;
+    }
+    return !block->thumb && (op->immediate & 3u) == 0u &&
+           op->pc_value == block->exit_pc && op->metadata == 0u &&
+           block->exit_pc == block->start_pc + block->insn_count * 4u;
+}
+
 static bool validate_run(const arm_cpu_t *cpu,
                          const a64_static_block_t *block, uint64_t blocks,
                          const uint8_t *ram, size_t ram_size,
@@ -1332,11 +1395,9 @@ static bool validate_run(const arm_cpu_t *cpu,
         }
         if (handler_is_vfp(handler)) saw_vfp = true;
         if (handler_is_terminal_branch(handler)) {
-            if (saw_dynamic_exit || j + 1u != end || block->thumb ||
-                (block->uops[j].immediate & 3u) != 0u ||
-                block->uops[j].pc_value != block->exit_pc ||
-                block->uops[j].metadata != 0u ||
-                block->exit_pc != block->start_pc + block->insn_count * 4u)
+            if (saw_dynamic_exit || j + 1u != end ||
+                !terminal_branch_shape_valid(block, handler,
+                                             &block->uops[j]))
                 return false;
             saw_dynamic_exit = true;
         }
@@ -1478,11 +1539,9 @@ static bool validate_decoded_hits_at(const a64_static_block_t *block,
             block->uops[block->uop_count - 2u].handler);
     if (block->dynamic_exit != terminal_dynamic ||
         (terminal_dynamic &&
-         (block->thumb ||
-          (block->uops[block->uop_count - 2u].immediate & 3u) != 0u ||
-          block->uops[block->uop_count - 2u].pc_value != block->exit_pc ||
-          block->uops[block->uop_count - 2u].metadata != 0u ||
-           block->exit_pc != block->start_pc + block->insn_count * 4u)))
+         !terminal_branch_shape_valid(
+             block, block->uops[block->uop_count - 2u].handler,
+             &block->uops[block->uop_count - 2u])))
         return false;
     return true;
 }

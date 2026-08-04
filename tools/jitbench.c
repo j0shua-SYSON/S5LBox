@@ -4,11 +4,11 @@
  * This is deliberately NOT a product-performance claim and not a JIT
  * dispatcher. It translates one small synthetic block once, then compares
  * repeated interpreter execution with both that already-built block and a
- * firmware-independent static-threaded proof. The proof's 26,198 generic
+ * firmware-independent static-threaded proof. The proof's 26,260 generic
  * ISA/register handlers are compiled and signed with the executable; runtime
  * decoding creates data records only. The table includes product-only guarded
  * read/write-cache, exact VFP register/system transfer and terminal A32
- * immediate branch/link paths.
+ * immediate plus A32/Thumb register-indirect branch/link paths.
  *
  * The answer is only a feasibility bound. The native and direct product-entry
  * rows have no device tick, MMIO, interrupt sampling, cache lookup,
@@ -667,7 +667,15 @@ static bool validate_static_shapes(void) {
     static const uint32_t MID_BLOCK_LINK[] = {
         0xeb000000u, 0xe2800001u,
     };
+    static const uint32_t MID_BLOCK_INDIRECT[] = {
+        0xe12fff10u, 0xe2800001u,
+    };
+    static const uint16_t MID_BLOCK_THUMB_INDIRECT[] = {
+        UINT16_C(0x4700), UINT16_C(0x3001),
+    };
     static const uint32_t BLX_IMMEDIATE[] = { 0xfa000000u };
+    static const uint32_t BLX_PC[] = { UINT32_C(0xe12fff3f) };
+    static const uint16_t THUMB_BLX_PC[] = { UINT16_C(0x47f8) };
     static const uint32_t PC_WRITE[] = { 0xe3a0f000u };
     static const uint32_t MULTIPLY[] = { 0xe0000090u };
     static const uint32_t CONDITIONAL_DP[] = {
@@ -721,7 +729,7 @@ static bool validate_static_shapes(void) {
     static const uint16_t INVALID_PRODUCT_THUMB[] = {
         0x4487u, /* ADD pc,r0 */
         0x4687u, /* MOV pc,r0 */
-        0x4700u, /* BX r0 */
+        0x47f8u, /* BLX pc */
         0x6000u, /* STR r0,[r0] */
         0x8000u, /* STRH r0,[r0] */
         0x9000u, /* STR r0,[sp] */
@@ -761,7 +769,9 @@ static bool validate_static_shapes(void) {
     uint8_t vfp_widen_bytes[sizeof VFP_WIDEN_OPS];
     uint8_t vfp_read_bytes[sizeof VFP_READ_HITS];
     uint32_t branch_handlers[29];
+    uint32_t indirect_handlers[62];
     unsigned branch_handler_count = 0u;
+    unsigned indirect_handler_count = 0u;
     unsigned i;
 
     for (i = 0u; i < sizeof A32_READ_HITS / sizeof A32_READ_HITS[0]; i++) {
@@ -900,6 +910,139 @@ static bool validate_static_shapes(void) {
     }
     printf("STATIC-BRANCH-SHAPE exact=yes conditional=14 link=15 "
            "handlers=29 forward=yes backward=yes\n");
+
+    for (unsigned link = 0u; link < 2u; link++) {
+        const unsigned registers = link ? 15u : 16u;
+        for (unsigned condition = 0u; condition < 15u; condition++) {
+            for (unsigned rm = 0u; rm < registers; rm++) {
+                const uint32_t pc = UINT32_C(0x1180);
+                const uint32_t insn = (condition << 28) |
+                    UINT32_C(0x012fff10) | (link << 5) | rm;
+                const unsigned expected_uops = condition < 14u ? 3u : 2u;
+                uint8_t bytes[4] = {
+                    (uint8_t)insn, (uint8_t)(insn >> 8),
+                    (uint8_t)(insn >> 16), (uint8_t)(insn >> 24)
+                };
+                a64_static_block_t product_block;
+                const a64_static_uop_t *branch;
+
+                if (!a64_static_decode_at(&insn, 1u, false, pc, &block) ||
+                    !a64_static_decode_read_hits_bytes_at(
+                        bytes, 1u, false, pc, &product_block) ||
+                    memcmp(&block, &product_block, sizeof block) != 0 ||
+                    block.insn_count != 1u ||
+                    block.uop_count != expected_uops ||
+                    block.start_pc != pc || block.exit_pc != pc + 4u ||
+                    block.thumb || !block.dynamic_exit ||
+                    block.touches_memory || block.direct_reads ||
+                    block.direct_writes || !block.runtime_guards || block.vfp ||
+                    block.uops[block.uop_count - 1u].handler != 0u ||
+                    block.uops[block.uop_count - 1u].immediate != pc + 4u ||
+                    (condition < 14u &&
+                     (block.uops[0].handler == 0u ||
+                      block.uops[0].metadata != 1u))) {
+                    fprintf(stderr,
+                            "jitbench: A32 indirect shape failed "
+                            "link=%u cond=%u rm=%u\n",
+                            link, condition, rm);
+                    return false;
+                }
+                branch = &block.uops[block.uop_count - 2u];
+                if (branch->handler == 0u || branch->immediate != 0u ||
+                    branch->pc_value != pc ||
+                    branch->metadata != UINT32_C(0x101)) {
+                    fprintf(stderr,
+                            "jitbench: A32 indirect record failed "
+                            "link=%u cond=%u rm=%u\n",
+                            link, condition, rm);
+                    return false;
+                }
+                if (condition == 14u) {
+                    for (i = 0u; i < branch_handler_count; i++) {
+                        if (branch_handlers[i] == branch->handler) {
+                            fprintf(stderr,
+                                    "jitbench: indirect handler collided with "
+                                    "immediate branch link=%u rm=%u\n",
+                                    link, rm);
+                            return false;
+                        }
+                    }
+                    for (i = 0u; i < indirect_handler_count; i++) {
+                        if (indirect_handlers[i] == branch->handler) {
+                            fprintf(stderr,
+                                    "jitbench: duplicate A32 indirect handler "
+                                    "link=%u rm=%u\n", link, rm);
+                            return false;
+                        }
+                    }
+                    indirect_handlers[indirect_handler_count++] =
+                        branch->handler;
+                }
+            }
+        }
+    }
+
+    for (unsigned link = 0u; link < 2u; link++) {
+        const unsigned registers = link ? 15u : 16u;
+        for (unsigned rm = 0u; rm < registers; rm++) {
+            const uint32_t pc = UINT32_C(0x11c0);
+            const uint16_t insn = (uint16_t)(UINT16_C(0x4700) |
+                                            (link << 7) | (rm << 3));
+            uint8_t bytes[2] = {(uint8_t)insn, (uint8_t)(insn >> 8)};
+            a64_static_block_t product_block;
+            const a64_static_uop_t *branch;
+
+            if (!a64_static_decode_at(&insn, 1u, true, pc, &block) ||
+                !a64_static_decode_read_hits_bytes_at(
+                    bytes, 1u, true, pc, &product_block) ||
+                memcmp(&block, &product_block, sizeof block) != 0 ||
+                block.insn_count != 1u || block.uop_count != 2u ||
+                block.start_pc != pc || block.exit_pc != pc + 2u ||
+                !block.thumb || !block.dynamic_exit ||
+                block.touches_memory || block.direct_reads ||
+                block.direct_writes || !block.runtime_guards || block.vfp ||
+                block.uops[1].handler != 0u ||
+                block.uops[1].immediate != pc + 2u) {
+                fprintf(stderr,
+                        "jitbench: Thumb indirect shape failed "
+                        "link=%u rm=%u\n", link, rm);
+                return false;
+            }
+            branch = &block.uops[0];
+            if (branch->handler == 0u || branch->immediate != 0u ||
+                branch->pc_value != pc ||
+                branch->metadata != UINT32_C(0x101)) {
+                fprintf(stderr,
+                        "jitbench: Thumb indirect record failed "
+                        "link=%u rm=%u\n", link, rm);
+                return false;
+            }
+            for (i = 0u; i < branch_handler_count; i++) {
+                if (branch_handlers[i] == branch->handler) {
+                    fprintf(stderr,
+                            "jitbench: Thumb indirect handler collided with "
+                            "immediate branch link=%u rm=%u\n", link, rm);
+                    return false;
+                }
+            }
+            for (i = 0u; i < indirect_handler_count; i++) {
+                if (indirect_handlers[i] == branch->handler) {
+                    fprintf(stderr,
+                            "jitbench: duplicate Thumb indirect handler "
+                            "link=%u rm=%u\n", link, rm);
+                    return false;
+                }
+            }
+            indirect_handlers[indirect_handler_count++] = branch->handler;
+        }
+    }
+    if (indirect_handler_count != 62u) {
+        fprintf(stderr, "jitbench: incomplete indirect branch family\n");
+        return false;
+    }
+    printf("STATIC-INDIRECT-BRANCH-SHAPE exact=yes a32-bx=16 a32-blx=15 "
+           "thumb-bx=16 thumb-blx=15 handlers=62 conditional=yes "
+           "terminal=yes guarded=yes\n");
 
     for (i = 0u; i < sizeof VALID_A32_STORES /
                          sizeof VALID_A32_STORES[0]; i++) {
@@ -1147,7 +1290,12 @@ static bool validate_static_shapes(void) {
         a64_static_decode_at(MID_BLOCK_CONDITIONAL_BRANCH, 2u, false, 0u,
                              &block) ||
         a64_static_decode_at(MID_BLOCK_LINK, 2u, false, 0u, &block) ||
+        a64_static_decode_at(MID_BLOCK_INDIRECT, 2u, false, 0u, &block) ||
+        a64_static_decode_at(MID_BLOCK_THUMB_INDIRECT, 2u, true, 0u,
+                             &block) ||
         a64_static_decode_at(BLX_IMMEDIATE, 1u, false, 0u, &block) ||
+        a64_static_decode_at(BLX_PC, 1u, false, 0u, &block) ||
+        a64_static_decode_at(THUMB_BLX_PC, 1u, true, 0u, &block) ||
         a64_static_decode_at(PC_WRITE, 1u, false, 0u, &block) ||
         a64_static_decode_at(MULTIPLY, 1u, false, 0u, &block) ||
         !a64_static_decode_at(CONDITIONAL_DP, 1u, false, 0x3000u,
@@ -2340,6 +2488,231 @@ static bool validate_static_branch_oracles(void) {
     return true;
 }
 
+static bool indirect_register_states_equal(const arm_cpu_t *reference,
+                                           const arm_cpu_t *statik) {
+    return reference && statik &&
+           memcmp(reference->r, statik->r, sizeof reference->r) == 0 &&
+           reference->cpsr == statik->cpsr &&
+           reference->cycles == statik->cycles;
+}
+
+static bool run_static_indirect_case(bool thumb, bool link,
+                                     unsigned condition, unsigned rm,
+                                     uint32_t target, uint32_t flags,
+                                     bool passed, unsigned *cases) {
+    const uint32_t pc = thumb ? UINT32_C(0x1900) : UINT32_C(0x1800);
+    const uint32_t nzcv_mask = ARM_CPSR_N | ARM_CPSR_Z |
+                               ARM_CPSR_C | ARM_CPSR_V;
+    uint32_t a32 = (condition << 28) | UINT32_C(0x012fff10) |
+                   ((link ? 1u : 0u) << 5) | rm;
+    uint16_t tinsn = (uint16_t)(UINT16_C(0x4700) |
+                                ((link ? 1u : 0u) << 7) | (rm << 3));
+    const void *program = thumb ? (const void *)&tinsn : (const void *)&a32;
+    arm_cpu_t reference;
+    arm_cpu_t statik;
+    a64_static_block_t block;
+    arm_status_t status;
+    unsigned completed = UINT_MAX;
+    uint32_t source;
+    uint32_t expected_pc;
+    uint32_t expected_lr;
+
+    seed_cpu_at(&reference, program, 1u, thumb, pc);
+    reference.cpsr = (reference.cpsr & ~nzcv_mask) | flags;
+    if (rm != 15u) reference.r[rm] = target;
+    source = rm == 15u ? pc + (thumb ? 4u : 8u) : target;
+    expected_pc = passed ? source & ~UINT32_C(1) : pc + (thumb ? 2u : 4u);
+    expected_lr = link && passed
+        ? (pc + (thumb ? 2u : 4u)) | (thumb ? 1u : 0u)
+        : reference.r[14];
+    statik = reference;
+
+    if (!a64_static_decode_read_hits_bytes_at(
+            &g_ram[pc], 1u, thumb, pc, &block)) {
+        fprintf(stderr,
+                "jitbench: indirect oracle decode failed "
+                "thumb=%u link=%u cond=%u rm=%u\n",
+                thumb ? 1u : 0u, link ? 1u : 0u, condition, rm);
+        return false;
+    }
+    status = arm_step(&reference);
+    if (!a64_static_run_read_hits(
+            &statik, &block, g_ram, sizeof g_ram, &completed) ||
+        status != ARM_OK || completed != 1u ||
+        !indirect_register_states_equal(&reference, &statik) ||
+        statik.r[15] != expected_pc || statik.r[14] != expected_lr ||
+        (((statik.cpsr & ARM_CPSR_T) != 0u) !=
+         (passed ? (source & 1u) != 0u : thumb))) {
+        fprintf(stderr,
+                "jitbench: indirect oracle mismatch thumb=%u link=%u "
+                "cond=%u rm=%u pass=%u pc=%08" PRIx32
+                " lr=%08" PRIx32 " completed=%u\n",
+                thumb ? 1u : 0u, link ? 1u : 0u, condition, rm,
+                passed ? 1u : 0u, statik.r[15], statik.r[14], completed);
+        return false;
+    }
+    if (cases) (*cases)++;
+    return true;
+}
+
+static bool validate_static_indirect_branch_oracles(void) {
+    const uint32_t targets[] = {UINT32_C(0x1a00), UINT32_C(0x1a01)};
+    const uint32_t invalid_target = UINT32_C(0x1a02);
+    unsigned cases = 0u;
+
+    /* Cross every A32 condition/outcome with both destination states. BLX
+     * reads LR here, which also proves the target is captured before LR is
+     * replaced with the return address. The separate AL matrix below covers
+     * every legal register, including BX pc. */
+    for (unsigned link = 0u; link < 2u; link++) {
+        const unsigned rm = link ? 14u : 0u;
+        for (unsigned condition = 0u; condition < 15u; condition++) {
+            const unsigned outcomes = condition == 14u ? 1u : 2u;
+            for (unsigned outcome = 0u; outcome < outcomes; outcome++) {
+                const bool passed = condition == 14u || outcome != 0u;
+                uint32_t flags = 0u;
+                if (condition != 14u &&
+                    !branch_condition_flags(condition, passed, &flags)) {
+                    fprintf(stderr,
+                            "jitbench: no indirect NZCV witness cond=%u "
+                            "pass=%u\n", condition, passed ? 1u : 0u);
+                    return false;
+                }
+                for (unsigned target = 0u; target < 2u; target++) {
+                    if (!run_static_indirect_case(
+                            false, link != 0u, condition, rm,
+                            targets[target], flags, passed, &cases))
+                        return false;
+                }
+            }
+        }
+    }
+
+    for (unsigned link = 0u; link < 2u; link++) {
+        const unsigned registers = link ? 15u : 16u;
+        for (unsigned rm = 0u; rm < registers; rm++) {
+            const unsigned target_count = rm == 15u ? 1u : 2u;
+            for (unsigned target = 0u; target < target_count; target++) {
+                if (!run_static_indirect_case(
+                        false, link != 0u, 14u, rm, targets[target],
+                        ARM_CPSR_C, true, &cases))
+                    return false;
+            }
+        }
+    }
+
+    for (unsigned link = 0u; link < 2u; link++) {
+        const unsigned registers = link ? 15u : 16u;
+        for (unsigned rm = 0u; rm < registers; rm++) {
+            const unsigned target_count = rm == 15u ? 1u : 2u;
+            for (unsigned target = 0u; target < target_count; target++) {
+                if (!run_static_indirect_case(
+                        true, link != 0u, 14u, rm, targets[target],
+                        ARM_CPSR_C, true, &cases))
+                    return false;
+            }
+        }
+    }
+
+    /* A 0b10 live target is a runtime refusal, not a partially executed
+     * instruction. The signed path must report a zero prefix unchanged; the
+     * caller's one interpreter step then reproduces ARM_UNDEFINED exactly. */
+    for (unsigned thumb = 0u; thumb < 2u; thumb++) {
+        for (unsigned link = 0u; link < 2u; link++) {
+            const uint32_t pc = thumb ? UINT32_C(0x1c00)
+                                      : UINT32_C(0x1b00);
+            uint32_t a32 = UINT32_C(0xe12fff10) | (link << 5);
+            uint16_t tinsn = (uint16_t)(UINT16_C(0x4700) | (link << 7));
+            const void *program = thumb ? (const void *)&tinsn
+                                        : (const void *)&a32;
+            arm_cpu_t reference;
+            arm_cpu_t statik;
+            arm_cpu_t before;
+            a64_static_block_t block;
+            arm_status_t reference_status;
+            arm_status_t static_status;
+            unsigned completed = UINT_MAX;
+
+            seed_cpu_at(&reference, program, 1u, thumb != 0u, pc);
+            reference.r[0] = invalid_target;
+            statik = reference;
+            before = statik;
+            if (!a64_static_decode_read_hits_bytes_at(
+                    &g_ram[pc], 1u, thumb != 0u, pc, &block)) {
+                fprintf(stderr, "jitbench: invalid indirect setup failed\n");
+                return false;
+            }
+            reference_status = arm_step(&reference);
+            if (!a64_static_run_read_hits(
+                    &statik, &block, g_ram, sizeof g_ram, &completed) ||
+                completed != 0u ||
+                !indirect_register_states_equal(&before, &statik)) {
+                fprintf(stderr,
+                        "jitbench: invalid indirect target changed state "
+                        "thumb=%u link=%u\n", thumb, link);
+                return false;
+            }
+            static_status = arm_step(&statik);
+            if (reference_status != ARM_UNDEFINED ||
+                static_status != reference_status ||
+                !indirect_register_states_equal(&reference, &statik)) {
+                fprintf(stderr,
+                        "jitbench: invalid indirect fallback diverged "
+                        "thumb=%u link=%u\n", thumb, link);
+                return false;
+            }
+        }
+    }
+
+    /* A failed condition retires without consulting an otherwise invalid
+     * target and, for BLX, without touching LR. */
+    for (unsigned link = 0u; link < 2u; link++) {
+        uint32_t flags = 0u;
+        if (!branch_condition_flags(0u, false, &flags) ||
+            !run_static_indirect_case(
+                false, link != 0u, 0u, 0u, invalid_target, flags,
+                false, &cases))
+            return false;
+    }
+
+    /* Cached decoded callers must fail closed if runtime-guard metadata is
+     * corrupted; no register, flag, PC or cycle is allowed to move. */
+    {
+        const uint32_t pc = UINT32_C(0x1d00);
+        const uint32_t insn = UINT32_C(0xe12fff10);
+        arm_cpu_t cpu;
+        arm_cpu_t before;
+        a64_static_block_t block;
+        unsigned completed = UINT_MAX;
+        seed_cpu_at(&cpu, &insn, 1u, false, pc);
+        cpu.r[0] = targets[1];
+        before = cpu;
+        if (!a64_static_decode_read_hits_bytes_at(
+                &g_ram[pc], 1u, false, pc, &block))
+            return false;
+        block.uops[0].metadata ^= 1u;
+        if (a64_static_run_read_hits_decoded(
+                &cpu, &block, g_ram, sizeof g_ram, &completed) ||
+            !indirect_register_states_equal(&before, &cpu) ||
+            completed != UINT_MAX) {
+            fprintf(stderr,
+                    "jitbench: mutated indirect contract did not fail closed\n");
+            return false;
+        }
+    }
+
+    if (cases != 240u) {
+        fprintf(stderr,
+                "jitbench: incomplete indirect branch oracle matrix (%u)\n",
+                cases);
+        return false;
+    }
+    printf("STATIC-INDIRECT-BRANCH-ORACLE exact=yes cases=240 "
+           "a32-conditions=yes registers=all arm-target=yes thumb-target=yes "
+           "link=yes pc-source=yes invalid-rollback=yes contract=yes\n");
+    return true;
+}
+
 static bool run_interpreter(const bench_case_t *bc, uint64_t total,
                             final_state_t *out, double *seconds) {
     arm_cpu_t cpu;
@@ -3317,6 +3690,7 @@ int main(int argc, char **argv) {
     if (!validate_static_vfp_widen_oracles()) return 1;
     if (!validate_static_vfp_read_oracles()) return 1;
     if (!validate_static_branch_oracles()) return 1;
+    if (!validate_static_indirect_branch_oracles()) return 1;
     if (!validate_static_oracles()) return 1;
 
     for (i = 0u; i < sizeof CASES / sizeof CASES[0]; i++) {

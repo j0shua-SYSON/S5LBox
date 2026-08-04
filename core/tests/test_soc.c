@@ -3496,6 +3496,143 @@ static void test_signed_static_a64_branch_oracle(void) {
     s5l8900_free(&reference);
 }
 
+/* The indirect handler must update two state owners before callback-free graph
+ * lookup: architectural CPSR.T and the chain context's Thumb byte. This loop
+ * crosses both directions through all four register-branch families. If the
+ * context byte is stale, the graph either selects the wrong halfword slot or
+ * rejects every cross-state edge; exact snapshots alone would not distinguish
+ * the latter from safe fallback, so the chain counters are mandatory too. */
+static void test_signed_static_a64_indirect_branch_oracle(void) {
+    static const uint32_t arm_zero[] = {
+        UINT32_C(0xe2844001), /* 00 ADD  r4,r4,#1 */
+        UINT32_C(0xe12fff38), /* 04 BLX  r8 -> Thumb 0x10 */
+    };
+    static const uint16_t thumb_ten[] = {
+        UINT16_C(0x3501), /* 10 ADDS r5,#1 */
+        UINT16_C(0x4748), /* 12 BX   r9 -> ARM 0x40 */
+    };
+    static const uint32_t arm_forty[] = {
+        UINT32_C(0xe2866001), /* 40 ADD r6,r6,#1 */
+        UINT32_C(0xe12fff1a), /* 44 BX  r10 -> Thumb 0x60 */
+    };
+    static const uint16_t thumb_sixty[] = {
+        UINT16_C(0x3701), /* 60 ADDS r7,#1 */
+        UINT16_C(0x47d8), /* 62 BLX  r11 -> ARM 0x00 */
+    };
+    const uint64_t total = UINT64_C(20000);
+    s5l8900_t fast = {0};
+    s5l8900_t reference = {0};
+    uint8_t *fast_snapshot = NULL;
+    uint8_t *reference_snapshot = NULL;
+    size_t fast_len = 0u;
+    size_t reference_len = 0u;
+    arm_status_t fast_status = ARM_OK;
+    arm_status_t reference_status = ARM_OK;
+    bool fast_ok;
+    bool reference_ok;
+    uint64_t retired;
+    uint64_t chains;
+    uint64_t graph_chains;
+
+    if (!s5l8900_static_a64_available()) {
+        printf("  STATIC-A64-INDIRECT-SOC-ORACLE SKIP: no signed AArch64 "
+               "handlers\n");
+        return;
+    }
+
+    fast_ok = s5l8900_init(&fast, 0u, 1u << 20);
+    reference_ok = s5l8900_init(&reference, 0u, 1u << 20);
+    CHECK(fast_ok && reference_ok, "indirect-oracle machine init failed");
+    if (!fast_ok || !reference_ok) {
+        if (fast_ok) s5l8900_free(&fast);
+        if (reference_ok) s5l8900_free(&reference);
+        return;
+    }
+
+    s5l8900_load(&fast, 0x00u, arm_zero, sizeof arm_zero);
+    s5l8900_load(&reference, 0x00u, arm_zero, sizeof arm_zero);
+    s5l8900_load(&fast, 0x10u, thumb_ten, sizeof thumb_ten);
+    s5l8900_load(&reference, 0x10u, thumb_ten, sizeof thumb_ten);
+    s5l8900_load(&fast, 0x40u, arm_forty, sizeof arm_forty);
+    s5l8900_load(&reference, 0x40u, arm_forty, sizeof arm_forty);
+    s5l8900_load(&fast, 0x60u, thumb_sixty, sizeof thumb_sixty);
+    s5l8900_load(&reference, 0x60u, thumb_sixty, sizeof thumb_sixty);
+    s5l8900_tick(&fast, 0u);
+    s5l8900_tick(&reference, 0u);
+
+    fast.cpu.r[4] = reference.cpu.r[4] = 0u;
+    fast.cpu.r[5] = reference.cpu.r[5] = 0u;
+    fast.cpu.r[6] = reference.cpu.r[6] = 0u;
+    fast.cpu.r[7] = reference.cpu.r[7] = 0u;
+    fast.cpu.r[8] = reference.cpu.r[8] = UINT32_C(0x11);
+    fast.cpu.r[9] = reference.cpu.r[9] = UINT32_C(0x40);
+    fast.cpu.r[10] = reference.cpu.r[10] = UINT32_C(0x61);
+    fast.cpu.r[11] = reference.cpu.r[11] = UINT32_C(0x00);
+    fast.cpu.r[15] = reference.cpu.r[15] = 0u;
+    fast.cpu.cpsr = reference.cpu.cpsr = ARM_MODE_SYS | ARM_CPSR_C;
+
+    CHECK(s5l8900_static_a64_set_enabled(&fast, true),
+          "indirect-oracle signed engine refused an available host");
+    CHECK(s5l8900_static_a64_set_graph(&fast, true),
+          "indirect-oracle graph engine refused an available host");
+    CHECK(s5l8900_run(&fast, total, &fast_status) == total,
+          "signed indirect run stopped early with status=%d",
+          (int)fast_status);
+    CHECK(s5l8900_run(&reference, total, &reference_status) == total,
+          "reference indirect run stopped early with status=%d",
+          (int)reference_status);
+
+    retired = s5l8900_static_a64_retired(&fast);
+    chains = s5l8900_static_a64_chained_blocks(&fast);
+    graph_chains = s5l8900_static_a64_graph_chained_blocks(&fast);
+    CHECK(retired > total * 3u / 4u,
+          "signed indirect loop retired only %llu/%llu instructions",
+          (unsigned long long)retired, (unsigned long long)total);
+    CHECK(chains != 0u, "signed indirect loop chained no target blocks");
+    CHECK(graph_chains == chains,
+          "graph/total indirect chains differ: %llu/%llu",
+          (unsigned long long)graph_chains,
+          (unsigned long long)chains);
+    CHECK(fast_status == reference_status,
+          "indirect status differs: signed=%d reference=%d",
+          (int)fast_status, (int)reference_status);
+    CHECK(fast.cpu.r[4] == total / 8u && fast.cpu.r[5] == total / 8u &&
+              fast.cpu.r[6] == total / 8u && fast.cpu.r[7] == total / 8u &&
+              fast.cpu.r[15] == 0u &&
+              (fast.cpu.cpsr & ARM_CPSR_T) == 0u,
+          "indirect loop did not complete every ARM/Thumb head exactly");
+
+    snapshot_status_t fast_snapshot_status =
+        snapshot_save_mem(&fast, &fast_snapshot, &fast_len);
+    snapshot_status_t reference_snapshot_status =
+        snapshot_save_mem(&reference, &reference_snapshot, &reference_len);
+    bool exact = fast_snapshot_status == SNAP_OK &&
+        reference_snapshot_status == SNAP_OK && fast_snapshot &&
+        reference_snapshot && fast_len == reference_len &&
+        memcmp(fast_snapshot, reference_snapshot, fast_len) == 0;
+    CHECK(fast_snapshot_status == SNAP_OK,
+          "could not serialize signed indirect machine: %s",
+          snapshot_strerror(fast_snapshot_status));
+    CHECK(reference_snapshot_status == SNAP_OK,
+          "could not serialize reference indirect machine: %s",
+          snapshot_strerror(reference_snapshot_status));
+    CHECK(exact, "signed and reference indirect snapshots differ");
+
+    if (exact && retired > total * 3u / 4u && chains != 0u &&
+        graph_chains == chains) {
+        printf("  STATIC-A64-INDIRECT-SOC-ORACLE exact=yes retired=%llu "
+               "chains=%llu a32-bx=yes a32-blx=yes thumb-bx=yes "
+               "thumb-blx=yes arm-to-thumb=yes thumb-to-arm=yes graph=yes\n",
+               (unsigned long long)retired,
+               (unsigned long long)chains);
+    }
+
+    free(fast_snapshot);
+    free(reference_snapshot);
+    s5l8900_free(&fast);
+    s5l8900_free(&reference);
+}
+
 /* Prove the chain cannot outrun the public caller budget. A one-instruction
  * self-branch is the strongest shape: after one interpreter warm-up fills the
  * fetch witness, every later instruction is a separate signed block. The
@@ -4287,6 +4424,7 @@ int main(void) {
     test_signed_static_a64_soc_oracle();
     test_signed_static_a64_store_oracle();
     test_signed_static_a64_branch_oracle();
+    test_signed_static_a64_indirect_branch_oracle();
     test_signed_static_a64_chain_bound_oracle();
     test_signed_static_a64_graph_bound_oracle();
     test_signed_static_a64_vfp_register_oracle();

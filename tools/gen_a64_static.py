@@ -19,7 +19,7 @@ CONDITIONS = (
     "eq", "ne", "cs", "cc", "mi", "pl", "vs", "vc",
     "hi", "ls", "ge", "lt", "gt", "le",
 )
-EXPECTED_HANDLERS = 26198
+EXPECTED_HANDLERS = 26260
 
 READ_KINDS = (
     ("word", "ldr", 4),
@@ -63,6 +63,52 @@ def terminal_branch_body(condition: str, link: bool) -> list[str]:
         ])
     body.extend([
         "    ldur w12, [x13, #-12]",
+        "    b .La64s_terminal_exit",
+    ])
+    return body
+
+
+def indirect_branch_body(link: bool, thumb: bool, rm: int) -> list[str]:
+    body = ["    mrs x7, nzcv"]
+    if rm in PINNED:
+        body.append(f"    mov w12, w{PINNED[rm]}")
+    elif rm == 15:
+        body.extend([
+            "    ldur w12, [x13, #-8]",
+            f"    add w12, w12, #{4 if thumb else 8}",
+        ])
+    else:
+        body.append(f"    ldr w12, [x0, #{rm * 4}]")
+
+    body.extend([
+        # An even halfword target cannot be represented in ARM state. Refuse
+        # before changing LR, CPSR.T or the persistent chain-state byte.
+        "    and w16, w12, #3",
+        "    cmp w16, #2",
+        "    b.ne 1f",
+        "    b .La64s_direct_miss",
+        "1:",
+    ])
+    if link:
+        body.extend([
+            "    ldur w9, [x13, #-8]",
+            f"    add w9, w9, #{2 if thumb else 4}",
+        ])
+        if thumb:
+            body.append("    orr w9, w9, #1")
+        body.append("    str w9, [x0, #56]")
+
+    body.extend([
+        "    and w16, w12, #1",
+        "    ldr w9, [x1]",
+        "    bfi w9, w16, #5, #1",
+        "    str w9, [x1]",
+        "    ldr x10, [sp, #96]",
+        "    cbz x10, 2f",
+        "    strb w16, [x10, #64]",
+        "2:",
+        "    bic w12, w12, #1",
+        "    msr nzcv, x7",
         "    b .La64s_terminal_exit",
     ])
     return body
@@ -1347,6 +1393,22 @@ def build_handlers() -> list[tuple[str, list[str]]]:
         name = condition if condition else "al"
         handlers.append((f".La64s_branch_link_{name}",
                          terminal_branch_body(condition, True)))
+
+    # Register-indirect branches are terminal, runtime-guarded exits. ARM
+    # conditions reuse the ordinary guard record, so only the register, link
+    # and source-state dimensions need distinct signed text here.
+    for rm in range(16):
+        handlers.append((f".La64s_arm_bx_{rm}",
+                         indirect_branch_body(False, False, rm)))
+    for rm in range(15):
+        handlers.append((f".La64s_arm_blx_{rm}",
+                         indirect_branch_body(True, False, rm)))
+    for rm in range(16):
+        handlers.append((f".La64s_thumb_bx_{rm}",
+                         indirect_branch_body(False, True, rm)))
+    for rm in range(15):
+        handlers.append((f".La64s_thumb_blx_{rm}",
+                         indirect_branch_body(True, True, rm)))
 
     if len(handlers) != EXPECTED_HANDLERS:
         raise RuntimeError(

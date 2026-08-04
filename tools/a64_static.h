@@ -30,7 +30,7 @@
 /* A conditional register-offset A32 load/store uses a guard, shifter, address
  * and memory record. The final slot is the fixed block exit. */
 #define A64_STATIC_MAX_UOPS (A64_STATIC_MAX_INSNS * 4u + 1u)
-#define A64_STATIC_HANDLER_COUNT 26198u
+#define A64_STATIC_HANDLER_COUNT 26260u
 #define A64_STATIC_GRAPH_SLOTS 512u
 
 typedef struct {
@@ -86,7 +86,11 @@ typedef const a64_static_block_t *(*a64_static_chain_next_fn)(
  * `pc`. A terminal A32 immediate B/BL may target any word-aligned address.
  * Conditional branches and every BL carry both their taken target and natural
  * fallthrough in a dynamic-exit record; exit_pc names that fallthrough. A
- * terminal unconditional B retains the compact fixed-exit form. A32 data
+ * terminal unconditional B retains the compact fixed-exit form. Terminal
+ * A32 and Thumb BX/BLX register forms are guarded dynamic exits: the signed
+ * handler validates the live target before changing LR, PC or instruction
+ * state, and updates the persistent chain's ARM/Thumb state before selecting
+ * another decoded head. A32 data
  * processing covers every opcode, condition and immediate/register
  * barrel-shifter form with r0-r14 destinations and the architecturally valid
  * source registers; writes to PC remain outside the contract. Thumb covers
