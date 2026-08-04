@@ -5917,3 +5917,59 @@ blocks. The normal iOS app still compiles the engine out and the only phone obse
 count, and the next serious prototype must keep guest registers/native context live across
 validated block heads. More isolated opcode additions or a flattering length-only weighting
 would be whack-a-mole, not a credible path to 30 FPS.
+
+### r514: joint block shape quantifies the persistent-context opportunity
+
+r514 adds a read-only observer to `bootkernel --sequence-profile`; it does not change engine
+dispatch or guest state. For every modeled outer call it records both total guest instructions
+and successful native blocks, then independently closes three identities: calls, instructions and
+blocks. The last quantity must equal outer calls plus chained heads. The identical restored replay
+reports
+
+```
+exact shape calls/instructions/blocks=1832685/6956087/2674071 model=1832685/6956087/2674071  EXACT
+```
+
+The successful-block distribution is:
+
+| native blocks in outer call | calls | call share | guest instructions | instruction share | native block entries |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 1,370,748 | 74.795% | 3,182,960 | 45.758% | 1,370,748 |
+| 2 | 276,965 | 15.113% | 1,612,741 | 23.185% | 553,930 |
+| 3 | 87,115 | 4.753% | 799,566 | 11.494% | 261,345 |
+| 4 | 52,303 | 2.854% | 670,595 | 9.640% | 209,212 |
+| 5 | 25,851 | 1.411% | 379,598 | 5.457% | 129,255 |
+| 6 | 6,371 | 0.348% | 98,388 | 1.414% | 38,226 |
+| 7 | 1,305 | 0.071% | 19,824 | 0.285% | 9,135 |
+| 8 | 6,023 | 0.329% | 96,351 | 1.385% | 48,184 |
+| 9 | 6,004 | 0.328% | 96,064 | 1.381% | 54,036 |
+
+Only 25.205% of outer calls cross multiple native blocks, but those calls carry **54.242%** of
+modeled guest instructions. The 841,386 chained heads are **31.465%** of all 2,674,071 successful
+native-block entries. Those are the entries at which the current implementation repeats the full
+generated-function boundary: save/restore AAPCS64 callee-saved registers, reload/write back pinned
+guest registers and reconstruct dispatcher state. A persistent context cannot remove the required
+per-head raw-byte/cache/fetch/interrupt checks, but it can potentially avoid that repeated native
+register round trip at exactly those 841,386 transitions. This is a measured hot-path population,
+not an assumed one.
+
+`work/r514-chain-shape-10m` was independently relinked, restored the same r445 checkpoint and
+stopped at exactly 7.110 B retired instructions with status OK in 31.3 host seconds. Stderr was
+empty, external-media failures were zero and CLCD again reached 1,590 frames. The work image and
+screen PPM remain byte-identical to r513 at SHA-256
+`8A59C388C481165F460984926AA5FFB1B72A0E9030216CD0038DE9B3264B79FE` and
+`1EF63FFE3EEFD976416E17120A36BA074BF295EA0955D716E2D345FCC5EA0A9E`. Both complete local suites
+pass 60/60. Observer commit `1a9833e337c0e7b2d08f2289dcf84e45ffb14fb7` is on `main`; exact-SHA
+core run `30888920549` is green in all eight jobs, including macOS 14/15 native execution,
+ASan/UBSan, warnings-as-errors and the default-off build.
+
+Brutal status: **r514 proves that persistent native context addresses substantial real signed
+work, but it proves zero FPS improvement by itself**. The table counts successful native blocks;
+it does not count refused/zero-retire native attempts, measure prologue cycles or provide a
+same-binary firmware A/B. The normal iOS app still compiles this engine out, and the only physical
+iPhone observation remains 0--4 FPS. The justified next experiment is one bounded persistent
+native invocation across these already-validated heads, preserving the total sixteen-instruction
+caller/timer limit, dynamic branch PC, NZCV, exact read-miss prefix semantics and final serialized
+CPU state. It must beat the current signed path on native Apple hosts before it can be considered
+for the app; if the C validation callback costs as much as the removed register round trip, the
+prototype should be rejected rather than narrated as progress.
