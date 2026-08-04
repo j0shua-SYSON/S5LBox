@@ -24834,6 +24834,17 @@ typedef struct {
     uint64_t single_load;
     uint64_t single_store;
     uint64_t single_load_pc;
+    uint64_t single_load_form[32];
+    uint64_t single_load_form_passed[32];
+    uint64_t single_load_form_valid[32];
+    uint64_t single_load_form_dread_hit[32];
+    uint64_t single_load_condition_failed;
+    uint64_t single_load_invalid;
+    uint64_t single_load_alignment_abort;
+    uint64_t single_load_legacy_rotate;
+    uint64_t single_load_unaligned_u;
+    uint64_t single_load_dread_hit;
+    uint64_t single_load_dread_miss;
     uint64_t block_load;
     uint64_t block_store;
     uint64_t block_load_pc;
@@ -24957,6 +24968,117 @@ static bool sequence_dp_writes_pc(uint32_t insn) {
     unsigned opcode = (insn >> 21) & 15u;
     bool writes = opcode < 8u || opcode > 11u;
     return writes && ((insn >> 12) & 15u) == 15u;
+}
+
+/* Read-only profiling model for A32 Addressing Mode 2. This does not translate,
+ * fill a cache, touch memory or change counters; it only reconstructs the VA
+ * the following literal arm_step() will use so the report can inspect the
+ * already-existing data-read cache before that step. */
+typedef enum {
+    SEQUENCE_LOAD_INVALID = 0,
+    SEQUENCE_LOAD_ALIGNMENT,
+    SEQUENCE_LOAD_ADDRESS
+} sequence_load_address_t;
+
+static uint32_t sequence_ror32(uint32_t value, unsigned amount) {
+    amount &= 31u;
+    if (!amount) return value;
+    return (value >> amount) | (value << (32u - amount));
+}
+
+static uint32_t sequence_address_shift(const arm_cpu_t *cpu, uint32_t value,
+                                       unsigned type, unsigned amount) {
+    switch (type & 3u) {
+    case 0u: /* LSL */
+        return amount ? value << amount : value;
+    case 1u: /* LSR #0 means #32 */
+        return amount ? value >> amount : 0u;
+    case 2u: /* ASR #0 means #32 */
+        if (!amount) return (value >> 31) ? UINT32_MAX : 0u;
+        if ((value >> 31) == 0u) return value >> amount;
+        return (value >> amount) | ~(UINT32_MAX >> amount);
+    default: /* ROR #0 is RRX through the incoming C flag */
+        if (!amount)
+            return (value >> 1) |
+                   ((cpu->cpsr & ARM_CPSR_C) ? UINT32_C(0x80000000) : 0u);
+        return sequence_ror32(value, amount);
+    }
+}
+
+static sequence_load_address_t sequence_single_load_address(
+        const arm_cpu_t *cpu, uint32_t pc, uint32_t insn,
+        uint32_t *cache_va, unsigned *width, bool *priv,
+        bool *legacy_rotate, bool *unaligned_u) {
+    bool register_offset = (insn & (1u << 25)) != 0u;
+    bool pre = (insn & (1u << 24)) != 0u;
+    bool up = (insn & (1u << 23)) != 0u;
+    bool byte = (insn & (1u << 22)) != 0u;
+    bool writeback_bit = (insn & (1u << 21)) != 0u;
+    unsigned rn = (insn >> 16) & 15u;
+    unsigned rd = (insn >> 12) & 15u;
+    bool writes_back = !pre || writeback_bit;
+    uint32_t offset;
+    uint32_t base;
+    uint32_t address;
+
+    if (!cpu || !cache_va || !width || !priv || !legacy_rotate ||
+        !unaligned_u || (insn & (1u << 20)) == 0u || rd == 15u)
+        return SEQUENCE_LOAD_INVALID;
+    if (writes_back && (rn == 15u || rn == rd))
+        return SEQUENCE_LOAD_INVALID;
+    if (register_offset && (insn & 15u) == 15u)
+        return SEQUENCE_LOAD_INVALID;
+
+    if (!register_offset) {
+        offset = insn & UINT32_C(0x0fff);
+    } else {
+        unsigned rm = insn & 15u;
+        unsigned type = (insn >> 5) & 3u;
+        unsigned amount = (insn >> 7) & 31u;
+        offset = sequence_address_shift(cpu, cpu->r[rm], type, amount);
+    }
+    base = rn == 15u ? pc + 8u : cpu->r[rn];
+    address = pre ? (up ? base + offset : base - offset) : base;
+
+    *width = byte ? 1u : 4u;
+    *priv = (!pre && writeback_bit)
+          ? false
+          : (cpu->cpsr & ARM_CPSR_MODE_MASK) != ARM_MODE_USR;
+    *legacy_rotate = false;
+    *unaligned_u = false;
+    if (!byte && (address & 3u) != 0u) {
+        if ((cpu->cp15.sctlr & ARM_SCTLR_A) != 0u)
+            return SEQUENCE_LOAD_ALIGNMENT;
+        if ((cpu->cp15.sctlr & ARM_SCTLR_U) == 0u) {
+            *legacy_rotate = true;
+            address &= ~UINT32_C(3);
+        } else {
+            *unaligned_u = true;
+        }
+    }
+    *cache_va = address;
+    return SEQUENCE_LOAD_ADDRESS;
+}
+
+static unsigned sequence_single_load_form(uint32_t insn) {
+    return ((insn >> 25) & 1u) |
+           (((insn >> 24) & 1u) << 1) |
+           (((insn >> 23) & 1u) << 2) |
+           (((insn >> 22) & 1u) << 3) |
+           (((insn >> 21) & 1u) << 4);
+}
+
+static bool sequence_dread_would_hit(const arm_cpu_t *cpu, uint32_t va,
+                                     unsigned width, bool priv) {
+    const uint32_t block_mask = UINT32_C(0x3ff);
+    if (!cpu || !width ||
+        (uint64_t)(va & block_mask) + width > (uint64_t)block_mask + 1u)
+        return false;
+    unsigned slot = (unsigned)(((va >> 10) +
+        (priv ? ARM_DREAD_ENTRIES / 2u : 0u)) & (ARM_DREAD_ENTRIES - 1u));
+    uint32_t tag = (va & ~block_mask) | (priv ? 1u : 0u);
+    return cpu->dread[slot].host && cpu->dread[slot].tag == tag &&
+           cpu->dread[slot].gen == cpu->tlb_gen;
 }
 
 static sequence_class_t sequence_classify_arm(uint32_t insn) {
@@ -25482,8 +25604,47 @@ static void sequence_profile_observe(sequence_profile_t *profile,
         if (instruction_class == SEQUENCE_ARM_SINGLE_LS) {
             if (raw & (1u << 20)) {
                 profile->single_load++;
-                if (((raw >> 12) & 15u) == 15u)
+                if (((raw >> 12) & 15u) == 15u) {
                     profile->single_load_pc++;
+                } else {
+                    unsigned form = sequence_single_load_form(raw);
+                    unsigned condition = raw >> 28;
+                    profile->single_load_form[form]++;
+                    if (condition < 14u &&
+                        !arm_cond_passed(cpu, condition)) {
+                        profile->single_load_condition_failed++;
+                    } else {
+                        uint32_t cache_va = 0u;
+                        unsigned width = 0u;
+                        bool priv = false;
+                        bool legacy_rotate = false;
+                        bool unaligned_u = false;
+                        sequence_load_address_t address_status;
+                        profile->single_load_form_passed[form]++;
+                        address_status = sequence_single_load_address(
+                            cpu, pc, raw, &cache_va, &width, &priv,
+                            &legacy_rotate, &unaligned_u);
+                        if (address_status == SEQUENCE_LOAD_INVALID) {
+                            profile->single_load_invalid++;
+                        } else if (address_status ==
+                                   SEQUENCE_LOAD_ALIGNMENT) {
+                            profile->single_load_alignment_abort++;
+                        } else {
+                            profile->single_load_form_valid[form]++;
+                            if (legacy_rotate)
+                                profile->single_load_legacy_rotate++;
+                            if (unaligned_u)
+                                profile->single_load_unaligned_u++;
+                            if (sequence_dread_would_hit(cpu, cache_va,
+                                                         width, priv)) {
+                                profile->single_load_dread_hit++;
+                                profile->single_load_form_dread_hit[form]++;
+                            } else {
+                                profile->single_load_dread_miss++;
+                            }
+                        }
+                    }
+                }
             } else {
                 profile->single_store++;
             }
@@ -25719,6 +25880,40 @@ static void sequence_profile_report(sequence_profile_t *profile) {
            " (loads to pc=%" PRIu64 ")\n",
            profile->single_load, profile->single_store,
            profile->single_load_pc);
+    printf("    non-PC single loads=%" PRIu64
+           " failed-condition=%" PRIu64 " invalid-if-executed=%" PRIu64
+           " alignment-abort=%" PRIu64 "\n",
+           profile->single_load - profile->single_load_pc,
+           profile->single_load_condition_failed,
+           profile->single_load_invalid,
+           profile->single_load_alignment_abort);
+    printf("    pre-step data-read cache among passed valid loads: "
+           "hit/miss=%" PRIu64 "/%" PRIu64 " (%.3f%% hit)"
+           " legacy-rotate=%" PRIu64 " U-unaligned=%" PRIu64 "\n",
+           profile->single_load_dread_hit,
+           profile->single_load_dread_miss,
+           profile->single_load_dread_hit + profile->single_load_dread_miss
+               ? 100.0 * (double)profile->single_load_dread_hit /
+                     (double)(profile->single_load_dread_hit +
+                              profile->single_load_dread_miss)
+               : 0.0,
+           profile->single_load_legacy_rotate,
+           profile->single_load_unaligned_u);
+    printf("    single-load forms (I=1 register offset; B=1 byte):\n");
+    printf("      I P U B W          all       passed        valid    dread-hit"
+           "    hit%%\n");
+    for (unsigned form = 0u; form < 32u; form++) {
+        uint64_t valid = profile->single_load_form_valid[form];
+        uint64_t hits = profile->single_load_form_dread_hit[form];
+        if (!profile->single_load_form[form]) continue;
+        printf("      %u %u %u %u %u %12" PRIu64 " %12" PRIu64
+               " %12" PRIu64 " %12" PRIu64 " %7.3f%%\n",
+               form & 1u, (form >> 1) & 1u, (form >> 2) & 1u,
+               (form >> 3) & 1u, (form >> 4) & 1u,
+               profile->single_load_form[form],
+               profile->single_load_form_passed[form], valid, hits,
+               valid ? 100.0 * (double)hits / (double)valid : 0.0);
+    }
     printf("    block load/store=%" PRIu64 "/%" PRIu64
            " (loads including pc=%" PRIu64 ")\n",
            profile->block_load, profile->block_store,
