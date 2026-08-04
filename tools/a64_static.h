@@ -23,7 +23,7 @@
 /* A conditional register-offset A32 load uses a guard, shifter, address and
  * read record. The final slot is the fixed block exit. */
 #define A64_STATIC_MAX_UOPS (A64_STATIC_MAX_INSNS * 4u + 1u)
-#define A64_STATIC_HANDLER_COUNT 23941u
+#define A64_STATIC_HANDLER_COUNT 24005u
 
 typedef struct {
     uint32_t handler;
@@ -48,8 +48,10 @@ typedef struct {
  * block exits at its natural fallthrough. A32 data processing covers every
  * opcode, condition and immediate/register barrel-shifter form with r0-r14
  * destinations and the architecturally valid source registers; writes to PC
- * remain outside the contract. Thumb SP-relative word loads/stores remain
- * available. Every unsupported bit causes a clean false return. */
+ * remain outside the contract. Thumb covers its broad shift, small/immediate
+ * and register ALU, non-PC high-register, PC/SP address and SP-adjust forms;
+ * flat-proof SP-relative word loads/stores remain available. Every unsupported
+ * bit causes a clean false return. */
 bool a64_static_decode_at(const void *program, unsigned insns, bool thumb,
                           uint32_t pc, a64_static_block_t *out);
 
@@ -60,11 +62,12 @@ bool a64_static_decode_bytes_at(const uint8_t *program, unsigned insns,
                                 bool thumb, uint32_t pc,
                                 a64_static_block_t *out);
 
-/* Product decoder for the real SoC path. It replaces only exact A32
- * pre-indexed, no-writeback loads with read-cache records. Stores, PC loads,
- * writeback/post-index forms and every other unsupported instruction refuse
- * cleanly. Runtime cache misses still return to arm_step(), which alone walks
- * the MMU, raises faults and handles MMIO. */
+/* Product decoder for the real SoC path. It admits the non-memory contract and
+ * replaces only exact A32 pre-indexed, no-writeback loads with read-cache
+ * records. Flat-proof memory handlers, stores, PC loads, writeback/post-index
+ * forms and every other unsupported instruction refuse cleanly. Runtime cache
+ * misses still return to arm_step(), which alone walks the MMU, raises faults
+ * and handles MMIO. */
 bool a64_static_decode_read_hits_bytes_at(const uint8_t *program,
                                           unsigned insns, bool thumb,
                                           uint32_t pc,

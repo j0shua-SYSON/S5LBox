@@ -3202,6 +3202,107 @@ static void test_signed_static_a64_soc_oracle(void) {
     s5l8900_free(&reference);
 }
 
+/* Product-facing Thumb coverage must cross the real SoC runner too, not only
+ * the flat semantic oracle. This loop spans every newly admitted broad shape,
+ * crosses hundreds of real timer edges and compares complete serialized
+ * machines with the literal interpreter. */
+static void test_signed_static_a64_thumb_oracle(void) {
+    static const uint16_t signed_loop[16] = {
+        0x0008u, /* LSLS r0,r1,#0  */
+        0x081au, /* LSRS r2,r3,#32 */
+        0x17ecu, /* ASRS r4,r5,#31 */
+        0x188eu, /* ADDS r6,r1,r2  */
+        0x1fdfu, /* SUBS r7,r3,#7  */
+        0x2080u, /* MOVS r0,#0x80  */
+        0x29ffu, /* CMP  r1,#0xff  */
+        0x4008u, /* AND  r0,r1     */
+        0x415au, /* ADC  r2,r3     */
+        0x4363u, /* MUL  r3,r4     */
+        0x4480u, /* ADD  r8,r0     */
+        0x46fau, /* MOV  r10,pc    */
+        0xa403u, /* ADD  r4,pc,#12 */
+        0xad05u, /* ADD  r5,sp,#20 */
+        0xb008u, /* ADD  sp,#32    */
+        0xe7efu, /* B    0         */
+    };
+    s5l8900_t fast = {0};
+    s5l8900_t reference = {0};
+    uint8_t *fast_snapshot = NULL;
+    uint8_t *reference_snapshot = NULL;
+    size_t fast_len = 0u;
+    size_t reference_len = 0u;
+    arm_status_t fast_status = ARM_OK;
+    arm_status_t reference_status = ARM_OK;
+    bool fast_ok;
+    bool reference_ok;
+
+    if (!s5l8900_static_a64_available()) {
+        printf("  STATIC-A64-THUMB-ORACLE SKIP: no signed AArch64 handlers\n");
+        return;
+    }
+
+    fast_ok = s5l8900_init(&fast, 0u, 1u << 20);
+    reference_ok = s5l8900_init(&reference, 0u, 1u << 20);
+    CHECK(fast_ok && reference_ok, "Thumb oracle machine init failed");
+    if (!fast_ok || !reference_ok) {
+        if (fast_ok) s5l8900_free(&fast);
+        if (reference_ok) s5l8900_free(&reference);
+        return;
+    }
+
+    s5l8900_load(&fast, 0u, signed_loop, sizeof signed_loop);
+    s5l8900_load(&reference, 0u, signed_loop, sizeof signed_loop);
+    s5l8900_tick(&fast, 0u);
+    s5l8900_tick(&reference, 0u);
+    for (unsigned i = 0u; i < 15u; i++) {
+        fast.cpu.r[i] = UINT32_C(0x10203040) + i * UINT32_C(0x01010101);
+        reference.cpu.r[i] = fast.cpu.r[i];
+    }
+    fast.cpu.r[13] = reference.cpu.r[13] = UINT32_C(0x00080000);
+    fast.cpu.r[15] = reference.cpu.r[15] = 0u;
+    fast.cpu.cpsr = reference.cpu.cpsr =
+        ARM_MODE_SYS | ARM_CPSR_T | ARM_CPSR_C;
+
+    CHECK(s5l8900_static_a64_set_enabled(&fast, true),
+          "Thumb oracle signed engine refused an available host");
+    CHECK(s5l8900_run(&fast, 24000u, &fast_status) == 24000u,
+          "signed Thumb run stopped early with status=%d", (int)fast_status);
+    CHECK(s5l8900_run(&reference, 24000u, &reference_status) == 24000u,
+          "reference Thumb run stopped early with status=%d",
+          (int)reference_status);
+    CHECK(fast_status == reference_status,
+          "Thumb status differs: signed=%d reference=%d",
+          (int)fast_status, (int)reference_status);
+    CHECK(s5l8900_static_a64_retired(&fast) != 0u,
+          "available signed engine retired no Thumb instructions");
+
+    snapshot_status_t fast_snapshot_status =
+        snapshot_save_mem(&fast, &fast_snapshot, &fast_len);
+    snapshot_status_t reference_snapshot_status =
+        snapshot_save_mem(&reference, &reference_snapshot, &reference_len);
+    CHECK(fast_snapshot_status == SNAP_OK,
+          "could not serialize signed Thumb machine: %s",
+          snapshot_strerror(fast_snapshot_status));
+    CHECK(reference_snapshot_status == SNAP_OK,
+          "could not serialize reference Thumb machine: %s",
+          snapshot_strerror(reference_snapshot_status));
+    CHECK(fast_snapshot && reference_snapshot && fast_len == reference_len &&
+              memcmp(fast_snapshot, reference_snapshot, fast_len) == 0,
+          "signed and reference Thumb machine snapshots differ");
+
+    if (fast_snapshot && reference_snapshot && fast_len == reference_len &&
+        memcmp(fast_snapshot, reference_snapshot, fast_len) == 0 &&
+        s5l8900_static_a64_retired(&fast) != 0u) {
+        printf("  STATIC-A64-THUMB-ORACLE exact=yes retired=%llu\n",
+               (unsigned long long)s5l8900_static_a64_retired(&fast));
+    }
+
+    free(fast_snapshot);
+    free(reference_snapshot);
+    s5l8900_free(&fast);
+    s5l8900_free(&reference);
+}
+
 int main(void) {
     printf("S5LBox S5L8900 machine tests\n");
     test_ram_readback();
@@ -3210,6 +3311,7 @@ int main(void) {
     test_bounds_check_cannot_overflow();
     test_bare_metal_uart_hello();
     test_signed_static_a64_soc_oracle();
+    test_signed_static_a64_thumb_oracle();
     test_stub_window_stores_and_counts();
     test_mmio_width_alignment_and_window_edges();
     test_address_space_wrap_is_refused();

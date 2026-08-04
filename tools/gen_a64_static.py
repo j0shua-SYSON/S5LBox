@@ -19,7 +19,7 @@ CONDITIONS = (
     "eq", "ne", "cs", "cc", "mi", "pl", "vs", "vc",
     "hi", "ls", "ge", "lt", "gt", "le",
 )
-EXPECTED_HANDLERS = 23941
+EXPECTED_HANDLERS = 24005
 
 
 def next_dispatch() -> list[str]:
@@ -479,6 +479,22 @@ def build_handlers() -> list[tuple[str, list[str]]]:
                 # so retain C/V explicitly around a flag-setting self-test.
                 "    mrs x10, nzcv",
                 f"    eor w{hd}, w{hd}, w{hm}",
+                f"    ands wzr, w{hd}, w{hd}",
+                "    mrs x9, nzcv",
+                "    and w10, w10, #0x30000000",
+                "    and w9, w9, #0xc0000000",
+                "    orr w9, w9, w10",
+                "    msr nzcv, x9",
+                *next_dispatch(),
+            ]))
+
+    for rd, hd in enumerate(HOST):
+        for rm, hm in enumerate(HOST):
+            label = f".La64s_muls_rr_{rd}_{rm}"
+            handlers.append((label, [
+                # Thumb MUL updates N/Z and preserves C/V on ARMv6.
+                "    mrs x10, nzcv",
+                f"    mul w{hd}, w{hd}, w{hm}",
                 f"    ands wzr, w{hd}, w{hd}",
                 "    mrs x9, nzcv",
                 "    and w10, w10, #0x30000000",

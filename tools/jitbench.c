@@ -4,9 +4,9 @@
  * This is deliberately NOT a product-performance claim and not a JIT
  * dispatcher. It translates one small synthetic block once, then compares
  * repeated interpreter execution with both that already-built block and a
- * firmware-independent static-threaded proof. The proof's 23,941 generic
+ * firmware-independent static-threaded proof. The proof's 24,005 generic
  * ISA/register handlers are compiled and signed with the executable; runtime
- * decoding creates data records only. The table now has 23,941 handlers,
+ * decoding creates data records only. The table now has 24,005 handlers,
  * including a product-only guarded read-cache path.
  *
  * The answer is only a feasibility bound. There is no device tick, MMIO,
@@ -161,6 +161,54 @@ static const uint16_t THUMB_SHORT_FALL[] = {
 
 static const uint16_t THUMB_SHORT_BRANCH[] = {
     0x3001u, 0xe00du, /* branch at 0x0202 -> 0x0220 */
+};
+
+#define THUMB_ALU_REG(opcode, rd, rm)                                      \
+    ((uint16_t)(UINT16_C(0x4000) | ((uint16_t)(opcode) << 6) |             \
+                ((uint16_t)(rm) << 3) | (uint16_t)(rd)))
+
+/* Every 0x4000 Thumb register-ALU opcode. The static path deliberately reuses
+ * the full A32 barrel-shifter/ALU records for the shared semantics; EOR and
+ * MUL retain compact signed handlers. */
+static const uint16_t THUMB_REGISTER_ALU_ALL[] = {
+    THUMB_ALU_REG( 0, 0, 1), /* AND  r0,r1 */
+    THUMB_ALU_REG( 1, 2, 3), /* EOR  r2,r3 */
+    THUMB_ALU_REG( 2, 4, 5), /* LSL  r4,r5 */
+    THUMB_ALU_REG( 3, 6, 1), /* LSR  r6,r1 */
+    THUMB_ALU_REG( 4, 7, 2), /* ASR  r7,r2 */
+    THUMB_ALU_REG( 5, 0, 3), /* ADC  r0,r3 */
+    THUMB_ALU_REG( 6, 1, 4), /* SBC  r1,r4 */
+    THUMB_ALU_REG( 7, 2, 5), /* ROR  r2,r5 */
+    THUMB_ALU_REG( 8, 3, 6), /* TST  r3,r6 */
+    THUMB_ALU_REG( 9, 4, 7), /* NEG  r4,r7 */
+    THUMB_ALU_REG(10, 5, 0), /* CMP  r5,r0 */
+    THUMB_ALU_REG(11, 6, 1), /* CMN  r6,r1 */
+    THUMB_ALU_REG(12, 7, 2), /* ORR  r7,r2 */
+    THUMB_ALU_REG(13, 0, 3), /* MUL  r0,r3 */
+    THUMB_ALU_REG(14, 1, 4), /* BIC  r1,r4 */
+    THUMB_ALU_REG(15, 2, 5), /* MVN  r2,r5 */
+};
+
+/* Broad non-control Thumb integer forms, including immediate/register shifts,
+ * three-bit ADD/SUB, all four immediate ALU families, high-register PC reads,
+ * PC/SP address formation and SP adjustment. Writes to PC remain refused. */
+static const uint16_t THUMB_INTEGER_MISC[] = {
+    0x0008u, /* LSLS r0,r1,#0  */
+    0x081au, /* LSRS r2,r3,#32 */
+    0x17ecu, /* ASRS r4,r5,#31 */
+    0x188eu, /* ADDS r6,r1,r2  */
+    0x1fdfu, /* SUBS r7,r3,#7  */
+    0x2080u, /* MOVS r0,#0x80  */
+    0x29ffu, /* CMP  r1,#0xff  */
+    0x3201u, /* ADDS r2,#1     */
+    0x3b02u, /* SUBS r3,#2     */
+    0x4480u, /* ADD  r8,r0     */
+    0x45c7u, /* CMP  pc,r8     */
+    0x46fau, /* MOV  r10,pc    */
+    0xa403u, /* ADD  r4,pc,#12 */
+    0xad05u, /* ADD  r5,sp,#20 */
+    0xb008u, /* ADD  sp,#32    */
+    0xb087u, /* SUB  sp,#28    */
 };
 
 #define A32_DP_IMM(cond, opcode, set, rn, rd, rotate, imm8)                 \
@@ -352,6 +400,10 @@ static const static_case_t STATIC_CASES[] = {
       0x7000u, 0x7040u, 33u },
     { "a32-reg-conditions", A32_REG_CONDITIONS, 16u, false,
       0xa000u, 0xa040u, 46u },
+    { "thumb-register-alu-all", THUMB_REGISTER_ALU_ALL, 16u, true,
+      0xe000u, 0xe020u, 30u },
+    { "thumb-integer-misc", THUMB_INTEGER_MISC, 16u, true,
+      0xe100u, 0xe120u, 24u },
 };
 
 static const bench_case_t CASES[] = {
@@ -460,6 +512,16 @@ static bool validate_static_shapes(void) {
         A32_SINGLE(14, 1, 1, 0, 1, 0, 1, 15),/* register Rm=PC */
         A32_SINGLE(14, 1, 1, 0, 1, 0, 1, 0x11),/* reserved bit 4 */
     };
+    static const uint16_t INVALID_PRODUCT_THUMB[] = {
+        0x4487u, /* ADD pc,r0 */
+        0x4687u, /* MOV pc,r0 */
+        0x4700u, /* BX r0 */
+        0x6800u, /* LDR r0,[r0] -- no Thumb DREAD record yet */
+        0xb401u, /* PUSH {r0} */
+        0xd000u, /* conditional branch */
+        0xdf00u, /* SVC */
+        0xf000u, /* BL first half */
+    };
     /* Deliberately unaligned guest byte stream: ADD r0,r0,#1. */
     static const uint8_t UNALIGNED_A32[] = {
         0xffu, 0x01u, 0x00u, 0x80u, 0xe2u,
@@ -529,6 +591,19 @@ static bool validate_static_shapes(void) {
                                                  &block)) {
             fprintf(stderr,
                     "jitbench: product decoder accepted invalid read %u\n",
+                    i);
+            return false;
+        }
+    }
+
+    for (i = 0u; i < sizeof INVALID_PRODUCT_THUMB /
+                         sizeof INVALID_PRODUCT_THUMB[0]; i++) {
+        uint16_t value = INVALID_PRODUCT_THUMB[i];
+        uint8_t bytes[2] = {(uint8_t)value, (uint8_t)(value >> 8)};
+        if (a64_static_decode_read_hits_bytes_at(bytes, 1u, true, 0x200u,
+                                                 &block)) {
+            fprintf(stderr,
+                    "jitbench: product decoder accepted invalid Thumb %u\n",
                     i);
             return false;
         }

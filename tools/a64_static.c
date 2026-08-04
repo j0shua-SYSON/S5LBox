@@ -16,7 +16,8 @@ enum {
     A64S_ADDS_IMM = A64S_EOR_IMM + 64u,
     A64S_SUBS_IMM = A64S_ADDS_IMM + 64u,
     A64S_EORS_RR = A64S_SUBS_IMM + 64u,
-    A64S_LDR = A64S_EORS_RR + 64u,
+    A64S_MULS_RR = A64S_EORS_RR + 64u,
+    A64S_LDR = A64S_MULS_RR + 64u,
     A64S_STR = A64S_LDR + 64u,
     A64S_LDR_SP = A64S_STR + 64u,
     A64S_STR_SP = A64S_LDR_SP + 8u,
@@ -341,33 +342,159 @@ static bool decode_arm(uint32_t insn, unsigned index, unsigned insns,
     return false;
 }
 
+static void thumb_emit_dp_reg(a64_static_uop_t *out, unsigned opcode,
+                              bool set_flags, unsigned rd, unsigned rn,
+                              unsigned rm, bool needs_carry,
+                              uint32_t pc_value) {
+    out[0].handler = shift_imm(needs_carry, 0u, rm, 0u);
+    out[0].pc_value = pc_value;
+    out[1].handler = dp_reg(opcode, set_flags, rd, rn);
+    out[1].pc_value = pc_value;
+}
+
+static void thumb_emit_shift(a64_static_uop_t *out, bool register_shift,
+                             unsigned type, unsigned rd, unsigned source,
+                             unsigned amount, uint32_t pc_value) {
+    out[0].handler = register_shift
+        ? shift_reg(true, type, rd, amount)
+        : shift_imm(true, type, source, amount);
+    out[0].pc_value = pc_value;
+    out[1].handler = dp_reg(13u, true, rd, 0u); /* MOVS Rd, shifter result */
+    out[1].pc_value = pc_value;
+}
+
 static bool decode_thumb(uint16_t insn, unsigned index, unsigned insns,
-                         uint32_t pc,
-                         a64_static_uop_t *out) {
+                         uint32_t pc, a64_static_uop_t *out,
+                         unsigned *written) {
+    uint32_t pc_value = pc + index * 2u + 4u;
+    if (!written) return false;
+    *written = 0u;
+
     if ((insn & UINT16_C(0xf800)) == UINT16_C(0xe000)) {
         int32_t displacement = (int32_t)((uint32_t)(insn & 0x07ffu) << 21) >> 20;
         uint32_t target = pc + index * 2u + 4u + (uint32_t)displacement;
         if (index + 1u != insns) return false;
         out->handler = A64S_END;
         out->immediate = target;
+        *written = 1u;
         return true;
     }
 
-    if ((insn & UINT16_C(0xf800)) == UINT16_C(0x3000) ||
-        (insn & UINT16_C(0xf800)) == UINT16_C(0x3800)) {
+    if ((insn & UINT16_C(0xf800)) < UINT16_C(0x1800)) {
+        unsigned type = (insn >> 11) & 3u;
+        unsigned amount = (insn >> 6) & 31u;
+        unsigned source = (insn >> 3) & 7u;
+        unsigned rd = insn & 7u;
+        thumb_emit_shift(out, false, type, rd, source, amount, pc_value);
+        *written = 2u;
+        return true;
+    }
+
+    if ((insn & UINT16_C(0xf800)) == UINT16_C(0x1800)) {
+        unsigned rd = insn & 7u;
+        unsigned rn = (insn >> 3) & 7u;
+        unsigned operand = (insn >> 6) & 7u;
+        unsigned opcode = (insn & (1u << 9)) != 0u ? 2u : 4u;
+        if (insn & (1u << 10)) {
+            out->handler = dp_imm(opcode, true, rd, rn);
+            out->immediate = operand;
+            out->pc_value = pc_value;
+            *written = 1u;
+        } else {
+            thumb_emit_dp_reg(out, opcode, true, rd, rn, operand,
+                              false, pc_value);
+            *written = 2u;
+        }
+        return true;
+    }
+
+    if ((insn & UINT16_C(0xe000)) == UINT16_C(0x2000)) {
         unsigned rd = (insn >> 8) & 7u;
-        bool subtract = (insn & UINT16_C(0x0800)) != 0u;
-        out->handler = rr(subtract ? A64S_SUBS_IMM : A64S_ADDS_IMM,
-                          rd, rd);
+        unsigned operation = (insn >> 11) & 3u;
+        if (operation >= 2u) {
+            out->handler = rr(operation == 3u ? A64S_SUBS_IMM
+                                              : A64S_ADDS_IMM,
+                              rd, rd);
+        } else {
+            unsigned opcode = operation == 0u ? 13u : 10u;
+            unsigned handler_rd = operation == 0u ? rd : 0u;
+            unsigned rn = operation == 0u ? 0u : rd;
+            out->handler = dp_imm(opcode, true, handler_rd, rn);
+            out->metadata = A64S_CARRY_PRESERVE;
+        }
         out->immediate = insn & 255u;
+        out->pc_value = pc_value;
+        *written = 1u;
         return true;
     }
 
-    if ((insn & UINT16_C(0xffc0)) == UINT16_C(0x4040)) {
+    if ((insn & UINT16_C(0xfc00)) == UINT16_C(0x4000)) {
         unsigned rm = (insn >> 3) & 7u;
         unsigned rd = insn & 7u;
-        out->handler = rr(A64S_EORS_RR, rd, rm);
-        out->immediate = 0u;
+        unsigned opcode = (insn >> 6) & 15u;
+        switch (opcode) {
+        case 1u: /* EOR: retain the compact r491 handler. */
+            out->handler = rr(A64S_EORS_RR, rd, rm);
+            *written = 1u;
+            return true;
+        case 2u: case 3u: case 4u: case 7u:
+            thumb_emit_shift(out, true,
+                             opcode == 2u ? 0u :
+                             opcode == 3u ? 1u :
+                             opcode == 4u ? 2u : 3u,
+                             rd, rd, rm, pc_value);
+            *written = 2u;
+            return true;
+        case 9u: /* NEG Rd, Rm is RSBS Rd,Rm,#0. */
+            out->handler = dp_imm(3u, true, rd, rm);
+            out->immediate = 0u;
+            out->pc_value = pc_value;
+            *written = 1u;
+            return true;
+        case 13u:
+            out->handler = rr(A64S_MULS_RR, rd, rm);
+            *written = 1u;
+            return true;
+        default: {
+            unsigned arm_opcode;
+            bool needs_carry = false;
+            switch (opcode) {
+            case 0u:  arm_opcode = 0u;  needs_carry = true; break; /* AND */
+            case 5u:  arm_opcode = 5u;  break;                    /* ADC */
+            case 6u:  arm_opcode = 6u;  break;                    /* SBC */
+            case 8u:  arm_opcode = 8u;  needs_carry = true; break; /* TST */
+            case 10u: arm_opcode = 10u; break;                    /* CMP */
+            case 11u: arm_opcode = 11u; break;                    /* CMN */
+            case 12u: arm_opcode = 12u; needs_carry = true; break; /* ORR */
+            case 14u: arm_opcode = 14u; needs_carry = true; break; /* BIC */
+            case 15u: arm_opcode = 15u; needs_carry = true; break; /* MVN */
+            default: return false;
+            }
+            bool writes_result = arm_opcode < 8u || arm_opcode >= 12u;
+            unsigned handler_rd = writes_result ? rd : 0u;
+            unsigned rn = arm_opcode == 15u ? 0u : rd;
+            thumb_emit_dp_reg(out, arm_opcode, true, handler_rd, rn,
+                              rm, needs_carry, pc_value);
+            *written = 2u;
+            return true;
+        }
+        }
+    }
+
+    if ((insn & UINT16_C(0xfc00)) == UINT16_C(0x4400)) {
+        unsigned operation = (insn >> 8) & 3u;
+        unsigned rd = (insn & 7u) | ((insn >> 4) & 8u);
+        unsigned rm = ((insn >> 3) & 7u) | ((insn >> 3) & 8u);
+        if (operation == 3u || (operation != 1u && rd == 15u))
+            return false;
+        unsigned opcode = operation == 0u ? 4u :
+                          operation == 1u ? 10u : 13u;
+        bool writes_result = operation != 1u;
+        unsigned handler_rd = writes_result ? rd : 0u;
+        unsigned rn = operation == 2u ? 0u : rd;
+        thumb_emit_dp_reg(out, opcode, operation == 1u,
+                          handler_rd, rn, rm, false, pc_value);
+        *written = 2u;
         return true;
     }
 
@@ -376,6 +503,27 @@ static bool decode_thumb(uint16_t insn, unsigned index, unsigned insns,
         bool load = (insn & UINT16_C(0x0800)) != 0u;
         out->handler = (load ? A64S_LDR_SP : A64S_STR_SP) + rd;
         out->immediate = (uint32_t)(insn & 255u) * 4u;
+        out->pc_value = pc_value;
+        *written = 1u;
+        return true;
+    }
+
+    if ((insn & UINT16_C(0xf000)) == UINT16_C(0xa000)) {
+        unsigned rd = (insn >> 8) & 7u;
+        bool sp = (insn & (1u << 11)) != 0u;
+        out->handler = dp_imm(4u, false, rd, sp ? 13u : 15u);
+        out->immediate = (uint32_t)(insn & 255u) * 4u;
+        out->pc_value = sp ? pc_value : (pc_value & ~UINT32_C(3));
+        *written = 1u;
+        return true;
+    }
+
+    if ((insn & UINT16_C(0xff00)) == UINT16_C(0xb000)) {
+        bool subtract = (insn & (1u << 7)) != 0u;
+        out->handler = dp_imm(subtract ? 2u : 4u, false, 13u, 13u);
+        out->immediate = (uint32_t)(insn & 127u) * 4u;
+        out->pc_value = pc_value;
+        *written = 1u;
         return true;
     }
 
@@ -394,14 +542,16 @@ static bool decode_program_at(const void *program, unsigned insns, bool thumb,
     memset(out, 0, sizeof *out);
     for (unsigned i = 0; i < insns; i++) {
         bool ok;
-        unsigned added = 1u;
+        unsigned added = 0u;
         if (thumb) {
             const uint8_t *p = bytes + i * 2u;
             ok = decode_thumb(guest_bytes ? read_le16(p) : read_native16(p),
-                              i, insns, pc, &out->uops[uop_count]);
-            if (ok && read_hits &&
-                handler_touches_memory(out->uops[uop_count].handler))
-                ok = false;
+                              i, insns, pc, &out->uops[uop_count], &added);
+            if (ok && read_hits)
+                for (unsigned j = 0u; j < added; j++)
+                    if (handler_touches_memory(
+                            out->uops[uop_count + j].handler))
+                        ok = false;
         } else {
             const uint8_t *p = bytes + i * 4u;
             ok = decode_arm(guest_bytes ? read_le32(p) : read_native32(p),
