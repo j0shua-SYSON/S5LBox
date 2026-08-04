@@ -2631,7 +2631,8 @@ typedef struct {
 typedef enum {
     SOC_ENTRY_REFERENCE,
     SOC_ENTRY_SIGNED,
-    SOC_ENTRY_GRAPH
+    SOC_ENTRY_GRAPH,
+    SOC_ENTRY_GRAPH_FUSED
 } soc_entry_path_t;
 
 static const char *soc_entry_path_name(soc_entry_path_t path) {
@@ -2639,6 +2640,7 @@ static const char *soc_entry_path_name(soc_entry_path_t path) {
     case SOC_ENTRY_REFERENCE: return "reference";
     case SOC_ENTRY_SIGNED:    return "signed";
     case SOC_ENTRY_GRAPH:     return "graph";
+    case SOC_ENTRY_GRAPH_FUSED: return "graph-fused";
     }
     return "invalid";
 }
@@ -2655,9 +2657,11 @@ static void free_soc_run_result(soc_run_result_t *result) {
  * device ticks. A complete machine snapshot is retained for comparison with
  * the interpreter arm; the signed cache and its counter are host diagnostics
  * and deliberately do not enter that architectural byte stream. */
-static bool run_soc_entry_path(const uint32_t *program, unsigned length,
-                               uint64_t total, soc_entry_path_t path,
-                               soc_run_result_t *out) {
+static bool run_soc_entry_path_config(const uint32_t *program,
+                                      unsigned length, uint64_t total,
+                                      soc_entry_path_t path,
+                                      bool read_loop,
+                                      soc_run_result_t *out) {
     s5l8900_t machine = {0};
     arm_status_t status = ARM_OK;
     uint64_t remaining = total;
@@ -2672,9 +2676,11 @@ static bool run_soc_entry_path(const uint32_t *program, unsigned length,
     bool ok = false;
 
     bool signed_path = path != SOC_ENTRY_REFERENCE;
-    bool graph_path = path == SOC_ENTRY_GRAPH;
+    bool graph_path = path == SOC_ENTRY_GRAPH ||
+                      path == SOC_ENTRY_GRAPH_FUSED;
+    bool fused_path = path == SOC_ENTRY_GRAPH_FUSED;
 
-    if (!program || !length || !out || path > SOC_ENTRY_GRAPH)
+    if (!program || !length || !out || path > SOC_ENTRY_GRAPH_FUSED)
         return false;
     memset(out, 0, sizeof *out);
     if (!s5l8900_init(&machine, 0u, RAM_SIZE)) {
@@ -2684,6 +2690,15 @@ static bool run_soc_entry_path(const uint32_t *program, unsigned length,
     initialized = true;
     s5l8900_load(&machine, 0u, program,
                  (size_t)length * sizeof *program);
+    if (read_loop) {
+        machine.cpu.r[0] = DATA_BASE;
+        for (unsigned i = 0u; i + 1u < length; i++) {
+            uint32_t value = UINT32_C(0x10203040) ^
+                (UINT32_C(0x01020408) * (i + 1u));
+            s5l8900_load(&machine, DATA_BASE + i * 4u,
+                         &value, sizeof value);
+        }
+    }
 
     /* Clear reset's dirty-level gate before warming either path. This uses the
      * real 412 MHz:6 MHz board clocks installed by s5l8900_init(). */
@@ -2696,6 +2711,11 @@ static bool run_soc_entry_path(const uint32_t *program, unsigned length,
     if (graph_path &&
         !s5l8900_static_a64_set_graph(&machine, true)) {
         fprintf(stderr, "jitbench: SoC entry graph engine unavailable\n");
+        goto done;
+    }
+    if (fused_path &&
+        !s5l8900_static_a64_set_fused_reads(&machine, true)) {
+        fprintf(stderr, "jitbench: SoC entry fused decoder unavailable\n");
         goto done;
     }
 
@@ -2770,6 +2790,150 @@ static bool run_soc_entry_path(const uint32_t *program, unsigned length,
 done:
     if (initialized) s5l8900_free(&machine);
     if (!ok) free_soc_run_result(out);
+    return ok;
+}
+
+static bool run_soc_entry_path(const uint32_t *program, unsigned length,
+                               uint64_t total, soc_entry_path_t path,
+                               soc_run_result_t *out) {
+    return run_soc_entry_path_config(program, length, total, path, false,
+                                     out);
+}
+
+/* Cross the real app-facing SoC entry, decode cache, complete raw-byte
+ * witness, dynamic gates, timer boundaries and device tick for the same
+ * maximal warmed-read loop used by the direct wrapper gate. Baseline and
+ * fused graph machines are separate but live in one executable, run in
+ * rotated order, and must serialize byte-identically to the interpreter. */
+static bool bench_soc_fused_reads(uint64_t requested, unsigned reps) {
+    const unsigned length =
+        (unsigned)(sizeof A32_FUSED_READ_LOOP /
+                   sizeof A32_FUSED_READ_LOOP[0]);
+    double *reference_rates = NULL;
+    double *baseline_rates = NULL;
+    double *fused_rates = NULL;
+    uint64_t blocks, total;
+    uint64_t baseline_chains = 0u;
+    uint64_t fused_chains = 0u;
+    bool ok = false;
+
+    if (!requested || requested > UINT64_MAX - (length - 1u))
+        return false;
+    blocks = (requested + length - 1u) / length;
+    total = blocks * length;
+    reference_rates = (double *)calloc(reps, sizeof *reference_rates);
+    baseline_rates = (double *)calloc(reps, sizeof *baseline_rates);
+    fused_rates = (double *)calloc(reps, sizeof *fused_rates);
+    if (!reference_rates || !baseline_rates || !fused_rates) {
+        fprintf(stderr, "jitbench: SoC fused-read out of memory\n");
+        goto done;
+    }
+
+    for (unsigned rep = 0u; rep < reps; rep++) {
+        soc_run_result_t reference = {0};
+        soc_run_result_t baseline = {0};
+        soc_run_result_t fused = {0};
+        const char *order;
+        bool ran;
+
+        if (rep % 3u == 0u) {
+            order = "reference-baseline-fused";
+            ran = run_soc_entry_path_config(
+                      A32_FUSED_READ_LOOP, length, total,
+                      SOC_ENTRY_REFERENCE, true, &reference) &&
+                  run_soc_entry_path_config(
+                      A32_FUSED_READ_LOOP, length, total,
+                      SOC_ENTRY_GRAPH, true, &baseline) &&
+                  run_soc_entry_path_config(
+                      A32_FUSED_READ_LOOP, length, total,
+                      SOC_ENTRY_GRAPH_FUSED, true, &fused);
+        } else if (rep % 3u == 1u) {
+            order = "baseline-fused-reference";
+            ran = run_soc_entry_path_config(
+                      A32_FUSED_READ_LOOP, length, total,
+                      SOC_ENTRY_GRAPH, true, &baseline) &&
+                  run_soc_entry_path_config(
+                      A32_FUSED_READ_LOOP, length, total,
+                      SOC_ENTRY_GRAPH_FUSED, true, &fused) &&
+                  run_soc_entry_path_config(
+                      A32_FUSED_READ_LOOP, length, total,
+                      SOC_ENTRY_REFERENCE, true, &reference);
+        } else {
+            order = "fused-reference-baseline";
+            ran = run_soc_entry_path_config(
+                      A32_FUSED_READ_LOOP, length, total,
+                      SOC_ENTRY_GRAPH_FUSED, true, &fused) &&
+                  run_soc_entry_path_config(
+                      A32_FUSED_READ_LOOP, length, total,
+                      SOC_ENTRY_REFERENCE, true, &reference) &&
+                  run_soc_entry_path_config(
+                      A32_FUSED_READ_LOOP, length, total,
+                      SOC_ENTRY_GRAPH, true, &baseline);
+        }
+        if (!ran || !reference.snapshot || !baseline.snapshot ||
+            !fused.snapshot ||
+            reference.snapshot_len != baseline.snapshot_len ||
+            reference.snapshot_len != fused.snapshot_len ||
+            memcmp(reference.snapshot, baseline.snapshot,
+                   reference.snapshot_len) != 0 ||
+            memcmp(reference.snapshot, fused.snapshot,
+                   reference.snapshot_len) != 0 ||
+            baseline.signed_chains != fused.signed_chains ||
+            baseline.graph_chains != fused.graph_chains) {
+            fprintf(stderr,
+                    "jitbench: SoC fused-read repetition %u failed exact "
+                    "machine equality\n", rep + 1u);
+            free_soc_run_result(&reference);
+            free_soc_run_result(&baseline);
+            free_soc_run_result(&fused);
+            goto done;
+        }
+        if (rep == 0u) {
+            baseline_chains = baseline.graph_chains;
+            fused_chains = fused.graph_chains;
+        } else if (baseline_chains != baseline.graph_chains ||
+                   fused_chains != fused.graph_chains) {
+            fprintf(stderr,
+                    "jitbench: SoC fused-read chain counts changed across "
+                    "repetitions\n");
+            free_soc_run_result(&reference);
+            free_soc_run_result(&baseline);
+            free_soc_run_result(&fused);
+            goto done;
+        }
+        reference_rates[rep] = (double)total / reference.seconds / 1.0e6;
+        baseline_rates[rep] = (double)total / baseline.seconds / 1.0e6;
+        fused_rates[rep] = (double)total / fused.seconds / 1.0e6;
+        printf("SOC-FUSED-READ-SAMPLE rep=%u order=%s reference=%.3f "
+               "baseline-graph=%.3f fused-graph=%.3f Minsn/s chains=%"
+               PRIu64 " exact-snapshot=yes\n",
+               rep + 1u, order, reference_rates[rep], baseline_rates[rep],
+               fused_rates[rep], fused.graph_chains);
+        free_soc_run_result(&reference);
+        free_soc_run_result(&baseline);
+        free_soc_run_result(&fused);
+    }
+
+    qsort(reference_rates, reps, sizeof *reference_rates, cmp_double);
+    qsort(baseline_rates, reps, sizeof *baseline_rates, cmp_double);
+    qsort(fused_rates, reps, sizeof *fused_rates, cmp_double);
+    printf("SOC-FUSED-READ-CURVE guest-insns=%" PRIu64
+           " block-insns=%u reps=%u read-share=93.750%% same-binary=yes "
+           "run-api=yes cache-lookup=yes block-witness=yes entry-gates=yes "
+           "timer-boundaries=yes device-tick=yes exact-snapshot=yes "
+           "baseline-chains=%" PRIu64 " fused-chains=%" PRIu64
+           " reference-median=%.3f baseline-graph-median=%.3f "
+           "fused-graph-median=%.3f fused-over-baseline=%.3fx\n",
+           total, length, reps, baseline_chains, fused_chains,
+           reference_rates[reps / 2u], baseline_rates[reps / 2u],
+           fused_rates[reps / 2u],
+           fused_rates[reps / 2u] / baseline_rates[reps / 2u]);
+    ok = true;
+
+done:
+    free(reference_rates);
+    free(baseline_rates);
+    free(fused_rates);
     return ok;
 }
 
@@ -3156,6 +3320,7 @@ int main(int argc, char **argv) {
     if (!validate_static_branch_oracles()) return 1;
     if (!validate_static_oracles()) return 1;
     if (!bench_static_fused_reads(soc_insns, reps)) return 1;
+    if (!bench_soc_fused_reads(soc_insns, reps)) return 1;
 
     for (i = 0u; i < sizeof CASES / sizeof CASES[0]; i++) {
         if (!bench_one(&CASES[i], insns, reps)) return 1;

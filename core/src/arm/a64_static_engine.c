@@ -38,6 +38,7 @@ typedef struct {
     bool enabled;
     bool persistent;
     bool graph_enabled;
+    bool fused_reads;
     uint64_t retired;
     uint64_t chained_blocks;
     uint64_t persistent_chained_blocks;
@@ -69,11 +70,15 @@ static bool entry_matches(const static_a64_entry_t *entry,
 }
 
 static bool decode_longest(const uint8_t *bytes, unsigned candidate_insns,
-                           bool thumb, uint32_t pc,
+                           bool thumb, uint32_t pc, bool fused_reads,
                            a64_static_block_t *out) {
     for (unsigned count = candidate_insns; count != 0u; count--) {
-        if (a64_static_decode_read_hits_bytes_at(bytes, count, thumb, pc,
-                                                 out))
+        bool decoded = fused_reads
+            ? a64_static_decode_fused_read_hits_bytes_at(
+                  bytes, count, thumb, pc, out)
+            : a64_static_decode_read_hits_bytes_at(
+                  bytes, count, thumb, pc, out);
+        if (decoded)
             return true;
     }
     return false;
@@ -133,7 +138,8 @@ static void decode_entry(static_a64_state_t *state, static_a64_entry_t *entry,
 
     /* Decode the longest exact prefix. Product loads carry a guarded DREAD hit;
      * stores and unsupported forms still shorten to an earlier exact prefix. */
-    if (decode_longest(bytes, candidate_insns, thumb, pc, &entry->block)) {
+    if (decode_longest(bytes, candidate_insns, thumb, pc,
+                       state->fused_reads, &entry->block)) {
         entry->supported = true;
         entry->raw_len = (uint8_t)(entry->block.insn_count * width);
     } else {
@@ -221,6 +227,7 @@ static const a64_static_block_t *select_persistent_block(
     /* A bounded prefix lives in the persistent invocation's outer C frame;
      * the next callback cannot overwrite it until this block has completed. */
     if (!decode_longest(bytes, remaining, thumb, pc,
+                        context->state->fused_reads,
                         &context->bounded_block))
         return NULL;
     return &context->bounded_block;
@@ -294,6 +301,35 @@ bool s5l8900_static_a64_set_graph(s5l8900_t *m, bool enabled) {
         return false;
     state->persistent = false;
     state->graph_enabled = true;
+    return true;
+#else
+    (void)enabled;
+    return false;
+#endif
+}
+
+bool s5l8900_static_a64_set_fused_reads(s5l8900_t *m, bool enabled) {
+    if (!m) return false;
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    static_a64_state_t *state = static_state(m);
+    if (!enabled) {
+        if (state && state->fused_reads) {
+            memset(state->cache, 0, sizeof state->cache);
+            memset(state->graph_nodes, 0, sizeof state->graph_nodes);
+            state->fused_reads = false;
+        }
+        return true;
+    }
+    if (!state || !state->enabled || !a64_static_host_available())
+        return false;
+    if (!state->fused_reads) {
+        /* A decoded block owns handler IDs and packed record immediates from
+         * exactly one decoder contract. Flush both host-only tables before
+         * changing contracts; guest state and diagnostic totals stay live. */
+        memset(state->cache, 0, sizeof state->cache);
+        memset(state->graph_nodes, 0, sizeof state->graph_nodes);
+        state->fused_reads = true;
+    }
     return true;
 #else
     (void)enabled;
@@ -508,6 +544,7 @@ unsigned s5l8900_static_a64_try(s5l8900_t *m, unsigned max_insns) {
             /* The total chain never crosses its caller/time/device budget.
              * Decode an exact bounded prefix without mutating the cache. */
             if (!decode_longest(bytes, remaining, thumb, pc,
+                                state->fused_reads,
                                 &bounded_block))
                 break;
             run_block = &bounded_block;

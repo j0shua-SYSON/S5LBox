@@ -213,6 +213,7 @@ jobs:
             grep -Fq 'STATIC-FUSED-READ-SHAPE exact=yes insns=16 baseline-uops=31 fused-uops=16 handlers=25194' <<<"$static_output"
             grep -Eq 'STATIC-FUSED-READ-ORACLE exact=yes a32=yes thumb=yes vfp=yes high-register=yes zero-prefix=yes baseline-uops=[1-9][0-9]* fused-uops=[1-9][0-9]* handlers=25194' <<<"$static_output"
             grep -Eq 'STATIC-FUSED-READ-CURVE guest-insns=10000 block-insns=16 baseline-uops=31 fused-uops=16 reps=1 .*same-binary=yes decoded-wrapper=yes .*fused-over-baseline=[0-9.]+x exact=yes' <<<"$static_output"
+            grep -Eq 'SOC-FUSED-READ-CURVE guest-insns=10000 block-insns=16 reps=1 read-share=93.750% same-binary=yes run-api=yes cache-lookup=yes block-witness=yes entry-gates=yes timer-boundaries=yes device-tick=yes exact-snapshot=yes .*fused-over-baseline=[0-9.]+x' <<<"$static_output"
             grep -Eq 'PRODUCT-ENTRY-CEILING length=1 uops=1 guest-insns=10000 reps=1 predecoded=yes validated-wrapper=yes decoded-contract=yes cache-lookup=no' <<<"$static_output"
             grep -Eq 'PRODUCT-ENTRY-CEILING length=16 uops=16 guest-insns=10000 reps=1 predecoded=yes validated-wrapper=yes decoded-contract=yes cache-lookup=no' <<<"$static_output"
             grep -Eq 'SOC-ENTRY-CURVE length=1 uops=1 guest-insns=10000 reps=1 run-api=yes cache-lookup=yes block-witness=yes .*exact-snapshot=yes signed-retired=10000 signed-chains=[1-9][0-9]* graph-chains=[1-9][0-9]*' <<<"$static_output"
