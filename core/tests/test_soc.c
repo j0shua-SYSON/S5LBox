@@ -3081,7 +3081,7 @@ static void test_signed_static_a64_soc_oracle(void) {
         0xe3580000u, /* CMP   r8,#0              */
         0x02888001u, /* ADDEQ r8,r8,#1           */
         0x12888008u, /* ADDNE r8,r8,#8           */
-        0xe3a09102u, /* MOV   r9,#0x80000000     */
+        0xe59f90e8u, /* LDR   r9,[pc,#0xe8] -> 0x100 */
         0xe3b0a102u, /* MOVS  r10,#0x80000000    */
         0xe2a8b002u, /* ADC   r11,r8,#2          */
         0xe2cbc001u, /* SBC   r12,r11,#1         */
@@ -3123,6 +3123,11 @@ static void test_signed_static_a64_soc_oracle(void) {
 
     s5l8900_load(&fast, 0u, signed_loop, sizeof signed_loop);
     s5l8900_load(&reference, 0u, signed_loop, sizeof signed_loop);
+    {
+        const uint32_t load_value = UINT32_C(0x80000000);
+        s5l8900_load(&fast, 0x100u, &load_value, sizeof load_value);
+        s5l8900_load(&reference, 0x100u, &load_value, sizeof load_value);
+    }
     /* The board's real 412 MHz:6 MHz non-integral ratio makes the run cross
      * hundreds of device boundaries, rather than proving a timer-free line.
      * Keep it real: tb_hz is also the PMU's configured clock and snapshots

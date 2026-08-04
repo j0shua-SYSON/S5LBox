@@ -19,7 +19,7 @@ CONDITIONS = (
     "eq", "ne", "cs", "cc", "mi", "pl", "vs", "vc",
     "hi", "ls", "ge", "lt", "gt", "le",
 )
-EXPECTED_HANDLERS = 23847
+EXPECTED_HANDLERS = 23941
 
 
 def next_dispatch() -> list[str]:
@@ -347,6 +347,84 @@ def shift_register_body(needs_carry: bool, shift_type: int,
     return body
 
 
+def address_body(up: bool, rn: int, register_offset: bool) -> list[str]:
+    body: list[str] = []
+    if not register_offset:
+        body.append("    ldur w9, [x13, #-12]")
+    loads, source = read_guest_register(rn, 10)
+    body.extend(loads)
+    offset = "w17" if register_offset else "w9"
+    body.append(
+        f"    {'add' if up else 'sub'} w17, {source}, {offset}"
+    )
+    body.extend(next_dispatch())
+    return body
+
+
+def direct_read_body(byte: bool, rd: int) -> list[str]:
+    result, stores = result_register(rd)
+    body = [
+        # Every comparison below uses host NZCV. Preserve the guest flags even
+        # when the access misses and exits in the middle of a block.
+        "    mrs x7, nzcv",
+        "    cbnz x3, 1f",
+        "    b .La64s_direct_miss",
+        "1:",
+    ]
+    if not byte:
+        # The observed boot window had no unaligned candidate. Refusing it is
+        # nevertheless essential: arm_step owns SCTLR.A/U faults and legacy
+        # rotate semantics, while an aligned word cannot cross a 1 KiB block.
+        body.extend([
+            "    tst w17, #3",
+            "    b.eq 1f",
+            "    b .La64s_direct_miss",
+            "1:",
+        ])
+    body.extend([
+        # slot = ((va >> 10) + (priv ? 32 : 0)) & 63
+        "    ldr w4, [x3, #20]",
+        "    lsr w5, w17, #10",
+        "    add w5, w5, w4, lsl #5",
+        "    and w5, w5, #63",
+        "    ldr x6, [x3, #0]",
+        "    add x6, x6, w5, uxtw #4",
+        "    ldr x16, [x6, #0]",
+        "    cbnz x16, 1f",
+        "    b .La64s_direct_miss",
+        "1:",
+        # tag = 1 KiB-aligned VA | privilege
+        "    lsr w4, w17, #10",
+        "    lsl w4, w4, #10",
+        "    ldr w5, [x3, #20]",
+        "    orr w4, w4, w5",
+        "    ldr w5, [x6, #8]",
+        "    cmp w5, w4",
+        "    b.eq 1f",
+        "    b .La64s_direct_miss",
+        "1:",
+        "    ldr w4, [x6, #12]",
+        "    ldr w5, [x3, #16]",
+        "    cmp w4, w5",
+        "    b.eq 1f",
+        "    b .La64s_direct_miss",
+        "1:",
+        "    and w4, w17, #0x3ff",
+        "    add x16, x16, w4, uxtw",
+        f"    {'ldrb' if byte else 'ldr'} {result}, [x16]",
+        *stores,
+        # Match dread_hit(): one hit for each successful direct access and no
+        # counter change at all on a miss left for the literal slow path.
+        "    ldr x4, [x3, #8]",
+        "    ldr x5, [x4]",
+        "    add x5, x5, #1",
+        "    str x5, [x4]",
+        "    msr nzcv, x7",
+        *next_dispatch(),
+    ])
+    return body
+
+
 def build_handlers() -> list[tuple[str, list[str]]]:
     handlers: list[tuple[str, list[str]]] = []
 
@@ -518,6 +596,25 @@ def build_handlers() -> list[tuple[str, list[str]]]:
                         dp_register_body(opcode, set_flags, rd, rn),
                     ))
 
+    # The product read path splits address generation from the cache access.
+    # U and Rn are ordinary ISA dimensions; immediates remain in data records.
+    for up in (False, True):
+        for rn in range(16):
+            label = f".La64s_addr_imm_{int(up)}_{rn}"
+            handlers.append((label, address_body(up, rn, False)))
+
+    for up in (False, True):
+        for rn in range(16):
+            label = f".La64s_addr_reg_{int(up)}_{rn}"
+            handlers.append((label, address_body(up, rn, True)))
+
+    # Loads to PC remain literal. Byte/word and r0-r14 need only thirty direct
+    # handlers because the address record has already produced the exact VA.
+    for byte in (False, True):
+        for rd in range(15):
+            label = f".La64s_direct_read_{int(byte)}_{rd}"
+            handlers.append((label, direct_read_body(byte, rd)))
+
     if len(handlers) != EXPECTED_HANDLERS:
         raise RuntimeError(
             f"generated {len(handlers)} handlers, expected {EXPECTED_HANDLERS}"
@@ -561,6 +658,9 @@ def render() -> str:
         "    mov x14, x3",
         "    mov x13, x3",
         "    mov x15, x4",
+        # The ninth AAPCS64 argument lives at the entry SP. The 96-byte
+        # prologue moves that slot to [sp,#96]; it is NULL for the flat proof.
+        "    ldr x3, [sp, #96]",
         # ADR also reaches only +/-1 MiB. Use the platform's page-relative
         # relocation spelling so handler growth cannot invalidate the entry.
         "#if defined(__APPLE__)",
@@ -587,7 +687,23 @@ def render() -> str:
 
     lines.extend([
         "",
+        ".La64s_direct_miss:",
+        # metadata low byte is the unretired suffix (including this load); the
+        # next byte is completed+1 so zero can continue to mean full success.
+        "    ldur w16, [x13, #-4]",
+        "    and w9, w16, #0xff",
+        "    ldr x10, [x2]",
+        "    sub x10, x10, x9",
+        "    str x10, [x2]",
+        "    ldur w12, [x13, #-8]",
+        "    ubfx w17, w16, #8, #8",
+        "    msr nzcv, x7",
+        "    b .La64s_save",
+        "",
         ".La64s_exit:",
+        "    mov w17, wzr",
+        "",
+        ".La64s_save:",
         "    stp w19, w20, [x0, #0]",
         "    stp w21, w22, [x0, #8]",
         "    stp w23, w24, [x0, #16]",
@@ -606,7 +722,7 @@ def render() -> str:
         "    ldp x21, x22, [sp, #32]",
         "    ldp x19, x20, [sp, #16]",
         "    ldp x29, x30, [sp], #96",
-        "    mov w0, wzr",
+        "    mov w0, w17",
         "    ret",
         "#if !defined(__APPLE__)",
         ".size A64S_CSYM(a64_static_execute), .-A64S_CSYM(a64_static_execute)",

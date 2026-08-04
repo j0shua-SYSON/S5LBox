@@ -4,9 +4,10 @@
  * This is deliberately NOT a product-performance claim and not a JIT
  * dispatcher. It translates one small synthetic block once, then compares
  * repeated interpreter execution with both that already-built block and a
- * firmware-independent static-threaded proof. The proof's 23,847 generic
+ * firmware-independent static-threaded proof. The proof's 23,941 generic
  * ISA/register handlers are compiled and signed with the executable; runtime
- * decoding creates data records only.
+ * decoding creates data records only. The table now has 23,941 handlers,
+ * including a product-only guarded read-cache path.
  *
  * The answer is only a feasibility bound. There is no device tick, MMIO,
  * interrupt sampling, cache lookup, translation, chaining, framebuffer
@@ -180,6 +181,13 @@ static const uint16_t THUMB_SHORT_BRANCH[] = {
      ((uint32_t)(rd) << 12) | ((uint32_t)(rs) << 8) |                      \
      ((uint32_t)(type) << 5) | UINT32_C(0x10) | (uint32_t)(rm))
 
+#define A32_SINGLE(cond, indexed, up, byte, load, rn, rd, offset)           \
+    (((uint32_t)(cond) << 28) | UINT32_C(0x04000000) |                     \
+     ((uint32_t)(indexed) << 25) | UINT32_C(0x01000000) |                  \
+     ((uint32_t)(up) << 23) | ((uint32_t)(byte) << 22) |                   \
+     ((uint32_t)(load) << 20) | ((uint32_t)(rn) << 16) |                   \
+     ((uint32_t)(rd) << 12) | (uint32_t)(offset))
+
 /* All sixteen A32 immediate data-processing opcodes. This deliberately uses
  * r8-r14, PC as an input, arithmetic and logical flag writes, both rotated and
  * unrotated immediates, and carry-consuming operations. */
@@ -288,6 +296,31 @@ static const uint32_t A32_REG_CONDITIONS[] = {
     A32_DP_REG_IMM(12, 4, 0, 8, 8, 9, 0, 1),
     A32_DP_REG_IMM(13, 4, 0, 8, 8, 9, 0, 1),
     A32_DP_REG_IMM(14, 13, 0, 0, 14, 8, 3, 0),
+};
+
+/* Product-only cache-hit loads: immediate/register offsets, add/subtract,
+ * byte/word, PC base, high destinations and both condition outcomes. Every
+ * dynamic address is inside one of two explicitly warmed 1 KiB blocks. */
+static const uint32_t A32_READ_HITS[] = {
+    A32_SINGLE(14, 0, 1, 0, 1,  0,  8, 0x020), /* LDR r8,[r0,#0x20]       */
+    A32_SINGLE(14, 0, 0, 1, 1,  2,  9, 0x001), /* LDRB r9,[r2,#-1]        */
+    A32_SINGLE(14, 1, 1, 0, 1,  0, 10, 0x101), /* LDR r10,[r0,r1,LSL #2] */
+    A32_SINGLE(14, 1, 0, 0, 1,  2, 11, 0x101), /* LDR r11,[r2,-r1,LSL #2]*/
+    A32_SINGLE(14, 0, 1, 0, 1, 15, 12, 0x0e8), /* LDR r12,[pc,#0xe8]      */
+    A32_SINGLE(14, 0, 1, 0, 1,  0, 13, 0x024), /* LDR sp,[r0,#0x24]       */
+    A32_SINGLE(14, 0, 1, 0, 1,  0, 14, 0x028), /* LDR lr,[r0,#0x28]       */
+    A32_SINGLE( 1, 0, 1, 0, 1,  0,  3, 0x02c), /* LDRNE r3,[r0,#0x2c]     */
+    A32_SINGLE( 0, 0, 1, 0, 1,  0,  4, 0x030), /* LDREQ r4,... (skipped)   */
+};
+
+static const uint32_t A32_READ_PARTIAL[] = {
+    A32_DP_IMM(14, 4, 0, 0, 0, 0, 1),
+    A32_SINGLE(14, 0, 1, 0, 1, 7, 8, 0),
+    A32_DP_IMM(14, 4, 0, 1, 1, 0, 3),
+};
+
+static const uint32_t A32_READ_ZERO_PREFIX[] = {
+    A32_SINGLE(14, 0, 1, 0, 1, 7, 8, 0),
 };
 
 typedef struct {
@@ -419,12 +452,29 @@ static bool validate_static_shapes(void) {
         A32_DP_REG_REG(14, 4, 0, 0, 0, 15, 0, 2),
         A32_DP_REG_REG(14, 4, 0, 0, 0, 1, 0, 15),
     };
+    static const uint32_t INVALID_READ_HITS[] = {
+        A32_SINGLE(14, 0, 1, 0, 0, 0, 1, 0), /* store */
+        UINT32_C(0xe4901000),                 /* post-index load */
+        UINT32_C(0xe5b01000),                 /* pre-index writeback */
+        A32_SINGLE(14, 0, 1, 0, 1, 0, 15, 0),/* load to PC */
+        A32_SINGLE(14, 1, 1, 0, 1, 0, 1, 15),/* register Rm=PC */
+        A32_SINGLE(14, 1, 1, 0, 1, 0, 1, 0x11),/* reserved bit 4 */
+    };
     /* Deliberately unaligned guest byte stream: ADD r0,r0,#1. */
     static const uint8_t UNALIGNED_A32[] = {
         0xffu, 0x01u, 0x00u, 0x80u, 0xe2u,
     };
     a64_static_block_t block;
+    uint8_t read_bytes[sizeof A32_READ_HITS];
     unsigned i;
+
+    for (i = 0u; i < sizeof A32_READ_HITS / sizeof A32_READ_HITS[0]; i++) {
+        uint32_t value = A32_READ_HITS[i];
+        read_bytes[i * 4u + 0u] = (uint8_t)value;
+        read_bytes[i * 4u + 1u] = (uint8_t)(value >> 8);
+        read_bytes[i * 4u + 2u] = (uint8_t)(value >> 16);
+        read_bytes[i * 4u + 3u] = (uint8_t)(value >> 24);
+    }
 
     for (i = 0u; i < sizeof STATIC_CASES / sizeof STATIC_CASES[0]; i++) {
         const static_case_t *sc = &STATIC_CASES[i];
@@ -454,6 +504,36 @@ static bool validate_static_shapes(void) {
         }
     }
 
+    if (!a64_static_decode_read_hits_bytes_at(
+            read_bytes, (unsigned)(sizeof A32_READ_HITS /
+                                   sizeof A32_READ_HITS[0]),
+            false, 0xb000u, &block) ||
+        block.insn_count != sizeof A32_READ_HITS / sizeof A32_READ_HITS[0] ||
+        block.uop_count != 23u || block.start_pc != 0xb000u ||
+        block.exit_pc != 0xb024u || !block.touches_memory ||
+        !block.direct_reads) {
+        fprintf(stderr, "jitbench: product read-hit shape failed\n");
+        return false;
+    }
+    printf("STATIC-READ-SHAPE exact=yes insns=%u uops=%u handlers=%u\n",
+           block.insn_count, block.uop_count, A64_STATIC_HANDLER_COUNT);
+
+    for (i = 0u; i < sizeof INVALID_READ_HITS /
+                         sizeof INVALID_READ_HITS[0]; i++) {
+        uint32_t value = INVALID_READ_HITS[i];
+        uint8_t bytes[4] = {
+            (uint8_t)value, (uint8_t)(value >> 8),
+            (uint8_t)(value >> 16), (uint8_t)(value >> 24)
+        };
+        if (a64_static_decode_read_hits_bytes_at(bytes, 1u, false, 0u,
+                                                 &block)) {
+            fprintf(stderr,
+                    "jitbench: product decoder accepted invalid read %u\n",
+                    i);
+            return false;
+        }
+    }
+
     if (a64_static_decode_at(A32_SHORT_FALL, 0u, false, 0u, &block) ||
         a64_static_decode_at(A32_SHORT_FALL, A64_STATIC_MAX_INSNS + 1u,
                              false, 0u, &block) ||
@@ -473,6 +553,120 @@ static bool validate_static_shapes(void) {
         fprintf(stderr, "jitbench: static decoder accepted an invalid shape\n");
         return false;
     }
+    return true;
+}
+
+static unsigned oracle_dread_slot(uint32_t va, bool priv) {
+    return (unsigned)(((va >> 10) + (priv ? ARM_DREAD_ENTRIES / 2u : 0u)) &
+                      (ARM_DREAD_ENTRIES - 1u));
+}
+
+static void oracle_warm_dread(arm_cpu_t *cpu, uint32_t va) {
+    const bool priv = (cpu->cpsr & ARM_CPSR_MODE_MASK) != ARM_MODE_USR;
+    const uint32_t block = va & ~UINT32_C(0x3ff);
+    const unsigned slot = oracle_dread_slot(va, priv);
+    cpu->dread[slot].host = &g_ram[block];
+    cpu->dread[slot].tag = block | (priv ? 1u : 0u);
+    cpu->dread[slot].gen = cpu->tlb_gen;
+}
+
+static void seed_read_oracle(arm_cpu_t *cpu, const uint32_t *program,
+                             unsigned insns, uint32_t pc, bool warm) {
+    seed_cpu_at(cpu, program, insns, false, pc);
+    cpu->r[0] = DATA_BASE;
+    cpu->r[1] = 4u;
+    cpu->r[2] = DATA_BASE + 0x20u;
+    mem_w8(NULL, DATA_BASE + 0x1fu, 0xabu);
+    mem_w32(NULL, DATA_BASE + 0x10u, UINT32_C(0x10203040));
+    mem_w32(NULL, DATA_BASE + 0x20u, UINT32_C(0x11223344));
+    mem_w32(NULL, DATA_BASE + 0x24u, UINT32_C(0x55667788));
+    mem_w32(NULL, DATA_BASE + 0x28u, UINT32_C(0x99aabbcc));
+    mem_w32(NULL, DATA_BASE + 0x2cu, UINT32_C(0xddeeff00));
+    mem_w32(NULL, DATA_BASE + 0x30u, UINT32_C(0x13579bdf));
+    if (pc == 0xb000u)
+        mem_w32(NULL, 0xb100u, UINT32_C(0xcafef00d));
+    if (warm) {
+        oracle_warm_dread(cpu, DATA_BASE);
+        if (pc == 0xb000u) oracle_warm_dread(cpu, 0xb100u);
+    }
+}
+
+static bool validate_static_read_oracles(void) {
+    a64_static_block_t block;
+    arm_cpu_t reference, statik, before;
+    final_state_t reference_state, static_state;
+    arm_status_t status = ARM_OK;
+    unsigned completed = 0u;
+
+    seed_read_oracle(&reference, A32_READ_HITS,
+                     (unsigned)(sizeof A32_READ_HITS /
+                                sizeof A32_READ_HITS[0]),
+                     0xb000u, true);
+    statik = reference;
+    if (!a64_static_decode_read_hits_bytes_at(
+            &g_ram[0xb000u],
+            (unsigned)(sizeof A32_READ_HITS / sizeof A32_READ_HITS[0]),
+            false, 0xb000u, &block))
+        return false;
+    for (unsigned i = 0u; i < block.insn_count; i++) {
+        status = arm_step(&reference);
+        if (status != ARM_OK) break;
+    }
+    if (!a64_static_run_read_hits(&statik, &block, g_ram, sizeof g_ram,
+                                  &completed)) {
+        fprintf(stderr, "jitbench: product read-hit execution refused\n");
+        return false;
+    }
+    capture_state(&reference_state, &reference, status, JIT_EXIT_NEXT);
+    capture_state(&static_state, &statik, ARM_OK, JIT_EXIT_NEXT);
+    if (status != ARM_OK || completed != block.insn_count ||
+        !architectural_states_equal(&reference_state, &static_state) ||
+        reference.dread_hits != statik.dread_hits ||
+        reference.dread_misses != statik.dread_misses ||
+        statik.dread_hits != 8u || statik.dread_misses != 0u) {
+        fprintf(stderr, "jitbench: product read-hit oracle mismatch\n");
+        return false;
+    }
+
+    seed_read_oracle(&statik, A32_READ_ZERO_PREFIX, 1u, 0xd000u, false);
+    before = statik;
+    if (!a64_static_decode_read_hits_bytes_at(&g_ram[0xd000u], 1u, false,
+                                              0xd000u, &block) ||
+        !a64_static_run_read_hits(&statik, &block, g_ram, sizeof g_ram,
+                                  &completed) ||
+        completed != 0u || memcmp(statik.r, before.r, sizeof statik.r) != 0 ||
+        statik.cpsr != before.cpsr || statik.cycles != before.cycles ||
+        statik.dread_hits != before.dread_hits ||
+        statik.dread_misses != before.dread_misses) {
+        fprintf(stderr, "jitbench: zero-prefix read miss changed state\n");
+        return false;
+    }
+
+    seed_read_oracle(&reference, A32_READ_PARTIAL, 3u, 0xc000u, false);
+    statik = reference;
+    if (!a64_static_decode_read_hits_bytes_at(&g_ram[0xc000u], 3u, false,
+                                              0xc000u, &block) ||
+        !a64_static_run_read_hits(&statik, &block, g_ram, sizeof g_ram,
+                                  &completed) ||
+        completed != 1u || arm_step(&reference) != ARM_OK ||
+        memcmp(statik.r, reference.r, sizeof statik.r) != 0 ||
+        statik.cpsr != reference.cpsr || statik.cycles != reference.cycles ||
+        statik.dread_hits != 0u || statik.dread_misses != 0u) {
+        fprintf(stderr, "jitbench: partial-prefix read miss mismatch\n");
+        return false;
+    }
+    if (arm_step(&statik) != ARM_OK || arm_step(&reference) != ARM_OK ||
+        memcmp(statik.r, reference.r, sizeof statik.r) != 0 ||
+        statik.cpsr != reference.cpsr || statik.cycles != reference.cycles ||
+        statik.dread_hits != reference.dread_hits ||
+        statik.dread_misses != reference.dread_misses ||
+        statik.dread_misses != 1u) {
+        fprintf(stderr, "jitbench: literal fallback after partial miss differs\n");
+        return false;
+    }
+
+    printf("STATIC-READ-ORACLE exact=yes hits=8 zero-prefix=yes "
+           "partial-prefix=yes\n");
     return true;
 }
 
@@ -783,6 +977,7 @@ int main(int argc, char **argv) {
         fprintf(stderr, "jitbench: arm64 host lacks static handler build\n");
         return 1;
     }
+    if (!validate_static_read_oracles()) return 1;
     if (!validate_static_oracles()) return 1;
 
     for (i = 0u; i < sizeof CASES / sizeof CASES[0]; i++) {

@@ -20,10 +20,10 @@
 #include <stdint.h>
 
 #define A64_STATIC_MAX_INSNS 16u
-/* A conditional register-form A32 instruction uses a guard, shifter and ALU
- * record. The final slot is the fixed block exit. */
-#define A64_STATIC_MAX_UOPS (A64_STATIC_MAX_INSNS * 3u + 1u)
-#define A64_STATIC_HANDLER_COUNT 23847u
+/* A conditional register-offset A32 load uses a guard, shifter, address and
+ * read record. The final slot is the fixed block exit. */
+#define A64_STATIC_MAX_UOPS (A64_STATIC_MAX_INSNS * 4u + 1u)
+#define A64_STATIC_HANDLER_COUNT 23941u
 
 typedef struct {
     uint32_t handler;
@@ -40,6 +40,7 @@ typedef struct {
     uint32_t exit_pc;
     bool thumb;
     bool touches_memory;
+    bool direct_reads;
 } a64_static_block_t;
 
 /* Decode one host-native uint32_t/uint16_t instruction array beginning at
@@ -59,6 +60,16 @@ bool a64_static_decode_bytes_at(const uint8_t *program, unsigned insns,
                                 bool thumb, uint32_t pc,
                                 a64_static_block_t *out);
 
+/* Product decoder for the real SoC path. It replaces only exact A32
+ * pre-indexed, no-writeback loads with read-cache records. Stores, PC loads,
+ * writeback/post-index forms and every other unsupported instruction refuse
+ * cleanly. Runtime cache misses still return to arm_step(), which alone walks
+ * the MMU, raises faults and handles MMIO. */
+bool a64_static_decode_read_hits_bytes_at(const uint8_t *program,
+                                          unsigned insns, bool thumb,
+                                          uint32_t pc,
+                                          a64_static_block_t *out);
+
 /* Compatibility shorthand for a block beginning at address zero. */
 bool a64_static_decode(const void *program, unsigned insns, bool thumb,
                        a64_static_block_t *out);
@@ -72,5 +83,15 @@ bool a64_static_host_available(void);
  * timer or IRQ path exists in this proof. */
 bool a64_static_run(arm_cpu_t *cpu, const a64_static_block_t *block,
                     uint64_t blocks, uint8_t *ram, size_t ram_size);
+
+/* Execute one product-decoded block against the CPU's existing data-read
+ * cache. On a cache miss, `completed` is the exact prefix retired before the
+ * load (possibly zero), PC names that load, and no miss/fault/MMIO side effect
+ * has occurred; the caller must resume with arm_step(). A false return is a
+ * pre-execution contract refusal and leaves guest state unchanged. */
+bool a64_static_run_read_hits(arm_cpu_t *cpu,
+                              const a64_static_block_t *block,
+                              uint8_t *ram, size_t ram_size,
+                              unsigned *completed);
 
 #endif /* S5LBOX_A64_STATIC_H */

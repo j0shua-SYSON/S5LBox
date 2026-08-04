@@ -1448,8 +1448,8 @@ static void s5l8900_refresh(s5l8900_t *m, uint32_t tb) {
 #if defined(S5LBOX_STATIC_A64_ENGINE)
 /* The signed engine may retire several guest instructions before returning to
  * the device graph, but never across the first timebase edge the literal loop
- * would have observed. Its current semantic subset performs no guest memory
- * access, so no device or timebase register can be sampled inside the batch.
+ * would have observed. Its only memory operation is an already-proved plain-RAM
+ * read-cache hit; misses, faults and MMIO return before the load for arm_step().
  * Dirty levels and host inputs force the ordinary one-instruction path first.
  */
 static unsigned static_a64_batch_limit(const s5l8900_t *m,
