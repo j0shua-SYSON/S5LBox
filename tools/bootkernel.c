@@ -24842,6 +24842,11 @@ typedef enum {
  * only and never carries out a guest write. */
 typedef struct {
     sequence_signed_extended_t extended;
+    /* Exact subset implemented by the signed engine: A32 and Thumb
+     * single-register stores only. Keep it beside the broader architecture
+     * ceiling so one replay cannot confuse potential coverage with shipped
+     * coverage. Both models consume the same literal-store DWRITE history. */
+    sequence_signed_extended_t implemented;
     uint64_t family_outcomes[SEQUENCE_STORE_FAMILY_COUNT]
                             [SEQUENCE_STORE_OUTCOME_COUNT];
     uint64_t candidates;
@@ -25947,11 +25952,14 @@ static bool sequence_store_thumb_candidate(
 static bool sequence_store_classify(
         sequence_profile_t *profile, arm_cpu_t *cpu, uint32_t pc,
         uint32_t raw, bool thumb, sequence_class_t instruction_class,
-        sequence_signed_classification_t *classification) {
+        sequence_signed_classification_t *classification,
+        sequence_store_family_t *family_out) {
     sequence_store_blocks_t blocks = { 0 };
     sequence_store_family_t family = SEQUENCE_STORE_ARM_SINGLE;
     sequence_store_outcome_t outcome = SEQUENCE_STORE_INVALID;
     bool candidate = false;
+
+    if (family_out) *family_out = SEQUENCE_STORE_FAMILY_COUNT;
 
     if (thumb) {
         candidate = sequence_store_thumb_candidate(
@@ -25973,6 +25981,7 @@ static bool sequence_store_classify(
         outcome = sequence_store_arm_vfp(cpu, pc, raw, &blocks);
     }
     if (!candidate) return false;
+    if (family_out) *family_out = family;
 
     if (outcome == SEQUENCE_STORE_DWRITE_HIT && blocks.count)
         outcome = sequence_store_probe_blocks(
@@ -26337,10 +26346,10 @@ static void sequence_signed_extended_close(sequence_profile_t *profile,
     model->head_length = 0u;
 }
 
-static void sequence_signed_store_close(sequence_profile_t *profile,
-                                         sequence_signed_stop_t why) {
-    if (!profile) return;
-    sequence_signed_extended_t *model = &profile->signed_store.extended;
+static void sequence_signed_store_model_close(
+        sequence_signed_extended_t *model,
+        sequence_signed_stop_t why) {
+    if (!model) return;
     model->chain_pending = false;
     if (!model->call_length) {
         model->call_blocks = 0u;
@@ -26516,9 +26525,9 @@ static void sequence_signed_extended_observe(
 static void sequence_signed_store_observe(
         sequence_profile_t *profile, const s5l8900_t *mach,
         uint32_t pc, bool thumb, bool physical_sequential,
-        const sequence_signed_classification_t *classification) {
-    if (!profile || !mach || !classification) return;
-    sequence_signed_extended_t *model = &profile->signed_store.extended;
+        const sequence_signed_classification_t *classification,
+        sequence_signed_extended_t *model) {
+    if (!profile || !mach || !classification || !model) return;
     bool chained_head = false;
 
     if (model->call_length) {
@@ -26527,14 +26536,15 @@ static void sequence_signed_store_observe(
                            thumb == model->chain_thumb;
             model->chain_pending = false;
             if (!chained_head)
-                sequence_signed_store_close(profile,
-                                             SEQUENCE_SIGNED_STOP_FLOW);
+                sequence_signed_store_model_close(
+                    model, SEQUENCE_SIGNED_STOP_FLOW);
         } else if (!physical_sequential) {
-            sequence_signed_store_close(profile, SEQUENCE_SIGNED_STOP_FLOW);
+            sequence_signed_store_model_close(
+                model, SEQUENCE_SIGNED_STOP_FLOW);
         } else if ((profile->previous_pc & ~UINT32_C(0x3ff)) !=
                    (pc & ~UINT32_C(0x3ff))) {
-            sequence_signed_store_close(
-                profile, SEQUENCE_SIGNED_STOP_FETCH_BLOCK);
+            sequence_signed_store_model_close(
+                model, SEQUENCE_SIGNED_STOP_FETCH_BLOCK);
         }
     }
 
@@ -26544,8 +26554,8 @@ static void sequence_signed_store_observe(
                       classification->outcome == SEQUENCE_SIGNED_READ_HIT;
     if (!retireable || !classification->handler_records ||
         classification->handler_records > SEQUENCE_SIGNED_RECORD_CAP) {
-        sequence_signed_store_close(profile,
-                                    SEQUENCE_SIGNED_STOP_INELIGIBLE);
+        sequence_signed_store_model_close(
+            model, SEQUENCE_SIGNED_STOP_INELIGIBLE);
         return;
     }
 
@@ -26575,15 +26585,15 @@ static void sequence_signed_store_observe(
     bool head_complete = classification->terminal ||
                          model->head_length == SEQUENCE_SIGNED_CAP;
     if (!model->call_remaining) {
-        sequence_signed_store_close(profile, model->budget_stop);
+        sequence_signed_store_model_close(model, model->budget_stop);
     } else if (head_complete) {
         uint32_t exit_pc = classification->terminal
                          ? classification->exit_pc
                          : pc + (thumb ? 2u : 4u);
         if ((pc & ~UINT32_C(0x3ff)) !=
             (exit_pc & ~UINT32_C(0x3ff))) {
-            sequence_signed_store_close(
-                profile, SEQUENCE_SIGNED_STOP_FETCH_BLOCK);
+            sequence_signed_store_model_close(
+                model, SEQUENCE_SIGNED_STOP_FETCH_BLOCK);
         } else {
             model->chain_pc = exit_pc;
             model->chain_thumb = thumb;
@@ -26608,12 +26618,24 @@ static bool sequence_signed_observe(sequence_profile_t *profile,
         profile, mach, pc, thumb, physical_sequential, &classification);
     {
         sequence_signed_classification_t store_classification = classification;
-        (void)sequence_store_classify(
+        sequence_signed_classification_t implemented_classification =
+            classification;
+        sequence_store_family_t store_family =
+            SEQUENCE_STORE_FAMILY_COUNT;
+        bool store_eligible = sequence_store_classify(
             profile, &mach->cpu, pc, raw, thumb, instruction_class,
-            &store_classification);
+            &store_classification, &store_family);
         sequence_signed_store_observe(
             profile, mach, pc, thumb, physical_sequential,
-            &store_classification);
+            &store_classification, &profile->signed_store.extended);
+        if (store_eligible &&
+            (store_family == SEQUENCE_STORE_ARM_SINGLE ||
+             store_family == SEQUENCE_STORE_THUMB_SINGLE))
+            implemented_classification = store_classification;
+        sequence_signed_store_observe(
+            profile, mach, pc, thumb, physical_sequential,
+            &implemented_classification,
+            &profile->signed_store.implemented);
     }
 
     if (profile->signed_call_length) {
@@ -26718,7 +26740,10 @@ static void sequence_profile_break(sequence_profile_t *profile) {
     }
     sequence_signed_close(profile, SEQUENCE_SIGNED_STOP_OBSERVER);
     sequence_signed_extended_close(profile, SEQUENCE_SIGNED_STOP_OBSERVER);
-    sequence_signed_store_close(profile, SEQUENCE_SIGNED_STOP_OBSERVER);
+    sequence_signed_store_model_close(
+        &profile->signed_store.extended, SEQUENCE_SIGNED_STOP_OBSERVER);
+    sequence_signed_store_model_close(
+        &profile->signed_store.implemented, SEQUENCE_SIGNED_STOP_OBSERVER);
 #endif
     sequence_trace_head_close(profile);
     sequence_close_run(profile->flow_runs, profile->flow_run_instructions,
@@ -27811,15 +27836,25 @@ static void sequence_profile_report_store_model(
     const sequence_signed_store_t *store = &profile->signed_store;
     const sequence_signed_extended_t *current = &profile->signed_extended;
     const sequence_signed_extended_t *model = &store->extended;
+    const sequence_signed_extended_t *implemented = &store->implemented;
     uint64_t family_total = 0u;
     uint64_t invalid = 0u, skipped = 0u, hits = 0u;
+    uint64_t implemented_candidates = 0u;
+    uint64_t implemented_invalid = 0u;
+    uint64_t implemented_skipped = 0u;
+    uint64_t implemented_hits = 0u;
     uint64_t histogram_calls = 0u, histogram_instructions = 0u;
     uint64_t stops = 0u, gate_refusals = 0u;
+    uint64_t implemented_histogram_calls = 0u;
+    uint64_t implemented_histogram_instructions = 0u;
+    uint64_t implemented_stops = 0u;
+    uint64_t implemented_gate_refusals = 0u;
     uint64_t current_eligible =
         profile->signed_outcomes[SEQUENCE_SIGNED_PLAIN] +
         profile->signed_outcomes[SEQUENCE_SIGNED_READ_SKIPPED] +
         profile->signed_outcomes[SEQUENCE_SIGNED_READ_HIT];
     bool lengths_exact = true;
+    bool implemented_lengths_exact = true;
 
     for (unsigned family = 0u; family < SEQUENCE_STORE_FAMILY_COUNT;
          family++) {
@@ -27830,6 +27865,19 @@ static void sequence_profile_report_store_model(
         skipped +=
             store->family_outcomes[family][SEQUENCE_STORE_CONDITION_SKIP];
         hits += store->family_outcomes[family][SEQUENCE_STORE_DWRITE_HIT];
+        if (family == SEQUENCE_STORE_ARM_SINGLE ||
+            family == SEQUENCE_STORE_THUMB_SINGLE) {
+            for (unsigned outcome = 0u;
+                 outcome < SEQUENCE_STORE_OUTCOME_COUNT; outcome++)
+                implemented_candidates +=
+                    store->family_outcomes[family][outcome];
+            implemented_invalid +=
+                store->family_outcomes[family][SEQUENCE_STORE_INVALID];
+            implemented_skipped += store->family_outcomes[family]
+                [SEQUENCE_STORE_CONDITION_SKIP];
+            implemented_hits += store->family_outcomes[family]
+                [SEQUENCE_STORE_DWRITE_HIT];
+        }
     }
     for (unsigned length = 1u;
          length <= SEQUENCE_SIGNED_EXTENDED_CAP; length++) {
@@ -27839,24 +27887,49 @@ static void sequence_profile_report_store_model(
         histogram_instructions += instructions;
         if (instructions != calls * (uint64_t)length)
             lengths_exact = false;
+        calls = implemented->length_calls[length];
+        instructions = implemented->length_instructions[length];
+        implemented_histogram_calls += calls;
+        implemented_histogram_instructions += instructions;
+        if (instructions != calls * (uint64_t)length)
+            implemented_lengths_exact = false;
     }
-    for (unsigned i = 0u; i < SEQUENCE_SIGNED_STOP_COUNT; i++)
+    for (unsigned i = 0u; i < SEQUENCE_SIGNED_STOP_COUNT; i++) {
         stops += model->stops[i];
-    for (unsigned i = 1u; i < SEQUENCE_SIGNED_GATE_COUNT; i++)
+        implemented_stops += implemented->stops[i];
+    }
+    for (unsigned i = 1u; i < SEQUENCE_SIGNED_GATE_COUNT; i++) {
         gate_refusals += model->gate_refusals[i];
+        implemented_gate_refusals += implemented->gate_refusals[i];
+    }
 
     uint64_t proposed_supported = store->candidates >= invalid
         ? store->candidates - invalid : 0u;
     uint64_t proposed_eligible = skipped + hits;
+    uint64_t implemented_supported =
+        implemented_candidates >= implemented_invalid
+            ? implemented_candidates - implemented_invalid : 0u;
+    uint64_t implemented_eligible =
+        implemented_skipped + implemented_hits;
     uint64_t hypothetical_eligible =
         current_eligible + store->retirement_eligible;
+    uint64_t implemented_hypothetical_eligible =
+        current_eligible + implemented_eligible;
     uint64_t current_entries = profile->fetched >= current->instructions
         ? profile->fetched - current->instructions + current->calls : 0u;
     uint64_t store_entries = profile->fetched >= model->instructions
         ? profile->fetched - model->instructions + model->calls : 0u;
+    uint64_t implemented_entries =
+        profile->fetched >= implemented->instructions
+            ? profile->fetched - implemented->instructions +
+                  implemented->calls
+            : 0u;
     uint64_t removed_entries = current_entries >= store_entries
         ? current_entries - store_entries : 0u;
-    bool exact = family_total == store->candidates &&
+    uint64_t implemented_removed_entries =
+        current_entries >= implemented_entries
+            ? current_entries - implemented_entries : 0u;
+    bool broad_exact = family_total == store->candidates &&
         proposed_supported == store->decoder_supported &&
         proposed_eligible == store->retirement_eligible &&
         store->block_lookups == store->block_hits + store->block_misses &&
@@ -27876,6 +27949,19 @@ static void sequence_profile_report_store_model(
             store->validation_observed_events &&
         store->validation_overflows == 0u &&
         model->maximum <= SEQUENCE_SIGNED_EXTENDED_CAP;
+    bool implemented_exact = implemented_lengths_exact &&
+        implemented_histogram_calls == implemented->calls &&
+        implemented_histogram_instructions == implemented->instructions &&
+        implemented_stops == implemented->calls &&
+        implemented_hypothetical_eligible ==
+            implemented->instructions + implemented_gate_refusals &&
+        implemented->blocks ==
+            implemented->calls + implemented->chain_transitions &&
+        implemented->instructions >= current->instructions &&
+        model->instructions >= implemented->instructions &&
+        current_entries >= implemented_entries &&
+        implemented_entries >= store_entries &&
+        implemented->maximum <= SEQUENCE_SIGNED_EXTENDED_CAP;
 
     printf("\n    capability-gated plain-RAM store architecture model\n");
     printf("      This assumes an iOS frontend explicitly permits callback-free "
@@ -27907,7 +27993,15 @@ static void sequence_profile_report_store_model(
                row[SEQUENCE_STORE_TRANSLATION_FAULT],
                row[SEQUENCE_STORE_NON_RAM]);
     }
-    printf("      proposed decoder supported/retirement-eligible="
+    printf("      implemented single-store supported/retirement-eligible="
+           "%" PRIu64 "/%" PRIu64 " of candidates=%" PRIu64
+           " (eligible %.3f%% fetched)\n",
+           implemented_supported, implemented_eligible,
+           implemented_candidates,
+           profile->fetched
+               ? 100.0 * (double)implemented_eligible /
+                     (double)profile->fetched : 0.0);
+    printf("      broad ceiling decoder supported/retirement-eligible="
            "%" PRIu64 "/%" PRIu64 " of candidates=%" PRIu64
            " (eligible %.3f%% fetched)\n",
            store->decoder_supported, store->retirement_eligible,
@@ -27945,17 +28039,48 @@ static void sequence_profile_report_store_model(
                store->first_mismatch_expected_width,
                store->first_mismatch_observed_width);
     }
-    printf("      current/store calls/instructions/heads/chains="
+    printf("      current/implemented calls/instructions/heads/chains="
            "%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64
            " -> %" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64
-           " (store mean %.3f max=%" PRIu64 ")\n",
+           " (implemented mean %.3f max=%" PRIu64 ")\n",
+           current->calls, current->instructions, current->blocks,
+           current->chain_transitions, implemented->calls,
+           implemented->instructions, implemented->blocks,
+           implemented->chain_transitions,
+           implemented->calls
+               ? (double)implemented->instructions /
+                     (double)implemented->calls : 0.0,
+           implemented->maximum);
+    printf("      implemented runner entries current/product/removed="
+           "%" PRIu64 "/%" PRIu64 "/%" PRIu64 " (%6.3f%% current); "
+           "eligible current/+implemented/model+refused=%" PRIu64
+           "/%" PRIu64 "/%" PRIu64 "+%" PRIu64 "\n",
+           current_entries, implemented_entries,
+           implemented_removed_entries,
+           current_entries
+               ? 100.0 * (double)implemented_removed_entries /
+                     (double)current_entries : 0.0,
+           current_eligible, implemented_eligible,
+           implemented->instructions, implemented_gate_refusals);
+    printf("      implemented histogram calls/instructions=%" PRIu64
+           "/%" PRIu64 " stops=%" PRIu64
+           " blocks/calls+chains=%" PRIu64 "/%" PRIu64 "  %s\n",
+           implemented_histogram_calls,
+           implemented_histogram_instructions, implemented_stops,
+           implemented->blocks,
+           implemented->calls + implemented->chain_transitions,
+           implemented_exact ? "EXACT" : "MISMATCH");
+    printf("      current/broad-ceiling calls/instructions/heads/chains="
+           "%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64
+           " -> %" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64
+           " (ceiling mean %.3f max=%" PRIu64 ")\n",
            current->calls, current->instructions, current->blocks,
            current->chain_transitions, model->calls, model->instructions,
            model->blocks, model->chain_transitions,
            model->calls ? (double)model->instructions /
                               (double)model->calls : 0.0,
            model->maximum);
-    printf("      candidate runner entries current/store/removed="
+    printf("      broad-ceiling runner entries current/ceiling/removed="
            "%" PRIu64 "/%" PRIu64 "/%" PRIu64 " (%6.3f%% current); "
            "eligible current/+store/model+refused=%" PRIu64 "/%" PRIu64
            "/%" PRIu64 "+%" PRIu64 "\n",
@@ -27965,13 +28090,13 @@ static void sequence_profile_report_store_model(
                      (double)current_entries : 0.0,
            current_eligible, store->retirement_eligible,
            model->instructions, gate_refusals);
-    printf("      histogram calls/instructions=%" PRIu64 "/%" PRIu64
+    printf("      broad histogram calls/instructions=%" PRIu64 "/%" PRIu64
            " stops=%" PRIu64 " blocks/calls+chains=%" PRIu64 "/%" PRIu64
            " cache-lookups/hit+miss=%" PRIu64 "/%" PRIu64 "  %s\n",
            histogram_calls, histogram_instructions, stops, model->blocks,
            model->calls + model->chain_transitions, store->block_lookups,
            store->block_hits + store->block_misses,
-           exact ? "EXACT" : "MISMATCH");
+           broad_exact ? "EXACT" : "MISMATCH");
 }
 #endif
 
