@@ -44,6 +44,10 @@ typedef struct {
     unsigned uop_count;
     uint32_t start_pc;
     uint32_t exit_pc;
+    /* Portable identity of the last semantic record (END for a compact fixed
+     * exit). The cache-owned fast validator cross-checks dynamic_exit against
+     * this value without reversing a native dispatch offset on every entry. */
+    uint32_t terminal_handler_id;
     bool thumb;
     bool dynamic_exit;
     bool touches_memory;

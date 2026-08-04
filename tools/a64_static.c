@@ -115,6 +115,9 @@ static uint32_t block_handler(const a64_static_block_t *block, unsigned i) {
 }
 
 static void finalize_dispatch_records(a64_static_block_t *block) {
+    unsigned terminal = block->uop_count > 1u
+        ? block->uop_count - 2u : block->uop_count - 1u;
+    block->terminal_handler_id = block->uops[terminal].handler;
 #if defined(S5LBOX_STATIC_A64_NATIVE)
     for (unsigned i = 0u; i < block->uop_count; i++) {
         uint32_t handler = block->uops[i].handler;
@@ -1200,6 +1203,9 @@ static bool validate_run(const arm_cpu_t *cpu,
         return false;
 
     end = block->uop_count - 1u;
+    if (block->terminal_handler_id !=
+        (end ? block_handler(block, end - 1u) : A64S_END))
+        return false;
     for (unsigned j = 0u; j < end; j++) {
         uint32_t handler = block_handler(block, j);
         if (handler == A64S_END || handler >= A64S_HANDLER_COUNT)
@@ -1339,13 +1345,16 @@ static bool validate_decoded_read_hits_at(const a64_static_block_t *block,
         pc != block->start_pc || thumb != block->thumb ||
         (block->touches_memory && !block->direct_reads))
         return false;
-    terminal_dynamic = block->dynamic_exit;
-    if (terminal_dynamic &&
+    terminal_dynamic = handler_is_terminal_branch(
+        block->terminal_handler_id);
+    if (block->terminal_handler_id >= A64S_HANDLER_COUNT ||
+        block->dynamic_exit != terminal_dynamic ||
+        (terminal_dynamic &&
          (block->uop_count < 2u || block->thumb ||
           (block->uops[block->uop_count - 2u].immediate & 3u) != 0u ||
           block->uops[block->uop_count - 2u].pc_value != block->exit_pc ||
           block->uops[block->uop_count - 2u].metadata != 0u ||
-           block->exit_pc != block->start_pc + block->insn_count * 4u))
+           block->exit_pc != block->start_pc + block->insn_count * 4u)))
         return false;
     return true;
 }
