@@ -105,7 +105,9 @@ jobs:
             build
           binary="$PWD/dist/S5LBox.app/S5LBox"
           test -f "$binary"
-          xcrun nm "$binary" | grep -Eq ' _a64_static_execute$'
+          xcrun nm "$binary" |
+            awk '$NF == "_a64_static_execute" { found=1 }
+                 END { exit !found }'
 
       - name: Fake-sign + package .ipa
         working-directory: app
