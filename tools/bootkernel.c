@@ -24763,6 +24763,7 @@ typedef struct {
 typedef struct {
     uint32_t raw;
     uint64_t hits;
+    uint64_t signed_rejected_hits;
     bool thumb;
     bool occupied;
 } sequence_raw_t;
@@ -25376,7 +25377,7 @@ static sequence_signed_gate_t sequence_signed_entry_budget(
                    : SEQUENCE_SIGNED_GATE_TIMEBASE;
 }
 
-static void sequence_signed_observe(sequence_profile_t *profile,
+static bool sequence_signed_observe(sequence_profile_t *profile,
                                     const s5l8900_t *mach,
                                     uint32_t pc, uint32_t raw,
                                     bool thumb, bool physical_sequential,
@@ -25403,7 +25404,7 @@ static void sequence_signed_observe(sequence_profile_t *profile,
                       classification.outcome == SEQUENCE_SIGNED_READ_HIT;
     if (!retireable) {
         sequence_signed_close(profile, SEQUENCE_SIGNED_STOP_INELIGIBLE);
-        return;
+        return classification.outcome == SEQUENCE_SIGNED_REJECTED;
     }
 
     if (!profile->signed_call_length) {
@@ -25414,7 +25415,7 @@ static void sequence_signed_observe(sequence_profile_t *profile,
         if (gate != SEQUENCE_SIGNED_GATE_OK) {
             profile->signed_gate_refusals[gate]++;
             profile->signed_class_gate_refused[instruction_class]++;
-            return;
+            return classification.outcome == SEQUENCE_SIGNED_REJECTED;
         }
         profile->signed_call_remaining = budget;
         profile->signed_budget_stop = budget_stop;
@@ -25431,6 +25432,7 @@ static void sequence_signed_observe(sequence_profile_t *profile,
     } else if (!profile->signed_call_remaining) {
         sequence_signed_close(profile, profile->signed_budget_stop);
     }
+    return classification.outcome == SEQUENCE_SIGNED_REJECTED;
 }
 #endif
 
@@ -25503,7 +25505,7 @@ static size_t sequence_site_find(sequence_profile_t *profile,
 }
 
 static void sequence_raw_note(sequence_profile_t *profile, uint32_t raw,
-                              bool thumb) {
+                              bool thumb, bool signed_rejected) {
     uint64_t key = raw ^ (thumb ? UINT64_C(0xd6e8feb86659fd93) : 0u);
     size_t slot = (size_t)sequence_mix64(key) & (SEQUENCE_RAW_CAP - 1u);
     for (size_t probe = 0; probe < SEQUENCE_RAW_CAP; probe++) {
@@ -25513,11 +25515,13 @@ static void sequence_raw_note(sequence_profile_t *profile, uint32_t raw,
             entry->raw = raw;
             entry->thumb = thumb;
             entry->hits = 1u;
+            entry->signed_rejected_hits = signed_rejected ? 1u : 0u;
             profile->raw_distinct++;
             return;
         }
         if (entry->raw == raw && entry->thumb == thumb) {
             entry->hits++;
+            if (signed_rejected) entry->signed_rejected_hits++;
             return;
         }
         slot = (slot + 1u) & (SEQUENCE_RAW_CAP - 1u);
@@ -25813,9 +25817,11 @@ static void sequence_profile_observe(sequence_profile_t *profile,
         profile->current_trace_length++;
     }
 
+    bool signed_rejected = false;
 #if defined(S5LBOX_STATIC_A64_ENGINE)
-    sequence_signed_observe(profile, mach, pc, raw, thumb,
-                            physical_sequential, instruction_class);
+    signed_rejected = sequence_signed_observe(
+        profile, mach, pc, raw, thumb,
+        physical_sequential, instruction_class);
 #endif
 
     bool safe_dp = instruction_class == SEQUENCE_ARM_DP;
@@ -25962,7 +25968,7 @@ static void sequence_profile_observe(sequence_profile_t *profile,
         entry->hits++;
         if (safe_dp) entry->safe_dp_hits++;
     }
-    sequence_raw_note(profile, raw, thumb);
+    sequence_raw_note(profile, raw, thumb, signed_rejected);
 
     profile->have_previous = true;
     profile->previous_thumb = thumb;
@@ -26096,6 +26102,421 @@ static void sequence_profile_report_trace_heads(
     free(ranked);
 }
 
+/* These groups mirror the real VFP and Thumb decoder branches. They are
+ * intentionally broad implementation tranches rather than a list of hot
+ * individual opcodes: the report is meant to decide whether a semantic family
+ * is large enough to justify a direct signed-native implementation. */
+typedef enum {
+    SEQUENCE_VFP_XFER32_SINGLE = 0,
+    SEQUENCE_VFP_XFER32_DWORD,
+    SEQUENCE_VFP_XFER32_SYSTEM,
+    SEQUENCE_VFP_XFER32_OTHER,
+    SEQUENCE_VFP_DP_MLA,
+    SEQUENCE_VFP_DP_MUL,
+    SEQUENCE_VFP_DP_ADD_SUB,
+    SEQUENCE_VFP_DP_DIV,
+    SEQUENCE_VFP_DP_OTHER_ARITH,
+    SEQUENCE_VFP_DP_MOVE_SIGN,
+    SEQUENCE_VFP_DP_SQRT,
+    SEQUENCE_VFP_DP_COMPARE,
+    SEQUENCE_VFP_DP_CONVERT_PRECISION,
+    SEQUENCE_VFP_DP_INT_TO_FP,
+    SEQUENCE_VFP_DP_FP_TO_INT,
+    SEQUENCE_VFP_DP_OTHER,
+    SEQUENCE_VFP_XFER64,
+    SEQUENCE_VFP_LOAD_SINGLE,
+    SEQUENCE_VFP_STORE_SINGLE,
+    SEQUENCE_VFP_LOAD_MULTIPLE,
+    SEQUENCE_VFP_STORE_MULTIPLE,
+    SEQUENCE_VFP_OTHER,
+    SEQUENCE_VFP_FAMILY_COUNT
+} sequence_vfp_family_t;
+
+static const char *const SEQUENCE_VFP_FAMILY_NAMES[
+        SEQUENCE_VFP_FAMILY_COUNT] = {
+    "VMOV core <-> single",
+    "VMOV core <-> D-word",
+    "VMRS/VMSR system",
+    "other 32-bit transfer",
+    "VMLA/VMLS/VNMLA/VNMLS",
+    "VMUL/VNMUL",
+    "VADD/VSUB",
+    "VDIV",
+    "other arithmetic",
+    "VMOV/VABS/VNEG register",
+    "VSQRT",
+    "VCMP/VCMPE",
+    "VCVT single <-> double",
+    "VCVT integer -> float",
+    "VCVT float -> integer",
+    "other data processing",
+    "VMOV two core registers",
+    "VLDR",
+    "VSTR",
+    "VLDM/VPOP",
+    "VSTM/VPUSH",
+    "other VFP encoding"
+};
+
+static sequence_vfp_family_t sequence_vfp_family(uint32_t insn) {
+    if ((insn & UINT32_C(0x0f000e10)) == UINT32_C(0x0e000a10)) {
+        unsigned opc1 = (insn >> 21) & 7u;
+        bool cp11 = (insn & (1u << 8)) != 0u;
+        if (!cp11 && opc1 == 0u) return SEQUENCE_VFP_XFER32_SINGLE;
+        if (cp11 && opc1 <= 1u) return SEQUENCE_VFP_XFER32_DWORD;
+        if (!cp11 && opc1 == 7u) return SEQUENCE_VFP_XFER32_SYSTEM;
+        return SEQUENCE_VFP_XFER32_OTHER;
+    }
+    if ((insn & UINT32_C(0x0f000e10)) == UINT32_C(0x0e000a00)) {
+        unsigned op = (((insn >> 23) & 1u) << 2) |
+                      (((insn >> 21) & 1u) << 1) |
+                       ((insn >> 20) & 1u);
+        if (op != 7u) {
+            switch (op) {
+            case 0u: case 1u: return SEQUENCE_VFP_DP_MLA;
+            case 2u: return SEQUENCE_VFP_DP_MUL;
+            case 3u: return SEQUENCE_VFP_DP_ADD_SUB;
+            case 4u: return SEQUENCE_VFP_DP_DIV;
+            default: return SEQUENCE_VFP_DP_OTHER_ARITH;
+            }
+        }
+        if ((insn & (1u << 6)) == 0u)
+            return SEQUENCE_VFP_DP_OTHER;
+        unsigned opc2 = (insn >> 16) & 15u;
+        bool top = (insn & (1u << 7)) != 0u;
+        if (opc2 == 0u || (opc2 == 1u && !top))
+            return SEQUENCE_VFP_DP_MOVE_SIGN;
+        if (opc2 == 1u) return SEQUENCE_VFP_DP_SQRT;
+        if (opc2 == 4u || opc2 == 5u)
+            return SEQUENCE_VFP_DP_COMPARE;
+        if (opc2 == 7u && top)
+            return SEQUENCE_VFP_DP_CONVERT_PRECISION;
+        if (opc2 == 8u) return SEQUENCE_VFP_DP_INT_TO_FP;
+        if (opc2 == 12u || opc2 == 13u)
+            return SEQUENCE_VFP_DP_FP_TO_INT;
+        return SEQUENCE_VFP_DP_OTHER;
+    }
+    if ((insn & UINT32_C(0x0fe00e00)) == UINT32_C(0x0c400a00))
+        return SEQUENCE_VFP_XFER64;
+    if ((insn & UINT32_C(0x0e000e00)) == UINT32_C(0x0c000a00)) {
+        bool single = (insn & (1u << 24)) != 0u &&
+                      (insn & (1u << 21)) == 0u;
+        bool load = (insn & (1u << 20)) != 0u;
+        if (single)
+            return load ? SEQUENCE_VFP_LOAD_SINGLE
+                        : SEQUENCE_VFP_STORE_SINGLE;
+        return load ? SEQUENCE_VFP_LOAD_MULTIPLE
+                    : SEQUENCE_VFP_STORE_MULTIPLE;
+    }
+    return SEQUENCE_VFP_OTHER;
+}
+
+typedef enum {
+    SEQUENCE_THUMB_SHIFT_IMMEDIATE = 0,
+    SEQUENCE_THUMB_ADD_SUB_SMALL,
+    SEQUENCE_THUMB_ALU_IMMEDIATE,
+    SEQUENCE_THUMB_ALU_REGISTER,
+    SEQUENCE_THUMB_HIGH_REGISTER,
+    SEQUENCE_THUMB_BX_BLX_REGISTER,
+    SEQUENCE_THUMB_LITERAL_LOAD,
+    SEQUENCE_THUMB_REGISTER_LOAD,
+    SEQUENCE_THUMB_REGISTER_STORE,
+    SEQUENCE_THUMB_IMMEDIATE_LOAD,
+    SEQUENCE_THUMB_IMMEDIATE_STORE,
+    SEQUENCE_THUMB_SP_LOAD,
+    SEQUENCE_THUMB_SP_STORE,
+    SEQUENCE_THUMB_ADDRESS,
+    SEQUENCE_THUMB_SP_ADJUST,
+    SEQUENCE_THUMB_PUSH,
+    SEQUENCE_THUMB_POP,
+    SEQUENCE_THUMB_EXTEND,
+    SEQUENCE_THUMB_REVERSE,
+    SEQUENCE_THUMB_SYSTEM,
+    SEQUENCE_THUMB_OTHER_B,
+    SEQUENCE_THUMB_MULTIPLE_LOAD,
+    SEQUENCE_THUMB_MULTIPLE_STORE,
+    SEQUENCE_THUMB_CONDITIONAL_BRANCH,
+    SEQUENCE_THUMB_SVC_OR_UDF,
+    SEQUENCE_THUMB_UNCONDITIONAL_BRANCH,
+    SEQUENCE_THUMB_BL_OR_BLX_PAIR,
+    SEQUENCE_THUMB_FAMILY_COUNT
+} sequence_thumb_family_t;
+
+static const char *const SEQUENCE_THUMB_FAMILY_NAMES[
+        SEQUENCE_THUMB_FAMILY_COUNT] = {
+    "shift immediate",
+    "ADD/SUB small",
+    "MOV/CMP/ADD/SUB immediate",
+    "register ALU",
+    "high-register data op",
+    "BX/BLX register",
+    "PC-relative LDR",
+    "register-offset load",
+    "register-offset store",
+    "immediate load",
+    "immediate store",
+    "SP-relative load",
+    "SP-relative store",
+    "ADD address from PC/SP",
+    "ADD/SUB SP",
+    "PUSH",
+    "POP",
+    "extend",
+    "byte reverse",
+    "CPS/SETEND",
+    "other 0xB group",
+    "LDMIA",
+    "STMIA",
+    "conditional branch",
+    "SVC/UDF",
+    "unconditional branch/BLX suffix",
+    "BL/BLX pair half"
+};
+
+static sequence_thumb_family_t sequence_thumb_family(uint16_t insn) {
+    switch (insn >> 12) {
+    case 0x0u: case 0x1u:
+        return (insn & UINT16_C(0xf800)) == UINT16_C(0x1800)
+            ? SEQUENCE_THUMB_ADD_SUB_SMALL
+            : SEQUENCE_THUMB_SHIFT_IMMEDIATE;
+    case 0x2u: case 0x3u:
+        return SEQUENCE_THUMB_ALU_IMMEDIATE;
+    case 0x4u:
+        if ((insn & UINT16_C(0xfc00)) == UINT16_C(0x4000))
+            return SEQUENCE_THUMB_ALU_REGISTER;
+        if ((insn & UINT16_C(0xfc00)) == UINT16_C(0x4400))
+            return ((insn >> 8) & 3u) == 3u
+                ? SEQUENCE_THUMB_BX_BLX_REGISTER
+                : SEQUENCE_THUMB_HIGH_REGISTER;
+        return SEQUENCE_THUMB_LITERAL_LOAD;
+    case 0x5u: {
+        bool load;
+        if (insn & (1u << 9))
+            load = ((insn >> 10) & 3u) != 0u;
+        else
+            load = (insn & (1u << 11)) != 0u;
+        return load ? SEQUENCE_THUMB_REGISTER_LOAD
+                    : SEQUENCE_THUMB_REGISTER_STORE;
+    }
+    case 0x6u: case 0x7u:
+        return (insn & (1u << 11)) != 0u
+            ? SEQUENCE_THUMB_IMMEDIATE_LOAD
+            : SEQUENCE_THUMB_IMMEDIATE_STORE;
+    case 0x8u:
+        return (insn & (1u << 11)) != 0u
+            ? SEQUENCE_THUMB_IMMEDIATE_LOAD
+            : SEQUENCE_THUMB_IMMEDIATE_STORE;
+    case 0x9u:
+        return (insn & (1u << 11)) != 0u
+            ? SEQUENCE_THUMB_SP_LOAD : SEQUENCE_THUMB_SP_STORE;
+    case 0xau:
+        return SEQUENCE_THUMB_ADDRESS;
+    case 0xbu:
+        if ((insn & UINT16_C(0xff00)) == UINT16_C(0xb000))
+            return SEQUENCE_THUMB_SP_ADJUST;
+        if ((insn & UINT16_C(0xf600)) == UINT16_C(0xb400))
+            return (insn & (1u << 11)) != 0u
+                ? SEQUENCE_THUMB_POP : SEQUENCE_THUMB_PUSH;
+        if ((insn & UINT16_C(0xff00)) == UINT16_C(0xb200))
+            return SEQUENCE_THUMB_EXTEND;
+        if ((insn & UINT16_C(0xff00)) == UINT16_C(0xba00))
+            return SEQUENCE_THUMB_REVERSE;
+        if ((insn & UINT16_C(0xffe0)) == UINT16_C(0xb660) ||
+            (insn & UINT16_C(0xfff7)) == UINT16_C(0xb650))
+            return SEQUENCE_THUMB_SYSTEM;
+        return SEQUENCE_THUMB_OTHER_B;
+    case 0xcu:
+        return (insn & (1u << 11)) != 0u
+            ? SEQUENCE_THUMB_MULTIPLE_LOAD
+            : SEQUENCE_THUMB_MULTIPLE_STORE;
+    case 0xdu: {
+        unsigned cond = (insn >> 8) & 15u;
+        return cond >= 14u ? SEQUENCE_THUMB_SVC_OR_UDF
+                           : SEQUENCE_THUMB_CONDITIONAL_BRANCH;
+    }
+    case 0xeu:
+        return SEQUENCE_THUMB_UNCONDITIONAL_BRANCH;
+    default:
+        return SEQUENCE_THUMB_BL_OR_BLX_PAIR;
+    }
+}
+
+static void sequence_profile_report_decoder_families(
+        const sequence_profile_t *profile) {
+    uint64_t vfp[SEQUENCE_VFP_FAMILY_COUNT] = {0};
+    uint64_t vfp_rejected[SEQUENCE_VFP_FAMILY_COUNT] = {0};
+    uint64_t thumb[SEQUENCE_THUMB_FAMILY_COUNT] = {0};
+    uint64_t thumb_rejected[SEQUENCE_THUMB_FAMILY_COUNT] = {0};
+    uint64_t vfp_total = 0u, vfp_rejected_total = 0u;
+    uint64_t thumb_total = 0u, thumb_rejected_total = 0u;
+
+    for (size_t i = 0; i < SEQUENCE_RAW_CAP; i++) {
+        const sequence_raw_t *entry = &profile->raws[i];
+        if (!entry->occupied) continue;
+        if (entry->thumb) {
+            sequence_thumb_family_t family =
+                sequence_thumb_family((uint16_t)entry->raw);
+            thumb[family] += entry->hits;
+            thumb_rejected[family] += entry->signed_rejected_hits;
+            thumb_total += entry->hits;
+            thumb_rejected_total += entry->signed_rejected_hits;
+        } else if (sequence_classify_arm(entry->raw) == SEQUENCE_ARM_VFP) {
+            sequence_vfp_family_t family = sequence_vfp_family(entry->raw);
+            vfp[family] += entry->hits;
+            vfp_rejected[family] += entry->signed_rejected_hits;
+            vfp_total += entry->hits;
+            vfp_rejected_total += entry->signed_rejected_hits;
+        }
+    }
+
+    printf("\n  exact VFP decoder-family census\n");
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    printf("    %-29s %12s %9s %12s %9s\n",
+           "family", "observed", "fetched", "rejected", "reject-share");
+#else
+    printf("    %-29s %12s %9s\n", "family", "observed", "fetched");
+#endif
+    for (unsigned i = 0u; i < SEQUENCE_VFP_FAMILY_COUNT; i++) {
+        if (!vfp[i]) continue;
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+        printf("    %-29s %12" PRIu64 " %8.3f%% %12" PRIu64
+               " %8.3f%%\n",
+               SEQUENCE_VFP_FAMILY_NAMES[i], vfp[i],
+               profile->fetched
+                   ? 100.0 * (double)vfp[i] / (double)profile->fetched : 0.0,
+               vfp_rejected[i], vfp_rejected_total
+                   ? 100.0 * (double)vfp_rejected[i] /
+                         (double)vfp_rejected_total : 0.0);
+#else
+        printf("    %-29s %12" PRIu64 " %8.3f%%\n",
+               SEQUENCE_VFP_FAMILY_NAMES[i], vfp[i],
+               profile->fetched
+                   ? 100.0 * (double)vfp[i] / (double)profile->fetched : 0.0);
+#endif
+    }
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    uint64_t expected_vfp_rejected =
+        profile->signed_class_outcomes[SEQUENCE_ARM_VFP]
+                                      [SEQUENCE_SIGNED_REJECTED];
+    printf("    accounting observed=%" PRIu64 "/%" PRIu64
+           " rejected=%" PRIu64 "/%" PRIu64 "  %s\n",
+           vfp_total, profile->class_hits[SEQUENCE_ARM_VFP],
+           vfp_rejected_total, expected_vfp_rejected,
+           vfp_total == profile->class_hits[SEQUENCE_ARM_VFP] &&
+                   vfp_rejected_total == expected_vfp_rejected &&
+                   profile->raw_dropped == 0u ? "EXACT" : "MISMATCH");
+#else
+    printf("    accounting observed=%" PRIu64 "/%" PRIu64 "  %s\n",
+           vfp_total, profile->class_hits[SEQUENCE_ARM_VFP],
+           vfp_total == profile->class_hits[SEQUENCE_ARM_VFP] &&
+                   profile->raw_dropped == 0u ? "EXACT" : "MISMATCH");
+#endif
+
+    printf("\n  exact Thumb decoder-family census\n");
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    printf("    %-36s %12s %9s %12s %9s\n",
+           "family", "observed", "fetched", "rejected", "reject-share");
+#else
+    printf("    %-36s %12s %9s\n", "family", "observed", "fetched");
+#endif
+    for (unsigned i = 0u; i < SEQUENCE_THUMB_FAMILY_COUNT; i++) {
+        if (!thumb[i]) continue;
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+        printf("    %-36s %12" PRIu64 " %8.3f%% %12" PRIu64
+               " %8.3f%%\n",
+               SEQUENCE_THUMB_FAMILY_NAMES[i], thumb[i],
+               profile->fetched
+                   ? 100.0 * (double)thumb[i] / (double)profile->fetched : 0.0,
+               thumb_rejected[i], thumb_rejected_total
+                   ? 100.0 * (double)thumb_rejected[i] /
+                         (double)thumb_rejected_total : 0.0);
+#else
+        printf("    %-36s %12" PRIu64 " %8.3f%%\n",
+               SEQUENCE_THUMB_FAMILY_NAMES[i], thumb[i],
+               profile->fetched
+                   ? 100.0 * (double)thumb[i] / (double)profile->fetched : 0.0);
+#endif
+    }
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    uint64_t expected_thumb_rejected =
+        profile->signed_class_outcomes[SEQUENCE_THUMB]
+                                      [SEQUENCE_SIGNED_REJECTED];
+    printf("    accounting observed=%" PRIu64 "/%" PRIu64
+           " rejected=%" PRIu64 "/%" PRIu64 "  %s\n",
+           thumb_total, profile->class_hits[SEQUENCE_THUMB],
+           thumb_rejected_total, expected_thumb_rejected,
+           thumb_total == profile->class_hits[SEQUENCE_THUMB] &&
+                   thumb_rejected_total == expected_thumb_rejected &&
+                   profile->raw_dropped == 0u ? "EXACT" : "MISMATCH");
+#else
+    printf("    accounting observed=%" PRIu64 "/%" PRIu64 "  %s\n",
+           thumb_total, profile->class_hits[SEQUENCE_THUMB],
+           thumb_total == profile->class_hits[SEQUENCE_THUMB] &&
+                   profile->raw_dropped == 0u ? "EXACT" : "MISMATCH");
+#endif
+}
+
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+static void sequence_profile_report_rejected_raw(
+        const sequence_profile_t *profile, bool thumb) {
+    enum { SHOW = 32 };
+    size_t chosen[SHOW];
+    size_t chosen_count = 0u;
+    uint64_t total = 0u, cumulative = 0u, distinct = 0u;
+    sequence_class_t cls = thumb ? SEQUENCE_THUMB : SEQUENCE_ARM_VFP;
+    uint64_t expected =
+        profile->signed_class_outcomes[cls][SEQUENCE_SIGNED_REJECTED];
+
+    for (size_t i = 0; i < SEQUENCE_RAW_CAP; i++) {
+        const sequence_raw_t *entry = &profile->raws[i];
+        bool matches = entry->occupied && entry->thumb == thumb &&
+            (thumb || sequence_classify_arm(entry->raw) == SEQUENCE_ARM_VFP);
+        if (!matches || !entry->signed_rejected_hits) continue;
+        total += entry->signed_rejected_hits;
+        distinct++;
+    }
+
+    printf("\n  hottest exact decoder-rejected %s raw encodings\n",
+           thumb ? "Thumb" : "VFP");
+    printf("    retained accounting=%" PRIu64 "/%" PRIu64
+           " distinct=%" PRIu64 " raw-dropped=%" PRIu64 "  %s\n",
+           total, expected, distinct, profile->raw_dropped,
+           total == expected && profile->raw_dropped == 0u
+               ? "EXACT" : "MISMATCH");
+    for (unsigned rank = 0u; rank < SHOW; rank++) {
+        size_t best = SEQUENCE_RAW_CAP;
+        uint64_t best_hits = 0u;
+        for (size_t i = 0; i < SEQUENCE_RAW_CAP; i++) {
+            const sequence_raw_t *entry = &profile->raws[i];
+            bool matches = entry->occupied && entry->thumb == thumb &&
+                (thumb ||
+                 sequence_classify_arm(entry->raw) == SEQUENCE_ARM_VFP);
+            if (!matches || entry->signed_rejected_hits <= best_hits)
+                continue;
+            bool already_chosen = false;
+            for (size_t j = 0u; j < chosen_count; j++)
+                if (chosen[j] == i) already_chosen = true;
+            if (!already_chosen) {
+                best = i;
+                best_hits = entry->signed_rejected_hits;
+            }
+        }
+        if (best == SEQUENCE_RAW_CAP) break;
+        chosen[chosen_count++] = best;
+        cumulative += best_hits;
+        const sequence_raw_t *entry = &profile->raws[best];
+        printf("    %2u  raw=%08x %12" PRIu64
+               "  reject=%7.3f%% cum=%7.3f%% fetched=%7.3f%%\n",
+               rank + 1u, entry->raw, best_hits,
+               expected ? 100.0 * (double)best_hits / (double)expected : 0.0,
+               expected ? 100.0 * (double)cumulative / (double)expected : 0.0,
+               profile->fetched
+                   ? 100.0 * (double)best_hits / (double)profile->fetched
+                   : 0.0);
+    }
+}
+#endif
+
 static void sequence_profile_report(sequence_profile_t *profile) {
     static const char *const DP_OPS[16] = {
         "AND", "EOR", "SUB", "RSB", "ADD", "ADC", "SBC", "RSC",
@@ -26201,6 +26622,7 @@ static void sequence_profile_report(sequence_profile_t *profile) {
            "%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64 "\n",
            profile->vfp_compute, profile->vfp_register,
            profile->vfp_memory_load, profile->vfp_memory_store);
+    sequence_profile_report_decoder_families(profile);
 
     uint64_t flow_instructions = 0u, flow_runs = 0u;
     uint64_t dp_instructions = 0u, dp_runs = 0u;
@@ -26547,6 +26969,11 @@ static void sequence_profile_report(sequence_profile_t *profile) {
                    entry->sample_mmu, NULL));
         entry->hits = 0u;
     }
+
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    sequence_profile_report_rejected_raw(profile, false);
+    sequence_profile_report_rejected_raw(profile, true);
+#endif
 
     printf("\n  hottest raw encodings\n");
     for (unsigned rank = 0; rank < 16u; rank++) {
