@@ -3090,6 +3090,8 @@ static void test_signed_static_a64_soc_oracle(void) {
     size_t reference_len = 0u;
     arm_status_t fast_status = ARM_OK;
     arm_status_t reference_status = ARM_OK;
+    snapshot_status_t fast_snapshot_status;
+    snapshot_status_t reference_snapshot_status;
     bool fast_ok;
     bool reference_ok;
 
@@ -3109,10 +3111,10 @@ static void test_signed_static_a64_soc_oracle(void) {
 
     s5l8900_load(&fast, 0u, add_loop, sizeof add_loop);
     s5l8900_load(&reference, 0u, add_loop, sizeof add_loop);
-    /* An intentionally non-integral ratio makes the run cross many device
-     * boundaries, rather than proving only a timer-free straight line. */
-    fast.cpu_hz = reference.cpu_hz = 1000u;
-    fast.tb_hz = reference.tb_hz = 7u;
+    /* The board's real 412 MHz:6 MHz non-integral ratio makes the run cross
+     * hundreds of device boundaries, rather than proving a timer-free line.
+     * Keep it real: tb_hz is also the PMU's configured clock and snapshots
+     * correctly reject a machine whose two clocks disagree. */
     s5l8900_tick(&fast, 0u);
     s5l8900_tick(&reference, 0u);
 
@@ -3141,11 +3143,16 @@ static void test_signed_static_a64_soc_oracle(void) {
           (int)fast_status, (int)reference_status);
     CHECK(s5l8900_static_a64_retired(&fast) != 0u,
           "available signed engine retired no instructions");
-    CHECK(snapshot_save_mem(&fast, &fast_snapshot, &fast_len) == SNAP_OK,
-          "could not serialize signed machine");
-    CHECK(snapshot_save_mem(&reference, &reference_snapshot, &reference_len) ==
-              SNAP_OK,
-          "could not serialize reference machine");
+    fast_snapshot_status =
+        snapshot_save_mem(&fast, &fast_snapshot, &fast_len);
+    reference_snapshot_status =
+        snapshot_save_mem(&reference, &reference_snapshot, &reference_len);
+    CHECK(fast_snapshot_status == SNAP_OK,
+          "could not serialize signed machine: %s",
+          snapshot_strerror(fast_snapshot_status));
+    CHECK(reference_snapshot_status == SNAP_OK,
+          "could not serialize reference machine: %s",
+          snapshot_strerror(reference_snapshot_status));
     CHECK(fast_snapshot && reference_snapshot && fast_len == reference_len &&
               memcmp(fast_snapshot, reference_snapshot, fast_len) == 0,
           "signed and reference machine snapshots differ");
