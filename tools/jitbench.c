@@ -2168,7 +2168,8 @@ typedef struct {
 typedef enum {
     SOC_ENTRY_REFERENCE,
     SOC_ENTRY_SIGNED,
-    SOC_ENTRY_GRAPH
+    SOC_ENTRY_GRAPH,
+    SOC_ENTRY_GRAPH_EXTENDED
 } soc_entry_path_t;
 
 static const char *soc_entry_path_name(soc_entry_path_t path) {
@@ -2176,6 +2177,7 @@ static const char *soc_entry_path_name(soc_entry_path_t path) {
     case SOC_ENTRY_REFERENCE: return "reference";
     case SOC_ENTRY_SIGNED:    return "signed";
     case SOC_ENTRY_GRAPH:     return "graph";
+    case SOC_ENTRY_GRAPH_EXTENDED: return "graph-extended";
     }
     return "invalid";
 }
@@ -2209,9 +2211,11 @@ static bool run_soc_entry_path(const uint32_t *program, unsigned length,
     bool ok = false;
 
     bool signed_path = path != SOC_ENTRY_REFERENCE;
-    bool graph_path = path == SOC_ENTRY_GRAPH;
+    bool graph_path = path == SOC_ENTRY_GRAPH ||
+                      path == SOC_ENTRY_GRAPH_EXTENDED;
+    bool extended_path = path == SOC_ENTRY_GRAPH_EXTENDED;
 
-    if (!program || !length || !out || path > SOC_ENTRY_GRAPH)
+    if (!program || !length || !out || path > SOC_ENTRY_GRAPH_EXTENDED)
         return false;
     memset(out, 0, sizeof *out);
     if (!s5l8900_init(&machine, 0u, RAM_SIZE)) {
@@ -2233,6 +2237,12 @@ static bool run_soc_entry_path(const uint32_t *program, unsigned length,
     if (graph_path &&
         !s5l8900_static_a64_set_graph(&machine, true)) {
         fprintf(stderr, "jitbench: SoC entry graph engine unavailable\n");
+        goto done;
+    }
+    if (extended_path &&
+        !s5l8900_static_a64_set_chain_limit(
+            &machine, A64_STATIC_MAX_CHAIN_INSNS)) {
+        fprintf(stderr, "jitbench: SoC entry extended limit unavailable\n");
         goto done;
     }
 
@@ -2312,7 +2322,9 @@ done:
 
 /* The earlier product-entry curve intentionally stops before the SoC. This
  * curve includes that missing product machinery and compares complete machine
- * state. It is still not phone FPS: there is no MMU miss, real firmware mix,
+ * state. The fourth same-binary arm changes only the total signed-invocation
+ * bound from 16 to 256; the machine still clamps it to the first timebase edge.
+ * It is still not phone FPS: there is no MMU miss, real firmware mix,
  * framebuffer publication or UIKit in this synthetic loop. */
 static bool bench_soc_entry(unsigned length, uint64_t requested,
                             unsigned reps) {
@@ -2321,9 +2333,11 @@ static bool bench_soc_entry(unsigned length, uint64_t requested,
     double *reference_rates = NULL;
     double *signed_rates = NULL;
     double *graph_rates = NULL;
+    double *extended_rates = NULL;
     uint64_t total;
     uint64_t signed_chains = 0u;
     uint64_t graph_chains = 0u;
+    uint64_t extended_chains = 0u;
     bool ok = false;
 
     if (requested > UINT64_MAX - (uint64_t)(length - 1u) ||
@@ -2336,7 +2350,9 @@ static bool bench_soc_entry(unsigned length, uint64_t requested,
     reference_rates = (double *)calloc(reps, sizeof *reference_rates);
     signed_rates = (double *)calloc(reps, sizeof *signed_rates);
     graph_rates = (double *)calloc(reps, sizeof *graph_rates);
-    if (!reference_rates || !signed_rates || !graph_rates) {
+    extended_rates = (double *)calloc(reps, sizeof *extended_rates);
+    if (!reference_rates || !signed_rates || !graph_rates ||
+        !extended_rates) {
         fprintf(stderr, "jitbench: SoC entry out of memory\n");
         goto done;
     }
@@ -2345,42 +2361,55 @@ static bool bench_soc_entry(unsigned length, uint64_t requested,
         soc_run_result_t reference = {0};
         soc_run_result_t signed_result = {0};
         soc_run_result_t graph_result = {0};
+        soc_run_result_t extended_result = {0};
         const char *order;
         bool ran;
 
         if (rep % 3u == 0u) {
-            order = "reference-signed-graph";
+            order = "reference-signed-graph16-graph256";
             ran = run_soc_entry_path(program, length, total,
                                      SOC_ENTRY_REFERENCE,
                                      &reference) &&
                   run_soc_entry_path(program, length, total,
                                      SOC_ENTRY_SIGNED, &signed_result) &&
                   run_soc_entry_path(program, length, total,
-                                     SOC_ENTRY_GRAPH, &graph_result);
+                                     SOC_ENTRY_GRAPH, &graph_result) &&
+                  run_soc_entry_path(program, length, total,
+                                     SOC_ENTRY_GRAPH_EXTENDED,
+                                     &extended_result);
         } else if (rep % 3u == 1u) {
-            order = "signed-graph-reference";
+            order = "signed-graph16-graph256-reference";
             ran = run_soc_entry_path(program, length, total,
                                      SOC_ENTRY_SIGNED, &signed_result) &&
                   run_soc_entry_path(program, length, total,
                                      SOC_ENTRY_GRAPH, &graph_result) &&
                   run_soc_entry_path(program, length, total,
+                                     SOC_ENTRY_GRAPH_EXTENDED,
+                                     &extended_result) &&
+                  run_soc_entry_path(program, length, total,
                                      SOC_ENTRY_REFERENCE, &reference);
         } else {
-            order = "graph-reference-signed";
+            order = "graph16-graph256-reference-signed";
             ran = run_soc_entry_path(program, length, total,
                                      SOC_ENTRY_GRAPH, &graph_result) &&
+                  run_soc_entry_path(program, length, total,
+                                     SOC_ENTRY_GRAPH_EXTENDED,
+                                     &extended_result) &&
                   run_soc_entry_path(program, length, total,
                                      SOC_ENTRY_REFERENCE, &reference) &&
                   run_soc_entry_path(program, length, total,
                                      SOC_ENTRY_SIGNED, &signed_result);
         }
         if (!ran || !reference.snapshot || !signed_result.snapshot ||
-            !graph_result.snapshot ||
+            !graph_result.snapshot || !extended_result.snapshot ||
             reference.snapshot_len != signed_result.snapshot_len ||
             reference.snapshot_len != graph_result.snapshot_len ||
+            reference.snapshot_len != extended_result.snapshot_len ||
             memcmp(reference.snapshot, signed_result.snapshot,
                    reference.snapshot_len) != 0 ||
             memcmp(reference.snapshot, graph_result.snapshot,
+                   reference.snapshot_len) != 0 ||
+            memcmp(reference.snapshot, extended_result.snapshot,
                    reference.snapshot_len) != 0) {
             fprintf(stderr,
                     "jitbench: SoC entry length %u repetition %u failed "
@@ -2389,66 +2418,81 @@ static bool bench_soc_entry(unsigned length, uint64_t requested,
             free_soc_run_result(&reference);
             free_soc_run_result(&signed_result);
             free_soc_run_result(&graph_result);
+            free_soc_run_result(&extended_result);
             goto done;
         }
         if (rep == 0u) {
             signed_chains = signed_result.signed_chains;
             graph_chains = graph_result.graph_chains;
+            extended_chains = extended_result.graph_chains;
         } else if (signed_chains != signed_result.signed_chains ||
-                   graph_chains != graph_result.graph_chains) {
+                   graph_chains != graph_result.graph_chains ||
+                   extended_chains != extended_result.graph_chains) {
             fprintf(stderr,
                     "jitbench: SoC entry length %u chain counts changed "
                     "across repetitions\n", length);
             free_soc_run_result(&reference);
             free_soc_run_result(&signed_result);
             free_soc_run_result(&graph_result);
+            free_soc_run_result(&extended_result);
             goto done;
         }
         /* A fixed graph node cannot manufacture the callback path's decoded
          * bounded prefix when the timer/caller remainder is shorter than its
          * cached block. Stopping there is exact, but legitimately lowers the
-         * graph chain count. Preserve both independent stable counters as a
-         * performance diagnostic; full snapshot equality remains the gate. */
+         * graph chain count. Preserve all stable counters as performance
+         * diagnostics; full four-way snapshot equality remains the gate. */
         reference_rates[rep] = (double)total / reference.seconds / 1.0e6;
         signed_rates[rep] = (double)total / signed_result.seconds / 1.0e6;
         graph_rates[rep] = (double)total / graph_result.seconds / 1.0e6;
+        extended_rates[rep] =
+            (double)total / extended_result.seconds / 1.0e6;
         printf("SOC-ENTRY-SAMPLE length=%u rep=%u order=%s "
-               "reference=%.3f signed=%.3f graph=%.3f Minsn/s "
-               "signed-chains=%" PRIu64 " graph-chains=%" PRIu64
+               "reference=%.3f signed=%.3f graph16=%.3f graph256=%.3f "
+               "Minsn/s signed-chains=%" PRIu64
+               " graph-chains=%" PRIu64 " extended-graph-chains=%" PRIu64
                " exact-snapshot=yes\n",
                length, rep + 1u, order, reference_rates[rep],
-               signed_rates[rep], graph_rates[rep],
+               signed_rates[rep], graph_rates[rep], extended_rates[rep],
                signed_result.signed_chains,
-               graph_result.graph_chains);
+               graph_result.graph_chains, extended_result.graph_chains);
         free_soc_run_result(&reference);
         free_soc_run_result(&signed_result);
         free_soc_run_result(&graph_result);
+        free_soc_run_result(&extended_result);
     }
 
     qsort(reference_rates, reps, sizeof *reference_rates, cmp_double);
     qsort(signed_rates, reps, sizeof *signed_rates, cmp_double);
     qsort(graph_rates, reps, sizeof *graph_rates, cmp_double);
+    qsort(extended_rates, reps, sizeof *extended_rates, cmp_double);
     printf("SOC-ENTRY-CURVE length=%u uops=%u guest-insns=%" PRIu64
-           " reps=%u run-api=yes cache-lookup=yes block-witness=yes "
+           " reps=%u chain-limit=16 extended-limit=256 run-api=yes "
+           "cache-lookup=yes block-witness=yes "
            "entry-gates=yes timer-boundaries=yes device-tick=yes "
            "head-cache=warm mmu=off exact-snapshot=yes signed-retired=%" PRIu64
            " signed-chains=%" PRIu64 " graph-chains=%" PRIu64
+           " extended-graph-chains=%" PRIu64
            " reference-median=%.3f signed-median=%.3f "
-           "graph-median=%.3f speedup=%.3fx "
-           "graph-speedup=%.3fx graph-over-signed=%.3fx\n",
+           "graph-median=%.3f extended-graph-median=%.3f speedup=%.3fx "
+           "graph-speedup=%.3fx extended-graph-speedup=%.3fx "
+           "graph-over-signed=%.3fx extended-over-graph=%.3fx\n",
            length, shape.uop_count, total, reps, total, signed_chains,
-           graph_chains,
+           graph_chains, extended_chains,
            reference_rates[reps / 2u], signed_rates[reps / 2u],
-           graph_rates[reps / 2u],
+           graph_rates[reps / 2u], extended_rates[reps / 2u],
            signed_rates[reps / 2u] / reference_rates[reps / 2u],
            graph_rates[reps / 2u] / reference_rates[reps / 2u],
-           graph_rates[reps / 2u] / signed_rates[reps / 2u]);
+           extended_rates[reps / 2u] / reference_rates[reps / 2u],
+           graph_rates[reps / 2u] / signed_rates[reps / 2u],
+           extended_rates[reps / 2u] / graph_rates[reps / 2u]);
     ok = true;
 
 done:
     free(reference_rates);
     free(signed_rates);
     free(graph_rates);
+    free(extended_rates);
     return ok;
 }
 
@@ -2667,8 +2711,9 @@ int main(int argc, char **argv) {
     printf("Product-entry rows use predecoded hot blocks and compare full "
            "wrapper validation with a cache-owned decoded contract; both "
            "still exclude SoC cache lookup and device gates.\n");
-    printf("SoC-entry rows rotate reference, legacy signed and callback-free graph "
-           "signed paths across separately initialized machines. They cross "
+    printf("SoC-entry rows rotate reference, legacy signed, 16-instruction graph "
+           "and extended graph paths across separately initialized machines. "
+           "The extended arm remains clamped to the first timebase edge. They cross "
            "the real run API, cache/raw witness, gates, timer boundaries and "
            "device ticks with exact serialized-machine comparison; they still "
            "exclude real firmware, framebuffer/UI work and phone FPS.\n");

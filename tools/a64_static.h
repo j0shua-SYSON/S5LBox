@@ -20,6 +20,12 @@
 #include <stdint.h>
 
 #define A64_STATIC_MAX_INSNS 16u
+/* One decoded head remains capped at sixteen instructions. A callback-free
+ * invocation may visit several already-validated heads, but this separate
+ * ceiling bounds its 32-bit accounting even when the SoC timebase edge is
+ * farther away. The product keeps the historical sixteen-instruction default
+ * until a same-binary end-to-end gate justifies changing it. */
+#define A64_STATIC_MAX_CHAIN_INSNS 256u
 /* A conditional register-offset A32 load uses a guard, shifter, address and
  * read record. The final slot is the fixed block exit. */
 #define A64_STATIC_MAX_UOPS (A64_STATIC_MAX_INSNS * 4u + 1u)

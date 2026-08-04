@@ -3446,12 +3446,14 @@ static void test_signed_static_a64_chain_bound_oracle(void) {
     s5l8900_free(&reference);
 }
 
-/* The callback-free graph must preserve the same strongest caller bound while
- * proving it actually consumed data-only cache descriptors. The self-branch
- * reuses one hot node fifteen times; every lookup repeats PC/generation/privilege
- * and its complete four-byte executing-block witness in signed assembly without
- * returning through C. Bytes after this terminal branch cannot affect it and
- * must not inflate that witness back to the full 64-byte decode candidate. */
+/* The callback-free graph must preserve the configured caller bound while
+ * proving it actually consumed data-only cache descriptors. The default
+ * self-branch reuses one hot node fifteen times. An explicitly extended run
+ * then reuses it sixty-three times without reaching the real 412:6 timebase
+ * edge. Every lookup repeats PC/generation/privilege and its complete four-byte
+ * executing-block witness in signed assembly without returning through C.
+ * Bytes after this terminal branch cannot affect it and must not inflate that
+ * witness back to the full 64-byte decode candidate. */
 static void test_signed_static_a64_graph_bound_oracle(void) {
     const uint32_t self_branch = UINT32_C(0xeafffffe); /* B . */
     const uint32_t colliding_pc = UINT32_C(0x400);
@@ -3582,6 +3584,47 @@ static void test_signed_static_a64_graph_bound_oracle(void) {
           "graph collision status differs: signed=%d reference=%d",
           (int)fast_status, (int)reference_status);
 
+    /* Reset only the exact converter remainder on both already-equal machines.
+     * Sixty-four CPU ticks produce 384 MHz-ticks, still below the first 412 MHz
+     * edge at the initialized 6 MHz timebase. The literal path therefore does
+     * no observable device refresh inside this window, and the extended signed
+     * invocation may retire the same 64 self-branches in one bounded entry. */
+    fast.tb_accum = 0u;
+    reference.tb_accum = 0u;
+    CHECK(!s5l8900_static_a64_set_chain_limit(&fast, 0u),
+          "zero extended graph limit was accepted");
+    CHECK(!s5l8900_static_a64_set_chain_limit(&fast, 257u),
+          "oversized extended graph limit was accepted");
+    CHECK(s5l8900_static_a64_set_chain_limit(&fast, 256u),
+          "extended graph limit was refused");
+    retired_before = s5l8900_static_a64_retired(&fast);
+    chains_before = s5l8900_static_a64_chained_blocks(&fast);
+    graph_before = s5l8900_static_a64_graph_chained_blocks(&fast);
+    CHECK(s5l8900_run(&fast, 64u, &fast_status) == 64u,
+          "extended graph-bound run stopped early");
+    CHECK(s5l8900_run(&reference, 64u, &reference_status) == 64u,
+          "extended graph-bound reference stopped early");
+    uint64_t extended_retired =
+        s5l8900_static_a64_retired(&fast) - retired_before;
+    uint64_t extended_chains =
+        s5l8900_static_a64_chained_blocks(&fast) - chains_before;
+    uint64_t extended_graph =
+        s5l8900_static_a64_graph_chained_blocks(&fast) - graph_before;
+    bool pre_edge = fast.tb_accum == reference.tb_accum &&
+                    fast.tb_accum == (uint64_t)64u * fast.tb_hz &&
+                    fast.tb_accum < fast.cpu_hz;
+    CHECK(extended_retired == 64u && extended_chains == 63u &&
+          extended_graph == 63u,
+          "extended graph retired/chained/graph %llu/%llu/%llu, "
+          "expected 64/63/63",
+          (unsigned long long)extended_retired,
+          (unsigned long long)extended_chains,
+          (unsigned long long)extended_graph);
+    CHECK(pre_edge, "extended graph crossed or drifted before timebase edge");
+    CHECK(fast_status == reference_status,
+          "extended graph status differs: signed=%d reference=%d",
+          (int)fast_status, (int)reference_status);
+
     snapshot_status_t fast_snapshot_status =
         snapshot_save_mem(&fast, &fast_snapshot, &fast_len);
     snapshot_status_t reference_snapshot_status =
@@ -3600,11 +3643,15 @@ static void test_signed_static_a64_graph_bound_oracle(void) {
     if (exact && one_retired == 1u && one_chains == 0u &&
         one_graph == 0u && sixteen_retired == 16u &&
         sixteen_chains == 15u && sixteen_graph == 15u &&
-        collision_graph == 15u && one_witness == sizeof self_branch) {
+        collision_graph == 15u && extended_retired == 64u &&
+        extended_chains == 63u && extended_graph == 63u && pre_edge &&
+        one_witness == sizeof self_branch) {
         printf("  STATIC-A64-GRAPH-BOUND-ORACLE exact=yes "
                "one-retired=1 one-chains=0 one-graph=0 "
                "sixteen-retired=16 sixteen-chains=15 sixteen-graph=15 "
-               "block-witness=4 collision-republish=yes\n");
+               "extended-retired=64 extended-chains=63 extended-graph=63 "
+               "first-timebase-edge=yes block-witness=4 "
+               "collision-republish=yes\n");
     }
 
     free(fast_snapshot);

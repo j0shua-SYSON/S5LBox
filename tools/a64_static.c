@@ -1329,7 +1329,8 @@ const a64_static_chain_step_t *a64_static_chain_advance(
     if (!context) return NULL;
     current = (unsigned)context->step.insns;
     context->final_pc = pc;
-    if (!current || current > context->budget - context->completed)
+    if (!current || context->completed > context->budget ||
+        current > context->budget - context->completed)
         return NULL;
     context->completed += current;
     context->blocks++;
@@ -1374,7 +1375,7 @@ static bool run_read_hits_chain(arm_cpu_t *cpu,
     thumb = (cpu->cpsr & ARM_CPSR_T) != 0u;
     priv = (cpu->cpsr & ARM_CPSR_MODE_MASK) != ARM_MODE_USR;
     if (!ram || !budget ||
-        budget > A64_STATIC_MAX_INSNS || !ram_size ||
+        budget > A64_STATIC_MAX_CHAIN_INSNS || !ram_size ||
         (ram_size & (ram_size - 1u)) != 0u ||
         ram_size - 1u > UINT32_MAX ||
         !validate_decoded_read_hits_at(

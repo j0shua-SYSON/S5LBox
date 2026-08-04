@@ -19,7 +19,6 @@
 
 #define STATIC_A64_CACHE_ENTRIES 1024u
 #define STATIC_A64_RAW_BYTES (A64_STATIC_MAX_INSNS * 4u)
-#define STATIC_A64_CHAIN_INSNS A64_STATIC_MAX_INSNS
 
 typedef struct {
     const uint8_t *fetch_host;
@@ -38,6 +37,7 @@ typedef struct {
     bool enabled;
     bool persistent;
     bool graph_enabled;
+    unsigned chain_limit;
     uint64_t retired;
     uint64_t chained_blocks;
     uint64_t persistent_chained_blocks;
@@ -253,6 +253,7 @@ bool s5l8900_static_a64_set_enabled(s5l8900_t *m, bool enabled) {
     if (!state) {
         state = (static_a64_state_t *)calloc(1u, sizeof *state);
         if (!state) return false;
+        state->chain_limit = A64_STATIC_MAX_INSNS;
         m->static_a64_state = state;
     }
     state->enabled = true;
@@ -297,6 +298,22 @@ bool s5l8900_static_a64_set_graph(s5l8900_t *m, bool enabled) {
     return true;
 #else
     (void)enabled;
+    return false;
+#endif
+}
+
+bool s5l8900_static_a64_set_chain_limit(s5l8900_t *m,
+                                        unsigned max_insns) {
+    if (!m) return false;
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    static_a64_state_t *state = static_state(m);
+    if (!state || !state->enabled || !a64_static_host_available() ||
+        !max_insns || max_insns > A64_STATIC_MAX_CHAIN_INSNS)
+        return false;
+    state->chain_limit = max_insns;
+    return true;
+#else
+    (void)max_insns;
     return false;
 #endif
 }
@@ -447,8 +464,8 @@ unsigned s5l8900_static_a64_try(s5l8900_t *m, unsigned max_insns) {
         return 0u;
 
     cpu = &m->cpu;
-    budget = max_insns < STATIC_A64_CHAIN_INSNS
-           ? max_insns : STATIC_A64_CHAIN_INSNS;
+    budget = max_insns < state->chain_limit
+           ? max_insns : state->chain_limit;
     if (state->graph_enabled) return try_graph(m, state, budget);
     if (state->persistent) return try_persistent(m, state, budget);
 

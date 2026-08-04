@@ -1319,9 +1319,10 @@ def render() -> str:
         *next_dispatch(),
         "",
         ".La64s_graph_advance:",
-        # Account the block that just completed before selecting another. All
-        # quantities are bounded to sixteen, but validate before adding so a
-        # corrupted descriptor can only stop, never expand caller retirement.
+        # Account the block that just completed before selecting another. Each
+        # head is bounded to sixteen and the total budget to 256, but validate
+        # before adding so a corrupted descriptor can only stop, never expand
+        # caller retirement.
         "    str w12, [x0, #60]",
         "    ldr w4, [x0, #52]",
         "    ldr x5, [x0, #8]",
