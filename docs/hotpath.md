@@ -5673,3 +5673,72 @@ measure the complete `s5l8900_run()` path at lengths 1, 2, 3, 4, 8 and 16, inclu
 cache/raw-byte witness, entry gates and device-time boundaries, then combine that curve with an
 exact per-length replay histogram. That evidence will decide whether cache/gate work and block
 chaining can close the gap or whether broader Thumb/VFP coverage must first create longer runs.
+
+### r509-r510: the real SoC curve predicts a modest gain, not 30 FPS
+
+r509 moves timing through the complete app-facing `s5l8900_run()` path. For each synthetic
+length it initializes independent signed and interpreter machines, warms two loop iterations
+outside the clock, and then times 20 million guest instructions. The signed side includes the
+real 1,024-entry cache index, live raw-byte self-modification witness, CPU/fetch/interrupt gates,
+timebase-edge splitting and device ticks. The interpreter side uses the same machine API. Every
+repetition ends in a complete serialized-machine comparison, and every timed signed instruction
+must appear in the engine's retirement counter. The loops are still synthetic, MMU-off and free
+of firmware, framebuffer publication and UIKit, so the result is not phone or emulator FPS.
+
+r510 extends that curve to every possible product call length and prints the observer's exact
+one-through-sixteen histogram. Exact commit
+`860d17335e505d02f57a735cf492b4ae336ad4cd` is fully green in core run `30883223864` and
+iOS run `30883236735`; both Apple runners passed all sixteen byte-identical machine comparisons.
+The unchanged 7.100--7.110 B replay produced:
+
+| length | modeled calls | modeled instructions | modeled share | macOS 14 SoC speedup | macOS 15 SoC speedup |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 1,018,251 | 1,018,251 | 17.359% | 0.499x | 0.535x |
+| 2 | 697,579 | 1,395,158 | 23.784% | 1.250x | 1.209x |
+| 3 | 305,484 | 916,452 | 15.624% | 1.763x | 1.779x |
+| 4 | 227,229 | 908,916 | 15.495% | 2.524x | 2.293x |
+| 5 | 84,414 | 422,070 | 7.195% | 2.459x | 2.661x |
+| 6 | 58,105 | 348,630 | 5.943% | 2.857x | 2.904x |
+| 7 | 31,420 | 219,940 | 3.750% | 3.188x | 2.919x |
+| 8 | 17,432 | 139,456 | 2.377% | 3.606x | 3.811x |
+| 9 | 6,070 | 54,630 | 0.931% | 3.790x | 4.010x |
+| 10 | 5,854 | 58,540 | 0.998% | 3.938x | 4.439x |
+| 11 | 9,107 | 100,177 | 1.708% | 4.115x | 4.241x |
+| 12 | 2,849 | 34,188 | 0.583% | 4.133x | 4.522x |
+| 13 | 4,826 | 62,738 | 1.070% | 4.273x | 4.877x |
+| 14 | 851 | 11,914 | 0.203% | 4.255x | 4.609x |
+| 15 | 2,862 | 42,930 | 0.732% | 4.353x | 4.587x |
+| 16 | 8,240 | 131,840 | 2.248% | 4.440x | 4.674x |
+
+All 2,480,573 calls and 5,865,830 modeled instructions land in exactly one row. The table
+exposes the current failure mode: **41.143% of modeled signed instructions are in length-one or
+length-two calls**, while only 8.473% reach lengths nine through sixteen. Length one is about half
+the interpreter's speed. The attractive 4.4--4.7x length-sixteen result therefore describes only
+2.248% of the modeled signed work.
+
+There is no unique honest way to turn synthetic ALU/branch loops into a firmware prediction.
+Two explicit weightings bound how much optimism is hidden. Treating every covered guest
+instruction as equal-cost and applying each length's relative curve gives a covered-region
+speedup of 1.287x on macOS 14 and 1.312x on macOS 15; Amdahl's law at 58.661% coverage gives only
+**1.150x and 1.162x whole-workload speedup**. Retaining each synthetic reference loop's measured
+seconds gives the more favourable covered values 1.474x and 1.437x, or **1.233x and 1.217x
+overall**. These are alternative synthetic interpretations, not a confidence interval and not a
+same-binary A/B. Applied only as scale to the 15.732668 M/s r485 baseline, they span roughly
+18.10--19.39 M/s, still far below the 34.304688 M/s capacity target.
+
+The replay exited OK in 32.9 host seconds with empty stderr. The histogram, outcome, class,
+stop and gate identities are exact; CLCD remains at 1,590 frames. Its work image and PPM hashes
+remain respectively
+`8A59C388C481165F460984926AA5FFB1B72A0E9030216CD0038DE9B3264B79FE` and
+`1EF63FFE3EEFD976416E17120A36BA074BF295EA0955D716E2D345FCC5EA0A9E`.
+
+Brutal status: **there is still no measured emulator or phone FPS improvement, and this model is
+nowhere near 30 FPS**. The normal app still builds the engine out and the physical phone remains
+at the reported 0--4 FPS. The result does establish that longer signed calls are valuable and
+that the current short-call distribution is the primary obstacle. Of 2,480,573 calls, 2,268,911
+stop on an ineligible instruction; only 102,431 stop on a currently signed branch, so branch
+chaining alone would be premature. The largest broad rejected boundary family is A32 immediate
+B/BL: 1,093,302 of 1,201,691 observations are rejected, **10.933% of the full fetched trace**.
+Exact conditional and link semantics are therefore the next coverage tranche. If admitted, they
+can convert a large literal boundary into the tail of an existing signed call; only after that
+replay will branch-to-target chaining have enough volume to justify its added dispatcher risk.
