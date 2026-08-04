@@ -3193,7 +3193,8 @@ static void test_signed_static_a64_soc_oracle(void) {
     if (fast_snapshot && reference_snapshot && fast_len == reference_len &&
         memcmp(fast_snapshot, reference_snapshot, fast_len) == 0 &&
         s5l8900_static_a64_retired(&fast) != 0u) {
-        printf("  STATIC-A64-SOC-ORACLE exact=yes retired=%llu smc=yes\n",
+        printf("  STATIC-A64-SOC-ORACLE exact=yes retired=%llu "
+               "smc=yes decoded=yes\n",
                (unsigned long long)s5l8900_static_a64_retired(&fast));
     }
 

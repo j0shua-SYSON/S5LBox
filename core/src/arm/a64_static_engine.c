@@ -200,11 +200,11 @@ unsigned s5l8900_static_a64_try(s5l8900_t *m, unsigned max_insns) {
         run_block = &bounded_block;
     }
 
-    if (!a64_static_run_read_hits(cpu, run_block, m->ram, m->ram_size,
-                                  &completed)) {
+    if (!a64_static_run_read_hits_decoded(cpu, run_block, m->ram,
+                                          m->ram_size, &completed)) {
         /* Fail closed, and make a transient contract mismatch re-decode rather
          * than becoming a permanent false hit. Guest state is unchanged when
-         * a64_static_run_read_hits refuses a block. */
+         * the decoded-contract runner refuses a block. */
         entry->valid = false;
         return 0u;
     }
