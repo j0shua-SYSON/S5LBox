@@ -711,7 +711,6 @@ static bool validate_static_shapes(void) {
     uint8_t vfp_read_bytes[sizeof VFP_READ_HITS];
     uint32_t branch_handlers[29];
     unsigned branch_handler_count = 0u;
-    unsigned resolved_records = 0u;
     unsigned i;
 
     for (i = 0u; i < sizeof A32_READ_HITS / sizeof A32_READ_HITS[0]; i++) {
@@ -766,40 +765,16 @@ static bool validate_static_shapes(void) {
             block.start_pc != sc->pc || block.exit_pc != sc->exit_pc ||
             block.thumb != sc->thumb || block.dynamic_exit ||
             block.touches_memory ||
-            a64_static_uop_handler_id(
-                &block, block.uop_count - 1u) != 0u ||
+            block.uops[block.uop_count - 1u].handler != 0u ||
             block.uops[block.uop_count - 1u].immediate != sc->exit_pc) {
             fprintf(stderr, "jitbench: static shape failed for %s\n", sc->name);
             return false;
-        }
-        for (unsigned j = 0u; j < block.uop_count; j++) {
-            if (a64_static_uop_handler_id(&block, j) >=
-                A64_STATIC_HANDLER_COUNT) {
-                fprintf(stderr,
-                        "jitbench: unresolved dispatch record for %s/%u\n",
-                        sc->name, j);
-                return false;
-            }
-            resolved_records++;
         }
         printf("STATIC-BLOCK-SHAPE case=%s pc=%08" PRIx32
                " exit=%08" PRIx32 " insns=%u uops=%u\n",
                sc->name, block.start_pc, block.exit_pc,
                block.insn_count, block.uop_count);
     }
-    {
-        a64_static_block_t invalid = block;
-        invalid.uops[0].handler = UINT32_MAX;
-        if (a64_static_uop_handler_id(&invalid, 0u) !=
-            A64_STATIC_HANDLER_COUNT) {
-            fprintf(stderr, "jitbench: invalid dispatch record resolved\n");
-            return false;
-        }
-    }
-    printf("STATIC-DISPATCH-OFFSET-SHAPE exact=yes records=%u "
-           "record-bytes=%zu invalid=yes native=%s\n",
-           resolved_records, sizeof(a64_static_uop_t),
-           a64_static_host_available() ? "yes" : "no");
 
     for (i = 0u; i < sizeof REG_SHIFT_PC / sizeof REG_SHIFT_PC[0]; i++) {
         if (a64_static_decode_at(&REG_SHIFT_PC[i], 1u, false, 0u, &block)) {
@@ -837,8 +812,7 @@ static bool validate_static_shapes(void) {
                 block.start_pc != pc || block.thumb ||
                 block.dynamic_exit != dynamic || block.touches_memory ||
                 block.direct_reads || block.runtime_guards || block.vfp ||
-                a64_static_uop_handler_id(
-                    &block, block.uop_count - 1u) != 0u ||
+                block.uops[block.uop_count - 1u].handler != 0u ||
                 block.exit_pc != (dynamic ? pc + 4u : target) ||
                 block.uops[block.uop_count - 1u].immediate !=
                     block.exit_pc) {
@@ -850,10 +824,7 @@ static bool validate_static_shapes(void) {
             if (dynamic) {
                 const a64_static_uop_t *branch =
                     &block.uops[block.uop_count - 2u];
-                uint32_t branch_handler =
-                    a64_static_uop_handler_id(
-                        &block, block.uop_count - 2u);
-                if (branch_handler == 0u || branch->immediate != target ||
+                if (branch->handler == 0u || branch->immediate != target ||
                     branch->pc_value != pc + 4u || branch->metadata != 0u) {
                     fprintf(stderr,
                             "jitbench: A32 dynamic exit record failed "
@@ -861,14 +832,14 @@ static bool validate_static_shapes(void) {
                     return false;
                 }
                 for (i = 0u; i < branch_handler_count; i++) {
-                    if (branch_handlers[i] == branch_handler) {
+                    if (branch_handlers[i] == branch->handler) {
                         fprintf(stderr,
                                 "jitbench: duplicate A32 branch handler "
                                 "link=%u cond=%u\n", link, condition);
                         return false;
                     }
                 }
-                branch_handlers[branch_handler_count++] = branch_handler;
+                branch_handlers[branch_handler_count++] = branch->handler;
             }
         }
     }
@@ -2459,7 +2430,6 @@ static bool bench_soc_entry(unsigned length, uint64_t requested,
     qsort(graph_rates, reps, sizeof *graph_rates, cmp_double);
     printf("SOC-ENTRY-CURVE length=%u uops=%u guest-insns=%" PRIu64
            " reps=%u run-api=yes cache-lookup=yes block-witness=yes "
-           "dispatch-offset=yes "
            "entry-gates=yes timer-boundaries=yes device-tick=yes "
            "head-cache=warm mmu=off exact-snapshot=yes signed-retired=%" PRIu64
            " signed-chains=%" PRIu64 " graph-chains=%" PRIu64

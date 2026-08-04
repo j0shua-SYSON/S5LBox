@@ -2,11 +2,9 @@
  * S5LBox -- signed static AArch64 semantic-thread contract.
  *
  * The native handlers are ordinary build-time-generated, signed text. Runtime
- * decoding creates only sixteen-byte data records. On native AArch64 the first
- * word is a pre-resolved signed-text-relative handler offset; other hosts keep
- * the portable handler id there. Immediate, PC operand and metadata occupy the
- * remaining words. It never emits code and never requests writable executable
- * memory.
+ * decoding creates only sixteen-byte data records (handler id, immediate,
+ * PC operand and metadata); it never emits code and never requests writable
+ * executable memory.
  *
  * This remains a deliberately bounded semantic subset. The benchmark uses the
  * complete contract, while the optional SoC engine accepts only the part it
@@ -29,10 +27,7 @@
 #define A64_STATIC_GRAPH_SLOTS 512u
 
 typedef struct {
-    union {
-        uint32_t handler;
-        int32_t dispatch_offset;
-    };
+    uint32_t handler;
     uint32_t immediate;
     uint32_t pc_value;
     uint32_t metadata;
@@ -44,10 +39,6 @@ typedef struct {
     unsigned uop_count;
     uint32_t start_pc;
     uint32_t exit_pc;
-    /* Portable identity of the last semantic record (END for a compact fixed
-     * exit). The cache-owned fast validator cross-checks dynamic_exit against
-     * this value without reversing a native dispatch offset on every entry. */
-    uint32_t terminal_handler_id;
     bool thumb;
     bool dynamic_exit;
     bool touches_memory;
@@ -126,12 +117,6 @@ bool a64_static_decode_read_hits_bytes_at(const uint8_t *program,
 /* Compatibility shorthand for a block beginning at address zero. */
 bool a64_static_decode(const void *program, unsigned insns, bool thumb,
                        a64_static_block_t *out);
-
-/* Recover the portable handler identity for validation and diagnostics. On a
- * native build this reverses the pre-resolved signed-text offset outside the
- * decoded product hot path. The count sentinel means the record is invalid. */
-uint32_t a64_static_uop_handler_id(const a64_static_block_t *block,
-                                   unsigned index);
 
 /* True only when the target was built with the generated AArch64 handler file. */
 bool a64_static_host_available(void);

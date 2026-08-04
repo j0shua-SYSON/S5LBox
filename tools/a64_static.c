@@ -76,59 +76,6 @@ _Static_assert(offsetof(a64_static_uop_t, immediate) == 4u &&
                offsetof(a64_static_uop_t, metadata) == 12u,
                "signed handler record layout changed");
 
-#if defined(S5LBOX_STATIC_A64_NATIVE)
-/* The generated object exports its existing table of signed-text-relative
- * offsets. Decode resolves an id through that read-only table once; the hot
- * native dispatcher then consumes the offset directly from the uop record. */
-extern const int32_t
-    a64_static_handler_offsets[A64_STATIC_HANDLER_COUNT];
-#endif
-
-uint32_t a64_static_uop_handler_id(const a64_static_block_t *block,
-                                   unsigned index) {
-    if (!block || index >= A64_STATIC_MAX_UOPS ||
-        index >= block->uop_count)
-        return A64S_HANDLER_COUNT;
-#if defined(S5LBOX_STATIC_A64_NATIVE)
-    int32_t target = block->uops[index].dispatch_offset;
-    unsigned low = 0u;
-    unsigned high = A64S_HANDLER_COUNT;
-    while (low < high) {
-        unsigned mid = low + (high - low) / 2u;
-        int32_t candidate = a64_static_handler_offsets[mid];
-        if (candidate < target)
-            low = mid + 1u;
-        else
-            high = mid;
-    }
-    return low < A64S_HANDLER_COUNT &&
-                   a64_static_handler_offsets[low] == target
-        ? low : A64S_HANDLER_COUNT;
-#else
-    return block->uops[index].handler < A64S_HANDLER_COUNT
-        ? block->uops[index].handler : A64S_HANDLER_COUNT;
-#endif
-}
-
-static uint32_t block_handler(const a64_static_block_t *block, unsigned i) {
-    return a64_static_uop_handler_id(block, i);
-}
-
-static void finalize_dispatch_records(a64_static_block_t *block) {
-    unsigned terminal = block->uop_count > 1u
-        ? block->uop_count - 2u : block->uop_count - 1u;
-    block->terminal_handler_id = block->uops[terminal].handler;
-#if defined(S5LBOX_STATIC_A64_NATIVE)
-    for (unsigned i = 0u; i < block->uop_count; i++) {
-        uint32_t handler = block->uops[i].handler;
-        block->uops[i].dispatch_offset =
-            a64_static_handler_offsets[handler];
-    }
-#else
-    (void)block;
-#endif
-}
-
 typedef struct {
     const void *dread;
     uint64_t *hits;
@@ -1027,7 +974,6 @@ static bool decode_program_at(const void *program, unsigned insns, bool thumb,
     out->start_pc = pc;
     out->exit_pc = out->uops[uop_count - 1u].immediate;
     out->thumb = thumb;
-    finalize_dispatch_records(out);
     return true;
 }
 
@@ -1147,24 +1093,22 @@ static unsigned semantic_span(const a64_static_block_t *block, unsigned i,
                               unsigned end) {
     uint32_t handler;
     if (i >= end) return 0u;
-    handler = block_handler(block, i);
+    handler = block->uops[i].handler;
     if (handler_is_terminal_branch(handler)) return 1u;
     if (handler_is_condition(handler) || handler == A64S_END)
         return 0u;
     if (handler_is_shift(handler)) {
-        if (i + 1u < end &&
-            handler_is_dp_reg(block_handler(block, i + 1u)))
+        if (i + 1u < end && handler_is_dp_reg(block->uops[i + 1u].handler))
             return 2u;
         if (i + 2u < end &&
-            handler_is_addr_reg(block_handler(block, i + 1u)) &&
-            handler_is_direct_read(block_handler(block, i + 2u)))
+            handler_is_addr_reg(block->uops[i + 1u].handler) &&
+            handler_is_direct_read(block->uops[i + 2u].handler))
             return 3u;
         return 0u;
     }
     if (handler_is_addr_imm(handler)) {
         return i + 1u < end &&
-               handler_is_direct_read(block_handler(block, i + 1u))
-                   ? 2u : 0u;
+               handler_is_direct_read(block->uops[i + 1u].handler) ? 2u : 0u;
     }
     if (handler_is_dp_reg(handler) || handler_is_addr_reg(handler) ||
         handler_is_direct_read(handler))
@@ -1191,7 +1135,7 @@ static bool validate_run(const arm_cpu_t *cpu,
         block->uop_count < block->insn_count ||
         block->uop_count > block->insn_count * 4u + 1u ||
         block->uop_count > A64_STATIC_MAX_UOPS ||
-        block_handler(block, block->uop_count - 1u) != A64S_END ||
+        block->uops[block->uop_count - 1u].handler != A64S_END ||
         block->uops[block->uop_count - 1u].immediate != block->exit_pc ||
         cpu->r[15] != block->start_pc ||
         ((cpu->cpsr & ARM_CPSR_T) != 0u) != block->thumb ||
@@ -1203,11 +1147,8 @@ static bool validate_run(const arm_cpu_t *cpu,
         return false;
 
     end = block->uop_count - 1u;
-    if (block->terminal_handler_id !=
-        (end ? block_handler(block, end - 1u) : A64S_END))
-        return false;
     for (unsigned j = 0u; j < end; j++) {
-        uint32_t handler = block_handler(block, j);
+        uint32_t handler = block->uops[j].handler;
         if (handler == A64S_END || handler >= A64S_HANDLER_COUNT)
             return false;
         if (handler_touches_memory(handler)) saw_flat_memory = true;
@@ -1255,7 +1196,7 @@ static bool validate_run(const arm_cpu_t *cpu,
 
     while (i < end) {
         unsigned span;
-        if (handler_is_condition(block_handler(block, i))) {
+        if (handler_is_condition(block->uops[i].handler)) {
             span = semantic_span(block, i + 1u, end);
             if (!span || block->uops[i].metadata != span)
                 return false;
@@ -1341,16 +1282,17 @@ static bool validate_decoded_read_hits_at(const a64_static_block_t *block,
         block->insn_count > remaining ||
         block->insn_count > A64_STATIC_MAX_INSNS || !block->uop_count ||
         block->uop_count > A64_STATIC_MAX_UOPS ||
+        block->uops[block->uop_count - 1u].handler != A64S_END ||
         block->uops[block->uop_count - 1u].immediate != block->exit_pc ||
         pc != block->start_pc || thumb != block->thumb ||
         (block->touches_memory && !block->direct_reads))
         return false;
-    terminal_dynamic = handler_is_terminal_branch(
-        block->terminal_handler_id);
-    if (block->terminal_handler_id >= A64S_HANDLER_COUNT ||
-        block->dynamic_exit != terminal_dynamic ||
+    terminal_dynamic = block->uop_count > 1u &&
+        handler_is_terminal_branch(
+            block->uops[block->uop_count - 2u].handler);
+    if (block->dynamic_exit != terminal_dynamic ||
         (terminal_dynamic &&
-         (block->uop_count < 2u || block->thumb ||
+         (block->thumb ||
           (block->uops[block->uop_count - 2u].immediate & 3u) != 0u ||
           block->uops[block->uop_count - 2u].pc_value != block->exit_pc ||
           block->uops[block->uop_count - 2u].metadata != 0u ||

@@ -204,7 +204,6 @@ jobs:
             grep -Eq 'STATIC-A64-VFP-READ-ORACLE exact=yes retired=[1-9][0-9]* cold-fill=yes double=yes' <<<"$soc_output"
             grep -Eq 'STATIC-A64-THUMB-ORACLE exact=yes retired=[1-9][0-9]*' <<<"$soc_output"
             grep -Eq 'STATIC-A64-THUMB-READ-ORACLE exact=yes retired=[1-9][0-9]*' <<<"$soc_output"
-            grep -Eq 'STATIC-DISPATCH-OFFSET-SHAPE exact=yes records=[1-9][0-9]* record-bytes=16 invalid=yes native=yes' <<<"$static_output"
             grep -Fq 'STATIC-BRANCH-SHAPE exact=yes conditional=14 link=15 handlers=29 forward=yes backward=yes' <<<"$static_output"
             grep -Fq 'STATIC-BRANCH-ORACLE exact=yes cases=58 taken=yes fallthrough=yes link=yes backward=yes contract=yes' <<<"$static_output"
             grep -Eq 'STATIC-VFP-COMPARE-SHAPE exact=yes insns=8 uops=9 handlers=24646' <<<"$static_output"
@@ -213,8 +212,8 @@ jobs:
             grep -Eq 'STATIC-VFP-WIDEN-ORACLE exact=yes ops=15 finite=yes subnormal=yes nan=yes fz=yes zero-prefix=yes partial-prefix=yes' <<<"$static_output"
             grep -Eq 'PRODUCT-ENTRY-CEILING length=1 uops=1 guest-insns=10000 reps=1 predecoded=yes validated-wrapper=yes decoded-contract=yes cache-lookup=no' <<<"$static_output"
             grep -Eq 'PRODUCT-ENTRY-CEILING length=16 uops=16 guest-insns=10000 reps=1 predecoded=yes validated-wrapper=yes decoded-contract=yes cache-lookup=no' <<<"$static_output"
-            grep -Eq 'SOC-ENTRY-CURVE length=1 uops=1 guest-insns=10000 reps=1 run-api=yes cache-lookup=yes block-witness=yes dispatch-offset=yes .*exact-snapshot=yes signed-retired=10000 signed-chains=[1-9][0-9]* graph-chains=[1-9][0-9]*' <<<"$static_output"
-            grep -Eq 'SOC-ENTRY-CURVE length=16 uops=16 guest-insns=10000 reps=1 run-api=yes cache-lookup=yes block-witness=yes dispatch-offset=yes .*exact-snapshot=yes signed-retired=10000 signed-chains=[1-9][0-9]* graph-chains=0' <<<"$static_output"
+            grep -Eq 'SOC-ENTRY-CURVE length=1 uops=1 guest-insns=10000 reps=1 run-api=yes cache-lookup=yes block-witness=yes .*exact-snapshot=yes signed-retired=10000 signed-chains=[1-9][0-9]* graph-chains=[1-9][0-9]*' <<<"$static_output"
+            grep -Eq 'SOC-ENTRY-CURVE length=16 uops=16 guest-insns=10000 reps=1 run-api=yes cache-lookup=yes block-witness=yes .*exact-snapshot=yes signed-retired=10000 signed-chains=[1-9][0-9]* graph-chains=0' <<<"$static_output"
           else
             grep -Fq 'SKIP: not an arm64 host' <<<"$output"
             grep -Fq 'STATIC-A64-SOC-ORACLE SKIP: no signed AArch64 handlers' <<<"$soc_output"
