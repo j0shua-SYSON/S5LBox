@@ -5742,3 +5742,71 @@ B/BL: 1,093,302 of 1,201,691 observations are rejected, **10.933% of the full fe
 Exact conditional and link semantics are therefore the next coverage tranche. If admitted, they
 can convert a large literal boundary into the tail of an existing signed call; only after that
 replay will branch-to-target chaining have enough volume to justify its added dispatcher risk.
+
+### r511: exact A32 B/BL materially lengthens calls, still not 30 FPS
+
+r511 admits the complete terminal A32 immediate branch family without runtime-generated code.
+Fourteen signed handlers select conditional B exits from live NZCV; fifteen conditional/AL BL
+handlers additionally write LR only on a taken link. The decoder record carries both the taken
+target and natural fallthrough, full validation proves the dynamic exit is terminal and
+word-aligned, and the cache-owned fast contract checks that the decoder's dynamic-exit bit still
+matches the penultimate handler. Unconditional AL B retains the old compact fixed END record.
+Nothing chains to another block yet.
+
+Exact commit `42e6247a737b833306ae7fa452806a663181a946` is fully green in core run
+`30885206122` and iOS run `30885206182`. Both Apple runners passed a 58-case native matrix over
+every condition, taken and not-taken outcomes, positive and negative targets, taken-only LR
+writes and a corrupted decoded-contract refusal. The real SoC oracle retired 19,999 of 20,000
+control-flow-heavy loop instructions through signed handlers and serialized byte-identically to
+the interpreter. Strict warnings, ASan/UBSan, all 60 local tests, every hosted platform job and
+the ad-hoc-signed IPA build are green.
+
+The relinked profiler then replayed the identical 7.100--7.110 B snapshot window. The exact
+model changes are substantial:
+
+- decoder support rises from 64.400% to 75.334% of fetched instructions;
+- modeled signed retirement rises from 5,865,830 (58.661%) to 6,956,087 (69.564%);
+- all 1,201,691 observed A32 B/BL instructions decode, and 1,179,537 remain retirement-modeled;
+- calls fall from 2,480,573 to 2,242,465 while mean length rises from 2.365 to 3.102;
+- length-one/two modeled work falls from 41.143% to 26.571%, while length nine-through-sixteen
+  rises from 8.473% to 21.674%.
+
+| length | modeled calls | modeled instructions | modeled share |
+|---:|---:|---:|---:|
+| 1 | 723,633 | 723,633 | 10.403% |
+| 2 | 562,327 | 1,124,654 | 16.168% |
+| 3 | 327,361 | 982,083 | 14.118% |
+| 4 | 205,109 | 820,436 | 11.795% |
+| 5 | 127,076 | 635,380 | 9.134% |
+| 6 | 88,145 | 528,870 | 7.603% |
+| 7 | 54,660 | 382,620 | 5.501% |
+| 8 | 31,342 | 250,736 | 3.605% |
+| 9 | 23,111 | 207,999 | 2.990% |
+| 10 | 20,971 | 209,710 | 3.015% |
+| 11 | 13,713 | 150,843 | 2.169% |
+| 12 | 15,620 | 187,440 | 2.695% |
+| 13 | 6,570 | 85,410 | 1.228% |
+| 14 | 6,842 | 95,788 | 1.377% |
+| 15 | 5,275 | 79,125 | 1.137% |
+| 16 | 30,710 | 491,360 | 7.064% |
+
+Reweighting the unchanged Apple SoC-entry medians gives an equal-instruction covered speedup of
+1.646x/1.677x on macOS 14/15, or **1.375x/1.391x whole-workload** at 69.564% coverage. Retaining
+the synthetic reference loops' measured seconds gives 1.825x/1.851x covered and
+**1.459x/1.470x overall**. Used only as scale against r485, those alternatives span about
+21.64--23.13 M/s. They are still synthetic interpretations, not confidence bounds, measured
+firmware timing, emulator FPS or phone FPS; the 30 FPS capacity target remains 34.304688 M/s.
+
+The replay exited OK in about 26 host seconds with empty stderr and 1,590 CLCD frames. Its work
+image and PPM hashes remain byte-identical to r510:
+`8A59C388C481165F460984926AA5FFB1B72A0E9030216CD0038DE9B3264B79FE` and
+`1EF63FFE3EEFD976416E17120A36BA074BF295EA0955D716E2D345FCC5EA0A9E`.
+
+Brutal status: **this is the first large structural gain since the signed engine entered the
+product path, but it still does not prove any emulator or physical-phone FPS gain**. The normal
+iOS app still compiles the default-off engine out, and the only phone observation remains 0--4
+FPS. The replay now records 626,866 dynamic-flow stops, up from 4,345 because supported branches
+correctly end at their selected destination. That is finally enough volume to justify bounded
+branch-to-target chaining. The next tranche must preserve the caller/timer budget, fetch-block
+and raw-byte witness, interrupt gates and exact interpreter state; a faster chain that skips any
+of those boundaries is not an optimization this project will accept.
