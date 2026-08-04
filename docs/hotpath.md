@@ -5391,3 +5391,78 @@ pre-sign build for one imported image; it is not compatible with the current dis
 app, which imports user firmware after its executable is signed. A generic signed engine
 remains the product route. It does not enter the app until a same-binary restored A/B
 shows a structural gain large enough to justify physical-iPhone and final cold-boot tests.
+
+### r498-r500: broad Thumb integer and DREAD-load coverage is substantial, not yet fast
+
+r498 implemented Thumb families rather than individual hot halfwords. Immediate shifts,
+small register/immediate ADD/SUB, all four imm8 ALU forms, all sixteen register-ALU
+operations, non-PC high-register operations, PC/SP address formation and SP adjustment
+reuse the signed A32 shifter and ALU semantics. Dynamic PC writes, BX/BLX, conditional
+branches, BL, stack operations and product memory operations remained literal in that
+tranche. A 16-instruction real-SoC oracle crosses timer boundaries and compares complete
+serialized machines with the interpreter on Apple arm64.
+
+The identical 7.100--7.110 B observer replay measured a real coverage change. Decoder
+support rose from 44.747% to 50.302%, and modeled signed retirement rose from 4,062,729
+to 4,570,357 instructions: **40.629% to 45.706%**, or +5.076 percentage points. That was
+not automatically a performance win. Modeled calls increased by 305,444 and their mean
+length fell from 2.183 to 2.110 instructions. The new arithmetic semantics were exact and
+broad, but unsupported loads and control flow still split them into more short entries.
+Calling that an FPS improvement would have been false.
+
+r500 then adds every ordinary Thumb single-load shape to the product DREAD contract:
+PC-relative, register-offset, immediate word/byte/halfword and SP-relative forms, including
+signed byte and signed halfword results. The generated table grows from 24,005 to 24,050
+firmware-independent handlers. Stores remain literal. An aligned cache hit reads through
+the interpreter's already-proved 1 KiB host pointer and updates the existing hit counter.
+An alignment guard or cache miss changes no guest state, refunds the unretired suffix and
+returns at the exact load PC so `arm_step()` still owns the MMU walk, permission/alignment
+fault, MMIO path and cache fill. A cold-cache SoC oracle deliberately exercises that
+miss-to-interpreter-to-signed-hit lifecycle rather than prewarming every access.
+
+The first r500 replay correctly refused to count the new instructions: its observer still
+had an explicit A32-only address proof and classified 277,405 recognized Thumb loads as
+`read-guard`. That run kept the old 45.706% modeled result and was diagnostic, not evidence
+of failure or speed. The observer was then extended with an independent Thumb address and
+alignment model and the same 10 M-entry replay was repeated. All identities closed:
+
+| exact current product model | instructions | fetched share |
+|---|---:|---:|
+| decoder-supported | 5,307,377 | 53.076% |
+| decoder-rejected | 4,692,112 | 46.924% |
+| retirement-eligible after condition/DREAD checks | 5,156,763 | 51.570% |
+| modeled signed retirement | **4,784,184** | **47.844%** |
+| entry-gate refusal | 372,579 | 3.726% |
+
+Across all A32 and Thumb reads the exact outcomes were 57,303 condition skips,
+1,376,016 DREAD hits, 150,571 misses and 43 conservative alignment guards. Within Thumb,
+879,312 instructions decoded, 841,456 were dynamically eligible and 766,070 were modeled
+as retired. Relative to r498, the load tranche adds 213,827 modeled instructions while
+reducing calls by 15,618; mean call length improves from 2.110 to 2.224. That is the first
+new tranche here to improve both coverage and continuity in the exact model. It is still
+residency, not execution time.
+
+Both full observer runs exited OK with empty stderr, exact family/raw accounting and no
+external-media failure. The final work-image SHA-256 remained
+`8A59C388C481165F460984926AA5FFB1B72A0E9030216CD0038DE9B3264B79FE`; the final PPM
+remained `1EF63FFE3EEFD976416E17120A36BA074BF295EA0955D716E2D345FCC5EA0A9E`, with 1,590
+CLCD frames. These are output-equality checks, not a saved whole-machine comparison and
+not a throughput or FPS result. The broad integer commit
+`df69e572ab044b50516046a95df72a7a8671d5aa` passed core run `30875079567` and iOS run
+`30875079573`. The load commit
+`f7f69190aa0f7216980a8304370c922703cd54d2` passed core run `30876286838` and iOS run
+`30876286829`. macOS-14 and macOS-15 each reported
+`STATIC-A64-THUMB-READ-ORACLE exact=yes retired=23997`, 5,864/0 SoC assertions and
+`STATIC-READ-ORACLE exact=yes hits=18 thumb=yes zero-prefix=yes partial-prefix=yes`.
+
+Brutal status: **there is still zero measured emulator or iPhone FPS gain**. At 47.844%
+coverage, even infinitely fast signed instructions cap the whole workload at **1.917332x**,
+below the required 2.180475x. The engine remains compiled out of the normal iOS app, so
+the phone correctly remains at the reported 0--4 FPS. Another 6.294 percentage points are
+required merely to cross the impossible zero-cost coverage minimum, before allowing for
+lookup, entry, cache misses, UIKit or device work. Remaining Thumb control alone cannot
+provide that margin. The next evidence-backed tranche is therefore broad exact VFP
+register/bitwise transfers and cache-hit VLDR, with arithmetic and exceptional modes
+continuing to fall back until separately proved. Only after coverage clears the
+mathematical gate does a same-binary restored A/B and then a physical-iPhone build become
+honest.
