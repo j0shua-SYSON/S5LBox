@@ -50,6 +50,9 @@ static rootfs_work_entry_t *g_jb_entries = NULL;
 #include "sha256.h"
 #include "snapshot.h"
 #include "soc.h"
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+#include "a64_static.h"
+#endif
 #include <ctype.h>
 #include <errno.h>
 #include <inttypes.h>
@@ -24671,6 +24674,12 @@ static const char *status_name(arm_status_t s) {
 #define SEQUENCE_TRACE_HEAD_CAP  (1u << 18)
 #define SEQUENCE_TRACE_HEAD_LEN  16u
 #define SEQUENCE_TRACE_HEAD_LEVEL 2u
+#define SEQUENCE_SIGNED_CAP      16u
+
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+_Static_assert(SEQUENCE_SIGNED_CAP == A64_STATIC_MAX_INSNS,
+               "sequence model and product signed-block cap disagree");
+#endif
 
 static const unsigned SEQUENCE_TRACE_CAPS[SEQUENCE_TRACE_LEVELS] = {
     4u, 8u, 16u, 32u, 64u
@@ -24697,6 +24706,39 @@ typedef enum {
     SEQUENCE_THUMB,
     SEQUENCE_CLASS_COUNT
 } sequence_class_t;
+
+typedef enum {
+    SEQUENCE_SIGNED_REJECTED = 0,
+    SEQUENCE_SIGNED_PLAIN,
+    SEQUENCE_SIGNED_READ_SKIPPED,
+    SEQUENCE_SIGNED_READ_HIT,
+    SEQUENCE_SIGNED_READ_MISS,
+    SEQUENCE_SIGNED_READ_GUARD,
+    SEQUENCE_SIGNED_OUTCOME_COUNT
+} sequence_signed_outcome_t;
+
+typedef enum {
+    SEQUENCE_SIGNED_GATE_OK = 0,
+    SEQUENCE_SIGNED_GATE_MACHINE,
+    SEQUENCE_SIGNED_GATE_TICK_EAGER,
+    SEQUENCE_SIGNED_GATE_LEVEL_DIRTY,
+    SEQUENCE_SIGNED_GATE_EXTERNAL_INPUT,
+    SEQUENCE_SIGNED_GATE_FETCH,
+    SEQUENCE_SIGNED_GATE_TIMEBASE,
+    SEQUENCE_SIGNED_GATE_COUNT
+} sequence_signed_gate_t;
+
+typedef enum {
+    SEQUENCE_SIGNED_STOP_CAP = 0,
+    SEQUENCE_SIGNED_STOP_TIMER,
+    SEQUENCE_SIGNED_STOP_CALLER,
+    SEQUENCE_SIGNED_STOP_BRANCH,
+    SEQUENCE_SIGNED_STOP_FLOW,
+    SEQUENCE_SIGNED_STOP_FETCH_BLOCK,
+    SEQUENCE_SIGNED_STOP_INELIGIBLE,
+    SEQUENCE_SIGNED_STOP_OBSERVER,
+    SEQUENCE_SIGNED_STOP_COUNT
+} sequence_signed_stop_t;
 
 static const char *const SEQUENCE_CLASS_NAMES[SEQUENCE_CLASS_COUNT] = {
     "ARM data-processing", "ARM data-processing -> pc", "ARM B/BL",
@@ -24870,6 +24912,25 @@ typedef struct {
     uint64_t mixed_body_total;
     uint64_t mixed_terminal_branch;
     uint64_t mixed_terminal_store;
+
+    /* Exact dynamic eligibility model for the optional product decoder. It
+     * uses the literal run's pre-step architectural/cache state but never
+     * executes a signed handler or changes the machine. */
+    uint64_t signed_outcomes[SEQUENCE_SIGNED_OUTCOME_COUNT];
+    uint64_t signed_class_outcomes[SEQUENCE_CLASS_COUNT]
+                                  [SEQUENCE_SIGNED_OUTCOME_COUNT];
+    uint64_t signed_class_modeled[SEQUENCE_CLASS_COUNT];
+    uint64_t signed_class_gate_refused[SEQUENCE_CLASS_COUNT];
+    uint64_t signed_gate_refusals[SEQUENCE_SIGNED_GATE_COUNT];
+    uint64_t signed_calls[SEQUENCE_RUN_BUCKETS];
+    uint64_t signed_call_instructions[SEQUENCE_RUN_BUCKETS];
+    uint64_t signed_call_length;
+    uint64_t signed_call_max;
+    uint64_t signed_call_remaining;
+    uint64_t signed_modeled_retired;
+    uint64_t signed_stops[SEQUENCE_SIGNED_STOP_COUNT];
+    sequence_signed_stop_t signed_budget_stop;
+    bool signed_tick_eager;
 
     bool have_previous;
     bool previous_thumb;
@@ -25081,6 +25142,78 @@ static bool sequence_dread_would_hit(const arm_cpu_t *cpu, uint32_t va,
            cpu->dread[slot].gen == cpu->tlb_gen;
 }
 
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+typedef struct {
+    sequence_signed_outcome_t outcome;
+    bool terminal;
+} sequence_signed_classification_t;
+
+static bool sequence_signed_terminal(uint32_t raw, bool thumb) {
+    if (thumb)
+        return (raw & UINT32_C(0xf800)) == UINT32_C(0xe000);
+    return (raw >> 28) == 14u &&
+           (raw & UINT32_C(0x0f000000)) == UINT32_C(0x0a000000);
+}
+
+/* Ask the product decoder about exactly one live instruction. A direct-read
+ * record is retirement-eligible only if its condition skips the read or the
+ * current interpreter DREAD entry satisfies the handler's exact guard. The
+ * helper reads state only; arm_step() still performs the real instruction. */
+static sequence_signed_classification_t sequence_signed_classify(
+        const arm_cpu_t *cpu, uint32_t pc, uint32_t raw, bool thumb) {
+    sequence_signed_classification_t result = {
+        SEQUENCE_SIGNED_REJECTED, false
+    };
+    uint8_t bytes[4] = {
+        (uint8_t)raw, (uint8_t)(raw >> 8),
+        (uint8_t)(raw >> 16), (uint8_t)(raw >> 24)
+    };
+    a64_static_block_t block;
+
+    if (!cpu || !a64_static_decode_read_hits_bytes_at(
+            bytes, 1u, thumb, pc, &block))
+        return result;
+
+    result.terminal = sequence_signed_terminal(raw, thumb);
+    if (!block.direct_reads) {
+        result.outcome = SEQUENCE_SIGNED_PLAIN;
+        return result;
+    }
+
+    /* Product direct-read records are currently A32-only. Keep this explicit
+     * so a later Thumb read implementation cannot silently inherit an A32
+     * address model. */
+    if (thumb) {
+        result.outcome = SEQUENCE_SIGNED_READ_GUARD;
+        return result;
+    }
+
+    unsigned condition = raw >> 28;
+    if (condition < 14u && !arm_cond_passed(cpu, condition)) {
+        result.outcome = SEQUENCE_SIGNED_READ_SKIPPED;
+        return result;
+    }
+
+    uint32_t cache_va = 0u;
+    unsigned width = 0u;
+    bool priv = false;
+    bool legacy_rotate = false;
+    bool unaligned_u = false;
+    sequence_load_address_t address_status = sequence_single_load_address(
+        cpu, pc, raw, &cache_va, &width, &priv,
+        &legacy_rotate, &unaligned_u);
+    if (address_status != SEQUENCE_LOAD_ADDRESS || legacy_rotate ||
+        unaligned_u) {
+        result.outcome = SEQUENCE_SIGNED_READ_GUARD;
+        return result;
+    }
+
+    result.outcome = sequence_dread_would_hit(cpu, cache_va, width, priv)
+        ? SEQUENCE_SIGNED_READ_HIT : SEQUENCE_SIGNED_READ_MISS;
+    return result;
+}
+#endif
+
 static sequence_class_t sequence_classify_arm(uint32_t insn) {
     if ((insn >> 28) == 15u) return SEQUENCE_ARM_UNCONDITIONAL;
     if (sequence_dp_encoding(insn))
@@ -25170,7 +25303,141 @@ static void sequence_close_run(uint64_t *counts, uint64_t *instructions,
     *length = 0u;
 }
 
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+static void sequence_signed_close(sequence_profile_t *profile,
+                                  sequence_signed_stop_t why) {
+    if (!profile || !profile->signed_call_length) return;
+    sequence_close_run(profile->signed_calls,
+                       profile->signed_call_instructions,
+                       &profile->signed_call_length,
+                       &profile->signed_call_max);
+    if ((unsigned)why < SEQUENCE_SIGNED_STOP_COUNT)
+        profile->signed_stops[why]++;
+    profile->signed_call_remaining = 0u;
+}
+
+/* Reproduce every read-only entry gate available to bootkernel. The native
+ * handler availability and runtime opt-in are deliberately assumed: this
+ * models the iPhone target, while the current Windows host can only decode.
+ * FRAME_METER_CHUNK_INSTRUCTIONS is the same 100,000-instruction public run()
+ * boundary used by VMEngine.m and the --run-api harness. */
+static sequence_signed_gate_t sequence_signed_entry_budget(
+        const sequence_profile_t *profile, const s5l8900_t *mach,
+        uint32_t pc, bool thumb, uint64_t *budget,
+        sequence_signed_stop_t *budget_stop) {
+    if (!profile || !mach || !budget || !budget_stop)
+        return SEQUENCE_SIGNED_GATE_MACHINE;
+    const arm_cpu_t *cpu = &mach->cpu;
+    if (cpu->arch != ARM_ARCH_V6_ARM1176 ||
+        !arm_mode_is_valid(cpu->cpsr) || cpu->abort_pending ||
+        (cpu->fiq_line && !(cpu->cpsr & ARM_CPSR_F)) ||
+        (cpu->irq_line && !(cpu->cpsr & ARM_CPSR_I)) ||
+        !mach->ram || !mach->ram_size ||
+        (mach->ram_size & (mach->ram_size - 1u)) != 0u)
+        return SEQUENCE_SIGNED_GATE_MACHINE;
+    if (profile->signed_tick_eager)
+        return SEQUENCE_SIGNED_GATE_TICK_EAGER;
+    if (mach->level_dirty)
+        return SEQUENCE_SIGNED_GATE_LEVEL_DIRTY;
+
+    uint32_t external_inputs = (uint32_t)mach->uart4.rx_count |
+        ((uint32_t)mach->buttons.pressed << 8) |
+        ((uint32_t)(mach->mtz2.atn ? 1u : 0u) << 16);
+    if (external_inputs != mach->ext_seen)
+        return SEQUENCE_SIGNED_GATE_EXTERNAL_INPUT;
+
+    if (!mach->cpu_hz || !mach->tb_hz || mach->tb_hz > mach->cpu_hz ||
+        mach->tb_accum >= mach->cpu_hz)
+        return SEQUENCE_SIGNED_GATE_TIMEBASE;
+
+    bool priv = (cpu->cpsr & ARM_CPSR_MODE_MASK) != ARM_MODE_USR;
+    uint32_t fetch_block = pc & ~UINT32_C(0x3ff);
+    if (!cpu->fetch_host || cpu->fetch_blk != fetch_block ||
+        cpu->fetch_gen != cpu->tlb_gen || cpu->fetch_priv != priv ||
+        (pc & (thumb ? 1u : 3u)) != 0u)
+        return SEQUENCE_SIGNED_GATE_FETCH;
+
+    uint64_t until_edge = ((uint64_t)mach->cpu_hz - mach->tb_accum +
+                           mach->tb_hz - 1u) / mach->tb_hz;
+    uint64_t caller_offset = (profile->observations - 1u) %
+                             FRAME_METER_CHUNK_INSTRUCTIONS;
+    uint64_t until_caller = FRAME_METER_CHUNK_INSTRUCTIONS - caller_offset;
+    *budget = SEQUENCE_SIGNED_CAP;
+    *budget_stop = SEQUENCE_SIGNED_STOP_CAP;
+    if (until_edge < *budget) {
+        *budget = until_edge;
+        *budget_stop = SEQUENCE_SIGNED_STOP_TIMER;
+    }
+    if (until_caller < *budget) {
+        *budget = until_caller;
+        *budget_stop = SEQUENCE_SIGNED_STOP_CALLER;
+    }
+    return *budget ? SEQUENCE_SIGNED_GATE_OK
+                   : SEQUENCE_SIGNED_GATE_TIMEBASE;
+}
+
+static void sequence_signed_observe(sequence_profile_t *profile,
+                                    const s5l8900_t *mach,
+                                    uint32_t pc, uint32_t raw,
+                                    bool thumb, bool physical_sequential,
+                                    sequence_class_t instruction_class) {
+    sequence_signed_classification_t classification =
+        sequence_signed_classify(&mach->cpu, pc, raw, thumb);
+    profile->signed_outcomes[classification.outcome]++;
+    profile->signed_class_outcomes[instruction_class]
+                                  [classification.outcome]++;
+
+    if (profile->signed_call_length) {
+        if (!physical_sequential) {
+            sequence_signed_close(profile, SEQUENCE_SIGNED_STOP_FLOW);
+        } else if ((profile->previous_pc & ~UINT32_C(0x3ff)) !=
+                   (pc & ~UINT32_C(0x3ff))) {
+            sequence_signed_close(profile,
+                                  SEQUENCE_SIGNED_STOP_FETCH_BLOCK);
+        }
+    }
+
+    bool retireable = classification.outcome == SEQUENCE_SIGNED_PLAIN ||
+                      classification.outcome ==
+                          SEQUENCE_SIGNED_READ_SKIPPED ||
+                      classification.outcome == SEQUENCE_SIGNED_READ_HIT;
+    if (!retireable) {
+        sequence_signed_close(profile, SEQUENCE_SIGNED_STOP_INELIGIBLE);
+        return;
+    }
+
+    if (!profile->signed_call_length) {
+        uint64_t budget = 0u;
+        sequence_signed_stop_t budget_stop = SEQUENCE_SIGNED_STOP_CAP;
+        sequence_signed_gate_t gate = sequence_signed_entry_budget(
+            profile, mach, pc, thumb, &budget, &budget_stop);
+        if (gate != SEQUENCE_SIGNED_GATE_OK) {
+            profile->signed_gate_refusals[gate]++;
+            profile->signed_class_gate_refused[instruction_class]++;
+            return;
+        }
+        profile->signed_call_remaining = budget;
+        profile->signed_budget_stop = budget_stop;
+    }
+
+    profile->signed_call_length++;
+    profile->signed_modeled_retired++;
+    profile->signed_class_modeled[instruction_class]++;
+    if (profile->signed_call_remaining)
+        profile->signed_call_remaining--;
+
+    if (classification.terminal) {
+        sequence_signed_close(profile, SEQUENCE_SIGNED_STOP_BRANCH);
+    } else if (!profile->signed_call_remaining) {
+        sequence_signed_close(profile, profile->signed_budget_stop);
+    }
+}
+#endif
+
 static void sequence_profile_break(sequence_profile_t *profile) {
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    sequence_signed_close(profile, SEQUENCE_SIGNED_STOP_OBSERVER);
+#endif
     sequence_trace_head_close(profile);
     sequence_close_run(profile->flow_runs, profile->flow_run_instructions,
                        &profile->flow_run_length, &profile->flow_run_max);
@@ -25458,13 +25725,20 @@ static bool sequence_profile_start(sequence_profile_t *profile) {
         }
     }
     profile->current_trace_head = SEQUENCE_TRACE_HEAD_CAP;
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    {
+        const char *eager = getenv("S5LBOX_TICK_EAGER");
+        profile->signed_tick_eager = eager && *eager && *eager != '0';
+    }
+#endif
     profile->enabled = true;
     return true;
 }
 
 static void sequence_profile_observe(sequence_profile_t *profile,
-                                     arm_cpu_t *cpu) {
-    if (!profile || !profile->enabled || !cpu) return;
+                                     s5l8900_t *mach) {
+    if (!profile || !profile->enabled || !mach) return;
+    arm_cpu_t *cpu = &mach->cpu;
     profile->observations++;
 
     if ((cpu->fiq_line && !(cpu->cpsr & ARM_CPSR_F)) ||
@@ -25538,6 +25812,11 @@ static void sequence_profile_observe(sequence_profile_t *profile,
     } else {
         profile->current_trace_length++;
     }
+
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    sequence_signed_observe(profile, mach, pc, raw, thumb,
+                            physical_sequential, instruction_class);
+#endif
 
     bool safe_dp = instruction_class == SEQUENCE_ARM_DP;
     if (safe_dp) {
@@ -26041,8 +26320,157 @@ static void sequence_profile_report(sequence_profile_t *profile) {
            profile->fetched
                ? 100.0 * (double)profile->mixed_body_total /
                      (double)profile->fetched : 0.0,
-           profile->mixed_terminal_branch,
-           profile->mixed_terminal_store);
+            profile->mixed_terminal_branch,
+            profile->mixed_terminal_store);
+
+    printf("\n  exact current signed-engine retirement model\n");
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    {
+        uint64_t signed_calls = 0u, signed_instructions = 0u;
+        uint64_t signed_gate_refusals = 0u, signed_stops = 0u;
+        uint64_t signed_outcome_total = 0u;
+        for (unsigned i = 1u; i < SEQUENCE_RUN_BUCKETS; i++) {
+            signed_calls += profile->signed_calls[i];
+            signed_instructions += profile->signed_call_instructions[i];
+        }
+        for (unsigned i = 1u; i < SEQUENCE_SIGNED_GATE_COUNT; i++)
+            signed_gate_refusals += profile->signed_gate_refusals[i];
+        for (unsigned i = 0u; i < SEQUENCE_SIGNED_STOP_COUNT; i++)
+            signed_stops += profile->signed_stops[i];
+        for (unsigned i = 0u; i < SEQUENCE_SIGNED_OUTCOME_COUNT; i++)
+            signed_outcome_total += profile->signed_outcomes[i];
+
+        uint64_t signed_supported =
+            signed_outcome_total -
+            profile->signed_outcomes[SEQUENCE_SIGNED_REJECTED];
+        uint64_t signed_eligible =
+            profile->signed_outcomes[SEQUENCE_SIGNED_PLAIN] +
+            profile->signed_outcomes[SEQUENCE_SIGNED_READ_SKIPPED] +
+            profile->signed_outcomes[SEQUENCE_SIGNED_READ_HIT];
+        printf("    Product decoder, exact pre-step conditions/DREAD/fetch "
+               "state, 1 KiB fetch blocks, cap=%u, timer edges, and "
+               "100,000-instruction caller edges. Runtime opt-in and an "
+               "arm64 target are assumed; lookup/decode cost is not speed.\n",
+               SEQUENCE_SIGNED_CAP);
+        printf("    decoder supported/rejected=%" PRIu64 "/%" PRIu64
+               " (supported %.3f%% fetched); outcomes/fetched=%" PRIu64
+               "/%" PRIu64 " %s\n",
+               signed_supported,
+               profile->signed_outcomes[SEQUENCE_SIGNED_REJECTED],
+               profile->fetched
+                   ? 100.0 * (double)signed_supported /
+                         (double)profile->fetched : 0.0,
+               signed_outcome_total, profile->fetched,
+               signed_outcome_total == profile->fetched
+                   ? "EXACT" : "MISMATCH");
+        printf("    supported outcomes: plain=%" PRIu64
+               " read-condition-skip=%" PRIu64 " read-hit=%" PRIu64
+               " read-miss=%" PRIu64 " read-guard=%" PRIu64 "\n",
+               profile->signed_outcomes[SEQUENCE_SIGNED_PLAIN],
+               profile->signed_outcomes[SEQUENCE_SIGNED_READ_SKIPPED],
+               profile->signed_outcomes[SEQUENCE_SIGNED_READ_HIT],
+               profile->signed_outcomes[SEQUENCE_SIGNED_READ_MISS],
+               profile->signed_outcomes[SEQUENCE_SIGNED_READ_GUARD]);
+        printf("    per-class product residency\n");
+        printf("      %-28s %10s %10s %10s %10s %10s\n",
+               "class", "observed", "supported", "eligible", "modeled",
+               "rejected");
+        for (unsigned cls = 0u; cls < SEQUENCE_CLASS_COUNT; cls++) {
+            uint64_t class_outcomes = 0u;
+            for (unsigned outcome = 0u;
+                 outcome < SEQUENCE_SIGNED_OUTCOME_COUNT; outcome++)
+                class_outcomes +=
+                    profile->signed_class_outcomes[cls][outcome];
+            uint64_t class_rejected =
+                profile->signed_class_outcomes[cls]
+                                              [SEQUENCE_SIGNED_REJECTED];
+            uint64_t class_supported = class_outcomes - class_rejected;
+            uint64_t class_eligible =
+                profile->signed_class_outcomes[cls][SEQUENCE_SIGNED_PLAIN] +
+                profile->signed_class_outcomes[cls]
+                                              [SEQUENCE_SIGNED_READ_SKIPPED] +
+                profile->signed_class_outcomes[cls]
+                                              [SEQUENCE_SIGNED_READ_HIT];
+            bool exact = class_outcomes == profile->class_hits[cls] &&
+                class_eligible == profile->signed_class_modeled[cls] +
+                                      profile->signed_class_gate_refused[cls];
+            printf("      %-28s %10" PRIu64 " %10" PRIu64
+                   " %10" PRIu64 " %10" PRIu64 " %10" PRIu64 "%s\n",
+                   SEQUENCE_CLASS_NAMES[cls], profile->class_hits[cls],
+                   class_supported, class_eligible,
+                   profile->signed_class_modeled[cls], class_rejected,
+                   exact ? "" : " MISMATCH");
+        }
+        printf("    retirement-eligible=%" PRIu64
+               " modeled-signed=%" PRIu64 " (%.3f%% fetched)"
+               " entry-gate-refused=%" PRIu64 "  %s\n",
+               signed_eligible, profile->signed_modeled_retired,
+               profile->fetched
+                   ? 100.0 * (double)profile->signed_modeled_retired /
+                         (double)profile->fetched : 0.0,
+               signed_gate_refusals,
+               signed_eligible == profile->signed_modeled_retired +
+                                      signed_gate_refusals
+                   ? "EXACT" : "MISMATCH");
+        printf("    modeled calls=%" PRIu64 " instructions=%" PRIu64
+               " mean=%.3f max=%" PRIu64
+               " calls/stops=%" PRIu64 "/%" PRIu64 "  %s\n",
+               signed_calls, signed_instructions,
+               signed_calls
+                   ? (double)signed_instructions / (double)signed_calls : 0.0,
+               profile->signed_call_max, signed_calls, signed_stops,
+               signed_instructions == profile->signed_modeled_retired &&
+                       signed_calls == signed_stops
+                   ? "EXACT" : "MISMATCH");
+        sequence_profile_print_run_group(
+            "1", profile->signed_calls,
+            profile->signed_call_instructions, 1u, 1u,
+            signed_instructions);
+        sequence_profile_print_run_group(
+            "2-4", profile->signed_calls,
+            profile->signed_call_instructions, 2u, 4u,
+            signed_instructions);
+        sequence_profile_print_run_group(
+            "5-8", profile->signed_calls,
+            profile->signed_call_instructions, 5u, 8u,
+            signed_instructions);
+        sequence_profile_print_run_group(
+            "9-16", profile->signed_calls,
+            profile->signed_call_instructions, 9u, 16u,
+            signed_instructions);
+        printf("    stops cap/timer/caller/branch/flow/fetch-block/"
+               "ineligible/observer=%" PRIu64 "/%" PRIu64 "/%" PRIu64
+               "/%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64
+               "/%" PRIu64 "\n",
+               profile->signed_stops[SEQUENCE_SIGNED_STOP_CAP],
+               profile->signed_stops[SEQUENCE_SIGNED_STOP_TIMER],
+               profile->signed_stops[SEQUENCE_SIGNED_STOP_CALLER],
+               profile->signed_stops[SEQUENCE_SIGNED_STOP_BRANCH],
+               profile->signed_stops[SEQUENCE_SIGNED_STOP_FLOW],
+               profile->signed_stops[SEQUENCE_SIGNED_STOP_FETCH_BLOCK],
+               profile->signed_stops[SEQUENCE_SIGNED_STOP_INELIGIBLE],
+               profile->signed_stops[SEQUENCE_SIGNED_STOP_OBSERVER]);
+        printf("    entry refusals machine/eager/dirty/external/fetch/timebase="
+               "%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64
+               "/%" PRIu64 "/%" PRIu64
+               "; native-on-this-host=%s\n",
+               profile->signed_gate_refusals[SEQUENCE_SIGNED_GATE_MACHINE],
+               profile->signed_gate_refusals[
+                   SEQUENCE_SIGNED_GATE_TICK_EAGER],
+               profile->signed_gate_refusals[
+                   SEQUENCE_SIGNED_GATE_LEVEL_DIRTY],
+               profile->signed_gate_refusals[
+                   SEQUENCE_SIGNED_GATE_EXTERNAL_INPUT],
+               profile->signed_gate_refusals[SEQUENCE_SIGNED_GATE_FETCH],
+               profile->signed_gate_refusals[SEQUENCE_SIGNED_GATE_TIMEBASE],
+               a64_static_host_available() ? "yes" : "no");
+        printf("    This is modeled retirement, not measured execution time, "
+               "FPS, or a same-binary A/B.\n");
+    }
+#else
+    printf("    unavailable: rebuild with S5LBOX_STATIC_A64_ENGINE=ON so the "
+           "observer can call the exact product decoder\n");
+#endif
 
     printf("\n  exact physical instruction-site working set\n");
     printf("    distinct=%" PRIu64 " dropped=%" PRIu64
@@ -30011,7 +30439,7 @@ external_md_work_ready:
         last_cpsr = mach.cpu.cpsr;
         last_mmu_enabled =
             (mach.cpu.cp15.sctlr & ARM_SCTLR_M) != 0u;
-        sequence_profile_observe(&sequence_profile, &mach.cpu);
+        sequence_profile_observe(&sequence_profile, &mach);
         /*
          * THE OBSERVATIONAL BLOCK, and --fast is the only thing that turns it
          * off. Every line of it runs on EVERY retired instruction, and the
