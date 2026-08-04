@@ -5172,3 +5172,59 @@ prove the 2.18x end-to-end requirement even under infinite immediate-ALU speed. 
 non-whack-a-mole step is the other 1,158,810 profiled register-form data-processing
 instructions with the exact barrel shifter and full register set, followed by MMU/TLB RAM
 read hits. Product FPS remains the reported 0--4.
+
+### r495: exact register Operand2 completes the measured safe-DP class
+
+r495 implements the remaining A32 register-form data-processing shape rather than
+adjusting the cache around the immediate subset. The r473 profile counted 1,158,810
+register-form observations, **11.589% of fetched instructions**. That is a gross form
+count: r473 recorded 2,515 data-processing writes to PC across both immediate and
+register forms without splitting those 2,515 by Operand2 kind. The defensible combined
+ceiling is therefore the separately classified 3,013,148 ordinary non-PC data-processing
+instructions, **30.133% of fetched instructions**, not 18.569% + 11.589% presented as
+an exact reached-path sum.
+
+Each supported register instruction is represented by an exact barrel-shifter record
+followed by an ALU record. Immediate shifts implement LSL #0 carry preservation,
+LSR/ASR #0 as shift-by-32, and ROR #0 as RRX through the incoming C flag.
+Register-specified shifts use Rs[7:0] and distinguish 0, 1--31, 32 and greater than 32
+instead of inheriting AArch64's modulo-32 variable-shift behaviour. The shifter changes
+no host flags before ADC/SBC/RSC consumes the incoming C. Logical flag writes still use
+the shifter carry and preserve V. All sixteen opcodes, r0--r14 destinations, valid
+sources, every condition and the interpreter's register-shift R15 refusal are covered;
+PC writes remain outside the contract.
+
+The signed table now contains 23,847 firmware-independent handlers. Runtime records
+remain sixteen-byte data, and there is still no runtime code generation or writable
+executable mapping. The larger text also forced a real range correction: table address
+formation now uses page-relative relocations, and the distant exit uses a local CBNZ
+plus an ordinary branch, rather than relying on ADR/CBZ's +/-1 MiB reach. Generated
+assembly was 6,625,182 bytes in this revision, but it is build output rather than a
+checked-in or firmware-derived artifact.
+
+The Apple oracle adds three independent blocks: all opcodes with immediate shifts,
+all opcodes with register-specified shifts at amounts 0/1/31/32/33/255, and all fourteen
+condition guards skipping two records. macOS-14 and macOS-15 reported every block exact
+at its expected PC and sixteen cycles. The complete SoC loop also executes signed EOR
+and BIC register forms and still reported
+`STATIC-A64-SOC-ORACLE exact=yes retired=21520 smc=yes` with byte-identical final
+machine snapshots. Local checks included a 476,928-case shifter-model comparison and
+5,832/0 SoC assertions; hosted Apple runs reported 5,843/0, 60/60 JIT-on tests and
+55/55 JIT-off tests.
+
+The old four-block 500 M-instruction synthetic ceiling remains positive but is still
+not a product measurement. Static ratios ranged from 17.527x to 38.552x on macOS-14
+and 15.024x to 40.269x on macOS-15. Those timed blocks mostly use the old small handler
+set, flat RAM and one already-decoded loop, so neither the ratios nor their runner-to-runner
+movement measure the new real-workload coverage. Exact commit
+`9cfce454edda8bd27b619db63f5ca0834acdfd61` passed core run `30869029321` and iOS build
+`30869029353`; the latter still builds the signed engine out and therefore proves only
+that the ordinary IPA was not broken.
+
+Brutal status: **measured emulator and phone FPS improvement is still zero**. This is
+substantial semantics and integration progress, but the measured safe-DP islands average
+only 1.635 instructions and every load/store, VFP instruction, Thumb instruction and
+control transfer still returns to the literal path. There has been no restored
+same-binary performance bracket, no phone execution of this engine, and no cold-boot
+acceptance. The next evidence-backed step is an encoding census followed by exact
+MMU/TLB-backed RAM read hits; cache-size tuning or an FPS claim here would be dishonest.
