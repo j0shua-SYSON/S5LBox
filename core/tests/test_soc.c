@@ -3221,7 +3221,7 @@ static void test_signed_static_a64_vfp_register_oracle(void) {
         UINT32_C(0xeeb51ac0), /* VCMPE.F32 s2,#0 */
         UINT32_C(0xeeb40b41), /* VCMP.F64 d0,d1 */
         UINT32_C(0xeeb51bc0), /* VCMPE.F64 d1,#0 */
-        UINT32_C(0xeeb02bc1), /* VABS.F64 d2,d1 */
+        UINT32_C(0xeeb77ae7), /* VCVT.F64.F32 d7,s15 (hot trace word) */
         UINT32_C(0xeef8ca10), /* VMRS r12,FPEXC */
         UINT32_C(0xeaffffef), /* B 0 */
     };
@@ -3305,7 +3305,7 @@ static void test_signed_static_a64_vfp_register_oracle(void) {
         memcmp(fast_snapshot, reference_snapshot, fast_len) == 0 &&
         s5l8900_static_a64_retired(&fast) != 0u) {
         printf("  STATIC-A64-VFP-REGISTER-ORACLE exact=yes retired=%llu "
-               "compare=yes\n",
+               "compare=yes widen=yes\n",
                (unsigned long long)s5l8900_static_a64_retired(&fast));
     }
 

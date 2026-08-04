@@ -19,7 +19,7 @@ CONDITIONS = (
     "eq", "ne", "cs", "cc", "mi", "pl", "vs", "vc",
     "hi", "ls", "ge", "lt", "gt", "le",
 )
-EXPECTED_HANDLERS = 24616
+EXPECTED_HANDLERS = 24617
 
 READ_KINDS = (
     ("word", "ldr", 4),
@@ -735,6 +735,84 @@ def vfp_compare_body(width: int) -> list[str]:
     ]
 
 
+def vfp_widen_body() -> list[str]:
+    """Expand one binary32 encoding into binary64 without host FP state."""
+    p = ".La64s_vfp_widen_32"
+    return [
+        *vfp_gate("values"),
+        "    ldur w9, [x13, #-12]",
+        "    and w12, w9, #0xff",
+        "    ubfx w10, w9, #8, #8",
+        "    ldr x6, [x3, #24]",
+        "    add x16, x6, w10, uxtw #2",
+        "    ldr w5, [x16]",
+        "    ldr x17, [x3, #40]",
+        "    ldr w4, [x17]",
+        "    ubfx x9, x5, #31, #1",
+        "    lsl x9, x9, #63",
+        "    ubfx w10, w5, #23, #8",
+        "    and w6, w5, #0x7fffff",
+        f"    cbz w10, {p}_zero_exp",
+        "    cmp w10, #0xff",
+        f"    b.eq {p}_special",
+        # Normal input: rebias 127 to 1023 and move the fraction exactly.
+        "    add w10, w10, #896",
+        "    lsl x10, x10, #52",
+        "    lsl x6, x6, #29",
+        "    orr x5, x9, x10",
+        "    orr x5, x5, x6",
+        f"    b {p}_store",
+        f"{p}_zero_exp:",
+        f"    cbz w6, {p}_signed_zero",
+        f"    tbz w4, #24, {p}_subnormal",
+        # FZ consumes the denormal and preserves its sign as zero.
+        "    orr w4, w4, #0x80",
+        f"    b {p}_signed_zero",
+        f"{p}_subnormal:",
+        # A binary32 subnormal is still normal in binary64. clz gives both the
+        # normalization shift and the exact rebased exponent.
+        "    clz w16, w6",
+        "    add w10, w16, #21",
+        "    lsl x6, x6, x10",
+        "    and x6, x6, #0x000fffffffffffff",
+        "    mov w10, #905",
+        "    sub w10, w10, w16",
+        "    lsl x10, x10, #52",
+        "    orr x5, x9, x10",
+        "    orr x5, x5, x6",
+        f"    b {p}_store",
+        f"{p}_special:",
+        f"    cbnz w6, {p}_nan",
+        "    mov x10, #0x7ff0000000000000",
+        "    orr x5, x9, x10",
+        f"    b {p}_store",
+        f"{p}_nan:",
+        # FPConvert quiets signalling NaNs and raises IOC before DN chooses
+        # whether the payload remains observable.
+        f"    tbnz w6, #22, {p}_quiet_nan",
+        "    orr w4, w4, #1",
+        "    orr w6, w6, #0x400000",
+        f"{p}_quiet_nan:",
+        f"    tbnz w4, #25, {p}_default_nan",
+        "    mov x10, #0x7ff0000000000000",
+        "    lsl x6, x6, #29",
+        "    orr x5, x9, x10",
+        "    orr x5, x5, x6",
+        f"    b {p}_store",
+        f"{p}_default_nan:",
+        "    mov x5, #0x7ff8000000000000",
+        f"    b {p}_store",
+        f"{p}_signed_zero:",
+        "    mov x5, x9",
+        f"{p}_store:",
+        "    ldr x6, [x3, #24]",
+        "    add x6, x6, w12, uxtw #2",
+        "    str x5, [x6]",
+        "    str w4, [x17]",
+        *vfp_finish(),
+    ]
+
+
 def vfp_direct_read_body(width: int) -> list[str]:
     reg = "w5" if width == 4 else "x5"
     body = [
@@ -1053,6 +1131,7 @@ def build_handlers() -> list[tuple[str, list[str]]]:
                          vfp_unary_body(operation, 8)))
     handlers.append((".La64s_vfp_compare_32", vfp_compare_body(4)))
     handlers.append((".La64s_vfp_compare_64", vfp_compare_body(8)))
+    handlers.append((".La64s_vfp_widen_32", vfp_widen_body()))
     handlers.append((".La64s_vfp_direct_read_32",
                      vfp_direct_read_body(4)))
     handlers.append((".La64s_vfp_direct_read_64",

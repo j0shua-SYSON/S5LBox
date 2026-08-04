@@ -53,7 +53,8 @@ enum {
     A64S_VFP_UNARY64 = A64S_VFP_UNARY32 + 3u,
     A64S_VFP_COMPARE32 = A64S_VFP_UNARY64 + 3u,
     A64S_VFP_COMPARE64 = A64S_VFP_COMPARE32 + 1u,
-    A64S_VFP_DIRECT_READ32 = A64S_VFP_COMPARE64 + 1u,
+    A64S_VFP_WIDEN32 = A64S_VFP_COMPARE64 + 1u,
+    A64S_VFP_DIRECT_READ32 = A64S_VFP_WIDEN32 + 1u,
     A64S_VFP_DIRECT_READ64 = A64S_VFP_DIRECT_READ32 + 1u,
     A64S_HANDLER_COUNT = A64S_VFP_DIRECT_READ64 + 1u
 };
@@ -108,6 +109,7 @@ _Static_assert(ARM1176_FPSID == UINT32_C(0x410120b4) &&
                ARM_FPEXC_EN == (1u << 30) &&
                ARM_FPSCR_LEN == UINT32_C(0x00070000) &&
                ARM_FPSCR_ENABLES == UINT32_C(0x00009f00) &&
+               ARM_FPSCR_DN == (1u << 25) &&
                ARM_FPSCR_FZ == (1u << 24) &&
                ARM_FPSCR_IDC == (1u << 7) &&
                ARM_FPSCR_IOC == (1u << 0) &&
@@ -397,6 +399,17 @@ static bool decode_vfp_transfer(uint32_t insn, uint32_t pc_value,
             op->immediate = rd | (rm << 8) |
                             ((zero ? 1u : 0u) << 16) |
                             ((top ? 1u : 0u) << 17);
+            *written = 1u;
+            return true;
+        }
+        /* VCVT.F64.F32 is an exact widening conversion. The inverse rounds
+         * and remains literal until its exception behavior is proved. */
+        if (opc2 == 7u && top && !dbl) {
+            if ((insn & (1u << 22)) != 0u) return false;
+            rd = ((insn >> 12) & 15u) * 2u;
+            rm = (insn & 15u) * 2u + ((insn >> 5) & 1u);
+            op->handler = A64S_VFP_WIDEN32;
+            op->immediate = rd | (rm << 8);
             *written = 1u;
             return true;
         }

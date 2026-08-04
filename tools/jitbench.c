@@ -252,6 +252,8 @@ static const uint16_t THUMB_INTEGER_MISC[] = {
            VFP_SB(sm), VFP_SV(sm))
 #define VFP_UN_D(opc2, top, dd, dm)                                        \
     VFP_DP(1, 1, 1, 0, (opc2), (dd), 1, (top), 1, 0, (dm))
+#define VFP_WIDEN(dd, sm)                                                  \
+    VFP_DP(1, 1, 1, 0, 7, (dd), 0, 1, 1, VFP_SB(sm), VFP_SV(sm))
 #define VFP_VMRS(rt, crn)                                                  \
     (UINT32_C(0xeef00a10) | ((uint32_t)(crn) << 16) |                     \
      ((uint32_t)(rt) << 12))
@@ -460,6 +462,17 @@ static const uint32_t VFP_COMPARE_OPS[] = {
     VFP_UN_D(5, 1, 15,  0),              /* VCMPE.F64 d15,#0 */
 };
 
+static const uint32_t VFP_WIDEN_OPS[] = {
+    VFP_WIDEN( 0,  0),                    /* VCVT.F64.F32 d0,s0 */
+    VFP_WIDEN( 1,  1),                    /* VCVT.F64.F32 d1,s1 */
+    VFP_WIDEN( 2,  2),                    /* VCVT.F64.F32 d2,s2 */
+    VFP_WIDEN( 3,  7),                    /* VCVT.F64.F32 d3,s7 */
+    VFP_WIDEN( 4, 15),                    /* VCVT.F64.F32 d4,s15 */
+    VFP_WIDEN( 8, 16),                    /* VCVT.F64.F32 d8,s16 */
+    VFP_WIDEN(14, 30),                    /* VCVT.F64.F32 d14,s30 */
+    VFP_WIDEN(15, 31),                    /* VCVT.F64.F32 d15,s31 */
+};
+
 static const uint32_t VFP_READ_HITS[] = {
     VFP_LDST(14, 1, 1, 0, 0, 1,  0, 0, 0, 0), /* VLDR s0,[r0] */
     VFP_LDST(14, 1, 1, 1, 0, 1,  0,15, 0, 1), /* VLDR s31,[r0,#4] */
@@ -641,6 +654,8 @@ static bool validate_static_shapes(void) {
         VFP_UN_S(5, 0, 0, 1), /* VCMP #0 with non-zero Vm field */
         VFP_UN_D(5, 0, 0, 1), /* double VCMP #0 with non-zero Vm */
         VFP_DP(1, 1, 1, 1, 4, 0, 1, 0, 1, 0, 0), /* compare d16 */
+        VFP_UN_D(7, 1, 0, 1), /* narrowing VCVT still rounds */
+        VFP_DP(1, 1, 1, 1, 7, 0, 0, 1, 1, 0, 0), /* widen to d16 */
     };
     /* Deliberately unaligned guest byte stream: ADD r0,r0,#1. */
     static const uint8_t UNALIGNED_A32[] = {
@@ -651,6 +666,7 @@ static bool validate_static_shapes(void) {
     uint8_t thumb_read_bytes[sizeof THUMB_READ_HITS];
     uint8_t vfp_bytes[sizeof VFP_REGISTER_OPS];
     uint8_t vfp_compare_bytes[sizeof VFP_COMPARE_OPS];
+    uint8_t vfp_widen_bytes[sizeof VFP_WIDEN_OPS];
     uint8_t vfp_read_bytes[sizeof VFP_READ_HITS];
     unsigned i;
 
@@ -688,6 +704,13 @@ static bool validate_static_shapes(void) {
         vfp_compare_bytes[i * 4u + 1u] = (uint8_t)(value >> 8);
         vfp_compare_bytes[i * 4u + 2u] = (uint8_t)(value >> 16);
         vfp_compare_bytes[i * 4u + 3u] = (uint8_t)(value >> 24);
+    }
+    for (i = 0u; i < sizeof VFP_WIDEN_OPS / sizeof VFP_WIDEN_OPS[0]; i++) {
+        uint32_t value = VFP_WIDEN_OPS[i];
+        vfp_widen_bytes[i * 4u + 0u] = (uint8_t)value;
+        vfp_widen_bytes[i * 4u + 1u] = (uint8_t)(value >> 8);
+        vfp_widen_bytes[i * 4u + 2u] = (uint8_t)(value >> 16);
+        vfp_widen_bytes[i * 4u + 3u] = (uint8_t)(value >> 24);
     }
 
     for (i = 0u; i < sizeof STATIC_CASES / sizeof STATIC_CASES[0]; i++) {
@@ -777,6 +800,22 @@ static bool validate_static_shapes(void) {
         return false;
     }
     printf("STATIC-VFP-COMPARE-SHAPE exact=yes insns=%u uops=%u "
+           "handlers=%u\n", block.insn_count, block.uop_count,
+           A64_STATIC_HANDLER_COUNT);
+
+    if (!a64_static_decode_read_hits_bytes_at(
+            vfp_widen_bytes,
+            (unsigned)(sizeof VFP_WIDEN_OPS / sizeof VFP_WIDEN_OPS[0]),
+            false, 0xe600u, &block) ||
+        block.insn_count != sizeof VFP_WIDEN_OPS /
+                            sizeof VFP_WIDEN_OPS[0] ||
+        block.uop_count != 9u || block.start_pc != 0xe600u ||
+        block.exit_pc != 0xe620u || block.touches_memory ||
+        block.direct_reads || !block.runtime_guards || !block.vfp) {
+        fprintf(stderr, "jitbench: product VFP widen shape failed\n");
+        return false;
+    }
+    printf("STATIC-VFP-WIDEN-SHAPE exact=yes insns=%u uops=%u "
            "handlers=%u\n", block.insn_count, block.uop_count,
            A64_STATIC_HANDLER_COUNT);
 
@@ -1345,6 +1384,144 @@ static bool validate_static_vfp_compare_oracles(void) {
 
 #undef VFP_COMPARE_CONTROL
 
+#define VFP_WIDEN_CONTROL \
+    (ARM_FPSCR_RMODE | ARM_FPSCR_DZC | ARM_FPSCR_N | ARM_FPSCR_C)
+
+typedef struct {
+    const char *name;
+    uint32_t input;
+    uint32_t mode;
+    uint64_t output;
+    uint32_t raised;
+} static_vfp_widen_case_t;
+
+static bool validate_static_vfp_widen_oracles(void) {
+    static const static_vfp_widen_case_t cases[] = {
+        {"+zero", UINT32_C(0x00000000), 0u,
+         UINT64_C(0x0000000000000000), 0u},
+        {"-zero", UINT32_C(0x80000000), 0u,
+         UINT64_C(0x8000000000000000), 0u},
+        {"one", UINT32_C(0x3f800000), 0u,
+         UINT64_C(0x3ff0000000000000), 0u},
+        {"largest-finite", UINT32_C(0x7f7fffff), 0u,
+         UINT64_C(0x47efffffe0000000), 0u},
+        {"smallest-normal", UINT32_C(0x00800000), 0u,
+         UINT64_C(0x3810000000000000), 0u},
+        {"smallest-subnormal", UINT32_C(0x00000001), 0u,
+         UINT64_C(0x36a0000000000000), 0u},
+        {"largest-subnormal", UINT32_C(0x007fffff), 0u,
+         UINT64_C(0x380fffffc0000000), 0u},
+        {"fz-positive", UINT32_C(0x00000001), ARM_FPSCR_FZ,
+         UINT64_C(0x0000000000000000), ARM_FPSCR_IDC},
+        {"fz-negative", UINT32_C(0x80000001), ARM_FPSCR_FZ,
+         UINT64_C(0x8000000000000000), ARM_FPSCR_IDC},
+        {"+infinity", UINT32_C(0x7f800000), 0u,
+         UINT64_C(0x7ff0000000000000), 0u},
+        {"-infinity", UINT32_C(0xff800000), 0u,
+         UINT64_C(0xfff0000000000000), 0u},
+        {"quiet-nan", UINT32_C(0x7fc12345), 0u,
+         UINT64_C(0x7ff82468a0000000), 0u},
+        {"signalling-nan", UINT32_C(0xff812345), 0u,
+         UINT64_C(0xfff82468a0000000), ARM_FPSCR_IOC},
+        {"default-nan", UINT32_C(0xffc12345), ARM_FPSCR_DN,
+         UINT64_C(0x7ff8000000000000), 0u},
+        {"default-signalling-nan", UINT32_C(0xff812345), ARM_FPSCR_DN,
+         UINT64_C(0x7ff8000000000000), ARM_FPSCR_IOC},
+    };
+    static const uint32_t ONE[] = {VFP_WIDEN(2, 1)};
+    static const uint32_t PARTIAL[] = {
+        VFP_WIDEN(2, 1),                 /* widening succeeds */
+        VFP_VMSR(1, 0),                 /* enable trapped invalid */
+        VFP_WIDEN(3, 2),                 /* widening must fall back */
+    };
+    a64_static_block_t block;
+    arm_cpu_t reference, statik, before;
+    unsigned completed = 0u;
+
+    if (!a64_static_host_available()) {
+        printf("STATIC-VFP-WIDEN-ORACLE SKIP: no signed AArch64 handlers\n");
+        return true;
+    }
+
+    for (unsigned i = 0u; i < sizeof cases / sizeof cases[0]; i++) {
+        const static_vfp_widen_case_t *test = &cases[i];
+        uint32_t pc = 0xee00u + i * 4u;
+        uint32_t expected_fpscr = VFP_WIDEN_CONTROL | test->mode |
+                                  test->raised;
+        seed_vfp_oracle(&reference, ONE, 1u, pc, true);
+        reference.vfp_s[1] = test->input;
+        reference.vfp_fpscr = VFP_WIDEN_CONTROL | test->mode;
+        statik = reference;
+        if (!a64_static_decode_read_hits_bytes_at(&g_ram[pc], 1u, false,
+                                                  pc, &block) ||
+            arm_step(&reference) != ARM_OK ||
+            !a64_static_run_read_hits(&statik, &block, g_ram, sizeof g_ram,
+                                      &completed) ||
+            completed != 1u ||
+            vfp_get_d(&reference, 2) != test->output ||
+            reference.vfp_fpscr != expected_fpscr ||
+            !static_vfp_states_equal(&reference, &statik)) {
+            fprintf(stderr, "jitbench: VFP widen oracle mismatch for %s\n",
+                    test->name);
+            return false;
+        }
+    }
+
+    for (unsigned i = 0u; i < 2u; i++) {
+        uint32_t pc = 0xef00u + i * 4u;
+        seed_vfp_oracle(&statik, ONE, 1u, pc, true);
+        statik.vfp_fpscr = VFP_WIDEN_CONTROL |
+                           (i == 0u ? ARM_FPSCR_LEN : ARM_FPSCR_IOE);
+        before = statik;
+        if (!a64_static_decode_read_hits_bytes_at(&g_ram[pc], 1u, false,
+                                                  pc, &block) ||
+            !a64_static_run_read_hits(&statik, &block, g_ram, sizeof g_ram,
+                                      &completed) ||
+            completed != 0u || !static_vfp_states_equal(&before, &statik)) {
+            fprintf(stderr, "jitbench: VFP widen live guard changed state\n");
+            return false;
+        }
+    }
+
+    seed_vfp_oracle(&reference, PARTIAL, 3u, 0xf700u, true);
+    reference.vfp_s[1] = UINT32_C(0x3f800000);
+    reference.vfp_s[2] = UINT32_C(0xbf800000);
+    reference.r[0] = VFP_WIDEN_CONTROL | ARM_FPSCR_IOE;
+    statik = reference;
+    if (!a64_static_decode_read_hits_bytes_at(&g_ram[0xf700u], 3u, false,
+                                              0xf700u, &block) ||
+        arm_step(&reference) != ARM_OK || arm_step(&reference) != ARM_OK ||
+        !a64_static_run_read_hits(&statik, &block, g_ram, sizeof g_ram,
+                                  &completed) || completed != 2u ||
+        !static_vfp_states_equal(&reference, &statik)) {
+        fprintf(stderr, "jitbench: VFP widen partial-prefix mismatch\n");
+        return false;
+    }
+
+    {
+        uint32_t condition_skip = VFP_WIDEN(2, 1) & UINT32_C(0x0fffffff);
+        seed_vfp_oracle(&reference, &condition_skip, 1u, 0xf800u, false);
+        reference.cp15.cpacr = 0u;
+        statik = reference;
+        if (!a64_static_decode_read_hits_bytes_at(&g_ram[0xf800u], 1u,
+                                                  false, 0xf800u, &block) ||
+            arm_step(&reference) != ARM_OK ||
+            !a64_static_run_read_hits(&statik, &block, g_ram, sizeof g_ram,
+                                      &completed) || completed != 1u ||
+            !static_vfp_states_equal(&reference, &statik)) {
+            fprintf(stderr, "jitbench: conditional VFP widen skip mismatch\n");
+            return false;
+        }
+    }
+
+    printf("STATIC-VFP-WIDEN-ORACLE exact=yes ops=%u finite=yes subnormal=yes "
+           "nan=yes fz=yes zero-prefix=yes partial-prefix=yes\n",
+           (unsigned)(sizeof cases / sizeof cases[0]));
+    return true;
+}
+
+#undef VFP_WIDEN_CONTROL
+
 static void seed_vfp_read_oracle(arm_cpu_t *cpu, bool warm) {
     seed_vfp_oracle(cpu, VFP_READ_HITS,
                     (unsigned)(sizeof VFP_READ_HITS /
@@ -1788,6 +1965,7 @@ int main(int argc, char **argv) {
     if (!validate_static_read_oracles()) return 1;
     if (!validate_static_vfp_register_oracles()) return 1;
     if (!validate_static_vfp_compare_oracles()) return 1;
+    if (!validate_static_vfp_widen_oracles()) return 1;
     if (!validate_static_vfp_read_oracles()) return 1;
     if (!validate_static_oracles()) return 1;
 

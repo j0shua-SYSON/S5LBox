@@ -26272,7 +26272,8 @@ typedef enum {
     SEQUENCE_VFP_DP_MOVE_SIGN,
     SEQUENCE_VFP_DP_SQRT,
     SEQUENCE_VFP_DP_COMPARE,
-    SEQUENCE_VFP_DP_CONVERT_PRECISION,
+    SEQUENCE_VFP_DP_CONVERT_WIDEN,
+    SEQUENCE_VFP_DP_CONVERT_NARROW,
     SEQUENCE_VFP_DP_INT_TO_FP,
     SEQUENCE_VFP_DP_FP_TO_INT,
     SEQUENCE_VFP_DP_OTHER,
@@ -26299,7 +26300,8 @@ static const char *const SEQUENCE_VFP_FAMILY_NAMES[
     "VMOV/VABS/VNEG register",
     "VSQRT",
     "VCMP/VCMPE",
-    "VCVT single <-> double",
+    "VCVT single -> double",
+    "VCVT double -> single",
     "VCVT integer -> float",
     "VCVT float -> integer",
     "other data processing",
@@ -26343,7 +26345,9 @@ static sequence_vfp_family_t sequence_vfp_family(uint32_t insn) {
         if (opc2 == 4u || opc2 == 5u)
             return SEQUENCE_VFP_DP_COMPARE;
         if (opc2 == 7u && top)
-            return SEQUENCE_VFP_DP_CONVERT_PRECISION;
+            return (insn & (1u << 8)) != 0u
+                       ? SEQUENCE_VFP_DP_CONVERT_NARROW
+                       : SEQUENCE_VFP_DP_CONVERT_WIDEN;
         if (opc2 == 8u) return SEQUENCE_VFP_DP_INT_TO_FP;
         if (opc2 == 12u || opc2 == 13u)
             return SEQUENCE_VFP_DP_FP_TO_INT;

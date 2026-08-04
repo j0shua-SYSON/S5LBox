@@ -1031,6 +1031,67 @@ static void test_conversions(void) {
         CHECK(get_f64(&c, 0) == 0.5, "F32->F64 = %f", get_f64(&c, 0));
         CHECK(get_f32(&c, 4) == 0.5f, "F64->F32 = %f", (double)get_f32(&c, 4));
     }
+
+    /* Widening has no rounding step. Pin its complete bit behavior so the
+     * signed engine can implement it without borrowing host floating state. */
+    {
+        static const struct {
+            uint32_t input;
+            uint32_t mode;
+            uint64_t output;
+            uint32_t raised;
+            const char *name;
+        } WIDEN[] = {
+            {UINT32_C(0x00000000), 0u, UINT64_C(0x0000000000000000), 0u,
+             "+zero"},
+            {UINT32_C(0x80000000), 0u, UINT64_C(0x8000000000000000), 0u,
+             "-zero"},
+            {UINT32_C(0x3f800000), ARM_FPSCR_RMODE,
+             UINT64_C(0x3ff0000000000000), 0u, "one under RZ"},
+            {UINT32_C(0x7f7fffff), 0u,
+             UINT64_C(0x47efffffe0000000), 0u, "largest finite"},
+            {UINT32_C(0x00800000), 0u,
+             UINT64_C(0x3810000000000000), 0u, "smallest normal"},
+            {UINT32_C(0x00000001), 0u,
+             UINT64_C(0x36a0000000000000), 0u, "smallest subnormal"},
+            {UINT32_C(0x007fffff), 0u,
+             UINT64_C(0x380fffffc0000000), 0u, "largest subnormal"},
+            {UINT32_C(0x80000001), ARM_FPSCR_FZ,
+             UINT64_C(0x8000000000000000), ARM_FPSCR_IDC,
+             "FZ negative subnormal"},
+            {UINT32_C(0x7f800000), 0u,
+             UINT64_C(0x7ff0000000000000), 0u, "+infinity"},
+            {UINT32_C(0xff800000), 0u,
+             UINT64_C(0xfff0000000000000), 0u, "-infinity"},
+            {UINT32_C(0x7fc12345), 0u,
+             UINT64_C(0x7ff82468a0000000), 0u, "quiet NaN payload"},
+            {UINT32_C(0xff812345), 0u,
+             UINT64_C(0xfff82468a0000000), ARM_FPSCR_IOC,
+             "signalling NaN"},
+            {UINT32_C(0xffc12345), ARM_FPSCR_DN,
+             UINT64_C(0x7ff8000000000000), 0u, "default NaN"},
+        };
+        uint32_t widen[] = {
+            UN_D_FROM_S(7,1, 2,1),       /* VCVT.F64.F32 d2,s1 */
+        };
+        for (unsigned i = 0u; i < sizeof WIDEN / sizeof WIDEN[0]; i++) {
+            uint32_t initial = WIDEN[i].mode | ARM_FPSCR_DZC;
+            vfp_reset(&c);
+            c.vfp_fpscr = initial;
+            vfp_set_s(&c, 1, WIDEN[i].input);
+            CHECK(run(&c, widen, 1, 1) == ARM_OK,
+                  "widening refused for %s", WIDEN[i].name);
+            CHECK(vfp_get_d(&c, 2) == WIDEN[i].output,
+                  "%s widened to 0x%016llx, expected 0x%016llx",
+                  WIDEN[i].name,
+                  (unsigned long long)vfp_get_d(&c, 2),
+                  (unsigned long long)WIDEN[i].output);
+            CHECK(c.vfp_fpscr == (initial | WIDEN[i].raised),
+                  "%s FPSCR = 0x%08x, expected 0x%08x",
+                  WIDEN[i].name, c.vfp_fpscr,
+                  initial | WIDEN[i].raised);
+        }
+    }
 }
 
 /*
