@@ -3204,6 +3204,106 @@ static void test_signed_static_a64_soc_oracle(void) {
     s5l8900_free(&reference);
 }
 
+/* A control-flow-heavy loop proves that the product cache and decoded runner
+ * actually retire conditional B/BL records, rather than obtaining an exact
+ * snapshot only by falling back at every branch. Eleven instructions execute
+ * per lap; six are branches, covering taken/fallthrough and taken/not-taken
+ * links. Without signed branch retirement the 75% threshold is unreachable. */
+static void test_signed_static_a64_branch_oracle(void) {
+    static const uint32_t signed_loop[] = {
+        UINT32_C(0xe3a00000), /* 00 MOV   r0,#0 */
+        UINT32_C(0xe3500000), /* 04 CMP   r0,#0 */
+        UINT32_C(0x1a000000), /* 08 BNE   0x10 (not taken) */
+        UINT32_C(0x1b000000), /* 0c BLNE  0x14 (not taken) */
+        UINT32_C(0x0b000000), /* 10 BLEQ  0x18 (taken, LR=0x14) */
+        UINT32_C(0xe2877001), /* 14 skipped */
+        UINT32_C(0xe2800001), /* 18 ADD   r0,r0,#1 */
+        UINT32_C(0xe3500000), /* 1c CMP   r0,#0 */
+        UINT32_C(0x0a000000), /* 20 BEQ   0x28 (not taken) */
+        UINT32_C(0x1a000000), /* 24 BNE   0x2c (taken) */
+        UINT32_C(0xe2877001), /* 28 skipped */
+        UINT32_C(0x1b000000), /* 2c BLNE  0x34 (taken, LR=0x30) */
+        UINT32_C(0xe2877001), /* 30 skipped */
+        UINT32_C(0xeafffff1), /* 34 B     0 */
+    };
+    const uint64_t total = UINT64_C(20000);
+    s5l8900_t fast = {0};
+    s5l8900_t reference = {0};
+    uint8_t *fast_snapshot = NULL;
+    uint8_t *reference_snapshot = NULL;
+    size_t fast_len = 0u;
+    size_t reference_len = 0u;
+    arm_status_t fast_status = ARM_OK;
+    arm_status_t reference_status = ARM_OK;
+    snapshot_status_t fast_snapshot_status;
+    snapshot_status_t reference_snapshot_status;
+    bool fast_ok;
+    bool reference_ok;
+    uint64_t retired;
+
+    if (!s5l8900_static_a64_available()) {
+        printf("  STATIC-A64-BRANCH-SOC-ORACLE SKIP: no signed AArch64 "
+               "handlers\n");
+        return;
+    }
+
+    fast_ok = s5l8900_init(&fast, 0u, 1u << 20);
+    reference_ok = s5l8900_init(&reference, 0u, 1u << 20);
+    CHECK(fast_ok && reference_ok, "machine init failed");
+    if (!fast_ok || !reference_ok) {
+        if (fast_ok) s5l8900_free(&fast);
+        if (reference_ok) s5l8900_free(&reference);
+        return;
+    }
+
+    s5l8900_load(&fast, 0u, signed_loop, sizeof signed_loop);
+    s5l8900_load(&reference, 0u, signed_loop, sizeof signed_loop);
+    s5l8900_tick(&fast, 0u);
+    s5l8900_tick(&reference, 0u);
+
+    CHECK(s5l8900_static_a64_set_enabled(&fast, true),
+          "signed engine refused an available host");
+    CHECK(s5l8900_run(&fast, total, &fast_status) == total,
+          "signed branch run stopped early with status=%d", (int)fast_status);
+    CHECK(s5l8900_run(&reference, total, &reference_status) == total,
+          "reference branch run stopped early with status=%d",
+          (int)reference_status);
+
+    retired = s5l8900_static_a64_retired(&fast);
+    CHECK(retired > total * 3u / 4u,
+          "signed branch loop retired only %llu/%llu instructions",
+          (unsigned long long)retired, (unsigned long long)total);
+    CHECK(fast_status == reference_status,
+          "status differs: signed=%d reference=%d",
+          (int)fast_status, (int)reference_status);
+
+    fast_snapshot_status = snapshot_save_mem(&fast, &fast_snapshot, &fast_len);
+    reference_snapshot_status =
+        snapshot_save_mem(&reference, &reference_snapshot, &reference_len);
+    CHECK(fast_snapshot_status == SNAP_OK,
+          "could not serialize signed branch machine: %s",
+          snapshot_strerror(fast_snapshot_status));
+    CHECK(reference_snapshot_status == SNAP_OK,
+          "could not serialize reference branch machine: %s",
+          snapshot_strerror(reference_snapshot_status));
+    CHECK(fast_snapshot && reference_snapshot && fast_len == reference_len &&
+              memcmp(fast_snapshot, reference_snapshot, fast_len) == 0,
+          "signed and reference branch snapshots differ");
+
+    if (fast_snapshot && reference_snapshot && fast_len == reference_len &&
+        memcmp(fast_snapshot, reference_snapshot, fast_len) == 0 &&
+        retired > total * 3u / 4u) {
+        printf("  STATIC-A64-BRANCH-SOC-ORACLE exact=yes retired=%llu "
+               "conditional=yes link=yes taken=yes fallthrough=yes\n",
+               (unsigned long long)retired);
+    }
+
+    free(fast_snapshot);
+    free(reference_snapshot);
+    s5l8900_free(&fast);
+    s5l8900_free(&reference);
+}
+
 /* Product-facing VFP state coverage crosses the real SoC runner and timer
  * boundaries. The loop contains no host floating arithmetic: it proves raw
  * S/D aliasing, core transfers, system access and integer-bit FPCompare. */
@@ -3652,6 +3752,7 @@ int main(void) {
     test_bounds_check_cannot_overflow();
     test_bare_metal_uart_hello();
     test_signed_static_a64_soc_oracle();
+    test_signed_static_a64_branch_oracle();
     test_signed_static_a64_vfp_register_oracle();
     test_signed_static_a64_vfp_read_oracle();
     test_signed_static_a64_thumb_oracle();

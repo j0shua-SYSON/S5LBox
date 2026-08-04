@@ -19,7 +19,7 @@ CONDITIONS = (
     "eq", "ne", "cs", "cc", "mi", "pl", "vs", "vc",
     "hi", "ls", "ge", "lt", "gt", "le",
 )
-EXPECTED_HANDLERS = 24617
+EXPECTED_HANDLERS = 24646
 
 READ_KINDS = (
     ("word", "ldr", 4),
@@ -37,6 +37,29 @@ def next_dispatch() -> list[str]:
         "    add x16, x8, x16",
         "    br x16",
     ]
+
+
+def terminal_branch_body(condition: str, link: bool) -> list[str]:
+    body: list[str] = []
+    if condition:
+        body.extend([
+            f"    b.{condition} 1f",
+            # A failed condition exits at the instruction after B/BL and must
+            # leave LR untouched even when the link bit is set.
+            "    ldur w12, [x13, #-8]",
+            "    b .La64s_exit",
+            "1:",
+        ])
+    if link:
+        body.extend([
+            "    ldur w9, [x13, #-8]",
+            "    str w9, [x0, #56]",
+        ])
+    body.extend([
+        "    ldur w12, [x13, #-12]",
+        "    b .La64s_exit",
+    ])
+    return body
 
 
 def read_guest_register(reg: int, scratch: int) -> tuple[list[str], str]:
@@ -1136,6 +1159,18 @@ def build_handlers() -> list[tuple[str, list[str]]]:
                      vfp_direct_read_body(4)))
     handlers.append((".La64s_vfp_direct_read_64",
                      vfp_direct_read_body(8)))
+
+    # Terminal A32 immediate branches leave the threaded block directly. An
+    # unconditional B already uses the compact END record; these fourteen
+    # conditional B handlers and fifteen conditional/AL BL handlers carry the
+    # distinct taken and fallthrough PCs without generating runtime code.
+    for condition in CONDITIONS:
+        handlers.append((f".La64s_branch_{condition}",
+                         terminal_branch_body(condition, False)))
+    for condition in (*CONDITIONS, ""):
+        name = condition if condition else "al"
+        handlers.append((f".La64s_branch_link_{name}",
+                         terminal_branch_body(condition, True)))
 
     if len(handlers) != EXPECTED_HANDLERS:
         raise RuntimeError(

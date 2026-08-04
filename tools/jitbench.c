@@ -4,11 +4,11 @@
  * This is deliberately NOT a product-performance claim and not a JIT
  * dispatcher. It translates one small synthetic block once, then compares
  * repeated interpreter execution with both that already-built block and a
- * firmware-independent static-threaded proof. The proof's 24,617 generic
+ * firmware-independent static-threaded proof. The proof's 24,646 generic
  * ISA/register handlers are compiled and signed with the executable; runtime
- * decoding creates data records only. The table now has 24,617 handlers,
- * including product-only guarded read-cache and exact VFP register/system
- * transfer paths.
+ * decoding creates data records only. The table includes product-only guarded
+ * read-cache, exact VFP register/system transfer and terminal A32 immediate
+ * branch/link paths.
  *
  * The answer is only a feasibility bound. The native and direct product-entry
  * rows have no device tick, MMIO, interrupt sampling, cache lookup,
@@ -641,7 +641,13 @@ static bool validate_static_shapes(void) {
     static const uint32_t MID_BLOCK_BRANCH[] = {
         0xea000000u, 0xe2800001u,
     };
-    static const uint32_t CONDITIONAL_BRANCH[] = { 0x1a000000u };
+    static const uint32_t MID_BLOCK_CONDITIONAL_BRANCH[] = {
+        0x1a000000u, 0xe2800001u,
+    };
+    static const uint32_t MID_BLOCK_LINK[] = {
+        0xeb000000u, 0xe2800001u,
+    };
+    static const uint32_t BLX_IMMEDIATE[] = { 0xfa000000u };
     static const uint32_t PC_WRITE[] = { 0xe3a0f000u };
     static const uint32_t MULTIPLY[] = { 0xe0000090u };
     static const uint32_t CONDITIONAL_DP[] = {
@@ -703,6 +709,8 @@ static bool validate_static_shapes(void) {
     uint8_t vfp_compare_bytes[sizeof VFP_COMPARE_OPS];
     uint8_t vfp_widen_bytes[sizeof VFP_WIDEN_OPS];
     uint8_t vfp_read_bytes[sizeof VFP_READ_HITS];
+    uint32_t branch_handlers[29];
+    unsigned branch_handler_count = 0u;
     unsigned i;
 
     for (i = 0u; i < sizeof A32_READ_HITS / sizeof A32_READ_HITS[0]; i++) {
@@ -755,7 +763,8 @@ static bool validate_static_shapes(void) {
                                   sc->pc, &block) ||
             block.insn_count != sc->insns || block.uop_count != sc->uops ||
             block.start_pc != sc->pc || block.exit_pc != sc->exit_pc ||
-            block.thumb != sc->thumb || block.touches_memory ||
+            block.thumb != sc->thumb || block.dynamic_exit ||
+            block.touches_memory ||
             block.uops[block.uop_count - 1u].handler != 0u ||
             block.uops[block.uop_count - 1u].immediate != sc->exit_pc) {
             fprintf(stderr, "jitbench: static shape failed for %s\n", sc->name);
@@ -775,6 +784,71 @@ static bool validate_static_shapes(void) {
             return false;
         }
     }
+
+    for (unsigned link = 0u; link < 2u; link++) {
+        for (unsigned condition = 0u; condition < 15u; condition++) {
+            const uint32_t pc = UINT32_C(0x1100);
+            const uint32_t imm24 = ((condition + link) & 1u) != 0u
+                ? UINT32_C(0x000002)
+                : UINT32_C(0xfffffc);
+            const uint32_t insn = (condition << 28) |
+                UINT32_C(0x0a000000) | (link << 24) | imm24;
+            const int32_t displacement = (int32_t)(insn << 8) >> 6;
+            const uint32_t target = pc + 8u + (uint32_t)displacement;
+            const bool dynamic = link != 0u || condition != 14u;
+            const unsigned expected_uops = dynamic ? 2u : 1u;
+            uint8_t bytes[4] = {
+                (uint8_t)insn, (uint8_t)(insn >> 8),
+                (uint8_t)(insn >> 16), (uint8_t)(insn >> 24)
+            };
+            a64_static_block_t product_block;
+
+            if (!a64_static_decode_at(&insn, 1u, false, pc, &block) ||
+                !a64_static_decode_read_hits_bytes_at(
+                    bytes, 1u, false, pc, &product_block) ||
+                memcmp(&block, &product_block, sizeof block) != 0 ||
+                block.insn_count != 1u ||
+                block.uop_count != expected_uops ||
+                block.start_pc != pc || block.thumb ||
+                block.dynamic_exit != dynamic || block.touches_memory ||
+                block.direct_reads || block.runtime_guards || block.vfp ||
+                block.uops[block.uop_count - 1u].handler != 0u ||
+                block.exit_pc != (dynamic ? pc + 4u : target) ||
+                block.uops[block.uop_count - 1u].immediate !=
+                    block.exit_pc) {
+                fprintf(stderr,
+                        "jitbench: A32 branch shape failed link=%u cond=%u\n",
+                        link, condition);
+                return false;
+            }
+            if (dynamic) {
+                const a64_static_uop_t *branch =
+                    &block.uops[block.uop_count - 2u];
+                if (branch->handler == 0u || branch->immediate != target ||
+                    branch->pc_value != pc + 4u || branch->metadata != 0u) {
+                    fprintf(stderr,
+                            "jitbench: A32 dynamic exit record failed "
+                            "link=%u cond=%u\n", link, condition);
+                    return false;
+                }
+                for (i = 0u; i < branch_handler_count; i++) {
+                    if (branch_handlers[i] == branch->handler) {
+                        fprintf(stderr,
+                                "jitbench: duplicate A32 branch handler "
+                                "link=%u cond=%u\n", link, condition);
+                        return false;
+                    }
+                }
+                branch_handlers[branch_handler_count++] = branch->handler;
+            }
+        }
+    }
+    if (branch_handler_count != 29u) {
+        fprintf(stderr, "jitbench: incomplete A32 branch handler family\n");
+        return false;
+    }
+    printf("STATIC-BRANCH-SHAPE exact=yes conditional=14 link=15 "
+           "handlers=29 forward=yes backward=yes\n");
 
     if (!a64_static_decode_read_hits_bytes_at(
             read_bytes, (unsigned)(sizeof A32_READ_HITS /
@@ -919,7 +993,10 @@ static bool validate_static_shapes(void) {
                              false, 0u, &block) ||
         a64_static_decode_at(A32_SHORT_FALL, 1u, false, 2u, &block) ||
         a64_static_decode_at(MID_BLOCK_BRANCH, 2u, false, 0u, &block) ||
-        a64_static_decode_at(CONDITIONAL_BRANCH, 1u, false, 0u, &block) ||
+        a64_static_decode_at(MID_BLOCK_CONDITIONAL_BRANCH, 2u, false, 0u,
+                             &block) ||
+        a64_static_decode_at(MID_BLOCK_LINK, 2u, false, 0u, &block) ||
+        a64_static_decode_at(BLX_IMMEDIATE, 1u, false, 0u, &block) ||
         a64_static_decode_at(PC_WRITE, 1u, false, 0u, &block) ||
         a64_static_decode_at(MULTIPLY, 1u, false, 0u, &block) ||
         !a64_static_decode_at(CONDITIONAL_DP, 1u, false, 0x3000u,
@@ -1745,6 +1822,152 @@ static bool validate_static_oracles(void) {
     return true;
 }
 
+static uint32_t branch_nzcv(unsigned mask) {
+    uint32_t flags = 0u;
+    if (mask & 1u) flags |= ARM_CPSR_N;
+    if (mask & 2u) flags |= ARM_CPSR_Z;
+    if (mask & 4u) flags |= ARM_CPSR_C;
+    if (mask & 8u) flags |= ARM_CPSR_V;
+    return flags;
+}
+
+static bool branch_condition_flags(unsigned condition, bool passed,
+                                   uint32_t *flags_out) {
+    arm_cpu_t probe;
+    if (!flags_out || condition >= 14u) return false;
+    memset(&probe, 0, sizeof probe);
+    for (unsigned mask = 0u; mask < 16u; mask++) {
+        probe.cpsr = ARM_MODE_SYS | branch_nzcv(mask);
+        if (arm_cond_passed(&probe, condition) == passed) {
+            *flags_out = branch_nzcv(mask);
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool validate_static_branch_oracles(void) {
+    const uint32_t pc = UINT32_C(0x1800);
+    const uint32_t nzcv_mask = ARM_CPSR_N | ARM_CPSR_Z |
+                               ARM_CPSR_C | ARM_CPSR_V;
+    unsigned cases = 0u;
+
+    for (unsigned link = 0u; link < 2u; link++) {
+        for (unsigned condition = 0u; condition < 15u; condition++) {
+            const unsigned outcomes = condition == 14u ? 1u : 2u;
+            for (unsigned outcome = 0u; outcome < outcomes; outcome++) {
+                const bool passed = condition == 14u || outcome != 0u;
+                const uint32_t imm24 = (cases & 1u) != 0u
+                    ? UINT32_C(0x000002)
+                    : UINT32_C(0xfffffc);
+                const uint32_t insn = (condition << 28) |
+                    UINT32_C(0x0a000000) | (link << 24) | imm24;
+                const int32_t displacement = (int32_t)(insn << 8) >> 6;
+                const uint32_t target = pc + 8u + (uint32_t)displacement;
+                const uint32_t expected_pc = passed ? target : pc + 4u;
+                const uint32_t expected_lr = link != 0u && passed
+                    ? pc + 4u : UINT32_C(0xdead00ff);
+                uint32_t flags = 0u;
+                a64_static_block_t block;
+                arm_cpu_t interp_cpu;
+                arm_cpu_t static_cpu;
+                final_state_t interp;
+                final_state_t statik;
+                arm_status_t status;
+
+                if (condition != 14u &&
+                    !branch_condition_flags(condition, passed, &flags)) {
+                    fprintf(stderr,
+                            "jitbench: no NZCV witness for cond=%u pass=%u\n",
+                            condition, passed ? 1u : 0u);
+                    return false;
+                }
+                if (!a64_static_decode_at(&insn, 1u, false, pc, &block)) {
+                    fprintf(stderr,
+                            "jitbench: branch oracle decode failed "
+                            "link=%u cond=%u pass=%u\n",
+                            link, condition, passed ? 1u : 0u);
+                    return false;
+                }
+
+                seed_cpu_at(&interp_cpu, &insn, 1u, false, pc);
+                interp_cpu.cpsr =
+                    (interp_cpu.cpsr & ~nzcv_mask) | flags;
+                status = arm_step(&interp_cpu);
+                capture_state(&interp, &interp_cpu, status, JIT_EXIT_NEXT);
+
+                seed_cpu_at(&static_cpu, &insn, 1u, false, pc);
+                static_cpu.cpsr =
+                    (static_cpu.cpsr & ~nzcv_mask) | flags;
+                if (!a64_static_run(&static_cpu, &block, 1u,
+                                    g_ram, sizeof g_ram)) {
+                    fprintf(stderr,
+                            "jitbench: branch oracle execution failed "
+                            "link=%u cond=%u pass=%u\n",
+                            link, condition, passed ? 1u : 0u);
+                    return false;
+                }
+                capture_state(&statik, &static_cpu, ARM_OK, JIT_EXIT_NEXT);
+                if (status != ARM_OK ||
+                    !architectural_states_equal(&interp, &statik) ||
+                    statik.r[15] != expected_pc ||
+                    statik.r[14] != expected_lr ||
+                    statik.cycles != 1u) {
+                    fprintf(stderr,
+                            "jitbench: branch oracle mismatch "
+                            "link=%u cond=%u pass=%u pc=%08" PRIx32
+                            " lr=%08" PRIx32 "\n",
+                            link, condition, passed ? 1u : 0u,
+                            statik.r[15], statik.r[14]);
+                    return false;
+                }
+                cases++;
+            }
+        }
+    }
+
+    {
+        const uint32_t insn = UINT32_C(0x0a000002); /* BEQ forward */
+        const uint8_t bytes[4] = {
+            (uint8_t)insn, (uint8_t)(insn >> 8),
+            (uint8_t)(insn >> 16), (uint8_t)(insn >> 24)
+        };
+        a64_static_block_t block;
+        arm_cpu_t cpu;
+        arm_cpu_t before;
+        unsigned completed = UINT_MAX;
+        uint32_t flags;
+
+        if (!branch_condition_flags(0u, true, &flags) ||
+            !a64_static_decode_read_hits_bytes_at(
+                bytes, 1u, false, pc, &block)) {
+            fprintf(stderr, "jitbench: decoded branch contract setup failed\n");
+            return false;
+        }
+        seed_cpu_at(&cpu, &insn, 1u, false, pc);
+        cpu.cpsr = (cpu.cpsr & ~nzcv_mask) | flags;
+        before = cpu;
+        block.dynamic_exit = false;
+        if (a64_static_run_read_hits_decoded(
+                &cpu, &block, g_ram, sizeof g_ram, &completed) ||
+            memcmp(&before, &cpu, sizeof cpu) != 0 ||
+            completed != UINT_MAX) {
+            fprintf(stderr,
+                    "jitbench: mutated decoded branch contract did not "
+                    "fail closed\n");
+            return false;
+        }
+    }
+
+    if (cases != 58u) {
+        fprintf(stderr, "jitbench: incomplete branch oracle matrix\n");
+        return false;
+    }
+    printf("STATIC-BRANCH-ORACLE exact=yes cases=58 taken=yes "
+           "fallthrough=yes link=yes backward=yes contract=yes\n");
+    return true;
+}
+
 static bool run_interpreter(const bench_case_t *bc, uint64_t total,
                             final_state_t *out, double *seconds) {
     arm_cpu_t cpu;
@@ -2366,6 +2589,7 @@ int main(int argc, char **argv) {
     if (!validate_static_vfp_compare_oracles()) return 1;
     if (!validate_static_vfp_widen_oracles()) return 1;
     if (!validate_static_vfp_read_oracles()) return 1;
+    if (!validate_static_branch_oracles()) return 1;
     if (!validate_static_oracles()) return 1;
 
     for (i = 0u; i < sizeof CASES / sizeof CASES[0]; i++) {

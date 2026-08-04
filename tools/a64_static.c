@@ -56,7 +56,9 @@ enum {
     A64S_VFP_WIDEN32 = A64S_VFP_COMPARE64 + 1u,
     A64S_VFP_DIRECT_READ32 = A64S_VFP_WIDEN32 + 1u,
     A64S_VFP_DIRECT_READ64 = A64S_VFP_DIRECT_READ32 + 1u,
-    A64S_HANDLER_COUNT = A64S_VFP_DIRECT_READ64 + 1u
+    A64S_BRANCH_COND = A64S_VFP_DIRECT_READ64 + 1u,
+    A64S_BRANCH_LINK = A64S_BRANCH_COND + 14u,
+    A64S_HANDLER_COUNT = A64S_BRANCH_LINK + 15u
 };
 
 enum {
@@ -206,6 +208,14 @@ static uint32_t vfp_pair_to_core(unsigned rt, unsigned rt2) {
     return A64S_VFP_PAIR_TO_CORE + rt * 15u + rt2;
 }
 
+static uint32_t branch_cond(unsigned condition) {
+    return A64S_BRANCH_COND + condition;
+}
+
+static uint32_t branch_link(unsigned condition) {
+    return A64S_BRANCH_LINK + condition;
+}
+
 static bool handler_is_condition(uint32_t handler) {
     return handler >= A64S_COND && handler < A64S_DP_IMM;
 }
@@ -234,7 +244,12 @@ static bool handler_is_direct_read(uint32_t handler) {
 }
 
 static bool handler_is_vfp(uint32_t handler) {
-    return handler >= A64S_VFP_CORE_TO_S && handler < A64S_HANDLER_COUNT;
+    return handler >= A64S_VFP_CORE_TO_S &&
+           handler <= A64S_VFP_DIRECT_READ64;
+}
+
+static bool handler_is_terminal_branch(uint32_t handler) {
+    return handler >= A64S_BRANCH_COND && handler < A64S_HANDLER_COUNT;
 }
 
 static bool handler_is_runtime_guarded(uint32_t handler) {
@@ -451,15 +466,20 @@ static bool decode_arm(uint32_t insn, unsigned index, unsigned insns,
     if ((insn & UINT32_C(0x0e000000)) == UINT32_C(0x0a000000)) {
         int32_t displacement;
         uint32_t target;
-        /* A conditional branch has two possible block exits. It stays in the
-         * literal path until the signed contract carries both destinations. */
-        if (condition != 14u || (insn & (1u << 24)) != 0u ||
-            index + 1u != insns)
-            return false;
+        uint32_t fallthrough;
+        bool link = (insn & (1u << 24)) != 0u;
+        if (index + 1u != insns) return false;
         displacement = (int32_t)(insn << 8) >> 6;
         target = pc + index * 4u + 8u + (uint32_t)displacement;
-        op->handler = A64S_END;
+        fallthrough = pc + index * 4u + 4u;
+        /* Unconditional B retains the compact fixed-exit record. Every BL and
+         * every conditional B needs both destinations: the generated handler
+         * chooses from live NZCV and writes LR only on a taken link. */
+        op->handler = !link && condition == 14u
+            ? A64S_END
+            : (link ? branch_link(condition) : branch_cond(condition));
         op->immediate = target;
+        op->pc_value = fallthrough;
         *written = 1u;
         return true;
     }
@@ -915,6 +935,13 @@ static bool decode_program_at(const void *program, unsigned insns, bool thumb,
                 memset(out, 0, sizeof *out);
                 return false;
             }
+            if (handler_is_terminal_branch(handler)) {
+                if (i + 1u != insns || out->dynamic_exit) {
+                    memset(out, 0, sizeof *out);
+                    return false;
+                }
+                out->dynamic_exit = true;
+            }
             if (handler_touches_memory(handler))
                 out->touches_memory = true;
             if (handler_is_runtime_guarded(handler)) {
@@ -1000,6 +1027,7 @@ static unsigned semantic_span(const a64_static_block_t *block, unsigned i,
     uint32_t handler;
     if (i >= end) return 0u;
     handler = block->uops[i].handler;
+    if (handler_is_terminal_branch(handler)) return 1u;
     if (handler_is_condition(handler) || handler == A64S_END)
         return 0u;
     if (handler_is_shift(handler)) {
@@ -1033,6 +1061,7 @@ static bool validate_run(const arm_cpu_t *cpu,
     bool saw_direct_read = false;
     bool saw_runtime_guard = false;
     bool saw_vfp = false;
+    bool saw_dynamic_exit = false;
 
     if (!cpu || !block || !blocks || !ram ||
         !block->insn_count || block->insn_count > A64_STATIC_MAX_INSNS ||
@@ -1043,7 +1072,8 @@ static bool validate_run(const arm_cpu_t *cpu,
         block->uops[block->uop_count - 1u].immediate != block->exit_pc ||
         cpu->r[15] != block->start_pc ||
         ((cpu->cpsr & ARM_CPSR_T) != 0u) != block->thumb ||
-        (blocks > 1u && block->exit_pc != block->start_pc) ||
+        (blocks > 1u &&
+         (block->dynamic_exit || block->exit_pc != block->start_pc)) ||
         (kind == A64S_RUN_READ_HITS && blocks != 1u) ||
         !ram_size || (ram_size & (ram_size - 1u)) != 0u ||
         ram_size - 1u > UINT32_MAX)
@@ -1073,6 +1103,15 @@ static bool validate_run(const arm_cpu_t *cpu,
         }
         if (handler_is_direct_read(handler)) saw_direct_read = true;
         if (handler_is_vfp(handler)) saw_vfp = true;
+        if (handler_is_terminal_branch(handler)) {
+            if (saw_dynamic_exit || j + 1u != end || block->thumb ||
+                (block->uops[j].immediate & 3u) != 0u ||
+                block->uops[j].pc_value != block->exit_pc ||
+                block->uops[j].metadata != 0u ||
+                block->exit_pc != block->start_pc + block->insn_count * 4u)
+                return false;
+            saw_dynamic_exit = true;
+        }
         if (handler >= A64S_DP_IMM && handler < A64S_SHIFT_IMM &&
             block->uops[j].metadata > A64S_CARRY_SET)
             return false;
@@ -1082,6 +1121,7 @@ static bool validate_run(const arm_cpu_t *cpu,
         block->direct_reads != saw_direct_read ||
         block->runtime_guards != saw_runtime_guard ||
         block->vfp != saw_vfp ||
+        block->dynamic_exit != saw_dynamic_exit ||
         (kind == A64S_RUN_FLAT && saw_direct_read) ||
         (kind == A64S_RUN_FLAT && saw_vfp) ||
         (kind == A64S_RUN_READ_HITS && saw_flat_memory))
@@ -1171,6 +1211,7 @@ bool a64_static_run_read_hits_decoded(arm_cpu_t *cpu,
                                       const a64_static_block_t *block,
                                       uint8_t *ram, size_t ram_size,
                                       unsigned *completed) {
+    bool terminal_dynamic;
     if (!cpu || !block || !ram || !completed || !block->insn_count ||
         block->insn_count > A64_STATIC_MAX_INSNS || !block->uop_count ||
         block->uop_count > A64_STATIC_MAX_UOPS ||
@@ -1181,6 +1222,17 @@ bool a64_static_run_read_hits_decoded(arm_cpu_t *cpu,
         (block->touches_memory && !block->direct_reads) || !ram_size ||
         (ram_size & (ram_size - 1u)) != 0u ||
         ram_size - 1u > UINT32_MAX)
+        return false;
+    terminal_dynamic = block->uop_count > 1u &&
+        handler_is_terminal_branch(
+            block->uops[block->uop_count - 2u].handler);
+    if (block->dynamic_exit != terminal_dynamic ||
+        (terminal_dynamic &&
+         (block->thumb ||
+          (block->uops[block->uop_count - 2u].immediate & 3u) != 0u ||
+          block->uops[block->uop_count - 2u].pc_value != block->exit_pc ||
+          block->uops[block->uop_count - 2u].metadata != 0u ||
+          block->exit_pc != block->start_pc + block->insn_count * 4u)))
         return false;
     return execute_read_hits(cpu, block, ram, ram_size, completed);
 }
