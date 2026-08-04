@@ -217,6 +217,7 @@ jobs:
             grep -Eq 'PRODUCT-ENTRY-CEILING length=16 uops=16 guest-insns=10000 reps=1 predecoded=yes validated-wrapper=yes decoded-contract=yes cache-lookup=no' <<<"$static_output"
             grep -Eq 'SOC-ENTRY-CURVE length=1 uops=1 guest-insns=10000 reps=1 chain-limit=16 extended-limit=256 run-api=yes cache-lookup=yes block-witness=yes .*exact-snapshot=yes signed-retired=10000 signed-chains=[1-9][0-9]* graph-chains=[1-9][0-9]* extended-graph-chains=[1-9][0-9]*' <<<"$static_output"
             grep -Eq 'SOC-ENTRY-CURVE length=16 uops=16 guest-insns=10000 reps=1 chain-limit=16 extended-limit=256 run-api=yes cache-lookup=yes block-witness=yes .*exact-snapshot=yes signed-retired=10000 signed-chains=[1-9][0-9]* graph-chains=0 extended-graph-chains=[1-9][0-9]*' <<<"$static_output"
+            grep -Eq 'SOC-STORE-CURVE length=16 stores=4 guest-insns=10000 reps=1 chain-limit=256 run-api=yes cache-lookup=yes block-witness=yes entry-gates=yes timer-boundaries=yes device-tick=yes head-cache=warm mmu=off exact-snapshot=yes off-signed-retired=7500 on-signed-retired=10000 dwrite-hits=2500 dwrite-misses=0 off-graph-chains=[0-9]+ on-graph-chains=[0-9]+' <<<"$static_output"
           else
             grep -Fq 'SKIP: not an arm64 host' <<<"$output"
             grep -Fq 'STATIC-A64-SOC-ORACLE SKIP: no signed AArch64 handlers' <<<"$soc_output"

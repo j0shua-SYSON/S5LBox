@@ -136,6 +136,17 @@ static const uint32_t A32_MIXED[] = {
     0xe2811001u, 0xe2422001u, 0xe0833002u, 0xeaffffefu,
 };
 
+/* Four ordinary stores in a sixteen-instruction loop. This is a deliberately
+ * synthetic same-binary A/B for the app-facing SoC path: it is store-heavier
+ * than the restored workload and is never presented as firmware or phone FPS.
+ * r7 is seeded to DATA_BASE by the store benchmark before either warmup. */
+static const uint32_t A32_SOC_STORES[] = {
+    0xe2800001u, 0xe5870000u, 0xe2811003u, 0xe5871004u,
+    0xe0222001u, 0xe5973000u, 0xe2844001u, 0xe5874008u,
+    0xe0855003u, 0xe5976004u, 0xe2466001u, 0xe587600cu,
+    0xe0800006u, 0xe0211005u, 0xe2422001u, 0xeaffffefu,
+};
+
 static const uint16_t THUMB_ALU[] = {
     0x3001u, 0x3103u, 0x3a01u, 0x3305u,
     0x3c02u, 0x3507u, 0x3e03u, 0x3709u,
@@ -2523,6 +2534,8 @@ typedef struct {
     uint64_t signed_retired;
     uint64_t signed_chains;
     uint64_t graph_chains;
+    uint64_t dwrite_hits;
+    uint64_t dwrite_misses;
     double seconds;
 } soc_run_result_t;
 
@@ -2530,7 +2543,8 @@ typedef enum {
     SOC_ENTRY_REFERENCE,
     SOC_ENTRY_SIGNED,
     SOC_ENTRY_GRAPH,
-    SOC_ENTRY_GRAPH_EXTENDED
+    SOC_ENTRY_GRAPH_EXTENDED,
+    SOC_ENTRY_GRAPH_EXTENDED_WRITES
 } soc_entry_path_t;
 
 static const char *soc_entry_path_name(soc_entry_path_t path) {
@@ -2539,6 +2553,8 @@ static const char *soc_entry_path_name(soc_entry_path_t path) {
     case SOC_ENTRY_SIGNED:    return "signed";
     case SOC_ENTRY_GRAPH:     return "graph";
     case SOC_ENTRY_GRAPH_EXTENDED: return "graph-extended";
+    case SOC_ENTRY_GRAPH_EXTENDED_WRITES:
+        return "graph-extended-writes";
     }
     return "invalid";
 }
@@ -2557,6 +2573,7 @@ static void free_soc_run_result(soc_run_result_t *result) {
  * and deliberately do not enter that architectural byte stream. */
 static bool run_soc_entry_path(const uint32_t *program, unsigned length,
                                uint64_t total, soc_entry_path_t path,
+                               uint32_t seed_r7,
                                soc_run_result_t *out) {
     s5l8900_t machine = {0};
     arm_status_t status = ARM_OK;
@@ -2567,16 +2584,24 @@ static bool run_soc_entry_path(const uint32_t *program, unsigned length,
     uint64_t chains_after;
     uint64_t graph_before;
     uint64_t graph_after;
+    uint64_t dwrite_hits_before;
+    uint64_t dwrite_hits_after;
+    uint64_t dwrite_misses_before;
+    uint64_t dwrite_misses_after;
     double start, end;
     bool initialized = false;
     bool ok = false;
 
     bool signed_path = path != SOC_ENTRY_REFERENCE;
     bool graph_path = path == SOC_ENTRY_GRAPH ||
-                      path == SOC_ENTRY_GRAPH_EXTENDED;
-    bool extended_path = path == SOC_ENTRY_GRAPH_EXTENDED;
+                      path == SOC_ENTRY_GRAPH_EXTENDED ||
+                      path == SOC_ENTRY_GRAPH_EXTENDED_WRITES;
+    bool extended_path = path == SOC_ENTRY_GRAPH_EXTENDED ||
+                         path == SOC_ENTRY_GRAPH_EXTENDED_WRITES;
+    bool direct_write_path = path == SOC_ENTRY_GRAPH_EXTENDED_WRITES;
 
-    if (!program || !length || !out || path > SOC_ENTRY_GRAPH_EXTENDED)
+    if (!program || !length || !out ||
+        path > SOC_ENTRY_GRAPH_EXTENDED_WRITES)
         return false;
     memset(out, 0, sizeof *out);
     if (!s5l8900_init(&machine, 0u, RAM_SIZE)) {
@@ -2586,10 +2611,16 @@ static bool run_soc_entry_path(const uint32_t *program, unsigned length,
     initialized = true;
     s5l8900_load(&machine, 0u, program,
                  (size_t)length * sizeof *program);
+    machine.cpu.r[7] = seed_r7;
 
     /* Clear reset's dirty-level gate before warming either path. This uses the
      * real 412 MHz:6 MHz board clocks installed by s5l8900_init(). */
     s5l8900_tick(&machine, 0u);
+    if (direct_write_path &&
+        !s5l8900_set_direct_ram_writes(&machine, true)) {
+        fprintf(stderr, "jitbench: SoC entry direct writes unavailable\n");
+        goto done;
+    }
     if (signed_path &&
         !s5l8900_static_a64_set_enabled(&machine, true)) {
         fprintf(stderr, "jitbench: SoC entry signed engine unavailable\n");
@@ -2622,6 +2653,8 @@ static bool run_soc_entry_path(const uint32_t *program, unsigned length,
     retired_before = s5l8900_static_a64_retired(&machine);
     chains_before = s5l8900_static_a64_chained_blocks(&machine);
     graph_before = s5l8900_static_a64_graph_chained_blocks(&machine);
+    dwrite_hits_before = machine.cpu.dwrite_hits;
+    dwrite_misses_before = machine.cpu.dwrite_misses;
     start = now_seconds();
     while (remaining != 0u) {
         unsigned chunk = remaining > (uint64_t)UINT_MAX
@@ -2635,6 +2668,8 @@ static bool run_soc_entry_path(const uint32_t *program, unsigned length,
     retired_after = s5l8900_static_a64_retired(&machine);
     chains_after = s5l8900_static_a64_chained_blocks(&machine);
     graph_after = s5l8900_static_a64_graph_chained_blocks(&machine);
+    dwrite_hits_after = machine.cpu.dwrite_hits;
+    dwrite_misses_after = machine.cpu.dwrite_misses;
     if (remaining != 0u || status != ARM_OK || end <= start ||
         machine.cpu.r[15] != 0u) {
         fprintf(stderr,
@@ -2647,10 +2682,13 @@ static bool run_soc_entry_path(const uint32_t *program, unsigned length,
     out->signed_retired = retired_after - retired_before;
     out->signed_chains = chains_after - chains_before;
     out->graph_chains = graph_after - graph_before;
-    if ((signed_path && out->signed_retired != total) ||
+    out->dwrite_hits = dwrite_hits_after - dwrite_hits_before;
+    out->dwrite_misses = dwrite_misses_after - dwrite_misses_before;
+    if ((signed_path && out->signed_retired > total) ||
         (!signed_path &&
          (out->signed_retired != 0u || out->signed_chains != 0u ||
-          out->graph_chains != 0u)) ||
+          out->graph_chains != 0u || out->dwrite_hits != 0u ||
+          out->dwrite_misses != 0u)) ||
         (path == SOC_ENTRY_SIGNED && out->graph_chains != 0u) ||
         (graph_path &&
          out->graph_chains != out->signed_chains)) {
@@ -2730,36 +2768,48 @@ static bool bench_soc_entry(unsigned length, uint64_t requested,
             order = "reference-signed-graph16-graph256";
             ran = run_soc_entry_path(program, length, total,
                                      SOC_ENTRY_REFERENCE,
+                                     0u,
                                      &reference) &&
                   run_soc_entry_path(program, length, total,
-                                     SOC_ENTRY_SIGNED, &signed_result) &&
+                                     SOC_ENTRY_SIGNED, 0u,
+                                     &signed_result) &&
                   run_soc_entry_path(program, length, total,
-                                     SOC_ENTRY_GRAPH, &graph_result) &&
+                                     SOC_ENTRY_GRAPH, 0u,
+                                     &graph_result) &&
                   run_soc_entry_path(program, length, total,
                                      SOC_ENTRY_GRAPH_EXTENDED,
+                                     0u,
                                      &extended_result);
         } else if (rep % 3u == 1u) {
             order = "signed-graph16-graph256-reference";
             ran = run_soc_entry_path(program, length, total,
-                                     SOC_ENTRY_SIGNED, &signed_result) &&
+                                     SOC_ENTRY_SIGNED, 0u,
+                                     &signed_result) &&
                   run_soc_entry_path(program, length, total,
-                                     SOC_ENTRY_GRAPH, &graph_result) &&
+                                     SOC_ENTRY_GRAPH, 0u,
+                                     &graph_result) &&
                   run_soc_entry_path(program, length, total,
                                      SOC_ENTRY_GRAPH_EXTENDED,
+                                     0u,
                                      &extended_result) &&
                   run_soc_entry_path(program, length, total,
-                                     SOC_ENTRY_REFERENCE, &reference);
+                                     SOC_ENTRY_REFERENCE, 0u,
+                                     &reference);
         } else {
             order = "graph16-graph256-reference-signed";
             ran = run_soc_entry_path(program, length, total,
-                                     SOC_ENTRY_GRAPH, &graph_result) &&
+                                     SOC_ENTRY_GRAPH, 0u,
+                                     &graph_result) &&
                   run_soc_entry_path(program, length, total,
                                      SOC_ENTRY_GRAPH_EXTENDED,
+                                     0u,
                                      &extended_result) &&
                   run_soc_entry_path(program, length, total,
-                                     SOC_ENTRY_REFERENCE, &reference) &&
+                                     SOC_ENTRY_REFERENCE, 0u,
+                                     &reference) &&
                   run_soc_entry_path(program, length, total,
-                                     SOC_ENTRY_SIGNED, &signed_result);
+                                     SOC_ENTRY_SIGNED, 0u,
+                                     &signed_result);
         }
         if (!ran || !reference.snapshot || !signed_result.snapshot ||
             !graph_result.snapshot || !extended_result.snapshot ||
@@ -2771,7 +2821,16 @@ static bool bench_soc_entry(unsigned length, uint64_t requested,
             memcmp(reference.snapshot, graph_result.snapshot,
                    reference.snapshot_len) != 0 ||
             memcmp(reference.snapshot, extended_result.snapshot,
-                   reference.snapshot_len) != 0) {
+                   reference.snapshot_len) != 0 ||
+            signed_result.signed_retired != total ||
+            graph_result.signed_retired != total ||
+            extended_result.signed_retired != total ||
+            signed_result.dwrite_hits != 0u ||
+            signed_result.dwrite_misses != 0u ||
+            graph_result.dwrite_hits != 0u ||
+            graph_result.dwrite_misses != 0u ||
+            extended_result.dwrite_hits != 0u ||
+            extended_result.dwrite_misses != 0u) {
             fprintf(stderr,
                     "jitbench: SoC entry length %u repetition %u failed "
                     "exact machine equality\n",
@@ -2854,6 +2913,164 @@ done:
     free(signed_rates);
     free(graph_rates);
     free(extended_rates);
+    return ok;
+}
+
+/* Measure the first signed-store tranche at the actual SoC entry point. The
+ * graph-off and graph-on arms are the same binary and differ only in the
+ * machine's explicit direct-RAM-write consent. Four terminal stores per loop
+ * make the expected signed-retirement gap exact and independently auditable.
+ * This deliberately store-heavy loop is an architectural A/B, not a claim
+ * about the restored firmware's instruction mix or physical-device FPS. */
+static bool bench_soc_store(uint64_t requested, unsigned reps) {
+    const unsigned length =
+        (unsigned)(sizeof A32_SOC_STORES / sizeof A32_SOC_STORES[0]);
+    const uint64_t stores_per_loop = 4u;
+    double *reference_rates = NULL;
+    double *off_rates = NULL;
+    double *on_rates = NULL;
+    uint64_t total;
+    uint64_t expected_stores;
+    uint64_t expected_off_retired;
+    uint64_t off_chains = 0u;
+    uint64_t on_chains = 0u;
+    bool ok = false;
+
+    if (length != 16u ||
+        requested > UINT64_MAX - (uint64_t)(length - 1u)) {
+        fprintf(stderr, "jitbench: SoC store shape failed\n");
+        return false;
+    }
+    total = ((requested + length - 1u) / length) * length;
+    expected_stores = (total / length) * stores_per_loop;
+    expected_off_retired = total - expected_stores;
+    reference_rates = (double *)calloc(reps, sizeof *reference_rates);
+    off_rates = (double *)calloc(reps, sizeof *off_rates);
+    on_rates = (double *)calloc(reps, sizeof *on_rates);
+    if (!reference_rates || !off_rates || !on_rates) {
+        fprintf(stderr, "jitbench: SoC store out of memory\n");
+        goto done;
+    }
+
+    for (unsigned rep = 0u; rep < reps; rep++) {
+        soc_run_result_t reference = {0};
+        soc_run_result_t off = {0};
+        soc_run_result_t on = {0};
+        const char *order;
+        bool ran;
+
+        if (rep % 3u == 0u) {
+            order = "reference-off-on";
+            ran = run_soc_entry_path(A32_SOC_STORES, length, total,
+                                     SOC_ENTRY_REFERENCE, DATA_BASE,
+                                     &reference) &&
+                  run_soc_entry_path(A32_SOC_STORES, length, total,
+                                     SOC_ENTRY_GRAPH_EXTENDED, DATA_BASE,
+                                     &off) &&
+                  run_soc_entry_path(A32_SOC_STORES, length, total,
+                                     SOC_ENTRY_GRAPH_EXTENDED_WRITES,
+                                     DATA_BASE, &on);
+        } else if (rep % 3u == 1u) {
+            order = "off-on-reference";
+            ran = run_soc_entry_path(A32_SOC_STORES, length, total,
+                                     SOC_ENTRY_GRAPH_EXTENDED, DATA_BASE,
+                                     &off) &&
+                  run_soc_entry_path(A32_SOC_STORES, length, total,
+                                     SOC_ENTRY_GRAPH_EXTENDED_WRITES,
+                                     DATA_BASE, &on) &&
+                  run_soc_entry_path(A32_SOC_STORES, length, total,
+                                     SOC_ENTRY_REFERENCE, DATA_BASE,
+                                     &reference);
+        } else {
+            order = "on-reference-off";
+            ran = run_soc_entry_path(A32_SOC_STORES, length, total,
+                                     SOC_ENTRY_GRAPH_EXTENDED_WRITES,
+                                     DATA_BASE, &on) &&
+                  run_soc_entry_path(A32_SOC_STORES, length, total,
+                                     SOC_ENTRY_REFERENCE, DATA_BASE,
+                                     &reference) &&
+                  run_soc_entry_path(A32_SOC_STORES, length, total,
+                                     SOC_ENTRY_GRAPH_EXTENDED, DATA_BASE,
+                                     &off);
+        }
+        if (!ran || !reference.snapshot || !off.snapshot || !on.snapshot ||
+            reference.snapshot_len != off.snapshot_len ||
+            reference.snapshot_len != on.snapshot_len ||
+            memcmp(reference.snapshot, off.snapshot,
+                   reference.snapshot_len) != 0 ||
+            memcmp(reference.snapshot, on.snapshot,
+                   reference.snapshot_len) != 0 ||
+            off.signed_retired != expected_off_retired ||
+            off.dwrite_hits != 0u || off.dwrite_misses != 0u ||
+            on.signed_retired != total ||
+            on.dwrite_hits != expected_stores ||
+            on.dwrite_misses != 0u) {
+            fprintf(stderr,
+                    "jitbench: SoC store repetition %u failed exact A/B "
+                    "off-retired=%" PRIu64 " on-retired=%" PRIu64
+                    " hits=%" PRIu64 " misses=%" PRIu64 "\n",
+                    rep + 1u, off.signed_retired, on.signed_retired,
+                    on.dwrite_hits, on.dwrite_misses);
+            free_soc_run_result(&reference);
+            free_soc_run_result(&off);
+            free_soc_run_result(&on);
+            goto done;
+        }
+        if (rep == 0u) {
+            off_chains = off.graph_chains;
+            on_chains = on.graph_chains;
+        } else if (off_chains != off.graph_chains ||
+                   on_chains != on.graph_chains) {
+            fprintf(stderr,
+                    "jitbench: SoC store chain counts changed across "
+                    "repetitions\n");
+            free_soc_run_result(&reference);
+            free_soc_run_result(&off);
+            free_soc_run_result(&on);
+            goto done;
+        }
+
+        reference_rates[rep] = (double)total / reference.seconds / 1.0e6;
+        off_rates[rep] = (double)total / off.seconds / 1.0e6;
+        on_rates[rep] = (double)total / on.seconds / 1.0e6;
+        printf("SOC-STORE-SAMPLE rep=%u order=%s reference=%.3f "
+               "graph-off=%.3f graph-on=%.3f Minsn/s "
+               "off-retired=%" PRIu64 " on-retired=%" PRIu64
+               " dwrite-hits=%" PRIu64 " exact-snapshot=yes\n",
+               rep + 1u, order, reference_rates[rep], off_rates[rep],
+               on_rates[rep], off.signed_retired, on.signed_retired,
+               on.dwrite_hits);
+        free_soc_run_result(&reference);
+        free_soc_run_result(&off);
+        free_soc_run_result(&on);
+    }
+
+    qsort(reference_rates, reps, sizeof *reference_rates, cmp_double);
+    qsort(off_rates, reps, sizeof *off_rates, cmp_double);
+    qsort(on_rates, reps, sizeof *on_rates, cmp_double);
+    printf("SOC-STORE-CURVE length=%u stores=%" PRIu64
+           " guest-insns=%" PRIu64 " reps=%u chain-limit=256 "
+           "run-api=yes cache-lookup=yes block-witness=yes entry-gates=yes "
+           "timer-boundaries=yes device-tick=yes head-cache=warm mmu=off "
+           "exact-snapshot=yes off-signed-retired=%" PRIu64
+           " on-signed-retired=%" PRIu64 " dwrite-hits=%" PRIu64
+           " dwrite-misses=0 off-graph-chains=%" PRIu64
+           " on-graph-chains=%" PRIu64
+           " reference-median=%.3f off-median=%.3f on-median=%.3f "
+           "off-speedup=%.3fx on-speedup=%.3fx on-over-off=%.3fx\n",
+           length, stores_per_loop, total, reps, expected_off_retired,
+           total, expected_stores, off_chains, on_chains,
+           reference_rates[reps / 2u], off_rates[reps / 2u],
+           on_rates[reps / 2u],
+           off_rates[reps / 2u] / reference_rates[reps / 2u],
+           on_rates[reps / 2u] / reference_rates[reps / 2u],
+           on_rates[reps / 2u] / off_rates[reps / 2u]);
+    ok = true;
+
+done:
+    free(reference_rates);
+    free(off_rates);
+    free(on_rates);
     return ok;
 }
 
@@ -3078,6 +3295,9 @@ int main(int argc, char **argv) {
            "the real run API, cache/raw witness, gates, timer boundaries and "
            "device ticks with exact serialized-machine comparison; they still "
            "exclude real firmware, framebuffer/UI work and phone FPS.\n");
+    printf("The SoC-store row is a same-binary direct-write-consent A/B with "
+           "four stores per synthetic loop and the same exact snapshot gate; "
+           "it is intentionally not a firmware-mix or phone-FPS claim.\n");
     if (!validate_static_shapes()) return 1;
     for (i = 0u; i < sizeof CASES / sizeof CASES[0]; i++) {
         if (!validate_case_translation(&CASES[i])) return 1;
@@ -3113,5 +3333,6 @@ int main(int argc, char **argv) {
         if (!bench_soc_entry(SOC_ENTRY_LENGTHS[i], soc_insns, reps))
             return 1;
     }
+    if (!bench_soc_store(soc_insns, reps)) return 1;
     return 0;
 }
