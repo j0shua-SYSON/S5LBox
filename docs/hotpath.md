@@ -5292,3 +5292,102 @@ false. The next gate is an exact restored-trace model of the product decoder's c
 signed runs, including live DREAD misses and the sixteen-instruction cap. Only if that
 shows useful residency should the engine enter an app build and face same-binary restored
 and phone measurements; final acceptance still requires a cold boot.
+
+### r497: exact residency proves the current signed subset cannot reach 30 FPS
+
+r497 answers the gate at the end of r496 without executing a native handler or changing
+the guest. The read-only sequence observer now calls the exact shipping product decoder
+for every live instruction, classifies the literal pre-step condition and DREAD state,
+and reconstructs the actual signed-call boundaries. The model includes the product's
+1 KiB fetch-block rule, sixteen-instruction cap, exact device-timer edges, interrupts,
+the app's 100,000-instruction `run()` boundary, current fetch mapping/generation and every
+read-only entry gate visible to `bootkernel`. Runtime opt-in and an arm64 target are
+deliberately assumed. Decode/cache lookup time is omitted, and this Windows replay cannot
+execute the AArch64 handlers, so the result is residency rather than speed.
+
+The exact restored 7.100--7.110 B interval again contained 10,000,000 observations,
+9,999,489 fetched instructions and 511 interrupt entries, with no fetch failure. Every
+accounting identity closed:
+
+| exact current product model | instructions | fetched share |
+|---|---:|---:|
+| decoder-supported | 4,474,493 | 44.747% |
+| decoder-rejected | 5,524,996 | 55.253% |
+| retirement-eligible after condition/DREAD checks | 4,361,735 | 43.619% |
+| modeled signed retirement | **4,062,729** | **40.629%** |
+| entry-gate refusal | 299,006 | 2.990% |
+
+The model formed 1,860,925 calls with a mean of only 2.183 instructions and a maximum of
+sixteen. It attributed one stop to every call. Unsupported or dynamically ineligible
+instructions caused 1,684,361 stops; timer, fetch-block and cap stops were 58,499, 8,398
+and 2,868 respectively. All 299,006 entry refusals were the existing fetch-cache gate;
+machine, eager-tick, dirty-level, external-input and timebase refusals were zero. This is
+an exact description of the observed literal stream under the stated model, not a claim
+that 40.629% will run for free or that native lookup overhead is zero.
+
+The r485 optimized baseline is 15.732668 M guest instructions/s and the 30 FPS capacity
+target is 34.304688 M/s, a required **2.180475x** speedup. If the modeled 40.629% became
+infinitely fast, Amdahl's law caps the whole program at **1.684334x**. The absolute
+infinite-speed coverage minimum is 54.138%. Therefore the current signed engine is not
+merely unmeasured or unlikely to reach 30 FPS: **this measured subset cannot reach it**.
+Enabling it in the app now would be a misleading device experiment.
+
+The observer was then extended to retain each exact product-decoder rejection and group
+it by the same broad branches as the real VFP and Thumb decoders. No raw encoding was
+dropped. All 1,709,378 VFP observations were currently rejected:
+
+| VFP decoder family | observations | fetched share |
+|---|---:|---:|
+| VLDR | 466,108 | 4.661% |
+| VCVT single/double | 223,959 | 2.240% |
+| VMRS/VMSR | 181,590 | 1.816% |
+| VCMP/VCMPE | 180,986 | 1.810% |
+| VSTR | 148,246 | 1.483% |
+| VMLA/VMLS/VNMLA/VNMLS | 121,266 | 1.213% |
+| VADD/VSUB | 84,887 | 0.849% |
+| VMOV/VABS/VNEG register | 75,991 | 0.760% |
+| VMUL/VNMUL | 68,646 | 0.686% |
+| remaining transfers, conversions, loads/stores and divide | 157,699 | 1.577% |
+
+Thumb contributed 1,355,047 observations. The product decoder supported 46,428 and
+rejected 1,308,619. The largest rejected families were immediate loads (178,060),
+conditional branches (147,493), immediate MOV/CMP/ADD/SUB (138,699), small ADD/SUB
+(134,717), high-register operations (98,780), register ALU (81,841), BL/BLX pair halves
+(66,755), BX/BLX-register (48,502), PUSH/POP (96,233 combined), and shifts (39,332).
+The complete family rows accounted exactly for both the observed and rejected totals.
+
+This is diffuse enough to reject an opcode-at-a-time strategy. The hottest VFP encoding,
+`eef1fa10` (`VMRS APSR_nzcv,FPSCR`), is 1.810% of the whole trace; the hottest rejected
+Thumb halfword is only 0.311%. The hottest 32 encodings cover 37.870% of rejected VFP and
+26.598% of rejected Thumb. Special-casing those lists would still leave most of each
+class literal and would bake one restored interval into product semantics.
+
+The coverage arithmetic also rejects two superficially attractive shortcuts. Adding
+every rejected Thumb instruction to current modeled retirement reaches only **53.716%**,
+still below the infinite-speed minimum. Adding every VFP instruction except stores reaches
+**55.997%**, whose impossible zero-cost ceiling is only 2.273x and leaves no allowance for
+native entry, FP-mode, DREAD or device overhead. A credible route must therefore combine
+broad Thumb and VFP execution and increase contiguous call length; neither family alone
+has honest margin.
+
+The optimized full observer run exited OK in 30.607 seconds with empty stderr and zero
+external-media failures. That instrumented wall time is not a performance result. Its
+work-image SHA-256 was
+`8A59C388C481165F460984926AA5FFB1B72A0E9030216CD0038DE9B3264B79FE`, and the captured
+PPM was `1EF63FFE3EEFD976416E17120A36BA074BF295EA0955D716E2D345FCC5EA0A9E`, both identical
+to r496. Guest counters and status, including 1,590 CLCD frames, also matched the prior
+observer run; this is checked-output equality, not a serialized whole-machine comparison.
+Local strict engine-on/off builds passed, as did all 60 engine-on tests. Exact commit
+`319e01a97b199ff49c75093a67861ce27e2041c5` passed core-tests run `30874343573` and the
+manually dispatched iOS build `30874363387`.
+
+Brutal status: **we are not close to 30 FPS yet**. The exact model converts previous
+optimism into a falsifiable plan, but it produces zero measured emulator or iPhone FPS
+gain, the app still builds the engine out, and the phone remains at the reported 0--4 FPS.
+The next retained implementation must cover broad Thumb integer/control/read families
+and then broad exact VFP transfer/compute/read families, preserving literal fallback for
+faults and exceptional FP modes. Firmware-specific AOT remains possible only in a bespoke
+pre-sign build for one imported image; it is not compatible with the current distributable
+app, which imports user firmware after its executable is signed. A generic signed engine
+remains the product route. It does not enter the app until a same-binary restored A/B
+shows a structural gain large enough to justify physical-iPhone and final cold-boot tests.
