@@ -5973,3 +5973,72 @@ caller/timer limit, dynamic branch PC, NZCV, exact read-miss prefix semantics an
 CPU state. It must beat the current signed path on native Apple hosts before it can be considered
 for the app; if the C validation callback costs as much as the removed register round trip, the
 prototype should be rejected rather than narrated as progress.
+
+### r515: persistent native context is exact, but the C callback loses
+
+Implementation commit `f72e67a184bedf5addb28d840b1dae1bd1b6a02d` adds an experimental
+same-binary control without changing the legacy signed path or the normal app default. One signed
+invocation may keep guest r0--r7 and SP in AAPCS64 callee-saved registers across block heads. It
+saves NZCV around a C head-selection callback, repeats the interrupt/fetch/cache/raw-byte contract,
+retains the total sixteen-instruction caller/timer bound and writes architectural state back once
+at the final exit or exact read/VFP miss prefix. Persistent mode must be explicitly enabled after
+the already optional signed engine.
+
+This difficult part is correct on both Apple hosts. Exact-SHA core run `30890861908` is green in
+all eight jobs and exact-SHA iOS run `30890862137` builds the ad-hoc-signed IPA. macOS 14 and 15
+both pass the required native markers; the completed macOS 14 log is representative:
+
+```
+STATIC-A64-SOC-ORACLE exact=yes retired=24095 smc=yes decoded=yes persistent=yes
+STATIC-A64-BRANCH-SOC-ORACLE exact=yes retired=19999 chains=11801 conditional=yes link=yes taken=yes fallthrough=yes persistent=yes
+STATIC-A64-CHAIN-BOUND-ORACLE exact=yes one-retired=1 one-chains=0 sixteen-retired=16 sixteen-chains=15 persistent-chains=15
+```
+
+Correctness is not speed. Benchmark commit `d427dbea0470dbc9179327f31c3568a09964d2ec`
+rotates three separately initialised machines in one binary: literal interpreter, legacy signed
+chaining and persistent signed chaining. Warm-up stays outside timing; legacy and persistent chain
+counts must match; both complete snapshots must match the reference before a row is printed.
+Exact-SHA core run `30891229180` is green in all eight jobs. Its three-repetition
+`persistent-over-signed` medians are:
+
+| synthetic block length | macOS 14 | macOS 15 |
+|---:|---:|---:|
+| 1 | **1.144x** | **1.049x** |
+| 2 | 0.932x | 0.874x |
+| 3 | 0.923x | 0.906x |
+| 4 | 0.821x | 0.869x |
+| 5 | 0.937x | 0.818x |
+| 6 | 0.815x | 0.863x |
+| 7 | 0.806x | 0.853x |
+| 8 | **1.001x** | 0.877x |
+| 9 | 0.846x | 0.907x |
+| 10 | 0.834x | 0.889x |
+| 11 | 0.926x | 0.875x |
+| 12 | 0.829x | 0.905x |
+| 13 | 0.748x | 0.919x |
+| 14 | 0.845x | 0.905x |
+| 15 | 0.715x | 0.901x |
+| 16 | 0.847x | 0.893x |
+
+The one-instruction case removes enough native ABI traffic to win by 14.4%/4.9%; length eight
+only ties on macOS 14. Every other row loses, commonly by 7--18% and by as much as 28.5%. Absolute
+host rates drifted while three paths shared the hosted machines, so the conclusion uses only the
+same-row, same-run persistent/legacy ratio. Exact snapshots and identical transition counts rule
+out the tempting explanation that the persistent arm did less work.
+
+Brutal status: **the callback-based persistent prototype is rejected as a performance path**. It
+proves that pinned state can cross dynamic branches and exact miss exits without semantic drift,
+but its nested C/indirect callback, NZCV crossing and dispatcher reconstruction cost more than the
+register round trip they replace for the workload shapes that matter. It remains opt-in as a
+correctness scaffold and must not be enabled in the app. This is negative performance evidence,
+not an FPS gain; the app remains compiled without the engine and the only physical-phone report
+remains 0--4 FPS.
+
+The next justified architecture is a callback-free signed graph dispatcher. A hot fetch-block
+cache must expose predecoded head descriptors to ordinary build-time-signed assembly; the native
+boundary must look up the dynamic exit PC, enforce the remaining budget and compare that head's
+raw-byte witness without returning through C. Stable MMU/privilege/interrupt facts may be proved
+once per bounded invocation only because the admitted subset cannot mutate them and devices do not
+tick inside the batch. A missing, colliding, stale, cross-fetch-block or oversized descriptor must
+return to the legacy path. No runtime code generation, writable executable memory or relaxed guest
+contract is justified by these results.
