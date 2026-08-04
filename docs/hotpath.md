@@ -5563,3 +5563,52 @@ region to be about **19.511x** faster. There remains zero measured emulator or i
 gain. The next broad safe candidate is exact single-to-double VCVT widening, which dominates
 the hottest remaining conversion encodings; narrowing and arithmetic still require their
 own rounding/exception proof.
+
+### r505: exact VCVT widening adds 1.598 points, not measured FPS
+
+r505 admits the complete scalar VFPv2 `VCVT.F64.F32` family whose destination is one of
+the implemented `d0`--`d15` registers. It still rejects double-to-single narrowing and
+high-D-register destinations. The generated AArch64 handler never borrows host floating
+state: integer operations widen normals exactly, normalize binary32 subnormals, flush FZ
+input denormals to signed zero with IDC, preserve infinities and quiet-NaN payloads, quiet
+signalling NaNs with IOC, and implement DN default-NaN selection. Live CPACR, FPEXC,
+FPSCR.Len and trap-enable guards fail before changing guest state. The generic handler
+table grows from 24,616 to 24,617 entries.
+
+The portable VFP edge suite reports 552 assertions passed, the full local Release suite
+reports 60/60 tests passed, and the strict warning build passes. Exact commit
+`8f0509808fcd20af972582bb30628ca147bef037` is fully green in core run `30880172743`
+and iOS run `30880172791`. On both macOS-14 and macOS-15, the native arm64 jobs report
+`STATIC-VFP-WIDEN-ORACLE exact=yes ops=15`, covering finite, subnormal, NaN, FZ and
+fallback-prefix cases, plus a serialized 23,999-instruction SoC comparison with
+`widen=yes`. That proves the generated handler on Apple arm64; it does not measure the
+normal app or a phone.
+
+The unchanged 7.100--7.110 B restored replay completed in 32.015 host seconds with empty
+stderr and exact accounting. Splitting the formerly combined conversion census shows
+161,207 single-to-double operations and 62,752 double-to-single operations. Every widening
+operation now decodes; every narrowing operation remains rejected. The product model is:
+
+| r505 exact product model | instructions | fetched share |
+|---|---:|---:|
+| decoder-supported | 6,439,683 | 64.400% |
+| retirement-eligible | 6,276,116 | 62.764% |
+| modeled signed retirement | **5,865,830** | **58.661%** |
+| entry-gate refusal | 410,286 | 4.103% |
+
+Relative to r504, modeled retirement increases by 159,816 instructions, or **1.598
+percentage points**. Continuity again improves: modeled calls fall by 53,072 to 2,480,573
+and mean run length rises from 2.252 to 2.365 instructions. The work-image SHA-256 remains
+`8A59C388C481165F460984926AA5FFB1B72A0E9030216CD0038DE9B3264B79FE`; the PPM remains
+`1EF63FFE3EEFD976416E17120A36BA074BF295EA0955D716E2D345FCC5EA0A9E`, with 1,590 CLCD
+frames. These hashes prove deterministic replay output, not native execution timing.
+
+Brutal status: this raises the infinite-speed ceiling from 2.328997x to **2.419041x** and
+widens the margin over the impossible zero-cost coverage floor to 4.523 percentage points.
+It also lowers the covered-region speedup required for the 30-FPS capacity target from
+19.511x to **12.970x**. That is real progress, but 12.970x is still a severe requirement.
+There is still zero measured emulator or iPhone FPS gain, the signed engine remains built
+out of the normal iOS app, and the phone therefore remains at the reported 0--4 FPS. The
+next tranche must address a broad remaining family and demonstrate both exact Apple-arm64
+semantics and actual native throughput; merely adding another hot encoding is no longer
+enough.
