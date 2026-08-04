@@ -2,8 +2,9 @@
 #
 # We do NOT commit an .xcodeproj (it is a churny binary blob). CI runs
 # `xcodegen generate` on the macOS runner to produce S5LBox.xcodeproj from
-# this file, then `xcodebuild`. To develop locally on a Mac, run the same
-# `xcodegen generate` and open the project.
+# this file, then `xcodebuild`. To develop locally on a Mac, first run
+# `python3 ../tools/gen_a64_static.py Generated/a64_static_handlers.S`, then
+# `xcodegen generate`, and open the project.
 name: S5LBox
 options:
   bundleIdPrefix: com.j0shua
@@ -32,11 +33,19 @@ targets:
         # exclusion at stage J3, when the app enables the JIT for real.
         excludes:
           - "jit/**"
+      # Ordinary build-time-signed AArch64 semantics. This is not a JIT: the
+      # generator emits normal text before Xcode compiles and signs the app,
+      # and no writable/executable page exists at runtime. CI creates this
+      # ignored file before XcodeGen resolves the source list.
+      - path: ../tools/a64_static.c
+        group: core
+      - path: Generated/a64_static_handlers.S
+        group: core
       # The firmware importer authenticates what it produces against known-good
       # SHA-256 digests, and the exact kernel and rootfs host policies already
       # share this one implementation. Pulled in as a single file rather than as
-      # all of tools/, which is desktop harness code that has no business in a
-      # phone binary.
+      # all of tools/, whose remaining files are desktop harness code that has
+      # no business in a phone binary.
       - path: ../tools/sha256.c
         group: core
       # BOOTING APPLE'S KERNEL needs five more of those files, and no more.
@@ -110,6 +119,11 @@ targets:
         GCC_PREPROCESSOR_DEFINITIONS:
           - $(inherited)
           - _FILE_OFFSET_BITS=64
+          - S5LBOX_STATIC_A64_ENGINE=1
+          - S5LBOX_STATIC_A64_NATIVE=1
+          # This target is the measured arm64 product consumer. Host/default
+          # builds remain opt-in and the interpreter remains their default.
+          - S5LBOX_STATIC_A64_DEFAULT_GRAPH=1
         # Stated rather than inherited: the Objective-C sources are written for
         # ARC, and would leak (or double-free) under manual retain/release.
         CLANG_ENABLE_OBJC_ARC: YES

@@ -14,6 +14,7 @@
 **/build/
 **/dist/
 **/DerivedData/
+/app/Generated/
 /.tmp/
 /.cache/
 /.m5-lab/

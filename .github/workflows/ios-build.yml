@@ -9,8 +9,9 @@ on:
     paths:
       - 'app/**'
       - 'core/**'
-      # The app compiles six files out of tools/ (see app/project.yml, which
-      # lists them one by one rather than pulling in the directory). Without
+      # The app compiles seven C files out of tools/, plus generated assembly
+      # (see app/project.yml, which lists them rather than pulling in the
+      # directory). Without
       # these, a change to one of them cannot trigger this workflow -- and that
       # is not hypothetical: d38f1c4 FIXED an iOS build break in
       # tools/rootfs_work.c and did not run this job, because the fix touched
@@ -28,6 +29,9 @@ on:
       - 'tools/sha256.h'
       - 'tools/file_block.h'
       - 'tools/guest_patch.h'
+      - 'tools/a64_static.c'
+      - 'tools/a64_static.h'
+      - 'tools/gen_a64_static.py'
       - '.github/workflows/ios-build.yml'
   workflow_dispatch:
 
@@ -78,7 +82,13 @@ jobs:
 
       - name: Generate Xcode project
         working-directory: app
-        run: xcodegen generate
+        run: |
+          set -euo pipefail
+          mkdir -p Generated
+          python3 ../tools/gen_a64_static.py \
+            Generated/a64_static_handlers.S
+          test -s Generated/a64_static_handlers.S
+          xcodegen generate
 
       - name: Build (unsigned, arm64/iphoneos)
         working-directory: app
@@ -93,6 +103,9 @@ jobs:
             CONFIGURATION_BUILD_DIR="$PWD/dist" \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
             build
+          binary="$PWD/dist/S5LBox.app/S5LBox"
+          test -f "$binary"
+          xcrun nm "$binary" | grep -Eq ' _a64_static_execute$'
 
       - name: Fake-sign + package .ipa
         working-directory: app

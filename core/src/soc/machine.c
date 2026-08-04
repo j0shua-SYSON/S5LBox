@@ -1201,6 +1201,16 @@ bool s5l8900_init(s5l8900_t *m, uint32_t ram_base, uint32_t ram_size) {
     m->bus.host_ram = machine_host_ram;
 
     arm_reset(&m->cpu, &m->bus);
+#if defined(S5LBOX_STATIC_A64_DEFAULT_GRAPH)
+    /* The iOS target explicitly promises the measured, build-time-signed
+     * graph path. Refuse a misconfigured binary rather than silently shipping
+     * the interpreter while its UI and documentation imply acceleration. */
+    if (!s5l8900_static_a64_set_enabled(m, true) ||
+        !s5l8900_static_a64_set_graph(m, true)) {
+        s5l8900_free(m);
+        return false;
+    }
+#endif
     return true;
 }
 
