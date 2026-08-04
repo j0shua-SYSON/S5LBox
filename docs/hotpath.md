@@ -6139,3 +6139,82 @@ intended gain where the removed comparisons existed, all exactness gates remain 
 actual iOS target packages it. The next highest-value measurement is the exact IPA on a physical
 iPhone. Without that, another result must either model the restored graph's real joint shapes or
 remove another structural boundary; isolated opcode additions would return to whack-a-mole.
+
+### 2026-08-04: exact graph-head reuse rejects invocation tokens
+
+An invocation token initially looked like a safe way to skip repeated native raw-witness checks.
+Once a node has been validated inside one bounded signed invocation, the admitted subset cannot
+store to guest memory and therefore cannot change that node's instruction bytes before returning.
+That observation is exact, but it does not establish that repeated nodes are common enough to pay
+for token state.
+
+Observer commit `979c4a35b1576cdf5c8728f8d7bf95538a4ecf92` therefore adds no product
+dispatch. It extends the existing joint call-shape model with the unique `(PC, ARM/Thumb)` graph
+heads visited by each call and closes the new totals against the already exact call/block counts.
+The unchanged 7.100--7.110 B restored replay reports:
+
+```
+exact graph validation calls/heads/unique=1832685/2674071/2582592 current-native/token-native/reusable=841386/749907/91479  EXACT
+```
+
+Of 1,832,685 modeled calls, 1,370,748 (**74.795%**) still visit only one node and offer no
+next-head work to remove. The current callback-free graph performs 841,386 native next-head
+validations. A perfect per-invocation token would still have to validate 749,907 first visits and
+could skip only 91,479 revisits: **10.872% of next-head validations**, or 0.915 skipped checks per
+100 fetched guest instructions. Most of the reuse is concentrated in 5,474 eight-block calls with
+one unique node and 6,004 nine-block calls with two; it is not a broad property of the workload.
+
+`work/r516-graph-reuse-10m` stopped at exactly 7.110 B instructions with status `OK`, empty
+stderr and 1,590 CLCD frames. Its work image and PPM remain byte-identical to the prior replay at
+SHA-256 `8A59C388C481165F460984926AA5FFB1B72A0E9030216CD0038DE9B3264B79FE` and
+`1EF63FFE3EEFD976416E17120A36BA074BF295EA0955D716E2D345FCC5EA0A9E`. The complete local
+suite passes 60/60 and the independent strict build passes. Exact-SHA core runs `30898201583` and
+`30898213574` are green in all eight jobs; exact-SHA iOS run `30898215966` is green as well.
+
+Brutal status: **an invocation token is rejected as the next production optimization**. It could
+make synthetic self-loops faster, but the exact restored workload says it can remove only a small
+minority of already narrowed graph-head checks while adding epoch state, wrap handling and another
+native conditional. This observer proves no FPS gain. The larger structural cost remains handler
+dispatch inside every covered signed instruction, not graph-node revisits.
+
+### 2026-08-04: pre-resolved signed dispatch is exact, performance-neutral and reverted
+
+Commits `68611e7ce4c28814e89d09252cbd9b750be097e6` and
+`f4f2f06df659e78947e96b763904fdbf0263bae3` tested a narrower handler-dispatch shape. The
+decoder replaced each handler ID with that handler's signed-text-relative offset while retaining
+the existing sixteen-byte record. Native dispatch therefore removed one dependent table load per
+reached record: `ldrsw/add/br` instead of `ldr/ldrsw/add/br`. It generated no runtime code, stored
+no process pointer and added no per-record or per-block sidecar.
+
+The first exact Apple run exposed a real fail-closed regression before performance was accepted.
+Fast cache-owned validation trusted the decoded block's `dynamic_exit` flag, so the existing oracle
+could mutate that flag and incorrectly pass validation. The fix retained the terminal handler ID in
+the block and derived the dynamic-branch contract independently on the hot validation path. This
+failure is part of the result, not erased by the later green run. Corrected exact-SHA core run
+`30899399339` passed all eight jobs, including the mutation oracle, warnings-as-errors and
+ASan/UBSan; iOS run `30899399431` built and packaged the actual arm64 app.
+
+Correctness was green, but the three-repetition 20 M-instruction Apple curves did not establish a
+useful speedup. The table compares each of the sixteen normalized ratios with the preceding exact
+`fa2f68a` run, then takes the geometric mean of those per-length changes:
+
+| runner | signed-path change | lengths better/worse | graph-path change | lengths better/worse | graph range |
+|---|---:|---:|---:|---:|---:|
+| macOS 14 arm64 | **-1.32%** | 5 / 11 | +0.50% | 10 / 6 | -8.41% to +17.84% |
+| macOS 15 arm64 | **-0.65%** | 8 / 8 | +2.17% | 9 / 7 | -19.92% to +23.91% |
+
+The signed and graph engines execute the same changed handler dispatch, yet their directions differ
+and individual rows swing by double digits. That is mixed hosted-run noise, not a broad structural
+gain. A sub-three-percent geometric change cannot justify keeping extra offset finalization,
+reverse validation and terminal-contract state when the project still needs roughly a twofold core
+improvement.
+
+Commit `973159db66c0a4b5ff04dd6cf8c0f4004ba5cb07` reverts the experiment without rewriting
+history. After the revert the complete local suite passes 60/60 and the independent strict build is
+clean. Exact-SHA core run `30900231098` is green in all eight jobs and iOS run `30900231131` is
+green. The retained graph engine is therefore back to the previously proved handler-ID contract.
+
+Brutal status: **pre-resolved dispatch is rejected, and it produced no phone FPS result**. The only
+physical-phone observation remains the older 0--4 FPS report. The next architectural gate must
+measure how many handler dispatches the restored workload actually performs and how many a
+universal, build-time-signed fusion could remove before another product implementation is attempted.
