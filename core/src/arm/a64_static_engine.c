@@ -60,12 +60,12 @@ static unsigned cache_index(uint32_t pc, bool thumb, uint32_t generation) {
 static bool entry_matches(const static_a64_entry_t *entry,
                           const arm_cpu_t *cpu, const uint8_t *bytes,
                           uint32_t pc, bool thumb, bool priv,
-                          unsigned raw_len) {
+                          unsigned available_len) {
     return entry->valid && entry->fetch_host == cpu->fetch_host &&
            entry->pc == pc && entry->fetch_gen == cpu->fetch_gen &&
            entry->fetch_priv == priv && entry->thumb == thumb &&
-           entry->raw_len == raw_len &&
-           memcmp(entry->raw, bytes, raw_len) == 0;
+           entry->raw_len != 0u && entry->raw_len <= available_len &&
+           memcmp(entry->raw, bytes, entry->raw_len) == 0;
 }
 
 static bool decode_longest(const uint8_t *bytes, unsigned candidate_insns,
@@ -119,7 +119,9 @@ static void decode_entry(static_a64_state_t *state, static_a64_entry_t *entry,
                          const arm_cpu_t *cpu,
                          const uint8_t *bytes, uint32_t pc, bool thumb,
                          bool priv, unsigned candidate_insns,
-                         unsigned raw_len) {
+                         unsigned available_len) {
+    const unsigned width = thumb ? 2u : 4u;
+
     invalidate_entry(state, entry);
     memset(entry, 0, sizeof *entry);
     entry->fetch_host = cpu->fetch_host;
@@ -127,14 +129,30 @@ static void decode_entry(static_a64_state_t *state, static_a64_entry_t *entry,
     entry->fetch_gen = cpu->fetch_gen;
     entry->fetch_priv = priv;
     entry->thumb = thumb;
-    entry->raw_len = (uint8_t)raw_len;
-    memcpy(entry->raw, bytes, raw_len);
     entry->valid = true;
 
     /* Decode the longest exact prefix. Product loads carry a guarded DREAD hit;
      * stores and unsupported forms still shorten to an earlier exact prefix. */
-    if (decode_longest(bytes, candidate_insns, thumb, pc, &entry->block))
+    if (decode_longest(bytes, candidate_insns, thumb, pc, &entry->block)) {
         entry->supported = true;
+        entry->raw_len = (uint8_t)(entry->block.insn_count * width);
+    } else {
+        /* If instruction zero is unsupported, later bytes cannot make any
+         * prefix executable while its own encoding is unchanged. Remembering
+         * one instruction therefore detects every semantic change relevant to
+         * this negative entry without rescanning the rest of the candidate. */
+        entry->raw_len = (uint8_t)width;
+    }
+    /* A cached supported prefix depends only on the bytes it can execute.
+     * Bytes after that prefix may later become supportable; retaining the
+     * shorter block is still exact because arm_step() owns the next PC. The
+     * old full-candidate witness compared as many as 64 bytes at every hot
+     * graph head even when the block contained one instruction. */
+    if (entry->raw_len > available_len) {
+        invalidate_entry(state, entry);
+        return;
+    }
+    memcpy(entry->raw, bytes, entry->raw_len);
     publish_graph_node(state, entry);
 }
 
@@ -321,6 +339,24 @@ uint64_t s5l8900_static_a64_graph_chained_blocks(const s5l8900_t *m) {
     (void)m;
     return 0u;
 #endif
+}
+
+unsigned s5l8900_static_a64_cached_witness_bytes(const s5l8900_t *m,
+                                                 uint32_t pc, bool thumb) {
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    const static_a64_state_t *state = static_state(m);
+    if (!state) return 0u;
+    for (unsigned i = 0u; i < STATIC_A64_CACHE_ENTRIES; i++) {
+        const static_a64_entry_t *entry = &state->cache[i];
+        if (entry->valid && entry->pc == pc && entry->thumb == thumb)
+            return entry->raw_len;
+    }
+#else
+    (void)m;
+    (void)pc;
+    (void)thumb;
+#endif
+    return 0u;
 }
 
 #if defined(S5LBOX_STATIC_A64_ENGINE)

@@ -1358,7 +1358,8 @@ def render() -> str:
         "    lsl x4, x4, #7",
         "    add x10, x10, x4",
         # Validate the data-only node. Owner replacement clears valid before
-        # reusing inline uops, and raw comparison catches unnotified SMC.
+        # reusing inline uops, and the complete executing-block byte witness
+        # catches SMC without repeatedly comparing unrelated candidate tail.
         "    ldrb w4, [x10, #106]",
         "    cbz w4, .La64s_chain_stop",
         "    ldrb w4, [x10, #107]",

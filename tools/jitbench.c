@@ -2429,7 +2429,7 @@ static bool bench_soc_entry(unsigned length, uint64_t requested,
     qsort(signed_rates, reps, sizeof *signed_rates, cmp_double);
     qsort(graph_rates, reps, sizeof *graph_rates, cmp_double);
     printf("SOC-ENTRY-CURVE length=%u uops=%u guest-insns=%" PRIu64
-           " reps=%u run-api=yes cache-lookup=yes raw-witness=yes "
+           " reps=%u run-api=yes cache-lookup=yes block-witness=yes "
            "entry-gates=yes timer-boundaries=yes device-tick=yes "
            "head-cache=warm mmu=off exact-snapshot=yes signed-retired=%" PRIu64
            " signed-chains=%" PRIu64 " graph-chains=%" PRIu64

@@ -3449,7 +3449,9 @@ static void test_signed_static_a64_chain_bound_oracle(void) {
 /* The callback-free graph must preserve the same strongest caller bound while
  * proving it actually consumed data-only cache descriptors. The self-branch
  * reuses one hot node fifteen times; every lookup repeats PC/generation/privilege
- * and raw-byte checks in signed assembly without returning through C. */
+ * and its complete four-byte executing-block witness in signed assembly without
+ * returning through C. Bytes after this terminal branch cannot affect it and
+ * must not inflate that witness back to the full 64-byte decode candidate. */
 static void test_signed_static_a64_graph_bound_oracle(void) {
     const uint32_t self_branch = UINT32_C(0xeafffffe); /* B . */
     const uint32_t colliding_pc = UINT32_C(0x400);
@@ -3508,12 +3510,17 @@ static void test_signed_static_a64_graph_bound_oracle(void) {
         s5l8900_static_a64_chained_blocks(&fast) - chains_before;
     uint64_t one_graph =
         s5l8900_static_a64_graph_chained_blocks(&fast) - graph_before;
+    unsigned one_witness =
+        s5l8900_static_a64_cached_witness_bytes(&fast, 0u, false);
     CHECK(one_retired == 1u && one_chains == 0u && one_graph == 0u,
           "one-step graph retired/chained/graph %llu/%llu/%llu, "
           "expected 1/0/0",
           (unsigned long long)one_retired,
           (unsigned long long)one_chains,
           (unsigned long long)one_graph);
+    CHECK(one_witness == sizeof self_branch,
+          "one-instruction graph witness is %u bytes, expected %zu",
+          one_witness, sizeof self_branch);
 
     retired_before = s5l8900_static_a64_retired(&fast);
     chains_before = s5l8900_static_a64_chained_blocks(&fast);
@@ -3593,11 +3600,11 @@ static void test_signed_static_a64_graph_bound_oracle(void) {
     if (exact && one_retired == 1u && one_chains == 0u &&
         one_graph == 0u && sixteen_retired == 16u &&
         sixteen_chains == 15u && sixteen_graph == 15u &&
-        collision_graph == 15u) {
+        collision_graph == 15u && one_witness == sizeof self_branch) {
         printf("  STATIC-A64-GRAPH-BOUND-ORACLE exact=yes "
                "one-retired=1 one-chains=0 one-graph=0 "
                "sixteen-retired=16 sixteen-chains=15 sixteen-graph=15 "
-               "raw-witness=yes collision-republish=yes\n");
+               "block-witness=4 collision-republish=yes\n");
     }
 
     free(fast_snapshot);

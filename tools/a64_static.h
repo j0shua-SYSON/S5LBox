@@ -167,7 +167,10 @@ bool a64_static_run_read_hits_chain(arm_cpu_t *cpu,
 /* Callback-free variant. `nodes` is the engine's fixed 512-slot table for the
  * current direct-offset head index. Generated assembly accepts a next head
  * only when its PC/fetch pointer/generation/privilege/state fields and complete
- * raw-byte witness match, and otherwise returns the exact completed prefix.
+ * executing-block raw-byte witness match, and otherwise returns the exact
+ * completed prefix. Bytes after the cached executable prefix are deliberately
+ * outside that witness: changing them cannot alter the prefix's semantics and
+ * arm_step() still owns the following instruction.
  * Stable interrupt/MMU facts are proved by the caller before entry; the signed
  * subset cannot mutate them and no device ticks occur inside the bounded run. */
 bool a64_static_run_read_hits_graph(

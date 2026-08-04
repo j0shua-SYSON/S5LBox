@@ -3916,6 +3916,11 @@ uint64_t s5l8900_static_a64_retired(const s5l8900_t *m);
 uint64_t s5l8900_static_a64_chained_blocks(const s5l8900_t *m);
 uint64_t s5l8900_static_a64_persistent_chained_blocks(const s5l8900_t *m);
 uint64_t s5l8900_static_a64_graph_chained_blocks(const s5l8900_t *m);
+/* Host diagnostic: byte span protecting the currently cached signed head at
+ * `pc`, or zero when no such entry exists. It is derived cache state and is
+ * never part of a guest snapshot. */
+unsigned s5l8900_static_a64_cached_witness_bytes(const s5l8900_t *m,
+                                                 uint32_t pc, bool thumb);
 
 /* Run up to max_steps instructions, stopping early on a non-OK status.
  * Returns the number of instructions retired. */
