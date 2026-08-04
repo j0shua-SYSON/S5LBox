@@ -19,7 +19,7 @@ CONDITIONS = (
     "eq", "ne", "cs", "cc", "mi", "pl", "vs", "vc",
     "hi", "ls", "ge", "lt", "gt", "le",
 )
-EXPECTED_HANDLERS = 24612
+EXPECTED_HANDLERS = 24614
 
 READ_KINDS = (
     ("word", "ldr", 4),
@@ -618,6 +618,73 @@ def vfp_unary_body(operation: str, width: int) -> list[str]:
     return body
 
 
+def vfp_direct_read_body(width: int) -> list[str]:
+    reg = "w5" if width == 4 else "x5"
+    body = [
+        *vfp_gate("enabled"),
+        # The interpreter applies coprocessor word alignment independently to
+        # each word. Refuse every misaligned case so it retains sole ownership
+        # of SCTLR.A/U faults and legacy align-down behavior.
+        "    tst w17, #3",
+        "    b.eq 1f",
+        "    b .La64s_direct_miss",
+        "1:",
+    ]
+    if width == 8:
+        body.extend([
+            # Both words must reside in the same already-proved 1 KiB host
+            # block. Otherwise the second word needs its own translation,
+            # fault and cache accounting and stays literal.
+            "    and w4, w17, #0x3ff",
+            "    cmp w4, #1016",
+            "    b.ls 1f",
+            "    b .La64s_direct_miss",
+            "1:",
+        ])
+    body.extend([
+        "    ldr w4, [x3, #20]",
+        "    lsr w5, w17, #10",
+        "    add w5, w5, w4, lsl #5",
+        "    and w5, w5, #63",
+        "    ldr x6, [x3, #0]",
+        "    add x6, x6, w5, uxtw #4",
+        "    ldr x16, [x6, #0]",
+        "    cbnz x16, 1f",
+        "    b .La64s_direct_miss",
+        "1:",
+        "    lsr w4, w17, #10",
+        "    lsl w4, w4, #10",
+        "    ldr w5, [x3, #20]",
+        "    orr w4, w4, w5",
+        "    ldr w5, [x6, #8]",
+        "    cmp w5, w4",
+        "    b.eq 1f",
+        "    b .La64s_direct_miss",
+        "1:",
+        "    ldr w4, [x6, #12]",
+        "    ldr w5, [x3, #16]",
+        "    cmp w4, w5",
+        "    b.eq 1f",
+        "    b .La64s_direct_miss",
+        "1:",
+        "    and w4, w17, #0x3ff",
+        "    add x16, x16, w4, uxtw",
+        "    ldur w9, [x13, #-12]",
+        "    ldr x4, [x3, #24]",
+        "    add x4, x4, w9, uxtw #2",
+        f"    ldr {reg}, [x16]",
+        f"    str {reg}, [x4]",
+        # A double VLDR is architecturally two read32 calls. Both are hits
+        # under the same-block guard, so preserve the interpreter's counters.
+        "    ldr x4, [x3, #8]",
+        "    ldr x5, [x4]",
+        f"    add x5, x5, #{width // 4}",
+        "    str x5, [x4]",
+        *vfp_finish(),
+    ])
+    return body
+
+
 def build_handlers() -> list[tuple[str, list[str]]]:
     handlers: list[tuple[str, list[str]]] = []
 
@@ -867,6 +934,10 @@ def build_handlers() -> list[tuple[str, list[str]]]:
     for operation in ("mov", "abs", "neg"):
         handlers.append((f".La64s_vfp_{operation}_64",
                          vfp_unary_body(operation, 8)))
+    handlers.append((".La64s_vfp_direct_read_32",
+                     vfp_direct_read_body(4)))
+    handlers.append((".La64s_vfp_direct_read_64",
+                     vfp_direct_read_body(8)))
 
     if len(handlers) != EXPECTED_HANDLERS:
         raise RuntimeError(

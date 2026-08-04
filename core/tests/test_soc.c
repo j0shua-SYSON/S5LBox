@@ -3314,6 +3314,120 @@ static void test_signed_static_a64_vfp_register_oracle(void) {
     s5l8900_free(&reference);
 }
 
+/* Start with an empty DREAD cache. The first VLDR must return to arm_step(),
+ * which performs the translation/fill; later S/D loads may hit signed text.
+ * Full snapshot equality includes VFP state, timer state and DREAD counters. */
+static void test_signed_static_a64_vfp_read_oracle(void) {
+    static const uint32_t signed_loop[16] = {
+        UINT32_C(0xed970a00), /* VLDR s0,[r7,#0] */
+        UINT32_C(0xedd70a01), /* VLDR s1,[r7,#4] */
+        UINT32_C(0xed971b02), /* VLDR d1,[r7,#8] */
+        UINT32_C(0xed972b04), /* VLDR d2,[r7,#16] */
+        UINT32_C(0xed973a06), /* VLDR s6,[r7,#24] */
+        UINT32_C(0xedd73a07), /* VLDR s7,[r7,#28] */
+        UINT32_C(0xed974b08), /* VLDR d4,[r7,#32] */
+        UINT32_C(0xed975b0a), /* VLDR d5,[r7,#40] */
+        UINT32_C(0xed976a0c), /* VLDR s12,[r7,#48] */
+        UINT32_C(0xedd76a0d), /* VLDR s13,[r7,#52] */
+        UINT32_C(0xed977b0e), /* VLDR d7,[r7,#56] */
+        UINT32_C(0xee100a10), /* VMOV r0,s0 */
+        UINT32_C(0xeeb07ae6), /* VABS.F32 s14,s13 */
+        UINT32_C(0xeef17a46), /* VNEG.F32 s15,s12 */
+        UINT32_C(0xeef11a10), /* VMRS r1,FPSCR */
+        UINT32_C(0xeaffffef), /* B 0 */
+    };
+    static const uint32_t data_words[16] = {
+        UINT32_C(0x11223344), UINT32_C(0x55667788),
+        UINT32_C(0x99aabbcc), UINT32_C(0xddeeff00),
+        UINT32_C(0x13579bdf), UINT32_C(0x2468ace0),
+        UINT32_C(0xff800001), UINT32_C(0x80000000),
+        UINT32_C(0x0badc0de), UINT32_C(0xfeedface),
+        UINT32_C(0xcafef00d), UINT32_C(0xa5a55a5a),
+        UINT32_C(0x01020304), UINT32_C(0x10203040),
+        UINT32_C(0x89abcdef), UINT32_C(0x76543210),
+    };
+    s5l8900_t fast = {0};
+    s5l8900_t reference = {0};
+    uint8_t *fast_snapshot = NULL;
+    uint8_t *reference_snapshot = NULL;
+    size_t fast_len = 0u;
+    size_t reference_len = 0u;
+    arm_status_t fast_status = ARM_OK;
+    arm_status_t reference_status = ARM_OK;
+    bool fast_ok;
+    bool reference_ok;
+
+    if (!s5l8900_static_a64_available()) {
+        printf("  STATIC-A64-VFP-READ-ORACLE SKIP: no signed AArch64 "
+               "handlers\n");
+        return;
+    }
+
+    fast_ok = s5l8900_init(&fast, 0u, 1u << 20);
+    reference_ok = s5l8900_init(&reference, 0u, 1u << 20);
+    CHECK(fast_ok && reference_ok, "VFP read oracle machine init failed");
+    if (!fast_ok || !reference_ok) {
+        if (fast_ok) s5l8900_free(&fast);
+        if (reference_ok) s5l8900_free(&reference);
+        return;
+    }
+
+    s5l8900_load(&fast, 0u, signed_loop, sizeof signed_loop);
+    s5l8900_load(&reference, 0u, signed_loop, sizeof signed_loop);
+    s5l8900_load(&fast, 0x1000u, data_words, sizeof data_words);
+    s5l8900_load(&reference, 0x1000u, data_words, sizeof data_words);
+    s5l8900_tick(&fast, 0u);
+    s5l8900_tick(&reference, 0u);
+    fast.cpu.r[7] = reference.cpu.r[7] = 0x1000u;
+    fast.cpu.r[15] = reference.cpu.r[15] = 0u;
+    fast.cpu.cpsr = reference.cpu.cpsr = ARM_MODE_SYS | ARM_CPSR_C;
+    fast.cpu.cp15.cpacr = reference.cpu.cp15.cpacr =
+        0xfu << ARM_CPACR_CP10_SHIFT;
+    fast.cpu.vfp_fpexc = reference.cpu.vfp_fpexc = ARM_FPEXC_EN;
+    fast.cpu.vfp_fpscr = reference.cpu.vfp_fpscr = 0u;
+
+    CHECK(s5l8900_static_a64_set_enabled(&fast, true),
+          "VFP read oracle signed engine refused an available host");
+    CHECK(s5l8900_run(&fast, 24000u, &fast_status) == 24000u,
+          "signed VFP read run stopped early with status=%d",
+          (int)fast_status);
+    CHECK(s5l8900_run(&reference, 24000u, &reference_status) == 24000u,
+          "reference VFP read run stopped early with status=%d",
+          (int)reference_status);
+    CHECK(fast_status == reference_status,
+          "VFP read status differs: signed=%d reference=%d",
+          (int)fast_status, (int)reference_status);
+    CHECK(s5l8900_static_a64_retired(&fast) != 0u,
+          "available signed engine retired no VFP reads");
+
+    snapshot_status_t fast_snapshot_status =
+        snapshot_save_mem(&fast, &fast_snapshot, &fast_len);
+    snapshot_status_t reference_snapshot_status =
+        snapshot_save_mem(&reference, &reference_snapshot, &reference_len);
+    CHECK(fast_snapshot_status == SNAP_OK,
+          "could not serialize signed VFP read machine: %s",
+          snapshot_strerror(fast_snapshot_status));
+    CHECK(reference_snapshot_status == SNAP_OK,
+          "could not serialize reference VFP read machine: %s",
+          snapshot_strerror(reference_snapshot_status));
+    CHECK(fast_snapshot && reference_snapshot && fast_len == reference_len &&
+              memcmp(fast_snapshot, reference_snapshot, fast_len) == 0,
+          "signed and reference VFP read machine snapshots differ");
+
+    if (fast_snapshot && reference_snapshot && fast_len == reference_len &&
+        memcmp(fast_snapshot, reference_snapshot, fast_len) == 0 &&
+        s5l8900_static_a64_retired(&fast) != 0u) {
+        printf("  STATIC-A64-VFP-READ-ORACLE exact=yes retired=%llu "
+               "cold-fill=yes double=yes\n",
+               (unsigned long long)s5l8900_static_a64_retired(&fast));
+    }
+
+    free(fast_snapshot);
+    free(reference_snapshot);
+    s5l8900_free(&fast);
+    s5l8900_free(&reference);
+}
+
 /* Product-facing Thumb coverage must cross the real SoC runner too, not only
  * the flat semantic oracle. This loop spans every newly admitted broad shape,
  * crosses hundreds of real timer edges and compares complete serialized
@@ -3537,6 +3651,7 @@ int main(void) {
     test_bare_metal_uart_hello();
     test_signed_static_a64_soc_oracle();
     test_signed_static_a64_vfp_register_oracle();
+    test_signed_static_a64_vfp_read_oracle();
     test_signed_static_a64_thumb_oracle();
     test_signed_static_a64_thumb_read_oracle();
     test_stub_window_stores_and_counts();

@@ -51,7 +51,9 @@ enum {
     A64S_VFP_VMSR_FPEXC = A64S_VFP_VMSR_FPSCR + 15u,
     A64S_VFP_UNARY32 = A64S_VFP_VMSR_FPEXC + 15u,
     A64S_VFP_UNARY64 = A64S_VFP_UNARY32 + 3u,
-    A64S_HANDLER_COUNT = A64S_VFP_UNARY64 + 3u
+    A64S_VFP_DIRECT_READ32 = A64S_VFP_UNARY64 + 3u,
+    A64S_VFP_DIRECT_READ64 = A64S_VFP_DIRECT_READ32 + 1u,
+    A64S_HANDLER_COUNT = A64S_VFP_DIRECT_READ64 + 1u
 };
 
 enum {
@@ -217,7 +219,10 @@ static bool handler_is_addr_reg(uint32_t handler) {
 }
 
 static bool handler_is_direct_read(uint32_t handler) {
-    return handler >= A64S_DIRECT_READ && handler < A64S_VFP_CORE_TO_S;
+    return (handler >= A64S_DIRECT_READ &&
+            handler < A64S_VFP_CORE_TO_S) ||
+           (handler >= A64S_VFP_DIRECT_READ32 &&
+            handler <= A64S_VFP_DIRECT_READ64);
 }
 
 static bool handler_is_vfp(uint32_t handler) {
@@ -249,8 +254,8 @@ enum {
  * transfers. Floating arithmetic and memory stay outside this tranche. Every
  * admitted handler rechecks the live VFP access state before touching guest
  * state, because a decoded block can outlive a thread's lazy-VFP context. */
-static bool decode_vfp_transfer(uint32_t insn, a64_static_uop_t *op,
-                                unsigned *written) {
+static bool decode_vfp_transfer(uint32_t insn, uint32_t pc_value,
+                                a64_static_uop_t *op, unsigned *written) {
     if (!op || !written) return false;
 
     /* MCR/MRC: core <-> single/double word and VMRS/VMSR. */
@@ -333,6 +338,27 @@ static bool decode_vfp_transfer(uint32_t insn, a64_static_uop_t *op,
         return true;
     }
 
+    /* LDC: one S/D register with a pre-indexed immediate and no writeback. */
+    if ((insn & UINT32_C(0x0e000e00)) == UINT32_C(0x0c000a00)) {
+        bool pre = (insn & (1u << 24)) != 0u;
+        bool up = (insn & (1u << 23)) != 0u;
+        bool d = (insn & (1u << 22)) != 0u;
+        bool writeback = (insn & (1u << 21)) != 0u;
+        bool load = (insn & (1u << 20)) != 0u;
+        bool dbl = (insn & (1u << 8)) != 0u;
+        unsigned rn = (insn >> 16) & 15u;
+        unsigned vd = (insn >> 12) & 15u;
+        if (!pre || writeback || !load || (dbl && d)) return false;
+        op[0].handler = addr_imm(up, rn);
+        op[0].immediate = (insn & 255u) * 4u;
+        op[0].pc_value = pc_value;
+        op[1].handler = dbl ? A64S_VFP_DIRECT_READ64
+                            : A64S_VFP_DIRECT_READ32;
+        op[1].immediate = dbl ? vd * 2u : vd * 2u + (d ? 1u : 0u);
+        *written = 2u;
+        return true;
+    }
+
     /* CDP "other" group: raw same-width VMOV/VABS/VNEG only. */
     if ((insn & UINT32_C(0x0f000e10)) == UINT32_C(0x0e000a00)) {
         unsigned family = (((insn >> 23) & 1u) << 2) |
@@ -404,7 +430,8 @@ static bool decode_arm(uint32_t insn, unsigned index, unsigned insns,
         count++;
     }
 
-    if (read_hits && decode_vfp_transfer(insn, op, written)) {
+    if (read_hits && decode_vfp_transfer(
+            insn, pc + index * 4u + 8u, op, written)) {
         if (guard) guard->metadata = *written;
         *written += count;
         return true;

@@ -25184,6 +25184,36 @@ static sequence_load_address_t sequence_thumb_load_address(
     return SEQUENCE_LOAD_ADDRESS;
 }
 
+/* Read-only counterpart of the signed VLDR decoder and handler guard. A
+ * double load still needs only word alignment, but both words must fit in the
+ * same DREAD block for the one-record signed access to be exact. */
+static sequence_load_address_t sequence_vfp_load_address(
+        const arm_cpu_t *cpu, uint32_t pc, uint32_t insn,
+        uint32_t *cache_va, unsigned *width, bool *priv) {
+    bool pre = (insn & (1u << 24)) != 0u;
+    bool up = (insn & (1u << 23)) != 0u;
+    bool writeback = (insn & (1u << 21)) != 0u;
+    bool load = (insn & (1u << 20)) != 0u;
+    bool dbl = (insn & (1u << 8)) != 0u;
+    unsigned rn = (insn >> 16) & 15u;
+    uint32_t base;
+    uint32_t offset;
+    uint32_t address;
+
+    if (!cpu || !cache_va || !width || !priv ||
+        (insn & UINT32_C(0x0e000e00)) != UINT32_C(0x0c000a00) ||
+        !pre || writeback || !load)
+        return SEQUENCE_LOAD_INVALID;
+    base = rn == 15u ? pc + 8u : cpu->r[rn];
+    offset = (insn & 255u) * 4u;
+    address = up ? base + offset : base - offset;
+    if ((address & 3u) != 0u) return SEQUENCE_LOAD_ALIGNMENT;
+    *cache_va = address;
+    *width = dbl ? 8u : 4u;
+    *priv = (cpu->cpsr & ARM_CPSR_MODE_MASK) != ARM_MODE_USR;
+    return SEQUENCE_LOAD_ADDRESS;
+}
+
 static unsigned sequence_single_load_form(uint32_t insn) {
     return ((insn >> 25) & 1u) |
            (((insn >> 24) & 1u) << 1) |
@@ -25291,6 +25321,23 @@ static sequence_signed_classification_t sequence_signed_classify(
         sequence_load_address_t address_status =
             sequence_thumb_load_address(cpu, pc, (uint16_t)raw,
                                         &cache_va, &width, &priv);
+        if (address_status != SEQUENCE_LOAD_ADDRESS) {
+            result.outcome = SEQUENCE_SIGNED_READ_GUARD;
+            return result;
+        }
+        result.outcome = sequence_dread_would_hit(
+            cpu, cache_va, width, priv)
+            ? SEQUENCE_SIGNED_READ_HIT : SEQUENCE_SIGNED_READ_MISS;
+        return result;
+    }
+
+    if (block.vfp) {
+        uint32_t cache_va = 0u;
+        unsigned width = 0u;
+        bool priv = false;
+        sequence_load_address_t address_status =
+            sequence_vfp_load_address(cpu, pc, raw, &cache_va, &width,
+                                      &priv);
         if (address_status != SEQUENCE_LOAD_ADDRESS) {
             result.outcome = SEQUENCE_SIGNED_READ_GUARD;
             return result;
