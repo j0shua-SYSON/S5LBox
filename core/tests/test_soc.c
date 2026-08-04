@@ -3309,6 +3309,114 @@ static void test_signed_static_a64_branch_oracle(void) {
     s5l8900_free(&reference);
 }
 
+/* Prove the chain cannot outrun the public caller budget. A one-instruction
+ * self-branch is the strongest shape: after one interpreter warm-up fills the
+ * fetch witness, every later instruction is a separate signed block. The
+ * one-step call must therefore chain zero blocks, while the sixteen-step call
+ * must chain exactly fifteen and still serialize identically to the literal
+ * machine. This is independent of the timer phase in the longer benchmarks. */
+static void test_signed_static_a64_chain_bound_oracle(void) {
+    const uint32_t self_branch = UINT32_C(0xeafffffe); /* B . */
+    s5l8900_t fast = {0};
+    s5l8900_t reference = {0};
+    uint8_t *fast_snapshot = NULL;
+    uint8_t *reference_snapshot = NULL;
+    size_t fast_len = 0u;
+    size_t reference_len = 0u;
+    arm_status_t fast_status = ARM_OK;
+    arm_status_t reference_status = ARM_OK;
+    bool fast_ok;
+    bool reference_ok;
+
+    if (!s5l8900_static_a64_available()) {
+        printf("  STATIC-A64-CHAIN-BOUND-ORACLE SKIP: no signed AArch64 "
+               "handlers\n");
+        return;
+    }
+
+    fast_ok = s5l8900_init(&fast, 0u, 1u << 20);
+    reference_ok = s5l8900_init(&reference, 0u, 1u << 20);
+    CHECK(fast_ok && reference_ok, "chain-bound machine init failed");
+    if (!fast_ok || !reference_ok) {
+        if (fast_ok) s5l8900_free(&fast);
+        if (reference_ok) s5l8900_free(&reference);
+        return;
+    }
+
+    s5l8900_load(&fast, 0u, &self_branch, sizeof self_branch);
+    s5l8900_load(&reference, 0u, &self_branch, sizeof self_branch);
+    s5l8900_tick(&fast, 0u);
+    s5l8900_tick(&reference, 0u);
+
+    /* Warm the translated fetch witness while the signed engine is off. */
+    CHECK(s5l8900_run(&fast, 1u, &fast_status) == 1u,
+          "chain-bound signed warm-up stopped early");
+    CHECK(s5l8900_run(&reference, 1u, &reference_status) == 1u,
+          "chain-bound reference warm-up stopped early");
+    CHECK(s5l8900_static_a64_set_enabled(&fast, true),
+          "chain-bound signed engine refused an available host");
+
+    uint64_t retired_before = s5l8900_static_a64_retired(&fast);
+    uint64_t chains_before = s5l8900_static_a64_chained_blocks(&fast);
+    CHECK(s5l8900_run(&fast, 1u, &fast_status) == 1u,
+          "one-step signed chain-bound run stopped early");
+    CHECK(s5l8900_run(&reference, 1u, &reference_status) == 1u,
+          "one-step reference chain-bound run stopped early");
+    uint64_t one_retired =
+        s5l8900_static_a64_retired(&fast) - retired_before;
+    uint64_t one_chains =
+        s5l8900_static_a64_chained_blocks(&fast) - chains_before;
+    CHECK(one_retired == 1u && one_chains == 0u,
+          "one-step bound retired/chained %llu/%llu, expected 1/0",
+          (unsigned long long)one_retired,
+          (unsigned long long)one_chains);
+
+    retired_before = s5l8900_static_a64_retired(&fast);
+    chains_before = s5l8900_static_a64_chained_blocks(&fast);
+    CHECK(s5l8900_run(&fast, 16u, &fast_status) == 16u,
+          "sixteen-step signed chain-bound run stopped early");
+    CHECK(s5l8900_run(&reference, 16u, &reference_status) == 16u,
+          "sixteen-step reference chain-bound run stopped early");
+    uint64_t sixteen_retired =
+        s5l8900_static_a64_retired(&fast) - retired_before;
+    uint64_t sixteen_chains =
+        s5l8900_static_a64_chained_blocks(&fast) - chains_before;
+    CHECK(sixteen_retired == 16u && sixteen_chains == 15u,
+          "sixteen-step bound retired/chained %llu/%llu, expected 16/15",
+          (unsigned long long)sixteen_retired,
+          (unsigned long long)sixteen_chains);
+    CHECK(fast_status == reference_status,
+          "chain-bound status differs: signed=%d reference=%d",
+          (int)fast_status, (int)reference_status);
+
+    snapshot_status_t fast_snapshot_status =
+        snapshot_save_mem(&fast, &fast_snapshot, &fast_len);
+    snapshot_status_t reference_snapshot_status =
+        snapshot_save_mem(&reference, &reference_snapshot, &reference_len);
+    CHECK(fast_snapshot_status == SNAP_OK,
+          "could not serialize signed chain-bound machine: %s",
+          snapshot_strerror(fast_snapshot_status));
+    CHECK(reference_snapshot_status == SNAP_OK,
+          "could not serialize reference chain-bound machine: %s",
+          snapshot_strerror(reference_snapshot_status));
+    bool exact = fast_snapshot && reference_snapshot &&
+                 fast_len == reference_len &&
+                 memcmp(fast_snapshot, reference_snapshot, fast_len) == 0;
+    CHECK(exact, "signed and reference chain-bound snapshots differ");
+
+    if (exact && one_retired == 1u && one_chains == 0u &&
+        sixteen_retired == 16u && sixteen_chains == 15u) {
+        printf("  STATIC-A64-CHAIN-BOUND-ORACLE exact=yes "
+               "one-retired=1 one-chains=0 sixteen-retired=16 "
+               "sixteen-chains=15\n");
+    }
+
+    free(fast_snapshot);
+    free(reference_snapshot);
+    s5l8900_free(&fast);
+    s5l8900_free(&reference);
+}
+
 /* Product-facing VFP state coverage crosses the real SoC runner and timer
  * boundaries. The loop contains no host floating arithmetic: it proves raw
  * S/D aliasing, core transfers, system access and integer-bit FPCompare. */
@@ -3758,6 +3866,7 @@ int main(void) {
     test_bare_metal_uart_hello();
     test_signed_static_a64_soc_oracle();
     test_signed_static_a64_branch_oracle();
+    test_signed_static_a64_chain_bound_oracle();
     test_signed_static_a64_vfp_register_oracle();
     test_signed_static_a64_vfp_read_oracle();
     test_signed_static_a64_thumb_oracle();
