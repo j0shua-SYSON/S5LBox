@@ -24676,11 +24676,14 @@ static const char *status_name(arm_status_t s) {
 #define SEQUENCE_TRACE_HEAD_LEN  16u
 #define SEQUENCE_TRACE_HEAD_LEVEL 2u
 #define SEQUENCE_SIGNED_CAP      16u
+#define SEQUENCE_SIGNED_EXTENDED_CAP 256u
 #define SEQUENCE_SIGNED_RECORD_CAP 4u
 
 #if defined(S5LBOX_STATIC_A64_ENGINE)
 _Static_assert(SEQUENCE_SIGNED_CAP == A64_STATIC_MAX_INSNS,
                "sequence model and product signed-block cap disagree");
+_Static_assert(SEQUENCE_SIGNED_EXTENDED_CAP == A64_STATIC_MAX_CHAIN_INSNS,
+               "sequence model and product signed-chain cap disagree");
 _Static_assert(SEQUENCE_SIGNED_RECORD_CAP <= A64_STATIC_MAX_UOPS,
                "sequence handler-record histogram exceeds product storage");
 #endif
@@ -24743,6 +24746,31 @@ typedef enum {
     SEQUENCE_SIGNED_STOP_OBSERVER,
     SEQUENCE_SIGNED_STOP_COUNT
 } sequence_signed_stop_t;
+
+/* Side-by-side observer for the product's extended total invocation. The
+ * existing signed_* fields below retain the historical sixteen-instruction
+ * model verbatim, so one literal replay can compare the boundary without
+ * crossing runs or changing architectural state. Individual decoded heads
+ * remain capped at SEQUENCE_SIGNED_CAP inside this model. */
+typedef struct {
+    uint64_t length_calls[SEQUENCE_SIGNED_EXTENDED_CAP + 1u];
+    uint64_t length_instructions[SEQUENCE_SIGNED_EXTENDED_CAP + 1u];
+    uint64_t gate_refusals[SEQUENCE_SIGNED_GATE_COUNT];
+    uint64_t stops[SEQUENCE_SIGNED_STOP_COUNT];
+    uint64_t calls;
+    uint64_t instructions;
+    uint64_t blocks;
+    uint64_t chain_transitions;
+    uint64_t call_length;
+    uint64_t call_remaining;
+    uint64_t call_blocks;
+    uint64_t maximum;
+    unsigned head_length;
+    sequence_signed_stop_t budget_stop;
+    uint32_t chain_pc;
+    bool chain_pending;
+    bool chain_thumb;
+} sequence_signed_extended_t;
 
 static const char *const SEQUENCE_CLASS_NAMES[SEQUENCE_CLASS_COUNT] = {
     "ARM data-processing", "ARM data-processing -> pc", "ARM B/BL",
@@ -24963,6 +24991,7 @@ typedef struct {
     bool signed_chain_pending;
     bool signed_chain_thumb;
     bool signed_tick_eager;
+    sequence_signed_extended_t signed_extended;
 
     bool have_previous;
     bool previous_thumb;
@@ -25583,6 +25612,36 @@ static void sequence_signed_close(sequence_profile_t *profile,
     profile->signed_call_unique_blocks = 0u;
 }
 
+static void sequence_signed_extended_close(sequence_profile_t *profile,
+                                            sequence_signed_stop_t why) {
+    if (!profile) return;
+    sequence_signed_extended_t *model = &profile->signed_extended;
+    model->chain_pending = false;
+    if (!model->call_length) {
+        model->call_blocks = 0u;
+        model->head_length = 0u;
+        return;
+    }
+    if (model->call_length <= SEQUENCE_SIGNED_EXTENDED_CAP) {
+        unsigned length = (unsigned)model->call_length;
+        model->length_calls[length]++;
+        model->length_instructions[length] += model->call_length;
+    }
+    model->calls++;
+    model->instructions += model->call_length;
+    model->blocks += model->call_blocks;
+    if (model->call_blocks)
+        model->chain_transitions += model->call_blocks - 1u;
+    if (model->call_length > model->maximum)
+        model->maximum = model->call_length;
+    if ((unsigned)why < SEQUENCE_SIGNED_STOP_COUNT)
+        model->stops[why]++;
+    model->call_length = 0u;
+    model->call_remaining = 0u;
+    model->call_blocks = 0u;
+    model->head_length = 0u;
+}
+
 /* Reproduce every read-only entry gate available to bootkernel. The native
  * handler availability and runtime opt-in are deliberately assumed: this
  * models the iPhone target, while the current Windows host can only decode.
@@ -25590,9 +25649,9 @@ static void sequence_signed_close(sequence_profile_t *profile,
  * boundary used by VMEngine.m and the --run-api harness. */
 static sequence_signed_gate_t sequence_signed_entry_budget(
         const sequence_profile_t *profile, const s5l8900_t *mach,
-        uint32_t pc, bool thumb, uint64_t *budget,
+        uint32_t pc, bool thumb, uint64_t maximum, uint64_t *budget,
         sequence_signed_stop_t *budget_stop) {
-    if (!profile || !mach || !budget || !budget_stop)
+    if (!profile || !mach || !maximum || !budget || !budget_stop)
         return SEQUENCE_SIGNED_GATE_MACHINE;
     const arm_cpu_t *cpu = &mach->cpu;
     if (cpu->arch != ARM_ARCH_V6_ARM1176 ||
@@ -25629,7 +25688,7 @@ static sequence_signed_gate_t sequence_signed_entry_budget(
     uint64_t caller_offset = (profile->observations - 1u) %
                              FRAME_METER_CHUNK_INSTRUCTIONS;
     uint64_t until_caller = FRAME_METER_CHUNK_INSTRUCTIONS - caller_offset;
-    *budget = SEQUENCE_SIGNED_CAP;
+    *budget = maximum;
     *budget_stop = SEQUENCE_SIGNED_STOP_CAP;
     if (until_edge < *budget) {
         *budget = until_edge;
@@ -25643,6 +25702,88 @@ static sequence_signed_gate_t sequence_signed_entry_budget(
                    : SEQUENCE_SIGNED_GATE_TIMEBASE;
 }
 
+static void sequence_signed_extended_observe(
+        sequence_profile_t *profile, const s5l8900_t *mach,
+        uint32_t pc, bool thumb, bool physical_sequential,
+        const sequence_signed_classification_t *classification) {
+    if (!profile || !mach || !classification) return;
+    sequence_signed_extended_t *model = &profile->signed_extended;
+    bool chained_head = false;
+
+    if (model->call_length) {
+        if (model->chain_pending) {
+            chained_head = pc == model->chain_pc &&
+                           thumb == model->chain_thumb;
+            model->chain_pending = false;
+            if (!chained_head)
+                sequence_signed_extended_close(
+                    profile, SEQUENCE_SIGNED_STOP_FLOW);
+        } else if (!physical_sequential) {
+            sequence_signed_extended_close(profile,
+                                            SEQUENCE_SIGNED_STOP_FLOW);
+        } else if ((profile->previous_pc & ~UINT32_C(0x3ff)) !=
+                   (pc & ~UINT32_C(0x3ff))) {
+            sequence_signed_extended_close(
+                profile, SEQUENCE_SIGNED_STOP_FETCH_BLOCK);
+        }
+    }
+
+    bool retireable = classification->outcome == SEQUENCE_SIGNED_PLAIN ||
+                      classification->outcome ==
+                          SEQUENCE_SIGNED_READ_SKIPPED ||
+                      classification->outcome == SEQUENCE_SIGNED_READ_HIT;
+    if (!retireable || !classification->handler_records ||
+        classification->handler_records > SEQUENCE_SIGNED_RECORD_CAP) {
+        sequence_signed_extended_close(profile,
+                                        SEQUENCE_SIGNED_STOP_INELIGIBLE);
+        return;
+    }
+
+    if (!model->call_length) {
+        uint64_t budget = 0u;
+        sequence_signed_stop_t budget_stop = SEQUENCE_SIGNED_STOP_CAP;
+        sequence_signed_gate_t gate = sequence_signed_entry_budget(
+            profile, mach, pc, thumb, SEQUENCE_SIGNED_EXTENDED_CAP,
+            &budget, &budget_stop);
+        if (gate != SEQUENCE_SIGNED_GATE_OK) {
+            model->gate_refusals[gate]++;
+            return;
+        }
+        model->call_remaining = budget;
+        model->budget_stop = budget_stop;
+        model->call_blocks = 1u;
+        model->head_length = 0u;
+    } else if (chained_head) {
+        model->call_blocks++;
+        model->head_length = 0u;
+    }
+
+    model->call_length++;
+    model->head_length++;
+    if (model->call_remaining)
+        model->call_remaining--;
+
+    bool head_complete = classification->terminal ||
+                         model->head_length == SEQUENCE_SIGNED_CAP;
+    if (!model->call_remaining) {
+        sequence_signed_extended_close(profile, model->budget_stop);
+    } else if (head_complete) {
+        uint32_t exit_pc = classification->terminal
+                         ? classification->exit_pc
+                         : pc + (thumb ? 2u : 4u);
+        if ((pc & ~UINT32_C(0x3ff)) !=
+            (exit_pc & ~UINT32_C(0x3ff))) {
+            sequence_signed_extended_close(
+                profile, SEQUENCE_SIGNED_STOP_FETCH_BLOCK);
+        } else {
+            model->chain_pc = exit_pc;
+            model->chain_thumb = thumb;
+            model->chain_pending = true;
+            model->head_length = 0u;
+        }
+    }
+}
+
 static bool sequence_signed_observe(sequence_profile_t *profile,
                                     const s5l8900_t *mach,
                                     uint32_t pc, uint32_t raw,
@@ -25654,6 +25795,8 @@ static bool sequence_signed_observe(sequence_profile_t *profile,
     profile->signed_outcomes[classification.outcome]++;
     profile->signed_class_outcomes[instruction_class]
                                   [classification.outcome]++;
+    sequence_signed_extended_observe(
+        profile, mach, pc, thumb, physical_sequential, &classification);
 
     if (profile->signed_call_length) {
         if (profile->signed_chain_pending) {
@@ -25684,7 +25827,8 @@ static bool sequence_signed_observe(sequence_profile_t *profile,
         uint64_t budget = 0u;
         sequence_signed_stop_t budget_stop = SEQUENCE_SIGNED_STOP_CAP;
         sequence_signed_gate_t gate = sequence_signed_entry_budget(
-            profile, mach, pc, thumb, &budget, &budget_stop);
+            profile, mach, pc, thumb, SEQUENCE_SIGNED_CAP,
+            &budget, &budget_stop);
         if (gate != SEQUENCE_SIGNED_GATE_OK) {
             profile->signed_gate_refusals[gate]++;
             profile->signed_class_gate_refused[instruction_class]++;
@@ -25750,6 +25894,7 @@ static bool sequence_signed_observe(sequence_profile_t *profile,
 static void sequence_profile_break(sequence_profile_t *profile) {
 #if defined(S5LBOX_STATIC_A64_ENGINE)
     sequence_signed_close(profile, SEQUENCE_SIGNED_STOP_OBSERVER);
+    sequence_signed_extended_close(profile, SEQUENCE_SIGNED_STOP_OBSERVER);
 #endif
     sequence_trace_head_close(profile);
     sequence_close_run(profile->flow_runs, profile->flow_run_instructions,
@@ -27276,6 +27421,171 @@ static void sequence_profile_report(sequence_profile_t *profile) {
                                               profile->signed_chain_transitions &&
                            reusable_heads == profile->signed_reused_graph_heads
                        ? "EXACT" : "MISMATCH");
+        }
+        {
+            static const struct {
+                const char *name;
+                unsigned first;
+                unsigned last;
+            } groups[] = {
+                { "1", 1u, 1u },
+                { "2-4", 2u, 4u },
+                { "5-8", 5u, 8u },
+                { "9-16", 9u, 16u },
+                { "17-32", 17u, 32u },
+                { "33-64", 33u, 64u },
+                { "65-128", 65u, 128u },
+                { "129-256", 129u, 256u }
+            };
+            const sequence_signed_extended_t *extended =
+                &profile->signed_extended;
+            uint64_t histogram_calls = 0u;
+            uint64_t histogram_instructions = 0u;
+            uint64_t calls_over_sixteen = 0u;
+            uint64_t instructions_over_sixteen = 0u;
+            uint64_t extended_stops = 0u;
+            uint64_t extended_gate_refusals = 0u;
+            uint64_t current_heads =
+                signed_calls + profile->signed_chain_transitions;
+            bool lengths_exact = true;
+
+            for (unsigned length = 1u;
+                 length <= SEQUENCE_SIGNED_EXTENDED_CAP; length++) {
+                uint64_t calls = extended->length_calls[length];
+                uint64_t instructions =
+                    extended->length_instructions[length];
+                histogram_calls += calls;
+                histogram_instructions += instructions;
+                if (instructions != calls * (uint64_t)length)
+                    lengths_exact = false;
+                if (length > SEQUENCE_SIGNED_CAP) {
+                    calls_over_sixteen += calls;
+                    instructions_over_sixteen += instructions;
+                }
+            }
+            for (unsigned i = 0u; i < SEQUENCE_SIGNED_STOP_COUNT; i++)
+                extended_stops += extended->stops[i];
+            for (unsigned i = 1u; i < SEQUENCE_SIGNED_GATE_COUNT; i++)
+                extended_gate_refusals += extended->gate_refusals[i];
+
+            uint64_t removed_entries = signed_calls >= extended->calls
+                ? signed_calls - extended->calls : 0u;
+            uint64_t removed_heads = current_heads >= extended->blocks
+                ? current_heads - extended->blocks : 0u;
+            bool exact = lengths_exact &&
+                histogram_calls == extended->calls &&
+                histogram_instructions == extended->instructions &&
+                extended_stops == extended->calls &&
+                extended->instructions == signed_instructions &&
+                signed_eligible == extended->instructions +
+                                       extended_gate_refusals &&
+                extended->blocks == extended->calls +
+                                        extended->chain_transitions &&
+                extended->calls <= signed_calls &&
+                extended->blocks <= current_heads &&
+                removed_heads <= removed_entries &&
+                extended->maximum <= SEQUENCE_SIGNED_EXTENDED_CAP;
+
+            printf("    exact modeled timebase-bounded extended invocation\n");
+            printf("      The old and extended totals share one literal "
+                   "instruction stream. Each decoded head is still at most "
+                   "%u instructions; this models warm graph availability, "
+                   "not lookup cost or elapsed time. Removing a total-budget "
+                   "boundary may also remove the short head it forced.\n",
+                   SEQUENCE_SIGNED_CAP);
+            printf("      current calls/instructions/heads/chains="
+                   "%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64
+                   " mean=%.3f max=%" PRIu64 "\n",
+                   signed_calls, signed_instructions, current_heads,
+                   profile->signed_chain_transitions,
+                   signed_calls
+                       ? (double)signed_instructions / (double)signed_calls
+                       : 0.0,
+                   profile->signed_call_max);
+            printf("      extended calls/instructions/heads/chains="
+                   "%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64
+                   " mean=%.3f max=%" PRIu64 "\n",
+                   extended->calls, extended->instructions,
+                   extended->blocks, extended->chain_transitions,
+                   extended->calls
+                       ? (double)extended->instructions /
+                             (double)extended->calls
+                       : 0.0,
+                   extended->maximum);
+            printf("      removed outer entries/short bounded heads="
+                   "%" PRIu64 "/%" PRIu64 " (%6.3f%%/%6.3f%% current); "
+                   "calls/instructions over 16="
+                   "%" PRIu64 "/%" PRIu64 " (%6.3f%% instructions)\n",
+                   removed_entries, removed_heads,
+                   signed_calls
+                       ? 100.0 * (double)removed_entries /
+                             (double)signed_calls
+                       : 0.0,
+                   current_heads
+                       ? 100.0 * (double)removed_heads /
+                             (double)current_heads
+                       : 0.0,
+                   calls_over_sixteen, instructions_over_sixteen,
+                   extended->instructions
+                       ? 100.0 * (double)instructions_over_sixteen /
+                             (double)extended->instructions
+                       : 0.0);
+            printf("      extended call-length groups\n");
+            for (unsigned group = 0u;
+                 group < sizeof groups / sizeof groups[0]; group++) {
+                uint64_t calls = 0u;
+                uint64_t instructions = 0u;
+                for (unsigned length = groups[group].first;
+                     length <= groups[group].last; length++) {
+                    calls += extended->length_calls[length];
+                    instructions +=
+                        extended->length_instructions[length];
+                }
+                if (!calls) continue;
+                printf("        %-7s calls=%10" PRIu64
+                       " instructions=%10" PRIu64
+                       " modeled-share=%6.3f%%\n",
+                       groups[group].name, calls, instructions,
+                       extended->instructions
+                           ? 100.0 * (double)instructions /
+                                 (double)extended->instructions
+                           : 0.0);
+            }
+            printf("      stops cap/timer/caller/branch/flow/fetch-block/"
+                   "ineligible/observer=%" PRIu64 "/%" PRIu64
+                   "/%" PRIu64 "/%" PRIu64 "/%" PRIu64
+                   "/%" PRIu64 "/%" PRIu64 "/%" PRIu64 "\n",
+                   extended->stops[SEQUENCE_SIGNED_STOP_CAP],
+                   extended->stops[SEQUENCE_SIGNED_STOP_TIMER],
+                   extended->stops[SEQUENCE_SIGNED_STOP_CALLER],
+                   extended->stops[SEQUENCE_SIGNED_STOP_BRANCH],
+                   extended->stops[SEQUENCE_SIGNED_STOP_FLOW],
+                   extended->stops[SEQUENCE_SIGNED_STOP_FETCH_BLOCK],
+                   extended->stops[SEQUENCE_SIGNED_STOP_INELIGIBLE],
+                   extended->stops[SEQUENCE_SIGNED_STOP_OBSERVER]);
+            printf("      entry refusals machine/eager/dirty/external/fetch/"
+                   "timebase=%" PRIu64 "/%" PRIu64 "/%" PRIu64
+                   "/%" PRIu64 "/%" PRIu64 "/%" PRIu64 "\n",
+                   extended->gate_refusals[SEQUENCE_SIGNED_GATE_MACHINE],
+                   extended->gate_refusals[
+                       SEQUENCE_SIGNED_GATE_TICK_EAGER],
+                   extended->gate_refusals[
+                       SEQUENCE_SIGNED_GATE_LEVEL_DIRTY],
+                   extended->gate_refusals[
+                       SEQUENCE_SIGNED_GATE_EXTERNAL_INPUT],
+                   extended->gate_refusals[SEQUENCE_SIGNED_GATE_FETCH],
+                   extended->gate_refusals[SEQUENCE_SIGNED_GATE_TIMEBASE]);
+            printf("      histogram calls/instructions=%" PRIu64
+                   "/%" PRIu64 " model=%" PRIu64 "/%" PRIu64
+                   " stops=%" PRIu64 " eligible/model+refused=%" PRIu64
+                   "/%" PRIu64 " heads current/extended=%" PRIu64
+                   "/%" PRIu64 "  %s\n",
+                   histogram_calls, histogram_instructions,
+                   extended->calls, extended->instructions,
+                   extended_stops, signed_eligible,
+                   extended->instructions + extended_gate_refusals,
+                   current_heads, extended->blocks,
+                   exact ? "EXACT" : "MISMATCH");
         }
         {
             uint64_t histogram_instructions = 0u;
