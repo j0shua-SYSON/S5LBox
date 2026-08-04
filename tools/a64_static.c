@@ -15,6 +15,17 @@ enum {
 };
 
 enum {
+    /* r0-r7 and SP retain dedicated pinned-register cases. r8-r12/r14 share
+     * one memory-backed case; PC retains its architectural A32 PC+8 case. */
+    A64S_FUSED_BASE_COUNT = 11u,
+    A64S_FUSED_DEST_COUNT = 10u,
+    A64S_FUSED_PRIMARY_KIND_COUNT = 2u,
+    A64S_FUSED_HIGH_BASE = 9u,
+    A64S_FUSED_PC_BASE = 10u,
+    A64S_FUSED_HIGH_DEST = 9u
+};
+
+enum {
     A64S_END = 0u,
     A64S_ADD_RRR = 1u,
     A64S_SUB_RRR = A64S_ADD_RRR + 512u,
@@ -41,8 +52,10 @@ enum {
     A64S_DIRECT_READ = A64S_ADDR_REG + 2u * 16u,
     A64S_FUSED_READ_IMM =
         A64S_DIRECT_READ + A64S_READ_KIND_COUNT * 15u,
-    A64S_VFP_CORE_TO_S = A64S_FUSED_READ_IMM +
-        2u * 16u * A64S_READ_KIND_COUNT * 15u,
+    A64S_FUSED_READ_IMM_HALF = A64S_FUSED_READ_IMM +
+        2u * A64S_FUSED_BASE_COUNT *
+        A64S_FUSED_PRIMARY_KIND_COUNT * A64S_FUSED_DEST_COUNT,
+    A64S_VFP_CORE_TO_S = A64S_FUSED_READ_IMM_HALF + 8u * 8u,
     A64S_VFP_S_TO_CORE = A64S_VFP_CORE_TO_S + 15u,
     A64S_VFP_CORE_TO_PAIR = A64S_VFP_S_TO_CORE + 15u,
     A64S_VFP_PAIR_TO_CORE = A64S_VFP_CORE_TO_PAIR + 15u * 15u,
@@ -60,7 +73,8 @@ enum {
     A64S_VFP_DIRECT_READ32 = A64S_VFP_WIDEN32 + 1u,
     A64S_VFP_DIRECT_READ64 = A64S_VFP_DIRECT_READ32 + 1u,
     A64S_FUSED_VFP_READ_IMM = A64S_VFP_DIRECT_READ64 + 1u,
-    A64S_BRANCH_COND = A64S_FUSED_VFP_READ_IMM + 2u * 16u * 2u,
+    A64S_BRANCH_COND = A64S_FUSED_VFP_READ_IMM +
+        2u * A64S_FUSED_BASE_COUNT * 2u,
     A64S_BRANCH_LINK = A64S_BRANCH_COND + 14u,
     A64S_HANDLER_COUNT = A64S_BRANCH_LINK + 15u
 };
@@ -196,16 +210,60 @@ static uint32_t direct_read(unsigned kind, unsigned rd) {
     return A64S_DIRECT_READ + kind * 15u + rd;
 }
 
-static uint32_t fused_read_imm(uint32_t address, uint32_t read) {
-    return A64S_FUSED_READ_IMM +
-           (address - A64S_ADDR_IMM) * A64S_READ_KIND_COUNT * 15u +
-           (read - A64S_DIRECT_READ);
+static unsigned fused_base_case(unsigned rn) {
+    if (rn <= 7u) return rn;
+    if (rn == 13u) return 8u;
+    if (rn == 15u) return A64S_FUSED_PC_BASE;
+    return A64S_FUSED_HIGH_BASE;
+}
+
+static unsigned fused_dest_case(unsigned rd) {
+    if (rd <= 7u) return rd;
+    if (rd == 13u) return 8u;
+    return A64S_FUSED_HIGH_DEST;
+}
+
+static bool fused_read_imm(uint32_t address, uint32_t read,
+                           uint32_t *handler) {
+    unsigned address_index;
+    unsigned read_index;
+    unsigned up;
+    unsigned rn;
+    unsigned kind;
+    unsigned rd;
+    if (!handler || address < A64S_ADDR_IMM || address >= A64S_ADDR_REG ||
+        read < A64S_DIRECT_READ || read >= A64S_FUSED_READ_IMM)
+        return false;
+    address_index = address - A64S_ADDR_IMM;
+    read_index = read - A64S_DIRECT_READ;
+    up = address_index >> 4;
+    rn = address_index & 15u;
+    kind = read_index / 15u;
+    rd = read_index % 15u;
+    if (kind < A64S_FUSED_PRIMARY_KIND_COUNT) {
+        *handler = A64S_FUSED_READ_IMM +
+            (((up * A64S_FUSED_BASE_COUNT + fused_base_case(rn)) *
+               A64S_FUSED_PRIMARY_KIND_COUNT + kind) *
+              A64S_FUSED_DEST_COUNT + fused_dest_case(rd));
+        return true;
+    }
+    /* The only immediate halfword form in the admitted product subset is
+     * Thumb LDRH: add offset, low base and low destination. Signed Thumb
+     * byte/halfword loads are register-offset forms and cannot be fused here. */
+    if (kind == A64S_READ_HALF && up == 1u && rn <= 7u && rd <= 7u) {
+        *handler = A64S_FUSED_READ_IMM_HALF + rn * 8u + rd;
+        return true;
+    }
+    return false;
 }
 
 static uint32_t fused_vfp_read_imm(uint32_t address, uint32_t read) {
+    unsigned address_index = address - A64S_ADDR_IMM;
+    unsigned up = address_index >> 4;
+    unsigned rn = address_index & 15u;
     return A64S_FUSED_VFP_READ_IMM +
-           (address - A64S_ADDR_IMM) * 2u +
-           (read - A64S_VFP_DIRECT_READ32);
+        (up * A64S_FUSED_BASE_COUNT + fused_base_case(rn)) * 2u +
+        (read - A64S_VFP_DIRECT_READ32);
 }
 
 static uint32_t vfp_core_to_s(unsigned rt) {
@@ -936,6 +994,8 @@ static bool fuse_immediate_read_records(a64_static_block_t *block) {
         bool vfp = read >= A64S_VFP_DIRECT_READ32 &&
                    read <= A64S_VFP_DIRECT_READ64;
         unsigned rn;
+        unsigned rd = 0u;
+        uint32_t fused_handler;
         a64_static_uop_t fused;
 
         if (!address_immediate || (!scalar && !vfp)) {
@@ -947,6 +1007,15 @@ static bool fuse_immediate_read_records(a64_static_block_t *block) {
             i++;
             continue;
         }
+        if (scalar) {
+            rd = (read - A64S_DIRECT_READ) % 15u;
+            if (!fused_read_imm(address, read, &fused_handler)) {
+                i++;
+                continue;
+            }
+        } else {
+            fused_handler = fused_vfp_read_imm(address, read);
+        }
         if (i != 0u && handler_is_condition(block->uops[i - 1u].handler)) {
             if (block->uops[i - 1u].metadata != 2u) return false;
             block->uops[i - 1u].metadata = 1u;
@@ -955,14 +1024,20 @@ static bool fuse_immediate_read_records(a64_static_block_t *block) {
         fused = block->uops[i];
         fused.pc_value = block->uops[i + 1u].pc_value;
         fused.metadata = block->uops[i + 1u].metadata;
+        fused.handler = fused_handler;
         if (scalar) {
-            fused.handler = fused_read_imm(address, read);
+            if (fused.immediate > UINT16_MAX) return false;
+            if (fused_base_case(rn) == A64S_FUSED_HIGH_BASE)
+                fused.immediate |= rn << 16;
+            if (fused_dest_case(rd) == A64S_FUSED_HIGH_DEST)
+                fused.immediate |= rd << 20;
         } else {
             if (fused.immediate > UINT16_MAX ||
-                block->uops[i + 1u].immediate > UINT16_MAX)
+                block->uops[i + 1u].immediate > UINT8_MAX)
                 return false;
-            fused.handler = fused_vfp_read_imm(address, read);
             fused.immediate |= block->uops[i + 1u].immediate << 16;
+            if (fused_base_case(rn) == A64S_FUSED_HIGH_BASE)
+                fused.immediate |= rn << 24;
         }
         block->uops[i] = fused;
         memmove(&block->uops[i + 1u], &block->uops[i + 2u],

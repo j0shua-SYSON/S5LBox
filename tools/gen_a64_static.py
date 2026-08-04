@@ -19,7 +19,7 @@ CONDITIONS = (
     "eq", "ne", "cs", "cc", "mi", "pl", "vs", "vc",
     "hi", "ls", "ge", "lt", "gt", "le",
 )
-EXPECTED_HANDLERS = 27110
+EXPECTED_HANDLERS = 25194
 
 READ_KINDS = (
     ("word", "ldr", 4),
@@ -28,6 +28,11 @@ READ_KINDS = (
     ("signed_byte", "ldrsb", 1),
     ("signed_half", "ldrsh", 2),
 )
+
+# Dedicated cases retain the guest registers already pinned in host registers.
+# The six other non-PC high registers share one data-record-selected case.
+FUSED_BASES = (*range(8), 13, None, 15)
+FUSED_DESTS = (*range(8), 13, None)
 
 
 def next_dispatch() -> list[str]:
@@ -398,8 +403,17 @@ def address_body(up: bool, rn: int, register_offset: bool) -> list[str]:
     return body
 
 
-def direct_read_body(mnemonic: str, width: int, rd: int) -> list[str]:
-    result, stores = result_register(rd)
+def direct_read_body(mnemonic: str, width: int,
+                     rd: int | None) -> list[str]:
+    if rd is None:
+        result = "w12"
+        stores = [
+            "    ldur w9, [x13, #-12]",
+            "    ubfx w9, w9, #20, #4",
+            "    str w12, [x0, w9, uxtw #2]",
+        ]
+    else:
+        result, stores = result_register(rd)
     body = [
         # Every comparison below uses host NZCV. Preserve the guest flags even
         # when the access misses and exits in the middle of a block.
@@ -463,12 +477,18 @@ def direct_read_body(mnemonic: str, width: int, rd: int) -> list[str]:
     return body
 
 
-def fused_address_imm_prefix(up: bool, rn: int,
+def fused_address_imm_prefix(up: bool, rn: int | None,
+                             packed_scalar: bool = False,
                              packed_vfp: bool = False) -> list[str]:
     body = ["    ldur w9, [x13, #-12]"]
-    if packed_vfp:
-        body.append("    and w9, w9, #0xffff")
-    if rn == 15:
+    if rn is None:
+        shift = 24 if packed_vfp else 16
+        body.extend([
+            f"    ubfx w10, w9, #{shift}, #4",
+            "    ldr w10, [x0, w10, uxtw #2]",
+        ])
+        source = "w10"
+    elif rn == 15:
         # Fused Thumb PC-relative reads are deliberately not decoded. The
         # record keeps the instruction PC for exact miss return, so rebuild
         # the A32 architectural PC+8 operand here.
@@ -480,14 +500,17 @@ def fused_address_imm_prefix(up: bool, rn: int,
     else:
         loads, source = read_guest_register(rn, 10)
         body.extend(loads)
+    if packed_scalar or packed_vfp:
+        body.append("    and w9, w9, #0xffff")
     body.append(f"    {'add' if up else 'sub'} w17, {source}, w9")
     return body
 
 
-def fused_read_imm_body(up: bool, rn: int, mnemonic: str,
-                        width: int, rd: int) -> list[str]:
+def fused_read_imm_body(up: bool, rn: int | None, mnemonic: str,
+                        width: int, rd: int | None) -> list[str]:
     return [
-        *fused_address_imm_prefix(up, rn),
+        *fused_address_imm_prefix(
+            up, rn, packed_scalar=rn is None or rd is None),
         *direct_read_body(mnemonic, width, rd),
     ]
 
@@ -918,7 +941,7 @@ def vfp_direct_read_body(width: int,
         "    and w4, w17, #0x3ff",
         "    add x16, x16, w4, uxtw",
         "    ldur w9, [x13, #-12]",
-        *(["    lsr w9, w9, #16"] if packed_immediate else []),
+        *(["    ubfx w9, w9, #16, #8"] if packed_immediate else []),
         "    ldr x4, [x3, #24]",
         "    add x4, x4, w9, uxtw #2",
         f"    ldr {reg}, [x16]",
@@ -934,7 +957,8 @@ def vfp_direct_read_body(width: int,
     return body
 
 
-def fused_vfp_read_imm_body(up: bool, rn: int, width: int) -> list[str]:
+def fused_vfp_read_imm_body(up: bool, rn: int | None,
+                            width: int) -> list[str]:
     return [
         *fused_address_imm_prefix(up, rn, packed_vfp=True),
         *vfp_direct_read_body(width, packed_immediate=True),
@@ -1153,21 +1177,36 @@ def build_handlers() -> list[tuple[str, list[str]]]:
             handlers.append((label,
                              direct_read_body(mnemonic, width, rd)))
 
-    # Benchmark-only universal fusion candidates. The handler dimensions are
-    # ISA operands, never firmware/profile data. Keeping the old address/read
-    # handlers permits an exact same-binary baseline. Thumb Rn=PC remains on
-    # that baseline because its aligned PC+4 base differs from A32 PC+8.
+    # Benchmark-only universal fusion candidates. Keep dedicated cases for the
+    # guest registers already pinned in host registers, while all other high
+    # registers share a data-selected source/destination case. This preserves
+    # every admitted A32 word/byte immediate read without a 16x15 Cartesian
+    # handler explosion. The only additional immediate kind is low-register
+    # Thumb LDRH; signed byte/halfword Thumb loads use register offsets and
+    # cannot reach this fusion. Thumb Rn=PC stays on the baseline because its
+    # aligned PC+4 base differs from A32 PC+8.
     for up in (False, True):
-        for rn in range(16):
-            for kind, mnemonic, width in READ_KINDS:
-                for rd in range(15):
+        for rn in FUSED_BASES:
+            rn_name = "high" if rn is None else str(rn)
+            for kind, mnemonic, width in READ_KINDS[:2]:
+                for rd in FUSED_DESTS:
+                    rd_name = "high" if rd is None else str(rd)
                     label = (
-                        f".La64s_fused_read_imm_{int(up)}_{rn}_{kind}_{rd}"
+                        f".La64s_fused_read_imm_{int(up)}_{rn_name}_"
+                        f"{kind}_{rd_name}"
                     )
                     handlers.append((
                         label,
                         fused_read_imm_body(up, rn, mnemonic, width, rd),
                     ))
+    _, half_mnemonic, half_width = READ_KINDS[2]
+    for rn in range(8):
+        for rd in range(8):
+            handlers.append((
+                f".La64s_fused_read_imm_half_{rn}_{rd}",
+                fused_read_imm_body(
+                    True, rn, half_mnemonic, half_width, rd),
+            ))
 
     # VFP register and system-state operations are ordinary signed text too.
     # Only core-register operands need enumerated handlers; VFP register
@@ -1219,10 +1258,11 @@ def build_handlers() -> list[tuple[str, list[str]]]:
                      vfp_direct_read_body(8)))
 
     for up in (False, True):
-        for rn in range(16):
+        for rn in FUSED_BASES:
+            rn_name = "high" if rn is None else str(rn)
             for width in (4, 8):
                 handlers.append((
-                    f".La64s_fused_vfp_read_imm_{int(up)}_{rn}_{width}",
+                    f".La64s_fused_vfp_read_imm_{int(up)}_{rn_name}_{width}",
                     fused_vfp_read_imm_body(up, rn, width),
                 ))
 

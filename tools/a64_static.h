@@ -23,7 +23,7 @@
 /* A conditional register-offset A32 load uses a guard, shifter, address and
  * read record. The final slot is the fixed block exit. */
 #define A64_STATIC_MAX_UOPS (A64_STATIC_MAX_INSNS * 4u + 1u)
-#define A64_STATIC_HANDLER_COUNT 27110u
+#define A64_STATIC_HANDLER_COUNT 25194u
 #define A64_STATIC_GRAPH_SLOTS 512u
 
 typedef struct {

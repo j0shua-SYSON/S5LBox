@@ -5,7 +5,7 @@
  * dispatcher. It translates one small synthetic block once, then compares
  * repeated interpreter execution with both that already-built block and a
  * firmware-independent static-threaded proof. Its 24,646 product handlers and
- * 2,464 benchmark-only immediate-read fusion candidates are compiled and
+ * 548 benchmark-only immediate-read fusion candidates are compiled and
  * signed with the executable; runtime decoding creates data records only. The
  * table includes product-only guarded read-cache, exact VFP register/system
  * transfer and terminal A32 immediate branch/link paths.
@@ -139,7 +139,7 @@ static const uint32_t A32_MIXED[] = {
 /* A deliberately favorable dispatch ceiling for immediate-read fusion:
  * fifteen warmed word loads from one DREAD block and a branch back to zero.
  * It is not a firmware mix. Reusing pinned r1-r7 destinations makes this a
- * stronger rejection gate: a weak result here cannot justify shipping 2,464
+ * stronger rejection gate: a weak result here cannot justify shipping 548
  * additional signed handlers. */
 static const uint32_t A32_FUSED_READ_LOOP[] = {
     0xe5901000u, 0xe5902004u, 0xe5903008u, 0xe590400cu,
@@ -1829,10 +1829,18 @@ static bool validate_static_vfp_read_oracles(void) {
 }
 
 /* Prove the benchmark-only immediate-read fusion against both the unchanged
- * product decoder and arm_step(). The three blocks cover scalar A32 (including
- * PC base and both condition outcomes), Thumb immediate/register mixes, VFP
- * single/double/PC loads, and a zero-prefix miss. */
+ * product decoder and arm_step(). The blocks cover scalar A32 (including PC,
+ * shared high-register cases and both condition outcomes), Thumb
+ * immediate/register mixes, VFP single/double/PC/high-base loads, and a
+ * zero-prefix miss. */
 static bool validate_static_fused_read_oracles(void) {
+    static const uint32_t HIGH_SCALAR[] = {
+        A32_SINGLE(14, 0, 1, 0, 1, 12,  8, 0x020),
+        A32_SINGLE(14, 0, 0, 1, 1, 14, 14, 0x001),
+    };
+    static const uint32_t HIGH_VFP[] = {
+        VFP_LDST(14, 1, 1, 0, 0, 1, 12, 6, 0, 0),
+    };
     a64_static_block_t baseline, fused;
     arm_cpu_t reference, baseline_cpu, fused_cpu, before;
     final_state_t reference_state, baseline_state, fused_state;
@@ -1856,6 +1864,49 @@ static bool validate_static_fused_read_oracles(void) {
             &g_ram[0xb000u],
             (unsigned)(sizeof A32_READ_HITS / sizeof A32_READ_HITS[0]),
             false, 0xb000u, &fused) ||
+        fused.uop_count >= baseline.uop_count)
+        return false;
+    for (unsigned i = 0u; i < baseline.insn_count; i++) {
+        status = arm_step(&reference);
+        if (status != ARM_OK) break;
+    }
+    if (!a64_static_run_read_hits(&baseline_cpu, &baseline, g_ram,
+                                  sizeof g_ram, &baseline_completed) ||
+        !a64_static_run_read_hits(&fused_cpu, &fused, g_ram,
+                                  sizeof g_ram, &fused_completed))
+        return false;
+    capture_state(&reference_state, &reference, status, JIT_EXIT_NEXT);
+    capture_state(&baseline_state, &baseline_cpu, ARM_OK, JIT_EXIT_NEXT);
+    capture_state(&fused_state, &fused_cpu, ARM_OK, JIT_EXIT_NEXT);
+    if (status != ARM_OK || baseline_completed != baseline.insn_count ||
+        fused_completed != fused.insn_count ||
+        !architectural_states_equal(&reference_state, &baseline_state) ||
+        !architectural_states_equal(&reference_state, &fused_state) ||
+        reference.dread_hits != baseline_cpu.dread_hits ||
+        reference.dread_hits != fused_cpu.dread_hits)
+        return false;
+    baseline_uops += baseline.uop_count;
+    fused_uops += fused.uop_count;
+
+    seed_read_oracle(&reference, HIGH_SCALAR,
+                     (unsigned)(sizeof HIGH_SCALAR /
+                                sizeof HIGH_SCALAR[0]),
+                     0xc000u, true);
+    reference.r[12] = DATA_BASE;
+    reference.r[14] = DATA_BASE + 0x40u;
+    mem_w32(NULL, DATA_BASE + 0x20u, UINT32_C(0x31415926));
+    mem_w8(NULL, DATA_BASE + 0x3fu, UINT8_C(0xa7));
+    baseline_cpu = reference;
+    fused_cpu = reference;
+    status = ARM_OK;
+    if (!a64_static_decode_read_hits_bytes_at(
+            &g_ram[0xc000u],
+            (unsigned)(sizeof HIGH_SCALAR / sizeof HIGH_SCALAR[0]),
+            false, 0xc000u, &baseline) ||
+        !a64_static_decode_fused_read_hits_bytes_at(
+            &g_ram[0xc000u],
+            (unsigned)(sizeof HIGH_SCALAR / sizeof HIGH_SCALAR[0]),
+            false, 0xc000u, &fused) ||
         fused.uop_count >= baseline.uop_count)
         return false;
     for (unsigned i = 0u; i < baseline.insn_count; i++) {
@@ -1918,6 +1969,32 @@ static bool validate_static_fused_read_oracles(void) {
     baseline_uops += baseline.uop_count;
     fused_uops += fused.uop_count;
 
+    seed_vfp_oracle(&reference, HIGH_VFP,
+                    (unsigned)(sizeof HIGH_VFP / sizeof HIGH_VFP[0]),
+                    0xf900u, true);
+    reference.r[12] = DATA_BASE;
+    mem_w32(NULL, DATA_BASE, UINT32_C(0x27182818));
+    oracle_warm_dread(&reference, DATA_BASE);
+    baseline_cpu = reference;
+    fused_cpu = reference;
+    status = arm_step(&reference);
+    if (!a64_static_decode_read_hits_bytes_at(
+            &g_ram[0xf900u], 1u, false, 0xf900u, &baseline) ||
+        !a64_static_decode_fused_read_hits_bytes_at(
+            &g_ram[0xf900u], 1u, false, 0xf900u, &fused) ||
+        fused.uop_count >= baseline.uop_count ||
+        !a64_static_run_read_hits(&baseline_cpu, &baseline, g_ram,
+                                  sizeof g_ram, &baseline_completed) ||
+        !a64_static_run_read_hits(&fused_cpu, &fused, g_ram,
+                                  sizeof g_ram, &fused_completed) ||
+        status != ARM_OK || baseline_completed != 1u ||
+        fused_completed != 1u ||
+        !static_vfp_states_equal(&reference, &baseline_cpu) ||
+        !static_vfp_states_equal(&reference, &fused_cpu))
+        return false;
+    baseline_uops += baseline.uop_count;
+    fused_uops += fused.uop_count;
+
     seed_vfp_read_oracle(&reference, true);
     baseline_cpu = reference;
     fused_cpu = reference;
@@ -1963,7 +2040,8 @@ static bool validate_static_fused_read_oracles(void) {
         return false;
 
     printf("STATIC-FUSED-READ-ORACLE exact=yes a32=yes thumb=yes vfp=yes "
-           "zero-prefix=yes baseline-uops=%u fused-uops=%u handlers=%u\n",
+           "high-register=yes zero-prefix=yes baseline-uops=%u "
+           "fused-uops=%u handlers=%u\n",
            baseline_uops, fused_uops, A64_STATIC_HANDLER_COUNT);
     return true;
 }
