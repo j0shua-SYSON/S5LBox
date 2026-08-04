@@ -5466,3 +5466,62 @@ register/bitwise transfers and cache-hit VLDR, with arithmetic and exceptional m
 continuing to fall back until separately proved. Only after coverage clears the
 mathematical gate does a same-binary restored A/B and then a physical-iPhone build become
 honest.
+
+### r501-r503: guarded VFP transfers and VLDR cross only the absolute coverage floor
+
+r501-r502 add exact VFPv2 register and system-state families to the signed product path:
+VMOV between core and single/double words, two-core-register transfers, VMRS/VMSR,
+`VMRS APSR_nzcv,FPSCR`, and raw same-width VMOV/VABS/VNEG. These handlers do not assume
+that decode-time VFP state remains live. Each execution rechecks CPACR, FPEXC and, where
+required, FPSCR.Len before changing guest state; a failed guard returns the exact
+unretired prefix to `arm_step()`. The generated, firmware-independent table grew from
+24,050 to 24,612 handlers.
+
+r503 adds pre-indexed, no-writeback single-register VLDR in both widths and offset
+directions. It reuses the already-proved DREAD tag, generation and privilege checks.
+Misalignment, a cache miss, or a double crossing the 1 KiB cache block changes no VFP
+state and falls back at the exact instruction. A successful single load accounts for one
+interpreter-equivalent read32 hit; a successful double accounts for two. Stores,
+load-multiple and every arithmetic operation remained literal. The table is now 24,614
+handlers.
+
+The local 60-test Release suite and a strict `-Wall -Wextra -Werror` build passed. On both
+macOS-14 and macOS-15, core run `30878278847` reported exact whole-SoC cold-fill and
+signed-engine oracles for the VFP register and read paths, including disabled/Len guards,
+partial prefixes, alignment and cache-block boundaries. iOS run `30878278855` built the
+ad-hoc-signed app at the same exact commit
+`965231b1eef6ae2014a502afb944013f572bc089`. Those jobs prove semantics and compilation;
+they do not install the app or measure an iPhone.
+
+The identical restored 7.100--7.110 B observer replay then closed every class, outcome,
+VFP-family and stop identity:
+
+| exact current product model | instructions | fetched share |
+|---|---:|---:|
+| decoder-supported | 6,097,490 | 60.978% |
+| decoder-rejected | 3,901,999 | 39.022% |
+| retirement-eligible after condition/DREAD/VFP checks | 5,933,923 | 59.342% |
+| modeled signed retirement | **5,528,961** | **55.292%** |
+| entry-gate refusal | 404,962 | 4.050% |
+
+Relative to r500, the VFP tranches add 790,113 decoded and 744,777 modeled instructions.
+That is a real structural coverage gain, not an FPS result. Calls rise from 2,150,751 to
+2,632,258 and their mean falls from 2.224 to 2.100 instructions, because newly admitted
+VFP entries are still split by unsupported arithmetic, compare, conversion and store
+families. The run exited OK with empty stderr and 1,590 CLCD frames. Its work-image and
+PPM SHA-256 values remained respectively
+`8A59C388C481165F460984926AA5FFB1B72A0E9030216CD0038DE9B3264B79FE` and
+`1EF63FFE3EEFD976416E17120A36BA074BF295EA0955D716E2D345FCC5EA0A9E`.
+Those output hashes are strong replay checks, but they are not a serialized whole-machine
+A/B and they do not validate native execution on this x86 host.
+
+Brutal status: this is the first revision to cross the absolute 54.138% zero-cost floor,
+but it crosses by only **1.154 percentage points**. Infinite-speed signed instructions
+would cap the workload at **2.236758x**; reaching the required 2.180475x at the current
+coverage would require the covered region itself to run about **47.914x** faster. That is
+not a credible practical margin. There is still **zero measured emulator or iPhone FPS
+gain**, the normal app still builds this engine out, and the phone remains at the reported
+0--4 FPS. The next trace-selected tranche is exact VCMP/VCMPE (1.810% of all fetched
+instructions), whose comparison, NaN, signed-zero, FZ and IOC/IDC behavior can be expressed
+with integer bit logic. Arithmetic and narrowing conversion stay literal until their
+rounding and cumulative-exception behavior is separately proved.
