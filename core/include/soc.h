@@ -3914,8 +3914,9 @@ bool s5l8900_static_a64_set_persistent(s5l8900_t *m, bool enabled);
 bool s5l8900_static_a64_set_graph(s5l8900_t *m, bool enabled);
 /* Same-binary benchmark control for the total signed invocation bound. A
  * decoded head remains at most sixteen instructions and the machine still
- * clamps every invocation to the first exact timebase edge. Product default
- * is sixteen; accepted experimental values are 1..256. */
+ * clamps every invocation to the first exact timebase edge. The generic engine
+ * initializes at sixteen; the gated iOS product explicitly selects 256.
+ * Accepted values are 1..256. */
 bool s5l8900_static_a64_set_chain_limit(s5l8900_t *m, unsigned max_insns);
 uint64_t s5l8900_static_a64_retired(const s5l8900_t *m);
 uint64_t s5l8900_static_a64_chained_blocks(const s5l8900_t *m);

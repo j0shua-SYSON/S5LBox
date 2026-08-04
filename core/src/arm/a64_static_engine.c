@@ -20,6 +20,10 @@
 #define STATIC_A64_CACHE_ENTRIES 1024u
 #define STATIC_A64_RAW_BYTES (A64_STATIC_MAX_INSNS * 4u)
 
+_Static_assert(S5LBOX_STATIC_A64_PRODUCT_CHAIN_INSNS ==
+                   A64_STATIC_MAX_CHAIN_INSNS,
+               "product and signed-runner chain ceilings differ");
+
 typedef struct {
     const uint8_t *fetch_host;
     uint32_t pc;
