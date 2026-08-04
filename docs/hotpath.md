@@ -6042,3 +6042,100 @@ once per bounded invocation only because the admitted subset cannot mutate them 
 tick inside the batch. A missing, colliding, stale, cross-fetch-block or oversized descriptor must
 return to the legacy path. No runtime code generation, writable executable memory or relaxed guest
 contract is justified by these results.
+
+### 2026-08-04: callback-free graph dispatch wins its synthetic gate and enters the app
+
+Commit `7afdddce4c30eaa9e05938f605e6c76b37295378` implements that architecture. Each
+1 KiB fetch block has a fixed 512-slot, 128-byte data-only descriptor table indexed by
+instruction offset. After a C-validated first head, ordinary build-time-signed AArch64 assembly
+selects dynamic branch targets without a callback. Every accepted head still checks the complete
+PC, host fetch pointer, translation generation, privilege, ARM/Thumb state, remaining caller/timer
+budget and raw instruction witness. A missing, colliding, stale, cross-block or oversized node
+returns the exact completed prefix. Runtime read or VFP misses retain the existing exact partial
+accounting. There is no runtime code generation and no writable executable page.
+
+The graph oracle deliberately makes self-branches at `0x000` and `0x400` collide in the same
+descriptor slot, then requires the original cached head to republish and chain fifteen times. The
+complete Apple-host markers include byte-identical serialized machines, live SMC, dynamic
+conditional/link branches, a one-instruction caller bound, the sixteen-instruction total bound,
+raw-witness rejection and collision recovery. Two benchmark-contract corrections are recorded in
+`a35410637cc6c2fad50aa93f926741bc783becf5` and
+`736f540d3d3a1b6869eb16abc5743b7ccdacba3b`: a fixed graph node may correctly stop when it is
+longer than the timer remainder, and a length-sixteen node correctly has zero internal graph
+transitions because it consumes the whole bound. Neither correction changes engine semantics.
+
+Commit `f11296fb8a9ea875fa11d9d06d8847c04f5bf2eb` removes an unconditional 128-byte
+descriptor republish on every outer entry. Exact-SHA core run `30894417886` is green in all eight
+jobs. In its long three-repetition Apple measurements the graph beats the legacy signed path at
+all sixteen synthetic lengths: by 4.9--48.9% on macOS 14 and 18.4--66.2% on macOS 15. Those are
+same-row graph/legacy ratios, not firmware or phone FPS. They prove that removing the callback and
+repeated native register boundary is worthwhile; they do not establish how the restored firmware's
+mixed graph shapes weight those rows.
+
+The product integration is no longer hypothetical. Commit
+`87b40ba69c99b387220d9b0a31acb9426d63e08c` makes the iOS target generate and link the
+signed handler assembly, compile the generic engine, and fail initialization rather than silently
+fall back if the signed graph is unavailable. It does not touch or enable the JIT. Commit
+`db94bb5ad8e0f7cc6ff8a838b6a10567024882e9` fixes only the linked-symbol CI check. Core run
+`30894814704` is green in all eight jobs and iOS run `30894954810` builds, fake-signs and uploads
+the graph-enabled IPA. That proves the actual app binary contains the engine. It does not prove the
+binary was installed or made a physical iPhone faster.
+
+Brutal status: **the callback-free graph is substantial architecture progress, but it is not a
+30 FPS result**. The only physical-phone observation remains the older, uncontrolled 0--4 FPS
+report. No connected iPhone was available for this build, and a restored Windows firmware replay
+cannot execute AArch64 signed handlers. A cold desktop boot would therefore test guest correctness
+but say nothing about this optimization's native path. The first authority for speed is an
+exact-build physical-device run, with execution and publication measured separately; final
+acceptance still requires a cold boot after the performance path is selected.
+
+### 2026-08-04: block-sized SMC witnesses improve the short cases, still not 30 FPS
+
+The first graph audit found that every cache hit compared the entire decode candidate: as many as
+64 bytes even when the cached executable block was one instruction. That work is not required for
+correctness. A supported cache entry depends on the bytes of the instructions it can execute. If a
+later formerly unsupported instruction changes, retaining the shorter prefix is still exact:
+the signed block returns at its old end and `arm_step()` or a separately decoded next head owns the
+following PC. An unsupported entry needs only its first instruction, because changing later bytes
+cannot make instruction zero supported while its own encoding is unchanged. Live PC-relative and
+VFP loads remain guarded data reads; their loaded bytes were never instruction-witness bytes.
+
+Commit `fa2f68a155abe2d543044073162f8faa3732773e` implements that narrower contract without
+a dirty bitmap or write-notification dependency. This distinction matters: the snapshot code
+already documents why a forgotten RAM writer makes dirty tracking silently wrong. Immediate SMC
+inside an executable prefix still invalidates by byte comparison. The native graph-bound oracle
+now pins a one-instruction self-branch to an exact four-byte witness and still proves fifteen
+callback-free transitions, collision republish and byte-identical final machine state.
+
+Both complete local suites pass 60/60; the focused machine test passes 5,832 assertions. Exact-SHA
+core run `30896405607` is green in all eight jobs, including both Apple-arm64 native runs,
+warnings-as-errors and ASan/UBSan. Exact-SHA iOS run `30896409779` builds and packages the real app.
+Against the preceding exact graph curve, normalized graph/interpreter speedups change as follows:
+
+| synthetic block length | macOS 14 | macOS 15 |
+|---:|---:|---:|
+| 1 | **+18.1%** | **+20.9%** |
+| 2 | **+19.1%** | **+19.8%** |
+| 3 | **+12.3%** | **+26.3%** |
+| 4 | +3.4% | +13.5% |
+
+The direction and size at lengths one through three agree on both hosts and match the removed
+work. Longer rows, where the witness was already nearer its executed span, fluctuate in both
+directions by ordinary hosted-run noise; length sixteen changes by -3.9%/-3.1% even though its
+64-byte witness is unchanged, which is an explicit control against over-reading the table.
+
+For continuity with r512 only, applying the new per-length graph/interpreter curve to r512's old
+call-length histogram changes the deliberately naive whole-workload calculation from
+1.442x/1.525x to **1.530x/1.642x** on macOS 14/15. Scaling r485's 15.732668 Minsn/s gives
+24.06--25.83 Minsn/s; scaling the old 11.143 changed-scanout/s mean gives **17.0--18.3
+changes/s**. This weighting is not a forecast: graph chaining changes call shapes, synthetic loops
+omit firmware/MMU/framebuffer/UIKit work, and the physical host is different. Its legitimate use
+is negative: even the improved shortcut remains far below the 34.304688 Minsn/s capacity target
+and 30 changes/s.
+
+Brutal status: **this is a measured, exact short-block improvement and still not evidence that the
+phone exceeds 0--4 FPS, much less reaches 30 FPS**. It stays because both Apple hosts show the
+intended gain where the removed comparisons existed, all exactness gates remain green, and the
+actual iOS target packages it. The next highest-value measurement is the exact IPA on a physical
+iPhone. Without that, another result must either model the restored graph's real joint shapes or
+remove another structural boundary; isolated opcode additions would return to whack-a-mole.
