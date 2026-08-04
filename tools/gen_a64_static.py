@@ -19,7 +19,7 @@ CONDITIONS = (
     "eq", "ne", "cs", "cc", "mi", "pl", "vs", "vc",
     "hi", "ls", "ge", "lt", "gt", "le",
 )
-EXPECTED_HANDLERS = 24646
+EXPECTED_HANDLERS = 26198
 
 READ_KINDS = (
     ("word", "ldr", 4),
@@ -27,6 +27,12 @@ READ_KINDS = (
     ("half", "ldrh", 2),
     ("signed_byte", "ldrsb", 1),
     ("signed_half", "ldrsh", 2),
+)
+
+WRITE_KINDS = (
+    ("word", "str", 4),
+    ("byte", "strb", 1),
+    ("half", "strh", 2),
 )
 
 
@@ -398,6 +404,24 @@ def address_body(up: bool, rn: int, register_offset: bool) -> list[str]:
     return body
 
 
+def post_address_body(up: bool, rn: int,
+                      register_offset: bool) -> list[str]:
+    body: list[str] = []
+    if not register_offset:
+        body.append("    ldur w9, [x13, #-12]")
+    loads, source = read_guest_register(rn, 10)
+    body.extend(loads)
+    offset = "w17" if register_offset else "w9"
+    # w17 is the transfer VA; w9 retains the post-index writeback value until
+    # the guarded store has succeeded. No guest register changes on a miss.
+    body.extend([
+        f"    {'add' if up else 'sub'} w9, {source}, {offset}",
+        f"    mov w17, {source}",
+        *next_dispatch(),
+    ])
+    return body
+
+
 def direct_read_body(mnemonic: str, width: int, rd: int) -> list[str]:
     result, stores = result_register(rd)
     body = [
@@ -454,6 +478,113 @@ def direct_read_body(mnemonic: str, width: int, rd: int) -> list[str]:
         # Match dread_hit(): one hit for each successful direct access and no
         # counter change at all on a miss left for the literal slow path.
         "    ldr x4, [x3, #8]",
+        "    ldr x5, [x4]",
+        "    add x5, x5, #1",
+        "    str x5, [x4]",
+        "    msr nzcv, x7",
+        *next_dispatch(),
+    ])
+    return body
+
+
+def direct_write_body(mnemonic: str, width: int, rd: int,
+                      rn: int | None, unprivileged: bool) -> list[str]:
+    body = [
+        # Preserve guest NZCV across every host-side cache comparison and every
+        # miss. x3 is non-NULL for product runs, but a flat runner must fail
+        # closed before a direct store can touch guest state.
+        "    mrs x7, nzcv",
+        "    cbnz x3, 1f",
+        "    b .La64s_direct_miss",
+        "1:",
+    ]
+    if width > 1:
+        # arm_step owns SCTLR.A/U behavior and all legacy unaligned semantics.
+        # An aligned word/halfword also cannot cross this cache's 1 KiB block.
+        body.extend([
+            f"    tst w17, #{width - 1}",
+            "    b.eq 1f",
+            "    b .La64s_direct_miss",
+            "1:",
+        ])
+
+    # dwrite is present only while the frontend's separate write-pointer
+    # consent callback is live. The entry itself proves the exact translated
+    # VA block, privilege and MMU generation resolved by the literal path.
+    body.extend([
+        "    ldr x6, [x3, #56]",
+        "    cbnz x6, 1f",
+        "    b .La64s_direct_miss",
+        "1:",
+    ])
+    if unprivileged:
+        body.append("    mov w4, wzr")
+    else:
+        body.append("    ldr w4, [x3, #20]")
+    body.extend([
+        "    lsr w5, w17, #10",
+        "    add w5, w5, w4, lsl #5",
+        "    and w5, w5, #63",
+        "    add x6, x6, w5, uxtw #4",
+        "    ldr x16, [x6, #0]",
+        "    cbnz x16, 1f",
+        "    b .La64s_direct_miss",
+        "1:",
+        "    lsr w4, w17, #10",
+        "    lsl w4, w4, #10",
+    ])
+    if unprivileged:
+        body.append("    mov w5, wzr")
+    else:
+        body.append("    ldr w5, [x3, #20]")
+    body.extend([
+        "    orr w4, w4, w5",
+        "    ldr w5, [x6, #8]",
+        "    cmp w5, w4",
+        "    b.eq 1f",
+        "    b .La64s_direct_miss",
+        "1:",
+        "    ldr w4, [x6, #12]",
+        "    ldr w5, [x3, #16]",
+        "    cmp w4, w5",
+        "    b.eq 1f",
+        "    b .La64s_direct_miss",
+        "1:",
+        "    and w4, w17, #0x3ff",
+        "    add x16, x16, w4, uxtw",
+    ])
+
+    if rd == 15:
+        # Runtime-guard metadata makes this record's pc_value the instruction
+        # address. ARM STR pc stores that address plus twelve, not PC+8.
+        source_loads = [
+            "    ldur w10, [x13, #-8]",
+            "    add w10, w10, #12",
+        ]
+        source = "w10"
+    else:
+        source_loads, source = read_guest_register(rd, 10)
+    body.extend(source_loads)
+    body.append(f"    {mnemonic} {source}, [x16]")
+
+    if rn is not None:
+        # immediate==0 selects the pre-index effective address in w17;
+        # immediate==1 selects the post-index update retained in w9.
+        body.extend([
+            "    ldur w4, [x13, #-12]",
+            "    cbz w4, 1f",
+            "    mov w4, w9",
+            "    b 2f",
+            "1:",
+            "    mov w4, w17",
+            "2:",
+            *write_guest_register(rn, "w4"),
+        ])
+
+    body.extend([
+        # Match dwrite_hit(): a successful signed access is one hit; a miss is
+        # counted exactly once later by the literal fallback that fills it.
+        "    ldr x4, [x3, #64]",
         "    ldr x5, [x4]",
         "    add x5, x5, #1",
         "    str x5, [x4]",
@@ -1106,6 +1237,18 @@ def build_handlers() -> list[tuple[str, list[str]]]:
             label = f".La64s_addr_reg_{int(up)}_{rn}"
             handlers.append((label, address_body(up, rn, True)))
 
+    # Post-indexed stores transfer through the original base in w17 and defer
+    # the updated base in w9 until the guarded write has actually succeeded.
+    for up in (False, True):
+        for rn in range(16):
+            label = f".La64s_post_addr_imm_{int(up)}_{rn}"
+            handlers.append((label, post_address_body(up, rn, False)))
+
+    for up in (False, True):
+        for rn in range(16):
+            label = f".La64s_post_addr_reg_{int(up)}_{rn}"
+            handlers.append((label, post_address_body(up, rn, True)))
+
     # Loads to PC remain literal. Five result widths/sign modes across r0-r14
     # need seventy-five direct handlers because the address record has already
     # produced the exact VA.
@@ -1114,6 +1257,35 @@ def build_handlers() -> list[tuple[str, list[str]]]:
             label = f".La64s_direct_read_{kind}_{rd}"
             handlers.append((label,
                              direct_read_body(mnemonic, width, rd)))
+
+    # Store sources include R15 because A32 STR pc has a precise PC+12 value;
+    # byte-to-PC encodings are rejected by the decoder. Writeback bases exclude
+    # R15 exactly as the ARMv6 interpreter does. Translation stores have their
+    # own family so privilege is forced to user for both slot and tag checks.
+    for kind, mnemonic, width in WRITE_KINDS:
+        for rd in range(16):
+            label = f".La64s_direct_write_{kind}_{rd}"
+            handlers.append((label,
+                             direct_write_body(mnemonic, width, rd,
+                                               None, False)))
+
+    for kind, mnemonic, width in WRITE_KINDS:
+        for rd in range(16):
+            for rn in range(15):
+                label = f".La64s_direct_write_wb_{kind}_{rd}_{rn}"
+                handlers.append((label,
+                                 direct_write_body(mnemonic, width, rd,
+                                                   rn, False)))
+
+    for kind, mnemonic, width in WRITE_KINDS:
+        for rd in range(16):
+            for rn in range(15):
+                label = (
+                    f".La64s_direct_write_wb_unpriv_{kind}_{rd}_{rn}"
+                )
+                handlers.append((label,
+                                 direct_write_body(mnemonic, width, rd,
+                                                   rn, True)))
 
     # VFP register and system-state operations are ordinary signed text too.
     # Only core-register operands need enumerated handlers; VFP register
@@ -1224,8 +1396,8 @@ def render() -> str:
         "    mov x15, x4",
         # The ninth and tenth AAPCS64 arguments live at the entry SP. The
         # 144-byte prologue moves them to [sp,#144] and [sp,#152]. The former
-        # carries DREAD/VFP live-state pointers; the latter is NULL for the
-        # legacy boundary or carries the persistent product-chain context.
+        # carries DREAD/DWRITE/VFP live-state pointers; the latter is NULL for
+        # the legacy boundary or carries the persistent product-chain context.
         "    ldr x3, [sp, #144]",
         "    ldr x9, [sp, #152]",
         "    str x9, [sp, #96]",

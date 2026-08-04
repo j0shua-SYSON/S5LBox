@@ -4,11 +4,11 @@
  * This is deliberately NOT a product-performance claim and not a JIT
  * dispatcher. It translates one small synthetic block once, then compares
  * repeated interpreter execution with both that already-built block and a
- * firmware-independent static-threaded proof. The proof's 24,646 generic
+ * firmware-independent static-threaded proof. The proof's 26,198 generic
  * ISA/register handlers are compiled and signed with the executable; runtime
  * decoding creates data records only. The table includes product-only guarded
- * read-cache, exact VFP register/system transfer and terminal A32 immediate
- * branch/link paths.
+ * read/write-cache, exact VFP register/system transfer and terminal A32
+ * immediate branch/link paths.
  *
  * The answer is only a feasibility bound. The native and direct product-entry
  * rows have no device tick, MMIO, interrupt sampling, cache lookup,
@@ -241,6 +241,15 @@ static const uint16_t THUMB_INTEGER_MISC[] = {
      ((uint32_t)(up) << 23) | ((uint32_t)(byte) << 22) |                   \
      ((uint32_t)(load) << 20) | ((uint32_t)(rn) << 16) |                   \
      ((uint32_t)(rd) << 12) | (uint32_t)(offset))
+
+#define A32_SINGLE_MODE2(cond, indexed, pre, up, byte, writeback, load,     \
+                         rn, rd, offset)                                    \
+    (((uint32_t)(cond) << 28) | UINT32_C(0x04000000) |                     \
+     ((uint32_t)(indexed) << 25) | ((uint32_t)(pre) << 24) |               \
+     ((uint32_t)(up) << 23) | ((uint32_t)(byte) << 22) |                   \
+     ((uint32_t)(writeback) << 21) | ((uint32_t)(load) << 20) |           \
+     ((uint32_t)(rn) << 16) | ((uint32_t)(rd) << 12) |                    \
+     (uint32_t)(offset))
 
 #define VFP_SV(n) ((uint32_t)(n) >> 1)
 #define VFP_SB(n) ((uint32_t)(n) & 1u)
@@ -667,6 +676,37 @@ static bool validate_static_shapes(void) {
         A32_SINGLE(14, 1, 1, 0, 1, 0, 1, 15),/* register Rm=PC */
         A32_SINGLE(14, 1, 1, 0, 1, 0, 1, 0x11),/* reserved bit 4 */
     };
+    static const uint32_t VALID_A32_STORES[] = {
+        A32_SINGLE_MODE2(14, 0, 1, 1, 0, 0, 0, 4,  3, 0x00c),
+        A32_SINGLE_MODE2( 1, 0, 1, 0, 1, 1, 0, 4,  3, 0x001),
+        A32_SINGLE_MODE2(14, 1, 0, 1, 0, 0, 0, 4,  3, 0x102),
+        A32_SINGLE_MODE2(14, 0, 0, 1, 0, 1, 0, 4,  3, 0x004),
+        A32_SINGLE_MODE2(14, 0, 1, 1, 0, 0, 0, 4, 15, 0x010),
+        A32_SINGLE_MODE2( 0, 0, 1, 1, 0, 0, 0, 4,  3, 0x014),
+    };
+    static const unsigned VALID_A32_STORE_UOPS[] = {3u, 4u, 4u, 3u, 3u, 4u};
+    static const uint32_t INVALID_A32_STORES[] = {
+        /* Every invalid writeback alias and operand is rejected before a
+         * direct record can exist, matching exec_single_transfer(). */
+        A32_SINGLE_MODE2(14, 0, 1, 1, 0, 1, 0, 4, 4, 0x004),
+        A32_SINGLE_MODE2(14, 0, 0, 1, 0, 0, 0, 4, 4, 0x004),
+        A32_SINGLE_MODE2(14, 0, 1, 1, 0, 1, 0, 15, 3, 0x004),
+        A32_SINGLE_MODE2(14, 0, 1, 1, 1, 0, 0, 4, 15, 0x004),
+        A32_SINGLE_MODE2(14, 1, 1, 1, 0, 0, 0, 4, 3, 0x00f),
+        A32_SINGLE_MODE2(14, 1, 1, 1, 0, 0, 0, 4, 3, 0x012),
+    };
+    static const uint16_t VALID_THUMB_STORES[] = {
+        UINT16_C(0x508b), /* STR  r3,[r1,r2] */
+        UINT16_C(0x528b), /* STRH r3,[r1,r2] */
+        UINT16_C(0x548b), /* STRB r3,[r1,r2] */
+        UINT16_C(0x604b), /* STR  r3,[r1,#4] */
+        UINT16_C(0x704b), /* STRB r3,[r1,#1] */
+        UINT16_C(0x804b), /* STRH r3,[r1,#2] */
+        UINT16_C(0x9301), /* STR  r3,[sp,#4] */
+    };
+    static const unsigned VALID_THUMB_STORE_UOPS[] = {
+        4u, 4u, 4u, 3u, 3u, 3u, 3u
+    };
     static const uint16_t INVALID_PRODUCT_THUMB[] = {
         0x4487u, /* ADD pc,r0 */
         0x4687u, /* MOV pc,r0 */
@@ -849,6 +889,106 @@ static bool validate_static_shapes(void) {
     }
     printf("STATIC-BRANCH-SHAPE exact=yes conditional=14 link=15 "
            "handlers=29 forward=yes backward=yes\n");
+
+    for (i = 0u; i < sizeof VALID_A32_STORES /
+                         sizeof VALID_A32_STORES[0]; i++) {
+        uint32_t value = VALID_A32_STORES[i];
+        const uint32_t pc = UINT32_C(0x1200) + i * 4u;
+        uint8_t bytes[4] = {
+            (uint8_t)value, (uint8_t)(value >> 8),
+            (uint8_t)(value >> 16), (uint8_t)(value >> 24)
+        };
+        if (a64_static_decode_read_hits_bytes_at(
+                bytes, 1u, false, pc, &block) ||
+            !a64_static_decode_memory_hits_bytes_at(
+                bytes, 1u, false, pc, &block) ||
+            block.insn_count != 1u ||
+            block.uop_count != VALID_A32_STORE_UOPS[i] ||
+            block.start_pc != pc || block.exit_pc != pc + 4u ||
+            block.thumb || !block.touches_memory || block.direct_reads ||
+            !block.direct_writes || !block.runtime_guards || block.vfp ||
+            block.uops[block.uop_count - 2u].handler == 0u ||
+            block.uops[block.uop_count - 2u].pc_value != pc ||
+            block.uops[block.uop_count - 2u].metadata != UINT32_C(0x101)) {
+            fprintf(stderr,
+                    "jitbench: product A32 store shape failed at %u\n", i);
+            return false;
+        }
+    }
+    for (i = 0u; i < sizeof INVALID_A32_STORES /
+                         sizeof INVALID_A32_STORES[0]; i++) {
+        uint32_t value = INVALID_A32_STORES[i];
+        uint8_t bytes[4] = {
+            (uint8_t)value, (uint8_t)(value >> 8),
+            (uint8_t)(value >> 16), (uint8_t)(value >> 24)
+        };
+        if (a64_static_decode_memory_hits_bytes_at(
+                bytes, 1u, false, 0x1300u, &block)) {
+            fprintf(stderr,
+                    "jitbench: product decoder accepted invalid A32 store %u\n",
+                    i);
+            return false;
+        }
+    }
+    {
+        uint32_t values[2] = {
+            VALID_A32_STORES[0], A32_DP_IMM(14, 4, 0, 0, 0, 0, 1)
+        };
+        uint8_t bytes[8];
+        for (i = 0u; i < 2u; i++) {
+            bytes[i * 4u + 0u] = (uint8_t)values[i];
+            bytes[i * 4u + 1u] = (uint8_t)(values[i] >> 8);
+            bytes[i * 4u + 2u] = (uint8_t)(values[i] >> 16);
+            bytes[i * 4u + 3u] = (uint8_t)(values[i] >> 24);
+        }
+        if (a64_static_decode_memory_hits_bytes_at(
+                bytes, 2u, false, 0x1400u, &block)) {
+            fprintf(stderr,
+                    "jitbench: product decoder accepted a mid-block store\n");
+            return false;
+        }
+    }
+
+    for (i = 0u; i < sizeof VALID_THUMB_STORES /
+                         sizeof VALID_THUMB_STORES[0]; i++) {
+        uint16_t value = VALID_THUMB_STORES[i];
+        const uint32_t pc = UINT32_C(0x1500) + i * 2u;
+        uint8_t bytes[2] = {(uint8_t)value, (uint8_t)(value >> 8)};
+        if (a64_static_decode_read_hits_bytes_at(
+                bytes, 1u, true, pc, &block) ||
+            !a64_static_decode_memory_hits_bytes_at(
+                bytes, 1u, true, pc, &block) ||
+            block.insn_count != 1u ||
+            block.uop_count != VALID_THUMB_STORE_UOPS[i] ||
+            block.start_pc != pc || block.exit_pc != pc + 2u ||
+            !block.thumb || !block.touches_memory || block.direct_reads ||
+            !block.direct_writes || !block.runtime_guards || block.vfp ||
+            block.uops[block.uop_count - 2u].handler == 0u ||
+            block.uops[block.uop_count - 2u].pc_value != pc ||
+            block.uops[block.uop_count - 2u].metadata != UINT32_C(0x101)) {
+            fprintf(stderr,
+                    "jitbench: product Thumb store shape failed at %u\n", i);
+            return false;
+        }
+    }
+    {
+        uint16_t values[2] = {
+            VALID_THUMB_STORES[0], UINT16_C(0x3001)
+        };
+        uint8_t bytes[4] = {
+            (uint8_t)values[0], (uint8_t)(values[0] >> 8),
+            (uint8_t)values[1], (uint8_t)(values[1] >> 8)
+        };
+        if (a64_static_decode_memory_hits_bytes_at(
+                bytes, 2u, true, 0x1600u, &block)) {
+            fprintf(stderr,
+                    "jitbench: product decoder accepted a mid-block Thumb store\n");
+            return false;
+        }
+    }
+    printf("STATIC-STORE-SHAPE exact=yes a32=6 thumb=7 terminal=yes "
+           "read-contract=preserved handlers=%u\n",
+           A64_STATIC_HANDLER_COUNT);
 
     if (!a64_static_decode_read_hits_bytes_at(
             read_bytes, (unsigned)(sizeof A32_READ_HITS /
@@ -1041,6 +1181,14 @@ static void oracle_warm_dread(arm_cpu_t *cpu, uint32_t va) {
     cpu->dread[slot].gen = cpu->tlb_gen;
 }
 
+static void oracle_warm_dwrite(arm_cpu_t *cpu, uint32_t va, bool priv) {
+    const uint32_t block = va & ~UINT32_C(0x3ff);
+    const unsigned slot = oracle_dread_slot(va, priv);
+    cpu->dwrite[slot].host = &g_ram[block];
+    cpu->dwrite[slot].tag = block | (priv ? 1u : 0u);
+    cpu->dwrite[slot].gen = cpu->tlb_gen;
+}
+
 static void seed_read_oracle(arm_cpu_t *cpu, const uint32_t *program,
                              unsigned insns, uint32_t pc, bool warm) {
     seed_cpu_at(cpu, program, insns, false, pc);
@@ -1203,6 +1351,219 @@ static bool validate_static_read_oracles(void) {
 
     printf("STATIC-READ-ORACLE exact=yes hits=18 thumb=yes zero-prefix=yes "
            "partial-prefix=yes\n");
+    return true;
+}
+
+static bool validate_static_store_oracles(void) {
+    typedef struct {
+        const char *name;
+        uint32_t insn;
+        bool thumb;
+        unsigned rn;
+        uint32_t base;
+        uint32_t va;
+        bool access_priv;
+        bool executes;
+    } store_case_t;
+    const uint32_t base = DATA_BASE + UINT32_C(0x400);
+    const uint32_t stack = base + UINT32_C(0x100);
+    const store_case_t cases[] = {
+        {"a32-imm", A32_SINGLE_MODE2(14,0,1,1,0,0,0,4,3,12),
+         false, 4u, base, base + 12u, true, true},
+        {"a32-byte-pre-wb", A32_SINGLE_MODE2(1,0,1,0,1,1,0,4,3,1),
+         false, 4u, base, base - 1u, true, true},
+        {"a32-reg-post", A32_SINGLE_MODE2(14,1,0,1,0,0,0,4,3,0x102),
+         false, 4u, base, base, true, true},
+        {"a32-strt", A32_SINGLE_MODE2(14,0,0,1,0,1,0,4,3,4),
+         false, 4u, base, base, false, true},
+        {"a32-pc-source", A32_SINGLE_MODE2(14,0,1,1,0,0,0,4,15,16),
+         false, 4u, base, base + 16u, true, true},
+        {"a32-failed-condition", A32_SINGLE_MODE2(0,0,1,1,0,0,0,4,3,20),
+         false, 4u, base, base + 20u, true, false},
+        {"a32-high-wb", A32_SINGLE_MODE2(14,0,1,1,0,1,0,12,14,8),
+         false, 12u, base, base + 8u, true, true},
+        {"a32-sp-wb", A32_SINGLE_MODE2(14,0,1,1,0,1,0,13,8,4),
+         false, 13u, stack, stack + 4u, true, true},
+        {"thumb-reg-word", UINT32_C(0x508b),
+         true, 1u, base, base + 4u, true, true},
+        {"thumb-reg-half", UINT32_C(0x528b),
+         true, 1u, base, base + 4u, true, true},
+        {"thumb-reg-byte", UINT32_C(0x548b),
+         true, 1u, base, base + 4u, true, true},
+        {"thumb-imm-word", UINT32_C(0x604b),
+         true, 1u, base, base + 4u, true, true},
+        {"thumb-imm-byte", UINT32_C(0x704b),
+         true, 1u, base, base + 1u, true, true},
+        {"thumb-imm-half", UINT32_C(0x804b),
+         true, 1u, base, base + 2u, true, true},
+        {"thumb-sp-word", UINT32_C(0x9301),
+         true, 13u, stack, stack + 4u, true, true},
+    };
+    arm_bus_t write_bus = g_bus;
+    uint8_t *baseline = (uint8_t *)malloc(sizeof g_ram);
+    unsigned hit_cases = 0u;
+
+    if (!baseline) {
+        fprintf(stderr, "jitbench: store-oracle allocation failed\n");
+        return false;
+    }
+    write_bus.host_ram_write = mem_host_ram;
+
+    for (unsigned i = 0u; i < sizeof cases / sizeof cases[0]; i++) {
+        const store_case_t *sc = &cases[i];
+        const uint32_t pc = UINT32_C(0x10000);
+        arm_cpu_t reference, statik;
+        final_state_t reference_state, static_state;
+        a64_static_block_t block;
+        arm_status_t status;
+        unsigned completed = 0u;
+        uint8_t bytes[4];
+
+        if (sc->thumb) {
+            uint16_t insn = (uint16_t)sc->insn;
+            seed_cpu_at(&reference, &insn, 1u, true, pc);
+            bytes[0] = (uint8_t)insn;
+            bytes[1] = (uint8_t)(insn >> 8);
+        } else {
+            seed_cpu_at(&reference, &sc->insn, 1u, false, pc);
+            bytes[0] = (uint8_t)sc->insn;
+            bytes[1] = (uint8_t)(sc->insn >> 8);
+            bytes[2] = (uint8_t)(sc->insn >> 16);
+            bytes[3] = (uint8_t)(sc->insn >> 24);
+        }
+        reference.bus = &write_bus;
+        reference.r[1] = base;
+        reference.r[2] = 4u;
+        reference.r[3] = UINT32_C(0x11223344);
+        reference.r[8] = UINT32_C(0x89abcdef);
+        reference.r[14] = UINT32_C(0x55667788);
+        reference.r[sc->rn] = sc->base;
+        oracle_warm_dwrite(&reference, sc->va, sc->access_priv);
+        statik = reference;
+        memcpy(baseline, g_ram, sizeof g_ram);
+
+        if (!a64_static_decode_memory_hits_bytes_at(
+                bytes, 1u, sc->thumb, pc, &block) ||
+            !block.direct_writes ||
+            a64_static_decode_read_hits_bytes_at(
+                bytes, 1u, sc->thumb, pc, &block)) {
+            fprintf(stderr, "jitbench: store oracle decode failed for %s\n",
+                    sc->name);
+            free(baseline);
+            return false;
+        }
+        /* The read-only refusal zeroes its output, so decode the executable
+         * memory contract again before running it. */
+        if (!a64_static_decode_memory_hits_bytes_at(
+                bytes, 1u, sc->thumb, pc, &block)) {
+            free(baseline);
+            return false;
+        }
+
+        status = arm_step(&reference);
+        capture_state(&reference_state, &reference, status, JIT_EXIT_NEXT);
+        memcpy(g_ram, baseline, sizeof g_ram);
+        if (!a64_static_run_memory_hits(&statik, &block, g_ram, sizeof g_ram,
+                                        &completed)) {
+            fprintf(stderr, "jitbench: signed store refused for %s\n",
+                    sc->name);
+            free(baseline);
+            return false;
+        }
+        capture_state(&static_state, &statik, ARM_OK, JIT_EXIT_NEXT);
+        if (status != ARM_OK || completed != 1u ||
+            !architectural_states_equal(&reference_state, &static_state) ||
+            reference.dwrite_hits != statik.dwrite_hits ||
+            reference.dwrite_misses != statik.dwrite_misses ||
+            statik.dwrite_hits != (sc->executes ? 1u : 0u) ||
+            statik.dwrite_misses != 0u) {
+            fprintf(stderr, "jitbench: signed store mismatch for %s\n",
+                    sc->name);
+            free(baseline);
+            return false;
+        }
+        if (sc->executes) hit_cases++;
+    }
+
+    /* A guarded miss after one preceding instruction must retire exactly that
+     * prefix, without counting or performing the store. arm_step then owns the
+     * single slow miss/fill and both CPUs converge exactly. */
+    {
+        const uint32_t program[] = {
+            A32_DP_IMM(14, 4, 0, 0, 0, 0, 1),
+            A32_SINGLE_MODE2(14, 0, 1, 1, 0, 0, 0, 4, 3, 0),
+        };
+        const uint32_t pc = UINT32_C(0x11000);
+        arm_cpu_t reference, statik;
+        a64_static_block_t block;
+        unsigned completed = 0u;
+
+        seed_cpu_at(&reference, program, 2u, false, pc);
+        reference.bus = &write_bus;
+        reference.r[3] = UINT32_C(0xa5a55a5a);
+        reference.r[4] = base;
+        statik = reference;
+        if (!a64_static_decode_memory_hits_bytes_at(
+                &g_ram[pc], 2u, false, pc, &block) ||
+            arm_step(&reference) != ARM_OK ||
+            !a64_static_run_memory_hits(&statik, &block, g_ram, sizeof g_ram,
+                                        &completed) ||
+            completed != 1u ||
+            memcmp(reference.r, statik.r, sizeof statik.r) != 0 ||
+            reference.cpsr != statik.cpsr ||
+            reference.cycles != statik.cycles ||
+            statik.dwrite_hits != 0u || statik.dwrite_misses != 0u ||
+            arm_step(&reference) != ARM_OK || arm_step(&statik) != ARM_OK ||
+            memcmp(reference.r, statik.r, sizeof statik.r) != 0 ||
+            reference.cpsr != statik.cpsr ||
+            reference.cycles != statik.cycles ||
+            reference.dwrite_hits != statik.dwrite_hits ||
+            reference.dwrite_misses != statik.dwrite_misses ||
+            statik.dwrite_hits != 0u || statik.dwrite_misses != 1u) {
+            fprintf(stderr, "jitbench: partial-prefix store miss mismatch\n");
+            free(baseline);
+            return false;
+        }
+    }
+
+    /* Alignment-dependent ARMv6 behavior is never guessed in signed text. */
+    {
+        const uint32_t insn =
+            A32_SINGLE_MODE2(14, 0, 1, 1, 0, 0, 0, 4, 3, 0);
+        const uint32_t pc = UINT32_C(0x12000);
+        arm_cpu_t statik, before;
+        a64_static_block_t block;
+        unsigned completed = 99u;
+        uint64_t ram_before;
+
+        seed_cpu_at(&statik, &insn, 1u, false, pc);
+        statik.bus = &write_bus;
+        statik.r[3] = UINT32_C(0x12345678);
+        statik.r[4] = base + 1u;
+        oracle_warm_dwrite(&statik, statik.r[4], true);
+        before = statik;
+        ram_before = hash_ram();
+        if (!a64_static_decode_memory_hits_bytes_at(
+                &g_ram[pc], 1u, false, pc, &block) ||
+            !a64_static_run_memory_hits(&statik, &block, g_ram, sizeof g_ram,
+                                        &completed) ||
+            completed != 0u ||
+            memcmp(statik.r, before.r, sizeof statik.r) != 0 ||
+            statik.cpsr != before.cpsr || statik.cycles != before.cycles ||
+            statik.dwrite_hits != before.dwrite_hits ||
+            statik.dwrite_misses != before.dwrite_misses ||
+            hash_ram() != ram_before) {
+            fprintf(stderr, "jitbench: unaligned store refusal changed state\n");
+            free(baseline);
+            return false;
+        }
+    }
+
+    free(baseline);
+    printf("STATIC-STORE-ORACLE exact=yes cases=%zu hits=%u "
+           "pc-source=yes writeback=yes unprivileged=yes thumb=yes "
+           "zero-prefix=yes partial-prefix=yes\n",
+           sizeof cases / sizeof cases[0], hit_cases);
     return true;
 }
 
@@ -2730,6 +3091,7 @@ int main(int argc, char **argv) {
         return 1;
     }
     if (!validate_static_read_oracles()) return 1;
+    if (!validate_static_store_oracles()) return 1;
     if (!validate_static_vfp_register_oracles()) return 1;
     if (!validate_static_vfp_compare_oracles()) return 1;
     if (!validate_static_vfp_widen_oracles()) return 1;

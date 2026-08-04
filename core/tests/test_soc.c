@@ -3251,6 +3251,137 @@ static void test_signed_static_a64_soc_oracle(void) {
     s5l8900_free(&reference);
 }
 
+/* A direct signed store may rewrite code, but it is always the terminal
+ * semantic instruction in its head. This oracle first caches the next head,
+ * fills DWRITE with a no-op-equivalent store, then uses a signed hit to replace
+ * that cached ADD with SUB. The graph must reject the stale raw witness; the
+ * exact reference snapshot and zero chained stale edge prove that it did. */
+static void test_signed_static_a64_store_oracle(void) {
+    static const uint32_t program[] = {
+        UINT32_C(0xe5801000), /* 00 STR r1,[r0] */
+        UINT32_C(0xe2822001), /* 04 ADD r2,r2,#1 */
+        UINT32_C(0xeafffffd), /* 08 B   0x04 */
+    };
+    const uint32_t replacement = UINT32_C(0xe2422001); /* SUB r2,r2,#1 */
+    s5l8900_t fast = {0};
+    s5l8900_t reference = {0};
+    uint8_t *fast_snapshot = NULL;
+    uint8_t *reference_snapshot = NULL;
+    size_t fast_len = 0u;
+    size_t reference_len = 0u;
+    arm_status_t fast_status = ARM_OK;
+    arm_status_t reference_status = ARM_OK;
+    bool fast_ok;
+    bool reference_ok;
+
+    if (!s5l8900_static_a64_available()) {
+        printf("  STATIC-A64-STORE-ORACLE SKIP: no signed AArch64 handlers\n");
+        return;
+    }
+
+    fast_ok = s5l8900_init(&fast, 0u, 1u << 20);
+    reference_ok = s5l8900_init(&reference, 0u, 1u << 20);
+    CHECK(fast_ok && reference_ok, "store-oracle machine init failed");
+    if (!fast_ok || !reference_ok) {
+        if (fast_ok) s5l8900_free(&fast);
+        if (reference_ok) s5l8900_free(&reference);
+        return;
+    }
+
+    s5l8900_load(&fast, 0u, program, sizeof program);
+    s5l8900_load(&reference, 0u, program, sizeof program);
+    s5l8900_tick(&fast, 0u);
+    s5l8900_tick(&reference, 0u);
+    fast.cpu.cpsr = ARM_MODE_SYS;
+    reference.cpu.cpsr = ARM_MODE_SYS;
+    fast.cpu.r[15] = reference.cpu.r[15] = 4u;
+    fast.cpu.r[2] = reference.cpu.r[2] = 0u;
+
+    CHECK(s5l8900_set_direct_ram_writes(&fast, true),
+          "store oracle could not opt into direct RAM writes");
+    CHECK(s5l8900_static_a64_set_enabled(&fast, true),
+          "store oracle signed engine refused an available host");
+    CHECK(s5l8900_static_a64_set_graph(&fast, true),
+          "store oracle graph engine refused an available host");
+
+    /* Revisit 0x04 enough times to publish it as a hot graph node. */
+    CHECK(s5l8900_run(&fast, 32u, &fast_status) == 32u,
+          "store-oracle signed warm-up stopped early");
+    CHECK(s5l8900_run(&reference, 32u, &reference_status) == 32u,
+          "store-oracle reference warm-up stopped early");
+    CHECK(s5l8900_static_a64_graph_chained_blocks(&fast) != 0u,
+          "store-oracle warm-up published no graph edge");
+
+    /* The first store writes the same ADD bytes and deliberately misses, so
+     * arm_step performs the write and installs the exact DWRITE block. */
+    fast.cpu.r[15] = reference.cpu.r[15] = 0u;
+    fast.cpu.r[0] = reference.cpu.r[0] = 4u;
+    fast.cpu.r[1] = reference.cpu.r[1] = program[1];
+    CHECK(s5l8900_run(&fast, 1u, &fast_status) == 1u,
+          "store-oracle signed DWRITE fill stopped early");
+    CHECK(s5l8900_run(&reference, 1u, &reference_status) == 1u,
+          "store-oracle reference fill stopped early");
+    CHECK(fast.cpu.dwrite_misses == 1u && fast.cpu.dwrite_hits == 0u,
+          "store-oracle DWRITE fill accounting is %llu/%llu",
+          (unsigned long long)fast.cpu.dwrite_hits,
+          (unsigned long long)fast.cpu.dwrite_misses);
+
+    /* This hit changes 0x04 while its old ADD node remains cached. With a
+     * two-instruction caller budget, an accepted stale edge would execute ADD;
+     * the correct raw mismatch returns to C and re-decodes SUB instead. */
+    fast.cpu.r[15] = reference.cpu.r[15] = 0u;
+    fast.cpu.r[1] = reference.cpu.r[1] = replacement;
+    uint64_t hits_before = fast.cpu.dwrite_hits;
+    uint64_t retired_before = s5l8900_static_a64_retired(&fast);
+    uint64_t graph_before = s5l8900_static_a64_graph_chained_blocks(&fast);
+    CHECK(s5l8900_run(&fast, 2u, &fast_status) == 2u,
+          "store-oracle signed SMC run stopped early");
+    CHECK(s5l8900_run(&reference, 2u, &reference_status) == 2u,
+          "store-oracle reference SMC run stopped early");
+    uint64_t hit_delta = fast.cpu.dwrite_hits - hits_before;
+    uint64_t retired_delta =
+        s5l8900_static_a64_retired(&fast) - retired_before;
+    uint64_t graph_delta =
+        s5l8900_static_a64_graph_chained_blocks(&fast) - graph_before;
+    CHECK(hit_delta == 1u, "signed SMC store produced %llu DWRITE hits",
+          (unsigned long long)hit_delta);
+    CHECK(retired_delta == 2u,
+          "signed SMC store/redecode retired %llu instructions",
+          (unsigned long long)retired_delta);
+    CHECK(graph_delta == 0u,
+          "signed SMC store crossed %llu stale graph edges",
+          (unsigned long long)graph_delta);
+    CHECK(fast_status == reference_status && fast.cpu.r[2] == reference.cpu.r[2],
+          "store-oracle state diverged before serialization");
+
+    snapshot_status_t fast_snapshot_status =
+        snapshot_save_mem(&fast, &fast_snapshot, &fast_len);
+    snapshot_status_t reference_snapshot_status =
+        snapshot_save_mem(&reference, &reference_snapshot, &reference_len);
+    bool exact = fast_snapshot_status == SNAP_OK &&
+        reference_snapshot_status == SNAP_OK && fast_snapshot &&
+        reference_snapshot && fast_len == reference_len &&
+        memcmp(fast_snapshot, reference_snapshot, fast_len) == 0;
+    CHECK(fast_snapshot_status == SNAP_OK,
+          "could not serialize signed store machine: %s",
+          snapshot_strerror(fast_snapshot_status));
+    CHECK(reference_snapshot_status == SNAP_OK,
+          "could not serialize reference store machine: %s",
+          snapshot_strerror(reference_snapshot_status));
+    CHECK(exact, "signed and reference store snapshots differ");
+
+    if (exact && hit_delta == 1u && retired_delta == 2u &&
+        graph_delta == 0u) {
+        printf("  STATIC-A64-STORE-ORACLE exact=yes dwrite-hit=1 "
+               "terminal=yes smc-witness=yes stale-edges=0\n");
+    }
+
+    free(fast_snapshot);
+    free(reference_snapshot);
+    s5l8900_free(&fast);
+    s5l8900_free(&reference);
+}
+
 /* A control-flow-heavy loop proves that the product cache and decoded runner
  * actually retire conditional B/BL records, rather than obtaining an exact
  * snapshot only by falling back at every branch. Eleven instructions execute
@@ -4154,6 +4285,7 @@ int main(void) {
     test_bounds_check_cannot_overflow();
     test_bare_metal_uart_hello();
     test_signed_static_a64_soc_oracle();
+    test_signed_static_a64_store_oracle();
     test_signed_static_a64_branch_oracle();
     test_signed_static_a64_chain_bound_oracle();
     test_signed_static_a64_graph_bound_oracle();

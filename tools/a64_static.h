@@ -27,10 +27,10 @@
  * default; the iOS product explicitly selects this ceiling after a same-binary
  * Apple-host end-to-end gate. */
 #define A64_STATIC_MAX_CHAIN_INSNS 256u
-/* A conditional register-offset A32 load uses a guard, shifter, address and
- * read record. The final slot is the fixed block exit. */
+/* A conditional register-offset A32 load/store uses a guard, shifter, address
+ * and memory record. The final slot is the fixed block exit. */
 #define A64_STATIC_MAX_UOPS (A64_STATIC_MAX_INSNS * 4u + 1u)
-#define A64_STATIC_HANDLER_COUNT 24646u
+#define A64_STATIC_HANDLER_COUNT 26198u
 #define A64_STATIC_GRAPH_SLOTS 512u
 
 typedef struct {
@@ -50,6 +50,7 @@ typedef struct {
     bool dynamic_exit;
     bool touches_memory;
     bool direct_reads;
+    bool direct_writes;
     bool runtime_guards;
     bool vfp;
 } a64_static_block_t;
@@ -121,6 +122,20 @@ bool a64_static_decode_read_hits_bytes_at(const uint8_t *program,
                                           uint32_t pc,
                                           a64_static_block_t *out);
 
+/* Superset of the read-hit product decoder. In addition to the exact guarded
+ * read/VFP subset above, this admits bounded A32 STR/STRB addressing-mode-2
+ * forms and ordinary Thumb STR/STRB/STRH forms when, and only when, the store
+ * is the final semantic instruction in the decoded head. A hit uses the CPU's
+ * separately consent-gated data-write cache; a miss changes no guest state and
+ * returns to arm_step(), which owns translation, faults, MMIO and observers.
+ * Ending the head at every store makes self-modifying code fail closed: no
+ * following cached head can execute before its complete raw-byte witness has
+ * been checked against the now-live RAM bytes. */
+bool a64_static_decode_memory_hits_bytes_at(const uint8_t *program,
+                                            unsigned insns, bool thumb,
+                                            uint32_t pc,
+                                            a64_static_block_t *out);
+
 /* Compatibility shorthand for a block beginning at address zero. */
 bool a64_static_decode(const void *program, unsigned insns, bool thumb,
                        a64_static_block_t *out);
@@ -145,6 +160,15 @@ bool a64_static_run_read_hits(arm_cpu_t *cpu,
                               uint8_t *ram, size_t ram_size,
                               unsigned *completed);
 
+/* Execute one block returned by a64_static_decode_memory_hits_bytes_at().
+ * Direct stores are possible only while cpu->bus->host_ram_write is live and
+ * the exact VA/privilege/generation DWRITE entry hits. On refusal, `completed`
+ * has the same exact-prefix meaning as the read-only runner. */
+bool a64_static_run_memory_hits(arm_cpu_t *cpu,
+                                const a64_static_block_t *block,
+                                uint8_t *ram, size_t ram_size,
+                                unsigned *completed);
+
 /* Execute an unmodified block returned by
  * a64_static_decode_read_hits_bytes_at(). This retains the dynamic CPU/PC,
  * RAM and final-record checks but skips the full per-uop structural rescan;
@@ -155,14 +179,20 @@ bool a64_static_run_read_hits_decoded(arm_cpu_t *cpu,
                                       uint8_t *ram, size_t ram_size,
                                       unsigned *completed);
 
+bool a64_static_run_memory_hits_decoded(arm_cpu_t *cpu,
+                                        const a64_static_block_t *block,
+                                        uint8_t *ram, size_t ram_size,
+                                        unsigned *completed);
+
 /* Execute one or more product-decoded blocks while keeping the pinned guest
  * register context live inside the signed function. `first` has already been
  * selected for cpu->r[15]. After each full block, `next` must repeat the
  * product's interrupt/fetch/cache/raw-byte checks and may select a block no
- * longer than `remaining`. The total never exceeds `budget`. Runtime read/VFP
- * guard misses stop at the exact completed prefix; false is reserved for a
- * pre-execution contract refusal and leaves guest state unchanged. `blocks`
- * counts only block entries that retired at least one instruction. */
+ * longer than `remaining`. The total never exceeds `budget`. Runtime
+ * read/write/VFP guard misses stop at the exact completed prefix; false is
+ * reserved for a pre-execution contract refusal and leaves guest state
+ * unchanged. `blocks` counts only block entries that retired at least one
+ * instruction. */
 bool a64_static_run_read_hits_chain(arm_cpu_t *cpu,
                                     const a64_static_block_t *first,
                                     uint8_t *ram, size_t ram_size,
@@ -171,16 +201,32 @@ bool a64_static_run_read_hits_chain(arm_cpu_t *cpu,
                                     void *opaque, unsigned *completed,
                                     unsigned *blocks);
 
+bool a64_static_run_memory_hits_chain(arm_cpu_t *cpu,
+                                      const a64_static_block_t *first,
+                                      uint8_t *ram, size_t ram_size,
+                                      unsigned budget,
+                                      a64_static_chain_next_fn next,
+                                      void *opaque, unsigned *completed,
+                                      unsigned *blocks);
+
 /* Callback-free variant. `nodes` is the engine's fixed 512-slot table for the
  * current direct-offset head index. Generated assembly accepts a next head
  * only when its PC/fetch pointer/generation/privilege/state fields and complete
  * executing-block raw-byte witness match, and otherwise returns the exact
  * completed prefix. Bytes after the cached executable prefix are deliberately
  * outside that witness: changing them cannot alter the prefix's semantics and
- * arm_step() still owns the following instruction.
+ * arm_step() still owns the following instruction. Every admitted store ends
+ * its head, so a store that changes code reaches this witness before another
+ * cached head can execute.
  * Stable interrupt/MMU facts are proved by the caller before entry; the signed
  * subset cannot mutate them and no device ticks occur inside the bounded run. */
 bool a64_static_run_read_hits_graph(
+    arm_cpu_t *cpu, const a64_static_block_t *first,
+    uint8_t *ram, size_t ram_size, unsigned budget,
+    const a64_static_graph_node_t nodes[A64_STATIC_GRAPH_SLOTS],
+    unsigned *completed, unsigned *blocks);
+
+bool a64_static_run_memory_hits_graph(
     arm_cpu_t *cpu, const a64_static_block_t *first,
     uint8_t *ram, size_t ram_size, unsigned budget,
     const a64_static_graph_node_t nodes[A64_STATIC_GRAPH_SLOTS],

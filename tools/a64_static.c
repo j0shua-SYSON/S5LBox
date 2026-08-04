@@ -38,8 +38,13 @@ enum {
     A64S_DP_REG = A64S_SHIFT_REG + 2u * 4u * 15u * 15u,
     A64S_ADDR_IMM = A64S_DP_REG + 16u * 2u * 15u * 16u,
     A64S_ADDR_REG = A64S_ADDR_IMM + 2u * 16u,
-    A64S_DIRECT_READ = A64S_ADDR_REG + 2u * 16u,
-    A64S_VFP_CORE_TO_S = A64S_DIRECT_READ + A64S_READ_KIND_COUNT * 15u,
+    A64S_POST_ADDR_IMM = A64S_ADDR_REG + 2u * 16u,
+    A64S_POST_ADDR_REG = A64S_POST_ADDR_IMM + 2u * 16u,
+    A64S_DIRECT_READ = A64S_POST_ADDR_REG + 2u * 16u,
+    A64S_DIRECT_WRITE = A64S_DIRECT_READ + A64S_READ_KIND_COUNT * 15u,
+    A64S_DIRECT_WRITE_WB = A64S_DIRECT_WRITE + 3u * 16u,
+    A64S_DIRECT_WRITE_WB_UNPRIV = A64S_DIRECT_WRITE_WB + 3u * 16u * 15u,
+    A64S_VFP_CORE_TO_S = A64S_DIRECT_WRITE_WB_UNPRIV + 3u * 16u * 15u,
     A64S_VFP_S_TO_CORE = A64S_VFP_CORE_TO_S + 15u,
     A64S_VFP_CORE_TO_PAIR = A64S_VFP_S_TO_CORE + 15u,
     A64S_VFP_PAIR_TO_CORE = A64S_VFP_CORE_TO_PAIR + 15u * 15u,
@@ -85,6 +90,8 @@ typedef struct {
     uint32_t *vfp_fpexc;
     uint32_t *vfp_fpscr;
     uint32_t vfp_access;
+    const void *dwrite;
+    uint64_t *dwrite_hits;
 } a64_static_read_context_t;
 
 _Static_assert(offsetof(arm_cpu_t, r) == 0u,
@@ -97,7 +104,15 @@ _Static_assert(sizeof(((arm_cpu_t *)0)->dread[0]) == 16u &&
                offsetof(arm_cpu_t, dread[0].gen) ==
                    offsetof(arm_cpu_t, dread) + 12u,
                "signed handlers and data-read cache layout disagree");
-_Static_assert(sizeof(a64_static_read_context_t) == 56u &&
+_Static_assert(sizeof(((arm_cpu_t *)0)->dwrite[0]) == 16u &&
+               offsetof(arm_cpu_t, dwrite[0].host) ==
+                   offsetof(arm_cpu_t, dwrite) &&
+               offsetof(arm_cpu_t, dwrite[0].tag) ==
+                   offsetof(arm_cpu_t, dwrite) + 8u &&
+               offsetof(arm_cpu_t, dwrite[0].gen) ==
+                   offsetof(arm_cpu_t, dwrite) + 12u,
+               "signed handlers and data-write cache layout disagree");
+_Static_assert(sizeof(a64_static_read_context_t) == 72u &&
                offsetof(a64_static_read_context_t, dread) == 0u &&
                offsetof(a64_static_read_context_t, hits) == 8u &&
                offsetof(a64_static_read_context_t, generation) == 16u &&
@@ -105,8 +120,10 @@ _Static_assert(sizeof(a64_static_read_context_t) == 56u &&
                offsetof(a64_static_read_context_t, vfp_s) == 24u &&
                offsetof(a64_static_read_context_t, vfp_fpexc) == 32u &&
                offsetof(a64_static_read_context_t, vfp_fpscr) == 40u &&
-               offsetof(a64_static_read_context_t, vfp_access) == 48u,
-               "signed read context layout changed");
+               offsetof(a64_static_read_context_t, vfp_access) == 48u &&
+               offsetof(a64_static_read_context_t, dwrite) == 56u &&
+               offsetof(a64_static_read_context_t, dwrite_hits) == 64u,
+               "signed memory context layout changed");
 _Static_assert(ARM1176_FPSID == UINT32_C(0x410120b4) &&
                ARM_FPEXC_EN == (1u << 30) &&
                ARM_FPSCR_LEN == UINT32_C(0x00070000) &&
@@ -188,8 +205,27 @@ static uint32_t addr_reg(bool up, unsigned rn) {
     return A64S_ADDR_REG + (up ? 16u : 0u) + rn;
 }
 
+static uint32_t post_addr_imm(bool up, unsigned rn) {
+    return A64S_POST_ADDR_IMM + (up ? 16u : 0u) + rn;
+}
+
+static uint32_t post_addr_reg(bool up, unsigned rn) {
+    return A64S_POST_ADDR_REG + (up ? 16u : 0u) + rn;
+}
+
 static uint32_t direct_read(unsigned kind, unsigned rd) {
     return A64S_DIRECT_READ + kind * 15u + rd;
+}
+
+static uint32_t direct_write(unsigned kind, unsigned rd) {
+    return A64S_DIRECT_WRITE + kind * 16u + rd;
+}
+
+static uint32_t direct_write_wb(unsigned kind, unsigned rd, unsigned rn,
+                                bool unprivileged) {
+    unsigned base = unprivileged ? A64S_DIRECT_WRITE_WB_UNPRIV
+                                 : A64S_DIRECT_WRITE_WB;
+    return base + (kind * 16u + rd) * 15u + rn;
 }
 
 static uint32_t vfp_core_to_s(unsigned rt) {
@@ -229,18 +265,38 @@ static bool handler_is_dp_reg(uint32_t handler) {
 }
 
 static bool handler_is_addr_imm(uint32_t handler) {
-    return handler >= A64S_ADDR_IMM && handler < A64S_ADDR_REG;
+    return (handler >= A64S_ADDR_IMM && handler < A64S_ADDR_REG) ||
+           (handler >= A64S_POST_ADDR_IMM &&
+            handler < A64S_POST_ADDR_REG);
 }
 
 static bool handler_is_addr_reg(uint32_t handler) {
-    return handler >= A64S_ADDR_REG && handler < A64S_DIRECT_READ;
+    return (handler >= A64S_ADDR_REG &&
+            handler < A64S_POST_ADDR_IMM) ||
+           (handler >= A64S_POST_ADDR_REG &&
+            handler < A64S_DIRECT_READ);
 }
 
 static bool handler_is_direct_read(uint32_t handler) {
     return (handler >= A64S_DIRECT_READ &&
-            handler < A64S_VFP_CORE_TO_S) ||
+            handler < A64S_DIRECT_WRITE) ||
            (handler >= A64S_VFP_DIRECT_READ32 &&
             handler <= A64S_VFP_DIRECT_READ64);
+}
+
+static bool handler_is_direct_write(uint32_t handler) {
+    return handler >= A64S_DIRECT_WRITE &&
+           handler < A64S_VFP_CORE_TO_S;
+}
+
+static bool handler_is_direct_write_wb(uint32_t handler) {
+    return handler >= A64S_DIRECT_WRITE_WB &&
+           handler < A64S_VFP_CORE_TO_S;
+}
+
+static bool handler_is_direct_write_unpriv(uint32_t handler) {
+    return handler >= A64S_DIRECT_WRITE_WB_UNPRIV &&
+           handler < A64S_VFP_CORE_TO_S;
 }
 
 static bool handler_is_vfp(uint32_t handler) {
@@ -253,7 +309,8 @@ static bool handler_is_terminal_branch(uint32_t handler) {
 }
 
 static bool handler_is_runtime_guarded(uint32_t handler) {
-    return handler_is_direct_read(handler) || handler_is_vfp(handler);
+    return handler_is_direct_read(handler) ||
+           handler_is_direct_write(handler) || handler_is_vfp(handler);
 }
 
 static bool arm_dp_encoding(uint32_t insn) {
@@ -453,7 +510,7 @@ static bool decode_vfp_transfer(uint32_t insn, uint32_t pc_value,
 }
 
 static bool decode_arm(uint32_t insn, unsigned index, unsigned insns,
-                       uint32_t pc, bool read_hits,
+                       uint32_t pc, bool read_hits, bool write_hits,
                        a64_static_uop_t *out, unsigned *written) {
     unsigned condition = insn >> 28;
     unsigned count = 0u;
@@ -507,9 +564,21 @@ static bool decode_arm(uint32_t insn, unsigned index, unsigned insns,
 
         if (read_hits) {
             bool byte = (insn & (1u << 22)) != 0u;
-            if (!load || (insn & (1u << 24)) == 0u ||
-                (insn & (1u << 21)) != 0u || rd == 15u)
-                return false;
+            bool pre = (insn & (1u << 24)) != 0u;
+            bool writeback = !pre || (insn & (1u << 21)) != 0u;
+            bool unprivileged = !pre && (insn & (1u << 21)) != 0u;
+
+            if (load) {
+                if (!pre || writeback || rd == 15u) return false;
+            } else {
+                /* Stores deliberately terminate every signed head. On a hit,
+                 * the next raw-byte witness therefore observes SMC before any
+                 * following cached instruction can execute. */
+                if (!write_hits || index + 1u != insns ||
+                    (writeback && (rn == 15u || rn == rd)) ||
+                    (byte && rd == 15u))
+                    return false;
+            }
             if ((insn & (1u << 25)) != 0u) {
                 unsigned rm = insn & 15u;
                 unsigned type = (insn >> 5) & 3u;
@@ -518,16 +587,26 @@ static bool decode_arm(uint32_t insn, unsigned index, unsigned insns,
                     return false;
                 op[0].handler = shift_imm(false, type, rm, amount);
                 op[0].pc_value = pc + index * 4u + 8u;
-                op[1].handler = addr_reg(up, rn);
+                op[1].handler = pre ? addr_reg(up, rn)
+                                    : post_addr_reg(up, rn);
                 op[1].pc_value = pc + index * 4u + 8u;
-                op[2].handler = direct_read(byte, rd);
+                op[2].handler = load ? direct_read(byte, rd) :
+                    (writeback ? direct_write_wb(byte, rd, rn,
+                                                 unprivileged)
+                               : direct_write(byte, rd));
+                if (!load && writeback) op[2].immediate = pre ? 0u : 1u;
                 if (guard) guard->metadata = 3u;
                 *written = count + 3u;
             } else {
-                op[0].handler = addr_imm(up, rn);
+                op[0].handler = pre ? addr_imm(up, rn)
+                                    : post_addr_imm(up, rn);
                 op[0].immediate = offset;
                 op[0].pc_value = pc + index * 4u + 8u;
-                op[1].handler = direct_read(byte, rd);
+                op[1].handler = load ? direct_read(byte, rd) :
+                    (writeback ? direct_write_wb(byte, rd, rn,
+                                                 unprivileged)
+                               : direct_write(byte, rd));
+                if (!load && writeback) op[1].immediate = pre ? 0u : 1u;
                 if (guard) guard->metadata = 2u;
                 *written = count + 2u;
             }
@@ -666,9 +745,28 @@ static void thumb_emit_read_reg(a64_static_uop_t *out, unsigned kind,
     out[2].handler = direct_read(kind, rd);
 }
 
+static void thumb_emit_write_imm(a64_static_uop_t *out, unsigned kind,
+                                 unsigned rd, unsigned rn, uint32_t offset,
+                                 uint32_t pc_value) {
+    out[0].handler = addr_imm(true, rn);
+    out[0].immediate = offset;
+    out[0].pc_value = pc_value;
+    out[1].handler = direct_write(kind, rd);
+}
+
+static void thumb_emit_write_reg(a64_static_uop_t *out, unsigned kind,
+                                 unsigned rd, unsigned rn, unsigned rm,
+                                 uint32_t pc_value) {
+    out[0].handler = shift_imm(false, 0u, rm, 0u);
+    out[0].pc_value = pc_value;
+    out[1].handler = addr_reg(true, rn);
+    out[1].pc_value = pc_value;
+    out[2].handler = direct_write(kind, rd);
+}
+
 static bool decode_thumb(uint16_t insn, unsigned index, unsigned insns,
-                         uint32_t pc, bool read_hits, a64_static_uop_t *out,
-                         unsigned *written) {
+                         uint32_t pc, bool read_hits, bool write_hits,
+                         a64_static_uop_t *out, unsigned *written) {
     uint32_t pc_value = pc + index * 2u + 4u;
     if (!written) return false;
     *written = 0u;
@@ -816,20 +914,24 @@ static bool decode_thumb(uint16_t insn, unsigned index, unsigned insns,
         unsigned rn = (insn >> 3) & 7u;
         unsigned rm = (insn >> 6) & 7u;
         unsigned kind;
+        unsigned operation = (insn >> 9) & 7u;
         if (!read_hits) return false;
-        if ((insn & (1u << 9)) != 0u) {
-            switch ((insn >> 10) & 3u) {
-            case 1u: kind = A64S_READ_SIGNED_BYTE; break;
-            case 2u: kind = A64S_READ_HALF; break;
-            case 3u: kind = A64S_READ_SIGNED_HALF; break;
-            default: return false; /* STRH */
-            }
+        if (operation <= 2u) {
+            if (!write_hits || index + 1u != insns) return false;
+            kind = operation == 0u ? A64S_READ_WORD :
+                   operation == 1u ? A64S_READ_HALF : A64S_READ_BYTE;
+            thumb_emit_write_reg(out, kind, rd, rn, rm, pc_value);
         } else {
-            if ((insn & (1u << 11)) == 0u) return false;
-            kind = (insn & (1u << 10)) != 0u
-                ? A64S_READ_BYTE : A64S_READ_WORD;
+            switch (operation) {
+            case 3u: kind = A64S_READ_SIGNED_BYTE; break;
+            case 4u: kind = A64S_READ_WORD; break;
+            case 5u: kind = A64S_READ_HALF; break;
+            case 6u: kind = A64S_READ_BYTE; break;
+            case 7u: kind = A64S_READ_SIGNED_HALF; break;
+            default: return false;
+            }
+            thumb_emit_read_reg(out, kind, rd, rn, rm, pc_value);
         }
-        thumb_emit_read_reg(out, kind, rd, rn, rm, pc_value);
         *written = 3u;
         return true;
     }
@@ -839,9 +941,17 @@ static bool decode_thumb(uint16_t insn, unsigned index, unsigned insns,
         unsigned rn = (insn >> 3) & 7u;
         unsigned offset = (insn >> 6) & 31u;
         bool byte = (insn & (1u << 12)) != 0u;
-        if (!read_hits || (insn & (1u << 11)) == 0u) return false;
-        thumb_emit_read_imm(out, byte ? A64S_READ_BYTE : A64S_READ_WORD,
-                            rd, rn, byte ? offset : offset * 4u, pc_value);
+        bool load = (insn & (1u << 11)) != 0u;
+        if (!read_hits || (!load &&
+            (!write_hits || index + 1u != insns))) return false;
+        if (load)
+            thumb_emit_read_imm(out,
+                byte ? A64S_READ_BYTE : A64S_READ_WORD,
+                rd, rn, byte ? offset : offset * 4u, pc_value);
+        else
+            thumb_emit_write_imm(out,
+                byte ? A64S_READ_BYTE : A64S_READ_WORD,
+                rd, rn, byte ? offset : offset * 4u, pc_value);
         *written = 2u;
         return true;
     }
@@ -850,8 +960,15 @@ static bool decode_thumb(uint16_t insn, unsigned index, unsigned insns,
         unsigned rd = insn & 7u;
         unsigned rn = (insn >> 3) & 7u;
         unsigned offset = ((insn >> 6) & 31u) * 2u;
-        if (!read_hits || (insn & (1u << 11)) == 0u) return false;
-        thumb_emit_read_imm(out, A64S_READ_HALF, rd, rn, offset, pc_value);
+        bool load = (insn & (1u << 11)) != 0u;
+        if (!read_hits || (!load &&
+            (!write_hits || index + 1u != insns))) return false;
+        if (load)
+            thumb_emit_read_imm(out, A64S_READ_HALF, rd, rn, offset,
+                                pc_value);
+        else
+            thumb_emit_write_imm(out, A64S_READ_HALF, rd, rn, offset,
+                                 pc_value);
         *written = 2u;
         return true;
     }
@@ -860,9 +977,14 @@ static bool decode_thumb(uint16_t insn, unsigned index, unsigned insns,
         unsigned rd = (insn >> 8) & 7u;
         bool load = (insn & UINT16_C(0x0800)) != 0u;
         if (read_hits) {
-            if (!load) return false;
-            thumb_emit_read_imm(out, A64S_READ_WORD, rd, 13u,
-                                (uint32_t)(insn & 255u) * 4u, pc_value);
+            if (!load && (!write_hits || index + 1u != insns)) return false;
+            if (load)
+                thumb_emit_read_imm(out, A64S_READ_WORD, rd, 13u,
+                                    (uint32_t)(insn & 255u) * 4u, pc_value);
+            else
+                thumb_emit_write_imm(out, A64S_READ_WORD, rd, 13u,
+                                     (uint32_t)(insn & 255u) * 4u,
+                                     pc_value);
             *written = 2u;
             return true;
         }
@@ -897,6 +1019,7 @@ static bool decode_thumb(uint16_t insn, unsigned index, unsigned insns,
 
 static bool decode_program_at(const void *program, unsigned insns, bool thumb,
                               uint32_t pc, bool guest_bytes, bool read_hits,
+                              bool write_hits,
                               a64_static_block_t *out) {
     const uint8_t *bytes = (const uint8_t *)program;
     unsigned uop_count = 0u;
@@ -911,7 +1034,7 @@ static bool decode_program_at(const void *program, unsigned insns, bool thumb,
         if (thumb) {
             const uint8_t *p = bytes + i * 2u;
             ok = decode_thumb(guest_bytes ? read_le16(p) : read_native16(p),
-                              i, insns, pc, read_hits,
+                              i, insns, pc, read_hits, write_hits,
                               &out->uops[uop_count], &added);
             if (ok && read_hits)
                 for (unsigned j = 0u; j < added; j++)
@@ -921,7 +1044,7 @@ static bool decode_program_at(const void *program, unsigned insns, bool thumb,
         } else {
             const uint8_t *p = bytes + i * 4u;
             ok = decode_arm(guest_bytes ? read_le32(p) : read_native32(p),
-                            i, insns, pc, read_hits,
+                            i, insns, pc, read_hits, write_hits,
                             &out->uops[uop_count], &added);
         }
         if (!ok || !added || added > A64_STATIC_MAX_UOPS - uop_count) {
@@ -955,6 +1078,14 @@ static bool decode_program_at(const void *program, unsigned insns, bool thumb,
                 out->touches_memory = true;
                 out->direct_reads = true;
             }
+            if (handler_is_direct_write(handler)) {
+                if (i + 1u != insns) {
+                    memset(out, 0, sizeof *out);
+                    return false;
+                }
+                out->touches_memory = true;
+                out->direct_writes = true;
+            }
             if (handler_is_vfp(handler)) out->vfp = true;
         }
         uop_count += added;
@@ -979,20 +1110,31 @@ static bool decode_program_at(const void *program, unsigned insns, bool thumb,
 
 bool a64_static_decode_at(const void *program, unsigned insns, bool thumb,
                           uint32_t pc, a64_static_block_t *out) {
-    return decode_program_at(program, insns, thumb, pc, false, false, out);
+    return decode_program_at(program, insns, thumb, pc, false, false, false,
+                             out);
 }
 
 bool a64_static_decode_bytes_at(const uint8_t *program, unsigned insns,
                                 bool thumb, uint32_t pc,
                                 a64_static_block_t *out) {
-    return decode_program_at(program, insns, thumb, pc, true, false, out);
+    return decode_program_at(program, insns, thumb, pc, true, false, false,
+                             out);
 }
 
 bool a64_static_decode_read_hits_bytes_at(const uint8_t *program,
                                           unsigned insns, bool thumb,
                                           uint32_t pc,
                                           a64_static_block_t *out) {
-    return decode_program_at(program, insns, thumb, pc, true, true, out);
+    return decode_program_at(program, insns, thumb, pc, true, true, false,
+                             out);
+}
+
+bool a64_static_decode_memory_hits_bytes_at(const uint8_t *program,
+                                            unsigned insns, bool thumb,
+                                            uint32_t pc,
+                                            a64_static_block_t *out) {
+    return decode_program_at(program, insns, thumb, pc, true, true, true,
+                             out);
 }
 
 bool a64_static_decode(const void *program, unsigned insns, bool thumb,
@@ -1039,6 +1181,7 @@ typedef struct {
     uint32_t graph_fetch_block;
     uint32_t graph_fetch_gen;
     uint32_t graph_fetch_priv;
+    bool memory_hits;
 } a64_static_chain_context_t;
 
 /* These offsets are consumed by the build-time assembly generator. Keep the
@@ -1062,6 +1205,8 @@ _Static_assert(offsetof(a64_static_chain_context_t, graph_fetch_gen) == 92u,
                "chain graph-generation ABI offset");
 _Static_assert(offsetof(a64_static_chain_context_t, graph_fetch_priv) == 96u,
                "chain graph-privilege ABI offset");
+_Static_assert(offsetof(a64_static_chain_context_t, memory_hits) == 100u,
+               "chain memory-hit ABI offset");
 _Static_assert(sizeof(a64_static_graph_node_t) == 128u,
                "graph node ABI size");
 _Static_assert(offsetof(a64_static_graph_node_t, fetch_host) == 8u,
@@ -1086,7 +1231,8 @@ _Static_assert(offsetof(a64_static_graph_node_t, fetch_priv) == 104u &&
 
 typedef enum {
     A64S_RUN_FLAT,
-    A64S_RUN_READ_HITS
+    A64S_RUN_READ_HITS,
+    A64S_RUN_MEMORY_HITS
 } a64s_run_kind_t;
 
 static unsigned semantic_span(const a64_static_block_t *block, unsigned i,
@@ -1102,16 +1248,20 @@ static unsigned semantic_span(const a64_static_block_t *block, unsigned i,
             return 2u;
         if (i + 2u < end &&
             handler_is_addr_reg(block->uops[i + 1u].handler) &&
-            handler_is_direct_read(block->uops[i + 2u].handler))
+            (handler_is_direct_read(block->uops[i + 2u].handler) ||
+             handler_is_direct_write(block->uops[i + 2u].handler)))
             return 3u;
         return 0u;
     }
     if (handler_is_addr_imm(handler)) {
         return i + 1u < end &&
-               handler_is_direct_read(block->uops[i + 1u].handler) ? 2u : 0u;
+               (handler_is_direct_read(block->uops[i + 1u].handler) ||
+                handler_is_direct_write(block->uops[i + 1u].handler))
+                   ? 2u : 0u;
     }
     if (handler_is_dp_reg(handler) || handler_is_addr_reg(handler) ||
-        handler_is_direct_read(handler))
+        handler_is_direct_read(handler) ||
+        handler_is_direct_write(handler))
         return 0u;
     if (handler_is_vfp(handler)) return 1u;
     return 1u;
@@ -1126,6 +1276,7 @@ static bool validate_run(const arm_cpu_t *cpu,
     unsigned end;
     bool saw_flat_memory = false;
     bool saw_direct_read = false;
+    bool saw_direct_write = false;
     bool saw_runtime_guard = false;
     bool saw_vfp = false;
     bool saw_dynamic_exit = false;
@@ -1141,7 +1292,7 @@ static bool validate_run(const arm_cpu_t *cpu,
         ((cpu->cpsr & ARM_CPSR_T) != 0u) != block->thumb ||
         (blocks > 1u &&
          (block->dynamic_exit || block->exit_pc != block->start_pc)) ||
-        (kind == A64S_RUN_READ_HITS && blocks != 1u) ||
+        (kind != A64S_RUN_FLAT && blocks != 1u) ||
         !ram_size || (ram_size & (ram_size - 1u)) != 0u ||
         ram_size - 1u > UINT32_MAX)
         return false;
@@ -1169,6 +1320,16 @@ static bool validate_run(const arm_cpu_t *cpu,
                 return false;
         }
         if (handler_is_direct_read(handler)) saw_direct_read = true;
+        if (handler_is_direct_write(handler)) {
+            if (saw_direct_write || j + 1u != end ||
+                (handler_is_direct_write_wb(handler)
+                     ? block->uops[j].immediate > 1u
+                     : block->uops[j].immediate != 0u) ||
+                (handler_is_direct_write_unpriv(handler) &&
+                 block->uops[j].immediate != 1u))
+                return false;
+            saw_direct_write = true;
+        }
         if (handler_is_vfp(handler)) saw_vfp = true;
         if (handler_is_terminal_branch(handler)) {
             if (saw_dynamic_exit || j + 1u != end || block->thumb ||
@@ -1184,14 +1345,18 @@ static bool validate_run(const arm_cpu_t *cpu,
             return false;
     }
 
-    if (block->touches_memory != (saw_flat_memory || saw_direct_read) ||
+    if (block->touches_memory !=
+            (saw_flat_memory || saw_direct_read || saw_direct_write) ||
         block->direct_reads != saw_direct_read ||
+        block->direct_writes != saw_direct_write ||
         block->runtime_guards != saw_runtime_guard ||
         block->vfp != saw_vfp ||
         block->dynamic_exit != saw_dynamic_exit ||
-        (kind == A64S_RUN_FLAT && saw_direct_read) ||
+        (kind == A64S_RUN_FLAT && (saw_direct_read || saw_direct_write)) ||
         (kind == A64S_RUN_FLAT && saw_vfp) ||
-        (kind == A64S_RUN_READ_HITS && saw_flat_memory))
+        (kind == A64S_RUN_READ_HITS &&
+         (saw_flat_memory || saw_direct_write)) ||
+        (kind == A64S_RUN_MEMORY_HITS && saw_flat_memory))
         return false;
 
     while (i < end) {
@@ -1230,10 +1395,10 @@ bool a64_static_run(arm_cpu_t *cpu, const a64_static_block_t *block,
 #endif
 }
 
-static bool execute_read_hits(arm_cpu_t *cpu,
-                              const a64_static_block_t *block,
-                              uint8_t *ram, size_t ram_size,
-                              unsigned *completed) {
+static bool execute_memory_hits(arm_cpu_t *cpu,
+                                const a64_static_block_t *block,
+                                uint8_t *ram, size_t ram_size,
+                                unsigned *completed) {
 #if defined(S5LBOX_STATIC_A64_NATIVE)
     a64_static_read_context_t context = {
         cpu->dread,
@@ -1243,7 +1408,9 @@ static bool execute_read_hits(arm_cpu_t *cpu,
         cpu->vfp_s,
         &cpu->vfp_fpexc,
         &cpu->vfp_fpscr,
-        vfp_cpacr_permits(cpu) ? 1u : 0u
+        vfp_cpacr_permits(cpu) ? 1u : 0u,
+        cpu->bus && cpu->bus->host_ram_write ? cpu->dwrite : NULL,
+        &cpu->dwrite_hits
     };
     int result = a64_static_execute(cpu->r, &cpu->cpsr, &cpu->cycles,
                                     block->uops, 1u, ram,
@@ -1271,13 +1438,26 @@ bool a64_static_run_read_hits(arm_cpu_t *cpu,
         !validate_run(cpu, block, 1u, ram, ram_size,
                       A64S_RUN_READ_HITS))
         return false;
-    return execute_read_hits(cpu, block, ram, ram_size, completed);
+    return execute_memory_hits(cpu, block, ram, ram_size, completed);
 }
 
-static bool validate_decoded_read_hits_at(const a64_static_block_t *block,
-                                          uint32_t pc, bool thumb,
-                                          unsigned remaining) {
+bool a64_static_run_memory_hits(arm_cpu_t *cpu,
+                                const a64_static_block_t *block,
+                                uint8_t *ram, size_t ram_size,
+                                unsigned *completed) {
+    if (!completed ||
+        !validate_run(cpu, block, 1u, ram, ram_size,
+                      A64S_RUN_MEMORY_HITS))
+        return false;
+    return execute_memory_hits(cpu, block, ram, ram_size, completed);
+}
+
+static bool validate_decoded_hits_at(const a64_static_block_t *block,
+                                     uint32_t pc, bool thumb,
+                                     unsigned remaining,
+                                     bool memory_hits) {
     bool terminal_dynamic;
+    bool terminal_write;
     if (!block || !remaining || !block->insn_count ||
         block->insn_count > remaining ||
         block->insn_count > A64_STATIC_MAX_INSNS || !block->uop_count ||
@@ -1285,8 +1465,14 @@ static bool validate_decoded_read_hits_at(const a64_static_block_t *block,
         block->uops[block->uop_count - 1u].handler != A64S_END ||
         block->uops[block->uop_count - 1u].immediate != block->exit_pc ||
         pc != block->start_pc || thumb != block->thumb ||
-        (block->touches_memory && !block->direct_reads))
+        (!memory_hits && block->direct_writes) ||
+        (block->touches_memory &&
+         !(block->direct_reads || block->direct_writes)))
         return false;
+    terminal_write = block->uop_count > 1u &&
+        handler_is_direct_write(
+            block->uops[block->uop_count - 2u].handler);
+    if (block->direct_writes != terminal_write) return false;
     terminal_dynamic = block->uop_count > 1u &&
         handler_is_terminal_branch(
             block->uops[block->uop_count - 2u].handler);
@@ -1308,11 +1494,25 @@ bool a64_static_run_read_hits_decoded(arm_cpu_t *cpu,
     if (!cpu || !ram || !completed || !ram_size ||
         (ram_size & (ram_size - 1u)) != 0u ||
         ram_size - 1u > UINT32_MAX ||
-        !validate_decoded_read_hits_at(
+        !validate_decoded_hits_at(
             block, cpu->r[15], (cpu->cpsr & ARM_CPSR_T) != 0u,
-            A64_STATIC_MAX_INSNS))
+            A64_STATIC_MAX_INSNS, false))
         return false;
-    return execute_read_hits(cpu, block, ram, ram_size, completed);
+    return execute_memory_hits(cpu, block, ram, ram_size, completed);
+}
+
+bool a64_static_run_memory_hits_decoded(arm_cpu_t *cpu,
+                                        const a64_static_block_t *block,
+                                        uint8_t *ram, size_t ram_size,
+                                        unsigned *completed) {
+    if (!cpu || !ram || !completed || !ram_size ||
+        (ram_size & (ram_size - 1u)) != 0u ||
+        ram_size - 1u > UINT32_MAX ||
+        !validate_decoded_hits_at(
+            block, cpu->r[15], (cpu->cpsr & ARM_CPSR_T) != 0u,
+            A64_STATIC_MAX_INSNS, true))
+        return false;
+    return execute_memory_hits(cpu, block, ram, ram_size, completed);
 }
 
 #if defined(S5LBOX_STATIC_A64_NATIVE)
@@ -1338,7 +1538,8 @@ const a64_static_chain_step_t *a64_static_chain_advance(
     if (!remaining || !context->next) return NULL;
 
     next = context->next(context->opaque, pc, remaining);
-    if (!validate_decoded_read_hits_at(next, pc, context->thumb, remaining))
+    if (!validate_decoded_hits_at(next, pc, context->thumb, remaining,
+                                  context->memory_hits))
         return NULL;
     context->step.uops = next->uops;
     context->step.insns = next->insn_count;
@@ -1358,14 +1559,15 @@ void a64_static_chain_partial(a64_static_chain_context_t *context,
 }
 #endif
 
-static bool run_read_hits_chain(arm_cpu_t *cpu,
-                                const a64_static_block_t *first,
-                                uint8_t *ram, size_t ram_size,
-                                unsigned budget,
-                                a64_static_chain_next_fn next,
-                                void *opaque,
-                                const a64_static_graph_node_t *graph_nodes,
-                                unsigned *completed, unsigned *blocks) {
+static bool run_hits_chain(arm_cpu_t *cpu,
+                           const a64_static_block_t *first,
+                           uint8_t *ram, size_t ram_size,
+                           unsigned budget,
+                           a64_static_chain_next_fn next,
+                           void *opaque,
+                           const a64_static_graph_node_t *graph_nodes,
+                           bool memory_hits,
+                           unsigned *completed, unsigned *blocks) {
     bool thumb;
     bool priv;
     if (!completed || !blocks) return false;
@@ -1378,8 +1580,8 @@ static bool run_read_hits_chain(arm_cpu_t *cpu,
         budget > A64_STATIC_MAX_CHAIN_INSNS || !ram_size ||
         (ram_size & (ram_size - 1u)) != 0u ||
         ram_size - 1u > UINT32_MAX ||
-        !validate_decoded_read_hits_at(
-            first, cpu->r[15], thumb, budget) ||
+        !validate_decoded_hits_at(
+            first, cpu->r[15], thumb, budget, memory_hits) ||
         (graph_nodes &&
          (!cpu->fetch_host ||
           cpu->fetch_blk != (cpu->r[15] & ~UINT32_C(0x3ff)) ||
@@ -1394,7 +1596,9 @@ static bool run_read_hits_chain(arm_cpu_t *cpu,
         cpu->vfp_s,
         &cpu->vfp_fpexc,
         &cpu->vfp_fpscr,
-        vfp_cpacr_permits(cpu) ? 1u : 0u
+        vfp_cpacr_permits(cpu) ? 1u : 0u,
+        cpu->bus && cpu->bus->host_ram_write ? cpu->dwrite : NULL,
+        &cpu->dwrite_hits
     };
     a64_static_chain_context_t context = {
         .step = { first->uops, first->insn_count },
@@ -1409,7 +1613,8 @@ static bool run_read_hits_chain(arm_cpu_t *cpu,
         .graph_fetch_host = cpu->fetch_host,
         .graph_fetch_block = cpu->fetch_blk,
         .graph_fetch_gen = cpu->fetch_gen,
-        .graph_fetch_priv = priv ? 1u : 0u
+        .graph_fetch_priv = priv ? 1u : 0u,
+        .memory_hits = memory_hits
     };
     int result = a64_static_execute(cpu->r, &cpu->cpsr, &cpu->cycles,
                                     first->uops, 1u, ram,
@@ -1424,6 +1629,7 @@ static bool run_read_hits_chain(arm_cpu_t *cpu,
     (void)next;
     (void)opaque;
     (void)graph_nodes;
+    (void)memory_hits;
     return false;
 #endif
 }
@@ -1435,8 +1641,19 @@ bool a64_static_run_read_hits_chain(arm_cpu_t *cpu,
                                     a64_static_chain_next_fn next,
                                     void *opaque, unsigned *completed,
                                     unsigned *blocks) {
-    return run_read_hits_chain(cpu, first, ram, ram_size, budget, next, opaque,
-                               NULL, completed, blocks);
+    return run_hits_chain(cpu, first, ram, ram_size, budget, next, opaque,
+                          NULL, false, completed, blocks);
+}
+
+bool a64_static_run_memory_hits_chain(arm_cpu_t *cpu,
+                                      const a64_static_block_t *first,
+                                      uint8_t *ram, size_t ram_size,
+                                      unsigned budget,
+                                      a64_static_chain_next_fn next,
+                                      void *opaque, unsigned *completed,
+                                      unsigned *blocks) {
+    return run_hits_chain(cpu, first, ram, ram_size, budget, next, opaque,
+                          NULL, true, completed, blocks);
 }
 
 bool a64_static_run_read_hits_graph(
@@ -1445,6 +1662,16 @@ bool a64_static_run_read_hits_graph(
     const a64_static_graph_node_t nodes[A64_STATIC_GRAPH_SLOTS],
     unsigned *completed, unsigned *blocks) {
     if (!nodes) return false;
-    return run_read_hits_chain(cpu, first, ram, ram_size, budget, NULL, NULL,
-                               nodes, completed, blocks);
+    return run_hits_chain(cpu, first, ram, ram_size, budget, NULL, NULL,
+                          nodes, false, completed, blocks);
+}
+
+bool a64_static_run_memory_hits_graph(
+    arm_cpu_t *cpu, const a64_static_block_t *first,
+    uint8_t *ram, size_t ram_size, unsigned budget,
+    const a64_static_graph_node_t nodes[A64_STATIC_GRAPH_SLOTS],
+    unsigned *completed, unsigned *blocks) {
+    if (!nodes) return false;
+    return run_hits_chain(cpu, first, ram, ram_size, budget, NULL, NULL,
+                          nodes, true, completed, blocks);
 }
