@@ -2161,8 +2161,24 @@ typedef struct {
     size_t snapshot_len;
     uint64_t signed_retired;
     uint64_t signed_chains;
+    uint64_t persistent_chains;
     double seconds;
 } soc_run_result_t;
+
+typedef enum {
+    SOC_ENTRY_REFERENCE,
+    SOC_ENTRY_SIGNED,
+    SOC_ENTRY_PERSISTENT
+} soc_entry_path_t;
+
+static const char *soc_entry_path_name(soc_entry_path_t path) {
+    switch (path) {
+    case SOC_ENTRY_REFERENCE:  return "reference";
+    case SOC_ENTRY_SIGNED:     return "signed";
+    case SOC_ENTRY_PERSISTENT: return "persistent";
+    }
+    return "invalid";
+}
 
 static void free_soc_run_result(soc_run_result_t *result) {
     if (!result) return;
@@ -2177,7 +2193,7 @@ static void free_soc_run_result(soc_run_result_t *result) {
  * the interpreter arm; the signed cache and its counter are host diagnostics
  * and deliberately do not enter that architectural byte stream. */
 static bool run_soc_entry_path(const uint32_t *program, unsigned length,
-                               uint64_t total, bool signed_path,
+                               uint64_t total, soc_entry_path_t path,
                                soc_run_result_t *out) {
     s5l8900_t machine = {0};
     arm_status_t status = ARM_OK;
@@ -2186,11 +2202,17 @@ static bool run_soc_entry_path(const uint32_t *program, unsigned length,
     uint64_t retired_after;
     uint64_t chains_before;
     uint64_t chains_after;
+    uint64_t persistent_before;
+    uint64_t persistent_after;
     double start, end;
     bool initialized = false;
     bool ok = false;
 
-    if (!program || !length || !out) return false;
+    bool signed_path = path != SOC_ENTRY_REFERENCE;
+    bool persistent_path = path == SOC_ENTRY_PERSISTENT;
+
+    if (!program || !length || !out || path > SOC_ENTRY_PERSISTENT)
+        return false;
     memset(out, 0, sizeof *out);
     if (!s5l8900_init(&machine, 0u, RAM_SIZE)) {
         fprintf(stderr, "jitbench: SoC entry machine init failed\n");
@@ -2208,6 +2230,11 @@ static bool run_soc_entry_path(const uint32_t *program, unsigned length,
         fprintf(stderr, "jitbench: SoC entry signed engine unavailable\n");
         goto done;
     }
+    if (persistent_path &&
+        !s5l8900_static_a64_set_persistent(&machine, true)) {
+        fprintf(stderr, "jitbench: SoC entry persistent engine unavailable\n");
+        goto done;
+    }
 
     /* The first instruction establishes the fetch pointer. The remainder of
      * the first loop and the second complete loop establish the cache-owned
@@ -2216,13 +2243,15 @@ static bool run_soc_entry_path(const uint32_t *program, unsigned length,
         status != ARM_OK || machine.cpu.r[15] != 0u) {
         fprintf(stderr,
                 "jitbench: SoC entry %s warmup failed status=%d pc=0x%08x\n",
-                signed_path ? "signed" : "reference", (int)status,
+                soc_entry_path_name(path), (int)status,
                 machine.cpu.r[15]);
         goto done;
     }
 
     retired_before = s5l8900_static_a64_retired(&machine);
     chains_before = s5l8900_static_a64_chained_blocks(&machine);
+    persistent_before =
+        s5l8900_static_a64_persistent_chained_blocks(&machine);
     start = now_seconds();
     while (remaining != 0u) {
         unsigned chunk = remaining > (uint64_t)UINT_MAX
@@ -2235,25 +2264,34 @@ static bool run_soc_entry_path(const uint32_t *program, unsigned length,
     end = now_seconds();
     retired_after = s5l8900_static_a64_retired(&machine);
     chains_after = s5l8900_static_a64_chained_blocks(&machine);
+    persistent_after =
+        s5l8900_static_a64_persistent_chained_blocks(&machine);
     if (remaining != 0u || status != ARM_OK || end <= start ||
         machine.cpu.r[15] != 0u) {
         fprintf(stderr,
                 "jitbench: SoC entry %s run failed remaining=%" PRIu64
                 " status=%d pc=0x%08x\n",
-                signed_path ? "signed" : "reference", remaining,
+                soc_entry_path_name(path), remaining,
                 (int)status, machine.cpu.r[15]);
         goto done;
     }
     out->signed_retired = retired_after - retired_before;
     out->signed_chains = chains_after - chains_before;
+    out->persistent_chains = persistent_after - persistent_before;
     if ((signed_path && out->signed_retired != total) ||
         (!signed_path &&
-         (out->signed_retired != 0u || out->signed_chains != 0u))) {
+         (out->signed_retired != 0u || out->signed_chains != 0u ||
+          out->persistent_chains != 0u)) ||
+        (path == SOC_ENTRY_SIGNED && out->persistent_chains != 0u) ||
+        (persistent_path &&
+         (out->persistent_chains == 0u ||
+          out->persistent_chains != out->signed_chains))) {
         fprintf(stderr,
                 "jitbench: SoC entry %s retired signed=%" PRIu64
-                " chains=%" PRIu64 " expected=%" PRIu64 "\n",
-                signed_path ? "signed" : "reference",
-                out->signed_retired, out->signed_chains,
+                " chains=%" PRIu64 " persistent=%" PRIu64
+                " expected=%" PRIu64 "\n",
+                soc_entry_path_name(path), out->signed_retired,
+                out->signed_chains, out->persistent_chains,
                 signed_path ? total : UINT64_C(0));
         goto done;
     }
@@ -2285,8 +2323,10 @@ static bool bench_soc_entry(unsigned length, uint64_t requested,
     a64_static_block_t shape;
     double *reference_rates = NULL;
     double *signed_rates = NULL;
+    double *persistent_rates = NULL;
     uint64_t total;
     uint64_t signed_chains = 0u;
+    uint64_t persistent_chains = 0u;
     bool ok = false;
 
     if (requested > UINT64_MAX - (uint64_t)(length - 1u) ||
@@ -2298,7 +2338,8 @@ static bool bench_soc_entry(unsigned length, uint64_t requested,
     total = ((requested + length - 1u) / length) * length;
     reference_rates = (double *)calloc(reps, sizeof *reference_rates);
     signed_rates = (double *)calloc(reps, sizeof *signed_rates);
-    if (!reference_rates || !signed_rates) {
+    persistent_rates = (double *)calloc(reps, sizeof *persistent_rates);
+    if (!reference_rates || !signed_rates || !persistent_rates) {
         fprintf(stderr, "jitbench: SoC entry out of memory\n");
         goto done;
     }
@@ -2306,25 +2347,46 @@ static bool bench_soc_entry(unsigned length, uint64_t requested,
     for (unsigned rep = 0u; rep < reps; rep++) {
         soc_run_result_t reference = {0};
         soc_run_result_t signed_result = {0};
+        soc_run_result_t persistent_result = {0};
         const char *order;
         bool ran;
 
-        if ((rep & 1u) == 0u) {
-            order = "reference-signed";
-            ran = run_soc_entry_path(program, length, total, false,
+        if (rep % 3u == 0u) {
+            order = "reference-signed-persistent";
+            ran = run_soc_entry_path(program, length, total,
+                                     SOC_ENTRY_REFERENCE,
                                      &reference) &&
-                  run_soc_entry_path(program, length, total, true,
-                                     &signed_result);
+                  run_soc_entry_path(program, length, total,
+                                     SOC_ENTRY_SIGNED, &signed_result) &&
+                  run_soc_entry_path(program, length, total,
+                                     SOC_ENTRY_PERSISTENT,
+                                     &persistent_result);
+        } else if (rep % 3u == 1u) {
+            order = "signed-persistent-reference";
+            ran = run_soc_entry_path(program, length, total,
+                                     SOC_ENTRY_SIGNED, &signed_result) &&
+                  run_soc_entry_path(program, length, total,
+                                     SOC_ENTRY_PERSISTENT,
+                                     &persistent_result) &&
+                  run_soc_entry_path(program, length, total,
+                                     SOC_ENTRY_REFERENCE, &reference);
         } else {
-            order = "signed-reference";
-            ran = run_soc_entry_path(program, length, total, true,
-                                     &signed_result) &&
-                  run_soc_entry_path(program, length, total, false,
-                                     &reference);
+            order = "persistent-reference-signed";
+            ran = run_soc_entry_path(program, length, total,
+                                     SOC_ENTRY_PERSISTENT,
+                                     &persistent_result) &&
+                  run_soc_entry_path(program, length, total,
+                                     SOC_ENTRY_REFERENCE, &reference) &&
+                  run_soc_entry_path(program, length, total,
+                                     SOC_ENTRY_SIGNED, &signed_result);
         }
         if (!ran || !reference.snapshot || !signed_result.snapshot ||
+            !persistent_result.snapshot ||
             reference.snapshot_len != signed_result.snapshot_len ||
+            reference.snapshot_len != persistent_result.snapshot_len ||
             memcmp(reference.snapshot, signed_result.snapshot,
+                   reference.snapshot_len) != 0 ||
+            memcmp(reference.snapshot, persistent_result.snapshot,
                    reference.snapshot_len) != 0) {
             fprintf(stderr,
                     "jitbench: SoC entry length %u repetition %u failed "
@@ -2332,45 +2394,75 @@ static bool bench_soc_entry(unsigned length, uint64_t requested,
                     length, rep + 1u);
             free_soc_run_result(&reference);
             free_soc_run_result(&signed_result);
+            free_soc_run_result(&persistent_result);
             goto done;
         }
         if (rep == 0u) {
             signed_chains = signed_result.signed_chains;
-        } else if (signed_chains != signed_result.signed_chains) {
+            persistent_chains = persistent_result.persistent_chains;
+        } else if (signed_chains != signed_result.signed_chains ||
+                   persistent_chains != persistent_result.persistent_chains) {
             fprintf(stderr,
-                    "jitbench: SoC entry length %u chain count changed "
+                    "jitbench: SoC entry length %u chain counts changed "
                     "across repetitions\n", length);
             free_soc_run_result(&reference);
             free_soc_run_result(&signed_result);
+            free_soc_run_result(&persistent_result);
+            goto done;
+        }
+        if (signed_result.signed_chains !=
+            persistent_result.persistent_chains) {
+            fprintf(stderr,
+                    "jitbench: SoC entry length %u legacy/persistent "
+                    "chain counts differ: %" PRIu64 "/%" PRIu64 "\n",
+                    length, signed_result.signed_chains,
+                    persistent_result.persistent_chains);
+            free_soc_run_result(&reference);
+            free_soc_run_result(&signed_result);
+            free_soc_run_result(&persistent_result);
             goto done;
         }
         reference_rates[rep] = (double)total / reference.seconds / 1.0e6;
         signed_rates[rep] = (double)total / signed_result.seconds / 1.0e6;
+        persistent_rates[rep] =
+            (double)total / persistent_result.seconds / 1.0e6;
         printf("SOC-ENTRY-SAMPLE length=%u rep=%u order=%s "
-               "reference=%.3f signed=%.3f Minsn/s chains=%" PRIu64
+               "reference=%.3f signed=%.3f persistent=%.3f Minsn/s "
+               "signed-chains=%" PRIu64 " persistent-chains=%" PRIu64
                " exact-snapshot=yes\n",
                length, rep + 1u, order, reference_rates[rep],
-               signed_rates[rep], signed_result.signed_chains);
+               signed_rates[rep], persistent_rates[rep],
+               signed_result.signed_chains,
+               persistent_result.persistent_chains);
         free_soc_run_result(&reference);
         free_soc_run_result(&signed_result);
+        free_soc_run_result(&persistent_result);
     }
 
     qsort(reference_rates, reps, sizeof *reference_rates, cmp_double);
     qsort(signed_rates, reps, sizeof *signed_rates, cmp_double);
+    qsort(persistent_rates, reps, sizeof *persistent_rates, cmp_double);
     printf("SOC-ENTRY-CURVE length=%u uops=%u guest-insns=%" PRIu64
            " reps=%u run-api=yes cache-lookup=yes raw-witness=yes "
            "entry-gates=yes timer-boundaries=yes device-tick=yes "
            "head-cache=warm mmu=off exact-snapshot=yes signed-retired=%" PRIu64
-           " signed-chains=%" PRIu64 " reference-median=%.3f "
-           "signed-median=%.3f speedup=%.3fx\n",
+           " signed-chains=%" PRIu64 " persistent-chains=%" PRIu64
+           " reference-median=%.3f signed-median=%.3f "
+           "persistent-median=%.3f speedup=%.3fx "
+           "persistent-speedup=%.3fx persistent-over-signed=%.3fx\n",
            length, shape.uop_count, total, reps, total, signed_chains,
+           persistent_chains,
            reference_rates[reps / 2u], signed_rates[reps / 2u],
-           signed_rates[reps / 2u] / reference_rates[reps / 2u]);
+           persistent_rates[reps / 2u],
+           signed_rates[reps / 2u] / reference_rates[reps / 2u],
+           persistent_rates[reps / 2u] / reference_rates[reps / 2u],
+           persistent_rates[reps / 2u] / signed_rates[reps / 2u]);
     ok = true;
 
 done:
     free(reference_rates);
     free(signed_rates);
+    free(persistent_rates);
     return ok;
 }
 
@@ -2589,10 +2681,11 @@ int main(int argc, char **argv) {
     printf("Product-entry rows use predecoded hot blocks and compare full "
            "wrapper validation with a cache-owned decoded contract; both "
            "still exclude SoC cache lookup and device gates.\n");
-    printf("SoC-entry rows cross the real run API, cache/raw witness, gates, "
-           "timer boundaries and device ticks with exact serialized-machine "
-           "comparison; they still exclude real firmware, framebuffer/UI "
-           "work and phone FPS.\n");
+    printf("SoC-entry rows rotate reference, legacy signed and persistent "
+           "signed paths across separately initialized machines. They cross "
+           "the real run API, cache/raw witness, gates, timer boundaries and "
+           "device ticks with exact serialized-machine comparison; they still "
+           "exclude real firmware, framebuffer/UI work and phone FPS.\n");
     if (!validate_static_shapes()) return 1;
     for (i = 0u; i < sizeof CASES / sizeof CASES[0]; i++) {
         if (!validate_case_translation(&CASES[i])) return 1;
