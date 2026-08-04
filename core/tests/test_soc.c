@@ -33,6 +33,51 @@ static void test_ram_readback(void) {
     s5l8900_free(&m);
 }
 
+static void direct_write_test_interposer(void *ctx, uint32_t addr,
+                                         uint32_t value) {
+    (void)ctx; (void)addr; (void)value;
+}
+
+static void test_direct_ram_write_consent_is_fail_closed(void) {
+    s5l8900_t m;
+    CHECK(!s5l8900_set_direct_ram_writes(NULL, true),
+          "NULL machine accepted direct writes");
+    CHECK(s5l8900_init(&m, 0, 1u << 20), "machine init failed");
+    CHECK(m.bus.host_ram_write == NULL,
+          "generic machine unexpectedly opted into direct writes");
+
+    CHECK(s5l8900_set_direct_ram_writes(&m, true),
+          "canonical machine bus refused direct writes");
+    CHECK(m.bus.host_ram_write == m.bus.host_ram,
+          "write pointer source differs from proven RAM pointer source");
+
+    m.cpu.dwrite[0].host = m.ram;
+    m.cpu.dwrite[0].tag = 1u;
+    m.cpu.dwrite[0].gen = m.cpu.tlb_gen;
+    CHECK(s5l8900_set_direct_ram_writes(&m, false),
+          "revoking direct writes failed");
+    CHECK(m.bus.host_ram_write == NULL && m.cpu.dwrite[0].host == NULL,
+          "revocation retained callback or derived pointer");
+
+    /* Refusing an interposed bus must also revoke a stale earlier grant. */
+    CHECK(s5l8900_set_direct_ram_writes(&m, true),
+          "second canonical opt-in failed");
+    m.cpu.dwrite[1].host = m.ram;
+    void (*canonical_w32)(void *, uint32_t, uint32_t) = m.bus.write32;
+    m.bus.write32 = direct_write_test_interposer;
+    CHECK(!s5l8900_set_direct_ram_writes(&m, true),
+          "interposed write bus was accepted");
+    CHECK(m.bus.host_ram_write == NULL && m.cpu.dwrite[1].host == NULL,
+          "refused opt-in did not fail closed");
+    CHECK(s5l8900_set_direct_ram_writes(&m, false),
+          "interposed bus could not explicitly revoke");
+
+    m.bus.write32 = canonical_w32;
+    CHECK(s5l8900_set_direct_ram_writes(&m, true),
+          "restored canonical bus could not opt in");
+    s5l8900_free(&m);
+}
+
 static void test_uart_status_is_ready(void) {
     /* A guest polling UTRSTAT must see the transmitter ready, or it spins. */
     s5l8900_t m;
@@ -4103,6 +4148,7 @@ static void test_signed_static_a64_thumb_read_oracle(void) {
 int main(void) {
     printf("S5LBox S5L8900 machine tests\n");
     test_ram_readback();
+    test_direct_ram_write_consent_is_fail_closed();
     test_uart_status_is_ready();
     test_unmapped_access_counted();
     test_bounds_check_cannot_overflow();

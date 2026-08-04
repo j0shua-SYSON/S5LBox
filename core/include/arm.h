@@ -243,6 +243,24 @@ typedef struct arm_bus {
     uint8_t *(*host_ram)(void *ctx, uint32_t pa, uint32_t len);
 
     /*
+     * OPTIONAL, AND DELIBERATELY SEPARATE FROM host_ram. Returning a pointer
+     * here is the frontend's explicit promise that CPU stores may update that
+     * plain-RAM range through the pointer without calling write8/16/32.
+     *
+     * NULL is the safe default. A bus write interposer MUST leave this NULL or
+     * clear it before guest execution; otherwise direct stores would bypass
+     * the very observer the interposer installed. The machine bus can opt in
+     * because its RAM write callbacks only perform the same little-endian host
+     * write. bootkernel cannot opt in because its write hook observes live
+     * framebuffer traffic.
+     *
+     * The lifetime and range contract is identical to host_ram. Keeping a
+     * second callback instead of a boolean makes consent inseparable from the
+     * pointer source and leaves every existing frontend fail-closed.
+     */
+    uint8_t *(*host_ram_write)(void *ctx, uint32_t pa, uint32_t len);
+
+    /*
      * Optional platform hook for the ARM1176 CP15 Wait For Interrupt
      * operation.  A system model can synchronously advance its autonomous
      * devices to the first interrupt edge and return true.  Returning false
@@ -504,6 +522,20 @@ typedef struct arm_cpu {
         uint32_t gen;      /* the tlb_gen it was resolved under               */
     } dread[ARM_DREAD_ENTRIES];
     /*
+     * THE DATA-WRITE BLOCK CACHE. Its mapping key and 1 KB range are identical
+     * to dread, but an entry can be filled only through host_ram_write. A hit
+     * therefore proves both MMU write permission and frontend consent to skip
+     * the write callbacks. Misses stay on the architectural bus path.
+     *
+     * Like dread this is derived host state: generation-tagged, cleared on
+     * reset/restore/wrap, and never serialised.
+     */
+    struct {
+        uint8_t *host;
+        uint32_t tag;
+        uint32_t gen;
+    } dwrite[ARM_DREAD_ENTRIES];
+    /*
      * The registers a cached translation is only valid under, kept so the
      * cache can notice them changing BY ANY ROUTE rather than only through
      * MCR. The CP15 write path flushes explicitly, but three things mutate
@@ -532,6 +564,7 @@ typedef struct arm_cpu {
      * slow-path traffic too and hiding them would flatter the hit rate.
      */
     uint64_t dread_hits, dread_misses;
+    uint64_t dwrite_hits, dwrite_misses;
 } arm_cpu_t;
 
 /*

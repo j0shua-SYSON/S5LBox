@@ -124,6 +124,9 @@ targets:
           # This target is the measured arm64 product consumer. Host/default
           # builds remain opt-in and the interpreter remains their default.
           - S5LBOX_STATIC_A64_DEFAULT_GRAPH=1
+          # The app uses the canonical machine bus with no RAM-write observer,
+          # so it may grant the separate direct-write pointer contract.
+          - S5LBOX_STATIC_A64_DEFAULT_DIRECT_WRITES=1
         # Stated rather than inherited: the Objective-C sources are written for
         # ARC, and would leak (or double-free) under manual retain/release.
         CLANG_ENABLE_OBJC_ARC: YES

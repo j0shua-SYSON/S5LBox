@@ -154,6 +154,15 @@ static void test_cpu_state_round_trips(void) {
      * state is subtly wrong — the exact failure this file exists to prevent. */
     for (unsigned i = 0; i < 32; i++) a->cpu.vfp_s[i] = 0x5f000000u + i * 0x37u;
 
+    CHECK(s5l8900_set_direct_ram_writes(b, true),
+          "destination direct-write opt-in");
+    b->cpu.dread[0].host = b->ram;
+    b->cpu.dread[0].tag = 1u;
+    b->cpu.dread[0].gen = b->cpu.tlb_gen;
+    b->cpu.dwrite[0].host = b->ram;
+    b->cpu.dwrite[0].tag = 1u;
+    b->cpu.dwrite[0].gen = b->cpu.tlb_gen;
+
     CHECK(roundtrip(a, b), "cpu round trip");
 
     for (unsigned i = 0; i < 16; i++) SAME(cpu.r[i]);
@@ -180,6 +189,10 @@ static void test_cpu_state_round_trips(void) {
      * machine's own bus, not at the machine the snapshot came from. */
     CHECK(b->cpu.bus == &b->bus, "restored cpu->bus must point at its own machine");
     CHECK(b->bus.ctx == b, "restored bus ctx must point at its own machine");
+    CHECK(b->bus.host_ram_write == b->bus.host_ram,
+          "restore did not preserve live direct-write consent");
+    CHECK(b->cpu.dread[0].host == NULL && b->cpu.dwrite[0].host == NULL,
+          "restore retained process-local data-cache pointers");
 
     s5l8900_free(a); s5l8900_free(b);
 }

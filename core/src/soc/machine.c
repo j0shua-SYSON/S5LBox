@@ -644,6 +644,27 @@ static void w32(void *c, uint32_t a, uint32_t v) { bus_write(c, a, v, 4); }
 static void w16(void *c, uint32_t a, uint16_t v) { bus_write(c, a, v, 2); }
 static void w8 (void *c, uint32_t a, uint8_t  v) { bus_write(c, a, v, 1); }
 
+bool s5l8900_set_direct_ram_writes(s5l8900_t *m, bool enabled) {
+    if (!m) return false;
+    if (enabled &&
+        (m->bus.ctx != m || m->cpu.bus != &m->bus ||
+         m->bus.write32 != w32 || m->bus.write16 != w16 ||
+         m->bus.write8 != w8 || m->bus.host_ram != machine_host_ram)) {
+        /* Fail closed even if a caller asks to re-enable after installing an
+         * interposer without first revoking an earlier grant. The interposer
+         * still owns the ordering contract, but this API must never make that
+         * mistake persist once it can see it. */
+        m->bus.host_ram_write = NULL;
+        memset(m->cpu.dwrite, 0, sizeof m->cpu.dwrite);
+        return false;
+    }
+    m->bus.host_ram_write = enabled ? machine_host_ram : NULL;
+    /* A pointer granted under an earlier frontend contract must never survive
+     * a mode change. Generation tags cannot express revoked consent. */
+    memset(m->cpu.dwrite, 0, sizeof m->cpu.dwrite);
+    return true;
+}
+
 /* -------------------------------------------------------- wake sources ---
  *
  * Which modelled devices can end a WFI, and how far away each one's next
@@ -1201,6 +1222,14 @@ bool s5l8900_init(s5l8900_t *m, uint32_t ram_base, uint32_t ram_size) {
     m->bus.host_ram = machine_host_ram;
 
     arm_reset(&m->cpu, &m->bus);
+#if defined(S5LBOX_STATIC_A64_DEFAULT_DIRECT_WRITES)
+    /* This opt-in belongs to the iOS target, whose machine bus is not wrapped
+     * by a RAM-write observer. Generic and diagnostic frontends remain NULL. */
+    if (!s5l8900_set_direct_ram_writes(m, true)) {
+        s5l8900_free(m);
+        return false;
+    }
+#endif
 #if defined(S5LBOX_STATIC_A64_DEFAULT_GRAPH)
     /* The iOS target explicitly promises the measured, build-time-signed
      * graph path and its exact timebase-bounded extended invocation. Refuse a

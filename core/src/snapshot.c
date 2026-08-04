@@ -106,15 +106,16 @@
         "update this number, and bump SNAPSHOT_VERSION in snapshot.h.")
 
 SNAP_SIZE_GUARD(arm_cp15_t,        64,    "snap_cpu");
-/* 67072 = 66032 + the data-read block cache (64 x 16), its two counters (16)
- * and the padding its
- * 8-byte alignment adds after fetch_priv. Like the fetch cache it holds HOST
- * pointers, so it is NOT in snap_cpu(), snap_cpu() clears it on read, and the
- * bytes on disk are identical to a file written before it existed --
- * SNAPSHOT_VERSION therefore does not move. Same exception as level_dirty
- * below, and justified the same way. Measured with a sizeof probe, not
+/* 68112 = 66032 + the data-read and data-write block caches (2 x 64 x 16),
+ * their four host-only accounting counters (32), and the padding their
+ * 8-byte alignment adds after fetch_priv. Like the fetch cache they hold HOST
+ * pointers, so they are NOT in snap_cpu(), snap_cpu() clears them on read,
+ * and the bytes on disk are identical to a file written before either existed
+ * -- SNAPSHOT_VERSION therefore does not move. Same exception as level_dirty
+ * below, and justified the same way. Measured with the compiler's failed size
+ * guard and confirmed by the successful guard below, not assumed from source
  * arithmetic; the padding is exactly why. */
-SNAP_SIZE_GUARD(arm_cpu_t,         67072,   "snap_cpu");
+SNAP_SIZE_GUARD(arm_cpu_t,         68112,   "snap_cpu");
 SNAP_SIZE_GUARD(s5l_uart_t,        8280,  "snap_uart");
 SNAP_SIZE_GUARD(s5l_vic_t,         16,    "snap_vic");
 SNAP_SIZE_GUARD(s5l_timer_t,       40,    "snap_timer");
@@ -147,11 +148,12 @@ SNAP_SIZE_GUARD(s5l_pl080_t,       496,   "snap_pl080");
 SNAP_SIZE_GUARD(s5l_nor_entry_t,   12,    "snap_nor");
 SNAP_SIZE_GUARD(s5l_nor_t,         208,   "snap_nor");
 SNAP_SIZE_GUARD(s5l_stub_t,        56,    "snap_stubs");
-/* arm_bus_t's optional WFI and privileged-SVC hooks plus their contexts are
- * host-owned runtime configuration. They grow the containing machine ABI but
- * are deliberately excluded from MACH for the same reason as every other bus
- * callback; snapshot_load preserves the live machine's hooks and dedicated
- * privileged-SVC context. The byte format therefore does not change. */
+/* arm_bus_t's optional direct-write, WFI and privileged-SVC hooks plus their
+ * contexts are host-owned runtime configuration. They grow the containing
+ * machine ABI but are deliberately excluded from MACH for the same reason as
+ * every other bus callback; snapshot_load preserves the live machine's hooks
+ * and dedicated privileged-SVC context. The byte format therefore does not
+ * change. */
 /* 43648 = 42888 + the codec (496) + two I2S windows (2 x 104) + the five
  * physical buttons (32) + the GPIO controller's `driven` mask (28).
  *
@@ -171,12 +173,14 @@ SNAP_SIZE_GUARD(s5l_stub_t,        56,    "snap_stubs");
  * the byte format DOES change, so SNAPSHOT_VERSION moved to 17. Measured with
  * a sizeof probe rather than arithmetic -- the first two guesses were wrong,
  * which is the entire reason this guard is a compile error. */
-/* 112576 = 111536 + the CPU's data-read block cache and counters, which this struct
- * contains. Not serialised, byte format unchanged; see the arm_cpu_t note.
- * 120792 adds one host-only pointer for the signed-static decode cache. Like
- * fetch_host it is derivable, process-local and deliberately absent from the
- * stream, so SNAPSHOT_VERSION and the bytes on disk do not move. */
-SNAP_SIZE_GUARD(s5l8900_t,         120792, "snap_mach");
+/* 112576 = 111536 + the CPU's data-read block cache and counters, which this
+ * struct contains. Not serialised, byte format unchanged; see the arm_cpu_t
+ * note. 120792 adds one host-only pointer for the signed-static decode cache.
+ * 121840 adds the CPU's host-only data-write block cache/counters (1040) and
+ * the bus's host_ram_write callback (8). Like fetch_host, all are derivable,
+ * process-local and deliberately absent from the stream, so SNAPSHOT_VERSION
+ * and the bytes on disk do not move. */
+SNAP_SIZE_GUARD(s5l8900_t,         121840, "snap_mach");
 #endif
 
 /* ---------------------------------------------------------------- the IO --- */
@@ -437,9 +441,10 @@ static void snap_cpu(sn_io_t *io, arm_cpu_t *c) {
         c->fetch_blk  = 0u;
         c->fetch_gen  = 0u;
         c->fetch_priv = false;
-        /* The data-read block cache holds host addresses for the same reason
-         * and is unsafe to carry across a restore for the same reason. */
+        /* The data block caches hold host addresses for the same reason and
+         * are unsafe to carry across a restore for the same reason. */
         memset(c->dread, 0, sizeof c->dread);
+        memset(c->dwrite, 0, sizeof c->dwrite);
     }
 }
 

@@ -3895,6 +3895,11 @@ s5l_wake_kind_t s5l8900_next_wake(const s5l8900_t *m,
 bool s5l8900_init(s5l8900_t *m, uint32_t ram_base, uint32_t ram_size);
 void s5l8900_free(s5l8900_t *m);
 
+/* Same-binary control for callback-free plain-RAM CPU stores. Enabling succeeds
+ * only while the machine still owns its canonical, uninterposed write bus.
+ * Disabling is always safe and invalidates every derived write pointer. */
+bool s5l8900_set_direct_ram_writes(s5l8900_t *m, bool enabled);
+
 /* Copy a blob into guest RAM at a physical address. */
 void s5l8900_load(s5l8900_t *m, uint32_t addr, const void *data, size_t len);
 

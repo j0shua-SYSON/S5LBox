@@ -256,6 +256,39 @@ static inline void dread_fill(arm_cpu_t *c, uint32_t va, uint32_t pa,
 #endif
 }
 
+/* The write cache repeats dread's proven translation key, but it is live only
+ * when the frontend supplies host_ram_write. That separate callback is the
+ * permission to bypass bus write observers; host_ram alone is never enough. */
+static inline uint8_t *dwrite_hit(arm_cpu_t *c, uint32_t va, unsigned n,
+                                  bool priv) {
+    if (!c->bus->host_ram_write) return NULL;
+    if (((va & ARM_DREAD_BLK_MASK) + n) > (ARM_DREAD_BLK_MASK + 1u)) {
+        c->dwrite_misses++;
+        return NULL;
+    }
+    const unsigned slot = dread_slot(va, priv);
+    if (!c->dwrite[slot].host ||
+        c->dwrite[slot].tag != dread_tag(va, priv) ||
+        c->dwrite[slot].gen != c->tlb_gen) {
+        c->dwrite_misses++;
+        return NULL;
+    }
+    c->dwrite_hits++;
+    return c->dwrite[slot].host + (va & ARM_DREAD_BLK_MASK);
+}
+
+static inline void dwrite_fill(arm_cpu_t *c, uint32_t va, uint32_t pa,
+                               bool priv) {
+    if (!c->bus->host_ram_write) return;
+    uint8_t *blk = c->bus->host_ram_write(
+        c->bus->ctx, pa & ~ARM_DREAD_BLK_MASK, ARM_DREAD_BLK_MASK + 1u);
+    if (!blk) return;
+    const unsigned slot = dread_slot(va, priv);
+    c->dwrite[slot].host = blk;
+    c->dwrite[slot].tag = dread_tag(va, priv);
+    c->dwrite[slot].gen = c->tlb_gen;
+}
+
 #define MEM_READ(bits)                                                        \
     static uint##bits##_t mem_r##bits##_as(arm_cpu_t *c, uint32_t va, bool priv) { \
         uint32_t original = va;                                               \
@@ -301,9 +334,12 @@ static inline void dread_fill(arm_cpu_t *c, uint32_t va, uint32_t pa,
         if (mem_crosses_page(va, (bits) / 8u)) {                              \
             mem_write_crossing(c, va, (bits) / 8u, v, priv); return;          \
         }                                                                     \
+        uint8_t *dw = dwrite_hit(c, va, (bits) / 8u, priv);                   \
+        if (dw) { memcpy(dw, &v, (bits) / 8u); return; }                      \
         uint32_t pa, f = arm_mmu_translate(c, va, ARM_ACCESS_WRITE, priv, &pa);\
         if (f) { note_abort(c, f, va); return; }                              \
         c->bus->write##bits(c->bus->ctx, pa, v);                              \
+        dwrite_fill(c, va, pa, priv);                                         \
     }                                                                         \
     static inline void mem_w##bits(arm_cpu_t *c, uint32_t va, uint##bits##_t v) {\
         mem_w##bits##_as(c, va, v, cpu_is_priv(c));                           \
@@ -851,8 +887,10 @@ void arm_reset(arm_cpu_t *cpu, const arm_bus_t *bus) {
     cpu->fetch_priv = false;
     /* And the data-read block cache, which holds the same kind of pointer. */
     memset(cpu->dread, 0, sizeof cpu->dread);
+    memset(cpu->dwrite, 0, sizeof cpu->dwrite);
     cpu->tlb_hits = cpu->tlb_misses = cpu->tlb_flushes = 0;
     cpu->dread_hits = cpu->dread_misses = 0;
+    cpu->dwrite_hits = cpu->dwrite_misses = 0;
     cpu->abort_pending = false;
     cpu->abort_fsr = 0;
     cpu->abort_far = 0;

@@ -19560,6 +19560,9 @@ static void sw8(void *c, uint32_t a, uint8_t v) {
 
 static void spy_install(s5l8900_t *m, uint32_t virt_base, uint32_t phys_base,
                         const uint32_t *hot_page, unsigned hot_page_n) {
+    /* This frontend observes RAM writes for live scanout accounting. Revoke
+     * direct-write consent before saving and wrapping the canonical bus. */
+    (void)s5l8900_set_direct_ram_writes(m, false);
     memset(&G, 0, sizeof G);
     G.mach  = m;
     G.inner = m->bus;

@@ -29,6 +29,12 @@ static void m_w32(void *ctx, uint32_t a, uint32_t v){ (void)ctx; if(a==g_watch_a
 static void m_w16(void *ctx, uint32_t a, uint16_t v){ (void)ctx; if(a==g_watch_addr)g_watch_writes16++; memcpy(&g_ram[a&(RAM_SIZE-1)],&v,2); }
 static void m_w8 (void *ctx, uint32_t a, uint8_t  v){ (void)ctx; if(a==g_watch_addr)g_watch_writes8++; g_ram[a&(RAM_SIZE-1)]=v; }
 
+static uint8_t *m_host_ram_write(void *ctx, uint32_t a, uint32_t len) {
+    (void)ctx;
+    if (!len || (uint64_t)a + len > RAM_SIZE) return NULL;
+    return &g_ram[a];
+}
+
 /* Designated, so a new optional hook on arm_bus_t cannot break this file: the
  * positional form listed ten members and the struct has grown four. Every
  * omitted member is a NULL optional hook, which is what the trailing NULLs
@@ -5411,6 +5417,72 @@ static void test_xn_on_a_section_and_the_xp_gate(void) {
     }
 }
 
+static void test_direct_write_cache_requires_explicit_consent(void) {
+    static const uint32_t prog[] = {
+        0xe5801000u, /* STR r1,[r0] */
+        0xe5801000u,
+        0xe5801000u,
+        0xe5801000u,
+        0xe5801000u,
+    };
+    arm_bus_t bus = g_bus;
+    arm_cpu_t c;
+    uint32_t value = 0u;
+
+    memset(g_ram, 0, sizeof g_ram);
+    for (unsigned i = 0u; i < sizeof prog / sizeof prog[0]; i++)
+        m_w32(NULL, i * 4u, prog[i]);
+    bus.host_ram_write = m_host_ram_write;
+    arm_reset(&c, &bus);
+    c.cpsr = (c.cpsr & ~UINT32_C(0x1f)) | ARM_MODE_SYS;
+    c.r[0] = UINT32_C(0x8000);
+    c.r[1] = UINT32_C(0x11223344);
+    g_watch_addr = c.r[0];
+    g_watch_writes32 = 0u;
+
+    CHECK(arm_step(&c) == ARM_OK && arm_step(&c) == ARM_OK,
+          "consented direct stores execute");
+    memcpy(&value, &g_ram[c.r[0]], sizeof value);
+    CHECK(value == c.r[1], "direct-store value=%08x", value);
+    CHECK(g_watch_writes32 == 1u,
+          "first store fills through bus, second bypasses it: writes=%u",
+          g_watch_writes32);
+    CHECK(c.dwrite_misses == 1u && c.dwrite_hits == 1u,
+          "direct-write counters miss/hit=%llu/%llu",
+          (unsigned long long)c.dwrite_misses,
+          (unsigned long long)c.dwrite_hits);
+
+    /* Revoking the callback must defeat an already-filled pointer immediately,
+     * without depending on a TLB flush or cache clear. */
+    bus.host_ram_write = NULL;
+    c.r[1] = UINT32_C(0x55667788);
+    CHECK(arm_step(&c) == ARM_OK && g_watch_writes32 == 2u,
+          "revoked consent returned to the bus, writes=%u",
+          g_watch_writes32);
+
+    /* Re-enable and change the translation generation. The old host pointer is
+     * still present but must miss on generation before the following hit. */
+    bus.host_ram_write = m_host_ram_write;
+    arm_mmu_tlb_flush(&c);
+    c.r[1] = UINT32_C(0xaabbccdd);
+    CHECK(arm_step(&c) == ARM_OK && arm_step(&c) == ARM_OK,
+          "generation-refilled direct stores execute");
+    CHECK(g_watch_writes32 == 3u,
+          "generation miss used the bus exactly once, writes=%u",
+          g_watch_writes32);
+    CHECK(c.dwrite_misses == 2u && c.dwrite_hits == 2u,
+          "post-flush miss/hit=%llu/%llu",
+          (unsigned long long)c.dwrite_misses,
+          (unsigned long long)c.dwrite_hits);
+
+    arm_reset(&c, &bus);
+    bool empty = true;
+    for (unsigned i = 0u; i < ARM_DREAD_ENTRIES; i++)
+        if (c.dwrite[i].host) empty = false;
+    CHECK(empty, "reset clears every process-local DWRITE pointer");
+    g_watch_addr = UINT32_MAX;
+}
+
 int main(void) {
     printf("S5LBox ARMv6 interpreter tests\n");
     test_mov_imm();
@@ -5424,6 +5496,7 @@ int main(void) {
     test_branch();
     test_bl_sets_lr();
     test_ldr_str();
+    test_direct_write_cache_requires_explicit_consent();
     test_str_and_stm_store_pc_plus_12();
     test_ldrb();
     test_cond_not_taken();
