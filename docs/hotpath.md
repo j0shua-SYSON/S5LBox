@@ -6218,3 +6218,57 @@ Brutal status: **pre-resolved dispatch is rejected, and it produced no phone FPS
 physical-phone observation remains the older 0--4 FPS report. The next architectural gate must
 measure how many handler dispatches the restored workload actually performs and how many a
 universal, build-time-signed fusion could remove before another product implementation is attempted.
+
+### 2026-08-04: immediate-read fusion wins in isolation and loses at the SoC boundary
+
+Observer commit `a2db8938ab5134b99c4e7e6cad33d6190e8bb133` first measured the proposal
+against the unchanged 7.100--7.110 B restored replay instead of guessing from an opcode list. The
+model closed exactly over 6,956,087 retirement-eligible signed guest instructions and 11,600,622
+handler records. Even a perfect adjacent-record fusion could remove only 3,163,152 records
+(27.267%). The practical immediate scalar and VFP families covered 1,407,449 removable records
+(12.132% of the current record stream); this was a real but bounded target, not a path to 30 FPS by
+arithmetic alone.
+
+Commit `2314c0c5a7ea4fa78366855bcb1525a8bd540198` implemented the deliberately broad
+same-binary gate with 2,464 additional build-time-signed handlers. Its exact 20 M-instruction
+Apple-host direct-wrapper curve improved by 1.452x on macOS 14 and 1.580x on macOS 15, but the
+actual iOS executable grew from 4,403,312 to 5,130,128 bytes: +726,816 bytes or 16.506%. Core run
+`30902899037` and iOS run `30902899021` were green. Correct and fast in a maximally favourable
+wrapper is not enough to justify that product cost.
+
+Commit `a14502d639435be701534677d89b042a149f8d18` reduced the family to 548 handlers while
+retaining every immediate read the product decoder could emit: dedicated pinned low-register/SP/PC
+cases and packed shared high-register cases for scalar and VFP loads. The exact oracles included
+those shared cases. The iOS executable delta fell to 163,568 bytes (+3.715%), while the direct
+20 M-instruction curve still measured 1.246x on macOS 14 and 1.454x on macOS 15. Core run
+`30904186455` and iOS run `30904186355` were green. That justified one stricter experiment, not
+shipping it.
+
+Commit `f38a75960c87f8e5d199ccbf7acb55eb991dc8bb` then measured baseline and compact fusion
+through `s5l8900_run()` in the same executable. Setup and cache warming remained outside timing;
+the measured path included the app-facing run API, signed cache lookup, complete executable-byte
+witness, dynamic entry gates, timebase-boundary splitting and device ticks. Three separately
+initialized machines ran in rotated order, and the interpreter, baseline graph and fused graph had
+to serialize byte-identically on every repetition. Exact-SHA core run `30905164727` passed all
+eight jobs and iOS run `30905164538` built and packaged the app.
+
+The end-to-end result rejected the optimization:
+
+| Apple host | direct decoded wrapper | complete SoC path |
+|---|---:|---:|
+| macOS 14 arm64 | 1.553x | **1.003x** |
+| macOS 15 arm64 | 1.439x | **0.937x** |
+
+The direct row proves that halving the read-loop records really removed dispatch work. The SoC row
+proves that the saved work was masked by the remaining outer-entry, validation and device-time
+costs; on macOS 15 the larger handler family was measurably worse. The test used fifteen warm
+plain-RAM loads in every sixteen instructions (93.75%), which is substantially friendlier than the
+firmware. A neutral-to-negative result there cannot honestly be promoted into a guest-speed claim.
+
+The rejection accompanying this record removes the 548 handlers, the fused decoder and its
+benchmark-only SoC switch, restoring the 24,646-handler product. The shipping app default was never
+turned on. **There is no new phone FPS measurement**: no physical iPhone was connected, and the
+only device observation remains roughly 0--4 FPS. The useful conclusion is structural: further
+record-level fusion is not the next lever. The next gate must amortize or remove a larger boundary,
+such as the current total signed-invocation bound, while preserving the exact first timebase edge;
+otherwise it is another dispatch micro-optimization hidden under the same dominant costs.
