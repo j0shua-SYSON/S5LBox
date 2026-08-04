@@ -2,8 +2,9 @@
  * S5LBox -- signed static AArch64 semantic-thread contract.
  *
  * The native handlers are ordinary build-time-generated, signed text. Runtime
- * decoding creates only eight-byte data records (handler id + immediate); it
- * never emits code and never requests writable executable memory.
+ * decoding creates only sixteen-byte data records (handler id, immediate,
+ * PC operand and metadata); it never emits code and never requests writable
+ * executable memory.
  *
  * This remains a deliberately bounded semantic subset. The benchmark uses the
  * complete contract, while the optional SoC engine accepts only the part it
@@ -19,12 +20,16 @@
 #include <stdint.h>
 
 #define A64_STATIC_MAX_INSNS 16u
-#define A64_STATIC_MAX_UOPS (A64_STATIC_MAX_INSNS + 1u)
-#define A64_STATIC_HANDLER_COUNT 2577u
+/* A conditional A32 instruction uses a condition guard plus its semantic
+ * record. The final slot is the fixed block exit. */
+#define A64_STATIC_MAX_UOPS (A64_STATIC_MAX_INSNS * 2u + 1u)
+#define A64_STATIC_HANDLER_COUNT 10271u
 
 typedef struct {
     uint32_t handler;
     uint32_t immediate;
+    uint32_t pc_value;
+    uint32_t metadata;
 } a64_static_uop_t;
 
 typedef struct {
@@ -39,9 +44,11 @@ typedef struct {
 
 /* Decode one host-native uint32_t/uint16_t instruction array beginning at
  * `pc`. A terminal unconditional branch may target any address; otherwise the
- * block exits at its natural fallthrough. Supported data operands are r0-r7
- * plus Thumb SP-relative word loads/stores; every unsupported bit causes a
- * clean false return. */
+ * block exits at its natural fallthrough. A32 immediate data processing covers
+ * every opcode and condition with r0-r14 destinations and r0-r15 sources;
+ * writes to PC remain outside the contract. The older register subset and
+ * Thumb SP-relative word loads/stores remain available. Every unsupported bit
+ * causes a clean false return. */
 bool a64_static_decode_at(const void *program, unsigned insns, bool thumb,
                           uint32_t pc, a64_static_block_t *out);
 

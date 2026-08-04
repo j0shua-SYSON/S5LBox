@@ -4,7 +4,7 @@
  * This is deliberately NOT a product-performance claim and not a JIT
  * dispatcher. It translates one small synthetic block once, then compares
  * repeated interpreter execution with both that already-built block and a
- * firmware-independent static-threaded proof. The proof's 2,577 generic
+ * firmware-independent static-threaded proof. The proof's 10,271 generic
  * ISA/register handlers are compiled and signed with the executable; runtime
  * decoding creates data records only.
  *
@@ -12,11 +12,13 @@
  * interrupt sampling, cache lookup, translation, chaining, framebuffer
  * publication, UIKit, or real iOS instruction mix here. In particular, a
  * positive result cannot be reported as phone FPS or as proof that a complete
- * no-JIT interpreter will have the same speed. The static proof covers only the
- * four synthetic blocks, flat power-of-two RAM, r0-r7 and SP-relative memory;
- * it has no conditions, MMU, faults, timer, IRQ, MMIO, cache, framebuffer or
- * UI path. Its inner repetition also avoids real block lookup. Those omissions
- * are why it is an architecture gate, not an emulator speed claim.
+ * no-JIT interpreter will have the same speed. The timed rows still cover only
+ * four synthetic blocks and flat power-of-two RAM. Separate exactness cases now
+ * cover every A32 immediate data-processing opcode, all conditions, r8-r14 and
+ * PC reads, but there is still no MMU, fault, timer, IRQ, MMIO, cache,
+ * framebuffer or UI path in the ceiling. Its inner repetition also avoids real
+ * block lookup. Those omissions are why it is an architecture gate, not an
+ * emulator speed claim.
  *
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed.
  */
@@ -159,6 +161,55 @@ static const uint16_t THUMB_SHORT_BRANCH[] = {
     0x3001u, 0xe00du, /* branch at 0x0202 -> 0x0220 */
 };
 
+#define A32_DP_IMM(cond, opcode, set, rn, rd, rotate, imm8)                 \
+    (((uint32_t)(cond) << 28) | UINT32_C(0x02000000) |                     \
+     ((uint32_t)(opcode) << 21) | ((uint32_t)(set) << 20) |                \
+     ((uint32_t)(rn) << 16) | ((uint32_t)(rd) << 12) |                     \
+     ((uint32_t)(rotate) << 8) | (uint32_t)(imm8))
+
+/* All sixteen A32 immediate data-processing opcodes. This deliberately uses
+ * r8-r14, PC as an input, arithmetic and logical flag writes, both rotated and
+ * unrotated immediates, and carry-consuming operations. */
+static const uint32_t A32_IMM_ALL_OPS[] = {
+    A32_DP_IMM(14,  0, 1,  0,  8, 0, 0xff), /* ANDS r8,r0,#ff       */
+    A32_DP_IMM(14,  1, 1,  1,  9, 1, 0x02), /* EORS r9,r1,#80000000 */
+    A32_DP_IMM(14,  2, 1,  2, 10, 0, 0x01), /* SUBS r10,r2,#1       */
+    A32_DP_IMM(14,  3, 1,  3, 11, 0, 0x02), /* RSBS r11,r3,#2       */
+    A32_DP_IMM(14,  4, 0, 15, 12, 0, 0x04), /* ADD r12,pc,#4        */
+    A32_DP_IMM(14,  5, 1,  4, 13, 0, 0x03), /* ADCS sp,r4,#3        */
+    A32_DP_IMM(14,  6, 1,  5, 14, 0, 0x04), /* SBCS lr,r5,#4        */
+    A32_DP_IMM(14,  7, 0,  6,  8, 0, 0x05), /* RSC r8,r6,#5         */
+    A32_DP_IMM(14,  8, 1,  8,  0, 0, 0x80), /* TST r8,#80           */
+    A32_DP_IMM(14,  9, 1,  9,  0, 0, 0xff), /* TEQ r9,#ff           */
+    A32_DP_IMM(14, 10, 1, 10,  0, 0, 0x80), /* CMP r10,#80          */
+    A32_DP_IMM(14, 11, 1, 11,  0, 0, 0x7f), /* CMN r11,#7f          */
+    A32_DP_IMM(14, 12, 1, 12, 12, 0, 0x10), /* ORRS r12,r12,#10     */
+    A32_DP_IMM(14, 13, 1,  0, 13, 0, 0x00), /* MOVS sp,#0           */
+    A32_DP_IMM(14, 14, 1, 14, 14, 0, 0xff), /* BICS lr,lr,#ff       */
+    A32_DP_IMM(14, 15, 1,  0,  8, 1, 0x02), /* MVNS r8,#80000000    */
+};
+
+/* With N=0,Z=0,C=1,V=0, these fourteen guards exercise seven passing and
+ * seven failing ARM conditions without changing the flags. */
+static const uint32_t A32_IMM_CONDITIONS[] = {
+    A32_DP_IMM(14, 10, 1, 0, 0, 0, 0),
+    A32_DP_IMM( 0,  4, 0, 8, 8, 0, 1),
+    A32_DP_IMM( 1,  4, 0, 8, 8, 0, 1),
+    A32_DP_IMM( 2,  4, 0, 8, 8, 0, 1),
+    A32_DP_IMM( 3,  4, 0, 8, 8, 0, 1),
+    A32_DP_IMM( 4,  4, 0, 8, 8, 0, 1),
+    A32_DP_IMM( 5,  4, 0, 8, 8, 0, 1),
+    A32_DP_IMM( 6,  4, 0, 8, 8, 0, 1),
+    A32_DP_IMM( 7,  4, 0, 8, 8, 0, 1),
+    A32_DP_IMM( 8,  4, 0, 8, 8, 0, 1),
+    A32_DP_IMM( 9,  4, 0, 8, 8, 0, 1),
+    A32_DP_IMM(10,  4, 0, 8, 8, 0, 1),
+    A32_DP_IMM(11,  4, 0, 8, 8, 0, 1),
+    A32_DP_IMM(12,  4, 0, 8, 8, 0, 1),
+    A32_DP_IMM(13,  4, 0, 8, 8, 0, 1),
+    A32_DP_IMM(14, 13, 0, 0, 14, 0, 0x5a),
+};
+
 typedef struct {
     const char *name;
     const void *program;
@@ -178,6 +229,10 @@ static const static_case_t STATIC_CASES[] = {
       0x0200u, 0x0206u, 4u },
     { "thumb-branch-target", THUMB_SHORT_BRANCH, 2u, true,
       0x0200u, 0x0220u, 2u },
+    { "a32-imm-all-ops", A32_IMM_ALL_OPS, 16u, false,
+      0x4000u, 0x4040u, 17u },
+    { "a32-imm-conditions", A32_IMM_CONDITIONS, 16u, false,
+      0x5000u, 0x5040u, 31u },
 };
 
 static const bench_case_t CASES[] = {
@@ -261,6 +316,12 @@ static bool validate_static_shapes(void) {
     static const uint32_t MID_BLOCK_BRANCH[] = {
         0xea000000u, 0xe2800001u,
     };
+    static const uint32_t CONDITIONAL_BRANCH[] = { 0x1a000000u };
+    static const uint32_t PC_WRITE[] = { 0xe3a0f000u };
+    static const uint32_t MULTIPLY[] = { 0xe0000090u };
+    static const uint32_t CONDITIONAL_DP[] = {
+        A32_DP_IMM(1, 4, 0, 8, 8, 0, 1),
+    };
     /* Deliberately unaligned guest byte stream: ADD r0,r0,#1. */
     static const uint8_t UNALIGNED_A32[] = {
         0xffu, 0x01u, 0x00u, 0x80u, 0xe2u,
@@ -292,6 +353,13 @@ static bool validate_static_shapes(void) {
                              false, 0u, &block) ||
         a64_static_decode_at(A32_SHORT_FALL, 1u, false, 2u, &block) ||
         a64_static_decode_at(MID_BLOCK_BRANCH, 2u, false, 0u, &block) ||
+        a64_static_decode_at(CONDITIONAL_BRANCH, 1u, false, 0u, &block) ||
+        a64_static_decode_at(PC_WRITE, 1u, false, 0u, &block) ||
+        a64_static_decode_at(MULTIPLY, 1u, false, 0u, &block) ||
+        !a64_static_decode_at(CONDITIONAL_DP, 1u, false, 0x3000u,
+                             &block) ||
+        block.insn_count != 1u || block.uop_count != 3u ||
+        block.exit_pc != 0x3004u || block.touches_memory ||
         !a64_static_decode_bytes_at(&UNALIGNED_A32[1], 1u, false, 0x1000u,
                                     &block) ||
         block.start_pc != 0x1000u || block.exit_pc != 0x1004u ||
@@ -594,8 +662,8 @@ int main(int argc, char **argv) {
     }
 
     printf("Apple-arm64 native/static-semantics ceiling benchmark\n");
-    printf("NOT PHONE FPS: four synthetic subset blocks; static arm has flat "
-           "RAM and no condition/MMU/fault/tick/IRQ/MMIO/cache/framebuffer/UI "
+    printf("NOT PHONE FPS: four synthetic timed blocks; static arm has flat "
+           "RAM and no MMU/fault/tick/IRQ/MMIO/cache/framebuffer/UI "
            "path or real block lookup.\n");
     if (!validate_static_shapes()) return 1;
     for (i = 0u; i < sizeof CASES / sizeof CASES[0]; i++) {

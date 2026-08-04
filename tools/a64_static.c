@@ -20,11 +20,25 @@ enum {
     A64S_STR = A64S_LDR + 64u,
     A64S_LDR_SP = A64S_STR + 64u,
     A64S_STR_SP = A64S_LDR_SP + 8u,
-    A64S_HANDLER_COUNT = A64S_STR_SP + 8u
+    A64S_COND = A64S_STR_SP + 8u,
+    A64S_DP_IMM = A64S_COND + 14u,
+    A64S_HANDLER_COUNT = A64S_DP_IMM + 16u * 2u * 15u * 16u
+};
+
+enum {
+    A64S_CARRY_PRESERVE = 0u,
+    A64S_CARRY_CLEAR = 1u,
+    A64S_CARRY_SET = 2u
 };
 
 _Static_assert(A64S_HANDLER_COUNT == A64_STATIC_HANDLER_COUNT,
                "C decoder and generated handler table disagree");
+_Static_assert(sizeof(a64_static_uop_t) == 16u,
+               "signed handler record stride changed");
+_Static_assert(offsetof(a64_static_uop_t, immediate) == 4u &&
+               offsetof(a64_static_uop_t, pc_value) == 8u &&
+               offsetof(a64_static_uop_t, metadata) == 12u,
+               "signed handler record layout changed");
 
 static uint32_t ror32(uint32_t value, unsigned amount) {
     amount &= 31u;
@@ -61,21 +75,54 @@ static uint32_t rr(unsigned base, unsigned rd, unsigned rn) {
     return base + rd * 8u + rn;
 }
 
+static uint32_t dp_imm(unsigned opcode, bool set_flags,
+                       unsigned rd, unsigned rn) {
+    return A64S_DP_IMM +
+           (((opcode * 2u + (set_flags ? 1u : 0u)) * 15u + rd) *
+            16u + rn);
+}
+
+static bool arm_dp_encoding(uint32_t insn) {
+    return (insn & UINT32_C(0x0c000000)) == 0u &&
+           (insn & UINT32_C(0x01900000)) != UINT32_C(0x01000000) &&
+           !((insn & UINT32_C(0x0e000000)) == 0u &&
+             (insn & UINT32_C(0x00000090)) == UINT32_C(0x00000090));
+}
+
+static bool handler_touches_memory(uint32_t handler) {
+    return handler >= A64S_LDR && handler < A64S_COND;
+}
+
 static bool decode_arm(uint32_t insn, unsigned index, unsigned insns,
-                       uint32_t pc,
-                       a64_static_uop_t *out) {
-    if ((insn >> 28) != 14u) return false;
+                       uint32_t pc, a64_static_uop_t *out,
+                       unsigned *written) {
+    unsigned condition = insn >> 28;
+    unsigned count = 0u;
+    a64_static_uop_t *op = out;
+
+    if (!written || condition == 15u) return false;
+    *written = 0u;
 
     if ((insn & UINT32_C(0x0e000000)) == UINT32_C(0x0a000000)) {
         int32_t displacement;
         uint32_t target;
-        if ((insn & (1u << 24)) != 0u || index + 1u != insns)
+        /* A conditional branch has two possible block exits. It stays in the
+         * literal path until the signed contract carries both destinations. */
+        if (condition != 14u || (insn & (1u << 24)) != 0u ||
+            index + 1u != insns)
             return false;
         displacement = (int32_t)(insn << 8) >> 6;
         target = pc + index * 4u + 8u + (uint32_t)displacement;
-        out->handler = A64S_END;
-        out->immediate = target;
+        op->handler = A64S_END;
+        op->immediate = target;
+        *written = 1u;
         return true;
+    }
+
+    if (condition < 14u) {
+        op->handler = A64S_COND + condition;
+        op++;
+        count++;
     }
 
     if ((insn & UINT32_C(0x0c000000)) == UINT32_C(0x04000000)) {
@@ -89,45 +136,58 @@ static bool decode_arm(uint32_t insn, unsigned index, unsigned insns,
             (insn & (1u << 21)) != 0u || rd > 7u || rn > 7u)
             return false;
         if ((insn & (1u << 23)) == 0u) offset = 0u - offset;
-        out->handler = rr(load ? A64S_LDR : A64S_STR, rd, rn);
-        out->immediate = offset;
+        op->handler = rr(load ? A64S_LDR : A64S_STR, rd, rn);
+        op->immediate = offset;
+        *written = count + 1u;
         return true;
     }
 
-    if ((insn & UINT32_C(0x0c000000)) == 0u) {
+    if (arm_dp_encoding(insn)) {
         unsigned opcode = (insn >> 21) & 15u;
+        bool set_flags = (insn & (1u << 20)) != 0u;
         unsigned rn = (insn >> 16) & 15u;
         unsigned rd = (insn >> 12) & 15u;
+        bool writes_result = opcode < 8u || opcode >= 12u;
         unsigned base;
-        if ((insn & (1u << 20)) != 0u || rd > 7u || rn > 7u)
-            return false;
+
+        /* TST/TEQ/CMP/CMN require S. The S==0 encodings are miscellaneous
+         * control instructions, which arm_dp_encoding has already excluded. */
+        if (!writes_result && !set_flags) return false;
+        if (writes_result && rd == 15u) return false;
+
         if ((insn & (1u << 25)) != 0u) {
-            uint32_t immediate = ror32(insn & 255u,
-                                       2u * ((insn >> 8) & 15u));
-            switch (opcode) {
-            case 1u:  base = A64S_EOR_IMM; break;
-            case 2u:  base = A64S_SUB_IMM; break;
-            case 4u:  base = A64S_ADD_IMM; break;
-            default: return false;
-            }
-            out->handler = rr(base, rd, rn);
-            out->immediate = immediate;
+            unsigned rotate = 2u * ((insn >> 8) & 15u);
+            uint32_t immediate = ror32(insn & 255u, rotate);
+            unsigned handler_rd = writes_result ? rd : 0u;
+            op->handler = dp_imm(opcode, set_flags, handler_rd, rn);
+            op->immediate = immediate;
+            op->pc_value = pc + index * 4u + 8u;
+            op->metadata = rotate == 0u ? A64S_CARRY_PRESERVE :
+                ((immediate >> 31) != 0u ? A64S_CARRY_SET :
+                                           A64S_CARRY_CLEAR);
+            *written = count + 1u;
             return true;
         }
 
-        if ((insn & UINT32_C(0x00000ff0)) != 0u) return false;
-        unsigned rm = insn & 15u;
-        if (rm > 7u) return false;
-        switch (opcode) {
-        case 1u:  base = A64S_EOR_RRR; break;
-        case 2u:  base = A64S_SUB_RRR; break;
-        case 4u:  base = A64S_ADD_RRR; break;
-        case 12u: base = A64S_ORR_RRR; break;
-        default: return false;
+        /* Keep the original no-shift r0-r7 register proof. Broader register
+         * forms need an exact barrel-shifter contract and are a later gate. */
+        if (set_flags || rd > 7u || rn > 7u ||
+            (insn & UINT32_C(0x00000ff0)) != 0u)
+            return false;
+        {
+            unsigned rm = insn & 15u;
+            if (rm > 7u) return false;
+            switch (opcode) {
+            case 1u:  base = A64S_EOR_RRR; break;
+            case 2u:  base = A64S_SUB_RRR; break;
+            case 4u:  base = A64S_ADD_RRR; break;
+            case 12u: base = A64S_ORR_RRR; break;
+            default: return false;
+            }
+            op->handler = rrr(base, rd, rn, rm);
+            *written = count + 1u;
+            return true;
         }
-        out->handler = rrr(base, rd, rn, rm);
-        out->immediate = 0u;
-        return true;
     }
 
     return false;
@@ -178,7 +238,7 @@ static bool decode_program_at(const void *program, unsigned insns, bool thumb,
                               uint32_t pc, bool guest_bytes,
                               a64_static_block_t *out) {
     const uint8_t *bytes = (const uint8_t *)program;
-    unsigned uop_count;
+    unsigned uop_count = 0u;
     uint32_t fallthrough;
     if (!program || !out || !insns || insns > A64_STATIC_MAX_INSNS ||
         (pc & (thumb ? 1u : 3u)) != 0u)
@@ -186,29 +246,38 @@ static bool decode_program_at(const void *program, unsigned insns, bool thumb,
     memset(out, 0, sizeof *out);
     for (unsigned i = 0; i < insns; i++) {
         bool ok;
+        unsigned added = 1u;
         if (thumb) {
             const uint8_t *p = bytes + i * 2u;
             ok = decode_thumb(guest_bytes ? read_le16(p) : read_native16(p),
-                              i, insns, pc, &out->uops[i]);
+                              i, insns, pc, &out->uops[uop_count]);
         } else {
             const uint8_t *p = bytes + i * 4u;
             ok = decode_arm(guest_bytes ? read_le32(p) : read_native32(p),
-                            i, insns, pc, &out->uops[i]);
+                            i, insns, pc, &out->uops[uop_count], &added);
         }
-        if (!ok || out->uops[i].handler >= A64S_HANDLER_COUNT) {
+        if (!ok || !added || added > A64_STATIC_MAX_UOPS - uop_count) {
             memset(out, 0, sizeof *out);
             return false;
         }
-        if (out->uops[i].handler >= A64S_LDR)
-            out->touches_memory = true;
-        if (i + 1u != insns && out->uops[i].handler == A64S_END) {
-            memset(out, 0, sizeof *out);
-            return false;
+        for (unsigned j = 0u; j < added; j++) {
+            uint32_t handler = out->uops[uop_count + j].handler;
+            if (handler >= A64S_HANDLER_COUNT ||
+                (i + 1u != insns && handler == A64S_END)) {
+                memset(out, 0, sizeof *out);
+                return false;
+            }
+            if (handler_touches_memory(handler))
+                out->touches_memory = true;
         }
+        uop_count += added;
     }
-    uop_count = insns;
     fallthrough = pc + insns * (thumb ? 2u : 4u);
-    if (out->uops[insns - 1u].handler != A64S_END) {
+    if (out->uops[uop_count - 1u].handler != A64S_END) {
+        if (uop_count == A64_STATIC_MAX_UOPS) {
+            memset(out, 0, sizeof *out);
+            return false;
+        }
         out->uops[uop_count].handler = A64S_END;
         out->uops[uop_count].immediate = fallthrough;
         uop_count++;
@@ -257,8 +326,8 @@ bool a64_static_run(arm_cpu_t *cpu, const a64_static_block_t *block,
                     uint64_t blocks, uint8_t *ram, size_t ram_size) {
     if (!cpu || !block || !blocks || !ram ||
         !block->insn_count || block->insn_count > A64_STATIC_MAX_INSNS ||
-        (block->uop_count != block->insn_count &&
-         block->uop_count != block->insn_count + 1u) ||
+        block->uop_count < block->insn_count ||
+        block->uop_count > block->insn_count * 2u + 1u ||
         block->uop_count > A64_STATIC_MAX_UOPS ||
         block->uops[block->uop_count - 1u].handler != A64S_END ||
         block->uops[block->uop_count - 1u].immediate != block->exit_pc ||
@@ -268,10 +337,22 @@ bool a64_static_run(arm_cpu_t *cpu, const a64_static_block_t *block,
         !ram_size || (ram_size & (ram_size - 1u)) != 0u ||
         ram_size - 1u > UINT32_MAX)
         return false;
-    for (unsigned i = 0; i < block->uop_count - 1u; i++)
-        if (block->uops[i].handler == A64S_END ||
-            block->uops[i].handler >= A64S_HANDLER_COUNT)
+    for (unsigned i = 0; i < block->uop_count - 1u; i++) {
+        uint32_t handler = block->uops[i].handler;
+        if (handler == A64S_END || handler >= A64S_HANDLER_COUNT)
             return false;
+        if (handler >= A64S_COND && handler < A64S_DP_IMM) {
+            uint32_t next_handler;
+            if (i + 1u >= block->uop_count - 1u) return false;
+            next_handler = block->uops[i + 1u].handler;
+            if (next_handler == A64S_END ||
+                (next_handler >= A64S_COND && next_handler < A64S_DP_IMM))
+                return false;
+        }
+        if (handler >= A64S_DP_IMM && block->uops[i].metadata >
+                                         A64S_CARRY_SET)
+            return false;
+    }
 #if defined(S5LBOX_STATIC_A64_NATIVE)
     return a64_static_execute(cpu->r, &cpu->cpsr, &cpu->cycles,
                               block->uops, blocks, ram,

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the benchmark-only, firmware-independent AArch64 handler table.
+"""Generate the firmware-independent signed AArch64 handler table.
 
 The output is ordinary assembly compiled and signed with the executable. The
 generator enumerates ISA operand combinations only; it consumes no guest image,
@@ -13,23 +13,122 @@ from pathlib import Path
 
 
 HOST = tuple(range(19, 27))  # guest r0-r7 stay pinned in x19-x26
-EXPECTED_HANDLERS = 2577
+PINNED = {reg: host for reg, host in enumerate(HOST)}
+PINNED[13] = 27
+CONDITIONS = (
+    "eq", "ne", "cs", "cc", "mi", "pl", "vs", "vc",
+    "hi", "ls", "ge", "lt", "gt", "le",
+)
+EXPECTED_HANDLERS = 10271
 
 
 def next_dispatch() -> list[str]:
     return [
-        "    ldr w16, [x13], #8",
+        "    ldr w16, [x13], #16",
         "    ldrsw x16, [x8, w16, uxtw #2]",
         "    add x16, x8, x16",
         "    br x16",
     ]
 
 
+def read_guest_register(reg: int, scratch: int) -> tuple[list[str], str]:
+    if reg in PINNED:
+        return [], f"w{PINNED[reg]}"
+    if reg == 15:
+        return [f"    ldur w{scratch}, [x13, #-8]"], f"w{scratch}"
+    return [f"    ldr w{scratch}, [x0, #{reg * 4}]"], f"w{scratch}"
+
+
+def result_register(rd: int) -> tuple[str, list[str]]:
+    if rd in PINNED:
+        return f"w{PINNED[rd]}", []
+    return "w12", [f"    str w12, [x0, #{rd * 4}]"]
+
+
+def logic_flags(result: str) -> list[str]:
+    return [
+        # metadata: 0 preserves C, 1 clears C, 2 sets C. V is preserved.
+        "    ldur w16, [x13, #-4]",
+        "    mrs x10, nzcv",
+        f"    ands wzr, {result}, {result}",
+        "    mrs x9, nzcv",
+        "    and w9, w9, #0xc0000000",
+        "    cmp w16, #0",
+        "    b.ne 1f",
+        "    and w10, w10, #0x30000000",
+        "    b 3f",
+        "1:",
+        "    and w10, w10, #0x10000000",
+        "    cmp w16, #2",
+        "    b.ne 3f",
+        "    orr w10, w10, #0x20000000",
+        "3:",
+        "    orr w9, w9, w10",
+        "    msr nzcv, x9",
+    ]
+
+
+def dp_immediate_body(opcode: int, set_flags: bool,
+                      rd: int, rn: int) -> list[str]:
+    body = ["    ldur w9, [x13, #-12]"]
+    if opcode not in (13, 15):
+        loads, source = read_guest_register(rn, 10)
+        body.extend(loads)
+    else:
+        source = "wzr"
+
+    writes = opcode < 8 or opcode >= 12
+    if writes:
+        result, stores = result_register(rd)
+    else:
+        result, stores = "w12", []
+
+    if opcode == 0:       # AND
+        body.append(f"    and {result}, {source}, w9")
+    elif opcode == 1:     # EOR
+        body.append(f"    eor {result}, {source}, w9")
+    elif opcode == 2:     # SUB
+        body.append(f"    {'subs' if set_flags else 'sub'} {result}, {source}, w9")
+    elif opcode == 3:     # RSB
+        body.append(f"    {'subs' if set_flags else 'sub'} {result}, w9, {source}")
+    elif opcode == 4:     # ADD
+        body.append(f"    {'adds' if set_flags else 'add'} {result}, {source}, w9")
+    elif opcode == 5:     # ADC
+        body.append(f"    {'adcs' if set_flags else 'adc'} {result}, {source}, w9")
+    elif opcode == 6:     # SBC
+        body.append(f"    {'sbcs' if set_flags else 'sbc'} {result}, {source}, w9")
+    elif opcode == 7:     # RSC
+        body.append(f"    {'sbcs' if set_flags else 'sbc'} {result}, w9, {source}")
+    elif opcode == 8:     # TST
+        body.append(f"    and {result}, {source}, w9")
+    elif opcode == 9:     # TEQ
+        body.append(f"    eor {result}, {source}, w9")
+    elif opcode == 10:    # CMP
+        body.append(f"    subs wzr, {source}, w9")
+    elif opcode == 11:    # CMN
+        body.append(f"    adds wzr, {source}, w9")
+    elif opcode == 12:    # ORR
+        body.append(f"    orr {result}, {source}, w9")
+    elif opcode == 13:    # MOV
+        body.append(f"    mov {result}, w9")
+    elif opcode == 14:    # BIC
+        body.append(f"    bic {result}, {source}, w9")
+    else:                 # MVN
+        body.append(f"    mvn {result}, w9")
+
+    if (opcode in (0, 1, 8, 9, 12, 13, 14, 15) and
+            (set_flags or not writes)):
+        body.extend(logic_flags(result))
+    body.extend(stores)
+    body.extend(next_dispatch())
+    return body
+
+
 def build_handlers() -> list[tuple[str, list[str]]]:
     handlers: list[tuple[str, list[str]]] = []
 
     handlers.append((".La64s_end", [
-        "    ldur w12, [x13, #-4]",
+        "    ldur w12, [x13, #-12]",
         "    sub x15, x15, #1",
         "    cbz x15, .La64s_exit",
         "    mov x13, x14",
@@ -62,7 +161,7 @@ def build_handlers() -> list[tuple[str, list[str]]]:
             for rn, hn in enumerate(HOST):
                 label = f".La64s_{name}_{rd}_{rn}"
                 handlers.append((label, [
-                    "    ldur w9, [x13, #-4]",
+                    "    ldur w9, [x13, #-12]",
                     f"    {mnemonic} w{hd}, w{hn}, w9",
                     *next_dispatch(),
                 ]))
@@ -94,7 +193,7 @@ def build_handlers() -> list[tuple[str, list[str]]]:
                     else f"    str w{hd}, [x28, w9, uxtw]"
                 )
                 handlers.append((label, [
-                    "    ldur w9, [x13, #-4]",
+                    "    ldur w9, [x13, #-12]",
                     f"    add w9, w{hn}, w9",
                     "    and w9, w9, w11",
                     memory_op,
@@ -110,12 +209,37 @@ def build_handlers() -> list[tuple[str, list[str]]]:
                 else f"    str w{hd}, [x28, w9, uxtw]"
             )
             handlers.append((label, [
-                "    ldur w9, [x13, #-4]",
+                "    ldur w9, [x13, #-12]",
                 "    add w9, w27, w9",
                 "    and w9, w9, w11",
                 memory_op,
                 *next_dispatch(),
             ]))
+
+    # A failed ARM condition skips exactly the following semantic record.
+    # AL has no guard and cond=0xf is rejected by the decoder.
+    for condition in CONDITIONS:
+        handlers.append((f".La64s_cond_{condition}", [
+            f"    b.{condition} 1f",
+            "    add x13, x13, #16",
+            "1:",
+            *next_dispatch(),
+        ]))
+
+    # Uniform dimensions keep the C decoder's handler arithmetic auditable.
+    # Several comparison/Rn combinations are unreachable but retaining their
+    # ordinary signed text is cheaper and safer than a generated lookup map.
+    for opcode in range(16):
+        for set_flags in (False, True):
+            for rd in range(15):
+                for rn in range(16):
+                    label = (
+                        f".La64s_dp_imm_{opcode}_{int(set_flags)}_{rd}_{rn}"
+                    )
+                    handlers.append((
+                        label,
+                        dp_immediate_body(opcode, set_flags, rd, rn),
+                    ))
 
     if len(handlers) != EXPECTED_HANDLERS:
         raise RuntimeError(

@@ -3076,11 +3076,23 @@ static void test_timer_interrupt_reaches_handler(void) {
  * than a missing invalidation notification.
  */
 static void test_signed_static_a64_soc_oracle(void) {
-    static const uint32_t add_loop[16] = {
-        0xe2800001u, 0xe2800001u, 0xe2800001u, 0xe2800001u,
-        0xe2800001u, 0xe2800001u, 0xe2800001u, 0xe2800001u,
-        0xe2800001u, 0xe2800001u, 0xe2800001u, 0xe2800001u,
-        0xe2800001u, 0xe2800001u, 0xe2800001u, 0xeaffffefu
+    static const uint32_t signed_loop[16] = {
+        0xe3a08000u, /* MOV   r8,#0              */
+        0xe3580000u, /* CMP   r8,#0              */
+        0x02888001u, /* ADDEQ r8,r8,#1           */
+        0x12888008u, /* ADDNE r8,r8,#8           */
+        0xe3a09102u, /* MOV   r9,#0x80000000     */
+        0xe3b0a102u, /* MOVS  r10,#0x80000000    */
+        0xe2a8b002u, /* ADC   r11,r8,#2          */
+        0xe2cbc001u, /* SBC   r12,r11,#1         */
+        0xe28dd004u, /* ADD   sp,sp,#4           */
+        0xe22ee001u, /* EOR   lr,lr,#1           */
+        0xe31900ffu, /* TST   r9,#0xff           */
+        0x038cc040u, /* ORREQ r12,r12,#0x40      */
+        0xe3ccc020u, /* BIC   r12,r12,#0x20      */
+        0xe3e09000u, /* MVN   r9,#0              */
+        0xe3790001u, /* CMN   r9,#1              */
+        0xeaffffefu  /* B     0                  */
     };
     s5l8900_t fast = {0};
     s5l8900_t reference = {0};
@@ -3109,8 +3121,8 @@ static void test_signed_static_a64_soc_oracle(void) {
         return;
     }
 
-    s5l8900_load(&fast, 0u, add_loop, sizeof add_loop);
-    s5l8900_load(&reference, 0u, add_loop, sizeof add_loop);
+    s5l8900_load(&fast, 0u, signed_loop, sizeof signed_loop);
+    s5l8900_load(&reference, 0u, signed_loop, sizeof signed_loop);
     /* The board's real 412 MHz:6 MHz non-integral ratio makes the run cross
      * hundreds of device boundaries, rather than proving a timer-free line.
      * Keep it real: tb_hz is also the PMU's configured clock and snapshots
@@ -3126,11 +3138,12 @@ static void test_signed_static_a64_soc_oracle(void) {
           "reference run stopped early with status=%d", (int)reference_status);
 
     /* Keep the fetch pointer and decode cache live, but change the bytes they
-     * alias. 0xe2400001 is SUB r0,r0,#1, still inside the signed subset. */
+     * alias. MOV r8,#1 remains inside the signed subset and reverses which
+     * of the following EQ/NE operations executes. */
     {
-        const uint32_t subtract = UINT32_C(0xe2400001);
-        s5l8900_load(&fast, 0u, &subtract, sizeof subtract);
-        s5l8900_load(&reference, 0u, &subtract, sizeof subtract);
+        const uint32_t mov_one = UINT32_C(0xe3a08001);
+        s5l8900_load(&fast, 0u, &mov_one, sizeof mov_one);
+        s5l8900_load(&reference, 0u, &mov_one, sizeof mov_one);
     }
     CHECK(s5l8900_run(&fast, 4096u, &fast_status) == 4096u,
           "signed SMC run stopped early with status=%d", (int)fast_status);
