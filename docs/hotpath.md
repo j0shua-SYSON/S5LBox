@@ -5228,3 +5228,67 @@ control transfer still returns to the literal path. There has been no restored
 same-binary performance bracket, no phone execution of this engine, and no cold-boot
 acceptance. The next evidence-backed step is an encoding census followed by exact
 MMU/TLB-backed RAM read hits; cache-size tuning or an FPS claim here would be dishonest.
+
+### r496: exact DREAD RAM hits broaden the signed path without hiding misses
+
+Before implementing a load fast path, r496 extended the read-only restored-workload
+observer and replayed exactly 10,000,000 entries from the r445 snapshot at 7.100 billion
+retired instructions. The interval contained 9,999,489 fetched instructions and 511
+interrupt entries. It observed 1,325,611 non-PC A32 single loads: 60,331 failed their
+condition, none were invalid if executed, and none took an alignment abort. Among passed,
+valid loads, the interpreter's pre-step 1 KiB DREAD cache would hit 1,152,488 times and
+miss 112,792 times, a 91.086% hit rate. The narrower pre-index/no-writeback family now
+implemented by the signed decoder accounted for 1,306,528 observations: 57,303 failed
+conditions, while 1,136,467 of the passed loads had a DREAD hit. That profile was a
+read-only classification run; it changed no guest behaviour and measured no speed.
+
+The product decoder now accepts that exact A32 family for word and byte loads, immediate
+or register offsets, add or subtract addressing, every base register, and every non-PC
+destination. Register offsets use the exact ARM immediate barrel-shifter rules. Stores,
+loads to PC, post-indexing, writeback, invalid register-offset encodings and Rm=PC remain
+literal. Generated ordinary AArch64 text grew from 23,847 to 23,941 firmware-independent
+handlers; decoded blocks remain data records and still require no JIT, writable executable
+memory or firmware-derived code.
+
+A direct read is allowed only when the live DREAD slot has the exact virtual tag,
+translation generation and privilege, and word alignment is valid. A hit reads through
+the cached host pointer and increments the existing hit counter exactly. A miss does not
+pretend that RAM is safe: the signed runner refunds the unretired suffix of its prepaid
+cycle budget, publishes the unexecuted load PC and completed prefix state, and returns to
+`arm_step()`. The literal path then owns the MMU walk, permission fault, alignment policy,
+MMIO exit, miss accounting and cache fill. Native Apple oracles cover eight exact hits, a
+zero-prefix miss and a miss after one completed data-processing instruction, all against
+the interpreter.
+
+The first integration also exposed a separate structural loss at device-time boundaries.
+The cache retained the longest decodable block, but a caller budget shorter than that
+block returned directly to the interpreter. r496 now decodes a temporary longest prefix
+bounded by the remaining budget instead. The cached block stays unchanged, and at most
+one shortened prefix is needed at an edge. The complete SoC oracle explicitly reaches a
+warm sixteen-instruction block with a one-instruction budget and requires that instruction
+to retire through the signed path; the final machine snapshot remains byte-exact.
+
+At exact commit `74e488011012d4a4bce9d93bacd6cf9decd29a06`, core-tests run
+`30871962759` and iOS-build run `30871962760` both passed. macOS-14 and macOS-15 each
+reported `STATIC-READ-SHAPE exact=yes insns=9 uops=23 handlers=23941`,
+`STATIC-READ-ORACLE exact=yes hits=8 zero-prefix=yes partial-prefix=yes`,
+`STATIC-A64-SOC-ORACLE exact=yes retired=24095 smc=yes`, 5,846/0 SoC assertions,
+60/60 engine-on tests and 55/55 independent engine-off tests. Linux, Windows,
+sanitizers and warnings-as-errors were also green. The ad-hoc-signed IPA built and
+packaged successfully, but its normal project configuration still builds this engine out.
+
+The largest honest single-instruction eligibility ceiling visible in that profile is
+3,013,148 safe non-PC data-processing observations plus 1,193,770 supported load guards
+or hits: 4,206,918 of 9,999,489 fetched instructions, or **42.071%**. This is not measured
+signed retirement, is not a speedup, and cannot be inserted into Amdahl's law as an
+independent additive gain. Unsupported instructions, cache entry costs, short fragments,
+misses, interrupts and timer boundaries can make realised coverage much smaller.
+
+Brutal status: **measured emulator and iPhone FPS improvement is still zero**, and the
+only current phone report remains 0--4 FPS. There has been no restored same-binary A/B,
+no iPhone execution of this engine, and no cold-boot acceptance. The work is substantial
+correctness and coverage infrastructure, but calling it an FPS improvement would be
+false. The next gate is an exact restored-trace model of the product decoder's contiguous
+signed runs, including live DREAD misses and the sixteen-instruction cap. Only if that
+shows useful residency should the engine enter an app build and face same-binary restored
+and phone measurements; final acceptance still requires a cold boot.
