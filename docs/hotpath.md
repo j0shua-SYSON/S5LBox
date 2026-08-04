@@ -5743,7 +5743,7 @@ Exact conditional and link semantics are therefore the next coverage tranche. If
 can convert a large literal boundary into the tail of an existing signed call; only after that
 replay will branch-to-target chaining have enough volume to justify its added dispatcher risk.
 
-### r511: exact A32 B/BL materially lengthens calls, still not 30 FPS
+### r511-r512: exact A32 B/BL improves coverage, still not 30 FPS
 
 r511 admits the complete terminal A32 immediate branch family without runtime-generated code.
 Fourteen signed handlers select conditional B exits from live NZCV; fifteen conditional/AL BL
@@ -5761,52 +5761,59 @@ control-flow-heavy loop instructions through signed handlers and serialized byte
 the interpreter. Strict warnings, ASan/UBSan, all 60 local tests, every hosted platform job and
 the ad-hoc-signed IPA build are green.
 
-The relinked profiler then replayed the identical 7.100--7.110 B snapshot window. The exact
-model changes are substantial:
+The first relinked replay counted instruction coverage correctly, but its call histogram still
+recognized only the old unconditional B as terminal. It therefore merged a failed conditional
+B/BL's sequential fallthrough into the same modeled call even though the current product
+returns from every dynamic branch handler. This was caught while auditing the proposed chaining
+contract, before using the optimistic histogram to implement it. Commit
+`75b3bfde7121e76d5a3c21a9d0e390c30ed9f396` makes every admitted A32 immediate B/BL terminal in
+the current-engine observer. The corrected identical 7.100--7.110 B replay reports:
 
 - decoder support rises from 64.400% to 75.334% of fetched instructions;
 - modeled signed retirement rises from 5,865,830 (58.661%) to 6,956,087 (69.564%);
 - all 1,201,691 observed A32 B/BL instructions decode, and 1,179,537 remain retirement-modeled;
-- calls fall from 2,480,573 to 2,242,465 while mean length rises from 2.365 to 3.102;
-- length-one/two modeled work falls from 41.143% to 26.571%, while length nine-through-sixteen
-  rises from 8.473% to 21.674%.
+- calls rise from 2,480,573 to 2,628,811 because newly supported branches can form their own
+  signed calls, while mean length still rises from 2.365 to 2.646;
+- length-one/two modeled work falls from 41.143% to 32.441%; length nine-through-sixteen remains
+  nearly flat at 8.534%, rather than the erroneous first replay's 21.674%.
 
 | length | modeled calls | modeled instructions | modeled share |
 |---:|---:|---:|---:|
-| 1 | 723,633 | 723,633 | 10.403% |
-| 2 | 562,327 | 1,124,654 | 16.168% |
-| 3 | 327,361 | 982,083 | 14.118% |
-| 4 | 205,109 | 820,436 | 11.795% |
-| 5 | 127,076 | 635,380 | 9.134% |
-| 6 | 88,145 | 528,870 | 7.603% |
-| 7 | 54,660 | 382,620 | 5.501% |
-| 8 | 31,342 | 250,736 | 3.605% |
-| 9 | 23,111 | 207,999 | 2.990% |
-| 10 | 20,971 | 209,710 | 3.015% |
-| 11 | 13,713 | 150,843 | 2.169% |
-| 12 | 15,620 | 187,440 | 2.695% |
-| 13 | 6,570 | 85,410 | 1.228% |
-| 14 | 6,842 | 95,788 | 1.377% |
-| 15 | 5,275 | 79,125 | 1.137% |
-| 16 | 30,710 | 491,360 | 7.064% |
+| 1 | 838,292 | 838,292 | 12.051% |
+| 2 | 709,180 | 1,418,360 | 20.390% |
+| 3 | 491,070 | 1,473,210 | 21.179% |
+| 4 | 274,165 | 1,096,660 | 15.765% |
+| 5 | 140,650 | 703,250 | 10.110% |
+| 6 | 69,598 | 417,588 | 6.003% |
+| 7 | 34,625 | 242,375 | 3.484% |
+| 8 | 21,590 | 172,720 | 2.483% |
+| 9 | 12,718 | 114,462 | 1.645% |
+| 10 | 4,536 | 45,360 | 0.652% |
+| 11 | 6,129 | 67,419 | 0.969% |
+| 12 | 8,717 | 104,604 | 1.504% |
+| 13 | 4,639 | 60,307 | 0.867% |
+| 14 | 1,571 | 21,994 | 0.316% |
+| 15 | 1,810 | 27,150 | 0.390% |
+| 16 | 9,521 | 152,336 | 2.190% |
 
 Reweighting the unchanged Apple SoC-entry medians gives an equal-instruction covered speedup of
-1.646x/1.677x on macOS 14/15, or **1.375x/1.391x whole-workload** at 69.564% coverage. Retaining
-the synthetic reference loops' measured seconds gives 1.825x/1.851x covered and
-**1.459x/1.470x overall**. Used only as scale against r485, those alternatives span about
-21.64--23.13 M/s. They are still synthetic interpretations, not confidence bounds, measured
+1.454x/1.475x on macOS 14/15, or **1.277x/1.289x whole-workload** at 69.564% coverage. Retaining
+the synthetic reference loops' measured seconds gives 1.622x/1.596x covered and
+**1.364x/1.351x overall**. Used only as scale against r485, those alternatives span about
+20.10--21.45 M/s. They are still synthetic interpretations, not confidence bounds, measured
 firmware timing, emulator FPS or phone FPS; the 30 FPS capacity target remains 34.304688 M/s.
 
-The replay exited OK in about 26 host seconds with empty stderr and 1,590 CLCD frames. Its work
+The corrected replay exited OK in about 33 host seconds with empty stderr and 1,590 CLCD frames. Its work
 image and PPM hashes remain byte-identical to r510:
 `8A59C388C481165F460984926AA5FFB1B72A0E9030216CD0038DE9B3264B79FE` and
 `1EF63FFE3EEFD976416E17120A36BA074BF295EA0955D716E2D345FCC5EA0A9E`.
 
-Brutal status: **this is the first large structural gain since the signed engine entered the
-product path, but it still does not prove any emulator or physical-phone FPS gain**. The normal
-iOS app still compiles the default-off engine out, and the only phone observation remains 0--4
-FPS. The replay now records 626,866 dynamic-flow stops, up from 4,345 because supported branches
-correctly end at their selected destination. That is finally enough volume to justify bounded
-branch-to-target chaining. The next tranche must preserve the caller/timer budget, fetch-block
-and raw-byte witness, interrupt gates and exact interpreter state; a faster chain that skips any
-of those boundaries is not an optimization this project will accept.
+Brutal status: **this is a real structural gain, but it still does not prove any emulator or
+physical-phone FPS gain and the corrected estimate remains far below 30 FPS**. The normal iOS
+app still compiles the default-off engine out, and the only phone observation remains 0--4 FPS.
+The current model stops 1,192,688 calls on signed branches; flow stops remain only 4,345. That is
+finally enough branch volume to justify bounded branch-to-target chaining, but the erroneous
+fallthrough merge shows why its accounting and tests must be explicit. The next tranche must
+preserve the caller/timer budget, target fetch translation, cache/raw-byte witness, privilege and
+generation keys, interrupt gates and exact interpreter state; a faster chain that skips any of
+those boundaries is not an optimization this project will accept.
