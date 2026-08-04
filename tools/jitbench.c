@@ -532,6 +532,10 @@ static const bench_case_t CASES[] = {
 };
 
 static const unsigned PRODUCT_ENTRY_LENGTHS[] = {1u, 2u, 3u, 4u, 8u, 16u};
+static const unsigned SOC_ENTRY_LENGTHS[] = {
+    1u, 2u, 3u, 4u, 5u, 6u, 7u, 8u,
+    9u, 10u, 11u, 12u, 13u, 14u, 15u, 16u,
+};
 
 static double now_seconds(void) {
 #if defined(_WIN32)
@@ -2373,9 +2377,9 @@ int main(int argc, char **argv) {
                                  reps))
             return 1;
     }
-    for (i = 0u; i < sizeof PRODUCT_ENTRY_LENGTHS /
-                         sizeof PRODUCT_ENTRY_LENGTHS[0]; i++) {
-        if (!bench_soc_entry(PRODUCT_ENTRY_LENGTHS[i], soc_insns, reps))
+    for (i = 0u; i < sizeof SOC_ENTRY_LENGTHS /
+                         sizeof SOC_ENTRY_LENGTHS[0]; i++) {
+        if (!bench_soc_entry(SOC_ENTRY_LENGTHS[i], soc_insns, reps))
             return 1;
     }
     return 0;

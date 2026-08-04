@@ -27017,6 +27017,37 @@ static void sequence_profile_report(sequence_profile_t *profile) {
             "9-16", profile->signed_calls,
             profile->signed_call_instructions, 9u, 16u,
             signed_instructions);
+        {
+            uint64_t histogram_calls = 0u;
+            uint64_t histogram_instructions = 0u;
+            printf("    exact modeled call-length histogram\n");
+            for (unsigned length = 1u; length <= SEQUENCE_SIGNED_CAP;
+                 length++) {
+                uint64_t calls = profile->signed_calls[length];
+                uint64_t instructions =
+                    profile->signed_call_instructions[length];
+                histogram_calls += calls;
+                histogram_instructions += instructions;
+                printf("      length=%2u calls=%10" PRIu64
+                       " instructions=%10" PRIu64
+                       " modeled-share=%6.3f%%  %s\n",
+                       length, calls, instructions,
+                       signed_instructions
+                           ? 100.0 * (double)instructions /
+                                 (double)signed_instructions
+                           : 0.0,
+                       instructions == calls * (uint64_t)length
+                           ? "EXACT" : "MISMATCH");
+            }
+            printf("    exact histogram calls/instructions=%" PRIu64
+                   "/%" PRIu64 " model=%" PRIu64 "/%" PRIu64
+                   "  %s\n",
+                   histogram_calls, histogram_instructions,
+                   signed_calls, signed_instructions,
+                   histogram_calls == signed_calls &&
+                           histogram_instructions == signed_instructions
+                       ? "EXACT" : "MISMATCH");
+        }
         printf("    stops cap/timer/caller/branch/flow/fetch-block/"
                "ineligible/observer=%" PRIu64 "/%" PRIu64 "/%" PRIu64
                "/%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64
