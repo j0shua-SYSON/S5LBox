@@ -371,10 +371,16 @@ static unsigned try_graph(s5l8900_t *m, static_a64_state_t *state,
     if (!first) return 0u;
     /* The direct table is intentionally scoped by offset, so a descriptor at
      * the same offset in another 1 KiB fetch block may have replaced this
-     * cache entry's node. Republish the C-validated first head even on a cache
-     * hit. This lets a returning hot block rebuild its local graph instead of
-     * suffering a permanent validation miss after a legitimate collision. */
-    publish_graph_node(state, context.last_entry);
+     * cache entry's node. Ensure the C-validated first head is published, but
+     * leave an already-owned valid node untouched on the common hot hit. This
+     * lets a returning block recover without recopying 128 bytes per entry. */
+    {
+        static_a64_entry_t *entry = context.last_entry;
+        a64_static_graph_node_t *node =
+            &state->graph_nodes[graph_index(entry->pc, entry->thumb)];
+        if (node->owner != entry || !node->valid || !node->supported)
+            publish_graph_node(state, entry);
+    }
     if (!a64_static_run_read_hits_graph(cpu, first, m->ram, m->ram_size,
                                         budget, state->graph_nodes, &completed,
                                         &blocks)) {
