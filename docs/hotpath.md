@@ -5124,3 +5124,51 @@ conditions, barrel shifts and r8--r14, then add exact MMU/TLB read hits and late
 Only after enough of the measured stream stays inside signed handlers is a restored
 same-binary A/B useful. Cache-size tuning or claiming the synthetic 18x--45x ratios as
 emulator speed would be another whack-a-mole detour.
+
+### r494: exact immediate A32 semantics cover a measured 18.569% ceiling
+
+r494 expands the signed path along the largest already-measured tractable slice rather
+than tuning its cache. The r473 restored profile observed 1,856,853 A32 immediate
+data-processing instructions: **18.569% of all fetched instructions** and 61.625% of the
+data-processing class. The decoder now accepts all sixteen immediate data-processing
+opcodes, conditions 0x0--0xd plus AL, r0--r14 destinations and r0--r15 sources. PC reads
+use the exact per-instruction `pc + 8` value placed in a data record at decode time. PC
+writes, cond=0xf, BL and conditional branches remain rejected.
+
+Condition execution is a signed guard record. A failed guard skips the following semantic
+record without changing flags or registers; the guest instruction still counts once in
+the block's timer budget. Arithmetic operations use AArch64's matching 32-bit NZCV
+semantics. Logical operations explicitly reconstruct ARM's N/Z, shifter-C and preserved-V
+rules, including the difference between an unrotated immediate that preserves C and a
+rotated immediate that replaces it. Guest r0--r7 and SP remain pinned. r8--r12 and LR are
+loaded/stored through the live CPU register array, so writes from an earlier signed
+instruction are visible to the next one. Runtime records grew from eight to sixteen bytes
+to carry the immediate, exact PC operand and flag metadata; build-time handlers grew from
+2,577 to 10,271. They are still ordinary signed text, not generated executable memory.
+
+The independent Apple oracle now contains one sixteen-instruction case spanning every
+opcode, r8--r14, PC input, rotated/unrotated immediates and flag writes, plus a second case
+that holds N=0/Z=0/C=1/V=0 while exercising all fourteen real condition codes: seven pass
+and seven fail. Both macOS runners reported exact final CPU/RAM state at the correct exit
+PC and cycle count. The full S5L8900 oracle was also upgraded from repeated ADDs to a loop
+using conditions, r8--r14, carry consumers and logical flags. Both runners reported
+`STATIC-A64-SOC-ORACLE exact=yes retired=21520 smc=yes`; changing its cached MOV changed
+the EQ/NE path and still produced a byte-identical final machine snapshot.
+
+The larger record and handler table did not erase the synthetic ceiling. Across the same
+500 M-instruction timed rows, static signed ratios ranged from 17.340x to 41.240x on
+macOS-15 and 18.738x to 40.380x on macOS-14. Those rows still repeat four old synthetic
+blocks with flat RAM and no real lookup, so they are a regression guard, not a projection
+of the newly supported workload or a phone speed result. Exact commit
+`cf36c139b533d6fa85b63f0c0802faf1f9070dda` passed core run `30867587456`, including
+60/60 JIT-on and 55/55 JIT-off tests, and iOS build `30867587465`.
+
+Brutal status: this is the first expansion with a quantified real-workload ceiling, but
+there is still **zero measured emulator or iPhone FPS gain**. The decoder can cover at
+most the immediate 18.569% slice plus its older tiny register subset, and unsupported
+instructions fragment that coverage into short runs. The iOS target still builds the
+engine out. A restored A/B now would mainly report fallback/entry overhead and could not
+prove the 2.18x end-to-end requirement even under infinite immediate-ALU speed. The next
+non-whack-a-mole step is the other 1,158,810 profiled register-form data-processing
+instructions with the exact barrel shifter and full register set, followed by MMU/TLB RAM
+read hits. Product FPS remains the reported 0--4.
