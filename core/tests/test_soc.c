@@ -3205,7 +3205,7 @@ static void test_signed_static_a64_soc_oracle(void) {
 
 /* Product-facing VFP state coverage crosses the real SoC runner and timer
  * boundaries. The loop contains no host floating arithmetic: it proves raw
- * S/D aliasing, core transfers, FPSCR/FPEXC access and sign-bit operations. */
+ * S/D aliasing, core transfers, system access and integer-bit FPCompare. */
 static void test_signed_static_a64_vfp_register_oracle(void) {
     static const uint32_t signed_loop[16] = {
         UINT32_C(0xee000a10), /* VMOV s0,r0 */
@@ -3216,12 +3216,12 @@ static void test_signed_static_a64_vfp_register_oracle(void) {
         UINT32_C(0xec598a11), /* VMOV r8,r9,s2,s3 */
         UINT32_C(0xeee1aa10), /* VMSR FPSCR,r10 */
         UINT32_C(0xeef1ba10), /* VMRS r11,FPSCR */
+        UINT32_C(0xeeb40a60), /* VCMP.F32 s0,s1 */
         UINT32_C(0xeef1fa10), /* VMRS APSR_nzcv,FPSCR */
-        UINT32_C(0xeef02a42), /* VMOV.F32 s5,s4 */
-        UINT32_C(0xeeb03ac2), /* VABS.F32 s6,s4 */
-        UINT32_C(0xeef13a42), /* VNEG.F32 s7,s4 */
+        UINT32_C(0xeeb51ac0), /* VCMPE.F32 s2,#0 */
+        UINT32_C(0xeeb40b41), /* VCMP.F64 d0,d1 */
+        UINT32_C(0xeeb51bc0), /* VCMPE.F64 d1,#0 */
         UINT32_C(0xeeb02bc1), /* VABS.F64 d2,d1 */
-        UINT32_C(0xeeb13b41), /* VNEG.F64 d3,d1 */
         UINT32_C(0xeef8ca10), /* VMRS r12,FPEXC */
         UINT32_C(0xeaffffef), /* B 0 */
     };
@@ -3304,7 +3304,8 @@ static void test_signed_static_a64_vfp_register_oracle(void) {
     if (fast_snapshot && reference_snapshot && fast_len == reference_len &&
         memcmp(fast_snapshot, reference_snapshot, fast_len) == 0 &&
         s5l8900_static_a64_retired(&fast) != 0u) {
-        printf("  STATIC-A64-VFP-REGISTER-ORACLE exact=yes retired=%llu\n",
+        printf("  STATIC-A64-VFP-REGISTER-ORACLE exact=yes retired=%llu "
+               "compare=yes\n",
                (unsigned long long)s5l8900_static_a64_retired(&fast));
     }
 

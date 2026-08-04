@@ -19,7 +19,7 @@ CONDITIONS = (
     "eq", "ne", "cs", "cc", "mi", "pl", "vs", "vc",
     "hi", "ls", "ge", "lt", "gt", "le",
 )
-EXPECTED_HANDLERS = 24614
+EXPECTED_HANDLERS = 24616
 
 READ_KINDS = (
     ("word", "ldr", 4),
@@ -491,6 +491,17 @@ def vfp_gate(kind: str) -> list[str]:
                 "    b .La64s_direct_miss",
                 "1:",
             ])
+        elif kind == "values":
+            body.extend([
+                "    ldr x4, [x3, #40]",
+                "    ldr w4, [x4]",
+                "    mov w5, #0x9f00",
+                "    movk w5, #0x7, lsl #16",
+                "    tst w4, w5",
+                "    b.eq 1f",
+                "    b .La64s_direct_miss",
+                "1:",
+            ])
     return body
 
 
@@ -616,6 +627,112 @@ def vfp_unary_body(operation: str, width: int) -> list[str]:
         *vfp_finish(),
     ])
     return body
+
+
+def vfp_compare_body(width: int) -> list[str]:
+    """Implement VFPv2 FPCompare without using the host floating-point unit."""
+    bits = width * 8
+    reg = "w" if width == 4 else "x"
+    zero = "wzr" if width == 4 else "xzr"
+    exp_lsb = 23 if width == 4 else 52
+    exp_bits = 8 if width == 4 else 11
+    exp_all = "#0xff" if width == 4 else "#0x7ff"
+    frac_shift = 9 if width == 4 else 12
+    quiet_bit = 22 if width == 4 else 51
+    sign_mask = "#0x80000000" if width == 4 else "#0x8000000000000000"
+    p = f".La64s_vfp_compare_{bits}"
+    return [
+        *vfp_gate("values"),
+        "    ldur w9, [x13, #-12]",
+        "    and w16, w9, #0xff",
+        "    ubfx w17, w9, #8, #8",
+        "    ubfx w12, w9, #17, #1",
+        "    ldr x4, [x3, #24]",
+        "    add x16, x4, w16, uxtw #2",
+        f"    ldr {reg}5, [x16]",
+        f"    tbnz w9, #16, {p}_zero",
+        "    add x16, x4, w17, uxtw #2",
+        f"    ldr {reg}6, [x16]",
+        f"    b {p}_operands",
+        f"{p}_zero:",
+        f"    mov {reg}6, {zero}",
+        f"{p}_operands:",
+        "    ldr x17, [x3, #40]",
+        "    ldr w4, [x17]",
+        f"    tbz w4, #24, {p}_classify",
+        # FZ replaces each input denormal by a same-sign zero and sets IDC.
+        f"    ubfx {reg}16, {reg}5, #{exp_lsb}, #{exp_bits}",
+        f"    cbnz {reg}16, {p}_fz_a_done",
+        f"    lsl {reg}16, {reg}5, #{frac_shift}",
+        f"    cbz {reg}16, {p}_fz_a_done",
+        f"    and {reg}5, {reg}5, {sign_mask}",
+        "    orr w4, w4, #0x80",
+        f"{p}_fz_a_done:",
+        f"    ubfx {reg}16, {reg}6, #{exp_lsb}, #{exp_bits}",
+        f"    cbnz {reg}16, {p}_classify",
+        f"    lsl {reg}16, {reg}6, #{frac_shift}",
+        f"    cbz {reg}16, {p}_classify",
+        f"    and {reg}6, {reg}6, {sign_mask}",
+        "    orr w4, w4, #0x80",
+        f"{p}_classify:",
+        # w9 is any-NaN, w10 is any-signalling-NaN.
+        "    mov w9, wzr",
+        "    mov w10, wzr",
+        f"    ubfx {reg}16, {reg}5, #{exp_lsb}, #{exp_bits}",
+        f"    cmp {reg}16, {exp_all}",
+        f"    b.ne {p}_class_b",
+        f"    lsl {reg}16, {reg}5, #{frac_shift}",
+        f"    cbz {reg}16, {p}_class_b",
+        "    mov w9, #1",
+        f"    tbnz {reg}5, #{quiet_bit}, {p}_class_b",
+        "    mov w10, #1",
+        f"{p}_class_b:",
+        f"    ubfx {reg}16, {reg}6, #{exp_lsb}, #{exp_bits}",
+        f"    cmp {reg}16, {exp_all}",
+        f"    b.ne {p}_classified",
+        f"    lsl {reg}16, {reg}6, #{frac_shift}",
+        f"    cbz {reg}16, {p}_classified",
+        "    mov w9, #1",
+        f"    tbnz {reg}6, #{quiet_bit}, {p}_classified",
+        "    mov w10, #1",
+        f"{p}_classified:",
+        f"    cbz w9, {p}_ordered",
+        "    mov w6, #0x30000000",
+        f"    cbnz w12, {p}_invalid",
+        f"    cbz w10, {p}_write",
+        f"{p}_invalid:",
+        "    orr w4, w4, #1",
+        f"    b {p}_write",
+        f"{p}_ordered:",
+        f"    cmp {reg}5, {reg}6",
+        f"    b.eq {p}_equal",
+        # +0.0 and -0.0 compare equal even though their encodings differ.
+        f"    lsl {reg}16, {reg}5, #1",
+        f"    cbnz {reg}16, {p}_key",
+        f"    lsl {reg}16, {reg}6, #1",
+        f"    cbz {reg}16, {p}_equal",
+        f"{p}_key:",
+        f"    asr {reg}9, {reg}5, #{bits - 1}",
+        f"    orr {reg}9, {reg}9, {sign_mask}",
+        f"    eor {reg}5, {reg}5, {reg}9",
+        f"    asr {reg}9, {reg}6, #{bits - 1}",
+        f"    orr {reg}9, {reg}9, {sign_mask}",
+        f"    eor {reg}6, {reg}6, {reg}9",
+        f"    cmp {reg}5, {reg}6",
+        f"    b.lo {p}_less",
+        "    mov w6, #0x20000000",
+        f"    b {p}_write",
+        f"{p}_less:",
+        "    mov w6, #0x80000000",
+        f"    b {p}_write",
+        f"{p}_equal:",
+        "    mov w6, #0x60000000",
+        f"{p}_write:",
+        "    bic w4, w4, #0xf0000000",
+        "    orr w4, w4, w6",
+        "    str w4, [x17]",
+        *vfp_finish(),
+    ]
 
 
 def vfp_direct_read_body(width: int) -> list[str]:
@@ -934,6 +1051,8 @@ def build_handlers() -> list[tuple[str, list[str]]]:
     for operation in ("mov", "abs", "neg"):
         handlers.append((f".La64s_vfp_{operation}_64",
                          vfp_unary_body(operation, 8)))
+    handlers.append((".La64s_vfp_compare_32", vfp_compare_body(4)))
+    handlers.append((".La64s_vfp_compare_64", vfp_compare_body(8)))
     handlers.append((".La64s_vfp_direct_read_32",
                      vfp_direct_read_body(4)))
     handlers.append((".La64s_vfp_direct_read_64",

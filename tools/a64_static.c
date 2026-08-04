@@ -51,7 +51,9 @@ enum {
     A64S_VFP_VMSR_FPEXC = A64S_VFP_VMSR_FPSCR + 15u,
     A64S_VFP_UNARY32 = A64S_VFP_VMSR_FPEXC + 15u,
     A64S_VFP_UNARY64 = A64S_VFP_UNARY32 + 3u,
-    A64S_VFP_DIRECT_READ32 = A64S_VFP_UNARY64 + 3u,
+    A64S_VFP_COMPARE32 = A64S_VFP_UNARY64 + 3u,
+    A64S_VFP_COMPARE64 = A64S_VFP_COMPARE32 + 1u,
+    A64S_VFP_DIRECT_READ32 = A64S_VFP_COMPARE64 + 1u,
     A64S_VFP_DIRECT_READ64 = A64S_VFP_DIRECT_READ32 + 1u,
     A64S_HANDLER_COUNT = A64S_VFP_DIRECT_READ64 + 1u
 };
@@ -105,6 +107,10 @@ _Static_assert(sizeof(a64_static_read_context_t) == 56u &&
 _Static_assert(ARM1176_FPSID == UINT32_C(0x410120b4) &&
                ARM_FPEXC_EN == (1u << 30) &&
                ARM_FPSCR_LEN == UINT32_C(0x00070000) &&
+               ARM_FPSCR_ENABLES == UINT32_C(0x00009f00) &&
+               ARM_FPSCR_FZ == (1u << 24) &&
+               ARM_FPSCR_IDC == (1u << 7) &&
+               ARM_FPSCR_IOC == (1u << 0) &&
                ARM_FPSCR_WMASK == UINT32_C(0xf3f79f9f),
                "generated VFP constants disagree with the interpreter");
 
@@ -250,10 +256,9 @@ enum {
     A64S_VFP_NEG = 2u
 };
 
-/* Decode only VFPv2 operations whose semantics are raw register/system-state
- * transfers. Floating arithmetic and memory stay outside this tranche. Every
- * admitted handler rechecks the live VFP access state before touching guest
- * state, because a decoded block can outlive a thread's lazy-VFP context. */
+/* Decode the bounded VFPv2 product subset. Every admitted handler rechecks the
+ * live VFP access and mode state before touching guest state, because a decoded
+ * block can outlive a thread's lazy-VFP context. */
 static bool decode_vfp_transfer(uint32_t insn, uint32_t pc_value,
                                 a64_static_uop_t *op, unsigned *written) {
     if (!op || !written) return false;
@@ -359,7 +364,7 @@ static bool decode_vfp_transfer(uint32_t insn, uint32_t pc_value,
         return true;
     }
 
-    /* CDP "other" group: raw same-width VMOV/VABS/VNEG only. */
+    /* CDP "other" group: raw same-width VMOV/VABS/VNEG and exact compares. */
     if ((insn & UINT32_C(0x0f000e10)) == UINT32_C(0x0e000a00)) {
         unsigned family = (((insn >> 23) & 1u) << 2) |
                           (((insn >> 21) & 1u) << 1) |
@@ -372,6 +377,29 @@ static bool decode_vfp_transfer(uint32_t insn, uint32_t pc_value,
         unsigned rm;
         if (family != 7u || (insn & (1u << 6)) == 0u)
             return false;
+        if (opc2 == 4u || opc2 == 5u) {
+            bool zero = opc2 == 5u;
+            if (zero && ((insn & 15u) != 0u ||
+                         (insn & (1u << 5)) != 0u))
+                return false;
+            if (dbl) {
+                if ((insn & ((1u << 22) | (1u << 5))) != 0u)
+                    return false;
+                rd = ((insn >> 12) & 15u) * 2u;
+                rm = (insn & 15u) * 2u;
+                op->handler = A64S_VFP_COMPARE64;
+            } else {
+                rd = ((insn >> 12) & 15u) * 2u +
+                     ((insn >> 22) & 1u);
+                rm = (insn & 15u) * 2u + ((insn >> 5) & 1u);
+                op->handler = A64S_VFP_COMPARE32;
+            }
+            op->immediate = rd | (rm << 8) |
+                            ((zero ? 1u : 0u) << 16) |
+                            ((top ? 1u : 0u) << 17);
+            *written = 1u;
+            return true;
+        }
         if (opc2 == 0u)
             operation = top ? A64S_VFP_ABS : A64S_VFP_MOV;
         else if (opc2 == 1u && !top)

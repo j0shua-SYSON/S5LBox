@@ -449,6 +449,17 @@ static const uint32_t VFP_REGISTER_OPS[] = {
     VFP_UN_D(1, 0, 6, 4),                /* VNEG.F64 d6,d4 */
 };
 
+static const uint32_t VFP_COMPARE_OPS[] = {
+    VFP_UN_S(4, 0,  0,  2),              /* VCMP.F32 s0,s2 */
+    VFP_UN_S(4, 1,  3,  4),              /* VCMPE.F32 s3,s4 */
+    VFP_UN_S(5, 0,  5,  0),              /* VCMP.F32 s5,#0 */
+    VFP_UN_S(5, 1, 31,  0),              /* VCMPE.F32 s31,#0 */
+    VFP_UN_D(4, 0,  0,  1),              /* VCMP.F64 d0,d1 */
+    VFP_UN_D(4, 1,  2,  3),              /* VCMPE.F64 d2,d3 */
+    VFP_UN_D(5, 0,  4,  0),              /* VCMP.F64 d4,#0 */
+    VFP_UN_D(5, 1, 15,  0),              /* VCMPE.F64 d15,#0 */
+};
+
 static const uint32_t VFP_READ_HITS[] = {
     VFP_LDST(14, 1, 1, 0, 0, 1,  0, 0, 0, 0), /* VLDR s0,[r0] */
     VFP_LDST(14, 1, 1, 1, 0, 1,  0,15, 0, 1), /* VLDR s31,[r0,#4] */
@@ -627,6 +638,9 @@ static bool validate_static_shapes(void) {
         VFP_LDST(14, 0, 1, 0, 0, 1, 0, 0, 0, 1), /* VLDM */
         VFP_LDST(14, 1, 1, 0, 1, 1, 0, 0, 0, 1), /* writeback */
         VFP_LDST(14, 1, 1, 1, 0, 1, 0, 0, 1, 0), /* d16 absent */
+        VFP_UN_S(5, 0, 0, 1), /* VCMP #0 with non-zero Vm field */
+        VFP_UN_D(5, 0, 0, 1), /* double VCMP #0 with non-zero Vm */
+        VFP_DP(1, 1, 1, 1, 4, 0, 1, 0, 1, 0, 0), /* compare d16 */
     };
     /* Deliberately unaligned guest byte stream: ADD r0,r0,#1. */
     static const uint8_t UNALIGNED_A32[] = {
@@ -636,6 +650,7 @@ static bool validate_static_shapes(void) {
     uint8_t read_bytes[sizeof A32_READ_HITS];
     uint8_t thumb_read_bytes[sizeof THUMB_READ_HITS];
     uint8_t vfp_bytes[sizeof VFP_REGISTER_OPS];
+    uint8_t vfp_compare_bytes[sizeof VFP_COMPARE_OPS];
     uint8_t vfp_read_bytes[sizeof VFP_READ_HITS];
     unsigned i;
 
@@ -665,6 +680,14 @@ static bool validate_static_shapes(void) {
         vfp_read_bytes[i * 4u + 1u] = (uint8_t)(value >> 8);
         vfp_read_bytes[i * 4u + 2u] = (uint8_t)(value >> 16);
         vfp_read_bytes[i * 4u + 3u] = (uint8_t)(value >> 24);
+    }
+    for (i = 0u; i < sizeof VFP_COMPARE_OPS / sizeof VFP_COMPARE_OPS[0];
+         i++) {
+        uint32_t value = VFP_COMPARE_OPS[i];
+        vfp_compare_bytes[i * 4u + 0u] = (uint8_t)value;
+        vfp_compare_bytes[i * 4u + 1u] = (uint8_t)(value >> 8);
+        vfp_compare_bytes[i * 4u + 2u] = (uint8_t)(value >> 16);
+        vfp_compare_bytes[i * 4u + 3u] = (uint8_t)(value >> 24);
     }
 
     for (i = 0u; i < sizeof STATIC_CASES / sizeof STATIC_CASES[0]; i++) {
@@ -738,6 +761,22 @@ static bool validate_static_shapes(void) {
         return false;
     }
     printf("STATIC-VFP-REGISTER-SHAPE exact=yes insns=%u uops=%u "
+           "handlers=%u\n", block.insn_count, block.uop_count,
+           A64_STATIC_HANDLER_COUNT);
+
+    if (!a64_static_decode_read_hits_bytes_at(
+            vfp_compare_bytes,
+            (unsigned)(sizeof VFP_COMPARE_OPS / sizeof VFP_COMPARE_OPS[0]),
+            false, 0xe500u, &block) ||
+        block.insn_count != sizeof VFP_COMPARE_OPS /
+                            sizeof VFP_COMPARE_OPS[0] ||
+        block.uop_count != 9u || block.start_pc != 0xe500u ||
+        block.exit_pc != 0xe520u || block.touches_memory ||
+        block.direct_reads || !block.runtime_guards || !block.vfp) {
+        fprintf(stderr, "jitbench: product VFP compare shape failed\n");
+        return false;
+    }
+    printf("STATIC-VFP-COMPARE-SHAPE exact=yes insns=%u uops=%u "
            "handlers=%u\n", block.insn_count, block.uop_count,
            A64_STATIC_HANDLER_COUNT);
 
@@ -1141,6 +1180,170 @@ static bool validate_static_vfp_register_oracles(void) {
            "zero-prefix=yes partial-prefix=yes\n");
     return true;
 }
+
+#define VFP_COMPARE_CONTROL \
+    (ARM_FPSCR_DN | ARM_FPSCR_RMODE | ARM_FPSCR_DZC)
+
+typedef struct {
+    const char *name;
+    uint32_t insn;
+    uint32_t s0;
+    uint32_t s1;
+    uint32_t s2;
+    uint32_t s3;
+    uint32_t extra_control;
+    uint32_t expected_result;
+} static_vfp_compare_case_t;
+
+static bool validate_static_vfp_compare_oracles(void) {
+    static const static_vfp_compare_case_t cases[] = {
+        {"s-less", VFP_UN_S(4, 0, 0, 2),
+         UINT32_C(0xc0000000), 0u, UINT32_C(0x3f800000), 0u,
+         0u, ARM_FPSCR_N},
+        {"s-greater", VFP_UN_S(4, 0, 0, 2),
+         UINT32_C(0x40000000), 0u, UINT32_C(0xbf800000), 0u,
+         0u, ARM_FPSCR_C},
+        {"s-signed-zero", VFP_UN_S(4, 0, 0, 2),
+         UINT32_C(0x80000000), 0u, 0u, 0u,
+         0u, ARM_FPSCR_Z | ARM_FPSCR_C},
+        {"s-infinity", VFP_UN_S(4, 0, 0, 2),
+         UINT32_C(0x7f800000), 0u, UINT32_C(0x7f7fffff), 0u,
+         0u, ARM_FPSCR_C},
+        {"s-qnan-vcmp", VFP_UN_S(4, 0, 0, 2),
+         UINT32_C(0x7fc01234), 0u, UINT32_C(0x3f800000), 0u,
+         0u, ARM_FPSCR_C | ARM_FPSCR_V},
+        {"s-snan-vcmp", VFP_UN_S(4, 0, 0, 2),
+         UINT32_C(0x7f801234), 0u, UINT32_C(0x3f800000), 0u,
+         0u, ARM_FPSCR_C | ARM_FPSCR_V | ARM_FPSCR_IOC},
+        {"s-qnan-vcmpe", VFP_UN_S(4, 1, 0, 2),
+         UINT32_C(0x7fc01234), 0u, UINT32_C(0x3f800000), 0u,
+         0u, ARM_FPSCR_C | ARM_FPSCR_V | ARM_FPSCR_IOC},
+        {"s-fz-denormal", VFP_UN_S(5, 0, 0, 0),
+         UINT32_C(0x00000001), 0u, 0u, 0u,
+         ARM_FPSCR_FZ, ARM_FPSCR_Z | ARM_FPSCR_C | ARM_FPSCR_IDC},
+        {"s-fz-negative-denormal", VFP_UN_S(5, 0, 0, 0),
+         UINT32_C(0x80000001), 0u, 0u, 0u,
+         ARM_FPSCR_FZ, ARM_FPSCR_Z | ARM_FPSCR_C | ARM_FPSCR_IDC},
+        {"d-less", VFP_UN_D(4, 0, 0, 1),
+         0u, UINT32_C(0xc0000000), 0u, UINT32_C(0x3ff00000),
+         0u, ARM_FPSCR_N},
+        {"d-greater", VFP_UN_D(4, 0, 0, 1),
+         0u, UINT32_C(0x40000000), 0u, UINT32_C(0xbff00000),
+         0u, ARM_FPSCR_C},
+        {"d-signed-zero", VFP_UN_D(4, 0, 0, 1),
+         0u, UINT32_C(0x80000000), 0u, 0u,
+         0u, ARM_FPSCR_Z | ARM_FPSCR_C},
+        {"d-qnan-vcmp", VFP_UN_D(4, 0, 0, 1),
+         UINT32_C(0x00001234), UINT32_C(0x7ff80000),
+         0u, UINT32_C(0x3ff00000),
+         0u, ARM_FPSCR_C | ARM_FPSCR_V},
+        {"d-snan-vcmpe", VFP_UN_D(4, 1, 0, 1),
+         UINT32_C(0x00000001), UINT32_C(0x7ff00000),
+         0u, UINT32_C(0x3ff00000),
+         0u, ARM_FPSCR_C | ARM_FPSCR_V | ARM_FPSCR_IOC},
+        {"d-fz-denormal", VFP_UN_D(5, 0, 0, 0),
+         UINT32_C(0x00000001), 0u, 0u, 0u,
+         ARM_FPSCR_FZ, ARM_FPSCR_Z | ARM_FPSCR_C | ARM_FPSCR_IDC},
+    };
+    static const uint32_t PARTIAL[] = {
+        VFP_UN_S(4, 0, 0, 2),           /* compare succeeds */
+        VFP_VMSR(1, 0),                 /* enable trapped invalid */
+        VFP_UN_S(4, 1, 0, 2),           /* compare must fall back */
+    };
+    static const uint32_t GUARD[] = {VFP_UN_S(4, 0, 0, 2)};
+    a64_static_block_t block;
+    arm_cpu_t reference, statik, before;
+    unsigned completed = 0u;
+
+    if (!a64_static_host_available()) {
+        printf("STATIC-VFP-COMPARE-ORACLE SKIP: no signed AArch64 handlers\n");
+        return true;
+    }
+
+    for (unsigned i = 0u; i < sizeof cases / sizeof cases[0]; i++) {
+        const static_vfp_compare_case_t *test = &cases[i];
+        uint32_t expected = VFP_COMPARE_CONTROL | test->extra_control |
+                            test->expected_result;
+        seed_vfp_oracle(&reference, &test->insn, 1u,
+                        0xea00u + i * 4u, true);
+        reference.vfp_s[0] = test->s0;
+        reference.vfp_s[1] = test->s1;
+        reference.vfp_s[2] = test->s2;
+        reference.vfp_s[3] = test->s3;
+        reference.vfp_fpscr = VFP_COMPARE_CONTROL | test->extra_control |
+                              ARM_FPSCR_NZCV;
+        statik = reference;
+        if (!a64_static_decode_read_hits_bytes_at(
+                &g_ram[reference.r[15]], 1u, false, reference.r[15], &block) ||
+            arm_step(&reference) != ARM_OK ||
+            !a64_static_run_read_hits(&statik, &block, g_ram, sizeof g_ram,
+                                      &completed) ||
+            completed != 1u ||
+            reference.vfp_fpscr != expected ||
+            !static_vfp_states_equal(&reference, &statik)) {
+            fprintf(stderr, "jitbench: VFP compare oracle mismatch for %s\n",
+                    test->name);
+            return false;
+        }
+    }
+
+    /* Len and every trap-enable bit are live guards. They must refuse before
+     * changing even cumulative flags or the host-visible instruction prefix. */
+    for (unsigned i = 0u; i < 2u; i++) {
+        seed_vfp_oracle(&statik, GUARD, 1u, 0xeb00u + i * 4u, true);
+        statik.vfp_fpscr = VFP_COMPARE_CONTROL |
+                           (i == 0u ? ARM_FPSCR_LEN : ARM_FPSCR_IOE);
+        before = statik;
+        if (!a64_static_decode_read_hits_bytes_at(
+                &g_ram[statik.r[15]], 1u, false, statik.r[15], &block) ||
+            !a64_static_run_read_hits(&statik, &block, g_ram, sizeof g_ram,
+                                      &completed) ||
+            completed != 0u || !static_vfp_states_equal(&before, &statik)) {
+            fprintf(stderr, "jitbench: VFP compare live guard changed state\n");
+            return false;
+        }
+    }
+
+    seed_vfp_oracle(&reference, PARTIAL, 3u, 0xec00u, true);
+    reference.vfp_s[0] = UINT32_C(0xbf800000);
+    reference.vfp_s[2] = UINT32_C(0x3f800000);
+    reference.r[0] = VFP_COMPARE_CONTROL | ARM_FPSCR_IOE;
+    statik = reference;
+    if (!a64_static_decode_read_hits_bytes_at(&g_ram[0xec00u], 3u, false,
+                                              0xec00u, &block) ||
+        arm_step(&reference) != ARM_OK || arm_step(&reference) != ARM_OK ||
+        !a64_static_run_read_hits(&statik, &block, g_ram, sizeof g_ram,
+                                  &completed) || completed != 2u ||
+        !static_vfp_states_equal(&reference, &statik)) {
+        fprintf(stderr, "jitbench: VFP compare partial-prefix mismatch\n");
+        return false;
+    }
+
+    /* A failed ARM condition retires before the VFP access/mode guards. */
+    {
+        uint32_t condition_skip = VFP_UN_S(4, 0, 0, 2) &
+                                  UINT32_C(0x0fffffff);
+        seed_vfp_oracle(&reference, &condition_skip, 1u, 0xed00u, false);
+        reference.cp15.cpacr = 0u;
+        statik = reference;
+        if (!a64_static_decode_read_hits_bytes_at(&g_ram[0xed00u], 1u,
+                                                  false, 0xed00u, &block) ||
+            arm_step(&reference) != ARM_OK ||
+            !a64_static_run_read_hits(&statik, &block, g_ram, sizeof g_ram,
+                                      &completed) || completed != 1u ||
+            !static_vfp_states_equal(&reference, &statik)) {
+            fprintf(stderr, "jitbench: conditional VFP compare skip mismatch\n");
+            return false;
+        }
+    }
+
+    printf("STATIC-VFP-COMPARE-ORACLE exact=yes ops=%u single=yes double=yes "
+           "nan=yes fz=yes zero-prefix=yes partial-prefix=yes\n",
+           (unsigned)(sizeof cases / sizeof cases[0]));
+    return true;
+}
+
+#undef VFP_COMPARE_CONTROL
 
 static void seed_vfp_read_oracle(arm_cpu_t *cpu, bool warm) {
     seed_vfp_oracle(cpu, VFP_READ_HITS,
@@ -1584,6 +1787,7 @@ int main(int argc, char **argv) {
     }
     if (!validate_static_read_oracles()) return 1;
     if (!validate_static_vfp_register_oracles()) return 1;
+    if (!validate_static_vfp_compare_oracles()) return 1;
     if (!validate_static_vfp_read_oracles()) return 1;
     if (!validate_static_oracles()) return 1;
 

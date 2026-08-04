@@ -180,6 +180,12 @@ jobs:
           test "$soc_status" -eq 0
           grep -Eq '[1-9][0-9]* passed, 0 failed' <<<"$memory_output"
           if [ "$RUNNER_OS" = "macOS" ]; then
+            set +e
+            static_output="$(./build-jit/core/jitbench --insns 10000 --reps 1 2>&1)"
+            static_status=$?
+            set -e
+            printf '%s\n' "$static_output"
+            test "$static_status" -eq 0
             if grep -Fq 'SKIP:' <<<"$memory_output"; then
               echo 'Required macOS MAP_JIT memory-policy coverage was skipped.' >&2
               exit 1
@@ -191,10 +197,12 @@ jobs:
             grep -Fq 'code buffer policy: MAP_JIT + pthread_jit_write_protect_np' <<<"$output"
             grep -Eq '[1-9][0-9]* passed, 0 failed' <<<"$output"
             grep -Eq 'STATIC-A64-SOC-ORACLE exact=yes retired=[1-9][0-9]* smc=yes' <<<"$soc_output"
-            grep -Eq 'STATIC-A64-VFP-REGISTER-ORACLE exact=yes retired=[1-9][0-9]*' <<<"$soc_output"
+            grep -Eq 'STATIC-A64-VFP-REGISTER-ORACLE exact=yes retired=[1-9][0-9]* compare=yes' <<<"$soc_output"
             grep -Eq 'STATIC-A64-VFP-READ-ORACLE exact=yes retired=[1-9][0-9]* cold-fill=yes double=yes' <<<"$soc_output"
             grep -Eq 'STATIC-A64-THUMB-ORACLE exact=yes retired=[1-9][0-9]*' <<<"$soc_output"
             grep -Eq 'STATIC-A64-THUMB-READ-ORACLE exact=yes retired=[1-9][0-9]*' <<<"$soc_output"
+            grep -Eq 'STATIC-VFP-COMPARE-SHAPE exact=yes insns=8 uops=9 handlers=24616' <<<"$static_output"
+            grep -Eq 'STATIC-VFP-COMPARE-ORACLE exact=yes ops=15 single=yes double=yes nan=yes fz=yes zero-prefix=yes partial-prefix=yes' <<<"$static_output"
           else
             grep -Fq 'SKIP: not an arm64 host' <<<"$output"
             grep -Fq 'STATIC-A64-SOC-ORACLE SKIP: no signed AArch64 handlers' <<<"$soc_output"

@@ -23,7 +23,7 @@
 /* A conditional register-offset A32 load uses a guard, shifter, address and
  * read record. The final slot is the fixed block exit. */
 #define A64_STATIC_MAX_UOPS (A64_STATIC_MAX_INSNS * 4u + 1u)
-#define A64_STATIC_HANDLER_COUNT 24614u
+#define A64_STATIC_HANDLER_COUNT 24616u
 
 typedef struct {
     uint32_t handler;
@@ -69,10 +69,11 @@ bool a64_static_decode_bytes_at(const uint8_t *program, unsigned insns,
  * PC/register/immediate/SP-relative loads with read-cache records. Thumb word,
  * byte, halfword, signed-byte and signed-halfword results are covered; dynamic
  * alignment cases refuse at runtime before touching guest state. Exact VFPv2
- * core/register transfers, VMRS/VMSR and raw VMOV/VABS/VNEG register operations
- * are also admitted behind live CPACR/FPEXC/FPSCR guards. Single-register VLDR
- * uses the same already-proved plain-RAM read cache, including exact one- and
- * two-word hit accounting. Flat-proof memory handlers, stores, PC loads,
+ * core/register transfers, VMRS/VMSR, raw VMOV/VABS/VNEG and VCMP/VCMPE are
+ * also admitted behind live CPACR/FPEXC/FPSCR guards. Compare handles NaNs,
+ * signed zero, FZ and cumulative IOC/IDC with integer bit logic. Single-register
+ * VLDR uses the same already-proved plain-RAM read cache, including exact one-
+ * and two-word hit accounting. Flat-proof memory handlers, stores, PC loads,
  * writeback/post-index forms and every other unsupported instruction refuse
  * cleanly. Runtime cache misses or VFP guard failures still return to arm_step(),
  * which alone owns exceptions, MMU walks, faults and MMIO. */
