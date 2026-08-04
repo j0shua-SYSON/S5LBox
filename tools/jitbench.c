@@ -10,26 +10,30 @@
  * including product-only guarded read-cache and exact VFP register/system
  * transfer paths.
  *
- * The answer is only a feasibility bound. There is no device tick, MMIO,
- * interrupt sampling, cache lookup, translation, chaining, framebuffer
- * publication, UIKit, or real iOS instruction mix here. In particular, a
- * positive result cannot be reported as phone FPS or as proof that a complete
- * no-JIT interpreter will have the same speed. The timed rows still cover only
- * four synthetic blocks and flat power-of-two RAM. Separate exactness cases now
- * cover every A32 data-processing opcode, all conditions, immediate and
- * register barrel-shifter edge cases, r8-r14 and the architecturally valid PC
- * reads, but there is still no MMU, fault, timer, IRQ, MMIO, cache, framebuffer
- * or UI path in the ceiling. Its inner repetition also avoids real block
- * lookup. Those omissions are why it is an architecture gate, not an emulator
- * speed claim.
+ * The answer is only a feasibility bound. The native and direct product-entry
+ * rows have no device tick, MMIO, interrupt sampling, cache lookup,
+ * translation, chaining, framebuffer publication, UIKit, or real iOS
+ * instruction mix. A separate SoC-entry curve now adds the real machine run
+ * API, signed cache/raw witness, dynamic gates, timer boundaries and device
+ * ticks, with complete serialized-machine equality. It still uses tiny
+ * synthetic MMU-off loops and omits firmware, framebuffer publication and UI.
+ * In particular, a positive result cannot be reported as phone FPS or as proof
+ * that a complete no-JIT interpreter will have the same speed. Separate
+ * exactness cases cover every A32 data-processing opcode, all conditions,
+ * immediate and register barrel-shifter edge cases, r8-r14 and the
+ * architecturally valid PC reads. Those omissions are why this remains an
+ * architecture gate, not an emulator speed claim.
  *
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed.
  */
 #include "jit.h"
 #include "a64_static.h"
+#include "snapshot.h"
+#include "soc.h"
 #include "vfp.h"
 
 #include <inttypes.h>
+#include <limits.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -1925,6 +1929,203 @@ done:
     return ok;
 }
 
+typedef struct {
+    uint8_t *snapshot;
+    size_t snapshot_len;
+    uint64_t signed_retired;
+    double seconds;
+} soc_run_result_t;
+
+static void free_soc_run_result(soc_run_result_t *result) {
+    if (!result) return;
+    free(result->snapshot);
+    memset(result, 0, sizeof *result);
+}
+
+/* Run the exact app-facing machine loop. Setup and the two-loop cache warmup
+ * stay outside the timed region. The signed arm still pays the product cache
+ * index, raw-byte SMC witness, dynamic gates, timer-boundary splitting and
+ * device ticks. A complete machine snapshot is retained for comparison with
+ * the interpreter arm; the signed cache and its counter are host diagnostics
+ * and deliberately do not enter that architectural byte stream. */
+static bool run_soc_entry_path(const uint32_t *program, unsigned length,
+                               uint64_t total, bool signed_path,
+                               soc_run_result_t *out) {
+    s5l8900_t machine = {0};
+    arm_status_t status = ARM_OK;
+    uint64_t remaining = total;
+    uint64_t retired_before;
+    uint64_t retired_after;
+    double start, end;
+    bool initialized = false;
+    bool ok = false;
+
+    if (!program || !length || !out) return false;
+    memset(out, 0, sizeof *out);
+    if (!s5l8900_init(&machine, 0u, RAM_SIZE)) {
+        fprintf(stderr, "jitbench: SoC entry machine init failed\n");
+        goto done;
+    }
+    initialized = true;
+    s5l8900_load(&machine, 0u, program,
+                 (size_t)length * sizeof *program);
+
+    /* Clear reset's dirty-level gate before warming either path. This uses the
+     * real 412 MHz:6 MHz board clocks installed by s5l8900_init(). */
+    s5l8900_tick(&machine, 0u);
+    if (signed_path &&
+        !s5l8900_static_a64_set_enabled(&machine, true)) {
+        fprintf(stderr, "jitbench: SoC entry signed engine unavailable\n");
+        goto done;
+    }
+
+    /* The first instruction establishes the fetch pointer. The remainder of
+     * the first loop and the second complete loop establish the cache-owned
+     * decoded entries while returning PC to zero. */
+    if (s5l8900_run(&machine, length * 2u, &status) != length * 2u ||
+        status != ARM_OK || machine.cpu.r[15] != 0u) {
+        fprintf(stderr,
+                "jitbench: SoC entry %s warmup failed status=%d pc=0x%08x\n",
+                signed_path ? "signed" : "reference", (int)status,
+                machine.cpu.r[15]);
+        goto done;
+    }
+
+    retired_before = s5l8900_static_a64_retired(&machine);
+    start = now_seconds();
+    while (remaining != 0u) {
+        unsigned chunk = remaining > (uint64_t)UINT_MAX
+                             ? UINT_MAX
+                             : (unsigned)remaining;
+        unsigned ran = s5l8900_run(&machine, chunk, &status);
+        if (ran != chunk || status != ARM_OK) break;
+        remaining -= ran;
+    }
+    end = now_seconds();
+    retired_after = s5l8900_static_a64_retired(&machine);
+    if (remaining != 0u || status != ARM_OK || end <= start ||
+        machine.cpu.r[15] != 0u) {
+        fprintf(stderr,
+                "jitbench: SoC entry %s run failed remaining=%" PRIu64
+                " status=%d pc=0x%08x\n",
+                signed_path ? "signed" : "reference", remaining,
+                (int)status, machine.cpu.r[15]);
+        goto done;
+    }
+    out->signed_retired = retired_after - retired_before;
+    if ((signed_path && out->signed_retired != total) ||
+        (!signed_path && out->signed_retired != 0u)) {
+        fprintf(stderr,
+                "jitbench: SoC entry %s retired signed=%" PRIu64
+                " expected=%" PRIu64 "\n",
+                signed_path ? "signed" : "reference",
+                out->signed_retired, signed_path ? total : UINT64_C(0));
+        goto done;
+    }
+    out->seconds = end - start;
+    {
+        snapshot_status_t snap =
+            snapshot_save_mem(&machine, &out->snapshot, &out->snapshot_len);
+        if (snap != SNAP_OK) {
+            fprintf(stderr, "jitbench: SoC entry snapshot failed: %s\n",
+                    snapshot_strerror(snap));
+            goto done;
+        }
+    }
+    ok = true;
+
+done:
+    if (initialized) s5l8900_free(&machine);
+    if (!ok) free_soc_run_result(out);
+    return ok;
+}
+
+/* The earlier product-entry curve intentionally stops before the SoC. This
+ * curve includes that missing product machinery and compares complete machine
+ * state. It is still not phone FPS: there is no MMU miss, real firmware mix,
+ * framebuffer publication or UIKit in this synthetic loop. */
+static bool bench_soc_entry(unsigned length, uint64_t requested,
+                            unsigned reps) {
+    uint32_t program[A64_STATIC_MAX_INSNS];
+    a64_static_block_t shape;
+    double *reference_rates = NULL;
+    double *signed_rates = NULL;
+    uint64_t total;
+    bool ok = false;
+
+    if (requested > UINT64_MAX - (uint64_t)(length - 1u) ||
+        !prepare_product_entry(length, program, &shape)) {
+        fprintf(stderr, "jitbench: SoC entry shape failed at length %u\n",
+                length);
+        return false;
+    }
+    total = ((requested + length - 1u) / length) * length;
+    reference_rates = (double *)calloc(reps, sizeof *reference_rates);
+    signed_rates = (double *)calloc(reps, sizeof *signed_rates);
+    if (!reference_rates || !signed_rates) {
+        fprintf(stderr, "jitbench: SoC entry out of memory\n");
+        goto done;
+    }
+
+    for (unsigned rep = 0u; rep < reps; rep++) {
+        soc_run_result_t reference = {0};
+        soc_run_result_t signed_result = {0};
+        const char *order;
+        bool ran;
+
+        if ((rep & 1u) == 0u) {
+            order = "reference-signed";
+            ran = run_soc_entry_path(program, length, total, false,
+                                     &reference) &&
+                  run_soc_entry_path(program, length, total, true,
+                                     &signed_result);
+        } else {
+            order = "signed-reference";
+            ran = run_soc_entry_path(program, length, total, true,
+                                     &signed_result) &&
+                  run_soc_entry_path(program, length, total, false,
+                                     &reference);
+        }
+        if (!ran || !reference.snapshot || !signed_result.snapshot ||
+            reference.snapshot_len != signed_result.snapshot_len ||
+            memcmp(reference.snapshot, signed_result.snapshot,
+                   reference.snapshot_len) != 0) {
+            fprintf(stderr,
+                    "jitbench: SoC entry length %u repetition %u failed "
+                    "exact machine equality\n",
+                    length, rep + 1u);
+            free_soc_run_result(&reference);
+            free_soc_run_result(&signed_result);
+            goto done;
+        }
+        reference_rates[rep] = (double)total / reference.seconds / 1.0e6;
+        signed_rates[rep] = (double)total / signed_result.seconds / 1.0e6;
+        printf("SOC-ENTRY-SAMPLE length=%u rep=%u order=%s "
+               "reference=%.3f signed=%.3f Minsn/s exact-snapshot=yes\n",
+               length, rep + 1u, order, reference_rates[rep],
+               signed_rates[rep]);
+        free_soc_run_result(&reference);
+        free_soc_run_result(&signed_result);
+    }
+
+    qsort(reference_rates, reps, sizeof *reference_rates, cmp_double);
+    qsort(signed_rates, reps, sizeof *signed_rates, cmp_double);
+    printf("SOC-ENTRY-CURVE length=%u uops=%u guest-insns=%" PRIu64
+           " reps=%u run-api=yes cache-lookup=yes raw-witness=yes "
+           "entry-gates=yes timer-boundaries=yes device-tick=yes "
+           "head-cache=warm mmu=off exact-snapshot=yes signed-retired=%" PRIu64
+           " reference-median=%.3f signed-median=%.3f speedup=%.3fx\n",
+           length, shape.uop_count, total, reps, total,
+           reference_rates[reps / 2u], signed_rates[reps / 2u],
+           signed_rates[reps / 2u] / reference_rates[reps / 2u]);
+    ok = true;
+
+done:
+    free(reference_rates);
+    free(signed_rates);
+    return ok;
+}
+
 static bool bench_one(const bench_case_t *bc, uint64_t requested,
                       unsigned reps) {
     jit_buf_t arena;
@@ -2097,6 +2298,7 @@ static bool validate_case_translation(const bench_case_t *bc) {
 int main(int argc, char **argv) {
     uint64_t insns = DEFAULT_INSNS;
     uint64_t entry_insns = 0u;
+    uint64_t soc_insns = 0u;
     unsigned reps = DEFAULT_REPS;
     unsigned i;
 
@@ -2117,21 +2319,32 @@ int main(int argc, char **argv) {
                 fprintf(stderr, "jitbench: invalid --entry-insns value\n");
                 return 2;
             }
+        } else if (strcmp(argv[i], "--soc-insns") == 0 &&
+                   i + 1u < (unsigned)argc) {
+            if (!parse_u64(argv[++i], &soc_insns)) {
+                fprintf(stderr, "jitbench: invalid --soc-insns value\n");
+                return 2;
+            }
         } else {
             fprintf(stderr, "usage: %s [--insns N] [--entry-insns N] "
-                            "[--reps N]\n", argv[0]);
+                            "[--soc-insns N] [--reps N]\n", argv[0]);
             return 2;
         }
     }
     if (!entry_insns) entry_insns = insns;
+    if (!soc_insns) soc_insns = entry_insns;
 
     printf("Apple-arm64 native/static-semantics ceiling benchmark\n");
-    printf("NOT PHONE FPS: four synthetic timed blocks; static arm has flat "
-           "RAM and no MMU/fault/tick/IRQ/MMIO/cache/framebuffer/UI "
-           "path or real block lookup.\n");
+    printf("NOT PHONE FPS: direct native/static rows use flat RAM and omit "
+           "the machine path; the separate SoC rows remain synthetic and "
+           "omit firmware/framebuffer/UI work.\n");
     printf("Product-entry rows use predecoded hot blocks and compare full "
            "wrapper validation with a cache-owned decoded contract; both "
            "still exclude SoC cache lookup and device gates.\n");
+    printf("SoC-entry rows cross the real run API, cache/raw witness, gates, "
+           "timer boundaries and device ticks with exact serialized-machine "
+           "comparison; they still exclude real firmware, framebuffer/UI "
+           "work and phone FPS.\n");
     if (!validate_static_shapes()) return 1;
     for (i = 0u; i < sizeof CASES / sizeof CASES[0]; i++) {
         if (!validate_case_translation(&CASES[i])) return 1;
@@ -2158,6 +2371,11 @@ int main(int argc, char **argv) {
                          sizeof PRODUCT_ENTRY_LENGTHS[0]; i++) {
         if (!bench_product_entry(PRODUCT_ENTRY_LENGTHS[i], entry_insns,
                                  reps))
+            return 1;
+    }
+    for (i = 0u; i < sizeof PRODUCT_ENTRY_LENGTHS /
+                         sizeof PRODUCT_ENTRY_LENGTHS[0]; i++) {
+        if (!bench_soc_entry(PRODUCT_ENTRY_LENGTHS[i], soc_insns, reps))
             return 1;
     }
     return 0;
