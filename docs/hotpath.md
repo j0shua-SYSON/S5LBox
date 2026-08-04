@@ -6340,3 +6340,54 @@ timing. The exact IPA has not yet been installed on a physical iPhone, and the o
 observation remains roughly 0--4 FPS. The next decisive measurement is that exact IPA; absent a
 device, the restored replay must first measure how often real graph calls can use the newly removed
 boundary before another product optimization is justified.
+
+### 2026-08-04: restored firmware bounds the extended-graph win
+
+Commit `2cb6cb8d4e56a979d6598b4b60b995f6e2a18480` answers that gate without
+pretending that an x86-64 Windows host can time AArch64 signed handlers. The existing exact
+`--sequence-profile` replay now keeps the old sixteen-total-instruction accounting side by side
+with a second model. The second model leaves each decoded head capped at sixteen instructions but
+continues across eligible sequential and branch heads until the nearer of the caller limit or the
+first exact modeled timebase edge, with a hard product ceiling of 256. It changes no CPU, memory,
+device or framebuffer state and assumes a graph node is warm whenever the corresponding supported
+head is available. It is therefore an exact call-shape model and an optimistic availability bound,
+not a wall-time benchmark.
+
+The independently relinked `work/r521-extended-boundary-10m` replay restored the trusted r445
+7.100 B MBX checkpoint and stopped at exactly 7.110 B with status `OK`, empty stderr and zero
+external-media failures. Both models account for the same 6,956,087 signed-modeled guest
+instructions:
+
+| restored accounting | current total cap 16 | timebase-bounded total cap 256 | change |
+|---|---:|---:|---:|
+| outer signed calls | 1,832,685 | 1,767,198 | **-65,487 (-3.573%)** |
+| decoded heads entered | 2,674,071 | 2,628,811 | **-45,260 (-1.693%)** |
+| graph chains | 841,386 | 861,613 | +20,227 |
+| mean instructions per outer call | 3.796 | 3.936 | +3.69% |
+| longest outer call | 16 | 69 | +53 |
+
+The longer model contains 46,229 calls above sixteen instructions and those calls carry
+1,283,272 instructions, or 18.448% of the signed-modeled population. That is reach, not speed:
+most instructions in those calls already ran in the old graph through additional outer entries.
+The only boundary work the extension can remove in this interval is the 65,487 outer entries and
+45,260 now-unnecessary short heads above. The model's exact eligibility closure is
+7,369,418 = 6,956,087 modeled retirements + 413,331 fetch-block refusals. Its extended stop totals
+also close: 101,937 timer edges, 73 caller bounds, 4,345 control-flow exits, 203,195 fetch-block
+exits and 1,457,648 ineligible heads; there are zero cap, branch, observer or timebase-gate errors.
+
+The replay preserves the prior 466,825,216-byte work-image SHA-256
+`8A59C388C481165F460984926AA5FFB1B72A0E9030216CD0038DE9B3264B79FE` and the prior
+460,815-byte screen PPM SHA-256
+`1EF63FFE3EEFD976416E17120A36BA074BF295EA0955D716E2D345FCC5EA0A9E`. The complete
+local suite passes 60/60, and an independent `-Wall -Wextra -Werror` bootkernel build is clean.
+Exact-SHA core run `30910744224` is green in all eight jobs, including both Apple-arm64 native
+runs, warnings-as-errors and ASan/UBSan. Exact-SHA iOS run `30910758465` is green and packages
+the app. Neither workflow result is a physical-device measurement.
+
+Brutal status: **the new boundary reaches the real workload, but its incremental firmware
+opportunity is modest and it does not put the project close to 30 FPS**. The broad 1.440x--1.483x
+synthetic result remains valid for those deliberately repetitive machines; projecting it wholesale
+onto SpringBoard would now contradict the exact restored call shape. The only phone observation
+remains roughly 0--4 FPS. A fresh instruction-zero MBX boot is still required for final graphics
+correctness, while speed requires an exact-build physical-iPhone run or a larger architectural
+lever than another graph-boundary or record-dispatch micro-optimization.
