@@ -4,9 +4,9 @@
  * This is deliberately NOT a product-performance claim and not a JIT
  * dispatcher. It translates one small synthetic block once, then compares
  * repeated interpreter execution with both that already-built block and a
- * firmware-independent static-threaded proof. The proof's 24,612 generic
+ * firmware-independent static-threaded proof. The proof's 24,617 generic
  * ISA/register handlers are compiled and signed with the executable; runtime
- * decoding creates data records only. The table now has 24,612 handlers,
+ * decoding creates data records only. The table now has 24,617 handlers,
  * including product-only guarded read-cache and exact VFP register/system
  * transfer paths.
  *
@@ -527,6 +527,8 @@ static const bench_case_t CASES[] = {
     { "thumb-mixed", THUMB_MIXED, 16u, true, true },
 };
 
+static const unsigned PRODUCT_ENTRY_LENGTHS[] = {1u, 2u, 3u, 4u, 8u, 16u};
+
 static double now_seconds(void) {
 #if defined(_WIN32)
     LARGE_INTEGER counter, frequency;
@@ -600,6 +602,31 @@ static bool architectural_states_equal(const final_state_t *a,
 static bool states_equal(const final_state_t *a, const final_state_t *b) {
     return architectural_states_equal(a, b) &&
            a->status == ARM_OK && b->jit_exit == JIT_EXIT_NEXT;
+}
+
+static bool prepare_product_entry(unsigned length,
+                                  uint32_t program[A64_STATIC_MAX_INSNS],
+                                  a64_static_block_t *block) {
+    uint8_t bytes[A64_STATIC_MAX_INSNS * sizeof(uint32_t)];
+
+    if (!length || length > A64_STATIC_MAX_INSNS || !program || !block)
+        return false;
+    for (unsigned i = 0u; i + 1u < length; i++) program[i] = A32_ALU[i];
+    program[length - 1u] = UINT32_C(0xea000000) |
+        ((uint32_t)(-(int32_t)(length + 1u)) & UINT32_C(0x00ffffff));
+    for (unsigned i = 0u; i < length; i++) {
+        uint32_t value = program[i];
+        bytes[i * 4u + 0u] = (uint8_t)value;
+        bytes[i * 4u + 1u] = (uint8_t)(value >> 8);
+        bytes[i * 4u + 2u] = (uint8_t)(value >> 16);
+        bytes[i * 4u + 3u] = (uint8_t)(value >> 24);
+    }
+    memset(block, 0, sizeof *block);
+    return a64_static_decode_read_hits_bytes_at(bytes, length, false, 0u,
+                                                block) &&
+           block->insn_count == length && block->start_pc == 0u &&
+           block->exit_pc == 0u && !block->touches_memory &&
+           !block->direct_reads && !block->runtime_guards && !block->vfp;
 }
 
 static bool validate_static_shapes(void) {
@@ -897,6 +924,20 @@ static bool validate_static_shapes(void) {
         block.insn_count != 1u || block.touches_memory) {
         fprintf(stderr, "jitbench: static decoder accepted an invalid shape\n");
         return false;
+    }
+    for (i = 0u; i < sizeof PRODUCT_ENTRY_LENGTHS /
+                         sizeof PRODUCT_ENTRY_LENGTHS[0]; i++) {
+        uint32_t program[A64_STATIC_MAX_INSNS];
+        unsigned length = PRODUCT_ENTRY_LENGTHS[i];
+        if (!prepare_product_entry(length, program, &block) ||
+            block.uop_count != length) {
+            fprintf(stderr,
+                    "jitbench: product-entry shape failed at length %u\n",
+                    length);
+            return false;
+        }
+        printf("PRODUCT-ENTRY-SHAPE exact=yes length=%u uops=%u\n",
+               length, block.uop_count);
     }
     return true;
 }
@@ -1750,9 +1791,111 @@ static bool run_static(const bench_case_t *bc,
     return ran && *seconds > 0.0;
 }
 
+static bool run_product_entry(const bench_case_t *bc,
+                              const a64_static_block_t *block,
+                              uint64_t blocks, final_state_t *out,
+                              double *seconds) {
+    arm_cpu_t cpu;
+    uint64_t i;
+    unsigned completed = 0u;
+    double start, end;
+
+    seed_cpu(&cpu, bc);
+    start = now_seconds();
+    for (i = 0u; i < blocks; i++) {
+        completed = 0u;
+        if (!a64_static_run_read_hits(&cpu, block, g_ram, sizeof g_ram,
+                                      &completed) ||
+            completed != block->insn_count)
+            break;
+    }
+    end = now_seconds();
+    capture_state(out, &cpu, ARM_OK, JIT_EXIT_NEXT);
+    *seconds = end - start;
+    return i == blocks && *seconds > 0.0;
+}
+
 static int cmp_double(const void *lhs, const void *rhs) {
     double a = *(const double *)lhs, b = *(const double *)rhs;
     return (a > b) - (a < b);
+}
+
+/* Measure the wrapper the SoC actually calls once per cached product block.
+ * The program is already decoded and every access hits one cache entry, so
+ * this includes public-contract validation, context construction and native
+ * entry/exit but deliberately excludes the SoC cache lookup, timer/IRQ gates
+ * and decode misses. It is therefore still a ceiling, just a much less
+ * flattering one than a single native call repeating 16-instruction blocks. */
+static bool bench_product_entry(unsigned length, uint64_t requested,
+                                unsigned reps) {
+    uint32_t program[A64_STATIC_MAX_INSNS];
+    bench_case_t bc = {"a32-product-entry", program, length, false, false};
+    a64_static_block_t block;
+    double *interp_rates = NULL, *product_rates = NULL;
+    uint64_t blocks, total;
+    bool ok = false;
+
+    if (!prepare_product_entry(length, program, &block)) {
+        fprintf(stderr, "jitbench: product-entry decode failed at length %u\n",
+                length);
+        return false;
+    }
+
+    blocks = (requested + length - 1u) / length;
+    total = blocks * length;
+    interp_rates = (double *)calloc(reps, sizeof *interp_rates);
+    product_rates = (double *)calloc(reps, sizeof *product_rates);
+    if (!interp_rates || !product_rates) {
+        fprintf(stderr, "jitbench: out of memory\n");
+        goto done;
+    }
+
+    for (unsigned rep = 0u; rep < reps; rep++) {
+        final_state_t interp, product;
+        double interp_s = 0.0, product_s = 0.0;
+        bool ran;
+        const char *order;
+
+        if ((rep & 1u) == 0u) {
+            order = "interp-product";
+            ran = run_interpreter(&bc, total, &interp, &interp_s) &&
+                  run_product_entry(&bc, &block, blocks, &product,
+                                    &product_s);
+        } else {
+            order = "product-interp";
+            ran = run_product_entry(&bc, &block, blocks, &product,
+                                    &product_s) &&
+                  run_interpreter(&bc, total, &interp, &interp_s);
+        }
+        if (!ran || !architectural_states_equal(&interp, &product)) {
+            fprintf(stderr,
+                    "jitbench: product-entry length %u repetition %u failed\n",
+                    length, rep + 1u);
+            goto done;
+        }
+        interp_rates[rep] = (double)total / interp_s / 1.0e6;
+        product_rates[rep] = (double)total / product_s / 1.0e6;
+        printf("PRODUCT-ENTRY-SAMPLE length=%u rep=%u order=%s "
+               "interpreter=%.3f signed-product=%.3f Minsn/s\n",
+               length, rep + 1u, order, interp_rates[rep],
+               product_rates[rep]);
+    }
+
+    qsort(interp_rates, reps, sizeof *interp_rates, cmp_double);
+    qsort(product_rates, reps, sizeof *product_rates, cmp_double);
+    printf("PRODUCT-ENTRY-CEILING length=%u uops=%u guest-insns=%" PRIu64
+           " reps=%u predecoded=yes wrapper-validation=yes cache-lookup=no "
+           "interpreter-median=%.3f signed-product-median=%.3f "
+           "speedup=%.3fx\n",
+           length, block.uop_count, total, reps,
+           interp_rates[reps / 2u], product_rates[reps / 2u],
+           product_rates[reps / 2u] / interp_rates[reps / 2u]);
+    ok = true;
+
+done:
+    free(interp_rates);
+    free(product_rates);
+    return ok;
 }
 
 static bool bench_one(const bench_case_t *bc, uint64_t requested,
@@ -1926,6 +2069,7 @@ static bool validate_case_translation(const bench_case_t *bc) {
 
 int main(int argc, char **argv) {
     uint64_t insns = DEFAULT_INSNS;
+    uint64_t entry_insns = 0u;
     unsigned reps = DEFAULT_REPS;
     unsigned i;
 
@@ -1940,16 +2084,27 @@ int main(int argc, char **argv) {
                 fprintf(stderr, "jitbench: invalid --reps value\n");
                 return 2;
             }
+        } else if (strcmp(argv[i], "--entry-insns") == 0 &&
+                   i + 1u < (unsigned)argc) {
+            if (!parse_u64(argv[++i], &entry_insns)) {
+                fprintf(stderr, "jitbench: invalid --entry-insns value\n");
+                return 2;
+            }
         } else {
-            fprintf(stderr, "usage: %s [--insns N] [--reps N]\n", argv[0]);
+            fprintf(stderr, "usage: %s [--insns N] [--entry-insns N] "
+                            "[--reps N]\n", argv[0]);
             return 2;
         }
     }
+    if (!entry_insns) entry_insns = insns;
 
     printf("Apple-arm64 native/static-semantics ceiling benchmark\n");
     printf("NOT PHONE FPS: four synthetic timed blocks; static arm has flat "
            "RAM and no MMU/fault/tick/IRQ/MMIO/cache/framebuffer/UI "
            "path or real block lookup.\n");
+    printf("Product-entry rows use predecoded hot blocks and include the "
+           "public wrapper validation/context/native call, but still exclude "
+           "SoC cache lookup and device gates.\n");
     if (!validate_static_shapes()) return 1;
     for (i = 0u; i < sizeof CASES / sizeof CASES[0]; i++) {
         if (!validate_case_translation(&CASES[i])) return 1;
@@ -1971,6 +2126,12 @@ int main(int argc, char **argv) {
 
     for (i = 0u; i < sizeof CASES / sizeof CASES[0]; i++) {
         if (!bench_one(&CASES[i], insns, reps)) return 1;
+    }
+    for (i = 0u; i < sizeof PRODUCT_ENTRY_LENGTHS /
+                         sizeof PRODUCT_ENTRY_LENGTHS[0]; i++) {
+        if (!bench_product_entry(PRODUCT_ENTRY_LENGTHS[i], entry_insns,
+                                 reps))
+            return 1;
     }
     return 0;
 }
