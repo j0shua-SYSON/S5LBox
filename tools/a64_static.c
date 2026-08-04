@@ -22,7 +22,10 @@ enum {
     A64S_STR_SP = A64S_LDR_SP + 8u,
     A64S_COND = A64S_STR_SP + 8u,
     A64S_DP_IMM = A64S_COND + 14u,
-    A64S_HANDLER_COUNT = A64S_DP_IMM + 16u * 2u * 15u * 16u
+    A64S_SHIFT_IMM = A64S_DP_IMM + 16u * 2u * 15u * 16u,
+    A64S_SHIFT_REG = A64S_SHIFT_IMM + 2u * 4u * 16u * 32u,
+    A64S_DP_REG = A64S_SHIFT_REG + 2u * 4u * 15u * 15u,
+    A64S_HANDLER_COUNT = A64S_DP_REG + 16u * 2u * 15u * 16u
 };
 
 enum {
@@ -82,6 +85,34 @@ static uint32_t dp_imm(unsigned opcode, bool set_flags,
             16u + rn);
 }
 
+static uint32_t shift_imm(bool carry, unsigned type, unsigned rm,
+                          unsigned amount) {
+    return A64S_SHIFT_IMM +
+           ((((carry ? 1u : 0u) * 4u + type) * 16u + rm) * 32u +
+            amount);
+}
+
+static uint32_t shift_reg(bool carry, unsigned type, unsigned rm,
+                          unsigned rs) {
+    return A64S_SHIFT_REG +
+           ((((carry ? 1u : 0u) * 4u + type) * 15u + rm) * 15u + rs);
+}
+
+static uint32_t dp_reg(unsigned opcode, bool set_flags,
+                       unsigned rd, unsigned rn) {
+    return A64S_DP_REG +
+           (((opcode * 2u + (set_flags ? 1u : 0u)) * 15u + rd) *
+            16u + rn);
+}
+
+static bool handler_is_condition(uint32_t handler) {
+    return handler >= A64S_COND && handler < A64S_DP_IMM;
+}
+
+static bool handler_is_shift(uint32_t handler) {
+    return handler >= A64S_SHIFT_IMM && handler < A64S_DP_REG;
+}
+
 static bool arm_dp_encoding(uint32_t insn) {
     return (insn & UINT32_C(0x0c000000)) == 0u &&
            (insn & UINT32_C(0x01900000)) != UINT32_C(0x01000000) &&
@@ -99,6 +130,7 @@ static bool decode_arm(uint32_t insn, unsigned index, unsigned insns,
     unsigned condition = insn >> 28;
     unsigned count = 0u;
     a64_static_uop_t *op = out;
+    a64_static_uop_t *guard = NULL;
 
     if (!written || condition == 15u) return false;
     *written = 0u;
@@ -120,6 +152,7 @@ static bool decode_arm(uint32_t insn, unsigned index, unsigned insns,
     }
 
     if (condition < 14u) {
+        guard = op;
         op->handler = A64S_COND + condition;
         op++;
         count++;
@@ -138,6 +171,7 @@ static bool decode_arm(uint32_t insn, unsigned index, unsigned insns,
         if ((insn & (1u << 23)) == 0u) offset = 0u - offset;
         op->handler = rr(load ? A64S_LDR : A64S_STR, rd, rn);
         op->immediate = offset;
+        if (guard) guard->metadata = 1u;
         *written = count + 1u;
         return true;
     }
@@ -165,27 +199,55 @@ static bool decode_arm(uint32_t insn, unsigned index, unsigned insns,
             op->metadata = rotate == 0u ? A64S_CARRY_PRESERVE :
                 ((immediate >> 31) != 0u ? A64S_CARRY_SET :
                                            A64S_CARRY_CLEAR);
+            if (guard) guard->metadata = 1u;
             *written = count + 1u;
             return true;
         }
 
-        /* Keep the original no-shift r0-r7 register proof. Broader register
-         * forms need an exact barrel-shifter contract and are a later gate. */
-        if (set_flags || rd > 7u || rn > 7u ||
-            (insn & UINT32_C(0x00000ff0)) != 0u)
-            return false;
         {
             unsigned rm = insn & 15u;
-            if (rm > 7u) return false;
-            switch (opcode) {
-            case 1u:  base = A64S_EOR_RRR; break;
-            case 2u:  base = A64S_SUB_RRR; break;
-            case 4u:  base = A64S_ADD_RRR; break;
-            case 12u: base = A64S_ORR_RRR; break;
-            default: return false;
+            unsigned type = (insn >> 5) & 3u;
+            unsigned handler_rd = writes_result ? rd : 0u;
+            bool logical = opcode == 0u || opcode == 1u ||
+                           opcode == 8u || opcode == 9u ||
+                           opcode >= 12u;
+            bool needs_carry = logical && (set_flags || !writes_result);
+
+            /* Retain the small one-record fast path proved by r491. */
+            base = 0u;
+            if (!set_flags && rd <= 7u && rn <= 7u && rm <= 7u &&
+                (insn & UINT32_C(0x00000ff0)) == 0u) {
+                switch (opcode) {
+                case 1u:  base = A64S_EOR_RRR; break;
+                case 2u:  base = A64S_SUB_RRR; break;
+                case 4u:  base = A64S_ADD_RRR; break;
+                case 12u: base = A64S_ORR_RRR; break;
+                default: break;
+                }
             }
-            op->handler = rrr(base, rd, rn, rm);
-            *written = count + 1u;
+            if (base != 0u) {
+                op->handler = rrr(base, rd, rn, rm);
+                if (guard) guard->metadata = 1u;
+                *written = count + 1u;
+                return true;
+            }
+
+            if ((insn & (1u << 4)) != 0u) {
+                unsigned rs = (insn >> 8) & 15u;
+                /* ARMv6 declares every R15 use in a register-specified shift
+                 * UNPREDICTABLE; the literal core refuses it as undefined. */
+                if (rd == 15u || rn == 15u || rm == 15u || rs == 15u)
+                    return false;
+                op[0].handler = shift_reg(needs_carry, type, rm, rs);
+            } else {
+                unsigned amount = (insn >> 7) & 31u;
+                op[0].handler = shift_imm(needs_carry, type, rm, amount);
+                op[0].pc_value = pc + index * 4u + 8u;
+            }
+            op[1].handler = dp_reg(opcode, set_flags, handler_rd, rn);
+            op[1].pc_value = pc + index * 4u + 8u;
+            if (guard) guard->metadata = 2u;
+            *written = count + 2u;
             return true;
         }
     }
@@ -327,7 +389,7 @@ bool a64_static_run(arm_cpu_t *cpu, const a64_static_block_t *block,
     if (!cpu || !block || !blocks || !ram ||
         !block->insn_count || block->insn_count > A64_STATIC_MAX_INSNS ||
         block->uop_count < block->insn_count ||
-        block->uop_count > block->insn_count * 2u + 1u ||
+        block->uop_count > block->insn_count * 3u + 1u ||
         block->uop_count > A64_STATIC_MAX_UOPS ||
         block->uops[block->uop_count - 1u].handler != A64S_END ||
         block->uops[block->uop_count - 1u].immediate != block->exit_pc ||
@@ -341,16 +403,28 @@ bool a64_static_run(arm_cpu_t *cpu, const a64_static_block_t *block,
         uint32_t handler = block->uops[i].handler;
         if (handler == A64S_END || handler >= A64S_HANDLER_COUNT)
             return false;
-        if (handler >= A64S_COND && handler < A64S_DP_IMM) {
-            uint32_t next_handler;
-            if (i + 1u >= block->uop_count - 1u) return false;
-            next_handler = block->uops[i + 1u].handler;
-            if (next_handler == A64S_END ||
-                (next_handler >= A64S_COND && next_handler < A64S_DP_IMM))
+        if (handler_is_condition(handler)) {
+            unsigned skip = block->uops[i].metadata;
+            if (!skip || skip > 2u ||
+                i + skip >= block->uop_count - 1u)
+                return false;
+            for (unsigned j = 1u; j <= skip; j++)
+                if (block->uops[i + j].handler == A64S_END ||
+                    handler_is_condition(block->uops[i + j].handler))
+                    return false;
+            if (handler_is_shift(block->uops[i + 1u].handler) !=
+                (skip == 2u))
                 return false;
         }
-        if (handler >= A64S_DP_IMM && block->uops[i].metadata >
-                                         A64S_CARRY_SET)
+        if (handler >= A64S_DP_IMM && handler < A64S_SHIFT_IMM &&
+            block->uops[i].metadata > A64S_CARRY_SET)
+            return false;
+        if (handler_is_shift(handler) &&
+            (i + 1u >= block->uop_count - 1u ||
+             block->uops[i + 1u].handler < A64S_DP_REG))
+            return false;
+        if (handler >= A64S_DP_REG &&
+            (i == 0u || !handler_is_shift(block->uops[i - 1u].handler)))
             return false;
     }
 #if defined(S5LBOX_STATIC_A64_NATIVE)

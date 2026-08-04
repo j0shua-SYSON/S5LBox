@@ -4,7 +4,7 @@
  * This is deliberately NOT a product-performance claim and not a JIT
  * dispatcher. It translates one small synthetic block once, then compares
  * repeated interpreter execution with both that already-built block and a
- * firmware-independent static-threaded proof. The proof's 10,271 generic
+ * firmware-independent static-threaded proof. The proof's 23,847 generic
  * ISA/register handlers are compiled and signed with the executable; runtime
  * decoding creates data records only.
  *
@@ -14,11 +14,12 @@
  * positive result cannot be reported as phone FPS or as proof that a complete
  * no-JIT interpreter will have the same speed. The timed rows still cover only
  * four synthetic blocks and flat power-of-two RAM. Separate exactness cases now
- * cover every A32 immediate data-processing opcode, all conditions, r8-r14 and
- * PC reads, but there is still no MMU, fault, timer, IRQ, MMIO, cache,
- * framebuffer or UI path in the ceiling. Its inner repetition also avoids real
- * block lookup. Those omissions are why it is an architecture gate, not an
- * emulator speed claim.
+ * cover every A32 data-processing opcode, all conditions, immediate and
+ * register barrel-shifter edge cases, r8-r14 and the architecturally valid PC
+ * reads, but there is still no MMU, fault, timer, IRQ, MMIO, cache, framebuffer
+ * or UI path in the ceiling. Its inner repetition also avoids real block
+ * lookup. Those omissions are why it is an architecture gate, not an emulator
+ * speed claim.
  *
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed.
  */
@@ -167,6 +168,18 @@ static const uint16_t THUMB_SHORT_BRANCH[] = {
      ((uint32_t)(rn) << 16) | ((uint32_t)(rd) << 12) |                     \
      ((uint32_t)(rotate) << 8) | (uint32_t)(imm8))
 
+#define A32_DP_REG_IMM(cond, opcode, set, rn, rd, rm, type, amount)         \
+    (((uint32_t)(cond) << 28) | ((uint32_t)(opcode) << 21) |               \
+     ((uint32_t)(set) << 20) | ((uint32_t)(rn) << 16) |                    \
+     ((uint32_t)(rd) << 12) | ((uint32_t)(amount) << 7) |                  \
+     ((uint32_t)(type) << 5) | (uint32_t)(rm))
+
+#define A32_DP_REG_REG(cond, opcode, set, rn, rd, rm, type, rs)             \
+    (((uint32_t)(cond) << 28) | ((uint32_t)(opcode) << 21) |               \
+     ((uint32_t)(set) << 20) | ((uint32_t)(rn) << 16) |                    \
+     ((uint32_t)(rd) << 12) | ((uint32_t)(rs) << 8) |                      \
+     ((uint32_t)(type) << 5) | UINT32_C(0x10) | (uint32_t)(rm))
+
 /* All sixteen A32 immediate data-processing opcodes. This deliberately uses
  * r8-r14, PC as an input, arithmetic and logical flag writes, both rotated and
  * unrotated immediates, and carry-consuming operations. */
@@ -210,6 +223,73 @@ static const uint32_t A32_IMM_CONDITIONS[] = {
     A32_DP_IMM(14, 13, 0, 0, 14, 0, 0x5a),
 };
 
+/* All sixteen register-form data-processing opcodes. The first four cover
+ * the architecturally special immediate-shift encodings LSL #0, LSR #32,
+ * ASR #32 and RRX. The rest cover ordinary amounts, high registers, SP and
+ * both valid PC input positions. */
+static const uint32_t A32_REG_IMM_ALL_OPS[] = {
+    A32_DP_REG_IMM(14,  0, 1,  0,  8,  1, 0,  0), /* ANDS r8,r0,r1,LSL #0  */
+    A32_DP_REG_IMM(14,  1, 1,  1,  9,  2, 1,  0), /* EORS r9,r1,r2,LSR #32 */
+    A32_DP_REG_IMM(14,  2, 1,  2, 10,  3, 2,  0), /* SUBS r10,r2,r3,ASR #32*/
+    A32_DP_REG_IMM(14,  3, 1,  3, 11,  4, 3,  0), /* RSBS r11,r3,r4,RRX    */
+    A32_DP_REG_IMM(14,  4, 0, 15, 12,  5, 0,  1), /* ADD r12,pc,r5,LSL #1  */
+    A32_DP_REG_IMM(14,  5, 1,  4, 13,  6, 1,  1), /* ADCS sp,r4,r6,LSR #1  */
+    A32_DP_REG_IMM(14,  6, 1,  5, 14,  7, 2, 31), /* SBCS lr,r5,r7,ASR #31 */
+    A32_DP_REG_IMM(14,  7, 0,  6,  8, 15, 3,  7), /* RSC r8,r6,pc,ROR #7   */
+    A32_DP_REG_IMM(14,  8, 1,  8,  0,  9, 0, 31), /* TST r8,r9,LSL #31     */
+    A32_DP_REG_IMM(14,  9, 1,  9,  0, 10, 1, 31), /* TEQ r9,r10,LSR #31    */
+    A32_DP_REG_IMM(14, 10, 1, 10,  0, 11, 2,  1), /* CMP r10,r11,ASR #1    */
+    A32_DP_REG_IMM(14, 11, 1, 11,  0, 12, 3, 16), /* CMN r11,r12,ROR #16   */
+    A32_DP_REG_IMM(14, 12, 1, 12, 12, 13, 0,  2), /* ORRS r12,r12,sp,LSL #2*/
+    A32_DP_REG_IMM(14, 13, 1,  0, 13, 14, 1,  4), /* MOVS sp,lr,LSR #4     */
+    A32_DP_REG_IMM(14, 14, 1, 14, 14,  0, 2,  4), /* BICS lr,lr,r0,ASR #4  */
+    A32_DP_REG_IMM(14, 15, 1,  0,  8,  1, 3,  8), /* MVNS r8,r1,ROR #8     */
+};
+
+/* Register-specified shifts use only Rs[7:0], and ARM's answers at 0, 32 and
+ * above 32 deliberately differ from AArch64's modulo-32 variable shifts.
+ * r8/r9/r10/r11/r12 and r14[7:0] are seeded to 0/1/31/32/33/255. */
+static const uint32_t A32_REG_REG_ALL_OPS[] = {
+    A32_DP_REG_REG(14,  0, 0,  1,  0,  2, 0,  8), /* AND r0,r1,r2,LSL r8   */
+    A32_DP_REG_REG(14,  1, 0,  2,  1,  3, 1,  9), /* EOR r1,r2,r3,LSR r9   */
+    A32_DP_REG_REG(14,  2, 1,  3,  2,  4, 2, 10), /* SUBS r2,r3,r4,ASR r10 */
+    A32_DP_REG_REG(14,  3, 1,  4,  3,  5, 3, 11), /* RSBS r3,r4,r5,ROR r11 */
+    A32_DP_REG_REG(14,  4, 0,  5,  4,  6, 0, 12), /* ADD r4,r5,r6,LSL r12  */
+    A32_DP_REG_REG(14,  5, 1,  6,  5,  7, 1, 14), /* ADCS r5,r6,r7,LSR lr  */
+    A32_DP_REG_REG(14,  6, 1,  7,  6, 13, 2,  8), /* SBCS r6,r7,sp,ASR r8  */
+    A32_DP_REG_REG(14,  7, 0, 13,  7,  0, 3,  9), /* RSC r7,sp,r0,ROR r9   */
+    A32_DP_REG_REG(14,  8, 1,  0,  0,  1, 0, 10), /* TST r0,r1,LSL r10     */
+    A32_DP_REG_REG(14,  9, 1,  1,  0,  2, 1, 11), /* TEQ r1,r2,LSR r11     */
+    A32_DP_REG_REG(14, 10, 1,  2,  0,  3, 2, 12), /* CMP r2,r3,ASR r12     */
+    A32_DP_REG_REG(14, 11, 1,  3,  0,  4, 3, 14), /* CMN r3,r4,ROR lr      */
+    A32_DP_REG_REG(14, 12, 1, 13, 13,  5, 0,  8), /* ORRS sp,sp,r5,LSL r8  */
+    A32_DP_REG_REG(14, 13, 1,  0,  0,  6, 1,  9), /* MOVS r0,r6,LSR r9     */
+    A32_DP_REG_REG(14, 14, 1,  1,  1,  7, 2, 11), /* BICS r1,r1,r7,ASR r11 */
+    A32_DP_REG_REG(14, 15, 1,  0,  2,  8, 3, 12), /* MVNS r2,r8,ROR r12    */
+};
+
+/* The same N=0,Z=0,C=1,V=0 condition matrix as the immediate case, but each
+ * guarded operation occupies two semantic records. This proves all fourteen
+ * guard handlers skip exactly two records on failure and none on success. */
+static const uint32_t A32_REG_CONDITIONS[] = {
+    A32_DP_IMM(14, 10, 1, 0, 0, 0, 0),
+    A32_DP_REG_IMM( 0, 4, 0, 8, 8, 9, 0, 1),
+    A32_DP_REG_IMM( 1, 4, 0, 8, 8, 9, 0, 1),
+    A32_DP_REG_IMM( 2, 4, 0, 8, 8, 9, 0, 1),
+    A32_DP_REG_IMM( 3, 4, 0, 8, 8, 9, 0, 1),
+    A32_DP_REG_IMM( 4, 4, 0, 8, 8, 9, 0, 1),
+    A32_DP_REG_IMM( 5, 4, 0, 8, 8, 9, 0, 1),
+    A32_DP_REG_IMM( 6, 4, 0, 8, 8, 9, 0, 1),
+    A32_DP_REG_IMM( 7, 4, 0, 8, 8, 9, 0, 1),
+    A32_DP_REG_IMM( 8, 4, 0, 8, 8, 9, 0, 1),
+    A32_DP_REG_IMM( 9, 4, 0, 8, 8, 9, 0, 1),
+    A32_DP_REG_IMM(10, 4, 0, 8, 8, 9, 0, 1),
+    A32_DP_REG_IMM(11, 4, 0, 8, 8, 9, 0, 1),
+    A32_DP_REG_IMM(12, 4, 0, 8, 8, 9, 0, 1),
+    A32_DP_REG_IMM(13, 4, 0, 8, 8, 9, 0, 1),
+    A32_DP_REG_IMM(14, 13, 0, 0, 14, 8, 3, 0),
+};
+
 typedef struct {
     const char *name;
     const void *program;
@@ -233,6 +313,12 @@ static const static_case_t STATIC_CASES[] = {
       0x4000u, 0x4040u, 17u },
     { "a32-imm-conditions", A32_IMM_CONDITIONS, 16u, false,
       0x5000u, 0x5040u, 31u },
+    { "a32-reg-imm-all-ops", A32_REG_IMM_ALL_OPS, 16u, false,
+      0x6000u, 0x6040u, 33u },
+    { "a32-reg-reg-all-ops", A32_REG_REG_ALL_OPS, 16u, false,
+      0x7000u, 0x7040u, 33u },
+    { "a32-reg-conditions", A32_REG_CONDITIONS, 16u, false,
+      0xa000u, 0xa040u, 46u },
 };
 
 static const bench_case_t CASES[] = {
@@ -282,7 +368,12 @@ static void seed_cpu_at(arm_cpu_t *cpu, const void *program, unsigned insns,
     for (i = 0; i < 13u; i++) cpu->r[i] = 0x10203040u + i * 0x01010101u;
     cpu->r[7] = DATA_BASE;
     cpu->r[13] = STACK_BASE;
-    cpu->r[14] = 0xdead0000u;
+    cpu->r[14] = 0xdead00ffu;
+    cpu->r[8] = 0u;
+    cpu->r[9] = 1u;
+    cpu->r[10] = 31u;
+    cpu->r[11] = 32u;
+    cpu->r[12] = 33u;
     cpu->r[15] = pc;
 }
 
@@ -322,6 +413,12 @@ static bool validate_static_shapes(void) {
     static const uint32_t CONDITIONAL_DP[] = {
         A32_DP_IMM(1, 4, 0, 8, 8, 0, 1),
     };
+    static const uint32_t REG_SHIFT_PC[] = {
+        A32_DP_REG_REG(14, 4, 0, 0, 15, 1, 0, 2),
+        A32_DP_REG_REG(14, 4, 0, 15, 0, 1, 0, 2),
+        A32_DP_REG_REG(14, 4, 0, 0, 0, 15, 0, 2),
+        A32_DP_REG_REG(14, 4, 0, 0, 0, 1, 0, 15),
+    };
     /* Deliberately unaligned guest byte stream: ADD r0,r0,#1. */
     static const uint8_t UNALIGNED_A32[] = {
         0xffu, 0x01u, 0x00u, 0x80u, 0xe2u,
@@ -346,6 +443,15 @@ static bool validate_static_shapes(void) {
                " exit=%08" PRIx32 " insns=%u uops=%u\n",
                sc->name, block.start_pc, block.exit_pc,
                block.insn_count, block.uop_count);
+    }
+
+    for (i = 0u; i < sizeof REG_SHIFT_PC / sizeof REG_SHIFT_PC[0]; i++) {
+        if (a64_static_decode_at(&REG_SHIFT_PC[i], 1u, false, 0u, &block)) {
+            fprintf(stderr,
+                    "jitbench: static decoder accepted register-shift PC "
+                    "case %u\n", i);
+            return false;
+        }
     }
 
     if (a64_static_decode_at(A32_SHORT_FALL, 0u, false, 0u, &block) ||

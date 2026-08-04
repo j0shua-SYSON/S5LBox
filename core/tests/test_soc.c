@@ -3086,10 +3086,10 @@ static void test_signed_static_a64_soc_oracle(void) {
         0xe2a8b002u, /* ADC   r11,r8,#2          */
         0xe2cbc001u, /* SBC   r12,r11,#1         */
         0xe28dd004u, /* ADD   sp,sp,#4           */
-        0xe22ee001u, /* EOR   lr,lr,#1           */
+        0xe02ee008u, /* EOR   lr,lr,r8,LSL #0    */
         0xe31900ffu, /* TST   r9,#0xff           */
         0x038cc040u, /* ORREQ r12,r12,#0x40      */
-        0xe3ccc020u, /* BIC   r12,r12,#0x20      */
+        0xe1ccc0abu, /* BIC   r12,r12,r11,LSR #1 */
         0xe3e09000u, /* MVN   r9,#0              */
         0xe3790001u, /* CMN   r9,#1              */
         0xeaffffefu  /* B     0                  */

@@ -20,10 +20,10 @@
 #include <stdint.h>
 
 #define A64_STATIC_MAX_INSNS 16u
-/* A conditional A32 instruction uses a condition guard plus its semantic
+/* A conditional register-form A32 instruction uses a guard, shifter and ALU
  * record. The final slot is the fixed block exit. */
-#define A64_STATIC_MAX_UOPS (A64_STATIC_MAX_INSNS * 2u + 1u)
-#define A64_STATIC_HANDLER_COUNT 10271u
+#define A64_STATIC_MAX_UOPS (A64_STATIC_MAX_INSNS * 3u + 1u)
+#define A64_STATIC_HANDLER_COUNT 23847u
 
 typedef struct {
     uint32_t handler;
@@ -44,11 +44,11 @@ typedef struct {
 
 /* Decode one host-native uint32_t/uint16_t instruction array beginning at
  * `pc`. A terminal unconditional branch may target any address; otherwise the
- * block exits at its natural fallthrough. A32 immediate data processing covers
- * every opcode and condition with r0-r14 destinations and r0-r15 sources;
- * writes to PC remain outside the contract. The older register subset and
- * Thumb SP-relative word loads/stores remain available. Every unsupported bit
- * causes a clean false return. */
+ * block exits at its natural fallthrough. A32 data processing covers every
+ * opcode, condition and immediate/register barrel-shifter form with r0-r14
+ * destinations and the architecturally valid source registers; writes to PC
+ * remain outside the contract. Thumb SP-relative word loads/stores remain
+ * available. Every unsupported bit causes a clean false return. */
 bool a64_static_decode_at(const void *program, unsigned insns, bool thumb,
                           uint32_t pc, a64_static_block_t *out);
 

@@ -19,7 +19,7 @@ CONDITIONS = (
     "eq", "ne", "cs", "cc", "mi", "pl", "vs", "vc",
     "hi", "ls", "ge", "lt", "gt", "le",
 )
-EXPECTED_HANDLERS = 10271
+EXPECTED_HANDLERS = 23847
 
 
 def next_dispatch() -> list[str]:
@@ -124,13 +124,240 @@ def dp_immediate_body(opcode: int, set_flags: bool,
     return body
 
 
+def logic_flags_from_shifter(result: str) -> list[str]:
+    return [
+        # w6 is the exact ARM shifter carry-out. Preserve the old V flag.
+        "    mrs x10, nzcv",
+        f"    ands wzr, {result}, {result}",
+        "    mrs x9, nzcv",
+        "    and w10, w10, #0x10000000",
+        "    and w9, w9, #0xc0000000",
+        "    cbz w6, 1f",
+        "    orr w10, w10, #0x20000000",
+        "1:",
+        "    orr w9, w9, w10",
+        "    msr nzcv, x9",
+    ]
+
+
+def dp_register_body(opcode: int, set_flags: bool,
+                     rd: int, rn: int) -> list[str]:
+    body: list[str] = []
+    if opcode not in (13, 15):
+        loads, source = read_guest_register(rn, 10)
+        body.extend(loads)
+    else:
+        source = "wzr"
+
+    writes = opcode < 8 or opcode >= 12
+    if writes:
+        result, stores = result_register(rd)
+    else:
+        result, stores = "w12", []
+
+    if opcode == 0:
+        body.append(f"    and {result}, {source}, w17")
+    elif opcode == 1:
+        body.append(f"    eor {result}, {source}, w17")
+    elif opcode == 2:
+        body.append(f"    {'subs' if set_flags else 'sub'} {result}, {source}, w17")
+    elif opcode == 3:
+        body.append(f"    {'subs' if set_flags else 'sub'} {result}, w17, {source}")
+    elif opcode == 4:
+        body.append(f"    {'adds' if set_flags else 'add'} {result}, {source}, w17")
+    elif opcode == 5:
+        body.append(f"    {'adcs' if set_flags else 'adc'} {result}, {source}, w17")
+    elif opcode == 6:
+        body.append(f"    {'sbcs' if set_flags else 'sbc'} {result}, {source}, w17")
+    elif opcode == 7:
+        body.append(f"    {'sbcs' if set_flags else 'sbc'} {result}, w17, {source}")
+    elif opcode == 8:
+        body.append(f"    and {result}, {source}, w17")
+    elif opcode == 9:
+        body.append(f"    eor {result}, {source}, w17")
+    elif opcode == 10:
+        body.append(f"    subs wzr, {source}, w17")
+    elif opcode == 11:
+        body.append(f"    adds wzr, {source}, w17")
+    elif opcode == 12:
+        body.append(f"    orr {result}, {source}, w17")
+    elif opcode == 13:
+        body.append(f"    mov {result}, w17")
+    elif opcode == 14:
+        body.append(f"    bic {result}, {source}, w17")
+    else:
+        body.append(f"    mvn {result}, w17")
+
+    if (opcode in (0, 1, 8, 9, 12, 13, 14, 15) and
+            (set_flags or not writes)):
+        body.extend(logic_flags_from_shifter(result))
+    body.extend(stores)
+    body.extend(next_dispatch())
+    return body
+
+
+def carry_bit(source: str, bit: int) -> list[str]:
+    return [f"    ubfx w6, {source}, #{bit}, #1"]
+
+
+def shift_immediate_body(needs_carry: bool, shift_type: int,
+                         rm: int, amount: int) -> list[str]:
+    body, source = read_guest_register(rm, 10)
+    body = list(body)
+
+    if shift_type == 0:  # LSL
+        if amount == 0:
+            body.append(f"    mov w17, {source}")
+            if needs_carry:
+                body.append("    cset w6, cs")
+        else:
+            body.append(f"    lsl w17, {source}, #{amount}")
+            if needs_carry:
+                body.extend(carry_bit(source, 32 - amount))
+    elif shift_type == 1:  # LSR; encoded zero means 32
+        if amount == 0:
+            body.append("    mov w17, wzr")
+            if needs_carry:
+                body.extend(carry_bit(source, 31))
+        else:
+            body.append(f"    lsr w17, {source}, #{amount}")
+            if needs_carry:
+                body.extend(carry_bit(source, amount - 1))
+    elif shift_type == 2:  # ASR; encoded zero means 32
+        body.append(f"    asr w17, {source}, #{31 if amount == 0 else amount}")
+        if needs_carry:
+            body.extend(carry_bit(source, 31 if amount == 0 else amount - 1))
+    else:  # ROR; encoded zero is RRX through the old C flag
+        if amount == 0:
+            body.extend([
+                "    cset w12, cs",
+                f"    lsr w17, {source}, #1",
+                "    orr w17, w17, w12, lsl #31",
+            ])
+            if needs_carry:
+                body.extend(carry_bit(source, 0))
+        else:
+            body.append(f"    ror w17, {source}, #{amount}")
+            if needs_carry:
+                body.extend(carry_bit(source, amount - 1))
+
+    body.extend(next_dispatch())
+    return body
+
+
+def shift_register_body(needs_carry: bool, shift_type: int,
+                        rm: int, rs: int) -> list[str]:
+    body, source = read_guest_register(rm, 10)
+    amount_loads, amount_source = read_guest_register(rs, 9)
+    body = list(body)
+    body.extend(amount_loads)
+    body.append(f"    and w9, {amount_source}, #0xff")
+
+    if shift_type == 0:  # LSL
+        body.extend([
+            "    cbz w9, 1f",
+            "    lsr w12, w9, #5",
+            "    cbz w12, 2f",
+            "    eor w12, w9, #32",
+            "    cbz w12, 3f",
+            "    mov w17, wzr",
+        ])
+        if needs_carry:
+            body.append("    mov w6, wzr")
+        body.extend(["    b 9f", "1:", f"    mov w17, {source}"])
+        if needs_carry:
+            body.append("    cset w6, cs")
+        body.extend(["    b 9f", "2:", f"    lslv w17, {source}, w9"])
+        if needs_carry:
+            body.extend([
+                "    mov w12, #32",
+                "    sub w12, w12, w9",
+                f"    lsrv w6, {source}, w12",
+                "    and w6, w6, #1",
+            ])
+        body.extend(["    b 9f", "3:", "    mov w17, wzr"])
+        if needs_carry:
+            body.extend(carry_bit(source, 0))
+    elif shift_type == 1:  # LSR
+        body.extend([
+            "    cbz w9, 1f",
+            "    lsr w12, w9, #5",
+            "    cbz w12, 2f",
+            "    eor w12, w9, #32",
+            "    cbz w12, 3f",
+            "    mov w17, wzr",
+        ])
+        if needs_carry:
+            body.append("    mov w6, wzr")
+        body.extend(["    b 9f", "1:", f"    mov w17, {source}"])
+        if needs_carry:
+            body.append("    cset w6, cs")
+        body.extend(["    b 9f", "2:", f"    lsrv w17, {source}, w9"])
+        if needs_carry:
+            body.extend([
+                "    sub w12, w9, #1",
+                f"    lsrv w6, {source}, w12",
+                "    and w6, w6, #1",
+            ])
+        body.extend(["    b 9f", "3:", "    mov w17, wzr"])
+        if needs_carry:
+            body.extend(carry_bit(source, 31))
+    elif shift_type == 2:  # ASR
+        body.extend([
+            "    cbz w9, 1f",
+            "    lsr w12, w9, #5",
+            "    cbz w12, 2f",
+            "3:",
+            f"    asr w17, {source}, #31",
+        ])
+        if needs_carry:
+            body.extend(carry_bit(source, 31))
+        body.extend(["    b 9f", "1:", f"    mov w17, {source}"])
+        if needs_carry:
+            body.append("    cset w6, cs")
+        body.extend(["    b 9f", "2:", f"    asrv w17, {source}, w9"])
+        if needs_carry:
+            body.extend([
+                "    sub w12, w9, #1",
+                f"    lsrv w6, {source}, w12",
+                "    and w6, w6, #1",
+            ])
+    else:  # ROR
+        body.extend([
+            "    cbz w9, 1f",
+            "    and w12, w9, #31",
+            "    cbz w12, 3f",
+            f"    rorv w17, {source}, w12",
+        ])
+        if needs_carry:
+            body.extend([
+                "    sub w12, w12, #1",
+                f"    lsrv w6, {source}, w12",
+                "    and w6, w6, #1",
+            ])
+        body.extend(["    b 9f", "1:", f"    mov w17, {source}"])
+        if needs_carry:
+            body.append("    cset w6, cs")
+        body.extend(["    b 9f", "3:", f"    mov w17, {source}"])
+        if needs_carry:
+            body.extend(carry_bit(source, 31))
+
+    body.append("9:")
+    body.extend(next_dispatch())
+    return body
+
+
 def build_handlers() -> list[tuple[str, list[str]]]:
     handlers: list[tuple[str, list[str]]] = []
 
     handlers.append((".La64s_end", [
         "    ldur w12, [x13, #-12]",
         "    sub x15, x15, #1",
-        "    cbz x15, .La64s_exit",
+        # Keep the conditional target local: CBZ/CBNZ reaches only +/-1 MiB,
+        # while the expanded signed handler text is intentionally larger.
+        "    cbnz x15, 1f",
+        "    b .La64s_exit",
+        "1:",
         "    mov x13, x14",
         *next_dispatch(),
     ]))
@@ -216,12 +443,15 @@ def build_handlers() -> list[tuple[str, list[str]]]:
                 *next_dispatch(),
             ]))
 
-    # A failed ARM condition skips exactly the following semantic record.
-    # AL has no guard and cond=0xf is rejected by the decoder.
+    # A failed ARM condition skips the record count stored in its metadata.
+    # Immediate forms use one semantic record; register forms use a shifter
+    # record followed by an ALU record. AL has no guard and cond=0xf is
+    # rejected by the decoder.
     for condition in CONDITIONS:
         handlers.append((f".La64s_cond_{condition}", [
             f"    b.{condition} 1f",
-            "    add x13, x13, #16",
+            "    ldur w16, [x13, #-4]",
+            "    add x13, x13, x16, lsl #4",
             "1:",
             *next_dispatch(),
         ]))
@@ -239,6 +469,53 @@ def build_handlers() -> list[tuple[str, list[str]]]:
                     handlers.append((
                         label,
                         dp_immediate_body(opcode, set_flags, rd, rn),
+                    ))
+
+    # Register Operand2 is split into an exact barrel-shifter record and a
+    # data-processing record. Keeping those dimensions independent avoids a
+    # firmware-derived table and holds signed text to a tractable size.
+    for needs_carry in (False, True):
+        for shift_type in range(4):
+            for rm in range(16):
+                for amount in range(32):
+                    label = (
+                        f".La64s_shift_imm_{int(needs_carry)}_"
+                        f"{shift_type}_{rm}_{amount}"
+                    )
+                    handlers.append((
+                        label,
+                        shift_immediate_body(
+                            needs_carry, shift_type, rm, amount
+                        ),
+                    ))
+
+    # R15 is architecturally UNPREDICTABLE in every register-specified shift
+    # operand field on ARM1176, so only r0-r14 are enumerated here.
+    for needs_carry in (False, True):
+        for shift_type in range(4):
+            for rm in range(15):
+                for rs in range(15):
+                    label = (
+                        f".La64s_shift_reg_{int(needs_carry)}_"
+                        f"{shift_type}_{rm}_{rs}"
+                    )
+                    handlers.append((
+                        label,
+                        shift_register_body(
+                            needs_carry, shift_type, rm, rs
+                        ),
+                    ))
+
+    for opcode in range(16):
+        for set_flags in (False, True):
+            for rd in range(15):
+                for rn in range(16):
+                    label = (
+                        f".La64s_dp_reg_{opcode}_{int(set_flags)}_{rd}_{rn}"
+                    )
+                    handlers.append((
+                        label,
+                        dp_register_body(opcode, set_flags, rd, rn),
                     ))
 
     if len(handlers) != EXPECTED_HANDLERS:
@@ -284,7 +561,15 @@ def render() -> str:
         "    mov x14, x3",
         "    mov x13, x3",
         "    mov x15, x4",
-        "    adr x8, .La64s_table",
+        # ADR also reaches only +/-1 MiB. Use the platform's page-relative
+        # relocation spelling so handler growth cannot invalidate the entry.
+        "#if defined(__APPLE__)",
+        "    adrp x8, .La64s_table@PAGE",
+        "    add x8, x8, .La64s_table@PAGEOFF",
+        "#else",
+        "    adrp x8, .La64s_table",
+        "    add x8, x8, :lo12:.La64s_table",
+        "#endif",
         "",
         "    mul x9, x4, x7",
         "    ldr x10, [x2]",
