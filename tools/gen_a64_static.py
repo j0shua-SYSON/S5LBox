@@ -32,8 +32,11 @@ READ_KINDS = (
 
 def next_dispatch() -> list[str]:
     return [
-        "    ldr w16, [x13], #16",
-        "    ldrsw x16, [x8, w16, uxtw #2]",
+        # Decode has already resolved the portable handler id through the
+        # signed table below. The hot record carries that exact relative
+        # offset, removing one dependent table load from every uop while the
+        # target remains confined to ordinary build-time-signed text.
+        "    ldrsw x16, [x13], #16",
         "    add x16, x8, x16",
         "    br x16",
     ]
@@ -1486,6 +1489,8 @@ def render() -> str:
         "#endif",
         "",
         ".p2align 2",
+        ".globl A64S_CSYM(a64_static_handler_offsets)",
+        "A64S_CSYM(a64_static_handler_offsets):",
         ".La64s_table:",
     ])
     lines.extend(f"    .long {label} - .La64s_table" for label, _ in handlers)
