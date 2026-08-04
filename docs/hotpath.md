@@ -5056,3 +5056,71 @@ and coherency, variable/short exits, conditions, r8--r12 and PC semantics, MMU/T
 loads/stores, timer/interrupt boundaries, faults and fallback. Only a same-binary restored
 firmware A/B can promote it. Shipping phone FPS remains the measured 0--4 until that gate
 passes and the iOS app is rebuilt and measured.
+
+### r492: variable signed blocks preserve exact guest addresses
+
+r492 removed a benchmark-only assumption before touching the SoC. The signed decoder now
+accepts any block length from one through sixteen instructions, records its real guest
+start and exit addresses, and emits an explicit fallthrough exit when the last instruction
+is not a branch. A terminal ARM or Thumb unconditional branch may target any aligned guest
+address; a branch before the end of a proposed block is rejected. The machine-facing entry
+point reads an unaligned little-endian guest byte stream rather than casting translated RAM
+to a host-native instruction array. The original host-native array entry point remains for
+the cross-endian benchmark contract.
+
+The exact oracle covers every accepted length and both fallthrough and branch exits, then
+compares signed execution with the literal interpreter on Apple arm64. Decoder negatives
+include zero and over-cap lengths, misaligned PCs, a mid-block branch, and an unaligned
+guest-byte buffer. The static handler set and its synthetic ceiling are otherwise unchanged:
+this milestone adds address correctness, not ISA coverage or performance. Exact commit
+`0bad476e1ceeff9738bce5cccdc936af402d7a3d` is included in the later fully green r493
+matrices.
+
+This was necessary integration work, but it did not put the engine in the product and did
+not produce an FPS result. Calling it progress toward 30 FPS is fair only in the structural
+sense: it removed a false fixed-loop model that could not execute real guest control flow.
+It did not make the emulator faster.
+
+### r493: the first signed path reaches the SoC loop, default off
+
+r493 integrates the signed AArch64 contract into the real `s5l8900_run()` loop behind
+`S5LBOX_STATIC_A64_ENGINE`, which defaults to OFF, and a separate per-machine runtime opt-in.
+The path still creates no executable memory. A 1,024-entry direct-mapped cache stores only
+decoded data records. Its identity includes guest PC/state, translated fetch pointer,
+translation generation and privilege; every hit also compares the exact guest bytes before
+reuse. That redundant-looking byte witness is intentional: direct RAM writes and host SVC
+bridges can change code without going through a normal guest-store invalidation hook.
+
+The integration fails closed. It runs only when the existing fetch translation is already
+valid, the CPU mode is valid, no abort or unmasked interrupt is pending, and the full block
+fits before the next exact device-time boundary. Unsupported instructions return to
+`arm_step()` without changing state. Most importantly, the first version refuses **every
+load and store**. The benchmark's masked flat-RAM operations do not implement the guest
+MMU, permission faults, unaligned access, MMIO or write observers, so reusing them here
+would be fast and wrong. Snapshot data and version remain pointer-free; only the opaque
+per-machine cache pointer changes the in-memory machine layout.
+
+The Apple execution oracle uses two complete S5L8900 machines at the board's real
+412 MHz:6 MHz clock ratio. One uses signed handlers and one remains literal. They run across
+hundreds of device boundaries, rewrite a cached ADD into SUB through direct RAM, and compare
+their final serialized snapshots byte for byte. Both hosted Apple runners reported
+`STATIC-A64-SOC-ORACLE exact=yes retired=21520 smc=yes` and 5,843 assertions with zero
+failures. The JIT-on matrix ran 60/60 tests on each Apple runner, and the independent
+JIT-off build ran 55/55. Exact commit
+`6b85b4a775c65ee3f3edb647a61a9b915eaef600` passed core run `30866085797` and iOS build
+`30866085815`.
+
+That evidence is a correctness milestone, **not a speed milestone**. The oracle is a tiny
+unconditional ADD/SUB loop chosen specifically to enter the current subset. There is no
+same-binary restored-firmware A/B, no cold boot, no frame measurement and no phone result.
+The iOS target still builds with the engine off; the green IPA job proves that the ordinary
+app was not broken, not that the new path is active on an iPhone. Measured product FPS is
+therefore unchanged at the reported 0--4.
+
+Running the current subset against the restored workload would mostly measure fallback
+overhead and could make a misleadingly narrow implementation look decisive. The r473
+profile instead dictates the next work: broaden A32 data processing around MOV, CMP,
+conditions, barrel shifts and r8--r14, then add exact MMU/TLB read hits and later Thumb/VFP.
+Only after enough of the measured stream stays inside signed handlers is a restored
+same-binary A/B useful. Cache-size tuning or claiming the synthetic 18x--45x ratios as
+emulator speed would be another whack-a-mole detour.
