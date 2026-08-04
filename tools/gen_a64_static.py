@@ -47,7 +47,7 @@ def terminal_branch_body(condition: str, link: bool) -> list[str]:
             # A failed condition exits at the instruction after B/BL and must
             # leave LR untouched even when the link bit is set.
             "    ldur w12, [x13, #-8]",
-            "    b .La64s_exit",
+            "    b .La64s_terminal_exit",
             "1:",
         ])
     if link:
@@ -57,7 +57,7 @@ def terminal_branch_body(condition: str, link: bool) -> list[str]:
         ])
     body.extend([
         "    ldur w12, [x13, #-12]",
-        "    b .La64s_exit",
+        "    b .La64s_terminal_exit",
     ])
     return body
 
@@ -912,10 +912,14 @@ def build_handlers() -> list[tuple[str, list[str]]]:
         # Keep the conditional target local: CBZ/CBNZ reaches only +/-1 MiB,
         # while the expanded signed handler text is intentionally larger.
         "    cbnz x15, 1f",
+        "    ldr x9, [sp, #96]",
+        "    cbnz x9, 2f",
         "    b .La64s_exit",
         "1:",
         "    mov x13, x14",
         *next_dispatch(),
+        "2:",
+        "    b .La64s_chain_advance",
     ]))
 
     for name, mnemonic in (
@@ -1197,13 +1201,16 @@ def render() -> str:
         ".type A64S_CSYM(a64_static_execute), %function",
         "#endif",
         "A64S_CSYM(a64_static_execute):",
-        "    stp x29, x30, [sp, #-96]!",
+        "    stp x29, x30, [sp, #-144]!",
         "    mov x29, sp",
         "    stp x19, x20, [sp, #16]",
         "    stp x21, x22, [sp, #32]",
         "    stp x23, x24, [sp, #48]",
         "    stp x25, x26, [sp, #64]",
         "    stp x27, x28, [sp, #80]",
+        "    str x0, [sp, #104]",
+        "    str x1, [sp, #112]",
+        "    str x2, [sp, #120]",
         "",
         "    ldp w19, w20, [x0, #0]",
         "    ldp w21, w22, [x0, #8]",
@@ -1215,10 +1222,14 @@ def render() -> str:
         "    mov x14, x3",
         "    mov x13, x3",
         "    mov x15, x4",
-        # The ninth AAPCS64 argument lives at the entry SP. The 96-byte
-        # prologue moves that slot to [sp,#96]; it is NULL for the flat proof
-        # and carries both DREAD and VFP live-state pointers in the product.
-        "    ldr x3, [sp, #96]",
+        # The ninth and tenth AAPCS64 arguments live at the entry SP. The
+        # 144-byte prologue moves them to [sp,#144] and [sp,#152]. The former
+        # carries DREAD/VFP live-state pointers; the latter is NULL for the
+        # legacy boundary or carries the persistent product-chain context.
+        "    ldr x3, [sp, #144]",
+        "    ldr x9, [sp, #152]",
+        "    str x9, [sp, #96]",
+        "    str x3, [sp, #128]",
         # ADR also reaches only +/-1 MiB. Use the platform's page-relative
         # relocation spelling so handler growth cannot invalidate the entry.
         "#if defined(__APPLE__)",
@@ -1256,6 +1267,63 @@ def render() -> str:
         "    ldur w12, [x13, #-8]",
         "    ubfx w17, w16, #8, #8",
         "    msr nzcv, x7",
+        "    ldr x9, [sp, #96]",
+        "    cbz x9, .La64s_save",
+        "    mrs x10, nzcv",
+        "    str x10, [sp, #136]",
+        "    mov x0, x9",
+        "    sub w1, w17, #1",
+        "    mov w2, w12",
+        "    bl A64S_CSYM(a64_static_chain_partial)",
+        "    ldr x9, [sp, #96]",
+        "    ldr w12, [x9, #60]",
+        "    ldr x0, [sp, #104]",
+        "    ldr x1, [sp, #112]",
+        "    ldr x10, [sp, #136]",
+        "    msr nzcv, x10",
+        "    mov w17, wzr",
+        "    b .La64s_save",
+        "",
+        ".La64s_terminal_exit:",
+        "    ldr x9, [sp, #96]",
+        "    cbnz x9, .La64s_chain_advance",
+        "    b .La64s_exit",
+        "",
+        ".La64s_chain_advance:",
+        "    mrs x9, nzcv",
+        "    str x9, [sp, #136]",
+        "    ldr x0, [sp, #96]",
+        "    mov w1, w12",
+        "    bl A64S_CSYM(a64_static_chain_advance)",
+        "    cbz x0, .La64s_chain_stop",
+        "    ldr x13, [x0, #0]",
+        "    mov x14, x13",
+        "    mov x15, #1",
+        "    ldr x9, [sp, #96]",
+        "    ldr w11, [x9, #40]",
+        "    ldr x0, [sp, #104]",
+        "    ldr x1, [sp, #112]",
+        "    ldr x2, [sp, #120]",
+        "    ldr x3, [sp, #128]",
+        "    ldr x9, [sp, #136]",
+        "    msr nzcv, x9",
+        "#if defined(__APPLE__)",
+        "    adrp x8, .La64s_table@PAGE",
+        "    add x8, x8, .La64s_table@PAGEOFF",
+        "#else",
+        "    adrp x8, .La64s_table",
+        "    add x8, x8, :lo12:.La64s_table",
+        "#endif",
+        *next_dispatch(),
+        "",
+        ".La64s_chain_stop:",
+        "    ldr x9, [sp, #96]",
+        "    ldr w12, [x9, #60]",
+        "    ldr x0, [sp, #104]",
+        "    ldr x1, [sp, #112]",
+        "    ldr x9, [sp, #136]",
+        "    msr nzcv, x9",
+        "    mov w17, wzr",
         "    b .La64s_save",
         "",
         ".La64s_exit:",
@@ -1279,7 +1347,7 @@ def render() -> str:
         "    ldp x23, x24, [sp, #48]",
         "    ldp x21, x22, [sp, #32]",
         "    ldp x19, x20, [sp, #16]",
-        "    ldp x29, x30, [sp], #96",
+        "    ldp x29, x30, [sp], #144",
         "    mov w0, w17",
         "    ret",
         "#if !defined(__APPLE__)",

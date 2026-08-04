@@ -46,6 +46,12 @@ typedef struct {
     bool vfp;
 } a64_static_block_t;
 
+/* A product chain validates its next guest PC outside the generated handler
+ * text. The callback may return only an immutable block owned by its caller;
+ * NULL ends the chain after the block that just completed. */
+typedef const a64_static_block_t *(*a64_static_chain_next_fn)(
+    void *opaque, uint32_t pc, unsigned remaining);
+
 /* Decode one host-native uint32_t/uint16_t instruction array beginning at
  * `pc`. A terminal A32 immediate B/BL may target any word-aligned address.
  * Conditional branches and every BL carry both their taken target and natural
@@ -119,5 +125,21 @@ bool a64_static_run_read_hits_decoded(arm_cpu_t *cpu,
                                       const a64_static_block_t *block,
                                       uint8_t *ram, size_t ram_size,
                                       unsigned *completed);
+
+/* Execute one or more product-decoded blocks while keeping the pinned guest
+ * register context live inside the signed function. `first` has already been
+ * selected for cpu->r[15]. After each full block, `next` must repeat the
+ * product's interrupt/fetch/cache/raw-byte checks and may select a block no
+ * longer than `remaining`. The total never exceeds `budget`. Runtime read/VFP
+ * guard misses stop at the exact completed prefix; false is reserved for a
+ * pre-execution contract refusal and leaves guest state unchanged. `blocks`
+ * counts only block entries that retired at least one instruction. */
+bool a64_static_run_read_hits_chain(arm_cpu_t *cpu,
+                                    const a64_static_block_t *first,
+                                    uint8_t *ram, size_t ram_size,
+                                    unsigned budget,
+                                    a64_static_chain_next_fn next,
+                                    void *opaque, unsigned *completed,
+                                    unsigned *blocks);
 
 #endif /* S5LBOX_A64_STATIC_H */

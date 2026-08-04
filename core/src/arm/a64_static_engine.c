@@ -36,8 +36,10 @@ typedef struct {
 
 typedef struct {
     bool enabled;
+    bool persistent;
     uint64_t retired;
     uint64_t chained_blocks;
+    uint64_t persistent_chained_blocks;
     static_a64_entry_t cache[STATIC_A64_CACHE_ENTRIES];
 } static_a64_state_t;
 
@@ -95,6 +97,82 @@ static void decode_entry(static_a64_entry_t *entry, const arm_cpu_t *cpu,
         return;
     }
 }
+
+typedef struct {
+    static_a64_state_t *state;
+    s5l8900_t *machine;
+    uint32_t fetch_block;
+    a64_static_block_t bounded_block;
+    static_a64_entry_t *last_entry;
+} static_a64_chain_context_t;
+
+static const a64_static_block_t *select_persistent_block(
+    static_a64_chain_context_t *context, uint32_t pc, unsigned remaining) {
+    s5l8900_t *m;
+    arm_cpu_t *cpu;
+    uint32_t fetch_block;
+    unsigned width;
+    unsigned offset;
+    unsigned candidate_insns;
+    unsigned raw_len;
+    bool thumb;
+    bool priv;
+    const uint8_t *bytes;
+    static_a64_entry_t *entry;
+
+    if (!context || !remaining) return NULL;
+    m = context->machine;
+    cpu = &m->cpu;
+
+    /* This is the same fail-closed head contract as the legacy C loop. Guest
+     * general registers/NZCV remain pinned across this callback, so selection
+     * deliberately consults only state that the signed subset cannot mutate. */
+    if (cpu->arch != ARM_ARCH_V6_ARM1176 ||
+        !arm_mode_is_valid(cpu->cpsr) || cpu->abort_pending ||
+        (cpu->fiq_line && !(cpu->cpsr & ARM_CPSR_F)) ||
+        (cpu->irq_line && !(cpu->cpsr & ARM_CPSR_I)))
+        return NULL;
+
+    thumb = (cpu->cpsr & ARM_CPSR_T) != 0u;
+    priv = (cpu->cpsr & ARM_CPSR_MODE_MASK) != ARM_MODE_USR;
+    width = thumb ? 2u : 4u;
+    if ((pc & (width - 1u)) != 0u) return NULL;
+    fetch_block = pc & ~UINT32_C(0x3ff);
+    if (fetch_block != context->fetch_block || !cpu->fetch_host ||
+        cpu->fetch_blk != fetch_block || cpu->fetch_gen != cpu->tlb_gen ||
+        cpu->fetch_priv != priv)
+        return NULL;
+
+    offset = pc - fetch_block;
+    candidate_insns = (0x400u - offset) / width;
+    if (candidate_insns > A64_STATIC_MAX_INSNS)
+        candidate_insns = A64_STATIC_MAX_INSNS;
+    if (!candidate_insns) return NULL;
+    raw_len = candidate_insns * width;
+    bytes = cpu->fetch_host + offset;
+
+    entry = &context->state->cache[
+        cache_index(pc, thumb, cpu->fetch_gen)];
+    if (!entry_matches(entry, cpu, bytes, pc, thumb, priv, raw_len))
+        decode_entry(entry, cpu, bytes, pc, thumb, priv,
+                     candidate_insns, raw_len);
+    context->last_entry = entry;
+    if (!entry->supported) return NULL;
+    if (entry->block.insn_count <= remaining) return &entry->block;
+
+    /* A bounded prefix lives in the persistent invocation's outer C frame;
+     * the next callback cannot overwrite it until this block has completed. */
+    if (!decode_longest(bytes, remaining, thumb, pc,
+                        &context->bounded_block))
+        return NULL;
+    return &context->bounded_block;
+}
+
+static const a64_static_block_t *persistent_next(void *opaque, uint32_t pc,
+                                                 unsigned remaining) {
+    return select_persistent_block(
+        (static_a64_chain_context_t *)opaque, pc, remaining);
+}
 #endif
 
 bool s5l8900_static_a64_available(void) {
@@ -127,6 +205,24 @@ bool s5l8900_static_a64_set_enabled(s5l8900_t *m, bool enabled) {
 #endif
 }
 
+bool s5l8900_static_a64_set_persistent(s5l8900_t *m, bool enabled) {
+    if (!m) return false;
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    static_a64_state_t *state = static_state(m);
+    if (!enabled) {
+        if (state) state->persistent = false;
+        return true;
+    }
+    if (!state || !state->enabled || !a64_static_host_available())
+        return false;
+    state->persistent = true;
+    return true;
+#else
+    (void)enabled;
+    return false;
+#endif
+}
+
 uint64_t s5l8900_static_a64_retired(const s5l8900_t *m) {
 #if defined(S5LBOX_STATIC_A64_ENGINE)
     const static_a64_state_t *state = static_state(m);
@@ -147,6 +243,48 @@ uint64_t s5l8900_static_a64_chained_blocks(const s5l8900_t *m) {
 #endif
 }
 
+uint64_t s5l8900_static_a64_persistent_chained_blocks(const s5l8900_t *m) {
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    const static_a64_state_t *state = static_state(m);
+    return state ? state->persistent_chained_blocks : 0u;
+#else
+    (void)m;
+    return 0u;
+#endif
+}
+
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+static unsigned try_persistent(s5l8900_t *m, static_a64_state_t *state,
+                               unsigned budget) {
+    arm_cpu_t *cpu = &m->cpu;
+    static_a64_chain_context_t context = {
+        .state = state,
+        .machine = m,
+        .fetch_block = cpu->r[15] & ~UINT32_C(0x3ff)
+    };
+    const a64_static_block_t *first =
+        select_persistent_block(&context, cpu->r[15], budget);
+    unsigned completed = 0u;
+    unsigned blocks = 0u;
+
+    if (!first) return 0u;
+    if (!a64_static_run_read_hits_chain(cpu, first, m->ram, m->ram_size,
+                                        budget, persistent_next, &context,
+                                        &completed, &blocks)) {
+        /* A pre-execution contract mismatch must not become a sticky cache
+         * hit. Runtime read/VFP misses are successful exact-prefix returns. */
+        if (context.last_entry) context.last_entry->valid = false;
+        return 0u;
+    }
+    state->retired += completed;
+    if (blocks > 1u) {
+        state->chained_blocks += blocks - 1u;
+        state->persistent_chained_blocks += blocks - 1u;
+    }
+    return completed;
+}
+#endif
+
 unsigned s5l8900_static_a64_try(s5l8900_t *m, unsigned max_insns) {
 #if defined(S5LBOX_STATIC_A64_ENGINE)
     static_a64_state_t *state = static_state(m);
@@ -163,6 +301,7 @@ unsigned s5l8900_static_a64_try(s5l8900_t *m, unsigned max_insns) {
     cpu = &m->cpu;
     budget = max_insns < STATIC_A64_CHAIN_INSNS
            ? max_insns : STATIC_A64_CHAIN_INSNS;
+    if (state->persistent) return try_persistent(m, state, budget);
 
     while (retired < budget) {
         uint32_t pc;

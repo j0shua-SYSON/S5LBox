@@ -196,9 +196,9 @@ jobs:
             fi
             grep -Fq 'code buffer policy: MAP_JIT + pthread_jit_write_protect_np' <<<"$output"
             grep -Eq '[1-9][0-9]* passed, 0 failed' <<<"$output"
-            grep -Eq 'STATIC-A64-SOC-ORACLE exact=yes retired=[1-9][0-9]* smc=yes decoded=yes' <<<"$soc_output"
-            grep -Eq 'STATIC-A64-BRANCH-SOC-ORACLE exact=yes retired=[1-9][0-9]* chains=[1-9][0-9]* conditional=yes link=yes taken=yes fallthrough=yes' <<<"$soc_output"
-            grep -Fq 'STATIC-A64-CHAIN-BOUND-ORACLE exact=yes one-retired=1 one-chains=0 sixteen-retired=16 sixteen-chains=15' <<<"$soc_output"
+            grep -Eq 'STATIC-A64-SOC-ORACLE exact=yes retired=[1-9][0-9]* smc=yes decoded=yes persistent=yes' <<<"$soc_output"
+            grep -Eq 'STATIC-A64-BRANCH-SOC-ORACLE exact=yes retired=[1-9][0-9]* chains=[1-9][0-9]* conditional=yes link=yes taken=yes fallthrough=yes persistent=yes' <<<"$soc_output"
+            grep -Fq 'STATIC-A64-CHAIN-BOUND-ORACLE exact=yes one-retired=1 one-chains=0 sixteen-retired=16 sixteen-chains=15 persistent-chains=15' <<<"$soc_output"
             grep -Eq 'STATIC-A64-VFP-REGISTER-ORACLE exact=yes retired=[1-9][0-9]* compare=yes widen=yes' <<<"$soc_output"
             grep -Eq 'STATIC-A64-VFP-READ-ORACLE exact=yes retired=[1-9][0-9]* cold-fill=yes double=yes' <<<"$soc_output"
             grep -Eq 'STATIC-A64-THUMB-ORACLE exact=yes retired=[1-9][0-9]*' <<<"$soc_output"

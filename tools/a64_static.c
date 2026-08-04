@@ -1014,8 +1014,37 @@ extern int a64_static_execute(uint32_t *regs, uint32_t *cpsr,
                               const a64_static_uop_t *uops,
                               uint64_t blocks, uint8_t *ram,
                               uint64_t ram_mask, uint64_t block_insns,
-                              const a64_static_read_context_t *read_context);
+                              const a64_static_read_context_t *read_context,
+                              void *chain_context);
 #endif
+
+typedef struct {
+    const a64_static_uop_t *uops;
+    uint64_t insns;
+} a64_static_chain_step_t;
+
+typedef struct {
+    a64_static_chain_step_t step;
+    a64_static_chain_next_fn next;
+    void *opaque;
+    uint64_t *cycles;
+    uint64_t ram_mask;
+    uint32_t budget;
+    uint32_t completed;
+    uint32_t blocks;
+    uint32_t final_pc;
+    bool thumb;
+} a64_static_chain_context_t;
+
+/* These offsets are consumed by the build-time assembly generator. Keep the
+ * static assertions beside the C layout so an ABI drift is a build failure,
+ * not silent guest-state corruption. */
+_Static_assert(offsetof(a64_static_chain_context_t, step) == 0u,
+               "chain step ABI offset");
+_Static_assert(offsetof(a64_static_chain_context_t, ram_mask) == 40u,
+               "chain RAM-mask ABI offset");
+_Static_assert(offsetof(a64_static_chain_context_t, final_pc) == 60u,
+               "chain final-PC ABI offset");
 
 typedef enum {
     A64S_RUN_FLAT,
@@ -1156,7 +1185,7 @@ bool a64_static_run(arm_cpu_t *cpu, const a64_static_block_t *block,
     return a64_static_execute(cpu->r, &cpu->cpsr, &cpu->cycles,
                               block->uops, blocks, ram,
                               (uint64_t)ram_size - 1u,
-                              block->insn_count, NULL) == 0;
+                              block->insn_count, NULL, NULL) == 0;
 #else
     (void)blocks;
     return false;
@@ -1181,7 +1210,7 @@ static bool execute_read_hits(arm_cpu_t *cpu,
     int result = a64_static_execute(cpu->r, &cpu->cpsr, &cpu->cycles,
                                     block->uops, 1u, ram,
                                     (uint64_t)ram_size - 1u,
-                                    block->insn_count, &context);
+                                    block->insn_count, &context, NULL);
     if (result < 0 || (unsigned)result > block->insn_count)
         return false;
     *completed = result == 0 ? block->insn_count : (unsigned)result - 1u;
@@ -1207,21 +1236,18 @@ bool a64_static_run_read_hits(arm_cpu_t *cpu,
     return execute_read_hits(cpu, block, ram, ram_size, completed);
 }
 
-bool a64_static_run_read_hits_decoded(arm_cpu_t *cpu,
-                                      const a64_static_block_t *block,
-                                      uint8_t *ram, size_t ram_size,
-                                      unsigned *completed) {
+static bool validate_decoded_read_hits_at(const a64_static_block_t *block,
+                                          uint32_t pc, bool thumb,
+                                          unsigned remaining) {
     bool terminal_dynamic;
-    if (!cpu || !block || !ram || !completed || !block->insn_count ||
+    if (!block || !remaining || !block->insn_count ||
+        block->insn_count > remaining ||
         block->insn_count > A64_STATIC_MAX_INSNS || !block->uop_count ||
         block->uop_count > A64_STATIC_MAX_UOPS ||
         block->uops[block->uop_count - 1u].handler != A64S_END ||
         block->uops[block->uop_count - 1u].immediate != block->exit_pc ||
-        cpu->r[15] != block->start_pc ||
-        ((cpu->cpsr & ARM_CPSR_T) != 0u) != block->thumb ||
-        (block->touches_memory && !block->direct_reads) || !ram_size ||
-        (ram_size & (ram_size - 1u)) != 0u ||
-        ram_size - 1u > UINT32_MAX)
+        pc != block->start_pc || thumb != block->thumb ||
+        (block->touches_memory && !block->direct_reads))
         return false;
     terminal_dynamic = block->uop_count > 1u &&
         handler_is_terminal_branch(
@@ -1232,7 +1258,117 @@ bool a64_static_run_read_hits_decoded(arm_cpu_t *cpu,
           (block->uops[block->uop_count - 2u].immediate & 3u) != 0u ||
           block->uops[block->uop_count - 2u].pc_value != block->exit_pc ||
           block->uops[block->uop_count - 2u].metadata != 0u ||
-          block->exit_pc != block->start_pc + block->insn_count * 4u)))
+           block->exit_pc != block->start_pc + block->insn_count * 4u)))
+        return false;
+    return true;
+}
+
+bool a64_static_run_read_hits_decoded(arm_cpu_t *cpu,
+                                      const a64_static_block_t *block,
+                                      uint8_t *ram, size_t ram_size,
+                                      unsigned *completed) {
+    if (!cpu || !ram || !completed || !ram_size ||
+        (ram_size & (ram_size - 1u)) != 0u ||
+        ram_size - 1u > UINT32_MAX ||
+        !validate_decoded_read_hits_at(
+            block, cpu->r[15], (cpu->cpsr & ARM_CPSR_T) != 0u,
+            A64_STATIC_MAX_INSNS))
         return false;
     return execute_read_hits(cpu, block, ram, ram_size, completed);
+}
+
+#if defined(S5LBOX_STATIC_A64_NATIVE)
+/* Called only from the generated signed function while guest r0-r7/SP remain
+ * pinned in AAPCS64 callee-saved registers. The callback may inspect and update
+ * host decode-cache state, but it cannot see those deliberately unflushed guest
+ * registers and therefore must be limited to head validation/selection. */
+const a64_static_chain_step_t *a64_static_chain_advance(
+    a64_static_chain_context_t *context, uint32_t pc) {
+    const a64_static_block_t *next;
+    unsigned current;
+    unsigned remaining;
+
+    if (!context) return NULL;
+    current = (unsigned)context->step.insns;
+    context->final_pc = pc;
+    if (!current || current > context->budget - context->completed)
+        return NULL;
+    context->completed += current;
+    context->blocks++;
+    remaining = context->budget - context->completed;
+    if (!remaining || !context->next) return NULL;
+
+    next = context->next(context->opaque, pc, remaining);
+    if (!validate_decoded_read_hits_at(next, pc, context->thumb, remaining))
+        return NULL;
+    context->step.uops = next->uops;
+    context->step.insns = next->insn_count;
+    *context->cycles += next->insn_count;
+    return &context->step;
+}
+
+void a64_static_chain_partial(a64_static_chain_context_t *context,
+                              uint32_t completed, uint32_t pc) {
+    if (!context) return;
+    context->final_pc = pc;
+    if (completed > context->step.insns ||
+        completed > context->budget - context->completed)
+        return;
+    context->completed += completed;
+    if (completed) context->blocks++;
+}
+#endif
+
+bool a64_static_run_read_hits_chain(arm_cpu_t *cpu,
+                                    const a64_static_block_t *first,
+                                    uint8_t *ram, size_t ram_size,
+                                    unsigned budget,
+                                    a64_static_chain_next_fn next,
+                                    void *opaque, unsigned *completed,
+                                    unsigned *blocks) {
+    if (!completed || !blocks) return false;
+    *completed = 0u;
+    *blocks = 0u;
+    if (!cpu || !ram || !budget ||
+        budget > A64_STATIC_MAX_INSNS || !ram_size ||
+        (ram_size & (ram_size - 1u)) != 0u ||
+        ram_size - 1u > UINT32_MAX ||
+        !validate_decoded_read_hits_at(
+            first, cpu->r[15], (cpu->cpsr & ARM_CPSR_T) != 0u, budget))
+        return false;
+#if defined(S5LBOX_STATIC_A64_NATIVE)
+    a64_static_read_context_t read_context = {
+        cpu->dread,
+        &cpu->dread_hits,
+        cpu->tlb_gen,
+        (cpu->cpsr & ARM_CPSR_MODE_MASK) != ARM_MODE_USR ? 1u : 0u,
+        cpu->vfp_s,
+        &cpu->vfp_fpexc,
+        &cpu->vfp_fpscr,
+        vfp_cpacr_permits(cpu) ? 1u : 0u
+    };
+    a64_static_chain_context_t context = {
+        .step = { first->uops, first->insn_count },
+        .next = next,
+        .opaque = opaque,
+        .cycles = &cpu->cycles,
+        .ram_mask = (uint64_t)ram_size - 1u,
+        .budget = budget,
+        .final_pc = cpu->r[15],
+        .thumb = (cpu->cpsr & ARM_CPSR_T) != 0u
+    };
+    int result = a64_static_execute(cpu->r, &cpu->cpsr, &cpu->cycles,
+                                    first->uops, 1u, ram,
+                                    (uint64_t)ram_size - 1u,
+                                    first->insn_count, &read_context, &context);
+    if (result < 0) return false;
+    *completed = context.completed;
+    *blocks = context.blocks;
+    return true;
+#else
+    (void)first;
+    (void)next;
+    (void)opaque;
+    return false;
+#endif
 }

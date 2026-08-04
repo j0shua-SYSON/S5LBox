@@ -3138,6 +3138,8 @@ static void test_signed_static_a64_soc_oracle(void) {
 
     CHECK(s5l8900_static_a64_set_enabled(&fast, true),
           "signed engine refused an available host");
+    CHECK(s5l8900_static_a64_set_persistent(&fast, true),
+          "persistent signed engine refused an available host");
     CHECK(s5l8900_run(&fast, 20000u, &fast_status) == 20000u,
           "signed run stopped early with status=%d", (int)fast_status);
     CHECK(s5l8900_run(&reference, 20000u, &reference_status) == 20000u,
@@ -3194,7 +3196,7 @@ static void test_signed_static_a64_soc_oracle(void) {
         memcmp(fast_snapshot, reference_snapshot, fast_len) == 0 &&
         s5l8900_static_a64_retired(&fast) != 0u) {
         printf("  STATIC-A64-SOC-ORACLE exact=yes retired=%llu "
-               "smc=yes decoded=yes\n",
+               "smc=yes decoded=yes persistent=yes\n",
                (unsigned long long)s5l8900_static_a64_retired(&fast));
     }
 
@@ -3241,6 +3243,7 @@ static void test_signed_static_a64_branch_oracle(void) {
     bool reference_ok;
     uint64_t retired;
     uint64_t chains;
+    uint64_t persistent_chains;
 
     if (!s5l8900_static_a64_available()) {
         printf("  STATIC-A64-BRANCH-SOC-ORACLE SKIP: no signed AArch64 "
@@ -3264,6 +3267,8 @@ static void test_signed_static_a64_branch_oracle(void) {
 
     CHECK(s5l8900_static_a64_set_enabled(&fast, true),
           "signed engine refused an available host");
+    CHECK(s5l8900_static_a64_set_persistent(&fast, true),
+          "persistent branch engine refused an available host");
     CHECK(s5l8900_run(&fast, total, &fast_status) == total,
           "signed branch run stopped early with status=%d", (int)fast_status);
     CHECK(s5l8900_run(&reference, total, &reference_status) == total,
@@ -3272,10 +3277,16 @@ static void test_signed_static_a64_branch_oracle(void) {
 
     retired = s5l8900_static_a64_retired(&fast);
     chains = s5l8900_static_a64_chained_blocks(&fast);
+    persistent_chains =
+        s5l8900_static_a64_persistent_chained_blocks(&fast);
     CHECK(retired > total * 3u / 4u,
           "signed branch loop retired only %llu/%llu instructions",
           (unsigned long long)retired, (unsigned long long)total);
     CHECK(chains != 0u, "signed branch loop chained no target blocks");
+    CHECK(persistent_chains == chains,
+          "persistent/total branch chains differ: %llu/%llu",
+          (unsigned long long)persistent_chains,
+          (unsigned long long)chains);
     CHECK(fast_status == reference_status,
           "status differs: signed=%d reference=%d",
           (int)fast_status, (int)reference_status);
@@ -3295,10 +3306,11 @@ static void test_signed_static_a64_branch_oracle(void) {
 
     if (fast_snapshot && reference_snapshot && fast_len == reference_len &&
         memcmp(fast_snapshot, reference_snapshot, fast_len) == 0 &&
-        retired > total * 3u / 4u && chains != 0u) {
+        retired > total * 3u / 4u && chains != 0u &&
+        persistent_chains == chains) {
         printf("  STATIC-A64-BRANCH-SOC-ORACLE exact=yes retired=%llu "
                "chains=%llu conditional=yes link=yes taken=yes "
-               "fallthrough=yes\n",
+               "fallthrough=yes persistent=yes\n",
                (unsigned long long)retired,
                (unsigned long long)chains);
     }
@@ -3355,9 +3367,13 @@ static void test_signed_static_a64_chain_bound_oracle(void) {
           "chain-bound reference warm-up stopped early");
     CHECK(s5l8900_static_a64_set_enabled(&fast, true),
           "chain-bound signed engine refused an available host");
+    CHECK(s5l8900_static_a64_set_persistent(&fast, true),
+          "chain-bound persistent engine refused an available host");
 
     uint64_t retired_before = s5l8900_static_a64_retired(&fast);
     uint64_t chains_before = s5l8900_static_a64_chained_blocks(&fast);
+    uint64_t persistent_before =
+        s5l8900_static_a64_persistent_chained_blocks(&fast);
     CHECK(s5l8900_run(&fast, 1u, &fast_status) == 1u,
           "one-step signed chain-bound run stopped early");
     CHECK(s5l8900_run(&reference, 1u, &reference_status) == 1u,
@@ -3366,13 +3382,20 @@ static void test_signed_static_a64_chain_bound_oracle(void) {
         s5l8900_static_a64_retired(&fast) - retired_before;
     uint64_t one_chains =
         s5l8900_static_a64_chained_blocks(&fast) - chains_before;
-    CHECK(one_retired == 1u && one_chains == 0u,
-          "one-step bound retired/chained %llu/%llu, expected 1/0",
+    uint64_t one_persistent =
+        s5l8900_static_a64_persistent_chained_blocks(&fast) -
+        persistent_before;
+    CHECK(one_retired == 1u && one_chains == 0u && one_persistent == 0u,
+          "one-step bound retired/chained/persistent %llu/%llu/%llu, "
+          "expected 1/0/0",
           (unsigned long long)one_retired,
-          (unsigned long long)one_chains);
+          (unsigned long long)one_chains,
+          (unsigned long long)one_persistent);
 
     retired_before = s5l8900_static_a64_retired(&fast);
     chains_before = s5l8900_static_a64_chained_blocks(&fast);
+    persistent_before =
+        s5l8900_static_a64_persistent_chained_blocks(&fast);
     CHECK(s5l8900_run(&fast, 16u, &fast_status) == 16u,
           "sixteen-step signed chain-bound run stopped early");
     CHECK(s5l8900_run(&reference, 16u, &reference_status) == 16u,
@@ -3381,10 +3404,16 @@ static void test_signed_static_a64_chain_bound_oracle(void) {
         s5l8900_static_a64_retired(&fast) - retired_before;
     uint64_t sixteen_chains =
         s5l8900_static_a64_chained_blocks(&fast) - chains_before;
-    CHECK(sixteen_retired == 16u && sixteen_chains == 15u,
-          "sixteen-step bound retired/chained %llu/%llu, expected 16/15",
+    uint64_t sixteen_persistent =
+        s5l8900_static_a64_persistent_chained_blocks(&fast) -
+        persistent_before;
+    CHECK(sixteen_retired == 16u && sixteen_chains == 15u &&
+          sixteen_persistent == 15u,
+          "sixteen-step bound retired/chained/persistent %llu/%llu/%llu, "
+          "expected 16/15/15",
           (unsigned long long)sixteen_retired,
-          (unsigned long long)sixteen_chains);
+          (unsigned long long)sixteen_chains,
+          (unsigned long long)sixteen_persistent);
     CHECK(fast_status == reference_status,
           "chain-bound status differs: signed=%d reference=%d",
           (int)fast_status, (int)reference_status);
@@ -3405,10 +3434,11 @@ static void test_signed_static_a64_chain_bound_oracle(void) {
     CHECK(exact, "signed and reference chain-bound snapshots differ");
 
     if (exact && one_retired == 1u && one_chains == 0u &&
-        sixteen_retired == 16u && sixteen_chains == 15u) {
+        one_persistent == 0u && sixteen_retired == 16u &&
+        sixteen_chains == 15u && sixteen_persistent == 15u) {
         printf("  STATIC-A64-CHAIN-BOUND-ORACLE exact=yes "
                "one-retired=1 one-chains=0 sixteen-retired=16 "
-               "sixteen-chains=15\n");
+               "sixteen-chains=15 persistent-chains=15\n");
     }
 
     free(fast_snapshot);
