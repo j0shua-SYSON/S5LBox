@@ -100,8 +100,9 @@ are deterministic apart from that one contact, so the tap is what dismissed it.
   roughly **0–4 fps**. That is a field observation, not yet an exact-SHA,
   counter-backed benchmark, but it is the only phone result and it is far below
   the target. The latest exact-SHA IPA now contains and automatically enables
-  the generic no-JIT signed-graph engine, but that IPA has not been installed
-  and measured on a physical phone. r461/r463's direct restored desktop meter
+  the no-JIT signed-graph engine with total invocations extended to the first
+  modeled timebase edge, but that IPA has not been installed and measured on a
+  physical phone. r461/r463's direct restored desktop meter
   observed only
   **10.816–11.449 changed scanouts/s on average**, with no window at 30. It does
   not include UIKit drawing and must not be presented as iOS-device FPS. See
@@ -140,7 +141,7 @@ userspace received the framebuffer read-only and faulted on its first store.*
 | **Hidden from the guest by default** | SHA-1 acceleration, cellular/baseband transport and USB are deliberately declared absent by editing only the in-memory device tree, because their rows name measured boot failures. MBX is also hidden in the accepted default, but is now an opt-in experiment rather than an unmodelled register hole. The firmware files on disk are never modified. |
 | **Invented register values** | The USB controller's three configuration registers (`GHWCFG1`/`GHWCFG2`/`GHWCFG4`) hold a legal and sufficient configuration. They are **not** measured from real S5L8900 silicon. This is one of the two exceptions the networking row above draws its line around: three constants, named here so nobody has to discover them, and replaceable the day somebody reads the real part. |
 | **Rendering** | The accepted default sets `CA_ENABLE_MBX2D=0` in a new work image so QuartzCore uses Apple's CPU renderer. The experimental path leaves MBX matched and now completes a live interval of 1,388/1,388 2D jobs and 8,888/8,888 3D renders with zero decoder rejection or recovery. That interval is checkpoint-derived; final cold-boot and 30 fps acceptance are still open, so MBX is not silently promoted to the default. |
-| **Speed** | Not cycle-accurate and not yet 30 fps. r458's symmetric live SpringBoard A/B measured **15.694844 M instructions/s** for the desktop app-equivalent core loop versus 14.854045 M/s for its baseline, a repeatable +5.66%. r461/r463 then measured execution and publication together on one restored MBX workload: **10.816–11.449 changed scanouts/s on average**, zero windows at 30, and a stable mean of about 1.143 M retired instructions per detected change. Holding that cadence fixed projects roughly **34.3 Minsn/s**, or **2.725x** the metered desktop mean, for 30 changes/s. The latest iOS IPA links and automatically enables a generic build-time-signed, callback-free AArch64 graph engine without a JIT. Its exact Apple-host synthetic curve materially improves short signed blocks; applying that curve to an older restored histogram gives only a deliberately naive **17.0–18.3 changed scanouts/s**, still below 30 and explicitly not phone FPS. The new IPA has not been measured on a phone. The currently installed phone app is reported at roughly **0–4 fps**, so that remains the honest device result. The guest clock still uses an invented 412 MHz : 6 MHz instruction-to-tick ratio rather than cycle timing. |
+| **Speed** | Not cycle-accurate and not yet 30 fps. r458's symmetric live SpringBoard A/B measured **15.694844 M instructions/s** for the desktop app-equivalent core loop versus 14.854045 M/s for its baseline, a repeatable +5.66%. r461/r463 then measured execution and publication together on one restored MBX workload: **10.816–11.449 changed scanouts/s on average**, zero windows at 30, and a stable mean of about 1.143 M retired instructions per detected change. Holding that cadence fixed projects roughly **34.3 Minsn/s**, or **2.725x** the metered desktop mean, for 30 changes/s. The latest iOS IPA links and automatically enables a build-time-signed, callback-free AArch64 graph engine without a JIT, and now lets one invocation continue across decoded heads until the first modeled timebase edge instead of stopping at sixteen instructions. In same-binary 20 M-instruction tests through the complete `s5l8900_run()` path, the extended path beat the old graph at all sixteen tested block lengths: geometric mean **1.483x** on macOS 14 arm64 and **1.440x** on macOS 15 arm64. This supersedes the older 17.0–18.3 scanout extrapolation, which mixed an obsolete graph curve with a different restored histogram and was never a forecast. The new IPA has not been measured on a phone; firmware mix, MMU, devices, framebuffer publication and UIKit are absent from the synthetic test. The currently installed phone app is reported at roughly **0–4 fps**, so that remains the honest device result. The guest clock still uses an invented 412 MHz : 6 MHz instruction-to-tick ratio rather than cycle timing. |
 | **Kernel patches** | The kernel is modified in memory as it loads: a real-time-clock timeout is forced to zero, the root-device lookup is redirected to the emulator's fake disk, and hooks are installed so the guest's disk access reaches the host. Applied only after checking a SHA-256 hash and a nine-segment layout check of the exact 7,942,144-byte kernel. |
 | **Storage** | Not flash memory. The desktop harness can create a fresh writable work image per run; the app keeps one persistent work image per machine. Snapshot storage and copy-on-write layers exist and are host-tested, but the current app controller still refuses Take/Open because their lifecycle wiring is unfinished, so app snapshots are not claimed working. The canonical imported root filesystem is read-only. |
 | **Boot chain** | No secure boot chain is executed. The kernel is loaded directly; the boot ROM, the low-level bootloader and iBoot are not run. Apple's firmware container format has been parsed and an extracted bootloader payload executed, but separately, never as a chain. |
@@ -261,12 +262,14 @@ shell is Apple-specific. Detail in
 The runtime-code-generating translator still exists and is tested, but the boot
 loop does not call it and the iOS app excludes it. Stock iOS does not generally
 grant JIT execution, and the 30 fps target must be met without it. Separately,
-the app now links and automatically enables a generic build-time-signed AArch64
-semantic engine. Its callback-free graph dispatches predecoded data records into
-ordinary code signed with the app; it creates no executable code or writable
-executable page at runtime. Exact Apple-host synthetic tests show a real gain,
-especially for the one- and two-instruction blocks that dominate the measured
-signed subset. No physical-phone run has yet measured this exact IPA, however.
+the app now links and automatically enables a build-time-signed AArch64 semantic
+engine. Its callback-free graph dispatches predecoded data records into ordinary
+code signed with the app; it creates no executable code or writable executable
+page at runtime. Individual decoded heads remain capped at sixteen instructions,
+but an exact invocation can cross validated heads until the first modeled
+timebase edge. Same-binary Apple-host tests through the complete SoC run API show
+a broad 1.440x–1.483x geometric-mean gain over the old sixteen-instruction graph.
+No physical-phone run has yet measured this exact IPA, however.
 The best restored desktop publication measurement remains 10.816–11.449 changed
 scanouts/s with no 30 fps window, and the only phone report remains roughly
 0–4 fps without an exact-build execution/publication breakdown.

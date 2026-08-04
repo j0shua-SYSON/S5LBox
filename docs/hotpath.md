@@ -6272,3 +6272,71 @@ only device observation remains roughly 0--4 FPS. The useful conclusion is struc
 record-level fusion is not the next lever. The next gate must amortize or remove a larger boundary,
 such as the current total signed-invocation bound, while preserving the exact first timebase edge;
 otherwise it is another dispatch micro-optimization hidden under the same dominant costs.
+
+### 2026-08-04: timebase-bounded graph invocations win broadly and enter the app
+
+The next audit found a structural mismatch rather than another missing opcode. A decoded signed
+head could contain at most sixteen instructions, which is a useful cache and witness bound. The
+*entire native invocation* was also capped at sixteen, however. That second limit prevented graph
+chaining exactly when a full first head retired: the length-sixteen benchmark reported zero graph
+transitions even though, with the current invented 412 MHz : 6 MHz instruction-to-tick ratio, the
+first timebase edge can be about 69 instructions away. The graph was paying its outer entry,
+validation and device-time costs again before it could amortize them.
+
+Commit `3b301f9f3efc0a8afab8ef4f67649adffdc256be` separates those contracts. Each decoded
+head remains at most sixteen instructions and retains the same raw-byte witness, fetch-block,
+interrupt, MMU and dynamic-exit gates. The generic engine still defaults to a sixteen-instruction
+total, while a same-binary experimental setting permits up to 256. `s5l8900_run()` remains the
+ultimate bound: it supplies only the instructions before the first exact modeled timebase edge, so
+the larger ceiling does not skip a device tick. This is still ordinary build-time-signed code: no
+JIT, executable allocation or writable-executable page is involved.
+
+The Apple-only oracle starts two otherwise identical machines at the same zero timebase phase and
+runs a 64-instruction self-branch interval before that first edge. The legacy setting retires only
+sixteen instructions; the extended setting retires all 64 with exactly 63 graph transitions. Both
+machines then serialize byte-identically to the interpreter reference. The focused machine test
+passes 5,832 assertions, both complete local suites pass 60/60, and exact-SHA core run
+`30906989815` is green in all eight jobs. Exact-SHA iOS run `30906989506` builds and packages the
+app.
+
+Commit `de173905da3f10a209b243b15146c6186acb1e16` then makes the exact-gated iOS product
+explicitly select the extended ceiling while leaving the generic engine default unchanged. Product
+initialization fails closed if signed execution, graph execution or the extended bound cannot be
+enabled. Exact-SHA core run `30907692589` is green in all eight jobs and exact-SHA iOS run
+`30907692726` is green and packages the real app. Repeating the 20 M-instruction, three-repetition,
+same-binary comparison at that product SHA gives the following extended/current-graph ratios
+through the complete `s5l8900_run()` path:
+
+| synthetic block length | macOS 14 arm64 | macOS 15 arm64 |
+|---:|---:|---:|
+| 1 | 1.353x | 1.410x |
+| 2 | 1.389x | 1.418x |
+| 3 | 1.468x | 1.460x |
+| 4 | 1.486x | 1.377x |
+| 5 | 1.501x | 1.526x |
+| 6 | 1.600x | 1.417x |
+| 7 | 1.494x | 1.427x |
+| 8 | 1.441x | 1.372x |
+| 9 | 1.719x | 1.653x |
+| 10 | 1.551x | 1.422x |
+| 11 | 1.570x | 1.584x |
+| 12 | 1.479x | 1.483x |
+| 13 | 1.501x | 1.432x |
+| 14 | 1.442x | 1.441x |
+| 15 | 1.410x | 1.369x |
+| 16 | 1.360x | 1.291x |
+| **geometric mean** | **1.483x** | **1.440x** |
+
+All sixteen lengths improve on both hosts; the full observed range is 1.291x--1.719x. Unlike the
+discarded read-fusion result, this gain survives the app-facing SoC boundary and is broad rather
+than tied to one favourable handler sequence. It is the strongest structural no-JIT core result in
+this phase and is therefore enabled in the app.
+
+Brutal status: **this is still not a phone FPS result and it does not prove 30 FPS**. The synthetic
+machines use warm plain RAM with the MMU disabled and omit restored-firmware instruction mix,
+device traffic, framebuffer publication and UIKit. The first timebase edge is exact relative to the
+emulator's current clock model, but that 412:6 ratio is invented rather than measured silicon
+timing. The exact IPA has not yet been installed on a physical iPhone, and the only device
+observation remains roughly 0--4 FPS. The next decisive measurement is that exact IPA; absent a
+device, the restored replay must first measure how often real graph calls can use the newly removed
+boundary before another product optimization is justified.
