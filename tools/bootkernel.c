@@ -24676,10 +24676,13 @@ static const char *status_name(arm_status_t s) {
 #define SEQUENCE_TRACE_HEAD_LEN  16u
 #define SEQUENCE_TRACE_HEAD_LEVEL 2u
 #define SEQUENCE_SIGNED_CAP      16u
+#define SEQUENCE_SIGNED_RECORD_CAP 4u
 
 #if defined(S5LBOX_STATIC_A64_ENGINE)
 _Static_assert(SEQUENCE_SIGNED_CAP == A64_STATIC_MAX_INSNS,
                "sequence model and product signed-block cap disagree");
+_Static_assert(SEQUENCE_SIGNED_RECORD_CAP <= A64_STATIC_MAX_UOPS,
+               "sequence handler-record histogram exceeds product storage");
 #endif
 
 static const unsigned SEQUENCE_TRACE_CAPS[SEQUENCE_TRACE_LEVELS] = {
@@ -24936,6 +24939,20 @@ typedef struct {
                                [SEQUENCE_SIGNED_CAP + 1u];
     uint64_t signed_unique_shapes[SEQUENCE_SIGNED_CAP + 1u]
                                  [SEQUENCE_SIGNED_CAP + 1u];
+    /* Handler records actually reached by modeled retired instructions. A
+     * failed A32 condition reaches only its guard record; the skipped semantic
+     * records are deliberately excluded. Fixed block-END records are counted
+     * separately in the report so terminal branches are not double-counted. */
+    uint64_t signed_handler_records;
+    uint64_t signed_handler_record_hist[SEQUENCE_SIGNED_RECORD_CAP + 1u];
+    uint64_t signed_class_handler_records[SEQUENCE_CLASS_COUNT];
+    uint64_t signed_class_record_hist[SEQUENCE_CLASS_COUNT]
+                                     [SEQUENCE_SIGNED_RECORD_CAP + 1u];
+    uint64_t signed_guard_fusion_ceiling;
+    uint64_t signed_semantic_fusion_ceiling;
+    uint64_t signed_class_guard_fusion_ceiling[SEQUENCE_CLASS_COUNT];
+    uint64_t signed_class_semantic_fusion_ceiling[SEQUENCE_CLASS_COUNT];
+    uint64_t signed_terminal_instructions;
     uint64_t signed_reused_graph_heads;
     uint32_t signed_call_unique_pc[SEQUENCE_SIGNED_CAP];
     bool signed_call_unique_thumb[SEQUENCE_SIGNED_CAP];
@@ -25252,6 +25269,9 @@ static bool sequence_dread_would_hit(const arm_cpu_t *cpu, uint32_t va,
 typedef struct {
     sequence_signed_outcome_t outcome;
     uint32_t exit_pc;
+    unsigned handler_records;
+    unsigned guard_fusion_ceiling;
+    unsigned semantic_fusion_ceiling;
     bool terminal;
 } sequence_signed_classification_t;
 
@@ -25304,7 +25324,7 @@ static bool sequence_vfp_guard_passes(const arm_cpu_t *cpu, uint32_t insn) {
 static sequence_signed_classification_t sequence_signed_classify(
         const arm_cpu_t *cpu, uint32_t pc, uint32_t raw, bool thumb) {
     sequence_signed_classification_t result = {
-        SEQUENCE_SIGNED_REJECTED, 0u, false
+        SEQUENCE_SIGNED_REJECTED, 0u, 0u, 0u, 0u, false
     };
     uint8_t bytes[4] = {
         (uint8_t)raw, (uint8_t)(raw >> 8),
@@ -25317,6 +25337,27 @@ static sequence_signed_classification_t sequence_signed_classify(
         return result;
 
     result.terminal = sequence_signed_terminal(raw, thumb);
+    /* A normal one-instruction decode appends a fixed END record, which is a
+     * block boundary rather than part of that instruction's semantics. An
+     * unconditional B is represented by END itself, while conditional B/BL
+     * uses one terminal handler followed by an unreachable END. Both terminal
+     * shapes therefore reach exactly one instruction-owned record. */
+    result.handler_records = block.uop_count - 1u;
+    if (result.terminal && result.handler_records == 0u)
+        result.handler_records = 1u;
+    if (!result.terminal && !thumb && (raw >> 28) < 14u) {
+        unsigned semantic_records = result.handler_records - 1u;
+        if (!arm_cond_passed(cpu, raw >> 28)) {
+            result.handler_records = 1u;
+        } else {
+            result.guard_fusion_ceiling = 1u;
+            result.semantic_fusion_ceiling =
+                semantic_records > 1u ? semantic_records - 1u : 0u;
+        }
+    } else if (!result.terminal) {
+        result.semantic_fusion_ceiling = result.handler_records > 1u
+            ? result.handler_records - 1u : 0u;
+    }
     if (result.terminal) {
         if (thumb) {
             int32_t displacement =
@@ -25655,9 +25696,30 @@ static bool sequence_signed_observe(sequence_profile_t *profile,
         sequence_signed_note_block_head(profile, pc, thumb);
     }
 
+    if (!classification.handler_records ||
+        classification.handler_records > SEQUENCE_SIGNED_RECORD_CAP) {
+        sequence_signed_close(profile, SEQUENCE_SIGNED_STOP_INELIGIBLE);
+        return classification.outcome == SEQUENCE_SIGNED_REJECTED;
+    }
     profile->signed_call_length++;
     profile->signed_modeled_retired++;
     profile->signed_class_modeled[instruction_class]++;
+    profile->signed_handler_records += classification.handler_records;
+    profile->signed_handler_record_hist[classification.handler_records]++;
+    profile->signed_class_handler_records[instruction_class] +=
+        classification.handler_records;
+    profile->signed_class_record_hist[instruction_class]
+                                     [classification.handler_records]++;
+    profile->signed_guard_fusion_ceiling +=
+        classification.guard_fusion_ceiling;
+    profile->signed_semantic_fusion_ceiling +=
+        classification.semantic_fusion_ceiling;
+    profile->signed_class_guard_fusion_ceiling[instruction_class] +=
+        classification.guard_fusion_ceiling;
+    profile->signed_class_semantic_fusion_ceiling[instruction_class] +=
+        classification.semantic_fusion_ceiling;
+    if (classification.terminal)
+        profile->signed_terminal_instructions++;
     if (chained_head) {
         profile->signed_chain_transitions++;
         profile->signed_call_blocks++;
@@ -27214,6 +27276,119 @@ static void sequence_profile_report(sequence_profile_t *profile) {
                                               profile->signed_chain_transitions &&
                            reusable_heads == profile->signed_reused_graph_heads
                        ? "EXACT" : "MISMATCH");
+        }
+        {
+            uint64_t histogram_instructions = 0u;
+            uint64_t histogram_records = 0u;
+            uint64_t class_instructions = 0u;
+            uint64_t class_records = 0u;
+            bool class_hist_exact = true;
+            bool class_fusion_exact = true;
+            uint64_t block_heads =
+                signed_calls + profile->signed_chain_transitions;
+            bool terminal_exact =
+                profile->signed_terminal_instructions <= block_heads;
+            uint64_t end_records = terminal_exact
+                ? block_heads - profile->signed_terminal_instructions : 0u;
+            uint64_t current_records =
+                profile->signed_handler_records + end_records;
+            uint64_t perfect_records = signed_instructions + end_records;
+            uint64_t removable = current_records >= perfect_records
+                ? current_records - perfect_records : 0u;
+
+            printf("    exact modeled signed handler-dispatch ceiling\n");
+            printf("      Reached records count condition skips exactly; fixed "
+                   "non-terminal END records are separate. The perfect "
+                   "one-record-per-instruction row is an impossible upper "
+                   "bound, not an implementation or speed prediction.\n");
+            printf("      reached-record histogram\n");
+            for (unsigned records = 1u;
+                 records <= SEQUENCE_SIGNED_RECORD_CAP; records++) {
+                uint64_t instructions =
+                    profile->signed_handler_record_hist[records];
+                histogram_instructions += instructions;
+                histogram_records += instructions * records;
+                printf("        records=%u instructions=%10" PRIu64
+                       " modeled-share=%6.3f%%\n",
+                       records, instructions,
+                       signed_instructions
+                           ? 100.0 * (double)instructions /
+                                 (double)signed_instructions
+                           : 0.0);
+            }
+            printf("      per-class reached records and perfect-fusion ceiling\n");
+            printf("        %-28s %10s %12s %12s %10s %10s"
+                   " %10s %10s %10s %10s\n",
+                   "class", "modeled", "records", "removable",
+                   "guard", "semantic", "one", "two", "three", "four");
+            for (unsigned cls = 0u; cls < SEQUENCE_CLASS_COUNT; cls++) {
+                uint64_t instructions =
+                    profile->signed_class_modeled[cls];
+                uint64_t records =
+                    profile->signed_class_handler_records[cls];
+                uint64_t class_removable = records >= instructions
+                    ? records - instructions : 0u;
+                uint64_t class_guard =
+                    profile->signed_class_guard_fusion_ceiling[cls];
+                uint64_t class_semantic =
+                    profile->signed_class_semantic_fusion_ceiling[cls];
+                uint64_t class_hist_instructions = 0u;
+                uint64_t class_hist_records = 0u;
+                for (unsigned count = 1u;
+                     count <= SEQUENCE_SIGNED_RECORD_CAP; count++) {
+                    uint64_t occurrences =
+                        profile->signed_class_record_hist[cls][count];
+                    class_hist_instructions += occurrences;
+                    class_hist_records += occurrences * count;
+                }
+                if (class_hist_instructions != instructions ||
+                    class_hist_records != records)
+                    class_hist_exact = false;
+                if (class_guard + class_semantic != class_removable)
+                    class_fusion_exact = false;
+                class_instructions += instructions;
+                class_records += records;
+                if (!instructions) continue;
+                printf("        %-28s %10" PRIu64 " %12" PRIu64
+                       " %12" PRIu64 " %10" PRIu64 " %10" PRIu64
+                       " %10" PRIu64 " %10" PRIu64 " %10" PRIu64
+                       " %10" PRIu64 "\n",
+                       SEQUENCE_CLASS_NAMES[cls], instructions, records,
+                       class_removable, class_guard, class_semantic,
+                       profile->signed_class_record_hist[cls][1u],
+                       profile->signed_class_record_hist[cls][2u],
+                       profile->signed_class_record_hist[cls][3u],
+                       profile->signed_class_record_hist[cls][4u]);
+            }
+            printf("      instructions/reached/end/total=%" PRIu64
+                   "/%" PRIu64 "/%" PRIu64 "/%" PRIu64
+                   " perfect-total/removable=%" PRIu64 "/%" PRIu64
+                   " (%6.3f%%)  %s\n",
+                   signed_instructions, profile->signed_handler_records,
+                   end_records, current_records, perfect_records, removable,
+                   current_records
+                       ? 100.0 * (double)removable /
+                             (double)current_records : 0.0,
+                   terminal_exact &&
+                           histogram_instructions == signed_instructions &&
+                           histogram_records ==
+                               profile->signed_handler_records &&
+                           class_instructions == signed_instructions &&
+                           class_records == profile->signed_handler_records &&
+                           class_hist_exact &&
+                           class_fusion_exact &&
+                           profile->signed_guard_fusion_ceiling +
+                                   profile->signed_semantic_fusion_ceiling ==
+                               removable
+                       ? "EXACT" : "MISMATCH");
+            printf("      removable breakdown condition-guard/semantic="
+                   "%" PRIu64 "/%" PRIu64 "\n",
+                   profile->signed_guard_fusion_ceiling,
+                   profile->signed_semantic_fusion_ceiling);
+            printf("      block-heads/terminal/non-terminal-END=%" PRIu64
+                   "/%" PRIu64 "/%" PRIu64 "\n",
+                   block_heads, profile->signed_terminal_instructions,
+                   end_records);
         }
         printf("    stops cap/timer/caller/branch/flow/fetch-block/"
                "ineligible/observer=%" PRIu64 "/%" PRIu64 "/%" PRIu64
