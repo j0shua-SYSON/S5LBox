@@ -5525,3 +5525,41 @@ gain**, the normal app still builds this engine out, and the phone remains at th
 instructions), whose comparison, NaN, signed-zero, FZ and IOC/IDC behavior can be expressed
 with integer bit logic. Arithmetic and narrowing conversion stay literal until their
 rounding and cumulative-exception behavior is separately proved.
+
+### r504: exact VCMP improves both coverage and continuity, not measured FPS
+
+r504 admits every scalar VFPv2 VCMP/VCMPE register and `#0` form in single and
+double precision. The signed handlers do not use the host floating-point unit.
+They classify and order IEEE-754 encodings with integer operations, including quiet and
+signalling NaNs, infinities, signed zero and FZ input denormals; they overwrite FPSCR.NZCV
+and preserve or accumulate IOC/IDC exactly. CPACR, FPEXC, FPSCR.Len and all trap-enable
+bits remain live runtime guards, so a disabled or exceptional mode returns the exact
+unretired prefix without changing guest state. The generated table grows by two generic
+handlers, from 24,614 to 24,616.
+
+The local 60-test Release suite and strict warning build passed. Core run `30879381816`
+and iOS run `30879381822` are fully green at exact commit
+`c2b4f99abd841a5b17e34f4c1d3f6cfc2693c635`. Both Apple runners executed 15 independent
+single/double, NaN, FZ, signed-zero and fallback-prefix cases and a complete serialized
+23,999-instruction SoC comparison. This is substantially stronger than accepting the
+decoder shape; it still is not a physical-iPhone run.
+
+The identical 10 M-entry restored observer replay exited OK with empty stderr, 1,590 CLCD
+frames, exact accounting, and unchanged work-image/PPM hashes. Its current product model is:
+
+| r504 exact product model | instructions | fetched share |
+|---|---:|---:|
+| decoder-supported | 6,278,476 | 62.788% |
+| retirement-eligible | 6,114,909 | 61.152% |
+| modeled signed retirement | **5,706,014** | **57.063%** |
+| entry-gate refusal | 408,895 | 4.089% |
+
+All 180,986 observed comparisons now decode; 177,053 more instructions are modeled as
+retired. Unlike the earlier register tranche, continuity also improves: modeled calls
+fall by 98,613 to 2,533,645 and mean call length rises from 2.100 to 2.252 instructions.
+That is a substantial structural result. It is not throughput. The infinite-speed ceiling
+rises to **2.328997x**, but hitting 2.180475x at this coverage still requires the covered
+region to be about **19.511x** faster. There remains zero measured emulator or iPhone FPS
+gain. The next broad safe candidate is exact single-to-double VCVT widening, which dominates
+the hottest remaining conversion encodings; narrowing and arithmetic still require their
+own rounding/exception proof.
