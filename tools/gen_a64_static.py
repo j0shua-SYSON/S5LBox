@@ -1365,11 +1365,13 @@ def vfp_arithmetic_body(operation: str, width: int) -> list[str]:
         body.extend(load_operand("w12", 0, "d"))
 
     body.extend([
-        "    mrs x4, fpcr",
-        "    mrs x5, fpsr",
-        f"    cbz x4, {p}_fpcr_ready",
-        "    msr fpcr, xzr",
-        f"{p}_fpcr_ready:",
+        # The signed invocation owns one lazy host-FP session. The first
+        # arithmetic operation saves and normalizes caller state; later
+        # operations reuse it. Every function exit and every external C
+        # callback restores that state through the shared epilogue. FPSR is
+        # still cleared and sampled per guest instruction, preserving exact
+        # fallback atomicity and the smallest-normal/IXC test.
+        "    bl .La64s_fp_session_begin",
         "    msr fpsr, xzr",
     ])
 
@@ -1407,11 +1409,6 @@ def vfp_arithmetic_body(operation: str, width: int) -> list[str]:
         *vfp_arithmetic_flags(
             width, ireg, f"{p}_result", state_failure
         ),
-        # Restore every host-visible control/status bit before guest commit.
-        "    msr fpsr, x5",
-        f"    cbz x4, {p}_state_restored",
-        "    msr fpcr, x4",
-        f"{p}_state_restored:",
     ])
     if width == 4:
         body.append("    str w16, [x6, w12, uxtw #2]")
@@ -1423,10 +1420,6 @@ def vfp_arithmetic_body(operation: str, width: int) -> list[str]:
     body.extend([
         *vfp_finish(),
         f"{state_failure}:",
-        "    msr fpsr, x5",
-        f"    cbz x4, {p}_failure_restored",
-        "    msr fpcr, x4",
-        f"{p}_failure_restored:",
         "    b .La64s_direct_miss",
     ])
     return body
@@ -2143,7 +2136,7 @@ def render() -> str:
         ".type A64S_CSYM(a64_static_execute), %function",
         "#endif",
         "A64S_CSYM(a64_static_execute):",
-        "    stp x29, x30, [sp, #-144]!",
+        "    stp x29, x30, [sp, #-176]!",
         "    mov x29, sp",
         "    stp x19, x20, [sp, #16]",
         "    stp x21, x22, [sp, #32]",
@@ -2165,13 +2158,17 @@ def render() -> str:
         "    mov x13, x3",
         "    mov x15, x4",
         # The ninth and tenth AAPCS64 arguments live at the entry SP. The
-        # 144-byte prologue moves them to [sp,#144] and [sp,#152]. The former
+        # 176-byte prologue moves them to [sp,#176] and [sp,#184]. The former
         # carries DREAD/DWRITE/VFP live-state pointers; the latter is NULL for
         # the legacy boundary or carries the persistent product-chain context.
-        "    ldr x3, [sp, #144]",
-        "    ldr x9, [sp, #152]",
+        "    ldr x3, [sp, #176]",
+        "    ldr x9, [sp, #184]",
         "    str x9, [sp, #96]",
         "    str x3, [sp, #128]",
+        # Lazy host-FP session state. Offset 144 is the active word; 152 and
+        # 160 preserve every caller-visible FPCR/FPSR bit until the common
+        # epilogue or an external callback boundary.
+        "    str wzr, [sp, #144]",
         # ADR also reaches only +/-1 MiB. Use the platform's page-relative
         # relocation spelling so handler growth cannot invalidate the entry.
         "#if defined(__APPLE__)",
@@ -2198,6 +2195,32 @@ def render() -> str:
 
     lines.extend([
         "",
+        ".La64s_fp_session_begin:",
+        "    ldr w4, [sp, #144]",
+        "    cbnz w4, .La64s_fp_session_begin_done",
+        "    mrs x4, fpcr",
+        "    mrs x5, fpsr",
+        "    str x4, [sp, #152]",
+        "    str x5, [sp, #160]",
+        "    cbz x4, .La64s_fp_session_fpcr_ready",
+        "    msr fpcr, xzr",
+        ".La64s_fp_session_fpcr_ready:",
+        "    mov w4, #1",
+        "    str w4, [sp, #144]",
+        ".La64s_fp_session_begin_done:",
+        "    ret",
+        "",
+        ".La64s_fp_session_restore:",
+        "    ldr w9, [sp, #144]",
+        "    cbz w9, .La64s_fp_session_restore_done",
+        "    ldr x10, [sp, #160]",
+        "    msr fpsr, x10",
+        "    ldr x10, [sp, #152]",
+        "    msr fpcr, x10",
+        "    str wzr, [sp, #144]",
+        ".La64s_fp_session_restore_done:",
+        "    ret",
+        "",
         ".La64s_direct_miss:",
         # metadata low byte is the unretired suffix (including this load); the
         # next byte is completed+1 so zero can continue to mean full success.
@@ -2209,6 +2232,10 @@ def render() -> str:
         "    ldur w12, [x13, #-8]",
         "    ubfx w17, w16, #8, #8",
         "    msr nzcv, x7",
+        # A direct miss may call back into C to publish the exact partial
+        # prefix. Restore the caller's FP environment before crossing that
+        # external boundary; the common save path sees an inactive session.
+        "    bl .La64s_fp_session_restore",
         "    ldr x9, [sp, #96]",
         "    cbz x9, .La64s_save",
         "    mrs x10, nzcv",
@@ -2237,6 +2264,10 @@ def render() -> str:
         "    ldr x0, [sp, #96]",
         "    ldr x10, [x0, #72]",
         "    cbnz x10, .La64s_graph_advance",
+        # The callback-backed chain selector is ordinary C. End the lazy FP
+        # session before the call; a later arithmetic head will reopen it.
+        "    bl .La64s_fp_session_restore",
+        "    ldr x0, [sp, #96]",
         "    mov w1, w12",
         "    bl A64S_CSYM(a64_static_chain_advance)",
         "    cbz x0, .La64s_chain_stop",
@@ -2404,6 +2435,7 @@ def render() -> str:
         "    mov w17, wzr",
         "",
         ".La64s_save:",
+        "    bl .La64s_fp_session_restore",
         "    stp w19, w20, [x0, #0]",
         "    stp w21, w22, [x0, #8]",
         "    stp w23, w24, [x0, #16]",
@@ -2421,7 +2453,7 @@ def render() -> str:
         "    ldp x23, x24, [sp, #48]",
         "    ldp x21, x22, [sp, #32]",
         "    ldp x19, x20, [sp, #16]",
-        "    ldp x29, x30, [sp], #144",
+        "    ldp x29, x30, [sp], #176",
         "    mov w0, w17",
         "    ret",
         "#if !defined(__APPLE__)",

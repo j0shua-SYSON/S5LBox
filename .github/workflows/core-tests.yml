@@ -230,7 +230,7 @@ jobs:
             grep -Eq 'STATIC-VFP-COMPARE-ORACLE exact=yes ops=15 single=yes double=yes nan=yes fz=yes zero-prefix=yes partial-prefix=yes' <<<"$static_output"
             grep -Eq 'STATIC-VFP-WIDEN-SHAPE exact=yes insns=8 uops=9 handlers=26508' <<<"$static_output"
             grep -Fq 'STATIC-VFP-ARITH-SHAPE exact=yes operations=9 widths=2 handlers=18 conditional=yes runtime-guard=yes total=26508' <<<"$static_output"
-            grep -Fq 'STATIC-VFP-ARITH-ORACLE exact=yes operations=9 widths=2 accepted=20 signed-zero=yes inexact=yes fallbacks=25 conditions=yes partial-prefix=yes host-fp-state=yes' <<<"$static_output"
+            grep -Fq 'STATIC-VFP-ARITH-ORACLE exact=yes operations=9 widths=2 accepted=20 signed-zero=yes inexact=yes fallbacks=25 conditions=yes partial-prefix=yes host-fp-state=yes host-fp-session=yes' <<<"$static_output"
             grep -Fq 'STATIC-VFP-WRITE-SHAPE exact=yes cases=7 single=yes double=yes pc-relative=yes conditional=yes terminal=yes read-contract=preserved handlers=26508' <<<"$static_output"
             grep -Fq 'STATIC-VFP-WRITE-ORACLE exact=yes cases=7 hit-words=8 single=yes double=yes pc-relative=yes conditional=yes alignment=yes boundary=yes rollback=yes zero-prefix=yes' <<<"$static_output"
             grep -Eq 'STATIC-VFP-WIDEN-ORACLE exact=yes ops=15 finite=yes subnormal=yes nan=yes fz=yes zero-prefix=yes partial-prefix=yes' <<<"$static_output"

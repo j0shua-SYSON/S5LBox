@@ -3439,11 +3439,72 @@ static bool validate_static_vfp_arithmetic_oracles(void) {
             return false;
         }
     }
+
+    /* The generated runner now keeps one lazy host-FP session across adjacent
+     * arithmetic handlers. Prove both sides of that session boundary: two
+     * successful guest operations restore the caller environment once, while
+     * a fault-sensitive second operation returns the exact one-instruction
+     * prefix and restores the same environment before fallback. */
+    for (unsigned rejection = 0u; rejection < 2u; rejection++) {
+        static const uint32_t session_program[] = {
+            VFP_ARITH_S(3,0,2,0,1), /* VADD s2,s0,s1 */
+            VFP_ARITH_S(2,0,5,3,4), /* VMUL s5,s3,s4 */
+        };
+        uint32_t pc = UINT32_C(0x14700) + rejection * 8u;
+        uint64_t original_fpcr = static_host_fpcr_read();
+        uint64_t original_fpsr = static_host_fpsr_read();
+        uint64_t installed_fpcr;
+        uint64_t installed_fpsr;
+        uint64_t after_fpcr;
+        uint64_t after_fpsr;
+        bool run_ok;
+
+        seed_vfp_oracle(&reference, session_program, 2u, pc, true);
+        reference.vfp_fpscr = VFP_ARITH_CONTROL;
+        static_vfp_arith_set_operands(
+            &reference, session_program[0], UINT32_C(0x3f800000),
+            UINT32_C(0x40400000), UINT32_C(0x40a00000));
+        static_vfp_arith_set_operands(
+            &reference, session_program[1], UINT32_C(0x3f800000),
+            rejection ? UINT32_C(0x7f7fffff) : UINT32_C(0x40000000),
+            rejection ? UINT32_C(0x40000000) : UINT32_C(0x40800000));
+        statik = reference;
+        if (!a64_static_decode_read_hits_bytes_at(
+                &g_ram[pc], 2u, false, pc, &block) ||
+            arm_step(&reference) != ARM_OK ||
+            (!rejection && arm_step(&reference) != ARM_OK))
+            return false;
+
+        static_host_fpcr_write(
+            (original_fpcr & ~(UINT64_C(3) << 22)) |
+            (UINT64_C(2) << 22));
+        static_host_fpsr_write(UINT64_C(0x08000015));
+        installed_fpcr = static_host_fpcr_read();
+        installed_fpsr = static_host_fpsr_read();
+        completed = UINT_MAX;
+        run_ok = a64_static_run_read_hits(
+            &statik, &block, g_ram, sizeof g_ram, &completed);
+        after_fpcr = static_host_fpcr_read();
+        after_fpsr = static_host_fpsr_read();
+        static_host_fpsr_write(original_fpsr);
+        static_host_fpcr_write(original_fpcr);
+
+        if (!run_ok || after_fpcr != installed_fpcr ||
+            after_fpsr != installed_fpsr ||
+            completed != (rejection ? 1u : 2u) ||
+            !static_vfp_states_equal(&reference, &statik)) {
+            fprintf(stderr,
+                    "jitbench: batched VFP host-state %s mismatch\n",
+                    rejection ? "partial rejection" : "success");
+            return false;
+        }
+    }
 #endif
 
     printf("STATIC-VFP-ARITH-ORACLE exact=yes operations=9 widths=2 "
            "accepted=%u signed-zero=yes inexact=yes fallbacks=%zu "
-           "conditions=yes partial-prefix=yes host-fp-state=yes\n",
+           "conditions=yes partial-prefix=yes host-fp-state=yes "
+           "host-fp-session=yes\n",
            exact_cases, sizeof fallbacks / sizeof fallbacks[0]);
     return true;
 }
