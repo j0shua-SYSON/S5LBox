@@ -48,6 +48,7 @@ typedef struct {
     uint32_t exit_pc;
     bool thumb;
     bool dynamic_exit;
+    bool indirect_exit;
     bool touches_memory;
     bool direct_reads;
     bool direct_writes;

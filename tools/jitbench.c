@@ -147,6 +147,26 @@ static const uint32_t A32_SOC_STORES[] = {
     0xe0800006u, 0xe0211005u, 0xe2422001u, 0xeaffffefu,
 };
 
+/* Four two-instruction heads cross ARM/Thumb state through every register
+ * branch family. Distinct graph slots remove alias churn from the timing:
+ * ARM 0x00 -> Thumb 0x10 -> ARM 0x40 -> Thumb 0x60 -> ARM 0x00. */
+static const uint32_t A32_SOC_INDIRECT_ZERO[] = {
+    UINT32_C(0xe2844001), /* ADD r4,r4,#1 */
+    UINT32_C(0xe12fff38), /* BLX r8 */
+};
+static const uint16_t THUMB_SOC_INDIRECT_TEN[] = {
+    UINT16_C(0x3501), /* ADDS r5,#1 */
+    UINT16_C(0x4748), /* BX r9 */
+};
+static const uint32_t A32_SOC_INDIRECT_FORTY[] = {
+    UINT32_C(0xe2866001), /* ADD r6,r6,#1 */
+    UINT32_C(0xe12fff1a), /* BX r10 */
+};
+static const uint16_t THUMB_SOC_INDIRECT_SIXTY[] = {
+    UINT16_C(0x3701), /* ADDS r7,#1 */
+    UINT16_C(0x47d8), /* BLX r11 */
+};
+
 static const uint16_t THUMB_ALU[] = {
     0x3001u, 0x3103u, 0x3a01u, 0x3305u,
     0x3c02u, 0x3507u, 0x3e03u, 0x3709u,
@@ -825,6 +845,7 @@ static bool validate_static_shapes(void) {
             block.insn_count != sc->insns || block.uop_count != sc->uops ||
             block.start_pc != sc->pc || block.exit_pc != sc->exit_pc ||
             block.thumb != sc->thumb || block.dynamic_exit ||
+            block.indirect_exit ||
             block.touches_memory ||
             block.uops[block.uop_count - 1u].handler != 0u ||
             block.uops[block.uop_count - 1u].immediate != sc->exit_pc) {
@@ -871,7 +892,8 @@ static bool validate_static_shapes(void) {
                 block.insn_count != 1u ||
                 block.uop_count != expected_uops ||
                 block.start_pc != pc || block.thumb ||
-                block.dynamic_exit != dynamic || block.touches_memory ||
+                block.dynamic_exit != dynamic || block.indirect_exit ||
+                block.touches_memory ||
                 block.direct_reads || block.runtime_guards || block.vfp ||
                 block.uops[block.uop_count - 1u].handler != 0u ||
                 block.exit_pc != (dynamic ? pc + 4u : target) ||
@@ -934,6 +956,7 @@ static bool validate_static_shapes(void) {
                     block.uop_count != expected_uops ||
                     block.start_pc != pc || block.exit_pc != pc + 4u ||
                     block.thumb || !block.dynamic_exit ||
+                    !block.indirect_exit ||
                     block.touches_memory || block.direct_reads ||
                     block.direct_writes || !block.runtime_guards || block.vfp ||
                     block.uops[block.uop_count - 1u].handler != 0u ||
@@ -999,6 +1022,7 @@ static bool validate_static_shapes(void) {
                 block.insn_count != 1u || block.uop_count != 2u ||
                 block.start_pc != pc || block.exit_pc != pc + 2u ||
                 !block.thumb || !block.dynamic_exit ||
+                !block.indirect_exit ||
                 block.touches_memory || block.direct_reads ||
                 block.direct_writes || !block.runtime_guards || block.vfp ||
                 block.uops[1].handler != 0u ||
@@ -2917,6 +2941,7 @@ typedef enum {
     SOC_ENTRY_SIGNED,
     SOC_ENTRY_GRAPH,
     SOC_ENTRY_GRAPH_EXTENDED,
+    SOC_ENTRY_GRAPH_EXTENDED_INDIRECT_OFF,
     SOC_ENTRY_GRAPH_EXTENDED_WRITES
 } soc_entry_path_t;
 
@@ -2926,6 +2951,8 @@ static const char *soc_entry_path_name(soc_entry_path_t path) {
     case SOC_ENTRY_SIGNED:    return "signed";
     case SOC_ENTRY_GRAPH:     return "graph";
     case SOC_ENTRY_GRAPH_EXTENDED: return "graph-extended";
+    case SOC_ENTRY_GRAPH_EXTENDED_INDIRECT_OFF:
+        return "graph-extended-indirect-off";
     case SOC_ENTRY_GRAPH_EXTENDED_WRITES:
         return "graph-extended-writes";
     }
@@ -2938,16 +2965,55 @@ static void free_soc_run_result(soc_run_result_t *result) {
     memset(result, 0, sizeof *result);
 }
 
+typedef struct {
+    const uint32_t *program;
+    unsigned length;
+    uint32_t seed_r7;
+    bool indirect_workload;
+} soc_entry_setup_t;
+
+static bool setup_soc_entry_machine(s5l8900_t *machine,
+                                    const soc_entry_setup_t *setup) {
+    if (!machine || !setup) return false;
+    if (!setup->indirect_workload) {
+        if (!setup->program || !setup->length) return false;
+        s5l8900_load(machine, 0u, setup->program,
+                     (size_t)setup->length * sizeof *setup->program);
+        machine->cpu.r[7] = setup->seed_r7;
+        return true;
+    }
+
+    s5l8900_load(machine, 0x00u, A32_SOC_INDIRECT_ZERO,
+                 sizeof A32_SOC_INDIRECT_ZERO);
+    s5l8900_load(machine, 0x10u, THUMB_SOC_INDIRECT_TEN,
+                 sizeof THUMB_SOC_INDIRECT_TEN);
+    s5l8900_load(machine, 0x40u, A32_SOC_INDIRECT_FORTY,
+                 sizeof A32_SOC_INDIRECT_FORTY);
+    s5l8900_load(machine, 0x60u, THUMB_SOC_INDIRECT_SIXTY,
+                 sizeof THUMB_SOC_INDIRECT_SIXTY);
+    machine->cpu.r[4] = 0u;
+    machine->cpu.r[5] = 0u;
+    machine->cpu.r[6] = 0u;
+    machine->cpu.r[7] = 0u;
+    machine->cpu.r[8] = UINT32_C(0x11);
+    machine->cpu.r[9] = UINT32_C(0x40);
+    machine->cpu.r[10] = UINT32_C(0x61);
+    machine->cpu.r[11] = UINT32_C(0x00);
+    machine->cpu.r[15] = 0u;
+    machine->cpu.cpsr = ARM_MODE_SYS | ARM_CPSR_C;
+    return true;
+}
+
 /* Run the exact app-facing machine loop. Setup and the two-loop cache warmup
  * stay outside the timed region. The signed arm still pays the product cache
  * index, raw-byte SMC witness, dynamic gates, timer-boundary splitting and
  * device ticks. A complete machine snapshot is retained for comparison with
  * the interpreter arm; the signed cache and its counter are host diagnostics
  * and deliberately do not enter that architectural byte stream. */
-static bool run_soc_entry_path(const uint32_t *program, unsigned length,
-                               uint64_t total, soc_entry_path_t path,
-                               uint32_t seed_r7,
-                               soc_run_result_t *out) {
+static bool run_soc_entry_configured(const soc_entry_setup_t *setup,
+                                     unsigned loop_insns, uint64_t total,
+                                     soc_entry_path_t path,
+                                     soc_run_result_t *out) {
     s5l8900_t machine = {0};
     arm_status_t status = ARM_OK;
     uint64_t remaining = total;
@@ -2968,12 +3034,16 @@ static bool run_soc_entry_path(const uint32_t *program, unsigned length,
     bool signed_path = path != SOC_ENTRY_REFERENCE;
     bool graph_path = path == SOC_ENTRY_GRAPH ||
                       path == SOC_ENTRY_GRAPH_EXTENDED ||
+                      path == SOC_ENTRY_GRAPH_EXTENDED_INDIRECT_OFF ||
                       path == SOC_ENTRY_GRAPH_EXTENDED_WRITES;
     bool extended_path = path == SOC_ENTRY_GRAPH_EXTENDED ||
+                         path == SOC_ENTRY_GRAPH_EXTENDED_INDIRECT_OFF ||
                          path == SOC_ENTRY_GRAPH_EXTENDED_WRITES;
+    bool indirect_off_path =
+        path == SOC_ENTRY_GRAPH_EXTENDED_INDIRECT_OFF;
     bool direct_write_path = path == SOC_ENTRY_GRAPH_EXTENDED_WRITES;
 
-    if (!program || !length || !out ||
+    if (!setup || !loop_insns || !out ||
         path > SOC_ENTRY_GRAPH_EXTENDED_WRITES)
         return false;
     memset(out, 0, sizeof *out);
@@ -2982,9 +3052,10 @@ static bool run_soc_entry_path(const uint32_t *program, unsigned length,
         goto done;
     }
     initialized = true;
-    s5l8900_load(&machine, 0u, program,
-                 (size_t)length * sizeof *program);
-    machine.cpu.r[7] = seed_r7;
+    if (!setup_soc_entry_machine(&machine, setup)) {
+        fprintf(stderr, "jitbench: SoC entry setup failed\n");
+        goto done;
+    }
 
     /* Clear reset's dirty-level gate before warming either path. This uses the
      * real 412 MHz:6 MHz board clocks installed by s5l8900_init(). */
@@ -2997,6 +3068,11 @@ static bool run_soc_entry_path(const uint32_t *program, unsigned length,
     if (signed_path &&
         !s5l8900_static_a64_set_enabled(&machine, true)) {
         fprintf(stderr, "jitbench: SoC entry signed engine unavailable\n");
+        goto done;
+    }
+    if (indirect_off_path &&
+        !s5l8900_static_a64_set_indirect_branches(&machine, false)) {
+        fprintf(stderr, "jitbench: SoC indirect-off control unavailable\n");
         goto done;
     }
     if (graph_path &&
@@ -3014,7 +3090,8 @@ static bool run_soc_entry_path(const uint32_t *program, unsigned length,
     /* The first instruction establishes the fetch pointer. The remainder of
      * the first loop and the second complete loop establish the cache-owned
      * decoded entries while returning PC to zero. */
-    if (s5l8900_run(&machine, length * 2u, &status) != length * 2u ||
+    if (s5l8900_run(&machine, loop_insns * 2u, &status) !=
+            loop_insns * 2u ||
         status != ARM_OK || machine.cpu.r[15] != 0u) {
         fprintf(stderr,
                 "jitbench: SoC entry %s warmup failed status=%d pc=0x%08x\n",
@@ -3090,6 +3167,27 @@ done:
     if (initialized) s5l8900_free(&machine);
     if (!ok) free_soc_run_result(out);
     return ok;
+}
+
+static bool run_soc_entry_path(const uint32_t *program, unsigned length,
+                               uint64_t total, soc_entry_path_t path,
+                               uint32_t seed_r7,
+                               soc_run_result_t *out) {
+    const soc_entry_setup_t setup = {
+        .program = program,
+        .length = length,
+        .seed_r7 = seed_r7,
+        .indirect_workload = false,
+    };
+    return run_soc_entry_configured(&setup, length, total, path, out);
+}
+
+static bool run_soc_indirect_path(uint64_t total, soc_entry_path_t path,
+                                  soc_run_result_t *out) {
+    const soc_entry_setup_t setup = {
+        .indirect_workload = true,
+    };
+    return run_soc_entry_configured(&setup, 8u, total, path, out);
 }
 
 /* The earlier product-entry curve intentionally stops before the SoC. This
@@ -3447,6 +3545,154 @@ done:
     return ok;
 }
 
+/* Isolate the register-indirect tranche with a same-binary feature A/B. Both
+ * signed arms retain every older handler, graph lookup, 256-instruction bound
+ * and machine gate. The off arm reproduces the old longest exact prefix and
+ * therefore signs each ALU instruction but returns to arm_step() for BX/BLX;
+ * the on arm keeps all four two-instruction heads in signed text. This loop is
+ * intentionally 50% indirect branches and is not a firmware-mix or phone-FPS
+ * claim. Exact three-way snapshots and exact retirement counts are the gate. */
+static bool bench_soc_indirect(uint64_t requested, unsigned reps) {
+    const uint64_t loop_insns = 8u;
+    const uint64_t indirect_per_loop = 4u;
+    double *reference_rates = NULL;
+    double *off_rates = NULL;
+    double *on_rates = NULL;
+    uint64_t total;
+    uint64_t expected_indirect;
+    uint64_t expected_off_retired;
+    uint64_t off_chains = 0u;
+    uint64_t on_chains = 0u;
+    bool ok = false;
+
+    if (requested > UINT64_MAX - (loop_insns - 1u)) {
+        fprintf(stderr, "jitbench: SoC indirect shape failed\n");
+        return false;
+    }
+    total = ((requested + loop_insns - 1u) / loop_insns) * loop_insns;
+    expected_indirect = (total / loop_insns) * indirect_per_loop;
+    expected_off_retired = total - expected_indirect;
+    reference_rates = (double *)calloc(reps, sizeof *reference_rates);
+    off_rates = (double *)calloc(reps, sizeof *off_rates);
+    on_rates = (double *)calloc(reps, sizeof *on_rates);
+    if (!reference_rates || !off_rates || !on_rates) {
+        fprintf(stderr, "jitbench: SoC indirect out of memory\n");
+        goto done;
+    }
+
+    for (unsigned rep = 0u; rep < reps; rep++) {
+        soc_run_result_t reference = {0};
+        soc_run_result_t off = {0};
+        soc_run_result_t on = {0};
+        const char *order;
+        bool ran;
+
+        if (rep % 3u == 0u) {
+            order = "reference-off-on";
+            ran = run_soc_indirect_path(total, SOC_ENTRY_REFERENCE,
+                                        &reference) &&
+                  run_soc_indirect_path(
+                      total, SOC_ENTRY_GRAPH_EXTENDED_INDIRECT_OFF, &off) &&
+                  run_soc_indirect_path(total, SOC_ENTRY_GRAPH_EXTENDED,
+                                        &on);
+        } else if (rep % 3u == 1u) {
+            order = "off-on-reference";
+            ran = run_soc_indirect_path(
+                      total, SOC_ENTRY_GRAPH_EXTENDED_INDIRECT_OFF, &off) &&
+                  run_soc_indirect_path(total, SOC_ENTRY_GRAPH_EXTENDED,
+                                        &on) &&
+                  run_soc_indirect_path(total, SOC_ENTRY_REFERENCE,
+                                        &reference);
+        } else {
+            order = "on-reference-off";
+            ran = run_soc_indirect_path(total, SOC_ENTRY_GRAPH_EXTENDED,
+                                        &on) &&
+                  run_soc_indirect_path(total, SOC_ENTRY_REFERENCE,
+                                        &reference) &&
+                  run_soc_indirect_path(
+                      total, SOC_ENTRY_GRAPH_EXTENDED_INDIRECT_OFF, &off);
+        }
+        if (!ran || !reference.snapshot || !off.snapshot || !on.snapshot ||
+            reference.snapshot_len != off.snapshot_len ||
+            reference.snapshot_len != on.snapshot_len ||
+            memcmp(reference.snapshot, off.snapshot,
+                   reference.snapshot_len) != 0 ||
+            memcmp(reference.snapshot, on.snapshot,
+                   reference.snapshot_len) != 0 ||
+            off.signed_retired != expected_off_retired ||
+            on.signed_retired != total || off.graph_chains != 0u ||
+            on.graph_chains == 0u || off.dwrite_hits != 0u ||
+            off.dwrite_misses != 0u || on.dwrite_hits != 0u ||
+            on.dwrite_misses != 0u) {
+            fprintf(stderr,
+                    "jitbench: SoC indirect repetition %u failed exact A/B "
+                    "off-retired=%" PRIu64 " on-retired=%" PRIu64
+                    " off-chains=%" PRIu64 " on-chains=%" PRIu64 "\n",
+                    rep + 1u, off.signed_retired, on.signed_retired,
+                    off.graph_chains, on.graph_chains);
+            free_soc_run_result(&reference);
+            free_soc_run_result(&off);
+            free_soc_run_result(&on);
+            goto done;
+        }
+        if (rep == 0u) {
+            off_chains = off.graph_chains;
+            on_chains = on.graph_chains;
+        } else if (off_chains != off.graph_chains ||
+                   on_chains != on.graph_chains) {
+            fprintf(stderr,
+                    "jitbench: SoC indirect chain counts changed across "
+                    "repetitions\n");
+            free_soc_run_result(&reference);
+            free_soc_run_result(&off);
+            free_soc_run_result(&on);
+            goto done;
+        }
+
+        reference_rates[rep] = (double)total / reference.seconds / 1.0e6;
+        off_rates[rep] = (double)total / off.seconds / 1.0e6;
+        on_rates[rep] = (double)total / on.seconds / 1.0e6;
+        printf("SOC-INDIRECT-SAMPLE rep=%u order=%s reference=%.3f "
+               "graph-off=%.3f graph-on=%.3f Minsn/s "
+               "off-retired=%" PRIu64 " on-retired=%" PRIu64
+               " on-graph-chains=%" PRIu64 " exact-snapshot=yes\n",
+               rep + 1u, order, reference_rates[rep], off_rates[rep],
+               on_rates[rep], off.signed_retired, on.signed_retired,
+               on.graph_chains);
+        free_soc_run_result(&reference);
+        free_soc_run_result(&off);
+        free_soc_run_result(&on);
+    }
+
+    qsort(reference_rates, reps, sizeof *reference_rates, cmp_double);
+    qsort(off_rates, reps, sizeof *off_rates, cmp_double);
+    qsort(on_rates, reps, sizeof *on_rates, cmp_double);
+    printf("SOC-INDIRECT-CURVE heads=4 loop-insns=%" PRIu64
+           " indirect=%" PRIu64 " guest-insns=%" PRIu64
+           " reps=%u chain-limit=256 same-binary=yes run-api=yes "
+           "cache-lookup=yes block-witness=yes entry-gates=yes "
+           "timer-boundaries=yes device-tick=yes head-cache=warm mmu=off "
+           "exact-snapshot=yes off-signed-retired=%" PRIu64
+           " on-signed-retired=%" PRIu64 " off-graph-chains=%" PRIu64
+           " on-graph-chains=%" PRIu64
+           " reference-median=%.3f off-median=%.3f on-median=%.3f "
+           "off-speedup=%.3fx on-speedup=%.3fx on-over-off=%.3fx\n",
+           loop_insns, indirect_per_loop, total, reps,
+           expected_off_retired, total, off_chains, on_chains,
+           reference_rates[reps / 2u], off_rates[reps / 2u],
+           on_rates[reps / 2u],
+           off_rates[reps / 2u] / reference_rates[reps / 2u],
+           on_rates[reps / 2u] / reference_rates[reps / 2u],
+           on_rates[reps / 2u] / off_rates[reps / 2u]);
+    ok = true;
+
+done:
+    free(reference_rates);
+    free(off_rates);
+    free(on_rates);
+    return ok;
+}
+
 static bool bench_one(const bench_case_t *bc, uint64_t requested,
                       unsigned reps) {
     jit_buf_t arena;
@@ -3671,6 +3917,9 @@ int main(int argc, char **argv) {
     printf("The SoC-store row is a same-binary direct-write-consent A/B with "
            "four stores per synthetic loop and the same exact snapshot gate; "
            "it is intentionally not a firmware-mix or phone-FPS claim.\n");
+    printf("The SoC-indirect row is a same-binary BX/BLX capability A/B over "
+           "four mixed ARM/Thumb heads. Its branch-heavy synthetic speedup is "
+           "not a firmware-mix or phone-FPS claim either.\n");
     if (!validate_static_shapes()) return 1;
     for (i = 0u; i < sizeof CASES / sizeof CASES[0]; i++) {
         if (!validate_case_translation(&CASES[i])) return 1;
@@ -3708,5 +3957,6 @@ int main(int argc, char **argv) {
             return 1;
     }
     if (!bench_soc_store(soc_insns, reps)) return 1;
+    if (!bench_soc_indirect(soc_insns, reps)) return 1;
     return 0;
 }

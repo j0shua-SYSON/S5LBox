@@ -3917,6 +3917,11 @@ bool s5l8900_static_a64_set_persistent(s5l8900_t *m, bool enabled);
 /* Experimental callback-free descriptor lookup; mutually exclusive with the
  * callback scaffold above and still compile-time/app-default off. */
 bool s5l8900_static_a64_set_graph(s5l8900_t *m, bool enabled);
+/* Same-binary rollout/benchmark control for terminal A32/Thumb BX/BLX signed
+ * records. It defaults on when the engine is created. Changing it clears only
+ * derived decode/graph entries so an off/on comparison cannot reuse a block
+ * admitted under the other feature set. */
+bool s5l8900_static_a64_set_indirect_branches(s5l8900_t *m, bool enabled);
 /* Same-binary benchmark control for the total signed invocation bound. A
  * decoded head remains at most sixteen instructions and the machine still
  * clamps every invocation to the first exact timebase edge. The generic engine

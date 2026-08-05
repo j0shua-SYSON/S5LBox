@@ -1109,6 +1109,8 @@ static bool decode_program_at(const void *program, unsigned insns, bool thumb,
                     return false;
                 }
                 out->dynamic_exit = true;
+                if (handler_is_indirect_branch(handler))
+                    out->indirect_exit = true;
             }
             if (handler_touches_memory(handler))
                 out->touches_memory = true;
@@ -1343,6 +1345,7 @@ static bool validate_run(const arm_cpu_t *cpu,
     bool saw_runtime_guard = false;
     bool saw_vfp = false;
     bool saw_dynamic_exit = false;
+    bool saw_indirect_exit = false;
 
     if (!cpu || !block || !blocks || !ram ||
         !block->insn_count || block->insn_count > A64_STATIC_MAX_INSNS ||
@@ -1400,6 +1403,8 @@ static bool validate_run(const arm_cpu_t *cpu,
                                              &block->uops[j]))
                 return false;
             saw_dynamic_exit = true;
+            if (handler_is_indirect_branch(handler))
+                saw_indirect_exit = true;
         }
         if (handler >= A64S_DP_IMM && handler < A64S_SHIFT_IMM &&
             block->uops[j].metadata > A64S_CARRY_SET)
@@ -1413,6 +1418,7 @@ static bool validate_run(const arm_cpu_t *cpu,
         block->runtime_guards != saw_runtime_guard ||
         block->vfp != saw_vfp ||
         block->dynamic_exit != saw_dynamic_exit ||
+        block->indirect_exit != saw_indirect_exit ||
         (kind == A64S_RUN_FLAT && (saw_direct_read || saw_direct_write)) ||
         (kind == A64S_RUN_FLAT && saw_vfp) ||
         (kind == A64S_RUN_READ_HITS &&
@@ -1518,6 +1524,7 @@ static bool validate_decoded_hits_at(const a64_static_block_t *block,
                                      unsigned remaining,
                                      bool memory_hits) {
     bool terminal_dynamic;
+    bool terminal_indirect;
     bool terminal_write;
     if (!block || !remaining || !block->insn_count ||
         block->insn_count > remaining ||
@@ -1537,7 +1544,11 @@ static bool validate_decoded_hits_at(const a64_static_block_t *block,
     terminal_dynamic = block->uop_count > 1u &&
         handler_is_terminal_branch(
             block->uops[block->uop_count - 2u].handler);
+    terminal_indirect = terminal_dynamic &&
+        handler_is_indirect_branch(
+            block->uops[block->uop_count - 2u].handler);
     if (block->dynamic_exit != terminal_dynamic ||
+        block->indirect_exit != terminal_indirect ||
         (terminal_dynamic &&
          !terminal_branch_shape_valid(
              block, block->uops[block->uop_count - 2u].handler,
