@@ -6763,3 +6763,94 @@ physical iPhone in this environment, and the only device observation remains rou
 The next remaining store family can remove only 0.852% of this baseline, so another store opcode is
 not automatically the next best long-term FPS investment. The next tranche must be chosen from a
 broader measured bottleneck, and 30 FPS is not close or established.
+
+### 2026-08-05: all Thumb conditional exits move into signed text
+
+The next tranche was not chosen by continuing down an opcode list. Read-only observer commit
+`f3522d00d31e91c1d428a4e19a075049e57f2b08` compared six remaining families side by side on the
+unchanged 7.100--7.110 B literal stream. The exact bounded results were:
+
+| post-store family | eligible | entries removed from 3,372,540 | old-baseline reduction |
+|---|---:|---:|---:|
+| Thumb conditional B | 147,493 | **263,208** | **7.804%** |
+| A32 LDM, no PC, one DREAD block | 95,956 | 130,759 | 3.877% |
+| VLDM/VPOP, one DREAD block | 25,626 | 48,757 | 1.446% |
+| Thumb POP/LDM, no PC, one DREAD block | 9,142 | 14,203 | 0.421% |
+| A32 multiply, perfect one-record ceiling | 38,997 | 57,262 | 1.698% |
+| remaining VFP compute, perfect one-record ceiling | 378,620 | 584,961 | 17.345% |
+
+The final two rows are deliberately labelled ceilings. They assume a perfect semantic handler and
+do not prove that host integer multiply or floating point is exact for ARM1176/VFPv2. The first row
+was both the largest fully bounded contract and simpler than either memory family. Its 73,132 taken
+and 74,361 fallthrough observations covered both paths. That evidence selected the implementation.
+
+Implementation commit `eb31c1fa17fa04ef0800ddd2b3c41475d97db5ba` admits every valid 16-bit
+Thumb conditional branch (`0xD000`--`0xDDFF`) only when it terminates a decoded head. It reuses the
+fourteen existing build-time-signed A32 condition handlers, so it adds no generated executable
+handler text and no runtime code generation. The record carries the signed halfword target and the
+natural two-byte fallthrough separately; live NZCV chooses between them while CPSR.T and LR remain
+unchanged. Conditions `0xE`/`0xF`, mid-block branches and mis-shaped metadata refuse cleanly.
+
+The validator independently reconstructs a dedicated Thumb-conditional-exit bit from the terminal
+handler, alignment and natural fallthrough. A mutation oracle clears that bit and proves the decoded
+runner returns false without changing CPU state or the completed count. The semantic matrix crosses
+all fourteen conditions with taken and fallthrough outcomes, alternating forward and backward
+targets: 28 interpreter-versus-signed cases, exact registers/CPSR/cycles, Thumb state preserved and
+LR untouched. A separate app-facing SoC oracle must exceed the old subset's exact 75% retirement
+ceiling, publish graph chains and serialize byte-identically to the interpreter. The rollout switch
+invalidates only derived decode/graph state, allowing the benchmark to disable exactly this family
+inside one binary.
+
+The rotated 20 M-instruction same-binary benchmark keeps the complete SoC run API, raw-byte witness,
+entry gates, graph lookup, timebase splitting and device ticks inside timing. The branch-disabled arm
+still signs the other twelve instructions per loop and retires exactly 15,000,000 signed
+instructions; the enabled arm retires all 20,000,000. Every arm serializes to the same complete
+machine snapshot.
+
+| Apple arm64 runner | interpreter | branch off | branch on | on/interpreter | on/off |
+|---|---:|---:|---:|---:|---:|
+| macOS 14 | 66.811 Minsn/s | 30.905 Minsn/s | 171.680 Minsn/s | **2.570x** | **5.555x** |
+| macOS 15 | 83.672 Minsn/s | 35.809 Minsn/s | 203.849 Minsn/s | **2.436x** | **5.693x** |
+
+Those ratios belong to a deliberately branch-dense 25% synthetic loop whose taken destination is
+the natural fallthrough so every arm executes an identical fixed path. They isolate product dispatch
+cost; they are not the restored firmware mix, elapsed firmware speed or phone FPS. Exact-SHA core
+run `30975501851` is green in all eight jobs, including macOS 14/15 native execution. Exact-SHA iOS
+run `30975501834` builds and packages the app.
+
+`work/r545-thumb-cond-10m` is the decisive firmware replay. It restores the trusted 7.100 B
+checkpoint, stops at exactly 7.110 B in 56.8 host seconds, exits 0, leaves stderr empty and reports
+57 `EXACT` verdicts with no case-sensitive `MISMATCH`. The literal write oracle remains exact at
+1,032,111/1,032,111 candidates and 1,736,595/1,736,595 events. CLCD remains live and nonblack at
+frame 1,590; 15,626 media reads and 469 writes finish with zero failures. Work-image and screen
+SHA-256 values are byte-identical to r544, so the product/profile change altered no guest output.
+
+The measured before/after is exact:
+
+| restored product metric | before | after | change |
+|---|---:|---:|---:|
+| decoder-supported fetched instructions | 7,766,172 | 7,913,665 | +147,493 |
+| retirement-eligible instructions | 7,602,605 | 7,750,098 | +147,493 |
+| modeled signed instructions | 7,186,816 | 7,334,306 | +147,490 |
+| modeled signed calls | 1,910,113 | 1,804,655 | -105,458 |
+| post-store runner entries | 3,372,540 | 3,109,332 | **-263,208** |
+
+Three of the newly supported observations remain behind the unchanged fetch entry gate, explaining
+the 147,493-versus-147,490 difference. After stores, the exact product shape moves from
+`calls/instructions/heads/chains=1405523/8032472/3069366/1663843` to
+`1289805/8179962/3084029/1794224`. Re-adding Thumb conditional B now changes zero candidates,
+eligible instructions or entries. The pre-implementation prediction and post-implementation audit
+therefore agree exactly.
+
+The new baseline also changes the honest ranking. One-block no-PC A32 LDM is now the largest bounded
+unimplemented family at 130,759 entries, or 4.205% of 3,109,332. The VFP-compute ceiling is larger at
+584,961 entries (18.813%), but remains unsafe to implement until exact ARM VFPv2 exception, NaN,
+rounding, denormal and cumulative-status behavior is proved; calling that a ready-made 18.813% win
+would be fiction.
+
+Brutal status: **this is the largest exact continuity reduction implemented in the recent isolated
+tranches, but measured phone-FPS improvement is still zero**. Runner entries are dispatch
+opportunities, not time or frames. The exact IPA has not been installed on a physical phone in this
+environment; the only device observation remains roughly 0--4 FPS. No duplicate checkpoint was
+created because the accurate r533 7.110 B checkpoint already represents the identical guest state.
+Thirty FPS is still neither close nor established by this result.
