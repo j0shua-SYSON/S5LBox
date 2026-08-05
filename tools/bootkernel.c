@@ -24850,6 +24850,19 @@ typedef struct {
     uint64_t fp_head_sessions;
     uint64_t fp_call_max_operations;
     uint64_t fp_head_max_operations;
+    /* Entry recoveries admitted only by the lookup-only fetch-refill model.
+     * This is a profiler count, not the host-only runtime diagnostic counter. */
+    uint64_t fetch_refill_recoveries;
+    uint64_t fetch_refill_calls;
+    uint64_t fetch_refill_call_instructions;
+    uint64_t fetch_refill_call_blocks;
+    uint64_t fetch_refill_single_instruction_calls;
+    uint64_t fetch_refill_single_cross_block_calls;
+    uint64_t fetch_refill_single_fixed_cross_block_calls;
+    uint64_t fetch_refill_first_head_one_calls;
+    uint64_t fetch_refill_first_head_one_multi_calls;
+    uint64_t fetch_refill_first_head_one_instructions;
+    uint64_t fetch_refill_call_maximum;
     uint64_t call_length;
     uint64_t call_remaining;
     uint64_t call_blocks;
@@ -24857,10 +24870,14 @@ typedef struct {
     uint64_t head_fp_operations;
     uint64_t maximum;
     unsigned head_length;
+    unsigned call_first_head_length;
     sequence_signed_stop_t budget_stop;
     uint32_t chain_pc;
     bool chain_pending;
     bool chain_thumb;
+    bool call_fetch_refilled;
+    bool call_refill_first_cross_block;
+    bool call_refill_first_fixed_cross_block;
 } sequence_signed_extended_t;
 
 typedef enum {
@@ -24942,6 +24959,10 @@ typedef struct {
      * cannot confuse potential coverage with shipped coverage. Both models
      * consume the same literal-store DWRITE history. */
     sequence_signed_extended_t implemented;
+    /* Exact shipped instruction/store subset with only the new lookup-only
+     * fetch refill enabled. Keeping the former product model immediately
+     * above provides a same-stream control for call-continuity accounting. */
+    sequence_signed_extended_t implemented_fetch_refill;
     /* Current product (including its implemented single stores, VSTR S/D,
      * one-block ordinary STM/VSTM and whatever the exact read-only decoder
      * already admits) plus exactly one remaining store family. These side-by-
@@ -25693,6 +25714,7 @@ typedef struct {
     unsigned semantic_fusion_ceiling;
     bool terminal;
     bool exit_thumb;
+    bool dynamic_exit;
 } sequence_signed_classification_t;
 
 static bool sequence_vfp_guard_passes(const arm_cpu_t *cpu, uint32_t insn);
@@ -26898,6 +26920,7 @@ static sequence_signed_classification_t sequence_signed_classify(
 
     result.terminal = sequence_signed_terminal(raw, thumb) ||
                       block.indirect_exit;
+    result.dynamic_exit = block.dynamic_exit;
     /* A normal one-instruction decode appends a fixed END record, which is a
      * block boundary rather than part of that instruction's semantics. An
      * unconditional B is represented by END itself, while conditional B/BL
@@ -27443,6 +27466,7 @@ static void sequence_signed_extended_close(sequence_profile_t *profile,
         model->head_length = 0u;
         model->call_fp_operations = 0u;
         model->head_fp_operations = 0u;
+        model->call_first_head_length = 0u;
         return;
     }
     if (model->call_length <= SEQUENCE_SIGNED_EXTENDED_CAP) {
@@ -27465,6 +27489,7 @@ static void sequence_signed_extended_close(sequence_profile_t *profile,
     model->call_fp_operations = 0u;
     model->head_fp_operations = 0u;
     model->head_length = 0u;
+    model->call_first_head_length = 0u;
 }
 
 static void sequence_signed_store_model_close(
@@ -27477,7 +27502,34 @@ static void sequence_signed_store_model_close(
         model->head_length = 0u;
         model->call_fp_operations = 0u;
         model->head_fp_operations = 0u;
+        model->call_first_head_length = 0u;
+        model->call_fetch_refilled = false;
+        model->call_refill_first_cross_block = false;
+        model->call_refill_first_fixed_cross_block = false;
         return;
+    }
+    if (model->call_fetch_refilled) {
+        unsigned first_head_length = model->call_first_head_length
+            ? model->call_first_head_length : model->head_length;
+        model->fetch_refill_calls++;
+        model->fetch_refill_call_instructions += model->call_length;
+        model->fetch_refill_call_blocks += model->call_blocks;
+        if (model->call_length == 1u) {
+            model->fetch_refill_single_instruction_calls++;
+            if (model->call_refill_first_cross_block)
+                model->fetch_refill_single_cross_block_calls++;
+            if (model->call_refill_first_fixed_cross_block)
+                model->fetch_refill_single_fixed_cross_block_calls++;
+        }
+        if (model->call_length > model->fetch_refill_call_maximum)
+            model->fetch_refill_call_maximum = model->call_length;
+        if (first_head_length == 1u) {
+            model->fetch_refill_first_head_one_calls++;
+            model->fetch_refill_first_head_one_instructions +=
+                model->call_length;
+            if (model->call_length > 1u)
+                model->fetch_refill_first_head_one_multi_calls++;
+        }
     }
     if (model->call_length <= SEQUENCE_SIGNED_EXTENDED_CAP) {
         unsigned length = (unsigned)model->call_length;
@@ -27499,6 +27551,10 @@ static void sequence_signed_store_model_close(
     model->call_fp_operations = 0u;
     model->head_fp_operations = 0u;
     model->head_length = 0u;
+    model->call_first_head_length = 0u;
+    model->call_fetch_refilled = false;
+    model->call_refill_first_cross_block = false;
+    model->call_refill_first_fixed_cross_block = false;
 }
 
 /* Capture the product gate and lookup-only recovery verdict before the
@@ -27594,6 +27650,15 @@ static void sequence_signed_fetch_probe_note(sequence_profile_t *profile) {
     probe->pending = false;
 }
 
+static bool sequence_signed_fetch_probe_recoverable(
+        const sequence_profile_t *profile) {
+    if (!profile || !profile->signed_fetch_probe.pending) return false;
+    sequence_fetch_preflight_outcome_t outcome =
+        profile->signed_fetch_probe.pending_outcome;
+    return outcome == SEQUENCE_FETCH_PREFLIGHT_MMU_OFF_RAM ||
+           outcome == SEQUENCE_FETCH_PREFLIGHT_TLB_RAM;
+}
+
 /* Reproduce every read-only entry gate available to bootkernel. The native
  * handler availability and runtime opt-in are deliberately assumed: this
  * models the iPhone target, while the current Windows host can only decode.
@@ -27602,9 +27667,11 @@ static void sequence_signed_fetch_probe_note(sequence_profile_t *profile) {
 static sequence_signed_gate_t sequence_signed_entry_budget(
         const sequence_profile_t *profile, const s5l8900_t *mach,
         uint32_t pc, bool thumb, uint64_t maximum, uint64_t *budget,
-        sequence_signed_stop_t *budget_stop) {
+        sequence_signed_stop_t *budget_stop, bool allow_fetch_refill,
+        bool *fetch_refilled) {
     if (!profile || !mach || !maximum || !budget || !budget_stop)
         return SEQUENCE_SIGNED_GATE_MACHINE;
+    if (fetch_refilled) *fetch_refilled = false;
     const arm_cpu_t *cpu = &mach->cpu;
     if (cpu->arch != ARM_ARCH_V6_ARM1176 ||
         !arm_mode_is_valid(cpu->cpsr) || cpu->abort_pending ||
@@ -27632,8 +27699,12 @@ static sequence_signed_gate_t sequence_signed_entry_budget(
     uint32_t fetch_block = pc & ~UINT32_C(0x3ff);
     if (!cpu->fetch_host || cpu->fetch_blk != fetch_block ||
         cpu->fetch_gen != cpu->tlb_gen || cpu->fetch_priv != priv ||
-        (pc & (thumb ? 1u : 3u)) != 0u)
-        return SEQUENCE_SIGNED_GATE_FETCH;
+        (pc & (thumb ? 1u : 3u)) != 0u) {
+        if (!allow_fetch_refill ||
+            !sequence_signed_fetch_probe_recoverable(profile))
+            return SEQUENCE_SIGNED_GATE_FETCH;
+        if (fetch_refilled) *fetch_refilled = true;
+    }
 
     uint64_t until_edge = ((uint64_t)mach->cpu_hz - mach->tb_accum +
                            mach->tb_hz - 1u) / mach->tb_hz;
@@ -27696,7 +27767,7 @@ static void sequence_signed_extended_observe(
         sequence_signed_stop_t budget_stop = SEQUENCE_SIGNED_STOP_CAP;
         sequence_signed_gate_t gate = sequence_signed_entry_budget(
             profile, mach, pc, thumb, SEQUENCE_SIGNED_EXTENDED_CAP,
-            &budget, &budget_stop);
+            &budget, &budget_stop, false, NULL);
         if (gate != SEQUENCE_SIGNED_GATE_OK) {
             model->gate_refusals[gate]++;
             return;
@@ -27745,7 +27816,8 @@ static void sequence_signed_store_observe_tagged(
         sequence_profile_t *profile, const s5l8900_t *mach,
         uint32_t pc, bool thumb, bool physical_sequential,
         const sequence_signed_classification_t *classification,
-        sequence_signed_extended_t *model, bool fp_arithmetic) {
+        sequence_signed_extended_t *model, bool fp_arithmetic,
+        bool allow_fetch_refill) {
     if (!profile || !mach || !classification || !model) return;
     bool chained_head = false;
 
@@ -27781,15 +27853,27 @@ static void sequence_signed_store_observe_tagged(
     if (!model->call_length) {
         uint64_t budget = 0u;
         sequence_signed_stop_t budget_stop = SEQUENCE_SIGNED_STOP_CAP;
+        bool fetch_refilled = false;
         sequence_signed_gate_t gate = sequence_signed_entry_budget(
             profile, mach, pc, thumb, SEQUENCE_SIGNED_EXTENDED_CAP,
-            &budget, &budget_stop);
+            &budget, &budget_stop, allow_fetch_refill, &fetch_refilled);
         if (gate != SEQUENCE_SIGNED_GATE_OK) {
             model->gate_refusals[gate]++;
             if (gate == SEQUENCE_SIGNED_GATE_FETCH &&
                 model == &profile->signed_store.implemented)
                 sequence_signed_fetch_probe_note(profile);
             return;
+        }
+        if (fetch_refilled) {
+            model->fetch_refill_recoveries++;
+            model->call_fetch_refilled = true;
+            model->call_refill_first_cross_block =
+                classification->terminal &&
+                (pc & ~UINT32_C(0x3ff)) !=
+                    (classification->exit_pc & ~UINT32_C(0x3ff));
+            model->call_refill_first_fixed_cross_block =
+                model->call_refill_first_cross_block &&
+                !classification->dynamic_exit;
         }
         model->call_remaining = budget;
         model->budget_stop = budget_stop;
@@ -27820,6 +27904,9 @@ static void sequence_signed_store_observe_tagged(
 
     bool head_complete = classification->terminal ||
                          model->head_length == SEQUENCE_SIGNED_CAP;
+    if (head_complete && model->call_fetch_refilled &&
+        !model->call_first_head_length)
+        model->call_first_head_length = model->head_length;
     if (!model->call_remaining) {
             sequence_signed_store_model_close(model, model->budget_stop);
     } else if (head_complete) {
@@ -27848,7 +27935,17 @@ static void sequence_signed_store_observe(
         sequence_signed_extended_t *model) {
     sequence_signed_store_observe_tagged(
         profile, mach, pc, thumb, physical_sequential,
-        classification, model, false);
+        classification, model, false, false);
+}
+
+static void sequence_signed_store_observe_fetch_refill(
+        sequence_profile_t *profile, const s5l8900_t *mach,
+        uint32_t pc, bool thumb, bool physical_sequential,
+        const sequence_signed_classification_t *classification,
+        sequence_signed_extended_t *model) {
+    sequence_signed_store_observe_tagged(
+        profile, mach, pc, thumb, physical_sequential,
+        classification, model, false, true);
 }
 
 static bool sequence_signed_observe(sequence_profile_t *profile,
@@ -27910,6 +28007,12 @@ static bool sequence_signed_observe(sequence_profile_t *profile,
              store_family == SEQUENCE_STORE_THUMB_SINGLE || shipped_vstr ||
              shipped_stm || shipped_vstm))
             implemented_classification = store_classification;
+        /* Observe the refill arm before the old product control consumes the
+         * one pre-profile TLB verdict. Both otherwise see identical input. */
+        sequence_signed_store_observe_fetch_refill(
+            profile, mach, pc, thumb, physical_sequential,
+            &implemented_classification,
+            &profile->signed_store.implemented_fetch_refill);
         sequence_signed_store_observe(
             profile, mach, pc, thumb, physical_sequential,
             &implemented_classification,
@@ -27975,7 +28078,7 @@ static bool sequence_signed_observe(sequence_profile_t *profile,
             profile, mach, pc, thumb, physical_sequential,
             &vfp_arith_classification,
             &profile->signed_post_store.vfp_arith_mode_admitted,
-            vfp_arith_session);
+            vfp_arith_session, false);
         for (unsigned family = 0u;
              family < SEQUENCE_STORE_FAMILY_COUNT; family++) {
             if (family == SEQUENCE_STORE_ARM_SINGLE ||
@@ -28100,7 +28203,7 @@ static bool sequence_signed_observe(sequence_profile_t *profile,
         sequence_signed_stop_t budget_stop = SEQUENCE_SIGNED_STOP_CAP;
         sequence_signed_gate_t gate = sequence_signed_entry_budget(
             profile, mach, pc, thumb, SEQUENCE_SIGNED_CAP,
-            &budget, &budget_stop);
+            &budget, &budget_stop, false, NULL);
         if (gate != SEQUENCE_SIGNED_GATE_OK) {
             profile->signed_gate_refusals[gate]++;
             profile->signed_class_gate_refused[instruction_class]++;
@@ -28176,6 +28279,9 @@ static void sequence_profile_break(sequence_profile_t *profile) {
         &profile->signed_store.extended, SEQUENCE_SIGNED_STOP_OBSERVER);
     sequence_signed_store_model_close(
         &profile->signed_store.implemented, SEQUENCE_SIGNED_STOP_OBSERVER);
+    sequence_signed_store_model_close(
+        &profile->signed_store.implemented_fetch_refill,
+        SEQUENCE_SIGNED_STOP_OBSERVER);
     for (unsigned family = 0u;
          family < SEQUENCE_STORE_FAMILY_COUNT; family++) {
         if (family == SEQUENCE_STORE_ARM_SINGLE ||
@@ -29337,6 +29443,8 @@ static void sequence_profile_report_store_model(
     const sequence_signed_extended_t *current = &profile->signed_extended;
     const sequence_signed_extended_t *model = &store->extended;
     const sequence_signed_extended_t *implemented = &store->implemented;
+    const sequence_signed_extended_t *fetch_refill =
+        &store->implemented_fetch_refill;
     uint64_t family_total = 0u;
     uint64_t invalid = 0u, skipped = 0u, hits = 0u;
     uint64_t implemented_candidates = 0u;
@@ -29349,12 +29457,17 @@ static void sequence_profile_report_store_model(
     uint64_t implemented_histogram_instructions = 0u;
     uint64_t implemented_stops = 0u;
     uint64_t implemented_gate_refusals = 0u;
+    uint64_t fetch_refill_histogram_calls = 0u;
+    uint64_t fetch_refill_histogram_instructions = 0u;
+    uint64_t fetch_refill_stops = 0u;
+    uint64_t fetch_refill_gate_refusals = 0u;
     uint64_t current_eligible =
         profile->signed_outcomes[SEQUENCE_SIGNED_PLAIN] +
         profile->signed_outcomes[SEQUENCE_SIGNED_READ_SKIPPED] +
         profile->signed_outcomes[SEQUENCE_SIGNED_READ_HIT];
     bool lengths_exact = true;
     bool implemented_lengths_exact = true;
+    bool fetch_refill_lengths_exact = true;
 
     for (unsigned family = 0u; family < SEQUENCE_STORE_FAMILY_COUNT;
          family++) {
@@ -29422,14 +29535,22 @@ static void sequence_profile_report_store_model(
         implemented_histogram_instructions += instructions;
         if (instructions != calls * (uint64_t)length)
             implemented_lengths_exact = false;
+        calls = fetch_refill->length_calls[length];
+        instructions = fetch_refill->length_instructions[length];
+        fetch_refill_histogram_calls += calls;
+        fetch_refill_histogram_instructions += instructions;
+        if (instructions != calls * (uint64_t)length)
+            fetch_refill_lengths_exact = false;
     }
     for (unsigned i = 0u; i < SEQUENCE_SIGNED_STOP_COUNT; i++) {
         stops += model->stops[i];
         implemented_stops += implemented->stops[i];
+        fetch_refill_stops += fetch_refill->stops[i];
     }
     for (unsigned i = 1u; i < SEQUENCE_SIGNED_GATE_COUNT; i++) {
         gate_refusals += model->gate_refusals[i];
         implemented_gate_refusals += implemented->gate_refusals[i];
+        fetch_refill_gate_refusals += fetch_refill->gate_refusals[i];
     }
 
     uint64_t proposed_supported = store->candidates >= invalid
@@ -29453,11 +29574,19 @@ static void sequence_profile_report_store_model(
             ? profile->fetched - implemented->instructions +
                   implemented->calls
             : 0u;
+    uint64_t fetch_refill_entries =
+        profile->fetched >= fetch_refill->instructions
+            ? profile->fetched - fetch_refill->instructions +
+                  fetch_refill->calls
+            : 0u;
     uint64_t removed_entries = current_entries >= store_entries
         ? current_entries - store_entries : 0u;
     uint64_t implemented_removed_entries =
         current_entries >= implemented_entries
             ? current_entries - implemented_entries : 0u;
+    uint64_t fetch_refill_removed_entries =
+        implemented_entries >= fetch_refill_entries
+            ? implemented_entries - fetch_refill_entries : 0u;
     bool broad_exact = family_total == store->candidates &&
         proposed_supported == store->decoder_supported &&
         proposed_eligible == store->retirement_eligible &&
@@ -29491,6 +29620,37 @@ static void sequence_profile_report_store_model(
         current_entries >= implemented_entries &&
         implemented_entries >= store_entries &&
         implemented->maximum <= SEQUENCE_SIGNED_EXTENDED_CAP;
+    bool fetch_refill_exact = fetch_refill_lengths_exact &&
+        fetch_refill_histogram_calls == fetch_refill->calls &&
+        fetch_refill_histogram_instructions == fetch_refill->instructions &&
+        fetch_refill_stops == fetch_refill->calls &&
+        implemented_hypothetical_eligible ==
+            fetch_refill->instructions + fetch_refill_gate_refusals &&
+        fetch_refill->blocks ==
+            fetch_refill->calls + fetch_refill->chain_transitions &&
+        fetch_refill->instructions >= implemented->instructions &&
+        implemented_entries >= fetch_refill_entries &&
+        fetch_refill->fetch_refill_calls ==
+            fetch_refill->fetch_refill_recoveries &&
+        fetch_refill->fetch_refill_call_instructions >=
+            fetch_refill->fetch_refill_calls &&
+        fetch_refill->fetch_refill_call_blocks >=
+            fetch_refill->fetch_refill_calls &&
+        fetch_refill->fetch_refill_single_instruction_calls <=
+            fetch_refill->fetch_refill_calls &&
+        fetch_refill->fetch_refill_single_cross_block_calls <=
+            fetch_refill->fetch_refill_single_instruction_calls &&
+        fetch_refill->fetch_refill_single_fixed_cross_block_calls <=
+            fetch_refill->fetch_refill_single_cross_block_calls &&
+        fetch_refill->fetch_refill_first_head_one_multi_calls <=
+            fetch_refill->fetch_refill_first_head_one_calls &&
+        fetch_refill->fetch_refill_first_head_one_calls <=
+            fetch_refill->fetch_refill_calls &&
+        fetch_refill->fetch_refill_first_head_one_instructions >=
+            fetch_refill->fetch_refill_first_head_one_calls &&
+        fetch_refill->fetch_refill_call_maximum <=
+            SEQUENCE_SIGNED_EXTENDED_CAP &&
+        fetch_refill->maximum <= SEQUENCE_SIGNED_EXTENDED_CAP;
 
     printf("\n    capability-gated plain-RAM store architecture model\n");
     printf("      This assumes an iOS frontend explicitly permits callback-free "
@@ -29642,6 +29802,79 @@ static void sequence_profile_report_store_model(
         printf("      This lookup-only fraction is an architectural coverage "
                "bound, not elapsed speed, firmware FPS or phone FPS. It was "
                "sampled before the profiler's diagnostic translation.\n");
+        bool fetch_refill_accounting_exact = fetch_refill_exact &&
+            fetch_refill->fetch_refill_recoveries <= recoverable;
+        printf("      fetch-refill A/B calls/instructions/heads/chains="
+               "%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64
+               " -> %" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64
+               " (refill mean %.3f max=%" PRIu64 ")\n",
+               implemented->calls, implemented->instructions,
+               implemented->blocks, implemented->chain_transitions,
+               fetch_refill->calls, fetch_refill->instructions,
+               fetch_refill->blocks, fetch_refill->chain_transitions,
+               fetch_refill->calls
+                   ? (double)fetch_refill->instructions /
+                         (double)fetch_refill->calls : 0.0,
+               fetch_refill->maximum);
+        printf("      fetch-refill runner entries off/product/removed="
+               "%" PRIu64 "/%" PRIu64 "/%" PRIu64
+               " (%6.3f%% off); recoveries=%" PRIu64
+               " remaining-fetch-refusals=%" PRIu64 "\n",
+               implemented_entries, fetch_refill_entries,
+               fetch_refill_removed_entries,
+               implemented_entries
+                   ? 100.0 * (double)fetch_refill_removed_entries /
+                         (double)implemented_entries : 0.0,
+               fetch_refill->fetch_refill_recoveries,
+               fetch_refill->gate_refusals[SEQUENCE_SIGNED_GATE_FETCH]);
+        printf("      recovered calls/instructions/heads/single/xblk/"
+               "fixed-xblk/max="
+               "%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64
+               "/%" PRIu64 "/%" PRIu64 "/%" PRIu64
+               " (mean-insns %.3f mean-heads %.3f; "
+               "single %.3f%%)\n",
+               fetch_refill->fetch_refill_calls,
+               fetch_refill->fetch_refill_call_instructions,
+               fetch_refill->fetch_refill_call_blocks,
+               fetch_refill->fetch_refill_single_instruction_calls,
+               fetch_refill->fetch_refill_single_cross_block_calls,
+               fetch_refill->fetch_refill_single_fixed_cross_block_calls,
+               fetch_refill->fetch_refill_call_maximum,
+               fetch_refill->fetch_refill_calls
+                   ? (double)fetch_refill->fetch_refill_call_instructions /
+                         (double)fetch_refill->fetch_refill_calls : 0.0,
+               fetch_refill->fetch_refill_calls
+                   ? (double)fetch_refill->fetch_refill_call_blocks /
+                         (double)fetch_refill->fetch_refill_calls : 0.0,
+               fetch_refill->fetch_refill_calls
+                   ? 100.0 *
+                         (double)fetch_refill->
+                             fetch_refill_single_instruction_calls /
+                         (double)fetch_refill->fetch_refill_calls : 0.0);
+        printf("      recovered first-head-one calls/multi/instructions="
+               "%" PRIu64 "/%" PRIu64 "/%" PRIu64
+               " (calls %.3f%%; mean-insns %.3f)\n",
+               fetch_refill->fetch_refill_first_head_one_calls,
+               fetch_refill->fetch_refill_first_head_one_multi_calls,
+               fetch_refill->fetch_refill_first_head_one_instructions,
+               fetch_refill->fetch_refill_calls
+                   ? 100.0 *
+                         (double)fetch_refill->
+                             fetch_refill_first_head_one_calls /
+                         (double)fetch_refill->fetch_refill_calls : 0.0,
+               fetch_refill->fetch_refill_first_head_one_calls
+                   ? (double)fetch_refill->
+                         fetch_refill_first_head_one_instructions /
+                         (double)fetch_refill->
+                             fetch_refill_first_head_one_calls : 0.0);
+        printf("      fetch-refill histogram calls/instructions=%" PRIu64
+               "/%" PRIu64 " stops=%" PRIu64
+               " blocks/calls+chains=%" PRIu64 "/%" PRIu64 "  %s\n",
+               fetch_refill_histogram_calls,
+               fetch_refill_histogram_instructions, fetch_refill_stops,
+               fetch_refill->blocks,
+               fetch_refill->calls + fetch_refill->chain_transitions,
+               fetch_refill_accounting_exact ? "EXACT" : "MISMATCH");
     }
     printf("      current/broad-ceiling calls/instructions/heads/chains="
            "%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64
