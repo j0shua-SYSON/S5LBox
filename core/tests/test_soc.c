@@ -3586,6 +3586,11 @@ static void test_signed_static_a64_ldm_oracle(void) {
     CHECK(s5l8900_static_a64_set_ldm(&fast, false) &&
               s5l8900_static_a64_set_ldm(&fast, true),
           "LDM oracle same-binary rollout switch failed");
+    /* The generic harness starts at one sixteen-instruction head. The iOS
+     * product selects 256 so a complete sixteen-instruction loop can cross
+     * its terminal branch and prove the callback-free graph path. */
+    CHECK(s5l8900_static_a64_set_chain_limit(&fast, 256u),
+          "LDM oracle product chain limit was refused");
     CHECK(s5l8900_static_a64_set_graph(&fast, true),
           "LDM oracle graph engine refused an available host");
     CHECK(s5l8900_run(&fast, 16000u, &fast_status) == 16000u,
