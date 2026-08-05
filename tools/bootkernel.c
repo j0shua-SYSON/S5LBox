@@ -24852,6 +24852,21 @@ typedef enum {
 } sequence_vfp_store_frontier_t;
 
 typedef enum {
+    SEQUENCE_VSTM_MODE_IA_NO_WB = 0,
+    SEQUENCE_VSTM_MODE_IA_WB,
+    SEQUENCE_VSTM_MODE_DB_WB,
+    SEQUENCE_VSTM_MODE_OTHER,
+    SEQUENCE_VSTM_MODE_COUNT
+} sequence_vstm_mode_t;
+
+typedef enum {
+    SEQUENCE_VSTM_FRONTIER_EVEN_ONE_BLOCK = 0,
+    SEQUENCE_VSTM_FRONTIER_EVEN_ALL,
+    SEQUENCE_VSTM_FRONTIER_FSTMX,
+    SEQUENCE_VSTM_FRONTIER_COUNT
+} sequence_vstm_frontier_t;
+
+typedef enum {
     SEQUENCE_ARM_BLOCK_ORDINARY_NO_WB = 0,
     SEQUENCE_ARM_BLOCK_ORDINARY_WB,
     SEQUENCE_ARM_BLOCK_ORDINARY_WB_BASE,
@@ -24888,11 +24903,19 @@ typedef struct {
     sequence_signed_extended_t
         vfp_frontier[SEQUENCE_VFP_STORE_FRONTIER_COUNT];
     sequence_signed_extended_t
+        vstm_frontier[SEQUENCE_VSTM_FRONTIER_COUNT];
+    sequence_signed_extended_t
         arm_block_frontier[SEQUENCE_ARM_BLOCK_FRONTIER_COUNT];
     uint64_t family_outcomes[SEQUENCE_STORE_FAMILY_COUNT]
                             [SEQUENCE_STORE_OUTCOME_COUNT];
     uint64_t vfp_kind_outcomes[SEQUENCE_VFP_STORE_KIND_COUNT]
                               [SEQUENCE_STORE_OUTCOME_COUNT];
+    uint64_t vstm_mode_outcomes[SEQUENCE_VSTM_MODE_COUNT]
+                               [SEQUENCE_STORE_OUTCOME_COUNT];
+    uint64_t vstm_words_outcomes[256u][SEQUENCE_STORE_OUTCOME_COUNT];
+    uint64_t vstm_span_outcomes[3u][SEQUENCE_STORE_OUTCOME_COUNT];
+    uint64_t vstm_frontier_outcomes[SEQUENCE_VSTM_FRONTIER_COUNT]
+                                   [SEQUENCE_STORE_OUTCOME_COUNT];
     uint64_t arm_block_kind_outcomes[SEQUENCE_ARM_BLOCK_KIND_COUNT]
                                     [SEQUENCE_STORE_OUTCOME_COUNT];
     uint64_t arm_block_mode_outcomes[4u][SEQUENCE_STORE_OUTCOME_COUNT];
@@ -25901,7 +25924,9 @@ static bool sequence_store_arm_block_stm_shape(uint32_t insn) {
 static sequence_store_outcome_t sequence_store_arm_vfp(
         arm_cpu_t *cpu, uint32_t pc, uint32_t insn,
         sequence_store_blocks_t *blocks,
-        sequence_vfp_store_kind_t *kind_out) {
+        sequence_vfp_store_kind_t *kind_out,
+        sequence_vstm_mode_t *vstm_mode_out,
+        unsigned *vstm_words_out) {
     bool pre = (insn & (1u << 24)) != 0u;
     bool up = (insn & (1u << 23)) != 0u;
     bool high = (insn & (1u << 22)) != 0u;
@@ -25913,6 +25938,9 @@ static sequence_store_outcome_t sequence_store_arm_vfp(
     unsigned imm8 = insn & 255u;
     unsigned words;
 
+    if (vstm_mode_out) *vstm_mode_out = SEQUENCE_VSTM_MODE_OTHER;
+    if (vstm_words_out) *vstm_words_out = 0u;
+
     if (kind_out) {
         if (pre && !writeback)
             *kind_out = dbl ? SEQUENCE_VFP_STORE_VSTR_D
@@ -25923,6 +25951,16 @@ static sequence_store_outcome_t sequence_store_arm_vfp(
             *kind_out = SEQUENCE_VFP_STORE_FSTMX_D;
         else
             *kind_out = SEQUENCE_VFP_STORE_VSTM_D;
+    }
+    if (!(pre && !writeback)) {
+        sequence_vstm_mode_t mode = SEQUENCE_VSTM_MODE_OTHER;
+        if (!pre && up)
+            mode = writeback ? SEQUENCE_VSTM_MODE_IA_WB
+                             : SEQUENCE_VSTM_MODE_IA_NO_WB;
+        else if (pre && !up && writeback)
+            mode = SEQUENCE_VSTM_MODE_DB_WB;
+        if (vstm_mode_out) *vstm_mode_out = mode;
+        if (vstm_words_out) *vstm_words_out = imm8;
     }
 
     if (!cpu || !blocks || !kind_out || load ||
@@ -26087,6 +26125,8 @@ static bool sequence_store_classify(
         sequence_signed_classification_t *classification,
         sequence_store_family_t *family_out,
         sequence_vfp_store_kind_t *vfp_kind_out,
+        sequence_vstm_mode_t *vstm_mode_out,
+        unsigned *vstm_words_out, unsigned *vstm_span_out,
         sequence_arm_block_kind_t *arm_block_kind_out,
         unsigned *arm_block_mode_out, unsigned *arm_block_words_out,
         unsigned *arm_block_span_out,
@@ -26095,6 +26135,8 @@ static bool sequence_store_classify(
     sequence_store_family_t family = SEQUENCE_STORE_ARM_SINGLE;
     sequence_store_outcome_t outcome = SEQUENCE_STORE_INVALID;
     sequence_vfp_store_kind_t vfp_kind = SEQUENCE_VFP_STORE_KIND_COUNT;
+    sequence_vstm_mode_t vstm_mode = SEQUENCE_VSTM_MODE_COUNT;
+    unsigned vstm_words = 256u;
     sequence_arm_block_kind_t arm_block_kind =
         SEQUENCE_ARM_BLOCK_KIND_COUNT;
     unsigned arm_block_mode = 4u;
@@ -26104,6 +26146,9 @@ static bool sequence_store_classify(
 
     if (family_out) *family_out = SEQUENCE_STORE_FAMILY_COUNT;
     if (vfp_kind_out) *vfp_kind_out = SEQUENCE_VFP_STORE_KIND_COUNT;
+    if (vstm_mode_out) *vstm_mode_out = SEQUENCE_VSTM_MODE_COUNT;
+    if (vstm_words_out) *vstm_words_out = 256u;
+    if (vstm_span_out) *vstm_span_out = 0u;
     if (arm_block_kind_out)
         *arm_block_kind_out = SEQUENCE_ARM_BLOCK_KIND_COUNT;
     if (arm_block_mode_out) *arm_block_mode_out = 4u;
@@ -26132,11 +26177,14 @@ static bool sequence_store_classify(
         family = SEQUENCE_STORE_ARM_VFP;
         candidate = true;
         outcome = sequence_store_arm_vfp(
-            cpu, pc, raw, &blocks, &vfp_kind);
+            cpu, pc, raw, &blocks, &vfp_kind, &vstm_mode, &vstm_words);
     }
     if (!candidate) return false;
     if (family_out) *family_out = family;
     if (vfp_kind_out) *vfp_kind_out = vfp_kind;
+    if (vstm_mode_out) *vstm_mode_out = vstm_mode;
+    if (vstm_words_out) *vstm_words_out = vstm_words;
+    if (vstm_span_out) *vstm_span_out = blocks.count;
     if (arm_block_kind_out) *arm_block_kind_out = arm_block_kind;
     if (arm_block_mode_out) *arm_block_mode_out = arm_block_mode;
     if (arm_block_words_out) *arm_block_words_out = arm_block_words;
@@ -26152,6 +26200,32 @@ static bool sequence_store_classify(
     if (family == SEQUENCE_STORE_ARM_VFP &&
         vfp_kind < SEQUENCE_VFP_STORE_KIND_COUNT)
         profile->signed_store.vfp_kind_outcomes[vfp_kind][outcome]++;
+    if (family == SEQUENCE_STORE_ARM_VFP &&
+        vfp_kind >= SEQUENCE_VFP_STORE_VSTM_S &&
+        vfp_kind < SEQUENCE_VFP_STORE_KIND_COUNT &&
+        vstm_mode < SEQUENCE_VSTM_MODE_COUNT && vstm_words < 256u &&
+        blocks.count <= 2u) {
+        profile->signed_store.vstm_mode_outcomes[vstm_mode][outcome]++;
+        profile->signed_store.vstm_words_outcomes[vstm_words][outcome]++;
+        profile->signed_store.vstm_span_outcomes[blocks.count][outcome]++;
+
+        bool even = vfp_kind == SEQUENCE_VFP_STORE_VSTM_S ||
+                    vfp_kind == SEQUENCE_VFP_STORE_VSTM_D;
+        if (even) {
+            sequence_store_outcome_t one_block_outcome = outcome;
+            if (blocks.count > 1u && outcome != SEQUENCE_STORE_INVALID &&
+                outcome != SEQUENCE_STORE_CONDITION_SKIP)
+                one_block_outcome = SEQUENCE_STORE_STATE_GUARD;
+            profile->signed_store.vstm_frontier_outcomes[
+                SEQUENCE_VSTM_FRONTIER_EVEN_ONE_BLOCK]
+                [one_block_outcome]++;
+            profile->signed_store.vstm_frontier_outcomes[
+                SEQUENCE_VSTM_FRONTIER_EVEN_ALL][outcome]++;
+        } else if (vfp_kind == SEQUENCE_VFP_STORE_FSTMX_D) {
+            profile->signed_store.vstm_frontier_outcomes[
+                SEQUENCE_VSTM_FRONTIER_FSTMX][outcome]++;
+        }
+    }
     if (family == SEQUENCE_STORE_ARM_BLOCK &&
         arm_block_kind < SEQUENCE_ARM_BLOCK_KIND_COUNT &&
         arm_block_mode < 4u && arm_block_words <= 16u &&
@@ -26996,6 +27070,9 @@ static bool sequence_signed_observe(sequence_profile_t *profile,
             SEQUENCE_STORE_FAMILY_COUNT;
         sequence_vfp_store_kind_t vfp_store_kind =
             SEQUENCE_VFP_STORE_KIND_COUNT;
+        sequence_vstm_mode_t vstm_mode = SEQUENCE_VSTM_MODE_COUNT;
+        unsigned vstm_words = 256u;
+        unsigned vstm_span = 0u;
         sequence_arm_block_kind_t arm_block_kind =
             SEQUENCE_ARM_BLOCK_KIND_COUNT;
         unsigned arm_block_mode = 4u;
@@ -27005,6 +27082,7 @@ static bool sequence_signed_observe(sequence_profile_t *profile,
         bool store_eligible = sequence_store_classify(
             profile, &mach->cpu, pc, raw, thumb, instruction_class,
             &store_classification, &store_family, &vfp_store_kind,
+            &vstm_mode, &vstm_words, &vstm_span,
             &arm_block_kind, &arm_block_mode, &arm_block_words,
             &arm_block_span, &arm_block_stm_shape);
         sequence_signed_store_observe(
@@ -27058,6 +27136,32 @@ static bool sequence_signed_observe(sequence_profile_t *profile,
                 profile, mach, pc, thumb, physical_sequential,
                 &vfp_classification,
                 &profile->signed_store.vfp_frontier[frontier]);
+        }
+        for (unsigned frontier = 0u;
+             frontier < SEQUENCE_VSTM_FRONTIER_COUNT; frontier++) {
+            sequence_signed_classification_t vstm_classification =
+                implemented_classification;
+            bool even = vfp_store_kind == SEQUENCE_VFP_STORE_VSTM_S ||
+                        vfp_store_kind == SEQUENCE_VFP_STORE_VSTM_D;
+            bool selected;
+            if (frontier == SEQUENCE_VSTM_FRONTIER_EVEN_ONE_BLOCK) {
+                selected = even &&
+                    (store_classification.outcome ==
+                         SEQUENCE_SIGNED_READ_SKIPPED ||
+                     vstm_span == 1u);
+            } else if (frontier == SEQUENCE_VSTM_FRONTIER_EVEN_ALL) {
+                selected = even;
+            } else {
+                selected =
+                    vfp_store_kind == SEQUENCE_VFP_STORE_FSTMX_D;
+            }
+            if (store_eligible &&
+                store_family == SEQUENCE_STORE_ARM_VFP && selected)
+                vstm_classification = store_classification;
+            sequence_signed_store_observe(
+                profile, mach, pc, thumb, physical_sequential,
+                &vstm_classification,
+                &profile->signed_store.vstm_frontier[frontier]);
         }
         for (unsigned frontier = 0u;
              frontier < SEQUENCE_ARM_BLOCK_FRONTIER_COUNT; frontier++) {
@@ -27214,6 +27318,11 @@ static void sequence_profile_break(sequence_profile_t *profile) {
          frontier < SEQUENCE_VFP_STORE_FRONTIER_COUNT; frontier++)
         sequence_signed_store_model_close(
             &profile->signed_store.vfp_frontier[frontier],
+            SEQUENCE_SIGNED_STOP_OBSERVER);
+    for (unsigned frontier = 0u;
+         frontier < SEQUENCE_VSTM_FRONTIER_COUNT; frontier++)
+        sequence_signed_store_model_close(
+            &profile->signed_store.vstm_frontier[frontier],
             SEQUENCE_SIGNED_STOP_OBSERVER);
     for (unsigned frontier = 0u;
          frontier < SEQUENCE_ARM_BLOCK_FRONTIER_COUNT; frontier++)
@@ -28319,6 +28428,13 @@ static void sequence_profile_report_store_model(
             SEQUENCE_VFP_STORE_FRONTIER_COUNT] = {
         "VSTR shipped", "VSTM/FSTMX"
     };
+    static const char *const VSTM_MODES[SEQUENCE_VSTM_MODE_COUNT] = {
+        "IA no-WB", "IA WB", "DB WB", "other/invalid"
+    };
+    static const char *const VSTM_FRONTIERS[
+            SEQUENCE_VSTM_FRONTIER_COUNT] = {
+        "VSTM 1blk", "VSTM all", "FSTMX"
+    };
     static const char *const ARM_BLOCK_KINDS[
             SEQUENCE_ARM_BLOCK_KIND_COUNT] = {
         "ordinary no-WB", "ordinary WB", "WB base-in-list", "user bank"
@@ -29095,6 +29211,200 @@ static void sequence_profile_report_store_model(
                " %12" PRIu64 " %10" PRIu64 " %10" PRIu64
                " %12" PRIu64 " %10" PRIu64 " %7.3f%% %s\n",
                VFP_FRONTIERS[selected], selected_candidates,
+               selected_eligible, frontier->calls, frontier->instructions,
+               frontier->blocks, frontier->chain_transitions,
+               frontier_entries, frontier_removed,
+               implemented_entries
+                   ? 100.0 * (double)frontier_removed /
+                         (double)implemented_entries : 0.0,
+                frontier_exact ? "EXACT" : "MISMATCH");
+    }
+
+    uint64_t vstm_family_candidates = 0u;
+    uint64_t vstm_family_eligible = 0u;
+    for (unsigned kind = SEQUENCE_VFP_STORE_VSTM_S;
+         kind < SEQUENCE_VFP_STORE_KIND_COUNT; kind++) {
+        const uint64_t *row = store->vfp_kind_outcomes[kind];
+        for (unsigned outcome = 0u;
+             outcome < SEQUENCE_STORE_OUTCOME_COUNT; outcome++)
+            vstm_family_candidates += row[outcome];
+        vstm_family_eligible += row[SEQUENCE_STORE_CONDITION_SKIP] +
+                                row[SEQUENCE_STORE_DWRITE_HIT];
+    }
+    uint64_t vstm_mode_candidates = 0u;
+    uint64_t vstm_mode_eligible = 0u;
+    uint64_t vstm_words_candidates = 0u;
+    uint64_t vstm_words_eligible = 0u;
+    uint64_t vstm_span_candidates = 0u;
+    uint64_t vstm_span_eligible = 0u;
+
+    printf("      A32 VSTM/FSTMX semantic split\n");
+    printf("        %-20s %10s %10s %10s %10s %10s %10s %10s\n",
+           "address mode", "candidate", "eligible", "cond-skip", "hit",
+           "miss-fill", "state", "invalid");
+    for (unsigned mode = 0u; mode < SEQUENCE_VSTM_MODE_COUNT; mode++) {
+        const uint64_t *row = store->vstm_mode_outcomes[mode];
+        uint64_t candidates = 0u;
+        for (unsigned outcome = 0u;
+             outcome < SEQUENCE_STORE_OUTCOME_COUNT; outcome++)
+            candidates += row[outcome];
+        uint64_t eligible = row[SEQUENCE_STORE_CONDITION_SKIP] +
+                            row[SEQUENCE_STORE_DWRITE_HIT];
+        vstm_mode_candidates += candidates;
+        vstm_mode_eligible += eligible;
+        if (!candidates) continue;
+        printf("        %-20s %10" PRIu64 " %10" PRIu64
+               " %10" PRIu64 " %10" PRIu64 " %10" PRIu64
+               " %10" PRIu64 " %10" PRIu64 "\n",
+               VSTM_MODES[mode], candidates, eligible,
+               row[SEQUENCE_STORE_CONDITION_SKIP],
+               row[SEQUENCE_STORE_DWRITE_HIT],
+               row[SEQUENCE_STORE_DWRITE_MISS_FILL],
+               row[SEQUENCE_STORE_STATE_GUARD],
+               row[SEQUENCE_STORE_INVALID]);
+    }
+    printf("        %-20s %10s %10s %10s %10s %10s %10s %10s\n",
+           "transfer words", "candidate", "eligible", "cond-skip", "hit",
+           "miss-fill", "state", "invalid");
+    for (unsigned words = 0u; words < 256u; words++) {
+        const uint64_t *row = store->vstm_words_outcomes[words];
+        uint64_t candidates = 0u;
+        for (unsigned outcome = 0u;
+             outcome < SEQUENCE_STORE_OUTCOME_COUNT; outcome++)
+            candidates += row[outcome];
+        uint64_t eligible = row[SEQUENCE_STORE_CONDITION_SKIP] +
+                            row[SEQUENCE_STORE_DWRITE_HIT];
+        vstm_words_candidates += candidates;
+        vstm_words_eligible += eligible;
+        if (!candidates) continue;
+        char label[32];
+        (void)snprintf(label, sizeof label, "%u", words);
+        printf("        %-20s %10" PRIu64 " %10" PRIu64
+               " %10" PRIu64 " %10" PRIu64 " %10" PRIu64
+               " %10" PRIu64 " %10" PRIu64 "\n",
+               label, candidates, eligible,
+               row[SEQUENCE_STORE_CONDITION_SKIP],
+               row[SEQUENCE_STORE_DWRITE_HIT],
+               row[SEQUENCE_STORE_DWRITE_MISS_FILL],
+               row[SEQUENCE_STORE_STATE_GUARD],
+               row[SEQUENCE_STORE_INVALID]);
+    }
+    printf("        %-20s %10s %10s %10s %10s %10s %10s %10s\n",
+           "DWRITE spans", "candidate", "eligible", "cond-skip", "hit",
+           "miss-fill", "state", "invalid");
+    for (unsigned span = 0u; span <= 2u; span++) {
+        const uint64_t *row = store->vstm_span_outcomes[span];
+        uint64_t candidates = 0u;
+        for (unsigned outcome = 0u;
+             outcome < SEQUENCE_STORE_OUTCOME_COUNT; outcome++)
+            candidates += row[outcome];
+        uint64_t eligible = row[SEQUENCE_STORE_CONDITION_SKIP] +
+                            row[SEQUENCE_STORE_DWRITE_HIT];
+        vstm_span_candidates += candidates;
+        vstm_span_eligible += eligible;
+        char label[32];
+        (void)snprintf(label, sizeof label, "%u block%s", span,
+                       span == 1u ? "" : "s");
+        printf("        %-20s %10" PRIu64 " %10" PRIu64
+               " %10" PRIu64 " %10" PRIu64 " %10" PRIu64
+               " %10" PRIu64 " %10" PRIu64 "\n",
+               label, candidates, eligible,
+               row[SEQUENCE_STORE_CONDITION_SKIP],
+               row[SEQUENCE_STORE_DWRITE_HIT],
+               row[SEQUENCE_STORE_DWRITE_MISS_FILL],
+               row[SEQUENCE_STORE_STATE_GUARD],
+               row[SEQUENCE_STORE_INVALID]);
+    }
+    bool vstm_semantic_exact =
+        vstm_mode_candidates == vstm_family_candidates &&
+        vstm_mode_eligible == vstm_family_eligible &&
+        vstm_words_candidates == vstm_family_candidates &&
+        vstm_words_eligible == vstm_family_eligible &&
+        vstm_span_candidates == vstm_family_candidates &&
+        vstm_span_eligible == vstm_family_eligible;
+    printf("        mode/words/span candidates=%" PRIu64 "/%" PRIu64
+           "/%" PRIu64 " family=%" PRIu64 " eligible=%" PRIu64
+           "/%" PRIu64 "/%" PRIu64 " family=%" PRIu64 "  %s\n",
+           vstm_mode_candidates, vstm_words_candidates,
+           vstm_span_candidates, vstm_family_candidates,
+           vstm_mode_eligible, vstm_words_eligible, vstm_span_eligible,
+           vstm_family_eligible,
+           vstm_semantic_exact ? "EXACT" : "MISMATCH");
+
+    printf("      A32 VSTM/FSTMX implementation continuity split\n");
+    printf("        The even one-block row models a transactional handler that "
+           "refuses before any write if a live transfer crosses a 1 KiB "
+           "DWRITE block. The even-all and deprecated odd-count FSTMX rows "
+           "remain separate. These are exact continuity frontiers, not "
+           "measured speedups or product support.\n");
+    printf("        %-14s %10s %10s %10s %12s %10s %10s %12s %10s %8s %s\n",
+           "frontier", "candidate", "eligible", "calls", "instructions",
+           "heads", "chains", "entries", "removed", "%base", "gate");
+    const sequence_signed_extended_t *vfp_all =
+        &store->family_frontier[SEQUENCE_STORE_ARM_VFP];
+    uint64_t vfp_all_entries =
+        profile->fetched >= vfp_all->instructions
+            ? profile->fetched - vfp_all->instructions + vfp_all->calls
+            : 0u;
+    for (unsigned selected = 0u;
+         selected < SEQUENCE_VSTM_FRONTIER_COUNT; selected++) {
+        const sequence_signed_extended_t *frontier =
+            &store->vstm_frontier[selected];
+        const uint64_t *row = store->vstm_frontier_outcomes[selected];
+        uint64_t selected_candidates = 0u;
+        for (unsigned outcome = 0u;
+             outcome < SEQUENCE_STORE_OUTCOME_COUNT; outcome++)
+            selected_candidates += row[outcome];
+        uint64_t selected_eligible =
+            row[SEQUENCE_STORE_CONDITION_SKIP] +
+            row[SEQUENCE_STORE_DWRITE_HIT];
+        uint64_t frontier_histogram_calls = 0u;
+        uint64_t frontier_histogram_instructions = 0u;
+        uint64_t frontier_stops = 0u;
+        uint64_t frontier_gate_refusals = 0u;
+        bool frontier_lengths_exact = true;
+        for (unsigned length = 1u;
+             length <= SEQUENCE_SIGNED_EXTENDED_CAP; length++) {
+            uint64_t calls = frontier->length_calls[length];
+            uint64_t instructions = frontier->length_instructions[length];
+            frontier_histogram_calls += calls;
+            frontier_histogram_instructions += instructions;
+            if (instructions != calls * (uint64_t)length)
+                frontier_lengths_exact = false;
+        }
+        for (unsigned i = 0u; i < SEQUENCE_SIGNED_STOP_COUNT; i++)
+            frontier_stops += frontier->stops[i];
+        for (unsigned i = 1u; i < SEQUENCE_SIGNED_GATE_COUNT; i++)
+            frontier_gate_refusals += frontier->gate_refusals[i];
+        uint64_t frontier_entries =
+            profile->fetched >= frontier->instructions
+                ? profile->fetched - frontier->instructions +
+                      frontier->calls
+                : 0u;
+        uint64_t frontier_removed =
+            implemented_entries >= frontier_entries
+                ? implemented_entries - frontier_entries : 0u;
+        uint64_t frontier_eligible = current_eligible +
+                                     implemented_eligible +
+                                     selected_eligible;
+        bool frontier_exact = vstm_semantic_exact &&
+            frontier_lengths_exact &&
+            frontier_histogram_calls == frontier->calls &&
+            frontier_histogram_instructions == frontier->instructions &&
+            frontier_stops == frontier->calls &&
+            frontier_eligible ==
+                frontier->instructions + frontier_gate_refusals &&
+            frontier->blocks ==
+                frontier->calls + frontier->chain_transitions &&
+            frontier->instructions >= implemented->instructions &&
+            vfp_all->instructions >= frontier->instructions &&
+            implemented_entries >= frontier_entries &&
+            frontier_entries >= vfp_all_entries &&
+            frontier->maximum <= SEQUENCE_SIGNED_EXTENDED_CAP;
+        printf("        %-14s %10" PRIu64 " %10" PRIu64 " %10" PRIu64
+               " %12" PRIu64 " %10" PRIu64 " %10" PRIu64
+               " %12" PRIu64 " %10" PRIu64 " %7.3f%% %s\n",
+               VSTM_FRONTIERS[selected], selected_candidates,
                selected_eligible, frontier->calls, frontier->instructions,
                frontier->blocks, frontier->chain_transitions,
                frontier_entries, frontier_removed,
