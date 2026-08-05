@@ -25007,6 +25007,40 @@ typedef struct {
     uint64_t product_overlaps;
 } sequence_signed_indirect_t;
 
+typedef enum {
+    SEQUENCE_POST_STORE_THUMB_COND_BRANCH = 0,
+    SEQUENCE_POST_STORE_ARM_LDM_ONE_BLOCK,
+    SEQUENCE_POST_STORE_VLDM_ONE_BLOCK,
+    SEQUENCE_POST_STORE_THUMB_MULTI_LOAD_ONE_BLOCK,
+    SEQUENCE_POST_STORE_ARM_MULTIPLY_CEILING,
+    SEQUENCE_POST_STORE_VFP_COMPUTE_CEILING,
+    SEQUENCE_POST_STORE_FAMILY_COUNT
+} sequence_post_store_family_t;
+
+typedef enum {
+    SEQUENCE_POST_STORE_INVALID = 0,
+    SEQUENCE_POST_STORE_CONDITION_SKIP,
+    SEQUENCE_POST_STORE_PLAIN,
+    SEQUENCE_POST_STORE_DREAD_HIT,
+    SEQUENCE_POST_STORE_DREAD_MISS,
+    SEQUENCE_POST_STORE_ALIGNMENT,
+    SEQUENCE_POST_STORE_CROSS_BLOCK,
+    SEQUENCE_POST_STORE_STATE_GUARD,
+    SEQUENCE_POST_STORE_BRANCH_TAKEN,
+    SEQUENCE_POST_STORE_BRANCH_FALLTHROUGH,
+    SEQUENCE_POST_STORE_OUTCOME_COUNT
+} sequence_post_store_outcome_t;
+
+/* Side-by-side, read-only continuations of the exact shipped-store baseline.
+ * The first four rows are deliberately bounded implementation contracts. The
+ * final two are one-record semantic ceilings: they rank potential continuity
+ * but make no claim that exact native arithmetic has been proved. */
+typedef struct {
+    sequence_signed_extended_t family[SEQUENCE_POST_STORE_FAMILY_COUNT];
+    uint64_t outcomes[SEQUENCE_POST_STORE_FAMILY_COUNT]
+                     [SEQUENCE_POST_STORE_OUTCOME_COUNT];
+} sequence_signed_post_store_t;
+
 static const char *const SEQUENCE_CLASS_NAMES[SEQUENCE_CLASS_COUNT] = {
     "ARM data-processing", "ARM data-processing -> pc", "ARM B/BL",
     "ARM single load/store", "ARM block load/store", "ARM extra/sync",
@@ -25229,6 +25263,7 @@ typedef struct {
     sequence_signed_extended_t signed_extended;
     sequence_signed_store_t signed_store;
     sequence_signed_indirect_t signed_indirect;
+    sequence_signed_post_store_t signed_post_store;
 
     bool have_previous;
     bool previous_thumb;
@@ -26626,6 +26661,238 @@ static sequence_signed_classification_t sequence_signed_classify(
         ? SEQUENCE_SIGNED_READ_HIT : SEQUENCE_SIGNED_READ_MISS;
     return result;
 }
+
+static bool sequence_post_store_retireable(
+        const sequence_signed_classification_t *classification) {
+    return classification &&
+        (classification->outcome == SEQUENCE_SIGNED_PLAIN ||
+         classification->outcome == SEQUENCE_SIGNED_READ_SKIPPED ||
+         classification->outcome == SEQUENCE_SIGNED_READ_HIT);
+}
+
+static unsigned sequence_post_store_popcount(uint32_t value) {
+    unsigned count = 0u;
+    while (value) {
+        count += value & 1u;
+        value >>= 1;
+    }
+    return count;
+}
+
+/* Exact read-only counterpart of a transactional one-block DREAD preflight.
+ * The literal interpreter retains every miss, cross-block transfer, alignment
+ * fault and unsupported state. A hit proves the complete span is callback-free
+ * plain RAM before a hypothetical handler commits any destination register. */
+static sequence_post_store_outcome_t sequence_post_store_dread_span(
+        const arm_cpu_t *cpu, uint32_t address, unsigned bytes) {
+    if (!cpu || !bytes) return SEQUENCE_POST_STORE_INVALID;
+    if ((address & 3u) != 0u) {
+        if ((cpu->cp15.sctlr & (ARM_SCTLR_U | ARM_SCTLR_A)) != 0u)
+            return SEQUENCE_POST_STORE_ALIGNMENT;
+        address &= ~UINT32_C(3);
+    }
+    if ((uint64_t)address + (uint64_t)bytes - 1u > UINT32_MAX ||
+        (uint64_t)(address & UINT32_C(0x3ff)) + bytes > 1024u)
+        return SEQUENCE_POST_STORE_CROSS_BLOCK;
+    bool privileged =
+        (cpu->cpsr & ARM_CPSR_MODE_MASK) != ARM_MODE_USR;
+    return sequence_dread_would_hit(cpu, address, bytes, privileged)
+        ? SEQUENCE_POST_STORE_DREAD_HIT
+        : SEQUENCE_POST_STORE_DREAD_MISS;
+}
+
+static void sequence_post_store_admit(
+        sequence_signed_classification_t *classification,
+        sequence_signed_outcome_t outcome) {
+    if (!classification) return;
+    classification->outcome = outcome;
+    classification->handler_records = 1u;
+    classification->guard_fusion_ceiling = 0u;
+    classification->semantic_fusion_ceiling = 0u;
+    classification->terminal = false;
+}
+
+/* Classify one still-rejected instruction against broad post-store families.
+ * Multi-load rows are exact bounded contracts. The multiply and VFP-compute
+ * rows deliberately assume a perfect one-record semantic implementation and
+ * are reported as ceilings, never as implementation-ready coverage. */
+static sequence_post_store_family_t sequence_post_store_classify(
+        const arm_cpu_t *cpu, uint32_t pc, uint32_t raw, bool thumb,
+        sequence_class_t instruction_class,
+        const sequence_signed_classification_t *baseline,
+        sequence_signed_classification_t *candidate,
+        sequence_post_store_outcome_t *outcome, bool *eligible) {
+    if (!cpu || !baseline || !candidate || !outcome || !eligible ||
+        sequence_post_store_retireable(baseline))
+        return SEQUENCE_POST_STORE_FAMILY_COUNT;
+    *candidate = *baseline;
+    *outcome = SEQUENCE_POST_STORE_INVALID;
+    *eligible = false;
+
+    if (thumb) {
+        uint16_t insn = (uint16_t)raw;
+        if ((insn & UINT16_C(0xf000)) == UINT16_C(0xd000) &&
+            ((insn >> 8) & 15u) < 14u) {
+            unsigned condition = (insn >> 8) & 15u;
+            bool taken = arm_cond_passed(cpu, condition);
+            int32_t displacement =
+                (int32_t)(int8_t)(uint8_t)insn * 2;
+            sequence_post_store_admit(candidate, SEQUENCE_SIGNED_PLAIN);
+            candidate->terminal = true;
+            candidate->exit_thumb = true;
+            candidate->exit_pc = taken
+                ? pc + 4u + (uint32_t)displacement : pc + 2u;
+            *outcome = taken ? SEQUENCE_POST_STORE_BRANCH_TAKEN
+                             : SEQUENCE_POST_STORE_BRANCH_FALLTHROUGH;
+            *eligible = true;
+            return SEQUENCE_POST_STORE_THUMB_COND_BRANCH;
+        }
+
+        bool pop = (insn & UINT16_C(0xf600)) == UINT16_C(0xb400) &&
+                   (insn & (1u << 11)) != 0u;
+        bool ldmia = (insn & UINT16_C(0xf800)) == UINT16_C(0xc800);
+        if (pop || ldmia) {
+            uint32_t list = insn & 255u;
+            bool pc_list = pop && (insn & (1u << 8)) != 0u;
+            if (!list && !pc_list) {
+                *outcome = SEQUENCE_POST_STORE_INVALID;
+                return SEQUENCE_POST_STORE_THUMB_MULTI_LOAD_ONE_BLOCK;
+            }
+            if (pc_list) {
+                *outcome = SEQUENCE_POST_STORE_STATE_GUARD;
+                return SEQUENCE_POST_STORE_THUMB_MULTI_LOAD_ONE_BLOCK;
+            }
+            unsigned words = sequence_post_store_popcount(list);
+            uint32_t address = pop ? cpu->r[13]
+                                   : cpu->r[(insn >> 8) & 7u];
+            *outcome = sequence_post_store_dread_span(
+                cpu, address, words * 4u);
+            if (*outcome == SEQUENCE_POST_STORE_DREAD_HIT) {
+                sequence_post_store_admit(candidate,
+                                          SEQUENCE_SIGNED_READ_HIT);
+                *eligible = true;
+            }
+            return SEQUENCE_POST_STORE_THUMB_MULTI_LOAD_ONE_BLOCK;
+        }
+        return SEQUENCE_POST_STORE_FAMILY_COUNT;
+    }
+
+    unsigned condition = raw >> 28;
+    if (instruction_class == SEQUENCE_ARM_BLOCK_LS &&
+        (raw & (1u << 20)) != 0u) {
+        uint32_t list = raw & UINT32_C(0xffff);
+        unsigned rn = (raw >> 16) & 15u;
+        bool user_bank = (raw & (1u << 22)) != 0u;
+        bool writeback = (raw & (1u << 21)) != 0u;
+        if (condition == 15u || !list || rn == 15u || user_bank ||
+            (list & (1u << 15)) != 0u ||
+            (writeback && (list & (1u << rn)) != 0u)) {
+            *outcome = SEQUENCE_POST_STORE_STATE_GUARD;
+            return SEQUENCE_POST_STORE_ARM_LDM_ONE_BLOCK;
+        }
+        if (condition < 14u && !arm_cond_passed(cpu, condition)) {
+            sequence_post_store_admit(candidate,
+                                      SEQUENCE_SIGNED_READ_SKIPPED);
+            *outcome = SEQUENCE_POST_STORE_CONDITION_SKIP;
+            *eligible = true;
+            return SEQUENCE_POST_STORE_ARM_LDM_ONE_BLOCK;
+        }
+        bool pre = (raw & (1u << 24)) != 0u;
+        bool up = (raw & (1u << 23)) != 0u;
+        unsigned words = sequence_post_store_popcount(list);
+        uint32_t base = cpu->r[rn];
+        uint32_t address = up ? (pre ? base + 4u : base)
+                              : (pre ? base - words * 4u
+                                     : base - words * 4u + 4u);
+        *outcome = sequence_post_store_dread_span(
+            cpu, address, words * 4u);
+        if (*outcome == SEQUENCE_POST_STORE_DREAD_HIT) {
+            sequence_post_store_admit(candidate, SEQUENCE_SIGNED_READ_HIT);
+            *eligible = true;
+        }
+        return SEQUENCE_POST_STORE_ARM_LDM_ONE_BLOCK;
+    }
+
+    if (instruction_class == SEQUENCE_ARM_VFP &&
+        sequence_vfp_memory(raw) && (raw & (1u << 20)) != 0u) {
+        bool pre = (raw & (1u << 24)) != 0u;
+        bool up = (raw & (1u << 23)) != 0u;
+        bool d = (raw & (1u << 22)) != 0u;
+        bool writeback = (raw & (1u << 21)) != 0u;
+        bool dbl = (raw & (1u << 8)) != 0u;
+        unsigned rn = (raw >> 16) & 15u;
+        unsigned vd = (raw >> 12) & 15u;
+        unsigned imm8 = raw & 255u;
+        bool mode_ok = (!pre && up) || (pre && !up && writeback);
+        if (pre && !writeback)
+            return SEQUENCE_POST_STORE_FAMILY_COUNT; /* VLDR, already separate. */
+        if (condition == 15u || !mode_ok || rn == 15u || !imm8 ||
+            (dbl ? (d || vd + imm8 / 2u > 16u)
+                 : (vd * 2u + (d ? 1u : 0u) + imm8 > 32u))) {
+            *outcome = SEQUENCE_POST_STORE_STATE_GUARD;
+            return SEQUENCE_POST_STORE_VLDM_ONE_BLOCK;
+        }
+        if (condition < 14u && !arm_cond_passed(cpu, condition)) {
+            sequence_post_store_admit(candidate,
+                                      SEQUENCE_SIGNED_READ_SKIPPED);
+            *outcome = SEQUENCE_POST_STORE_CONDITION_SKIP;
+            *eligible = true;
+            return SEQUENCE_POST_STORE_VLDM_ONE_BLOCK;
+        }
+        if (!sequence_vfp_guard_passes(cpu, raw)) {
+            *outcome = SEQUENCE_POST_STORE_STATE_GUARD;
+            return SEQUENCE_POST_STORE_VLDM_ONE_BLOCK;
+        }
+        uint32_t base = cpu->r[rn];
+        uint32_t address = up ? base : base - imm8 * 4u;
+        *outcome = sequence_post_store_dread_span(
+            cpu, address, imm8 * 4u);
+        if (*outcome == SEQUENCE_POST_STORE_DREAD_HIT) {
+            sequence_post_store_admit(candidate, SEQUENCE_SIGNED_READ_HIT);
+            *eligible = true;
+        }
+        return SEQUENCE_POST_STORE_VLDM_ONE_BLOCK;
+    }
+
+    if (instruction_class == SEQUENCE_ARM_MULTIPLY) {
+        if (condition == 15u) {
+            *outcome = SEQUENCE_POST_STORE_INVALID;
+            return SEQUENCE_POST_STORE_ARM_MULTIPLY_CEILING;
+        }
+        if (condition < 14u && !arm_cond_passed(cpu, condition)) {
+            sequence_post_store_admit(candidate,
+                                      SEQUENCE_SIGNED_READ_SKIPPED);
+            *outcome = SEQUENCE_POST_STORE_CONDITION_SKIP;
+        } else {
+            sequence_post_store_admit(candidate, SEQUENCE_SIGNED_PLAIN);
+            *outcome = SEQUENCE_POST_STORE_PLAIN;
+        }
+        *eligible = true;
+        return SEQUENCE_POST_STORE_ARM_MULTIPLY_CEILING;
+    }
+
+    if (instruction_class == SEQUENCE_ARM_VFP &&
+        !sequence_vfp_memory(raw)) {
+        if (condition == 15u) {
+            *outcome = SEQUENCE_POST_STORE_INVALID;
+            return SEQUENCE_POST_STORE_VFP_COMPUTE_CEILING;
+        }
+        if (condition < 14u && !arm_cond_passed(cpu, condition)) {
+            sequence_post_store_admit(candidate,
+                                      SEQUENCE_SIGNED_READ_SKIPPED);
+            *outcome = SEQUENCE_POST_STORE_CONDITION_SKIP;
+            *eligible = true;
+        } else if (!sequence_vfp_guard_passes(cpu, raw)) {
+            *outcome = SEQUENCE_POST_STORE_STATE_GUARD;
+        } else {
+            sequence_post_store_admit(candidate, SEQUENCE_SIGNED_PLAIN);
+            *outcome = SEQUENCE_POST_STORE_PLAIN;
+            *eligible = true;
+        }
+        return SEQUENCE_POST_STORE_VFP_COMPUTE_CEILING;
+    }
+    return SEQUENCE_POST_STORE_FAMILY_COUNT;
+}
 #endif
 
 static sequence_class_t sequence_classify_arm(uint32_t insn) {
@@ -27119,6 +27386,30 @@ static bool sequence_signed_observe(sequence_profile_t *profile,
             profile, mach, pc, thumb, physical_sequential,
             &implemented_classification,
             &profile->signed_store.implemented);
+        sequence_signed_classification_t post_store_classification =
+            implemented_classification;
+        sequence_post_store_outcome_t post_store_outcome =
+            SEQUENCE_POST_STORE_INVALID;
+        bool post_store_eligible = false;
+        sequence_post_store_family_t post_store_family =
+            sequence_post_store_classify(
+                &mach->cpu, pc, raw, thumb, instruction_class,
+                &implemented_classification, &post_store_classification,
+                &post_store_outcome, &post_store_eligible);
+        if (post_store_family < SEQUENCE_POST_STORE_FAMILY_COUNT)
+            profile->signed_post_store.outcomes[post_store_family]
+                                                   [post_store_outcome]++;
+        for (unsigned family = 0u;
+             family < SEQUENCE_POST_STORE_FAMILY_COUNT; family++) {
+            const sequence_signed_classification_t *family_classification =
+                post_store_eligible && post_store_family == family
+                    ? &post_store_classification
+                    : &implemented_classification;
+            sequence_signed_store_observe(
+                profile, mach, pc, thumb, physical_sequential,
+                family_classification,
+                &profile->signed_post_store.family[family]);
+        }
         for (unsigned family = 0u;
              family < SEQUENCE_STORE_FAMILY_COUNT; family++) {
             if (family == SEQUENCE_STORE_ARM_SINGLE ||
@@ -27346,6 +27637,11 @@ static void sequence_profile_break(sequence_profile_t *profile) {
     sequence_signed_store_model_close(
         &profile->signed_indirect.implemented_plus_indirect,
         SEQUENCE_SIGNED_STOP_OBSERVER);
+    for (unsigned family = 0u;
+         family < SEQUENCE_POST_STORE_FAMILY_COUNT; family++)
+        sequence_signed_store_model_close(
+            &profile->signed_post_store.family[family],
+            SEQUENCE_SIGNED_STOP_OBSERVER);
 #endif
     sequence_trace_head_close(profile);
     sequence_close_run(profile->flow_runs, profile->flow_run_instructions,
@@ -29488,6 +29784,134 @@ static void sequence_profile_report_store_model(
     }
 }
 
+static void sequence_profile_report_post_store_model(
+        const sequence_profile_t *profile) {
+    static const char *const FAMILIES[SEQUENCE_POST_STORE_FAMILY_COUNT] = {
+        "Thumb cond B",
+        "A32 LDM 1blk",
+        "VLDM/VPOP 1blk",
+        "Thumb loads 1blk",
+        "A32 multiply ceil",
+        "VFP compute ceil"
+    };
+    const sequence_signed_extended_t *baseline =
+        &profile->signed_store.implemented;
+    uint64_t baseline_entries = profile->fetched >= baseline->instructions
+        ? profile->fetched - baseline->instructions + baseline->calls : 0u;
+    uint64_t baseline_gate_refusals = 0u;
+    for (unsigned gate = 1u; gate < SEQUENCE_SIGNED_GATE_COUNT; gate++)
+        baseline_gate_refusals += baseline->gate_refusals[gate];
+    uint64_t baseline_eligible =
+        baseline->instructions + baseline_gate_refusals;
+
+    printf("\n    post-store signed-engine family frontier\n");
+    printf("      Every row starts from the exact shipping single/VSTR/STM/VSTM "
+           "baseline and adds one whole family on the same literal stream. "
+           "Thumb conditional B and the one-block no-PC multi-load rows are "
+           "bounded contracts. The multiply and VFP-compute rows assume a "
+           "perfect one-record semantic handler: they are optimistic ceilings, "
+           "not implementation-ready coverage, speed or FPS.\n");
+    printf("      %-18s %10s %10s %9s %9s %9s %9s %9s %9s %9s\n",
+           "family", "candidate", "eligible", "skip", "plain", "DREAD", "miss",
+           "align", "cross", "state");
+    for (unsigned family = 0u;
+         family < SEQUENCE_POST_STORE_FAMILY_COUNT; family++) {
+        const uint64_t *row = profile->signed_post_store.outcomes[family];
+        uint64_t candidates = 0u;
+        for (unsigned outcome = 0u;
+             outcome < SEQUENCE_POST_STORE_OUTCOME_COUNT; outcome++)
+            candidates += row[outcome];
+        uint64_t plain = row[SEQUENCE_POST_STORE_PLAIN] +
+            row[SEQUENCE_POST_STORE_BRANCH_TAKEN] +
+            row[SEQUENCE_POST_STORE_BRANCH_FALLTHROUGH];
+        uint64_t eligible = row[SEQUENCE_POST_STORE_CONDITION_SKIP] +
+            plain + row[SEQUENCE_POST_STORE_DREAD_HIT];
+        printf("      %-18s %10" PRIu64 " %10" PRIu64 " %9" PRIu64
+               " %9" PRIu64 " %9" PRIu64 " %9" PRIu64 " %9" PRIu64
+               " %9" PRIu64 " %9" PRIu64 "\n",
+               FAMILIES[family], candidates, eligible,
+               row[SEQUENCE_POST_STORE_CONDITION_SKIP], plain,
+               row[SEQUENCE_POST_STORE_DREAD_HIT],
+               row[SEQUENCE_POST_STORE_DREAD_MISS],
+               row[SEQUENCE_POST_STORE_ALIGNMENT],
+               row[SEQUENCE_POST_STORE_CROSS_BLOCK],
+               row[SEQUENCE_POST_STORE_STATE_GUARD] +
+                   row[SEQUENCE_POST_STORE_INVALID]);
+    }
+    printf("      Thumb conditional B taken/fallthrough=%" PRIu64 "/%" PRIu64
+           "; both outcomes are exact terminal control flow.\n",
+           profile->signed_post_store.outcomes[
+               SEQUENCE_POST_STORE_THUMB_COND_BRANCH]
+               [SEQUENCE_POST_STORE_BRANCH_TAKEN],
+           profile->signed_post_store.outcomes[
+               SEQUENCE_POST_STORE_THUMB_COND_BRANCH]
+               [SEQUENCE_POST_STORE_BRANCH_FALLTHROUGH]);
+    printf("      baseline calls/instructions/heads/chains/runner-entries="
+           "%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64
+           "/%" PRIu64 "\n",
+           baseline->calls, baseline->instructions, baseline->blocks,
+           baseline->chain_transitions, baseline_entries);
+    printf("      %-18s %10s %12s %10s %10s %10s %10s %8s %s\n",
+           "family", "calls", "instructions", "heads", "chains", "entries",
+           "removed", "%base", "gate");
+
+    for (unsigned family = 0u;
+         family < SEQUENCE_POST_STORE_FAMILY_COUNT; family++) {
+        const sequence_signed_extended_t *model =
+            &profile->signed_post_store.family[family];
+        const uint64_t *row = profile->signed_post_store.outcomes[family];
+        uint64_t candidates = 0u;
+        for (unsigned outcome = 0u;
+             outcome < SEQUENCE_POST_STORE_OUTCOME_COUNT; outcome++)
+            candidates += row[outcome];
+        uint64_t additional_eligible =
+            row[SEQUENCE_POST_STORE_CONDITION_SKIP] +
+            row[SEQUENCE_POST_STORE_PLAIN] +
+            row[SEQUENCE_POST_STORE_DREAD_HIT] +
+            row[SEQUENCE_POST_STORE_BRANCH_TAKEN] +
+            row[SEQUENCE_POST_STORE_BRANCH_FALLTHROUGH];
+        uint64_t histogram_calls = 0u;
+        uint64_t histogram_instructions = 0u;
+        uint64_t stops = 0u;
+        uint64_t gate_refusals = 0u;
+        bool lengths_exact = true;
+        for (unsigned length = 1u;
+             length <= SEQUENCE_SIGNED_EXTENDED_CAP; length++) {
+            uint64_t calls = model->length_calls[length];
+            uint64_t instructions = model->length_instructions[length];
+            histogram_calls += calls;
+            histogram_instructions += instructions;
+            if (instructions != calls * (uint64_t)length)
+                lengths_exact = false;
+        }
+        for (unsigned stop = 0u; stop < SEQUENCE_SIGNED_STOP_COUNT; stop++)
+            stops += model->stops[stop];
+        for (unsigned gate = 1u; gate < SEQUENCE_SIGNED_GATE_COUNT; gate++)
+            gate_refusals += model->gate_refusals[gate];
+        uint64_t entries = profile->fetched >= model->instructions
+            ? profile->fetched - model->instructions + model->calls : 0u;
+        uint64_t removed = baseline_entries >= entries
+            ? baseline_entries - entries : 0u;
+        bool exact = candidates >= additional_eligible && lengths_exact &&
+            histogram_calls == model->calls &&
+            histogram_instructions == model->instructions &&
+            stops == model->calls &&
+            baseline_eligible + additional_eligible ==
+                model->instructions + gate_refusals &&
+            model->blocks == model->calls + model->chain_transitions &&
+            model->instructions >= baseline->instructions &&
+            baseline_entries >= entries &&
+            model->maximum <= SEQUENCE_SIGNED_EXTENDED_CAP;
+        printf("      %-18s %10" PRIu64 " %12" PRIu64 " %10" PRIu64
+               " %10" PRIu64 " %10" PRIu64 " %10" PRIu64 " %7.3f%% %s\n",
+               FAMILIES[family], model->calls, model->instructions,
+               model->blocks, model->chain_transitions, entries, removed,
+               baseline_entries
+                   ? 100.0 * (double)removed / (double)baseline_entries : 0.0,
+               exact ? "EXACT" : "MISMATCH");
+    }
+}
+
 static void sequence_profile_report_indirect_model(
         const sequence_profile_t *profile) {
     static const char *const FAMILIES[SEQUENCE_INDIRECT_FAMILY_COUNT] = {
@@ -30428,6 +30852,7 @@ static void sequence_profile_report(sequence_profile_t *profile) {
                 profile->signed_gate_refusals[SEQUENCE_SIGNED_GATE_TIMEBASE],
                 a64_static_host_available() ? "yes" : "no");
         sequence_profile_report_store_model(profile);
+        sequence_profile_report_post_store_model(profile);
         sequence_profile_report_indirect_model(profile);
         printf("    This is modeled retirement, not measured execution time, "
                "FPS, or a same-binary A/B.\n");
