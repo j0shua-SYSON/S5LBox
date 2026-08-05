@@ -3628,6 +3628,126 @@ static void test_signed_static_a64_branch_oracle(void) {
     s5l8900_free(&reference);
 }
 
+/* Four terminal Thumb condition branches sit exactly at the 25% threshold:
+ * the older Thumb ALU/unconditional-B subset can retire only 75% of this loop.
+ * Requiring more than that, graph chains and an exact whole-machine snapshot
+ * proves the new records ran through the product engine for both outcomes. */
+static void test_signed_static_a64_thumb_conditional_branch_oracle(void) {
+    static const uint16_t signed_loop[16] = {
+        UINT16_C(0x2000), /* MOVS r0,#0: Z=1 */
+        UINT16_C(0xd0ff), /* BEQ next: taken */
+        UINT16_C(0x3101), /* ADDS r1,#1: normally Z=0 */
+        UINT16_C(0xd0ff), /* BEQ next: fallthrough */
+        UINT16_C(0x2200), /* MOVS r2,#0: Z=1 */
+        UINT16_C(0xd1ff), /* BNE next: fallthrough */
+        UINT16_C(0x3301), /* ADDS r3,#1: normally Z=0 */
+        UINT16_C(0xd1ff), /* BNE next: taken */
+        UINT16_C(0x3401), UINT16_C(0x3503),
+        UINT16_C(0x3e01), UINT16_C(0x3705),
+        UINT16_C(0x3002), UINT16_C(0x3901),
+        UINT16_C(0x3204), UINT16_C(0xe7ef),
+    };
+    const uint64_t total = UINT64_C(20000);
+    s5l8900_t fast = {0};
+    s5l8900_t reference = {0};
+    uint8_t *fast_snapshot = NULL;
+    uint8_t *reference_snapshot = NULL;
+    size_t fast_len = 0u;
+    size_t reference_len = 0u;
+    arm_status_t fast_status = ARM_OK;
+    arm_status_t reference_status = ARM_OK;
+    snapshot_status_t fast_snapshot_status;
+    snapshot_status_t reference_snapshot_status;
+    bool fast_ok;
+    bool reference_ok;
+    uint64_t retired;
+    uint64_t chains;
+    uint64_t graph_chains;
+
+    if (!s5l8900_static_a64_available()) {
+        printf("  STATIC-A64-THUMB-COND-SOC-ORACLE SKIP: no signed "
+               "AArch64 handlers\n");
+        return;
+    }
+
+    fast_ok = s5l8900_init(&fast, 0u, 1u << 20);
+    reference_ok = s5l8900_init(&reference, 0u, 1u << 20);
+    CHECK(fast_ok && reference_ok,
+          "Thumb conditional oracle machine init failed");
+    if (!fast_ok || !reference_ok) {
+        if (fast_ok) s5l8900_free(&fast);
+        if (reference_ok) s5l8900_free(&reference);
+        return;
+    }
+
+    s5l8900_load(&fast, 0u, signed_loop, sizeof signed_loop);
+    s5l8900_load(&reference, 0u, signed_loop, sizeof signed_loop);
+    s5l8900_tick(&fast, 0u);
+    s5l8900_tick(&reference, 0u);
+    fast.cpu.r[15] = reference.cpu.r[15] = 0u;
+    fast.cpu.cpsr = reference.cpu.cpsr =
+        ARM_MODE_SYS | ARM_CPSR_T | ARM_CPSR_C;
+
+    CHECK(s5l8900_static_a64_set_enabled(&fast, true),
+          "Thumb conditional signed engine refused an available host");
+    CHECK(s5l8900_static_a64_set_thumb_conditional_branches(&fast, false) &&
+              s5l8900_static_a64_set_thumb_conditional_branches(&fast, true),
+          "Thumb conditional same-binary rollout switch failed");
+    CHECK(s5l8900_static_a64_set_graph(&fast, true),
+          "Thumb conditional graph engine refused an available host");
+    CHECK(s5l8900_run(&fast, total, &fast_status) == total,
+          "signed Thumb conditional run stopped early with status=%d",
+          (int)fast_status);
+    CHECK(s5l8900_run(&reference, total, &reference_status) == total,
+          "reference Thumb conditional run stopped early with status=%d",
+          (int)reference_status);
+
+    retired = s5l8900_static_a64_retired(&fast);
+    chains = s5l8900_static_a64_chained_blocks(&fast);
+    graph_chains = s5l8900_static_a64_graph_chained_blocks(&fast);
+    CHECK(retired > total * 3u / 4u,
+          "signed Thumb conditional loop retired only %llu/%llu instructions",
+          (unsigned long long)retired, (unsigned long long)total);
+    CHECK(chains != 0u,
+          "signed Thumb conditional loop chained no target blocks");
+    CHECK(graph_chains == chains,
+          "Thumb conditional graph/total chains differ: %llu/%llu",
+          (unsigned long long)graph_chains,
+          (unsigned long long)chains);
+    CHECK(fast_status == reference_status,
+          "Thumb conditional status differs: signed=%d reference=%d",
+          (int)fast_status, (int)reference_status);
+
+    fast_snapshot_status = snapshot_save_mem(&fast, &fast_snapshot, &fast_len);
+    reference_snapshot_status =
+        snapshot_save_mem(&reference, &reference_snapshot, &reference_len);
+    CHECK(fast_snapshot_status == SNAP_OK,
+          "could not serialize signed Thumb conditional machine: %s",
+          snapshot_strerror(fast_snapshot_status));
+    CHECK(reference_snapshot_status == SNAP_OK,
+          "could not serialize reference Thumb conditional machine: %s",
+          snapshot_strerror(reference_snapshot_status));
+    CHECK(fast_snapshot && reference_snapshot && fast_len == reference_len &&
+              memcmp(fast_snapshot, reference_snapshot, fast_len) == 0,
+          "signed and reference Thumb conditional snapshots differ");
+
+    if (fast_snapshot && reference_snapshot && fast_len == reference_len &&
+        memcmp(fast_snapshot, reference_snapshot, fast_len) == 0 &&
+        retired > total * 3u / 4u && chains != 0u &&
+        graph_chains == chains) {
+        printf("  STATIC-A64-THUMB-COND-SOC-ORACLE exact=yes retired=%llu "
+               "chains=%llu conditions=eq-ne taken=yes fallthrough=yes "
+               "thumb-state=yes graph=yes rollout=yes\n",
+               (unsigned long long)retired,
+               (unsigned long long)chains);
+    }
+
+    free(fast_snapshot);
+    free(reference_snapshot);
+    s5l8900_free(&fast);
+    s5l8900_free(&reference);
+}
+
 /* The indirect handler must update two state owners before callback-free graph
  * lookup: architectural CPSR.T and the chain context's Thumb byte. This loop
  * crosses both directions through all four register-branch families. If the
@@ -4847,6 +4967,7 @@ int main(void) {
     test_signed_static_a64_store_oracle();
     test_signed_static_a64_stm_oracle();
     test_signed_static_a64_branch_oracle();
+    test_signed_static_a64_thumb_conditional_branch_oracle();
     test_signed_static_a64_indirect_branch_oracle();
     test_signed_static_a64_chain_bound_oracle();
     test_signed_static_a64_graph_bound_oracle();

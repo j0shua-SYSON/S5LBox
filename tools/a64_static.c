@@ -389,6 +389,10 @@ static bool handler_is_terminal_branch(uint32_t handler) {
     return handler >= A64S_BRANCH_COND && handler < A64S_HANDLER_COUNT;
 }
 
+static bool handler_is_conditional_branch(uint32_t handler) {
+    return handler >= A64S_BRANCH_COND && handler < A64S_BRANCH_LINK;
+}
+
 static bool handler_is_indirect_branch(uint32_t handler) {
     return handler >= A64S_ARM_BX && handler < A64S_HANDLER_COUNT;
 }
@@ -944,6 +948,20 @@ static bool decode_thumb(uint16_t insn, unsigned index, unsigned insns,
     if (!written) return false;
     *written = 0u;
 
+    if ((insn & UINT16_C(0xf000)) == UINT16_C(0xd000) &&
+        ((insn >> 8) & 15u) < 14u) {
+        unsigned condition = (insn >> 8) & 15u;
+        int32_t displacement =
+            (int32_t)((uint32_t)(insn & 0x00ffu) << 24) >> 23;
+        uint32_t target = pc_value + (uint32_t)displacement;
+        if (index + 1u != insns) return false;
+        out->handler = branch_cond(condition);
+        out->immediate = target;
+        out->pc_value = pc + index * 2u + 2u;
+        *written = 1u;
+        return true;
+    }
+
     if ((insn & UINT16_C(0xf800)) == UINT16_C(0xe000)) {
         int32_t displacement = (int32_t)((uint32_t)(insn & 0x07ffu) << 21) >> 20;
         uint32_t target = pc + index * 2u + 4u + (uint32_t)displacement;
@@ -1253,6 +1271,8 @@ static bool decode_program_at(const void *program, unsigned insns, bool thumb,
                     return false;
                 }
                 out->dynamic_exit = true;
+                if (thumb && handler_is_conditional_branch(handler))
+                    out->thumb_conditional_exit = true;
                 if (handler_is_indirect_branch(handler))
                     out->indirect_exit = true;
             }
@@ -1524,6 +1544,11 @@ static bool terminal_branch_shape_valid(const a64_static_block_t *block,
                op->metadata == (block->insn_count << 8 | 1u) &&
                block->exit_pc == block->start_pc + block->insn_count * width;
     }
+    if (block->thumb && handler_is_conditional_branch(handler)) {
+        return (op->immediate & 1u) == 0u &&
+               op->pc_value == block->exit_pc && op->metadata == 0u &&
+               block->exit_pc == block->start_pc + block->insn_count * 2u;
+    }
     return !block->thumb && (op->immediate & 3u) == 0u &&
            op->pc_value == block->exit_pc && op->metadata == 0u &&
            block->exit_pc == block->start_pc + block->insn_count * 4u;
@@ -1546,6 +1571,7 @@ static bool validate_run(const arm_cpu_t *cpu,
     bool saw_vstm_direct_write = false;
     bool saw_dynamic_exit = false;
     bool saw_indirect_exit = false;
+    bool saw_thumb_conditional_exit = false;
 
     if (!cpu || !block || !blocks || !ram ||
         !block->insn_count || block->insn_count > A64_STATIC_MAX_INSNS ||
@@ -1617,6 +1643,8 @@ static bool validate_run(const arm_cpu_t *cpu,
                                              &block->uops[j]))
                 return false;
             saw_dynamic_exit = true;
+            if (block->thumb && handler_is_conditional_branch(handler))
+                saw_thumb_conditional_exit = true;
             if (handler_is_indirect_branch(handler))
                 saw_indirect_exit = true;
         }
@@ -1636,6 +1664,7 @@ static bool validate_run(const arm_cpu_t *cpu,
         block->vstm_direct_writes != saw_vstm_direct_write ||
         block->dynamic_exit != saw_dynamic_exit ||
         block->indirect_exit != saw_indirect_exit ||
+        block->thumb_conditional_exit != saw_thumb_conditional_exit ||
         (kind == A64S_RUN_FLAT && (saw_direct_read || saw_direct_write)) ||
         (kind == A64S_RUN_FLAT && saw_vfp) ||
         (kind == A64S_RUN_READ_HITS &&
@@ -1742,6 +1771,7 @@ static bool validate_decoded_hits_at(const a64_static_block_t *block,
                                      bool memory_hits) {
     bool terminal_dynamic;
     bool terminal_indirect;
+    bool terminal_thumb_conditional;
     bool terminal_write;
     bool terminal_vfp_write;
     bool terminal_stm_write;
@@ -1780,8 +1810,12 @@ static bool validate_decoded_hits_at(const a64_static_block_t *block,
     terminal_indirect = terminal_dynamic &&
         handler_is_indirect_branch(
             block->uops[block->uop_count - 2u].handler);
+    terminal_thumb_conditional = terminal_dynamic && block->thumb &&
+        handler_is_conditional_branch(
+            block->uops[block->uop_count - 2u].handler);
     if (block->dynamic_exit != terminal_dynamic ||
         block->indirect_exit != terminal_indirect ||
+        block->thumb_conditional_exit != terminal_thumb_conditional ||
         (terminal_dynamic &&
          !terminal_branch_shape_valid(
              block, block->uops[block->uop_count - 2u].handler,

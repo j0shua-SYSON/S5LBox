@@ -26480,8 +26480,14 @@ static bool sequence_indirect_classify(
 }
 
 static bool sequence_signed_terminal(uint32_t raw, bool thumb) {
-    if (thumb)
-        return (raw & UINT32_C(0xf800)) == UINT32_C(0xe000);
+    if (thumb) {
+        bool unconditional =
+            (raw & UINT32_C(0xf800)) == UINT32_C(0xe000);
+        bool conditional =
+            (raw & UINT32_C(0xf000)) == UINT32_C(0xd000) &&
+            ((raw >> 8) & 15u) < 14u;
+        return unconditional || conditional;
+    }
     /* Every admitted A32 immediate B/BL exits the current signed invocation,
      * including a failed conditional branch that selects fallthrough. The
      * profiler must not merge that fallthrough into the same call until the
@@ -26579,9 +26585,21 @@ static sequence_signed_classification_t sequence_signed_classify(
         }
     } else if (result.terminal) {
         if (thumb) {
-            int32_t displacement =
-                (int32_t)((raw & UINT32_C(0x7ff)) << 21) >> 20;
-            result.exit_pc = pc + 4u + (uint32_t)displacement;
+            if ((raw & UINT32_C(0xf000)) == UINT32_C(0xd000) &&
+                ((raw >> 8) & 15u) < 14u) {
+                unsigned condition = (raw >> 8) & 15u;
+                if (!arm_cond_passed(cpu, condition)) {
+                    result.exit_pc = pc + 2u;
+                } else {
+                    int32_t displacement =
+                        (int32_t)((raw & UINT32_C(0xff)) << 24) >> 23;
+                    result.exit_pc = pc + 4u + (uint32_t)displacement;
+                }
+            } else {
+                int32_t displacement =
+                    (int32_t)((raw & UINT32_C(0x7ff)) << 21) >> 20;
+                result.exit_pc = pc + 4u + (uint32_t)displacement;
+            }
         } else {
             unsigned condition = raw >> 28;
             if (condition < 14u && !arm_cond_passed(cpu, condition)) {

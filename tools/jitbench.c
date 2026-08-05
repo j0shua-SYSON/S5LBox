@@ -167,6 +167,26 @@ static const uint16_t THUMB_SOC_INDIRECT_SIXTY[] = {
     UINT16_C(0x47d8), /* BLX r11 */
 };
 
+/* Four terminal conditional branches in a sixteen-instruction Thumb loop.
+ * Each branch's taken target equals its natural fallthrough (imm8=-1), so
+ * taken and failed conditions execute the same fixed-size loop while still
+ * exercising the live NZCV selector and terminal graph exit. The paired flag
+ * setters guarantee both outcomes before long-run register wraparound. */
+static const uint16_t THUMB_SOC_CONDITIONAL[] = {
+    UINT16_C(0x2000), /* MOVS r0,#0: Z=1 */
+    UINT16_C(0xd0ff), /* BEQ next: taken */
+    UINT16_C(0x3101), /* ADDS r1,#1: normally Z=0 */
+    UINT16_C(0xd0ff), /* BEQ next: fallthrough */
+    UINT16_C(0x2200), /* MOVS r2,#0: Z=1 */
+    UINT16_C(0xd1ff), /* BNE next: fallthrough */
+    UINT16_C(0x3301), /* ADDS r3,#1: normally Z=0 */
+    UINT16_C(0xd1ff), /* BNE next: taken */
+    UINT16_C(0x3401), UINT16_C(0x3503),
+    UINT16_C(0x3e01), UINT16_C(0x3705),
+    UINT16_C(0x3002), UINT16_C(0x3901),
+    UINT16_C(0x3204), UINT16_C(0xe7ef),
+};
+
 static const uint16_t THUMB_ALU[] = {
     0x3001u, 0x3103u, 0x3a01u, 0x3305u,
     0x3c02u, 0x3507u, 0x3e03u, 0x3709u,
@@ -867,7 +887,7 @@ static bool validate_static_shapes(void) {
         0x8000u, /* STRH r0,[r0] */
         0x9000u, /* STR r0,[sp] */
         0xb401u, /* PUSH {r0} */
-        0xd000u, /* conditional branch */
+        0xde00u, /* UDF */
         0xdf00u, /* SVC */
         0xf000u, /* BL first half */
     };
@@ -1059,6 +1079,59 @@ static bool validate_static_shapes(void) {
     }
     printf("STATIC-BRANCH-SHAPE exact=yes conditional=14 link=15 "
            "handlers=29 forward=yes backward=yes\n");
+
+    for (unsigned condition = 0u; condition < 14u; condition++) {
+        const uint32_t pc = UINT32_C(0x1160);
+        const uint16_t insn = (uint16_t)(UINT16_C(0xd000) |
+            (condition << 8) | (((condition & 1u) != 0u) ? 2u : 0xfcu));
+        const int32_t displacement =
+            (int32_t)((uint32_t)(insn & 0xffu) << 24) >> 23;
+        const uint32_t target = pc + 4u + (uint32_t)displacement;
+        const uint8_t bytes[2] = {(uint8_t)insn, (uint8_t)(insn >> 8)};
+        a64_static_block_t product_block;
+        const a64_static_uop_t *branch;
+
+        if (!a64_static_decode_at(&insn, 1u, true, pc, &block) ||
+            !a64_static_decode_read_hits_bytes_at(
+                bytes, 1u, true, pc, &product_block) ||
+            memcmp(&block, &product_block, sizeof block) != 0 ||
+            block.insn_count != 1u || block.uop_count != 2u ||
+            block.start_pc != pc || block.exit_pc != pc + 2u ||
+            !block.thumb || !block.dynamic_exit || block.indirect_exit ||
+            !block.thumb_conditional_exit || block.touches_memory ||
+            block.direct_reads || block.direct_writes ||
+            block.runtime_guards || block.vfp ||
+            block.uops[1].handler != 0u ||
+            block.uops[1].immediate != pc + 2u) {
+            fprintf(stderr,
+                    "jitbench: Thumb conditional branch shape failed "
+                    "cond=%u\n", condition);
+            return false;
+        }
+        branch = &block.uops[0];
+        if (branch->handler != branch_handlers[condition] ||
+            branch->immediate != target || branch->pc_value != pc + 2u ||
+            branch->metadata != 0u) {
+            fprintf(stderr,
+                    "jitbench: Thumb conditional branch record failed "
+                    "cond=%u\n", condition);
+            return false;
+        }
+    }
+    {
+        const uint16_t mid_block[] = {
+            UINT16_C(0xd0ff), UINT16_C(0x3001)
+        };
+        if (a64_static_decode_at(mid_block, 2u, true,
+                                 UINT32_C(0x1160), &block)) {
+            fprintf(stderr,
+                    "jitbench: Thumb conditional branch accepted mid-block\n");
+            return false;
+        }
+    }
+    printf("STATIC-THUMB-COND-BRANCH-SHAPE exact=yes conditions=14 "
+           "handlers=reused forward=yes backward=yes terminal=yes "
+           "mid-block-refused=yes rollout=yes\n");
 
     for (unsigned link = 0u; link < 2u; link++) {
         const unsigned registers = link ? 15u : 16u;
@@ -3577,6 +3650,121 @@ static bool validate_static_branch_oracles(void) {
     return true;
 }
 
+static bool validate_static_thumb_cond_branch_oracles(void) {
+    const uint32_t pc = UINT32_C(0x1900);
+    const uint32_t nzcv_mask = ARM_CPSR_N | ARM_CPSR_Z |
+                               ARM_CPSR_C | ARM_CPSR_V;
+    unsigned cases = 0u;
+
+    for (unsigned condition = 0u; condition < 14u; condition++) {
+        for (unsigned outcome = 0u; outcome < 2u; outcome++) {
+            const bool passed = outcome != 0u;
+            const uint8_t imm8 = ((condition + outcome) & 1u) != 0u
+                ? UINT8_C(2) : UINT8_C(0xfc);
+            const uint16_t insn = (uint16_t)(UINT16_C(0xd000) |
+                (condition << 8) | imm8);
+            const int32_t displacement =
+                (int32_t)((uint32_t)imm8 << 24) >> 23;
+            const uint32_t target = pc + 4u + (uint32_t)displacement;
+            const uint32_t expected_pc = passed ? target : pc + 2u;
+            uint32_t flags = 0u;
+            a64_static_block_t block;
+            arm_cpu_t interp_cpu;
+            arm_cpu_t static_cpu;
+            final_state_t interp;
+            final_state_t statik;
+            arm_status_t status;
+
+            if (!branch_condition_flags(condition, passed, &flags)) {
+                fprintf(stderr,
+                        "jitbench: no Thumb NZCV witness cond=%u pass=%u\n",
+                        condition, passed ? 1u : 0u);
+                return false;
+            }
+            if (!a64_static_decode_at(&insn, 1u, true, pc, &block)) {
+                fprintf(stderr,
+                        "jitbench: Thumb conditional decode failed "
+                        "cond=%u pass=%u\n",
+                        condition, passed ? 1u : 0u);
+                return false;
+            }
+
+            seed_cpu_at(&interp_cpu, &insn, 1u, true, pc);
+            interp_cpu.cpsr =
+                (interp_cpu.cpsr & ~nzcv_mask) | flags;
+            status = arm_step(&interp_cpu);
+            capture_state(&interp, &interp_cpu, status, JIT_EXIT_NEXT);
+
+            seed_cpu_at(&static_cpu, &insn, 1u, true, pc);
+            static_cpu.cpsr =
+                (static_cpu.cpsr & ~nzcv_mask) | flags;
+            if (!a64_static_run(&static_cpu, &block, 1u,
+                                g_ram, sizeof g_ram)) {
+                fprintf(stderr,
+                        "jitbench: Thumb conditional execution failed "
+                        "cond=%u pass=%u\n",
+                        condition, passed ? 1u : 0u);
+                return false;
+            }
+            capture_state(&statik, &static_cpu, ARM_OK, JIT_EXIT_NEXT);
+            if (status != ARM_OK ||
+                !architectural_states_equal(&interp, &statik) ||
+                statik.r[15] != expected_pc ||
+                statik.r[14] != UINT32_C(0xdead00ff) ||
+                (statik.cpsr & ARM_CPSR_T) == 0u || statik.cycles != 1u) {
+                fprintf(stderr,
+                        "jitbench: Thumb conditional mismatch cond=%u "
+                        "pass=%u pc=%08" PRIx32 " lr=%08" PRIx32 "\n",
+                        condition, passed ? 1u : 0u,
+                        statik.r[15], statik.r[14]);
+                return false;
+            }
+            cases++;
+        }
+    }
+
+    {
+        const uint16_t insn = UINT16_C(0xd0fc);
+        const uint8_t bytes[2] = {(uint8_t)insn, (uint8_t)(insn >> 8)};
+        a64_static_block_t block;
+        arm_cpu_t cpu;
+        arm_cpu_t before;
+        unsigned completed = UINT_MAX;
+        uint32_t flags;
+
+        if (!branch_condition_flags(0u, true, &flags) ||
+            !a64_static_decode_read_hits_bytes_at(
+                bytes, 1u, true, pc, &block)) {
+            fprintf(stderr,
+                    "jitbench: Thumb decoded-branch contract setup failed\n");
+            return false;
+        }
+        seed_cpu_at(&cpu, &insn, 1u, true, pc);
+        cpu.cpsr = (cpu.cpsr & ~nzcv_mask) | flags;
+        before = cpu;
+        block.thumb_conditional_exit = false;
+        if (a64_static_run_read_hits_decoded(
+                &cpu, &block, g_ram, sizeof g_ram, &completed) ||
+            memcmp(&before, &cpu, sizeof cpu) != 0 ||
+            completed != UINT_MAX) {
+            fprintf(stderr,
+                    "jitbench: mutated Thumb conditional contract did not "
+                    "fail closed\n");
+            return false;
+        }
+    }
+
+    if (cases != 28u) {
+        fprintf(stderr,
+                "jitbench: incomplete Thumb conditional oracle matrix\n");
+        return false;
+    }
+    printf("STATIC-THUMB-COND-BRANCH-ORACLE exact=yes cases=28 "
+           "conditions=all taken=yes fallthrough=yes backward=yes "
+           "thumb-state=yes lr-preserved=yes contract=yes\n");
+    return true;
+}
+
 static bool indirect_register_states_equal(const arm_cpu_t *reference,
                                            const arm_cpu_t *statik) {
     return reference && statik &&
@@ -4007,6 +4195,7 @@ typedef enum {
     SOC_ENTRY_GRAPH,
     SOC_ENTRY_GRAPH_EXTENDED,
     SOC_ENTRY_GRAPH_EXTENDED_INDIRECT_OFF,
+    SOC_ENTRY_GRAPH_EXTENDED_THUMB_CONDITIONAL_OFF,
     SOC_ENTRY_GRAPH_EXTENDED_VSTR_OFF,
     SOC_ENTRY_GRAPH_EXTENDED_STM_OFF,
     SOC_ENTRY_GRAPH_EXTENDED_VSTM_OFF,
@@ -4021,6 +4210,8 @@ static const char *soc_entry_path_name(soc_entry_path_t path) {
     case SOC_ENTRY_GRAPH_EXTENDED: return "graph-extended";
     case SOC_ENTRY_GRAPH_EXTENDED_INDIRECT_OFF:
         return "graph-extended-indirect-off";
+    case SOC_ENTRY_GRAPH_EXTENDED_THUMB_CONDITIONAL_OFF:
+        return "graph-extended-thumb-conditional-off";
     case SOC_ENTRY_GRAPH_EXTENDED_VSTR_OFF:
         return "graph-extended-vstr-off";
     case SOC_ENTRY_GRAPH_EXTENDED_STM_OFF:
@@ -4044,12 +4235,20 @@ typedef struct {
     unsigned length;
     uint32_t seed_r7;
     bool indirect_workload;
+    bool thumb_conditional_workload;
     bool vfp_workload;
 } soc_entry_setup_t;
 
 static bool setup_soc_entry_machine(s5l8900_t *machine,
                                     const soc_entry_setup_t *setup) {
     if (!machine || !setup) return false;
+    if (setup->thumb_conditional_workload) {
+        s5l8900_load(machine, 0u, THUMB_SOC_CONDITIONAL,
+                     sizeof THUMB_SOC_CONDITIONAL);
+        machine->cpu.r[15] = 0u;
+        machine->cpu.cpsr = ARM_MODE_SYS | ARM_CPSR_T | ARM_CPSR_C;
+        return true;
+    }
     if (!setup->indirect_workload) {
         if (!setup->program || !setup->length) return false;
         s5l8900_load(machine, 0u, setup->program,
@@ -4120,18 +4319,22 @@ static bool run_soc_entry_configured(const soc_entry_setup_t *setup,
     bool graph_path = path == SOC_ENTRY_GRAPH ||
                       path == SOC_ENTRY_GRAPH_EXTENDED ||
                       path == SOC_ENTRY_GRAPH_EXTENDED_INDIRECT_OFF ||
+                      path == SOC_ENTRY_GRAPH_EXTENDED_THUMB_CONDITIONAL_OFF ||
                       path == SOC_ENTRY_GRAPH_EXTENDED_VSTR_OFF ||
                       path == SOC_ENTRY_GRAPH_EXTENDED_STM_OFF ||
                       path == SOC_ENTRY_GRAPH_EXTENDED_VSTM_OFF ||
                       path == SOC_ENTRY_GRAPH_EXTENDED_WRITES;
     bool extended_path = path == SOC_ENTRY_GRAPH_EXTENDED ||
                          path == SOC_ENTRY_GRAPH_EXTENDED_INDIRECT_OFF ||
+                         path == SOC_ENTRY_GRAPH_EXTENDED_THUMB_CONDITIONAL_OFF ||
                          path == SOC_ENTRY_GRAPH_EXTENDED_VSTR_OFF ||
                          path == SOC_ENTRY_GRAPH_EXTENDED_STM_OFF ||
                          path == SOC_ENTRY_GRAPH_EXTENDED_VSTM_OFF ||
                          path == SOC_ENTRY_GRAPH_EXTENDED_WRITES;
     bool indirect_off_path =
         path == SOC_ENTRY_GRAPH_EXTENDED_INDIRECT_OFF;
+    bool thumb_conditional_off_path =
+        path == SOC_ENTRY_GRAPH_EXTENDED_THUMB_CONDITIONAL_OFF;
     bool vstr_off_path = path == SOC_ENTRY_GRAPH_EXTENDED_VSTR_OFF;
     bool stm_off_path = path == SOC_ENTRY_GRAPH_EXTENDED_STM_OFF;
     bool vstm_off_path = path == SOC_ENTRY_GRAPH_EXTENDED_VSTM_OFF;
@@ -4168,6 +4371,13 @@ static bool run_soc_entry_configured(const soc_entry_setup_t *setup,
     if (indirect_off_path &&
         !s5l8900_static_a64_set_indirect_branches(&machine, false)) {
         fprintf(stderr, "jitbench: SoC indirect-off control unavailable\n");
+        goto done;
+    }
+    if (thumb_conditional_off_path &&
+        !s5l8900_static_a64_set_thumb_conditional_branches(
+            &machine, false)) {
+        fprintf(stderr,
+                "jitbench: SoC Thumb-conditional-off control unavailable\n");
         goto done;
     }
     if (vstr_off_path &&
@@ -4298,6 +4508,15 @@ static bool run_soc_indirect_path(uint64_t total, soc_entry_path_t path,
         .indirect_workload = true,
     };
     return run_soc_entry_configured(&setup, 8u, total, path, out);
+}
+
+static bool run_soc_thumb_conditional_path(uint64_t total,
+                                           soc_entry_path_t path,
+                                           soc_run_result_t *out) {
+    const soc_entry_setup_t setup = {
+        .thumb_conditional_workload = true,
+    };
+    return run_soc_entry_configured(&setup, 16u, total, path, out);
 }
 
 static bool run_soc_vstr_path(uint64_t total, soc_entry_path_t path,
@@ -4822,6 +5041,161 @@ static bool bench_soc_indirect(uint64_t requested, unsigned reps) {
            " reference-median=%.3f off-median=%.3f on-median=%.3f "
            "off-speedup=%.3fx on-speedup=%.3fx on-over-off=%.3fx\n",
            loop_insns, indirect_per_loop, total, reps,
+           expected_off_retired, total, off_chains, on_chains,
+           reference_rates[reps / 2u], off_rates[reps / 2u],
+           on_rates[reps / 2u],
+           off_rates[reps / 2u] / reference_rates[reps / 2u],
+           on_rates[reps / 2u] / reference_rates[reps / 2u],
+           on_rates[reps / 2u] / off_rates[reps / 2u]);
+    ok = true;
+
+done:
+    free(reference_rates);
+    free(off_rates);
+    free(on_rates);
+    return ok;
+}
+
+/* Isolate the Thumb conditional-branch tranche with the same three-way exact
+ * snapshot gate as the indirect benchmark. Four branch records per fixed
+ * sixteen-instruction loop exercise both condition outcomes. Their taken
+ * target deliberately equals fallthrough so every arm retires the same loop;
+ * this measures product-path overhead, not restored-firmware mix or phone FPS. */
+static bool bench_soc_thumb_conditional(uint64_t requested, unsigned reps) {
+    const uint64_t loop_insns = 16u;
+    const uint64_t branches_per_loop = 4u;
+    double *reference_rates = NULL;
+    double *off_rates = NULL;
+    double *on_rates = NULL;
+    uint64_t total;
+    uint64_t expected_branches;
+    uint64_t expected_off_retired;
+    uint64_t off_chains = 0u;
+    uint64_t on_chains = 0u;
+    bool ok = false;
+
+    if (requested > UINT64_MAX - (loop_insns - 1u)) {
+        fprintf(stderr, "jitbench: SoC Thumb conditional shape failed\n");
+        return false;
+    }
+    total = ((requested + loop_insns - 1u) / loop_insns) * loop_insns;
+    expected_branches = (total / loop_insns) * branches_per_loop;
+    expected_off_retired = total - expected_branches;
+    reference_rates = (double *)calloc(reps, sizeof *reference_rates);
+    off_rates = (double *)calloc(reps, sizeof *off_rates);
+    on_rates = (double *)calloc(reps, sizeof *on_rates);
+    if (!reference_rates || !off_rates || !on_rates) {
+        fprintf(stderr, "jitbench: SoC Thumb conditional out of memory\n");
+        goto done;
+    }
+
+    for (unsigned rep = 0u; rep < reps; rep++) {
+        soc_run_result_t reference = {0};
+        soc_run_result_t off = {0};
+        soc_run_result_t on = {0};
+        const char *order;
+        bool ran;
+
+        if (rep % 3u == 0u) {
+            order = "reference-off-on";
+            ran = run_soc_thumb_conditional_path(
+                      total, SOC_ENTRY_REFERENCE, &reference) &&
+                  run_soc_thumb_conditional_path(
+                      total,
+                      SOC_ENTRY_GRAPH_EXTENDED_THUMB_CONDITIONAL_OFF,
+                      &off) &&
+                  run_soc_thumb_conditional_path(
+                      total, SOC_ENTRY_GRAPH_EXTENDED, &on);
+        } else if (rep % 3u == 1u) {
+            order = "off-on-reference";
+            ran = run_soc_thumb_conditional_path(
+                      total,
+                      SOC_ENTRY_GRAPH_EXTENDED_THUMB_CONDITIONAL_OFF,
+                      &off) &&
+                  run_soc_thumb_conditional_path(
+                      total, SOC_ENTRY_GRAPH_EXTENDED, &on) &&
+                  run_soc_thumb_conditional_path(
+                      total, SOC_ENTRY_REFERENCE, &reference);
+        } else {
+            order = "on-reference-off";
+            ran = run_soc_thumb_conditional_path(
+                      total, SOC_ENTRY_GRAPH_EXTENDED, &on) &&
+                  run_soc_thumb_conditional_path(
+                      total, SOC_ENTRY_REFERENCE, &reference) &&
+                  run_soc_thumb_conditional_path(
+                      total,
+                      SOC_ENTRY_GRAPH_EXTENDED_THUMB_CONDITIONAL_OFF,
+                      &off);
+        }
+        if (!ran || !reference.snapshot || !off.snapshot || !on.snapshot ||
+            reference.snapshot_len != off.snapshot_len ||
+            reference.snapshot_len != on.snapshot_len ||
+            memcmp(reference.snapshot, off.snapshot,
+                   reference.snapshot_len) != 0 ||
+            memcmp(reference.snapshot, on.snapshot,
+                   reference.snapshot_len) != 0 ||
+            off.signed_retired != expected_off_retired ||
+            on.signed_retired != total || on.graph_chains == 0u ||
+            reference.dwrite_hits != 0u || off.dwrite_hits != 0u ||
+            on.dwrite_hits != 0u || reference.dwrite_misses != 0u ||
+            off.dwrite_misses != 0u || on.dwrite_misses != 0u) {
+            fprintf(stderr,
+                    "jitbench: SoC Thumb conditional repetition %u failed "
+                    "exact A/B off-retired=%" PRIu64
+                    " on-retired=%" PRIu64 " off-chains=%" PRIu64
+                    " on-chains=%" PRIu64 "\n",
+                    rep + 1u, off.signed_retired, on.signed_retired,
+                    off.graph_chains, on.graph_chains);
+            free_soc_run_result(&reference);
+            free_soc_run_result(&off);
+            free_soc_run_result(&on);
+            goto done;
+        }
+        if (rep == 0u) {
+            off_chains = off.graph_chains;
+            on_chains = on.graph_chains;
+        } else if (off_chains != off.graph_chains ||
+                   on_chains != on.graph_chains) {
+            fprintf(stderr,
+                    "jitbench: SoC Thumb conditional chain counts changed "
+                    "across repetitions\n");
+            free_soc_run_result(&reference);
+            free_soc_run_result(&off);
+            free_soc_run_result(&on);
+            goto done;
+        }
+
+        reference_rates[rep] = (double)total / reference.seconds / 1.0e6;
+        off_rates[rep] = (double)total / off.seconds / 1.0e6;
+        on_rates[rep] = (double)total / on.seconds / 1.0e6;
+        printf("SOC-THUMB-COND-SAMPLE rep=%u order=%s reference=%.3f "
+               "branch-off=%.3f branch-on=%.3f Minsn/s "
+               "off-retired=%" PRIu64 " on-retired=%" PRIu64
+               " on-graph-chains=%" PRIu64 " exact-snapshot=yes\n",
+               rep + 1u, order, reference_rates[rep], off_rates[rep],
+               on_rates[rep], off.signed_retired, on.signed_retired,
+               on.graph_chains);
+        free_soc_run_result(&reference);
+        free_soc_run_result(&off);
+        free_soc_run_result(&on);
+    }
+
+    qsort(reference_rates, reps, sizeof *reference_rates, cmp_double);
+    qsort(off_rates, reps, sizeof *off_rates, cmp_double);
+    qsort(on_rates, reps, sizeof *on_rates, cmp_double);
+    printf("SOC-THUMB-COND-CURVE length=%" PRIu64
+           " branches=%" PRIu64 " guest-insns=%" PRIu64
+           " reps=%u chain-limit=256 same-binary=yes run-api=yes "
+           "cache-lookup=yes block-witness=yes entry-gates=yes "
+           "timer-boundaries=yes device-tick=yes head-cache=warm mmu=off "
+           "taken=yes fallthrough=yes exact-snapshot=yes "
+           "off-signed-retired=%" PRIu64
+           " on-signed-retired=%" PRIu64
+           " off-graph-chains=%" PRIu64
+           " on-graph-chains=%" PRIu64
+           " reference-median=%.3f off-median=%.3f on-median=%.3f "
+           "off-speedup=%.3fx on-speedup=%.3fx on-over-off=%.3fx\n",
+           loop_insns, branches_per_loop, total, reps,
            expected_off_retired, total, off_chains, on_chains,
            reference_rates[reps / 2u], off_rates[reps / 2u],
            on_rates[reps / 2u],
@@ -5543,6 +5917,9 @@ int main(int argc, char **argv) {
     printf("The SoC-indirect row is a same-binary BX/BLX capability A/B over "
            "four mixed ARM/Thumb heads. Its branch-heavy synthetic speedup is "
            "not a firmware-mix or phone-FPS claim either.\n");
+    printf("The SoC-Thumb-conditional row is a same-binary capability A/B "
+           "with four terminal condition branches and both outcomes per "
+           "synthetic loop. It is not firmware timing or phone FPS.\n");
     printf("The SoC-VSTR row is a same-binary VSTR capability A/B with four "
            "single/double stores per synthetic loop. Its 25%% VSTR mix is "
            "not a firmware-mix or phone-FPS claim either.\n");
@@ -5574,6 +5951,7 @@ int main(int argc, char **argv) {
     if (!validate_static_vfp_write_oracles()) return 1;
     if (!validate_static_vstm_write_oracles()) return 1;
     if (!validate_static_branch_oracles()) return 1;
+    if (!validate_static_thumb_cond_branch_oracles()) return 1;
     if (!validate_static_indirect_branch_oracles()) return 1;
     if (!validate_static_oracles()) return 1;
 
@@ -5593,6 +5971,7 @@ int main(int argc, char **argv) {
     }
     if (!bench_soc_store(soc_insns, reps)) return 1;
     if (!bench_soc_indirect(soc_insns, reps)) return 1;
+    if (!bench_soc_thumb_conditional(soc_insns, reps)) return 1;
     if (!bench_soc_vstr(soc_insns, reps)) return 1;
     if (!bench_soc_stm(soc_insns, reps)) return 1;
     if (!bench_soc_vstm(soc_insns, reps)) return 1;

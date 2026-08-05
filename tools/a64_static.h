@@ -52,6 +52,7 @@ typedef struct {
     bool thumb;
     bool dynamic_exit;
     bool indirect_exit;
+    bool thumb_conditional_exit;
     bool touches_memory;
     bool direct_reads;
     bool direct_writes;
@@ -90,10 +91,12 @@ typedef const a64_static_block_t *(*a64_static_chain_next_fn)(
     void *opaque, uint32_t pc, unsigned remaining);
 
 /* Decode one host-native uint32_t/uint16_t instruction array beginning at
- * `pc`. A terminal A32 immediate B/BL may target any word-aligned address.
- * Conditional branches and every BL carry both their taken target and natural
- * fallthrough in a dynamic-exit record; exit_pc names that fallthrough. A
- * terminal unconditional B retains the compact fixed-exit form. Terminal
+ * `pc`. A terminal A32 immediate B/BL may target any word-aligned address;
+ * terminal Thumb conditional B covers all fourteen valid conditions and any
+ * halfword-aligned target. Conditional branches and every A32 BL carry both
+ * their taken target and natural fallthrough in a dynamic-exit record; exit_pc
+ * names that fallthrough. A terminal unconditional B retains the compact
+ * fixed-exit form. Terminal
  * A32 and Thumb BX/BLX register forms are guarded dynamic exits: the signed
  * handler validates the live target before changing LR, PC or instruction
  * state, and updates the persistent chain's ARM/Thumb state before selecting

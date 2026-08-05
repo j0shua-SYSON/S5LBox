@@ -3922,6 +3922,11 @@ bool s5l8900_static_a64_set_graph(s5l8900_t *m, bool enabled);
  * derived decode/graph entries so an off/on comparison cannot reuse a block
  * admitted under the other feature set. */
 bool s5l8900_static_a64_set_indirect_branches(s5l8900_t *m, bool enabled);
+/* Same-binary rollout/benchmark control for terminal Thumb conditional B.
+ * All fourteen valid conditions default on; changing the switch clears only
+ * derived decode/graph state and leaves guest state and counters untouched. */
+bool s5l8900_static_a64_set_thumb_conditional_branches(s5l8900_t *m,
+                                                       bool enabled);
 /* Same-binary rollout/benchmark control for signed VSTR S/D records. It
  * defaults on and invalidates only derived decode/graph state when changed. */
 bool s5l8900_static_a64_set_vstr(s5l8900_t *m, bool enabled);
