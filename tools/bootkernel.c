@@ -26627,6 +26627,38 @@ static sequence_signed_classification_t sequence_signed_classify(
         return result;
     }
 
+    if (block.ldm_direct_reads) {
+        uint32_t list = raw & UINT32_C(0x7fff);
+        unsigned rn = (raw >> 16) & 15u;
+        bool pre = (raw & (1u << 24)) != 0u;
+        bool up = (raw & (1u << 23)) != 0u;
+        unsigned words = 0u;
+        uint32_t remaining = list;
+        while (remaining) {
+            words += remaining & 1u;
+            remaining >>= 1;
+        }
+        uint32_t base = cpu->r[rn];
+        uint32_t address = up ? (pre ? base + 4u : base)
+                              : (pre ? base - words * 4u
+                                     : base - words * 4u + 4u);
+        unsigned bytes = words * 4u;
+        bool privileged =
+            (cpu->cpsr & ARM_CPSR_MODE_MASK) != ARM_MODE_USR;
+        /* The shipping handler intentionally leaves all unaligned legacy
+         * align-down behavior to arm_step(), even when SCTLR.A/U are clear. */
+        if (!words || (address & 3u) != 0u ||
+            (uint64_t)address + (uint64_t)bytes - 1u > UINT32_MAX ||
+            (uint64_t)(address & UINT32_C(0x3ff)) + bytes > 1024u) {
+            result.outcome = SEQUENCE_SIGNED_READ_GUARD;
+            return result;
+        }
+        result.outcome = sequence_dread_would_hit(
+            cpu, address, bytes, privileged)
+            ? SEQUENCE_SIGNED_READ_HIT : SEQUENCE_SIGNED_READ_MISS;
+        return result;
+    }
+
     if (thumb) {
         uint32_t cache_va = 0u;
         unsigned width = 0u;

@@ -392,6 +392,30 @@ static const uint32_t A32_SOC_STM[] = {
     UINT32_C(0xeaffffef),
 };
 
+/* Four no-PC LDM instructions in a sixteen-instruction loop. Twelve read32
+ * calls cover IA/IB/DA/DB while all transfers stay in one DREAD block. The
+ * fixed base is excluded from every list, making repeated loops deterministic.
+ * This dense 25% block-load mix isolates the tranche; it is not firmware mix
+ * or phone-FPS evidence. */
+static const uint32_t A32_SOC_LDM[] = {
+    UINT32_C(0xe2800001),
+    A32_BLOCK(14, 0, 1, 0, 0, 1, 7, UINT32_C(0x0003)), /* IA, 2 words */
+    UINT32_C(0xe2811003),
+    A32_BLOCK(14, 1, 1, 0, 0, 1, 7, UINT32_C(0x001c)), /* IB, 3 words */
+    UINT32_C(0xe0222001),
+    UINT32_C(0xe2833001),
+    A32_BLOCK(14, 0, 0, 0, 0, 1, 7, UINT32_C(0x0060)), /* DA, 2 words */
+    UINT32_C(0xe0244003),
+    UINT32_C(0xe2855001),
+    A32_BLOCK(14, 1, 0, 0, 0, 1, 7, UINT32_C(0x1f00)), /* DB, 5 words */
+    UINT32_C(0xe0466005),
+    UINT32_C(0xe0800006),
+    UINT32_C(0xe0211005),
+    UINT32_C(0xe2422001),
+    UINT32_C(0xe0833002),
+    UINT32_C(0xeaffffef),
+};
+
 /* Four architectural VSTM instructions in a sixteen-instruction loop. The
  * sixteen written words cover IA without writeback, IA with writeback, DB
  * with writeback/VPUSH addressing, single and double lists, and the highest
@@ -849,6 +873,15 @@ static bool validate_static_shapes(void) {
         A32_BLOCK(14, 0, 1, 0, 0, 0,  7, UINT32_C(0xffff)), /* all */
     };
     static const unsigned VALID_A32_STM_WORDS[] = {4u, 4u, 3u, 4u, 2u, 16u};
+    static const uint32_t VALID_A32_LDM[] = {
+        A32_BLOCK(14, 0, 1, 0, 0, 1,  4, UINT32_C(0x4109)), /* IA */
+        A32_BLOCK(14, 1, 1, 0, 1, 1, 12, UINT32_C(0x4106)), /* IB! */
+        A32_BLOCK(14, 0, 0, 0, 0, 1, 13, UINT32_C(0x4210)), /* DA */
+        A32_BLOCK(14, 1, 0, 0, 1, 1, 11, UINT32_C(0x4481)), /* DB! */
+        A32_BLOCK( 0, 0, 1, 0, 0, 1,  4, UINT32_C(0x4004)), /* EQ */
+        A32_BLOCK(14, 0, 1, 0, 0, 1,  7, UINT32_C(0x7fff)), /* r0-r14 */
+    };
+    static const unsigned VALID_A32_LDM_WORDS[] = {4u, 4u, 3u, 4u, 2u, 15u};
     static const uint32_t INVALID_A32_STORES[] = {
         /* Every invalid writeback alias and operand is rejected before a
          * direct record can exist, matching exec_single_transfer(). */
@@ -860,12 +893,19 @@ static bool validate_static_shapes(void) {
         A32_SINGLE_MODE2(14, 1, 1, 1, 0, 0, 0, 4, 3, 0x012),
     };
     static const uint32_t INVALID_A32_STM[] = {
-        A32_BLOCK(14, 0, 1, 0, 0, 1, 4, UINT32_C(0x0003)), /* LDM */
         A32_BLOCK(14, 0, 1, 1, 0, 0, 4, UINT32_C(0x0003)), /* user bank */
         A32_BLOCK(14, 0, 1, 0, 0, 0,15, UINT32_C(0x0003)), /* PC base */
         A32_BLOCK(14, 0, 1, 0, 0, 0, 4, UINT32_C(0x0000)), /* empty */
         A32_BLOCK(14, 0, 1, 0, 1, 0, 4, UINT32_C(0x0010)), /* wb alias */
         A32_BLOCK(15, 0, 1, 0, 0, 0, 4, UINT32_C(0x0003)), /* cond=1111 */
+    };
+    static const uint32_t INVALID_A32_LDM[] = {
+        A32_BLOCK(14, 0, 1, 1, 0, 1, 4, UINT32_C(0x0003)), /* user bank */
+        A32_BLOCK(14, 0, 1, 0, 0, 1,15, UINT32_C(0x0003)), /* PC base */
+        A32_BLOCK(14, 0, 1, 0, 0, 1, 4, UINT32_C(0x0000)), /* empty */
+        A32_BLOCK(14, 0, 1, 0, 1, 1, 4, UINT32_C(0x0010)), /* wb alias */
+        A32_BLOCK(14, 0, 1, 0, 0, 1, 4, UINT32_C(0x8003)), /* PC list */
+        A32_BLOCK(15, 0, 1, 0, 0, 1, 4, UINT32_C(0x0003)), /* cond=1111 */
     };
     static const uint16_t VALID_THUMB_STORES[] = {
         UINT16_C(0x508b), /* STR  r3,[r1,r2] */
@@ -1517,6 +1557,157 @@ static bool validate_static_shapes(void) {
         printf("STATIC-STM-SHAPE exact=yes modes=4 bases=15 sources=16 "
                "writeback=15 conditional=yes pc-source=yes max-words=16 "
                "transactional=yes terminal=yes read-contract=preserved "
+               "handlers=%u\n", A64_STATIC_HANDLER_COUNT);
+    }
+
+    {
+        uint32_t preflight_handlers[60];
+        uint32_t writeback_handlers[15];
+        uint32_t no_writeback_handler = 0u;
+        unsigned preflight_count = 0u;
+
+        for (i = 0u; i < sizeof VALID_A32_LDM /
+                             sizeof VALID_A32_LDM[0]; i++) {
+            const uint32_t value = VALID_A32_LDM[i];
+            const uint32_t pc = UINT32_C(0x1c00) + i * 4u;
+            const unsigned words = VALID_A32_LDM_WORDS[i];
+            const bool conditional = (value >> 28) < 14u;
+            const unsigned preflight = conditional ? 1u : 0u;
+            const unsigned expected_uops = words + 3u +
+                                            (conditional ? 1u : 0u);
+            uint8_t bytes[4] = {
+                (uint8_t)value, (uint8_t)(value >> 8),
+                (uint8_t)(value >> 16), (uint8_t)(value >> 24)
+            };
+            if (!a64_static_decode_read_hits_bytes_at(
+                    bytes, 1u, false, pc, &block) ||
+                block.insn_count != 1u || block.uop_count != expected_uops ||
+                block.thumb || !block.touches_memory || !block.direct_reads ||
+                block.direct_writes || !block.runtime_guards || block.vfp ||
+                block.vfp_direct_writes || block.stm_direct_writes ||
+                !block.ldm_direct_reads || block.vstm_direct_writes ||
+                block.uops[preflight].handler == 0u ||
+                block.uops[preflight].immediate != words ||
+                block.uops[preflight].pc_value != pc ||
+                block.uops[preflight].metadata != UINT32_C(0x101) ||
+                block.uops[block.uop_count - 2u].handler == 0u ||
+                block.uops[block.uop_count - 2u].immediate != words ||
+                block.uops[block.uop_count - 2u].pc_value != 0u ||
+                block.uops[block.uop_count - 2u].metadata != 0u ||
+                (conditional && block.uops[0].metadata != words + 2u)) {
+                fprintf(stderr, "jitbench: product LDM shape failed at %u\n",
+                        i);
+                return false;
+            }
+            for (unsigned j = 1u; j < words; j++) {
+                if (block.uops[preflight + j].handler >=
+                    block.uops[preflight + j + 1u].handler) {
+                    fprintf(stderr,
+                            "jitbench: product LDM destination order failed "
+                            "at %u\n", i);
+                    return false;
+                }
+            }
+        }
+
+        for (unsigned pre = 0u; pre < 2u; pre++) {
+            for (unsigned up = 0u; up < 2u; up++) {
+                for (unsigned rn = 0u; rn < 15u; rn++) {
+                    const uint32_t value = A32_BLOCK(
+                        14, pre, up, 0, 0, 1, rn, UINT32_C(1));
+                    uint8_t bytes[4] = {
+                        (uint8_t)value, (uint8_t)(value >> 8),
+                        (uint8_t)(value >> 16), (uint8_t)(value >> 24)
+                    };
+                    if (!a64_static_decode_read_hits_bytes_at(
+                            bytes, 1u, false, UINT32_C(0x1d00), &block) ||
+                        block.uop_count != 4u || !block.ldm_direct_reads) {
+                        fprintf(stderr, "jitbench: LDM preflight family gap\n");
+                        return false;
+                    }
+                    for (unsigned j = 0u; j < preflight_count; j++) {
+                        if (preflight_handlers[j] == block.uops[0].handler) {
+                            fprintf(stderr,
+                                    "jitbench: duplicate LDM preflight handler\n");
+                            return false;
+                        }
+                    }
+                    preflight_handlers[preflight_count++] =
+                        block.uops[0].handler;
+                    if (!no_writeback_handler)
+                        no_writeback_handler = block.uops[2].handler;
+                    else if (no_writeback_handler != block.uops[2].handler) {
+                        fprintf(stderr,
+                                "jitbench: LDM no-writeback handler drifted\n");
+                        return false;
+                    }
+                }
+            }
+        }
+        for (unsigned rn = 0u; rn < 15u; rn++) {
+            const unsigned destination = (rn + 1u) % 15u;
+            const uint32_t value = A32_BLOCK(
+                14, 0, 1, 0, 1, 1, rn, UINT32_C(1) << destination);
+            uint8_t bytes[4] = {
+                (uint8_t)value, (uint8_t)(value >> 8),
+                (uint8_t)(value >> 16), (uint8_t)(value >> 24)
+            };
+            if (!a64_static_decode_read_hits_bytes_at(
+                    bytes, 1u, false, UINT32_C(0x1e00), &block) ||
+                block.uop_count != 4u ||
+                block.uops[2].handler == no_writeback_handler) {
+                fprintf(stderr, "jitbench: LDM writeback family gap\n");
+                return false;
+            }
+            for (unsigned j = 0u; j < rn; j++) {
+                if (writeback_handlers[j] == block.uops[2].handler) {
+                    fprintf(stderr,
+                            "jitbench: duplicate LDM writeback handler\n");
+                    return false;
+                }
+            }
+            writeback_handlers[rn] = block.uops[2].handler;
+        }
+        if (preflight_count != 60u) return false;
+
+        for (i = 0u; i < sizeof INVALID_A32_LDM /
+                             sizeof INVALID_A32_LDM[0]; i++) {
+            const uint32_t value = INVALID_A32_LDM[i];
+            uint8_t bytes[4] = {
+                (uint8_t)value, (uint8_t)(value >> 8),
+                (uint8_t)(value >> 16), (uint8_t)(value >> 24)
+            };
+            if (a64_static_decode_read_hits_bytes_at(
+                    bytes, 1u, false, UINT32_C(0x1f00), &block)) {
+                fprintf(stderr,
+                        "jitbench: product decoder accepted invalid LDM %u\n",
+                        i);
+                return false;
+            }
+        }
+        {
+            const uint32_t values[2] = {
+                VALID_A32_LDM[0], A32_DP_IMM(14, 4, 0, 0, 0, 0, 1)
+            };
+            uint8_t bytes[8];
+            for (i = 0u; i < 2u; i++) {
+                bytes[i * 4u + 0u] = (uint8_t)values[i];
+                bytes[i * 4u + 1u] = (uint8_t)(values[i] >> 8);
+                bytes[i * 4u + 2u] = (uint8_t)(values[i] >> 16);
+                bytes[i * 4u + 3u] = (uint8_t)(values[i] >> 24);
+            }
+            if (!a64_static_decode_read_hits_bytes_at(
+                    bytes, 2u, false, UINT32_C(0x2000), &block) ||
+                block.insn_count != 2u || block.uop_count != 8u ||
+                !block.ldm_direct_reads || block.direct_writes) {
+                fprintf(stderr,
+                        "jitbench: product decoder did not continue after LDM\n");
+                return false;
+            }
+        }
+        printf("STATIC-LDM-SHAPE exact=yes modes=4 bases=15 "
+               "destinations=15 writeback=15 conditional=yes max-words=15 "
+               "transactional=yes nonterminal=yes pc=no user-bank=no "
                "handlers=%u\n", A64_STATIC_HANDLER_COUNT);
     }
 
@@ -2514,6 +2705,205 @@ static bool validate_static_stm_oracles(void) {
            "writeback=yes pc-source=yes conditional=yes max-words=16 "
            "one-block=yes cross-block-rollback=yes alignment=yes "
            "cold-cache=yes consent=yes\n",
+           sizeof cases / sizeof cases[0], hit_words);
+    return true;
+}
+
+
+static bool validate_static_ldm_oracles(void) {
+    typedef struct {
+        const char *name;
+        uint32_t insn;
+        uint32_t pc;
+        unsigned rn;
+        uint32_t base;
+        uint32_t start;
+        unsigned words;
+        bool executes;
+    } ldm_case_t;
+    const uint32_t ordinary = DATA_BASE + UINT32_C(0x800);
+    const uint32_t exact_boundary = DATA_BASE + UINT32_C(0xfc4);
+    const ldm_case_t cases[] = {
+        {"ia-base-in-list", A32_BLOCK(
+             14,0,1,0,0,1, 4,UINT32_C(0x4111)),
+         UINT32_C(0x13400), 4u, ordinary, ordinary, 4u, true},
+        {"ib-writeback", A32_BLOCK(
+             14,1,1,0,1,1,12,UINT32_C(0x4106)),
+         UINT32_C(0x13500), 12u, ordinary, ordinary + 4u, 4u, true},
+        {"da-sp-base", A32_BLOCK(
+             14,0,0,0,0,1,13,UINT32_C(0x4210)),
+         UINT32_C(0x13600), 13u, ordinary + 0x40u,
+         ordinary + 0x38u, 3u, true},
+        {"db-writeback", A32_BLOCK(
+             14,1,0,0,1,1,11,UINT32_C(0x4481)),
+         UINT32_C(0x13700), 11u, ordinary, ordinary - 16u, 4u, true},
+        {"failed-condition", A32_BLOCK(
+              0,0,1,0,0,1, 4,UINT32_C(0x4004)),
+         UINT32_C(0x13800), 4u, ordinary, ordinary, 2u, false},
+        {"fifteen-word-boundary", A32_BLOCK(
+             14,0,1,0,0,1, 7,UINT32_C(0x7fff)),
+         UINT32_C(0x13900), 7u, exact_boundary, exact_boundary, 15u, true},
+    };
+    unsigned hit_words = 0u;
+
+    if (!a64_static_host_available()) {
+        printf("STATIC-LDM-ORACLE SKIP: no signed AArch64 handlers\n");
+        return true;
+    }
+
+    for (unsigned i = 0u; i < sizeof cases / sizeof cases[0]; i++) {
+        const ldm_case_t *lc = &cases[i];
+        arm_cpu_t reference, statik;
+        final_state_t reference_state, static_state;
+        a64_static_block_t block;
+        unsigned completed = 99u;
+        arm_status_t status;
+
+        seed_cpu_at(&reference, &lc->insn, 1u, false, lc->pc);
+        for (unsigned reg = 0u; reg < 15u; reg++)
+            reference.r[reg] = UINT32_C(0xa1000000) |
+                               (reg * UINT32_C(0x010101));
+        reference.r[lc->rn] = lc->base;
+        reference.r[15] = lc->pc;
+        for (unsigned word = 0u; word < lc->words; word++)
+            mem_w32(NULL, lc->start + word * 4u,
+                    UINT32_C(0x51000000) |
+                    (i << 16) | (word * UINT32_C(0x010101)));
+        if (lc->executes) oracle_warm_dread(&reference, lc->start);
+        statik = reference;
+
+        if (!a64_static_decode_read_hits_bytes_at(
+                &g_ram[lc->pc], 1u, false, lc->pc, &block) ||
+            !block.ldm_direct_reads || block.direct_writes) {
+            fprintf(stderr, "jitbench: LDM oracle decode failed for %s\n",
+                    lc->name);
+            return false;
+        }
+        status = arm_step(&reference);
+        capture_state(&reference_state, &reference, status, JIT_EXIT_NEXT);
+        if (!a64_static_run_read_hits(
+                &statik, &block, g_ram, sizeof g_ram, &completed)) {
+            fprintf(stderr, "jitbench: signed LDM refused for %s\n",
+                    lc->name);
+            return false;
+        }
+        capture_state(&static_state, &statik, ARM_OK, JIT_EXIT_NEXT);
+        if (status != ARM_OK || completed != 1u ||
+            !architectural_states_equal(&reference_state, &static_state) ||
+            reference.dread_hits != statik.dread_hits ||
+            reference.dread_misses != statik.dread_misses ||
+            statik.dread_hits != (lc->executes ? lc->words : 0u) ||
+            statik.dread_misses != 0u) {
+            fprintf(stderr, "jitbench: signed LDM mismatch for %s\n",
+                    lc->name);
+            return false;
+        }
+        if (lc->executes) hit_words += lc->words;
+    }
+
+    /* A cross-block run refuses before its first destination register. The
+     * literal fallback must then converge with a pure reference, including
+     * DREAD fills and hit/miss accounting. */
+    {
+        const uint32_t insn = A32_BLOCK(
+            14, 0, 1, 0, 0, 1, 4, UINT32_C(0x4109));
+        const uint32_t pc = UINT32_C(0x13a00);
+        const uint32_t start = DATA_BASE + UINT32_C(0x13f8);
+        arm_cpu_t reference, statik, before;
+        final_state_t reference_state, static_state;
+        a64_static_block_t block;
+        unsigned completed = 99u;
+
+        seed_cpu_at(&reference, &insn, 1u, false, pc);
+        reference.r[4] = start;
+        for (unsigned word = 0u; word < 4u; word++)
+            mem_w32(NULL, start + word * 4u,
+                    UINT32_C(0x62000000) + word);
+        oracle_warm_dread(&reference, start);
+        statik = reference;
+        before = statik;
+        if (!a64_static_decode_read_hits_bytes_at(
+                &g_ram[pc], 1u, false, pc, &block) ||
+            !a64_static_run_read_hits(
+                &statik, &block, g_ram, sizeof g_ram, &completed) ||
+            completed != 0u || memcmp(&statik, &before, sizeof statik) != 0) {
+            fprintf(stderr, "jitbench: cross-block LDM was not transactional\n");
+            return false;
+        }
+        if (arm_step(&reference) != ARM_OK || arm_step(&statik) != ARM_OK) {
+            fprintf(stderr, "jitbench: cross-block LDM fallback trapped\n");
+            return false;
+        }
+        capture_state(&reference_state, &reference, ARM_OK, JIT_EXIT_NEXT);
+        capture_state(&static_state, &statik, ARM_OK, JIT_EXIT_NEXT);
+        if (!architectural_states_equal(&reference_state, &static_state) ||
+            reference.dread_hits != statik.dread_hits ||
+            reference.dread_misses != statik.dread_misses) {
+            fprintf(stderr, "jitbench: cross-block LDM fallback diverged\n");
+            return false;
+        }
+    }
+
+    /* Cold, unaligned and stale-generation preflights all return a zero
+     * prefix without changing registers, cache state, counters or cycles. */
+    for (unsigned refusal = 0u; refusal < 3u; refusal++) {
+        const uint32_t insn = A32_BLOCK(
+            14, 0, 1, 0, 1, 1, 12, UINT32_C(0x4106));
+        const uint32_t pc = UINT32_C(0x13b00) + refusal * 0x100u;
+        arm_cpu_t statik, before;
+        a64_static_block_t block;
+        unsigned completed = 99u;
+
+        seed_cpu_at(&statik, &insn, 1u, false, pc);
+        statik.r[12] = ordinary + (refusal == 1u ? 1u : 0u);
+        if (refusal != 0u)
+            oracle_warm_dread(&statik, statik.r[12]);
+        if (refusal == 2u) statik.tlb_gen++;
+        before = statik;
+        if (!a64_static_decode_read_hits_bytes_at(
+                &g_ram[pc], 1u, false, pc, &block) ||
+            !a64_static_run_read_hits(
+                &statik, &block, g_ram, sizeof g_ram, &completed) ||
+            completed != 0u || memcmp(&statik, &before, sizeof statik) != 0) {
+            fprintf(stderr, "jitbench: LDM refusal %u changed state\n",
+                    refusal);
+            return false;
+        }
+    }
+
+    /* Metadata flags are part of the validator contract, not advisory. */
+    {
+        const uint32_t insn = A32_BLOCK(
+            14, 0, 1, 0, 0, 1, 4, UINT32_C(0x4109));
+        const uint32_t pc = UINT32_C(0x13e00);
+        arm_cpu_t statik, before;
+        a64_static_block_t block;
+        unsigned completed = UINT_MAX;
+
+        seed_cpu_at(&statik, &insn, 1u, false, pc);
+        statik.r[4] = ordinary;
+        oracle_warm_dread(&statik, ordinary);
+        before = statik;
+        if (!a64_static_decode_read_hits_bytes_at(
+                &g_ram[pc], 1u, false, pc, &block)) {
+            fprintf(stderr, "jitbench: LDM mutation setup failed\n");
+            return false;
+        }
+        block.ldm_direct_reads = false;
+        if (a64_static_run_read_hits(
+                &statik, &block, g_ram, sizeof g_ram, &completed) ||
+            memcmp(&statik, &before, sizeof statik) != 0 ||
+            completed != UINT_MAX) {
+            fprintf(stderr,
+                    "jitbench: mutated LDM contract did not fail closed\n");
+            return false;
+        }
+    }
+
+    printf("STATIC-LDM-ORACLE exact=yes cases=%zu hit-words=%u modes=4 "
+           "writeback=yes base-in-list=yes conditional=yes max-words=15 "
+           "one-block=yes cross-block-rollback=yes alignment=yes "
+           "cold-cache=yes stale-cache=yes contract=yes nonterminal=yes\n",
            sizeof cases / sizeof cases[0], hit_words);
     return true;
 }
@@ -4184,6 +4574,8 @@ typedef struct {
     uint64_t signed_retired;
     uint64_t signed_chains;
     uint64_t graph_chains;
+    uint64_t dread_hits;
+    uint64_t dread_misses;
     uint64_t dwrite_hits;
     uint64_t dwrite_misses;
     double seconds;
@@ -4198,6 +4590,7 @@ typedef enum {
     SOC_ENTRY_GRAPH_EXTENDED_THUMB_CONDITIONAL_OFF,
     SOC_ENTRY_GRAPH_EXTENDED_VSTR_OFF,
     SOC_ENTRY_GRAPH_EXTENDED_STM_OFF,
+    SOC_ENTRY_GRAPH_EXTENDED_LDM_OFF,
     SOC_ENTRY_GRAPH_EXTENDED_VSTM_OFF,
     SOC_ENTRY_GRAPH_EXTENDED_WRITES
 } soc_entry_path_t;
@@ -4216,6 +4609,8 @@ static const char *soc_entry_path_name(soc_entry_path_t path) {
         return "graph-extended-vstr-off";
     case SOC_ENTRY_GRAPH_EXTENDED_STM_OFF:
         return "graph-extended-stm-off";
+    case SOC_ENTRY_GRAPH_EXTENDED_LDM_OFF:
+        return "graph-extended-ldm-off";
     case SOC_ENTRY_GRAPH_EXTENDED_VSTM_OFF:
         return "graph-extended-vstm-off";
     case SOC_ENTRY_GRAPH_EXTENDED_WRITES:
@@ -4307,6 +4702,10 @@ static bool run_soc_entry_configured(const soc_entry_setup_t *setup,
     uint64_t chains_after;
     uint64_t graph_before;
     uint64_t graph_after;
+    uint64_t dread_hits_before;
+    uint64_t dread_hits_after;
+    uint64_t dread_misses_before;
+    uint64_t dread_misses_after;
     uint64_t dwrite_hits_before;
     uint64_t dwrite_hits_after;
     uint64_t dwrite_misses_before;
@@ -4322,6 +4721,7 @@ static bool run_soc_entry_configured(const soc_entry_setup_t *setup,
                       path == SOC_ENTRY_GRAPH_EXTENDED_THUMB_CONDITIONAL_OFF ||
                       path == SOC_ENTRY_GRAPH_EXTENDED_VSTR_OFF ||
                       path == SOC_ENTRY_GRAPH_EXTENDED_STM_OFF ||
+                      path == SOC_ENTRY_GRAPH_EXTENDED_LDM_OFF ||
                       path == SOC_ENTRY_GRAPH_EXTENDED_VSTM_OFF ||
                       path == SOC_ENTRY_GRAPH_EXTENDED_WRITES;
     bool extended_path = path == SOC_ENTRY_GRAPH_EXTENDED ||
@@ -4329,6 +4729,7 @@ static bool run_soc_entry_configured(const soc_entry_setup_t *setup,
                          path == SOC_ENTRY_GRAPH_EXTENDED_THUMB_CONDITIONAL_OFF ||
                          path == SOC_ENTRY_GRAPH_EXTENDED_VSTR_OFF ||
                          path == SOC_ENTRY_GRAPH_EXTENDED_STM_OFF ||
+                         path == SOC_ENTRY_GRAPH_EXTENDED_LDM_OFF ||
                          path == SOC_ENTRY_GRAPH_EXTENDED_VSTM_OFF ||
                          path == SOC_ENTRY_GRAPH_EXTENDED_WRITES;
     bool indirect_off_path =
@@ -4337,6 +4738,7 @@ static bool run_soc_entry_configured(const soc_entry_setup_t *setup,
         path == SOC_ENTRY_GRAPH_EXTENDED_THUMB_CONDITIONAL_OFF;
     bool vstr_off_path = path == SOC_ENTRY_GRAPH_EXTENDED_VSTR_OFF;
     bool stm_off_path = path == SOC_ENTRY_GRAPH_EXTENDED_STM_OFF;
+    bool ldm_off_path = path == SOC_ENTRY_GRAPH_EXTENDED_LDM_OFF;
     bool vstm_off_path = path == SOC_ENTRY_GRAPH_EXTENDED_VSTM_OFF;
     bool direct_write_path = path == SOC_ENTRY_GRAPH_EXTENDED_WRITES ||
                              vstr_off_path || stm_off_path || vstm_off_path;
@@ -4390,6 +4792,11 @@ static bool run_soc_entry_configured(const soc_entry_setup_t *setup,
         fprintf(stderr, "jitbench: SoC STM-off control unavailable\n");
         goto done;
     }
+    if (ldm_off_path &&
+        !s5l8900_static_a64_set_ldm(&machine, false)) {
+        fprintf(stderr, "jitbench: SoC LDM-off control unavailable\n");
+        goto done;
+    }
     if (vstm_off_path &&
         !s5l8900_static_a64_set_vstm(&machine, false)) {
         fprintf(stderr, "jitbench: SoC VSTM-off control unavailable\n");
@@ -4423,6 +4830,8 @@ static bool run_soc_entry_configured(const soc_entry_setup_t *setup,
     retired_before = s5l8900_static_a64_retired(&machine);
     chains_before = s5l8900_static_a64_chained_blocks(&machine);
     graph_before = s5l8900_static_a64_graph_chained_blocks(&machine);
+    dread_hits_before = machine.cpu.dread_hits;
+    dread_misses_before = machine.cpu.dread_misses;
     dwrite_hits_before = machine.cpu.dwrite_hits;
     dwrite_misses_before = machine.cpu.dwrite_misses;
     start = now_seconds();
@@ -4438,6 +4847,8 @@ static bool run_soc_entry_configured(const soc_entry_setup_t *setup,
     retired_after = s5l8900_static_a64_retired(&machine);
     chains_after = s5l8900_static_a64_chained_blocks(&machine);
     graph_after = s5l8900_static_a64_graph_chained_blocks(&machine);
+    dread_hits_after = machine.cpu.dread_hits;
+    dread_misses_after = machine.cpu.dread_misses;
     dwrite_hits_after = machine.cpu.dwrite_hits;
     dwrite_misses_after = machine.cpu.dwrite_misses;
     if (remaining != 0u || status != ARM_OK || end <= start ||
@@ -4452,6 +4863,8 @@ static bool run_soc_entry_configured(const soc_entry_setup_t *setup,
     out->signed_retired = retired_after - retired_before;
     out->signed_chains = chains_after - chains_before;
     out->graph_chains = graph_after - graph_before;
+    out->dread_hits = dread_hits_after - dread_hits_before;
+    out->dread_misses = dread_misses_after - dread_misses_before;
     out->dwrite_hits = dwrite_hits_after - dwrite_hits_before;
     out->dwrite_misses = dwrite_misses_after - dwrite_misses_before;
     if ((signed_path && out->signed_retired > total) ||
@@ -4537,6 +4950,16 @@ static bool run_soc_stm_path(uint64_t total, soc_entry_path_t path,
         .program = A32_SOC_STM,
         .length = (unsigned)(sizeof A32_SOC_STM / sizeof A32_SOC_STM[0]),
         .seed_r7 = DATA_BASE + UINT32_C(0x100),
+    };
+    return run_soc_entry_configured(&setup, setup.length, total, path, out);
+}
+
+static bool run_soc_ldm_path(uint64_t total, soc_entry_path_t path,
+                             soc_run_result_t *out) {
+    const soc_entry_setup_t setup = {
+        .program = A32_SOC_LDM,
+        .length = (unsigned)(sizeof A32_SOC_LDM / sizeof A32_SOC_LDM[0]),
+        .seed_r7 = DATA_BASE + UINT32_C(0x300),
     };
     return run_soc_entry_configured(&setup, setup.length, total, path, out);
 }
@@ -5531,6 +5954,162 @@ done:
     return ok;
 }
 
+/* Isolate ordinary aligned one-block LDM with the same three-way exact
+ * snapshot gate as STM. Both signed arms retain every older capability; the
+ * off arm changes only LDM admission. Four block loads issue twelve read32
+ * calls per loop across IA/IB/DA/DB. This synthetic 25% LDM mix is native
+ * contract evidence, not restored-firmware timing or phone FPS. */
+static bool bench_soc_ldm(uint64_t requested, unsigned reps) {
+    const unsigned length =
+        (unsigned)(sizeof A32_SOC_LDM / sizeof A32_SOC_LDM[0]);
+    const uint64_t ldm_per_loop = 4u;
+    const uint64_t dread_words_per_loop = 12u;
+    double *reference_rates = NULL;
+    double *off_rates = NULL;
+    double *on_rates = NULL;
+    uint64_t total;
+    uint64_t expected_ldm;
+    uint64_t expected_dread_hits;
+    uint64_t expected_off_retired;
+    uint64_t off_chains = 0u;
+    uint64_t on_chains = 0u;
+    bool ok = false;
+
+    if (length != 16u ||
+        requested > UINT64_MAX - (uint64_t)(length - 1u)) {
+        fprintf(stderr, "jitbench: SoC LDM shape failed\n");
+        return false;
+    }
+    total = ((requested + length - 1u) / length) * length;
+    expected_ldm = (total / length) * ldm_per_loop;
+    expected_dread_hits =
+        (total / length) * dread_words_per_loop;
+    expected_off_retired = total - expected_ldm;
+    reference_rates = (double *)calloc(reps, sizeof *reference_rates);
+    off_rates = (double *)calloc(reps, sizeof *off_rates);
+    on_rates = (double *)calloc(reps, sizeof *on_rates);
+    if (!reference_rates || !off_rates || !on_rates) {
+        fprintf(stderr, "jitbench: SoC LDM out of memory\n");
+        goto done;
+    }
+
+    for (unsigned rep = 0u; rep < reps; rep++) {
+        soc_run_result_t reference = {0};
+        soc_run_result_t off = {0};
+        soc_run_result_t on = {0};
+        const char *order;
+        bool ran;
+
+        if (rep % 3u == 0u) {
+            order = "reference-off-on";
+            ran = run_soc_ldm_path(total, SOC_ENTRY_REFERENCE, &reference) &&
+                  run_soc_ldm_path(
+                      total, SOC_ENTRY_GRAPH_EXTENDED_LDM_OFF, &off) &&
+                  run_soc_ldm_path(
+                      total, SOC_ENTRY_GRAPH_EXTENDED, &on);
+        } else if (rep % 3u == 1u) {
+            order = "off-on-reference";
+            ran = run_soc_ldm_path(
+                      total, SOC_ENTRY_GRAPH_EXTENDED_LDM_OFF, &off) &&
+                  run_soc_ldm_path(
+                      total, SOC_ENTRY_GRAPH_EXTENDED, &on) &&
+                  run_soc_ldm_path(total, SOC_ENTRY_REFERENCE, &reference);
+        } else {
+            order = "on-reference-off";
+            ran = run_soc_ldm_path(
+                      total, SOC_ENTRY_GRAPH_EXTENDED, &on) &&
+                  run_soc_ldm_path(total, SOC_ENTRY_REFERENCE, &reference) &&
+                  run_soc_ldm_path(
+                      total, SOC_ENTRY_GRAPH_EXTENDED_LDM_OFF, &off);
+        }
+        if (!ran || !reference.snapshot || !off.snapshot || !on.snapshot ||
+            reference.snapshot_len != off.snapshot_len ||
+            reference.snapshot_len != on.snapshot_len ||
+            memcmp(reference.snapshot, off.snapshot,
+                   reference.snapshot_len) != 0 ||
+            memcmp(reference.snapshot, on.snapshot,
+                   reference.snapshot_len) != 0 ||
+            off.signed_retired != expected_off_retired ||
+            on.signed_retired != total ||
+            reference.dread_hits != expected_dread_hits ||
+            off.dread_hits != expected_dread_hits ||
+            on.dread_hits != expected_dread_hits ||
+            reference.dread_misses != 0u || off.dread_misses != 0u ||
+            on.dread_misses != 0u || on.graph_chains == 0u) {
+            fprintf(stderr,
+                    "jitbench: SoC LDM repetition %u failed exact A/B "
+                    "off-retired=%" PRIu64 " on-retired=%" PRIu64
+                    " hits=%" PRIu64 "/%" PRIu64 "/%" PRIu64
+                    " misses=%" PRIu64 "/%" PRIu64 "/%" PRIu64 "\n",
+                    rep + 1u, off.signed_retired, on.signed_retired,
+                    reference.dread_hits, off.dread_hits, on.dread_hits,
+                    reference.dread_misses, off.dread_misses,
+                    on.dread_misses);
+            free_soc_run_result(&reference);
+            free_soc_run_result(&off);
+            free_soc_run_result(&on);
+            goto done;
+        }
+        if (rep == 0u) {
+            off_chains = off.graph_chains;
+            on_chains = on.graph_chains;
+        } else if (off_chains != off.graph_chains ||
+                   on_chains != on.graph_chains) {
+            fprintf(stderr,
+                    "jitbench: SoC LDM chain counts changed across "
+                    "repetitions\n");
+            free_soc_run_result(&reference);
+            free_soc_run_result(&off);
+            free_soc_run_result(&on);
+            goto done;
+        }
+
+        reference_rates[rep] = (double)total / reference.seconds / 1.0e6;
+        off_rates[rep] = (double)total / off.seconds / 1.0e6;
+        on_rates[rep] = (double)total / on.seconds / 1.0e6;
+        printf("SOC-LDM-SAMPLE rep=%u order=%s reference=%.3f "
+               "ldm-off=%.3f ldm-on=%.3f Minsn/s "
+               "off-retired=%" PRIu64 " on-retired=%" PRIu64
+               " dread-hits=%" PRIu64 " exact-snapshot=yes\n",
+               rep + 1u, order, reference_rates[rep], off_rates[rep],
+               on_rates[rep], off.signed_retired, on.signed_retired,
+               on.dread_hits);
+        free_soc_run_result(&reference);
+        free_soc_run_result(&off);
+        free_soc_run_result(&on);
+    }
+
+    qsort(reference_rates, reps, sizeof *reference_rates, cmp_double);
+    qsort(off_rates, reps, sizeof *off_rates, cmp_double);
+    qsort(on_rates, reps, sizeof *on_rates, cmp_double);
+    printf("SOC-LDM-CURVE length=%u ldm=%" PRIu64
+           " dread-words=%" PRIu64 " guest-insns=%" PRIu64
+           " reps=%u chain-limit=256 same-binary=yes run-api=yes "
+           "cache-lookup=yes block-witness=yes entry-gates=yes "
+           "timer-boundaries=yes device-tick=yes head-cache=warm mmu=off "
+           "exact-snapshot=yes off-signed-retired=%" PRIu64
+           " on-signed-retired=%" PRIu64 " dread-hits=%" PRIu64
+           " dread-misses=0 off-graph-chains=%" PRIu64
+           " on-graph-chains=%" PRIu64
+           " reference-median=%.3f off-median=%.3f on-median=%.3f "
+           "off-speedup=%.3fx on-speedup=%.3fx on-over-off=%.3fx\n",
+           length, ldm_per_loop, dread_words_per_loop, total, reps,
+           expected_off_retired, total, expected_dread_hits,
+           off_chains, on_chains,
+           reference_rates[reps / 2u], off_rates[reps / 2u],
+           on_rates[reps / 2u],
+           off_rates[reps / 2u] / reference_rates[reps / 2u],
+           on_rates[reps / 2u] / reference_rates[reps / 2u],
+           on_rates[reps / 2u] / off_rates[reps / 2u]);
+    ok = true;
+
+done:
+    free(reference_rates);
+    free(off_rates);
+    free(on_rates);
+    return ok;
+}
+
 /* Isolate transactional one-block VSTM with the same three-way exact snapshot
  * gate as VSTR and STM. Both signed arms retain every older capability and
  * direct-write consent; the off arm changes only VSTM admission. Four VSTM
@@ -5926,6 +6505,9 @@ int main(int argc, char **argv) {
     printf("The SoC-STM row is a same-binary ordinary block-store A/B with "
            "four IA/IB/DA/DB transfers and twelve words per synthetic loop. "
            "Its 25%% STM mix is not firmware timing or phone FPS.\n");
+    printf("The SoC-LDM row is a same-binary ordinary block-load A/B with "
+           "four IA/IB/DA/DB transfers and twelve words per synthetic loop. "
+           "Its 25%% LDM mix is not firmware timing or phone FPS.\n");
     printf("The SoC-VSTM row is a separately gated same-binary A/B with four "
            "architectural IA/DB transfers and sixteen words per synthetic "
            "loop. Its 25%% VSTM mix is not firmware timing or phone FPS.\n");
@@ -5944,6 +6526,7 @@ int main(int argc, char **argv) {
     if (!validate_static_read_oracles()) return 1;
     if (!validate_static_store_oracles()) return 1;
     if (!validate_static_stm_oracles()) return 1;
+    if (!validate_static_ldm_oracles()) return 1;
     if (!validate_static_vfp_register_oracles()) return 1;
     if (!validate_static_vfp_compare_oracles()) return 1;
     if (!validate_static_vfp_widen_oracles()) return 1;
@@ -5974,6 +6557,7 @@ int main(int argc, char **argv) {
     if (!bench_soc_thumb_conditional(soc_insns, reps)) return 1;
     if (!bench_soc_vstr(soc_insns, reps)) return 1;
     if (!bench_soc_stm(soc_insns, reps)) return 1;
+    if (!bench_soc_ldm(soc_insns, reps)) return 1;
     if (!bench_soc_vstm(soc_insns, reps)) return 1;
     return 0;
 }

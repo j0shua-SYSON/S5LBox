@@ -28,12 +28,12 @@
  * Apple-host end-to-end gate. */
 #define A64_STATIC_MAX_CHAIN_INSNS 256u
 /* A conditional register-offset A32 load/store uses a guard, shifter, address
- * and memory record. A terminal conditional STM can instead use a guard,
- * preflight, sixteen source commits and a finish record: fifteen records more
- * than the former four-record per-instruction ceiling. The final slot is the
- * fixed block exit. */
+ * and memory record. A conditional LDM can instead use a guard, preflight,
+ * fifteen destination commits and a finish record. Even after fifteen earlier
+ * four-record instructions that remains below this ceiling; the final slot is
+ * the fixed block exit. */
 #define A64_STATIC_MAX_UOPS (A64_STATIC_MAX_INSNS * 4u + 16u)
-#define A64_STATIC_HANDLER_COUNT 26399u
+#define A64_STATIC_HANDLER_COUNT 26490u
 #define A64_STATIC_GRAPH_SLOTS 512u
 
 typedef struct {
@@ -60,6 +60,7 @@ typedef struct {
     bool vfp;
     bool vfp_direct_writes;
     bool stm_direct_writes;
+    bool ldm_direct_reads;
     bool vstm_direct_writes;
 } a64_static_block_t;
 

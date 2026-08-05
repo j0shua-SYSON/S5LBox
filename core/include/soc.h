@@ -3933,6 +3933,9 @@ bool s5l8900_static_a64_set_vstr(s5l8900_t *m, bool enabled);
 /* Same-binary rollout/benchmark control for transactional ordinary A32 STM
  * records. It defaults on and clears only derived decode/graph state. */
 bool s5l8900_static_a64_set_stm(s5l8900_t *m, bool enabled);
+/* Same-binary rollout/benchmark control for transactional aligned one-block
+ * ordinary A32 LDM records without PC or user-bank transfers. */
+bool s5l8900_static_a64_set_ldm(s5l8900_t *m, bool enabled);
 /* Same-binary rollout/benchmark control for transactional one-block A32 VSTM
  * records. Deprecated FSTMX and cross-block transfers stay literal. */
 bool s5l8900_static_a64_set_vstm(s5l8900_t *m, bool enabled);
