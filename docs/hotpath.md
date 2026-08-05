@@ -7504,3 +7504,53 @@ added here and 30 FPS is not close or established**. The x86 Release replay itse
 This closes another renderer micro-optimization path. The next local work must profile a larger core
 execution or device boundary, while the decisive MBX-versus-normal result remains simultaneous
 sustained Minsn/s and changed FPS from these exact, visibly distinct IPAs on the same phone scene.
+
+### 2026-08-06: a fresh current-tree MBX rebuild reaches about 14 changed scanouts/s on x86, not 30
+
+r570--r572 remain exact measurements of the executables named in their logs, but they are not a
+current-tree throughput baseline. After rebuilding `build-mbx` and the sampling-only
+`build-gprof` from HEAD `b6d79e94073b987c21889d420a5140e83f4374a6`, with `core/` and `tools/`
+clean, the same retained r446 state and the same 7.320--7.420 B app-shaped MBX window run much
+faster. No source optimization was made in this experiment. The reason the older binaries were
+slower is **not established**; build directories needed to identify every old flag no longer
+exist, so attributing the difference to a particular compiler option would be invention.
+
+r574 and r575 use the freshly rebuilt ordinary-`-O2`, link-only-`-pg` sampling binary. Both exit
+zero, retire the requested 100 M instructions, observe 87 changed signatures, and finish with
+byte-identical guest state:
+
+| run | core rate | mean / max changed FPS | live publications | >=30-FPS windows |
+|---|---:|---:|---:|---:|
+| r574 | 14.918200 Minsn/s | 13.111 / 15.506 | 181 | 0 |
+| r575 | 14.917172 Minsn/s | 12.942 / 15.109 | 182 | 0 |
+
+The longer sample moves the broad attribution away from another MBX micro-optimization. After
+excluding 0.20 seconds in one-time snapshot validation, `arm_step` owns about 38% of sampled CPU,
+`exec_data_processing` about 6.7%, `s5l8900_tick` about 5.5%, and the next individual interpreter,
+MMU and bus functions are each about 2.6--4.3%. `mbx_execute_textured_sprite` itself is about 2.9%.
+This is x86 interpreter attribution: the iOS product additionally uses its build-time-signed
+AArch64 graph, so these percentages must not be projected onto the A9.
+
+r576 and r577 then run the freshly rebuilt non-profiled `build-mbx` binary, SHA-256
+`EF15340C930F708863CEC436F7D7F30DFA59039E24BD69F0D047D9165BDECB56`, through the identical
+window:
+
+| run | core rate | mean / max changed FPS | live publications | >=30-FPS windows |
+|---|---:|---:|---:|---:|
+| r576 | 16.448664 Minsn/s | 14.342 / 15.854 | 167 | 0 |
+| r577 | 15.895194 Minsn/s | 13.809 / 17.393 | 173 | 0 |
+
+Their averages are 16.171929 Minsn/s and 14.076 changed scanouts/s. All four successful runs have
+empty stderr, the exact work-image SHA-256
+`06AAAA84FB4BFEAE5A647290C9B50BEBE7640F420457089F40BDBED961D6992D`, the exact screen SHA-256
+`96EC1953CD74B76E979F08EB933684FE2AC4182C64BF6129143DEE7E040CE63E`, and a nonblack final frame
+with 250,188 of 460,800 RGB bytes non-zero. No snapshot was created: every run restored the
+canonical r446 checkpoint. r573 is only a harness-location failure before guest execution; its
+reconstructible work image was deleted and it contributes no performance result.
+
+Brutal status: **the current x86 MBX baseline is substantially better than the stale executable,
+but it is still about 14 changed scanouts/s, contains no 30-FPS window, and says nothing direct
+about the installed iPhone build**. The physical device remains the authority. Optimizing x86
+`arm_step` from this profile before measuring the iOS signed graph would risk solving the wrong
+bottleneck; the next decisive action remains the unlocked-phone MBX run with simultaneous app
+changed-frame status, sustained process CPU and CoreAnimation telemetry.
