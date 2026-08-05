@@ -1498,6 +1498,11 @@ static unsigned semantic_span(const a64_static_block_t *block, unsigned i,
                 handler_is_direct_write(block->uops[i + 1u].handler))
                    ? 2u : 0u;
     }
+    /* VSTM folds address generation, the transactional DWRITE proof and the
+     * complete VFP word stream into one terminal record. Unlike ordinary
+     * direct writes, it is therefore a complete semantic instruction by
+     * itself rather than the second half of an address/write pair. */
+    if (handler_is_vstm_direct_write(handler)) return 1u;
     if (handler_is_dp_reg(handler) || handler_is_addr_reg(handler) ||
         handler_is_direct_read(handler) ||
         handler_is_direct_write(handler) || handler_is_stm_commit(handler))
