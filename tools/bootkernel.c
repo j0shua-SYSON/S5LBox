@@ -24828,6 +24828,21 @@ typedef enum {
     SEQUENCE_SIGNED_STOP_COUNT
 } sequence_signed_stop_t;
 
+/* Read-only mirror of the product's direct-mapped adaptive refill predictor.
+ * It consumes only the already-modeled call result and never changes the
+ * unconditional continuity model or guest. */
+#define SEQUENCE_REFILL_PREDICTOR_SLOTS 1024u
+#define SEQUENCE_REFILL_SINGLE_REPROBE 16u
+typedef struct {
+    uint32_t pc;
+    uint32_t fetch_gen;
+    uint8_t skip_remaining;
+    bool fetch_priv;
+    bool thumb;
+    bool valid;
+    bool multi_seen;
+} sequence_refill_predictor_entry_t;
+
 /* Side-by-side observer for the product's extended total invocation. The
  * existing signed_* fields below retain the historical sixteen-instruction
  * model verbatim, so one literal replay can compare the boundary without
@@ -24863,6 +24878,17 @@ typedef struct {
     uint64_t fetch_refill_first_head_one_multi_calls;
     uint64_t fetch_refill_first_head_one_instructions;
     uint64_t fetch_refill_call_maximum;
+    /* Offline admission replay over the unconditional refill calls. A skipped
+     * call's observed length is used only to audit what the predictor missed;
+     * it is never fed back into the predictor. */
+    sequence_refill_predictor_entry_t *fetch_refill_predictor;
+    uint64_t fetch_refill_adaptive_attempts;
+    uint64_t fetch_refill_adaptive_skips;
+    uint64_t fetch_refill_adaptive_attempt_single;
+    uint64_t fetch_refill_adaptive_attempt_multi;
+    uint64_t fetch_refill_adaptive_skip_single;
+    uint64_t fetch_refill_adaptive_skip_multi;
+    uint64_t fetch_refill_adaptive_attempt_instructions;
     uint64_t call_length;
     uint64_t call_remaining;
     uint64_t call_blocks;
@@ -24871,6 +24897,9 @@ typedef struct {
     uint64_t maximum;
     unsigned head_length;
     unsigned call_first_head_length;
+    uint64_t call_refill_initial_budget;
+    uint32_t call_refill_pc;
+    uint32_t call_refill_gen;
     sequence_signed_stop_t budget_stop;
     uint32_t chain_pc;
     bool chain_pending;
@@ -24878,6 +24907,9 @@ typedef struct {
     bool call_fetch_refilled;
     bool call_refill_first_cross_block;
     bool call_refill_first_fixed_cross_block;
+    bool call_refill_thumb;
+    bool call_refill_priv;
+    bool call_refill_adaptive_allowed;
 } sequence_signed_extended_t;
 
 typedef enum {
@@ -24963,6 +24995,8 @@ typedef struct {
      * fetch refill enabled. Keeping the former product model immediately
      * above provides a same-stream control for call-continuity accounting. */
     sequence_signed_extended_t implemented_fetch_refill;
+    sequence_refill_predictor_entry_t
+        fetch_refill_predictor[SEQUENCE_REFILL_PREDICTOR_SLOTS];
     /* Current product (including its implemented single stores, VSTR S/D,
      * one-block ordinary STM/VSTM and whatever the exact read-only decoder
      * already admits) plus exactly one remaining store family. These side-by-
@@ -27492,6 +27526,57 @@ static void sequence_signed_extended_close(sequence_profile_t *profile,
     model->call_first_head_length = 0u;
 }
 
+static unsigned sequence_refill_predictor_index(uint32_t pc, uint32_t gen,
+                                                bool thumb) {
+    uint32_t key = pc >> (thumb ? 1u : 2u);
+    key ^= gen * UINT32_C(0x9e3779b1);
+    if (thumb) key ^= UINT32_C(0x85ebca6b);
+    return key & (SEQUENCE_REFILL_PREDICTOR_SLOTS - 1u);
+}
+
+static bool sequence_refill_predictor_matches(
+        const sequence_refill_predictor_entry_t *entry, uint32_t pc,
+        uint32_t gen, bool thumb, bool priv) {
+    return entry->valid && entry->pc == pc && entry->fetch_gen == gen &&
+           entry->thumb == thumb && entry->fetch_priv == priv;
+}
+
+static bool sequence_refill_predictor_allows(
+        sequence_refill_predictor_entry_t *table, uint32_t pc, uint32_t gen,
+        bool thumb, bool priv) {
+    if (!table) return true;
+    sequence_refill_predictor_entry_t *entry =
+        &table[sequence_refill_predictor_index(pc, gen, thumb)];
+    if (!sequence_refill_predictor_matches(
+            entry, pc, gen, thumb, priv) ||
+        entry->multi_seen || entry->skip_remaining == 0u)
+        return true;
+    entry->skip_remaining--;
+    return false;
+}
+
+static void sequence_refill_predictor_record(
+        sequence_refill_predictor_entry_t *table, uint32_t pc, uint32_t gen,
+        bool thumb, bool priv, uint64_t completed, uint64_t budget) {
+    if (!table) return;
+    sequence_refill_predictor_entry_t *entry =
+        &table[sequence_refill_predictor_index(pc, gen, thumb)];
+    if (!sequence_refill_predictor_matches(entry, pc, gen, thumb, priv)) {
+        memset(entry, 0, sizeof *entry);
+        entry->pc = pc;
+        entry->fetch_gen = gen;
+        entry->thumb = thumb;
+        entry->fetch_priv = priv;
+        entry->valid = true;
+    }
+    if (completed > 1u) {
+        entry->multi_seen = true;
+        entry->skip_remaining = 0u;
+    } else if (!entry->multi_seen && budget > 1u) {
+        entry->skip_remaining = SEQUENCE_REFILL_SINGLE_REPROBE - 1u;
+    }
+}
+
 static void sequence_signed_store_model_close(
         sequence_signed_extended_t *model,
         sequence_signed_stop_t why) {
@@ -27506,6 +27591,12 @@ static void sequence_signed_store_model_close(
         model->call_fetch_refilled = false;
         model->call_refill_first_cross_block = false;
         model->call_refill_first_fixed_cross_block = false;
+        model->call_refill_initial_budget = 0u;
+        model->call_refill_pc = 0u;
+        model->call_refill_gen = 0u;
+        model->call_refill_thumb = false;
+        model->call_refill_priv = false;
+        model->call_refill_adaptive_allowed = false;
         return;
     }
     if (model->call_fetch_refilled) {
@@ -27529,6 +27620,25 @@ static void sequence_signed_store_model_close(
                 model->call_length;
             if (model->call_length > 1u)
                 model->fetch_refill_first_head_one_multi_calls++;
+        }
+        if (model->fetch_refill_predictor) {
+            if (model->call_refill_adaptive_allowed) {
+                model->fetch_refill_adaptive_attempt_instructions +=
+                    model->call_length;
+                if (model->call_length > 1u)
+                    model->fetch_refill_adaptive_attempt_multi++;
+                else
+                    model->fetch_refill_adaptive_attempt_single++;
+                sequence_refill_predictor_record(
+                    model->fetch_refill_predictor,
+                    model->call_refill_pc, model->call_refill_gen,
+                    model->call_refill_thumb, model->call_refill_priv,
+                    model->call_length, model->call_refill_initial_budget);
+            } else if (model->call_length > 1u) {
+                model->fetch_refill_adaptive_skip_multi++;
+            } else {
+                model->fetch_refill_adaptive_skip_single++;
+            }
         }
     }
     if (model->call_length <= SEQUENCE_SIGNED_EXTENDED_CAP) {
@@ -27555,6 +27665,12 @@ static void sequence_signed_store_model_close(
     model->call_fetch_refilled = false;
     model->call_refill_first_cross_block = false;
     model->call_refill_first_fixed_cross_block = false;
+    model->call_refill_initial_budget = 0u;
+    model->call_refill_pc = 0u;
+    model->call_refill_gen = 0u;
+    model->call_refill_thumb = false;
+    model->call_refill_priv = false;
+    model->call_refill_adaptive_allowed = false;
 }
 
 /* Capture the product gate and lookup-only recovery verdict before the
@@ -27867,6 +27983,23 @@ static void sequence_signed_store_observe_tagged(
         if (fetch_refilled) {
             model->fetch_refill_recoveries++;
             model->call_fetch_refilled = true;
+            if (model->fetch_refill_predictor) {
+                bool priv = (mach->cpu.cpsr & ARM_CPSR_MODE_MASK) !=
+                            ARM_MODE_USR;
+                model->call_refill_pc = pc;
+                model->call_refill_gen = mach->cpu.tlb_gen;
+                model->call_refill_thumb = thumb;
+                model->call_refill_priv = priv;
+                model->call_refill_initial_budget = budget;
+                model->call_refill_adaptive_allowed =
+                    sequence_refill_predictor_allows(
+                        model->fetch_refill_predictor, pc,
+                        mach->cpu.tlb_gen, thumb, priv);
+                if (model->call_refill_adaptive_allowed)
+                    model->fetch_refill_adaptive_attempts++;
+                else
+                    model->fetch_refill_adaptive_skips++;
+            }
             model->call_refill_first_cross_block =
                 classification->terminal &&
                 (pc & ~UINT32_C(0x3ff)) !=
@@ -27943,6 +28076,9 @@ static void sequence_signed_store_observe_fetch_refill(
         uint32_t pc, bool thumb, bool physical_sequential,
         const sequence_signed_classification_t *classification,
         sequence_signed_extended_t *model) {
+    if (profile && model)
+        model->fetch_refill_predictor =
+            profile->signed_store.fetch_refill_predictor;
     sequence_signed_store_observe_tagged(
         profile, mach, pc, thumb, physical_sequential,
         classification, model, false, true);
@@ -29587,6 +29723,17 @@ static void sequence_profile_report_store_model(
     uint64_t fetch_refill_removed_entries =
         implemented_entries >= fetch_refill_entries
             ? implemented_entries - fetch_refill_entries : 0u;
+    uint64_t fetch_refill_multi_calls =
+        fetch_refill->fetch_refill_calls >=
+                fetch_refill->fetch_refill_single_instruction_calls
+            ? fetch_refill->fetch_refill_calls -
+                  fetch_refill->fetch_refill_single_instruction_calls
+            : 0u;
+    uint64_t adaptive_removed_entries =
+        fetch_refill->fetch_refill_adaptive_attempt_multi;
+    uint64_t adaptive_entries =
+        implemented_entries >= adaptive_removed_entries
+            ? implemented_entries - adaptive_removed_entries : 0u;
     bool broad_exact = family_total == store->candidates &&
         proposed_supported == store->decoder_supported &&
         proposed_eligible == store->retirement_eligible &&
@@ -29648,6 +29795,27 @@ static void sequence_profile_report_store_model(
             fetch_refill->fetch_refill_calls &&
         fetch_refill->fetch_refill_first_head_one_instructions >=
             fetch_refill->fetch_refill_first_head_one_calls &&
+        fetch_refill_removed_entries == fetch_refill_multi_calls &&
+        fetch_refill->fetch_refill_adaptive_attempts +
+                fetch_refill->fetch_refill_adaptive_skips ==
+            fetch_refill->fetch_refill_recoveries &&
+        fetch_refill->fetch_refill_adaptive_attempt_single +
+                fetch_refill->fetch_refill_adaptive_attempt_multi ==
+            fetch_refill->fetch_refill_adaptive_attempts &&
+        fetch_refill->fetch_refill_adaptive_skip_single +
+                fetch_refill->fetch_refill_adaptive_skip_multi ==
+            fetch_refill->fetch_refill_adaptive_skips &&
+        fetch_refill->fetch_refill_adaptive_attempt_single +
+                fetch_refill->fetch_refill_adaptive_skip_single ==
+            fetch_refill->fetch_refill_single_instruction_calls &&
+        fetch_refill->fetch_refill_adaptive_attempt_multi +
+                fetch_refill->fetch_refill_adaptive_skip_multi ==
+            fetch_refill_multi_calls &&
+        fetch_refill->fetch_refill_adaptive_attempt_instructions >=
+            fetch_refill->fetch_refill_adaptive_attempts &&
+        adaptive_removed_entries <= fetch_refill_removed_entries &&
+        adaptive_entries >= fetch_refill_entries &&
+        implemented_entries >= adaptive_entries &&
         fetch_refill->fetch_refill_call_maximum <=
             SEQUENCE_SIGNED_EXTENDED_CAP &&
         fetch_refill->maximum <= SEQUENCE_SIGNED_EXTENDED_CAP;
@@ -29827,6 +29995,35 @@ static void sequence_profile_report_store_model(
                          (double)implemented_entries : 0.0,
                fetch_refill->fetch_refill_recoveries,
                fetch_refill->gate_refusals[SEQUENCE_SIGNED_GATE_FETCH]);
+        printf("      adaptive predictor attempts/skips=%" PRIu64
+               "/%" PRIu64 " decisions=%" PRIu64 "/%" PRIu64 "\n",
+               fetch_refill->fetch_refill_adaptive_attempts,
+               fetch_refill->fetch_refill_adaptive_skips,
+               fetch_refill->fetch_refill_adaptive_attempts +
+                   fetch_refill->fetch_refill_adaptive_skips,
+               fetch_refill->fetch_refill_recoveries);
+        printf("      adaptive observed attempt single/multi/instructions="
+               "%" PRIu64 "/%" PRIu64 "/%" PRIu64
+               "; skip single/multi=%" PRIu64 "/%" PRIu64 "\n",
+               fetch_refill->fetch_refill_adaptive_attempt_single,
+               fetch_refill->fetch_refill_adaptive_attempt_multi,
+               fetch_refill->fetch_refill_adaptive_attempt_instructions,
+               fetch_refill->fetch_refill_adaptive_skip_single,
+               fetch_refill->fetch_refill_adaptive_skip_multi);
+        printf("      adaptive runner entries off/product/removed="
+               "%" PRIu64 "/%" PRIu64 "/%" PRIu64
+               " (%6.3f%% off); retained=%6.3f%% of unconditional removals\n",
+               implemented_entries, adaptive_entries,
+               adaptive_removed_entries,
+               implemented_entries
+                   ? 100.0 * (double)adaptive_removed_entries /
+                         (double)implemented_entries : 0.0,
+               fetch_refill_removed_entries
+                   ? 100.0 * (double)adaptive_removed_entries /
+                         (double)fetch_refill_removed_entries : 0.0);
+        printf("      Skipped-call lengths above are offline audit only; "
+               "the product predictor never observes or learns from a "
+               "skipped call.\n");
         printf("      recovered calls/instructions/heads/single/xblk/"
                "fixed-xblk/max="
                "%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64
