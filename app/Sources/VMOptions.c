@@ -134,9 +134,10 @@ static const vm_option_omission_t VM_OMITTED[] = {
     { "iomfb-display",
       "meaningful only alongside --framebuffer, which this app does not offer" },
     { "hle",
-      "native rasterizer replacements are still an opt-in host experiment. "
-      "They belong in the app as a verified default, not a user-facing switch, "
-      "only after live pixel equivalence and the no-JIT speed target pass" },
+      "native rasterizer replacements remain off in the normal app. The "
+      "manual experimental-HLE IPA arms the same exact-prologue library for "
+      "a measured phone A/B; it becomes a default, not a user-facing switch, "
+      "only after live pixel equivalence and a worthwhile no-JIT speed result" },
     { "hle-verify",
       "a developer differential oracle that deliberately executes Apple's "
       "routine and emits a terminal report; it is a validation run, not a "

@@ -9,7 +9,7 @@ on:
     paths:
       - 'app/**'
       - 'core/**'
-      # The app compiles seven C files out of tools/, plus generated assembly
+      # The app compiles eight C files out of tools/, plus generated assembly
       # (see app/project.yml, which lists them rather than pulling in the
       # directory). Without
       # these, a change to one of them cannot trigger this workflow -- and that
@@ -21,6 +21,8 @@ on:
       - 'tools/guest_patch.c'
       - 'tools/ios3_bringup_gate.c'
       - 'tools/ios3_bringup_gate.h'
+      - 'tools/ios3_hle.c'
+      - 'tools/ios3_hle.h'
       - 'tools/ios3_kernel_patch.c'
       - 'tools/ios3_kernel_patch.h'
       - 'tools/rootfs_work.c'
@@ -34,11 +36,20 @@ on:
       - 'tools/gen_a64_static.py'
       - '.github/workflows/ios-build.yml'
   workflow_dispatch:
+    inputs:
+      experimental_hle:
+        description: 'Build an explicitly labelled native-raster HLE candidate'
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   build:
     name: build ad-hoc-signed .ipa
     runs-on: macos-15
+    env:
+      EXPERIMENTAL_HLE: ${{ github.event_name == 'workflow_dispatch' && inputs.experimental_hle && 'true' || 'false' }}
+      IPA_ARTIFACT: ${{ github.event_name == 'workflow_dispatch' && inputs.experimental_hle && 'S5LBox-hle-experimental-ipa' || 'S5LBox-ipa' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -94,6 +105,10 @@ jobs:
         working-directory: app
         run: |
           set -euo pipefail
+          build_settings=()
+          if [ "$EXPERIMENTAL_HLE" = true ]; then
+            build_settings+=("OTHER_CFLAGS=-DS5LBOX_IOS3_HLE_EXPERIMENT=1")
+          fi
           xcodebuild \
             -project S5LBox.xcodeproj \
             -target S5LBox \
@@ -102,12 +117,18 @@ jobs:
             -arch arm64 \
             CONFIGURATION_BUILD_DIR="$PWD/dist" \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            "${build_settings[@]}" \
             build
           binary="$PWD/dist/S5LBox.app/S5LBox"
           test -f "$binary"
           xcrun nm "$binary" |
             awk '$NF == "_a64_static_execute" { found=1 }
                  END { exit !found }'
+          if [ "$EXPERIMENTAL_HLE" = true ]; then
+            xcrun nm "$binary" |
+              awk '$NF == "_vm_firmware_hle_enable" { found=1 }
+                   END { exit !found }'
+          fi
 
       - name: Fake-sign + package .ipa
         working-directory: app
@@ -126,6 +147,6 @@ jobs:
       - name: Upload .ipa
         uses: actions/upload-artifact@v4
         with:
-          name: S5LBox-ipa
+          name: ${{ env.IPA_ARTIFACT }}
           path: app/S5LBox.ipa
           if-no-files-found: error

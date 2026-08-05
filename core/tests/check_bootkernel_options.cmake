@@ -182,14 +182,21 @@ expect_config(run_api_accepts_exact_checkpoints
 expect_config(run_api_accepts_frame_meter
     "framebuffer=1|--run-api|--frame-meter"
     absent-kernel -F --run-api --frame-meter --print-config)
-# By contrast these need work at a particular instruction. Refusing them is
+# Scheduled input still needs a general instruction callback. Refusing it is
 # what prevents a fast run from silently executing a different request.
 expect_refused(run_api_refuses_scheduled_input
     "--run-api cannot be combined"
     absent-kernel --run-api --touch 1000:160:240 --print-config)
-expect_refused(run_api_refuses_hle
-    "--run-api cannot be combined"
+# Replacement HLE now uses the same bounded exact-PC hook as the experimental
+# iOS build, so this combination is the faithful way to test that product path.
+expect_config(run_api_accepts_replacement_hle
+    "hle=1|--run-api"
     absent-kernel --run-api --hle --print-config)
+# The differential verifier must observe the complete original function and
+# its return boundary, which remains a literal-runner diagnostic.
+expect_refused(run_api_refuses_hle_verify
+    "--run-api cannot be combined"
+    absent-kernel --run-api --hle-verify --print-config)
 # Full sequence profiling requires the literal instruction boundary. It is a
 # host observer, so the relaunch line (not the machine-toggle table) records it.
 expect_config(sequence_profile_is_explicit

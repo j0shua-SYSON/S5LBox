@@ -86,6 +86,18 @@ static static_a64_state_t *static_state(const s5l8900_t *m) {
     return m ? (static_a64_state_t *)m->static_a64_state : NULL;
 }
 
+/* A registered host replacement is a hard block boundary.  Only decode pays
+ * this scan: hot graph traversal sees no node at the target and returns to the
+ * machine loop, where the hook is invoked once. */
+static unsigned cap_before_pre_step_target(const s5l8900_t *m, uint32_t pc,
+                                           unsigned width,
+                                           unsigned candidate_insns) {
+    for (unsigned i = 1u; i < candidate_insns; i++) {
+        if (s5l8900_pre_step_target(m, pc + i * width)) return i;
+    }
+    return candidate_insns;
+}
+
 static unsigned cache_index(uint32_t pc, bool thumb, uint32_t generation) {
     uint32_t key = pc >> (thumb ? 1u : 2u);
     key ^= generation * UINT32_C(0x9e3779b1);
@@ -328,6 +340,10 @@ static const a64_static_block_t *select_persistent_block(
     m = context->machine;
     cpu = &m->cpu;
 
+    /* Never publish a descriptor for the target itself.  A direct graph link
+     * then has no node to cross and the outer machine loop owns the callback. */
+    if (s5l8900_pre_step_target(m, pc)) return NULL;
+
     /* This is the same fail-closed head contract as the legacy C loop. Guest
      * general registers/NZCV remain pinned across this callback, so selection
      * deliberately consults only state that the signed subset cannot mutate. */
@@ -351,6 +367,8 @@ static const a64_static_block_t *select_persistent_block(
     candidate_insns = (0x400u - offset) / width;
     if (candidate_insns > A64_STATIC_MAX_INSNS)
         candidate_insns = A64_STATIC_MAX_INSNS;
+    candidate_insns = cap_before_pre_step_target(
+        m, pc, width, candidate_insns);
     if (!candidate_insns) return NULL;
     raw_len = candidate_insns * width;
     bytes = cpu->fetch_host + offset;
@@ -391,6 +409,17 @@ bool s5l8900_static_a64_available(void) {
     return a64_static_host_available();
 #else
     return false;
+#endif
+}
+
+void s5l8900_static_a64_invalidate_derived(s5l8900_t *m) {
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    static_a64_state_t *state = static_state(m);
+    if (!state) return;
+    memset(state->cache, 0, sizeof state->cache);
+    memset(state->graph_nodes, 0, sizeof state->graph_nodes);
+#else
+    (void)m;
 #endif
 }
 
@@ -941,6 +970,7 @@ unsigned s5l8900_static_a64_try(s5l8900_t *m, unsigned max_insns,
         priv = (cpu->cpsr & ARM_CPSR_MODE_MASK) != ARM_MODE_USR;
         width = thumb ? 2u : 4u;
         if ((pc & (width - 1u)) != 0u) break;
+        if (s5l8900_pre_step_target(m, pc)) break;
 
         fetch_block = pc & ~UINT32_C(0x3ff);
         /* A cross-block target must return to arm_step(), which alone owns
@@ -953,6 +983,8 @@ unsigned s5l8900_static_a64_try(s5l8900_t *m, unsigned max_insns,
         candidate_insns = (0x400u - offset) / width;
         if (candidate_insns > A64_STATIC_MAX_INSNS)
             candidate_insns = A64_STATIC_MAX_INSNS;
+        candidate_insns = cap_before_pre_step_target(
+            m, pc, width, candidate_insns);
         if (!candidate_insns) break;
         raw_len = candidate_insns * width;
         bytes = cpu->fetch_host + offset;

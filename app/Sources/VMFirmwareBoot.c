@@ -3,6 +3,7 @@
 
 #include "file_block.h"
 #include "VMSnapshotCow.h"
+#include "VMFirmwareHLE.h"
 #include "ios3_bringup_gate.h"
 #include "rootfs_work.h"
 
@@ -22,6 +23,11 @@ struct vm_firmware_boot {
     vm_cow_t         *cow;
     char              overlay[VM_FW_BOOT_PATH_CAPACITY];
     bool              overlay_armed;
+#if defined(S5LBOX_IOS3_HLE_EXPERIMENT)
+    /* Pointer identity only. VMEngine frees the machine before this owner;
+     * vm_firmware_hle_release() deliberately never dereferences it. */
+    const s5l8900_t   *hle_machine;
+#endif
 };
 
 /* -------------------------------------------------------------------------- */
@@ -275,6 +281,10 @@ bool vm_firmware_boot_flush_overlay(vm_firmware_boot_t *boot) {
 void vm_firmware_boot_destroy(vm_firmware_boot_t **slot) {
     if (!slot || !*slot) return;
     vm_firmware_boot_t *boot = *slot;
+#if defined(S5LBOX_IOS3_HLE_EXPERIMENT)
+    if (boot->hle_machine)
+        vm_firmware_hle_release(boot->hle_machine);
+#endif
     /*
      * The overlay closes BEFORE the media, and that order is not tidiness. The
      * adapter holds a copy of the file descriptor and its close is where a
@@ -440,9 +450,33 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
         return false;
     }
 
+#if defined(S5LBOX_IOS3_HLE_EXPERIMENT)
+    /*
+     * This build exists to measure the native raster replacements on a real
+     * phone. Quietly falling back to the ordinary interpreter would produce a
+     * perfectly plausible but false control result, so inability to install
+     * the exact-PC boundary is a boot failure in this build only.
+     */
+    if (!vm_firmware_hle_enable(machine)) {
+        (void)file_block_close(boot->media);
+        set_detail(report->detail, sizeof report->detail,
+                   "The experimental native raster hook could not be armed; "
+                   "the ordinary app build is unaffected.");
+        set_detail(report->summary, sizeof report->summary,
+                   "experimental raster HLE unavailable");
+        return false;
+    }
+    boot->hle_machine = machine;
+#endif
+
     report->ok = true;
+#if defined(S5LBOX_IOS3_HLE_EXPERIMENT)
+    (void)snprintf(report->summary, sizeof report->summary,
+                   "iPhone OS 3.1.3 + EXPERIMENTAL native raster HLE");
+#else
     (void)snprintf(report->summary, sizeof report->summary,
                    "iPhone OS 3.1.3 kernel, root on /dev/md0");
+#endif
     report->summary[sizeof report->summary - 1u] = '\0';
     return true;
 }

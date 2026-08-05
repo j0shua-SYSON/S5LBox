@@ -27,6 +27,7 @@
 #include "file_block.h"
 #include "ios3_hle.h"
 #include "ios3_kernel_patch.h"
+#include "VMFirmwareHLE.h"
 #include "macho.h"
 #include "md_bridge.h"
 #include "md_raw_bridge.h"
@@ -32834,7 +32835,9 @@ static void boot_print_usage(FILE *stream, const char *argv0) {
             "      every per-instruction host observer while retaining CPU,\n"
             "      MMU, device tick, framebuffer, MBX, and external-md guest\n"
             "      behavior. Exact --snapshot-at boundaries and --frame-meter\n"
-            "      are supported, but scheduled input, HLE, PPP/NAT, call probes,\n"
+            "      are supported. --hle uses the same exact-PC machine hook as\n"
+            "      the experimental iOS build; scheduled input, HLE verify,\n"
+            "      PPP/NAT, call probes,\n"
             "      and per-instruction diagnostic requests are refused rather than\n"
             "      silently ignored. The final diagnostic report is necessarily\n"
             "      sparse; TLB counters omit observer translations and therefore\n"
@@ -34413,20 +34416,19 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    /* s5l8900_run() deliberately has no instruction-boundary callback. Every
-     * item below changes guest state between instructions or promises a
-     * diagnostic at that boundary, so accepting it here would make --run-api
-     * fast by quietly doing less than requested. Snapshots and frame-meter are
-     * different: both are app-chunk-boundary work, and the runner shortens its
-     * next chunk to land on their exact absolute boundary. */
+    /* s5l8900_run() now has one deliberately narrow instruction-boundary
+     * facility: exact-PC replacements, which is how the experimental iOS HLE
+     * is measured through the real app runner. Everything else below changes
+     * guest state or promises diagnostics at a boundary the API does not
+     * expose. Snapshots and frame-meter are app-chunk-boundary work. */
     if (run_api_hot &&
         (call_probe_n || touch_n || drag_n || pinch_n || button_n ||
-         cfg.v.hle || cfg.v.hle_verify || ppp ||
+         cfg.v.hle_verify || ppp ||
          stop_on_abort || heartbeat || hot_page_given || win_lo != 0u ||
          win_hi != UINT64_MAX || ktail != 512u)) {
         fprintf(stderr,
                 "--run-api cannot be combined with call probes, scheduled "
-                "input, HLE, PPP/NAT, stop-on-abort, -Z, -H, -W, "
+                "input, HLE verify, PPP/NAT, stop-on-abort, -Z, -H, -W, "
                 "or a non-default -T: those require per-instruction host "
                 "observation\n");
         return 1;
@@ -36483,6 +36485,21 @@ external_md_work_ready:
      * struct that every observer in the loop could in principle have written.
      */
     const bool call_probe_active = G.call_probe_n != 0u;
+    bool run_api_hle = false;
+    if (run_api_hot && cfg.v.hle) {
+        if (!vm_firmware_hle_enable(&mach)) {
+            fprintf(stderr,
+                    "--run-api --hle: exact-PC machine hook installation "
+                    "failed\n");
+            sequence_profile_destroy(&sequence_profile);
+            frame_meter_destroy(&frame_meter);
+            return 2;
+        }
+        run_api_hle = true;
+        printf("run api HLE: experimental iOS adapter installed at %u exact "
+               "replacement target(s); arming remains identity-gated\n",
+               mach.pre_step_target_count);
+    }
     if (run_api_hot) {
         /* VMEngine.m uses this exact chunk size. Keep the benchmark on the
          * public app entry point instead of inventing a larger desktop-only
@@ -37405,6 +37422,13 @@ external_md_work_ready:
 
     /* ------------------------------------------- the user-mode call probe --- */
     call_probe_report();
+    if (run_api_hle) {
+        g_hle_space = vm_firmware_hle_space(&mach);
+        printf("run api HLE: target matches=%" PRIu64
+               " handled=%" PRIu64 "\n",
+               s5l8900_pre_step_matches(&mach),
+               s5l8900_pre_step_handled(&mach));
+    }
     hle_report();
     touch_report();
     button_report();
@@ -38528,6 +38552,7 @@ external_md_work_ready:
 
     sequence_profile_destroy(&sequence_profile);
     frame_meter_destroy(&frame_meter);
+    if (run_api_hle) vm_firmware_hle_release(&mach);
     s5l8900_free(&mach);
     ksyms_free(&KS);
     free(img);

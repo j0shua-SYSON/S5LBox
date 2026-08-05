@@ -65,6 +65,13 @@ targets:
       # 27,000 lines of diagnostics -- which has no business in a phone binary.
       - path: ../tools/ios3_bringup_gate.c
         group: core
+      # The normal build links the already-tested replacement library but does
+      # not arm it. A manual ios-build dispatch with experimental_hle=true adds
+      # S5LBOX_IOS3_HLE_EXPERIMENT, and only that candidate installs the exact-
+      # PC adapter in VMFirmwareBoot. Keeping one source graph makes the phone
+      # A/B differ by policy rather than by a hand-edited project.
+      - path: ../tools/ios3_hle.c
+        group: core
       - path: ../tools/ios3_kernel_patch.c
         group: core
       - path: ../tools/guest_patch.c

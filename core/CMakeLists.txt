@@ -514,6 +514,46 @@ else()
 endif()
 add_test(NAME ios3_hle COMMAND test_ios3_hle)
 
+add_library(host_vm_firmware_hle STATIC
+    ../app/Sources/VMFirmwareHLE.c
+)
+target_include_directories(host_vm_firmware_hle PUBLIC
+    ../app/Sources ../tools include)
+target_link_libraries(host_vm_firmware_hle PUBLIC emucore host_ios3_hle)
+set_target_properties(host_vm_firmware_hle PROPERTIES
+    C_STANDARD 11
+    C_STANDARD_REQUIRED YES
+    C_EXTENSIONS NO)
+if(MSVC)
+    target_compile_options(host_vm_firmware_hle PRIVATE /W4 /WX)
+else()
+    target_compile_options(host_vm_firmware_hle PRIVATE
+        -Wall -Wextra -Werror -pedantic -Wformat=2 -Wshadow)
+endif()
+
+# The phone adapter around that library has separate responsibilities: bind
+# replacement entries into s5l8900_run(), keep the one global HLE table owned
+# by one machine, and fail closed when ownership moves. Compile it under the
+# same strict host matrix instead of trusting the first iphoneos build to find
+# a portable-C error.
+add_executable(test_vmfirmwarehle
+    tests/test_vmfirmwarehle.c
+)
+target_include_directories(test_vmfirmwarehle PRIVATE
+    ../app/Sources ../tools include)
+target_link_libraries(test_vmfirmwarehle PRIVATE host_vm_firmware_hle)
+set_target_properties(test_vmfirmwarehle PROPERTIES
+    C_STANDARD 11
+    C_STANDARD_REQUIRED YES
+    C_EXTENSIONS NO)
+if(MSVC)
+    target_compile_options(test_vmfirmwarehle PRIVATE /W4 /WX)
+else()
+    target_compile_options(test_vmfirmwarehle PRIVATE
+        -Wall -Wextra -Werror -pedantic -Wformat=2 -Wshadow)
+endif()
+add_test(NAME app_firmware_hle_adapter COMMAND test_vmfirmwarehle)
+
 # Which files belong to which machine.  The identifier from the machine list
 # becomes a PATH COMPONENT here, so the check that admits only sixteen
 # lower-case hex digits is a security boundary and not a formatting rule; and
@@ -1038,7 +1078,7 @@ add_executable(bootkernel ../tools/bootkernel.c)
 target_link_libraries(bootkernel PRIVATE
     emucore host_audio_capture host_file_block host_guest_patch
     host_ios3_hle host_ios3_kernel_patch host_mt_drag host_payload_tar
-    host_rootfs_work nethost)
+    host_rootfs_work host_vm_firmware_hle nethost)
 
 # Public CI cannot contain Apple's firmware, but it can still exercise the
 # external-md parser's fail-closed boundary before any file is opened. These

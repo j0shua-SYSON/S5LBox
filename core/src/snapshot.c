@@ -177,10 +177,14 @@ SNAP_SIZE_GUARD(s5l_stub_t,        56,    "snap_stubs");
  * struct contains. Not serialised, byte format unchanged; see the arm_cpu_t
  * note. 120792 adds one host-only pointer for the signed-static decode cache.
  * 121840 adds the CPU's host-only data-write block cache/counters (1040) and
- * the bus's host_ram_write callback (8). Like fetch_host, all are derivable,
- * process-local and deliberately absent from the stream, so SNAPSHOT_VERSION
- * and the bytes on disk do not move. */
-SNAP_SIZE_GUARD(s5l8900_t,         121840, "snap_mach");
+ * the bus's host_ram_write callback (8). 121952 adds the exact-PC pre-step
+ * hook, its context, bounded target table, rejection filter and host-only
+ * counters (112). Like
+ * the bus callbacks, snapshot_load preserves this live host policy; none of
+ * it belongs to guest state or the stream. SNAPSHOT_VERSION and the bytes on
+ * disk therefore do not move. The size was read from the compiler's emitted
+ * `.space`, not inferred from source padding. */
+SNAP_SIZE_GUARD(s5l8900_t,         121952, "snap_mach");
 #endif
 
 /* ---------------------------------------------------------------- the IO --- */
@@ -1018,7 +1022,8 @@ static void snap_nor(sn_io_t *io, s5l_nor_t *n) {
  *
  * Deliberately NOT serialised: `cpu` (own section), `bus` (host function
  * pointers and callback contexts — a tool may have interposed on them),
- * `ram` (host allocation),
+ * `ram` (host allocation), `pre_step_hook`/its context, targets and counters
+ * (live host execution policy),
  * `nor.data` and `stubs[].regs`/`stubs[].name` (host allocations / string
  * literals). ram_base/ram_size live in GEOM.
  */

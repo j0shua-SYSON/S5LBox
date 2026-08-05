@@ -3532,6 +3532,15 @@ bool     s5l_pl080_run(s5l_pl080_t *d, const arm_bus_t *bus,
 
 #define S5L_STUB_MAX      16
 
+/*
+ * A bounded host replacement may take over only at one of these exact guest
+ * PCs.  This is intentionally a target table rather than a callback on every
+ * instruction: the signed engine can stop before a registered entry without
+ * paying an indirect host call at every graph node.
+ */
+#define S5L_PRE_STEP_TARGET_MAX 16u
+typedef bool (*s5l_pre_step_fn)(void *ctx);
+
 typedef struct {
     uint32_t    base, size;
     const char *name;
@@ -3714,6 +3723,21 @@ typedef struct {
      * from guest RAM. The public enable call owns it; s5l8900_free releases
      * it. Keeping one per machine avoids cross-VM code/data aliases. */
     void      *static_a64_state;
+
+    /*
+     * Optional host-function interception, also never serialised.  A hook is
+     * consulted only when PC equals one of pre_step_target[]; returning true
+     * means it completed the whole guest operation and set the next PC.  The
+     * machine supplies one device tick, but no retired guest instruction, to
+     * match bootkernel's established HLE contract.
+     */
+    s5l_pre_step_fn pre_step_hook;
+    void           *pre_step_ctx;
+    uint32_t        pre_step_target[S5L_PRE_STEP_TARGET_MAX];
+    unsigned        pre_step_target_count;
+    uint64_t        pre_step_filter;
+    uint64_t        pre_step_matches;
+    uint64_t        pre_step_handled;
 } s5l8900_t;
 
 /*
@@ -3900,6 +3924,19 @@ void s5l8900_free(s5l8900_t *m);
  * Disabling is always safe and invalidates every derived write pointer. */
 bool s5l8900_set_direct_ram_writes(s5l8900_t *m, bool enabled);
 
+/*
+ * Install or clear an exact-PC host replacement hook.  `fn == NULL` clears
+ * the hook and requires targets == NULL/count == 0.  Targets must be distinct
+ * halfword-aligned guest addresses.  Changing the table invalidates only
+ * derived signed decode/graph state so a previously cached block can never
+ * run across a newly registered boundary.
+ */
+bool s5l8900_set_pre_step_hook(s5l8900_t *m, s5l_pre_step_fn fn, void *ctx,
+                               const uint32_t *targets, unsigned count);
+bool s5l8900_pre_step_target(const s5l8900_t *m, uint32_t pc);
+uint64_t s5l8900_pre_step_matches(const s5l8900_t *m);
+uint64_t s5l8900_pre_step_handled(const s5l8900_t *m);
+
 /* Copy a blob into guest RAM at a physical address. */
 void s5l8900_load(s5l8900_t *m, uint32_t addr, const void *data, size_t len);
 
@@ -3962,6 +3999,9 @@ bool s5l8900_static_a64_set_fetch_refill(s5l8900_t *m, bool enabled);
  * one ordinary arm_step(); no architectural state or snapshot field is added. */
 bool s5l8900_static_a64_set_known_negative_bypass(s5l8900_t *m,
                                                    bool enabled);
+/* Host-policy changes such as a new pre-step boundary call this to discard
+ * only derivable entries; architectural state and diagnostic totals remain. */
+void s5l8900_static_a64_invalidate_derived(s5l8900_t *m);
 /* Same-binary benchmark control for the total signed invocation bound. A
  * decoded head remains at most sixteen instructions and the machine still
  * clamps every invocation to the first exact timebase edge. The generic engine

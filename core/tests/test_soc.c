@@ -78,6 +78,97 @@ static void test_direct_ram_write_consent_is_fail_closed(void) {
     s5l8900_free(&m);
 }
 
+typedef struct {
+    s5l8900_t *machine;
+    uint32_t next_pc;
+    uint32_t result;
+    unsigned calls;
+    bool handle;
+} pre_step_fixture_t;
+
+static bool pre_step_fixture_call(void *opaque) {
+    pre_step_fixture_t *f = (pre_step_fixture_t *)opaque;
+    if (!f || !f->machine) return false;
+    f->calls++;
+    if (!f->handle) return false;
+    f->machine->cpu.r[0] = f->result;
+    f->machine->cpu.r[15] = f->next_pc;
+    return true;
+}
+
+static void test_pre_step_hook_is_bounded_and_fail_closed(void) {
+    const uint32_t code[] = {
+        UINT32_C(0xe3a00001), /* mov r0, #1 */
+        UINT32_C(0xeafffffe), /* b .        */
+    };
+    const uint32_t target = 0u;
+    const uint32_t duplicate[] = {0u, 0u};
+    const uint32_t odd = 1u;
+    s5l8900_t m;
+    arm_status_t status = ARM_OK;
+    pre_step_fixture_t fixture = {
+        .machine = &m,
+        .next_pc = 4u,
+        .result = UINT32_C(0xdecafbad),
+        .calls = 0u,
+        .handle = true,
+    };
+
+    CHECK(!s5l8900_set_pre_step_hook(NULL, pre_step_fixture_call, &fixture,
+                                     &target, 1u),
+          "NULL machine accepted a pre-step hook");
+    CHECK(s5l8900_init(&m, 0u, 1u << 20), "pre-step machine init failed");
+    s5l8900_load(&m, 0u, code, sizeof code);
+    m.cpu.r[15] = 0u;
+    CHECK(!s5l8900_set_pre_step_hook(&m, pre_step_fixture_call, &fixture,
+                                     NULL, 1u),
+          "pre-step hook accepted a missing target table");
+    CHECK(!s5l8900_set_pre_step_hook(&m, pre_step_fixture_call, &fixture,
+                                     duplicate, 2u),
+          "pre-step hook accepted duplicate targets");
+    CHECK(!s5l8900_set_pre_step_hook(&m, pre_step_fixture_call, &fixture,
+                                     &odd, 1u),
+          "pre-step hook accepted an odd target");
+    CHECK(s5l8900_set_pre_step_hook(&m, pre_step_fixture_call, &fixture,
+                                    &target, 1u),
+          "valid pre-step hook was refused");
+    CHECK(s5l8900_run(&m, 1u, &status) == 1u && status == ARM_OK,
+          "handled pre-step run did not retire its following instruction");
+    CHECK(fixture.calls == 1u &&
+              s5l8900_pre_step_matches(&m) == 1u &&
+              s5l8900_pre_step_handled(&m) == 1u,
+          "handled pre-step counts calls/matches/handled=%u/%llu/%llu",
+          fixture.calls,
+          (unsigned long long)s5l8900_pre_step_matches(&m),
+          (unsigned long long)s5l8900_pre_step_handled(&m));
+    CHECK(m.cpu.r[0] == fixture.result && m.cpu.r[15] == 4u &&
+              m.cpu.cycles == 1u,
+          "handled pre-step state r0/pc/cycles=%08x/%08x/%llu",
+          m.cpu.r[0], m.cpu.r[15], (unsigned long long)m.cpu.cycles);
+
+    fixture.handle = false;
+    fixture.calls = 0u;
+    m.cpu.r[0] = 0u;
+    m.cpu.r[15] = 0u;
+    CHECK(s5l8900_set_pre_step_hook(&m, pre_step_fixture_call, &fixture,
+                                    &target, 1u),
+          "refusal-path pre-step hook was refused");
+    CHECK(s5l8900_run(&m, 1u, &status) == 1u && status == ARM_OK,
+          "refused pre-step did not execute the guest instruction");
+    CHECK(fixture.calls == 1u && m.cpu.r[0] == 1u && m.cpu.r[15] == 4u &&
+              s5l8900_pre_step_matches(&m) == 1u &&
+              s5l8900_pre_step_handled(&m) == 0u,
+          "refused pre-step did not fail into the literal instruction");
+
+    CHECK(s5l8900_set_pre_step_hook(&m, NULL, NULL, NULL, 0u),
+          "clearing pre-step hook failed");
+    CHECK(!s5l8900_pre_step_target(&m, target) &&
+              s5l8900_pre_step_matches(&m) == 0u &&
+              s5l8900_pre_step_handled(&m) == 0u,
+          "cleared pre-step hook retained policy or counters");
+    s5l8900_free(&m);
+}
+
 static void test_uart_status_is_ready(void) {
     /* A guest polling UTRSTAT must see the transmitter ready, or it spins. */
     s5l8900_t m;
@@ -4373,6 +4464,73 @@ static void test_signed_static_a64_graph_bound_oracle(void) {
     s5l8900_free(&reference);
 }
 
+/* A native graph may chain across many guest basic blocks without returning
+ * through C.  A host replacement target must nevertheless be a hard boundary,
+ * including when it sits in the middle of a previously cached linear block.
+ * Warm the old block first so installation also proves derived-cache
+ * invalidation, then require the hook to win before the target ADD executes. */
+static void test_signed_static_a64_pre_step_boundary(void) {
+    const uint32_t code[] = {
+        UINT32_C(0xe2800001), /* 0x00: add r0, r0, #1 */
+        UINT32_C(0xe2800001), /* 0x04: replacement target */
+        UINT32_C(0xeafffffe), /* 0x08: b . */
+    };
+    const uint32_t target = 4u;
+    s5l8900_t m = {0};
+    arm_status_t status = ARM_OK;
+    pre_step_fixture_t fixture = {
+        .machine = &m,
+        .next_pc = 8u,
+        .result = UINT32_C(0x13579bdf),
+        .calls = 0u,
+        .handle = true,
+    };
+
+    if (!s5l8900_static_a64_available()) {
+        printf("  STATIC-A64-PRE-STEP-BOUNDARY SKIP: no signed AArch64 "
+               "handlers\n");
+        return;
+    }
+    CHECK(s5l8900_init(&m, 0u, 1u << 20),
+          "pre-step boundary machine init failed");
+    s5l8900_load(&m, 0u, code, sizeof code);
+    s5l8900_tick(&m, 0u);
+    CHECK(s5l8900_static_a64_set_enabled(&m, true),
+          "pre-step boundary signed engine was refused");
+    CHECK(s5l8900_static_a64_set_graph(&m, true),
+          "pre-step boundary graph engine was refused");
+
+    /* Populate a descriptor that includes the future target before the policy
+     * exists.  Installing the hook must discard it. */
+    m.cpu.r[15] = 0u;
+    CHECK(s5l8900_run(&m, 3u, &status) == 3u && status == ARM_OK,
+          "pre-step boundary warm-up stopped early");
+    CHECK(m.cpu.r[0] == 2u && m.cpu.r[15] == 8u,
+          "pre-step boundary warm-up did not execute both ADDs");
+
+    m.cpu.r[0] = 0u;
+    m.cpu.r[15] = 0u;
+    CHECK(s5l8900_set_pre_step_hook(&m, pre_step_fixture_call, &fixture,
+                                    &target, 1u),
+          "pre-step boundary hook installation failed");
+    uint64_t retired_before = s5l8900_static_a64_retired(&m);
+    CHECK(s5l8900_run(&m, 2u, &status) == 2u && status == ARM_OK,
+          "pre-step boundary measured run stopped early");
+    uint64_t retired = s5l8900_static_a64_retired(&m) - retired_before;
+    CHECK(fixture.calls == 1u &&
+              s5l8900_pre_step_matches(&m) == 1u &&
+              s5l8900_pre_step_handled(&m) == 1u,
+          "signed graph crossed the pre-step callback boundary");
+    CHECK(m.cpu.r[0] == fixture.result && m.cpu.r[15] == 8u,
+          "target instruction ran before hook: r0/pc=%08x/%08x",
+          m.cpu.r[0], m.cpu.r[15]);
+    CHECK(retired == 2u,
+          "signed work around replacement retired %llu instructions, expected 2",
+          (unsigned long long)retired);
+
+    s5l8900_free(&m);
+}
+
 /* Product-facing VFP state coverage crosses the real SoC runner and timer
  * boundaries. The loop contains no host floating arithmetic: it proves raw
  * S/D aliasing, core transfers, system access and integer-bit FPCompare. */
@@ -5281,6 +5439,7 @@ int main(void) {
     printf("S5LBox S5L8900 machine tests\n");
     test_ram_readback();
     test_direct_ram_write_consent_is_fail_closed();
+    test_pre_step_hook_is_bounded_and_fail_closed();
     test_uart_status_is_ready();
     test_unmapped_access_counted();
     test_bounds_check_cannot_overflow();
@@ -5294,6 +5453,7 @@ int main(void) {
     test_signed_static_a64_indirect_branch_oracle();
     test_signed_static_a64_chain_bound_oracle();
     test_signed_static_a64_graph_bound_oracle();
+    test_signed_static_a64_pre_step_boundary();
     test_signed_static_a64_vfp_register_oracle();
     test_signed_static_a64_vfp_arithmetic_oracle();
     test_signed_static_a64_vfp_read_oracle();

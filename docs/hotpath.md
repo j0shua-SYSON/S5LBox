@@ -7346,3 +7346,69 @@ population and cannot plausibly close a multi-fold phone-FPS gap. No runtime swi
 handler, app change or synthetic speed claim is added. The device result remains roughly 0--4 FPS;
 the next work must seek a materially larger end-to-end lever or obtain the exact-build phone
 throughput/publication split, not shave another decoder boundary.
+
+### 2026-08-05: native raster HLE reaches the app, but remains an explicit phone experiment
+
+The next candidate is deliberately larger than another decoder shortcut. The repository already
+had four native replacements for hot iPhone OS 3.1.3 raster routines, but the iOS app neither
+compiled nor drove them. The app can now opt into those replacements through the same public
+`s5l8900_run()` path it ships. This is still not permission to call HLE fast: it is a controlled way
+to find out whether avoiding guest raster work pays for the replacement C on an Apple A9.
+
+The machine exposes one bounded, fail-closed pre-step hook with at most sixteen exact even-PC
+targets. A 64-bit rejection filter makes almost every ordinary PC miss without scanning the target
+array. A match calls the replacement; refusal executes the original guest instruction, while
+success advances guest state, supplies one device tick and does not invent retired instructions for
+the skipped function. Installing or clearing targets invalidates signed-A64 derived blocks, and the
+signed graph builder treats every target as a hard boundary even in the middle of a cached linear
+block. The callback, target table, filter and counters are live host policy, not guest snapshot
+bytes; existing snapshots remain compatible.
+
+`VMFirmwareHLE.c` retains the earlier verifier's safety rules in a portable app adapter. It requires
+the exact function prologue, binds only the first matching userspace translation context, refuses a
+different address space, retries only when the site is resident, preflights every 1 KiB MMU span
+before writing anything, permits unprivileged virtual writes only to RAM, and permits
+descriptor-supplied physical reads only from RAM or MBX EDRAM. Only the four
+`IOS3_HLE_REPLACE` sites become machine boundaries. The normal IPA does not install the adapter.
+A manual `experimental_hle=true` workflow build defines
+`S5LBOX_IOS3_HLE_EXPERIMENT=1`, fails firmware start rather than silently becoming a false control,
+labels the firmware summary as experimental, and uploads a separately named IPA.
+
+`work/r566-app-hle-bracket` measures this exact app-shaped runner from the retained r354 checkpoint
+at 7.540 B through 7.550 B retired guest instructions. Each arm restores the same checkpoint and
+work image, uses 100,000-instruction `s5l8900_run()` chunks plus the app-equivalent changed-scanout
+meter, and creates no snapshot. The order brackets drift: normal, HLE, HLE, normal.
+
+| arm | core rate | changed FPS mean / max | changed signatures | mean guest gap |
+|---|---:|---:|---:|---:|
+| normal A | 6.977664 Minsn/s | 4.964 / 5.969 | 6 | 1.700 M instructions |
+| HLE B | 4.160006 Minsn/s | 3.936 / 5.902 | 9 | 1.1375 M instructions |
+| HLE C | 4.617447 Minsn/s | 4.280 / 5.624 | 9 | 1.1375 M instructions |
+| normal D | 5.174374 Minsn/s | 3.268 / 3.939 | 6 | 1.720 M instructions |
+
+Both HLE arms reach 24 exact targets and handle all 24, all at `ogl_poly_scan`. Their final screen is
+byte-identical to the earlier retained HLE evidence at
+`B257D0FB90F4DD510CD3147BF31E1A49FF89DB3AFBBDB062F2921E72E943729E`; both normal arms match the
+earlier normal screen at
+`0B24F372055080E78C7770A90B45CA8328B275212765B7FB05E465B61B545A51`. Every work image remains
+byte-identical at
+`94D0E05B2DEF54AE5C26F6DA4CF8C6FAB68AF3ED4BE8E9C41C5F29596E46B8EF`. stderr is empty and all
+external-media operations succeed.
+
+The symmetric desktop result is not a speed win. The two normal FPS means average 4.116; the two
+HLE means average 4.108. HLE cuts the mean changed-frame guest gap by about one third, but its native
+raster cost reduces guest-retired throughput from a bracket-average 6.076019 to 4.388727 Minsn/s,
+about 27.8%. A current-tree r567 smoke after adding the rejection filter repeats the exact HLE
+behavior: 24/24 targets handled, nine changed signatures, a 1.1375 M mean gap, 4.312 desktop FPS,
+the same work-image/screen hashes, empty stderr and no new snapshot. The strict local suite is
+61/61 green; the signed-A64 mid-block boundary case necessarily awaits Apple-arm64 CI on this x86
+host.
+
+Brutal status: **desktop HLE is cadence-neutral and the phone result is unknown**. Keeping it on in
+the normal app would be unjustified. ARM64 can still differ materially because the control uses the
+signed native graph while the replacement runs as ordinary compiled C, but that is a reason to run
+the labelled A/B experiment, not a forecast. The only trustworthy existing phone observation
+remains roughly 0--4 FPS, and nothing here proves that 30 FPS is close. Promotion requires the same
+visible phone animation in normal and experimental IPAs, simultaneous sustained Minsn/s and changed
+FPS, correct pixels, and a worthwhile repeatable gain. A regression means removing or redesigning
+the path, not rationalizing it.

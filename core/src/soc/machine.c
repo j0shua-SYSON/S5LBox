@@ -665,6 +665,75 @@ bool s5l8900_set_direct_ram_writes(s5l8900_t *m, bool enabled) {
     return true;
 }
 
+static unsigned pre_step_filter_bit(uint32_t pc) {
+    uint32_t word = pc >> 1u;
+    return (unsigned)((word ^ (word >> 10u) ^ (word >> 20u)) & 63u);
+}
+
+static bool pre_step_target_matches(const s5l8900_t *m, uint32_t pc) {
+    if (!m || !m->pre_step_hook || !m->pre_step_target_count) return false;
+    pc &= ~UINT32_C(1);
+    if ((m->pre_step_filter &
+         (UINT64_C(1) << pre_step_filter_bit(pc))) == 0u)
+        return false;
+    for (unsigned i = 0u; i < m->pre_step_target_count; i++) {
+        if (m->pre_step_target[i] == pc) return true;
+    }
+    return false;
+}
+
+bool s5l8900_pre_step_target(const s5l8900_t *m, uint32_t pc) {
+    return pre_step_target_matches(m, pc);
+}
+
+bool s5l8900_set_pre_step_hook(s5l8900_t *m, s5l_pre_step_fn fn, void *ctx,
+                               const uint32_t *targets, unsigned count) {
+    if (!m) return false;
+    if (!fn) {
+        if (targets || count) return false;
+        m->pre_step_hook = NULL;
+        m->pre_step_ctx = NULL;
+        memset(m->pre_step_target, 0, sizeof m->pre_step_target);
+        m->pre_step_target_count = 0u;
+        m->pre_step_filter = 0u;
+        m->pre_step_matches = 0u;
+        m->pre_step_handled = 0u;
+        s5l8900_static_a64_invalidate_derived(m);
+        return true;
+    }
+    if (!targets || !count || count > S5L_PRE_STEP_TARGET_MAX) return false;
+    for (unsigned i = 0u; i < count; i++) {
+        if (targets[i] & 1u) return false;
+        for (unsigned j = 0u; j < i; j++) {
+            if (targets[j] == targets[i]) return false;
+        }
+    }
+
+    /* Validate the whole request before changing any live policy. */
+    memcpy(m->pre_step_target, targets, count * sizeof targets[0]);
+    memset(m->pre_step_target + count, 0,
+           (S5L_PRE_STEP_TARGET_MAX - count) * sizeof targets[0]);
+    m->pre_step_target_count = count;
+    m->pre_step_filter = 0u;
+    for (unsigned i = 0u; i < count; i++)
+        m->pre_step_filter |=
+            UINT64_C(1) << pre_step_filter_bit(targets[i]);
+    m->pre_step_ctx = ctx;
+    m->pre_step_hook = fn;
+    m->pre_step_matches = 0u;
+    m->pre_step_handled = 0u;
+    s5l8900_static_a64_invalidate_derived(m);
+    return true;
+}
+
+uint64_t s5l8900_pre_step_matches(const s5l8900_t *m) {
+    return m ? m->pre_step_matches : 0u;
+}
+
+uint64_t s5l8900_pre_step_handled(const s5l8900_t *m) {
+    return m ? m->pre_step_handled : 0u;
+}
+
 /* -------------------------------------------------------- wake sources ---
  *
  * Which modelled devices can end a WFI, and how far away each one's next
@@ -1514,6 +1583,17 @@ unsigned s5l8900_run(s5l8900_t *m, unsigned max_steps, arm_status_t *status) {
     arm_status_t st = ARM_OK;
     unsigned n = 0;
     while (n < max_steps) {
+        if (pre_step_target_matches(m, m->cpu.r[15])) {
+            m->pre_step_matches++;
+            if (m->pre_step_hook(m->pre_step_ctx)) {
+                m->pre_step_handled++;
+                /* A replacement completes a whole guest operation but does
+                 * not pretend those skipped instructions retired.  One device
+                 * tick matches bootkernel's established HLE timing contract. */
+                s5l8900_tick(m, 1u);
+                continue;
+            }
+        }
 #if defined(S5LBOX_STATIC_A64_ENGINE)
         bool known_negative = false;
         unsigned batch = static_a64_batch_limit(m, max_steps - n);
