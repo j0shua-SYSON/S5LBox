@@ -6493,3 +6493,66 @@ The exact IPA containing these handlers has not been installed on a physical iPh
 and an execution/publication breakdown are now more informative than reflexively implementing the
 remaining store families, whose combined entry-removal ceiling is only another 7.469% before code
 size and end-to-end timing are considered.
+
+### 2026-08-05: signed register-indirect exits remove a second real boundary
+
+The store model still stopped at every register-indirect control transfer. Observer commit
+`e0ce013` therefore extended only the read-only restored sequence census before adding native
+code. `work/r529-indirect-continuity-final-10m` restored the trusted 7.100 B checkpoint and stopped
+at exactly 7.110 B with status `OK`, empty stderr and 1,590 CLCD frames. The work-image and screen
+hashes remained the established
+`8A59C388C481165F460984926AA5FFB1B72A0E9030216CD0038DE9B3264B79FE` and
+`1EF63FFE3EEFD976416E17120A36BA074BF295EA0955D716E2D345FCC5EA0A9E`.
+
+The observer read every BX/BLX target from the literal pre-step register file and required the
+next fetched PC and ARM/Thumb state to match before extending a chain. All 233,187 candidates were
+retirement-eligible, with 65,538 link operations, 60,278 state switches, zero invalid register
+forms and zero invalid targets. The exact family census was 156,764 A32 BX, 27,921 A32 BLX,
+10,147 Thumb BX and 38,355 Thumb BLX. On top of the shipped single-store model, the added control
+flow changes the modeled runner entries from 3,892,377 to 3,717,526: another 174,851 entries, or
+**4.492%**. Total modeled removal relative to the earlier read-only decoder is 1,093,074 of
+4,810,600 entries, or **22.722%**. This was coverage and continuity, not elapsed time or FPS.
+
+Commit `34e780b6d65f65fb1f5b12997f58652ff3097b0d` implements that exact family as 62
+build-time-signed terminal handlers: A32 BX 16, A32 BLX 15, Thumb BX 16 and Thumb BLX 15. The
+generated family grows from 26,198 to 26,260 handlers (+0.237%). Live targets are guarded before
+LR, CPSR.T or persistent graph context changes; A32 conditions, architectural PC source values,
+link values, ARM/Thumb switching and unrepresentable halfword targets retain interpreter
+semantics. A refusal returns before architectural mutation so literal `arm_step()` owns it.
+
+The exhaustive native shape/oracle covers all 62 unique handlers and 240 execution cases across
+all source registers and all A32 condition outcomes. The mixed-state SoC oracle traverses all four
+families and both state directions through distinct graph slots. On both Apple runners it retired
+19,999 instructions with 8,540 graph chains and serialized exactly like the interpreter; the
+focused SoC suite passed 5,988 assertions. Exact-SHA core run `30961542308` is green in all eight
+jobs and iOS run `30961542292` builds and packages the app.
+
+Commit `9fc5a02f9424a76f676ef87f4041884722a1dca9` then measures the isolated boundary in
+the same executable. Four two-instruction heads cross A32/Thumb state through BX and BLX. The off
+arm retains the older signed engine, extended graph and every store handler but returns to the
+interpreter for each indirect branch; the on arm changes only admission of the 62 new handlers.
+Interpreter, off and on run through `s5l8900_run()` on separately initialized machines in rotated
+order. Setup and warming remain outside timing; cache lookup, raw-byte witness, entry gates,
+timebase splitting and device ticks remain inside. Every repetition must serialize to the same
+complete machine snapshot.
+
+| Apple arm64 runner | interpreter | indirect off | indirect on | on/interpreter | on/off |
+|---|---:|---:|---:|---:|---:|
+| macOS 14 | 58.241 Minsn/s | 19.536 Minsn/s | 173.515 Minsn/s | **2.979x** | **8.882x** |
+| macOS 15 | 52.475 Minsn/s | 21.518 Minsn/s | 160.690 Minsn/s | **3.062x** | **7.468x** |
+
+Each long off run retires exactly 10,000,000 of 20,000,000 instructions in signed text and has
+zero graph chains; each on run retires all 20,000,000 and records 9,708,737 graph chains. All
+snapshots are exact. Exact-SHA core run `30962409297` is green in all eight jobs, including both
+Apple-native gates, warnings-as-errors and ASan/UBSan. Exact-SHA iOS run `30962409295` is green and
+packages the real app.
+
+Brutal status: **the boundary removal is correct and very large when half of a synthetic loop is
+BX/BLX, but that is not the firmware mix and it does not put the project close to 30 FPS**. The
+restored interval says indirect branches are only 2.332% of fetched instructions and can remove at
+most another 4.492% of runner entries beyond stores. Neither 7.468x nor 8.882x may be multiplied
+into the old roughly 0--4 FPS phone report. This exact IPA has still not been installed on a
+physical iPhone, so there is no new phone FPS result. The next no-JIT tranche must be selected from
+measured remaining families and code-size cost; a cold boot is still required for final graphics
+acceptance, but it would not make this isolated speed comparison more accurate than the native
+oracle and restored checkpoint used here.

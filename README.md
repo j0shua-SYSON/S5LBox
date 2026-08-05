@@ -280,8 +280,13 @@ machine bus direct plain-RAM-write consent and executes A32/Thumb single stores
 inside terminal signed heads. A deliberately store-heavy same-binary SoC loop is
 3.410x–3.451x faster than the interpreter on Apple arm64 with exact snapshots,
 but the restored interval models only 5.930% eligible implemented stores and
-19.087% fewer runner entries. Neither number is phone FPS. No physical-phone run
-has yet measured this exact IPA.
+19.087% fewer runner entries. Terminal A32/Thumb BX/BLX now also remain in signed
+text. A deliberately branch-heavy same-binary SoC loop is 2.979x–3.062x faster
+than the interpreter and 7.468x–8.882x faster than the identical signed graph
+with those 62 handlers disabled, but the restored interval contains only 2.332%
+eligible indirect branches and models only another 4.492% runner-entry reduction.
+Those synthetic ratios are not phone-FPS multipliers. No physical-phone run has
+yet measured this exact IPA.
 The best restored desktop publication measurement remains 10.816–11.449 changed
 scanouts/s with no 30 fps window, and the only phone report remains roughly
 0–4 fps without an exact-build execution/publication breakdown.
