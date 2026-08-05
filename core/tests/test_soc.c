@@ -4466,6 +4466,161 @@ static void test_signed_static_a64_vfp_write_oracle(void) {
     s5l8900_free(&reference);
 }
 
+#define SOC_VFP_LDST(cond, P, U, D, W, L, rn, vd, sz, imm8)                \
+    (((uint32_t)(cond) << 28) | UINT32_C(0x0c000a00) |                    \
+     ((uint32_t)(P) << 24) | ((uint32_t)(U) << 23) |                      \
+     ((uint32_t)(D) << 22) | ((uint32_t)(W) << 21) |                      \
+     ((uint32_t)(L) << 20) | ((uint32_t)(rn) << 16) |                     \
+     ((uint32_t)(vd) << 12) | ((uint32_t)(sz) << 8) |                     \
+     (uint32_t)(imm8))
+
+/* Exercise the separately gated VSTM contract through the real machine cache,
+ * callback-free graph, timer and snapshot paths. Each successful transfer is
+ * aligned and contained in one DWRITE block; the first word fills that block,
+ * after which exact hit accounting and a full serialized-machine comparison
+ * prove the generated loop commits the same contiguous VFP words, writebacks
+ * and conditional skip as arm_step(). */
+static void test_signed_static_a64_vstm_oracle(void) {
+    static const uint32_t signed_loop[16] = {
+        SOC_VFP_LDST(14,0,1,0,0,0, 7, 0,0, 1), /* VSTMIA r7,{s0} */
+        SOC_VFP_LDST(14,0,1,1,1,0, 8,15,0, 1), /* VSTMIA r8!,{s31} */
+        UINT32_C(0xe2488004),                    /* SUB r8,r8,#4 */
+        SOC_VFP_LDST(14,1,0,0,1,0, 9, 0,1,32), /* VSTMDB r9!,{d0-d15} */
+        UINT32_C(0xe2899080),                    /* ADD r9,r9,#128 */
+        SOC_VFP_LDST(14,0,1,0,0,0,10,14,1, 4), /* VSTMIA r10,{d14-d15} */
+        SOC_VFP_LDST(14,0,1,0,1,0,11, 0,0,32), /* VSTMIA r11!,{s0-s31} */
+        UINT32_C(0xe24bb080),                    /* SUB r11,r11,#128 */
+        SOC_VFP_LDST( 0,0,1,0,1,0, 7, 0,0, 2), /* VSTMEQIA skipped */
+        UINT32_C(0xe2800001),                    /* ADD r0,r0,#1 */
+        UINT32_C(0xe0211000),                    /* EOR r1,r1,r0 */
+        UINT32_C(0xe2822003),                    /* ADD r2,r2,#3 */
+        UINT32_C(0xe2433001),                    /* SUB r3,r3,#1 */
+        UINT32_C(0xe2844005),                    /* ADD r4,r4,#5 */
+        UINT32_C(0xe0255002),                    /* EOR r5,r5,r2 */
+        UINT32_C(0xeaffffef),                    /* B 0 */
+    };
+    const uint64_t expected_hits = UINT64_C(69999);
+    s5l8900_t fast = {0};
+    s5l8900_t reference = {0};
+    uint8_t *fast_snapshot = NULL;
+    uint8_t *reference_snapshot = NULL;
+    size_t fast_len = 0u;
+    size_t reference_len = 0u;
+    arm_status_t fast_status = ARM_OK;
+    arm_status_t reference_status = ARM_OK;
+    bool fast_ok;
+    bool reference_ok;
+
+    if (!s5l8900_static_a64_available()) {
+        printf("  STATIC-A64-VSTM-ORACLE SKIP: no signed AArch64 handlers\n");
+        return;
+    }
+
+    fast_ok = s5l8900_init(&fast, 0u, 1u << 20);
+    reference_ok = s5l8900_init(&reference, 0u, 1u << 20);
+    CHECK(fast_ok && reference_ok, "VSTM oracle machine init failed");
+    if (!fast_ok || !reference_ok) {
+        if (fast_ok) s5l8900_free(&fast);
+        if (reference_ok) s5l8900_free(&reference);
+        return;
+    }
+
+    s5l8900_load(&fast, 0u, signed_loop, sizeof signed_loop);
+    s5l8900_load(&reference, 0u, signed_loop, sizeof signed_loop);
+    s5l8900_tick(&fast, 0u);
+    s5l8900_tick(&reference, 0u);
+    for (unsigned reg = 0u; reg < 15u; reg++) {
+        fast.cpu.r[reg] = UINT32_C(0x11000000) |
+                          (reg * UINT32_C(0x010101));
+        reference.cpu.r[reg] = fast.cpu.r[reg];
+    }
+    fast.cpu.r[7] = reference.cpu.r[7] = UINT32_C(0x1000);
+    fast.cpu.r[8] = reference.cpu.r[8] = UINT32_C(0x1100);
+    fast.cpu.r[9] = reference.cpu.r[9] = UINT32_C(0x1280);
+    fast.cpu.r[10] = reference.cpu.r[10] = UINT32_C(0x1300);
+    fast.cpu.r[11] = reference.cpu.r[11] = UINT32_C(0x1380);
+    fast.cpu.r[15] = reference.cpu.r[15] = 0u;
+    fast.cpu.cpsr = reference.cpu.cpsr = ARM_MODE_SYS | ARM_CPSR_C;
+    fast.cpu.cp15.cpacr = reference.cpu.cp15.cpacr =
+        0xfu << ARM_CPACR_CP10_SHIFT;
+    fast.cpu.vfp_fpexc = reference.cpu.vfp_fpexc = ARM_FPEXC_EN;
+    fast.cpu.vfp_fpscr = reference.cpu.vfp_fpscr = 0u;
+    for (unsigned i = 0u; i < 32u; i++) {
+        fast.cpu.vfp_s[i] = UINT32_C(0x80000000) ^
+                            (UINT32_C(0x01020304) * (i + 1u));
+        reference.cpu.vfp_s[i] = fast.cpu.vfp_s[i];
+    }
+
+    CHECK(s5l8900_set_direct_ram_writes(&fast, true) &&
+              s5l8900_set_direct_ram_writes(&reference, true),
+          "VSTM oracle could not opt into direct RAM writes");
+    CHECK(s5l8900_static_a64_set_enabled(&fast, true),
+          "VSTM oracle signed engine refused an available host");
+    CHECK(s5l8900_static_a64_set_vstm(&fast, false) &&
+              s5l8900_static_a64_set_vstm(&fast, true),
+          "VSTM oracle same-binary rollout switch failed");
+    CHECK(s5l8900_static_a64_set_graph(&fast, true),
+          "VSTM oracle graph engine refused an available host");
+    CHECK(s5l8900_run(&fast, 16000u, &fast_status) == 16000u,
+          "signed VSTM run stopped early with status=%d", (int)fast_status);
+    CHECK(s5l8900_run(&reference, 16000u, &reference_status) == 16000u,
+          "reference VSTM run stopped early with status=%d",
+          (int)reference_status);
+
+    uint64_t retired = s5l8900_static_a64_retired(&fast);
+    uint64_t graph = s5l8900_static_a64_graph_chained_blocks(&fast);
+    CHECK(fast_status == reference_status,
+          "VSTM status differs: signed=%d reference=%d",
+          (int)fast_status, (int)reference_status);
+    CHECK(retired > 12000u,
+          "signed VSTM loop retired only %llu instructions",
+          (unsigned long long)retired);
+    CHECK(graph != 0u, "signed VSTM loop published no graph edge");
+    CHECK(fast.cpu.dwrite_hits == expected_hits &&
+              reference.cpu.dwrite_hits == expected_hits &&
+              fast.cpu.dwrite_misses == 1u &&
+              reference.cpu.dwrite_misses == 1u,
+          "VSTM DWRITE accounting differs: fast=%llu/%llu "
+          "reference=%llu/%llu",
+          (unsigned long long)fast.cpu.dwrite_hits,
+          (unsigned long long)fast.cpu.dwrite_misses,
+          (unsigned long long)reference.cpu.dwrite_hits,
+          (unsigned long long)reference.cpu.dwrite_misses);
+
+    snapshot_status_t fast_snapshot_status =
+        snapshot_save_mem(&fast, &fast_snapshot, &fast_len);
+    snapshot_status_t reference_snapshot_status =
+        snapshot_save_mem(&reference, &reference_snapshot, &reference_len);
+    bool exact = fast_snapshot_status == SNAP_OK &&
+        reference_snapshot_status == SNAP_OK && fast_snapshot &&
+        reference_snapshot && fast_len == reference_len &&
+        memcmp(fast_snapshot, reference_snapshot, fast_len) == 0;
+    CHECK(fast_snapshot_status == SNAP_OK,
+          "could not serialize signed VSTM machine: %s",
+          snapshot_strerror(fast_snapshot_status));
+    CHECK(reference_snapshot_status == SNAP_OK,
+          "could not serialize reference VSTM machine: %s",
+          snapshot_strerror(reference_snapshot_status));
+    CHECK(exact, "signed and reference VSTM snapshots differ");
+
+    if (exact && retired > 12000u && graph != 0u &&
+        fast.cpu.dwrite_hits == expected_hits &&
+        fast.cpu.dwrite_misses == 1u) {
+        printf("  STATIC-A64-VSTM-ORACLE exact=yes retired=%llu "
+               "dwrite-hits=69999 dwrite-misses=1 modes=3 "
+               "single=yes double=yes odd-single=yes max-words=32 "
+               "writeback=yes conditional=yes graph=yes\n",
+               (unsigned long long)retired);
+    }
+
+    free(fast_snapshot);
+    free(reference_snapshot);
+    s5l8900_free(&fast);
+    s5l8900_free(&reference);
+}
+
+#undef SOC_VFP_LDST
+
 /* Product-facing Thumb coverage must cross the real SoC runner too, not only
  * the flat semantic oracle. This loop spans every newly admitted broad shape,
  * crosses hundreds of real timer edges and compares complete serialized
@@ -4698,6 +4853,7 @@ int main(void) {
     test_signed_static_a64_vfp_register_oracle();
     test_signed_static_a64_vfp_read_oracle();
     test_signed_static_a64_vfp_write_oracle();
+    test_signed_static_a64_vstm_oracle();
     test_signed_static_a64_thumb_oracle();
     test_signed_static_a64_thumb_read_oracle();
     test_stub_window_stores_and_counts();

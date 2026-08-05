@@ -67,7 +67,8 @@ enum {
     A64S_VFP_DIRECT_READ64 = A64S_VFP_DIRECT_READ32 + 1u,
     A64S_VFP_DIRECT_WRITE32 = A64S_VFP_DIRECT_READ64 + 1u,
     A64S_VFP_DIRECT_WRITE64 = A64S_VFP_DIRECT_WRITE32 + 1u,
-    A64S_BRANCH_COND = A64S_VFP_DIRECT_WRITE64 + 1u,
+    A64S_VSTM_DIRECT_WRITE = A64S_VFP_DIRECT_WRITE64 + 1u,
+    A64S_BRANCH_COND = A64S_VSTM_DIRECT_WRITE + 3u * 15u,
     A64S_BRANCH_LINK = A64S_BRANCH_COND + 14u,
     A64S_ARM_BX = A64S_BRANCH_LINK + 15u,
     A64S_ARM_BLX = A64S_ARM_BX + 16u,
@@ -251,6 +252,10 @@ static uint32_t stm_finish(bool writeback, unsigned rn) {
     return writeback ? A64S_STM_FINISH_WB + rn : A64S_STM_FINISH;
 }
 
+static uint32_t vstm_direct_write(unsigned mode, unsigned rn) {
+    return A64S_VSTM_DIRECT_WRITE + mode * 15u + rn;
+}
+
 static uint32_t vfp_core_to_s(unsigned rt) {
     return A64S_VFP_CORE_TO_S + rt;
 }
@@ -329,12 +334,17 @@ static bool handler_is_direct_write(uint32_t handler) {
            (handler >= A64S_STM_FINISH &&
             handler < A64S_VFP_CORE_TO_S) ||
            (handler >= A64S_VFP_DIRECT_WRITE32 &&
-            handler <= A64S_VFP_DIRECT_WRITE64);
+            handler < A64S_BRANCH_COND);
 }
 
 static bool handler_is_vfp_direct_write(uint32_t handler) {
     return handler >= A64S_VFP_DIRECT_WRITE32 &&
            handler <= A64S_VFP_DIRECT_WRITE64;
+}
+
+static bool handler_is_vstm_direct_write(uint32_t handler) {
+    return handler >= A64S_VSTM_DIRECT_WRITE &&
+           handler < A64S_BRANCH_COND;
 }
 
 static bool handler_is_direct_write_wb(uint32_t handler) {
@@ -365,7 +375,14 @@ static bool handler_is_stm_finish_wb(uint32_t handler) {
 
 static bool handler_is_vfp(uint32_t handler) {
     return handler >= A64S_VFP_CORE_TO_S &&
-           handler <= A64S_VFP_DIRECT_WRITE64;
+           handler < A64S_BRANCH_COND;
+}
+
+static bool vstm_immediate_valid(uint32_t immediate) {
+    unsigned first = immediate & 63u;
+    unsigned words = (immediate >> 8) & 63u;
+    return immediate == (first | (words << 8)) && words != 0u &&
+           words <= 32u && first < 32u && first + words <= 32u;
 }
 
 static bool handler_is_terminal_branch(uint32_t handler) {
@@ -490,7 +507,7 @@ static bool decode_vfp_transfer(uint32_t insn, uint32_t pc_value,
         return true;
     }
 
-    /* LDC: one S/D register with a pre-indexed immediate and no writeback. */
+    /* LDC/STC: one VSTR/VLDR or one bounded architectural VSTM. */
     if ((insn & UINT32_C(0x0e000e00)) == UINT32_C(0x0c000a00)) {
         bool pre = (insn & (1u << 24)) != 0u;
         bool up = (insn & (1u << 23)) != 0u;
@@ -500,19 +517,49 @@ static bool decode_vfp_transfer(uint32_t insn, uint32_t pc_value,
         bool dbl = (insn & (1u << 8)) != 0u;
         unsigned rn = (insn >> 16) & 15u;
         unsigned vd = (insn >> 12) & 15u;
-        if (!pre || writeback || (!load && !write_hits) || (dbl && d))
+        unsigned imm8 = insn & 255u;
+
+        if (pre && !writeback) {
+            if ((!load && !write_hits) || (dbl && d)) return false;
+            op[0].handler = addr_imm(up, rn);
+            op[0].immediate = imm8 * 4u;
+            op[0].pc_value = pc_value;
+            if (load)
+                op[1].handler = dbl ? A64S_VFP_DIRECT_READ64
+                                    : A64S_VFP_DIRECT_READ32;
+            else
+                op[1].handler = dbl ? A64S_VFP_DIRECT_WRITE64
+                                    : A64S_VFP_DIRECT_WRITE32;
+            op[1].immediate = dbl ? vd * 2u : vd * 2u + (d ? 1u : 0u);
+            *written = 2u;
+            return true;
+        }
+
+        /* VSTM S/D shares one contiguous vfp_s[] word stream. Keep only the
+         * three architectural address forms, reject PC bases, empty lists and
+         * deprecated odd-count FSTMX D, and leave every load on arm_step(). */
+        unsigned mode;
+        unsigned first;
+        if (load || !write_hits || rn == 15u || imm8 == 0u)
             return false;
-        op[0].handler = addr_imm(up, rn);
-        op[0].immediate = (insn & 255u) * 4u;
-        op[0].pc_value = pc_value;
-        if (load)
-            op[1].handler = dbl ? A64S_VFP_DIRECT_READ64
-                                : A64S_VFP_DIRECT_READ32;
+        if (!pre && up)
+            mode = writeback ? 1u : 0u;
+        else if (pre && !up && writeback)
+            mode = 2u;
         else
-            op[1].handler = dbl ? A64S_VFP_DIRECT_WRITE64
-                                : A64S_VFP_DIRECT_WRITE32;
-        op[1].immediate = dbl ? vd * 2u : vd * 2u + (d ? 1u : 0u);
-        *written = 2u;
+            return false;
+        if (dbl) {
+            unsigned count = imm8 / 2u;
+            if (d || (imm8 & 1u) != 0u || vd + count > 16u)
+                return false;
+            first = vd * 2u;
+        } else {
+            first = vd * 2u + (d ? 1u : 0u);
+            if (first + imm8 > 32u) return false;
+        }
+        op->handler = vstm_direct_write(mode, rn);
+        op->immediate = first | (imm8 << 8);
+        *written = 1u;
         return true;
     }
 
@@ -1233,6 +1280,8 @@ static bool decode_program_at(const void *program, unsigned insns, bool thumb,
                     out->vfp_direct_writes = true;
                 if (handler_is_stm_finish(handler))
                     out->stm_direct_writes = true;
+                if (handler_is_vstm_direct_write(handler))
+                    out->vstm_direct_writes = true;
             }
             if (handler_is_vfp(handler)) out->vfp = true;
         }
@@ -1489,6 +1538,7 @@ static bool validate_run(const arm_cpu_t *cpu,
     bool saw_vfp = false;
     bool saw_vfp_direct_write = false;
     bool saw_stm_direct_write = false;
+    bool saw_vstm_direct_write = false;
     bool saw_dynamic_exit = false;
     bool saw_indirect_exit = false;
 
@@ -1534,10 +1584,13 @@ static bool validate_run(const arm_cpu_t *cpu,
             const uint32_t immediate = block->uops[j].immediate;
             const bool vfp_write = handler_is_vfp_direct_write(handler);
             const bool stm_write = handler_is_stm_finish(handler);
+            const bool vstm_write = handler_is_vstm_direct_write(handler);
             if (saw_direct_write || j + 1u != end ||
-                (stm_write
-                     ? immediate == 0u || immediate > 16u
-                     : vfp_write
+                 (stm_write
+                      ? immediate == 0u || immediate > 16u
+                      : vstm_write
+                      ? !vstm_immediate_valid(immediate)
+                      : vfp_write
                      ? (handler == A64S_VFP_DIRECT_WRITE32
                             ? immediate > 31u
                             : immediate > 30u || (immediate & 1u) != 0u)
@@ -1550,6 +1603,7 @@ static bool validate_run(const arm_cpu_t *cpu,
             saw_direct_write = true;
             if (vfp_write) saw_vfp_direct_write = true;
             if (stm_write) saw_stm_direct_write = true;
+            if (vstm_write) saw_vstm_direct_write = true;
         }
         if (handler_is_vfp(handler)) saw_vfp = true;
         if (handler_is_terminal_branch(handler)) {
@@ -1574,6 +1628,7 @@ static bool validate_run(const arm_cpu_t *cpu,
         block->vfp != saw_vfp ||
         block->vfp_direct_writes != saw_vfp_direct_write ||
         block->stm_direct_writes != saw_stm_direct_write ||
+        block->vstm_direct_writes != saw_vstm_direct_write ||
         block->dynamic_exit != saw_dynamic_exit ||
         block->indirect_exit != saw_indirect_exit ||
         (kind == A64S_RUN_FLAT && (saw_direct_read || saw_direct_write)) ||
@@ -1685,6 +1740,7 @@ static bool validate_decoded_hits_at(const a64_static_block_t *block,
     bool terminal_write;
     bool terminal_vfp_write;
     bool terminal_stm_write;
+    bool terminal_vstm_write;
     if (!block || !remaining || !block->insn_count ||
         block->insn_count > remaining ||
         block->insn_count > A64_STATIC_MAX_INSNS || !block->uop_count ||
@@ -1705,9 +1761,13 @@ static bool validate_decoded_hits_at(const a64_static_block_t *block,
     terminal_stm_write = terminal_write &&
         handler_is_stm_finish(
             block->uops[block->uop_count - 2u].handler);
+    terminal_vstm_write = terminal_write &&
+        handler_is_vstm_direct_write(
+            block->uops[block->uop_count - 2u].handler);
     if (block->direct_writes != terminal_write ||
         block->vfp_direct_writes != terminal_vfp_write ||
-        block->stm_direct_writes != terminal_stm_write)
+        block->stm_direct_writes != terminal_stm_write ||
+        block->vstm_direct_writes != terminal_vstm_write)
         return false;
     terminal_dynamic = block->uop_count > 1u &&
         handler_is_terminal_branch(

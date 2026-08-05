@@ -33,7 +33,7 @@
  * than the former four-record per-instruction ceiling. The final slot is the
  * fixed block exit. */
 #define A64_STATIC_MAX_UOPS (A64_STATIC_MAX_INSNS * 4u + 16u)
-#define A64_STATIC_HANDLER_COUNT 26354u
+#define A64_STATIC_HANDLER_COUNT 26399u
 #define A64_STATIC_GRAPH_SLOTS 512u
 
 typedef struct {
@@ -59,6 +59,7 @@ typedef struct {
     bool vfp;
     bool vfp_direct_writes;
     bool stm_direct_writes;
+    bool vstm_direct_writes;
 } a64_static_block_t;
 
 /* Fixed-layout, data-only head descriptor for callback-free signed chaining.
@@ -137,7 +138,11 @@ bool a64_static_decode_read_hits_bytes_at(const uint8_t *program,
  * forms and ordinary Thumb STR/STRB/STRH forms when, and only when, the store
  * is the final semantic instruction in the decoded head. Single-register VSTR
  * S/D with the same pre-indexed, no-writeback address form as VLDR is included;
- * a doubleword validates both word mappings before either word is changed. A
+ * a doubleword validates both word mappings before either word is changed.
+ * Architectural VSTM S/D forms use a separately identifiable transactional
+ * handler only when every word is aligned and covered by one already-proved
+ * 1 KiB DWRITE entry. Cross-block transfers and deprecated FSTMX remain on the
+ * literal interpreter. A
  * hit uses the CPU's separately consent-gated data-write cache; a miss changes
  * no guest state and returns to arm_step(), which owns translation, faults,
  * MMIO and observers.

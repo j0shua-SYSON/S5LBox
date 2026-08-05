@@ -372,6 +372,30 @@ static const uint32_t A32_SOC_STM[] = {
     UINT32_C(0xeaffffef),
 };
 
+/* Four architectural VSTM instructions in a sixteen-instruction loop. The
+ * sixteen written words cover IA without writeback, IA with writeback, DB
+ * with writeback/VPUSH addressing, single and double lists, and the highest
+ * VFPv2 double register. Reset instructions keep every transfer in the same
+ * proved 1 KiB DWRITE block. This 25% VSTM mix is deliberately synthetic. */
+static const uint32_t A32_SOC_VSTM[] = {
+    UINT32_C(0xe2800001),
+    VFP_LDST(14, 0, 1, 0, 0, 0, 7,  0, 0, 2), /* IA {s0-s1}, 2 words */
+    UINT32_C(0xe2811003),
+    VFP_LDST(14, 0, 1, 0, 1, 0, 7,  1, 0, 4), /* IA! {s2-s5}, 4 words */
+    UINT32_C(0xe2477010),                        /* SUB r7,r7,#16 */
+    UINT32_C(0xe0222001),
+    VFP_LDST(14, 1, 0, 0, 1, 0, 7,  3, 1, 6), /* DB! {d3-d5}, 6 words */
+    UINT32_C(0xe2877018),                        /* ADD r7,r7,#24 */
+    UINT32_C(0xe2844001),
+    VFP_LDST(14, 0, 1, 0, 0, 0, 7, 14, 1, 4), /* IA {d14-d15}, 4 words */
+    UINT32_C(0xe0855003),
+    UINT32_C(0xe2466001),
+    UINT32_C(0xe0800006),
+    UINT32_C(0xe0211005),
+    UINT32_C(0xe2422001),
+    UINT32_C(0xeaffffef),
+};
+
 /* All sixteen A32 immediate data-processing opcodes. This deliberately uses
  * r8-r14, PC as an input, arithmetic and logical flag writes, both rotated and
  * unrotated immediates, and carry-consuming operations. */
@@ -591,6 +615,14 @@ static const uint32_t VFP_WRITE_HITS[] = {
     VFP_LDST(14, 1, 0, 0, 0, 0,  1,15, 1, 2), /* VSTR d15,[r1,#-8] */
     VFP_LDST(14, 1, 1, 0, 0, 0, 15, 2, 0,32), /* VSTR s4,[pc,#128] */
     VFP_LDST( 0, 1, 1, 0, 0, 0,  0, 5, 0,63), /* VSTREQ skipped */
+};
+
+static const uint32_t VSTM_WRITE_HITS[] = {
+    VFP_LDST(14, 0, 1, 0, 0, 0,  0, 0, 0, 1), /* VSTMIA r0,{s0} */
+    VFP_LDST(14, 0, 1, 1, 1, 0,  1,15, 0, 1), /* VSTMIA r1!,{s31} */
+    VFP_LDST(14, 1, 0, 0, 1, 0, 13, 0, 1,32), /* VSTMDB sp!,{d0-d15} */
+    VFP_LDST(14, 0, 1, 0, 0, 0,  2,14, 1, 4), /* VSTMIA r2,{d14-d15} */
+    VFP_LDST( 0, 0, 1, 0, 1, 0,  3, 0, 0, 2), /* VSTMEQIA r3!,{s0-s1} */
 };
 
 typedef struct {
@@ -859,9 +891,16 @@ static bool validate_static_shapes(void) {
         VFP_DP(1, 1, 1, 1, 7, 0, 0, 1, 1, 0, 0), /* widen to d16 */
     };
     static const uint32_t INVALID_PRODUCT_VFP_STORES[] = {
-        VFP_LDST(14, 0, 1, 0, 0, 0, 0, 0, 0, 1), /* VSTM, not VSTR */
-        VFP_LDST(14, 1, 1, 0, 1, 0, 0, 0, 0, 1), /* writeback */
         VFP_LDST(14, 1, 1, 1, 0, 0, 0, 0, 1, 0), /* d16 absent */
+        VFP_LDST(14, 0, 1, 0, 0, 1, 0, 0, 0, 1), /* VLDM, not VSTM */
+        VFP_LDST(14, 0, 0, 0, 1, 0, 0, 0, 0, 1), /* invalid DA form */
+        VFP_LDST(14, 1, 1, 0, 1, 0, 0, 0, 0, 1), /* invalid pre/up/wb */
+        VFP_LDST(14, 0, 1, 0, 0, 0,15, 0, 0, 1), /* VSTM PC base */
+        VFP_LDST(14, 0, 1, 0, 0, 0, 0, 0, 0, 0), /* empty VSTM */
+        VFP_LDST(14, 0, 1, 1, 0, 0, 0, 0, 1, 2), /* VSTM d16 */
+        VFP_LDST(14, 0, 1, 0, 0, 0, 0, 0, 1, 3), /* deprecated FSTMX */
+        VFP_LDST(14, 0, 1, 1, 0, 0, 0,15, 0, 2), /* S list overflow */
+        VFP_LDST(14, 0, 1, 0, 0, 0, 0,15, 1, 4), /* D list overflow */
     };
     /* Deliberately unaligned guest byte stream: ADD r0,r0,#1. */
     static const uint8_t UNALIGNED_A32[] = {
@@ -877,6 +916,7 @@ static bool validate_static_shapes(void) {
     uint32_t branch_handlers[29];
     uint32_t indirect_handlers[62];
     uint32_t vfp_write_handlers[2] = {0u, 0u};
+    uint32_t vstm_write_handlers[3][15] = {{0u}};
     unsigned branch_handler_count = 0u;
     unsigned indirect_handler_count = 0u;
     unsigned i;
@@ -1554,6 +1594,105 @@ static bool validate_static_shapes(void) {
             return false;
         }
     }
+
+    /* Every architectural VSTM address/base pair has a distinct signed-text
+     * handler, while the data record carries only the contiguous VFP word
+     * slice. This is a structural proof; runtime one-block rollback is covered
+     * by the native semantic oracle below. */
+    for (unsigned mode = 0u; mode < 3u; mode++) {
+        const bool pre = mode == 2u;
+        const bool up = mode != 2u;
+        const bool writeback = mode != 0u;
+        for (unsigned rn = 0u; rn < 15u; rn++) {
+            uint32_t value = VFP_LDST(
+                14, pre, up, 0, writeback, 0, rn, 0, 0, 1);
+            uint32_t pc = UINT32_C(0x10500) +
+                          (mode * 15u + rn) * 4u;
+            uint8_t bytes[4] = {
+                (uint8_t)value, (uint8_t)(value >> 8),
+                (uint8_t)(value >> 16), (uint8_t)(value >> 24)
+            };
+            const a64_static_uop_t *store;
+
+            if (a64_static_decode_read_hits_bytes_at(
+                    bytes, 1u, false, pc, &block) ||
+                !a64_static_decode_memory_hits_bytes_at(
+                    bytes, 1u, false, pc, &block) ||
+                block.insn_count != 1u || block.uop_count != 2u ||
+                block.start_pc != pc || block.exit_pc != pc + 4u ||
+                block.thumb || !block.touches_memory || block.direct_reads ||
+                !block.direct_writes || !block.runtime_guards || !block.vfp ||
+                block.vfp_direct_writes || block.stm_direct_writes ||
+                !block.vstm_direct_writes) {
+                fprintf(stderr,
+                        "jitbench: product VSTM handler shape failed "
+                        "mode=%u rn=%u\n", mode, rn);
+                return false;
+            }
+            store = &block.uops[block.uop_count - 2u];
+            if (store->handler == 0u || store->immediate != UINT32_C(0x100) ||
+                store->pc_value != pc ||
+                store->metadata != UINT32_C(0x101)) {
+                fprintf(stderr,
+                        "jitbench: product VSTM record failed mode=%u rn=%u\n",
+                        mode, rn);
+                return false;
+            }
+            for (unsigned old_mode = 0u; old_mode <= mode; old_mode++) {
+                unsigned old_limit = old_mode == mode ? rn : 15u;
+                for (unsigned old_rn = 0u; old_rn < old_limit; old_rn++) {
+                    if (vstm_write_handlers[old_mode][old_rn] ==
+                            store->handler) {
+                        fprintf(stderr,
+                                "jitbench: VSTM handler alias mode=%u rn=%u\n",
+                                mode, rn);
+                        return false;
+                    }
+                }
+            }
+            vstm_write_handlers[mode][rn] = store->handler;
+        }
+    }
+    {
+        static const unsigned FIRST[] = {0u, 31u, 0u, 28u, 0u};
+        static const unsigned WORDS[] = {1u, 1u, 32u, 4u, 2u};
+        static const unsigned MODES[] = {0u, 1u, 2u, 0u, 1u};
+        static const unsigned BASES[] = {0u, 1u, 13u, 2u, 3u};
+        for (i = 0u; i < sizeof VSTM_WRITE_HITS /
+                             sizeof VSTM_WRITE_HITS[0]; i++) {
+            uint32_t value = VSTM_WRITE_HITS[i];
+            uint32_t pc = UINT32_C(0x10700) + i * 4u;
+            bool conditional = (value >> 28) < 14u;
+            uint8_t bytes[4] = {
+                (uint8_t)value, (uint8_t)(value >> 8),
+                (uint8_t)(value >> 16), (uint8_t)(value >> 24)
+            };
+            const a64_static_uop_t *store;
+            if (a64_static_decode_read_hits_bytes_at(
+                    bytes, 1u, false, pc, &block) ||
+                !a64_static_decode_memory_hits_bytes_at(
+                    bytes, 1u, false, pc, &block) ||
+                block.uop_count != (conditional ? 3u : 2u) ||
+                !block.direct_writes || !block.runtime_guards || !block.vfp ||
+                block.vfp_direct_writes || block.stm_direct_writes ||
+                !block.vstm_direct_writes) {
+                fprintf(stderr,
+                        "jitbench: VSTM list shape failed at %u\n", i);
+                return false;
+            }
+            store = &block.uops[block.uop_count - 2u];
+            if (store->handler !=
+                    vstm_write_handlers[MODES[i]][BASES[i]] ||
+                store->immediate !=
+                    (FIRST[i] | (WORDS[i] << 8)) ||
+                store->pc_value != pc ||
+                store->metadata != UINT32_C(0x101)) {
+                fprintf(stderr,
+                        "jitbench: VSTM list record failed at %u\n", i);
+                return false;
+            }
+        }
+    }
     for (i = 0u; i < sizeof INVALID_PRODUCT_VFP_STORES /
                          sizeof INVALID_PRODUCT_VFP_STORES[0]; i++) {
         uint32_t value = INVALID_PRODUCT_VFP_STORES[i];
@@ -1587,9 +1726,31 @@ static bool validate_static_shapes(void) {
             return false;
         }
     }
+    {
+        uint32_t values[2] = {
+            VSTM_WRITE_HITS[0], A32_DP_IMM(14, 4, 0, 0, 0, 0, 1)
+        };
+        uint8_t bytes[8];
+        for (i = 0u; i < 2u; i++) {
+            bytes[i * 4u + 0u] = (uint8_t)values[i];
+            bytes[i * 4u + 1u] = (uint8_t)(values[i] >> 8);
+            bytes[i * 4u + 2u] = (uint8_t)(values[i] >> 16);
+            bytes[i * 4u + 3u] = (uint8_t)(values[i] >> 24);
+        }
+        if (a64_static_decode_memory_hits_bytes_at(
+                bytes, 2u, false, 0x10800u, &block)) {
+            fprintf(stderr,
+                    "jitbench: product decoder accepted a mid-block VSTM\n");
+            return false;
+        }
+    }
     printf("STATIC-VFP-WRITE-SHAPE exact=yes cases=7 single=yes double=yes "
            "pc-relative=yes conditional=yes terminal=yes read-contract="
            "preserved handlers=%u\n", A64_STATIC_HANDLER_COUNT);
+    printf("STATIC-VSTM-WRITE-SHAPE exact=yes modes=3 bases=15 "
+           "single-words=1-32 double-words=even-2-32 FSTMX=no terminal=yes "
+           "read-contract=preserved handlers=%u\n",
+           A64_STATIC_HANDLER_COUNT);
 
     for (i = 0u; i < sizeof INVALID_READ_HITS /
                          sizeof INVALID_READ_HITS[0]; i++) {
@@ -3046,6 +3207,189 @@ static bool validate_static_vfp_write_oracles(void) {
     return true;
 }
 
+
+static bool validate_static_vstm_write_oracles(void) {
+    typedef struct {
+        const char *name;
+        uint32_t insn;
+        uint32_t pc;
+        unsigned rn;
+        uint32_t base;
+        uint32_t start;
+        unsigned words;
+        bool executes;
+    } vstm_write_case_t;
+    const uint32_t ordinary = DATA_BASE + UINT32_C(0x800);
+    const vstm_write_case_t cases[] = {
+        {"ia-s-odd", VSTM_WRITE_HITS[0], UINT32_C(0x10f00),
+         0u, ordinary, ordinary, 1u, true},
+        {"ia-wb-s31", VSTM_WRITE_HITS[1], UINT32_C(0x11000),
+         1u, ordinary + 0x40u, ordinary + 0x40u, 1u, true},
+        {"db-wb-d0-d15", VSTM_WRITE_HITS[2], UINT32_C(0x11100),
+         13u, ordinary + 0x400u, ordinary + 0x380u, 32u, true},
+        {"ia-d14-d15", VSTM_WRITE_HITS[3], UINT32_C(0x11200),
+         2u, ordinary + 0x100u, ordinary + 0x100u, 4u, true},
+        {"failed-condition", VSTM_WRITE_HITS[4], UINT32_C(0x11300),
+         3u, ordinary + 0x180u, ordinary + 0x180u, 2u, false},
+        {"ia-wb-s0-s31",
+         VFP_LDST(14, 0, 1, 0, 1, 0, 4, 0, 0, 32),
+         UINT32_C(0x11400), 4u, ordinary + 0x200u,
+         ordinary + 0x200u, 32u, true},
+    };
+    arm_bus_t write_bus = g_bus;
+    uint8_t *baseline = (uint8_t *)malloc(sizeof g_ram);
+    uint8_t *expected = (uint8_t *)malloc(sizeof g_ram);
+    unsigned hit_words = 0u;
+
+    if (!a64_static_host_available()) {
+        printf("STATIC-VSTM-WRITE-ORACLE SKIP: no signed AArch64 handlers\n");
+        free(baseline);
+        free(expected);
+        return true;
+    }
+    if (!baseline || !expected) {
+        fprintf(stderr, "jitbench: VSTM write-oracle allocation failed\n");
+        free(baseline);
+        free(expected);
+        return false;
+    }
+    write_bus.host_ram_write = mem_host_ram;
+
+    for (unsigned i = 0u; i < sizeof cases / sizeof cases[0]; i++) {
+        const vstm_write_case_t *sc = &cases[i];
+        arm_cpu_t reference, statik;
+        a64_static_block_t block;
+        unsigned completed = 99u;
+        arm_status_t status;
+
+        seed_vfp_oracle(&reference, &sc->insn, 1u, sc->pc, true);
+        reference.bus = &write_bus;
+        reference.r[sc->rn] = sc->base;
+        if (!sc->executes) {
+            /* A failed condition must bypass VFP and DWRITE guards. */
+            reference.cp15.cpacr = 0u;
+            reference.vfp_fpexc = 0u;
+        } else {
+            oracle_warm_dwrite(&reference, sc->start, true);
+        }
+        statik = reference;
+        memcpy(baseline, g_ram, sizeof g_ram);
+
+        if (!a64_static_decode_memory_hits_bytes_at(
+                &g_ram[sc->pc], 1u, false, sc->pc, &block) ||
+            !block.vstm_direct_writes || block.vfp_direct_writes ||
+            block.stm_direct_writes) {
+            fprintf(stderr, "jitbench: VSTM decode failed for %s\n",
+                    sc->name);
+            free(baseline);
+            free(expected);
+            return false;
+        }
+        status = arm_step(&reference);
+        memcpy(expected, g_ram, sizeof g_ram);
+        memcpy(g_ram, baseline, sizeof g_ram);
+        if (!a64_static_run_memory_hits(&statik, &block, g_ram, sizeof g_ram,
+                                         &completed) ||
+            status != ARM_OK || completed != 1u ||
+            !static_vfp_states_equal(&reference, &statik) ||
+            memcmp(expected, g_ram, sizeof g_ram) != 0 ||
+            statik.dwrite_hits != (sc->executes ? sc->words : 0u) ||
+            statik.dwrite_misses != 0u) {
+            fprintf(stderr, "jitbench: VSTM mismatch for %s\n", sc->name);
+            free(baseline);
+            free(expected);
+            return false;
+        }
+        if (sc->executes) hit_words += sc->words;
+    }
+
+    /* A transfer that crosses a DWRITE block is refused before its first word
+     * even when the first block is hot. Literal fallback owns the complete
+     * transfer, fills the second block, and must converge exactly. */
+    {
+        const uint32_t insn =
+            VFP_LDST(14, 0, 1, 0, 0, 0, 4, 0, 0, 4);
+        const uint32_t pc = UINT32_C(0x11500);
+        const uint32_t start = ordinary + UINT32_C(0x3f8);
+        arm_cpu_t reference, statik, before;
+        a64_static_block_t block;
+        unsigned completed = 99u;
+
+        seed_vfp_oracle(&reference, &insn, 1u, pc, true);
+        reference.bus = &write_bus;
+        reference.r[4] = start;
+        oracle_warm_dwrite(&reference, start, true);
+        statik = reference;
+        before = statik;
+        memcpy(baseline, g_ram, sizeof g_ram);
+        if (!a64_static_decode_memory_hits_bytes_at(
+                &g_ram[pc], 1u, false, pc, &block) ||
+            arm_step(&reference) != ARM_OK) {
+            fprintf(stderr, "jitbench: VSTM cross-block setup failed\n");
+            free(baseline);
+            free(expected);
+            return false;
+        }
+        memcpy(expected, g_ram, sizeof g_ram);
+        memcpy(g_ram, baseline, sizeof g_ram);
+        if (!a64_static_run_memory_hits(&statik, &block, g_ram, sizeof g_ram,
+                                         &completed) ||
+            completed != 0u || !static_vfp_states_equal(&before, &statik) ||
+            memcmp(baseline, g_ram, sizeof g_ram) != 0 ||
+            arm_step(&statik) != ARM_OK ||
+            !static_vfp_states_equal(&reference, &statik) ||
+            memcmp(expected, g_ram, sizeof g_ram) != 0) {
+            fprintf(stderr,
+                    "jitbench: VSTM cross-block rollback/fallback mismatch\n");
+            free(baseline);
+            free(expected);
+            return false;
+        }
+    }
+
+    /* Cold DWRITE, alignment, revoked consent and disabled VFP are all
+     * zero-prefix refusals with no architectural or diagnostic side effect. */
+    for (unsigned refusal = 0u; refusal < 4u; refusal++) {
+        const uint32_t insn =
+            VFP_LDST(14, 0, 1, 0, 1, 0, 4, 0, 0, 4);
+        const uint32_t pc = UINT32_C(0x11600) + refusal * 0x100u;
+        arm_cpu_t statik, before;
+        a64_static_block_t block;
+        unsigned completed = 99u;
+
+        seed_vfp_oracle(&statik, &insn, 1u, pc, refusal != 3u);
+        statik.bus = refusal == 2u ? &g_bus : &write_bus;
+        statik.r[4] = ordinary + UINT32_C(0x100) +
+                      (refusal == 1u ? 1u : 0u);
+        if (refusal != 0u)
+            oracle_warm_dwrite(&statik, statik.r[4], true);
+        before = statik;
+        memcpy(baseline, g_ram, sizeof g_ram);
+        if (!a64_static_decode_memory_hits_bytes_at(
+                &g_ram[pc], 1u, false, pc, &block) ||
+            !a64_static_run_memory_hits(&statik, &block, g_ram, sizeof g_ram,
+                                         &completed) ||
+            completed != 0u || !static_vfp_states_equal(&before, &statik) ||
+            memcmp(baseline, g_ram, sizeof g_ram) != 0) {
+            fprintf(stderr, "jitbench: VSTM refusal %u changed state\n",
+                    refusal);
+            free(baseline);
+            free(expected);
+            return false;
+        }
+    }
+
+    free(baseline);
+    free(expected);
+    printf("STATIC-VSTM-WRITE-ORACLE exact=yes cases=%zu hit-words=%u "
+           "modes=3 single=yes double=yes odd-single=yes max-words=32 "
+           "writeback=yes conditional=yes one-block=yes "
+           "cross-block-rollback=yes alignment=yes cold-cache=yes "
+           "consent=yes VFP-guard=yes FSTMX=no\n",
+           sizeof cases / sizeof cases[0], hit_words);
+    return true;
+}
+
 static bool validate_static_oracles(void) {
     unsigned i;
     for (i = 0u; i < sizeof STATIC_CASES / sizeof STATIC_CASES[0]; i++) {
@@ -3665,6 +4009,7 @@ typedef enum {
     SOC_ENTRY_GRAPH_EXTENDED_INDIRECT_OFF,
     SOC_ENTRY_GRAPH_EXTENDED_VSTR_OFF,
     SOC_ENTRY_GRAPH_EXTENDED_STM_OFF,
+    SOC_ENTRY_GRAPH_EXTENDED_VSTM_OFF,
     SOC_ENTRY_GRAPH_EXTENDED_WRITES
 } soc_entry_path_t;
 
@@ -3680,6 +4025,8 @@ static const char *soc_entry_path_name(soc_entry_path_t path) {
         return "graph-extended-vstr-off";
     case SOC_ENTRY_GRAPH_EXTENDED_STM_OFF:
         return "graph-extended-stm-off";
+    case SOC_ENTRY_GRAPH_EXTENDED_VSTM_OFF:
+        return "graph-extended-vstm-off";
     case SOC_ENTRY_GRAPH_EXTENDED_WRITES:
         return "graph-extended-writes";
     }
@@ -3775,18 +4122,21 @@ static bool run_soc_entry_configured(const soc_entry_setup_t *setup,
                       path == SOC_ENTRY_GRAPH_EXTENDED_INDIRECT_OFF ||
                       path == SOC_ENTRY_GRAPH_EXTENDED_VSTR_OFF ||
                       path == SOC_ENTRY_GRAPH_EXTENDED_STM_OFF ||
+                      path == SOC_ENTRY_GRAPH_EXTENDED_VSTM_OFF ||
                       path == SOC_ENTRY_GRAPH_EXTENDED_WRITES;
     bool extended_path = path == SOC_ENTRY_GRAPH_EXTENDED ||
                          path == SOC_ENTRY_GRAPH_EXTENDED_INDIRECT_OFF ||
                          path == SOC_ENTRY_GRAPH_EXTENDED_VSTR_OFF ||
                          path == SOC_ENTRY_GRAPH_EXTENDED_STM_OFF ||
+                         path == SOC_ENTRY_GRAPH_EXTENDED_VSTM_OFF ||
                          path == SOC_ENTRY_GRAPH_EXTENDED_WRITES;
     bool indirect_off_path =
         path == SOC_ENTRY_GRAPH_EXTENDED_INDIRECT_OFF;
     bool vstr_off_path = path == SOC_ENTRY_GRAPH_EXTENDED_VSTR_OFF;
     bool stm_off_path = path == SOC_ENTRY_GRAPH_EXTENDED_STM_OFF;
+    bool vstm_off_path = path == SOC_ENTRY_GRAPH_EXTENDED_VSTM_OFF;
     bool direct_write_path = path == SOC_ENTRY_GRAPH_EXTENDED_WRITES ||
-                             vstr_off_path || stm_off_path;
+                             vstr_off_path || stm_off_path || vstm_off_path;
 
     if (!setup || !loop_insns || !out ||
         path > SOC_ENTRY_GRAPH_EXTENDED_WRITES)
@@ -3828,6 +4178,11 @@ static bool run_soc_entry_configured(const soc_entry_setup_t *setup,
     if (stm_off_path &&
         !s5l8900_static_a64_set_stm(&machine, false)) {
         fprintf(stderr, "jitbench: SoC STM-off control unavailable\n");
+        goto done;
+    }
+    if (vstm_off_path &&
+        !s5l8900_static_a64_set_vstm(&machine, false)) {
+        fprintf(stderr, "jitbench: SoC VSTM-off control unavailable\n");
         goto done;
     }
     if (graph_path &&
@@ -3963,6 +4318,18 @@ static bool run_soc_stm_path(uint64_t total, soc_entry_path_t path,
         .program = A32_SOC_STM,
         .length = (unsigned)(sizeof A32_SOC_STM / sizeof A32_SOC_STM[0]),
         .seed_r7 = DATA_BASE + UINT32_C(0x100),
+    };
+    return run_soc_entry_configured(&setup, setup.length, total, path, out);
+}
+
+static bool run_soc_vstm_path(uint64_t total, soc_entry_path_t path,
+                              soc_run_result_t *out) {
+    const soc_entry_setup_t setup = {
+        .program = A32_SOC_VSTM,
+        .length = (unsigned)(sizeof A32_SOC_VSTM /
+                             sizeof A32_SOC_VSTM[0]),
+        .seed_r7 = DATA_BASE + UINT32_C(0x200),
+        .vfp_workload = true,
     };
     return run_soc_entry_configured(&setup, setup.length, total, path, out);
 }
@@ -4790,6 +5157,165 @@ done:
     return ok;
 }
 
+/* Isolate transactional one-block VSTM with the same three-way exact snapshot
+ * gate as VSTR and STM. Both signed arms retain every older capability and
+ * direct-write consent; the off arm changes only VSTM admission. Four VSTM
+ * instructions issue sixteen write32 calls per loop across all three valid
+ * address/writeback modes. This is a native-contract measurement, not restored
+ * firmware timing and not physical-device FPS. */
+static bool bench_soc_vstm(uint64_t requested, unsigned reps) {
+    const unsigned length =
+        (unsigned)(sizeof A32_SOC_VSTM / sizeof A32_SOC_VSTM[0]);
+    const uint64_t vstm_per_loop = 4u;
+    const uint64_t dwrite_words_per_loop = 16u;
+    double *reference_rates = NULL;
+    double *off_rates = NULL;
+    double *on_rates = NULL;
+    uint64_t total;
+    uint64_t expected_vstm;
+    uint64_t expected_dwrite_hits;
+    uint64_t expected_off_retired;
+    uint64_t off_chains = 0u;
+    uint64_t on_chains = 0u;
+    bool ok = false;
+
+    if (length != 16u ||
+        requested > UINT64_MAX - (uint64_t)(length - 1u)) {
+        fprintf(stderr, "jitbench: SoC VSTM shape failed\n");
+        return false;
+    }
+    total = ((requested + length - 1u) / length) * length;
+    expected_vstm = (total / length) * vstm_per_loop;
+    expected_dwrite_hits =
+        (total / length) * dwrite_words_per_loop;
+    expected_off_retired = total - expected_vstm;
+    reference_rates = (double *)calloc(reps, sizeof *reference_rates);
+    off_rates = (double *)calloc(reps, sizeof *off_rates);
+    on_rates = (double *)calloc(reps, sizeof *on_rates);
+    if (!reference_rates || !off_rates || !on_rates) {
+        fprintf(stderr, "jitbench: SoC VSTM out of memory\n");
+        goto done;
+    }
+
+    for (unsigned rep = 0u; rep < reps; rep++) {
+        soc_run_result_t reference = {0};
+        soc_run_result_t off = {0};
+        soc_run_result_t on = {0};
+        const char *order;
+        bool ran;
+
+        if (rep % 3u == 0u) {
+            order = "reference-off-on";
+            ran = run_soc_vstm_path(total, SOC_ENTRY_REFERENCE,
+                                     &reference) &&
+                  run_soc_vstm_path(
+                      total, SOC_ENTRY_GRAPH_EXTENDED_VSTM_OFF, &off) &&
+                  run_soc_vstm_path(
+                      total, SOC_ENTRY_GRAPH_EXTENDED_WRITES, &on);
+        } else if (rep % 3u == 1u) {
+            order = "off-on-reference";
+            ran = run_soc_vstm_path(
+                      total, SOC_ENTRY_GRAPH_EXTENDED_VSTM_OFF, &off) &&
+                  run_soc_vstm_path(
+                      total, SOC_ENTRY_GRAPH_EXTENDED_WRITES, &on) &&
+                  run_soc_vstm_path(total, SOC_ENTRY_REFERENCE, &reference);
+        } else {
+            order = "on-reference-off";
+            ran = run_soc_vstm_path(
+                      total, SOC_ENTRY_GRAPH_EXTENDED_WRITES, &on) &&
+                  run_soc_vstm_path(total, SOC_ENTRY_REFERENCE, &reference) &&
+                  run_soc_vstm_path(
+                      total, SOC_ENTRY_GRAPH_EXTENDED_VSTM_OFF, &off);
+        }
+        if (!ran || !reference.snapshot || !off.snapshot || !on.snapshot ||
+            reference.snapshot_len != off.snapshot_len ||
+            reference.snapshot_len != on.snapshot_len ||
+            memcmp(reference.snapshot, off.snapshot,
+                   reference.snapshot_len) != 0 ||
+            memcmp(reference.snapshot, on.snapshot,
+                   reference.snapshot_len) != 0 ||
+            off.signed_retired != expected_off_retired ||
+            on.signed_retired != total ||
+            reference.dwrite_hits != 0u ||
+            off.dwrite_hits != expected_dwrite_hits ||
+            on.dwrite_hits != expected_dwrite_hits ||
+            reference.dwrite_misses != 0u || off.dwrite_misses != 0u ||
+            on.dwrite_misses != 0u || on.graph_chains == 0u) {
+            fprintf(stderr,
+                    "jitbench: SoC VSTM repetition %u failed exact A/B "
+                    "off-retired=%" PRIu64 " on-retired=%" PRIu64
+                    " reference-hits=%" PRIu64 " off-hits=%" PRIu64
+                    " on-hits=%" PRIu64 " misses=%" PRIu64 "/%" PRIu64
+                    "/%" PRIu64 "\n",
+                    rep + 1u, off.signed_retired, on.signed_retired,
+                    reference.dwrite_hits, off.dwrite_hits,
+                    on.dwrite_hits, reference.dwrite_misses,
+                    off.dwrite_misses, on.dwrite_misses);
+            free_soc_run_result(&reference);
+            free_soc_run_result(&off);
+            free_soc_run_result(&on);
+            goto done;
+        }
+        if (rep == 0u) {
+            off_chains = off.graph_chains;
+            on_chains = on.graph_chains;
+        } else if (off_chains != off.graph_chains ||
+                   on_chains != on.graph_chains) {
+            fprintf(stderr,
+                    "jitbench: SoC VSTM chain counts changed across "
+                    "repetitions\n");
+            free_soc_run_result(&reference);
+            free_soc_run_result(&off);
+            free_soc_run_result(&on);
+            goto done;
+        }
+
+        reference_rates[rep] = (double)total / reference.seconds / 1.0e6;
+        off_rates[rep] = (double)total / off.seconds / 1.0e6;
+        on_rates[rep] = (double)total / on.seconds / 1.0e6;
+        printf("SOC-VSTM-SAMPLE rep=%u order=%s reference=%.3f "
+               "vstm-off=%.3f vstm-on=%.3f Minsn/s "
+               "off-retired=%" PRIu64 " on-retired=%" PRIu64
+               " dwrite-hits=%" PRIu64 " exact-snapshot=yes\n",
+               rep + 1u, order, reference_rates[rep], off_rates[rep],
+               on_rates[rep], off.signed_retired, on.signed_retired,
+               on.dwrite_hits);
+        free_soc_run_result(&reference);
+        free_soc_run_result(&off);
+        free_soc_run_result(&on);
+    }
+
+    qsort(reference_rates, reps, sizeof *reference_rates, cmp_double);
+    qsort(off_rates, reps, sizeof *off_rates, cmp_double);
+    qsort(on_rates, reps, sizeof *on_rates, cmp_double);
+    printf("SOC-VSTM-CURVE length=%u vstm=%" PRIu64
+           " dwrite-words=%" PRIu64 " guest-insns=%" PRIu64
+           " reps=%u chain-limit=256 same-binary=yes run-api=yes "
+           "cache-lookup=yes block-witness=yes entry-gates=yes "
+           "timer-boundaries=yes device-tick=yes head-cache=warm mmu=off "
+           "exact-snapshot=yes off-signed-retired=%" PRIu64
+           " on-signed-retired=%" PRIu64 " dwrite-hits=%" PRIu64
+           " dwrite-misses=0 off-graph-chains=%" PRIu64
+           " on-graph-chains=%" PRIu64
+           " reference-median=%.3f off-median=%.3f on-median=%.3f "
+           "off-speedup=%.3fx on-speedup=%.3fx on-over-off=%.3fx\n",
+           length, vstm_per_loop, dwrite_words_per_loop, total, reps,
+           expected_off_retired, total, expected_dwrite_hits,
+           off_chains, on_chains,
+           reference_rates[reps / 2u], off_rates[reps / 2u],
+           on_rates[reps / 2u],
+           off_rates[reps / 2u] / reference_rates[reps / 2u],
+           on_rates[reps / 2u] / reference_rates[reps / 2u],
+           on_rates[reps / 2u] / off_rates[reps / 2u]);
+    ok = true;
+
+done:
+    free(reference_rates);
+    free(off_rates);
+    free(on_rates);
+    return ok;
+}
+
 static bool bench_one(const bench_case_t *bc, uint64_t requested,
                       unsigned reps) {
     jit_buf_t arena;
@@ -5023,6 +5549,9 @@ int main(int argc, char **argv) {
     printf("The SoC-STM row is a same-binary ordinary block-store A/B with "
            "four IA/IB/DA/DB transfers and twelve words per synthetic loop. "
            "Its 25%% STM mix is not firmware timing or phone FPS.\n");
+    printf("The SoC-VSTM row is a separately gated same-binary A/B with four "
+           "architectural IA/DB transfers and sixteen words per synthetic "
+           "loop. Its 25%% VSTM mix is not firmware timing or phone FPS.\n");
     if (!validate_static_shapes()) return 1;
     for (i = 0u; i < sizeof CASES / sizeof CASES[0]; i++) {
         if (!validate_case_translation(&CASES[i])) return 1;
@@ -5043,6 +5572,7 @@ int main(int argc, char **argv) {
     if (!validate_static_vfp_widen_oracles()) return 1;
     if (!validate_static_vfp_read_oracles()) return 1;
     if (!validate_static_vfp_write_oracles()) return 1;
+    if (!validate_static_vstm_write_oracles()) return 1;
     if (!validate_static_branch_oracles()) return 1;
     if (!validate_static_indirect_branch_oracles()) return 1;
     if (!validate_static_oracles()) return 1;
@@ -5065,5 +5595,6 @@ int main(int argc, char **argv) {
     if (!bench_soc_indirect(soc_insns, reps)) return 1;
     if (!bench_soc_vstr(soc_insns, reps)) return 1;
     if (!bench_soc_stm(soc_insns, reps)) return 1;
+    if (!bench_soc_vstm(soc_insns, reps)) return 1;
     return 0;
 }

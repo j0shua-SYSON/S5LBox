@@ -3928,6 +3928,9 @@ bool s5l8900_static_a64_set_vstr(s5l8900_t *m, bool enabled);
 /* Same-binary rollout/benchmark control for transactional ordinary A32 STM
  * records. It defaults on and clears only derived decode/graph state. */
 bool s5l8900_static_a64_set_stm(s5l8900_t *m, bool enabled);
+/* Same-binary rollout/benchmark control for transactional one-block A32 VSTM
+ * records. Deprecated FSTMX and cross-block transfers stay literal. */
+bool s5l8900_static_a64_set_vstm(s5l8900_t *m, bool enabled);
 /* Same-binary benchmark control for the total signed invocation bound. A
  * decoded head remains at most sixteen instructions and the machine still
  * clamps every invocation to the first exact timebase edge. The generic engine

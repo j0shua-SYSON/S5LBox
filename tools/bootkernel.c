@@ -24860,8 +24860,8 @@ typedef enum {
 } sequence_vstm_mode_t;
 
 typedef enum {
-    SEQUENCE_VSTM_FRONTIER_EVEN_ONE_BLOCK = 0,
-    SEQUENCE_VSTM_FRONTIER_EVEN_ALL,
+    SEQUENCE_VSTM_FRONTIER_ARCH_ONE_BLOCK = 0,
+    SEQUENCE_VSTM_FRONTIER_ARCH_ALL,
     SEQUENCE_VSTM_FRONTIER_FSTMX,
     SEQUENCE_VSTM_FRONTIER_COUNT
 } sequence_vstm_frontier_t;
@@ -26209,18 +26209,18 @@ static bool sequence_store_classify(
         profile->signed_store.vstm_words_outcomes[vstm_words][outcome]++;
         profile->signed_store.vstm_span_outcomes[blocks.count][outcome]++;
 
-        bool even = vfp_kind == SEQUENCE_VFP_STORE_VSTM_S ||
-                    vfp_kind == SEQUENCE_VFP_STORE_VSTM_D;
-        if (even) {
+        bool architectural = vfp_kind == SEQUENCE_VFP_STORE_VSTM_S ||
+                             vfp_kind == SEQUENCE_VFP_STORE_VSTM_D;
+        if (architectural) {
             sequence_store_outcome_t one_block_outcome = outcome;
             if (blocks.count > 1u && outcome != SEQUENCE_STORE_INVALID &&
                 outcome != SEQUENCE_STORE_CONDITION_SKIP)
                 one_block_outcome = SEQUENCE_STORE_STATE_GUARD;
             profile->signed_store.vstm_frontier_outcomes[
-                SEQUENCE_VSTM_FRONTIER_EVEN_ONE_BLOCK]
+                SEQUENCE_VSTM_FRONTIER_ARCH_ONE_BLOCK]
                 [one_block_outcome]++;
             profile->signed_store.vstm_frontier_outcomes[
-                SEQUENCE_VSTM_FRONTIER_EVEN_ALL][outcome]++;
+                SEQUENCE_VSTM_FRONTIER_ARCH_ALL][outcome]++;
         } else if (vfp_kind == SEQUENCE_VFP_STORE_FSTMX_D) {
             profile->signed_store.vstm_frontier_outcomes[
                 SEQUENCE_VSTM_FRONTIER_FSTMX][outcome]++;
@@ -27141,16 +27141,17 @@ static bool sequence_signed_observe(sequence_profile_t *profile,
              frontier < SEQUENCE_VSTM_FRONTIER_COUNT; frontier++) {
             sequence_signed_classification_t vstm_classification =
                 implemented_classification;
-            bool even = vfp_store_kind == SEQUENCE_VFP_STORE_VSTM_S ||
-                        vfp_store_kind == SEQUENCE_VFP_STORE_VSTM_D;
+            bool architectural =
+                vfp_store_kind == SEQUENCE_VFP_STORE_VSTM_S ||
+                vfp_store_kind == SEQUENCE_VFP_STORE_VSTM_D;
             bool selected;
-            if (frontier == SEQUENCE_VSTM_FRONTIER_EVEN_ONE_BLOCK) {
-                selected = even &&
+            if (frontier == SEQUENCE_VSTM_FRONTIER_ARCH_ONE_BLOCK) {
+                selected = architectural &&
                     (store_classification.outcome ==
                          SEQUENCE_SIGNED_READ_SKIPPED ||
                      vstm_span == 1u);
-            } else if (frontier == SEQUENCE_VSTM_FRONTIER_EVEN_ALL) {
-                selected = even;
+            } else if (frontier == SEQUENCE_VSTM_FRONTIER_ARCH_ALL) {
+                selected = architectural;
             } else {
                 selected =
                     vfp_store_kind == SEQUENCE_VFP_STORE_FSTMX_D;
@@ -29332,10 +29333,13 @@ static void sequence_profile_report_store_model(
            vstm_semantic_exact ? "EXACT" : "MISMATCH");
 
     printf("      A32 VSTM/FSTMX implementation continuity split\n");
-    printf("        The even one-block row models a transactional handler that "
+    printf("        The architectural one-block row models a transactional "
+           "handler that "
            "refuses before any write if a live transfer crosses a 1 KiB "
-           "DWRITE block. The even-all and deprecated odd-count FSTMX rows "
-           "remain separate. These are exact continuity frontiers, not "
+           "DWRITE block. Architectural VSTM S lists may contain an odd "
+           "number of words; only deprecated odd-count FSTMX D is excluded. "
+           "The all-block and FSTMX rows remain separate. These are exact "
+           "continuity frontiers, not "
            "measured speedups or product support.\n");
     printf("        %-14s %10s %10s %10s %12s %10s %10s %12s %10s %8s %s\n",
            "frontier", "candidate", "eligible", "calls", "instructions",

@@ -19,7 +19,7 @@ CONDITIONS = (
     "eq", "ne", "cs", "cc", "mi", "pl", "vs", "vc",
     "hi", "ls", "ge", "lt", "gt", "le",
 )
-EXPECTED_HANDLERS = 26354
+EXPECTED_HANDLERS = 26399
 
 READ_KINDS = (
     ("word", "ldr", 4),
@@ -1299,6 +1299,129 @@ def vfp_direct_write_body(width: int) -> list[str]:
     return body
 
 
+def vstm_direct_write_body(mode: int, rn: int) -> list[str]:
+    """Commit one architectural VSTM through one proved DWRITE block.
+
+    mode 0 is increment-after without writeback, mode 1 is increment-after
+    with writeback, and mode 2 is decrement-before with writeback. The record
+    immediate packs the first S-word index in bits 0..5 and the transfer word
+    count in bits 8..13. VSTM D is the same contiguous word stream as VSTM S;
+    the C decoder rejects deprecated odd-count FSTMX before selecting this
+    handler.
+    """
+    if mode not in (0, 1, 2) or rn not in range(15):
+        raise ValueError("invalid VSTM handler shape")
+
+    body = [
+        *vfp_gate("enabled"),
+        "    ldur w12, [x13, #-12]",
+        "    and w4, w12, #0x3f",
+        "    ubfx w5, w12, #8, #6",
+        # Refuse malformed data records even on the decoded-cache fast path.
+        "    orr w6, w4, w5, lsl #8",
+        "    cmp w6, w12",
+        "    b.eq 1f",
+        "    b .La64s_direct_miss",
+        "1:",
+        "    cbnz w5, 1f",
+        "    b .La64s_direct_miss",
+        "1:",
+        "    cmp w5, #32",
+        "    b.ls 1f",
+        "    b .La64s_direct_miss",
+        "1:",
+        "    add w6, w4, w5",
+        "    cmp w6, #32",
+        "    b.ls 1f",
+        "    b .La64s_direct_miss",
+        "1:",
+    ]
+    loads, base = read_guest_register(rn, 4)
+    body.extend(loads)
+    if mode == 0:
+        body.append(f"    mov w17, {base}")
+    elif mode == 1:
+        body.extend([
+            f"    mov w17, {base}",
+            f"    add w9, {base}, w5, lsl #2",
+        ])
+    else:
+        body.extend([
+            f"    sub w17, {base}, w5, lsl #2",
+            "    mov w9, w17",
+        ])
+
+    body.extend([
+        # arm_step owns SCTLR.A/U and every legacy unaligned behavior.
+        "    tst w17, #3",
+        "    b.eq 1f",
+        "    b .La64s_direct_miss",
+        "1:",
+        # Prove the complete transfer stays in one 1 KiB cache block before
+        # writing its first word. This also rejects a top-of-VA wrap.
+        "    and w4, w17, #0x3ff",
+        "    add w4, w4, w5, lsl #2",
+        "    cmp w4, #1024",
+        "    b.ls 1f",
+        "    b .La64s_direct_miss",
+        "1:",
+        # DWRITE exists only while the frontend separately consents to direct
+        # callback-free RAM writes.
+        "    ldr x6, [x3, #56]",
+        "    cbnz x6, 1f",
+        "    b .La64s_direct_miss",
+        "1:",
+        "    ldr w4, [x3, #20]",
+        "    lsr w5, w17, #10",
+        "    add w5, w5, w4, lsl #5",
+        "    and w5, w5, #63",
+        "    add x6, x6, w5, uxtw #4",
+        "    ldr x16, [x6, #0]",
+        "    cbnz x16, 1f",
+        "    b .La64s_direct_miss",
+        "1:",
+        "    lsr w4, w17, #10",
+        "    lsl w4, w4, #10",
+        "    ldr w5, [x3, #20]",
+        "    orr w4, w4, w5",
+        "    ldr w5, [x6, #8]",
+        "    cmp w5, w4",
+        "    b.eq 1f",
+        "    b .La64s_direct_miss",
+        "1:",
+        "    ldr w4, [x6, #12]",
+        "    ldr w5, [x3, #16]",
+        "    cmp w4, w5",
+        "    b.eq 1f",
+        "    b .La64s_direct_miss",
+        "1:",
+        "    and w4, w17, #0x3ff",
+        "    add x17, x16, w4, uxtw",
+        # Both S and D lists are contiguous 32-bit words in vfp_s[].
+        "    and w4, w12, #0x3f",
+        "    ubfx w6, w12, #8, #6",
+        "    ldr x10, [x3, #24]",
+        "    add x10, x10, w4, uxtw #2",
+        "2:",
+        "    ldr w4, [x10], #4",
+        "    str w4, [x17], #4",
+        "    subs w6, w6, #1",
+        "    b.ne 2b",
+    ])
+    if mode != 0:
+        body.extend(write_guest_register(rn, "w9"))
+    body.extend([
+        # Match one interpreter dwrite_hit() for every architectural write32.
+        "    ubfx w6, w12, #8, #6",
+        "    ldr x4, [x3, #64]",
+        "    ldr x5, [x4]",
+        "    add x5, x5, x6",
+        "    str x5, [x4]",
+        *vfp_finish(),
+    ])
+    return body
+
+
 def build_handlers() -> list[tuple[str, list[str]]]:
     handlers: list[tuple[str, list[str]]] = []
 
@@ -1619,7 +1742,14 @@ def build_handlers() -> list[tuple[str, list[str]]]:
     handlers.append((".La64s_vfp_direct_write_32",
                      vfp_direct_write_body(4)))
     handlers.append((".La64s_vfp_direct_write_64",
-                     vfp_direct_write_body(8)))
+                      vfp_direct_write_body(8)))
+    # VSTM has three architectural address/writeback forms and fifteen legal
+    # base registers. One handler loops over the already-bounded contiguous
+    # VFP word slice after an all-or-nothing one-block DWRITE proof.
+    for mode in range(3):
+        for rn in range(15):
+            handlers.append((f".La64s_vstm_direct_write_{mode}_{rn}",
+                             vstm_direct_write_body(mode, rn)))
 
     # Terminal A32 immediate branches leave the threaded block directly. An
     # unconditional B already uses the compact END record; these fourteen
