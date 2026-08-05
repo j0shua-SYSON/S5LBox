@@ -19,7 +19,7 @@ CONDITIONS = (
     "eq", "ne", "cs", "cc", "mi", "pl", "vs", "vc",
     "hi", "ls", "ge", "lt", "gt", "le",
 )
-EXPECTED_HANDLERS = 26260
+EXPECTED_HANDLERS = 26262
 
 READ_KINDS = (
     ("word", "ldr", 4),
@@ -1080,6 +1080,116 @@ def vfp_direct_read_body(width: int) -> list[str]:
     return body
 
 
+def vfp_direct_write_body(width: int) -> list[str]:
+    """Store one VFP register through already-proved DWRITE mappings.
+
+    VSTR D is two architectural write32 calls. Validate both translated words
+    before touching RAM so a miss can return the whole instruction to the
+    literal path without partially committing it. This also covers the legal
+    1 KiB-boundary case, where the two words occupy distinct cache entries.
+    """
+    body = [
+        *vfp_gate("enabled"),
+        # The interpreter owns SCTLR.A/U and legacy align-down behavior.
+        "    tst w17, #3",
+        "    b.eq 1f",
+        "    b .La64s_direct_miss",
+        "1:",
+        # The write table exists only while the frontend explicitly consents
+        # to bypassing write observers.
+        "    ldr x6, [x3, #56]",
+        "    cbnz x6, 1f",
+        "    b .La64s_direct_miss",
+        "1:",
+        # Validate the first word and retain its exact host address in x16.
+        "    ldr w4, [x3, #20]",
+        "    lsr w5, w17, #10",
+        "    add w5, w5, w4, lsl #5",
+        "    and w5, w5, #63",
+        "    add x9, x6, w5, uxtw #4",
+        "    ldr x16, [x9, #0]",
+        "    cbnz x16, 1f",
+        "    b .La64s_direct_miss",
+        "1:",
+        "    lsr w4, w17, #10",
+        "    lsl w4, w4, #10",
+        "    ldr w5, [x3, #20]",
+        "    orr w4, w4, w5",
+        "    ldr w5, [x9, #8]",
+        "    cmp w5, w4",
+        "    b.eq 1f",
+        "    b .La64s_direct_miss",
+        "1:",
+        "    ldr w4, [x9, #12]",
+        "    ldr w5, [x3, #16]",
+        "    cmp w4, w5",
+        "    b.eq 1f",
+        "    b .La64s_direct_miss",
+        "1:",
+        "    and w4, w17, #0x3ff",
+        "    add x16, x16, w4, uxtw",
+    ]
+    if width == 8:
+        body.extend([
+            # Preserve the second wrapped 32-bit VA in w10 until its host
+            # pointer is final. Adjacent blocks use adjacent cache slots; the
+            # 0xffffffff -> 0 wrap follows the interpreter's uint32_t address.
+            "    add w10, w17, #4",
+            "    ldr w4, [x3, #20]",
+            "    lsr w5, w10, #10",
+            "    add w5, w5, w4, lsl #5",
+            "    and w5, w5, #63",
+            "    add x9, x6, w5, uxtw #4",
+            "    ldr x12, [x9, #0]",
+            "    cbnz x12, 1f",
+            "    b .La64s_direct_miss",
+            "1:",
+            "    lsr w4, w10, #10",
+            "    lsl w4, w4, #10",
+            "    ldr w5, [x3, #20]",
+            "    orr w4, w4, w5",
+            "    ldr w5, [x9, #8]",
+            "    cmp w5, w4",
+            "    b.eq 1f",
+            "    b .La64s_direct_miss",
+            "1:",
+            "    ldr w4, [x9, #12]",
+            "    ldr w5, [x3, #16]",
+            "    cmp w4, w5",
+            "    b.eq 1f",
+            "    b .La64s_direct_miss",
+            "1:",
+            "    and w4, w10, #0x3ff",
+            "    add x10, x12, w4, uxtw",
+        ])
+    body.extend([
+        "    ldur w9, [x13, #-12]",
+        "    ldr x4, [x3, #24]",
+        "    add x4, x4, w9, uxtw #2",
+    ])
+    if width == 4:
+        body.extend([
+            "    ldr w5, [x4]",
+            "    str w5, [x16]",
+        ])
+    else:
+        body.extend([
+            "    ldr x5, [x4]",
+            "    str w5, [x16]",
+            "    lsr x5, x5, #32",
+            "    str w5, [x10]",
+        ])
+    body.extend([
+        # Match the interpreter's one dwrite_hit() per write32 call.
+        "    ldr x4, [x3, #64]",
+        "    ldr x5, [x4]",
+        f"    add x5, x5, #{width // 4}",
+        "    str x5, [x4]",
+        *vfp_finish(),
+    ])
+    return body
+
+
 def build_handlers() -> list[tuple[str, list[str]]]:
     handlers: list[tuple[str, list[str]]] = []
 
@@ -1381,6 +1491,10 @@ def build_handlers() -> list[tuple[str, list[str]]]:
                      vfp_direct_read_body(4)))
     handlers.append((".La64s_vfp_direct_read_64",
                      vfp_direct_read_body(8)))
+    handlers.append((".La64s_vfp_direct_write_32",
+                     vfp_direct_write_body(4)))
+    handlers.append((".La64s_vfp_direct_write_64",
+                     vfp_direct_write_body(8)))
 
     # Terminal A32 immediate branches leave the threaded block directly. An
     # unconditional B already uses the compact END record; these fourteen

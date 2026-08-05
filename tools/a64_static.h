@@ -30,7 +30,7 @@
 /* A conditional register-offset A32 load/store uses a guard, shifter, address
  * and memory record. The final slot is the fixed block exit. */
 #define A64_STATIC_MAX_UOPS (A64_STATIC_MAX_INSNS * 4u + 1u)
-#define A64_STATIC_HANDLER_COUNT 26260u
+#define A64_STATIC_HANDLER_COUNT 26262u
 #define A64_STATIC_GRAPH_SLOTS 512u
 
 typedef struct {
@@ -130,9 +130,12 @@ bool a64_static_decode_read_hits_bytes_at(const uint8_t *program,
 /* Superset of the read-hit product decoder. In addition to the exact guarded
  * read/VFP subset above, this admits bounded A32 STR/STRB addressing-mode-2
  * forms and ordinary Thumb STR/STRB/STRH forms when, and only when, the store
- * is the final semantic instruction in the decoded head. A hit uses the CPU's
- * separately consent-gated data-write cache; a miss changes no guest state and
- * returns to arm_step(), which owns translation, faults, MMIO and observers.
+ * is the final semantic instruction in the decoded head. Single-register VSTR
+ * S/D with the same pre-indexed, no-writeback address form as VLDR is included;
+ * a doubleword validates both word mappings before either word is changed. A
+ * hit uses the CPU's separately consent-gated data-write cache; a miss changes
+ * no guest state and returns to arm_step(), which owns translation, faults,
+ * MMIO and observers.
  * Ending the head at every store makes self-modifying code fail closed: no
  * following cached head can execute before its complete raw-byte witness has
  * been checked against the now-live RAM bytes. */

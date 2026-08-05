@@ -61,7 +61,9 @@ enum {
     A64S_VFP_WIDEN32 = A64S_VFP_COMPARE64 + 1u,
     A64S_VFP_DIRECT_READ32 = A64S_VFP_WIDEN32 + 1u,
     A64S_VFP_DIRECT_READ64 = A64S_VFP_DIRECT_READ32 + 1u,
-    A64S_BRANCH_COND = A64S_VFP_DIRECT_READ64 + 1u,
+    A64S_VFP_DIRECT_WRITE32 = A64S_VFP_DIRECT_READ64 + 1u,
+    A64S_VFP_DIRECT_WRITE64 = A64S_VFP_DIRECT_WRITE32 + 1u,
+    A64S_BRANCH_COND = A64S_VFP_DIRECT_WRITE64 + 1u,
     A64S_BRANCH_LINK = A64S_BRANCH_COND + 14u,
     A64S_ARM_BX = A64S_BRANCH_LINK + 15u,
     A64S_ARM_BLX = A64S_ARM_BX + 16u,
@@ -305,8 +307,15 @@ static bool handler_is_direct_read(uint32_t handler) {
 }
 
 static bool handler_is_direct_write(uint32_t handler) {
-    return handler >= A64S_DIRECT_WRITE &&
-           handler < A64S_VFP_CORE_TO_S;
+    return (handler >= A64S_DIRECT_WRITE &&
+            handler < A64S_VFP_CORE_TO_S) ||
+           (handler >= A64S_VFP_DIRECT_WRITE32 &&
+            handler <= A64S_VFP_DIRECT_WRITE64);
+}
+
+static bool handler_is_vfp_direct_write(uint32_t handler) {
+    return handler >= A64S_VFP_DIRECT_WRITE32 &&
+           handler <= A64S_VFP_DIRECT_WRITE64;
 }
 
 static bool handler_is_direct_write_wb(uint32_t handler) {
@@ -321,7 +330,7 @@ static bool handler_is_direct_write_unpriv(uint32_t handler) {
 
 static bool handler_is_vfp(uint32_t handler) {
     return handler >= A64S_VFP_CORE_TO_S &&
-           handler <= A64S_VFP_DIRECT_READ64;
+           handler <= A64S_VFP_DIRECT_WRITE64;
 }
 
 static bool handler_is_terminal_branch(uint32_t handler) {
@@ -359,7 +368,8 @@ enum {
  * live VFP access and mode state before touching guest state, because a decoded
  * block can outlive a thread's lazy-VFP context. */
 static bool decode_vfp_transfer(uint32_t insn, uint32_t pc_value,
-                                a64_static_uop_t *op, unsigned *written) {
+                                bool write_hits, a64_static_uop_t *op,
+                                unsigned *written) {
     if (!op || !written) return false;
 
     /* MCR/MRC: core <-> single/double word and VMRS/VMSR. */
@@ -452,12 +462,17 @@ static bool decode_vfp_transfer(uint32_t insn, uint32_t pc_value,
         bool dbl = (insn & (1u << 8)) != 0u;
         unsigned rn = (insn >> 16) & 15u;
         unsigned vd = (insn >> 12) & 15u;
-        if (!pre || writeback || !load || (dbl && d)) return false;
+        if (!pre || writeback || (!load && !write_hits) || (dbl && d))
+            return false;
         op[0].handler = addr_imm(up, rn);
         op[0].immediate = (insn & 255u) * 4u;
         op[0].pc_value = pc_value;
-        op[1].handler = dbl ? A64S_VFP_DIRECT_READ64
-                            : A64S_VFP_DIRECT_READ32;
+        if (load)
+            op[1].handler = dbl ? A64S_VFP_DIRECT_READ64
+                                : A64S_VFP_DIRECT_READ32;
+        else
+            op[1].handler = dbl ? A64S_VFP_DIRECT_WRITE64
+                                : A64S_VFP_DIRECT_WRITE32;
         op[1].immediate = dbl ? vd * 2u : vd * 2u + (d ? 1u : 0u);
         *written = 2u;
         return true;
@@ -585,7 +600,7 @@ static bool decode_arm(uint32_t insn, unsigned index, unsigned insns,
     }
 
     if (read_hits && decode_vfp_transfer(
-            insn, pc + index * 4u + 8u, op, written)) {
+            insn, pc + index * 4u + 8u, write_hits, op, written)) {
         if (guard) guard->metadata = *written;
         *written += count;
         return true;
@@ -1387,12 +1402,18 @@ static bool validate_run(const arm_cpu_t *cpu,
         }
         if (handler_is_direct_read(handler)) saw_direct_read = true;
         if (handler_is_direct_write(handler)) {
+            const uint32_t immediate = block->uops[j].immediate;
+            const bool vfp_write = handler_is_vfp_direct_write(handler);
             if (saw_direct_write || j + 1u != end ||
-                (handler_is_direct_write_wb(handler)
-                     ? block->uops[j].immediate > 1u
-                     : block->uops[j].immediate != 0u) ||
+                (vfp_write
+                     ? (handler == A64S_VFP_DIRECT_WRITE32
+                            ? immediate > 31u
+                            : immediate > 30u || (immediate & 1u) != 0u)
+                     : (handler_is_direct_write_wb(handler)
+                            ? immediate > 1u
+                            : immediate != 0u)) ||
                 (handler_is_direct_write_unpriv(handler) &&
-                 block->uops[j].immediate != 1u))
+                 immediate != 1u))
                 return false;
             saw_direct_write = true;
         }

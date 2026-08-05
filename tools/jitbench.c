@@ -4,7 +4,7 @@
  * This is deliberately NOT a product-performance claim and not a JIT
  * dispatcher. It translates one small synthetic block once, then compares
  * repeated interpreter execution with both that already-built block and a
- * firmware-independent static-threaded proof. The proof's 26,260 generic
+ * firmware-independent static-threaded proof. The proof's 26,262 generic
  * ISA/register handlers are compiled and signed with the executable; runtime
  * decoding creates data records only. The table includes product-only guarded
  * read/write-cache, exact VFP register/system transfer and terminal A32
@@ -529,6 +529,16 @@ static const uint32_t VFP_READ_HITS[] = {
     VFP_VMOV_R_S(10, 0),                       /* VMOV r10,s0 */
 };
 
+static const uint32_t VFP_WRITE_HITS[] = {
+    VFP_LDST(14, 1, 1, 0, 0, 0,  0, 0, 0, 0), /* VSTR s0,[r0] */
+    VFP_LDST(14, 1, 1, 1, 0, 0,  0,15, 0, 1), /* VSTR s31,[r0,#4] */
+    VFP_LDST(14, 1, 0, 0, 0, 0,  1, 1, 0, 1), /* VSTR s2,[r1,#-4] */
+    VFP_LDST(14, 1, 1, 0, 0, 0,  0, 2, 1, 2), /* VSTR d2,[r0,#8] */
+    VFP_LDST(14, 1, 0, 0, 0, 0,  1,15, 1, 2), /* VSTR d15,[r1,#-8] */
+    VFP_LDST(14, 1, 1, 0, 0, 0, 15, 2, 0,32), /* VSTR s4,[pc,#128] */
+    VFP_LDST( 0, 1, 1, 0, 0, 0,  0, 5, 0,63), /* VSTREQ skipped */
+};
+
 typedef struct {
     const char *name;
     const void *program;
@@ -777,6 +787,11 @@ static bool validate_static_shapes(void) {
         VFP_UN_D(7, 1, 0, 1), /* narrowing VCVT still rounds */
         VFP_DP(1, 1, 1, 1, 7, 0, 0, 1, 1, 0, 0), /* widen to d16 */
     };
+    static const uint32_t INVALID_PRODUCT_VFP_STORES[] = {
+        VFP_LDST(14, 0, 1, 0, 0, 0, 0, 0, 0, 1), /* VSTM, not VSTR */
+        VFP_LDST(14, 1, 1, 0, 1, 0, 0, 0, 0, 1), /* writeback */
+        VFP_LDST(14, 1, 1, 1, 0, 0, 0, 0, 1, 0), /* d16 absent */
+    };
     /* Deliberately unaligned guest byte stream: ADD r0,r0,#1. */
     static const uint8_t UNALIGNED_A32[] = {
         0xffu, 0x01u, 0x00u, 0x80u, 0xe2u,
@@ -790,6 +805,7 @@ static bool validate_static_shapes(void) {
     uint8_t vfp_read_bytes[sizeof VFP_READ_HITS];
     uint32_t branch_handlers[29];
     uint32_t indirect_handlers[62];
+    uint32_t vfp_write_handlers[2] = {0u, 0u};
     unsigned branch_handler_count = 0u;
     unsigned indirect_handler_count = 0u;
     unsigned i;
@@ -1260,6 +1276,96 @@ static bool validate_static_shapes(void) {
     }
     printf("STATIC-VFP-READ-SHAPE exact=yes insns=%u uops=%u handlers=%u\n",
            block.insn_count, block.uop_count, A64_STATIC_HANDLER_COUNT);
+
+    {
+        static const unsigned source_registers[] = {
+            0u, 31u, 2u, 4u, 30u, 4u, 10u
+        };
+        for (i = 0u; i < sizeof VFP_WRITE_HITS /
+                             sizeof VFP_WRITE_HITS[0]; i++) {
+            const uint32_t value = VFP_WRITE_HITS[i];
+            const uint32_t pc = UINT32_C(0x10200) + i * 4u;
+            const bool conditional = (value >> 28) < 14u;
+            const bool dbl = (value & (1u << 8)) != 0u;
+            uint8_t bytes[4] = {
+                (uint8_t)value, (uint8_t)(value >> 8),
+                (uint8_t)(value >> 16), (uint8_t)(value >> 24)
+            };
+            const a64_static_uop_t *store;
+
+            if (a64_static_decode_read_hits_bytes_at(
+                    bytes, 1u, false, pc, &block) ||
+                !a64_static_decode_memory_hits_bytes_at(
+                    bytes, 1u, false, pc, &block) ||
+                block.insn_count != 1u ||
+                block.uop_count != (conditional ? 4u : 3u) ||
+                block.start_pc != pc || block.exit_pc != pc + 4u ||
+                block.thumb || !block.touches_memory || block.direct_reads ||
+                !block.direct_writes || !block.runtime_guards || !block.vfp) {
+                fprintf(stderr,
+                        "jitbench: product VFP write shape failed at %u\n",
+                        i);
+                return false;
+            }
+            store = &block.uops[block.uop_count - 2u];
+            if (store->handler == 0u ||
+                store->immediate != source_registers[i] ||
+                store->pc_value != pc ||
+                store->metadata != UINT32_C(0x101)) {
+                fprintf(stderr,
+                        "jitbench: product VFP write record failed at %u\n",
+                        i);
+                return false;
+            }
+            if (vfp_write_handlers[dbl ? 1u : 0u] == 0u)
+                vfp_write_handlers[dbl ? 1u : 0u] = store->handler;
+            else if (vfp_write_handlers[dbl ? 1u : 0u] != store->handler) {
+                fprintf(stderr,
+                        "jitbench: VFP write width handler was not stable\n");
+                return false;
+            }
+        }
+        if (vfp_write_handlers[0] == vfp_write_handlers[1]) {
+            fprintf(stderr, "jitbench: VFP write widths share a handler\n");
+            return false;
+        }
+    }
+    for (i = 0u; i < sizeof INVALID_PRODUCT_VFP_STORES /
+                         sizeof INVALID_PRODUCT_VFP_STORES[0]; i++) {
+        uint32_t value = INVALID_PRODUCT_VFP_STORES[i];
+        uint8_t bytes[4] = {
+            (uint8_t)value, (uint8_t)(value >> 8),
+            (uint8_t)(value >> 16), (uint8_t)(value >> 24)
+        };
+        if (a64_static_decode_memory_hits_bytes_at(
+                bytes, 1u, false, 0x10300u, &block)) {
+            fprintf(stderr,
+                    "jitbench: product decoder accepted invalid VFP store %u\n",
+                    i);
+            return false;
+        }
+    }
+    {
+        uint32_t values[2] = {
+            VFP_WRITE_HITS[0], A32_DP_IMM(14, 4, 0, 0, 0, 0, 1)
+        };
+        uint8_t bytes[8];
+        for (i = 0u; i < 2u; i++) {
+            bytes[i * 4u + 0u] = (uint8_t)values[i];
+            bytes[i * 4u + 1u] = (uint8_t)(values[i] >> 8);
+            bytes[i * 4u + 2u] = (uint8_t)(values[i] >> 16);
+            bytes[i * 4u + 3u] = (uint8_t)(values[i] >> 24);
+        }
+        if (a64_static_decode_memory_hits_bytes_at(
+                bytes, 2u, false, 0x10400u, &block)) {
+            fprintf(stderr,
+                    "jitbench: product decoder accepted a mid-block VSTR\n");
+            return false;
+        }
+    }
+    printf("STATIC-VFP-WRITE-SHAPE exact=yes cases=7 single=yes double=yes "
+           "pc-relative=yes conditional=yes terminal=yes read-contract="
+           "preserved handlers=%u\n", A64_STATIC_HANDLER_COUNT);
 
     for (i = 0u; i < sizeof INVALID_READ_HITS /
                          sizeof INVALID_READ_HITS[0]; i++) {
@@ -1770,7 +1876,9 @@ static bool static_vfp_states_equal(const arm_cpu_t *a,
            a->vfp_fpscr == b->vfp_fpscr &&
            memcmp(a->vfp_s, b->vfp_s, sizeof a->vfp_s) == 0 &&
            a->dread_hits == b->dread_hits &&
-           a->dread_misses == b->dread_misses;
+           a->dread_misses == b->dread_misses &&
+           a->dwrite_hits == b->dwrite_hits &&
+           a->dwrite_misses == b->dwrite_misses;
 }
 
 static bool validate_static_vfp_register_oracles(void) {
@@ -2322,6 +2430,190 @@ static bool validate_static_vfp_read_oracles(void) {
 
     printf("STATIC-VFP-READ-ORACLE exact=yes hits=10 double=yes "
            "zero-prefix=yes partial-prefix=yes alignment=yes boundary=yes\n");
+    return true;
+}
+
+static bool validate_static_vfp_write_oracles(void) {
+    typedef struct {
+        const char *name;
+        uint32_t insn;
+        uint32_t pc;
+        unsigned rn;
+        uint32_t base;
+        uint32_t va;
+        bool dbl;
+        bool executes;
+    } vfp_write_case_t;
+    const uint32_t ordinary = DATA_BASE + UINT32_C(0x800);
+    const uint32_t boundary = DATA_BASE + UINT32_C(0xbfc);
+    const vfp_write_case_t cases[] = {
+        {"s0", VFP_WRITE_HITS[0], UINT32_C(0x10500),
+         0u, ordinary, ordinary, false, true},
+        {"s31", VFP_WRITE_HITS[1], UINT32_C(0x10600),
+         0u, ordinary, ordinary + 4u, false, true},
+        {"s2-negative", VFP_WRITE_HITS[2], UINT32_C(0x10700),
+         1u, ordinary + 0x40u, ordinary + 0x3cu, false, true},
+        {"d2-boundary", VFP_WRITE_HITS[3], UINT32_C(0x10800),
+         0u, boundary - 8u, boundary, true, true},
+        {"d15-negative", VFP_WRITE_HITS[4], UINT32_C(0x10900),
+         1u, ordinary + 0x80u, ordinary + 0x78u, true, true},
+        {"pc-relative", VFP_WRITE_HITS[5], UINT32_C(0x10a00),
+         15u, 0u, UINT32_C(0x10a88), false, true},
+        {"failed-condition", VFP_WRITE_HITS[6], UINT32_C(0x10b00),
+         0u, ordinary, ordinary + 252u, false, false},
+    };
+    static const uint32_t DOUBLE_BOUNDARY =
+        VFP_LDST(14, 1, 1, 0, 0, 0, 0, 3, 1, 0);
+    static const uint32_t ONE_SINGLE =
+        VFP_LDST(14, 1, 1, 0, 0, 0, 0, 0, 0, 0);
+    arm_bus_t write_bus = g_bus;
+    uint8_t *baseline = (uint8_t *)malloc(sizeof g_ram);
+    uint8_t *expected = (uint8_t *)malloc(sizeof g_ram);
+    unsigned hit_words = 0u;
+
+    if (!a64_static_host_available()) {
+        printf("STATIC-VFP-WRITE-ORACLE SKIP: no signed AArch64 handlers\n");
+        free(baseline);
+        free(expected);
+        return true;
+    }
+    if (!baseline || !expected) {
+        fprintf(stderr, "jitbench: VFP write-oracle allocation failed\n");
+        free(baseline);
+        free(expected);
+        return false;
+    }
+    write_bus.host_ram_write = mem_host_ram;
+
+    for (unsigned i = 0u; i < sizeof cases / sizeof cases[0]; i++) {
+        const vfp_write_case_t *sc = &cases[i];
+        arm_cpu_t reference, statik;
+        a64_static_block_t block;
+        unsigned completed = 99u;
+        arm_status_t status;
+
+        seed_vfp_oracle(&reference, &sc->insn, 1u, sc->pc, true);
+        reference.bus = &write_bus;
+        if (sc->rn != 15u) reference.r[sc->rn] = sc->base;
+        if (!sc->executes) {
+            /* A failed condition must bypass CPACR, FPEXC and DWRITE. */
+            reference.cp15.cpacr = 0u;
+            reference.vfp_fpexc = 0u;
+        } else {
+            oracle_warm_dwrite(&reference, sc->va, true);
+            if (sc->dbl) oracle_warm_dwrite(&reference, sc->va + 4u, true);
+        }
+        statik = reference;
+        memcpy(baseline, g_ram, sizeof g_ram);
+
+        if (!a64_static_decode_memory_hits_bytes_at(
+                &g_ram[sc->pc], 1u, false, sc->pc, &block)) {
+            fprintf(stderr, "jitbench: VFP write decode failed for %s\n",
+                    sc->name);
+            free(baseline);
+            free(expected);
+            return false;
+        }
+        status = arm_step(&reference);
+        memcpy(expected, g_ram, sizeof g_ram);
+        memcpy(g_ram, baseline, sizeof g_ram);
+        if (!a64_static_run_memory_hits(&statik, &block, g_ram, sizeof g_ram,
+                                        &completed) ||
+            status != ARM_OK || completed != 1u ||
+            !static_vfp_states_equal(&reference, &statik) ||
+            memcmp(expected, g_ram, sizeof g_ram) != 0 ||
+            statik.dwrite_hits !=
+                (sc->executes ? (sc->dbl ? 2u : 1u) : 0u) ||
+            statik.dwrite_misses != 0u) {
+            fprintf(stderr, "jitbench: VFP write mismatch for %s\n",
+                    sc->name);
+            free(baseline);
+            free(expected);
+            return false;
+        }
+        if (sc->executes) hit_words += sc->dbl ? 2u : 1u;
+    }
+
+    /* If only the first word of a boundary-spanning D store is cached, signed
+     * execution must leave both RAM and counters untouched. The literal step
+     * then owns both architectural writes and converges with a pure reference
+     * run, including its one hit and one miss. */
+    {
+        const uint32_t pc = UINT32_C(0x10c00);
+        arm_cpu_t reference, statik, before;
+        a64_static_block_t block;
+        unsigned completed = 99u;
+
+        seed_vfp_oracle(&reference, &DOUBLE_BOUNDARY, 1u, pc, true);
+        reference.bus = &write_bus;
+        reference.r[0] = boundary;
+        oracle_warm_dwrite(&reference, boundary, true);
+        statik = reference;
+        before = statik;
+        memcpy(baseline, g_ram, sizeof g_ram);
+
+        if (!a64_static_decode_memory_hits_bytes_at(
+                &g_ram[pc], 1u, false, pc, &block) ||
+            arm_step(&reference) != ARM_OK) {
+            fprintf(stderr, "jitbench: VFP boundary rollback setup failed\n");
+            free(baseline);
+            free(expected);
+            return false;
+        }
+        memcpy(expected, g_ram, sizeof g_ram);
+        memcpy(g_ram, baseline, sizeof g_ram);
+        if (!a64_static_run_memory_hits(&statik, &block, g_ram, sizeof g_ram,
+                                        &completed) ||
+            completed != 0u ||
+            !static_vfp_states_equal(&before, &statik) ||
+            memcmp(baseline, g_ram, sizeof g_ram) != 0 ||
+            arm_step(&statik) != ARM_OK ||
+            !static_vfp_states_equal(&reference, &statik) ||
+            memcmp(expected, g_ram, sizeof g_ram) != 0 ||
+            statik.dwrite_hits != 1u || statik.dwrite_misses != 1u) {
+            fprintf(stderr,
+                    "jitbench: VFP boundary rollback/fallback mismatch\n");
+            free(baseline);
+            free(expected);
+            return false;
+        }
+    }
+
+    /* Alignment and live VFP access remain literal concerns. Each refusal is
+     * zero-prefix and must be wholly observational. */
+    for (unsigned disabled = 0u; disabled < 2u; disabled++) {
+        const uint32_t pc = UINT32_C(0x10d00) + disabled * 0x100u;
+        arm_cpu_t statik, before;
+        a64_static_block_t block;
+        unsigned completed = 99u;
+
+        seed_vfp_oracle(&statik, &ONE_SINGLE, 1u, pc, disabled == 0u);
+        statik.bus = &write_bus;
+        statik.r[0] = disabled ? ordinary : ordinary + 1u;
+        oracle_warm_dwrite(&statik, statik.r[0], true);
+        before = statik;
+        memcpy(baseline, g_ram, sizeof g_ram);
+        if (!a64_static_decode_memory_hits_bytes_at(
+                &g_ram[pc], 1u, false, pc, &block) ||
+            !a64_static_run_memory_hits(&statik, &block, g_ram, sizeof g_ram,
+                                        &completed) ||
+            completed != 0u ||
+            !static_vfp_states_equal(&before, &statik) ||
+            memcmp(baseline, g_ram, sizeof g_ram) != 0) {
+            fprintf(stderr, "jitbench: VFP write %s refusal changed state\n",
+                    disabled ? "disabled" : "alignment");
+            free(baseline);
+            free(expected);
+            return false;
+        }
+    }
+
+    free(baseline);
+    free(expected);
+    printf("STATIC-VFP-WRITE-ORACLE exact=yes cases=%zu hit-words=%u "
+           "single=yes double=yes pc-relative=yes conditional=yes "
+           "alignment=yes boundary=yes rollback=yes zero-prefix=yes\n",
+           sizeof cases / sizeof cases[0], hit_words);
     return true;
 }
 
@@ -3938,6 +4230,7 @@ int main(int argc, char **argv) {
     if (!validate_static_vfp_compare_oracles()) return 1;
     if (!validate_static_vfp_widen_oracles()) return 1;
     if (!validate_static_vfp_read_oracles()) return 1;
+    if (!validate_static_vfp_write_oracles()) return 1;
     if (!validate_static_branch_oracles()) return 1;
     if (!validate_static_indirect_branch_oracles()) return 1;
     if (!validate_static_oracles()) return 1;
