@@ -3382,6 +3382,135 @@ static void test_signed_static_a64_store_oracle(void) {
     s5l8900_free(&reference);
 }
 
+/* The product runner must retire ordinary STM through its real cache, graph,
+ * timer and device gates, not merely through the flat semantic harness. Every
+ * successful transfer stays inside one DWRITE block; the first word fills it,
+ * then exact hit accounting proves all later signed commits remain word-for-
+ * word equivalent to arm_step. The EQ transfer deliberately remains skipped. */
+static void test_signed_static_a64_stm_oracle(void) {
+    static const uint32_t signed_loop[16] = {
+        UINT32_C(0xe887000f), /* STMIA r7,{r0-r3} */
+        UINT32_C(0xe9a84030), /* STMIB r8!,{r4,r5,r14} */
+        UINT32_C(0xe248800c), /* SUB   r8,r8,#12 */
+        UINT32_C(0xe8094440), /* STMDA r9,{r6,r10,r14} */
+        UINT32_C(0xe92b8481), /* STMDB r11!,{r0,r7,r10,pc} */
+        UINT32_C(0xe28bb010), /* ADD   r11,r11,#16 */
+        UINT32_C(0xe88cffff), /* STMIA r12,{r0-r15}, ends at block edge */
+        UINT32_C(0x08870003), /* STMEQIA r7,{r0,r1}, skipped (Z clear) */
+        UINT32_C(0xe2800001), /* ADD r0,r0,#1 */
+        UINT32_C(0xe0211000), /* EOR r1,r1,r0 */
+        UINT32_C(0xe2822003), /* ADD r2,r2,#3 */
+        UINT32_C(0xe2433001), /* SUB r3,r3,#1 */
+        UINT32_C(0xe2844005), /* ADD r4,r4,#5 */
+        UINT32_C(0xe0255002), /* EOR r5,r5,r2 */
+        UINT32_C(0xe2866007), /* ADD r6,r6,#7 */
+        UINT32_C(0xeaffffef), /* B 0 */
+    };
+    const uint64_t expected_hits = UINT64_C(29999);
+    s5l8900_t fast = {0};
+    s5l8900_t reference = {0};
+    uint8_t *fast_snapshot = NULL;
+    uint8_t *reference_snapshot = NULL;
+    size_t fast_len = 0u;
+    size_t reference_len = 0u;
+    arm_status_t fast_status = ARM_OK;
+    arm_status_t reference_status = ARM_OK;
+    bool fast_ok;
+    bool reference_ok;
+
+    if (!s5l8900_static_a64_available()) {
+        printf("  STATIC-A64-STM-ORACLE SKIP: no signed AArch64 handlers\n");
+        return;
+    }
+
+    fast_ok = s5l8900_init(&fast, 0u, 1u << 20);
+    reference_ok = s5l8900_init(&reference, 0u, 1u << 20);
+    CHECK(fast_ok && reference_ok, "STM oracle machine init failed");
+    if (!fast_ok || !reference_ok) {
+        if (fast_ok) s5l8900_free(&fast);
+        if (reference_ok) s5l8900_free(&reference);
+        return;
+    }
+
+    s5l8900_load(&fast, 0u, signed_loop, sizeof signed_loop);
+    s5l8900_load(&reference, 0u, signed_loop, sizeof signed_loop);
+    s5l8900_tick(&fast, 0u);
+    s5l8900_tick(&reference, 0u);
+    for (unsigned reg = 0u; reg < 15u; reg++) {
+        fast.cpu.r[reg] = UINT32_C(0x11000000) |
+                          (reg * UINT32_C(0x010101));
+        reference.cpu.r[reg] = fast.cpu.r[reg];
+    }
+    fast.cpu.r[7] = reference.cpu.r[7] = UINT32_C(0x1000);
+    fast.cpu.r[8] = reference.cpu.r[8] = UINT32_C(0x1100);
+    fast.cpu.r[9] = reference.cpu.r[9] = UINT32_C(0x1200);
+    fast.cpu.r[11] = reference.cpu.r[11] = UINT32_C(0x1300);
+    fast.cpu.r[12] = reference.cpu.r[12] = UINT32_C(0x13c0);
+    fast.cpu.r[15] = reference.cpu.r[15] = 0u;
+    fast.cpu.cpsr = reference.cpu.cpsr = ARM_MODE_SYS | ARM_CPSR_C;
+
+    CHECK(s5l8900_set_direct_ram_writes(&fast, true) &&
+              s5l8900_set_direct_ram_writes(&reference, true),
+          "STM oracle could not opt into direct RAM writes");
+    CHECK(s5l8900_static_a64_set_enabled(&fast, true),
+          "STM oracle signed engine refused an available host");
+    CHECK(s5l8900_static_a64_set_graph(&fast, true),
+          "STM oracle graph engine refused an available host");
+    CHECK(s5l8900_run(&fast, 16000u, &fast_status) == 16000u,
+          "signed STM run stopped early with status=%d", (int)fast_status);
+    CHECK(s5l8900_run(&reference, 16000u, &reference_status) == 16000u,
+          "reference STM run stopped early with status=%d",
+          (int)reference_status);
+
+    uint64_t retired = s5l8900_static_a64_retired(&fast);
+    uint64_t graph = s5l8900_static_a64_graph_chained_blocks(&fast);
+    CHECK(fast_status == reference_status,
+          "STM status differs: signed=%d reference=%d",
+          (int)fast_status, (int)reference_status);
+    CHECK(retired > 12000u, "signed STM loop retired only %llu instructions",
+          (unsigned long long)retired);
+    CHECK(graph != 0u, "signed STM loop published no graph edge");
+    CHECK(fast.cpu.dwrite_hits == expected_hits &&
+              reference.cpu.dwrite_hits == expected_hits &&
+              fast.cpu.dwrite_misses == 1u &&
+              reference.cpu.dwrite_misses == 1u,
+          "STM DWRITE accounting differs: fast=%llu/%llu reference=%llu/%llu",
+          (unsigned long long)fast.cpu.dwrite_hits,
+          (unsigned long long)fast.cpu.dwrite_misses,
+          (unsigned long long)reference.cpu.dwrite_hits,
+          (unsigned long long)reference.cpu.dwrite_misses);
+
+    snapshot_status_t fast_snapshot_status =
+        snapshot_save_mem(&fast, &fast_snapshot, &fast_len);
+    snapshot_status_t reference_snapshot_status =
+        snapshot_save_mem(&reference, &reference_snapshot, &reference_len);
+    bool exact = fast_snapshot_status == SNAP_OK &&
+        reference_snapshot_status == SNAP_OK && fast_snapshot &&
+        reference_snapshot && fast_len == reference_len &&
+        memcmp(fast_snapshot, reference_snapshot, fast_len) == 0;
+    CHECK(fast_snapshot_status == SNAP_OK,
+          "could not serialize signed STM machine: %s",
+          snapshot_strerror(fast_snapshot_status));
+    CHECK(reference_snapshot_status == SNAP_OK,
+          "could not serialize reference STM machine: %s",
+          snapshot_strerror(reference_snapshot_status));
+    CHECK(exact, "signed and reference STM snapshots differ");
+
+    if (exact && retired > 12000u && graph != 0u &&
+        fast.cpu.dwrite_hits == expected_hits &&
+        fast.cpu.dwrite_misses == 1u) {
+        printf("  STATIC-A64-STM-ORACLE exact=yes retired=%llu "
+               "dwrite-hits=29999 dwrite-misses=1 modes=4 writeback=yes "
+               "pc-source=yes conditional=yes max-words=16 graph=yes\n",
+               (unsigned long long)retired);
+    }
+
+    free(fast_snapshot);
+    free(reference_snapshot);
+    s5l8900_free(&fast);
+    s5l8900_free(&reference);
+}
+
 /* A control-flow-heavy loop proves that the product cache and decoded runner
  * actually retire conditional B/BL records, rather than obtaining an exact
  * snapshot only by falling back at every branch. Eleven instructions execute
@@ -4558,6 +4687,7 @@ int main(void) {
     test_bare_metal_uart_hello();
     test_signed_static_a64_soc_oracle();
     test_signed_static_a64_store_oracle();
+    test_signed_static_a64_stm_oracle();
     test_signed_static_a64_branch_oracle();
     test_signed_static_a64_indirect_branch_oracle();
     test_signed_static_a64_chain_bound_oracle();
