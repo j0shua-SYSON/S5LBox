@@ -7,6 +7,14 @@
 #import "VMSettings.h"
 #import "VMInstanceListViewController.h"
 
+static NSString *const kAutomationOpenFirstMachineArgument =
+    @"--s5lbox-automation-open-first-machine";
+
+static BOOL VMLaunchRequestsFirstMachine(void) {
+    return [[[NSProcessInfo processInfo] arguments]
+        containsObject:kAutomationOpenFirstMachineArgument];
+}
+
 /*
  * iOS 26's content-wide interactive pop gesture is not an edge gesture.  A
  * rightward drag anywhere over the guest can therefore pop the emulator and
@@ -124,11 +132,27 @@ static UIGestureRecognizer *VMNavigationContentPopGestureRecognizer(
     /* The machine list is the root now, with the emulator pushed on top of it.
      * A navigation stack rather than a modal presentation because going back
      * to the list is the common action once there is more than one machine. */
+    VMInstanceListViewController *machines =
+        [[VMInstanceListViewController alloc] init];
     UINavigationController *nav = [[VMNavigationController alloc]
-        initWithRootViewController:[[VMInstanceListViewController alloc] init]];
+        initWithRootViewController:machines];
     nav.navigationBar.prefersLargeTitles = YES;
     self.window.rootViewController = nav;
     [self.window makeKeyAndVisible];
+
+    /*
+     * Device profiling needs a deterministic way to reach the running guest.
+     * This exact argument is opt-in and uses the same list-controller method as
+     * a real row tap. Dispatching once lets the root finish appearing before a
+     * no-animation push; normal launches remain on the machine list.
+     */
+    if (VMLaunchRequestsFirstMachine()) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            BOOL opened = [machines openFirstMachineForAutomation];
+            NSLog(@"[automation] open first machine: %@",
+                  opened ? @"started" : @"refused");
+        });
+    }
     return YES;
 }
 

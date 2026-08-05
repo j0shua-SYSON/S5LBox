@@ -17,4 +17,16 @@
 #import <UIKit/UIKit.h>
 
 @interface VMInstanceListViewController : UITableViewController
+
+/*
+ * A deliberately narrow device-automation hook. Normal launches and taps do
+ * not call it. It opens the first configured machine through the same path as
+ * -tableView:didSelectRowAtIndexPath:, without inventing a second boot path.
+ *
+ * Returns NO when the list is not the visible navigation root or no machine is
+ * available. The caller can then report a failed automation setup rather than
+ * claiming that a guest was started.
+ */
+- (BOOL)openFirstMachineForAutomation;
+
 @end

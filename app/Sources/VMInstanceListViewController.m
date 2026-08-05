@@ -12,6 +12,7 @@
 #import "VMSettingsViewController.h"
 
 static NSString *const kCell = @"machine";
+static NSString *const kAutomationMachinePrefix = @"s5lbox.machine.";
 
 @implementation VMInstanceListViewController
 
@@ -36,6 +37,10 @@ static NSString *const kCell = @"machine";
                  style:UIBarButtonItemStylePlain
                 target:self action:@selector(settingsTapped)];
     settings.accessibilityLabel = @"Settings";
+    add.accessibilityIdentifier = @"s5lbox.machines.add";
+    settings.accessibilityIdentifier = @"s5lbox.machines.settings";
+    self.editButtonItem.accessibilityIdentifier = @"s5lbox.machines.edit";
+    self.tableView.accessibilityIdentifier = @"s5lbox.machines.list";
     /* The first item is nearest the trailing edge. Keep Create in the familiar
      * top-right position and put global app setup beside it. Previously the
      * only route to firmware import was to open a machine and start its engine
@@ -279,16 +284,20 @@ titleForFooterInSection:(NSInteger)section {
     cell.detailTextLabel.adjustsFontForContentSizeCategory = YES;
     cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
     cell.accessibilityHint = @"Opens this machine.";
+    NSString *identifier = row[@"id"];
+    cell.accessibilityIdentifier = identifier.length
+        ? [kAutomationMachinePrefix stringByAppendingString:identifier]
+        : @"s5lbox.machine.unknown";
     return cell;
 }
 
-- (void)tableView:(UITableView *)tableView
-didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
-    [tableView deselectRowAtIndexPath:indexPath animated:YES];
+- (BOOL)openInstanceAtIndex:(NSUInteger)index animated:(BOOL)animated {
+    NSDictionary *row = [[VMInstanceStore sharedStore] instanceAtIndex:index];
+    UINavigationController *navigation = self.navigationController;
 
-    NSDictionary *row =
-        [[VMInstanceStore sharedStore] instanceAtIndex:(NSUInteger)indexPath.row];
-    if (!row) return;
+    /* Refuse ambiguous automation state. A hidden list must not push another
+     * emulator over whichever controller is currently visible. */
+    if (!row || !navigation || navigation.topViewController != self) return NO;
 
     [[VMInstanceStore sharedStore] noteOpenedInstanceWithID:row[@"id"]];
 
@@ -299,7 +308,23 @@ didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
      * firmware at all, which is deliberate -- see -[VMEngine
      * initWithInstanceID:]. */
     vc.instanceID = row[@"id"];
-    [self.navigationController pushViewController:vc animated:YES];
+    [navigation pushViewController:vc animated:animated];
+    return YES;
+}
+
+- (BOOL)openFirstMachineForAutomation {
+    /* -viewDidLoad creates the initial machine when this is a fresh container.
+     * Loading here makes that contract explicit instead of depending on the
+     * navigation controller's current view-loading timing. */
+    [self loadViewIfNeeded];
+    if ([[VMInstanceStore sharedStore] count] == 0) return NO;
+    return [self openInstanceAtIndex:0 animated:NO];
+}
+
+- (void)tableView:(UITableView *)tableView
+didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
+    [tableView deselectRowAtIndexPath:indexPath animated:YES];
+    [self openInstanceAtIndex:(NSUInteger)indexPath.row animated:YES];
 }
 
 /* Swipe actions rather than only an edit-mode delete: rename and duplicate are
