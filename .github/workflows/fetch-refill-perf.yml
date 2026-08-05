@@ -74,10 +74,10 @@ jobs:
               ;;
             representative)
               ./build-perf/core/jitbench \
-                --fetch-refill-mix-only \
+                --fetch-refill-paired-only \
                 --soc-insns "$SOC_INSNS" --reps "$REPS" | tee fetch-refill.log
-              test "$(grep -c '^SOC-FETCH-REFILL-MIX-CURVE ' fetch-refill.log)" -eq 1
-              grep -Eq '^SOC-FETCH-REFILL-MIX-CURVE .*long-insns=10 .*exact-snapshot=yes ' \
+              test "$(grep -c '^SOC-FETCH-REFILL-PAIRED-CURVE ' fetch-refill.log)" -eq 1
+              grep -Eq '^SOC-FETCH-REFILL-PAIRED-CURVE .*long-insns=10 .*order=alternating-adjacent exact-snapshot=yes ' \
                 fetch-refill.log
               ;;
             *)
