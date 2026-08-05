@@ -7462,3 +7462,45 @@ MBX on and the CPU renderer off, and consequently owns a fresh app container and
 The normal app remains CPU-renderer-default. This removes the persistent-image ambiguity from the
 phone A/B; it does not make MBX faster and it is not a 30 FPS claim. The decisive report remains
 simultaneous sustained Minsn/s and changed FPS on the same visible animation.
+
+### 2026-08-05: the isolated MBX artifact is exact; caching affine taps is neutral
+
+Commit `5107c802311a8a72c820ea379b2c48dee3c6ecc5` makes the experiment
+unambiguous on a phone. The normal IPA remains `com.j0shua.S5LBox` / `S5LBox`; the manual MBX IPA
+is `com.j0shua.S5LBox.MBXExperiment` / `S5LBox MBX`. Its independent container forces a fresh work
+image with MBX enabled and the QuartzCore CPU renderer disabled. Exact-SHA core run `31011319261`,
+normal iOS run `31011319491`, and MBX iOS run `31011339013` are green. The downloaded IPAs are:
+
+| artifact | bytes | SHA-256 |
+|---|---:|---|
+| normal `work/artifacts/5107c80-normal/S5LBox.ipa` | 1,242,096 | `97C315C7E2F94A40A1D0610B22B0789E1967DF8CB02E16962D800BA3DD283D25` |
+| MBX `work/artifacts/5107c80-mbx/S5LBox.ipa` | 1,242,097 | `8D2CA568101355AB5507F3B674766FE76E0B124B55D815EA4647A6F4D66F4091` |
+
+r572 then tested the largest obvious redundancy inside the sampled MBX renderer instead of assuming
+it mattered. Affine textured sprites traverse every destination pixel twice: the first pass finds
+the exact source-tap window and the second recomputes the same affine transform and bilinear taps
+while blending. A temporary bounded cache preserved the first pass's already-quantized taps, so it
+changed neither floating-point sampling nor pixels. Both cache-off and cache-on focused binaries
+passed 938/938 assertions. Four alternating Release replay arms restored r446 at 7.320 B, ran the
+same 100 M instructions through the app-shaped meter, and created no snapshot:
+
+| arm | affine tap cache | core rate | mean changed FPS | changes |
+|---|---|---:|---:|---:|
+| A | off | 8.014172 Minsn/s | 7.043 | 87 |
+| B | on | 8.169055 Minsn/s | 7.055 | 87 |
+| C | on | 8.073924 Minsn/s | 7.073 | 87 |
+| D | off | 8.170579 Minsn/s | 7.083 | 87 |
+
+The cache averages 8.121490 Minsn/s against 8.092376 for the controls, only **+0.36%**, while
+mean changed FPS is 7.064 versus 7.063. Every arm exits zero with empty stderr, no 30-FPS window,
+the exact work-image SHA-256
+`06AAAA84FB4BFEAE5A647290C9B50BEBE7640F420457089F40BDBED961D6992D`, and the exact screen
+SHA-256 `96EC1953CD74B76E979F08EB933684FE2AC4182C64BF6129143DEE7E040CE63E`.
+The temporary code is removed rather than converting noise into a product feature.
+
+Brutal status: **the isolated IPA is ready for a trustworthy phone A/B, but no measured speedup was
+added here and 30 FPS is not close or established**. The x86 Release replay itself averages about
+7.06 changed scanouts/s; eliminating the duplicated affine math did essentially nothing end to end.
+This closes another renderer micro-optimization path. The next local work must profile a larger core
+execution or device boundary, while the decisive MBX-versus-normal result remains simultaneous
+sustained Minsn/s and changed FPS from these exact, visibly distinct IPAs on the same phone scene.
