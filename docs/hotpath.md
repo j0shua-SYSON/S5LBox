@@ -7102,3 +7102,49 @@ different measurements and cannot honestly be multiplied into the old roughly 0-
 report. This exact IPA has not run on the iPhone here. The optimization is worth retaining, but an
 exact-build device measurement or a trustworthy end-to-end signed-firmware timing path remains the
 authority for whether the project has moved toward 30 FPS.
+
+### 2026-08-05: 98.421% of the remaining fetch-entry refusals already have an exact TLB witness
+
+The current product still refuses 521,880 otherwise eligible signed-runner entries in the exact
+7.100--7.110 B restored interval because its 1 KiB fetch-host cache does not cover the current PC.
+Returning to `arm_step()` for the first instruction of every such block is deliberately safe: that
+path owns page-table walks, prefetch faults and MMIO. It is also potentially unnecessary when the
+software TLB already contains the exact successful FETCH translation and the bus can prove the
+translated 1 KiB span is ordinary RAM.
+
+The `r553-fetch-preflight-10m` observer measures that distinction without changing the product or
+guest. It samples the fetch cache and direct-mapped TLB **before** `--sequence-profile` performs its
+own diagnostic translation. Sampling afterward would make the profiler manufacture the answer it
+wanted by warming the very TLB entry under test. The probe performs no walk, fault, bus read, cache
+fill or counter update; it only validates the live MMU-register stamp, exact generation/tag/fault
+record and `host_ram` pointer contract.
+
+The exact current-product result is:
+
+| pre-profile state at a current-product fetch refusal | observations | share |
+|---|---:|---:|
+| exact successful TLB translation to a full plain-RAM block | **513,642** | **98.421%** |
+| no matching live TLB entry | 8,238 | 1.579% |
+| stale MMU context, cached fault, non-RAM, MMU-off or misalignment | 0 | 0.000% |
+| total | 521,880 | 100.000% |
+
+The overlapping gate reasons are 52 null host pointers, 521,828 block mismatches, 52 generation
+mismatches, 78 privilege mismatches and zero alignment failures. Thus the broad loss is almost
+entirely a change of 1 KiB virtual fetch block, not a fault or unsafe mapping. A lookup-only refill
+could make up to 513,642 more observations enter signed text in this interval, moving the raw
+modeled-instruction bound from 8,561,262 (85.613% fetched) to 9,074,904 (90.749%). That arithmetic
+is a coverage bound, not yet a measured runner-entry reduction or speedup; the next implementation
+must still prove exact call continuity and native execution.
+
+The run stops exactly at 7.110 B with exit zero and empty stderr. All 61 case-sensitive accounting
+verdicts are `EXACT`; none is `MISMATCH`. The external disk completes 15,626 reads and 469 writes
+with zero failures. The work image and nonblack CLCD screen remain byte-identical to r551 at
+`8A59C388C481165F460984926AA5FFB1B72A0E9030216CD0038DE9B3264B79FE` and
+`1EF63FFE3EEFD976416E17120A36BA074BF295EA0955D716E2D345FCC5EA0A9E`. No new snapshot was
+created; the run reused the retained r445 7.100 B checkpoint. All 60 strict local tests pass.
+
+Brutal status: **this is a large systemic coverage opportunity, not evidence that the emulator is
+near 30 FPS**. It can remove a literal warm-up from about 5.14% of all fetched instructions, but the
+lookup, decode and signed handler still cost host time, and no physical iPhone has run this change.
+The evidence is strong enough to implement a fail-closed lookup-only refill; it is not strong enough
+to predict even one additional frame per second.

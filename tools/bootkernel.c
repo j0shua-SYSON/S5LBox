@@ -24781,6 +24781,41 @@ typedef enum {
     SEQUENCE_SIGNED_GATE_COUNT
 } sequence_signed_gate_t;
 
+/* Side-effect-free look at the exact state the product fetch gate sees before
+ * --sequence-profile performs its diagnostic translation.  The profiler's
+ * sequence_fetch() deliberately warms the software TLB, so inspecting after
+ * that call would turn every current fetch into an apparent TLB hit and give
+ * a falsely flattering answer. */
+typedef enum {
+    SEQUENCE_FETCH_PREFLIGHT_READY = 0,
+    SEQUENCE_FETCH_PREFLIGHT_MISALIGNED,
+    SEQUENCE_FETCH_PREFLIGHT_MMU_OFF_RAM,
+    SEQUENCE_FETCH_PREFLIGHT_MMU_OFF_NON_RAM,
+    SEQUENCE_FETCH_PREFLIGHT_STALE_CONTEXT,
+    SEQUENCE_FETCH_PREFLIGHT_TLB_MISS,
+    SEQUENCE_FETCH_PREFLIGHT_TLB_FAULT,
+    SEQUENCE_FETCH_PREFLIGHT_TLB_RAM,
+    SEQUENCE_FETCH_PREFLIGHT_TLB_NON_RAM,
+    SEQUENCE_FETCH_PREFLIGHT_COUNT
+} sequence_fetch_preflight_outcome_t;
+
+typedef enum {
+    SEQUENCE_FETCH_REASON_HOST_NULL = 0,
+    SEQUENCE_FETCH_REASON_BLOCK,
+    SEQUENCE_FETCH_REASON_GENERATION,
+    SEQUENCE_FETCH_REASON_PRIVILEGE,
+    SEQUENCE_FETCH_REASON_ALIGNMENT,
+    SEQUENCE_FETCH_REASON_COUNT
+} sequence_fetch_reason_t;
+
+typedef struct {
+    uint64_t outcomes[SEQUENCE_FETCH_PREFLIGHT_COUNT];
+    uint64_t reasons[SEQUENCE_FETCH_REASON_COUNT];
+    sequence_fetch_preflight_outcome_t pending_outcome;
+    uint32_t pending_reasons;
+    bool pending;
+} sequence_signed_fetch_probe_t;
+
 typedef enum {
     SEQUENCE_SIGNED_STOP_CAP = 0,
     SEQUENCE_SIGNED_STOP_TIMER,
@@ -25341,6 +25376,7 @@ typedef struct {
     bool signed_chain_pending;
     bool signed_chain_thumb;
     bool signed_tick_eager;
+    sequence_signed_fetch_probe_t signed_fetch_probe;
     sequence_signed_extended_t signed_extended;
     sequence_signed_store_t signed_store;
     sequence_signed_indirect_t signed_indirect;
@@ -27465,6 +27501,99 @@ static void sequence_signed_store_model_close(
     model->head_length = 0u;
 }
 
+/* Capture the product gate and lookup-only recovery verdict before the
+ * profiler's own fetch calls arm_mmu_translate().  Reading an existing TLB
+ * entry and asking host_ram for a pointer have no architectural side effects:
+ * there is no walk, fault, bus read, cache fill or counter update here. */
+static void sequence_signed_fetch_probe_prepare(
+        sequence_profile_t *profile, const s5l8900_t *mach) {
+    if (!profile) return;
+    sequence_signed_fetch_probe_t *probe = &profile->signed_fetch_probe;
+    probe->pending = false;
+    if (!mach) return;
+
+    const arm_cpu_t *cpu = &mach->cpu;
+    const uint32_t pc = cpu->r[15];
+    const bool thumb = (cpu->cpsr & ARM_CPSR_T) != 0u;
+    const bool priv = (cpu->cpsr & ARM_CPSR_MODE_MASK) != ARM_MODE_USR;
+    const uint32_t fetch_block = pc & ~UINT32_C(0x3ff);
+    uint32_t reasons = 0u;
+    sequence_fetch_preflight_outcome_t outcome;
+
+    if (!cpu->fetch_host)
+        reasons |= 1u << SEQUENCE_FETCH_REASON_HOST_NULL;
+    if (cpu->fetch_blk != fetch_block)
+        reasons |= 1u << SEQUENCE_FETCH_REASON_BLOCK;
+    if (cpu->fetch_gen != cpu->tlb_gen)
+        reasons |= 1u << SEQUENCE_FETCH_REASON_GENERATION;
+    if (cpu->fetch_priv != priv)
+        reasons |= 1u << SEQUENCE_FETCH_REASON_PRIVILEGE;
+    if ((pc & (thumb ? 1u : 3u)) != 0u)
+        reasons |= 1u << SEQUENCE_FETCH_REASON_ALIGNMENT;
+
+    if (reasons == 0u) {
+        outcome = SEQUENCE_FETCH_PREFLIGHT_READY;
+    } else if ((reasons &
+                (1u << SEQUENCE_FETCH_REASON_ALIGNMENT)) != 0u) {
+        outcome = SEQUENCE_FETCH_PREFLIGHT_MISALIGNED;
+    } else if ((cpu->cp15.sctlr & ARM_SCTLR_M) == 0u) {
+        const uint8_t *host = cpu->bus && cpu->bus->host_ram
+            ? cpu->bus->host_ram(cpu->bus->ctx, fetch_block, 0x400u)
+            : NULL;
+        outcome = host ? SEQUENCE_FETCH_PREFLIGHT_MMU_OFF_RAM
+                       : SEQUENCE_FETCH_PREFLIGHT_MMU_OFF_NON_RAM;
+    } else if (cpu->tlb_gen == 0u ||
+               cpu->tlb_stamp.sctlr != cpu->cp15.sctlr ||
+               cpu->tlb_stamp.ttbr0 != cpu->cp15.ttbr0 ||
+               cpu->tlb_stamp.ttbr1 != cpu->cp15.ttbr1 ||
+               cpu->tlb_stamp.ttbcr != cpu->cp15.ttbcr ||
+               cpu->tlb_stamp.dacr != cpu->cp15.dacr ||
+               cpu->tlb_stamp.context_id != cpu->cp15.context_id) {
+        outcome = SEQUENCE_FETCH_PREFLIGHT_STALE_CONTEXT;
+    } else {
+        const uint32_t tag = ((pc >> 10) << 3) |
+            ((uint32_t)ARM_ACCESS_FETCH << 1) | (priv ? 1u : 0u);
+        const unsigned slot =
+            ((pc >> 10) + (unsigned)ARM_ACCESS_FETCH *
+                (ARM_TLB_ENTRIES / 4u)) & (ARM_TLB_ENTRIES - 1u);
+        if (cpu->tlb[slot].gen != cpu->tlb_gen ||
+            cpu->tlb[slot].tag != tag) {
+            outcome = SEQUENCE_FETCH_PREFLIGHT_TLB_MISS;
+        } else if (cpu->tlb[slot].fsr != 0u) {
+            outcome = SEQUENCE_FETCH_PREFLIGHT_TLB_FAULT;
+        } else {
+            const uint8_t *host = cpu->bus && cpu->bus->host_ram
+                ? cpu->bus->host_ram(cpu->bus->ctx, cpu->tlb[slot].pa,
+                                     0x400u)
+                : NULL;
+            outcome = host ? SEQUENCE_FETCH_PREFLIGHT_TLB_RAM
+                           : SEQUENCE_FETCH_PREFLIGHT_TLB_NON_RAM;
+        }
+    }
+
+    probe->pending_outcome = outcome;
+    probe->pending_reasons = reasons;
+    probe->pending = true;
+}
+
+static void sequence_signed_fetch_probe_note(sequence_profile_t *profile) {
+    if (!profile) return;
+    sequence_signed_fetch_probe_t *probe = &profile->signed_fetch_probe;
+    if (!probe->pending ||
+        probe->pending_outcome >= SEQUENCE_FETCH_PREFLIGHT_COUNT)
+        return;
+    probe->outcomes[probe->pending_outcome]++;
+    for (unsigned reason = 0u; reason < SEQUENCE_FETCH_REASON_COUNT;
+         reason++) {
+        if ((probe->pending_reasons & (1u << reason)) != 0u)
+            probe->reasons[reason]++;
+    }
+    /* Only the exact current-product model is permitted to consume a sample.
+     * This prevents the many side-by-side frontier models from multiplying the
+     * same dynamic refusal. */
+    probe->pending = false;
+}
+
 /* Reproduce every read-only entry gate available to bootkernel. The native
  * handler availability and runtime opt-in are deliberately assumed: this
  * models the iPhone target, while the current Windows host can only decode.
@@ -27657,6 +27786,9 @@ static void sequence_signed_store_observe_tagged(
             &budget, &budget_stop);
         if (gate != SEQUENCE_SIGNED_GATE_OK) {
             model->gate_refusals[gate]++;
+            if (gate == SEQUENCE_SIGNED_GATE_FETCH &&
+                model == &profile->signed_store.implemented)
+                sequence_signed_fetch_probe_note(profile);
             return;
         }
         model->call_remaining = budget;
@@ -28395,6 +28527,10 @@ static void sequence_profile_observe(sequence_profile_t *profile,
         sequence_profile_break(profile);
         return;
     }
+
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    sequence_signed_fetch_probe_prepare(profile, mach);
+#endif
 
     uint32_t pc = cpu->r[15];
     bool thumb = (cpu->cpsr & ARM_CPSR_T) != 0u;
@@ -29464,6 +29600,49 @@ static void sequence_profile_report_store_model(
            implemented->blocks,
            implemented->calls + implemented->chain_transitions,
            implemented_exact ? "EXACT" : "MISMATCH");
+    {
+        const sequence_signed_fetch_probe_t *fetch =
+            &profile->signed_fetch_probe;
+        uint64_t fetch_total = 0u;
+        for (unsigned outcome = 0u;
+             outcome < SEQUENCE_FETCH_PREFLIGHT_COUNT; outcome++)
+            fetch_total += fetch->outcomes[outcome];
+        uint64_t recoverable =
+            fetch->outcomes[SEQUENCE_FETCH_PREFLIGHT_MMU_OFF_RAM] +
+            fetch->outcomes[SEQUENCE_FETCH_PREFLIGHT_TLB_RAM];
+        bool fetch_exact = fetch_total ==
+            implemented->gate_refusals[SEQUENCE_SIGNED_GATE_FETCH];
+        printf("      fetch-refusal reasons host-null/block/generation/privilege/"
+               "alignment=%" PRIu64 "/%" PRIu64 "/%" PRIu64
+               "/%" PRIu64 "/%" PRIu64 " (overlap allowed)\n",
+               fetch->reasons[SEQUENCE_FETCH_REASON_HOST_NULL],
+               fetch->reasons[SEQUENCE_FETCH_REASON_BLOCK],
+               fetch->reasons[SEQUENCE_FETCH_REASON_GENERATION],
+               fetch->reasons[SEQUENCE_FETCH_REASON_PRIVILEGE],
+               fetch->reasons[SEQUENCE_FETCH_REASON_ALIGNMENT]);
+        printf("      pre-profile fetch state ready/misaligned/mmu-off-RAM/"
+               "mmu-off-nonRAM/stale/TLB-miss/TLB-fault/TLB-RAM/"
+               "TLB-nonRAM=%" PRIu64 "/%" PRIu64 "/%" PRIu64
+               "/%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64
+               "/%" PRIu64 "/%" PRIu64 "; lookup-only recoverable="
+               "%" PRIu64 " (%.3f%%)  %s\n",
+               fetch->outcomes[SEQUENCE_FETCH_PREFLIGHT_READY],
+               fetch->outcomes[SEQUENCE_FETCH_PREFLIGHT_MISALIGNED],
+               fetch->outcomes[SEQUENCE_FETCH_PREFLIGHT_MMU_OFF_RAM],
+               fetch->outcomes[SEQUENCE_FETCH_PREFLIGHT_MMU_OFF_NON_RAM],
+               fetch->outcomes[SEQUENCE_FETCH_PREFLIGHT_STALE_CONTEXT],
+               fetch->outcomes[SEQUENCE_FETCH_PREFLIGHT_TLB_MISS],
+               fetch->outcomes[SEQUENCE_FETCH_PREFLIGHT_TLB_FAULT],
+               fetch->outcomes[SEQUENCE_FETCH_PREFLIGHT_TLB_RAM],
+               fetch->outcomes[SEQUENCE_FETCH_PREFLIGHT_TLB_NON_RAM],
+               recoverable,
+               fetch_total
+                   ? 100.0 * (double)recoverable / (double)fetch_total : 0.0,
+               fetch_exact ? "ACCOUNTING-EXACT" : "MISMATCH");
+        printf("      This lookup-only fraction is an architectural coverage "
+               "bound, not elapsed speed, firmware FPS or phone FPS. It was "
+               "sampled before the profiler's diagnostic translation.\n");
+    }
     printf("      current/broad-ceiling calls/instructions/heads/chains="
            "%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64
            " -> %" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64
