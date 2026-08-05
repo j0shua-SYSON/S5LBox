@@ -12,7 +12,10 @@ machine after its root navigation controller appears. It calls the same method
 as a real row tap, so instance selection, the opened timestamp, persistent work
 image selection and engine startup do not have a second automation-only path.
 A fresh app container creates its normal initial machine first. With no imported
-firmware, that machine runs the built-in test guest exactly as the UI says.
+firmware, that machine runs the built-in test guest exactly as the UI says. The
+same opt-in launch disables the app process's idle timer so a long profile does
+not become a lock-screen sample; ordinary launches keep the user's Auto-Lock
+setting.
 
 For example, after mounting the matching Developer Disk Image:
 

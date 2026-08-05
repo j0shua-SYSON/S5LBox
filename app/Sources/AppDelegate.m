@@ -122,7 +122,13 @@ static UIGestureRecognizer *VMNavigationContentPopGestureRecognizer(
      */
     [[VMSettings sharedSettings] ensureUserVisibleDirectories];
 
-    (void)application; (void)launchOptions;
+    (void)launchOptions;
+    BOOL automationRequested = VMLaunchRequestsFirstMachine();
+    /* A long phone profile must not turn into a lock-screen measurement half
+     * way through. This lasts only for the explicitly automated app process;
+     * ordinary launches keep the user's normal Auto-Lock setting. */
+    if (automationRequested) application.idleTimerDisabled = YES;
+
     self.window = [[UIWindow alloc] initWithFrame:[[UIScreen mainScreen] bounds]];
     /* Keep the shell native rather than painting a second design system over
      * UIKit.  One explicit accent and large navigation titles are enough to
@@ -146,7 +152,7 @@ static UIGestureRecognizer *VMNavigationContentPopGestureRecognizer(
      * a real row tap. Dispatching once lets the root finish appearing before a
      * no-animation push; normal launches remain on the machine list.
      */
-    if (VMLaunchRequestsFirstMachine()) {
+    if (automationRequested) {
         dispatch_async(dispatch_get_main_queue(), ^{
             BOOL opened = [machines openFirstMachineForAutomation];
             NSLog(@"[automation] open first machine: %@",
