@@ -4049,9 +4049,10 @@ done:
  * opt into direct RAM writes and retain every other handler, graph lookup,
  * 256-instruction bound and machine gate. The off arm falls back only for the
  * four VSTR instructions; the on arm keeps them in signed text. Six written
- * words per loop independently audit the two single and two double stores.
- * This 25%-VSTR loop is intentionally synthetic and is not restored-firmware
- * timing or a physical-device FPS claim. */
+ * words per loop independently audit the two signed arms. The interpreter
+ * reference deliberately has no direct-write consent and therefore no DWRITE
+ * diagnostics. This 25%-VSTR loop is intentionally synthetic and is not
+ * restored-firmware timing or a physical-device FPS claim. */
 static bool bench_soc_vstr(uint64_t requested, unsigned reps) {
     const unsigned length =
         (unsigned)(sizeof A32_SOC_VSTR / sizeof A32_SOC_VSTR[0]);
@@ -4127,7 +4128,7 @@ static bool bench_soc_vstr(uint64_t requested, unsigned reps) {
                    reference.snapshot_len) != 0 ||
             off.signed_retired != expected_off_retired ||
             on.signed_retired != total ||
-            reference.dwrite_hits != expected_dwrite_hits ||
+            reference.dwrite_hits != 0u ||
             off.dwrite_hits != expected_dwrite_hits ||
             on.dwrite_hits != expected_dwrite_hits ||
             reference.dwrite_misses != 0u || off.dwrite_misses != 0u ||
