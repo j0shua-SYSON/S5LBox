@@ -1147,6 +1147,8 @@ static bool decode_program_at(const void *program, unsigned insns, bool thumb,
                 }
                 out->touches_memory = true;
                 out->direct_writes = true;
+                if (handler_is_vfp_direct_write(handler))
+                    out->vfp_direct_writes = true;
             }
             if (handler_is_vfp(handler)) out->vfp = true;
         }
@@ -1359,6 +1361,7 @@ static bool validate_run(const arm_cpu_t *cpu,
     bool saw_direct_write = false;
     bool saw_runtime_guard = false;
     bool saw_vfp = false;
+    bool saw_vfp_direct_write = false;
     bool saw_dynamic_exit = false;
     bool saw_indirect_exit = false;
 
@@ -1416,6 +1419,7 @@ static bool validate_run(const arm_cpu_t *cpu,
                  immediate != 1u))
                 return false;
             saw_direct_write = true;
+            if (vfp_write) saw_vfp_direct_write = true;
         }
         if (handler_is_vfp(handler)) saw_vfp = true;
         if (handler_is_terminal_branch(handler)) {
@@ -1438,6 +1442,7 @@ static bool validate_run(const arm_cpu_t *cpu,
         block->direct_writes != saw_direct_write ||
         block->runtime_guards != saw_runtime_guard ||
         block->vfp != saw_vfp ||
+        block->vfp_direct_writes != saw_vfp_direct_write ||
         block->dynamic_exit != saw_dynamic_exit ||
         block->indirect_exit != saw_indirect_exit ||
         (kind == A64S_RUN_FLAT && (saw_direct_read || saw_direct_write)) ||
@@ -1547,6 +1552,7 @@ static bool validate_decoded_hits_at(const a64_static_block_t *block,
     bool terminal_dynamic;
     bool terminal_indirect;
     bool terminal_write;
+    bool terminal_vfp_write;
     if (!block || !remaining || !block->insn_count ||
         block->insn_count > remaining ||
         block->insn_count > A64_STATIC_MAX_INSNS || !block->uop_count ||
@@ -1561,7 +1567,12 @@ static bool validate_decoded_hits_at(const a64_static_block_t *block,
     terminal_write = block->uop_count > 1u &&
         handler_is_direct_write(
             block->uops[block->uop_count - 2u].handler);
-    if (block->direct_writes != terminal_write) return false;
+    terminal_vfp_write = terminal_write &&
+        handler_is_vfp_direct_write(
+            block->uops[block->uop_count - 2u].handler);
+    if (block->direct_writes != terminal_write ||
+        block->vfp_direct_writes != terminal_vfp_write)
+        return false;
     terminal_dynamic = block->uop_count > 1u &&
         handler_is_terminal_branch(
             block->uops[block->uop_count - 2u].handler);

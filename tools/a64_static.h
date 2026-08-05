@@ -54,6 +54,7 @@ typedef struct {
     bool direct_writes;
     bool runtime_guards;
     bool vfp;
+    bool vfp_direct_writes;
 } a64_static_block_t;
 
 /* Fixed-layout, data-only head descriptor for callback-free signed chaining.
