@@ -48,6 +48,7 @@ typedef struct {
     bool stm_enabled;
     bool ldm_enabled;
     bool vstm_enabled;
+    bool vfp_arithmetic_enabled;
     unsigned chain_limit;
     uint64_t retired;
     uint64_t chained_blocks;
@@ -83,6 +84,7 @@ static bool decode_longest(const uint8_t *bytes, unsigned candidate_insns,
                            bool thumb, uint32_t pc, bool allow_indirect,
                            bool allow_thumb_conditional, bool allow_vstr,
                            bool allow_stm, bool allow_ldm, bool allow_vstm,
+                           bool allow_vfp_arithmetic,
                            a64_static_block_t *out) {
     for (unsigned count = candidate_insns; count != 0u; count--) {
         if (a64_static_decode_memory_hits_bytes_at(bytes, count, thumb, pc,
@@ -92,7 +94,8 @@ static bool decode_longest(const uint8_t *bytes, unsigned candidate_insns,
             (allow_vstr || !out->vfp_direct_writes) &&
             (allow_stm || !out->stm_direct_writes) &&
             (allow_ldm || !out->ldm_direct_reads) &&
-            (allow_vstm || !out->vstm_direct_writes))
+            (allow_vstm || !out->vstm_direct_writes) &&
+            (allow_vfp_arithmetic || !out->vfp_arithmetic))
             return true;
     }
     return false;
@@ -158,6 +161,7 @@ static void decode_entry(static_a64_state_t *state, static_a64_entry_t *entry,
                        state->thumb_conditional_enabled,
                        state->vstr_enabled, state->stm_enabled,
                        state->ldm_enabled, state->vstm_enabled,
+                       state->vfp_arithmetic_enabled,
                        &entry->block)) {
         entry->supported = true;
         entry->raw_len = (uint8_t)(entry->block.insn_count * width);
@@ -252,6 +256,7 @@ static const a64_static_block_t *select_persistent_block(
                         context->state->stm_enabled,
                         context->state->ldm_enabled,
                         context->state->vstm_enabled,
+                        context->state->vfp_arithmetic_enabled,
                         &context->bounded_block))
         return NULL;
     return &context->bounded_block;
@@ -291,6 +296,7 @@ bool s5l8900_static_a64_set_enabled(s5l8900_t *m, bool enabled) {
         state->stm_enabled = true;
         state->ldm_enabled = true;
         state->vstm_enabled = true;
+        state->vfp_arithmetic_enabled = true;
         m->static_a64_state = state;
     }
     state->enabled = true;
@@ -449,6 +455,25 @@ bool s5l8900_static_a64_set_vstm(s5l8900_t *m, bool enabled) {
     memset(state->cache, 0, sizeof state->cache);
     memset(state->graph_nodes, 0, sizeof state->graph_nodes);
     state->vstm_enabled = enabled;
+    return true;
+#else
+    (void)enabled;
+    return false;
+#endif
+}
+
+bool s5l8900_static_a64_set_vfp_arithmetic(s5l8900_t *m, bool enabled) {
+    if (!m) return false;
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    static_a64_state_t *state = static_state(m);
+    if (!state || !state->enabled || !a64_static_host_available())
+        return false;
+    if (state->vfp_arithmetic_enabled == enabled) return true;
+    /* Arithmetic support changes the longest exact prefix at a VFP head.
+     * Invalidate only derived state for a same-machine semantic A/B. */
+    memset(state->cache, 0, sizeof state->cache);
+    memset(state->graph_nodes, 0, sizeof state->graph_nodes);
+    state->vfp_arithmetic_enabled = enabled;
     return true;
 #else
     (void)enabled;
@@ -684,6 +709,7 @@ unsigned s5l8900_static_a64_try(s5l8900_t *m, unsigned max_insns) {
                                 state->vstr_enabled,
                                 state->stm_enabled, state->ldm_enabled,
                                 state->vstm_enabled,
+                                state->vfp_arithmetic_enabled,
                                 &bounded_block))
                 break;
             run_block = &bounded_block;

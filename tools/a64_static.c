@@ -67,7 +67,9 @@ enum {
     A64S_VFP_COMPARE32 = A64S_VFP_UNARY64 + 3u,
     A64S_VFP_COMPARE64 = A64S_VFP_COMPARE32 + 1u,
     A64S_VFP_WIDEN32 = A64S_VFP_COMPARE64 + 1u,
-    A64S_VFP_DIRECT_READ32 = A64S_VFP_WIDEN32 + 1u,
+    A64S_VFP_ARITH32 = A64S_VFP_WIDEN32 + 1u,
+    A64S_VFP_ARITH64 = A64S_VFP_ARITH32 + 9u,
+    A64S_VFP_DIRECT_READ32 = A64S_VFP_ARITH64 + 9u,
     A64S_VFP_DIRECT_READ64 = A64S_VFP_DIRECT_READ32 + 1u,
     A64S_VFP_DIRECT_WRITE32 = A64S_VFP_DIRECT_READ64 + 1u,
     A64S_VFP_DIRECT_WRITE64 = A64S_VFP_DIRECT_WRITE32 + 1u,
@@ -414,6 +416,24 @@ static bool handler_is_vfp(uint32_t handler) {
            handler < A64S_BRANCH_COND;
 }
 
+static bool handler_is_vfp_arithmetic(uint32_t handler) {
+    return handler >= A64S_VFP_ARITH32 &&
+           handler < A64S_VFP_DIRECT_READ32;
+}
+
+static bool vfp_arithmetic_immediate_valid(uint32_t handler,
+                                           uint32_t immediate) {
+    unsigned rd = immediate & 255u;
+    unsigned rn = (immediate >> 8) & 255u;
+    unsigned rm = (immediate >> 16) & 255u;
+    if (!handler_is_vfp_arithmetic(handler) || (immediate >> 24) != 0u)
+        return false;
+    if (handler < A64S_VFP_ARITH64)
+        return rd <= 31u && rn <= 31u && rm <= 31u;
+    return rd <= 30u && rn <= 30u && rm <= 30u &&
+           (rd & 1u) == 0u && (rn & 1u) == 0u && (rm & 1u) == 0u;
+}
+
 static bool vstm_immediate_valid(uint32_t immediate) {
     unsigned first = immediate & 63u;
     unsigned words = (immediate >> 8) & 63u;
@@ -457,6 +477,18 @@ enum {
     A64S_VFP_MOV = 0u,
     A64S_VFP_ABS = 1u,
     A64S_VFP_NEG = 2u
+};
+
+enum {
+    A64S_VFP_VMLA = 0u,
+    A64S_VFP_VMLS = 1u,
+    A64S_VFP_VNMLS = 2u,
+    A64S_VFP_VNMLA = 3u,
+    A64S_VFP_VMUL = 4u,
+    A64S_VFP_VNMUL = 5u,
+    A64S_VFP_VADD = 6u,
+    A64S_VFP_VSUB = 7u,
+    A64S_VFP_VDIV = 8u
 };
 
 /* Decode the bounded VFPv2 product subset. Every admitted handler rechecks the
@@ -603,7 +635,9 @@ static bool decode_vfp_transfer(uint32_t insn, uint32_t pc_value,
         return true;
     }
 
-    /* CDP "other" group: raw same-width VMOV/VABS/VNEG and exact compares. */
+    /* CDP arithmetic and "other" groups. Arithmetic is a deliberately narrow
+     * runtime contract: the generated handler proves the live RunFast mode,
+     * simple operands/results and host exception state before committing. */
     if ((insn & UINT32_C(0x0f000e10)) == UINT32_C(0x0e000a00)) {
         unsigned family = (((insn >> 23) & 1u) << 2) |
                           (((insn >> 21) & 1u) << 1) |
@@ -613,9 +647,50 @@ static bool decode_vfp_transfer(uint32_t insn, uint32_t pc_value,
         bool dbl = (insn & (1u << 8)) != 0u;
         unsigned operation;
         unsigned rd;
+        unsigned rn;
         unsigned rm;
-        if (family != 7u || (insn & (1u << 6)) == 0u)
-            return false;
+        if (family != 7u) {
+            bool alt = (insn & (1u << 6)) != 0u;
+            switch (family) {
+            case 0u:
+                operation = alt ? A64S_VFP_VMLS : A64S_VFP_VMLA;
+                break;
+            case 1u:
+                operation = alt ? A64S_VFP_VNMLA : A64S_VFP_VNMLS;
+                break;
+            case 2u:
+                operation = alt ? A64S_VFP_VNMUL : A64S_VFP_VMUL;
+                break;
+            case 3u:
+                operation = alt ? A64S_VFP_VSUB : A64S_VFP_VADD;
+                break;
+            case 4u:
+                if (alt) return false;
+                operation = A64S_VFP_VDIV;
+                break;
+            default:
+                return false; /* VFPv4 fused operations on a VFPv2 core. */
+            }
+            if (dbl) {
+                if ((insn & ((1u << 22) | (1u << 7) | (1u << 5))) != 0u)
+                    return false;
+                rd = ((insn >> 12) & 15u) * 2u;
+                rn = ((insn >> 16) & 15u) * 2u;
+                rm = (insn & 15u) * 2u;
+                op->handler = A64S_VFP_ARITH64 + operation;
+            } else {
+                rd = ((insn >> 12) & 15u) * 2u +
+                     ((insn >> 22) & 1u);
+                rn = ((insn >> 16) & 15u) * 2u +
+                     ((insn >> 7) & 1u);
+                rm = (insn & 15u) * 2u + ((insn >> 5) & 1u);
+                op->handler = A64S_VFP_ARITH32 + operation;
+            }
+            op->immediate = rd | (rn << 8) | (rm << 16);
+            *written = 1u;
+            return true;
+        }
+        if ((insn & (1u << 6)) == 0u) return false;
         if (opc2 == 4u || opc2 == 5u) {
             bool zero = opc2 == 5u;
             if (zero && ((insn & 15u) != 0u ||
@@ -1346,6 +1421,8 @@ static bool decode_program_at(const void *program, unsigned insns, bool thumb,
                     out->vstm_direct_writes = true;
             }
             if (handler_is_vfp(handler)) out->vfp = true;
+            if (handler_is_vfp_arithmetic(handler))
+                out->vfp_arithmetic = true;
         }
         uop_count += added;
     }
@@ -1652,6 +1729,7 @@ static bool validate_run(const arm_cpu_t *cpu,
     bool saw_direct_write = false;
     bool saw_runtime_guard = false;
     bool saw_vfp = false;
+    bool saw_vfp_arithmetic = false;
     bool saw_vfp_direct_write = false;
     bool saw_stm_direct_write = false;
     bool saw_ldm_direct_read = false;
@@ -1728,6 +1806,12 @@ static bool validate_run(const arm_cpu_t *cpu,
             if (vstm_write) saw_vstm_direct_write = true;
         }
         if (handler_is_vfp(handler)) saw_vfp = true;
+        if (handler_is_vfp_arithmetic(handler)) {
+            if (!vfp_arithmetic_immediate_valid(
+                    handler, block->uops[j].immediate))
+                return false;
+            saw_vfp_arithmetic = true;
+        }
         if (handler_is_terminal_branch(handler)) {
             if (saw_dynamic_exit || j + 1u != end ||
                 !terminal_branch_shape_valid(block, handler,
@@ -1750,6 +1834,7 @@ static bool validate_run(const arm_cpu_t *cpu,
         block->direct_writes != saw_direct_write ||
         block->runtime_guards != saw_runtime_guard ||
         block->vfp != saw_vfp ||
+        block->vfp_arithmetic != saw_vfp_arithmetic ||
         block->vfp_direct_writes != saw_vfp_direct_write ||
         block->stm_direct_writes != saw_stm_direct_write ||
         block->ldm_direct_reads != saw_ldm_direct_read ||

@@ -4,11 +4,11 @@
  * This is deliberately NOT a product-performance claim and not a JIT
  * dispatcher. It translates one small synthetic block once, then compares
  * repeated interpreter execution with both that already-built block and a
- * firmware-independent static-threaded proof. The proof's 26,354 generic
+ * firmware-independent static-threaded proof. The proof's 26,508 generic
  * ISA/register handlers are compiled and signed with the executable; runtime
  * decoding creates data records only. The table includes product-only guarded
- * read/write-cache, exact VFP register/system transfer and terminal A32
- * immediate plus A32/Thumb register-indirect branch/link paths.
+ * read/write-cache, exact VFP register/system transfer, guarded scalar VFPv2
+ * arithmetic and terminal A32 immediate plus A32/Thumb indirect branches.
  *
  * The answer is only a feasibility bound. The native and direct product-entry
  * rows have no device tick, MMIO, interrupt sampling, cache lookup,
@@ -323,6 +323,13 @@ static const uint16_t THUMB_INTEGER_MISC[] = {
            VFP_SB(sm), VFP_SV(sm))
 #define VFP_UN_D(opc2, top, dd, dm)                                        \
     VFP_DP(1, 1, 1, 0, (opc2), (dd), 1, (top), 1, 0, (dm))
+#define VFP_ARITH_S(op, alt, sd, sn, sm)                                   \
+    VFP_DP(((op) >> 2) & 1u, ((op) >> 1) & 1u, (op) & 1u,                 \
+           VFP_SB(sd), VFP_SV(sn), VFP_SV(sd), 0, VFP_SB(sn), (alt),      \
+           VFP_SB(sm), VFP_SV(sm))
+#define VFP_ARITH_D(op, alt, dd, dn, dm)                                   \
+    VFP_DP(((op) >> 2) & 1u, ((op) >> 1) & 1u, (op) & 1u,                 \
+           0, (dn), (dd), 1, 0, (alt), 0, (dm))
 #define VFP_WIDEN(dd, sm)                                                  \
     VFP_DP(1, 1, 1, 0, 7, (dd), 0, 1, 1, VFP_SB(sm), VFP_SV(sm))
 #define VFP_VMRS(rt, crn)                                                  \
@@ -639,6 +646,33 @@ static const uint32_t VFP_WIDEN_OPS[] = {
     VFP_WIDEN(15, 31),                    /* VCVT.F64.F32 d15,s31 */
 };
 
+/* All nine VFPv2 scalar arithmetic operations in both architectural widths.
+ * Register choices cover low/high S words and D-register word aliasing; the
+ * native semantic oracle below owns value and fallback correctness. */
+static const uint32_t VFP_ARITH32_OPS[] = {
+    VFP_ARITH_S(0, 0,  0,  1,  2), /* VMLA  */
+    VFP_ARITH_S(0, 1, 31, 30, 29), /* VMLS  */
+    VFP_ARITH_S(1, 0,  3,  5,  7), /* VNMLS */
+    VFP_ARITH_S(1, 1, 28, 26, 24), /* VNMLA */
+    VFP_ARITH_S(2, 0,  8,  9, 10), /* VMUL  */
+    VFP_ARITH_S(2, 1, 23, 21, 19), /* VNMUL */
+    VFP_ARITH_S(3, 0, 12, 13, 14), /* VADD  */
+    VFP_ARITH_S(3, 1, 18, 17, 16), /* VSUB  */
+    VFP_ARITH_S(4, 0, 22, 20, 15), /* VDIV  */
+};
+
+static const uint32_t VFP_ARITH64_OPS[] = {
+    VFP_ARITH_D(0, 0,  0,  1,  2), /* VMLA  */
+    VFP_ARITH_D(0, 1, 15, 14, 13), /* VMLS  */
+    VFP_ARITH_D(1, 0,  3,  5,  7), /* VNMLS */
+    VFP_ARITH_D(1, 1, 12, 11, 10), /* VNMLA */
+    VFP_ARITH_D(2, 0,  4,  6,  8), /* VMUL  */
+    VFP_ARITH_D(2, 1, 13,  9,  5), /* VNMUL */
+    VFP_ARITH_D(3, 0,  2,  3,  4), /* VADD  */
+    VFP_ARITH_D(3, 1, 10,  8,  6), /* VSUB  */
+    VFP_ARITH_D(4, 0, 11,  7,  1), /* VDIV  */
+};
+
 static const uint32_t VFP_READ_HITS[] = {
     VFP_LDST(14, 1, 1, 0, 0, 1,  0, 0, 0, 0), /* VLDR s0,[r0] */
     VFP_LDST(14, 1, 1, 1, 0, 1,  0,15, 0, 1), /* VLDR s31,[r0,#4] */
@@ -932,7 +966,6 @@ static bool validate_static_shapes(void) {
         0xf000u, /* BL first half */
     };
     static const uint32_t INVALID_PRODUCT_VFP[] = {
-        UINT32_C(0xee300a00), /* VADD.F32: arithmetic is a later tranche */
         VFP_UN_S(1, 1, 0, 1), /* VSQRT.F32 */
         UINT32_C(0xeeb00b00), /* VMOV.F64 immediate: VFPv3 */
         UINT32_C(0xee000a11), /* VMOV core transfer reserved bit */
@@ -949,6 +982,12 @@ static bool validate_static_shapes(void) {
         VFP_DP(1, 1, 1, 1, 4, 0, 1, 0, 1, 0, 0), /* compare d16 */
         VFP_UN_D(7, 1, 0, 1), /* narrowing VCVT still rounds */
         VFP_DP(1, 1, 1, 1, 7, 0, 0, 1, 1, 0, 0), /* widen to d16 */
+        VFP_DP(0, 1, 1, 1, 0, 0, 1, 0, 0, 0, 0), /* arithmetic d16 D */
+        VFP_DP(0, 1, 1, 0, 0, 0, 1, 1, 0, 0, 0), /* arithmetic d16 N */
+        VFP_DP(0, 1, 1, 0, 0, 0, 1, 0, 0, 1, 0), /* arithmetic d16 M */
+        VFP_ARITH_S(4, 1, 0, 1, 2), /* undefined VDIV alternate */
+        VFP_ARITH_S(5, 0, 0, 1, 2), /* VFPv4 fused family */
+        VFP_ARITH_S(6, 0, 0, 1, 2), /* VFPv4 fused family */
     };
     static const uint32_t INVALID_PRODUCT_VFP_STORES[] = {
         VFP_LDST(14, 1, 1, 1, 0, 0, 0, 0, 1, 0), /* d16 absent */
@@ -976,6 +1015,7 @@ static bool validate_static_shapes(void) {
     uint32_t branch_handlers[29];
     uint32_t indirect_handlers[62];
     uint32_t vfp_write_handlers[2] = {0u, 0u};
+    uint32_t vfp_arith_handlers[2][9] = {{0u}};
     uint32_t vstm_write_handlers[3][15] = {{0u}};
     unsigned branch_handler_count = 0u;
     unsigned indirect_handler_count = 0u;
@@ -1787,6 +1827,70 @@ static bool validate_static_shapes(void) {
     }
     printf("STATIC-VFP-WIDEN-SHAPE exact=yes insns=%u uops=%u "
            "handlers=%u\n", block.insn_count, block.uop_count,
+           A64_STATIC_HANDLER_COUNT);
+
+    {
+        static const unsigned S_RD[] = {0u,31u,3u,28u,8u,23u,12u,18u,22u};
+        static const unsigned S_RN[] = {1u,30u,5u,26u,9u,21u,13u,17u,20u};
+        static const unsigned S_RM[] = {2u,29u,7u,24u,10u,19u,14u,16u,15u};
+        static const unsigned D_RD[] = {0u,15u,3u,12u,4u,13u,2u,10u,11u};
+        static const unsigned D_RN[] = {1u,14u,5u,11u,6u,9u,3u,8u,7u};
+        static const unsigned D_RM[] = {2u,13u,7u,10u,8u,5u,4u,6u,1u};
+        const uint32_t *programs[2] = {VFP_ARITH32_OPS, VFP_ARITH64_OPS};
+        const unsigned *rds[2] = {S_RD, D_RD};
+        const unsigned *rns[2] = {S_RN, D_RN};
+        const unsigned *rms[2] = {S_RM, D_RM};
+        for (unsigned width = 0u; width < 2u; width++) {
+            for (unsigned operation = 0u; operation < 9u; operation++) {
+                uint32_t value = programs[width][operation];
+                uint32_t pc = UINT32_C(0xe700) +
+                              (width * 9u + operation) * 4u;
+                unsigned scale = width ? 2u : 1u;
+                uint8_t bytes[4] = {
+                    (uint8_t)value, (uint8_t)(value >> 8),
+                    (uint8_t)(value >> 16), (uint8_t)(value >> 24)
+                };
+                uint32_t immediate = rds[width][operation] * scale |
+                    (rns[width][operation] * scale << 8) |
+                    (rms[width][operation] * scale << 16);
+                if (!a64_static_decode_read_hits_bytes_at(
+                        bytes, 1u, false, pc, &block) ||
+                    block.insn_count != 1u || block.uop_count != 2u ||
+                    block.start_pc != pc || block.exit_pc != pc + 4u ||
+                    block.touches_memory || block.direct_reads ||
+                    !block.runtime_guards || !block.vfp ||
+                    !block.vfp_arithmetic || block.vfp_direct_writes ||
+                    block.uops[0].handler == 0u ||
+                    block.uops[0].immediate != immediate ||
+                    block.uops[0].pc_value != pc ||
+                    block.uops[0].metadata != UINT32_C(0x101)) {
+                    fprintf(stderr,
+                            "jitbench: VFP arithmetic shape failed "
+                            "width=%u operation=%u\n", width, operation);
+                    return false;
+                }
+                for (unsigned old_width = 0u; old_width <= width;
+                     old_width++) {
+                    unsigned limit = old_width == width ? operation : 9u;
+                    for (unsigned old_operation = 0u;
+                         old_operation < limit; old_operation++) {
+                        if (vfp_arith_handlers[old_width][old_operation] ==
+                                block.uops[0].handler) {
+                            fprintf(stderr,
+                                    "jitbench: VFP arithmetic handler alias "
+                                    "width=%u operation=%u\n",
+                                    width, operation);
+                            return false;
+                        }
+                    }
+                }
+                vfp_arith_handlers[width][operation] =
+                    block.uops[0].handler;
+            }
+        }
+    }
+    printf("STATIC-VFP-ARITH-SHAPE exact=yes operations=9 widths=2 "
+           "handlers=18 conditional=yes runtime-guard=yes total=%u\n",
            A64_STATIC_HANDLER_COUNT);
 
     if (!a64_static_decode_read_hits_bytes_at(
@@ -2933,6 +3037,395 @@ static bool static_vfp_states_equal(const arm_cpu_t *a,
            a->dwrite_hits == b->dwrite_hits &&
            a->dwrite_misses == b->dwrite_misses;
 }
+
+#if defined(__aarch64__) && (defined(__GNUC__) || defined(__clang__))
+static uint64_t static_host_fpcr_read(void) {
+    uint64_t value;
+    __asm__ __volatile__("mrs %0, fpcr" : "=r"(value) :: "memory");
+    return value;
+}
+
+static uint64_t static_host_fpsr_read(void) {
+    uint64_t value;
+    __asm__ __volatile__("mrs %0, fpsr" : "=r"(value) :: "memory");
+    return value;
+}
+
+static void static_host_fpcr_write(uint64_t value) {
+    __asm__ __volatile__("msr fpcr, %0" :: "r"(value) : "memory");
+}
+
+static void static_host_fpsr_write(uint64_t value) {
+    __asm__ __volatile__("msr fpsr, %0" :: "r"(value) : "memory");
+}
+#endif
+
+#define VFP_ARITH_CONTROL \
+    (ARM_FPSCR_FZ | ARM_FPSCR_DN | ARM_FPSCR_IXC | \
+     ARM_FPSCR_N | ARM_FPSCR_C)
+
+typedef struct {
+    const char *name;
+    uint32_t insn;
+    uint64_t d;
+    uint64_t n;
+    uint64_t m;
+    uint32_t fpscr;
+    bool access;
+    bool enabled;
+} static_vfp_arith_fallback_t;
+
+static void static_vfp_arith_indices(uint32_t insn, bool *dbl,
+                                     unsigned *rd, unsigned *rn,
+                                     unsigned *rm) {
+    *dbl = (insn & (1u << 8)) != 0u;
+    if (*dbl) {
+        *rd = (insn >> 12) & 15u;
+        *rn = (insn >> 16) & 15u;
+        *rm = insn & 15u;
+    } else {
+        *rd = ((insn >> 12) & 15u) * 2u + ((insn >> 22) & 1u);
+        *rn = ((insn >> 16) & 15u) * 2u + ((insn >> 7) & 1u);
+        *rm = (insn & 15u) * 2u + ((insn >> 5) & 1u);
+    }
+}
+
+static void static_vfp_arith_set_operands(arm_cpu_t *cpu, uint32_t insn,
+                                          uint64_t d, uint64_t n,
+                                          uint64_t m) {
+    bool dbl;
+    unsigned rd, rn, rm;
+    static_vfp_arith_indices(insn, &dbl, &rd, &rn, &rm);
+    if (dbl) {
+        vfp_set_d(cpu, rd, d);
+        vfp_set_d(cpu, rn, n);
+        vfp_set_d(cpu, rm, m);
+    } else {
+        vfp_set_s(cpu, rd, (uint32_t)d);
+        vfp_set_s(cpu, rn, (uint32_t)n);
+        vfp_set_s(cpu, rm, (uint32_t)m);
+    }
+}
+
+static bool static_vfp_arith_decode_one(const uint32_t *insn, uint32_t pc,
+                                        arm_cpu_t *cpu,
+                                        a64_static_block_t *block) {
+    seed_vfp_oracle(cpu, insn, 1u, pc, true);
+    return a64_static_decode_read_hits_bytes_at(
+        &g_ram[pc], 1u, false, pc, block);
+}
+
+static bool validate_static_vfp_arithmetic_oracles(void) {
+    static const static_vfp_arith_fallback_t fallbacks[] = {
+        {"missing-ixc", VFP_ARITH_S(3,0,2,0,1),
+         UINT32_C(0x3f800000), UINT32_C(0x40400000),
+         UINT32_C(0x40a00000), ARM_FPSCR_FZ | ARM_FPSCR_DN, true, true},
+        {"missing-fz", VFP_ARITH_S(3,0,2,0,1),
+         UINT32_C(0x3f800000), UINT32_C(0x40400000),
+         UINT32_C(0x40a00000), ARM_FPSCR_DN | ARM_FPSCR_IXC, true, true},
+        {"missing-dn", VFP_ARITH_S(3,0,2,0,1),
+         UINT32_C(0x3f800000), UINT32_C(0x40400000),
+         UINT32_C(0x40a00000), ARM_FPSCR_FZ | ARM_FPSCR_IXC, true, true},
+        {"directed-rounding", VFP_ARITH_S(3,0,2,0,1),
+         UINT32_C(0x3f800000), UINT32_C(0x40400000),
+         UINT32_C(0x40a00000), VFP_ARITH_CONTROL | (1u << 22), true, true},
+        {"vector-length", VFP_ARITH_S(3,0,2,0,1),
+         UINT32_C(0x3f800000), UINT32_C(0x40400000),
+         UINT32_C(0x40a00000), VFP_ARITH_CONTROL | ARM_FPSCR_LEN, true, true},
+        {"exception-enable", VFP_ARITH_S(3,0,2,0,1),
+         UINT32_C(0x3f800000), UINT32_C(0x40400000),
+         UINT32_C(0x40a00000), VFP_ARITH_CONTROL | ARM_FPSCR_IOE, true, true},
+        {"other-sticky", VFP_ARITH_S(3,0,2,0,1),
+         UINT32_C(0x3f800000), UINT32_C(0x40400000),
+         UINT32_C(0x40a00000), VFP_ARITH_CONTROL | ARM_FPSCR_IOC, true, true},
+        {"cpacr", VFP_ARITH_S(3,0,2,0,1),
+         UINT32_C(0x3f800000), UINT32_C(0x40400000),
+         UINT32_C(0x40a00000), VFP_ARITH_CONTROL, false, true},
+        {"fpexc", VFP_ARITH_S(3,0,2,0,1),
+         UINT32_C(0x3f800000), UINT32_C(0x40400000),
+         UINT32_C(0x40a00000), VFP_ARITH_CONTROL, true, false},
+        {"s-subnormal", VFP_ARITH_S(3,0,2,0,1),
+         UINT32_C(0x3f800000), UINT32_C(0x00000001),
+         UINT32_C(0x3f800000), VFP_ARITH_CONTROL, true, true},
+        {"s-infinity", VFP_ARITH_S(3,0,2,0,1),
+         UINT32_C(0x3f800000), UINT32_C(0x7f800000),
+         UINT32_C(0x3f800000), VFP_ARITH_CONTROL, true, true},
+        {"s-qnan", VFP_ARITH_S(3,0,2,0,1),
+         UINT32_C(0x3f800000), UINT32_C(0x7fc00001),
+         UINT32_C(0x3f800000), VFP_ARITH_CONTROL, true, true},
+        {"s-snan", VFP_ARITH_S(3,0,2,0,1),
+         UINT32_C(0x3f800000), UINT32_C(0x7f800001),
+         UINT32_C(0x3f800000), VFP_ARITH_CONTROL, true, true},
+        {"s-overflow", VFP_ARITH_S(2,0,2,0,1),
+         UINT32_C(0x3f800000), UINT32_C(0x7f7fffff),
+         UINT32_C(0x40000000), VFP_ARITH_CONTROL, true, true},
+        {"s-underflow", VFP_ARITH_S(2,0,2,0,1),
+         UINT32_C(0x3f800000), UINT32_C(0x00800000),
+         UINT32_C(0x3e800000), VFP_ARITH_CONTROL, true, true},
+        {"s-div-zero", VFP_ARITH_S(4,0,2,0,1),
+         UINT32_C(0x3f800000), UINT32_C(0x3f800000),
+         UINT32_C(0x00000000), VFP_ARITH_CONTROL, true, true},
+        {"s-mla-intermediate-underflow", VFP_ARITH_S(0,0,2,0,1),
+         UINT32_C(0x3f800000), UINT32_C(0x00800000),
+         UINT32_C(0x3f000000), VFP_ARITH_CONTROL, true, true},
+        {"d-subnormal", VFP_ARITH_D(3,0,2,0,1),
+         UINT64_C(0x3ff0000000000000), UINT64_C(0x0000000000000001),
+         UINT64_C(0x3ff0000000000000), VFP_ARITH_CONTROL, true, true},
+        {"d-infinity", VFP_ARITH_D(3,0,2,0,1),
+         UINT64_C(0x3ff0000000000000), UINT64_C(0x7ff0000000000000),
+         UINT64_C(0x3ff0000000000000), VFP_ARITH_CONTROL, true, true},
+        {"d-qnan", VFP_ARITH_D(3,0,2,0,1),
+         UINT64_C(0x3ff0000000000000), UINT64_C(0x7ff8000000000001),
+         UINT64_C(0x3ff0000000000000), VFP_ARITH_CONTROL, true, true},
+        {"d-snan", VFP_ARITH_D(3,0,2,0,1),
+         UINT64_C(0x3ff0000000000000), UINT64_C(0x7ff0000000000001),
+         UINT64_C(0x3ff0000000000000), VFP_ARITH_CONTROL, true, true},
+        {"d-overflow", VFP_ARITH_D(2,0,2,0,1),
+         UINT64_C(0x3ff0000000000000), UINT64_C(0x7fefffffffffffff),
+         UINT64_C(0x4000000000000000), VFP_ARITH_CONTROL, true, true},
+        {"d-underflow", VFP_ARITH_D(2,0,2,0,1),
+         UINT64_C(0x3ff0000000000000), UINT64_C(0x0010000000000000),
+         UINT64_C(0x3fd0000000000000), VFP_ARITH_CONTROL, true, true},
+        {"d-div-zero", VFP_ARITH_D(4,0,2,0,1),
+         UINT64_C(0x3ff0000000000000), UINT64_C(0x3ff0000000000000),
+         UINT64_C(0x0000000000000000), VFP_ARITH_CONTROL, true, true},
+        {"d-mla-intermediate-underflow", VFP_ARITH_D(0,0,2,0,1),
+         UINT64_C(0x3ff0000000000000), UINT64_C(0x0010000000000000),
+         UINT64_C(0x3fe0000000000000), VFP_ARITH_CONTROL, true, true},
+    };
+    a64_static_block_t block;
+    arm_cpu_t reference, statik, before;
+    unsigned completed = 0u;
+    unsigned exact_cases = 0u;
+
+    if (!a64_static_host_available()) {
+        printf("STATIC-VFP-ARITH-ORACLE SKIP: no signed AArch64 handlers\n");
+        return true;
+    }
+
+    /* Every operation/width gets its own interpreter equality proof. The
+     * division cases are inexact; IXC is already sticky, exactly as in the
+     * measured firmware window, so that new host flag is unobservable. */
+    for (unsigned width = 0u; width < 2u; width++) {
+        const uint32_t *program = width ? VFP_ARITH64_OPS : VFP_ARITH32_OPS;
+        for (unsigned operation = 0u; operation < 9u; operation++) {
+            uint32_t pc = UINT32_C(0x14000) +
+                          (width * 9u + operation) * 4u;
+            uint64_t d = width ? UINT64_C(0x4059000000000000)
+                               : UINT32_C(0x42c80000); /* 100 */
+            uint64_t n = width ? UINT64_C(0x4008000000000000)
+                               : UINT32_C(0x40400000); /* 3 */
+            uint64_t m = width ? UINT64_C(0x4014000000000000)
+                               : UINT32_C(0x40a00000); /* 5 */
+            if (!static_vfp_arith_decode_one(
+                    &program[operation], pc, &reference, &block))
+                return false;
+            reference.vfp_fpscr = VFP_ARITH_CONTROL;
+            static_vfp_arith_set_operands(
+                &reference, program[operation], d, n, m);
+            statik = reference;
+            if (arm_step(&reference) != ARM_OK ||
+                !a64_static_run_read_hits(
+                    &statik, &block, g_ram, sizeof g_ram, &completed) ||
+                completed != 1u ||
+                !static_vfp_states_equal(&reference, &statik)) {
+                fprintf(stderr,
+                        "jitbench: VFP arithmetic oracle mismatch "
+                        "width=%u operation=%u\n", width, operation);
+                return false;
+            }
+            exact_cases++;
+        }
+    }
+
+    /* Signed zero is inside the admitted class and must retain its sign. */
+    for (unsigned width = 0u; width < 2u; width++) {
+        uint32_t insn = width ? VFP_ARITH_D(2,0,2,0,1)
+                              : VFP_ARITH_S(2,0,2,0,1);
+        uint32_t pc = UINT32_C(0x14100) + width * 4u;
+        uint64_t negative_zero = width ? UINT64_C(0x8000000000000000)
+                                       : UINT32_C(0x80000000);
+        uint64_t two = width ? UINT64_C(0x4000000000000000)
+                             : UINT32_C(0x40000000);
+        if (!static_vfp_arith_decode_one(&insn, pc, &reference, &block))
+            return false;
+        reference.vfp_fpscr = VFP_ARITH_CONTROL;
+        static_vfp_arith_set_operands(
+            &reference, insn, two, negative_zero, two);
+        statik = reference;
+        if (arm_step(&reference) != ARM_OK ||
+            !a64_static_run_read_hits(
+                &statik, &block, g_ram, sizeof g_ram, &completed) ||
+            completed != 1u ||
+            !static_vfp_states_equal(&reference, &statik)) {
+            fprintf(stderr,
+                    "jitbench: VFP signed-zero arithmetic mismatch width=%u\n",
+                    width);
+            return false;
+        }
+        exact_cases++;
+    }
+
+    for (unsigned i = 0u; i < sizeof fallbacks / sizeof fallbacks[0]; i++) {
+        const static_vfp_arith_fallback_t *test = &fallbacks[i];
+        uint32_t pc = UINT32_C(0x14200) + i * 4u;
+        if (!static_vfp_arith_decode_one(
+                &test->insn, pc, &statik, &block))
+            return false;
+        statik.vfp_fpscr = test->fpscr;
+        statik.vfp_fpexc = test->enabled ? ARM_FPEXC_EN : 0u;
+        if (!test->access)
+            statik.cp15.cpacr &= ~(UINT32_C(0xf) <<
+                                   ARM_CPACR_CP10_SHIFT);
+        static_vfp_arith_set_operands(
+            &statik, test->insn, test->d, test->n, test->m);
+        before = statik;
+        completed = UINT_MAX;
+        if (!a64_static_run_read_hits(
+                &statik, &block, g_ram, sizeof g_ram, &completed) ||
+            completed != 0u || !static_vfp_states_equal(&before, &statik)) {
+            fprintf(stderr,
+                    "jitbench: VFP arithmetic fallback changed state for %s\n",
+                    test->name);
+            return false;
+        }
+    }
+
+    /* The ARM condition guard owns the skip before every VFP live-state gate. */
+    {
+        uint32_t insn = VFP_ARITH_S(3,0,2,0,1) & UINT32_C(0x0fffffff);
+        if (!static_vfp_arith_decode_one(
+                &insn, UINT32_C(0x14300), &reference, &block))
+            return false;
+        reference.cp15.cpacr = 0u;
+        reference.vfp_fpexc = 0u;
+        reference.vfp_fpscr = 0u;
+        statik = reference;
+        if (arm_step(&reference) != ARM_OK ||
+            !a64_static_run_read_hits(
+                &statik, &block, g_ram, sizeof g_ram, &completed) ||
+            completed != 1u ||
+            !static_vfp_states_equal(&reference, &statik)) {
+            fprintf(stderr, "jitbench: conditional VFP arithmetic skip mismatch\n");
+            return false;
+        }
+    }
+
+    /* One arithmetic result and one VMSR retire; the following arithmetic
+     * sees the newly-invalid live FPSCR and returns the exact two-insn prefix. */
+    {
+        static const uint32_t partial[] = {
+            VFP_ARITH_S(3,0,2,0,1), VFP_VMSR(1, 0),
+            VFP_ARITH_S(2,0,3,1,2),
+        };
+        seed_vfp_oracle(&reference, partial, 3u, UINT32_C(0x14400), true);
+        reference.vfp_fpscr = VFP_ARITH_CONTROL;
+        reference.r[0] = ARM_FPSCR_FZ | ARM_FPSCR_DN;
+        reference.vfp_s[0] = UINT32_C(0x3f800000);
+        reference.vfp_s[1] = UINT32_C(0x40000000);
+        statik = reference;
+        if (!a64_static_decode_read_hits_bytes_at(
+                &g_ram[0x14400], 3u, false, UINT32_C(0x14400), &block) ||
+            arm_step(&reference) != ARM_OK || arm_step(&reference) != ARM_OK ||
+            !a64_static_run_read_hits(
+                &statik, &block, g_ram, sizeof g_ram, &completed) ||
+            completed != 2u ||
+            !static_vfp_states_equal(&reference, &statik)) {
+            fprintf(stderr, "jitbench: VFP arithmetic partial-prefix mismatch\n");
+            return false;
+        }
+    }
+
+    /* The feature flag is part of the validated data contract. */
+    {
+        uint32_t insn = VFP_ARITH_S(3,0,2,0,1);
+        if (!static_vfp_arith_decode_one(
+                &insn, UINT32_C(0x14500), &statik, &block))
+            return false;
+        statik.vfp_fpscr = VFP_ARITH_CONTROL;
+        static_vfp_arith_set_operands(
+            &statik, insn, UINT32_C(0x3f800000),
+            UINT32_C(0x40400000), UINT32_C(0x40a00000));
+        before = statik;
+        block.vfp_arithmetic = false;
+        completed = UINT_MAX;
+        if (a64_static_run_read_hits(
+                &statik, &block, g_ram, sizeof g_ram, &completed) ||
+            completed != UINT_MAX ||
+            !static_vfp_states_equal(&before, &statik)) {
+            fprintf(stderr,
+                    "jitbench: mutated VFP arithmetic contract ran\n");
+            return false;
+        }
+    }
+
+#if defined(__aarch64__) && (defined(__GNUC__) || defined(__clang__))
+    /* Force a non-RN caller mode plus pre-existing FPSR flags. Success must
+     * still equal the RN interpreter, and both success and a post-FMUL
+     * overflow rejection must restore every caller-visible host bit. */
+    for (unsigned rejection = 0u; rejection < 2u; rejection++) {
+        uint32_t insn = rejection ? VFP_ARITH_S(2,0,2,0,1)
+                                  : VFP_ARITH_S(4,0,2,0,1);
+        uint32_t pc = UINT32_C(0x14600) + rejection * 4u;
+        uint64_t original_fpcr = static_host_fpcr_read();
+        uint64_t original_fpsr = static_host_fpsr_read();
+        uint64_t installed_fpcr;
+        uint64_t installed_fpsr;
+        uint64_t after_fpcr;
+        uint64_t after_fpsr;
+        bool run_ok;
+
+        if (!static_vfp_arith_decode_one(&insn, pc, &statik, &block))
+            return false;
+        statik.vfp_fpscr = VFP_ARITH_CONTROL;
+        static_vfp_arith_set_operands(
+            &statik, insn, UINT32_C(0x3f800000),
+            rejection ? UINT32_C(0x7f7fffff) : UINT32_C(0x3f800000),
+            rejection ? UINT32_C(0x40000000) : UINT32_C(0x40400000));
+        if (!rejection) {
+            reference = statik;
+            if (arm_step(&reference) != ARM_OK) return false;
+        } else {
+            before = statik;
+        }
+
+        static_host_fpcr_write(
+            (original_fpcr & ~(UINT64_C(3) << 22)) |
+            (UINT64_C(1) << 22));
+        static_host_fpsr_write(UINT64_C(0x08000015));
+        installed_fpcr = static_host_fpcr_read();
+        installed_fpsr = static_host_fpsr_read();
+        completed = UINT_MAX;
+        run_ok = a64_static_run_read_hits(
+            &statik, &block, g_ram, sizeof g_ram, &completed);
+        after_fpcr = static_host_fpcr_read();
+        after_fpsr = static_host_fpsr_read();
+        static_host_fpsr_write(original_fpsr);
+        static_host_fpcr_write(original_fpcr);
+
+        if (!run_ok || after_fpcr != installed_fpcr ||
+            after_fpsr != installed_fpsr ||
+            (rejection
+                 ? completed != 0u ||
+                       !static_vfp_states_equal(&before, &statik)
+                 : completed != 1u ||
+                       !static_vfp_states_equal(&reference, &statik))) {
+            fprintf(stderr,
+                    "jitbench: VFP arithmetic host-state %s mismatch\n",
+                    rejection ? "rejection" : "success");
+            return false;
+        }
+    }
+#endif
+
+    printf("STATIC-VFP-ARITH-ORACLE exact=yes operations=9 widths=2 "
+           "accepted=%u signed-zero=yes inexact=yes fallbacks=%zu "
+           "conditions=yes partial-prefix=yes host-fp-state=yes\n",
+           exact_cases, sizeof fallbacks / sizeof fallbacks[0]);
+    return true;
+}
+
+#undef VFP_ARITH_CONTROL
 
 static bool validate_static_vfp_register_oracles(void) {
     static const uint32_t LAZY_ENABLE[] = {
@@ -6528,6 +7021,7 @@ int main(int argc, char **argv) {
     if (!validate_static_stm_oracles()) return 1;
     if (!validate_static_ldm_oracles()) return 1;
     if (!validate_static_vfp_register_oracles()) return 1;
+    if (!validate_static_vfp_arithmetic_oracles()) return 1;
     if (!validate_static_vfp_compare_oracles()) return 1;
     if (!validate_static_vfp_widen_oracles()) return 1;
     if (!validate_static_vfp_read_oracles()) return 1;

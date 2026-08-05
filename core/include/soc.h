@@ -3939,6 +3939,10 @@ bool s5l8900_static_a64_set_ldm(s5l8900_t *m, bool enabled);
 /* Same-binary rollout/benchmark control for transactional one-block A32 VSTM
  * records. Deprecated FSTMX and cross-block transfers stay literal. */
 bool s5l8900_static_a64_set_vstm(s5l8900_t *m, bool enabled);
+/* Same-binary rollout/benchmark control for guarded VFPv2 scalar arithmetic.
+ * The signed handlers commit only the exact RunFast/simple-value contract and
+ * return every other case to arm_step(). */
+bool s5l8900_static_a64_set_vfp_arithmetic(s5l8900_t *m, bool enabled);
 /* Same-binary benchmark control for the total signed invocation bound. A
  * decoded head remains at most sixteen instructions and the machine still
  * clamps every invocation to the first exact timebase edge. The generic engine

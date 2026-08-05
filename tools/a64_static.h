@@ -33,7 +33,7 @@
  * four-record instructions that remains below this ceiling; the final slot is
  * the fixed block exit. */
 #define A64_STATIC_MAX_UOPS (A64_STATIC_MAX_INSNS * 4u + 16u)
-#define A64_STATIC_HANDLER_COUNT 26490u
+#define A64_STATIC_HANDLER_COUNT 26508u
 #define A64_STATIC_GRAPH_SLOTS 512u
 
 typedef struct {
@@ -58,6 +58,7 @@ typedef struct {
     bool direct_writes;
     bool runtime_guards;
     bool vfp;
+    bool vfp_arithmetic;
     bool vfp_direct_writes;
     bool stm_direct_writes;
     bool ldm_direct_reads;
@@ -124,7 +125,10 @@ bool a64_static_decode_bytes_at(const uint8_t *program, unsigned insns,
  * byte, halfword, signed-byte and signed-halfword results are covered; dynamic
  * alignment cases refuse at runtime before touching guest state. Exact VFPv2
  * core/register transfers, VMRS/VMSR, raw VMOV/VABS/VNEG and VCMP/VCMPE are
- * also admitted behind live CPACR/FPEXC/FPSCR guards. Compare and exact
+ * also admitted behind live CPACR/FPEXC/FPSCR guards. Guarded scalar VFPv2
+ * arithmetic commits only the traced RN/FZ/DN, sticky-IXC, signed-zero/normal
+ * finite contract; every special value or newly visible exception falls back
+ * before guest mutation. Compare and exact
  * single-to-double VCVT widening handle NaNs, signed zero, FZ and cumulative
  * IOC/IDC with integer bit logic. Single-register VLDR uses the same
  * already-proved plain-RAM read cache, including exact one- and two-word hit

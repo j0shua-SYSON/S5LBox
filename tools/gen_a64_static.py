@@ -19,7 +19,7 @@ CONDITIONS = (
     "eq", "ne", "cs", "cc", "mi", "pl", "vs", "vc",
     "hi", "ls", "ge", "lt", "gt", "le",
 )
-EXPECTED_HANDLERS = 26490
+EXPECTED_HANDLERS = 26508
 
 READ_KINDS = (
     ("word", "ldr", 4),
@@ -921,6 +921,30 @@ def vfp_gate(kind: str) -> list[str]:
                 "    b .La64s_direct_miss",
                 "1:",
             ])
+        elif kind == "live_arith":
+            body.extend([
+                "    ldr x4, [x3, #40]",
+                "    ldr w4, [x4]",
+                # Accept exactly the live RunFast control mode: RN, FZ, DN,
+                # scalar Len and all exception enables clear.
+                "    mov w5, #0x9f00",
+                "    movk w5, #0x3c7, lsl #16",
+                "    and w6, w4, w5",
+                "    mov w5, #3",
+                "    lsl w5, w5, #24",
+                "    cmp w6, w5",
+                "    b.eq 1f",
+                "    b .La64s_direct_miss",
+                "1:",
+                # Host IXC can be ignored only because it is already sticky in
+                # the guest. Refuse every other pre-existing cumulative flag.
+                "    mov w5, #0x9f",
+                "    and w4, w4, w5",
+                "    cmp w4, #0x10",
+                "    b.eq 1f",
+                "    b .La64s_direct_miss",
+                "1:",
+            ])
     return body
 
 
@@ -1230,6 +1254,182 @@ def vfp_widen_body() -> list[str]:
         "    str w4, [x17]",
         *vfp_finish(),
     ]
+
+
+def vfp_simple_classify(width: int, value: str, scratch: str,
+                        prefix: str, failure: str) -> list[str]:
+    """Accept only a signed zero or a finite normal IEEE encoding."""
+    exp_lsb = 23 if width == 4 else 52
+    exp_bits = 8 if width == 4 else 11
+    exp_all = "#0xff" if width == 4 else "#0x7ff"
+    return [
+        f"    ubfx {scratch}, {value}, #{exp_lsb}, #{exp_bits}",
+        f"    cbz {scratch}, {prefix}_zero",
+        f"    cmp {scratch}, {exp_all}",
+        f"    b.ne {prefix}_ok",
+        f"    b {failure}",
+        f"{prefix}_zero:",
+        f"    lsl {scratch}, {value}, #1",
+        f"    cbz {scratch}, {prefix}_ok",
+        f"    b {failure}",
+        f"{prefix}_ok:",
+    ]
+
+
+def vfp_arithmetic_flags(width: int, value: str, prefix: str,
+                         failure: str) -> list[str]:
+    """Reject exceptions the sticky-IXC contract cannot make invisible."""
+    body = [
+        "    mrs x17, fpsr",
+        "    mov w9, #0x9f",
+        "    and w9, w17, w9",
+        "    cmp w9, #0x10",
+        f"    b.eq {prefix}_flags_ok",
+        f"    cbz w9, {prefix}_flags_ok",
+        f"    b {failure}",
+        f"{prefix}_flags_ok:",
+    ]
+    if width == 4:
+        body.extend([
+            f"    and w17, {value}, #0x7fffffff",
+            "    mov w10, #0x800000",
+        ])
+    else:
+        body.extend([
+            f"    and x17, {value}, #0x7fffffffffffffff",
+            "    mov x10, #1",
+            "    lsl x10, x10, #52",
+        ])
+    body.extend([
+        f"    cmp {'w17' if width == 4 else 'x17'}, "
+        f"{'w10' if width == 4 else 'x10'}",
+        f"    b.ne {prefix}_boundary_ok",
+        f"    tbz w9, #4, {prefix}_boundary_ok",
+        # In guest FZ mode an inexact value rounded to the smallest normal is
+        # the interpreter's explicit pre-rounding-boundary ambiguity.
+        f"    b {failure}",
+        f"{prefix}_boundary_ok:",
+    ])
+    return body
+
+
+def vfp_arithmetic_body(operation: str, width: int) -> list[str]:
+    """Execute the traced scalar VFPv2 arithmetic contract exactly.
+
+    VMLA is deliberately two host instructions. Its rounded product is
+    classified and its flags are sampled before a separately-rounded add, so
+    neither AArch64 FMA contraction nor cumulative FPSR state can hide the
+    guest's FZ boundary refusal.
+    """
+    if operation not in (
+        "vmla", "vmls", "vnmls", "vnmla", "vmul", "vnmul",
+        "vadd", "vsub", "vdiv",
+    ) or width not in (4, 8):
+        raise ValueError("invalid VFP arithmetic handler shape")
+
+    bits = width * 8
+    ireg = "w16" if width == 4 else "x16"
+    iscratch = "w17" if width == 4 else "x17"
+    fp = "s" if width == 4 else "d"
+    p = f".La64s_vfp_{operation}_{bits}"
+    pre_failure = ".La64s_direct_miss"
+    state_failure = f"{p}_state_fail"
+    mla = operation in ("vmla", "vmls", "vnmls", "vnmla")
+
+    body = [
+        *vfp_gate("live_arith"),
+        "    ldur w9, [x13, #-12]",
+        "    and w12, w9, #0xff",
+        "    ubfx w10, w9, #8, #8",
+        "    ubfx w9, w9, #16, #8",
+        "    ldr x6, [x3, #24]",
+    ]
+
+    def load_operand(index: str, fp_reg: int, name: str) -> list[str]:
+        if width == 4:
+            result = [f"    ldr {ireg}, [x6, {index}, uxtw #2]"]
+        else:
+            result = [
+                f"    add x16, x6, {index}, uxtw #2",
+                "    ldr x16, [x16]",
+            ]
+        result.append(f"    fmov {fp}{fp_reg}, {ireg}")
+        result.extend(vfp_simple_classify(
+            width, ireg, iscratch, f"{p}_{name}", pre_failure
+        ))
+        return result
+
+    body.extend(load_operand("w10", 1, "n"))
+    body.extend(load_operand("w9", 2, "m"))
+    if mla:
+        body.extend(load_operand("w12", 0, "d"))
+
+    body.extend([
+        "    mrs x4, fpcr",
+        "    mrs x5, fpsr",
+        f"    cbz x4, {p}_fpcr_ready",
+        "    msr fpcr, xzr",
+        f"{p}_fpcr_ready:",
+        "    msr fpsr, xzr",
+    ])
+
+    if mla:
+        body.append(f"    fmul {fp}3, {fp}1, {fp}2")
+        body.append(f"    fmov {ireg}, {fp}3")
+        body.extend(vfp_simple_classify(
+            width, ireg, iscratch, f"{p}_product", state_failure
+        ))
+        body.extend(vfp_arithmetic_flags(
+            width, ireg, f"{p}_product", state_failure
+        ))
+        body.append("    msr fpsr, xzr")
+        if operation in ("vmls", "vnmla"):
+            body.append(f"    fneg {fp}3, {fp}3")
+        if operation in ("vnmla", "vnmls"):
+            body.append(f"    fneg {fp}0, {fp}0")
+        body.append(f"    fadd {fp}0, {fp}0, {fp}3")
+    elif operation in ("vmul", "vnmul"):
+        body.append(f"    fmul {fp}0, {fp}1, {fp}2")
+        if operation == "vnmul":
+            body.append(f"    fneg {fp}0, {fp}0")
+    elif operation == "vadd":
+        body.append(f"    fadd {fp}0, {fp}1, {fp}2")
+    elif operation == "vsub":
+        body.append(f"    fsub {fp}0, {fp}1, {fp}2")
+    else:
+        body.append(f"    fdiv {fp}0, {fp}1, {fp}2")
+
+    body.extend([
+        f"    fmov {ireg}, {fp}0",
+        *vfp_simple_classify(
+            width, ireg, iscratch, f"{p}_result", state_failure
+        ),
+        *vfp_arithmetic_flags(
+            width, ireg, f"{p}_result", state_failure
+        ),
+        # Restore every host-visible control/status bit before guest commit.
+        "    msr fpsr, x5",
+        f"    cbz x4, {p}_state_restored",
+        "    msr fpcr, x4",
+        f"{p}_state_restored:",
+    ])
+    if width == 4:
+        body.append("    str w16, [x6, w12, uxtw #2]")
+    else:
+        body.extend([
+            "    add x6, x6, w12, uxtw #2",
+            "    str x16, [x6]",
+        ])
+    body.extend([
+        *vfp_finish(),
+        f"{state_failure}:",
+        "    msr fpsr, x5",
+        f"    cbz x4, {p}_failure_restored",
+        "    msr fpcr, x4",
+        f"{p}_failure_restored:",
+        "    b .La64s_direct_miss",
+    ])
+    return body
 
 
 def vfp_direct_read_body(width: int) -> list[str]:
@@ -1862,6 +2062,18 @@ def build_handlers() -> list[tuple[str, list[str]]]:
     handlers.append((".La64s_vfp_compare_32", vfp_compare_body(4)))
     handlers.append((".La64s_vfp_compare_64", vfp_compare_body(8)))
     handlers.append((".La64s_vfp_widen_32", vfp_widen_body()))
+    for operation in (
+        "vmla", "vmls", "vnmls", "vnmla", "vmul", "vnmul",
+        "vadd", "vsub", "vdiv",
+    ):
+        handlers.append((f".La64s_vfp_{operation}_32",
+                         vfp_arithmetic_body(operation, 4)))
+    for operation in (
+        "vmla", "vmls", "vnmls", "vnmla", "vmul", "vnmul",
+        "vadd", "vsub", "vdiv",
+    ):
+        handlers.append((f".La64s_vfp_{operation}_64",
+                         vfp_arithmetic_body(operation, 8)))
     handlers.append((".La64s_vfp_direct_read_32",
                      vfp_direct_read_body(4)))
     handlers.append((".La64s_vfp_direct_read_64",
