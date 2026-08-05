@@ -24873,15 +24873,17 @@ typedef enum {
 typedef struct {
     sequence_signed_extended_t extended;
     /* Exact store subset implemented by the signed engine: A32/Thumb
-     * single-register stores plus single-register VSTR S/D. Keep it beside
-     * the broader architecture ceiling so one replay cannot confuse potential
+     * single-register stores, single-register VSTR S/D and ordinary A32 STM
+     * when its entire live transfer fits one DWRITE block. Keep it beside the
+     * broader architecture ceiling so one replay cannot confuse potential
      * coverage with shipped coverage. Both models consume the same literal-
      * store DWRITE history. */
     sequence_signed_extended_t implemented;
-    /* Current product (including its implemented single stores, VSTR S/D and
-     * whatever the exact read-only decoder already admits) plus exactly one
-     * remaining store family. These side-by-side models rank continuity before
-     * native code is added; `extended` remains the all-family ceiling. */
+    /* Current product (including its implemented single stores, VSTR S/D,
+     * one-block ordinary STM and whatever the exact read-only decoder already
+     * admits) plus exactly one remaining store family. These side-by-side
+     * models rank continuity before native code is added; `extended` remains
+     * the all-family ceiling. */
     sequence_signed_extended_t family_frontier[SEQUENCE_STORE_FAMILY_COUNT];
     sequence_signed_extended_t
         vfp_frontier[SEQUENCE_VFP_STORE_FRONTIER_COUNT];
@@ -24898,6 +24900,13 @@ typedef struct {
     uint64_t arm_block_span_outcomes[3u][SEQUENCE_STORE_OUTCOME_COUNT];
     uint64_t arm_block_frontier_outcomes[
         SEQUENCE_ARM_BLOCK_FRONTIER_COUNT][SEQUENCE_STORE_OUTCOME_COUNT];
+    /* The shipped STM contract and the exact dynamic cases left outside it.
+     * A two-block transfer is recorded in `remaining` with the broad outcome
+     * after the shipped preflight has been modeled as a state-guard refusal. */
+    uint64_t arm_block_stm_outcomes[SEQUENCE_STORE_OUTCOME_COUNT];
+    uint64_t arm_block_remaining_outcomes[SEQUENCE_STORE_OUTCOME_COUNT];
+    uint64_t arm_block_remaining_ordinary_outcomes[
+        SEQUENCE_STORE_OUTCOME_COUNT];
     uint64_t candidates;
     uint64_t decoder_supported;
     uint64_t retirement_eligible;
@@ -25841,7 +25850,8 @@ static sequence_store_outcome_t sequence_store_arm_block(
     }
     if (mode_out) *mode_out = (pre ? 2u : 0u) | (up ? 1u : 0u);
     if (words_out) *words_out = 0u;
-    if (!cpu || !blocks || (insn & (1u << 20)) != 0u || !list ||
+    if (!cpu || !blocks || (insn >> 28) == 15u ||
+        (insn & (1u << 20)) != 0u || !list ||
         rn == 15u || (user_bank && writeback) || !kind_out || !mode_out ||
         !words_out)
         return SEQUENCE_STORE_INVALID;
@@ -25873,6 +25883,19 @@ static sequence_store_outcome_t sequence_store_arm_block(
         (cpu->cpsr & ARM_CPSR_MODE_MASK) != ARM_MODE_USR;
     return sequence_store_add_words(blocks, address, words)
         ? SEQUENCE_STORE_DWRITE_HIT : SEQUENCE_STORE_INVALID;
+}
+
+/* Static half of the exact product contract. Runtime condition, alignment,
+ * one-block and DWRITE witnesses are classified separately below. */
+static bool sequence_store_arm_block_stm_shape(uint32_t insn) {
+    bool user_bank = (insn & (1u << 22)) != 0u;
+    bool writeback = (insn & (1u << 21)) != 0u;
+    unsigned rn = (insn >> 16) & 15u;
+    uint32_t list = insn & UINT32_C(0xffff);
+
+    return (insn >> 28) < 15u &&
+           (insn & (1u << 20)) == 0u && !user_bank && rn < 15u && list &&
+           (!writeback || (list & (1u << rn)) == 0u);
 }
 
 static sequence_store_outcome_t sequence_store_arm_vfp(
@@ -26066,7 +26089,8 @@ static bool sequence_store_classify(
         sequence_vfp_store_kind_t *vfp_kind_out,
         sequence_arm_block_kind_t *arm_block_kind_out,
         unsigned *arm_block_mode_out, unsigned *arm_block_words_out,
-        unsigned *arm_block_span_out) {
+        unsigned *arm_block_span_out,
+        bool *arm_block_stm_shape_out) {
     sequence_store_blocks_t blocks = { 0 };
     sequence_store_family_t family = SEQUENCE_STORE_ARM_SINGLE;
     sequence_store_outcome_t outcome = SEQUENCE_STORE_INVALID;
@@ -26075,6 +26099,7 @@ static bool sequence_store_classify(
         SEQUENCE_ARM_BLOCK_KIND_COUNT;
     unsigned arm_block_mode = 4u;
     unsigned arm_block_words = 17u;
+    bool arm_block_stm_shape = false;
     bool candidate = false;
 
     if (family_out) *family_out = SEQUENCE_STORE_FAMILY_COUNT;
@@ -26084,6 +26109,7 @@ static bool sequence_store_classify(
     if (arm_block_mode_out) *arm_block_mode_out = 4u;
     if (arm_block_words_out) *arm_block_words_out = 17u;
     if (arm_block_span_out) *arm_block_span_out = 0u;
+    if (arm_block_stm_shape_out) *arm_block_stm_shape_out = false;
 
     if (thumb) {
         candidate = sequence_store_thumb_candidate(
@@ -26097,6 +26123,7 @@ static bool sequence_store_classify(
                (raw & (1u << 20)) == 0u) {
         family = SEQUENCE_STORE_ARM_BLOCK;
         candidate = true;
+        arm_block_stm_shape = sequence_store_arm_block_stm_shape(raw);
         outcome = sequence_store_arm_block(
             cpu, raw, &blocks, &arm_block_kind, &arm_block_mode,
             &arm_block_words);
@@ -26114,6 +26141,8 @@ static bool sequence_store_classify(
     if (arm_block_mode_out) *arm_block_mode_out = arm_block_mode;
     if (arm_block_words_out) *arm_block_words_out = arm_block_words;
     if (arm_block_span_out) *arm_block_span_out = blocks.count;
+    if (arm_block_stm_shape_out)
+        *arm_block_stm_shape_out = arm_block_stm_shape;
 
     if (outcome == SEQUENCE_STORE_DWRITE_HIT && blocks.count)
         outcome = sequence_store_probe_blocks(
@@ -26152,6 +26181,24 @@ static bool sequence_store_classify(
         if (arm_block_kind == SEQUENCE_ARM_BLOCK_USER_BANK)
             profile->signed_store.arm_block_frontier_outcomes[
                 SEQUENCE_ARM_BLOCK_FRONTIER_USER_BANK][outcome]++;
+
+        sequence_store_outcome_t stm_outcome = outcome;
+        if (arm_block_stm_shape && blocks.count > 1u &&
+            outcome != SEQUENCE_STORE_INVALID &&
+            outcome != SEQUENCE_STORE_CONDITION_SKIP)
+            stm_outcome = SEQUENCE_STORE_STATE_GUARD;
+        if (arm_block_stm_shape)
+            profile->signed_store.arm_block_stm_outcomes[stm_outcome]++;
+
+        /* Count only cases whose broad-family result is not already the exact
+         * shipped STM result. This makes remaining-family continuity additive
+         * instead of counting the one-block baseline twice. */
+        if (!arm_block_stm_shape || stm_outcome != outcome) {
+            profile->signed_store.arm_block_remaining_outcomes[outcome]++;
+            if (arm_block_kind < SEQUENCE_ARM_BLOCK_USER_BANK)
+                profile->signed_store
+                    .arm_block_remaining_ordinary_outcomes[outcome]++;
+        }
     }
     if (outcome != SEQUENCE_STORE_INVALID)
         profile->signed_store.decoder_supported++;
@@ -26954,11 +27001,12 @@ static bool sequence_signed_observe(sequence_profile_t *profile,
         unsigned arm_block_mode = 4u;
         unsigned arm_block_words = 17u;
         unsigned arm_block_span = 0u;
+        bool arm_block_stm_shape = false;
         bool store_eligible = sequence_store_classify(
             profile, &mach->cpu, pc, raw, thumb, instruction_class,
             &store_classification, &store_family, &vfp_store_kind,
             &arm_block_kind, &arm_block_mode, &arm_block_words,
-            &arm_block_span);
+            &arm_block_span, &arm_block_stm_shape);
         sequence_signed_store_observe(
             profile, mach, pc, thumb, physical_sequential,
             &store_classification, &profile->signed_store.extended);
@@ -26966,9 +27014,15 @@ static bool sequence_signed_observe(sequence_profile_t *profile,
             store_family == SEQUENCE_STORE_ARM_VFP &&
             (vfp_store_kind == SEQUENCE_VFP_STORE_VSTR_S ||
              vfp_store_kind == SEQUENCE_VFP_STORE_VSTR_D);
+        bool shipped_stm = store_eligible &&
+            store_family == SEQUENCE_STORE_ARM_BLOCK &&
+            arm_block_stm_shape &&
+            (store_classification.outcome == SEQUENCE_SIGNED_READ_SKIPPED ||
+             arm_block_span == 1u);
         if (store_eligible &&
             (store_family == SEQUENCE_STORE_ARM_SINGLE ||
-             store_family == SEQUENCE_STORE_THUMB_SINGLE || shipped_vstr))
+             store_family == SEQUENCE_STORE_THUMB_SINGLE || shipped_vstr ||
+             shipped_stm))
             implemented_classification = store_classification;
         sequence_signed_store_observe(
             profile, mach, pc, thumb, physical_sequential,
@@ -27014,10 +27068,7 @@ static bool sequence_signed_observe(sequence_profile_t *profile,
             bool selected = false;
             if (frontier ==
                     SEQUENCE_ARM_BLOCK_FRONTIER_ORDINARY_ONE_BLOCK) {
-                selected = ordinary &&
-                    (store_classification.outcome ==
-                         SEQUENCE_SIGNED_READ_SKIPPED ||
-                     arm_block_span == 1u);
+                selected = shipped_stm;
             } else if (frontier ==
                        SEQUENCE_ARM_BLOCK_FRONTIER_ORDINARY_ALL) {
                 selected = ordinary;
@@ -27163,6 +27214,11 @@ static void sequence_profile_break(sequence_profile_t *profile) {
          frontier < SEQUENCE_VFP_STORE_FRONTIER_COUNT; frontier++)
         sequence_signed_store_model_close(
             &profile->signed_store.vfp_frontier[frontier],
+            SEQUENCE_SIGNED_STOP_OBSERVER);
+    for (unsigned frontier = 0u;
+         frontier < SEQUENCE_ARM_BLOCK_FRONTIER_COUNT; frontier++)
+        sequence_signed_store_model_close(
+            &profile->signed_store.arm_block_frontier[frontier],
             SEQUENCE_SIGNED_STOP_OBSERVER);
     sequence_signed_store_model_close(
         &profile->signed_indirect.implemented_plus_indirect,
@@ -28272,7 +28328,7 @@ static void sequence_profile_report_store_model(
     };
     static const char *const ARM_BLOCK_FRONTIERS[
             SEQUENCE_ARM_BLOCK_FRONTIER_COUNT] = {
-        "ordinary 1blk", "ordinary all", "user bank"
+        "STM 1blk shipped", "ordinary all", "user bank"
     };
     const sequence_signed_store_t *store = &profile->signed_store;
     const sequence_signed_extended_t *current = &profile->signed_extended;
@@ -28323,6 +28379,15 @@ static void sequence_profile_report_store_model(
     for (unsigned kind = SEQUENCE_VFP_STORE_VSTR_S;
          kind <= SEQUENCE_VFP_STORE_VSTR_D; kind++) {
         const uint64_t *row = store->vfp_kind_outcomes[kind];
+        for (unsigned outcome = 0u;
+             outcome < SEQUENCE_STORE_OUTCOME_COUNT; outcome++)
+            implemented_candidates += row[outcome];
+        implemented_invalid += row[SEQUENCE_STORE_INVALID];
+        implemented_skipped += row[SEQUENCE_STORE_CONDITION_SKIP];
+        implemented_hits += row[SEQUENCE_STORE_DWRITE_HIT];
+    }
+    {
+        const uint64_t *row = store->arm_block_stm_outcomes;
         for (unsigned outcome = 0u;
              outcome < SEQUENCE_STORE_OUTCOME_COUNT; outcome++)
             implemented_candidates += row[outcome];
@@ -28444,7 +28509,8 @@ static void sequence_profile_report_store_model(
                row[SEQUENCE_STORE_TRANSLATION_FAULT],
                row[SEQUENCE_STORE_NON_RAM]);
     }
-    printf("      implemented single-store+VSTR supported/retirement-eligible="
+    printf("      implemented single-store+VSTR+STM1blk "
+           "supported/retirement-eligible="
            "%" PRIu64 "/%" PRIu64 " of candidates=%" PRIu64
            " (eligible %.3f%% fetched)\n",
            implemented_supported, implemented_eligible,
@@ -28552,9 +28618,10 @@ static void sequence_profile_report_store_model(
     printf("      current-product remaining-store frontier\n");
     printf("        The baseline asks the exact shipping decoder first, so its "
            "BX/BLX handlers are already present, then adds the shipped "
-           "single stores and VSTR S/D. Each row adds exactly one remaining "
-           "store family on the same literal stream; this ranks continuity, "
-           "not speed or code-size cost.\n");
+           "single stores, VSTR S/D and transactional one-block ordinary "
+           "STM. Each row adds exactly one remaining dynamic store family "
+           "on the same literal stream; this ranks continuity, not speed or "
+           "code-size cost.\n");
     printf("        baseline calls/instructions/heads/chains/runner-entries="
            "%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64
            "\n", implemented->calls, implemented->instructions,
@@ -28572,7 +28639,14 @@ static void sequence_profile_report_store_model(
             &store->family_frontier[family];
         uint64_t family_candidates = 0u;
         uint64_t family_eligible = 0u;
-        if (family == SEQUENCE_STORE_ARM_VFP) {
+        if (family == SEQUENCE_STORE_ARM_BLOCK) {
+            const uint64_t *row = store->arm_block_remaining_outcomes;
+            for (unsigned outcome = 0u;
+                 outcome < SEQUENCE_STORE_OUTCOME_COUNT; outcome++)
+                family_candidates += row[outcome];
+            family_eligible = row[SEQUENCE_STORE_CONDITION_SKIP] +
+                              row[SEQUENCE_STORE_DWRITE_HIT];
+        } else if (family == SEQUENCE_STORE_ARM_VFP) {
             for (unsigned kind = SEQUENCE_VFP_STORE_VSTM_S;
                  kind < SEQUENCE_VFP_STORE_KIND_COUNT; kind++) {
                 const uint64_t *row = store->vfp_kind_outcomes[kind];
@@ -28772,6 +28846,30 @@ static void sequence_profile_report_store_model(
         arm_block_words_eligible == arm_block_family_eligible &&
         arm_block_span_candidates == arm_block_family_candidates &&
         arm_block_span_eligible == arm_block_family_eligible;
+    uint64_t arm_block_stm_eligible =
+        store->arm_block_stm_outcomes[SEQUENCE_STORE_CONDITION_SKIP] +
+        store->arm_block_stm_outcomes[SEQUENCE_STORE_DWRITE_HIT];
+    uint64_t arm_block_remaining_eligible =
+        store->arm_block_remaining_outcomes[
+            SEQUENCE_STORE_CONDITION_SKIP] +
+        store->arm_block_remaining_outcomes[SEQUENCE_STORE_DWRITE_HIT];
+    uint64_t arm_block_remaining_ordinary_eligible =
+        store->arm_block_remaining_ordinary_outcomes[
+            SEQUENCE_STORE_CONDITION_SKIP] +
+        store->arm_block_remaining_ordinary_outcomes[
+            SEQUENCE_STORE_DWRITE_HIT];
+    uint64_t arm_block_user_eligible =
+        store->arm_block_frontier_outcomes[
+            SEQUENCE_ARM_BLOCK_FRONTIER_USER_BANK]
+            [SEQUENCE_STORE_CONDITION_SKIP] +
+        store->arm_block_frontier_outcomes[
+            SEQUENCE_ARM_BLOCK_FRONTIER_USER_BANK]
+            [SEQUENCE_STORE_DWRITE_HIT];
+    bool arm_block_baseline_exact =
+        arm_block_stm_eligible + arm_block_remaining_eligible ==
+            arm_block_family_eligible &&
+        arm_block_remaining_ordinary_eligible + arm_block_user_eligible ==
+            arm_block_remaining_eligible;
     printf("        kind/mode/words/span candidates=%" PRIu64 "/%" PRIu64
            "/%" PRIu64 "/%" PRIu64 " family=%" PRIu64
            " eligible=%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64
@@ -28781,13 +28879,23 @@ static void sequence_profile_report_store_model(
            arm_block_family_candidates, arm_block_kind_eligible,
            arm_block_mode_eligible, arm_block_words_eligible,
            arm_block_span_eligible, arm_block_family_eligible,
-           arm_block_semantic_exact ? "EXACT" : "MISMATCH");
+           arm_block_semantic_exact && arm_block_baseline_exact
+               ? "EXACT" : "MISMATCH");
+    printf("        shipped-STM/remaining eligible=%" PRIu64 "/%" PRIu64
+           " family=%" PRIu64 "; remaining ordinary/user=%" PRIu64
+           "/%" PRIu64 "  %s\n",
+           arm_block_stm_eligible, arm_block_remaining_eligible,
+           arm_block_family_eligible, arm_block_remaining_ordinary_eligible,
+           arm_block_user_eligible,
+           arm_block_baseline_exact ? "EXACT" : "MISMATCH");
 
     printf("      A32 block-store continuity split\n");
-    printf("        The one-block row models a transactional signed handler "
-           "that refuses before any write when the live register list spans "
-           "two 1 KiB DWRITE blocks. The ordinary rows exclude user-bank "
-           "semantics. These are implementation frontiers, not speedups.\n");
+    printf("        The one-block row is now a zero-increment audit of the "
+           "shipped transactional handler, which refuses before any write "
+           "when the live list spans two 1 KiB DWRITE blocks. The ordinary-"
+           "all row adds only cases left outside that exact contract; the "
+           "user-bank row remains separate. These are implementation "
+           "frontiers, not speedups.\n");
     printf("        %-14s %10s %10s %10s %12s %10s %10s %12s %10s %8s %s\n",
            "frontier", "candidate", "eligible", "calls", "instructions",
            "heads", "chains", "entries", "removed", "%base", "gate");
@@ -28802,15 +28910,21 @@ static void sequence_profile_report_store_model(
          selected < SEQUENCE_ARM_BLOCK_FRONTIER_COUNT; selected++) {
         const sequence_signed_extended_t *frontier =
             &store->arm_block_frontier[selected];
-        const uint64_t *row =
-            store->arm_block_frontier_outcomes[selected];
+        const uint64_t *row = selected ==
+                SEQUENCE_ARM_BLOCK_FRONTIER_ORDINARY_ALL
+            ? store->arm_block_remaining_ordinary_outcomes
+            : store->arm_block_frontier_outcomes[selected];
         uint64_t selected_candidates = 0u;
-        for (unsigned outcome = 0u;
-             outcome < SEQUENCE_STORE_OUTCOME_COUNT; outcome++)
-            selected_candidates += row[outcome];
-        uint64_t selected_eligible =
-            row[SEQUENCE_STORE_CONDITION_SKIP] +
-            row[SEQUENCE_STORE_DWRITE_HIT];
+        uint64_t selected_eligible = 0u;
+        /* The first model is deliberately identical to the new baseline. */
+        if (selected !=
+                SEQUENCE_ARM_BLOCK_FRONTIER_ORDINARY_ONE_BLOCK) {
+            for (unsigned outcome = 0u;
+                 outcome < SEQUENCE_STORE_OUTCOME_COUNT; outcome++)
+                selected_candidates += row[outcome];
+            selected_eligible = row[SEQUENCE_STORE_CONDITION_SKIP] +
+                                row[SEQUENCE_STORE_DWRITE_HIT];
+        }
         uint64_t frontier_histogram_calls = 0u;
         uint64_t frontier_histogram_instructions = 0u;
         uint64_t frontier_stops = 0u;
@@ -28841,6 +28955,7 @@ static void sequence_profile_report_store_model(
                                      implemented_eligible +
                                      selected_eligible;
         bool frontier_exact = arm_block_semantic_exact &&
+            arm_block_baseline_exact &&
             frontier_lengths_exact &&
             frontier_histogram_calls == frontier->calls &&
             frontier_histogram_instructions == frontier->instructions &&
@@ -29051,6 +29166,10 @@ static void sequence_profile_report_indirect_model(
         store_eligible += profile->signed_store.vfp_kind_outcomes[kind]
             [SEQUENCE_STORE_DWRITE_HIT];
     }
+    store_eligible += profile->signed_store.arm_block_stm_outcomes
+        [SEQUENCE_STORE_CONDITION_SKIP];
+    store_eligible += profile->signed_store.arm_block_stm_outcomes
+        [SEQUENCE_STORE_DWRITE_HIT];
 
     uint64_t current_eligible =
         profile->signed_outcomes[SEQUENCE_SIGNED_PLAIN] +
