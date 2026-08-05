@@ -204,6 +204,7 @@ jobs:
             grep -Fq 'STATIC-A64-GRAPH-BOUND-ORACLE exact=yes one-retired=1 one-chains=0 one-graph=0 sixteen-retired=16 sixteen-chains=15 sixteen-graph=15 extended-retired=64 extended-chains=63 extended-graph=63 first-timebase-edge=yes block-witness=4 collision-republish=yes' <<<"$soc_output"
             grep -Eq 'STATIC-A64-VFP-REGISTER-ORACLE exact=yes retired=[1-9][0-9]* compare=yes widen=yes' <<<"$soc_output"
             grep -Eq 'STATIC-A64-VFP-READ-ORACLE exact=yes retired=[1-9][0-9]* cold-fill=yes double=yes' <<<"$soc_output"
+            grep -Eq 'STATIC-A64-VFP-WRITE-ORACLE exact=yes retired=[1-9][0-9]* dwrite-hits=32998 dwrite-misses=2 double=yes boundary=yes graph=yes' <<<"$soc_output"
             grep -Eq 'STATIC-A64-THUMB-ORACLE exact=yes retired=[1-9][0-9]*' <<<"$soc_output"
             grep -Eq 'STATIC-A64-THUMB-READ-ORACLE exact=yes retired=[1-9][0-9]*' <<<"$soc_output"
             grep -Fq 'STATIC-BRANCH-SHAPE exact=yes conditional=14 link=15 handlers=29 forward=yes backward=yes' <<<"$static_output"

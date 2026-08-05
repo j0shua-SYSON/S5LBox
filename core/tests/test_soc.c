@@ -4199,6 +4199,141 @@ static void test_signed_static_a64_vfp_read_oracle(void) {
     s5l8900_free(&reference);
 }
 
+/* VSTR is a terminal signed head even when the following instruction is plain
+ * RAM. This loop drives all S/D register-number edges plus a D store whose two
+ * write32 calls straddle the 1 KiB cache boundary. Both machines opt into the
+ * same direct-write contract, so full snapshot equality and exact DWRITE
+ * accounting prove the signed path neither skips nor duplicates either word. */
+static void test_signed_static_a64_vfp_write_oracle(void) {
+    static const uint32_t signed_loop[16] = {
+        UINT32_C(0xed870a00), /* VSTR s0,[r7,#0] */
+        UINT32_C(0xedc70a01), /* VSTR s1,[r7,#4] */
+        UINT32_C(0xed871b02), /* VSTR d1,[r7,#8] */
+        UINT32_C(0xed872b04), /* VSTR d2,[r7,#16] */
+        UINT32_C(0xed873a06), /* VSTR s6,[r7,#24] */
+        UINT32_C(0xedc73a07), /* VSTR s7,[r7,#28] */
+        UINT32_C(0xed874b08), /* VSTR d4,[r7,#32] */
+        UINT32_C(0xed875b0a), /* VSTR d5,[r7,#40] */
+        UINT32_C(0xed876a0c), /* VSTR s12,[r7,#48] */
+        UINT32_C(0xedc76a0d), /* VSTR s13,[r7,#52] */
+        UINT32_C(0xed877b0e), /* VSTR d7,[r7,#56] */
+        UINT32_C(0xed87fb10), /* VSTR d15,[r7,#64] */
+        UINT32_C(0xed081a01), /* VSTR s2,[r8,#-4] */
+        UINT32_C(0xed890b00), /* VSTR d0,[r9] across 1 KiB boundary */
+        UINT32_C(0xed872a12), /* VSTR s4,[r7,#72] */
+        UINT32_C(0xeaffffef), /* B 0 */
+    };
+    const uint64_t expected_hits = UINT64_C(32998);
+    s5l8900_t fast = {0};
+    s5l8900_t reference = {0};
+    uint8_t *fast_snapshot = NULL;
+    uint8_t *reference_snapshot = NULL;
+    size_t fast_len = 0u;
+    size_t reference_len = 0u;
+    arm_status_t fast_status = ARM_OK;
+    arm_status_t reference_status = ARM_OK;
+    bool fast_ok;
+    bool reference_ok;
+
+    if (!s5l8900_static_a64_available()) {
+        printf("  STATIC-A64-VFP-WRITE-ORACLE SKIP: no signed AArch64 "
+               "handlers\n");
+        return;
+    }
+
+    fast_ok = s5l8900_init(&fast, 0u, 1u << 20);
+    reference_ok = s5l8900_init(&reference, 0u, 1u << 20);
+    CHECK(fast_ok && reference_ok, "VFP write oracle machine init failed");
+    if (!fast_ok || !reference_ok) {
+        if (fast_ok) s5l8900_free(&fast);
+        if (reference_ok) s5l8900_free(&reference);
+        return;
+    }
+
+    s5l8900_load(&fast, 0u, signed_loop, sizeof signed_loop);
+    s5l8900_load(&reference, 0u, signed_loop, sizeof signed_loop);
+    s5l8900_tick(&fast, 0u);
+    s5l8900_tick(&reference, 0u);
+    fast.cpu.r[7] = reference.cpu.r[7] = UINT32_C(0x1000);
+    fast.cpu.r[8] = reference.cpu.r[8] = UINT32_C(0x1040);
+    fast.cpu.r[9] = reference.cpu.r[9] = UINT32_C(0x13fc);
+    fast.cpu.r[15] = reference.cpu.r[15] = 0u;
+    fast.cpu.cpsr = reference.cpu.cpsr = ARM_MODE_SYS | ARM_CPSR_C;
+    fast.cpu.cp15.cpacr = reference.cpu.cp15.cpacr =
+        0xfu << ARM_CPACR_CP10_SHIFT;
+    fast.cpu.vfp_fpexc = reference.cpu.vfp_fpexc = ARM_FPEXC_EN;
+    fast.cpu.vfp_fpscr = reference.cpu.vfp_fpscr = 0u;
+    for (unsigned i = 0u; i < 32u; i++) {
+        fast.cpu.vfp_s[i] = UINT32_C(0x80000000) ^
+                            (UINT32_C(0x01020304) * (i + 1u));
+        reference.cpu.vfp_s[i] = fast.cpu.vfp_s[i];
+    }
+
+    CHECK(s5l8900_set_direct_ram_writes(&fast, true) &&
+              s5l8900_set_direct_ram_writes(&reference, true),
+          "VFP write oracle could not opt into direct RAM writes");
+    CHECK(s5l8900_static_a64_set_enabled(&fast, true),
+          "VFP write oracle signed engine refused an available host");
+    CHECK(s5l8900_static_a64_set_graph(&fast, true),
+          "VFP write oracle graph engine refused an available host");
+    CHECK(s5l8900_run(&fast, 24000u, &fast_status) == 24000u,
+          "signed VFP write run stopped early with status=%d",
+          (int)fast_status);
+    CHECK(s5l8900_run(&reference, 24000u, &reference_status) == 24000u,
+          "reference VFP write run stopped early with status=%d",
+          (int)reference_status);
+
+    uint64_t retired = s5l8900_static_a64_retired(&fast);
+    uint64_t graph = s5l8900_static_a64_graph_chained_blocks(&fast);
+    CHECK(fast_status == reference_status,
+          "VFP write status differs: signed=%d reference=%d",
+          (int)fast_status, (int)reference_status);
+    CHECK(retired > 12000u,
+          "signed VFP write loop retired only %llu instructions",
+          (unsigned long long)retired);
+    CHECK(graph != 0u, "signed VFP write loop published no graph edge");
+    CHECK(fast.cpu.dwrite_hits == expected_hits &&
+              reference.cpu.dwrite_hits == expected_hits &&
+              fast.cpu.dwrite_misses == 2u &&
+              reference.cpu.dwrite_misses == 2u,
+          "VFP write DWRITE accounting differs: fast=%llu/%llu "
+          "reference=%llu/%llu",
+          (unsigned long long)fast.cpu.dwrite_hits,
+          (unsigned long long)fast.cpu.dwrite_misses,
+          (unsigned long long)reference.cpu.dwrite_hits,
+          (unsigned long long)reference.cpu.dwrite_misses);
+
+    snapshot_status_t fast_snapshot_status =
+        snapshot_save_mem(&fast, &fast_snapshot, &fast_len);
+    snapshot_status_t reference_snapshot_status =
+        snapshot_save_mem(&reference, &reference_snapshot, &reference_len);
+    bool exact = fast_snapshot_status == SNAP_OK &&
+        reference_snapshot_status == SNAP_OK && fast_snapshot &&
+        reference_snapshot && fast_len == reference_len &&
+        memcmp(fast_snapshot, reference_snapshot, fast_len) == 0;
+    CHECK(fast_snapshot_status == SNAP_OK,
+          "could not serialize signed VFP write machine: %s",
+          snapshot_strerror(fast_snapshot_status));
+    CHECK(reference_snapshot_status == SNAP_OK,
+          "could not serialize reference VFP write machine: %s",
+          snapshot_strerror(reference_snapshot_status));
+    CHECK(exact, "signed and reference VFP write snapshots differ");
+
+    if (exact && retired > 12000u && graph != 0u &&
+        fast.cpu.dwrite_hits == expected_hits &&
+        fast.cpu.dwrite_misses == 2u) {
+        printf("  STATIC-A64-VFP-WRITE-ORACLE exact=yes retired=%llu "
+               "dwrite-hits=32998 dwrite-misses=2 double=yes "
+               "boundary=yes graph=yes\n",
+               (unsigned long long)retired);
+    }
+
+    free(fast_snapshot);
+    free(reference_snapshot);
+    s5l8900_free(&fast);
+    s5l8900_free(&reference);
+}
+
 /* Product-facing Thumb coverage must cross the real SoC runner too, not only
  * the flat semantic oracle. This loop spans every newly admitted broad shape,
  * crosses hundreds of real timer edges and compares complete serialized
@@ -4429,6 +4564,7 @@ int main(void) {
     test_signed_static_a64_graph_bound_oracle();
     test_signed_static_a64_vfp_register_oracle();
     test_signed_static_a64_vfp_read_oracle();
+    test_signed_static_a64_vfp_write_oracle();
     test_signed_static_a64_thumb_oracle();
     test_signed_static_a64_thumb_read_oracle();
     test_stub_window_stores_and_counts();
