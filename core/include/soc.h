@@ -3949,9 +3949,11 @@ bool s5l8900_static_a64_set_vfp_arithmetic(s5l8900_t *m, bool enabled);
  * it retains exact semantics but restores host FP state after every operation. */
 bool s5l8900_static_a64_set_vfp_fp_session(s5l8900_t *m, bool enabled);
 /* Same-binary control for rebuilding a missing instruction-fetch host pointer
- * from an exact live software-TLB witness. Product default is enabled. The
- * helper never walks, faults or reads MMIO; a refusal leaves arm_step() as the
- * sole owner of the architectural fetch. */
+ * from an exact live software-TLB witness. Product default is enabled with an
+ * adaptive admission policy: a call that has never retired more than one
+ * instruction is periodically re-probed instead of paying the refill on every
+ * visit. The helper never walks, faults or reads MMIO; a refusal leaves
+ * arm_step() as the sole owner of the architectural fetch. */
 bool s5l8900_static_a64_set_fetch_refill(s5l8900_t *m, bool enabled);
 /* Same-binary benchmark control for the total signed invocation bound. A
  * decoded head remains at most sixteen instructions and the machine still
@@ -3965,6 +3967,7 @@ uint64_t s5l8900_static_a64_persistent_chained_blocks(const s5l8900_t *m);
 uint64_t s5l8900_static_a64_graph_chained_blocks(const s5l8900_t *m);
 uint64_t s5l8900_static_a64_fetch_refill_attempts(const s5l8900_t *m);
 uint64_t s5l8900_static_a64_fetch_refill_hits(const s5l8900_t *m);
+uint64_t s5l8900_static_a64_fetch_refill_skips(const s5l8900_t *m);
 /* Host diagnostic: byte span protecting the currently cached signed head at
  * `pc`, or zero when no such entry exists. It is derived cache state and is
  * never part of a guest snapshot. */

@@ -20,6 +20,11 @@
 
 #define STATIC_A64_CACHE_ENTRIES 1024u
 #define STATIC_A64_RAW_BYTES (A64_STATIC_MAX_INSNS * 4u)
+/* A call observed to retire at most one instruction removes no outer runner
+ * entry. Skip fifteen repeats before probing it again: this amortizes the
+ * losing path while guaranteeing that a cold graph or changed dynamic path
+ * can become eligible without an invalidation signal. */
+#define STATIC_A64_REFILL_SINGLE_REPROBE 16u
 
 _Static_assert(S5LBOX_STATIC_A64_PRODUCT_CHAIN_INSNS ==
                    A64_STATIC_MAX_CHAIN_INSNS,
@@ -37,6 +42,16 @@ typedef struct {
     bool supported;
     a64_static_block_t block;
 } static_a64_entry_t;
+
+typedef struct {
+    uint32_t pc;
+    uint32_t fetch_gen;
+    uint8_t skip_remaining;
+    bool fetch_priv;
+    bool thumb;
+    bool valid;
+    bool multi_seen;
+} static_a64_refill_predictor_t;
 
 typedef struct {
     bool enabled;
@@ -58,7 +73,10 @@ typedef struct {
     uint64_t graph_chained_blocks;
     uint64_t fetch_refill_attempts;
     uint64_t fetch_refill_hits;
+    uint64_t fetch_refill_skips;
     static_a64_entry_t cache[STATIC_A64_CACHE_ENTRIES];
+    static_a64_refill_predictor_t
+        refill_predictor[STATIC_A64_CACHE_ENTRIES];
     a64_static_graph_node_t graph_nodes[A64_STATIC_GRAPH_SLOTS];
 } static_a64_state_t;
 
@@ -71,6 +89,51 @@ static unsigned cache_index(uint32_t pc, bool thumb, uint32_t generation) {
     key ^= generation * UINT32_C(0x9e3779b1);
     if (thumb) key ^= UINT32_C(0x85ebca6b);
     return key & (STATIC_A64_CACHE_ENTRIES - 1u);
+}
+
+static bool refill_predictor_matches(
+    const static_a64_refill_predictor_t *predictor, uint32_t pc,
+    uint32_t fetch_gen, bool thumb, bool priv) {
+    return predictor->valid && predictor->pc == pc &&
+           predictor->fetch_gen == fetch_gen && predictor->thumb == thumb &&
+           predictor->fetch_priv == priv;
+}
+
+static bool refill_predictor_allows(static_a64_state_t *state, uint32_t pc,
+                                    uint32_t fetch_gen, bool thumb,
+                                    bool priv) {
+    static_a64_refill_predictor_t *predictor =
+        &state->refill_predictor[cache_index(pc, thumb, fetch_gen)];
+    if (!refill_predictor_matches(predictor, pc, fetch_gen, thumb, priv) ||
+        predictor->multi_seen || predictor->skip_remaining == 0u)
+        return true;
+    predictor->skip_remaining--;
+    state->fetch_refill_skips++;
+    return false;
+}
+
+static void refill_predictor_record(static_a64_state_t *state, uint32_t pc,
+                                    uint32_t fetch_gen, bool thumb, bool priv,
+                                    unsigned completed, unsigned budget) {
+    static_a64_refill_predictor_t *predictor =
+        &state->refill_predictor[cache_index(pc, thumb, fetch_gen)];
+    if (!refill_predictor_matches(predictor, pc, fetch_gen, thumb, priv)) {
+        memset(predictor, 0, sizeof *predictor);
+        predictor->pc = pc;
+        predictor->fetch_gen = fetch_gen;
+        predictor->thumb = thumb;
+        predictor->fetch_priv = priv;
+        predictor->valid = true;
+    }
+    if (completed > 1u) {
+        predictor->multi_seen = true;
+        predictor->skip_remaining = 0u;
+    } else if (!predictor->multi_seen && budget > 1u) {
+        /* A one-instruction caller/timebase budget says nothing about the
+         * natural call length. Leave it due for another probe. */
+        predictor->skip_remaining =
+            STATIC_A64_REFILL_SINGLE_REPROBE - 1u;
+    }
 }
 
 static bool entry_matches(const static_a64_entry_t *entry,
@@ -593,6 +656,16 @@ uint64_t s5l8900_static_a64_fetch_refill_hits(const s5l8900_t *m) {
 #endif
 }
 
+uint64_t s5l8900_static_a64_fetch_refill_skips(const s5l8900_t *m) {
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    const static_a64_state_t *state = static_state(m);
+    return state ? state->fetch_refill_skips : 0u;
+#else
+    (void)m;
+    return 0u;
+#endif
+}
+
 unsigned s5l8900_static_a64_cached_witness_bytes(const s5l8900_t *m,
                                                  uint32_t pc, bool thumb) {
 #if defined(S5LBOX_STATIC_A64_ENGINE)
@@ -694,6 +767,11 @@ unsigned s5l8900_static_a64_try(s5l8900_t *m, unsigned max_insns) {
     unsigned budget;
     unsigned retired = 0u;
     unsigned executed_blocks = 0u;
+    uint32_t refill_pc = 0u;
+    uint32_t refill_gen = 0u;
+    bool refill_thumb = false;
+    bool refill_priv = false;
+    bool refilled = false;
 
     if (!state || !state->enabled || !max_insns ||
         !a64_static_host_available() || !m->ram || !m->ram_size ||
@@ -715,15 +793,37 @@ unsigned s5l8900_static_a64_try(s5l8900_t *m, unsigned max_insns) {
         if ((pc & (width - 1u)) == 0u &&
             (!cpu->fetch_host || cpu->fetch_blk != fetch_block ||
              cpu->fetch_gen != cpu->tlb_gen || cpu->fetch_priv != priv)) {
+            if (!refill_predictor_allows(state, pc, cpu->tlb_gen, thumb,
+                                         priv))
+                return 0u;
             state->fetch_refill_attempts++;
-            if (arm_fetch_cache_try_refill(cpu, pc, priv))
-                state->fetch_refill_hits++;
+            if (!arm_fetch_cache_try_refill(cpu, pc, priv)) return 0u;
+            state->fetch_refill_hits++;
+            refill_pc = pc;
+            refill_gen = cpu->tlb_gen;
+            refill_thumb = thumb;
+            refill_priv = priv;
+            refilled = true;
         }
     }
     budget = max_insns < state->chain_limit
            ? max_insns : state->chain_limit;
-    if (state->graph_enabled) return try_graph(m, state, budget);
-    if (state->persistent) return try_persistent(m, state, budget);
+    if (state->graph_enabled) {
+        unsigned completed = try_graph(m, state, budget);
+        if (refilled)
+            refill_predictor_record(state, refill_pc, refill_gen,
+                                    refill_thumb, refill_priv, completed,
+                                    budget);
+        return completed;
+    }
+    if (state->persistent) {
+        unsigned completed = try_persistent(m, state, budget);
+        if (refilled)
+            refill_predictor_record(state, refill_pc, refill_gen,
+                                    refill_thumb, refill_priv, completed,
+                                    budget);
+        return completed;
+    }
 
     while (retired < budget) {
         uint32_t pc;
@@ -809,6 +909,9 @@ unsigned s5l8900_static_a64_try(s5l8900_t *m, unsigned max_insns) {
     }
 
     state->retired += retired;
+    if (refilled)
+        refill_predictor_record(state, refill_pc, refill_gen, refill_thumb,
+                                refill_priv, retired, budget);
     return retired;
 #else
     (void)m;

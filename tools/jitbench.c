@@ -5176,6 +5176,7 @@ typedef struct {
     uint64_t dwrite_misses;
     uint64_t fetch_refill_attempts;
     uint64_t fetch_refill_hits;
+    uint64_t fetch_refill_skips;
     double seconds;
 } soc_run_result_t;
 
@@ -5393,6 +5394,8 @@ static bool run_soc_entry_configured(const soc_entry_setup_t *setup,
     uint64_t fetch_refill_attempts_after;
     uint64_t fetch_refill_hits_before;
     uint64_t fetch_refill_hits_after;
+    uint64_t fetch_refill_skips_before;
+    uint64_t fetch_refill_skips_after;
     double start, end;
     bool initialized = false;
     bool ok = false;
@@ -5553,6 +5556,8 @@ static bool run_soc_entry_configured(const soc_entry_setup_t *setup,
         s5l8900_static_a64_fetch_refill_attempts(&machine);
     fetch_refill_hits_before =
         s5l8900_static_a64_fetch_refill_hits(&machine);
+    fetch_refill_skips_before =
+        s5l8900_static_a64_fetch_refill_skips(&machine);
     start = now_seconds();
     while (remaining != 0u) {
         unsigned chunk = remaining > (uint64_t)UINT_MAX
@@ -5574,6 +5579,8 @@ static bool run_soc_entry_configured(const soc_entry_setup_t *setup,
         s5l8900_static_a64_fetch_refill_attempts(&machine);
     fetch_refill_hits_after =
         s5l8900_static_a64_fetch_refill_hits(&machine);
+    fetch_refill_skips_after =
+        s5l8900_static_a64_fetch_refill_skips(&machine);
     if (remaining != 0u || status != ARM_OK || end <= start ||
         machine.cpu.r[15] != 0u) {
         fprintf(stderr,
@@ -5594,6 +5601,8 @@ static bool run_soc_entry_configured(const soc_entry_setup_t *setup,
         fetch_refill_attempts_after - fetch_refill_attempts_before;
     out->fetch_refill_hits =
         fetch_refill_hits_after - fetch_refill_hits_before;
+    out->fetch_refill_skips =
+        fetch_refill_skips_after - fetch_refill_skips_before;
     if ((signed_path && out->signed_retired > total) ||
         (!signed_path &&
          (out->signed_retired != 0u || out->signed_chains != 0u ||
@@ -6093,16 +6102,22 @@ done:
  * between distinct 1 KiB virtual blocks under one MMU section. Warmup leaves
  * all four exact FETCH translations in the software TLB. The off arm keeps
  * the complete signed engine but reproduces the former fetch-cache refusal,
- * so every branch is literal; the on arm rebuilds the host pointer and retires
- * every branch in signed text. TLB hit accounting and complete snapshots must
- * remain byte exact across reference/off/on. This intentionally pathological
- * 100% boundary mix is not firmware timing or phone FPS. */
+ * so every branch is literal. The adaptive arm probes a call, learns that it
+ * retired only one instruction, and then skips fifteen repeats before
+ * re-probing. Attempts plus skips must account for every branch, while every
+ * actual hit retires exactly one signed instruction. TLB hit accounting and
+ * complete snapshots remain byte exact. This intentionally pathological 100%
+ * boundary mix is not firmware timing or phone FPS. */
 static bool bench_soc_fetch_refill(uint64_t requested, unsigned reps) {
     const uint64_t loop_insns = 4u;
     double *reference_rates = NULL;
     double *off_rates = NULL;
     double *on_rates = NULL;
     uint64_t total;
+    uint64_t adaptive_retired = 0u;
+    uint64_t adaptive_attempts = 0u;
+    uint64_t adaptive_hits = 0u;
+    uint64_t adaptive_skips = 0u;
     bool ok = false;
 
     if (requested > UINT64_MAX - (loop_insns - 1u)) {
@@ -6161,12 +6176,15 @@ static bool bench_soc_fetch_refill(uint64_t requested, unsigned reps) {
             memcmp(reference.snapshot, on.snapshot,
                    reference.snapshot_len) != 0 ||
             reference.signed_retired != 0u || off.signed_retired != 0u ||
-            on.signed_retired != total ||
+            on.signed_retired != on.fetch_refill_hits ||
             reference.fetch_refill_attempts != 0u ||
             reference.fetch_refill_hits != 0u ||
+            reference.fetch_refill_skips != 0u ||
             off.fetch_refill_attempts != 0u || off.fetch_refill_hits != 0u ||
-            on.fetch_refill_attempts != total ||
-            on.fetch_refill_hits != total ||
+            off.fetch_refill_skips != 0u ||
+            on.fetch_refill_attempts == 0u || on.fetch_refill_skips == 0u ||
+            on.fetch_refill_attempts + on.fetch_refill_skips != total ||
+            on.fetch_refill_hits != on.fetch_refill_attempts ||
             reference.dread_hits != 0u || reference.dread_misses != 0u ||
             off.dread_hits != 0u || off.dread_misses != 0u ||
             on.dread_hits != 0u || on.dread_misses != 0u ||
@@ -6177,9 +6195,28 @@ static bool bench_soc_fetch_refill(uint64_t requested, unsigned reps) {
             fprintf(stderr,
                     "jitbench: SoC fetch-refill repetition %u failed exact "
                     "A/B off-retired=%" PRIu64 " on-retired=%" PRIu64
-                    " attempts/hits=%" PRIu64 "/%" PRIu64 "\n",
+                    " attempts/hits/skips=%" PRIu64 "/%" PRIu64
+                    "/%" PRIu64 "\n",
                     rep + 1u, off.signed_retired, on.signed_retired,
-                    on.fetch_refill_attempts, on.fetch_refill_hits);
+                    on.fetch_refill_attempts, on.fetch_refill_hits,
+                    on.fetch_refill_skips);
+            free_soc_run_result(&reference);
+            free_soc_run_result(&off);
+            free_soc_run_result(&on);
+            goto done;
+        }
+        if (rep == 0u) {
+            adaptive_retired = on.signed_retired;
+            adaptive_attempts = on.fetch_refill_attempts;
+            adaptive_hits = on.fetch_refill_hits;
+            adaptive_skips = on.fetch_refill_skips;
+        } else if (adaptive_retired != on.signed_retired ||
+                   adaptive_attempts != on.fetch_refill_attempts ||
+                   adaptive_hits != on.fetch_refill_hits ||
+                   adaptive_skips != on.fetch_refill_skips) {
+            fprintf(stderr,
+                    "jitbench: SoC fetch-refill adaptive accounting changed "
+                    "across repetitions\n");
             free_soc_run_result(&reference);
             free_soc_run_result(&off);
             free_soc_run_result(&on);
@@ -6190,12 +6227,13 @@ static bool bench_soc_fetch_refill(uint64_t requested, unsigned reps) {
         off_rates[rep] = (double)total / off.seconds / 1.0e6;
         on_rates[rep] = (double)total / on.seconds / 1.0e6;
         printf("SOC-FETCH-REFILL-SAMPLE rep=%u order=%s reference=%.3f "
-               "refill-off=%.3f refill-on=%.3f Minsn/s "
-               "off-retired=%" PRIu64 " on-retired=%" PRIu64
-               " on-refills=%" PRIu64 " exact-snapshot=yes\n",
+               "refill-off=%.3f refill-adaptive=%.3f Minsn/s "
+               "off-retired=%" PRIu64 " adaptive-retired=%" PRIu64
+               " adaptive-refills=%" PRIu64 " adaptive-skips=%" PRIu64
+               " exact-snapshot=yes\n",
                rep + 1u, order, reference_rates[rep], off_rates[rep],
                on_rates[rep], off.signed_retired, on.signed_retired,
-               on.fetch_refill_hits);
+               on.fetch_refill_hits, on.fetch_refill_skips);
         free_soc_run_result(&reference);
         free_soc_run_result(&off);
         free_soc_run_result(&on);
@@ -6210,11 +6248,17 @@ static bool bench_soc_fetch_refill(uint64_t requested, unsigned reps) {
            "cache-lookup=yes block-witness=yes entry-gates=yes "
            "timer-boundaries=yes device-tick=yes head-cache=warm "
            "mmu=section tlb=warm exact-snapshot=yes "
-           "off-signed-retired=0 on-signed-retired=%" PRIu64
-           " on-refill-attempts=%" PRIu64 " on-refill-hits=%" PRIu64
-           " reference-median=%.3f off-median=%.3f on-median=%.3f "
-           "off-speedup=%.3fx on-speedup=%.3fx on-over-off=%.3fx\n",
-           loop_insns, total, reps, total, total, total,
+           "off-signed-retired=0 adaptive-signed-retired=%" PRIu64
+           " adaptive-refill-attempts=%" PRIu64
+           " adaptive-refill-hits=%" PRIu64
+           " adaptive-refill-skips=%" PRIu64
+           " refill-accounting=%" PRIu64 "/%" PRIu64 " "
+           "reference-median=%.3f off-median=%.3f adaptive-median=%.3f "
+           "off-speedup=%.3fx adaptive-speedup=%.3fx "
+           "adaptive-over-off=%.3fx\n",
+           loop_insns, total, reps, adaptive_retired,
+           adaptive_attempts, adaptive_hits, adaptive_skips,
+           adaptive_attempts + adaptive_skips, total,
            reference_rates[reps / 2u], off_rates[reps / 2u],
            on_rates[reps / 2u],
            off_rates[reps / 2u] / reference_rates[reps / 2u],
@@ -6235,14 +6279,18 @@ done:
  * 15.342%); the other seventeen contain nine inert ALU instructions plus the
  * branch (10 instructions, versus the observed 9.463-instruction multi-call
  * mean). With refill off, arm_step() owns only the first instruction in every
- * new block and the signed engine still retires the remaining nine. With it
- * on, the same binary retires the whole block. This isolates the measured mix
- * instead of repeating the deliberately pathological 100%-single curve. */
+ * new block and the signed engine still retires the remaining nine. Adaptive
+ * refill learns the three true single-instruction calls, periodically probes
+ * them, and keeps all seventeen multi-instruction calls. This isolates the
+ * measured mix instead of repeating the deliberately pathological 100%-single
+ * curve. */
 static bool bench_soc_fetch_refill_mix(uint64_t requested, unsigned reps) {
     const uint64_t loop_insns = FETCH_REFILL_MIX_LOOP_INSNS;
     const uint64_t off_signed_per_loop =
         FETCH_REFILL_MIX_LONG_BLOCKS *
         (FETCH_REFILL_MIX_LONG_INSNS - 1u);
+    const uint64_t adaptive_multi_signed_per_loop =
+        FETCH_REFILL_MIX_LONG_BLOCKS * FETCH_REFILL_MIX_LONG_INSNS;
     double *reference_rates = NULL;
     double *off_rates = NULL;
     double *on_rates = NULL;
@@ -6251,6 +6299,12 @@ static bool bench_soc_fetch_refill_mix(uint64_t requested, unsigned reps) {
     uint64_t loops;
     uint64_t expected_off_signed;
     uint64_t expected_refills;
+    uint64_t expected_multi_refills;
+    uint64_t expected_multi_signed;
+    uint64_t adaptive_retired = 0u;
+    uint64_t adaptive_attempts = 0u;
+    uint64_t adaptive_hits = 0u;
+    uint64_t adaptive_skips = 0u;
     unsigned paired_wins = 0u;
     bool ok = false;
 
@@ -6262,6 +6316,8 @@ static bool bench_soc_fetch_refill_mix(uint64_t requested, unsigned reps) {
     loops = total / loop_insns;
     expected_off_signed = loops * off_signed_per_loop;
     expected_refills = loops * FETCH_REFILL_MIX_BLOCKS;
+    expected_multi_refills = loops * FETCH_REFILL_MIX_LONG_BLOCKS;
+    expected_multi_signed = loops * adaptive_multi_signed_per_loop;
     reference_rates = (double *)calloc(reps, sizeof *reference_rates);
     off_rates = (double *)calloc(reps, sizeof *off_rates);
     on_rates = (double *)calloc(reps, sizeof *on_rates);
@@ -6314,12 +6370,18 @@ static bool bench_soc_fetch_refill_mix(uint64_t requested, unsigned reps) {
                    reference.snapshot_len) != 0 ||
             reference.signed_retired != 0u ||
             off.signed_retired != expected_off_signed ||
-            on.signed_retired != total ||
             reference.fetch_refill_attempts != 0u ||
             reference.fetch_refill_hits != 0u ||
+            reference.fetch_refill_skips != 0u ||
             off.fetch_refill_attempts != 0u || off.fetch_refill_hits != 0u ||
-            on.fetch_refill_attempts != expected_refills ||
-            on.fetch_refill_hits != expected_refills ||
+            off.fetch_refill_skips != 0u ||
+            on.fetch_refill_attempts < expected_multi_refills ||
+            on.fetch_refill_attempts > expected_refills ||
+            on.fetch_refill_hits != on.fetch_refill_attempts ||
+            on.fetch_refill_attempts + on.fetch_refill_skips !=
+                expected_refills ||
+            on.signed_retired != expected_multi_signed +
+                (on.fetch_refill_attempts - expected_multi_refills) ||
             reference.dread_hits != 0u || reference.dread_misses != 0u ||
             off.dread_hits != 0u || off.dread_misses != 0u ||
             on.dread_hits != 0u || on.dread_misses != 0u ||
@@ -6331,10 +6393,29 @@ static bool bench_soc_fetch_refill_mix(uint64_t requested, unsigned reps) {
             fprintf(stderr,
                     "jitbench: SoC fetch-refill mix repetition %u failed "
                     "exact A/B off-retired=%" PRIu64
-                    " on-retired=%" PRIu64 " refills=%" PRIu64
-                    " expected=%" PRIu64 "\n",
+                    " adaptive-retired=%" PRIu64
+                    " attempts/hits/skips=%" PRIu64 "/%" PRIu64
+                    "/%" PRIu64 " decisions=%" PRIu64 "\n",
                     rep + 1u, off.signed_retired, on.signed_retired,
-                    on.fetch_refill_hits, expected_refills);
+                    on.fetch_refill_attempts, on.fetch_refill_hits,
+                    on.fetch_refill_skips, expected_refills);
+            free_soc_run_result(&reference);
+            free_soc_run_result(&off);
+            free_soc_run_result(&on);
+            goto done;
+        }
+        if (rep == 0u) {
+            adaptive_retired = on.signed_retired;
+            adaptive_attempts = on.fetch_refill_attempts;
+            adaptive_hits = on.fetch_refill_hits;
+            adaptive_skips = on.fetch_refill_skips;
+        } else if (adaptive_retired != on.signed_retired ||
+                   adaptive_attempts != on.fetch_refill_attempts ||
+                   adaptive_hits != on.fetch_refill_hits ||
+                   adaptive_skips != on.fetch_refill_skips) {
+            fprintf(stderr,
+                    "jitbench: SoC fetch-refill mix adaptive accounting "
+                    "changed across repetitions\n");
             free_soc_run_result(&reference);
             free_soc_run_result(&off);
             free_soc_run_result(&on);
@@ -6347,13 +6428,17 @@ static bool bench_soc_fetch_refill_mix(uint64_t requested, unsigned reps) {
         paired_ratios[rep] = on_rates[rep] / off_rates[rep];
         if (paired_ratios[rep] > 1.0) paired_wins++;
         printf("SOC-FETCH-REFILL-MIX-SAMPLE rep=%u order=%s "
-               "reference=%.3f refill-off=%.3f refill-on=%.3f Minsn/s "
-               "off-retired=%" PRIu64 " on-retired=%" PRIu64
-               " on-refills=%" PRIu64 " paired-on-over-off=%.3fx "
+               "reference=%.3f refill-off=%.3f refill-adaptive=%.3f "
+               "Minsn/s off-retired=%" PRIu64
+               " adaptive-retired=%" PRIu64
+               " adaptive-refills=%" PRIu64
+               " adaptive-skips=%" PRIu64
+               " paired-adaptive-over-off=%.3fx "
                "exact-snapshot=yes\n",
                rep + 1u, order, reference_rates[rep], off_rates[rep],
                on_rates[rep], off.signed_retired, on.signed_retired,
-               on.fetch_refill_hits, paired_ratios[rep]);
+               on.fetch_refill_hits, on.fetch_refill_skips,
+               paired_ratios[rep]);
         free_soc_run_result(&reference);
         free_soc_run_result(&off);
         free_soc_run_result(&on);
@@ -6373,15 +6458,19 @@ static bool bench_soc_fetch_refill_mix(uint64_t requested, unsigned reps) {
            "timer-boundaries=yes device-tick=yes head-cache=warm "
            "mmu=section tlb=warm exact-snapshot=yes "
            "off-signed-retired=%" PRIu64
-           " on-signed-retired=%" PRIu64
-           " on-refill-attempts=%" PRIu64
-           " on-refill-hits=%" PRIu64 " "
-           "reference-median=%.3f off-median=%.3f on-median=%.3f "
-           "off-speedup=%.3fx on-speedup=%.3fx on-over-off=%.3fx "
-           "paired-on-over-off-median=%.3fx paired-min=%.3fx "
+           " adaptive-signed-retired=%" PRIu64
+           " adaptive-refill-attempts=%" PRIu64
+           " adaptive-refill-hits=%" PRIu64
+           " adaptive-refill-skips=%" PRIu64
+           " refill-accounting=%" PRIu64 "/%" PRIu64 " "
+           "reference-median=%.3f off-median=%.3f adaptive-median=%.3f "
+           "off-speedup=%.3fx adaptive-speedup=%.3fx "
+           "adaptive-over-off=%.3fx "
+           "paired-adaptive-over-off-median=%.3fx paired-min=%.3fx "
            "paired-max=%.3fx paired-wins=%u/%u\n",
-           loop_insns, total, reps, expected_off_signed, total,
-           expected_refills, expected_refills,
+           loop_insns, total, reps, expected_off_signed, adaptive_retired,
+           adaptive_attempts, adaptive_hits, adaptive_skips,
+           adaptive_attempts + adaptive_skips, expected_refills,
            reference_rates[reps / 2u],
            off_rates[reps / 2u], on_rates[reps / 2u],
            off_rates[reps / 2u] / reference_rates[reps / 2u],
