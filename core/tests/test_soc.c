@@ -3454,6 +3454,9 @@ static void test_signed_static_a64_stm_oracle(void) {
           "STM oracle could not opt into direct RAM writes");
     CHECK(s5l8900_static_a64_set_enabled(&fast, true),
           "STM oracle signed engine refused an available host");
+    CHECK(s5l8900_static_a64_set_stm(&fast, false) &&
+              s5l8900_static_a64_set_stm(&fast, true),
+          "STM oracle same-binary rollout switch failed");
     CHECK(s5l8900_static_a64_set_graph(&fast, true),
           "STM oracle graph engine refused an available host");
     CHECK(s5l8900_run(&fast, 16000u, &fast_status) == 16000u,
