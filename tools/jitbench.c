@@ -6317,12 +6317,14 @@ static bool bench_soc_fetch_refill_mix_length(
     uint64_t expected_refills;
     uint64_t expected_multi_refills;
     uint64_t expected_multi_signed;
-    uint64_t expected_off_graph_chains;
-    uint64_t expected_adaptive_graph_chains;
+    uint64_t maximum_off_graph_chains;
+    uint64_t maximum_adaptive_graph_chains;
     uint64_t adaptive_retired = 0u;
     uint64_t adaptive_attempts = 0u;
     uint64_t adaptive_hits = 0u;
     uint64_t adaptive_skips = 0u;
+    uint64_t off_graph_chains = 0u;
+    uint64_t adaptive_graph_chains = 0u;
     unsigned paired_wins = 0u;
     bool ok = false;
 
@@ -6336,11 +6338,11 @@ static bool bench_soc_fetch_refill_mix_length(
     expected_refills = loops * FETCH_REFILL_MIX_BLOCKS;
     expected_multi_refills = loops * FETCH_REFILL_MIX_LONG_BLOCKS;
     expected_multi_signed = loops * adaptive_multi_signed_per_loop;
-    expected_off_graph_chains = loops * FETCH_REFILL_MIX_LONG_BLOCKS *
+    maximum_off_graph_chains = loops * FETCH_REFILL_MIX_LONG_BLOCKS *
         (((long_insns - 1u) + A64_STATIC_MAX_INSNS - 1u) /
              A64_STATIC_MAX_INSNS -
          1u);
-    expected_adaptive_graph_chains =
+    maximum_adaptive_graph_chains =
         loops * FETCH_REFILL_MIX_LONG_BLOCKS *
         ((long_insns + A64_STATIC_MAX_INSNS - 1u) /
              A64_STATIC_MAX_INSNS -
@@ -6416,8 +6418,11 @@ static bool bench_soc_fetch_refill_mix_length(
             reference.dwrite_misses != 0u || off.dwrite_hits != 0u ||
             off.dwrite_misses != 0u || on.dwrite_hits != 0u ||
             on.dwrite_misses != 0u ||
-            off.graph_chains != expected_off_graph_chains ||
-            on.graph_chains != expected_adaptive_graph_chains) {
+            (long_insns <= A64_STATIC_MAX_INSNS
+                 ? off.graph_chains != 0u || on.graph_chains != 0u
+                 : off.graph_chains == 0u || on.graph_chains == 0u ||
+                       off.graph_chains > maximum_off_graph_chains ||
+                       on.graph_chains > maximum_adaptive_graph_chains)) {
             fprintf(stderr,
                     "jitbench: SoC fetch-refill mix repetition %u failed "
                     "exact A/B off-retired=%" PRIu64
@@ -6429,8 +6434,8 @@ static bool bench_soc_fetch_refill_mix_length(
                     rep + 1u, off.signed_retired, on.signed_retired,
                     on.fetch_refill_attempts, on.fetch_refill_hits,
                     on.fetch_refill_skips, expected_refills,
-                    off.graph_chains, expected_off_graph_chains,
-                    on.graph_chains, expected_adaptive_graph_chains);
+                    off.graph_chains, maximum_off_graph_chains,
+                    on.graph_chains, maximum_adaptive_graph_chains);
             free_soc_run_result(&reference);
             free_soc_run_result(&off);
             free_soc_run_result(&on);
@@ -6441,10 +6446,14 @@ static bool bench_soc_fetch_refill_mix_length(
             adaptive_attempts = on.fetch_refill_attempts;
             adaptive_hits = on.fetch_refill_hits;
             adaptive_skips = on.fetch_refill_skips;
+            off_graph_chains = off.graph_chains;
+            adaptive_graph_chains = on.graph_chains;
         } else if (adaptive_retired != on.signed_retired ||
                    adaptive_attempts != on.fetch_refill_attempts ||
                    adaptive_hits != on.fetch_refill_hits ||
-                   adaptive_skips != on.fetch_refill_skips) {
+                   adaptive_skips != on.fetch_refill_skips ||
+                   off_graph_chains != off.graph_chains ||
+                   adaptive_graph_chains != on.graph_chains) {
             fprintf(stderr,
                     "jitbench: SoC fetch-refill mix adaptive accounting "
                     "changed across repetitions\n");

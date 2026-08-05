@@ -8,6 +8,14 @@ name: fetch-refill-perf
 on:
   workflow_dispatch:
     inputs:
+      mode:
+        description: Focused timing workload
+        required: true
+        default: break-even
+        type: choice
+        options:
+          - break-even
+          - representative
       soc_insns:
         description: Guest instructions per length and repetition
         required: true
@@ -20,8 +28,8 @@ on:
         type: string
 
 jobs:
-  break-even:
-    name: break-even (${{ matrix.os }})
+  measure:
+    name: ${{ inputs.mode }} (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
@@ -48,15 +56,32 @@ jobs:
       - name: Exact fetch-refill call-length sweep
         shell: bash
         env:
+          MODE: ${{ inputs.mode }}
           SOC_INSNS: ${{ inputs.soc_insns }}
           REPS: ${{ inputs.reps }}
         run: |
           set -euo pipefail
-          ./build-perf/core/jitbench \
-            --fetch-refill-break-even-only \
-            --soc-insns "$SOC_INSNS" --reps "$REPS" | tee fetch-refill.log
-          test "$(grep -c '^SOC-FETCH-REFILL-MIX-CURVE ' fetch-refill.log)" -eq 9
-          for length in 2 3 4 6 8 10 16 32 64; do
-            grep -Eq "^SOC-FETCH-REFILL-MIX-CURVE .*long-insns=${length} .*exact-snapshot=yes " \
-              fetch-refill.log
-          done
+          case "$MODE" in
+            break-even)
+              ./build-perf/core/jitbench \
+                --fetch-refill-break-even-only \
+                --soc-insns "$SOC_INSNS" --reps "$REPS" | tee fetch-refill.log
+              test "$(grep -c '^SOC-FETCH-REFILL-MIX-CURVE ' fetch-refill.log)" -eq 9
+              for length in 2 3 4 6 8 10 16 32 64; do
+                grep -Eq "^SOC-FETCH-REFILL-MIX-CURVE .*long-insns=${length} .*exact-snapshot=yes " \
+                  fetch-refill.log
+              done
+              ;;
+            representative)
+              ./build-perf/core/jitbench \
+                --fetch-refill-mix-only \
+                --soc-insns "$SOC_INSNS" --reps "$REPS" | tee fetch-refill.log
+              test "$(grep -c '^SOC-FETCH-REFILL-MIX-CURVE ' fetch-refill.log)" -eq 1
+              grep -Eq '^SOC-FETCH-REFILL-MIX-CURVE .*long-insns=10 .*exact-snapshot=yes ' \
+                fetch-refill.log
+              ;;
+            *)
+              echo "Unknown mode: $MODE" >&2
+              exit 2
+              ;;
+          esac
