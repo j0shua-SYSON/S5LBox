@@ -4,7 +4,7 @@
  * This is deliberately NOT a product-performance claim and not a JIT
  * dispatcher. It translates one small synthetic block once, then compares
  * repeated interpreter execution with both that already-built block and a
- * firmware-independent static-threaded proof. The proof's 26,262 generic
+ * firmware-independent static-threaded proof. The proof's 26,354 generic
  * ISA/register handlers are compiled and signed with the executable; runtime
  * decoding creates data records only. The table includes product-only guarded
  * read/write-cache, exact VFP register/system transfer and terminal A32
@@ -281,6 +281,13 @@ static const uint16_t THUMB_INTEGER_MISC[] = {
      ((uint32_t)(writeback) << 21) | ((uint32_t)(load) << 20) |           \
      ((uint32_t)(rn) << 16) | ((uint32_t)(rd) << 12) |                    \
      (uint32_t)(offset))
+
+#define A32_BLOCK(cond, pre, up, user_bank, writeback, load, rn, list)      \
+    (((uint32_t)(cond) << 28) | UINT32_C(0x08000000) |                    \
+     ((uint32_t)(pre) << 24) | ((uint32_t)(up) << 23) |                   \
+     ((uint32_t)(user_bank) << 22) | ((uint32_t)(writeback) << 21) |      \
+     ((uint32_t)(load) << 20) | ((uint32_t)(rn) << 16) |                  \
+     (uint32_t)(list))
 
 #define VFP_SV(n) ((uint32_t)(n) >> 1)
 #define VFP_SB(n) ((uint32_t)(n) & 1u)
@@ -758,6 +765,15 @@ static bool validate_static_shapes(void) {
         A32_SINGLE_MODE2( 0, 0, 1, 1, 0, 0, 0, 4,  3, 0x014),
     };
     static const unsigned VALID_A32_STORE_UOPS[] = {3u, 4u, 4u, 3u, 3u, 4u};
+    static const uint32_t VALID_A32_STM[] = {
+        A32_BLOCK(14, 0, 1, 0, 0, 0,  4, UINT32_C(0x8109)), /* IA */
+        A32_BLOCK(14, 1, 1, 0, 1, 0, 12, UINT32_C(0x4106)), /* IB! */
+        A32_BLOCK(14, 0, 0, 0, 0, 0, 13, UINT32_C(0x4210)), /* DA */
+        A32_BLOCK(14, 1, 0, 0, 1, 0, 11, UINT32_C(0x8481)), /* DB! */
+        A32_BLOCK( 0, 0, 1, 0, 0, 0,  4, UINT32_C(0x4004)), /* EQ */
+        A32_BLOCK(14, 0, 1, 0, 0, 0,  7, UINT32_C(0xffff)), /* all */
+    };
+    static const unsigned VALID_A32_STM_WORDS[] = {4u, 4u, 3u, 4u, 2u, 16u};
     static const uint32_t INVALID_A32_STORES[] = {
         /* Every invalid writeback alias and operand is rejected before a
          * direct record can exist, matching exec_single_transfer(). */
@@ -767,6 +783,14 @@ static bool validate_static_shapes(void) {
         A32_SINGLE_MODE2(14, 0, 1, 1, 1, 0, 0, 4, 15, 0x004),
         A32_SINGLE_MODE2(14, 1, 1, 1, 0, 0, 0, 4, 3, 0x00f),
         A32_SINGLE_MODE2(14, 1, 1, 1, 0, 0, 0, 4, 3, 0x012),
+    };
+    static const uint32_t INVALID_A32_STM[] = {
+        A32_BLOCK(14, 0, 1, 0, 0, 1, 4, UINT32_C(0x0003)), /* LDM */
+        A32_BLOCK(14, 0, 1, 1, 0, 0, 4, UINT32_C(0x0003)), /* user bank */
+        A32_BLOCK(14, 0, 1, 0, 0, 0,15, UINT32_C(0x0003)), /* PC base */
+        A32_BLOCK(14, 0, 1, 0, 0, 0, 4, UINT32_C(0x0000)), /* empty */
+        A32_BLOCK(14, 0, 1, 0, 1, 0, 4, UINT32_C(0x0010)), /* wb alias */
+        A32_BLOCK(15, 0, 1, 0, 0, 0, 4, UINT32_C(0x0003)), /* cond=1111 */
     };
     static const uint16_t VALID_THUMB_STORES[] = {
         UINT16_C(0x508b), /* STR  r3,[r1,r2] */
@@ -1207,6 +1231,158 @@ static bool validate_static_shapes(void) {
     printf("STATIC-STORE-SHAPE exact=yes a32=6 thumb=7 terminal=yes "
            "read-contract=preserved handlers=%u\n",
            A64_STATIC_HANDLER_COUNT);
+
+    {
+        uint32_t preflight_handlers[60];
+        uint32_t writeback_handlers[15];
+        uint32_t no_writeback_handler = 0u;
+        unsigned preflight_count = 0u;
+
+        for (i = 0u; i < sizeof VALID_A32_STM /
+                             sizeof VALID_A32_STM[0]; i++) {
+            const uint32_t value = VALID_A32_STM[i];
+            const uint32_t pc = UINT32_C(0x1700) + i * 4u;
+            const unsigned words = VALID_A32_STM_WORDS[i];
+            const bool conditional = (value >> 28) < 14u;
+            const unsigned preflight = conditional ? 1u : 0u;
+            const unsigned expected_uops = words + 3u +
+                                            (conditional ? 1u : 0u);
+            uint8_t bytes[4] = {
+                (uint8_t)value, (uint8_t)(value >> 8),
+                (uint8_t)(value >> 16), (uint8_t)(value >> 24)
+            };
+            if (a64_static_decode_read_hits_bytes_at(
+                    bytes, 1u, false, pc, &block) ||
+                !a64_static_decode_memory_hits_bytes_at(
+                    bytes, 1u, false, pc, &block) ||
+                block.insn_count != 1u ||
+                block.uop_count != expected_uops || block.thumb ||
+                !block.touches_memory || block.direct_reads ||
+                !block.direct_writes || !block.runtime_guards || block.vfp ||
+                block.vfp_direct_writes || !block.stm_direct_writes ||
+                block.uops[preflight].handler == 0u ||
+                block.uops[preflight].immediate != words ||
+                block.uops[preflight].pc_value != pc ||
+                block.uops[preflight].metadata != UINT32_C(0x101) ||
+                block.uops[block.uop_count - 2u].handler == 0u ||
+                block.uops[block.uop_count - 2u].immediate != words ||
+                block.uops[block.uop_count - 2u].pc_value != 0u ||
+                block.uops[block.uop_count - 2u].metadata != 0u ||
+                (conditional && block.uops[0].metadata != words + 2u)) {
+                fprintf(stderr, "jitbench: product STM shape failed at %u\n",
+                        i);
+                return false;
+            }
+            for (unsigned j = 1u; j < words; j++) {
+                if (block.uops[preflight + j].handler >=
+                    block.uops[preflight + j + 1u].handler) {
+                    fprintf(stderr,
+                            "jitbench: product STM source order failed at %u\n",
+                            i);
+                    return false;
+                }
+            }
+        }
+
+        /* Prove that every P/U/base dimension reaches distinct signed text. */
+        for (unsigned pre = 0u; pre < 2u; pre++) {
+            for (unsigned up = 0u; up < 2u; up++) {
+                for (unsigned rn = 0u; rn < 15u; rn++) {
+                    const uint32_t value = A32_BLOCK(
+                        14, pre, up, 0, 0, 0, rn, UINT32_C(1));
+                    uint8_t bytes[4] = {
+                        (uint8_t)value, (uint8_t)(value >> 8),
+                        (uint8_t)(value >> 16), (uint8_t)(value >> 24)
+                    };
+                    if (!a64_static_decode_memory_hits_bytes_at(
+                            bytes, 1u, false, UINT32_C(0x1800), &block) ||
+                        block.uop_count != 4u) {
+                        fprintf(stderr, "jitbench: STM preflight family gap\n");
+                        return false;
+                    }
+                    for (unsigned j = 0u; j < preflight_count; j++) {
+                        if (preflight_handlers[j] == block.uops[0].handler) {
+                            fprintf(stderr,
+                                    "jitbench: duplicate STM preflight handler\n");
+                            return false;
+                        }
+                    }
+                    preflight_handlers[preflight_count++] =
+                        block.uops[0].handler;
+                    if (!no_writeback_handler)
+                        no_writeback_handler = block.uops[2].handler;
+                    else if (no_writeback_handler != block.uops[2].handler) {
+                        fprintf(stderr,
+                                "jitbench: STM no-writeback handler drifted\n");
+                        return false;
+                    }
+                }
+            }
+        }
+        for (unsigned rn = 0u; rn < 15u; rn++) {
+            const unsigned source = (rn + 1u) % 15u;
+            const uint32_t value = A32_BLOCK(
+                14, 0, 1, 0, 1, 0, rn, UINT32_C(1) << source);
+            uint8_t bytes[4] = {
+                (uint8_t)value, (uint8_t)(value >> 8),
+                (uint8_t)(value >> 16), (uint8_t)(value >> 24)
+            };
+            if (!a64_static_decode_memory_hits_bytes_at(
+                    bytes, 1u, false, UINT32_C(0x1900), &block) ||
+                block.uop_count != 4u ||
+                block.uops[2].handler == no_writeback_handler) {
+                fprintf(stderr, "jitbench: STM writeback family gap\n");
+                return false;
+            }
+            for (unsigned j = 0u; j < rn; j++) {
+                if (writeback_handlers[j] == block.uops[2].handler) {
+                    fprintf(stderr,
+                            "jitbench: duplicate STM writeback handler\n");
+                    return false;
+                }
+            }
+            writeback_handlers[rn] = block.uops[2].handler;
+        }
+        if (preflight_count != 60u) return false;
+
+        for (i = 0u; i < sizeof INVALID_A32_STM /
+                             sizeof INVALID_A32_STM[0]; i++) {
+            const uint32_t value = INVALID_A32_STM[i];
+            uint8_t bytes[4] = {
+                (uint8_t)value, (uint8_t)(value >> 8),
+                (uint8_t)(value >> 16), (uint8_t)(value >> 24)
+            };
+            if (a64_static_decode_memory_hits_bytes_at(
+                    bytes, 1u, false, UINT32_C(0x1a00), &block)) {
+                fprintf(stderr,
+                        "jitbench: product decoder accepted invalid STM %u\n",
+                        i);
+                return false;
+            }
+        }
+        {
+            const uint32_t values[2] = {
+                VALID_A32_STM[0], A32_DP_IMM(14, 4, 0, 0, 0, 0, 1)
+            };
+            uint8_t bytes[8];
+            for (i = 0u; i < 2u; i++) {
+                bytes[i * 4u + 0u] = (uint8_t)values[i];
+                bytes[i * 4u + 1u] = (uint8_t)(values[i] >> 8);
+                bytes[i * 4u + 2u] = (uint8_t)(values[i] >> 16);
+                bytes[i * 4u + 3u] = (uint8_t)(values[i] >> 24);
+            }
+            if (a64_static_decode_memory_hits_bytes_at(
+                    bytes, 2u, false, UINT32_C(0x1b00), &block)) {
+                fprintf(stderr,
+                        "jitbench: product decoder accepted a mid-block STM\n");
+                return false;
+            }
+        }
+        printf("STATIC-STM-SHAPE exact=yes modes=4 bases=15 sources=16 "
+               "writeback=15 conditional=yes pc-source=yes max-words=16 "
+               "transactional=yes terminal=yes read-contract=preserved "
+               "handlers=%u\n", A64_STATIC_HANDLER_COUNT);
+    }
 
     if (!a64_static_decode_read_hits_bytes_at(
             read_bytes, (unsigned)(sizeof A32_READ_HITS /
@@ -1880,6 +2056,210 @@ static bool validate_static_store_oracles(void) {
            sizeof cases / sizeof cases[0], hit_cases);
     return true;
 }
+
+
+static bool validate_static_stm_oracles(void) {
+    typedef struct {
+        const char *name;
+        uint32_t insn;
+        uint32_t pc;
+        unsigned rn;
+        uint32_t base;
+        uint32_t start;
+        unsigned words;
+        bool executes;
+    } stm_case_t;
+    const uint32_t ordinary = DATA_BASE + UINT32_C(0x800);
+    const uint32_t exact_boundary = DATA_BASE + UINT32_C(0xfc0);
+    const stm_case_t cases[] = {
+        {"ia", A32_BLOCK(14,0,1,0,0,0, 4,UINT32_C(0x8109)),
+         UINT32_C(0x12400), 4u, ordinary, ordinary, 4u, true},
+        {"ib-writeback", A32_BLOCK(14,1,1,0,1,0,12,UINT32_C(0x4106)),
+         UINT32_C(0x12500), 12u, ordinary, ordinary + 4u, 4u, true},
+        {"da-sp-base", A32_BLOCK(14,0,0,0,0,0,13,UINT32_C(0x4210)),
+         UINT32_C(0x12600), 13u, ordinary, ordinary - 8u, 3u, true},
+        {"db-writeback", A32_BLOCK(14,1,0,0,1,0,11,UINT32_C(0x8481)),
+         UINT32_C(0x12700), 11u, ordinary, ordinary - 16u, 4u, true},
+        {"failed-condition", A32_BLOCK(0,0,1,0,0,0,4,UINT32_C(0x4004)),
+         UINT32_C(0x12800), 4u, ordinary, ordinary, 2u, false},
+        {"sixteen-word-boundary",
+         A32_BLOCK(14,0,1,0,0,0,7,UINT32_C(0xffff)),
+         UINT32_C(0x12900), 7u, exact_boundary, exact_boundary, 16u, true},
+    };
+    arm_bus_t write_bus = g_bus;
+    uint8_t *baseline = (uint8_t *)malloc(sizeof g_ram);
+    uint8_t *expected = (uint8_t *)malloc(sizeof g_ram);
+    unsigned hit_words = 0u;
+
+    if (!a64_static_host_available()) {
+        printf("STATIC-STM-ORACLE SKIP: no signed AArch64 handlers\n");
+        free(baseline);
+        free(expected);
+        return true;
+    }
+    if (!baseline || !expected) {
+        fprintf(stderr, "jitbench: STM oracle allocation failed\n");
+        free(baseline);
+        free(expected);
+        return false;
+    }
+    write_bus.host_ram_write = mem_host_ram;
+
+    for (unsigned i = 0u; i < sizeof cases / sizeof cases[0]; i++) {
+        const stm_case_t *sc = &cases[i];
+        arm_cpu_t reference, statik;
+        final_state_t reference_state, static_state;
+        a64_static_block_t block;
+        unsigned completed = 99u;
+        arm_status_t status;
+
+        seed_cpu_at(&reference, &sc->insn, 1u, false, sc->pc);
+        reference.bus = &write_bus;
+        for (unsigned reg = 0u; reg < 15u; reg++)
+            reference.r[reg] = UINT32_C(0x11000000) |
+                               (reg * UINT32_C(0x010101));
+        reference.r[sc->rn] = sc->base;
+        if (sc->executes) oracle_warm_dwrite(&reference, sc->start, true);
+        statik = reference;
+        memcpy(baseline, g_ram, sizeof g_ram);
+
+        if (!a64_static_decode_memory_hits_bytes_at(
+                &g_ram[sc->pc], 1u, false, sc->pc, &block) ||
+            !block.stm_direct_writes) {
+            fprintf(stderr, "jitbench: STM oracle decode failed for %s\n",
+                    sc->name);
+            free(baseline);
+            free(expected);
+            return false;
+        }
+        status = arm_step(&reference);
+        capture_state(&reference_state, &reference, status, JIT_EXIT_NEXT);
+        memcpy(expected, g_ram, sizeof g_ram);
+        memcpy(g_ram, baseline, sizeof g_ram);
+        if (!a64_static_run_memory_hits(&statik, &block, g_ram, sizeof g_ram,
+                                        &completed)) {
+            fprintf(stderr, "jitbench: signed STM refused for %s\n", sc->name);
+            free(baseline);
+            free(expected);
+            return false;
+        }
+        capture_state(&static_state, &statik, ARM_OK, JIT_EXIT_NEXT);
+        if (status != ARM_OK || completed != 1u ||
+            !architectural_states_equal(&reference_state, &static_state) ||
+            memcmp(expected, g_ram, sizeof g_ram) != 0 ||
+            reference.dwrite_hits != statik.dwrite_hits ||
+            reference.dwrite_misses != statik.dwrite_misses ||
+            statik.dwrite_hits != (sc->executes ? sc->words : 0u) ||
+            statik.dwrite_misses != 0u) {
+            fprintf(stderr, "jitbench: signed STM mismatch for %s\n", sc->name);
+            free(baseline);
+            free(expected);
+            return false;
+        }
+        if (sc->executes) hit_words += sc->words;
+    }
+
+    /* A two-block run is refused before its first word. Literal fallback then
+     * owns the complete instruction and must converge with a pure reference,
+     * including the first-block hits and second-block fill. */
+    {
+        const uint32_t insn = A32_BLOCK(
+            14, 0, 1, 0, 0, 0, 4, UINT32_C(0x8109));
+        const uint32_t pc = UINT32_C(0x12a00);
+        const uint32_t start = DATA_BASE + UINT32_C(0x13f8);
+        arm_cpu_t reference, statik, before;
+        final_state_t reference_state, static_state;
+        a64_static_block_t block;
+        unsigned completed = 99u;
+        uint64_t ram_before;
+
+        seed_cpu_at(&reference, &insn, 1u, false, pc);
+        reference.bus = &write_bus;
+        reference.r[0] = UINT32_C(0x01020304);
+        reference.r[3] = UINT32_C(0x11223344);
+        reference.r[4] = start;
+        reference.r[8] = UINT32_C(0x55667788);
+        reference.r[15] = pc;
+        oracle_warm_dwrite(&reference, start, true);
+        statik = reference;
+        before = statik;
+        ram_before = hash_ram();
+        if (!a64_static_decode_memory_hits_bytes_at(
+                &g_ram[pc], 1u, false, pc, &block) ||
+            !a64_static_run_memory_hits(&statik, &block, g_ram, sizeof g_ram,
+                                        &completed) || completed != 0u ||
+            memcmp(statik.r, before.r, sizeof statik.r) != 0 ||
+            statik.cpsr != before.cpsr || statik.cycles != before.cycles ||
+            statik.dwrite_hits != before.dwrite_hits ||
+            statik.dwrite_misses != before.dwrite_misses ||
+            hash_ram() != ram_before) {
+            fprintf(stderr, "jitbench: cross-block STM was not transactional\n");
+            free(baseline);
+            free(expected);
+            return false;
+        }
+        if (arm_step(&reference) != ARM_OK || arm_step(&statik) != ARM_OK) {
+            free(baseline);
+            free(expected);
+            return false;
+        }
+        capture_state(&reference_state, &reference, ARM_OK, JIT_EXIT_NEXT);
+        capture_state(&static_state, &statik, ARM_OK, JIT_EXIT_NEXT);
+        if (!architectural_states_equal(&reference_state, &static_state) ||
+            reference.dwrite_hits != statik.dwrite_hits ||
+            reference.dwrite_misses != statik.dwrite_misses) {
+            fprintf(stderr, "jitbench: cross-block STM fallback diverged\n");
+            free(baseline);
+            free(expected);
+            return false;
+        }
+    }
+
+    /* Cold cache, unaligned addressing and revoked write consent all return a
+     * zero prefix without changing registers, counters, flags, cycles or RAM. */
+    for (unsigned refusal = 0u; refusal < 3u; refusal++) {
+        const uint32_t insn = A32_BLOCK(
+            14, 0, 1, 0, 1, 0, 12, UINT32_C(0x4106));
+        const uint32_t pc = UINT32_C(0x12b00) + refusal * 0x100u;
+        arm_cpu_t statik, before;
+        a64_static_block_t block;
+        unsigned completed = 99u;
+        uint64_t ram_before;
+
+        seed_cpu_at(&statik, &insn, 1u, false, pc);
+        statik.bus = refusal == 2u ? &g_bus : &write_bus;
+        statik.r[12] = ordinary + (refusal == 1u ? 1u : 0u);
+        if (refusal != 0u)
+            oracle_warm_dwrite(&statik, statik.r[12] + 4u, true);
+        before = statik;
+        ram_before = hash_ram();
+        if (!a64_static_decode_memory_hits_bytes_at(
+                &g_ram[pc], 1u, false, pc, &block) ||
+            !a64_static_run_memory_hits(&statik, &block, g_ram, sizeof g_ram,
+                                        &completed) || completed != 0u ||
+            memcmp(statik.r, before.r, sizeof statik.r) != 0 ||
+            statik.cpsr != before.cpsr || statik.cycles != before.cycles ||
+            statik.dwrite_hits != before.dwrite_hits ||
+            statik.dwrite_misses != before.dwrite_misses ||
+            hash_ram() != ram_before) {
+            fprintf(stderr, "jitbench: STM refusal %u changed state\n",
+                    refusal);
+            free(baseline);
+            free(expected);
+            return false;
+        }
+    }
+
+    free(baseline);
+    free(expected);
+    printf("STATIC-STM-ORACLE exact=yes cases=%zu hit-words=%u modes=4 "
+           "writeback=yes pc-source=yes conditional=yes max-words=16 "
+           "one-block=yes cross-block-rollback=yes alignment=yes "
+           "cold-cache=yes consent=yes\n",
+           sizeof cases / sizeof cases[0], hit_words);
+    return true;
+}
+
 
 static void seed_vfp_oracle(arm_cpu_t *cpu, const uint32_t *program,
                             unsigned insns, uint32_t pc, bool enabled) {
@@ -4452,6 +4832,7 @@ int main(int argc, char **argv) {
     }
     if (!validate_static_read_oracles()) return 1;
     if (!validate_static_store_oracles()) return 1;
+    if (!validate_static_stm_oracles()) return 1;
     if (!validate_static_vfp_register_oracles()) return 1;
     if (!validate_static_vfp_compare_oracles()) return 1;
     if (!validate_static_vfp_widen_oracles()) return 1;

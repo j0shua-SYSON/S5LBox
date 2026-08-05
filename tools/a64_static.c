@@ -44,7 +44,11 @@ enum {
     A64S_DIRECT_WRITE = A64S_DIRECT_READ + A64S_READ_KIND_COUNT * 15u,
     A64S_DIRECT_WRITE_WB = A64S_DIRECT_WRITE + 3u * 16u,
     A64S_DIRECT_WRITE_WB_UNPRIV = A64S_DIRECT_WRITE_WB + 3u * 16u * 15u,
-    A64S_VFP_CORE_TO_S = A64S_DIRECT_WRITE_WB_UNPRIV + 3u * 16u * 15u,
+    A64S_STM_PREFLIGHT = A64S_DIRECT_WRITE_WB_UNPRIV + 3u * 16u * 15u,
+    A64S_STM_COMMIT = A64S_STM_PREFLIGHT + 4u * 15u,
+    A64S_STM_FINISH = A64S_STM_COMMIT + 16u,
+    A64S_STM_FINISH_WB = A64S_STM_FINISH + 1u,
+    A64S_VFP_CORE_TO_S = A64S_STM_FINISH_WB + 15u,
     A64S_VFP_S_TO_CORE = A64S_VFP_CORE_TO_S + 15u,
     A64S_VFP_CORE_TO_PAIR = A64S_VFP_S_TO_CORE + 15u,
     A64S_VFP_PAIR_TO_CORE = A64S_VFP_CORE_TO_PAIR + 15u * 15u,
@@ -234,6 +238,19 @@ static uint32_t direct_write_wb(unsigned kind, unsigned rd, unsigned rn,
     return base + (kind * 16u + rd) * 15u + rn;
 }
 
+static uint32_t stm_preflight(bool pre, bool up, unsigned rn) {
+    return A64S_STM_PREFLIGHT +
+           (((pre ? 1u : 0u) * 2u + (up ? 1u : 0u)) * 15u + rn);
+}
+
+static uint32_t stm_commit(unsigned rd) {
+    return A64S_STM_COMMIT + rd;
+}
+
+static uint32_t stm_finish(bool writeback, unsigned rn) {
+    return writeback ? A64S_STM_FINISH_WB + rn : A64S_STM_FINISH;
+}
+
 static uint32_t vfp_core_to_s(unsigned rt) {
     return A64S_VFP_CORE_TO_S + rt;
 }
@@ -308,6 +325,8 @@ static bool handler_is_direct_read(uint32_t handler) {
 
 static bool handler_is_direct_write(uint32_t handler) {
     return (handler >= A64S_DIRECT_WRITE &&
+            handler < A64S_STM_PREFLIGHT) ||
+           (handler >= A64S_STM_FINISH &&
             handler < A64S_VFP_CORE_TO_S) ||
            (handler >= A64S_VFP_DIRECT_WRITE32 &&
             handler <= A64S_VFP_DIRECT_WRITE64);
@@ -320,12 +339,28 @@ static bool handler_is_vfp_direct_write(uint32_t handler) {
 
 static bool handler_is_direct_write_wb(uint32_t handler) {
     return handler >= A64S_DIRECT_WRITE_WB &&
-           handler < A64S_VFP_CORE_TO_S;
+           handler < A64S_STM_PREFLIGHT;
 }
 
 static bool handler_is_direct_write_unpriv(uint32_t handler) {
     return handler >= A64S_DIRECT_WRITE_WB_UNPRIV &&
-           handler < A64S_VFP_CORE_TO_S;
+           handler < A64S_STM_PREFLIGHT;
+}
+
+static bool handler_is_stm_preflight(uint32_t handler) {
+    return handler >= A64S_STM_PREFLIGHT && handler < A64S_STM_COMMIT;
+}
+
+static bool handler_is_stm_commit(uint32_t handler) {
+    return handler >= A64S_STM_COMMIT && handler < A64S_STM_FINISH;
+}
+
+static bool handler_is_stm_finish(uint32_t handler) {
+    return handler >= A64S_STM_FINISH && handler < A64S_VFP_CORE_TO_S;
+}
+
+static bool handler_is_stm_finish_wb(uint32_t handler) {
+    return handler >= A64S_STM_FINISH_WB && handler < A64S_VFP_CORE_TO_S;
 }
 
 static bool handler_is_vfp(uint32_t handler) {
@@ -343,7 +378,10 @@ static bool handler_is_indirect_branch(uint32_t handler) {
 
 static bool handler_is_runtime_guarded(uint32_t handler) {
     return handler_is_direct_read(handler) ||
-           handler_is_direct_write(handler) || handler_is_vfp(handler) ||
+           handler_is_stm_preflight(handler) ||
+           (handler_is_direct_write(handler) &&
+            !handler_is_stm_finish(handler)) ||
+           handler_is_vfp(handler) ||
            handler_is_indirect_branch(handler);
 }
 
@@ -603,6 +641,43 @@ static bool decode_arm(uint32_t insn, unsigned index, unsigned insns,
             insn, pc + index * 4u + 8u, write_hits, op, written)) {
         if (guard) guard->metadata = *written;
         *written += count;
+        return true;
+    }
+
+    if ((insn & UINT32_C(0x0e000000)) == UINT32_C(0x08000000)) {
+        const bool pre = (insn & (1u << 24)) != 0u;
+        const bool up = (insn & (1u << 23)) != 0u;
+        const bool user_bank = (insn & (1u << 22)) != 0u;
+        const bool writeback = (insn & (1u << 21)) != 0u;
+        const bool load = (insn & (1u << 20)) != 0u;
+        const unsigned rn = (insn >> 16) & 15u;
+        const uint32_t list = insn & UINT32_C(0xffff);
+        unsigned n = 0u;
+
+        /* Ordinary STM is a terminal, transactional DWRITE instruction. The
+         * interpreter retains LDM, user-bank transfers, empty lists and every
+         * writeback/base alias. The firmware observer found no base-in-list
+         * writeback candidate, so refusing even its one defined ordering keeps
+         * this first signed contract smaller without losing measured coverage. */
+        if (!read_hits || !write_hits || index + 1u != insns || load ||
+            user_bank || rn == 15u || list == 0u ||
+            (writeback && (list & (1u << rn)) != 0u))
+            return false;
+        for (unsigned i = 0u; i < 16u; i++)
+            if ((list & (1u << i)) != 0u) n++;
+
+        op->handler = stm_preflight(pre, up, rn);
+        op->immediate = n;
+        op++;
+        for (unsigned i = 0u; i < 16u; i++) {
+            if ((list & (1u << i)) == 0u) continue;
+            op->handler = stm_commit(i);
+            op++;
+        }
+        op->handler = stm_finish(writeback, rn);
+        op->immediate = n;
+        if (guard) guard->metadata = n + 2u;
+        *written = count + n + 2u;
         return true;
     }
 
@@ -1089,28 +1164,35 @@ static bool decode_program_at(const void *program, unsigned insns, bool thumb,
         return false;
     memset(out, 0, sizeof *out);
     for (unsigned i = 0; i < insns; i++) {
+        /* Decode out of line so a large terminal STM cannot overrun the final
+         * slots while a longer candidate is being shortened. One instruction
+         * needs at most guard + preflight + sixteen commits + finish records. */
+        a64_static_uop_t decoded[19u] = {{0u, 0u, 0u, 0u}};
         bool ok;
         unsigned added = 0u;
         if (thumb) {
             const uint8_t *p = bytes + i * 2u;
             ok = decode_thumb(guest_bytes ? read_le16(p) : read_native16(p),
                               i, insns, pc, read_hits, write_hits,
-                              &out->uops[uop_count], &added);
+                              decoded, &added);
             if (ok && read_hits)
                 for (unsigned j = 0u; j < added; j++)
                     if (handler_touches_memory(
-                            out->uops[uop_count + j].handler))
+                            decoded[j].handler))
                         ok = false;
         } else {
             const uint8_t *p = bytes + i * 4u;
             ok = decode_arm(guest_bytes ? read_le32(p) : read_native32(p),
                             i, insns, pc, read_hits, write_hits,
-                            &out->uops[uop_count], &added);
+                            decoded, &added);
         }
-        if (!ok || !added || added > A64_STATIC_MAX_UOPS - uop_count) {
+        if (!ok || !added || added > 19u ||
+            added > A64_STATIC_MAX_UOPS - uop_count) {
             memset(out, 0, sizeof *out);
             return false;
         }
+        memcpy(&out->uops[uop_count], decoded,
+               added * sizeof out->uops[0]);
         for (unsigned j = 0u; j < added; j++) {
             uint32_t handler = out->uops[uop_count + j].handler;
             if (handler >= A64S_HANDLER_COUNT ||
@@ -1149,6 +1231,8 @@ static bool decode_program_at(const void *program, unsigned insns, bool thumb,
                 out->direct_writes = true;
                 if (handler_is_vfp_direct_write(handler))
                     out->vfp_direct_writes = true;
+                if (handler_is_stm_finish(handler))
+                    out->stm_direct_writes = true;
             }
             if (handler_is_vfp(handler)) out->vfp = true;
         }
@@ -1299,6 +1383,46 @@ typedef enum {
     A64S_RUN_MEMORY_HITS
 } a64s_run_kind_t;
 
+static unsigned stm_semantic_span(const a64_static_block_t *block,
+                                  unsigned i, unsigned end) {
+    const a64_static_uop_t *preflight;
+    const a64_static_uop_t *finish;
+    uint32_t register_mask = 0u;
+    unsigned n;
+    unsigned rn;
+    unsigned previous = 0u;
+
+    if (!block || i >= end ||
+        !handler_is_stm_preflight(block->uops[i].handler))
+        return 0u;
+    preflight = &block->uops[i];
+    n = preflight->immediate;
+    rn = (preflight->handler - A64S_STM_PREFLIGHT) % 15u;
+    if (!n || n > 16u || i + n + 1u >= end) return 0u;
+
+    for (unsigned j = 0u; j < n; j++) {
+        const a64_static_uop_t *commit = &block->uops[i + 1u + j];
+        unsigned reg;
+        if (!handler_is_stm_commit(commit->handler) || commit->immediate != 0u ||
+            commit->pc_value != 0u || commit->metadata != 0u)
+            return 0u;
+        reg = commit->handler - A64S_STM_COMMIT;
+        if (j != 0u && reg <= previous) return 0u;
+        previous = reg;
+        register_mask |= 1u << reg;
+    }
+
+    finish = &block->uops[i + n + 1u];
+    if (!handler_is_stm_finish(finish->handler) || finish->immediate != n ||
+        finish->pc_value != 0u || finish->metadata != 0u)
+        return 0u;
+    if (handler_is_stm_finish_wb(finish->handler) &&
+        (finish->handler - A64S_STM_FINISH_WB != rn ||
+         (register_mask & (1u << rn)) != 0u))
+        return 0u;
+    return n + 2u;
+}
+
 static unsigned semantic_span(const a64_static_block_t *block, unsigned i,
                               unsigned end) {
     uint32_t handler;
@@ -1307,6 +1431,8 @@ static unsigned semantic_span(const a64_static_block_t *block, unsigned i,
     if (handler_is_terminal_branch(handler)) return 1u;
     if (handler_is_condition(handler) || handler == A64S_END)
         return 0u;
+    if (handler_is_stm_preflight(handler))
+        return stm_semantic_span(block, i, end);
     if (handler_is_shift(handler)) {
         if (i + 1u < end && handler_is_dp_reg(block->uops[i + 1u].handler))
             return 2u;
@@ -1325,7 +1451,7 @@ static unsigned semantic_span(const a64_static_block_t *block, unsigned i,
     }
     if (handler_is_dp_reg(handler) || handler_is_addr_reg(handler) ||
         handler_is_direct_read(handler) ||
-        handler_is_direct_write(handler))
+        handler_is_direct_write(handler) || handler_is_stm_commit(handler))
         return 0u;
     if (handler_is_vfp(handler)) return 1u;
     return 1u;
@@ -1362,13 +1488,13 @@ static bool validate_run(const arm_cpu_t *cpu,
     bool saw_runtime_guard = false;
     bool saw_vfp = false;
     bool saw_vfp_direct_write = false;
+    bool saw_stm_direct_write = false;
     bool saw_dynamic_exit = false;
     bool saw_indirect_exit = false;
 
     if (!cpu || !block || !blocks || !ram ||
         !block->insn_count || block->insn_count > A64_STATIC_MAX_INSNS ||
         block->uop_count < block->insn_count ||
-        block->uop_count > block->insn_count * 4u + 1u ||
         block->uop_count > A64_STATIC_MAX_UOPS ||
         block->uops[block->uop_count - 1u].handler != A64S_END ||
         block->uops[block->uop_count - 1u].immediate != block->exit_pc ||
@@ -1407,8 +1533,11 @@ static bool validate_run(const arm_cpu_t *cpu,
         if (handler_is_direct_write(handler)) {
             const uint32_t immediate = block->uops[j].immediate;
             const bool vfp_write = handler_is_vfp_direct_write(handler);
+            const bool stm_write = handler_is_stm_finish(handler);
             if (saw_direct_write || j + 1u != end ||
-                (vfp_write
+                (stm_write
+                     ? immediate == 0u || immediate > 16u
+                     : vfp_write
                      ? (handler == A64S_VFP_DIRECT_WRITE32
                             ? immediate > 31u
                             : immediate > 30u || (immediate & 1u) != 0u)
@@ -1420,6 +1549,7 @@ static bool validate_run(const arm_cpu_t *cpu,
                 return false;
             saw_direct_write = true;
             if (vfp_write) saw_vfp_direct_write = true;
+            if (stm_write) saw_stm_direct_write = true;
         }
         if (handler_is_vfp(handler)) saw_vfp = true;
         if (handler_is_terminal_branch(handler)) {
@@ -1443,6 +1573,7 @@ static bool validate_run(const arm_cpu_t *cpu,
         block->runtime_guards != saw_runtime_guard ||
         block->vfp != saw_vfp ||
         block->vfp_direct_writes != saw_vfp_direct_write ||
+        block->stm_direct_writes != saw_stm_direct_write ||
         block->dynamic_exit != saw_dynamic_exit ||
         block->indirect_exit != saw_indirect_exit ||
         (kind == A64S_RUN_FLAT && (saw_direct_read || saw_direct_write)) ||
@@ -1553,6 +1684,7 @@ static bool validate_decoded_hits_at(const a64_static_block_t *block,
     bool terminal_indirect;
     bool terminal_write;
     bool terminal_vfp_write;
+    bool terminal_stm_write;
     if (!block || !remaining || !block->insn_count ||
         block->insn_count > remaining ||
         block->insn_count > A64_STATIC_MAX_INSNS || !block->uop_count ||
@@ -1570,8 +1702,12 @@ static bool validate_decoded_hits_at(const a64_static_block_t *block,
     terminal_vfp_write = terminal_write &&
         handler_is_vfp_direct_write(
             block->uops[block->uop_count - 2u].handler);
+    terminal_stm_write = terminal_write &&
+        handler_is_stm_finish(
+            block->uops[block->uop_count - 2u].handler);
     if (block->direct_writes != terminal_write ||
-        block->vfp_direct_writes != terminal_vfp_write)
+        block->vfp_direct_writes != terminal_vfp_write ||
+        block->stm_direct_writes != terminal_stm_write)
         return false;
     terminal_dynamic = block->uop_count > 1u &&
         handler_is_terminal_branch(

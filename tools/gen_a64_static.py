@@ -19,7 +19,7 @@ CONDITIONS = (
     "eq", "ne", "cs", "cc", "mi", "pl", "vs", "vc",
     "hi", "ls", "ge", "lt", "gt", "le",
 )
-EXPECTED_HANDLERS = 26262
+EXPECTED_HANDLERS = 26354
 
 READ_KINDS = (
     ("word", "ldr", 4),
@@ -633,6 +633,113 @@ def direct_write_body(mnemonic: str, width: int, rd: int,
         "    ldr x4, [x3, #64]",
         "    ldr x5, [x4]",
         "    add x5, x5, #1",
+        "    str x5, [x4]",
+        "    msr nzcv, x7",
+        *next_dispatch(),
+    ])
+    return body
+
+
+def stm_preflight_body(pre: bool, up: bool, rn: int) -> list[str]:
+    """Prove one aligned DWRITE block before an ordinary STM commits.
+
+    x7 retains guest NZCV, w9 the optional writeback value, w10 PC+12 and x17
+    the advancing host pointer across the source handlers. No architectural
+    state changes until every runtime proof below has succeeded.
+    """
+    body = [
+        "    mrs x7, nzcv",
+        "    cbnz x3, 1f",
+        "    b .La64s_direct_miss",
+        "1:",
+        "    ldur w5, [x13, #-12]",
+        "    cbz w5, .La64s_direct_miss",
+        "    cmp w5, #16",
+        "    b.ls 1f",
+        "    b .La64s_direct_miss",
+        "1:",
+    ]
+    loads, base = read_guest_register(rn, 4)
+    body.extend(loads)
+    if up:
+        body.append(f"    {'add w17, ' + base + ', #4' if pre else 'mov w17, ' + base}")
+        body.append(f"    add w9, {base}, w5, lsl #2")
+    else:
+        body.append(f"    sub w9, {base}, w5, lsl #2")
+        body.append("    mov w17, w9" if pre else "    add w17, w9, #4")
+    body.extend([
+        # arm_step owns SCTLR.A/U and legacy align-down behavior.
+        "    tst w17, #3",
+        "    b.eq 1f",
+        "    b .La64s_direct_miss",
+        "1:",
+        # A single validated DWRITE entry covers exactly one 1 KiB block. This
+        # check also rejects a wrapped 32-bit run at the top of guest VA space.
+        "    and w4, w17, #0x3ff",
+        "    add w4, w4, w5, lsl #2",
+        "    cmp w4, #1024",
+        "    b.ls 1f",
+        "    b .La64s_direct_miss",
+        "1:",
+        # STM's R15 source is the instruction address plus twelve.
+        "    ldur w10, [x13, #-8]",
+        "    add w10, w10, #12",
+        # The table exists only under the frontend's explicit write consent.
+        "    ldr x6, [x3, #56]",
+        "    cbnz x6, 1f",
+        "    b .La64s_direct_miss",
+        "1:",
+        "    ldr w4, [x3, #20]",
+        "    lsr w5, w17, #10",
+        "    add w5, w5, w4, lsl #5",
+        "    and w5, w5, #63",
+        "    add x6, x6, w5, uxtw #4",
+        "    ldr x16, [x6, #0]",
+        "    cbnz x16, 1f",
+        "    b .La64s_direct_miss",
+        "1:",
+        "    lsr w4, w17, #10",
+        "    lsl w4, w4, #10",
+        "    ldr w5, [x3, #20]",
+        "    orr w4, w4, w5",
+        "    ldr w5, [x6, #8]",
+        "    cmp w5, w4",
+        "    b.eq 1f",
+        "    b .La64s_direct_miss",
+        "1:",
+        "    ldr w4, [x6, #12]",
+        "    ldr w5, [x3, #16]",
+        "    cmp w4, w5",
+        "    b.eq 1f",
+        "    b .La64s_direct_miss",
+        "1:",
+        "    and w4, w17, #0x3ff",
+        "    add x17, x16, w4, uxtw",
+        *next_dispatch(),
+    ])
+    return body
+
+
+def stm_commit_body(rd: int) -> list[str]:
+    if rd == 15:
+        body = ["    str w10, [x17], #4"]
+    else:
+        loads, source = read_guest_register(rd, 4)
+        body = [*loads, f"    str {source}, [x17], #4"]
+    body.extend(next_dispatch())
+    return body
+
+
+def stm_finish_body(rn: int | None) -> list[str]:
+    body: list[str] = []
+    if rn is not None:
+        body.extend(write_guest_register(rn, "w9"))
+    body.extend([
+        # Match one dwrite_hit() for each architectural write32 call.
+        "    ldur w6, [x13, #-12]",
+        "    ldr x4, [x3, #64]",
+        "    ldr x5, [x4]",
+        "    add x5, x5, x6",
         "    str x5, [x4]",
         "    msr nzcv, x7",
         *next_dispatch(),
@@ -1442,6 +1549,22 @@ def build_handlers() -> list[tuple[str, list[str]]]:
                 handlers.append((label,
                                  direct_write_body(mnemonic, width, rd,
                                                    rn, True)))
+
+    # Ordinary A32 STM separates its all-or-nothing one-block proof from the
+    # ordered source commits. Addressing mode and base select sixty preflights;
+    # source and optional writeback registers add thirty-two compact handlers.
+    for pre in (False, True):
+        for up in (False, True):
+            for rn in range(15):
+                label = f".La64s_stm_preflight_{int(pre)}_{int(up)}_{rn}"
+                handlers.append((label, stm_preflight_body(pre, up, rn)))
+    for rd in range(16):
+        handlers.append((f".La64s_stm_commit_{rd}",
+                         stm_commit_body(rd)))
+    handlers.append((".La64s_stm_finish", stm_finish_body(None)))
+    for rn in range(15):
+        handlers.append((f".La64s_stm_finish_wb_{rn}",
+                         stm_finish_body(rn)))
 
     # VFP register and system-state operations are ordinary signed text too.
     # Only core-register operands need enumerated handlers; VFP register
