@@ -349,6 +349,29 @@ static const uint32_t A32_SOC_VSTR[] = {
     UINT32_C(0xeaffffef),
 };
 
+/* Four ordinary STM instructions in a sixteen-instruction loop. Their twelve
+ * write32 calls cover IA/IB/DA/DB and PC+12 while every run stays in one 1 KiB
+ * DWRITE block. This deliberately dense 25% block-store mix isolates the
+ * tranche; it is not a restored-firmware mix or phone-FPS claim. */
+static const uint32_t A32_SOC_STM[] = {
+    UINT32_C(0xe2800001),
+    A32_BLOCK(14, 0, 1, 0, 0, 0, 7, UINT32_C(0x0003)), /* IA, 2 words */
+    UINT32_C(0xe2811003),
+    A32_BLOCK(14, 1, 1, 0, 0, 0, 7, UINT32_C(0x001c)), /* IB, 3 words */
+    UINT32_C(0xe0222001),
+    UINT32_C(0xe2833001),
+    A32_BLOCK(14, 0, 0, 0, 0, 0, 7, UINT32_C(0x0060)), /* DA, 2 words */
+    UINT32_C(0xe0244003),
+    UINT32_C(0xe2855001),
+    A32_BLOCK(14, 1, 0, 0, 0, 0, 7, UINT32_C(0xc700)), /* DB, 5 words */
+    UINT32_C(0xe0466005),
+    UINT32_C(0xe0800006),
+    UINT32_C(0xe0211005),
+    UINT32_C(0xe2422001),
+    UINT32_C(0xe0833002),
+    UINT32_C(0xeaffffef),
+};
+
 /* All sixteen A32 immediate data-processing opcodes. This deliberately uses
  * r8-r14, PC as an input, arithmetic and logical flag writes, both rotated and
  * unrotated immediates, and carry-consuming operations. */
@@ -3641,6 +3664,7 @@ typedef enum {
     SOC_ENTRY_GRAPH_EXTENDED,
     SOC_ENTRY_GRAPH_EXTENDED_INDIRECT_OFF,
     SOC_ENTRY_GRAPH_EXTENDED_VSTR_OFF,
+    SOC_ENTRY_GRAPH_EXTENDED_STM_OFF,
     SOC_ENTRY_GRAPH_EXTENDED_WRITES
 } soc_entry_path_t;
 
@@ -3654,6 +3678,8 @@ static const char *soc_entry_path_name(soc_entry_path_t path) {
         return "graph-extended-indirect-off";
     case SOC_ENTRY_GRAPH_EXTENDED_VSTR_OFF:
         return "graph-extended-vstr-off";
+    case SOC_ENTRY_GRAPH_EXTENDED_STM_OFF:
+        return "graph-extended-stm-off";
     case SOC_ENTRY_GRAPH_EXTENDED_WRITES:
         return "graph-extended-writes";
     }
@@ -3748,16 +3774,19 @@ static bool run_soc_entry_configured(const soc_entry_setup_t *setup,
                       path == SOC_ENTRY_GRAPH_EXTENDED ||
                       path == SOC_ENTRY_GRAPH_EXTENDED_INDIRECT_OFF ||
                       path == SOC_ENTRY_GRAPH_EXTENDED_VSTR_OFF ||
+                      path == SOC_ENTRY_GRAPH_EXTENDED_STM_OFF ||
                       path == SOC_ENTRY_GRAPH_EXTENDED_WRITES;
     bool extended_path = path == SOC_ENTRY_GRAPH_EXTENDED ||
                          path == SOC_ENTRY_GRAPH_EXTENDED_INDIRECT_OFF ||
                          path == SOC_ENTRY_GRAPH_EXTENDED_VSTR_OFF ||
+                         path == SOC_ENTRY_GRAPH_EXTENDED_STM_OFF ||
                          path == SOC_ENTRY_GRAPH_EXTENDED_WRITES;
     bool indirect_off_path =
         path == SOC_ENTRY_GRAPH_EXTENDED_INDIRECT_OFF;
     bool vstr_off_path = path == SOC_ENTRY_GRAPH_EXTENDED_VSTR_OFF;
+    bool stm_off_path = path == SOC_ENTRY_GRAPH_EXTENDED_STM_OFF;
     bool direct_write_path = path == SOC_ENTRY_GRAPH_EXTENDED_WRITES ||
-                             vstr_off_path;
+                             vstr_off_path || stm_off_path;
 
     if (!setup || !loop_insns || !out ||
         path > SOC_ENTRY_GRAPH_EXTENDED_WRITES)
@@ -3794,6 +3823,11 @@ static bool run_soc_entry_configured(const soc_entry_setup_t *setup,
     if (vstr_off_path &&
         !s5l8900_static_a64_set_vstr(&machine, false)) {
         fprintf(stderr, "jitbench: SoC VSTR-off control unavailable\n");
+        goto done;
+    }
+    if (stm_off_path &&
+        !s5l8900_static_a64_set_stm(&machine, false)) {
+        fprintf(stderr, "jitbench: SoC STM-off control unavailable\n");
         goto done;
     }
     if (graph_path &&
@@ -3919,6 +3953,16 @@ static bool run_soc_vstr_path(uint64_t total, soc_entry_path_t path,
                              sizeof A32_SOC_VSTR[0]),
         .seed_r7 = DATA_BASE,
         .vfp_workload = true,
+    };
+    return run_soc_entry_configured(&setup, setup.length, total, path, out);
+}
+
+static bool run_soc_stm_path(uint64_t total, soc_entry_path_t path,
+                             soc_run_result_t *out) {
+    const soc_entry_setup_t setup = {
+        .program = A32_SOC_STM,
+        .length = (unsigned)(sizeof A32_SOC_STM / sizeof A32_SOC_STM[0]),
+        .seed_r7 = DATA_BASE + UINT32_C(0x100),
     };
     return run_soc_entry_configured(&setup, setup.length, total, path, out);
 }
@@ -4589,6 +4633,163 @@ done:
     return ok;
 }
 
+/* Isolate ordinary one-block STM with the same three-way snapshot gate as
+ * VSTR. Both signed arms retain direct-write consent and every older feature;
+ * the off arm changes only STM admission. Four block stores issue twelve
+ * write32 calls per loop across IA/IB/DA/DB. This synthetic 25% STM mix is a
+ * native-contract measurement, not firmware timing or phone FPS. */
+static bool bench_soc_stm(uint64_t requested, unsigned reps) {
+    const unsigned length =
+        (unsigned)(sizeof A32_SOC_STM / sizeof A32_SOC_STM[0]);
+    const uint64_t stm_per_loop = 4u;
+    const uint64_t dwrite_words_per_loop = 12u;
+    double *reference_rates = NULL;
+    double *off_rates = NULL;
+    double *on_rates = NULL;
+    uint64_t total;
+    uint64_t expected_stm;
+    uint64_t expected_dwrite_hits;
+    uint64_t expected_off_retired;
+    uint64_t off_chains = 0u;
+    uint64_t on_chains = 0u;
+    bool ok = false;
+
+    if (length != 16u ||
+        requested > UINT64_MAX - (uint64_t)(length - 1u)) {
+        fprintf(stderr, "jitbench: SoC STM shape failed\n");
+        return false;
+    }
+    total = ((requested + length - 1u) / length) * length;
+    expected_stm = (total / length) * stm_per_loop;
+    expected_dwrite_hits =
+        (total / length) * dwrite_words_per_loop;
+    expected_off_retired = total - expected_stm;
+    reference_rates = (double *)calloc(reps, sizeof *reference_rates);
+    off_rates = (double *)calloc(reps, sizeof *off_rates);
+    on_rates = (double *)calloc(reps, sizeof *on_rates);
+    if (!reference_rates || !off_rates || !on_rates) {
+        fprintf(stderr, "jitbench: SoC STM out of memory\n");
+        goto done;
+    }
+
+    for (unsigned rep = 0u; rep < reps; rep++) {
+        soc_run_result_t reference = {0};
+        soc_run_result_t off = {0};
+        soc_run_result_t on = {0};
+        const char *order;
+        bool ran;
+
+        if (rep % 3u == 0u) {
+            order = "reference-off-on";
+            ran = run_soc_stm_path(total, SOC_ENTRY_REFERENCE, &reference) &&
+                  run_soc_stm_path(
+                      total, SOC_ENTRY_GRAPH_EXTENDED_STM_OFF, &off) &&
+                  run_soc_stm_path(
+                      total, SOC_ENTRY_GRAPH_EXTENDED_WRITES, &on);
+        } else if (rep % 3u == 1u) {
+            order = "off-on-reference";
+            ran = run_soc_stm_path(
+                      total, SOC_ENTRY_GRAPH_EXTENDED_STM_OFF, &off) &&
+                  run_soc_stm_path(
+                      total, SOC_ENTRY_GRAPH_EXTENDED_WRITES, &on) &&
+                  run_soc_stm_path(total, SOC_ENTRY_REFERENCE, &reference);
+        } else {
+            order = "on-reference-off";
+            ran = run_soc_stm_path(
+                      total, SOC_ENTRY_GRAPH_EXTENDED_WRITES, &on) &&
+                  run_soc_stm_path(total, SOC_ENTRY_REFERENCE, &reference) &&
+                  run_soc_stm_path(
+                      total, SOC_ENTRY_GRAPH_EXTENDED_STM_OFF, &off);
+        }
+        if (!ran || !reference.snapshot || !off.snapshot || !on.snapshot ||
+            reference.snapshot_len != off.snapshot_len ||
+            reference.snapshot_len != on.snapshot_len ||
+            memcmp(reference.snapshot, off.snapshot,
+                   reference.snapshot_len) != 0 ||
+            memcmp(reference.snapshot, on.snapshot,
+                   reference.snapshot_len) != 0 ||
+            off.signed_retired != expected_off_retired ||
+            on.signed_retired != total ||
+            reference.dwrite_hits != 0u ||
+            off.dwrite_hits != expected_dwrite_hits ||
+            on.dwrite_hits != expected_dwrite_hits ||
+            reference.dwrite_misses != 0u || off.dwrite_misses != 0u ||
+            on.dwrite_misses != 0u || on.graph_chains == 0u) {
+            fprintf(stderr,
+                    "jitbench: SoC STM repetition %u failed exact A/B "
+                    "off-retired=%" PRIu64 " on-retired=%" PRIu64
+                    " reference-hits=%" PRIu64 " off-hits=%" PRIu64
+                    " on-hits=%" PRIu64 " misses=%" PRIu64 "/%" PRIu64
+                    "/%" PRIu64 "\n",
+                    rep + 1u, off.signed_retired, on.signed_retired,
+                    reference.dwrite_hits, off.dwrite_hits,
+                    on.dwrite_hits, reference.dwrite_misses,
+                    off.dwrite_misses, on.dwrite_misses);
+            free_soc_run_result(&reference);
+            free_soc_run_result(&off);
+            free_soc_run_result(&on);
+            goto done;
+        }
+        if (rep == 0u) {
+            off_chains = off.graph_chains;
+            on_chains = on.graph_chains;
+        } else if (off_chains != off.graph_chains ||
+                   on_chains != on.graph_chains) {
+            fprintf(stderr,
+                    "jitbench: SoC STM chain counts changed across "
+                    "repetitions\n");
+            free_soc_run_result(&reference);
+            free_soc_run_result(&off);
+            free_soc_run_result(&on);
+            goto done;
+        }
+
+        reference_rates[rep] = (double)total / reference.seconds / 1.0e6;
+        off_rates[rep] = (double)total / off.seconds / 1.0e6;
+        on_rates[rep] = (double)total / on.seconds / 1.0e6;
+        printf("SOC-STM-SAMPLE rep=%u order=%s reference=%.3f "
+               "stm-off=%.3f stm-on=%.3f Minsn/s "
+               "off-retired=%" PRIu64 " on-retired=%" PRIu64
+               " dwrite-hits=%" PRIu64 " exact-snapshot=yes\n",
+               rep + 1u, order, reference_rates[rep], off_rates[rep],
+               on_rates[rep], off.signed_retired, on.signed_retired,
+               on.dwrite_hits);
+        free_soc_run_result(&reference);
+        free_soc_run_result(&off);
+        free_soc_run_result(&on);
+    }
+
+    qsort(reference_rates, reps, sizeof *reference_rates, cmp_double);
+    qsort(off_rates, reps, sizeof *off_rates, cmp_double);
+    qsort(on_rates, reps, sizeof *on_rates, cmp_double);
+    printf("SOC-STM-CURVE length=%u stm=%" PRIu64
+           " dwrite-words=%" PRIu64 " guest-insns=%" PRIu64
+           " reps=%u chain-limit=256 same-binary=yes run-api=yes "
+           "cache-lookup=yes block-witness=yes entry-gates=yes "
+           "timer-boundaries=yes device-tick=yes head-cache=warm mmu=off "
+           "exact-snapshot=yes off-signed-retired=%" PRIu64
+           " on-signed-retired=%" PRIu64 " dwrite-hits=%" PRIu64
+           " dwrite-misses=0 off-graph-chains=%" PRIu64
+           " on-graph-chains=%" PRIu64
+           " reference-median=%.3f off-median=%.3f on-median=%.3f "
+           "off-speedup=%.3fx on-speedup=%.3fx on-over-off=%.3fx\n",
+           length, stm_per_loop, dwrite_words_per_loop, total, reps,
+           expected_off_retired, total, expected_dwrite_hits,
+           off_chains, on_chains,
+           reference_rates[reps / 2u], off_rates[reps / 2u],
+           on_rates[reps / 2u],
+           off_rates[reps / 2u] / reference_rates[reps / 2u],
+           on_rates[reps / 2u] / reference_rates[reps / 2u],
+           on_rates[reps / 2u] / off_rates[reps / 2u]);
+    ok = true;
+
+done:
+    free(reference_rates);
+    free(off_rates);
+    free(on_rates);
+    return ok;
+}
+
 static bool bench_one(const bench_case_t *bc, uint64_t requested,
                       unsigned reps) {
     jit_buf_t arena;
@@ -4819,6 +5020,9 @@ int main(int argc, char **argv) {
     printf("The SoC-VSTR row is a same-binary VSTR capability A/B with four "
            "single/double stores per synthetic loop. Its 25%% VSTR mix is "
            "not a firmware-mix or phone-FPS claim either.\n");
+    printf("The SoC-STM row is a same-binary ordinary block-store A/B with "
+           "four IA/IB/DA/DB transfers and twelve words per synthetic loop. "
+           "Its 25%% STM mix is not firmware timing or phone FPS.\n");
     if (!validate_static_shapes()) return 1;
     for (i = 0u; i < sizeof CASES / sizeof CASES[0]; i++) {
         if (!validate_case_translation(&CASES[i])) return 1;
@@ -4860,5 +5064,6 @@ int main(int argc, char **argv) {
     if (!bench_soc_store(soc_insns, reps)) return 1;
     if (!bench_soc_indirect(soc_insns, reps)) return 1;
     if (!bench_soc_vstr(soc_insns, reps)) return 1;
+    if (!bench_soc_stm(soc_insns, reps)) return 1;
     return 0;
 }
