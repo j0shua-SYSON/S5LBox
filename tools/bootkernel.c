@@ -29942,6 +29942,18 @@ static void sequence_profile_report_store_model(
            implemented->blocks,
            implemented->calls + implemented->chain_transitions,
            implemented_exact ? "EXACT" : "MISMATCH");
+    printf("      implemented stops cap/timer/caller/branch/flow/fetch-block/"
+           "ineligible/observer=%" PRIu64 "/%" PRIu64 "/%" PRIu64
+           "/%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64
+           "/%" PRIu64 "\n",
+           implemented->stops[SEQUENCE_SIGNED_STOP_CAP],
+           implemented->stops[SEQUENCE_SIGNED_STOP_TIMER],
+           implemented->stops[SEQUENCE_SIGNED_STOP_CALLER],
+           implemented->stops[SEQUENCE_SIGNED_STOP_BRANCH],
+           implemented->stops[SEQUENCE_SIGNED_STOP_FLOW],
+           implemented->stops[SEQUENCE_SIGNED_STOP_FETCH_BLOCK],
+           implemented->stops[SEQUENCE_SIGNED_STOP_INELIGIBLE],
+           implemented->stops[SEQUENCE_SIGNED_STOP_OBSERVER]);
     {
         const sequence_signed_fetch_probe_t *fetch =
             &profile->signed_fetch_probe;
@@ -30120,6 +30132,18 @@ static void sequence_profile_report_store_model(
                fetch_refill->blocks,
                fetch_refill->calls + fetch_refill->chain_transitions,
                fetch_refill_accounting_exact ? "EXACT" : "MISMATCH");
+        printf("      fetch-refill stops cap/timer/caller/branch/flow/"
+               "fetch-block/ineligible/observer=%" PRIu64 "/%" PRIu64
+               "/%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64
+               "/%" PRIu64 "/%" PRIu64 "\n",
+               fetch_refill->stops[SEQUENCE_SIGNED_STOP_CAP],
+               fetch_refill->stops[SEQUENCE_SIGNED_STOP_TIMER],
+               fetch_refill->stops[SEQUENCE_SIGNED_STOP_CALLER],
+               fetch_refill->stops[SEQUENCE_SIGNED_STOP_BRANCH],
+               fetch_refill->stops[SEQUENCE_SIGNED_STOP_FLOW],
+               fetch_refill->stops[SEQUENCE_SIGNED_STOP_FETCH_BLOCK],
+               fetch_refill->stops[SEQUENCE_SIGNED_STOP_INELIGIBLE],
+               fetch_refill->stops[SEQUENCE_SIGNED_STOP_OBSERVER]);
     }
     printf("      current/broad-ceiling calls/instructions/heads/chains="
            "%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64

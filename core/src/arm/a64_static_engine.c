@@ -66,6 +66,7 @@ typedef struct {
     bool vfp_arithmetic_enabled;
     bool vfp_fp_session_enabled;
     bool fetch_refill_enabled;
+    bool known_negative_bypass_enabled;
     unsigned chain_limit;
     uint64_t retired;
     uint64_t chained_blocks;
@@ -74,6 +75,7 @@ typedef struct {
     uint64_t fetch_refill_attempts;
     uint64_t fetch_refill_hits;
     uint64_t fetch_refill_skips;
+    uint64_t known_negative_bypasses;
     static_a64_entry_t cache[STATIC_A64_CACHE_ENTRIES];
     static_a64_refill_predictor_t
         refill_predictor[STATIC_A64_CACHE_ENTRIES];
@@ -145,6 +147,54 @@ static bool entry_matches(const static_a64_entry_t *entry,
            entry->fetch_priv == priv && entry->thumb == thumb &&
            entry->raw_len != 0u && entry->raw_len <= available_len &&
            memcmp(entry->raw, bytes, entry->raw_len) == 0;
+}
+
+/* A negative cache entry is useful only while its complete one-instruction
+ * witness and the live fetch identity still match. This is deliberately much
+ * narrower than asking whether the next graph node merely says unsupported:
+ * self-modifying code or a direct-table alias must get a fresh decode. */
+static bool current_cached_unsupported(const s5l8900_t *m,
+                                       const static_a64_state_t *state) {
+    const arm_cpu_t *cpu;
+    const static_a64_entry_t *entry;
+    const uint8_t *bytes;
+    uint32_t pc;
+    uint32_t fetch_block;
+    unsigned width;
+    unsigned offset;
+    unsigned candidate_insns;
+    unsigned raw_len;
+    bool thumb;
+    bool priv;
+
+    if (!m || !state || !state->enabled ||
+        !state->known_negative_bypass_enabled)
+        return false;
+    cpu = &m->cpu;
+    if (cpu->arch != ARM_ARCH_V6_ARM1176 ||
+        !arm_mode_is_valid(cpu->cpsr) || cpu->abort_pending ||
+        (cpu->fiq_line && !(cpu->cpsr & ARM_CPSR_F)) ||
+        (cpu->irq_line && !(cpu->cpsr & ARM_CPSR_I)))
+        return false;
+    pc = cpu->r[15];
+    thumb = (cpu->cpsr & ARM_CPSR_T) != 0u;
+    priv = (cpu->cpsr & ARM_CPSR_MODE_MASK) != ARM_MODE_USR;
+    width = thumb ? 2u : 4u;
+    if ((pc & (width - 1u)) != 0u) return false;
+    fetch_block = pc & ~UINT32_C(0x3ff);
+    if (!cpu->fetch_host || cpu->fetch_blk != fetch_block ||
+        cpu->fetch_gen != cpu->tlb_gen || cpu->fetch_priv != priv)
+        return false;
+    offset = pc - fetch_block;
+    candidate_insns = (0x400u - offset) / width;
+    if (candidate_insns > A64_STATIC_MAX_INSNS)
+        candidate_insns = A64_STATIC_MAX_INSNS;
+    if (!candidate_insns) return false;
+    raw_len = candidate_insns * width;
+    bytes = cpu->fetch_host + offset;
+    entry = &state->cache[cache_index(pc, thumb, cpu->fetch_gen)];
+    return entry_matches(entry, cpu, bytes, pc, thumb, priv, raw_len) &&
+           !entry->supported;
 }
 
 static bool decode_longest(const uint8_t *bytes, unsigned candidate_insns,
@@ -366,6 +416,7 @@ bool s5l8900_static_a64_set_enabled(s5l8900_t *m, bool enabled) {
         state->vfp_arithmetic_enabled = true;
         state->vfp_fp_session_enabled = true;
         state->fetch_refill_enabled = true;
+        state->known_negative_bypass_enabled = true;
         m->static_a64_state = state;
     }
     state->enabled = true;
@@ -580,6 +631,23 @@ bool s5l8900_static_a64_set_fetch_refill(s5l8900_t *m, bool enabled) {
 #endif
 }
 
+bool s5l8900_static_a64_set_known_negative_bypass(s5l8900_t *m,
+                                                   bool enabled) {
+    if (!m) return false;
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    static_a64_state_t *state = static_state(m);
+    if (!state || !state->enabled || !a64_static_host_available())
+        return false;
+    /* Execution policy only: both arms use identical decoded data and graph
+     * nodes, which is required for a meaningful same-binary timing A/B. */
+    state->known_negative_bypass_enabled = enabled;
+    return true;
+#else
+    (void)enabled;
+    return false;
+#endif
+}
+
 bool s5l8900_static_a64_set_chain_limit(s5l8900_t *m,
                                         unsigned max_insns) {
     if (!m) return false;
@@ -660,6 +728,16 @@ uint64_t s5l8900_static_a64_fetch_refill_skips(const s5l8900_t *m) {
 #if defined(S5LBOX_STATIC_A64_ENGINE)
     const static_a64_state_t *state = static_state(m);
     return state ? state->fetch_refill_skips : 0u;
+#else
+    (void)m;
+    return 0u;
+#endif
+}
+
+uint64_t s5l8900_static_a64_known_negative_bypasses(const s5l8900_t *m) {
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    const static_a64_state_t *state = static_state(m);
+    return state ? state->known_negative_bypasses : 0u;
 #else
     (void)m;
     return 0u;
@@ -760,7 +838,8 @@ static unsigned try_graph(s5l8900_t *m, static_a64_state_t *state,
 }
 #endif
 
-unsigned s5l8900_static_a64_try(s5l8900_t *m, unsigned max_insns) {
+unsigned s5l8900_static_a64_try(s5l8900_t *m, unsigned max_insns,
+                                bool *known_negative) {
 #if defined(S5LBOX_STATIC_A64_ENGINE)
     static_a64_state_t *state = static_state(m);
     arm_cpu_t *cpu;
@@ -773,6 +852,7 @@ unsigned s5l8900_static_a64_try(s5l8900_t *m, unsigned max_insns) {
     bool refill_priv = false;
     bool refilled = false;
 
+    if (known_negative) *known_negative = false;
     if (!state || !state->enabled || !max_insns ||
         !a64_static_host_available() || !m->ram || !m->ram_size ||
         (m->ram_size & (m->ram_size - 1u)) != 0u)
@@ -814,6 +894,9 @@ unsigned s5l8900_static_a64_try(s5l8900_t *m, unsigned max_insns) {
             refill_predictor_record(state, refill_pc, refill_gen,
                                     refill_thumb, refill_priv, completed,
                                     budget);
+        if (known_negative && completed && completed < budget &&
+            current_cached_unsupported(m, state))
+            *known_negative = true;
         return completed;
     }
     if (state->persistent) {
@@ -822,6 +905,9 @@ unsigned s5l8900_static_a64_try(s5l8900_t *m, unsigned max_insns) {
             refill_predictor_record(state, refill_pc, refill_gen,
                                     refill_thumb, refill_priv, completed,
                                     budget);
+        if (known_negative && completed && completed < budget &&
+            current_cached_unsupported(m, state))
+            *known_negative = true;
         return completed;
     }
 
@@ -912,11 +998,29 @@ unsigned s5l8900_static_a64_try(s5l8900_t *m, unsigned max_insns) {
     if (refilled)
         refill_predictor_record(state, refill_pc, refill_gen, refill_thumb,
                                 refill_priv, retired, budget);
+    if (known_negative && retired && retired < budget &&
+        current_cached_unsupported(m, state))
+        *known_negative = true;
     return retired;
 #else
     (void)m;
     (void)max_insns;
+    if (known_negative) *known_negative = false;
     return 0u;
+#endif
+}
+
+bool s5l8900_static_a64_commit_known_negative_bypass(s5l8900_t *m) {
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    static_a64_state_t *state = static_state(m);
+    /* The device tick between detection and this call can invalidate fetch or
+     * change RAM. Repeat the complete negative witness before skipping work. */
+    if (!current_cached_unsupported(m, state)) return false;
+    state->known_negative_bypasses++;
+    return true;
+#else
+    (void)m;
+    return false;
 #endif
 }
 

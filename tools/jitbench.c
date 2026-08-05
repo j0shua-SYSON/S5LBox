@@ -163,6 +163,20 @@ static const uint32_t A32_SOC_STORES[] = {
     0xe0800006u, 0xe0211005u, 0xe2422001u, 0xeaffffefu,
 };
 
+/* Eight signed ALU instructions, one deliberately unsupported but ordinary
+ * interpreter MUL, and a signed branch. In steady state the branch chains into
+ * the ALU head and stops on the already-cached negative MUL descriptor. This
+ * matches the restored trace's common native-to-ineligible boundary shape
+ * without pretending to replay firmware or report phone FPS. */
+static const uint32_t A32_SOC_NEGATIVE_BOUNDARY[] = {
+    UINT32_C(0xe2833001), UINT32_C(0xe2844003),
+    UINT32_C(0xe2455001), UINT32_C(0xe0266003),
+    UINT32_C(0xe0877004), UINT32_C(0xe2888001),
+    UINT32_C(0xe2899001), UINT32_C(0xe24aa001),
+    UINT32_C(0xe0000090), /* MUL r0,r0,r0: literal interpreter */
+    UINT32_C(0xeafffff5), /* branch at 0x24 -> 0x00 */
+};
+
 /* Four two-instruction heads cross ARM/Thumb state through every register
  * branch family. Distinct graph slots remove alias churn from the timing:
  * ARM 0x00 -> Thumb 0x10 -> ARM 0x40 -> Thumb 0x60 -> ARM 0x00. */
@@ -5178,6 +5192,7 @@ typedef struct {
     uint64_t fetch_refill_attempts;
     uint64_t fetch_refill_hits;
     uint64_t fetch_refill_skips;
+    uint64_t known_negative_bypasses;
     double seconds;
 } soc_run_result_t;
 
@@ -5195,6 +5210,7 @@ typedef enum {
     SOC_ENTRY_GRAPH_EXTENDED_VFP_ARITHMETIC_OFF,
     SOC_ENTRY_GRAPH_EXTENDED_VFP_ARITHMETIC_UNBATCHED,
     SOC_ENTRY_GRAPH_EXTENDED_FETCH_REFILL_OFF,
+    SOC_ENTRY_GRAPH_EXTENDED_KNOWN_NEGATIVE_BYPASS_OFF,
     SOC_ENTRY_GRAPH_EXTENDED_WRITES
 } soc_entry_path_t;
 
@@ -5222,6 +5238,8 @@ static const char *soc_entry_path_name(soc_entry_path_t path) {
         return "graph-extended-vfp-arithmetic-unbatched";
     case SOC_ENTRY_GRAPH_EXTENDED_FETCH_REFILL_OFF:
         return "graph-extended-fetch-refill-off";
+    case SOC_ENTRY_GRAPH_EXTENDED_KNOWN_NEGATIVE_BYPASS_OFF:
+        return "graph-extended-known-negative-bypass-off";
     case SOC_ENTRY_GRAPH_EXTENDED_WRITES:
         return "graph-extended-writes";
     }
@@ -5403,6 +5421,8 @@ static bool run_soc_entry_configured(const soc_entry_setup_t *setup,
     uint64_t fetch_refill_hits_after;
     uint64_t fetch_refill_skips_before;
     uint64_t fetch_refill_skips_after;
+    uint64_t known_negative_bypasses_before;
+    uint64_t known_negative_bypasses_after;
     double start, end;
     bool initialized = false;
     bool ok = false;
@@ -5420,6 +5440,8 @@ static bool run_soc_entry_configured(const soc_entry_setup_t *setup,
                       path ==
                           SOC_ENTRY_GRAPH_EXTENDED_VFP_ARITHMETIC_UNBATCHED ||
                       path == SOC_ENTRY_GRAPH_EXTENDED_FETCH_REFILL_OFF ||
+                      path ==
+                          SOC_ENTRY_GRAPH_EXTENDED_KNOWN_NEGATIVE_BYPASS_OFF ||
                       path == SOC_ENTRY_GRAPH_EXTENDED_WRITES;
     bool extended_path = path == SOC_ENTRY_GRAPH_EXTENDED ||
                          path == SOC_ENTRY_GRAPH_EXTENDED_INDIRECT_OFF ||
@@ -5432,6 +5454,8 @@ static bool run_soc_entry_configured(const soc_entry_setup_t *setup,
                          path ==
                              SOC_ENTRY_GRAPH_EXTENDED_VFP_ARITHMETIC_UNBATCHED ||
                          path == SOC_ENTRY_GRAPH_EXTENDED_FETCH_REFILL_OFF ||
+                         path ==
+                             SOC_ENTRY_GRAPH_EXTENDED_KNOWN_NEGATIVE_BYPASS_OFF ||
                          path == SOC_ENTRY_GRAPH_EXTENDED_WRITES;
     bool indirect_off_path =
         path == SOC_ENTRY_GRAPH_EXTENDED_INDIRECT_OFF;
@@ -5447,6 +5471,8 @@ static bool run_soc_entry_configured(const soc_entry_setup_t *setup,
         path == SOC_ENTRY_GRAPH_EXTENDED_VFP_ARITHMETIC_UNBATCHED;
     bool fetch_refill_off_path =
         path == SOC_ENTRY_GRAPH_EXTENDED_FETCH_REFILL_OFF;
+    bool known_negative_bypass_off_path =
+        path == SOC_ENTRY_GRAPH_EXTENDED_KNOWN_NEGATIVE_BYPASS_OFF;
     bool direct_write_path = path == SOC_ENTRY_GRAPH_EXTENDED_WRITES ||
                              vstr_off_path || stm_off_path || vstm_off_path;
 
@@ -5527,6 +5553,12 @@ static bool run_soc_entry_configured(const soc_entry_setup_t *setup,
                 "jitbench: SoC fetch-refill-off control unavailable\n");
         goto done;
     }
+    if (known_negative_bypass_off_path &&
+        !s5l8900_static_a64_set_known_negative_bypass(&machine, false)) {
+        fprintf(stderr,
+                "jitbench: SoC known-negative bypass control unavailable\n");
+        goto done;
+    }
     if (graph_path &&
         !s5l8900_static_a64_set_graph(&machine, true)) {
         fprintf(stderr, "jitbench: SoC entry graph engine unavailable\n");
@@ -5565,6 +5597,8 @@ static bool run_soc_entry_configured(const soc_entry_setup_t *setup,
         s5l8900_static_a64_fetch_refill_hits(&machine);
     fetch_refill_skips_before =
         s5l8900_static_a64_fetch_refill_skips(&machine);
+    known_negative_bypasses_before =
+        s5l8900_static_a64_known_negative_bypasses(&machine);
     start = now_seconds();
     while (remaining != 0u) {
         unsigned chunk = remaining > (uint64_t)UINT_MAX
@@ -5588,6 +5622,8 @@ static bool run_soc_entry_configured(const soc_entry_setup_t *setup,
         s5l8900_static_a64_fetch_refill_hits(&machine);
     fetch_refill_skips_after =
         s5l8900_static_a64_fetch_refill_skips(&machine);
+    known_negative_bypasses_after =
+        s5l8900_static_a64_known_negative_bypasses(&machine);
     if (remaining != 0u || status != ARM_OK || end <= start ||
         machine.cpu.r[15] != 0u) {
         fprintf(stderr,
@@ -5610,6 +5646,8 @@ static bool run_soc_entry_configured(const soc_entry_setup_t *setup,
         fetch_refill_hits_after - fetch_refill_hits_before;
     out->fetch_refill_skips =
         fetch_refill_skips_after - fetch_refill_skips_before;
+    out->known_negative_bypasses =
+        known_negative_bypasses_after - known_negative_bypasses_before;
     if ((signed_path && out->signed_retired > total) ||
         (!signed_path &&
          (out->signed_retired != 0u || out->signed_chains != 0u ||
@@ -6106,6 +6144,149 @@ done:
     free(reference_rates);
     free(off_rates);
     free(on_rates);
+    return ok;
+}
+
+/* Measure only the redundant zero-return entry after a positive graph call
+ * reaches an unchanged cached-negative instruction. The off/on machines use
+ * identical signed handlers, graph data, timer boundaries and interpreter
+ * work; the switch changes only whether the known-losing second probe is made.
+ * Adjacent order alternates to reduce host drift. Complete snapshots, signed
+ * retirement, chain counts and the bypass counter must all agree exactly. */
+static bool bench_soc_known_negative_boundary(uint64_t requested,
+                                               unsigned reps) {
+    const unsigned length = (unsigned)(sizeof A32_SOC_NEGATIVE_BOUNDARY /
+                                       sizeof A32_SOC_NEGATIVE_BOUNDARY[0]);
+    double *off_rates = NULL;
+    double *on_rates = NULL;
+    double *paired_ratios = NULL;
+    uint64_t total;
+    uint64_t loops;
+    uint64_t expected_signed;
+    uint64_t off_chains = 0u;
+    uint64_t on_chains = 0u;
+    uint64_t bypasses = 0u;
+    unsigned paired_wins = 0u;
+    bool ok = false;
+
+    if (length != 10u || requested > UINT64_MAX - (uint64_t)(length - 1u)) {
+        fprintf(stderr, "jitbench: known-negative boundary shape failed\n");
+        return false;
+    }
+    total = ((requested + length - 1u) / length) * length;
+    loops = total / length;
+    expected_signed = total - loops;
+    off_rates = (double *)calloc(reps, sizeof *off_rates);
+    on_rates = (double *)calloc(reps, sizeof *on_rates);
+    paired_ratios = (double *)calloc(reps, sizeof *paired_ratios);
+    if (!off_rates || !on_rates || !paired_ratios) {
+        fprintf(stderr, "jitbench: known-negative boundary out of memory\n");
+        goto done;
+    }
+
+    for (unsigned rep = 0u; rep < reps; rep++) {
+        soc_run_result_t off = {0};
+        soc_run_result_t on = {0};
+        const char *order;
+        bool ran;
+        if ((rep & 1u) == 0u) {
+            order = "off-on";
+            ran = run_soc_entry_path(
+                      A32_SOC_NEGATIVE_BOUNDARY, length, total,
+                      SOC_ENTRY_GRAPH_EXTENDED_KNOWN_NEGATIVE_BYPASS_OFF,
+                      0u, &off) &&
+                  run_soc_entry_path(A32_SOC_NEGATIVE_BOUNDARY, length, total,
+                                     SOC_ENTRY_GRAPH_EXTENDED, 0u, &on);
+        } else {
+            order = "on-off";
+            ran = run_soc_entry_path(A32_SOC_NEGATIVE_BOUNDARY, length, total,
+                                     SOC_ENTRY_GRAPH_EXTENDED, 0u, &on) &&
+                  run_soc_entry_path(
+                      A32_SOC_NEGATIVE_BOUNDARY, length, total,
+                      SOC_ENTRY_GRAPH_EXTENDED_KNOWN_NEGATIVE_BYPASS_OFF,
+                      0u, &off);
+        }
+        if (!ran || !off.snapshot || !on.snapshot ||
+            off.snapshot_len != on.snapshot_len ||
+            memcmp(off.snapshot, on.snapshot, off.snapshot_len) != 0 ||
+            off.signed_retired != expected_signed ||
+            on.signed_retired != expected_signed ||
+            off.graph_chains == 0u ||
+            off.graph_chains != on.graph_chains ||
+            off.known_negative_bypasses != 0u ||
+            !on.known_negative_bypasses ||
+            on.known_negative_bypasses > loops ||
+            off.fetch_refill_attempts != 0u ||
+            on.fetch_refill_attempts != 0u ||
+            off.dread_hits != 0u || off.dread_misses != 0u ||
+            on.dread_hits != 0u || on.dread_misses != 0u ||
+            off.dwrite_hits != 0u || off.dwrite_misses != 0u ||
+            on.dwrite_hits != 0u || on.dwrite_misses != 0u) {
+            fprintf(stderr,
+                    "jitbench: known-negative boundary repetition %u failed "
+                    "exact A/B retired=%" PRIu64 "/%" PRIu64
+                    " chains=%" PRIu64 "/%" PRIu64
+                    " bypasses=%" PRIu64 "/%" PRIu64 "\n",
+                    rep + 1u, off.signed_retired, on.signed_retired,
+                    off.graph_chains, on.graph_chains,
+                    off.known_negative_bypasses,
+                    on.known_negative_bypasses);
+            free_soc_run_result(&off);
+            free_soc_run_result(&on);
+            goto done;
+        }
+        if (rep == 0u) {
+            off_chains = off.graph_chains;
+            on_chains = on.graph_chains;
+            bypasses = on.known_negative_bypasses;
+        } else if (off_chains != off.graph_chains ||
+                   on_chains != on.graph_chains ||
+                   bypasses != on.known_negative_bypasses) {
+            fprintf(stderr,
+                    "jitbench: known-negative boundary counters changed "
+                    "across repetitions\n");
+            free_soc_run_result(&off);
+            free_soc_run_result(&on);
+            goto done;
+        }
+
+        off_rates[rep] = (double)total / off.seconds / 1.0e6;
+        on_rates[rep] = (double)total / on.seconds / 1.0e6;
+        paired_ratios[rep] = on_rates[rep] / off_rates[rep];
+        if (paired_ratios[rep] > 1.0) paired_wins++;
+        printf("SOC-KNOWN-NEGATIVE-SAMPLE rep=%u order=%s off=%.3f "
+               "on=%.3f Minsn/s on-over-off=%.3fx bypasses=%" PRIu64
+               " exact-snapshot=yes\n",
+               rep + 1u, order, off_rates[rep], on_rates[rep],
+               paired_ratios[rep], on.known_negative_bypasses);
+        free_soc_run_result(&off);
+        free_soc_run_result(&on);
+    }
+
+    qsort(off_rates, reps, sizeof *off_rates, cmp_double);
+    qsort(on_rates, reps, sizeof *on_rates, cmp_double);
+    qsort(paired_ratios, reps, sizeof *paired_ratios, cmp_double);
+    printf("SOC-KNOWN-NEGATIVE-CURVE length=%u unsupported-per-loop=1 "
+           "guest-insns=%" PRIu64 " reps=%u same-binary=yes run-api=yes "
+           "cache-lookup=yes block-witness=yes entry-gates=yes "
+           "timer-boundaries=yes device-tick=yes head-cache=warm mmu=off "
+           "not-phone-fps=yes exact-snapshot=yes signed-retired=%" PRIu64
+           " bypasses=%" PRIu64 "/%" PRIu64
+           " off-graph-chains=%" PRIu64 " on-graph-chains=%" PRIu64
+           " off-median=%.3f on-median=%.3f on-over-off=%.3fx "
+           "paired-median=%.3fx paired-min=%.3fx paired-max=%.3fx "
+           "paired-wins=%u/%u\n",
+           length, total, reps, expected_signed, bypasses, loops,
+           off_chains, on_chains, off_rates[reps / 2u],
+           on_rates[reps / 2u], on_rates[reps / 2u] / off_rates[reps / 2u],
+           paired_ratios[reps / 2u], paired_ratios[0u],
+           paired_ratios[reps - 1u], paired_wins, reps);
+    ok = true;
+
+done:
+    free(off_rates);
+    free(on_rates);
+    free(paired_ratios);
     return ok;
 }
 
@@ -8053,6 +8234,7 @@ int main(int argc, char **argv) {
     bool fetch_refill_mix_only = false;
     bool fetch_refill_break_even_only = false;
     bool fetch_refill_paired_only = false;
+    bool known_negative_boundary_only = false;
 
     for (i = 1u; i < (unsigned)argc; i++) {
         if (strcmp(argv[i], "--insns") == 0 && i + 1u < (unsigned)argc) {
@@ -8083,19 +8265,23 @@ int main(int argc, char **argv) {
             fetch_refill_break_even_only = true;
         } else if (strcmp(argv[i], "--fetch-refill-paired-only") == 0) {
             fetch_refill_paired_only = true;
+        } else if (strcmp(argv[i], "--known-negative-boundary-only") == 0) {
+            known_negative_boundary_only = true;
         } else {
             fprintf(stderr, "usage: %s [--insns N] [--entry-insns N] "
                             "[--soc-insns N] [--reps N] "
                             "[--fetch-refill-mix-only] "
                             "[--fetch-refill-break-even-only] "
-                            "[--fetch-refill-paired-only]\n", argv[0]);
+                            "[--fetch-refill-paired-only] "
+                            "[--known-negative-boundary-only]\n", argv[0]);
             return 2;
         }
     }
     if ((unsigned)fetch_refill_mix_only +
             (unsigned)fetch_refill_break_even_only +
-            (unsigned)fetch_refill_paired_only > 1u) {
-        fprintf(stderr, "jitbench: choose only one fetch-refill-only mode\n");
+            (unsigned)fetch_refill_paired_only +
+            (unsigned)known_negative_boundary_only > 1u) {
+        fprintf(stderr, "jitbench: choose only one focused benchmark mode\n");
         return 2;
     }
     if (!entry_insns) entry_insns = insns;
@@ -8134,6 +8320,10 @@ int main(int argc, char **argv) {
     printf("The optional paired refill confirmation alternates adjacent "
            "off/on order without an intervening interpreter arm. Exact "
            "snapshots remain mandatory; it is still not phone FPS.\n");
+    printf("The known-negative boundary row alternates a same-binary policy "
+           "A/B around one cached interpreter-only MUL per ten-instruction "
+           "loop. It measures redundant probe cost, not firmware or phone "
+           "FPS.\n");
     printf("The SoC-Thumb-conditional row is a same-binary capability A/B "
            "with four terminal condition branches and both outcomes per "
            "synthetic loop. It is not firmware timing or phone FPS.\n");
@@ -8187,6 +8377,8 @@ int main(int argc, char **argv) {
         return bench_soc_fetch_refill_break_even(soc_insns, reps) ? 0 : 1;
     if (fetch_refill_paired_only)
         return bench_soc_fetch_refill_paired(soc_insns, reps) ? 0 : 1;
+    if (known_negative_boundary_only)
+        return bench_soc_known_negative_boundary(soc_insns, reps) ? 0 : 1;
 
     for (i = 0u; i < sizeof CASES / sizeof CASES[0]; i++) {
         if (!bench_one(&CASES[i], insns, reps)) return 1;
@@ -8205,6 +8397,7 @@ int main(int argc, char **argv) {
     if (!bench_soc_store(soc_insns, reps)) return 1;
     if (!bench_soc_fetch_refill(soc_insns, reps)) return 1;
     if (!bench_soc_fetch_refill_mix(soc_insns, reps)) return 1;
+    if (!bench_soc_known_negative_boundary(soc_insns, reps)) return 1;
     if (!bench_soc_indirect(soc_insns, reps)) return 1;
     if (!bench_soc_thumb_conditional(soc_insns, reps)) return 1;
     if (!bench_soc_vstr(soc_insns, reps)) return 1;

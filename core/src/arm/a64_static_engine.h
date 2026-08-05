@@ -13,8 +13,15 @@
  * most sixteen guest instructions, stays inside the current proven fetch block
  * and repeats the cache/raw-byte witness. The configured total cannot exceed
  * the product ceiling above. Zero means fall back to the architectural
- * interpreter without changing guest state. */
-unsigned s5l8900_static_a64_try(s5l8900_t *m, unsigned max_insns);
+ * interpreter without changing guest state. When a positive exact prefix ends
+ * at an unchanged, already-cached unsupported instruction, `known_negative`
+ * reports that the immediately following signed probe would return zero. */
+unsigned s5l8900_static_a64_try(s5l8900_t *m, unsigned max_insns,
+                                bool *known_negative);
+
+/* Revalidate and account a known-negative probe bypass after the device tick.
+ * False leaves the ordinary next-loop decision untouched. */
+bool s5l8900_static_a64_commit_known_negative_bypass(s5l8900_t *m);
 
 /* Release the per-machine decode cache. Safe on an uninitialised NULL field. */
 void s5l8900_static_a64_dispose(s5l8900_t *m);

@@ -1515,12 +1515,22 @@ unsigned s5l8900_run(s5l8900_t *m, unsigned max_steps, arm_status_t *status) {
     unsigned n = 0;
     while (n < max_steps) {
 #if defined(S5LBOX_STATIC_A64_ENGINE)
+        bool known_negative = false;
         unsigned batch = static_a64_batch_limit(m, max_steps - n);
-        if (batch) batch = s5l8900_static_a64_try(m, batch);
+        if (batch)
+            batch = s5l8900_static_a64_try(m, batch, &known_negative);
         if (batch) {
             n += batch;
             s5l8900_tick(m, batch);
-            continue;
+            /* The ordinary next iteration would first repeat the machine gate
+             * and only then discover the same negative cache entry. Do those
+             * checks now and fall directly into its one interpreter step. A
+             * timer/IRQ/input edge or changed byte cancels the bypass. */
+            if (!known_negative || n >= max_steps)
+                continue;
+            if (static_a64_batch_limit(m, max_steps - n) &&
+                !s5l8900_static_a64_commit_known_negative_bypass(m))
+                continue;
         }
 #endif
         st = arm_step(&m->cpu);

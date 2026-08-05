@@ -3955,6 +3955,13 @@ bool s5l8900_static_a64_set_vfp_fp_session(s5l8900_t *m, bool enabled);
  * visit. The helper never walks, faults or reads MMIO; a refusal leaves
  * arm_step() as the sole owner of the architectural fetch. */
 bool s5l8900_static_a64_set_fetch_refill(s5l8900_t *m, bool enabled);
+/* Exact execution-policy control for eliding the otherwise immediate second
+ * signed-engine probe after a positive chain stops at an unchanged cached
+ * unsupported instruction. Product default is enabled. The device tick,
+ * machine gate and complete negative byte/fetch witness are rechecked before
+ * one ordinary arm_step(); no architectural state or snapshot field is added. */
+bool s5l8900_static_a64_set_known_negative_bypass(s5l8900_t *m,
+                                                   bool enabled);
 /* Same-binary benchmark control for the total signed invocation bound. A
  * decoded head remains at most sixteen instructions and the machine still
  * clamps every invocation to the first exact timebase edge. The generic engine
@@ -3968,6 +3975,7 @@ uint64_t s5l8900_static_a64_graph_chained_blocks(const s5l8900_t *m);
 uint64_t s5l8900_static_a64_fetch_refill_attempts(const s5l8900_t *m);
 uint64_t s5l8900_static_a64_fetch_refill_hits(const s5l8900_t *m);
 uint64_t s5l8900_static_a64_fetch_refill_skips(const s5l8900_t *m);
+uint64_t s5l8900_static_a64_known_negative_bypasses(const s5l8900_t *m);
 /* Host diagnostic: byte span protecting the currently cached signed head at
  * `pc`, or zero when no such entry exists. It is derived cache state and is
  * never part of a guest snapshot. */

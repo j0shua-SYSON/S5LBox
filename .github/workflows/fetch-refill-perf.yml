@@ -16,13 +16,14 @@ on:
         options:
           - break-even
           - representative
+          - known-negative
       soc_insns:
         description: Guest instructions per length and repetition
         required: true
         default: '20000000'
         type: string
       reps:
-        description: Rotated reference/off/adaptive repetitions per length
+        description: Alternating or rotated A/B repetitions per workload
         required: true
         default: '3'
         type: string
@@ -78,6 +79,14 @@ jobs:
                 --soc-insns "$SOC_INSNS" --reps "$REPS" | tee fetch-refill.log
               test "$(grep -c '^SOC-FETCH-REFILL-PAIRED-CURVE ' fetch-refill.log)" -eq 1
               grep -Eq '^SOC-FETCH-REFILL-PAIRED-CURVE .*long-insns=10 .*order=alternating-adjacent exact-snapshot=yes ' \
+                fetch-refill.log
+              ;;
+            known-negative)
+              ./build-perf/core/jitbench \
+                --known-negative-boundary-only \
+                --soc-insns "$SOC_INSNS" --reps "$REPS" | tee fetch-refill.log
+              test "$(grep -c '^SOC-KNOWN-NEGATIVE-CURVE ' fetch-refill.log)" -eq 1
+              grep -Eq '^SOC-KNOWN-NEGATIVE-CURVE .*same-binary=yes .*not-phone-fps=yes exact-snapshot=yes ' \
                 fetch-refill.log
               ;;
             *)
