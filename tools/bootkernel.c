@@ -24807,9 +24807,19 @@ typedef struct {
     uint64_t instructions;
     uint64_t blocks;
     uint64_t chain_transitions;
+    /* Host-FP preservation opportunity for a tagged arithmetic model. A
+     * generated graph chain can retain one session for the whole call; a
+     * callback-backed chain must restore at every decoded-head boundary. */
+    uint64_t fp_operations;
+    uint64_t fp_call_sessions;
+    uint64_t fp_head_sessions;
+    uint64_t fp_call_max_operations;
+    uint64_t fp_head_max_operations;
     uint64_t call_length;
     uint64_t call_remaining;
     uint64_t call_blocks;
+    uint64_t call_fp_operations;
+    uint64_t head_fp_operations;
     uint64_t maximum;
     unsigned head_length;
     sequence_signed_stop_t budget_stop;
@@ -27395,6 +27405,8 @@ static void sequence_signed_extended_close(sequence_profile_t *profile,
     if (!model->call_length) {
         model->call_blocks = 0u;
         model->head_length = 0u;
+        model->call_fp_operations = 0u;
+        model->head_fp_operations = 0u;
         return;
     }
     if (model->call_length <= SEQUENCE_SIGNED_EXTENDED_CAP) {
@@ -27414,6 +27426,8 @@ static void sequence_signed_extended_close(sequence_profile_t *profile,
     model->call_length = 0u;
     model->call_remaining = 0u;
     model->call_blocks = 0u;
+    model->call_fp_operations = 0u;
+    model->head_fp_operations = 0u;
     model->head_length = 0u;
 }
 
@@ -27425,6 +27439,8 @@ static void sequence_signed_store_model_close(
     if (!model->call_length) {
         model->call_blocks = 0u;
         model->head_length = 0u;
+        model->call_fp_operations = 0u;
+        model->head_fp_operations = 0u;
         return;
     }
     if (model->call_length <= SEQUENCE_SIGNED_EXTENDED_CAP) {
@@ -27444,6 +27460,8 @@ static void sequence_signed_store_model_close(
     model->call_length = 0u;
     model->call_remaining = 0u;
     model->call_blocks = 0u;
+    model->call_fp_operations = 0u;
+    model->head_fp_operations = 0u;
     model->head_length = 0u;
 }
 
@@ -27594,11 +27612,11 @@ static void sequence_signed_extended_observe(
  * exact product classification plus only those broad stores whose simulated
  * DWRITE guard is live. Keeping a distinct accumulator makes this experiment
  * unable to flatter or rewrite the current-product accounting. */
-static void sequence_signed_store_observe(
+static void sequence_signed_store_observe_tagged(
         sequence_profile_t *profile, const s5l8900_t *mach,
         uint32_t pc, bool thumb, bool physical_sequential,
         const sequence_signed_classification_t *classification,
-        sequence_signed_extended_t *model) {
+        sequence_signed_extended_t *model, bool fp_arithmetic) {
     if (!profile || !mach || !classification || !model) return;
     bool chained_head = false;
 
@@ -27644,12 +27662,26 @@ static void sequence_signed_store_observe(
         model->call_remaining = budget;
         model->budget_stop = budget_stop;
         model->call_blocks = 1u;
+        model->call_fp_operations = 0u;
+        model->head_fp_operations = 0u;
         model->head_length = 0u;
     } else if (chained_head) {
         model->call_blocks++;
+        model->head_fp_operations = 0u;
         model->head_length = 0u;
     }
 
+    if (fp_arithmetic) {
+        model->fp_operations++;
+        if (!model->call_fp_operations) model->fp_call_sessions++;
+        if (!model->head_fp_operations) model->fp_head_sessions++;
+        model->call_fp_operations++;
+        model->head_fp_operations++;
+        if (model->call_fp_operations > model->fp_call_max_operations)
+            model->fp_call_max_operations = model->call_fp_operations;
+        if (model->head_fp_operations > model->fp_head_max_operations)
+            model->fp_head_max_operations = model->head_fp_operations;
+    }
     model->call_length++;
     model->head_length++;
     if (model->call_remaining) model->call_remaining--;
@@ -27671,9 +27703,20 @@ static void sequence_signed_store_observe(
             model->chain_thumb = classification->terminal
                                ? classification->exit_thumb : thumb;
             model->chain_pending = true;
+            model->head_fp_operations = 0u;
             model->head_length = 0u;
         }
     }
+}
+
+static void sequence_signed_store_observe(
+        sequence_profile_t *profile, const s5l8900_t *mach,
+        uint32_t pc, bool thumb, bool physical_sequential,
+        const sequence_signed_classification_t *classification,
+        sequence_signed_extended_t *model) {
+    sequence_signed_store_observe_tagged(
+        profile, mach, pc, thumb, physical_sequential,
+        classification, model, false);
 }
 
 static bool sequence_signed_observe(sequence_profile_t *profile,
@@ -27778,15 +27821,29 @@ static bool sequence_signed_observe(sequence_profile_t *profile,
             &vfp_arith_outcome, &vfp_arith_eligible);
         bool vfp_arith_incremental = vfp_arith_candidate &&
             !sequence_post_store_retireable(&implemented_classification);
+        uint32_t vfp_arith_control_mask = ARM_FPSCR_RMODE |
+            ARM_FPSCR_STRIDE | ARM_FPSCR_LEN | ARM_FPSCR_FZ |
+            ARM_FPSCR_DN | ARM_FPSCR_ENABLES;
+        uint32_t vfp_arith_flag_mask = ARM_FPSCR_IDC | ARM_FPSCR_IXC |
+            ARM_FPSCR_UFC | ARM_FPSCR_OFC | ARM_FPSCR_DZC |
+            ARM_FPSCR_IOC;
+        bool vfp_arith_session = vfp_arith_candidate &&
+            vfp_arith_outcome == SEQUENCE_POST_STORE_PLAIN &&
+            profile->vfp_arith.pending_simple_inputs &&
+            (profile->vfp_arith.pending_fpscr &
+                vfp_arith_control_mask) == (ARM_FPSCR_FZ | ARM_FPSCR_DN) &&
+            (profile->vfp_arith.pending_fpscr & vfp_arith_flag_mask) ==
+                ARM_FPSCR_IXC;
         if (vfp_arith_incremental)
             profile->signed_post_store
                 .vfp_arith_outcomes[vfp_arith_outcome]++;
         else
             vfp_arith_classification = implemented_classification;
-        sequence_signed_store_observe(
+        sequence_signed_store_observe_tagged(
             profile, mach, pc, thumb, physical_sequential,
             &vfp_arith_classification,
-            &profile->signed_post_store.vfp_arith_mode_admitted);
+            &profile->signed_post_store.vfp_arith_mode_admitted,
+            vfp_arith_session);
         for (unsigned family = 0u;
              family < SEQUENCE_STORE_FAMILY_COUNT; family++) {
             if (family == SEQUENCE_STORE_ARM_SINGLE ||
@@ -30540,6 +30597,41 @@ static void sequence_profile_report_vfp_arith_model(
            baseline_entries
                ? 100.0 * (double)removed / (double)baseline_entries : 0.0,
            continuity_exact ? "ACCOUNTING-EXACT" : "MISMATCH");
+
+    uint64_t fp_operations = model->fp_operations;
+    uint64_t warm_sessions = model->fp_call_sessions;
+    uint64_t callback_sessions = model->fp_head_sessions;
+    uint64_t warm_removed = fp_operations >= warm_sessions
+        ? fp_operations - warm_sessions : 0u;
+    uint64_t callback_removed = fp_operations >= callback_sessions
+        ? fp_operations - callback_sessions : 0u;
+    bool fp_session_exact =
+        warm_sessions <= callback_sessions &&
+        callback_sessions <= fp_operations &&
+        fp_operations <= model->instructions &&
+        warm_sessions <= model->calls &&
+        callback_sessions <= model->blocks &&
+        model->fp_call_max_operations <= model->maximum &&
+        model->fp_head_max_operations <= SEQUENCE_SIGNED_CAP &&
+        ((fp_operations == 0u) == (warm_sessions == 0u)) &&
+        ((fp_operations == 0u) == (callback_sessions == 0u));
+    printf("      host-FP preservation pairs per-op/warm-graph/callback-head="
+           "%" PRIu64 "/%" PRIu64 "/%" PRIu64
+           "; removed warm/head=%" PRIu64 "/%" PRIu64
+           "; max arithmetic per call/head=%" PRIu64 "/%" PRIu64
+           "  %s\n",
+           fp_operations, warm_sessions, callback_sessions,
+           warm_removed, callback_removed,
+           model->fp_call_max_operations,
+           model->fp_head_max_operations,
+           fp_session_exact ? "ACCOUNTING-EXACT" : "MISMATCH");
+    printf("      warm-graph/callback-head arithmetic per FP session="
+           "%.3f/%.3f. These are decoded-invocation bounds on FPCR/FPSR "
+           "amortization, not elapsed speed, frames or phone FPS.\n",
+           warm_sessions
+               ? (double)fp_operations / (double)warm_sessions : 0.0,
+           callback_sessions
+               ? (double)fp_operations / (double)callback_sessions : 0.0);
 
     const sequence_signed_extended_t *vldm =
         &profile->signed_post_store.family[

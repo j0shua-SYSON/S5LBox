@@ -7042,3 +7042,63 @@ not elapsed firmware speed or frames. This exact IPA has not been installed on a
 this environment, so measured phone-FPS improvement remains zero and the only device observation
 remains roughly 0--4 FPS. The work is substantial, but the evidence says FP-state amortization and a
 new exact A/B are required before this architecture can honestly be called a path to 30 FPS.
+
+### 2026-08-05: FP-state batching is a real arithmetic speed win, not a phone-FPS result
+
+Commit `9bdbf76207cb76400cc812cd5be93f2d4e11e95b` replaces per-operation host
+FPCR/FPSR preservation with one lazy session per generated signed invocation. The first guarded
+arithmetic handler saves caller FPCR/FPSR and normalizes FPCR; subsequent arithmetic handlers reuse
+that state. FPSR is still cleared and sampled for every guest operation and between the separately
+rounded multiply/add stages of VMLA-family operations. Every generated exit restores the caller
+environment. A callback-backed chain also restores before crossing into C, while a validated graph
+chain can retain the session across decoded heads.
+
+That implementation initially had an encouraging cross-run benchmark, but comparing it with an
+older executable could not isolate batching from runner variation. Commit
+`25e067c899c3c55b4a5bc243ac9a81e9854f48c9` therefore adds an execution-policy switch in the
+existing four-byte context padding. Its control arm uses the former inline save/normalize/restore
+sequence on every operation; its product arm uses the lazy session. Both arms execute the same
+generated binary, decode the same records, traverse the same graph and rotate order with the
+interpreter and arithmetic-disabled controls. The native oracle perturbs host FPCR/FPSR and proves
+success plus second-operation rejection for both policies before accepting the benchmark.
+
+The 20-million-instruction Apple-arm64 result is unambiguous for this deliberately dense loop:
+
+| Apple arm64 runner | interpreter | arithmetic off | unbatched | batched | batched/interpreter | batched/unbatched |
+|---|---:|---:|---:|---:|---:|---:|
+| macOS 14 | 32.819 Minsn/s | 14.602 Minsn/s | 26.737 Minsn/s | 51.816 Minsn/s | **1.579x** | **1.938x** |
+| macOS 15 | 20.706 Minsn/s | 10.838 Minsn/s | 22.042 Minsn/s | 41.230 Minsn/s | **1.991x** | **1.871x** |
+
+Every unbatched and batched repetition retires all 20,000,000 guest instructions, publishes exactly
+958,737 graph transitions and serializes byte-identically to the interpreter. Absolute hosted rates,
+especially the macOS 15 interpreter samples, still move with runner load. The paired 1.871x--1.938x
+session ratio is the defensible result because it compares adjacent policy arms with identical work;
+the absolute rates are not a device forecast. Exact-SHA core run `30984819392` is green in all eight
+jobs, and exact-SHA iOS run `30984819388` builds, fake-signs and uploads the app.
+
+The read-only `r551-vfp-fp-session-observer-10m` replay then asks whether real firmware presents
+enough adjacent arithmetic to use that win. It restores the trusted r445 checkpoint at 7.100 B,
+stops at 7.110 B, exits zero in 68.727 seconds and leaves stderr empty. All 60 case-sensitive
+accounting verdicts are `EXACT`; none is `MISMATCH`. Of 284,374 executed arithmetic observations,
+284,349 actually enter the modeled signed runner; 25 land behind exact product entry-gate refusals
+and remain literal. The warm-graph model needs 107,490 host-FP sessions, or 2.645 arithmetic
+operations per session. Resetting conservatively at every decoded-head boundary needs 126,531, or
+2.247 operations per session. Relative to one preservation pair per operation, those bounds remove
+176,859 (**62.198%**) or 157,818 (**55.502%**) FPCR/FPSR save/restore pairs. The longest observed
+call and head contain twelve and eight arithmetic operations respectively.
+
+The replay changes no guest state and creates no duplicate snapshot. Its work-image and screen
+SHA-256 remain the established
+`8A59C388C481165F460984926AA5FFB1B72A0E9030216CD0038DE9B3264B79FE` and
+`1EF63FFE3EEFD976416E17120A36BA074BF295EA0955D716E2D345FCC5EA0A9E`. The final CLCD image is
+nonblack; 15,626 media reads and 469 writes complete with zero failures.
+
+Brutal status: **FP-state batching is the first demonstrated large speed improvement for the new
+arithmetic handlers, and it still does not prove meaningful emulator FPS improvement**. VFP
+arithmetic accounts for only about 2.84% of fetched instructions in this restored window, although
+its interpreter cost is not known to equal an average instruction. The 14.031% runner-entry removal,
+1.871x--1.938x dense-loop session gain and 55.502%--62.198% real-stream preservation reduction are
+different measurements and cannot honestly be multiplied into the old roughly 0--4 FPS phone
+report. This exact IPA has not run on the iPhone here. The optimization is worth retaining, but an
+exact-build device measurement or a trustworthy end-to-end signed-firmware timing path remains the
+authority for whether the project has moved toward 30 FPS.
