@@ -24847,6 +24847,11 @@ typedef struct {
      * ceiling so one replay cannot confuse potential coverage with shipped
      * coverage. Both models consume the same literal-store DWRITE history. */
     sequence_signed_extended_t implemented;
+    /* Current product (including its implemented single stores and whatever
+     * the exact decoder already admits) plus exactly one remaining store
+     * family. These side-by-side models rank continuity before native code is
+     * added; the broad `extended` model remains the all-family ceiling. */
+    sequence_signed_extended_t family_frontier[SEQUENCE_STORE_FAMILY_COUNT];
     uint64_t family_outcomes[SEQUENCE_STORE_FAMILY_COUNT]
                             [SEQUENCE_STORE_OUTCOME_COUNT];
     uint64_t candidates;
@@ -24907,11 +24912,10 @@ typedef enum {
     SEQUENCE_INDIRECT_OUTCOME_COUNT
 } sequence_indirect_outcome_t;
 
-/* Exact live-state census for the next categorical control-flow boundary.
- * This model starts from the shipped single-store subset and adds only
- * register-indirect BX/BLX. It executes nothing and is kept separate from the
- * broad store ceiling so a hot return population cannot be mistaken for an
- * implemented speedup. */
+/* Exact live-state census/audit for register-indirect BX/BLX. The product
+ * decoder is always queried first: handlers it already ships count as overlap,
+ * while any still-unimplemented eligible form counts as incremental. It
+ * executes nothing and remains separate from the broad store ceiling. */
 typedef struct {
     sequence_signed_extended_t implemented_plus_indirect;
     uint64_t family_outcomes[SEQUENCE_INDIRECT_FAMILY_COUNT]
@@ -26044,6 +26048,48 @@ static bool sequence_store_classify(
     return true;
 }
 
+/* Resolve the exact live exit selected by a decoded terminal BX/BLX without
+ * changing CPU state. A failed A32 condition selects ordinary ARM fallthrough;
+ * an unrepresentable halfword target fails closed exactly like the signed
+ * handler and remains for literal arm_step(). */
+static bool sequence_indirect_live_exit(
+        const arm_cpu_t *cpu, uint32_t pc, uint32_t raw, bool thumb,
+        uint32_t *exit_pc, bool *exit_thumb) {
+    uint32_t target;
+    bool link;
+
+    if (!cpu || !exit_pc || !exit_thumb) return false;
+    if (thumb) {
+        uint16_t insn = (uint16_t)raw;
+        if ((insn & UINT16_C(0xff00)) != UINT16_C(0x4700))
+            return false;
+        link = (insn & (1u << 7)) != 0u;
+        unsigned rm = (insn >> 3) & 15u;
+        if (link && rm == 15u) return false;
+        target = rm == 15u ? pc + 4u : cpu->r[rm];
+    } else {
+        unsigned condition = raw >> 28;
+        bool bx = (raw & UINT32_C(0x0ffffff0)) ==
+                  UINT32_C(0x012fff10);
+        bool blx = (raw & UINT32_C(0x0ffffff0)) ==
+                   UINT32_C(0x012fff30);
+        if (condition == 15u || (!bx && !blx)) return false;
+        if (condition < 14u && !arm_cond_passed(cpu, condition)) {
+            *exit_pc = pc + 4u;
+            *exit_thumb = false;
+            return true;
+        }
+        unsigned rm = raw & 15u;
+        if (blx && rm == 15u) return false;
+        target = rm == 15u ? pc + 8u : cpu->r[rm];
+    }
+
+    if ((target & 3u) == 2u) return false;
+    *exit_pc = target & ~UINT32_C(1);
+    *exit_thumb = (target & 1u) != 0u;
+    return true;
+}
+
 static bool sequence_indirect_classify(
         sequence_profile_t *profile, const arm_cpu_t *cpu, uint32_t pc,
         uint32_t raw, bool thumb,
@@ -26206,7 +26252,8 @@ static sequence_signed_classification_t sequence_signed_classify(
             bytes, 1u, thumb, pc, &block))
         return result;
 
-    result.terminal = sequence_signed_terminal(raw, thumb);
+    result.terminal = sequence_signed_terminal(raw, thumb) ||
+                      block.indirect_exit;
     /* A normal one-instruction decode appends a fixed END record, which is a
      * block boundary rather than part of that instruction's semantics. An
      * unconditional B is represented by END itself, while conditional B/BL
@@ -26215,6 +26262,12 @@ static sequence_signed_classification_t sequence_signed_classify(
     result.handler_records = block.uop_count - 1u;
     if (result.terminal && result.handler_records == 0u)
         result.handler_records = 1u;
+    if (block.indirect_exit && !thumb && (raw >> 28) < 14u) {
+        if (!arm_cond_passed(cpu, raw >> 28))
+            result.handler_records = 1u;
+        else
+            result.guard_fusion_ceiling = 1u;
+    }
     if (!result.terminal && !thumb && (raw >> 28) < 14u) {
         unsigned semantic_records = result.handler_records - 1u;
         if (!arm_cond_passed(cpu, raw >> 28)) {
@@ -26228,7 +26281,14 @@ static sequence_signed_classification_t sequence_signed_classify(
         result.semantic_fusion_ceiling = result.handler_records > 1u
             ? result.handler_records - 1u : 0u;
     }
-    if (result.terminal) {
+    if (block.indirect_exit) {
+        if (!sequence_indirect_live_exit(
+                cpu, pc, raw, thumb, &result.exit_pc,
+                &result.exit_thumb)) {
+            result.outcome = SEQUENCE_SIGNED_READ_GUARD;
+            return result;
+        }
+    } else if (result.terminal) {
         if (thumb) {
             int32_t displacement =
                 (int32_t)((raw & UINT32_C(0x7ff)) << 21) >> 20;
@@ -26775,6 +26835,20 @@ static bool sequence_signed_observe(sequence_profile_t *profile,
             profile, mach, pc, thumb, physical_sequential,
             &implemented_classification,
             &profile->signed_store.implemented);
+        for (unsigned family = 0u;
+             family < SEQUENCE_STORE_FAMILY_COUNT; family++) {
+            if (family == SEQUENCE_STORE_ARM_SINGLE ||
+                family == SEQUENCE_STORE_THUMB_SINGLE)
+                continue;
+            sequence_signed_classification_t frontier_classification =
+                implemented_classification;
+            if (store_eligible && store_family == family)
+                frontier_classification = store_classification;
+            sequence_signed_store_observe(
+                profile, mach, pc, thumb, physical_sequential,
+                &frontier_classification,
+                &profile->signed_store.family_frontier[family]);
+        }
         sequence_signed_classification_t indirect_classification =
             implemented_classification;
         (void)sequence_indirect_classify(
@@ -26892,6 +26966,15 @@ static void sequence_profile_break(sequence_profile_t *profile) {
         &profile->signed_store.extended, SEQUENCE_SIGNED_STOP_OBSERVER);
     sequence_signed_store_model_close(
         &profile->signed_store.implemented, SEQUENCE_SIGNED_STOP_OBSERVER);
+    for (unsigned family = 0u;
+         family < SEQUENCE_STORE_FAMILY_COUNT; family++) {
+        if (family == SEQUENCE_STORE_ARM_SINGLE ||
+            family == SEQUENCE_STORE_THUMB_SINGLE)
+            continue;
+        sequence_signed_store_model_close(
+            &profile->signed_store.family_frontier[family],
+            SEQUENCE_SIGNED_STOP_OBSERVER);
+    }
     sequence_signed_store_model_close(
         &profile->signed_indirect.implemented_plus_indirect,
         SEQUENCE_SIGNED_STOP_OBSERVER);
@@ -28248,6 +28331,86 @@ static void sequence_profile_report_store_model(
            model->calls + model->chain_transitions, store->block_lookups,
            store->block_hits + store->block_misses,
            broad_exact ? "EXACT" : "MISMATCH");
+
+    printf("      current-product remaining-store frontier\n");
+    printf("        The baseline asks the exact shipping decoder first, so its "
+           "BX/BLX handlers are already present. Each row then adds exactly "
+           "one still-unimplemented store family on the same literal stream; "
+           "this ranks continuity, not speed or code-size cost.\n");
+    printf("        baseline calls/instructions/heads/chains/runner-entries="
+           "%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64
+           "\n", implemented->calls, implemented->instructions,
+           implemented->blocks, implemented->chain_transitions,
+           implemented_entries);
+    printf("        %-14s %10s %10s %10s %12s %10s %10s %12s %10s %8s %s\n",
+           "family", "candidate", "eligible", "calls", "instructions",
+           "heads", "chains", "entries", "removed", "%base", "gate");
+    for (unsigned family = 0u; family < SEQUENCE_STORE_FAMILY_COUNT;
+         family++) {
+        if (family == SEQUENCE_STORE_ARM_SINGLE ||
+            family == SEQUENCE_STORE_THUMB_SINGLE)
+            continue;
+        const sequence_signed_extended_t *frontier =
+            &store->family_frontier[family];
+        uint64_t family_candidates = 0u;
+        for (unsigned outcome = 0u;
+             outcome < SEQUENCE_STORE_OUTCOME_COUNT; outcome++)
+            family_candidates += store->family_outcomes[family][outcome];
+        uint64_t family_eligible = store->family_outcomes[family]
+            [SEQUENCE_STORE_CONDITION_SKIP] +
+            store->family_outcomes[family][SEQUENCE_STORE_DWRITE_HIT];
+        uint64_t frontier_histogram_calls = 0u;
+        uint64_t frontier_histogram_instructions = 0u;
+        uint64_t frontier_stops = 0u;
+        uint64_t frontier_gate_refusals = 0u;
+        bool frontier_lengths_exact = true;
+        for (unsigned length = 1u;
+             length <= SEQUENCE_SIGNED_EXTENDED_CAP; length++) {
+            uint64_t calls = frontier->length_calls[length];
+            uint64_t instructions = frontier->length_instructions[length];
+            frontier_histogram_calls += calls;
+            frontier_histogram_instructions += instructions;
+            if (instructions != calls * (uint64_t)length)
+                frontier_lengths_exact = false;
+        }
+        for (unsigned i = 0u; i < SEQUENCE_SIGNED_STOP_COUNT; i++)
+            frontier_stops += frontier->stops[i];
+        for (unsigned i = 1u; i < SEQUENCE_SIGNED_GATE_COUNT; i++)
+            frontier_gate_refusals += frontier->gate_refusals[i];
+        uint64_t frontier_entries =
+            profile->fetched >= frontier->instructions
+                ? profile->fetched - frontier->instructions + frontier->calls
+                : 0u;
+        uint64_t frontier_removed =
+            implemented_entries >= frontier_entries
+                ? implemented_entries - frontier_entries : 0u;
+        uint64_t frontier_eligible = current_eligible +
+                                     implemented_eligible + family_eligible;
+        bool frontier_exact = frontier_lengths_exact &&
+            frontier_histogram_calls == frontier->calls &&
+            frontier_histogram_instructions == frontier->instructions &&
+            frontier_stops == frontier->calls &&
+            frontier_eligible ==
+                frontier->instructions + frontier_gate_refusals &&
+            frontier->blocks ==
+                frontier->calls + frontier->chain_transitions &&
+            frontier->instructions >= implemented->instructions &&
+            model->instructions >= frontier->instructions &&
+            implemented_entries >= frontier_entries &&
+            frontier_entries >= store_entries &&
+            frontier->maximum <= SEQUENCE_SIGNED_EXTENDED_CAP;
+        printf("        %-14s %10" PRIu64 " %10" PRIu64 " %10" PRIu64
+               " %12" PRIu64 " %10" PRIu64 " %10" PRIu64
+               " %12" PRIu64 " %10" PRIu64 " %7.3f%% %s\n",
+               FAMILIES[family], family_candidates, family_eligible,
+               frontier->calls, frontier->instructions, frontier->blocks,
+               frontier->chain_transitions, frontier_entries,
+               frontier_removed,
+               implemented_entries
+                   ? 100.0 * (double)frontier_removed /
+                         (double)implemented_entries : 0.0,
+               frontier_exact ? "EXACT" : "MISMATCH");
+    }
 }
 
 static void sequence_profile_report_indirect_model(
@@ -28338,6 +28501,8 @@ static void sequence_profile_report_indirect_model(
         eligible_from_outcomes == indirect->retirement_eligible &&
         indirect->incremental_eligible + indirect->product_overlaps ==
             indirect->retirement_eligible &&
+        indirect->incremental_eligible == 0u &&
+        indirect->product_overlaps == indirect->retirement_eligible &&
         indirect->links == expected_links && lengths_exact &&
         histogram_calls == model->calls &&
         histogram_instructions == model->instructions &&
@@ -28349,12 +28514,13 @@ static void sequence_profile_report_indirect_model(
         baseline_entries >= model_entries &&
         model->maximum <= SEQUENCE_SIGNED_EXTENDED_CAP;
 
-    printf("\n    implemented-store plus register-indirect control-flow model\n");
-    printf("      Observation only: no BX/BLX signed handler exists here. "
-           "Targets and destination ARM/Thumb state come from the literal "
-           "pre-step registers; the next observation verifies both before "
-           "continuing a chain. This is coverage/continuity, not elapsed "
-           "time or FPS.\n");
+    printf("\n    current-product register-indirect coverage audit\n");
+    printf("      The exact shipping decoder is queried first. BX/BLX it "
+           "already admits count as product overlap; only an eligible form "
+           "it still rejects counts as incremental. Targets and destination "
+           "ARM/Thumb state come from literal pre-step registers and the next "
+           "observation verifies both. This is coverage/continuity, not "
+           "elapsed time or FPS.\n");
     printf("      %-10s %10s %10s %10s %10s %10s %10s\n",
            "family", "candidate", "cond-skip", "same-state", "switch",
            "bad-reg", "bad-target");
@@ -28384,7 +28550,7 @@ static void sequence_profile_report_indirect_model(
            profile->fetched
                ? 100.0 * (double)indirect->incremental_eligible /
                      (double)profile->fetched : 0.0);
-    printf("      implemented-store/plus-indirect "
+    printf("      implemented-store baseline/audited-indirect "
            "calls/instructions/heads/chains=%" PRIu64 "/%" PRIu64
            "/%" PRIu64 "/%" PRIu64 " -> %" PRIu64 "/%" PRIu64
            "/%" PRIu64 "/%" PRIu64 " (mean %.3f max=%" PRIu64 ")\n",
@@ -28394,7 +28560,7 @@ static void sequence_profile_report_indirect_model(
            model->calls ? (double)model->instructions /
                               (double)model->calls : 0.0,
            model->maximum);
-    printf("      runner entries store-baseline/plus-indirect/additional-removed="
+    printf("      runner entries store-baseline/audited/additional-removed="
            "%" PRIu64 "/%" PRIu64 "/%" PRIu64 " (%6.3f%% baseline); "
            "current/total-removed=%" PRIu64 "/%" PRIu64
            " (%6.3f%% current)\n",
@@ -28406,7 +28572,7 @@ static void sequence_profile_report_indirect_model(
            current_entries
                ? 100.0 * (double)total_removed /
                      (double)current_entries : 0.0);
-    printf("      eligible current/+stores/+indirect/model+refused="
+    printf("      eligible current/+stores/+unimplemented-indirect/model+refused="
            "%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64
            "+%" PRIu64 "; histogram calls/instructions=%" PRIu64
            "/%" PRIu64 " stops=%" PRIu64
