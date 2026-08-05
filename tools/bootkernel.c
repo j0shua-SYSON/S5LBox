@@ -24836,6 +24836,21 @@ typedef enum {
     SEQUENCE_STORE_OUTCOME_COUNT
 } sequence_store_outcome_t;
 
+typedef enum {
+    SEQUENCE_VFP_STORE_VSTR_S = 0,
+    SEQUENCE_VFP_STORE_VSTR_D,
+    SEQUENCE_VFP_STORE_VSTM_S,
+    SEQUENCE_VFP_STORE_VSTM_D,
+    SEQUENCE_VFP_STORE_FSTMX_D,
+    SEQUENCE_VFP_STORE_KIND_COUNT
+} sequence_vfp_store_kind_t;
+
+typedef enum {
+    SEQUENCE_VFP_STORE_FRONTIER_VSTR = 0,
+    SEQUENCE_VFP_STORE_FRONTIER_VSTM,
+    SEQUENCE_VFP_STORE_FRONTIER_COUNT
+} sequence_vfp_store_frontier_t;
+
 /* Read-only product-shape experiment for a frontend-consented write cache.
  * bootkernel itself never grants that consent: its RAM-write interposer owns
  * the live framebuffer observer. The cache below contains profiling witnesses
@@ -24852,8 +24867,12 @@ typedef struct {
      * family. These side-by-side models rank continuity before native code is
      * added; the broad `extended` model remains the all-family ceiling. */
     sequence_signed_extended_t family_frontier[SEQUENCE_STORE_FAMILY_COUNT];
+    sequence_signed_extended_t
+        vfp_frontier[SEQUENCE_VFP_STORE_FRONTIER_COUNT];
     uint64_t family_outcomes[SEQUENCE_STORE_FAMILY_COUNT]
                             [SEQUENCE_STORE_OUTCOME_COUNT];
+    uint64_t vfp_kind_outcomes[SEQUENCE_VFP_STORE_KIND_COUNT]
+                              [SEQUENCE_STORE_OUTCOME_COUNT];
     uint64_t candidates;
     uint64_t decoder_supported;
     uint64_t retirement_eligible;
@@ -25820,7 +25839,8 @@ static sequence_store_outcome_t sequence_store_arm_block(
 
 static sequence_store_outcome_t sequence_store_arm_vfp(
         arm_cpu_t *cpu, uint32_t pc, uint32_t insn,
-        sequence_store_blocks_t *blocks) {
+        sequence_store_blocks_t *blocks,
+        sequence_vfp_store_kind_t *kind_out) {
     bool pre = (insn & (1u << 24)) != 0u;
     bool up = (insn & (1u << 23)) != 0u;
     bool high = (insn & (1u << 22)) != 0u;
@@ -25832,7 +25852,19 @@ static sequence_store_outcome_t sequence_store_arm_vfp(
     unsigned imm8 = insn & 255u;
     unsigned words;
 
-    if (!cpu || !blocks || load ||
+    if (kind_out) {
+        if (pre && !writeback)
+            *kind_out = dbl ? SEQUENCE_VFP_STORE_VSTR_D
+                            : SEQUENCE_VFP_STORE_VSTR_S;
+        else if (!dbl)
+            *kind_out = SEQUENCE_VFP_STORE_VSTM_S;
+        else if ((imm8 & 1u) != 0u)
+            *kind_out = SEQUENCE_VFP_STORE_FSTMX_D;
+        else
+            *kind_out = SEQUENCE_VFP_STORE_VSTM_D;
+    }
+
+    if (!cpu || !blocks || !kind_out || load ||
         (insn & UINT32_C(0x0e000e00)) != UINT32_C(0x0c000a00) ||
         (!pre && !up && !writeback) || (pre && up && writeback) ||
         (rn == 15u && (writeback || !pre)))
@@ -25992,13 +26024,16 @@ static bool sequence_store_classify(
         sequence_profile_t *profile, arm_cpu_t *cpu, uint32_t pc,
         uint32_t raw, bool thumb, sequence_class_t instruction_class,
         sequence_signed_classification_t *classification,
-        sequence_store_family_t *family_out) {
+        sequence_store_family_t *family_out,
+        sequence_vfp_store_kind_t *vfp_kind_out) {
     sequence_store_blocks_t blocks = { 0 };
     sequence_store_family_t family = SEQUENCE_STORE_ARM_SINGLE;
     sequence_store_outcome_t outcome = SEQUENCE_STORE_INVALID;
+    sequence_vfp_store_kind_t vfp_kind = SEQUENCE_VFP_STORE_KIND_COUNT;
     bool candidate = false;
 
     if (family_out) *family_out = SEQUENCE_STORE_FAMILY_COUNT;
+    if (vfp_kind_out) *vfp_kind_out = SEQUENCE_VFP_STORE_KIND_COUNT;
 
     if (thumb) {
         candidate = sequence_store_thumb_candidate(
@@ -26017,16 +26052,21 @@ static bool sequence_store_classify(
                sequence_vfp_memory(raw) && (raw & (1u << 20)) == 0u) {
         family = SEQUENCE_STORE_ARM_VFP;
         candidate = true;
-        outcome = sequence_store_arm_vfp(cpu, pc, raw, &blocks);
+        outcome = sequence_store_arm_vfp(
+            cpu, pc, raw, &blocks, &vfp_kind);
     }
     if (!candidate) return false;
     if (family_out) *family_out = family;
+    if (vfp_kind_out) *vfp_kind_out = vfp_kind;
 
     if (outcome == SEQUENCE_STORE_DWRITE_HIT && blocks.count)
         outcome = sequence_store_probe_blocks(
             &profile->signed_store, cpu, &blocks);
     profile->signed_store.candidates++;
     profile->signed_store.family_outcomes[family][outcome]++;
+    if (family == SEQUENCE_STORE_ARM_VFP &&
+        vfp_kind < SEQUENCE_VFP_STORE_KIND_COUNT)
+        profile->signed_store.vfp_kind_outcomes[vfp_kind][outcome]++;
     if (outcome != SEQUENCE_STORE_INVALID)
         profile->signed_store.decoder_supported++;
     sequence_store_validation_arm(profile, cpu, pc, raw, thumb, &blocks);
@@ -26821,9 +26861,11 @@ static bool sequence_signed_observe(sequence_profile_t *profile,
             classification;
         sequence_store_family_t store_family =
             SEQUENCE_STORE_FAMILY_COUNT;
+        sequence_vfp_store_kind_t vfp_store_kind =
+            SEQUENCE_VFP_STORE_KIND_COUNT;
         bool store_eligible = sequence_store_classify(
             profile, &mach->cpu, pc, raw, thumb, instruction_class,
-            &store_classification, &store_family);
+            &store_classification, &store_family, &vfp_store_kind);
         sequence_signed_store_observe(
             profile, mach, pc, thumb, physical_sequential,
             &store_classification, &profile->signed_store.extended);
@@ -26848,6 +26890,23 @@ static bool sequence_signed_observe(sequence_profile_t *profile,
                 profile, mach, pc, thumb, physical_sequential,
                 &frontier_classification,
                 &profile->signed_store.family_frontier[family]);
+        }
+        for (unsigned frontier = 0u;
+             frontier < SEQUENCE_VFP_STORE_FRONTIER_COUNT; frontier++) {
+            sequence_signed_classification_t vfp_classification =
+                implemented_classification;
+            bool vstr = vfp_store_kind == SEQUENCE_VFP_STORE_VSTR_S ||
+                        vfp_store_kind == SEQUENCE_VFP_STORE_VSTR_D;
+            bool selected = frontier == SEQUENCE_VFP_STORE_FRONTIER_VSTR
+                ? vstr : vfp_store_kind < SEQUENCE_VFP_STORE_KIND_COUNT &&
+                         !vstr;
+            if (store_eligible && store_family == SEQUENCE_STORE_ARM_VFP &&
+                selected)
+                vfp_classification = store_classification;
+            sequence_signed_store_observe(
+                profile, mach, pc, thumb, physical_sequential,
+                &vfp_classification,
+                &profile->signed_store.vfp_frontier[frontier]);
         }
         sequence_signed_classification_t indirect_classification =
             implemented_classification;
@@ -26975,6 +27034,11 @@ static void sequence_profile_break(sequence_profile_t *profile) {
             &profile->signed_store.family_frontier[family],
             SEQUENCE_SIGNED_STOP_OBSERVER);
     }
+    for (unsigned frontier = 0u;
+         frontier < SEQUENCE_VFP_STORE_FRONTIER_COUNT; frontier++)
+        sequence_signed_store_model_close(
+            &profile->signed_store.vfp_frontier[frontier],
+            SEQUENCE_SIGNED_STOP_OBSERVER);
     sequence_signed_store_model_close(
         &profile->signed_indirect.implemented_plus_indirect,
         SEQUENCE_SIGNED_STOP_OBSERVER);
@@ -28067,6 +28131,13 @@ static void sequence_profile_report_store_model(
         "A32 single", "A32 block", "A32 VFP",
         "Thumb single", "Thumb multi"
     };
+    static const char *const VFP_KINDS[SEQUENCE_VFP_STORE_KIND_COUNT] = {
+        "VSTR S", "VSTR D", "VSTM S", "VSTM D", "FSTMX D"
+    };
+    static const char *const VFP_FRONTIERS[
+            SEQUENCE_VFP_STORE_FRONTIER_COUNT] = {
+        "all VSTR", "all VSTM/FSTMX"
+    };
     const sequence_signed_store_t *store = &profile->signed_store;
     const sequence_signed_extended_t *current = &profile->signed_extended;
     const sequence_signed_extended_t *model = &store->extended;
@@ -28406,6 +28477,124 @@ static void sequence_profile_report_store_model(
                frontier->calls, frontier->instructions, frontier->blocks,
                frontier->chain_transitions, frontier_entries,
                frontier_removed,
+               implemented_entries
+                   ? 100.0 * (double)frontier_removed /
+                         (double)implemented_entries : 0.0,
+               frontier_exact ? "EXACT" : "MISMATCH");
+    }
+
+    uint64_t vfp_family_candidates = 0u;
+    for (unsigned outcome = 0u;
+         outcome < SEQUENCE_STORE_OUTCOME_COUNT; outcome++)
+        vfp_family_candidates +=
+            store->family_outcomes[SEQUENCE_STORE_ARM_VFP][outcome];
+    uint64_t vfp_family_eligible =
+        store->family_outcomes[SEQUENCE_STORE_ARM_VFP]
+            [SEQUENCE_STORE_CONDITION_SKIP] +
+        store->family_outcomes[SEQUENCE_STORE_ARM_VFP]
+            [SEQUENCE_STORE_DWRITE_HIT];
+    uint64_t vfp_kind_candidates = 0u;
+    uint64_t vfp_kind_eligible = 0u;
+    printf("      A32 VFP-store semantic split\n");
+    printf("        %-14s %10s %10s %10s %10s %10s %10s\n",
+           "kind", "candidate", "eligible", "cond-skip", "hit",
+           "miss-fill", "state");
+    for (unsigned kind = 0u; kind < SEQUENCE_VFP_STORE_KIND_COUNT; kind++) {
+        const uint64_t *row = store->vfp_kind_outcomes[kind];
+        uint64_t candidates = 0u;
+        for (unsigned outcome = 0u;
+             outcome < SEQUENCE_STORE_OUTCOME_COUNT; outcome++)
+            candidates += row[outcome];
+        uint64_t eligible = row[SEQUENCE_STORE_CONDITION_SKIP] +
+                            row[SEQUENCE_STORE_DWRITE_HIT];
+        vfp_kind_candidates += candidates;
+        vfp_kind_eligible += eligible;
+        printf("        %-14s %10" PRIu64 " %10" PRIu64 " %10" PRIu64
+               " %10" PRIu64 " %10" PRIu64 " %10" PRIu64 "\n",
+               VFP_KINDS[kind], candidates, eligible,
+               row[SEQUENCE_STORE_CONDITION_SKIP],
+               row[SEQUENCE_STORE_DWRITE_HIT],
+               row[SEQUENCE_STORE_DWRITE_MISS_FILL],
+               row[SEQUENCE_STORE_STATE_GUARD]);
+    }
+    bool vfp_kind_exact = vfp_kind_candidates == vfp_family_candidates &&
+                          vfp_kind_eligible == vfp_family_eligible;
+    printf("        subtype/family candidates=%" PRIu64 "/%" PRIu64
+           " eligible=%" PRIu64 "/%" PRIu64 "  %s\n",
+           vfp_kind_candidates, vfp_family_candidates, vfp_kind_eligible,
+           vfp_family_eligible, vfp_kind_exact ? "EXACT" : "MISMATCH");
+
+    printf("      A32 VFP-store continuity split\n");
+    printf("        %-14s %10s %10s %10s %12s %10s %10s %12s %10s %8s %s\n",
+           "frontier", "candidate", "eligible", "calls", "instructions",
+           "heads", "chains", "entries", "removed", "%base", "gate");
+    for (unsigned selected = 0u;
+         selected < SEQUENCE_VFP_STORE_FRONTIER_COUNT; selected++) {
+        const sequence_signed_extended_t *frontier =
+            &store->vfp_frontier[selected];
+        uint64_t selected_candidates = 0u;
+        uint64_t selected_eligible = 0u;
+        for (unsigned kind = 0u;
+             kind < SEQUENCE_VFP_STORE_KIND_COUNT; kind++) {
+            bool vstr = kind == SEQUENCE_VFP_STORE_VSTR_S ||
+                        kind == SEQUENCE_VFP_STORE_VSTR_D;
+            if ((selected == SEQUENCE_VFP_STORE_FRONTIER_VSTR) != vstr)
+                continue;
+            const uint64_t *row = store->vfp_kind_outcomes[kind];
+            for (unsigned outcome = 0u;
+                 outcome < SEQUENCE_STORE_OUTCOME_COUNT; outcome++)
+                selected_candidates += row[outcome];
+            selected_eligible += row[SEQUENCE_STORE_CONDITION_SKIP] +
+                                 row[SEQUENCE_STORE_DWRITE_HIT];
+        }
+        uint64_t frontier_histogram_calls = 0u;
+        uint64_t frontier_histogram_instructions = 0u;
+        uint64_t frontier_stops = 0u;
+        uint64_t frontier_gate_refusals = 0u;
+        bool frontier_lengths_exact = true;
+        for (unsigned length = 1u;
+             length <= SEQUENCE_SIGNED_EXTENDED_CAP; length++) {
+            uint64_t calls = frontier->length_calls[length];
+            uint64_t instructions = frontier->length_instructions[length];
+            frontier_histogram_calls += calls;
+            frontier_histogram_instructions += instructions;
+            if (instructions != calls * (uint64_t)length)
+                frontier_lengths_exact = false;
+        }
+        for (unsigned i = 0u; i < SEQUENCE_SIGNED_STOP_COUNT; i++)
+            frontier_stops += frontier->stops[i];
+        for (unsigned i = 1u; i < SEQUENCE_SIGNED_GATE_COUNT; i++)
+            frontier_gate_refusals += frontier->gate_refusals[i];
+        uint64_t frontier_entries =
+            profile->fetched >= frontier->instructions
+                ? profile->fetched - frontier->instructions + frontier->calls
+                : 0u;
+        uint64_t frontier_removed =
+            implemented_entries >= frontier_entries
+                ? implemented_entries - frontier_entries : 0u;
+        uint64_t frontier_eligible = current_eligible +
+                                     implemented_eligible + selected_eligible;
+        bool frontier_exact = vfp_kind_exact && frontier_lengths_exact &&
+            frontier_histogram_calls == frontier->calls &&
+            frontier_histogram_instructions == frontier->instructions &&
+            frontier_stops == frontier->calls &&
+            frontier_eligible ==
+                frontier->instructions + frontier_gate_refusals &&
+            frontier->blocks ==
+                frontier->calls + frontier->chain_transitions &&
+            frontier->instructions >= implemented->instructions &&
+            store->family_frontier[SEQUENCE_STORE_ARM_VFP].instructions >=
+                frontier->instructions &&
+            implemented_entries >= frontier_entries &&
+            frontier_entries >= store_entries &&
+            frontier->maximum <= SEQUENCE_SIGNED_EXTENDED_CAP;
+        printf("        %-14s %10" PRIu64 " %10" PRIu64 " %10" PRIu64
+               " %12" PRIu64 " %10" PRIu64 " %10" PRIu64
+               " %12" PRIu64 " %10" PRIu64 " %7.3f%% %s\n",
+               VFP_FRONTIERS[selected], selected_candidates,
+               selected_eligible, frontier->calls, frontier->instructions,
+               frontier->blocks, frontier->chain_transitions,
+               frontier_entries, frontier_removed,
                implemented_entries
                    ? 100.0 * (double)frontier_removed /
                          (double)implemented_entries : 0.0,
