@@ -105,9 +105,12 @@ jobs:
         working-directory: app
         run: |
           set -euo pipefail
-          build_settings=()
+          # Positional parameters expand safely to zero arguments under
+          # `set -u`; an empty Bash 3.2 array does not. Hosted macOS still
+          # exposes that older nounset behavior.
+          set --
           if [ "$EXPERIMENTAL_HLE" = true ]; then
-            build_settings+=("OTHER_CFLAGS=-DS5LBOX_IOS3_HLE_EXPERIMENT=1")
+            set -- "OTHER_CFLAGS=-DS5LBOX_IOS3_HLE_EXPERIMENT=1"
           fi
           xcodebuild \
             -project S5LBox.xcodeproj \
@@ -117,7 +120,7 @@ jobs:
             -arch arm64 \
             CONFIGURATION_BUILD_DIR="$PWD/dist" \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
-            "${build_settings[@]}" \
+            "$@" \
             build
           binary="$PWD/dist/S5LBox.app/S5LBox"
           test -f "$binary"
