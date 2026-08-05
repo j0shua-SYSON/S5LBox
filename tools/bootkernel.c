@@ -24851,6 +24851,21 @@ typedef enum {
     SEQUENCE_VFP_STORE_FRONTIER_COUNT
 } sequence_vfp_store_frontier_t;
 
+typedef enum {
+    SEQUENCE_ARM_BLOCK_ORDINARY_NO_WB = 0,
+    SEQUENCE_ARM_BLOCK_ORDINARY_WB,
+    SEQUENCE_ARM_BLOCK_ORDINARY_WB_BASE,
+    SEQUENCE_ARM_BLOCK_USER_BANK,
+    SEQUENCE_ARM_BLOCK_KIND_COUNT
+} sequence_arm_block_kind_t;
+
+typedef enum {
+    SEQUENCE_ARM_BLOCK_FRONTIER_ORDINARY_ONE_BLOCK = 0,
+    SEQUENCE_ARM_BLOCK_FRONTIER_ORDINARY_ALL,
+    SEQUENCE_ARM_BLOCK_FRONTIER_USER_BANK,
+    SEQUENCE_ARM_BLOCK_FRONTIER_COUNT
+} sequence_arm_block_frontier_t;
+
 /* Read-only product-shape experiment for a frontend-consented write cache.
  * bootkernel itself never grants that consent: its RAM-write interposer owns
  * the live framebuffer observer. The cache below contains profiling witnesses
@@ -24870,10 +24885,19 @@ typedef struct {
     sequence_signed_extended_t family_frontier[SEQUENCE_STORE_FAMILY_COUNT];
     sequence_signed_extended_t
         vfp_frontier[SEQUENCE_VFP_STORE_FRONTIER_COUNT];
+    sequence_signed_extended_t
+        arm_block_frontier[SEQUENCE_ARM_BLOCK_FRONTIER_COUNT];
     uint64_t family_outcomes[SEQUENCE_STORE_FAMILY_COUNT]
                             [SEQUENCE_STORE_OUTCOME_COUNT];
     uint64_t vfp_kind_outcomes[SEQUENCE_VFP_STORE_KIND_COUNT]
                               [SEQUENCE_STORE_OUTCOME_COUNT];
+    uint64_t arm_block_kind_outcomes[SEQUENCE_ARM_BLOCK_KIND_COUNT]
+                                    [SEQUENCE_STORE_OUTCOME_COUNT];
+    uint64_t arm_block_mode_outcomes[4u][SEQUENCE_STORE_OUTCOME_COUNT];
+    uint64_t arm_block_words_outcomes[17u][SEQUENCE_STORE_OUTCOME_COUNT];
+    uint64_t arm_block_span_outcomes[3u][SEQUENCE_STORE_OUTCOME_COUNT];
+    uint64_t arm_block_frontier_outcomes[
+        SEQUENCE_ARM_BLOCK_FRONTIER_COUNT][SEQUENCE_STORE_OUTCOME_COUNT];
     uint64_t candidates;
     uint64_t decoder_supported;
     uint64_t retirement_eligible;
@@ -25799,20 +25823,36 @@ static sequence_store_outcome_t sequence_store_arm_single(
 }
 
 static sequence_store_outcome_t sequence_store_arm_block(
-        arm_cpu_t *cpu, uint32_t insn, sequence_store_blocks_t *blocks) {
+        arm_cpu_t *cpu, uint32_t insn, sequence_store_blocks_t *blocks,
+        sequence_arm_block_kind_t *kind_out, unsigned *mode_out,
+        unsigned *words_out) {
     bool pre = (insn & (1u << 24)) != 0u;
     bool up = (insn & (1u << 23)) != 0u;
     bool user_bank = (insn & (1u << 22)) != 0u;
     bool writeback = (insn & (1u << 21)) != 0u;
     unsigned rn = (insn >> 16) & 15u;
     uint32_t list = insn & UINT32_C(0xffff);
+    if (kind_out) {
+        *kind_out = user_bank ? SEQUENCE_ARM_BLOCK_USER_BANK
+            : !writeback ? SEQUENCE_ARM_BLOCK_ORDINARY_NO_WB
+            : (list & (1u << rn)) != 0u
+                ? SEQUENCE_ARM_BLOCK_ORDINARY_WB_BASE
+                : SEQUENCE_ARM_BLOCK_ORDINARY_WB;
+    }
+    if (mode_out) *mode_out = (pre ? 2u : 0u) | (up ? 1u : 0u);
+    if (words_out) *words_out = 0u;
     if (!cpu || !blocks || (insn & (1u << 20)) != 0u || !list ||
-        rn == 15u || (user_bank && writeback))
+        rn == 15u || (user_bank && writeback) || !kind_out || !mode_out ||
+        !words_out)
         return SEQUENCE_STORE_INVALID;
     if (writeback && (list & (1u << rn)) != 0u) {
         uint32_t lower = rn == 0u ? 0u : ((1u << rn) - 1u);
         if ((list & lower) != 0u) return SEQUENCE_STORE_INVALID;
     }
+    unsigned words = 0u;
+    for (unsigned i = 0u; i < 16u; i++)
+        if ((list & (1u << i)) != 0u) words++;
+    *words_out = words;
     unsigned condition = insn >> 28;
     if (condition < 14u && !arm_cond_passed(cpu, condition))
         return SEQUENCE_STORE_CONDITION_SKIP;
@@ -25822,9 +25862,6 @@ static sequence_store_outcome_t sequence_store_arm_block(
             return SEQUENCE_STORE_STATE_GUARD;
     }
 
-    unsigned words = 0u;
-    for (unsigned i = 0u; i < 16u; i++)
-        if ((list & (1u << i)) != 0u) words++;
     uint32_t base = cpu->r[rn];
     uint32_t address = up
         ? (pre ? base + 4u : base)
@@ -26026,15 +26063,27 @@ static bool sequence_store_classify(
         uint32_t raw, bool thumb, sequence_class_t instruction_class,
         sequence_signed_classification_t *classification,
         sequence_store_family_t *family_out,
-        sequence_vfp_store_kind_t *vfp_kind_out) {
+        sequence_vfp_store_kind_t *vfp_kind_out,
+        sequence_arm_block_kind_t *arm_block_kind_out,
+        unsigned *arm_block_mode_out, unsigned *arm_block_words_out,
+        unsigned *arm_block_span_out) {
     sequence_store_blocks_t blocks = { 0 };
     sequence_store_family_t family = SEQUENCE_STORE_ARM_SINGLE;
     sequence_store_outcome_t outcome = SEQUENCE_STORE_INVALID;
     sequence_vfp_store_kind_t vfp_kind = SEQUENCE_VFP_STORE_KIND_COUNT;
+    sequence_arm_block_kind_t arm_block_kind =
+        SEQUENCE_ARM_BLOCK_KIND_COUNT;
+    unsigned arm_block_mode = 4u;
+    unsigned arm_block_words = 17u;
     bool candidate = false;
 
     if (family_out) *family_out = SEQUENCE_STORE_FAMILY_COUNT;
     if (vfp_kind_out) *vfp_kind_out = SEQUENCE_VFP_STORE_KIND_COUNT;
+    if (arm_block_kind_out)
+        *arm_block_kind_out = SEQUENCE_ARM_BLOCK_KIND_COUNT;
+    if (arm_block_mode_out) *arm_block_mode_out = 4u;
+    if (arm_block_words_out) *arm_block_words_out = 17u;
+    if (arm_block_span_out) *arm_block_span_out = 0u;
 
     if (thumb) {
         candidate = sequence_store_thumb_candidate(
@@ -26048,7 +26097,9 @@ static bool sequence_store_classify(
                (raw & (1u << 20)) == 0u) {
         family = SEQUENCE_STORE_ARM_BLOCK;
         candidate = true;
-        outcome = sequence_store_arm_block(cpu, raw, &blocks);
+        outcome = sequence_store_arm_block(
+            cpu, raw, &blocks, &arm_block_kind, &arm_block_mode,
+            &arm_block_words);
     } else if (instruction_class == SEQUENCE_ARM_VFP &&
                sequence_vfp_memory(raw) && (raw & (1u << 20)) == 0u) {
         family = SEQUENCE_STORE_ARM_VFP;
@@ -26059,6 +26110,10 @@ static bool sequence_store_classify(
     if (!candidate) return false;
     if (family_out) *family_out = family;
     if (vfp_kind_out) *vfp_kind_out = vfp_kind;
+    if (arm_block_kind_out) *arm_block_kind_out = arm_block_kind;
+    if (arm_block_mode_out) *arm_block_mode_out = arm_block_mode;
+    if (arm_block_words_out) *arm_block_words_out = arm_block_words;
+    if (arm_block_span_out) *arm_block_span_out = blocks.count;
 
     if (outcome == SEQUENCE_STORE_DWRITE_HIT && blocks.count)
         outcome = sequence_store_probe_blocks(
@@ -26068,6 +26123,36 @@ static bool sequence_store_classify(
     if (family == SEQUENCE_STORE_ARM_VFP &&
         vfp_kind < SEQUENCE_VFP_STORE_KIND_COUNT)
         profile->signed_store.vfp_kind_outcomes[vfp_kind][outcome]++;
+    if (family == SEQUENCE_STORE_ARM_BLOCK &&
+        arm_block_kind < SEQUENCE_ARM_BLOCK_KIND_COUNT &&
+        arm_block_mode < 4u && arm_block_words <= 16u &&
+        blocks.count <= 2u) {
+        profile->signed_store
+            .arm_block_kind_outcomes[arm_block_kind][outcome]++;
+        profile->signed_store
+            .arm_block_mode_outcomes[arm_block_mode][outcome]++;
+        profile->signed_store
+            .arm_block_words_outcomes[arm_block_words][outcome]++;
+        profile->signed_store
+            .arm_block_span_outcomes[blocks.count][outcome]++;
+        bool ordinary = arm_block_kind < SEQUENCE_ARM_BLOCK_USER_BANK;
+        if (ordinary) {
+            sequence_store_outcome_t one_block_outcome = outcome;
+            if (blocks.count > 1u &&
+                outcome != SEQUENCE_STORE_INVALID &&
+                outcome != SEQUENCE_STORE_CONDITION_SKIP)
+                one_block_outcome = SEQUENCE_STORE_STATE_GUARD;
+            profile->signed_store.arm_block_frontier_outcomes[
+                SEQUENCE_ARM_BLOCK_FRONTIER_ORDINARY_ONE_BLOCK]
+                [one_block_outcome]++;
+        }
+        if (ordinary)
+            profile->signed_store.arm_block_frontier_outcomes[
+                SEQUENCE_ARM_BLOCK_FRONTIER_ORDINARY_ALL][outcome]++;
+        if (arm_block_kind == SEQUENCE_ARM_BLOCK_USER_BANK)
+            profile->signed_store.arm_block_frontier_outcomes[
+                SEQUENCE_ARM_BLOCK_FRONTIER_USER_BANK][outcome]++;
+    }
     if (outcome != SEQUENCE_STORE_INVALID)
         profile->signed_store.decoder_supported++;
     sequence_store_validation_arm(profile, cpu, pc, raw, thumb, &blocks);
@@ -26864,9 +26949,16 @@ static bool sequence_signed_observe(sequence_profile_t *profile,
             SEQUENCE_STORE_FAMILY_COUNT;
         sequence_vfp_store_kind_t vfp_store_kind =
             SEQUENCE_VFP_STORE_KIND_COUNT;
+        sequence_arm_block_kind_t arm_block_kind =
+            SEQUENCE_ARM_BLOCK_KIND_COUNT;
+        unsigned arm_block_mode = 4u;
+        unsigned arm_block_words = 17u;
+        unsigned arm_block_span = 0u;
         bool store_eligible = sequence_store_classify(
             profile, &mach->cpu, pc, raw, thumb, instruction_class,
-            &store_classification, &store_family, &vfp_store_kind);
+            &store_classification, &store_family, &vfp_store_kind,
+            &arm_block_kind, &arm_block_mode, &arm_block_words,
+            &arm_block_span);
         sequence_signed_store_observe(
             profile, mach, pc, thumb, physical_sequential,
             &store_classification, &profile->signed_store.extended);
@@ -26912,6 +27004,34 @@ static bool sequence_signed_observe(sequence_profile_t *profile,
                 profile, mach, pc, thumb, physical_sequential,
                 &vfp_classification,
                 &profile->signed_store.vfp_frontier[frontier]);
+        }
+        for (unsigned frontier = 0u;
+             frontier < SEQUENCE_ARM_BLOCK_FRONTIER_COUNT; frontier++) {
+            sequence_signed_classification_t block_classification =
+                implemented_classification;
+            bool ordinary =
+                arm_block_kind < SEQUENCE_ARM_BLOCK_USER_BANK;
+            bool selected = false;
+            if (frontier ==
+                    SEQUENCE_ARM_BLOCK_FRONTIER_ORDINARY_ONE_BLOCK) {
+                selected = ordinary &&
+                    (store_classification.outcome ==
+                         SEQUENCE_SIGNED_READ_SKIPPED ||
+                     arm_block_span == 1u);
+            } else if (frontier ==
+                       SEQUENCE_ARM_BLOCK_FRONTIER_ORDINARY_ALL) {
+                selected = ordinary;
+            } else {
+                selected =
+                    arm_block_kind == SEQUENCE_ARM_BLOCK_USER_BANK;
+            }
+            if (store_eligible &&
+                store_family == SEQUENCE_STORE_ARM_BLOCK && selected)
+                block_classification = store_classification;
+            sequence_signed_store_observe(
+                profile, mach, pc, thumb, physical_sequential,
+                &block_classification,
+                &profile->signed_store.arm_block_frontier[frontier]);
         }
         sequence_signed_classification_t indirect_classification =
             implemented_classification;
@@ -28143,6 +28263,17 @@ static void sequence_profile_report_store_model(
             SEQUENCE_VFP_STORE_FRONTIER_COUNT] = {
         "VSTR shipped", "VSTM/FSTMX"
     };
+    static const char *const ARM_BLOCK_KINDS[
+            SEQUENCE_ARM_BLOCK_KIND_COUNT] = {
+        "ordinary no-WB", "ordinary WB", "WB base-in-list", "user bank"
+    };
+    static const char *const ARM_BLOCK_MODES[4u] = {
+        "DA", "IA", "DB", "IB"
+    };
+    static const char *const ARM_BLOCK_FRONTIERS[
+            SEQUENCE_ARM_BLOCK_FRONTIER_COUNT] = {
+        "ordinary 1blk", "ordinary all", "user bank"
+    };
     const sequence_signed_store_t *store = &profile->signed_store;
     const sequence_signed_extended_t *current = &profile->signed_extended;
     const sequence_signed_extended_t *model = &store->extended;
@@ -28507,6 +28638,229 @@ static void sequence_profile_report_store_model(
                frontier->calls, frontier->instructions, frontier->blocks,
                frontier->chain_transitions, frontier_entries,
                frontier_removed,
+               implemented_entries
+                   ? 100.0 * (double)frontier_removed /
+                         (double)implemented_entries : 0.0,
+               frontier_exact ? "EXACT" : "MISMATCH");
+    }
+
+    uint64_t arm_block_family_candidates = 0u;
+    for (unsigned outcome = 0u;
+         outcome < SEQUENCE_STORE_OUTCOME_COUNT; outcome++)
+        arm_block_family_candidates +=
+            store->family_outcomes[SEQUENCE_STORE_ARM_BLOCK][outcome];
+    uint64_t arm_block_family_eligible =
+        store->family_outcomes[SEQUENCE_STORE_ARM_BLOCK]
+            [SEQUENCE_STORE_CONDITION_SKIP] +
+        store->family_outcomes[SEQUENCE_STORE_ARM_BLOCK]
+            [SEQUENCE_STORE_DWRITE_HIT];
+    uint64_t arm_block_kind_candidates = 0u;
+    uint64_t arm_block_kind_eligible = 0u;
+    uint64_t arm_block_mode_candidates = 0u;
+    uint64_t arm_block_mode_eligible = 0u;
+    uint64_t arm_block_words_candidates = 0u;
+    uint64_t arm_block_words_eligible = 0u;
+    uint64_t arm_block_span_candidates = 0u;
+    uint64_t arm_block_span_eligible = 0u;
+
+    printf("      A32 block-store semantic split\n");
+    printf("        %-20s %10s %10s %10s %10s %10s %10s %10s\n",
+           "kind", "candidate", "eligible", "cond-skip", "hit",
+           "miss-fill", "state", "invalid");
+    for (unsigned kind = 0u; kind < SEQUENCE_ARM_BLOCK_KIND_COUNT;
+         kind++) {
+        const uint64_t *row = store->arm_block_kind_outcomes[kind];
+        uint64_t candidates = 0u;
+        for (unsigned outcome = 0u;
+             outcome < SEQUENCE_STORE_OUTCOME_COUNT; outcome++)
+            candidates += row[outcome];
+        uint64_t eligible = row[SEQUENCE_STORE_CONDITION_SKIP] +
+                            row[SEQUENCE_STORE_DWRITE_HIT];
+        arm_block_kind_candidates += candidates;
+        arm_block_kind_eligible += eligible;
+        printf("        %-20s %10" PRIu64 " %10" PRIu64
+               " %10" PRIu64 " %10" PRIu64 " %10" PRIu64
+               " %10" PRIu64 " %10" PRIu64 "\n",
+               ARM_BLOCK_KINDS[kind], candidates, eligible,
+               row[SEQUENCE_STORE_CONDITION_SKIP],
+               row[SEQUENCE_STORE_DWRITE_HIT],
+               row[SEQUENCE_STORE_DWRITE_MISS_FILL],
+               row[SEQUENCE_STORE_STATE_GUARD],
+               row[SEQUENCE_STORE_INVALID]);
+    }
+    printf("        %-20s %10s %10s %10s %10s %10s %10s %10s\n",
+           "address mode", "candidate", "eligible", "cond-skip", "hit",
+           "miss-fill", "state", "invalid");
+    for (unsigned mode = 0u; mode < 4u; mode++) {
+        const uint64_t *row = store->arm_block_mode_outcomes[mode];
+        uint64_t candidates = 0u;
+        for (unsigned outcome = 0u;
+             outcome < SEQUENCE_STORE_OUTCOME_COUNT; outcome++)
+            candidates += row[outcome];
+        uint64_t eligible = row[SEQUENCE_STORE_CONDITION_SKIP] +
+                            row[SEQUENCE_STORE_DWRITE_HIT];
+        arm_block_mode_candidates += candidates;
+        arm_block_mode_eligible += eligible;
+        printf("        %-20s %10" PRIu64 " %10" PRIu64
+               " %10" PRIu64 " %10" PRIu64 " %10" PRIu64
+               " %10" PRIu64 " %10" PRIu64 "\n",
+               ARM_BLOCK_MODES[mode], candidates, eligible,
+               row[SEQUENCE_STORE_CONDITION_SKIP],
+               row[SEQUENCE_STORE_DWRITE_HIT],
+               row[SEQUENCE_STORE_DWRITE_MISS_FILL],
+               row[SEQUENCE_STORE_STATE_GUARD],
+               row[SEQUENCE_STORE_INVALID]);
+    }
+    printf("        %-20s %10s %10s %10s %10s %10s %10s %10s\n",
+           "register words", "candidate", "eligible", "cond-skip", "hit",
+           "miss-fill", "state", "invalid");
+    for (unsigned words = 0u; words <= 16u; words++) {
+        const uint64_t *row = store->arm_block_words_outcomes[words];
+        uint64_t candidates = 0u;
+        for (unsigned outcome = 0u;
+             outcome < SEQUENCE_STORE_OUTCOME_COUNT; outcome++)
+            candidates += row[outcome];
+        uint64_t eligible = row[SEQUENCE_STORE_CONDITION_SKIP] +
+                            row[SEQUENCE_STORE_DWRITE_HIT];
+        arm_block_words_candidates += candidates;
+        arm_block_words_eligible += eligible;
+        if (!candidates) continue;
+        char label[32];
+        (void)snprintf(label, sizeof label, "%u", words);
+        printf("        %-20s %10" PRIu64 " %10" PRIu64
+               " %10" PRIu64 " %10" PRIu64 " %10" PRIu64
+               " %10" PRIu64 " %10" PRIu64 "\n",
+               label, candidates, eligible,
+               row[SEQUENCE_STORE_CONDITION_SKIP],
+               row[SEQUENCE_STORE_DWRITE_HIT],
+               row[SEQUENCE_STORE_DWRITE_MISS_FILL],
+               row[SEQUENCE_STORE_STATE_GUARD],
+               row[SEQUENCE_STORE_INVALID]);
+    }
+    printf("        %-20s %10s %10s %10s %10s %10s %10s %10s\n",
+           "DWRITE spans", "candidate", "eligible", "cond-skip", "hit",
+           "miss-fill", "state", "invalid");
+    for (unsigned span = 0u; span <= 2u; span++) {
+        const uint64_t *row = store->arm_block_span_outcomes[span];
+        uint64_t candidates = 0u;
+        for (unsigned outcome = 0u;
+             outcome < SEQUENCE_STORE_OUTCOME_COUNT; outcome++)
+            candidates += row[outcome];
+        uint64_t eligible = row[SEQUENCE_STORE_CONDITION_SKIP] +
+                            row[SEQUENCE_STORE_DWRITE_HIT];
+        arm_block_span_candidates += candidates;
+        arm_block_span_eligible += eligible;
+        char label[32];
+        (void)snprintf(label, sizeof label, "%u block%s", span,
+                       span == 1u ? "" : "s");
+        printf("        %-20s %10" PRIu64 " %10" PRIu64
+               " %10" PRIu64 " %10" PRIu64 " %10" PRIu64
+               " %10" PRIu64 " %10" PRIu64 "\n",
+               label, candidates, eligible,
+               row[SEQUENCE_STORE_CONDITION_SKIP],
+               row[SEQUENCE_STORE_DWRITE_HIT],
+               row[SEQUENCE_STORE_DWRITE_MISS_FILL],
+               row[SEQUENCE_STORE_STATE_GUARD],
+               row[SEQUENCE_STORE_INVALID]);
+    }
+    bool arm_block_semantic_exact =
+        arm_block_kind_candidates == arm_block_family_candidates &&
+        arm_block_kind_eligible == arm_block_family_eligible &&
+        arm_block_mode_candidates == arm_block_family_candidates &&
+        arm_block_mode_eligible == arm_block_family_eligible &&
+        arm_block_words_candidates == arm_block_family_candidates &&
+        arm_block_words_eligible == arm_block_family_eligible &&
+        arm_block_span_candidates == arm_block_family_candidates &&
+        arm_block_span_eligible == arm_block_family_eligible;
+    printf("        kind/mode/words/span candidates=%" PRIu64 "/%" PRIu64
+           "/%" PRIu64 "/%" PRIu64 " family=%" PRIu64
+           " eligible=%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64
+           " family=%" PRIu64 "  %s\n",
+           arm_block_kind_candidates, arm_block_mode_candidates,
+           arm_block_words_candidates, arm_block_span_candidates,
+           arm_block_family_candidates, arm_block_kind_eligible,
+           arm_block_mode_eligible, arm_block_words_eligible,
+           arm_block_span_eligible, arm_block_family_eligible,
+           arm_block_semantic_exact ? "EXACT" : "MISMATCH");
+
+    printf("      A32 block-store continuity split\n");
+    printf("        The one-block row models a transactional signed handler "
+           "that refuses before any write when the live register list spans "
+           "two 1 KiB DWRITE blocks. The ordinary rows exclude user-bank "
+           "semantics. These are implementation frontiers, not speedups.\n");
+    printf("        %-14s %10s %10s %10s %12s %10s %10s %12s %10s %8s %s\n",
+           "frontier", "candidate", "eligible", "calls", "instructions",
+           "heads", "chains", "entries", "removed", "%base", "gate");
+    const sequence_signed_extended_t *arm_block_all =
+        &store->family_frontier[SEQUENCE_STORE_ARM_BLOCK];
+    uint64_t arm_block_all_entries =
+        profile->fetched >= arm_block_all->instructions
+            ? profile->fetched - arm_block_all->instructions +
+                  arm_block_all->calls
+            : 0u;
+    for (unsigned selected = 0u;
+         selected < SEQUENCE_ARM_BLOCK_FRONTIER_COUNT; selected++) {
+        const sequence_signed_extended_t *frontier =
+            &store->arm_block_frontier[selected];
+        const uint64_t *row =
+            store->arm_block_frontier_outcomes[selected];
+        uint64_t selected_candidates = 0u;
+        for (unsigned outcome = 0u;
+             outcome < SEQUENCE_STORE_OUTCOME_COUNT; outcome++)
+            selected_candidates += row[outcome];
+        uint64_t selected_eligible =
+            row[SEQUENCE_STORE_CONDITION_SKIP] +
+            row[SEQUENCE_STORE_DWRITE_HIT];
+        uint64_t frontier_histogram_calls = 0u;
+        uint64_t frontier_histogram_instructions = 0u;
+        uint64_t frontier_stops = 0u;
+        uint64_t frontier_gate_refusals = 0u;
+        bool frontier_lengths_exact = true;
+        for (unsigned length = 1u;
+             length <= SEQUENCE_SIGNED_EXTENDED_CAP; length++) {
+            uint64_t calls = frontier->length_calls[length];
+            uint64_t instructions = frontier->length_instructions[length];
+            frontier_histogram_calls += calls;
+            frontier_histogram_instructions += instructions;
+            if (instructions != calls * (uint64_t)length)
+                frontier_lengths_exact = false;
+        }
+        for (unsigned i = 0u; i < SEQUENCE_SIGNED_STOP_COUNT; i++)
+            frontier_stops += frontier->stops[i];
+        for (unsigned i = 1u; i < SEQUENCE_SIGNED_GATE_COUNT; i++)
+            frontier_gate_refusals += frontier->gate_refusals[i];
+        uint64_t frontier_entries =
+            profile->fetched >= frontier->instructions
+                ? profile->fetched - frontier->instructions +
+                      frontier->calls
+                : 0u;
+        uint64_t frontier_removed =
+            implemented_entries >= frontier_entries
+                ? implemented_entries - frontier_entries : 0u;
+        uint64_t frontier_eligible = current_eligible +
+                                     implemented_eligible +
+                                     selected_eligible;
+        bool frontier_exact = arm_block_semantic_exact &&
+            frontier_lengths_exact &&
+            frontier_histogram_calls == frontier->calls &&
+            frontier_histogram_instructions == frontier->instructions &&
+            frontier_stops == frontier->calls &&
+            frontier_eligible ==
+                frontier->instructions + frontier_gate_refusals &&
+            frontier->blocks ==
+                frontier->calls + frontier->chain_transitions &&
+            frontier->instructions >= implemented->instructions &&
+            arm_block_all->instructions >= frontier->instructions &&
+            implemented_entries >= frontier_entries &&
+            frontier_entries >= arm_block_all_entries &&
+            frontier->maximum <= SEQUENCE_SIGNED_EXTENDED_CAP;
+        printf("        %-14s %10" PRIu64 " %10" PRIu64 " %10" PRIu64
+               " %12" PRIu64 " %10" PRIu64 " %10" PRIu64
+               " %12" PRIu64 " %10" PRIu64 " %7.3f%% %s\n",
+               ARM_BLOCK_FRONTIERS[selected], selected_candidates,
+               selected_eligible, frontier->calls, frontier->instructions,
+               frontier->blocks, frontier->chain_transitions,
+               frontier_entries, frontier_removed,
                implemented_entries
                    ? 100.0 * (double)frontier_removed /
                          (double)implemented_entries : 0.0,
