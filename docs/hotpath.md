@@ -6854,3 +6854,106 @@ opportunities, not time or frames. The exact IPA has not been installed on a phy
 environment; the only device observation remains roughly 0--4 FPS. No duplicate checkpoint was
 created because the accurate r533 7.110 B checkpoint already represents the identical guest state.
 Thirty FPS is still neither close nor established by this result.
+
+### 2026-08-05: transactional one-block A32 LDM removes the next measured boundary
+
+The Thumb-condition replay made ordinary A32 block loads the largest bounded remaining family.
+The earlier read-only ranking predicted that no-PC LDM transfers whose complete live address span
+fit one 1 KiB DREAD block would add 95,956 retirement-eligible instructions and remove 130,759
+runner entries, or 4.205% of the 3,109,332-entry product baseline. This was an exact live-state
+contract, unlike the larger multiply and VFP-compute rows, which still assume a perfect semantic
+handler. That distinction selected LDM; it was not selected merely because it was the next opcode.
+
+Implementation commit `da415e09627aa7455a9e4eb72b63e8ab831b1952` adds 91
+build-time-signed handlers for transactional A32 LDM: four IA/IB/DA/DB preflight modes over r0--r14
+bases, fifteen destination commits, and finish records with or without safe writeback. The decoder
+admits r0--r14 destinations and bases, every ordinary condition, lists through fifteen words and
+optional writeback when the base is not in the list. PC loads, PC bases, user-bank transfers,
+empty lists and writeback/base aliases remain literal. Unlike STM, LDM is nonterminal, so later
+instructions may remain in the same signed head.
+
+The runtime contract is all-or-nothing. Before changing a destination or base register, the
+preflight reconstructs the complete ascending transfer span and requires aligned addresses, one
+live plain-RAM DREAD block, matching privilege and translation generation, and enough record
+metadata for every destination. A cold or stale cache, misalignment, cross-block span, invalid
+metadata or other mismatch returns an exact zero prefix; `arm_step()` remains the only owner of
+translation, faults and MMIO. Only a successful preflight permits the ordered destination commits,
+optional writeback and aggregate DREAD hit accounting. The same-binary `set_ldm` switch defaults on
+and clears only derived decode/graph state when changed.
+
+The flat native oracle covers all four modes, writeback, a legal base-in-list/no-writeback case,
+condition skip, a fifteen-word list and nonterminal continuation: six interpreter-versus-signed
+cases and thirty exact hit words. Separate gates require cross-block rollback, cold/misaligned/stale
+cache refusal, a metadata mutation that fails closed, every generated shape, and the app-facing SoC
+path. The dense benchmark uses the identical executable for interpreter, LDM disabled and LDM
+enabled. Four LDM instructions load twelve words in each sixteen-instruction loop. Setup and warmup
+stay outside timing; product cache lookup, raw-byte witness, graph entry gates, the 256-instruction
+product ceiling, timebase boundaries and device ticks remain inside. Every repetition serializes to
+the same complete machine snapshot.
+
+| Apple arm64 runner | interpreter | LDM off | LDM on | on/interpreter | on/off |
+|---|---:|---:|---:|---:|---:|
+| macOS 14 | 48.169 Minsn/s | 33.757 Minsn/s | 140.995 Minsn/s | **2.927x** | **4.177x** |
+| macOS 15 | 28.743 Minsn/s | 23.025 Minsn/s | 99.306 Minsn/s | **3.455x** | **4.313x** |
+
+Each long disabled run retires 15,000,000 of 20,000,000 instructions in signed text; each enabled
+run retires all 20,000,000, records 15,000,000 DREAD word hits and zero timed misses, and remains
+snapshot-exact. Absolute rates differ sharply across hosted machines, so only rotated same-run
+ratios and the exact-state gate support the isolated result.
+
+The proof did expose test and observer mistakes, and they are not being erased from the account.
+The first exact replay, r546, printed seventeen `MISMATCH` verdicts because the read-only observer's
+per-instruction reached-record histogram stopped at four records while a maximal LDM semantic group
+can reach eighteen. The guest disk and screen remained deterministic, but that run was not accepted
+as exact evidence. Commit `c4a5d4743d72b212188139cf0d61817ab7e116ee` raises the
+observer limit to eighteen. The native SoC oracle also remained red through three core CI attempts:
+one fixture used a decrementing transfer at a DREAD boundary, and the revised sixteen-instruction
+loop still used the generic sixteen-instruction invocation ceiling, leaving no budget to prove a
+successor edge. The implementation correctly refused the crossing case, and the graph correctly
+stopped at its configured ceiling. Commits `3ce91e5e0f2e7d961fd47bd9add94ee89b7bae91` and
+`6f87756d6e5d4adf12d7b31017428f8a4a07e3fe` put all four transfers inside one
+block and select the actual 256-instruction iOS product ceiling. The graph assertion was retained,
+not weakened. It then reports 15,998 signed retirements, 11,999 DREAD hits, one cold miss, all four
+modes, an exact snapshot and a real graph edge on both Apple hosts.
+
+`work/r547-ldm-record-cap-10m` is the accepted restored authority. It starts from the trusted
+7.100 B checkpoint, stops at exactly 7.110 B, exits 0, leaves stderr empty and reports 57
+case-sensitive `EXACT` verdicts with zero case-sensitive `MISMATCH`. The final two source commits
+change only the test fixture, so they do not alter the replayed `bootkernel` implementation. The
+literal-write oracle remains exact at 1,032,111/1,032,111 candidates and 1,736,595/1,736,595
+events. CLCD remains live and nonblack at frame 1,590; 15,626 media reads and 469 writes complete
+with zero failures. Work-image and screen SHA-256 values remain byte-identical to r545:
+`8A59C388C481165F460984926AA5FFB1B72A0E9030216CD0038DE9B3264B79FE` and
+`1EF63FFE3EEFD976416E17120A36BA074BF295EA0955D716E2D345FCC5EA0A9E`.
+
+The measured product change is exact:
+
+| restored product metric | before | after | change |
+|---|---:|---:|---:|
+| decoder-supported fetched instructions | 7,913,665 | 8,014,303 | +100,638 |
+| retirement-eligible instructions | 7,750,098 | 7,846,054 | +95,956 |
+| modeled signed instructions | 7,334,306 | 7,426,504 | +92,198 |
+| product runner entries | 3,109,332 | 2,978,573 | **-130,759** |
+
+The full product shape moves from
+`calls/instructions/heads/chains=1289805/8179962/3084029/1794224` to
+`1251244/8272160/3066547/1815303`. Re-adding one-block no-PC A32 LDM now changes zero entries.
+The remaining LDM census contains 116,334 candidates but zero eligible encounters: 4,643 are live
+DREAD misses, 39 cross a block and 111,652 use states outside this exact contract. The predicted
+and measured runner-entry reductions therefore agree exactly. No duplicate 7.110 B checkpoint was
+created; the existing r533 checkpoint already provides the fast, byte-identical restore state.
+
+Final exact-SHA core run `30978271615` is green in all eight jobs, including both Apple-native
+oracles, warnings-as-errors, ASan/UBSan and JIT-off builds. Exact-SHA iOS run `30978271669` builds,
+fake-signs and uploads the app. The local strict suite is 60/60 green. Commits contain no co-author
+trailers.
+
+Brutal status: **this is another real structural reduction, and it still does not show that 30 FPS
+is close**. The 4.177x--4.313x on/off result belongs to a deliberately dense loop where one quarter
+of instructions are LDM. The restored result is 130,759 fewer modeled runner entries, not elapsed
+firmware time, scanouts or physical-device frames. This exact IPA has not been installed here, and
+the only phone observation remains roughly 0--4 FPS. The next bounded family, one-block VLDM/VPOP,
+can remove 48,757 entries or 1.637% of the current baseline. The larger multiply and VFP-compute
+rows can remove 60,146 (2.019%) and 585,011 (19.641%) only under perfect-handler assumptions. The
+next tranche must weigh exact semantic cost and broad coverage rather than blindly walking that
+list; none of these counts is a promise of 30 FPS.

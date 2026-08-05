@@ -102,15 +102,16 @@ are deterministic apart from that one contact, so the tap is what dismissed it.
   the target. The latest exact-SHA IPA now contains and automatically enables
   the no-JIT signed graph through the first modeled timebase edge, A32/Thumb
   single stores, VSTR S/D, transactional one-block ordinary STM and VSTM/VPUSH,
-  terminal BX/BLX, and all fourteen terminal Thumb conditional branches. The
-  restored interval finds 947,961 eligible implemented stores (9.480% of
-  fetched instructions), then 147,493 eligible Thumb condition branches; those
+  transactional one-block no-PC A32 LDM, terminal BX/BLX, and all fourteen
+  terminal Thumb conditional branches. The restored interval finds 947,961
+  eligible implemented stores (9.480% of fetched instructions), then 147,493
+  eligible Thumb condition branches and 95,956 eligible LDM instructions. The
   branches reduce the post-store baseline from 3,372,540 to 3,109,332 runner
-  entries, **263,208 exactly** (7.804%). A dense same-binary branch loop is
-  5.555x–5.693x faster with only this family on than off on Apple arm64, but
-  neither that synthetic ratio nor any runner-entry reduction is a frame-rate
-  multiplier. This exact app has not been installed and measured
-  on a physical phone.
+  entries; LDM then reduces it to 2,978,573, another **130,759 exactly**
+  (4.205%). A dense same-binary LDM loop is 4.177x–4.313x faster with only this
+  family on than off on Apple arm64, but neither that synthetic ratio nor any
+  runner-entry reduction is a frame-rate multiplier. This exact app has not
+  been installed and measured on a physical phone.
   r461/r463's direct restored desktop meter
   observed only
   **10.816–11.449 changed scanouts/s on average**, with no window at 30. It does
@@ -150,7 +151,7 @@ userspace received the framebuffer read-only and faulted on its first store.*
 | **Hidden from the guest by default** | SHA-1 acceleration, cellular/baseband transport and USB are deliberately declared absent by editing only the in-memory device tree, because their rows name measured boot failures. MBX is also hidden in the accepted default, but is now an opt-in experiment rather than an unmodelled register hole. The firmware files on disk are never modified. |
 | **Invented register values** | The USB controller's three configuration registers (`GHWCFG1`/`GHWCFG2`/`GHWCFG4`) hold a legal and sufficient configuration. They are **not** measured from real S5L8900 silicon. This is one of the two exceptions the networking row above draws its line around: three constants, named here so nobody has to discover them, and replaceable the day somebody reads the real part. |
 | **Rendering** | The accepted default sets `CA_ENABLE_MBX2D=0` in a new work image so QuartzCore uses Apple's CPU renderer. The experimental path leaves MBX matched and now completes a live interval of 1,388/1,388 2D jobs and 8,888/8,888 3D renders with zero decoder rejection or recovery. That interval is checkpoint-derived; final cold-boot and 30 fps acceptance are still open, so MBX is not silently promoted to the default. |
-| **Speed** | Not cycle-accurate and not yet 30 fps. r458's symmetric live SpringBoard A/B measured **15.694844 M instructions/s** for the desktop app-equivalent core loop versus 14.854045 M/s for its baseline, a repeatable +5.66%. r461/r463 measured execution and publication together at **10.816–11.449 changed scanouts/s on average**, with no window at 30; holding that cadence fixed puts 30 changes/s near **34.3 Minsn/s**, or **2.725x** the metered desktop mean. The current IPA automatically enables a no-JIT, build-time-signed AArch64 graph through the first modeled timebase edge plus terminal single stores, VSTR S/D, transactional one-block ordinary STM and VSTM/VPUSH, BX/BLX and all fourteen Thumb conditional branches. The extended graph's same-binary geometric-mean gain is **1.483x/1.440x** on macOS 14/15 arm64, but its restored outer-entry opportunity is only **3.573%**. Dense STM, VSTM and Thumb-condition same-binary loops are respectively **4.258x–5.757x**, **4.283x–5.266x** and **5.555x–5.693x** faster with the isolated family on than off and remain snapshot-exact; real restored reach is 947,961 eligible implemented stores (9.480% fetched), then 147,493 eligible Thumb condition branches. Exact incremental VSTR/STM/VSTM/Thumb-condition runner-entry reductions are 175,502/124,114/45,370/263,208, leaving a 3,109,332-entry baseline. None of those synthetic ratios or continuity counts is a frame-rate multiplier. The exact app has not been measured on a physical phone; firmware mix, MMU, devices, framebuffer publication and UIKit are absent from the synthetic tests. The installed phone app is still reported at roughly **0–4 fps**, which remains the honest device result. The guest clock still uses an invented 412 MHz : 6 MHz instruction-to-tick ratio rather than cycle timing. |
+| **Speed** | Not cycle-accurate and not yet 30 fps. r458's symmetric live SpringBoard A/B measured **15.694844 M instructions/s** for the desktop app-equivalent core loop versus 14.854045 M/s for its baseline, a repeatable +5.66%. r461/r463 measured execution and publication together at **10.816–11.449 changed scanouts/s on average**, with no window at 30; holding that cadence fixed puts 30 changes/s near **34.3 Minsn/s**, or **2.725x** the metered desktop mean. The current IPA automatically enables a no-JIT, build-time-signed AArch64 graph through the first modeled timebase edge plus terminal single stores, VSTR S/D, transactional one-block ordinary STM and VSTM/VPUSH, transactional one-block no-PC A32 LDM, BX/BLX and all fourteen Thumb conditional branches. The extended graph's same-binary geometric-mean gain is **1.483x/1.440x** on macOS 14/15 arm64, but its restored outer-entry opportunity is only **3.573%**. Dense STM, VSTM, Thumb-condition and LDM same-binary loops are respectively **4.258x–5.757x**, **4.283x–5.266x**, **5.555x–5.693x** and **4.177x–4.313x** faster with the isolated family on than off and remain snapshot-exact; real restored reach is 947,961 eligible implemented stores (9.480% fetched), then 147,493 eligible Thumb condition branches and 95,956 eligible LDM instructions. Exact incremental VSTR/STM/VSTM/Thumb-condition/LDM runner-entry reductions are 175,502/124,114/45,370/263,208/130,759, leaving a 2,978,573-entry baseline. None of those synthetic ratios or continuity counts is a frame-rate multiplier. The exact app has not been measured on a physical phone; firmware mix, MMU, devices, framebuffer publication and UIKit are absent from the synthetic tests. The installed phone app is still reported at roughly **0–4 fps**, which remains the honest device result. The guest clock still uses an invented 412 MHz : 6 MHz instruction-to-tick ratio rather than cycle timing. |
 | **Kernel patches** | The kernel is modified in memory as it loads: a real-time-clock timeout is forced to zero, the root-device lookup is redirected to the emulator's fake disk, and hooks are installed so the guest's disk access reaches the host. Applied only after checking a SHA-256 hash and a nine-segment layout check of the exact 7,942,144-byte kernel. |
 | **Storage** | Not flash memory. The desktop harness can create a fresh writable work image per run; the app keeps one persistent work image per machine. Snapshot storage and copy-on-write layers exist and are host-tested, but the current app controller still refuses Take/Open because their lifecycle wiring is unfinished, so app snapshots are not claimed working. The canonical imported root filesystem is read-only. |
 | **Boot chain** | No secure boot chain is executed. The kernel is loaded directly; the boot ROM, the low-level bootloader and iBoot are not run. Apple's firmware container format has been parsed and an extracted bootloader payload executed, but separately, never as a chain. |
@@ -283,7 +284,8 @@ and decoded heads by only 1.693% in the measured interval, so that synthetic
 multiplier is not a firmware or FPS forecast. The app also grants its canonical
 machine bus direct plain-RAM-write consent and executes A32/Thumb single stores,
 VSTR S/D, transactional one-block ordinary STM, and transactional one-block
-VSTM/VPUSH inside terminal signed heads. The specialized same-binary store loops
+VSTM/VPUSH inside terminal signed heads. Transactional one-block no-PC A32 LDM
+also remains in nonterminal signed heads. The specialized same-binary store loops
 are much faster on Apple arm64 with exact snapshots, including 4.258x–5.757x
 STM-on/STM-off and 4.283x–5.266x VSTM-on/VSTM-off results, but their deliberately
 dense mixes are synthetic. The restored interval instead finds 947,961 eligible
@@ -304,10 +306,15 @@ observations (73,132 taken and 74,361 fallthrough) and moves the post-store runn
 baseline from 3,372,540 to 3,109,332 entries: **263,208 fewer, exactly the 7.804%
 pre-implementation prediction**. A dense 25%-branch same-binary loop measures
 5.555x–5.693x on/off and 2.436x–2.570x on/interpreter on Apple arm64, with exact
-snapshots; it is not a firmware or FPS multiplier. The next largest bounded
-measured family is one-block no-PC A32 LDM at 130,759 entries (4.205% of the new
-baseline). The larger 18.813% VFP-compute figure is only a perfect-handler ceiling,
-not exact semantics ready for implementation.
+snapshots; it is not a firmware or FPS multiplier. One-block no-PC A32 LDM now
+adds 95,956 retirement-eligible instructions and moves that baseline from
+3,109,332 to 2,978,573 entries: **130,759 fewer, exactly the predicted 4.205%**.
+A dense 25%-LDM same-binary loop measures 4.177x–4.313x on/off and
+2.927x–3.455x on/interpreter on Apple arm64 with exact snapshots; it is also not
+a firmware or FPS multiplier. The next bounded family is one-block VLDM/VPOP at
+48,757 entries (1.637% of the current baseline). The larger 2.019% multiply and
+19.641% VFP-compute figures remain perfect-handler ceilings, not exact semantics
+ready for implementation.
 The best restored desktop publication measurement remains 10.816–11.449 changed
 scanouts/s with no 30 fps window, and the only phone report remains roughly
 0–4 fps without an exact-build execution/publication breakdown.
