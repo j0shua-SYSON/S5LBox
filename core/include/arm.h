@@ -593,6 +593,16 @@ typedef enum {
 uint32_t arm_mmu_translate(arm_cpu_t *cpu, uint32_t va, arm_access_t acc,
                            bool priv, uint32_t *pa);
 
+/* Rebuild the 1 KiB instruction-fetch host pointer without walking page
+ * tables or touching the bus. With the MMU enabled this succeeds only from an
+ * exact, current, non-faulting FETCH entry already present in the software
+ * TLB; with it disabled the mapping is the architectural identity map. The
+ * complete physical block must be exposed by host_ram. A successful MMU-on
+ * reuse accounts for the one TLB hit that the displaced arm_step() fetch
+ * would have recorded. Every refusal leaves the fetch cache and counters
+ * untouched, so the caller can fall back to arm_step() for faults or MMIO. */
+bool arm_fetch_cache_try_refill(arm_cpu_t *cpu, uint32_t va, bool priv);
+
 /*
  * Drop every cached translation. Call this wherever the guest does something
  * that could change what a walk would return: CP15 c8 maintenance (which is

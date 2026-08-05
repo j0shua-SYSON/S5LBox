@@ -3183,6 +3183,9 @@ static void test_signed_static_a64_soc_oracle(void) {
 
     CHECK(s5l8900_static_a64_set_enabled(&fast, true),
           "signed engine refused an available host");
+    CHECK(s5l8900_static_a64_set_fetch_refill(&fast, false) &&
+              s5l8900_static_a64_set_fetch_refill(&fast, true),
+          "fetch-refill same-binary control refused an available host");
     CHECK(s5l8900_static_a64_set_graph(&fast, true),
           "graph signed engine refused an available host");
     CHECK(s5l8900_run(&fast, 20000u, &fast_status) == 20000u,
@@ -3191,17 +3194,28 @@ static void test_signed_static_a64_soc_oracle(void) {
           "reference run stopped early with status=%d", (int)reference_status);
 
     /* 20,000 is an exact multiple of the loop length, so fast is back at PC 0
-     * with a cached sixteen-instruction block and a warm load. A one-step
-     * caller budget must execute a signed one-instruction prefix rather than
-     * refusing the whole cache entry and falling back to arm_step(). */
+     * with a cached sixteen-instruction block and a warm load. Deliberately
+     * revoke only the derived fetch pointer: MMU-off identity plus host_ram
+     * must reconstruct it, after which a one-step caller budget must execute
+     * a signed prefix rather than falling back to arm_step(). */
     {
         uint64_t retired_before = s5l8900_static_a64_retired(&fast);
+        uint64_t refill_attempts_before =
+            s5l8900_static_a64_fetch_refill_attempts(&fast);
+        uint64_t refill_hits_before =
+            s5l8900_static_a64_fetch_refill_hits(&fast);
+        fast.cpu.fetch_host = NULL;
         CHECK(s5l8900_run(&fast, 1u, &fast_status) == 1u,
               "signed bounded-prefix run stopped early");
         CHECK(s5l8900_run(&reference, 1u, &reference_status) == 1u,
               "reference bounded-prefix run stopped early");
         CHECK(s5l8900_static_a64_retired(&fast) == retired_before + 1u,
               "one-instruction budget bypassed the signed bounded prefix");
+        CHECK(s5l8900_static_a64_fetch_refill_attempts(&fast) ==
+                  refill_attempts_before + 1u &&
+              s5l8900_static_a64_fetch_refill_hits(&fast) ==
+                  refill_hits_before + 1u,
+              "signed SoC path did not consume one exact fetch refill");
     }
 
     /* Keep the fetch pointer and decode cache live, but change the bytes they
@@ -3241,7 +3255,7 @@ static void test_signed_static_a64_soc_oracle(void) {
         memcmp(fast_snapshot, reference_snapshot, fast_len) == 0 &&
         s5l8900_static_a64_retired(&fast) != 0u) {
         printf("  STATIC-A64-SOC-ORACLE exact=yes retired=%llu "
-               "smc=yes decoded=yes graph=yes\n",
+               "smc=yes decoded=yes graph=yes refill=yes\n",
                (unsigned long long)s5l8900_static_a64_retired(&fast));
     }
 

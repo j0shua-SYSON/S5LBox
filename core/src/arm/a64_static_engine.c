@@ -50,11 +50,14 @@ typedef struct {
     bool vstm_enabled;
     bool vfp_arithmetic_enabled;
     bool vfp_fp_session_enabled;
+    bool fetch_refill_enabled;
     unsigned chain_limit;
     uint64_t retired;
     uint64_t chained_blocks;
     uint64_t persistent_chained_blocks;
     uint64_t graph_chained_blocks;
+    uint64_t fetch_refill_attempts;
+    uint64_t fetch_refill_hits;
     static_a64_entry_t cache[STATIC_A64_CACHE_ENTRIES];
     a64_static_graph_node_t graph_nodes[A64_STATIC_GRAPH_SLOTS];
 } static_a64_state_t;
@@ -299,6 +302,7 @@ bool s5l8900_static_a64_set_enabled(s5l8900_t *m, bool enabled) {
         state->vstm_enabled = true;
         state->vfp_arithmetic_enabled = true;
         state->vfp_fp_session_enabled = true;
+        state->fetch_refill_enabled = true;
         m->static_a64_state = state;
     }
     state->enabled = true;
@@ -499,6 +503,20 @@ bool s5l8900_static_a64_set_vfp_fp_session(s5l8900_t *m, bool enabled) {
 #endif
 }
 
+bool s5l8900_static_a64_set_fetch_refill(s5l8900_t *m, bool enabled) {
+    if (!m) return false;
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    static_a64_state_t *state = static_state(m);
+    if (!state || !state->enabled || !a64_static_host_available())
+        return false;
+    state->fetch_refill_enabled = enabled;
+    return true;
+#else
+    (void)enabled;
+    return false;
+#endif
+}
+
 bool s5l8900_static_a64_set_chain_limit(s5l8900_t *m,
                                         unsigned max_insns) {
     if (!m) return false;
@@ -549,6 +567,26 @@ uint64_t s5l8900_static_a64_graph_chained_blocks(const s5l8900_t *m) {
 #if defined(S5LBOX_STATIC_A64_ENGINE)
     const static_a64_state_t *state = static_state(m);
     return state ? state->graph_chained_blocks : 0u;
+#else
+    (void)m;
+    return 0u;
+#endif
+}
+
+uint64_t s5l8900_static_a64_fetch_refill_attempts(const s5l8900_t *m) {
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    const static_a64_state_t *state = static_state(m);
+    return state ? state->fetch_refill_attempts : 0u;
+#else
+    (void)m;
+    return 0u;
+#endif
+}
+
+uint64_t s5l8900_static_a64_fetch_refill_hits(const s5l8900_t *m) {
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    const static_a64_state_t *state = static_state(m);
+    return state ? state->fetch_refill_hits : 0u;
 #else
     (void)m;
     return 0u;
@@ -663,6 +701,25 @@ unsigned s5l8900_static_a64_try(s5l8900_t *m, unsigned max_insns) {
         return 0u;
 
     cpu = &m->cpu;
+    if (state->fetch_refill_enabled &&
+        cpu->arch == ARM_ARCH_V6_ARM1176 &&
+        arm_mode_is_valid(cpu->cpsr) && !cpu->abort_pending &&
+        !(cpu->fiq_line && !(cpu->cpsr & ARM_CPSR_F)) &&
+        !(cpu->irq_line && !(cpu->cpsr & ARM_CPSR_I))) {
+        const uint32_t pc = cpu->r[15];
+        const bool thumb = (cpu->cpsr & ARM_CPSR_T) != 0u;
+        const bool priv =
+            (cpu->cpsr & ARM_CPSR_MODE_MASK) != ARM_MODE_USR;
+        const uint32_t fetch_block = pc & ~UINT32_C(0x3ff);
+        const unsigned width = thumb ? 2u : 4u;
+        if ((pc & (width - 1u)) == 0u &&
+            (!cpu->fetch_host || cpu->fetch_blk != fetch_block ||
+             cpu->fetch_gen != cpu->tlb_gen || cpu->fetch_priv != priv)) {
+            state->fetch_refill_attempts++;
+            if (arm_fetch_cache_try_refill(cpu, pc, priv))
+                state->fetch_refill_hits++;
+        }
+    }
     budget = max_insns < state->chain_limit
            ? max_insns : state->chain_limit;
     if (state->graph_enabled) return try_graph(m, state, budget);

@@ -35,6 +35,10 @@ static uint8_t *m_host_ram_write(void *ctx, uint32_t a, uint32_t len) {
     return &g_ram[a];
 }
 
+static uint8_t *m_host_ram(void *ctx, uint32_t a, uint32_t len) {
+    return m_host_ram_write(ctx, a, len);
+}
+
 /* Designated, so a new optional hook on arm_bus_t cannot break this file: the
  * positional form listed ten members and the struct has grown four. Every
  * omitted member is a NULL optional hook, which is what the trailing NULLs
@@ -2161,6 +2165,99 @@ static void test_force_access_flag_faults_precede_domain_permissions(void) {
     CHECK(g_watch_reads32 == 0u && g_watch_writes32 == 0u,
           "page access-flag fault touched target memory");
     g_watch_addr = 0xffffffffu;
+}
+
+static void test_fetch_cache_refill_requires_an_exact_live_witness(void) {
+    arm_bus_t bus = g_bus;
+    arm_cpu_t c;
+    uint32_t pa = 0u;
+    uint64_t hits, misses, flushes;
+    const uint32_t mapped_va = UINT32_C(0x80000420);
+
+    bus.host_ram = m_host_ram;
+    memset(g_ram, 0, sizeof g_ram);
+    arm_reset(&c, &bus);
+
+    /* MMU-off identity mapping needs no TLB entry and must not invent one in
+     * the accounting. */
+    hits = c.tlb_hits;
+    CHECK(arm_fetch_cache_try_refill(&c, 0x420u, true) &&
+          c.fetch_host == g_ram + 0x400u && c.fetch_blk == 0x400u &&
+          c.fetch_gen == c.tlb_gen && c.fetch_priv &&
+          c.tlb_hits == hits,
+          "MMU-off fetch refill did not use the exact identity block");
+
+    /* One privileged FETCH translation seeds the exact 1 KiB TLB witness. */
+    memset(g_ram, 0, sizeof g_ram);
+    m_w32(NULL, 0x4000u + (0x800u << 2),
+          (3u << 10) | 2u);                 /* VA 0x80000000 -> PA 0 */
+    arm_reset(&c, &bus);
+    c.cp15.ttbr0 = 0x4000u;
+    c.cp15.dacr = 1u;
+    c.cp15.sctlr = ARM_SCTLR_M;
+    CHECK(arm_mmu_translate(&c, mapped_va, ARM_ACCESS_FETCH, true, &pa) == 0u &&
+          pa == 0x420u,
+          "could not seed fetch TLB witness: pa=%08x", pa);
+    c.fetch_host = NULL;
+    hits = c.tlb_hits;
+    misses = c.tlb_misses;
+    flushes = c.tlb_flushes;
+    CHECK(arm_fetch_cache_try_refill(&c, mapped_va, true) &&
+          c.fetch_host == g_ram + 0x400u &&
+          c.fetch_blk == (mapped_va & ~UINT32_C(0x3ff)) &&
+          c.fetch_gen == c.tlb_gen && c.fetch_priv,
+          "exact TLB witness did not refill the host fetch block");
+    CHECK(c.tlb_hits == hits + 1u && c.tlb_misses == misses &&
+          c.tlb_flushes == flushes,
+          "successful refill did not replace exactly one interpreter TLB hit");
+    hits = c.tlb_hits;
+    CHECK(arm_fetch_cache_try_refill(&c, mapped_va, true) &&
+          c.tlb_hits == hits,
+          "already-live fetch cache counted a second TLB hit");
+
+    /* Privilege and register-stamp differences must refuse without changing
+     * either the cache or the counters. */
+    c.fetch_host = NULL;
+    hits = c.tlb_hits;
+    CHECK(!arm_fetch_cache_try_refill(&c, mapped_va, false) &&
+          !c.fetch_host && c.tlb_hits == hits,
+          "privileged FETCH witness was reused for an unprivileged fetch");
+    c.cp15.context_id ^= 1u;
+    CHECK(!arm_fetch_cache_try_refill(&c, mapped_va, true) &&
+          !c.fetch_host && c.tlb_hits == hits,
+          "stale MMU register stamp was accepted");
+
+    /* Restore a current stamp, then distinguish a genuine miss, a cached
+     * fault and a successful translation whose target is not plain RAM. */
+    c.cp15.context_id ^= 1u;
+    CHECK(arm_mmu_translate(&c, mapped_va, ARM_ACCESS_FETCH, true, &pa) == 0u,
+          "could not restore the current MMU stamp");
+    c.fetch_host = NULL;
+    hits = c.tlb_hits;
+    misses = c.tlb_misses;
+    CHECK(!arm_fetch_cache_try_refill(&c, 0x80000820u, true) &&
+          !c.fetch_host && c.tlb_hits == hits && c.tlb_misses == misses,
+          "lookup-only refill walked or counted a missing TLB entry");
+
+    pa = 0xdeadbeefu;
+    CHECK(arm_mmu_translate(&c, 0x90000420u, ARM_ACCESS_FETCH, true, &pa) != 0u &&
+          pa == 0xdeadbeefu,
+          "could not seed a cached prefetch fault");
+    hits = c.tlb_hits;
+    CHECK(!arm_fetch_cache_try_refill(&c, 0x90000420u, true) &&
+          !c.fetch_host && c.tlb_hits == hits,
+          "cached prefetch fault was consumed or double-counted");
+
+    m_w32(NULL, 0x4000u + (0x900u << 2),
+          UINT32_C(0x00200000) | (3u << 10) | 2u);
+    arm_mmu_tlb_flush(&c);
+    CHECK(arm_mmu_translate(&c, 0x90000420u, ARM_ACCESS_FETCH, true, &pa) == 0u &&
+          pa == 0x00200420u,
+          "could not seed a non-RAM successful translation: pa=%08x", pa);
+    hits = c.tlb_hits;
+    CHECK(!arm_fetch_cache_try_refill(&c, 0x90000420u, true) &&
+          !c.fetch_host && c.tlb_hits == hits,
+          "non-RAM translation produced a direct fetch pointer");
 }
 
 static void test_abort_restores_base_register(void) {
@@ -5572,6 +5669,7 @@ int main(void) {
     test_arm1176_rejects_fine_page_tables();
     test_page_translation_fault_precedes_page_domain_fault();
     test_force_access_flag_faults_precede_domain_permissions();
+    test_fetch_cache_refill_requires_an_exact_live_witness();
     test_abort_restores_base_register();
     test_sctlr_a_faults_ordinary_unaligned_accesses();
     test_sctlr_u_selects_legacy_or_armv6_unaligned_data();

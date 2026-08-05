@@ -170,6 +170,26 @@ static bool xn_forbids_fetch(const arm_cpu_t *c, arm_access_t acc, unsigned dac,
 static uint32_t mmu_walk(arm_cpu_t *c, uint32_t va, arm_access_t acc,
                          bool priv, uint32_t *pa);
 
+static inline uint32_t mmu_tlb_tag(uint32_t va, arm_access_t acc,
+                                   bool priv) {
+    return ((va >> 10) << 3) | ((uint32_t)acc << 1) |
+           (priv ? 1u : 0u);
+}
+
+static inline unsigned mmu_tlb_slot(uint32_t va, arm_access_t acc) {
+    return ((va >> 10) + (unsigned)acc * (ARM_TLB_ENTRIES / 4u)) &
+           (ARM_TLB_ENTRIES - 1u);
+}
+
+static bool mmu_stamp_matches(const arm_cpu_t *c) {
+    return c && c->tlb_stamp.sctlr == c->cp15.sctlr &&
+           c->tlb_stamp.ttbr0 == c->cp15.ttbr0 &&
+           c->tlb_stamp.ttbr1 == c->cp15.ttbr1 &&
+           c->tlb_stamp.ttbcr == c->cp15.ttbcr &&
+           c->tlb_stamp.dacr == c->cp15.dacr &&
+           c->tlb_stamp.context_id == c->cp15.context_id;
+}
+
 /*
  * Flush is a generation bump, not a memset. The guest flushes on every context
  * switch -- pmap_switch writes TTBR0 -- so an O(entries) flush would put a
@@ -234,12 +254,7 @@ uint32_t arm_mmu_translate(arm_cpu_t *c, uint32_t va, arm_access_t acc,
     /* Every cached entry is valid only under the registers it was walked
      * under. See tlb_stamp: this catches a change made by any route, not just
      * by MCR, which is what keeps direct mutation from reading stale. */
-    if (c->tlb_stamp.sctlr      != c->cp15.sctlr  ||
-        c->tlb_stamp.ttbr0      != c->cp15.ttbr0  ||
-        c->tlb_stamp.ttbr1      != c->cp15.ttbr1  ||
-        c->tlb_stamp.ttbcr      != c->cp15.ttbcr  ||
-        c->tlb_stamp.dacr       != c->cp15.dacr   ||
-        c->tlb_stamp.context_id != c->cp15.context_id) {
+    if (!mmu_stamp_matches(c)) {
         arm_mmu_tlb_flush(c);
         c->tlb_stamp.sctlr      = c->cp15.sctlr;
         c->tlb_stamp.ttbr0      = c->cp15.ttbr0;
@@ -250,8 +265,7 @@ uint32_t arm_mmu_translate(arm_cpu_t *c, uint32_t va, arm_access_t acc,
     }
 
     /* 1 KB key: see ARM_TLB_ENTRIES for why it cannot be the 4 KB page. */
-    const uint32_t tag  = ((va >> 10) << 3) | ((uint32_t)acc << 1) |
-                          (priv ? 1u : 0u);
+    const uint32_t tag = mmu_tlb_tag(va, acc, priv);
     /*
      * THE INDEX MUST SEPARATE WHAT THE TAG SEPARATES.
      *
@@ -271,8 +285,7 @@ uint32_t arm_mmu_translate(arm_cpu_t *c, uint32_t va, arm_access_t acc,
      * already carries `acc`, so no hit that was correct can become incorrect
      * and no fault behaviour moves. It is a cache; only eviction changes.
      */
-    const unsigned slot = ((va >> 10) + (unsigned)acc * (ARM_TLB_ENTRIES / 4u))
-                          & (ARM_TLB_ENTRIES - 1u);
+    const unsigned slot = mmu_tlb_slot(va, acc);
 
     /*
      * A FAULTING TRANSLATION MUST LEAVE *pa UNTOUCHED, on a hit exactly as on
@@ -297,6 +310,40 @@ uint32_t arm_mmu_translate(arm_cpu_t *c, uint32_t va, arm_access_t acc,
     c->tlb[slot].fsr = fsr;
     c->tlb[slot].pa  = (fsr == 0u) ? (*pa & ~0x3ffu) : 0u;
     return fsr;
+}
+
+bool arm_fetch_cache_try_refill(arm_cpu_t *c, uint32_t va, bool priv) {
+    uint32_t pa_block;
+    const uint32_t va_block = va & ~UINT32_C(0x3ff);
+    bool count_tlb_hit = false;
+
+    if (!c || !c->bus || !c->bus->host_ram) return false;
+    if (c->fetch_host && c->fetch_blk == va_block &&
+        c->fetch_gen == c->tlb_gen && c->fetch_priv == priv)
+        return true;
+
+    if ((c->cp15.sctlr & ARM_SCTLR_M) == 0u) {
+        pa_block = va_block;
+    } else {
+        const uint32_t tag =
+            mmu_tlb_tag(va, ARM_ACCESS_FETCH, priv);
+        const unsigned slot = mmu_tlb_slot(va, ARM_ACCESS_FETCH);
+        if (c->tlb_gen == 0u || !mmu_stamp_matches(c) ||
+            c->tlb[slot].gen != c->tlb_gen ||
+            c->tlb[slot].tag != tag || c->tlb[slot].fsr != 0u)
+            return false;
+        pa_block = c->tlb[slot].pa;
+        count_tlb_hit = true;
+    }
+
+    uint8_t *host = c->bus->host_ram(c->bus->ctx, pa_block, 0x400u);
+    if (!host) return false;
+    c->fetch_host = host;
+    c->fetch_blk = va_block;
+    c->fetch_gen = c->tlb_gen;
+    c->fetch_priv = priv;
+    if (count_tlb_hit) c->tlb_hits++;
+    return true;
 }
 
 static uint32_t mmu_walk(arm_cpu_t *c, uint32_t va, arm_access_t acc,

@@ -5159,6 +5159,8 @@ typedef struct {
     uint64_t dread_misses;
     uint64_t dwrite_hits;
     uint64_t dwrite_misses;
+    uint64_t fetch_refill_attempts;
+    uint64_t fetch_refill_hits;
     double seconds;
 } soc_run_result_t;
 
@@ -5175,6 +5177,7 @@ typedef enum {
     SOC_ENTRY_GRAPH_EXTENDED_VSTM_OFF,
     SOC_ENTRY_GRAPH_EXTENDED_VFP_ARITHMETIC_OFF,
     SOC_ENTRY_GRAPH_EXTENDED_VFP_ARITHMETIC_UNBATCHED,
+    SOC_ENTRY_GRAPH_EXTENDED_FETCH_REFILL_OFF,
     SOC_ENTRY_GRAPH_EXTENDED_WRITES
 } soc_entry_path_t;
 
@@ -5200,6 +5203,8 @@ static const char *soc_entry_path_name(soc_entry_path_t path) {
         return "graph-extended-vfp-arithmetic-off";
     case SOC_ENTRY_GRAPH_EXTENDED_VFP_ARITHMETIC_UNBATCHED:
         return "graph-extended-vfp-arithmetic-unbatched";
+    case SOC_ENTRY_GRAPH_EXTENDED_FETCH_REFILL_OFF:
+        return "graph-extended-fetch-refill-off";
     case SOC_ENTRY_GRAPH_EXTENDED_WRITES:
         return "graph-extended-writes";
     }
@@ -5220,11 +5225,33 @@ typedef struct {
     bool thumb_conditional_workload;
     bool vfp_workload;
     bool vfp_arithmetic_workload;
+    bool fetch_refill_workload;
 } soc_entry_setup_t;
 
 static bool setup_soc_entry_machine(s5l8900_t *machine,
                                     const soc_entry_setup_t *setup) {
     if (!machine || !setup) return false;
+    if (setup->fetch_refill_workload) {
+        static const uint32_t branch[4u] = {
+            UINT32_C(0xea0000fe), /* 0x000 -> 0x400 */
+            UINT32_C(0xea0000fe), /* 0x400 -> 0x800 */
+            UINT32_C(0xea0000fe), /* 0x800 -> 0xc00 */
+            UINT32_C(0xeafffcfe), /* 0xc00 -> 0x000 */
+        };
+        static const uint32_t pc[4u] = {
+            0x000u, 0x400u, 0x800u, 0xc00u
+        };
+        const uint32_t section = (3u << 10) | 2u;
+        for (unsigned i = 0u; i < 4u; i++)
+            s5l8900_load(machine, pc[i], &branch[i], sizeof branch[i]);
+        s5l8900_load(machine, 0x4000u, &section, sizeof section);
+        machine->cpu.cp15.ttbr0 = 0x4000u;
+        machine->cpu.cp15.dacr = 1u;
+        machine->cpu.cp15.sctlr |= ARM_SCTLR_M;
+        machine->cpu.r[15] = 0u;
+        machine->cpu.cpsr = ARM_MODE_SYS | ARM_CPSR_C;
+        return true;
+    }
     if (setup->thumb_conditional_workload) {
         s5l8900_load(machine, 0u, THUMB_SOC_CONDITIONAL,
                      sizeof THUMB_SOC_CONDITIONAL);
@@ -5312,6 +5339,10 @@ static bool run_soc_entry_configured(const soc_entry_setup_t *setup,
     uint64_t dwrite_hits_after;
     uint64_t dwrite_misses_before;
     uint64_t dwrite_misses_after;
+    uint64_t fetch_refill_attempts_before;
+    uint64_t fetch_refill_attempts_after;
+    uint64_t fetch_refill_hits_before;
+    uint64_t fetch_refill_hits_after;
     double start, end;
     bool initialized = false;
     bool ok = false;
@@ -5328,6 +5359,7 @@ static bool run_soc_entry_configured(const soc_entry_setup_t *setup,
                       path == SOC_ENTRY_GRAPH_EXTENDED_VFP_ARITHMETIC_OFF ||
                       path ==
                           SOC_ENTRY_GRAPH_EXTENDED_VFP_ARITHMETIC_UNBATCHED ||
+                      path == SOC_ENTRY_GRAPH_EXTENDED_FETCH_REFILL_OFF ||
                       path == SOC_ENTRY_GRAPH_EXTENDED_WRITES;
     bool extended_path = path == SOC_ENTRY_GRAPH_EXTENDED ||
                          path == SOC_ENTRY_GRAPH_EXTENDED_INDIRECT_OFF ||
@@ -5339,6 +5371,7 @@ static bool run_soc_entry_configured(const soc_entry_setup_t *setup,
                          path == SOC_ENTRY_GRAPH_EXTENDED_VFP_ARITHMETIC_OFF ||
                          path ==
                              SOC_ENTRY_GRAPH_EXTENDED_VFP_ARITHMETIC_UNBATCHED ||
+                         path == SOC_ENTRY_GRAPH_EXTENDED_FETCH_REFILL_OFF ||
                          path == SOC_ENTRY_GRAPH_EXTENDED_WRITES;
     bool indirect_off_path =
         path == SOC_ENTRY_GRAPH_EXTENDED_INDIRECT_OFF;
@@ -5352,6 +5385,8 @@ static bool run_soc_entry_configured(const soc_entry_setup_t *setup,
         path == SOC_ENTRY_GRAPH_EXTENDED_VFP_ARITHMETIC_OFF;
     bool vfp_arithmetic_unbatched_path =
         path == SOC_ENTRY_GRAPH_EXTENDED_VFP_ARITHMETIC_UNBATCHED;
+    bool fetch_refill_off_path =
+        path == SOC_ENTRY_GRAPH_EXTENDED_FETCH_REFILL_OFF;
     bool direct_write_path = path == SOC_ENTRY_GRAPH_EXTENDED_WRITES ||
                              vstr_off_path || stm_off_path || vstm_off_path;
 
@@ -5426,6 +5461,12 @@ static bool run_soc_entry_configured(const soc_entry_setup_t *setup,
                 "jitbench: SoC VFP-arithmetic session control unavailable\n");
         goto done;
     }
+    if (fetch_refill_off_path &&
+        !s5l8900_static_a64_set_fetch_refill(&machine, false)) {
+        fprintf(stderr,
+                "jitbench: SoC fetch-refill-off control unavailable\n");
+        goto done;
+    }
     if (graph_path &&
         !s5l8900_static_a64_set_graph(&machine, true)) {
         fprintf(stderr, "jitbench: SoC entry graph engine unavailable\n");
@@ -5458,6 +5499,10 @@ static bool run_soc_entry_configured(const soc_entry_setup_t *setup,
     dread_misses_before = machine.cpu.dread_misses;
     dwrite_hits_before = machine.cpu.dwrite_hits;
     dwrite_misses_before = machine.cpu.dwrite_misses;
+    fetch_refill_attempts_before =
+        s5l8900_static_a64_fetch_refill_attempts(&machine);
+    fetch_refill_hits_before =
+        s5l8900_static_a64_fetch_refill_hits(&machine);
     start = now_seconds();
     while (remaining != 0u) {
         unsigned chunk = remaining > (uint64_t)UINT_MAX
@@ -5475,6 +5520,10 @@ static bool run_soc_entry_configured(const soc_entry_setup_t *setup,
     dread_misses_after = machine.cpu.dread_misses;
     dwrite_hits_after = machine.cpu.dwrite_hits;
     dwrite_misses_after = machine.cpu.dwrite_misses;
+    fetch_refill_attempts_after =
+        s5l8900_static_a64_fetch_refill_attempts(&machine);
+    fetch_refill_hits_after =
+        s5l8900_static_a64_fetch_refill_hits(&machine);
     if (remaining != 0u || status != ARM_OK || end <= start ||
         machine.cpu.r[15] != 0u) {
         fprintf(stderr,
@@ -5491,6 +5540,10 @@ static bool run_soc_entry_configured(const soc_entry_setup_t *setup,
     out->dread_misses = dread_misses_after - dread_misses_before;
     out->dwrite_hits = dwrite_hits_after - dwrite_hits_before;
     out->dwrite_misses = dwrite_misses_after - dwrite_misses_before;
+    out->fetch_refill_attempts =
+        fetch_refill_attempts_after - fetch_refill_attempts_before;
+    out->fetch_refill_hits =
+        fetch_refill_hits_after - fetch_refill_hits_before;
     if ((signed_path && out->signed_retired > total) ||
         (!signed_path &&
          (out->signed_retired != 0u || out->signed_chains != 0u ||
@@ -5554,6 +5607,15 @@ static bool run_soc_thumb_conditional_path(uint64_t total,
         .thumb_conditional_workload = true,
     };
     return run_soc_entry_configured(&setup, 16u, total, path, out);
+}
+
+static bool run_soc_fetch_refill_path(uint64_t total,
+                                      soc_entry_path_t path,
+                                      soc_run_result_t *out) {
+    const soc_entry_setup_t setup = {
+        .fetch_refill_workload = true,
+    };
+    return run_soc_entry_configured(&setup, 4u, total, path, out);
 }
 
 static bool run_soc_vstr_path(uint64_t total, soc_entry_path_t path,
@@ -5953,6 +6015,146 @@ static bool bench_soc_store(uint64_t requested, unsigned reps) {
            "off-speedup=%.3fx on-speedup=%.3fx on-over-off=%.3fx\n",
            length, stores_per_loop, total, reps, expected_off_retired,
            total, expected_stores, off_chains, on_chains,
+           reference_rates[reps / 2u], off_rates[reps / 2u],
+           on_rates[reps / 2u],
+           off_rates[reps / 2u] / reference_rates[reps / 2u],
+           on_rates[reps / 2u] / reference_rates[reps / 2u],
+           on_rates[reps / 2u] / off_rates[reps / 2u]);
+    ok = true;
+
+done:
+    free(reference_rates);
+    free(off_rates);
+    free(on_rates);
+    return ok;
+}
+
+/* Isolate only the lookup-only fetch refill. Four terminal A32 branches hop
+ * between distinct 1 KiB virtual blocks under one MMU section. Warmup leaves
+ * all four exact FETCH translations in the software TLB. The off arm keeps
+ * the complete signed engine but reproduces the former fetch-cache refusal,
+ * so every branch is literal; the on arm rebuilds the host pointer and retires
+ * every branch in signed text. TLB hit accounting and complete snapshots must
+ * remain byte exact across reference/off/on. This intentionally pathological
+ * 100% boundary mix is not firmware timing or phone FPS. */
+static bool bench_soc_fetch_refill(uint64_t requested, unsigned reps) {
+    const uint64_t loop_insns = 4u;
+    double *reference_rates = NULL;
+    double *off_rates = NULL;
+    double *on_rates = NULL;
+    uint64_t total;
+    bool ok = false;
+
+    if (requested > UINT64_MAX - (loop_insns - 1u)) {
+        fprintf(stderr, "jitbench: SoC fetch-refill shape failed\n");
+        return false;
+    }
+    total = ((requested + loop_insns - 1u) / loop_insns) * loop_insns;
+    reference_rates = (double *)calloc(reps, sizeof *reference_rates);
+    off_rates = (double *)calloc(reps, sizeof *off_rates);
+    on_rates = (double *)calloc(reps, sizeof *on_rates);
+    if (!reference_rates || !off_rates || !on_rates) {
+        fprintf(stderr, "jitbench: SoC fetch-refill out of memory\n");
+        goto done;
+    }
+
+    for (unsigned rep = 0u; rep < reps; rep++) {
+        soc_run_result_t reference = {0};
+        soc_run_result_t off = {0};
+        soc_run_result_t on = {0};
+        const char *order;
+        bool ran;
+
+        if (rep % 3u == 0u) {
+            order = "reference-off-on";
+            ran = run_soc_fetch_refill_path(
+                      total, SOC_ENTRY_REFERENCE, &reference) &&
+                  run_soc_fetch_refill_path(
+                      total, SOC_ENTRY_GRAPH_EXTENDED_FETCH_REFILL_OFF,
+                      &off) &&
+                  run_soc_fetch_refill_path(
+                      total, SOC_ENTRY_GRAPH_EXTENDED, &on);
+        } else if (rep % 3u == 1u) {
+            order = "off-on-reference";
+            ran = run_soc_fetch_refill_path(
+                      total, SOC_ENTRY_GRAPH_EXTENDED_FETCH_REFILL_OFF,
+                      &off) &&
+                  run_soc_fetch_refill_path(
+                      total, SOC_ENTRY_GRAPH_EXTENDED, &on) &&
+                  run_soc_fetch_refill_path(
+                      total, SOC_ENTRY_REFERENCE, &reference);
+        } else {
+            order = "on-reference-off";
+            ran = run_soc_fetch_refill_path(
+                      total, SOC_ENTRY_GRAPH_EXTENDED, &on) &&
+                  run_soc_fetch_refill_path(
+                      total, SOC_ENTRY_REFERENCE, &reference) &&
+                  run_soc_fetch_refill_path(
+                      total, SOC_ENTRY_GRAPH_EXTENDED_FETCH_REFILL_OFF,
+                      &off);
+        }
+        if (!ran || !reference.snapshot || !off.snapshot || !on.snapshot ||
+            reference.snapshot_len != off.snapshot_len ||
+            reference.snapshot_len != on.snapshot_len ||
+            memcmp(reference.snapshot, off.snapshot,
+                   reference.snapshot_len) != 0 ||
+            memcmp(reference.snapshot, on.snapshot,
+                   reference.snapshot_len) != 0 ||
+            reference.signed_retired != 0u || off.signed_retired != 0u ||
+            on.signed_retired != total ||
+            reference.fetch_refill_attempts != 0u ||
+            reference.fetch_refill_hits != 0u ||
+            off.fetch_refill_attempts != 0u || off.fetch_refill_hits != 0u ||
+            on.fetch_refill_attempts != total ||
+            on.fetch_refill_hits != total ||
+            reference.dread_hits != 0u || reference.dread_misses != 0u ||
+            off.dread_hits != 0u || off.dread_misses != 0u ||
+            on.dread_hits != 0u || on.dread_misses != 0u ||
+            reference.dwrite_hits != 0u ||
+            reference.dwrite_misses != 0u || off.dwrite_hits != 0u ||
+            off.dwrite_misses != 0u || on.dwrite_hits != 0u ||
+            on.dwrite_misses != 0u || on.graph_chains != 0u) {
+            fprintf(stderr,
+                    "jitbench: SoC fetch-refill repetition %u failed exact "
+                    "A/B off-retired=%" PRIu64 " on-retired=%" PRIu64
+                    " attempts/hits=%" PRIu64 "/%" PRIu64 "\n",
+                    rep + 1u, off.signed_retired, on.signed_retired,
+                    on.fetch_refill_attempts, on.fetch_refill_hits);
+            free_soc_run_result(&reference);
+            free_soc_run_result(&off);
+            free_soc_run_result(&on);
+            goto done;
+        }
+
+        reference_rates[rep] = (double)total / reference.seconds / 1.0e6;
+        off_rates[rep] = (double)total / off.seconds / 1.0e6;
+        on_rates[rep] = (double)total / on.seconds / 1.0e6;
+        printf("SOC-FETCH-REFILL-SAMPLE rep=%u order=%s reference=%.3f "
+               "refill-off=%.3f refill-on=%.3f Minsn/s "
+               "off-retired=%" PRIu64 " on-retired=%" PRIu64
+               " on-refills=%" PRIu64 " exact-snapshot=yes\n",
+               rep + 1u, order, reference_rates[rep], off_rates[rep],
+               on_rates[rep], off.signed_retired, on.signed_retired,
+               on.fetch_refill_hits);
+        free_soc_run_result(&reference);
+        free_soc_run_result(&off);
+        free_soc_run_result(&on);
+    }
+
+    qsort(reference_rates, reps, sizeof *reference_rates, cmp_double);
+    qsort(off_rates, reps, sizeof *off_rates, cmp_double);
+    qsort(on_rates, reps, sizeof *on_rates, cmp_double);
+    printf("SOC-FETCH-REFILL-CURVE blocks=4 loop-insns=%" PRIu64
+           " guest-insns=%" PRIu64
+           " reps=%u chain-limit=256 same-binary=yes run-api=yes "
+           "cache-lookup=yes block-witness=yes entry-gates=yes "
+           "timer-boundaries=yes device-tick=yes head-cache=warm "
+           "mmu=section tlb=warm exact-snapshot=yes "
+           "off-signed-retired=0 on-signed-retired=%" PRIu64
+           " on-refill-attempts=%" PRIu64 " on-refill-hits=%" PRIu64
+           " reference-median=%.3f off-median=%.3f on-median=%.3f "
+           "off-speedup=%.3fx on-speedup=%.3fx on-over-off=%.3fx\n",
+           loop_insns, total, reps, total, total, total,
            reference_rates[reps / 2u], off_rates[reps / 2u],
            on_rates[reps / 2u],
            off_rates[reps / 2u] / reference_rates[reps / 2u],
@@ -7352,6 +7554,9 @@ int main(int argc, char **argv) {
     printf("The SoC-indirect row is a same-binary BX/BLX capability A/B over "
            "four mixed ARM/Thumb heads. Its branch-heavy synthetic speedup is "
            "not a firmware-mix or phone-FPS claim either.\n");
+    printf("The SoC-fetch-refill row is a same-binary policy A/B over four "
+           "MMU-mapped 1 KiB blocks with already-warm FETCH TLB entries. Its "
+           "100%% boundary mix is not firmware timing or phone FPS.\n");
     printf("The SoC-Thumb-conditional row is a same-binary capability A/B "
            "with four terminal condition branches and both outcomes per "
            "synthetic loop. It is not firmware timing or phone FPS.\n");
@@ -7414,6 +7619,7 @@ int main(int argc, char **argv) {
             return 1;
     }
     if (!bench_soc_store(soc_insns, reps)) return 1;
+    if (!bench_soc_fetch_refill(soc_insns, reps)) return 1;
     if (!bench_soc_indirect(soc_insns, reps)) return 1;
     if (!bench_soc_thumb_conditional(soc_insns, reps)) return 1;
     if (!bench_soc_vstr(soc_insns, reps)) return 1;
