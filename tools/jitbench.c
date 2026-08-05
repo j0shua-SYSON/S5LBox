@@ -6246,10 +6246,12 @@ static bool bench_soc_fetch_refill_mix(uint64_t requested, unsigned reps) {
     double *reference_rates = NULL;
     double *off_rates = NULL;
     double *on_rates = NULL;
+    double *paired_ratios = NULL;
     uint64_t total;
     uint64_t loops;
     uint64_t expected_off_signed;
     uint64_t expected_refills;
+    unsigned paired_wins = 0u;
     bool ok = false;
 
     if (requested > UINT64_MAX - (loop_insns - 1u)) {
@@ -6263,7 +6265,8 @@ static bool bench_soc_fetch_refill_mix(uint64_t requested, unsigned reps) {
     reference_rates = (double *)calloc(reps, sizeof *reference_rates);
     off_rates = (double *)calloc(reps, sizeof *off_rates);
     on_rates = (double *)calloc(reps, sizeof *on_rates);
-    if (!reference_rates || !off_rates || !on_rates) {
+    paired_ratios = (double *)calloc(reps, sizeof *paired_ratios);
+    if (!reference_rates || !off_rates || !on_rates || !paired_ratios) {
         fprintf(stderr, "jitbench: SoC fetch-refill mix out of memory\n");
         goto done;
     }
@@ -6341,13 +6344,16 @@ static bool bench_soc_fetch_refill_mix(uint64_t requested, unsigned reps) {
         reference_rates[rep] = (double)total / reference.seconds / 1.0e6;
         off_rates[rep] = (double)total / off.seconds / 1.0e6;
         on_rates[rep] = (double)total / on.seconds / 1.0e6;
+        paired_ratios[rep] = on_rates[rep] / off_rates[rep];
+        if (paired_ratios[rep] > 1.0) paired_wins++;
         printf("SOC-FETCH-REFILL-MIX-SAMPLE rep=%u order=%s "
                "reference=%.3f refill-off=%.3f refill-on=%.3f Minsn/s "
                "off-retired=%" PRIu64 " on-retired=%" PRIu64
-               " on-refills=%" PRIu64 " exact-snapshot=yes\n",
+               " on-refills=%" PRIu64 " paired-on-over-off=%.3fx "
+               "exact-snapshot=yes\n",
                rep + 1u, order, reference_rates[rep], off_rates[rep],
                on_rates[rep], off.signed_retired, on.signed_retired,
-               on.fetch_refill_hits);
+               on.fetch_refill_hits, paired_ratios[rep]);
         free_soc_run_result(&reference);
         free_soc_run_result(&off);
         free_soc_run_result(&on);
@@ -6356,6 +6362,7 @@ static bool bench_soc_fetch_refill_mix(uint64_t requested, unsigned reps) {
     qsort(reference_rates, reps, sizeof *reference_rates, cmp_double);
     qsort(off_rates, reps, sizeof *off_rates, cmp_double);
     qsort(on_rates, reps, sizeof *on_rates, cmp_double);
+    qsort(paired_ratios, reps, sizeof *paired_ratios, cmp_double);
     printf("SOC-FETCH-REFILL-MIX-CURVE blocks=20 single-blocks=3 "
            "long-blocks=17 long-insns=10 loop-insns=%" PRIu64
            " guest-insns=%" PRIu64
@@ -6370,20 +6377,25 @@ static bool bench_soc_fetch_refill_mix(uint64_t requested, unsigned reps) {
            " on-refill-attempts=%" PRIu64
            " on-refill-hits=%" PRIu64 " "
            "reference-median=%.3f off-median=%.3f on-median=%.3f "
-           "off-speedup=%.3fx on-speedup=%.3fx on-over-off=%.3fx\n",
+           "off-speedup=%.3fx on-speedup=%.3fx on-over-off=%.3fx "
+           "paired-on-over-off-median=%.3fx paired-min=%.3fx "
+           "paired-max=%.3fx paired-wins=%u/%u\n",
            loop_insns, total, reps, expected_off_signed, total,
            expected_refills, expected_refills,
            reference_rates[reps / 2u],
            off_rates[reps / 2u], on_rates[reps / 2u],
            off_rates[reps / 2u] / reference_rates[reps / 2u],
            on_rates[reps / 2u] / reference_rates[reps / 2u],
-           on_rates[reps / 2u] / off_rates[reps / 2u]);
+           on_rates[reps / 2u] / off_rates[reps / 2u],
+           paired_ratios[reps / 2u], paired_ratios[0u],
+           paired_ratios[reps - 1u], paired_wins, reps);
     ok = true;
 
 done:
     free(reference_rates);
     free(off_rates);
     free(on_rates);
+    free(paired_ratios);
     return ok;
 }
 
@@ -7720,6 +7732,7 @@ int main(int argc, char **argv) {
     uint64_t soc_insns = 0u;
     unsigned reps = DEFAULT_REPS;
     unsigned i;
+    bool fetch_refill_mix_only = false;
 
     for (i = 1u; i < (unsigned)argc; i++) {
         if (strcmp(argv[i], "--insns") == 0 && i + 1u < (unsigned)argc) {
@@ -7744,9 +7757,12 @@ int main(int argc, char **argv) {
                 fprintf(stderr, "jitbench: invalid --soc-insns value\n");
                 return 2;
             }
+        } else if (strcmp(argv[i], "--fetch-refill-mix-only") == 0) {
+            fetch_refill_mix_only = true;
         } else {
             fprintf(stderr, "usage: %s [--insns N] [--entry-insns N] "
-                            "[--soc-insns N] [--reps N]\n", argv[0]);
+                            "[--soc-insns N] [--reps N] "
+                            "[--fetch-refill-mix-only]\n", argv[0]);
             return 2;
         }
     }
@@ -7825,6 +7841,9 @@ int main(int argc, char **argv) {
     if (!validate_static_thumb_cond_branch_oracles()) return 1;
     if (!validate_static_indirect_branch_oracles()) return 1;
     if (!validate_static_oracles()) return 1;
+
+    if (fetch_refill_mix_only)
+        return bench_soc_fetch_refill_mix(soc_insns, reps) ? 0 : 1;
 
     for (i = 0u; i < sizeof CASES / sizeof CASES[0]; i++) {
         if (!bench_one(&CASES[i], insns, reps)) return 1;
