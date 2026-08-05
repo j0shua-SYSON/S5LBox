@@ -1,0 +1,62 @@
+name: fetch-refill-perf
+
+# Manual, focused Apple-arm64 timing evidence. This workflow deliberately
+# builds only jitbench instead of re-running the full cross-platform test
+# matrix. Exact snapshots and accounting remain hard gates; hosted throughput
+# is reported without a pass/fail speed threshold because shared runners are
+# noisy and are not physical-iPhone FPS measurements.
+on:
+  workflow_dispatch:
+    inputs:
+      soc_insns:
+        description: Guest instructions per length and repetition
+        required: true
+        default: '20000000'
+        type: string
+      reps:
+        description: Rotated reference/off/adaptive repetitions per length
+        required: true
+        default: '3'
+        type: string
+
+jobs:
+  break-even:
+    name: break-even (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, macos-15]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Require Apple arm64
+        shell: bash
+        run: |
+          set -euo pipefail
+          uname -a
+          test "$(uname -m)" = arm64
+
+      - name: Configure focused signed-static benchmark
+        run: >-
+          cmake -S . -B build-perf -DCMAKE_BUILD_TYPE=Release
+          -DS5LBOX_JIT=ON -DS5LBOX_STATIC_A64_ENGINE=ON
+
+      - name: Build jitbench only
+        run: cmake --build build-perf --config Release --target jitbench
+
+      - name: Exact fetch-refill call-length sweep
+        shell: bash
+        env:
+          SOC_INSNS: ${{ inputs.soc_insns }}
+          REPS: ${{ inputs.reps }}
+        run: |
+          set -euo pipefail
+          ./build-perf/core/jitbench \
+            --fetch-refill-break-even-only \
+            --soc-insns "$SOC_INSNS" --reps "$REPS" | tee fetch-refill.log
+          test "$(grep -c '^SOC-FETCH-REFILL-MIX-CURVE ' fetch-refill.log)" -eq 9
+          for length in 2 3 4 6 8 10 16 32 64; do
+            grep -Eq "^SOC-FETCH-REFILL-MIX-CURVE .*long-insns=${length} .*exact-snapshot=yes " \
+              fetch-refill.log
+          done

@@ -55,6 +55,7 @@
 #define FETCH_REFILL_MIX_SINGLE_BLOCKS 3u
 #define FETCH_REFILL_MIX_LONG_BLOCKS 17u
 #define FETCH_REFILL_MIX_LONG_INSNS 10u
+#define FETCH_REFILL_MIX_MAX_LONG_INSNS 64u
 #define FETCH_REFILL_MIX_LOOP_INSNS 173u
 
 _Static_assert(FETCH_REFILL_MIX_SINGLE_BLOCKS +
@@ -5243,6 +5244,7 @@ typedef struct {
     bool vfp_arithmetic_workload;
     bool fetch_refill_workload;
     bool fetch_refill_mix_workload;
+    unsigned fetch_refill_mix_long_insns;
 } soc_entry_setup_t;
 
 static uint32_t encode_a32_unconditional_b(uint32_t pc, uint32_t target) {
@@ -5256,11 +5258,16 @@ static bool setup_soc_entry_machine(s5l8900_t *machine,
     if (!machine || !setup) return false;
     if (setup->fetch_refill_mix_workload) {
         const uint32_t section = (3u << 10) | 2u;
+        const unsigned long_insns = setup->fetch_refill_mix_long_insns
+            ? setup->fetch_refill_mix_long_insns
+            : FETCH_REFILL_MIX_LONG_INSNS;
+        if (long_insns < 2u ||
+            long_insns > FETCH_REFILL_MIX_MAX_LONG_INSNS)
+            return false;
         for (unsigned i = 0u; i < FETCH_REFILL_MIX_BLOCKS; i++) {
-            uint32_t program[FETCH_REFILL_MIX_LONG_INSNS];
+            uint32_t program[FETCH_REFILL_MIX_MAX_LONG_INSNS];
             const bool single = i == 0u || i == 7u || i == 14u;
-            const unsigned length = single ? 1u :
-                                           FETCH_REFILL_MIX_LONG_INSNS;
+            const unsigned length = single ? 1u : long_insns;
             const uint32_t pc = i * UINT32_C(0x400) + i * 4u;
             const unsigned next_i = (i + 1u) % FETCH_REFILL_MIX_BLOCKS;
             const uint32_t target =
@@ -5677,14 +5684,18 @@ static bool run_soc_fetch_refill_path(uint64_t total,
     return run_soc_entry_configured(&setup, 4u, total, path, out);
 }
 
-static bool run_soc_fetch_refill_mix_path(uint64_t total,
-                                          soc_entry_path_t path,
-                                          soc_run_result_t *out) {
+static bool run_soc_fetch_refill_mix_length_path(
+        uint64_t total, unsigned long_insns, soc_entry_path_t path,
+        soc_run_result_t *out) {
+    if (long_insns < 2u || long_insns > FETCH_REFILL_MIX_MAX_LONG_INSNS)
+        return false;
+    const unsigned loop_insns = FETCH_REFILL_MIX_SINGLE_BLOCKS +
+        FETCH_REFILL_MIX_LONG_BLOCKS * long_insns;
     const soc_entry_setup_t setup = {
         .fetch_refill_mix_workload = true,
+        .fetch_refill_mix_long_insns = long_insns,
     };
-    return run_soc_entry_configured(
-        &setup, FETCH_REFILL_MIX_LOOP_INSNS, total, path, out);
+    return run_soc_entry_configured(&setup, loop_insns, total, path, out);
 }
 
 static bool run_soc_vstr_path(uint64_t total, soc_entry_path_t path,
@@ -6273,24 +6284,29 @@ done:
     return ok;
 }
 
-/* Approximate the exact restored refill-call shape without embedding firmware
- * bytes or pretending this synthetic loop is phone timing. Three of twenty
+/* Exercise a controlled refill-call length without embedding firmware bytes
+ * or pretending this synthetic loop is phone timing. Three of twenty
  * cross-block calls contain only their branch (15.000%, versus the observed
- * 15.342%); the other seventeen contain nine inert ALU instructions plus the
- * branch (10 instructions, versus the observed 9.463-instruction multi-call
- * mean). With refill off, arm_step() owns only the first instruction in every
- * new block and the signed engine still retires the remaining nine. Adaptive
- * refill learns the three true single-instruction calls, periodically probes
- * them, and keeps all seventeen multi-instruction calls. This isolates the
- * measured mix instead of repeating the deliberately pathological 100%-single
- * curve. */
-static bool bench_soc_fetch_refill_mix(uint64_t requested, unsigned reps) {
-    const uint64_t loop_insns = FETCH_REFILL_MIX_LOOP_INSNS;
+ * 15.342%); the other seventeen contain long_insns instructions. With refill
+ * off, arm_step() owns only the first instruction in every new block and the
+ * signed engine can retire the remainder. Adaptive refill learns the three
+ * true single-instruction calls, periodically probes them, and keeps the
+ * proven multi-instruction calls. The default ten-instruction shape matches
+ * the observed 9.463-instruction multi-call mean; the break-even sweep varies
+ * only that controlled length. */
+static bool bench_soc_fetch_refill_mix_length(
+        uint64_t requested, unsigned reps, unsigned long_insns) {
+    if (long_insns < 2u || long_insns > FETCH_REFILL_MIX_MAX_LONG_INSNS) {
+        fprintf(stderr, "jitbench: invalid fetch-refill mix length\n");
+        return false;
+    }
+    const uint64_t loop_insns = FETCH_REFILL_MIX_SINGLE_BLOCKS +
+        FETCH_REFILL_MIX_LONG_BLOCKS * (uint64_t)long_insns;
     const uint64_t off_signed_per_loop =
         FETCH_REFILL_MIX_LONG_BLOCKS *
-        (FETCH_REFILL_MIX_LONG_INSNS - 1u);
+        (uint64_t)(long_insns - 1u);
     const uint64_t adaptive_multi_signed_per_loop =
-        FETCH_REFILL_MIX_LONG_BLOCKS * FETCH_REFILL_MIX_LONG_INSNS;
+        FETCH_REFILL_MIX_LONG_BLOCKS * (uint64_t)long_insns;
     double *reference_rates = NULL;
     double *off_rates = NULL;
     double *on_rates = NULL;
@@ -6335,31 +6351,31 @@ static bool bench_soc_fetch_refill_mix(uint64_t requested, unsigned reps) {
         bool ran;
         if (rep % 3u == 0u) {
             order = "reference-off-on";
-            ran = run_soc_fetch_refill_mix_path(
-                      total, SOC_ENTRY_REFERENCE, &reference) &&
-                  run_soc_fetch_refill_mix_path(
-                      total, SOC_ENTRY_GRAPH_EXTENDED_FETCH_REFILL_OFF,
-                      &off) &&
-                  run_soc_fetch_refill_mix_path(
-                      total, SOC_ENTRY_GRAPH_EXTENDED, &on);
+            ran = run_soc_fetch_refill_mix_length_path(
+                      total, long_insns, SOC_ENTRY_REFERENCE, &reference) &&
+                  run_soc_fetch_refill_mix_length_path(
+                      total, long_insns,
+                      SOC_ENTRY_GRAPH_EXTENDED_FETCH_REFILL_OFF, &off) &&
+                  run_soc_fetch_refill_mix_length_path(
+                      total, long_insns, SOC_ENTRY_GRAPH_EXTENDED, &on);
         } else if (rep % 3u == 1u) {
             order = "off-on-reference";
-            ran = run_soc_fetch_refill_mix_path(
-                      total, SOC_ENTRY_GRAPH_EXTENDED_FETCH_REFILL_OFF,
-                      &off) &&
-                  run_soc_fetch_refill_mix_path(
-                      total, SOC_ENTRY_GRAPH_EXTENDED, &on) &&
-                  run_soc_fetch_refill_mix_path(
-                      total, SOC_ENTRY_REFERENCE, &reference);
+            ran = run_soc_fetch_refill_mix_length_path(
+                      total, long_insns,
+                      SOC_ENTRY_GRAPH_EXTENDED_FETCH_REFILL_OFF, &off) &&
+                  run_soc_fetch_refill_mix_length_path(
+                      total, long_insns, SOC_ENTRY_GRAPH_EXTENDED, &on) &&
+                  run_soc_fetch_refill_mix_length_path(
+                      total, long_insns, SOC_ENTRY_REFERENCE, &reference);
         } else {
             order = "on-reference-off";
-            ran = run_soc_fetch_refill_mix_path(
-                      total, SOC_ENTRY_GRAPH_EXTENDED, &on) &&
-                  run_soc_fetch_refill_mix_path(
-                      total, SOC_ENTRY_REFERENCE, &reference) &&
-                  run_soc_fetch_refill_mix_path(
-                      total, SOC_ENTRY_GRAPH_EXTENDED_FETCH_REFILL_OFF,
-                      &off);
+            ran = run_soc_fetch_refill_mix_length_path(
+                      total, long_insns, SOC_ENTRY_GRAPH_EXTENDED, &on) &&
+                  run_soc_fetch_refill_mix_length_path(
+                      total, long_insns, SOC_ENTRY_REFERENCE, &reference) &&
+                  run_soc_fetch_refill_mix_length_path(
+                      total, long_insns,
+                      SOC_ENTRY_GRAPH_EXTENDED_FETCH_REFILL_OFF, &off);
         }
         if (!ran || !reference.snapshot || !off.snapshot || !on.snapshot ||
             reference.snapshot_len != off.snapshot_len ||
@@ -6427,7 +6443,7 @@ static bool bench_soc_fetch_refill_mix(uint64_t requested, unsigned reps) {
         on_rates[rep] = (double)total / on.seconds / 1.0e6;
         paired_ratios[rep] = on_rates[rep] / off_rates[rep];
         if (paired_ratios[rep] > 1.0) paired_wins++;
-        printf("SOC-FETCH-REFILL-MIX-SAMPLE rep=%u order=%s "
+        printf("SOC-FETCH-REFILL-MIX-SAMPLE long-insns=%u rep=%u order=%s "
                "reference=%.3f refill-off=%.3f refill-adaptive=%.3f "
                "Minsn/s off-retired=%" PRIu64
                " adaptive-retired=%" PRIu64
@@ -6435,7 +6451,8 @@ static bool bench_soc_fetch_refill_mix(uint64_t requested, unsigned reps) {
                " adaptive-skips=%" PRIu64
                " paired-adaptive-over-off=%.3fx "
                "exact-snapshot=yes\n",
-               rep + 1u, order, reference_rates[rep], off_rates[rep],
+               long_insns, rep + 1u, order, reference_rates[rep],
+               off_rates[rep],
                on_rates[rep], off.signed_retired, on.signed_retired,
                on.fetch_refill_hits, on.fetch_refill_skips,
                paired_ratios[rep]);
@@ -6449,7 +6466,7 @@ static bool bench_soc_fetch_refill_mix(uint64_t requested, unsigned reps) {
     qsort(on_rates, reps, sizeof *on_rates, cmp_double);
     qsort(paired_ratios, reps, sizeof *paired_ratios, cmp_double);
     printf("SOC-FETCH-REFILL-MIX-CURVE blocks=20 single-blocks=3 "
-           "long-blocks=17 long-insns=10 loop-insns=%" PRIu64
+           "long-blocks=17 long-insns=%u loop-insns=%" PRIu64
            " guest-insns=%" PRIu64
            " reps=%u single-call-share=15.000%% "
            "observed-single-share=15.342%% "
@@ -6468,7 +6485,8 @@ static bool bench_soc_fetch_refill_mix(uint64_t requested, unsigned reps) {
            "adaptive-over-off=%.3fx "
            "paired-adaptive-over-off-median=%.3fx paired-min=%.3fx "
            "paired-max=%.3fx paired-wins=%u/%u\n",
-           loop_insns, total, reps, expected_off_signed, adaptive_retired,
+           long_insns, loop_insns, total, reps, expected_off_signed,
+           adaptive_retired,
            adaptive_attempts, adaptive_hits, adaptive_skips,
            adaptive_attempts + adaptive_skips, expected_refills,
            reference_rates[reps / 2u],
@@ -6486,6 +6504,24 @@ done:
     free(on_rates);
     free(paired_ratios);
     return ok;
+}
+
+static bool bench_soc_fetch_refill_mix(uint64_t requested, unsigned reps) {
+    return bench_soc_fetch_refill_mix_length(
+        requested, reps, FETCH_REFILL_MIX_LONG_INSNS);
+}
+
+static bool bench_soc_fetch_refill_break_even(uint64_t requested,
+                                              unsigned reps) {
+    static const unsigned LENGTHS[] = {
+        2u, 3u, 4u, 6u, 8u, 10u, 16u, 32u, 64u
+    };
+    for (size_t i = 0u; i < sizeof LENGTHS / sizeof LENGTHS[0]; i++) {
+        if (!bench_soc_fetch_refill_mix_length(
+                requested, reps, LENGTHS[i]))
+            return false;
+    }
+    return true;
 }
 
 /* Isolate the register-indirect tranche with a same-binary feature A/B. Both
@@ -7822,6 +7858,7 @@ int main(int argc, char **argv) {
     unsigned reps = DEFAULT_REPS;
     unsigned i;
     bool fetch_refill_mix_only = false;
+    bool fetch_refill_break_even_only = false;
 
     for (i = 1u; i < (unsigned)argc; i++) {
         if (strcmp(argv[i], "--insns") == 0 && i + 1u < (unsigned)argc) {
@@ -7848,12 +7885,19 @@ int main(int argc, char **argv) {
             }
         } else if (strcmp(argv[i], "--fetch-refill-mix-only") == 0) {
             fetch_refill_mix_only = true;
+        } else if (strcmp(argv[i], "--fetch-refill-break-even-only") == 0) {
+            fetch_refill_break_even_only = true;
         } else {
             fprintf(stderr, "usage: %s [--insns N] [--entry-insns N] "
                             "[--soc-insns N] [--reps N] "
-                            "[--fetch-refill-mix-only]\n", argv[0]);
+                            "[--fetch-refill-mix-only] "
+                            "[--fetch-refill-break-even-only]\n", argv[0]);
             return 2;
         }
+    }
+    if (fetch_refill_mix_only && fetch_refill_break_even_only) {
+        fprintf(stderr, "jitbench: choose only one fetch-refill-only mode\n");
+        return 2;
     }
     if (!entry_insns) entry_insns = insns;
     if (!soc_insns) soc_insns = entry_insns;
@@ -7883,6 +7927,10 @@ int main(int argc, char **argv) {
     printf("The SoC-fetch-refill-mix row approximates the restored 15.342%% "
            "single-call share with three single and seventeen ten-instruction "
            "cross-block calls. It remains synthetic, not firmware timing or "
+           "phone FPS.\n");
+    printf("The optional SoC-fetch-refill break-even sweep holds that call "
+           "share fixed and varies the multi-call length from 2 through 64. "
+           "It measures a synthetic host-cost crossover, not firmware or "
            "phone FPS.\n");
     printf("The SoC-Thumb-conditional row is a same-binary capability A/B "
            "with four terminal condition branches and both outcomes per "
@@ -7933,6 +7981,8 @@ int main(int argc, char **argv) {
 
     if (fetch_refill_mix_only)
         return bench_soc_fetch_refill_mix(soc_insns, reps) ? 0 : 1;
+    if (fetch_refill_break_even_only)
+        return bench_soc_fetch_refill_break_even(soc_insns, reps) ? 0 : 1;
 
     for (i = 0u; i < sizeof CASES / sizeof CASES[0]; i++) {
         if (!bench_one(&CASES[i], insns, reps)) return 1;

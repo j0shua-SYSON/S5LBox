@@ -24878,6 +24878,8 @@ typedef struct {
     uint64_t fetch_refill_first_head_one_multi_calls;
     uint64_t fetch_refill_first_head_one_instructions;
     uint64_t fetch_refill_call_maximum;
+    uint64_t fetch_refill_call_lengths[
+        SEQUENCE_SIGNED_EXTENDED_CAP + 1u];
     /* Offline admission replay over the unconditional refill calls. A skipped
      * call's observed length is used only to audit what the predictor missed;
      * it is never fed back into the predictor. */
@@ -27614,6 +27616,8 @@ static void sequence_signed_store_model_close(
         }
         if (model->call_length > model->fetch_refill_call_maximum)
             model->fetch_refill_call_maximum = model->call_length;
+        if (model->call_length <= SEQUENCE_SIGNED_EXTENDED_CAP)
+            model->fetch_refill_call_lengths[model->call_length]++;
         if (first_head_length == 1u) {
             model->fetch_refill_first_head_one_calls++;
             model->fetch_refill_first_head_one_instructions +=
@@ -29595,6 +29599,8 @@ static void sequence_profile_report_store_model(
     uint64_t implemented_gate_refusals = 0u;
     uint64_t fetch_refill_histogram_calls = 0u;
     uint64_t fetch_refill_histogram_instructions = 0u;
+    uint64_t fetch_refill_recovered_histogram_calls = 0u;
+    uint64_t fetch_refill_recovered_histogram_instructions = 0u;
     uint64_t fetch_refill_stops = 0u;
     uint64_t fetch_refill_gate_refusals = 0u;
     uint64_t current_eligible =
@@ -29677,6 +29683,10 @@ static void sequence_profile_report_store_model(
         fetch_refill_histogram_instructions += instructions;
         if (instructions != calls * (uint64_t)length)
             fetch_refill_lengths_exact = false;
+        calls = fetch_refill->fetch_refill_call_lengths[length];
+        fetch_refill_recovered_histogram_calls += calls;
+        fetch_refill_recovered_histogram_instructions +=
+            calls * (uint64_t)length;
     }
     for (unsigned i = 0u; i < SEQUENCE_SIGNED_STOP_COUNT; i++) {
         stops += model->stops[i];
@@ -29781,6 +29791,10 @@ static void sequence_profile_report_store_model(
             fetch_refill->fetch_refill_recoveries &&
         fetch_refill->fetch_refill_call_instructions >=
             fetch_refill->fetch_refill_calls &&
+        fetch_refill_recovered_histogram_calls ==
+            fetch_refill->fetch_refill_calls &&
+        fetch_refill_recovered_histogram_instructions ==
+            fetch_refill->fetch_refill_call_instructions &&
         fetch_refill->fetch_refill_call_blocks >=
             fetch_refill->fetch_refill_calls &&
         fetch_refill->fetch_refill_single_instruction_calls <=
@@ -30048,6 +30062,40 @@ static void sequence_profile_report_store_model(
                          (double)fetch_refill->
                              fetch_refill_single_instruction_calls /
                          (double)fetch_refill->fetch_refill_calls : 0.0);
+        {
+            static const unsigned THRESHOLDS[] = {
+                2u, 3u, 4u, 5u, 6u, 8u, 10u,
+                12u, 16u, 24u, 32u, 48u, 64u
+            };
+            printf("      recovered call-length break-even ceiling "
+                   "(oracle admit length >= threshold)\n");
+            printf("        threshold        calls instructions "
+                   "retained-removals retained-share\n");
+            for (size_t i = 0u;
+                 i < sizeof THRESHOLDS / sizeof THRESHOLDS[0]; i++) {
+                unsigned threshold = THRESHOLDS[i];
+                uint64_t threshold_calls = 0u;
+                uint64_t threshold_instructions = 0u;
+                for (unsigned length = threshold;
+                     length <= SEQUENCE_SIGNED_EXTENDED_CAP; length++) {
+                    uint64_t calls =
+                        fetch_refill->fetch_refill_call_lengths[length];
+                    threshold_calls += calls;
+                    threshold_instructions += calls * (uint64_t)length;
+                }
+                printf("        %9u %12" PRIu64 " %12" PRIu64
+                       " %17" PRIu64 " %13.3f%%\n",
+                       threshold, threshold_calls,
+                       threshold_instructions, threshold_calls,
+                       fetch_refill_removed_entries
+                           ? 100.0 * (double)threshold_calls /
+                                 (double)fetch_refill_removed_entries
+                           : 0.0);
+            }
+            printf("        This is an offline upper bound: a live predictor "
+                   "must first pay to observe a call and can miss changed "
+                   "paths or direct-map collisions.\n");
+        }
         printf("      recovered first-head-one calls/multi/instructions="
                "%" PRIu64 "/%" PRIu64 "/%" PRIu64
                " (calls %.3f%%; mean-insns %.3f)\n",
