@@ -30189,12 +30189,12 @@ static void sequence_profile_report_post_store_model(
         baseline->instructions + baseline_gate_refusals;
 
     printf("\n    post-store signed-engine family frontier\n");
-    printf("      Every row starts from the exact shipping single/VSTR/STM/VSTM "
-           "baseline and adds one whole family on the same literal stream. "
-           "Thumb conditional B and the one-block no-PC multi-load rows are "
-           "bounded contracts. The multiply and VFP-compute rows assume a "
-           "perfect one-record semantic handler: they are optimistic ceilings, "
-           "not implementation-ready coverage, speed or FPS.\n");
+    printf("      Every row starts from the exact current product decoder plus "
+           "the explicit single/VSTR/STM/VSTM store contract, then adds one "
+           "whole remaining family on the same literal stream. Shipped "
+           "families therefore appear as zero-increment audits. The bounded "
+           "multi-load rows are exact contracts; multiply and broad VFP "
+           "compute remain optimistic one-record ceilings, not speed or FPS.\n");
     printf("      %-18s %10s %10s %9s %9s %9s %9s %9s %9s %9s\n",
            "family", "candidate", "eligible", "skip", "plain", "DREAD", "miss",
            "align", "cross", "state");
@@ -30329,12 +30329,14 @@ static void sequence_profile_report_vfp_arith_model(
     uint64_t status_total = 0u;
 
     printf("\n    live VFP arithmetic mode-admission audit\n");
-    printf("      This observer never executes native arithmetic. It applies the "
-           "literal interpreter's encoding, condition, lazy-VFP, Len and "
-           "exception-enable gates, then records literal arm_step() results. "
-           "RMode/FZ/DN are measured semantic modes, not refusals. A mode-"
-           "admitted row is still a ceiling until an AArch64 oracle proves "
-           "results, flags and host-state restoration.\n");
+    printf("      This replay never executes signed AArch64 arithmetic. It "
+           "applies the literal interpreter's encoding, condition, lazy-VFP, "
+           "Len and exception-enable gates, then records literal arm_step() "
+           "results. RMode/FZ/DN are measured semantic modes, not refusals. "
+           "When the product decoder already admits this family, a zero "
+           "increment is its rollout audit. The separate Apple-native oracle "
+           "proves handler semantics and host-state restoration; this observer "
+           "alone proves neither execution speed nor FPS.\n");
     printf("      %-27s %10s %9s %9s %9s %9s %9s %10s %9s %9s\n",
            "family", "candidate", "invalid", "skip", "access", "Len",
            "enables", "admitted", "single", "double");
@@ -30462,6 +30464,8 @@ static void sequence_profile_report_vfp_arith_model(
     uint64_t additional_eligible =
         frontier_row[SEQUENCE_POST_STORE_CONDITION_SKIP] +
         frontier_row[SEQUENCE_POST_STORE_PLAIN];
+    uint64_t product_overlap = candidates >= frontier_candidates
+        ? candidates - frontier_candidates : 0u;
     uint64_t baseline_entries = profile->fetched >= baseline->instructions
         ? profile->fetched - baseline->instructions + baseline->calls : 0u;
     uint64_t entries = profile->fetched >= model->instructions
@@ -30523,7 +30527,10 @@ static void sequence_profile_report_vfp_arith_model(
            operand_mask_total, status_total + vfp->post_not_literal +
                vfp->pending_abandoned,
            census_exact ? "EXACT" : "MISMATCH");
-    printf("      mode-admitted ceiling candidate/eligible/calls/instructions/"
+    printf("      mode-admitted candidates product-overlap/incremental="
+           "%" PRIu64 "/%" PRIu64 "/%" PRIu64 "\n",
+           candidates, product_overlap, frontier_candidates);
+    printf("      mode-admitted incremental candidate/eligible/calls/instructions/"
            "heads/chains/runner-entries/removed=%" PRIu64 "/%" PRIu64
            "/%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64
            "/%" PRIu64 "/%" PRIu64 " (%.3f%% baseline)  %s\n",
@@ -30541,7 +30548,7 @@ static void sequence_profile_report_vfp_arith_model(
         ? profile->fetched - vldm->instructions + vldm->calls : 0u;
     uint64_t vldm_removed = baseline_entries >= vldm_entries
         ? baseline_entries - vldm_entries : 0u;
-    printf("      continuity comparison: guarded-arithmetic/VLDM removed="
+    printf("      continuity comparison: incremental guarded-arithmetic/VLDM removed="
            "%" PRIu64 "/%" PRIu64 " runner entries (%.3fx). This is "
            "continuity, not elapsed speed or FPS.\n",
            removed, vldm_removed,

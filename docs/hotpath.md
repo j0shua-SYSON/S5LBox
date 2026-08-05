@@ -6957,3 +6957,88 @@ can remove 48,757 entries or 1.637% of the current baseline. The larger multiply
 rows can remove 60,146 (2.019%) and 585,011 (19.641%) only under perfect-handler assumptions. The
 next tranche must weigh exact semantic cost and broad coverage rather than blindly walking that
 list; none of these counts is a promise of 30 FPS.
+
+### 2026-08-05: guarded scalar VFP arithmetic closes the large boundary, but is not yet a speed win
+
+The post-LDM ranking did not justify another small memory opcode. Read-only commit
+`00beb3a1a65c830f85cf6487a9985a139ea91a45` and its preceding observer work instead measured
+the complete VFPv2 three-operand arithmetic family over the unchanged 7.100--7.110 B literal
+stream. There were 289,127 VMLA/VMLS/VNMLA/VNMLS, VMUL/VNMUL, VADD/VSUB and VDIV candidates:
+4,753 condition skips and 284,374 executed instructions. Every executed observation used
+round-to-nearest with FZ and DN set, vector length zero, all exception enables clear, and IXC
+already sticky. Every operand and result was a signed zero or finite normal; no newly visible
+exception flag appeared. Under that measured contract, admitting the whole family predicted
+417,915 fewer runner entries, or **14.031%** of the 2,978,573-entry LDM baseline. This was a broad
+measured frontier, not an opcode-by-opcode choice.
+
+Implementation commit `6969ebda3f8d943435acf49e3af57a926f49ee3b` adds all nine operations in
+both single and double precision as eighteen ordinary build-time-signed AArch64 handlers. It does
+not allocate or modify executable memory. Runtime admission checks live CPACR/FPEXC access, the
+exact RN+FZ+DN/Len-zero/enables-zero/IXC-sticky guest mode and zero-or-normal operand classes before
+touching guest state. Host FPCR/FPSR are saved, normalized and restored. Results must remain signed
+zero or normal and may expose only no exception or IXC; the FZ smallest-normal ambiguity refuses.
+VMLA-family operations use separately rounded multiply and add stages, sample the intermediate
+result and flags, and never contract into host FMA. Any failed check returns the exact completed
+prefix before mutating the rejected guest instruction.
+
+The Apple-native oracle covers all eighteen operations, signed zero, inexact results, conditional
+skip, partial-prefix return and 25 fail-closed cases across access, mode, sticky flags, abnormal
+inputs/results, overflow, underflow, divide-by-zero and VMLA intermediate underflow. It also
+perturbs host FPCR/FPSR and requires exact restoration on success and rejection. Rollout commit
+`b558ce69c880e977d926ee819417a5ec7f04f3b3` then proves the feature through the actual SoC path:
+the same machine retires 1,000 signed instructions with arithmetic disabled and all 16,000 with it
+enabled, publishes 766 graph chains and remains snapshot-identical to the literal reference.
+
+The long same-binary benchmark is deliberately hostile to self-deception: fifteen of every sixteen
+instructions are VFP arithmetic, with the loop branch as the sixteenth. Setup and warm-up remain
+outside timing; cache lookup, raw witness, entry gates, graph lookup, timer boundaries and device
+ticks remain inside. All three arms serialize byte-identically.
+
+| Apple arm64 runner | interpreter | arithmetic off | arithmetic on | on/interpreter | on/off |
+|---|---:|---:|---:|---:|---:|
+| macOS 14 | 34.883 Minsn/s | 15.172 Minsn/s | 28.740 Minsn/s | **0.824x** | **1.894x** |
+| macOS 15 | 30.223 Minsn/s | 15.781 Minsn/s | 29.225 Minsn/s | **0.967x** | **1.852x** |
+
+That result is useful precisely because it is not flattering. Native arithmetic removes the signed
+fallback boundary and is 1.852x--1.894x faster than leaving that boundary in the signed engine, but
+the guarded handler itself does **not** beat the literal interpreter in this arithmetic-dense loop.
+Per-instruction host FPCR/FPSR save, normalization, sampling and restoration are now the named cost
+to attack. The next performance tranche is batching or otherwise amortizing that exact FP-state
+contract across a signed invocation, with the same failure atomicity and host-state oracle. Adding
+another opcode before addressing this measured cost would be the wrong optimization order.
+
+`work/r550-vfp-arith-current-10m` is the exact product-baseline replay. It restores the trusted r445
+7.100 B checkpoint, stops at 7.110 B and PC `0x312092bc`, exits 0 in 58.736 host seconds and leaves
+stderr empty. All 59 case-sensitive accounting verdicts are `EXACT`; none is `MISMATCH`. The 284,374
+executed arithmetic observations again have only zero/normal operands and results, RN+FZ+DN, and
+pre-existing IXC. Re-adding the family is now a zero-increment audit, proving the current product
+decoder owns the measured candidates.
+
+| restored product metric | before | after | change |
+|---|---:|---:|---:|
+| decoder-supported fetched instructions | 8,014,303 | 8,303,430 | +289,127 |
+| retirement-eligible instructions | 7,846,054 | 8,135,181 | +289,127 |
+| modeled signed instructions | 7,426,504 | 7,715,606 | +289,102 |
+| modeled signed calls | 1,251,244 | 1,122,431 | -128,813 |
+| modeled signed heads | 3,066,547 | 2,960,614 | -105,933 |
+| modeled chain transitions | 1,815,303 | 1,838,183 | +22,880 |
+| product runner entries | 2,978,573 | 2,560,658 | **-417,915 (-14.031%)** |
+
+The pre-implementation prediction and shipped audit therefore agree exactly. The final work image
+and screen remain byte-identical to r549 and the retained r533 checkpoint:
+`8A59C388C481165F460984926AA5FFB1B72A0E9030216CD0038DE9B3264B79FE` and
+`1EF63FFE3EEFD976416E17120A36BA074BF295EA0955D716E2D345FCC5EA0A9E`. CLCD remains live and
+nonblack at 1,590 frames; 15,626 media reads and 469 writes complete with zero failures. No duplicate
+snapshot was created because r533 already holds the identical 7.110 B state.
+
+Exact-SHA core run `30982162147` is green in all eight jobs, including both Apple-native semantic
+and SoC rollout oracles, warnings-as-errors, ASan/UBSan and JIT-off builds. Exact-SHA iOS run
+`30982162237` builds, fake-signs and uploads the app. Commits contain no co-author trailers.
+
+Brutal status: **this is the largest recent exact structural reduction, but it still does not show
+that 30 FPS is close**. The dense A64 result says the current guarded arithmetic path is at best near
+interpreter speed and sometimes slower. The restored 14.031% result counts avoided runner entries,
+not elapsed firmware speed or frames. This exact IPA has not been installed on a physical phone in
+this environment, so measured phone-FPS improvement remains zero and the only device observation
+remains roughly 0--4 FPS. The work is substantial, but the evidence says FP-state amortization and a
+new exact A/B are required before this architecture can honestly be called a path to 30 FPS.
