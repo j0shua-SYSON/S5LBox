@@ -7307,3 +7307,42 @@ forecast. The only trustworthy phone result therefore remains roughly 0--4 FPS. 
 worth testing for regression and a small sustained gain; expecting 30 FPS from this change would be
 dishonest. A physical exact-build trace remains the authority, and a much larger end-to-end lever is
 still required.
+
+### 2026-08-05: standalone warm negatives are too sparse to justify another runtime path
+
+The post-prefix bypass above raised a broader systemic question before any more opcode work: how
+often does the machine enter the signed engine at an instruction whose exact decoder-cache slot is
+already a warm negative, without first retiring a positive signed prefix? A fast rejection there
+could shorten a failed graph selection, but it could not retire the instruction; `arm_step()` would
+still own its architectural fetch and semantics. The question therefore needed a real-stream
+population gate before another policy switch or Apple benchmark.
+
+The read-only cache replay now counts that population separately. It uses the same 1,024-slot key,
+fetch pointer, PC, generation, privilege, instruction state and one-instruction raw witness as the
+product. Positive heads still overwrite their slots and ambiguous refill heads still clobber them.
+The replay also stops republishing an identical warm negative: the current product's cache hit
+selects the existing unsupported entry and returns without decoding or publishing it again. This
+changes observer accounting only; it executes no signed code and changes no guest state.
+
+`work/r565-standalone-negative-observer-10m` restores the retained r445 checkpoint at exactly
+7.100 B, stops at 7.110 B and creates no snapshot. It exits zero in 62.914 host seconds with empty
+stderr. All 63 case-sensitive accounting verdicts end in `EXACT`, none ends in `MISMATCH`, and the
+work image and nonblack CLCD screen remain byte-identical at
+`8A59C388C481165F460984926AA5FFB1B72A0E9030216CD0038DE9B3264B79FE` and
+`1EF63FFE3EEFD976416E17120A36BA074BF295EA0955D716E2D345FCC5EA0A9E`.
+
+| standalone rejected signed-engine entry | observations | share |
+|---|---:|---:|
+| all standalone decoder rejects | 217,281 | 2.173% of observations |
+| exact fetch identity ready / unready | 119,982 / 97,299 | 55.220% / 44.780% |
+| exact warm negative | **55,850** | **46.549% of ready rejects** |
+| cold or displaced negative | 64,132 | 53.451% of ready rejects |
+| warm negative versus all observations | **55,850 / 10,000,000** | **0.559%** |
+
+Brutal status: **this candidate is rejected before implementation**. Even a zero-cost perfect fast
+rejection could touch only 0.559% of the measured instruction observations, and every hit would
+still execute the same ordinary `arm_step()`. That is smaller than the already-small post-prefix
+population and cannot plausibly close a multi-fold phone-FPS gap. No runtime switch, generated
+handler, app change or synthetic speed claim is added. The device result remains roughly 0--4 FPS;
+the next work must seek a materially larger end-to-end lever or obtain the exact-build phone
+throughput/publication split, not shave another decoder boundary.

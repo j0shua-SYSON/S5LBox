@@ -24873,6 +24873,15 @@ typedef struct {
     uint64_t warm_hits;
     uint64_t cold_or_displaced;
     uint64_t fetch_unready;
+    /* Rejected instructions reached with no positive signed prefix in the
+     * current product call. The machine still probes the signed engine at
+     * these outer entries; an exact warm negative could reject before graph
+     * selection, but arm_step() must still execute the instruction. */
+    uint64_t standalone_rejected_boundaries;
+    uint64_t standalone_ready_boundaries;
+    uint64_t standalone_warm_hits;
+    uint64_t standalone_cold_or_displaced;
+    uint64_t standalone_fetch_unready;
     uint64_t positive_publications;
     uint64_t positive_unknown_clobbers;
     uint64_t negative_publications;
@@ -27973,12 +27982,18 @@ static void sequence_negative_cache_note_ineligible(
     bool ready;
     bool priv;
     unsigned slot;
-    bool hit = false;
+    bool hit;
+    bool product_probes;
     if (!profile || !mach || !model) return;
 
     ready = sequence_negative_cache_ready(profile, mach, pc, thumb);
     priv = (mach->cpu.cpsr & ARM_CPSR_MODE_MASK) != ARM_MODE_USR;
     slot = sequence_negative_cache_index(pc, thumb, mach->cpu.fetch_gen);
+    product_probes = !ended_positive_call || product_call_admitted;
+    hit = ready && product_probes &&
+          outcome == SEQUENCE_SIGNED_REJECTED &&
+          sequence_negative_cache_matches(
+              &model->entries[slot], &mach->cpu, pc, raw, thumb, priv);
     if (ended_positive_call && outcome == SEQUENCE_SIGNED_REJECTED) {
         model->modeled_rejected_boundaries++;
         if (!product_call_admitted) {
@@ -27989,13 +28004,23 @@ static void sequence_negative_cache_note_ineligible(
                 model->fetch_unready++;
             } else {
                 model->ready_boundaries++;
-                hit = sequence_negative_cache_matches(
-                    &model->entries[slot], &mach->cpu, pc, raw, thumb, priv);
                 if (hit)
                     model->warm_hits++;
                 else
                     model->cold_or_displaced++;
             }
+        }
+    } else if (!ended_positive_call &&
+               outcome == SEQUENCE_SIGNED_REJECTED) {
+        model->standalone_rejected_boundaries++;
+        if (!ready) {
+            model->standalone_fetch_unready++;
+        } else {
+            model->standalone_ready_boundaries++;
+            if (hit)
+                model->standalone_warm_hits++;
+            else
+                model->standalone_cold_or_displaced++;
         }
     }
 
@@ -28003,8 +28028,7 @@ static void sequence_negative_cache_note_ineligible(
      * before arm_step(). A rejected head publishes a one-instruction negative;
      * a dynamic read/write guard remains a supported decoded head. Requiring a
      * pre-profile READY fetch makes this a conservative subset of refill cases. */
-    if (ready && !hit &&
-        (!ended_positive_call || product_call_admitted))
+    if (ready && !hit && product_probes)
         sequence_negative_cache_publish(
             model, &mach->cpu, pc, raw, thumb,
             outcome != SEQUENCE_SIGNED_REJECTED);
@@ -30376,6 +30400,12 @@ static void sequence_profile_report_store_model(
                     negative->rejected_boundaries &&
                 negative->warm_hits + negative->cold_or_displaced ==
                     negative->ready_boundaries &&
+                negative->standalone_ready_boundaries +
+                        negative->standalone_fetch_unready ==
+                    negative->standalone_rejected_boundaries &&
+                negative->standalone_warm_hits +
+                        negative->standalone_cold_or_displaced ==
+                    negative->standalone_ready_boundaries &&
                 negative->modeled_rejected_boundaries ==
                     fetch_refill->ineligible_stop_outcomes[
                         SEQUENCE_SIGNED_REJECTED];
@@ -30392,6 +30422,20 @@ static void sequence_profile_report_store_model(
                    negative->ready_boundaries
                        ? 100.0 * (double)negative->warm_hits /
                              (double)negative->ready_boundaries : 0.0,
+                    negative_exact ? "ACCOUNTING-EXACT" : "MISMATCH");
+            printf("      standalone rejected native entries modeled="
+                   "%" PRIu64 " ready/unready=%" PRIu64 "/%" PRIu64
+                   " warm-hit/cold-or-displaced=%" PRIu64 "/%" PRIu64
+                   " (%.3f%% ready hit)  %s\n",
+                   negative->standalone_rejected_boundaries,
+                   negative->standalone_ready_boundaries,
+                   negative->standalone_fetch_unready,
+                   negative->standalone_warm_hits,
+                   negative->standalone_cold_or_displaced,
+                   negative->standalone_ready_boundaries
+                       ? 100.0 * (double)negative->standalone_warm_hits /
+                             (double)negative->standalone_ready_boundaries
+                       : 0.0,
                    negative_exact ? "ACCOUNTING-EXACT" : "MISMATCH");
             printf("      cache publications positive/unknown-clobber/negative "
                    "and negative-evictions=%" PRIu64 "/%" PRIu64
