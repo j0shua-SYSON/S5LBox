@@ -24857,15 +24857,16 @@ typedef enum {
  * only and never carries out a guest write. */
 typedef struct {
     sequence_signed_extended_t extended;
-    /* Exact subset implemented by the signed engine: A32 and Thumb
-     * single-register stores only. Keep it beside the broader architecture
-     * ceiling so one replay cannot confuse potential coverage with shipped
-     * coverage. Both models consume the same literal-store DWRITE history. */
+    /* Exact store subset implemented by the signed engine: A32/Thumb
+     * single-register stores plus single-register VSTR S/D. Keep it beside
+     * the broader architecture ceiling so one replay cannot confuse potential
+     * coverage with shipped coverage. Both models consume the same literal-
+     * store DWRITE history. */
     sequence_signed_extended_t implemented;
-    /* Current product (including its implemented single stores and whatever
-     * the exact decoder already admits) plus exactly one remaining store
-     * family. These side-by-side models rank continuity before native code is
-     * added; the broad `extended` model remains the all-family ceiling. */
+    /* Current product (including its implemented single stores, VSTR S/D and
+     * whatever the exact read-only decoder already admits) plus exactly one
+     * remaining store family. These side-by-side models rank continuity before
+     * native code is added; `extended` remains the all-family ceiling. */
     sequence_signed_extended_t family_frontier[SEQUENCE_STORE_FAMILY_COUNT];
     sequence_signed_extended_t
         vfp_frontier[SEQUENCE_VFP_STORE_FRONTIER_COUNT];
@@ -26869,9 +26870,13 @@ static bool sequence_signed_observe(sequence_profile_t *profile,
         sequence_signed_store_observe(
             profile, mach, pc, thumb, physical_sequential,
             &store_classification, &profile->signed_store.extended);
+        bool shipped_vstr =
+            store_family == SEQUENCE_STORE_ARM_VFP &&
+            (vfp_store_kind == SEQUENCE_VFP_STORE_VSTR_S ||
+             vfp_store_kind == SEQUENCE_VFP_STORE_VSTR_D);
         if (store_eligible &&
             (store_family == SEQUENCE_STORE_ARM_SINGLE ||
-             store_family == SEQUENCE_STORE_THUMB_SINGLE))
+             store_family == SEQUENCE_STORE_THUMB_SINGLE || shipped_vstr))
             implemented_classification = store_classification;
         sequence_signed_store_observe(
             profile, mach, pc, thumb, physical_sequential,
@@ -28136,7 +28141,7 @@ static void sequence_profile_report_store_model(
     };
     static const char *const VFP_FRONTIERS[
             SEQUENCE_VFP_STORE_FRONTIER_COUNT] = {
-        "all VSTR", "all VSTM/FSTMX"
+        "VSTR shipped", "VSTM/FSTMX"
     };
     const sequence_signed_store_t *store = &profile->signed_store;
     const sequence_signed_extended_t *current = &profile->signed_extended;
@@ -28183,6 +28188,16 @@ static void sequence_profile_report_store_model(
             implemented_hits += store->family_outcomes[family]
                 [SEQUENCE_STORE_DWRITE_HIT];
         }
+    }
+    for (unsigned kind = SEQUENCE_VFP_STORE_VSTR_S;
+         kind <= SEQUENCE_VFP_STORE_VSTR_D; kind++) {
+        const uint64_t *row = store->vfp_kind_outcomes[kind];
+        for (unsigned outcome = 0u;
+             outcome < SEQUENCE_STORE_OUTCOME_COUNT; outcome++)
+            implemented_candidates += row[outcome];
+        implemented_invalid += row[SEQUENCE_STORE_INVALID];
+        implemented_skipped += row[SEQUENCE_STORE_CONDITION_SKIP];
+        implemented_hits += row[SEQUENCE_STORE_DWRITE_HIT];
     }
     for (unsigned length = 1u;
          length <= SEQUENCE_SIGNED_EXTENDED_CAP; length++) {
@@ -28298,7 +28313,7 @@ static void sequence_profile_report_store_model(
                row[SEQUENCE_STORE_TRANSLATION_FAULT],
                row[SEQUENCE_STORE_NON_RAM]);
     }
-    printf("      implemented single-store supported/retirement-eligible="
+    printf("      implemented single-store+VSTR supported/retirement-eligible="
            "%" PRIu64 "/%" PRIu64 " of candidates=%" PRIu64
            " (eligible %.3f%% fetched)\n",
            implemented_supported, implemented_eligible,
@@ -28356,7 +28371,7 @@ static void sequence_profile_report_store_model(
                ? (double)implemented->instructions /
                      (double)implemented->calls : 0.0,
            implemented->maximum);
-    printf("      implemented runner entries current/product/removed="
+    printf("      implemented-store runner entries current/product/removed="
            "%" PRIu64 "/%" PRIu64 "/%" PRIu64 " (%6.3f%% current); "
            "eligible current/+implemented/model+refused=%" PRIu64
            "/%" PRIu64 "/%" PRIu64 "+%" PRIu64 "\n",
@@ -28405,9 +28420,10 @@ static void sequence_profile_report_store_model(
 
     printf("      current-product remaining-store frontier\n");
     printf("        The baseline asks the exact shipping decoder first, so its "
-           "BX/BLX handlers are already present. Each row then adds exactly "
-           "one still-unimplemented store family on the same literal stream; "
-           "this ranks continuity, not speed or code-size cost.\n");
+           "BX/BLX handlers are already present, then adds the shipped "
+           "single stores and VSTR S/D. Each row adds exactly one remaining "
+           "store family on the same literal stream; this ranks continuity, "
+           "not speed or code-size cost.\n");
     printf("        baseline calls/instructions/heads/chains/runner-entries="
            "%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64
            "\n", implemented->calls, implemented->instructions,
@@ -28424,12 +28440,26 @@ static void sequence_profile_report_store_model(
         const sequence_signed_extended_t *frontier =
             &store->family_frontier[family];
         uint64_t family_candidates = 0u;
-        for (unsigned outcome = 0u;
-             outcome < SEQUENCE_STORE_OUTCOME_COUNT; outcome++)
-            family_candidates += store->family_outcomes[family][outcome];
-        uint64_t family_eligible = store->family_outcomes[family]
-            [SEQUENCE_STORE_CONDITION_SKIP] +
-            store->family_outcomes[family][SEQUENCE_STORE_DWRITE_HIT];
+        uint64_t family_eligible = 0u;
+        if (family == SEQUENCE_STORE_ARM_VFP) {
+            for (unsigned kind = SEQUENCE_VFP_STORE_VSTM_S;
+                 kind < SEQUENCE_VFP_STORE_KIND_COUNT; kind++) {
+                const uint64_t *row = store->vfp_kind_outcomes[kind];
+                for (unsigned outcome = 0u;
+                     outcome < SEQUENCE_STORE_OUTCOME_COUNT; outcome++)
+                    family_candidates += row[outcome];
+                family_eligible += row[SEQUENCE_STORE_CONDITION_SKIP] +
+                                   row[SEQUENCE_STORE_DWRITE_HIT];
+            }
+        } else {
+            for (unsigned outcome = 0u;
+                 outcome < SEQUENCE_STORE_OUTCOME_COUNT; outcome++)
+                family_candidates +=
+                    store->family_outcomes[family][outcome];
+            family_eligible = store->family_outcomes[family]
+                [SEQUENCE_STORE_CONDITION_SKIP] +
+                store->family_outcomes[family][SEQUENCE_STORE_DWRITE_HIT];
+        }
         uint64_t frontier_histogram_calls = 0u;
         uint64_t frontier_histogram_instructions = 0u;
         uint64_t frontier_stops = 0u;
@@ -28539,6 +28569,10 @@ static void sequence_profile_report_store_model(
             bool vstr = kind == SEQUENCE_VFP_STORE_VSTR_S ||
                         kind == SEQUENCE_VFP_STORE_VSTR_D;
             if ((selected == SEQUENCE_VFP_STORE_FRONTIER_VSTR) != vstr)
+                continue;
+            /* VSTR is already in the baseline. Retain a zero-increment row
+             * as an audit that selecting it again changes no continuity. */
+            if (selected == SEQUENCE_VFP_STORE_FRONTIER_VSTR)
                 continue;
             const uint64_t *row = store->vfp_kind_outcomes[kind];
             for (unsigned outcome = 0u;
@@ -28656,6 +28690,13 @@ static void sequence_profile_report_indirect_model(
         store_eligible += profile->signed_store.family_outcomes[family]
             [SEQUENCE_STORE_DWRITE_HIT];
     }
+    for (unsigned kind = SEQUENCE_VFP_STORE_VSTR_S;
+         kind <= SEQUENCE_VFP_STORE_VSTR_D; kind++) {
+        store_eligible += profile->signed_store.vfp_kind_outcomes[kind]
+            [SEQUENCE_STORE_CONDITION_SKIP];
+        store_eligible += profile->signed_store.vfp_kind_outcomes[kind]
+            [SEQUENCE_STORE_DWRITE_HIT];
+    }
 
     uint64_t current_eligible =
         profile->signed_outcomes[SEQUENCE_SIGNED_PLAIN] +
@@ -28739,7 +28780,7 @@ static void sequence_profile_report_indirect_model(
            profile->fetched
                ? 100.0 * (double)indirect->incremental_eligible /
                      (double)profile->fetched : 0.0);
-    printf("      implemented-store baseline/audited-indirect "
+    printf("      current-store baseline/audited-indirect "
            "calls/instructions/heads/chains=%" PRIu64 "/%" PRIu64
            "/%" PRIu64 "/%" PRIu64 " -> %" PRIu64 "/%" PRIu64
            "/%" PRIu64 "/%" PRIu64 " (mean %.3f max=%" PRIu64 ")\n",
@@ -28749,7 +28790,7 @@ static void sequence_profile_report_indirect_model(
            model->calls ? (double)model->instructions /
                               (double)model->calls : 0.0,
            model->maximum);
-    printf("      runner entries store-baseline/audited/additional-removed="
+    printf("      runner entries current-store/audited/additional-removed="
            "%" PRIu64 "/%" PRIu64 "/%" PRIu64 " (%6.3f%% baseline); "
            "current/total-removed=%" PRIu64 "/%" PRIu64
            " (%6.3f%% current)\n",
