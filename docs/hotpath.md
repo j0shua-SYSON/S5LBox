@@ -7148,3 +7148,92 @@ near 30 FPS**. It can remove a literal warm-up from about 5.14% of all fetched i
 lookup, decode and signed handler still cost host time, and no physical iPhone has run this change.
 The evidence is strong enough to implement a fail-closed lookup-only refill; it is not strong enough
 to predict even one additional frame per second.
+
+### 2026-08-05: adaptive lookup-only fetch refill retains the coverage and only barely clears the Apple-host cost gate
+
+Commit `715ed21dd6bc13bfdfebbad22c1dc23c08c8869e` implements the preflight above as
+`arm_fetch_cache_try_refill()`. It accepts only the exact current FETCH software-TLB generation,
+virtual tag, privilege and successful translation, then requires the complete 1 KiB translated span
+to resolve through `host_ram` as ordinary RAM. It performs no page-table walk, fault, MMIO read or
+guest-visible access. Every refusal returns zero before guest state changes, leaving `arm_step()` as
+the sole architectural fetch owner. The refill cache remains a host reconstruction and is absent
+from snapshots.
+
+Enabling that helper on every eligible miss was safe and structurally useful, but not fast enough.
+The deliberately pathological all-single-call Apple test fell to 0.609x refill-off on macOS 14 and
+0.560x on macOS 15. The first long representative confirmation was split: macOS 14 had a 1.059x
+paired median with 9/9 wins, while macOS 15 had a 0.996x paired median, 3/9 wins and a 0.999x ratio
+of medians. **That unconditional design was rejected.** A coverage improvement which loses host
+time on one Apple runner is not a product speed optimization.
+
+Commit `f4bb68451b37b354964740fb3a139ac327210c9d` adds a 1,024-entry host-only admission
+predictor keyed by PC, fetch generation, instruction set and privilege. A naturally
+single-instruction refill call skips fifteen repeats before it is probed again. A caller/timebase
+budget of one is not treated as evidence about natural call length, and any call which proves more
+than one instruction becomes admitted. Periodic probing permits changed paths to recover; direct-map
+collisions fail toward another measurement rather than permanent exclusion. The predictor still
+cannot observe or learn from a skipped call.
+
+The read-only `r560-fetch-refill-length-10m` replay applies the product admission decisions to the
+same unconditional call stream without changing the guest. It restores r445 at exactly 7.100 B and
+stops at 7.110 B after 10,000,000 observations: 9,999,489 fetched instructions, 511 interrupt
+entries and zero fetch failures. Unconditional refill finds 513,642 recoveries and removes 434,840
+of 2,560,658 modeled outer runner entries (**16.982%**). Adaptive admission makes 457,256 attempts
+and 56,386 skips. It attempts 24,493 single and 432,763 multi-instruction calls, skips 54,309 single
+and 2,077 multi-instruction calls, and therefore removes 432,763 entries (**16.900%**) while
+retaining **99.522%** of the unconditional reduction.
+
+The recovered call-length distribution also rules out tuning a flattering high threshold:
+
+| Oracle minimum recovered length | removals retained | share of unconditional removal |
+|---:|---:|---:|
+| 2 | 434,840 | 100.000% |
+| 3 | 368,457 | 84.734% |
+| 4 | 314,846 | 72.405% |
+| 10 | 145,472 | 33.454% |
+| 16 | 71,160 | 16.365% |
+
+Those rows are offline upper bounds, not implementable foreknowledge. They show why raising the
+threshold until one synthetic sample looks good would discard most real continuity. The adaptive
+length-two policy instead keeps the firmware benefit and amortizes the known single-call loss.
+
+The replay reports 60 lines ending in `EXACT` (including three `ACCOUNTING-EXACT` lines) and zero
+ending in `MISMATCH`. stderr is empty. The external disk completes 15,626 reads and 469 writes with
+zero failures. No new checkpoint was created. The work image and nonblack CLCD screen remain
+byte-identical at
+`8A59C388C481165F460984926AA5FFB1B72A0E9030216CD0038DE9B3264B79FE` and
+`1EF63FFE3EEFD976416E17120A36BA074BF295EA0955D716E2D345FCC5EA0A9E`.
+
+Hosted timing required a second correction in methodology. The three-arm benchmark put an
+interpreter run between off and adaptive in one third of repetitions, weakening its claim to be
+paired. Commit `f2c8bc3ad01fc549957707af79e25df3e45410fb` adds a focused workflow which builds
+only `jitbench`, alternates adjacent `off -> adaptive` and `adaptive -> off` pairs, and still requires
+exact complete-machine snapshots and exact refill accounting. This makes the confirmation both
+faster and less exposed to runner drift. Two independent 9 x 200,000,110-instruction runs give:
+
+| Apple arm64 runner | adjacent pairs | paired median | geometric mean | min--max | wins |
+|---|---:|---:|---:|---:|---:|
+| macOS 14 | 18 | **1.091x** | **1.0861x** | 0.975x--1.281x | 17/18 |
+| macOS 15 | 18 | **1.026x** | **1.0014x** | 0.870x--1.060x | 12/18 |
+
+The macOS 14 result is a defensible hosted speed win. The macOS 15 result is not: its geometric
+mean is only 0.14% above refill-off and its spread includes a 13% loss. The honest reading is
+**neutral to slightly positive under runner noise**, not "2.6% faster." Because the central result
+does not regress on either Apple host and the exact firmware observer retains 99.522% of the entry
+reduction, adaptive refill remains enabled. It should be disabled again if a physical-device or
+stable-machine measurement shows a repeatable loss.
+
+Focused break-even run `30994602023` is green on macOS 14/15. The two adjacent confirmations,
+`30994873385` and `30995187485`, are also green on both hosts. Exact implementation SHA
+`f2c8bc3ad01fc549957707af79e25df3e45410fb` is green in all eight core jobs as run
+`30994857220`; iOS run `30994870032` builds, fake-signs and packages the app. The strict local suite
+is 60/60 green, and the commits contain no co-author trailers.
+
+Brutal status: **this is substantial and carefully measured hot-path progress, but it does not show
+that 30 FPS is close**. The strongest real-stream statement is 432,763 fewer modeled outer entries
+in one 10-million-instruction window. The strongest host-timing statement is an 8.61% geometric-mean
+synthetic gain on macOS 14 and effectively zero on macOS 15. Neither is end-to-end firmware time,
+scanout cadence, UIKit presentation time or physical-iPhone FPS. This exact IPA has not run on the
+phone here; the only trustworthy device observation remains roughly 0--4 FPS. No honest multiplier
+turns these measurements into 30 FPS. The next authority is an exact-build sustained device trace;
+until transport is available, broader end-to-end bottleneck work remains necessary.
