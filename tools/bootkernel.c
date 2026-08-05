@@ -24843,6 +24843,42 @@ typedef struct {
     bool multi_seen;
 } sequence_refill_predictor_entry_t;
 
+/* Read-only replay of the product decoder cache field that matters to the
+ * known-negative bypass. A rejected instruction is bypassable only when the
+ * same direct-mapped slot still owns its one-instruction negative witness;
+ * merely ending a modeled native call at an ineligible instruction is not
+ * enough. Positive head publications are replayed too, so collisions can evict
+ * a prior negative instead of flattering its reuse rate. */
+#define SEQUENCE_NEGATIVE_CACHE_SLOTS 1024u
+_Static_assert((SEQUENCE_NEGATIVE_CACHE_SLOTS &
+                (SEQUENCE_NEGATIVE_CACHE_SLOTS - 1u)) == 0u,
+               "negative-cache replay requires a power-of-two slot count");
+typedef struct {
+    const uint8_t *fetch_host;
+    uint32_t pc;
+    uint32_t fetch_gen;
+    uint32_t raw;
+    bool fetch_priv;
+    bool thumb;
+    bool valid;
+    bool supported;
+} sequence_negative_cache_entry_t;
+
+typedef struct {
+    sequence_negative_cache_entry_t entries[SEQUENCE_NEGATIVE_CACHE_SLOTS];
+    uint64_t modeled_rejected_boundaries;
+    uint64_t rejected_boundaries;
+    uint64_t adaptive_skipped_boundaries;
+    uint64_t ready_boundaries;
+    uint64_t warm_hits;
+    uint64_t cold_or_displaced;
+    uint64_t fetch_unready;
+    uint64_t positive_publications;
+    uint64_t positive_unknown_clobbers;
+    uint64_t negative_publications;
+    uint64_t negative_evictions;
+} sequence_negative_cache_model_t;
+
 /* Side-by-side observer for the product's extended total invocation. The
  * existing signed_* fields below retain the historical sixteen-instruction
  * model verbatim, so one literal replay can compare the boundary without
@@ -24853,6 +24889,7 @@ typedef struct {
     uint64_t length_instructions[SEQUENCE_SIGNED_EXTENDED_CAP + 1u];
     uint64_t gate_refusals[SEQUENCE_SIGNED_GATE_COUNT];
     uint64_t stops[SEQUENCE_SIGNED_STOP_COUNT];
+    uint64_t ineligible_stop_outcomes[SEQUENCE_SIGNED_OUTCOME_COUNT];
     uint64_t calls;
     uint64_t instructions;
     uint64_t blocks;
@@ -24997,6 +25034,7 @@ typedef struct {
      * fetch refill enabled. Keeping the former product model immediately
      * above provides a same-stream control for call-continuity accounting. */
     sequence_signed_extended_t implemented_fetch_refill;
+    sequence_negative_cache_model_t known_negative_cache;
     sequence_refill_predictor_entry_t
         fetch_refill_predictor[SEQUENCE_REFILL_PREDICTOR_SLOTS];
     /* Current product (including its implemented single stores, VSTR S/D,
@@ -27845,6 +27883,136 @@ static sequence_signed_gate_t sequence_signed_entry_budget(
                    : SEQUENCE_SIGNED_GATE_TIMEBASE;
 }
 
+static unsigned sequence_negative_cache_index(uint32_t pc, bool thumb,
+                                              uint32_t generation) {
+    uint32_t key = pc >> (thumb ? 1u : 2u);
+    key ^= generation * UINT32_C(0x9e3779b1);
+    if (thumb) key ^= UINT32_C(0x85ebca6b);
+    return key & (SEQUENCE_NEGATIVE_CACHE_SLOTS - 1u);
+}
+
+static bool sequence_negative_cache_ready(
+        const sequence_profile_t *profile, const s5l8900_t *mach,
+        uint32_t pc, bool thumb) {
+    uint64_t budget = 0u;
+    sequence_signed_stop_t budget_stop = SEQUENCE_SIGNED_STOP_CAP;
+    if (!profile || !mach || !profile->signed_fetch_probe.pending ||
+        profile->signed_fetch_probe.pending_outcome !=
+            SEQUENCE_FETCH_PREFLIGHT_READY)
+        return false;
+    return sequence_signed_entry_budget(
+               profile, mach, pc, thumb, SEQUENCE_SIGNED_EXTENDED_CAP,
+               &budget, &budget_stop, false, NULL) ==
+           SEQUENCE_SIGNED_GATE_OK;
+}
+
+static bool sequence_negative_cache_matches(
+        const sequence_negative_cache_entry_t *entry,
+        const arm_cpu_t *cpu, uint32_t pc, uint32_t raw, bool thumb,
+        bool priv) {
+    return entry && entry->valid && !entry->supported &&
+           entry->fetch_host == cpu->fetch_host && entry->pc == pc &&
+           entry->fetch_gen == cpu->fetch_gen && entry->raw == raw &&
+           entry->fetch_priv == priv && entry->thumb == thumb;
+}
+
+static void sequence_negative_cache_publish(
+        sequence_negative_cache_model_t *model, const arm_cpu_t *cpu,
+        uint32_t pc, uint32_t raw, bool thumb, bool supported) {
+    bool priv;
+    unsigned slot;
+    sequence_negative_cache_entry_t *entry;
+    if (!model || !cpu || !cpu->fetch_host) return;
+    priv = (cpu->cpsr & ARM_CPSR_MODE_MASK) != ARM_MODE_USR;
+    slot = sequence_negative_cache_index(pc, thumb, cpu->fetch_gen);
+    entry = &model->entries[slot];
+    if (entry->valid && !entry->supported &&
+        (supported || entry->fetch_host != cpu->fetch_host ||
+         entry->pc != pc || entry->fetch_gen != cpu->fetch_gen ||
+         entry->raw != raw || entry->fetch_priv != priv ||
+         entry->thumb != thumb))
+        model->negative_evictions++;
+    entry->fetch_host = cpu->fetch_host;
+    entry->pc = pc;
+    entry->fetch_gen = cpu->fetch_gen;
+    entry->raw = raw;
+    entry->fetch_priv = priv;
+    entry->thumb = thumb;
+    entry->valid = true;
+    entry->supported = supported;
+    if (supported)
+        model->positive_publications++;
+    else
+        model->negative_publications++;
+}
+
+static void sequence_negative_cache_clobber(
+        sequence_negative_cache_model_t *model, uint32_t pc, bool thumb,
+        uint32_t generation) {
+    unsigned slot;
+    sequence_negative_cache_entry_t *entry;
+    if (!model) return;
+    slot = sequence_negative_cache_index(pc, thumb, generation);
+    entry = &model->entries[slot];
+    if (entry->valid && !entry->supported)
+        model->negative_evictions++;
+    memset(entry, 0, sizeof *entry);
+    entry->pc = pc;
+    entry->fetch_gen = generation;
+    entry->thumb = thumb;
+    entry->valid = true;
+    entry->supported = true;
+    model->positive_unknown_clobbers++;
+}
+
+static void sequence_negative_cache_note_ineligible(
+        sequence_profile_t *profile, const s5l8900_t *mach,
+        sequence_negative_cache_model_t *model, uint32_t pc, uint32_t raw,
+        bool thumb, sequence_signed_outcome_t outcome,
+        bool ended_positive_call, bool product_call_admitted) {
+    bool ready;
+    bool priv;
+    unsigned slot;
+    bool hit = false;
+    if (!profile || !mach || !model) return;
+
+    ready = sequence_negative_cache_ready(profile, mach, pc, thumb);
+    priv = (mach->cpu.cpsr & ARM_CPSR_MODE_MASK) != ARM_MODE_USR;
+    slot = sequence_negative_cache_index(pc, thumb, mach->cpu.fetch_gen);
+    if (ended_positive_call && outcome == SEQUENCE_SIGNED_REJECTED) {
+        model->modeled_rejected_boundaries++;
+        if (!product_call_admitted) {
+            model->adaptive_skipped_boundaries++;
+        } else {
+            model->rejected_boundaries++;
+            if (!ready) {
+                model->fetch_unready++;
+            } else {
+                model->ready_boundaries++;
+                hit = sequence_negative_cache_matches(
+                    &model->entries[slot], &mach->cpu, pc, raw, thumb, priv);
+                if (hit)
+                    model->warm_hits++;
+                else
+                    model->cold_or_displaced++;
+            }
+        }
+    }
+
+    /* If the bypass misses, the ordinary next runner entry selects this head
+     * before arm_step(). A rejected head publishes a one-instruction negative;
+     * a dynamic read/write guard remains a supported decoded head. Requiring a
+     * pre-profile READY fetch makes this a conservative subset of refill cases. */
+    if (ready && !hit &&
+        (!ended_positive_call || product_call_admitted))
+        sequence_negative_cache_publish(
+            model, &mach->cpu, pc, raw, thumb,
+            outcome != SEQUENCE_SIGNED_REJECTED);
+    else if (!ready || (ended_positive_call && !product_call_admitted))
+        sequence_negative_cache_clobber(
+            model, pc, thumb, mach->cpu.tlb_gen);
+}
+
 static void sequence_signed_extended_observe(
         sequence_profile_t *profile, const s5l8900_t *mach,
         uint32_t pc, bool thumb, bool physical_sequential,
@@ -27934,10 +28102,11 @@ static void sequence_signed_extended_observe(
  * unable to flatter or rewrite the current-product accounting. */
 static void sequence_signed_store_observe_tagged(
         sequence_profile_t *profile, const s5l8900_t *mach,
-        uint32_t pc, bool thumb, bool physical_sequential,
+        uint32_t pc, uint32_t raw, bool thumb, bool physical_sequential,
         const sequence_signed_classification_t *classification,
         sequence_signed_extended_t *model, bool fp_arithmetic,
-        bool allow_fetch_refill) {
+        bool allow_fetch_refill,
+        sequence_negative_cache_model_t *negative_cache) {
     if (!profile || !mach || !classification || !model) return;
     bool chained_head = false;
 
@@ -27965,11 +28134,24 @@ static void sequence_signed_store_observe_tagged(
                       classification->outcome == SEQUENCE_SIGNED_READ_HIT;
     if (!retireable || !classification->handler_records ||
         classification->handler_records > SEQUENCE_SIGNED_RECORD_CAP) {
+        bool ended_positive_call = model->call_length != 0u;
+        bool product_call_admitted =
+            !model->call_fetch_refilled ||
+            model->call_refill_adaptive_allowed;
+        if (ended_positive_call &&
+            classification->outcome < SEQUENCE_SIGNED_OUTCOME_COUNT)
+            model->ineligible_stop_outcomes[classification->outcome]++;
+        if (negative_cache)
+            sequence_negative_cache_note_ineligible(
+                profile, mach, negative_cache, pc, raw, thumb,
+                classification->outcome, ended_positive_call,
+                product_call_admitted);
         sequence_signed_store_model_close(
             model, SEQUENCE_SIGNED_STOP_INELIGIBLE);
         return;
     }
 
+    bool new_call = false;
     if (!model->call_length) {
         uint64_t budget = 0u;
         sequence_signed_stop_t budget_stop = SEQUENCE_SIGNED_STOP_CAP;
@@ -28018,10 +28200,24 @@ static void sequence_signed_store_observe_tagged(
         model->call_fp_operations = 0u;
         model->head_fp_operations = 0u;
         model->head_length = 0u;
+        new_call = true;
     } else if (chained_head) {
         model->call_blocks++;
         model->head_fp_operations = 0u;
         model->head_length = 0u;
+    }
+
+    if (negative_cache && (new_call || chained_head)) {
+        bool product_call_admitted =
+            !model->call_fetch_refilled ||
+            model->call_refill_adaptive_allowed;
+        if (product_call_admitted &&
+            sequence_negative_cache_ready(profile, mach, pc, thumb))
+            sequence_negative_cache_publish(
+                negative_cache, &mach->cpu, pc, raw, thumb, true);
+        else
+            sequence_negative_cache_clobber(
+                negative_cache, pc, thumb, mach->cpu.tlb_gen);
     }
 
     if (fp_arithmetic) {
@@ -28071,21 +28267,22 @@ static void sequence_signed_store_observe(
         const sequence_signed_classification_t *classification,
         sequence_signed_extended_t *model) {
     sequence_signed_store_observe_tagged(
-        profile, mach, pc, thumb, physical_sequential,
-        classification, model, false, false);
+        profile, mach, pc, 0u, thumb, physical_sequential,
+        classification, model, false, false, NULL);
 }
 
 static void sequence_signed_store_observe_fetch_refill(
         sequence_profile_t *profile, const s5l8900_t *mach,
-        uint32_t pc, bool thumb, bool physical_sequential,
+        uint32_t pc, uint32_t raw, bool thumb, bool physical_sequential,
         const sequence_signed_classification_t *classification,
         sequence_signed_extended_t *model) {
     if (profile && model)
         model->fetch_refill_predictor =
             profile->signed_store.fetch_refill_predictor;
     sequence_signed_store_observe_tagged(
-        profile, mach, pc, thumb, physical_sequential,
-        classification, model, false, true);
+        profile, mach, pc, raw, thumb, physical_sequential,
+        classification, model, false, true,
+        profile ? &profile->signed_store.known_negative_cache : NULL);
 }
 
 static bool sequence_signed_observe(sequence_profile_t *profile,
@@ -28150,7 +28347,7 @@ static bool sequence_signed_observe(sequence_profile_t *profile,
         /* Observe the refill arm before the old product control consumes the
          * one pre-profile TLB verdict. Both otherwise see identical input. */
         sequence_signed_store_observe_fetch_refill(
-            profile, mach, pc, thumb, physical_sequential,
+            profile, mach, pc, raw, thumb, physical_sequential,
             &implemented_classification,
             &profile->signed_store.implemented_fetch_refill);
         sequence_signed_store_observe(
@@ -28215,10 +28412,10 @@ static bool sequence_signed_observe(sequence_profile_t *profile,
         else
             vfp_arith_classification = implemented_classification;
         sequence_signed_store_observe_tagged(
-            profile, mach, pc, thumb, physical_sequential,
+            profile, mach, pc, 0u, thumb, physical_sequential,
             &vfp_arith_classification,
             &profile->signed_post_store.vfp_arith_mode_admitted,
-            vfp_arith_session, false);
+            vfp_arith_session, false, NULL);
         for (unsigned family = 0u;
              family < SEQUENCE_STORE_FAMILY_COUNT; family++) {
             if (family == SEQUENCE_STORE_ARM_SINGLE ||
@@ -29603,6 +29800,7 @@ static void sequence_profile_report_store_model(
     uint64_t fetch_refill_recovered_histogram_instructions = 0u;
     uint64_t fetch_refill_stops = 0u;
     uint64_t fetch_refill_gate_refusals = 0u;
+    uint64_t fetch_refill_ineligible_outcomes = 0u;
     uint64_t current_eligible =
         profile->signed_outcomes[SEQUENCE_SIGNED_PLAIN] +
         profile->signed_outcomes[SEQUENCE_SIGNED_READ_SKIPPED] +
@@ -29698,6 +29896,9 @@ static void sequence_profile_report_store_model(
         implemented_gate_refusals += implemented->gate_refusals[i];
         fetch_refill_gate_refusals += fetch_refill->gate_refusals[i];
     }
+    for (unsigned i = 0u; i < SEQUENCE_SIGNED_OUTCOME_COUNT; i++)
+        fetch_refill_ineligible_outcomes +=
+            fetch_refill->ineligible_stop_outcomes[i];
 
     uint64_t proposed_supported = store->candidates >= invalid
         ? store->candidates - invalid : 0u;
@@ -29832,6 +30033,8 @@ static void sequence_profile_report_store_model(
         implemented_entries >= adaptive_entries &&
         fetch_refill->fetch_refill_call_maximum <=
             SEQUENCE_SIGNED_EXTENDED_CAP &&
+        fetch_refill_ineligible_outcomes ==
+            fetch_refill->stops[SEQUENCE_SIGNED_STOP_INELIGIBLE] &&
         fetch_refill->maximum <= SEQUENCE_SIGNED_EXTENDED_CAP;
 
     printf("\n    capability-gated plain-RAM store architecture model\n");
@@ -30144,6 +30347,66 @@ static void sequence_profile_report_store_model(
                fetch_refill->stops[SEQUENCE_SIGNED_STOP_FETCH_BLOCK],
                fetch_refill->stops[SEQUENCE_SIGNED_STOP_INELIGIBLE],
                fetch_refill->stops[SEQUENCE_SIGNED_STOP_OBSERVER]);
+        printf("      ineligible-stop outcomes rejected/plain/read-skip/"
+               "read-hit/read-miss/read-guard=%" PRIu64 "/%" PRIu64
+               "/%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64
+               "  %s\n",
+               fetch_refill->ineligible_stop_outcomes[
+                   SEQUENCE_SIGNED_REJECTED],
+               fetch_refill->ineligible_stop_outcomes[SEQUENCE_SIGNED_PLAIN],
+               fetch_refill->ineligible_stop_outcomes[
+                   SEQUENCE_SIGNED_READ_SKIPPED],
+               fetch_refill->ineligible_stop_outcomes[
+                   SEQUENCE_SIGNED_READ_HIT],
+               fetch_refill->ineligible_stop_outcomes[
+                   SEQUENCE_SIGNED_READ_MISS],
+               fetch_refill->ineligible_stop_outcomes[
+                   SEQUENCE_SIGNED_READ_GUARD],
+               fetch_refill_ineligible_outcomes ==
+                       fetch_refill->stops[SEQUENCE_SIGNED_STOP_INELIGIBLE]
+                   ? "EXACT" : "MISMATCH");
+        {
+            const sequence_negative_cache_model_t *negative =
+                &store->known_negative_cache;
+            bool negative_exact =
+                negative->rejected_boundaries +
+                        negative->adaptive_skipped_boundaries ==
+                    negative->modeled_rejected_boundaries &&
+                negative->ready_boundaries + negative->fetch_unready ==
+                    negative->rejected_boundaries &&
+                negative->warm_hits + negative->cold_or_displaced ==
+                    negative->ready_boundaries &&
+                negative->modeled_rejected_boundaries ==
+                    fetch_refill->ineligible_stop_outcomes[
+                        SEQUENCE_SIGNED_REJECTED];
+            printf("      known-negative cache replay modeled-rejected/"
+                   "adaptive-admitted/skipped=%" PRIu64 "/%" PRIu64
+                   "/%" PRIu64 " ready/unready=%" PRIu64 "/%" PRIu64
+                   " warm-hit/cold-or-displaced=%" PRIu64 "/%" PRIu64
+                   " (%.3f%% ready hit)  %s\n",
+                   negative->modeled_rejected_boundaries,
+                   negative->rejected_boundaries,
+                   negative->adaptive_skipped_boundaries,
+                   negative->ready_boundaries, negative->fetch_unready,
+                   negative->warm_hits, negative->cold_or_displaced,
+                   negative->ready_boundaries
+                       ? 100.0 * (double)negative->warm_hits /
+                             (double)negative->ready_boundaries : 0.0,
+                   negative_exact ? "ACCOUNTING-EXACT" : "MISMATCH");
+            printf("      cache publications positive/unknown-clobber/negative "
+                   "and negative-evictions=%" PRIu64 "/%" PRIu64
+                   "/%" PRIu64 "/%" PRIu64 "\n",
+                   negative->positive_publications,
+                   negative->positive_unknown_clobbers,
+                   negative->negative_publications,
+                   negative->negative_evictions);
+            printf("      This direct-map replay requires a pre-profile READY "
+                   "identity for a hit, overwrites every modeled positive "
+                   "head, and clobbers ambiguous refill heads. It is a "
+                   "conservative warm-cache applicability "
+                   "estimate, not an executed native counter, elapsed speed, "
+                   "firmware FPS or phone FPS.\n");
+        }
     }
     printf("      current/broad-ceiling calls/instructions/heads/chains="
            "%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64

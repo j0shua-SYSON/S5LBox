@@ -7237,3 +7237,73 @@ scanout cadence, UIKit presentation time or physical-iPhone FPS. This exact IPA 
 phone here; the only trustworthy device observation remains roughly 0--4 FPS. No honest multiplier
 turns these measurements into 30 FPS. The next authority is an exact-build sustained device trace;
 until transport is available, broader end-to-end bottleneck work remains necessary.
+
+### 2026-08-05: an exact negative witness removes redundant native re-entry, but not enough for 30 FPS
+
+Commit `9bb21f12a5a536b0a249671b0b09bfbe85205038` removes one systemic losing path without
+adding guest semantics. When a positive graph invocation ends before its budget at an unsupported
+instruction, the signed engine returns a host-only hint only if its direct-mapped decoder entry is
+still a valid negative for the exact fetch pointer, PC, generation, privilege, instruction state and
+one-instruction raw witness. The machine ticks the completed batch first, repeats its device/timebase
+gate, then revalidates the complete negative witness before falling directly into the one literal
+`arm_step()`. An interrupt, input edge, dirty device level, fetch change or changed instruction byte
+cancels the shortcut. The policy and counter are absent from snapshots.
+
+The same executable can disable the policy, so the Apple test alternates adjacent off/on arms with
+no interpreter run between them. Its ten-instruction loop contains eight signed ALU instructions,
+one cached interpreter-only MUL and one signed branch. Each 200-million-instruction arm requires an
+exact complete-machine snapshot, retires 180 million instructions in signed text and encounters 20
+million unsupported boundaries. The product arm validates 19,611,650 bypasses; this deliberately
+98.058% warm-cache workload is a cost isolation, not a firmware mix.
+
+| Apple arm64 runner | repetitions | ratio of medians | paired median | min--max | wins |
+|---|---:|---:|---:|---:|---:|
+| macOS 14 | 9 | **1.048x** | **1.061x** | 0.928x--1.178x | 7/9 |
+| macOS 15 | 9 | **1.107x** | **1.128x** | 0.981x--1.212x | 7/9 |
+
+Those results prove that the redundant probe has meaningful Apple-host cost. They do **not** say
+that firmware or an iPhone becomes 4.8%--12.8% faster: the synthetic loop makes the boundary almost
+three times denser than the exact firmware replay and omits real framebuffer/UIKit work.
+
+The first firmware accounting treated every ineligible call end as a candidate. That was wrong.
+`r564-known-negative-adaptive-lower-bound-10m` corrects it by splitting the exact implemented/refill
+model's 651,725 ineligible stops by decoder result, then replaying the product's 1,024-slot cache key
+and complete one-instruction negative identity. Every modeled positive head overwrites its slot; a
+refill head whose exact host pointer is unavailable clobbers the slot instead of being ignored. It
+also discounts every rejected boundary reached by a refill call which the shipped adaptive predictor
+would skip, including ambiguous multi-instruction continuations. Those choices charge uncertainty
+against the optimization. The read-only model still assumes the existing warm-graph continuity
+ceiling, so this is a conservative applicability lower bound rather than an executed native counter.
+
+| exact 7.100--7.110 B firmware boundary | observations | share |
+|---|---:|---:|
+| all ineligible modeled call ends | 651,725 | 6.517% of observations |
+| decoder-rejected boundaries | 530,817 | 81.450% of ineligible ends |
+| supported read miss / read guard | 120,827 / 81 | cannot be negative bypasses |
+| adaptive-skipped rejected boundaries | 42,472 | conservatively excluded |
+| adaptive-admitted rejected boundaries | 488,345 | 92.000% of rejected boundaries |
+| exact warm negative hits | **288,090** | **58.993% of admitted boundaries** |
+| cold or displaced negatives | 200,255 | 41.007% of admitted boundaries |
+| warm hits versus all observations | **288,090 / 10,000,000** | **2.881%** |
+| warm hits versus adaptive modeled runner entries | **288,090 / 2,127,895** | **13.539%** |
+
+The replay restores the retained r445 checkpoint at exactly 7.100 B, stops at 7.110 B and creates no
+new snapshot. It exits zero with empty stderr. All 62 case-sensitive accounting verdicts end in
+`EXACT` (including the accounting-exact rows), none ends in `MISMATCH`, and the 9,999,489 fetched
+instructions plus 511 interrupt entries account for all 10 million observations. Its work image and
+nonblack CLCD screen remain byte-identical at
+`8A59C388C481165F460984926AA5FFB1B72A0E9030216CD0038DE9B3264B79FE` and
+`1EF63FFE3EEFD976416E17120A36BA074BF295EA0955D716E2D345FCC5EA0A9E`.
+
+Focused Apple run `30997713569` succeeds on macOS 14 and 15. Exact implementation core run
+`30997692642` is green in all eight jobs, and iOS run `30997692975` builds, fake-signs and packages
+the app. The strict local suite is 60/60 green. No commit contains a co-author trailer.
+
+Brutal status: **this is a real redundant-host-work reduction, not a route from 0--4 FPS to 30
+FPS**. Its conservative firmware hit density is only 29.38% of the synthetic benchmark's density.
+Even the non-authoritative linear sanity check scales the Apple ratios to roughly 1.014x--1.038x, and workload
+costs, Apple A9 behavior, framebuffer publication and UIKit make that unsuitable as a device
+forecast. The only trustworthy phone result therefore remains roughly 0--4 FPS. The fresh IPA is
+worth testing for regression and a small sustained gain; expecting 30 FPS from this change would be
+dishonest. A physical exact-build trace remains the authority, and a much larger end-to-end lever is
+still required.
