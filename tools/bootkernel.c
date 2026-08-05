@@ -25042,7 +25042,75 @@ typedef struct {
     sequence_signed_extended_t family[SEQUENCE_POST_STORE_FAMILY_COUNT];
     uint64_t outcomes[SEQUENCE_POST_STORE_FAMILY_COUNT]
                      [SEQUENCE_POST_STORE_OUTCOME_COUNT];
+    /* A separate subset frontier because arithmetic is also part of the broad
+     * VFP-compute ceiling above. Keeping it outside `family[]` lets one replay
+     * retain both answers instead of assigning each instruction to only one
+     * of two overlapping rows. */
+    sequence_signed_extended_t vfp_arith_mode_admitted;
+    uint64_t vfp_arith_outcomes[SEQUENCE_POST_STORE_OUTCOME_COUNT];
 } sequence_signed_post_store_t;
+
+typedef enum {
+    SEQUENCE_VFP_ARITH_MLA = 0,
+    SEQUENCE_VFP_ARITH_MUL,
+    SEQUENCE_VFP_ARITH_ADD_SUB,
+    SEQUENCE_VFP_ARITH_DIV,
+    SEQUENCE_VFP_ARITH_UNSUPPORTED,
+    SEQUENCE_VFP_ARITH_FAMILY_COUNT
+} sequence_vfp_arith_family_t;
+
+typedef enum {
+    SEQUENCE_VFP_ARITH_INVALID = 0,
+    SEQUENCE_VFP_ARITH_CONDITION_SKIP,
+    SEQUENCE_VFP_ARITH_ACCESS_GUARD,
+    SEQUENCE_VFP_ARITH_FPSCR_LEN,
+    SEQUENCE_VFP_ARITH_FPSCR_ENABLES,
+    SEQUENCE_VFP_ARITH_ADMITTED,
+    SEQUENCE_VFP_ARITH_OUTCOME_COUNT
+} sequence_vfp_arith_outcome_t;
+
+typedef enum {
+    SEQUENCE_FP_ZERO = 0,
+    SEQUENCE_FP_SUBNORMAL,
+    SEQUENCE_FP_NORMAL,
+    SEQUENCE_FP_INFINITY,
+    SEQUENCE_FP_QNAN,
+    SEQUENCE_FP_SNAN,
+    SEQUENCE_FP_CLASS_COUNT
+} sequence_fp_class_t;
+
+/* Read-only pre/post census for the VFPv2 three-operand arithmetic group.
+ * `mode_admitted` means only that the literal interpreter's architectural
+ * access and FPSCR gates allow the instruction. It is deliberately not named
+ * "native exact": that verdict requires the separate AArch64 semantic oracle.
+ * The pending record observes what the literal arm_step() actually produced;
+ * it never changes the CPU or clears sticky exception state. */
+typedef struct {
+    uint64_t outcomes[SEQUENCE_VFP_ARITH_FAMILY_COUNT]
+                     [SEQUENCE_VFP_ARITH_OUTCOME_COUNT];
+    uint64_t precision[SEQUENCE_VFP_ARITH_FAMILY_COUNT][2u];
+    uint64_t mode_control[4u][4u];
+    uint64_t simple_inputs[4u][4u];
+    uint64_t simple_results[4u][4u];
+    uint64_t operand_classes[SEQUENCE_FP_CLASS_COUNT];
+    uint64_t operand_masks[1u << SEQUENCE_FP_CLASS_COUNT];
+    uint64_t result_classes[SEQUENCE_FP_CLASS_COUNT];
+    uint64_t pre_sticky_flags[1u << 6];
+    uint64_t newly_visible_flags[1u << 6];
+    uint64_t post_status[4u];
+    uint64_t post_not_literal;
+    uint64_t pending_abandoned;
+    uint32_t pending_fpscr;
+    uint32_t pending_pc;
+    uint32_t pending_raw;
+    uint8_t pending_rd;
+    uint8_t pending_width;
+    uint8_t pending_rounding;
+    uint8_t pending_control;
+    uint8_t pending_operand_mask;
+    bool pending_simple_inputs;
+    bool pending;
+} sequence_vfp_arith_t;
 
 static const char *const SEQUENCE_CLASS_NAMES[SEQUENCE_CLASS_COUNT] = {
     "ARM data-processing", "ARM data-processing -> pc", "ARM B/BL",
@@ -25267,6 +25335,7 @@ typedef struct {
     sequence_signed_store_t signed_store;
     sequence_signed_indirect_t signed_indirect;
     sequence_signed_post_store_t signed_post_store;
+    sequence_vfp_arith_t vfp_arith;
 
     bool have_previous;
     bool previous_thumb;
@@ -25582,6 +25651,12 @@ typedef struct {
 
 static bool sequence_vfp_guard_passes(const arm_cpu_t *cpu, uint32_t insn);
 static bool sequence_vfp_memory(uint32_t insn);
+static void sequence_post_store_admit(
+        sequence_signed_classification_t *classification,
+        sequence_signed_outcome_t outcome);
+static void sequence_vfp_arith_note_post_step(
+        sequence_vfp_arith_t *model, const arm_cpu_t *cpu,
+        bool literal_step, arm_status_t status);
 
 typedef struct {
     uint32_t blocks[SEQUENCE_STORE_BLOCK_CAP];
@@ -25798,8 +25873,12 @@ armed:
 }
 
 static void sequence_profile_note_post_step(sequence_profile_t *profile,
-                                            bool literal_step) {
+                                            const arm_cpu_t *cpu,
+                                            bool literal_step,
+                                            arm_status_t status) {
     if (!profile || !profile->enabled) return;
+    sequence_vfp_arith_note_post_step(
+        &profile->vfp_arith, cpu, literal_step, status);
     sequence_signed_store_t *model = &profile->signed_store;
     if (!model->validation_armed) return;
     g_sequence_write_capture.armed = false;
@@ -26528,6 +26607,227 @@ static bool sequence_vfp_guard_passes(const arm_cpu_t *cpu, uint32_t insn) {
             return (cpu->vfp_fpscr & ARM_FPSCR_LEN) == 0u;
     }
     return true;
+}
+
+typedef struct {
+    sequence_vfp_arith_family_t family;
+    sequence_vfp_arith_outcome_t outcome;
+    sequence_fp_class_t operands[3u];
+    unsigned operand_count;
+    unsigned rd;
+    uint8_t operand_mask;
+    bool dbl;
+} sequence_vfp_arith_classification_t;
+
+static sequence_fp_class_t sequence_fp32_class(uint32_t value) {
+    uint32_t exponent = (value >> 23) & UINT32_C(0xff);
+    uint32_t fraction = value & UINT32_C(0x007fffff);
+    if (!exponent)
+        return fraction ? SEQUENCE_FP_SUBNORMAL : SEQUENCE_FP_ZERO;
+    if (exponent != UINT32_C(0xff)) return SEQUENCE_FP_NORMAL;
+    if (!fraction) return SEQUENCE_FP_INFINITY;
+    return (fraction & UINT32_C(0x00400000)) != 0u
+        ? SEQUENCE_FP_QNAN : SEQUENCE_FP_SNAN;
+}
+
+static sequence_fp_class_t sequence_fp64_class(uint64_t value) {
+    uint64_t exponent = (value >> 52) & UINT64_C(0x7ff);
+    uint64_t fraction = value & UINT64_C(0x000fffffffffffff);
+    if (!exponent)
+        return fraction ? SEQUENCE_FP_SUBNORMAL : SEQUENCE_FP_ZERO;
+    if (exponent != UINT64_C(0x7ff)) return SEQUENCE_FP_NORMAL;
+    if (!fraction) return SEQUENCE_FP_INFINITY;
+    return (fraction & UINT64_C(0x0008000000000000)) != 0u
+        ? SEQUENCE_FP_QNAN : SEQUENCE_FP_SNAN;
+}
+
+static bool sequence_vfp_simple_class(sequence_fp_class_t cls) {
+    return cls == SEQUENCE_FP_ZERO || cls == SEQUENCE_FP_NORMAL;
+}
+
+/* Classify the VFPv2 three-operand arithmetic group against the literal
+ * interpreter's real architectural gates. No arithmetic is executed here.
+ * Directed rounding is admitted: vfp_execute() implements it by temporarily
+ * adopting FPSCR.RMode on the host. FZ/DN are likewise result semantics, not
+ * refusal gates. */
+static bool sequence_vfp_arith_classify(
+        const arm_cpu_t *cpu, uint32_t insn,
+        sequence_vfp_arith_classification_t *result) {
+    if (!cpu || !result ||
+        (insn & UINT32_C(0x0f000e10)) != UINT32_C(0x0e000a00))
+        return false;
+
+    unsigned op = (((insn >> 23) & 1u) << 2) |
+                  (((insn >> 21) & 1u) << 1) |
+                  ((insn >> 20) & 1u);
+    if (op == 7u) return false;
+
+    memset(result, 0, sizeof *result);
+    if (op <= 1u) result->family = SEQUENCE_VFP_ARITH_MLA;
+    else if (op == 2u) result->family = SEQUENCE_VFP_ARITH_MUL;
+    else if (op == 3u) result->family = SEQUENCE_VFP_ARITH_ADD_SUB;
+    else if (op == 4u) result->family = SEQUENCE_VFP_ARITH_DIV;
+    else result->family = SEQUENCE_VFP_ARITH_UNSUPPORTED;
+    result->outcome = SEQUENCE_VFP_ARITH_INVALID;
+    result->dbl = (insn & (1u << 8)) != 0u;
+
+    unsigned condition = insn >> 28;
+    bool encoding_valid = op <= 4u &&
+        !(op == 4u && (insn & (1u << 6)) != 0u);
+    if (result->dbl &&
+        (insn & ((1u << 22) | (1u << 7) | (1u << 5))) != 0u)
+        encoding_valid = false; /* d16-d31 do not exist on VFPv2. */
+    if (condition == 15u || !encoding_valid) return true;
+
+    if (condition < 14u && !arm_cond_passed(cpu, condition)) {
+        result->outcome = SEQUENCE_VFP_ARITH_CONDITION_SKIP;
+        return true;
+    }
+    if (!sequence_vfp_guard_passes(cpu, insn)) {
+        result->outcome = SEQUENCE_VFP_ARITH_ACCESS_GUARD;
+        return true;
+    }
+    if ((cpu->vfp_fpscr & ARM_FPSCR_LEN) != 0u) {
+        result->outcome = SEQUENCE_VFP_ARITH_FPSCR_LEN;
+        return true;
+    }
+    if ((cpu->vfp_fpscr & ARM_FPSCR_ENABLES) != 0u) {
+        result->outcome = SEQUENCE_VFP_ARITH_FPSCR_ENABLES;
+        return true;
+    }
+
+    result->outcome = SEQUENCE_VFP_ARITH_ADMITTED;
+    unsigned rn;
+    unsigned rm;
+    if (result->dbl) {
+        result->rd = (insn >> 12) & 15u;
+        rn = (insn >> 16) & 15u;
+        rm = insn & 15u;
+        result->operands[result->operand_count++] =
+            sequence_fp64_class(vfp_get_d(cpu, rn));
+        result->operands[result->operand_count++] =
+            sequence_fp64_class(vfp_get_d(cpu, rm));
+        if (result->family == SEQUENCE_VFP_ARITH_MLA)
+            result->operands[result->operand_count++] =
+                sequence_fp64_class(vfp_get_d(cpu, result->rd));
+    } else {
+        result->rd = ((insn >> 12) & 15u) * 2u +
+                     ((insn >> 22) & 1u);
+        rn = ((insn >> 16) & 15u) * 2u + ((insn >> 7) & 1u);
+        rm = (insn & 15u) * 2u + ((insn >> 5) & 1u);
+        result->operands[result->operand_count++] =
+            sequence_fp32_class(vfp_get_s(cpu, rn));
+        result->operands[result->operand_count++] =
+            sequence_fp32_class(vfp_get_s(cpu, rm));
+        if (result->family == SEQUENCE_VFP_ARITH_MLA)
+            result->operands[result->operand_count++] =
+                sequence_fp32_class(vfp_get_s(cpu, result->rd));
+    }
+    for (unsigned i = 0u; i < result->operand_count; i++)
+        result->operand_mask |= (uint8_t)(1u << result->operands[i]);
+    return true;
+}
+
+static uint8_t sequence_vfp_flag_index(uint32_t flags) {
+    uint8_t result = (uint8_t)(flags & UINT32_C(0x1f));
+    if ((flags & ARM_FPSCR_IDC) != 0u) result |= (uint8_t)(1u << 5);
+    return result;
+}
+
+/* Observe one arithmetic candidate and arm a one-instruction literal oracle
+ * only after every architectural gate passes. The returned classification is
+ * suitable for the overlapping mode-admitted continuity ceiling. */
+static bool sequence_vfp_arith_observe(
+        sequence_profile_t *profile, const arm_cpu_t *cpu, uint32_t insn,
+        sequence_signed_classification_t *frontier,
+        sequence_post_store_outcome_t *frontier_outcome,
+        bool *frontier_eligible) {
+    sequence_vfp_arith_classification_t observed;
+    if (!profile || !cpu || !frontier || !frontier_outcome ||
+        !frontier_eligible || !sequence_vfp_arith_classify(
+            cpu, insn, &observed))
+        return false;
+
+    sequence_vfp_arith_t *model = &profile->vfp_arith;
+    model->outcomes[observed.family][observed.outcome]++;
+    *frontier_outcome = SEQUENCE_POST_STORE_INVALID;
+    *frontier_eligible = false;
+    if (observed.outcome == SEQUENCE_VFP_ARITH_CONDITION_SKIP) {
+        sequence_post_store_admit(frontier, SEQUENCE_SIGNED_READ_SKIPPED);
+        *frontier_outcome = SEQUENCE_POST_STORE_CONDITION_SKIP;
+        *frontier_eligible = true;
+        return true;
+    }
+    if (observed.outcome != SEQUENCE_VFP_ARITH_ADMITTED) {
+        if (observed.outcome != SEQUENCE_VFP_ARITH_INVALID)
+            *frontier_outcome = SEQUENCE_POST_STORE_STATE_GUARD;
+        return true;
+    }
+
+    sequence_post_store_admit(frontier, SEQUENCE_SIGNED_PLAIN);
+    *frontier_outcome = SEQUENCE_POST_STORE_PLAIN;
+    *frontier_eligible = true;
+    unsigned rounding = (cpu->vfp_fpscr & ARM_FPSCR_RMODE) >> 22;
+    unsigned control = ((cpu->vfp_fpscr & ARM_FPSCR_FZ) ? 1u : 0u) |
+                       ((cpu->vfp_fpscr & ARM_FPSCR_DN) ? 2u : 0u);
+    model->precision[observed.family][observed.dbl ? 1u : 0u]++;
+    model->mode_control[rounding][control]++;
+    bool simple = true;
+    for (unsigned i = 0u; i < observed.operand_count; i++) {
+        model->operand_classes[observed.operands[i]]++;
+        if (!sequence_vfp_simple_class(observed.operands[i])) simple = false;
+    }
+    model->operand_masks[observed.operand_mask]++;
+    if (simple) model->simple_inputs[rounding][control]++;
+
+    uint32_t cumulative = ARM_FPSCR_IDC | ARM_FPSCR_IXC |
+                          ARM_FPSCR_UFC | ARM_FPSCR_OFC |
+                          ARM_FPSCR_DZC | ARM_FPSCR_IOC;
+    model->pre_sticky_flags[sequence_vfp_flag_index(
+        cpu->vfp_fpscr & cumulative)]++;
+
+    if (model->pending) model->pending_abandoned++;
+    model->pending = true;
+    model->pending_fpscr = cpu->vfp_fpscr;
+    model->pending_pc = cpu->r[15];
+    model->pending_raw = insn;
+    model->pending_rd = (uint8_t)observed.rd;
+    model->pending_width = (uint8_t)(observed.dbl ? 8u : 4u);
+    model->pending_rounding = (uint8_t)rounding;
+    model->pending_control = (uint8_t)control;
+    model->pending_operand_mask = observed.operand_mask;
+    model->pending_simple_inputs = simple;
+    return true;
+}
+
+static void sequence_vfp_arith_note_post_step(
+        sequence_vfp_arith_t *model, const arm_cpu_t *cpu,
+        bool literal_step, arm_status_t status) {
+    if (!model || !model->pending) return;
+    model->pending = false;
+    if (!literal_step || !cpu) {
+        model->post_not_literal++;
+        return;
+    }
+    unsigned status_index = (unsigned)status;
+    if (status_index >= 4u) status_index = 3u;
+    model->post_status[status_index]++;
+    if (status != ARM_OK) return;
+
+    sequence_fp_class_t result_class = model->pending_width == 8u
+        ? sequence_fp64_class(vfp_get_d(cpu, model->pending_rd))
+        : sequence_fp32_class(vfp_get_s(cpu, model->pending_rd));
+    model->result_classes[result_class]++;
+    uint32_t cumulative = ARM_FPSCR_IDC | ARM_FPSCR_IXC |
+                          ARM_FPSCR_UFC | ARM_FPSCR_OFC |
+                          ARM_FPSCR_DZC | ARM_FPSCR_IOC;
+    uint32_t newly_visible = cpu->vfp_fpscr & ~model->pending_fpscr &
+                             cumulative;
+    model->newly_visible_flags[sequence_vfp_flag_index(newly_visible)]++;
+    if (model->pending_simple_inputs &&
+        sequence_vfp_simple_class(result_class))
+        model->simple_results[model->pending_rounding]
+                             [model->pending_control]++;
 }
 
 /* Ask the product decoder about exactly one live instruction. A direct-read
@@ -27463,6 +27763,30 @@ static bool sequence_signed_observe(sequence_profile_t *profile,
                 family_classification,
                 &profile->signed_post_store.family[family]);
         }
+        /* Arithmetic overlaps the broad VFP-compute ceiling, so it needs an
+         * independent continuation model rather than another mutually
+         * exclusive `post_store_family` row. The census always observes the
+         * literal instruction; incremental continuity excludes anything the
+         * shipping baseline already retires. */
+        sequence_signed_classification_t vfp_arith_classification =
+            implemented_classification;
+        sequence_post_store_outcome_t vfp_arith_outcome =
+            SEQUENCE_POST_STORE_INVALID;
+        bool vfp_arith_eligible = false;
+        bool vfp_arith_candidate = sequence_vfp_arith_observe(
+            profile, &mach->cpu, raw, &vfp_arith_classification,
+            &vfp_arith_outcome, &vfp_arith_eligible);
+        bool vfp_arith_incremental = vfp_arith_candidate &&
+            !sequence_post_store_retireable(&implemented_classification);
+        if (vfp_arith_incremental)
+            profile->signed_post_store
+                .vfp_arith_outcomes[vfp_arith_outcome]++;
+        else
+            vfp_arith_classification = implemented_classification;
+        sequence_signed_store_observe(
+            profile, mach, pc, thumb, physical_sequential,
+            &vfp_arith_classification,
+            &profile->signed_post_store.vfp_arith_mode_admitted);
         for (unsigned family = 0u;
              family < SEQUENCE_STORE_FAMILY_COUNT; family++) {
             if (family == SEQUENCE_STORE_ARM_SINGLE ||
@@ -27695,6 +28019,13 @@ static void sequence_profile_break(sequence_profile_t *profile) {
         sequence_signed_store_model_close(
             &profile->signed_post_store.family[family],
             SEQUENCE_SIGNED_STOP_OBSERVER);
+    sequence_signed_store_model_close(
+        &profile->signed_post_store.vfp_arith_mode_admitted,
+        SEQUENCE_SIGNED_STOP_OBSERVER);
+    if (profile->vfp_arith.pending) {
+        profile->vfp_arith.pending_abandoned++;
+        profile->vfp_arith.pending = false;
+    }
 #endif
     sequence_trace_head_close(profile);
     sequence_close_run(profile->flow_runs, profile->flow_run_instructions,
@@ -29965,6 +30296,258 @@ static void sequence_profile_report_post_store_model(
     }
 }
 
+static void sequence_profile_report_vfp_arith_model(
+        const sequence_profile_t *profile) {
+    static const char *const FAMILIES[SEQUENCE_VFP_ARITH_FAMILY_COUNT] = {
+        "VMLA/VMLS/VNMLA/VNMLS", "VMUL/VNMUL", "VADD/VSUB", "VDIV",
+        "unsupported arithmetic"
+    };
+    static const char *const CLASSES[SEQUENCE_FP_CLASS_COUNT] = {
+        "zero", "subnormal", "normal", "infinity", "qNaN", "sNaN"
+    };
+    static const char *const CONTROLS[4u] = {
+        "FZ0 DN0", "FZ1 DN0", "FZ0 DN1", "FZ1 DN1"
+    };
+    const sequence_vfp_arith_t *vfp = &profile->vfp_arith;
+    const sequence_signed_extended_t *baseline =
+        &profile->signed_store.implemented;
+    const sequence_signed_extended_t *model =
+        &profile->signed_post_store.vfp_arith_mode_admitted;
+    uint64_t total_outcomes[SEQUENCE_VFP_ARITH_OUTCOME_COUNT] = { 0 };
+    uint64_t candidates = 0u;
+    uint64_t admitted = 0u;
+    uint64_t precision_total = 0u;
+    uint64_t mode_total = 0u;
+    uint64_t simple_input_total = 0u;
+    uint64_t simple_result_total = 0u;
+    uint64_t operand_total = 0u;
+    uint64_t operand_mask_total = 0u;
+    uint64_t expected_operands = 0u;
+    uint64_t result_total = 0u;
+    uint64_t pre_flag_total = 0u;
+    uint64_t flag_total = 0u;
+    uint64_t status_total = 0u;
+
+    printf("\n    live VFP arithmetic mode-admission audit\n");
+    printf("      This observer never executes native arithmetic. It applies the "
+           "literal interpreter's encoding, condition, lazy-VFP, Len and "
+           "exception-enable gates, then records literal arm_step() results. "
+           "RMode/FZ/DN are measured semantic modes, not refusals. A mode-"
+           "admitted row is still a ceiling until an AArch64 oracle proves "
+           "results, flags and host-state restoration.\n");
+    printf("      %-27s %10s %9s %9s %9s %9s %9s %10s %9s %9s\n",
+           "family", "candidate", "invalid", "skip", "access", "Len",
+           "enables", "admitted", "single", "double");
+    for (unsigned family = 0u;
+         family < SEQUENCE_VFP_ARITH_FAMILY_COUNT; family++) {
+        const uint64_t *row = vfp->outcomes[family];
+        uint64_t family_candidates = 0u;
+        for (unsigned outcome = 0u;
+             outcome < SEQUENCE_VFP_ARITH_OUTCOME_COUNT; outcome++) {
+            family_candidates += row[outcome];
+            total_outcomes[outcome] += row[outcome];
+        }
+        candidates += family_candidates;
+        admitted += row[SEQUENCE_VFP_ARITH_ADMITTED];
+        precision_total += vfp->precision[family][0u] +
+                           vfp->precision[family][1u];
+        expected_operands += row[SEQUENCE_VFP_ARITH_ADMITTED] *
+            (family == SEQUENCE_VFP_ARITH_MLA ? 3u : 2u);
+        printf("      %-27s %10" PRIu64 " %9" PRIu64 " %9" PRIu64
+               " %9" PRIu64 " %9" PRIu64 " %9" PRIu64 " %10" PRIu64
+               " %9" PRIu64 " %9" PRIu64 "\n",
+               FAMILIES[family], family_candidates,
+               row[SEQUENCE_VFP_ARITH_INVALID],
+               row[SEQUENCE_VFP_ARITH_CONDITION_SKIP],
+               row[SEQUENCE_VFP_ARITH_ACCESS_GUARD],
+               row[SEQUENCE_VFP_ARITH_FPSCR_LEN],
+               row[SEQUENCE_VFP_ARITH_FPSCR_ENABLES],
+               row[SEQUENCE_VFP_ARITH_ADMITTED],
+               vfp->precision[family][0u], vfp->precision[family][1u]);
+    }
+
+    printf("      admitted/simple-input/simple-result by FPSCR mode\n");
+    printf("      %-9s %24s %24s %24s %24s\n",
+           "control", "RN", "RP", "RM", "RZ");
+    for (unsigned control = 0u; control < 4u; control++) {
+        printf("      %-9s", CONTROLS[control]);
+        for (unsigned rounding = 0u; rounding < 4u; rounding++) {
+            uint64_t all = vfp->mode_control[rounding][control];
+            uint64_t simple_in = vfp->simple_inputs[rounding][control];
+            uint64_t simple_out = vfp->simple_results[rounding][control];
+            mode_total += all;
+            simple_input_total += simple_in;
+            simple_result_total += simple_out;
+            printf(" %7" PRIu64 "/%7" PRIu64 "/%7" PRIu64,
+                   all, simple_in, simple_out);
+        }
+        printf("\n");
+    }
+
+    printf("      operand classes:");
+    for (unsigned cls = 0u; cls < SEQUENCE_FP_CLASS_COUNT; cls++) {
+        operand_total += vfp->operand_classes[cls];
+        printf(" %s=%" PRIu64, CLASSES[cls],
+               vfp->operand_classes[cls]);
+    }
+    printf("\n      result classes :");
+    for (unsigned cls = 0u; cls < SEQUENCE_FP_CLASS_COUNT; cls++) {
+        result_total += vfp->result_classes[cls];
+        printf(" %s=%" PRIu64, CLASSES[cls],
+               vfp->result_classes[cls]);
+    }
+    printf("\n");
+    for (unsigned mask = 0u;
+         mask < (1u << SEQUENCE_FP_CLASS_COUNT); mask++)
+        operand_mask_total += vfp->operand_masks[mask];
+    for (unsigned flags = 0u; flags < (1u << 6); flags++) {
+        pre_flag_total += vfp->pre_sticky_flags[flags];
+        flag_total += vfp->newly_visible_flags[flags];
+    }
+    for (unsigned status = 0u; status < 4u; status++)
+        status_total += vfp->post_status[status];
+
+    static const unsigned FLAG_BITS[6u] = { 0u, 1u, 2u, 3u, 4u, 5u };
+    static const char *const FLAG_NAMES[6u] = {
+        "IOC", "DZC", "OFC", "UFC", "IXC", "IDC"
+    };
+    printf("      instruction operand masks: zero-only=%" PRIu64
+           " normal-only=%" PRIu64 " zero+normal=%" PRIu64
+           " other=%" PRIu64 "\n",
+           vfp->operand_masks[1u << SEQUENCE_FP_ZERO],
+           vfp->operand_masks[1u << SEQUENCE_FP_NORMAL],
+           vfp->operand_masks[(1u << SEQUENCE_FP_ZERO) |
+                              (1u << SEQUENCE_FP_NORMAL)],
+           operand_mask_total -
+               vfp->operand_masks[1u << SEQUENCE_FP_ZERO] -
+               vfp->operand_masks[1u << SEQUENCE_FP_NORMAL] -
+               vfp->operand_masks[(1u << SEQUENCE_FP_ZERO) |
+                                  (1u << SEQUENCE_FP_NORMAL)]);
+    printf("      pre-existing sticky flags: none=%" PRIu64,
+           vfp->pre_sticky_flags[0u]);
+    for (unsigned bit = 0u; bit < 6u; bit++) {
+        uint64_t hits = 0u;
+        for (unsigned flags = 0u; flags < (1u << 6); flags++)
+            if ((flags & (1u << FLAG_BITS[bit])) != 0u)
+                hits += vfp->pre_sticky_flags[flags];
+        printf(" %s=%" PRIu64, FLAG_NAMES[bit], hits);
+    }
+    printf("\n");
+    printf("      newly visible sticky flags: none=%" PRIu64,
+           vfp->newly_visible_flags[0u]);
+    for (unsigned bit = 0u; bit < 6u; bit++) {
+        uint64_t hits = 0u;
+        for (unsigned flags = 0u; flags < (1u << 6); flags++)
+            if ((flags & (1u << FLAG_BITS[bit])) != 0u)
+                hits += vfp->newly_visible_flags[flags];
+        printf(" %s=%" PRIu64, FLAG_NAMES[bit], hits);
+    }
+    printf("\n      literal post status OK/UNDEFINED/HALT/GUEST-UNDEFINED="
+           "%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64
+           "; not-literal=%" PRIu64 "; abandoned=%" PRIu64 "\n",
+           vfp->post_status[ARM_OK], vfp->post_status[ARM_UNDEFINED],
+           vfp->post_status[ARM_HALT],
+           vfp->post_status[ARM_GUEST_UNDEFINED],
+           vfp->post_not_literal, vfp->pending_abandoned);
+    printf("      Sticky-flag counts are only bits newly visible over the pre-step "
+           "FPSCR. Re-raising a bit that was already sticky is intentionally "
+           "not claimed as observable here.\n");
+
+    const uint64_t *frontier_row =
+        profile->signed_post_store.vfp_arith_outcomes;
+    uint64_t frontier_candidates = 0u;
+    for (unsigned outcome = 0u;
+         outcome < SEQUENCE_POST_STORE_OUTCOME_COUNT; outcome++)
+        frontier_candidates += frontier_row[outcome];
+    uint64_t additional_eligible =
+        frontier_row[SEQUENCE_POST_STORE_CONDITION_SKIP] +
+        frontier_row[SEQUENCE_POST_STORE_PLAIN];
+    uint64_t baseline_entries = profile->fetched >= baseline->instructions
+        ? profile->fetched - baseline->instructions + baseline->calls : 0u;
+    uint64_t entries = profile->fetched >= model->instructions
+        ? profile->fetched - model->instructions + model->calls : 0u;
+    uint64_t removed = baseline_entries >= entries
+        ? baseline_entries - entries : 0u;
+    uint64_t baseline_gate_refusals = 0u;
+    uint64_t model_gate_refusals = 0u;
+    uint64_t histogram_calls = 0u;
+    uint64_t histogram_instructions = 0u;
+    uint64_t stops = 0u;
+    bool lengths_exact = true;
+    for (unsigned gate = 1u; gate < SEQUENCE_SIGNED_GATE_COUNT; gate++) {
+        baseline_gate_refusals += baseline->gate_refusals[gate];
+        model_gate_refusals += model->gate_refusals[gate];
+    }
+    for (unsigned length = 1u;
+         length <= SEQUENCE_SIGNED_EXTENDED_CAP; length++) {
+        uint64_t calls = model->length_calls[length];
+        uint64_t instructions = model->length_instructions[length];
+        histogram_calls += calls;
+        histogram_instructions += instructions;
+        if (instructions != calls * (uint64_t)length)
+            lengths_exact = false;
+    }
+    for (unsigned stop = 0u; stop < SEQUENCE_SIGNED_STOP_COUNT; stop++)
+        stops += model->stops[stop];
+    uint64_t baseline_eligible = baseline->instructions +
+                                 baseline_gate_refusals;
+    bool census_exact = candidates ==
+            total_outcomes[SEQUENCE_VFP_ARITH_INVALID] +
+            total_outcomes[SEQUENCE_VFP_ARITH_CONDITION_SKIP] +
+            total_outcomes[SEQUENCE_VFP_ARITH_ACCESS_GUARD] +
+            total_outcomes[SEQUENCE_VFP_ARITH_FPSCR_LEN] +
+            total_outcomes[SEQUENCE_VFP_ARITH_FPSCR_ENABLES] +
+            total_outcomes[SEQUENCE_VFP_ARITH_ADMITTED] &&
+        admitted == precision_total && admitted == mode_total &&
+        admitted == operand_mask_total && admitted == pre_flag_total &&
+        operand_total == expected_operands &&
+        admitted == status_total + vfp->post_not_literal +
+                    vfp->pending_abandoned &&
+        vfp->post_status[ARM_OK] == result_total &&
+        vfp->post_status[ARM_OK] == flag_total &&
+        simple_result_total <= simple_input_total;
+    bool continuity_exact = frontier_candidates >= additional_eligible &&
+        lengths_exact && histogram_calls == model->calls &&
+        histogram_instructions == model->instructions &&
+        stops == model->calls &&
+        baseline_eligible + additional_eligible ==
+            model->instructions + model_gate_refusals &&
+        model->blocks == model->calls + model->chain_transitions &&
+        model->instructions >= baseline->instructions &&
+        baseline_entries >= entries &&
+        model->maximum <= SEQUENCE_SIGNED_EXTENDED_CAP;
+    printf("      accounting candidates/admitted/precision/modes/operand-masks/"
+           "post=%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64
+           "/%" PRIu64 "/%" PRIu64 "  %s\n",
+           candidates, admitted, precision_total, mode_total,
+           operand_mask_total, status_total + vfp->post_not_literal +
+               vfp->pending_abandoned,
+           census_exact ? "EXACT" : "MISMATCH");
+    printf("      mode-admitted ceiling candidate/eligible/calls/instructions/"
+           "heads/chains/runner-entries/removed=%" PRIu64 "/%" PRIu64
+           "/%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64
+           "/%" PRIu64 "/%" PRIu64 " (%.3f%% baseline)  %s\n",
+           frontier_candidates, additional_eligible, model->calls,
+           model->instructions, model->blocks, model->chain_transitions,
+           entries, removed,
+           baseline_entries
+               ? 100.0 * (double)removed / (double)baseline_entries : 0.0,
+           continuity_exact ? "ACCOUNTING-EXACT" : "MISMATCH");
+
+    const sequence_signed_extended_t *vldm =
+        &profile->signed_post_store.family[
+            SEQUENCE_POST_STORE_VLDM_ONE_BLOCK];
+    uint64_t vldm_entries = profile->fetched >= vldm->instructions
+        ? profile->fetched - vldm->instructions + vldm->calls : 0u;
+    uint64_t vldm_removed = baseline_entries >= vldm_entries
+        ? baseline_entries - vldm_entries : 0u;
+    printf("      continuity comparison: guarded-arithmetic/VLDM removed="
+           "%" PRIu64 "/%" PRIu64 " runner entries (%.3fx). This is "
+           "continuity, not elapsed speed or FPS.\n",
+           removed, vldm_removed,
+           vldm_removed ? (double)removed / (double)vldm_removed : 0.0);
+}
+
 static void sequence_profile_report_indirect_model(
         const sequence_profile_t *profile) {
     static const char *const FAMILIES[SEQUENCE_INDIRECT_FAMILY_COUNT] = {
@@ -30906,6 +31489,7 @@ static void sequence_profile_report(sequence_profile_t *profile) {
                 a64_static_host_available() ? "yes" : "no");
         sequence_profile_report_store_model(profile);
         sequence_profile_report_post_store_model(profile);
+        sequence_profile_report_vfp_arith_model(profile);
         sequence_profile_report_indirect_model(profile);
         printf("    This is modeled retirement, not measured execution time, "
                "FPS, or a same-binary A/B.\n");
@@ -35202,8 +35786,8 @@ external_md_work_ready:
             st = arm_step(&mach.cpu);
         }
 #if defined(S5LBOX_STATIC_A64_ENGINE)
-        sequence_profile_note_post_step(&sequence_profile,
-                                        sequence_literal_step);
+        sequence_profile_note_post_step(&sequence_profile, &mach.cpu,
+                                        sequence_literal_step, st);
 #endif
         hle_verify_note_post_step(&mach.cpu, n);
         springboard_return_note_post_step(&mach.cpu, n, st);
