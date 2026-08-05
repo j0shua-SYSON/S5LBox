@@ -17,6 +17,14 @@
 static unsigned tests;
 static unsigned failed;
 
+#if defined(S5LBOX_MBX_EXPERIMENT) && S5LBOX_MBX_EXPERIMENT
+#define EXPECTED_MBX_DEFAULT true
+#define EXPECTED_CA_DEFAULT  false
+#else
+#define EXPECTED_MBX_DEFAULT false
+#define EXPECTED_CA_DEFAULT  true
+#endif
+
 #define CHECK(expr, ...) do {                                                \
     tests++;                                                                 \
     if (!(expr)) {                                                           \
@@ -34,7 +42,7 @@ static const struct {
     unsigned    group;
     unsigned    impl;
 } EXPECTED[] = {
-    { "mbx",                false, VM_OPT_GROUP_HARDWARE,    VM_OPT_IMPL_HARNESS },
+    { "mbx", EXPECTED_MBX_DEFAULT, VM_OPT_GROUP_HARDWARE,    VM_OPT_IMPL_HARNESS },
     { "sha1",               false, VM_OPT_GROUP_HARDWARE,    VM_OPT_IMPL_HARNESS },
     { "baseband",           false, VM_OPT_GROUP_HARDWARE,    VM_OPT_IMPL_HARNESS },
     { "spi2",               false, VM_OPT_GROUP_HARDWARE,    VM_OPT_IMPL_HARNESS },
@@ -63,7 +71,8 @@ static const struct {
      * run149 and run150 differ in this flag alone, at the same budget, and
      * draw 273206 bytes against 1890. A default that guarantees a black screen
      * was not a neutral choice. */
-    { "ca-software-render", true,  VM_OPT_GROUP_PATCH,       VM_OPT_IMPL_HARNESS },
+    { "ca-software-render", EXPECTED_CA_DEFAULT,
+                                             VM_OPT_GROUP_PATCH,       VM_OPT_IMPL_HARNESS },
     /* activate was NOWHERE until the app grew MAP_PROVISION_ACTIVATE and
      * VMFirmwareBoot.c began passing rootfs_work_activation_entries(). Its row
      * text claimed "NOT IMPLEMENTED ANYWHERE" while the app's own boot report
@@ -182,8 +191,10 @@ static void test_command_line(void) {
     expect_command_line(values, "", "everything at its default");
 
     defaults_into(values);
-    values[vm_option_index("mbx")] = true;
-    expect_command_line(values, "--mbx", "an off default turned on");
+    values[vm_option_index("mbx")] = !EXPECTED_MBX_DEFAULT;
+    expect_command_line(values,
+                        EXPECTED_MBX_DEFAULT ? "--no-mbx" : "--mbx",
+                        "the MBX build default flipped");
 
     defaults_into(values);
     values[vm_option_index("vram")] = false;
@@ -210,18 +221,23 @@ static void test_command_line(void) {
     CHECK(full[need - 1] != ' ', "trailing separator in \"%s\"", full);
     /* Flipped means the opposite spelling of the default: an off default is
      * now asserted with --name, an on default negated with --no-name. */
+#if defined(S5LBOX_MBX_EXPERIMENT) && S5LBOX_MBX_EXPERIMENT
+    CHECK(strncmp(full, "--no-mbx", strlen("--no-mbx")) == 0,
+          "on experiment default not negated first: %s", full);
+#else
     CHECK(strstr(full, "--mbx") != NULL, "off default not asserted: %s", full);
-    CHECK(strstr(full, "--no-vram") != NULL, "on default not negated: %s", full);
     CHECK(strstr(full, "--no-mbx") == NULL, "off default also negated: %s", full);
+#endif
+    CHECK(strstr(full, "--no-vram") != NULL, "on default not negated: %s", full);
 }
 
 static void test_command_line_truncation_and_nulls(void) {
     bool values[64];
     defaults_into(values);
-    values[vm_option_index("mbx")] = true;
     values[vm_option_index("sha1")] = true;
+    values[vm_option_index("baseband")] = true;
 
-    const char *want = "--mbx --sha1";
+    const char *want = "--sha1 --baseband";
     const size_t want_len = strlen(want);
 
     /* A dry run has to report the length a real run would need. */
@@ -251,7 +267,7 @@ static void test_command_line_truncation_and_nulls(void) {
     CHECK(buf[0] == '\0', "a null value array left the buffer untouched");
 
     /* A short array describes only the rows it covers. */
-    CHECK(vm_option_command_line(values, 1, NULL, 0) == strlen("--mbx"),
+    CHECK(vm_option_command_line(values, 1, NULL, 0) == 0u,
           "a one-row array looked past its end");
     CHECK(vm_option_command_line(values, 0, NULL, 0) == 0,
           "an empty array rendered arguments");

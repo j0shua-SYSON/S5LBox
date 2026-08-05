@@ -42,6 +42,11 @@ on:
         required: false
         default: false
         type: boolean
+      experimental_mbx:
+        description: 'Build a separate-container MBX-default phone candidate'
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   build:
@@ -49,7 +54,8 @@ jobs:
     runs-on: macos-15
     env:
       EXPERIMENTAL_HLE: ${{ github.event_name == 'workflow_dispatch' && inputs.experimental_hle && 'true' || 'false' }}
-      IPA_ARTIFACT: ${{ github.event_name == 'workflow_dispatch' && inputs.experimental_hle && 'S5LBox-hle-experimental-ipa' || 'S5LBox-ipa' }}
+      EXPERIMENTAL_MBX: ${{ github.event_name == 'workflow_dispatch' && inputs.experimental_mbx && 'true' || 'false' }}
+      IPA_ARTIFACT: ${{ github.event_name == 'workflow_dispatch' && inputs.experimental_hle && 'S5LBox-hle-experimental-ipa' || github.event_name == 'workflow_dispatch' && inputs.experimental_mbx && 'S5LBox-mbx-experimental-ipa' || 'S5LBox-ipa' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -109,8 +115,20 @@ jobs:
           # `set -u`; an empty Bash 3.2 array does not. Hosted macOS still
           # exposes that older nounset behavior.
           set --
-          if [ "$EXPERIMENTAL_HLE" = true ]; then
+          if [ "$EXPERIMENTAL_HLE" = true ] && [ "$EXPERIMENTAL_MBX" = true ]; then
+            echo "experimental_hle and experimental_mbx are mutually exclusive" >&2
+            exit 2
+          elif [ "$EXPERIMENTAL_HLE" = true ]; then
             set -- "OTHER_CFLAGS=-DS5LBOX_IOS3_HLE_EXPERIMENT=1"
+          elif [ "$EXPERIMENTAL_MBX" = true ]; then
+            # A separate identifier means separate NSUserDefaults, firmware,
+            # and machine images. The first MBX run therefore cannot inherit a
+            # normal app's persistent CPU-renderer choice while still looking
+            # like a controlled experiment.
+            set -- \
+              "OTHER_CFLAGS=-DS5LBOX_MBX_EXPERIMENT=1" \
+              "PRODUCT_BUNDLE_IDENTIFIER=com.j0shua.S5LBox.MBXExperiment" \
+              "S5LBOX_DISPLAY_NAME=S5LBox MBX"
           fi
           xcodebuild \
             -project S5LBox.xcodeproj \
@@ -131,6 +149,13 @@ jobs:
             xcrun nm "$binary" |
               awk '$NF == "_vm_firmware_hle_enable" { found=1 }
                    END { exit !found }'
+          fi
+          if [ "$EXPERIMENTAL_MBX" = true ]; then
+            plist="$PWD/dist/S5LBox.app/Info.plist"
+            test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$plist")" = \
+              "com.j0shua.S5LBox.MBXExperiment"
+            test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$plist")" = \
+              "S5LBox MBX"
           fi
 
       - name: Fake-sign + package .ipa

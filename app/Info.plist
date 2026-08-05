@@ -19,7 +19,7 @@
          because 16 CMake build trees cache its absolute path and a folder name
          is not worth reconfiguring them for. -->
     <key>CFBundleDisplayName</key>
-    <string>S5LBox</string>
+    <string>$(S5LBOX_DISPLAY_NAME)</string>
     <key>CFBundleExecutable</key>
     <string>$(EXECUTABLE_NAME)</string>
     <key>CFBundleIdentifier</key>

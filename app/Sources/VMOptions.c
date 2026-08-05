@@ -7,18 +7,50 @@
 
 #include <string.h>
 
+/*
+ * A phone A/B must not inherit the normal app's saved renderer choice or an
+ * existing CPU-renderer work image.  The manual MBX workflow therefore builds
+ * a different bundle identifier and compiles this table with the two graphics
+ * defaults paired in the other direction.  The normal target does not define
+ * this macro and retains its conservative defaults byte-for-byte.
+ */
+#if defined(S5LBOX_MBX_EXPERIMENT) && S5LBOX_MBX_EXPERIMENT
+#define VM_DEFAULT_MBX                true
+#define VM_DEFAULT_CA_SOFTWARE_RENDER false
+#define VM_MBX_DETAIL \
+    "On only in the separately labelled S5LBox MBX phone experiment. It " \
+    "uses a separate app container so its first machine gets a fresh MBX work " \
+    "image rather than silently reusing the normal app's CPU-renderer image. " \
+    "The path is still experimental: no phone run has proved 30 fps."
+#define VM_CA_RENDER_DETAIL \
+    "Off only in the separately labelled S5LBox MBX phone experiment, paired " \
+    "with MBX on before its first work image is created. The normal app keeps " \
+    "Apple's CPU renderer on. Changing this after an image exists cannot " \
+    "convert that image and is not a controlled comparison."
+#else
+#define VM_DEFAULT_MBX                false
+#define VM_DEFAULT_CA_SOFTWARE_RENDER true
+#define VM_MBX_DETAIL \
+    "Off by default pending final cold-boot and 30 fps acceptance. On leaves " \
+    "the PowerVR driver matched and uses the VM's reset, ring, 2D and 3D " \
+    "models. A live checkpoint completed 1,388/1,388 2D jobs and 8,888/8,888 " \
+    "3D renders with no decoder rejection or recovery, but that is not yet " \
+    "a cold product-level proof."
+#define VM_CA_RENDER_DETAIL \
+    "On is the conservative default, applied when the work image is made: " \
+    "CA_ENABLE_MBX2D=0 selects Apple's CPU renderer while MBX remains off. " \
+    "Turn it off in a fresh machine to exercise the experimental MBX path. " \
+    "Changing it later cannot rewrite an existing work image."
+#endif
+
 /* The reasons below are compressed from bootkernel's own help text. They are
  * kept to one sentence each because a table row is not a manual page, and they
  * name the observed failure rather than a policy: "hangs the boot" is checkable
  * against docs/BOOTLOG.md, "recommended" is not. */
 static const vm_option_t VM_OPTIONS[] = {
     { "mbx", "MBX graphics (experimental)  ·  /arm-io/mbx",
-      "Off by default pending final cold-boot and 30 fps acceptance. On leaves "
-      "the PowerVR driver matched and uses the VM's reset, ring, 2D and 3D "
-      "models. A live checkpoint completed 1,388/1,388 2D jobs and 8,888/8,888 "
-      "3D renders with no decoder rejection or recovery, but that is not yet "
-      "a cold product-level proof.",
-      false, VM_OPT_GROUP_HARDWARE, VM_OPT_IMPL_HARNESS },
+      VM_MBX_DETAIL,
+      VM_DEFAULT_MBX, VM_OPT_GROUP_HARDWARE, VM_OPT_IMPL_HARNESS },
     { "sha1", "SHA-1 engine  ·  /arm-io/sha1",
       "Off: matched, every 4096-byte cs_validate_page digest goes to an "
       "unmodelled register file and launchd's first text page fails signing.",
@@ -60,11 +92,9 @@ static const vm_option_t VM_OPTIONS[] = {
       "failure stays visible instead of costing a 30-second stall.",
       true, VM_OPT_GROUP_PATCH, VM_OPT_IMPL_HARNESS },
     { "ca-software-render", "QuartzCore software renderer",
-      "On is the conservative default, applied when the work image is made: "
-      "CA_ENABLE_MBX2D=0 selects Apple's CPU renderer while MBX remains off. "
-      "Turn it off in a fresh machine to exercise the experimental MBX path. "
-      "Changing it later cannot rewrite an existing work image.",
-      true, VM_OPT_GROUP_PATCH, VM_OPT_IMPL_HARNESS },
+      VM_CA_RENDER_DETAIL,
+      VM_DEFAULT_CA_SOFTWARE_RENDER,
+      VM_OPT_GROUP_PATCH, VM_OPT_IMPL_HARNESS },
 
     { "activate", "Activation",
       "On, and applied when the work image is made, not at boot: provisions "

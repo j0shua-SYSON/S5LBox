@@ -93,6 +93,10 @@ targets:
       base:
         PRODUCT_NAME: S5LBox
         PRODUCT_BUNDLE_IDENTIFIER: com.j0shua.S5LBox
+        # The normal build shows S5LBox. The manual MBX workflow overrides this
+        # one setting to "S5LBox MBX" while retaining the stable product path
+        # used by packaging.
+        S5LBOX_DISPLAY_NAME: S5LBox
         INFOPLIST_FILE: Info.plist
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         CODE_SIGN_ENTITLEMENTS: S5LBox.entitlements

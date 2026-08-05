@@ -7412,3 +7412,53 @@ remains roughly 0--4 FPS, and nothing here proves that 30 FPS is close. Promotio
 visible phone animation in normal and experimental IPAs, simultaneous sustained Minsn/s and changed
 FPS, correct pixels, and a worthwhile repeatable gain. A regression means removing or redesigning
 the path, not rationalizing it.
+
+### 2026-08-05: sampling rejects the HLE-cost story; isolate the larger MBX phone test
+
+The interpretation immediately above assigned the bracket's lower fixed-retired throughput to
+"native raster cost." That attribution was not measured. A fixed retired-instruction window with
+HLE reaches a different guest state and instruction mix, and the four arms also show large host
+drift. r568 first tried to settle the question with compile-time `-pg`; it was invalid for the exact
+reason already recorded at r440: `_mcount_private` plus `__fentry__` consumed about 60% of the
+samples. No conclusion from r568 is retained.
+
+r569 uses the established sampling-only build instead: ordinary `-O2`, `-pg` only at link time,
+and a non-relocating executable. In the short 7.540--7.550 B pair, HLE retired 11.700728 Minsn/s
+against normal's 12.065438 Minsn/s, only 3.0% lower rather than the earlier inferred 27.8%. More
+importantly, its mean host gap between changed scanouts was 0.095445 seconds against 0.144593,
+although the sub-second arms completed only one FPS window and are not a phone forecast.
+
+The longer HLE sample retired 100 M instructions in 8.375276 seconds and handled 184/184
+`ogl_poly_scan` roots. Across 5.76 sampled CPU seconds, each of the root handler, scanline handler,
+app MMU read adapter, and shadow-row reader received exactly one 10 ms sample: 40 ms combined, or
+about 0.75% after excluding the 0.44-second snapshot-validation sample. The suspected quadratic
+row bookkeeping is real source structure but is not the throughput bottleneck in this workload.
+Optimizing it now would be polishing a sub-1% population, so no such patch is made.
+
+The structurally larger candidate remains the already decoded MBX path. r570 restored r446's
+post-keygen hardware-renderer animation at 7.320 B and ran the current app-shaped
+`s5l8900_run()`/publication loop for 100 M instructions with no new snapshot. It exited zero with
+all 710 publications reading a live scanout:
+
+| measurement | r570 MBX app-shaped run |
+|---|---:|
+| core rate | 2.600708 Minsn/s |
+| changed signatures | 87 |
+| changed FPS mean / max | 2.242 / 3.976 |
+| mean guest gap | 1.153488 M instructions |
+| mean host gap | 0.445842 seconds |
+| windows at or above 30 FPS | 0 |
+
+That result is negative: MBX is not fast on this x86 run. It does preserve the much smaller guest
+work per changed scanout that made the path interesting. r571's clean sampling-only 20 M window
+measured 7.670556 Minsn/s and 7.072 mean changed FPS. Textured-sprite execution, coordinate
+generation, linear sampling, premultiplied blending, GART reads and 2D staging together account for
+0.17 of 1.65 non-snapshot sampled CPU seconds, about 10%. Even deleting all of that cannot explain
+the phone's reported 0--4 FPS or produce an eightfold gain.
+
+The next phone artifact is therefore deliberately isolated rather than silently promoted. A manual
+MBX workflow build uses a separate bundle identifier and the visible name `S5LBox MBX`, defaults
+MBX on and the CPU renderer off, and consequently owns a fresh app container and fresh work image.
+The normal app remains CPU-renderer-default. This removes the persistent-image ambiguity from the
+phone A/B; it does not make MBX faster and it is not a 30 FPS claim. The decisive report remains
+simultaneous sustained Minsn/s and changed FPS on the same visible animation.

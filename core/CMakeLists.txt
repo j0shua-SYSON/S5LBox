@@ -638,6 +638,21 @@ add_executable(test_vmoptions
 target_include_directories(test_vmoptions PRIVATE ../app/Sources)
 add_test(NAME app_option_table COMMAND test_vmoptions)
 
+# The manually dispatched phone experiment is a separate product policy, not a
+# change to the normal app's defaults. Compile the same longhand table test in
+# that policy too so a labelled MBX IPA cannot quietly pair MBX with the CPU
+# renderer or fall back to the normal default.
+add_executable(test_vmoptions_mbx_experiment
+    ../app/Tests/test_vmoptions.c
+    ../app/Sources/VMOptions.c
+)
+target_include_directories(test_vmoptions_mbx_experiment
+    PRIVATE ../app/Sources)
+target_compile_definitions(test_vmoptions_mbx_experiment
+    PRIVATE S5LBOX_MBX_EXPERIMENT=1)
+add_test(NAME app_option_table_mbx_experiment
+         COMMAND test_vmoptions_mbx_experiment)
+
 # The IPSW importer. Every byte it reads comes from a file the user found on the
 # internet, so this is the app's largest untrusted-input surface by a wide
 # margin -- a zip central directory, a DEFLATE stream, an XML property list, an
