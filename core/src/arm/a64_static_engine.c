@@ -49,6 +49,7 @@ typedef struct {
     bool ldm_enabled;
     bool vstm_enabled;
     bool vfp_arithmetic_enabled;
+    bool vfp_fp_session_enabled;
     unsigned chain_limit;
     uint64_t retired;
     uint64_t chained_blocks;
@@ -297,6 +298,7 @@ bool s5l8900_static_a64_set_enabled(s5l8900_t *m, bool enabled) {
         state->ldm_enabled = true;
         state->vstm_enabled = true;
         state->vfp_arithmetic_enabled = true;
+        state->vfp_fp_session_enabled = true;
         m->static_a64_state = state;
     }
     state->enabled = true;
@@ -481,6 +483,22 @@ bool s5l8900_static_a64_set_vfp_arithmetic(s5l8900_t *m, bool enabled) {
 #endif
 }
 
+bool s5l8900_static_a64_set_vfp_fp_session(s5l8900_t *m, bool enabled) {
+    if (!m) return false;
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    static_a64_state_t *state = static_state(m);
+    if (!state || !state->enabled || !a64_static_host_available())
+        return false;
+    /* This is an execution-policy A/B switch. The decoded records and graph
+     * are identical; only the generated runner's host-FP save cadence changes. */
+    state->vfp_fp_session_enabled = enabled;
+    return true;
+#else
+    (void)enabled;
+    return false;
+#endif
+}
+
 bool s5l8900_static_a64_set_chain_limit(s5l8900_t *m,
                                         unsigned max_insns) {
     if (!m) return false;
@@ -572,6 +590,7 @@ static unsigned try_persistent(s5l8900_t *m, static_a64_state_t *state,
     if (!first) return 0u;
     if (!a64_static_run_memory_hits_chain(cpu, first, m->ram, m->ram_size,
                                           budget, persistent_next, &context,
+                                          state->vfp_fp_session_enabled,
                                           &completed, &blocks)) {
         /* A pre-execution contract mismatch must not become a sticky cache
          * hit. Runtime read/VFP misses are successful exact-prefix returns. */
@@ -615,6 +634,7 @@ static unsigned try_graph(s5l8900_t *m, static_a64_state_t *state,
     }
     if (!a64_static_run_memory_hits_graph(cpu, first, m->ram, m->ram_size,
                                           budget, state->graph_nodes,
+                                          state->vfp_fp_session_enabled,
                                           &completed, &blocks)) {
         if (context.last_entry)
             invalidate_entry(state, context.last_entry);
@@ -716,7 +736,9 @@ unsigned s5l8900_static_a64_try(s5l8900_t *m, unsigned max_insns) {
         }
 
         if (!a64_static_run_memory_hits_decoded(cpu, run_block, m->ram,
-                                                m->ram_size, &completed)) {
+                                                m->ram_size,
+                                                state->vfp_fp_session_enabled,
+                                                &completed)) {
             /* Fail closed, and make a transient contract mismatch re-decode.
              * The decoded runner refuses before changing guest state. */
             invalidate_entry(state, entry);

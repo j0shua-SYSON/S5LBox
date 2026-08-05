@@ -205,9 +205,12 @@ bool a64_static_run_read_hits_decoded(arm_cpu_t *cpu,
                                       uint8_t *ram, size_t ram_size,
                                       unsigned *completed);
 
+/* `vfp_fp_session` selects lazy host FP-state preservation for guarded VFP
+ * arithmetic. False retains exact per-operation preservation. */
 bool a64_static_run_memory_hits_decoded(arm_cpu_t *cpu,
                                         const a64_static_block_t *block,
                                         uint8_t *ram, size_t ram_size,
+                                        bool vfp_fp_session,
                                         unsigned *completed);
 
 /* Execute one or more product-decoded blocks while keeping the pinned guest
@@ -227,12 +230,14 @@ bool a64_static_run_read_hits_chain(arm_cpu_t *cpu,
                                     void *opaque, unsigned *completed,
                                     unsigned *blocks);
 
+/* `vfp_fp_session` has the same meaning as for the decoded runner. */
 bool a64_static_run_memory_hits_chain(arm_cpu_t *cpu,
                                       const a64_static_block_t *first,
                                       uint8_t *ram, size_t ram_size,
                                       unsigned budget,
                                       a64_static_chain_next_fn next,
-                                      void *opaque, unsigned *completed,
+                                      void *opaque, bool vfp_fp_session,
+                                      unsigned *completed,
                                       unsigned *blocks);
 
 /* Callback-free variant. `nodes` is the engine's fixed 512-slot table for the
@@ -252,10 +257,11 @@ bool a64_static_run_read_hits_graph(
     const a64_static_graph_node_t nodes[A64_STATIC_GRAPH_SLOTS],
     unsigned *completed, unsigned *blocks);
 
+/* `vfp_fp_session` has the same meaning as for the decoded runner. */
 bool a64_static_run_memory_hits_graph(
     arm_cpu_t *cpu, const a64_static_block_t *first,
     uint8_t *ram, size_t ram_size, unsigned budget,
     const a64_static_graph_node_t nodes[A64_STATIC_GRAPH_SLOTS],
-    unsigned *completed, unsigned *blocks);
+    bool vfp_fp_session, unsigned *completed, unsigned *blocks);
 
 #endif /* S5LBOX_A64_STATIC_H */

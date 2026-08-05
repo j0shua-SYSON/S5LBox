@@ -3440,17 +3440,19 @@ static bool validate_static_vfp_arithmetic_oracles(void) {
         }
     }
 
-    /* The generated runner now keeps one lazy host-FP session across adjacent
-     * arithmetic handlers. Prove both sides of that session boundary: two
-     * successful guest operations restore the caller environment once, while
-     * a fault-sensitive second operation returns the exact one-instruction
+    /* Prove both preservation policies and both sides of their exit boundary.
+     * Two successful guest operations restore the caller environment, while a
+     * fault-sensitive second operation returns the exact one-instruction
      * prefix and restores the same environment before fallback. */
-    for (unsigned rejection = 0u; rejection < 2u; rejection++) {
+    for (unsigned scenario = 0u; scenario < 4u; scenario++) {
+        unsigned session = scenario / 2u;
+        unsigned rejection = scenario % 2u;
         static const uint32_t session_program[] = {
             VFP_ARITH_S(3,0,2,0,1), /* VADD s2,s0,s1 */
             VFP_ARITH_S(2,0,5,3,4), /* VMUL s5,s3,s4 */
         };
-        uint32_t pc = UINT32_C(0x14700) + rejection * 8u;
+        uint32_t pc = UINT32_C(0x14700) +
+                      (session * 2u + rejection) * 8u;
         uint64_t original_fpcr = static_host_fpcr_read();
         uint64_t original_fpsr = static_host_fpsr_read();
         uint64_t installed_fpcr;
@@ -3482,8 +3484,9 @@ static bool validate_static_vfp_arithmetic_oracles(void) {
         installed_fpcr = static_host_fpcr_read();
         installed_fpsr = static_host_fpsr_read();
         completed = UINT_MAX;
-        run_ok = a64_static_run_read_hits(
-            &statik, &block, g_ram, sizeof g_ram, &completed);
+        run_ok = a64_static_run_memory_hits_decoded(
+            &statik, &block, g_ram, sizeof g_ram,
+            session != 0u, &completed);
         after_fpcr = static_host_fpcr_read();
         after_fpsr = static_host_fpsr_read();
         static_host_fpsr_write(original_fpsr);
@@ -3494,7 +3497,8 @@ static bool validate_static_vfp_arithmetic_oracles(void) {
             completed != (rejection ? 1u : 2u) ||
             !static_vfp_states_equal(&reference, &statik)) {
             fprintf(stderr,
-                    "jitbench: batched VFP host-state %s mismatch\n",
+                    "jitbench: %s VFP host-state %s mismatch\n",
+                    session ? "batched" : "unbatched",
                     rejection ? "partial rejection" : "success");
             return false;
         }
@@ -3504,7 +3508,7 @@ static bool validate_static_vfp_arithmetic_oracles(void) {
     printf("STATIC-VFP-ARITH-ORACLE exact=yes operations=9 widths=2 "
            "accepted=%u signed-zero=yes inexact=yes fallbacks=%zu "
            "conditions=yes partial-prefix=yes host-fp-state=yes "
-           "host-fp-session=yes\n",
+           "host-fp-session=yes host-fp-control=yes\n",
            exact_cases, sizeof fallbacks / sizeof fallbacks[0]);
     return true;
 }
@@ -5170,6 +5174,7 @@ typedef enum {
     SOC_ENTRY_GRAPH_EXTENDED_LDM_OFF,
     SOC_ENTRY_GRAPH_EXTENDED_VSTM_OFF,
     SOC_ENTRY_GRAPH_EXTENDED_VFP_ARITHMETIC_OFF,
+    SOC_ENTRY_GRAPH_EXTENDED_VFP_ARITHMETIC_UNBATCHED,
     SOC_ENTRY_GRAPH_EXTENDED_WRITES
 } soc_entry_path_t;
 
@@ -5193,6 +5198,8 @@ static const char *soc_entry_path_name(soc_entry_path_t path) {
         return "graph-extended-vstm-off";
     case SOC_ENTRY_GRAPH_EXTENDED_VFP_ARITHMETIC_OFF:
         return "graph-extended-vfp-arithmetic-off";
+    case SOC_ENTRY_GRAPH_EXTENDED_VFP_ARITHMETIC_UNBATCHED:
+        return "graph-extended-vfp-arithmetic-unbatched";
     case SOC_ENTRY_GRAPH_EXTENDED_WRITES:
         return "graph-extended-writes";
     }
@@ -5319,6 +5326,8 @@ static bool run_soc_entry_configured(const soc_entry_setup_t *setup,
                       path == SOC_ENTRY_GRAPH_EXTENDED_LDM_OFF ||
                       path == SOC_ENTRY_GRAPH_EXTENDED_VSTM_OFF ||
                       path == SOC_ENTRY_GRAPH_EXTENDED_VFP_ARITHMETIC_OFF ||
+                      path ==
+                          SOC_ENTRY_GRAPH_EXTENDED_VFP_ARITHMETIC_UNBATCHED ||
                       path == SOC_ENTRY_GRAPH_EXTENDED_WRITES;
     bool extended_path = path == SOC_ENTRY_GRAPH_EXTENDED ||
                          path == SOC_ENTRY_GRAPH_EXTENDED_INDIRECT_OFF ||
@@ -5328,6 +5337,8 @@ static bool run_soc_entry_configured(const soc_entry_setup_t *setup,
                          path == SOC_ENTRY_GRAPH_EXTENDED_LDM_OFF ||
                          path == SOC_ENTRY_GRAPH_EXTENDED_VSTM_OFF ||
                          path == SOC_ENTRY_GRAPH_EXTENDED_VFP_ARITHMETIC_OFF ||
+                         path ==
+                             SOC_ENTRY_GRAPH_EXTENDED_VFP_ARITHMETIC_UNBATCHED ||
                          path == SOC_ENTRY_GRAPH_EXTENDED_WRITES;
     bool indirect_off_path =
         path == SOC_ENTRY_GRAPH_EXTENDED_INDIRECT_OFF;
@@ -5339,6 +5350,8 @@ static bool run_soc_entry_configured(const soc_entry_setup_t *setup,
     bool vstm_off_path = path == SOC_ENTRY_GRAPH_EXTENDED_VSTM_OFF;
     bool vfp_arithmetic_off_path =
         path == SOC_ENTRY_GRAPH_EXTENDED_VFP_ARITHMETIC_OFF;
+    bool vfp_arithmetic_unbatched_path =
+        path == SOC_ENTRY_GRAPH_EXTENDED_VFP_ARITHMETIC_UNBATCHED;
     bool direct_write_path = path == SOC_ENTRY_GRAPH_EXTENDED_WRITES ||
                              vstr_off_path || stm_off_path || vstm_off_path;
 
@@ -5405,6 +5418,12 @@ static bool run_soc_entry_configured(const soc_entry_setup_t *setup,
         !s5l8900_static_a64_set_vfp_arithmetic(&machine, false)) {
         fprintf(stderr,
                 "jitbench: SoC VFP-arithmetic-off control unavailable\n");
+        goto done;
+    }
+    if (vfp_arithmetic_unbatched_path &&
+        !s5l8900_static_a64_set_vfp_fp_session(&machine, false)) {
+        fprintf(stderr,
+                "jitbench: SoC VFP-arithmetic session control unavailable\n");
         goto done;
     }
     if (graph_path &&
@@ -6886,10 +6905,11 @@ done:
     return ok;
 }
 
-/* Isolate the guarded arithmetic tranche with a three-way exact snapshot
- * gate. The off and on arms are the same binary and retain every older signed
- * capability; only scalar VFP arithmetic admission differs. This 93.75% VFP
- * loop is a handler-overhead measurement, not a firmware mix or phone FPS. */
+/* Isolate the guarded arithmetic tranche with a four-way exact snapshot gate.
+ * All arms are the same binary. The unbatched and batched arms retire the same
+ * signed records and differ only in host FP-state preservation cadence. This
+ * 93.75% VFP loop is a handler-overhead measurement, not a firmware mix or
+ * phone-FPS result. */
 static bool bench_soc_vfp_arithmetic(uint64_t requested, unsigned reps) {
     const unsigned length =
         (unsigned)(sizeof A32_SOC_VFP_ARITH /
@@ -6897,12 +6917,14 @@ static bool bench_soc_vfp_arithmetic(uint64_t requested, unsigned reps) {
     const uint64_t arithmetic_per_loop = 15u;
     double *reference_rates = NULL;
     double *off_rates = NULL;
-    double *on_rates = NULL;
+    double *unbatched_rates = NULL;
+    double *batched_rates = NULL;
     uint64_t total;
     uint64_t expected_arithmetic;
     uint64_t expected_off_retired;
     uint64_t off_chains = 0u;
-    uint64_t on_chains = 0u;
+    uint64_t unbatched_chains = 0u;
+    uint64_t batched_chains = 0u;
     bool ok = false;
 
     if (length != 16u ||
@@ -6915,8 +6937,10 @@ static bool bench_soc_vfp_arithmetic(uint64_t requested, unsigned reps) {
     expected_off_retired = total - expected_arithmetic;
     reference_rates = (double *)calloc(reps, sizeof *reference_rates);
     off_rates = (double *)calloc(reps, sizeof *off_rates);
-    on_rates = (double *)calloc(reps, sizeof *on_rates);
-    if (!reference_rates || !off_rates || !on_rates) {
+    unbatched_rates = (double *)calloc(reps, sizeof *unbatched_rates);
+    batched_rates = (double *)calloc(reps, sizeof *batched_rates);
+    if (!reference_rates || !off_rates || !unbatched_rates ||
+        !batched_rates) {
         fprintf(stderr, "jitbench: SoC VFP arithmetic out of memory\n");
         goto done;
     }
@@ -6924,120 +6948,180 @@ static bool bench_soc_vfp_arithmetic(uint64_t requested, unsigned reps) {
     for (unsigned rep = 0u; rep < reps; rep++) {
         soc_run_result_t reference = {0};
         soc_run_result_t off = {0};
-        soc_run_result_t on = {0};
+        soc_run_result_t unbatched = {0};
+        soc_run_result_t batched = {0};
         const char *order;
         bool ran;
 
-        if (rep % 3u == 0u) {
-            order = "reference-off-on";
+        if (rep % 4u == 0u) {
+            order = "reference-off-unbatched-batched";
             ran = run_soc_vfp_arithmetic_path(
                       total, SOC_ENTRY_REFERENCE, &reference) &&
                   run_soc_vfp_arithmetic_path(
                       total,
                       SOC_ENTRY_GRAPH_EXTENDED_VFP_ARITHMETIC_OFF, &off) &&
                   run_soc_vfp_arithmetic_path(
-                      total, SOC_ENTRY_GRAPH_EXTENDED, &on);
-        } else if (rep % 3u == 1u) {
-            order = "off-on-reference";
+                      total,
+                      SOC_ENTRY_GRAPH_EXTENDED_VFP_ARITHMETIC_UNBATCHED,
+                      &unbatched) &&
+                  run_soc_vfp_arithmetic_path(
+                      total, SOC_ENTRY_GRAPH_EXTENDED, &batched);
+        } else if (rep % 4u == 1u) {
+            order = "off-reference-batched-unbatched";
             ran = run_soc_vfp_arithmetic_path(
                       total,
                       SOC_ENTRY_GRAPH_EXTENDED_VFP_ARITHMETIC_OFF, &off) &&
                   run_soc_vfp_arithmetic_path(
-                      total, SOC_ENTRY_GRAPH_EXTENDED, &on) &&
+                      total, SOC_ENTRY_REFERENCE, &reference) &&
                   run_soc_vfp_arithmetic_path(
-                      total, SOC_ENTRY_REFERENCE, &reference);
-        } else {
-            order = "on-reference-off";
+                      total, SOC_ENTRY_GRAPH_EXTENDED, &batched) &&
+                  run_soc_vfp_arithmetic_path(
+                      total,
+                      SOC_ENTRY_GRAPH_EXTENDED_VFP_ARITHMETIC_UNBATCHED,
+                      &unbatched);
+        } else if (rep % 4u == 2u) {
+            order = "unbatched-batched-reference-off";
             ran = run_soc_vfp_arithmetic_path(
-                      total, SOC_ENTRY_GRAPH_EXTENDED, &on) &&
+                      total,
+                      SOC_ENTRY_GRAPH_EXTENDED_VFP_ARITHMETIC_UNBATCHED,
+                      &unbatched) &&
+                  run_soc_vfp_arithmetic_path(
+                      total, SOC_ENTRY_GRAPH_EXTENDED, &batched) &&
                   run_soc_vfp_arithmetic_path(
                       total, SOC_ENTRY_REFERENCE, &reference) &&
                   run_soc_vfp_arithmetic_path(
                       total,
                       SOC_ENTRY_GRAPH_EXTENDED_VFP_ARITHMETIC_OFF, &off);
+        } else {
+            order = "batched-unbatched-off-reference";
+            ran = run_soc_vfp_arithmetic_path(
+                      total, SOC_ENTRY_GRAPH_EXTENDED, &batched) &&
+                  run_soc_vfp_arithmetic_path(
+                      total,
+                      SOC_ENTRY_GRAPH_EXTENDED_VFP_ARITHMETIC_UNBATCHED,
+                      &unbatched) &&
+                  run_soc_vfp_arithmetic_path(
+                      total,
+                      SOC_ENTRY_GRAPH_EXTENDED_VFP_ARITHMETIC_OFF, &off) &&
+                  run_soc_vfp_arithmetic_path(
+                      total, SOC_ENTRY_REFERENCE, &reference);
         }
-        if (!ran || !reference.snapshot || !off.snapshot || !on.snapshot ||
+        if (!ran || !reference.snapshot || !off.snapshot ||
+            !unbatched.snapshot || !batched.snapshot ||
             reference.snapshot_len != off.snapshot_len ||
-            reference.snapshot_len != on.snapshot_len ||
+            reference.snapshot_len != unbatched.snapshot_len ||
+            reference.snapshot_len != batched.snapshot_len ||
             memcmp(reference.snapshot, off.snapshot,
                    reference.snapshot_len) != 0 ||
-            memcmp(reference.snapshot, on.snapshot,
+            memcmp(reference.snapshot, unbatched.snapshot,
+                   reference.snapshot_len) != 0 ||
+            memcmp(reference.snapshot, batched.snapshot,
                    reference.snapshot_len) != 0 ||
             off.signed_retired != expected_off_retired ||
-            on.signed_retired != total ||
+            unbatched.signed_retired != total ||
+            batched.signed_retired != total ||
             reference.dread_hits != 0u || off.dread_hits != 0u ||
-            on.dread_hits != 0u || reference.dread_misses != 0u ||
-            off.dread_misses != 0u || on.dread_misses != 0u ||
+            unbatched.dread_hits != 0u || batched.dread_hits != 0u ||
+            reference.dread_misses != 0u || off.dread_misses != 0u ||
+            unbatched.dread_misses != 0u || batched.dread_misses != 0u ||
             reference.dwrite_hits != 0u || off.dwrite_hits != 0u ||
-            on.dwrite_hits != 0u || reference.dwrite_misses != 0u ||
-            off.dwrite_misses != 0u || on.dwrite_misses != 0u ||
-            on.graph_chains == 0u) {
+            unbatched.dwrite_hits != 0u || batched.dwrite_hits != 0u ||
+            reference.dwrite_misses != 0u || off.dwrite_misses != 0u ||
+            unbatched.dwrite_misses != 0u ||
+            batched.dwrite_misses != 0u ||
+            unbatched.graph_chains == 0u ||
+            unbatched.graph_chains != batched.graph_chains) {
             fprintf(stderr,
                     "jitbench: SoC VFP arithmetic repetition %u failed "
                     "exact A/B off-retired=%" PRIu64
-                    " on-retired=%" PRIu64 " graph=%" PRIu64 "\n",
-                    rep + 1u, off.signed_retired, on.signed_retired,
-                    on.graph_chains);
+                    " unbatched-retired=%" PRIu64
+                    " batched-retired=%" PRIu64
+                    " unbatched-graph=%" PRIu64
+                    " batched-graph=%" PRIu64 "\n",
+                    rep + 1u, off.signed_retired,
+                    unbatched.signed_retired, batched.signed_retired,
+                    unbatched.graph_chains, batched.graph_chains);
             free_soc_run_result(&reference);
             free_soc_run_result(&off);
-            free_soc_run_result(&on);
+            free_soc_run_result(&unbatched);
+            free_soc_run_result(&batched);
             goto done;
         }
         if (rep == 0u) {
             off_chains = off.graph_chains;
-            on_chains = on.graph_chains;
+            unbatched_chains = unbatched.graph_chains;
+            batched_chains = batched.graph_chains;
         } else if (off_chains != off.graph_chains ||
-                   on_chains != on.graph_chains) {
+                   unbatched_chains != unbatched.graph_chains ||
+                   batched_chains != batched.graph_chains) {
             fprintf(stderr,
                     "jitbench: SoC VFP arithmetic chain counts changed "
                     "across repetitions\n");
             free_soc_run_result(&reference);
             free_soc_run_result(&off);
-            free_soc_run_result(&on);
+            free_soc_run_result(&unbatched);
+            free_soc_run_result(&batched);
             goto done;
         }
 
         reference_rates[rep] = (double)total / reference.seconds / 1.0e6;
         off_rates[rep] = (double)total / off.seconds / 1.0e6;
-        on_rates[rep] = (double)total / on.seconds / 1.0e6;
+        unbatched_rates[rep] =
+            (double)total / unbatched.seconds / 1.0e6;
+        batched_rates[rep] = (double)total / batched.seconds / 1.0e6;
         printf("SOC-VFP-ARITH-SAMPLE rep=%u order=%s reference=%.3f "
-               "arithmetic-off=%.3f arithmetic-on=%.3f Minsn/s "
-               "off-retired=%" PRIu64 " on-retired=%" PRIu64
+               "arithmetic-off=%.3f arithmetic-unbatched=%.3f "
+               "arithmetic-batched=%.3f Minsn/s "
+               "off-retired=%" PRIu64
+               " unbatched-retired=%" PRIu64
+               " batched-retired=%" PRIu64
                " exact-snapshot=yes\n",
                rep + 1u, order, reference_rates[rep], off_rates[rep],
-               on_rates[rep], off.signed_retired, on.signed_retired);
+               unbatched_rates[rep], batched_rates[rep], off.signed_retired,
+               unbatched.signed_retired, batched.signed_retired);
         free_soc_run_result(&reference);
         free_soc_run_result(&off);
-        free_soc_run_result(&on);
+        free_soc_run_result(&unbatched);
+        free_soc_run_result(&batched);
     }
 
     qsort(reference_rates, reps, sizeof *reference_rates, cmp_double);
     qsort(off_rates, reps, sizeof *off_rates, cmp_double);
-    qsort(on_rates, reps, sizeof *on_rates, cmp_double);
+    qsort(unbatched_rates, reps, sizeof *unbatched_rates, cmp_double);
+    qsort(batched_rates, reps, sizeof *batched_rates, cmp_double);
     printf("SOC-VFP-ARITH-CURVE length=%u arithmetic=%" PRIu64
            " guest-insns=%" PRIu64
            " reps=%u chain-limit=256 same-binary=yes run-api=yes "
            "cache-lookup=yes block-witness=yes entry-gates=yes "
            "timer-boundaries=yes device-tick=yes head-cache=warm mmu=off "
            "exact-snapshot=yes off-signed-retired=%" PRIu64
-           " on-signed-retired=%" PRIu64
+           " unbatched-signed-retired=%" PRIu64
+           " batched-signed-retired=%" PRIu64
            " off-graph-chains=%" PRIu64
-           " on-graph-chains=%" PRIu64
-           " reference-median=%.3f off-median=%.3f on-median=%.3f "
-           "off-speedup=%.3fx on-speedup=%.3fx on-over-off=%.3fx\n",
+           " unbatched-graph-chains=%" PRIu64
+           " batched-graph-chains=%" PRIu64
+           " reference-median=%.3f off-median=%.3f "
+           "unbatched-median=%.3f batched-median=%.3f "
+           "off-speedup=%.3fx unbatched-speedup=%.3fx "
+           "batched-speedup=%.3fx batched-over-off=%.3fx "
+           "session-speedup=%.3fx\n",
            length, arithmetic_per_loop, total, reps,
-           expected_off_retired, total, off_chains, on_chains,
+           expected_off_retired, total, total, off_chains,
+           unbatched_chains, batched_chains,
            reference_rates[reps / 2u], off_rates[reps / 2u],
-           on_rates[reps / 2u],
+           unbatched_rates[reps / 2u], batched_rates[reps / 2u],
            off_rates[reps / 2u] / reference_rates[reps / 2u],
-           on_rates[reps / 2u] / reference_rates[reps / 2u],
-           on_rates[reps / 2u] / off_rates[reps / 2u]);
+           unbatched_rates[reps / 2u] / reference_rates[reps / 2u],
+           batched_rates[reps / 2u] / reference_rates[reps / 2u],
+           batched_rates[reps / 2u] / off_rates[reps / 2u],
+           batched_rates[reps / 2u] / unbatched_rates[reps / 2u]);
     ok = true;
 
 done:
     free(reference_rates);
     free(off_rates);
-    free(on_rates);
+    free(unbatched_rates);
+    free(batched_rates);
     return ok;
 }
 

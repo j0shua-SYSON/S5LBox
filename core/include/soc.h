@@ -3943,6 +3943,11 @@ bool s5l8900_static_a64_set_vstm(s5l8900_t *m, bool enabled);
  * The signed handlers commit only the exact RunFast/simple-value contract and
  * return every other case to arm_step(). */
 bool s5l8900_static_a64_set_vfp_arithmetic(s5l8900_t *m, bool enabled);
+
+/* Same-binary benchmark control for lazy host FPCR/FPSR preservation across
+ * adjacent guarded arithmetic handlers. Product default is enabled. Disabling
+ * it retains exact semantics but restores host FP state after every operation. */
+bool s5l8900_static_a64_set_vfp_fp_session(s5l8900_t *m, bool enabled);
 /* Same-binary benchmark control for the total signed invocation bound. A
  * decoded head remains at most sixteen instructions and the machine still
  * clamps every invocation to the first exact timebase edge. The generic engine

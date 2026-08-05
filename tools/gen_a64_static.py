@@ -1365,13 +1365,22 @@ def vfp_arithmetic_body(operation: str, width: int) -> list[str]:
         body.extend(load_operand("w12", 0, "d"))
 
     body.extend([
-        # The signed invocation owns one lazy host-FP session. The first
-        # arithmetic operation saves and normalizes caller state; later
-        # operations reuse it. Every function exit and every external C
-        # callback restores that state through the shared epilogue. FPSR is
-        # still cleared and sampled per guest instruction, preserving exact
-        # fallback atomicity and the smallest-normal/IXC test.
+        # Product execution normally owns one lazy host-FP session. The
+        # context switch at +52 also exposes an exact same-binary control:
+        # false uses the former inline per-operation save/restore sequence,
+        # while true saves once and reuses the state until an exit or C call.
+        # FPSR remains cleared and sampled per guest instruction in both arms.
+        "    ldr w17, [x3, #52]",
+        f"    cbz w17, {p}_unbatched_begin",
         "    bl .La64s_fp_session_begin",
+        f"    b {p}_fp_ready",
+        f"{p}_unbatched_begin:",
+        "    mrs x4, fpcr",
+        "    mrs x5, fpsr",
+        f"    cbz x4, {p}_unbatched_fpcr_ready",
+        "    msr fpcr, xzr",
+        f"{p}_unbatched_fpcr_ready:",
+        f"{p}_fp_ready:",
         "    msr fpsr, xzr",
     ])
 
@@ -1409,6 +1418,15 @@ def vfp_arithmetic_body(operation: str, width: int) -> list[str]:
         *vfp_arithmetic_flags(
             width, ireg, f"{p}_result", state_failure
         ),
+        # The control arm restores exactly where the pre-session handler did.
+        # The product arm deliberately carries the session into an adjacent
+        # arithmetic handler; the common exit still restores caller state.
+        "    ldr w17, [x3, #52]",
+        f"    cbnz w17, {p}_state_ready",
+        "    msr fpsr, x5",
+        f"    cbz x4, {p}_state_ready",
+        "    msr fpcr, x4",
+        f"{p}_state_ready:",
     ])
     if width == 4:
         body.append("    str w16, [x6, w12, uxtw #2]")
@@ -1420,6 +1438,14 @@ def vfp_arithmetic_body(operation: str, width: int) -> list[str]:
     body.extend([
         *vfp_finish(),
         f"{state_failure}:",
+        # A batched failure defers restoration to the common direct-miss
+        # boundary. The unbatched control owns its inline saved x4/x5 values.
+        "    ldr w17, [x3, #52]",
+        f"    cbnz w17, {p}_failure_ready",
+        "    msr fpsr, x5",
+        f"    cbz x4, {p}_failure_ready",
+        "    msr fpcr, x4",
+        f"{p}_failure_ready:",
         "    b .La64s_direct_miss",
     ])
     return body

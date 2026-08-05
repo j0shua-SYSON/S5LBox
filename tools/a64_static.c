@@ -107,6 +107,7 @@ typedef struct {
     uint32_t *vfp_fpexc;
     uint32_t *vfp_fpscr;
     uint32_t vfp_access;
+    uint32_t vfp_fp_session;
     const void *dwrite;
     uint64_t *dwrite_hits;
 } a64_static_read_context_t;
@@ -138,6 +139,7 @@ _Static_assert(sizeof(a64_static_read_context_t) == 72u &&
                offsetof(a64_static_read_context_t, vfp_fpexc) == 32u &&
                offsetof(a64_static_read_context_t, vfp_fpscr) == 40u &&
                offsetof(a64_static_read_context_t, vfp_access) == 48u &&
+               offsetof(a64_static_read_context_t, vfp_fp_session) == 52u &&
                offsetof(a64_static_read_context_t, dwrite) == 56u &&
                offsetof(a64_static_read_context_t, dwrite_hits) == 64u,
                "signed memory context layout changed");
@@ -1888,6 +1890,7 @@ bool a64_static_run(arm_cpu_t *cpu, const a64_static_block_t *block,
 static bool execute_memory_hits(arm_cpu_t *cpu,
                                 const a64_static_block_t *block,
                                 uint8_t *ram, size_t ram_size,
+                                bool vfp_fp_session,
                                 unsigned *completed) {
 #if defined(S5LBOX_STATIC_A64_NATIVE)
     a64_static_read_context_t context = {
@@ -1899,6 +1902,7 @@ static bool execute_memory_hits(arm_cpu_t *cpu,
         &cpu->vfp_fpexc,
         &cpu->vfp_fpscr,
         vfp_cpacr_permits(cpu) ? 1u : 0u,
+        vfp_fp_session ? 1u : 0u,
         cpu->bus && cpu->bus->host_ram_write ? cpu->dwrite : NULL,
         &cpu->dwrite_hits
     };
@@ -1915,6 +1919,7 @@ static bool execute_memory_hits(arm_cpu_t *cpu,
     (void)block;
     (void)ram;
     (void)ram_size;
+    (void)vfp_fp_session;
     (void)completed;
     return false;
 #endif
@@ -1928,7 +1933,7 @@ bool a64_static_run_read_hits(arm_cpu_t *cpu,
         !validate_run(cpu, block, 1u, ram, ram_size,
                       A64S_RUN_READ_HITS))
         return false;
-    return execute_memory_hits(cpu, block, ram, ram_size, completed);
+    return execute_memory_hits(cpu, block, ram, ram_size, true, completed);
 }
 
 bool a64_static_run_memory_hits(arm_cpu_t *cpu,
@@ -1939,7 +1944,7 @@ bool a64_static_run_memory_hits(arm_cpu_t *cpu,
         !validate_run(cpu, block, 1u, ram, ram_size,
                       A64S_RUN_MEMORY_HITS))
         return false;
-    return execute_memory_hits(cpu, block, ram, ram_size, completed);
+    return execute_memory_hits(cpu, block, ram, ram_size, true, completed);
 }
 
 static bool validate_decoded_hits_at(const a64_static_block_t *block,
@@ -2012,12 +2017,13 @@ bool a64_static_run_read_hits_decoded(arm_cpu_t *cpu,
             block, cpu->r[15], (cpu->cpsr & ARM_CPSR_T) != 0u,
             A64_STATIC_MAX_INSNS, false))
         return false;
-    return execute_memory_hits(cpu, block, ram, ram_size, completed);
+    return execute_memory_hits(cpu, block, ram, ram_size, true, completed);
 }
 
 bool a64_static_run_memory_hits_decoded(arm_cpu_t *cpu,
                                         const a64_static_block_t *block,
                                         uint8_t *ram, size_t ram_size,
+                                        bool vfp_fp_session,
                                         unsigned *completed) {
     if (!cpu || !ram || !completed || !ram_size ||
         (ram_size & (ram_size - 1u)) != 0u ||
@@ -2026,7 +2032,8 @@ bool a64_static_run_memory_hits_decoded(arm_cpu_t *cpu,
             block, cpu->r[15], (cpu->cpsr & ARM_CPSR_T) != 0u,
             A64_STATIC_MAX_INSNS, true))
         return false;
-    return execute_memory_hits(cpu, block, ram, ram_size, completed);
+    return execute_memory_hits(cpu, block, ram, ram_size,
+                               vfp_fp_session, completed);
 }
 
 #if defined(S5LBOX_STATIC_A64_NATIVE)
@@ -2081,6 +2088,7 @@ static bool run_hits_chain(arm_cpu_t *cpu,
                            void *opaque,
                            const a64_static_graph_node_t *graph_nodes,
                            bool memory_hits,
+                           bool vfp_fp_session,
                            unsigned *completed, unsigned *blocks) {
     bool thumb;
     bool priv;
@@ -2111,6 +2119,7 @@ static bool run_hits_chain(arm_cpu_t *cpu,
         &cpu->vfp_fpexc,
         &cpu->vfp_fpscr,
         vfp_cpacr_permits(cpu) ? 1u : 0u,
+        vfp_fp_session ? 1u : 0u,
         cpu->bus && cpu->bus->host_ram_write ? cpu->dwrite : NULL,
         &cpu->dwrite_hits
     };
@@ -2144,6 +2153,7 @@ static bool run_hits_chain(arm_cpu_t *cpu,
     (void)opaque;
     (void)graph_nodes;
     (void)memory_hits;
+    (void)vfp_fp_session;
     return false;
 #endif
 }
@@ -2156,7 +2166,7 @@ bool a64_static_run_read_hits_chain(arm_cpu_t *cpu,
                                     void *opaque, unsigned *completed,
                                     unsigned *blocks) {
     return run_hits_chain(cpu, first, ram, ram_size, budget, next, opaque,
-                          NULL, false, completed, blocks);
+                          NULL, false, true, completed, blocks);
 }
 
 bool a64_static_run_memory_hits_chain(arm_cpu_t *cpu,
@@ -2164,10 +2174,11 @@ bool a64_static_run_memory_hits_chain(arm_cpu_t *cpu,
                                       uint8_t *ram, size_t ram_size,
                                       unsigned budget,
                                       a64_static_chain_next_fn next,
-                                      void *opaque, unsigned *completed,
+                                      void *opaque, bool vfp_fp_session,
+                                      unsigned *completed,
                                       unsigned *blocks) {
     return run_hits_chain(cpu, first, ram, ram_size, budget, next, opaque,
-                          NULL, true, completed, blocks);
+                          NULL, true, vfp_fp_session, completed, blocks);
 }
 
 bool a64_static_run_read_hits_graph(
@@ -2177,15 +2188,15 @@ bool a64_static_run_read_hits_graph(
     unsigned *completed, unsigned *blocks) {
     if (!nodes) return false;
     return run_hits_chain(cpu, first, ram, ram_size, budget, NULL, NULL,
-                          nodes, false, completed, blocks);
+                          nodes, false, true, completed, blocks);
 }
 
 bool a64_static_run_memory_hits_graph(
     arm_cpu_t *cpu, const a64_static_block_t *first,
     uint8_t *ram, size_t ram_size, unsigned budget,
     const a64_static_graph_node_t nodes[A64_STATIC_GRAPH_SLOTS],
-    unsigned *completed, unsigned *blocks) {
+    bool vfp_fp_session, unsigned *completed, unsigned *blocks) {
     if (!nodes) return false;
     return run_hits_chain(cpu, first, ram, ram_size, budget, NULL, NULL,
-                          nodes, true, completed, blocks);
+                          nodes, true, vfp_fp_session, completed, blocks);
 }
