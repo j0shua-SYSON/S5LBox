@@ -6686,3 +6686,80 @@ device observation remains roughly 0--4 FPS. The next measured store frontier is
 even its exact continuity ceiling is only 1.327% of the new baseline. A real exact-build device
 measurement remains the decisive authority; implementing VSTM is justified as bounded continuity
 work, not as a promise that 30 FPS is close.
+
+### 2026-08-05: transactional one-block VSTM closes the measured VFP-store boundary
+
+Read-only observer commit `6227c2a91fdc86b302fce33ad39df9ad76504f4e` split the VFP
+multi-store frontier before any implementation. The unchanged 7.100--7.110 B instruction stream
+contained 24,436 architectural VSTM/VPUSH candidates and 24,410 retirement-eligible encounters.
+Exactly 24,275 eligible encounters fit the existing one-block DWRITE contract; the remaining 135
+cross a 1 KiB boundary. The model predicted that the one-block family would remove 45,370 runner
+entries, while admitting all 135 cross-block cases would remove **zero additional entries**. That
+measured result selected a transactional one-block implementation and rules out cross-block VSTM
+as useful continuity work on this authority.
+
+Implementation commit `56db1b3d770869f3383bdb794344750f07ce5d27` adds 45 terminal
+build-time-signed handlers: IA without writeback, IA with writeback, and DB with writeback/VPUSH,
+across all non-PC base registers. Single-precision lists may contain 1--32 words, including odd
+counts; double-precision lists use even encoded word counts and D0--D15. Deprecated FSTMX, empty
+lists, invalid register ranges and PC bases remain in the interpreter. Runtime admission checks the
+A32 condition, live VFP enable state, complete aligned address span, privilege, translation
+generation, consent and one 1 KiB DWRITE witness before the first write. Only then are all words
+committed, followed by optional base writeback. Any refusal happens before architectural mutation.
+No executable page is created or changed at runtime.
+
+The native oracle covers IA/DB, writeback, odd S lists, double registers, every A32 condition,
+VFP-disabled refusal, alignment, cold-cache fallback, consent denial and cross-block rollback. It
+reports six exact write cases and 70 exact word hits. An initial Apple CI failure exposed a validator
+ordering bug, not a VSTM semantic or RAM-corruption bug: the generic semantic-span scanner mistook a
+terminal one-record VSTM for half of a direct-write pair. Commit
+`832a2e8f959e02a8f841b8ce6cbe016a9501ca99` recognizes the complete VFP record first.
+Exact-SHA core run `30973237408` is green in all eight jobs, and exact-SHA iOS run
+`30973237428` builds and packages the real app.
+
+Benchmarking uses the same executable for reference, VSTM disabled and VSTM enabled. Each
+sixteen-instruction loop contains four VSTM operations and writes twenty words. Setup and warm-up
+remain outside timing; graph lookup, byte witness, entry gates, timebase splitting and device ticks
+remain inside. Every arm must serialize to the same complete machine snapshot.
+
+| Apple arm64 runner | interpreter | VSTM off | VSTM on | on/interpreter | on/off |
+|---|---:|---:|---:|---:|---:|
+| macOS 14 | 32.627 Minsn/s | 27.013 Minsn/s | 142.253 Minsn/s | **4.360x** | **5.266x** |
+| macOS 15 | 29.195 Minsn/s | 31.124 Minsn/s | 133.300 Minsn/s | **4.566x** | **4.283x** |
+
+Each 20 M-instruction disabled run retires exactly 15,000,000 instructions in signed text; each
+enabled run retires all 20,000,000, records 20,000,000 DWRITE word hits and zero timed misses, and
+matches the interpreter snapshot byte for byte. The different absolute host rates are not compared
+across CI runners; only rotated same-run ratios and the exact-state gate support the result.
+
+Baseline commit `e667fa697ce07afd77eb8e49934217d116db9207` advances the exact
+firmware authority without creating a duplicate snapshot. `work/r542-vstm-baseline-10m` restores
+the trusted project-local 7.100 B checkpoint, reaches exactly 7.110 B, exits 0 in 55.677 host
+seconds, leaves stderr empty, produces 1,590 live nonblack CLCD frames, and completes 15,626 media
+reads plus 469 writes with zero failures. The literal-write oracle remains exact at
+1,032,111/1,032,111 candidates and 1,736,595/1,736,595 events. Work-image, screen and output hashes
+remain stable. Exact-SHA core run `30973710318` is green in all eight jobs.
+
+The shipped store baseline now contains 947,961 retirement-eligible instructions (9.480% fetched)
+and 3,372,540 runner entries. The preceding STM baseline was 3,417,910: the measured reduction is
+**45,370 exactly**, matching the pre-implementation prediction. Relative to the current read-only
+decoder, the implemented store graph removes 1,283,112 entries, or 27.560%. Re-adding shipped
+one-block VSTM changes zero entries, and all partitions and histograms report `EXACT`.
+
+| remaining store family | eligible | entries removed from 3,372,540 | baseline reduction |
+|---|---:|---:|---:|
+| Thumb multi-store | 48,679 | 28,733 | **0.852%** |
+| A32 block remainder | 1,848 | 1,122 | 0.033% |
+| A32 VSTM cross-block/FSTMX | 135 | 0 | **0.000%** |
+
+The accurate r533 project-local checkpoint remains the fast restore point; this run deliberately
+does not consume storage for a byte-identical duplicate checkpoint.
+
+Brutal status: **the implementation is exact and the architectural progress is real, but measured
+phone-FPS improvement remains zero**. The 4.283x--5.266x on/off result belongs to a synthetic loop
+where VSTM writes twenty words per sixteen instructions. Real restored benefit is 45,370 fewer
+modeled runner entries, not elapsed time or frames. The exact IPA has not been installed on a
+physical iPhone in this environment, and the only device observation remains roughly 0--4 FPS.
+The next remaining store family can remove only 0.852% of this baseline, so another store opcode is
+not automatically the next best long-term FPS investment. The next tranche must be chosen from a
+broader measured bottleneck, and 30 FPS is not close or established.
