@@ -207,6 +207,7 @@ jobs:
             grep -Fq 'STATIC-A64-CHAIN-BOUND-ORACLE exact=yes one-retired=1 one-chains=0 sixteen-retired=16 sixteen-chains=15 persistent-chains=15' <<<"$soc_output"
             grep -Fq 'STATIC-A64-GRAPH-BOUND-ORACLE exact=yes one-retired=1 one-chains=0 one-graph=0 sixteen-retired=16 sixteen-chains=15 sixteen-graph=15 extended-retired=64 extended-chains=63 extended-graph=63 first-timebase-edge=yes block-witness=4 collision-republish=yes' <<<"$soc_output"
             grep -Eq 'STATIC-A64-VFP-REGISTER-ORACLE exact=yes retired=[1-9][0-9]* compare=yes widen=yes' <<<"$soc_output"
+            grep -Eq 'STATIC-A64-VFP-ARITH-ORACLE exact=yes off-retired=[0-9]+ on-retired=16000 graph=[1-9][0-9]* operations=15 single=yes double=yes same-machine=yes rollout=yes' <<<"$soc_output"
             grep -Eq 'STATIC-A64-VFP-READ-ORACLE exact=yes retired=[1-9][0-9]* cold-fill=yes double=yes' <<<"$soc_output"
             grep -Eq 'STATIC-A64-VFP-WRITE-ORACLE exact=yes retired=[1-9][0-9]* dwrite-hits=32998 dwrite-misses=2 double=yes boundary=yes graph=yes' <<<"$soc_output"
             grep -Eq 'STATIC-A64-THUMB-ORACLE exact=yes retired=[1-9][0-9]*' <<<"$soc_output"
@@ -244,6 +245,7 @@ jobs:
             grep -Eq 'SOC-STM-CURVE length=16 stm=4 dwrite-words=12 guest-insns=10000 reps=1 chain-limit=256 same-binary=yes run-api=yes cache-lookup=yes block-witness=yes entry-gates=yes timer-boundaries=yes device-tick=yes head-cache=warm mmu=off exact-snapshot=yes off-signed-retired=7500 on-signed-retired=10000 dwrite-hits=7500 dwrite-misses=0 off-graph-chains=[0-9]+ on-graph-chains=[1-9][0-9]*' <<<"$static_output"
             grep -Eq 'SOC-LDM-CURVE length=16 ldm=4 dread-words=12 guest-insns=10000 reps=1 chain-limit=256 same-binary=yes run-api=yes cache-lookup=yes block-witness=yes entry-gates=yes timer-boundaries=yes device-tick=yes head-cache=warm mmu=off exact-snapshot=yes off-signed-retired=7500 on-signed-retired=10000 dread-hits=7500 dread-misses=0 off-graph-chains=[0-9]+ on-graph-chains=[1-9][0-9]*' <<<"$static_output"
             grep -Eq 'SOC-VSTM-CURVE length=16 vstm=4 dwrite-words=16 guest-insns=10000 reps=1 chain-limit=256 same-binary=yes run-api=yes cache-lookup=yes block-witness=yes entry-gates=yes timer-boundaries=yes device-tick=yes head-cache=warm mmu=off exact-snapshot=yes off-signed-retired=7500 on-signed-retired=10000 dwrite-hits=10000 dwrite-misses=0 off-graph-chains=[0-9]+ on-graph-chains=[1-9][0-9]*' <<<"$static_output"
+            grep -Eq 'SOC-VFP-ARITH-CURVE length=16 arithmetic=15 guest-insns=10000 reps=1 chain-limit=256 same-binary=yes run-api=yes cache-lookup=yes block-witness=yes entry-gates=yes timer-boundaries=yes device-tick=yes head-cache=warm mmu=off exact-snapshot=yes off-signed-retired=625 on-signed-retired=10000 off-graph-chains=[0-9]+ on-graph-chains=[1-9][0-9]*' <<<"$static_output"
           else
             grep -Fq 'SKIP: not an arm64 host' <<<"$output"
             grep -Fq 'STATIC-A64-SOC-ORACLE SKIP: no signed AArch64 handlers' <<<"$soc_output"
@@ -257,6 +259,7 @@ jobs:
             grep -Fq 'STATIC-A64-CHAIN-BOUND-ORACLE SKIP: no signed AArch64 handlers' <<<"$soc_output"
             grep -Fq 'STATIC-A64-GRAPH-BOUND-ORACLE SKIP: no signed AArch64 handlers' <<<"$soc_output"
             grep -Fq 'STATIC-A64-VFP-REGISTER-ORACLE SKIP: no signed AArch64 handlers' <<<"$soc_output"
+            grep -Fq 'STATIC-A64-VFP-ARITH-ORACLE SKIP: no signed AArch64 handlers' <<<"$soc_output"
             grep -Fq 'STATIC-A64-VFP-READ-ORACLE SKIP: no signed AArch64 handlers' <<<"$soc_output"
             grep -Fq 'STATIC-A64-THUMB-ORACLE SKIP: no signed AArch64 handlers' <<<"$soc_output"
             grep -Fq 'STATIC-A64-THUMB-READ-ORACLE SKIP: no signed AArch64 handlers' <<<"$soc_output"

@@ -447,6 +447,29 @@ static const uint32_t A32_SOC_VSTM[] = {
     UINT32_C(0xeaffffef),
 };
 
+/* Fifteen VFPv2 arithmetic instructions plus the loop branch. All operands
+ * remain signed zero or finite normal across repetitions. This deliberately
+ * extreme 93.75% arithmetic mix isolates handler overhead and is neither a
+ * restored-firmware instruction mix nor phone-FPS evidence. */
+static const uint32_t A32_SOC_VFP_ARITH[] = {
+    VFP_ARITH_S(0,0, 0, 8, 9),  /* VMLA  s0,s8,s9 */
+    VFP_ARITH_S(0,1, 1, 8, 9),  /* VMLS  s1,s8,s9 */
+    VFP_ARITH_S(1,0, 2, 8, 9),  /* VNMLS s2,s8,s9 */
+    VFP_ARITH_S(1,1, 3, 8, 9),  /* VNMLA s3,s8,s9 */
+    VFP_ARITH_S(2,0, 4, 8, 9),  /* VMUL  s4,s8,s9 */
+    VFP_ARITH_S(2,1, 5, 8, 9),  /* VNMUL s5,s8,s9 */
+    VFP_ARITH_S(3,0, 6, 8, 9),  /* VADD  s6,s8,s9 */
+    VFP_ARITH_S(3,1, 7, 8, 9),  /* VSUB  s7,s8,s9 */
+    VFP_ARITH_S(4,0,10,30,31),  /* VDIV  s10,s30,s31 */
+    VFP_ARITH_D(0,0, 0, 7, 8),  /* VMLA  d0,d7,d8 */
+    VFP_ARITH_D(0,1, 1, 7, 8),  /* VMLS  d1,d7,d8 */
+    VFP_ARITH_D(2,0, 2, 7, 8),  /* VMUL  d2,d7,d8 */
+    VFP_ARITH_D(3,0, 3, 7, 8),  /* VADD  d3,d7,d8 */
+    VFP_ARITH_D(3,1, 4, 7, 8),  /* VSUB  d4,d7,d8 */
+    VFP_ARITH_D(4,0, 5,13,14),  /* VDIV  d5,d13,d14 */
+    UINT32_C(0xeaffffef),       /* B 0 */
+};
+
 /* All sixteen A32 immediate data-processing opcodes. This deliberately uses
  * r8-r14, PC as an input, arithmetic and logical flag writes, both rotated and
  * unrotated immediates, and carry-consuming operations. */
@@ -5085,6 +5108,7 @@ typedef enum {
     SOC_ENTRY_GRAPH_EXTENDED_STM_OFF,
     SOC_ENTRY_GRAPH_EXTENDED_LDM_OFF,
     SOC_ENTRY_GRAPH_EXTENDED_VSTM_OFF,
+    SOC_ENTRY_GRAPH_EXTENDED_VFP_ARITHMETIC_OFF,
     SOC_ENTRY_GRAPH_EXTENDED_WRITES
 } soc_entry_path_t;
 
@@ -5106,6 +5130,8 @@ static const char *soc_entry_path_name(soc_entry_path_t path) {
         return "graph-extended-ldm-off";
     case SOC_ENTRY_GRAPH_EXTENDED_VSTM_OFF:
         return "graph-extended-vstm-off";
+    case SOC_ENTRY_GRAPH_EXTENDED_VFP_ARITHMETIC_OFF:
+        return "graph-extended-vfp-arithmetic-off";
     case SOC_ENTRY_GRAPH_EXTENDED_WRITES:
         return "graph-extended-writes";
     }
@@ -5125,6 +5151,7 @@ typedef struct {
     bool indirect_workload;
     bool thumb_conditional_workload;
     bool vfp_workload;
+    bool vfp_arithmetic_workload;
 } soc_entry_setup_t;
 
 static bool setup_soc_entry_machine(s5l8900_t *machine,
@@ -5142,15 +5169,29 @@ static bool setup_soc_entry_machine(s5l8900_t *machine,
         s5l8900_load(machine, 0u, setup->program,
                      (size_t)setup->length * sizeof *setup->program);
         machine->cpu.r[7] = setup->seed_r7;
-        if (setup->vfp_workload) {
+        if (setup->vfp_workload || setup->vfp_arithmetic_workload) {
             machine->cpu.cp15.cpacr =
                 0xfu << ARM_CPACR_CP10_SHIFT;
             machine->cpu.vfp_fpexc = ARM_FPEXC_EN;
-            machine->cpu.vfp_fpscr = 0u;
-            for (unsigned i = 0u; i < 32u; i++)
-                machine->cpu.vfp_s[i] =
-                    UINT32_C(0x80000000) ^
-                    (UINT32_C(0x01020304) * (i + 1u));
+            if (setup->vfp_arithmetic_workload) {
+                machine->cpu.vfp_fpscr =
+                    ARM_FPSCR_FZ | ARM_FPSCR_DN | ARM_FPSCR_IXC |
+                    ARM_FPSCR_N | ARM_FPSCR_C;
+                memset(machine->cpu.vfp_s, 0,
+                       sizeof machine->cpu.vfp_s);
+                vfp_set_d(&machine->cpu, 13u,
+                          UINT64_C(0x3ff0000000000000));
+                vfp_set_d(&machine->cpu, 14u,
+                          UINT64_C(0x3ff0000000000000));
+                vfp_set_s(&machine->cpu, 30u, UINT32_C(0x3f800000));
+                vfp_set_s(&machine->cpu, 31u, UINT32_C(0x3f800000));
+            } else {
+                machine->cpu.vfp_fpscr = 0u;
+                for (unsigned i = 0u; i < 32u; i++)
+                    machine->cpu.vfp_s[i] =
+                        UINT32_C(0x80000000) ^
+                        (UINT32_C(0x01020304) * (i + 1u));
+            }
         }
         return true;
     }
@@ -5216,6 +5257,7 @@ static bool run_soc_entry_configured(const soc_entry_setup_t *setup,
                       path == SOC_ENTRY_GRAPH_EXTENDED_STM_OFF ||
                       path == SOC_ENTRY_GRAPH_EXTENDED_LDM_OFF ||
                       path == SOC_ENTRY_GRAPH_EXTENDED_VSTM_OFF ||
+                      path == SOC_ENTRY_GRAPH_EXTENDED_VFP_ARITHMETIC_OFF ||
                       path == SOC_ENTRY_GRAPH_EXTENDED_WRITES;
     bool extended_path = path == SOC_ENTRY_GRAPH_EXTENDED ||
                          path == SOC_ENTRY_GRAPH_EXTENDED_INDIRECT_OFF ||
@@ -5224,6 +5266,7 @@ static bool run_soc_entry_configured(const soc_entry_setup_t *setup,
                          path == SOC_ENTRY_GRAPH_EXTENDED_STM_OFF ||
                          path == SOC_ENTRY_GRAPH_EXTENDED_LDM_OFF ||
                          path == SOC_ENTRY_GRAPH_EXTENDED_VSTM_OFF ||
+                         path == SOC_ENTRY_GRAPH_EXTENDED_VFP_ARITHMETIC_OFF ||
                          path == SOC_ENTRY_GRAPH_EXTENDED_WRITES;
     bool indirect_off_path =
         path == SOC_ENTRY_GRAPH_EXTENDED_INDIRECT_OFF;
@@ -5233,6 +5276,8 @@ static bool run_soc_entry_configured(const soc_entry_setup_t *setup,
     bool stm_off_path = path == SOC_ENTRY_GRAPH_EXTENDED_STM_OFF;
     bool ldm_off_path = path == SOC_ENTRY_GRAPH_EXTENDED_LDM_OFF;
     bool vstm_off_path = path == SOC_ENTRY_GRAPH_EXTENDED_VSTM_OFF;
+    bool vfp_arithmetic_off_path =
+        path == SOC_ENTRY_GRAPH_EXTENDED_VFP_ARITHMETIC_OFF;
     bool direct_write_path = path == SOC_ENTRY_GRAPH_EXTENDED_WRITES ||
                              vstr_off_path || stm_off_path || vstm_off_path;
 
@@ -5293,6 +5338,12 @@ static bool run_soc_entry_configured(const soc_entry_setup_t *setup,
     if (vstm_off_path &&
         !s5l8900_static_a64_set_vstm(&machine, false)) {
         fprintf(stderr, "jitbench: SoC VSTM-off control unavailable\n");
+        goto done;
+    }
+    if (vfp_arithmetic_off_path &&
+        !s5l8900_static_a64_set_vfp_arithmetic(&machine, false)) {
+        fprintf(stderr,
+                "jitbench: SoC VFP-arithmetic-off control unavailable\n");
         goto done;
     }
     if (graph_path &&
@@ -5465,6 +5516,18 @@ static bool run_soc_vstm_path(uint64_t total, soc_entry_path_t path,
                              sizeof A32_SOC_VSTM[0]),
         .seed_r7 = DATA_BASE + UINT32_C(0x200),
         .vfp_workload = true,
+    };
+    return run_soc_entry_configured(&setup, setup.length, total, path, out);
+}
+
+static bool run_soc_vfp_arithmetic_path(uint64_t total,
+                                         soc_entry_path_t path,
+                                         soc_run_result_t *out) {
+    const soc_entry_setup_t setup = {
+        .program = A32_SOC_VFP_ARITH,
+        .length = (unsigned)(sizeof A32_SOC_VFP_ARITH /
+                             sizeof A32_SOC_VFP_ARITH[0]),
+        .vfp_arithmetic_workload = true,
     };
     return run_soc_entry_configured(&setup, setup.length, total, path, out);
 }
@@ -6762,6 +6825,161 @@ done:
     return ok;
 }
 
+/* Isolate the guarded arithmetic tranche with a three-way exact snapshot
+ * gate. The off and on arms are the same binary and retain every older signed
+ * capability; only scalar VFP arithmetic admission differs. This 93.75% VFP
+ * loop is a handler-overhead measurement, not a firmware mix or phone FPS. */
+static bool bench_soc_vfp_arithmetic(uint64_t requested, unsigned reps) {
+    const unsigned length =
+        (unsigned)(sizeof A32_SOC_VFP_ARITH /
+                   sizeof A32_SOC_VFP_ARITH[0]);
+    const uint64_t arithmetic_per_loop = 15u;
+    double *reference_rates = NULL;
+    double *off_rates = NULL;
+    double *on_rates = NULL;
+    uint64_t total;
+    uint64_t expected_arithmetic;
+    uint64_t expected_off_retired;
+    uint64_t off_chains = 0u;
+    uint64_t on_chains = 0u;
+    bool ok = false;
+
+    if (length != 16u ||
+        requested > UINT64_MAX - (uint64_t)(length - 1u)) {
+        fprintf(stderr, "jitbench: SoC VFP arithmetic shape failed\n");
+        return false;
+    }
+    total = ((requested + length - 1u) / length) * length;
+    expected_arithmetic = (total / length) * arithmetic_per_loop;
+    expected_off_retired = total - expected_arithmetic;
+    reference_rates = (double *)calloc(reps, sizeof *reference_rates);
+    off_rates = (double *)calloc(reps, sizeof *off_rates);
+    on_rates = (double *)calloc(reps, sizeof *on_rates);
+    if (!reference_rates || !off_rates || !on_rates) {
+        fprintf(stderr, "jitbench: SoC VFP arithmetic out of memory\n");
+        goto done;
+    }
+
+    for (unsigned rep = 0u; rep < reps; rep++) {
+        soc_run_result_t reference = {0};
+        soc_run_result_t off = {0};
+        soc_run_result_t on = {0};
+        const char *order;
+        bool ran;
+
+        if (rep % 3u == 0u) {
+            order = "reference-off-on";
+            ran = run_soc_vfp_arithmetic_path(
+                      total, SOC_ENTRY_REFERENCE, &reference) &&
+                  run_soc_vfp_arithmetic_path(
+                      total,
+                      SOC_ENTRY_GRAPH_EXTENDED_VFP_ARITHMETIC_OFF, &off) &&
+                  run_soc_vfp_arithmetic_path(
+                      total, SOC_ENTRY_GRAPH_EXTENDED, &on);
+        } else if (rep % 3u == 1u) {
+            order = "off-on-reference";
+            ran = run_soc_vfp_arithmetic_path(
+                      total,
+                      SOC_ENTRY_GRAPH_EXTENDED_VFP_ARITHMETIC_OFF, &off) &&
+                  run_soc_vfp_arithmetic_path(
+                      total, SOC_ENTRY_GRAPH_EXTENDED, &on) &&
+                  run_soc_vfp_arithmetic_path(
+                      total, SOC_ENTRY_REFERENCE, &reference);
+        } else {
+            order = "on-reference-off";
+            ran = run_soc_vfp_arithmetic_path(
+                      total, SOC_ENTRY_GRAPH_EXTENDED, &on) &&
+                  run_soc_vfp_arithmetic_path(
+                      total, SOC_ENTRY_REFERENCE, &reference) &&
+                  run_soc_vfp_arithmetic_path(
+                      total,
+                      SOC_ENTRY_GRAPH_EXTENDED_VFP_ARITHMETIC_OFF, &off);
+        }
+        if (!ran || !reference.snapshot || !off.snapshot || !on.snapshot ||
+            reference.snapshot_len != off.snapshot_len ||
+            reference.snapshot_len != on.snapshot_len ||
+            memcmp(reference.snapshot, off.snapshot,
+                   reference.snapshot_len) != 0 ||
+            memcmp(reference.snapshot, on.snapshot,
+                   reference.snapshot_len) != 0 ||
+            off.signed_retired != expected_off_retired ||
+            on.signed_retired != total ||
+            reference.dread_hits != 0u || off.dread_hits != 0u ||
+            on.dread_hits != 0u || reference.dread_misses != 0u ||
+            off.dread_misses != 0u || on.dread_misses != 0u ||
+            reference.dwrite_hits != 0u || off.dwrite_hits != 0u ||
+            on.dwrite_hits != 0u || reference.dwrite_misses != 0u ||
+            off.dwrite_misses != 0u || on.dwrite_misses != 0u ||
+            on.graph_chains == 0u) {
+            fprintf(stderr,
+                    "jitbench: SoC VFP arithmetic repetition %u failed "
+                    "exact A/B off-retired=%" PRIu64
+                    " on-retired=%" PRIu64 " graph=%" PRIu64 "\n",
+                    rep + 1u, off.signed_retired, on.signed_retired,
+                    on.graph_chains);
+            free_soc_run_result(&reference);
+            free_soc_run_result(&off);
+            free_soc_run_result(&on);
+            goto done;
+        }
+        if (rep == 0u) {
+            off_chains = off.graph_chains;
+            on_chains = on.graph_chains;
+        } else if (off_chains != off.graph_chains ||
+                   on_chains != on.graph_chains) {
+            fprintf(stderr,
+                    "jitbench: SoC VFP arithmetic chain counts changed "
+                    "across repetitions\n");
+            free_soc_run_result(&reference);
+            free_soc_run_result(&off);
+            free_soc_run_result(&on);
+            goto done;
+        }
+
+        reference_rates[rep] = (double)total / reference.seconds / 1.0e6;
+        off_rates[rep] = (double)total / off.seconds / 1.0e6;
+        on_rates[rep] = (double)total / on.seconds / 1.0e6;
+        printf("SOC-VFP-ARITH-SAMPLE rep=%u order=%s reference=%.3f "
+               "arithmetic-off=%.3f arithmetic-on=%.3f Minsn/s "
+               "off-retired=%" PRIu64 " on-retired=%" PRIu64
+               " exact-snapshot=yes\n",
+               rep + 1u, order, reference_rates[rep], off_rates[rep],
+               on_rates[rep], off.signed_retired, on.signed_retired);
+        free_soc_run_result(&reference);
+        free_soc_run_result(&off);
+        free_soc_run_result(&on);
+    }
+
+    qsort(reference_rates, reps, sizeof *reference_rates, cmp_double);
+    qsort(off_rates, reps, sizeof *off_rates, cmp_double);
+    qsort(on_rates, reps, sizeof *on_rates, cmp_double);
+    printf("SOC-VFP-ARITH-CURVE length=%u arithmetic=%" PRIu64
+           " guest-insns=%" PRIu64
+           " reps=%u chain-limit=256 same-binary=yes run-api=yes "
+           "cache-lookup=yes block-witness=yes entry-gates=yes "
+           "timer-boundaries=yes device-tick=yes head-cache=warm mmu=off "
+           "exact-snapshot=yes off-signed-retired=%" PRIu64
+           " on-signed-retired=%" PRIu64
+           " off-graph-chains=%" PRIu64
+           " on-graph-chains=%" PRIu64
+           " reference-median=%.3f off-median=%.3f on-median=%.3f "
+           "off-speedup=%.3fx on-speedup=%.3fx on-over-off=%.3fx\n",
+           length, arithmetic_per_loop, total, reps,
+           expected_off_retired, total, off_chains, on_chains,
+           reference_rates[reps / 2u], off_rates[reps / 2u],
+           on_rates[reps / 2u],
+           off_rates[reps / 2u] / reference_rates[reps / 2u],
+           on_rates[reps / 2u] / reference_rates[reps / 2u],
+           on_rates[reps / 2u] / off_rates[reps / 2u]);
+    ok = true;
+
+done:
+    free(reference_rates);
+    free(off_rates);
+    free(on_rates);
+    return ok;
+}
+
 static bool bench_one(const bench_case_t *bc, uint64_t requested,
                       unsigned reps) {
     jit_buf_t arena;
@@ -7004,6 +7222,10 @@ int main(int argc, char **argv) {
     printf("The SoC-VSTM row is a separately gated same-binary A/B with four "
            "architectural IA/DB transfers and sixteen words per synthetic "
            "loop. Its 25%% VSTM mix is not firmware timing or phone FPS.\n");
+    printf("The SoC-VFP-arithmetic row is a separately gated same-binary A/B "
+           "with fifteen scalar operations per synthetic loop. Its 93.75%% "
+           "arithmetic mix isolates handler overhead and is not firmware "
+           "timing or phone FPS.\n");
     if (!validate_static_shapes()) return 1;
     for (i = 0u; i < sizeof CASES / sizeof CASES[0]; i++) {
         if (!validate_case_translation(&CASES[i])) return 1;
@@ -7053,5 +7275,6 @@ int main(int argc, char **argv) {
     if (!bench_soc_stm(soc_insns, reps)) return 1;
     if (!bench_soc_ldm(soc_insns, reps)) return 1;
     if (!bench_soc_vstm(soc_insns, reps)) return 1;
+    if (!bench_soc_vfp_arithmetic(soc_insns, reps)) return 1;
     return 0;
 }

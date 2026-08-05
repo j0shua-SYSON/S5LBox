@@ -4471,6 +4471,180 @@ static void test_signed_static_a64_vfp_register_oracle(void) {
     s5l8900_free(&reference);
 }
 
+#define SOC_VFP_SV(n) ((uint32_t)(n) >> 1)
+#define SOC_VFP_SB(n) ((uint32_t)(n) & 1u)
+#define SOC_VFP_DP(p,q,r,D,vn,vd,sz,N,s,M,vm)                              \
+    (UINT32_C(0xee000a00) | ((uint32_t)(p) << 23) |                       \
+     ((uint32_t)(D) << 22) | ((uint32_t)(q) << 21) |                     \
+     ((uint32_t)(r) << 20) | ((uint32_t)(vn) << 16) |                    \
+     ((uint32_t)(vd) << 12) | ((uint32_t)(sz) << 8) |                    \
+     ((uint32_t)(N) << 7) | ((uint32_t)(s) << 6) |                       \
+     ((uint32_t)(M) << 5) | (uint32_t)(vm))
+#define SOC_VFP_ARITH_S(op, alt, sd, sn, sm)                              \
+    SOC_VFP_DP(((op) >> 2) & 1u, ((op) >> 1) & 1u, (op) & 1u,            \
+               SOC_VFP_SB(sd), SOC_VFP_SV(sn), SOC_VFP_SV(sd), 0,        \
+               SOC_VFP_SB(sn), (alt), SOC_VFP_SB(sm), SOC_VFP_SV(sm))
+#define SOC_VFP_ARITH_D(op, alt, dd, dn, dm)                              \
+    SOC_VFP_DP(((op) >> 2) & 1u, ((op) >> 1) & 1u, (op) & 1u,            \
+               0, (dn), (dd), 1, 0, (alt), 0, (dm))
+
+/* Drive the arithmetic tranche through the actual machine cache, timer and
+ * callback-free graph path. The same signed machine runs one phase with only
+ * arithmetic disabled, toggles it on (which invalidates derived descriptors),
+ * and continues from that exact architectural state. The literal machine runs
+ * both phases unchanged; final snapshots remain the authority. */
+static void test_signed_static_a64_vfp_arithmetic_oracle(void) {
+    static const uint32_t signed_loop[16] = {
+        SOC_VFP_ARITH_S(0,0, 0, 8, 9), /* VMLA  s0,s8,s9 */
+        SOC_VFP_ARITH_S(0,1, 1, 8, 9), /* VMLS  s1,s8,s9 */
+        SOC_VFP_ARITH_S(1,0, 2, 8, 9), /* VNMLS s2,s8,s9 */
+        SOC_VFP_ARITH_S(1,1, 3, 8, 9), /* VNMLA s3,s8,s9 */
+        SOC_VFP_ARITH_S(2,0, 4, 8, 9), /* VMUL  s4,s8,s9 */
+        SOC_VFP_ARITH_S(2,1, 5, 8, 9), /* VNMUL s5,s8,s9 */
+        SOC_VFP_ARITH_S(3,0, 6, 8, 9), /* VADD  s6,s8,s9 */
+        SOC_VFP_ARITH_S(3,1, 7, 8, 9), /* VSUB  s7,s8,s9 */
+        SOC_VFP_ARITH_S(4,0,10,30,31), /* VDIV  s10,s30,s31 */
+        SOC_VFP_ARITH_D(0,0, 0, 7, 8), /* VMLA  d0,d7,d8 */
+        SOC_VFP_ARITH_D(0,1, 1, 7, 8), /* VMLS  d1,d7,d8 */
+        SOC_VFP_ARITH_D(2,0, 2, 7, 8), /* VMUL  d2,d7,d8 */
+        SOC_VFP_ARITH_D(3,0, 3, 7, 8), /* VADD  d3,d7,d8 */
+        SOC_VFP_ARITH_D(3,1, 4, 7, 8), /* VSUB  d4,d7,d8 */
+        SOC_VFP_ARITH_D(4,0, 5,13,14), /* VDIV  d5,d13,d14 */
+        UINT32_C(0xeaffffef),          /* B 0 */
+    };
+    const unsigned phase_insns = 16000u;
+    s5l8900_t fast = {0};
+    s5l8900_t reference = {0};
+    uint8_t *fast_snapshot = NULL;
+    uint8_t *reference_snapshot = NULL;
+    size_t fast_len = 0u;
+    size_t reference_len = 0u;
+    arm_status_t fast_status = ARM_OK;
+    arm_status_t reference_status = ARM_OK;
+    bool fast_ok;
+    bool reference_ok;
+
+    if (!s5l8900_static_a64_available()) {
+        printf("  STATIC-A64-VFP-ARITH-ORACLE SKIP: no signed AArch64 "
+               "handlers\n");
+        return;
+    }
+
+    fast_ok = s5l8900_init(&fast, 0u, 1u << 20);
+    reference_ok = s5l8900_init(&reference, 0u, 1u << 20);
+    CHECK(fast_ok && reference_ok, "VFP arithmetic machine init failed");
+    if (!fast_ok || !reference_ok) {
+        if (fast_ok) s5l8900_free(&fast);
+        if (reference_ok) s5l8900_free(&reference);
+        return;
+    }
+
+    s5l8900_load(&fast, 0u, signed_loop, sizeof signed_loop);
+    s5l8900_load(&reference, 0u, signed_loop, sizeof signed_loop);
+    s5l8900_tick(&fast, 0u);
+    s5l8900_tick(&reference, 0u);
+    fast.cpu.r[15] = reference.cpu.r[15] = 0u;
+    fast.cpu.cpsr = reference.cpu.cpsr = ARM_MODE_SYS | ARM_CPSR_C;
+    fast.cpu.cp15.cpacr = reference.cpu.cp15.cpacr =
+        0xfu << ARM_CPACR_CP10_SHIFT;
+    fast.cpu.vfp_fpexc = reference.cpu.vfp_fpexc = ARM_FPEXC_EN;
+    fast.cpu.vfp_fpscr = reference.cpu.vfp_fpscr =
+        ARM_FPSCR_FZ | ARM_FPSCR_DN | ARM_FPSCR_IXC |
+        ARM_FPSCR_N | ARM_FPSCR_C;
+    memset(fast.cpu.vfp_s, 0, sizeof fast.cpu.vfp_s);
+    memset(reference.cpu.vfp_s, 0, sizeof reference.cpu.vfp_s);
+    vfp_set_d(&fast.cpu, 13u, UINT64_C(0x3ff0000000000000));
+    vfp_set_d(&fast.cpu, 14u, UINT64_C(0x3ff0000000000000));
+    vfp_set_s(&fast.cpu, 30u, UINT32_C(0x3f800000));
+    vfp_set_s(&fast.cpu, 31u, UINT32_C(0x3f800000));
+    memcpy(reference.cpu.vfp_s, fast.cpu.vfp_s,
+           sizeof reference.cpu.vfp_s);
+
+    CHECK(s5l8900_static_a64_set_enabled(&fast, true),
+          "VFP arithmetic signed engine refused an available host");
+    CHECK(s5l8900_static_a64_set_graph(&fast, true),
+          "VFP arithmetic graph engine refused an available host");
+    CHECK(s5l8900_static_a64_set_chain_limit(&fast, 256u),
+          "VFP arithmetic extended chain limit was refused");
+    CHECK(s5l8900_static_a64_set_vfp_arithmetic(&fast, false),
+          "VFP arithmetic off control was refused");
+
+    uint64_t retired_before = s5l8900_static_a64_retired(&fast);
+    CHECK(s5l8900_run(&fast, phase_insns, &fast_status) == phase_insns,
+          "VFP arithmetic-off run stopped early with status=%d",
+          (int)fast_status);
+    CHECK(s5l8900_run(&reference, phase_insns, &reference_status) ==
+              phase_insns,
+          "VFP arithmetic-off reference stopped early with status=%d",
+          (int)reference_status);
+    uint64_t off_retired =
+        s5l8900_static_a64_retired(&fast) - retired_before;
+
+    CHECK(s5l8900_static_a64_set_vfp_arithmetic(&fast, true),
+          "VFP arithmetic on control was refused");
+    retired_before = s5l8900_static_a64_retired(&fast);
+    uint64_t graph_before =
+        s5l8900_static_a64_graph_chained_blocks(&fast);
+    CHECK(s5l8900_run(&fast, phase_insns, &fast_status) == phase_insns,
+          "VFP arithmetic-on run stopped early with status=%d",
+          (int)fast_status);
+    CHECK(s5l8900_run(&reference, phase_insns, &reference_status) ==
+              phase_insns,
+          "VFP arithmetic-on reference stopped early with status=%d",
+          (int)reference_status);
+    uint64_t on_retired =
+        s5l8900_static_a64_retired(&fast) - retired_before;
+    uint64_t graph =
+        s5l8900_static_a64_graph_chained_blocks(&fast) - graph_before;
+
+    CHECK(fast_status == reference_status,
+          "VFP arithmetic status differs: signed=%d reference=%d",
+          (int)fast_status, (int)reference_status);
+    CHECK(on_retired == phase_insns && on_retired > off_retired,
+          "VFP arithmetic rollout retired off/on %llu/%llu, expected on=%u",
+          (unsigned long long)off_retired,
+          (unsigned long long)on_retired, phase_insns);
+    CHECK(graph != 0u,
+          "VFP arithmetic-on loop published no graph edge");
+
+    snapshot_status_t fast_snapshot_status =
+        snapshot_save_mem(&fast, &fast_snapshot, &fast_len);
+    snapshot_status_t reference_snapshot_status =
+        snapshot_save_mem(&reference, &reference_snapshot, &reference_len);
+    bool exact = fast_snapshot_status == SNAP_OK &&
+        reference_snapshot_status == SNAP_OK && fast_snapshot &&
+        reference_snapshot && fast_len == reference_len &&
+        memcmp(fast_snapshot, reference_snapshot, fast_len) == 0;
+    CHECK(fast_snapshot_status == SNAP_OK,
+          "could not serialize signed VFP arithmetic machine: %s",
+          snapshot_strerror(fast_snapshot_status));
+    CHECK(reference_snapshot_status == SNAP_OK,
+          "could not serialize reference VFP arithmetic machine: %s",
+          snapshot_strerror(reference_snapshot_status));
+    CHECK(exact, "signed and reference VFP arithmetic snapshots differ");
+
+    if (exact && on_retired == phase_insns && on_retired > off_retired &&
+        graph != 0u) {
+        printf("  STATIC-A64-VFP-ARITH-ORACLE exact=yes "
+               "off-retired=%llu on-retired=%llu graph=%llu operations=15 "
+               "single=yes double=yes same-machine=yes rollout=yes\n",
+               (unsigned long long)off_retired,
+               (unsigned long long)on_retired,
+               (unsigned long long)graph);
+    }
+
+    free(fast_snapshot);
+    free(reference_snapshot);
+    s5l8900_free(&fast);
+    s5l8900_free(&reference);
+}
+
+#undef SOC_VFP_ARITH_D
+#undef SOC_VFP_ARITH_S
+#undef SOC_VFP_DP
+#undef SOC_VFP_SB
+#undef SOC_VFP_SV
+
 /* Start with an empty DREAD cache. The first VLDR must return to arm_step(),
  * which performs the translation/fill; later S/D loads may hit signed text.
  * Full snapshot equality includes VFP state, timer state and DREAD counters. */
@@ -5107,6 +5281,7 @@ int main(void) {
     test_signed_static_a64_chain_bound_oracle();
     test_signed_static_a64_graph_bound_oracle();
     test_signed_static_a64_vfp_register_oracle();
+    test_signed_static_a64_vfp_arithmetic_oracle();
     test_signed_static_a64_vfp_read_oracle();
     test_signed_static_a64_vfp_write_oracle();
     test_signed_static_a64_vstm_oracle();
