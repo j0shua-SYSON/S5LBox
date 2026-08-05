@@ -24719,7 +24719,10 @@ static const char *status_name(arm_status_t s) {
 #define SEQUENCE_TRACE_HEAD_LEVEL 2u
 #define SEQUENCE_SIGNED_CAP      16u
 #define SEQUENCE_SIGNED_EXTENDED_CAP 256u
-#define SEQUENCE_SIGNED_RECORD_CAP 4u
+/* One live instruction can now be a conditional no-PC LDM: guard, preflight,
+ * fifteen ascending destination commits and finish. This is a reporting
+ * dimension, not a larger guest-instruction head or invocation budget. */
+#define SEQUENCE_SIGNED_RECORD_CAP 18u
 #define SEQUENCE_STORE_BLOCK_CAP 34u
 
 #if defined(S5LBOX_STATIC_A64_ENGINE)

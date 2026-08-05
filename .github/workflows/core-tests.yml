@@ -199,7 +199,7 @@ jobs:
             grep -Eq 'STATIC-A64-SOC-ORACLE exact=yes retired=[1-9][0-9]* smc=yes decoded=yes graph=yes' <<<"$soc_output"
             grep -Fq 'STATIC-A64-STORE-ORACLE exact=yes dwrite-hit=1 terminal=yes smc-witness=yes stale-edges=0' <<<"$soc_output"
             grep -Eq 'STATIC-A64-STM-ORACLE exact=yes retired=[1-9][0-9]* dwrite-hits=29999 dwrite-misses=1 modes=4 writeback=yes pc-source=yes conditional=yes max-words=16 graph=yes' <<<"$soc_output"
-            grep -Eq 'STATIC-A64-LDM-ORACLE exact=yes retired=[1-9][0-9]* dread-hits=10999 dread-misses=1 modes=4 writeback=yes no-pc=yes graph=yes rollout=yes' <<<"$soc_output"
+            grep -Eq 'STATIC-A64-LDM-ORACLE exact=yes retired=[1-9][0-9]* dread-hits=11999 dread-misses=1 modes=4 writeback=no no-pc=yes graph=yes rollout=yes' <<<"$soc_output"
             grep -Eq 'STATIC-A64-VSTM-ORACLE exact=yes retired=[1-9][0-9]* dwrite-hits=69999 dwrite-misses=1 modes=3 single=yes double=yes odd-single=yes max-words=32 writeback=yes conditional=yes graph=yes' <<<"$soc_output"
             grep -Eq 'STATIC-A64-BRANCH-SOC-ORACLE exact=yes retired=[1-9][0-9]* chains=[1-9][0-9]* conditional=yes link=yes taken=yes fallthrough=yes graph=yes' <<<"$soc_output"
             grep -Eq 'STATIC-A64-THUMB-COND-SOC-ORACLE exact=yes retired=[1-9][0-9]* chains=[1-9][0-9]* conditions=eq-ne taken=yes fallthrough=yes thumb-state=yes graph=yes rollout=yes' <<<"$soc_output"

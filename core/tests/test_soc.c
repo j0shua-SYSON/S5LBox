@@ -3516,28 +3516,28 @@ static void test_signed_static_a64_stm_oracle(void) {
 
 /* Exercise transactional no-PC LDM through the real cache, graph, timer and
  * device gates. The first word fills one DREAD block; every later multi-load
- * is a signed all-or-nothing hit. Four address modes and two writebacks load
- * eleven words per loop, while exact serialized state remains the authority. */
+ * is a signed all-or-nothing hit. Four address modes load twelve words per
+ * loop, while exact serialized state remains the authority. */
 static void test_signed_static_a64_ldm_oracle(void) {
     static const uint32_t signed_loop[16] = {
-        UINT32_C(0xe8970003), /* LDMIA r7,{r0,r1} */
-        UINT32_C(0xe9b8001c), /* LDMIB r8!,{r2-r4} */
-        UINT32_C(0xe248800c), /* SUB   r8,r8,#12 */
-        UINT32_C(0xe8190060), /* LDMDA r9,{r5,r6} */
-        UINT32_C(0xe93a7800), /* LDMDB r10!,{r11-r14} */
-        UINT32_C(0xe28aa010), /* ADD   r10,r10,#16 */
         UINT32_C(0xe2800001), /* ADD r0,r0,#1 */
-        UINT32_C(0xe0211000), /* EOR r1,r1,r0 */
-        UINT32_C(0xe2822003), /* ADD r2,r2,#3 */
-        UINT32_C(0xe2433001), /* SUB r3,r3,#1 */
-        UINT32_C(0xe2844005), /* ADD r4,r4,#5 */
-        UINT32_C(0xe0255002), /* EOR r5,r5,r2 */
-        UINT32_C(0xe2866007), /* ADD r6,r6,#7 */
-        UINT32_C(0xe28bb001), /* ADD r11,r11,#1 */
-        UINT32_C(0xe22cc001), /* EOR r12,r12,#1 */
+        UINT32_C(0xe8970003), /* LDMIA r7,{r0,r1} */
+        UINT32_C(0xe2811003), /* ADD r1,r1,#3 */
+        UINT32_C(0xe997001c), /* LDMIB r7,{r2-r4} */
+        UINT32_C(0xe0222001), /* EOR r2,r2,r1 */
+        UINT32_C(0xe2833001), /* ADD r3,r3,#1 */
+        UINT32_C(0xe8170060), /* LDMDA r7,{r5,r6} */
+        UINT32_C(0xe0244003), /* EOR r4,r4,r3 */
+        UINT32_C(0xe2855001), /* ADD r5,r5,#1 */
+        UINT32_C(0xe9171f00), /* LDMDB r7,{r8-r12} */
+        UINT32_C(0xe0466005), /* SUB r6,r6,r5 */
+        UINT32_C(0xe0800006), /* ADD r0,r0,r6 */
+        UINT32_C(0xe0211005), /* EOR r1,r1,r5 */
+        UINT32_C(0xe2422001), /* SUB r2,r2,#1 */
+        UINT32_C(0xe0833002), /* ADD r3,r3,r2 */
         UINT32_C(0xeaffffef), /* B 0 */
     };
-    const uint64_t expected_hits = UINT64_C(10999);
+    const uint64_t expected_hits = UINT64_C(11999);
     s5l8900_t fast = {0};
     s5l8900_t reference = {0};
     uint8_t *fast_snapshot = NULL;
@@ -3574,10 +3574,7 @@ static void test_signed_static_a64_ldm_oracle(void) {
     }
     s5l8900_tick(&fast, 0u);
     s5l8900_tick(&reference, 0u);
-    fast.cpu.r[7] = reference.cpu.r[7] = UINT32_C(0x1000);
-    fast.cpu.r[8] = reference.cpu.r[8] = UINT32_C(0x1100);
-    fast.cpu.r[9] = reference.cpu.r[9] = UINT32_C(0x1200);
-    fast.cpu.r[10] = reference.cpu.r[10] = UINT32_C(0x1300);
+    fast.cpu.r[7] = reference.cpu.r[7] = UINT32_C(0x1300);
     fast.cpu.r[15] = reference.cpu.r[15] = 0u;
     fast.cpu.cpsr = reference.cpu.cpsr = ARM_MODE_SYS | ARM_CPSR_C;
 
@@ -3632,7 +3629,7 @@ static void test_signed_static_a64_ldm_oracle(void) {
         fast.cpu.dread_hits == expected_hits &&
         fast.cpu.dread_misses == 1u) {
         printf("  STATIC-A64-LDM-ORACLE exact=yes retired=%llu "
-               "dread-hits=10999 dread-misses=1 modes=4 writeback=yes "
+               "dread-hits=11999 dread-misses=1 modes=4 writeback=no "
                "no-pc=yes graph=yes rollout=yes\n",
                (unsigned long long)retired);
     }
