@@ -3574,7 +3574,10 @@ static void test_signed_static_a64_ldm_oracle(void) {
     }
     s5l8900_tick(&fast, 0u);
     s5l8900_tick(&reference, 0u);
-    fast.cpu.r[7] = reference.cpu.r[7] = UINT32_C(0x1300);
+    /* Keep IA/IB/DA/DB, including the five-word DB span, inside the same
+     * 1 KiB DREAD block. A base exactly at 0x1300 makes DA cross the block
+     * boundary and correctly forces the transactional handler to fall back. */
+    fast.cpu.r[7] = reference.cpu.r[7] = UINT32_C(0x1340);
     fast.cpu.r[15] = reference.cpu.r[15] = 0u;
     fast.cpu.cpsr = reference.cpu.cpsr = ARM_MODE_SYS | ARM_CPSR_C;
 
