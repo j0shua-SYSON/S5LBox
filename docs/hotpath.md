@@ -6556,3 +6556,133 @@ physical iPhone, so there is no new phone FPS result. The next no-JIT tranche mu
 measured remaining families and code-size cost; a cold boot is still required for final graphics
 acceptance, but it would not make this isolated speed comparison more accurate than the native
 oracle and restored checkpoint used here.
+
+### 2026-08-05: single-register VFP stores preserve the graph boundary
+
+The next store was selected by measurement rather than opcode order. Observer commit
+`a4714c50f138ad69af6487ced913e8ecb2c1f2d6` split the unchanged 7.100--7.110 B
+interval into single-register VSTR and multi-register VSTM/FSTMX. VSTR S/D supplied 148,219
+retirement-eligible encounters and predicted 175,502 fewer runner entries; VSTM/FSTMX supplied
+24,410 eligible encounters and predicted 38,270. VSTR therefore covered 82.098% of the measured
+A32 VFP-store continuity benefit with much narrower semantics. This selected the implementation;
+it did not predict FPS.
+
+Commit `ebe975c347b5c6b7b13e9983cda903b1566b19c2` implements terminal VSTR S and D
+through the existing consent-gated DWRITE contract. The signed handler checks the live VFP enable
+state, condition, alignment, privilege, translation generation and one/two-word plain-RAM witness
+before mutation. A failed condition skips the complete memory/VFP semantic group; a refusal returns
+before the store so literal `arm_step()` remains authoritative. Single precision preserves the
+selected half of the D register and double precision writes both words. PC-relative bases retain
+the interpreter's PC+8 address. No runtime code generation or executable allocation is added.
+
+The Apple oracle covers S/D values, PC-relative addressing, every condition outcome, VFP-disabled
+refusal, alignment and DWRITE miss rollback. Exact-SHA core run `30964845382` is green in all
+eight jobs and iOS run `30964845373` packages the app. Product-continuity commits
+`3cc754a060602ceb01ded0e9aaf0f5d369983852` and
+`641220d5bedc8384ca4926bff555d13d8709a42f` then move VSTR into the shipped observer
+baseline and save the exact project-local 7.110 B checkpoint used by later fast restores.
+
+Benchmark commit `48b7bebbd4e1f42c141a111c80455415846aed81`, with reference-accounting
+correction `2953d0749fe3344aa5a6b2174773639b55b03d03`, isolates VSTR in one executable.
+The sixteen-instruction loop contains four VSTR operations and six written words. Reference, VSTR
+disabled and VSTR enabled run through `s5l8900_run()` on separately initialized machines in rotated
+order. Warm-up stays outside timing; cache lookup, raw witness, graph entry gates, timebase edges and
+device ticks stay inside; complete snapshots must match before output.
+
+| Apple arm64 runner | interpreter | VSTR off | VSTR on | on/interpreter | on/off |
+|---|---:|---:|---:|---:|---:|
+| macOS 14 | 39.959 Minsn/s | 31.185 Minsn/s | 146.958 Minsn/s | **3.678x** | **4.712x** |
+| macOS 15 | 45.423 Minsn/s | 42.196 Minsn/s | 168.899 Minsn/s | **3.718x** | **4.003x** |
+
+Each long disabled run retires 15,000,000 of 20,000,000 instructions in signed text; each enabled
+run retires all 20,000,000, records 7,500,000 direct-write word hits and zero timed misses, and
+serializes byte-identically to the interpreter. Exact-SHA core run `30966856232` is green in all
+eight jobs and iOS run `30966877869` is green.
+
+The restored authority is smaller. `work/r533-vstr-current-checkpoint-7110m` reproduces the
+predicted baseline exactly: 3,717,526 runner entries become 3,542,024, a reduction of 175,502
+(4.721%). The process exits 0 with empty stderr, 1,590 live CLCD frames, zero media failures, and
+the established work-image/screen hashes. A separate restore smoke starts the new checkpoint at
+exactly 7,110,000,000 and advances it without state drift.
+
+Brutal status: **VSTR is a real, exact no-JIT boundary removal and still not a phone-FPS result**.
+The 4.003x--4.712x on/off ratio belongs to a synthetic loop where VSTR is 25% of instructions.
+Only 1.482% of fetched instructions in the restored interval are retirement-eligible VSTR, and
+4.721% counts removed runner entries rather than elapsed time or frames. The physical iPhone has
+not run this exact IPA; its only reported result remains roughly 0--4 FPS.
+
+### 2026-08-05: transactional ordinary STM removes the measured block-store boundary
+
+The VSTR baseline made A32 block stores the largest remaining store frontier. Read-only observer
+commit `fc5c934196f64590604b1d9d18b4dae1840b8e95` split 185,083 live candidates by
+semantics and DWRITE span. Ordinary transfers whose live addresses fit one 1 KiB block account for
+182,512 retirement-eligible encounters and predict 124,114 fewer runner entries. That is
+124,114/125,236 = **99.104%** of the entire A32 block-store continuity opportunity. Supporting
+ordinary two-block cases would add only 580 entries and user-bank forms another 542. The measured
+contract therefore selected all IA/IB/DA/DB modes and optional writeback, with a transactional
+one-block preflight and fail-closed fallback for the rest.
+
+Implementation commit `f2e6323d86ad79da237f5e2e55f1036130ad4e79` adds ordinary terminal A32
+STM records. The decoder rejects user-bank, load, empty-list, PC-base and writeback/base-alias
+forms. Runtime preflight checks the condition, exact live address span, alignment, privilege,
+translation generation and DWRITE witness before the first write. Only after every guard succeeds
+do ascending register commits run; a stored PC uses PC+12 and optional base writeback occurs in the
+finish record. Any cold, crossing, fault-sensitive or non-consented case returns before mutation.
+This is ordinary build-time-signed AArch64, not JIT code.
+
+`d697a87131087bacd110100aa914a230f5836328` keeps large conditional semantic groups within
+AArch64 branch range. `97f808e5865dad83d9f562719cc31c29b7ed239f` corrects an oracle whose DA
+fixture accidentally crossed a 1 KiB boundary; the implementation's refusal was correct and the
+test assumption was not. `cbb5f3c5bc603cc6707fc93a4316abc3316beeae` adds a same-binary rollout
+gate that defaults on and invalidates only derived graph/cache state when toggled. Native tests
+cover IA/IB/DA/DB, lists through all sixteen sources, PC+12, writeback, every condition outcome,
+full sixteen-word transfer, alignment/cold-cache refusal and cross-block rollback. Exact-SHA core
+run `30969064608` and iOS run `30969064552` are green.
+
+Benchmark commit `687dd921af01f4e8d0373029f54bd81e9bba57d3` uses four STM operations and
+twelve written words in each sixteen-instruction loop. Its off arm retains identical direct-write
+consent and every older signed feature but disables only STM admission. The on and off binaries are
+therefore literally the same executable. All timed arms cross the complete SoC run boundary and
+must serialize exactly.
+
+| Apple arm64 runner | interpreter | STM off | STM on | on/interpreter | on/off |
+|---|---:|---:|---:|---:|---:|
+| macOS 14 | 37.213 Minsn/s | 26.382 Minsn/s | 151.879 Minsn/s | **4.081x** | **5.757x** |
+| macOS 15 | 36.694 Minsn/s | 35.822 Minsn/s | 152.523 Minsn/s | **4.157x** | **4.258x** |
+
+Each 20 M-instruction disabled run retires exactly 15,000,000 instructions in signed text; each
+enabled run retires all 20,000,000, records 15,000,000 DWRITE word hits and zero timed misses, and
+matches the interpreter snapshot byte for byte. Exact-SHA core run `30969381030` is green in all
+eight jobs. The wide host-to-host off-rate difference is a warning against comparing absolute CI
+rates; the conclusion uses only rotated same-run ratios and the exact state gate.
+
+Observer commit `08010c223498a06bded2889bc4ae5f7c887ee691` advances the firmware baseline.
+`work/r536-stm-current-10m` restores the same trusted 7.100 B checkpoint, reaches exactly 7.110 B
+in 59.2 host seconds, exits 0, leaves stderr empty, keeps 1,590 live nonblack CLCD frames, completes
+15,626 media reads and 469 writes with zero failures, and preserves the established work-image and
+screen hashes. The literal write oracle remains exact at 1,032,111/1,032,111 candidates and
+1,736,595/1,736,595 events.
+
+The shipped store baseline now has 923,686 retirement-eligible instructions (9.237% fetched) and
+3,417,910 runner entries. The preceding VSTR baseline was 3,542,024: the measured reduction is
+**124,114 exactly**, matching the pre-implementation prediction. Re-adding shipped one-block STM
+changes zero entries, and all partitions/histograms report `EXACT`. The new remaining frontiers are:
+
+| remaining store family | eligible | entries removed from 3,417,910 | baseline reduction |
+|---|---:|---:|---:|
+| A32 VSTM/FSTMX | 24,410 | 45,370 | **1.327%** |
+| Thumb multi-store | 48,679 | 28,733 | 0.841% |
+| A32 block remainder | 1,848 | 1,122 | 0.033% |
+
+Exact-SHA core run `30970050048` is green in all eight jobs. The accurate r533 project-local
+checkpoint remains the fast 7.110 B restore point; this read-only run does not waste storage on a
+duplicate snapshot.
+
+Brutal status: **this is substantial architectural progress, but measured emulator and phone FPS
+improvement is still zero**. The 4.258x--5.757x on/off ratio comes from a deliberately dense 25%
+STM loop, while the restored benefit is 124,114 fewer modeled runner entries. Neither number is a
+frame-rate multiplier. No physical iPhone install was possible in this environment, and the only
+device observation remains roughly 0--4 FPS. The next measured store frontier is VSTM/FSTMX, but
+even its exact continuity ceiling is only 1.327% of the new baseline. A real exact-build device
+measurement remains the decisive authority; implementing VSTM is justified as bounded continuity
+work, not as a promise that 30 FPS is close.

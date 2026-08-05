@@ -100,12 +100,15 @@ are deterministic apart from that one contact, so the tap is what dismissed it.
   roughly **0–4 fps**. That is a field observation, not yet an exact-SHA,
   counter-backed benchmark, but it is the only phone result and it is far below
   the target. The latest exact-SHA IPA now contains and automatically enables
-  the no-JIT signed graph through the first modeled timebase edge plus
-  consent-gated A32/Thumb plain-RAM stores. A store-heavy same-binary SoC test is
-  3.410x–3.451x faster than the interpreter on Apple arm64, but the restored
-  firmware model finds eligible implemented stores in only 5.930% of fetched
-  instructions and models 19.087% fewer runner entries—not a frame-rate
-  multiplier. That IPA has not been installed and measured on a physical phone.
+  the no-JIT signed graph through the first modeled timebase edge, A32/Thumb
+  single stores, VSTR S/D, transactional one-block ordinary STM, and terminal
+  BX/BLX. The restored interval finds 923,686 eligible implemented stores
+  (9.237% of fetched instructions) and a 3,417,910-entry store baseline,
+  exactly 124,114 entries below the preceding VSTR baseline. A dense
+  same-binary STM loop is 4.258x–5.757x faster with STM on than off on Apple
+  arm64, but neither that synthetic ratio nor the runner-entry reduction is a
+  frame-rate multiplier. This exact app has not been installed and measured
+  on a physical phone.
   r461/r463's direct restored desktop meter
   observed only
   **10.816–11.449 changed scanouts/s on average**, with no window at 30. It does
@@ -145,7 +148,7 @@ userspace received the framebuffer read-only and faulted on its first store.*
 | **Hidden from the guest by default** | SHA-1 acceleration, cellular/baseband transport and USB are deliberately declared absent by editing only the in-memory device tree, because their rows name measured boot failures. MBX is also hidden in the accepted default, but is now an opt-in experiment rather than an unmodelled register hole. The firmware files on disk are never modified. |
 | **Invented register values** | The USB controller's three configuration registers (`GHWCFG1`/`GHWCFG2`/`GHWCFG4`) hold a legal and sufficient configuration. They are **not** measured from real S5L8900 silicon. This is one of the two exceptions the networking row above draws its line around: three constants, named here so nobody has to discover them, and replaceable the day somebody reads the real part. |
 | **Rendering** | The accepted default sets `CA_ENABLE_MBX2D=0` in a new work image so QuartzCore uses Apple's CPU renderer. The experimental path leaves MBX matched and now completes a live interval of 1,388/1,388 2D jobs and 8,888/8,888 3D renders with zero decoder rejection or recovery. That interval is checkpoint-derived; final cold-boot and 30 fps acceptance are still open, so MBX is not silently promoted to the default. |
-| **Speed** | Not cycle-accurate and not yet 30 fps. r458's symmetric live SpringBoard A/B measured **15.694844 M instructions/s** for the desktop app-equivalent core loop versus 14.854045 M/s for its baseline, a repeatable +5.66%. r461/r463 then measured execution and publication together on one restored MBX workload: **10.816–11.449 changed scanouts/s on average**, zero windows at 30, and a stable mean of about 1.143 M retired instructions per detected change. Holding that cadence fixed projects roughly **34.3 Minsn/s**, or **2.725x** the metered desktop mean, for 30 changes/s. The latest iOS IPA links and automatically enables a build-time-signed, callback-free AArch64 graph engine without a JIT, extends invocations to the first modeled timebase edge, and executes consented A32/Thumb single stores in terminal signed heads. The extended graph's same-binary 20 M-instruction geometric-mean gain over the old graph is **1.483x** on macOS 14 arm64 and **1.440x** on macOS 15 arm64, but the restored model finds only **3.573% fewer outer entries**. The store-heavy same-binary SoC loop is **3.410x–3.451x** faster than the interpreter with byte-identical snapshots, but eligible implemented stores are only **5.930%** of the restored interval and remove **19.087%** of modeled runner entries. Neither synthetic multiplier can honestly be projected wholesale onto firmware or FPS. This supersedes the older 17.0–18.3 scanout extrapolation, which mixed an obsolete graph curve with a different restored histogram and was never a forecast. The new IPA has not been measured on a phone; firmware mix, MMU, devices, framebuffer publication and UIKit are absent from the synthetic tests. The currently installed phone app is reported at roughly **0–4 fps**, so that remains the honest device result. The guest clock still uses an invented 412 MHz : 6 MHz instruction-to-tick ratio rather than cycle timing. |
+| **Speed** | Not cycle-accurate and not yet 30 fps. r458's symmetric live SpringBoard A/B measured **15.694844 M instructions/s** for the desktop app-equivalent core loop versus 14.854045 M/s for its baseline, a repeatable +5.66%. r461/r463 measured execution and publication together at **10.816–11.449 changed scanouts/s on average**, with no window at 30; holding that cadence fixed puts 30 changes/s near **34.3 Minsn/s**, or **2.725x** the metered desktop mean. The current IPA automatically enables a no-JIT, build-time-signed AArch64 graph through the first modeled timebase edge plus terminal single stores, VSTR S/D, transactional one-block ordinary STM, and BX/BLX. The extended graph's same-binary geometric-mean gain is **1.483x/1.440x** on macOS 14/15 arm64, but its restored outer-entry opportunity is only **3.573%**. A dense STM same-binary loop is **4.258x–5.757x** faster with STM on than off and remains snapshot-exact; real restored reach is 923,686 eligible implemented stores (9.237% fetched), a 3,417,910-entry baseline, and exact incremental VSTR/STM reductions of 175,502/124,114 entries. None of those synthetic ratios or continuity counts is a frame-rate multiplier. The exact app has not been measured on a physical phone; firmware mix, MMU, devices, framebuffer publication and UIKit are absent from the synthetic tests. The installed phone app is still reported at roughly **0–4 fps**, which remains the honest device result. The guest clock still uses an invented 412 MHz : 6 MHz instruction-to-tick ratio rather than cycle timing. |
 | **Kernel patches** | The kernel is modified in memory as it loads: a real-time-clock timeout is forced to zero, the root-device lookup is redirected to the emulator's fake disk, and hooks are installed so the guest's disk access reaches the host. Applied only after checking a SHA-256 hash and a nine-segment layout check of the exact 7,942,144-byte kernel. |
 | **Storage** | Not flash memory. The desktop harness can create a fresh writable work image per run; the app keeps one persistent work image per machine. Snapshot storage and copy-on-write layers exist and are host-tested, but the current app controller still refuses Take/Open because their lifecycle wiring is unfinished, so app snapshots are not claimed working. The canonical imported root filesystem is read-only. |
 | **Boot chain** | No secure boot chain is executed. The kernel is loaded directly; the boot ROM, the low-level bootloader and iBoot are not run. Apple's firmware container format has been parsed and an extracted bootloader payload executed, but separately, never as a chain. |
@@ -276,17 +279,21 @@ a broad 1.440x–1.483x geometric-mean gain over the old sixteen-instruction gra
 An exact restored-firmware model, however, reduces outer entries by only 3.573%
 and decoded heads by only 1.693% in the measured interval, so that synthetic
 multiplier is not a firmware or FPS forecast. The app also grants its canonical
-machine bus direct plain-RAM-write consent and executes A32/Thumb single stores
-inside terminal signed heads. A deliberately store-heavy same-binary SoC loop is
-3.410x–3.451x faster than the interpreter on Apple arm64 with exact snapshots,
-but the restored interval models only 5.930% eligible implemented stores and
-19.087% fewer runner entries. Terminal A32/Thumb BX/BLX now also remain in signed
-text. A deliberately branch-heavy same-binary SoC loop is 2.979x–3.062x faster
-than the interpreter and 7.468x–8.882x faster than the identical signed graph
-with those 62 handlers disabled, but the restored interval contains only 2.332%
-eligible indirect branches and models only another 4.492% runner-entry reduction.
-Those synthetic ratios are not phone-FPS multipliers. No physical-phone run has
-yet measured this exact IPA.
+machine bus direct plain-RAM-write consent and executes A32/Thumb single stores,
+VSTR S/D, and transactional one-block ordinary STM inside terminal signed heads.
+The specialized same-binary store loops are much faster on Apple arm64 with exact
+snapshots, including a 4.258x–5.757x STM-on/STM-off result, but their deliberately
+dense mixes are synthetic. The restored interval instead finds 923,686 eligible
+implemented stores (9.237% fetched) and 3,417,910 store-baseline runner entries,
+26.586% fewer than the current read-only signed decoder. VSTR and STM account for
+exact incremental reductions of 175,502 and 124,114 entries respectively.
+Terminal A32/Thumb BX/BLX also remain in signed text. A deliberately branch-heavy
+same-binary SoC loop is 2.979x–3.062x faster than the interpreter and
+7.468x–8.882x faster than the identical signed graph with those 62 handlers
+disabled, but the restored interval contains only 2.332% eligible indirect
+branches; its original isolated continuity result was 4.492% beyond the
+then-current store baseline. These ratios and entry counts are not phone-FPS
+multipliers. No physical-phone run has yet measured this exact IPA.
 The best restored desktop publication measurement remains 10.816–11.449 changed
 scanouts/s with no 30 fps window, and the only phone report remains roughly
 0–4 fps without an exact-build execution/publication breakdown.
