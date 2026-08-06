@@ -1595,22 +1595,30 @@ unsigned s5l8900_run(s5l8900_t *m, unsigned max_steps, arm_status_t *status) {
             }
         }
 #if defined(S5LBOX_STATIC_A64_ENGINE)
-        bool known_negative = false;
-        unsigned batch = static_a64_batch_limit(m, max_steps - n);
-        if (batch)
-            batch = s5l8900_static_a64_try(m, batch, &known_negative);
-        if (batch) {
-            n += batch;
-            s5l8900_tick(m, batch);
-            /* The ordinary next iteration would first repeat the machine gate
-             * and only then discover the same negative cache entry. Do those
-             * checks now and fall directly into its one interpreter step. A
-             * timer/IRQ/input edge or changed byte cancels the bypass. */
-            if (!known_negative || n >= max_steps)
-                continue;
-            if (static_a64_batch_limit(m, max_steps - n) &&
-                !s5l8900_static_a64_commit_known_negative_bypass(m))
-                continue;
+        /* The iOS product keeps the rejected signed engine compiled for exact
+         * experiments but leaves it disabled. Check that policy before the
+         * expensive timebase/input eligibility gate: the old order paid a
+         * 64-bit divide and several scattered loads on every interpreted guest
+         * instruction even though no signed state had ever been allocated. */
+        if (s5l8900_static_a64_is_enabled(m)) {
+            bool known_negative = false;
+            unsigned batch = static_a64_batch_limit(m, max_steps - n);
+            if (batch)
+                batch = s5l8900_static_a64_try(m, batch, &known_negative);
+            if (batch) {
+                n += batch;
+                s5l8900_tick(m, batch);
+                /* The ordinary next iteration would first repeat the machine
+                 * gate and only then discover the same negative cache entry.
+                 * Do those checks now and fall directly into its one
+                 * interpreter step. A timer/IRQ/input edge or changed byte
+                 * cancels the bypass. */
+                if (!known_negative || n >= max_steps)
+                    continue;
+                if (static_a64_batch_limit(m, max_steps - n) &&
+                    !s5l8900_static_a64_commit_known_negative_bypass(m))
+                    continue;
+            }
         }
 #endif
         st = arm_step(&m->cpu);

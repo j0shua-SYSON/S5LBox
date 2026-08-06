@@ -9,6 +9,11 @@
  * clamps every invocation to the first timebase edge. */
 #define S5LBOX_STATIC_A64_PRODUCT_CHAIN_INSNS 256u
 
+/* Cheap execution-policy gate. In the LTO iOS product this folds to the
+ * opaque-state pointer and its first enabled byte, allowing a compiled but
+ * disabled engine to avoid the much larger timebase/input eligibility path. */
+bool s5l8900_static_a64_is_enabled(const s5l8900_t *m);
+
 /* Try an already-translated, time-bounded chain. Each decoded head remains at
  * most sixteen guest instructions, stays inside the current proven fetch block
  * and repeats the cache/raw-byte witness. The configured total cannot exceed

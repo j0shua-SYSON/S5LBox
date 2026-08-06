@@ -412,6 +412,16 @@ bool s5l8900_static_a64_available(void) {
 #endif
 }
 
+bool s5l8900_static_a64_is_enabled(const s5l8900_t *m) {
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    const static_a64_state_t *state = static_state(m);
+    return state && state->enabled;
+#else
+    (void)m;
+    return false;
+#endif
+}
+
 void s5l8900_static_a64_invalidate_derived(s5l8900_t *m) {
 #if defined(S5LBOX_STATIC_A64_ENGINE)
     static_a64_state_t *state = static_state(m);
