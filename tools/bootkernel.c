@@ -2636,6 +2636,15 @@ typedef struct {
     uint64_t start_at;
     uint64_t stop_at;
     uint64_t next_chunk_at;
+    uint64_t start_timer_ticks;
+    uint64_t stop_timer_ticks;
+    uint64_t start_clcd_frames;
+    uint64_t stop_clcd_frames;
+    uint32_t start_cpu_hz;
+    uint32_t stop_cpu_hz;
+    uint32_t start_tb_hz;
+    uint32_t stop_tb_hz;
+    bool guest_time_valid;
     double started_sec;
     double stopped_sec;
     double last_publish_sec;
@@ -2724,9 +2733,11 @@ static const uint8_t *frame_meter_live_display(
     return mach->ram + (size_t)offset;
 }
 
-static bool frame_meter_start(frame_meter_t *meter, uint64_t at,
+static bool frame_meter_start(frame_meter_t *meter, const s5l8900_t *mach,
+                              uint64_t at,
                               bool exact_chunk_schedule) {
-    if (!meter || at > UINT64_MAX - FRAME_METER_CHUNK_INSTRUCTIONS)
+    if (!meter || !mach ||
+        at > UINT64_MAX - FRAME_METER_CHUNK_INSTRUCTIONS)
         return false;
     memset(meter, 0, sizeof *meter);
     meter->snapshot = calloc(1, N82_FB_BYTES);
@@ -2743,6 +2754,14 @@ static bool frame_meter_start(frame_meter_t *meter, uint64_t at,
     meter->snapshot_blank = true;
     meter->start_at = at;
     meter->stop_at = at;
+    meter->start_timer_ticks = mach->timer.ticks;
+    meter->stop_timer_ticks = mach->timer.ticks;
+    meter->start_clcd_frames = mach->clcd.frames;
+    meter->stop_clcd_frames = mach->clcd.frames;
+    meter->start_cpu_hz = mach->cpu_hz;
+    meter->stop_cpu_hz = mach->cpu_hz;
+    meter->start_tb_hz = mach->tb_hz;
+    meter->stop_tb_hz = mach->tb_hz;
     meter->next_chunk_at = at + FRAME_METER_CHUNK_INSTRUCTIONS;
     meter->started_sec = now;
     meter->stopped_sec = now;
@@ -2870,13 +2889,25 @@ static bool frame_meter_poll(frame_meter_t *meter, const s5l8900_t *mach,
 
 static bool frame_meter_finish(frame_meter_t *meter, const s5l8900_t *mach,
                                uint64_t at) {
-    if (!meter || !meter->enabled) return false;
+    if (!meter || !meter->enabled || !mach) return false;
     double now = frame_meter_now_seconds();
     if (!meter->failed &&
         !frame_meter_publish(meter, mach, at, now))
         meter->failed = true;
     if (now >= meter->started_sec) meter->stopped_sec = now;
     meter->stop_at = at;
+    meter->stop_timer_ticks = mach->timer.ticks;
+    meter->stop_clcd_frames = mach->clcd.frames;
+    meter->stop_cpu_hz = mach->cpu_hz;
+    meter->stop_tb_hz = mach->tb_hz;
+    meter->guest_time_valid =
+        meter->start_tb_hz != 0u &&
+        meter->start_tb_hz == meter->stop_tb_hz &&
+        meter->start_cpu_hz != 0u &&
+        meter->start_cpu_hz == meter->stop_cpu_hz &&
+        meter->stop_at >= meter->start_at &&
+        meter->stop_timer_ticks >= meter->start_timer_ticks &&
+        meter->stop_clcd_frames >= meter->start_clcd_frames;
     return !meter->failed;
 }
 
@@ -2903,6 +2934,48 @@ static void frame_meter_report(const frame_meter_t *meter) {
         printf(" = %.3f M guest retired/s",
                (double)(meter->stop_at - meter->start_at) / wall / 1e6);
     printf("\n");
+    if (meter->guest_time_valid) {
+        uint64_t timer_delta =
+            meter->stop_timer_ticks - meter->start_timer_ticks;
+        uint64_t vblank_delta =
+            meter->stop_clcd_frames - meter->start_clcd_frames;
+        uint64_t retired_delta = meter->stop_at - meter->start_at;
+        uint64_t post_baseline_changes =
+            meter->changed_frames ? meter->changed_frames - 1u : 0u;
+        double guest_seconds =
+            (double)timer_delta / (double)meter->start_tb_hz;
+        double active_seconds =
+            (double)retired_delta / (double)meter->start_cpu_hz;
+        double nonretiring_seconds = guest_seconds - active_seconds;
+        if (nonretiring_seconds < 0.0) nonretiring_seconds = 0.0;
+        printf("  guest clock: timer ticks +%" PRIu64 " at %u Hz = "
+               "%.6f guest s; modeled active/non-retiring="
+               "%.6f/%.6f guest s",
+               timer_delta, meter->start_tb_hz, guest_seconds,
+               active_seconds, nonretiring_seconds);
+        if (wall > 0.0)
+            printf("; realtime factor=%.3fx", guest_seconds / wall);
+        printf("\n");
+        printf("  guest display: CLCD VBL +%" PRIu64,
+               vblank_delta);
+        if (guest_seconds > 0.0) {
+            printf(" = %.3f/guest s; post-baseline changed signatures "
+                   "%" PRIu64 " = %.3f/guest s",
+                   (double)vblank_delta / guest_seconds,
+                   post_baseline_changes,
+                   (double)post_baseline_changes / guest_seconds);
+        } else {
+            printf("; no positive guest-time span exists");
+        }
+        if (wall > 0.0)
+            printf("; CLCD/changes=%.3f/%.3f per host s",
+                   (double)vblank_delta / wall,
+                   (double)post_baseline_changes / wall);
+        printf("\n");
+    } else {
+        printf("  guest clock: INVALID (clock fields changed, stopped "
+               "before final capture, or counters moved backwards)\n");
+    }
     printf("  publications: %" PRIu64 " total; %" PRIu64
            " live-scanout / %" PRIu64 " unavailable; changed signatures=%"
            PRIu64 " (the first live signature counts, exactly as in the app)\n",
@@ -36570,7 +36643,8 @@ external_md_work_ready:
     frame_meter_t frame_meter;
     memset(&frame_meter, 0, sizeof frame_meter);
     if (frame_meter_requested &&
-        !frame_meter_start(&frame_meter, mach.cpu.cycles, run_api_hot)) {
+        !frame_meter_start(&frame_meter, &mach, mach.cpu.cycles,
+                           run_api_hot)) {
         fprintf(stderr,
                 "--frame-meter: cannot allocate its publication buffer or "
                 "start %s\n", FRAME_METER_TIMER);
