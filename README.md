@@ -401,11 +401,13 @@ so historical 768 MiB experiments are not valid recipes.
 [`docs/debugging.md`](docs/debugging.md) is the procedure these add up to.
 
 **Get the app:** on a matching push or manual dispatch, the `ios-build` workflow
-produces an ad-hoc (`ldid` fake-signed) `S5LBox.ipa` as a temporary GitHub
-Actions artifact. CI builds, signs and packages it; it does not install or launch
-it. Installing it is your affair. The emulator asks nothing of the host beyond
-an ordinary app sandbox, so any method that gets a fake-signed `.ipa` onto
-your device will do. No Apple Developer account is involved.
+produces an ad-hoc-signed `S5LBox.ipa` as a temporary GitHub Actions artifact.
+CI has no Apple signing identity, so that artifact **will not install on stock
+iOS as-is**. Re-sign it with your own ordinary provisioning profile using your
+preferred stock-device installation method. The app requests no private, JIT,
+debug, increased-memory or jailbreak entitlement and needs only the normal app
+sandbox. A jailbroken development phone makes testing easier; it is not a
+product dependency.
 
 **Supply firmware:** for the desktop harness, put your **own** iPhone OS 3.1.3
 files and keys in the git-ignored `firmware/` directory; see
@@ -433,7 +435,8 @@ value cannot. Results from such a hybrid do not test the newly selected mode.
   iOS 15), and the README stated that as a requirement when it was only the
   first host it happened to run on.
 
-  It asks nothing special of the host because it is a pure **interpreter**. No
+  It asks nothing special of the host because it is a pure **interpreter**. Its
+  tracked entitlement dictionary is deliberately empty. No
   generated code is executed, so nothing has to be made writable-then-executable
   and no debug entitlement is needed. That changes if the code translator is
   ever finished: JIT execution needs both an executable mapping and a process

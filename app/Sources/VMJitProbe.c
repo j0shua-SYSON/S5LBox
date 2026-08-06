@@ -284,9 +284,10 @@ vm_jit_result_t vm_jit_probe_run(vm_jit_strategy_t strategy,
 
 #if VM_JIT_HAVE_WP_TOGGLE
     /* macOS only. MAP_JIT pages start execute-only for this thread; the toggle
-     * is what makes them writable. Without the dynamic-codesigning entitlement
-     * the call is documented to abort rather than fail, which is precisely why
-     * this strategy is opt-in and breadcrumbed like the others. */
+     * is what makes them writable. Without platform JIT authorization the call
+     * is documented to abort rather than fail, which is precisely why this
+     * strategy is opt-in and breadcrumbed like the others. The stock iOS app
+     * requests no such authorization and never calls this macOS-only branch. */
     if (jit_wp) pthread_jit_write_protect_np(0);
 #endif
 

@@ -1,9 +1,11 @@
 name: ios-build
 
-# Builds the iOS app on a standard hosted macOS runner, subject to GitHub's
-# current usage and billing policy. It ad-hoc/fake-signs with ldid — no Apple
-# Developer account required — and uploads a candidate .ipa for a compatible
-# jailbroken device. The workflow does not install or launch it.
+# Builds the stock-compatible iOS app on a standard hosted macOS runner,
+# subject to GitHub's current usage and billing policy. CI has no Apple signing
+# identity, so it applies a private-entitlement-free ad-hoc signature and
+# uploads a transport artifact. Stock installation requires the user's normal
+# provisioning signature; a jailbreak is test infrastructure, never an app
+# runtime dependency. The workflow does not install or launch the app.
 on:
   push:
     paths:
@@ -59,7 +61,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install XcodeGen (pinned) + ldid
+      - name: Install XcodeGen (pinned)
         # Pin XcodeGen to a known-good release so a previously-green build can't
         # break from Homebrew drift (a newer XcodeGen could emit a project format
         # the runner's Xcode can't read). Bump deliberately, not implicitly.
@@ -71,7 +73,51 @@ jobs:
           unzip -q /tmp/xcodegen.zip -d /tmp/xcodegen
           sudo /tmp/xcodegen/xcodegen/install.sh
           xcodegen --version
-          brew install ldid
+
+      - name: Verify stock-iPhone app policy
+        working-directory: app
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import plistlib
+          from pathlib import Path
+
+          entitlements = plistlib.loads(Path("S5LBox.entitlements").read_bytes())
+          if entitlements:
+              raise SystemExit(
+                  f"shipping app requests entitlements: {entitlements!r}"
+              )
+
+          forbidden = (
+              "/var/jb",
+              "jbctl",
+              "Dopamine",
+              "dynamic-codesigning",
+              "get-task-allow",
+              "com.apple.developer.kernel.increased-memory-limit",
+              "platform-application",
+              "com.apple.private.security.no-container",
+              "com.apple.private.skip-library-validation",
+              "MobileSubstrate",
+              "libhooker",
+              "ElleKit",
+          )
+          checked = [Path("project.yml"), Path("S5LBox.entitlements")]
+          checked.extend(Path("Sources").rglob("*"))
+          violations = []
+          for path in checked:
+              if not path.is_file():
+                  continue
+              text = path.read_text(encoding="utf-8", errors="strict")
+              for marker in forbidden:
+                  if marker.lower() in text.lower():
+                      violations.append(f"{path}: {marker}")
+          if violations:
+              raise SystemExit(
+                  "jailbreak/private host dependency leaked into app target:\n" +
+                  "\n".join(violations)
+              )
+          PY
 
       - name: Select newest installed Xcode
         # XcodeGen emits the Xcode 16 project format (objectVersion 77); pick the
@@ -158,15 +204,35 @@ jobs:
               "S5LBox MBX"
           fi
 
-      - name: Fake-sign + package .ipa
+      - name: Ad-hoc sign transport artifact + package .ipa
         working-directory: app
         run: |
           set -euo pipefail
           APP="dist/S5LBox.app"
           test -d "$APP"
-          # Request the declared entitlements and ad-hoc sign. Whether the
-          # target jailbreak grants them must be validated on that device.
-          ldid -S"S5LBox.entitlements" "$APP/S5LBox"
+          # Apple's built-in signer creates a structurally complete transport
+          # artifact with the deliberately empty entitlement contract. This is
+          # not a stock-device provisioning signature; stock installers must
+          # replace it with the user's valid profile/signature.
+          codesign --force --sign - --timestamp=none \
+            --entitlements S5LBox.entitlements "$APP"
+          codesign --verify --strict --verbose=2 "$APP"
+          codesign --display --entitlements :- "$APP" \
+            > dist/embedded-entitlements.plist
+          python3 - <<'PY'
+          import plistlib
+          from pathlib import Path
+
+          declared = plistlib.loads(Path("S5LBox.entitlements").read_bytes())
+          embedded = plistlib.loads(
+              Path("dist/embedded-entitlements.plist").read_bytes()
+          )
+          if declared or embedded != declared:
+              raise SystemExit(
+                  f"stock entitlement contract mismatch: "
+                  f"declared={declared!r}, embedded={embedded!r}"
+              )
+          PY
           rm -rf Payload && mkdir Payload
           cp -R "$APP" Payload/
           zip -qry S5LBox.ipa Payload

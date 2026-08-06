@@ -699,10 +699,10 @@ per guest instruction plus a header, ~200 bytes/block → **10–60 MiB**.
 Start by testing a **64 MiB** arena ceiling, bump-allocate into it, and on exhaustion **flush
 everything**: drop all blocks, clear all bitmaps, reset the arena. No LRU, no
 per-block freeing. The recorded 530x mean reuse suggests retranslation may be
-cheap, but only dispatcher measurements can validate the flush cost. The app
-requests `com.apple.developer.kernel.increased-memory-limit`, but that is not a
-guarantee. A 64 MiB arena must be treated as a tunable upper bound and validated
-against the live memory budget after the shared, streaming guest session exists.
+cheap, but only dispatcher measurements can validate the flush cost. The
+stock-compatible app requests no private increased-memory entitlement. A 64 MiB
+arena must be treated as a tunable upper bound and validated against the
+ordinary live app budget after the shared, streaming guest session exists.
 
 **Flush is also a test tool**: a "torture mode" that flushes every N blocks
 exercises translation and invalidation paths that would otherwise run once
@@ -1892,8 +1892,8 @@ entire validation strategy (§9).
    matters. *Mitigation:* implement the audited writable md bulk-copy bridge and
    snapshot coupling, preserve bounded source access in the shared session,
    query the live budget, bound every cache and queue, handle memory pressure,
-   and treat the increased-memory entitlement as a request rather than a
-   guarantee. Measure block counts at J3 against §3.7.
+   and remain within the ordinary stock-app memory policy rather than relying
+   on a private entitlement. Measure block counts at J3 against §3.7.
 8. **Divergence debugging is expensive even with the harness.** A mismatch 4
    billion instructions into a boot is a bad day regardless. *Mitigation:*
    §9.7's trace fixtures make the *first* divergence cheap to find, and

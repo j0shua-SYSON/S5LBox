@@ -91,17 +91,15 @@ Counter-intuitively, an old phone is the better JIT target:
   process policy: a separate opt-in `mmap`/emit/call diagnostic must succeed on
   the target before the dynarec can rely on it. The launch path must never make
   this potentially fatal branch.
-- A compatible jailbreak may mark the process `CS_DEBUGGED`. That flag is a
-  relevant policy signal, not proof that unsigned code can execute under a
-  particular jailbreak. The current app observes it with `csops`
-  and probes whether an RWX mapping can be created, but it never executes that
-  mapping during startup. The app embeds `get-task-allow` and
-  `dynamic-codesigning` requests, but it does not invoke a jailbreak service or
-  record a successful target-device execution result. Any service integration
-  belongs in an optional host adapter, not in the portable core.
-- 2 GB RAM is tight for holding a guest OS image. The app requests
-  `com.apple.developer.kernel.increased-memory-limit`, but that is not a memory
-  guarantee on every device. The real-guest host must measure the live budget,
+- A compatible test jailbreak may mark the process `CS_DEBUGGED`, and the
+  current app can report that host fact through its capability probe. It is not
+  a product requirement. The shipping entitlement dictionary is empty, the
+  signed-static/interpreter path generates no executable memory, and neither
+  startup nor guest execution invokes a jailbreak service. Any optional JIT
+  experiment must remain non-load-bearing and outside stock-device acceptance.
+- 2 GB RAM is tight for holding a guest OS image. The stock-compatible app
+  requests no private increased-memory entitlement. The real-guest host must
+  fit the ordinary app budget, measure it live,
   preserve the CLI's direct-to-guest rootfs streaming, and fail cleanly under
   pressure. A current CLI continuation dipped to 97 free guest pages
   (0.38 MiB), recovered to 253 near 2.944 B and ended at 214 against a 250-page
@@ -112,7 +110,7 @@ The current S5L8900/iPhone 3G target had **128 MB** of RAM and an approximately
 **412 MHz** single core. A later S5L8920/iPhone 3GS target would instead be in the
 256 MB / 600 MHz class. The iPhone 6s Plus host has a dual ~1.85 GHz arm64 CPU and is the first
 optimization and on-device validation target, not an excuse to couple emulator
-semantics to UIKit, Darwin sockets or one jailbreak. Other hosts keep the
+semantics to UIKit, Darwin sockets or any jailbreak. Other hosts keep the
 interpreter and device models and supply their own presentation, storage, audio,
 network and JIT-memory adapters.
 

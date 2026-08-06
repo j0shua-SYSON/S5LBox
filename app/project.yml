@@ -144,7 +144,10 @@ targets:
         CLANG_ENABLE_MODULES: YES
         TARGETED_DEVICE_FAMILY: "1,2"
         ENABLE_BITCODE: NO
-        # Signing is handled after the build by ldid fake-signing (see CI).
+        # Xcode produces an unsigned bundle. CI applies a stock-neutral ad-hoc
+        # signature with Apple's codesign only so the artifact is structurally
+        # complete; a stock-device installer replaces it with an ordinary
+        # provisioning signature. The app requests no private/JIT entitlement.
         CODE_SIGNING_ALLOWED: NO
         CODE_SIGNING_REQUIRED: NO
         CODE_SIGN_IDENTITY: ""
