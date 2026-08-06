@@ -27,17 +27,18 @@ jobs:
           xcodebuild -version
           cmake --version
 
-      - name: Build app-policy full-guest replay for iphoneos
+      - name: Build signed-engine full-guest replay for iphoneos
         run: |
           set -euo pipefail
           mkdir -p device-full-guest-replay
 
           # CMake owns bootkernel's complete host-helper graph. Cross-building
           # that target avoids a second hand-maintained source list while the
-          # global definitions intentionally match the shipping app's signed
-          # graph and direct-write policies. bootkernel then revokes direct
-          # writes when it installs its diagnostic bus, and the build contract
-          # below says so explicitly. This remains a no-JIT build.
+          # global definitions intentionally build the signed graph and its
+          # direct-write policy. bootkernel's ordinary diagnostic bus revokes
+          # direct writes, while --canonical-bus restores the app's exact bus
+          # callbacks and compiled direct-write default for a controlled A/B.
+          # The build contract states both paths. This remains a no-JIT build.
           cmake -S . -B device-full-guest-replay/build \
             -G 'Unix Makefiles' \
             -DCMAKE_SYSTEM_NAME=iOS \
@@ -105,7 +106,11 @@ jobs:
             printf 'target=iphoneos-arm64\n'
             printf 'execution=no-jit-signed-static-a64\n'
             printf 'frontend=bootkernel-run-api-frame-meter\n'
-            printf 'direct_ram_writes=revoked-by-bootkernel-diagnostic-bus\n'
+            printf 'default_bus=diagnostic-observer\n'
+            printf 'default_direct_ram_writes=revoked-by-diagnostic-bus\n'
+            printf 'app_bus_control=--canonical-bus\n'
+            printf 'app_bus_direct_ram_writes=compiled-default-on\n'
+            printf 'direct_write_control=--no-direct-ram-writes\n'
             printf 'firmware_in_artifact=no\n'
           } > device-full-guest-replay/BUILD-CONTRACT.txt
           shasum -a 256 \

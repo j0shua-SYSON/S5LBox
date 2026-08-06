@@ -192,6 +192,22 @@ expect_config(interpreter_control_is_explicit
 expect_refused(interpreter_control_requires_run_api
     "--interpreter-control requires --run-api"
     absent-kernel --interpreter-control --print-config)
+# The first physical A9 replay proved that the diagnostic observer's revoked
+# write consent was not app-identical. These controls must remain explicit,
+# bounded and independently switchable in one executable.
+expect_config(canonical_bus_control_is_explicit
+    "--run-api|--canonical-bus"
+    absent-kernel --run-api --canonical-bus --print-config)
+expect_refused(canonical_bus_control_requires_run_api
+    "--canonical-bus requires --run-api"
+    absent-kernel --canonical-bus --print-config)
+expect_config(direct_write_off_control_is_explicit
+    "--run-api|--canonical-bus|--no-direct-ram-writes"
+    absent-kernel --run-api --canonical-bus --no-direct-ram-writes
+    --print-config)
+expect_refused(direct_write_off_control_requires_canonical_bus
+    "--no-direct-ram-writes requires --canonical-bus"
+    absent-kernel --run-api --no-direct-ram-writes --print-config)
 # Scheduled input still needs a general instruction callback. Refusing it is
 # what prevents a fast run from silently executing a different request.
 expect_refused(run_api_refuses_scheduled_input

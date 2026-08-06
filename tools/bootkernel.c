@@ -19577,6 +19577,48 @@ static void spy_install(s5l8900_t *m, uint32_t virt_base, uint32_t phys_base,
 }
 
 /*
+ * Put back the canonical machine callbacks for a bounded --run-api control.
+ *
+ * spy_install() is unconditional because ordinary bootkernel runs exist to
+ * observe the guest. That makes their read/write call boundary different from
+ * the iOS app, however, and necessarily revokes the app's direct-RAM-write
+ * consent. A device performance comparison needs a way to select the exact
+ * canonical boundary after all setup and snapshot restoration are complete.
+ *
+ * Restore only the callbacks the spy replaced. In particular, do not assign
+ * the complete saved bus: --external-md installs its privileged-SVC host bridge
+ * after spy_install(), and replacing the structure would silently discard it.
+ */
+static bool spy_select_canonical_bus(s5l8900_t *m,
+                                     bool direct_ram_writes) {
+    if (!m || G.mach != m || m->cpu.bus != &m->bus ||
+        m->bus.read32 != sr32 || m->bus.read16 != sr16 ||
+        m->bus.read8 != sr8 || m->bus.write32 != sw32 ||
+        m->bus.write16 != sw16 || m->bus.write8 != sw8 ||
+        !G.inner.read32 || !G.inner.read16 || !G.inner.read8 ||
+        !G.inner.write32 || !G.inner.write16 || !G.inner.write8 ||
+        !G.inner.host_ram)
+        return false;
+
+    m->bus.ctx = G.inner.ctx;
+    m->bus.read32 = G.inner.read32;
+    m->bus.read16 = G.inner.read16;
+    m->bus.read8 = G.inner.read8;
+    m->bus.write32 = G.inner.write32;
+    m->bus.write16 = G.inner.write16;
+    m->bus.write8 = G.inner.write8;
+    m->bus.host_ram = G.inner.host_ram;
+    m->bus.wait_for_interrupt = G.inner.wait_for_interrupt;
+
+    if (!s5l8900_set_direct_ram_writes(m, direct_ram_writes)) return false;
+
+    /* The app does not collect bootkernel's bounded device-access log. This is
+     * host-only diagnostic state and is deliberately absent from snapshots. */
+    m->trace_devices = false;
+    return true;
+}
+
+/*
  * Build the runtime milestone table: the hand-transcribed list verbatim, then
  * whichever of MILE_BYNAME the kernel's symbol table can resolve. Called after
  * ksyms_load and before spy_install, which reads NM.
@@ -32809,7 +32851,8 @@ static void boot_print_usage(FILE *stream, const char *argv0) {
             "          [--touch <at>:<x>:<y>[:<hold>]] ...\n"
             "          [--drag <at>:<x0>:<y0>:<x1>:<y1>[:<steps>[:<span>]]] ...\n"
             "          [--fast] [--run-api] [--frame-meter]\n"
-            "          [--interpreter-control]\n"
+            "          [--interpreter-control] [--canonical-bus]\n"
+            "          [--no-direct-ram-writes]\n"
             "          [--sequence-profile]\n"
             "          [--pinch <at>:<ax0>:<ay0>:<ax1>:<ay1>:<bx0>:<by0>:"
             "<bx1>:<by1>[:<steps>[:<span>]]] ...\n"
@@ -32850,6 +32893,15 @@ static void boot_print_usage(FILE *stream, const char *argv0) {
             "      it changes host execution only and leaves guest state and\n"
             "      emulated hardware unchanged. The run reports signed-retired\n"
             "      and graph/refill counters for either arm.\n"
+            "  --canonical-bus  with --run-api, remove bootkernel's read/write\n"
+            "      observer after setup/restore and run through the canonical\n"
+            "      machine bus used by the iOS app. The build's direct-RAM-write\n"
+            "      default is restored. This deliberately forfeits timed-window\n"
+            "      UART, framebuffer-write and device-access diagnostics; the\n"
+            "      chunk-boundary frame meter and final machine state remain.\n"
+            "  --no-direct-ram-writes  with --canonical-bus, revoke that one\n"
+            "      host fast path as a same-binary control. This changes no\n"
+            "      guest-visible state and is not an ordinary boot mode.\n"
             "  --frame-meter  mirror the iOS app's changed-published-frame\n"
             "      counter: check after 100000-instruction chunks, regularly\n"
             "      publish at most 30 Hz plus the app's terminal publication,\n"
@@ -33101,6 +33153,11 @@ int main(int argc, char **argv) {
      * runtime. Restricted to --run-api so a diagnostic arm cannot be mistaken
      * for an ordinary boot configuration. */
     bool interpreter_control = false;
+    /* --canonical-bus: replace bootkernel's observer callbacks with the exact
+     * machine bus used by the app for a bounded run-api performance control.
+     * --no-direct-ram-writes isolates the compiled direct-write default. */
+    bool canonical_bus_control = false;
+    bool no_direct_ram_writes_control = false;
     /* --frame-meter: host-only publication observer beside --fast, not an
      * emulated-machine toggle and therefore not snapshot state. */
     bool frame_meter_requested = false;
@@ -33381,6 +33438,14 @@ int main(int argc, char **argv) {
         }
         if (!strcmp(argv[i], "--interpreter-control")) {
             interpreter_control = true;
+            continue;
+        }
+        if (!strcmp(argv[i], "--canonical-bus")) {
+            canonical_bus_control = true;
+            continue;
+        }
+        if (!strcmp(argv[i], "--no-direct-ram-writes")) {
+            no_direct_ram_writes_control = true;
             continue;
         }
         if (!strcmp(argv[i], "--frame-meter")) {
@@ -34452,6 +34517,18 @@ int main(int argc, char **argv) {
         fprintf(stderr,
                 "--interpreter-control requires --run-api: it is a bounded "
                 "same-binary performance control, not a boot mode\n");
+        return 1;
+    }
+    if (canonical_bus_control && !run_api_hot) {
+        fprintf(stderr,
+                "--canonical-bus requires --run-api: disabling diagnostics "
+                "is valid only inside a bounded app-bus performance control\n");
+        return 1;
+    }
+    if (no_direct_ram_writes_control && !canonical_bus_control) {
+        fprintf(stderr,
+                "--no-direct-ram-writes requires --canonical-bus: the "
+                "diagnostic bus has already revoked that consent\n");
         return 1;
     }
 
@@ -36472,6 +36549,24 @@ external_md_work_ready:
      * boot it is zero and this is the old `n = 0`.
      */
     uint64_t n = mach.cpu.cycles;
+    bool run_api_direct_ram_writes = false;
+    if (canonical_bus_control) {
+#if defined(S5LBOX_STATIC_A64_DEFAULT_DIRECT_WRITES)
+        run_api_direct_ram_writes = !no_direct_ram_writes_control;
+#endif
+        if (!spy_select_canonical_bus(&mach,
+                                      run_api_direct_ram_writes)) {
+            fprintf(stderr,
+                    "--canonical-bus: exact machine-bus restoration or "
+                    "direct-write policy selection failed\n");
+            return 2;
+        }
+        printf("run api bus: canonical app callbacks; diagnostics=disabled; "
+               "direct-ram-writes=%s%s\n",
+               run_api_direct_ram_writes ? "enabled" : "disabled",
+               no_direct_ram_writes_control ? " by control" : " as built");
+        fflush(stdout);
+    }
     frame_meter_t frame_meter;
     memset(&frame_meter, 0, sizeof frame_meter);
     if (frame_meter_requested &&
@@ -36662,9 +36757,14 @@ external_md_work_ready:
             printf("run api A64: refill attempts/hits/skips=%" PRIu64
                    "/%" PRIu64 "/%" PRIu64
                    " known-negative-bypasses=%" PRIu64
-                   " direct-ram-writes=revoked-by-diagnostic-bus\n",
+                   " direct-ram-writes=%s\n",
                    refill_attempts, refill_hits, refill_skips,
-                   negative_bypasses);
+                   negative_bypasses,
+                   canonical_bus_control
+                       ? (run_api_direct_ram_writes
+                              ? "enabled-by-canonical-bus"
+                              : "disabled-by-canonical-bus")
+                       : "revoked-by-diagnostic-bus");
         }
 #endif
         fflush(stdout);
