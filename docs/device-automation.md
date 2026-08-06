@@ -23,9 +23,17 @@ machine. In automation mode only, a bounded setup observer waits for that same
 provisioner to report success, stops the test guest, waits until its emulator
 thread has actually exited, and reopens the same first machine through the same
 list-controller path. A provisioning refusal or failure is logged and is never
-turned into a firmware launch. The observer removes its timer as soon as the
-firmware engine (or the intentional built-in guest) is running, so it is not a
-permanent profiling load.
+turned into a firmware launch. The observer samples at 0.5-second intervals and
+stops after 30 minutes. Frame work is recorded at the two measured pipeline
+boundaries rather than by doing Objective-C work on every frame.
+
+There is also a non-driving observation path for tools that cannot supply launch
+arguments. When Developer Mode is already enabled at app launch, S5LBox enables
+the same frame telemetry and publishes it through the guest display's
+accessibility value. The observer attaches after a person or accessibility
+client opens any machine normally. It never opens, stops, reopens, provisions or
+otherwise steers a machine, and it does not disable Auto-Lock. Turning Developer
+Mode on takes effect for this purpose on the next app launch.
 
 For example, after mounting the matching Developer Disk Image:
 
@@ -52,14 +60,21 @@ The machine list also exposes stable accessibility identifiers:
 - `s5lbox.emulator.keys`
 - `s5lbox.emulator.toolbar`
 
+With telemetry enabled, `s5lbox.emulator.screen` has an accessibility value
+beginning with `frame_pipeline_v1`. It distinguishes guest scanout attempts and
+changed scanouts from UIKit layer submissions and rejected submissions. A layer
+submission is not proof that iOS displayed the frame; the value states that
+limitation explicitly.
+
 ## What this does not prove
 
-This is startup automation, not unrestricted remote control. It does not inject
-arbitrary touches, dismiss system dialogs, import firmware, reset app data or
-select a different machine. A successful launch proves only that the requested
-machine reached the emulator screen and attempted to start. FPS still has to be
-measured from target-device frame publication and graphics telemetry; neither a
-screenshot nor a successful process launch is an FPS result.
+This is startup automation and observation, not unrestricted remote control. It
+does not inject arbitrary touches, dismiss system dialogs, import firmware,
+reset app data or select a different machine. A successful launch proves only
+that the requested machine reached the emulator screen and attempted to start.
+The accessibility value reports pipeline counters, not visible display FPS: a
+screenshot, process launch, or accepted layer submission is not proof that the
+device compositor displayed a new frame.
 
 The hook also cannot bypass the iOS lock screen. A jailbreak can provide SSH
 file and process access while locked, but SpringBoard still refuses a foreground

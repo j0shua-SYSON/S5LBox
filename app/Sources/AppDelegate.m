@@ -126,11 +126,14 @@ static UIGestureRecognizer *VMNavigationContentPopGestureRecognizer(
      * nothing in it is an empty folder. A user told to drop an IPSW in the
      * firmware folder must be able to FIND a firmware folder.
      */
-    [[VMSettings sharedSettings] ensureUserVisibleDirectories];
+    VMSettings *settings = [VMSettings sharedSettings];
+    [settings ensureUserVisibleDirectories];
 
     (void)launchOptions;
     BOOL automationRequested = VMLaunchRequestsFirstMachine();
-    if (automationRequested) vm_frame_telemetry_reset(true);
+    BOOL developerObservationRequested = settings.developerMode;
+    if (automationRequested || developerObservationRequested)
+        vm_frame_telemetry_reset(true);
     /* A long phone profile must not turn into a lock-screen measurement half
      * way through. This lasts only for the explicitly automated app process;
      * ordinary launches keep the user's normal Auto-Lock setting. */
@@ -166,9 +169,24 @@ static UIGestureRecognizer *VMNavigationContentPopGestureRecognizer(
                   opened ? @"started" : @"refused");
             if (opened) {
                 self.deviceAutomation = [[VMDeviceAutomation alloc]
-                    initWithNavigationController:nav machineList:machines];
+                    initWithNavigationController:nav
+                                      machineList:machines
+                                             mode:
+                        VMDeviceAutomationModePrepareAndReopen];
                 [self.deviceAutomation start];
             }
+        });
+    } else if (developerObservationRequested) {
+        /* Developer Mode exposes the exact same telemetry through UIKit's
+         * accessibility tree without driving the UI or machine lifecycle.
+         * Starting after the window is visible also lets this observer attach
+         * whenever the user (or a test client) opens an emulator normally. */
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self.deviceAutomation = [[VMDeviceAutomation alloc]
+                initWithNavigationController:nav
+                                  machineList:machines
+                                         mode:VMDeviceAutomationModeObserveOnly];
+            [self.deviceAutomation start];
         });
     }
     return YES;

@@ -1,5 +1,5 @@
 //
-//  S5LBox — narrow, opt-in physical-device automation. See the header.
+//  S5LBox — narrow, opt-in physical-device observation and automation.
 //  Copyright (c) 2026 j0shua-SYSON. MIT licensed.
 //
 #import "VMDeviceAutomation.h"
@@ -22,7 +22,8 @@ typedef NS_ENUM(NSUInteger, VMDeviceAutomationState) {
  * internals. Automation still needs the exact engine status that controller
  * already renders and the views to which stable identifiers belong. KVC is
  * confined to this opt-in file, names only our own ivars, and fails closed if
- * the controller changes. Normal launches never take this path.
+ * the controller changes. Ordinary launches take this path only when the user
+ * has enabled Developer Mode, and then use the non-mutating observation mode.
  */
 static id VMDeviceAutomationValue(id object, NSString *key) {
     if (!object || !key.length) return nil;
@@ -52,6 +53,7 @@ static double VMDeviceAutomationSeconds(uint64_t firstNS, uint64_t lastNS) {
     VMEngine *_stoppingEngine;
     NSTimer *_timer;
     VMDeviceAutomationState _state;
+    VMDeviceAutomationMode _mode;
     BOOL _sawPreparation;
     BOOL _endpointLogged;
     NSUInteger _ticks;
@@ -60,12 +62,14 @@ static double VMDeviceAutomationSeconds(uint64_t firstNS, uint64_t lastNS) {
 - (instancetype)initWithNavigationController:
         (UINavigationController *)navigationController
                               machineList:
-        (VMInstanceListViewController *)machineList {
+        (VMInstanceListViewController *)machineList
+                                    mode:(VMDeviceAutomationMode)mode {
     self = [super init];
     if (!self) return nil;
     _navigationController = navigationController;
     _machineList = machineList;
     _state = VMDeviceAutomationStateObserving;
+    _mode = mode;
     return self;
 }
 
@@ -209,7 +213,8 @@ static double VMDeviceAutomationSeconds(uint64_t firstNS, uint64_t lastNS) {
 }
 
 - (void)beginReopenAfterPreparation:(VMEngine *)engine {
-    if (_state != VMDeviceAutomationStateObserving || !engine) return;
+    if (_mode != VMDeviceAutomationModePrepareAndReopen ||
+        _state != VMDeviceAutomationStateObserving || !engine) return;
 
     _state = VMDeviceAutomationStateWaitingForStop;
     _stoppingEngine = engine;
@@ -268,6 +273,24 @@ static double VMDeviceAutomationSeconds(uint64_t firstNS, uint64_t lastNS) {
     [self updateFrameTelemetry];
     VMEngine *engine = [self currentEngine];
     if (!engine) return;
+
+    /* Developer Mode deliberately stops here. Accessibility metadata and the
+     * frame-pipeline snapshot above are observations; every lifecycle action
+     * below belongs exclusively to the explicit launch-argument workflow. */
+    if (_mode == VMDeviceAutomationModeObserveOnly) {
+        if (engine.isRunningFirmware && !_endpointLogged) {
+            NSLog(@"[automation] firmware engine is running; observation-only "
+                   "frame telemetry remains active");
+            _endpointLogged = YES;
+        } else if ([engine.modeDescription
+                       isEqualToString:@"built-in test guest"] &&
+                   !_endpointLogged) {
+            NSLog(@"[automation] built-in test guest is running; "
+                   "observation-only frame telemetry remains active");
+            _endpointLogged = YES;
+        }
+        return;
+    }
 
     BOOL preparing = engine.isPreparingRootFilesystem;
     if (preparing) {
