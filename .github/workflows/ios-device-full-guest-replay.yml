@@ -1,0 +1,123 @@
+name: ios-device-full-guest-replay
+
+# Build the existing full-machine diagnostic harness as a standalone iPhoneOS
+# executable. The artifact deliberately contains no Apple firmware, snapshot,
+# root filesystem, or user data. A maintainer supplies authenticated inputs on
+# a jailbroken device and runs the same --run-api/--frame-meter path already
+# used for the desktop app-shaped replay.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build no-JIT arm64 full-guest replay
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select newest installed Xcode
+        run: |
+          set -euo pipefail
+          latest=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
+          if [ -n "$latest" ]; then sudo xcode-select -s "$latest"; fi
+          xcodebuild -version
+          cmake --version
+
+      - name: Build app-policy full-guest replay for iphoneos
+        run: |
+          set -euo pipefail
+          mkdir -p device-full-guest-replay
+
+          # CMake owns bootkernel's complete host-helper graph. Cross-building
+          # that target avoids a second hand-maintained source list while the
+          # global definitions intentionally match the shipping app's signed
+          # graph and direct-write policies. This remains a no-JIT build.
+          cmake -S . -B device-full-guest-replay/build \
+            -G 'Unix Makefiles' \
+            -DCMAKE_SYSTEM_NAME=iOS \
+            -DCMAKE_SYSTEM_PROCESSOR=arm64 \
+            -DCMAKE_OSX_SYSROOT=iphoneos \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0 \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+            '-DCMAKE_C_FLAGS=-D_FILE_OFFSET_BITS=64 -DS5LBOX_STATIC_A64_DEFAULT_GRAPH=1 -DS5LBOX_STATIC_A64_DEFAULT_DIRECT_WRITES=1' \
+            -DS5LBOX_STATIC_A64_ENGINE=ON \
+            -DS5LBOX_JIT=OFF
+          cmake --build device-full-guest-replay/build \
+            --target bootkernel --parallel 3
+
+          binary=device-full-guest-replay/build/core/bootkernel
+          test -f "$binary"
+          test "$(lipo -archs "$binary")" = arm64
+          xcrun vtool -show-build "$binary" |
+            grep -Eq 'platform[[:space:]]+IOS'
+          xcrun nm "$binary" |
+            awk '$NF == "_a64_static_execute" { found=1 }
+                 END { exit !found }'
+
+          # Fail if the cross-build silently loses any product-defining flag.
+          compile_db=device-full-guest-replay/build/compile_commands.json
+          grep -q -- '-O3' "$compile_db"
+          grep -q -- '-flto' "$compile_db"
+          grep -q -- '-DS5LBOX_STATIC_A64_ENGINE=1' "$compile_db"
+          grep -q -- '-DS5LBOX_STATIC_A64_NATIVE=1' "$compile_db"
+          grep -q -- '-DS5LBOX_STATIC_A64_DEFAULT_GRAPH=1' "$compile_db"
+          grep -q -- '-DS5LBOX_STATIC_A64_DEFAULT_DIRECT_WRITES=1' "$compile_db"
+
+          cp "$binary" \
+            device-full-guest-replay/s5lbox-full-guest-replay-ios-arm64
+          cp tools/ios-device-benchmark-entitlements.plist \
+            device-full-guest-replay/entitlements.plist
+          codesign --force --sign - --timestamp=none \
+            --entitlements device-full-guest-replay/entitlements.plist \
+            device-full-guest-replay/s5lbox-full-guest-replay-ios-arm64
+          codesign --verify --strict --verbose=2 \
+            device-full-guest-replay/s5lbox-full-guest-replay-ios-arm64
+          codesign --display --entitlements :- \
+            device-full-guest-replay/s5lbox-full-guest-replay-ios-arm64 \
+            > device-full-guest-replay/embedded-entitlements.plist
+          python3 - <<'PY'
+          import plistlib
+          from pathlib import Path
+
+          expected = plistlib.loads(
+              Path("device-full-guest-replay/entitlements.plist").read_bytes()
+          )
+          embedded = plistlib.loads(
+              Path("device-full-guest-replay/embedded-entitlements.plist").read_bytes()
+          )
+          if embedded != expected:
+              raise SystemExit(
+                  f"embedded entitlement mismatch: {embedded!r} != {expected!r}"
+              )
+          PY
+
+          {
+            printf 'source_commit=%s\n' "$GITHUB_SHA"
+            printf 'target=iphoneos-arm64\n'
+            printf 'execution=no-jit-signed-static-a64\n'
+            printf 'frontend=bootkernel-run-api-frame-meter\n'
+            printf 'firmware_in_artifact=no\n'
+          } > device-full-guest-replay/BUILD-CONTRACT.txt
+          shasum -a 256 \
+            device-full-guest-replay/s5lbox-full-guest-replay-ios-arm64 \
+            device-full-guest-replay/entitlements.plist \
+            device-full-guest-replay/BUILD-CONTRACT.txt |
+            tee device-full-guest-replay/SHA256SUMS
+
+      - name: Upload full-guest replay harness
+        uses: actions/upload-artifact@v4
+        with:
+          name: S5LBox-ios-full-guest-replay
+          path: |
+            device-full-guest-replay/s5lbox-full-guest-replay-ios-arm64
+            device-full-guest-replay/entitlements.plist
+            device-full-guest-replay/BUILD-CONTRACT.txt
+            device-full-guest-replay/SHA256SUMS
+          if-no-files-found: error
