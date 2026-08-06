@@ -4,6 +4,7 @@
 //
 #import "AppDelegate.h"
 #import "EmulatorViewController.h"
+#import "VMDeviceAutomation.h"
 #import "VMSettings.h"
 #import "VMInstanceListViewController.h"
 
@@ -110,6 +111,10 @@ static UIGestureRecognizer *VMNavigationContentPopGestureRecognizer(
 
 @end
 
+@interface AppDelegate ()
+@property (strong, nonatomic) VMDeviceAutomation *deviceAutomation;
+@end
+
 @implementation AppDelegate
 
 - (BOOL)application:(UIApplication *)application
@@ -157,6 +162,11 @@ static UIGestureRecognizer *VMNavigationContentPopGestureRecognizer(
             BOOL opened = [machines openFirstMachineForAutomation];
             NSLog(@"[automation] open first machine: %@",
                   opened ? @"started" : @"refused");
+            if (opened) {
+                self.deviceAutomation = [[VMDeviceAutomation alloc]
+                    initWithNavigationController:nav machineList:machines];
+                [self.deviceAutomation start];
+            }
         });
     }
     return YES;
