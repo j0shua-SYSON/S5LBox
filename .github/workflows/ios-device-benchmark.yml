@@ -55,14 +55,39 @@ jobs:
             $core_sources device-benchmark/a64_static_handlers.S \
             -o device-benchmark/s5lbox-insnbench-ios-arm64
 
-          # A jailbreak is still required. Ad-hoc signing does not make this a
-          # stock-iOS executable and grants no dynamic-code/JIT entitlement.
+          # A jailbreak is still required. These are the minimal CLI
+          # entitlements proven on Dopamine; they do not grant dynamic code or
+          # JIT. Keep the plist with the artifact so a necessary phone-side
+          # re-sign can preserve the exact same contract.
+          cp tools/ios-device-benchmark-entitlements.plist \
+            device-benchmark/entitlements.plist
           codesign --force --sign - --timestamp=none \
+            --entitlements device-benchmark/entitlements.plist \
             device-benchmark/s5lbox-insnbench-ios-arm64
           lipo -info device-benchmark/s5lbox-insnbench-ios-arm64
-          codesign --verify --verbose=2 \
+          codesign --verify --strict --verbose=2 \
             device-benchmark/s5lbox-insnbench-ios-arm64
-          shasum -a 256 device-benchmark/s5lbox-insnbench-ios-arm64 |
+          codesign --display --entitlements :- \
+            device-benchmark/s5lbox-insnbench-ios-arm64 \
+            > device-benchmark/embedded-entitlements.plist
+          python3 - <<'PY'
+          import plistlib
+          from pathlib import Path
+
+          expected = plistlib.loads(
+              Path("device-benchmark/entitlements.plist").read_bytes()
+          )
+          embedded = plistlib.loads(
+              Path("device-benchmark/embedded-entitlements.plist").read_bytes()
+          )
+          if embedded != expected:
+              raise SystemExit(
+                  f"embedded entitlement mismatch: {embedded!r} != {expected!r}"
+              )
+          PY
+          shasum -a 256 \
+            device-benchmark/s5lbox-insnbench-ios-arm64 \
+            device-benchmark/entitlements.plist |
             tee device-benchmark/SHA256SUMS
 
       - name: Upload device benchmark
@@ -71,5 +96,6 @@ jobs:
           name: S5LBox-ios-device-benchmark
           path: |
             device-benchmark/s5lbox-insnbench-ios-arm64
+            device-benchmark/entitlements.plist
             device-benchmark/SHA256SUMS
           if-no-files-found: error
