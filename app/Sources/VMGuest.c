@@ -203,7 +203,8 @@ const uint8_t *vm_guest_framebuffer(const s5l8900_t *m) {
 
 static const uint8_t *vm_guest_record_display(const s5l8900_t *m,
                                               const uint8_t *pixels,
-                                              size_t bytes) {
+                                              size_t bytes,
+                                              const vm_frame_scanout_observation_t *observation) {
     uint64_t timer_ticks = 0;
     uint64_t clcd_frames = 0;
     uint32_t timebase_hz = 0;
@@ -217,7 +218,8 @@ static const uint8_t *vm_guest_record_display(const s5l8900_t *m,
 #endif
     }
     vm_frame_telemetry_note_scanout(
-        pixels, bytes, timer_ticks, clcd_frames, timebase_hz, cpu_hz);
+        pixels, bytes, timer_ticks, clcd_frames, timebase_hz, cpu_hz,
+        observation);
     return pixels;
 }
 
@@ -230,7 +232,18 @@ const uint8_t *vm_guest_display(const s5l8900_t *m,
     if (height) *height = 0;
     if (stride) *stride = 0;
     if (order)  *order = VM_ORDER_BGRA;
-    if (!m || !m->ram) return vm_guest_record_display(m, NULL, 0);
+    vm_frame_scanout_observation_t observation;
+    memset(&observation, 0, sizeof observation);
+    observation.reason = VM_FRAME_SCANOUT_REASON_UNKNOWN;
+    observation.active_window = UINT32_MAX;
+    if (!m) {
+        observation.reason = VM_FRAME_SCANOUT_REASON_NO_MACHINE;
+        return vm_guest_record_display(m, NULL, 0, &observation);
+    }
+    if (!m->ram) {
+        observation.reason = VM_FRAME_SCANOUT_REASON_NO_RAM;
+        return vm_guest_record_display(m, NULL, 0, &observation);
+    }
 
 #ifdef S5L8900_CLCD_BASE
     /*
@@ -243,43 +256,80 @@ const uint8_t *vm_guest_display(const s5l8900_t *m,
      */
     uint32_t fb_phys = 0, w = 0, h = 0, st = 0, fmt = 0;
     uint32_t active = s5l_clcd_active_window(&m->clcd);
-    bool running = s5l_clcd_running(&m->clcd);
-    if (running && active != CLCD_WIN_NONE
-        && s5l_clcd_window(&m->clcd, active,
-                           &fb_phys, &w, &h, &st, &fmt, NULL)
-        && CLCD_FMT_IS_32BPP(fmt)
-        && w == VM_FB_WIDTH && h == VM_FB_HEIGHT
-        && st >= w * VM_FB_BPP
-        && fb_phys >= m->ram_base
-        && (uint64_t)(fb_phys - m->ram_base) + (uint64_t)st * h <= m->ram_size
-        && (uint64_t)st * h <= VM_FB_BYTES) {
-        if (width)  *width  = w;
-        if (height) *height = h;
-        if (stride) *stride = st;
-        /* AppleH1CLCD publishes the same 'ARGB' IOSurface for every value of
-         * control bits[17:16], and the core deliberately has no evidence for a
-         * hardware swizzle. Match s5l_clcd_scanout(): report the observed
-         * little-endian AARRGGBB memory layout as BGRA. */
-        if (order)  *order  = VM_ORDER_BGRA;
-        return vm_guest_record_display(
-            m, m->ram + (fb_phys - m->ram_base), (size_t)st * h);
+    observation.scanning = m->clcd.scanning ? 1u : 0u;
+    observation.ctrl = m->clcd.ctrl;
+    observation.gate = m->clcd.gate;
+    observation.active_window = active;
+
+    if (!m->clcd.scanning) {
+        observation.reason = VM_FRAME_SCANOUT_REASON_STOPPED;
+    } else if ((m->clcd.ctrl & CLCD_CTRL_ENABLE) == 0u) {
+        observation.reason = VM_FRAME_SCANOUT_REASON_GLOBAL_DISABLED;
+    } else if ((m->clcd.gate & 1u) == 0u) {
+        observation.reason = VM_FRAME_SCANOUT_REASON_CLOCK_GATED;
+    } else if (active == CLCD_WIN_NONE) {
+        observation.reason = VM_FRAME_SCANOUT_REASON_NO_ACTIVE_WINDOW;
+    } else if (!s5l_clcd_window(&m->clcd, active,
+                                &fb_phys, &w, &h, &st, &fmt, NULL)) {
+        observation.reason = VM_FRAME_SCANOUT_REASON_WINDOW_UNAVAILABLE;
+    } else {
+        observation.framebuffer_phys = fb_phys;
+        observation.width = w;
+        observation.height = h;
+        observation.stride = st;
+        observation.format = fmt;
+        if (!CLCD_FMT_IS_32BPP(fmt)) {
+            observation.reason = VM_FRAME_SCANOUT_REASON_UNSUPPORTED_FORMAT;
+        } else if (w != VM_FB_WIDTH || h != VM_FB_HEIGHT) {
+            observation.reason = VM_FRAME_SCANOUT_REASON_UNSUPPORTED_GEOMETRY;
+        } else if (st < w * VM_FB_BPP) {
+            observation.reason = VM_FRAME_SCANOUT_REASON_STRIDE_TOO_SMALL;
+        } else if (fb_phys < m->ram_base) {
+            observation.reason = VM_FRAME_SCANOUT_REASON_FRAMEBUFFER_BELOW_RAM;
+        } else if ((uint64_t)(fb_phys - m->ram_base) +
+                       (uint64_t)st * h > m->ram_size) {
+            observation.reason = VM_FRAME_SCANOUT_REASON_FRAMEBUFFER_OUTSIDE_RAM;
+        } else if ((uint64_t)st * h > VM_FB_BYTES) {
+            observation.reason = VM_FRAME_SCANOUT_REASON_PUBLICATION_TOO_LARGE;
+        } else {
+            observation.reason = VM_FRAME_SCANOUT_REASON_VALID;
+            if (width)  *width  = w;
+            if (height) *height = h;
+            if (stride) *stride = st;
+            /* AppleH1CLCD publishes the same 'ARGB' IOSurface for every value
+             * of control bits[17:16], and the core deliberately has no evidence
+             * for a hardware swizzle. Match s5l_clcd_scanout(): report the
+             * observed little-endian AARRGGBB memory layout as BGRA. */
+            if (order) *order = VM_ORDER_BGRA;
+            return vm_guest_record_display(
+                m, m->ram + (fb_phys - m->ram_base), (size_t)st * h,
+                &observation);
+        }
     }
 
     /* The core always has a CLCD model. No enabled, usable window means there
      * is no trustworthy scanout to publish; returning the fixed demo address
      * here would turn a guest display failure into a convincing stale frame. */
-    return vm_guest_record_display(m, NULL, 0);
+    return vm_guest_record_display(m, NULL, 0, &observation);
 #endif
 
     /* Build-time fallback for a core configuration without the CLCD model. */
     uint32_t pa = vm_guest_fb_pa(m->ram_base, m->ram_size);
-    if (!pa) return vm_guest_record_display(m, NULL, 0);
+    if (!pa) {
+        observation.reason = VM_FRAME_SCANOUT_REASON_FRAMEBUFFER_OUTSIDE_RAM;
+        return vm_guest_record_display(m, NULL, 0, &observation);
+    }
+    observation.reason = VM_FRAME_SCANOUT_REASON_VALID;
+    observation.framebuffer_phys = pa;
+    observation.width = VM_FB_WIDTH;
+    observation.height = VM_FB_HEIGHT;
+    observation.stride = VM_FB_WIDTH * VM_FB_BPP;
     if (width)  *width  = VM_FB_WIDTH;
     if (height) *height = VM_FB_HEIGHT;
     if (stride) *stride = VM_FB_WIDTH * VM_FB_BPP;
     if (order)  *order  = VM_ORDER_BGRA;
     return vm_guest_record_display(
-        m, m->ram + (pa - m->ram_base), VM_FB_BYTES);
+        m, m->ram + (pa - m->ram_base), VM_FB_BYTES, &observation);
 }
 
 bool vm_guest_install(s5l8900_t *m) {

@@ -188,6 +188,19 @@ static double VMDeviceAutomationSeconds(uint64_t firstNS, uint64_t lastNS) {
         : 0u;
     const double scanoutChangedPerGuestSecond = guestSeconds > 0.0
         ? (double)scanoutPostBaseline / guestSeconds : 0.0;
+    const uint64_t scanoutInvalid = state.scanout_attempts >= state.scanout_valid
+        ? state.scanout_attempts - state.scanout_valid : 0u;
+    const vm_frame_scanout_reason_t lastReason = state.scanout_last.reason;
+    const uint32_t lastReasonIndex = (uint32_t)lastReason;
+    const uint64_t lastReasonCount =
+        lastReasonIndex < (uint32_t)VM_FRAME_SCANOUT_REASON_COUNT
+        ? state.scanout_reason_counts[lastReasonIndex] : 0u;
+    const double lastValidAgoSeconds =
+        state.scanout_last_valid_host_ns != 0u &&
+        state.scanout_last_host_ns >= state.scanout_last_valid_host_ns
+        ? (double)(state.scanout_last_host_ns -
+                   state.scanout_last_valid_host_ns) / 1.0e9
+        : 0.0;
 
     const double layerSeconds = VMDeviceAutomationSeconds(
         state.layer_first_host_ns, state.layer_last_host_ns);
@@ -209,9 +222,16 @@ static double VMDeviceAutomationSeconds(uint64_t firstNS, uint64_t lastNS) {
         : @"guest_clock=invalid";
     NSString *value = [NSString stringWithFormat:
         @"frame_pipeline_v1,generation=%llu,"
-         "scanout_attempts=%llu,scanout_valid=%llu,"
+         "scanout_attempts=%llu,scanout_valid=%llu,scanout_invalid=%llu,"
          "scanout_signatures=%llu,scanout_host_s=%.6f,"
          "scanout_changed_per_host_s=%.3f,%@,"
+         "scanout_last_reason=%s,scanout_last_reason_count=%llu,"
+         "scanout_last_reason_streak=%llu,scanout_last_valid_ago_host_s=%.6f,"
+         "scanout_last_scanning=%u,scanout_last_ctrl=%08x,"
+         "scanout_last_gate=%08x,scanout_last_active=%u,"
+         "scanout_last_fb=%08x,scanout_last_width=%u,"
+         "scanout_last_height=%u,scanout_last_stride=%u,"
+         "scanout_last_format=%u,"
          "layer_attempts=%llu,layer_accepted=%llu,layer_rejected=%llu,"
          "layer_signatures=%llu,layer_host_s=%.6f,"
          "layer_changed_per_host_s=%.3f,layer_work_mean_ms=%.3f,"
@@ -219,8 +239,22 @@ static double VMDeviceAutomationSeconds(uint64_t firstNS, uint64_t lastNS) {
         (unsigned long long)state.generation,
         (unsigned long long)state.scanout_attempts,
         (unsigned long long)state.scanout_valid,
+        (unsigned long long)scanoutInvalid,
         (unsigned long long)state.scanout_changes,
         scanoutSeconds, scanoutChangedPerHostSecond, guest,
+        vm_frame_scanout_reason_name(lastReason),
+        (unsigned long long)lastReasonCount,
+        (unsigned long long)state.scanout_last_reason_streak,
+        lastValidAgoSeconds,
+        state.scanout_last.scanning,
+        state.scanout_last.ctrl,
+        state.scanout_last.gate,
+        state.scanout_last.active_window,
+        state.scanout_last.framebuffer_phys,
+        state.scanout_last.width,
+        state.scanout_last.height,
+        state.scanout_last.stride,
+        state.scanout_last.format,
         (unsigned long long)state.layer_attempts,
         (unsigned long long)state.layer_accepted,
         (unsigned long long)state.layer_rejected,

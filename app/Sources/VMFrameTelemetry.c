@@ -122,13 +122,47 @@ uint64_t vm_frame_telemetry_now_ns(void) {
     return seconds * UINT64_C(1000000000) + (uint64_t)now.tv_nsec;
 }
 
+const char *vm_frame_scanout_reason_name(vm_frame_scanout_reason_t reason) {
+    switch (reason) {
+    case VM_FRAME_SCANOUT_REASON_VALID:                   return "valid";
+    case VM_FRAME_SCANOUT_REASON_NO_MACHINE:              return "no_machine";
+    case VM_FRAME_SCANOUT_REASON_NO_RAM:                  return "no_ram";
+    case VM_FRAME_SCANOUT_REASON_STOPPED:                 return "stopped";
+    case VM_FRAME_SCANOUT_REASON_GLOBAL_DISABLED:         return "global_disabled";
+    case VM_FRAME_SCANOUT_REASON_CLOCK_GATED:             return "clock_gated";
+    case VM_FRAME_SCANOUT_REASON_NO_ACTIVE_WINDOW:        return "no_active_window";
+    case VM_FRAME_SCANOUT_REASON_WINDOW_UNAVAILABLE:      return "window_unavailable";
+    case VM_FRAME_SCANOUT_REASON_UNSUPPORTED_FORMAT:      return "unsupported_format";
+    case VM_FRAME_SCANOUT_REASON_UNSUPPORTED_GEOMETRY:    return "unsupported_geometry";
+    case VM_FRAME_SCANOUT_REASON_STRIDE_TOO_SMALL:        return "stride_too_small";
+    case VM_FRAME_SCANOUT_REASON_FRAMEBUFFER_BELOW_RAM:   return "framebuffer_below_ram";
+    case VM_FRAME_SCANOUT_REASON_FRAMEBUFFER_OUTSIDE_RAM: return "framebuffer_outside_ram";
+    case VM_FRAME_SCANOUT_REASON_PUBLICATION_TOO_LARGE:   return "publication_too_large";
+    case VM_FRAME_SCANOUT_REASON_UNKNOWN:
+    case VM_FRAME_SCANOUT_REASON_COUNT:
+    default:                                               return "unknown";
+    }
+}
+
 void vm_frame_telemetry_note_scanout(
         const void *pixels, size_t bytes,
         uint64_t timer_ticks, uint64_t clcd_frames,
-        uint32_t timebase_hz, uint32_t cpu_hz) {
+        uint32_t timebase_hz, uint32_t cpu_hz,
+        const vm_frame_scanout_observation_t *observation) {
     if (!vm_frame_telemetry_is_enabled()) return;
 
     const bool valid = pixels != NULL && bytes >= 4u;
+    vm_frame_scanout_observation_t observed;
+    memset(&observed, 0, sizeof observed);
+    observed.active_window = UINT32_MAX;
+    if (observation) observed = *observation;
+    if (valid) {
+        observed.reason = VM_FRAME_SCANOUT_REASON_VALID;
+    } else if ((uint32_t)observed.reason >=
+                   (uint32_t)VM_FRAME_SCANOUT_REASON_COUNT ||
+               observed.reason == VM_FRAME_SCANOUT_REASON_VALID) {
+        observed.reason = VM_FRAME_SCANOUT_REASON_UNKNOWN;
+    }
     const uint64_t signature = valid
         ? vm_frame_telemetry_signature((const uint8_t *)pixels, bytes) : 0;
     const uint64_t host_ns = vm_frame_telemetry_now_ns();
@@ -145,6 +179,14 @@ void vm_frame_telemetry_note_scanout(
     if (state->scanout_attempts == UINT64_C(1))
         state->scanout_first_host_ns = host_ns;
     state->scanout_last_host_ns = host_ns;
+    if (state->scanout_attempts > UINT64_C(1) &&
+        state->scanout_last.reason == observed.reason) {
+        state->scanout_last_reason_streak++;
+    } else {
+        state->scanout_last_reason_streak = UINT64_C(1);
+    }
+    state->scanout_last = observed;
+    state->scanout_reason_counts[observed.reason]++;
 
     if (timebase_hz != 0u && cpu_hz != 0u) {
         if (!state->scanout_guest_clock_captured) {
@@ -166,6 +208,9 @@ void vm_frame_telemetry_note_scanout(
 
     if (valid) {
         state->scanout_valid++;
+        state->scanout_last_valid_host_ns = host_ns;
+        state->scanout_last_valid_timer_ticks = timer_ticks;
+        state->scanout_last_valid_clcd_frames = clcd_frames;
         if (!g_vm_frame_telemetry.scanout_signature_valid ||
             signature != g_vm_frame_telemetry.scanout_signature) {
             g_vm_frame_telemetry.scanout_signature_valid = true;

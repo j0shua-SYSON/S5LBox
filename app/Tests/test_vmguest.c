@@ -6,6 +6,7 @@
  * app's 128 MB demo guest, let alone a real 512 MB XNU machine.
  */
 #include "VMGuest.h"
+#include "VMFrameTelemetry.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -23,6 +24,13 @@ static unsigned failed;
         fputc('\n', stderr);                                                 \
     }                                                                        \
 } while (0)
+
+static vm_frame_scanout_reason_t last_scanout_reason(void) {
+    vm_frame_telemetry_snapshot_t state;
+    memset(&state, 0, sizeof state);
+    vm_frame_telemetry_snapshot(&state);
+    return state.scanout_last.reason;
+}
 
 static void test_framebuffer_address_boundaries(void) {
     const uint32_t minimum = VM_FB_BYTES + VM_GUEST_BLOB_BYTES + 0x10000u;
@@ -50,12 +58,16 @@ static void test_framebuffer_address_boundaries(void) {
 static void test_null_and_uninitialised_inputs(void) {
     uint32_t w = 1, h = 1, stride = 1;
     vm_pixel_order_t order = VM_ORDER_ARGB;
+    vm_frame_telemetry_reset(true);
 
     CHECK(!vm_guest_install(NULL), "install accepted a null machine");
     CHECK(vm_guest_framebuffer(NULL) == NULL,
           "framebuffer accepted a null machine");
     CHECK(vm_guest_display(NULL, &w, &h, &stride, &order) == NULL,
           "display accepted a null machine");
+    CHECK(last_scanout_reason() == VM_FRAME_SCANOUT_REASON_NO_MACHINE,
+          "null machine reason=%s",
+          vm_frame_scanout_reason_name(last_scanout_reason()));
     CHECK(w == 0 && h == 0 && stride == 0 && order == VM_ORDER_BGRA,
           "failed display lookup left stale output metadata");
 
@@ -64,6 +76,10 @@ static void test_null_and_uninitialised_inputs(void) {
     CHECK(!vm_guest_install(&blank), "install accepted a machine without RAM");
     CHECK(vm_guest_framebuffer(&blank) == NULL,
           "framebuffer accepted a machine without RAM");
+    CHECK(vm_guest_display(&blank, NULL, NULL, NULL, NULL) == NULL &&
+          last_scanout_reason() == VM_FRAME_SCANOUT_REASON_NO_RAM,
+          "missing-RAM display reason=%s",
+          vm_frame_scanout_reason_name(last_scanout_reason()));
 }
 
 static void test_install_scanout_and_execution(void) {
@@ -84,6 +100,7 @@ static void test_install_scanout_and_execution(void) {
 
     uint32_t w = 0, h = 0, stride = 0;
     vm_pixel_order_t order = VM_ORDER_ARGB;
+    vm_frame_telemetry_reset(true);
     const uint8_t *display = vm_guest_display(&m, &w, &h, &stride, &order);
     CHECK(display == expected, "CLCD scanout did not select the demo buffer");
     CHECK(w == VM_FB_WIDTH && h == VM_FB_HEIGHT,
@@ -91,6 +108,9 @@ static void test_install_scanout_and_execution(void) {
     CHECK(stride == VM_FB_WIDTH * VM_FB_BPP,
           "scanout stride=%u", stride);
     CHECK(order == VM_ORDER_BGRA, "demo scanout order=%u", (unsigned)order);
+    CHECK(last_scanout_reason() == VM_FRAME_SCANOUT_REASON_VALID,
+          "valid demo scanout reason=%s",
+          vm_frame_scanout_reason_name(last_scanout_reason()));
 
     arm_status_t status = ARM_OK;
     unsigned retired = s5l8900_run(&m, 2000, &status);
@@ -120,6 +140,7 @@ static void test_host_refuses_malicious_clcd_windows(void) {
     const uint32_t fixed_pa = vm_guest_fb_pa(m.ram_base, m.ram_size);
     const uint8_t *fixed = m.ram + (fixed_pa - m.ram_base);
     const uint32_t b = CLCD_WIN_FIRST;
+    vm_frame_telemetry_reset(true);
 
     /* Keep the window enabled and apparently well-formed, but place its last
      * line outside RAM. The app must reject it instead of handing UIKit an
@@ -128,6 +149,10 @@ static void test_host_refuses_malicious_clcd_windows(void) {
                    m.ram_base + m.ram_size - 4u);
     CHECK(vm_guest_display(&m, NULL, NULL, NULL, NULL) == NULL,
           "out-of-RAM CLCD window escaped validation");
+    CHECK(last_scanout_reason() ==
+              VM_FRAME_SCANOUT_REASON_FRAMEBUFFER_OUTSIDE_RAM,
+          "out-of-RAM reason=%s",
+          vm_frame_scanout_reason_name(last_scanout_reason()));
 
     CHECK(s5l_clcd_seed_window0(&m.clcd, fixed_pa,
                                 VM_FB_WIDTH, VM_FB_HEIGHT,
@@ -139,6 +164,10 @@ static void test_host_refuses_malicious_clcd_windows(void) {
     s5l_clcd_write(&m.clcd, b + CLCD_WIN_PITCH, UINT32_MAX);
     CHECK(vm_guest_display(&m, NULL, NULL, NULL, NULL) == NULL,
           "overflowing CLCD stride escaped validation");
+    CHECK(last_scanout_reason() ==
+              VM_FRAME_SCANOUT_REASON_FRAMEBUFFER_OUTSIDE_RAM,
+          "overflowing-stride reason=%s",
+          vm_frame_scanout_reason_name(last_scanout_reason()));
 
     for (uint32_t rawOrder = 0; rawOrder <= CLCD_ORDER_MASK; rawOrder++) {
         CHECK(s5l_clcd_seed_window0(&m.clcd, fixed_pa,
@@ -151,6 +180,9 @@ static void test_host_refuses_malicious_clcd_windows(void) {
               "valid order value %u was rejected", rawOrder);
         CHECK(order == VM_ORDER_BGRA,
               "unverified order value %u invented a swizzle", rawOrder);
+        CHECK(last_scanout_reason() == VM_FRAME_SCANOUT_REASON_VALID,
+              "valid order %u reason=%s", rawOrder,
+              vm_frame_scanout_reason_name(last_scanout_reason()));
     }
 
     s5l8900_free(&m);
@@ -169,6 +201,7 @@ static void test_host_follows_active_clcd_window(void) {
                                 VM_FB_WIDTH * VM_FB_BPP,
                                 CLCD_FMT_32BPP, CLCD_ORDER_BGRA),
           "could not seed window 0");
+    vm_frame_telemetry_reset(true);
 
     const uint32_t b1 = CLCD_WIN_FIRST + CLCD_WIN_STRIDE;
     s5l_clcd_write(&m.clcd, b1 + CLCD_WIN_PITCH, VM_FB_WIDTH * VM_FB_BPP);
@@ -195,15 +228,36 @@ static void test_host_follows_active_clcd_window(void) {
           "active window 1 did not become scanout");
     CHECK(order == VM_ORDER_BGRA, "unknown order bits invented a swizzle");
 
+    s5l_clcd_write(&m.clcd, CLCD_GATE, m.clcd.gate & ~1u);
+    CHECK(vm_guest_display(&m, NULL, NULL, NULL, NULL) == NULL &&
+          last_scanout_reason() == VM_FRAME_SCANOUT_REASON_CLOCK_GATED,
+          "clock-gated reason=%s",
+          vm_frame_scanout_reason_name(last_scanout_reason()));
+    s5l_clcd_write(&m.clcd, CLCD_GATE, CLCD_N82_VIDCON0);
+
+    s5l_clcd_write(&m.clcd, CLCD_CTRL, CLCD_CTRL_WIN1);
+    CHECK(vm_guest_display(&m, NULL, NULL, NULL, NULL) == NULL &&
+          last_scanout_reason() == VM_FRAME_SCANOUT_REASON_GLOBAL_DISABLED,
+          "global-disabled reason=%s",
+          vm_frame_scanout_reason_name(last_scanout_reason()));
+    s5l_clcd_write(&m.clcd, CLCD_CTRL,
+                   CLCD_CTRL_ENABLE | CLCD_CTRL_WIN1);
+
     s5l_clcd_write(&m.clcd, CLCD_DISABLE, 1u);
     CHECK(vm_guest_display(&m, NULL, NULL, NULL, NULL) == NULL,
           "stopped scanout still exposed a framebuffer");
+    CHECK(last_scanout_reason() == VM_FRAME_SCANOUT_REASON_STOPPED,
+          "stopped reason=%s",
+          vm_frame_scanout_reason_name(last_scanout_reason()));
     s5l_clcd_write(&m.clcd, CLCD_ENABLE, 1u);
 
     /* No enabled window is an explicit no-scanout state, not the demo buffer. */
     s5l_clcd_write(&m.clcd, CLCD_CTRL, CLCD_CTRL_ENABLE);
     CHECK(vm_guest_display(&m, NULL, NULL, NULL, NULL) == NULL,
           "disabled windows produced a stale fallback frame");
+    CHECK(last_scanout_reason() == VM_FRAME_SCANOUT_REASON_NO_ACTIVE_WINDOW,
+          "no-window reason=%s",
+          vm_frame_scanout_reason_name(last_scanout_reason()));
 
     s5l8900_free(&m);
 }

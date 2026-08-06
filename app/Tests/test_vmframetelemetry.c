@@ -18,12 +18,23 @@ static unsigned failed;
     }                                                                        \
 } while (0)
 
+static vm_frame_scanout_observation_t observation(
+        vm_frame_scanout_reason_t reason) {
+    vm_frame_scanout_observation_t value;
+    memset(&value, 0, sizeof value);
+    value.reason = reason;
+    value.active_window = UINT32_MAX;
+    return value;
+}
+
 static void test_disabled_is_inert(void) {
     uint8_t pixels[800];
     memset(pixels, 0x5a, sizeof pixels);
+    vm_frame_scanout_observation_t valid =
+        observation(VM_FRAME_SCANOUT_REASON_VALID);
     vm_frame_telemetry_reset(false);
     vm_frame_telemetry_note_scanout(
-        pixels, sizeof pixels, 100u, 5u, 6000000u, 412000000u);
+        pixels, sizeof pixels, 100u, 5u, 6000000u, 412000000u, &valid);
     vm_frame_telemetry_note_layer_submission(
         pixels, sizeof pixels, true, 500u);
 
@@ -43,18 +54,35 @@ static void test_boundaries_and_sampled_changes(void) {
     vm_frame_telemetry_reset(true);
     CHECK(vm_frame_telemetry_is_enabled(), "reset did not enable telemetry");
 
+    vm_frame_scanout_observation_t stopped =
+        observation(VM_FRAME_SCANOUT_REASON_STOPPED);
+    stopped.ctrl = 0x41u;
+    stopped.gate = 0x441u;
+    stopped.active_window = 0u;
+    vm_frame_scanout_observation_t valid =
+        observation(VM_FRAME_SCANOUT_REASON_VALID);
+    valid.scanning = 1u;
+    valid.ctrl = 0x41u;
+    valid.gate = 0x441u;
+    valid.active_window = 0u;
+    valid.framebuffer_phys = 0x0ff6a000u;
+    valid.width = 320u;
+    valid.height = 480u;
+    valid.stride = 1280u;
+    valid.format = 6u;
+
     vm_frame_telemetry_note_scanout(
-        NULL, 0, 100u, 5u, 6000000u, 412000000u);
+        NULL, 0, 100u, 5u, 6000000u, 412000000u, &stopped);
     vm_frame_telemetry_note_scanout(
-        pixels, sizeof pixels, 200u, 6u, 6000000u, 412000000u);
+        pixels, sizeof pixels, 200u, 6u, 6000000u, 412000000u, &valid);
     vm_frame_telemetry_note_scanout(
-        pixels, sizeof pixels, 300u, 7u, 6000000u, 412000000u);
+        pixels, sizeof pixels, 300u, 7u, 6000000u, 412000000u, &valid);
     pixels[5] ^= 1u; /* deliberately outside the 397-byte sample */
     vm_frame_telemetry_note_scanout(
-        pixels, sizeof pixels, 400u, 8u, 6000000u, 412000000u);
+        pixels, sizeof pixels, 400u, 8u, 6000000u, 412000000u, &valid);
     pixels[397] ^= 1u;
     vm_frame_telemetry_note_scanout(
-        pixels, sizeof pixels, 500u, 9u, 6000000u, 412000000u);
+        pixels, sizeof pixels, 500u, 9u, 6000000u, 412000000u, &valid);
 
     vm_frame_telemetry_note_layer_submission(
         NULL, 0, false, 100u);
@@ -76,7 +104,28 @@ static void test_boundaries_and_sampled_changes(void) {
           (unsigned long long)state.scanout_valid);
     CHECK(state.scanout_changes == 2u,
           "sampled scanout changes=%llu, expected 2",
-          (unsigned long long)state.scanout_changes);
+           (unsigned long long)state.scanout_changes);
+    CHECK(state.scanout_reason_counts[VM_FRAME_SCANOUT_REASON_STOPPED] == 1u &&
+          state.scanout_reason_counts[VM_FRAME_SCANOUT_REASON_VALID] == 4u,
+          "scanout reason counts stopped=%llu valid=%llu",
+          (unsigned long long)state.scanout_reason_counts[
+              VM_FRAME_SCANOUT_REASON_STOPPED],
+          (unsigned long long)state.scanout_reason_counts[
+              VM_FRAME_SCANOUT_REASON_VALID]);
+    CHECK(state.scanout_last.reason == VM_FRAME_SCANOUT_REASON_VALID &&
+          state.scanout_last_reason_streak == 4u,
+          "last scanout reason/streak=%s/%llu",
+          vm_frame_scanout_reason_name(state.scanout_last.reason),
+          (unsigned long long)state.scanout_last_reason_streak);
+    CHECK(state.scanout_last.framebuffer_phys == 0x0ff6a000u &&
+          state.scanout_last.width == 320u &&
+          state.scanout_last.height == 480u &&
+          state.scanout_last.stride == 1280u,
+          "last raw scanout metadata was not preserved");
+    CHECK(state.scanout_last_valid_timer_ticks == 500u &&
+          state.scanout_last_valid_clcd_frames == 9u &&
+          state.scanout_last_valid_host_ns != 0u,
+          "last-valid boundary was not captured");
     CHECK(state.scanout_guest_clock_captured &&
           state.scanout_guest_clock_consistent,
           "guest clock was not captured consistently");
@@ -105,10 +154,17 @@ static void test_boundaries_and_sampled_changes(void) {
           (unsigned long long)state.layer_max_work_ns);
 
     vm_frame_telemetry_note_scanout(
-        pixels, sizeof pixels, 10u, 1u, 3000000u, 412000000u);
+        pixels, sizeof pixels, 10u, 1u, 3000000u, 412000000u, &valid);
     vm_frame_telemetry_snapshot(&state);
     CHECK(!state.scanout_guest_clock_consistent,
           "clock-rate/counter regression was accepted as consistent");
+    CHECK(strcmp(vm_frame_scanout_reason_name(
+                     VM_FRAME_SCANOUT_REASON_FRAMEBUFFER_OUTSIDE_RAM),
+                 "framebuffer_outside_ram") == 0 &&
+          strcmp(vm_frame_scanout_reason_name(
+                     (vm_frame_scanout_reason_t)UINT32_MAX),
+                 "unknown") == 0,
+          "scanout reason names are not stable");
 }
 
 int main(void) {
