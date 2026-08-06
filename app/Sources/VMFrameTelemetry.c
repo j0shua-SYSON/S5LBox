@@ -1,9 +1,17 @@
 /* See VMFrameTelemetry.h for the measurement boundary and its limitations. */
 #include "VMFrameTelemetry.h"
 
-#include <stdatomic.h>
 #include <string.h>
 #include <time.h>
+
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#else
+#include <stdatomic.h>
+#endif
 
 typedef struct {
     vm_frame_telemetry_snapshot_t public_state;
@@ -13,9 +21,37 @@ typedef struct {
     uint64_t layer_signature;
 } vm_frame_telemetry_state_t;
 
+static vm_frame_telemetry_state_t g_vm_frame_telemetry;
+
+#if defined(_WIN32)
+/* MSVC does not enable C11 atomics for the C mode used by this project.
+ * Interlocked keeps the Windows test build portable without weakening the
+ * stock-iOS path or requiring an experimental compiler switch. */
+static volatile LONG g_vm_frame_telemetry_lock;
+static volatile LONG g_vm_frame_telemetry_enabled;
+
+static void vm_frame_telemetry_lock(void) {
+    while (InterlockedCompareExchange(&g_vm_frame_telemetry_lock,
+                                      1, 0) != 0) {
+    }
+}
+
+static void vm_frame_telemetry_unlock(void) {
+    (void)InterlockedExchange(&g_vm_frame_telemetry_lock, 0);
+}
+
+static void vm_frame_telemetry_set_enabled(bool enabled) {
+    (void)InterlockedExchange(&g_vm_frame_telemetry_enabled,
+                              enabled ? 1 : 0);
+}
+
+static bool vm_frame_telemetry_enabled(void) {
+    return InterlockedCompareExchange(&g_vm_frame_telemetry_enabled,
+                                      0, 0) != 0;
+}
+#else
 static atomic_flag g_vm_frame_telemetry_lock = ATOMIC_FLAG_INIT;
 static atomic_bool g_vm_frame_telemetry_enabled = ATOMIC_VAR_INIT(false);
-static vm_frame_telemetry_state_t g_vm_frame_telemetry;
 
 static void vm_frame_telemetry_lock(void) {
     while (atomic_flag_test_and_set_explicit(
@@ -27,6 +63,17 @@ static void vm_frame_telemetry_unlock(void) {
     atomic_flag_clear_explicit(&g_vm_frame_telemetry_lock,
                                memory_order_release);
 }
+
+static void vm_frame_telemetry_set_enabled(bool enabled) {
+    atomic_store_explicit(&g_vm_frame_telemetry_enabled, enabled,
+                          memory_order_release);
+}
+
+static bool vm_frame_telemetry_enabled(void) {
+    return atomic_load_explicit(&g_vm_frame_telemetry_enabled,
+                                memory_order_acquire);
+}
+#endif
 
 /* This is intentionally the same bounded sampled signature used by VMEngine.
  * It touches 6,192 bytes of a 614,400-byte 320x480 scanout. A tiny update that
@@ -52,14 +99,12 @@ void vm_frame_telemetry_reset(bool enabled) {
     memset(&g_vm_frame_telemetry, 0, sizeof g_vm_frame_telemetry);
     g_vm_frame_telemetry.public_state.enabled = enabled;
     g_vm_frame_telemetry.public_state.generation = generation;
-    atomic_store_explicit(&g_vm_frame_telemetry_enabled, enabled,
-                          memory_order_release);
+    vm_frame_telemetry_set_enabled(enabled);
     vm_frame_telemetry_unlock();
 }
 
 bool vm_frame_telemetry_is_enabled(void) {
-    return atomic_load_explicit(&g_vm_frame_telemetry_enabled,
-                                memory_order_acquire);
+    return vm_frame_telemetry_enabled();
 }
 
 uint64_t vm_frame_telemetry_now_ns(void) {
