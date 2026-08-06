@@ -132,11 +132,13 @@ targets:
           - _FILE_OFFSET_BITS=64
           - S5LBOX_STATIC_A64_ENGINE=1
           - S5LBOX_STATIC_A64_NATIVE=1
-          # This target is the measured arm64 product consumer. Host/default
-          # builds remain opt-in and the interpreter remains their default.
-          - S5LBOX_STATIC_A64_DEFAULT_GRAPH=1
-          # The app uses the canonical machine bus with no RAM-write observer,
-          # so it may grant the separate direct-write pointer contract.
+          # Keep the signed-static engine and native handlers compiled so the
+          # candidate remains testable, but do not select its graph for the
+          # product. With the app's canonical bus and direct writes enabled, a
+          # 100M full-guest A9 replay measured 1.125 Minsn/s for the graph and
+          # 6.945 Minsn/s for repeated interpreter controls: 6.17x slower.
+          # Keep the narrower direct-write contract: disabling it in the same
+          # interpreter replay was 4.14% slower with identical final evidence.
           - S5LBOX_STATIC_A64_DEFAULT_DIRECT_WRITES=1
         # Stated rather than inherited: the Objective-C sources are written for
         # ARC, and would leak (or double-free) under manual retain/release.

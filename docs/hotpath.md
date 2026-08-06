@@ -7554,3 +7554,102 @@ about the installed iPhone build**. The physical device remains the authority. O
 `arm_step` from this profile before measuring the iOS signed graph would risk solving the wrong
 bottleneck; the next decisive action remains the unlocked-phone MBX run with simultaneous app
 changed-frame status, sustained process CPU and CoreAnimation telemetry.
+
+### 2026-08-06: the signed-static graph is a 6.17x A9 regression under the app bus
+
+The synthetic signed-engine benchmark above was not enough evidence for product policy. Commit
+`fe1b45c03516e629f58b322cd3715d08706ca404` added a runtime interpreter control and native-engine
+retirement/refill counters to the **same** iPhoneOS full-guest executable. Exact workflow run
+`31067846341` is green. Its hosted-signed artifact is 3,546,816 bytes with SHA-256
+`8D17C3A294E0EE07D5EF8BB4F78749884DAA2D1EC6799AEE6111CF573ADAC602`; the exact phone CDHash is
+`1417760a73a63df2d40ad7450404113bb1b588d3`. It has only the three previously proven Dopamine CLI
+entitlements and requests no JIT or writable-executable memory.
+
+The run reused r446's retained 7.320 B checkpoint instead of spending another cold boot. The
+snapshot, external work image and sidecar remained exact:
+
+| retained input | bytes | SHA-256 |
+|---|---:|---|
+| `post-swipe-7320m.bin` | 122,092,890 | `6A1F8ECF15F71AE4AC020C26E162C72C723BDEB0B04AB7BCE7BC317FC7311C61` |
+| `.mdimage` | 466,825,216 | `06AAAA84FB4BFEAE5A647290C9B50BEBE7640F420457089F40BDBED961D6992D` |
+| `.mdstate` | 131,248 | `C152E63315BE0F62ECB81E55C2A1B9CE7394708360AB00069210A7DCD7969CB8` |
+
+Each arm restored that state, ran the same app-shaped 100,000-instruction schedule for exactly
+100 M guest instructions, and created a separate disposable work image. The A/B/A result on the
+iPhone 6s Plus A9 is decisive:
+
+| arm | execution policy | core rate | mean / max changed cadence | changed signatures | windows zero / >=30 |
+|---|---|---:|---:|---:|---:|
+| A | interpreter control | 6.524984 Minsn/s | 5.664 / 7.997 | 87 | 0 / 0 |
+| B | signed-static graph | 0.963142 Minsn/s | 0.838 / 1.998 | 87 | 99 / 0 |
+| A | interpreter control | 6.529058 Minsn/s | 5.708 / 7.777 | 87 | 0 / 0 |
+
+The interpreter controls average 6.527021 Minsn/s, **6.78 times the graph's rate**. This is not a
+minor regression or thermal drift between separate builds: the slower arm sits between two nearly
+identical controls in one exact executable. The graph claims 80,909,582 signed-native retirements
+out of 100 M (80.910%), 4,311,170 chained graph entries, 3,849,314 refill attempts, 3,706,664 hits,
+2,531,948 skips, and 2,654,726 known-negative bypasses. High native coverage therefore did not
+translate into useful throughput; graph lookup/refill and handler-boundary costs overwhelm the
+saved interpreter dispatch on this workload and device.
+
+All three arms exit zero with empty stderr and the same terminal PC/CPSR, thread, task, process,
+translation tables, fault registers, device counters and CLCD state. Every disposable work image
+ends at SHA-256 `06AAAA84FB4BFEAE5A647290C9B50BEBE7640F420457089F40BDBED961D6992D`, and product versus
+interpreter screen output is byte-identical on the phone at SHA-256
+`F23E8D07E9C863755DBB1BFDE4A1892F17110FE529A56F676C0EBFFB02EEB7C7`. The capture-log SHA-256
+values, in A/B/A order, are
+`08651EB8FC657B16A3A514745A30DA3DB9D62AECF0B99619A5C8DE8F9F7CA8BB`,
+`FB65D459DE8D88E88CC0BBC26AC98B5DC75C6572E664E6EF0A1DB9A2A36FADEF`, and
+`BE53E9CCA0C0E8B602B6DB8E0CD4FDF68991D5D8A14466993DBC1F41FCC2D47F`.
+
+There were two important limits. First, bootkernel's diagnostic bus observes RAM writes and therefore
+revoked the engine's separate direct-RAM-write consent; the app's canonical bus does not have that
+observer. Commit `94ed9dfb75dd32e20c3d7be51ba442555df2b7f4` closed that gap with a same-binary
+`--canonical-bus` mode plus a separate `--no-direct-ram-writes` control. Its exact hosted artifact
+came from green workflow run `31069383068`; the phone copy was 3,546,864 bytes with SHA-256
+`A25766071A5E700041EAD029DEBFE0D1418AA207254F2E8AFD116650FD41B713`, and its exact admitted
+CDHash was `fabd3fb733d2c88daac7ad4ba9afdf9ebdca1c65`. These are standalone lab-harness properties,
+not dependencies or entitlements of the stock-compatible app.
+
+The canonical-bus sustained controls restored the same checkpoint, ran exactly 100 M instructions,
+disabled per-instruction host observers during timing, and produced the same final work-image SHA-256
+`06AAAA84FB4BFEAE5A647290C9B50BEBE7640F420457089F40BDBED961D6992D` and screen SHA-256
+`F23E8D07E9C863755DBB1BFDE4A1892F17110FE529A56F676C0EBFFB02EEB7C7`:
+
+| arm | execution policy | core rate | mean / max changed cadence | changed signatures | windows zero / >=30 |
+|---|---|---:|---:|---:|---:|
+| A | graph + direct writes | 1.125446 Minsn/s | 0.985 / 1.991 | 87 | 77 / 0 |
+| B1 | interpreter + direct writes | 6.951659 Minsn/s | 6.062 / 7.921 | 87 | 0 / 0 |
+| C | interpreter, direct writes disabled | 6.668303 Minsn/s | 5.825 / 7.641 | 87 | 0 / 0 |
+| B2 | interpreter + direct writes | 6.937394 Minsn/s | 6.046 / 7.928 | 87 | 0 / 0 |
+
+The two direct interpreter controls average 6.944527 Minsn/s: **6.17 times the graph rate** and
+**4.14% faster** than the no-direct control. Their log SHA-256 values in A/B1/C/B2 order are
+`C1171DAFC3A10F5B4515A4AAC558737727382B39B630653BEA343C3E64B660ED`,
+`10E49597676B779D79EDD20F347A955A299EF8C9C8D695965CF1C09EB3997CD2`,
+`7EED5D47AD170A8F75B246EB82D9911181C130F9AF0E0CF1C5C35E4CC453D1FF`, and
+`24DA057A7C94BC769DA0253DD697B3D96BDD6B0BEDD38DDC43C199484676F600`.
+This closes the app-bus caveat: product policy must disable the graph but retain the independently
+useful direct-write contract.
+
+The second limit remains: a Windows interpreter replay reached the same guest machine state at
+5.982866 Minsn/s and 5.199 mean changed cadence, but its final PPM differs from the phone at three
+pixels: seven of 460,800 RGB bytes, each by one least-significant bit. Cross-host raster output is
+therefore not universally byte exact. The same-phone product/interpreter comparison is byte exact,
+which is the comparison used for the engine decision.
+
+This change keeps the signed engine and generated native handlers compiled for repair and controlled
+experiments, removes only the graph default from the shipping iOS target, and keeps direct writes.
+A CI policy test pins both decisions. The synthetic device workflow continues to build the signed
+candidate deliberately, but is now labelled as a diagnostic rather than falsely described as
+app-matched.
+
+Brutal status: **this is a real, large shipping regression removed, not a 30 FPS result**. The
+canonical-bus interpreter controls average only about 6.05 changed scanouts/s and contain no 30-FPS
+window. More importantly, the project owner reports older app runs near 20 Minsn/s on this A9 and
+40 Minsn/s on an iPhone 16 Pro Max while visible presentation still stayed around 0--2 FPS. Those
+historical figures are not yet reproduced under this exact harness, but they are strong contrary
+evidence against equating instruction throughput with UIKit FPS. The next foreground build must
+count and time every boundary from guest scanout change through VM publication, copy/conversion,
+main-thread delivery and actual presentation. MBX remains functionally useful but has not yet proved
+a phone-speed win. Further structural work must target whichever measured boundary drops the frames.

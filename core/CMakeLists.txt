@@ -1130,6 +1130,25 @@ add_test(NAME app_info_plist
             -DPLIST=${CMAKE_CURRENT_SOURCE_DIR}/../app/Info.plist
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_info_plist.cmake)
 
+# The signed-static A64 implementation stays compiled into the iOS app for
+# controlled experiments, but exact canonical-bus full-guest A9 evidence
+# showed that selecting its graph is a 6.17x regression. The narrower direct-
+# RAM-write contract remains selected because a same-binary control proved it
+# 4.14% faster with identical final evidence. Keep both decisions executable.
+add_test(NAME app_execution_policy
+    COMMAND ${CMAKE_COMMAND}
+            -DAPP_PROJECT=${CMAKE_CURRENT_SOURCE_DIR}/../app/project.yml
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_app_execution_policy.cmake)
+
+# Dopamine makes the physical A9 a flexible lab target; it is never part of
+# the product contract. Defend that boundary on every host by rejecting private
+# execution entitlements, rootless-jailbreak paths and tweak frameworks from
+# the app target. The emulated guest's separate jailbreak option is allowed.
+add_test(NAME app_stock_host_policy
+    COMMAND ${CMAKE_COMMAND}
+            -DAPP_DIR=${CMAKE_CURRENT_SOURCE_DIR}/../app
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_app_stock_policy.cmake)
+
 add_test(NAME app_option_mirror
     COMMAND ${CMAKE_COMMAND}
             -DBOOTKERNEL=$<TARGET_FILE:bootkernel>

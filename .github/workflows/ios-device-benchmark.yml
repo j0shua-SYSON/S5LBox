@@ -25,7 +25,7 @@ jobs:
           if [ -n "$latest" ]; then sudo xcode-select -s "$latest"; fi
           xcodebuild -version
 
-      - name: Build app-matched no-JIT benchmark for iphoneos
+      - name: Build signed-engine diagnostic benchmark for iphoneos
         run: |
           set -euo pipefail
           sdkroot="$(xcrun --sdk iphoneos --show-sdk-path)"
@@ -34,8 +34,10 @@ jobs:
             device-benchmark/a64_static_handlers.S
 
           # Keep this source graph coupled to the portable core rather than a
-          # hand-maintained copy. The app makes the same exclusion: jit/** is
-          # not linked. Paths in this repository contain no whitespace.
+          # hand-maintained copy. Like the app, it excludes jit/**. The signed
+          # graph and direct-write definitions below deliberately measure a
+          # candidate engine; they are NOT the current shipping-app default.
+          # Paths in this repository contain no whitespace.
           core_sources=$(find core/src -type f -name '*.c' \
             ! -path 'core/src/jit/*' -print | sort)
           test -n "$core_sources"
