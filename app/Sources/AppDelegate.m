@@ -5,6 +5,7 @@
 #import "AppDelegate.h"
 #import "EmulatorViewController.h"
 #import "VMDeviceAutomation.h"
+#import "VMFrameTelemetry.h"
 #import "VMSettings.h"
 #import "VMInstanceListViewController.h"
 
@@ -129,6 +130,7 @@ static UIGestureRecognizer *VMNavigationContentPopGestureRecognizer(
 
     (void)launchOptions;
     BOOL automationRequested = VMLaunchRequestsFirstMachine();
+    if (automationRequested) vm_frame_telemetry_reset(true);
     /* A long phone profile must not turn into a lock-screen measurement half
      * way through. This lasts only for the explicitly automated app process;
      * ordinary launches keep the user's normal Auto-Lock setting. */

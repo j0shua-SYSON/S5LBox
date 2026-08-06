@@ -17,13 +17,17 @@
 //  at the exact 320:480 aspect, so the two agree and no interpretation of
 //  contentsScale can stretch the picture.
 //
-//  If the guest ever runs fast enough that per-frame texture upload matters,
-//  this is the one file to replace. It is not the bottleneck today: the ARM
-//  interpreter is, by four orders of magnitude.
+//  This path is intentionally measured rather than declared cheap. Historical
+//  phone runs reached roughly 20-40 M guest instructions/s while visible
+//  motion still stayed around 0-2 fps, so instruction throughput alone cannot
+//  exonerate the copy/CGImage/layer/compositor path. Opt-in automation times
+//  this method and counts changed layer submissions; device compositor data
+//  remains necessary before calling any submission a displayed frame.
 //
 //  Copyright (c) 2026 j0shua-SYSON. MIT licensed.
 //
 #import "VMFramebufferView.h"
+#import "VMFrameTelemetry.h"
 #import <QuartzCore/QuartzCore.h>
 #include <limits.h>
 #include <stdint.h>
@@ -103,46 +107,72 @@ static void vm_fb_release_data(void *info, const void *data, size_t size) {
                height:(size_t)h
                stride:(size_t)stride
                  argb:(BOOL)argb {
-    if (!pixels || w == 0 || h == 0 || !_colorSpace ||
-        w > SIZE_MAX / 4 || stride < w * 4 || h > SIZE_MAX / stride) return;
+    const BOOL telemetry = vm_frame_telemetry_is_enabled();
+    const uint64_t startedNS = telemetry ? vm_frame_telemetry_now_ns() : 0;
+    size_t bytes = 0;
+    BOOL accepted = NO;
 
-    /* Only after the frame has been accepted: a rejected frame must not move
-     * the coordinate system a touch is measured against. */
-    if (w <= UINT_MAX && h <= UINT_MAX) {
-        _guestWidth  = (unsigned)w;
-        _guestHeight = (unsigned)h;
+    do {
+        if (!pixels || w == 0 || h == 0 || !_colorSpace ||
+            w > SIZE_MAX / 4 || stride < w * 4 ||
+            h > SIZE_MAX / stride)
+            break;
+
+        /* Only after the frame has been accepted geometrically: malformed
+         * input must not move the coordinate system a touch is measured
+         * against. Allocation or CGImage failure keeps the previous picture,
+         * but the supplied geometry remains the next valid guest geometry. */
+        if (w <= UINT_MAX && h <= UINT_MAX) {
+            _guestWidth  = (unsigned)w;
+            _guestHeight = (unsigned)h;
+        }
+
+        bytes = stride * h;
+
+        // The CGImage must own immutable pixels: the emulator thread is free
+        // to repaint its framebuffer the instant this method returns.
+        void *copy = malloc(bytes);
+        if (!copy) break;
+        memcpy(copy, pixels, bytes);
+
+        CGDataProviderRef provider =
+            CGDataProviderCreateWithData(NULL, copy, bytes,
+                                         vm_fb_release_data);
+        if (!provider) {
+            free(copy);
+            break;
+        }
+
+        // Alpha is always skipped, never honoured: the guest's alpha byte is
+        // not trustworthy (XNU's console leaves it zero), and composited it
+        // would erase the whole screen. That leaves only component order:
+        //   B,G,R,A == 0xAARRGGBB little-endian -> ByteOrder32Little
+        //   A,R,G,B == 0xAARRGGBB big-endian    -> ByteOrder32Big
+        CGBitmapInfo info = (CGBitmapInfo)(kCGImageAlphaNoneSkipFirst
+            | (argb ? kCGBitmapByteOrder32Big :
+                      kCGBitmapByteOrder32Little));
+
+        CGImageRef image = CGImageCreate(
+            w, h, 8, 32, stride, _colorSpace, info,
+            provider, NULL, false, kCGRenderingIntentDefault);
+
+        /* Frees copy too if image creation failed; otherwise the image keeps
+         * the provider alive until Core Animation releases the image. */
+        CGDataProviderRelease(provider);
+        if (!image) break;
+
+        self.layer.contents = (__bridge id)image;
+        CGImageRelease(image);
+        accepted = YES;
+    } while (0);
+
+    if (telemetry) {
+        const uint64_t finishedNS = vm_frame_telemetry_now_ns();
+        const uint64_t workNS = startedNS != 0 && finishedNS >= startedNS
+            ? finishedNS - startedNS : 0;
+        vm_frame_telemetry_note_layer_submission(
+            pixels, bytes, accepted, workNS);
     }
-
-    const size_t bytes = stride * h;
-
-    // The CGImage must own immutable pixels: the emulator thread is free to
-    // repaint its framebuffer the instant this method returns.
-    void *copy = malloc(bytes);
-    if (!copy) return;
-    memcpy(copy, pixels, bytes);
-
-    CGDataProviderRef provider =
-        CGDataProviderCreateWithData(NULL, copy, bytes, vm_fb_release_data);
-    if (!provider) { free(copy); return; }
-
-    // Alpha is always skipped, never honoured: the guest's alpha byte is not
-    // trustworthy (XNU's console leaves it zero), and composited it would erase
-    // the whole screen. That leaves only the component order to get right, and
-    // it is the same "alpha first" layout either way, differing only in endian:
-    //   B,G,R,A in memory  == 0xAARRGGBB little-endian  -> ByteOrder32Little
-    //   A,R,G,B in memory  == 0xAARRGGBB big-endian     -> ByteOrder32Big
-    CGBitmapInfo info = (CGBitmapInfo)(kCGImageAlphaNoneSkipFirst
-        | (argb ? kCGBitmapByteOrder32Big : kCGBitmapByteOrder32Little));
-
-    CGImageRef image = CGImageCreate(
-        w, h, 8, 32, stride, _colorSpace, info,
-        provider, NULL, false, kCGRenderingIntentDefault);
-
-    CGDataProviderRelease(provider);   // frees `copy` too, if the image failed
-    if (!image) return;
-
-    self.layer.contents = (__bridge id)image;
-    CGImageRelease(image);
 }
 
 #pragma mark - Touches

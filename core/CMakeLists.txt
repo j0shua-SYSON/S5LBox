@@ -360,11 +360,23 @@ add_test(NAME macho_parser COMMAND test_macho)
 # not compile UIKit or allocate the real 128/512 MB guest configuration.
 add_executable(test_vmguest
     ../app/Tests/test_vmguest.c
+    ../app/Sources/VMFrameTelemetry.c
     ../app/Sources/VMGuest.c
 )
 target_include_directories(test_vmguest PRIVATE ../app/Sources)
 target_link_libraries(test_vmguest PRIVATE emucore)
 add_test(NAME app_vmguest_bridge COMMAND test_vmguest)
+
+# Frame telemetry is kept in portable C so its cross-thread counter and the
+# intentionally sampled change definition are host-tested. The Objective-C
+# view supplies only the two facts UIKit knows: whether CGImage construction
+# reached CALayer.contents and how long that main-thread work took.
+add_executable(test_vmframetelemetry
+    ../app/Tests/test_vmframetelemetry.c
+    ../app/Sources/VMFrameTelemetry.c
+)
+target_include_directories(test_vmframetelemetry PRIVATE ../app/Sources)
+add_test(NAME app_frame_telemetry COMMAND test_vmframetelemetry)
 
 # The app's user interface is built by a macOS CI runner and can only be run on
 # a phone, so none of its Objective-C is reachable from this suite.  The pieces

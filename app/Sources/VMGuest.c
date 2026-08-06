@@ -77,6 +77,7 @@
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed.
  */
 #include "VMGuest.h"
+#include "VMFrameTelemetry.h"
 
 #include <string.h>
 
@@ -200,6 +201,26 @@ const uint8_t *vm_guest_framebuffer(const s5l8900_t *m) {
     return m->ram + (pa - m->ram_base);
 }
 
+static const uint8_t *vm_guest_record_display(const s5l8900_t *m,
+                                              const uint8_t *pixels,
+                                              size_t bytes) {
+    uint64_t timer_ticks = 0;
+    uint64_t clcd_frames = 0;
+    uint32_t timebase_hz = 0;
+    uint32_t cpu_hz = 0;
+    if (m) {
+        timer_ticks = m->timer.ticks;
+        timebase_hz = m->tb_hz;
+        cpu_hz = m->cpu_hz;
+#ifdef S5L8900_CLCD_BASE
+        clcd_frames = m->clcd.frames;
+#endif
+    }
+    vm_frame_telemetry_note_scanout(
+        pixels, bytes, timer_ticks, clcd_frames, timebase_hz, cpu_hz);
+    return pixels;
+}
+
 const uint8_t *vm_guest_display(const s5l8900_t *m,
                                 uint32_t *width, uint32_t *height,
                                 uint32_t *stride, vm_pixel_order_t *order) {
@@ -209,7 +230,7 @@ const uint8_t *vm_guest_display(const s5l8900_t *m,
     if (height) *height = 0;
     if (stride) *stride = 0;
     if (order)  *order = VM_ORDER_BGRA;
-    if (!m || !m->ram) return NULL;
+    if (!m || !m->ram) return vm_guest_record_display(m, NULL, 0);
 
 #ifdef S5L8900_CLCD_BASE
     /*
@@ -240,23 +261,25 @@ const uint8_t *vm_guest_display(const s5l8900_t *m,
          * hardware swizzle. Match s5l_clcd_scanout(): report the observed
          * little-endian AARRGGBB memory layout as BGRA. */
         if (order)  *order  = VM_ORDER_BGRA;
-        return m->ram + (fb_phys - m->ram_base);
+        return vm_guest_record_display(
+            m, m->ram + (fb_phys - m->ram_base), (size_t)st * h);
     }
 
     /* The core always has a CLCD model. No enabled, usable window means there
      * is no trustworthy scanout to publish; returning the fixed demo address
      * here would turn a guest display failure into a convincing stale frame. */
-    return NULL;
+    return vm_guest_record_display(m, NULL, 0);
 #endif
 
     /* Build-time fallback for a core configuration without the CLCD model. */
     uint32_t pa = vm_guest_fb_pa(m->ram_base, m->ram_size);
-    if (!pa) return NULL;
+    if (!pa) return vm_guest_record_display(m, NULL, 0);
     if (width)  *width  = VM_FB_WIDTH;
     if (height) *height = VM_FB_HEIGHT;
     if (stride) *stride = VM_FB_WIDTH * VM_FB_BPP;
     if (order)  *order  = VM_ORDER_BGRA;
-    return m->ram + (pa - m->ram_base);
+    return vm_guest_record_display(
+        m, m->ram + (pa - m->ram_base), VM_FB_BYTES);
 }
 
 bool vm_guest_install(s5l8900_t *m) {

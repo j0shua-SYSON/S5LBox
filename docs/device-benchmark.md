@@ -105,3 +105,32 @@ This contradiction is why the workflow remains useful as a candidate-engine
 microbenchmark but no longer defines product policy. A signed-engine change
 must now win a firmware-backed replay on physical hardware before it can be
 made the app default again.
+
+## Separating host cadence from guest time
+
+Commit `55379b6` extends the full-guest `--frame-meter` report with guest timer
+ticks, CLCD VBlanks, modeled active versus event-fast-forward time, and changed
+signatures per guest and host second. This is still a CLI replay rather than a
+foreground UIKit measurement, but it prevents two different failures from
+being collapsed into one number.
+
+The exact A9 canonical-bus interpreter run from workflow `31071907256` retired
+100M instructions at 6.961979 Minsn/s. Across the meter's 14.407973 host
+seconds, the guest advanced 4.333795 seconds and 260 CLCD VBlanks. That is
+59.994 VBlanks per guest second, while the 86 post-baseline sampled changes are
+19.844 per guest second and only 5.969 per host second. About 4.091 of the
+4.334 guest seconds came from non-retiring/event fast-forward, so the invented
+412 MHz CPU ratio is technical debt but not the missing fivefold lever in this
+checkpoint.
+
+The report remains deliberately bounded:
+
+- the sampled signature can miss a small update;
+- CLCD VBlank is a display boundary, not proof of changed pixels;
+- a changed scanout is not proof UIKit consumed it; and
+- a `CALayer.contents` assignment is not proof the compositor displayed it.
+
+The automated app build therefore records validated scanout changes and layer
+submissions separately, while the physical profile records Core Animation and
+process CPU simultaneously. Only the three-way result can locate the dropped
+cadence. No Minsn/s figure alone is accepted as phone FPS.

@@ -6,6 +6,7 @@
 
 #import "EmulatorViewController.h"
 #import "VMEngine.h"
+#import "VMFrameTelemetry.h"
 #import "VMInstanceListViewController.h"
 
 #import <UIKit/UIKit.h>
@@ -34,14 +35,25 @@ static id VMDeviceAutomationValue(id object, NSString *key) {
     }
 }
 
+static double VMDeviceAutomationSeconds(uint64_t firstNS, uint64_t lastNS) {
+    if (firstNS == 0 || lastNS <= firstNS) return 0.0;
+    return (double)(lastNS - firstNS) / 1.0e9;
+}
+
+@interface VMDeviceAutomation ()
+- (void)updateFrameTelemetry;
+@end
+
 @implementation VMDeviceAutomation {
     __weak UINavigationController *_navigationController;
     __weak VMInstanceListViewController *_machineList;
     __weak EmulatorViewController *_emulator;
+    __weak UIView *_telemetryScreen;
     VMEngine *_stoppingEngine;
     NSTimer *_timer;
     VMDeviceAutomationState _state;
     BOOL _sawPreparation;
+    BOOL _endpointLogged;
     NSUInteger _ticks;
 }
 
@@ -64,6 +76,7 @@ static id VMDeviceAutomationValue(id object, NSString *key) {
 - (void)start {
     NSAssert([NSThread isMainThread], @"device automation is UIKit work");
     [self attachToCurrentEmulator];
+    [self updateFrameTelemetry];
     _timer = [NSTimer scheduledTimerWithTimeInterval:0.5
                                               target:self
                                             selector:@selector(tick:)
@@ -84,6 +97,7 @@ static id VMDeviceAutomationValue(id object, NSString *key) {
     UIViewController *top = _navigationController.topViewController;
     if (![top isKindOfClass:[EmulatorViewController class]]) {
         _emulator = nil;
+        _telemetryScreen = nil;
         return;
     }
 
@@ -94,6 +108,7 @@ static id VMDeviceAutomationValue(id object, NSString *key) {
 
     UIView *screen = VMDeviceAutomationValue(emulator, @"screen");
     if ([screen isKindOfClass:[UIView class]]) {
+        _telemetryScreen = screen;
         screen.isAccessibilityElement = YES;
         screen.accessibilityIdentifier = @"s5lbox.emulator.screen";
         screen.accessibilityLabel = @"iPhone OS guest display";
@@ -114,6 +129,78 @@ static id VMDeviceAutomationValue(id object, NSString *key) {
     UIToolbar *toolbar = VMDeviceAutomationValue(emulator, @"toolbar");
     if ([toolbar isKindOfClass:[UIToolbar class]])
         toolbar.accessibilityIdentifier = @"s5lbox.emulator.toolbar";
+}
+
+- (void)updateFrameTelemetry {
+    vm_frame_telemetry_snapshot_t state;
+    vm_frame_telemetry_snapshot(&state);
+    if (!state.enabled) return;
+
+    UIView *screen = _telemetryScreen;
+    if (![screen isKindOfClass:[UIView class]]) return;
+
+    const double scanoutSeconds = VMDeviceAutomationSeconds(
+        state.scanout_first_host_ns, state.scanout_last_host_ns);
+    const uint64_t scanoutPostBaseline = state.scanout_changes > 0
+        ? state.scanout_changes - 1u : 0u;
+    const double scanoutChangedPerHostSecond = scanoutSeconds > 0.0
+        ? (double)scanoutPostBaseline / scanoutSeconds : 0.0;
+
+    const BOOL guestClockValid =
+        state.scanout_guest_clock_captured &&
+        state.scanout_guest_clock_consistent &&
+        state.scanout_timebase_hz != 0u &&
+        state.scanout_last_timer_ticks >= state.scanout_first_timer_ticks &&
+        state.scanout_last_clcd_frames >= state.scanout_first_clcd_frames;
+    const double guestSeconds = guestClockValid
+        ? (double)(state.scanout_last_timer_ticks -
+                   state.scanout_first_timer_ticks) /
+              (double)state.scanout_timebase_hz
+        : 0.0;
+    const uint64_t vblanks = guestClockValid
+        ? state.scanout_last_clcd_frames - state.scanout_first_clcd_frames
+        : 0u;
+    const double scanoutChangedPerGuestSecond = guestSeconds > 0.0
+        ? (double)scanoutPostBaseline / guestSeconds : 0.0;
+
+    const double layerSeconds = VMDeviceAutomationSeconds(
+        state.layer_first_host_ns, state.layer_last_host_ns);
+    const uint64_t layerPostBaseline = state.layer_changes > 0
+        ? state.layer_changes - 1u : 0u;
+    const double layerChangedPerHostSecond = layerSeconds > 0.0
+        ? (double)layerPostBaseline / layerSeconds : 0.0;
+    const double layerMeanMS = state.layer_attempts > 0
+        ? (double)state.layer_total_work_ns /
+              (double)state.layer_attempts / 1.0e6
+        : 0.0;
+    const double layerMaxMS = (double)state.layer_max_work_ns / 1.0e6;
+
+    NSString *guest = guestClockValid
+        ? [NSString stringWithFormat:
+            @"guest_s=%.6f,vblanks=%llu,scanout_changed_per_guest_s=%.3f",
+            guestSeconds, (unsigned long long)vblanks,
+            scanoutChangedPerGuestSecond]
+        : @"guest_clock=invalid";
+    NSString *value = [NSString stringWithFormat:
+        @"frame_pipeline_v1,generation=%llu,"
+         "scanout_attempts=%llu,scanout_valid=%llu,"
+         "scanout_signatures=%llu,scanout_host_s=%.6f,"
+         "scanout_changed_per_host_s=%.3f,%@,"
+         "layer_attempts=%llu,layer_accepted=%llu,layer_rejected=%llu,"
+         "layer_signatures=%llu,layer_host_s=%.6f,"
+         "layer_changed_per_host_s=%.3f,layer_work_mean_ms=%.3f,"
+         "layer_work_max_ms=%.3f,layer_is_submission_not_display=1",
+        (unsigned long long)state.generation,
+        (unsigned long long)state.scanout_attempts,
+        (unsigned long long)state.scanout_valid,
+        (unsigned long long)state.scanout_changes,
+        scanoutSeconds, scanoutChangedPerHostSecond, guest,
+        (unsigned long long)state.layer_attempts,
+        (unsigned long long)state.layer_accepted,
+        (unsigned long long)state.layer_rejected,
+        (unsigned long long)state.layer_changes,
+        layerSeconds, layerChangedPerHostSecond, layerMeanMS, layerMaxMS];
+    screen.accessibilityValue = value;
 }
 
 - (VMEngine *)currentEngine {
@@ -148,6 +235,7 @@ static id VMDeviceAutomationValue(id object, NSString *key) {
     _stoppingEngine = nil;
     VMInstanceListViewController *machineList = _machineList;
     UINavigationController *navigation = _navigationController;
+    vm_frame_telemetry_reset(true);
     if (!machineList || navigation.topViewController != machineList ||
         ![machineList openFirstMachineForAutomation]) {
         [self finishWithMessage:
@@ -157,6 +245,7 @@ static id VMDeviceAutomationValue(id object, NSString *key) {
 
     _state = VMDeviceAutomationStateObserving;
     _sawPreparation = NO;
+    _endpointLogged = NO;
     [self attachToCurrentEmulator];
     NSLog(@"[automation] reopened the prepared machine through the normal path");
 }
@@ -176,6 +265,7 @@ static id VMDeviceAutomationValue(id object, NSString *key) {
 
     if (!_emulator || _navigationController.topViewController != _emulator)
         [self attachToCurrentEmulator];
+    [self updateFrameTelemetry];
     VMEngine *engine = [self currentEngine];
     if (!engine) return;
 
@@ -186,8 +276,11 @@ static id VMDeviceAutomationValue(id object, NSString *key) {
     }
 
     if (engine.isRunningFirmware) {
-        [self finishWithMessage:
-            @"firmware engine is running; setup observer removed"];
+        if (!_endpointLogged) {
+            NSLog(@"[automation] firmware engine is running; frame telemetry "
+                   "observer remains active");
+            _endpointLogged = YES;
+        }
         return;
     }
 
@@ -205,13 +298,16 @@ static id VMDeviceAutomationValue(id object, NSString *key) {
         return;
     }
 
-    /* No firmware means the synthetic guest is the intended endpoint. The
-     * identifiers are installed already; leaving a polling timer alive would
-     * only perturb the profile it was meant to observe. */
+    /* No firmware means the synthetic guest is the intended endpoint. Keep
+     * the low-rate observer because it now carries the before/after pipeline
+     * counters used by the physical-device profile. It does no per-frame
+     * Objective-C work; the two boundary hooks are the measured overhead. */
     if ([engine.modeDescription isEqualToString:@"built-in test guest"] &&
-        note.length == 0)
-        [self finishWithMessage:
-            @"built-in test guest is running; setup observer removed"];
+        note.length == 0 && !_endpointLogged) {
+        NSLog(@"[automation] built-in test guest is running; frame telemetry "
+               "observer remains active");
+        _endpointLogged = YES;
+    }
 }
 
 @end

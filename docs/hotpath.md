@@ -7653,3 +7653,52 @@ evidence against equating instruction throughput with UIKit FPS. The next foregr
 count and time every boundary from guest scanout change through VM publication, copy/conversion,
 main-thread delivery and actual presentation. MBX remains functionally useful but has not yet proved
 a phone-speed win. Further structural work must target whichever measured boundary drops the frames.
+
+### 2026-08-06: guest time is not the missing 5x; instrument the real app pipeline
+
+Commit `55379b6517c12452eb14c8dd16292a39c5be4fc0` adds the clock domain that the earlier
+frame meter omitted. Exact full-guest workflow run `31071907256` is green. Its hosted-signed arm64
+artifact is 3,546,864 bytes, SHA-256
+`CAC31EF1D760FE4D25F86DDDFDC0672B776598E21766E6760412995B25149FAF`, and has phone CDHash
+`a3f7c61fb5a36fd90c05c992fc44a53c88c4e4c9`. Those are standalone jailbreak-lab harness
+properties, not app dependencies. The stock-compatible app still requests no private entitlement.
+
+The exact artifact restored the same authenticated r446 7.320 B state and ran the canonical app bus,
+interpreter control, direct RAM writes and 100,000-instruction app schedule for exactly 100 M retired
+instructions on the A9. It stopped normally with empty stderr:
+
+| quantity | exact A9 result |
+|---|---:|
+| timed core rate | 6.961979 Minsn/s |
+| frame-meter host span | 14.407973 s |
+| guest timer advance | 26,002,769 ticks at 6 MHz = 4.333795 guest s |
+| modeled active / non-retiring guest time | 0.242718 / 4.091076 s |
+| CLCD VBlank advance | 260 = 59.994/guest s = 18.046/host s |
+| post-baseline sampled changes | 86 = 19.844/guest s = 5.969/host s |
+| publications / valid / unavailable | 366 / 366 / 0 |
+| changed-window mean / max / >=30 windows | 6.040 / 7.991 / 0 |
+
+The work image remains SHA-256
+`06AAAA84FB4BFEAE5A647290C9B50BEBE7640F420457089F40BDBED961D6992D`; the final screen remains
+`F23E8D07E9C863755DBB1BFDE4A1892F17110FE529A56F676C0EBFFB02EEB7C7`. The complete stdout is
+SHA-256 `DFFA93078889F767F03BA92ABB85C26C62871F1A4789E75667E232227D467F33`.
+
+This corrects the tempting but wrong theory that one retired instruction always advances only one
+modeled CPU cycle and therefore prevents guest realtime. In this interval, WFI/event fast-forward
+supplies about 4.09 of 4.33 guest seconds. The CLCD itself advances at essentially 60 VBlanks per
+guest second. Changing the 412 MHz CPU constant cannot provide the missing fivefold host cadence in
+this checkpoint. The sampled content changes only about 19.8 times per guest second here, although
+the 397-byte sampled signature can miss a small update and therefore remains an undercounting meter.
+
+The remaining ambiguity is now narrower and measurable. Opt-in device automation counts validated
+scanouts where they enter `VMEngine` and changed immutable-image submissions where
+`VMFramebufferView` assigns `CALayer.contents`, including main-thread image-build time. The result is
+exposed in the guest screen's accessibility value so the existing before/after physical profile can
+bracket it without per-frame file I/O. A layer submission is explicitly **not** labelled a displayed
+frame; simultaneous DVT Core Animation samples remain the authority for the compositor boundary.
+Normal launches pay only a disabled atomic gate. No protected controller or engine file is modified.
+
+Brutal status: **this adds a decisive diagnostic and retracts a bad time-model lead; it adds zero
+measured FPS by itself**. The next exact foreground MBX run must show which boundary loses cadence.
+Only then is it rational to optimize guest rendering, publication/copy, main-thread image creation,
+or the compositor instead of continuing to whack whichever code path happens to look expensive.
