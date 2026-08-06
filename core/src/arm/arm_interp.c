@@ -21,6 +21,14 @@
 
 /* ------------------------------------------------------------------ helpers */
 
+#if defined(_MSC_VER)
+#define ARM_INTERP_NOINLINE __declspec(noinline)
+#elif defined(__clang__) || defined(__GNUC__)
+#define ARM_INTERP_NOINLINE __attribute__((noinline))
+#else
+#define ARM_INTERP_NOINLINE
+#endif
+
 static inline void set_flag(arm_cpu_t *c, uint32_t bit, bool on) {
     if (on) c->cpsr |= bit; else c->cpsr &= ~bit;
 }
@@ -44,8 +52,14 @@ static inline bool cpu_is_priv(const arm_cpu_t *c) {
  * the callback context is outside the CPU's control and is covered by the
  * contract in arm.h.
  */
-static arm_svc_result_t privileged_svc_result(arm_cpu_t *c, uint32_t pc,
-                                               uint32_t encoding) {
+/* arm_cpu_t deliberately carries large translation/data caches.  The saved
+ * rollback image below is therefore about 68 KiB in the shipping arm64 build.
+ * Apple Clang LTO used to inline this helper into arm_step(), making every
+ * ordinary guest instruction call ___chkstk_darwin and reserve that frame even
+ * though only an actual privileged SVC can reach the snapshot.  Keep the rare
+ * transactional path out of line; its architectural behavior is unchanged. */
+static ARM_INTERP_NOINLINE arm_svc_result_t
+privileged_svc_result(arm_cpu_t *c, uint32_t pc, uint32_t encoding) {
     if (!cpu_is_priv(c) || c->bus->privileged_svc_handler == NULL)
         return ARM_SVC_UNHANDLED;
 
@@ -67,6 +81,8 @@ static arm_svc_result_t privileged_svc_result(arm_cpu_t *c, uint32_t pc,
     }
     return ARM_SVC_UNHANDLED;
 }
+
+#undef ARM_INTERP_NOINLINE
 
 /*
  * Data-side memory accessors. Every guest load/store goes through translation;
