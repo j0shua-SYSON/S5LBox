@@ -52,7 +52,7 @@ jobs:
           cmake --build device-full-guest-replay/build \
             --target bootkernel --parallel 3
 
-          binary=device-full-guest-replay/build/core/bootkernel
+          binary=device-full-guest-replay/build/core/bootkernel.app/bootkernel
           test -f "$binary"
           test "$(lipo -archs "$binary")" = arm64
           xcrun vtool -show-build "$binary" |
