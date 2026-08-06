@@ -32809,6 +32809,7 @@ static void boot_print_usage(FILE *stream, const char *argv0) {
             "          [--touch <at>:<x>:<y>[:<hold>]] ...\n"
             "          [--drag <at>:<x0>:<y0>:<x1>:<y1>[:<steps>[:<span>]]] ...\n"
             "          [--fast] [--run-api] [--frame-meter]\n"
+            "          [--interpreter-control]\n"
             "          [--sequence-profile]\n"
             "          [--pinch <at>:<ax0>:<ay0>:<ax1>:<ay1>:<bx0>:<by0>:"
             "<bx1>:<by1>[:<steps>[:<span>]]] ...\n"
@@ -32843,6 +32844,12 @@ static void boot_print_usage(FILE *stream, const char *argv0) {
             "      sparse; TLB counters omit observer translations and therefore\n"
             "      differ from a literal diagnostic run even when guest state is\n"
             "      identical. This mode is for app-facing throughput A/B tests.\n"
+            "  --interpreter-control  with --run-api, disable the optional\n"
+            "      signed-static AArch64 engine after machine initialization.\n"
+            "      This is a same-binary diagnostic control, not a product mode;\n"
+            "      it changes host execution only and leaves guest state and\n"
+            "      emulated hardware unchanged. The run reports signed-retired\n"
+            "      and graph/refill counters for either arm.\n"
             "  --frame-meter  mirror the iOS app's changed-published-frame\n"
             "      counter: check after 100000-instruction chunks, regularly\n"
             "      publish at most 30 Hz plus the app's terminal publication,\n"
@@ -33090,6 +33097,10 @@ int main(int argc, char **argv) {
      * iOS app. Unlike --fast, this bypasses every instruction-granularity host
      * observer; the coherence gate below refuses features that need one. */
     bool run_api_hot = false;
+    /* --interpreter-control: same compiled binary, signed engine disabled at
+     * runtime. Restricted to --run-api so a diagnostic arm cannot be mistaken
+     * for an ordinary boot configuration. */
+    bool interpreter_control = false;
     /* --frame-meter: host-only publication observer beside --fast, not an
      * emulated-machine toggle and therefore not snapshot state. */
     bool frame_meter_requested = false;
@@ -33366,6 +33377,10 @@ int main(int argc, char **argv) {
         if (!strcmp(argv[i], "--run-api")) {
             run_api_hot = true;
             fast_hot = true;
+            continue;
+        }
+        if (!strcmp(argv[i], "--interpreter-control")) {
+            interpreter_control = true;
             continue;
         }
         if (!strcmp(argv[i], "--frame-meter")) {
@@ -34433,6 +34448,12 @@ int main(int argc, char **argv) {
                 "observation\n");
         return 1;
     }
+    if (interpreter_control && !run_api_hot) {
+        fprintf(stderr,
+                "--interpreter-control requires --run-api: it is a bounded "
+                "same-binary performance control, not a boot mode\n");
+        return 1;
+    }
 
     /* --print-config: report and stop, before the kernel, the tree, the rootfs
      * or the work image is opened. Nothing on disk is read or written. */
@@ -34491,6 +34512,26 @@ int main(int argc, char **argv) {
      * RAM disk has to live in DRAM alongside everything else. */
     s5l8900_t mach;
     if (!s5l8900_init(&mach, phys_base, ram_size)) { fprintf(stderr, "init failed\n"); return 1; }
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    if (interpreter_control &&
+        !s5l8900_static_a64_set_enabled(&mach, false)) {
+        fprintf(stderr,
+                "--interpreter-control: signed-static engine disable failed\n");
+        s5l8900_free(&mach);
+        return 1;
+    }
+    printf("signed A64 : %s; runtime counters will be reported by --run-api\n",
+           interpreter_control ? "DISABLED by --interpreter-control"
+                               : "as built (no runtime override)");
+#else
+    if (interpreter_control) {
+        fprintf(stderr,
+                "--interpreter-control is unavailable: this binary was built "
+                "without S5LBOX_STATIC_A64_ENGINE\n");
+        s5l8900_free(&mach);
+        return 1;
+    }
+#endif
     mach.trace_devices = true;
     g_mach = &mach;
     g_virt_base = virt_base;
@@ -36511,6 +36552,24 @@ external_md_work_ready:
         uint64_t run_retired = 0u;
         double run_seconds = 0.0;
         bool timing_valid = true;
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+        const uint64_t signed_retired_before =
+            s5l8900_static_a64_retired(&mach);
+        const uint64_t signed_chained_before =
+            s5l8900_static_a64_chained_blocks(&mach);
+        const uint64_t signed_persistent_before =
+            s5l8900_static_a64_persistent_chained_blocks(&mach);
+        const uint64_t signed_graph_before =
+            s5l8900_static_a64_graph_chained_blocks(&mach);
+        const uint64_t refill_attempts_before =
+            s5l8900_static_a64_fetch_refill_attempts(&mach);
+        const uint64_t refill_hits_before =
+            s5l8900_static_a64_fetch_refill_hits(&mach);
+        const uint64_t refill_skips_before =
+            s5l8900_static_a64_fetch_refill_skips(&mach);
+        const uint64_t negative_bypasses_before =
+            s5l8900_static_a64_known_negative_bypasses(&mach);
+#endif
 
         printf("run api    : s5l8900_run chunks <= %u; timer %s; "
                "per-instruction host observers disabled\n",
@@ -36567,6 +36626,47 @@ external_md_work_ready:
                    " timing INVALID (%s)\n",
                    run_calls, run_retired, FRAME_METER_TIMER);
         }
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+        {
+            uint64_t signed_retired = s5l8900_static_a64_retired(&mach) -
+                                      signed_retired_before;
+            uint64_t signed_chained =
+                s5l8900_static_a64_chained_blocks(&mach) -
+                signed_chained_before;
+            uint64_t signed_persistent =
+                s5l8900_static_a64_persistent_chained_blocks(&mach) -
+                signed_persistent_before;
+            uint64_t signed_graph =
+                s5l8900_static_a64_graph_chained_blocks(&mach) -
+                signed_graph_before;
+            uint64_t refill_attempts =
+                s5l8900_static_a64_fetch_refill_attempts(&mach) -
+                refill_attempts_before;
+            uint64_t refill_hits =
+                s5l8900_static_a64_fetch_refill_hits(&mach) -
+                refill_hits_before;
+            uint64_t refill_skips =
+                s5l8900_static_a64_fetch_refill_skips(&mach) -
+                refill_skips_before;
+            uint64_t negative_bypasses =
+                s5l8900_static_a64_known_negative_bypasses(&mach) -
+                negative_bypasses_before;
+            printf("run api A64: mode=%s signed-retired=%" PRIu64
+                   "/%" PRIu64 " (%.3f%%) chained=%" PRIu64
+                   " persistent=%" PRIu64 " graph=%" PRIu64 "\n",
+                   interpreter_control ? "interpreter-control" : "as-built",
+                   signed_retired, run_retired,
+                   run_retired ? 100.0 * (double)signed_retired /
+                                     (double)run_retired : 0.0,
+                   signed_chained, signed_persistent, signed_graph);
+            printf("run api A64: refill attempts/hits/skips=%" PRIu64
+                   "/%" PRIu64 "/%" PRIu64
+                   " known-negative-bypasses=%" PRIu64
+                   " direct-ram-writes=revoked-by-diagnostic-bus\n",
+                   refill_attempts, refill_hits, refill_skips,
+                   negative_bypasses);
+        }
+#endif
         fflush(stdout);
     } else {
         for (; n < steps; n++) {

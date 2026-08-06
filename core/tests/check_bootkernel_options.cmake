@@ -182,6 +182,16 @@ expect_config(run_api_accepts_exact_checkpoints
 expect_config(run_api_accepts_frame_meter
     "framebuffer=1|--run-api|--frame-meter"
     absent-kernel -F --run-api --frame-meter --print-config)
+# The physical-device A/B must use one executable and change only the runtime
+# engine policy. Its provenance is the relaunch line, like the other host-only
+# controls, and accepting it without --run-api would make it look like a normal
+# boot mode rather than the bounded performance control it is.
+expect_config(interpreter_control_is_explicit
+    "--run-api|--interpreter-control"
+    absent-kernel --run-api --interpreter-control --print-config)
+expect_refused(interpreter_control_requires_run_api
+    "--interpreter-control requires --run-api"
+    absent-kernel --interpreter-control --print-config)
 # Scheduled input still needs a general instruction callback. Refusing it is
 # what prevents a fast run from silently executing a different request.
 expect_refused(run_api_refuses_scheduled_input
