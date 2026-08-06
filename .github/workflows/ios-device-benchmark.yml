@@ -1,0 +1,75 @@
+name: ios-device-benchmark
+
+# Build the existing correctness-checked instruction benchmark for a real
+# jailbroken iPhone. This workflow is manual because the artifact is useful
+# only when a maintainer has a compatible device available; ordinary pushes
+# should not spend a macOS runner compiling a second copy of the core.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build no-JIT arm64 iPhone benchmark
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select newest installed Xcode
+        run: |
+          set -euo pipefail
+          latest=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
+          if [ -n "$latest" ]; then sudo xcode-select -s "$latest"; fi
+          xcodebuild -version
+
+      - name: Build app-matched no-JIT benchmark for iphoneos
+        run: |
+          set -euo pipefail
+          sdkroot="$(xcrun --sdk iphoneos --show-sdk-path)"
+          mkdir -p device-benchmark
+          python3 tools/gen_a64_static.py \
+            device-benchmark/a64_static_handlers.S
+
+          # Keep this source graph coupled to the portable core rather than a
+          # hand-maintained copy. The app makes the same exclusion: jit/** is
+          # not linked. Paths in this repository contain no whitespace.
+          core_sources=$(find core/src -type f -name '*.c' \
+            ! -path 'core/src/jit/*' -print | sort)
+          test -n "$core_sources"
+
+          xcrun --sdk iphoneos clang \
+            -std=c11 -O3 -flto -DNDEBUG -ffp-contract=off \
+            -Wall -Wextra -Werror -Werror=unguarded-availability-new \
+            -arch arm64 -miphoneos-version-min=13.0 \
+            -isysroot "$sdkroot" -Icore/include -Itools \
+            -D_FILE_OFFSET_BITS=64 \
+            -DS5LBOX_STATIC_A64_ENGINE=1 \
+            -DS5LBOX_STATIC_A64_NATIVE=1 \
+            -DS5LBOX_STATIC_A64_DEFAULT_GRAPH=1 \
+            -DS5LBOX_STATIC_A64_DEFAULT_DIRECT_WRITES=1 \
+            '-DINSNBENCH_BUILD_TYPE="Release-iPhoneOS-LTO"' \
+            tools/insnbench.c tools/a64_static.c \
+            $core_sources device-benchmark/a64_static_handlers.S \
+            -o device-benchmark/s5lbox-insnbench-ios-arm64
+
+          # A jailbreak is still required. Ad-hoc signing does not make this a
+          # stock-iOS executable and grants no dynamic-code/JIT entitlement.
+          codesign --force --sign - --timestamp=none \
+            device-benchmark/s5lbox-insnbench-ios-arm64
+          lipo -info device-benchmark/s5lbox-insnbench-ios-arm64
+          codesign --verify --verbose=2 \
+            device-benchmark/s5lbox-insnbench-ios-arm64
+          shasum -a 256 device-benchmark/s5lbox-insnbench-ios-arm64 |
+            tee device-benchmark/SHA256SUMS
+
+      - name: Upload device benchmark
+        uses: actions/upload-artifact@v4
+        with:
+          name: S5LBox-ios-device-benchmark
+          path: |
+            device-benchmark/s5lbox-insnbench-ios-arm64
+            device-benchmark/SHA256SUMS
+          if-no-files-found: error

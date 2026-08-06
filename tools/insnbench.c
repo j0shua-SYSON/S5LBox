@@ -59,6 +59,10 @@
 #include <string.h>
 #include <time.h>
 
+#if defined(__APPLE__)
+#  include <TargetConditionals.h>
+#endif
+
 /* ------------------------------------------------------------------ clock ---
  *
  * One monotonic wall clock, chosen at compile time from what <time.h> offers,
@@ -118,6 +122,8 @@ static double now_seconds(void) {
 
 #if defined(_WIN32)
 #  define INSNBENCH_OS "windows"
+#elif defined(__APPLE__) && TARGET_OS_IPHONE
+#  define INSNBENCH_OS "ios"
 #elif defined(__APPLE__)
 #  define INSNBENCH_OS "macos"
 #elif defined(__linux__)
