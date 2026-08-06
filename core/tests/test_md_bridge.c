@@ -22,12 +22,13 @@
  *
  * arm_cpu_t gained a translation cache on 2026-07-29 -- tlb[], its generation,
  * the register stamp it is valid under, and hit/miss counters -- all placed
- * after vfp_s so this comparison can stop before them. A cache is not state:
+ * after vfp_s so this comparison can stop at the first derived field. A
+ * cache is not state:
  * a service that translates an address legitimately fills it, and a
  * whole-struct memcmp would report that as "changed CPU state" when nothing
  * the guest can observe has moved.
  */
-#define CPU_ARCH_BYTES offsetof(arm_cpu_t, tlb)
+#define CPU_ARCH_BYTES offsetof(arm_cpu_t, tlb_gen)
 
 #define TEST_RAM_SIZE UINT32_C(65536)
 #define TEST_MEDIA_CAPACITY UINT32_C(8192)

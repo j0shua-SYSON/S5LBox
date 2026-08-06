@@ -420,6 +420,13 @@ typedef struct arm_cpu {
     /*
      * THE TRANSLATION CACHE, and why the model went without one for so long.
      *
+     * The 64 KiB entry array is the FINAL field in arm_cpu_t. Keeping that
+     * cold backing store after the generation, host-pointer caches and their
+     * counters is deliberate: every instruction reads the latter fields,
+     * while only a translation miss or refill needs the array. On AArch64 an
+     * array in the middle made each fast-path access synthesize a second base
+     * pointer more than 64 KiB away from `cpu`.
+     *
      * arm_mmu_translate() walks the guest's page tables on EVERY fetch and
      * EVERY data access, which costs two bus reads each because there was
      * nothing remembering the last answer. insnbench measures the price
@@ -444,12 +451,10 @@ typedef struct arm_cpu {
      * answer a fetch with a load's verdict. Sections and supersections simply
      * occupy several entries; correctness does not depend on page size.
      */
-    struct {
-        uint32_t gen;    /* the flush generation this entry was filled in    */
-        uint32_t tag;    /* (va >> 10) << 3 | acc << 1 | priv                */
-        uint32_t pa;     /* 1 KB-aligned base, already masked                */
-        uint32_t fsr;    /* what the walk returned, faults included          */
-    } tlb[ARM_TLB_ENTRIES];
+    /* Everything above this line is architectural CPU state. Everything from
+     * tlb_gen onward is derived cache state or host-only diagnostics. Tests
+     * that need the architectural byte prefix use offsetof(..., tlb_gen), not
+     * the location of the cold backing array at the end of this struct. */
     uint32_t tlb_gen;
     /*
      * THE INSTRUCTION-FETCH BLOCK CACHE.
@@ -565,6 +570,14 @@ typedef struct arm_cpu {
      */
     uint64_t dread_hits, dread_misses;
     uint64_t dwrite_hits, dwrite_misses;
+    /* Cold backing store for the translation cache documented above. Keep it
+     * last so the fetch/data fast paths stay at small offsets from `cpu`. */
+    struct {
+        uint32_t gen;    /* the flush generation this entry was filled in    */
+        uint32_t tag;    /* (va >> 10) << 3 | acc << 1 | priv                */
+        uint32_t pa;     /* 1 KB-aligned base, already masked                */
+        uint32_t fsr;    /* what the walk returned, faults included          */
+    } tlb[ARM_TLB_ENTRIES];
 } arm_cpu_t;
 
 /*

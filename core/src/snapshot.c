@@ -409,7 +409,7 @@ static void snap_cpu(sn_io_t *io, arm_cpu_t *c) {
      * guest RAM, which the snapshot DOES carry. Restoring it empty therefore
      * loses nothing: the first access to each page walks and refills, and a
      * walk and a hit return the same physical address and the same fault code
-     * by construction. Storing it would add 12 KB per snapshot to save work
+     * by construction. Storing it would add 64 KiB per snapshot to save work
      * that costs microseconds to redo.
      *
      * Clearing on restore is also the SAFE direction. A stored TLB could

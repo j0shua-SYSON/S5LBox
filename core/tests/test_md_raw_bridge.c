@@ -13,12 +13,12 @@
 
 /*
  * The architectural CPU state. arm_cpu_t gained a translation cache on
- * 2026-07-29, placed after vfp_s precisely so a rollback check can stop before
- * it: a cache filled by translating is not a register the guest can observe,
- * and comparing it would report "the CPU changed" for work that changed
- * nothing.
+ * 2026-07-29, placed after vfp_s precisely so a rollback check can stop at
+ * tlb_gen, the first derived field: a cache filled by translating is not a
+ * register the guest can observe, and comparing it would report "the CPU
+ * changed" for work that changed nothing.
  */
-#define CPU_ARCH_BYTES offsetof(arm_cpu_t, tlb)
+#define CPU_ARCH_BYTES offsetof(arm_cpu_t, tlb_gen)
 
 #define TEST_RAM_SIZE UINT32_C(1048576)
 #define TEST_MEDIA_SIZE UINT32_C(131072)
