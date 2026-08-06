@@ -30,10 +30,13 @@ boundaries rather than by doing Objective-C work on every frame.
 There is also a non-driving observation path for tools that cannot supply launch
 arguments. When Developer Mode is already enabled at app launch, S5LBox enables
 the same frame telemetry and publishes it through the guest display's
-accessibility value. The observer attaches after a person or accessibility
-client opens any machine normally. It never opens, stops, reopens, provisions or
-otherwise steers a machine, and it does not disable Auto-Lock. Turning Developer
-Mode on takes effect for this purpose on the next app launch.
+accessibility value and a one-point transparent accessibility label. The latter
+exists because compact accessibility clients can omit a custom view's value; it
+does not accept touches or draw visible text. The observer attaches after a
+person or accessibility client opens any machine normally. It never opens,
+stops, reopens, provisions or otherwise steers a machine, and it does not disable
+Auto-Lock. Turning Developer Mode on takes effect for this purpose on the next
+app launch.
 
 For example, after mounting the matching Developer Disk Image:
 
@@ -60,11 +63,13 @@ The machine list also exposes stable accessibility identifiers:
 - `s5lbox.emulator.keys`
 - `s5lbox.emulator.toolbar`
 
-With telemetry enabled, `s5lbox.emulator.screen` has an accessibility value
-beginning with `frame_pipeline_v1`. It distinguishes guest scanout attempts and
-changed scanouts from UIKit layer submissions and rejected submissions. A layer
-submission is not proof that iOS displayed the frame; the value states that
-limitation explicitly.
+With telemetry enabled, `s5lbox.emulator.screen` has an accessibility value and
+the transparent diagnostic label has accessibility text beginning with
+`frame_pipeline_v1`. They distinguish guest scanout attempts and changed
+scanouts from UIKit layer submissions and rejected submissions. A layer
+submission is not proof that iOS displayed the frame; the record states that
+limitation explicitly. Updating this diagnostic string at 0.5 Hz is additional
+Developer Mode work and is not present in an ordinary launch.
 
 ## What this does not prove
 

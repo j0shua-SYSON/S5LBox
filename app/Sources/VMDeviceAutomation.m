@@ -50,6 +50,7 @@ static double VMDeviceAutomationSeconds(uint64_t firstNS, uint64_t lastNS) {
     __weak VMInstanceListViewController *_machineList;
     __weak EmulatorViewController *_emulator;
     __weak UIView *_telemetryScreen;
+    __weak UILabel *_telemetryLabel;
     VMEngine *_stoppingEngine;
     NSTimer *_timer;
     VMDeviceAutomationState _state;
@@ -102,6 +103,7 @@ static double VMDeviceAutomationSeconds(uint64_t firstNS, uint64_t lastNS) {
     if (![top isKindOfClass:[EmulatorViewController class]]) {
         _emulator = nil;
         _telemetryScreen = nil;
+        _telemetryLabel = nil;
         return;
     }
 
@@ -116,6 +118,24 @@ static double VMDeviceAutomationSeconds(uint64_t firstNS, uint64_t lastNS) {
         screen.isAccessibilityElement = YES;
         screen.accessibilityIdentifier = @"s5lbox.emulator.screen";
         screen.accessibilityLabel = @"iPhone OS guest display";
+    }
+
+    /* ios-mcp's compact accessibility serializer can omit a custom view's
+     * value even though Apple's full AX snapshot retains it. A real UILabel is
+     * exposed consistently by both. Its one-point clear frame is visible to AX
+     * but not to the user, cannot receive touches, and exists only in the two
+     * opt-in diagnostic modes that construct this object. */
+    UILabel *telemetryLabel = _telemetryLabel;
+    if (telemetryLabel.superview != emulator.view) {
+        telemetryLabel = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, 1, 1)];
+        telemetryLabel.userInteractionEnabled = NO;
+        telemetryLabel.textColor = UIColor.clearColor;
+        telemetryLabel.backgroundColor = UIColor.clearColor;
+        telemetryLabel.font = [UIFont systemFontOfSize:1.0];
+        telemetryLabel.isAccessibilityElement = YES;
+        telemetryLabel.accessibilityTraits = UIAccessibilityTraitStaticText;
+        [emulator.view addSubview:telemetryLabel];
+        _telemetryLabel = telemetryLabel;
     }
 
     UILabel *status = VMDeviceAutomationValue(emulator, @"stats");
@@ -141,7 +161,9 @@ static double VMDeviceAutomationSeconds(uint64_t firstNS, uint64_t lastNS) {
     if (!state.enabled) return;
 
     UIView *screen = _telemetryScreen;
-    if (![screen isKindOfClass:[UIView class]]) return;
+    UILabel *telemetryLabel = _telemetryLabel;
+    if (![screen isKindOfClass:[UIView class]] &&
+        ![telemetryLabel isKindOfClass:[UILabel class]]) return;
 
     const double scanoutSeconds = VMDeviceAutomationSeconds(
         state.scanout_first_host_ns, state.scanout_last_host_ns);
@@ -204,7 +226,10 @@ static double VMDeviceAutomationSeconds(uint64_t firstNS, uint64_t lastNS) {
         (unsigned long long)state.layer_rejected,
         (unsigned long long)state.layer_changes,
         layerSeconds, layerChangedPerHostSecond, layerMeanMS, layerMaxMS];
-    screen.accessibilityValue = value;
+    if ([screen isKindOfClass:[UIView class]])
+        screen.accessibilityValue = value;
+    telemetryLabel.text = value;
+    telemetryLabel.accessibilityLabel = value;
 }
 
 - (VMEngine *)currentEngine {

@@ -131,9 +131,7 @@ static UIGestureRecognizer *VMNavigationContentPopGestureRecognizer(
 
     (void)launchOptions;
     BOOL automationRequested = VMLaunchRequestsFirstMachine();
-    BOOL developerObservationRequested = settings.developerMode;
-    if (automationRequested || developerObservationRequested)
-        vm_frame_telemetry_reset(true);
+    if (automationRequested) vm_frame_telemetry_reset(true);
     /* A long phone profile must not turn into a lock-screen measurement half
      * way through. This lasts only for the explicitly automated app process;
      * ordinary launches keep the user's normal Auto-Lock setting. */
@@ -176,12 +174,15 @@ static UIGestureRecognizer *VMNavigationContentPopGestureRecognizer(
                 [self.deviceAutomation start];
             }
         });
-    } else if (developerObservationRequested) {
+    } else {
         /* Developer Mode exposes the exact same telemetry through UIKit's
          * accessibility tree without driving the UI or machine lifecycle.
-         * Starting after the window is visible also lets this observer attach
-         * whenever the user (or a test client) opens an emulator normally. */
+         * Re-read it after the window is live instead of trusting a value
+         * captured before an app-data migration has settled. Ordinary launches
+         * do one defaults read and return without creating a timer. */
         dispatch_async(dispatch_get_main_queue(), ^{
+            if (!settings.developerMode) return;
+            vm_frame_telemetry_reset(true);
             self.deviceAutomation = [[VMDeviceAutomation alloc]
                 initWithNavigationController:nav
                                   machineList:machines
