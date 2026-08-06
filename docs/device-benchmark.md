@@ -131,6 +131,9 @@ The report remains deliberately bounded:
 - a `CALayer.contents` assignment is not proof the compositor displayed it.
 
 The automated app build therefore records validated scanout changes and layer
-submissions separately, while the physical profile records Core Animation and
-process CPU simultaneously. Only the three-way result can locate the dropped
-cadence. No Minsn/s figure alone is accepted as phone FPS.
+submissions separately, while the physical profile records process CPU and the
+DVT graphics service simultaneously. That graphics service takes no PID and
+its `CoreAnimationFramesPerSecond` value is a **device-wide correlating gauge**,
+not app-specific visible FPS. The combined result can locate a dropped cadence,
+but final visible-FPS proof still needs the foreground app and screen itself;
+no Minsn/s or device-wide compositor figure alone is accepted as phone FPS.

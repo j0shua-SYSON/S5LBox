@@ -7695,7 +7695,9 @@ scanouts where they enter `VMEngine` and changed immutable-image submissions whe
 `VMFramebufferView` assigns `CALayer.contents`, including main-thread image-build time. The result is
 exposed in the guest screen's accessibility value so the existing before/after physical profile can
 bracket it without per-frame file I/O. A layer submission is explicitly **not** labelled a displayed
-frame; simultaneous DVT Core Animation samples remain the authority for the compositor boundary.
+frame. The simultaneous DVT graphics service has no PID selector, so its
+`CoreAnimationFramesPerSecond` sample is only a **device-wide correlating gauge**, not authority that
+this app displayed a frame. Final visible-FPS proof still requires the foreground app and screen.
 Normal launches pay only a disabled atomic gate. No protected controller or engine file is modified.
 
 Brutal status: **this adds a decisive diagnostic and retracts a bad time-model lead; it adds zero
