@@ -208,9 +208,9 @@ bool a64_compact_raw_run(arm_cpu_t *cpu, const uint8_t *code,
                          unsigned *completed);
 
 /* Execute from a caller-proved live virtual-code window while the guest MMU
- * may be enabled. The pointer itself is the fetch translation witness; every
- * condition-passed data access stops before mutation because this mode has no
- * data translation or MMIO authority. Masked interrupt lines are harmless,
+ * may be enabled. The pointer itself is the fetch translation witness. This
+ * non-resident form supplies no fallback, so every condition-passed data
+ * access still stops before mutation. Masked interrupt lines are harmless,
  * while a pending unmasked interrupt remains an entry refusal. */
 bool a64_compact_raw_run_code_window(arm_cpu_t *cpu, const uint8_t *code,
                                      uint32_t code_base,
@@ -235,10 +235,14 @@ typedef a64_compact_raw_fallback_result_t
 
 /* Keep one build-time-linked AArch64 invocation resident across exact
  * interpreter fallbacks. The caller still proves the live virtual-code window
- * and bounds the whole interval to a machine-safe retirement budget. Branches
- * leaving the window return to the caller rather than asking the fallback to
- * fetch through an unproved pointer. `native_completed` and
- * `fallback_completed` partition `completed` exactly. */
+ * and bounds the whole interval to a machine-safe retirement budget. Aligned
+ * immediate word loads/stores may execute only when the interpreter-owned
+ * DREAD/DWRITE entry proves the VA block, privilege and MMU generation;
+ * stores additionally require live frontend write-pointer consent. Every
+ * cache miss reaches the fallback before mutation. Branches leaving the
+ * window return to the caller rather than fetching through an unproved
+ * pointer. `native_completed` and `fallback_completed` partition `completed`
+ * exactly. */
 bool a64_compact_raw_run_code_window_resident(
     arm_cpu_t *cpu, const uint8_t *code, uint32_t code_base,
     uint32_t code_bytes, unsigned max_insns,

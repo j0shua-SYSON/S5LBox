@@ -1675,7 +1675,11 @@ bool a64_compact_raw_run_code_window_resident(
         memset(&context, 0, sizeof context);
         if (fallback) {
             context.dread = cpu->dread;
-            context.dwrite = cpu->dwrite;
+            /* A cached translation is not write authority. Expose DWRITE only
+             * while the frontend's separate observer-bypass consent is live;
+             * its revocation API also clears every derived entry. */
+            context.dwrite =
+                cpu->bus && cpu->bus->host_ram_write ? cpu->dwrite : NULL;
             context.dread_hits = &cpu->dread_hits;
             context.dwrite_hits = &cpu->dwrite_hits;
         }

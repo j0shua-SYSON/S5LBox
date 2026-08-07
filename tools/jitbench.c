@@ -5253,7 +5253,7 @@ static bool compact_raw_resident_compare(
         const char *name, const uint32_t *program, unsigned insns,
         uint32_t pc, unsigned reference_steps, unsigned budget,
         unsigned expected_native, unsigned expected_fallback,
-        unsigned stop_after) {
+        unsigned stop_after, bool stale_write_witness) {
     arm_cpu_t reference, resident;
     final_state_t reference_state, resident_state;
     compact_raw_resident_oracle_context_t context;
@@ -5273,6 +5273,11 @@ static bool compact_raw_resident_compare(
 
     seed_cpu_at(&reference, program, insns, false, pc);
     resident = reference;
+    /* A derived DWRITE entry without the separate live frontend callback is
+     * deliberately insufficient. This catches a wrapper that exposes stale
+     * write authority to the resident loop after consent is absent/revoked. */
+    if (stale_write_witness)
+        oracle_warm_dwrite(&resident, DATA_BASE, true);
     memcpy(baseline, g_ram, sizeof g_ram);
     for (unsigned i = 0u; i < reference_steps; i++) {
         status = arm_step(&reference);
@@ -5466,11 +5471,11 @@ static bool validate_compact_raw_oracles(void) {
         return false;
     if (!compact_raw_resident_compare(
             "continue", resident_mixed, 5u, UINT32_C(0x4c00),
-            5u, 5u, 3u, 2u, 0u))
+            5u, 5u, 3u, 2u, 0u, true))
         return false;
     if (!compact_raw_resident_compare(
             "boundary-stop", resident_mixed, 5u, UINT32_C(0x4c00),
-            2u, 5u, 1u, 1u, 1u))
+            2u, 5u, 1u, 1u, 1u, false))
         return false;
 
     seed_cpu_at(&contract, unsupported_prefix, 2u, false,
@@ -5497,7 +5502,8 @@ static bool validate_compact_raw_oracles(void) {
            "invalid-contract-rollback=yes\n");
     printf("COMPACT-RAW-RESIDENT-ORACLE exact=yes cases=2 "
            "native-fallback-partition=yes interpreter-continue=yes "
-           "boundary-stop=yes ram-equality=yes runtime-codegen=no\n");
+           "boundary-stop=yes write-consent=yes ram-equality=yes "
+           "runtime-codegen=no\n");
     return true;
 }
 
@@ -6042,6 +6048,10 @@ static bool run_soc_entry_configured(const soc_entry_setup_t *setup,
     if (!setup || !loop_insns || !out ||
         path > SOC_ENTRY_GRAPH_EXTENDED_WRITES)
         return false;
+    /* The compact MMU oracle models the app's canonical-bus contract on both
+     * arms. This warms and measures DWRITE symmetrically instead of proving
+     * only the read half of the new resident cache-hit path. */
+    if (setup->mmu_identity_workload) direct_write_path = true;
     memset(out, 0, sizeof *out);
     if (!s5l8900_init(&machine, 0u, RAM_SIZE)) {
         fprintf(stderr, "jitbench: SoC entry machine init failed\n");
@@ -6247,8 +6257,9 @@ static bool run_soc_entry_configured(const soc_entry_setup_t *setup,
     if ((signed_path && out->signed_retired > total) ||
         (!signed_path &&
          (out->signed_retired != 0u || out->signed_chains != 0u ||
-          out->graph_chains != 0u || out->dwrite_hits != 0u ||
-          out->dwrite_misses != 0u)) ||
+          out->graph_chains != 0u ||
+          (!setup->mmu_identity_workload &&
+           (out->dwrite_hits != 0u || out->dwrite_misses != 0u)))) ||
         (path == SOC_ENTRY_SIGNED && out->graph_chains != 0u) ||
         (compact_raw_path &&
          (out->compact_raw_retired +
@@ -6417,26 +6428,28 @@ static bool run_soc_vfp_arithmetic_path(uint64_t total,
 }
 
 /* Prove the resident/native-interpreter partition through the actual machine
- * runner before measuring its compute-only control. Three instructions per
- * eight-instruction loop deliberately require arm_step(): two MMU-on data
- * accesses and one unsupported MUL. The other four ALU operations plus the
- * loop branch stay in the build-time-linked AArch64 loop. */
+ * runner before measuring its compute-only control. The two MMU-on data
+ * accesses use already-proven DREAD/DWRITE witnesses; only unsupported MUL
+ * requires arm_step(). The other four ALU operations plus the loop branch
+ * stay in the build-time-linked AArch64 loop. */
 static bool validate_soc_compact_raw_resident(void) {
     enum { LOOP_INSNS = 8u, TOTAL_INSNS = 8192u };
     static const uint32_t PROGRAM[LOOP_INSNS] = {
         UINT32_C(0xe2800001), /* native ADD r0,r0,#1 */
-        UINT32_C(0xe5870000), /* fallback STR r0,[r7,#0] */
+        UINT32_C(0xe5870000), /* native DWRITE-hit STR r0,[r7,#0] */
         UINT32_C(0xe2422001), /* native SUB r2,r2,#1 */
         UINT32_C(0xe0000090), /* fallback MUL r0,r0,r0 */
         UINT32_C(0xe2855001), /* native ADD r5,r5,#1 */
-        UINT32_C(0xe5971000), /* fallback LDR r1,[r7,#0] */
+        UINT32_C(0xe5971000), /* native DREAD-hit LDR r1,[r7,#0] */
         UINT32_C(0xe0266001), /* native EOR r6,r6,r1 */
         UINT32_C(0xeafffff7), /* native branch 0x1c -> 0x00 */
     };
     const uint64_t expected_native =
-        (uint64_t)TOTAL_INSNS * 5u / LOOP_INSNS;
+        (uint64_t)TOTAL_INSNS * 7u / LOOP_INSNS;
     const uint64_t expected_fallback =
-        (uint64_t)TOTAL_INSNS * 3u / LOOP_INSNS;
+        (uint64_t)TOTAL_INSNS / LOOP_INSNS;
+    const uint64_t expected_data_hits =
+        (uint64_t)TOTAL_INSNS / LOOP_INSNS;
     soc_run_result_t reference = {0};
     soc_run_result_t resident = {0};
     bool ok = false;
@@ -6455,8 +6468,16 @@ static bool validate_soc_compact_raw_resident(void) {
         reference.compact_raw_calls != 0u ||
         reference.compact_raw_retired != 0u ||
         reference.compact_raw_fallback_retired != 0u ||
+        reference.dread_hits != expected_data_hits ||
+        reference.dread_misses != 0u ||
+        reference.dwrite_hits != expected_data_hits ||
+        reference.dwrite_misses != 0u ||
         resident.compact_raw_retired != expected_native ||
         resident.compact_raw_fallback_retired != expected_fallback ||
+        resident.dread_hits != reference.dread_hits ||
+        resident.dread_misses != reference.dread_misses ||
+        resident.dwrite_hits != reference.dwrite_hits ||
+        resident.dwrite_misses != reference.dwrite_misses ||
         resident.signed_retired != expected_native ||
         resident.compact_raw_calls == 0u ||
         resident.compact_raw_attempts < resident.compact_raw_calls) {
@@ -6464,20 +6485,24 @@ static bool validate_soc_compact_raw_resident(void) {
                 "jitbench: SoC compact-raw resident oracle failed "
                 "attempts/calls/native/fallback=%" PRIu64 "/%" PRIu64
                 "/%" PRIu64 "/%" PRIu64 " expected=%" PRIu64 "/%" PRIu64
+                " data-hits=%" PRIu64 "/%" PRIu64 " expected=%" PRIu64
                 "\n",
                 resident.compact_raw_attempts, resident.compact_raw_calls,
                 resident.compact_raw_retired,
                 resident.compact_raw_fallback_retired, expected_native,
-                expected_fallback);
+                expected_fallback, resident.dread_hits,
+                resident.dwrite_hits, expected_data_hits);
         goto done;
     }
 
     printf("SOC-COMPACT-RAW-RESIDENT-ORACLE exact=yes guest-insns=%u "
            "loop-insns=%u mmu=on native=%" PRIu64 " fallback=%" PRIu64
-           " data-fallback=yes unsupported-fallback=yes "
+           " dread-hits=%" PRIu64 " dwrite-hits=%" PRIu64
+           " data-cache-hit=yes write-consent=yes unsupported-fallback=yes "
            "timebase-bounded=yes device-tick=yes serialized-machine=yes "
            "runtime-codegen=no\n",
-           TOTAL_INSNS, LOOP_INSNS, expected_native, expected_fallback);
+           TOTAL_INSNS, LOOP_INSNS, expected_native, expected_fallback,
+           expected_data_hits, expected_data_hits);
     ok = true;
 
 done:

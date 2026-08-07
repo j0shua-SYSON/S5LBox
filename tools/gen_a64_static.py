@@ -2466,12 +2466,11 @@ def compact_raw_function() -> list[str]:
         ".La64cr_memory:",
         # Immediate, pre-indexed, word, no-writeback LDR/STR only.  Requiring
         # alignment avoids depending on the guest SCTLR's legacy rotation
-        # policy; every admitted access has one exact flat-RAM interpretation.
-        # A NULL flat-RAM pointer is the MMU-aware code-window contract. The
-        # resident path hands the current instruction to arm_step(); the
-        # non-resident oracle has no callback and still stops before mutation.
-        "    ldr x14, [x27, #0]",
-        "    cbz x14, .La64cr_fallback",
+        # policy. Flat runs retain their masked-RAM contract. Resident MMU runs
+        # may touch data only through the interpreter-owned DREAD/DWRITE cache:
+        # a host pointer, exact VA/privilege tag and current generation are a
+        # complete witness for this aligned word. Any miss reaches arm_step()
+        # before mutation, so it alone owns walks, faults, MMIO and cache fill.
         "    tbnz w9, #25, .La64cr_fallback",
         "    tbz w9, #24, .La64cr_fallback",
         "    tbnz w9, #22, .La64cr_fallback",
@@ -2492,6 +2491,58 @@ def compact_raw_function() -> list[str]:
         ".La64cr_memory_address:",
         "    tst w10, #3",
         "    b.ne .La64cr_fallback",
+        "    ldr x14, [x27, #0]",
+        "    cbnz x14, .La64cr_memory_flat",
+        # Select both the cache and its architectural hit counter before any
+        # guest memory access. A NULL DWRITE pointer is the live frontend-
+        # consent refusal installed by the C wrapper.
+        "    tbnz w9, #20, .La64cr_memory_cache_read",
+        "    ldr x14, [x27, #24]",
+        "    ldr x12, [x27, #40]",
+        "    b .La64cr_memory_cache_common",
+        ".La64cr_memory_cache_read:",
+        "    ldr x14, [x27, #16]",
+        "    ldr x12, [x27, #32]",
+        ".La64cr_memory_cache_common:",
+        "    cbz x14, .La64cr_fallback",
+        "    cbz x12, .La64cr_fallback",
+        # slot = ((va >> 10) + (priv ? 32 : 0)) & 63
+        "    ldr w15, [x27, #84]",
+        "    lsr w11, w10, #10",
+        "    add w11, w11, w15, lsl #5",
+        "    and w11, w11, #63",
+        "    add x14, x14, w11, uxtw #4",
+        "    ldr x15, [x14, #0]",
+        "    cbz x15, .La64cr_fallback",
+        # tag = 1 KiB-aligned VA | privilege
+        "    lsr w11, w10, #10",
+        "    lsl w11, w11, #10",
+        "    ldr w8, [x27, #84]",
+        "    orr w11, w11, w8",
+        "    ldr w8, [x14, #8]",
+        "    cmp w8, w11",
+        "    b.ne .La64cr_fallback",
+        "    ldr w8, [x14, #12]",
+        "    ldr w11, [x27, #80]",
+        "    cmp w8, w11",
+        "    b.ne .La64cr_fallback",
+        "    and w11, w10, #0x3ff",
+        "    add x14, x15, w11, uxtw",
+        "    tbnz w9, #20, .La64cr_memory_cache_load",
+        "    ldr w11, [x19, w13, uxtw #2]",
+        "    str w11, [x14]",
+        "    b .La64cr_memory_cache_hit",
+        ".La64cr_memory_cache_load:",
+        "    ldr w11, [x14]",
+        "    str w11, [x19, w13, uxtw #2]",
+        ".La64cr_memory_cache_hit:",
+        # Match dread_hit()/dwrite_hit(): one hit for a successful direct
+        # access; a refused access changes no counter before the literal path.
+        "    ldr x11, [x12]",
+        "    add x11, x11, #1",
+        "    str x11, [x12]",
+        "    b .La64cr_memory_done",
+        ".La64cr_memory_flat:",
         "    ldr w15, [x27, #8]",
         "    and w10, w10, w15",
         "    tbnz w9, #20, .La64cr_memory_load",
