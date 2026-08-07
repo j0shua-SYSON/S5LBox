@@ -5070,6 +5070,84 @@ static bool run_compact_raw(const bench_case_t *bc, uint64_t total,
     return done == total && *seconds > 0.0;
 }
 
+static bool compact_raw_admission_supported(
+        a64_compact_raw_admission_t admission) {
+    return (unsigned)admission < (unsigned)A64_COMPACT_RAW_ADMITTED_COUNT;
+}
+
+static bool validate_compact_raw_admission_shapes(void) {
+    typedef struct {
+        uint32_t insn;
+        bool thumb;
+        a64_compact_raw_admission_t expected;
+    } admission_case_t;
+    static const admission_case_t CASES[] = {
+        { UINT32_C(0xe2800001), false, A64_COMPACT_RAW_ADMIT_EXECUTE },
+        /* EQ fails with the seeded Z=0. Decode must not inspect the SVC. */
+        { UINT32_C(0x0f000000), false,
+          A64_COMPACT_RAW_ADMIT_CONDITION_SKIP },
+        { UINT32_C(0xe2800001), true,  A64_COMPACT_RAW_REJECT_THUMB },
+        { UINT32_C(0xf2800001), false, A64_COMPACT_RAW_REJECT_NV },
+        { UINT32_C(0xe28f0001), false, A64_COMPACT_RAW_REJECT_DP_PC },
+        { UINT32_C(0xe3000000), false,
+          A64_COMPACT_RAW_REJECT_DP_TEST_WITHOUT_S },
+        { UINT32_C(0xe0810312), false,
+          A64_COMPACT_RAW_REJECT_DP_REGISTER_SHIFT },
+        { UINT32_C(0xe081000f), false,
+          A64_COMPACT_RAW_REJECT_DP_RM_PC },
+        { UINT32_C(0xe7970000), false,
+          A64_COMPACT_RAW_REJECT_MEMORY_FORM },
+        { UINT32_C(0xe597f000), false,
+          A64_COMPACT_RAW_REJECT_MEMORY_PC },
+        { UINT32_C(0xe5970001), false,
+          A64_COMPACT_RAW_REJECT_MEMORY_ALIGNMENT },
+        { UINT32_C(0xef000000), false, A64_COMPACT_RAW_REJECT_CLASS },
+    };
+    arm_cpu_t cpu;
+    uint32_t seed = UINT32_C(0xe2800001);
+
+    seed_cpu_at(&cpu, &seed, 1u, false, UINT32_C(0x1000));
+    for (unsigned i = 0u; i < sizeof CASES / sizeof CASES[0]; i++) {
+        a64_compact_raw_admission_t actual =
+            a64_compact_raw_classify_instruction(
+                &cpu, CASES[i].insn, CASES[i].thumb);
+        if (actual != CASES[i].expected) {
+            fprintf(stderr,
+                    "jitbench: compact raw admission case %u returned %u, "
+                    "expected %u\n",
+                    i, (unsigned)actual, (unsigned)CASES[i].expected);
+            return false;
+        }
+    }
+    printf("COMPACT-RAW-ADMISSION-MODEL exact-shapes=yes cases=12 "
+           "outcomes=12 condition-before-decode=yes machine-gates=excluded\n");
+    return true;
+}
+
+static unsigned compact_raw_modeled_prefix(const uint32_t *program,
+                                            unsigned insns, uint32_t pc,
+                                            unsigned budget) {
+    arm_cpu_t model;
+    unsigned completed = 0u;
+
+    seed_cpu_at(&model, program, insns, false, pc);
+    while (completed < budget) {
+        uint32_t current = model.r[15];
+        uint64_t offset;
+        a64_compact_raw_admission_t admission;
+
+        if (current < pc || (current & 3u) != 0u) break;
+        offset = (uint64_t)current - pc;
+        if (offset + 4u > (uint64_t)insns * 4u) break;
+        admission = a64_compact_raw_classify_instruction(
+            &model, mem_r32(NULL, current), false);
+        if (!compact_raw_admission_supported(admission)) break;
+        if (arm_step(&model) != ARM_OK) break;
+        completed++;
+    }
+    return completed;
+}
+
 static bool compact_raw_compare(const char *name, const uint32_t *program,
                                 unsigned insns, uint32_t pc,
                                 unsigned reference_steps, unsigned budget,
@@ -5078,6 +5156,7 @@ static bool compact_raw_compare(const char *name, const uint32_t *program,
     final_state_t reference_state, compact_state;
     arm_status_t status = ARM_OK;
     unsigned completed = 0u;
+    unsigned modeled;
 
     seed_cpu_at(&reference, program, insns, false, pc);
     for (unsigned i = 0u; i < reference_steps; i++) {
@@ -5086,6 +5165,8 @@ static bool compact_raw_compare(const char *name, const uint32_t *program,
     }
     capture_state(&reference_state, &reference, status, JIT_EXIT_NEXT);
 
+    modeled = compact_raw_modeled_prefix(program, insns, pc, budget);
+
     seed_cpu_at(&compact, program, insns, false, pc);
     if (!a64_compact_raw_run(&compact, &g_ram[pc], pc, insns * 4u,
                              budget, g_ram, sizeof g_ram, &completed)) {
@@ -5093,12 +5174,14 @@ static bool compact_raw_compare(const char *name, const uint32_t *program,
         return false;
     }
     capture_state(&compact_state, &compact, ARM_OK, JIT_EXIT_NEXT);
-    if (status != ARM_OK || completed != expected_completed ||
+    if (status != ARM_OK || modeled != expected_completed ||
+        completed != modeled ||
         !architectural_states_equal(&reference_state, &compact_state)) {
         fprintf(stderr,
-                "jitbench: compact raw %s mismatch (completed %u/%u, "
-                "reference steps %u)\n",
-                name, completed, expected_completed, reference_steps);
+                "jitbench: compact raw %s mismatch (completed/model/expected "
+                "%u/%u/%u, reference steps %u)\n",
+                name, completed, modeled, expected_completed,
+                reference_steps);
         return false;
     }
     return true;
@@ -8641,6 +8724,7 @@ int main(int argc, char **argv) {
     for (i = 0u; i < sizeof CASES / sizeof CASES[0]; i++) {
         if (!validate_case_translation(&CASES[i])) return 1;
     }
+    if (!validate_compact_raw_admission_shapes()) return 1;
     if (!jit_host_can_execute()) {
         printf("SKIP: not an arm64 execution host.\n");
         return 0;

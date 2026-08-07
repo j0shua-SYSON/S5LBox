@@ -169,6 +169,31 @@ bool a64_static_decode(const void *program, unsigned insns, bool thumb,
 /* True only when the target was built with the generated AArch64 handler file. */
 bool a64_static_host_available(void);
 
+/* Instruction-level admission result for the compact live-byte loop.  The
+ * first two values retire exactly; every later value stops before mutation.
+ * This classifier deliberately excludes the wrapper's machine-wide gates
+ * (MMU, interrupts, byte window and flat-RAM ownership), so a profile can
+ * separate missing instruction semantics from missing SoC integration. */
+typedef enum {
+    A64_COMPACT_RAW_ADMIT_EXECUTE = 0,
+    A64_COMPACT_RAW_ADMIT_CONDITION_SKIP,
+    A64_COMPACT_RAW_ADMITTED_COUNT,
+    A64_COMPACT_RAW_REJECT_THUMB = A64_COMPACT_RAW_ADMITTED_COUNT,
+    A64_COMPACT_RAW_REJECT_NV,
+    A64_COMPACT_RAW_REJECT_DP_PC,
+    A64_COMPACT_RAW_REJECT_DP_TEST_WITHOUT_S,
+    A64_COMPACT_RAW_REJECT_DP_REGISTER_SHIFT,
+    A64_COMPACT_RAW_REJECT_DP_RM_PC,
+    A64_COMPACT_RAW_REJECT_MEMORY_FORM,
+    A64_COMPACT_RAW_REJECT_MEMORY_PC,
+    A64_COMPACT_RAW_REJECT_MEMORY_ALIGNMENT,
+    A64_COMPACT_RAW_REJECT_CLASS,
+    A64_COMPACT_RAW_ADMISSION_COUNT
+} a64_compact_raw_admission_t;
+
+a64_compact_raw_admission_t a64_compact_raw_classify_instruction(
+    const arm_cpu_t *cpu, uint32_t insn, bool thumb);
+
 /* Execute a deliberately narrow A32 subset directly from live instruction
  * bytes, without decoded records or the static handler graph.  This is a
  * feasibility/oracle boundary, not a product engine: MMU, interrupts, Thumb,

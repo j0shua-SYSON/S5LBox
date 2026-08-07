@@ -236,6 +236,7 @@ jobs:
             grep -Fq 'STATIC-BRANCH-ORACLE exact=yes cases=58 taken=yes fallthrough=yes link=yes backward=yes contract=yes' <<<"$static_output"
             grep -Fq 'STATIC-THUMB-COND-BRANCH-ORACLE exact=yes cases=28 conditions=all taken=yes fallthrough=yes backward=yes thumb-state=yes lr-preserved=yes contract=yes' <<<"$static_output"
             grep -Fq 'STATIC-INDIRECT-BRANCH-ORACLE exact=yes cases=240 a32-conditions=yes registers=all arm-target=yes thumb-target=yes link=yes pc-source=yes invalid-rollback=yes contract=yes' <<<"$static_output"
+            grep -Fq 'COMPACT-RAW-ADMISSION-MODEL exact-shapes=yes cases=12 outcomes=12 condition-before-decode=yes machine-gates=excluded' <<<"$static_output"
             grep -Fq 'COMPACT-RAW-ORACLE exact=yes cases=8 result-opcodes=12 flag-opcodes=16 conditions=14 immediate-rotate=yes register-immediate-shifts=all word-load-store=yes branch-link=yes live-bytes=yes out-of-window=yes unsupported-prefix=yes invalid-contract-rollback=yes' <<<"$compact_output"
             grep -Eq 'COMPACT-RAW-CEILING case=a32-alu guest-insns=10000 reps=1 live-bytes=yes decoded-cache=no graph=no runtime-codegen=no .*compact-speedup=[0-9.]+x' <<<"$compact_output"
             grep -Eq 'COMPACT-RAW-CEILING case=a32-mixed guest-insns=10000 reps=1 live-bytes=yes decoded-cache=no graph=no runtime-codegen=no .*compact-speedup=[0-9.]+x' <<<"$compact_output"

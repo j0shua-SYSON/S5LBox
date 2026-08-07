@@ -1488,6 +1488,64 @@ bool a64_static_host_available(void) {
 #endif
 }
 
+a64_compact_raw_admission_t a64_compact_raw_classify_instruction(
+        const arm_cpu_t *cpu, uint32_t insn, bool thumb) {
+    unsigned condition;
+
+    if (!cpu) return A64_COMPACT_RAW_REJECT_CLASS;
+    if (thumb) return A64_COMPACT_RAW_REJECT_THUMB;
+
+    condition = insn >> 28;
+    if (condition == 15u) return A64_COMPACT_RAW_REJECT_NV;
+    if (condition != 14u && !arm_cond_passed(cpu, condition))
+        return A64_COMPACT_RAW_ADMIT_CONDITION_SKIP;
+
+    /* B/BL is selected before the broad bits[27:26] data-processing class in
+     * the generated loop. */
+    if (((insn >> 25) & 7u) == 5u)
+        return A64_COMPACT_RAW_ADMIT_EXECUTE;
+
+    if (((insn >> 26) & 3u) == 0u) {
+        unsigned opcode = (insn >> 21) & 15u;
+        unsigned rn = (insn >> 16) & 15u;
+        unsigned rd = (insn >> 12) & 15u;
+
+        if (rn == 15u || rd == 15u)
+            return A64_COMPACT_RAW_REJECT_DP_PC;
+        if ((insn & (1u << 25)) == 0u) {
+            if (insn & (1u << 4))
+                return A64_COMPACT_RAW_REJECT_DP_REGISTER_SHIFT;
+            if ((insn & 15u) == 15u)
+                return A64_COMPACT_RAW_REJECT_DP_RM_PC;
+        }
+        if ((insn & (1u << 20)) == 0u && opcode >= 8u && opcode <= 11u)
+            return A64_COMPACT_RAW_REJECT_DP_TEST_WITHOUT_S;
+        return A64_COMPACT_RAW_ADMIT_EXECUTE;
+    }
+
+    if (((insn >> 26) & 3u) == 1u) {
+        unsigned rn = (insn >> 16) & 15u;
+        unsigned rd = (insn >> 12) & 15u;
+        uint32_t address;
+
+        if ((insn & (1u << 25)) != 0u ||
+            (insn & (1u << 24)) == 0u ||
+            (insn & (1u << 22)) != 0u ||
+            (insn & (1u << 21)) != 0u)
+            return A64_COMPACT_RAW_REJECT_MEMORY_FORM;
+        if (rn == 15u || rd == 15u)
+            return A64_COMPACT_RAW_REJECT_MEMORY_PC;
+        address = (insn & (1u << 23)) != 0u
+                ? cpu->r[rn] + (insn & UINT32_C(0xfff))
+                : cpu->r[rn] - (insn & UINT32_C(0xfff));
+        if ((address & 3u) != 0u)
+            return A64_COMPACT_RAW_REJECT_MEMORY_ALIGNMENT;
+        return A64_COMPACT_RAW_ADMIT_EXECUTE;
+    }
+
+    return A64_COMPACT_RAW_REJECT_CLASS;
+}
+
 #if defined(S5LBOX_STATIC_A64_NATIVE)
 extern int a64_static_execute(uint32_t *regs, uint32_t *cpsr,
                               uint64_t *cycles,

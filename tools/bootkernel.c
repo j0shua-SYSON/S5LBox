@@ -25551,6 +25551,24 @@ typedef struct {
     uint64_t mixed_terminal_branch;
     uint64_t mixed_terminal_store;
 
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    /* Exact instruction-semantic admission model for the compact live-byte
+     * loop. It follows actual dynamic control flow and condition outcomes but
+     * intentionally does not claim the current flat-RAM wrapper can enter
+     * through an MMU mapping or cross a device/timebase boundary. */
+    uint64_t compact_raw_outcomes[A64_COMPACT_RAW_ADMISSION_COUNT];
+    uint64_t compact_raw_class_outcomes[SEQUENCE_CLASS_COUNT]
+                                       [A64_COMPACT_RAW_ADMISSION_COUNT];
+    uint64_t compact_raw_runs[SEQUENCE_RUN_BUCKETS];
+    uint64_t compact_raw_run_instructions[SEQUENCE_RUN_BUCKETS];
+    uint64_t compact_raw_run_length;
+    uint64_t compact_raw_run_max;
+    uint64_t compact_raw_mmu_on;
+    uint64_t compact_raw_interrupt_line;
+    uint64_t compact_raw_abort_pending;
+    uint64_t compact_raw_big_endian;
+#endif
+
     /* Exact dynamic eligibility model for the optional product decoder. It
      * uses the literal run's pre-step architectural/cache state but never
      * executes a signed handler or changes the machine. */
@@ -28853,6 +28871,10 @@ static void sequence_profile_break(sequence_profile_t *profile) {
         profile->vfp_arith.pending_abandoned++;
         profile->vfp_arith.pending = false;
     }
+    sequence_close_run(profile->compact_raw_runs,
+                       profile->compact_raw_run_instructions,
+                       &profile->compact_raw_run_length,
+                       &profile->compact_raw_run_max);
 #endif
     sequence_trace_head_close(profile);
     sequence_close_run(profile->flow_runs, profile->flow_run_instructions,
@@ -29250,6 +29272,32 @@ static void sequence_profile_observe(sequence_profile_t *profile,
     signed_rejected = sequence_signed_observe(
         profile, mach, pc, raw, thumb,
         physical_sequential, instruction_class);
+    {
+        a64_compact_raw_admission_t admission =
+            a64_compact_raw_classify_instruction(cpu, raw, thumb);
+        if ((unsigned)admission >=
+            (unsigned)A64_COMPACT_RAW_ADMISSION_COUNT)
+            admission = A64_COMPACT_RAW_REJECT_CLASS;
+        profile->compact_raw_outcomes[admission]++;
+        profile->compact_raw_class_outcomes[instruction_class][admission]++;
+        if ((cpu->cp15.sctlr & ARM_SCTLR_M) != 0u)
+            profile->compact_raw_mmu_on++;
+        if (cpu->irq_line || cpu->fiq_line)
+            profile->compact_raw_interrupt_line++;
+        if (cpu->abort_pending)
+            profile->compact_raw_abort_pending++;
+        if ((cpu->cpsr & ARM_CPSR_E) != 0u)
+            profile->compact_raw_big_endian++;
+        if ((unsigned)admission <
+            (unsigned)A64_COMPACT_RAW_ADMITTED_COUNT) {
+            profile->compact_raw_run_length++;
+        } else {
+            sequence_close_run(profile->compact_raw_runs,
+                               profile->compact_raw_run_instructions,
+                               &profile->compact_raw_run_length,
+                               &profile->compact_raw_run_max);
+        }
+    }
 #endif
 
     bool safe_dp = instruction_class == SEQUENCE_ARM_DP;
@@ -32010,6 +32058,17 @@ static void sequence_profile_report(sequence_profile_t *profile) {
         "AND", "EOR", "SUB", "RSB", "ADD", "ADC", "SBC", "RSC",
         "TST", "TEQ", "CMP", "CMN", "ORR", "MOV", "BIC", "MVN"
     };
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    static const char *const COMPACT_RAW_OUTCOMES[
+        A64_COMPACT_RAW_ADMISSION_COUNT] = {
+        "admit execute", "admit failed condition",
+        "reject Thumb", "reject cond=NV", "reject DP pc operand/dest",
+        "reject DP test/compare without S", "reject register shift",
+        "reject DP rm=pc", "reject load/store form",
+        "reject load/store pc", "reject load/store alignment",
+        "reject instruction class"
+    };
+#endif
     if (!profile || !profile->enabled) return;
 
     uint64_t class_total = 0u;
@@ -32233,6 +32292,134 @@ static void sequence_profile_report(sequence_profile_t *profile) {
                      (double)profile->fetched : 0.0,
             profile->mixed_terminal_branch,
             profile->mixed_terminal_store);
+
+    printf("\n  exact compact-raw instruction-semantic admission model\n");
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    {
+        uint64_t total = 0u, admitted = 0u;
+        uint64_t calls = 0u, instructions = 0u;
+        for (unsigned i = 0u;
+             i < (unsigned)A64_COMPACT_RAW_ADMISSION_COUNT; i++)
+            total += profile->compact_raw_outcomes[i];
+        for (unsigned i = 0u;
+             i < (unsigned)A64_COMPACT_RAW_ADMITTED_COUNT; i++)
+            admitted += profile->compact_raw_outcomes[i];
+        for (unsigned i = 1u; i < SEQUENCE_RUN_BUCKETS; i++) {
+            calls += profile->compact_raw_runs[i];
+            instructions += profile->compact_raw_run_instructions[i];
+        }
+        printf("    Live pre-step A32/Thumb words and CPSR are classified by "
+               "the generated loop's instruction contract. Runs follow "
+               "actual branches and condition skips. This excludes MMU/code-"
+               "window translation, interrupts, MMIO and the timebase entry "
+               "gate: it is coverage, not executable SoC throughput or FPS.\n");
+        printf("    accounting=%" PRIu64 "/%" PRIu64 " %s  admitted=%" PRIu64
+               " (%.3f%%) calls=%" PRIu64 " mean=%.3f max=%" PRIu64 "\n",
+               total, profile->fetched,
+               total == profile->fetched ? "EXACT" : "MISMATCH",
+               admitted,
+               profile->fetched
+                   ? 100.0 * (double)admitted / (double)profile->fetched
+                   : 0.0,
+               calls, calls ? (double)instructions / (double)calls : 0.0,
+               profile->compact_raw_run_max);
+        for (unsigned i = 0u;
+             i < (unsigned)A64_COMPACT_RAW_ADMISSION_COUNT; i++) {
+            uint64_t count = profile->compact_raw_outcomes[i];
+            if (!count) continue;
+            printf("    %-35s %12" PRIu64 "  %7.3f%%\n",
+                   COMPACT_RAW_OUTCOMES[i], count,
+                   profile->fetched
+                       ? 100.0 * (double)count / (double)profile->fetched
+                       : 0.0);
+        }
+        printf("    current flat-wrapper blockers (overlap allowed): "
+               "MMU-on=%" PRIu64 " interrupt-line=%" PRIu64
+               " abort-pending=%" PRIu64 " big-endian=%" PRIu64 "\n",
+               profile->compact_raw_mmu_on,
+               profile->compact_raw_interrupt_line,
+               profile->compact_raw_abort_pending,
+               profile->compact_raw_big_endian);
+        printf("    per-class semantic admission\n");
+        printf("      %-28s %12s %12s %12s %12s %9s\n",
+               "class", "observed", "executed", "cond-skip", "rejected",
+               "admit%");
+        for (unsigned cls = 0u; cls < SEQUENCE_CLASS_COUNT; cls++) {
+            uint64_t class_executed = profile->compact_raw_class_outcomes[cls]
+                [A64_COMPACT_RAW_ADMIT_EXECUTE];
+            uint64_t class_skipped = profile->compact_raw_class_outcomes[cls]
+                [A64_COMPACT_RAW_ADMIT_CONDITION_SKIP];
+            uint64_t class_rejected = 0u;
+            for (unsigned outcome = A64_COMPACT_RAW_ADMITTED_COUNT;
+                 outcome < (unsigned)A64_COMPACT_RAW_ADMISSION_COUNT;
+                 outcome++) {
+                class_rejected +=
+                    profile->compact_raw_class_outcomes[cls][outcome];
+            }
+            uint64_t class_total =
+                class_executed + class_skipped + class_rejected;
+            if (!class_total) continue;
+            printf("      %-28s %12" PRIu64 " %12" PRIu64
+                   " %12" PRIu64 " %12" PRIu64 " %8.3f%%\n",
+                   SEQUENCE_CLASS_NAMES[cls], class_total,
+                   class_executed, class_skipped, class_rejected,
+                   class_total
+                       ? 100.0 * (double)(class_executed + class_skipped) /
+                             (double)class_total
+                       : 0.0);
+        }
+        sequence_profile_print_run_group(
+            "1", profile->compact_raw_runs,
+            profile->compact_raw_run_instructions, 1u, 1u, instructions);
+        sequence_profile_print_run_group(
+            "2-4", profile->compact_raw_runs,
+            profile->compact_raw_run_instructions, 2u, 4u, instructions);
+        sequence_profile_print_run_group(
+            "5-8", profile->compact_raw_runs,
+            profile->compact_raw_run_instructions, 5u, 8u, instructions);
+        sequence_profile_print_run_group(
+            "9-16", profile->compact_raw_runs,
+            profile->compact_raw_run_instructions, 9u, 16u, instructions);
+        sequence_profile_print_run_group(
+            "17-32", profile->compact_raw_runs,
+            profile->compact_raw_run_instructions, 17u, 32u,
+            instructions);
+        sequence_profile_print_run_group(
+            "33-63", profile->compact_raw_runs,
+            profile->compact_raw_run_instructions, 33u, 63u,
+            instructions);
+        sequence_profile_print_run_group(
+            "64+", profile->compact_raw_runs,
+            profile->compact_raw_run_instructions, 64u, 64u,
+            instructions);
+        {
+            static const unsigned THRESHOLDS[] = {2u, 4u, 8u, 16u, 32u, 64u};
+            printf("    minimum-run entry ceiling (no lookup/entry cost "
+                   "modeled)\n");
+            printf("      %9s %12s %12s %14s\n",
+                   "threshold", "calls", "instructions", "admitted-share");
+            for (unsigned t = 0u;
+                 t < sizeof THRESHOLDS / sizeof THRESHOLDS[0]; t++) {
+                uint64_t retained_calls = 0u, retained_instructions = 0u;
+                for (unsigned length = THRESHOLDS[t];
+                     length < SEQUENCE_RUN_BUCKETS; length++) {
+                    retained_calls += profile->compact_raw_runs[length];
+                    retained_instructions +=
+                        profile->compact_raw_run_instructions[length];
+                }
+                printf("      %9u %12" PRIu64 " %12" PRIu64
+                       " %13.3f%%\n",
+                       THRESHOLDS[t], retained_calls, retained_instructions,
+                       admitted
+                           ? 100.0 * (double)retained_instructions /
+                                 (double)admitted
+                           : 0.0);
+            }
+        }
+    }
+#else
+    printf("    unavailable: rebuild with S5LBOX_STATIC_A64_ENGINE=ON\n");
+#endif
 
     printf("\n  exact current signed-engine retirement model\n");
 #if defined(S5LBOX_STATIC_A64_ENGINE)
