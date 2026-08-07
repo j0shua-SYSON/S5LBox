@@ -8111,3 +8111,51 @@ that exists and wins physically, the accepted interpreter stays active. The cand
 diagnostic-only, changes stock-app policy by zero, and provides no 30-FPS evidence. Full evidence is
 under `work/artifacts/7a768a2-cross-window-gate-20260807/`; its cadence remains emulator-thread
 telemetry, not displayed UIKit/Core Animation FPS.
+
+### 2026-08-07: the exact 7.320 B census selects mixed Thumb and VFP, not another callback change
+
+The older 7.100--7.110 B sequence census was a different scene, so it was not sufficient authority
+for choosing the next engine boundary. A current-tree `build-strict` replay at documentation commit
+`a66377f638b1da63f27430dd9c443dccef12d132` restored the exact r446 7.320 B checkpoint and observed
+the next 10,000,000 retirements with `--sequence-profile`. It exited zero with empty stderr,
+9,999,510 fetched instructions plus 490 interrupt entries, canonical derived work-image SHA-256
+`06AAAA84FB4BFEAE5A647290C9B50BEBE7640F420457089F40BDBED961D6992D`, and per-run screen SHA-256
+`45E3B4807D81A42EB14251246CA94F3149647462A0BC79C4C865C9F2418B6B57`. The profiler deliberately
+performs an extra translation per fetched instruction, so none of its elapsed time or ordinary TLB
+counters is performance evidence.
+
+The generated compact loop's exact instruction-semantic classifier admits 5,804,750 instructions,
+or **58.050%** of the fetched stream: 4,992,391 condition-passed executions and 812,359 failed-
+condition architectural no-ops. Its 1,104,522 admitted runs average 5.255 instructions. The missing
+coverage is broad and stable relative to the older scene:
+
+| current live-stream outcome | instructions | fetched share |
+|---|---:|---:|
+| Thumb | 1,343,144 | 13.432% |
+| unsupported instruction class | 2,140,887 | 21.410% |
+| broader load/store form | 212,296 | 2.123% |
+| load/store PC operand | 166,872 | 1.669% |
+| DP PC operand/destination | 194,647 | 1.947% |
+| register-specified shift | 99,508 | 0.995% |
+| DP `Rm=PC` | 18,971 | 0.190% |
+| unconditional/NV space | 18,435 | 0.184% |
+
+The class census identifies what the coarse unsupported row contains. VFP contributes 1,705,451
+observations and only 32,097 condition skips, leaving **1,673,354** unexecuted by the compact tier.
+Thumb contributes 1,343,144, all outside it. Block transfer leaves 380,633 outside; extra/sync,
+multiply, media and coprocessor classes add another 175,606. In contrast, A32 data processing is
+98.314% admitted and immediate B/BL is 100% admitted. Extending those already-dominant A32 families
+again would therefore be the wrong scale of work.
+
+This coverage model does not reinterpret the physical result: the actual A9 candidate retired
+4,152,321 instructions natively and sent 2,552,885 through the resident C fallback. It only selects
+the next architecture. The live signed loop must become mixed A32/Thumb and implement whole proven
+Thumb and VFP families internally, then add broad witnessed memory/control families. It must not
+route through the rejected decoded graph and must not call C once per common instruction. A design
+target is fewer than roughly 300,000 exact fallbacks per 10 M in this interval before another phone
+gate; that is a coverage gate, not a promised speedup or FPS value.
+
+Brutal status: **the new census explains the repeated losses but adds zero accepted speed today.**
+It supports a plausible Amdahl path only if the broad native semantics retain their measured inner-
+loop advantage after real VFP, Thumb and memory work. The interpreter remains the stock policy.
+Evidence is retained under `work/artifacts/compact-raw-admission-7320-a66377f/`.
