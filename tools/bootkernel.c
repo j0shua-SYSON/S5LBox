@@ -25587,6 +25587,16 @@ typedef struct {
     uint64_t signed_class_semantic_fusion_ceiling[SEQUENCE_CLASS_COUNT];
     uint64_t signed_terminal_instructions;
     uint64_t signed_reused_graph_heads;
+    /* Dynamic demand for the exact current product decoder's signed handler
+     * records. This deliberately ignores the outer execution gate: it answers
+     * which semantic records the real instruction stream would ask a compact
+     * engine to execute, while the existing call/gate model continues to own
+     * the separate question of whether a particular invocation can enter. */
+    uint64_t *signed_product_handler_hits;
+    uint64_t signed_product_handler_instructions;
+    uint64_t signed_product_handler_records;
+    uint64_t signed_product_handler_decode_failures;
+    uint64_t signed_product_handler_record_mismatches;
     uint32_t signed_call_unique_pc[SEQUENCE_SIGNED_CAP];
     bool signed_call_unique_thumb[SEQUENCE_SIGNED_CAP];
     unsigned signed_call_unique_blocks;
@@ -27291,6 +27301,48 @@ static bool sequence_post_store_retireable(
          classification->outcome == SEQUENCE_SIGNED_READ_HIT);
 }
 
+/* Record the exact build-time handler IDs demanded by one dynamically reached
+ * instruction under the current product decoder. The outer gate and chaining
+ * models intentionally remain separate: this census is an instruction-mix
+ * input for a compact signed engine, not a prediction of accepted calls or
+ * speed. A failed condition contributes only its reached guard record, exactly
+ * like the existing aggregate handler-record accounting. */
+static void sequence_signed_product_handler_note(
+        sequence_profile_t *profile, const arm_cpu_t *cpu, uint32_t pc,
+        uint32_t raw, bool thumb,
+        const sequence_signed_classification_t *classification) {
+    uint8_t bytes[4] = {
+        (uint8_t)raw, (uint8_t)(raw >> 8),
+        (uint8_t)(raw >> 16), (uint8_t)(raw >> 24)
+    };
+    a64_static_block_t block;
+    unsigned records;
+
+    if (!profile || !cpu || !profile->signed_product_handler_hits ||
+        !sequence_post_store_retireable(classification))
+        return;
+    if (!a64_static_decode_memory_hits_bytes_at(
+            bytes, 1u, thumb, pc, &block)) {
+        profile->signed_product_handler_decode_failures++;
+        return;
+    }
+    records = classification->handler_records;
+    if (!records || records > block.uop_count) {
+        profile->signed_product_handler_record_mismatches++;
+        return;
+    }
+    for (unsigned i = 0u; i < records; i++) {
+        if (block.uops[i].handler >= A64_STATIC_HANDLER_COUNT) {
+            profile->signed_product_handler_record_mismatches++;
+            return;
+        }
+    }
+    profile->signed_product_handler_instructions++;
+    profile->signed_product_handler_records += records;
+    for (unsigned i = 0u; i < records; i++)
+        profile->signed_product_handler_hits[block.uops[i].handler]++;
+}
+
 static unsigned sequence_post_store_popcount(uint32_t value) {
     unsigned count = 0u;
     while (value) {
@@ -28484,6 +28536,9 @@ static bool sequence_signed_observe(sequence_profile_t *profile,
              store_family == SEQUENCE_STORE_THUMB_SINGLE || shipped_vstr ||
              shipped_stm || shipped_vstm))
             implemented_classification = store_classification;
+        sequence_signed_product_handler_note(
+            profile, &mach->cpu, pc, raw, thumb,
+            &implemented_classification);
         /* Observe the refill arm before the old product control consumes the
          * one pre-profile TLB verdict. Both otherwise see identical input. */
         sequence_signed_store_observe_fetch_refill(
@@ -29022,6 +29077,7 @@ static void sequence_profile_destroy(sequence_profile_t *profile) {
     free(profile->raws);
     free(profile->pairs);
     free(profile->trace_heads);
+    free(profile->signed_product_handler_hits);
     for (unsigned i = 0; i < SEQUENCE_CACHE_LEVELS; i++)
         free(profile->cache[i]);
     for (unsigned i = 0; i < SEQUENCE_BLOCK_LEVELS; i++)
@@ -29046,6 +29102,11 @@ static bool sequence_profile_start(sequence_profile_t *profile) {
     profile->pairs = calloc(SEQUENCE_PAIR_CAP, sizeof *profile->pairs);
     profile->trace_heads = calloc(SEQUENCE_TRACE_HEAD_CAP,
                                   sizeof *profile->trace_heads);
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    profile->signed_product_handler_hits = calloc(
+        A64_STATIC_HANDLER_COUNT,
+        sizeof *profile->signed_product_handler_hits);
+#endif
     for (unsigned i = 0; i < SEQUENCE_CACHE_LEVELS; i++) {
         profile->cache_size[i] = CACHE_SIZES[i];
         profile->cache[i] = calloc(CACHE_SIZES[i], sizeof *profile->cache[i]);
@@ -29063,7 +29124,11 @@ static bool sequence_profile_start(sequence_profile_t *profile) {
         }
     }
     if (!profile->sites || !profile->raws || !profile->pairs ||
-        !profile->trace_heads) {
+        !profile->trace_heads
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+        || !profile->signed_product_handler_hits
+#endif
+    ) {
         sequence_profile_destroy(profile);
         return false;
     }
@@ -32663,6 +32728,72 @@ static void sequence_profile_report(sequence_profile_t *profile) {
                    "/%" PRIu64 "/%" PRIu64 "\n",
                    block_heads, profile->signed_terminal_instructions,
                    end_records);
+        }
+        {
+            uint64_t summed_records = 0u;
+            uint64_t distinct = 0u;
+            uint64_t cumulative = 0u;
+            uint8_t *reported = calloc(A64_STATIC_HANDLER_COUNT, 1u);
+
+            for (unsigned id = 0u; id < A64_STATIC_HANDLER_COUNT; id++) {
+                uint64_t hits = profile->signed_product_handler_hits
+                              ? profile->signed_product_handler_hits[id] : 0u;
+                summed_records += hits;
+                if (hits) distinct++;
+            }
+            printf("    exact current-product handler-ID demand\n");
+            printf("      Gate-independent dynamic instruction mix for compact "
+                   "engine design; this is not accepted-call, speed, or FPS "
+                   "evidence.\n");
+            printf("      instructions/records/distinct=%" PRIu64 "/%" PRIu64
+                   "/%" PRIu64 " decode-failures/record-mismatches=%" PRIu64
+                   "/%" PRIu64 " summed=%" PRIu64 "  %s\n",
+                   profile->signed_product_handler_instructions,
+                   profile->signed_product_handler_records, distinct,
+                   profile->signed_product_handler_decode_failures,
+                   profile->signed_product_handler_record_mismatches,
+                   summed_records,
+                   profile->signed_product_handler_decode_failures == 0u &&
+                           profile->signed_product_handler_record_mismatches ==
+                               0u &&
+                           summed_records ==
+                               profile->signed_product_handler_records
+                       ? "EXACT" : "MISMATCH");
+            if (!reported) {
+                printf("      top handler IDs unavailable: allocation failed\n");
+            } else {
+                for (unsigned rank = 0u;
+                     rank < A64_STATIC_HANDLER_COUNT; rank++) {
+                    unsigned best_id = A64_STATIC_HANDLER_COUNT;
+                    uint64_t best_hits = 0u;
+                    for (unsigned id = 0u;
+                         id < A64_STATIC_HANDLER_COUNT; id++) {
+                        uint64_t hits =
+                            profile->signed_product_handler_hits[id];
+                        if (!reported[id] && hits > best_hits) {
+                            best_id = id;
+                            best_hits = hits;
+                        }
+                    }
+                    if (best_id == A64_STATIC_HANDLER_COUNT) break;
+                    reported[best_id] = 1u;
+                    cumulative += best_hits;
+                    printf("        %4u id=%5u hits=%10" PRIu64
+                           " share=%6.3f%% cumulative=%6.3f%%\n",
+                           rank + 1u, best_id, best_hits,
+                           profile->signed_product_handler_records
+                               ? 100.0 * (double)best_hits /
+                                     (double)profile
+                                         ->signed_product_handler_records
+                               : 0.0,
+                           profile->signed_product_handler_records
+                               ? 100.0 * (double)cumulative /
+                                     (double)profile
+                                         ->signed_product_handler_records
+                               : 0.0);
+                }
+                free(reported);
+            }
         }
         printf("    stops cap/timer/caller/branch/flow/fetch-block/"
                "ineligible/observer=%" PRIu64 "/%" PRIu64 "/%" PRIu64
