@@ -1593,7 +1593,7 @@ static a64_compact_raw_admission_t compact_raw_classify_vfp(
     const bool enabled = (cpu->vfp_fpexc & ARM_FPEXC_EN) != 0u;
 
     memset(ops, 0, sizeof ops);
-    if (!decode_vfp_transfer(insn, cpu->r[15] + 8u, false, ops, &written) ||
+    if (!decode_vfp_transfer(insn, cpu->r[15] + 8u, true, ops, &written) ||
         !written || written > 2u)
         return A64_COMPACT_RAW_REJECT_VFP;
     handler = ops[written - 1u].handler;
@@ -1612,10 +1612,9 @@ static a64_compact_raw_admission_t compact_raw_classify_vfp(
         return A64_COMPACT_RAW_REJECT_VFP;
     }
 
-    /* This tranche owns exact bitwise/register, compare and widening
-     * semantics. Arithmetic and witnessed memory are admitted only when their
-     * live-loop implementations land, even though the older decoded engine
-     * already provides their differential oracle. */
+    /* The live loop owns exact bitwise/register, compare, widening and
+     * witnessed memory semantics. Arithmetic remains separate because it also
+     * owns a lazy host-FP preservation session. */
     if (handler >= A64S_VFP_UNARY32 &&
         handler < A64S_VFP_COMPARE32) {
         return (cpu->vfp_fpscr & ARM_FPSCR_LEN) == 0u
@@ -1629,8 +1628,31 @@ static a64_compact_raw_admission_t compact_raw_classify_vfp(
             ? A64_COMPACT_RAW_ADMIT_EXECUTE
             : A64_COMPACT_RAW_REJECT_VFP;
     }
-    if (handler >= A64S_VFP_ARITH32)
+    if (handler_is_vfp_arithmetic(handler))
         return A64_COMPACT_RAW_REJECT_VFP;
+    if ((handler >= A64S_VFP_DIRECT_READ32 &&
+         handler <= A64S_VFP_DIRECT_WRITE64) ||
+        handler_is_vstm_direct_write(handler)) {
+        const bool pre = (insn & (1u << 24)) != 0u;
+        const bool up = (insn & (1u << 23)) != 0u;
+        const bool writeback = (insn & (1u << 21)) != 0u;
+        const unsigned rn = (insn >> 16) & 15u;
+        const unsigned words = insn & 255u;
+        uint32_t base = rn == 15u ? cpu->r[15] + 8u : cpu->r[rn];
+        uint32_t address;
+
+        if (pre && !writeback) {
+            address = up ? base + words * 4u : base - words * 4u;
+            return (address & 3u) == 0u
+                ? A64_COMPACT_RAW_ADMIT_EXECUTE
+                : A64_COMPACT_RAW_REJECT_MEMORY_ALIGNMENT;
+        }
+        address = pre ? base - words * 4u : base;
+        if ((address & 3u) != 0u ||
+            (address & UINT32_C(0x3ff)) + words * 4u > 1024u)
+            return A64_COMPACT_RAW_REJECT_MEMORY_ALIGNMENT;
+        return A64_COMPACT_RAW_ADMIT_EXECUTE;
+    }
     return A64_COMPACT_RAW_ADMIT_EXECUTE;
 }
 

@@ -5135,6 +5135,12 @@ static bool validate_compact_raw_admission_shapes(void) {
             A64_COMPACT_RAW_ADMIT_EXECUTE ||
         a64_compact_raw_classify_instruction(
             &cpu, VFP_UN_S(4, 0, 0, 1), false) !=
+            A64_COMPACT_RAW_ADMIT_EXECUTE ||
+        a64_compact_raw_classify_instruction(
+            &cpu, VFP_READ_HITS[0], false) !=
+            A64_COMPACT_RAW_ADMIT_EXECUTE ||
+        a64_compact_raw_classify_instruction(
+            &cpu, VSTM_WRITE_HITS[0], false) !=
             A64_COMPACT_RAW_ADMIT_EXECUTE) {
         fprintf(stderr, "jitbench: compact raw VFP admission refused\n");
         return false;
@@ -5146,7 +5152,7 @@ static bool validate_compact_raw_admission_shapes(void) {
         fprintf(stderr, "jitbench: compact raw VFP Len guard admitted\n");
         return false;
     }
-    printf("COMPACT-RAW-ADMISSION-MODEL exact-shapes=yes cases=21 "
+    printf("COMPACT-RAW-ADMISSION-MODEL exact-shapes=yes cases=23 "
            "outcomes=13 condition-before-decode=yes machine-gates=excluded\n");
     return true;
 }
@@ -5737,6 +5743,97 @@ static bool validate_compact_raw_vfp_nonarith_oracles(void) {
     return true;
 }
 
+static bool compact_raw_vfp_flat_memory_case(const char *name,
+                                             unsigned insns,
+                                             uint32_t pc,
+                                             arm_cpu_t *initial,
+                                             uint8_t *baseline,
+                                             uint8_t *expected) {
+    arm_cpu_t reference = *initial;
+    arm_cpu_t compact = *initial;
+    arm_status_t status = ARM_OK;
+    unsigned completed = UINT_MAX;
+
+    memcpy(baseline, g_ram, sizeof g_ram);
+    for (unsigned i = 0u; i < insns; i++) {
+        status = arm_step(&reference);
+        if (status != ARM_OK) break;
+    }
+    memcpy(expected, g_ram, sizeof g_ram);
+    memcpy(g_ram, baseline, sizeof g_ram);
+    if (!a64_compact_raw_run(&compact, &g_ram[pc], pc, insns * 4u,
+                             insns, g_ram, sizeof g_ram, &completed) ||
+        status != ARM_OK || completed != insns ||
+        !static_vfp_states_equal(&reference, &compact) ||
+        memcmp(expected, g_ram, sizeof g_ram) != 0) {
+        fprintf(stderr,
+                "jitbench: compact raw VFP flat-memory %s mismatch "
+                "(completed/expected %u/%u status=%d)\n",
+                name, completed, insns, (int)status);
+        return false;
+    }
+    return true;
+}
+
+static bool validate_compact_raw_vfp_memory_oracles(void) {
+    uint8_t *baseline = (uint8_t *)malloc(sizeof g_ram);
+    uint8_t *expected = (uint8_t *)malloc(sizeof g_ram);
+    arm_cpu_t initial;
+    bool ok = false;
+
+    if (!baseline || !expected) {
+        fprintf(stderr,
+                "jitbench: compact raw VFP memory allocation failed\n");
+        goto done;
+    }
+
+    seed_vfp_read_oracle(&initial, false);
+    if (!compact_raw_vfp_flat_memory_case(
+            "loads",
+            (unsigned)(sizeof VFP_READ_HITS / sizeof VFP_READ_HITS[0]),
+            UINT32_C(0xf000), &initial, baseline, expected))
+        goto done;
+
+    seed_vfp_oracle(&initial, VFP_WRITE_HITS,
+                    (unsigned)(sizeof VFP_WRITE_HITS /
+                               sizeof VFP_WRITE_HITS[0]),
+                    UINT32_C(0x8000), true);
+    initial.r[0] = DATA_BASE + UINT32_C(0x800);
+    initial.r[1] = DATA_BASE + UINT32_C(0x880);
+    if (!compact_raw_vfp_flat_memory_case(
+            "stores",
+            (unsigned)(sizeof VFP_WRITE_HITS / sizeof VFP_WRITE_HITS[0]),
+            UINT32_C(0x8000), &initial, baseline, expected))
+        goto done;
+
+    seed_vfp_oracle(&initial, VSTM_WRITE_HITS,
+                    (unsigned)(sizeof VSTM_WRITE_HITS /
+                               sizeof VSTM_WRITE_HITS[0]),
+                    UINT32_C(0x8200), true);
+    initial.r[0] = DATA_BASE + UINT32_C(0x800);
+    initial.r[1] = DATA_BASE + UINT32_C(0x840);
+    initial.r[13] = DATA_BASE + UINT32_C(0xc00);
+    initial.r[2] = DATA_BASE + UINT32_C(0xd00);
+    initial.r[3] = DATA_BASE + UINT32_C(0xe00);
+    if (!compact_raw_vfp_flat_memory_case(
+            "multiple-stores",
+            (unsigned)(sizeof VSTM_WRITE_HITS /
+                       sizeof VSTM_WRITE_HITS[0]),
+            UINT32_C(0x8200), &initial, baseline, expected))
+        goto done;
+
+    printf("COMPACT-RAW-VFP-MEMORY-ORACLE exact=yes cases=21 "
+           "vldr=yes vstr=yes vstm=yes single=yes double=yes pc-relative=yes "
+           "writeback=yes condition-before-guard=yes transactional=yes "
+           "runtime-codegen=no\n");
+    ok = true;
+
+done:
+    free(baseline);
+    free(expected);
+    return ok;
+}
+
 static bool validate_compact_raw_oracles(void) {
     static const unsigned result_ops[] = {
         0u, 1u, 2u, 3u, 4u, 5u, 6u, 7u, 12u, 13u, 14u, 15u,
@@ -5804,6 +5901,8 @@ static bool validate_compact_raw_oracles(void) {
     unsigned completed = UINT_MAX;
 
     if (!validate_compact_raw_vfp_nonarith_oracles())
+        return false;
+    if (!validate_compact_raw_vfp_memory_oracles())
         return false;
 
     for (unsigned i = 0u; i < sizeof result_ops / sizeof result_ops[0]; i++) {
