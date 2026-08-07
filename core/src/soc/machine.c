@@ -1604,7 +1604,7 @@ unsigned s5l8900_static_a64_fallback_step(s5l8900_t *m,
     *status = ARM_OK;
     if (m->level_dirty || ext_inputs(m) != m->ext_seen ||
         (m->cpu.cpsr & ARM_CPSR_MODE_MASK) != ARM_MODE_USR ||
-        (m->cpu.cpsr & (ARM_CPSR_T | ARM_CPSR_E)) != 0u ||
+        (m->cpu.cpsr & ARM_CPSR_E) != 0u ||
         m->cpu.abort_pending ||
         (m->cpu.fiq_line && !(m->cpu.cpsr & ARM_CPSR_F)) ||
         (m->cpu.irq_line && !(m->cpu.cpsr & ARM_CPSR_I)))
@@ -1614,12 +1614,12 @@ unsigned s5l8900_static_a64_fallback_step(s5l8900_t *m,
     if (step_status != ARM_OK) return 0u;
 
     /* A fallback may perform MMIO or change instruction state/privilege. The
-     * resident ARM loop can continue only while the same User/A32 machine
+     * resident ARM loop can continue only while the same User A32/Thumb machine
      * boundary that admitted it remains exact. RETIRE_STOP still accounts the
      * successful instruction before returning to the device tick. */
     if (m->level_dirty || ext_inputs(m) != m->ext_seen ||
         (m->cpu.cpsr & ARM_CPSR_MODE_MASK) != ARM_MODE_USR ||
-        (m->cpu.cpsr & (ARM_CPSR_T | ARM_CPSR_E)) != 0u ||
+        (m->cpu.cpsr & ARM_CPSR_E) != 0u ||
         m->cpu.abort_pending ||
         (m->cpu.fiq_line && !(m->cpu.cpsr & ARM_CPSR_F)) ||
         (m->cpu.irq_line && !(m->cpu.cpsr & ARM_CPSR_I)))

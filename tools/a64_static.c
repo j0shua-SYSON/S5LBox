@@ -1489,12 +1489,99 @@ bool a64_static_host_available(void) {
 #endif
 }
 
+static a64_compact_raw_admission_t compact_raw_classify_thumb(
+        const arm_cpu_t *cpu, uint16_t insn) {
+    unsigned top = insn >> 12;
+
+    if ((insn & UINT16_C(0xf000)) == UINT16_C(0xd000)) {
+        unsigned condition = (insn >> 8) & 15u;
+        if (condition >= 14u) return A64_COMPACT_RAW_REJECT_THUMB;
+        return arm_cond_passed(cpu, condition)
+            ? A64_COMPACT_RAW_ADMIT_EXECUTE
+            : A64_COMPACT_RAW_ADMIT_CONDITION_SKIP;
+    }
+    if ((insn & UINT16_C(0xf800)) == UINT16_C(0xe000))
+        return A64_COMPACT_RAW_ADMIT_EXECUTE;
+
+    if ((insn & UINT16_C(0xff00)) == UINT16_C(0x4700)) {
+        unsigned rm = (insn >> 3) & 15u;
+        bool link = (insn & (1u << 7)) != 0u;
+        uint32_t target;
+        if (link && rm == 15u) return A64_COMPACT_RAW_REJECT_THUMB;
+        target = rm == 15u ? cpu->r[15] + 4u : cpu->r[rm];
+        return (target & 3u) == 2u
+            ? A64_COMPACT_RAW_REJECT_THUMB
+            : A64_COMPACT_RAW_ADMIT_EXECUTE;
+    }
+
+    if ((insn & UINT16_C(0xf800)) < UINT16_C(0x1800) ||
+        (insn & UINT16_C(0xf800)) == UINT16_C(0x1800) ||
+        (insn & UINT16_C(0xe000)) == UINT16_C(0x2000) ||
+        (insn & UINT16_C(0xfc00)) == UINT16_C(0x4000))
+        return A64_COMPACT_RAW_ADMIT_EXECUTE;
+
+    if ((insn & UINT16_C(0xfc00)) == UINT16_C(0x4400)) {
+        unsigned operation = (insn >> 8) & 3u;
+        unsigned rd = (insn & 7u) | ((insn >> 4) & 8u);
+        if (operation == 3u || (operation != 1u && rd == 15u))
+            return A64_COMPACT_RAW_REJECT_THUMB;
+        return A64_COMPACT_RAW_ADMIT_EXECUTE;
+    }
+
+    if ((insn & UINT16_C(0xf800)) == UINT16_C(0x4800))
+        return A64_COMPACT_RAW_ADMIT_EXECUTE;
+
+    if (top == 5u) {
+        unsigned rb = (insn >> 3) & 7u;
+        unsigned ro = (insn >> 6) & 7u;
+        unsigned operation = (insn >> 9) & 7u;
+        uint32_t address = cpu->r[rb] + cpu->r[ro];
+        unsigned width = operation == 0u || operation == 4u ? 4u :
+                         operation == 2u || operation == 3u ||
+                         operation == 6u ? 1u : 2u;
+        return width > 1u && (address & (width - 1u)) != 0u
+            ? A64_COMPACT_RAW_REJECT_MEMORY_ALIGNMENT
+            : A64_COMPACT_RAW_ADMIT_EXECUTE;
+    }
+
+    if (top == 6u || top == 7u) {
+        unsigned rb = (insn >> 3) & 7u;
+        unsigned offset = (insn >> 6) & 31u;
+        bool byte = (insn & (1u << 12)) != 0u;
+        uint32_t address = cpu->r[rb] + (byte ? offset : offset * 4u);
+        return !byte && (address & 3u) != 0u
+            ? A64_COMPACT_RAW_REJECT_MEMORY_ALIGNMENT
+            : A64_COMPACT_RAW_ADMIT_EXECUTE;
+    }
+
+    if (top == 8u) {
+        unsigned rb = (insn >> 3) & 7u;
+        uint32_t address = cpu->r[rb] + ((uint32_t)((insn >> 6) & 31u) * 2u);
+        return (address & 1u) != 0u
+            ? A64_COMPACT_RAW_REJECT_MEMORY_ALIGNMENT
+            : A64_COMPACT_RAW_ADMIT_EXECUTE;
+    }
+
+    if (top == 9u) {
+        uint32_t address = cpu->r[13] + ((uint32_t)(insn & 255u) * 4u);
+        return (address & 3u) != 0u
+            ? A64_COMPACT_RAW_REJECT_MEMORY_ALIGNMENT
+            : A64_COMPACT_RAW_ADMIT_EXECUTE;
+    }
+
+    if (top == 10u ||
+        (insn & UINT16_C(0xff00)) == UINT16_C(0xb000))
+        return A64_COMPACT_RAW_ADMIT_EXECUTE;
+
+    return A64_COMPACT_RAW_REJECT_THUMB;
+}
+
 a64_compact_raw_admission_t a64_compact_raw_classify_instruction(
         const arm_cpu_t *cpu, uint32_t insn, bool thumb) {
     unsigned condition;
 
     if (!cpu) return A64_COMPACT_RAW_REJECT_CLASS;
-    if (thumb) return A64_COMPACT_RAW_REJECT_THUMB;
+    if (thumb) return compact_raw_classify_thumb(cpu, (uint16_t)insn);
 
     condition = insn >> 28;
     if (condition == 15u) return A64_COMPACT_RAW_REJECT_NV;
@@ -1614,8 +1701,8 @@ bool a64_compact_raw_run(arm_cpu_t *cpu, const uint8_t *code,
     if (!cpu || !code || !ram || !max_insns || code_bytes < 4u ||
         (code_base & 3u) != 0u || (code_bytes & 3u) != 0u ||
         code_end > (uint64_t)UINT32_MAX + 1u ||
-        (cpu->r[15] & 3u) != 0u ||
-        (cpu->cpsr & (ARM_CPSR_T | ARM_CPSR_E)) != 0u ||
+        (cpu->r[15] & ((cpu->cpsr & ARM_CPSR_T) ? 1u : 3u)) != 0u ||
+        (cpu->cpsr & ARM_CPSR_E) != 0u ||
         (cpu->cp15.sctlr & ARM_SCTLR_M) != 0u || cpu->irq_line ||
         cpu->fiq_line || cpu->abort_pending || ram_size < 4u ||
         (ram_size & (ram_size - 1u)) != 0u ||
@@ -1669,8 +1756,8 @@ bool a64_compact_raw_run_code_window_resident(
     if (!cpu || !code || !max_insns || code_bytes < 4u ||
         (code_base & 3u) != 0u || (code_bytes & 3u) != 0u ||
         code_end > (uint64_t)UINT32_MAX + 1u ||
-        (cpu->r[15] & 3u) != 0u ||
-        (cpu->cpsr & (ARM_CPSR_T | ARM_CPSR_E)) != 0u ||
+        (cpu->r[15] & ((cpu->cpsr & ARM_CPSR_T) ? 1u : 3u)) != 0u ||
+        (cpu->cpsr & ARM_CPSR_E) != 0u ||
         !arm_mode_is_valid(cpu->cpsr) || cpu->abort_pending ||
         (cpu->fiq_line && !(cpu->cpsr & ARM_CPSR_F)) ||
         (cpu->irq_line && !(cpu->cpsr & ARM_CPSR_I)))

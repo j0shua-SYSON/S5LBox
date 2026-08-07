@@ -32062,7 +32062,8 @@ static void sequence_profile_report(sequence_profile_t *profile) {
     static const char *const COMPACT_RAW_OUTCOMES[
         A64_COMPACT_RAW_ADMISSION_COUNT] = {
         "admit execute", "admit failed condition",
-        "reject Thumb", "reject cond=NV", "reject DP pc operand/dest",
+        "reject unsupported Thumb", "reject cond=NV",
+        "reject DP pc operand/dest",
         "reject DP test/compare without S", "reject register shift",
         "reject DP rm=pc", "reject load/store form",
         "reject load/store pc", "reject load/store alignment",
@@ -33286,10 +33287,12 @@ static void boot_print_usage(FILE *stream, const char *argv0) {
             "      emulated hardware unchanged. The run reports signed-retired\n"
             "      and graph/refill counters for either arm.\n"
             "  --compact-raw-control  with --run-api, replace the as-built\n"
-            "      signed policy with the default-off compact live-byte A32\n"
+            "      signed policy with the default-off compact live-byte\n"
+            "      mixed A32/Thumb engine\n"
             "      loop. It consumes only a proven 1 KiB fetch translation,\n"
-            "      stops before data access, and remains bounded by the first\n"
-            "      device-time edge. This is a same-binary diagnostic control,\n"
+            "      allows only aligned cache-witnessed data access, and remains\n"
+            "      bounded by the first device-time edge. This is a same-binary\n"
+            "      diagnostic control,\n"
             "      not a shipping mode or an FPS claim.\n"
             "  --canonical-bus  with --run-api, remove bootkernel's read/write\n"
             "      observer after setup/restore and run through the canonical\n"

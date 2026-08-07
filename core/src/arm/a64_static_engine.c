@@ -941,7 +941,7 @@ static a64_compact_raw_fallback_result_t compact_raw_fallback(
     /* This refill consumes only an interpreter-owned live TLB/host-RAM
      * witness. It cannot walk the MMU or enter a fault/device path inside the
      * resident interval; refusal returns to the outer machine loop. */
-    if ((cpu->r[15] & 3u) != 0u ||
+    if ((cpu->r[15] & ((cpu->cpsr & ARM_CPSR_T) ? 1u : 3u)) != 0u ||
         !arm_fetch_cache_try_refill(cpu, cpu->r[15], false)) {
         if (crossed) context->state->compact_raw_window_stops++;
         return A64_COMPACT_RAW_FALLBACK_RETIRE_STOP;
@@ -981,7 +981,7 @@ static unsigned try_compact_raw(s5l8900_t *m, static_a64_state_t *state,
         cpu->arch != ARM_ARCH_V6_ARM1176 ||
         !arm_mode_is_valid(cpu->cpsr) || cpu->abort_pending ||
         (cpu->cpsr & ARM_CPSR_MODE_MASK) != ARM_MODE_USR ||
-        (cpu->cpsr & (ARM_CPSR_T | ARM_CPSR_E)) != 0u ||
+        (cpu->cpsr & ARM_CPSR_E) != 0u ||
         (cpu->fiq_line && !(cpu->cpsr & ARM_CPSR_F)) ||
         (cpu->irq_line && !(cpu->cpsr & ARM_CPSR_I)))
         return 0u;

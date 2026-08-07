@@ -194,11 +194,11 @@ typedef enum {
 a64_compact_raw_admission_t a64_compact_raw_classify_instruction(
     const arm_cpu_t *cpu, uint32_t insn, bool thumb);
 
-/* Execute a deliberately narrow A32 subset directly from live instruction
- * bytes, without decoded records or the static handler graph.  This is a
- * feasibility/oracle boundary, not a product engine: MMU, interrupts, Thumb,
- * MMIO, PC operands/destinations, register-specified shifts and unaligned data
- * accesses are refused. A supported prefix may retire before the first
+/* Execute a deliberately bounded mixed A32/Thumb subset directly from live
+ * instruction bytes, without decoded records or the static handler graph.
+ * This is a feasibility/oracle boundary, not a product engine: MMU,
+ * interrupts, MMIO, unsupported PC forms and unaligned data accesses are
+ * refused. A supported prefix may retire before the first
  * unsupported or out-of-window instruction; `completed` reports that exact
  * prefix. Runtime code generation is never used--the loop is ordinary
  * build-time-linked, signed AArch64 text. */
@@ -247,11 +247,11 @@ typedef a64_compact_raw_fallback_result_t
  * immediate word loads/stores may execute only when the interpreter-owned
  * DREAD/DWRITE entry proves the VA block, privilege and MMU generation;
  * stores additionally require live frontend write-pointer consent. Every
- * cache miss reaches the fallback before mutation. A PC leaving the current
- * window also reaches the fallback; after one exact retirement, a continued
- * callback may replace the window with the next proven fetch witness. No
- * unproved pointer is read. `native_completed` and `fallback_completed`
- * partition `completed` exactly. */
+ * cache miss reaches the fallback before mutation. A PC or instruction-state
+ * transition leaving the current window also reaches the fallback; after one
+ * exact retirement, a continued callback may replace the window with the next
+ * proven fetch witness. No unproved pointer is read. `native_completed` and
+ * `fallback_completed` partition `completed` exactly. */
 bool a64_compact_raw_run_code_window_resident(
     arm_cpu_t *cpu, const uint8_t *code, uint32_t code_base,
     uint32_t code_bytes, unsigned max_insns,
