@@ -2466,6 +2466,9 @@ def compact_raw_function() -> list[str]:
         # Immediate, pre-indexed, word, no-writeback LDR/STR only.  Requiring
         # alignment avoids depending on the guest SCTLR's legacy rotation
         # policy; every admitted access has one exact flat-RAM interpretation.
+        # A NULL RAM pointer is the MMU-aware code-window contract: no virtual
+        # data translation has been vouched for, so stop before any mutation.
+        "    cbz x27, .La64cr_exit",
         "    tbnz w9, #25, .La64cr_exit",
         "    tbz w9, #24, .La64cr_exit",
         "    tbnz w9, #22, .La64cr_exit",

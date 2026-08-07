@@ -5187,6 +5187,45 @@ static bool compact_raw_compare(const char *name, const uint32_t *program,
     return true;
 }
 
+static bool compact_raw_window_compare(const char *name,
+                                       const uint32_t *program,
+                                       unsigned insns, uint32_t pc,
+                                       unsigned reference_steps,
+                                       unsigned budget,
+                                       unsigned expected_completed) {
+    arm_cpu_t reference, window;
+    final_state_t reference_state, window_state;
+    arm_status_t status = ARM_OK;
+    unsigned completed = 0u;
+
+    seed_cpu_at(&reference, program, insns, false, pc);
+    for (unsigned i = 0u; i < reference_steps; i++) {
+        status = arm_step(&reference);
+        if (status != ARM_OK) break;
+    }
+    capture_state(&reference_state, &reference, status, JIT_EXIT_NEXT);
+
+    seed_cpu_at(&window, program, insns, false, pc);
+    window.cp15.sctlr |= ARM_SCTLR_M;
+    if (!a64_compact_raw_run_code_window(
+            &window, &g_ram[pc], pc, insns * 4u, budget, &completed)) {
+        fprintf(stderr,
+                "jitbench: compact raw code-window %s contract refused\n",
+                name);
+        return false;
+    }
+    capture_state(&window_state, &window, ARM_OK, JIT_EXIT_NEXT);
+    if (status != ARM_OK || completed != expected_completed ||
+        !architectural_states_equal(&reference_state, &window_state)) {
+        fprintf(stderr,
+                "jitbench: compact raw code-window %s mismatch "
+                "(completed %u/%u, reference steps %u)\n",
+                name, completed, expected_completed, reference_steps);
+        return false;
+    }
+    return true;
+}
+
 static bool validate_compact_raw_oracles(void) {
     static const unsigned result_ops[] = {
         0u, 1u, 2u, 3u, 4u, 5u, 6u, 7u, 12u, 13u, 14u, 15u,
@@ -5210,6 +5249,10 @@ static bool validate_compact_raw_oracles(void) {
     };
     const uint32_t unsupported_first[] = {
         UINT32_C(0xe28f0001), /* PC operand */
+    };
+    const uint32_t window_data_stop[] = {
+        UINT32_C(0xe2800001), /* supported ADD */
+        UINT32_C(0xe5971000), /* data translation deliberately unavailable */
     };
     arm_cpu_t contract;
     final_state_t before, after;
@@ -5306,6 +5349,20 @@ static bool validate_compact_raw_oracles(void) {
     if (!compact_raw_compare("unsupported-first", unsupported_first,
                              1u, UINT32_C(0x4000), 0u, 1u, 0u))
         return false;
+    if (!compact_raw_window_compare("mmu-compute", dp_program,
+                                    (unsigned)(sizeof dp_program /
+                                               sizeof dp_program[0]),
+                                    UINT32_C(0x4400),
+                                    (unsigned)(sizeof dp_program /
+                                               sizeof dp_program[0]),
+                                    (unsigned)(sizeof dp_program /
+                                               sizeof dp_program[0]) + 1u,
+                                    (unsigned)(sizeof dp_program /
+                                               sizeof dp_program[0])))
+        return false;
+    if (!compact_raw_window_compare("data-stop", window_data_stop, 2u,
+                                    UINT32_C(0x4800), 1u, 2u, 1u))
+        return false;
 
     seed_cpu_at(&contract, unsupported_prefix, 2u, false,
                 UINT32_C(0x5000));
@@ -5323,10 +5380,11 @@ static bool validate_compact_raw_oracles(void) {
         return false;
     }
 
-    printf("COMPACT-RAW-ORACLE exact=yes cases=8 result-opcodes=12 "
+    printf("COMPACT-RAW-ORACLE exact=yes cases=10 result-opcodes=12 "
            "flag-opcodes=16 conditions=14 immediate-rotate=yes "
            "register-immediate-shifts=all word-load-store=yes branch-link=yes "
-           "live-bytes=yes out-of-window=yes unsupported-prefix=yes "
+           "live-bytes=yes mmu-code-window=yes data-ops-stop=yes "
+           "out-of-window=yes unsupported-prefix=yes "
            "invalid-contract-rollback=yes\n");
     return true;
 }
@@ -5561,11 +5619,15 @@ typedef struct {
     uint64_t fetch_refill_hits;
     uint64_t fetch_refill_skips;
     uint64_t known_negative_bypasses;
+    uint64_t compact_raw_attempts;
+    uint64_t compact_raw_calls;
+    uint64_t compact_raw_retired;
     double seconds;
 } soc_run_result_t;
 
 typedef enum {
     SOC_ENTRY_REFERENCE,
+    SOC_ENTRY_COMPACT_RAW,
     SOC_ENTRY_SIGNED,
     SOC_ENTRY_GRAPH,
     SOC_ENTRY_GRAPH_EXTENDED,
@@ -5585,6 +5647,7 @@ typedef enum {
 static const char *soc_entry_path_name(soc_entry_path_t path) {
     switch (path) {
     case SOC_ENTRY_REFERENCE: return "reference";
+    case SOC_ENTRY_COMPACT_RAW: return "compact-raw";
     case SOC_ENTRY_SIGNED:    return "signed";
     case SOC_ENTRY_GRAPH:     return "graph";
     case SOC_ENTRY_GRAPH_EXTENDED: return "graph-extended";
@@ -5630,6 +5693,7 @@ typedef struct {
     bool vfp_arithmetic_workload;
     bool fetch_refill_workload;
     bool fetch_refill_mix_workload;
+    bool mmu_identity_workload;
     unsigned fetch_refill_mix_long_insns;
 } soc_entry_setup_t;
 
@@ -5732,6 +5796,15 @@ static bool setup_soc_entry_machine(s5l8900_t *machine,
                         (UINT32_C(0x01020304) * (i + 1u));
             }
         }
+        if (setup->mmu_identity_workload) {
+            const uint32_t section = (3u << 10) | 2u;
+            s5l8900_load(machine, UINT32_C(0x4000),
+                         &section, sizeof section);
+            machine->cpu.cp15.ttbr0 = UINT32_C(0x4000);
+            machine->cpu.cp15.dacr = 1u;
+            machine->cpu.cp15.sctlr |= ARM_SCTLR_M;
+            machine->cpu.cpsr = ARM_MODE_USR | ARM_CPSR_C;
+        }
         return true;
     }
 
@@ -5791,11 +5864,18 @@ static bool run_soc_entry_configured(const soc_entry_setup_t *setup,
     uint64_t fetch_refill_skips_after;
     uint64_t known_negative_bypasses_before;
     uint64_t known_negative_bypasses_after;
+    uint64_t compact_raw_attempts_before;
+    uint64_t compact_raw_attempts_after;
+    uint64_t compact_raw_calls_before;
+    uint64_t compact_raw_calls_after;
+    uint64_t compact_raw_retired_before;
+    uint64_t compact_raw_retired_after;
     double start, end;
     bool initialized = false;
     bool ok = false;
 
     bool signed_path = path != SOC_ENTRY_REFERENCE;
+    bool compact_raw_path = path == SOC_ENTRY_COMPACT_RAW;
     bool graph_path = path == SOC_ENTRY_GRAPH ||
                       path == SOC_ENTRY_GRAPH_EXTENDED ||
                       path == SOC_ENTRY_GRAPH_EXTENDED_INDIRECT_OFF ||
@@ -5927,6 +6007,14 @@ static bool run_soc_entry_configured(const soc_entry_setup_t *setup,
                 "jitbench: SoC known-negative bypass control unavailable\n");
         goto done;
     }
+    if (compact_raw_path &&
+        (!s5l8900_static_a64_set_compact_raw(&machine, true) ||
+         !s5l8900_static_a64_set_chain_limit(
+             &machine, A64_STATIC_MAX_CHAIN_INSNS))) {
+        fprintf(stderr,
+                "jitbench: SoC compact-raw code-window path unavailable\n");
+        goto done;
+    }
     if (graph_path &&
         !s5l8900_static_a64_set_graph(&machine, true)) {
         fprintf(stderr, "jitbench: SoC entry graph engine unavailable\n");
@@ -5967,6 +6055,12 @@ static bool run_soc_entry_configured(const soc_entry_setup_t *setup,
         s5l8900_static_a64_fetch_refill_skips(&machine);
     known_negative_bypasses_before =
         s5l8900_static_a64_known_negative_bypasses(&machine);
+    compact_raw_attempts_before =
+        s5l8900_static_a64_compact_raw_attempts(&machine);
+    compact_raw_calls_before =
+        s5l8900_static_a64_compact_raw_calls(&machine);
+    compact_raw_retired_before =
+        s5l8900_static_a64_compact_raw_retired(&machine);
     start = now_seconds();
     while (remaining != 0u) {
         unsigned chunk = remaining > (uint64_t)UINT_MAX
@@ -5992,6 +6086,12 @@ static bool run_soc_entry_configured(const soc_entry_setup_t *setup,
         s5l8900_static_a64_fetch_refill_skips(&machine);
     known_negative_bypasses_after =
         s5l8900_static_a64_known_negative_bypasses(&machine);
+    compact_raw_attempts_after =
+        s5l8900_static_a64_compact_raw_attempts(&machine);
+    compact_raw_calls_after =
+        s5l8900_static_a64_compact_raw_calls(&machine);
+    compact_raw_retired_after =
+        s5l8900_static_a64_compact_raw_retired(&machine);
     if (remaining != 0u || status != ARM_OK || end <= start ||
         machine.cpu.r[15] != 0u) {
         fprintf(stderr,
@@ -6016,12 +6116,27 @@ static bool run_soc_entry_configured(const soc_entry_setup_t *setup,
         fetch_refill_skips_after - fetch_refill_skips_before;
     out->known_negative_bypasses =
         known_negative_bypasses_after - known_negative_bypasses_before;
+    out->compact_raw_attempts =
+        compact_raw_attempts_after - compact_raw_attempts_before;
+    out->compact_raw_calls =
+        compact_raw_calls_after - compact_raw_calls_before;
+    out->compact_raw_retired =
+        compact_raw_retired_after - compact_raw_retired_before;
     if ((signed_path && out->signed_retired > total) ||
         (!signed_path &&
          (out->signed_retired != 0u || out->signed_chains != 0u ||
           out->graph_chains != 0u || out->dwrite_hits != 0u ||
           out->dwrite_misses != 0u)) ||
         (path == SOC_ENTRY_SIGNED && out->graph_chains != 0u) ||
+        (compact_raw_path &&
+         (out->compact_raw_retired != total ||
+          out->signed_retired != out->compact_raw_retired ||
+          out->compact_raw_calls == 0u ||
+          out->compact_raw_attempts < out->compact_raw_calls)) ||
+        (!compact_raw_path &&
+         (out->compact_raw_attempts != 0u ||
+          out->compact_raw_calls != 0u ||
+          out->compact_raw_retired != 0u)) ||
         (graph_path &&
          out->graph_chains != out->signed_chains)) {
         fprintf(stderr,
@@ -6061,6 +6176,20 @@ static bool run_soc_entry_path(const uint32_t *program, unsigned length,
         .seed_r7 = seed_r7,
         .indirect_workload = false,
     };
+    return run_soc_entry_configured(&setup, length, total, path, out);
+}
+
+static bool run_soc_compact_raw_path(const uint32_t *program,
+                                     unsigned length, uint64_t total,
+                                     soc_entry_path_t path,
+                                     soc_run_result_t *out) {
+    const soc_entry_setup_t setup = {
+        .program = program,
+        .length = length,
+        .mmu_identity_workload = true,
+    };
+    if (path != SOC_ENTRY_REFERENCE && path != SOC_ENTRY_COMPACT_RAW)
+        return false;
     return run_soc_entry_configured(&setup, length, total, path, out);
 }
 
@@ -6158,6 +6287,121 @@ static bool run_soc_vfp_arithmetic_path(uint64_t total,
         .vfp_arithmetic_workload = true,
     };
     return run_soc_entry_configured(&setup, setup.length, total, path, out);
+}
+
+/* First real-machine gate for the compact live-byte architecture. Both arms
+ * use the app-facing s5l8900_run(), an enabled identity-mapped MMU and User
+ * mode. The reference uses the exact interpreter tick batcher; the compact
+ * arm uses the signed engine's equivalent first-timebase-edge bound. It
+ * obtains code only from the CPU's proven live 1 KiB fetch window and compares
+ * the complete serialized machine afterward. */
+static bool bench_soc_compact_raw(uint64_t requested, unsigned reps) {
+    enum { LOOP_INSNS = 16u };
+    uint32_t program[A64_STATIC_MAX_INSNS];
+    a64_static_block_t shape;
+    double *reference_rates = NULL, *compact_rates = NULL;
+    uint64_t total;
+    uint64_t exact_attempts = 0u, exact_calls = 0u;
+    bool ok = false;
+
+    if (requested > UINT64_MAX - (LOOP_INSNS - 1u) ||
+        !prepare_product_entry(LOOP_INSNS, program, &shape)) {
+        fprintf(stderr, "jitbench: SoC compact-raw shape failed\n");
+        return false;
+    }
+    total = ((requested + LOOP_INSNS - 1u) / LOOP_INSNS) * LOOP_INSNS;
+    reference_rates = (double *)calloc(reps, sizeof *reference_rates);
+    compact_rates = (double *)calloc(reps, sizeof *compact_rates);
+    if (!reference_rates || !compact_rates) {
+        fprintf(stderr, "jitbench: SoC compact-raw out of memory\n");
+        goto done;
+    }
+
+    for (unsigned rep = 0u; rep < reps; rep++) {
+        soc_run_result_t reference = {0};
+        soc_run_result_t compact = {0};
+        const char *order;
+        bool ran;
+
+        if ((rep & 1u) == 0u) {
+            order = "reference-compact";
+            ran = run_soc_compact_raw_path(
+                      program, LOOP_INSNS, total, SOC_ENTRY_REFERENCE,
+                      &reference) &&
+                  run_soc_compact_raw_path(
+                      program, LOOP_INSNS, total, SOC_ENTRY_COMPACT_RAW,
+                      &compact);
+        } else {
+            order = "compact-reference";
+            ran = run_soc_compact_raw_path(
+                      program, LOOP_INSNS, total, SOC_ENTRY_COMPACT_RAW,
+                      &compact) &&
+                  run_soc_compact_raw_path(
+                      program, LOOP_INSNS, total, SOC_ENTRY_REFERENCE,
+                      &reference);
+        }
+        if (!ran || !reference.snapshot || !compact.snapshot ||
+            reference.snapshot_len != compact.snapshot_len ||
+            memcmp(reference.snapshot, compact.snapshot,
+                   reference.snapshot_len) != 0 ||
+            reference.compact_raw_attempts != 0u ||
+            reference.compact_raw_calls != 0u ||
+            reference.compact_raw_retired != 0u ||
+            compact.compact_raw_retired != total ||
+            compact.signed_retired != total ||
+            compact.compact_raw_calls == 0u ||
+            compact.compact_raw_attempts < compact.compact_raw_calls) {
+            fprintf(stderr,
+                    "jitbench: SoC compact-raw repetition %u failed "
+                    "attempts/calls/retired=%" PRIu64 "/%" PRIu64
+                    "/%" PRIu64 " expected=%" PRIu64 "\n",
+                    rep + 1u, compact.compact_raw_attempts,
+                    compact.compact_raw_calls,
+                    compact.compact_raw_retired, total);
+            free_soc_run_result(&reference);
+            free_soc_run_result(&compact);
+            goto done;
+        }
+        if (rep == 0u) {
+            exact_attempts = compact.compact_raw_attempts;
+            exact_calls = compact.compact_raw_calls;
+        } else if (compact.compact_raw_attempts != exact_attempts ||
+                   compact.compact_raw_calls != exact_calls) {
+            fprintf(stderr,
+                    "jitbench: SoC compact-raw call accounting drifted\n");
+            free_soc_run_result(&reference);
+            free_soc_run_result(&compact);
+            goto done;
+        }
+        reference_rates[rep] = (double)total / reference.seconds / 1.0e6;
+        compact_rates[rep] = (double)total / compact.seconds / 1.0e6;
+        printf("SOC-COMPACT-RAW-SAMPLE rep=%u order=%s reference=%.3f "
+               "compact-raw=%.3f Minsn/s attempts=%" PRIu64
+               " calls=%" PRIu64 " retired=%" PRIu64 "\n",
+               rep + 1u, order, reference_rates[rep], compact_rates[rep],
+               compact.compact_raw_attempts, compact.compact_raw_calls,
+               compact.compact_raw_retired);
+        free_soc_run_result(&reference);
+        free_soc_run_result(&compact);
+    }
+
+    qsort(reference_rates, reps, sizeof *reference_rates, cmp_double);
+    qsort(compact_rates, reps, sizeof *compact_rates, cmp_double);
+    printf("SOC-COMPACT-RAW-CEILING guest-insns=%" PRIu64
+           " reps=%u loop-insns=%u mmu=on live-fetch-window=yes "
+           "data-access=stop pre-step-hook=absent timebase-bounded=yes "
+           "device-tick=yes serialized-machine=yes runtime-codegen=no "
+           "attempts=%" PRIu64 " calls=%" PRIu64
+           " reference-median=%.3f compact-raw-median=%.3f speedup=%.3fx\n",
+           total, reps, LOOP_INSNS, exact_attempts, exact_calls,
+           reference_rates[reps / 2u], compact_rates[reps / 2u],
+           compact_rates[reps / 2u] / reference_rates[reps / 2u]);
+    ok = true;
+
+done:
+    free(reference_rates);
+    free(compact_rates);
+    return ok;
 }
 
 /* The earlier product-entry curve intentionally stops before the SoC. This
@@ -8604,6 +8848,7 @@ int main(int argc, char **argv) {
     bool fetch_refill_paired_only = false;
     bool known_negative_boundary_only = false;
     bool compact_raw_only = false;
+    bool compact_raw_soc_only = false;
 
     for (i = 1u; i < (unsigned)argc; i++) {
         if (strcmp(argv[i], "--insns") == 0 && i + 1u < (unsigned)argc) {
@@ -8638,6 +8883,8 @@ int main(int argc, char **argv) {
             known_negative_boundary_only = true;
         } else if (strcmp(argv[i], "--compact-raw-only") == 0) {
             compact_raw_only = true;
+        } else if (strcmp(argv[i], "--compact-raw-soc-only") == 0) {
+            compact_raw_soc_only = true;
         } else {
             fprintf(stderr, "usage: %s [--insns N] [--entry-insns N] "
                             "[--soc-insns N] [--reps N] "
@@ -8645,7 +8892,8 @@ int main(int argc, char **argv) {
                             "[--fetch-refill-break-even-only] "
                             "[--fetch-refill-paired-only] "
                             "[--known-negative-boundary-only] "
-                            "[--compact-raw-only]\n", argv[0]);
+                            "[--compact-raw-only] "
+                            "[--compact-raw-soc-only]\n", argv[0]);
             return 2;
         }
     }
@@ -8653,7 +8901,8 @@ int main(int argc, char **argv) {
             (unsigned)fetch_refill_break_even_only +
             (unsigned)fetch_refill_paired_only +
             (unsigned)known_negative_boundary_only +
-            (unsigned)compact_raw_only > 1u) {
+            (unsigned)compact_raw_only +
+            (unsigned)compact_raw_soc_only > 1u) {
         fprintf(stderr, "jitbench: choose only one focused benchmark mode\n");
         return 2;
     }
@@ -8671,6 +8920,10 @@ int main(int argc, char **argv) {
            "one build-time-linked semantic loop, with no decoded cache, graph "
            "or runtime code generation. They are an exact synthetic "
            "architecture gate, not a product path or phone-FPS claim.\n");
+    printf("The compact-raw SoC row uses an MMU-on live fetch-cache window, "
+           "stops before data access, crosses the real timebase-bounded run "
+           "API and requires byte-identical serialized machine state. It is "
+           "still a compute-only synthetic loop, not firmware or phone FPS.\n");
     printf("SoC-entry rows rotate reference, legacy signed, 16-instruction graph "
            "and extended graph paths across separately initialized machines. "
            "The extended arm remains clamped to the first timebase edge. They cross "
@@ -8758,6 +9011,8 @@ int main(int argc, char **argv) {
         return bench_soc_fetch_refill_paired(soc_insns, reps) ? 0 : 1;
     if (known_negative_boundary_only)
         return bench_soc_known_negative_boundary(soc_insns, reps) ? 0 : 1;
+    if (compact_raw_soc_only)
+        return bench_soc_compact_raw(soc_insns, reps) ? 0 : 1;
     if (compact_raw_only) {
         for (i = 0u; i < sizeof CASES / sizeof CASES[0]; i++) {
             if (!CASES[i].thumb &&
@@ -8775,6 +9030,7 @@ int main(int argc, char **argv) {
                                  reps))
             return 1;
     }
+    if (!bench_soc_compact_raw(soc_insns, reps)) return 1;
     for (i = 0u; i < sizeof SOC_ENTRY_LENGTHS /
                          sizeof SOC_ENTRY_LENGTHS[0]; i++) {
         if (!bench_soc_entry(SOC_ENTRY_LENGTHS[i], soc_insns, reps))

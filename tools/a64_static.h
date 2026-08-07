@@ -207,6 +207,17 @@ bool a64_compact_raw_run(arm_cpu_t *cpu, const uint8_t *code,
                          unsigned max_insns, uint8_t *ram, size_t ram_size,
                          unsigned *completed);
 
+/* Execute from a caller-proved live virtual-code window while the guest MMU
+ * may be enabled. The pointer itself is the fetch translation witness; every
+ * condition-passed data access stops before mutation because this mode has no
+ * data translation or MMIO authority. Masked interrupt lines are harmless,
+ * while a pending unmasked interrupt remains an entry refusal. */
+bool a64_compact_raw_run_code_window(arm_cpu_t *cpu, const uint8_t *code,
+                                     uint32_t code_base,
+                                     uint32_t code_bytes,
+                                     unsigned max_insns,
+                                     unsigned *completed);
+
 /* Execute against flat, power-of-two RAM. A non-loop block may be executed once;
  * repeated execution is accepted only when its exit PC equals its start PC.
  * The wrapper is intentionally narrower than arm_run: no MMU, faults, MMIO,

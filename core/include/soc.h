@@ -3967,6 +3967,10 @@ bool s5l8900_static_a64_set_persistent(s5l8900_t *m, bool enabled);
 /* Experimental callback-free descriptor lookup; mutually exclusive with the
  * callback scaffold above and still compile-time/app-default off. */
 bool s5l8900_static_a64_set_graph(s5l8900_t *m, bool enabled);
+/* Default-off compact live-byte mode. It consumes only the current proven
+ * 1 KiB fetch window, supports MMU-on code, and stops before data accesses.
+ * It is mutually exclusive with the decoded persistent/graph paths. */
+bool s5l8900_static_a64_set_compact_raw(s5l8900_t *m, bool enabled);
 /* Same-binary rollout/benchmark control for terminal A32/Thumb BX/BLX signed
  * records. It defaults on when the engine is created. Changing it clears only
  * derived decode/graph entries so an off/on comparison cannot reuse a block
@@ -4025,6 +4029,9 @@ uint64_t s5l8900_static_a64_retired(const s5l8900_t *m);
 uint64_t s5l8900_static_a64_chained_blocks(const s5l8900_t *m);
 uint64_t s5l8900_static_a64_persistent_chained_blocks(const s5l8900_t *m);
 uint64_t s5l8900_static_a64_graph_chained_blocks(const s5l8900_t *m);
+uint64_t s5l8900_static_a64_compact_raw_attempts(const s5l8900_t *m);
+uint64_t s5l8900_static_a64_compact_raw_calls(const s5l8900_t *m);
+uint64_t s5l8900_static_a64_compact_raw_retired(const s5l8900_t *m);
 uint64_t s5l8900_static_a64_fetch_refill_attempts(const s5l8900_t *m);
 uint64_t s5l8900_static_a64_fetch_refill_hits(const s5l8900_t *m);
 uint64_t s5l8900_static_a64_fetch_refill_skips(const s5l8900_t *m);

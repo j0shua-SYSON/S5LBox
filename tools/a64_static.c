@@ -1597,6 +1597,40 @@ bool a64_compact_raw_run(arm_cpu_t *cpu, const uint8_t *code,
 #endif
 }
 
+bool a64_compact_raw_run_code_window(arm_cpu_t *cpu, const uint8_t *code,
+                                     uint32_t code_base,
+                                     uint32_t code_bytes,
+                                     unsigned max_insns,
+                                     unsigned *completed) {
+    uint64_t code_end;
+
+    if (!completed) return false;
+    *completed = 0u;
+    code_end = (uint64_t)code_base + code_bytes;
+    if (!cpu || !code || !max_insns || code_bytes < 4u ||
+        (code_base & 3u) != 0u || (code_bytes & 3u) != 0u ||
+        code_end > (uint64_t)UINT32_MAX + 1u ||
+        (cpu->r[15] & 3u) != 0u ||
+        (cpu->cpsr & (ARM_CPSR_T | ARM_CPSR_E)) != 0u ||
+        !arm_mode_is_valid(cpu->cpsr) || cpu->abort_pending ||
+        (cpu->fiq_line && !(cpu->cpsr & ARM_CPSR_F)) ||
+        (cpu->irq_line && !(cpu->cpsr & ARM_CPSR_I)))
+        return false;
+#if defined(S5LBOX_STATIC_A64_NATIVE)
+    {
+        uint32_t result = a64_compact_raw_execute(
+            cpu->r, &cpu->cpsr, &cpu->cycles, code, code_base, code_bytes,
+            max_insns, NULL, 0u);
+        if (result > max_insns) return false;
+        *completed = result;
+        return true;
+    }
+#else
+    (void)code_end;
+    return false;
+#endif
+}
+
 typedef struct {
     const a64_static_uop_t *uops;
     uint64_t insns;

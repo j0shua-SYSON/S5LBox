@@ -57,6 +57,7 @@ typedef struct {
     bool enabled;
     bool persistent;
     bool graph_enabled;
+    bool compact_raw_enabled;
     bool indirect_enabled;
     bool thumb_conditional_enabled;
     bool vstr_enabled;
@@ -72,6 +73,9 @@ typedef struct {
     uint64_t chained_blocks;
     uint64_t persistent_chained_blocks;
     uint64_t graph_chained_blocks;
+    uint64_t compact_raw_attempts;
+    uint64_t compact_raw_calls;
+    uint64_t compact_raw_retired;
     uint64_t fetch_refill_attempts;
     uint64_t fetch_refill_hits;
     uint64_t fetch_refill_skips;
@@ -477,6 +481,7 @@ bool s5l8900_static_a64_set_persistent(s5l8900_t *m, bool enabled) {
     if (!state || !state->enabled || !a64_static_host_available())
         return false;
     state->graph_enabled = false;
+    state->compact_raw_enabled = false;
     state->persistent = true;
     return true;
 #else
@@ -496,7 +501,28 @@ bool s5l8900_static_a64_set_graph(s5l8900_t *m, bool enabled) {
     if (!state || !state->enabled || !a64_static_host_available())
         return false;
     state->persistent = false;
+    state->compact_raw_enabled = false;
     state->graph_enabled = true;
+    return true;
+#else
+    (void)enabled;
+    return false;
+#endif
+}
+
+bool s5l8900_static_a64_set_compact_raw(s5l8900_t *m, bool enabled) {
+    if (!m) return false;
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    static_a64_state_t *state = static_state(m);
+    if (!enabled) {
+        if (state) state->compact_raw_enabled = false;
+        return true;
+    }
+    if (!state || !state->enabled || !a64_static_host_available())
+        return false;
+    state->persistent = false;
+    state->graph_enabled = false;
+    state->compact_raw_enabled = true;
     return true;
 #else
     (void)enabled;
@@ -743,6 +769,36 @@ uint64_t s5l8900_static_a64_graph_chained_blocks(const s5l8900_t *m) {
 #endif
 }
 
+uint64_t s5l8900_static_a64_compact_raw_attempts(const s5l8900_t *m) {
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    const static_a64_state_t *state = static_state(m);
+    return state ? state->compact_raw_attempts : 0u;
+#else
+    (void)m;
+    return 0u;
+#endif
+}
+
+uint64_t s5l8900_static_a64_compact_raw_calls(const s5l8900_t *m) {
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    const static_a64_state_t *state = static_state(m);
+    return state ? state->compact_raw_calls : 0u;
+#else
+    (void)m;
+    return 0u;
+#endif
+}
+
+uint64_t s5l8900_static_a64_compact_raw_retired(const s5l8900_t *m) {
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    const static_a64_state_t *state = static_state(m);
+    return state ? state->compact_raw_retired : 0u;
+#else
+    (void)m;
+    return 0u;
+#endif
+}
+
 uint64_t s5l8900_static_a64_fetch_refill_attempts(const s5l8900_t *m) {
 #if defined(S5LBOX_STATIC_A64_ENGINE)
     const static_a64_state_t *state = static_state(m);
@@ -802,6 +858,45 @@ unsigned s5l8900_static_a64_cached_witness_bytes(const s5l8900_t *m,
 }
 
 #if defined(S5LBOX_STATIC_A64_ENGINE)
+static unsigned try_compact_raw(s5l8900_t *m, static_a64_state_t *state,
+                                unsigned budget) {
+    arm_cpu_t *cpu = &m->cpu;
+    uint32_t fetch_block;
+    uint32_t pc;
+    bool priv;
+    unsigned completed = 0u;
+
+    state->compact_raw_attempts++;
+    /* A branch can reach any address in the live 1 KiB window, so a sparse
+     * pre-step target list is not enough: any installed host hook disables
+     * this path until a target-aware in-loop guard exists. */
+    if (!budget || m->pre_step_hook ||
+        cpu->arch != ARM_ARCH_V6_ARM1176 ||
+        !arm_mode_is_valid(cpu->cpsr) || cpu->abort_pending ||
+        (cpu->cpsr & (ARM_CPSR_T | ARM_CPSR_E)) != 0u ||
+        (cpu->fiq_line && !(cpu->cpsr & ARM_CPSR_F)) ||
+        (cpu->irq_line && !(cpu->cpsr & ARM_CPSR_I)))
+        return 0u;
+
+    pc = cpu->r[15];
+    if ((pc & 3u) != 0u) return 0u;
+    priv = (cpu->cpsr & ARM_CPSR_MODE_MASK) != ARM_MODE_USR;
+    fetch_block = pc & ~UINT32_C(0x3ff);
+    if (!cpu->fetch_host || cpu->fetch_blk != fetch_block ||
+        cpu->fetch_gen != cpu->tlb_gen || cpu->fetch_priv != priv)
+        return 0u;
+    if (!a64_compact_raw_run_code_window(
+            cpu, cpu->fetch_host, fetch_block, UINT32_C(0x400), budget,
+            &completed))
+        return 0u;
+    if (completed) {
+        state->compact_raw_calls++;
+        state->compact_raw_retired += completed;
+        state->retired += completed;
+    }
+    return completed;
+}
+
 static unsigned try_persistent(s5l8900_t *m, static_a64_state_t *state,
                                unsigned budget) {
     arm_cpu_t *cpu = &m->cpu;
@@ -927,6 +1022,14 @@ unsigned s5l8900_static_a64_try(s5l8900_t *m, unsigned max_insns,
     }
     budget = max_insns < state->chain_limit
            ? max_insns : state->chain_limit;
+    if (state->compact_raw_enabled) {
+        unsigned completed = try_compact_raw(m, state, budget);
+        if (refilled)
+            refill_predictor_record(state, refill_pc, refill_gen,
+                                    refill_thumb, refill_priv, completed,
+                                    budget);
+        return completed;
+    }
     if (state->graph_enabled) {
         unsigned completed = try_graph(m, state, budget);
         if (refilled)
