@@ -1500,7 +1500,10 @@ static a64_compact_raw_admission_t compact_raw_classify_thumb(
             ? A64_COMPACT_RAW_ADMIT_EXECUTE
             : A64_COMPACT_RAW_ADMIT_CONDITION_SKIP;
     }
-    if ((insn & UINT16_C(0xf800)) == UINT16_C(0xe000))
+    /* Thumb-1 long BL/BLX is represented as two separately retired
+     * halfwords.  Both halves, plus the 0xe8xx BLX suffix, are exact live
+     * semantics in the compact loop. */
+    if (top >= 14u)
         return A64_COMPACT_RAW_ADMIT_EXECUTE;
 
     if ((insn & UINT16_C(0xff00)) == UINT16_C(0x4700)) {
@@ -1567,6 +1570,48 @@ static a64_compact_raw_admission_t compact_raw_classify_thumb(
         return (address & 3u) != 0u
             ? A64_COMPACT_RAW_REJECT_MEMORY_ALIGNMENT
             : A64_COMPACT_RAW_ADMIT_EXECUTE;
+    }
+
+    if ((insn & UINT16_C(0xf600)) == UINT16_C(0xb400)) {
+        const bool load = (insn & (1u << 11)) != 0u;
+        const bool extra = (insn & (1u << 8)) != 0u;
+        const uint32_t list = insn & UINT16_C(0xff);
+        unsigned words = extra ? 1u : 0u;
+        uint32_t start;
+
+        if (list == 0u && !extra) return A64_COMPACT_RAW_REJECT_THUMB;
+        for (unsigned reg = 0u; reg < 8u; reg++)
+            if ((list & (UINT32_C(1) << reg)) != 0u) words++;
+        start = load ? cpu->r[13] : cpu->r[13] - words * 4u;
+        if ((start & 3u) != 0u ||
+            (start & UINT32_C(0x3ff)) + words * 4u > 1024u)
+            return A64_COMPACT_RAW_REJECT_MEMORY_ALIGNMENT;
+        return A64_COMPACT_RAW_ADMIT_EXECUTE;
+    }
+
+    if ((insn & UINT16_C(0xff00)) == UINT16_C(0xb200))
+        return A64_COMPACT_RAW_ADMIT_EXECUTE;
+
+    if (top == 12u) {
+        const bool load = (insn & (1u << 11)) != 0u;
+        const unsigned rb = (insn >> 8) & 7u;
+        const uint32_t list = insn & UINT16_C(0xff);
+        unsigned words = 0u;
+        uint32_t start = cpu->r[rb];
+
+        if (list == 0u) return A64_COMPACT_RAW_REJECT_THUMB;
+        if (!load && (list & (UINT32_C(1) << rb)) != 0u) {
+            const uint32_t lower = rb == 0u
+                ? 0u : (UINT32_C(1) << rb) - 1u;
+            if ((list & lower) != 0u)
+                return A64_COMPACT_RAW_REJECT_THUMB;
+        }
+        for (unsigned reg = 0u; reg < 8u; reg++)
+            if ((list & (UINT32_C(1) << reg)) != 0u) words++;
+        if ((start & 3u) != 0u ||
+            (start & UINT32_C(0x3ff)) + words * 4u > 1024u)
+            return A64_COMPACT_RAW_REJECT_MEMORY_ALIGNMENT;
+        return A64_COMPACT_RAW_ADMIT_EXECUTE;
     }
 
     if (top == 10u ||
@@ -1739,8 +1784,7 @@ a64_compact_raw_admission_t a64_compact_raw_classify_instruction(
         uint32_t base;
         uint32_t start;
 
-        if (user_bank || rn == 15u || list == 0u ||
-            (load && (list & UINT32_C(0x8000)) != 0u))
+        if (user_bank || rn == 15u || list == 0u)
             return A64_COMPACT_RAW_REJECT_MEMORY_FORM;
         if (writeback && (list & (UINT32_C(1) << rn)) != 0u) {
             const uint32_t lower = rn == 0u

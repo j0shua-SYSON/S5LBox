@@ -5100,7 +5100,17 @@ static bool validate_compact_raw_admission_shapes(void) {
         { UINT32_C(0x0f000000), false,
           A64_COMPACT_RAW_ADMIT_CONDITION_SKIP },
         { UINT32_C(0x00003001), true,  A64_COMPACT_RAW_ADMIT_EXECUTE },
-        { UINT32_C(0x0000b401), true,  A64_COMPACT_RAW_REJECT_THUMB },
+        { UINT32_C(0x0000b401), true,  A64_COMPACT_RAW_ADMIT_EXECUTE },
+        { UINT32_C(0x0000b255), true,  A64_COMPACT_RAW_ADMIT_EXECUTE },
+        { UINT32_C(0x0000bc01), true,  A64_COMPACT_RAW_ADMIT_EXECUTE },
+        { UINT32_C(0x0000c703), true,  A64_COMPACT_RAW_ADMIT_EXECUTE },
+        { UINT32_C(0x0000cf03), true,  A64_COMPACT_RAW_ADMIT_EXECUTE },
+        { UINT32_C(0x0000e801), true,  A64_COMPACT_RAW_ADMIT_EXECUTE },
+        { UINT32_C(0x0000f001), true,  A64_COMPACT_RAW_ADMIT_EXECUTE },
+        { UINT32_C(0x0000f801), true,  A64_COMPACT_RAW_ADMIT_EXECUTE },
+        { UINT32_C(0x0000b400), true,  A64_COMPACT_RAW_REJECT_THUMB },
+        { UINT32_C(0x0000c600), true,  A64_COMPACT_RAW_REJECT_THUMB },
+        { UINT32_C(0x0000c641), true,  A64_COMPACT_RAW_REJECT_THUMB },
         { UINT32_C(0x0000d000), true,
           A64_COMPACT_RAW_ADMIT_CONDITION_SKIP },
         { UINT32_C(0x0000d100), true,  A64_COMPACT_RAW_ADMIT_EXECUTE },
@@ -5175,6 +5185,9 @@ static bool validate_compact_raw_admission_shapes(void) {
             false) != A64_COMPACT_RAW_ADMIT_EXECUTE ||
         a64_compact_raw_classify_instruction(
             &cpu, A32_BLOCK(14,1,0,0,1,1,4,UINT32_C(0x4109)),
+            false) != A64_COMPACT_RAW_ADMIT_EXECUTE ||
+        a64_compact_raw_classify_instruction(
+            &cpu, A32_BLOCK(14,0,1,0,0,1,4,UINT32_C(0x8001)),
             false) != A64_COMPACT_RAW_ADMIT_EXECUTE) {
         fprintf(stderr,
                 "jitbench: compact raw A32 block admission refused\n");
@@ -5197,9 +5210,6 @@ static bool validate_compact_raw_admission_shapes(void) {
             false) != A64_COMPACT_RAW_REJECT_MEMORY_FORM ||
         a64_compact_raw_classify_instruction(
             &cpu, A32_BLOCK(14,0,1,0,1,1,4,UINT32_C(0x0010)),
-            false) != A64_COMPACT_RAW_REJECT_MEMORY_FORM ||
-        a64_compact_raw_classify_instruction(
-            &cpu, A32_BLOCK(14,0,1,0,0,1,4,UINT32_C(0x8001)),
             false) != A64_COMPACT_RAW_REJECT_MEMORY_FORM) {
         fprintf(stderr,
                 "jitbench: compact raw A32 block shape guard admitted\n");
@@ -5323,7 +5333,7 @@ static bool validate_compact_raw_admission_shapes(void) {
         fprintf(stderr, "jitbench: compact raw VFP Len guard admitted\n");
         return false;
     }
-    printf("COMPACT-RAW-ADMISSION-MODEL exact-shapes=yes cases=54 "
+    printf("COMPACT-RAW-ADMISSION-MODEL exact-shapes=yes cases=64 "
            "outcomes=13 condition-before-decode=yes machine-gates=excluded\n");
     return true;
 }
@@ -5448,7 +5458,7 @@ static bool compact_raw_thumb_instruction_compare(uint16_t insn,
                                                   uint32_t pc) {
     const uint16_t program[2] = {
         insn,
-        UINT16_C(0xb401), /* unsupported PUSH sentinel */
+        UINT16_C(0xba00), /* unsupported REV sentinel */
     };
     arm_cpu_t reference, compact;
     final_state_t reference_state, compact_state;
@@ -5474,6 +5484,44 @@ static bool compact_raw_thumb_instruction_compare(uint16_t insn,
                 "jitbench: compact raw Thumb 0x%04x mismatch "
                 "(completed %u, status %u)\n",
                 (unsigned)insn, completed, (unsigned)status);
+        return false;
+    }
+    return true;
+}
+
+static bool compact_raw_thumb_program_compare(
+        const char *name, const uint16_t *program, unsigned insns,
+        uint32_t pc, unsigned reference_steps, unsigned budget,
+        unsigned expected_completed) {
+    arm_cpu_t reference;
+    arm_cpu_t compact;
+    final_state_t reference_state;
+    final_state_t compact_state;
+    arm_status_t status = ARM_OK;
+    unsigned completed = UINT_MAX;
+
+    seed_compact_raw_thumb(&reference, program, insns, pc);
+    for (unsigned i = 0u; i < reference_steps; i++) {
+        status = arm_step(&reference);
+        if (status != ARM_OK) break;
+    }
+    capture_state(&reference_state, &reference, status, JIT_EXIT_NEXT);
+
+    seed_compact_raw_thumb(&compact, program, insns, pc);
+    if (!a64_compact_raw_run(&compact, &g_ram[pc], pc, insns * 2u,
+                             budget, g_ram, sizeof g_ram, &completed)) {
+        fprintf(stderr,
+                "jitbench: compact raw Thumb program %s contract refused\n",
+                name);
+        return false;
+    }
+    capture_state(&compact_state, &compact, ARM_OK, JIT_EXIT_NEXT);
+    if (status != ARM_OK || completed != expected_completed ||
+        !architectural_states_equal(&reference_state, &compact_state)) {
+        fprintf(stderr,
+                "jitbench: compact raw Thumb program %s mismatch "
+                "(completed %u/%u, status=%u)\n",
+                name, completed, expected_completed, (unsigned)status);
         return false;
     }
     return true;
@@ -5723,9 +5771,28 @@ static bool validate_compact_raw_thumb_oracles(void) {
     THUMB_ORACLE(UINT16_C(0xb001));
     THUMB_ORACLE(UINT16_C(0xb081));
 
+    for (unsigned operation = 0u; operation < 4u; operation++)
+        THUMB_ORACLE(UINT16_C(0xb200) | (operation << 6) |
+                     (2u << 3) | 5u);
+
+    THUMB_ORACLE(UINT16_C(0xb405)); /* PUSH {r0,r2} */
+    THUMB_ORACLE(UINT16_C(0xb500)); /* PUSH {lr} */
+    THUMB_ORACLE(UINT16_C(0xb5a5)); /* PUSH {r0,r2,r5,r7,lr} */
+    THUMB_ORACLE(UINT16_C(0xbc05)); /* POP {r0,r2} */
+    THUMB_ORACLE(UINT16_C(0xbd00)); /* POP {pc} */
+    THUMB_ORACLE(UINT16_C(0xbda5)); /* POP {r0,r2,r5,r7,pc} */
+
+    THUMB_ORACLE(UINT16_C(0xc603)); /* STMIA r6!,{r0,r1} */
+    THUMB_ORACLE(UINT16_C(0xc6c0)); /* STMIA r6!,{r6,r7} */
+    THUMB_ORACLE(UINT16_C(0xce03)); /* LDMIA r6!,{r0,r1} */
+    THUMB_ORACLE(UINT16_C(0xcec0)); /* LDMIA r6!,{r6,r7} */
+
     for (unsigned condition = 0u; condition < 14u; condition++)
         THUMB_ORACLE(UINT16_C(0xd001) | (condition << 8));
     THUMB_ORACLE(UINT16_C(0xe001));
+    THUMB_ORACLE(UINT16_C(0xe801)); /* BLX suffix */
+    THUMB_ORACLE(UINT16_C(0xf001)); /* BL/BLX prefix */
+    THUMB_ORACLE(UINT16_C(0xf801)); /* BL suffix */
     THUMB_ORACLE(UINT16_C(0x4730)); /* BX r6: Thumb -> A32 */
     THUMB_ORACLE(UINT16_C(0x4710)); /* BX r2: remain Thumb */
     THUMB_ORACLE(UINT16_C(0x47b0)); /* BLX r6 */
@@ -5733,10 +5800,25 @@ static bool validate_compact_raw_thumb_oracles(void) {
 
 #undef THUMB_ORACLE
 
+    {
+        const uint16_t bl_pair[] = {
+            UINT16_C(0xf000), UINT16_C(0xf801),
+        };
+        const uint16_t blx_pair[] = {
+            UINT16_C(0xf000), UINT16_C(0xe801),
+        };
+        if (!compact_raw_thumb_program_compare(
+                "bl-pair", bl_pair, 2u, UINT32_C(0x7200), 2u, 2u, 2u) ||
+            !compact_raw_thumb_program_compare(
+                "blx-pair", blx_pair, 2u, UINT32_C(0x7300), 2u, 2u, 2u))
+            return false;
+    }
+
     printf("COMPACT-RAW-THUMB-ORACLE exact=yes cases=%u "
            "immediate-shifts=boundaries register-shifts=0-1-31-32-33 "
-           "alu=all high-register=yes memory-kinds=all "
-           "branches=all-conditions state-switch=yes\n",
+           "alu=all high-register=yes extend=yes memory-kinds=all "
+           "stack-multiple=yes branches=all-conditions "
+           "long-branch-pairs=2 state-switch=yes\n",
            cases);
     return true;
 }
@@ -5820,7 +5902,7 @@ static bool compact_raw_resident_compare(
     resident = reference;
     /* The generic synthetic bus neither populates DREAD nor grants the live
      * frontend write consent required to expose DWRITE. The Thumb cache-path
-     * case makes both witnesses and that consent explicit. Its leading PUSH
+     * case makes both witnesses and that consent explicit. Its leading REV
      * remains unsupported natively, so fallback, Thumb window publication,
      * and native continuation are still exercised before the memory body. */
     if (thumb) {
@@ -6668,6 +6750,309 @@ done:
 
 typedef struct {
     const char *name;
+    uint16_t insn;
+    uint32_t pc;
+    uint32_t base;
+    uint32_t start;
+    unsigned words;
+    uint32_t final_word;
+} compact_raw_thumb_multi_case_t;
+
+static void seed_compact_raw_thumb_multi_case(
+        arm_cpu_t *cpu, const compact_raw_thumb_multi_case_t *sc) {
+    const bool stack = (sc->insn & UINT16_C(0xf600)) ==
+                       UINT16_C(0xb400);
+    const unsigned rb = stack ? 13u : (sc->insn >> 8) & 7u;
+
+    seed_compact_raw_thumb(cpu, &sc->insn, 1u, sc->pc);
+    for (unsigned reg = 0u; reg < 15u; reg++)
+        cpu->r[reg] = UINT32_C(0x75000000) |
+                      (reg * UINT32_C(0x010203));
+    cpu->r[rb] = sc->base;
+    cpu->r[15] = sc->pc;
+    for (unsigned word = 0u; word < sc->words; word++)
+        mem_w32(NULL, sc->start + word * 4u,
+                UINT32_C(0x53000000) |
+                ((sc->pc & UINT32_C(0xff)) << 16) |
+                (word * UINT32_C(0x010101)));
+    if (sc->final_word && sc->words)
+        mem_w32(NULL, sc->start + (sc->words - 1u) * 4u,
+                sc->final_word);
+}
+
+static bool compact_raw_thumb_multi_exact_case(
+        const compact_raw_thumb_multi_case_t *sc, bool resident,
+        uint8_t *baseline, uint8_t *expected) {
+    const bool load = (sc->insn & (1u << 11)) != 0u;
+    arm_bus_t write_bus = g_bus;
+    arm_cpu_t initial;
+    arm_cpu_t reference;
+    arm_cpu_t compact;
+    compact_raw_resident_oracle_context_t context;
+    arm_status_t status;
+    unsigned completed = UINT_MAX;
+    unsigned native_completed = UINT_MAX;
+    unsigned fallback_completed = UINT_MAX;
+    bool run_ok;
+
+    write_bus.host_ram_write = mem_host_ram;
+    seed_compact_raw_thumb_multi_case(&initial, sc);
+    if (resident) {
+        if (load) {
+            oracle_warm_dread(&initial, sc->start);
+        } else {
+            initial.bus = &write_bus;
+            oracle_warm_dwrite(&initial, sc->start, true);
+        }
+    }
+    reference = initial;
+    compact = initial;
+    memcpy(baseline, g_ram, sizeof g_ram);
+    status = arm_step(&reference);
+    memcpy(expected, g_ram, sizeof g_ram);
+    memcpy(g_ram, baseline, sizeof g_ram);
+
+    if (resident) {
+        memset(&context, 0, sizeof context);
+        context.cpu = &compact;
+        context.status = ARM_OK;
+        context.code = g_ram;
+        context.code_bytes = (uint32_t)sizeof g_ram;
+        run_ok = a64_compact_raw_run_code_window_resident(
+            &compact, &g_ram[sc->pc], sc->pc, 4u, 1u,
+            compact_raw_resident_oracle_step, &context, &completed,
+            &native_completed, &fallback_completed);
+    } else {
+        memset(&context, 0, sizeof context);
+        run_ok = a64_compact_raw_run(
+            &compact, &g_ram[sc->pc], sc->pc, 4u, 1u,
+            g_ram, sizeof g_ram, &completed);
+        native_completed = completed;
+        fallback_completed = 0u;
+    }
+
+    if (!run_ok || status != ARM_OK || completed != 1u ||
+        native_completed != 1u || fallback_completed != 0u ||
+        (resident && (context.status != ARM_OK || context.calls != 0u)) ||
+        !(resident ? static_vfp_states_equal(&reference, &compact)
+                    : static_vfp_arch_states_equal(&reference, &compact)) ||
+        memcmp(expected, g_ram, sizeof g_ram) != 0) {
+        fprintf(stderr,
+                "jitbench: compact raw Thumb multi %s %s mismatch "
+                "(completed/native/fallback/calls %u/%u/%u/%u, "
+                "status=%d/%d, dread=%" PRIu64 "/%" PRIu64 ", "
+                "dwrite=%" PRIu64 "/%" PRIu64 ")\n",
+                resident ? "resident" : "flat", sc->name,
+                completed, native_completed, fallback_completed,
+                resident ? context.calls : 0u, (int)status,
+                resident ? (int)context.status : (int)ARM_OK,
+                reference.dread_hits, compact.dread_hits,
+                reference.dwrite_hits, compact.dwrite_hits);
+        return false;
+    }
+    return true;
+}
+
+static bool compact_raw_thumb_multi_refusal_case(
+        const compact_raw_thumb_multi_case_t *sc,
+        uint8_t *baseline, uint8_t *expected) {
+    arm_cpu_t reference;
+    arm_cpu_t compact;
+    arm_cpu_t before;
+    arm_status_t reference_status;
+    arm_status_t compact_status;
+    unsigned completed = UINT_MAX;
+
+    seed_compact_raw_thumb_multi_case(&reference, sc);
+    compact = reference;
+    before = compact;
+    memcpy(baseline, g_ram, sizeof g_ram);
+    reference_status = arm_step(&reference);
+    memcpy(expected, g_ram, sizeof g_ram);
+    memcpy(g_ram, baseline, sizeof g_ram);
+    if (!a64_compact_raw_run(
+            &compact, &g_ram[sc->pc], sc->pc, 4u, 1u,
+            g_ram, sizeof g_ram, &completed) ||
+        completed != 0u || memcmp(&before, &compact, sizeof compact) != 0 ||
+        memcmp(baseline, g_ram, sizeof g_ram) != 0) {
+        fprintf(stderr,
+                "jitbench: compact raw Thumb multi refusal %s changed "
+                "state (completed=%u)\n", sc->name, completed);
+        return false;
+    }
+    compact_status = arm_step(&compact);
+    if (compact_status != reference_status ||
+        memcmp(&reference, &compact, sizeof compact) != 0 ||
+        memcmp(expected, g_ram, sizeof g_ram) != 0) {
+        fprintf(stderr,
+                "jitbench: compact raw Thumb multi refusal %s fallback "
+                "diverged (status=%d/%d)\n",
+                sc->name, (int)reference_status, (int)compact_status);
+        return false;
+    }
+    return true;
+}
+
+static bool compact_raw_thumb_multi_resident_fallback_case(
+        const compact_raw_thumb_multi_case_t *sc, unsigned mode,
+        uint8_t *baseline, uint8_t *expected) {
+    const bool load = (sc->insn & (1u << 11)) != 0u;
+    const bool no_retire = mode == 4u;
+    arm_bus_t write_bus = g_bus;
+    arm_cpu_t reference;
+    arm_cpu_t resident;
+    compact_raw_resident_oracle_context_t context;
+    arm_status_t reference_status;
+    unsigned completed = UINT_MAX;
+    unsigned native_completed = UINT_MAX;
+    unsigned fallback_completed = UINT_MAX;
+
+    write_bus.host_ram_write = mem_host_ram;
+    seed_compact_raw_thumb_multi_case(&reference, sc);
+    if (load) {
+        if (mode == 1u) {
+            oracle_warm_dread(&reference, sc->start);
+            reference.tlb_gen++;
+        } else if (mode == 4u) {
+            oracle_warm_dread(&reference, sc->start);
+        }
+    } else {
+        if (mode != 2u) reference.bus = &write_bus;
+        oracle_warm_dwrite(&reference, sc->start, true);
+    }
+    resident = reference;
+    memcpy(baseline, g_ram, sizeof g_ram);
+    reference_status = arm_step(&reference);
+    memcpy(expected, g_ram, sizeof g_ram);
+    memcpy(g_ram, baseline, sizeof g_ram);
+
+    memset(&context, 0, sizeof context);
+    context.cpu = &resident;
+    context.status = ARM_OK;
+    context.code = g_ram;
+    context.code_bytes = (uint32_t)sizeof g_ram;
+    if (!a64_compact_raw_run_code_window_resident(
+            &resident, &g_ram[sc->pc], sc->pc, 4u, 1u,
+            compact_raw_resident_oracle_step, &context, &completed,
+            &native_completed, &fallback_completed) ||
+        completed != (no_retire ? 0u : 1u) || native_completed != 0u ||
+        fallback_completed != (no_retire ? 0u : 1u) ||
+        context.calls != (no_retire ? 0u : 1u) ||
+        context.status != reference_status ||
+        memcmp(&reference, &resident, sizeof resident) != 0 ||
+        memcmp(expected, g_ram, sizeof g_ram) != 0) {
+        fprintf(stderr,
+                "jitbench: compact raw resident Thumb multi fallback %s "
+                "mode=%u diverged (completed/native/fallback/calls "
+                "%u/%u/%u/%u status=%d/%d)\n",
+                sc->name, mode, completed, native_completed,
+                fallback_completed, context.calls,
+                (int)reference_status, (int)context.status);
+        return false;
+    }
+    return true;
+}
+
+static bool validate_compact_raw_thumb_multi_oracles(void) {
+    const uint32_t ordinary = DATA_BASE + UINT32_C(0x1800);
+    const compact_raw_thumb_multi_case_t cases[] = {
+        {"push-registers", UINT16_C(0xb405), UINT32_C(0xd200),
+         ordinary + UINT32_C(0x40), ordinary + UINT32_C(0x38), 2u, 0u},
+        {"push-lr", UINT16_C(0xb500), UINT32_C(0xd300),
+         ordinary + UINT32_C(0x80), ordinary + UINT32_C(0x7c), 1u, 0u},
+        {"push-nine-words", UINT16_C(0xb5ff), UINT32_C(0xd400),
+         ordinary + UINT32_C(0x100), ordinary + UINT32_C(0xdc), 9u, 0u},
+        {"pop-registers", UINT16_C(0xbc05), UINT32_C(0xd500),
+         ordinary + UINT32_C(0x140), ordinary + UINT32_C(0x140), 2u, 0u},
+        {"pop-pc-arm", UINT16_C(0xbd00), UINT32_C(0xd600),
+         ordinary + UINT32_C(0x180), ordinary + UINT32_C(0x180), 1u,
+         UINT32_C(0xec00)},
+        {"pop-pc-thumb-low1", UINT16_C(0xbd01), UINT32_C(0xd700),
+         ordinary + UINT32_C(0x1c0), ordinary + UINT32_C(0x1c0), 2u,
+         UINT32_C(0xed01)},
+        {"pop-pc-thumb-low3", UINT16_C(0xbd02), UINT32_C(0xd800),
+         ordinary + UINT32_C(0x200), ordinary + UINT32_C(0x200), 2u,
+         UINT32_C(0xee03)},
+        {"stmia", UINT16_C(0xc603), UINT32_C(0xd900),
+         ordinary + UINT32_C(0x240), ordinary + UINT32_C(0x240), 2u, 0u},
+        {"stmia-base-lowest", UINT16_C(0xc6c0), UINT32_C(0xda00),
+         ordinary + UINT32_C(0x280), ordinary + UINT32_C(0x280), 2u, 0u},
+        {"ldmia", UINT16_C(0xce03), UINT32_C(0xdb00),
+         ordinary + UINT32_C(0x2c0), ordinary + UINT32_C(0x2c0), 2u, 0u},
+        {"ldmia-base-in-list", UINT16_C(0xcec0), UINT32_C(0xdc00),
+         ordinary + UINT32_C(0x300), ordinary + UINT32_C(0x300), 2u, 0u},
+    };
+    const compact_raw_thumb_multi_case_t refusals[] = {
+        {"empty-push", UINT16_C(0xb400), UINT32_C(0xdd00),
+         ordinary, ordinary, 0u, 0u},
+        {"empty-pop", UINT16_C(0xbc00), UINT32_C(0xde00),
+         ordinary, ordinary, 0u, 0u},
+        {"empty-stmia", UINT16_C(0xc600), UINT32_C(0xdf00),
+         ordinary, ordinary, 0u, 0u},
+        {"stmia-base-not-lowest", UINT16_C(0xc641), UINT32_C(0xe000),
+         ordinary + UINT32_C(0x40), ordinary + UINT32_C(0x40), 2u, 0u},
+        {"unaligned-push", UINT16_C(0xb401), UINT32_C(0xe100),
+         ordinary + UINT32_C(0x81), ordinary + UINT32_C(0x7d), 1u, 0u},
+        {"cross-cache-block-push", UINT16_C(0xb5ff), UINT32_C(0xe200),
+         DATA_BASE + UINT32_C(0x2404), DATA_BASE + UINT32_C(0x23e0),
+         9u, 0u},
+        {"pop-pc-invalid-target-low2", UINT16_C(0xbd00),
+         UINT32_C(0xe300), ordinary + UINT32_C(0x100),
+         ordinary + UINT32_C(0x100), 1u, UINT32_C(0xef02)},
+    };
+    uint8_t *baseline = (uint8_t *)malloc(sizeof g_ram);
+    uint8_t *expected = (uint8_t *)malloc(sizeof g_ram);
+    bool ok = false;
+
+    if (!baseline || !expected) {
+        fprintf(stderr,
+                "jitbench: compact raw Thumb multi allocation failed\n");
+        goto done;
+    }
+    for (unsigned i = 0u; i < sizeof cases / sizeof cases[0]; i++) {
+        if (!compact_raw_thumb_multi_exact_case(
+                &cases[i], false, baseline, expected) ||
+            !compact_raw_thumb_multi_exact_case(
+                &cases[i], true, baseline, expected))
+            goto done;
+    }
+    for (unsigned i = 0u; i < sizeof refusals / sizeof refusals[0]; i++) {
+        if (!compact_raw_thumb_multi_refusal_case(
+                &refusals[i], baseline, expected))
+            goto done;
+    }
+    if (!compact_raw_thumb_multi_resident_fallback_case(
+            &cases[3], 0u, baseline, expected) ||
+        !compact_raw_thumb_multi_resident_fallback_case(
+            &cases[3], 1u, baseline, expected) ||
+        !compact_raw_thumb_multi_resident_fallback_case(
+            &cases[0], 2u, baseline, expected) ||
+        !compact_raw_thumb_multi_resident_fallback_case(
+            &refusals[5], 3u, baseline, expected) ||
+        !compact_raw_thumb_multi_resident_fallback_case(
+            &refusals[6], 4u, baseline, expected))
+        goto done;
+
+    printf("COMPACT-RAW-THUMB-MULTI-ORACLE exact=yes cases=11 refusals=7 "
+           "push=yes pop=yes stmia=yes ldmia=yes lr=yes "
+           "pc-interwork=yes base-lowest=yes base-in-list=yes "
+           "max-words=9 transactional=yes flat-ram=yes "
+           "runtime-codegen=no\n");
+    printf("COMPACT-RAW-THUMB-MULTI-RESIDENT-ORACLE exact=yes cases=11 "
+           "dread=yes dwrite=yes hit-accounting=yes native-only=yes "
+           "fallback=zero resident-refusals=5 cold-cache=yes "
+           "stale-cache=yes consent=yes cross-block=yes "
+           "invalid-target=yes transactional=yes runtime-codegen=no\n");
+    ok = true;
+
+done:
+    free(baseline);
+    free(expected);
+    return ok;
+}
+
+typedef struct {
+    const char *name;
     uint32_t insn;
     uint32_t pc;
     uint32_t base;
@@ -7091,6 +7476,7 @@ typedef struct {
     uint32_t start;
     unsigned words;
     bool executes;
+    uint32_t final_word;
 } compact_raw_block_case_t;
 
 static void seed_compact_raw_block_case(
@@ -7106,6 +7492,9 @@ static void seed_compact_raw_block_case(
                 UINT32_C(0x51000000) |
                 ((sc->pc & UINT32_C(0xff)) << 16) |
                 (word * UINT32_C(0x010101)));
+    if (sc->final_word && sc->words)
+        mem_w32(NULL, sc->start + (sc->words - 1u) * 4u,
+                sc->final_word);
 }
 
 static bool compact_raw_block_exact_case(
@@ -7226,6 +7615,7 @@ static bool compact_raw_block_resident_fallback_case(
         const compact_raw_block_case_t *sc, unsigned mode,
         uint8_t *baseline, uint8_t *expected) {
     const bool load = (sc->insn & (1u << 20)) != 0u;
+    const bool no_retire = mode == 4u;
     arm_bus_t write_bus = g_bus;
     arm_cpu_t reference;
     arm_cpu_t resident;
@@ -7241,6 +7631,8 @@ static bool compact_raw_block_resident_fallback_case(
         if (mode == 1u) {
             oracle_warm_dread(&reference, sc->start);
             reference.tlb_gen++;
+        } else if (mode == 4u) {
+            oracle_warm_dread(&reference, sc->start);
         }
     } else {
         if (mode != 2u) reference.bus = &write_bus;
@@ -7261,8 +7653,9 @@ static bool compact_raw_block_resident_fallback_case(
             &resident, &g_ram[sc->pc], sc->pc, 4u, 1u,
             compact_raw_resident_oracle_step, &context, &completed,
             &native_completed, &fallback_completed) ||
-        completed != 1u || native_completed != 0u ||
-        fallback_completed != 1u || context.calls != 1u ||
+        completed != (no_retire ? 0u : 1u) || native_completed != 0u ||
+        fallback_completed != (no_retire ? 0u : 1u) ||
+        context.calls != (no_retire ? 0u : 1u) ||
         context.status != reference_status ||
         memcmp(&reference, &resident, sizeof resident) != 0 ||
         memcmp(expected, g_ram, sizeof g_ram) != 0) {
@@ -7282,71 +7675,84 @@ static bool validate_compact_raw_a32_block_oracles(void) {
     const uint32_t ordinary = DATA_BASE + UINT32_C(0x800);
     const compact_raw_block_case_t cases[] = {
         {"stm-ia", A32_BLOCK(14,0,1,0,0,0,4,UINT32_C(0x8109)),
-         UINT32_C(0x8c00), 4u, ordinary, ordinary, 4u, true},
+         UINT32_C(0x8c00), 4u, ordinary, ordinary, 4u, true, 0u},
         {"stm-ib-writeback",
          A32_BLOCK(14,1,1,0,1,0,12,UINT32_C(0x4106)),
-         UINT32_C(0x8d00), 12u, ordinary, ordinary + 4u, 4u, true},
+         UINT32_C(0x8d00), 12u, ordinary, ordinary + 4u, 4u, true, 0u},
         {"stm-da-sp", A32_BLOCK(14,0,0,0,0,0,13,UINT32_C(0x4210)),
          UINT32_C(0x8e00), 13u, ordinary + UINT32_C(0x40),
-         ordinary + UINT32_C(0x38), 3u, true},
+         ordinary + UINT32_C(0x38), 3u, true, 0u},
         {"stm-db-writeback",
          A32_BLOCK(14,1,0,0,1,0,11,UINT32_C(0x8481)),
-         UINT32_C(0x8f00), 11u, ordinary, ordinary - 16u, 4u, true},
+         UINT32_C(0x8f00), 11u, ordinary, ordinary - 16u, 4u, true, 0u},
         {"stm-db-base-lowest-writeback",
          A32_BLOCK(14,1,0,0,1,0,4,UINT32_C(0x4110)),
-         UINT32_C(0x9000), 4u, ordinary, ordinary - 12u, 3u, true},
+         UINT32_C(0x9000), 4u, ordinary, ordinary - 12u, 3u, true, 0u},
         {"stm-failed-condition",
          A32_BLOCK(0,0,1,0,0,0,4,UINT32_C(0x4004)),
-         UINT32_C(0x9100), 4u, ordinary, ordinary, 2u, false},
+         UINT32_C(0x9100), 4u, ordinary, ordinary, 2u, false, 0u},
         {"stm-sixteen-words",
          A32_BLOCK(14,0,1,0,0,0,7,UINT32_C(0xffff)),
          UINT32_C(0x9200), 7u, DATA_BASE + UINT32_C(0xfc0),
-         DATA_BASE + UINT32_C(0xfc0), 16u, true},
+         DATA_BASE + UINT32_C(0xfc0), 16u, true, 0u},
         {"ldm-ia-base-in-list",
          A32_BLOCK(14,0,1,0,0,1,4,UINT32_C(0x4119)),
-         UINT32_C(0x9300), 4u, ordinary, ordinary, 5u, true},
+         UINT32_C(0x9300), 4u, ordinary, ordinary, 5u, true, 0u},
         {"ldm-ib-writeback",
          A32_BLOCK(14,1,1,0,1,1,12,UINT32_C(0x4106)),
-         UINT32_C(0x9400), 12u, ordinary, ordinary + 4u, 4u, true},
+         UINT32_C(0x9400), 12u, ordinary, ordinary + 4u, 4u, true, 0u},
         {"ldm-da-sp", A32_BLOCK(14,0,0,0,0,1,13,UINT32_C(0x4210)),
          UINT32_C(0x9500), 13u, ordinary + UINT32_C(0x40),
-         ordinary + UINT32_C(0x38), 3u, true},
+         ordinary + UINT32_C(0x38), 3u, true, 0u},
         {"ldm-db-writeback",
          A32_BLOCK(14,1,0,0,1,1,11,UINT32_C(0x4481)),
-         UINT32_C(0x9600), 11u, ordinary, ordinary - 16u, 4u, true},
+         UINT32_C(0x9600), 11u, ordinary, ordinary - 16u, 4u, true, 0u},
         {"ldm-failed-condition",
          A32_BLOCK(0,0,1,0,0,1,4,UINT32_C(0x4004)),
-         UINT32_C(0x9700), 4u, ordinary, ordinary, 2u, false},
+         UINT32_C(0x9700), 4u, ordinary, ordinary, 2u, false, 0u},
         {"ldm-fifteen-words",
          A32_BLOCK(14,0,1,0,0,1,7,UINT32_C(0x7fff)),
          UINT32_C(0x9800), 7u, DATA_BASE + UINT32_C(0xfc4),
-         DATA_BASE + UINT32_C(0xfc4), 15u, true},
+         DATA_BASE + UINT32_C(0xfc4), 15u, true, 0u},
         {"failed-condition-before-invalid-shape",
          A32_BLOCK(0,0,1,1,0,0,4,UINT32_C(0x0003)),
-         UINT32_C(0x9900), 4u, ordinary, ordinary, 2u, false},
+         UINT32_C(0x9900), 4u, ordinary, ordinary, 2u, false, 0u},
+        {"ldm-pc-arm-target",
+         A32_BLOCK(14,0,1,0,0,1,4,UINT32_C(0x8009)),
+         UINT32_C(0xa200), 4u, ordinary + UINT32_C(0x100),
+         ordinary + UINT32_C(0x100), 3u, true, UINT32_C(0xe400)},
+        {"ldm-pc-thumb-target-low1",
+         A32_BLOCK(14,1,0,0,1,1,11,UINT32_C(0x8044)),
+         UINT32_C(0xa300), 11u, ordinary + UINT32_C(0x180),
+         ordinary + UINT32_C(0x174), 3u, true, UINT32_C(0xe501)},
+        {"ldm-pc-thumb-target-low3",
+         A32_BLOCK(14,0,1,0,0,1,4,UINT32_C(0x8021)),
+         UINT32_C(0xa400), 4u, ordinary + UINT32_C(0x200),
+         ordinary + UINT32_C(0x200), 3u, true, UINT32_C(0xe603)},
     };
     const compact_raw_block_case_t refusals[] = {
         {"user-bank", A32_BLOCK(14,0,1,1,0,0,4,UINT32_C(0x0003)),
-         UINT32_C(0x9a00), 4u, ordinary, ordinary, 2u, true},
+         UINT32_C(0x9a00), 4u, ordinary, ordinary, 2u, true, 0u},
         {"pc-base", A32_BLOCK(14,0,1,0,0,0,15,UINT32_C(0x0003)),
-         UINT32_C(0x9b00), 15u, ordinary, ordinary, 2u, true},
+         UINT32_C(0x9b00), 15u, ordinary, ordinary, 2u, true, 0u},
         {"empty-list", A32_BLOCK(14,0,1,0,0,0,4,UINT32_C(0x0000)),
-         UINT32_C(0x9c00), 4u, ordinary, ordinary, 0u, true},
+         UINT32_C(0x9c00), 4u, ordinary, ordinary, 0u, true, 0u},
         {"stm-writeback-alias",
          A32_BLOCK(14,0,1,0,1,0,4,UINT32_C(0x0011)),
-         UINT32_C(0x9d00), 4u, ordinary, ordinary, 2u, true},
+         UINT32_C(0x9d00), 4u, ordinary, ordinary, 2u, true, 0u},
         {"ldm-writeback-alias",
          A32_BLOCK(14,0,1,0,1,1,4,UINT32_C(0x0010)),
-         UINT32_C(0x9e00), 4u, ordinary, ordinary, 1u, true},
-        {"ldm-pc-list",
+         UINT32_C(0x9e00), 4u, ordinary, ordinary, 1u, true, 0u},
+        {"ldm-pc-invalid-target-low2",
          A32_BLOCK(14,0,1,0,0,1,4,UINT32_C(0x8001)),
-         UINT32_C(0x9f00), 4u, ordinary, ordinary, 2u, true},
+         UINT32_C(0x9f00), 4u, ordinary, ordinary, 2u, true,
+         UINT32_C(0xe702)},
         {"unaligned", A32_BLOCK(14,0,1,0,0,0,4,UINT32_C(0x0003)),
-         UINT32_C(0xa000), 4u, ordinary + 1u, ordinary + 1u, 2u, true},
+         UINT32_C(0xa000), 4u, ordinary + 1u, ordinary + 1u, 2u, true, 0u},
         {"cross-cache-block",
          A32_BLOCK(14,0,1,0,0,0,4,UINT32_C(0x000f)),
          UINT32_C(0xa100), 4u, DATA_BASE + UINT32_C(0x13f8),
-         DATA_BASE + UINT32_C(0x13f8), 4u, true},
+         DATA_BASE + UINT32_C(0x13f8), 4u, true, 0u},
     };
     uint8_t *baseline = (uint8_t *)malloc(sizeof g_ram);
     uint8_t *expected = (uint8_t *)malloc(sizeof g_ram);
@@ -7379,19 +7785,22 @@ static bool validate_compact_raw_a32_block_oracles(void) {
         !compact_raw_block_resident_fallback_case(
             &cases[0], 2u, baseline, expected) ||
         !compact_raw_block_resident_fallback_case(
-            &refusals[7], 3u, baseline, expected))
+            &refusals[7], 3u, baseline, expected) ||
+        !compact_raw_block_resident_fallback_case(
+            &refusals[5], 4u, baseline, expected))
         goto done;
 
-    printf("COMPACT-RAW-A32-BLOCK-ORACLE exact=yes cases=14 refusals=8 "
+    printf("COMPACT-RAW-A32-BLOCK-ORACLE exact=yes cases=17 refusals=8 "
            "stm=yes ldm=yes modes=4 writeback=yes "
            "base-lowest-writeback=yes base-in-list=yes pc-store=yes "
-           "max-words=16 condition-before-guard=yes transactional=yes "
+           "pc-load-interwork=yes max-words=16 "
+           "condition-before-guard=yes transactional=yes "
            "fallback-convergence=yes flat-ram=yes runtime-codegen=no\n");
-    printf("COMPACT-RAW-A32-BLOCK-RESIDENT-ORACLE exact=yes cases=14 "
+    printf("COMPACT-RAW-A32-BLOCK-RESIDENT-ORACLE exact=yes cases=17 "
            "stm=yes ldm=yes dread=yes dwrite=yes hit-accounting=yes "
-           "native-only=yes fallback=zero resident-refusals=4 "
+           "native-only=yes fallback=zero resident-refusals=5 "
            "cold-cache=yes stale-cache=yes consent=yes cross-block=yes "
-           "transactional=yes "
+           "invalid-target=yes transactional=yes "
            "runtime-codegen=no\n");
     ok = true;
 
@@ -7456,7 +7865,7 @@ static bool validate_compact_raw_oracles(void) {
         UINT32_C(0xe2866001), /* must not execute via the stale window */
     };
     const uint16_t resident_thumb_memory[] = {
-        UINT16_C(0xb401), /* fallback PUSH publishes the Thumb window */
+        UINT16_C(0xba00), /* fallback REV publishes the Thumb window */
         UINT16_C(0x6833), /* native LDR r3,[r6,#0] via seeded DREAD */
         UINT16_C(0x6834), /* native LDR r4,[r6,#0] */
         UINT16_C(0x6030), /* native STR r0,[r6,#0] via consented DWRITE */
@@ -7526,6 +7935,8 @@ static bool validate_compact_raw_oracles(void) {
                                         sizeof dp_program[0])))
         return false;
     if (!validate_compact_raw_thumb_oracles())
+        return false;
+    if (!validate_compact_raw_thumb_multi_oracles())
         return false;
     if (!validate_compact_raw_a32_indirect_oracles())
         return false;
