@@ -5770,6 +5770,61 @@ static bool compact_raw_vfp_flat_memory_case(const char *name,
                 "jitbench: compact raw VFP flat-memory %s mismatch "
                 "(completed/expected %u/%u status=%d)\n",
                 name, completed, insns, (int)status);
+        for (unsigned i = 0u; i < 16u; i++) {
+            if (reference.r[i] != compact.r[i]) {
+                fprintf(stderr,
+                        "jitbench: compact raw VFP %s r%u "
+                        "reference=%08" PRIx32 " compact=%08" PRIx32 "\n",
+                        name, i, reference.r[i], compact.r[i]);
+            }
+        }
+        if (reference.cpsr != compact.cpsr ||
+            reference.cycles != compact.cycles ||
+            reference.vfp_fpexc != compact.vfp_fpexc ||
+            reference.vfp_fpscr != compact.vfp_fpscr) {
+            fprintf(stderr,
+                    "jitbench: compact raw VFP %s scalar-state "
+                    "cpsr=%08" PRIx32 "/%08" PRIx32 " "
+                    "cycles=%" PRIu64 "/%" PRIu64 " "
+                    "fpexc=%08" PRIx32 "/%08" PRIx32 " "
+                    "fpscr=%08" PRIx32 "/%08" PRIx32 "\n",
+                    name, reference.cpsr, compact.cpsr,
+                    reference.cycles, compact.cycles,
+                    reference.vfp_fpexc, compact.vfp_fpexc,
+                    reference.vfp_fpscr, compact.vfp_fpscr);
+        }
+        for (unsigned i = 0u; i < 32u; i++) {
+            if (reference.vfp_s[i] != compact.vfp_s[i]) {
+                fprintf(stderr,
+                        "jitbench: compact raw VFP %s s%u "
+                        "reference=%08" PRIx32 " compact=%08" PRIx32 "\n",
+                        name, i, reference.vfp_s[i], compact.vfp_s[i]);
+            }
+        }
+        if (reference.dread_hits != compact.dread_hits ||
+            reference.dread_misses != compact.dread_misses ||
+            reference.dwrite_hits != compact.dwrite_hits ||
+            reference.dwrite_misses != compact.dwrite_misses) {
+            fprintf(stderr,
+                    "jitbench: compact raw VFP %s cache-state "
+                    "dread=%" PRIu64 "/%" PRIu64 " hits, "
+                    "%" PRIu64 "/%" PRIu64 " misses; "
+                    "dwrite=%" PRIu64 "/%" PRIu64 " hits, "
+                    "%" PRIu64 "/%" PRIu64 " misses\n",
+                    name, reference.dread_hits, compact.dread_hits,
+                    reference.dread_misses, compact.dread_misses,
+                    reference.dwrite_hits, compact.dwrite_hits,
+                    reference.dwrite_misses, compact.dwrite_misses);
+        }
+        for (unsigned i = 0u; i < sizeof g_ram; i++) {
+            if (expected[i] != g_ram[i]) {
+                fprintf(stderr,
+                        "jitbench: compact raw VFP %s RAM[%08x] "
+                        "reference=%02x compact=%02x\n",
+                        name, i, expected[i], g_ram[i]);
+                break;
+            }
+        }
         return false;
     }
     return true;
