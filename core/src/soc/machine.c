@@ -1596,6 +1596,37 @@ static unsigned interpreter_tick_batch_limit(const s5l8900_t *m,
     return retirement_batch_limit(m, remaining);
 }
 
+unsigned s5l8900_static_a64_fallback_step(s5l8900_t *m,
+                                          arm_status_t *status) {
+    arm_status_t step_status;
+
+    if (!m || !status) return 0u;
+    *status = ARM_OK;
+    if (m->level_dirty || ext_inputs(m) != m->ext_seen ||
+        (m->cpu.cpsr & ARM_CPSR_MODE_MASK) != ARM_MODE_USR ||
+        (m->cpu.cpsr & (ARM_CPSR_T | ARM_CPSR_E)) != 0u ||
+        m->cpu.abort_pending ||
+        (m->cpu.fiq_line && !(m->cpu.cpsr & ARM_CPSR_F)) ||
+        (m->cpu.irq_line && !(m->cpu.cpsr & ARM_CPSR_I)))
+        return 0u;
+    step_status = arm_step(&m->cpu);
+    *status = step_status;
+    if (step_status != ARM_OK) return 0u;
+
+    /* A fallback may perform MMIO or change instruction state/privilege. The
+     * resident ARM loop can continue only while the same User/A32 machine
+     * boundary that admitted it remains exact. RETIRE_STOP still accounts the
+     * successful instruction before returning to the device tick. */
+    if (m->level_dirty || ext_inputs(m) != m->ext_seen ||
+        (m->cpu.cpsr & ARM_CPSR_MODE_MASK) != ARM_MODE_USR ||
+        (m->cpu.cpsr & (ARM_CPSR_T | ARM_CPSR_E)) != 0u ||
+        m->cpu.abort_pending ||
+        (m->cpu.fiq_line && !(m->cpu.cpsr & ARM_CPSR_F)) ||
+        (m->cpu.irq_line && !(m->cpu.cpsr & ARM_CPSR_I)))
+        return 2u;
+    return 1u;
+}
+
 unsigned s5l8900_run(s5l8900_t *m, unsigned max_steps, arm_status_t *status) {
     arm_status_t st = ARM_OK;
     unsigned n = 0;
@@ -1619,12 +1650,18 @@ unsigned s5l8900_run(s5l8900_t *m, unsigned max_steps, arm_status_t *status) {
          * instruction even though no signed state had ever been allocated. */
         if (s5l8900_static_a64_is_enabled(m)) {
             bool known_negative = false;
+            arm_status_t engine_status = ARM_OK;
             unsigned batch = retirement_batch_limit(m, max_steps - n);
             if (batch)
-                batch = s5l8900_static_a64_try(m, batch, &known_negative);
+                batch = s5l8900_static_a64_try(
+                    m, batch, &known_negative, &engine_status);
             if (batch) {
                 n += batch;
                 s5l8900_tick(m, batch);
+                if (engine_status != ARM_OK) {
+                    st = engine_status;
+                    break;
+                }
                 /* The ordinary next iteration would first repeat the machine
                  * gate and only then discover the same negative cache entry.
                  * Do those checks now and fall directly into its one
@@ -1635,6 +1672,10 @@ unsigned s5l8900_run(s5l8900_t *m, unsigned max_steps, arm_status_t *status) {
                 if (retirement_batch_limit(m, max_steps - n) &&
                     !s5l8900_static_a64_commit_known_negative_bypass(m))
                     continue;
+            }
+            if (engine_status != ARM_OK) {
+                st = engine_status;
+                break;
             }
         }
 #endif

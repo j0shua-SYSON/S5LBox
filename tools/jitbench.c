@@ -5226,6 +5226,100 @@ static bool compact_raw_window_compare(const char *name,
     return true;
 }
 
+typedef struct {
+    arm_cpu_t *cpu;
+    arm_status_t status;
+    unsigned calls;
+    unsigned stop_after;
+} compact_raw_resident_oracle_context_t;
+
+static a64_compact_raw_fallback_result_t compact_raw_resident_oracle_step(
+        void *opaque) {
+    compact_raw_resident_oracle_context_t *context =
+        (compact_raw_resident_oracle_context_t *)opaque;
+
+    if (!context || !context->cpu)
+        return A64_COMPACT_RAW_FALLBACK_NO_RETIRE;
+    context->status = arm_step(context->cpu);
+    if (context->status != ARM_OK)
+        return A64_COMPACT_RAW_FALLBACK_NO_RETIRE;
+    context->calls++;
+    if (context->stop_after && context->calls >= context->stop_after)
+        return A64_COMPACT_RAW_FALLBACK_RETIRE_STOP;
+    return A64_COMPACT_RAW_FALLBACK_RETIRE_CONTINUE;
+}
+
+static bool compact_raw_resident_compare(
+        const char *name, const uint32_t *program, unsigned insns,
+        uint32_t pc, unsigned reference_steps, unsigned budget,
+        unsigned expected_native, unsigned expected_fallback,
+        unsigned stop_after) {
+    arm_cpu_t reference, resident;
+    final_state_t reference_state, resident_state;
+    compact_raw_resident_oracle_context_t context;
+    uint8_t *baseline = (uint8_t *)malloc(sizeof g_ram);
+    uint8_t *expected_ram = (uint8_t *)malloc(sizeof g_ram);
+    arm_status_t status = ARM_OK;
+    unsigned completed = 0u;
+    unsigned native_completed = 0u;
+    unsigned fallback_completed = 0u;
+    bool ok = false;
+
+    if (!baseline || !expected_ram) {
+        fprintf(stderr,
+                "jitbench: compact raw resident oracle allocation failed\n");
+        goto done;
+    }
+
+    seed_cpu_at(&reference, program, insns, false, pc);
+    resident = reference;
+    memcpy(baseline, g_ram, sizeof g_ram);
+    for (unsigned i = 0u; i < reference_steps; i++) {
+        status = arm_step(&reference);
+        if (status != ARM_OK) break;
+    }
+    capture_state(&reference_state, &reference, status, JIT_EXIT_NEXT);
+    memcpy(expected_ram, g_ram, sizeof g_ram);
+
+    memcpy(g_ram, baseline, sizeof g_ram);
+    context.cpu = &resident;
+    context.status = ARM_OK;
+    context.calls = 0u;
+    context.stop_after = stop_after;
+    if (!a64_compact_raw_run_code_window_resident(
+            &resident, &g_ram[pc], pc, insns * 4u, budget,
+            compact_raw_resident_oracle_step, &context, &completed,
+            &native_completed, &fallback_completed)) {
+        fprintf(stderr,
+                "jitbench: compact raw resident %s contract refused\n",
+                name);
+        goto done;
+    }
+    capture_state(&resident_state, &resident, context.status, JIT_EXIT_NEXT);
+    if (status != ARM_OK || completed != reference_steps ||
+        native_completed != expected_native ||
+        fallback_completed != expected_fallback ||
+        context.calls != expected_fallback ||
+        native_completed + fallback_completed != completed ||
+        memcmp(expected_ram, g_ram, sizeof g_ram) != 0 ||
+        !architectural_states_equal(&reference_state, &resident_state)) {
+        fprintf(stderr,
+                "jitbench: compact raw resident %s mismatch "
+                "(completed/native/fallback/calls %u/%u/%u/%u, expected "
+                "%u/%u/%u/%u)\n",
+                name, completed, native_completed, fallback_completed,
+                context.calls, reference_steps, expected_native,
+                expected_fallback, expected_fallback);
+        goto done;
+    }
+    ok = true;
+
+done:
+    free(baseline);
+    free(expected_ram);
+    return ok;
+}
+
 static bool validate_compact_raw_oracles(void) {
     static const unsigned result_ops[] = {
         0u, 1u, 2u, 3u, 4u, 5u, 6u, 7u, 12u, 13u, 14u, 15u,
@@ -5253,6 +5347,13 @@ static bool validate_compact_raw_oracles(void) {
     const uint32_t window_data_stop[] = {
         UINT32_C(0xe2800001), /* supported ADD */
         UINT32_C(0xe5971000), /* data translation deliberately unavailable */
+    };
+    const uint32_t resident_mixed[] = {
+        UINT32_C(0xe2800001), /* native ADD r0,r0,#1 */
+        UINT32_C(0xe5870000), /* fallback STR r0,[r7,#0] */
+        UINT32_C(0xe2422001), /* native SUB r2,r2,#1 */
+        UINT32_C(0xe0000090), /* fallback MUL r0,r0,r0 */
+        UINT32_C(0xe2855001), /* native ADD r5,r5,#1 */
     };
     arm_cpu_t contract;
     final_state_t before, after;
@@ -5363,6 +5464,14 @@ static bool validate_compact_raw_oracles(void) {
     if (!compact_raw_window_compare("data-stop", window_data_stop, 2u,
                                     UINT32_C(0x4800), 1u, 2u, 1u))
         return false;
+    if (!compact_raw_resident_compare(
+            "continue", resident_mixed, 5u, UINT32_C(0x4c00),
+            5u, 5u, 3u, 2u, 0u))
+        return false;
+    if (!compact_raw_resident_compare(
+            "boundary-stop", resident_mixed, 5u, UINT32_C(0x4c00),
+            2u, 5u, 1u, 1u, 1u))
+        return false;
 
     seed_cpu_at(&contract, unsupported_prefix, 2u, false,
                 UINT32_C(0x5000));
@@ -5386,6 +5495,9 @@ static bool validate_compact_raw_oracles(void) {
            "live-bytes=yes mmu-code-window=yes data-ops-stop=yes "
            "out-of-window=yes unsupported-prefix=yes "
            "invalid-contract-rollback=yes\n");
+    printf("COMPACT-RAW-RESIDENT-ORACLE exact=yes cases=2 "
+           "native-fallback-partition=yes interpreter-continue=yes "
+           "boundary-stop=yes ram-equality=yes runtime-codegen=no\n");
     return true;
 }
 
@@ -5622,6 +5734,7 @@ typedef struct {
     uint64_t compact_raw_attempts;
     uint64_t compact_raw_calls;
     uint64_t compact_raw_retired;
+    uint64_t compact_raw_fallback_retired;
     double seconds;
 } soc_run_result_t;
 
@@ -5870,6 +5983,8 @@ static bool run_soc_entry_configured(const soc_entry_setup_t *setup,
     uint64_t compact_raw_calls_after;
     uint64_t compact_raw_retired_before;
     uint64_t compact_raw_retired_after;
+    uint64_t compact_raw_fallback_retired_before;
+    uint64_t compact_raw_fallback_retired_after;
     double start, end;
     bool initialized = false;
     bool ok = false;
@@ -6061,6 +6176,8 @@ static bool run_soc_entry_configured(const soc_entry_setup_t *setup,
         s5l8900_static_a64_compact_raw_calls(&machine);
     compact_raw_retired_before =
         s5l8900_static_a64_compact_raw_retired(&machine);
+    compact_raw_fallback_retired_before =
+        s5l8900_static_a64_compact_raw_fallback_retired(&machine);
     start = now_seconds();
     while (remaining != 0u) {
         unsigned chunk = remaining > (uint64_t)UINT_MAX
@@ -6092,6 +6209,8 @@ static bool run_soc_entry_configured(const soc_entry_setup_t *setup,
         s5l8900_static_a64_compact_raw_calls(&machine);
     compact_raw_retired_after =
         s5l8900_static_a64_compact_raw_retired(&machine);
+    compact_raw_fallback_retired_after =
+        s5l8900_static_a64_compact_raw_fallback_retired(&machine);
     if (remaining != 0u || status != ARM_OK || end <= start ||
         machine.cpu.r[15] != 0u) {
         fprintf(stderr,
@@ -6122,6 +6241,9 @@ static bool run_soc_entry_configured(const soc_entry_setup_t *setup,
         compact_raw_calls_after - compact_raw_calls_before;
     out->compact_raw_retired =
         compact_raw_retired_after - compact_raw_retired_before;
+    out->compact_raw_fallback_retired =
+        compact_raw_fallback_retired_after -
+        compact_raw_fallback_retired_before;
     if ((signed_path && out->signed_retired > total) ||
         (!signed_path &&
          (out->signed_retired != 0u || out->signed_chains != 0u ||
@@ -6129,22 +6251,26 @@ static bool run_soc_entry_configured(const soc_entry_setup_t *setup,
           out->dwrite_misses != 0u)) ||
         (path == SOC_ENTRY_SIGNED && out->graph_chains != 0u) ||
         (compact_raw_path &&
-         (out->compact_raw_retired != total ||
+         (out->compact_raw_retired +
+                  out->compact_raw_fallback_retired != total ||
           out->signed_retired != out->compact_raw_retired ||
           out->compact_raw_calls == 0u ||
           out->compact_raw_attempts < out->compact_raw_calls)) ||
         (!compact_raw_path &&
          (out->compact_raw_attempts != 0u ||
           out->compact_raw_calls != 0u ||
-          out->compact_raw_retired != 0u)) ||
+          out->compact_raw_retired != 0u ||
+          out->compact_raw_fallback_retired != 0u)) ||
         (graph_path &&
          out->graph_chains != out->signed_chains)) {
         fprintf(stderr,
                 "jitbench: SoC entry %s retired signed=%" PRIu64
-                " chains=%" PRIu64 " graph=%" PRIu64
+                " fallback=%" PRIu64 " chains=%" PRIu64
+                " graph=%" PRIu64
                 " expected=%" PRIu64 "\n",
                 soc_entry_path_name(path), out->signed_retired,
-                out->signed_chains, out->graph_chains,
+                out->compact_raw_fallback_retired, out->signed_chains,
+                out->graph_chains,
                 signed_path ? total : UINT64_C(0));
         goto done;
     }
@@ -6186,6 +6312,7 @@ static bool run_soc_compact_raw_path(const uint32_t *program,
     const soc_entry_setup_t setup = {
         .program = program,
         .length = length,
+        .seed_r7 = DATA_BASE,
         .mmu_identity_workload = true,
     };
     if (path != SOC_ENTRY_REFERENCE && path != SOC_ENTRY_COMPACT_RAW)
@@ -6289,6 +6416,76 @@ static bool run_soc_vfp_arithmetic_path(uint64_t total,
     return run_soc_entry_configured(&setup, setup.length, total, path, out);
 }
 
+/* Prove the resident/native-interpreter partition through the actual machine
+ * runner before measuring its compute-only control. Three instructions per
+ * eight-instruction loop deliberately require arm_step(): two MMU-on data
+ * accesses and one unsupported MUL. The other four ALU operations plus the
+ * loop branch stay in the build-time-linked AArch64 loop. */
+static bool validate_soc_compact_raw_resident(void) {
+    enum { LOOP_INSNS = 8u, TOTAL_INSNS = 8192u };
+    static const uint32_t PROGRAM[LOOP_INSNS] = {
+        UINT32_C(0xe2800001), /* native ADD r0,r0,#1 */
+        UINT32_C(0xe5870000), /* fallback STR r0,[r7,#0] */
+        UINT32_C(0xe2422001), /* native SUB r2,r2,#1 */
+        UINT32_C(0xe0000090), /* fallback MUL r0,r0,r0 */
+        UINT32_C(0xe2855001), /* native ADD r5,r5,#1 */
+        UINT32_C(0xe5971000), /* fallback LDR r1,[r7,#0] */
+        UINT32_C(0xe0266001), /* native EOR r6,r6,r1 */
+        UINT32_C(0xeafffff7), /* native branch 0x1c -> 0x00 */
+    };
+    const uint64_t expected_native =
+        (uint64_t)TOTAL_INSNS * 5u / LOOP_INSNS;
+    const uint64_t expected_fallback =
+        (uint64_t)TOTAL_INSNS * 3u / LOOP_INSNS;
+    soc_run_result_t reference = {0};
+    soc_run_result_t resident = {0};
+    bool ok = false;
+
+    if (!run_soc_compact_raw_path(
+            PROGRAM, LOOP_INSNS, TOTAL_INSNS, SOC_ENTRY_REFERENCE,
+            &reference) ||
+        !run_soc_compact_raw_path(
+            PROGRAM, LOOP_INSNS, TOTAL_INSNS, SOC_ENTRY_COMPACT_RAW,
+            &resident) ||
+        !reference.snapshot || !resident.snapshot ||
+        reference.snapshot_len != resident.snapshot_len ||
+        memcmp(reference.snapshot, resident.snapshot,
+               reference.snapshot_len) != 0 ||
+        reference.compact_raw_attempts != 0u ||
+        reference.compact_raw_calls != 0u ||
+        reference.compact_raw_retired != 0u ||
+        reference.compact_raw_fallback_retired != 0u ||
+        resident.compact_raw_retired != expected_native ||
+        resident.compact_raw_fallback_retired != expected_fallback ||
+        resident.signed_retired != expected_native ||
+        resident.compact_raw_calls == 0u ||
+        resident.compact_raw_attempts < resident.compact_raw_calls) {
+        fprintf(stderr,
+                "jitbench: SoC compact-raw resident oracle failed "
+                "attempts/calls/native/fallback=%" PRIu64 "/%" PRIu64
+                "/%" PRIu64 "/%" PRIu64 " expected=%" PRIu64 "/%" PRIu64
+                "\n",
+                resident.compact_raw_attempts, resident.compact_raw_calls,
+                resident.compact_raw_retired,
+                resident.compact_raw_fallback_retired, expected_native,
+                expected_fallback);
+        goto done;
+    }
+
+    printf("SOC-COMPACT-RAW-RESIDENT-ORACLE exact=yes guest-insns=%u "
+           "loop-insns=%u mmu=on native=%" PRIu64 " fallback=%" PRIu64
+           " data-fallback=yes unsupported-fallback=yes "
+           "timebase-bounded=yes device-tick=yes serialized-machine=yes "
+           "runtime-codegen=no\n",
+           TOTAL_INSNS, LOOP_INSNS, expected_native, expected_fallback);
+    ok = true;
+
+done:
+    free_soc_run_result(&reference);
+    free_soc_run_result(&resident);
+    return ok;
+}
+
 /* First real-machine gate for the compact live-byte architecture. Both arms
  * use the app-facing s5l8900_run(), an enabled identity-mapped MMU and User
  * mode. The reference uses the exact interpreter tick batcher; the compact
@@ -6309,6 +6506,7 @@ static bool bench_soc_compact_raw(uint64_t requested, unsigned reps) {
         fprintf(stderr, "jitbench: SoC compact-raw shape failed\n");
         return false;
     }
+    if (!validate_soc_compact_raw_resident()) return false;
     total = ((requested + LOOP_INSNS - 1u) / LOOP_INSNS) * LOOP_INSNS;
     reference_rates = (double *)calloc(reps, sizeof *reference_rates);
     compact_rates = (double *)calloc(reps, sizeof *compact_rates);
@@ -6347,7 +6545,9 @@ static bool bench_soc_compact_raw(uint64_t requested, unsigned reps) {
             reference.compact_raw_attempts != 0u ||
             reference.compact_raw_calls != 0u ||
             reference.compact_raw_retired != 0u ||
+            reference.compact_raw_fallback_retired != 0u ||
             compact.compact_raw_retired != total ||
+            compact.compact_raw_fallback_retired != 0u ||
             compact.signed_retired != total ||
             compact.compact_raw_calls == 0u ||
             compact.compact_raw_attempts < compact.compact_raw_calls) {
@@ -6377,10 +6577,12 @@ static bool bench_soc_compact_raw(uint64_t requested, unsigned reps) {
         compact_rates[rep] = (double)total / compact.seconds / 1.0e6;
         printf("SOC-COMPACT-RAW-SAMPLE rep=%u order=%s reference=%.3f "
                "compact-raw=%.3f Minsn/s attempts=%" PRIu64
-               " calls=%" PRIu64 " retired=%" PRIu64 "\n",
+               " calls=%" PRIu64 " native=%" PRIu64
+               " fallback=%" PRIu64 "\n",
                rep + 1u, order, reference_rates[rep], compact_rates[rep],
                compact.compact_raw_attempts, compact.compact_raw_calls,
-               compact.compact_raw_retired);
+               compact.compact_raw_retired,
+               compact.compact_raw_fallback_retired);
         free_soc_run_result(&reference);
         free_soc_run_result(&compact);
     }
@@ -6389,10 +6591,11 @@ static bool bench_soc_compact_raw(uint64_t requested, unsigned reps) {
     qsort(compact_rates, reps, sizeof *compact_rates, cmp_double);
     printf("SOC-COMPACT-RAW-CEILING guest-insns=%" PRIu64
            " reps=%u loop-insns=%u mmu=on live-fetch-window=yes "
-           "data-access=stop pre-step-hook=absent timebase-bounded=yes "
+           "data-access=absent pre-step-hook=absent timebase-bounded=yes "
            "device-tick=yes serialized-machine=yes runtime-codegen=no "
            "attempts=%" PRIu64 " calls=%" PRIu64
-           " reference-median=%.3f compact-raw-median=%.3f speedup=%.3fx\n",
+           " reference-median=%.3f compact-raw-median=%.3f speedup=%.3fx "
+           "fallback-retired=0\n",
            total, reps, LOOP_INSNS, exact_attempts, exact_calls,
            reference_rates[reps / 2u], compact_rates[reps / 2u],
            compact_rates[reps / 2u] / reference_rates[reps / 2u]);
@@ -8920,10 +9123,11 @@ int main(int argc, char **argv) {
            "one build-time-linked semantic loop, with no decoded cache, graph "
            "or runtime code generation. They are an exact synthetic "
            "architecture gate, not a product path or phone-FPS claim.\n");
-    printf("The compact-raw SoC row uses an MMU-on live fetch-cache window, "
-           "stops before data access, crosses the real timebase-bounded run "
-           "API and requires byte-identical serialized machine state. It is "
-           "still a compute-only synthetic loop, not firmware or phone FPS.\n");
+    printf("The compact-raw SoC gate first proves resident exact-interpreter "
+           "fallback for MMU-on data and unsupported instructions, then "
+           "measures a separate compute-only control. Both cross the real "
+           "timebase-bounded run API and require byte-identical serialized "
+           "machine state; neither is firmware or phone FPS.\n");
     printf("SoC-entry rows rotate reference, legacy signed, 16-instruction graph "
            "and extended graph paths across separately initialized machines. "
            "The extended arm remains clamped to the first timebase edge. They cross "

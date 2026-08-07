@@ -2164,10 +2164,11 @@ def compact_raw_function() -> list[str]:
         ".type A64S_CSYM(a64_compact_raw_execute), %function",
         "#endif",
         "A64S_CSYM(a64_compact_raw_execute):",
-        # Nine AAPCS64 arguments: the RAM mask is at the entry SP.  Preserve
-        # every callee-saved register used by the persistent loop.
+        # Eight AAPCS64 arguments. x7 names a caller-owned context containing
+        # the flat-RAM oracle, optional resident fallback and exact split
+        # counters. Preserve every callee-saved register used by the loop; x29
+        # is the native-retirement count not yet committed across a fallback.
         "    stp x29, x30, [sp, #-96]!",
-        "    mov x29, sp",
         "    stp x19, x20, [sp, #16]",
         "    stp x21, x22, [sp, #32]",
         "    stp x23, x24, [sp, #48]",
@@ -2180,10 +2181,10 @@ def compact_raw_function() -> list[str]:
         "    mov w23, w4",       # code_base
         "    mov w24, w5",       # code_bytes
         "    mov w25, w6",       # remaining instruction budget
-        "    mov x27, x7",       # flat RAM
-        "    ldr w28, [sp, #96]", # ninth argument: flat-RAM mask
+        "    mov x27, x7",       # compact raw execution context
+        "    mov w28, w6",       # original budget, for exact total prefix
+        "    mov w29, wzr",      # native retirements pending cycle commit
         "    ldr w26, [x19, #60]", # architectural PC
-        "    mov w12, w25",      # original budget, for exact prefix
         # Pin the semantic jump table once rather than resolving it per
         # instruction.  The table contains relative offsets and is ordinary
         # signed text on every platform.
@@ -2220,7 +2221,7 @@ def compact_raw_function() -> list[str]:
         "    lsr w10, w9, #28",
         "    cmp w10, #14",
         "    b.eq .La64cr_condition_pass",
-        "    b.hi .La64cr_exit",
+        "    b.hi .La64cr_fallback",
         "    ldr w11, [x20]",
         "    msr nzcv, x11",
         "    ldrsw x15, [x17, w10, uxtw #2]",
@@ -2237,7 +2238,7 @@ def compact_raw_function() -> list[str]:
         "    cbz w10, .La64cr_dp",
         "    cmp w10, #1",
         "    b.eq .La64cr_memory",
-        "    b .La64cr_exit",
+        "    b .La64cr_fallback",
         "",
         ".La64cr_dp:",
         # PC operands/destinations and register-specified shifts remain outside
@@ -2245,18 +2246,18 @@ def compact_raw_function() -> list[str]:
         # every S/comparison opcode are exact, including shifter carry.
         "    ubfx w13, w9, #12, #4",
         "    cmp w13, #15",
-        "    b.eq .La64cr_exit",
+        "    b.eq .La64cr_fallback",
         "    ubfx w11, w9, #16, #4",
         "    cmp w11, #15",
-        "    b.eq .La64cr_exit",
+        "    b.eq .La64cr_fallback",
         "    ldr w11, [x19, w11, uxtw #2]",
         "    ldr w8, [x20]",
         "    ubfx w8, w8, #29, #1",
         "    tbnz w9, #25, .La64cr_dp_immediate",
-        "    tbnz w9, #4, .La64cr_exit",
+        "    tbnz w9, #4, .La64cr_fallback",
         "    and w10, w9, #0xf",
         "    cmp w10, #15",
-        "    b.eq .La64cr_exit",
+        "    b.eq .La64cr_fallback",
         "    ldr w10, [x19, w10, uxtw #2]",
         # Preserve the old zero-shift fast path. Every other immediate-shift
         # shape follows ARM's special amount-zero rules rather than AArch64's
@@ -2466,19 +2467,21 @@ def compact_raw_function() -> list[str]:
         # Immediate, pre-indexed, word, no-writeback LDR/STR only.  Requiring
         # alignment avoids depending on the guest SCTLR's legacy rotation
         # policy; every admitted access has one exact flat-RAM interpretation.
-        # A NULL RAM pointer is the MMU-aware code-window contract: no virtual
-        # data translation has been vouched for, so stop before any mutation.
-        "    cbz x27, .La64cr_exit",
-        "    tbnz w9, #25, .La64cr_exit",
-        "    tbz w9, #24, .La64cr_exit",
-        "    tbnz w9, #22, .La64cr_exit",
-        "    tbnz w9, #21, .La64cr_exit",
+        # A NULL flat-RAM pointer is the MMU-aware code-window contract. The
+        # resident path hands the current instruction to arm_step(); the
+        # non-resident oracle has no callback and still stops before mutation.
+        "    ldr x14, [x27, #0]",
+        "    cbz x14, .La64cr_fallback",
+        "    tbnz w9, #25, .La64cr_fallback",
+        "    tbz w9, #24, .La64cr_fallback",
+        "    tbnz w9, #22, .La64cr_fallback",
+        "    tbnz w9, #21, .La64cr_fallback",
         "    ubfx w11, w9, #16, #4",
         "    cmp w11, #15",
-        "    b.eq .La64cr_exit",
+        "    b.eq .La64cr_fallback",
         "    ubfx w13, w9, #12, #4",
         "    cmp w13, #15",
-        "    b.eq .La64cr_exit",
+        "    b.eq .La64cr_fallback",
         "    ldr w11, [x19, w11, uxtw #2]",
         "    and w10, w9, #0xfff",
         "    tbz w9, #23, .La64cr_memory_sub",
@@ -2488,14 +2491,15 @@ def compact_raw_function() -> list[str]:
         "    sub w10, w11, w10",
         ".La64cr_memory_address:",
         "    tst w10, #3",
-        "    b.ne .La64cr_exit",
-        "    and w10, w10, w28",
+        "    b.ne .La64cr_fallback",
+        "    ldr w15, [x27, #8]",
+        "    and w10, w10, w15",
         "    tbnz w9, #20, .La64cr_memory_load",
         "    ldr w11, [x19, w13, uxtw #2]",
-        "    str w11, [x27, w10, uxtw]",
+        "    str w11, [x14, w10, uxtw]",
         "    b .La64cr_memory_done",
         ".La64cr_memory_load:",
-        "    ldr w11, [x27, w10, uxtw]",
+        "    ldr w11, [x14, w10, uxtw]",
         "    str w11, [x19, w13, uxtw #2]",
         ".La64cr_memory_done:",
         "    add w26, w26, #4",
@@ -2556,15 +2560,68 @@ def compact_raw_function() -> list[str]:
         "    b .La64cr_condition_skip",
         "",
         ".La64cr_retire:",
+        "    add w29, w29, #1",
         "    subs w25, w25, #1",
         "    b.ne .La64cr_loop",
         "",
-        ".La64cr_exit:",
-        "    sub w0, w12, w25",
+        # Commit native cycles before a fallback because arm_step owns the
+        # next instruction's cycle accounting and may inspect the counter.
+        # The callback result is 0=no retirement, 1=retire+continue,
+        # 2=retire+stop. x19-x29 survive the C call by AAPCS64; the two table
+        # pointers are caller-saved and are rebuilt only on continuation.
+        ".La64cr_fallback:",
+        "    ldr x9, [x27, #48]",
+        "    cbz x9, .La64cr_exit",
         "    str w26, [x19, #60]",
+        "    cbz w29, .La64cr_fallback_committed",
+        "    ldr x10, [x21]",
+        "    add x10, x10, x29",
+        "    str x10, [x21]",
+        "    ldr x10, [x27, #64]",
+        "    add x10, x10, x29",
+        "    str x10, [x27, #64]",
+        "    mov w29, wzr",
+        ".La64cr_fallback_committed:",
+        "    ldr x9, [x27, #48]",
+        "    ldr x0, [x27, #56]",
+        "    blr x9",
+        "    mov w11, w0",
+        "    ldr w26, [x19, #60]",
+        "    cbz w11, .La64cr_exit",
+        "    cmp w11, #2",
+        "    b.hi .La64cr_exit",
+        "    ldr x10, [x27, #72]",
+        "    add x10, x10, #1",
+        "    str x10, [x27, #72]",
+        "    subs w25, w25, #1",
+        "    b.eq .La64cr_exit",
+        "    cmp w11, #1",
+        "    b.ne .La64cr_exit",
+        "#if defined(__APPLE__)",
+        "    adrp x16, .La64cr_dp_table@PAGE",
+        "    add x16, x16, .La64cr_dp_table@PAGEOFF",
+        "    adrp x17, .La64cr_cond_table@PAGE",
+        "    add x17, x17, .La64cr_cond_table@PAGEOFF",
+        "#else",
+        "    adrp x16, .La64cr_dp_table",
+        "    add x16, x16, :lo12:.La64cr_dp_table",
+        "    adrp x17, .La64cr_cond_table",
+        "    add x17, x17, :lo12:.La64cr_cond_table",
+        "#endif",
+        "    b .La64cr_loop",
+        "",
+        ".La64cr_exit:",
+        "    cbz w29, .La64cr_exit_committed",
         "    ldr x9, [x21]",
-        "    add x9, x9, x0",
+        "    add x9, x9, x29",
         "    str x9, [x21]",
+        "    ldr x10, [x27, #64]",
+        "    add x10, x10, x29",
+        "    str x10, [x27, #64]",
+        "    mov w29, wzr",
+        ".La64cr_exit_committed:",
+        "    sub w0, w28, w25",
+        "    str w26, [x19, #60]",
         "    ldp x27, x28, [sp, #80]",
         "    ldp x25, x26, [sp, #64]",
         "    ldp x23, x24, [sp, #48]",
@@ -2586,10 +2643,10 @@ def compact_raw_function() -> list[str]:
         "    .long .La64cr_dp_adc - .La64cr_dp_table",
         "    .long .La64cr_dp_sbc - .La64cr_dp_table",
         "    .long .La64cr_dp_rsc - .La64cr_dp_table",
-        "    .long .La64cr_exit - .La64cr_dp_table",
-        "    .long .La64cr_exit - .La64cr_dp_table",
-        "    .long .La64cr_exit - .La64cr_dp_table",
-        "    .long .La64cr_exit - .La64cr_dp_table",
+        "    .long .La64cr_fallback - .La64cr_dp_table",
+        "    .long .La64cr_fallback - .La64cr_dp_table",
+        "    .long .La64cr_fallback - .La64cr_dp_table",
+        "    .long .La64cr_fallback - .La64cr_dp_table",
         "    .long .La64cr_dp_orr - .La64cr_dp_table",
         "    .long .La64cr_dp_mov - .La64cr_dp_table",
         "    .long .La64cr_dp_bic - .La64cr_dp_table",

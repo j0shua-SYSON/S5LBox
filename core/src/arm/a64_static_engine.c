@@ -76,6 +76,7 @@ typedef struct {
     uint64_t compact_raw_attempts;
     uint64_t compact_raw_calls;
     uint64_t compact_raw_retired;
+    uint64_t compact_raw_fallback_retired;
     uint64_t fetch_refill_attempts;
     uint64_t fetch_refill_hits;
     uint64_t fetch_refill_skips;
@@ -799,6 +800,17 @@ uint64_t s5l8900_static_a64_compact_raw_retired(const s5l8900_t *m) {
 #endif
 }
 
+uint64_t s5l8900_static_a64_compact_raw_fallback_retired(
+        const s5l8900_t *m) {
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    const static_a64_state_t *state = static_state(m);
+    return state ? state->compact_raw_fallback_retired : 0u;
+#else
+    (void)m;
+    return 0u;
+#endif
+}
+
 uint64_t s5l8900_static_a64_fetch_refill_attempts(const s5l8900_t *m) {
 #if defined(S5LBOX_STATIC_A64_ENGINE)
     const static_a64_state_t *state = static_state(m);
@@ -858,13 +870,38 @@ unsigned s5l8900_static_a64_cached_witness_bytes(const s5l8900_t *m,
 }
 
 #if defined(S5LBOX_STATIC_A64_ENGINE)
+typedef struct {
+    s5l8900_t *machine;
+    arm_status_t status;
+} compact_raw_fallback_context_t;
+
+static a64_compact_raw_fallback_result_t compact_raw_fallback(void *opaque) {
+    compact_raw_fallback_context_t *context =
+        (compact_raw_fallback_context_t *)opaque;
+    unsigned result;
+
+    if (!context || !context->machine)
+        return A64_COMPACT_RAW_FALLBACK_NO_RETIRE;
+    result = s5l8900_static_a64_fallback_step(context->machine,
+                                              &context->status);
+    if (result > A64_COMPACT_RAW_FALLBACK_RETIRE_STOP)
+        return A64_COMPACT_RAW_FALLBACK_NO_RETIRE;
+    return (a64_compact_raw_fallback_result_t)result;
+}
+
 static unsigned try_compact_raw(s5l8900_t *m, static_a64_state_t *state,
-                                unsigned budget) {
+                                unsigned budget, arm_status_t *status) {
     arm_cpu_t *cpu = &m->cpu;
+    compact_raw_fallback_context_t fallback_context = {
+        .machine = m,
+        .status = ARM_OK,
+    };
     uint32_t fetch_block;
     uint32_t pc;
     bool priv;
     unsigned completed = 0u;
+    unsigned native_completed = 0u;
+    unsigned fallback_completed = 0u;
 
     state->compact_raw_attempts++;
     /* A branch can reach any address in the live 1 KiB window, so a sparse
@@ -873,6 +910,7 @@ static unsigned try_compact_raw(s5l8900_t *m, static_a64_state_t *state,
     if (!budget || m->pre_step_hook ||
         cpu->arch != ARM_ARCH_V6_ARM1176 ||
         !arm_mode_is_valid(cpu->cpsr) || cpu->abort_pending ||
+        (cpu->cpsr & ARM_CPSR_MODE_MASK) != ARM_MODE_USR ||
         (cpu->cpsr & (ARM_CPSR_T | ARM_CPSR_E)) != 0u ||
         (cpu->fiq_line && !(cpu->cpsr & ARM_CPSR_F)) ||
         (cpu->irq_line && !(cpu->cpsr & ARM_CPSR_I)))
@@ -885,14 +923,17 @@ static unsigned try_compact_raw(s5l8900_t *m, static_a64_state_t *state,
     if (!cpu->fetch_host || cpu->fetch_blk != fetch_block ||
         cpu->fetch_gen != cpu->tlb_gen || cpu->fetch_priv != priv)
         return 0u;
-    if (!a64_compact_raw_run_code_window(
+    if (!a64_compact_raw_run_code_window_resident(
             cpu, cpu->fetch_host, fetch_block, UINT32_C(0x400), budget,
-            &completed))
+            compact_raw_fallback, &fallback_context, &completed,
+            &native_completed, &fallback_completed))
         return 0u;
+    if (status) *status = fallback_context.status;
     if (completed) {
         state->compact_raw_calls++;
-        state->compact_raw_retired += completed;
-        state->retired += completed;
+        state->compact_raw_retired += native_completed;
+        state->compact_raw_fallback_retired += fallback_completed;
+        state->retired += native_completed;
     }
     return completed;
 }
@@ -973,7 +1014,8 @@ static unsigned try_graph(s5l8900_t *m, static_a64_state_t *state,
 #endif
 
 unsigned s5l8900_static_a64_try(s5l8900_t *m, unsigned max_insns,
-                                bool *known_negative) {
+                                bool *known_negative,
+                                arm_status_t *status) {
 #if defined(S5LBOX_STATIC_A64_ENGINE)
     static_a64_state_t *state = static_state(m);
     arm_cpu_t *cpu;
@@ -987,6 +1029,7 @@ unsigned s5l8900_static_a64_try(s5l8900_t *m, unsigned max_insns,
     bool refilled = false;
 
     if (known_negative) *known_negative = false;
+    if (status) *status = ARM_OK;
     if (!state || !state->enabled || !max_insns ||
         !a64_static_host_available() || !m->ram || !m->ram_size ||
         (m->ram_size & (m->ram_size - 1u)) != 0u)
@@ -1023,7 +1066,7 @@ unsigned s5l8900_static_a64_try(s5l8900_t *m, unsigned max_insns,
     budget = max_insns < state->chain_limit
            ? max_insns : state->chain_limit;
     if (state->compact_raw_enabled) {
-        unsigned completed = try_compact_raw(m, state, budget);
+        unsigned completed = try_compact_raw(m, state, budget, status);
         if (refilled)
             refill_predictor_record(state, refill_pc, refill_gen,
                                     refill_thumb, refill_priv, completed,
@@ -1151,6 +1194,7 @@ unsigned s5l8900_static_a64_try(s5l8900_t *m, unsigned max_insns,
     (void)m;
     (void)max_insns;
     if (known_negative) *known_negative = false;
+    if (status) *status = ARM_OK;
     return 0u;
 #endif
 }

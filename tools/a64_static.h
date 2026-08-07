@@ -218,6 +218,34 @@ bool a64_compact_raw_run_code_window(arm_cpu_t *cpu, const uint8_t *code,
                                      unsigned max_insns,
                                      unsigned *completed);
 
+/* A resident code-window invocation may hand an instruction it cannot execute
+ * to the architectural interpreter without returning through the outer SoC
+ * loop. The callback owns that one instruction's complete semantics and cycle
+ * accounting. NO_RETIRE leaves the current instruction untouched and stops;
+ * RETIRE_CONTINUE and RETIRE_STOP both promise exactly one successful
+ * retirement, with the latter ending the resident interval immediately. */
+typedef enum {
+    A64_COMPACT_RAW_FALLBACK_NO_RETIRE = 0,
+    A64_COMPACT_RAW_FALLBACK_RETIRE_CONTINUE,
+    A64_COMPACT_RAW_FALLBACK_RETIRE_STOP
+} a64_compact_raw_fallback_result_t;
+
+typedef a64_compact_raw_fallback_result_t
+    (*a64_compact_raw_fallback_fn)(void *opaque);
+
+/* Keep one build-time-linked AArch64 invocation resident across exact
+ * interpreter fallbacks. The caller still proves the live virtual-code window
+ * and bounds the whole interval to a machine-safe retirement budget. Branches
+ * leaving the window return to the caller rather than asking the fallback to
+ * fetch through an unproved pointer. `native_completed` and
+ * `fallback_completed` partition `completed` exactly. */
+bool a64_compact_raw_run_code_window_resident(
+    arm_cpu_t *cpu, const uint8_t *code, uint32_t code_base,
+    uint32_t code_bytes, unsigned max_insns,
+    a64_compact_raw_fallback_fn fallback, void *fallback_opaque,
+    unsigned *completed, unsigned *native_completed,
+    unsigned *fallback_completed);
+
 /* Execute against flat, power-of-two RAM. A non-loop block may be executed once;
  * repeated execution is accepted only when its exit PC equals its start PC.
  * The wrapper is intentionally narrower than arm_run: no MMU, faults, MMIO,

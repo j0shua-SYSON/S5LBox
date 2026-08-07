@@ -3,6 +3,7 @@
 #include "vfp.h"
 
 #include <limits.h>
+#include <stddef.h>
 #include <string.h>
 
 enum {
@@ -1547,6 +1548,37 @@ a64_compact_raw_admission_t a64_compact_raw_classify_instruction(
 }
 
 #if defined(S5LBOX_STATIC_A64_NATIVE)
+typedef struct {
+    uint8_t *flat_ram;
+    uint64_t flat_mask;
+    const void *dread;
+    const void *dwrite;
+    uint64_t *dread_hits;
+    uint64_t *dwrite_hits;
+    a64_compact_raw_fallback_fn fallback;
+    void *fallback_opaque;
+    uint64_t native_retired;
+    uint64_t fallback_retired;
+    uint32_t tlb_gen;
+    uint32_t priv_tag;
+} a64_compact_raw_context_t;
+
+_Static_assert(sizeof(void *) == 8u,
+               "compact raw native context requires AArch64 pointers");
+_Static_assert(offsetof(a64_compact_raw_context_t, flat_ram) == 0u &&
+                   offsetof(a64_compact_raw_context_t, flat_mask) == 8u &&
+                   offsetof(a64_compact_raw_context_t, dread) == 16u &&
+                   offsetof(a64_compact_raw_context_t, dwrite) == 24u &&
+                   offsetof(a64_compact_raw_context_t, dread_hits) == 32u &&
+                   offsetof(a64_compact_raw_context_t, dwrite_hits) == 40u &&
+                   offsetof(a64_compact_raw_context_t, fallback) == 48u &&
+                   offsetof(a64_compact_raw_context_t, fallback_opaque) == 56u &&
+                   offsetof(a64_compact_raw_context_t, native_retired) == 64u &&
+                   offsetof(a64_compact_raw_context_t, fallback_retired) == 72u &&
+                   offsetof(a64_compact_raw_context_t, tlb_gen) == 80u &&
+                   offsetof(a64_compact_raw_context_t, priv_tag) == 84u,
+               "compact raw native context layout drifted");
+
 extern int a64_static_execute(uint32_t *regs, uint32_t *cpsr,
                               uint64_t *cycles,
                               const a64_static_uop_t *uops,
@@ -1559,8 +1591,8 @@ extern uint32_t a64_compact_raw_execute(uint32_t *regs, uint32_t *cpsr,
                                         const uint8_t *code,
                                         uint32_t code_base,
                                         uint32_t code_bytes,
-                                        uint32_t max_insns, uint8_t *ram,
-                                        uint64_t ram_mask);
+                                        uint32_t max_insns,
+                                        a64_compact_raw_context_t *context);
 #endif
 
 bool a64_compact_raw_run(arm_cpu_t *cpu, const uint8_t *code,
@@ -1584,9 +1616,13 @@ bool a64_compact_raw_run(arm_cpu_t *cpu, const uint8_t *code,
         return false;
 #if defined(S5LBOX_STATIC_A64_NATIVE)
     {
+        a64_compact_raw_context_t context;
+        memset(&context, 0, sizeof context);
+        context.flat_ram = ram;
+        context.flat_mask = (uint64_t)ram_size - 1u;
         uint32_t result = a64_compact_raw_execute(
             cpu->r, &cpu->cpsr, &cpu->cycles, code, code_base, code_bytes,
-            max_insns, ram, (uint64_t)ram_size - 1u);
+            max_insns, &context);
         if (result > max_insns) return false;
         *completed = result;
         return true;
@@ -1602,10 +1638,26 @@ bool a64_compact_raw_run_code_window(arm_cpu_t *cpu, const uint8_t *code,
                                      uint32_t code_bytes,
                                      unsigned max_insns,
                                      unsigned *completed) {
+    unsigned native_completed = 0u;
+    unsigned fallback_completed = 0u;
+
+    return a64_compact_raw_run_code_window_resident(
+        cpu, code, code_base, code_bytes, max_insns, NULL, NULL, completed,
+        &native_completed, &fallback_completed);
+}
+
+bool a64_compact_raw_run_code_window_resident(
+        arm_cpu_t *cpu, const uint8_t *code, uint32_t code_base,
+        uint32_t code_bytes, unsigned max_insns,
+        a64_compact_raw_fallback_fn fallback, void *fallback_opaque,
+        unsigned *completed, unsigned *native_completed,
+        unsigned *fallback_completed) {
     uint64_t code_end;
 
-    if (!completed) return false;
+    if (!completed || !native_completed || !fallback_completed) return false;
     *completed = 0u;
+    *native_completed = 0u;
+    *fallback_completed = 0u;
     code_end = (uint64_t)code_base + code_bytes;
     if (!cpu || !code || !max_insns || code_bytes < 4u ||
         (code_base & 3u) != 0u || (code_bytes & 3u) != 0u ||
@@ -1618,15 +1670,37 @@ bool a64_compact_raw_run_code_window(arm_cpu_t *cpu, const uint8_t *code,
         return false;
 #if defined(S5LBOX_STATIC_A64_NATIVE)
     {
+        const bool priv = (cpu->cpsr & ARM_CPSR_MODE_MASK) != ARM_MODE_USR;
+        a64_compact_raw_context_t context;
+        memset(&context, 0, sizeof context);
+        if (fallback) {
+            context.dread = cpu->dread;
+            context.dwrite = cpu->dwrite;
+            context.dread_hits = &cpu->dread_hits;
+            context.dwrite_hits = &cpu->dwrite_hits;
+        }
+        context.fallback = fallback;
+        context.fallback_opaque = fallback_opaque;
+        context.tlb_gen = cpu->tlb_gen;
+        context.priv_tag = priv ? 1u : 0u;
         uint32_t result = a64_compact_raw_execute(
             cpu->r, &cpu->cpsr, &cpu->cycles, code, code_base, code_bytes,
-            max_insns, NULL, 0u);
-        if (result > max_insns) return false;
+            max_insns, &context);
+        if (result > max_insns || context.native_retired > result ||
+            context.fallback_retired > result ||
+            context.native_retired + context.fallback_retired != result ||
+            context.native_retired > UINT_MAX ||
+            context.fallback_retired > UINT_MAX)
+            return false;
         *completed = result;
+        *native_completed = (unsigned)context.native_retired;
+        *fallback_completed = (unsigned)context.fallback_retired;
         return true;
     }
 #else
     (void)code_end;
+    (void)fallback;
+    (void)fallback_opaque;
     return false;
 #endif
 }

@@ -22,7 +22,16 @@ bool s5l8900_static_a64_is_enabled(const s5l8900_t *m);
  * at an unchanged, already-cached unsupported instruction, `known_negative`
  * reports that the immediately following signed probe would return zero. */
 unsigned s5l8900_static_a64_try(s5l8900_t *m, unsigned max_insns,
-                                bool *known_negative);
+                                bool *known_negative,
+                                arm_status_t *status);
+
+/* One exact architectural fallback for the resident compact loop. Implemented
+ * beside the SoC run loop because only machine.c owns the complete
+ * level/input boundary. Return 0 for no retirement, 1 to continue the bounded
+ * resident interval, or 2 after one retirement that must return to the device
+ * tick immediately. */
+unsigned s5l8900_static_a64_fallback_step(s5l8900_t *m,
+                                          arm_status_t *status);
 
 /* Revalidate and account a known-negative probe bypass after the device tick.
  * False leaves the ordinary next-loop decision untouched. */

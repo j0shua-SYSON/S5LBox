@@ -37106,6 +37106,8 @@ external_md_work_ready:
             s5l8900_static_a64_compact_raw_calls(&mach);
         const uint64_t compact_raw_retired_before =
             s5l8900_static_a64_compact_raw_retired(&mach);
+        const uint64_t compact_raw_fallback_retired_before =
+            s5l8900_static_a64_compact_raw_fallback_retired(&mach);
         const uint64_t refill_attempts_before =
             s5l8900_static_a64_fetch_refill_attempts(&mach);
         const uint64_t refill_hits_before =
@@ -37208,6 +37210,9 @@ external_md_work_ready:
             uint64_t compact_raw_retired =
                 s5l8900_static_a64_compact_raw_retired(&mach) -
                 compact_raw_retired_before;
+            uint64_t compact_raw_fallback_retired =
+                s5l8900_static_a64_compact_raw_fallback_retired(&mach) -
+                compact_raw_fallback_retired_before;
             uint64_t refill_attempts =
                 s5l8900_static_a64_fetch_refill_attempts(&mach) -
                 refill_attempts_before;
@@ -37235,6 +37240,8 @@ external_md_work_ready:
                    "/%" PRIu64 "/%" PRIu64 "\n",
                    compact_raw_attempts, compact_raw_calls,
                    compact_raw_retired);
+            printf("run api A64: resident-fallback-retired=%" PRIu64 "\n",
+                   compact_raw_fallback_retired);
             printf("run api A64: refill attempts/hits/skips=%" PRIu64
                    "/%" PRIu64 "/%" PRIu64
                    " known-negative-bypasses=%" PRIu64

@@ -4032,6 +4032,8 @@ uint64_t s5l8900_static_a64_graph_chained_blocks(const s5l8900_t *m);
 uint64_t s5l8900_static_a64_compact_raw_attempts(const s5l8900_t *m);
 uint64_t s5l8900_static_a64_compact_raw_calls(const s5l8900_t *m);
 uint64_t s5l8900_static_a64_compact_raw_retired(const s5l8900_t *m);
+uint64_t s5l8900_static_a64_compact_raw_fallback_retired(
+    const s5l8900_t *m);
 uint64_t s5l8900_static_a64_fetch_refill_attempts(const s5l8900_t *m);
 uint64_t s5l8900_static_a64_fetch_refill_hits(const s5l8900_t *m);
 uint64_t s5l8900_static_a64_fetch_refill_skips(const s5l8900_t *m);
