@@ -2563,6 +2563,7 @@ def compact_raw_function() -> list[str]:
         "    add w29, w29, #1",
         "    subs w25, w25, #1",
         "    b.ne .La64cr_loop",
+        "    b .La64cr_exit",
         "",
         # Commit native cycles before a fallback because arm_step owns the
         # next instruction's cycle accounting and may inspect the counter.
