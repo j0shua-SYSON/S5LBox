@@ -5791,10 +5791,8 @@ static bool validate_compact_raw_vfp_nonarith_oracles(void) {
 
 #if defined(__aarch64__) && (defined(__GNUC__) || defined(__clang__))
 typedef struct {
-    arm_cpu_t *cpu;
     uint64_t expected_fpcr;
     uint64_t expected_fpsr;
-    arm_status_t status;
     bool observed_restored;
 } compact_raw_vfp_fp_callback_context_t;
 
@@ -5803,15 +5801,15 @@ static a64_compact_raw_fallback_result_t compact_raw_vfp_fp_callback(
     compact_raw_vfp_fp_callback_context_t *context =
         (compact_raw_vfp_fp_callback_context_t *)opaque;
     (void)next_window;
-    if (!context || !context->cpu)
+    if (!context)
         return A64_COMPACT_RAW_FALLBACK_NO_RETIRE;
     context->observed_restored =
         static_host_fpcr_read() == context->expected_fpcr &&
         static_host_fpsr_read() == context->expected_fpsr;
-    context->status = arm_step(context->cpu);
-    return context->status == ARM_OK
-        ? A64_COMPACT_RAW_FALLBACK_RETIRE_STOP
-        : A64_COMPACT_RAW_FALLBACK_NO_RETIRE;
+    /* Refuse retirement: the oracle owns only the external-boundary proof.
+     * Executing arm_step here under an intentionally non-RN caller FPCR and
+     * comparing it with a reference produced under RN would be invalid. */
+    return A64_COMPACT_RAW_FALLBACK_NO_RETIRE;
 }
 #endif
 
@@ -6065,8 +6063,8 @@ static bool validate_compact_raw_vfp_arithmetic_oracles(void) {
         }
     }
 
-    /* A result rejection handed to resident arm_step must restore the host
-     * environment before the C callback observes it. */
+    /* A result rejection handed to a refusing resident callback must restore
+     * the host environment before that external C boundary observes it. */
     {
         const uint32_t insn = VFP_ARITH_S(2,0,2,0,1);
         const uint32_t pc = UINT32_C(0x17f00);
@@ -6083,18 +6081,15 @@ static bool validate_compact_raw_vfp_arithmetic_oracles(void) {
         static_vfp_arith_set_operands(
             &compact, insn, UINT32_C(0x3f800000),
             UINT32_C(0x7f7fffff), UINT32_C(0x40000000));
-        reference = compact;
-        if (arm_step(&reference) != ARM_OK) return false;
+        before = compact;
 
         static_host_fpcr_write(
             (original_fpcr & ~(UINT64_C(3) << 22)) |
             (UINT64_C(1) << 22));
         static_host_fpsr_write(UINT64_C(0x08000015));
         memset(&context, 0, sizeof context);
-        context.cpu = &compact;
         context.expected_fpcr = static_host_fpcr_read();
         context.expected_fpsr = static_host_fpsr_read();
-        context.status = ARM_OK;
         completed = UINT_MAX;
         run_ok = a64_compact_raw_run_code_window_resident(
             &compact, &g_ram[pc], pc, 4u, 1u,
@@ -6106,11 +6101,11 @@ static bool validate_compact_raw_vfp_arithmetic_oracles(void) {
         static_host_fpcr_write(original_fpcr);
 
         if (!run_ok || !context.observed_restored ||
-            context.status != ARM_OK || completed != 1u ||
-            native_completed != 0u || fallback_completed != 1u ||
+            completed != 0u || native_completed != 0u ||
+            fallback_completed != 0u ||
             after_fpcr != context.expected_fpcr ||
             after_fpsr != context.expected_fpsr ||
-            !static_vfp_states_equal(&reference, &compact)) {
+            !static_vfp_states_equal(&before, &compact)) {
             fprintf(stderr,
                     "jitbench: compact raw VFP arithmetic callback "
                     "boundary mismatch\n");
@@ -6122,7 +6117,8 @@ static bool validate_compact_raw_vfp_arithmetic_oracles(void) {
     printf("COMPACT-RAW-VFP-ARITH-ORACLE exact=yes operations=9 widths=2 "
            "accepted=%u signed-zero=yes inexact=yes fallbacks=%zu "
            "conditions=yes partial-prefix=yes host-fp-state=yes "
-           "host-fp-session=yes callback-boundary=yes runtime-codegen=no\n",
+           "host-fp-session=yes callback-boundary=yes "
+           "callback-no-retire=yes runtime-codegen=no\n",
            exact_cases,
            sizeof VFP_ARITH_FALLBACKS / sizeof VFP_ARITH_FALLBACKS[0]);
     return true;
