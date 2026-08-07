@@ -1909,3 +1909,48 @@ A pass requires THREE things, and any one missing makes it meaningless:
   * non-zero `handled` in the site report,
   * a screen that is not blank (r257: 453,081 of 460,800 bytes non-zero),
   * byte-identical framebuffers.
+
+## Current performance checkpoint, 2026-08-07
+
+The preceding Line A/Line B plan is retained as development history, not as the
+current task list. MBX progressed far beyond A4: the experimental model now
+executes the measured app-shaped interval without decoder rejection or recovery,
+but it has not produced a 30-FPS acceptance result and therefore is not the
+shipping default. The build-time-signed no-JIT graph is also no longer the
+shipping execution path; an exact A9 app-bus replay measured it **6.17x slower**
+than repeated interpreter controls. It remains compiled for experiments and is
+disabled by default.
+
+The accepted path is the ordinary interpreter with exact, bounded structural
+reductions. The latest one, commit `3f7a47e`, batches redundant device-tick calls
+only inside proven-safe User-mode intervals and stops at the first modeled
+timebase edge, guest MMIO, host-input change, exception, or mode escape. It does
+not batch ARM instructions and it does not use JIT. Release and strict test
+matrices pass, all exact-SHA GitHub workflows are green, and every physical A/B
+arm produced identical guest disk and screen hashes.
+
+On an iPhone 6s Plus, a drift-balanced B/A/B/A/B/A replay of the same retained
+7.320--7.420 B dynamic interval measured:
+
+| result | baseline | candidate | change |
+|---|---:|---:|---:|
+| median core rate | 10.741804 Minsn/s | 11.235212 Minsn/s | +4.59% |
+| median mean changed cadence | 9.370/s | 9.796/s | +4.55% |
+| best changed-cadence window | 11.911/s | 11.975/s | not a 30-FPS result |
+
+The candidate safely batched 66,544,318 of 100 M retirements and no arm had a
+window at or above 30. This cadence meter mirrors the app's guest execution and
+publication schedule but excludes UIKit and Core Animation, so it is not a claim
+of displayed iPhone FPS. The separate foreground report remains roughly 0--4
+FPS. Brutally: the change is real and worth keeping, but the measured scene is
+still about threefold short of 30 and another small layout/opcode edit is not a
+credible route there.
+
+Snapshots are the right fast tool for exact, repeatable hot-scene A/B tests when
+their version, hashes, successful exit, active scanout, and terminal counters are
+all checked. They do not replace cold boot for driver lifecycle, provisioning,
+first-use state, or final end-to-end acceptance. The next decision should use one
+post-change A9 dynamic profile plus exact foreground presentation telemetry to
+choose between a substantially different no-runtime-code-generation interpreter
+strategy and a publication-boundary fix. Do not revive the measured 20--26%
+slower memoized decode cache, and do not infer visible FPS from Minsn/s.

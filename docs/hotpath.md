@@ -7767,3 +7767,76 @@ moving hot fields merely made the disassembly prettier**. The shipping A9 app no
 visible FPS can decouple. Another structure-layout or dispatch micro-edit is not justified. The next
 implementation must attack a larger boundary selected by exact dynamic-scene evidence or change the
 execution strategy substantially; 30 FPS remains unproved and not close on current evidence.
+
+### 2026-08-07: timebase-bounded User-mode tick batching is exact and buys about 4.6% on A9
+
+The next implementation was selected by a physical A9 profile, not by another opcode guess. A
+five-second root `spindump` of the ordinary cold-boot app sampled the emulator thread 502 times:
+`arm_step` held 203 exclusive samples (40.438%), `s5l8900_tick` held 87 (17.331%), and
+`exec_data_processing` held 80 (15.936%). The profile is a cold-boot workload rather than the retained
+SpringBoard scene, but it established that the per-retirement machine tick was a real A9 cost. The
+main thread used only 0.228 CPU seconds during the same five seconds while the emulator thread used
+4.777, so UIKit was not the CPU bottleneck in that cold-boot interval. The retained profile SHA-256 is
+`E08F8A76FD2BB9A19D2B83C85F9DEE9E63EF3104AD38B9E1FF83E278C1B9008E`.
+
+Commit `3f7a47ed0f5798d511be64a64be565b7e91f4570` therefore collapses only redundant calls to
+`s5l8900_tick`; it does not batch or translate ARM instructions. The interpreter may do this only in
+User mode, with no pre-step/HLE hook, with the signed engine disabled, clean device levels, unchanged
+host inputs, valid clock state, and only up to the first exact timebase edge. It still checks every
+retirement for guest MMIO, host input, or exception/mode escape and stops the interval immediately.
+WFI and privileged host SVC can advance device time from inside `arm_step`, which is why privileged
+execution is deliberately excluded. Two host-only counters record attempted intervals and their
+retirements; they are not guest state and did not move the snapshot format.
+
+The contract is tested against the literal `arm_step()` plus `s5l8900_tick(1)` oracle across User and
+privileged execution, fractional and one-to-one clocks, guest MMIO, external input, User SVC escape,
+pre-step policy, invalid clocks and an initially invalid accumulator. CPU, clock phase, interrupt
+state and every advancing device remain equal. Release tests pass 60/60 and strict/static-engine tests
+pass 65/65. Exact-SHA GitHub runs `31145472828` (core matrix), `31145472809` (stock-compatible iOS app)
+and `31145496571` (no-JIT iPhone replay) are green. The replay artifact is 3,546,864 bytes, source-exact
+to `3f7a47e`, with SHA-256
+`B2B5448BA15C531531E40F8147978DE98D43596C7C63539D6050ED63DAD44B21`.
+
+The matched Windows Release benchmark is intentionally reported even though it is unimpressive. Its
+new User-mode rows measured 38.66 -> 38.72 Minsn/s for ALU/branch (+0.2%) and 27.52 -> 27.39 Minsn/s
+for load/store (-0.5%). That is neutral. GCC already inlines the cheap early-out on this host; the A9
+profile showed an out-of-line tick, so physical-device evidence remained the acceptance gate.
+
+The iPhone 6s Plus test reused, read-only, the authenticated r446 checkpoint at 7.320 B retired
+instructions and ran to exactly 7.420 B. Before the series, the snapshot, `.mdimage`, and `.mdstate`
+still had SHA-256 values
+`6A1F8ECF15F71AE4AC020C26E162C72C723BDEB0B04AB7BCE7BC317FC7311C61`,
+`06AAAA84FB4BFEAE5A647290C9B50BEBE7640F420457089F40BDBED961D6992D`, and
+`C152E63315BE0F62ECB81E55C2A1B9CE7394708360AB00069210A7DCD7969CB8`; the kernel, device tree and
+rootfs still had
+`0D8CDB339D37CF37A1DB2638FFF79272ECD63A17764BF7666EFA1618725DF70C`,
+`4867C95FEDF544BDA2ECAA2626AE14C01A60D7771DC53FFE6FD3A6AAC8B8BA57`, and
+`C3251E7F092C939D5818E92086CB47680981CFB03731DE7B55D238C942EB5E82`. Every arm used canonical app bus callbacks, direct plain-RAM writes,
+interpreter control, 100,000-instruction app chunks, a fresh disposable work image, and the same
+frame-meter contract. The sequence was deliberately balanced B/A/B/A/B/A because the plugged-in
+phone sped up during the series:
+
+| order | build | core rate | mean / max changed cadence | stderr | zero / >=30 windows |
+|---|---|---:|---:|---:|---:|
+| B0 | `3f7a47e` candidate | 10.729454 Minsn/s | 9.358 / 11.636 | 0 bytes | 0 / 0 |
+| A1 | `9ad43b6` baseline | 10.625308 Minsn/s | 9.231 / 9.962 | 0 bytes | 0 / 0 |
+| B1 | `3f7a47e` candidate | 11.235212 Minsn/s | 9.796 / 11.975 | 0 bytes | 0 / 0 |
+| A2 | `9ad43b6` baseline | 10.741804 Minsn/s | 9.370 / 11.351 | 0 bytes | 0 / 0 |
+| B2 | `3f7a47e` candidate | 11.682340 Minsn/s | 10.168 / 11.586 | 0 bytes | 0 / 0 |
+| A3 | `9ad43b6` baseline | 11.431719 Minsn/s | 9.965 / 11.911 | 0 bytes | 0 / 0 |
+
+The baseline/candidate medians are 10.741804/11.235212 Minsn/s (**+4.59%**) and 9.370/9.796 mean
+changed cadence (**+4.55%**). A simple linear-trend fit over the alternating order estimates +4.64%
+core throughput and +4.72% cadence, so the conclusion does not depend on pretending the upward drift
+was absent. The candidate deterministically covered 66,544,318 of 100 M retirements (66.544%) in
+971,832 intervals with a mean of 68.473 retirements. Every arm advanced exactly 260 CLCD VBlanks and
+86 post-baseline changed signatures, ended with work-image SHA-256
+`06AAAA84FB4BFEAE5A647290C9B50BEBE7640F420457089F40BDBED961D6992D`, and produced byte-identical
+screen SHA-256 `F23E8D07E9C863755DBB1BFDE4A1892F17110FE529A56F676C0EBFFB02EEB7C7`.
+
+Brutal status: **this is a repeatable, exact A9 improvement and still not close to 30 FPS**. The best
+candidate window in the balanced series was 11.975 FPS, the candidate median mean was 9.796, and not
+one window reached 30. Tick batching removes a measured tax; it does not supply the roughly threefold
+gain still missing from this scene, and it cannot explain historical 20--40 Minsn/s foreground runs
+that remained visually slow. Keep this layer, but the next step still has to be a larger no-JIT
+execution/presentation change selected by dynamic evidence rather than another small layout edit.
