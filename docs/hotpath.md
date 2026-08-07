@@ -7884,3 +7884,128 @@ must extend exact coverage in census order, then enter the real SoC only behind 
 interrupt-safe, live-fetch contract with serialized-machine equality. Only after restored replay and
 physical A9 A/B evidence may it become an app candidate. A marginal product result still rejects it,
 regardless of this attractive synthetic ceiling.
+
+### 2026-08-07: the compact loop survives the MMU-on SoC boundary; firmware and A9 still decide
+
+Commits `49982515dc92128c23c439d10ba76db94936c67f` and
+`d172e32dcd3a44e0a7a122d629eaed0b76de9ef5` close the first obvious semantic gaps instead of
+optimizing the original favourable loop. The compact decoder now implements all fourteen ordinary
+A32 conditions, all sixteen data-processing flag/comparison forms, immediate rotation, and every
+immediate LSL/LSR/ASR/ROR/RRX register shift. PC operands/destinations, register-specified shifts,
+Thumb and most instruction classes still stop before mutation. Exact-SHA core runs `31151397911`
+and `31151785140`, and stock-compatible iOS runs `31151397916` and `31151785167`, are green.
+
+Commit `91be5c119173460db44833e56e5e85453a8593a5` then models that exact admission rule against the
+unchanged restored 7.100--7.110 B interval. The replay exits zero, writes no stderr or external-media
+failure, and retains work-image SHA-256
+`8A59C388C481165F460984926AA5FFB1B72A0E9030216CD0038DE9B3264B79FE` and screen SHA-256
+`1EF63FFE3EEFD976416E17120A36BA074BF295EA0955D716E2D345FCC5EA0A9E`. Its accounting closes at
+9,999,489/9,999,489 fetched instructions:
+
+| exact restored-stream outcome | instructions | fetched share |
+|---|---:|---:|
+| condition-passed compact execution | 4,977,851 | 49.781% |
+| failed-condition architectural no-op | 811,454 | 8.115% |
+| **total semantically admitted** | **5,789,305** | **57.896%** |
+| unsupported instruction class | 2,139,357 | 21.395% |
+| Thumb | 1,355,047 | 13.551% |
+| every other rejection combined | 715,780 | 7.158% |
+
+The admitted instructions form 1,103,946 runs with mean length 5.244 and maximum 2,415. Requiring
+at least four/eight/sixteen consecutive admissions would retain only 79.736%/61.880%/40.295% of the
+admitted population. More importantly, the guest MMU is enabled at every one of the 9,999,489
+observations. The earlier flat-RAM wrapper therefore has **zero real-firmware entries**, regardless
+of its synthetic speed. This is a categorical blocker, not a small coverage caveat. Exact-SHA core
+run `31153034889` and iOS run `31153034865` are green.
+
+Commit `c078a4b142a8d51deab8ed9a4e10111e3ee6cdf8` removes only that blocker. The caller must supply
+the CPU's current proven 1 KiB virtual fetch window; the path rechecks its virtual block,
+translation generation and privilege and refuses Thumb, big endian, abort, an unmasked interrupt,
+an invalid mode, or any pre-step hook. It performs no page-table walk and claims no data-translation
+authority. A condition-passed data access therefore stops before the instruction mutates state;
+the interpreter still owns translation, faults, MMIO and the access itself. The mode is default off,
+mutually exclusive with the decoded graph/persistent paths, bounded by `s5l8900_run()` to the first
+device-time edge, and uses ordinary build-time-linked text rather than runtime code generation.
+
+The Apple gate runs an identity-mapped MMU-on User-mode loop through the complete machine API. The
+reference uses the exact interpreter tick batcher; the compact arm uses the signed engine's
+equivalent first-timebase-edge bound. Setup and warm-up stay outside timing. Every repetition must
+retire the full requested count through the compact counters and then produce a byte-identical
+complete serialized machine. Exact-SHA core run `31154140877` is green across all eight jobs and
+stock-compatible iOS run `31154140615` is green. The sustained 200 M-instruction result is:
+
+| Apple arm64 runner | interpreter | compact MMU-on SoC path | speedup | exact bounded calls |
+|---|---:|---:|---:|---:|
+| macOS 14 | 71.821 Minsn/s | 185.636 Minsn/s | **2.585x** | 2,912,622 |
+| macOS 15 | 64.960 Minsn/s | 171.043 Minsn/s | **2.633x** | 2,912,622 |
+
+All three repetitions on both hosts retire exactly 200,000,000 compact instructions and pass the
+serialized-machine comparison. The simultaneous direct semantic-loop medians remain 3.203x/3.763x
+for ALU/mixed on macOS 14 and 3.272x/4.027x on macOS 15. The smaller but still large SoC ratios are
+the honest number: roughly one third of the attractive flat-loop gain is spent on real machine
+entry, live translation witnesses, timebase splitting and device ticks.
+
+Brutal status: **the new architecture has survived a materially harder boundary at 2.585x, but it
+has not yet accelerated one real firmware instruction on Apple hardware.** The synthetic SoC loop
+is deliberately compute-only and achieves 100% compact retirement. Real restored firmware admits
+57.896% in much shorter runs, stops at every condition-passed data access, and may lose the entire
+gain to repeated entry/refusal overhead. No shipping app policy changed, no physical A9 result
+exists for this path, and these Minsn/s numbers say nothing about displayed iPhone FPS. The next
+valid decision is a same-binary interpreter/compact replay of the authenticated restored interval,
+followed by a balanced A9 A/B only if that replay is exact and positive. App integration before
+those gates would be optimism replacing evidence.
+
+Commit `9a8f5558f010f4f69b44adbf88fbea03a3c2ff09` adds the missing same-binary
+restored-replay control. `--interpreter-control` and `--compact-raw-control` now select the two arms
+without changing the executable or guest inputs; the compact arm requires `--run-api`, is mutually
+exclusive with the interpreter arm, refuses HLE because its exact-PC pre-step hook invalidates the
+in-loop branch contract, and reports attempts, successful calls and retired instructions separately.
+It changes diagnostic tooling only: the shipping app policy remains untouched. The post-change local
+suites pass 65/65 in the strict signed-engine build and 60/60 in the release build. Exact-SHA core
+run `31154771824` is green across all eight jobs and stock-compatible iOS run `31154771769` is green.
+Those results prove that the A/B instrument is buildable and regression-clean; they still do not
+prove that compact execution wins on restored firmware or improves one displayed frame.
+
+### 2026-08-07: restored firmware rejects the fragmented compact wrapper on A9
+
+Manual no-JIT device workflow run `31155444985` built commit `9a8f5558` successfully for iPhoneOS
+arm64. The hosted artifact is 3,566,272 bytes with SHA-256
+`42E3430F6D45F4FEDA9C49E1CE9D16915F44400715298D4971DC1DA6AD060007`; the byte-identical phone
+copy executed without phone-side re-signing. Immediately before the test, iOS MCP re-hashed the
+retained r446 snapshot, media image and media state plus the kernel, device tree and root file
+system. All six matched the canonical hashes recorded above.
+
+The physical iPhone 6s Plus (`iPhone8,2`, A9, iOS 15.8.5) then ran a reversed
+interpreter/compact/compact/interpreter bracket over the same 7.320--7.330 B restored interval.
+Every arm used the same executable, canonical app bus/direct writes, `--run-api`, frame meter and
+fresh disposable work image:
+
+| arm | core rate | complete host-span rate | compact retired / calls / attempts |
+|---|---:|---:|---:|
+| interpreter A | 17.107820 Minsn/s | 16.629 Minsn/s | 0 / 0 / 0 |
+| compact B | 11.887016 Minsn/s | 11.847 Minsn/s | 4,298,791 / 1,688,084 / 6,974,776 |
+| compact C | 11.975101 Minsn/s | 11.936 Minsn/s | 4,298,791 / 1,688,084 / 6,974,776 |
+| interpreter D | 17.108728 Minsn/s | 17.050 Minsn/s | 0 / 0 / 0 |
+
+All four arms exit zero, write empty stderr, retire exactly 10,000,000 instructions and finish
+with work-image SHA-256
+`06AAAA84FB4BFEAE5A647290C9B50BEBE7640F420457089F40BDBED961D6992D` and screen SHA-256
+`0CF5CB094E56D5FF444DB2F7DE5B838357D83295BC3607C59B669F0AAE815335`. Correctness therefore
+passes. Performance does not: the medians are 17.108274 versus 11.931059 Minsn/s, so the compact
+arm is **30.26% slower**. Reversing the order changes neither counter set and barely changes either
+rate, which rejects a warm-up or order explanation without wasting time on a ceremonial 100 M run.
+
+The failure mechanism is structural. Each successful native call retires only 2.5465 instructions
+on average, and 5,286,692 of 6,974,776 attempted entries retire nothing. The real stream therefore
+pays the AArch64 wrapper and machine-entry cost millions of times, while enabling the engine also
+forfeits the accepted interpreter tick batch on fallback instructions. This is the opposite of the
+synthetic SoC loop's roughly 68.7 instructions per call. The compact mode remains default off and
+must not enter the app.
+
+Brutal status: **the first physical-firmware gate killed this implementation, while preserving the
+underlying live-byte idea.** A credible successor must stay resident across interpreter fallbacks,
+reuse proven MMU read/write cache witnesses for RAM accesses, and amortize entry to one bounded
+machine interval instead of one tiny semantic run. Filtering or micro-tuning the current 1.69 M
+calls cannot plausibly reach 30 FPS. Evidence is retained under
+`work/artifacts/9a8f555-a9-compact-raw-gate-20260807/`. The reported scanout/publication cadence is
+still emulator-thread telemetry, not displayed UIKit/Core Animation FPS.
