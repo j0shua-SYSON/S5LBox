@@ -2151,10 +2151,10 @@ def compact_raw_function() -> list[str]:
     instruction bytes directly and keeps the architectural PC plus the flat
     RAM base resident across instructions.  It deliberately accepts only a
     narrow, exactly testable subset: conditional data-processing with complete
-    immediate/register-LSL#0 NZCV semantics, aligned immediate word LDR/STR,
-    and immediate B/BL.  An unsupported instruction stops before mutation and
-    the return value is the exact retired prefix. Product integration is
-    intentionally a later decision.
+    immediate/register-immediate-shift NZCV semantics, aligned immediate word
+    LDR/STR, and immediate B/BL. An unsupported instruction stops before
+    mutation and the return value is the exact retired prefix. Product
+    integration is intentionally a later decision.
     """
     return [
         "",
@@ -2240,9 +2240,9 @@ def compact_raw_function() -> list[str]:
         "    b .La64cr_exit",
         "",
         ".La64cr_dp:",
-        # PC operands/destinations and nonzero register shifts remain outside
-        # this tranche. Immediate rotation and every S/comparison opcode are
-        # exact, including the shifter-carry rule for logical flag writes.
+        # PC operands/destinations and register-specified shifts remain outside
+        # this tranche. Immediate rotation, every immediate register shift and
+        # every S/comparison opcode are exact, including shifter carry.
         "    ubfx w13, w9, #12, #4",
         "    cmp w13, #15",
         "    b.eq .La64cr_exit",
@@ -2253,12 +2253,63 @@ def compact_raw_function() -> list[str]:
         "    ldr w8, [x20]",
         "    ubfx w8, w8, #29, #1",
         "    tbnz w9, #25, .La64cr_dp_immediate",
-        "    tst w9, #0xff0",
-        "    b.ne .La64cr_exit",
+        "    tbnz w9, #4, .La64cr_exit",
         "    and w10, w9, #0xf",
         "    cmp w10, #15",
         "    b.eq .La64cr_exit",
         "    ldr w10, [x19, w10, uxtw #2]",
+        # Preserve the old zero-shift fast path. Every other immediate-shift
+        # shape follows ARM's special amount-zero rules rather than AArch64's
+        # modulo-32 variable-shift behavior.
+        "    tst w9, #0xff0",
+        "    b.eq .La64cr_dp_operand_ready",
+        "    ubfx w14, w9, #7, #5",
+        "    ubfx w15, w9, #5, #2",
+        "    cbz w15, .La64cr_shift_lsl",
+        "    cmp w15, #1",
+        "    b.eq .La64cr_shift_lsr",
+        "    cmp w15, #2",
+        "    b.eq .La64cr_shift_asr",
+        "    b .La64cr_shift_ror",
+        ".La64cr_shift_lsl:",
+        "    mov w15, #32",
+        "    sub w15, w15, w14",
+        "    lsrv w15, w10, w15",
+        "    and w8, w15, #1",
+        "    lslv w10, w10, w14",
+        "    b .La64cr_dp_operand_ready",
+        ".La64cr_shift_lsr:",
+        "    cbz w14, .La64cr_shift_lsr_32",
+        "    sub w15, w14, #1",
+        "    lsrv w15, w10, w15",
+        "    and w8, w15, #1",
+        "    lsrv w10, w10, w14",
+        "    b .La64cr_dp_operand_ready",
+        ".La64cr_shift_lsr_32:",
+        "    lsr w8, w10, #31",
+        "    mov w10, wzr",
+        "    b .La64cr_dp_operand_ready",
+        ".La64cr_shift_asr:",
+        "    cbz w14, .La64cr_shift_asr_32",
+        "    sub w15, w14, #1",
+        "    lsrv w15, w10, w15",
+        "    and w8, w15, #1",
+        "    asrv w10, w10, w14",
+        "    b .La64cr_dp_operand_ready",
+        ".La64cr_shift_asr_32:",
+        "    lsr w8, w10, #31",
+        "    asr w10, w10, #31",
+        "    b .La64cr_dp_operand_ready",
+        ".La64cr_shift_ror:",
+        "    cbz w14, .La64cr_shift_rrx",
+        "    rorv w10, w10, w14",
+        "    lsr w8, w10, #31",
+        "    b .La64cr_dp_operand_ready",
+        ".La64cr_shift_rrx:",
+        "    and w15, w10, #1",
+        "    lsr w10, w10, #1",
+        "    orr w10, w10, w8, lsl #31",
+        "    mov w8, w15",
         "    b .La64cr_dp_operand_ready",
         ".La64cr_dp_immediate:",
         "    and w10, w9, #0xff",

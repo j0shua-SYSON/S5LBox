@@ -5110,6 +5110,7 @@ static bool validate_compact_raw_oracles(void) {
     };
     uint32_t dp_program[sizeof result_ops / sizeof result_ops[0] * 2u];
     uint32_t flag_program[32];
+    uint32_t shift_program[16];
     const uint32_t memory_branch[] = {
         UINT32_C(0xe5870000), /* STR r0,[r7,#0] */
         UINT32_C(0xe5971000), /* LDR r1,[r7,#0] */
@@ -5156,6 +5157,17 @@ static bool validate_compact_raw_oracles(void) {
         flag_program[opcode * 2u + 1u] = UINT32_C(0xe0100000) |
             (opcode << 21) | (rn << 16) | (rd << 12) | rm;
     }
+    for (unsigned type = 0u; type < 4u; type++) {
+        static const unsigned amounts[4] = {0u, 1u, 7u, 31u};
+        for (unsigned a = 0u; a < 4u; a++) {
+            unsigned index = type * 4u + a;
+            unsigned rd = index & 7u;
+            unsigned rm = (index + 1u) & 7u;
+            shift_program[index] = UINT32_C(0xe0100000) |
+                (13u << 21) | (rd << 12) | (amounts[a] << 7) |
+                (type << 5) | rm;
+        }
+    }
     if (!compact_raw_compare("data-processing", dp_program,
                              (unsigned)(sizeof dp_program /
                                         sizeof dp_program[0]),
@@ -5177,6 +5189,17 @@ static bool validate_compact_raw_oracles(void) {
                                         sizeof flag_program[0]) + 1u,
                              (unsigned)(sizeof flag_program /
                                         sizeof flag_program[0])))
+        return false;
+    if (!compact_raw_compare("register-immediate-shifts", shift_program,
+                             (unsigned)(sizeof shift_program /
+                                        sizeof shift_program[0]),
+                             UINT32_C(0x1600),
+                             (unsigned)(sizeof shift_program /
+                                        sizeof shift_program[0]),
+                             (unsigned)(sizeof shift_program /
+                                        sizeof shift_program[0]) + 1u,
+                             (unsigned)(sizeof shift_program /
+                                        sizeof shift_program[0])))
         return false;
     if (!compact_raw_compare("conditions", A32_IMM_CONDITIONS,
                              (unsigned)(sizeof A32_IMM_CONDITIONS /
@@ -5217,9 +5240,9 @@ static bool validate_compact_raw_oracles(void) {
         return false;
     }
 
-    printf("COMPACT-RAW-ORACLE exact=yes cases=7 result-opcodes=12 "
+    printf("COMPACT-RAW-ORACLE exact=yes cases=8 result-opcodes=12 "
            "flag-opcodes=16 conditions=14 immediate-rotate=yes "
-           "register-lsl0=yes word-load-store=yes branch-link=yes "
+           "register-immediate-shifts=all word-load-store=yes branch-link=yes "
            "live-bytes=yes out-of-window=yes unsupported-prefix=yes "
            "invalid-contract-rollback=yes\n");
     return true;

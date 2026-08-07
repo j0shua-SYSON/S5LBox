@@ -172,7 +172,7 @@ bool a64_static_host_available(void);
 /* Execute a deliberately narrow A32 subset directly from live instruction
  * bytes, without decoded records or the static handler graph.  This is a
  * feasibility/oracle boundary, not a product engine: MMU, interrupts, Thumb,
- * MMIO, PC operands/destinations, nonzero register shifts and unaligned data
+ * MMIO, PC operands/destinations, register-specified shifts and unaligned data
  * accesses are refused. A supported prefix may retire before the first
  * unsupported or out-of-window instruction; `completed` reports that exact
  * prefix. Runtime code generation is never used--the loop is ordinary
