@@ -8009,3 +8009,62 @@ machine interval instead of one tiny semantic run. Filtering or micro-tuning the
 calls cannot plausibly reach 30 FPS. Evidence is retained under
 `work/artifacts/9a8f555-a9-compact-raw-gate-20260807/`. The reported scanout/publication cadence is
 still emulator-thread telemetry, not displayed UIKit/Core Animation FPS.
+
+### 2026-08-07: proven MMU data-cache hits help substantially, but the A9 still rejects the path
+
+Commits `146d56b12f011c4ff94e429610f371a9cee380c4` and
+`637e3acc5b037f8f0b92b85125da15b36556b5a5` attack the two measured structural costs rather than
+adding a catalogue of isolated handlers. The first keeps one build-time-linked AArch64 invocation
+resident while `arm_step()` executes unsupported instructions exactly. The second executes only
+aligned, immediate, pre-indexed, word, no-writeback LDR/STR operations through the interpreter's
+already-proven 1 KiB `dread`/`dwrite` witnesses. Host pointer, virtual tag, privilege and translation
+generation must all match; DWRITE additionally requires the frontend's live direct-write consent.
+Every miss reaches the literal fallback before mutation, so the interpreter still owns walks,
+faults, MMIO, cache fill and observer policy.
+
+The Apple exact gate at `637e3ac` moves its controlled MMU-on loop from 5/3 native/fallback
+retirements to 7/1 while preserving the complete serialized machine. Exact core run `31159903991`
+and stock-compatible iOS run `31159903993` are green. Diagnostic-only commit
+`d2b6c9a321cb9e05637e1eb0d3f1be01fd4f6dea` adds interval data-cache deltas; all eight jobs in core
+run `31160539347` and device replay build `31160623542` are green.
+
+The physical iPhone 6s Plus then ran the same authenticated 7.320--7.330 B interval in balanced
+interpreter/candidate/candidate/interpreter order. iOS MCP re-hashed the snapshot, media triplet,
+kernel, device tree and root file system first; all six remained canonical. Every arm used the same
+3,566,736-byte no-JIT binary, canonical app bus/direct writes, fresh disposable work image,
+`--run-api` and frame meter:
+
+| arm | core rate | complete span | signed retired | resident fallback | calls / attempts |
+|---|---:|---:|---:|---:|---:|
+| interpreter A | 16.513995 Minsn/s | 16.204 Minsn/s | 0 | 0 | 0 / 0 |
+| cache resident B | 15.363272 Minsn/s | 15.309 Minsn/s | 4,208,810 | 2,483,250 | 451,794 / 3,539,283 |
+| cache resident C | 15.743370 Minsn/s | 15.686 Minsn/s | 4,208,810 | 2,483,250 | 451,794 / 3,539,283 |
+| interpreter D | 17.143719 Minsn/s | 17.075 Minsn/s | 0 | 0 | 0 / 0 |
+
+All four arms exit zero, write empty stderr, retire exactly 10,000,000 instructions and end with
+byte-identical work-image SHA-256
+`06AAAA84FB4BFEAE5A647290C9B50BEBE7640F420457089F40BDBED961D6992D` and screen SHA-256
+`0CF5CB094E56D5FF444DB2F7DE5B838357D83295BC3607C59B669F0AAE815335`. Every arm also reports the
+same 3,003,411/182,581 dread hits/misses and 1,725,312/41,799 dwrite hits/misses. The compact path
+increments those same architectural counters when it consumes a witness; it does not invent a
+separate favourable metric.
+
+Relative to the preceding resident gate, exactly 1,080,656 instructions move from fallback to
+signed retirement. Native coverage rises 34.55% to 42.0881%; in-loop fallback falls 30.32%; the new
+resident median improves 6.78% from 14.565440 to 15.553321 Minsn/s. The acceptance comparison is the
+contemporaneous interpreter median of 16.828857, however, so the candidate remains **7.58% slower**.
+It stays disabled and changes the shipping app by zero FPS.
+
+The next bottleneck is now narrower and directly counted. Interpreter control batches 6,755,697
+retirements into 98,664 user-mode intervals (mean 68.472). The candidate disables that batcher but
+fragments 6,692,060 resident retirements into 451,794 positive calls and performs 3,539,283 probes,
+3,087,489 of which retire nothing. The fixed proven 1 KiB fetch window is the main artificial return
+boundary. The next implementation must reload the post-fallback proven fetch window and remain in
+the same AArch64 invocation until the actual timebase/device edge. Its exact oracle must cross a
+window both sequentially and by branch, refuse an unavailable witness without mutation, and retain
+serialized-machine equality before another A9 gate.
+
+Brutal status: **this is real structural progress from -30.26% to -13.99% to -7.58%, not a win and
+not evidence that 30 displayed FPS is close.** More opcode whack-a-mole is no longer justified.
+Evidence is retained under `work/artifacts/d2b6c9a-a9-cache-witness-gate-20260807/`. The reported
+scanout/publication cadence remains emulator-thread telemetry, not UIKit/Core Animation FPS.
