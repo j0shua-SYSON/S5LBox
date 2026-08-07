@@ -8159,3 +8159,46 @@ Brutal status: **the new census explains the repeated losses but adds zero accep
 It supports a plausible Amdahl path only if the broad native semantics retain their measured inner-
 loop advantage after real VFP, Thumb and memory work. The interpreter remains the stock policy.
 Evidence is retained under `work/artifacts/compact-raw-admission-7320-a66377f/`.
+
+### 2026-08-07: the callback-free mixed-Thumb tier raises exact admission to 69.430%
+
+Commit `288b616856afa508a616ee364a83904b24882307` extends the build-time-linked live
+AArch64 loop into a mixed A32/Thumb engine. It decodes and executes, inside the
+signed loop, the broad Thumb families proven by the existing interpreter: immediate
+and register shifts, all 16 ALU operations, high-register operations, PC/SP address
+forms, conditional and unconditional control flow, A32/Thumb state exchange, and
+witnessed word/byte/halfword/signed memory operations. Unsupported Thumb encodings
+still fall back exactly. This is a stock-compatible ahead-of-time engine; it adds no
+JIT entitlement, jailbreak dependency, decoded graph, or common-instruction C
+callback.
+
+Apple arm64 differential validation covers 99 isolated Thumb cases, including shift
+counts 0, 1, 31, 32 and 33, all ALU operations and condition codes, high-register and
+state-switch paths, and all admitted memory kinds. Seven resident-loop cases also
+prove mixed A32/Thumb continuation, unsupported-Thumb fallback, live read witnessing,
+and consented writes. Those tests compare the compact engine with the interpreter;
+they are semantic evidence, not a throughput or displayed-frame-rate benchmark.
+
+The exact r446 7.320--7.330 B census was then repeated with the new classifier at
+workflow commit `0a1d1ff0aabf86fd053b30fd68070fa54760c8db`. It again accounts for
+9,999,510 fetched instructions plus 490 interrupt entries, exits zero with empty
+stderr, and preserves canonical derived work-image SHA-256
+`06AAAA84FB4BFEAE5A647290C9B50BEBE7640F420457089F40BDBED961D6992D` and screen
+SHA-256 `45E3B4807D81A42EB14251246CA94F3149647462A0BC79C4C865C9F2418B6B57`.
+
+| exact 10 M classifier outcome | A32-only tier | mixed-Thumb tier | delta |
+|---|---:|---:|---:|
+| admitted | 5,804,750 (58.050%) | 6,942,629 (69.430%) | +1,137,879 (+11.380 pp) |
+| condition-passed execution | 4,992,391 | 6,056,466 | +1,064,075 |
+| failed-condition no-op | 812,359 | 886,163 | +73,804 |
+| rejected | 4,194,760 | 3,056,881 | -1,137,879 |
+
+Of 1,343,144 observed Thumb instructions, 1,137,879 are now admitted and 205,265
+remain outside the tier, for **84.718% Thumb admission**. The result is substantial
+coverage progress, but it is not yet accepted speed: no physical-phone A/B was run,
+the interpreter remains stock policy, and there is still no new UIKit/Core Animation
+FPS measurement. The dominant next gap is unchanged VFP: 1,705,451 observations,
+32,097 condition skips, and **1,673,354 condition-passed instructions** not yet
+executed by the compact tier. Another phone gate before broad VFP coverage would
+mostly remeasure known fallback overhead. Complete evidence is under
+`work/artifacts/compact-raw-thumb-admission-7320-0a1d1ff-r1/`.
