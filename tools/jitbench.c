@@ -5109,6 +5109,7 @@ static bool validate_compact_raw_oracles(void) {
         0u, 1u, 2u, 3u, 4u, 5u, 6u, 7u, 12u, 13u, 14u, 15u,
     };
     uint32_t dp_program[sizeof result_ops / sizeof result_ops[0] * 2u];
+    uint32_t flag_program[32];
     const uint32_t memory_branch[] = {
         UINT32_C(0xe5870000), /* STR r0,[r7,#0] */
         UINT32_C(0xe5971000), /* LDR r1,[r7,#0] */
@@ -5121,10 +5122,10 @@ static bool validate_compact_raw_oracles(void) {
     };
     const uint32_t unsupported_prefix[] = {
         UINT32_C(0xe2800001), /* supported ADD */
-        UINT32_C(0xe2900001), /* ADDS: deliberately unsupported */
+        UINT32_C(0xe28f0001), /* PC operand: deliberately unsupported */
     };
     const uint32_t unsupported_first[] = {
-        UINT32_C(0x12800001), /* conditional ADDNE */
+        UINT32_C(0xe28f0001), /* PC operand */
     };
     arm_cpu_t contract;
     final_state_t before, after;
@@ -5143,6 +5144,18 @@ static bool validate_compact_raw_oracles(void) {
         dp_program[i * 2u + 1u] = UINT32_C(0xe0000000) |
             (opcode << 21) | (rn << 16) | (rd << 12) | rm;
     }
+    for (unsigned opcode = 0u; opcode < 16u; opcode++) {
+        unsigned rn = (opcode + 1u) & 7u;
+        unsigned rd = (opcode + 2u) & 7u;
+        unsigned rm = (opcode + 3u) & 7u;
+        unsigned rot = opcode & 3u;
+        unsigned imm = 0x41u + opcode;
+        flag_program[opcode * 2u] = UINT32_C(0xe2100000) |
+            (opcode << 21) | (rn << 16) | (rd << 12) |
+            (rot << 8) | imm;
+        flag_program[opcode * 2u + 1u] = UINT32_C(0xe0100000) |
+            (opcode << 21) | (rn << 16) | (rd << 12) | rm;
+    }
     if (!compact_raw_compare("data-processing", dp_program,
                              (unsigned)(sizeof dp_program /
                                         sizeof dp_program[0]),
@@ -5153,6 +5166,28 @@ static bool validate_compact_raw_oracles(void) {
                                         sizeof dp_program[0]) + 1u,
                              (unsigned)(sizeof dp_program /
                                         sizeof dp_program[0])))
+        return false;
+    if (!compact_raw_compare("data-processing-flags", flag_program,
+                             (unsigned)(sizeof flag_program /
+                                        sizeof flag_program[0]),
+                             UINT32_C(0x1400),
+                             (unsigned)(sizeof flag_program /
+                                        sizeof flag_program[0]),
+                             (unsigned)(sizeof flag_program /
+                                        sizeof flag_program[0]) + 1u,
+                             (unsigned)(sizeof flag_program /
+                                        sizeof flag_program[0])))
+        return false;
+    if (!compact_raw_compare("conditions", A32_IMM_CONDITIONS,
+                             (unsigned)(sizeof A32_IMM_CONDITIONS /
+                                        sizeof A32_IMM_CONDITIONS[0]),
+                             UINT32_C(0x1800),
+                             (unsigned)(sizeof A32_IMM_CONDITIONS /
+                                        sizeof A32_IMM_CONDITIONS[0]),
+                             (unsigned)(sizeof A32_IMM_CONDITIONS /
+                                        sizeof A32_IMM_CONDITIONS[0]) + 1u,
+                             (unsigned)(sizeof A32_IMM_CONDITIONS /
+                                        sizeof A32_IMM_CONDITIONS[0])))
         return false;
     if (!compact_raw_compare("memory-branch", memory_branch,
                              (unsigned)(sizeof memory_branch /
@@ -5182,10 +5217,11 @@ static bool validate_compact_raw_oracles(void) {
         return false;
     }
 
-    printf("COMPACT-RAW-ORACLE exact=yes cases=5 result-opcodes=12 "
-           "immediate-rotate=yes register-lsl0=yes word-load-store=yes "
-           "branch-link=yes live-bytes=yes out-of-window=yes "
-           "unsupported-prefix=yes invalid-contract-rollback=yes\n");
+    printf("COMPACT-RAW-ORACLE exact=yes cases=7 result-opcodes=12 "
+           "flag-opcodes=16 conditions=14 immediate-rotate=yes "
+           "register-lsl0=yes word-load-store=yes branch-link=yes "
+           "live-bytes=yes out-of-window=yes unsupported-prefix=yes "
+           "invalid-contract-rollback=yes\n");
     return true;
 }
 
