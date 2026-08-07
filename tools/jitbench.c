@@ -3173,8 +3173,7 @@ static bool static_vfp_arith_decode_one(const uint32_t *insn, uint32_t pc,
         &g_ram[pc], 1u, false, pc, block);
 }
 
-static bool validate_static_vfp_arithmetic_oracles(void) {
-    static const static_vfp_arith_fallback_t fallbacks[] = {
+static const static_vfp_arith_fallback_t VFP_ARITH_FALLBACKS[] = {
         {"missing-ixc", VFP_ARITH_S(3,0,2,0,1),
          UINT32_C(0x3f800000), UINT32_C(0x40400000),
          UINT32_C(0x40a00000), ARM_FPSCR_FZ | ARM_FPSCR_DN, true, true},
@@ -3250,7 +3249,9 @@ static bool validate_static_vfp_arithmetic_oracles(void) {
         {"d-mla-intermediate-underflow", VFP_ARITH_D(0,0,2,0,1),
          UINT64_C(0x3ff0000000000000), UINT64_C(0x0010000000000000),
          UINT64_C(0x3fe0000000000000), VFP_ARITH_CONTROL, true, true},
-    };
+};
+
+static bool validate_static_vfp_arithmetic_oracles(void) {
     a64_static_block_t block;
     arm_cpu_t reference, statik, before;
     unsigned completed = 0u;
@@ -3324,8 +3325,10 @@ static bool validate_static_vfp_arithmetic_oracles(void) {
         exact_cases++;
     }
 
-    for (unsigned i = 0u; i < sizeof fallbacks / sizeof fallbacks[0]; i++) {
-        const static_vfp_arith_fallback_t *test = &fallbacks[i];
+    for (unsigned i = 0u;
+         i < sizeof VFP_ARITH_FALLBACKS / sizeof VFP_ARITH_FALLBACKS[0];
+         i++) {
+        const static_vfp_arith_fallback_t *test = &VFP_ARITH_FALLBACKS[i];
         uint32_t pc = UINT32_C(0x14200) + i * 4u;
         if (!static_vfp_arith_decode_one(
                 &test->insn, pc, &statik, &block))
@@ -3544,7 +3547,8 @@ static bool validate_static_vfp_arithmetic_oracles(void) {
            "accepted=%u signed-zero=yes inexact=yes fallbacks=%zu "
            "conditions=yes partial-prefix=yes host-fp-state=yes "
            "host-fp-session=yes host-fp-control=yes\n",
-           exact_cases, sizeof fallbacks / sizeof fallbacks[0]);
+           exact_cases,
+           sizeof VFP_ARITH_FALLBACKS / sizeof VFP_ARITH_FALLBACKS[0]);
     return true;
 }
 
@@ -5150,6 +5154,39 @@ static bool validate_compact_raw_admission_shapes(void) {
         fprintf(stderr, "jitbench: compact raw VFP admission refused\n");
         return false;
     }
+    {
+        const uint32_t arithmetic = VFP_ARITH_S(3,0,2,0,1);
+        cpu.vfp_fpscr = ARM_FPSCR_FZ | ARM_FPSCR_DN | ARM_FPSCR_IXC |
+                        ARM_FPSCR_N | ARM_FPSCR_C;
+        static_vfp_arith_set_operands(
+            &cpu, arithmetic, UINT32_C(0x3f800000),
+            UINT32_C(0x40400000), UINT32_C(0x40a00000));
+        if (a64_compact_raw_classify_instruction(
+                &cpu, arithmetic, false) !=
+            A64_COMPACT_RAW_ADMIT_EXECUTE) {
+            fprintf(stderr,
+                    "jitbench: compact raw VFP arithmetic admission "
+                    "refused RunFast values\n");
+            return false;
+        }
+        cpu.vfp_s[0] = UINT32_C(0x00000001);
+        if (a64_compact_raw_classify_instruction(
+                &cpu, arithmetic, false) != A64_COMPACT_RAW_REJECT_VFP) {
+            fprintf(stderr,
+                    "jitbench: compact raw VFP arithmetic admitted "
+                    "subnormal input\n");
+            return false;
+        }
+        cpu.vfp_s[0] = UINT32_C(0x40400000);
+        cpu.vfp_fpscr |= ARM_FPSCR_IOC;
+        if (a64_compact_raw_classify_instruction(
+                &cpu, arithmetic, false) != A64_COMPACT_RAW_REJECT_VFP) {
+            fprintf(stderr,
+                    "jitbench: compact raw VFP arithmetic admitted "
+                    "non-IXC sticky state\n");
+            return false;
+        }
+    }
     cpu.vfp_fpscr = ARM_FPSCR_LEN;
     if (a64_compact_raw_classify_instruction(
             &cpu, VFP_UN_S(4, 0, 0, 1), false) !=
@@ -5157,7 +5194,7 @@ static bool validate_compact_raw_admission_shapes(void) {
         fprintf(stderr, "jitbench: compact raw VFP Len guard admitted\n");
         return false;
     }
-    printf("COMPACT-RAW-ADMISSION-MODEL exact-shapes=yes cases=23 "
+    printf("COMPACT-RAW-ADMISSION-MODEL exact-shapes=yes cases=26 "
            "outcomes=13 condition-before-decode=yes machine-gates=excluded\n");
     return true;
 }
@@ -5748,6 +5785,351 @@ static bool validate_compact_raw_vfp_nonarith_oracles(void) {
     return true;
 }
 
+#define COMPACT_VFP_ARITH_CONTROL \
+    (ARM_FPSCR_FZ | ARM_FPSCR_DN | ARM_FPSCR_IXC | \
+     ARM_FPSCR_N | ARM_FPSCR_C)
+
+#if defined(__aarch64__) && (defined(__GNUC__) || defined(__clang__))
+typedef struct {
+    arm_cpu_t *cpu;
+    uint64_t expected_fpcr;
+    uint64_t expected_fpsr;
+    arm_status_t status;
+    bool observed_restored;
+} compact_raw_vfp_fp_callback_context_t;
+
+static a64_compact_raw_fallback_result_t compact_raw_vfp_fp_callback(
+        void *opaque, a64_compact_raw_code_window_t *next_window) {
+    compact_raw_vfp_fp_callback_context_t *context =
+        (compact_raw_vfp_fp_callback_context_t *)opaque;
+    (void)next_window;
+    if (!context || !context->cpu)
+        return A64_COMPACT_RAW_FALLBACK_NO_RETIRE;
+    context->observed_restored =
+        static_host_fpcr_read() == context->expected_fpcr &&
+        static_host_fpsr_read() == context->expected_fpsr;
+    context->status = arm_step(context->cpu);
+    return context->status == ARM_OK
+        ? A64_COMPACT_RAW_FALLBACK_RETIRE_STOP
+        : A64_COMPACT_RAW_FALLBACK_NO_RETIRE;
+}
+#endif
+
+static bool validate_compact_raw_vfp_arithmetic_oracles(void) {
+    arm_cpu_t reference, compact, before;
+    unsigned completed = UINT_MAX;
+    unsigned exact_cases = 0u;
+
+    /* Every operation and architectural width gets an interpreter equality
+     * proof. Division is intentionally inexact; guest IXC starts sticky, so
+     * the host's new IXC is the only cumulative flag that may be ignored. */
+    for (unsigned width = 0u; width < 2u; width++) {
+        const uint32_t *program = width ? VFP_ARITH64_OPS : VFP_ARITH32_OPS;
+        for (unsigned operation = 0u; operation < 9u; operation++) {
+            const uint32_t pc = UINT32_C(0x17800) +
+                                (width * 9u + operation) * 4u;
+            const uint64_t d = width ? UINT64_C(0x4059000000000000)
+                                     : UINT32_C(0x42c80000);
+            const uint64_t n = width ? UINT64_C(0x4008000000000000)
+                                     : UINT32_C(0x40400000);
+            const uint64_t m = width ? UINT64_C(0x4014000000000000)
+                                     : UINT32_C(0x40a00000);
+            seed_vfp_oracle(&reference, &program[operation], 1u, pc, true);
+            reference.vfp_fpscr = COMPACT_VFP_ARITH_CONTROL;
+            static_vfp_arith_set_operands(
+                &reference, program[operation], d, n, m);
+            compact = reference;
+            if (arm_step(&reference) != ARM_OK ||
+                !a64_compact_raw_run(&compact, &g_ram[pc], pc, 4u, 1u,
+                                     g_ram, sizeof g_ram, &completed) ||
+                completed != 1u ||
+                !static_vfp_states_equal(&reference, &compact)) {
+                fprintf(stderr,
+                        "jitbench: compact raw VFP arithmetic mismatch "
+                        "width=%u operation=%u completed=%u\n",
+                        width, operation, completed);
+                return false;
+            }
+            exact_cases++;
+        }
+    }
+
+    /* Signed zero is admitted and must preserve its sign exactly. */
+    for (unsigned width = 0u; width < 2u; width++) {
+        const uint32_t insn = width ? VFP_ARITH_D(2,0,2,0,1)
+                                    : VFP_ARITH_S(2,0,2,0,1);
+        const uint32_t pc = UINT32_C(0x17900) + width * 4u;
+        const uint64_t negative_zero =
+            width ? UINT64_C(0x8000000000000000)
+                  : UINT32_C(0x80000000);
+        const uint64_t two = width ? UINT64_C(0x4000000000000000)
+                                   : UINT32_C(0x40000000);
+        seed_vfp_oracle(&reference, &insn, 1u, pc, true);
+        reference.vfp_fpscr = COMPACT_VFP_ARITH_CONTROL;
+        static_vfp_arith_set_operands(
+            &reference, insn, two, negative_zero, two);
+        compact = reference;
+        if (arm_step(&reference) != ARM_OK ||
+            !a64_compact_raw_run(&compact, &g_ram[pc], pc, 4u, 1u,
+                                 g_ram, sizeof g_ram, &completed) ||
+            completed != 1u ||
+            !static_vfp_states_equal(&reference, &compact)) {
+            fprintf(stderr,
+                    "jitbench: compact raw VFP signed-zero mismatch "
+                    "width=%u\n", width);
+            return false;
+        }
+        exact_cases++;
+    }
+
+    /* Every live-mode, access, operand and post-host-operation rejection must
+     * stop before guest mutation and restore any opened FP session. */
+    for (unsigned i = 0u;
+         i < sizeof VFP_ARITH_FALLBACKS / sizeof VFP_ARITH_FALLBACKS[0];
+         i++) {
+        const static_vfp_arith_fallback_t *test = &VFP_ARITH_FALLBACKS[i];
+        const uint32_t pc = UINT32_C(0x17a00) + i * 4u;
+        seed_vfp_oracle(&compact, &test->insn, 1u, pc, true);
+        compact.vfp_fpscr = test->fpscr;
+        compact.vfp_fpexc = test->enabled ? ARM_FPEXC_EN : 0u;
+        if (!test->access)
+            compact.cp15.cpacr &= ~(UINT32_C(0xf) <<
+                                     ARM_CPACR_CP10_SHIFT);
+        static_vfp_arith_set_operands(
+            &compact, test->insn, test->d, test->n, test->m);
+        before = compact;
+        completed = UINT_MAX;
+        if (!a64_compact_raw_run(&compact, &g_ram[pc], pc, 4u, 1u,
+                                 g_ram, sizeof g_ram, &completed) ||
+            completed != 0u ||
+            !static_vfp_states_equal(&before, &compact)) {
+            fprintf(stderr,
+                    "jitbench: compact raw VFP arithmetic fallback "
+                    "changed state for %s (completed=%u)\n",
+                    test->name, completed);
+            return false;
+        }
+    }
+
+    /* ARM conditions retire before any VFP access or arithmetic guard. */
+    {
+        const uint32_t insn =
+            VFP_ARITH_S(3,0,2,0,1) & UINT32_C(0x0fffffff);
+        const uint32_t pc = UINT32_C(0x17b00);
+        seed_vfp_oracle(&reference, &insn, 1u, pc, false);
+        reference.cp15.cpacr = 0u;
+        compact = reference;
+        if (arm_step(&reference) != ARM_OK ||
+            !a64_compact_raw_run(&compact, &g_ram[pc], pc, 4u, 1u,
+                                 g_ram, sizeof g_ram, &completed) ||
+            completed != 1u ||
+            !static_vfp_states_equal(&reference, &compact)) {
+            fprintf(stderr,
+                    "jitbench: compact raw conditional VFP arithmetic "
+                    "skip mismatch\n");
+            return false;
+        }
+    }
+
+    /* A successful arithmetic operation and VMSR retire; the next arithmetic
+     * instruction sees the newly-invalid FPSCR and returns that exact prefix.
+     * This also forces an open FP session through an integer-only VFP op. */
+    {
+        static const uint32_t partial[] = {
+            VFP_ARITH_S(3,0,2,0,1), VFP_VMSR(1, 0),
+            VFP_ARITH_S(2,0,3,1,2),
+        };
+        const uint32_t pc = UINT32_C(0x17c00);
+        seed_vfp_oracle(&reference, partial, 3u, pc, true);
+        reference.vfp_fpscr = COMPACT_VFP_ARITH_CONTROL;
+        reference.r[0] = ARM_FPSCR_FZ | ARM_FPSCR_DN;
+        reference.vfp_s[0] = UINT32_C(0x3f800000);
+        reference.vfp_s[1] = UINT32_C(0x40000000);
+        compact = reference;
+        if (arm_step(&reference) != ARM_OK || arm_step(&reference) != ARM_OK ||
+            !a64_compact_raw_run(&compact, &g_ram[pc], pc, 12u, 3u,
+                                 g_ram, sizeof g_ram, &completed) ||
+            completed != 2u ||
+            !static_vfp_states_equal(&reference, &compact)) {
+            fprintf(stderr,
+                    "jitbench: compact raw VFP arithmetic partial-prefix "
+                    "mismatch (completed=%u)\n", completed);
+            return false;
+        }
+    }
+
+#if defined(__aarch64__) && (defined(__GNUC__) || defined(__clang__))
+    /* Success and post-FMUL rejection must both preserve every caller-visible
+     * host FPCR/FPSR bit despite running internally under RN FPCR=0. */
+    for (unsigned rejection = 0u; rejection < 2u; rejection++) {
+        const uint32_t insn = rejection ? VFP_ARITH_S(2,0,2,0,1)
+                                        : VFP_ARITH_S(4,0,2,0,1);
+        const uint32_t pc = UINT32_C(0x17d00) + rejection * 4u;
+        const uint64_t original_fpcr = static_host_fpcr_read();
+        const uint64_t original_fpsr = static_host_fpsr_read();
+        uint64_t installed_fpcr, installed_fpsr, after_fpcr, after_fpsr;
+        bool run_ok;
+
+        seed_vfp_oracle(&compact, &insn, 1u, pc, true);
+        compact.vfp_fpscr = COMPACT_VFP_ARITH_CONTROL;
+        static_vfp_arith_set_operands(
+            &compact, insn, UINT32_C(0x3f800000),
+            rejection ? UINT32_C(0x7f7fffff) : UINT32_C(0x3f800000),
+            rejection ? UINT32_C(0x40000000) : UINT32_C(0x40400000));
+        if (rejection) {
+            before = compact;
+        } else {
+            reference = compact;
+            if (arm_step(&reference) != ARM_OK) return false;
+        }
+
+        static_host_fpcr_write(
+            (original_fpcr & ~(UINT64_C(3) << 22)) |
+            (UINT64_C(1) << 22));
+        static_host_fpsr_write(UINT64_C(0x08000015));
+        installed_fpcr = static_host_fpcr_read();
+        installed_fpsr = static_host_fpsr_read();
+        completed = UINT_MAX;
+        run_ok = a64_compact_raw_run(
+            &compact, &g_ram[pc], pc, 4u, 1u,
+            g_ram, sizeof g_ram, &completed);
+        after_fpcr = static_host_fpcr_read();
+        after_fpsr = static_host_fpsr_read();
+        static_host_fpsr_write(original_fpsr);
+        static_host_fpcr_write(original_fpcr);
+
+        if (!run_ok || after_fpcr != installed_fpcr ||
+            after_fpsr != installed_fpsr ||
+            (rejection
+                 ? completed != 0u ||
+                       !static_vfp_states_equal(&before, &compact)
+                 : completed != 1u ||
+                       !static_vfp_states_equal(&reference, &compact))) {
+            fprintf(stderr,
+                    "jitbench: compact raw VFP arithmetic host-state %s "
+                    "mismatch\n", rejection ? "rejection" : "success");
+            return false;
+        }
+    }
+
+    /* Two adjacent operations share one internal session, while a rejecting
+     * second operation returns the exact first-instruction prefix. */
+    for (unsigned rejection = 0u; rejection < 2u; rejection++) {
+        static const uint32_t session_program[] = {
+            VFP_ARITH_S(3,0,2,0,1),
+            VFP_ARITH_S(2,0,5,3,4),
+        };
+        const uint32_t pc = UINT32_C(0x17e00) + rejection * 8u;
+        const uint64_t original_fpcr = static_host_fpcr_read();
+        const uint64_t original_fpsr = static_host_fpsr_read();
+        uint64_t installed_fpcr, installed_fpsr, after_fpcr, after_fpsr;
+        bool run_ok;
+
+        seed_vfp_oracle(&reference, session_program, 2u, pc, true);
+        reference.vfp_fpscr = COMPACT_VFP_ARITH_CONTROL;
+        static_vfp_arith_set_operands(
+            &reference, session_program[0], UINT32_C(0x3f800000),
+            UINT32_C(0x40400000), UINT32_C(0x40a00000));
+        static_vfp_arith_set_operands(
+            &reference, session_program[1], UINT32_C(0x3f800000),
+            rejection ? UINT32_C(0x7f7fffff) : UINT32_C(0x40000000),
+            rejection ? UINT32_C(0x40000000) : UINT32_C(0x40800000));
+        compact = reference;
+        if (arm_step(&reference) != ARM_OK ||
+            (!rejection && arm_step(&reference) != ARM_OK))
+            return false;
+
+        static_host_fpcr_write(
+            (original_fpcr & ~(UINT64_C(3) << 22)) |
+            (UINT64_C(2) << 22));
+        static_host_fpsr_write(UINT64_C(0x08000015));
+        installed_fpcr = static_host_fpcr_read();
+        installed_fpsr = static_host_fpsr_read();
+        completed = UINT_MAX;
+        run_ok = a64_compact_raw_run(
+            &compact, &g_ram[pc], pc, 8u, 2u,
+            g_ram, sizeof g_ram, &completed);
+        after_fpcr = static_host_fpcr_read();
+        after_fpsr = static_host_fpsr_read();
+        static_host_fpsr_write(original_fpsr);
+        static_host_fpcr_write(original_fpcr);
+
+        if (!run_ok || after_fpcr != installed_fpcr ||
+            after_fpsr != installed_fpsr ||
+            completed != (rejection ? 1u : 2u) ||
+            !static_vfp_states_equal(&reference, &compact)) {
+            fprintf(stderr,
+                    "jitbench: compact raw VFP arithmetic session %s "
+                    "mismatch\n", rejection ? "partial" : "success");
+            return false;
+        }
+    }
+
+    /* A result rejection handed to resident arm_step must restore the host
+     * environment before the C callback observes it. */
+    {
+        const uint32_t insn = VFP_ARITH_S(2,0,2,0,1);
+        const uint32_t pc = UINT32_C(0x17f00);
+        const uint64_t original_fpcr = static_host_fpcr_read();
+        const uint64_t original_fpsr = static_host_fpsr_read();
+        compact_raw_vfp_fp_callback_context_t context;
+        unsigned native_completed = UINT_MAX;
+        unsigned fallback_completed = UINT_MAX;
+        uint64_t after_fpcr, after_fpsr;
+        bool run_ok;
+
+        seed_vfp_oracle(&compact, &insn, 1u, pc, true);
+        compact.vfp_fpscr = COMPACT_VFP_ARITH_CONTROL;
+        static_vfp_arith_set_operands(
+            &compact, insn, UINT32_C(0x3f800000),
+            UINT32_C(0x7f7fffff), UINT32_C(0x40000000));
+        reference = compact;
+        if (arm_step(&reference) != ARM_OK) return false;
+
+        static_host_fpcr_write(
+            (original_fpcr & ~(UINT64_C(3) << 22)) |
+            (UINT64_C(1) << 22));
+        static_host_fpsr_write(UINT64_C(0x08000015));
+        memset(&context, 0, sizeof context);
+        context.cpu = &compact;
+        context.expected_fpcr = static_host_fpcr_read();
+        context.expected_fpsr = static_host_fpsr_read();
+        context.status = ARM_OK;
+        completed = UINT_MAX;
+        run_ok = a64_compact_raw_run_code_window_resident(
+            &compact, &g_ram[pc], pc, 4u, 1u,
+            compact_raw_vfp_fp_callback, &context, &completed,
+            &native_completed, &fallback_completed);
+        after_fpcr = static_host_fpcr_read();
+        after_fpsr = static_host_fpsr_read();
+        static_host_fpsr_write(original_fpsr);
+        static_host_fpcr_write(original_fpcr);
+
+        if (!run_ok || !context.observed_restored ||
+            context.status != ARM_OK || completed != 1u ||
+            native_completed != 0u || fallback_completed != 1u ||
+            after_fpcr != context.expected_fpcr ||
+            after_fpsr != context.expected_fpsr ||
+            !static_vfp_states_equal(&reference, &compact)) {
+            fprintf(stderr,
+                    "jitbench: compact raw VFP arithmetic callback "
+                    "boundary mismatch\n");
+            return false;
+        }
+    }
+#endif
+
+    printf("COMPACT-RAW-VFP-ARITH-ORACLE exact=yes operations=9 widths=2 "
+           "accepted=%u signed-zero=yes inexact=yes fallbacks=%zu "
+           "conditions=yes partial-prefix=yes host-fp-state=yes "
+           "host-fp-session=yes callback-boundary=yes runtime-codegen=no\n",
+           exact_cases,
+           sizeof VFP_ARITH_FALLBACKS / sizeof VFP_ARITH_FALLBACKS[0]);
+    return true;
+}
+
+#undef COMPACT_VFP_ARITH_CONTROL
+
 static bool compact_raw_vfp_flat_memory_case(const char *name,
                                              unsigned insns,
                                              uint32_t pc,
@@ -6059,6 +6441,8 @@ static bool validate_compact_raw_oracles(void) {
     unsigned completed = UINT_MAX;
 
     if (!validate_compact_raw_vfp_nonarith_oracles())
+        return false;
+    if (!validate_compact_raw_vfp_arithmetic_oracles())
         return false;
     if (!validate_compact_raw_vfp_memory_oracles())
         return false;

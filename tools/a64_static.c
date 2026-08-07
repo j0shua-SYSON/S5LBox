@@ -1583,6 +1583,21 @@ static bool compact_raw_is_vfp_encoding(uint32_t insn) {
            (insn & UINT32_C(0x0f000e10)) == UINT32_C(0x0e000a00);
 }
 
+static bool compact_raw_vfp_simple32(uint32_t value) {
+    const uint32_t exponent = (value >> 23) & UINT32_C(0xff);
+    return exponent ? exponent != UINT32_C(0xff)
+                    : (value << 1) == 0u;
+}
+
+static bool compact_raw_vfp_simple64(const uint32_t *words,
+                                     unsigned first) {
+    const uint64_t value = (uint64_t)words[first] |
+                           ((uint64_t)words[first + 1u] << 32);
+    const uint64_t exponent = (value >> 52) & UINT64_C(0x7ff);
+    return exponent ? exponent != UINT64_C(0x7ff)
+                    : (value << 1) == 0u;
+}
+
 static a64_compact_raw_admission_t compact_raw_classify_vfp(
         const arm_cpu_t *cpu, uint32_t insn) {
     a64_static_uop_t ops[2];
@@ -1612,9 +1627,11 @@ static a64_compact_raw_admission_t compact_raw_classify_vfp(
         return A64_COMPACT_RAW_REJECT_VFP;
     }
 
-    /* The live loop owns exact bitwise/register, compare, widening and
-     * witnessed memory semantics. Arithmetic remains separate because it also
-     * owns a lazy host-FP preservation session. */
+    /* The live loop owns exact bitwise/register, compare, widening, scalar
+     * arithmetic and witnessed memory semantics. Arithmetic admits only the
+     * replay-proven RunFast mode plus signed-zero/finite-normal inputs; the
+     * native loop separately validates intermediate/results and restores its
+     * lazy host-FP session before every exit or callback. */
     if (handler >= A64S_VFP_UNARY32 &&
         handler < A64S_VFP_COMPARE32) {
         return (cpu->vfp_fpscr & ARM_FPSCR_LEN) == 0u
@@ -1628,8 +1645,34 @@ static a64_compact_raw_admission_t compact_raw_classify_vfp(
             ? A64_COMPACT_RAW_ADMIT_EXECUTE
             : A64_COMPACT_RAW_REJECT_VFP;
     }
-    if (handler_is_vfp_arithmetic(handler))
-        return A64_COMPACT_RAW_REJECT_VFP;
+    if (handler_is_vfp_arithmetic(handler)) {
+        const uint32_t immediate = ops[written - 1u].immediate;
+        const unsigned rd = immediate & 255u;
+        const unsigned rn = (immediate >> 8) & 255u;
+        const unsigned rm = (immediate >> 16) & 255u;
+        const bool dbl = handler >= A64S_VFP_ARITH64;
+        const unsigned operation = dbl
+            ? handler - A64S_VFP_ARITH64
+            : handler - A64S_VFP_ARITH32;
+
+        if ((cpu->vfp_fpscr & UINT32_C(0x03c79f00)) !=
+                UINT32_C(0x03000000) ||
+            (cpu->vfp_fpscr & UINT32_C(0x9f)) != UINT32_C(0x10))
+            return A64_COMPACT_RAW_REJECT_VFP;
+        if (dbl) {
+            if (!compact_raw_vfp_simple64(cpu->vfp_s, rn) ||
+                !compact_raw_vfp_simple64(cpu->vfp_s, rm) ||
+                (operation < 4u &&
+                 !compact_raw_vfp_simple64(cpu->vfp_s, rd)))
+                return A64_COMPACT_RAW_REJECT_VFP;
+        } else if (!compact_raw_vfp_simple32(cpu->vfp_s[rn]) ||
+                   !compact_raw_vfp_simple32(cpu->vfp_s[rm]) ||
+                   (operation < 4u &&
+                    !compact_raw_vfp_simple32(cpu->vfp_s[rd]))) {
+            return A64_COMPACT_RAW_REJECT_VFP;
+        }
+        return A64_COMPACT_RAW_ADMIT_EXECUTE;
+    }
     if ((handler >= A64S_VFP_DIRECT_READ32 &&
          handler <= A64S_VFP_DIRECT_WRITE64) ||
         handler_is_vstm_direct_write(handler)) {
@@ -1821,7 +1864,8 @@ bool a64_compact_raw_run(arm_cpu_t *cpu, const uint8_t *code,
         uint32_t result = a64_compact_raw_execute(
             cpu->r, &cpu->cpsr, &cpu->cycles, code, code_base, code_bytes,
             max_insns, &context);
-        if (result > max_insns) return false;
+        if (result > max_insns || context.vfp_host_active != 0u)
+            return false;
         *completed = result;
         return true;
     }
@@ -1892,7 +1936,8 @@ bool a64_compact_raw_run_code_window_resident(
         uint32_t result = a64_compact_raw_execute(
             cpu->r, &cpu->cpsr, &cpu->cycles, code, code_base, code_bytes,
             max_insns, &context);
-        if (result > max_insns || context.native_retired > result ||
+        if (result > max_insns || context.vfp_host_active != 0u ||
+            context.native_retired > result ||
             context.fallback_retired > result ||
             context.native_retired + context.fallback_retired != result ||
             context.native_retired > UINT_MAX ||

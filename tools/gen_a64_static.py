@@ -2282,6 +2282,171 @@ def compact_vfp_compare_body(width: int) -> list[str]:
     return body
 
 
+def compact_vfp_arithmetic_flags(width: int, value: str, prefix: str,
+                                 failure: str) -> list[str]:
+    """Reject host exceptions that sticky guest IXC cannot hide."""
+    body = [
+        "    mrs x7, fpsr",
+        "    mov w8, #0x9f",
+        "    and w8, w7, w8",
+        "    cmp w8, #0x10",
+        f"    b.eq {prefix}_flags_ok",
+        f"    cbz w8, {prefix}_flags_ok",
+        f"    b {failure}",
+        f"{prefix}_flags_ok:",
+    ]
+    if width == 4:
+        body.extend([
+            f"    and w7, {value}, #0x7fffffff",
+            "    mov w10, #0x800000",
+        ])
+    else:
+        body.extend([
+            f"    and x7, {value}, #0x7fffffffffffffff",
+            "    mov x10, #1",
+            "    lsl x10, x10, #52",
+        ])
+    body.extend([
+        f"    cmp {'w7' if width == 4 else 'x7'}, "
+        f"{'w10' if width == 4 else 'x10'}",
+        f"    b.ne {prefix}_boundary_ok",
+        f"    tbz w8, #4, {prefix}_boundary_ok",
+        # The interpreter explicitly refuses this pre-rounding ambiguity in
+        # guest FZ mode: an inexact result at the smallest normal encoding.
+        f"    b {failure}",
+        f"{prefix}_boundary_ok:",
+    ])
+    return body
+
+
+def compact_vfp_arithmetic_body(width: int) -> list[str]:
+    """Return exact live scalar VFPv2 arithmetic for one guest width."""
+    if width not in (4, 8):
+        raise ValueError("invalid compact VFP arithmetic width")
+
+    bits = width * 8
+    integer = "w6" if width == 4 else "x6"
+    scratch = "w7" if width == 4 else "x7"
+    fp = "s" if width == 4 else "d"
+    p = f".La64cr_vfp_arith_{bits}"
+    state_failure = f"{p}_state_fail"
+    body = [
+        f"{p}:",
+        "    bl .La64cr_vfp_guard_arith",
+        "    cbz w0, .La64cr_fallback",
+        "    ldr x0, [x27, #104]",
+    ]
+
+    def load_operand(index: str, fp_reg: int, name: str) -> list[str]:
+        if width == 4:
+            result = [f"    ldr {integer}, [x0, {index}, uxtw #2]"]
+        else:
+            result = [
+                f"    add x1, x0, {index}, uxtw #2",
+                f"    ldr {integer}, [x1]",
+            ]
+        result.extend([
+            f"    fmov {fp}{fp_reg}, {integer}",
+            *vfp_simple_classify(
+                width, integer, scratch, f"{p}_{name}",
+                ".La64cr_fallback"
+            ),
+        ])
+        return result
+
+    body.extend(load_operand("w10", 1, "n"))
+    body.extend(load_operand("w11", 2, "m"))
+    body.extend([
+        # Operation IDs 0..3 are the four multiply-accumulate variants and
+        # alone consume the old destination as a third input.
+        "    cmp w14, #4",
+        f"    b.hs {p}_operands_ready",
+    ])
+    body.extend(load_operand("w12", 0, "d"))
+    body.extend([
+        f"{p}_operands_ready:",
+        "    bl .La64cr_fp_session_begin",
+        # FPSR is cumulative architecturally, but this contract samples each
+        # guest instruction independently while guest IXC is already sticky.
+        "    msr fpsr, xzr",
+        "    cmp w14, #4",
+        f"    b.lo {p}_accumulate",
+        "    cmp w14, #4",
+        f"    b.eq {p}_vmul",
+        "    cmp w14, #5",
+        f"    b.eq {p}_vnmul",
+        "    cmp w14, #6",
+        f"    b.eq {p}_vadd",
+        "    cmp w14, #7",
+        f"    b.eq {p}_vsub",
+        f"    fdiv {fp}0, {fp}1, {fp}2",
+        f"    b {p}_result",
+        f"{p}_vmul:",
+        f"    fmul {fp}0, {fp}1, {fp}2",
+        f"    b {p}_result",
+        f"{p}_vnmul:",
+        f"    fmul {fp}0, {fp}1, {fp}2",
+        f"    fneg {fp}0, {fp}0",
+        f"    b {p}_result",
+        f"{p}_vadd:",
+        f"    fadd {fp}0, {fp}1, {fp}2",
+        f"    b {p}_result",
+        f"{p}_vsub:",
+        f"    fsub {fp}0, {fp}1, {fp}2",
+        f"    b {p}_result",
+        f"{p}_accumulate:",
+        # VFPv2 VMLA is two separately rounded operations, never an FMA.
+        f"    fmul {fp}3, {fp}1, {fp}2",
+        f"    fmov {integer}, {fp}3",
+        *vfp_simple_classify(
+            width, integer, scratch, f"{p}_product", state_failure
+        ),
+        *compact_vfp_arithmetic_flags(
+            width, integer, f"{p}_product", state_failure
+        ),
+        "    msr fpsr, xzr",
+        "    cmp w14, #1",
+        f"    b.eq {p}_negate_product",
+        "    cmp w14, #3",
+        f"    b.ne {p}_product_sign_ready",
+        f"{p}_negate_product:",
+        f"    fneg {fp}3, {fp}3",
+        f"{p}_product_sign_ready:",
+        "    cmp w14, #2",
+        f"    b.eq {p}_negate_destination",
+        "    cmp w14, #3",
+        f"    b.ne {p}_destination_sign_ready",
+        f"{p}_negate_destination:",
+        f"    fneg {fp}0, {fp}0",
+        f"{p}_destination_sign_ready:",
+        f"    fadd {fp}0, {fp}0, {fp}3",
+        f"{p}_result:",
+        f"    fmov {integer}, {fp}0",
+        *vfp_simple_classify(
+            width, integer, scratch, f"{p}_result", state_failure
+        ),
+        *compact_vfp_arithmetic_flags(
+            width, integer, f"{p}_result", state_failure
+        ),
+        "    ldr x0, [x27, #104]",
+    ])
+    if width == 4:
+        body.append("    str w6, [x0, w12, uxtw #2]")
+    else:
+        body.extend([
+            "    add x0, x0, w12, uxtw #2",
+            "    str x6, [x0]",
+        ])
+    body.extend([
+        "    b .La64cr_vfp_done",
+        f"{state_failure}:",
+        # Guest state is still untouched. The common boundary restores the
+        # caller's complete FP environment before stopping or entering C.
+        "    b .La64cr_fallback",
+    ])
+    return body
+
+
 def compact_vfp_memory_body() -> list[str]:
     """Return transactional witnessed VLDR/VSTR/VSTM live semantics."""
     return [
@@ -2716,7 +2881,41 @@ def compact_vfp_nonarith_body() -> list[str]:
         "    ubfx w11, w9, #20, #1",
         "    orr w10, w11, w10, lsl #1",
         "    cmp w10, #7",
-        "    b.ne .La64cr_fallback",
+        "    b.eq .La64cr_vfp_cdp_other",
+        # Scalar arithmetic families 0..4 map to the nine VFPv2 operations.
+        # Families 5/6 are later fused operations and remain literal.
+        "    cmp w10, #4",
+        "    b.hi .La64cr_fallback",
+        "    ubfx w11, w9, #6, #1",
+        "    cmp w10, #4",
+        "    b.ne .La64cr_vfp_arith_operation",
+        "    cbnz w11, .La64cr_fallback",
+        ".La64cr_vfp_arith_operation:",
+        "    lsl w14, w10, #1",
+        "    add w14, w14, w11",
+        "    tbnz w9, #8, .La64cr_vfp_arith_decode_64",
+        "    ubfx w12, w9, #12, #4",
+        "    ubfx w13, w9, #22, #1",
+        "    orr w12, w13, w12, lsl #1",
+        "    ubfx w10, w9, #16, #4",
+        "    ubfx w13, w9, #7, #1",
+        "    orr w10, w13, w10, lsl #1",
+        "    and w11, w9, #0xf",
+        "    ubfx w13, w9, #5, #1",
+        "    orr w11, w13, w11, lsl #1",
+        "    b .La64cr_vfp_arith_32",
+        ".La64cr_vfp_arith_decode_64:",
+        "    tbnz w9, #22, .La64cr_fallback",
+        "    tbnz w9, #7, .La64cr_fallback",
+        "    tbnz w9, #5, .La64cr_fallback",
+        "    ubfx w12, w9, #12, #4",
+        "    lsl w12, w12, #1",
+        "    ubfx w10, w9, #16, #4",
+        "    lsl w10, w10, #1",
+        "    and w11, w9, #0xf",
+        "    lsl w11, w11, #1",
+        "    b .La64cr_vfp_arith_64",
+        ".La64cr_vfp_cdp_other:",
         "    tbz w9, #6, .La64cr_fallback",
         "    ubfx w10, w9, #16, #4",
         "    cmp w10, #4",
@@ -2794,6 +2993,10 @@ def compact_vfp_nonarith_body() -> list[str]:
         *compact_vfp_compare_body(4),
         "",
         *compact_vfp_compare_body(8),
+        "",
+        *compact_vfp_arithmetic_body(4),
+        "",
+        *compact_vfp_arithmetic_body(8),
         "",
         ".La64cr_vfp_widen_32:",
         "    ubfx w2, w9, #12, #4",
@@ -2906,6 +3109,32 @@ def compact_vfp_nonarith_body() -> list[str]:
         "    b.ne .La64cr_vfp_guard_fail",
         "    mov w0, #1",
         "    ret",
+        ".La64cr_vfp_guard_arith:",
+        "    ldr w0, [x27, #128]",
+        "    cbz w0, .La64cr_vfp_guard_fail",
+        "    ldr x1, [x27, #112]",
+        "    cbz x1, .La64cr_vfp_guard_fail",
+        "    ldr w0, [x1]",
+        "    tbz w0, #30, .La64cr_vfp_guard_fail",
+        "    ldr x1, [x27, #120]",
+        "    cbz x1, .La64cr_vfp_guard_fail",
+        "    ldr w0, [x1]",
+        # Accept exactly RN/FZ/DN, scalar Len, no enables. NZCV is outside
+        # this mask and remains available to guest compare/condition logic.
+        "    mov w1, #0x9f00",
+        "    movk w1, #0x3c7, lsl #16",
+        "    and w0, w0, w1",
+        "    mov w1, #3",
+        "    lsl w1, w1, #24",
+        "    cmp w0, w1",
+        "    b.ne .La64cr_vfp_guard_fail",
+        "    ldr x1, [x27, #120]",
+        "    ldr w0, [x1]",
+        "    and w0, w0, #0x9f",
+        "    cmp w0, #0x10",
+        "    b.ne .La64cr_vfp_guard_fail",
+        "    mov w0, #1",
+        "    ret",
         ".La64cr_vfp_guard_priv:",
         "    ldr w0, [x27, #128]",
         "    cbz w0, .La64cr_vfp_guard_fail",
@@ -2926,6 +3155,32 @@ def compact_vfp_nonarith_body() -> list[str]:
         "    ret",
         ".La64cr_vfp_guard_fail:",
         "    mov w0, wzr",
+        "    ret",
+        "",
+        ".La64cr_fp_session_begin:",
+        "    ldr w0, [x27, #132]",
+        "    cbnz w0, .La64cr_fp_session_begin_done",
+        "    mrs x0, fpcr",
+        "    mrs x1, fpsr",
+        "    str x0, [x27, #136]",
+        "    str x1, [x27, #144]",
+        "    cbz x0, .La64cr_fp_session_fpcr_ready",
+        "    msr fpcr, xzr",
+        ".La64cr_fp_session_fpcr_ready:",
+        "    mov w0, #1",
+        "    str w0, [x27, #132]",
+        ".La64cr_fp_session_begin_done:",
+        "    ret",
+        "",
+        ".La64cr_fp_session_restore:",
+        "    ldr w0, [x27, #132]",
+        "    cbz w0, .La64cr_fp_session_restore_done",
+        "    ldr x0, [x27, #144]",
+        "    msr fpsr, x0",
+        "    ldr x0, [x27, #136]",
+        "    msr fpcr, x0",
+        "    str wzr, [x27, #132]",
+        ".La64cr_fp_session_restore_done:",
         "    ret",
     ]
 
@@ -4042,6 +4297,7 @@ def compact_raw_function() -> list[str]:
         # The callback must explicitly publish a proven window for the next PC
         # when it asks to continue. Clearing the caller-owned output prevents a
         # stale witness from surviving a buggy or refusing callback.
+        "    bl .La64cr_fp_session_restore",
         "    str xzr, [x27, #88]",
         "    str xzr, [x27, #96]",
         "    ldr x9, [x27, #48]",
@@ -4110,6 +4366,8 @@ def compact_raw_function() -> list[str]:
         "    b .La64cr_loop",
         "",
         ".La64cr_exit:",
+        # No caller or C callback may observe the internal RunFast FP mode.
+        "    bl .La64cr_fp_session_restore",
         "    cbz w29, .La64cr_exit_committed",
         "    ldr x9, [x21]",
         "    add x9, x9, x29",
