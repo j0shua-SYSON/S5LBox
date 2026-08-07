@@ -1561,10 +1561,16 @@ typedef struct {
     uint64_t fallback_retired;
     uint32_t tlb_gen;
     uint32_t priv_tag;
+    a64_compact_raw_code_window_t next_window;
 } a64_compact_raw_context_t;
 
 _Static_assert(sizeof(void *) == 8u,
                "compact raw native context requires AArch64 pointers");
+_Static_assert(sizeof(a64_compact_raw_code_window_t) == 16u &&
+                   offsetof(a64_compact_raw_code_window_t, code) == 0u &&
+                   offsetof(a64_compact_raw_code_window_t, code_base) == 8u &&
+                   offsetof(a64_compact_raw_code_window_t, code_bytes) == 12u,
+               "compact raw code-window layout drifted");
 _Static_assert(offsetof(a64_compact_raw_context_t, flat_ram) == 0u &&
                    offsetof(a64_compact_raw_context_t, flat_mask) == 8u &&
                    offsetof(a64_compact_raw_context_t, dread) == 16u &&
@@ -1576,7 +1582,8 @@ _Static_assert(offsetof(a64_compact_raw_context_t, flat_ram) == 0u &&
                    offsetof(a64_compact_raw_context_t, native_retired) == 64u &&
                    offsetof(a64_compact_raw_context_t, fallback_retired) == 72u &&
                    offsetof(a64_compact_raw_context_t, tlb_gen) == 80u &&
-                   offsetof(a64_compact_raw_context_t, priv_tag) == 84u,
+                   offsetof(a64_compact_raw_context_t, priv_tag) == 84u &&
+                   offsetof(a64_compact_raw_context_t, next_window) == 88u,
                "compact raw native context layout drifted");
 
 extern int a64_static_execute(uint32_t *regs, uint32_t *cpsr,

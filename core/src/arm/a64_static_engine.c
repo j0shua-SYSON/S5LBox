@@ -77,6 +77,9 @@ typedef struct {
     uint64_t compact_raw_calls;
     uint64_t compact_raw_retired;
     uint64_t compact_raw_fallback_retired;
+    uint64_t compact_raw_window_crossings;
+    uint64_t compact_raw_window_reloads;
+    uint64_t compact_raw_window_stops;
     uint64_t fetch_refill_attempts;
     uint64_t fetch_refill_hits;
     uint64_t fetch_refill_skips;
@@ -811,6 +814,39 @@ uint64_t s5l8900_static_a64_compact_raw_fallback_retired(
 #endif
 }
 
+uint64_t s5l8900_static_a64_compact_raw_window_crossings(
+        const s5l8900_t *m) {
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    const static_a64_state_t *state = static_state(m);
+    return state ? state->compact_raw_window_crossings : 0u;
+#else
+    (void)m;
+    return 0u;
+#endif
+}
+
+uint64_t s5l8900_static_a64_compact_raw_window_reloads(
+        const s5l8900_t *m) {
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    const static_a64_state_t *state = static_state(m);
+    return state ? state->compact_raw_window_reloads : 0u;
+#else
+    (void)m;
+    return 0u;
+#endif
+}
+
+uint64_t s5l8900_static_a64_compact_raw_window_stops(
+        const s5l8900_t *m) {
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    const static_a64_state_t *state = static_state(m);
+    return state ? state->compact_raw_window_stops : 0u;
+#else
+    (void)m;
+    return 0u;
+#endif
+}
+
 uint64_t s5l8900_static_a64_fetch_refill_attempts(const s5l8900_t *m) {
 #if defined(S5LBOX_STATIC_A64_ENGINE)
     const static_a64_state_t *state = static_state(m);
@@ -872,21 +908,53 @@ unsigned s5l8900_static_a64_cached_witness_bytes(const s5l8900_t *m,
 #if defined(S5LBOX_STATIC_A64_ENGINE)
 typedef struct {
     s5l8900_t *machine;
+    static_a64_state_t *state;
     arm_status_t status;
+    uint32_t fetch_block;
 } compact_raw_fallback_context_t;
 
-static a64_compact_raw_fallback_result_t compact_raw_fallback(void *opaque) {
+static a64_compact_raw_fallback_result_t compact_raw_fallback(
+        void *opaque, a64_compact_raw_code_window_t *next_window) {
     compact_raw_fallback_context_t *context =
         (compact_raw_fallback_context_t *)opaque;
+    arm_cpu_t *cpu;
+    uint32_t step_block;
+    uint32_t next_block;
+    bool crossed;
     unsigned result;
 
-    if (!context || !context->machine)
+    if (!context || !context->machine || !context->state || !next_window)
         return A64_COMPACT_RAW_FALLBACK_NO_RETIRE;
+    cpu = &context->machine->cpu;
+    step_block = cpu->r[15] & ~UINT32_C(0x3ff);
     result = s5l8900_static_a64_fallback_step(context->machine,
                                               &context->status);
     if (result > A64_COMPACT_RAW_FALLBACK_RETIRE_STOP)
         return A64_COMPACT_RAW_FALLBACK_NO_RETIRE;
-    return (a64_compact_raw_fallback_result_t)result;
+    if (result != A64_COMPACT_RAW_FALLBACK_RETIRE_CONTINUE)
+        return (a64_compact_raw_fallback_result_t)result;
+
+    next_block = cpu->r[15] & ~UINT32_C(0x3ff);
+    crossed = step_block != context->fetch_block ||
+              next_block != context->fetch_block;
+    if (crossed) context->state->compact_raw_window_crossings++;
+    /* This refill consumes only an interpreter-owned live TLB/host-RAM
+     * witness. It cannot walk the MMU or enter a fault/device path inside the
+     * resident interval; refusal returns to the outer machine loop. */
+    if ((cpu->r[15] & 3u) != 0u ||
+        !arm_fetch_cache_try_refill(cpu, cpu->r[15], false)) {
+        if (crossed) context->state->compact_raw_window_stops++;
+        return A64_COMPACT_RAW_FALLBACK_RETIRE_STOP;
+    }
+
+    next_window->code = cpu->fetch_host;
+    next_window->code_base = next_block;
+    next_window->code_bytes = UINT32_C(0x400);
+    if (next_block != context->fetch_block) {
+        context->state->compact_raw_window_reloads++;
+        context->fetch_block = next_block;
+    }
+    return A64_COMPACT_RAW_FALLBACK_RETIRE_CONTINUE;
 }
 
 static unsigned try_compact_raw(s5l8900_t *m, static_a64_state_t *state,
@@ -894,7 +962,9 @@ static unsigned try_compact_raw(s5l8900_t *m, static_a64_state_t *state,
     arm_cpu_t *cpu = &m->cpu;
     compact_raw_fallback_context_t fallback_context = {
         .machine = m,
+        .state = state,
         .status = ARM_OK,
+        .fetch_block = 0u,
     };
     uint32_t fetch_block;
     uint32_t pc;
@@ -923,6 +993,7 @@ static unsigned try_compact_raw(s5l8900_t *m, static_a64_state_t *state,
     if (!cpu->fetch_host || cpu->fetch_blk != fetch_block ||
         cpu->fetch_gen != cpu->tlb_gen || cpu->fetch_priv != priv)
         return 0u;
+    fallback_context.fetch_block = fetch_block;
     if (!a64_compact_raw_run_code_window_resident(
             cpu, cpu->fetch_host, fetch_block, UINT32_C(0x400), budget,
             compact_raw_fallback, &fallback_context, &completed,

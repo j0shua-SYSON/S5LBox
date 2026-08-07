@@ -218,12 +218,19 @@ bool a64_compact_raw_run_code_window(arm_cpu_t *cpu, const uint8_t *code,
                                      unsigned max_insns,
                                      unsigned *completed);
 
+typedef struct {
+    const uint8_t *code;
+    uint32_t code_base;
+    uint32_t code_bytes;
+} a64_compact_raw_code_window_t;
+
 /* A resident code-window invocation may hand an instruction it cannot execute
  * to the architectural interpreter without returning through the outer SoC
  * loop. The callback owns that one instruction's complete semantics and cycle
  * accounting. NO_RETIRE leaves the current instruction untouched and stops;
- * RETIRE_CONTINUE and RETIRE_STOP both promise exactly one successful
- * retirement, with the latter ending the resident interval immediately. */
+ * RETIRE_STOP promises one successful retirement and ends the interval.
+ * RETIRE_CONTINUE also promises one retirement and must publish the proven
+ * live fetch window containing the next PC through `next_window`. */
 typedef enum {
     A64_COMPACT_RAW_FALLBACK_NO_RETIRE = 0,
     A64_COMPACT_RAW_FALLBACK_RETIRE_CONTINUE,
@@ -231,7 +238,8 @@ typedef enum {
 } a64_compact_raw_fallback_result_t;
 
 typedef a64_compact_raw_fallback_result_t
-    (*a64_compact_raw_fallback_fn)(void *opaque);
+    (*a64_compact_raw_fallback_fn)(
+        void *opaque, a64_compact_raw_code_window_t *next_window);
 
 /* Keep one build-time-linked AArch64 invocation resident across exact
  * interpreter fallbacks. The caller still proves the live virtual-code window
@@ -239,10 +247,11 @@ typedef a64_compact_raw_fallback_result_t
  * immediate word loads/stores may execute only when the interpreter-owned
  * DREAD/DWRITE entry proves the VA block, privilege and MMU generation;
  * stores additionally require live frontend write-pointer consent. Every
- * cache miss reaches the fallback before mutation. Branches leaving the
- * window return to the caller rather than fetching through an unproved
- * pointer. `native_completed` and `fallback_completed` partition `completed`
- * exactly. */
+ * cache miss reaches the fallback before mutation. A PC leaving the current
+ * window also reaches the fallback; after one exact retirement, a continued
+ * callback may replace the window with the next proven fetch witness. No
+ * unproved pointer is read. `native_completed` and `fallback_completed`
+ * partition `completed` exactly. */
 bool a64_compact_raw_run_code_window_resident(
     arm_cpu_t *cpu, const uint8_t *code, uint32_t code_base,
     uint32_t code_bytes, unsigned max_insns,

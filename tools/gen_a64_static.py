@@ -2152,9 +2152,11 @@ def compact_raw_function() -> list[str]:
     RAM base resident across instructions.  It deliberately accepts only a
     narrow, exactly testable subset: conditional data-processing with complete
     immediate/register-immediate-shift NZCV semantics, aligned immediate word
-    LDR/STR, and immediate B/BL. An unsupported instruction stops before
-    mutation and the return value is the exact retired prefix. Product
-    integration is intentionally a later decision.
+    LDR/STR, and immediate B/BL. A callback-free invocation stops before an
+    unsupported or out-of-window instruction. A resident invocation may hand
+    that instruction to one exact architectural fallback; continuation must
+    publish the proven live window containing the next PC. The return value is
+    always the exact retired prefix, with no runtime code generation.
     """
     return [
         "",
@@ -2205,12 +2207,13 @@ def compact_raw_function() -> list[str]:
         "    cbz w25, .La64cr_exit",
         "",
         ".La64cr_loop:",
-        # The code pointer names code_base.  Unsigned subtraction rejects both
-        # below-base and past-end PCs; the C contract guarantees a word-sized,
-        # word-aligned window.
+        # The code pointer names code_base. Unsigned subtraction rejects both
+        # below-base and past-end PCs. A resident invocation hands the first
+        # instruction beyond the window to the exact fallback; continuation
+        # must publish the next proven window before another native fetch.
         "    sub w8, w26, w23",
         "    cmp w8, w24",
-        "    b.hs .La64cr_exit",
+        "    b.hs .La64cr_fallback",
         "    tst w8, #3",
         "    b.ne .La64cr_exit",
         "    ldr w9, [x22, w8, uxtw]",
@@ -2622,6 +2625,11 @@ def compact_raw_function() -> list[str]:
         # 2=retire+stop. x19-x29 survive the C call by AAPCS64; the two table
         # pointers are caller-saved and are rebuilt only on continuation.
         ".La64cr_fallback:",
+        # The callback must explicitly publish a proven window for the next PC
+        # when it asks to continue. Clearing the caller-owned output prevents a
+        # stale witness from surviving a buggy or refusing callback.
+        "    str xzr, [x27, #88]",
+        "    str xzr, [x27, #96]",
         "    ldr x9, [x27, #48]",
         "    cbz x9, .La64cr_exit",
         "    str w26, [x19, #60]",
@@ -2636,6 +2644,7 @@ def compact_raw_function() -> list[str]:
         ".La64cr_fallback_committed:",
         "    ldr x9, [x27, #48]",
         "    ldr x0, [x27, #56]",
+        "    add x1, x27, #88",
         "    blr x9",
         "    mov w11, w0",
         "    ldr w26, [x19, #60]",
@@ -2648,6 +2657,25 @@ def compact_raw_function() -> list[str]:
         "    subs w25, w25, #1",
         "    b.eq .La64cr_exit",
         "    cmp w11, #1",
+        "    b.ne .La64cr_exit",
+        # Reload and validate the callback's post-retirement live fetch
+        # witness. The next loop still repeats the exact PC-in-window check;
+        # these guards prevent a NULL, unaligned or empty publication from
+        # causing a native read.
+        "    ldr x22, [x27, #88]",
+        "    ldr w23, [x27, #96]",
+        "    ldr w24, [x27, #100]",
+        "    cbz x22, .La64cr_exit",
+        "    tst w23, #3",
+        "    b.ne .La64cr_exit",
+        "    cmp w24, #4",
+        "    b.lo .La64cr_exit",
+        "    tst w24, #3",
+        "    b.ne .La64cr_exit",
+        "    sub w8, w26, w23",
+        "    cmp w8, w24",
+        "    b.hs .La64cr_exit",
+        "    tst w8, #3",
         "    b.ne .La64cr_exit",
         "#if defined(__APPLE__)",
         "    adrp x16, .La64cr_dp_table@PAGE",
