@@ -8068,3 +8068,46 @@ Brutal status: **this is real structural progress from -30.26% to -13.99% to -7.
 not evidence that 30 displayed FPS is close.** More opcode whack-a-mole is no longer justified.
 Evidence is retained under `work/artifacts/d2b6c9a-a9-cache-witness-gate-20260807/`. The reported
 scanout/publication cadence remains emulator-thread telemetry, not UIKit/Core Animation FPS.
+
+### 2026-08-07: cross-window residency removes the fragments and still loses on A9
+
+Commit `7a768a2775b1df89b3e108a74bae93c4a159d31d` tests the previous section's
+specific hypothesis rather than broadening the opcode catalogue. After one exact fallback, the
+callback may publish the proven fetch window containing the next PC. The same build-time-linked
+AArch64 invocation clears the previous descriptor, validates the new pointer/base/size/PC contract,
+reloads it, and continues until its real machine budget ends. A missing or malformed publication
+stops before another native fetch. No runtime-generated code is involved.
+
+Exact core run `31163204610`, stock-iOS run `31163204579`, and full-guest replay build
+`31163729731` are green. Both Apple Silicon jobs pass sequential and branch crossings, witness
+refusal, stale-publication rejection, and a serialized SoC oracle with 62 crossings/reloads and zero
+stops. The physical iPhone 6s Plus then ran the same authenticated 7.320--7.330 B
+interpreter/candidate/candidate/interpreter bracket:
+
+| arm | core rate | complete span | signed / fallback | calls / attempts | crossings / reloads / stops |
+|---|---:|---:|---:|---:|---:|
+| interpreter A | 16.688640 Minsn/s | 16.485 Minsn/s | 0 / 0 | 0 / 0 | 0 / 0 / 0 |
+| window resident B | 15.443658 Minsn/s | 15.389 Minsn/s | 4,152,321 / 2,552,885 | 101,933 / 3,187,346 | 359,577 / 357,239 / 2,155 |
+| window resident C | 15.101452 Minsn/s | 15.045 Minsn/s | 4,152,321 / 2,552,885 | 101,933 / 3,187,346 | 359,577 / 357,239 / 2,155 |
+| interpreter D | 16.951451 Minsn/s | 16.891 Minsn/s | 0 / 0 | 0 / 0 | 0 / 0 / 0 |
+
+All four runs exit zero with empty stderr, exactly 10 M retirements, identical cache accounting,
+canonical derived work-image SHA-256
+`06AAAA84FB4BFEAE5A647290C9B50BEBE7640F420457089F40BDBED961D6992D`, and screen SHA-256
+`0CF5CB094E56D5FF444DB2F7DE5B838357D83295BC3607C59B669F0AAE815335`.
+
+The structural mechanism works: positive resident calls fall 77.44%, from 451,794 to 101,933,
+almost matching the interpreter's 98,664 bounded batches. Average resident-call length rises from
+14.81 to 65.78 retirements. Performance nevertheless regresses from a bracketed interpreter median
+of 16.820046 to 15.272555 Minsn/s (**-9.20%**), and is 1.81% below the previous cache-resident
+candidate. The remaining 2,552,885 exact `arm_step()` callbacks, including roughly 360,000 window
+transitions, cost more than the removed outer returns save.
+
+Brutal status: **the experiment falsifies resident-call fragmentation as the primary remaining
+bottleneck.** It achieved the intended interval length and remained slower. Do not keep stretching
+this callback architecture and do not resume small opcode whack-a-mole. A credible next engine must
+remove most per-instruction C fallbacks with a broad callback-free live decoder/semantic tier; until
+that exists and wins physically, the accepted interpreter stays active. The candidate remains
+diagnostic-only, changes stock-app policy by zero, and provides no 30-FPS evidence. Full evidence is
+under `work/artifacts/7a768a2-cross-window-gate-20260807/`; its cadence remains emulator-thread
+telemetry, not displayed UIKit/Core Animation FPS.
