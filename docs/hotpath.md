@@ -8258,3 +8258,55 @@ PUSH/POP/STM/LDM and long BL/BLX with transactional LDM-to-PC; another phone run
 before those whole families land would mostly remeasure known fallback cost.
 Evidence is retained under
 `work/artifacts/compact-raw-block-single-admission-7320-4cd03ec-r1/`.
+
+### 2026-08-07: Thumb stack/return and LDM-to-PC raise exact admission to 96.170%
+
+Commit `622d2c490b46f86735fb6f79492b7197c500c609` adds native Thumb
+`SXTH`/`SXTB`/`UXTH`/`UXTB`, `PUSH`/`POP`, `STMIA`/`LDMIA`, and the two-halfword
+BL/BLX forms to the same build-time-linked compact loop. It also extends the
+transactional A32 block path through plain LDM-to-PC interworking. Invalid
+`0b10` targets, unaligned or cross-1-KiB spans, empty lists, unsafe base aliases,
+stale read witnesses, and revoked write consent are rejected before register,
+writeback, cache-telemetry, or memory commit. A follow-up at
+`c24ad58bc351809e4d3fbc704f8e401488b4b22c` fixes one AArch64 immediate encoding;
+it changes no guest semantics.
+
+The generated assembly has 27,282 labels with zero duplicates. Local strict
+CTest passes 65/65. Exact-SHA core run `31184673044` is green in every job,
+including the semantic loop on macOS 14 and 15 Apple arm64 and the JIT-off
+rebuild. Stock-iPhone build/IPA run `31184673177` is also green. Its policy
+checks confirm that this remains ahead-of-time signed code with no JIT
+entitlement, jailbreak dependency, or Dopamine/iOS-MCP product requirement.
+
+The unchanged r446 checkpoint was restored at 7,320,000,000 and stopped at
+7,330,000,000 with `--sequence-profile`. The run exits zero with empty stderr,
+accounts for 9,999,510 fetched instructions plus 490 interrupt entries, and
+preserves derived work-image SHA-256
+`06AAAA84FB4BFEAE5A647290C9B50BEBE7640F420457089F40BDBED961D6992D` and screen
+SHA-256 `45E3B4807D81A42EB14251246CA94F3149647462A0BC79C4C865C9F2418B6B57`.
+
+| exact 10 M classifier outcome | prior broad tier | + Thumb stack/return + LDM-PC | delta |
+|---|---:|---:|---:|
+| admitted | 9,315,056 (93.155%) | 9,616,559 (96.170%) | +301,503 (+3.015 pp) |
+| condition-passed execution | 8,428,893 | 8,730,396 | +301,503 |
+| rejected | 684,454 | 382,951 | -301,503 |
+| admitted runs | 545,072 | 351,203 | -193,869 |
+| mean admitted run | 17.090 | 27.382 | +10.292 |
+
+Thumb semantic admission is now 1,342,988/1,343,144 (**99.988%**), leaving 156
+per-class rejects instead of 205,265. Block-transfer admission is
+397,731/401,258 (**99.121%**), leaving 3,527 instead of 99,921. Those two exact
+reductions account for the complete 301,503-instruction gain. This is broad,
+reproducible architectural progress, not measured phone speed: no physical A9
+A/B or displayed UIKit/Core Animation FPS measurement has run for this build,
+and the accepted app policy remains the interpreter.
+
+Brutal status: **96.170% still misses the deliberately chosen phone-test gate.**
+There are 382,951 exact rejects, 82,951 above the fewer-than-roughly-300k design
+target. The largest coherent outcome gaps are 114,058 guarded/form VFP rejects,
+99,508 A32 register-specified shifts, and 86,900 unsupported instruction-class
+outcomes. The register-shift family alone is large enough to cross the gate and
+shares the already-proven data-processing commit path; implement that whole
+family and rerun this identical census before spending another physical-phone
+bracket. Evidence is under
+`work/artifacts/compact-raw-thumb-stack-admission-7320-c24ad58-r1/`.
