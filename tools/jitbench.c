@@ -5122,6 +5122,12 @@ static bool validate_compact_raw_admission_shapes(void) {
         { UINT32_C(0xe3000000), false,
           A64_COMPACT_RAW_REJECT_DP_TEST_WITHOUT_S },
         { UINT32_C(0xe0810312), false,
+          A64_COMPACT_RAW_ADMIT_EXECUTE },
+        { UINT32_C(0xe0810f12), false,
+          A64_COMPACT_RAW_REJECT_DP_PC },
+        { UINT32_C(0xe081031f), false,
+          A64_COMPACT_RAW_REJECT_DP_RM_PC },
+        { UINT32_C(0xe0810392), false,
           A64_COMPACT_RAW_REJECT_DP_REGISTER_SHIFT },
         { UINT32_C(0xe081000f), false,
           A64_COMPACT_RAW_REJECT_DP_RM_PC },
@@ -5333,7 +5339,7 @@ static bool validate_compact_raw_admission_shapes(void) {
         fprintf(stderr, "jitbench: compact raw VFP Len guard admitted\n");
         return false;
     }
-    printf("COMPACT-RAW-ADMISSION-MODEL exact-shapes=yes cases=64 "
+    printf("COMPACT-RAW-ADMISSION-MODEL exact-shapes=yes cases=67 "
            "outcomes=13 condition-before-decode=yes machine-gates=excluded\n");
     return true;
 }
@@ -5524,6 +5530,221 @@ static bool compact_raw_thumb_program_compare(
                 name, completed, expected_completed, (unsigned)status);
         return false;
     }
+    return true;
+}
+
+static uint32_t compact_raw_a32_register_shift_instruction(
+        unsigned opcode, bool set_flags, unsigned rn, unsigned rd,
+        unsigned rm, unsigned rs, unsigned type) {
+    return UINT32_C(0xe0000010) | (opcode << 21) |
+           ((set_flags ? 1u : 0u) << 20) | (rn << 16) | (rd << 12) |
+           (rs << 8) | (type << 5) | rm;
+}
+
+static void seed_compact_raw_a32_register_shift(
+        arm_cpu_t *cpu, uint32_t insn, uint32_t pc) {
+    seed_cpu_at(cpu, &insn, 1u, false, pc);
+    for (unsigned reg = 0u; reg < 15u; reg++)
+        cpu->r[reg] = UINT32_C(0x61000000) |
+                      (reg * UINT32_C(0x010203));
+    cpu->r[15] = pc;
+}
+
+static bool compact_raw_a32_register_shift_exact_case(
+        const char *name, const arm_cpu_t *initial, unsigned opcode,
+        bool set_flags, unsigned type, unsigned amount, unsigned carry) {
+    arm_cpu_t reference = *initial;
+    arm_cpu_t compact = *initial;
+    final_state_t reference_state;
+    final_state_t compact_state;
+    arm_status_t status;
+    unsigned completed = UINT_MAX;
+    const uint32_t pc = initial->r[15];
+
+    status = arm_step(&reference);
+    capture_state(&reference_state, &reference, status, JIT_EXIT_NEXT);
+    if (!a64_compact_raw_run(&compact, &g_ram[pc], pc, 4u, 1u,
+                             g_ram, sizeof g_ram, &completed)) {
+        fprintf(stderr,
+                "jitbench: compact raw A32 register shift %s contract "
+                "refused\n", name);
+        return false;
+    }
+    capture_state(&compact_state, &compact, ARM_OK, JIT_EXIT_NEXT);
+    if (status != ARM_OK || completed != 1u ||
+        !architectural_states_equal(&reference_state, &compact_state)) {
+        fprintf(stderr,
+                "jitbench: compact raw A32 register shift %s mismatch "
+                "opcode=%u S=%u type=%u amount=%u carry=%u "
+                "completed=%u status=%u\n",
+                name, opcode, set_flags ? 1u : 0u, type, amount, carry,
+                completed, (unsigned)status);
+        return false;
+    }
+    return true;
+}
+
+static bool compact_raw_a32_register_shift_refusal_case(
+        const char *name, uint32_t insn, uint32_t pc) {
+    arm_cpu_t reference;
+    arm_cpu_t compact;
+    arm_cpu_t before;
+    arm_status_t reference_status;
+    arm_status_t compact_status;
+    unsigned completed = UINT_MAX;
+
+    seed_compact_raw_a32_register_shift(&reference, insn, pc);
+    compact = reference;
+    before = compact;
+    reference_status = arm_step(&reference);
+    if (!a64_compact_raw_run(&compact, &g_ram[pc], pc, 4u, 1u,
+                             g_ram, sizeof g_ram, &completed) ||
+        completed != 0u || memcmp(&before, &compact, sizeof compact) != 0) {
+        fprintf(stderr,
+                "jitbench: compact raw A32 register shift refusal %s "
+                "changed state (completed=%u)\n", name, completed);
+        return false;
+    }
+    compact_status = arm_step(&compact);
+    if (reference_status != ARM_UNDEFINED ||
+        compact_status != reference_status ||
+        memcmp(&reference, &compact, sizeof compact) != 0) {
+        fprintf(stderr,
+                "jitbench: compact raw A32 register shift refusal %s "
+                "fallback diverged (status=%u/%u)\n", name,
+                (unsigned)reference_status, (unsigned)compact_status);
+        return false;
+    }
+    return true;
+}
+
+static bool validate_compact_raw_a32_register_shift_oracles(void) {
+    static const unsigned RESULT_OPS[] = {
+        0u, 1u, 2u, 3u, 4u, 5u, 6u, 7u, 12u, 13u, 14u, 15u,
+    };
+    static const unsigned TEST_OPS[] = {8u, 9u, 10u, 11u};
+    static const unsigned AMOUNTS[] = {
+        0u, 1u, 7u, 31u, 32u, 33u, 64u, 255u,
+    };
+    typedef struct {
+        const char *name;
+        unsigned opcode;
+        bool set_flags;
+        unsigned rn;
+        unsigned rd;
+        unsigned rm;
+        unsigned rs;
+        unsigned type;
+        uint32_t r[4];
+    } alias_case_t;
+    static const alias_case_t ALIASES[] = {
+        {"rd-rs", 13u, true, 0u, 3u, 2u, 3u, 0u,
+         {UINT32_C(0x7fffffff), UINT32_C(0x13579bdf),
+          UINT32_C(0x80000001), UINT32_C(0x00000001)}},
+        {"rd-rm", 4u, true, 0u, 2u, 2u, 3u, 1u,
+         {UINT32_C(0x7fffffff), UINT32_C(0x13579bdf),
+          UINT32_C(0x80000001), UINT32_C(0x00000001)}},
+        {"rd-rn", 2u, false, 1u, 1u, 2u, 3u, 2u,
+         {UINT32_C(0x2468ace0), UINT32_C(0x7fffffff),
+          UINT32_C(0x80000001), UINT32_C(0x0000001f)}},
+        {"rs-rm", 12u, true, 0u, 1u, 2u, 2u, 3u,
+         {UINT32_C(0x7fffffff), UINT32_C(0x13579bdf),
+          UINT32_C(0x80000001), UINT32_C(0x2468ace0)}},
+        {"rn-rs", 5u, true, 3u, 1u, 2u, 3u, 0u,
+         {UINT32_C(0x2468ace0), UINT32_C(0x13579bdf),
+          UINT32_C(0x80000001), UINT32_C(0x7fffff01)}},
+    };
+    const uint32_t pc = UINT32_C(0x7c00);
+    const uint32_t nzcv_mask = ARM_CPSR_N | ARM_CPSR_Z |
+                               ARM_CPSR_C | ARM_CPSR_V;
+    unsigned cases = 0u;
+
+    for (unsigned group = 0u; group < 2u; group++) {
+        const unsigned *ops = group == 0u ? RESULT_OPS : TEST_OPS;
+        const unsigned op_count = group == 0u
+            ? (unsigned)(sizeof RESULT_OPS / sizeof RESULT_OPS[0])
+            : (unsigned)(sizeof TEST_OPS / sizeof TEST_OPS[0]);
+        for (unsigned op_index = 0u; op_index < op_count; op_index++) {
+            const unsigned opcode = ops[op_index];
+            const unsigned first_s = group == 0u ? 0u : 1u;
+            for (unsigned set_flags = first_s; set_flags < 2u; set_flags++) {
+                for (unsigned type = 0u; type < 4u; type++) {
+                    for (unsigned amount_index = 0u;
+                         amount_index < sizeof AMOUNTS / sizeof AMOUNTS[0];
+                         amount_index++) {
+                        const unsigned amount = AMOUNTS[amount_index];
+                        for (unsigned carry = 0u; carry < 2u; carry++) {
+                            const uint32_t insn =
+                                compact_raw_a32_register_shift_instruction(
+                                    opcode, set_flags != 0u, 0u, 1u,
+                                    2u, 3u, type);
+                            arm_cpu_t initial;
+
+                            seed_compact_raw_a32_register_shift(
+                                &initial, insn, pc);
+                            initial.r[0] = UINT32_C(0x7fffffff);
+                            initial.r[1] = UINT32_C(0x13579bdf);
+                            initial.r[2] = UINT32_C(0x80000001);
+                            initial.r[3] = UINT32_C(0x5a5a0000) | amount;
+                            initial.cpsr =
+                                (initial.cpsr & ~nzcv_mask) |
+                                ARM_CPSR_N | ARM_CPSR_Z | ARM_CPSR_V |
+                                (carry ? ARM_CPSR_C : 0u);
+                            if (!compact_raw_a32_register_shift_exact_case(
+                                    "matrix", &initial, opcode,
+                                    set_flags != 0u, type, amount, carry))
+                                return false;
+                            cases++;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    for (unsigned i = 0u; i < sizeof ALIASES / sizeof ALIASES[0]; i++) {
+        const alias_case_t *ac = &ALIASES[i];
+        const uint32_t insn = compact_raw_a32_register_shift_instruction(
+            ac->opcode, ac->set_flags, ac->rn, ac->rd,
+            ac->rm, ac->rs, ac->type);
+        arm_cpu_t initial;
+
+        seed_compact_raw_a32_register_shift(&initial, insn, pc);
+        for (unsigned reg = 0u; reg < 4u; reg++) initial.r[reg] = ac->r[reg];
+        initial.cpsr = (initial.cpsr & ~nzcv_mask) |
+                       ARM_CPSR_N | ARM_CPSR_V | ARM_CPSR_C;
+        if (!compact_raw_a32_register_shift_exact_case(
+                ac->name, &initial, ac->opcode, ac->set_flags,
+                ac->type, initial.r[ac->rs] & 255u, 1u))
+            return false;
+        cases++;
+    }
+
+    if (cases != 1797u) {
+        fprintf(stderr,
+                "jitbench: incomplete compact raw A32 register shift "
+                "matrix (%u)\n", cases);
+        return false;
+    }
+    if (!compact_raw_a32_register_shift_refusal_case(
+            "rn-pc", compact_raw_a32_register_shift_instruction(
+                4u, true, 15u, 1u, 2u, 3u, 0u), pc) ||
+        !compact_raw_a32_register_shift_refusal_case(
+            "rd-pc", compact_raw_a32_register_shift_instruction(
+                4u, true, 0u, 15u, 2u, 3u, 1u), pc) ||
+        !compact_raw_a32_register_shift_refusal_case(
+            "rm-pc", compact_raw_a32_register_shift_instruction(
+                4u, true, 0u, 1u, 15u, 3u, 2u), pc) ||
+        !compact_raw_a32_register_shift_refusal_case(
+            "rs-pc", compact_raw_a32_register_shift_instruction(
+                4u, true, 0u, 1u, 2u, 15u, 3u), pc))
+        return false;
+
+    printf("COMPACT-RAW-A32-REGISTER-SHIFT-ORACLE exact=yes cases=1797 "
+           "refusals=4 opcodes=all result-flags=both types=all "
+           "amounts=0-1-7-31-32-33-64-255 amount-low8=yes carry=both "
+           "aliases=rd-rs-rd-rm-rd-rn-rs-rm-rn-rs pc-guards=all "
+           "runtime-codegen=no\n");
     return true;
 }
 
@@ -7885,6 +8106,8 @@ static bool validate_compact_raw_oracles(void) {
     if (!validate_compact_raw_a32_single_oracles())
         return false;
     if (!validate_compact_raw_a32_block_oracles())
+        return false;
+    if (!validate_compact_raw_a32_register_shift_oracles())
         return false;
 
     for (unsigned i = 0u; i < sizeof result_ops / sizeof result_ops[0]; i++) {

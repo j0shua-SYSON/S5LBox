@@ -1817,8 +1817,18 @@ a64_compact_raw_admission_t a64_compact_raw_classify_instruction(
         if (rn == 15u || rd == 15u)
             return A64_COMPACT_RAW_REJECT_DP_PC;
         if ((insn & (1u << 25)) == 0u) {
-            if (insn & (1u << 4))
-                return A64_COMPACT_RAW_REJECT_DP_REGISTER_SHIFT;
+            if (insn & (1u << 4)) {
+                const unsigned rs = (insn >> 8) & 15u;
+
+                /* A true register-specified data-processing shift has bit 7
+                 * clear.  The bit7+bit4 space belongs to multiply, extra
+                 * load/store and synchronization encodings.  ARMv6 also
+                 * forbids PC in Rs just as it does in Rn/Rd/Rm. */
+                if ((insn & (1u << 7)) != 0u)
+                    return A64_COMPACT_RAW_REJECT_DP_REGISTER_SHIFT;
+                if (rs == 15u)
+                    return A64_COMPACT_RAW_REJECT_DP_PC;
+            }
             if ((insn & 15u) == 15u)
                 return A64_COMPACT_RAW_REJECT_DP_RM_PC;
         }
