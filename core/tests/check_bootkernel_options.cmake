@@ -192,6 +192,23 @@ expect_config(interpreter_control_is_explicit
 expect_refused(interpreter_control_requires_run_api
     "--interpreter-control requires --run-api"
     absent-kernel --interpreter-control --print-config)
+# The compact live-byte engine is selected only inside the same bounded harness
+# and is mutually exclusive with the literal interpreter control. This keeps a
+# physical A9 A/B in one executable without turning the experiment into a boot
+# default or letting an impossible hybrid policy reach machine initialization.
+expect_config(compact_raw_control_is_explicit
+    "--run-api|--compact-raw-control"
+    absent-kernel --run-api --compact-raw-control --print-config)
+expect_refused(compact_raw_control_requires_run_api
+    "--compact-raw-control requires --run-api"
+    absent-kernel --compact-raw-control --print-config)
+expect_refused(compact_raw_and_interpreter_are_exclusive
+    "mutually exclusive execution policies"
+    absent-kernel --run-api --compact-raw-control --interpreter-control
+    --print-config)
+expect_refused(compact_raw_refuses_pre_step_hle
+    "cannot be combined with --hle"
+    absent-kernel --run-api --compact-raw-control --hle --print-config)
 # The first physical A9 replay proved that the diagnostic observer's revoked
 # write consent was not app-identical. These controls must remain explicit,
 # bounded and independently switchable in one executable.

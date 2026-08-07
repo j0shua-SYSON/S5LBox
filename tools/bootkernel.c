@@ -33242,7 +33242,8 @@ static void boot_print_usage(FILE *stream, const char *argv0) {
             "          [--touch <at>:<x>:<y>[:<hold>]] ...\n"
             "          [--drag <at>:<x0>:<y0>:<x1>:<y1>[:<steps>[:<span>]]] ...\n"
             "          [--fast] [--run-api] [--frame-meter]\n"
-            "          [--interpreter-control] [--canonical-bus]\n"
+            "          [--interpreter-control | --compact-raw-control]\n"
+            "          [--canonical-bus]\n"
             "          [--no-direct-ram-writes]\n"
             "          [--sequence-profile]\n"
             "          [--pinch <at>:<ax0>:<ay0>:<ax1>:<ay1>:<bx0>:<by0>:"
@@ -33284,6 +33285,12 @@ static void boot_print_usage(FILE *stream, const char *argv0) {
             "      it changes host execution only and leaves guest state and\n"
             "      emulated hardware unchanged. The run reports signed-retired\n"
             "      and graph/refill counters for either arm.\n"
+            "  --compact-raw-control  with --run-api, replace the as-built\n"
+            "      signed policy with the default-off compact live-byte A32\n"
+            "      loop. It consumes only a proven 1 KiB fetch translation,\n"
+            "      stops before data access, and remains bounded by the first\n"
+            "      device-time edge. This is a same-binary diagnostic control,\n"
+            "      not a shipping mode or an FPS claim.\n"
             "  --canonical-bus  with --run-api, remove bootkernel's read/write\n"
             "      observer after setup/restore and run through the canonical\n"
             "      machine bus used by the iOS app. The build's direct-RAM-write\n"
@@ -33544,6 +33551,10 @@ int main(int argc, char **argv) {
      * runtime. Restricted to --run-api so a diagnostic arm cannot be mistaken
      * for an ordinary boot configuration. */
     bool interpreter_control = false;
+    /* --compact-raw-control: same binary and guest, but select the default-off
+     * MMU-aware live-fetch loop instead of the as-built signed policy. It is
+     * deliberately restricted to the bounded run-api performance harness. */
+    bool compact_raw_control = false;
     /* --canonical-bus: replace bootkernel's observer callbacks with the exact
      * machine bus used by the app for a bounded run-api performance control.
      * --no-direct-ram-writes isolates the compiled direct-write default. */
@@ -33829,6 +33840,10 @@ int main(int argc, char **argv) {
         }
         if (!strcmp(argv[i], "--interpreter-control")) {
             interpreter_control = true;
+            continue;
+        }
+        if (!strcmp(argv[i], "--compact-raw-control")) {
+            compact_raw_control = true;
             continue;
         }
         if (!strcmp(argv[i], "--canonical-bus")) {
@@ -34910,6 +34925,25 @@ int main(int argc, char **argv) {
                 "same-binary performance control, not a boot mode\n");
         return 1;
     }
+    if (compact_raw_control && !run_api_hot) {
+        fprintf(stderr,
+                "--compact-raw-control requires --run-api: it is a bounded "
+                "same-binary performance control, not a boot mode\n");
+        return 1;
+    }
+    if (interpreter_control && compact_raw_control) {
+        fprintf(stderr,
+                "--interpreter-control and --compact-raw-control are mutually "
+                "exclusive execution policies\n");
+        return 1;
+    }
+    if (compact_raw_control && cfg.v.hle) {
+        fprintf(stderr,
+                "--compact-raw-control cannot be combined with --hle: the "
+                "exact-PC replacement hook deliberately disables compact "
+                "in-loop execution\n");
+        return 1;
+    }
     if (canonical_bus_control && !run_api_hot) {
         fprintf(stderr,
                 "--canonical-bus requires --run-api: disabling diagnostics "
@@ -34988,14 +35022,28 @@ int main(int argc, char **argv) {
         s5l8900_free(&mach);
         return 1;
     }
-    printf("signed A64 : %s; runtime counters will be reported by --run-api\n",
-           interpreter_control ? "DISABLED by --interpreter-control"
-                               : "as built (no runtime override)");
-#else
-    if (interpreter_control) {
+    if (compact_raw_control &&
+        (!s5l8900_static_a64_set_enabled(&mach, true) ||
+         !s5l8900_static_a64_set_compact_raw(&mach, true) ||
+         !s5l8900_static_a64_set_chain_limit(&mach, 256u))) {
         fprintf(stderr,
-                "--interpreter-control is unavailable: this binary was built "
-                "without S5LBOX_STATIC_A64_ENGINE\n");
+                "--compact-raw-control: live-fetch engine selection failed\n");
+        s5l8900_free(&mach);
+        return 1;
+    }
+    printf("signed A64 : %s; runtime counters will be reported by --run-api\n",
+           interpreter_control
+               ? "DISABLED by --interpreter-control"
+               : compact_raw_control
+                     ? "compact live-byte loop by --compact-raw-control"
+                     : "as built (no runtime override)");
+#else
+    if (interpreter_control || compact_raw_control) {
+        fprintf(stderr,
+                "%s is unavailable: this binary was built without "
+                "S5LBOX_STATIC_A64_ENGINE\n",
+                compact_raw_control ? "--compact-raw-control"
+                                    : "--interpreter-control");
         s5l8900_free(&mach);
         return 1;
     }
@@ -37052,6 +37100,12 @@ external_md_work_ready:
             s5l8900_static_a64_persistent_chained_blocks(&mach);
         const uint64_t signed_graph_before =
             s5l8900_static_a64_graph_chained_blocks(&mach);
+        const uint64_t compact_raw_attempts_before =
+            s5l8900_static_a64_compact_raw_attempts(&mach);
+        const uint64_t compact_raw_calls_before =
+            s5l8900_static_a64_compact_raw_calls(&mach);
+        const uint64_t compact_raw_retired_before =
+            s5l8900_static_a64_compact_raw_retired(&mach);
         const uint64_t refill_attempts_before =
             s5l8900_static_a64_fetch_refill_attempts(&mach);
         const uint64_t refill_hits_before =
@@ -37145,6 +37199,15 @@ external_md_work_ready:
             uint64_t signed_graph =
                 s5l8900_static_a64_graph_chained_blocks(&mach) -
                 signed_graph_before;
+            uint64_t compact_raw_attempts =
+                s5l8900_static_a64_compact_raw_attempts(&mach) -
+                compact_raw_attempts_before;
+            uint64_t compact_raw_calls =
+                s5l8900_static_a64_compact_raw_calls(&mach) -
+                compact_raw_calls_before;
+            uint64_t compact_raw_retired =
+                s5l8900_static_a64_compact_raw_retired(&mach) -
+                compact_raw_retired_before;
             uint64_t refill_attempts =
                 s5l8900_static_a64_fetch_refill_attempts(&mach) -
                 refill_attempts_before;
@@ -37160,11 +37223,18 @@ external_md_work_ready:
             printf("run api A64: mode=%s signed-retired=%" PRIu64
                    "/%" PRIu64 " (%.3f%%) chained=%" PRIu64
                    " persistent=%" PRIu64 " graph=%" PRIu64 "\n",
-                   interpreter_control ? "interpreter-control" : "as-built",
+                   interpreter_control
+                       ? "interpreter-control"
+                       : compact_raw_control ? "compact-raw-control"
+                                             : "as-built",
                    signed_retired, run_retired,
                    run_retired ? 100.0 * (double)signed_retired /
                                      (double)run_retired : 0.0,
                    signed_chained, signed_persistent, signed_graph);
+            printf("run api A64: compact-raw attempts/calls/retired=%" PRIu64
+                   "/%" PRIu64 "/%" PRIu64 "\n",
+                   compact_raw_attempts, compact_raw_calls,
+                   compact_raw_retired);
             printf("run api A64: refill attempts/hits/skips=%" PRIu64
                    "/%" PRIu64 "/%" PRIu64
                    " known-negative-bypasses=%" PRIu64
