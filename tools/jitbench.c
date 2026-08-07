@@ -3078,13 +3078,18 @@ static void seed_vfp_oracle(arm_cpu_t *cpu, const uint32_t *program,
     cpu->vfp_s[12] = UINT32_C(0xff800001); /* signalling NaN payload */
 }
 
-static bool static_vfp_states_equal(const arm_cpu_t *a,
-                                    const arm_cpu_t *b) {
+static bool static_vfp_arch_states_equal(const arm_cpu_t *a,
+                                         const arm_cpu_t *b) {
     return memcmp(a->r, b->r, sizeof a->r) == 0 &&
            a->cpsr == b->cpsr && a->cycles == b->cycles &&
            a->vfp_fpexc == b->vfp_fpexc &&
            a->vfp_fpscr == b->vfp_fpscr &&
-           memcmp(a->vfp_s, b->vfp_s, sizeof a->vfp_s) == 0 &&
+           memcmp(a->vfp_s, b->vfp_s, sizeof a->vfp_s) == 0;
+}
+
+static bool static_vfp_states_equal(const arm_cpu_t *a,
+                                    const arm_cpu_t *b) {
+    return static_vfp_arch_states_equal(a, b) &&
            a->dread_hits == b->dread_hits &&
            a->dread_misses == b->dread_misses &&
            a->dwrite_hits == b->dwrite_hits &&
@@ -5764,7 +5769,7 @@ static bool compact_raw_vfp_flat_memory_case(const char *name,
     if (!a64_compact_raw_run(&compact, &g_ram[pc], pc, insns * 4u,
                              insns, g_ram, sizeof g_ram, &completed) ||
         status != ARM_OK || completed != insns ||
-        !static_vfp_states_equal(&reference, &compact) ||
+        !static_vfp_arch_states_equal(&reference, &compact) ||
         memcmp(expected, g_ram, sizeof g_ram) != 0) {
         fprintf(stderr,
                 "jitbench: compact raw VFP flat-memory %s mismatch "
@@ -5880,7 +5885,7 @@ static bool validate_compact_raw_vfp_memory_oracles(void) {
     printf("COMPACT-RAW-VFP-MEMORY-ORACLE exact=yes cases=21 "
            "vldr=yes vstr=yes vstm=yes single=yes double=yes pc-relative=yes "
            "writeback=yes condition-before-guard=yes transactional=yes "
-           "runtime-codegen=no\n");
+           "flat-ram=yes cache-telemetry=excluded runtime-codegen=no\n");
     ok = true;
 
 done:
