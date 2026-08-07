@@ -5136,6 +5136,30 @@ static bool validate_compact_raw_admission_shapes(void) {
             return false;
         }
     }
+    cpu.r[0] = UINT32_C(0x1a01);
+    if (a64_compact_raw_classify_instruction(
+            &cpu, UINT32_C(0xe12fff10), false) !=
+            A64_COMPACT_RAW_ADMIT_EXECUTE ||
+        a64_compact_raw_classify_instruction(
+            &cpu, UINT32_C(0xe12fff30), false) !=
+            A64_COMPACT_RAW_ADMIT_EXECUTE) {
+        fprintf(stderr,
+                "jitbench: compact raw A32 indirect admission refused\n");
+        return false;
+    }
+    cpu.r[0] = UINT32_C(0x1a02);
+    if (a64_compact_raw_classify_instruction(
+            &cpu, UINT32_C(0xe12fff10), false) !=
+            A64_COMPACT_RAW_REJECT_CLASS ||
+        a64_compact_raw_classify_instruction(
+            &cpu, UINT32_C(0xe12fff3f), false) !=
+            A64_COMPACT_RAW_REJECT_CLASS) {
+        fprintf(stderr,
+                "jitbench: compact raw A32 indirect guard admitted "
+                "invalid target\n");
+        return false;
+    }
+    cpu.r[0] = UINT32_C(0x1a00);
     cpu.cp15.cpacr |= 0xfu << ARM_CPACR_CP10_SHIFT;
     cpu.vfp_fpexc = ARM_FPEXC_EN;
     cpu.vfp_fpscr = 0u;
@@ -5194,7 +5218,7 @@ static bool validate_compact_raw_admission_shapes(void) {
         fprintf(stderr, "jitbench: compact raw VFP Len guard admitted\n");
         return false;
     }
-    printf("COMPACT-RAW-ADMISSION-MODEL exact-shapes=yes cases=26 "
+    printf("COMPACT-RAW-ADMISSION-MODEL exact-shapes=yes cases=30 "
            "outcomes=13 condition-before-decode=yes machine-gates=excluded\n");
     return true;
 }
@@ -5347,6 +5371,173 @@ static bool compact_raw_thumb_instruction_compare(uint16_t insn,
                 (unsigned)insn, completed, (unsigned)status);
         return false;
     }
+    return true;
+}
+
+static bool run_compact_raw_a32_indirect_case(
+        bool link, unsigned condition, unsigned rm, uint32_t target,
+        uint32_t flags, bool passed, unsigned *cases) {
+    const uint32_t pc = UINT32_C(0x7600);
+    const uint32_t nzcv_mask = ARM_CPSR_N | ARM_CPSR_Z |
+                               ARM_CPSR_C | ARM_CPSR_V;
+    const uint32_t insn = (condition << 28) | UINT32_C(0x012fff10) |
+                          ((link ? 1u : 0u) << 5) | rm;
+    arm_cpu_t reference;
+    arm_cpu_t compact;
+    arm_status_t status;
+    unsigned completed = UINT_MAX;
+    uint32_t source;
+    uint32_t expected_pc;
+    uint32_t expected_lr;
+
+    seed_cpu_at(&reference, &insn, 1u, false, pc);
+    reference.cpsr = (reference.cpsr & ~nzcv_mask) | flags;
+    if (rm != 15u) reference.r[rm] = target;
+    source = rm == 15u ? pc + 8u : target;
+    expected_pc = passed ? source & ~UINT32_C(1) : pc + 4u;
+    expected_lr = link && passed ? pc + 4u : reference.r[14];
+    compact = reference;
+
+    status = arm_step(&reference);
+    if (!a64_compact_raw_run(&compact, &g_ram[pc], pc, 4u, 1u,
+                             g_ram, sizeof g_ram, &completed) ||
+        status != ARM_OK || completed != 1u ||
+        !indirect_register_states_equal(&reference, &compact) ||
+        compact.r[15] != expected_pc || compact.r[14] != expected_lr ||
+        (((compact.cpsr & ARM_CPSR_T) != 0u) !=
+         (passed ? (source & 1u) != 0u : false))) {
+        fprintf(stderr,
+                "jitbench: compact raw A32 indirect mismatch "
+                "link=%u cond=%u rm=%u pass=%u pc=%08" PRIx32
+                " lr=%08" PRIx32 " completed=%u status=%u\n",
+                link ? 1u : 0u, condition, rm, passed ? 1u : 0u,
+                compact.r[15], compact.r[14], completed,
+                (unsigned)status);
+        return false;
+    }
+    if (cases) (*cases)++;
+    return true;
+}
+
+static bool validate_compact_raw_a32_indirect_oracles(void) {
+    static const uint32_t TARGETS[] = {
+        UINT32_C(0x7a00), UINT32_C(0x7a01),
+    };
+    const uint32_t invalid_target = UINT32_C(0x7a02);
+    unsigned cases = 0u;
+
+    /* This crosses every ordinary condition result with both destination
+     * states. BLX reads LR as its target, proving the source is captured
+     * before the architectural return address replaces LR. */
+    for (unsigned link = 0u; link < 2u; link++) {
+        const unsigned rm = link ? 14u : 0u;
+        for (unsigned condition = 0u; condition < 15u; condition++) {
+            const unsigned outcomes = condition == 14u ? 1u : 2u;
+            for (unsigned outcome = 0u; outcome < outcomes; outcome++) {
+                const bool passed = condition == 14u || outcome != 0u;
+                uint32_t flags = 0u;
+                if (condition != 14u &&
+                    !branch_condition_flags(condition, passed, &flags)) {
+                    fprintf(stderr,
+                            "jitbench: no compact indirect NZCV witness "
+                            "cond=%u pass=%u\n",
+                            condition, passed ? 1u : 0u);
+                    return false;
+                }
+                for (unsigned target = 0u; target < 2u; target++) {
+                    if (!run_compact_raw_a32_indirect_case(
+                            link != 0u, condition, rm, TARGETS[target],
+                            flags, passed, &cases))
+                        return false;
+                }
+            }
+        }
+    }
+
+    /* BX accepts all sixteen source registers; BLX(register) accepts r0-r14.
+     * Cross each ordinary source with ARM and Thumb targets, plus BX pc. */
+    for (unsigned link = 0u; link < 2u; link++) {
+        const unsigned registers = link ? 15u : 16u;
+        for (unsigned rm = 0u; rm < registers; rm++) {
+            const unsigned target_count = rm == 15u ? 1u : 2u;
+            for (unsigned target = 0u; target < target_count; target++) {
+                if (!run_compact_raw_a32_indirect_case(
+                        link != 0u, 14u, rm, TARGETS[target],
+                        ARM_CPSR_C, true, &cases))
+                    return false;
+            }
+        }
+    }
+
+    /* Low bits 0b10 are neither a valid ARM word nor a Thumb halfword. The
+     * compact engine must return a zero prefix without changing any state;
+     * the caller's interpreter step then reproduces ARM_UNDEFINED exactly. */
+    for (unsigned invalid_case = 0u; invalid_case < 3u; invalid_case++) {
+        const bool link = invalid_case != 0u;
+        const unsigned rm = invalid_case == 2u ? 15u : 0u;
+        const uint32_t pc = UINT32_C(0x7800) + invalid_case * 4u;
+        const uint32_t insn = UINT32_C(0xe12fff10) |
+                              ((link ? 1u : 0u) << 5) | rm;
+        arm_cpu_t reference;
+        arm_cpu_t compact;
+        arm_cpu_t before;
+        arm_status_t reference_status;
+        arm_status_t compact_status;
+        unsigned completed = UINT_MAX;
+
+        seed_cpu_at(&reference, &insn, 1u, false, pc);
+        if (rm != 15u) reference.r[rm] = invalid_target;
+        compact = reference;
+        before = compact;
+        reference_status = arm_step(&reference);
+        if (!a64_compact_raw_run(&compact, &g_ram[pc], pc, 4u, 1u,
+                                 g_ram, sizeof g_ram, &completed) ||
+            completed != 0u ||
+            !indirect_register_states_equal(&before, &compact)) {
+            fprintf(stderr,
+                    "jitbench: compact raw invalid A32 indirect changed "
+                    "state link=%u rm=%u completed=%u\n",
+                    link ? 1u : 0u, rm, completed);
+            return false;
+        }
+        compact_status = arm_step(&compact);
+        if (reference_status != ARM_UNDEFINED ||
+            compact_status != reference_status ||
+            !indirect_register_states_equal(&reference, &compact)) {
+            fprintf(stderr,
+                    "jitbench: compact raw invalid A32 indirect fallback "
+                    "diverged link=%u rm=%u\n", link ? 1u : 0u, rm);
+            return false;
+        }
+    }
+
+    /* Condition evaluation precedes every runtime target guard. A failed EQ
+     * therefore retires even when the unobserved target would be invalid. */
+    for (unsigned link = 0u; link < 2u; link++) {
+        uint32_t flags = 0u;
+        if (!branch_condition_flags(0u, false, &flags) ||
+            !run_compact_raw_a32_indirect_case(
+                link != 0u, 0u, 0u, invalid_target, flags, false, NULL))
+            return false;
+    }
+    {
+        uint32_t flags = 0u;
+        if (!branch_condition_flags(0u, false, &flags) ||
+            !run_compact_raw_a32_indirect_case(
+                true, 0u, 15u, 0u, flags, false, NULL))
+            return false;
+    }
+
+    if (cases != 177u) {
+        fprintf(stderr,
+                "jitbench: incomplete compact raw A32 indirect matrix "
+                "(%u)\n", cases);
+        return false;
+    }
+    printf("COMPACT-RAW-A32-INDIRECT-ORACLE exact=yes cases=177 "
+           "conditions=all registers=all arm-target=yes thumb-target=yes "
+           "link=yes pc-source=yes invalid-rollback=yes "
+           "condition-before-guard=yes runtime-codegen=no\n");
     return true;
 }
 
@@ -6491,6 +6682,8 @@ static bool validate_compact_raw_oracles(void) {
                                         sizeof dp_program[0])))
         return false;
     if (!validate_compact_raw_thumb_oracles())
+        return false;
+    if (!validate_compact_raw_a32_indirect_oracles())
         return false;
     if (!compact_raw_compare("data-processing-flags", flag_program,
                              (unsigned)(sizeof flag_program /

@@ -1716,6 +1716,17 @@ a64_compact_raw_admission_t a64_compact_raw_classify_instruction(
     if (((insn >> 25) & 7u) == 5u)
         return A64_COMPACT_RAW_ADMIT_EXECUTE;
 
+    if ((insn & UINT32_C(0x0ffffff0)) == UINT32_C(0x012fff10) ||
+        (insn & UINT32_C(0x0ffffff0)) == UINT32_C(0x012fff30)) {
+        const bool link = (insn & UINT32_C(0x20)) != 0u;
+        const unsigned rm = insn & 15u;
+        const uint32_t target = rm == 15u ? cpu->r[15] + 8u
+                                          : cpu->r[rm];
+        if ((link && rm == 15u) || (target & 3u) == 2u)
+            return A64_COMPACT_RAW_REJECT_CLASS;
+        return A64_COMPACT_RAW_ADMIT_EXECUTE;
+    }
+
     if (compact_raw_is_vfp_encoding(insn))
         return compact_raw_classify_vfp(cpu, insn);
 
