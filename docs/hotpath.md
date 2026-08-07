@@ -8202,3 +8202,59 @@ FPS measurement. The dominant next gap is unchanged VFP: 1,705,451 observations,
 executed by the compact tier. Another phone gate before broad VFP coverage would
 mostly remeasure known fallback overhead. Complete evidence is under
 `work/artifacts/compact-raw-thumb-admission-7320-0a1d1ff-r1/`.
+
+### 2026-08-07: broad VFP and memory/control families raise admission to 93.155%
+
+Commits `8510c162` through `6e2e4cc3` add callback-free VFP state, memory and
+arithmetic families behind exact runtime-state guards. They raise the unchanged
+7.320--7.330 B classifier result from 6,942,629 to 8,501,791 admitted instructions:
+**+1,559,162 instructions and +15.592 percentage points**. Commits `b4169dc8`,
+`68312348` and `4cd03ecd` then add A32 `BX`/`BLX(register)`, ordinary block
+transfers and broad addressing-mode-2 single transfers. This is build-time-linked
+AArch64 code, not runtime code generation, and adds no JIT entitlement or jailbreak
+dependency.
+
+The single-transfer tranche covers immediate and shifted-register offsets, every
+immediate shift kind including RRX, byte/word accesses, pre/post indexing,
+writeback, unprivileged translation tags, PC-relative bases, PC stores and
+LDR-to-PC interworking. Its guards reject unsafe aliases, unaligned words, stale or
+wrong-privilege cache witnesses, revoked write consent and invalid targets before
+architectural mutation. The block path handles IA/IB/DA/DB and up to sixteen words
+through one fully preflighted 1 KiB DREAD/DWRITE span. Apple-arm64 differential
+oracles cover the flat and resident paths, cache telemetry, fallback convergence
+and transactional refusal. Exact-SHA core run `31181608245` and stock-iPhone
+build/IPA run `31181607347` are entirely green at `4cd03ec`.
+
+The current-tree restored census exits zero with empty stderr and again accounts
+for 9,999,510 fetched instructions plus 490 interrupt entries. Its derived work
+image and per-run screen remain canonical at SHA-256
+`06AAAA84FB4BFEAE5A647290C9B50BEBE7640F420457089F40BDBED961D6992D` and
+`45E3B4807D81A42EB14251246CA94F3149647462A0BC79C4C865C9F2418B6B57`.
+
+| exact 10 M classifier outcome | broad VFP | + indirect/block/single | delta |
+|---|---:|---:|---:|
+| admitted | 8,501,791 (85.022%) | 9,315,056 (93.155%) | +813,265 (+8.133 pp) |
+| condition-passed execution | 7,615,628 | 8,428,893 | +813,265 |
+| rejected | 1,497,719 | 684,454 | -813,265 |
+| admitted runs | 1,049,175 | 545,072 | -504,103 |
+| mean admitted run | 8.103 | 17.090 | +8.987 |
+
+A32 single transfers now have **100.000% semantic admission** in this scene.
+Ordinary block support raises that class from 5.140% to 75.098%, while the indirect
+branch work raises `ARM other` to 90.208%. This is substantial architectural
+progress, not measured phone speed. The sequence profiler performs an extra
+translation for every fetched instruction, so its elapsed time and ordinary TLB
+counters are invalid as performance evidence. No physical-phone A/B or displayed
+UIKit/Core Animation FPS measurement has been run for this build, and the shipping
+interpreter policy has not changed.
+
+Brutal status: **93.155% is still short of the fewer-than-roughly-300k fallback
+design gate.** Exactly 684,454 fetched instructions remain outside the semantic
+tier. The largest coherent residuals are the remaining Thumb stack/long-branch
+forms (205,265 total Thumb rejects), VFP guarded/form rejects (114,192), LDM-to-PC
+and other block forms (99,921), coprocessor instructions (86,683), and the smaller
+DP/extra/multiply/media families. The next implementation combines Thumb
+PUSH/POP/STM/LDM and long BL/BLX with transactional LDM-to-PC; another phone run
+before those whole families land would mostly remeasure known fallback cost.
+Evidence is retained under
+`work/artifacts/compact-raw-block-single-admission-7320-4cd03ec-r1/`.
