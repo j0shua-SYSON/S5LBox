@@ -189,9 +189,13 @@ jobs:
             set +e
             static_output="$(./build-jit/core/jitbench --insns 10000 --reps 1 2>&1)"
             static_status=$?
+            compact_output="$(./build-jit/core/jitbench --compact-raw-only --insns 10000 --reps 1 2>&1)"
+            compact_status=$?
             set -e
             printf '%s\n' "$static_output"
+            printf '%s\n' "$compact_output"
             test "$static_status" -eq 0
+            test "$compact_status" -eq 0
             if grep -Fq 'SKIP:' <<<"$memory_output"; then
               echo 'Required macOS MAP_JIT memory-policy coverage was skipped.' >&2
               exit 1
@@ -232,6 +236,9 @@ jobs:
             grep -Fq 'STATIC-BRANCH-ORACLE exact=yes cases=58 taken=yes fallthrough=yes link=yes backward=yes contract=yes' <<<"$static_output"
             grep -Fq 'STATIC-THUMB-COND-BRANCH-ORACLE exact=yes cases=28 conditions=all taken=yes fallthrough=yes backward=yes thumb-state=yes lr-preserved=yes contract=yes' <<<"$static_output"
             grep -Fq 'STATIC-INDIRECT-BRANCH-ORACLE exact=yes cases=240 a32-conditions=yes registers=all arm-target=yes thumb-target=yes link=yes pc-source=yes invalid-rollback=yes contract=yes' <<<"$static_output"
+            grep -Fq 'COMPACT-RAW-ORACLE exact=yes cases=5 result-opcodes=12 immediate-rotate=yes register-lsl0=yes word-load-store=yes branch-link=yes live-bytes=yes out-of-window=yes unsupported-prefix=yes invalid-contract-rollback=yes' <<<"$compact_output"
+            grep -Eq 'COMPACT-RAW-CEILING case=a32-alu guest-insns=10000 reps=1 live-bytes=yes decoded-cache=no graph=no runtime-codegen=no .*compact-speedup=[0-9.]+x' <<<"$compact_output"
+            grep -Eq 'COMPACT-RAW-CEILING case=a32-mixed guest-insns=10000 reps=1 live-bytes=yes decoded-cache=no graph=no runtime-codegen=no .*compact-speedup=[0-9.]+x' <<<"$compact_output"
             grep -Eq 'STATIC-VFP-COMPARE-SHAPE exact=yes insns=8 uops=9 handlers=26508' <<<"$static_output"
             grep -Eq 'STATIC-VFP-COMPARE-ORACLE exact=yes ops=15 single=yes double=yes nan=yes fz=yes zero-prefix=yes partial-prefix=yes' <<<"$static_output"
             grep -Eq 'STATIC-VFP-WIDEN-SHAPE exact=yes insns=8 uops=9 handlers=26508' <<<"$static_output"
@@ -272,6 +279,12 @@ jobs:
             grep -Fq 'STATIC-A64-THUMB-ORACLE SKIP: no signed AArch64 handlers' <<<"$soc_output"
             grep -Fq 'STATIC-A64-THUMB-READ-ORACLE SKIP: no signed AArch64 handlers' <<<"$soc_output"
           fi
+
+      - name: Compact raw semantic-loop ceiling (measurement, not phone FPS)
+        if: runner.arch == 'ARM64'
+        run: >-
+          ./build-jit/core/jitbench --compact-raw-only
+          --insns 500000000 --reps 3
 
       - name: Native/static-semantics ceilings (measurement, not a gate)
         if: runner.arch == 'ARM64'

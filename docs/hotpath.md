@@ -7840,3 +7840,47 @@ one window reached 30. Tick batching removes a measured tax; it does not supply 
 gain still missing from this scene, and it cannot explain historical 20--40 Minsn/s foreground runs
 that remained visually slow. Keep this layer, but the next step still has to be a larger no-JIT
 execution/presentation change selected by dynamic evidence rather than another small layout edit.
+
+### 2026-08-07: a live-byte compact AArch64 loop clears the architecture gate
+
+The prior signed graph result ruled out another handler-table rearrangement: 80.91% native coverage
+still ran 6.17 times slower than the interpreter on the A9. Commits
+`c38c3b8db75b6c5ba10e004898e06f3cbcf08987` and
+`e4f8acd3da6959ab0096c685cc7900bdfc5acc3f` therefore test a materially different boundary. One
+ordinary build-time-linked AArch64 function reads live A32 instruction words, keeps the guest PC,
+register file, code base and flat-RAM base resident, decodes and executes several instructions in one
+loop, and returns the exact retired prefix. It allocates no executable memory, emits no runtime code,
+uses no decoded-record cache, and never enters the 26,508-handler graph.
+
+The first gate is intentionally narrow: AL data-processing result opcodes without flag writes,
+immediate rotation or register LSL #0, aligned immediate word LDR/STR, and immediate B/BL. Conditions,
+flag-setting/comparison forms, Thumb, MMU translation, interrupts, MMIO, unaligned policy and device
+time are refused before the current instruction mutates state. The Apple-host oracle covers all twelve
+result opcodes in immediate and register form, both address directions, load/store, link branches,
+live-byte fetch, a branch outside the code window, an unsupported instruction after an exact prefix,
+an unsupported first instruction, and pre-entry contract rollback. Registers, CPSR, cycles and every
+RAM byte must equal the literal interpreter.
+
+Exact-SHA core run `31150592987` is green across all eight jobs. Both Apple Silicon runners pass the
+oracle, the 1.6 M-instruction CTest and the explicit 10 k verification. Their longer rotated
+three-repetition medians use 500 M guest instructions per arm:
+
+| runner | synthetic case | interpreter | compact live-byte loop | speedup |
+|---|---|---:|---:|---:|
+| macOS 14 | A32 ALU/branch | 83.167 Minsn/s | 339.661 Minsn/s | **4.084x** |
+| macOS 14 | A32 25% load/store | 75.061 Minsn/s | 360.908 Minsn/s | **4.808x** |
+| macOS 15 | A32 ALU/branch | 84.047 Minsn/s | 351.315 Minsn/s | **4.180x** |
+| macOS 15 | A32 25% load/store | 79.348 Minsn/s | 358.923 Minsn/s | **4.523x** |
+
+The predecoded static block reports much larger 28.56--36.82x synthetic ceilings in the same run,
+but that number has already proved non-predictive at the product boundary: it repeats a tiny decoded
+block and omits the lookup/refill/handler costs that destroyed the A9 graph. The compact row is the
+relevant architecture gate because it includes live instruction fetch and decode inside its persistent
+loop. Even it still omits real firmware and every machine/UI cost named above.
+
+Brutal status: **4.084x at the weakest long row is enough headroom to continue this architecture; it
+is not evidence of 30 FPS and it changes the shipping app by zero FPS today.** The next implementation
+must extend exact coverage in census order, then enter the real SoC only behind a timebase-bounded,
+interrupt-safe, live-fetch contract with serialized-machine equality. Only after restored replay and
+physical A9 A/B evidence may it become an app candidate. A marginal product result still rejects it,
+regardless of this attractive synthetic ceiling.

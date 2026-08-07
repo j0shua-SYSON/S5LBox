@@ -8461,6 +8461,7 @@ int main(int argc, char **argv) {
     bool fetch_refill_break_even_only = false;
     bool fetch_refill_paired_only = false;
     bool known_negative_boundary_only = false;
+    bool compact_raw_only = false;
 
     for (i = 1u; i < (unsigned)argc; i++) {
         if (strcmp(argv[i], "--insns") == 0 && i + 1u < (unsigned)argc) {
@@ -8493,20 +8494,24 @@ int main(int argc, char **argv) {
             fetch_refill_paired_only = true;
         } else if (strcmp(argv[i], "--known-negative-boundary-only") == 0) {
             known_negative_boundary_only = true;
+        } else if (strcmp(argv[i], "--compact-raw-only") == 0) {
+            compact_raw_only = true;
         } else {
             fprintf(stderr, "usage: %s [--insns N] [--entry-insns N] "
                             "[--soc-insns N] [--reps N] "
                             "[--fetch-refill-mix-only] "
                             "[--fetch-refill-break-even-only] "
                             "[--fetch-refill-paired-only] "
-                            "[--known-negative-boundary-only]\n", argv[0]);
+                            "[--known-negative-boundary-only] "
+                            "[--compact-raw-only]\n", argv[0]);
             return 2;
         }
     }
     if ((unsigned)fetch_refill_mix_only +
             (unsigned)fetch_refill_break_even_only +
             (unsigned)fetch_refill_paired_only +
-            (unsigned)known_negative_boundary_only > 1u) {
+            (unsigned)known_negative_boundary_only +
+            (unsigned)compact_raw_only > 1u) {
         fprintf(stderr, "jitbench: choose only one focused benchmark mode\n");
         return 2;
     }
@@ -8610,10 +8615,13 @@ int main(int argc, char **argv) {
         return bench_soc_fetch_refill_paired(soc_insns, reps) ? 0 : 1;
     if (known_negative_boundary_only)
         return bench_soc_known_negative_boundary(soc_insns, reps) ? 0 : 1;
-
-    for (i = 0u; i < sizeof CASES / sizeof CASES[0]; i++) {
-        if (!CASES[i].thumb && !bench_compact_raw(&CASES[i], insns, reps))
-            return 1;
+    if (compact_raw_only) {
+        for (i = 0u; i < sizeof CASES / sizeof CASES[0]; i++) {
+            if (!CASES[i].thumb &&
+                !bench_compact_raw(&CASES[i], insns, reps))
+                return 1;
+        }
+        return 0;
     }
     for (i = 0u; i < sizeof CASES / sizeof CASES[0]; i++) {
         if (!bench_one(&CASES[i], insns, reps)) return 1;
