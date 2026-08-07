@@ -7704,3 +7704,66 @@ Brutal status: **this adds a decisive diagnostic and retracts a bad time-model l
 measured FPS by itself**. The next exact foreground MBX run must show which boundary loses cadence.
 Only then is it rational to optimize guest rendering, publication/copy, main-thread image creation,
 or the compositor instead of continuing to whack whichever code path happens to look expensive.
+
+### 2026-08-07: two interpreter fixes are real; moving hot state ahead of the TLB is not
+
+Commits `2f2912ec8a659bb9d1497d91b24b4d40290f57d8` and
+`895f4183f5245ad2f500c8a65b224caa5b77451c` remove two costs that the exact Apple binary proved
+were paid by every interpreted instruction. The first bypasses signed-static eligibility work when
+that engine is disabled. The second keeps `privileged_svc_result()` out of line. That rare rollback
+helper copies the approximately 68 KiB `arm_cpu_t`; Apple LTO had inlined it into `arm_step()`, so
+the ordinary instruction path called `___chkstk_darwin` with a 68,160-byte frame. The fixed
+`arm_step()` frame is 144 bytes; only the rare SVC helper retains the large rollback frame.
+
+These are not assembly-only claims. Release tests pass 60/60 and strict `-Wall -Wextra -Werror`
+tests pass 65/65. Exact-SHA GitHub runs `31087095281` (stock-compatible iOS), `31087095411`
+(core matrix), and `31087708044` (MBX artifact) are green. The exact installed MBX executable is
+SHA-256 `53C8A234372BDE3DB71A8643C92CB4616CE3C9010C5285763A36639C87E5B286`.
+A matched physical-device A/B/A/B against exact pre-fix executable `5f84a20` measured pair means
+of 22.559143 Minsn/s before and 27.972571 Minsn/s after, about **+24.0%**. That is substantial
+instruction-throughput progress. It is still not a 30-FPS result: the scene was static, so its
+displayed `0 fps` cannot establish dynamic presentation cadence.
+
+The next candidate tested whether structure layout hid another broad AArch64 tax. In branch commit
+`e2e2aa6750716833724d55539576033043e38a05`, the 64 KiB TLB backing array moved behind the fetch,
+data-read and data-write host caches. Exact Apple code generation did improve as intended:
+
+| function | `895f418` bytes | candidate bytes | change |
+|---|---:|---:|---:|
+| `arm_step` | `0x2928` | `0x2920` | -8 |
+| `mem_r32_as` | `0x1f0` | `0x1dc` | -20 |
+| `mem_w32_as` | `0x1e4` | `0x1d8` | -12 |
+| `s5l8900_run` | `0xf64` | `0xf14` | -80 |
+
+The repeated AArch64 `cpu + 0x10000` base synthesis disappeared from the fetch/read/write paths.
+Exact candidate runs `31090617832` (core), `31090617732` (stock iOS), and `31090942204` (MBX)
+are green. Its MBX IPA is 1,223,871 bytes, SHA-256
+`364B116073AB6396A0BBA050E13A1603204539BBCBDAF68965AB9CCD028F8BCA`; the executable is
+SHA-256 `949C551E28A5346BD21B15C789B167D5E86FC3424C7C3A7406290A0BCA2BFBC4`.
+
+Cleaner code did **not** become a measured product win. The iPhone 6s Plus crossover used iOS MCP
+for every device action, killed the app between arms, reinstalled exact IPAs, and restored the same
+466,825,216-byte rootfs checkpoint (SHA-256
+`4A5B1A2739A57CF52FA843CEF612CC285C6DC6242DA8BF7AE1832D38BCCBD6BB`) before every cold app
+run. Each arm used a 20-second warmup followed by seven three-second-spaced accessibility samples:
+
+| arm | executable | sample mean | sample median | range | layer mean |
+|---|---|---:|---:|---:|---:|
+| A1 | `895f418` | 28.021 | 27.910 | 26.94--28.95 | 0.330 ms |
+| B1 | `e2e2aa6` | 28.634 | 28.380 | 26.75--31.25 | 0.328 ms |
+| A2 | `895f418` | 27.124 | 26.830 | 24.88--31.21 | 0.325 ms |
+| B2 | `e2e2aa6` | 26.744 | 26.320 | 25.89--28.16 | 0.326 ms |
+
+Across all fourteen samples per build, the old and candidate means are 27.572857 and 27.689286
+Minsn/s: only **+0.42%**. Their aggregate medians are 27.445 and 27.065 Minsn/s, **-1.39%**.
+Every arm stayed at two scanout signatures because the home screen was static, so none supplies a
+dynamic-FPS result. The distributions overlap completely. The layout candidate is therefore
+rejected, not promoted to `main`, and the phone was restored to exact `895f418` plus the authenticated
+pre-test rootfs.
+
+Brutal status: **removing disabled-engine work and the accidental 68 KiB instruction frame was real;
+moving hot fields merely made the disassembly prettier**. The shipping A9 app now sustains roughly
+27--28 Minsn/s in this static scene, but historical evidence already shows that instruction rate and
+visible FPS can decouple. Another structure-layout or dispatch micro-edit is not justified. The next
+implementation must attack a larger boundary selected by exact dynamic-scene evidence or change the
+execution strategy substantially; 30 FPS remains unproved and not close on current evidence.
