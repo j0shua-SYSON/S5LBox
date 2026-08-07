@@ -37091,6 +37091,10 @@ external_md_work_ready:
             s5l8900_interpreter_tick_batches(&mach);
         const uint64_t tick_batched_retired_before =
             s5l8900_interpreter_tick_batched_retired(&mach);
+        const uint64_t dread_hits_before = mach.cpu.dread_hits;
+        const uint64_t dread_misses_before = mach.cpu.dread_misses;
+        const uint64_t dwrite_hits_before = mach.cpu.dwrite_hits;
+        const uint64_t dwrite_misses_before = mach.cpu.dwrite_misses;
 #if defined(S5LBOX_STATIC_A64_ENGINE)
         const uint64_t signed_retired_before =
             s5l8900_static_a64_retired(&mach);
@@ -37188,6 +37192,16 @@ external_md_work_ready:
                    tick_batches ? (double)tick_batched_retired /
                                       (double)tick_batches : 0.0);
         }
+        /* Host-only attribution for the exact interval. The compact resident
+         * loop increments the same architectural cache counters as arm_step,
+         * so an interpreter/candidate pair can prove which MMU-witness layer
+         * actually changed without sampling or altering guest state. */
+        printf("run api data-cache: dread hits/misses=%" PRIu64 "/%" PRIu64
+               " dwrite hits/misses=%" PRIu64 "/%" PRIu64 "\n",
+               mach.cpu.dread_hits - dread_hits_before,
+               mach.cpu.dread_misses - dread_misses_before,
+               mach.cpu.dwrite_hits - dwrite_hits_before,
+               mach.cpu.dwrite_misses - dwrite_misses_before);
 #if defined(S5LBOX_STATIC_A64_ENGINE)
         {
             uint64_t signed_retired = s5l8900_static_a64_retired(&mach) -
