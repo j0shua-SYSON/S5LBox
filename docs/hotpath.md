@@ -8310,3 +8310,49 @@ shares the already-proven data-processing commit path; implement that whole
 family and rerun this identical census before spending another physical-phone
 bracket. Evidence is under
 `work/artifacts/compact-raw-thumb-stack-admission-7320-c24ad58-r1/`.
+
+### 2026-08-07: true A32 register shifts expose an overlapping residual
+
+Commit `360f6fdf3fc8cf0ce5cccdc015bb498ed9ced989` adds the complete A32
+data-processing register-specified-shift shape to the build-time-linked compact
+loop. The shift amount is the low byte of `Rs`; LSL/LSR/ASR/ROR cover amounts
+0, 1, 7, 31, 32, 33, 64 and 255, both incoming carry states, every one of the
+16 data-processing opcodes, flag-setting and non-flag-setting result forms, and
+the five architecturally awkward destination/source aliases. PC operands and
+the overlapping bit-7 multiply/extra/synchronization space still refuse before
+guest state changes. The Apple-arm64 oracle covers 1,797 exact cases plus four
+PC-refusal/fallback convergence cases.
+
+Local strict CTest passes 65/65. Exact-SHA core run `31186445394` is green in
+every job, including the compact semantic loop on macOS 14 and 15, sanitizers,
+strict warnings, and the JIT-off rebuild. Stock-iPhone build/IPA run
+`31186446894` is also green. The generated assembly contains 27,292 unique
+labels and no runtime code generation.
+
+The unchanged r446 checkpoint was again restored at 7,320,000,000 and stopped
+at 7,330,000,000 with `--sequence-profile`. It exits zero with empty stderr,
+accounts for 9,999,510 fetched instructions plus 490 interrupt entries, and
+preserves the same derived work-image and screen hashes as the preceding run.
+
+| exact 10 M classifier outcome | prior Thumb/LDM-PC tier | + true A32 register shifts | delta |
+|---|---:|---:|---:|
+| admitted | 9,616,559 (96.170%) | 9,639,738 (96.402%) | +23,179 (+0.232 pp) |
+| rejected | 382,951 | 359,772 | -23,179 |
+| admitted runs | 351,203 | 333,297 | -17,906 |
+| mean admitted run | 27.382 | 28.922 | +1.540 |
+
+Brutal correction: the previous section's projection was wrong. The old
+99,508-count `register shift` outcome was not one homogeneous data-processing
+family. Only 23,179 dynamic instructions were true register-specified shifts;
+the other 76,329 have both bits 7 and 4 set and belong to multiply,
+extra-load/store, or synchronization encodings. Treating the outcome label as
+an implementation-size estimate hid that overlap.
+
+This is still substantial architectural coverage, but it does **not** cross
+the deliberately chosen fewer-than-roughly-300k phone-test gate. There are
+359,772 exact rejects, still 59,772 above it, and no physical-phone FPS result
+for this build. The next measured coherent candidate is `VCVT.F32.F64`: the
+decoder census sees 62,586 narrowing conversions, but admission will remain
+literal until their live FPSCR modes, operands, results and sticky-flag effects
+are audited. Evidence is retained under
+`work/artifacts/compact-raw-register-shift-admission-7320-360f6fd-r1/`.
