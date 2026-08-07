@@ -1727,6 +1727,41 @@ a64_compact_raw_admission_t a64_compact_raw_classify_instruction(
         return A64_COMPACT_RAW_ADMIT_EXECUTE;
     }
 
+    if ((insn & UINT32_C(0x0e000000)) == UINT32_C(0x08000000)) {
+        const bool pre = (insn & (1u << 24)) != 0u;
+        const bool up = (insn & (1u << 23)) != 0u;
+        const bool user_bank = (insn & (1u << 22)) != 0u;
+        const bool writeback = (insn & (1u << 21)) != 0u;
+        const bool load = (insn & (1u << 20)) != 0u;
+        const unsigned rn = (insn >> 16) & 15u;
+        const uint32_t list = insn & UINT32_C(0xffff);
+        unsigned words = 0u;
+        uint32_t base;
+        uint32_t start;
+
+        if (user_bank || rn == 15u || list == 0u ||
+            (load && (list & UINT32_C(0x8000)) != 0u))
+            return A64_COMPACT_RAW_REJECT_MEMORY_FORM;
+        if (writeback && (list & (UINT32_C(1) << rn)) != 0u) {
+            const uint32_t lower = rn == 0u
+                ? 0u : (UINT32_C(1) << rn) - 1u;
+            if (load || (list & lower) != 0u)
+                return A64_COMPACT_RAW_REJECT_MEMORY_FORM;
+        }
+        for (unsigned reg = 0u; reg < 16u; reg++)
+            if ((list & (UINT32_C(1) << reg)) != 0u) words++;
+        base = cpu->r[rn];
+        if (up)
+            start = pre ? base + 4u : base;
+        else
+            start = pre ? base - words * 4u
+                        : base - words * 4u + 4u;
+        if ((start & 3u) != 0u ||
+            (start & UINT32_C(0x3ff)) + words * 4u > 1024u)
+            return A64_COMPACT_RAW_REJECT_MEMORY_ALIGNMENT;
+        return A64_COMPACT_RAW_ADMIT_EXECUTE;
+    }
+
     if (compact_raw_is_vfp_encoding(insn))
         return compact_raw_classify_vfp(cpu, insn);
 

@@ -5159,6 +5159,64 @@ static bool validate_compact_raw_admission_shapes(void) {
                 "invalid target\n");
         return false;
     }
+    cpu.r[4] = DATA_BASE + UINT32_C(0x800);
+    if (a64_compact_raw_classify_instruction(
+            &cpu, A32_BLOCK(14,0,1,0,0,0,4,UINT32_C(0x8109)),
+            false) != A64_COMPACT_RAW_ADMIT_EXECUTE ||
+        a64_compact_raw_classify_instruction(
+            &cpu, A32_BLOCK(14,1,0,0,1,0,4,UINT32_C(0x0110)),
+            false) != A64_COMPACT_RAW_ADMIT_EXECUTE ||
+        a64_compact_raw_classify_instruction(
+            &cpu, A32_BLOCK(14,0,1,0,0,1,4,UINT32_C(0x4119)),
+            false) != A64_COMPACT_RAW_ADMIT_EXECUTE ||
+        a64_compact_raw_classify_instruction(
+            &cpu, A32_BLOCK(14,1,0,0,1,1,4,UINT32_C(0x4109)),
+            false) != A64_COMPACT_RAW_ADMIT_EXECUTE) {
+        fprintf(stderr,
+                "jitbench: compact raw A32 block admission refused\n");
+        return false;
+    }
+    if (a64_compact_raw_classify_instruction(
+            &cpu, A32_BLOCK(0,0,1,1,0,0,4,UINT32_C(0x0003)),
+            false) != A64_COMPACT_RAW_ADMIT_CONDITION_SKIP ||
+        a64_compact_raw_classify_instruction(
+            &cpu, A32_BLOCK(14,0,1,1,0,0,4,UINT32_C(0x0003)),
+            false) != A64_COMPACT_RAW_REJECT_MEMORY_FORM ||
+        a64_compact_raw_classify_instruction(
+            &cpu, A32_BLOCK(14,0,1,0,0,0,15,UINT32_C(0x0003)),
+            false) != A64_COMPACT_RAW_REJECT_MEMORY_FORM ||
+        a64_compact_raw_classify_instruction(
+            &cpu, A32_BLOCK(14,0,1,0,0,0,4,UINT32_C(0x0000)),
+            false) != A64_COMPACT_RAW_REJECT_MEMORY_FORM ||
+        a64_compact_raw_classify_instruction(
+            &cpu, A32_BLOCK(14,0,1,0,1,0,4,UINT32_C(0x0011)),
+            false) != A64_COMPACT_RAW_REJECT_MEMORY_FORM ||
+        a64_compact_raw_classify_instruction(
+            &cpu, A32_BLOCK(14,0,1,0,1,1,4,UINT32_C(0x0010)),
+            false) != A64_COMPACT_RAW_REJECT_MEMORY_FORM ||
+        a64_compact_raw_classify_instruction(
+            &cpu, A32_BLOCK(14,0,1,0,0,1,4,UINT32_C(0x8001)),
+            false) != A64_COMPACT_RAW_REJECT_MEMORY_FORM) {
+        fprintf(stderr,
+                "jitbench: compact raw A32 block shape guard admitted\n");
+        return false;
+    }
+    cpu.r[4] = DATA_BASE + UINT32_C(0x801);
+    if (a64_compact_raw_classify_instruction(
+            &cpu, A32_BLOCK(14,0,1,0,0,0,4,UINT32_C(0x0003)),
+            false) != A64_COMPACT_RAW_REJECT_MEMORY_ALIGNMENT) {
+        fprintf(stderr,
+                "jitbench: compact raw A32 block alignment admitted\n");
+        return false;
+    }
+    cpu.r[4] = DATA_BASE + UINT32_C(0x3f8);
+    if (a64_compact_raw_classify_instruction(
+            &cpu, A32_BLOCK(14,0,1,0,0,0,4,UINT32_C(0x000f)),
+            false) != A64_COMPACT_RAW_REJECT_MEMORY_ALIGNMENT) {
+        fprintf(stderr,
+                "jitbench: compact raw A32 block cross-cache span admitted\n");
+        return false;
+    }
     cpu.r[0] = UINT32_C(0x1a00);
     cpu.cp15.cpacr |= 0xfu << ARM_CPACR_CP10_SHIFT;
     cpu.vfp_fpexc = ARM_FPEXC_EN;
@@ -5218,7 +5276,7 @@ static bool validate_compact_raw_admission_shapes(void) {
         fprintf(stderr, "jitbench: compact raw VFP Len guard admitted\n");
         return false;
     }
-    printf("COMPACT-RAW-ADMISSION-MODEL exact-shapes=yes cases=30 "
+    printf("COMPACT-RAW-ADMISSION-MODEL exact-shapes=yes cases=43 "
            "outcomes=13 condition-before-decode=yes machine-gates=excluded\n");
     return true;
 }
@@ -6561,6 +6619,325 @@ done:
     return ok;
 }
 
+typedef struct {
+    const char *name;
+    uint32_t insn;
+    uint32_t pc;
+    unsigned rn;
+    uint32_t base;
+    uint32_t start;
+    unsigned words;
+    bool executes;
+} compact_raw_block_case_t;
+
+static void seed_compact_raw_block_case(
+        arm_cpu_t *cpu, const compact_raw_block_case_t *sc) {
+    seed_cpu_at(cpu, &sc->insn, 1u, false, sc->pc);
+    for (unsigned reg = 0u; reg < 15u; reg++)
+        cpu->r[reg] = UINT32_C(0x71000000) |
+                      (reg * UINT32_C(0x010101));
+    if (sc->rn < 15u) cpu->r[sc->rn] = sc->base;
+    cpu->r[15] = sc->pc;
+    for (unsigned word = 0u; word < sc->words; word++)
+        mem_w32(NULL, sc->start + word * 4u,
+                UINT32_C(0x51000000) |
+                ((sc->pc & UINT32_C(0xff)) << 16) |
+                (word * UINT32_C(0x010101)));
+}
+
+static bool compact_raw_block_exact_case(
+        const compact_raw_block_case_t *sc, bool resident,
+        uint8_t *baseline, uint8_t *expected) {
+    const bool load = (sc->insn & (1u << 20)) != 0u;
+    arm_bus_t write_bus = g_bus;
+    arm_cpu_t initial;
+    arm_cpu_t reference;
+    arm_cpu_t compact;
+    compact_raw_resident_oracle_context_t context;
+    arm_status_t status;
+    unsigned completed = UINT_MAX;
+    unsigned native_completed = UINT_MAX;
+    unsigned fallback_completed = UINT_MAX;
+    bool run_ok;
+
+    write_bus.host_ram_write = mem_host_ram;
+    seed_compact_raw_block_case(&initial, sc);
+    if (resident) {
+        if (load) {
+            if (sc->executes) oracle_warm_dread(&initial, sc->start);
+        } else {
+            initial.bus = &write_bus;
+            if (sc->executes)
+                oracle_warm_dwrite(&initial, sc->start, true);
+        }
+    }
+    reference = initial;
+    compact = initial;
+    memcpy(baseline, g_ram, sizeof g_ram);
+    status = arm_step(&reference);
+    memcpy(expected, g_ram, sizeof g_ram);
+    memcpy(g_ram, baseline, sizeof g_ram);
+
+    if (resident) {
+        memset(&context, 0, sizeof context);
+        context.cpu = &compact;
+        context.status = ARM_OK;
+        context.code = g_ram;
+        context.code_bytes = (uint32_t)sizeof g_ram;
+        run_ok = a64_compact_raw_run_code_window_resident(
+            &compact, &g_ram[sc->pc], sc->pc, 4u, 1u,
+            compact_raw_resident_oracle_step, &context, &completed,
+            &native_completed, &fallback_completed);
+    } else {
+        memset(&context, 0, sizeof context);
+        run_ok = a64_compact_raw_run(
+            &compact, &g_ram[sc->pc], sc->pc, 4u, 1u,
+            g_ram, sizeof g_ram, &completed);
+        native_completed = completed;
+        fallback_completed = 0u;
+    }
+
+    if (!run_ok || status != ARM_OK || completed != 1u ||
+        native_completed != 1u || fallback_completed != 0u ||
+        (resident && (context.status != ARM_OK || context.calls != 0u)) ||
+        !(resident ? static_vfp_states_equal(&reference, &compact)
+                    : static_vfp_arch_states_equal(&reference, &compact)) ||
+        memcmp(expected, g_ram, sizeof g_ram) != 0) {
+        fprintf(stderr,
+                "jitbench: compact raw A32 block %s %s mismatch "
+                "(completed/native/fallback/calls %u/%u/%u/%u, "
+                "status=%d/%d, dread=%" PRIu64 "/%" PRIu64 ", "
+                "dwrite=%" PRIu64 "/%" PRIu64 ")\n",
+                resident ? "resident" : "flat", sc->name,
+                completed, native_completed, fallback_completed,
+                resident ? context.calls : 0u, (int)status,
+                resident ? (int)context.status : (int)ARM_OK,
+                reference.dread_hits, compact.dread_hits,
+                reference.dwrite_hits, compact.dwrite_hits);
+        return false;
+    }
+    return true;
+}
+
+static bool compact_raw_block_refusal_case(
+        const compact_raw_block_case_t *sc,
+        uint8_t *baseline, uint8_t *expected) {
+    arm_cpu_t reference;
+    arm_cpu_t compact;
+    arm_cpu_t before;
+    arm_status_t reference_status;
+    arm_status_t compact_status;
+    unsigned completed = UINT_MAX;
+
+    seed_compact_raw_block_case(&reference, sc);
+    compact = reference;
+    before = compact;
+    memcpy(baseline, g_ram, sizeof g_ram);
+    reference_status = arm_step(&reference);
+    memcpy(expected, g_ram, sizeof g_ram);
+    memcpy(g_ram, baseline, sizeof g_ram);
+    if (!a64_compact_raw_run(
+            &compact, &g_ram[sc->pc], sc->pc, 4u, 1u,
+            g_ram, sizeof g_ram, &completed) ||
+        completed != 0u || memcmp(&before, &compact, sizeof compact) != 0 ||
+        memcmp(baseline, g_ram, sizeof g_ram) != 0) {
+        fprintf(stderr,
+                "jitbench: compact raw A32 block refusal %s changed state "
+                "(completed=%u)\n", sc->name, completed);
+        return false;
+    }
+    compact_status = arm_step(&compact);
+    if (compact_status != reference_status ||
+        memcmp(&reference, &compact, sizeof compact) != 0 ||
+        memcmp(expected, g_ram, sizeof g_ram) != 0) {
+        fprintf(stderr,
+                "jitbench: compact raw A32 block refusal %s fallback "
+                "diverged (status=%d/%d)\n",
+                sc->name, (int)reference_status, (int)compact_status);
+        return false;
+    }
+    return true;
+}
+
+static bool compact_raw_block_resident_fallback_case(
+        const compact_raw_block_case_t *sc, unsigned mode,
+        uint8_t *baseline, uint8_t *expected) {
+    const bool load = (sc->insn & (1u << 20)) != 0u;
+    arm_bus_t write_bus = g_bus;
+    arm_cpu_t reference;
+    arm_cpu_t resident;
+    compact_raw_resident_oracle_context_t context;
+    arm_status_t reference_status;
+    unsigned completed = UINT_MAX;
+    unsigned native_completed = UINT_MAX;
+    unsigned fallback_completed = UINT_MAX;
+
+    write_bus.host_ram_write = mem_host_ram;
+    seed_compact_raw_block_case(&reference, sc);
+    if (load) {
+        if (mode == 1u) {
+            oracle_warm_dread(&reference, sc->start);
+            reference.tlb_gen++;
+        }
+    } else {
+        if (mode != 2u) reference.bus = &write_bus;
+        oracle_warm_dwrite(&reference, sc->start, true);
+    }
+    resident = reference;
+    memcpy(baseline, g_ram, sizeof g_ram);
+    reference_status = arm_step(&reference);
+    memcpy(expected, g_ram, sizeof g_ram);
+    memcpy(g_ram, baseline, sizeof g_ram);
+
+    memset(&context, 0, sizeof context);
+    context.cpu = &resident;
+    context.status = ARM_OK;
+    context.code = g_ram;
+    context.code_bytes = (uint32_t)sizeof g_ram;
+    if (!a64_compact_raw_run_code_window_resident(
+            &resident, &g_ram[sc->pc], sc->pc, 4u, 1u,
+            compact_raw_resident_oracle_step, &context, &completed,
+            &native_completed, &fallback_completed) ||
+        completed != 1u || native_completed != 0u ||
+        fallback_completed != 1u || context.calls != 1u ||
+        context.status != reference_status ||
+        memcmp(&reference, &resident, sizeof resident) != 0 ||
+        memcmp(expected, g_ram, sizeof g_ram) != 0) {
+        fprintf(stderr,
+                "jitbench: compact raw resident A32 block fallback %s "
+                "mode=%u diverged (completed/native/fallback/calls "
+                "%u/%u/%u/%u status=%d/%d)\n",
+                sc->name, mode, completed, native_completed,
+                fallback_completed, context.calls,
+                (int)reference_status, (int)context.status);
+        return false;
+    }
+    return true;
+}
+
+static bool validate_compact_raw_a32_block_oracles(void) {
+    const uint32_t ordinary = DATA_BASE + UINT32_C(0x800);
+    const compact_raw_block_case_t cases[] = {
+        {"stm-ia", A32_BLOCK(14,0,1,0,0,0,4,UINT32_C(0x8109)),
+         UINT32_C(0x8c00), 4u, ordinary, ordinary, 4u, true},
+        {"stm-ib-writeback",
+         A32_BLOCK(14,1,1,0,1,0,12,UINT32_C(0x4106)),
+         UINT32_C(0x8d00), 12u, ordinary, ordinary + 4u, 4u, true},
+        {"stm-da-sp", A32_BLOCK(14,0,0,0,0,0,13,UINT32_C(0x4210)),
+         UINT32_C(0x8e00), 13u, ordinary + UINT32_C(0x40),
+         ordinary + UINT32_C(0x38), 3u, true},
+        {"stm-db-writeback",
+         A32_BLOCK(14,1,0,0,1,0,11,UINT32_C(0x8481)),
+         UINT32_C(0x8f00), 11u, ordinary, ordinary - 16u, 4u, true},
+        {"stm-db-base-lowest-writeback",
+         A32_BLOCK(14,1,0,0,1,0,4,UINT32_C(0x4110)),
+         UINT32_C(0x9000), 4u, ordinary, ordinary - 12u, 3u, true},
+        {"stm-failed-condition",
+         A32_BLOCK(0,0,1,0,0,0,4,UINT32_C(0x4004)),
+         UINT32_C(0x9100), 4u, ordinary, ordinary, 2u, false},
+        {"stm-sixteen-words",
+         A32_BLOCK(14,0,1,0,0,0,7,UINT32_C(0xffff)),
+         UINT32_C(0x9200), 7u, DATA_BASE + UINT32_C(0xfc0),
+         DATA_BASE + UINT32_C(0xfc0), 16u, true},
+        {"ldm-ia-base-in-list",
+         A32_BLOCK(14,0,1,0,0,1,4,UINT32_C(0x4119)),
+         UINT32_C(0x9300), 4u, ordinary, ordinary, 5u, true},
+        {"ldm-ib-writeback",
+         A32_BLOCK(14,1,1,0,1,1,12,UINT32_C(0x4106)),
+         UINT32_C(0x9400), 12u, ordinary, ordinary + 4u, 4u, true},
+        {"ldm-da-sp", A32_BLOCK(14,0,0,0,0,1,13,UINT32_C(0x4210)),
+         UINT32_C(0x9500), 13u, ordinary + UINT32_C(0x40),
+         ordinary + UINT32_C(0x38), 3u, true},
+        {"ldm-db-writeback",
+         A32_BLOCK(14,1,0,0,1,1,11,UINT32_C(0x4481)),
+         UINT32_C(0x9600), 11u, ordinary, ordinary - 16u, 4u, true},
+        {"ldm-failed-condition",
+         A32_BLOCK(0,0,1,0,0,1,4,UINT32_C(0x4004)),
+         UINT32_C(0x9700), 4u, ordinary, ordinary, 2u, false},
+        {"ldm-fifteen-words",
+         A32_BLOCK(14,0,1,0,0,1,7,UINT32_C(0x7fff)),
+         UINT32_C(0x9800), 7u, DATA_BASE + UINT32_C(0xfc4),
+         DATA_BASE + UINT32_C(0xfc4), 15u, true},
+        {"failed-condition-before-invalid-shape",
+         A32_BLOCK(0,0,1,1,0,0,4,UINT32_C(0x0003)),
+         UINT32_C(0x9900), 4u, ordinary, ordinary, 2u, false},
+    };
+    const compact_raw_block_case_t refusals[] = {
+        {"user-bank", A32_BLOCK(14,0,1,1,0,0,4,UINT32_C(0x0003)),
+         UINT32_C(0x9a00), 4u, ordinary, ordinary, 2u, true},
+        {"pc-base", A32_BLOCK(14,0,1,0,0,0,15,UINT32_C(0x0003)),
+         UINT32_C(0x9b00), 15u, ordinary, ordinary, 2u, true},
+        {"empty-list", A32_BLOCK(14,0,1,0,0,0,4,UINT32_C(0x0000)),
+         UINT32_C(0x9c00), 4u, ordinary, ordinary, 0u, true},
+        {"stm-writeback-alias",
+         A32_BLOCK(14,0,1,0,1,0,4,UINT32_C(0x0011)),
+         UINT32_C(0x9d00), 4u, ordinary, ordinary, 2u, true},
+        {"ldm-writeback-alias",
+         A32_BLOCK(14,0,1,0,1,1,4,UINT32_C(0x0010)),
+         UINT32_C(0x9e00), 4u, ordinary, ordinary, 1u, true},
+        {"ldm-pc-list",
+         A32_BLOCK(14,0,1,0,0,1,4,UINT32_C(0x8001)),
+         UINT32_C(0x9f00), 4u, ordinary, ordinary, 2u, true},
+        {"unaligned", A32_BLOCK(14,0,1,0,0,0,4,UINT32_C(0x0003)),
+         UINT32_C(0xa000), 4u, ordinary + 1u, ordinary + 1u, 2u, true},
+        {"cross-cache-block",
+         A32_BLOCK(14,0,1,0,0,0,4,UINT32_C(0x000f)),
+         UINT32_C(0xa100), 4u, DATA_BASE + UINT32_C(0x13f8),
+         DATA_BASE + UINT32_C(0x13f8), 4u, true},
+    };
+    uint8_t *baseline = (uint8_t *)malloc(sizeof g_ram);
+    uint8_t *expected = (uint8_t *)malloc(sizeof g_ram);
+    bool ok = false;
+
+    if (!baseline || !expected) {
+        fprintf(stderr,
+                "jitbench: compact raw A32 block allocation failed\n");
+        goto done;
+    }
+    for (unsigned i = 0u; i < sizeof cases / sizeof cases[0]; i++) {
+        if (!compact_raw_block_exact_case(
+                &cases[i], false, baseline, expected) ||
+            !compact_raw_block_exact_case(
+                &cases[i], true, baseline, expected))
+            goto done;
+    }
+    for (unsigned i = 0u; i < sizeof refusals / sizeof refusals[0]; i++) {
+        if (!compact_raw_block_refusal_case(
+                &refusals[i], baseline, expected))
+            goto done;
+    }
+    /* Cache misses, stale translations, revoked write consent and a
+     * cross-block store all enter the interpreter with a pristine
+     * instruction. The callback must own the only retirement. */
+    if (!compact_raw_block_resident_fallback_case(
+            &cases[7], 0u, baseline, expected) ||
+        !compact_raw_block_resident_fallback_case(
+            &cases[7], 1u, baseline, expected) ||
+        !compact_raw_block_resident_fallback_case(
+            &cases[0], 2u, baseline, expected) ||
+        !compact_raw_block_resident_fallback_case(
+            &refusals[7], 3u, baseline, expected))
+        goto done;
+
+    printf("COMPACT-RAW-A32-BLOCK-ORACLE exact=yes cases=14 refusals=8 "
+           "stm=yes ldm=yes modes=4 writeback=yes "
+           "base-lowest-writeback=yes base-in-list=yes pc-store=yes "
+           "max-words=16 condition-before-guard=yes transactional=yes "
+           "fallback-convergence=yes flat-ram=yes runtime-codegen=no\n");
+    printf("COMPACT-RAW-A32-BLOCK-RESIDENT-ORACLE exact=yes cases=14 "
+           "stm=yes ldm=yes dread=yes dwrite=yes hit-accounting=yes "
+           "native-only=yes fallback=zero resident-refusals=4 "
+           "cold-cache=yes stale-cache=yes consent=yes cross-block=yes "
+           "transactional=yes "
+           "runtime-codegen=no\n");
+    ok = true;
+
+done:
+    free(baseline);
+    free(expected);
+    return ok;
+}
+
 static bool validate_compact_raw_oracles(void) {
     static const unsigned result_ops[] = {
         0u, 1u, 2u, 3u, 4u, 5u, 6u, 7u, 12u, 13u, 14u, 15u,
@@ -6632,6 +7009,8 @@ static bool validate_compact_raw_oracles(void) {
     if (!validate_compact_raw_vfp_arithmetic_oracles())
         return false;
     if (!validate_compact_raw_vfp_memory_oracles())
+        return false;
+    if (!validate_compact_raw_a32_block_oracles())
         return false;
 
     for (unsigned i = 0u; i < sizeof result_ops / sizeof result_ops[0]; i++) {
