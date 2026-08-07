@@ -5835,10 +5835,60 @@ static bool compact_raw_vfp_flat_memory_case(const char *name,
     return true;
 }
 
+static bool compact_raw_vfp_resident_memory_case(
+        const char *name, unsigned insns, uint32_t pc,
+        arm_cpu_t *initial, uint8_t *baseline, uint8_t *expected) {
+    arm_cpu_t reference = *initial;
+    arm_cpu_t resident = *initial;
+    compact_raw_resident_oracle_context_t context;
+    arm_status_t status = ARM_OK;
+    unsigned completed = UINT_MAX;
+    unsigned native_completed = UINT_MAX;
+    unsigned fallback_completed = UINT_MAX;
+
+    memcpy(baseline, g_ram, sizeof g_ram);
+    for (unsigned i = 0u; i < insns; i++) {
+        status = arm_step(&reference);
+        if (status != ARM_OK) break;
+    }
+    memcpy(expected, g_ram, sizeof g_ram);
+    memcpy(g_ram, baseline, sizeof g_ram);
+
+    memset(&context, 0, sizeof context);
+    context.cpu = &resident;
+    context.status = ARM_OK;
+    context.code = g_ram;
+    context.code_bytes = (uint32_t)sizeof g_ram;
+    if (!a64_compact_raw_run_code_window_resident(
+            &resident, &g_ram[pc], pc, insns * 4u, insns,
+            compact_raw_resident_oracle_step, &context, &completed,
+            &native_completed, &fallback_completed) ||
+        status != ARM_OK || context.status != ARM_OK ||
+        completed != insns || native_completed != insns ||
+        fallback_completed != 0u || context.calls != 0u ||
+        !static_vfp_states_equal(&reference, &resident) ||
+        memcmp(expected, g_ram, sizeof g_ram) != 0) {
+        fprintf(stderr,
+                "jitbench: compact raw resident VFP memory %s mismatch "
+                "(completed/native/fallback/calls %u/%u/%u/%u, "
+                "expected %u/%u/0/0, status=%d/%d, "
+                "dread=%" PRIu64 "/%" PRIu64 ", "
+                "dwrite=%" PRIu64 "/%" PRIu64 ")\n",
+                name, completed, native_completed, fallback_completed,
+                context.calls, insns, insns, (int)status,
+                (int)context.status, reference.dread_hits,
+                resident.dread_hits, reference.dwrite_hits,
+                resident.dwrite_hits);
+        return false;
+    }
+    return true;
+}
+
 static bool validate_compact_raw_vfp_memory_oracles(void) {
     uint8_t *baseline = (uint8_t *)malloc(sizeof g_ram);
     uint8_t *expected = (uint8_t *)malloc(sizeof g_ram);
     arm_cpu_t initial;
+    arm_bus_t write_bus = g_bus;
     bool ok = false;
 
     if (!baseline || !expected) {
@@ -5882,10 +5932,58 @@ static bool validate_compact_raw_vfp_memory_oracles(void) {
             UINT32_C(0x8200), &initial, baseline, expected))
         goto done;
 
+    seed_vfp_read_oracle(&initial, false);
+    oracle_warm_dread(&initial, DATA_BASE);
+    oracle_warm_dread(&initial, UINT32_C(0xf000));
+    if (!compact_raw_vfp_resident_memory_case(
+            "loads",
+            (unsigned)(sizeof VFP_READ_HITS / sizeof VFP_READ_HITS[0]),
+            UINT32_C(0xf000), &initial, baseline, expected))
+        goto done;
+
+    write_bus.host_ram_write = mem_host_ram;
+    seed_vfp_oracle(&initial, VFP_WRITE_HITS,
+                    (unsigned)(sizeof VFP_WRITE_HITS /
+                               sizeof VFP_WRITE_HITS[0]),
+                    UINT32_C(0x8000), true);
+    initial.bus = &write_bus;
+    initial.r[0] = DATA_BASE + UINT32_C(0x800);
+    initial.r[1] = DATA_BASE + UINT32_C(0x880);
+    oracle_warm_dwrite(&initial, DATA_BASE + UINT32_C(0x800), true);
+    oracle_warm_dwrite(&initial, UINT32_C(0x8000), true);
+    if (!compact_raw_vfp_resident_memory_case(
+            "stores",
+            (unsigned)(sizeof VFP_WRITE_HITS / sizeof VFP_WRITE_HITS[0]),
+            UINT32_C(0x8000), &initial, baseline, expected))
+        goto done;
+
+    seed_vfp_oracle(&initial, VSTM_WRITE_HITS,
+                    (unsigned)(sizeof VSTM_WRITE_HITS /
+                               sizeof VSTM_WRITE_HITS[0]),
+                    UINT32_C(0x8200), true);
+    initial.bus = &write_bus;
+    initial.r[0] = DATA_BASE + UINT32_C(0x800);
+    initial.r[1] = DATA_BASE + UINT32_C(0x840);
+    initial.r[13] = DATA_BASE + UINT32_C(0xc00);
+    initial.r[2] = DATA_BASE + UINT32_C(0xd00);
+    initial.r[3] = DATA_BASE + UINT32_C(0xe00);
+    oracle_warm_dwrite(&initial, DATA_BASE + UINT32_C(0x800), true);
+    oracle_warm_dwrite(&initial, DATA_BASE + UINT32_C(0xc00), true);
+    if (!compact_raw_vfp_resident_memory_case(
+            "multiple-stores",
+            (unsigned)(sizeof VSTM_WRITE_HITS /
+                       sizeof VSTM_WRITE_HITS[0]),
+            UINT32_C(0x8200), &initial, baseline, expected))
+        goto done;
+
     printf("COMPACT-RAW-VFP-MEMORY-ORACLE exact=yes cases=21 "
            "vldr=yes vstr=yes vstm=yes single=yes double=yes pc-relative=yes "
            "writeback=yes condition-before-guard=yes transactional=yes "
            "flat-ram=yes cache-telemetry=excluded runtime-codegen=no\n");
+    printf("COMPACT-RAW-VFP-RESIDENT-MEMORY-ORACLE exact=yes cases=21 "
+           "vldr=yes vstr=yes vstm=yes dread=yes dwrite=yes "
+           "hit-accounting=yes native-only=yes fallback=zero "
+           "transactional=yes runtime-codegen=no\n");
     ok = true;
 
 done:
