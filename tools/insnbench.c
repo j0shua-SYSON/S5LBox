@@ -425,6 +425,7 @@ typedef struct {
     bool        small_pages;
     bool        do_tick;
     bool        run_api;     /* execute through app-facing s5l8900_run() */
+    bool        user;        /* execute in unprivileged User mode       */
     bool        thumb;       /* enter with CPSR.T set                   */
 } bench_cfg_t;
 
@@ -461,6 +462,18 @@ static const bench_cfg_t g_configs[] = {
     { .loop = "load/store",  .mmu = "pages-4K",    .tick = "run",
       .prog = g_prog_ldst,  .prog_words = (unsigned)(sizeof g_prog_ldst  / 4),
       .loop_insns = 5u, .mmu_on = true, .small_pages = true, .run_api = true },
+    /* Keep an otherwise identical User-mode pair. A machine-loop optimization
+     * may be privilege-bounded (WFI and privileged SVC are deliberately not
+     * batchable), in which case the historical SVC rows above are a control,
+     * not a measurement of the path the optimization is intended to change. */
+    { .loop = "alu/branch",  .mmu = "pages-4K",    .tick = "user-run",
+      .prog = g_prog_alu,   .prog_words = (unsigned)(sizeof g_prog_alu   / 4),
+      .loop_insns = 5u, .mmu_on = true, .small_pages = true, .run_api = true,
+      .user = true },
+    { .loop = "load/store",  .mmu = "pages-4K",    .tick = "user-run",
+      .prog = g_prog_ldst,  .prog_words = (unsigned)(sizeof g_prog_ldst  / 4),
+      .loop_insns = 5u, .mmu_on = true, .small_pages = true, .run_api = true,
+      .user = true },
     /* The encoding real code actually uses. Paired with the ARM row above it
      * and with the MMU row, so the comparison is one variable at a time. */
     { .loop = "alu/branch T",.mmu = "off",         .tick = "no",
@@ -623,13 +636,15 @@ static bool setup(s5l8900_t *m, const bench_cfg_t *cfg) {
     }
 
     /*
-     * arm_reset leaves the core in SVC with CPSR.I and CPSR.F set, and nothing
-     * here clears them. That is load-bearing for the two `tick=yes` rows: the
+     * arm_reset leaves the core in SVC with CPSR.I and CPSR.F set. User-mode
+     * rows switch banks but retain both masks; every other row remains in SVC.
+     * That is load-bearing for the two `tick=yes` rows: the
      * device tick can raise a VIC line, and an interrupt actually taken would
      * add exception entry to what is supposed to be the price of s5l8900_tick()
      * alone. The end-state check requires the core to still be in SVC with its
      * PC at the top of the loop, which no taken exception could satisfy.
      */
+    if (cfg->user) arm_set_mode(cpu, ARM_MODE_USR);
     cpu->r[0] = 0;
     cpu->r[1] = 0;
     cpu->r[2] = BENCH_COUNTER_INIT;
@@ -724,9 +739,10 @@ static bool verify(s5l8900_t *m, const bench_cfg_t *cfg, uint64_t retired) {
                cpu->r[15], (unsigned)BENCH_CODE_VA);
         ok = false;
     }
-    if ((cpu->cpsr & ARM_CPSR_MODE_MASK) != ARM_MODE_SVC) {
-        printf("  ERROR: cpsr mode 0x%02x, expected SVC -- an exception was taken\n",
-               cpu->cpsr & ARM_CPSR_MODE_MASK);
+    uint32_t expected_mode = cfg->user ? ARM_MODE_USR : ARM_MODE_SVC;
+    if ((cpu->cpsr & ARM_CPSR_MODE_MASK) != expected_mode) {
+        printf("  ERROR: cpsr mode 0x%02x, expected 0x%02x -- an exception was taken\n",
+               cpu->cpsr & ARM_CPSR_MODE_MASK, expected_mode);
         ok = false;
     }
     if (cpu->abort_pending) {

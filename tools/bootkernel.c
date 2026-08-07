@@ -36721,6 +36721,10 @@ external_md_work_ready:
         uint64_t run_retired = 0u;
         double run_seconds = 0.0;
         bool timing_valid = true;
+        const uint64_t tick_batches_before =
+            s5l8900_interpreter_tick_batches(&mach);
+        const uint64_t tick_batched_retired_before =
+            s5l8900_interpreter_tick_batched_retired(&mach);
 #if defined(S5LBOX_STATIC_A64_ENGINE)
         const uint64_t signed_retired_before =
             s5l8900_static_a64_retired(&mach);
@@ -36794,6 +36798,21 @@ external_md_work_ready:
             printf("run api    : calls=%" PRIu64 " retired=%" PRIu64
                    " timing INVALID (%s)\n",
                    run_calls, run_retired, FRAME_METER_TIMER);
+        }
+        {
+            uint64_t tick_batches =
+                s5l8900_interpreter_tick_batches(&mach) - tick_batches_before;
+            uint64_t tick_batched_retired =
+                s5l8900_interpreter_tick_batched_retired(&mach) -
+                tick_batched_retired_before;
+            printf("run api tick: user-batches=%" PRIu64
+                   " batched-retired=%" PRIu64 "/%" PRIu64
+                   " (%.3f%%) mean=%.3f\n",
+                   tick_batches, tick_batched_retired, run_retired,
+                   run_retired ? 100.0 * (double)tick_batched_retired /
+                                     (double)run_retired : 0.0,
+                   tick_batches ? (double)tick_batched_retired /
+                                      (double)tick_batches : 0.0);
         }
 #if defined(S5LBOX_STATIC_A64_ENGINE)
         {

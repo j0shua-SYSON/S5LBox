@@ -1286,9 +1286,10 @@ static void test_skipped_refresh_is_invisible_to_the_guest(void) {
  * clock phase, interrupt-visible state, and every device whose state can
  * advance in a refresh.
  *
- * Normal and fractional phases exercise the common skip; 1:1 forces a refresh
- * every instruction; guest MMIO makes level_dirty true inside the run; the
- * direct button change is the host-behind-the-bus case ext_inputs() watches.
+ * Privileged mode is the unchanged control. User-mode normal and fractional
+ * phases exercise tick batching; 1:1 proves an edge cannot be crossed; guest
+ * MMIO, a user SVC, and a pre-step hook prove all three immediate escape gates.
+ * The direct button change is the host-behind-the-bus case ext_inputs() watches.
  * Inverted/zero rates and an invalid accumulator pin the public API's general
  * semantics instead of letting a benchmark-only assumption become behavior.
  */
@@ -1297,9 +1298,18 @@ struct run_tick_case {
     uint32_t cpu_hz, tb_hz;
     uint64_t tb_accum;
     unsigned steps;
+    bool user_mode;
     bool dirty_mmio;
     bool external_input;
+    bool mode_escape;
+    bool pre_step_hook;
+    bool expect_batch;
 };
+
+static bool never_handle_pre_step(void *opaque) {
+    (void)opaque;
+    return false;
+}
 
 static bool setup_run_tick_case(s5l8900_t *m, const struct run_tick_case *tc) {
     if (!s5l8900_init(m, 0, 1u << 20)) return false;
@@ -1309,7 +1319,14 @@ static bool setup_run_tick_case(s5l8900_t *m, const struct run_tick_case *tc) {
         0xe5801000u,                               /* STR r1,[r0] */
         0xeafffffdu                                /* B 0         */
     };
-    if (tc->dirty_mmio) {
+    static const uint32_t user_svc_then_spin[] = {
+        0xef000000u,                               /* SVC 0       */
+        0xeafffffeu,                               /* B .         */
+        0xeafffffeu                                /* vector 0x08 */
+    };
+    if (tc->mode_escape) {
+        s5l8900_load(m, 0, user_svc_then_spin, sizeof user_svc_then_spin);
+    } else if (tc->dirty_mmio) {
         s5l8900_load(m, 0, dirty_loop, sizeof dirty_loop);
         m->cpu.r[0] = S5L8900_VIC0_BASE + VIC_SOFTINT;
         m->cpu.r[1] = 1u << 3;
@@ -1320,30 +1337,66 @@ static bool setup_run_tick_case(s5l8900_t *m, const struct run_tick_case *tc) {
     arm_a_live_machine(m);
     m->cpu_hz = tc->cpu_hz;
     m->tb_hz = tc->tb_hz;
+    /* Start from a genuinely eligible clean boundary. Otherwise init's
+     * mandatory first refresh would make a mode-changing first instruction
+     * take the fallback path and leave the escape logic untested. */
+    s5l8900_tick(m, 0u);
     m->tb_accum = tc->tb_accum;
     m->cpu.r[15] = 0u;
-    m->cpu.cpsr = ARM_MODE_SVC | ARM_CPSR_I | ARM_CPSR_F;
+    arm_set_mode(&m->cpu, tc->user_mode ? ARM_MODE_USR : ARM_MODE_SVC);
+    m->cpu.cpsr |= ARM_CPSR_I | ARM_CPSR_F;
 
     /* Deliberately bypass the bus: this models the host changing the board
      * through the s5l_buttons_t pointer it is publicly handed. The next tick
      * must notice it even when no guest MMIO made level_dirty true. */
     if (tc->external_input)
         m->buttons.pressed = (uint8_t)(1u << S5L_BUTTON_MENU);
+    if (tc->pre_step_hook) {
+        const uint32_t target = 0u;
+        if (!s5l8900_set_pre_step_hook(m, never_handle_pre_step, NULL,
+                                      &target, 1u)) {
+            s5l8900_free(m);
+            return false;
+        }
+    }
     return true;
 }
 
 static void test_run_tick_path_matches_public_contract(void) {
     static const struct run_tick_case cases[] = {
-        { "real ratio",       S5L8900_CPU_HZ, S5L8900_TB_HZ,
-                                                        0u, 1000u, false, false },
-        { "fractional phase",            4u,       1u, 3u,  257u, false, false },
-        { "one to one",                  1u,       1u, 0u,  257u, false, false },
-        { "dirty guest MMIO",            4u,       1u, 2u,  258u, true,  false },
-        { "external button",             4u,       1u, 2u,  257u, false, true  },
-        { "inverted fallback",           1u,       4u, 0u,  257u, false, false },
-        { "zero CPU fallback",           0u,       1u, 7u,  257u, false, false },
-        { "zero timebase fallback",      4u,       0u, 3u,  257u, false, false },
-        { "invalid phase fallback",      4u,       1u, 5u,  257u, false, false }
+        { .name = "privileged control", .cpu_hz = S5L8900_CPU_HZ,
+          .tb_hz = S5L8900_TB_HZ, .steps = 1000u },
+        { .name = "user real ratio", .cpu_hz = S5L8900_CPU_HZ,
+          .tb_hz = S5L8900_TB_HZ, .steps = 1000u,
+          .user_mode = true, .expect_batch = true },
+        { .name = "user fractional phase", .cpu_hz = 4u, .tb_hz = 1u,
+          .tb_accum = 3u, .steps = 257u,
+          .user_mode = true, .expect_batch = true },
+        { .name = "user one to one", .cpu_hz = 1u, .tb_hz = 1u,
+          .steps = 257u, .user_mode = true },
+        { .name = "user dirty guest MMIO", .cpu_hz = 4u, .tb_hz = 1u,
+          .tb_accum = 2u, .steps = 258u, .user_mode = true,
+          .dirty_mmio = true, .expect_batch = true },
+        { .name = "user external button gate", .cpu_hz = 4u, .tb_hz = 1u,
+          .tb_accum = 2u, .steps = 1u, .user_mode = true,
+          .external_input = true },
+        { .name = "user SVC escape", .cpu_hz = S5L8900_CPU_HZ,
+          .tb_hz = S5L8900_TB_HZ, .steps = 17u, .user_mode = true,
+          .mode_escape = true, .expect_batch = true },
+        { .name = "user pre-step gate", .cpu_hz = S5L8900_CPU_HZ,
+          .tb_hz = S5L8900_TB_HZ, .steps = 257u, .user_mode = true,
+          .pre_step_hook = true },
+        { .name = "user inverted fallback", .cpu_hz = 1u, .tb_hz = 4u,
+          .steps = 257u, .user_mode = true },
+        { .name = "user zero CPU fallback", .tb_hz = 1u,
+          .tb_accum = 7u, .steps = 257u, .user_mode = true },
+        { .name = "user zero timebase fallback", .cpu_hz = 4u,
+          .tb_accum = 3u, .steps = 257u, .user_mode = true },
+        { .name = "user invalid phase first-step gate", .cpu_hz = 4u,
+          .tb_hz = 1u, .tb_accum = 5u, .steps = 1u, .user_mode = true },
+        { .name = "user invalid phase recovery", .cpu_hz = 4u, .tb_hz = 1u,
+          .tb_accum = 5u, .steps = 257u, .user_mode = true,
+          .expect_batch = true }
     };
 
     for (unsigned c = 0; c < sizeof cases / sizeof cases[0]; c++) {
@@ -1400,6 +1453,27 @@ static void test_run_tick_path_matches_public_contract(void) {
               memcmp(&fast.gpioic, &reference.gpioic, sizeof fast.gpioic) == 0 &&
               memcmp(&fast.buttons, &reference.buttons, sizeof fast.buttons) == 0,
               "%s: refreshed device state diverged", tc->name);
+
+        uint64_t batches = s5l8900_interpreter_tick_batches(&fast);
+        uint64_t batched_retired =
+            s5l8900_interpreter_tick_batched_retired(&fast);
+        if (tc->expect_batch) {
+            CHECK(batches > 0u && batched_retired >= batches,
+                  "%s: batching path was not covered (batches=%llu retired=%llu)",
+                  tc->name, (unsigned long long)batches,
+                  (unsigned long long)batched_retired);
+        } else {
+            CHECK(batches == 0u && batched_retired == 0u,
+                  "%s: ineligible path batched (batches=%llu retired=%llu)",
+                  tc->name, (unsigned long long)batches,
+                  (unsigned long long)batched_retired);
+        }
+        if (tc->mode_escape)
+            CHECK(batches == 1u && batched_retired == 1u,
+                  "%s: SVC did not end the batch at its exact retirement "
+                  "(batches=%llu retired=%llu)", tc->name,
+                  (unsigned long long)batches,
+                  (unsigned long long)batched_retired);
 
         s5l8900_free(&fast);
         s5l8900_free(&reference);

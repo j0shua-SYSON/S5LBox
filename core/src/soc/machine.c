@@ -1557,15 +1557,14 @@ static void s5l8900_refresh(s5l8900_t *m, uint32_t tb) {
     m->ext_seen = ext_inputs(m);
 }
 
-#if defined(S5LBOX_STATIC_A64_ENGINE)
-/* The signed engine may retire several guest instructions before returning to
- * the device graph, but never across the first timebase edge the literal loop
- * would have observed. Its only memory operation is an already-proved plain-RAM
- * read-cache hit; misses, faults and MMIO return before the load for arm_step().
- * Dirty levels and host inputs force the ordinary one-instruction path first.
+/* No execution path may defer the device graph across the first timebase edge
+ * the literal arm_step()+s5l8900_tick(1) loop would have observed. Dirty levels
+ * and host inputs force the ordinary one-instruction path first. This bound is
+ * shared by the signed engine and the interpreter batch below; it is timing
+ * policy, not an engine-specific optimization.
  */
-static unsigned static_a64_batch_limit(const s5l8900_t *m,
-                                       unsigned remaining) {
+static unsigned retirement_batch_limit(const s5l8900_t *m,
+                                        unsigned remaining) {
     uint64_t until_edge;
     if (!remaining || g_tick_eager || m->level_dirty ||
         ext_inputs(m) != m->ext_seen || !m->cpu_hz || !m->tb_hz ||
@@ -1577,7 +1576,25 @@ static unsigned static_a64_batch_limit(const s5l8900_t *m,
     if (until_edge < remaining) remaining = (unsigned)until_edge;
     return remaining;
 }
+
+/*
+ * Collapse only the calls to s5l8900_tick(), never ARM execution itself.
+ *
+ * User mode is the safety boundary: WFI and privileged host SVC can advance
+ * device time from inside arm_step(), while User code cannot. A pre-step hook
+ * can have a target anywhere in the interval, and the signed engine owns its
+ * own boundary contract, so either policy disables this path completely.
+ */
+static unsigned interpreter_tick_batch_limit(const s5l8900_t *m,
+                                              unsigned remaining) {
+    if ((m->cpu.cpsr & ARM_CPSR_MODE_MASK) != ARM_MODE_USR ||
+        m->pre_step_hook)
+        return 0u;
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    if (s5l8900_static_a64_is_enabled(m)) return 0u;
 #endif
+    return retirement_batch_limit(m, remaining);
+}
 
 unsigned s5l8900_run(s5l8900_t *m, unsigned max_steps, arm_status_t *status) {
     arm_status_t st = ARM_OK;
@@ -1602,7 +1619,7 @@ unsigned s5l8900_run(s5l8900_t *m, unsigned max_steps, arm_status_t *status) {
          * instruction even though no signed state had ever been allocated. */
         if (s5l8900_static_a64_is_enabled(m)) {
             bool known_negative = false;
-            unsigned batch = static_a64_batch_limit(m, max_steps - n);
+            unsigned batch = retirement_batch_limit(m, max_steps - n);
             if (batch)
                 batch = s5l8900_static_a64_try(m, batch, &known_negative);
             if (batch) {
@@ -1615,12 +1632,42 @@ unsigned s5l8900_run(s5l8900_t *m, unsigned max_steps, arm_status_t *status) {
                  * cancels the bypass. */
                 if (!known_negative || n >= max_steps)
                     continue;
-                if (static_a64_batch_limit(m, max_steps - n) &&
+                if (retirement_batch_limit(m, max_steps - n) &&
                     !s5l8900_static_a64_commit_known_negative_bypass(m))
                     continue;
             }
         }
 #endif
+
+        /* A limit of one cannot save a tick call, so retain the smaller
+         * ordinary path at the edge itself. Inside a real batch, inspect every
+         * retirement boundary for the exact three events the public tick would
+         * have observed: guest MMIO, a host-driven input, or departure from
+         * User mode. The final lump contains only successfully retired
+         * instructions; a non-OK arm_step() receives no device tick, matching
+         * the literal loop exactly. */
+        unsigned limit = interpreter_tick_batch_limit(m, max_steps - n);
+        if (limit > 1u) {
+            unsigned retired = 0u;
+            do {
+                st = arm_step(&m->cpu);
+                if (st != ARM_OK) break;
+                retired++;
+                if (m->level_dirty || ext_inputs(m) != m->ext_seen ||
+                    (m->cpu.cpsr & ARM_CPSR_MODE_MASK) != ARM_MODE_USR)
+                    break;
+            } while (retired < limit);
+
+            if (retired) {
+                n += retired;
+                m->interpreter_tick_batches++;
+                m->interpreter_tick_batched_retired += retired;
+                s5l8900_tick(m, retired);
+            }
+            if (st != ARM_OK) break;
+            continue;
+        }
+
         st = arm_step(&m->cpu);
         if (st != ARM_OK) break;
         n++;
@@ -1628,4 +1675,12 @@ unsigned s5l8900_run(s5l8900_t *m, unsigned max_steps, arm_status_t *status) {
     }
     if (status) *status = st;
     return n;
+}
+
+uint64_t s5l8900_interpreter_tick_batches(const s5l8900_t *m) {
+    return m ? m->interpreter_tick_batches : 0u;
+}
+
+uint64_t s5l8900_interpreter_tick_batched_retired(const s5l8900_t *m) {
+    return m ? m->interpreter_tick_batched_retired : 0u;
 }

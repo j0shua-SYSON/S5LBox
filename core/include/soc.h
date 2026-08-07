@@ -3738,6 +3738,19 @@ typedef struct {
     uint64_t        pre_step_filter;
     uint64_t        pre_step_matches;
     uint64_t        pre_step_handled;
+
+    /*
+     * Host-only evidence for the interpreter's timebase-bounded User-mode
+     * tick batching. A batch invocation may retire only one instruction when
+     * that instruction touches MMIO, observes a host input, or enters an
+     * exception; recording both totals makes that distinction visible.
+     *
+     * These are execution diagnostics, not guest state. They are deliberately
+     * absent from snap_mach(), just like the pre-step counters above, and a
+     * snapshot load preserves the live machine's running totals.
+     */
+    uint64_t        interpreter_tick_batches;
+    uint64_t        interpreter_tick_batched_retired;
 } s5l8900_t;
 
 /*
@@ -4025,5 +4038,10 @@ unsigned s5l8900_static_a64_cached_witness_bytes(const s5l8900_t *m,
 /* Run up to max_steps instructions, stopping early on a non-OK status.
  * Returns the number of instructions retired. */
 unsigned s5l8900_run(s5l8900_t *m, unsigned max_steps, arm_status_t *status);
+/* Host diagnostics for User-mode interpreter intervals whose per-instruction
+ * device ticks were collapsed into one exact timebase-bounded tick. Never part
+ * of guest state or a snapshot. */
+uint64_t s5l8900_interpreter_tick_batches(const s5l8900_t *m);
+uint64_t s5l8900_interpreter_tick_batched_retired(const s5l8900_t *m);
 
 #endif /* S5LBOX_SOC_H */
