@@ -8356,3 +8356,57 @@ decoder census sees 62,586 narrowing conversions, but admission will remain
 literal until their live FPSCR modes, operands, results and sticky-flag effects
 are audited. Evidence is retained under
 `work/artifacts/compact-raw-register-shift-admission-7320-360f6fd-r1/`.
+
+### 2026-08-07: audited VFP narrowing crosses the physical-test gate at 97.028%
+
+Commit `7cbab223b386b62b1dfdb25bf3c882c459914918` admits only the exact
+`VCVT.F32.F64` state observed in the unchanged 7.320--7.330 B interval. The
+decision came from a read-only live audit, not from treating a decoder count as
+proof. All 62,586 candidates used round-to-nearest with FZ and DN set, had no
+vector length or exception enables, consumed only signed-zero or finite-normal
+double inputs, and produced only signed-zero or finite-normal single outputs.
+The incoming sticky state was IXC-only, no conversion made a new exception bit
+visible, every literal interpreter result was `ARM_OK`, and all 62,586 passed
+the proposed guard both before and after conversion. The audit accounts for
+every candidate exactly and is retained under
+`work/artifacts/compact-raw-vfp-narrow-audit-7320-wip-r1/`.
+
+The signed-static and compact live-byte handlers still validate the contract at
+runtime. They enter a lazy host-FP session, save the caller's complete FPCR/FPSR,
+run the conversion under a controlled internal mode, stage the result, reject
+unexpected result classes or exception flags before guest commit, and restore
+the caller state on both success and fallback. The compact handler also rejects
+the smallest-normal plus IXC flush boundary. There is no executable allocation,
+runtime-generated code, JIT entitlement, jailbreak dependency, or stock-app
+policy change.
+
+Local strict CTest passes 65/65. The generated assembly contains 27,307 unique
+labels and no duplicate labels. Exact-SHA core run `31189124207` is green in
+all eight jobs, including the Apple-arm64 semantic and serialized-SoC oracles
+on macOS 14 and 15 plus the JIT-off rebuild. Stock-iPhone build/IPA run
+`31189124817` is also green.
+
+The post-change restored census again exits zero with empty stderr and accounts
+for 9,999,510 fetched instructions plus 490 interrupt entries. Its derived
+work-image SHA-256 is
+`06AAAA84FB4BFEAE5A647290C9B50BEBE7640F420457089F40BDBED961D6992D` and its
+screen SHA-256 is
+`45E3B4807D81A42EB14251246CA94F3149647462A0BC79C4C865C9F2418B6B57`.
+
+| exact 10 M classifier outcome | register-shift tier | + guarded VFP narrowing | delta |
+|---|---:|---:|---:|
+| admitted | 9,639,738 (96.402%) | 9,702,324 (97.028%) | +62,586 (+0.626 pp) |
+| condition-passed execution | 8,753,575 | 8,816,161 | +62,586 |
+| rejected | 359,772 | 297,186 | -62,586 |
+| admitted runs | 333,297 | 271,231 | -62,066 |
+| mean admitted run | 28.922 | 35.771 | +6.849 |
+
+This crosses the predeclared fewer-than-roughly-300k physical-test threshold by
+only 2,814 instructions. That threshold was an engineering gate, not a speed or
+FPS prediction. The sequence profiler performs an extra translation per fetched
+instruction, so its elapsed time is invalid as performance evidence. **There is
+still no physical-phone speedup and no basis for claiming that 30 displayed FPS
+is close.** The accepted app remains on the interpreter until a controlled A9
+interpreter/candidate bracket proves the candidate faster with identical guest
+state. Exact admission evidence is retained under
+`work/artifacts/compact-raw-vfp-narrow-admission-7320-7cbab22-r1/`.
