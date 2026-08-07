@@ -1794,6 +1794,8 @@ bool a64_compact_raw_run(arm_cpu_t *cpu, const uint8_t *code,
         context.vfp_fpexc = &cpu->vfp_fpexc;
         context.vfp_fpscr = &cpu->vfp_fpscr;
         context.vfp_access = vfp_cpacr_permits(cpu) ? 1u : 0u;
+        context.priv_tag =
+            (cpu->cpsr & ARM_CPSR_MODE_MASK) != ARM_MODE_USR ? 1u : 0u;
         uint32_t result = a64_compact_raw_execute(
             cpu->r, &cpu->cpsr, &cpu->cycles, code, code_base, code_bytes,
             max_insns, &context);
