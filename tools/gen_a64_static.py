@@ -2144,6 +2144,250 @@ def build_handlers() -> list[tuple[str, list[str]]]:
     return handlers
 
 
+def compact_raw_function() -> list[str]:
+    """Return a small raw-A32 execution loop used only by the feasibility gate.
+
+    Unlike the static handler engine above, this loop consumes live guest
+    instruction bytes directly and keeps the architectural PC plus the flat
+    RAM base resident across instructions.  It deliberately accepts only a
+    narrow, exactly testable subset: AL data-processing without flag writes,
+    aligned immediate word LDR/STR, and immediate B/BL.  An unsupported
+    instruction stops before mutation and the return value is the exact
+    retired prefix.  Product integration is intentionally a later decision.
+    """
+    return [
+        "",
+        ".p2align 2",
+        ".globl A64S_CSYM(a64_compact_raw_execute)",
+        "#if !defined(__APPLE__)",
+        ".type A64S_CSYM(a64_compact_raw_execute), %function",
+        "#endif",
+        "A64S_CSYM(a64_compact_raw_execute):",
+        # Nine AAPCS64 arguments: the RAM mask is at the entry SP.  Preserve
+        # every callee-saved register used by the persistent loop.
+        "    stp x29, x30, [sp, #-96]!",
+        "    mov x29, sp",
+        "    stp x19, x20, [sp, #16]",
+        "    stp x21, x22, [sp, #32]",
+        "    stp x23, x24, [sp, #48]",
+        "    stp x25, x26, [sp, #64]",
+        "    stp x27, x28, [sp, #80]",
+        "    mov x19, x0",       # architectural register file
+        "    mov x20, x1",       # CPSR (read for ADC/SBC/RSC carry)
+        "    mov x21, x2",       # cycle counter
+        "    mov x22, x3",       # live code bytes at code_base
+        "    mov w23, w4",       # code_base
+        "    mov w24, w5",       # code_bytes
+        "    mov w25, w6",       # remaining instruction budget
+        "    mov x27, x7",       # flat RAM
+        "    ldr w28, [sp, #96]", # ninth argument: flat-RAM mask
+        "    ldr w26, [x19, #60]", # architectural PC
+        "    mov w12, w25",      # original budget, for exact prefix
+        # Pin the semantic jump table once rather than resolving it per
+        # instruction.  The table contains relative offsets and is ordinary
+        # signed text on every platform.
+        "#if defined(__APPLE__)",
+        "    adrp x16, .La64cr_dp_table@PAGE",
+        "    add x16, x16, .La64cr_dp_table@PAGEOFF",
+        "#else",
+        "    adrp x16, .La64cr_dp_table",
+        "    add x16, x16, :lo12:.La64cr_dp_table",
+        "#endif",
+        "    cbz w25, .La64cr_exit",
+        "",
+        ".La64cr_loop:",
+        # The code pointer names code_base.  Unsigned subtraction rejects both
+        # below-base and past-end PCs; the C contract guarantees a word-sized,
+        # word-aligned window.
+        "    sub w8, w26, w23",
+        "    cmp w8, w24",
+        "    b.hs .La64cr_exit",
+        "    tst w8, #3",
+        "    b.ne .La64cr_exit",
+        "    ldr w9, [x22, w8, uxtw]",
+        # This first gate supports only ordinary AL A32 encodings.  Conditions
+        # and the unconditional space stop before the current instruction.
+        "    lsr w10, w9, #28",
+        "    cmp w10, #14",
+        "    b.ne .La64cr_exit",
+        "    ubfx w10, w9, #25, #3",
+        "    cmp w10, #5",
+        "    b.eq .La64cr_branch",
+        "    ubfx w10, w9, #26, #2",
+        "    cbz w10, .La64cr_dp",
+        "    cmp w10, #1",
+        "    b.eq .La64cr_memory",
+        "    b .La64cr_exit",
+        "",
+        ".La64cr_dp:",
+        # Flag-setting forms, PC operands/destinations and nonzero register
+        # shifts remain outside the proof.  Immediate rotation is supported.
+        "    tbnz w9, #20, .La64cr_exit",
+        "    ubfx w13, w9, #12, #4",
+        "    cmp w13, #15",
+        "    b.eq .La64cr_exit",
+        "    ubfx w11, w9, #16, #4",
+        "    cmp w11, #15",
+        "    b.eq .La64cr_exit",
+        "    ldr w11, [x19, w11, uxtw #2]",
+        "    tbnz w9, #25, .La64cr_dp_immediate",
+        "    tst w9, #0xff0",
+        "    b.ne .La64cr_exit",
+        "    and w10, w9, #0xf",
+        "    cmp w10, #15",
+        "    b.eq .La64cr_exit",
+        "    ldr w10, [x19, w10, uxtw #2]",
+        "    b .La64cr_dp_operand_ready",
+        ".La64cr_dp_immediate:",
+        "    and w10, w9, #0xff",
+        "    ubfx w14, w9, #8, #4",
+        "    lsl w14, w14, #1",
+        "    rorv w10, w10, w14",
+        ".La64cr_dp_operand_ready:",
+        "    ubfx w14, w9, #21, #4",
+        "    ldrsw x15, [x16, w14, uxtw #2]",
+        "    add x15, x16, x15",
+        "    br x15",
+        "",
+        ".La64cr_dp_and:",
+        "    and w10, w11, w10",
+        "    b .La64cr_dp_write",
+        ".La64cr_dp_eor:",
+        "    eor w10, w11, w10",
+        "    b .La64cr_dp_write",
+        ".La64cr_dp_sub:",
+        "    sub w10, w11, w10",
+        "    b .La64cr_dp_write",
+        ".La64cr_dp_rsb:",
+        "    sub w10, w10, w11",
+        "    b .La64cr_dp_write",
+        ".La64cr_dp_add:",
+        "    add w10, w11, w10",
+        "    b .La64cr_dp_write",
+        ".La64cr_dp_adc:",
+        "    ldr w15, [x20]",
+        "    ubfx w15, w15, #29, #1",
+        "    add w10, w11, w10",
+        "    add w10, w10, w15",
+        "    b .La64cr_dp_write",
+        ".La64cr_dp_sbc:",
+        "    ldr w15, [x20]",
+        "    ubfx w15, w15, #29, #1",
+        "    sub w10, w11, w10",
+        "    sub w10, w10, #1",
+        "    add w10, w10, w15",
+        "    b .La64cr_dp_write",
+        ".La64cr_dp_rsc:",
+        "    ldr w15, [x20]",
+        "    ubfx w15, w15, #29, #1",
+        "    sub w10, w10, w11",
+        "    sub w10, w10, #1",
+        "    add w10, w10, w15",
+        "    b .La64cr_dp_write",
+        ".La64cr_dp_orr:",
+        "    orr w10, w11, w10",
+        "    b .La64cr_dp_write",
+        ".La64cr_dp_mov:",
+        "    b .La64cr_dp_write",
+        ".La64cr_dp_bic:",
+        "    bic w10, w11, w10",
+        "    b .La64cr_dp_write",
+        ".La64cr_dp_mvn:",
+        "    mvn w10, w10",
+        ".La64cr_dp_write:",
+        "    str w10, [x19, w13, uxtw #2]",
+        "    add w26, w26, #4",
+        "    b .La64cr_retire",
+        "",
+        ".La64cr_memory:",
+        # Immediate, pre-indexed, word, no-writeback LDR/STR only.  Requiring
+        # alignment avoids depending on the guest SCTLR's legacy rotation
+        # policy; every admitted access has one exact flat-RAM interpretation.
+        "    tbnz w9, #25, .La64cr_exit",
+        "    tbz w9, #24, .La64cr_exit",
+        "    tbnz w9, #22, .La64cr_exit",
+        "    tbnz w9, #21, .La64cr_exit",
+        "    ubfx w11, w9, #16, #4",
+        "    cmp w11, #15",
+        "    b.eq .La64cr_exit",
+        "    ubfx w13, w9, #12, #4",
+        "    cmp w13, #15",
+        "    b.eq .La64cr_exit",
+        "    ldr w11, [x19, w11, uxtw #2]",
+        "    and w10, w9, #0xfff",
+        "    tbz w9, #23, .La64cr_memory_sub",
+        "    add w10, w11, w10",
+        "    b .La64cr_memory_address",
+        ".La64cr_memory_sub:",
+        "    sub w10, w11, w10",
+        ".La64cr_memory_address:",
+        "    tst w10, #3",
+        "    b.ne .La64cr_exit",
+        "    and w10, w10, w28",
+        "    tbnz w9, #20, .La64cr_memory_load",
+        "    ldr w11, [x19, w13, uxtw #2]",
+        "    str w11, [x27, w10, uxtw]",
+        "    b .La64cr_memory_done",
+        ".La64cr_memory_load:",
+        "    ldr w11, [x27, w10, uxtw]",
+        "    str w11, [x19, w13, uxtw #2]",
+        ".La64cr_memory_done:",
+        "    add w26, w26, #4",
+        "    b .La64cr_retire",
+        "",
+        ".La64cr_branch:",
+        "    tbz w9, #24, .La64cr_branch_no_link",
+        "    add w10, w26, #4",
+        "    str w10, [x19, #56]",
+        ".La64cr_branch_no_link:",
+        "    sbfx w10, w9, #0, #24",
+        "    lsl w10, w10, #2",
+        "    add w26, w26, #8",
+        "    add w26, w26, w10",
+        "",
+        ".La64cr_retire:",
+        "    subs w25, w25, #1",
+        "    b.ne .La64cr_loop",
+        "",
+        ".La64cr_exit:",
+        "    sub w0, w12, w25",
+        "    str w26, [x19, #60]",
+        "    ldr x9, [x21]",
+        "    add x9, x9, x0",
+        "    str x9, [x21]",
+        "    ldp x27, x28, [sp, #80]",
+        "    ldp x25, x26, [sp, #64]",
+        "    ldp x23, x24, [sp, #48]",
+        "    ldp x21, x22, [sp, #32]",
+        "    ldp x19, x20, [sp, #16]",
+        "    ldp x29, x30, [sp], #96",
+        "    ret",
+        "#if !defined(__APPLE__)",
+        ".size A64S_CSYM(a64_compact_raw_execute), .-A64S_CSYM(a64_compact_raw_execute)",
+        "#endif",
+        "",
+        ".p2align 2",
+        ".La64cr_dp_table:",
+        "    .long .La64cr_dp_and - .La64cr_dp_table",
+        "    .long .La64cr_dp_eor - .La64cr_dp_table",
+        "    .long .La64cr_dp_sub - .La64cr_dp_table",
+        "    .long .La64cr_dp_rsb - .La64cr_dp_table",
+        "    .long .La64cr_dp_add - .La64cr_dp_table",
+        "    .long .La64cr_dp_adc - .La64cr_dp_table",
+        "    .long .La64cr_dp_sbc - .La64cr_dp_table",
+        "    .long .La64cr_dp_rsc - .La64cr_dp_table",
+        "    .long .La64cr_exit - .La64cr_dp_table",
+        "    .long .La64cr_exit - .La64cr_dp_table",
+        "    .long .La64cr_exit - .La64cr_dp_table",
+        "    .long .La64cr_exit - .La64cr_dp_table",
+        "    .long .La64cr_dp_orr - .La64cr_dp_table",
+        "    .long .La64cr_dp_mov - .La64cr_dp_table",
+        "    .long .La64cr_dp_bic - .La64cr_dp_table",
+        "    .long .La64cr_dp_mvn - .La64cr_dp_table",
+        "",
+    ]
+
+
 def render() -> str:
     handlers = build_handlers()
     lines = [
@@ -2491,6 +2735,7 @@ def render() -> str:
     ])
     lines.extend(f"    .long {label} - .La64s_table" for label, _ in handlers)
     lines.append("")
+    lines.extend(compact_raw_function())
     return "\n".join(lines)
 
 

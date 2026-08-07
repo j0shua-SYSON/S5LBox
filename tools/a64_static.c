@@ -1496,7 +1496,48 @@ extern int a64_static_execute(uint32_t *regs, uint32_t *cpsr,
                               uint64_t ram_mask, uint64_t block_insns,
                               const a64_static_read_context_t *read_context,
                               void *chain_context);
+extern uint32_t a64_compact_raw_execute(uint32_t *regs, uint32_t *cpsr,
+                                        uint64_t *cycles,
+                                        const uint8_t *code,
+                                        uint32_t code_base,
+                                        uint32_t code_bytes,
+                                        uint32_t max_insns, uint8_t *ram,
+                                        uint64_t ram_mask);
 #endif
+
+bool a64_compact_raw_run(arm_cpu_t *cpu, const uint8_t *code,
+                         uint32_t code_base, uint32_t code_bytes,
+                         unsigned max_insns, uint8_t *ram, size_t ram_size,
+                         unsigned *completed) {
+    uint64_t code_end;
+
+    if (!completed) return false;
+    *completed = 0u;
+    code_end = (uint64_t)code_base + code_bytes;
+    if (!cpu || !code || !ram || !max_insns || code_bytes < 4u ||
+        (code_base & 3u) != 0u || (code_bytes & 3u) != 0u ||
+        code_end > (uint64_t)UINT32_MAX + 1u ||
+        (cpu->r[15] & 3u) != 0u ||
+        (cpu->cpsr & (ARM_CPSR_T | ARM_CPSR_E)) != 0u ||
+        (cpu->cp15.sctlr & ARM_SCTLR_M) != 0u || cpu->irq_line ||
+        cpu->fiq_line || cpu->abort_pending || ram_size < 4u ||
+        (ram_size & (ram_size - 1u)) != 0u ||
+        ram_size - 1u > UINT32_MAX)
+        return false;
+#if defined(S5LBOX_STATIC_A64_NATIVE)
+    {
+        uint32_t result = a64_compact_raw_execute(
+            cpu->r, &cpu->cpsr, &cpu->cycles, code, code_base, code_bytes,
+            max_insns, ram, (uint64_t)ram_size - 1u);
+        if (result > max_insns) return false;
+        *completed = result;
+        return true;
+    }
+#else
+    (void)code_end;
+    return false;
+#endif
+}
 
 typedef struct {
     const a64_static_uop_t *uops;
