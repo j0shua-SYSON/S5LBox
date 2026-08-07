@@ -19,7 +19,7 @@ CONDITIONS = (
     "eq", "ne", "cs", "cc", "mi", "pl", "vs", "vc",
     "hi", "ls", "ge", "lt", "gt", "le",
 )
-EXPECTED_HANDLERS = 26508
+EXPECTED_HANDLERS = 26509
 
 READ_KINDS = (
     ("word", "ldr", 4),
@@ -1256,6 +1256,38 @@ def vfp_widen_body() -> list[str]:
     ]
 
 
+def vfp_narrow_body() -> list[str]:
+    """Round binary64 to binary32 inside the audited RunFast contract."""
+    p = ".La64s_vfp_narrow_64"
+    return [
+        *vfp_gate("live_arith"),
+        "    ldur w9, [x13, #-12]",
+        "    and w12, w9, #0xff",
+        "    ubfx w10, w9, #8, #8",
+        "    ldr x6, [x3, #24]",
+        "    add x16, x6, w10, uxtw #2",
+        "    ldr x5, [x16]",
+        *vfp_simple_classify(
+            8, "x5", "x9", f"{p}_input", ".La64s_direct_miss"
+        ),
+        "    fmov d1, x5",
+        "    bl .La64s_fp_session_begin",
+        "    msr fpsr, xzr",
+        "    fcvt s0, d1",
+        "    fmov w5, s0",
+        *vfp_simple_classify(
+            4, "w5", "w6", f"{p}_result", ".La64s_direct_miss"
+        ),
+        *vfp_arithmetic_flags(
+            4, "w5", f"{p}_result", ".La64s_direct_miss"
+        ),
+        "    ldr x6, [x3, #24]",
+        "    add x6, x6, w12, uxtw #2",
+        "    str w5, [x6]",
+        *vfp_finish(),
+    ]
+
+
 def vfp_simple_classify(width: int, value: str, scratch: str,
                         prefix: str, failure: str) -> list[str]:
     """Accept only a signed zero or a finite normal IEEE encoding."""
@@ -2081,6 +2113,7 @@ def build_handlers() -> list[tuple[str, list[str]]]:
     handlers.append((".La64s_vfp_compare_32", vfp_compare_body(4)))
     handlers.append((".La64s_vfp_compare_64", vfp_compare_body(8)))
     handlers.append((".La64s_vfp_widen_32", vfp_widen_body()))
+    handlers.append((".La64s_vfp_narrow_64", vfp_narrow_body()))
     for operation in (
         "vmla", "vmls", "vnmls", "vnmla", "vmul", "vnmul",
         "vadd", "vsub", "vdiv",
@@ -2445,6 +2478,41 @@ def compact_vfp_arithmetic_body(width: int) -> list[str]:
         "    b .La64cr_fallback",
     ])
     return body
+
+
+def compact_vfp_narrow_body() -> list[str]:
+    """Return transactional VCVT.F32.F64 for the audited live contract."""
+    p = ".La64cr_vfp_narrow_64"
+    return [
+        f"{p}:",
+        "    ubfx w2, w9, #12, #4",
+        "    ubfx w3, w9, #22, #1",
+        "    orr w2, w3, w2, lsl #1",
+        "    and w3, w9, #0xf",
+        "    lsl w3, w3, #1",
+        "    bl .La64cr_vfp_guard_arith",
+        "    cbz w0, .La64cr_fallback",
+        "    ldr x0, [x27, #104]",
+        "    add x1, x0, w3, uxtw #2",
+        "    ldr x6, [x1]",
+        *vfp_simple_classify(
+            8, "x6", "x7", f"{p}_input", ".La64cr_fallback"
+        ),
+        "    fmov d1, x6",
+        "    bl .La64cr_fp_session_begin",
+        "    msr fpsr, xzr",
+        "    fcvt s0, d1",
+        "    fmov w6, s0",
+        *vfp_simple_classify(
+            4, "w6", "w7", f"{p}_result", ".La64cr_fallback"
+        ),
+        *compact_vfp_arithmetic_flags(
+            4, "w6", f"{p}_result", ".La64cr_fallback"
+        ),
+        "    ldr x0, [x27, #104]",
+        "    str w6, [x0, w2, uxtw #2]",
+        "    b .La64cr_vfp_done",
+    ]
 
 
 def compact_vfp_memory_body() -> list[str]:
@@ -2925,7 +2993,7 @@ def compact_vfp_nonarith_body() -> list[str]:
         "    cmp w10, #5",
         "    b.eq .La64cr_vfp_compare_select",
         "    cmp w10, #7",
-        "    b.eq .La64cr_vfp_widen_select",
+        "    b.eq .La64cr_vfp_convert_select",
         "    cbz w10, .La64cr_vfp_unary_mov_abs",
         "    cmp w10, #1",
         "    b.ne .La64cr_fallback",
@@ -2938,11 +3006,14 @@ def compact_vfp_nonarith_body() -> list[str]:
         ".La64cr_vfp_compare_select:",
         "    tbnz w9, #8, .La64cr_vfp_compare_64",
         "    b .La64cr_vfp_compare_32",
-        ".La64cr_vfp_widen_select:",
+        ".La64cr_vfp_convert_select:",
         "    tbz w9, #7, .La64cr_fallback",
-        "    tbnz w9, #8, .La64cr_fallback",
+        "    tbnz w9, #8, .La64cr_vfp_narrow_select",
         "    tbnz w9, #22, .La64cr_fallback",
         "    b .La64cr_vfp_widen_32",
+        ".La64cr_vfp_narrow_select:",
+        "    tbnz w9, #5, .La64cr_fallback",
+        "    b .La64cr_vfp_narrow_64",
         "",
         ".La64cr_vfp_unary:",
         "    tbnz w9, #8, .La64cr_vfp_unary_64",
@@ -3067,6 +3138,8 @@ def compact_vfp_nonarith_body() -> list[str]:
         "    str x7, [x0]",
         "    str w8, [x1]",
         "    b .La64cr_vfp_done",
+        "",
+        *compact_vfp_narrow_body(),
         "",
         *compact_vfp_memory_body(),
         "",

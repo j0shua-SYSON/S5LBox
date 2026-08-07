@@ -33,7 +33,7 @@
  * four-record instructions that remains below this ceiling; the final slot is
  * the fixed block exit. */
 #define A64_STATIC_MAX_UOPS (A64_STATIC_MAX_INSNS * 4u + 16u)
-#define A64_STATIC_HANDLER_COUNT 26508u
+#define A64_STATIC_HANDLER_COUNT 26509u
 #define A64_STATIC_GRAPH_SLOTS 512u
 
 typedef struct {
@@ -128,7 +128,9 @@ bool a64_static_decode_bytes_at(const uint8_t *program, unsigned insns,
  * also admitted behind live CPACR/FPEXC/FPSCR guards. Guarded scalar VFPv2
  * arithmetic commits only the traced RN/FZ/DN, sticky-IXC, signed-zero/normal
  * finite contract; every special value or newly visible exception falls back
- * before guest mutation. Compare and exact
+ * before guest mutation. The same audited contract admits double-to-single
+ * VCVT only while its staged result remains signed-zero/finite-normal and the
+ * host exposes no exception beyond already-sticky IXC. Compare and exact
  * single-to-double VCVT widening handle NaNs, signed zero, FZ and cumulative
  * IOC/IDC with integer bit logic. Single-register VLDR uses the same
  * already-proved plain-RAM read cache, including exact one- and two-word hit

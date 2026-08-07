@@ -25377,6 +25377,43 @@ typedef struct {
     bool pending;
 } sequence_vfp_arith_t;
 
+typedef enum {
+    SEQUENCE_VFP_NARROW_INVALID = 0,
+    SEQUENCE_VFP_NARROW_CONDITION_SKIP,
+    SEQUENCE_VFP_NARROW_ACCESS_GUARD,
+    SEQUENCE_VFP_NARROW_FPSCR_LEN,
+    SEQUENCE_VFP_NARROW_FPSCR_ENABLES,
+    SEQUENCE_VFP_NARROW_ADMITTED,
+    SEQUENCE_VFP_NARROW_OUTCOME_COUNT
+} sequence_vfp_narrow_outcome_t;
+
+/* Read-only pre/post census for VCVT.F32.F64. The prospective count is the
+ * exact bounded contract the compact loop could test before committing guest
+ * state: RN/FZ/DN, IXC already sticky, and a zero/finite-normal input and
+ * result. The observer never executes native code or changes admission. */
+typedef struct {
+    uint64_t outcomes[SEQUENCE_VFP_NARROW_OUTCOME_COUNT];
+    uint64_t mode_control[4u][4u];
+    uint64_t input_classes[SEQUENCE_FP_CLASS_COUNT];
+    uint64_t result_classes[SEQUENCE_FP_CLASS_COUNT];
+    uint64_t pre_sticky_flags[1u << 6];
+    uint64_t newly_visible_flags[1u << 6];
+    uint64_t post_status[4u];
+    uint64_t prospective_pre;
+    uint64_t prospective_post;
+    uint64_t post_not_literal;
+    uint64_t pending_abandoned;
+    uint32_t pending_fpscr;
+    uint32_t pending_pc;
+    uint32_t pending_raw;
+    uint8_t pending_rd;
+    uint8_t pending_input_class;
+    uint8_t pending_rounding;
+    uint8_t pending_control;
+    bool pending_prospective;
+    bool pending;
+} sequence_vfp_narrow_t;
+
 static const char *const SEQUENCE_CLASS_NAMES[SEQUENCE_CLASS_COUNT] = {
     "ARM data-processing", "ARM data-processing -> pc", "ARM B/BL",
     "ARM single load/store", "ARM block load/store", "ARM extra/sync",
@@ -25630,6 +25667,7 @@ typedef struct {
     sequence_signed_indirect_t signed_indirect;
     sequence_signed_post_store_t signed_post_store;
     sequence_vfp_arith_t vfp_arith;
+    sequence_vfp_narrow_t vfp_narrow;
 
     bool have_previous;
     bool previous_thumb;
@@ -25952,6 +25990,9 @@ static void sequence_post_store_admit(
 static void sequence_vfp_arith_note_post_step(
         sequence_vfp_arith_t *model, const arm_cpu_t *cpu,
         bool literal_step, arm_status_t status);
+static void sequence_vfp_narrow_note_post_step(
+        sequence_vfp_narrow_t *model, const arm_cpu_t *cpu,
+        bool literal_step, arm_status_t status);
 
 typedef struct {
     uint32_t blocks[SEQUENCE_STORE_BLOCK_CAP];
@@ -26174,6 +26215,8 @@ static void sequence_profile_note_post_step(sequence_profile_t *profile,
     if (!profile || !profile->enabled) return;
     sequence_vfp_arith_note_post_step(
         &profile->vfp_arith, cpu, literal_step, status);
+    sequence_vfp_narrow_note_post_step(
+        &profile->vfp_narrow, cpu, literal_step, status);
     sequence_signed_store_t *model = &profile->signed_store;
     if (!model->validation_armed) return;
     g_sequence_write_capture.armed = false;
@@ -27123,6 +27166,108 @@ static void sequence_vfp_arith_note_post_step(
         sequence_vfp_simple_class(result_class))
         model->simple_results[model->pending_rounding]
                              [model->pending_control]++;
+}
+
+/* Observe the one VFPv2 narrowing shape without changing decoder admission.
+ * A prospective native contract is counted only when every pre-state fact is
+ * available to the runtime guard. The post count additionally requires the
+ * literal result to stay zero/finite-normal and expose no new sticky bit other
+ * than the IXC that was already set before the instruction. */
+static bool sequence_vfp_narrow_observe(
+        sequence_profile_t *profile, const arm_cpu_t *cpu, uint32_t insn) {
+    if (!profile || !cpu ||
+        (insn & UINT32_C(0x0f000e10)) != UINT32_C(0x0e000a00))
+        return false;
+
+    unsigned family = (((insn >> 23) & 1u) << 2) |
+                      (((insn >> 21) & 1u) << 1) |
+                      ((insn >> 20) & 1u);
+    unsigned opc2 = (insn >> 16) & 15u;
+    if (family != 7u || (insn & (1u << 6)) == 0u || opc2 != 7u ||
+        (insn & (1u << 7)) == 0u || (insn & (1u << 8)) == 0u)
+        return false;
+
+    sequence_vfp_narrow_t *model = &profile->vfp_narrow;
+    sequence_vfp_narrow_outcome_t outcome = SEQUENCE_VFP_NARROW_INVALID;
+    unsigned condition = insn >> 28;
+    bool encoding_valid = (insn & (1u << 5)) == 0u;
+    if (condition != 15u && encoding_valid) {
+        if (condition < 14u && !arm_cond_passed(cpu, condition)) {
+            outcome = SEQUENCE_VFP_NARROW_CONDITION_SKIP;
+        } else if (!vfp_cpacr_permits(cpu) || !vfp_enabled(cpu)) {
+            outcome = SEQUENCE_VFP_NARROW_ACCESS_GUARD;
+        } else if ((cpu->vfp_fpscr & ARM_FPSCR_LEN) != 0u) {
+            outcome = SEQUENCE_VFP_NARROW_FPSCR_LEN;
+        } else if ((cpu->vfp_fpscr & ARM_FPSCR_ENABLES) != 0u) {
+            outcome = SEQUENCE_VFP_NARROW_FPSCR_ENABLES;
+        } else {
+            outcome = SEQUENCE_VFP_NARROW_ADMITTED;
+        }
+    }
+    model->outcomes[outcome]++;
+    if (outcome != SEQUENCE_VFP_NARROW_ADMITTED) return true;
+
+    unsigned source = insn & 15u;
+    unsigned rd = ((insn >> 12) & 15u) * 2u +
+                  ((insn >> 22) & 1u);
+    unsigned rounding = (cpu->vfp_fpscr & ARM_FPSCR_RMODE) >> 22;
+    unsigned control = ((cpu->vfp_fpscr & ARM_FPSCR_FZ) ? 1u : 0u) |
+                       ((cpu->vfp_fpscr & ARM_FPSCR_DN) ? 2u : 0u);
+    sequence_fp_class_t input_class =
+        sequence_fp64_class(vfp_get_d(cpu, source));
+    uint32_t cumulative = ARM_FPSCR_IDC | ARM_FPSCR_IXC |
+                          ARM_FPSCR_UFC | ARM_FPSCR_OFC |
+                          ARM_FPSCR_DZC | ARM_FPSCR_IOC;
+    uint8_t pre_flags = sequence_vfp_flag_index(
+        cpu->vfp_fpscr & cumulative);
+    bool prospective = rounding == 0u && control == 3u &&
+                       pre_flags == (1u << 4) &&
+                       sequence_vfp_simple_class(input_class);
+
+    model->mode_control[rounding][control]++;
+    model->input_classes[input_class]++;
+    model->pre_sticky_flags[pre_flags]++;
+    if (prospective) model->prospective_pre++;
+    if (model->pending) model->pending_abandoned++;
+    model->pending = true;
+    model->pending_fpscr = cpu->vfp_fpscr;
+    model->pending_pc = cpu->r[15];
+    model->pending_raw = insn;
+    model->pending_rd = (uint8_t)rd;
+    model->pending_input_class = (uint8_t)input_class;
+    model->pending_rounding = (uint8_t)rounding;
+    model->pending_control = (uint8_t)control;
+    model->pending_prospective = prospective;
+    return true;
+}
+
+static void sequence_vfp_narrow_note_post_step(
+        sequence_vfp_narrow_t *model, const arm_cpu_t *cpu,
+        bool literal_step, arm_status_t status) {
+    if (!model || !model->pending) return;
+    model->pending = false;
+    if (!literal_step || !cpu) {
+        model->post_not_literal++;
+        return;
+    }
+    unsigned status_index = (unsigned)status;
+    if (status_index >= 4u) status_index = 3u;
+    model->post_status[status_index]++;
+    if (status != ARM_OK) return;
+
+    sequence_fp_class_t result_class =
+        sequence_fp32_class(vfp_get_s(cpu, model->pending_rd));
+    model->result_classes[result_class]++;
+    uint32_t cumulative = ARM_FPSCR_IDC | ARM_FPSCR_IXC |
+                          ARM_FPSCR_UFC | ARM_FPSCR_OFC |
+                          ARM_FPSCR_DZC | ARM_FPSCR_IOC;
+    uint32_t newly_visible = cpu->vfp_fpscr & ~model->pending_fpscr &
+                             cumulative;
+    uint8_t new_flags = sequence_vfp_flag_index(newly_visible);
+    model->newly_visible_flags[new_flags]++;
+    if (model->pending_prospective &&
+        sequence_vfp_simple_class(result_class) && new_flags == 0u)
+        model->prospective_post++;
 }
 
 /* Ask the product decoder about exactly one live instruction. A direct-read
@@ -28604,6 +28749,7 @@ static bool sequence_signed_observe(sequence_profile_t *profile,
         bool vfp_arith_candidate = sequence_vfp_arith_observe(
             profile, &mach->cpu, raw, &vfp_arith_classification,
             &vfp_arith_outcome, &vfp_arith_eligible);
+        (void)sequence_vfp_narrow_observe(profile, &mach->cpu, raw);
         bool vfp_arith_incremental = vfp_arith_candidate &&
             !sequence_post_store_retireable(&implemented_classification);
         uint32_t vfp_arith_control_mask = ARM_FPSCR_RMODE |
@@ -28870,6 +29016,10 @@ static void sequence_profile_break(sequence_profile_t *profile) {
     if (profile->vfp_arith.pending) {
         profile->vfp_arith.pending_abandoned++;
         profile->vfp_arith.pending = false;
+    }
+    if (profile->vfp_narrow.pending) {
+        profile->vfp_narrow.pending_abandoned++;
+        profile->vfp_narrow.pending = false;
     }
     sequence_close_run(profile->compact_raw_runs,
                        profile->compact_raw_run_instructions,
@@ -31864,6 +32014,114 @@ static void sequence_profile_report_vfp_arith_model(
            vldm_removed ? (double)removed / (double)vldm_removed : 0.0);
 }
 
+static void sequence_profile_report_vfp_narrow_model(
+        const sequence_profile_t *profile) {
+    static const char *const CLASSES[SEQUENCE_FP_CLASS_COUNT] = {
+        "zero", "subnormal", "normal", "infinity", "qNaN", "sNaN"
+    };
+    static const char *const CONTROLS[4u] = {
+        "FZ0 DN0", "FZ1 DN0", "FZ0 DN1", "FZ1 DN1"
+    };
+    const sequence_vfp_narrow_t *vfp = &profile->vfp_narrow;
+    uint64_t candidates = 0u;
+    uint64_t mode_total = 0u;
+    uint64_t input_total = 0u;
+    uint64_t result_total = 0u;
+    uint64_t pre_total = 0u;
+    uint64_t new_total = 0u;
+    uint64_t status_total = 0u;
+    for (unsigned outcome = 0u;
+         outcome < SEQUENCE_VFP_NARROW_OUTCOME_COUNT; outcome++)
+        candidates += vfp->outcomes[outcome];
+    for (unsigned rounding = 0u; rounding < 4u; rounding++)
+        for (unsigned control = 0u; control < 4u; control++)
+            mode_total += vfp->mode_control[rounding][control];
+    for (unsigned cls = 0u; cls < SEQUENCE_FP_CLASS_COUNT; cls++) {
+        input_total += vfp->input_classes[cls];
+        result_total += vfp->result_classes[cls];
+    }
+    for (unsigned flags = 0u; flags < (1u << 6); flags++) {
+        pre_total += vfp->pre_sticky_flags[flags];
+        new_total += vfp->newly_visible_flags[flags];
+    }
+    for (unsigned status = 0u; status < 4u; status++)
+        status_total += vfp->post_status[status];
+
+    uint64_t admitted = vfp->outcomes[SEQUENCE_VFP_NARROW_ADMITTED];
+    bool exact = candidates ==
+            vfp->outcomes[SEQUENCE_VFP_NARROW_INVALID] +
+            vfp->outcomes[SEQUENCE_VFP_NARROW_CONDITION_SKIP] +
+            vfp->outcomes[SEQUENCE_VFP_NARROW_ACCESS_GUARD] +
+            vfp->outcomes[SEQUENCE_VFP_NARROW_FPSCR_LEN] +
+            vfp->outcomes[SEQUENCE_VFP_NARROW_FPSCR_ENABLES] + admitted &&
+        admitted == mode_total && admitted == input_total &&
+        admitted == pre_total &&
+        admitted == status_total + vfp->post_not_literal +
+                    vfp->pending_abandoned &&
+        vfp->post_status[ARM_OK] == result_total &&
+        vfp->post_status[ARM_OK] == new_total &&
+        vfp->prospective_post <= vfp->prospective_pre;
+
+    printf("\n    live VCVT.F32.F64 narrowing audit\n");
+    printf("      This is a read-only pre/post census of the literal "
+           "interpreter. It does not execute the proposed native handler "
+           "and is not elapsed speed or phone FPS.\n");
+    printf("      candidates/invalid/condition-skip/access/Len/enables/admitted="
+           "%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64
+           "/%" PRIu64 "/%" PRIu64 "/%" PRIu64 "\n",
+           candidates,
+           vfp->outcomes[SEQUENCE_VFP_NARROW_INVALID],
+           vfp->outcomes[SEQUENCE_VFP_NARROW_CONDITION_SKIP],
+           vfp->outcomes[SEQUENCE_VFP_NARROW_ACCESS_GUARD],
+           vfp->outcomes[SEQUENCE_VFP_NARROW_FPSCR_LEN],
+           vfp->outcomes[SEQUENCE_VFP_NARROW_FPSCR_ENABLES], admitted);
+    printf("      admitted by FPSCR control and rounding RN/RP/RM/RZ:\n");
+    for (unsigned control = 0u; control < 4u; control++)
+        printf("      %-9s %10" PRIu64 " %10" PRIu64 " %10" PRIu64
+               " %10" PRIu64 "\n", CONTROLS[control],
+               vfp->mode_control[0u][control],
+               vfp->mode_control[1u][control],
+               vfp->mode_control[2u][control],
+               vfp->mode_control[3u][control]);
+    printf("      input classes :");
+    for (unsigned cls = 0u; cls < SEQUENCE_FP_CLASS_COUNT; cls++)
+        printf(" %s=%" PRIu64, CLASSES[cls], vfp->input_classes[cls]);
+    printf("\n      result classes:");
+    for (unsigned cls = 0u; cls < SEQUENCE_FP_CLASS_COUNT; cls++)
+        printf(" %s=%" PRIu64, CLASSES[cls], vfp->result_classes[cls]);
+    printf("\n");
+    printf("      pre-existing sticky flags none/IXC/other=%" PRIu64
+           "/%" PRIu64 "/%" PRIu64 "\n",
+           vfp->pre_sticky_flags[0u],
+           vfp->pre_sticky_flags[1u << 4],
+           pre_total - vfp->pre_sticky_flags[0u] -
+               vfp->pre_sticky_flags[1u << 4]);
+    printf("      newly visible sticky flags none/IXC/other=%" PRIu64
+           "/%" PRIu64 "/%" PRIu64 "\n",
+           vfp->newly_visible_flags[0u],
+           vfp->newly_visible_flags[1u << 4],
+           new_total - vfp->newly_visible_flags[0u] -
+               vfp->newly_visible_flags[1u << 4]);
+    printf("      literal post OK/UNDEFINED/HALT/GUEST-UNDEFINED="
+           "%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64
+           "; not-literal=%" PRIu64 "; abandoned=%" PRIu64 "\n",
+           vfp->post_status[ARM_OK], vfp->post_status[ARM_UNDEFINED],
+           vfp->post_status[ARM_HALT],
+           vfp->post_status[ARM_GUEST_UNDEFINED],
+           vfp->post_not_literal, vfp->pending_abandoned);
+    printf("      prospective guarded pre/post=%" PRIu64 "/%" PRIu64
+           " (RN+FZ+DN, IXC sticky, zero/normal input+result, no newly "
+           "visible flags)\n",
+           vfp->prospective_pre, vfp->prospective_post);
+    printf("      accounting candidates/admitted/modes/input/pre/post="
+           "%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64
+           "/%" PRIu64 "/%" PRIu64 "  %s\n",
+           candidates, admitted, mode_total, input_total, pre_total,
+           status_total + vfp->post_not_literal +
+               vfp->pending_abandoned,
+           exact ? "EXACT" : "MISMATCH");
+}
+
 static void sequence_profile_report_indirect_model(
         const sequence_profile_t *profile) {
     static const char *const FAMILIES[SEQUENCE_INDIRECT_FAMILY_COUNT] = {
@@ -33012,6 +33270,7 @@ static void sequence_profile_report(sequence_profile_t *profile) {
         sequence_profile_report_store_model(profile);
         sequence_profile_report_post_store_model(profile);
         sequence_profile_report_vfp_arith_model(profile);
+        sequence_profile_report_vfp_narrow_model(profile);
         sequence_profile_report_indirect_model(profile);
         printf("    This is modeled retirement, not measured execution time, "
                "FPS, or a same-binary A/B.\n");

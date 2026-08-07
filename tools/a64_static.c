@@ -68,7 +68,8 @@ enum {
     A64S_VFP_COMPARE32 = A64S_VFP_UNARY64 + 3u,
     A64S_VFP_COMPARE64 = A64S_VFP_COMPARE32 + 1u,
     A64S_VFP_WIDEN32 = A64S_VFP_COMPARE64 + 1u,
-    A64S_VFP_ARITH32 = A64S_VFP_WIDEN32 + 1u,
+    A64S_VFP_NARROW64 = A64S_VFP_WIDEN32 + 1u,
+    A64S_VFP_ARITH32 = A64S_VFP_NARROW64 + 1u,
     A64S_VFP_ARITH64 = A64S_VFP_ARITH32 + 9u,
     A64S_VFP_DIRECT_READ32 = A64S_VFP_ARITH64 + 9u,
     A64S_VFP_DIRECT_READ64 = A64S_VFP_DIRECT_READ32 + 1u,
@@ -717,13 +718,22 @@ static bool decode_vfp_transfer(uint32_t insn, uint32_t pc_value,
             *written = 1u;
             return true;
         }
-        /* VCVT.F64.F32 is an exact widening conversion. The inverse rounds
-         * and remains literal until its exception behavior is proved. */
-        if (opc2 == 7u && top && !dbl) {
-            if ((insn & (1u << 22)) != 0u) return false;
-            rd = ((insn >> 12) & 15u) * 2u;
-            rm = (insn & 15u) * 2u + ((insn >> 5) & 1u);
-            op->handler = A64S_VFP_WIDEN32;
+        if (opc2 == 7u && top) {
+            if (dbl) {
+                /* VCVT.F32.F64 rounds, so its signed handler owns only the
+                 * separately-audited RunFast/simple-value contract. */
+                if ((insn & (1u << 5)) != 0u) return false;
+                rd = ((insn >> 12) & 15u) * 2u +
+                     ((insn >> 22) & 1u);
+                rm = (insn & 15u) * 2u;
+                op->handler = A64S_VFP_NARROW64;
+            } else {
+                /* VCVT.F64.F32 is exact for every binary32 value. */
+                if ((insn & (1u << 22)) != 0u) return false;
+                rd = ((insn >> 12) & 15u) * 2u;
+                rm = (insn & 15u) * 2u + ((insn >> 5) & 1u);
+                op->handler = A64S_VFP_WIDEN32;
+            }
             op->immediate = rd | (rm << 8);
             *written = 1u;
             return true;
@@ -1682,6 +1692,16 @@ static a64_compact_raw_admission_t compact_raw_classify_vfp(
         return (cpu->vfp_fpscr & ARM_FPSCR_LEN) == 0u
             ? A64_COMPACT_RAW_ADMIT_EXECUTE
             : A64_COMPACT_RAW_REJECT_VFP;
+    }
+    if (handler == A64S_VFP_NARROW64) {
+        const uint32_t immediate = ops[written - 1u].immediate;
+        const unsigned rm = (immediate >> 8) & 255u;
+        if ((cpu->vfp_fpscr & UINT32_C(0x03c79f00)) !=
+                UINT32_C(0x03000000) ||
+            (cpu->vfp_fpscr & UINT32_C(0x9f)) != UINT32_C(0x10) ||
+            !compact_raw_vfp_simple64(cpu->vfp_s, rm))
+            return A64_COMPACT_RAW_REJECT_VFP;
+        return A64_COMPACT_RAW_ADMIT_EXECUTE;
     }
     if (handler >= A64S_VFP_COMPARE32 &&
         handler < A64S_VFP_ARITH32) {

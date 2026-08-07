@@ -362,6 +362,8 @@ static const uint16_t THUMB_INTEGER_MISC[] = {
            0, (dn), (dd), 1, 0, (alt), 0, (dm))
 #define VFP_WIDEN(dd, sm)                                                  \
     VFP_DP(1, 1, 1, 0, 7, (dd), 0, 1, 1, VFP_SB(sm), VFP_SV(sm))
+#define VFP_NARROW(sd, dm)                                                 \
+    VFP_DP(1, 1, 1, VFP_SB(sd), 7, VFP_SV(sd), 1, 1, 1, 0, (dm))
 #define VFP_VMRS(rt, crn)                                                  \
     (UINT32_C(0xeef00a10) | ((uint32_t)(crn) << 16) |                     \
      ((uint32_t)(rt) << 12))
@@ -699,6 +701,17 @@ static const uint32_t VFP_WIDEN_OPS[] = {
     VFP_WIDEN(15, 31),                    /* VCVT.F64.F32 d15,s31 */
 };
 
+static const uint32_t VFP_NARROW_OPS[] = {
+    VFP_NARROW( 0,  0),                   /* VCVT.F32.F64 s0,d0  */
+    VFP_NARROW( 1,  0),                   /* destination aliases d0 high */
+    VFP_NARROW( 2,  1),
+    VFP_NARROW( 3,  7),
+    VFP_NARROW(15,  7),                   /* witnessed hot encoding */
+    VFP_NARROW(16,  8),
+    VFP_NARROW(30, 14),
+    VFP_NARROW(31, 15),
+};
+
 /* All nine VFPv2 scalar arithmetic operations in both architectural widths.
  * Register choices cover low/high S words and D-register word aliasing; the
  * native semantic oracle below owns value and fallback correctness. */
@@ -1033,7 +1046,7 @@ static bool validate_static_shapes(void) {
         VFP_UN_S(5, 0, 0, 1), /* VCMP #0 with non-zero Vm field */
         VFP_UN_D(5, 0, 0, 1), /* double VCMP #0 with non-zero Vm */
         VFP_DP(1, 1, 1, 1, 4, 0, 1, 0, 1, 0, 0), /* compare d16 */
-        VFP_UN_D(7, 1, 0, 1), /* narrowing VCVT still rounds */
+        VFP_DP(1, 1, 1, 0, 7, 0, 1, 1, 1, 1, 0), /* narrow from d16 */
         VFP_DP(1, 1, 1, 1, 7, 0, 0, 1, 1, 0, 0), /* widen to d16 */
         VFP_DP(0, 1, 1, 1, 0, 0, 1, 0, 0, 0, 0), /* arithmetic d16 D */
         VFP_DP(0, 1, 1, 0, 0, 0, 1, 1, 0, 0, 0), /* arithmetic d16 N */
@@ -1064,6 +1077,7 @@ static bool validate_static_shapes(void) {
     uint8_t vfp_bytes[sizeof VFP_REGISTER_OPS];
     uint8_t vfp_compare_bytes[sizeof VFP_COMPARE_OPS];
     uint8_t vfp_widen_bytes[sizeof VFP_WIDEN_OPS];
+    uint8_t vfp_narrow_bytes[sizeof VFP_NARROW_OPS];
     uint8_t vfp_read_bytes[sizeof VFP_READ_HITS];
     uint32_t branch_handlers[29];
     uint32_t indirect_handlers[62];
@@ -1115,6 +1129,13 @@ static bool validate_static_shapes(void) {
         vfp_widen_bytes[i * 4u + 1u] = (uint8_t)(value >> 8);
         vfp_widen_bytes[i * 4u + 2u] = (uint8_t)(value >> 16);
         vfp_widen_bytes[i * 4u + 3u] = (uint8_t)(value >> 24);
+    }
+    for (i = 0u; i < sizeof VFP_NARROW_OPS / sizeof VFP_NARROW_OPS[0]; i++) {
+        uint32_t value = VFP_NARROW_OPS[i];
+        vfp_narrow_bytes[i * 4u + 0u] = (uint8_t)value;
+        vfp_narrow_bytes[i * 4u + 1u] = (uint8_t)(value >> 8);
+        vfp_narrow_bytes[i * 4u + 2u] = (uint8_t)(value >> 16);
+        vfp_narrow_bytes[i * 4u + 3u] = (uint8_t)(value >> 24);
     }
 
     for (i = 0u; i < sizeof STATIC_CASES / sizeof STATIC_CASES[0]; i++) {
@@ -1879,6 +1900,22 @@ static bool validate_static_shapes(void) {
         return false;
     }
     printf("STATIC-VFP-WIDEN-SHAPE exact=yes insns=%u uops=%u "
+           "handlers=%u\n", block.insn_count, block.uop_count,
+           A64_STATIC_HANDLER_COUNT);
+
+    if (!a64_static_decode_read_hits_bytes_at(
+            vfp_narrow_bytes,
+            (unsigned)(sizeof VFP_NARROW_OPS / sizeof VFP_NARROW_OPS[0]),
+            false, 0xe680u, &block) ||
+        block.insn_count != sizeof VFP_NARROW_OPS /
+                            sizeof VFP_NARROW_OPS[0] ||
+        block.uop_count != 9u || block.start_pc != 0xe680u ||
+        block.exit_pc != 0xe6a0u || block.touches_memory ||
+        block.direct_reads || !block.runtime_guards || !block.vfp) {
+        fprintf(stderr, "jitbench: product VFP narrow shape failed\n");
+        return false;
+    }
+    printf("STATIC-VFP-NARROW-SHAPE exact=yes insns=%u uops=%u "
            "handlers=%u\n", block.insn_count, block.uop_count,
            A64_STATIC_HANDLER_COUNT);
 
@@ -3977,6 +4014,216 @@ static bool validate_static_vfp_widen_oracles(void) {
 
 #undef VFP_WIDEN_CONTROL
 
+#define VFP_NARROW_CONTROL \
+    (ARM_FPSCR_FZ | ARM_FPSCR_DN | ARM_FPSCR_IXC | \
+     ARM_FPSCR_N | ARM_FPSCR_C)
+
+static bool validate_static_vfp_narrow_oracles(void) {
+    static const struct {
+        uint32_t insn;
+        uint64_t input;
+    } ACCEPTED[] = {
+        {VFP_NARROW( 0,  0), UINT64_C(0x0000000000000000)},
+        {VFP_NARROW( 1,  0), UINT64_C(0x8000000000000000)},
+        {VFP_NARROW( 2,  1), UINT64_C(0x3ff8000000000000)},
+        {VFP_NARROW( 3,  7), UINT64_C(0x3fd5555555555555)},
+        {VFP_NARROW(15,  7), UINT64_C(0xbfd5555555555555)},
+        {VFP_NARROW(16,  8), UINT64_C(0x47efffffe0000000)},
+        {VFP_NARROW(30, 14), UINT64_C(0x3810000000000000)},
+        {VFP_NARROW(31, 15), UINT64_C(0xc00921fb54442d18)},
+    };
+    static const struct {
+        const char *name;
+        uint64_t input;
+        uint32_t fpscr;
+        bool enabled;
+        bool access;
+    } FALLBACKS[] = {
+        {"missing-runfast", UINT64_C(0x3ff0000000000000),
+         ARM_FPSCR_IXC, true, true},
+        {"missing-sticky", UINT64_C(0x3ff0000000000000),
+         ARM_FPSCR_FZ | ARM_FPSCR_DN, true, true},
+        {"directed-rounding", UINT64_C(0x3fd5555555555555),
+         VFP_NARROW_CONTROL | (1u << 22), true, true},
+        {"extra-sticky", UINT64_C(0x3ff0000000000000),
+         VFP_NARROW_CONTROL | ARM_FPSCR_IOC, true, true},
+        {"short-vector", UINT64_C(0x3ff0000000000000),
+         VFP_NARROW_CONTROL | ARM_FPSCR_LEN, true, true},
+        {"exception-enable", UINT64_C(0x3ff0000000000000),
+         VFP_NARROW_CONTROL | ARM_FPSCR_IOE, true, true},
+        {"disabled", UINT64_C(0x3ff0000000000000),
+         VFP_NARROW_CONTROL, false, true},
+        {"access-denied", UINT64_C(0x3ff0000000000000),
+         VFP_NARROW_CONTROL, true, false},
+        {"infinity", UINT64_C(0x7ff0000000000000),
+         VFP_NARROW_CONTROL, true, true},
+        {"overflow", UINT64_C(0x7fefffffffffffff),
+         VFP_NARROW_CONTROL, true, true},
+        {"subnormal-result", UINT64_C(0x36a0000000000000),
+         VFP_NARROW_CONTROL, true, true},
+        {"fz-boundary", UINT64_C(0x380fffffe0000000),
+         VFP_NARROW_CONTROL, true, true},
+    };
+    static const uint32_t PARTIAL[] = {
+        VFP_NARROW(0, 1), VFP_VMSR(1, 0), VFP_NARROW(2, 2),
+    };
+    a64_static_block_t block;
+    arm_cpu_t reference, statik, before;
+    unsigned completed = UINT_MAX;
+
+    if (!a64_static_host_available()) {
+        printf("STATIC-VFP-NARROW-ORACLE SKIP: no signed AArch64 handlers\n");
+        return true;
+    }
+
+    for (unsigned i = 0u; i < sizeof ACCEPTED / sizeof ACCEPTED[0]; i++) {
+        uint32_t pc = UINT32_C(0xfa00) + i * 4u;
+        seed_vfp_oracle(&reference, &ACCEPTED[i].insn, 1u, pc, true);
+        reference.vfp_fpscr = VFP_NARROW_CONTROL;
+        vfp_set_d(&reference, ACCEPTED[i].insn & 15u,
+                  ACCEPTED[i].input);
+        statik = reference;
+        if (!a64_static_decode_read_hits_bytes_at(&g_ram[pc], 1u, false,
+                                                  pc, &block) ||
+            arm_step(&reference) != ARM_OK ||
+            !a64_static_run_read_hits(&statik, &block, g_ram, sizeof g_ram,
+                                      &completed) ||
+            completed != 1u ||
+            !static_vfp_states_equal(&reference, &statik)) {
+            fprintf(stderr,
+                    "jitbench: static VFP narrow accepted case %u mismatch\n",
+                    i);
+            return false;
+        }
+    }
+
+    for (unsigned i = 0u; i < sizeof FALLBACKS / sizeof FALLBACKS[0]; i++) {
+        const uint32_t insn = VFP_NARROW(15, 7);
+        uint32_t pc = UINT32_C(0xfb00) + i * 4u;
+        seed_vfp_oracle(&statik, &insn, 1u, pc, true);
+        statik.vfp_fpscr = FALLBACKS[i].fpscr;
+        statik.vfp_fpexc = FALLBACKS[i].enabled ? ARM_FPEXC_EN : 0u;
+        if (!FALLBACKS[i].access)
+            statik.cp15.cpacr &= ~(UINT32_C(0xf) <<
+                                    ARM_CPACR_CP10_SHIFT);
+        vfp_set_d(&statik, 7u, FALLBACKS[i].input);
+        before = statik;
+        completed = UINT_MAX;
+        if (!a64_static_decode_read_hits_bytes_at(&g_ram[pc], 1u, false,
+                                                  pc, &block) ||
+            !a64_static_run_read_hits(&statik, &block, g_ram, sizeof g_ram,
+                                      &completed) ||
+            completed != 0u || !static_vfp_states_equal(&before, &statik)) {
+            fprintf(stderr,
+                    "jitbench: static VFP narrow fallback changed state "
+                    "for %s\n", FALLBACKS[i].name);
+            return false;
+        }
+    }
+
+    seed_vfp_oracle(&reference, PARTIAL, 3u, UINT32_C(0xfc00), true);
+    reference.vfp_fpscr = VFP_NARROW_CONTROL;
+    reference.r[0] = ARM_FPSCR_FZ | ARM_FPSCR_DN;
+    vfp_set_d(&reference, 1u, UINT64_C(0x3fd5555555555555));
+    vfp_set_d(&reference, 2u, UINT64_C(0x400921fb54442d18));
+    statik = reference;
+    if (!a64_static_decode_read_hits_bytes_at(
+            &g_ram[UINT32_C(0xfc00)], 3u, false,
+            UINT32_C(0xfc00), &block) ||
+        arm_step(&reference) != ARM_OK || arm_step(&reference) != ARM_OK ||
+        !a64_static_run_read_hits(&statik, &block, g_ram, sizeof g_ram,
+                                  &completed) || completed != 2u ||
+        !static_vfp_states_equal(&reference, &statik)) {
+        fprintf(stderr, "jitbench: static VFP narrow partial-prefix mismatch\n");
+        return false;
+    }
+
+    {
+        uint32_t condition_skip =
+            VFP_NARROW(15, 7) & UINT32_C(0x0fffffff);
+        seed_vfp_oracle(&reference, &condition_skip, 1u,
+                        UINT32_C(0xfd00), false);
+        reference.cp15.cpacr = 0u;
+        reference.vfp_fpexc = 0u;
+        reference.vfp_fpscr = 0u;
+        statik = reference;
+        if (!a64_static_decode_read_hits_bytes_at(
+                &g_ram[UINT32_C(0xfd00)], 1u, false,
+                UINT32_C(0xfd00), &block) ||
+            arm_step(&reference) != ARM_OK ||
+            !a64_static_run_read_hits(&statik, &block, g_ram, sizeof g_ram,
+                                      &completed) ||
+            completed != 1u ||
+            !static_vfp_states_equal(&reference, &statik)) {
+            fprintf(stderr,
+                    "jitbench: conditional static VFP narrow skip mismatch\n");
+            return false;
+        }
+    }
+
+#if defined(__aarch64__) && (defined(__GNUC__) || defined(__clang__))
+    for (unsigned rejection = 0u; rejection < 2u; rejection++) {
+        const uint32_t insn = VFP_NARROW(15, 7);
+        const uint32_t pc = UINT32_C(0xfe00) + rejection * 4u;
+        const uint64_t original_fpcr = static_host_fpcr_read();
+        const uint64_t original_fpsr = static_host_fpsr_read();
+        uint64_t installed_fpcr, installed_fpsr, after_fpcr, after_fpsr;
+        bool run_ok;
+
+        seed_vfp_oracle(&statik, &insn, 1u, pc, true);
+        statik.vfp_fpscr = VFP_NARROW_CONTROL;
+        vfp_set_d(&statik, 7u,
+                  rejection ? UINT64_C(0x7fefffffffffffff)
+                            : UINT64_C(0x3fd5555555555555));
+        if (rejection) {
+            before = statik;
+        } else {
+            reference = statik;
+            if (arm_step(&reference) != ARM_OK) return false;
+        }
+        if (!a64_static_decode_read_hits_bytes_at(&g_ram[pc], 1u, false,
+                                                  pc, &block))
+            return false;
+
+        static_host_fpcr_write(
+            (original_fpcr & ~(UINT64_C(3) << 22)) |
+            (UINT64_C(1) << 22));
+        static_host_fpsr_write(UINT64_C(0x08000015));
+        installed_fpcr = static_host_fpcr_read();
+        installed_fpsr = static_host_fpsr_read();
+        completed = UINT_MAX;
+        run_ok = a64_static_run_read_hits(
+            &statik, &block, g_ram, sizeof g_ram, &completed);
+        after_fpcr = static_host_fpcr_read();
+        after_fpsr = static_host_fpsr_read();
+        static_host_fpsr_write(original_fpsr);
+        static_host_fpcr_write(original_fpcr);
+
+        if (!run_ok || after_fpcr != installed_fpcr ||
+            after_fpsr != installed_fpsr ||
+            (rejection
+                 ? completed != 0u ||
+                       !static_vfp_states_equal(&before, &statik)
+                 : completed != 1u ||
+                       !static_vfp_states_equal(&reference, &statik))) {
+            fprintf(stderr,
+                    "jitbench: static VFP narrow host-state %s mismatch\n",
+                    rejection ? "rejection" : "success");
+            return false;
+        }
+    }
+#endif
+
+    printf("STATIC-VFP-NARROW-ORACLE exact=yes accepted=%zu fallbacks=%zu "
+           "aliases=yes inexact=yes conditions=yes partial-prefix=yes "
+           "host-fp-state=yes runtime-codegen=no\n",
+           sizeof ACCEPTED / sizeof ACCEPTED[0],
+           sizeof FALLBACKS / sizeof FALLBACKS[0]);
+    return true;
+}
+
+#undef VFP_NARROW_CONTROL
+
 static void seed_vfp_read_oracle(arm_cpu_t *cpu, bool warm) {
     seed_vfp_oracle(cpu, VFP_READ_HITS,
                     (unsigned)(sizeof VFP_READ_HITS /
@@ -5332,6 +5579,36 @@ static bool validate_compact_raw_admission_shapes(void) {
             return false;
         }
     }
+    {
+        const uint32_t narrow = VFP_NARROW(15, 7);
+        cpu.vfp_fpscr = ARM_FPSCR_FZ | ARM_FPSCR_DN | ARM_FPSCR_IXC |
+                        ARM_FPSCR_N | ARM_FPSCR_C;
+        vfp_set_d(&cpu, 7u, UINT64_C(0x3fd5555555555555));
+        if (a64_compact_raw_classify_instruction(
+                &cpu, narrow, false) != A64_COMPACT_RAW_ADMIT_EXECUTE) {
+            fprintf(stderr,
+                    "jitbench: compact raw VFP narrowing admission "
+                    "refused audited RunFast value\n");
+            return false;
+        }
+        cpu.vfp_fpscr &= ~ARM_FPSCR_IXC;
+        if (a64_compact_raw_classify_instruction(
+                &cpu, narrow, false) != A64_COMPACT_RAW_REJECT_VFP) {
+            fprintf(stderr,
+                    "jitbench: compact raw VFP narrowing admitted "
+                    "non-sticky IXC state\n");
+            return false;
+        }
+        cpu.vfp_fpscr |= ARM_FPSCR_IXC;
+        vfp_set_d(&cpu, 7u, UINT64_C(0x7ff0000000000000));
+        if (a64_compact_raw_classify_instruction(
+                &cpu, narrow, false) != A64_COMPACT_RAW_REJECT_VFP) {
+            fprintf(stderr,
+                    "jitbench: compact raw VFP narrowing admitted "
+                    "non-simple input\n");
+            return false;
+        }
+    }
     cpu.vfp_fpscr = ARM_FPSCR_LEN;
     if (a64_compact_raw_classify_instruction(
             &cpu, VFP_UN_S(4, 0, 0, 1), false) !=
@@ -5339,7 +5616,7 @@ static bool validate_compact_raw_admission_shapes(void) {
         fprintf(stderr, "jitbench: compact raw VFP Len guard admitted\n");
         return false;
     }
-    printf("COMPACT-RAW-ADMISSION-MODEL exact-shapes=yes cases=67 "
+    printf("COMPACT-RAW-ADMISSION-MODEL exact-shapes=yes cases=70 "
            "outcomes=13 condition-before-decode=yes machine-gates=excluded\n");
     return true;
 }
@@ -6723,6 +7000,249 @@ static bool validate_compact_raw_vfp_arithmetic_oracles(void) {
     return true;
 }
 
+static bool validate_compact_raw_vfp_narrow_oracles(void) {
+    static const struct {
+        uint32_t insn;
+        uint64_t input;
+    } ACCEPTED[] = {
+        {VFP_NARROW( 0,  0), UINT64_C(0x0000000000000000)},
+        {VFP_NARROW( 1,  0), UINT64_C(0x8000000000000000)},
+        {VFP_NARROW( 2,  1), UINT64_C(0x3ff8000000000000)},
+        {VFP_NARROW( 3,  7), UINT64_C(0x3fd5555555555555)},
+        {VFP_NARROW(15,  7), UINT64_C(0xbfd5555555555555)},
+        {VFP_NARROW(16,  8), UINT64_C(0x47efffffe0000000)},
+        {VFP_NARROW(30, 14), UINT64_C(0x3810000000000000)},
+        {VFP_NARROW(31, 15), UINT64_C(0xc00921fb54442d18)},
+    };
+    static const struct {
+        const char *name;
+        uint64_t input;
+        uint32_t fpscr;
+        bool enabled;
+        bool access;
+    } FALLBACKS[] = {
+        {"missing-runfast", UINT64_C(0x3ff0000000000000),
+         ARM_FPSCR_IXC, true, true},
+        {"missing-sticky", UINT64_C(0x3ff0000000000000),
+         ARM_FPSCR_FZ | ARM_FPSCR_DN, true, true},
+        {"directed-rounding", UINT64_C(0x3fd5555555555555),
+         COMPACT_VFP_ARITH_CONTROL | (1u << 22), true, true},
+        {"extra-sticky", UINT64_C(0x3ff0000000000000),
+         COMPACT_VFP_ARITH_CONTROL | ARM_FPSCR_IOC, true, true},
+        {"short-vector", UINT64_C(0x3ff0000000000000),
+         COMPACT_VFP_ARITH_CONTROL | ARM_FPSCR_LEN, true, true},
+        {"exception-enable", UINT64_C(0x3ff0000000000000),
+         COMPACT_VFP_ARITH_CONTROL | ARM_FPSCR_IOE, true, true},
+        {"disabled", UINT64_C(0x3ff0000000000000),
+         COMPACT_VFP_ARITH_CONTROL, false, true},
+        {"access-denied", UINT64_C(0x3ff0000000000000),
+         COMPACT_VFP_ARITH_CONTROL, true, false},
+        {"infinity", UINT64_C(0x7ff0000000000000),
+         COMPACT_VFP_ARITH_CONTROL, true, true},
+        {"overflow", UINT64_C(0x7fefffffffffffff),
+         COMPACT_VFP_ARITH_CONTROL, true, true},
+        {"subnormal-result", UINT64_C(0x36a0000000000000),
+         COMPACT_VFP_ARITH_CONTROL, true, true},
+        {"fz-boundary", UINT64_C(0x380fffffe0000000),
+         COMPACT_VFP_ARITH_CONTROL, true, true},
+    };
+    static const uint32_t PARTIAL[] = {
+        VFP_NARROW(0, 1), VFP_VMSR(1, 0), VFP_NARROW(2, 2),
+    };
+    arm_cpu_t reference, compact, before;
+    unsigned completed = UINT_MAX;
+
+    if (!a64_static_host_available()) {
+        printf("COMPACT-RAW-VFP-NARROW-ORACLE SKIP: "
+               "no signed AArch64 handlers\n");
+        return true;
+    }
+
+    for (unsigned i = 0u; i < sizeof ACCEPTED / sizeof ACCEPTED[0]; i++) {
+        uint32_t pc = UINT32_C(0x18000) + i * 4u;
+        seed_vfp_oracle(&reference, &ACCEPTED[i].insn, 1u, pc, true);
+        reference.vfp_fpscr = COMPACT_VFP_ARITH_CONTROL;
+        vfp_set_d(&reference, ACCEPTED[i].insn & 15u,
+                  ACCEPTED[i].input);
+        compact = reference;
+        if (arm_step(&reference) != ARM_OK ||
+            !a64_compact_raw_run(&compact, &g_ram[pc], pc, 4u, 1u,
+                                 g_ram, sizeof g_ram, &completed) ||
+            completed != 1u ||
+            !static_vfp_states_equal(&reference, &compact)) {
+            fprintf(stderr,
+                    "jitbench: compact raw VFP narrow accepted case %u "
+                    "mismatch\n", i);
+            return false;
+        }
+    }
+
+    for (unsigned i = 0u; i < sizeof FALLBACKS / sizeof FALLBACKS[0]; i++) {
+        const uint32_t insn = VFP_NARROW(15, 7);
+        uint32_t pc = UINT32_C(0x18100) + i * 4u;
+        seed_vfp_oracle(&compact, &insn, 1u, pc, true);
+        compact.vfp_fpscr = FALLBACKS[i].fpscr;
+        compact.vfp_fpexc = FALLBACKS[i].enabled ? ARM_FPEXC_EN : 0u;
+        if (!FALLBACKS[i].access)
+            compact.cp15.cpacr &= ~(UINT32_C(0xf) <<
+                                     ARM_CPACR_CP10_SHIFT);
+        vfp_set_d(&compact, 7u, FALLBACKS[i].input);
+        before = compact;
+        completed = UINT_MAX;
+        if (!a64_compact_raw_run(&compact, &g_ram[pc], pc, 4u, 1u,
+                                 g_ram, sizeof g_ram, &completed) ||
+            completed != 0u || !static_vfp_states_equal(&before, &compact)) {
+            fprintf(stderr,
+                    "jitbench: compact raw VFP narrow fallback changed "
+                    "state for %s\n", FALLBACKS[i].name);
+            return false;
+        }
+    }
+
+    seed_vfp_oracle(&reference, PARTIAL, 3u, UINT32_C(0x18200), true);
+    reference.vfp_fpscr = COMPACT_VFP_ARITH_CONTROL;
+    reference.r[0] = ARM_FPSCR_FZ | ARM_FPSCR_DN;
+    vfp_set_d(&reference, 1u, UINT64_C(0x3fd5555555555555));
+    vfp_set_d(&reference, 2u, UINT64_C(0x400921fb54442d18));
+    compact = reference;
+    if (arm_step(&reference) != ARM_OK || arm_step(&reference) != ARM_OK ||
+        !a64_compact_raw_run(
+            &compact, &g_ram[UINT32_C(0x18200)], UINT32_C(0x18200),
+            12u, 3u, g_ram, sizeof g_ram, &completed) ||
+        completed != 2u ||
+        !static_vfp_states_equal(&reference, &compact)) {
+        fprintf(stderr,
+                "jitbench: compact raw VFP narrow partial-prefix mismatch\n");
+        return false;
+    }
+
+    {
+        uint32_t condition_skip =
+            VFP_NARROW(15, 7) & UINT32_C(0x0fffffff);
+        seed_vfp_oracle(&reference, &condition_skip, 1u,
+                        UINT32_C(0x18300), false);
+        reference.cp15.cpacr = 0u;
+        reference.vfp_fpexc = 0u;
+        reference.vfp_fpscr = 0u;
+        compact = reference;
+        if (arm_step(&reference) != ARM_OK ||
+            !a64_compact_raw_run(
+                &compact, &g_ram[UINT32_C(0x18300)], UINT32_C(0x18300),
+                4u, 1u, g_ram, sizeof g_ram, &completed) ||
+            completed != 1u ||
+            !static_vfp_states_equal(&reference, &compact)) {
+            fprintf(stderr,
+                    "jitbench: conditional compact VFP narrow skip "
+                    "mismatch\n");
+            return false;
+        }
+    }
+
+#if defined(__aarch64__) && (defined(__GNUC__) || defined(__clang__))
+    for (unsigned rejection = 0u; rejection < 2u; rejection++) {
+        const uint32_t insn = VFP_NARROW(15, 7);
+        const uint32_t pc = UINT32_C(0x18400) + rejection * 4u;
+        const uint64_t original_fpcr = static_host_fpcr_read();
+        const uint64_t original_fpsr = static_host_fpsr_read();
+        uint64_t installed_fpcr, installed_fpsr, after_fpcr, after_fpsr;
+        bool run_ok;
+
+        seed_vfp_oracle(&compact, &insn, 1u, pc, true);
+        compact.vfp_fpscr = COMPACT_VFP_ARITH_CONTROL;
+        vfp_set_d(&compact, 7u,
+                  rejection ? UINT64_C(0x7fefffffffffffff)
+                            : UINT64_C(0x3fd5555555555555));
+        if (rejection) {
+            before = compact;
+        } else {
+            reference = compact;
+            if (arm_step(&reference) != ARM_OK) return false;
+        }
+
+        static_host_fpcr_write(
+            (original_fpcr & ~(UINT64_C(3) << 22)) |
+            (UINT64_C(2) << 22));
+        static_host_fpsr_write(UINT64_C(0x08000015));
+        installed_fpcr = static_host_fpcr_read();
+        installed_fpsr = static_host_fpsr_read();
+        completed = UINT_MAX;
+        run_ok = a64_compact_raw_run(
+            &compact, &g_ram[pc], pc, 4u, 1u,
+            g_ram, sizeof g_ram, &completed);
+        after_fpcr = static_host_fpcr_read();
+        after_fpsr = static_host_fpsr_read();
+        static_host_fpsr_write(original_fpsr);
+        static_host_fpcr_write(original_fpcr);
+
+        if (!run_ok || after_fpcr != installed_fpcr ||
+            after_fpsr != installed_fpsr ||
+            (rejection
+                 ? completed != 0u ||
+                       !static_vfp_states_equal(&before, &compact)
+                 : completed != 1u ||
+                       !static_vfp_states_equal(&reference, &compact))) {
+            fprintf(stderr,
+                    "jitbench: compact raw VFP narrow host-state %s "
+                    "mismatch\n", rejection ? "rejection" : "success");
+            return false;
+        }
+    }
+
+    {
+        const uint32_t insn = VFP_NARROW(15, 7);
+        const uint32_t pc = UINT32_C(0x18500);
+        const uint64_t original_fpcr = static_host_fpcr_read();
+        const uint64_t original_fpsr = static_host_fpsr_read();
+        compact_raw_vfp_fp_callback_context_t context;
+        unsigned native_completed = UINT_MAX;
+        unsigned fallback_completed = UINT_MAX;
+        uint64_t after_fpcr, after_fpsr;
+        bool run_ok;
+
+        seed_vfp_oracle(&compact, &insn, 1u, pc, true);
+        compact.vfp_fpscr = COMPACT_VFP_ARITH_CONTROL;
+        vfp_set_d(&compact, 7u, UINT64_C(0x7fefffffffffffff));
+        before = compact;
+        static_host_fpcr_write(
+            (original_fpcr & ~(UINT64_C(3) << 22)) |
+            (UINT64_C(1) << 22));
+        static_host_fpsr_write(UINT64_C(0x08000015));
+        memset(&context, 0, sizeof context);
+        context.expected_fpcr = static_host_fpcr_read();
+        context.expected_fpsr = static_host_fpsr_read();
+        completed = UINT_MAX;
+        run_ok = a64_compact_raw_run_code_window_resident(
+            &compact, &g_ram[pc], pc, 4u, 1u,
+            compact_raw_vfp_fp_callback, &context, &completed,
+            &native_completed, &fallback_completed);
+        after_fpcr = static_host_fpcr_read();
+        after_fpsr = static_host_fpsr_read();
+        static_host_fpsr_write(original_fpsr);
+        static_host_fpcr_write(original_fpcr);
+
+        if (!run_ok || !context.observed_restored ||
+            completed != 0u || native_completed != 0u ||
+            fallback_completed != 0u ||
+            after_fpcr != context.expected_fpcr ||
+            after_fpsr != context.expected_fpsr ||
+            !static_vfp_states_equal(&before, &compact)) {
+            fprintf(stderr,
+                    "jitbench: compact raw VFP narrow callback boundary "
+                    "mismatch\n");
+            return false;
+        }
+    }
+#endif
+
+    printf("COMPACT-RAW-VFP-NARROW-ORACLE exact=yes accepted=%zu "
+           "fallbacks=%zu aliases=yes inexact=yes post-round-rejection=yes "
+           "conditions=yes partial-prefix=yes host-fp-state=yes "
+           "callback-boundary=yes runtime-codegen=no\n",
+           sizeof ACCEPTED / sizeof ACCEPTED[0],
+           sizeof FALLBACKS / sizeof FALLBACKS[0]);
+    return true;
+}
+
 #undef COMPACT_VFP_ARITH_CONTROL
 
 static bool compact_raw_vfp_flat_memory_case(const char *name,
@@ -8100,6 +8620,8 @@ static bool validate_compact_raw_oracles(void) {
     if (!validate_compact_raw_vfp_nonarith_oracles())
         return false;
     if (!validate_compact_raw_vfp_arithmetic_oracles())
+        return false;
+    if (!validate_compact_raw_vfp_narrow_oracles())
         return false;
     if (!validate_compact_raw_vfp_memory_oracles())
         return false;
@@ -12107,6 +12629,7 @@ int main(int argc, char **argv) {
     if (!validate_static_vfp_arithmetic_oracles()) return 1;
     if (!validate_static_vfp_compare_oracles()) return 1;
     if (!validate_static_vfp_widen_oracles()) return 1;
+    if (!validate_static_vfp_narrow_oracles()) return 1;
     if (!validate_static_vfp_read_oracles()) return 1;
     if (!validate_static_vfp_write_oracles()) return 1;
     if (!validate_static_vstm_write_oracles()) return 1;
