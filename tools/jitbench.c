@@ -5108,6 +5108,7 @@ static bool validate_compact_raw_admission_shapes(void) {
           A64_COMPACT_RAW_REJECT_MEMORY_PC },
         { UINT32_C(0xe5970001), false,
           A64_COMPACT_RAW_REJECT_MEMORY_ALIGNMENT },
+        { VFP_UN_S(0, 0, 0, 1), false, A64_COMPACT_RAW_REJECT_VFP },
         { UINT32_C(0xef000000), false, A64_COMPACT_RAW_REJECT_CLASS },
     };
     arm_cpu_t cpu;
@@ -5126,8 +5127,27 @@ static bool validate_compact_raw_admission_shapes(void) {
             return false;
         }
     }
-    printf("COMPACT-RAW-ADMISSION-MODEL exact-shapes=yes cases=17 "
-           "outcomes=12 condition-before-decode=yes machine-gates=excluded\n");
+    cpu.cp15.cpacr |= 0xfu << ARM_CPACR_CP10_SHIFT;
+    cpu.vfp_fpexc = ARM_FPEXC_EN;
+    cpu.vfp_fpscr = 0u;
+    if (a64_compact_raw_classify_instruction(
+            &cpu, VFP_UN_S(0, 0, 0, 1), false) !=
+            A64_COMPACT_RAW_ADMIT_EXECUTE ||
+        a64_compact_raw_classify_instruction(
+            &cpu, VFP_UN_S(4, 0, 0, 1), false) !=
+            A64_COMPACT_RAW_ADMIT_EXECUTE) {
+        fprintf(stderr, "jitbench: compact raw VFP admission refused\n");
+        return false;
+    }
+    cpu.vfp_fpscr = ARM_FPSCR_LEN;
+    if (a64_compact_raw_classify_instruction(
+            &cpu, VFP_UN_S(4, 0, 0, 1), false) !=
+            A64_COMPACT_RAW_REJECT_VFP) {
+        fprintf(stderr, "jitbench: compact raw VFP Len guard admitted\n");
+        return false;
+    }
+    printf("COMPACT-RAW-ADMISSION-MODEL exact-shapes=yes cases=21 "
+           "outcomes=13 condition-before-decode=yes machine-gates=excluded\n");
     return true;
 }
 
@@ -5523,6 +5543,200 @@ done:
     return ok;
 }
 
+static bool compact_raw_vfp_run_pair(const char *name,
+                                     arm_cpu_t *reference,
+                                     arm_cpu_t *compact,
+                                     uint32_t code_base,
+                                     unsigned code_insns,
+                                     unsigned reference_steps,
+                                     unsigned budget,
+                                     unsigned expected_completed) {
+    arm_status_t status = ARM_OK;
+    unsigned completed = UINT_MAX;
+
+    for (unsigned i = 0u; i < reference_steps; i++) {
+        status = arm_step(reference);
+        if (status != ARM_OK) break;
+    }
+    if (!a64_compact_raw_run(compact, &g_ram[code_base], code_base,
+                             code_insns * 4u, budget, g_ram, sizeof g_ram,
+                             &completed) ||
+        status != ARM_OK || completed != expected_completed ||
+        !static_vfp_states_equal(reference, compact)) {
+        fprintf(stderr,
+                "jitbench: compact raw VFP %s mismatch "
+                "(completed/expected %u/%u status=%d)\n",
+                name, completed, expected_completed, (int)status);
+        return false;
+    }
+    return true;
+}
+
+static bool validate_compact_raw_vfp_nonarith_oracles(void) {
+    static const uint32_t SYSTEM_READS[] = {
+        VFP_VMRS(0, 0), /* VMRS r0,FPSID */
+        VFP_VMRS(1, 8), /* VMRS r1,FPEXC */
+    };
+    static const struct {
+        const char *name;
+        uint32_t insn;
+        uint32_t s0, s1, s2, s3;
+        uint32_t fpscr;
+    } COMPARES[] = {
+        {"compare-snan", VFP_UN_S(4, 0, 0, 2),
+         UINT32_C(0x7f801234), 0u, UINT32_C(0x3f800000), 0u, 0u},
+        {"compare-fz", VFP_UN_S(5, 0, 0, 0),
+         UINT32_C(0x80000001), 0u, 0u, 0u, ARM_FPSCR_FZ},
+        {"compare-double-qnan", VFP_UN_D(4, 0, 0, 1),
+         UINT32_C(0x00001234), UINT32_C(0x7ff80000),
+         0u, UINT32_C(0x3ff00000), 0u},
+        {"compare-double-zero", VFP_UN_D(4, 0, 0, 1),
+         0u, UINT32_C(0x80000000), 0u, 0u, 0u},
+    };
+    static const struct {
+        const char *name;
+        uint32_t input;
+        uint32_t fpscr;
+    } WIDENS[] = {
+        {"widen-subnormal", UINT32_C(0x00000001), 0u},
+        {"widen-fz-negative", UINT32_C(0x80000001), ARM_FPSCR_FZ},
+        {"widen-snan", UINT32_C(0xff812345), 0u},
+        {"widen-default-nan", UINT32_C(0xffc12345), ARM_FPSCR_DN},
+    };
+    arm_cpu_t reference, compact, before;
+    unsigned completed = UINT_MAX;
+    unsigned cases = 0u;
+
+    seed_vfp_oracle(&reference, VFP_REGISTER_OPS,
+                    (unsigned)(sizeof VFP_REGISTER_OPS /
+                               sizeof VFP_REGISTER_OPS[0]),
+                    UINT32_C(0x7000), true);
+    compact = reference;
+    if (!compact_raw_vfp_run_pair(
+            "register", &reference, &compact, UINT32_C(0x7000),
+            (unsigned)(sizeof VFP_REGISTER_OPS /
+                       sizeof VFP_REGISTER_OPS[0]),
+            (unsigned)(sizeof VFP_REGISTER_OPS /
+                       sizeof VFP_REGISTER_OPS[0]),
+            (unsigned)(sizeof VFP_REGISTER_OPS /
+                       sizeof VFP_REGISTER_OPS[0]),
+            (unsigned)(sizeof VFP_REGISTER_OPS /
+                       sizeof VFP_REGISTER_OPS[0])))
+        return false;
+    cases += (unsigned)(sizeof VFP_REGISTER_OPS /
+                        sizeof VFP_REGISTER_OPS[0]);
+
+    seed_vfp_oracle(&reference, VFP_COMPARE_OPS,
+                    (unsigned)(sizeof VFP_COMPARE_OPS /
+                               sizeof VFP_COMPARE_OPS[0]),
+                    UINT32_C(0x7200), true);
+    compact = reference;
+    if (!compact_raw_vfp_run_pair(
+            "compare-family", &reference, &compact, UINT32_C(0x7200),
+            (unsigned)(sizeof VFP_COMPARE_OPS / sizeof VFP_COMPARE_OPS[0]),
+            (unsigned)(sizeof VFP_COMPARE_OPS / sizeof VFP_COMPARE_OPS[0]),
+            (unsigned)(sizeof VFP_COMPARE_OPS / sizeof VFP_COMPARE_OPS[0]),
+            (unsigned)(sizeof VFP_COMPARE_OPS / sizeof VFP_COMPARE_OPS[0])))
+        return false;
+    cases += (unsigned)(sizeof VFP_COMPARE_OPS / sizeof VFP_COMPARE_OPS[0]);
+
+    seed_vfp_oracle(&reference, VFP_WIDEN_OPS,
+                    (unsigned)(sizeof VFP_WIDEN_OPS /
+                               sizeof VFP_WIDEN_OPS[0]),
+                    UINT32_C(0x7400), true);
+    compact = reference;
+    if (!compact_raw_vfp_run_pair(
+            "widen-family", &reference, &compact, UINT32_C(0x7400),
+            (unsigned)(sizeof VFP_WIDEN_OPS / sizeof VFP_WIDEN_OPS[0]),
+            (unsigned)(sizeof VFP_WIDEN_OPS / sizeof VFP_WIDEN_OPS[0]),
+            (unsigned)(sizeof VFP_WIDEN_OPS / sizeof VFP_WIDEN_OPS[0]),
+            (unsigned)(sizeof VFP_WIDEN_OPS / sizeof VFP_WIDEN_OPS[0])))
+        return false;
+    cases += (unsigned)(sizeof VFP_WIDEN_OPS / sizeof VFP_WIDEN_OPS[0]);
+
+    seed_vfp_oracle(&reference, SYSTEM_READS, 2u, UINT32_C(0x7600), true);
+    compact = reference;
+    if (!compact_raw_vfp_run_pair("system-reads", &reference, &compact,
+                                  UINT32_C(0x7600), 2u, 2u, 2u, 2u))
+        return false;
+    cases += 2u;
+
+    for (unsigned i = 0u; i < sizeof COMPARES / sizeof COMPARES[0]; i++) {
+        const uint32_t pc = UINT32_C(0x7700) + i * 4u;
+        seed_vfp_oracle(&reference, &COMPARES[i].insn, 1u, pc, true);
+        reference.vfp_s[0] = COMPARES[i].s0;
+        reference.vfp_s[1] = COMPARES[i].s1;
+        reference.vfp_s[2] = COMPARES[i].s2;
+        reference.vfp_s[3] = COMPARES[i].s3;
+        reference.vfp_fpscr = COMPARES[i].fpscr;
+        compact = reference;
+        if (!compact_raw_vfp_run_pair(COMPARES[i].name, &reference, &compact,
+                                      pc, 1u, 1u, 1u, 1u))
+            return false;
+        cases++;
+    }
+
+    for (unsigned i = 0u; i < sizeof WIDENS / sizeof WIDENS[0]; i++) {
+        const uint32_t pc = UINT32_C(0x7800) + i * 4u;
+        const uint32_t insn = VFP_WIDEN(2, 1);
+        seed_vfp_oracle(&reference, &insn, 1u, pc, true);
+        reference.vfp_s[1] = WIDENS[i].input;
+        reference.vfp_fpscr = WIDENS[i].fpscr;
+        compact = reference;
+        if (!compact_raw_vfp_run_pair(WIDENS[i].name, &reference, &compact,
+                                      pc, 1u, 1u, 1u, 1u))
+            return false;
+        cases++;
+    }
+
+    {
+        const uint32_t insn = VFP_VMSR(8, 2);
+        seed_vfp_oracle(&reference, &insn, 1u, UINT32_C(0x7900), false);
+        reference.r[2] = ARM_FPEXC_EN;
+        compact = reference;
+        if (!compact_raw_vfp_run_pair("enable-fpexc", &reference, &compact,
+                                      UINT32_C(0x7900), 1u, 1u, 1u, 1u))
+            return false;
+        cases++;
+    }
+
+    /* Failed conditions retire before access checks, while live access/Len
+     * failures must leave the current instruction wholly untouched. */
+    {
+        const uint32_t insn = VFP_UN_S(4, 0, 0, 2) & UINT32_C(0x0fffffff);
+        seed_vfp_oracle(&reference, &insn, 1u, UINT32_C(0x7a00), false);
+        reference.cp15.cpacr = 0u;
+        compact = reference;
+        if (!compact_raw_vfp_run_pair("condition-skip", &reference, &compact,
+                                      UINT32_C(0x7a00), 1u, 1u, 1u, 1u))
+            return false;
+        cases++;
+    }
+    for (unsigned i = 0u; i < 2u; i++) {
+        const uint32_t insn = VFP_UN_S(4, 0, 0, 2);
+        const uint32_t pc = UINT32_C(0x7b00) + i * 4u;
+        seed_vfp_oracle(&compact, &insn, 1u, pc, true);
+        if (i == 0u)
+            compact.cp15.cpacr = 0u;
+        else
+            compact.vfp_fpscr = ARM_FPSCR_LEN;
+        before = compact;
+        if (!a64_compact_raw_run(&compact, &g_ram[pc], pc, 4u, 1u,
+                                 g_ram, sizeof g_ram, &completed) ||
+            completed != 0u ||
+            !static_vfp_states_equal(&before, &compact)) {
+            fprintf(stderr, "jitbench: compact raw VFP guard mutated state\n");
+            return false;
+        }
+        cases++;
+    }
+
+    printf("COMPACT-RAW-VFP-NONARITH-ORACLE exact=yes cases=%u "
+           "core-system=yes unary=yes compare=yes widen=yes nan=yes fz=yes "
+           "lazy-access=yes condition-before-guard=yes\n", cases);
+    return true;
+}
+
 static bool validate_compact_raw_oracles(void) {
     static const unsigned result_ops[] = {
         0u, 1u, 2u, 3u, 4u, 5u, 6u, 7u, 12u, 13u, 14u, 15u,
@@ -5588,6 +5802,9 @@ static bool validate_compact_raw_oracles(void) {
     arm_cpu_t contract;
     final_state_t before, after;
     unsigned completed = UINT_MAX;
+
+    if (!validate_compact_raw_vfp_nonarith_oracles())
+        return false;
 
     for (unsigned i = 0u; i < sizeof result_ops / sizeof result_ops[0]; i++) {
         unsigned opcode = result_ops[i];

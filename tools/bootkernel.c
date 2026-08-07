@@ -32067,7 +32067,7 @@ static void sequence_profile_report(sequence_profile_t *profile) {
         "reject DP test/compare without S", "reject register shift",
         "reject DP rm=pc", "reject load/store form",
         "reject load/store pc", "reject load/store alignment",
-        "reject instruction class"
+        "reject VFP form/state", "reject instruction class"
     };
 #endif
     if (!profile || !profile->enabled) return;

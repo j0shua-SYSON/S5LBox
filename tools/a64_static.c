@@ -1576,6 +1576,64 @@ static a64_compact_raw_admission_t compact_raw_classify_thumb(
     return A64_COMPACT_RAW_REJECT_THUMB;
 }
 
+static bool compact_raw_is_vfp_encoding(uint32_t insn) {
+    return (insn & UINT32_C(0x0f000e10)) == UINT32_C(0x0e000a10) ||
+           (insn & UINT32_C(0x0fe00e00)) == UINT32_C(0x0c400a00) ||
+           (insn & UINT32_C(0x0e000e00)) == UINT32_C(0x0c000a00) ||
+           (insn & UINT32_C(0x0f000e10)) == UINT32_C(0x0e000a00);
+}
+
+static a64_compact_raw_admission_t compact_raw_classify_vfp(
+        const arm_cpu_t *cpu, uint32_t insn) {
+    a64_static_uop_t ops[2];
+    uint32_t handler;
+    unsigned written = 0u;
+    const bool priv =
+        (cpu->cpsr & ARM_CPSR_MODE_MASK) != ARM_MODE_USR;
+    const bool enabled = (cpu->vfp_fpexc & ARM_FPEXC_EN) != 0u;
+
+    memset(ops, 0, sizeof ops);
+    if (!decode_vfp_transfer(insn, cpu->r[15] + 8u, false, ops, &written) ||
+        !written || written > 2u)
+        return A64_COMPACT_RAW_REJECT_VFP;
+    handler = ops[written - 1u].handler;
+    if (!handler_is_vfp(handler) || !vfp_cpacr_permits(cpu))
+        return A64_COMPACT_RAW_REJECT_VFP;
+
+    if (handler >= A64S_VFP_VMRS_FPSID &&
+        handler < A64S_VFP_VMRS_FPSCR) {
+        if (!enabled && !priv) return A64_COMPACT_RAW_REJECT_VFP;
+    } else if ((handler >= A64S_VFP_VMRS_FPEXC &&
+                handler < A64S_VFP_VMRS_APSR) ||
+               (handler >= A64S_VFP_VMSR_FPEXC &&
+                handler < A64S_VFP_UNARY32)) {
+        if (!priv) return A64_COMPACT_RAW_REJECT_VFP;
+    } else if (!enabled) {
+        return A64_COMPACT_RAW_REJECT_VFP;
+    }
+
+    /* This tranche owns exact bitwise/register, compare and widening
+     * semantics. Arithmetic and witnessed memory are admitted only when their
+     * live-loop implementations land, even though the older decoded engine
+     * already provides their differential oracle. */
+    if (handler >= A64S_VFP_UNARY32 &&
+        handler < A64S_VFP_COMPARE32) {
+        return (cpu->vfp_fpscr & ARM_FPSCR_LEN) == 0u
+            ? A64_COMPACT_RAW_ADMIT_EXECUTE
+            : A64_COMPACT_RAW_REJECT_VFP;
+    }
+    if (handler >= A64S_VFP_COMPARE32 &&
+        handler < A64S_VFP_ARITH32) {
+        return (cpu->vfp_fpscr &
+                (ARM_FPSCR_LEN | ARM_FPSCR_ENABLES)) == 0u
+            ? A64_COMPACT_RAW_ADMIT_EXECUTE
+            : A64_COMPACT_RAW_REJECT_VFP;
+    }
+    if (handler >= A64S_VFP_ARITH32)
+        return A64_COMPACT_RAW_REJECT_VFP;
+    return A64_COMPACT_RAW_ADMIT_EXECUTE;
+}
+
 a64_compact_raw_admission_t a64_compact_raw_classify_instruction(
         const arm_cpu_t *cpu, uint32_t insn, bool thumb) {
     unsigned condition;
@@ -1592,6 +1650,9 @@ a64_compact_raw_admission_t a64_compact_raw_classify_instruction(
      * the generated loop. */
     if (((insn >> 25) & 7u) == 5u)
         return A64_COMPACT_RAW_ADMIT_EXECUTE;
+
+    if (compact_raw_is_vfp_encoding(insn))
+        return compact_raw_classify_vfp(cpu, insn);
 
     if (((insn >> 26) & 3u) == 0u) {
         unsigned opcode = (insn >> 21) & 15u;
@@ -1649,6 +1710,13 @@ typedef struct {
     uint32_t tlb_gen;
     uint32_t priv_tag;
     a64_compact_raw_code_window_t next_window;
+    uint32_t *vfp_s;
+    uint32_t *vfp_fpexc;
+    uint32_t *vfp_fpscr;
+    uint32_t vfp_access;
+    uint32_t vfp_host_active;
+    uint64_t vfp_host_fpcr;
+    uint64_t vfp_host_fpsr;
 } a64_compact_raw_context_t;
 
 _Static_assert(sizeof(void *) == 8u,
@@ -1670,7 +1738,15 @@ _Static_assert(offsetof(a64_compact_raw_context_t, flat_ram) == 0u &&
                    offsetof(a64_compact_raw_context_t, fallback_retired) == 72u &&
                    offsetof(a64_compact_raw_context_t, tlb_gen) == 80u &&
                    offsetof(a64_compact_raw_context_t, priv_tag) == 84u &&
-                   offsetof(a64_compact_raw_context_t, next_window) == 88u,
+                   offsetof(a64_compact_raw_context_t, next_window) == 88u &&
+                   offsetof(a64_compact_raw_context_t, vfp_s) == 104u &&
+                   offsetof(a64_compact_raw_context_t, vfp_fpexc) == 112u &&
+                   offsetof(a64_compact_raw_context_t, vfp_fpscr) == 120u &&
+                   offsetof(a64_compact_raw_context_t, vfp_access) == 128u &&
+                   offsetof(a64_compact_raw_context_t, vfp_host_active) == 132u &&
+                   offsetof(a64_compact_raw_context_t, vfp_host_fpcr) == 136u &&
+                   offsetof(a64_compact_raw_context_t, vfp_host_fpsr) == 144u &&
+                   sizeof(a64_compact_raw_context_t) == 152u,
                "compact raw native context layout drifted");
 
 extern int a64_static_execute(uint32_t *regs, uint32_t *cpsr,
@@ -1714,6 +1790,10 @@ bool a64_compact_raw_run(arm_cpu_t *cpu, const uint8_t *code,
         memset(&context, 0, sizeof context);
         context.flat_ram = ram;
         context.flat_mask = (uint64_t)ram_size - 1u;
+        context.vfp_s = cpu->vfp_s;
+        context.vfp_fpexc = &cpu->vfp_fpexc;
+        context.vfp_fpscr = &cpu->vfp_fpscr;
+        context.vfp_access = vfp_cpacr_permits(cpu) ? 1u : 0u;
         uint32_t result = a64_compact_raw_execute(
             cpu->r, &cpu->cpsr, &cpu->cycles, code, code_base, code_bytes,
             max_insns, &context);
@@ -1781,6 +1861,10 @@ bool a64_compact_raw_run_code_window_resident(
         context.fallback_opaque = fallback_opaque;
         context.tlb_gen = cpu->tlb_gen;
         context.priv_tag = priv ? 1u : 0u;
+        context.vfp_s = cpu->vfp_s;
+        context.vfp_fpexc = &cpu->vfp_fpexc;
+        context.vfp_fpscr = &cpu->vfp_fpscr;
+        context.vfp_access = vfp_cpacr_permits(cpu) ? 1u : 0u;
         uint32_t result = a64_compact_raw_execute(
             cpu->r, &cpu->cpsr, &cpu->cycles, code, code_base, code_bytes,
             max_insns, &context);
