@@ -5453,6 +5453,11 @@ static bool compact_raw_resident_compare(
     else
         seed_cpu_at(&reference, program, insns, false, pc);
     resident = reference;
+    /* The interpreter bus used by this synthetic oracle does not populate
+     * DREAD on an ordinary load. Seed the read witness explicitly for the
+     * Thumb cache-path case; its later cold store still exercises fallback,
+     * DWRITE fill, Thumb window publication, and native continuation. */
+    if (thumb) oracle_warm_dread(&resident, DATA_BASE);
     /* A derived DWRITE entry without the separate live frontend callback is
      * deliberately insufficient. This catches a wrapper that exposes stale
      * write authority to the resident loop after consent is absent/revoked. */
@@ -5566,10 +5571,10 @@ static bool validate_compact_raw_oracles(void) {
         UINT32_C(0xe2866001), /* must not execute via the stale window */
     };
     const uint16_t resident_thumb_memory[] = {
-        UINT16_C(0x6030), /* fallback STR r0,[r6,#0] fills DWRITE */
-        UINT16_C(0x6032), /* native STR r2,[r6,#0] */
-        UINT16_C(0x6833), /* fallback LDR r3,[r6,#0] fills DREAD */
+        UINT16_C(0x6833), /* native LDR r3,[r6,#0] via seeded DREAD */
         UINT16_C(0x6834), /* native LDR r4,[r6,#0] */
+        UINT16_C(0x6030), /* fallback STR r0,[r6,#0] fills DWRITE */
+        UINT16_C(0x6032), /* native STR r2,[r6,#0] after publication */
     };
     arm_cpu_t contract;
     final_state_t before, after;
@@ -5715,7 +5720,7 @@ static bool validate_compact_raw_oracles(void) {
     if (!compact_raw_resident_compare(
             "thumb-memory", resident_thumb_memory, 4u, true,
             UINT32_C(0x6c00), UINT32_C(0x6c00), 8u,
-            4u, 4u, 2u, 2u, 0u, false, false, 0u))
+            4u, 4u, 3u, 1u, 0u, false, false, 0u))
         return false;
 
     seed_cpu_at(&contract, unsupported_prefix, 2u, false,
