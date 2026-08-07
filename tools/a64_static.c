@@ -1784,21 +1784,63 @@ a64_compact_raw_admission_t a64_compact_raw_classify_instruction(
     }
 
     if (((insn >> 26) & 3u) == 1u) {
-        unsigned rn = (insn >> 16) & 15u;
-        unsigned rd = (insn >> 12) & 15u;
+        const bool indexed = (insn & (1u << 25)) != 0u;
+        const bool pre = (insn & (1u << 24)) != 0u;
+        const bool up = (insn & (1u << 23)) != 0u;
+        const bool byte = (insn & (1u << 22)) != 0u;
+        const bool write = (insn & (1u << 21)) != 0u;
+        const bool load = (insn & (1u << 20)) != 0u;
+        const bool writeback = !pre || write;
+        const unsigned rn = (insn >> 16) & 15u;
+        const unsigned rd = (insn >> 12) & 15u;
+        uint32_t offset;
+        uint32_t base;
         uint32_t address;
 
-        if ((insn & (1u << 25)) != 0u ||
-            (insn & (1u << 24)) == 0u ||
-            (insn & (1u << 22)) != 0u ||
-            (insn & (1u << 21)) != 0u)
-            return A64_COMPACT_RAW_REJECT_MEMORY_FORM;
-        if (rn == 15u || rd == 15u)
+        if (writeback && (rn == 15u || rn == rd))
+            return (rn == 15u || rd == 15u)
+                ? A64_COMPACT_RAW_REJECT_MEMORY_PC
+                : A64_COMPACT_RAW_REJECT_MEMORY_FORM;
+        if (byte && rd == 15u)
             return A64_COMPACT_RAW_REJECT_MEMORY_PC;
-        address = (insn & (1u << 23)) != 0u
-                ? cpu->r[rn] + (insn & UINT32_C(0xfff))
-                : cpu->r[rn] - (insn & UINT32_C(0xfff));
-        if ((address & 3u) != 0u)
+        if (load && !pre && write && rd == 15u)
+            return A64_COMPACT_RAW_REJECT_MEMORY_PC;
+        if (!indexed) {
+            offset = insn & UINT32_C(0xfff);
+        } else {
+            const unsigned rm = insn & 15u;
+            const unsigned type = (insn >> 5) & 3u;
+            const unsigned amount = (insn >> 7) & 31u;
+            uint32_t value;
+
+            if ((insn & (1u << 4)) != 0u)
+                return A64_COMPACT_RAW_REJECT_MEMORY_FORM;
+            if (rm == 15u)
+                return A64_COMPACT_RAW_REJECT_MEMORY_PC;
+            value = cpu->r[rm];
+            switch (type) {
+            case 0u:
+                offset = amount ? value << amount : value;
+                break;
+            case 1u:
+                offset = amount ? value >> amount : 0u;
+                break;
+            case 2u:
+                offset = amount
+                    ? (uint32_t)((int32_t)value >> amount)
+                    : ((value & UINT32_C(0x80000000)) ? UINT32_MAX : 0u);
+                break;
+            default:
+                offset = amount ? ror32(value, amount)
+                    : ((cpu->cpsr & ARM_CPSR_C) ? UINT32_C(0x80000000)
+                                                : 0u) |
+                      (value >> 1);
+                break;
+            }
+        }
+        base = rn == 15u ? cpu->r[15] + 8u : cpu->r[rn];
+        address = pre ? (up ? base + offset : base - offset) : base;
+        if (!byte && (address & 3u) != 0u)
             return A64_COMPACT_RAW_REJECT_MEMORY_ALIGNMENT;
         return A64_COMPACT_RAW_ADMIT_EXECUTE;
     }
