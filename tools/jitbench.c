@@ -5045,6 +5045,150 @@ static bool run_static(const bench_case_t *bc,
     return ran && *seconds > 0.0;
 }
 
+static bool run_compact_raw(const bench_case_t *bc, uint64_t total,
+                            final_state_t *out, double *seconds) {
+    arm_cpu_t cpu;
+    uint64_t done = 0u;
+    double start, end;
+
+    if (!bc || bc->thumb || bc->insns > UINT32_MAX / 4u) return false;
+    seed_cpu(&cpu, bc);
+    start = now_seconds();
+    while (done < total) {
+        uint64_t left = total - done;
+        unsigned chunk = left > UINT_MAX ? UINT_MAX : (unsigned)left;
+        unsigned completed = 0u;
+        if (!a64_compact_raw_run(&cpu, g_ram, 0u, bc->insns * 4u,
+                                 chunk, g_ram, sizeof g_ram, &completed) ||
+            completed != chunk)
+            break;
+        done += completed;
+    }
+    end = now_seconds();
+    capture_state(out, &cpu, ARM_OK, JIT_EXIT_NEXT);
+    *seconds = end - start;
+    return done == total && *seconds > 0.0;
+}
+
+static bool compact_raw_compare(const char *name, const uint32_t *program,
+                                unsigned insns, uint32_t pc,
+                                unsigned reference_steps, unsigned budget,
+                                unsigned expected_completed) {
+    arm_cpu_t reference, compact;
+    final_state_t reference_state, compact_state;
+    arm_status_t status = ARM_OK;
+    unsigned completed = 0u;
+
+    seed_cpu_at(&reference, program, insns, false, pc);
+    for (unsigned i = 0u; i < reference_steps; i++) {
+        status = arm_step(&reference);
+        if (status != ARM_OK) break;
+    }
+    capture_state(&reference_state, &reference, status, JIT_EXIT_NEXT);
+
+    seed_cpu_at(&compact, program, insns, false, pc);
+    if (!a64_compact_raw_run(&compact, &g_ram[pc], pc, insns * 4u,
+                             budget, g_ram, sizeof g_ram, &completed)) {
+        fprintf(stderr, "jitbench: compact raw %s contract refused\n", name);
+        return false;
+    }
+    capture_state(&compact_state, &compact, ARM_OK, JIT_EXIT_NEXT);
+    if (status != ARM_OK || completed != expected_completed ||
+        !architectural_states_equal(&reference_state, &compact_state)) {
+        fprintf(stderr,
+                "jitbench: compact raw %s mismatch (completed %u/%u, "
+                "reference steps %u)\n",
+                name, completed, expected_completed, reference_steps);
+        return false;
+    }
+    return true;
+}
+
+static bool validate_compact_raw_oracles(void) {
+    static const unsigned result_ops[] = {
+        0u, 1u, 2u, 3u, 4u, 5u, 6u, 7u, 12u, 13u, 14u, 15u,
+    };
+    uint32_t dp_program[sizeof result_ops / sizeof result_ops[0] * 2u];
+    const uint32_t memory_branch[] = {
+        UINT32_C(0xe5870000), /* STR r0,[r7,#0] */
+        UINT32_C(0xe5971000), /* LDR r1,[r7,#0] */
+        UINT32_C(0xe5072004), /* STR r2,[r7,#-4] */
+        UINT32_C(0xe5173004), /* LDR r3,[r7,#-4] */
+        UINT32_C(0xeb000000), /* BL to instruction 6 */
+        UINT32_C(0xe2844001), /* skipped */
+        UINT32_C(0xe2855001), /* ADD r5,r5,#1 */
+        UINT32_C(0xea000000), /* branch beyond the byte window */
+    };
+    const uint32_t unsupported_prefix[] = {
+        UINT32_C(0xe2800001), /* supported ADD */
+        UINT32_C(0xe2900001), /* ADDS: deliberately unsupported */
+    };
+    const uint32_t unsupported_first[] = {
+        UINT32_C(0x12800001), /* conditional ADDNE */
+    };
+    arm_cpu_t contract;
+    final_state_t before, after;
+    unsigned completed = UINT_MAX;
+
+    for (unsigned i = 0u; i < sizeof result_ops / sizeof result_ops[0]; i++) {
+        unsigned opcode = result_ops[i];
+        unsigned rn = (i + 1u) & 7u;
+        unsigned rd = (i + 2u) & 7u;
+        unsigned rm = (i + 3u) & 7u;
+        unsigned rot = i & 3u;
+        unsigned imm = 0x11u + i;
+        dp_program[i * 2u] = UINT32_C(0xe2000000) |
+            (opcode << 21) | (rn << 16) | (rd << 12) |
+            (rot << 8) | imm;
+        dp_program[i * 2u + 1u] = UINT32_C(0xe0000000) |
+            (opcode << 21) | (rn << 16) | (rd << 12) | rm;
+    }
+    if (!compact_raw_compare("data-processing", dp_program,
+                             (unsigned)(sizeof dp_program /
+                                        sizeof dp_program[0]),
+                             UINT32_C(0x1000),
+                             (unsigned)(sizeof dp_program /
+                                        sizeof dp_program[0]),
+                             (unsigned)(sizeof dp_program /
+                                        sizeof dp_program[0]) + 1u,
+                             (unsigned)(sizeof dp_program /
+                                        sizeof dp_program[0])))
+        return false;
+    if (!compact_raw_compare("memory-branch", memory_branch,
+                             (unsigned)(sizeof memory_branch /
+                                        sizeof memory_branch[0]),
+                             UINT32_C(0x2000), 7u, 16u, 7u))
+        return false;
+    if (!compact_raw_compare("unsupported-prefix", unsupported_prefix,
+                             2u, UINT32_C(0x3000), 1u, 2u, 1u))
+        return false;
+    if (!compact_raw_compare("unsupported-first", unsupported_first,
+                             1u, UINT32_C(0x4000), 0u, 1u, 0u))
+        return false;
+
+    seed_cpu_at(&contract, unsupported_prefix, 2u, false,
+                UINT32_C(0x5000));
+    contract.cp15.sctlr |= ARM_SCTLR_M;
+    capture_state(&before, &contract, ARM_OK, JIT_EXIT_NEXT);
+    if (a64_compact_raw_run(&contract, &g_ram[0x5000], UINT32_C(0x5000),
+                            8u, 1u, g_ram, sizeof g_ram, &completed) ||
+        completed != 0u) {
+        fprintf(stderr, "jitbench: compact raw invalid contract was accepted\n");
+        return false;
+    }
+    capture_state(&after, &contract, ARM_OK, JIT_EXIT_NEXT);
+    if (!architectural_states_equal(&before, &after)) {
+        fprintf(stderr, "jitbench: compact raw contract refusal mutated state\n");
+        return false;
+    }
+
+    printf("COMPACT-RAW-ORACLE exact=yes cases=5 result-opcodes=12 "
+           "immediate-rotate=yes register-lsl0=yes word-load-store=yes "
+           "branch-link=yes live-bytes=yes out-of-window=yes "
+           "unsupported-prefix=yes invalid-contract-rollback=yes\n");
+    return true;
+}
+
 static bool run_product_entry(const bench_case_t *bc,
                               const a64_static_block_t *block,
                               uint64_t blocks, bool decoded,
@@ -5076,6 +5220,88 @@ static bool run_product_entry(const bench_case_t *bc,
 static int cmp_double(const void *lhs, const void *rhs) {
     double a = *(const double *)lhs, b = *(const double *)rhs;
     return (a > b) - (a < b);
+}
+
+static bool bench_compact_raw(const bench_case_t *bc, uint64_t requested,
+                              unsigned reps) {
+    a64_static_block_t static_block;
+    double *interp_rates = NULL, *static_rates = NULL, *compact_rates = NULL;
+    uint64_t blocks = (requested + bc->insns - 1u) / bc->insns;
+    uint64_t total = blocks * bc->insns;
+    bool ok = false;
+
+    if (!bc || bc->thumb ||
+        !a64_static_decode(bc->program, bc->insns, false, &static_block)) {
+        fprintf(stderr, "jitbench: compact raw setup failed\n");
+        return false;
+    }
+    interp_rates = (double *)calloc(reps, sizeof *interp_rates);
+    static_rates = (double *)calloc(reps, sizeof *static_rates);
+    compact_rates = (double *)calloc(reps, sizeof *compact_rates);
+    if (!interp_rates || !static_rates || !compact_rates) {
+        fprintf(stderr, "jitbench: out of memory\n");
+        goto done;
+    }
+
+    for (unsigned rep = 0u; rep < reps; rep++) {
+        final_state_t interp, statik, compact;
+        double interp_s = 0.0, static_s = 0.0, compact_s = 0.0;
+        const char *order;
+        bool ran;
+
+        if (rep % 3u == 0u) {
+            order = "interp-static-compact";
+            ran = run_interpreter(bc, total, &interp, &interp_s) &&
+                  run_static(bc, &static_block, blocks, &statik, &static_s) &&
+                  run_compact_raw(bc, total, &compact, &compact_s);
+        } else if (rep % 3u == 1u) {
+            order = "static-compact-interp";
+            ran = run_static(bc, &static_block, blocks, &statik, &static_s) &&
+                  run_compact_raw(bc, total, &compact, &compact_s) &&
+                  run_interpreter(bc, total, &interp, &interp_s);
+        } else {
+            order = "compact-interp-static";
+            ran = run_compact_raw(bc, total, &compact, &compact_s) &&
+                  run_interpreter(bc, total, &interp, &interp_s) &&
+                  run_static(bc, &static_block, blocks, &statik, &static_s);
+        }
+        if (!ran || !states_equal(&interp, &statik) ||
+            !states_equal(&interp, &compact)) {
+            fprintf(stderr,
+                    "jitbench: compact raw %s repetition %u failed exact "
+                    "state equality\n",
+                    bc->name, rep + 1u);
+            goto done;
+        }
+        interp_rates[rep] = (double)total / interp_s / 1.0e6;
+        static_rates[rep] = (double)total / static_s / 1.0e6;
+        compact_rates[rep] = (double)total / compact_s / 1.0e6;
+        printf("COMPACT-RAW-SAMPLE case=%s rep=%u order=%s "
+               "interpreter=%.3f static-threaded=%.3f compact-raw=%.3f "
+               "Minsn/s\n",
+               bc->name, rep + 1u, order, interp_rates[rep],
+               static_rates[rep], compact_rates[rep]);
+    }
+
+    qsort(interp_rates, reps, sizeof *interp_rates, cmp_double);
+    qsort(static_rates, reps, sizeof *static_rates, cmp_double);
+    qsort(compact_rates, reps, sizeof *compact_rates, cmp_double);
+    printf("COMPACT-RAW-CEILING case=%s guest-insns=%" PRIu64
+           " reps=%u live-bytes=yes decoded-cache=no graph=no "
+           "runtime-codegen=no interpreter-median=%.3f "
+           "static-threaded-median=%.3f compact-raw-median=%.3f "
+           "static-speedup=%.3fx compact-speedup=%.3fx\n",
+           bc->name, total, reps, interp_rates[reps / 2u],
+           static_rates[reps / 2u], compact_rates[reps / 2u],
+           static_rates[reps / 2u] / interp_rates[reps / 2u],
+           compact_rates[reps / 2u] / interp_rates[reps / 2u]);
+    ok = true;
+
+done:
+    free(interp_rates);
+    free(static_rates);
+    free(compact_rates);
+    return ok;
 }
 
 /* Measure the wrapper the SoC actually calls once per cached product block.
@@ -8294,6 +8520,10 @@ int main(int argc, char **argv) {
     printf("Product-entry rows use predecoded hot blocks and compare full "
            "wrapper validation with a cache-owned decoded contract; both "
            "still exclude SoC cache lookup and device gates.\n");
+    printf("Compact-raw rows execute a narrow A32 subset from live bytes in "
+           "one build-time-linked semantic loop, with no decoded cache, graph "
+           "or runtime code generation. They are an exact synthetic "
+           "architecture gate, not a product path or phone-FPS claim.\n");
     printf("SoC-entry rows rotate reference, legacy signed, 16-instruction graph "
            "and extended graph paths across separately initialized machines. "
            "The extended arm remains clamped to the first timebase edge. They cross "
@@ -8370,6 +8600,7 @@ int main(int argc, char **argv) {
     if (!validate_static_thumb_cond_branch_oracles()) return 1;
     if (!validate_static_indirect_branch_oracles()) return 1;
     if (!validate_static_oracles()) return 1;
+    if (!validate_compact_raw_oracles()) return 1;
 
     if (fetch_refill_mix_only)
         return bench_soc_fetch_refill_mix(soc_insns, reps) ? 0 : 1;
@@ -8380,6 +8611,10 @@ int main(int argc, char **argv) {
     if (known_negative_boundary_only)
         return bench_soc_known_negative_boundary(soc_insns, reps) ? 0 : 1;
 
+    for (i = 0u; i < sizeof CASES / sizeof CASES[0]; i++) {
+        if (!CASES[i].thumb && !bench_compact_raw(&CASES[i], insns, reps))
+            return 1;
+    }
     for (i = 0u; i < sizeof CASES / sizeof CASES[0]; i++) {
         if (!bench_one(&CASES[i], insns, reps)) return 1;
     }
