@@ -8458,3 +8458,53 @@ spend the next iteration on another residual coprocessor opcode. The remaining
 work is to remove short-run, zero-retirement and fetch-window/entry overhead as
 a system, then explain why higher instruction throughput still does not map
 monotonically to displayed cadence.
+
+### 2026-08-09: exact privileged witnesses remove wasted probes, not the FPS ceiling
+
+Commit `3bbf24d80beff1f95ab2922fb05900f2624f6f9e` removes a specific
+double-dispatch path without adding a sticky opcode cache. After a productive
+privileged compact prefix stops on an instruction that the architectural
+fallback will not execute, the engine records one exact pending witness: fetch
+host, PC, fetch generation, privilege, ARM/Thumb state, and the literal two or
+four instruction bytes. The next matching entry consumes that witness and goes
+directly to one interpreter step. Any mismatch discards it. The ordinary hot
+path does not perform a persistent negative-cache lookup.
+
+The Apple-arm64 differential oracle verifies both sides of the switch. With
+the bypass disabled, its exact boundary case makes two attempts, one productive
+call, and one zero-retirement probe. With the bypass enabled, it makes one
+attempt, one productive call, zero zero-retirement probes, and one bypass; the
+serialized machine states remain identical. Core run `31264800171` and stock-
+iPhone build run `31264800095` are green.
+
+The iPhone 6s Plus then ran candidate/baseline/baseline/candidate from the same
+authenticated 7.320 B snapshot and writable image. Each arm performed the same
+six alternating 450 ms home-screen swipes, accepted all 156 generated touch
+samples, and refused none. Throughput and pipeline rows below pool cumulative
+counters by their corresponding host time; visible FPS gives each arm the same
+eight samples.
+
+| balanced metric | `e92c6c0` baseline | exact-witness candidate | delta |
+|---|---:|---:|---:|
+| CPU throughput | 22.0238 Minsn/s | 22.4510 Minsn/s | +1.940% |
+| compact attempts / native retired | 0.078140 | 0.063846 | -18.293% |
+| compact calls / native retired | 0.058404 | 0.057432 | -1.664% |
+| zero-retirement share of attempts | 25.1899% | 9.9612% | -60.456% relative |
+| changed scanout signatures/s | 18.6921 | 19.2514 | +2.992% |
+| changed layer signatures/s | 18.6855 | 19.2434 | +2.986% |
+| pooled visible FPS median | 18.5 | 18.0 | -0.5 FPS |
+| pooled visible FPS mean | 17.2500 | 17.3125 | +0.0625 FPS |
+
+The candidate consumed 27,707,419 exact witnesses across its two arms. The
+privileged-attempt/call difference still equals the remaining zero-retirement
+count exactly, so the counter identifies the intended pathology rather than an
+unrelated workload shift. Candidate FPS samples span 6--23; baseline samples
+span 9--23. The half-FPS median loss and 0.0625-FPS mean gain are noise, not a
+visible speedup.
+
+Brutal status: **ship this as a bounded efficiency improvement, not as progress
+to 30 displayed FPS.** It removes real redundant work, improves physical CPU
+and pipeline rates, preserves exact semantics, and is cheap enough to retain.
+It also proves that these failed privileged re-entries were not the dominant
+frame limiter. The next iteration must target the remaining fetch-window and
+entry costs or the guest-to-display cadence directly.
