@@ -216,6 +216,47 @@ static const uint8_t *vm_guest_record_display(const s5l8900_t *m,
 #ifdef S5L8900_CLCD_BASE
         clcd_frames = m->clcd.frames;
 #endif
+        if (vm_frame_telemetry_is_enabled()) {
+            s5l_static_a64_compact_raw_refusals_t refusals;
+            vm_execution_telemetry_observation_t execution;
+            memset(&execution, 0, sizeof execution);
+            s5l8900_static_a64_compact_raw_refusals(m, &refusals);
+            execution.cpu_retired = m->cpu.cycles;
+            execution.interpreter_tick_batches =
+                s5l8900_interpreter_tick_batches(m);
+            execution.interpreter_tick_batched_retired =
+                s5l8900_interpreter_tick_batched_retired(m);
+            execution.static_native_retired =
+                s5l8900_static_a64_retired(m);
+            execution.compact_attempts =
+                s5l8900_static_a64_compact_raw_attempts(m);
+            execution.compact_calls =
+                s5l8900_static_a64_compact_raw_calls(m);
+            execution.compact_native_retired =
+                s5l8900_static_a64_compact_raw_retired(m);
+            execution.compact_fallback_retired =
+                s5l8900_static_a64_compact_raw_fallback_retired(m);
+            execution.compact_window_crossings =
+                s5l8900_static_a64_compact_raw_window_crossings(m);
+            execution.compact_window_reloads =
+                s5l8900_static_a64_compact_raw_window_reloads(m);
+            execution.compact_window_stops =
+                s5l8900_static_a64_compact_raw_window_stops(m);
+            execution.compact_refused_guard = refusals.guard;
+            execution.compact_refused_privileged = refusals.privileged;
+            execution.compact_refused_alignment = refusals.alignment;
+            execution.compact_refused_fetch_witness =
+                refusals.fetch_witness;
+            execution.compact_refused_runner = refusals.runner;
+            execution.compact_zero_retired = refusals.zero_retired;
+            execution.fetch_refill_attempts =
+                s5l8900_static_a64_fetch_refill_attempts(m);
+            execution.fetch_refill_hits =
+                s5l8900_static_a64_fetch_refill_hits(m);
+            execution.fetch_refill_skips =
+                s5l8900_static_a64_fetch_refill_skips(m);
+            vm_frame_telemetry_note_execution(&execution);
+        }
     }
     vm_frame_telemetry_note_scanout(
         pixels, bytes, timer_ticks, clcd_frames, timebase_hz, cpu_hz,

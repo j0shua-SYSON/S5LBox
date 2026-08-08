@@ -4040,6 +4040,20 @@ uint64_t s5l8900_static_a64_compact_raw_window_reloads(
     const s5l8900_t *m);
 uint64_t s5l8900_static_a64_compact_raw_window_stops(
     const s5l8900_t *m);
+/* Mutually exclusive reasons why one compact-raw machine-loop attempt did
+ * not become a positive invocation.  Together with calls, these counters
+ * partition attempts exactly.  They are host diagnostics only and are never
+ * part of a guest snapshot. */
+typedef struct {
+    uint64_t guard;
+    uint64_t privileged;
+    uint64_t alignment;
+    uint64_t fetch_witness;
+    uint64_t runner;
+    uint64_t zero_retired;
+} s5l_static_a64_compact_raw_refusals_t;
+void s5l8900_static_a64_compact_raw_refusals(
+    const s5l8900_t *m, s5l_static_a64_compact_raw_refusals_t *out);
 uint64_t s5l8900_static_a64_fetch_refill_attempts(const s5l8900_t *m);
 uint64_t s5l8900_static_a64_fetch_refill_hits(const s5l8900_t *m);
 uint64_t s5l8900_static_a64_fetch_refill_skips(const s5l8900_t *m);

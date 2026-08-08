@@ -9761,6 +9761,106 @@ static bool run_soc_vfp_arithmetic_path(uint64_t total,
     return run_soc_entry_configured(&setup, setup.length, total, path, out);
 }
 
+/* The compact loop has always selected Thumb width from CPSR itself, but its
+ * former machine entry required PC%4==0 before calling that loop. A valid
+ * halfword-aligned entry at PC%4==2 therefore fell straight into arm_step().
+ * Exercise the app-facing runner at precisely that boundary and compare the
+ * complete serialized machine, not just r0/PC. */
+static bool validate_soc_compact_raw_thumb_halfword_entry(void) {
+    static const uint16_t INSN = UINT16_C(0x3001); /* adds r0,#1 */
+    s5l8900_t reference = {0};
+    s5l8900_t compact = {0};
+    arm_status_t reference_status = ARM_OK;
+    arm_status_t compact_status = ARM_OK;
+    uint8_t *reference_snapshot = NULL;
+    uint8_t *compact_snapshot = NULL;
+    size_t reference_len = 0u;
+    size_t compact_len = 0u;
+    s5l_static_a64_compact_raw_refusals_t refusals;
+    bool reference_initialized = false;
+    bool compact_initialized = false;
+    bool ok = false;
+
+    if (!s5l8900_static_a64_available()) {
+        printf("SOC-COMPACT-RAW-THUMB-HALFWORD-ORACLE skip "
+               "reason=signed-aarch64-unavailable\n");
+        return true;
+    }
+    if (!s5l8900_init(&reference, 0u, RAM_SIZE)) {
+        fprintf(stderr,
+                "jitbench: compact raw Thumb halfword init failed\n");
+        goto done;
+    }
+    reference_initialized = true;
+    if (!s5l8900_init(&compact, 0u, RAM_SIZE)) {
+        fprintf(stderr,
+                "jitbench: compact raw Thumb halfword init failed\n");
+        goto done;
+    }
+    compact_initialized = true;
+    s5l8900_load(&reference, 2u, &INSN, sizeof INSN);
+    s5l8900_load(&compact, 2u, &INSN, sizeof INSN);
+    reference.cpu.r[0] = compact.cpu.r[0] = UINT32_C(41);
+    reference.cpu.r[15] = compact.cpu.r[15] = UINT32_C(2);
+    reference.cpu.cpsr = compact.cpu.cpsr =
+        ARM_MODE_USR | ARM_CPSR_T | ARM_CPSR_C;
+    s5l8900_tick(&reference, 0u);
+    s5l8900_tick(&compact, 0u);
+    if (!s5l8900_static_a64_set_enabled(&compact, true) ||
+        !s5l8900_static_a64_set_compact_raw(&compact, true) ||
+        !s5l8900_static_a64_set_chain_limit(
+            &compact, A64_STATIC_MAX_CHAIN_INSNS)) {
+        fprintf(stderr,
+                "jitbench: compact raw Thumb halfword path unavailable\n");
+        goto done;
+    }
+    if (s5l8900_run(&reference, 1u, &reference_status) != 1u ||
+        s5l8900_run(&compact, 1u, &compact_status) != 1u ||
+        reference_status != ARM_OK || compact_status != ARM_OK ||
+        snapshot_save_mem(&reference, &reference_snapshot,
+                          &reference_len) != SNAP_OK ||
+        snapshot_save_mem(&compact, &compact_snapshot,
+                          &compact_len) != SNAP_OK) {
+        fprintf(stderr,
+                "jitbench: compact raw Thumb halfword execution failed\n");
+        goto done;
+    }
+    s5l8900_static_a64_compact_raw_refusals(&compact, &refusals);
+    if (reference_len != compact_len ||
+        memcmp(reference_snapshot, compact_snapshot, reference_len) != 0 ||
+        s5l8900_static_a64_compact_raw_attempts(&compact) != 1u ||
+        s5l8900_static_a64_compact_raw_calls(&compact) != 1u ||
+        s5l8900_static_a64_compact_raw_retired(&compact) != 1u ||
+        s5l8900_static_a64_compact_raw_fallback_retired(&compact) != 0u ||
+        refusals.guard != 0u || refusals.privileged != 0u ||
+        refusals.alignment != 0u || refusals.fetch_witness != 0u ||
+        refusals.runner != 0u || refusals.zero_retired != 0u) {
+        fprintf(stderr,
+                "jitbench: compact raw Thumb halfword oracle mismatch "
+                "attempts/calls/native=%" PRIu64 "/%" PRIu64 "/%" PRIu64
+                " refusals=%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64
+                "/%" PRIu64 "/%" PRIu64 "\n",
+                s5l8900_static_a64_compact_raw_attempts(&compact),
+                s5l8900_static_a64_compact_raw_calls(&compact),
+                s5l8900_static_a64_compact_raw_retired(&compact),
+                refusals.guard, refusals.privileged, refusals.alignment,
+                refusals.fetch_witness, refusals.runner,
+                refusals.zero_retired);
+        goto done;
+    }
+    printf("SOC-COMPACT-RAW-THUMB-HALFWORD-ORACLE exact=yes pc=0x2 "
+           "alignment=halfword native=1 fallback=0 "
+           "serialized-machine=yes runtime-codegen=no\n");
+    ok = true;
+
+done:
+    free(reference_snapshot);
+    free(compact_snapshot);
+    if (reference_initialized) s5l8900_free(&reference);
+    if (compact_initialized) s5l8900_free(&compact);
+    return ok;
+}
+
 /* Prove the resident/native-interpreter partition through the actual machine
  * runner before measuring its compute-only control. The two MMU-on data
  * accesses use already-proven DREAD/DWRITE witnesses; only unsupported MUL
@@ -9934,7 +10034,8 @@ static bool bench_soc_compact_raw(uint64_t requested, unsigned reps) {
         fprintf(stderr, "jitbench: SoC compact-raw shape failed\n");
         return false;
     }
-    if (!validate_soc_compact_raw_resident() ||
+    if (!validate_soc_compact_raw_thumb_halfword_entry() ||
+        !validate_soc_compact_raw_resident() ||
         !validate_soc_compact_raw_windows())
         return false;
     total = ((requested + LOOP_INSNS - 1u) / LOOP_INSNS) * LOOP_INSNS;

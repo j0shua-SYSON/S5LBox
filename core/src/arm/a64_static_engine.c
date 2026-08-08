@@ -80,6 +80,7 @@ typedef struct {
     uint64_t compact_raw_window_crossings;
     uint64_t compact_raw_window_reloads;
     uint64_t compact_raw_window_stops;
+    s5l_static_a64_compact_raw_refusals_t compact_raw_refusals;
     uint64_t fetch_refill_attempts;
     uint64_t fetch_refill_hits;
     uint64_t fetch_refill_skips;
@@ -847,6 +848,19 @@ uint64_t s5l8900_static_a64_compact_raw_window_stops(
 #endif
 }
 
+void s5l8900_static_a64_compact_raw_refusals(
+        const s5l8900_t *m,
+        s5l_static_a64_compact_raw_refusals_t *out) {
+    if (!out) return;
+    memset(out, 0, sizeof *out);
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    const static_a64_state_t *state = static_state(m);
+    if (state) *out = state->compact_raw_refusals;
+#else
+    (void)m;
+#endif
+}
+
 uint64_t s5l8900_static_a64_fetch_refill_attempts(const s5l8900_t *m) {
 #if defined(S5LBOX_STATIC_A64_ENGINE)
     const static_a64_state_t *state = static_state(m);
@@ -968,6 +982,8 @@ static unsigned try_compact_raw(s5l8900_t *m, static_a64_state_t *state,
     };
     uint32_t fetch_block;
     uint32_t pc;
+    unsigned width;
+    bool thumb;
     bool priv;
     unsigned completed = 0u;
     unsigned native_completed = 0u;
@@ -980,31 +996,50 @@ static unsigned try_compact_raw(s5l8900_t *m, static_a64_state_t *state,
     if (!budget || m->pre_step_hook ||
         cpu->arch != ARM_ARCH_V6_ARM1176 ||
         !arm_mode_is_valid(cpu->cpsr) || cpu->abort_pending ||
-        (cpu->cpsr & ARM_CPSR_MODE_MASK) != ARM_MODE_USR ||
         (cpu->cpsr & ARM_CPSR_E) != 0u ||
         (cpu->fiq_line && !(cpu->cpsr & ARM_CPSR_F)) ||
-        (cpu->irq_line && !(cpu->cpsr & ARM_CPSR_I)))
+        (cpu->irq_line && !(cpu->cpsr & ARM_CPSR_I))) {
+        state->compact_raw_refusals.guard++;
         return 0u;
+    }
+    if ((cpu->cpsr & ARM_CPSR_MODE_MASK) != ARM_MODE_USR) {
+        state->compact_raw_refusals.privileged++;
+        return 0u;
+    }
 
     pc = cpu->r[15];
-    if ((pc & 3u) != 0u) return 0u;
+    thumb = (cpu->cpsr & ARM_CPSR_T) != 0u;
+    width = thumb ? 2u : 4u;
+    /* The native loop selects A32/Thumb width from CPSR on every iteration.
+     * Requiring A32 alignment here discarded every valid Thumb entry at
+     * address 2 modulo 4 before that loop could inspect it. */
+    if ((pc & (width - 1u)) != 0u) {
+        state->compact_raw_refusals.alignment++;
+        return 0u;
+    }
     priv = (cpu->cpsr & ARM_CPSR_MODE_MASK) != ARM_MODE_USR;
     fetch_block = pc & ~UINT32_C(0x3ff);
     if (!cpu->fetch_host || cpu->fetch_blk != fetch_block ||
-        cpu->fetch_gen != cpu->tlb_gen || cpu->fetch_priv != priv)
+        cpu->fetch_gen != cpu->tlb_gen || cpu->fetch_priv != priv) {
+        state->compact_raw_refusals.fetch_witness++;
         return 0u;
+    }
     fallback_context.fetch_block = fetch_block;
     if (!a64_compact_raw_run_code_window_resident(
             cpu, cpu->fetch_host, fetch_block, UINT32_C(0x400), budget,
             compact_raw_fallback, &fallback_context, &completed,
-            &native_completed, &fallback_completed))
+            &native_completed, &fallback_completed)) {
+        state->compact_raw_refusals.runner++;
         return 0u;
+    }
     if (status) *status = fallback_context.status;
     if (completed) {
         state->compact_raw_calls++;
         state->compact_raw_retired += native_completed;
         state->compact_raw_fallback_retired += fallback_completed;
         state->retired += native_completed;
+    } else {
+        state->compact_raw_refusals.zero_retired++;
     }
     return completed;
 }

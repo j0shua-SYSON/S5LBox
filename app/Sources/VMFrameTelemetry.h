@@ -70,6 +70,32 @@ typedef struct {
     uint32_t format;
 } vm_frame_scanout_observation_t;
 
+/* Emulator-thread counters sampled only at the existing scanout lookup. This
+ * keeps diagnostics out of the instruction hot path while still exposing
+ * whether a signed invocation retired useful work or failed an entry gate. */
+typedef struct {
+    uint64_t cpu_retired;
+    uint64_t interpreter_tick_batches;
+    uint64_t interpreter_tick_batched_retired;
+    uint64_t static_native_retired;
+    uint64_t compact_attempts;
+    uint64_t compact_calls;
+    uint64_t compact_native_retired;
+    uint64_t compact_fallback_retired;
+    uint64_t compact_window_crossings;
+    uint64_t compact_window_reloads;
+    uint64_t compact_window_stops;
+    uint64_t compact_refused_guard;
+    uint64_t compact_refused_privileged;
+    uint64_t compact_refused_alignment;
+    uint64_t compact_refused_fetch_witness;
+    uint64_t compact_refused_runner;
+    uint64_t compact_zero_retired;
+    uint64_t fetch_refill_attempts;
+    uint64_t fetch_refill_hits;
+    uint64_t fetch_refill_skips;
+} vm_execution_telemetry_observation_t;
+
 typedef struct {
     bool enabled;
     uint64_t generation;
@@ -94,6 +120,12 @@ typedef struct {
     uint64_t scanout_last_clcd_frames;
     uint32_t scanout_timebase_hz;
     uint32_t scanout_cpu_hz;
+
+    bool execution_captured;
+    bool execution_consistent;
+    uint64_t execution_observations;
+    vm_execution_telemetry_observation_t execution_first;
+    vm_execution_telemetry_observation_t execution_last;
 
     uint64_t layer_attempts;
     uint64_t layer_accepted;
@@ -121,6 +153,11 @@ void vm_frame_telemetry_note_scanout(
     uint64_t timer_ticks, uint64_t clcd_frames,
     uint32_t timebase_hz, uint32_t cpu_hz,
     const vm_frame_scanout_observation_t *observation);
+
+/* One coherent emulator-thread execution sample. Counter regressions are
+ * retained as an explicit inconsistency instead of producing wrapped deltas. */
+void vm_frame_telemetry_note_execution(
+    const vm_execution_telemetry_observation_t *observation);
 
 /* Stable machine-readable spelling for accessibility/syslog diagnostics. */
 const char *vm_frame_scanout_reason_name(vm_frame_scanout_reason_t reason);

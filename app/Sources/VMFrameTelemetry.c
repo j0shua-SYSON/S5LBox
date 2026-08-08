@@ -144,6 +144,58 @@ const char *vm_frame_scanout_reason_name(vm_frame_scanout_reason_t reason) {
     }
 }
 
+static bool vm_execution_telemetry_not_before(
+        const vm_execution_telemetry_observation_t *now,
+        const vm_execution_telemetry_observation_t *before) {
+#define VM_EXEC_NOT_BEFORE(field_) (now->field_ >= before->field_)
+    return VM_EXEC_NOT_BEFORE(cpu_retired) &&
+           VM_EXEC_NOT_BEFORE(interpreter_tick_batches) &&
+           VM_EXEC_NOT_BEFORE(interpreter_tick_batched_retired) &&
+           VM_EXEC_NOT_BEFORE(static_native_retired) &&
+           VM_EXEC_NOT_BEFORE(compact_attempts) &&
+           VM_EXEC_NOT_BEFORE(compact_calls) &&
+           VM_EXEC_NOT_BEFORE(compact_native_retired) &&
+           VM_EXEC_NOT_BEFORE(compact_fallback_retired) &&
+           VM_EXEC_NOT_BEFORE(compact_window_crossings) &&
+           VM_EXEC_NOT_BEFORE(compact_window_reloads) &&
+           VM_EXEC_NOT_BEFORE(compact_window_stops) &&
+           VM_EXEC_NOT_BEFORE(compact_refused_guard) &&
+           VM_EXEC_NOT_BEFORE(compact_refused_privileged) &&
+           VM_EXEC_NOT_BEFORE(compact_refused_alignment) &&
+           VM_EXEC_NOT_BEFORE(compact_refused_fetch_witness) &&
+           VM_EXEC_NOT_BEFORE(compact_refused_runner) &&
+           VM_EXEC_NOT_BEFORE(compact_zero_retired) &&
+           VM_EXEC_NOT_BEFORE(fetch_refill_attempts) &&
+           VM_EXEC_NOT_BEFORE(fetch_refill_hits) &&
+           VM_EXEC_NOT_BEFORE(fetch_refill_skips);
+#undef VM_EXEC_NOT_BEFORE
+}
+
+void vm_frame_telemetry_note_execution(
+        const vm_execution_telemetry_observation_t *observation) {
+    if (!observation || !vm_frame_telemetry_is_enabled()) return;
+
+    vm_frame_telemetry_lock();
+    if (!g_vm_frame_telemetry.public_state.enabled) {
+        vm_frame_telemetry_unlock();
+        return;
+    }
+
+    vm_frame_telemetry_snapshot_t *state =
+        &g_vm_frame_telemetry.public_state;
+    if (!state->execution_captured) {
+        state->execution_captured = true;
+        state->execution_consistent = true;
+        state->execution_first = *observation;
+    } else if (!vm_execution_telemetry_not_before(
+                   observation, &state->execution_last)) {
+        state->execution_consistent = false;
+    }
+    state->execution_last = *observation;
+    state->execution_observations++;
+    vm_frame_telemetry_unlock();
+}
+
 void vm_frame_telemetry_note_scanout(
         const void *pixels, size_t bytes,
         uint64_t timer_ticks, uint64_t clcd_frames,

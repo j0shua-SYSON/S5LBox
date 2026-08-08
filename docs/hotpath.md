@@ -8276,7 +8276,7 @@ CTest passes 65/65. Exact-SHA core run `31184673044` is green in every job,
 including the semantic loop on macOS 14 and 15 Apple arm64 and the JIT-off
 rebuild. Stock-iPhone build/IPA run `31184673177` is also green. Its policy
 checks confirm that this remains ahead-of-time signed code with no JIT
-entitlement, jailbreak dependency, or Dopamine/iOS-MCP product requirement.
+entitlement or jailbreak dependency.
 
 The unchanged r446 checkpoint was restored at 7,320,000,000 and stopped at
 7,330,000,000 with `--sequence-profile`. The run exits zero with empty stderr,

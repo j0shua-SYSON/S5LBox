@@ -27,6 +27,33 @@ static vm_frame_scanout_observation_t observation(
     return value;
 }
 
+static vm_execution_telemetry_observation_t execution_observation(
+        uint64_t base) {
+    vm_execution_telemetry_observation_t value;
+    memset(&value, 0, sizeof value);
+    value.cpu_retired = base + 1u;
+    value.interpreter_tick_batches = base + 2u;
+    value.interpreter_tick_batched_retired = base + 3u;
+    value.static_native_retired = base + 4u;
+    value.compact_attempts = base + 5u;
+    value.compact_calls = base + 6u;
+    value.compact_native_retired = base + 7u;
+    value.compact_fallback_retired = base + 8u;
+    value.compact_window_crossings = base + 9u;
+    value.compact_window_reloads = base + 10u;
+    value.compact_window_stops = base + 11u;
+    value.compact_refused_guard = base + 12u;
+    value.compact_refused_privileged = base + 13u;
+    value.compact_refused_alignment = base + 14u;
+    value.compact_refused_fetch_witness = base + 15u;
+    value.compact_refused_runner = base + 16u;
+    value.compact_zero_retired = base + 17u;
+    value.fetch_refill_attempts = base + 18u;
+    value.fetch_refill_hits = base + 19u;
+    value.fetch_refill_skips = base + 20u;
+    return value;
+}
+
 static void test_disabled_is_inert(void) {
     uint8_t pixels[800];
     memset(pixels, 0x5a, sizeof pixels);
@@ -37,6 +64,9 @@ static void test_disabled_is_inert(void) {
         pixels, sizeof pixels, 100u, 5u, 6000000u, 412000000u, &valid);
     vm_frame_telemetry_note_layer_submission(
         pixels, sizeof pixels, true, 500u);
+    vm_execution_telemetry_observation_t execution =
+        execution_observation(100u);
+    vm_frame_telemetry_note_execution(&execution);
 
     vm_frame_telemetry_snapshot_t state;
     memset(&state, 0xa5, sizeof state);
@@ -44,6 +74,8 @@ static void test_disabled_is_inert(void) {
     CHECK(!state.enabled, "disabled state reported enabled");
     CHECK(state.scanout_attempts == 0u && state.layer_attempts == 0u,
           "disabled instrumentation changed counters");
+    CHECK(!state.execution_captured && state.execution_observations == 0u,
+          "disabled instrumentation captured execution counters");
 }
 
 static void test_boundaries_and_sampled_changes(void) {
@@ -53,6 +85,9 @@ static void test_boundaries_and_sampled_changes(void) {
 
     vm_frame_telemetry_reset(true);
     CHECK(vm_frame_telemetry_is_enabled(), "reset did not enable telemetry");
+    vm_execution_telemetry_observation_t execution_first =
+        execution_observation(1000u);
+    vm_frame_telemetry_note_execution(&execution_first);
 
     vm_frame_scanout_observation_t stopped =
         observation(VM_FRAME_SCANOUT_REASON_STOPPED);
@@ -93,6 +128,9 @@ static void test_boundaries_and_sampled_changes(void) {
     pixels[397] ^= 2u;
     vm_frame_telemetry_note_layer_submission(
         pixels, sizeof pixels, true, 400u);
+    vm_execution_telemetry_observation_t execution_last =
+        execution_observation(2000u);
+    vm_frame_telemetry_note_execution(&execution_last);
 
     vm_frame_telemetry_snapshot_t state;
     memset(&state, 0, sizeof state);
@@ -137,6 +175,17 @@ static void test_boundaries_and_sampled_changes(void) {
     CHECK(state.scanout_timebase_hz == 6000000u &&
           state.scanout_cpu_hz == 412000000u,
           "guest clock rates are wrong");
+    CHECK(state.execution_captured && state.execution_consistent &&
+          state.execution_observations == 2u,
+          "execution endpoint state captured/consistent/count=%u/%u/%llu",
+          state.execution_captured ? 1u : 0u,
+          state.execution_consistent ? 1u : 0u,
+          (unsigned long long)state.execution_observations);
+    CHECK(state.execution_first.cpu_retired == 1001u &&
+          state.execution_last.cpu_retired == 2001u &&
+          state.execution_first.compact_refused_privileged == 1013u &&
+          state.execution_last.fetch_refill_skips == 2020u,
+          "execution counter endpoints are wrong");
 
     CHECK(state.layer_attempts == 4u && state.layer_accepted == 3u &&
           state.layer_rejected == 1u,
@@ -158,6 +207,13 @@ static void test_boundaries_and_sampled_changes(void) {
     vm_frame_telemetry_snapshot(&state);
     CHECK(!state.scanout_guest_clock_consistent,
           "clock-rate/counter regression was accepted as consistent");
+    vm_execution_telemetry_observation_t execution_regressed =
+        execution_observation(1500u);
+    vm_frame_telemetry_note_execution(&execution_regressed);
+    vm_frame_telemetry_snapshot(&state);
+    CHECK(!state.execution_consistent &&
+          state.execution_observations == 3u,
+          "execution counter regression was accepted as consistent");
     CHECK(strcmp(vm_frame_scanout_reason_name(
                      VM_FRAME_SCANOUT_REASON_FRAMEBUFFER_OUTSIDE_RAM),
                  "framebuffer_outside_ram") == 0 &&

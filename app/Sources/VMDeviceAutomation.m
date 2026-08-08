@@ -120,8 +120,8 @@ static double VMDeviceAutomationSeconds(uint64_t firstNS, uint64_t lastNS) {
         screen.accessibilityLabel = @"iPhone OS guest display";
     }
 
-    /* ios-mcp's compact accessibility serializer can omit a custom view's
-     * value even though Apple's full AX snapshot retains it. A real UILabel is
+    /* Some compact accessibility serializers can omit a custom view's value
+     * even though Apple's full AX snapshot retains it. A real UILabel is
      * exposed consistently by both. Its one-point clear frame is visible to AX
      * but not to the user, cannot receive touches, and exists only in the two
      * opt-in diagnostic modes that construct this object. */
@@ -214,6 +214,57 @@ static double VMDeviceAutomationSeconds(uint64_t firstNS, uint64_t lastNS) {
         : 0.0;
     const double layerMaxMS = (double)state.layer_max_work_ns / 1.0e6;
 
+    NSString *execution = @"execution_captured=0";
+    if (state.execution_captured) {
+        const vm_execution_telemetry_observation_t *first =
+            &state.execution_first;
+        const vm_execution_telemetry_observation_t *last =
+            &state.execution_last;
+#define VM_EXEC_DELTA(field_) \
+    (last->field_ >= first->field_ ? last->field_ - first->field_ : 0u)
+        execution = [NSString stringWithFormat:
+            @"execution_captured=1,execution_consistent=%u,"
+             "execution_observations=%llu,cpu_retired=%llu,"
+             "interpreter_tick_batches=%llu,"
+             "interpreter_tick_batched_retired=%llu,"
+             "static_native_retired=%llu,compact_attempts=%llu,"
+             "compact_calls=%llu,compact_native_retired=%llu,"
+             "compact_fallback_retired=%llu,"
+             "compact_window_crossings=%llu,compact_window_reloads=%llu,"
+             "compact_window_stops=%llu,compact_refused_guard=%llu,"
+             "compact_refused_privileged=%llu,"
+             "compact_refused_alignment=%llu,"
+             "compact_refused_fetch_witness=%llu,"
+             "compact_refused_runner=%llu,compact_zero_retired=%llu,"
+             "fetch_refill_attempts=%llu,fetch_refill_hits=%llu,"
+             "fetch_refill_skips=%llu",
+            state.execution_consistent ? 1u : 0u,
+            (unsigned long long)state.execution_observations,
+            (unsigned long long)VM_EXEC_DELTA(cpu_retired),
+            (unsigned long long)VM_EXEC_DELTA(interpreter_tick_batches),
+            (unsigned long long)VM_EXEC_DELTA(
+                interpreter_tick_batched_retired),
+            (unsigned long long)VM_EXEC_DELTA(static_native_retired),
+            (unsigned long long)VM_EXEC_DELTA(compact_attempts),
+            (unsigned long long)VM_EXEC_DELTA(compact_calls),
+            (unsigned long long)VM_EXEC_DELTA(compact_native_retired),
+            (unsigned long long)VM_EXEC_DELTA(compact_fallback_retired),
+            (unsigned long long)VM_EXEC_DELTA(compact_window_crossings),
+            (unsigned long long)VM_EXEC_DELTA(compact_window_reloads),
+            (unsigned long long)VM_EXEC_DELTA(compact_window_stops),
+            (unsigned long long)VM_EXEC_DELTA(compact_refused_guard),
+            (unsigned long long)VM_EXEC_DELTA(compact_refused_privileged),
+            (unsigned long long)VM_EXEC_DELTA(compact_refused_alignment),
+            (unsigned long long)VM_EXEC_DELTA(
+                compact_refused_fetch_witness),
+            (unsigned long long)VM_EXEC_DELTA(compact_refused_runner),
+            (unsigned long long)VM_EXEC_DELTA(compact_zero_retired),
+            (unsigned long long)VM_EXEC_DELTA(fetch_refill_attempts),
+            (unsigned long long)VM_EXEC_DELTA(fetch_refill_hits),
+            (unsigned long long)VM_EXEC_DELTA(fetch_refill_skips)];
+#undef VM_EXEC_DELTA
+    }
+
     NSString *guest = guestClockValid
         ? [NSString stringWithFormat:
             @"guest_s=%.6f,vblanks=%llu,scanout_changed_per_guest_s=%.3f",
@@ -235,7 +286,7 @@ static double VMDeviceAutomationSeconds(uint64_t firstNS, uint64_t lastNS) {
          "layer_attempts=%llu,layer_accepted=%llu,layer_rejected=%llu,"
          "layer_signatures=%llu,layer_host_s=%.6f,"
          "layer_changed_per_host_s=%.3f,layer_work_mean_ms=%.3f,"
-         "layer_work_max_ms=%.3f,layer_is_submission_not_display=1",
+         "layer_work_max_ms=%.3f,layer_is_submission_not_display=1,%@",
         (unsigned long long)state.generation,
         (unsigned long long)state.scanout_attempts,
         (unsigned long long)state.scanout_valid,
@@ -259,7 +310,8 @@ static double VMDeviceAutomationSeconds(uint64_t firstNS, uint64_t lastNS) {
         (unsigned long long)state.layer_accepted,
         (unsigned long long)state.layer_rejected,
         (unsigned long long)state.layer_changes,
-        layerSeconds, layerChangedPerHostSecond, layerMeanMS, layerMaxMS];
+        layerSeconds, layerChangedPerHostSecond, layerMeanMS, layerMaxMS,
+        execution];
     if ([screen isKindOfClass:[UIView class]])
         screen.accessibilityValue = value;
     telemetryLabel.text = value;
