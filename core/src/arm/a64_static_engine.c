@@ -53,6 +53,25 @@ typedef struct {
     bool multi_seen;
 } static_a64_refill_predictor_t;
 
+/* One positive privileged compact interval can stop at an instruction that
+ * its User-only architectural fallback deliberately leaves untouched.  The
+ * outer machine loop used to tick the completed prefix and then enter the
+ * native loop again at that same known-losing instruction, producing a zero
+ * return before arm_step() finally owned it.  Retain only the exact pending
+ * instruction witness needed to bypass that one redundant re-entry after the
+ * tick.  This is not a persistent opcode cache: a successful commit consumes
+ * it immediately. */
+typedef struct {
+    const uint8_t *fetch_host;
+    uint32_t pc;
+    uint32_t fetch_gen;
+    uint8_t raw[4];
+    uint8_t raw_len;
+    bool fetch_priv;
+    bool thumb;
+    bool valid;
+} static_a64_compact_pending_t;
+
 typedef struct {
     bool enabled;
     bool persistent;
@@ -92,6 +111,7 @@ typedef struct {
     static_a64_entry_t cache[STATIC_A64_CACHE_ENTRIES];
     static_a64_refill_predictor_t
         refill_predictor[STATIC_A64_CACHE_ENTRIES];
+    static_a64_compact_pending_t compact_pending;
     a64_static_graph_node_t graph_nodes[A64_STATIC_GRAPH_SLOTS];
 } static_a64_state_t;
 
@@ -116,6 +136,89 @@ static unsigned cache_index(uint32_t pc, bool thumb, uint32_t generation) {
     key ^= generation * UINT32_C(0x9e3779b1);
     if (thumb) key ^= UINT32_C(0x85ebca6b);
     return key & (STATIC_A64_CACHE_ENTRIES - 1u);
+}
+
+static bool compact_pending_capture(s5l8900_t *m,
+                                    static_a64_state_t *state) {
+    arm_cpu_t *cpu;
+    static_a64_compact_pending_t *pending;
+    uint32_t pc;
+    uint32_t fetch_block;
+    unsigned width;
+    unsigned offset;
+    bool thumb;
+    bool priv;
+
+    if (!m || !state || !state->enabled || !state->compact_raw_enabled ||
+        !state->known_negative_bypass_enabled || m->pre_step_hook)
+        return false;
+    cpu = &m->cpu;
+    priv = (cpu->cpsr & ARM_CPSR_MODE_MASK) != ARM_MODE_USR;
+    if (!priv) return false;
+    pc = cpu->r[15];
+    thumb = (cpu->cpsr & ARM_CPSR_T) != 0u;
+    width = thumb ? 2u : 4u;
+    if ((pc & (width - 1u)) != 0u) return false;
+    fetch_block = pc & ~UINT32_C(0x3ff);
+    if (!cpu->fetch_host || cpu->fetch_blk != fetch_block ||
+        cpu->fetch_gen != cpu->tlb_gen || cpu->fetch_priv != priv)
+        return false;
+    offset = pc - fetch_block;
+    if (offset > UINT32_C(0x400) - width) return false;
+
+    pending = &state->compact_pending;
+    memset(pending, 0, sizeof *pending);
+    pending->fetch_host = cpu->fetch_host;
+    pending->pc = pc;
+    pending->fetch_gen = cpu->fetch_gen;
+    pending->raw_len = (uint8_t)width;
+    pending->fetch_priv = priv;
+    pending->thumb = thumb;
+    memcpy(pending->raw, cpu->fetch_host + offset, width);
+    pending->valid = true;
+    return true;
+}
+
+static bool compact_pending_matches(const s5l8900_t *m,
+                                    const static_a64_state_t *state) {
+    const arm_cpu_t *cpu;
+    const static_a64_compact_pending_t *pending;
+    uint32_t pc;
+    uint32_t fetch_block;
+    unsigned width;
+    unsigned offset;
+    bool thumb;
+    bool priv;
+
+    if (!m || !state || !state->enabled || !state->compact_raw_enabled ||
+        !state->known_negative_bypass_enabled || m->pre_step_hook)
+        return false;
+    pending = &state->compact_pending;
+    if (!pending->valid) return false;
+    cpu = &m->cpu;
+    if (cpu->arch != ARM_ARCH_V6_ARM1176 ||
+        !arm_mode_is_valid(cpu->cpsr) || cpu->abort_pending ||
+        (cpu->cpsr & ARM_CPSR_E) != 0u ||
+        (cpu->fiq_line && !(cpu->cpsr & ARM_CPSR_F)) ||
+        (cpu->irq_line && !(cpu->cpsr & ARM_CPSR_I)))
+        return false;
+    pc = cpu->r[15];
+    thumb = (cpu->cpsr & ARM_CPSR_T) != 0u;
+    priv = (cpu->cpsr & ARM_CPSR_MODE_MASK) != ARM_MODE_USR;
+    width = thumb ? 2u : 4u;
+    if (!priv || (pc & (width - 1u)) != 0u ||
+        pending->raw_len != width)
+        return false;
+    fetch_block = pc & ~UINT32_C(0x3ff);
+    if (!cpu->fetch_host || cpu->fetch_blk != fetch_block ||
+        cpu->fetch_gen != cpu->tlb_gen || cpu->fetch_priv != priv)
+        return false;
+    offset = pc - fetch_block;
+    if (offset > UINT32_C(0x400) - width) return false;
+    return pending->fetch_host == cpu->fetch_host && pending->pc == pc &&
+           pending->fetch_gen == cpu->fetch_gen &&
+           pending->fetch_priv == priv && pending->thumb == thumb &&
+           memcmp(pending->raw, cpu->fetch_host + offset, width) == 0;
 }
 
 static bool refill_predictor_matches(
@@ -440,6 +543,7 @@ void s5l8900_static_a64_invalidate_derived(s5l8900_t *m) {
     static_a64_state_t *state = static_state(m);
     if (!state) return;
     memset(state->cache, 0, sizeof state->cache);
+    memset(&state->compact_pending, 0, sizeof state->compact_pending);
     memset(state->graph_nodes, 0, sizeof state->graph_nodes);
 #else
     (void)m;
@@ -525,13 +629,18 @@ bool s5l8900_static_a64_set_compact_raw(s5l8900_t *m, bool enabled) {
 #if defined(S5LBOX_STATIC_A64_ENGINE)
     static_a64_state_t *state = static_state(m);
     if (!enabled) {
-        if (state) state->compact_raw_enabled = false;
+        if (state) {
+            state->compact_raw_enabled = false;
+            memset(&state->compact_pending, 0,
+                   sizeof state->compact_pending);
+        }
         return true;
     }
     if (!state || !state->enabled || !a64_static_host_available())
         return false;
     state->persistent = false;
     state->graph_enabled = false;
+    memset(&state->compact_pending, 0, sizeof state->compact_pending);
     state->compact_raw_enabled = true;
     return true;
 #else
@@ -730,6 +839,8 @@ bool s5l8900_static_a64_set_known_negative_bypass(s5l8900_t *m,
         return false;
     /* Execution policy only: both arms use identical decoded data and graph
      * nodes, which is required for a meaningful same-binary timing A/B. */
+    if (!enabled)
+        memset(&state->compact_pending, 0, sizeof state->compact_pending);
     state->known_negative_bypass_enabled = enabled;
     return true;
 #else
@@ -1025,7 +1136,8 @@ static a64_compact_raw_fallback_result_t compact_raw_fallback(
 }
 
 static unsigned try_compact_raw(s5l8900_t *m, static_a64_state_t *state,
-                                unsigned budget, arm_status_t *status) {
+                                unsigned budget, arm_status_t *status,
+                                bool *known_negative) {
     arm_cpu_t *cpu = &m->cpu;
     compact_raw_fallback_context_t fallback_context = {
         .machine = m,
@@ -1042,6 +1154,8 @@ static unsigned try_compact_raw(s5l8900_t *m, static_a64_state_t *state,
     unsigned native_completed = 0u;
     unsigned fallback_completed = 0u;
 
+    if (known_negative) *known_negative = false;
+    memset(&state->compact_pending, 0, sizeof state->compact_pending);
     state->compact_raw_attempts++;
     /* A branch can reach any address in the live 1 KiB window, so a sparse
      * pre-step target list is not enough: any installed host hook disables
@@ -1101,6 +1215,16 @@ static unsigned try_compact_raw(s5l8900_t *m, static_a64_state_t *state,
     } else {
         state->compact_raw_refusals.zero_retired++;
     }
+    /* A positive privileged prefix followed by a zero-retirement callback is
+     * the exact redundant-entry shape observed on the phone.  Preserve the
+     * untouched instruction only until the post-prefix device tick; the
+     * machine loop revalidates and consumes it before one literal arm_step().
+     * A completed budget did not inspect the next instruction, and a retired
+     * fallback is already accounted, so neither may arm the bypass. */
+    if (completed && completed < budget && fallback_completed == 0u &&
+        fallback_context.status == ARM_OK &&
+        compact_pending_capture(m, state) && known_negative)
+        *known_negative = true;
     return completed;
 }
 
@@ -1232,11 +1356,14 @@ unsigned s5l8900_static_a64_try(s5l8900_t *m, unsigned max_insns,
     budget = max_insns < state->chain_limit
            ? max_insns : state->chain_limit;
     if (state->compact_raw_enabled) {
-        unsigned completed = try_compact_raw(m, state, budget, status);
+        bool compact_known_negative = false;
+        unsigned completed = try_compact_raw(m, state, budget, status,
+                                             &compact_known_negative);
         if (refilled)
             refill_predictor_record(state, refill_pc, refill_gen,
                                     refill_thumb, refill_priv, completed,
                                     budget);
+        if (known_negative) *known_negative = compact_known_negative;
         return completed;
     }
     if (state->graph_enabled) {
@@ -1368,6 +1495,16 @@ unsigned s5l8900_static_a64_try(s5l8900_t *m, unsigned max_insns,
 bool s5l8900_static_a64_commit_known_negative_bypass(s5l8900_t *m) {
 #if defined(S5LBOX_STATIC_A64_ENGINE)
     static_a64_state_t *state = static_state(m);
+    if (state && state->compact_raw_enabled) {
+        bool matches = compact_pending_matches(m, state);
+        /* Whether the post-tick witness passed or failed, the pending record
+         * applies to this boundary only. Never turn it into a sticky opcode
+         * exclusion that could hide a later native opportunity. */
+        memset(&state->compact_pending, 0, sizeof state->compact_pending);
+        if (!matches) return false;
+        state->known_negative_bypasses++;
+        return true;
+    }
     /* The device tick between detection and this call can invalidate fetch or
      * change RAM. Repeat the complete negative witness before skipping work. */
     if (!current_cached_unsupported(m, state)) return false;

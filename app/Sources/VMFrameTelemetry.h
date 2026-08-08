@@ -97,6 +97,7 @@ typedef struct {
     uint64_t fetch_refill_attempts;
     uint64_t fetch_refill_hits;
     uint64_t fetch_refill_skips;
+    uint64_t known_negative_bypasses;
 } vm_execution_telemetry_observation_t;
 
 typedef struct {

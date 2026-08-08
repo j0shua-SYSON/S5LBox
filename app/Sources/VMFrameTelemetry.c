@@ -170,7 +170,8 @@ static bool vm_execution_telemetry_not_before(
            VM_EXEC_NOT_BEFORE(compact_zero_retired) &&
            VM_EXEC_NOT_BEFORE(fetch_refill_attempts) &&
            VM_EXEC_NOT_BEFORE(fetch_refill_hits) &&
-           VM_EXEC_NOT_BEFORE(fetch_refill_skips);
+           VM_EXEC_NOT_BEFORE(fetch_refill_skips) &&
+           VM_EXEC_NOT_BEFORE(known_negative_bypasses);
 #undef VM_EXEC_NOT_BEFORE
 }
 

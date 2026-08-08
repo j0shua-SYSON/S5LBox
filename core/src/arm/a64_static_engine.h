@@ -19,8 +19,9 @@ bool s5l8900_static_a64_is_enabled(const s5l8900_t *m);
  * and repeats the cache/raw-byte witness. The configured total cannot exceed
  * the product ceiling above. Zero means fall back to the architectural
  * interpreter without changing guest state. When a positive exact prefix ends
- * at an unchanged, already-cached unsupported instruction, `known_negative`
- * reports that the immediately following signed probe would return zero. */
+ * at an unchanged decoded negative, or a privileged compact interval leaves
+ * its fallback instruction untouched, `known_negative` reports that the next
+ * signed probe is redundant. */
 unsigned s5l8900_static_a64_try(s5l8900_t *m, unsigned max_insns,
                                 bool *known_negative,
                                 arm_status_t *status);
@@ -34,7 +35,9 @@ unsigned s5l8900_static_a64_fallback_step(s5l8900_t *m,
                                           arm_status_t *status);
 
 /* Revalidate and account a known-negative probe bypass after the device tick.
- * False leaves the ordinary next-loop decision untouched. */
+ * A compact pending witness is single-use; decoded negatives remain governed
+ * by their complete cache witness. False leaves the ordinary next-loop
+ * decision untouched. */
 bool s5l8900_static_a64_commit_known_negative_bypass(s5l8900_t *m);
 
 /* Release the per-machine decode cache. Safe on an uninitialised NULL field. */

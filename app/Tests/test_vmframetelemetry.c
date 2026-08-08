@@ -54,6 +54,7 @@ static vm_execution_telemetry_observation_t execution_observation(
     value.fetch_refill_attempts = base + 21u;
     value.fetch_refill_hits = base + 22u;
     value.fetch_refill_skips = base + 23u;
+    value.known_negative_bypasses = base + 24u;
     return value;
 }
 
@@ -187,7 +188,8 @@ static void test_boundaries_and_sampled_changes(void) {
     CHECK(state.execution_first.cpu_retired == 1001u &&
           state.execution_last.cpu_retired == 2001u &&
           state.execution_first.compact_refused_privileged == 1016u &&
-          state.execution_last.fetch_refill_skips == 2023u,
+          state.execution_last.fetch_refill_skips == 2023u &&
+          state.execution_last.known_negative_bypasses == 2024u,
           "execution counter endpoints are wrong");
 
     CHECK(state.layer_attempts == 4u && state.layer_accepted == 3u &&

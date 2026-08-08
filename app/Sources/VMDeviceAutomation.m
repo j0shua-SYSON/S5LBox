@@ -240,7 +240,7 @@ static double VMDeviceAutomationSeconds(uint64_t firstNS, uint64_t lastNS) {
              "compact_refused_fetch_witness=%llu,"
              "compact_refused_runner=%llu,compact_zero_retired=%llu,"
              "fetch_refill_attempts=%llu,fetch_refill_hits=%llu,"
-             "fetch_refill_skips=%llu",
+             "fetch_refill_skips=%llu,known_negative_bypasses=%llu",
             state.execution_consistent ? 1u : 0u,
             (unsigned long long)state.execution_observations,
             (unsigned long long)VM_EXEC_DELTA(cpu_retired),
@@ -267,7 +267,8 @@ static double VMDeviceAutomationSeconds(uint64_t firstNS, uint64_t lastNS) {
             (unsigned long long)VM_EXEC_DELTA(compact_zero_retired),
             (unsigned long long)VM_EXEC_DELTA(fetch_refill_attempts),
             (unsigned long long)VM_EXEC_DELTA(fetch_refill_hits),
-            (unsigned long long)VM_EXEC_DELTA(fetch_refill_skips)];
+            (unsigned long long)VM_EXEC_DELTA(fetch_refill_skips),
+            (unsigned long long)VM_EXEC_DELTA(known_negative_bypasses)];
 #undef VM_EXEC_DELTA
     }
 

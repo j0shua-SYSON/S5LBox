@@ -9931,6 +9931,7 @@ typedef struct {
     uint64_t privileged_attempts;
     uint64_t privileged_calls;
     uint64_t privileged_retired;
+    uint64_t known_negative_bypasses;
     s5l_static_a64_compact_raw_refusals_t refusals;
 } compact_privileged_oracle_result_t;
 
@@ -9970,7 +9971,7 @@ static void seed_compact_privileged_oracle_cpu(arm_cpu_t *cpu,
 
 static bool run_compact_privileged_oracle_case(
         uint32_t mode, bool thumb, bool boundary,
-        bool compact, bool privileged_enabled,
+        bool compact, bool privileged_enabled, bool bypass_enabled,
         compact_privileged_oracle_result_t *out) {
     static const uint32_t A32_NATIVE[] = {
         UINT32_C(0xe2888001), /* ADD r8,r8,#1: FIQ-bank witness */
@@ -10020,6 +10021,8 @@ static bool run_compact_privileged_oracle_case(
          !s5l8900_static_a64_set_compact_raw(&machine, true) ||
          !s5l8900_static_a64_set_compact_raw_privileged(
              &machine, privileged_enabled) ||
+         !s5l8900_static_a64_set_known_negative_bypass(
+             &machine, bypass_enabled) ||
          !s5l8900_static_a64_set_chain_limit(
              &machine, A64_STATIC_MAX_CHAIN_INSNS)))
         goto done;
@@ -10041,6 +10044,8 @@ static bool run_compact_privileged_oracle_case(
         s5l8900_static_a64_compact_raw_privileged_calls(&machine);
     out->privileged_retired =
         s5l8900_static_a64_compact_raw_privileged_retired(&machine);
+    out->known_negative_bypasses =
+        s5l8900_static_a64_known_negative_bypasses(&machine);
     s5l8900_static_a64_compact_raw_refusals(&machine, &out->refusals);
     ok = true;
 
@@ -10087,10 +10092,10 @@ static bool validate_soc_compact_raw_privileged_prefix(void) {
             compact_privileged_oracle_result_t native = {0};
             const bool ran = run_compact_privileged_oracle_case(
                                  MODES[i].mode, thumb != 0u, false,
-                                 false, false, &reference) &&
+                                 false, false, false, &reference) &&
                              run_compact_privileged_oracle_case(
                                  MODES[i].mode, thumb != 0u, false,
-                                 true, true, &native);
+                                 true, true, true, &native);
             const bool snapshot_exact = ran &&
                 compact_privileged_snapshots_equal(&reference, &native);
             const bool exact = snapshot_exact &&
@@ -10102,6 +10107,7 @@ static bool validate_soc_compact_raw_privileged_prefix(void) {
                 native.privileged_attempts == native.attempts &&
                 native.privileged_calls == native.calls &&
                 native.privileged_retired == native.native_retired &&
+                native.known_negative_bypasses == 0u &&
                 native.refusals.guard == 0u &&
                 native.refusals.privileged == 0u &&
                 native.refusals.alignment == 0u &&
@@ -10136,10 +10142,10 @@ static bool validate_soc_compact_raw_privileged_prefix(void) {
         compact_privileged_oracle_result_t control = {0};
         const bool ran = run_compact_privileged_oracle_case(
                              ARM_MODE_SVC, false, false,
-                             false, false, &reference) &&
+                             false, false, false, &reference) &&
                          run_compact_privileged_oracle_case(
                              ARM_MODE_SVC, false, false,
-                             true, false, &control);
+                             true, false, true, &control);
         const bool snapshot_exact = ran &&
             compact_privileged_snapshots_equal(&reference, &control);
         const bool exact = snapshot_exact &&
@@ -10149,6 +10155,7 @@ static bool validate_soc_compact_raw_privileged_prefix(void) {
             control.privileged_attempts == control.attempts &&
             control.privileged_calls == 0u &&
             control.privileged_retired == 0u &&
+            control.known_negative_bypasses == 0u &&
             control.refusals.privileged == control.attempts &&
             control.refusals.guard == 0u &&
             control.refusals.alignment == 0u &&
@@ -10173,50 +10180,69 @@ static bool validate_soc_compact_raw_privileged_prefix(void) {
 
     {
         compact_privileged_oracle_result_t reference = {0};
-        compact_privileged_oracle_result_t boundary = {0};
+        compact_privileged_oracle_result_t off = {0};
+        compact_privileged_oracle_result_t on = {0};
         const bool ran = run_compact_privileged_oracle_case(
                              ARM_MODE_SVC, false, true,
-                             false, false, &reference) &&
+                             false, false, false, &reference) &&
                          run_compact_privileged_oracle_case(
                              ARM_MODE_SVC, false, true,
-                             true, true, &boundary);
+                             true, true, false, &off) &&
+                         run_compact_privileged_oracle_case(
+                             ARM_MODE_SVC, false, true,
+                             true, true, true, &on);
         const bool snapshot_exact = ran &&
-            compact_privileged_snapshots_equal(&reference, &boundary);
+            compact_privileged_snapshots_equal(&reference, &off) &&
+            compact_privileged_snapshots_equal(&reference, &on);
         /* The first retirement can be owned by the machine timing gate. Four
          * native instructions ensure the admitted batch still reaches a
-         * nonempty native prefix before the interpreter-owned SVC boundary. */
+         * nonempty native prefix before the interpreter-owned SVC boundary.
+         * The off arm reproduces the redundant zero-return re-entry; the on
+         * arm must consume one exact post-tick witness and go directly to the
+         * same literal interpreter step. */
         const bool exact = snapshot_exact &&
-            boundary.attempts == 2u && boundary.calls == 1u &&
-            boundary.native_retired >= 3u &&
-            boundary.native_retired <= 4u &&
-            boundary.fallback_retired == 0u &&
-            boundary.privileged_attempts == 2u &&
-            boundary.privileged_calls == 1u &&
-            boundary.privileged_retired == boundary.native_retired &&
-            boundary.refusals.privileged == 0u &&
-            boundary.refusals.zero_retired == 1u;
+            off.attempts == 2u && off.calls == 1u &&
+            on.attempts == 1u && on.calls == 1u &&
+            off.native_retired >= 3u && off.native_retired <= 4u &&
+            on.native_retired == off.native_retired &&
+            off.fallback_retired == 0u && on.fallback_retired == 0u &&
+            off.privileged_attempts == 2u && off.privileged_calls == 1u &&
+            on.privileged_attempts == 1u && on.privileged_calls == 1u &&
+            off.privileged_retired == off.native_retired &&
+            on.privileged_retired == on.native_retired &&
+            off.known_negative_bypasses == 0u &&
+            on.known_negative_bypasses == 1u &&
+            off.refusals.privileged == 0u &&
+            on.refusals.privileged == 0u &&
+            off.refusals.zero_retired == 1u &&
+            on.refusals.zero_retired == 0u;
         if (!exact) {
             fprintf(stderr,
                     "jitbench: compact privileged boundary mismatch "
-                    "attempts/calls/native/fallback/zero=%" PRIu64 "/%" PRIu64
+                    "off-attempts/calls/zero=%" PRIu64 "/%" PRIu64
+                    "/%" PRIu64 " on-attempts/calls/zero/bypasses=%" PRIu64
                     "/%" PRIu64 "/%" PRIu64 "/%" PRIu64 " snapshot=%s\n",
-                    boundary.attempts, boundary.calls,
-                    boundary.native_retired, boundary.fallback_retired,
-                    boundary.refusals.zero_retired,
+                    off.attempts, off.calls, off.refusals.zero_retired,
+                    on.attempts, on.calls, on.refusals.zero_retired,
+                    on.known_negative_bypasses,
                     snapshot_exact ? "exact" : "mismatch");
             free_compact_privileged_oracle_result(&reference);
-            free_compact_privileged_oracle_result(&boundary);
+            free_compact_privileged_oracle_result(&off);
+            free_compact_privileged_oracle_result(&on);
             return false;
         }
         free_compact_privileged_oracle_result(&reference);
-        free_compact_privileged_oracle_result(&boundary);
+        free_compact_privileged_oracle_result(&off);
+        free_compact_privileged_oracle_result(&on);
     }
 
     printf("SOC-COMPACT-RAW-PRIVILEGED-ORACLE exact=yes modes=6 "
            "states=a32,thumb cases=%u minimum-native=%" PRIu64 " "
            "banked-registers=yes mmu=on "
            "privileged-native-prefix=yes privileged-fallback=no "
-           "control=user-only boundary=svc serialized-machine=yes "
+           "control=user-only boundary=svc-zero-bypass "
+           "boundary-attempts=2-to-1 boundary-zero=1-to-0 "
+           "serialized-machine=yes "
            "runtime-codegen=no\n",
            exact_cases, minimum_native);
     return true;

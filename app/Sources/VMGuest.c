@@ -261,6 +261,8 @@ static const uint8_t *vm_guest_record_display(const s5l8900_t *m,
                 s5l8900_static_a64_fetch_refill_hits(m);
             execution.fetch_refill_skips =
                 s5l8900_static_a64_fetch_refill_skips(m);
+            execution.known_negative_bypasses =
+                s5l8900_static_a64_known_negative_bypasses(m);
             vm_frame_telemetry_note_execution(&execution);
         }
     }
