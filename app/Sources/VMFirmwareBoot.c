@@ -438,6 +438,7 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
 
     bool forced_interpreter = false;
     bool compact_user_only = false;
+    bool compact_window_refill_off = false;
 #if defined(S5LBOX_STATIC_A64_ENGINE)
     /*
      * One signed binary supplies both halves of the physical A/B.  The marker
@@ -483,9 +484,30 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
                    "User-only control unavailable");
         return false;
     }
+    char compact_window_refill_path[VM_FW_BOOT_PATH_CAPACITY + 64u];
+    if (!join_path(compact_window_refill_path,
+                   sizeof compact_window_refill_path, paths->work,
+                   VM_FW_BOOT_COMPACT_WINDOW_REFILL_OFF_FILE)) {
+        set_detail(report->detail, sizeof report->detail,
+                   "The compact window-control path is too long to use.");
+        set_detail(report->summary, sizeof report->summary, "path too long");
+        return false;
+    }
+    compact_window_refill_off =
+        file_size(compact_window_refill_path) > 0u;
+    if (!forced_interpreter && compact_window_refill_off &&
+        !s5l8900_static_a64_set_compact_raw_window_refill(machine, false)) {
+        set_detail(report->detail, sizeof report->detail,
+                   "The compact window control could not disable lookup-only "
+                   "resident refills.");
+        set_detail(report->summary, sizeof report->summary,
+                   "window-refill control unavailable");
+        return false;
+    }
 #endif
 #endif
     (void)compact_user_only;
+    (void)compact_window_refill_off;
 
     vm_firmware_boot_state_t state;
     vm_firmware_boot_probe(paths, &state);
@@ -671,9 +693,15 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
         engine_mode = "interpreter control";
     } else {
 #if defined(S5LBOX_STATIC_A64_DEFAULT_COMPACT_RAW)
-        engine_mode = compact_user_only
-            ? "compact raw, User-only control"
-            : "compact raw, privileged prefix";
+        if (compact_user_only && compact_window_refill_off)
+            engine_mode =
+                "compact raw, User-only control + window-refill-off control";
+        else if (compact_user_only)
+            engine_mode = "compact raw, User-only control";
+        else if (compact_window_refill_off)
+            engine_mode = "compact raw, window-refill-off control";
+        else
+            engine_mode = "compact raw, privileged prefix";
 #elif defined(S5LBOX_STATIC_A64_DEFAULT_GRAPH)
         engine_mode = "static graph";
 #endif

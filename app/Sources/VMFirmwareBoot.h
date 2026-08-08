@@ -86,6 +86,12 @@ extern "C" {
  * admission gate, isolating privileged-prefix value from every other build,
  * checkpoint, rendering, and firmware variable. */
 #define VM_FW_BOOT_COMPACT_USER_ONLY_FILE "engine.compact-user-only"
+/* Same-binary performance control for resident code-window continuation. A
+ * nonempty marker keeps compact execution enabled but makes every 1 KiB
+ * crossing use the former interpreter-first path. It is diagnostic host
+ * policy, never guest state or a stock-device dependency. */
+#define VM_FW_BOOT_COMPACT_WINDOW_REFILL_OFF_FILE \
+    "engine.compact-window-refill-off"
 
 /* How much free space rootfs_work_create() adds to the volume. The stock
  * rootfs ships with ZERO free blocks, so without this launchd can create

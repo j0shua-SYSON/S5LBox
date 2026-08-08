@@ -287,6 +287,13 @@ static void test_saved_state_restore_fixture(void) {
     FILE *user_only_file = fopen(user_only_marker, "rb");
     bool expect_user_only = user_only_file != NULL;
     if (user_only_file) fclose(user_only_file);
+    char window_refill_off_marker[VM_FW_BOOT_PATH_CAPACITY + 64u];
+    snprintf(window_refill_off_marker, sizeof window_refill_off_marker,
+             "%s/%s", fixture,
+             VM_FW_BOOT_COMPACT_WINDOW_REFILL_OFF_FILE);
+    FILE *window_refill_off_file = fopen(window_refill_off_marker, "rb");
+    bool expect_window_refill_off = window_refill_off_file != NULL;
+    if (window_refill_off_file) fclose(window_refill_off_file);
 
     bool values[VM_BOOT_OPTION_MAX];
     for (unsigned i = 0; i < VM_BOOT_OPTION_MAX; i++) values[i] = false;
@@ -341,12 +348,18 @@ static void test_saved_state_restore_fixture(void) {
             CHECK(mentions(report.summary, "User-only control"),
                   "User-only marker did not reach the engine: %s",
                   report.summary);
+        if (!expect_interpreter && expect_window_refill_off)
+            CHECK(mentions(report.summary, "window-refill-off"),
+                  "window-refill marker did not reach the engine: %s",
+                  report.summary);
 #else
         (void)expect_user_only;
+        (void)expect_window_refill_off;
 #endif
 #else
         (void)expect_interpreter;
         (void)expect_user_only;
+        (void)expect_window_refill_off;
 #endif
 
         char marker[VM_FW_BOOT_PATH_CAPACITY + 64u];
