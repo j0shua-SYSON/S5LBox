@@ -39,18 +39,21 @@ static vm_execution_telemetry_observation_t execution_observation(
     value.compact_calls = base + 6u;
     value.compact_native_retired = base + 7u;
     value.compact_fallback_retired = base + 8u;
-    value.compact_window_crossings = base + 9u;
-    value.compact_window_reloads = base + 10u;
-    value.compact_window_stops = base + 11u;
-    value.compact_refused_guard = base + 12u;
-    value.compact_refused_privileged = base + 13u;
-    value.compact_refused_alignment = base + 14u;
-    value.compact_refused_fetch_witness = base + 15u;
-    value.compact_refused_runner = base + 16u;
-    value.compact_zero_retired = base + 17u;
-    value.fetch_refill_attempts = base + 18u;
-    value.fetch_refill_hits = base + 19u;
-    value.fetch_refill_skips = base + 20u;
+    value.compact_privileged_attempts = base + 9u;
+    value.compact_privileged_calls = base + 10u;
+    value.compact_privileged_retired = base + 11u;
+    value.compact_window_crossings = base + 12u;
+    value.compact_window_reloads = base + 13u;
+    value.compact_window_stops = base + 14u;
+    value.compact_refused_guard = base + 15u;
+    value.compact_refused_privileged = base + 16u;
+    value.compact_refused_alignment = base + 17u;
+    value.compact_refused_fetch_witness = base + 18u;
+    value.compact_refused_runner = base + 19u;
+    value.compact_zero_retired = base + 20u;
+    value.fetch_refill_attempts = base + 21u;
+    value.fetch_refill_hits = base + 22u;
+    value.fetch_refill_skips = base + 23u;
     return value;
 }
 
@@ -183,8 +186,8 @@ static void test_boundaries_and_sampled_changes(void) {
           (unsigned long long)state.execution_observations);
     CHECK(state.execution_first.cpu_retired == 1001u &&
           state.execution_last.cpu_retired == 2001u &&
-          state.execution_first.compact_refused_privileged == 1013u &&
-          state.execution_last.fetch_refill_skips == 2020u,
+          state.execution_first.compact_refused_privileged == 1016u &&
+          state.execution_last.fetch_refill_skips == 2023u,
           "execution counter endpoints are wrong");
 
     CHECK(state.layer_attempts == 4u && state.layer_accepted == 3u &&

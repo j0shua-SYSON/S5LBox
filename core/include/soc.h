@@ -3968,9 +3968,17 @@ bool s5l8900_static_a64_set_persistent(s5l8900_t *m, bool enabled);
  * callback scaffold above and still compile-time/app-default off. */
 bool s5l8900_static_a64_set_graph(s5l8900_t *m, bool enabled);
 /* Default-off compact live-byte mode. It consumes only the current proven
- * 1 KiB fetch window, supports MMU-on code, and stops before data accesses.
- * It is mutually exclusive with the decoded persistent/graph paths. */
+ * 1 KiB fetch window, supports MMU-on code, and admits only instruction shapes
+ * whose complete effect is implemented by the build-time-signed runner. It is
+ * mutually exclusive with the decoded persistent/graph paths. */
 bool s5l8900_static_a64_set_compact_raw(s5l8900_t *m, bool enabled);
+/* Same-binary control for native prefixes entered while the ARM core is in an
+ * implemented privileged mode. Product default is enabled. Privileged control
+ * instructions remain interpreter-only: the resident callback refuses them,
+ * commits any already-retired native prefix, and returns to the machine loop
+ * before arm_step() executes the boundary. */
+bool s5l8900_static_a64_set_compact_raw_privileged(s5l8900_t *m,
+                                                   bool enabled);
 /* Same-binary rollout/benchmark control for terminal A32/Thumb BX/BLX signed
  * records. It defaults on when the engine is created. Changing it clears only
  * derived decode/graph entries so an off/on comparison cannot reuse a block
@@ -4033,6 +4041,12 @@ uint64_t s5l8900_static_a64_compact_raw_attempts(const s5l8900_t *m);
 uint64_t s5l8900_static_a64_compact_raw_calls(const s5l8900_t *m);
 uint64_t s5l8900_static_a64_compact_raw_retired(const s5l8900_t *m);
 uint64_t s5l8900_static_a64_compact_raw_fallback_retired(
+    const s5l8900_t *m);
+uint64_t s5l8900_static_a64_compact_raw_privileged_attempts(
+    const s5l8900_t *m);
+uint64_t s5l8900_static_a64_compact_raw_privileged_calls(
+    const s5l8900_t *m);
+uint64_t s5l8900_static_a64_compact_raw_privileged_retired(
     const s5l8900_t *m);
 uint64_t s5l8900_static_a64_compact_raw_window_crossings(
     const s5l8900_t *m);

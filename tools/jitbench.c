@@ -9761,6 +9761,287 @@ static bool run_soc_vfp_arithmetic_path(uint64_t total,
     return run_soc_entry_configured(&setup, setup.length, total, path, out);
 }
 
+typedef struct {
+    uint8_t *snapshot;
+    size_t snapshot_len;
+    uint64_t attempts;
+    uint64_t calls;
+    uint64_t native_retired;
+    uint64_t fallback_retired;
+    uint64_t privileged_attempts;
+    uint64_t privileged_calls;
+    uint64_t privileged_retired;
+    s5l_static_a64_compact_raw_refusals_t refusals;
+} compact_privileged_oracle_result_t;
+
+static void free_compact_privileged_oracle_result(
+        compact_privileged_oracle_result_t *result) {
+    if (!result) return;
+    free(result->snapshot);
+    memset(result, 0, sizeof *result);
+}
+
+static void seed_compact_privileged_oracle_cpu(arm_cpu_t *cpu,
+                                                uint32_t mode,
+                                                bool thumb) {
+    for (unsigned i = 0u; i < 15u; i++)
+        cpu->r[i] = UINT32_C(0x10101010) +
+                    UINT32_C(0x01020304) * i;
+    for (unsigned i = 0u; i < ARM_BANK_COUNT; i++) {
+        cpu->bank_r13[i] = UINT32_C(0x20000000) + i * UINT32_C(0x1000);
+        cpu->bank_r14[i] = UINT32_C(0x30000000) + i * UINT32_C(0x1000);
+        cpu->spsr[i] = ARM_MODE_USR | ARM_CPSR_C |
+                       ((i & 1u) ? ARM_CPSR_T : 0u);
+    }
+    for (unsigned i = 0u; i < 5u; i++) {
+        cpu->fiq_r8_12[i] = UINT32_C(0x40000000) +
+                             i * UINT32_C(0x1111);
+        cpu->usr_r8_12[i] = UINT32_C(0x50000000) +
+                             i * UINT32_C(0x2222);
+    }
+
+    /* arm_set_mode(), rather than a direct CPSR edit, proves that the native
+     * register-file view is the same active bank the interpreter selected. */
+    arm_set_mode(cpu, mode);
+    cpu->cpsr = mode | ARM_CPSR_C | ARM_CPSR_I | ARM_CPSR_F | ARM_CPSR_A |
+                (thumb ? ARM_CPSR_T : 0u);
+    cpu->r[15] = thumb ? 2u : 0u;
+}
+
+static bool run_compact_privileged_oracle_case(
+        uint32_t mode, bool thumb, bool boundary,
+        bool compact, bool privileged_enabled,
+        compact_privileged_oracle_result_t *out) {
+    static const uint32_t A32_NATIVE[] = {
+        UINT32_C(0xe2888001), /* ADD r8,r8,#1: FIQ-bank witness */
+        UINT32_C(0xe28cc002), /* ADD r12,r12,#2: FIQ-bank witness */
+        UINT32_C(0xe28dd004), /* ADD sp,sp,#4: per-mode bank witness */
+        UINT32_C(0xe28ee008), /* ADD lr,lr,#8: per-mode bank witness */
+    };
+    static const uint32_t A32_BOUNDARY[] = {
+        UINT32_C(0xe2888001), /* exact native prefix */
+        UINT32_C(0xef000000), /* SVC: always interpreter-owned */
+    };
+    static const uint16_t THUMB_NATIVE[] = {
+        UINT16_C(0x3001), /* ADDS r0,#1 */
+        UINT16_C(0x3102), /* ADDS r1,#2 */
+        UINT16_C(0x3203), /* ADDS r2,#3 */
+        UINT16_C(0x3304), /* ADDS r3,#4 */
+    };
+    const uint32_t section = (3u << 10) | 2u;
+    const unsigned total = boundary ? 2u : 4u;
+    s5l8900_t machine = {0};
+    arm_status_t status = ARM_OK;
+    bool initialized = false;
+    bool ok = false;
+
+    if (!out || (boundary && thumb)) return false;
+    memset(out, 0, sizeof *out);
+    if (!s5l8900_init(&machine, 0u, RAM_SIZE)) goto done;
+    initialized = true;
+    if (thumb)
+        s5l8900_load(&machine, 2u, THUMB_NATIVE, sizeof THUMB_NATIVE);
+    else if (boundary)
+        s5l8900_load(&machine, 0u, A32_BOUNDARY, sizeof A32_BOUNDARY);
+    else
+        s5l8900_load(&machine, 0u, A32_NATIVE, sizeof A32_NATIVE);
+    s5l8900_load(&machine, UINT32_C(0x4000), &section, sizeof section);
+    machine.cpu.cp15.ttbr0 = UINT32_C(0x4000);
+    machine.cpu.cp15.dacr = 1u;
+    machine.cpu.cp15.sctlr |= ARM_SCTLR_M;
+    seed_compact_privileged_oracle_cpu(&machine.cpu, mode, thumb);
+    s5l8900_tick(&machine, 0u);
+
+    if (compact &&
+        (!s5l8900_static_a64_set_enabled(&machine, true) ||
+         !s5l8900_static_a64_set_compact_raw(&machine, true) ||
+         !s5l8900_static_a64_set_compact_raw_privileged(
+             &machine, privileged_enabled) ||
+         !s5l8900_static_a64_set_chain_limit(
+             &machine, A64_STATIC_MAX_CHAIN_INSNS)))
+        goto done;
+    if (s5l8900_run(&machine, total, &status) != total || status != ARM_OK)
+        goto done;
+    if (snapshot_save_mem(&machine, &out->snapshot,
+                          &out->snapshot_len) != SNAP_OK)
+        goto done;
+
+    out->attempts = s5l8900_static_a64_compact_raw_attempts(&machine);
+    out->calls = s5l8900_static_a64_compact_raw_calls(&machine);
+    out->native_retired =
+        s5l8900_static_a64_compact_raw_retired(&machine);
+    out->fallback_retired =
+        s5l8900_static_a64_compact_raw_fallback_retired(&machine);
+    out->privileged_attempts =
+        s5l8900_static_a64_compact_raw_privileged_attempts(&machine);
+    out->privileged_calls =
+        s5l8900_static_a64_compact_raw_privileged_calls(&machine);
+    out->privileged_retired =
+        s5l8900_static_a64_compact_raw_privileged_retired(&machine);
+    s5l8900_static_a64_compact_raw_refusals(&machine, &out->refusals);
+    ok = true;
+
+done:
+    if (initialized) s5l8900_free(&machine);
+    if (!ok) free_compact_privileged_oracle_result(out);
+    return ok;
+}
+
+static bool compact_privileged_snapshots_equal(
+        const compact_privileged_oracle_result_t *a,
+        const compact_privileged_oracle_result_t *b) {
+    return a && b && a->snapshot && b->snapshot &&
+           a->snapshot_len == b->snapshot_len &&
+           memcmp(a->snapshot, b->snapshot, a->snapshot_len) == 0;
+}
+
+/* The old User-only gate discarded virtually every compact entry in the
+ * measured kernel-heavy phone interval. Admit only the already-proved native
+ * instruction set under a privileged fetch tag. Any unsupported/control
+ * instruction reaches the callback, which must refuse to call arm_step() in
+ * privileged mode and return to the ordinary machine loop first. */
+static bool validate_soc_compact_raw_privileged_prefix(void) {
+    static const struct {
+        uint32_t mode;
+        const char *name;
+    } MODES[] = {
+        { ARM_MODE_FIQ, "fiq" }, { ARM_MODE_IRQ, "irq" },
+        { ARM_MODE_SVC, "svc" }, { ARM_MODE_ABT, "abt" },
+        { ARM_MODE_UND, "und" }, { ARM_MODE_SYS, "sys" },
+    };
+    unsigned exact_cases = 0u;
+
+    if (!s5l8900_static_a64_available()) {
+        printf("SOC-COMPACT-RAW-PRIVILEGED-ORACLE skip "
+               "reason=signed-aarch64-unavailable\n");
+        return true;
+    }
+
+    for (unsigned i = 0u; i < sizeof MODES / sizeof MODES[0]; i++) {
+        for (unsigned thumb = 0u; thumb <= 1u; thumb++) {
+            compact_privileged_oracle_result_t reference = {0};
+            compact_privileged_oracle_result_t native = {0};
+            const bool ran = run_compact_privileged_oracle_case(
+                                 MODES[i].mode, thumb != 0u, false,
+                                 false, false, &reference) &&
+                             run_compact_privileged_oracle_case(
+                                 MODES[i].mode, thumb != 0u, false,
+                                 true, true, &native);
+            const bool exact = ran &&
+                compact_privileged_snapshots_equal(&reference, &native) &&
+                native.attempts == 1u && native.calls == 1u &&
+                native.native_retired == 4u &&
+                native.fallback_retired == 0u &&
+                native.privileged_attempts == 1u &&
+                native.privileged_calls == 1u &&
+                native.privileged_retired == 4u &&
+                native.refusals.guard == 0u &&
+                native.refusals.privileged == 0u &&
+                native.refusals.alignment == 0u &&
+                native.refusals.fetch_witness == 0u &&
+                native.refusals.runner == 0u &&
+                native.refusals.zero_retired == 0u;
+            if (!exact) {
+                fprintf(stderr,
+                        "jitbench: compact privileged %s/%s mismatch "
+                        "attempts/calls/native/fallback/priv=%" PRIu64
+                        "/%" PRIu64 "/%" PRIu64 "/%" PRIu64
+                        "/%" PRIu64 "\n",
+                        MODES[i].name, thumb ? "thumb" : "a32",
+                        native.attempts, native.calls,
+                        native.native_retired, native.fallback_retired,
+                        native.privileged_retired);
+                free_compact_privileged_oracle_result(&reference);
+                free_compact_privileged_oracle_result(&native);
+                return false;
+            }
+            exact_cases++;
+            free_compact_privileged_oracle_result(&reference);
+            free_compact_privileged_oracle_result(&native);
+        }
+    }
+
+    {
+        compact_privileged_oracle_result_t reference = {0};
+        compact_privileged_oracle_result_t control = {0};
+        const bool ran = run_compact_privileged_oracle_case(
+                             ARM_MODE_SVC, false, false,
+                             false, false, &reference) &&
+                         run_compact_privileged_oracle_case(
+                             ARM_MODE_SVC, false, false,
+                             true, false, &control);
+        const bool exact = ran &&
+            compact_privileged_snapshots_equal(&reference, &control) &&
+            control.attempts == 4u && control.calls == 0u &&
+            control.native_retired == 0u && control.fallback_retired == 0u &&
+            control.privileged_attempts == 4u &&
+            control.privileged_calls == 0u &&
+            control.privileged_retired == 0u &&
+            control.refusals.privileged == 4u &&
+            control.refusals.guard == 0u &&
+            control.refusals.alignment == 0u &&
+            control.refusals.fetch_witness == 0u &&
+            control.refusals.runner == 0u &&
+            control.refusals.zero_retired == 0u;
+        if (!exact) {
+            fprintf(stderr,
+                    "jitbench: compact privileged user-only control "
+                    "mismatch attempts/calls/refused=%" PRIu64 "/%" PRIu64
+                    "/%" PRIu64 "\n",
+                    control.attempts, control.calls,
+                    control.refusals.privileged);
+            free_compact_privileged_oracle_result(&reference);
+            free_compact_privileged_oracle_result(&control);
+            return false;
+        }
+        free_compact_privileged_oracle_result(&reference);
+        free_compact_privileged_oracle_result(&control);
+    }
+
+    {
+        compact_privileged_oracle_result_t reference = {0};
+        compact_privileged_oracle_result_t boundary = {0};
+        const bool ran = run_compact_privileged_oracle_case(
+                             ARM_MODE_SVC, false, true,
+                             false, false, &reference) &&
+                         run_compact_privileged_oracle_case(
+                             ARM_MODE_SVC, false, true,
+                             true, true, &boundary);
+        const bool exact = ran &&
+            compact_privileged_snapshots_equal(&reference, &boundary) &&
+            boundary.attempts == 2u && boundary.calls == 1u &&
+            boundary.native_retired == 1u &&
+            boundary.fallback_retired == 0u &&
+            boundary.privileged_attempts == 2u &&
+            boundary.privileged_calls == 1u &&
+            boundary.privileged_retired == 1u &&
+            boundary.refusals.privileged == 0u &&
+            boundary.refusals.zero_retired == 1u;
+        if (!exact) {
+            fprintf(stderr,
+                    "jitbench: compact privileged boundary mismatch "
+                    "attempts/calls/native/fallback/zero=%" PRIu64 "/%" PRIu64
+                    "/%" PRIu64 "/%" PRIu64 "/%" PRIu64 "\n",
+                    boundary.attempts, boundary.calls,
+                    boundary.native_retired, boundary.fallback_retired,
+                    boundary.refusals.zero_retired);
+            free_compact_privileged_oracle_result(&reference);
+            free_compact_privileged_oracle_result(&boundary);
+            return false;
+        }
+        free_compact_privileged_oracle_result(&reference);
+        free_compact_privileged_oracle_result(&boundary);
+    }
+
+    printf("SOC-COMPACT-RAW-PRIVILEGED-ORACLE exact=yes modes=6 "
+           "states=a32,thumb cases=%u banked-registers=yes mmu=on "
+           "privileged-native-prefix=yes privileged-fallback=no "
+           "control=user-only boundary=svc serialized-machine=yes "
+           "runtime-codegen=no\n",
+           exact_cases);
+    return true;
+}
+
 /* The compact loop has always selected Thumb width from CPSR itself, but its
  * former machine entry required PC%4==0 before calling that loop. A valid
  * halfword-aligned entry at PC%4==2 therefore fell straight into arm_step().
@@ -10034,7 +10315,8 @@ static bool bench_soc_compact_raw(uint64_t requested, unsigned reps) {
         fprintf(stderr, "jitbench: SoC compact-raw shape failed\n");
         return false;
     }
-    if (!validate_soc_compact_raw_thumb_halfword_entry() ||
+    if (!validate_soc_compact_raw_privileged_prefix() ||
+        !validate_soc_compact_raw_thumb_halfword_entry() ||
         !validate_soc_compact_raw_resident() ||
         !validate_soc_compact_raw_windows())
         return false;

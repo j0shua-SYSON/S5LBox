@@ -281,6 +281,12 @@ static void test_saved_state_restore_fixture(void) {
     FILE *interpreter_file = fopen(interpreter_marker, "rb");
     bool expect_interpreter = interpreter_file != NULL;
     if (interpreter_file) fclose(interpreter_file);
+    char user_only_marker[VM_FW_BOOT_PATH_CAPACITY + 64u];
+    snprintf(user_only_marker, sizeof user_only_marker, "%s/%s", fixture,
+             VM_FW_BOOT_COMPACT_USER_ONLY_FILE);
+    FILE *user_only_file = fopen(user_only_marker, "rb");
+    bool expect_user_only = user_only_file != NULL;
+    if (user_only_file) fclose(user_only_file);
 
     bool values[VM_BOOT_OPTION_MAX];
     for (unsigned i = 0; i < VM_BOOT_OPTION_MAX; i++) values[i] = false;
@@ -330,8 +336,17 @@ static void test_saved_state_restore_fixture(void) {
             CHECK(mentions(report.summary, "interpreter control"),
                   "interpreter marker did not reach the engine: %s",
                   report.summary);
+#if defined(S5LBOX_STATIC_A64_DEFAULT_COMPACT_RAW)
+        if (!expect_interpreter && expect_user_only)
+            CHECK(mentions(report.summary, "User-only control"),
+                  "User-only marker did not reach the engine: %s",
+                  report.summary);
+#else
+        (void)expect_user_only;
+#endif
 #else
         (void)expect_interpreter;
+        (void)expect_user_only;
 #endif
 
         char marker[VM_FW_BOOT_PATH_CAPACITY + 64u];

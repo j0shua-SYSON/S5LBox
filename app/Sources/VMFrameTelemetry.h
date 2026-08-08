@@ -82,6 +82,9 @@ typedef struct {
     uint64_t compact_calls;
     uint64_t compact_native_retired;
     uint64_t compact_fallback_retired;
+    uint64_t compact_privileged_attempts;
+    uint64_t compact_privileged_calls;
+    uint64_t compact_privileged_retired;
     uint64_t compact_window_crossings;
     uint64_t compact_window_reloads;
     uint64_t compact_window_stops;

@@ -156,6 +156,9 @@ static bool vm_execution_telemetry_not_before(
            VM_EXEC_NOT_BEFORE(compact_calls) &&
            VM_EXEC_NOT_BEFORE(compact_native_retired) &&
            VM_EXEC_NOT_BEFORE(compact_fallback_retired) &&
+           VM_EXEC_NOT_BEFORE(compact_privileged_attempts) &&
+           VM_EXEC_NOT_BEFORE(compact_privileged_calls) &&
+           VM_EXEC_NOT_BEFORE(compact_privileged_retired) &&
            VM_EXEC_NOT_BEFORE(compact_window_crossings) &&
            VM_EXEC_NOT_BEFORE(compact_window_reloads) &&
            VM_EXEC_NOT_BEFORE(compact_window_stops) &&

@@ -236,6 +236,12 @@ static const uint8_t *vm_guest_record_display(const s5l8900_t *m,
                 s5l8900_static_a64_compact_raw_retired(m);
             execution.compact_fallback_retired =
                 s5l8900_static_a64_compact_raw_fallback_retired(m);
+            execution.compact_privileged_attempts =
+                s5l8900_static_a64_compact_raw_privileged_attempts(m);
+            execution.compact_privileged_calls =
+                s5l8900_static_a64_compact_raw_privileged_calls(m);
+            execution.compact_privileged_retired =
+                s5l8900_static_a64_compact_raw_privileged_retired(m);
             execution.compact_window_crossings =
                 s5l8900_static_a64_compact_raw_window_crossings(m);
             execution.compact_window_reloads =

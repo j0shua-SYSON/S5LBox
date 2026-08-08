@@ -58,6 +58,7 @@ typedef struct {
     bool persistent;
     bool graph_enabled;
     bool compact_raw_enabled;
+    bool compact_raw_privileged_enabled;
     bool indirect_enabled;
     bool thumb_conditional_enabled;
     bool vstr_enabled;
@@ -77,6 +78,9 @@ typedef struct {
     uint64_t compact_raw_calls;
     uint64_t compact_raw_retired;
     uint64_t compact_raw_fallback_retired;
+    uint64_t compact_raw_privileged_attempts;
+    uint64_t compact_raw_privileged_calls;
+    uint64_t compact_raw_privileged_retired;
     uint64_t compact_raw_window_crossings;
     uint64_t compact_raw_window_reloads;
     uint64_t compact_raw_window_stops;
@@ -465,6 +469,7 @@ bool s5l8900_static_a64_set_enabled(s5l8900_t *m, bool enabled) {
         state->vfp_fp_session_enabled = true;
         state->fetch_refill_enabled = true;
         state->known_negative_bypass_enabled = true;
+        state->compact_raw_privileged_enabled = true;
         m->static_a64_state = state;
     }
     state->enabled = true;
@@ -528,6 +533,21 @@ bool s5l8900_static_a64_set_compact_raw(s5l8900_t *m, bool enabled) {
     state->persistent = false;
     state->graph_enabled = false;
     state->compact_raw_enabled = true;
+    return true;
+#else
+    (void)enabled;
+    return false;
+#endif
+}
+
+bool s5l8900_static_a64_set_compact_raw_privileged(s5l8900_t *m,
+                                                    bool enabled) {
+    if (!m) return false;
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    static_a64_state_t *state = static_state(m);
+    if (!state || !state->enabled || !a64_static_host_available())
+        return false;
+    state->compact_raw_privileged_enabled = enabled;
     return true;
 #else
     (void)enabled;
@@ -815,6 +835,39 @@ uint64_t s5l8900_static_a64_compact_raw_fallback_retired(
 #endif
 }
 
+uint64_t s5l8900_static_a64_compact_raw_privileged_attempts(
+        const s5l8900_t *m) {
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    const static_a64_state_t *state = static_state(m);
+    return state ? state->compact_raw_privileged_attempts : 0u;
+#else
+    (void)m;
+    return 0u;
+#endif
+}
+
+uint64_t s5l8900_static_a64_compact_raw_privileged_calls(
+        const s5l8900_t *m) {
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    const static_a64_state_t *state = static_state(m);
+    return state ? state->compact_raw_privileged_calls : 0u;
+#else
+    (void)m;
+    return 0u;
+#endif
+}
+
+uint64_t s5l8900_static_a64_compact_raw_privileged_retired(
+        const s5l8900_t *m) {
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    const static_a64_state_t *state = static_state(m);
+    return state ? state->compact_raw_privileged_retired : 0u;
+#else
+    (void)m;
+    return 0u;
+#endif
+}
+
 uint64_t s5l8900_static_a64_compact_raw_window_crossings(
         const s5l8900_t *m) {
 #if defined(S5LBOX_STATIC_A64_ENGINE)
@@ -1002,9 +1055,13 @@ static unsigned try_compact_raw(s5l8900_t *m, static_a64_state_t *state,
         state->compact_raw_refusals.guard++;
         return 0u;
     }
-    if ((cpu->cpsr & ARM_CPSR_MODE_MASK) != ARM_MODE_USR) {
-        state->compact_raw_refusals.privileged++;
-        return 0u;
+    priv = (cpu->cpsr & ARM_CPSR_MODE_MASK) != ARM_MODE_USR;
+    if (priv) {
+        state->compact_raw_privileged_attempts++;
+        if (!state->compact_raw_privileged_enabled) {
+            state->compact_raw_refusals.privileged++;
+            return 0u;
+        }
     }
 
     pc = cpu->r[15];
@@ -1017,7 +1074,6 @@ static unsigned try_compact_raw(s5l8900_t *m, static_a64_state_t *state,
         state->compact_raw_refusals.alignment++;
         return 0u;
     }
-    priv = (cpu->cpsr & ARM_CPSR_MODE_MASK) != ARM_MODE_USR;
     fetch_block = pc & ~UINT32_C(0x3ff);
     if (!cpu->fetch_host || cpu->fetch_blk != fetch_block ||
         cpu->fetch_gen != cpu->tlb_gen || cpu->fetch_priv != priv) {
@@ -1037,6 +1093,10 @@ static unsigned try_compact_raw(s5l8900_t *m, static_a64_state_t *state,
         state->compact_raw_calls++;
         state->compact_raw_retired += native_completed;
         state->compact_raw_fallback_retired += fallback_completed;
+        if (priv) {
+            state->compact_raw_privileged_calls++;
+            state->compact_raw_privileged_retired += native_completed;
+        }
         state->retired += native_completed;
     } else {
         state->compact_raw_refusals.zero_retired++;

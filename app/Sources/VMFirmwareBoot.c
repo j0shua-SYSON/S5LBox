@@ -437,6 +437,7 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
     }
 
     bool forced_interpreter = false;
+    bool compact_user_only = false;
 #if defined(S5LBOX_STATIC_A64_ENGINE)
     /*
      * One signed binary supplies both halves of the physical A/B.  The marker
@@ -463,7 +464,28 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
                    "interpreter control unavailable");
         return false;
     }
+#if defined(S5LBOX_STATIC_A64_DEFAULT_COMPACT_RAW)
+    char compact_user_only_path[VM_FW_BOOT_PATH_CAPACITY + 64u];
+    if (!join_path(compact_user_only_path, sizeof compact_user_only_path,
+                   paths->work, VM_FW_BOOT_COMPACT_USER_ONLY_FILE)) {
+        set_detail(report->detail, sizeof report->detail,
+                   "The compact-control path is too long to use.");
+        set_detail(report->summary, sizeof report->summary, "path too long");
+        return false;
+    }
+    compact_user_only = file_size(compact_user_only_path) > 0u;
+    if (!forced_interpreter && compact_user_only &&
+        !s5l8900_static_a64_set_compact_raw_privileged(machine, false)) {
+        set_detail(report->detail, sizeof report->detail,
+                   "The User-only control could not disable privileged "
+                   "compact entries.");
+        set_detail(report->summary, sizeof report->summary,
+                   "User-only control unavailable");
+        return false;
+    }
 #endif
+#endif
+    (void)compact_user_only;
 
     vm_firmware_boot_state_t state;
     vm_firmware_boot_probe(paths, &state);
@@ -644,14 +666,18 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
     (void)snprintf(report->summary, sizeof report->summary,
                    "iPhone OS 3.1.3 + EXPERIMENTAL native raster HLE");
 #else
-    const char *engine_mode = forced_interpreter ? "interpreter control"
+    const char *engine_mode = "interpreter";
+    if (forced_interpreter) {
+        engine_mode = "interpreter control";
+    } else {
 #if defined(S5LBOX_STATIC_A64_DEFAULT_COMPACT_RAW)
-                                                  : "compact raw";
+        engine_mode = compact_user_only
+            ? "compact raw, User-only control"
+            : "compact raw, privileged prefix";
 #elif defined(S5LBOX_STATIC_A64_DEFAULT_GRAPH)
-                                                  : "static graph";
-#else
-                                                  : "interpreter";
+        engine_mode = "static graph";
 #endif
+    }
     if (restored) {
         (void)snprintf(report->summary, sizeof report->summary,
                        "iPhone OS 3.1.3 restored at %.1f M insn (%s)",

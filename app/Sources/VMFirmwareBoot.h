@@ -81,6 +81,11 @@ extern "C" {
  * it only disables the compiled-in engine so the same binary can provide an
  * interpreter control.  Ordinary machines never contain this file. */
 #define VM_FW_BOOT_INTERPRETER_FILE  "engine.interpreter"
+/* Same-binary performance control for the compact engine. A nonempty marker
+ * keeps compact execution enabled but restores the former User-mode-only
+ * admission gate, isolating privileged-prefix value from every other build,
+ * checkpoint, rendering, and firmware variable. */
+#define VM_FW_BOOT_COMPACT_USER_ONLY_FILE "engine.compact-user-only"
 
 /* How much free space rootfs_work_create() adds to the volume. The stock
  * rootfs ships with ZERO free blocks, so without this launchd can create
