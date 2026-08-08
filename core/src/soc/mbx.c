@@ -3015,7 +3015,6 @@ static bool mbx_execute_textured_sprite(s5l_mbx_t *m,
     uint32_t source_stage_y0 = source_y0;
     uint32_t source_stage_width = width;
     uint32_t source_stage_height = height;
-    uint32_t affine_covered_pixels = 0u;
     if (half_texel_layout) {
         uint32_t minimum_x = UINT32_MAX, minimum_y = UINT32_MAX;
         uint32_t maximum_x = 0u, maximum_y = 0u;
@@ -3043,45 +3042,30 @@ static bool mbx_execute_textured_sprite(s5l_mbx_t *m,
                 if (y_axis[y].second > maximum_y) maximum_y = y_axis[y].second;
             }
         } else {
-            for (uint32_t y = 0; y < height; y++) {
-                for (uint32_t x = 0; x < width; x++) {
-                    float u_fraction, v_fraction;
-                    if (!mbx_affine_pixel(&affine, left + x, top + y,
-                                          &u_fraction, &v_fraction))
-                        continue;
-                    struct mbx_bilinear_axis affine_x, affine_y;
-                    float u_coordinate =
-                        u_texel_start + u_fraction * u_texel_span;
-                    float v_coordinate =
-                        v_texel_start + v_fraction * v_texel_span;
-                    if (!mbx_bilinear_coordinate(
-                            u_coordinate, source_pitch_pixels, &affine_x) ||
-                        !mbx_bilinear_coordinate(
-                            v_coordinate, header_texture_height, &affine_y)) {
-                        if (why) *why =
-                            "affine sprite has an invalid filtered sample";
-                        return false;
-                    }
-                    if (affine_x.first < minimum_x)
-                        minimum_x = affine_x.first;
-                    if (affine_x.second > maximum_x)
-                        maximum_x = affine_x.second;
-                    if (affine_y.first < minimum_y)
-                        minimum_y = affine_y.first;
-                    if (affine_y.second > maximum_y)
-                        maximum_y = affine_y.second;
-                    affine_covered_pixels++;
-                }
-            }
-            if (!affine_covered_pixels) {
-                if (why) *why = "affine sprite covers no destination pixel centres";
-                return false;
-            }
+            /* The inverse transform already proves every covered fragment has
+             * u/v in [0, 1).  A bilinear tap can extend at most one texel past
+             * the UV rectangle's floor/ceil envelope, so stage that bounded
+             * superset directly.  The old path traversed the whole destination
+             * once to discover this window and then repeated the same affine
+             * divisions and coordinate conversion while rendering.  Staging
+             * a conservative rectangle removes that entire discovery pass
+             * without caching or changing any rendered sample calculation. */
+            source_stage_x0 = source_left ? source_left - 1u : 0u;
+            source_stage_y0 = source_top ? source_top - 1u : 0u;
+            uint32_t source_stage_right = source_right < source_pitch_pixels
+                ? source_right + 1u : source_pitch_pixels;
+            uint32_t source_stage_bottom =
+                source_bottom < header_texture_height
+                    ? source_bottom + 1u : header_texture_height;
+            source_stage_width = source_stage_right - source_stage_x0;
+            source_stage_height = source_stage_bottom - source_stage_y0;
         }
-        source_stage_x0 = minimum_x;
-        source_stage_y0 = minimum_y;
-        source_stage_width = maximum_x - minimum_x + 1u;
-        source_stage_height = maximum_y - minimum_y + 1u;
+        if (!affine_sprite) {
+            source_stage_x0 = minimum_x;
+            source_stage_y0 = minimum_y;
+            source_stage_width = maximum_x - minimum_x + 1u;
+            source_stage_height = maximum_y - minimum_y + 1u;
+        }
     }
 
     uint32_t source_row_bytes = source_stage_width * 4u;
@@ -3161,6 +3145,17 @@ static bool mbx_execute_textured_sprite(s5l_mbx_t *m,
                     sample_y = &affine_y;
                     affine_rendered_pixels++;
                 }
+                if (sample_x->first < source_stage_x0 ||
+                    sample_x->second >=
+                        source_stage_x0 + source_stage_width ||
+                    sample_y->first < source_stage_y0 ||
+                    sample_y->second >=
+                        source_stage_y0 + source_stage_height) {
+                    if (why) *why =
+                        "filtered sprite sample escaped its staged source window";
+                    ok = false;
+                    break;
+                }
                 uint32_t x0_offset = sample_x->first - source_stage_x0;
                 uint32_t x1_offset = sample_x->second - source_stage_x0;
                 uint32_t y0_offset = sample_y->first - source_stage_y0;
@@ -3193,9 +3188,8 @@ static bool mbx_execute_textured_sprite(s5l_mbx_t *m,
             pixels[pixel_offset + 3u] = (uint8_t)(blended >> 24);
         }
     }
-    if (ok && affine_sprite &&
-        affine_rendered_pixels != affine_covered_pixels) {
-        if (why) *why = "affine sprite coverage changed during staging";
+    if (ok && affine_sprite && !affine_rendered_pixels) {
+        if (why) *why = "affine sprite covers no destination pixel centres";
         ok = false;
     }
     for (uint32_t row = 0; row < height && ok; row++) {
@@ -3208,7 +3202,7 @@ static bool mbx_execute_textured_sprite(s5l_mbx_t *m,
     free(pixels);
     if (ok && pixels_blended) {
         *pixels_blended = affine_sprite
-            ? affine_covered_pixels : width * height;
+            ? affine_rendered_pixels : width * height;
     }
     return ok;
 }
