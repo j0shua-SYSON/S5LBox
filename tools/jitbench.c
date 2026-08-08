@@ -9819,7 +9819,10 @@ static bool run_compact_privileged_oracle_case(
         UINT32_C(0xe28ee008), /* ADD lr,lr,#8: per-mode bank witness */
     };
     static const uint32_t A32_BOUNDARY[] = {
-        UINT32_C(0xe2888001), /* exact native prefix */
+        UINT32_C(0xe2888001), /* exact native prefix; machine gate may own it */
+        UINT32_C(0xe28cc002), /* keep a native prefix after that gate */
+        UINT32_C(0xe28dd004),
+        UINT32_C(0xe28ee008),
         UINT32_C(0xef000000), /* SVC: always interpreter-owned */
     };
     static const uint16_t THUMB_NATIVE[] = {
@@ -9829,7 +9832,7 @@ static bool run_compact_privileged_oracle_case(
         UINT16_C(0x3304), /* ADDS r3,#4 */
     };
     const uint32_t section = (3u << 10) | 2u;
-    const unsigned total = boundary ? 2u : 4u;
+    const unsigned total = boundary ? 5u : 4u;
     s5l8900_t machine = {0};
     arm_status_t status = ARM_OK;
     bool initialized = false;
@@ -10017,24 +10020,30 @@ static bool validate_soc_compact_raw_privileged_prefix(void) {
                          run_compact_privileged_oracle_case(
                              ARM_MODE_SVC, false, true,
                              true, true, &boundary);
-        const bool exact = ran &&
-            compact_privileged_snapshots_equal(&reference, &boundary) &&
+        const bool snapshot_exact = ran &&
+            compact_privileged_snapshots_equal(&reference, &boundary);
+        /* The first retirement can be owned by the machine timing gate. Four
+         * native instructions ensure the admitted batch still reaches a
+         * nonempty native prefix before the interpreter-owned SVC boundary. */
+        const bool exact = snapshot_exact &&
             boundary.attempts == 2u && boundary.calls == 1u &&
-            boundary.native_retired == 1u &&
+            boundary.native_retired >= 3u &&
+            boundary.native_retired <= 4u &&
             boundary.fallback_retired == 0u &&
             boundary.privileged_attempts == 2u &&
             boundary.privileged_calls == 1u &&
-            boundary.privileged_retired == 1u &&
+            boundary.privileged_retired == boundary.native_retired &&
             boundary.refusals.privileged == 0u &&
             boundary.refusals.zero_retired == 1u;
         if (!exact) {
             fprintf(stderr,
                     "jitbench: compact privileged boundary mismatch "
                     "attempts/calls/native/fallback/zero=%" PRIu64 "/%" PRIu64
-                    "/%" PRIu64 "/%" PRIu64 "/%" PRIu64 "\n",
+                    "/%" PRIu64 "/%" PRIu64 "/%" PRIu64 " snapshot=%s\n",
                     boundary.attempts, boundary.calls,
                     boundary.native_retired, boundary.fallback_retired,
-                    boundary.refusals.zero_retired);
+                    boundary.refusals.zero_retired,
+                    snapshot_exact ? "exact" : "mismatch");
             free_compact_privileged_oracle_result(&reference);
             free_compact_privileged_oracle_result(&boundary);
             return false;
