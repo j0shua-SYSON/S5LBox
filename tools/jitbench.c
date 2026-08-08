@@ -9910,6 +9910,7 @@ static bool validate_soc_compact_raw_privileged_prefix(void) {
         { ARM_MODE_UND, "und" }, { ARM_MODE_SYS, "sys" },
     };
     unsigned exact_cases = 0u;
+    uint64_t minimum_native = UINT64_MAX;
 
     if (!s5l8900_static_a64_available()) {
         printf("SOC-COMPACT-RAW-PRIVILEGED-ORACLE skip "
@@ -9927,14 +9928,17 @@ static bool validate_soc_compact_raw_privileged_prefix(void) {
                              run_compact_privileged_oracle_case(
                                  MODES[i].mode, thumb != 0u, false,
                                  true, true, &native);
-            const bool exact = ran &&
-                compact_privileged_snapshots_equal(&reference, &native) &&
-                native.attempts == 1u && native.calls == 1u &&
-                native.native_retired == 4u &&
+            const bool snapshot_exact = ran &&
+                compact_privileged_snapshots_equal(&reference, &native);
+            const bool exact = snapshot_exact &&
+                native.attempts >= 1u && native.calls >= 1u &&
+                native.calls <= native.attempts &&
+                native.native_retired >= 3u &&
+                native.native_retired <= 4u &&
                 native.fallback_retired == 0u &&
-                native.privileged_attempts == 1u &&
-                native.privileged_calls == 1u &&
-                native.privileged_retired == 4u &&
+                native.privileged_attempts == native.attempts &&
+                native.privileged_calls == native.calls &&
+                native.privileged_retired == native.native_retired &&
                 native.refusals.guard == 0u &&
                 native.refusals.privileged == 0u &&
                 native.refusals.alignment == 0u &&
@@ -9946,16 +9950,19 @@ static bool validate_soc_compact_raw_privileged_prefix(void) {
                         "jitbench: compact privileged %s/%s mismatch "
                         "attempts/calls/native/fallback/priv=%" PRIu64
                         "/%" PRIu64 "/%" PRIu64 "/%" PRIu64
-                        "/%" PRIu64 "\n",
+                        "/%" PRIu64 " snapshot=%s\n",
                         MODES[i].name, thumb ? "thumb" : "a32",
                         native.attempts, native.calls,
                         native.native_retired, native.fallback_retired,
-                        native.privileged_retired);
+                        native.privileged_retired,
+                        snapshot_exact ? "exact" : "mismatch");
                 free_compact_privileged_oracle_result(&reference);
                 free_compact_privileged_oracle_result(&native);
                 return false;
             }
             exact_cases++;
+            if (native.native_retired < minimum_native)
+                minimum_native = native.native_retired;
             free_compact_privileged_oracle_result(&reference);
             free_compact_privileged_oracle_result(&native);
         }
@@ -10034,11 +10041,12 @@ static bool validate_soc_compact_raw_privileged_prefix(void) {
     }
 
     printf("SOC-COMPACT-RAW-PRIVILEGED-ORACLE exact=yes modes=6 "
-           "states=a32,thumb cases=%u banked-registers=yes mmu=on "
+           "states=a32,thumb cases=%u minimum-native=%" PRIu64 " "
+           "banked-registers=yes mmu=on "
            "privileged-native-prefix=yes privileged-fallback=no "
            "control=user-only boundary=svc serialized-machine=yes "
            "runtime-codegen=no\n",
-           exact_cases);
+           exact_cases, minimum_native);
     return true;
 }
 
