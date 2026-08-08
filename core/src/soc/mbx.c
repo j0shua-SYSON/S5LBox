@@ -387,9 +387,12 @@ static bool mbx_gart_read(const s5l_mbx_t *m, const arm_bus_t *bus,
     return true;
 }
 
-/* Writes deliberately use the bus, not host_ram. bootkernel interposes on RAM
- * stores to measure live scanout mutations; a direct memcpy would make the new
- * renderer fast by making its own validation blind. */
+/* host_ram_write is deliberately separate from host_ram: it is the frontend's
+ * explicit, revocable promise that this plain-RAM range has no write observer
+ * to bypass.  The stock machine bus grants it, while bootkernel's scanout
+ * interposer leaves it NULL so every word remains visible.  Consume that
+ * existing consent a translated page span at a time; a range-specific refusal
+ * retains the exact observed bus path. */
 static bool mbx_gart_write(const s5l_mbx_t *m, const arm_bus_t *bus,
                            uint32_t gpu_va, const uint8_t *src, uint32_t len,
                            const char **why) {
@@ -405,8 +408,14 @@ static bool mbx_gart_write(const s5l_mbx_t *m, const arm_bus_t *bus,
             if (why) *why = "translated destination is not word aligned";
             return false;
         }
-        for (uint32_t i = 0; i < span; i += 4u)
-            bus->write32(bus->ctx, pa + i, mbx_load_le32(src + i));
+        uint8_t *direct = bus->host_ram_write
+            ? bus->host_ram_write(bus->ctx, pa, span) : NULL;
+        if (direct) {
+            memcpy(direct, src, span);
+        } else {
+            for (uint32_t i = 0; i < span; i += 4u)
+                bus->write32(bus->ctx, pa + i, mbx_load_le32(src + i));
+        }
         src += span;
         gpu_va += span;
         len -= span;

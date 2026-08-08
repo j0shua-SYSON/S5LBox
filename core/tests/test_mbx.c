@@ -71,6 +71,8 @@ static void test_translated_copy_and_completion_boundary(void) {
     s5l8900_t m;
     CHECK(s5l8900_init(&m, RAM_BASE, RAM_SIZE), "machine init failed");
     if (!m.ram) return;
+    CHECK(s5l8900_set_direct_ram_writes(&m, false),
+          "observer-path fixture could not revoke direct RAM writes");
 
     /* GPU VA 0x008xxxxx selects root register 2. Source rows intentionally
      * land on non-contiguous physical pages; destination rows do too. */
