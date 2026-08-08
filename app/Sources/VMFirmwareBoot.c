@@ -2,6 +2,8 @@
 #include "VMFirmwareBoot.h"
 
 #include "file_block.h"
+#include "md_snapshot.h"
+#include "snapshot.h"
 #include "VMSnapshotCow.h"
 #include "VMFirmwareHLE.h"
 #include "ios3_bringup_gate.h"
@@ -76,6 +78,119 @@ static void set_detail(char *out, size_t capacity, const char *text) {
     if (!out || !capacity) return;
     (void)snprintf(out, capacity, "%s", text ? text : "");
     out[capacity - 1u] = '\0';
+}
+
+/*
+ * Restore a checkpoint only when an explicit, non-empty one-shot marker is
+ * present.  The state pair on its own is inert: that prevents an interrupted
+ * copy, an obsolete experiment, or a future snapshot-list entry from silently
+ * replacing a cold boot.
+ *
+ * The caller has already opened the live work image and completed bring-up.
+ * That establishes the correct RAM geometry, bridge callbacks and host-owned
+ * pointers.  snapshot_load() then replaces only their contents, exactly as the
+ * desktop harness does.  The marker is consumed by the caller only after every
+ * post-restore hook has also succeeded, so a failed start remains retryable.
+ */
+static bool restore_once(vm_firmware_boot_t *boot, s5l8900_t *machine,
+                         const vm_firmware_boot_paths_t *paths,
+                         uint64_t work_size, bool *restored,
+                         char *marker_path, size_t marker_capacity,
+                         char *detail, size_t detail_capacity) {
+    if (restored) *restored = false;
+    if (marker_path && marker_capacity) marker_path[0] = '\0';
+    if (!boot || !boot->bridges || !machine || !paths || !restored ||
+        !marker_path || !marker_capacity) {
+        set_detail(detail, detail_capacity,
+                   "The saved-state restore request was incomplete.");
+        return false;
+    }
+
+    char state_path[VM_FW_BOOT_PATH_CAPACITY + 64u];
+    char md_path[VM_FW_BOOT_PATH_CAPACITY + 64u];
+    if (!join_path(marker_path, marker_capacity, paths->work,
+                   VM_FW_BOOT_RESTORE_ONCE_FILE) ||
+        !join_path(state_path, sizeof state_path, paths->work,
+                   VM_FW_BOOT_STATE_FILE) ||
+        !join_path(md_path, sizeof md_path, paths->work,
+                   VM_FW_BOOT_STATE_MD_FILE)) {
+        set_detail(detail, detail_capacity,
+                   "The saved-state path is too long to use.");
+        return false;
+    }
+
+    if (file_size(marker_path) == 0u) {
+        marker_path[0] = '\0';
+        return true;
+    }
+
+    uint64_t state_bytes = file_size(state_path);
+    uint64_t md_bytes = file_size(md_path);
+    if (state_bytes == 0u || md_bytes != (uint64_t)sizeof(external_md_sidecar_t)) {
+        (void)snprintf(detail, detail_capacity,
+                       "The one-shot restore needs a complete %s and an exact "
+                       "%zu-byte %s; found %llu and %llu bytes.",
+                       VM_FW_BOOT_STATE_FILE, sizeof(external_md_sidecar_t),
+                       VM_FW_BOOT_STATE_MD_FILE,
+                       (unsigned long long)state_bytes,
+                       (unsigned long long)md_bytes);
+        if (detail && detail_capacity) detail[detail_capacity - 1u] = '\0';
+        return false;
+    }
+
+    external_md_sidecar_t sidecar;
+    FILE *md = fopen(md_path, "rb");
+    bool read_ok = md && fread(&sidecar, sizeof sidecar, 1u, md) == 1u;
+    if (md) fclose(md);
+    if (!read_ok) {
+        set_detail(detail, detail_capacity,
+                   "The saved memory-disk bridge state could not be read.");
+        return false;
+    }
+    if (sidecar.magic != EXTERNAL_MD_SIDECAR_MAGIC ||
+        sidecar.version != EXTERNAL_MD_SIDECAR_VERSION) {
+        (void)snprintf(detail, detail_capacity,
+                       "The saved memory-disk bridge state is format %08x/%u; "
+                       "this build requires %08x/%u.",
+                       sidecar.magic, sidecar.version,
+                       EXTERNAL_MD_SIDECAR_MAGIC,
+                       EXTERNAL_MD_SIDECAR_VERSION);
+        if (detail && detail_capacity) detail[detail_capacity - 1u] = '\0';
+        return false;
+    }
+    if (sidecar.media_size != work_size || sidecar.image_bytes != work_size) {
+        (void)snprintf(detail, detail_capacity,
+                       "The saved state describes a %llu-byte disk image "
+                       "(%llu bytes copied), but this machine has %llu bytes.",
+                       (unsigned long long)sidecar.media_size,
+                       (unsigned long long)sidecar.image_bytes,
+                       (unsigned long long)work_size);
+        if (detail && detail_capacity) detail[detail_capacity - 1u] = '\0';
+        return false;
+    }
+    if (!boot->bridges->installed) {
+        set_detail(detail, detail_capacity,
+                   "The saved state needs the memory-disk bridges, but bring-up "
+                   "did not install them.");
+        return false;
+    }
+
+    memcpy(boot->bridges->raw.guard_tail, sidecar.guard_tail,
+           sizeof sidecar.guard_tail);
+    boot->bridges->raw.stats = sidecar.raw_stats;
+    boot->bridges->strategy.stats = sidecar.strategy_stats;
+
+    snapshot_status_t status = snapshot_load(machine, state_path);
+    if (status != SNAP_OK) {
+        (void)snprintf(detail, detail_capacity,
+                       "The saved machine state was refused: %s.",
+                       snapshot_strerror(status));
+        if (detail && detail_capacity) detail[detail_capacity - 1u] = '\0';
+        return false;
+    }
+
+    *restored = true;
+    return true;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -321,6 +436,35 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
         return false;
     }
 
+    bool forced_interpreter = false;
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    /*
+     * One signed binary supplies both halves of the physical A/B.  The marker
+     * only turns an already compiled engine OFF; it cannot create executable
+     * memory or enable a facility absent from the build.  Keeping the choice
+     * outside the core snapshot is intentional: static_a64_state is host-owned
+     * derived state and snapshot_load() never serializes it.
+     */
+    char interpreter_path[VM_FW_BOOT_PATH_CAPACITY + 64u];
+    if (!join_path(interpreter_path, sizeof interpreter_path, paths->work,
+                   VM_FW_BOOT_INTERPRETER_FILE)) {
+        set_detail(report->detail, sizeof report->detail,
+                   "The engine-control path is too long to use.");
+        set_detail(report->summary, sizeof report->summary, "path too long");
+        return false;
+    }
+    forced_interpreter = file_size(interpreter_path) > 0u;
+    if (forced_interpreter &&
+        !s5l8900_static_a64_set_enabled(machine, false)) {
+        set_detail(report->detail, sizeof report->detail,
+                   "The interpreter control could not disable the signed "
+                   "static engine.");
+        set_detail(report->summary, sizeof report->summary,
+                   "interpreter control unavailable");
+        return false;
+    }
+#endif
+
     vm_firmware_boot_state_t state;
     vm_firmware_boot_probe(paths, &state);
     if (state.readiness != VM_FW_BOOT_READY) {
@@ -450,6 +594,17 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
         return false;
     }
 
+    bool restored = false;
+    char restore_marker[VM_FW_BOOT_PATH_CAPACITY + 64u];
+    if (!restore_once(boot, machine, paths, state.work_size, &restored,
+                      restore_marker, sizeof restore_marker,
+                      report->detail, sizeof report->detail)) {
+        (void)file_block_close(boot->media);
+        set_detail(report->summary, sizeof report->summary,
+                   "saved state unavailable");
+        return false;
+    }
+
 #if defined(S5LBOX_IOS3_HLE_EXPERIMENT)
     /*
      * This build exists to measure the native raster replacements on a real
@@ -469,13 +624,43 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
     boot->hle_machine = machine;
 #endif
 
+    /* Consume only the request, not the checkpoint.  The state remains useful
+     * for a controlled repeat, but it cannot roll a disk forward or backward a
+     * second time unless the caller explicitly re-arms it after reinstalling
+     * the matching image. */
+    if (restored && remove(restore_marker) != 0) {
+        (void)file_block_close(boot->media);
+        set_detail(report->detail, sizeof report->detail,
+                   "The saved state loaded, but its one-shot marker could not "
+                   "be consumed. The machine was stopped to prevent an unsafe "
+                   "second restore after its disk changes.");
+        set_detail(report->summary, sizeof report->summary,
+                   "saved state not safely consumed");
+        return false;
+    }
+
     report->ok = true;
 #if defined(S5LBOX_IOS3_HLE_EXPERIMENT)
     (void)snprintf(report->summary, sizeof report->summary,
                    "iPhone OS 3.1.3 + EXPERIMENTAL native raster HLE");
 #else
-    (void)snprintf(report->summary, sizeof report->summary,
-                   "iPhone OS 3.1.3 kernel, root on /dev/md0");
+    const char *engine_mode = forced_interpreter ? "interpreter control"
+#if defined(S5LBOX_STATIC_A64_DEFAULT_COMPACT_RAW)
+                                                  : "compact raw";
+#elif defined(S5LBOX_STATIC_A64_DEFAULT_GRAPH)
+                                                  : "static graph";
+#else
+                                                  : "interpreter";
+#endif
+    if (restored) {
+        (void)snprintf(report->summary, sizeof report->summary,
+                       "iPhone OS 3.1.3 restored at %.1f M insn (%s)",
+                       (double)machine->cpu.cycles / 1000000.0, engine_mode);
+    } else {
+        (void)snprintf(report->summary, sizeof report->summary,
+                       "iPhone OS 3.1.3 kernel, root on /dev/md0 (%s)",
+                       engine_mode);
+    }
 #endif
     report->summary[sizeof report->summary - 1u] = '\0';
     return true;

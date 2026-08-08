@@ -31,6 +31,7 @@
 #include "macho.h"
 #include "md_bridge.h"
 #include "md_raw_bridge.h"
+#include "md_snapshot.h"
 #include "mt_drag.h"
 #include "ppp.h"
 #include "net.h"
@@ -1290,19 +1291,6 @@ typedef struct {
  * state spans a guest bounce slot and a host transfer, and a checkpoint taken
  * mid-flight could not be restored coherently.
  */
-#define EXTERNAL_MD_SIDECAR_MAGIC UINT32_C(0x3144534d)   /* "MDS1" */
-#define EXTERNAL_MD_SIDECAR_VERSION UINT32_C(1)
-
-typedef struct {
-    uint32_t magic;
-    uint32_t version;
-    uint64_t media_size;
-    uint64_t image_bytes;
-    md_bridge_stats_t strategy_stats;
-    md_raw_bridge_stats_t raw_stats;
-    uint8_t guard_tail[MD_RAW_BRIDGE_MAX_TRANSFER];
-} external_md_sidecar_t;
-
 /* Set during external-md setup so the checkpoint path can reach them. */
 static md_bridge_t *g_external_strategy_bridge = NULL;
 static md_raw_bridge_t *g_external_raw_bridge = NULL;

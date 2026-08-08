@@ -51,8 +51,10 @@ extern "C" {
 #define VM_FW_BOOT_ROOTFS_FILE      "rootfs.img"
 #define VM_FW_BOOT_WORK_FILE        "rootfs-work.img"
 /*
- * The suspend-to-disk pair, written when the machine is paused and read
- * instead of booting.
+ * The reserved suspend-to-disk pair.  The app does not yet create this pair;
+ * a complete pair supplied by a trusted checkpoint may be consumed once when
+ * VM_FW_BOOT_RESTORE_ONCE_FILE is also present.  No marker means no restore,
+ * even if stale or partial state files happen to exist.
  *
  * WHY THIS IS TWO FILES AND NOT THREE. bootkernel writes a 466 MB `.mdimage`
  * sidecar beside every snapshot because it builds a FRESH work image on every
@@ -72,6 +74,13 @@ extern "C" {
 #define VM_FW_BOOT_STATE_MD_FILE    "state.snap.mdstate"
 #define VM_FW_BOOT_STATE_TMP        "state.snap.partial"
 #define VM_FW_BOOT_STATE_MD_TMP     "state.snap.mdstate.partial"
+#define VM_FW_BOOT_RESTORE_ONCE_FILE "state.snap.restore-once"
+
+/* Physical A/B control for the signed-static engine.  This marker is read only
+ * in builds which contain that engine.  It never enables executable memory;
+ * it only disables the compiled-in engine so the same binary can provide an
+ * interpreter control.  Ordinary machines never contain this file. */
+#define VM_FW_BOOT_INTERPRETER_FILE  "engine.interpreter"
 
 /* How much free space rootfs_work_create() adds to the volume. The stock
  * rootfs ships with ZERO free blocks, so without this launchd can create

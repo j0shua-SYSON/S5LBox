@@ -17,6 +17,7 @@
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed.
  */
 #include "VMFirmwareBoot.h"
+#include "md_snapshot.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -250,10 +251,119 @@ static void test_app_settings_reach_the_guest(const uint8_t *kernel,
     free(plain);
 }
 
+/*
+ * Optional artifact-backed seam test.  CI cannot carry Apple's firmware or a
+ * 588 MB checkpoint fixture, so the ordinary run states the skip.  A maintainer
+ * can point S5LBOX_APP_RESTORE_FIXTURE at a disposable directory containing:
+ *
+ *   rootfs-work.img, state.snap, state.snap.mdstate,
+ *   state.snap.restore-once
+ *
+ * This reaches the same VMFirmwareBoot entry point as the phone.  It is not a
+ * core-only snapshot test: the app must open the external disk, create both md
+ * bridges, apply their sidecar, load the machine, and consume the marker.
+ */
+static void test_saved_state_restore_fixture(void) {
+    const char *fixture = getenv("S5LBOX_APP_RESTORE_FIXTURE");
+    if (!fixture || !*fixture) {
+        printf("SKIP: app saved-state restore needs "
+               "S5LBOX_APP_RESTORE_FIXTURE\n");
+        return;
+    }
+
+    vm_firmware_boot_paths_t paths;
+    CHECK(vm_firmware_boot_paths_split(&paths, S5LBOX_FIRMWARE_DIR, fixture),
+          "restore fixture paths were refused");
+
+    char interpreter_marker[VM_FW_BOOT_PATH_CAPACITY + 64u];
+    snprintf(interpreter_marker, sizeof interpreter_marker, "%s/%s", fixture,
+             VM_FW_BOOT_INTERPRETER_FILE);
+    FILE *interpreter_file = fopen(interpreter_marker, "rb");
+    bool expect_interpreter = interpreter_file != NULL;
+    if (interpreter_file) fclose(interpreter_file);
+
+    bool values[VM_BOOT_OPTION_MAX];
+    for (unsigned i = 0; i < VM_BOOT_OPTION_MAX; i++) values[i] = false;
+    for (unsigned i = 0; i < vm_option_count() && i < VM_BOOT_OPTION_MAX; i++)
+        values[i] = vm_option_at(i)->def;
+    static const char *const ON[] = {
+        "mbx", "usb-otg", "multitouch", "vram", "lcd-panel-id",
+        "memory-reg", "rtc-patch", "activate", "nat"
+    };
+    for (unsigned n = 0; n < sizeof ON / sizeof ON[0]; n++) {
+        int i = vm_option_index(ON[n]);
+        CHECK(i >= 0, "restore option %s is absent", ON[n]);
+        if (i >= 0) values[(unsigned)i] = true;
+    }
+    int ca = vm_option_index("ca-software-render");
+    CHECK(ca >= 0, "ca-software-render option is absent");
+    if (ca >= 0) values[(unsigned)ca] = false;
+
+    s5l8900_t machine;
+    vm_firmware_boot_report_t report;
+    vm_firmware_boot_t *boot = vm_firmware_boot_create();
+    memset(&machine, 0, sizeof machine);
+    CHECK(boot != NULL, "could not create restore boot context");
+    CHECK(s5l8900_init(&machine, S5L_BRINGUP_PHYS_BASE,
+                       S5L_BRINGUP_RAM_SIZE),
+          "restore s5l8900_init failed");
+    if (!boot || !machine.ram) {
+        if (machine.ram) s5l8900_free(&machine);
+        vm_firmware_boot_destroy(&boot);
+        return;
+    }
+
+    bool ok = vm_firmware_boot_start(boot, &machine, &paths, values,
+                                     vm_option_count(), &report);
+    CHECK(ok, "app restore was refused: %s", report.detail);
+    CHECK(report.ok == ok, "restore report.ok disagrees with return value");
+    if (ok) {
+        CHECK(machine.cpu.cycles == UINT64_C(7320000000),
+              "restored at %llu instructions, expected 7320000000",
+              (unsigned long long)machine.cpu.cycles);
+        CHECK(s5l_clcd_active_window(&machine.clcd) != CLCD_WIN_NONE,
+              "restored active scene has no CLCD window");
+        CHECK(mentions(report.summary, "restored"),
+              "restore summary hides what happened: %s", report.summary);
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+        if (expect_interpreter)
+            CHECK(mentions(report.summary, "interpreter control"),
+                  "interpreter marker did not reach the engine: %s",
+                  report.summary);
+#else
+        (void)expect_interpreter;
+#endif
+
+        char marker[VM_FW_BOOT_PATH_CAPACITY + 64u];
+        snprintf(marker, sizeof marker, "%s/%s", fixture,
+                 VM_FW_BOOT_RESTORE_ONCE_FILE);
+        FILE *still_there = fopen(marker, "rb");
+        CHECK(still_there == NULL,
+              "successful restore did not consume its one-shot marker");
+        if (still_there) fclose(still_there);
+    }
+
+    s5l8900_free(&machine);
+    vm_firmware_boot_destroy(&boot);
+}
+
 int main(void) {
     vm_firmware_boot_state_t state;
 
     printf("== vm firmware boot ==\n");
+
+    /* This is a persisted ABI, not an in-memory convenience.  r446 and every
+     * external-md checkpoint written by bootkernel v1 carry exactly 131,248
+     * bytes here; an architecture-dependent layout change must fail before a
+     * phone reads the wrong offsets as bridge counters or coherent tail data. */
+    CHECK(sizeof(external_md_sidecar_t) == 131248u,
+          "external-md sidecar ABI is %zu bytes, expected 131248",
+          sizeof(external_md_sidecar_t));
+    CHECK(EXTERNAL_MD_SIDECAR_MAGIC == UINT32_C(0x3144534d) &&
+          EXTERNAL_MD_SIDECAR_VERSION == UINT32_C(1),
+          "external-md sidecar identity drifted");
+
+    test_saved_state_restore_fixture();
 
     {
         size_t klen = 0, tlen = 0;
