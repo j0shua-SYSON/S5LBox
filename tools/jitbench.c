@@ -339,6 +339,12 @@ static const uint16_t THUMB_INTEGER_MISC[] = {
      ((uint32_t)(load) << 20) | ((uint32_t)(rn) << 16) |                  \
      (uint32_t)(list))
 
+#define A32_COPROC_TRANSFER(cond, opc1, load, crn, rd, cp, opc2, crm)       \
+    (((uint32_t)(cond) << 28) | UINT32_C(0x0e000010) |                     \
+     ((uint32_t)(opc1) << 21) | ((uint32_t)(load) << 20) |                 \
+     ((uint32_t)(crn) << 16) | ((uint32_t)(rd) << 12) |                    \
+     ((uint32_t)(cp) << 8) | ((uint32_t)(opc2) << 5) | (uint32_t)(crm))
+
 #define VFP_SV(n) ((uint32_t)(n) >> 1)
 #define VFP_SB(n) ((uint32_t)(n) & 1u)
 #define VFP_DP(p,q,r,D,vn,vd,sz,N,s,M,vm)                                  \
@@ -5384,6 +5390,10 @@ static bool validate_compact_raw_admission_shapes(void) {
           A64_COMPACT_RAW_ADMIT_EXECUTE },
         { UINT32_C(0xe5970001), false,
           A64_COMPACT_RAW_REJECT_MEMORY_ALIGNMENT },
+        { UINT32_C(0xee100e10), false, A64_COMPACT_RAW_ADMIT_EXECUTE },
+        { UINT32_C(0xee070f5a), false, A64_COMPACT_RAW_ADMIT_EXECUTE },
+        { UINT32_C(0xee1d0f50), false, A64_COMPACT_RAW_ADMIT_EXECUTE },
+        { UINT32_C(0xee072f90), false, A64_COMPACT_RAW_REJECT_CLASS },
         { VFP_UN_S(0, 0, 0, 1), false, A64_COMPACT_RAW_REJECT_VFP },
         { UINT32_C(0xef000000), false, A64_COMPACT_RAW_REJECT_CLASS },
     };
@@ -5403,6 +5413,31 @@ static bool validate_compact_raw_admission_shapes(void) {
             return false;
         }
     }
+    cpu.cpsr = (cpu.cpsr & ~ARM_CPSR_MODE_MASK) | ARM_MODE_USR;
+    if (a64_compact_raw_classify_instruction(
+            &cpu, UINT32_C(0xee070f5a), false) !=
+            A64_COMPACT_RAW_ADMIT_EXECUTE ||
+        a64_compact_raw_classify_instruction(
+            &cpu, UINT32_C(0xee1d0f50), false) !=
+            A64_COMPACT_RAW_ADMIT_EXECUTE ||
+        a64_compact_raw_classify_instruction(
+            &cpu, UINT32_C(0xee1d0f70), false) !=
+            A64_COMPACT_RAW_ADMIT_EXECUTE ||
+        a64_compact_raw_classify_instruction(
+            &cpu, UINT32_C(0xee100e10), false) !=
+            A64_COMPACT_RAW_REJECT_CLASS ||
+        a64_compact_raw_classify_instruction(
+            &cpu, UINT32_C(0xee0d0f70), false) !=
+            A64_COMPACT_RAW_REJECT_CLASS ||
+        a64_compact_raw_classify_instruction(
+            &cpu, UINT32_C(0xee1d0f90), false) !=
+            A64_COMPACT_RAW_REJECT_CLASS) {
+        fprintf(stderr,
+                "jitbench: compact raw system-coprocessor privilege guard "
+                "mismatch\n");
+        return false;
+    }
+    cpu.cpsr = (cpu.cpsr & ~ARM_CPSR_MODE_MASK) | ARM_MODE_SYS;
     cpu.r[0] = UINT32_C(0x1a01);
     if (a64_compact_raw_classify_instruction(
             &cpu, UINT32_C(0xe12fff10), false) !=
@@ -5616,7 +5651,7 @@ static bool validate_compact_raw_admission_shapes(void) {
         fprintf(stderr, "jitbench: compact raw VFP Len guard admitted\n");
         return false;
     }
-    printf("COMPACT-RAW-ADMISSION-MODEL exact-shapes=yes cases=70 "
+    printf("COMPACT-RAW-ADMISSION-MODEL exact-shapes=yes cases=80 "
            "outcomes=13 condition-before-decode=yes machine-gates=excluded\n");
     return true;
 }
@@ -8551,6 +8586,129 @@ done:
     return ok;
 }
 
+static bool compact_raw_system_coprocessor_case(
+        const char *name, const uint32_t *program, unsigned insns,
+        uint32_t mode, unsigned expected_completed) {
+    const uint32_t pc = UINT32_C(0x2c000);
+    arm_cpu_t reference, compact;
+    final_state_t reference_state, compact_state;
+    arm_status_t status = ARM_OK;
+    unsigned completed = UINT_MAX;
+
+    seed_cpu_at(&reference, program, insns, false, pc);
+    reference.cpsr = (reference.cpsr & ~ARM_CPSR_MODE_MASK) | mode;
+    reference.cp15.tpidrurw = UINT32_C(0x13579bdf);
+    reference.cp15.tpidruro = UINT32_C(0x2468ace0);
+    reference.cp15.tpidrprw = UINT32_C(0x55aa55aa);
+    compact = reference;
+
+    for (unsigned i = 0u; i < expected_completed; i++) {
+        status = arm_step(&reference);
+        if (status != ARM_OK) break;
+    }
+    capture_state(&reference_state, &reference, status, JIT_EXIT_NEXT);
+    if (!a64_compact_raw_run(
+            &compact, &g_ram[pc], pc, insns * 4u, insns,
+            g_ram, sizeof g_ram, &completed)) {
+        fprintf(stderr,
+                "jitbench: compact raw system-coprocessor %s refused "
+                "runner contract\n", name);
+        return false;
+    }
+    capture_state(&compact_state, &compact, ARM_OK, JIT_EXIT_NEXT);
+    if (status != ARM_OK || completed != expected_completed ||
+        !architectural_states_equal(&reference_state, &compact_state) ||
+        memcmp(&reference.cp15, &compact.cp15, sizeof reference.cp15) != 0) {
+        fprintf(stderr,
+                "jitbench: compact raw system-coprocessor %s mismatch "
+                "completed=%u/%u\n",
+                name, completed, expected_completed);
+        return false;
+    }
+    return true;
+}
+
+static bool validate_compact_raw_system_coprocessor_oracles(void) {
+    static const uint32_t PRIVILEGED[] = {
+        A32_COPROC_TRANSFER(14,0,1,0,0,14,0,0),  /* CP14 MRC -> zero */
+        A32_COPROC_TRANSFER(14,0,0,0,1,14,0,0),  /* CP14 MCR ignored */
+        UINT32_C(0xee070f5a),                     /* hot c7 cache op */
+        A32_COPROC_TRANSFER(14,0,1,7,2,15,1,3),  /* c7 MRC -> zero */
+        A32_COPROC_TRANSFER(14,0,1,13,3,15,2,0), /* TPIDRURW read */
+        A32_COPROC_TRANSFER(14,0,0,13,4,15,2,0), /* TPIDRURW write */
+        A32_COPROC_TRANSFER(14,0,1,13,5,15,3,0), /* TPIDRURO read */
+        A32_COPROC_TRANSFER(14,0,0,13,6,15,3,0), /* TPIDRURO write */
+        A32_COPROC_TRANSFER(14,0,1,13,7,15,4,0), /* TPIDRPRW read */
+        A32_COPROC_TRANSFER(14,0,0,13,15,15,4,7),/* PC+8 write */
+    };
+    static const uint32_t USER[] = {
+        UINT32_C(0xee070f5a),
+        A32_COPROC_TRANSFER(14,0,1,7,0,15,1,3),
+        A32_COPROC_TRANSFER(14,0,1,13,1,15,2,0),
+        A32_COPROC_TRANSFER(14,0,0,13,2,15,2,0),
+        A32_COPROC_TRANSFER(14,0,1,13,3,15,3,0),
+    };
+    static const uint32_t WFI_PREFIX[] = {
+        UINT32_C(0xe2800001),
+        UINT32_C(0xee072f90),
+        UINT32_C(0xe2811001),
+    };
+    static const uint32_t FAILED_CONDITION_WFI[] = {
+        UINT32_C(0x0e072f90),
+        UINT32_C(0xe2800001),
+    };
+    static const uint32_t USER_CP14[] = {
+        A32_COPROC_TRANSFER(14,0,1,0,0,14,0,0),
+    };
+    static const uint32_t USER_TPIDRURO_WRITE[] = {
+        A32_COPROC_TRANSFER(14,0,0,13,0,15,3,0),
+    };
+    static const uint32_t USER_BAD_CRM[] = {
+        A32_COPROC_TRANSFER(14,0,1,13,0,15,2,1),
+    };
+    static const uint32_t PRIV_CONTEXT_ID[] = {
+        A32_COPROC_TRANSFER(14,0,1,13,0,15,1,0),
+    };
+
+    if (!a64_static_host_available()) {
+        printf("COMPACT-RAW-SYSTEM-COPROCESSOR-ORACLE skip "
+               "reason=signed-aarch64-unavailable\n");
+        return true;
+    }
+    if (!compact_raw_system_coprocessor_case(
+            "privileged", PRIVILEGED,
+            (unsigned)(sizeof PRIVILEGED / sizeof PRIVILEGED[0]),
+            ARM_MODE_SYS,
+            (unsigned)(sizeof PRIVILEGED / sizeof PRIVILEGED[0])) ||
+        !compact_raw_system_coprocessor_case(
+            "user", USER, (unsigned)(sizeof USER / sizeof USER[0]),
+            ARM_MODE_USR, (unsigned)(sizeof USER / sizeof USER[0])) ||
+        !compact_raw_system_coprocessor_case(
+            "wfi-prefix", WFI_PREFIX,
+            (unsigned)(sizeof WFI_PREFIX / sizeof WFI_PREFIX[0]),
+            ARM_MODE_SYS, 1u) ||
+        !compact_raw_system_coprocessor_case(
+            "failed-condition-wfi", FAILED_CONDITION_WFI,
+            (unsigned)(sizeof FAILED_CONDITION_WFI /
+                       sizeof FAILED_CONDITION_WFI[0]),
+            ARM_MODE_SYS, 2u) ||
+        !compact_raw_system_coprocessor_case(
+            "user-cp14", USER_CP14, 1u, ARM_MODE_USR, 0u) ||
+        !compact_raw_system_coprocessor_case(
+            "user-tpidruro-write", USER_TPIDRURO_WRITE, 1u,
+            ARM_MODE_USR, 0u) ||
+        !compact_raw_system_coprocessor_case(
+            "user-bad-crm", USER_BAD_CRM, 1u, ARM_MODE_USR, 0u) ||
+        !compact_raw_system_coprocessor_case(
+            "priv-context-id", PRIV_CONTEXT_ID, 1u, ARM_MODE_SYS, 0u))
+        return false;
+
+    printf("COMPACT-RAW-SYSTEM-COPROCESSOR-ORACLE exact=yes "
+           "cp14=yes cp15-c7=yes wfi=fallback thread-id=rw "
+           "privilege=guarded cases=8\n");
+    return true;
+}
+
 static bool validate_compact_raw_oracles(void) {
     static const unsigned result_ops[] = {
         0u, 1u, 2u, 3u, 4u, 5u, 6u, 7u, 12u, 13u, 14u, 15u,
@@ -8617,6 +8775,8 @@ static bool validate_compact_raw_oracles(void) {
     final_state_t before, after;
     unsigned completed = UINT_MAX;
 
+    if (!validate_compact_raw_system_coprocessor_oracles())
+        return false;
     if (!validate_compact_raw_vfp_nonarith_oracles())
         return false;
     if (!validate_compact_raw_vfp_arithmetic_oracles())

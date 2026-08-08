@@ -3261,6 +3261,111 @@ def compact_vfp_nonarith_body() -> list[str]:
     ]
 
 
+def compact_system_coprocessor_body() -> list[str]:
+    """Return exact callback-free CP14 and safe CP15 scalar semantics."""
+    return [
+        ".La64cr_coprocessor_decode:",
+        # Only the MCR/MRC form reaches exec_coprocessor() in arm_step().
+        # Other class-3 encodings retain the existing VFP decoder/fallback.
+        "    ubfx w10, w9, #24, #4",
+        "    cmp w10, #0xe",
+        "    b.ne .La64cr_vfp_decode",
+        "    tbz w9, #4, .La64cr_vfp_decode",
+        "    ubfx w10, w9, #8, #4",
+        "    cmp w10, #14",
+        "    b.eq .La64cr_cp14",
+        "    cmp w10, #15",
+        "    b.eq .La64cr_cp15",
+        "    b .La64cr_vfp_decode",
+        "",
+        # The modeled ARM1176 has no debug unit. Privileged CP14 reads return
+        # zero and writes are ignored; User accesses remain undefined.
+        ".La64cr_cp14:",
+        "    ldr w10, [x27, #84]",
+        "    cbz w10, .La64cr_fallback",
+        "    tbz w9, #20, .La64cr_system_done",
+        "    ubfx w10, w9, #12, #4",
+        "    cmp w10, #15",
+        "    b.eq .La64cr_system_done",
+        "    str wzr, [x19, w10, uxtw #2]",
+        "    b .La64cr_system_done",
+        "",
+        ".La64cr_cp15:",
+        "    ubfx w10, w9, #16, #4",
+        "    cmp w10, #7",
+        "    b.eq .La64cr_cp15_c7",
+        "    cmp w10, #13",
+        "    b.eq .La64cr_cp15_c13",
+        "    b .La64cr_fallback",
+        "",
+        # Every c7 read returns zero and every ordinary cache/barrier write is
+        # a no-op in the interpreter. The exact WFI form must leave the native
+        # loop before any retirement so the platform wait callback remains
+        # synchronous with the device graph.
+        ".La64cr_cp15_c7:",
+        "    tbnz w9, #20, .La64cr_cp15_c7_read",
+        "    ubfx w10, w9, #21, #3",
+        "    cbnz w10, .La64cr_system_done",
+        "    and w10, w9, #0xf",
+        "    cbnz w10, .La64cr_system_done",
+        "    ubfx w10, w9, #5, #3",
+        "    cmp w10, #4",
+        "    b.eq .La64cr_fallback",
+        "    b .La64cr_system_done",
+        ".La64cr_cp15_c7_read:",
+        "    ubfx w10, w9, #12, #4",
+        "    cmp w10, #15",
+        "    b.eq .La64cr_system_done",
+        "    str wzr, [x19, w10, uxtw #2]",
+        "    b .La64cr_system_done",
+        "",
+        # c13 opc2 2..4 are the software thread-ID words. User mode may
+        # read/write TPIDRURW and read TPIDRURO with CRm=0; all three are
+        # available in privileged modes. Context/FCSE writes still fall back
+        # because they can change translation identity or require a TLB flush.
+        ".La64cr_cp15_c13:",
+        "    ubfx w11, w9, #5, #3",
+        "    cmp w11, #2",
+        "    b.lo .La64cr_fallback",
+        "    cmp w11, #4",
+        "    b.hi .La64cr_fallback",
+        "    ldr w10, [x27, #84]",
+        "    cbnz w10, .La64cr_cp15_c13_access",
+        "    and w10, w9, #0xf",
+        "    cbnz w10, .La64cr_fallback",
+        "    cmp w11, #2",
+        "    b.eq .La64cr_cp15_c13_access",
+        "    cmp w11, #3",
+        "    b.ne .La64cr_fallback",
+        "    tbz w9, #20, .La64cr_fallback",
+        ".La64cr_cp15_c13_access:",
+        "    ldr x0, [x27, #152]",
+        "    cbz x0, .La64cr_fallback",
+        "    add x0, x0, #44",
+        "    add x0, x0, w11, uxtw #2",
+        "    ubfx w10, w9, #12, #4",
+        "    tbz w9, #20, .La64cr_cp15_c13_write",
+        "    cmp w10, #15",
+        "    b.eq .La64cr_system_done",
+        "    ldr w12, [x0]",
+        "    str w12, [x19, w10, uxtw #2]",
+        "    b .La64cr_system_done",
+        ".La64cr_cp15_c13_write:",
+        "    cmp w10, #15",
+        "    b.eq .La64cr_cp15_c13_write_pc",
+        "    ldr w12, [x19, w10, uxtw #2]",
+        "    b .La64cr_cp15_c13_write_commit",
+        ".La64cr_cp15_c13_write_pc:",
+        "    add w12, w26, #8",
+        ".La64cr_cp15_c13_write_commit:",
+        "    str w12, [x0]",
+        ".La64cr_system_done:",
+        "    add w26, w26, #4",
+        "    b .La64cr_retire",
+        "",
+    ]
+
+
 def compact_raw_function() -> list[str]:
     """Return the mixed A32/Thumb live-byte loop used by the feasibility gate.
 
@@ -3382,7 +3487,7 @@ def compact_raw_function() -> list[str]:
         "    cmp w10, #2",
         "    b.eq .La64cr_block",
         "    cmp w10, #3",
-        "    b.eq .La64cr_vfp_decode",
+        "    b.eq .La64cr_coprocessor_decode",
         "    b .La64cr_fallback",
         "",
         ".La64cr_thumb_fetch:",
@@ -4046,6 +4151,8 @@ def compact_raw_function() -> list[str]:
         "    add w26, w26, #8",
         "    add w26, w26, w10",
         "    b .La64cr_retire",
+        "",
+        *compact_system_coprocessor_body(),
         "",
         *compact_vfp_nonarith_body(),
         "",

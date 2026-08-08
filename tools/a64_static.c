@@ -1638,6 +1638,38 @@ static bool compact_raw_is_vfp_encoding(uint32_t insn) {
            (insn & UINT32_C(0x0f000e10)) == UINT32_C(0x0e000a00);
 }
 
+/* The resident loop can keep only system-coprocessor operations whose entire
+ * architectural effect is local to already-published CPU state. CP14 reports
+ * the deliberately absent debug unit as zero in privileged modes. CP15 c7 is
+ * cache/barrier maintenance and therefore a no-op in this cacheless model,
+ * except for the exact WFI encoding whose platform callback and time advance
+ * remain owned by arm_step(). The three software thread-ID registers are
+ * ordinary scalar state; MMU/TLB/control registers remain literal. */
+static bool compact_raw_system_coprocessor_supported(
+        const arm_cpu_t *cpu, uint32_t insn) {
+    const bool priv =
+        (cpu->cpsr & ARM_CPSR_MODE_MASK) != ARM_MODE_USR;
+    const bool load = (insn & (UINT32_C(1) << 20)) != 0u;
+    const unsigned cp = (insn >> 8) & 15u;
+    const unsigned crn = (insn >> 16) & 15u;
+    const unsigned opc2 = (insn >> 5) & 7u;
+    const unsigned crm = insn & 15u;
+
+    if ((insn & UINT32_C(0x0f000010)) != UINT32_C(0x0e000010))
+        return false;
+    if (cp == 14u) return priv;
+    if (cp != 15u) return false;
+    if (crn == 7u) {
+        const unsigned opc1 = (insn >> 21) & 7u;
+        const bool wfi = !load && opc1 == 0u && opc2 == 4u && crm == 0u;
+        return !wfi;
+    }
+    if (crn != 13u || opc2 < 2u || opc2 > 4u) return false;
+    if (priv) return true;
+    return crm == 0u &&
+           (opc2 == 2u || (opc2 == 3u && load));
+}
+
 static bool compact_raw_vfp_simple32(uint32_t value) {
     const uint32_t exponent = (value >> 23) & UINT32_C(0xff);
     return exponent ? exponent != UINT32_C(0xff)
@@ -1826,6 +1858,9 @@ a64_compact_raw_admission_t a64_compact_raw_classify_instruction(
         return A64_COMPACT_RAW_ADMIT_EXECUTE;
     }
 
+    if (compact_raw_system_coprocessor_supported(cpu, insn))
+        return A64_COMPACT_RAW_ADMIT_EXECUTE;
+
     if (compact_raw_is_vfp_encoding(insn))
         return compact_raw_classify_vfp(cpu, insn);
 
@@ -1944,6 +1979,7 @@ typedef struct {
     uint32_t vfp_host_active;
     uint64_t vfp_host_fpcr;
     uint64_t vfp_host_fpsr;
+    arm_cp15_t *cp15;
 } a64_compact_raw_context_t;
 
 _Static_assert(sizeof(void *) == 8u,
@@ -1973,8 +2009,14 @@ _Static_assert(offsetof(a64_compact_raw_context_t, flat_ram) == 0u &&
                    offsetof(a64_compact_raw_context_t, vfp_host_active) == 132u &&
                    offsetof(a64_compact_raw_context_t, vfp_host_fpcr) == 136u &&
                    offsetof(a64_compact_raw_context_t, vfp_host_fpsr) == 144u &&
-                   sizeof(a64_compact_raw_context_t) == 152u,
+                   offsetof(a64_compact_raw_context_t, cp15) == 152u &&
+                   sizeof(a64_compact_raw_context_t) == 160u,
                "compact raw native context layout drifted");
+_Static_assert(offsetof(arm_cp15_t, tpidrurw) == 52u &&
+                   offsetof(arm_cp15_t, tpidruro) == 56u &&
+                   offsetof(arm_cp15_t, tpidrprw) == 60u &&
+                   sizeof(arm_cp15_t) == 64u,
+               "compact raw CP15 thread-ID layout drifted");
 
 extern int a64_static_execute(uint32_t *regs, uint32_t *cpsr,
                               uint64_t *cycles,
@@ -2021,6 +2063,7 @@ bool a64_compact_raw_run(arm_cpu_t *cpu, const uint8_t *code,
         context.vfp_fpexc = &cpu->vfp_fpexc;
         context.vfp_fpscr = &cpu->vfp_fpscr;
         context.vfp_access = vfp_cpacr_permits(cpu) ? 1u : 0u;
+        context.cp15 = &cpu->cp15;
         context.priv_tag =
             (cpu->cpsr & ARM_CPSR_MODE_MASK) != ARM_MODE_USR ? 1u : 0u;
         uint32_t result = a64_compact_raw_execute(
@@ -2095,6 +2138,7 @@ bool a64_compact_raw_run_code_window_resident(
         context.vfp_fpexc = &cpu->vfp_fpexc;
         context.vfp_fpscr = &cpu->vfp_fpscr;
         context.vfp_access = vfp_cpacr_permits(cpu) ? 1u : 0u;
+        context.cp15 = &cpu->cp15;
         uint32_t result = a64_compact_raw_execute(
             cpu->r, &cpu->cpsr, &cpu->cycles, code, code_base, code_bytes,
             max_insns, &context);

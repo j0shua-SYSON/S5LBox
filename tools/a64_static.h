@@ -201,10 +201,12 @@ a64_compact_raw_admission_t a64_compact_raw_classify_instruction(
  * instruction bytes, without decoded records or the static handler graph.
  * This is a feasibility/oracle boundary, not a product engine: MMU,
  * interrupts, MMIO, unsupported PC forms and unaligned data accesses are
- * refused. A supported prefix may retire before the first
- * unsupported or out-of-window instruction; `completed` reports that exact
- * prefix. Runtime code generation is never used--the loop is ordinary
- * build-time-linked, signed AArch64 text. */
+ * refused. The exact no-side-effect CP14 probe, CP15 cache/barrier (excluding
+ * WFI), and software thread-ID families are included; MMU/TLB/control
+ * mutations remain interpreter-owned. A supported prefix may retire before
+ * the first unsupported or out-of-window instruction; `completed` reports
+ * that exact prefix. Runtime code generation is never used--the loop is
+ * ordinary build-time-linked, signed AArch64 text. */
 bool a64_compact_raw_run(arm_cpu_t *cpu, const uint8_t *code,
                          uint32_t code_base, uint32_t code_bytes,
                          unsigned max_insns, uint8_t *ram, size_t ram_size,
