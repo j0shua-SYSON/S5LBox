@@ -13,6 +13,11 @@
 #include <stdlib.h>
 #include <string.h>
 
+#if defined(S5LBOX_STATIC_A64_DEFAULT_GRAPH) && \
+    defined(S5LBOX_STATIC_A64_DEFAULT_COMPACT_RAW)
+#error "Only one signed-static A64 product policy may be selected"
+#endif
+
 /* ------------------------------------------------------- the window map ---
  *
  * Every window this machine decodes, in one place. It exists so that "is
@@ -1307,6 +1312,20 @@ bool s5l8900_init(s5l8900_t *m, uint32_t ram_base, uint32_t ram_size) {
      * imply acceleration. */
     if (!s5l8900_static_a64_set_enabled(m, true) ||
         !s5l8900_static_a64_set_graph(m, true) ||
+        !s5l8900_static_a64_set_chain_limit(
+            m, S5LBOX_STATIC_A64_PRODUCT_CHAIN_INSNS)) {
+        s5l8900_free(m);
+        return false;
+    }
+#endif
+#if defined(S5LBOX_STATIC_A64_DEFAULT_COMPACT_RAW)
+    /* The callback-free live-byte tier beat the interpreter by 6.06% in an
+     * exact, balanced 100M-instruction A9 replay. Select that proved policy
+     * with the same 256-instruction timebase-bounded ceiling used by the
+     * diagnostic control. Every unsupported or unproved shape still reaches
+     * the architectural interpreter before mutation. */
+    if (!s5l8900_static_a64_set_enabled(m, true) ||
+        !s5l8900_static_a64_set_compact_raw(m, true) ||
         !s5l8900_static_a64_set_chain_limit(
             m, S5LBOX_STATIC_A64_PRODUCT_CHAIN_INSNS)) {
         s5l8900_free(m);

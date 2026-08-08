@@ -1,12 +1,10 @@
 # S5LBox -- pin the measured iOS execution-engine policy.
 #
-# The signed-static A64 engine and generated native handlers remain part of the
-# product build so they can be repaired and compared in the same binary. The
-# graph is deliberately not selected by default: on the target iPhone 6s Plus,
-# an exact canonical-bus 100M-instruction replay measured it at 1.125 Minsn/s
-# and repeated interpreter controls at 6.952 and 6.937 Minsn/s. The separate
-# direct-write contract is required: disabling it reduced the interpreter to
-# 6.668 Minsn/s with identical final evidence.
+# The product selects the callback-free live-byte tier after balanced 10M and
+# 100M A9 replays proved complete guest equality and a sustained 6.06% median
+# win. The decoded graph remains rejected after its exact 6.17x regression.
+# The separate direct-write contract is also required: disabling it measured
+# 4.14% slower with identical final evidence.
 #
 # This checks the XcodeGen input rather than generated project output. Public CI
 # can therefore defend the shipping decision without Xcode or Apple firmware.
@@ -31,6 +29,16 @@ foreach(required S5LBOX_STATIC_A64_ENGINE S5LBOX_STATIC_A64_NATIVE)
     endif()
 endforeach()
 
+string(REGEX MATCHALL "S5LBOX_STATIC_A64_DEFAULT_COMPACT_RAW"
+    compact_occurrences "${text}")
+list(LENGTH compact_occurrences compact_count)
+if(NOT compact_count EQUAL 1 OR
+   NOT text MATCHES "S5LBOX_STATIC_A64_DEFAULT_COMPACT_RAW=1")
+    message(FATAL_ERROR
+        "${APP_PROJECT} must select the physically accepted compact live-byte "
+        "policy exactly once; found ${compact_count} references")
+endif()
+
 string(REGEX MATCHALL "S5LBOX_STATIC_A64_DEFAULT_DIRECT_WRITES"
     direct_occurrences "${text}")
 list(LENGTH direct_occurrences direct_count)
@@ -49,4 +57,5 @@ if(text MATCHES "S5LBOX_STATIC_A64_DEFAULT_GRAPH")
 endif()
 
 message(STATUS
-    "iOS policy: interpreter plus direct writes selected; graph disabled")
+    "iOS policy: compact live-byte engine plus direct writes selected; "
+    "rejected graph disabled")

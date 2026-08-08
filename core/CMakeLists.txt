@@ -1142,11 +1142,11 @@ add_test(NAME app_info_plist
             -DPLIST=${CMAKE_CURRENT_SOURCE_DIR}/../app/Info.plist
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_info_plist.cmake)
 
-# The signed-static A64 implementation stays compiled into the iOS app for
-# controlled experiments, but exact canonical-bus full-guest A9 evidence
-# showed that selecting its graph is a 6.17x regression. The narrower direct-
-# RAM-write contract remains selected because a same-binary control proved it
-# 4.14% faster with identical final evidence. Keep both decisions executable.
+# Exact canonical-bus full-guest A9 evidence accepts the callback-free compact
+# live-byte tier at +6.06% over adjacent interpreter controls and rejects the
+# older decoded graph after a 6.17x regression. The separate direct-RAM-write
+# contract remains selected after a same-binary +4.14% result. Keep all three
+# measured decisions executable.
 add_test(NAME app_execution_policy
     COMMAND ${CMAKE_COMMAND}
             -DAPP_PROJECT=${CMAKE_CURRENT_SOURCE_DIR}/../app/project.yml
