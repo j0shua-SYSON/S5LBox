@@ -138,7 +138,7 @@ static bool restore_once(vm_firmware_boot_t *boot, s5l8900_t *machine,
         return false;
     }
 
-    external_md_sidecar_t sidecar;
+    external_md_sidecar_t sidecar = {0};
     FILE *md = fopen(md_path, "rb");
     bool read_ok = md && fread(&sidecar, sizeof sidecar, 1u, md) == 1u;
     if (md) fclose(md);
