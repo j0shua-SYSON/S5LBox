@@ -8410,3 +8410,51 @@ is close.** The accepted app remains on the interpreter until a controlled A9
 interpreter/candidate bracket proves the candidate faster with identical guest
 state. Exact admission evidence is retained under
 `work/artifacts/compact-raw-vfp-narrow-admission-7320-7cbab22-r1/`.
+
+### 2026-08-09: safe system coprocessors cut native entries, not visible FPS
+
+Commit `522c7b274e74208edd8cceea659be07e37902925` keeps three coherent,
+callback-free system-coprocessor families in the build-time-linked compact
+loop: privileged CP14 probes of the deliberately absent debug unit; CP15 c7
+cache/barrier operations except WFI; and CP15 c13 software thread-ID reads and
+writes with the interpreter's exact privilege rules. WFI still falls back for
+its synchronous platform callback. MMU, TLB and control mutations remain
+interpreter-owned. There is no runtime code generation or JIT entitlement.
+
+The Apple-arm64 differential oracle covers privileged and User CP14/c7/c13,
+PC-source writes, WFI prefix stopping, failed-condition WFI, and privilege/CRm
+refusals. Exact-tip core run `31262652956` passes all eight jobs; stock-iPhone
+build run `31263032113` also passes. The unchanged 7.320--7.330 B replay exits
+zero with empty stderr and canonical media/raw-screen hashes. Its exact
+semantic model moves from 9,702,324 to 9,788,838 admitted instructions
+(97.028% to 97.893%). It admits 86,514 of 86,683 observed coprocessor
+instructions, cuts modeled admitted-run entries from 271,231 to 190,557, and
+raises mean modeled run length from 35.771 to 51.370.
+
+The physical iPhone 6s Plus then ran a balanced candidate/baseline/baseline/
+candidate bracket. Every arm restored the same authenticated 7.320 B snapshot
+and work image, reached valid live scanout, accepted all 156 generated touch
+samples, and ran the same six alternating 450 ms home-screen swipes.
+
+| balanced metric | `429f5c1` baseline | system-coprocessor candidate | delta |
+|---|---:|---:|---:|
+| CPU throughput | 21.5158 Minsn/s | 22.0986 Minsn/s | +2.709% |
+| compact calls / native retired | 0.076511 | 0.066957 | -12.487% |
+| changed scanout signatures/s | 13.7285 | 14.6243 | +6.525% |
+| changed layer signatures/s | 13.6124 | 14.5767 | +7.084% |
+| pooled visible FPS median | 16.0 | 16.0 | no change |
+| pooled visible FPS mean | 14.5 | 13.5 | -1.0 FPS |
+| pooled samples at or below 4 FPS | 3/16 | 1/16 | two fewer |
+
+The candidate's native-call density and core-throughput improvements are real.
+The frame result is not: the pooled median is unchanged, the mean is lower,
+and individual samples span 0--24 FPS. The changed-signature rows are pipeline
+telemetry, not proof that iOS displayed those frames. Two fewer hard stalls are
+directionally useful but far too small a sample to claim a stability fix.
+
+Brutal status: **this is a correct structural gain and a failed visible-FPS
+gate.** Keep the broad semantics, but do not call 16 FPS close to 30 and do not
+spend the next iteration on another residual coprocessor opcode. The remaining
+work is to remove short-run, zero-retirement and fetch-window/entry overhead as
+a system, then explain why higher instruction throughput still does not map
+monotonically to displayed cadence.
