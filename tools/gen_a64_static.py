@@ -4927,8 +4927,9 @@ def compact_raw_function() -> list[str]:
         # Commit native cycles before a fallback because arm_step owns the
         # next instruction's cycle accounting and may inspect the counter.
         # The callback result is 0=no retirement, 1=retire+continue,
-        # 2=retire+stop. x19-x29 survive the C call by AAPCS64; the two table
-        # pointers are caller-saved and are rebuilt only on continuation.
+        # 2=retire+stop, 3=no-retire+continue. x19-x29 survive the C call by
+        # AAPCS64; the two table pointers are caller-saved and are rebuilt only
+        # on continuation.
         ".La64cr_fallback:",
         # The callback must explicitly publish a proven window for the next PC
         # when it asks to continue. Clearing the caller-owned output prevents a
@@ -4955,6 +4956,8 @@ def compact_raw_function() -> list[str]:
         "    mov w11, w0",
         "    ldr w26, [x19, #60]",
         "    cbz w11, .La64cr_exit",
+        "    cmp w11, #3",
+        "    b.eq .La64cr_fallback_reload",
         "    cmp w11, #2",
         "    b.hi .La64cr_exit",
         "    ldr x10, [x27, #72]",
@@ -4964,10 +4967,10 @@ def compact_raw_function() -> list[str]:
         "    b.eq .La64cr_exit",
         "    cmp w11, #1",
         "    b.ne .La64cr_exit",
-        # Reload and validate the callback's post-retirement live fetch
-        # witness. The next loop still repeats the exact PC-in-window check;
-        # these guards prevent a NULL, unaligned or empty publication from
-        # causing a native read.
+        ".La64cr_fallback_reload:",
+        # Reload and validate the callback's live fetch witness. The next loop
+        # still repeats the exact PC-in-window check; these guards prevent a
+        # NULL, unaligned or empty publication from causing a native read.
         "    ldr x22, [x27, #88]",
         "    ldr w23, [x27, #96]",
         "    ldr w24, [x27, #100]",

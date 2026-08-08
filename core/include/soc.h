@@ -3979,6 +3979,13 @@ bool s5l8900_static_a64_set_compact_raw(s5l8900_t *m, bool enabled);
  * before arm_step() executes the boundary. */
 bool s5l8900_static_a64_set_compact_raw_privileged(s5l8900_t *m,
                                                    bool enabled);
+/* Same-binary control for continuing a resident compact interval at an
+ * unchanged PC in another 1 KiB code window. Product default is enabled. The
+ * continuation requires an exact live fetch-TLB/host-RAM witness and an
+ * instruction admitted by the signed runner; it never walks, faults, touches
+ * MMIO or retires through the callback. */
+bool s5l8900_static_a64_set_compact_raw_window_refill(s5l8900_t *m,
+                                                       bool enabled);
 /* Same-binary rollout/benchmark control for terminal A32/Thumb BX/BLX signed
  * records. It defaults on when the engine is created. Changing it clears only
  * derived decode/graph entries so an off/on comparison cannot reuse a block
@@ -4053,6 +4060,8 @@ uint64_t s5l8900_static_a64_compact_raw_window_crossings(
 uint64_t s5l8900_static_a64_compact_raw_window_reloads(
     const s5l8900_t *m);
 uint64_t s5l8900_static_a64_compact_raw_window_stops(
+    const s5l8900_t *m);
+uint64_t s5l8900_static_a64_compact_raw_window_fast_refills(
     const s5l8900_t *m);
 /* Mutually exclusive reasons why one compact-raw machine-loop attempt did
  * not become a positive invocation.  Together with calls, these counters

@@ -231,15 +231,18 @@ typedef struct {
 
 /* A resident code-window invocation may hand an instruction it cannot execute
  * to the architectural interpreter without returning through the outer SoC
- * loop. The callback owns that one instruction's complete semantics and cycle
- * accounting. NO_RETIRE leaves the current instruction untouched and stops;
- * RETIRE_STOP promises one successful retirement and ends the interval.
- * RETIRE_CONTINUE also promises one retirement and must publish the proven
- * live fetch window containing the next PC through `next_window`. */
+ * loop. The callback normally owns that one instruction's complete semantics
+ * and cycle accounting. NO_RETIRE leaves it untouched and stops; RETIRE_STOP
+ * promises one successful retirement and ends the interval. RETIRE_CONTINUE
+ * also promises one retirement and publishes the proven live fetch window
+ * containing the next PC through `next_window`. NO_RETIRE_CONTINUE is narrower:
+ * it promises no architectural mutation or retirement and publishes a proven
+ * replacement window containing the unchanged PC. */
 typedef enum {
     A64_COMPACT_RAW_FALLBACK_NO_RETIRE = 0,
     A64_COMPACT_RAW_FALLBACK_RETIRE_CONTINUE,
-    A64_COMPACT_RAW_FALLBACK_RETIRE_STOP
+    A64_COMPACT_RAW_FALLBACK_RETIRE_STOP,
+    A64_COMPACT_RAW_FALLBACK_NO_RETIRE_CONTINUE
 } a64_compact_raw_fallback_result_t;
 
 typedef a64_compact_raw_fallback_result_t
@@ -253,9 +256,10 @@ typedef a64_compact_raw_fallback_result_t
  * DREAD/DWRITE entry proves the VA block, privilege and MMU generation;
  * stores additionally require live frontend write-pointer consent. Every
  * cache miss reaches the fallback before mutation. A PC or instruction-state
- * transition leaving the current window also reaches the fallback; after one
- * exact retirement, a continued callback may replace the window with the next
- * proven fetch witness. No unproved pointer is read. `native_completed` and
+ * transition leaving the current window also reaches the fallback. A callback
+ * may either retire one instruction before replacing the window, or replace it
+ * without retirement when the unchanged PC is already covered by a new exact
+ * witness. No unproved pointer is read. `native_completed` and
  * `fallback_completed` partition `completed` exactly. */
 bool a64_compact_raw_run_code_window_resident(
     arm_cpu_t *cpu, const uint8_t *code, uint32_t code_base,

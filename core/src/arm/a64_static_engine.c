@@ -78,6 +78,7 @@ typedef struct {
     bool graph_enabled;
     bool compact_raw_enabled;
     bool compact_raw_privileged_enabled;
+    bool compact_raw_window_refill_enabled;
     bool indirect_enabled;
     bool thumb_conditional_enabled;
     bool vstr_enabled;
@@ -103,6 +104,7 @@ typedef struct {
     uint64_t compact_raw_window_crossings;
     uint64_t compact_raw_window_reloads;
     uint64_t compact_raw_window_stops;
+    uint64_t compact_raw_window_fast_refills;
     s5l_static_a64_compact_raw_refusals_t compact_raw_refusals;
     uint64_t fetch_refill_attempts;
     uint64_t fetch_refill_hits;
@@ -574,6 +576,7 @@ bool s5l8900_static_a64_set_enabled(s5l8900_t *m, bool enabled) {
         state->fetch_refill_enabled = true;
         state->known_negative_bypass_enabled = true;
         state->compact_raw_privileged_enabled = true;
+        state->compact_raw_window_refill_enabled = true;
         m->static_a64_state = state;
     }
     state->enabled = true;
@@ -657,6 +660,21 @@ bool s5l8900_static_a64_set_compact_raw_privileged(s5l8900_t *m,
     if (!state || !state->enabled || !a64_static_host_available())
         return false;
     state->compact_raw_privileged_enabled = enabled;
+    return true;
+#else
+    (void)enabled;
+    return false;
+#endif
+}
+
+bool s5l8900_static_a64_set_compact_raw_window_refill(s5l8900_t *m,
+                                                       bool enabled) {
+    if (!m) return false;
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    static_a64_state_t *state = static_state(m);
+    if (!state || !state->enabled || !a64_static_host_available())
+        return false;
+    state->compact_raw_window_refill_enabled = enabled;
     return true;
 #else
     (void)enabled;
@@ -1012,6 +1030,17 @@ uint64_t s5l8900_static_a64_compact_raw_window_stops(
 #endif
 }
 
+uint64_t s5l8900_static_a64_compact_raw_window_fast_refills(
+        const s5l8900_t *m) {
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    const static_a64_state_t *state = static_state(m);
+    return state ? state->compact_raw_window_fast_refills : 0u;
+#else
+    (void)m;
+    return 0u;
+#endif
+}
+
 void s5l8900_static_a64_compact_raw_refusals(
         const s5l8900_t *m,
         s5l_static_a64_compact_raw_refusals_t *out) {
@@ -1098,6 +1127,11 @@ static a64_compact_raw_fallback_result_t compact_raw_fallback(
     arm_cpu_t *cpu;
     uint32_t step_block;
     uint32_t next_block;
+    uint32_t insn;
+    unsigned width;
+    unsigned offset;
+    bool thumb;
+    bool priv;
     bool crossed;
     unsigned result;
 
@@ -1105,6 +1139,39 @@ static a64_compact_raw_fallback_result_t compact_raw_fallback(
         return A64_COMPACT_RAW_FALLBACK_NO_RETIRE;
     cpu = &context->machine->cpu;
     step_block = cpu->r[15] & ~UINT32_C(0x3ff);
+    thumb = (cpu->cpsr & ARM_CPSR_T) != 0u;
+    priv = (cpu->cpsr & ARM_CPSR_MODE_MASK) != ARM_MODE_USR;
+    width = thumb ? 2u : 4u;
+
+    /* A window exit does not itself require an architectural step. Reuse only
+     * the exact current FETCH witness, then ask the public signed-runner
+     * classifier whether the unchanged instruction can execute natively. A
+     * refusal falls through to arm_step(), which reuses any warmed fetch cache
+     * and remains the sole owner of walks, faults and MMIO. */
+    if (context->state->compact_raw_window_refill_enabled &&
+        step_block != context->fetch_block &&
+        (cpu->r[15] & (width - 1u)) == 0u &&
+        arm_fetch_cache_try_refill(cpu, cpu->r[15], priv)) {
+        offset = cpu->r[15] - step_block;
+        insn = (uint32_t)cpu->fetch_host[offset] |
+               ((uint32_t)cpu->fetch_host[offset + 1u] << 8);
+        if (!thumb) {
+            insn |= (uint32_t)cpu->fetch_host[offset + 2u] << 16;
+            insn |= (uint32_t)cpu->fetch_host[offset + 3u] << 24;
+        }
+        if ((unsigned)a64_compact_raw_classify_instruction(cpu, insn, thumb) <
+            (unsigned)A64_COMPACT_RAW_ADMITTED_COUNT) {
+            next_window->code = cpu->fetch_host;
+            next_window->code_base = step_block;
+            next_window->code_bytes = UINT32_C(0x400);
+            context->state->compact_raw_window_crossings++;
+            context->state->compact_raw_window_reloads++;
+            context->state->compact_raw_window_fast_refills++;
+            context->fetch_block = step_block;
+            return A64_COMPACT_RAW_FALLBACK_NO_RETIRE_CONTINUE;
+        }
+    }
+
     result = s5l8900_static_a64_fallback_step(context->machine,
                                               &context->status);
     if (result > A64_COMPACT_RAW_FALLBACK_RETIRE_STOP)
@@ -1119,8 +1186,9 @@ static a64_compact_raw_fallback_result_t compact_raw_fallback(
     /* This refill consumes only an interpreter-owned live TLB/host-RAM
      * witness. It cannot walk the MMU or enter a fault/device path inside the
      * resident interval; refusal returns to the outer machine loop. */
+    priv = (cpu->cpsr & ARM_CPSR_MODE_MASK) != ARM_MODE_USR;
     if ((cpu->r[15] & ((cpu->cpsr & ARM_CPSR_T) ? 1u : 3u)) != 0u ||
-        !arm_fetch_cache_try_refill(cpu, cpu->r[15], false)) {
+        !arm_fetch_cache_try_refill(cpu, cpu->r[15], priv)) {
         if (crossed) context->state->compact_raw_window_stops++;
         return A64_COMPACT_RAW_FALLBACK_RETIRE_STOP;
     }

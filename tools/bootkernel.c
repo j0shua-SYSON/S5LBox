@@ -37368,6 +37368,8 @@ external_md_work_ready:
             s5l8900_static_a64_compact_raw_window_reloads(&mach);
         const uint64_t compact_raw_window_stops_before =
             s5l8900_static_a64_compact_raw_window_stops(&mach);
+        const uint64_t compact_raw_window_fast_refills_before =
+            s5l8900_static_a64_compact_raw_window_fast_refills(&mach);
         const uint64_t refill_attempts_before =
             s5l8900_static_a64_fetch_refill_attempts(&mach);
         const uint64_t refill_hits_before =
@@ -37492,6 +37494,9 @@ external_md_work_ready:
             uint64_t compact_raw_window_stops =
                 s5l8900_static_a64_compact_raw_window_stops(&mach) -
                 compact_raw_window_stops_before;
+            uint64_t compact_raw_window_fast_refills =
+                s5l8900_static_a64_compact_raw_window_fast_refills(&mach) -
+                compact_raw_window_fast_refills_before;
             uint64_t refill_attempts =
                 s5l8900_static_a64_fetch_refill_attempts(&mach) -
                 refill_attempts_before;
@@ -37521,10 +37526,12 @@ external_md_work_ready:
                    compact_raw_retired);
             printf("run api A64: resident-fallback-retired=%" PRIu64 "\n",
                    compact_raw_fallback_retired);
-            printf("run api A64: resident-windows crossings/reloads/stops="
-                   "%" PRIu64 "/%" PRIu64 "/%" PRIu64 "\n",
+            printf("run api A64: resident-windows crossings/reloads/stops/"
+                   "fast-refills=%" PRIu64 "/%" PRIu64 "/%" PRIu64
+                   "/%" PRIu64 "\n",
                    compact_raw_window_crossings,
-                   compact_raw_window_reloads, compact_raw_window_stops);
+                   compact_raw_window_reloads, compact_raw_window_stops,
+                   compact_raw_window_fast_refills);
             printf("run api A64: refill attempts/hits/skips=%" PRIu64
                    "/%" PRIu64 "/%" PRIu64
                    " known-negative-bypasses=%" PRIu64
