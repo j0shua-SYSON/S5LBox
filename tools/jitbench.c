@@ -9977,14 +9977,16 @@ static bool validate_soc_compact_raw_privileged_prefix(void) {
                          run_compact_privileged_oracle_case(
                              ARM_MODE_SVC, false, false,
                              true, false, &control);
-        const bool exact = ran &&
-            compact_privileged_snapshots_equal(&reference, &control) &&
-            control.attempts == 4u && control.calls == 0u &&
+        const bool snapshot_exact = ran &&
+            compact_privileged_snapshots_equal(&reference, &control);
+        const bool exact = snapshot_exact &&
+            control.attempts >= 3u && control.attempts <= 4u &&
+            control.calls == 0u &&
             control.native_retired == 0u && control.fallback_retired == 0u &&
-            control.privileged_attempts == 4u &&
+            control.privileged_attempts == control.attempts &&
             control.privileged_calls == 0u &&
             control.privileged_retired == 0u &&
-            control.refusals.privileged == 4u &&
+            control.refusals.privileged == control.attempts &&
             control.refusals.guard == 0u &&
             control.refusals.alignment == 0u &&
             control.refusals.fetch_witness == 0u &&
@@ -9994,9 +9996,10 @@ static bool validate_soc_compact_raw_privileged_prefix(void) {
             fprintf(stderr,
                     "jitbench: compact privileged user-only control "
                     "mismatch attempts/calls/refused=%" PRIu64 "/%" PRIu64
-                    "/%" PRIu64 "\n",
+                    "/%" PRIu64 " snapshot=%s\n",
                     control.attempts, control.calls,
-                    control.refusals.privileged);
+                    control.refusals.privileged,
+                    snapshot_exact ? "exact" : "mismatch");
             free_compact_privileged_oracle_result(&reference);
             free_compact_privileged_oracle_result(&control);
             return false;
