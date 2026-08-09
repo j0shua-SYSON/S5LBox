@@ -282,6 +282,30 @@ static const uint8_t *vm_guest_record_display(const s5l8900_t *m,
                 m->active_clock_added_ticks;
             execution.active_clock_clamps = m->active_clock_clamps;
             execution.active_clock_failures = m->active_clock_failures;
+            s5l_static_a64_compact_pc_profile_t pc_profile;
+            s5l8900_static_a64_compact_raw_pc_profile(m, &pc_profile);
+            execution.compact_pc_profile_samples = pc_profile.samples;
+            execution.compact_pc_profile_outside = pc_profile.outside;
+            execution.compact_pc_profile_entry = pc_profile.region[
+                S5L_STATIC_A64_COMPACT_PC_ENTRY];
+            execution.compact_pc_profile_dp = pc_profile.region[
+                S5L_STATIC_A64_COMPACT_PC_DP];
+            execution.compact_pc_profile_memory = pc_profile.region[
+                S5L_STATIC_A64_COMPACT_PC_MEMORY];
+            execution.compact_pc_profile_block_control = pc_profile.region[
+                S5L_STATIC_A64_COMPACT_PC_BLOCK_CONTROL];
+            execution.compact_pc_profile_system = pc_profile.region[
+                S5L_STATIC_A64_COMPACT_PC_SYSTEM];
+            execution.compact_pc_profile_vfp = pc_profile.region[
+                S5L_STATIC_A64_COMPACT_PC_VFP];
+            execution.compact_pc_profile_thumb = pc_profile.region[
+                S5L_STATIC_A64_COMPACT_PC_THUMB];
+            execution.compact_pc_profile_retire = pc_profile.region[
+                S5L_STATIC_A64_COMPACT_PC_RETIRE];
+            execution.compact_pc_profile_fallback = pc_profile.region[
+                S5L_STATIC_A64_COMPACT_PC_FALLBACK];
+            execution.compact_pc_profile_exit = pc_profile.region[
+                S5L_STATIC_A64_COMPACT_PC_EXIT];
             vm_frame_telemetry_note_execution(&execution);
         }
     }

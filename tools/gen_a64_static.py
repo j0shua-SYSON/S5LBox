@@ -3389,6 +3389,11 @@ def compact_raw_function() -> list[str]:
         ".type A64S_CSYM(a64_compact_raw_execute), %function",
         "#endif",
         "A64S_CSYM(a64_compact_raw_execute):",
+        # Export zero-cost text boundaries for the opt-in statistical
+        # profiler. They are aliases only: ordinary execution gains no
+        # instruction, load, branch or writable executable state.
+        ".globl A64S_CSYM(a64_compact_raw_profile_entry)",
+        "A64S_CSYM(a64_compact_raw_profile_entry):",
         # Eight AAPCS64 arguments. x7 names a caller-owned context containing
         # the flat-RAM oracle, optional resident fallback and exact split
         # counters. Preserve every callee-saved register used by the loop; x29
@@ -3500,6 +3505,8 @@ def compact_raw_function() -> list[str]:
         "    ldrh w9, [x22, w8, uxtw]",
         "    b .La64cr_thumb_decode",
         "",
+        ".globl A64S_CSYM(a64_compact_raw_profile_dp)",
+        "A64S_CSYM(a64_compact_raw_profile_dp):",
         ".La64cr_dp:",
         # PC operands/destinations remain outside this tranche. Immediate
         # rotation and both immediate/register-specified shifts feed every
@@ -3797,6 +3804,8 @@ def compact_raw_function() -> list[str]:
         "    add w26, w26, w28",
         "    b .La64cr_retire",
         "",
+        ".globl A64S_CSYM(a64_compact_raw_profile_memory)",
+        "A64S_CSYM(a64_compact_raw_profile_memory):",
         ".La64cr_memory:",
         # Complete ARM addressing-mode-2 byte/word LDR/STR semantics. Both
         # immediate and shifted-register offsets, pre/post indexing,
@@ -3964,6 +3973,8 @@ def compact_raw_function() -> list[str]:
         "    add w26, w26, w28",
         "    b .La64cr_retire",
         "",
+        ".globl A64S_CSYM(a64_compact_raw_profile_block_control)",
+        "A64S_CSYM(a64_compact_raw_profile_block_control):",
         ".La64cr_block:",
         # Ordinary A32 STM/LDM, including every address mode, safe writeback
         # and plain LDM-to-PC interworking. S/user-bank and exception-return
@@ -4152,13 +4163,19 @@ def compact_raw_function() -> list[str]:
         "    add w26, w26, w10",
         "    b .La64cr_retire",
         "",
+        ".globl A64S_CSYM(a64_compact_raw_profile_system)",
+        "A64S_CSYM(a64_compact_raw_profile_system):",
         *compact_system_coprocessor_body(),
         "",
+        ".globl A64S_CSYM(a64_compact_raw_profile_vfp)",
+        "A64S_CSYM(a64_compact_raw_profile_vfp):",
         *compact_vfp_nonarith_body(),
         "",
         # Thumb-1 is decoded directly from the same live fetch window. The
         # broad family below mirrors decode_thumb(): unsupported encodings
         # reach the exact fallback before architectural mutation.
+        ".globl A64S_CSYM(a64_compact_raw_profile_thumb)",
+        "A64S_CSYM(a64_compact_raw_profile_thumb):",
         ".La64cr_thumb_decode:",
         "    ubfx w10, w9, #8, #8",
         "    cmp w10, #0x47",
@@ -4918,6 +4935,8 @@ def compact_raw_function() -> list[str]:
         "    b.le .La64cr_condition_pass",
         "    b .La64cr_condition_skip",
         "",
+        ".globl A64S_CSYM(a64_compact_raw_profile_retire)",
+        "A64S_CSYM(a64_compact_raw_profile_retire):",
         ".La64cr_retire:",
         "    add w29, w29, #1",
         "    subs w25, w25, #1",
@@ -4930,6 +4949,8 @@ def compact_raw_function() -> list[str]:
         # 2=retire+stop, 3=no-retire+continue. x19-x29 survive the C call by
         # AAPCS64; the two table pointers are caller-saved and are rebuilt only
         # on continuation.
+        ".globl A64S_CSYM(a64_compact_raw_profile_fallback)",
+        "A64S_CSYM(a64_compact_raw_profile_fallback):",
         ".La64cr_fallback:",
         # The callback must explicitly publish a proven window for the next PC
         # when it asks to continue. Clearing the caller-owned output prevents a
@@ -5004,6 +5025,8 @@ def compact_raw_function() -> list[str]:
         "#endif",
         "    b .La64cr_loop",
         "",
+        ".globl A64S_CSYM(a64_compact_raw_profile_exit)",
+        "A64S_CSYM(a64_compact_raw_profile_exit):",
         ".La64cr_exit:",
         # No caller or C callback may observe the internal RunFast FP mode.
         "    bl .La64cr_fp_session_restore",
@@ -5026,6 +5049,8 @@ def compact_raw_function() -> list[str]:
         "    ldp x19, x20, [sp, #16]",
         "    ldp x29, x30, [sp], #112",
         "    ret",
+        ".globl A64S_CSYM(a64_compact_raw_profile_end)",
+        "A64S_CSYM(a64_compact_raw_profile_end):",
         "#if !defined(__APPLE__)",
         ".size A64S_CSYM(a64_compact_raw_execute), .-A64S_CSYM(a64_compact_raw_execute)",
         "#endif",

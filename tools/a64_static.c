@@ -6,6 +6,13 @@
 #include <stddef.h>
 #include <string.h>
 
+#if defined(S5LBOX_STATIC_A64_NATIVE) && defined(__APPLE__) && \
+    (defined(__aarch64__) || defined(__arm64__))
+#include <signal.h>
+#include <sys/time.h>
+#include <sys/ucontext.h>
+#endif
+
 enum {
     A64S_READ_WORD = 0u,
     A64S_READ_BYTE = 1u,
@@ -2032,6 +2039,176 @@ extern uint32_t a64_compact_raw_execute(uint32_t *regs, uint32_t *cpsr,
                                         uint32_t code_bytes,
                                         uint32_t max_insns,
                                         a64_compact_raw_context_t *context);
+#endif
+
+#if defined(S5LBOX_STATIC_A64_NATIVE) && defined(__APPLE__) && \
+    (defined(__aarch64__) || defined(__arm64__))
+/* These symbols alias existing instruction addresses in the generated signed
+ * text. They are objects only for address arithmetic here; no data is read
+ * through them and no executable page is ever modified. */
+extern const unsigned char a64_compact_raw_profile_entry[];
+extern const unsigned char a64_compact_raw_profile_dp[];
+extern const unsigned char a64_compact_raw_profile_memory[];
+extern const unsigned char a64_compact_raw_profile_block_control[];
+extern const unsigned char a64_compact_raw_profile_system[];
+extern const unsigned char a64_compact_raw_profile_vfp[];
+extern const unsigned char a64_compact_raw_profile_thumb[];
+extern const unsigned char a64_compact_raw_profile_retire[];
+extern const unsigned char a64_compact_raw_profile_fallback[];
+extern const unsigned char a64_compact_raw_profile_exit[];
+extern const unsigned char a64_compact_raw_profile_end[];
+
+static const unsigned char *const g_compact_profile_boundary[] = {
+    a64_compact_raw_profile_entry,
+    a64_compact_raw_profile_dp,
+    a64_compact_raw_profile_memory,
+    a64_compact_raw_profile_block_control,
+    a64_compact_raw_profile_system,
+    a64_compact_raw_profile_vfp,
+    a64_compact_raw_profile_thumb,
+    a64_compact_raw_profile_retire,
+    a64_compact_raw_profile_fallback,
+    a64_compact_raw_profile_exit,
+    a64_compact_raw_profile_end,
+};
+
+_Static_assert(sizeof g_compact_profile_boundary /
+                       sizeof g_compact_profile_boundary[0] ==
+                   A64_COMPACT_RAW_PC_PROFILE_REGION_COUNT + 1u,
+               "compact PC-profile boundary count drifted");
+
+static volatile sig_atomic_t g_compact_profile_enabled;
+static volatile sig_atomic_t g_compact_profile_active;
+static volatile sig_atomic_t g_compact_profile_samples;
+static volatile sig_atomic_t g_compact_profile_outside;
+static volatile sig_atomic_t
+    g_compact_profile_region[A64_COMPACT_RAW_PC_PROFILE_REGION_COUNT];
+
+static void compact_profile_increment(volatile sig_atomic_t *value) {
+    sig_atomic_t current = *value;
+    if (current < INT_MAX) *value = current + 1;
+}
+
+static bool compact_profile_layout_valid(void) {
+    uintptr_t previous = (uintptr_t)g_compact_profile_boundary[0];
+    if (!previous) return false;
+    for (unsigned i = 1u;
+         i <= (unsigned)A64_COMPACT_RAW_PC_PROFILE_REGION_COUNT; i++) {
+        uintptr_t current = (uintptr_t)g_compact_profile_boundary[i];
+        if (current <= previous) return false;
+        previous = current;
+    }
+    return true;
+}
+
+static void compact_profile_signal(int signal_number, siginfo_t *info,
+                                   void *raw_context) {
+    (void)signal_number;
+    (void)info;
+    if (!g_compact_profile_enabled || !g_compact_profile_active ||
+        !raw_context)
+        return;
+
+    const ucontext_t *context = (const ucontext_t *)raw_context;
+    uintptr_t pc = (uintptr_t)context->uc_mcontext->__ss.__pc;
+    compact_profile_increment(&g_compact_profile_samples);
+
+    const uintptr_t begin =
+        (uintptr_t)g_compact_profile_boundary[0];
+    const uintptr_t end = (uintptr_t)g_compact_profile_boundary[
+        A64_COMPACT_RAW_PC_PROFILE_REGION_COUNT];
+    if (pc < begin || pc >= end) {
+        compact_profile_increment(&g_compact_profile_outside);
+        return;
+    }
+    for (unsigned i = 0u;
+         i < (unsigned)A64_COMPACT_RAW_PC_PROFILE_REGION_COUNT; i++) {
+        if (pc < (uintptr_t)g_compact_profile_boundary[i + 1u]) {
+            compact_profile_increment(&g_compact_profile_region[i]);
+            return;
+        }
+    }
+    compact_profile_increment(&g_compact_profile_outside);
+}
+
+bool a64_compact_raw_pc_profile_enable(void) {
+    struct sigaction previous;
+    struct sigaction action;
+    struct itimerval existing;
+    struct itimerval timer;
+
+    if (!compact_profile_layout_valid()) return false;
+    if (g_compact_profile_enabled) {
+        g_compact_profile_active = 0;
+        g_compact_profile_samples = 0;
+        g_compact_profile_outside = 0;
+        for (unsigned i = 0u;
+             i < (unsigned)A64_COMPACT_RAW_PC_PROFILE_REGION_COUNT; i++)
+            g_compact_profile_region[i] = 0;
+        return true;
+    }
+    if (getitimer(ITIMER_PROF, &existing) != 0 ||
+        existing.it_value.tv_sec != 0 || existing.it_value.tv_usec != 0 ||
+        existing.it_interval.tv_sec != 0 ||
+        existing.it_interval.tv_usec != 0 ||
+        sigaction(SIGPROF, NULL, &previous) != 0 ||
+        (previous.sa_handler != SIG_DFL &&
+         previous.sa_handler != SIG_IGN))
+        return false;
+
+    memset(&action, 0, sizeof action);
+    action.sa_sigaction = compact_profile_signal;
+    action.sa_flags = SA_SIGINFO | SA_RESTART;
+    if (sigemptyset(&action.sa_mask) != 0 ||
+        sigaction(SIGPROF, &action, NULL) != 0)
+        return false;
+
+    g_compact_profile_active = 0;
+    g_compact_profile_samples = 0;
+    g_compact_profile_outside = 0;
+    for (unsigned i = 0u;
+         i < (unsigned)A64_COMPACT_RAW_PC_PROFILE_REGION_COUNT; i++)
+        g_compact_profile_region[i] = 0;
+    g_compact_profile_enabled = 1;
+
+    memset(&timer, 0, sizeof timer);
+    timer.it_value.tv_usec = 1000;
+    timer.it_interval.tv_usec = 1000;
+    if (setitimer(ITIMER_PROF, &timer, NULL) != 0) {
+        g_compact_profile_enabled = 0;
+        (void)sigaction(SIGPROF, &previous, NULL);
+        return false;
+    }
+    return true;
+}
+
+void a64_compact_raw_pc_profile_slice_begin(void) {
+    if (g_compact_profile_enabled) g_compact_profile_active = 1;
+}
+
+void a64_compact_raw_pc_profile_slice_end(void) {
+    g_compact_profile_active = 0;
+}
+
+void a64_compact_raw_pc_profile_snapshot(
+        a64_compact_raw_pc_profile_t *out) {
+    if (!out) return;
+    memset(out, 0, sizeof *out);
+    out->enabled = g_compact_profile_enabled != 0;
+    out->samples = (uint64_t)g_compact_profile_samples;
+    out->outside = (uint64_t)g_compact_profile_outside;
+    for (unsigned i = 0u;
+         i < (unsigned)A64_COMPACT_RAW_PC_PROFILE_REGION_COUNT; i++)
+        out->region[i] = (uint64_t)g_compact_profile_region[i];
+}
+#else
+bool a64_compact_raw_pc_profile_enable(void) { return false; }
+void a64_compact_raw_pc_profile_slice_begin(void) {}
+void a64_compact_raw_pc_profile_slice_end(void) {}
+void a64_compact_raw_pc_profile_snapshot(
+        a64_compact_raw_pc_profile_t *out) {
+    if (out) memset(out, 0, sizeof *out);
+}
 #endif
 
 bool a64_compact_raw_run(arm_cpu_t *cpu, const uint8_t *code,

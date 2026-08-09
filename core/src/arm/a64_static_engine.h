@@ -56,6 +56,16 @@ unsigned s5l8900_static_a64_fallback_step(s5l8900_t *m,
  * decision untouched. */
 bool s5l8900_static_a64_commit_known_negative_bypass(s5l8900_t *m);
 
+/* Bracket one public s5l8900_run() call for the explicit compact-PC sampler.
+ * False means the marker was not enabled and the caller performs no matching
+ * end operation. This outer-slice gate is not a per-instruction cost. The
+ * global SIGPROF timer is installed only at opt-in boot; these calls merely
+ * gate which process-CPU samples belong to guest work. */
+bool s5l8900_static_a64_compact_raw_pc_profile_slice_begin(
+    const s5l8900_t *m);
+void s5l8900_static_a64_compact_raw_pc_profile_slice_end(
+    const s5l8900_t *m);
+
 /* Release the per-machine decode cache. Safe on an uninitialised NULL field. */
 void s5l8900_static_a64_dispose(s5l8900_t *m);
 

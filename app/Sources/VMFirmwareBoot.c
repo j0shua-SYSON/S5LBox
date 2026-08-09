@@ -497,6 +497,7 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
     bool compact_user_only = false;
     bool compact_window_refill_off = false;
     bool compact_privileged_window_refill = false;
+    bool compact_pc_profile = false;
     bool active_clock_off = false;
 #if defined(S5LBOX_STATIC_A64_ENGINE)
     /*
@@ -596,10 +597,29 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
         return false;
     }
 #endif
+    char compact_pc_profile_path[VM_FW_BOOT_PATH_CAPACITY + 64u];
+    if (!join_path(compact_pc_profile_path,
+                   sizeof compact_pc_profile_path, paths->work,
+                   VM_FW_BOOT_COMPACT_PC_PROFILE_FILE)) {
+        set_detail(report->detail, sizeof report->detail,
+                   "The compact CPU-profile path is too long to use.");
+        set_detail(report->summary, sizeof report->summary, "path too long");
+        return false;
+    }
+    compact_pc_profile = file_size(compact_pc_profile_path) > 0u;
+    if (compact_pc_profile && forced_interpreter) {
+        set_detail(report->detail, sizeof report->detail,
+                   "The compact CPU profile conflicts with the interpreter "
+                   "control.");
+        set_detail(report->summary, sizeof report->summary,
+                   "conflicting engine controls");
+        return false;
+    }
 #endif
     (void)compact_user_only;
     (void)compact_window_refill_off;
     (void)compact_privileged_window_refill;
+    (void)compact_pc_profile;
 
 #if defined(S5LBOX_IOS_ACTIVE_REALTIME_CLOCK)
     char active_clock_off_path[VM_FW_BOOT_PATH_CAPACITY + 64u];
@@ -816,6 +836,22 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
     boot->hle_machine = machine;
 #endif
 
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    /* Install process-wide diagnostic state only after the firmware, saved
+     * state and every ordinary host policy have passed validation. Marker-free
+     * boots never touch SIGPROF or ITIMER_PROF. */
+    if (compact_pc_profile &&
+        !s5l8900_static_a64_enable_compact_raw_pc_profile(machine)) {
+        (void)file_block_close(boot->media);
+        set_detail(report->detail, sizeof report->detail,
+                   "The compact CPU profile is unavailable on this host or "
+                   "another process CPU timer is already active.");
+        set_detail(report->summary, sizeof report->summary,
+                   "compact CPU profile unavailable");
+        return false;
+    }
+#endif
+
     /* Consume only the request, not the checkpoint.  The state remains useful
      * for a controlled repeat, but it cannot roll a disk forward or backward a
      * second time unless the caller explicitly re-arms it after reinstalling
@@ -859,13 +895,15 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
     }
     if (restored) {
         (void)snprintf(report->summary, sizeof report->summary,
-                       "iPhone OS 3.1.3 restored at %.1f M insn (%s%s)",
+                       "iPhone OS 3.1.3 restored at %.1f M insn (%s%s%s)",
                        (double)machine->cpu.cycles / 1000000.0, engine_mode,
+                       compact_pc_profile ? ", compact-PC profile" : "",
                        active_clock_off ? ", active-clock-off control" : "");
     } else {
         (void)snprintf(report->summary, sizeof report->summary,
-                       "iPhone OS 3.1.3 kernel, root on /dev/md0 (%s%s)",
+                       "iPhone OS 3.1.3 kernel, root on /dev/md0 (%s%s%s)",
                        engine_mode,
+                       compact_pc_profile ? ", compact-PC profile" : "",
                        active_clock_off ? ", active-clock-off control" : "");
     }
 #endif

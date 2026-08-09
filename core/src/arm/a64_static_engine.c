@@ -81,6 +81,7 @@ typedef struct {
     bool compact_raw_privileged_enabled;
     bool compact_raw_window_refill_enabled;
     bool compact_raw_privileged_window_refill_enabled;
+    bool compact_raw_pc_profile_enabled;
     bool indirect_enabled;
     bool thumb_conditional_enabled;
     bool vstr_enabled;
@@ -699,6 +700,70 @@ bool s5l8900_static_a64_set_compact_raw_privileged_window_refill(
 #else
     (void)enabled;
     return false;
+#endif
+}
+
+bool s5l8900_static_a64_enable_compact_raw_pc_profile(s5l8900_t *m) {
+    if (!m) return false;
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    static_a64_state_t *state = static_state(m);
+    if (!state || !state->enabled || !state->compact_raw_enabled ||
+        !a64_static_host_available() ||
+        !a64_compact_raw_pc_profile_enable())
+        return false;
+    state->compact_raw_pc_profile_enabled = true;
+    return true;
+#else
+    return false;
+#endif
+}
+
+void s5l8900_static_a64_compact_raw_pc_profile(
+        const s5l8900_t *m,
+        s5l_static_a64_compact_pc_profile_t *out) {
+    if (!out) return;
+    memset(out, 0, sizeof *out);
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    const static_a64_state_t *state = static_state(m);
+    if (state && state->compact_raw_pc_profile_enabled) {
+        a64_compact_raw_pc_profile_t native;
+        _Static_assert((unsigned)S5L_STATIC_A64_COMPACT_PC_REGION_COUNT ==
+                           (unsigned)A64_COMPACT_RAW_PC_PROFILE_REGION_COUNT,
+                       "compact PC-profile region count drifted");
+        a64_compact_raw_pc_profile_snapshot(&native);
+        out->enabled = native.enabled;
+        out->samples = native.samples;
+        out->outside = native.outside;
+        for (unsigned i = 0u;
+             i < (unsigned)S5L_STATIC_A64_COMPACT_PC_REGION_COUNT; i++)
+            out->region[i] = native.region[i];
+    }
+#else
+    (void)m;
+#endif
+}
+
+bool s5l8900_static_a64_compact_raw_pc_profile_slice_begin(
+        const s5l8900_t *m) {
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    const static_a64_state_t *state = static_state(m);
+    if (!state || !state->compact_raw_pc_profile_enabled) return false;
+    a64_compact_raw_pc_profile_slice_begin();
+    return true;
+#else
+    (void)m;
+    return false;
+#endif
+}
+
+void s5l8900_static_a64_compact_raw_pc_profile_slice_end(
+        const s5l8900_t *m) {
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    const static_a64_state_t *state = static_state(m);
+    if (state && state->compact_raw_pc_profile_enabled)
+        a64_compact_raw_pc_profile_slice_end();
+#else
+    (void)m;
 #endif
 }
 

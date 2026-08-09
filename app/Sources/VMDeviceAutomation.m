@@ -435,7 +435,17 @@ static double VMDeviceAutomationSeconds(uint64_t firstNS, uint64_t lastNS) {
              "mbx_3d_candidates=%llu,mbx_3d_completed=%llu,"
              "mbx_3d_rejected=%llu,mbx_3d_pixels=%llu,"
              "active_clock_updates=%llu,active_clock_added_ticks=%llu,"
-             "active_clock_clamps=%llu,active_clock_failures=%llu",
+             "active_clock_clamps=%llu,active_clock_failures=%llu,"
+             "compact_pc_profile_samples=%llu,"
+             "compact_pc_profile_outside=%llu,"
+             "compact_pc_profile_entry=%llu,compact_pc_profile_dp=%llu,"
+             "compact_pc_profile_memory=%llu,"
+             "compact_pc_profile_block_control=%llu,"
+             "compact_pc_profile_system=%llu,compact_pc_profile_vfp=%llu,"
+             "compact_pc_profile_thumb=%llu,"
+             "compact_pc_profile_retire=%llu,"
+             "compact_pc_profile_fallback=%llu,"
+             "compact_pc_profile_exit=%llu",
             state.execution_consistent ? 1u : 0u,
             (unsigned long long)state.execution_observations,
             (unsigned long long)VM_EXEC_DELTA(cpu_retired),
@@ -480,7 +490,23 @@ static double VMDeviceAutomationSeconds(uint64_t firstNS, uint64_t lastNS) {
             (unsigned long long)VM_EXEC_DELTA(active_clock_updates),
             (unsigned long long)VM_EXEC_DELTA(active_clock_added_ticks),
             (unsigned long long)VM_EXEC_DELTA(active_clock_clamps),
-            (unsigned long long)VM_EXEC_DELTA(active_clock_failures)];
+            (unsigned long long)VM_EXEC_DELTA(active_clock_failures),
+            (unsigned long long)VM_EXEC_DELTA(
+                compact_pc_profile_samples),
+            (unsigned long long)VM_EXEC_DELTA(
+                compact_pc_profile_outside),
+            (unsigned long long)VM_EXEC_DELTA(compact_pc_profile_entry),
+            (unsigned long long)VM_EXEC_DELTA(compact_pc_profile_dp),
+            (unsigned long long)VM_EXEC_DELTA(compact_pc_profile_memory),
+            (unsigned long long)VM_EXEC_DELTA(
+                compact_pc_profile_block_control),
+            (unsigned long long)VM_EXEC_DELTA(compact_pc_profile_system),
+            (unsigned long long)VM_EXEC_DELTA(compact_pc_profile_vfp),
+            (unsigned long long)VM_EXEC_DELTA(compact_pc_profile_thumb),
+            (unsigned long long)VM_EXEC_DELTA(compact_pc_profile_retire),
+            (unsigned long long)VM_EXEC_DELTA(
+                compact_pc_profile_fallback),
+            (unsigned long long)VM_EXEC_DELTA(compact_pc_profile_exit)];
 #undef VM_EXEC_DELTA
     }
 

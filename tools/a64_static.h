@@ -268,6 +268,39 @@ bool a64_compact_raw_run_code_window_resident(
     unsigned *completed, unsigned *native_completed,
     unsigned *fallback_completed);
 
+/* Opt-in statistical attribution for the build-time-linked compact runner.
+ * SIGPROF samples only while the public SoC run slice is active, then assigns
+ * the interrupted PC to one ordered text region. The aliases exported by the
+ * generator add no hot-path instructions. Unsupported hosts refuse enablement
+ * and every snapshot remains zero. This is host diagnostic state only: it is
+ * neither guest state nor part of a snapshot. */
+typedef enum {
+    A64_COMPACT_RAW_PC_PROFILE_ENTRY = 0,
+    A64_COMPACT_RAW_PC_PROFILE_DP,
+    A64_COMPACT_RAW_PC_PROFILE_MEMORY,
+    A64_COMPACT_RAW_PC_PROFILE_BLOCK_CONTROL,
+    A64_COMPACT_RAW_PC_PROFILE_SYSTEM,
+    A64_COMPACT_RAW_PC_PROFILE_VFP,
+    A64_COMPACT_RAW_PC_PROFILE_THUMB,
+    A64_COMPACT_RAW_PC_PROFILE_RETIRE,
+    A64_COMPACT_RAW_PC_PROFILE_FALLBACK,
+    A64_COMPACT_RAW_PC_PROFILE_EXIT,
+    A64_COMPACT_RAW_PC_PROFILE_REGION_COUNT
+} a64_compact_raw_pc_profile_region_t;
+
+typedef struct {
+    bool enabled;
+    uint64_t samples;
+    uint64_t outside;
+    uint64_t region[A64_COMPACT_RAW_PC_PROFILE_REGION_COUNT];
+} a64_compact_raw_pc_profile_t;
+
+bool a64_compact_raw_pc_profile_enable(void);
+void a64_compact_raw_pc_profile_slice_begin(void);
+void a64_compact_raw_pc_profile_slice_end(void);
+void a64_compact_raw_pc_profile_snapshot(
+    a64_compact_raw_pc_profile_t *out);
+
 /* Execute against flat, power-of-two RAM. A non-loop block may be executed once;
  * repeated execution is accepted only when its exit PC equals its start PC.
  * The wrapper is intentionally narrower than arm_run: no MMU, faults, MMIO,

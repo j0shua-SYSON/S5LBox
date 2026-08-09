@@ -1955,6 +1955,8 @@ unsigned s5l8900_run(s5l8900_t *m, unsigned max_steps, arm_status_t *status) {
         .active_clock = &active_clock,
         .pending_retired = &active_pending_retired,
     };
+    bool compact_pc_profile_slice =
+        s5l8900_static_a64_compact_raw_pc_profile_slice_begin(m);
 #endif
     /* A direct arm_step() may have used the same machine between run calls.
      * Only a wait reached during THIS bounded slice may shorten it. */
@@ -2083,6 +2085,10 @@ unsigned s5l8900_run(s5l8900_t *m, unsigned max_steps, arm_status_t *status) {
     if (active_clock && active_pending_retired)
         (void)active_host_clock_sync(
             m, (uint32_t)active_pending_retired);
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    if (compact_pc_profile_slice)
+        s5l8900_static_a64_compact_raw_pc_profile_slice_end(m);
+#endif
     if (status) *status = st;
     return n;
 }

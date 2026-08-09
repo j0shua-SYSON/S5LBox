@@ -99,6 +99,12 @@ extern "C" {
  * this marker. */
 #define VM_FW_BOOT_COMPACT_PRIVILEGED_WINDOW_REFILL_FILE \
     "engine.compact-privileged-window-refill-on"
+/* Explicit statistical diagnosis of where compact-runner CPU time lands.
+ * The ordinary marker-free product installs no signal handler or host timer.
+ * A nonempty marker is accepted only by the Apple-AArch64 compact engine and
+ * reports broad signed-text regions; it never changes guest semantics. */
+#define VM_FW_BOOT_COMPACT_PC_PROFILE_FILE \
+    "engine.compact-pc-profile-on"
 /* Same-binary timing control for an exact navigation replay. A nonempty
  * marker leaves real-time WFI pacing enabled but does not install the active
  * host clock, so the guest advances active time from retired instructions as

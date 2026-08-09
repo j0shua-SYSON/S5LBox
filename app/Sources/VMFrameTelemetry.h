@@ -113,6 +113,18 @@ typedef struct {
     uint64_t active_clock_failures;
     uint64_t compact_privileged_window_refills;
     uint64_t compact_privileged_boundary_retired;
+    uint64_t compact_pc_profile_samples;
+    uint64_t compact_pc_profile_outside;
+    uint64_t compact_pc_profile_entry;
+    uint64_t compact_pc_profile_dp;
+    uint64_t compact_pc_profile_memory;
+    uint64_t compact_pc_profile_block_control;
+    uint64_t compact_pc_profile_system;
+    uint64_t compact_pc_profile_vfp;
+    uint64_t compact_pc_profile_thumb;
+    uint64_t compact_pc_profile_retire;
+    uint64_t compact_pc_profile_fallback;
+    uint64_t compact_pc_profile_exit;
 } vm_execution_telemetry_observation_t;
 
 typedef struct {

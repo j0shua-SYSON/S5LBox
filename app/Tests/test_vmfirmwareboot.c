@@ -307,6 +307,13 @@ static void test_saved_state_restore_fixture(void) {
         privileged_window_refill_file != NULL;
     if (privileged_window_refill_file)
         fclose(privileged_window_refill_file);
+    char compact_pc_profile_marker[VM_FW_BOOT_PATH_CAPACITY + 64u];
+    snprintf(compact_pc_profile_marker, sizeof compact_pc_profile_marker,
+             "%s/%s", fixture, VM_FW_BOOT_COMPACT_PC_PROFILE_FILE);
+    FILE *compact_pc_profile_file =
+        fopen(compact_pc_profile_marker, "rb");
+    bool expect_compact_pc_profile = compact_pc_profile_file != NULL;
+    if (compact_pc_profile_file) fclose(compact_pc_profile_file);
     char active_clock_off_marker[VM_FW_BOOT_PATH_CAPACITY + 64u];
     snprintf(active_clock_off_marker, sizeof active_clock_off_marker,
              "%s/%s", fixture, VM_FW_BOOT_ACTIVE_CLOCK_OFF_FILE);
@@ -386,16 +393,22 @@ static void test_saved_state_restore_fixture(void) {
                            "privileged-window experiment"),
                   "privileged window marker did not reach the engine: %s",
                   report.summary);
+        if (!expect_interpreter && expect_compact_pc_profile)
+            CHECK(mentions(report.summary, "compact-PC profile"),
+                  "compact PC-profile marker did not reach the engine: %s",
+                  report.summary);
 #else
         (void)expect_user_only;
         (void)expect_window_refill_off;
         (void)expect_privileged_window_refill;
+        (void)expect_compact_pc_profile;
 #endif
 #else
         (void)expect_interpreter;
         (void)expect_user_only;
         (void)expect_window_refill_off;
         (void)expect_privileged_window_refill;
+        (void)expect_compact_pc_profile;
 #endif
 
         char marker[VM_FW_BOOT_PATH_CAPACITY + 64u];

@@ -188,7 +188,19 @@ static bool vm_execution_telemetry_not_before(
            VM_EXEC_NOT_BEFORE(active_clock_clamps) &&
            VM_EXEC_NOT_BEFORE(active_clock_failures) &&
            VM_EXEC_NOT_BEFORE(compact_privileged_window_refills) &&
-           VM_EXEC_NOT_BEFORE(compact_privileged_boundary_retired);
+           VM_EXEC_NOT_BEFORE(compact_privileged_boundary_retired) &&
+           VM_EXEC_NOT_BEFORE(compact_pc_profile_samples) &&
+           VM_EXEC_NOT_BEFORE(compact_pc_profile_outside) &&
+           VM_EXEC_NOT_BEFORE(compact_pc_profile_entry) &&
+           VM_EXEC_NOT_BEFORE(compact_pc_profile_dp) &&
+           VM_EXEC_NOT_BEFORE(compact_pc_profile_memory) &&
+           VM_EXEC_NOT_BEFORE(compact_pc_profile_block_control) &&
+           VM_EXEC_NOT_BEFORE(compact_pc_profile_system) &&
+           VM_EXEC_NOT_BEFORE(compact_pc_profile_vfp) &&
+           VM_EXEC_NOT_BEFORE(compact_pc_profile_thumb) &&
+           VM_EXEC_NOT_BEFORE(compact_pc_profile_retire) &&
+           VM_EXEC_NOT_BEFORE(compact_pc_profile_fallback) &&
+           VM_EXEC_NOT_BEFORE(compact_pc_profile_exit);
 #undef VM_EXEC_NOT_BEFORE
 }
 

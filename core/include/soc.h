@@ -4124,6 +4124,37 @@ bool s5l8900_static_a64_set_compact_raw_window_refill(s5l8900_t *m,
  * exact FETCH witness. The generic window-refill switch above must also be on. */
 bool s5l8900_static_a64_set_compact_raw_privileged_window_refill(
     s5l8900_t *m, bool enabled);
+/* Explicit diagnostic-only CPU-time sampling for the compact runner. On a
+ * supported Apple AArch64 host this installs SIGPROF at 1 ms of process CPU
+ * time and records samples only while s5l8900_run() is active. Ordinary
+ * machines pay one disabled gate per public run slice, never per guest
+ * instruction; their signal and timer state remain unchanged. It emits no
+ * runtime code and is never guest snapshot state. */
+bool s5l8900_static_a64_enable_compact_raw_pc_profile(s5l8900_t *m);
+
+typedef enum {
+    S5L_STATIC_A64_COMPACT_PC_ENTRY = 0,
+    S5L_STATIC_A64_COMPACT_PC_DP,
+    S5L_STATIC_A64_COMPACT_PC_MEMORY,
+    S5L_STATIC_A64_COMPACT_PC_BLOCK_CONTROL,
+    S5L_STATIC_A64_COMPACT_PC_SYSTEM,
+    S5L_STATIC_A64_COMPACT_PC_VFP,
+    S5L_STATIC_A64_COMPACT_PC_THUMB,
+    S5L_STATIC_A64_COMPACT_PC_RETIRE,
+    S5L_STATIC_A64_COMPACT_PC_FALLBACK,
+    S5L_STATIC_A64_COMPACT_PC_EXIT,
+    S5L_STATIC_A64_COMPACT_PC_REGION_COUNT
+} s5l_static_a64_compact_pc_region_t;
+
+typedef struct {
+    bool enabled;
+    uint64_t samples;
+    uint64_t outside;
+    uint64_t region[S5L_STATIC_A64_COMPACT_PC_REGION_COUNT];
+} s5l_static_a64_compact_pc_profile_t;
+
+void s5l8900_static_a64_compact_raw_pc_profile(
+    const s5l8900_t *m, s5l_static_a64_compact_pc_profile_t *out);
 /* Same-binary rollout/benchmark control for terminal A32/Thumb BX/BLX signed
  * records. It defaults on when the engine is created. Changing it clears only
  * derived decode/graph entries so an off/on comparison cannot reuse a block

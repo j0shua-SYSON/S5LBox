@@ -70,6 +70,18 @@ static vm_execution_telemetry_observation_t execution_observation(
     value.active_clock_failures = base + 37u;
     value.compact_privileged_window_refills = base + 38u;
     value.compact_privileged_boundary_retired = base + 39u;
+    value.compact_pc_profile_samples = base + 40u;
+    value.compact_pc_profile_outside = base + 41u;
+    value.compact_pc_profile_entry = base + 42u;
+    value.compact_pc_profile_dp = base + 43u;
+    value.compact_pc_profile_memory = base + 44u;
+    value.compact_pc_profile_block_control = base + 45u;
+    value.compact_pc_profile_system = base + 46u;
+    value.compact_pc_profile_vfp = base + 47u;
+    value.compact_pc_profile_thumb = base + 48u;
+    value.compact_pc_profile_retire = base + 49u;
+    value.compact_pc_profile_fallback = base + 50u;
+    value.compact_pc_profile_exit = base + 51u;
     return value;
 }
 
@@ -213,7 +225,19 @@ static void test_boundaries_and_sampled_changes(void) {
            state.execution_last.active_clock_clamps == 2036u &&
            state.execution_last.active_clock_failures == 2037u &&
            state.execution_last.compact_privileged_window_refills == 2038u &&
-           state.execution_last.compact_privileged_boundary_retired == 2039u,
+           state.execution_last.compact_privileged_boundary_retired == 2039u &&
+           state.execution_last.compact_pc_profile_samples == 2040u &&
+           state.execution_last.compact_pc_profile_outside == 2041u &&
+           state.execution_last.compact_pc_profile_entry == 2042u &&
+           state.execution_last.compact_pc_profile_dp == 2043u &&
+           state.execution_last.compact_pc_profile_memory == 2044u &&
+           state.execution_last.compact_pc_profile_block_control == 2045u &&
+           state.execution_last.compact_pc_profile_system == 2046u &&
+           state.execution_last.compact_pc_profile_vfp == 2047u &&
+           state.execution_last.compact_pc_profile_thumb == 2048u &&
+           state.execution_last.compact_pc_profile_retire == 2049u &&
+           state.execution_last.compact_pc_profile_fallback == 2050u &&
+           state.execution_last.compact_pc_profile_exit == 2051u,
           "execution counter endpoints are wrong");
 
     CHECK(state.layer_attempts == 4u && state.layer_accepted == 3u &&
