@@ -4008,11 +4008,12 @@ bool s5l8900_static_a64_set_compact_raw(s5l8900_t *m, bool enabled);
  * before arm_step() executes the boundary. */
 bool s5l8900_static_a64_set_compact_raw_privileged(s5l8900_t *m,
                                                    bool enabled);
-/* Same-binary control for continuing a resident compact interval at an
- * unchanged PC in another 1 KiB code window. Product default is enabled. The
- * continuation requires an exact live fetch-TLB/host-RAM witness and an
- * instruction admitted by the signed runner; it never walks, faults, touches
- * MMIO or retires through the callback. */
+/* Same-binary control for continuing a resident User-mode compact interval at
+ * an unchanged PC in another 1 KiB code window. Product default is enabled.
+ * Privileged prefixes always return to the normal machine/device boundary at
+ * a window exit. User-mode continuation requires an exact live
+ * fetch-TLB/host-RAM witness and an instruction admitted by the signed runner;
+ * it never walks, faults, touches MMIO or retires through the callback. */
 bool s5l8900_static_a64_set_compact_raw_window_refill(s5l8900_t *m,
                                                        bool enabled);
 /* Same-binary rollout/benchmark control for terminal A32/Thumb BX/BLX signed

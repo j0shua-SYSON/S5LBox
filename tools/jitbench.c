@@ -9992,6 +9992,10 @@ typedef struct {
     uint64_t privileged_calls;
     uint64_t privileged_retired;
     uint64_t known_negative_bypasses;
+    uint64_t window_crossings;
+    uint64_t window_reloads;
+    uint64_t window_stops;
+    uint64_t window_fast_refills;
     s5l_static_a64_compact_raw_refusals_t refusals;
 } compact_privileged_oracle_result_t;
 
@@ -10029,9 +10033,16 @@ static void seed_compact_privileged_oracle_cpu(arm_cpu_t *cpu,
     cpu->r[15] = thumb ? 2u : 0u;
 }
 
+typedef enum {
+    COMPACT_PRIVILEGED_NATIVE,
+    COMPACT_PRIVILEGED_CONTROL_BOUNDARY,
+    COMPACT_PRIVILEGED_WINDOW_BOUNDARY,
+} compact_privileged_workload_t;
+
 static bool run_compact_privileged_oracle_case(
-        uint32_t mode, bool thumb, bool boundary,
+        uint32_t mode, bool thumb, compact_privileged_workload_t workload,
         bool compact, bool privileged_enabled, bool bypass_enabled,
+        bool window_refill_enabled,
         compact_privileged_oracle_result_t *out) {
     static const uint32_t A32_NATIVE[] = {
         UINT32_C(0xe2888001), /* ADD r8,r8,#1: FIQ-bank witness */
@@ -10046,6 +10057,13 @@ static bool run_compact_privileged_oracle_case(
         UINT32_C(0xe28ee008),
         UINT32_C(0xef000000), /* SVC: always interpreter-owned */
     };
+    static const uint32_t A32_WINDOW[] = {
+        UINT32_C(0xe2800001), /* native ADD at 0x3f8 */
+        UINT32_C(0xe2811001), /* native ADD at 0x3fc */
+        UINT32_C(0xe2822001), /* first instruction in the 0x400 window */
+        UINT32_C(0xe2833001),
+        UINT32_C(0xe2844001),
+    };
     static const uint16_t THUMB_NATIVE[] = {
         UINT16_C(0x3001), /* ADDS r0,#1 */
         UINT16_C(0x3102), /* ADDS r1,#2 */
@@ -10053,20 +10071,25 @@ static bool run_compact_privileged_oracle_case(
         UINT16_C(0x3304), /* ADDS r3,#4 */
     };
     const uint32_t section = (3u << 10) | 2u;
-    const unsigned total = boundary ? 5u : 4u;
+    const unsigned total = workload == COMPACT_PRIVILEGED_NATIVE ? 4u : 5u;
     s5l8900_t machine = {0};
     arm_status_t status = ARM_OK;
     bool initialized = false;
     bool ok = false;
 
-    if (!out || (boundary && thumb)) return false;
+    if (!out || workload > COMPACT_PRIVILEGED_WINDOW_BOUNDARY ||
+        (workload != COMPACT_PRIVILEGED_NATIVE && thumb))
+        return false;
     memset(out, 0, sizeof *out);
     if (!s5l8900_init(&machine, 0u, RAM_SIZE)) goto done;
     initialized = true;
     if (thumb)
         s5l8900_load(&machine, 2u, THUMB_NATIVE, sizeof THUMB_NATIVE);
-    else if (boundary)
+    else if (workload == COMPACT_PRIVILEGED_CONTROL_BOUNDARY)
         s5l8900_load(&machine, 0u, A32_BOUNDARY, sizeof A32_BOUNDARY);
+    else if (workload == COMPACT_PRIVILEGED_WINDOW_BOUNDARY)
+        s5l8900_load(&machine, UINT32_C(0x3f8), A32_WINDOW,
+                     sizeof A32_WINDOW);
     else
         s5l8900_load(&machine, 0u, A32_NATIVE, sizeof A32_NATIVE);
     s5l8900_load(&machine, UINT32_C(0x4000), &section, sizeof section);
@@ -10074,6 +10097,8 @@ static bool run_compact_privileged_oracle_case(
     machine.cpu.cp15.dacr = 1u;
     machine.cpu.cp15.sctlr |= ARM_SCTLR_M;
     seed_compact_privileged_oracle_cpu(&machine.cpu, mode, thumb);
+    if (workload == COMPACT_PRIVILEGED_WINDOW_BOUNDARY)
+        machine.cpu.r[15] = UINT32_C(0x3f8);
     s5l8900_tick(&machine, 0u);
 
     if (compact &&
@@ -10083,6 +10108,8 @@ static bool run_compact_privileged_oracle_case(
              &machine, privileged_enabled) ||
          !s5l8900_static_a64_set_known_negative_bypass(
              &machine, bypass_enabled) ||
+         !s5l8900_static_a64_set_compact_raw_window_refill(
+             &machine, window_refill_enabled) ||
          !s5l8900_static_a64_set_chain_limit(
              &machine, A64_STATIC_MAX_CHAIN_INSNS)))
         goto done;
@@ -10106,6 +10133,14 @@ static bool run_compact_privileged_oracle_case(
         s5l8900_static_a64_compact_raw_privileged_retired(&machine);
     out->known_negative_bypasses =
         s5l8900_static_a64_known_negative_bypasses(&machine);
+    out->window_crossings =
+        s5l8900_static_a64_compact_raw_window_crossings(&machine);
+    out->window_reloads =
+        s5l8900_static_a64_compact_raw_window_reloads(&machine);
+    out->window_stops =
+        s5l8900_static_a64_compact_raw_window_stops(&machine);
+    out->window_fast_refills =
+        s5l8900_static_a64_compact_raw_window_fast_refills(&machine);
     s5l8900_static_a64_compact_raw_refusals(&machine, &out->refusals);
     ok = true;
 
@@ -10151,11 +10186,13 @@ static bool validate_soc_compact_raw_privileged_prefix(void) {
             compact_privileged_oracle_result_t reference = {0};
             compact_privileged_oracle_result_t native = {0};
             const bool ran = run_compact_privileged_oracle_case(
-                                 MODES[i].mode, thumb != 0u, false,
-                                 false, false, false, &reference) &&
+                                 MODES[i].mode, thumb != 0u,
+                                 COMPACT_PRIVILEGED_NATIVE,
+                                 false, false, false, true, &reference) &&
                              run_compact_privileged_oracle_case(
-                                 MODES[i].mode, thumb != 0u, false,
-                                 true, true, true, &native);
+                                 MODES[i].mode, thumb != 0u,
+                                 COMPACT_PRIVILEGED_NATIVE,
+                                 true, true, true, true, &native);
             const bool snapshot_exact = ran &&
                 compact_privileged_snapshots_equal(&reference, &native);
             const bool exact = snapshot_exact &&
@@ -10201,11 +10238,13 @@ static bool validate_soc_compact_raw_privileged_prefix(void) {
         compact_privileged_oracle_result_t reference = {0};
         compact_privileged_oracle_result_t control = {0};
         const bool ran = run_compact_privileged_oracle_case(
-                             ARM_MODE_SVC, false, false,
-                             false, false, false, &reference) &&
+                             ARM_MODE_SVC, false,
+                             COMPACT_PRIVILEGED_NATIVE,
+                             false, false, false, true, &reference) &&
                          run_compact_privileged_oracle_case(
-                             ARM_MODE_SVC, false, false,
-                             true, false, true, &control);
+                             ARM_MODE_SVC, false,
+                             COMPACT_PRIVILEGED_NATIVE,
+                             true, false, true, true, &control);
         const bool snapshot_exact = ran &&
             compact_privileged_snapshots_equal(&reference, &control);
         const bool exact = snapshot_exact &&
@@ -10243,14 +10282,17 @@ static bool validate_soc_compact_raw_privileged_prefix(void) {
         compact_privileged_oracle_result_t off = {0};
         compact_privileged_oracle_result_t on = {0};
         const bool ran = run_compact_privileged_oracle_case(
-                             ARM_MODE_SVC, false, true,
-                             false, false, false, &reference) &&
+                             ARM_MODE_SVC, false,
+                             COMPACT_PRIVILEGED_CONTROL_BOUNDARY,
+                             false, false, false, true, &reference) &&
                          run_compact_privileged_oracle_case(
-                             ARM_MODE_SVC, false, true,
-                             true, true, false, &off) &&
+                             ARM_MODE_SVC, false,
+                             COMPACT_PRIVILEGED_CONTROL_BOUNDARY,
+                             true, true, false, true, &off) &&
                          run_compact_privileged_oracle_case(
-                             ARM_MODE_SVC, false, true,
-                             true, true, true, &on);
+                             ARM_MODE_SVC, false,
+                             COMPACT_PRIVILEGED_CONTROL_BOUNDARY,
+                             true, true, true, true, &on);
         const bool snapshot_exact = ran &&
             compact_privileged_snapshots_equal(&reference, &off) &&
             compact_privileged_snapshots_equal(&reference, &on);
@@ -10296,11 +10338,73 @@ static bool validate_soc_compact_raw_privileged_prefix(void) {
         free_compact_privileged_oracle_result(&on);
     }
 
+    {
+        compact_privileged_oracle_result_t reference = {0};
+        compact_privileged_oracle_result_t refill_off = {0};
+        compact_privileged_oracle_result_t guarded = {0};
+        const bool ran = run_compact_privileged_oracle_case(
+                             ARM_MODE_SVC, false,
+                             COMPACT_PRIVILEGED_WINDOW_BOUNDARY,
+                             false, false, false, true, &reference) &&
+                         run_compact_privileged_oracle_case(
+                             ARM_MODE_SVC, false,
+                             COMPACT_PRIVILEGED_WINDOW_BOUNDARY,
+                             true, true, true, false, &refill_off) &&
+                         run_compact_privileged_oracle_case(
+                             ARM_MODE_SVC, false,
+                             COMPACT_PRIVILEGED_WINDOW_BOUNDARY,
+                             true, true, true, true, &guarded);
+        const bool snapshot_exact = ran &&
+            compact_privileged_snapshots_equal(&reference, &refill_off) &&
+            compact_privileged_snapshots_equal(&reference, &guarded);
+        const bool exact = snapshot_exact &&
+            refill_off.attempts == guarded.attempts &&
+            refill_off.calls == guarded.calls &&
+            refill_off.native_retired == guarded.native_retired &&
+            refill_off.native_retired != 0u &&
+            refill_off.fallback_retired == guarded.fallback_retired &&
+            refill_off.privileged_attempts == guarded.privileged_attempts &&
+            refill_off.privileged_calls == guarded.privileged_calls &&
+            refill_off.privileged_retired == guarded.privileged_retired &&
+            refill_off.known_negative_bypasses ==
+                guarded.known_negative_bypasses &&
+            refill_off.window_crossings == guarded.window_crossings &&
+            refill_off.window_reloads == guarded.window_reloads &&
+            refill_off.window_stops == guarded.window_stops &&
+            refill_off.window_fast_refills == 0u &&
+            guarded.window_fast_refills == 0u;
+        if (!exact) {
+            fprintf(stderr,
+                    "jitbench: compact privileged window guard mismatch "
+                    "off-attempts/calls/native/windows=%" PRIu64 "/%" PRIu64
+                    "/%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64
+                    "/%" PRIu64 " guarded=%" PRIu64 "/%" PRIu64 "/%" PRIu64
+                    "/%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64
+                    " snapshot=%s\n",
+                    refill_off.attempts, refill_off.calls,
+                    refill_off.native_retired, refill_off.window_crossings,
+                    refill_off.window_reloads, refill_off.window_stops,
+                    refill_off.window_fast_refills, guarded.attempts,
+                    guarded.calls, guarded.native_retired,
+                    guarded.window_crossings, guarded.window_reloads,
+                    guarded.window_stops, guarded.window_fast_refills,
+                    snapshot_exact ? "exact" : "mismatch");
+            free_compact_privileged_oracle_result(&reference);
+            free_compact_privileged_oracle_result(&refill_off);
+            free_compact_privileged_oracle_result(&guarded);
+            return false;
+        }
+        free_compact_privileged_oracle_result(&reference);
+        free_compact_privileged_oracle_result(&refill_off);
+        free_compact_privileged_oracle_result(&guarded);
+    }
+
     printf("SOC-COMPACT-RAW-PRIVILEGED-ORACLE exact=yes modes=6 "
            "states=a32,thumb cases=%u minimum-native=%" PRIu64 " "
            "banked-registers=yes mmu=on "
            "privileged-native-prefix=yes privileged-fallback=no "
            "control=user-only boundary=svc-zero-bypass "
+           "privileged-window-refill=guarded "
            "boundary-attempts=2-to-1 boundary-zero=1-to-0 "
            "serialized-machine=yes "
            "runtime-codegen=no\n",

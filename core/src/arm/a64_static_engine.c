@@ -1143,12 +1143,16 @@ static a64_compact_raw_fallback_result_t compact_raw_fallback(
     priv = (cpu->cpsr & ARM_CPSR_MODE_MASK) != ARM_MODE_USR;
     width = thumb ? 2u : 4u;
 
-    /* A window exit does not itself require an architectural step. Reuse only
-     * the exact current FETCH witness, then ask the public signed-runner
-     * classifier whether the unchanged instruction can execute natively. A
+    /* A User-mode window exit does not itself require an architectural step.
+     * Reuse only the exact current FETCH witness, then ask the public
+     * signed-runner classifier whether the unchanged instruction can execute
+     * natively. Privileged prefixes deliberately stop here: their resident
+     * fallback cannot own arm_step(), and skipping that stop also skips the
+     * normal SoC/device boundary which made the prefix admissible. A User-mode
      * refusal falls through to arm_step(), which reuses any warmed fetch cache
      * and remains the sole owner of walks, faults and MMIO. */
     if (context->state->compact_raw_window_refill_enabled &&
+        !priv &&
         step_block != context->fetch_block &&
         (cpu->r[15] & (width - 1u)) == 0u &&
         arm_fetch_cache_try_refill(cpu, cpu->r[15], priv)) {
