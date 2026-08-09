@@ -440,6 +440,207 @@ static bool wfi_pace_probe_sleep(void *ctx, uint64_t nanoseconds) {
     return probe->succeeds;
 }
 
+typedef struct {
+    uint64_t now_ns;
+    unsigned now_calls;
+    unsigned fail_on_call;
+    unsigned sleep_calls;
+    uint64_t last_sleep_ns;
+    bool succeeds;
+} active_clock_probe_t;
+
+static bool active_clock_probe_now(void *ctx, uint64_t *nanoseconds) {
+    active_clock_probe_t *probe = ctx;
+    if (!probe || !nanoseconds) return false;
+    probe->now_calls++;
+    if (!probe->succeeds ||
+        (probe->fail_on_call && probe->now_calls == probe->fail_on_call))
+        return false;
+    *nanoseconds = probe->now_ns;
+    return true;
+}
+
+static bool active_clock_probe_sleep(void *ctx, uint64_t nanoseconds) {
+    active_clock_probe_t *probe = ctx;
+    if (!probe) return false;
+    probe->sleep_calls++;
+    probe->last_sleep_ns = nanoseconds;
+    probe->now_ns += nanoseconds;
+    return true;
+}
+
+static void fill_arm_nops(uint32_t *program, unsigned count) {
+    for (unsigned i = 0u; i < count; i++) program[i] = 0xe1a00000u;
+}
+
+static void test_active_host_clock_is_optional_bounded_and_fail_closed(void) {
+    uint32_t program[512];
+    fill_arm_nops(program, sizeof program / sizeof program[0]);
+
+    /* With no callback, active execution retains the literal historical
+     * instruction clock exactly. */
+    s5l8900_t deterministic;
+    CHECK(s5l8900_init(&deterministic, 0, 1u << 20),
+          "deterministic active-clock control init failed");
+    s5l8900_load(&deterministic, 0, program, sizeof program);
+    deterministic.cpu_hz = deterministic.tb_hz = 1000u;
+    deterministic.cpu.cpsr = ARM_MODE_SYS | ARM_CPSR_I | ARM_CPSR_F;
+    arm_status_t st = ARM_OK;
+    unsigned ran = s5l8900_run(&deterministic, 300u, &st);
+    CHECK(st == ARM_OK && ran == 300u &&
+          deterministic.timer.ticks == 300u &&
+          deterministic.active_host_now == NULL,
+          "default active timing changed: status=%d ran=%u ticks=%llu",
+          (int)st, ran, (unsigned long long)deterministic.timer.ticks);
+    s5l8900_free(&deterministic);
+
+    s5l8900_t active;
+    CHECK(s5l8900_init(&active, 0, 1u << 20),
+          "active-clock machine init failed");
+    s5l8900_load(&active, 0, program, sizeof program);
+    active.cpu_hz = active.tb_hz = 1000u;
+    active.cpu.cpsr = ARM_MODE_SYS | ARM_CPSR_I | ARM_CPSR_F;
+    active_clock_probe_t probe = {
+        .now_ns = UINT64_C(1000000000), .succeeds = true
+    };
+    CHECK(!s5l8900_set_active_host_clock(NULL, active_clock_probe_now,
+                                         &probe),
+          "NULL machine accepted active clock");
+    CHECK(s5l8900_set_active_host_clock(
+              &active, active_clock_probe_now, &probe),
+          "could not enable active host clock");
+
+    /* Retiring 300 instructions while the host sample is stationary advances
+     * CPU work, but not the guest's physical clock. Sampling is bounded at 256
+     * retirements and flushed once at the end of the run. */
+    ran = s5l8900_run(&active, 300u, &st);
+    CHECK(st == ARM_OK && ran == 300u && active.timer.ticks == 0u &&
+          active.cpu.cycles == 300u && probe.now_calls == 3u,
+          "stationary host clock advanced time or missed its bound: "
+          "status=%d ran=%u ticks=%llu cycles=%llu calls=%u",
+          (int)st, ran, (unsigned long long)active.timer.ticks,
+          (unsigned long long)active.cpu.cycles, probe.now_calls);
+
+    probe.now_ns += UINT64_C(5000000); /* five host milliseconds */
+    ran = s5l8900_run(&active, 1u, &st);
+    CHECK(st == ARM_OK && ran == 1u && active.timer.ticks == 5u &&
+          active.active_clock_added_ticks == 5u,
+          "5 ms host interval did not add five 1 kHz guest ticks: "
+          "status=%d ran=%u ticks=%llu added=%llu",
+          (int)st, ran, (unsigned long long)active.timer.ticks,
+          (unsigned long long)active.active_clock_added_ticks);
+
+    /* A long suspend-like interval contributes only the responsiveness cap;
+     * the remaining 92 ms is deliberately discarded, not queued. */
+    probe.now_ns += UINT64_C(100000000);
+    ran = s5l8900_run(&active, 1u, &st);
+    CHECK(st == ARM_OK && ran == 1u && active.timer.ticks == 13u &&
+          active.active_clock_added_ticks == 13u &&
+          active.active_clock_clamps == 1u,
+          "long host interval was not capped: status=%d ran=%u ticks=%llu "
+          "added=%llu clamps=%llu",
+          (int)st, ran, (unsigned long long)active.timer.ticks,
+          (unsigned long long)active.active_clock_added_ticks,
+          (unsigned long long)active.active_clock_clamps);
+
+    /* A backwards timestamp is untrustworthy. This run must immediately use
+     * the old one-tick-per-retirement contract and re-anchor only next run. */
+    probe.now_ns--;
+    ran = s5l8900_run(&active, 3u, &st);
+    CHECK(st == ARM_OK && ran == 3u && active.timer.ticks == 16u &&
+          active.active_clock_failures == 1u &&
+          !active.active_clock_anchor_valid,
+          "backwards clock did not fail closed: status=%d ran=%u ticks=%llu "
+          "failures=%llu anchor=%d",
+          (int)st, ran, (unsigned long long)active.timer.ticks,
+          (unsigned long long)active.active_clock_failures,
+          (int)active.active_clock_anchor_valid);
+    probe.now_ns += 2u;
+    ran = s5l8900_run(&active, 2u, &st);
+    CHECK(st == ARM_OK && ran == 2u && active.timer.ticks == 16u &&
+          active.active_clock_anchor_valid,
+          "clock did not re-anchor without manufacturing time: "
+          "status=%d ran=%u ticks=%llu anchor=%d",
+          (int)st, ran, (unsigned long long)active.timer.ticks,
+          (int)active.active_clock_anchor_valid);
+
+    CHECK(!s5l8900_set_active_host_clock(&active, NULL, &probe),
+          "active-clock clear accepted stale context");
+    CHECK(s5l8900_set_active_host_clock(&active, NULL, NULL) &&
+          active.active_host_now == NULL &&
+          active.active_host_now_ctx == NULL &&
+          active.active_clock_updates == 0u &&
+          active.active_clock_failures == 0u &&
+          !active.active_clock_anchor_valid,
+          "active-clock clear retained policy, evidence or anchor");
+    s5l8900_free(&active);
+
+    /* Failure after a successful anchor is more dangerous than failure at run
+     * entry: 256 instructions are pending. They must all receive their old
+     * exact ticks, and the remainder of this run must stay on that old path. */
+    s5l8900_t mid_batch_failure;
+    CHECK(s5l8900_init(&mid_batch_failure, 0, 1u << 20),
+          "mid-batch failure machine init failed");
+    s5l8900_load(&mid_batch_failure, 0, program, sizeof program);
+    mid_batch_failure.cpu_hz = mid_batch_failure.tb_hz = 1000u;
+    mid_batch_failure.cpu.cpsr = ARM_MODE_SYS | ARM_CPSR_I | ARM_CPSR_F;
+    active_clock_probe_t failing = {
+        .now_ns = UINT64_C(2000000000), .fail_on_call = 2u,
+        .succeeds = true
+    };
+    CHECK(s5l8900_set_active_host_clock(
+              &mid_batch_failure, active_clock_probe_now, &failing),
+          "could not enable mid-batch failure oracle");
+    ran = s5l8900_run(&mid_batch_failure, 300u, &st);
+    CHECK(st == ARM_OK && ran == 300u &&
+          mid_batch_failure.timer.ticks == 300u &&
+          mid_batch_failure.active_clock_failures == 1u &&
+          failing.now_calls == 2u,
+          "mid-batch failure lost retirement time: status=%d ran=%u "
+          "ticks=%llu failures=%llu calls=%u",
+          (int)st, ran,
+          (unsigned long long)mid_batch_failure.timer.ticks,
+          (unsigned long long)mid_batch_failure.active_clock_failures,
+          failing.now_calls);
+    s5l8900_free(&mid_batch_failure);
+}
+
+static void test_active_host_clock_does_not_double_count_paced_wfi(void) {
+    const uint32_t wfi = 0xee070f90u;
+    s5l8900_t m;
+    CHECK(s5l8900_init(&m, 0, 1u << 20),
+          "active WFI machine init failed");
+    s5l8900_load(&m, 0, &wfi, sizeof wfi);
+    m.cpu_hz = m.tb_hz = 1000u;
+    m.timer.t4_count = m.timer.t4_value = 4u;
+    m.timer.t4_state = TIMER4_STATE_START;
+    m.vic[0].enable = 1u << S5L8900_IRQ_TIMER;
+    m.cpu.cpsr = ARM_MODE_SYS | ARM_CPSR_I | ARM_CPSR_F;
+
+    active_clock_probe_t probe = { .succeeds = true };
+    CHECK(s5l8900_set_active_host_clock(
+              &m, active_clock_probe_now, &probe) &&
+          s5l8900_set_wfi_host_pacing(
+              &m, active_clock_probe_sleep, &probe),
+          "could not enable combined active/WFI clock policy");
+    arm_status_t st = ARM_OK;
+    unsigned ran = s5l8900_run(&m, 1u, &st);
+    CHECK(st == ARM_OK && ran == 1u &&
+          probe.sleep_calls == 1u && probe.last_sleep_ns == UINT64_C(4000000) &&
+          m.timer.ticks == 4u && m.active_clock_added_ticks == 0u &&
+          m.active_clock_updates == 1u &&
+          m.active_clock_guest_ticks_since_sync == 0u,
+          "paced WFI was counted twice: status=%d ran=%u sleeps=%u ns=%llu "
+          "ticks=%llu added=%llu updates=%llu pending=%llu",
+          (int)st, ran, probe.sleep_calls,
+          (unsigned long long)probe.last_sleep_ns,
+          (unsigned long long)m.timer.ticks,
+          (unsigned long long)m.active_clock_added_ticks,
+          (unsigned long long)m.active_clock_updates,
+          (unsigned long long)m.active_clock_guest_ticks_since_sync);
+    s5l8900_free(&m);
+}
+
 static void test_wfi_host_pacing_is_optional_exact_and_yields(void) {
     const uint32_t program[] = {
         0xee070f90u,            /* WFI */
@@ -5748,6 +5949,8 @@ int main(void) {
     test_wfi_fast_forwards_to_the_timer_boundary();
     test_wfi_host_pacing_is_optional_exact_and_yields();
     test_wfi_host_pacing_bounds_long_and_failed_waits();
+    test_active_host_clock_is_optional_bounded_and_fail_closed();
+    test_active_host_clock_does_not_double_count_paced_wfi();
     test_wfi_unmasked_fiq_uses_the_post_mcr_return_link();
     test_wfi_pending_line_completes_without_advancing_time();
     test_wfi_stops_at_earliest_deliverable_device_edge();

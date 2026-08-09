@@ -5,8 +5,10 @@
 #include "soc.h"
 
 /* The generic engine initializes at sixteen. The iOS product explicitly uses
- * this larger ceiling after the exact Apple-host gate; the SoC loop still
- * clamps every invocation to the first timebase edge. */
+ * this larger ceiling after the exact Apple-host gate. Deterministic execution
+ * clamps each invocation to the first timebase edge; optional active host
+ * timing may use the whole ceiling because elapsed edges advance together at
+ * the next bounded host sample. */
 #define S5LBOX_STATIC_A64_PRODUCT_CHAIN_INSNS 256u
 
 /* Cheap execution-policy gate. In the LTO iOS product this folds to the

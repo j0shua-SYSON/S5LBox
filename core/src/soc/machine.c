@@ -692,6 +692,27 @@ bool s5l8900_set_wfi_host_pacing(s5l8900_t *m,
     return true;
 }
 
+bool s5l8900_set_active_host_clock(s5l8900_t *m,
+                                   s5l_active_host_now_fn now, void *ctx) {
+    if (!m) return false;
+    if (!now && ctx) return false;
+
+    /* Match the WFI policy's publication order: a diagnostic observer cannot
+     * see a live callback paired with stale context or anchor state. */
+    if (!now) m->active_host_now = NULL;
+    m->active_host_now_ctx = now ? ctx : NULL;
+    m->active_clock_last_host_ns = 0u;
+    m->active_clock_guest_ticks_since_sync = 0u;
+    m->active_clock_fraction = 0u;
+    m->active_clock_updates = 0u;
+    m->active_clock_added_ticks = 0u;
+    m->active_clock_clamps = 0u;
+    m->active_clock_failures = 0u;
+    m->active_clock_anchor_valid = false;
+    if (now) m->active_host_now = now;
+    return true;
+}
+
 static unsigned pre_step_filter_bit(uint32_t pc) {
     uint32_t word = pc >> 1u;
     return (unsigned)((word ^ (word >> 10u) ^ (word >> 20u)) & 63u);
@@ -1470,6 +1491,13 @@ void s5l8900_tick(s5l8900_t *m, uint32_t ticks) {
      * changing cpu.cycles. Feeding ticks straight into the timebase runs guest
      * time ~68x fast and livelocks the kernel's decrementer.
      */
+    if (m->active_host_now && ticks) {
+        if (UINT64_MAX - m->active_clock_guest_ticks_since_sync < ticks)
+            m->active_clock_guest_ticks_since_sync = UINT64_MAX;
+        else
+            m->active_clock_guest_ticks_since_sync += ticks;
+    }
+
     uint32_t tb = ticks;
     if (m->cpu_hz && m->tb_hz) {
         m->tb_accum += (uint64_t)ticks * m->tb_hz;
@@ -1680,6 +1708,23 @@ static unsigned retirement_batch_limit(const s5l8900_t *m,
 }
 
 /*
+ * Active wall-clock mode no longer needs an artificial retirement boundary at
+ * each 6 MHz timebase edge: the next host sample advances every elapsed edge
+ * together.  Device dirtiness and host inputs remain immediate boundaries.
+ * The fixed ceiling limits both interrupt latency and clock callback cost.
+ */
+static unsigned run_retirement_batch_limit(const s5l8900_t *m,
+                                           unsigned remaining,
+                                           bool active_clock) {
+    if (!active_clock) return retirement_batch_limit(m, remaining);
+    if (!remaining || m->level_dirty || ext_inputs(m) != m->ext_seen)
+        return 0u;
+    if (remaining > S5L8900_ACTIVE_CLOCK_SYNC_INSNS)
+        remaining = S5L8900_ACTIVE_CLOCK_SYNC_INSNS;
+    return remaining;
+}
+
+/*
  * Collapse only the calls to s5l8900_tick(), never ARM execution itself.
  *
  * User mode is the safety boundary: WFI and privileged host SVC can advance
@@ -1688,14 +1733,102 @@ static unsigned retirement_batch_limit(const s5l8900_t *m,
  * own boundary contract, so either policy disables this path completely.
  */
 static unsigned interpreter_tick_batch_limit(const s5l8900_t *m,
-                                              unsigned remaining) {
+                                              unsigned remaining,
+                                              bool active_clock) {
     if ((m->cpu.cpsr & ARM_CPSR_MODE_MASK) != ARM_MODE_USR ||
         m->pre_step_hook)
         return 0u;
 #if defined(S5LBOX_STATIC_A64_ENGINE)
     if (s5l8900_static_a64_is_enabled(m)) return 0u;
 #endif
-    return retirement_batch_limit(m, remaining);
+    return run_retirement_batch_limit(m, remaining, active_clock);
+}
+
+
+static void active_clock_counter_add(uint64_t *counter, uint64_t value) {
+    if (UINT64_MAX - *counter < value) *counter = UINT64_MAX;
+    else *counter += value;
+}
+
+/*
+ * Synchronize active guest time to one monotonic host sample. `fallback_ticks`
+ * are the successfully retired instructions not yet represented in guest
+ * time. If the host clock cannot provide a trustworthy sample, those ticks
+ * are applied through the old exact contract and the caller disables active
+ * timing for the rest of this run call.
+ */
+static bool active_host_clock_sync(s5l8900_t *m,
+                                   uint32_t fallback_ticks) {
+    uint64_t now_ns = 0u;
+    if (!m->active_host_now || !m->cpu_hz ||
+        !m->active_host_now(m->active_host_now_ctx, &now_ns) ||
+        (m->active_clock_anchor_valid &&
+         now_ns < m->active_clock_last_host_ns)) {
+        active_clock_counter_add(&m->active_clock_failures, 1u);
+        m->active_clock_anchor_valid = false;
+        m->active_clock_last_host_ns = 0u;
+        m->active_clock_fraction = 0u;
+        m->active_clock_guest_ticks_since_sync = 0u;
+        s5l8900_tick(m, fallback_ticks);
+        return false;
+    }
+
+    if (!m->active_clock_anchor_valid) {
+        m->active_clock_last_host_ns = now_ns;
+        m->active_clock_guest_ticks_since_sync = 0u;
+        m->active_clock_fraction = 0u;
+        m->active_clock_anchor_valid = true;
+        /* Establish the same level/input boundary the first ordinary device
+         * tick in this run would have supplied, without manufacturing time. */
+        s5l8900_tick(m, 0u);
+        return true;
+    }
+
+    uint64_t elapsed_ns = now_ns - m->active_clock_last_host_ns;
+    m->active_clock_last_host_ns = now_ns;
+    if (elapsed_ns > S5L8900_ACTIVE_CLOCK_MAX_STEP_NS) {
+        elapsed_ns = S5L8900_ACTIVE_CLOCK_MAX_STEP_NS;
+        active_clock_counter_add(&m->active_clock_clamps, 1u);
+    }
+
+    /* The elapsed interval is capped at 8 ms and cpu_hz is uint32_t, so this
+     * product is far below UINT64_MAX. The remainder is measured in billionths
+     * of a CPU tick and preserves sub-tick host samples without drift. */
+    uint64_t scaled = elapsed_ns * m->cpu_hz + m->active_clock_fraction;
+    uint64_t due_ticks = scaled / UINT64_C(1000000000);
+    m->active_clock_fraction = scaled % UINT64_C(1000000000);
+
+    uint64_t observed_ticks = m->active_clock_guest_ticks_since_sync;
+    uint64_t added_ticks = due_ticks > observed_ticks
+                         ? due_ticks - observed_ticks : 0u;
+    active_clock_counter_add(&m->active_clock_updates, 1u);
+    active_clock_counter_add(&m->active_clock_added_ticks, added_ticks);
+
+    /* added_ticks is bounded by 8 ms at a uint32_t CPU rate, hence it fits the
+     * public tick width. A zero call is still required to refresh MMIO levels
+     * and newly arrived host inputs at this synchronization boundary. */
+    s5l8900_tick(m, (uint32_t)added_ticks);
+    m->active_clock_guest_ticks_since_sync = 0u;
+    return true;
+}
+
+static void run_clock_retired(s5l8900_t *m, bool *active_clock,
+                              unsigned *pending_retired, unsigned retired,
+                              bool force_sync) {
+    if (!*active_clock) {
+        s5l8900_tick(m, retired);
+        return;
+    }
+
+    *pending_retired += retired;
+    if (!force_sync &&
+        *pending_retired < S5L8900_ACTIVE_CLOCK_SYNC_INSNS)
+        return;
+
+    unsigned fallback_ticks = *pending_retired;
+    *pending_retired = 0u;
+    if (!active_host_clock_sync(m, (uint32_t)fallback_ticks))
+        *active_clock = false;
 }
 
 unsigned s5l8900_static_a64_fallback_step(s5l8900_t *m,
@@ -1732,9 +1865,13 @@ unsigned s5l8900_static_a64_fallback_step(s5l8900_t *m,
 unsigned s5l8900_run(s5l8900_t *m, unsigned max_steps, arm_status_t *status) {
     arm_status_t st = ARM_OK;
     unsigned n = 0;
+    unsigned active_pending_retired = 0u;
+    bool active_clock = false;
     /* A direct arm_step() may have used the same machine between run calls.
      * Only a wait reached during THIS bounded slice may shorten it. */
     m->wfi_pace_yield = false;
+    if (max_steps && m->active_host_now)
+        active_clock = active_host_clock_sync(m, 0u);
     while (n < max_steps) {
         if (pre_step_target_matches(m, m->cpu.r[15])) {
             m->pre_step_matches++;
@@ -1743,7 +1880,10 @@ unsigned s5l8900_run(s5l8900_t *m, unsigned max_steps, arm_status_t *status) {
                 /* A replacement completes a whole guest operation but does
                  * not pretend those skipped instructions retired.  One device
                  * tick matches bootkernel's established HLE timing contract. */
-                s5l8900_tick(m, 1u);
+                run_clock_retired(m, &active_clock,
+                                  &active_pending_retired, 1u,
+                                  m->level_dirty ||
+                                  ext_inputs(m) != m->ext_seen);
                 continue;
             }
         }
@@ -1756,13 +1896,19 @@ unsigned s5l8900_run(s5l8900_t *m, unsigned max_steps, arm_status_t *status) {
         if (s5l8900_static_a64_is_enabled(m)) {
             bool known_negative = false;
             arm_status_t engine_status = ARM_OK;
-            unsigned batch = retirement_batch_limit(m, max_steps - n);
+            unsigned batch = run_retirement_batch_limit(
+                m, max_steps - n, active_clock);
             if (batch)
                 batch = s5l8900_static_a64_try(
                     m, batch, &known_negative, &engine_status);
             if (batch) {
                 n += batch;
-                s5l8900_tick(m, batch);
+                run_clock_retired(m, &active_clock,
+                                  &active_pending_retired, batch,
+                                  m->level_dirty ||
+                                  ext_inputs(m) != m->ext_seen ||
+                                  engine_status != ARM_OK ||
+                                  known_negative);
                 if (engine_status != ARM_OK) {
                     st = engine_status;
                     break;
@@ -1774,7 +1920,8 @@ unsigned s5l8900_run(s5l8900_t *m, unsigned max_steps, arm_status_t *status) {
                  * cancels the bypass. */
                 if (!known_negative || n >= max_steps)
                     continue;
-                if (retirement_batch_limit(m, max_steps - n) &&
+                if (run_retirement_batch_limit(
+                        m, max_steps - n, active_clock) &&
                     !s5l8900_static_a64_commit_known_negative_bypass(m))
                     continue;
             }
@@ -1792,7 +1939,8 @@ unsigned s5l8900_run(s5l8900_t *m, unsigned max_steps, arm_status_t *status) {
          * User mode. The final lump contains only successfully retired
          * instructions; a non-OK arm_step() receives no device tick, matching
          * the literal loop exactly. */
-        unsigned limit = interpreter_tick_batch_limit(m, max_steps - n);
+        unsigned limit = interpreter_tick_batch_limit(
+            m, max_steps - n, active_clock);
         if (limit > 1u) {
             unsigned retired = 0u;
             do {
@@ -1808,7 +1956,13 @@ unsigned s5l8900_run(s5l8900_t *m, unsigned max_steps, arm_status_t *status) {
                 n += retired;
                 m->interpreter_tick_batches++;
                 m->interpreter_tick_batched_retired += retired;
-                s5l8900_tick(m, retired);
+                run_clock_retired(m, &active_clock,
+                                  &active_pending_retired, retired,
+                                  m->level_dirty ||
+                                  ext_inputs(m) != m->ext_seen ||
+                                  (m->cpu.cpsr & ARM_CPSR_MODE_MASK) !=
+                                      ARM_MODE_USR ||
+                                  st != ARM_OK);
             }
             if (st != ARM_OK) break;
             continue;
@@ -1817,12 +1971,18 @@ unsigned s5l8900_run(s5l8900_t *m, unsigned max_steps, arm_status_t *status) {
         st = arm_step(&m->cpu);
         if (st != ARM_OK) break;
         n++;
-        s5l8900_tick(m, 1u);
+        run_clock_retired(m, &active_clock, &active_pending_retired, 1u,
+                          m->level_dirty ||
+                          ext_inputs(m) != m->ext_seen ||
+                          m->wfi_pace_yield);
         if (m->wfi_pace_yield) {
             m->wfi_pace_yield = false;
             break;
         }
     }
+    if (active_clock && active_pending_retired)
+        (void)active_host_clock_sync(
+            m, (uint32_t)active_pending_retired);
     if (status) *status = st;
     return n;
 }

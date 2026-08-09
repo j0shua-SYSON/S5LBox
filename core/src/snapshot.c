@@ -184,10 +184,12 @@ SNAP_SIZE_GUARD(s5l_stub_t,        56,    "snap_stubs");
  * ledger (64). 122088 adds the interactive WFI sleep callback/context, four
  * host-only evidence counters and the transient run-slice yield (56). Like
  * the bus callbacks, snapshot_load preserves this live host policy; none of
- * it belongs to guest state or the stream. SNAPSHOT_VERSION and the bytes on
- * disk therefore do not move. The size was read from the compiler's emitted
+ * it belongs to guest state or the stream. The optional active host clock adds
+ * another callback/context, seven uint64_t values and transient anchor flag;
+ * it follows the same policy. SNAPSHOT_VERSION and the bytes on disk therefore
+ * do not move. The size below must be read from the compiler's emitted
  * `.space`, not inferred from source padding. */
-SNAP_SIZE_GUARD(s5l8900_t,         122088, "snap_mach");
+SNAP_SIZE_GUARD(s5l8900_t,         122168, "snap_mach");
 #endif
 
 /* ---------------------------------------------------------------- the IO --- */
@@ -1540,6 +1542,13 @@ static snapshot_status_t snap_apply(s5l8900_t *m, FILE *f,
      * restored guest instant. The callback, context and accumulated evidence
      * remain the live frontend's, exactly like the other host-only fields. */
     m->wfi_pace_yield = false;
+    /* A restored guest instant has no relation to the host instant sampled
+     * before restore. Preserve policy/evidence, but require a fresh anchor and
+     * discard every transient conversion input. */
+    m->active_clock_last_host_ns = 0u;
+    m->active_clock_guest_ticks_since_sync = 0u;
+    m->active_clock_fraction = 0u;
+    m->active_clock_anchor_valid = false;
     return SNAP_OK;
 }
 

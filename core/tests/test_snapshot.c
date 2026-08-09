@@ -45,6 +45,13 @@ static bool snapshot_wfi_sleep_probe(void *ctx, uint64_t nanoseconds) {
     return true;
 }
 
+static bool snapshot_active_now_probe(void *ctx, uint64_t *nanoseconds) {
+    (void)ctx;
+    if (!nanoseconds) return false;
+    *nanoseconds = 1u;
+    return true;
+}
+
 /* --------------------------------------------------------------- helpers --- */
 
 /* Save `a` to memory, restore it into a freshly initialised `b`. */
@@ -378,6 +385,21 @@ static void test_device_state_round_trips(void) {
     b->wfi_paced_failures = 304u;
     b->wfi_pace_yield = true;
 
+    /* Active timing follows the same host-policy rule, except that its old
+     * host/guest anchor must be discarded after restore. */
+    int active_clock_context = 0;
+    CHECK(s5l8900_set_active_host_clock(
+              b, snapshot_active_now_probe, &active_clock_context),
+          "could not install destination active-clock policy");
+    b->active_clock_updates = 401u;
+    b->active_clock_added_ticks = 402u;
+    b->active_clock_clamps = 403u;
+    b->active_clock_failures = 404u;
+    b->active_clock_last_host_ns = 405u;
+    b->active_clock_guest_ticks_since_sync = 406u;
+    b->active_clock_fraction = 407u;
+    b->active_clock_anchor_valid = true;
+
     CHECK(roundtrip(a, b), "device round trip");
     CHECK(b->mbx_telemetry.candidates_2d == 201u &&
           b->mbx_telemetry.completed_2d == 202u &&
@@ -394,6 +416,18 @@ static void test_device_state_round_trips(void) {
           b->wfi_paced_partial_advances == 303u &&
           b->wfi_paced_failures == 304u && !b->wfi_pace_yield,
           "snapshot restore changed WFI host policy/evidence or retained yield");
+    CHECK(b->active_host_now == snapshot_active_now_probe &&
+          b->active_host_now_ctx == &active_clock_context &&
+          b->active_clock_updates == 401u &&
+          b->active_clock_added_ticks == 402u &&
+          b->active_clock_clamps == 403u &&
+          b->active_clock_failures == 404u &&
+          b->active_clock_last_host_ns == 0u &&
+          b->active_clock_guest_ticks_since_sync == 0u &&
+          b->active_clock_fraction == 0u &&
+          !b->active_clock_anchor_valid,
+          "snapshot restore changed active host policy/evidence or retained "
+          "a stale anchor");
 
     SAME(uart0.ulcon); SAME(uart0.ucon); SAME(uart0.ufcon);
     SAME(uart0.umcon); SAME(uart0.ubrdiv); SAME(uart0.tx_len);

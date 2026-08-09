@@ -3581,10 +3581,26 @@ typedef bool (*s5l_pre_step_fn)(void *ctx);
  */
 typedef bool (*s5l_wfi_host_sleep_fn)(void *ctx, uint64_t nanoseconds);
 
+/*
+ * Optional monotonic clock for interactive active execution.  The callback
+ * writes host nanoseconds and returns true, or returns false without claiming
+ * that time advanced.  It runs synchronously on the machine-owning thread and
+ * must not call back into the machine.  Generic frontends leave it NULL and
+ * retain instruction-paced guest time exactly.
+ */
+typedef bool (*s5l_active_host_now_fn)(void *ctx, uint64_t *nanoseconds);
+
 /* Do not hold an interactive execution slice inside WFI for longer than this.
  * Longer guest waits are advanced in real-time-sized pieces, yielding between
  * them so a frontend can drain input, stop requests and scanout. */
 #define S5L8900_WFI_PACE_SLICE_NS UINT64_C(8000000)
+
+/* Do not inject a suspend, debugger stop or starved frontend interval into the
+ * guest in one burst.  During uninterrupted execution the clock is sampled at
+ * least once per bounded retirement group, so ordinary intervals are much
+ * smaller than this ceiling. */
+#define S5L8900_ACTIVE_CLOCK_MAX_STEP_NS UINT64_C(8000000)
+#define S5L8900_ACTIVE_CLOCK_SYNC_INSNS 256u
 
 typedef struct {
     uint32_t    base, size;
@@ -3816,6 +3832,29 @@ typedef struct {
     uint64_t              wfi_paced_partial_advances;
     uint64_t              wfi_paced_failures;
     bool                  wfi_pace_yield;
+
+    /*
+     * Optional active host clock, also host policy and never guest state.
+     * The callback/context and evidence counters survive snapshot restore.
+     * The anchor, conversion remainder and ticks observed since the anchor are
+     * transient: snapshot_load() clears them so a restored guest instant can
+     * never be compared with an older host instant.
+     *
+     * Every s5l8900_tick() while the callback is installed contributes to
+     * guest_ticks_since_sync.  That includes paced WFI intervals, allowing the
+     * active synchronizer to add only a real-time deficit rather than counting
+     * the same host wait twice.
+     */
+    s5l_active_host_now_fn active_host_now;
+    void                  *active_host_now_ctx;
+    uint64_t               active_clock_last_host_ns;
+    uint64_t               active_clock_guest_ticks_since_sync;
+    uint64_t               active_clock_fraction;
+    uint64_t               active_clock_updates;
+    uint64_t               active_clock_added_ticks;
+    uint64_t               active_clock_clamps;
+    uint64_t               active_clock_failures;
+    bool                   active_clock_anchor_valid;
 } s5l8900_t;
 
 /*
@@ -3995,6 +4034,17 @@ s5l_wake_kind_t s5l8900_next_wake(const s5l8900_t *m,
  */
 bool s5l8900_set_wfi_host_pacing(s5l8900_t *m,
                                  s5l_wfi_host_sleep_fn sleep, void *ctx);
+
+/*
+ * Install or clear wall-clock timing for active CPU execution. `now == NULL`
+ * clears it and requires ctx == NULL. Installing or clearing resets all
+ * host-only evidence and transient anchor state. A successful callback makes
+ * elapsed monotonic host time, not retired-instruction throughput, drive the
+ * guest CPU/timebase ratio. Callback failure falls back to the historical
+ * instruction clock for that bounded run call.
+ */
+bool s5l8900_set_active_host_clock(s5l8900_t *m,
+                                   s5l_active_host_now_fn now, void *ctx);
 
 /*
  * ram_base/ram_size define where RAM appears. Returns false on allocation
