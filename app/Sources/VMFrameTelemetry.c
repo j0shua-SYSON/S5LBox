@@ -182,7 +182,11 @@ static bool vm_execution_telemetry_not_before(
            VM_EXEC_NOT_BEFORE(mbx_3d_candidates) &&
            VM_EXEC_NOT_BEFORE(mbx_3d_completed) &&
            VM_EXEC_NOT_BEFORE(mbx_3d_rejected) &&
-           VM_EXEC_NOT_BEFORE(mbx_3d_pixels);
+           VM_EXEC_NOT_BEFORE(mbx_3d_pixels) &&
+           VM_EXEC_NOT_BEFORE(active_clock_updates) &&
+           VM_EXEC_NOT_BEFORE(active_clock_added_ticks) &&
+           VM_EXEC_NOT_BEFORE(active_clock_clamps) &&
+           VM_EXEC_NOT_BEFORE(active_clock_failures);
 #undef VM_EXEC_NOT_BEFORE
 }
 

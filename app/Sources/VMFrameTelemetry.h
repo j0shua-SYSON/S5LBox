@@ -107,6 +107,10 @@ typedef struct {
     uint64_t mbx_3d_completed;
     uint64_t mbx_3d_rejected;
     uint64_t mbx_3d_pixels;
+    uint64_t active_clock_updates;
+    uint64_t active_clock_added_ticks;
+    uint64_t active_clock_clamps;
+    uint64_t active_clock_failures;
 } vm_execution_telemetry_observation_t;
 
 typedef struct {

@@ -14,6 +14,9 @@
 #include <string.h>
 #if defined(S5LBOX_IOS_WFI_REALTIME_PACING)
 #include <errno.h>
+#endif
+#if defined(S5LBOX_IOS_WFI_REALTIME_PACING) || \
+    defined(S5LBOX_IOS_ACTIVE_REALTIME_CLOCK)
 #include <time.h>
 #endif
 
@@ -58,6 +61,31 @@ static bool vm_firmware_wfi_sleep(void *ctx, uint64_t nanoseconds) {
         if (errno != EINTR) return false;
         request = remaining;
     }
+}
+#endif
+
+#if defined(S5LBOX_IOS_ACTIVE_REALTIME_CLOCK)
+/*
+ * Active guest time is a property of the emulated board, but the portable
+ * core cannot select a host clock. CLOCK_MONOTONIC is public, unaffected by
+ * wall-clock changes, and available on every iOS version this app supports.
+ */
+static bool vm_firmware_active_now(void *ctx, uint64_t *nanoseconds) {
+    (void)ctx;
+    if (!nanoseconds) return false;
+
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0 ||
+        now.tv_sec < 0 || now.tv_nsec < 0 ||
+        now.tv_nsec >= 1000000000L)
+        return false;
+
+    uint64_t seconds = (uint64_t)now.tv_sec;
+    if (seconds > (UINT64_MAX - (uint64_t)now.tv_nsec) /
+                      UINT64_C(1000000000))
+        return false;
+    *nanoseconds = seconds * UINT64_C(1000000000) + (uint64_t)now.tv_nsec;
+    return true;
 }
 #endif
 
@@ -677,6 +705,27 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
                    "saved state unavailable");
         return false;
     }
+
+#if defined(S5LBOX_IOS_ACTIVE_REALTIME_CLOCK)
+    /*
+     * Arm this after restore so the first host sample anchors the restored
+     * guest instant. The portable default remains deterministic; this product
+     * policy makes active timer/display deadlines follow monotonic wall time
+     * instead of interpreter throughput. Failure is explicit because silently
+     * reverting would recreate the device-dependent navigation cadence this
+     * build is intended to measure.
+     */
+    if (!s5l8900_set_active_host_clock(
+            machine, vm_firmware_active_now, NULL)) {
+        (void)file_block_close(boot->media);
+        set_detail(report->detail, sizeof report->detail,
+                   "The interactive guest clock could not enable bounded "
+                   "active-time synchronization.");
+        set_detail(report->summary, sizeof report->summary,
+                   "active clock unavailable");
+        return false;
+    }
+#endif
 
 #if defined(S5LBOX_IOS_WFI_REALTIME_PACING)
     /*

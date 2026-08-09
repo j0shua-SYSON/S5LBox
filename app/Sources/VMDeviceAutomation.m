@@ -270,7 +270,9 @@ static double VMDeviceAutomationSeconds(uint64_t firstNS, uint64_t lastNS) {
              "mbx_2d_candidates=%llu,mbx_2d_completed=%llu,"
              "mbx_2d_rejected=%llu,mbx_2d_bytes=%llu,"
              "mbx_3d_candidates=%llu,mbx_3d_completed=%llu,"
-             "mbx_3d_rejected=%llu,mbx_3d_pixels=%llu",
+             "mbx_3d_rejected=%llu,mbx_3d_pixels=%llu,"
+             "active_clock_updates=%llu,active_clock_added_ticks=%llu,"
+             "active_clock_clamps=%llu,active_clock_failures=%llu",
             state.execution_consistent ? 1u : 0u,
             (unsigned long long)state.execution_observations,
             (unsigned long long)VM_EXEC_DELTA(cpu_retired),
@@ -307,7 +309,11 @@ static double VMDeviceAutomationSeconds(uint64_t firstNS, uint64_t lastNS) {
             (unsigned long long)VM_EXEC_DELTA(mbx_3d_candidates),
             (unsigned long long)VM_EXEC_DELTA(mbx_3d_completed),
             (unsigned long long)VM_EXEC_DELTA(mbx_3d_rejected),
-            (unsigned long long)VM_EXEC_DELTA(mbx_3d_pixels)];
+            (unsigned long long)VM_EXEC_DELTA(mbx_3d_pixels),
+            (unsigned long long)VM_EXEC_DELTA(active_clock_updates),
+            (unsigned long long)VM_EXEC_DELTA(active_clock_added_ticks),
+            (unsigned long long)VM_EXEC_DELTA(active_clock_clamps),
+            (unsigned long long)VM_EXEC_DELTA(active_clock_failures)];
 #undef VM_EXEC_DELTA
     }
 

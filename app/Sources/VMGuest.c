@@ -273,6 +273,11 @@ static const uint8_t *vm_guest_record_display(const s5l8900_t *m,
             execution.mbx_3d_completed = m->mbx_telemetry.completed_3d;
             execution.mbx_3d_rejected = m->mbx_telemetry.rejected_3d;
             execution.mbx_3d_pixels = m->mbx_telemetry.pixels_3d;
+            execution.active_clock_updates = m->active_clock_updates;
+            execution.active_clock_added_ticks =
+                m->active_clock_added_ticks;
+            execution.active_clock_clamps = m->active_clock_clamps;
+            execution.active_clock_failures = m->active_clock_failures;
             vm_frame_telemetry_note_execution(&execution);
         }
     }

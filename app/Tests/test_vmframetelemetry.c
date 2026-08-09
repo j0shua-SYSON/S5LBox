@@ -64,6 +64,10 @@ static vm_execution_telemetry_observation_t execution_observation(
     value.mbx_3d_completed = base + 31u;
     value.mbx_3d_rejected = base + 32u;
     value.mbx_3d_pixels = base + 33u;
+    value.active_clock_updates = base + 34u;
+    value.active_clock_added_ticks = base + 35u;
+    value.active_clock_clamps = base + 36u;
+    value.active_clock_failures = base + 37u;
     return value;
 }
 
@@ -201,7 +205,11 @@ static void test_boundaries_and_sampled_changes(void) {
            state.execution_last.fetch_refill_skips == 2024u &&
            state.execution_last.known_negative_bypasses == 2025u &&
            state.execution_last.mbx_2d_bytes == 2029u &&
-           state.execution_last.mbx_3d_pixels == 2033u,
+           state.execution_last.mbx_3d_pixels == 2033u &&
+           state.execution_last.active_clock_updates == 2034u &&
+           state.execution_last.active_clock_added_ticks == 2035u &&
+           state.execution_last.active_clock_clamps == 2036u &&
+           state.execution_last.active_clock_failures == 2037u,
           "execution counter endpoints are wrong");
 
     CHECK(state.layer_attempts == 4u && state.layer_accepted == 3u &&
