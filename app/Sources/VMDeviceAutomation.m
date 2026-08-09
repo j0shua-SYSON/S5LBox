@@ -134,7 +134,9 @@ static double VMDeviceAutomationSeconds(uint64_t firstNS, uint64_t lastNS) {
     return (double)(lastNS - firstNS) / 1.0e9;
 }
 
-@interface VMDeviceAutomation ()
+@interface VMDeviceAutomation () <UINavigationControllerDelegate>
+- (void)attachToEmulator:(EmulatorViewController *)emulator;
+- (void)driveTouchPlan;
 - (void)updateFrameTelemetry;
 @end
 
@@ -187,6 +189,8 @@ static double VMDeviceAutomationSeconds(uint64_t firstNS, uint64_t lastNS) {
 
 - (void)dealloc {
     [_timer invalidate];
+    if (_navigationController.delegate == self)
+        _navigationController.delegate = nil;
 }
 
 - (void)start {
@@ -201,6 +205,13 @@ static double VMDeviceAutomationSeconds(uint64_t firstNS, uint64_t lastNS) {
         }
         _touchState = VMDeviceAutomationTouchStateWaitingForFirmware;
         _touchDeadline = [NSDate timeIntervalSinceReferenceDate] + 30.0;
+        UINavigationController *navigation = _navigationController;
+        if (navigation.delegate && navigation.delegate != self) {
+            [self finishWithMessage:
+                @"touch-once refused because navigation already has a delegate"];
+            return;
+        }
+        navigation.delegate = self;
     }
     [self attachToCurrentEmulator];
     [self updateFrameTelemetry];
@@ -220,18 +231,18 @@ static double VMDeviceAutomationSeconds(uint64_t firstNS, uint64_t lastNS) {
     _state = VMDeviceAutomationStateFinished;
     [_timer invalidate];
     _timer = nil;
+    if (_navigationController.delegate == self)
+        _navigationController.delegate = nil;
 }
 
-- (void)attachToCurrentEmulator {
-    UIViewController *top = _navigationController.topViewController;
-    if (![top isKindOfClass:[EmulatorViewController class]]) {
+- (void)attachToEmulator:(EmulatorViewController *)emulator {
+    if (![emulator isKindOfClass:[EmulatorViewController class]]) {
         _emulator = nil;
         _telemetryScreen = nil;
         _telemetryLabel = nil;
         return;
     }
 
-    EmulatorViewController *emulator = (EmulatorViewController *)top;
     [emulator loadViewIfNeeded];
     _emulator = emulator;
     emulator.view.accessibilityIdentifier = @"s5lbox.emulator.root";
@@ -277,6 +288,32 @@ static double VMDeviceAutomationSeconds(uint64_t firstNS, uint64_t lastNS) {
     UIToolbar *toolbar = VMDeviceAutomationValue(emulator, @"toolbar");
     if ([toolbar isKindOfClass:[UIToolbar class]])
         toolbar.accessibilityIdentifier = @"s5lbox.emulator.toolbar";
+}
+
+- (void)attachToCurrentEmulator {
+    UIViewController *top = _navigationController.topViewController;
+    [self attachToEmulator:
+        [top isKindOfClass:[EmulatorViewController class]]
+            ? (EmulatorViewController *)top : nil];
+}
+
+- (void)          navigationController:(UINavigationController *)navigation
+        willShowViewController:(UIViewController *)viewController
+                       animated:(BOOL)animated {
+    (void)navigation;
+    (void)animated;
+    if (_mode != VMDeviceAutomationModeInjectTouchOnce ||
+        _state == VMDeviceAutomationStateFinished ||
+        ![viewController isKindOfClass:[EmulatorViewController class]]) return;
+
+    /* This callback runs inside the push, before AppDelegate's open call
+     * returns. Loading the controller here starts the ordinary VMEngine path;
+     * queuing immediately afterwards closes the multi-second race in which a
+     * restored guest could reach its cap before the old post-push observer
+     * ever saw the engine. */
+    [self attachToEmulator:(EmulatorViewController *)viewController];
+    [self updateFrameTelemetry];
+    [self driveTouchPlan];
 }
 
 - (void)updateFrameTelemetry {
@@ -557,6 +594,8 @@ static double VMDeviceAutomationSeconds(uint64_t firstNS, uint64_t lastNS) {
 
     _touchState = VMDeviceAutomationTouchStateComplete;
     _mode = VMDeviceAutomationModeObserveOnly;
+    if (_navigationController.delegate == self)
+        _navigationController.delegate = nil;
     _ticks = 0u;
     [_timer invalidate];
     _timer = [NSTimer scheduledTimerWithTimeInterval:0.5
@@ -584,6 +623,8 @@ static double VMDeviceAutomationSeconds(uint64_t firstNS, uint64_t lastNS) {
         if (![engine sendTouchAtGuestX:(int)_touchPlan.x
                                      y:(int)_touchPlan.y
                                  phase:VM_TOUCH_BEGAN]) return;
+        NSLog(@"[automation] touch-down queued at %ld,%ld",
+              (long)_touchPlan.x, (long)_touchPlan.y);
         _touchLiftNotBefore = [NSDate timeIntervalSinceReferenceDate] + 0.05;
         _touchState = VMDeviceAutomationTouchStateDownQueued;
         return;
@@ -596,6 +637,7 @@ static double VMDeviceAutomationSeconds(uint64_t firstNS, uint64_t lastNS) {
         if (![engine sendTouchAtGuestX:(int)_touchPlan.x
                                      y:(int)_touchPlan.y
                                  phase:VM_TOUCH_ENDED]) return;
+        NSLog(@"[automation] touch-up queued after controller delivery");
         _touchState = VMDeviceAutomationTouchStateUpQueued;
         return;
     }

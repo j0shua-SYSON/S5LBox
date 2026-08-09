@@ -166,17 +166,32 @@ static UIGestureRecognizer *VMNavigationContentPopGestureRecognizer(
      */
     if (automationRequested) {
         dispatch_async(dispatch_get_main_queue(), ^{
-            BOOL opened = [machines openFirstMachineForAutomation];
-            NSLog(@"[automation] open first machine: %@",
-                  opened ? @"started" : @"refused");
-            if (opened) {
+            VMDeviceAutomationMode mode = touchAutomationRequested
+                ? VMDeviceAutomationModeInjectTouchOnce
+                : VMDeviceAutomationModePrepareAndReopen;
+            /* The one-shot observer must exist BEFORE the push. UIKit may
+             * spend long enough completing that push for a fast restored
+             * guest to cross a small diagnostic cap. Its navigation delegate
+             * callback therefore queues the input as the emulator is shown,
+             * while the ordinary launch-argument workflow still starts only
+             * after the same normal machine-opening path has succeeded. */
+            if (touchAutomationRequested) {
                 self.deviceAutomation = [[VMDeviceAutomation alloc]
                     initWithNavigationController:nav
                                       machineList:machines
-                                             mode:
-                        touchAutomationRequested
-                            ? VMDeviceAutomationModeInjectTouchOnce
-                            : VMDeviceAutomationModePrepareAndReopen];
+                                             mode:mode];
+                [self.deviceAutomation start];
+            }
+            BOOL opened = [machines openFirstMachineForAutomation];
+            NSLog(@"[automation] open first machine: %@",
+                  opened ? @"started" : @"refused");
+            if (!opened) {
+                self.deviceAutomation = nil;
+            } else if (!touchAutomationRequested) {
+                self.deviceAutomation = [[VMDeviceAutomation alloc]
+                    initWithNavigationController:nav
+                                      machineList:machines
+                                             mode:mode];
                 [self.deviceAutomation start];
             }
         });
