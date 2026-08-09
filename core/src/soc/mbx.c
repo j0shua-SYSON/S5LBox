@@ -2918,10 +2918,8 @@ static bool mbx_execute_textured_sprite(s5l_mbx_t *m,
         raster_right = (int32_t)boundary_right;
     if (raster_bottom > (int32_t)boundary_bottom)
         raster_bottom = (int32_t)boundary_bottom;
-    if (raster_left >= raster_right || raster_top >= raster_bottom) {
-        if (why) *why = "sprite has no covered pixel centres on the surface";
-        return false;
-    }
+    bool zero_coverage =
+        raster_left >= raster_right || raster_top >= raster_bottom;
     uint32_t left = (uint32_t)raster_left;
     uint32_t top = (uint32_t)raster_top;
     uint32_t right = (uint32_t)raster_right;
@@ -2930,7 +2928,7 @@ static bool mbx_execute_textured_sprite(s5l_mbx_t *m,
     uint32_t height = bottom - top;
 
     uint32_t source_x0 = 0u, source_y0 = 0u;
-    if (!half_texel_layout) {
+    if (!half_texel_layout && !zero_coverage) {
         /* The 0x0e producer order is unfiltered.  Its integer-sized unity
          * transform must still select one strict contiguous source crop.
          * The crop does not have to begin at texture origin: r430 copies
@@ -3015,6 +3013,46 @@ static bool mbx_execute_textured_sprite(s5l_mbx_t *m,
             }
             tile_index++;
         }
+    }
+
+    /* A conservative producer boundary can survive clipping even when the
+     * subpixel quad covers no pixel centre.  That is a valid no-op draw, not
+     * a rejected submission: the guest still waits for its completion event.
+     * Keep this lifecycle rule independent of any captured address or packet,
+     * but do not let it hide malformed state.  The texture allocation,
+     * render-target boundary, clip registers and complete tile list must all
+     * be valid before the command completes without reading or writing a
+     * pixel. */
+    if (zero_coverage) {
+        uint64_t source_end = (uint64_t)source +
+            (uint64_t)header_texture_height * source_stride;
+        if (source_end > UINT32_MAX) {
+            if (why) *why = "zero-coverage sprite source allocation overflows";
+            return false;
+        }
+        for (uint32_t row = 0; row < header_texture_height; row++) {
+            uint32_t src = source + row * source_stride;
+            if (!mbx_gart_validate(m, bus, src, source_stride, why))
+                return false;
+        }
+
+        uint32_t target_row_bytes =
+            (boundary_right - boundary_left) * 4u;
+        uint64_t target_end = (uint64_t)target +
+            (uint64_t)(boundary_bottom - 1u) * MBX_3D_TARGET_STRIDE +
+            (uint64_t)boundary_right * 4u;
+        if (target_end > UINT32_MAX) {
+            if (why) *why = "zero-coverage sprite target boundary overflows";
+            return false;
+        }
+        for (uint32_t row = boundary_top; row < boundary_bottom; row++) {
+            uint32_t dst = target + row * MBX_3D_TARGET_STRIDE +
+                           boundary_left * 4u;
+            if (!mbx_gart_validate(m, bus, dst, target_row_bytes, why))
+                return false;
+        }
+        *pixels_blended = 0u;
+        return true;
     }
 
     uint32_t row_bytes = width * 4u;

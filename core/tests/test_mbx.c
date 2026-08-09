@@ -1671,6 +1671,7 @@ struct mbx_test_status_form {
     bool scaled_sprite;
     bool variable_vertex_alpha;
     bool boundary_override;
+    bool zero_coverage;
     uint32_t tile_x0, tile_x1, tile_y0, tile_y1;
     uint32_t left, top, width, height;
     uint32_t source, source_x0, source_row0, source_stride, source_control;
@@ -1908,7 +1909,7 @@ static void test_captured_status_form(const struct mbx_test_status_form *form) {
     for (uint32_t y = 0; y < form->height; y++) {
         for (uint32_t x = 0; x < form->width; x++) {
             uint32_t src = 0u;
-            bool covered = true;
+            bool covered = !form->zero_coverage;
             if (filtered_sprite) {
                 struct test_bilinear_axis x_axis, y_axis;
                 bool axes_ok = false;
@@ -1971,8 +1972,11 @@ static void test_captured_status_form(const struct mbx_test_status_form *form) {
             }
         }
     }
-    CHECK(first_covered_offset != UINT32_MAX,
-          "%s expected rectangle contains no covered pixels", form->name);
+    CHECK(form->zero_coverage
+              ? first_covered_offset == UINT32_MAX && covered_pixels == 0u
+              : first_covered_offset != UINT32_MAX,
+          "%s reference coverage disagrees with its lifecycle class",
+          form->name);
     if (form->expected_covered_pixels) {
         CHECK(covered_pixels == form->expected_covered_pixels,
               "%s expected %u covered pixels but reference found %u",
@@ -2143,28 +2147,66 @@ static void test_captured_status_form(const struct mbx_test_status_form *form) {
               "%s inconsistent tile region raised completion", form->name);
         test_gpu_write32(&m, region, first_region_word);
 
-        uint32_t sampled_x = form->source_x0 + form->width - 1u;
-        uint32_t sampled_y = form->source_row0 + form->height - 1u;
-        if (filtered_sprite) {
-            CHECK(have_filtered_sample,
-                  "%s has no filtered source sample", form->name);
-            sampled_x = maximum_sampled_x;
-            sampled_y = maximum_sampled_y;
+        uint32_t last_source = 0u;
+        if (!form->zero_coverage) {
+            uint32_t sampled_x = form->source_x0 + form->width - 1u;
+            uint32_t sampled_y = form->source_row0 + form->height - 1u;
+            if (filtered_sprite) {
+                CHECK(have_filtered_sample,
+                      "%s has no filtered source sample", form->name);
+                sampled_x = maximum_sampled_x;
+                sampled_y = maximum_sampled_y;
+            }
+            last_source = form->source + sampled_y * form->source_stride +
+                          sampled_x * 4u;
+            uint32_t saved_source = test_gpu_read32(&m, last_source);
+            test_gpu_write32(&m, first, 0x89abcdefu);
+            test_gpu_write32(&m, last_destination, 0x76543210u);
+            test_gpu_write32(&m, last_source, 0x01000002u);
+            m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
+            CHECK(test_gpu_read32(&m, first) == 0x89abcdefu &&
+                  test_gpu_read32(&m, last_destination) == 0x76543210u,
+                  "%s non-premultiplied final texel partially committed",
+                  form->name);
+            CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
+                  "%s non-premultiplied final texel raised completion",
+                  form->name);
+            test_gpu_write32(&m, last_source, saved_source);
+        } else {
+            uint32_t source_table = m.bus.read32(m.bus.ctx,
+                MBX_BASE + REG_GART0 + (form->source >> 22) * 4u);
+            uint32_t source_pte_address = source_table +
+                (((form->source >> 12) & 0x3ffu) * 4u);
+            uint32_t source_pte =
+                m.bus.read32(m.bus.ctx, source_pte_address);
+            test_gpu_write32(&m, first, 0x89abcdefu);
+            m.bus.write32(m.bus.ctx, source_pte_address, 0u);
+            m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
+            CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
+                  "%s missing source allocation raised completion",
+                  form->name);
+            m.bus.write32(m.bus.ctx, source_pte_address, source_pte);
+            CHECK(test_gpu_read32(&m, first) == 0x89abcdefu,
+                  "%s missing source allocation changed the destination",
+                  form->name);
+
+            uint32_t target_table = m.bus.read32(m.bus.ctx,
+                MBX_BASE + REG_GART0 + (target >> 22) * 4u);
+            uint32_t target_pte_address = target_table +
+                (((first >> 12) & 0x3ffu) * 4u);
+            uint32_t target_pte =
+                m.bus.read32(m.bus.ctx, target_pte_address);
+            test_gpu_write32(&m, first, 0x76543210u);
+            m.bus.write32(m.bus.ctx, target_pte_address, 0u);
+            m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
+            CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
+                  "%s missing target boundary raised completion",
+                  form->name);
+            m.bus.write32(m.bus.ctx, target_pte_address, target_pte);
+            CHECK(test_gpu_read32(&m, first) == 0x76543210u,
+                  "%s missing target boundary changed the destination",
+                  form->name);
         }
-        uint32_t last_source = form->source + sampled_y * form->source_stride +
-                               sampled_x * 4u;
-        uint32_t saved_source = test_gpu_read32(&m, last_source);
-        test_gpu_write32(&m, first, 0x89abcdefu);
-        test_gpu_write32(&m, last_destination, 0x76543210u);
-        test_gpu_write32(&m, last_source, 0x01000002u);
-        m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
-        CHECK(test_gpu_read32(&m, first) == 0x89abcdefu &&
-              test_gpu_read32(&m, last_destination) == 0x76543210u,
-              "%s non-premultiplied final texel partially committed",
-              form->name);
-        CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
-              "%s non-premultiplied final texel raised completion", form->name);
-        test_gpu_write32(&m, last_source, saved_source);
 
         if (form->affine_sprite) {
             /* Preserve the normalized duplicate while moving only p11.  The
@@ -2252,6 +2294,41 @@ static void test_captured_status_form(const struct mbx_test_status_form *form) {
     free(expected);
     s5l8900_free(&m);
 }
+
+/* A right-edge conservative tile can be non-empty while the subpixel quad
+ * contains no sample centre after the 320-pixel surface clip.  Completion is
+ * a lifecycle property of this geometry, not of the captured addresses. */
+static const struct mbx_test_status_form zero_coverage_status_form = {
+    .name = "right-edge zero-coverage filtered sprite",
+    .xclip = 0x01400138u, .yclip = 0x014000f0u,
+    .target = 0x00998000u,
+    .semantic_sprite = true,
+    .boundary_override = true,
+    .zero_coverage = true,
+    .tile_x0 = 0x27u, .tile_x1 = 0x27u,
+    .tile_y0 = 0x0fu, .tile_y1 = 0x13u,
+    .left = 319u, .top = 242u, .width = 1u, .height = 63u,
+    .source = 0x00972000u,
+    .source_stride = 0x100u, .source_control = 0x8e100000u,
+    .source_width = 59u, .source_height = 62u,
+    .boundary = {
+        0x439f8000u, 0x43988000u, 0x439f8000u, 0x43720000u,
+        0x43a00000u, 0x43988000u, 0x43a00000u, 0x43720000u,
+    },
+    .quad = {
+        0xe0000000u, 0xa3318000u, 0u, 0xa6884710u,
+        0xa7718000u, 0x0e513300u, 0xae504ea0u, 0x22250e80u,
+        0x439fc326u, 0x43729a02u, 0x43bd4326u, 0x43729a02u,
+        0x439fc326u, 0x43984d01u, 0x43bd4326u, 0x43984d01u,
+        0u, 0u, 0u, 0u,
+        0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+        0xff000000u, 0u, 0u, 0x3e9fc326u,
+        0x3e729a02u, 0xff000000u, 0x3f6a0000u, 0u,
+        0x3ebd4326u, 0x3e729a02u, 0xff000000u, 0u,
+        0x3f760000u, 0x3e9fc326u, 0x3e984d01u, 0xff000000u,
+        0x3f6a0000u, 0x3f760000u, 0x3ebd4326u, 0x3e984d01u,
+    },
+};
 
 static void test_later_tiled_status_sprites(void) {
     static const struct mbx_test_status_form forms[] = {
@@ -3216,6 +3293,13 @@ static void test_later_tiled_status_sprites(void) {
     phase.quad[24] = phase.quad[29] = phase.quad[34] = phase.quad[39] =
         0x61000000u;
     test_captured_status_form(&phase);
+
+    test_captured_status_form(&zero_coverage_status_form);
+    struct mbx_test_status_form relocated_zero = zero_coverage_status_form;
+    relocated_zero.name = "relocated right-edge zero-coverage sprite";
+    relocated_zero.source = 0x00b72000u;
+    relocated_zero.target = 0x00c98000u;
+    test_captured_status_form(&relocated_zero);
 }
 
 int main(void) {
