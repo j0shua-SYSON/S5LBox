@@ -824,6 +824,27 @@ static void test_ordered_atomic_2d_batches(void) {
           "completed blend batch did not raise exactly 2D_SYNC");
     m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x400u);
 
+    /* The sparse batch staging path must replay every earlier job type, not
+     * merely another blend. Put a black fill under the same translucent source
+     * and require command two to see that staged black pixel rather than the
+     * still-unchanged guest-RAM value. */
+    uint32_t fill_then_blend[16] = {
+        0xa0060500u, target, 0x94060500u, 0u,
+        0x30000000u, 0x60800200u, 0x8000f0f0u, 0xff000000u,
+        0x000a000au, 0x000b000bu, 0x70000000u, 0x70000000u,
+        0x70000000u, 0x70000000u, 0x70000000u, 0x70000000u,
+    };
+    test_gpu_write32(&m, destination, original);
+    write_packet(&m, RING + 0x400u, fill_then_blend, 16u);
+    write_packet(&m, RING + 0x440u, first, 18u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + RING, 0xf0000000u);
+    CHECK(test_gpu_read32(&m, destination) ==
+              test_over(0xff000000u, first_source),
+          "blend did not see an intersecting prior fill's staged pixels");
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0x400u,
+          "mixed fill/blend batch did not raise exactly 2D_SYNC");
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x400u);
+
     /* A later invalid command must reject the whole submit. If the first
      * command leaks through, this pixel changes and the test catches the
      * non-atomic implementation directly. */
