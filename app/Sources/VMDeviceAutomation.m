@@ -17,6 +17,99 @@ typedef NS_ENUM(NSUInteger, VMDeviceAutomationState) {
     VMDeviceAutomationStateFinished,
 };
 
+typedef NS_ENUM(NSUInteger, VMDeviceAutomationTouchState) {
+    VMDeviceAutomationTouchStateWaitingForFirmware = 0,
+    VMDeviceAutomationTouchStateDownQueued,
+    VMDeviceAutomationTouchStateUpQueued,
+    VMDeviceAutomationTouchStateComplete,
+};
+
+typedef struct {
+    NSInteger x;
+    NSInteger y;
+    uint64_t instructionCap;
+} VMDeviceAutomationTouchPlan;
+
+static NSString *VMDeviceAutomationTouchPlanPath(void) {
+    NSURL *documents = [[[NSFileManager defaultManager]
+        URLsForDirectory:NSDocumentDirectory
+               inDomains:NSUserDomainMask] firstObject];
+    if (!documents) return nil;
+    return [[[documents URLByAppendingPathComponent:@"Automation"
+                                        isDirectory:YES]
+        URLByAppendingPathComponent:@"touch-once.txt"
+                         isDirectory:NO] path];
+}
+
+/*
+ * One deliberately boring line:
+ *
+ *     v1 <guest-x> <guest-y> <session-instruction-cap>
+ *
+ * The small size bound prevents an accidentally selected log or firmware file
+ * from being read as a command. A cap is mandatory: a diagnostic that can
+ * silently become an unbounded boot is not deterministic automation.
+ */
+static BOOL VMDeviceAutomationLoadTouchPlan(
+        VMDeviceAutomationTouchPlan *outPlan, NSString **outReason) {
+    NSString *path = VMDeviceAutomationTouchPlanPath();
+    if (!path.length) {
+        if (outReason) *outReason = @"the Documents directory is unavailable";
+        return NO;
+    }
+
+    NSError *error = nil;
+    NSDictionary<NSFileAttributeKey, id> *attributes =
+        [[NSFileManager defaultManager] attributesOfItemAtPath:path
+                                                        error:&error];
+    if (!attributes) {
+        if (outReason) *outReason = error.localizedDescription ?: @"not found";
+        return NO;
+    }
+    unsigned long long size = [attributes[NSFileSize] unsignedLongLongValue];
+    if (size == 0u || size > 128u) {
+        if (outReason) *outReason = @"the plan must be 1 through 128 bytes";
+        return NO;
+    }
+
+    NSString *text = [NSString stringWithContentsOfFile:path
+                                                encoding:NSUTF8StringEncoding
+                                                   error:&error];
+    if (!text) {
+        if (outReason) *outReason = error.localizedDescription ?: @"not UTF-8";
+        return NO;
+    }
+
+    NSScanner *scanner = [NSScanner scannerWithString:text];
+    scanner.charactersToBeSkipped =
+        [NSCharacterSet whitespaceAndNewlineCharacterSet];
+    NSInteger x = 0, y = 0;
+    long long cap = 0;
+    BOOL valid = [scanner scanString:@"v1" intoString:NULL] &&
+                 [scanner scanInteger:&x] &&
+                 [scanner scanInteger:&y] &&
+                 [scanner scanLongLong:&cap] && scanner.isAtEnd &&
+                 x >= 0 && x < (NSInteger)VM_FB_WIDTH &&
+                 y >= 0 && y < (NSInteger)VM_FB_HEIGHT &&
+                 cap >= 1000000ll && cap <= 1000000000ll;
+    if (!valid) {
+        if (outReason) {
+            *outReason = [NSString stringWithFormat:
+                @"expected 'v1 x y cap', panel %ux%u, cap 1000000..1000000000",
+                VM_FB_WIDTH, VM_FB_HEIGHT];
+        }
+        return NO;
+    }
+
+    if (outPlan) {
+        outPlan->x = x;
+        outPlan->y = y;
+        outPlan->instructionCap = (uint64_t)cap;
+    }
+    if (outReason) *outReason = nil;
+    return YES;
+}
+
 /*
  * The user-owned emulator controller intentionally exposes no diagnostic
  * internals. Automation still needs the exact engine status that controller
@@ -58,6 +151,24 @@ static double VMDeviceAutomationSeconds(uint64_t firstNS, uint64_t lastNS) {
     BOOL _sawPreparation;
     BOOL _endpointLogged;
     NSUInteger _ticks;
+    NSUInteger _fastTicks;
+    VMDeviceAutomationTouchState _touchState;
+    VMDeviceAutomationTouchPlan _touchPlan;
+    uint64_t _touchDeliveredBaseline;
+    NSTimeInterval _touchLiftNotBefore;
+    NSTimeInterval _touchDeadline;
+}
+
++ (BOOL)hasPendingTouchPlan {
+    NSString *path = VMDeviceAutomationTouchPlanPath();
+    if (!path.length ||
+        ![[NSFileManager defaultManager] fileExistsAtPath:path]) return NO;
+
+    NSString *reason = nil;
+    if (VMDeviceAutomationLoadTouchPlan(NULL, &reason)) return YES;
+    NSLog(@"[automation] ignored invalid touch-once plan: %@",
+          reason ?: @"unknown error");
+    return NO;
 }
 
 - (instancetype)initWithNavigationController:
@@ -80,14 +191,27 @@ static double VMDeviceAutomationSeconds(uint64_t firstNS, uint64_t lastNS) {
 
 - (void)start {
     NSAssert([NSThread isMainThread], @"device automation is UIKit work");
+    if (_mode == VMDeviceAutomationModeInjectTouchOnce) {
+        NSString *reason = nil;
+        if (!VMDeviceAutomationLoadTouchPlan(&_touchPlan, &reason)) {
+            [self finishWithMessage:[NSString stringWithFormat:
+                @"touch-once plan became unavailable: %@",
+                reason ?: @"unknown error"]];
+            return;
+        }
+        _touchState = VMDeviceAutomationTouchStateWaitingForFirmware;
+        _touchDeadline = [NSDate timeIntervalSinceReferenceDate] + 30.0;
+    }
     [self attachToCurrentEmulator];
     [self updateFrameTelemetry];
-    _timer = [NSTimer scheduledTimerWithTimeInterval:0.5
+    NSTimeInterval interval =
+        _mode == VMDeviceAutomationModeInjectTouchOnce ? 0.01 : 0.5;
+    _timer = [NSTimer scheduledTimerWithTimeInterval:interval
                                               target:self
                                             selector:@selector(tick:)
                                             userInfo:nil
                                              repeats:YES];
-    _timer.tolerance = 0.1;
+    _timer.tolerance = interval >= 0.5 ? 0.1 : 0.0;
     [self tick:_timer];
 }
 
@@ -420,6 +544,67 @@ static double VMDeviceAutomationSeconds(uint64_t firstNS, uint64_t lastNS) {
     return [engine isKindOfClass:[VMEngine class]] ? engine : nil;
 }
 
+- (void)finishTouchPlan {
+    NSString *path = VMDeviceAutomationTouchPlanPath();
+    NSError *error = nil;
+    if (!path.length ||
+        ![[NSFileManager defaultManager] removeItemAtPath:path error:&error]) {
+        [self finishWithMessage:[NSString stringWithFormat:
+            @"touch reached the guest but the one-shot plan could not be "
+             "consumed: %@", error.localizedDescription ?: @"path unavailable"]];
+        return;
+    }
+
+    _touchState = VMDeviceAutomationTouchStateComplete;
+    _mode = VMDeviceAutomationModeObserveOnly;
+    _ticks = 0u;
+    [_timer invalidate];
+    _timer = [NSTimer scheduledTimerWithTimeInterval:0.5
+                                              target:self
+                                            selector:@selector(tick:)
+                                            userInfo:nil
+                                             repeats:YES];
+    _timer.tolerance = 0.1;
+    NSLog(@"[automation] touch-once delivered at %ld,%ld; instruction cap %llu",
+          (long)_touchPlan.x, (long)_touchPlan.y,
+          (unsigned long long)_touchPlan.instructionCap);
+}
+
+- (void)driveTouchPlan {
+    VMEngine *engine = [self currentEngine];
+    if (!engine || !engine.isRunningFirmware) return;
+
+    uint64_t delivered = 0u;
+    [engine touchCountersQueued:NULL delivered:&delivered
+                       coalesced:NULL dropped:NULL];
+
+    if (_touchState == VMDeviceAutomationTouchStateWaitingForFirmware) {
+        [engine setInstructionCap:_touchPlan.instructionCap];
+        _touchDeliveredBaseline = delivered;
+        if (![engine sendTouchAtGuestX:(int)_touchPlan.x
+                                     y:(int)_touchPlan.y
+                                 phase:VM_TOUCH_BEGAN]) return;
+        _touchLiftNotBefore = [NSDate timeIntervalSinceReferenceDate] + 0.05;
+        _touchState = VMDeviceAutomationTouchStateDownQueued;
+        return;
+    }
+
+    if (_touchState == VMDeviceAutomationTouchStateDownQueued) {
+        if (delivered <= _touchDeliveredBaseline ||
+            [NSDate timeIntervalSinceReferenceDate] < _touchLiftNotBefore)
+            return;
+        if (![engine sendTouchAtGuestX:(int)_touchPlan.x
+                                     y:(int)_touchPlan.y
+                                 phase:VM_TOUCH_ENDED]) return;
+        _touchState = VMDeviceAutomationTouchStateUpQueued;
+        return;
+    }
+
+    if (_touchState == VMDeviceAutomationTouchStateUpQueued &&
+        delivered >= _touchDeliveredBaseline + 2u)
+        [self finishTouchPlan];
+}
+
 - (void)beginReopenAfterPreparation:(VMEngine *)engine {
     if (_mode != VMDeviceAutomationModePrepareAndReopen ||
         _state != VMDeviceAutomationStateObserving || !engine) return;
@@ -466,6 +651,20 @@ static double VMDeviceAutomationSeconds(uint64_t firstNS, uint64_t lastNS) {
 - (void)tick:(NSTimer *)timer {
     (void)timer;
     if (_state == VMDeviceAutomationStateFinished) return;
+    if (_mode == VMDeviceAutomationModeInjectTouchOnce &&
+        _touchState != VMDeviceAutomationTouchStateComplete) {
+        ++_fastTicks;
+        if ([NSDate timeIntervalSinceReferenceDate] >= _touchDeadline) {
+            [self finishWithMessage:
+                @"touch-once timed out after 30 seconds; its plan was retained"];
+            return;
+        }
+        if (!_emulator || _navigationController.topViewController != _emulator)
+            [self attachToCurrentEmulator];
+        if ((_fastTicks % 50u) == 0u) [self updateFrameTelemetry];
+        [self driveTouchPlan];
+        return;
+    }
     if (++_ticks >= 3600u) {
         [self finishWithMessage:
             @"setup observer timed out after 30 minutes; no state was forced"];

@@ -130,7 +130,11 @@ static UIGestureRecognizer *VMNavigationContentPopGestureRecognizer(
     [settings ensureUserVisibleDirectories];
 
     (void)launchOptions;
-    BOOL automationRequested = VMLaunchRequestsFirstMachine();
+    BOOL launchAutomationRequested = VMLaunchRequestsFirstMachine();
+    BOOL touchAutomationRequested =
+        settings.developerMode && [VMDeviceAutomation hasPendingTouchPlan];
+    BOOL automationRequested =
+        launchAutomationRequested || touchAutomationRequested;
     if (automationRequested) vm_frame_telemetry_reset(true);
     /* A long phone profile must not turn into a lock-screen measurement half
      * way through. This lasts only for the explicitly automated app process;
@@ -170,7 +174,9 @@ static UIGestureRecognizer *VMNavigationContentPopGestureRecognizer(
                     initWithNavigationController:nav
                                       machineList:machines
                                              mode:
-                        VMDeviceAutomationModePrepareAndReopen];
+                        touchAutomationRequested
+                            ? VMDeviceAutomationModeInjectTouchOnce
+                            : VMDeviceAutomationModePrepareAndReopen];
                 [self.deviceAutomation start];
             }
         });

@@ -17,6 +17,12 @@ typedef NS_ENUM(NSUInteger, VMDeviceAutomationMode) {
     /* In addition to observing, handle the documented first-firmware-launch
      * transition for an explicitly automated process. */
     VMDeviceAutomationModePrepareAndReopen,
+
+    /* Consume one validated Documents/Automation/touch-once.txt plan. The
+     * existing first machine is opened through its normal path, capped at the
+     * requested retired-instruction count, and receives one ordinary app-path
+     * touch. Developer Mode and the marker are both required. */
+    VMDeviceAutomationModeInjectTouchOnce,
 };
 
 /*
@@ -32,6 +38,12 @@ typedef NS_ENUM(NSUInteger, VMDeviceAutomationMode) {
  * so the verified firmware can boot unattended.
  */
 @interface VMDeviceAutomation : NSObject
+
+/* Whether a complete, bounded one-shot touch plan is waiting. Invalid plans
+ * are reported and ignored; this method never creates, changes or deletes the
+ * file. It exists so AppDelegate can leave an ordinary launch on the machine
+ * list unless the user deliberately armed the diagnostic. */
++ (BOOL)hasPendingTouchPlan;
 
 - (instancetype)initWithNavigationController:
         (UINavigationController *)navigationController
