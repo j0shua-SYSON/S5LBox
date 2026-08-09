@@ -3600,7 +3600,11 @@ typedef bool (*s5l_active_host_now_fn)(void *ctx, uint64_t *nanoseconds);
  * least once per bounded retirement group, so ordinary intervals are much
  * smaller than this ceiling. */
 #define S5L8900_ACTIVE_CLOCK_MAX_STEP_NS UINT64_C(8000000)
-#define S5L8900_ACTIVE_CLOCK_SYNC_INSNS 256u
+/* Keep engine/interpreter retirement groups small for input and MMIO checks,
+ * but do not turn every such boundary into an expensive host clock call. At
+ * the measured 16--30 Minsn/s, 4096 retirements are about 0.14--0.26 ms. */
+#define S5L8900_ACTIVE_CLOCK_BATCH_INSNS  256u
+#define S5L8900_ACTIVE_CLOCK_SAMPLE_INSNS 4096u
 
 typedef struct {
     uint32_t    base, size;

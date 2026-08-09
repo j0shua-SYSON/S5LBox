@@ -1719,8 +1719,8 @@ static unsigned run_retirement_batch_limit(const s5l8900_t *m,
     if (!active_clock) return retirement_batch_limit(m, remaining);
     if (!remaining || m->level_dirty || ext_inputs(m) != m->ext_seen)
         return 0u;
-    if (remaining > S5L8900_ACTIVE_CLOCK_SYNC_INSNS)
-        remaining = S5L8900_ACTIVE_CLOCK_SYNC_INSNS;
+    if (remaining > S5L8900_ACTIVE_CLOCK_BATCH_INSNS)
+        remaining = S5L8900_ACTIVE_CLOCK_BATCH_INSNS;
     return remaining;
 }
 
@@ -1814,16 +1814,24 @@ static bool active_host_clock_sync(s5l8900_t *m,
 
 static void run_clock_retired(s5l8900_t *m, bool *active_clock,
                               unsigned *pending_retired, unsigned retired,
-                              bool force_sync) {
+                              bool force_clock_sync,
+                              bool force_device_refresh) {
     if (!*active_clock) {
         s5l8900_tick(m, retired);
         return;
     }
 
     *pending_retired += retired;
-    if (!force_sync &&
-        *pending_retired < S5L8900_ACTIVE_CLOCK_SYNC_INSNS)
+    if (!force_clock_sync &&
+        *pending_retired < S5L8900_ACTIVE_CLOCK_SAMPLE_INSNS) {
+        /* Signed negative witnesses, MMIO and mode exits still require the
+         * post-retirement device boundary they historically received. A zero
+         * tick supplies that exact refresh without calling clock_gettime tens
+         * of millions of times per second. Retirements remain pending for the
+         * next periodic host-time sample. */
+        if (force_device_refresh) s5l8900_tick(m, 0u);
         return;
+    }
 
     unsigned fallback_ticks = *pending_retired;
     *pending_retired = 0u;
@@ -1882,6 +1890,7 @@ unsigned s5l8900_run(s5l8900_t *m, unsigned max_steps, arm_status_t *status) {
                  * tick matches bootkernel's established HLE timing contract. */
                 run_clock_retired(m, &active_clock,
                                   &active_pending_retired, 1u,
+                                  false,
                                   m->level_dirty ||
                                   ext_inputs(m) != m->ext_seen);
                 continue;
@@ -1905,9 +1914,9 @@ unsigned s5l8900_run(s5l8900_t *m, unsigned max_steps, arm_status_t *status) {
                 n += batch;
                 run_clock_retired(m, &active_clock,
                                   &active_pending_retired, batch,
+                                  engine_status != ARM_OK,
                                   m->level_dirty ||
                                   ext_inputs(m) != m->ext_seen ||
-                                  engine_status != ARM_OK ||
                                   known_negative);
                 if (engine_status != ARM_OK) {
                     st = engine_status;
@@ -1958,11 +1967,11 @@ unsigned s5l8900_run(s5l8900_t *m, unsigned max_steps, arm_status_t *status) {
                 m->interpreter_tick_batched_retired += retired;
                 run_clock_retired(m, &active_clock,
                                   &active_pending_retired, retired,
+                                  st != ARM_OK,
                                   m->level_dirty ||
                                   ext_inputs(m) != m->ext_seen ||
                                   (m->cpu.cpsr & ARM_CPSR_MODE_MASK) !=
-                                      ARM_MODE_USR ||
-                                  st != ARM_OK);
+                                      ARM_MODE_USR);
             }
             if (st != ARM_OK) break;
             continue;
@@ -1972,9 +1981,9 @@ unsigned s5l8900_run(s5l8900_t *m, unsigned max_steps, arm_status_t *status) {
         if (st != ARM_OK) break;
         n++;
         run_clock_retired(m, &active_clock, &active_pending_retired, 1u,
+                          m->wfi_pace_yield,
                           m->level_dirty ||
-                          ext_inputs(m) != m->ext_seen ||
-                          m->wfi_pace_yield);
+                          ext_inputs(m) != m->ext_seen);
         if (m->wfi_pace_yield) {
             m->wfi_pace_yield = false;
             break;

@@ -510,12 +510,12 @@ static void test_active_host_clock_is_optional_bounded_and_fail_closed(void) {
               &active, active_clock_probe_now, &probe),
           "could not enable active host clock");
 
-    /* Retiring 300 instructions while the host sample is stationary advances
-     * CPU work, but not the guest's physical clock. Sampling is bounded at 256
-     * retirements and flushed once at the end of the run. */
-    ran = s5l8900_run(&active, 300u, &st);
-    CHECK(st == ARM_OK && ran == 300u && active.timer.ticks == 0u &&
-          active.cpu.cycles == 300u && probe.now_calls == 3u,
+    /* Retiring 5000 instructions while the host sample is stationary advances
+     * CPU work, but not the guest's physical clock. One sample occurs at the
+     * 4096-retirement bound and another flushes the remainder at run exit. */
+    ran = s5l8900_run(&active, 5000u, &st);
+    CHECK(st == ARM_OK && ran == 5000u && active.timer.ticks == 0u &&
+          active.cpu.cycles == 5000u && probe.now_calls == 3u,
           "stationary host clock advanced time or missed its bound: "
           "status=%d ran=%u ticks=%llu cycles=%llu calls=%u",
           (int)st, ran, (unsigned long long)active.timer.ticks,
@@ -638,6 +638,40 @@ static void test_active_host_clock_does_not_double_count_paced_wfi(void) {
           (unsigned long long)m.active_clock_added_ticks,
           (unsigned long long)m.active_clock_updates,
           (unsigned long long)m.active_clock_guest_ticks_since_sync);
+    s5l8900_free(&m);
+}
+
+static void test_active_host_clock_refreshes_devices_without_oversampling(void) {
+    const uint32_t program[] = {
+        0xe5801020u, /* STR r1,[r0,#0x20] -- UART UTXH */
+        0xeafffffdu  /* B 0 */
+    };
+    s5l8900_t m;
+    CHECK(s5l8900_init(&m, 0, 1u << 20),
+          "active device-boundary machine init failed");
+    s5l8900_load(&m, 0, program, sizeof program);
+    m.cpu.r[0] = S5L8900_UART0_BASE;
+    m.cpu.r[1] = 'A';
+    m.cpu_hz = m.tb_hz = 1000u;
+    m.cpu.cpsr = ARM_MODE_SYS | ARM_CPSR_I | ARM_CPSR_F;
+
+    active_clock_probe_t probe = { .succeeds = true };
+    CHECK(s5l8900_set_active_host_clock(
+              &m, active_clock_probe_now, &probe),
+          "could not enable device-boundary clock oracle");
+    arm_status_t st = ARM_OK;
+    unsigned ran = s5l8900_run(&m, 100u, &st);
+    /* Fifty stores each dirty the machine and still require an immediate zero
+     * tick before the following instruction. They do not require fifty calls
+     * to a stationary host clock: entry plus the run-exit flush are enough. */
+    CHECK(st == ARM_OK && ran == 100u && m.uart0.tx_len == 50u &&
+          m.timer.ticks == 0u && probe.now_calls == 2u &&
+          m.active_clock_updates == 1u,
+          "device refresh sampled host clock per MMIO: status=%d ran=%u "
+          "tx=%zu ticks=%llu calls=%u updates=%llu",
+          (int)st, ran, m.uart0.tx_len,
+          (unsigned long long)m.timer.ticks, probe.now_calls,
+          (unsigned long long)m.active_clock_updates);
     s5l8900_free(&m);
 }
 
@@ -5951,6 +5985,7 @@ int main(void) {
     test_wfi_host_pacing_bounds_long_and_failed_waits();
     test_active_host_clock_is_optional_bounded_and_fail_closed();
     test_active_host_clock_does_not_double_count_paced_wfi();
+    test_active_host_clock_refreshes_devices_without_oversampling();
     test_wfi_unmasked_fiq_uses_the_post_mcr_return_link();
     test_wfi_pending_line_completes_without_advancing_time();
     test_wfi_stops_at_earliest_deliverable_device_edge();
