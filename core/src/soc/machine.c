@@ -672,6 +672,26 @@ bool s5l8900_set_direct_ram_writes(s5l8900_t *m, bool enabled) {
     return true;
 }
 
+bool s5l8900_set_wfi_host_pacing(s5l8900_t *m,
+                                 s5l_wfi_host_sleep_fn sleep, void *ctx) {
+    if (!m) return false;
+    if (!sleep && ctx) return false;
+
+    /* Publish the callback last when enabling and clear it first when
+     * disabling. The machine is single-owner, but this ordering also prevents
+     * a diagnostic observer from ever seeing a live callback with stale
+     * context. */
+    if (!sleep) m->wfi_host_sleep = NULL;
+    m->wfi_host_sleep_ctx = sleep ? ctx : NULL;
+    m->wfi_paced_waits = 0u;
+    m->wfi_paced_wait_ns = 0u;
+    m->wfi_paced_partial_advances = 0u;
+    m->wfi_paced_failures = 0u;
+    m->wfi_pace_yield = false;
+    if (sleep) m->wfi_host_sleep = sleep;
+    return true;
+}
+
 static unsigned pre_step_filter_bit(uint32_t pc) {
     uint32_t word = pc >> 1u;
     return (unsigned)((word ^ (word >> 10u) ^ (word >> 20u)) & 63u);
@@ -1037,6 +1057,67 @@ static bool machine_wait_for_interrupt(void *ctx) {
         /* Existing zero-clock fallback: s5l8900_tick treats its input as raw
          * timebase ticks when either advertised rate is zero. */
         cpu_ticks = edge_tb;
+    }
+
+    /*
+     * Deterministic harnesses deliberately have no callback and still jump to
+     * the edge immediately.  An interactive frontend may instead make each
+     * autonomous interval consume the same order of host time as guest time.
+     *
+     * Never wait more than one short host slice. A stopped CLCD can leave the
+     * next timer edge seconds away, while the frontend can inject touch or a
+     * stop request only between s5l8900_run() calls. Advancing a shorter,
+     * already-waited interval is safe because next_wake proved that no modeled
+     * source can fire before the selected edge. The WFI may complete spuriously
+     * at that intermediate point; ARM permits that, and the historical UNKNOWN
+     * fallback already relies on the same harmless behavior.
+     */
+    if (m->wfi_host_sleep) {
+        if (!m->cpu_hz || !m->tb_hz || m->tb_hz > m->cpu_hz) {
+            m->wfi_pace_yield = true;
+            m->wfi_paced_failures++;
+            return false;
+        }
+
+        uint64_t slice_ticks =
+            (S5L8900_WFI_PACE_SLICE_NS * m->cpu_hz) / UINT64_C(1000000000);
+        bool partial = cpu_ticks > slice_ticks;
+        uint64_t paced_ticks = partial ? slice_ticks : cpu_ticks;
+        uint64_t wait_ns;
+
+        if (!paced_ticks) {
+            /* At a synthetic clock below 125 Hz, even one CPU tick is longer
+             * than the responsiveness ceiling. Wait one slice, advance no
+             * guest time, and yield. Real S5L8900 clocks never take this path. */
+            wait_ns = S5L8900_WFI_PACE_SLICE_NS;
+        } else {
+            /* paced_ticks is bounded by the 8 ms slice, so this product cannot
+             * overflow for any uint32_t CPU rate. Round up: waiting a fraction
+             * too long is harmless; advancing before the requested interval
+             * completed would recreate the bug this policy exists to stop. */
+            uint64_t scaled = paced_ticks * UINT64_C(1000000000);
+            wait_ns = scaled / m->cpu_hz + (scaled % m->cpu_hz != 0u);
+        }
+
+        m->wfi_pace_yield = true;
+        m->wfi_paced_waits++;
+        if (UINT64_MAX - m->wfi_paced_wait_ns < wait_ns)
+            m->wfi_paced_wait_ns = UINT64_MAX;
+        else
+            m->wfi_paced_wait_ns += wait_ns;
+
+        if (!m->wfi_host_sleep(m->wfi_host_sleep_ctx, wait_ns)) {
+            m->wfi_paced_failures++;
+            s5l8900_tick(m, 0u);
+            return m->cpu.irq_line || m->cpu.fiq_line;
+        }
+
+        if (partial) {
+            m->wfi_paced_partial_advances++;
+            if (paced_ticks) s5l8900_tick(m, (uint32_t)paced_ticks);
+            else s5l8900_tick(m, 0u);
+            return m->cpu.irq_line || m->cpu.fiq_line;
+        }
     }
 
     /* The public tick API is 32-bit.  Split a very long wait without changing
@@ -1651,6 +1732,9 @@ unsigned s5l8900_static_a64_fallback_step(s5l8900_t *m,
 unsigned s5l8900_run(s5l8900_t *m, unsigned max_steps, arm_status_t *status) {
     arm_status_t st = ARM_OK;
     unsigned n = 0;
+    /* A direct arm_step() may have used the same machine between run calls.
+     * Only a wait reached during THIS bounded slice may shorten it. */
+    m->wfi_pace_yield = false;
     while (n < max_steps) {
         if (pre_step_target_matches(m, m->cpu.r[15])) {
             m->pre_step_matches++;
@@ -1734,6 +1818,10 @@ unsigned s5l8900_run(s5l8900_t *m, unsigned max_steps, arm_status_t *status) {
         if (st != ARM_OK) break;
         n++;
         s5l8900_tick(m, 1u);
+        if (m->wfi_pace_yield) {
+            m->wfi_pace_yield = false;
+            break;
+        }
     }
     if (status) *status = st;
     return n;

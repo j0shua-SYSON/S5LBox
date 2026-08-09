@@ -3565,6 +3565,27 @@ bool     s5l_pl080_run(s5l_pl080_t *d, const arm_bus_t *bus,
 #define S5L_PRE_STEP_TARGET_MAX 16u
 typedef bool (*s5l_pre_step_fn)(void *ctx);
 
+/*
+ * Optional host pacing for an interactive frontend's WFI idle intervals.
+ *
+ * The machine already knows the exact guest CPU ticks to the next deliverable
+ * device edge.  A frontend that supplies this callback asks the host to wait
+ * for the corresponding wall-clock interval before those idle ticks are
+ * committed.  Returning false means the full wait did not complete; guest
+ * time is then left at the last safely paced point and the WFI completes
+ * spuriously, which is safer than manufacturing elapsed time.
+ *
+ * The callback runs synchronously on the machine-owning thread and must not
+ * call back into the machine.  Generic frontends leave it NULL and retain the
+ * historical deterministic fast-forward exactly.
+ */
+typedef bool (*s5l_wfi_host_sleep_fn)(void *ctx, uint64_t nanoseconds);
+
+/* Do not hold an interactive execution slice inside WFI for longer than this.
+ * Longer guest waits are advanced in real-time-sized pieces, yielding between
+ * them so a frontend can drain input, stop requests and scanout. */
+#define S5L8900_WFI_PACE_SLICE_NS UINT64_C(8000000)
+
 typedef struct {
     uint32_t    base, size;
     const char *name;
@@ -3780,6 +3801,21 @@ typedef struct {
      * scanout boundary. Host diagnostics only: snap_mach() deliberately
      * preserves these running totals across a guest-state restore. */
     s5l_mbx_telemetry_t mbx_telemetry;
+
+    /*
+     * Interactive WFI pacing is host policy, never guest state.  The callback,
+     * context and evidence counters are absent from snap_mach(), while
+     * snapshot_load() clears only the transient run-slice yield.  A NULL
+     * callback is the deterministic/default machine used by every existing
+     * harness.  See s5l8900_set_wfi_host_pacing().
+     */
+    s5l_wfi_host_sleep_fn wfi_host_sleep;
+    void                 *wfi_host_sleep_ctx;
+    uint64_t              wfi_paced_waits;
+    uint64_t              wfi_paced_wait_ns;
+    uint64_t              wfi_paced_partial_advances;
+    uint64_t              wfi_paced_failures;
+    bool                  wfi_pace_yield;
 } s5l8900_t;
 
 /*
@@ -3950,6 +3986,15 @@ unsigned s5l8900_wake_sources(const s5l_wake_source_t **out);
 s5l_wake_kind_t s5l8900_next_wake(const s5l8900_t *m,
                                   const s5l_wake_source_t *src, unsigned n,
                                   uint32_t *ticks);
+
+/*
+ * Install or clear interactive host pacing for autonomous WFI time. `sleep ==
+ * NULL` clears it and requires ctx == NULL. Installing or clearing resets its
+ * host-only evidence counters. This does not pace active CPU execution and it
+ * does not alter the deterministic fast-forward used when no callback exists.
+ */
+bool s5l8900_set_wfi_host_pacing(s5l8900_t *m,
+                                 s5l_wfi_host_sleep_fn sleep, void *ctx);
 
 /*
  * ram_base/ram_size define where RAM appears. Returns false on allocation

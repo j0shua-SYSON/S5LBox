@@ -424,6 +424,173 @@ static void test_wfi_fast_forwards_to_the_timer_boundary(void) {
     s5l8900_free(&m);
 }
 
+typedef struct {
+    unsigned calls;
+    uint64_t last_ns;
+    uint64_t total_ns;
+    bool succeeds;
+} wfi_pace_probe_t;
+
+static bool wfi_pace_probe_sleep(void *ctx, uint64_t nanoseconds) {
+    wfi_pace_probe_t *probe = ctx;
+    if (!probe) return false;
+    probe->calls++;
+    probe->last_ns = nanoseconds;
+    probe->total_ns += nanoseconds;
+    return probe->succeeds;
+}
+
+static void test_wfi_host_pacing_is_optional_exact_and_yields(void) {
+    const uint32_t program[] = {
+        0xee070f90u,            /* WFI */
+        0xe3a0102au             /* MOV r1,#42 */
+    };
+
+    s5l8900_t paced;
+    CHECK(s5l8900_init(&paced, 0, 1u << 20), "paced machine init failed");
+    s5l8900_load(&paced, 0, program, sizeof program);
+    /* Three timebase ticks from fractional phase 1 at 4:1 need eleven CPU
+     * ticks. At 4 kHz that is exactly 2,750,000 ns, below the host slice. */
+    paced.cpu_hz = 4000u;
+    paced.tb_hz = 1000u;
+    paced.tb_accum = 1000u;
+    paced.timer.t4_count = paced.timer.t4_value = 3u;
+    paced.timer.t4_state = TIMER4_STATE_START;
+    paced.vic[0].enable = 1u << S5L8900_IRQ_TIMER;
+    paced.vic[0].select = 1u << S5L8900_IRQ_TIMER;
+    paced.cpu.cpsr = ARM_MODE_SYS | ARM_CPSR_F;
+
+    wfi_pace_probe_t probe = { .succeeds = true };
+    CHECK(s5l8900_set_wfi_host_pacing(&paced, wfi_pace_probe_sleep, &probe),
+          "could not enable WFI host pacing");
+    arm_status_t st = ARM_OK;
+    unsigned ran = s5l8900_run(&paced, 2u, &st);
+    CHECK(st == ARM_OK && ran == 1u && paced.cpu.r[15] == 4u &&
+          paced.cpu.r[1] == 0u,
+          "paced run did not yield after WFI: status=%d ran=%u pc=%08x r1=%u",
+          (int)st, ran, paced.cpu.r[15], paced.cpu.r[1]);
+    CHECK(probe.calls == 1u && probe.last_ns == UINT64_C(2750000) &&
+          probe.total_ns == UINT64_C(2750000),
+          "paced wait calls=%u last=%llu total=%llu, expected 1/2750000",
+          probe.calls, (unsigned long long)probe.last_ns,
+          (unsigned long long)probe.total_ns);
+    CHECK(paced.timer.ticks == 3u && paced.tb_accum == 1000u &&
+          paced.cpu.fiq_line,
+          "paced WFI missed its exact edge: ticks=%llu frac=%llu fiq=%d",
+          (unsigned long long)paced.timer.ticks,
+          (unsigned long long)paced.tb_accum, (int)paced.cpu.fiq_line);
+    CHECK(paced.wfi_paced_waits == 1u &&
+          paced.wfi_paced_wait_ns == UINT64_C(2750000) &&
+          paced.wfi_paced_partial_advances == 0u &&
+          paced.wfi_paced_failures == 0u,
+          "paced evidence waits=%llu ns=%llu partial=%llu failures=%llu",
+          (unsigned long long)paced.wfi_paced_waits,
+          (unsigned long long)paced.wfi_paced_wait_ns,
+          (unsigned long long)paced.wfi_paced_partial_advances,
+          (unsigned long long)paced.wfi_paced_failures);
+
+    /* The yield is one-shot. The next bounded run executes ordinary code and
+     * does not inherit a stale stop request from the preceding WFI. */
+    ran = s5l8900_run(&paced, 1u, &st);
+    CHECK(st == ARM_OK && ran == 1u && paced.cpu.r[1] == 42u,
+          "paced yield leaked into the next run: status=%d ran=%u r1=%u",
+          (int)st, ran, paced.cpu.r[1]);
+    s5l8900_free(&paced);
+
+    /* Default machines have no host wait and retain the old deterministic
+     * behavior: the same two-instruction slice crosses WFI and the MOV. */
+    s5l8900_t deterministic;
+    CHECK(s5l8900_init(&deterministic, 0, 1u << 20),
+          "deterministic machine init failed");
+    s5l8900_load(&deterministic, 0, program, sizeof program);
+    deterministic.cpu_hz = 4000u;
+    deterministic.tb_hz = 1000u;
+    deterministic.tb_accum = 1000u;
+    deterministic.timer.t4_count = deterministic.timer.t4_value = 3u;
+    deterministic.timer.t4_state = TIMER4_STATE_START;
+    deterministic.vic[0].enable = 1u << S5L8900_IRQ_TIMER;
+    deterministic.vic[0].select = 1u << S5L8900_IRQ_TIMER;
+    deterministic.cpu.cpsr = ARM_MODE_SYS | ARM_CPSR_F;
+    ran = s5l8900_run(&deterministic, 2u, &st);
+    CHECK(st == ARM_OK && ran == 2u && deterministic.cpu.r[1] == 42u &&
+          deterministic.wfi_paced_waits == 0u,
+          "default WFI changed: status=%d ran=%u r1=%u waits=%llu",
+          (int)st, ran, deterministic.cpu.r[1],
+          (unsigned long long)deterministic.wfi_paced_waits);
+    s5l8900_free(&deterministic);
+}
+
+static void test_wfi_host_pacing_bounds_long_and_failed_waits(void) {
+    const uint32_t wfi = 0xee070f90u;
+
+    s5l8900_t partial;
+    CHECK(s5l8900_init(&partial, 0, 1u << 20),
+          "partial pacing machine init failed");
+    s5l8900_load(&partial, 0, &wfi, sizeof wfi);
+    partial.cpu_hz = 1000u;
+    partial.tb_hz = 1u;
+    partial.timer.t4_count = partial.timer.t4_value = 1u;
+    partial.timer.t4_state = TIMER4_STATE_START;
+    partial.vic[0].enable = 1u << S5L8900_IRQ_TIMER;
+    partial.cpu.cpsr = ARM_MODE_SYS | ARM_CPSR_I;
+    wfi_pace_probe_t partial_probe = { .succeeds = true };
+    CHECK(s5l8900_set_wfi_host_pacing(
+              &partial, wfi_pace_probe_sleep, &partial_probe),
+          "could not enable partial WFI pacing");
+
+    arm_status_t st = ARM_OK;
+    unsigned ran = s5l8900_run(&partial, 2u, &st);
+    /* Eight paced CPU ticks fit in the 8 ms host slice; the retired WFI adds
+     * one ordinary active tick afterward. Neither reaches the 1 s timer edge. */
+    CHECK(st == ARM_OK && ran == 1u &&
+          partial_probe.last_ns == S5L8900_WFI_PACE_SLICE_NS &&
+          partial.timer.ticks == 0u && partial.tb_accum == 9u &&
+          partial.timer.t4_value == 1u && !partial.cpu.irq_line,
+          "long WFI was not sliced safely: status=%d ran=%u wait=%llu "
+          "ticks=%llu frac=%llu value=%u irq=%d",
+          (int)st, ran, (unsigned long long)partial_probe.last_ns,
+          (unsigned long long)partial.timer.ticks,
+          (unsigned long long)partial.tb_accum,
+          partial.timer.t4_value, (int)partial.cpu.irq_line);
+    CHECK(partial.wfi_paced_partial_advances == 1u &&
+          partial.wfi_paced_failures == 0u,
+          "long WFI evidence partial=%llu failures=%llu",
+          (unsigned long long)partial.wfi_paced_partial_advances,
+          (unsigned long long)partial.wfi_paced_failures);
+    s5l8900_free(&partial);
+
+    s5l8900_t failed;
+    CHECK(s5l8900_init(&failed, 0, 1u << 20),
+          "failed pacing machine init failed");
+    s5l8900_load(&failed, 0, &wfi, sizeof wfi);
+    failed.cpu_hz = 4000u;
+    failed.tb_hz = 1000u;
+    failed.tb_accum = 1000u;
+    failed.timer.t4_count = failed.timer.t4_value = 3u;
+    failed.timer.t4_state = TIMER4_STATE_START;
+    failed.vic[0].enable = 1u << S5L8900_IRQ_TIMER;
+    failed.cpu.cpsr = ARM_MODE_SYS | ARM_CPSR_I;
+    wfi_pace_probe_t failed_probe = { .succeeds = false };
+    CHECK(s5l8900_set_wfi_host_pacing(
+              &failed, wfi_pace_probe_sleep, &failed_probe),
+          "could not enable failing WFI pacing oracle");
+    ran = s5l8900_run(&failed, 2u, &st);
+    CHECK(st == ARM_OK && ran == 1u && failed.timer.ticks == 0u &&
+          failed.tb_accum == 2000u && failed.timer.t4_value == 3u &&
+          failed.wfi_paced_failures == 1u,
+          "failed host wait manufactured time: status=%d ran=%u ticks=%llu "
+          "frac=%llu value=%u failures=%llu",
+          (int)st, ran, (unsigned long long)failed.timer.ticks,
+          (unsigned long long)failed.tb_accum, failed.timer.t4_value,
+          (unsigned long long)failed.wfi_paced_failures);
+    CHECK(!s5l8900_set_wfi_host_pacing(&failed, NULL, &failed_probe),
+          "clear accepted a stale pacing context");
+    CHECK(s5l8900_set_wfi_host_pacing(&failed, NULL, NULL) &&
+          failed.wfi_host_sleep == NULL && failed.wfi_paced_waits == 0u,
+          "clean pacing disable did not reset host policy/evidence");
+    s5l8900_free(&failed);
+}
+
 static void test_wfi_unmasked_fiq_uses_the_post_mcr_return_link(void) {
     s5l8900_t m;
     CHECK(s5l8900_init(&m, 0, 1u << 20), "machine init failed");
@@ -5579,6 +5746,8 @@ int main(void) {
     test_timer_ack_mask_matches_the_kernels();
     test_timer_lump_matches_literal_countdown();
     test_wfi_fast_forwards_to_the_timer_boundary();
+    test_wfi_host_pacing_is_optional_exact_and_yields();
+    test_wfi_host_pacing_bounds_long_and_failed_waits();
     test_wfi_unmasked_fiq_uses_the_post_mcr_return_link();
     test_wfi_pending_line_completes_without_advancing_time();
     test_wfi_stops_at_earliest_deliverable_device_edge();

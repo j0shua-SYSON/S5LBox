@@ -181,12 +181,13 @@ SNAP_SIZE_GUARD(s5l_stub_t,        56,    "snap_stubs");
  * hook, its context, bounded target table, rejection filter and host-only
  * counters (112). 121968 adds the two host-only User-mode interpreter tick
  * batching counters (16). 122032 adds the per-machine host-only MBX work
- * ledger (64). Like
+ * ledger (64). 122088 adds the interactive WFI sleep callback/context, four
+ * host-only evidence counters and the transient run-slice yield (56). Like
  * the bus callbacks, snapshot_load preserves this live host policy; none of
  * it belongs to guest state or the stream. SNAPSHOT_VERSION and the bytes on
  * disk therefore do not move. The size was read from the compiler's emitted
  * `.space`, not inferred from source padding. */
-SNAP_SIZE_GUARD(s5l8900_t,         122032, "snap_mach");
+SNAP_SIZE_GUARD(s5l8900_t,         122088, "snap_mach");
 #endif
 
 /* ---------------------------------------------------------------- the IO --- */
@@ -1025,8 +1026,8 @@ static void snap_nor(sn_io_t *io, s5l_nor_t *n) {
  * Deliberately NOT serialised: `cpu` (own section), `bus` (host function
  * pointers and callback contexts — a tool may have interposed on them),
  * `ram` (host allocation), `pre_step_hook`/its context, targets and counters,
- * and the interpreter tick-batching counters plus MBX work ledger (live host
- * policy/measurement),
+ * and the interpreter tick-batching counters, MBX work ledger and WFI pacing
+ * callback/context/counters (live host policy/measurement),
  * `nor.data` and `stubs[].regs`/`stubs[].name` (host allocations / string
  * literals). ram_base/ram_size live in GEOM.
  */
@@ -1535,6 +1536,10 @@ static snapshot_status_t snap_apply(s5l8900_t *m, FILE *f,
      * this is what keeps it out of the file format — see `level_dirty` in
      * soc.h — and it is the safe direction: it costs one full refresh. */
     m->level_dirty = true;
+    /* A yield belongs to the host run call that observed the wait, not to the
+     * restored guest instant. The callback, context and accumulated evidence
+     * remain the live frontend's, exactly like the other host-only fields. */
+    m->wfi_pace_yield = false;
     return SNAP_OK;
 }
 

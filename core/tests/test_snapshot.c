@@ -39,6 +39,12 @@ static int g_pass = 0, g_fail = 0;
 
 #define RAMSZ (1u << 20)
 
+static bool snapshot_wfi_sleep_probe(void *ctx, uint64_t nanoseconds) {
+    (void)ctx;
+    (void)nanoseconds;
+    return true;
+}
+
 /* --------------------------------------------------------------- helpers --- */
 
 /* Save `a` to memory, restore it into a freshly initialised `b`. */
@@ -359,6 +365,19 @@ static void test_device_state_round_trips(void) {
     b->mbx_telemetry.rejected_3d = 207u;
     b->mbx_telemetry.pixels_3d = 208u;
 
+    /* Interactive pacing is live host policy. The destination's callback,
+     * context and running evidence must survive a guest restore, while a
+     * half-consumed yield from an older run call must not. */
+    int pacing_context = 0;
+    CHECK(s5l8900_set_wfi_host_pacing(
+              b, snapshot_wfi_sleep_probe, &pacing_context),
+          "could not install destination WFI pacing policy");
+    b->wfi_paced_waits = 301u;
+    b->wfi_paced_wait_ns = 302u;
+    b->wfi_paced_partial_advances = 303u;
+    b->wfi_paced_failures = 304u;
+    b->wfi_pace_yield = true;
+
     CHECK(roundtrip(a, b), "device round trip");
     CHECK(b->mbx_telemetry.candidates_2d == 201u &&
           b->mbx_telemetry.completed_2d == 202u &&
@@ -369,6 +388,12 @@ static void test_device_state_round_trips(void) {
           b->mbx_telemetry.rejected_3d == 207u &&
           b->mbx_telemetry.pixels_3d == 208u,
           "snapshot restore changed the live host-only MBX work ledger");
+    CHECK(b->wfi_host_sleep == snapshot_wfi_sleep_probe &&
+          b->wfi_host_sleep_ctx == &pacing_context &&
+          b->wfi_paced_waits == 301u && b->wfi_paced_wait_ns == 302u &&
+          b->wfi_paced_partial_advances == 303u &&
+          b->wfi_paced_failures == 304u && !b->wfi_pace_yield,
+          "snapshot restore changed WFI host policy/evidence or retained yield");
 
     SAME(uart0.ulcon); SAME(uart0.ucon); SAME(uart0.ufcon);
     SAME(uart0.umcon); SAME(uart0.ubrdiv); SAME(uart0.tx_len);
