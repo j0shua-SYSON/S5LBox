@@ -8581,3 +8581,52 @@ and changed-signature cadence is worse. This neither reaches 30 FPS nor fixes
 the reported 2 FPS navigation experience. Raw evidence is retained under
 `work/artifacts/dafe857-a9-privileged-window-isolated/`; the phone was returned
 to the marker-free stock policy after the comparison.
+
+### 2026-08-10: compact PC sampling finds transition work, not presentation
+
+Commit `2fe8094a5fdf1d6018d404cc6beb27da05311c92` adds an explicit
+diagnostic marker that samples process CPU time only while `s5l8900_run()` is
+active. Build-time text aliases divide the generated compact runner into ten
+regions without adding an executed instruction. Marker-free machines install
+no signal handler or timer and pay only one disabled gate per public run
+slice, never per guest instruction. Local strict CTest passes 65/65. Exact-SHA
+core run `31324423103` and iPhone build run `31324423077` are green.
+
+The downloaded IPA SHA-256 is
+`0F98AB98677F4817347A253C125C2D8E066E7D8926456E5AF6664F5AA51E44D4`.
+Its extracted and installed executable both hash to
+`6D54B9458438E54CC6E97A5E4290207EC6EEDA5A23048E23CA5A21F3591EC23C`.
+The iPhone 6s Plus ran three repetitions from the authenticated 7,212 M
+Settings snapshot, matching writable image, active host clock, identical touch
+and 160 M instruction cap. Every repetition accepted both touch transitions,
+reached populated Settings and consumed its one-shot restore and touch files.
+
+| physical-A9 profile metric | run 1 | run 2 | run 3 | median |
+|---|---:|---:|---:|---:|
+| endpoint FPS | 9 | 11 | 14 | 11 |
+| changed scanout signatures/s | 2.620 | 2.615 | 2.580 | 2.615 |
+| scanout host interval, s | 4.198850 | 4.206586 | 4.651963 | 4.206586 |
+| maximum changed-scanout gap, ms | 3081.515 | 3123.450 | 3435.226 | 3123.450 |
+| compact calls | 4,223,322 | 4,237,032 | 4,293,026 | 4,237,032 |
+| User fast window refills | 4,192,056 | 4,189,756 | 4,165,795 | 4,189,756 |
+| profile samples | 1,463 | 1,479 | 2,599 | 1,479 |
+| samples outside generated runner | 46.89% | 50.17% | 58.37% | 50.17% |
+| Thumb share of runner-only samples | 34.62% | 32.29% | 31.61% | 32.29% |
+
+The sampler is statistical, its absolute delivery count varies, and the
+outside bucket does not by itself identify a C function. It therefore does
+not prove that all outside time belongs to refills. The stable combination is
+still decisive enough to choose the next experiment: roughly half the samples
+are outside generated text, the run crosses User fetch windows about 4.19
+million times through a C callback, layer work remains only 0.34 ms on average,
+and changed pixels still disappear for more than three seconds.
+
+Brutal status: **the app is CPU-heavy and still not usable at the requested
+cadence.** This profile is diagnosis, not an FPS improvement. It rejects layer
+presentation as the dominant cost and makes a resident multi-window witness
+cache the next structural target: repeated, already-proved User windows should
+switch inside signed AArch64 text without re-entering C. Exact translation
+generation, privilege, fallback and serialized-machine oracles remain required
+before that path can be enabled. Raw measurements are retained under
+`work/artifacts/2fe8094-a9-compact-pc-profile/`; the diagnostic marker was
+removed after the third run.
