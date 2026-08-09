@@ -80,6 +80,7 @@ typedef struct {
     bool compact_raw_enabled;
     bool compact_raw_privileged_enabled;
     bool compact_raw_window_refill_enabled;
+    bool compact_raw_privileged_window_refill_enabled;
     bool indirect_enabled;
     bool thumb_conditional_enabled;
     bool vstr_enabled;
@@ -580,6 +581,7 @@ bool s5l8900_static_a64_set_enabled(s5l8900_t *m, bool enabled) {
         state->known_negative_bypass_enabled = true;
         state->compact_raw_privileged_enabled = true;
         state->compact_raw_window_refill_enabled = true;
+        state->compact_raw_privileged_window_refill_enabled = false;
         m->static_a64_state = state;
     }
     state->enabled = true;
@@ -678,6 +680,21 @@ bool s5l8900_static_a64_set_compact_raw_window_refill(s5l8900_t *m,
     if (!state || !state->enabled || !a64_static_host_available())
         return false;
     state->compact_raw_window_refill_enabled = enabled;
+    return true;
+#else
+    (void)enabled;
+    return false;
+#endif
+}
+
+bool s5l8900_static_a64_set_compact_raw_privileged_window_refill(
+        s5l8900_t *m, bool enabled) {
+    if (!m) return false;
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    static_a64_state_t *state = static_state(m);
+    if (!state || !state->enabled || !a64_static_host_available())
+        return false;
+    state->compact_raw_privileged_window_refill_enabled = enabled;
     return true;
 #else
     (void)enabled;
@@ -1184,6 +1201,8 @@ static a64_compact_raw_fallback_result_t compact_raw_fallback(
      * outside the privileged resident interval and remains the sole owner of
      * walks, faults, MMIO and control-state changes. */
     if (context->state->compact_raw_window_refill_enabled &&
+        (!priv ||
+         context->state->compact_raw_privileged_window_refill_enabled) &&
         step_block != context->fetch_block &&
         (cpu->r[15] & (width - 1u)) == 0u) {
         unsigned boundary_delta = 0u;

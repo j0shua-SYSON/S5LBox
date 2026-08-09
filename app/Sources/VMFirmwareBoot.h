@@ -92,6 +92,13 @@ extern "C" {
  * policy, never guest state or a stock-device dependency. */
 #define VM_FW_BOOT_COMPACT_WINDOW_REFILL_OFF_FILE \
     "engine.compact-window-refill-off"
+/* Opt-in rollout control for privileged window continuation. The code remains
+ * available because it substantially reduces engine work, but it is not the
+ * stock product default after a three-pair physical-A9 Settings replay showed
+ * worse displayed cadence. User-mode continuation remains enabled without
+ * this marker. */
+#define VM_FW_BOOT_COMPACT_PRIVILEGED_WINDOW_REFILL_FILE \
+    "engine.compact-privileged-window-refill-on"
 /* Same-binary timing control for an exact navigation replay. A nonempty
  * marker leaves real-time WFI pacing enabled but does not install the active
  * host clock, so the guest advances active time from retired instructions as

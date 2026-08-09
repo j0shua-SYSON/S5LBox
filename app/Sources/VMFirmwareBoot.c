@@ -496,6 +496,7 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
     bool forced_interpreter = false;
     bool compact_user_only = false;
     bool compact_window_refill_off = false;
+    bool compact_privileged_window_refill = false;
     bool active_clock_off = false;
 #if defined(S5LBOX_STATIC_A64_ENGINE)
     /*
@@ -562,10 +563,43 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
                    "window-refill control unavailable");
         return false;
     }
+    char compact_privileged_window_refill_path[
+        VM_FW_BOOT_PATH_CAPACITY + 64u];
+    if (!join_path(compact_privileged_window_refill_path,
+                   sizeof compact_privileged_window_refill_path,
+                   paths->work,
+                   VM_FW_BOOT_COMPACT_PRIVILEGED_WINDOW_REFILL_FILE)) {
+        set_detail(report->detail, sizeof report->detail,
+                   "The privileged window-rollout path is too long to use.");
+        set_detail(report->summary, sizeof report->summary, "path too long");
+        return false;
+    }
+    compact_privileged_window_refill =
+        file_size(compact_privileged_window_refill_path) > 0u;
+    if (!forced_interpreter && compact_privileged_window_refill &&
+        (compact_user_only || compact_window_refill_off)) {
+        set_detail(report->detail, sizeof report->detail,
+                   "The privileged window experiment conflicts with an "
+                   "active User-only or all-window-refill control.");
+        set_detail(report->summary, sizeof report->summary,
+                   "conflicting compact controls");
+        return false;
+    }
+    if (!forced_interpreter && compact_privileged_window_refill &&
+        !s5l8900_static_a64_set_compact_raw_privileged_window_refill(
+            machine, true)) {
+        set_detail(report->detail, sizeof report->detail,
+                   "The privileged compact window experiment could not be "
+                   "enabled.");
+        set_detail(report->summary, sizeof report->summary,
+                   "privileged window experiment unavailable");
+        return false;
+    }
 #endif
 #endif
     (void)compact_user_only;
     (void)compact_window_refill_off;
+    (void)compact_privileged_window_refill;
 
 #if defined(S5LBOX_IOS_ACTIVE_REALTIME_CLOCK)
     char active_clock_off_path[VM_FW_BOOT_PATH_CAPACITY + 64u];
@@ -814,6 +848,9 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
             engine_mode = "compact raw, User-only control";
         else if (compact_window_refill_off)
             engine_mode = "compact raw, window-refill-off control";
+        else if (compact_privileged_window_refill)
+            engine_mode =
+                "compact raw, privileged prefix + privileged-window experiment";
         else
             engine_mode = "compact raw, privileged prefix";
 #elif defined(S5LBOX_STATIC_A64_DEFAULT_GRAPH)

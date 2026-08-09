@@ -297,6 +297,16 @@ static void test_saved_state_restore_fixture(void) {
     FILE *window_refill_off_file = fopen(window_refill_off_marker, "rb");
     bool expect_window_refill_off = window_refill_off_file != NULL;
     if (window_refill_off_file) fclose(window_refill_off_file);
+    char privileged_window_refill_marker[VM_FW_BOOT_PATH_CAPACITY + 64u];
+    snprintf(privileged_window_refill_marker,
+             sizeof privileged_window_refill_marker, "%s/%s", fixture,
+             VM_FW_BOOT_COMPACT_PRIVILEGED_WINDOW_REFILL_FILE);
+    FILE *privileged_window_refill_file =
+        fopen(privileged_window_refill_marker, "rb");
+    bool expect_privileged_window_refill =
+        privileged_window_refill_file != NULL;
+    if (privileged_window_refill_file)
+        fclose(privileged_window_refill_file);
     char active_clock_off_marker[VM_FW_BOOT_PATH_CAPACITY + 64u];
     snprintf(active_clock_off_marker, sizeof active_clock_off_marker,
              "%s/%s", fixture, VM_FW_BOOT_ACTIVE_CLOCK_OFF_FILE);
@@ -371,14 +381,21 @@ static void test_saved_state_restore_fixture(void) {
             CHECK(mentions(report.summary, "window-refill-off"),
                   "window-refill marker did not reach the engine: %s",
                   report.summary);
+        if (!expect_interpreter && expect_privileged_window_refill)
+            CHECK(mentions(report.summary,
+                           "privileged-window experiment"),
+                  "privileged window marker did not reach the engine: %s",
+                  report.summary);
 #else
         (void)expect_user_only;
         (void)expect_window_refill_off;
+        (void)expect_privileged_window_refill;
 #endif
 #else
         (void)expect_interpreter;
         (void)expect_user_only;
         (void)expect_window_refill_off;
+        (void)expect_privileged_window_refill;
 #endif
 
         char marker[VM_FW_BOOT_PATH_CAPACITY + 64u];

@@ -9604,9 +9604,18 @@ static bool run_soc_entry_configured(const soc_entry_setup_t *setup,
         goto done;
     }
     if (compact_raw_window_refill_off_path &&
+        !setup->mmu_identity_privileged &&
         !s5l8900_static_a64_set_compact_raw_window_refill(&machine, false)) {
         fprintf(stderr,
                 "jitbench: SoC compact window-refill control unavailable\n");
+        goto done;
+    }
+    if (compact_raw_path && setup->mmu_identity_privileged &&
+        !s5l8900_static_a64_set_compact_raw_privileged_window_refill(
+            &machine, !compact_raw_window_refill_off_path)) {
+        fprintf(stderr,
+                "jitbench: SoC privileged compact window-refill control "
+                "unavailable\n");
         goto done;
     }
     if (indirect_off_path &&
@@ -10159,6 +10168,8 @@ static bool run_compact_privileged_oracle_case(
          !s5l8900_static_a64_set_known_negative_bypass(
              &machine, bypass_enabled) ||
          !s5l8900_static_a64_set_compact_raw_window_refill(
+             &machine, true) ||
+         !s5l8900_static_a64_set_compact_raw_privileged_window_refill(
              &machine, window_refill_enabled) ||
          !s5l8900_static_a64_set_chain_limit(
              &machine, A64_STATIC_MAX_CHAIN_INSNS)))
@@ -10752,9 +10763,9 @@ done:
 
 /* Repeat the cross-window oracle in privileged mode. Unlike the User path,
  * each continuation must account its completed prefix through the real SoC
- * device/clock boundary before publishing the next FETCH witness. The disabled
- * arm proves the same binary can restore the old outer-loop policy, while the
- * invocation-count inequality is the structural efficiency gate. */
+ * device/clock boundary before publishing the next FETCH witness. The generic
+ * User-mode refill gate stays enabled in both arms; only the privileged gate is
+ * changed. The invocation-count inequality is the structural efficiency gate. */
 static bool validate_soc_compact_raw_privileged_windows(void) {
     enum { LOOP_INSNS = 259u, LOOP_COUNT = 32u,
            TOTAL_INSNS = LOOP_INSNS * LOOP_COUNT };
@@ -10837,6 +10848,7 @@ static bool validate_soc_compact_raw_privileged_windows(void) {
            " calls-on=%" PRIu64 " outer-fallbacks-off=%" PRIu64
            " outer-fallbacks-on=%" PRIu64 " all-admitted-native=yes "
            " fewer-outer-entries=yes "
+           "user-window-refill=on-both privileged-control=isolated "
            "same-binary-control=yes timebase-bounded=yes device-tick=yes "
            "serialized-machine=yes runtime-codegen=no\n",
            TOTAL_INSNS,

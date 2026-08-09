@@ -4109,14 +4109,21 @@ bool s5l8900_static_a64_set_compact_raw(s5l8900_t *m, bool enabled);
 bool s5l8900_static_a64_set_compact_raw_privileged(s5l8900_t *m,
                                                    bool enabled);
 /* Same-binary control for continuing a resident compact interval at an
- * unchanged PC in another 1 KiB code window. Product default is enabled.
- * User mode reuses an exact live FETCH witness directly. Privileged mode first
- * accounts the completed prefix through the normal machine/device boundary,
- * rechecks interrupts and translation state, and only then publishes another
- * exact witness. Neither route walks, faults, touches MMIO or retires the
- * unchanged instruction through the callback. */
+ * unchanged PC in another 1 KiB code window. User-mode continuation defaults
+ * on and reuses an exact live FETCH witness directly. This switch is also the
+ * outer safety gate for the separately controlled privileged continuation.
+ * Neither route walks, faults, touches MMIO or retires the unchanged
+ * instruction through the callback. */
 bool s5l8900_static_a64_set_compact_raw_window_refill(s5l8900_t *m,
                                                        bool enabled);
+/* Privileged continuation is retained as a measured efficiency experiment but
+ * defaults off: three exact physical-A9 Settings pairs reduced engine entries
+ * while regressing displayed cadence. When explicitly enabled, it first
+ * accounts the completed prefix through the normal machine/device boundary,
+ * rechecks interrupts and translation state, and only then publishes another
+ * exact FETCH witness. The generic window-refill switch above must also be on. */
+bool s5l8900_static_a64_set_compact_raw_privileged_window_refill(
+    s5l8900_t *m, bool enabled);
 /* Same-binary rollout/benchmark control for terminal A32/Thumb BX/BLX signed
  * records. It defaults on when the engine is created. Changing it clears only
  * derived decode/graph entries so an off/on comparison cannot reuse a block
