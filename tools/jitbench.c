@@ -9827,6 +9827,11 @@ static bool run_soc_entry_configured(const soc_entry_setup_t *setup,
     out->compact_raw_privileged_boundary_retired =
         compact_raw_privileged_boundary_retired_after -
         compact_raw_privileged_boundary_retired_before;
+    /* A privileged compact refusal returns to the machine loop before
+     * arm_step(), so those outer interpreter retirements deliberately do not
+     * increment the resident fallback counter. User mode can execute that
+     * fallback inside the resident callback and must still partition `total`
+     * exactly between the two compact counters. */
     if ((signed_path && out->signed_retired > total) ||
         (!signed_path &&
          (out->signed_retired != 0u || out->signed_chains != 0u ||
@@ -9835,8 +9840,11 @@ static bool run_soc_entry_configured(const soc_entry_setup_t *setup,
            (out->dwrite_hits != 0u || out->dwrite_misses != 0u)))) ||
         (path == SOC_ENTRY_SIGNED && out->graph_chains != 0u) ||
         (compact_raw_path &&
-         (out->compact_raw_retired +
-                  out->compact_raw_fallback_retired != total ||
+         ((setup->mmu_identity_privileged
+               ? out->compact_raw_retired +
+                         out->compact_raw_fallback_retired > total
+               : out->compact_raw_retired +
+                         out->compact_raw_fallback_retired != total) ||
           out->signed_retired != out->compact_raw_retired ||
           out->compact_raw_calls == 0u ||
           out->compact_raw_attempts < out->compact_raw_calls)) ||
