@@ -10802,9 +10802,18 @@ static bool validate_soc_compact_raw_privileged_windows(void) {
         refill_on.compact_raw_privileged_boundary_retired == 0u ||
         refill_on.compact_raw_privileged_boundary_retired >
             refill_on.compact_raw_retired ||
+        /* A privileged refill may remove an outer machine entry without
+         * changing which path retires the next instruction. Unlike the User
+         * callback path, refill count therefore does not equal newly native
+         * retirements. Gate the actual contract: every admitted instruction
+         * is native, deliberate MUL refusals remain outside the resident
+         * callback, and enabled continuation needs fewer outer entries. */
         refill_on.compact_raw_calls >= refill_off.compact_raw_calls ||
-        refill_on.compact_raw_retired - refill_off.compact_raw_retired !=
-            refill_on.compact_raw_privileged_window_refills) {
+        refill_on.compact_raw_fallback_retired != 0u ||
+        refill_off.compact_raw_fallback_retired != 0u ||
+        refill_on.compact_raw_retired !=
+            (uint64_t)TOTAL_INSNS - (uint64_t)LOOP_COUNT ||
+        refill_off.compact_raw_retired > refill_on.compact_raw_retired) {
         fprintf(stderr,
                 "jitbench: privileged compact-window oracle failed "
                 "off-calls/native/fallback=%" PRIu64 "/%" PRIu64
@@ -10825,13 +10834,17 @@ static bool validate_soc_compact_raw_privileged_windows(void) {
     printf("SOC-COMPACT-RAW-PRIVILEGED-WINDOW-ORACLE exact=yes "
            "guest-insns=%u window-bytes=1024 refills=%" PRIu64
            " boundary-retired=%" PRIu64 " calls-off=%" PRIu64
-           " calls-on=%" PRIu64 " fewer-outer-entries=yes "
+           " calls-on=%" PRIu64 " outer-fallbacks-off=%" PRIu64
+           " outer-fallbacks-on=%" PRIu64 " all-admitted-native=yes "
+           " fewer-outer-entries=yes "
            "same-binary-control=yes timebase-bounded=yes device-tick=yes "
            "serialized-machine=yes runtime-codegen=no\n",
            TOTAL_INSNS,
            refill_on.compact_raw_privileged_window_refills,
            refill_on.compact_raw_privileged_boundary_retired,
-           refill_off.compact_raw_calls, refill_on.compact_raw_calls);
+           refill_off.compact_raw_calls, refill_on.compact_raw_calls,
+           (uint64_t)TOTAL_INSNS - refill_off.compact_raw_retired,
+           (uint64_t)TOTAL_INSNS - refill_on.compact_raw_retired);
     ok = true;
 
 done:
