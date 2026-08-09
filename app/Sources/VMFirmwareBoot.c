@@ -12,6 +12,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(S5LBOX_IOS_WFI_REALTIME_PACING)
+#include <errno.h>
+#include <time.h>
+#endif
 
 struct vm_firmware_boot {
     file_block_t     *media;
@@ -31,6 +35,31 @@ struct vm_firmware_boot {
     const s5l8900_t   *hle_machine;
 #endif
 };
+
+#if defined(S5LBOX_IOS_WFI_REALTIME_PACING)
+/*
+ * The portable machine names the exact idle interval; the iOS frontend owns
+ * the wall-clock wait. nanosleep() uses no private API, entitlement or
+ * executable-memory facility, and it runs only on the emulator thread.
+ *
+ * EINTR is not success. Advancing the whole guest interval after a shortened
+ * host wait would reintroduce the clock acceleration this callback exists to
+ * prevent, so resume the remainder and report false on every other error.
+ */
+static bool vm_firmware_wfi_sleep(void *ctx, uint64_t nanoseconds) {
+    (void)ctx;
+    struct timespec request;
+    request.tv_sec = (time_t)(nanoseconds / UINT64_C(1000000000));
+    request.tv_nsec = (long)(nanoseconds % UINT64_C(1000000000));
+
+    for (;;) {
+        struct timespec remaining = {0};
+        if (nanosleep(&request, &remaining) == 0) return true;
+        if (errno != EINTR) return false;
+        request = remaining;
+    }
+}
+#endif
 
 /* -------------------------------------------------------------------------- */
 
@@ -648,6 +677,26 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
                    "saved state unavailable");
         return false;
     }
+
+#if defined(S5LBOX_IOS_WFI_REALTIME_PACING)
+    /*
+     * Arm this AFTER the optional snapshot load. It is host policy, not saved
+     * guest state, and the loaded timer phase is now the one whose future WFI
+     * edges will be paced. A failure stops startup instead of silently falling
+     * back to the phone-speed-dependent fast-forward that made guest time run
+     * several times faster than wall time during idle navigation.
+     */
+    if (!s5l8900_set_wfi_host_pacing(
+            machine, vm_firmware_wfi_sleep, NULL)) {
+        (void)file_block_close(boot->media);
+        set_detail(report->detail, sizeof report->detail,
+                   "The interactive guest clock could not enable bounded "
+                   "idle pacing.");
+        set_detail(report->summary, sizeof report->summary,
+                   "idle pacing unavailable");
+        return false;
+    }
+#endif
 
 #if defined(S5LBOX_IOS3_HLE_EXPERIMENT)
     /*

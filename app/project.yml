@@ -142,6 +142,13 @@ targets:
           # Keep direct writes too: disabling this separate, guarded contract
           # measured 4.14% slower with identical final evidence.
           - S5LBOX_STATIC_A64_DEFAULT_DIRECT_WRITES=1
+          # Idle WFI previously skipped straight to each guest timer/display
+          # edge as fast as the phone could execute the host callback. That is
+          # correct for deterministic replay but wrong for an interactive app:
+          # guest time and auto-lock could run several times faster than wall
+          # time. Pace only autonomous idle intervals and yield every 8 ms;
+          # active CPU execution and generic core harnesses remain unthrottled.
+          - S5LBOX_IOS_WFI_REALTIME_PACING=1
         # Stated rather than inherited: the Objective-C sources are written for
         # ARC, and would leak (or double-free) under manual retain/release.
         CLANG_ENABLE_OBJC_ARC: YES
