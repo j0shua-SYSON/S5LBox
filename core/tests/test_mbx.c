@@ -956,16 +956,11 @@ static void test_first_tiled_premultiplied_over(void) {
         {0x0bcu, 0x42e80000u}, {0x0c4u, 0x41a00000u},
         {0x0c8u, 0x43a00000u}, {0x0ccu, 0x42e80000u},
         {0x0d0u, 0x43a00000u}, {0x0d4u, 0x41a00000u},
-        {0x0e8u, 0xe0000000u}, {0x0f4u, 0xa6887610u},
-        {0x0f8u, 0x22220e80u}, {0x12cu, 0x3f800000u},
-        {0x130u, 0x3f800000u}, {0x134u, 0x3f800000u},
-        {0x138u, 0x3f800000u}, {0x198u, 0xe0000000u},
-        {0x19cu, 0x22200e80u}, {0x1d0u, 0x3f800000u},
-        {0x1d4u, 0x3f800000u}, {0x1d8u, 0x3f800000u},
-        {0x1dcu, 0x3f800000u},
     };
     for (unsigned i = 0; i < sizeof boundary / sizeof boundary[0]; i++)
         test_gpu_write32(&m, object + boundary[i].off, boundary[i].value);
+    for (uint32_t off = 0x0e8u; off < 0x1f0u; off += 4u)
+        test_gpu_write32(&m, object + off, 0x3c000000u ^ off);
 
     static const uint32_t quad[44] = {
         0xe0000000u, 0xa0418001u, 0u, 0xa6884710u,
@@ -1276,16 +1271,11 @@ static void test_second_tiled_status_glyph(void) {
         {0x0b8u, 0x431b0000u}, {0x0bcu, 0x41a00000u},
         {0x0c0u, 0x431b0000u}, {0x0c8u, 0x43250000u},
         {0x0ccu, 0x41a00000u}, {0x0d0u, 0x43250000u},
-        {0x0e8u, 0xe0000000u}, {0x0f4u, 0xa6887610u},
-        {0x0f8u, 0x22220e80u}, {0x12cu, 0x3f800000u},
-        {0x130u, 0x3f800000u}, {0x134u, 0x3f800000u},
-        {0x138u, 0x3f800000u}, {0x198u, 0xe0000000u},
-        {0x19cu, 0x22200e80u}, {0x1d0u, 0x3f800000u},
-        {0x1d4u, 0x3f800000u}, {0x1d8u, 0x3f800000u},
-        {0x1dcu, 0x3f800000u},
     };
     for (unsigned i = 0; i < sizeof boundary / sizeof boundary[0]; i++)
         test_gpu_write32(&m, object + boundary[i].off, boundary[i].value);
+    for (uint32_t off = 0x0e8u; off < 0x1f0u; off += 4u)
+        test_gpu_write32(&m, object + off, 0xc3000000u ^ off);
 
     static const uint32_t quad[44] = {
         0xe0000000u, 0xa1218000u, 0u, 0xcd206c40u,
@@ -1360,6 +1350,328 @@ static void test_second_tiled_status_glyph(void) {
           "unknown glyph texture control changed the destination");
     CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
           "unknown glyph texture control raised completion");
+
+    s5l8900_free(&m);
+}
+
+static void test_write_compact_blit_copy(s5l8900_t *m,
+                                         uint32_t region,
+                                         uint32_t object,
+                                         uint32_t source,
+                                         uint32_t target,
+                                         uint32_t record_offset,
+                                         uint32_t left,
+                                         uint32_t top,
+                                         uint32_t width,
+                                         uint32_t height,
+                                         uint32_t source_stride) {
+    for (uint32_t off = 0u; off < 0x500u; off += 4u)
+        test_gpu_write32(m, object + off, 0u);
+
+    static const uint32_t background[26] = {
+        0xe0000000u, 0xa7718000u, 0u, 0xd6887610u,
+        0x22220e80u, 0u, 0u, 0x45000000u,
+        0u, 0u, 0x45000000u, 0x3f800000u,
+        0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+        0x3f800000u, 0u, 0u, 0u,
+        0u, 0x40000000u, 0u, 0u,
+        0u, 0x40000000u,
+    };
+    for (unsigned i = 0; i < 26u; i++) {
+        uint32_t value = i == 2u
+            ? 0x0e500000u | (target >> 7) : background[i];
+        test_gpu_write32(m, object + i * 4u, value);
+    }
+
+    uint32_t list = object + 0x68u;
+    test_gpu_write32(m, list, 0x60200020u);
+    test_gpu_write32(m, list + 4u, 0x6020002du);
+    test_gpu_write32(m, list + 8u,
+                     0x61200000u | (record_offset / 4u));
+    test_gpu_write32(m, list + 12u, 0xf0000000u);
+
+    static const struct {
+        uint16_t off;
+        uint32_t value;
+    } boundary_fixed[] = {
+        {0x080u, 0x22206f80u}, {0x088u, 0x45800000u},
+        {0x094u, 0x45800000u}, {0x098u, 0x45800000u},
+        {0x09cu, 0x45800000u}, {0x0b4u, 0x22207f80u},
+    };
+    for (unsigned i = 0;
+         i < sizeof boundary_fixed / sizeof boundary_fixed[0]; i++)
+        test_gpu_write32(m, object + boundary_fixed[i].off,
+                         boundary_fixed[i].value);
+    const uint32_t boundary[8] = {
+        left, top + height, left, top,
+        left + width, top + height, left + width, top,
+    };
+    for (unsigned i = 0; i < 8u; i++)
+        test_gpu_write32(m, object + 0x0b8u + i * 4u,
+                         test_float_word((float)boundary[i]));
+
+    uint32_t pitch_pixels = source_stride / 4u;
+    uint32_t texture_width = 8u, width_field = 0u;
+    while (texture_width < pitch_pixels) {
+        texture_width <<= 1;
+        width_field++;
+    }
+    uint32_t texture_height = 8u, height_field = 0u;
+    while (texture_height < height) {
+        texture_height <<= 1;
+        height_field++;
+    }
+    uint32_t pitch_units = source_stride / 16u;
+    uint32_t header = 0xa0018000u |
+        (width_field << 24) | (height_field << 20) |
+        ((pitch_units & 2u) >> 1);
+    uint32_t source_word = 0x8e000000u |
+        ((pitch_units & ~3u) << 16) | (source >> 7);
+    const float x0 = (float)left;
+    const float y0 = (float)top;
+    const float x1 = (float)(left + width);
+    const float y1 = (float)(top + height);
+    const float vertices[8] = {
+        x0, y0, x1, y0, x0, y1, x1, y1,
+    };
+    const float u0 = 0.0f, v0 = 0.0f;
+    const float u1 = ((float)width - 0.5f) / (float)texture_width;
+    const float v1 = ((float)height - 0.5f) / (float)texture_height;
+    const float uv[8] = {
+        u0, v0, u1, v0, u0, v1, u1, v1,
+    };
+    uint32_t record[33] = {
+        [0] = 0xe0000000u,
+        [1] = header,
+        [2] = source_word,
+        [3] = 0xa6887610u,
+        [4] = 0x22220e80u,
+        [17] = 0x3f800000u,
+        [18] = 0x3f800000u,
+        [19] = 0x3f800000u,
+        [20] = 0x3f800000u,
+    };
+    for (unsigned i = 0; i < 8u; i++)
+        record[5u + i] = test_float_word(vertices[i]);
+    for (unsigned vertex = 0; vertex < 4u; vertex++) {
+        unsigned attribute = 21u + vertex * 3u;
+        record[attribute] = 0xff000000u;
+        record[attribute + 1u] = test_float_word(uv[vertex * 2u]);
+        record[attribute + 2u] = test_float_word(uv[vertex * 2u + 1u]);
+    }
+    for (unsigned i = 0; i < 33u; i++)
+        test_gpu_write32(m, object + record_offset + i * 4u, record[i]);
+
+    const float lower_bias = 0.468505859375f;
+    const float upper_bias = 0.531494140625f;
+    uint32_t guard_left = (uint32_t)(x0 + lower_bias);
+    uint32_t guard_top = (uint32_t)(y0 + lower_bias);
+    uint32_t guard_right = (uint32_t)(x1 + upper_bias);
+    uint32_t guard_bottom = (uint32_t)(y1 + upper_bias);
+    uint32_t clip_left = guard_left & ~7u;
+    uint32_t clip_right = (guard_right + 7u) & ~7u;
+    uint32_t clip_top = guard_top & ~15u;
+    uint32_t clip_bottom = (guard_bottom + 15u) & ~15u;
+    uint32_t tile_x0 = clip_left / 8u;
+    uint32_t tile_x1 = clip_right / 8u - 1u;
+    uint32_t tile_y0 = clip_top / 16u;
+    uint32_t tile_y1 = clip_bottom / 16u - 1u;
+    uint32_t tile_count = (tile_x1 - tile_x0 + 1u) *
+                          (tile_y1 - tile_y0 + 1u);
+    uint32_t tile_index = 0u;
+    for (uint32_t y = tile_y0; y <= tile_y1; y++) {
+        for (uint32_t x = tile_x0; x <= tile_x1; x++) {
+            uint32_t code = (y << 8) | x;
+            if (tile_index + 1u == tile_count) code |= 0x80000000u;
+            test_gpu_write32(m, region + tile_index * 8u, code);
+            test_gpu_write32(m, region + tile_index * 8u + 4u, list);
+            tile_index++;
+        }
+    }
+
+    m->bus.write32(m->bus.ctx, MBX_BASE + REG_RGNBASE, region);
+    m->bus.write32(m->bus.ctx, MBX_BASE + REG_OBJBASE, object);
+    m->bus.write32(m->bus.ctx, MBX_BASE + REG_PIXSAMP, 0x00020007u);
+    m->bus.write32(m->bus.ctx, MBX_BASE + REG_FBCTL, 6u);
+    m->bus.write32(m->bus.ctx, MBX_BASE + REG_FBXCLIP,
+                   (clip_right << 16) | clip_left);
+    m->bus.write32(m->bus.ctx, MBX_BASE + REG_FBYCLIP,
+                   (clip_bottom << 16) | clip_top);
+    m->bus.write32(m->bus.ctx, MBX_BASE + REG_FBSTART, target);
+    m->bus.write32(m->bus.ctx, MBX_BASE + REG_FBSTRIDE, 320u);
+}
+
+static void test_compact_opaque_blit_copy(void) {
+    enum {
+        LEFT = 8u, TOP = 16u, WIDTH = 16u, HEIGHT = 8u,
+        SOURCE_STRIDE = 0x40u, TARGET_STRIDE = 0x500u,
+    };
+    const uint32_t table0 = 0x08003000u;
+    const uint32_t table2 = 0x08004000u;
+    const uint32_t table3 = 0x08005000u;
+    const uint32_t region = 0x00001000u;
+    const uint32_t object = 0x00014000u;
+    const uint32_t source = 0x00b72000u;
+    const uint32_t target = 0x00c98000u;
+    const uint32_t region_pa = 0x08010000u;
+    const uint32_t object_pa = 0x08014000u;
+    const uint32_t source_pa = 0x08020000u;
+    const uint32_t target_pa = 0x080c0000u;
+
+    s5l8900_t m;
+    CHECK(s5l8900_init(&m, RAM_BASE, RAM_SIZE),
+          "compact blit-copy machine init failed");
+    if (!m.ram) return;
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_GART0, table0);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_GART2, table2);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_GART3, table3);
+    test_map_gpu_page(&m, table0, region, region_pa);
+    test_map_gpu_page(&m, table0, object, object_pa);
+    test_map_gpu_page(&m, table2, source, source_pa);
+    uint32_t target_last = target +
+        (TOP + HEIGHT - 1u) * TARGET_STRIDE + (LEFT + WIDTH) * 4u - 1u;
+    for (uint32_t page = target; page <= (target_last & ~0xfffu);
+         page += 0x1000u)
+        test_map_gpu_page(&m, table3, page, target_pa + (page - target));
+
+    test_write_compact_blit_copy(&m, region, object, source, target,
+                                 0x0e8u, LEFT, TOP, WIDTH, HEIGHT,
+                                 SOURCE_STRIDE);
+    for (uint32_t y = 0; y < HEIGHT; y++)
+        for (uint32_t x = 0; x < WIDTH; x++)
+            test_gpu_write32(&m, source + y * SOURCE_STRIDE + x * 4u,
+                             test_sprite_source_pixel(x, y));
+    for (uint32_t y = 0; y < HEIGHT; y++)
+        for (uint32_t x = 0; x < WIDTH; x++)
+            test_gpu_write32(&m,
+                target + (TOP + y) * TARGET_STRIDE + (LEFT + x) * 4u,
+                0xff102030u);
+    uint32_t before = target + TOP * TARGET_STRIDE + (LEFT - 1u) * 4u;
+    uint32_t after = target + (TOP + HEIGHT) * TARGET_STRIDE + LEFT * 4u;
+    test_gpu_write32(&m, before, 0x11223344u);
+    test_gpu_write32(&m, after, 0x55667788u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
+    uint32_t mismatches = 0u;
+    for (uint32_t y = 0; y < HEIGHT; y++) {
+        struct test_bilinear_axis y_axis;
+        bool y_ok = test_bilinear_axis(
+            (float)TOP, (float)HEIGHT, 0.0f, (float)HEIGHT - 0.5f,
+            TOP + y, HEIGHT, &y_axis);
+        for (uint32_t x = 0; x < WIDTH; x++) {
+            struct test_bilinear_axis x_axis;
+            bool x_ok = test_bilinear_axis(
+                (float)LEFT, (float)WIDTH, 0.0f, (float)WIDTH - 0.5f,
+                LEFT + x, WIDTH, &x_axis);
+            uint32_t expected = x_ok && y_ok
+                ? test_bilinear_sprite_pixel(&x_axis, &y_axis) : 0u;
+            uint32_t actual = test_gpu_read32(&m,
+                target + (TOP + y) * TARGET_STRIDE + (LEFT + x) * 4u);
+            mismatches += !x_ok || !y_ok || actual != expected;
+        }
+    }
+    CHECK(mismatches == 0u,
+          "compact filtered blit-copy mismatched %u pixels", mismatches);
+    CHECK(test_gpu_read32(&m, before) == 0x11223344u &&
+          test_gpu_read32(&m, after) == 0x55667788u,
+          "compact blit-copy changed a pixel outside its rectangle");
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0x4cu,
+          "compact blit-copy did not raise all three completion events");
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x4cu);
+
+    /* Relocating the selected record and copying a transparent,
+     * non-premultiplied word prove this is pointer/opaque-copy semantics,
+     * not a literal +0xe8 packet or an accidental source-over path. */
+    test_write_compact_blit_copy(&m, region, object, source, target,
+                                 0x300u, LEFT, TOP, WIDTH, HEIGHT,
+                                 SOURCE_STRIDE);
+    for (uint32_t y = 0; y < HEIGHT; y++)
+        for (uint32_t x = 0; x < WIDTH; x++) {
+            test_gpu_write32(&m, source + y * SOURCE_STRIDE + x * 4u,
+                             0x00112233u);
+            test_gpu_write32(&m,
+                target + (TOP + y) * TARGET_STRIDE + (LEFT + x) * 4u,
+                0xffaabbccu);
+        }
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
+    mismatches = 0u;
+    for (uint32_t y = 0; y < HEIGHT; y++)
+        for (uint32_t x = 0; x < WIDTH; x++)
+            mismatches += test_gpu_read32(&m,
+                target + (TOP + y) * TARGET_STRIDE + (LEFT + x) * 4u) !=
+                    0x00112233u;
+    CHECK(mismatches == 0u,
+          "relocated compact opaque copy mismatched %u pixels", mismatches);
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0x4cu,
+          "relocated compact blit-copy did not complete");
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x4cu);
+
+    uint32_t first = target + TOP * TARGET_STRIDE + LEFT * 4u;
+    uint32_t last = target + (TOP + HEIGHT - 1u) * TARGET_STRIDE +
+                    (LEFT + WIDTH - 1u) * 4u;
+    uint32_t sampler = object + 0x300u + 3u * 4u;
+    uint32_t sampler_value = test_gpu_read32(&m, sampler);
+    test_gpu_write32(&m, first, 0x89abcdefu);
+    test_gpu_write32(&m, sampler, sampler_value ^ 1u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
+    CHECK(test_gpu_read32(&m, first) == 0x89abcdefu &&
+          m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
+          "unknown compact sampler was not rejected atomically");
+    test_gpu_write32(&m, sampler, sampler_value);
+
+    uint32_t second_u = object + 0x300u + 25u * 4u;
+    uint32_t second_u_value = test_gpu_read32(&m, second_u);
+    test_gpu_write32(&m, first, 0x89abcdefu);
+    test_gpu_write32(&m, second_u, second_u_value ^ 1u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
+    CHECK(test_gpu_read32(&m, first) == 0x89abcdefu &&
+          m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
+          "inconsistent compact UV was not rejected atomically");
+    test_gpu_write32(&m, second_u, second_u_value);
+
+    uint32_t boundary_setup = object + 0x84u;
+    test_gpu_write32(&m, first, 0x89abcdefu);
+    test_gpu_write32(&m, boundary_setup, 1u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
+    CHECK(test_gpu_read32(&m, first) == 0x89abcdefu &&
+          m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
+          "unknown compact boundary setup was not rejected atomically");
+    test_gpu_write32(&m, boundary_setup, 0u);
+
+    uint32_t region_word = test_gpu_read32(&m, region);
+    test_gpu_write32(&m, first, 0x89abcdefu);
+    test_gpu_write32(&m, region, region_word ^ 1u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
+    CHECK(test_gpu_read32(&m, first) == 0x89abcdefu &&
+          m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
+          "inconsistent compact tile was not rejected atomically");
+    test_gpu_write32(&m, region, region_word);
+
+    uint32_t source_pte_address = table2 +
+        (((source >> 12) & 0x3ffu) * 4u);
+    uint32_t source_pte = m.bus.read32(m.bus.ctx, source_pte_address);
+    test_gpu_write32(&m, first, 0x89abcdefu);
+    test_gpu_write32(&m, last, 0x76543210u);
+    m.bus.write32(m.bus.ctx, source_pte_address, 0u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
+    m.bus.write32(m.bus.ctx, source_pte_address, source_pte);
+    CHECK(test_gpu_read32(&m, first) == 0x89abcdefu &&
+          test_gpu_read32(&m, last) == 0x76543210u &&
+          m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
+          "missing compact source PTE partially committed or completed");
+
+    uint32_t last_page = last & ~0xfffu;
+    uint32_t target_pte_address = table3 +
+        (((last_page >> 12) & 0x3ffu) * 4u);
+    uint32_t target_pte = m.bus.read32(m.bus.ctx, target_pte_address);
+    test_gpu_write32(&m, first, 0x89abcdefu);
+    test_gpu_write32(&m, last, 0x76543210u);
+    m.bus.write32(m.bus.ctx, target_pte_address, 0u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
+    m.bus.write32(m.bus.ctx, target_pte_address, target_pte);
+    CHECK(test_gpu_read32(&m, first) == 0x89abcdefu &&
+          test_gpu_read32(&m, last) == 0x76543210u &&
+          m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
+          "late missing compact target PTE partially committed or completed");
 
     s5l8900_free(&m);
 }
@@ -1535,6 +1847,8 @@ static void test_pointer_selected_solid_quad(void) {
     test_write_solid_quad(&m, region, object, target, 0x2a0u,
                           159.0f, 239.0f, 161.0f, 241.0f,
                           0x00000000u);
+    for (uint32_t off = 0x0e8u; off < 0x1f0u; off += 4u)
+        test_gpu_write32(&m, object + off, 0xa5000000u ^ off);
     for (unsigned i = 0; i < 44u; i++)
         test_gpu_write32(&m, object + 0x1f0u + i * 4u,
                          0xdead0000u + i);
@@ -1830,6 +2144,11 @@ static void test_captured_status_form(const struct mbx_test_status_form *form) {
         if (i == 5u) value = 0x0e500000u | (target >> 7);
         test_gpu_write32(&m, object + 0x1f0u + i * 4u, value);
     }
+    /* Only the +0x80, +0xb4 and pointer-selected +0x1f0 records are in the
+     * list. Poison the intervening stale storage so a decoder cannot quietly
+     * turn a historical allocation pattern back into a packet requirement. */
+    for (uint32_t off = 0x0e8u; off < 0x1f0u; off += 4u)
+        test_gpu_write32(&m, object + off, 0x5a000000u ^ off);
 
     uint64_t pixel_count = (uint64_t)form->width * form->height;
     CHECK(pixel_count <= MAX_PIXELS, "%s fixture rectangle is too large",
@@ -3315,6 +3634,7 @@ int main(void) {
     test_ordered_atomic_2d_batches();
     test_first_tiled_premultiplied_over();
     test_second_tiled_status_glyph();
+    test_compact_opaque_blit_copy();
     test_pointer_selected_solid_quad();
     test_later_tiled_status_sprites();
     printf("\n%d passed, %d failed\n", g_pass, g_fail);

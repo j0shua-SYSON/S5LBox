@@ -1218,13 +1218,6 @@ static uint32_t mbx_3d_boundary_fixed_expected(uint32_t off) {
         {0x080u, 0x22206f80u}, {0x088u, 0x45800000u},
         {0x094u, 0x45800000u}, {0x098u, 0x45800000u},
         {0x09cu, 0x45800000u}, {0x0b4u, 0x22207f80u},
-        {0x0e8u, 0xe0000000u}, {0x0f4u, 0xa6887610u},
-        {0x0f8u, 0x22220e80u}, {0x12cu, 0x3f800000u},
-        {0x130u, 0x3f800000u}, {0x134u, 0x3f800000u},
-        {0x138u, 0x3f800000u}, {0x198u, 0xe0000000u},
-        {0x19cu, 0x22200e80u}, {0x1d0u, 0x3f800000u},
-        {0x1d4u, 0x3f800000u}, {0x1d8u, 0x3f800000u},
-        {0x1dcu, 0x3f800000u},
     };
     for (unsigned i = 0; i < sizeof nonzero / sizeof nonzero[0]; i++)
         if (nonzero[i].off == off) return nonzero[i].value;
@@ -1319,10 +1312,10 @@ static bool mbx_execute_first_tiled_over(s5l_mbx_t *m,
         }
     }
 
-    /* The first two list entries are the rectangle's fixed boundary objects.
-     * Check every word, including the measured zero padding, before accepting
-     * the final textured quad. */
-    for (uint32_t off = 0x80u; off < 0x1f0u; off += 4u) {
+    /* The first two list entries are consecutive 13-word boundary objects at
+     * +0x80 and +0xb4. Bytes from +0xe8 to the pointer-selected third object
+     * are not referenced and may retain an older command. */
+    for (uint32_t off = 0x80u; off < 0x0e8u; off += 4u) {
         uint32_t value;
         if (!mbx_gart_u32(m, bus, object + off, &value, why)) return false;
         if (value != mbx_3d_background_boundary_expected(form, off)) {
@@ -1913,7 +1906,7 @@ static bool mbx_execute_status_sprite(s5l_mbx_t *m,
         }
     }
 
-    for (uint32_t off = 0x80u; off < 0x1f0u; off += 4u) {
+    for (uint32_t off = 0x80u; off < 0x0e8u; off += 4u) {
         uint32_t value;
         if (!mbx_gart_u32(m, bus, object + off, &value, why)) return false;
         if (value != mbx_3d_status_boundary_expected(form, off)) {
@@ -2338,7 +2331,7 @@ static bool mbx_execute_solid_quad(s5l_mbx_t *m,
         }
     }
 
-    for (uint32_t off = 0x80u; off < 0x1f0u; off += 4u) {
+    for (uint32_t off = 0x80u; off < 0x0e8u; off += 4u) {
         uint32_t value;
         if (!mbx_gart_u32(m, bus, object + off, &value, why)) return false;
         uint32_t expected = mbx_3d_boundary_fixed_expected(off);
@@ -2421,6 +2414,13 @@ static bool mbx_execute_solid_quad(s5l_mbx_t *m,
     return ok;
 }
 
+/* MBX2D has two related textured producers. _mbx3DCtxQuadCopyPerspective
+ * emits the measured 44-word source-over record selected by 0x61a. The
+ * shipped _mbx3DCtxBlitCopy fast path emits a compact 33-word opaque-copy
+ * record selected by 0x612: it omits the blend-surface state and the four
+ * redundant normalized-destination pairs, but retains independently encoded
+ * geometry, UVs, texture allocation, boundary, clip and tiles. Decode both
+ * through one sampler so their filtering and guard rules cannot drift. */
 static bool mbx_execute_textured_sprite(s5l_mbx_t *m,
                                         const arm_bus_t *bus,
                                         const char **why,
@@ -2429,7 +2429,7 @@ static bool mbx_execute_textured_sprite(s5l_mbx_t *m,
     uint32_t object = m->reg[S5L_MBX_OBJBASE / 4u];
     uint32_t target = m->reg[S5L_MBX_FBSTART / 4u];
     if ((region & 3u) || (object & 3u) || (target & 3u) ||
-        object > UINT32_MAX - 0x2a0u) {
+        object > UINT32_MAX - 0x0e8u) {
         if (why) *why = "sprite region, object, or framebuffer base is invalid";
         return false;
     }
@@ -2442,16 +2442,19 @@ static bool mbx_execute_textured_sprite(s5l_mbx_t *m,
     }
 
     uint32_t list = object + 0x68u;
-    static const uint32_t list_words[4] = {
-        0x60200020u, 0x6020002du, 0x61a0007cu, 0xf0000000u
-    };
-    for (unsigned i = 0; i < 4u; i++) {
-        uint32_t value;
-        if (!mbx_gart_u32(m, bus, list + i * 4u, &value, why)) return false;
-        if (value != list_words[i]) {
-            if (why) *why = "sprite list is not the measured three-object list";
+    uint32_t list_words[4];
+    for (unsigned i = 0; i < 4u; i++)
+        if (!mbx_gart_u32(m, bus, list + i * 4u, &list_words[i], why))
             return false;
-        }
+    bool perspective_copy = list_words[2] == 0x61a0007cu;
+    bool compact_copy =
+        (list_words[2] & 0xfff00000u) == 0x61200000u;
+    if (list_words[0] != 0x60200020u ||
+        list_words[1] != 0x6020002du ||
+        (!perspective_copy && !compact_copy) ||
+        list_words[3] != 0xf0000000u) {
+        if (why) *why = "sprite list is not a supported three-object pointer form";
+        return false;
     }
 
     static const uint32_t background[26] = {
@@ -2478,26 +2481,60 @@ static bool mbx_execute_textured_sprite(s5l_mbx_t *m,
         }
     }
 
-    uint32_t quad[44];
-    for (unsigned i = 0; i < 44u; i++)
-        if (!mbx_gart_u32(m, bus, object + 0x1f0u + i * 4u,
-                          &quad[i], why))
+    uint32_t quad[44] = {0};
+    if (perspective_copy) {
+        if (object > UINT32_MAX - 0x2a0u) {
+            if (why) *why = "perspective sprite object span overflows";
             return false;
-    bool direct_sampler = quad[3] == 0xa6884710u &&
-                          quad[6] == 0xae504ea0u;
+        }
+        for (unsigned i = 0; i < 44u; i++)
+            if (!mbx_gart_u32(m, bus, object + 0x1f0u + i * 4u,
+                              &quad[i], why))
+                return false;
+    } else {
+        uint64_t compact64 = (uint64_t)object +
+            (uint64_t)(list_words[2] & 0x000fffffu) * 4u;
+        if (compact64 < (uint64_t)object + 0x0e8u ||
+            compact64 + 33u * 4u > (uint64_t)UINT32_MAX + 1u) {
+            if (why) *why = "compact-copy object pointer is outside its safe span";
+            return false;
+        }
+        uint32_t compact = (uint32_t)compact64;
+        uint32_t record[33];
+        for (unsigned i = 0; i < 33u; i++)
+            if (!mbx_gart_u32(m, bus, compact + i * 4u,
+                              &record[i], why))
+                return false;
+        for (unsigned i = 0; i < 4u; i++) quad[i] = record[i];
+        quad[7] = record[4];
+        for (unsigned i = 0; i < 16u; i++)
+            quad[8u + i] = record[5u + i];
+        for (unsigned vertex = 0; vertex < 4u; vertex++) {
+            unsigned compact_attribute = 21u + vertex * 3u;
+            unsigned quad_attribute = 24u + vertex * 5u;
+            quad[quad_attribute] = record[compact_attribute];
+            quad[quad_attribute + 1u] = record[compact_attribute + 1u];
+            quad[quad_attribute + 2u] = record[compact_attribute + 2u];
+        }
+    }
+    bool direct_sampler = compact_copy
+        ? quad[3] == 0xa6887610u
+        : quad[3] == 0xa6884710u && quad[6] == 0xae504ea0u;
     bool modulated_sampler = quad[3] == 0xcd206c40u &&
                              quad[6] == 0xae504ea0u;
     bool scaled_sampler = quad[3] == 0xd6887610u &&
                           quad[6] == 0xa3104620u;
     if (quad[0] != 0xe0000000u ||
         (!direct_sampler && !modulated_sampler && !scaled_sampler) ||
-        quad[4] != 0xa7718000u ||
-        quad[7] != 0x22250e80u) {
-        if (why) *why = "sprite quad setup is not the measured BGRA8 source-over form";
+        (compact_copy
+            ? quad[7] != 0x22220e80u
+            : quad[4] != 0xa7718000u || quad[7] != 0x22250e80u)) {
+        if (why) *why = "sprite quad setup is not a measured BGRA8 copy form";
         return false;
     }
-    if ((quad[5] & ~MBX_3D_ADDRESS_MASK) != 0x0e500000u ||
-        mbx_3d_decode_address(quad[5]) != target) {
+    if (!compact_copy &&
+        ((quad[5] & ~MBX_3D_ADDRESS_MASK) != 0x0e500000u ||
+         mbx_3d_decode_address(quad[5]) != target)) {
         if (why) *why = "sprite blend surface differs from FBSTART";
         return false;
     }
@@ -2557,6 +2594,10 @@ static bool mbx_execute_textured_sprite(s5l_mbx_t *m,
     float x1 = destination_x[p11], y1 = destination_y[p11];
     struct mbx_affine_transform affine = {0};
     bool affine_sprite = !axis_aligned;
+    if (compact_copy && affine_sprite) {
+        if (why) *why = "compact blit-copy destination is not axis-aligned";
+        return false;
+    }
     if (axis_aligned) {
         if (x0 >= x1 || y0 >= y1) {
             if (why) *why = "sprite destination coordinates are invalid";
@@ -2619,7 +2660,7 @@ static bool mbx_execute_textured_sprite(s5l_mbx_t *m,
     static const unsigned normalized_words[8] = {
         27u, 28u, 32u, 33u, 37u, 38u, 42u, 43u
     };
-    for (unsigned i = 0; i < 8u; i++) {
+    for (unsigned i = 0; !compact_copy && i < 8u; i++) {
         float coordinate;
         if (!mbx_3d_word_to_finite_float(
                 quad[destination_words[i]], &coordinate) ||
@@ -2838,7 +2879,7 @@ static bool mbx_execute_textured_sprite(s5l_mbx_t *m,
     uint32_t natural_bottom = (uint32_t)bounded_y1 +
         ((float)(uint32_t)bounded_y1 != bounded_y1);
     uint32_t boundary[8] = {0};
-    for (uint32_t off = 0x80u; off < 0x1f0u; off += 4u) {
+    for (uint32_t off = 0x80u; off < 0x0e8u; off += 4u) {
         uint32_t value;
         if (!mbx_gart_u32(m, bus, object + off, &value, why)) return false;
         if (off >= 0x0b8u && off <= 0x0d4u) {
@@ -3167,7 +3208,7 @@ static bool mbx_execute_textured_sprite(s5l_mbx_t *m,
         ok = mbx_gart_read(m, bus, dst, pixels + row * row_bytes,
                            row_bytes, why);
     }
-    for (uint32_t i = 0; i < source_total && ok; i += 4u) {
+    for (uint32_t i = 0; !compact_copy && i < source_total && ok; i += 4u) {
         uint32_t src = mbx_load_le32(source_pixels + i);
         uint32_t alpha = src >> 24;
         if ((src & 0xffu) > alpha || ((src >> 8) & 0xffu) > alpha ||
@@ -3240,14 +3281,18 @@ static bool mbx_execute_textured_sprite(s5l_mbx_t *m,
                 src = mbx_load_le32(source_pixels + y * source_row_bytes +
                                     x * 4u);
             }
-            src = mbx_modulate_vertex_alpha(src, vertex_alpha_word >> 24);
             uint32_t pixel_offset = y * row_bytes + x * 4u;
-            uint32_t blended = mbx_premultiplied_over(
-                mbx_load_le32(pixels + pixel_offset), src);
-            pixels[pixel_offset] = (uint8_t)blended;
-            pixels[pixel_offset + 1u] = (uint8_t)(blended >> 8);
-            pixels[pixel_offset + 2u] = (uint8_t)(blended >> 16);
-            pixels[pixel_offset + 3u] = (uint8_t)(blended >> 24);
+            uint32_t output = src;
+            if (!compact_copy) {
+                src = mbx_modulate_vertex_alpha(
+                    src, vertex_alpha_word >> 24);
+                output = mbx_premultiplied_over(
+                    mbx_load_le32(pixels + pixel_offset), src);
+            }
+            pixels[pixel_offset] = (uint8_t)output;
+            pixels[pixel_offset + 1u] = (uint8_t)(output >> 8);
+            pixels[pixel_offset + 2u] = (uint8_t)(output >> 16);
+            pixels[pixel_offset + 3u] = (uint8_t)(output >> 24);
         }
     }
     if (ok && affine_sprite && !affine_rendered_pixels) {
