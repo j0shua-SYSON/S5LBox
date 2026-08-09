@@ -1751,6 +1751,37 @@ static void active_clock_counter_add(uint64_t *counter, uint64_t value) {
 }
 
 /*
+ * Convert host nanoseconds plus the carried billionth-of-a-tick fraction into
+ * whole guest CPU ticks without multiplying the potentially unbounded whole
+ * interval by cpu_hz.  false means the whole-tick result cannot fit uint64_t;
+ * callers can still apply their bounded catch-up policy without trusting a
+ * wrapped value.
+ */
+static bool active_clock_elapsed_ticks(uint64_t elapsed_ns, uint32_t cpu_hz,
+                                       uint64_t fraction,
+                                       uint64_t *whole_ticks,
+                                       uint64_t *next_fraction) {
+    const uint64_t billion = UINT64_C(1000000000);
+    uint64_t seconds = elapsed_ns / billion;
+    uint64_t sub_ns = elapsed_ns % billion;
+
+    if (!cpu_hz || !whole_ticks || !next_fraction || fraction >= billion ||
+        seconds > UINT64_MAX / cpu_hz)
+        return false;
+
+    uint64_t whole = seconds * cpu_hz;
+    /* sub_ns < 1e9 and cpu_hz is uint32_t, so this product plus fraction is
+     * below 4.3e18 and cannot overflow uint64_t. */
+    uint64_t scaled_sub = sub_ns * cpu_hz + fraction;
+    uint64_t carry = scaled_sub / billion;
+    if (whole > UINT64_MAX - carry) return false;
+
+    *whole_ticks = whole + carry;
+    *next_fraction = scaled_sub % billion;
+    return true;
+}
+
+/*
  * Synchronize active guest time to one monotonic host sample. `fallback_ticks`
  * are the successfully retired instructions not yet represented in guest
  * time. If the host clock cannot provide a trustworthy sample, those ticks
@@ -1786,21 +1817,38 @@ static bool active_host_clock_sync(s5l8900_t *m,
 
     uint64_t elapsed_ns = now_ns - m->active_clock_last_host_ns;
     m->active_clock_last_host_ns = now_ns;
-    if (elapsed_ns > S5L8900_ACTIVE_CLOCK_MAX_STEP_NS) {
-        elapsed_ns = S5L8900_ACTIVE_CLOCK_MAX_STEP_NS;
+    uint64_t prior_fraction = m->active_clock_fraction;
+    uint64_t observed_ticks = m->active_clock_guest_ticks_since_sync;
+    uint64_t due_ticks = 0u, due_fraction = 0u;
+    uint64_t max_added_ticks = 0u, max_fraction = 0u;
+    bool converted = active_clock_elapsed_ticks(
+        elapsed_ns, m->cpu_hz, prior_fraction, &due_ticks, &due_fraction);
+    /* This conversion is guaranteed to fit: the interval is 8 ms and the
+     * frequency is uint32_t. Keeping it in the same helper pins the fraction
+     * semantics to the ordinary, unclamped path. */
+    bool max_converted = active_clock_elapsed_ticks(
+        S5L8900_ACTIVE_CLOCK_MAX_STEP_NS, m->cpu_hz, prior_fraction,
+        &max_added_ticks, &max_fraction);
+    uint64_t added_ticks = 0u;
+    bool clamp = !converted || !max_converted;
+
+    if (!clamp && due_ticks > observed_ticks) {
+        added_ticks = due_ticks - observed_ticks;
+        /* Cap only host time that the guest has not already advanced. Paced
+         * WFI ticks are observed above; clipping the raw host interval before
+         * subtracting them discarded normal scheduler oversleep every slice
+         * and made idle guest time fall progressively behind wall time. */
+        clamp = added_ticks > max_added_ticks ||
+                (added_ticks == max_added_ticks &&
+                 due_fraction > max_fraction);
+    }
+    if (clamp) {
+        added_ticks = max_added_ticks;
+        due_fraction = max_fraction;
         active_clock_counter_add(&m->active_clock_clamps, 1u);
     }
+    m->active_clock_fraction = due_fraction;
 
-    /* The elapsed interval is capped at 8 ms and cpu_hz is uint32_t, so this
-     * product is far below UINT64_MAX. The remainder is measured in billionths
-     * of a CPU tick and preserves sub-tick host samples without drift. */
-    uint64_t scaled = elapsed_ns * m->cpu_hz + m->active_clock_fraction;
-    uint64_t due_ticks = scaled / UINT64_C(1000000000);
-    m->active_clock_fraction = scaled % UINT64_C(1000000000);
-
-    uint64_t observed_ticks = m->active_clock_guest_ticks_since_sync;
-    uint64_t added_ticks = due_ticks > observed_ticks
-                         ? due_ticks - observed_ticks : 0u;
     active_clock_counter_add(&m->active_clock_updates, 1u);
     active_clock_counter_add(&m->active_clock_added_ticks, added_ticks);
 

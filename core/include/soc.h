@@ -3595,10 +3595,11 @@ typedef bool (*s5l_active_host_now_fn)(void *ctx, uint64_t *nanoseconds);
  * them so a frontend can drain input, stop requests and scanout. */
 #define S5L8900_WFI_PACE_SLICE_NS UINT64_C(8000000)
 
-/* Do not inject a suspend, debugger stop or starved frontend interval into the
- * guest in one burst.  During uninterrupted execution the clock is sampled at
- * least once per bounded retirement group, so ordinary intervals are much
- * smaller than this ceiling. */
+/* Do not inject more than this much host time that has not already been
+ * advanced by the guest. Paced WFI time is subtracted before applying the
+ * ceiling, so ordinary host sleep overshoot is preserved while a suspend,
+ * debugger stop or starved frontend interval still cannot arrive in one
+ * burst. During active execution the clock is sampled much more frequently. */
 #define S5L8900_ACTIVE_CLOCK_MAX_STEP_NS UINT64_C(8000000)
 /* Keep engine/interpreter retirement groups small for input and MMIO checks,
  * but do not turn every such boundary into an expensive host clock call. At
@@ -3845,9 +3846,9 @@ typedef struct {
      * never be compared with an older host instant.
      *
      * Every s5l8900_tick() while the callback is installed contributes to
-     * guest_ticks_since_sync.  That includes paced WFI intervals, allowing the
-     * active synchronizer to add only a real-time deficit rather than counting
-     * the same host wait twice.
+     * guest_ticks_since_sync. That includes paced WFI intervals, allowing the
+     * active synchronizer to subtract already-modeled time before bounding and
+     * adding only the residual real-time deficit.
      */
     s5l_active_host_now_fn active_host_now;
     void                  *active_host_now_ctx;

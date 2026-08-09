@@ -446,6 +446,7 @@ typedef struct {
     unsigned fail_on_call;
     unsigned sleep_calls;
     uint64_t last_sleep_ns;
+    uint64_t sleep_overshoot_ns;
     bool succeeds;
 } active_clock_probe_t;
 
@@ -466,6 +467,7 @@ static bool active_clock_probe_sleep(void *ctx, uint64_t nanoseconds) {
     probe->sleep_calls++;
     probe->last_sleep_ns = nanoseconds;
     probe->now_ns += nanoseconds;
+    probe->now_ns += probe->sleep_overshoot_ns;
     return true;
 }
 
@@ -576,7 +578,7 @@ static void test_active_host_clock_is_optional_bounded_and_fail_closed(void) {
     s5l8900_free(&active);
 
     /* Failure after a successful anchor is more dangerous than failure at run
-     * entry: 256 instructions are pending. They must all receive their old
+     * entry: all 300 instructions are pending. They must all receive their old
      * exact ticks, and the remainder of this run must stay on that old path. */
     s5l8900_t mid_batch_failure;
     CHECK(s5l8900_init(&mid_batch_failure, 0, 1u << 20),
@@ -639,6 +641,85 @@ static void test_active_host_clock_does_not_double_count_paced_wfi(void) {
           (unsigned long long)m.active_clock_updates,
           (unsigned long long)m.active_clock_guest_ticks_since_sync);
     s5l8900_free(&m);
+}
+
+static void test_active_host_clock_preserves_only_bounded_wfi_oversleep(void) {
+    const uint32_t wfi = 0xee070f90u;
+    arm_status_t st = ARM_OK;
+
+    /* The guest deliberately advances one full 8 ms WFI slice. If the host
+     * actually sleeps for 10 ms, the unmodeled 2 ms is real elapsed time, not
+     * a suspend. It must survive without tripping the 8 ms residual cap. */
+    s5l8900_t ordinary;
+    CHECK(s5l8900_init(&ordinary, 0, 1u << 20),
+          "ordinary WFI oversleep machine init failed");
+    s5l8900_load(&ordinary, 0, &wfi, sizeof wfi);
+    ordinary.cpu_hz = ordinary.tb_hz = 1000u;
+    ordinary.timer.t4_count = ordinary.timer.t4_value = 20u;
+    ordinary.timer.t4_state = TIMER4_STATE_START;
+    ordinary.vic[0].enable = 1u << S5L8900_IRQ_TIMER;
+    ordinary.cpu.cpsr = ARM_MODE_SYS | ARM_CPSR_I | ARM_CPSR_F;
+    active_clock_probe_t ordinary_probe = {
+        .sleep_overshoot_ns = UINT64_C(2000000), .succeeds = true
+    };
+    CHECK(s5l8900_set_active_host_clock(
+              &ordinary, active_clock_probe_now, &ordinary_probe) &&
+          s5l8900_set_wfi_host_pacing(
+              &ordinary, active_clock_probe_sleep, &ordinary_probe),
+          "could not enable ordinary WFI oversleep oracle");
+    unsigned ran = s5l8900_run(&ordinary, 1u, &st);
+    CHECK(st == ARM_OK && ran == 1u &&
+          ordinary_probe.sleep_calls == 1u &&
+          ordinary_probe.last_sleep_ns == UINT64_C(8000000) &&
+          ordinary.timer.ticks == 10u &&
+          ordinary.active_clock_added_ticks == 2u &&
+          ordinary.active_clock_clamps == 0u &&
+          ordinary.active_clock_guest_ticks_since_sync == 0u,
+          "ordinary WFI oversleep was lost or clamped: status=%d ran=%u "
+          "sleeps=%u ns=%llu ticks=%llu added=%llu clamps=%llu pending=%llu",
+          (int)st, ran, ordinary_probe.sleep_calls,
+          (unsigned long long)ordinary_probe.last_sleep_ns,
+          (unsigned long long)ordinary.timer.ticks,
+          (unsigned long long)ordinary.active_clock_added_ticks,
+          (unsigned long long)ordinary.active_clock_clamps,
+          (unsigned long long)ordinary.active_clock_guest_ticks_since_sync);
+    s5l8900_free(&ordinary);
+
+    /* A 100 ms host sleep after the same modeled 8 ms wait leaves 92 ms
+     * unmodeled. That is suspend-like: add one bounded 8 ms residual and
+     * discard the rest rather than delivering a 100 ms guest-time burst. */
+    s5l8900_t suspended;
+    CHECK(s5l8900_init(&suspended, 0, 1u << 20),
+          "suspend-like WFI oversleep machine init failed");
+    s5l8900_load(&suspended, 0, &wfi, sizeof wfi);
+    suspended.cpu_hz = suspended.tb_hz = 1000u;
+    suspended.timer.t4_count = suspended.timer.t4_value = 20u;
+    suspended.timer.t4_state = TIMER4_STATE_START;
+    suspended.vic[0].enable = 1u << S5L8900_IRQ_TIMER;
+    suspended.cpu.cpsr = ARM_MODE_SYS | ARM_CPSR_I | ARM_CPSR_F;
+    active_clock_probe_t suspended_probe = {
+        .sleep_overshoot_ns = UINT64_C(92000000), .succeeds = true
+    };
+    CHECK(s5l8900_set_active_host_clock(
+              &suspended, active_clock_probe_now, &suspended_probe) &&
+          s5l8900_set_wfi_host_pacing(
+              &suspended, active_clock_probe_sleep, &suspended_probe),
+          "could not enable suspend-like WFI oversleep oracle");
+    ran = s5l8900_run(&suspended, 1u, &st);
+    CHECK(st == ARM_OK && ran == 1u &&
+          suspended_probe.sleep_calls == 1u &&
+          suspended.timer.ticks == 16u &&
+          suspended.active_clock_added_ticks == 8u &&
+          suspended.active_clock_clamps == 1u &&
+          suspended.active_clock_guest_ticks_since_sync == 0u,
+          "suspend-like WFI residual escaped its cap: status=%d ran=%u "
+          "sleeps=%u ticks=%llu added=%llu clamps=%llu pending=%llu",
+          (int)st, ran, suspended_probe.sleep_calls,
+          (unsigned long long)suspended.timer.ticks,
+          (unsigned long long)suspended.active_clock_added_ticks,
+          (unsigned long long)suspended.active_clock_clamps,
+          (unsigned long long)suspended.active_clock_guest_ticks_since_sync);
+    s5l8900_free(&suspended);
 }
 
 static void test_active_host_clock_refreshes_devices_without_oversampling(void) {
@@ -5985,6 +6066,7 @@ int main(void) {
     test_wfi_host_pacing_bounds_long_and_failed_waits();
     test_active_host_clock_is_optional_bounded_and_fail_closed();
     test_active_host_clock_does_not_double_count_paced_wfi();
+    test_active_host_clock_preserves_only_bounded_wfi_oversleep();
     test_active_host_clock_refreshes_devices_without_oversampling();
     test_wfi_unmasked_fiq_uses_the_post_mcr_return_link();
     test_wfi_pending_line_completes_without_advancing_time();
