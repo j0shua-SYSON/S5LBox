@@ -18,6 +18,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/stat.h>
 
 #ifdef _WIN32
@@ -37,6 +38,19 @@
 #endif
 
 typedef struct file_block_session file_block_session_t;
+
+#define FILE_BLOCK_READ_CACHE_WAYS UINT32_C(4)
+#define FILE_BLOCK_READ_CACHE_ENTRY_COUNT \
+    (FILE_BLOCK_READ_CACHE_BYTES / FILE_BLOCK_READ_CACHE_LINE_BYTES)
+#define FILE_BLOCK_READ_CACHE_SET_COUNT \
+    (FILE_BLOCK_READ_CACHE_ENTRY_COUNT / FILE_BLOCK_READ_CACHE_WAYS)
+
+typedef struct {
+    uint64_t offset;
+    uint64_t last_use;
+    size_t valid_bytes;
+    bool valid;
+} file_block_read_cache_entry_t;
 
 #ifdef _WIN32
 typedef struct {
@@ -61,6 +75,7 @@ struct file_block {
     file_block_session_t *current;
     file_block_session_t *retired;
     int last_system_error;
+    bool read_cache_enabled;
 };
 
 struct file_block_session {
@@ -73,6 +88,12 @@ struct file_block_session {
     bool active;
     bool sticky_error;
     file_block_identity_t initial_identity;
+    uint8_t *read_cache_data;
+    file_block_read_cache_entry_t
+        read_cache_entries[FILE_BLOCK_READ_CACHE_ENTRY_COUNT];
+    uint64_t read_cache_clock;
+    bool read_cache_enabled;
+    file_block_read_cache_stats_t read_cache_stats;
 };
 
 #ifdef _WIN32
@@ -455,6 +476,187 @@ static vm_block_io_status_t windows_seek(file_block_session_t *session,
 }
 #endif
 
+static void counter_add_u64(uint64_t *counter, uint64_t amount) {
+    if (UINT64_MAX - *counter < amount)
+        *counter = UINT64_MAX;
+    else
+        *counter += amount;
+}
+
+static void read_cache_touch(file_block_session_t *session,
+                             file_block_read_cache_entry_t *entry) {
+    if (session->read_cache_clock != UINT64_MAX)
+        session->read_cache_clock++;
+    entry->last_use = session->read_cache_clock;
+}
+
+static uint8_t *read_cache_entry_data(file_block_session_t *session,
+                                      size_t entry_index) {
+    return session->read_cache_data +
+           entry_index * (size_t)FILE_BLOCK_READ_CACHE_LINE_BYTES;
+}
+
+static void read_cache_invalidate_range(file_block_session_t *session,
+                                        uint64_t offset,
+                                        size_t requested) {
+    uint64_t end = offset + (uint64_t)requested;
+
+    if (!session->read_cache_data || requested == 0u)
+        return;
+    for (size_t i = 0u; i < FILE_BLOCK_READ_CACHE_ENTRY_COUNT; i++) {
+        file_block_read_cache_entry_t *entry =
+            &session->read_cache_entries[i];
+        uint64_t entry_end;
+
+        if (!entry->valid)
+            continue;
+        entry_end = entry->offset + (uint64_t)entry->valid_bytes;
+        if (offset < entry_end && entry->offset < end) {
+            entry->valid = false;
+            counter_add_u64(&session->read_cache_stats.invalidated_lines, 1u);
+        }
+    }
+}
+
+static vm_block_io_status_t host_read_once(file_block_session_t *session,
+                                            uint64_t offset,
+                                            void *destination,
+                                            size_t requested,
+                                            size_t *actual) {
+    int saved_error;
+
+    *actual = 0u;
+#ifdef _WIN32
+    {
+        vm_block_io_status_t seek_status = windows_seek(session, offset);
+        int transferred;
+
+        if (seek_status != VM_BLOCK_IO_OK)
+            return seek_status;
+        errno = 0;
+        counter_add_u64(&session->read_cache_stats.host_reads, 1u);
+        transferred = _read(session->descriptor, destination,
+                            (unsigned int)requested);
+        if (transferred > 0) {
+            *actual = (size_t)transferred;
+            counter_add_u64(&session->read_cache_stats.host_read_bytes,
+                            (uint64_t)*actual);
+            return VM_BLOCK_IO_OK;
+        }
+        if (transferred == 0) {
+            session_remember_error(session, EIO);
+            return VM_BLOCK_IO_ERROR;
+        }
+    }
+#else
+    {
+        ssize_t transferred;
+        off_t position = (off_t)offset;
+
+        errno = 0;
+        counter_add_u64(&session->read_cache_stats.host_reads, 1u);
+        transferred = pread(session->descriptor, destination, requested,
+                            position);
+        if (transferred > 0) {
+            *actual = (size_t)transferred;
+            counter_add_u64(&session->read_cache_stats.host_read_bytes,
+                            (uint64_t)*actual);
+            return VM_BLOCK_IO_OK;
+        }
+        if (transferred == 0) {
+            session_remember_error(session, EIO);
+            return VM_BLOCK_IO_ERROR;
+        }
+    }
+#endif
+
+    saved_error = errno;
+    if (saved_error == EINTR)
+        return VM_BLOCK_IO_RETRY;
+    session_remember_error(session, saved_error);
+    return VM_BLOCK_IO_ERROR;
+}
+
+static vm_block_io_status_t read_cache_read(file_block_session_t *session,
+                                             uint64_t offset,
+                                             void *destination,
+                                             size_t requested,
+                                             size_t *actual) {
+    const uint64_t line_bytes = FILE_BLOCK_READ_CACHE_LINE_BYTES;
+    uint64_t line_offset = offset & ~(line_bytes - 1u);
+    size_t within = (size_t)(offset - line_offset);
+    uint64_t remaining = session->expected_size - line_offset;
+    size_t line_length = remaining < line_bytes
+        ? (size_t)remaining : (size_t)line_bytes;
+    uint64_t line_number = line_offset / line_bytes;
+    size_t set = (size_t)(line_number % FILE_BLOCK_READ_CACHE_SET_COUNT);
+    size_t first = set * FILE_BLOCK_READ_CACHE_WAYS;
+    size_t victim = first;
+    bool found_invalid = false;
+
+    if (requested > line_length - within) {
+        counter_add_u64(&session->read_cache_stats.cache_bypasses, 1u);
+        return host_read_once(session, offset, destination, requested, actual);
+    }
+
+    for (size_t way = 0u; way < FILE_BLOCK_READ_CACHE_WAYS; way++) {
+        size_t index = first + way;
+        file_block_read_cache_entry_t *entry =
+            &session->read_cache_entries[index];
+
+        if (entry->valid && entry->offset == line_offset &&
+            within < entry->valid_bytes) {
+            size_t available = entry->valid_bytes - within;
+            size_t transferred = requested < available ? requested : available;
+
+            memcpy(destination,
+                   read_cache_entry_data(session, index) + within,
+                   transferred);
+            *actual = transferred;
+            read_cache_touch(session, entry);
+            counter_add_u64(&session->read_cache_stats.cache_hits, 1u);
+            counter_add_u64(&session->read_cache_stats.cache_hit_bytes,
+                            (uint64_t)transferred);
+            return VM_BLOCK_IO_OK;
+        }
+        if (!entry->valid && !found_invalid) {
+            victim = index;
+            found_invalid = true;
+        } else if (!found_invalid &&
+                   entry->last_use <
+                       session->read_cache_entries[victim].last_use) {
+            victim = index;
+        }
+    }
+
+    counter_add_u64(&session->read_cache_stats.cache_misses, 1u);
+    file_block_read_cache_entry_t *entry =
+        &session->read_cache_entries[victim];
+    size_t filled = 0u;
+    vm_block_io_status_t status = host_read_once(
+        session, line_offset, read_cache_entry_data(session, victim),
+        line_length, &filled);
+    if (status != VM_BLOCK_IO_OK)
+        return status;
+
+    entry->offset = line_offset;
+    entry->valid_bytes = filled;
+    entry->valid = filled != 0u;
+    read_cache_touch(session, entry);
+    if (filled <= within) {
+        entry->valid = false;
+        counter_add_u64(&session->read_cache_stats.cache_bypasses, 1u);
+        return host_read_once(session, offset, destination, requested, actual);
+    }
+
+    size_t available = filled - within;
+    size_t transferred = requested < available ? requested : available;
+    memcpy(destination, read_cache_entry_data(session, victim) + within,
+           transferred);
+    *actual = transferred;
+    return VM_BLOCK_IO_OK;
+}
+
 static vm_block_io_status_t file_read_at(void *context,
                                          uint64_t offset,
                                          void *destination,
@@ -462,8 +664,6 @@ static vm_block_io_status_t file_read_at(void *context,
                                          size_t *actual) {
     file_block_session_t *session = (file_block_session_t *)context;
     session_validation_t validation;
-    int saved_error;
-
     if (!actual)
         return VM_BLOCK_IO_ERROR;
     *actual = 0;
@@ -481,49 +681,15 @@ static vm_block_io_status_t file_read_at(void *context,
         return VM_BLOCK_IO_RETRY;
     if (validation != SESSION_VALIDATION_OK)
         return VM_BLOCK_IO_ERROR;
-#ifdef _WIN32
-    {
-        vm_block_io_status_t seek_status = windows_seek(session, offset);
-        int transferred;
+    counter_add_u64(&session->read_cache_stats.read_callbacks, 1u);
+    counter_add_u64(&session->read_cache_stats.requested_bytes,
+                    (uint64_t)requested);
+    if (session->read_cache_enabled && session->read_cache_data &&
+        requested <= (size_t)FILE_BLOCK_READ_CACHE_LINE_BYTES)
+        return read_cache_read(session, offset, destination, requested, actual);
 
-        if (seek_status != VM_BLOCK_IO_OK)
-            return seek_status;
-        errno = 0;
-        transferred = _read(session->descriptor, destination,
-                            (unsigned int)requested);
-        if (transferred > 0) {
-            *actual = (size_t)transferred;
-            return VM_BLOCK_IO_OK;
-        }
-        if (transferred == 0) {
-            session_remember_error(session, EIO);
-            return VM_BLOCK_IO_ERROR;
-        }
-    }
-#else
-    {
-        ssize_t transferred;
-        off_t position = (off_t)offset;
-
-        errno = 0;
-        transferred = pread(session->descriptor, destination, requested,
-                            position);
-        if (transferred > 0) {
-            *actual = (size_t)transferred;
-            return VM_BLOCK_IO_OK;
-        }
-        if (transferred == 0) {
-            session_remember_error(session, EIO);
-            return VM_BLOCK_IO_ERROR;
-        }
-    }
-#endif
-
-    saved_error = errno;
-    if (saved_error == EINTR)
-        return VM_BLOCK_IO_RETRY;
-    session_remember_error(session, saved_error);
-    return VM_BLOCK_IO_ERROR;
+    counter_add_u64(&session->read_cache_stats.cache_bypasses, 1u);
+    return host_read_once(session, offset, destination, requested, actual);
 }
 
 static vm_block_io_status_t file_write_at(void *context,
@@ -552,6 +718,10 @@ static vm_block_io_status_t file_write_at(void *context,
         return VM_BLOCK_IO_RETRY;
     if (validation != SESSION_VALIDATION_OK)
         return VM_BLOCK_IO_ERROR;
+    /* Invalidate before the first possible backing-store mutation.  A short
+     * or failed host write can only make this conservative; it can never let
+     * a later read observe bytes cached before a committed partial write. */
+    read_cache_invalidate_range(session, offset, requested);
 #ifdef _WIN32
     {
         vm_block_io_status_t seek_status = windows_seek(session, offset);
@@ -625,6 +795,7 @@ static void initialize_session(file_block_session_t *session,
                                int descriptor,
                                uint64_t expected_size,
                                const file_block_identity_t *identity) {
+    memset(session, 0, sizeof *session);
     session->owner = owner;
     session->next = NULL;
     session->expected_size = expected_size;
@@ -633,6 +804,14 @@ static void initialize_session(file_block_session_t *session,
     session->active = true;
     session->sticky_error = false;
     session->initial_identity = *identity;
+    session->read_cache_enabled = owner->read_cache_enabled;
+    session->read_cache_stats.enabled = owner->read_cache_enabled;
+    if (owner->read_cache_enabled) {
+        session->read_cache_data =
+            (uint8_t *)malloc((size_t)FILE_BLOCK_READ_CACHE_BYTES);
+        session->read_cache_stats.allocated =
+            session->read_cache_data != NULL;
+    }
     session->block.context = session;
     session->block.size = expected_size;
     session->block.identity = 0;
@@ -650,7 +829,18 @@ file_block_t *file_block_create(void) {
     adapter->current = NULL;
     adapter->retired = NULL;
     adapter->last_system_error = 0;
+    adapter->read_cache_enabled = true;
     return adapter;
+}
+
+file_block_status_t file_block_set_read_cache_enabled(file_block_t *adapter,
+                                                      bool enabled) {
+    if (!adapter)
+        return FILE_BLOCK_STATUS_INVALID_ARGUMENT;
+    if (adapter->current)
+        return FILE_BLOCK_STATUS_ALREADY_OPEN;
+    adapter->read_cache_enabled = enabled;
+    return FILE_BLOCK_STATUS_OK;
 }
 
 file_block_status_t file_block_open(file_block_t *adapter,
@@ -760,6 +950,16 @@ const vm_block_t *file_block_get(const file_block_t *adapter) {
     return &adapter->current->block;
 }
 
+bool file_block_get_read_cache_stats(
+    const file_block_t *adapter,
+    file_block_read_cache_stats_t *out_stats) {
+    if (!adapter || !out_stats || !adapter->current ||
+        !adapter->current->active)
+        return false;
+    *out_stats = adapter->current->read_cache_stats;
+    return true;
+}
+
 file_block_status_t file_block_flush(file_block_t *adapter) {
     vm_block_io_status_t status;
     unsigned retry_count;
@@ -855,6 +1055,8 @@ file_block_status_t file_block_close(file_block_t *adapter) {
     }
 
     /* Never retry close: POSIX leaves descriptor state unspecified on EINTR. */
+    free(session->read_cache_data);
+    session->read_cache_data = NULL;
     session->descriptor = -1;
     session->active = false;
     session->sticky_error = failed;
@@ -882,6 +1084,7 @@ file_block_status_t file_block_destroy(file_block_t **adapter_address) {
     session = adapter->retired;
     while (session) {
         file_block_session_t *next = session->next;
+        free(session->read_cache_data);
         free(session);
         session = next;
     }

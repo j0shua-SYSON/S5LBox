@@ -225,6 +225,17 @@ expect_config(direct_write_off_control_is_explicit
 expect_refused(direct_write_off_control_requires_canonical_bus
     "--no-direct-ram-writes requires --canonical-bus"
     absent-kernel --run-api --no-direct-ram-writes --print-config)
+# External-media caching is a host-only default, so its off arm belongs in the
+# relaunch provenance rather than the emulated-machine option table.  It must
+# be accepted only when there is an adapter whose descriptor work it can
+# actually control.
+expect_config(external_md_read_cache_off_is_explicit
+    "--external-md|--no-external-md-read-cache"
+    absent-kernel -d absent-tree --external-md absent-source new-work
+    --no-external-md-read-cache --print-config)
+expect_refused(external_md_read_cache_off_requires_external_md
+    "--no-external-md-read-cache requires --external-md"
+    absent-kernel --no-external-md-read-cache --print-config)
 # The app drains its touch queue between s5l8900_run() chunks. The harness can
 # therefore split a bounded chunk at an absolute count and inject a tap at the
 # same ownership boundary without installing a per-instruction observer.

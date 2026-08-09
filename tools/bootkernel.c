@@ -33522,6 +33522,7 @@ static void boot_print_usage(FILE *stream, const char *argv0) {
             "          [--interpreter-control | --compact-raw-control]\n"
             "          [--canonical-bus]\n"
             "          [--no-direct-ram-writes]\n"
+            "          [--no-external-md-read-cache]\n"
             "          [--sequence-profile]\n"
             "          [--pinch <at>:<ax0>:<ay0>:<ax1>:<ay1>:<bx0>:<by0>:"
             "<bx1>:<by1>[:<steps>[:<span>]]] ...\n"
@@ -33581,6 +33582,10 @@ static void boot_print_usage(FILE *stream, const char *argv0) {
             "  --no-direct-ram-writes  with --canonical-bus, revoke that one\n"
             "      host fast path as a same-binary control. This changes no\n"
             "      guest-visible state and is not an ordinary boot mode.\n"
+            "  --no-external-md-read-cache  with --external-md, disable the\n"
+            "      bounded coherent host read cache. This same-binary control\n"
+            "      changes only descriptor I/O work; every read still uses the\n"
+            "      same guest media, and final hashes remain the authority.\n"
             "  --frame-meter  mirror the iOS app's changed-published-frame\n"
             "      counter: check after 100000-instruction chunks, regularly\n"
             "      publish at most 30 Hz plus the app's terminal publication,\n"
@@ -33841,6 +33846,7 @@ int main(int argc, char **argv) {
      * --no-direct-ram-writes isolates the compiled direct-write default. */
     bool canonical_bus_control = false;
     bool no_direct_ram_writes_control = false;
+    bool external_md_read_cache_off = false;
     /* --frame-meter: host-only publication observer beside --fast, not an
      * emulated-machine toggle and therefore not snapshot state. */
     bool frame_meter_requested = false;
@@ -34133,6 +34139,10 @@ int main(int argc, char **argv) {
         }
         if (!strcmp(argv[i], "--no-direct-ram-writes")) {
             no_direct_ram_writes_control = true;
+            continue;
+        }
+        if (!strcmp(argv[i], "--no-external-md-read-cache")) {
+            external_md_read_cache_off = true;
             continue;
         }
         if (!strcmp(argv[i], "--frame-meter")) {
@@ -35236,6 +35246,12 @@ int main(int argc, char **argv) {
         fprintf(stderr,
                 "--no-direct-ram-writes requires --canonical-bus: the "
                 "diagnostic bus has already revoked that consent\n");
+        return 1;
+    }
+    if (external_md_read_cache_off && !saw_external_md) {
+        fprintf(stderr,
+                "--no-external-md-read-cache requires --external-md: there "
+                "is no host media adapter to control\n");
         return 1;
     }
 
@@ -37003,6 +37019,18 @@ external_md_work_ready:
         external_block_adapter = file_block_create();
         if (!external_block_adapter) {
             fprintf(stderr, "external-md: cannot allocate file adapter\n");
+            s5l8900_free(&mach);
+            ksyms_free(&KS);
+            free(img);
+            return 1;
+        }
+
+        if (external_md_read_cache_off &&
+            file_block_set_read_cache_enabled(external_block_adapter, false) !=
+                FILE_BLOCK_STATUS_OK) {
+            fprintf(stderr,
+                    "external-md: cannot disable the read-cache control\n");
+            (void)file_block_destroy(&external_block_adapter);
             s5l8900_free(&mach);
             ksyms_free(&KS);
             free(img);
@@ -39639,6 +39667,29 @@ external_md_work_ready:
                    external_raw_bridge.stats.guard_bytes_read,
                (unsigned long long)
                    external_raw_bridge.stats.guard_bytes_written);
+        {
+            file_block_read_cache_stats_t cache_stats;
+            if (file_block_get_read_cache_stats(external_block_adapter,
+                                                &cache_stats)) {
+                printf("  read cache: %s%s; callbacks=%" PRIu64
+                       " requested=%" PRIu64 "B hits=%" PRIu64
+                       "/%" PRIu64 "B misses=%" PRIu64
+                       " bypasses=%" PRIu64 " host=%" PRIu64
+                       "/%" PRIu64 "B invalidated=%" PRIu64 "\n",
+                       cache_stats.enabled ? "enabled" : "disabled",
+                       cache_stats.enabled && !cache_stats.allocated
+                           ? " (allocation unavailable)" : "",
+                       cache_stats.read_callbacks,
+                       cache_stats.requested_bytes,
+                       cache_stats.cache_hits,
+                       cache_stats.cache_hit_bytes,
+                       cache_stats.cache_misses,
+                       cache_stats.cache_bypasses,
+                       cache_stats.host_reads,
+                       cache_stats.host_read_bytes,
+                       cache_stats.invalidated_lines);
+            }
+        }
         if (external_raw_bridge.stats.guest_errors != 0u) {
             const md_raw_bridge_error_t *error =
                 &external_raw_bridge.last_guest_error;

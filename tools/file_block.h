@@ -35,7 +35,40 @@ typedef enum {
  */
 typedef struct file_block file_block_t;
 
+/*
+ * Four MiB of 16 KiB lines is deliberately small beside the roughly 450 MiB
+ * work image.  The cache removes repeated 4 KiB descriptor reads and folds
+ * adjacent guest pages into one host read without making startup copy the
+ * media into RAM.  Every nonempty callback still performs the adapter's
+ * descriptor size/identity revalidation before consulting a cached line.
+ */
+#define FILE_BLOCK_READ_CACHE_LINE_BYTES UINT32_C(16384)
+#define FILE_BLOCK_READ_CACHE_BYTES      UINT32_C(4194304)
+
+typedef struct {
+    bool enabled;
+    bool allocated;
+    uint64_t read_callbacks;
+    uint64_t requested_bytes;
+    uint64_t cache_hits;
+    uint64_t cache_hit_bytes;
+    uint64_t cache_misses;
+    uint64_t cache_bypasses;
+    uint64_t host_reads;
+    uint64_t host_read_bytes;
+    uint64_t invalidated_lines;
+} file_block_read_cache_stats_t;
+
 file_block_t *file_block_create(void);
+
+/*
+ * The bounded read cache is enabled by default.  A frontend may disable it
+ * before opening a session to obtain a same-binary diagnostic control.  An
+ * active session cannot be reconfigured because its vm_block_t may already be
+ * borrowed by the machine.
+ */
+file_block_status_t file_block_set_read_cache_enabled(file_block_t *adapter,
+                                                      bool enabled);
 
 /*
  * Open an existing regular file for exact-size random reads and writes.  The
@@ -53,7 +86,10 @@ file_block_t *file_block_create(void);
  * flush.  Windows identity uses the underlying handle's volume serial and file
  * index, not the CRT stat fields (which are not meaningful NTFS identities).
  * That per-operation check is the fail-closed drift guard.  Calls and any
- * cooperating external access must still be serialized by the caller.
+ * cooperating external access must still be serialized by the caller.  While
+ * a session is open, content mutations must use the returned vm_block_t write
+ * callback so its read cache can be invalidated; an external writer must wait
+ * until file_block_close().
  * Interrupted open/setup operations are retried with the same bound.  During
  * I/O, interrupted metadata and sync calls remain retryable; the vm_block
  * exact-I/O helpers and this adapter's public flush/close operations cap them
@@ -76,6 +112,11 @@ file_block_status_t file_block_open(file_block_t *adapter,
  * end before file_block_destroy().
  */
 const vm_block_t *file_block_get(const file_block_t *adapter);
+
+/* Snapshot the active session's host-only cache telemetry. */
+bool file_block_get_read_cache_stats(
+    const file_block_t *adapter,
+    file_block_read_cache_stats_t *out_stats);
 
 /* Revalidate size/identity, then request bounded descriptor-level durability. */
 file_block_status_t file_block_flush(file_block_t *adapter);

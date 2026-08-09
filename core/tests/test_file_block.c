@@ -287,6 +287,131 @@ static void test_random_io_and_guards(void) {
     CHECK(remove(path) == 0, "could not remove random fixture");
 }
 
+static void test_bounded_read_cache_and_control(void) {
+    enum { PAGE_BYTES = 4096 };
+    char path[160];
+    uint8_t initial[FILE_BLOCK_READ_CACHE_LINE_BYTES * 2u];
+    uint8_t observed[PAGE_BYTES];
+    uint8_t replacement[32];
+    file_block_read_cache_stats_t stats;
+    file_block_t *adapter = file_block_create();
+    const vm_block_t *block;
+
+    CHECK(file_block_set_read_cache_enabled(NULL, false) ==
+              FILE_BLOCK_STATUS_INVALID_ARGUMENT,
+          "NULL cache configuration was accepted");
+    CHECK(adapter != NULL, "cache owner allocation failed");
+    if (!adapter)
+        return;
+    CHECK(!file_block_get_read_cache_stats(adapter, &stats),
+          "closed adapter exposed cache statistics");
+    CHECK(!file_block_get_read_cache_stats(adapter, NULL),
+          "NULL cache-stat destination was accepted");
+
+    CHECK(make_path(path, sizeof path, "cache"),
+          "could not form cache fixture path");
+    fill_pattern(initial, sizeof initial, 47);
+    fill_pattern(replacement, sizeof replacement, 211);
+    (void)remove(path);
+    CHECK(create_file(path, initial, sizeof initial),
+          "could not create cache fixture");
+    CHECK(file_block_open(adapter, path, sizeof initial) ==
+              FILE_BLOCK_STATUS_OK,
+          "cache fixture did not open");
+    CHECK(file_block_set_read_cache_enabled(adapter, false) ==
+              FILE_BLOCK_STATUS_ALREADY_OPEN,
+          "active cache policy was mutable");
+    block = file_block_get(adapter);
+    CHECK(block != NULL, "cache fixture exposed no block");
+    if (!block) {
+        (void)file_block_destroy(&adapter);
+        (void)remove(path);
+        return;
+    }
+
+    CHECK(vm_block_read_exact(block, 0u, observed, sizeof observed,
+                              NULL, NULL, NULL) == VM_BLOCK_STATUS_OK &&
+              memcmp(observed, initial, sizeof observed) == 0,
+          "initial cache-line read failed");
+    CHECK(vm_block_read_exact(block, PAGE_BYTES, observed, sizeof observed,
+                              NULL, NULL, NULL) == VM_BLOCK_STATUS_OK &&
+              memcmp(observed, initial + PAGE_BYTES, sizeof observed) == 0,
+          "adjacent cached page read failed");
+    CHECK(file_block_get_read_cache_stats(adapter, &stats),
+          "active cache statistics were unavailable");
+    CHECK(stats.enabled && stats.allocated,
+          "default bounded cache was not active");
+    CHECK(stats.read_callbacks == 2u &&
+              stats.requested_bytes == PAGE_BYTES * 2u,
+          "cache callback accounting was %llu/%llu",
+          (unsigned long long)stats.read_callbacks,
+          (unsigned long long)stats.requested_bytes);
+    CHECK(stats.cache_misses == 1u && stats.cache_hits == 1u &&
+              stats.cache_hit_bytes == PAGE_BYTES,
+          "adjacent page did not reuse one cache fill");
+    CHECK(stats.host_reads == 1u &&
+              stats.host_read_bytes == FILE_BLOCK_READ_CACHE_LINE_BYTES,
+          "cache fill did not collapse adjacent descriptor reads");
+
+    CHECK(vm_block_write_exact(block, PAGE_BYTES, replacement,
+                               sizeof replacement, NULL, NULL, NULL) ==
+              VM_BLOCK_STATUS_OK,
+          "cached-line write failed");
+    CHECK(vm_block_read_exact(block, PAGE_BYTES, observed, sizeof observed,
+                              NULL, NULL, NULL) == VM_BLOCK_STATUS_OK,
+          "read after cached-line invalidation failed");
+    CHECK(memcmp(observed, replacement, sizeof replacement) == 0 &&
+              memcmp(observed + sizeof replacement,
+                     initial + PAGE_BYTES + sizeof replacement,
+                     sizeof observed - sizeof replacement) == 0,
+          "read after write returned stale cached bytes");
+    CHECK(vm_block_read_exact(block, 0u, observed, sizeof observed,
+                              NULL, NULL, NULL) == VM_BLOCK_STATUS_OK &&
+              memcmp(observed, initial, sizeof observed) == 0,
+          "refilled line did not serve its adjacent original page");
+    CHECK(file_block_get_read_cache_stats(adapter, &stats),
+          "post-write cache statistics were unavailable");
+    CHECK(stats.invalidated_lines == 1u && stats.cache_misses == 2u &&
+              stats.cache_hits == 2u && stats.host_reads == 2u,
+          "write invalidation/refill accounting was unexpected");
+    CHECK(file_block_close(adapter) == FILE_BLOCK_STATUS_OK,
+          "cached session close failed");
+    CHECK(!file_block_get_read_cache_stats(adapter, &stats),
+          "closed cached session remained observable");
+
+    CHECK(file_block_set_read_cache_enabled(adapter, false) ==
+              FILE_BLOCK_STATUS_OK,
+          "could not select the cache-off control");
+    CHECK(file_block_open(adapter, path, sizeof initial) ==
+              FILE_BLOCK_STATUS_OK,
+          "cache-off fixture did not reopen");
+    block = file_block_get(adapter);
+    CHECK(block != NULL, "cache-off fixture exposed no block");
+    if (block) {
+        CHECK(vm_block_read_exact(block, 0u, observed, sizeof observed,
+                                  NULL, NULL, NULL) == VM_BLOCK_STATUS_OK,
+              "first cache-off read failed");
+        CHECK(vm_block_read_exact(block, PAGE_BYTES, observed,
+                                  sizeof observed, NULL, NULL, NULL) ==
+                  VM_BLOCK_STATUS_OK,
+              "second cache-off read failed");
+        CHECK(file_block_get_read_cache_stats(adapter, &stats),
+              "cache-off statistics were unavailable");
+        CHECK(!stats.enabled && !stats.allocated &&
+                  stats.cache_hits == 0u && stats.cache_misses == 0u,
+              "cache-off control still populated the cache");
+        CHECK(stats.cache_bypasses == 2u && stats.host_reads == 2u &&
+                  stats.host_read_bytes == PAGE_BYTES * 2u,
+              "cache-off descriptor accounting was unexpected");
+    }
+    CHECK(file_block_close(adapter) == FILE_BLOCK_STATUS_OK,
+          "cache-off session close failed");
+    CHECK(file_block_destroy(&adapter) == FILE_BLOCK_STATUS_OK &&
+              adapter == NULL,
+          "cache owner destroy failed");
+    CHECK(remove(path) == 0, "could not remove cache fixture");
+}
+
 static void test_stale_session_after_reopen(void) {
     char path[160];
     uint8_t bytes[8];
@@ -625,6 +750,7 @@ static void test_status_strings(void) {
 int main(void) {
     test_owner_lifetime();
     test_random_io_and_guards();
+    test_bounded_read_cache_and_control();
     test_stale_session_after_reopen();
 #ifndef _WIN32
     test_posix_size_and_link_drift();
