@@ -419,6 +419,8 @@ static double VMDeviceAutomationSeconds(uint64_t firstNS, uint64_t lastNS) {
              "compact_privileged_attempts=%llu,"
              "compact_privileged_calls=%llu,"
              "compact_privileged_retired=%llu,"
+             "compact_privileged_window_refills=%llu,"
+             "compact_privileged_boundary_retired=%llu,"
              "compact_window_crossings=%llu,compact_window_reloads=%llu,"
              "compact_window_fast_refills=%llu,compact_window_stops=%llu,"
              "compact_refused_guard=%llu,"
@@ -448,6 +450,10 @@ static double VMDeviceAutomationSeconds(uint64_t firstNS, uint64_t lastNS) {
             (unsigned long long)VM_EXEC_DELTA(compact_privileged_attempts),
             (unsigned long long)VM_EXEC_DELTA(compact_privileged_calls),
             (unsigned long long)VM_EXEC_DELTA(compact_privileged_retired),
+            (unsigned long long)VM_EXEC_DELTA(
+                compact_privileged_window_refills),
+            (unsigned long long)VM_EXEC_DELTA(
+                compact_privileged_boundary_retired),
             (unsigned long long)VM_EXEC_DELTA(compact_window_crossings),
             (unsigned long long)VM_EXEC_DELTA(compact_window_reloads),
             (unsigned long long)VM_EXEC_DELTA(compact_window_fast_refills),

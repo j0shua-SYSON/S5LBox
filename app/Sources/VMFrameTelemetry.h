@@ -111,6 +111,8 @@ typedef struct {
     uint64_t active_clock_added_ticks;
     uint64_t active_clock_clamps;
     uint64_t active_clock_failures;
+    uint64_t compact_privileged_window_refills;
+    uint64_t compact_privileged_boundary_retired;
 } vm_execution_telemetry_observation_t;
 
 typedef struct {

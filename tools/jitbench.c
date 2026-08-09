@@ -9244,6 +9244,8 @@ typedef struct {
     uint64_t compact_raw_window_reloads;
     uint64_t compact_raw_window_stops;
     uint64_t compact_raw_window_fast_refills;
+    uint64_t compact_raw_privileged_window_refills;
+    uint64_t compact_raw_privileged_boundary_retired;
     double seconds;
 } soc_run_result_t;
 
@@ -9319,6 +9321,7 @@ typedef struct {
     bool fetch_refill_workload;
     bool fetch_refill_mix_workload;
     bool mmu_identity_workload;
+    bool mmu_identity_privileged;
     unsigned fetch_refill_mix_long_insns;
 } soc_entry_setup_t;
 
@@ -9428,7 +9431,10 @@ static bool setup_soc_entry_machine(s5l8900_t *machine,
             machine->cpu.cp15.ttbr0 = UINT32_C(0x4000);
             machine->cpu.cp15.dacr = 1u;
             machine->cpu.cp15.sctlr |= ARM_SCTLR_M;
-            machine->cpu.cpsr = ARM_MODE_USR | ARM_CPSR_C;
+            machine->cpu.cpsr =
+                (setup->mmu_identity_privileged ? ARM_MODE_SYS
+                                                : ARM_MODE_USR) |
+                ARM_CPSR_C;
         }
         return true;
     }
@@ -9505,6 +9511,10 @@ static bool run_soc_entry_configured(const soc_entry_setup_t *setup,
     uint64_t compact_raw_window_stops_after;
     uint64_t compact_raw_window_fast_refills_before;
     uint64_t compact_raw_window_fast_refills_after;
+    uint64_t compact_raw_privileged_window_refills_before;
+    uint64_t compact_raw_privileged_window_refills_after;
+    uint64_t compact_raw_privileged_boundary_retired_before;
+    uint64_t compact_raw_privileged_boundary_retired_after;
     double start, end;
     bool initialized = false;
     bool ok = false;
@@ -9719,6 +9729,10 @@ static bool run_soc_entry_configured(const soc_entry_setup_t *setup,
         s5l8900_static_a64_compact_raw_window_stops(&machine);
     compact_raw_window_fast_refills_before =
         s5l8900_static_a64_compact_raw_window_fast_refills(&machine);
+    compact_raw_privileged_window_refills_before =
+        s5l8900_static_a64_compact_raw_privileged_window_refills(&machine);
+    compact_raw_privileged_boundary_retired_before =
+        s5l8900_static_a64_compact_raw_privileged_boundary_retired(&machine);
     start = now_seconds();
     while (remaining != 0u) {
         unsigned chunk = remaining > (uint64_t)UINT_MAX
@@ -9760,6 +9774,10 @@ static bool run_soc_entry_configured(const soc_entry_setup_t *setup,
         s5l8900_static_a64_compact_raw_window_stops(&machine);
     compact_raw_window_fast_refills_after =
         s5l8900_static_a64_compact_raw_window_fast_refills(&machine);
+    compact_raw_privileged_window_refills_after =
+        s5l8900_static_a64_compact_raw_privileged_window_refills(&machine);
+    compact_raw_privileged_boundary_retired_after =
+        s5l8900_static_a64_compact_raw_privileged_boundary_retired(&machine);
     if (remaining != 0u || status != ARM_OK || end <= start ||
         machine.cpu.r[15] != 0u) {
         fprintf(stderr,
@@ -9803,6 +9821,12 @@ static bool run_soc_entry_configured(const soc_entry_setup_t *setup,
     out->compact_raw_window_fast_refills =
         compact_raw_window_fast_refills_after -
         compact_raw_window_fast_refills_before;
+    out->compact_raw_privileged_window_refills =
+        compact_raw_privileged_window_refills_after -
+        compact_raw_privileged_window_refills_before;
+    out->compact_raw_privileged_boundary_retired =
+        compact_raw_privileged_boundary_retired_after -
+        compact_raw_privileged_boundary_retired_before;
     if ((signed_path && out->signed_retired > total) ||
         (!signed_path &&
          (out->signed_retired != 0u || out->signed_chains != 0u ||
@@ -9824,7 +9848,9 @@ static bool run_soc_entry_configured(const soc_entry_setup_t *setup,
             out->compact_raw_window_crossings != 0u ||
             out->compact_raw_window_reloads != 0u ||
             out->compact_raw_window_stops != 0u ||
-            out->compact_raw_window_fast_refills != 0u)) ||
+            out->compact_raw_window_fast_refills != 0u ||
+            out->compact_raw_privileged_window_refills != 0u ||
+            out->compact_raw_privileged_boundary_retired != 0u)) ||
         (graph_path &&
          out->graph_chains != out->signed_chains)) {
         fprintf(stderr,
@@ -9878,6 +9904,22 @@ static bool run_soc_compact_raw_path(const uint32_t *program,
         .length = length,
         .seed_r7 = DATA_BASE,
         .mmu_identity_workload = true,
+    };
+    if (path != SOC_ENTRY_REFERENCE && path != SOC_ENTRY_COMPACT_RAW &&
+        path != SOC_ENTRY_COMPACT_RAW_WINDOW_REFILL_OFF)
+        return false;
+    return run_soc_entry_configured(&setup, length, total, path, out);
+}
+
+static bool run_soc_compact_raw_privileged_path(
+        const uint32_t *program, unsigned length, uint64_t total,
+        soc_entry_path_t path, soc_run_result_t *out) {
+    const soc_entry_setup_t setup = {
+        .program = program,
+        .length = length,
+        .seed_r7 = DATA_BASE,
+        .mmu_identity_workload = true,
+        .mmu_identity_privileged = true,
     };
     if (path != SOC_ENTRY_REFERENCE && path != SOC_ENTRY_COMPACT_RAW &&
         path != SOC_ENTRY_COMPACT_RAW_WINDOW_REFILL_OFF)
@@ -10700,6 +10742,97 @@ done:
     return ok;
 }
 
+/* Repeat the cross-window oracle in privileged mode. Unlike the User path,
+ * each continuation must account its completed prefix through the real SoC
+ * device/clock boundary before publishing the next FETCH witness. The disabled
+ * arm proves the same binary can restore the old outer-loop policy, while the
+ * invocation-count inequality is the structural efficiency gate. */
+static bool validate_soc_compact_raw_privileged_windows(void) {
+    enum { LOOP_INSNS = 259u, LOOP_COUNT = 32u,
+           TOTAL_INSNS = LOOP_INSNS * LOOP_COUNT };
+    uint32_t program[LOOP_INSNS];
+    soc_run_result_t reference = {0};
+    soc_run_result_t refill_off = {0};
+    soc_run_result_t refill_on = {0};
+    bool ok = false;
+
+    for (unsigned i = 0u; i < 256u; i++)
+        program[i] = UINT32_C(0xe2800001); /* ADD r0,r0,#1 */
+    program[256] = UINT32_C(0xe2844001);   /* admitted ADD at 0x400 */
+    program[257] = UINT32_C(0xe0000090);   /* fallback MUL at 0x404 */
+    program[258] = UINT32_C(0xeafffefc);   /* branch 0x408 -> 0x000 */
+
+    if (!run_soc_compact_raw_privileged_path(
+            program, LOOP_INSNS, TOTAL_INSNS, SOC_ENTRY_REFERENCE,
+            &reference) ||
+        !run_soc_compact_raw_privileged_path(
+            program, LOOP_INSNS, TOTAL_INSNS,
+            SOC_ENTRY_COMPACT_RAW_WINDOW_REFILL_OFF, &refill_off) ||
+        !run_soc_compact_raw_privileged_path(
+            program, LOOP_INSNS, TOTAL_INSNS, SOC_ENTRY_COMPACT_RAW,
+            &refill_on) ||
+        !reference.snapshot || !refill_off.snapshot || !refill_on.snapshot ||
+        reference.snapshot_len != refill_off.snapshot_len ||
+        reference.snapshot_len != refill_on.snapshot_len ||
+        memcmp(reference.snapshot, refill_off.snapshot,
+               reference.snapshot_len) != 0 ||
+        memcmp(reference.snapshot, refill_on.snapshot,
+               reference.snapshot_len) != 0 ||
+        reference.compact_raw_privileged_window_refills != 0u ||
+        reference.compact_raw_privileged_boundary_retired != 0u ||
+        refill_off.compact_raw_privileged_window_refills != 0u ||
+        refill_off.compact_raw_privileged_boundary_retired != 0u ||
+        refill_off.compact_raw_window_fast_refills != 0u ||
+        refill_on.compact_raw_privileged_window_refills == 0u ||
+        refill_on.compact_raw_privileged_window_refills !=
+            refill_on.compact_raw_window_fast_refills ||
+        refill_on.compact_raw_window_crossings !=
+            refill_on.compact_raw_privileged_window_refills ||
+        refill_on.compact_raw_window_reloads !=
+            refill_on.compact_raw_privileged_window_refills ||
+        refill_on.compact_raw_window_stops != 0u ||
+        refill_on.compact_raw_privileged_boundary_retired == 0u ||
+        refill_on.compact_raw_privileged_boundary_retired >
+            refill_on.compact_raw_retired ||
+        refill_on.compact_raw_calls >= refill_off.compact_raw_calls ||
+        refill_on.compact_raw_retired - refill_off.compact_raw_retired !=
+            refill_on.compact_raw_privileged_window_refills) {
+        fprintf(stderr,
+                "jitbench: privileged compact-window oracle failed "
+                "off-calls/native/fallback=%" PRIu64 "/%" PRIu64
+                "/%" PRIu64 " on-calls/native/fallback/refills/boundary=%"
+                PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64
+                "\n",
+                refill_off.compact_raw_calls,
+                refill_off.compact_raw_retired,
+                refill_off.compact_raw_fallback_retired,
+                refill_on.compact_raw_calls,
+                refill_on.compact_raw_retired,
+                refill_on.compact_raw_fallback_retired,
+                refill_on.compact_raw_privileged_window_refills,
+                refill_on.compact_raw_privileged_boundary_retired);
+        goto done;
+    }
+
+    printf("SOC-COMPACT-RAW-PRIVILEGED-WINDOW-ORACLE exact=yes "
+           "guest-insns=%u window-bytes=1024 refills=%" PRIu64
+           " boundary-retired=%" PRIu64 " calls-off=%" PRIu64
+           " calls-on=%" PRIu64 " fewer-outer-entries=yes "
+           "same-binary-control=yes timebase-bounded=yes device-tick=yes "
+           "serialized-machine=yes runtime-codegen=no\n",
+           TOTAL_INSNS,
+           refill_on.compact_raw_privileged_window_refills,
+           refill_on.compact_raw_privileged_boundary_retired,
+           refill_off.compact_raw_calls, refill_on.compact_raw_calls);
+    ok = true;
+
+done:
+    free_soc_run_result(&reference);
+    free_soc_run_result(&refill_off);
+    free_soc_run_result(&refill_on);
+    return ok;
+}
+
 /* First real-machine gate for the compact live-byte architecture. Both arms
  * use the app-facing s5l8900_run(), an enabled identity-mapped MMU and User
  * mode. The reference uses the exact interpreter tick batcher; the compact
@@ -10723,7 +10856,8 @@ static bool bench_soc_compact_raw(uint64_t requested, unsigned reps) {
     if (!validate_soc_compact_raw_privileged_prefix() ||
         !validate_soc_compact_raw_thumb_halfword_entry() ||
         !validate_soc_compact_raw_resident() ||
-        !validate_soc_compact_raw_windows())
+        !validate_soc_compact_raw_windows() ||
+        !validate_soc_compact_raw_privileged_windows())
         return false;
     total = ((requested + LOOP_INSNS - 1u) / LOOP_INSNS) * LOOP_INSNS;
     reference_rates = (double *)calloc(reps, sizeof *reference_rates);

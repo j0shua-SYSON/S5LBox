@@ -4108,12 +4108,13 @@ bool s5l8900_static_a64_set_compact_raw(s5l8900_t *m, bool enabled);
  * before arm_step() executes the boundary. */
 bool s5l8900_static_a64_set_compact_raw_privileged(s5l8900_t *m,
                                                    bool enabled);
-/* Same-binary control for continuing a resident User-mode compact interval at
- * an unchanged PC in another 1 KiB code window. Product default is enabled.
- * Privileged prefixes always return to the normal machine/device boundary at
- * a window exit. User-mode continuation requires an exact live
- * fetch-TLB/host-RAM witness and an instruction admitted by the signed runner;
- * it never walks, faults, touches MMIO or retires through the callback. */
+/* Same-binary control for continuing a resident compact interval at an
+ * unchanged PC in another 1 KiB code window. Product default is enabled.
+ * User mode reuses an exact live FETCH witness directly. Privileged mode first
+ * accounts the completed prefix through the normal machine/device boundary,
+ * rechecks interrupts and translation state, and only then publishes another
+ * exact witness. Neither route walks, faults, touches MMIO or retires the
+ * unchanged instruction through the callback. */
 bool s5l8900_static_a64_set_compact_raw_window_refill(s5l8900_t *m,
                                                        bool enabled);
 /* Same-binary rollout/benchmark control for terminal A32/Thumb BX/BLX signed
@@ -4192,6 +4193,10 @@ uint64_t s5l8900_static_a64_compact_raw_window_reloads(
 uint64_t s5l8900_static_a64_compact_raw_window_stops(
     const s5l8900_t *m);
 uint64_t s5l8900_static_a64_compact_raw_window_fast_refills(
+    const s5l8900_t *m);
+uint64_t s5l8900_static_a64_compact_raw_privileged_window_refills(
+    const s5l8900_t *m);
+uint64_t s5l8900_static_a64_compact_raw_privileged_boundary_retired(
     const s5l8900_t *m);
 /* Mutually exclusive reasons why one compact-raw machine-loop attempt did
  * not become a positive invocation.  Together with calls, these counters

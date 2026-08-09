@@ -1887,6 +1887,32 @@ static void run_clock_retired(s5l8900_t *m, bool *active_clock,
         *active_clock = false;
 }
 
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+typedef struct {
+    s5l8900_t *machine;
+    bool *active_clock;
+    unsigned *pending_retired;
+} static_a64_retirement_boundary_t;
+
+/* A privileged compact prefix may remain inside the build-time-linked runner
+ * across a FETCH-window change only after receiving the same device/clock
+ * boundary its outer-loop return used to provide. The callback performs that
+ * exact accounting and then repeats the ordinary machine eligibility gate;
+ * the engine separately rechecks CPU/translation admission before reading the
+ * replacement window. */
+static bool static_a64_retirement_boundary(void *opaque, unsigned retired) {
+    static_a64_retirement_boundary_t *boundary =
+        (static_a64_retirement_boundary_t *)opaque;
+    if (!boundary || !boundary->machine || !boundary->active_clock ||
+        !boundary->pending_retired || !retired)
+        return false;
+    run_clock_retired(boundary->machine, boundary->active_clock,
+                      boundary->pending_retired, retired, false, true);
+    return run_retirement_batch_limit(boundary->machine, 1u,
+                                      *boundary->active_clock) != 0u;
+}
+#endif
+
 unsigned s5l8900_static_a64_fallback_step(s5l8900_t *m,
                                           arm_status_t *status) {
     arm_status_t step_status;
@@ -1923,6 +1949,13 @@ unsigned s5l8900_run(s5l8900_t *m, unsigned max_steps, arm_status_t *status) {
     unsigned n = 0;
     unsigned active_pending_retired = 0u;
     bool active_clock = false;
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    static_a64_retirement_boundary_t static_boundary = {
+        .machine = m,
+        .active_clock = &active_clock,
+        .pending_retired = &active_pending_retired,
+    };
+#endif
     /* A direct arm_step() may have used the same machine between run calls.
      * Only a wait reached during THIS bounded slice may shorten it. */
     m->wfi_pace_yield = false;
@@ -1953,19 +1986,29 @@ unsigned s5l8900_run(s5l8900_t *m, unsigned max_steps, arm_status_t *status) {
         if (s5l8900_static_a64_is_enabled(m)) {
             bool known_negative = false;
             arm_status_t engine_status = ARM_OK;
+            unsigned boundary_retired = 0u;
             unsigned batch = run_retirement_batch_limit(
                 m, max_steps - n, active_clock);
             if (batch)
                 batch = s5l8900_static_a64_try(
-                    m, batch, &known_negative, &engine_status);
+                    m, batch, &known_negative, &engine_status,
+                    static_a64_retirement_boundary, &static_boundary,
+                    &boundary_retired);
             if (batch) {
+                if (boundary_retired > batch) {
+                    st = ARM_UNDEFINED;
+                    break;
+                }
                 n += batch;
-                run_clock_retired(m, &active_clock,
-                                  &active_pending_retired, batch,
-                                  engine_status != ARM_OK,
-                                  m->level_dirty ||
-                                  ext_inputs(m) != m->ext_seen ||
-                                  known_negative);
+                unsigned unaccounted = batch - boundary_retired;
+                if (unaccounted || engine_status != ARM_OK) {
+                    run_clock_retired(
+                        m, &active_clock, &active_pending_retired,
+                        unaccounted, engine_status != ARM_OK,
+                        m->level_dirty ||
+                        ext_inputs(m) != m->ext_seen ||
+                        (known_negative && unaccounted != 0u));
+                }
                 if (engine_status != ARM_OK) {
                     st = engine_status;
                     break;

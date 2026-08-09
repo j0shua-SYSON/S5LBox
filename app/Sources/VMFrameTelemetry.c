@@ -186,7 +186,9 @@ static bool vm_execution_telemetry_not_before(
            VM_EXEC_NOT_BEFORE(active_clock_updates) &&
            VM_EXEC_NOT_BEFORE(active_clock_added_ticks) &&
            VM_EXEC_NOT_BEFORE(active_clock_clamps) &&
-           VM_EXEC_NOT_BEFORE(active_clock_failures);
+           VM_EXEC_NOT_BEFORE(active_clock_failures) &&
+           VM_EXEC_NOT_BEFORE(compact_privileged_window_refills) &&
+           VM_EXEC_NOT_BEFORE(compact_privileged_boundary_retired);
 #undef VM_EXEC_NOT_BEFORE
 }
 

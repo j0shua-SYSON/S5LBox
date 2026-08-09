@@ -68,6 +68,8 @@ static vm_execution_telemetry_observation_t execution_observation(
     value.active_clock_added_ticks = base + 35u;
     value.active_clock_clamps = base + 36u;
     value.active_clock_failures = base + 37u;
+    value.compact_privileged_window_refills = base + 38u;
+    value.compact_privileged_boundary_retired = base + 39u;
     return value;
 }
 
@@ -209,7 +211,9 @@ static void test_boundaries_and_sampled_changes(void) {
            state.execution_last.active_clock_updates == 2034u &&
            state.execution_last.active_clock_added_ticks == 2035u &&
            state.execution_last.active_clock_clamps == 2036u &&
-           state.execution_last.active_clock_failures == 2037u,
+           state.execution_last.active_clock_failures == 2037u &&
+           state.execution_last.compact_privileged_window_refills == 2038u &&
+           state.execution_last.compact_privileged_boundary_retired == 2039u,
           "execution counter endpoints are wrong");
 
     CHECK(state.layer_attempts == 4u && state.layer_accepted == 3u &&

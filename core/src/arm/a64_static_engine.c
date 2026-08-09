@@ -105,6 +105,8 @@ typedef struct {
     uint64_t compact_raw_window_reloads;
     uint64_t compact_raw_window_stops;
     uint64_t compact_raw_window_fast_refills;
+    uint64_t compact_raw_privileged_window_refills;
+    uint64_t compact_raw_privileged_boundary_retired;
     s5l_static_a64_compact_raw_refusals_t compact_raw_refusals;
     uint64_t fetch_refill_attempts;
     uint64_t fetch_refill_hits;
@@ -1041,6 +1043,28 @@ uint64_t s5l8900_static_a64_compact_raw_window_fast_refills(
 #endif
 }
 
+uint64_t s5l8900_static_a64_compact_raw_privileged_window_refills(
+        const s5l8900_t *m) {
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    const static_a64_state_t *state = static_state(m);
+    return state ? state->compact_raw_privileged_window_refills : 0u;
+#else
+    (void)m;
+    return 0u;
+#endif
+}
+
+uint64_t s5l8900_static_a64_compact_raw_privileged_boundary_retired(
+        const s5l8900_t *m) {
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    const static_a64_state_t *state = static_state(m);
+    return state ? state->compact_raw_privileged_boundary_retired : 0u;
+#else
+    (void)m;
+    return 0u;
+#endif
+}
+
 void s5l8900_static_a64_compact_raw_refusals(
         const s5l8900_t *m,
         s5l_static_a64_compact_raw_refusals_t *out) {
@@ -1118,6 +1142,11 @@ typedef struct {
     static_a64_state_t *state;
     arm_status_t status;
     uint32_t fetch_block;
+    uint64_t boundary_cycles;
+    unsigned budget;
+    unsigned boundary_retired;
+    s5l8900_static_a64_retirement_boundary_fn retirement_boundary;
+    void *retirement_opaque;
 } compact_raw_fallback_context_t;
 
 static a64_compact_raw_fallback_result_t compact_raw_fallback(
@@ -1143,19 +1172,57 @@ static a64_compact_raw_fallback_result_t compact_raw_fallback(
     priv = (cpu->cpsr & ARM_CPSR_MODE_MASK) != ARM_MODE_USR;
     width = thumb ? 2u : 4u;
 
-    /* A User-mode window exit does not itself require an architectural step.
-     * Reuse only the exact current FETCH witness, then ask the public
-     * signed-runner classifier whether the unchanged instruction can execute
-     * natively. Privileged prefixes deliberately stop here: their resident
-     * fallback cannot own arm_step(), and skipping that stop also skips the
-     * normal SoC/device boundary which made the prefix admissible. A User-mode
-     * refusal falls through to arm_step(), which reuses any warmed fetch cache
-     * and remains the sole owner of walks, faults and MMIO. */
+    /* A window exit does not itself require an architectural step. User mode
+     * can reuse an exact FETCH witness immediately. A privileged prefix first
+     * delegates every retirement since the previous continuation to the
+     * machine-owned device/clock boundary; only if that gate still admits
+     * execution may it prove and publish the next window. The native runner
+     * commits its one-cycle-per-retirement counter before this callback, so the
+     * cycle delta is the exact prefix length and cannot include an interpreter
+     * fallback. Unsupported instructions still stop here: arm_step() remains
+     * outside the privileged resident interval and remains the sole owner of
+     * walks, faults, MMIO and control-state changes. */
     if (context->state->compact_raw_window_refill_enabled &&
-        !priv &&
         step_block != context->fetch_block &&
-        (cpu->r[15] & (width - 1u)) == 0u &&
-        arm_fetch_cache_try_refill(cpu, cpu->r[15], priv)) {
+        (cpu->r[15] & (width - 1u)) == 0u) {
+        unsigned boundary_delta = 0u;
+        if (priv) {
+            uint64_t retired64;
+            if (!context->retirement_boundary)
+                return A64_COMPACT_RAW_FALLBACK_NO_RETIRE;
+            retired64 = cpu->cycles - context->boundary_cycles;
+            if (!retired64 || retired64 > UINT_MAX ||
+                retired64 > context->budget - context->boundary_retired)
+                return A64_COMPACT_RAW_FALLBACK_NO_RETIRE;
+            boundary_delta = (unsigned)retired64;
+            bool may_continue = context->retirement_boundary(
+                context->retirement_opaque, boundary_delta);
+            context->boundary_retired += boundary_delta;
+            context->boundary_cycles = cpu->cycles;
+            context->state->compact_raw_privileged_boundary_retired +=
+                boundary_delta;
+            if (!may_continue)
+                return A64_COMPACT_RAW_FALLBACK_NO_RETIRE;
+
+            /* The boundary may have sampled a host input, raised an interrupt
+             * or invalidated a translation. Re-read every CPU-side admission
+             * fact before consuming a pointer. Device refresh cannot change
+             * PC or mode, but keeping those checks explicit makes the contract
+             * fail closed if that invariant ever changes. */
+            thumb = (cpu->cpsr & ARM_CPSR_T) != 0u;
+            priv = (cpu->cpsr & ARM_CPSR_MODE_MASK) != ARM_MODE_USR;
+            width = thumb ? 2u : 4u;
+            step_block = cpu->r[15] & ~UINT32_C(0x3ff);
+            if (!priv || !arm_mode_is_valid(cpu->cpsr) ||
+                (cpu->cpsr & ARM_CPSR_E) != 0u || cpu->abort_pending ||
+                (cpu->fiq_line && !(cpu->cpsr & ARM_CPSR_F)) ||
+                (cpu->irq_line && !(cpu->cpsr & ARM_CPSR_I)) ||
+                step_block == context->fetch_block ||
+                (cpu->r[15] & (width - 1u)) != 0u)
+                return A64_COMPACT_RAW_FALLBACK_NO_RETIRE;
+        }
+        if (!arm_fetch_cache_try_refill(cpu, cpu->r[15], priv))
+            return A64_COMPACT_RAW_FALLBACK_NO_RETIRE;
         offset = cpu->r[15] - step_block;
         insn = (uint32_t)cpu->fetch_host[offset] |
                ((uint32_t)cpu->fetch_host[offset + 1u] << 8);
@@ -1171,6 +1238,9 @@ static a64_compact_raw_fallback_result_t compact_raw_fallback(
             context->state->compact_raw_window_crossings++;
             context->state->compact_raw_window_reloads++;
             context->state->compact_raw_window_fast_refills++;
+            if (priv) {
+                context->state->compact_raw_privileged_window_refills++;
+            }
             context->fetch_block = step_block;
             return A64_COMPACT_RAW_FALLBACK_NO_RETIRE_CONTINUE;
         }
@@ -1207,15 +1277,22 @@ static a64_compact_raw_fallback_result_t compact_raw_fallback(
     return A64_COMPACT_RAW_FALLBACK_RETIRE_CONTINUE;
 }
 
-static unsigned try_compact_raw(s5l8900_t *m, static_a64_state_t *state,
-                                unsigned budget, arm_status_t *status,
-                                bool *known_negative) {
+static unsigned try_compact_raw(
+        s5l8900_t *m, static_a64_state_t *state, unsigned budget,
+        arm_status_t *status, bool *known_negative,
+        s5l8900_static_a64_retirement_boundary_fn retirement_boundary,
+        void *retirement_opaque, unsigned *boundary_retired) {
     arm_cpu_t *cpu = &m->cpu;
     compact_raw_fallback_context_t fallback_context = {
         .machine = m,
         .state = state,
         .status = ARM_OK,
         .fetch_block = 0u,
+        .boundary_cycles = m->cpu.cycles,
+        .budget = budget,
+        .boundary_retired = 0u,
+        .retirement_boundary = retirement_boundary,
+        .retirement_opaque = retirement_opaque,
     };
     uint32_t fetch_block;
     uint32_t pc;
@@ -1227,6 +1304,7 @@ static unsigned try_compact_raw(s5l8900_t *m, static_a64_state_t *state,
     unsigned fallback_completed = 0u;
 
     if (known_negative) *known_negative = false;
+    if (boundary_retired) *boundary_retired = 0u;
     memset(&state->compact_pending, 0, sizeof state->compact_pending);
     state->compact_raw_attempts++;
     /* A branch can reach any address in the live 1 KiB window, so a sparse
@@ -1275,6 +1353,8 @@ static unsigned try_compact_raw(s5l8900_t *m, static_a64_state_t *state,
         return 0u;
     }
     if (status) *status = fallback_context.status;
+    if (boundary_retired)
+        *boundary_retired = fallback_context.boundary_retired;
     if (completed) {
         state->compact_raw_calls++;
         state->compact_raw_retired += native_completed;
@@ -1377,7 +1457,11 @@ static unsigned try_graph(s5l8900_t *m, static_a64_state_t *state,
 
 unsigned s5l8900_static_a64_try(s5l8900_t *m, unsigned max_insns,
                                 bool *known_negative,
-                                arm_status_t *status) {
+                                arm_status_t *status,
+                                s5l8900_static_a64_retirement_boundary_fn
+                                    retirement_boundary,
+                                void *retirement_opaque,
+                                unsigned *boundary_retired) {
 #if defined(S5LBOX_STATIC_A64_ENGINE)
     static_a64_state_t *state = static_state(m);
     arm_cpu_t *cpu;
@@ -1392,6 +1476,7 @@ unsigned s5l8900_static_a64_try(s5l8900_t *m, unsigned max_insns,
 
     if (known_negative) *known_negative = false;
     if (status) *status = ARM_OK;
+    if (boundary_retired) *boundary_retired = 0u;
     if (!state || !state->enabled || !max_insns ||
         !a64_static_host_available() || !m->ram || !m->ram_size ||
         (m->ram_size & (m->ram_size - 1u)) != 0u)
@@ -1429,8 +1514,9 @@ unsigned s5l8900_static_a64_try(s5l8900_t *m, unsigned max_insns,
            ? max_insns : state->chain_limit;
     if (state->compact_raw_enabled) {
         bool compact_known_negative = false;
-        unsigned completed = try_compact_raw(m, state, budget, status,
-                                             &compact_known_negative);
+        unsigned completed = try_compact_raw(
+            m, state, budget, status, &compact_known_negative,
+            retirement_boundary, retirement_opaque, boundary_retired);
         if (refilled)
             refill_predictor_record(state, refill_pc, refill_gen,
                                     refill_thumb, refill_priv, completed,
@@ -1558,8 +1644,11 @@ unsigned s5l8900_static_a64_try(s5l8900_t *m, unsigned max_insns,
 #else
     (void)m;
     (void)max_insns;
+    (void)retirement_boundary;
+    (void)retirement_opaque;
     if (known_negative) *known_negative = false;
     if (status) *status = ARM_OK;
+    if (boundary_retired) *boundary_retired = 0u;
     return 0u;
 #endif
 }

@@ -242,6 +242,10 @@ static const uint8_t *vm_guest_record_display(const s5l8900_t *m,
                 s5l8900_static_a64_compact_raw_privileged_calls(m);
             execution.compact_privileged_retired =
                 s5l8900_static_a64_compact_raw_privileged_retired(m);
+            execution.compact_privileged_window_refills =
+                s5l8900_static_a64_compact_raw_privileged_window_refills(m);
+            execution.compact_privileged_boundary_retired =
+                s5l8900_static_a64_compact_raw_privileged_boundary_retired(m);
             execution.compact_window_crossings =
                 s5l8900_static_a64_compact_raw_window_crossings(m);
             execution.compact_window_reloads =
