@@ -3237,7 +3237,13 @@ static bool mbx_execute_textured_sprite(s5l_mbx_t *m,
                            source_pixels + row * source_row_bytes,
                            source_row_bytes, why);
     }
-    for (uint32_t row = 0; row < height && ok; row++) {
+    /* The compact producer is an opaque copy and the validated axis-aligned
+     * raster loop below writes every byte in `pixels` before the commit.  Its
+     * previous destination read therefore moved an entire rectangle across
+     * the GART only to overwrite it.  Blended perspective sprites still need
+     * the original destination, and keeping the shared output buffer preserves
+     * the all-validation-before-first-write transaction boundary. */
+    for (uint32_t row = 0; !compact_copy && row < height && ok; row++) {
         uint32_t dst = target + (top + row) * MBX_3D_TARGET_STRIDE +
                        left * 4u;
         ok = mbx_gart_read(m, bus, dst, pixels + row * row_bytes,
@@ -3253,8 +3259,37 @@ static bool mbx_execute_textured_sprite(s5l_mbx_t *m,
             break;
         }
     }
+    /* Axis-aligned filtered sprites reuse the same vertical interpolation for
+     * every destination x that names a given source column.  The literal
+     * transcription used to recompute both vertical lanes for every output
+     * pixel and only then apply the horizontal filter.  Cache that exact
+     * vertical result once per source column when the staged source is no
+     * wider than the output.  Minification can leave large gaps between taps,
+     * so it keeps the literal path rather than scanning unused source columns.
+     * The order *inside each sample* remains vertical then horizontal, which
+     * preserves the shipped packed-byte rounding exactly. */
+    uint32_t vertical_pixels[MBX_3D_WIDTH + 2u];
+    bool cache_vertical = half_texel_layout && !affine_sprite &&
+                          source_stage_width <= width + 2u;
     uint32_t affine_rendered_pixels = 0u;
     for (uint32_t y = 0; y < height && ok; y++) {
+        if (cache_vertical) {
+            const struct mbx_bilinear_axis *sample_y = &y_axis[y];
+            uint32_t y0_offset = sample_y->first - source_stage_y0;
+            uint32_t y1_offset = sample_y->second - source_stage_y0;
+            const uint8_t *top_row = source_pixels +
+                                     y0_offset * source_row_bytes;
+            const uint8_t *bottom_row = source_pixels +
+                                        y1_offset * source_row_bytes;
+            for (uint32_t sx = 0; sx < source_stage_width; sx++) {
+                uint32_t top_pixel = mbx_load_le32(top_row + sx * 4u);
+                uint32_t bottom_pixel = mbx_load_le32(bottom_row + sx * 4u);
+                vertical_pixels[sx] = top_pixel == bottom_pixel
+                    ? top_pixel
+                    : mbx_linear_bgra8(top_pixel, bottom_pixel,
+                                       sample_y->weight);
+            }
+        }
         for (uint32_t x = 0; x < width; x++) {
             uint32_t src;
             if (half_texel_layout) {
@@ -3298,20 +3333,32 @@ static bool mbx_execute_textured_sprite(s5l_mbx_t *m,
                 uint32_t x1_offset = sample_x->second - source_stage_x0;
                 uint32_t y0_offset = sample_y->first - source_stage_y0;
                 uint32_t y1_offset = sample_y->second - source_stage_y0;
-                uint32_t top_left = mbx_load_le32(source_pixels +
-                    y0_offset * source_row_bytes + x0_offset * 4u);
-                uint32_t bottom_left = mbx_load_le32(source_pixels +
-                    y1_offset * source_row_bytes + x0_offset * 4u);
-                uint32_t top_right = mbx_load_le32(source_pixels +
-                    y0_offset * source_row_bytes + x1_offset * 4u);
-                uint32_t bottom_right = mbx_load_le32(source_pixels +
-                    y1_offset * source_row_bytes + x1_offset * 4u);
-                uint32_t vertical_left = mbx_linear_bgra8(
-                    top_left, bottom_left, sample_y->weight);
-                uint32_t vertical_right = mbx_linear_bgra8(
-                    top_right, bottom_right, sample_y->weight);
-                src = mbx_linear_bgra8(
-                    vertical_left, vertical_right, sample_x->weight);
+                uint32_t vertical_left, vertical_right;
+                if (cache_vertical) {
+                    vertical_left = vertical_pixels[x0_offset];
+                    vertical_right = vertical_pixels[x1_offset];
+                } else {
+                    uint32_t top_left = mbx_load_le32(source_pixels +
+                        y0_offset * source_row_bytes + x0_offset * 4u);
+                    uint32_t bottom_left = mbx_load_le32(source_pixels +
+                        y1_offset * source_row_bytes + x0_offset * 4u);
+                    uint32_t top_right = mbx_load_le32(source_pixels +
+                        y0_offset * source_row_bytes + x1_offset * 4u);
+                    uint32_t bottom_right = mbx_load_le32(source_pixels +
+                        y1_offset * source_row_bytes + x1_offset * 4u);
+                    vertical_left = top_left == bottom_left
+                        ? top_left
+                        : mbx_linear_bgra8(top_left, bottom_left,
+                                           sample_y->weight);
+                    vertical_right = top_right == bottom_right
+                        ? top_right
+                        : mbx_linear_bgra8(top_right, bottom_right,
+                                           sample_y->weight);
+                }
+                src = vertical_left == vertical_right
+                    ? vertical_left
+                    : mbx_linear_bgra8(vertical_left, vertical_right,
+                                       sample_x->weight);
             } else {
                 src = mbx_load_le32(source_pixels + y * source_row_bytes +
                                     x * 4u);
