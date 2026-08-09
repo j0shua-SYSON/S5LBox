@@ -12,6 +12,7 @@
  */
 #include "a64_static_engine.h"
 
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 
