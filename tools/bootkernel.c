@@ -18453,6 +18453,35 @@ static BOOTKERNEL_NOINLINE void touch_tap_step(uint64_t n) {
 }
 
 /*
+ * The app owns touch delivery between s5l8900_run() calls.  Keep the
+ * app-shaped harness on that same boundary: a requested absolute count may
+ * shorten the preceding chunk, then touch_tap_step() runs before the next
+ * chunk.  A refused report is deliberately not returned as an immediate
+ * boundary, otherwise the harness would spin without giving the guest a
+ * chance to drain the Z2.  The next ordinary app chunk becomes the retry,
+ * matching VMEngine's queue backpressure rather than the literal runner's
+ * per-instruction retry policy.
+ */
+static uint64_t touch_tap_next_run_api_boundary(uint64_t now) {
+    uint64_t next = UINT64_MAX;
+    for (unsigned i = 0; i < G.touch_n; i++) {
+        const touch_tap_t *t = &G.touch[i];
+        uint64_t due;
+
+        if (t->stage == 0u) {
+            due = t->at;
+        } else if (t->stage == 1u) {
+            if (t->down_at > UINT64_MAX - t->hold) continue;
+            due = t->down_at + t->hold;
+        } else {
+            continue;
+        }
+        if (due > now && due < next) next = due;
+    }
+    return next;
+}
+
+/*
  * Advance every scheduled drag by one instruction.
  *
  * Not inlined, for the same reason touch_tap_step() is not: the step loop's
@@ -33519,9 +33548,11 @@ static void boot_print_usage(FILE *stream, const char *argv0) {
             "      every per-instruction host observer while retaining CPU,\n"
             "      MMU, device tick, framebuffer, MBX, and external-md guest\n"
             "      behavior. Exact --snapshot-at boundaries and --frame-meter\n"
-            "      are supported. --hle uses the same exact-PC machine hook as\n"
-            "      the experimental iOS build; scheduled input, HLE verify,\n"
-            "      PPP/NAT, call probes,\n"
+            "      are supported. Scheduled --touch reports are delivered\n"
+            "      between bounded chunks, matching the app's queue ownership;\n"
+            "      a requested count may shorten the preceding chunk. --hle\n"
+            "      uses the same exact-PC machine hook as the experimental iOS\n"
+            "      build; scheduled gestures/buttons, HLE verify, PPP/NAT, call probes,\n"
             "      and per-instruction diagnostic requests are refused rather than\n"
             "      silently ignored. The final diagnostic report is necessarily\n"
             "      sparse; TLB counters omit observer translations and therefore\n"
@@ -35154,17 +35185,18 @@ int main(int argc, char **argv) {
 
     /* s5l8900_run() now has one deliberately narrow instruction-boundary
      * facility: exact-PC replacements, which is how the experimental iOS HLE
-     * is measured through the real app runner. Everything else below changes
+     * is measured through the real app runner. A scheduled tap, snapshots and
+     * frame-meter are app-chunk-boundary work. Everything else below changes
      * guest state or promises diagnostics at a boundary the API does not
-     * expose. Snapshots and frame-meter are app-chunk-boundary work. */
+     * expose. */
     if (run_api_hot &&
-        (call_probe_n || touch_n || drag_n || pinch_n || button_n ||
+        (call_probe_n || drag_n || pinch_n || button_n ||
          cfg.v.hle_verify || ppp ||
          stop_on_abort || heartbeat || hot_page_given || win_lo != 0u ||
          win_hi != UINT64_MAX || ktail != 512u)) {
         fprintf(stderr,
                 "--run-api cannot be combined with call probes, scheduled "
-                "input, HLE verify, PPP/NAT, stop-on-abort, -Z, -H, -W, "
+                "gestures/buttons, HLE verify, PPP/NAT, stop-on-abort, -Z, -H, -W, "
                 "or a non-default -T: those require per-instruction host "
                 "observation\n");
         return 1;
@@ -37333,9 +37365,25 @@ external_md_work_ready:
          * shortens one chunk so its architectural boundary remains exact. */
         const unsigned app_chunk =
             (unsigned)FRAME_METER_CHUNK_INSTRUCTIONS;
+        typedef struct {
+            double seconds;
+            uint64_t start_at, end_at;
+            uint32_t start_pc, end_pc;
+            uint64_t mbx_2d_completed, mbx_2d_bytes;
+            uint64_t mbx_3d_completed, mbx_3d_pixels;
+            uint64_t md_reads, md_read_bytes;
+            uint64_t md_writes, md_write_bytes;
+            uint64_t clcd_frames;
+        } run_api_slow_call_t;
+#define RUN_API_SLOW_CALLS 8u
+        run_api_slow_call_t run_slowest[RUN_API_SLOW_CALLS] = {{0}};
         uint64_t run_calls = 0u;
         uint64_t run_retired = 0u;
         double run_seconds = 0.0;
+        uint64_t run_latency_buckets[7] = {0};
+        double run_max_call_seconds = 0.0;
+        uint64_t run_max_call_start = 0u;
+        uint64_t run_max_call_end = 0u;
         bool timing_valid = true;
         const uint64_t tick_batches_before =
             s5l8900_interpreter_tick_batches(&mach);
@@ -37386,6 +37434,11 @@ external_md_work_ready:
         fflush(stdout);
 
         while (mach.cpu.cycles < steps) {
+            /* VMEngine drains its touch queue here, between app chunks.  The
+             * absolute schedule below can split the preceding chunk so this
+             * call lands exactly at the requested retired count. */
+            if (G.touch_n) touch_tap_step(mach.cpu.cycles);
+
             uint64_t boundary = steps;
             for (unsigned s = 0; s < nsnaps; s++) {
                 if (!snaps[s].done && snaps[s].at < boundary)
@@ -37394,6 +37447,11 @@ external_md_work_ready:
             if (frame_meter.enabled && !frame_meter.failed &&
                 frame_meter.next_chunk_at < boundary)
                 boundary = frame_meter.next_chunk_at;
+            if (G.touch_n) {
+                uint64_t touch_boundary =
+                    touch_tap_next_run_api_boundary(mach.cpu.cycles);
+                if (touch_boundary < boundary) boundary = touch_boundary;
+            }
 
             if (boundary == mach.cpu.cycles) {
                 if (!save_due_snapshots(&mach, snaps, nsnaps)) return 4;
@@ -37403,13 +37461,81 @@ external_md_work_ready:
             uint64_t remaining = boundary - mach.cpu.cycles;
             unsigned chunk = remaining > app_chunk
                            ? app_chunk : (unsigned)remaining;
+            uint64_t call_start = mach.cpu.cycles;
+            uint32_t call_start_pc = mach.cpu.r[15];
+            s5l_mbx_telemetry_t call_mbx_before = mach.mbx_telemetry;
+            md_bridge_stats_t call_md_before = external_bridge.stats;
+            md_raw_bridge_stats_t call_raw_md_before =
+                external_raw_bridge.stats;
+            uint64_t call_clcd_before = mach.clcd.frames;
             double before = frame_meter_now_seconds();
             unsigned ran = s5l8900_run(&mach, chunk, &st);
             double after = frame_meter_now_seconds();
+            uint64_t call_end = mach.cpu.cycles;
             run_calls++;
             run_retired += ran;
             if (before < 0.0 || after < before) timing_valid = false;
-            else if (timing_valid) run_seconds += after - before;
+            else if (timing_valid) {
+                double elapsed = after - before;
+                static const double latency_limits[6] = {
+                    0.001, 0.004, 0.008, 1.0 / 60.0, 1.0 / 30.0, 0.100
+                };
+                unsigned bucket = 0u;
+                run_seconds += elapsed;
+                while (bucket < 6u && elapsed > latency_limits[bucket])
+                    bucket++;
+                run_latency_buckets[bucket]++;
+                if (elapsed > run_max_call_seconds) {
+                    run_max_call_seconds = elapsed;
+                    run_max_call_start = call_start;
+                    run_max_call_end = call_end;
+                }
+                /* Keep only the eight longest existing app calls.  Reading
+                 * telemetry happens outside the timed region and changes no
+                 * machine state; the deltas identify whether a long slice
+                 * actually submitted renderer work instead of merely ending
+                 * near it. */
+                run_api_slow_call_t slow = {
+                    elapsed, call_start, call_end,
+                    call_start_pc, mach.cpu.r[15],
+                    mach.mbx_telemetry.completed_2d -
+                        call_mbx_before.completed_2d,
+                    mach.mbx_telemetry.bytes_2d - call_mbx_before.bytes_2d,
+                    mach.mbx_telemetry.completed_3d -
+                        call_mbx_before.completed_3d,
+                    mach.mbx_telemetry.pixels_3d -
+                        call_mbx_before.pixels_3d,
+                    (external_bridge.stats.successful_reads -
+                         call_md_before.successful_reads) +
+                        (external_raw_bridge.stats.successful_reads -
+                         call_raw_md_before.successful_reads),
+                    (external_bridge.stats.bytes_read -
+                         call_md_before.bytes_read) +
+                        (external_raw_bridge.stats.bytes_read -
+                         call_raw_md_before.bytes_read),
+                    (external_bridge.stats.successful_writes -
+                         call_md_before.successful_writes) +
+                        (external_raw_bridge.stats.successful_writes -
+                         call_raw_md_before.successful_writes),
+                    (external_bridge.stats.bytes_written -
+                         call_md_before.bytes_written) +
+                        (external_raw_bridge.stats.bytes_written -
+                         call_raw_md_before.bytes_written),
+                    mach.clcd.frames - call_clcd_before
+                };
+                unsigned place = 0u;
+                while (place < RUN_API_SLOW_CALLS &&
+                       run_slowest[place].seconds >= elapsed)
+                    place++;
+                if (place < RUN_API_SLOW_CALLS) {
+                    if (place + 1u < RUN_API_SLOW_CALLS)
+                        memmove(&run_slowest[place + 1u],
+                                &run_slowest[place],
+                                (RUN_API_SLOW_CALLS - place - 1u) *
+                                    sizeof run_slowest[0]);
+                    run_slowest[place] = slow;
+                }
+            }
 
             n = mach.cpu.cycles;
             if (frame_meter.enabled && !frame_meter.failed &&
@@ -37430,6 +37556,34 @@ external_md_work_ready:
                    run_calls, run_retired, run_seconds,
                    (double)run_retired / run_seconds / 1000000.0,
                    nsnaps ? " (checkpoint I/O excluded from timed calls)" : "");
+            printf("run api latency: <=1/4/8/16.7/33.3/100/>100 ms="
+                   "%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64
+                   "/%" PRIu64 "/%" PRIu64 "/%" PRIu64
+                   " max=%.3f ms @%" PRIu64 "..%" PRIu64 "\n",
+                   run_latency_buckets[0], run_latency_buckets[1],
+                   run_latency_buckets[2], run_latency_buckets[3],
+                   run_latency_buckets[4], run_latency_buckets[5],
+                   run_latency_buckets[6], run_max_call_seconds * 1000.0,
+                   run_max_call_start, run_max_call_end);
+            for (unsigned i = 0u;
+                 i < RUN_API_SLOW_CALLS && run_slowest[i].seconds > 0.0;
+                 i++) {
+                const run_api_slow_call_t *slow = &run_slowest[i];
+                printf("run api slow[%u]: %.3f ms @%" PRIu64 "..%" PRIu64
+                       " pc=%08x->%08x MBX2D=%" PRIu64 "/%" PRIu64
+                       "B MBX3D=%" PRIu64 "/%" PRIu64
+                       "px MD=%" PRIu64 "/%" PRIu64
+                       "B read,%" PRIu64 "/%" PRIu64
+                       "B write CLCD=%" PRIu64 "\n",
+                       i, slow->seconds * 1000.0,
+                       slow->start_at, slow->end_at,
+                       slow->start_pc, slow->end_pc,
+                       slow->mbx_2d_completed, slow->mbx_2d_bytes,
+                       slow->mbx_3d_completed, slow->mbx_3d_pixels,
+                       slow->md_reads, slow->md_read_bytes,
+                       slow->md_writes, slow->md_write_bytes,
+                       slow->clcd_frames);
+            }
         } else {
             printf("run api    : calls=%" PRIu64 " retired=%" PRIu64
                    " timing INVALID (%s)\n",
@@ -37546,6 +37700,7 @@ external_md_work_ready:
         }
 #endif
         fflush(stdout);
+#undef RUN_API_SLOW_CALLS
     } else {
         for (; n < steps; n++) {
         G.hot_now = n;

@@ -225,11 +225,18 @@ expect_config(direct_write_off_control_is_explicit
 expect_refused(direct_write_off_control_requires_canonical_bus
     "--no-direct-ram-writes requires --canonical-bus"
     absent-kernel --run-api --no-direct-ram-writes --print-config)
-# Scheduled input still needs a general instruction callback. Refusing it is
-# what prevents a fast run from silently executing a different request.
-expect_refused(run_api_refuses_scheduled_input
-    "--run-api cannot be combined"
+# The app drains its touch queue between s5l8900_run() chunks. The harness can
+# therefore split a bounded chunk at an absolute count and inject a tap at the
+# same ownership boundary without installing a per-instruction observer.
+expect_config(run_api_accepts_scheduled_tap
+    "touch taps           1|--run-api|--touch"
     absent-kernel --run-api --touch 1000:160:240 --print-config)
+# Multi-report gestures and buttons still use the literal runner's
+# per-instruction retry scheduler. Refuse those rather than accepting a request
+# the app-shaped path cannot currently execute faithfully.
+expect_refused(run_api_refuses_scheduled_gesture
+    "--run-api cannot be combined"
+    absent-kernel --run-api --drag 1000:10:240:300:240 --print-config)
 # Replacement HLE now uses the same bounded exact-PC hook as the experimental
 # iOS build, so this combination is the faithful way to test that product path.
 expect_config(run_api_accepts_replacement_hle
