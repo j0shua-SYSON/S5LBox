@@ -8508,3 +8508,76 @@ and pipeline rates, preserves exact semantics, and is cheap enough to retain.
 It also proves that these failed privileged re-entries were not the dominant
 frame limiter. The next iteration must target the remaining fetch-window and
 entry costs or the guest-to-display cadence directly.
+
+### 2026-08-10: privileged window continuation cuts entries but stays off by default
+
+Commit `88c7ed2f16a907c0321b8a0f539179c7e11f94b2` extends the resident
+compact interval across a 1 KiB fetch-window boundary in privileged mode. The
+callback first accounts the completed prefix through the ordinary machine and
+device boundary, then rechecks interrupts and translation state before
+publishing another exact FETCH witness. Walks, faults, MMIO, control-state
+changes and the unchanged instruction remain outside the callback. Follow-up
+oracle fixes through `ceda36b4a2c612a34a7384a6e91a814e2b262e47` prove the
+serialized-machine contract and require fewer outer entries without runtime
+code generation.
+
+The first physical test used the existing all-window-refill switch. Across
+three exact Settings pairs, enabling both User and privileged continuation cut
+median compact calls by 42.61%, fallback retirements by 43.97%, privileged
+calls by 49.81% and fetch-refill attempts by 81.03%. That was substantial
+engine efficiency. It was also a bad product result: median endpoint FPS fell
+from 15 to 10, changed scanout signatures/s fell 42.0%, and the measured
+scanout host interval did not get shorter. The result could not identify the
+privileged path alone because its OFF arm also disabled the older User-mode
+continuation.
+
+Commit `dafe857cfce7a8e7132a8895a4bd3e4c280fd6e3` therefore keeps the
+implementation but separates its rollout. User-mode continuation remains on
+in both arms and in the stock app. Privileged continuation has its own
+nonempty `engine.compact-privileged-window-refill-on` experiment marker and
+defaults off. Conflicting User-only or all-window-refill controls fail loudly.
+Local strict CTest passes 65/65. Exact-SHA core run `31321723729` and stock-
+iPhone build run `31321723747` are green.
+
+Both Apple-arm64 jobs report the same byte-exact privileged-window oracle:
+8,288 guest instructions, 63 refills, 1,087 boundary retirements, 186 compact
+calls OFF versus 153 ON, and 62 versus 32 outer fallbacks. The output records
+`user-window-refill=on-both`, `privileged-control=isolated`, serialized-machine
+equality, real device ticks and no runtime code generation. The downloaded IPA
+SHA-256 is
+`869108E6BB2A0510ACE117B6A580175D02019B3567223B5C8E42358CF454ACD0`.
+Its extracted and installed executable both hash to
+`BFCEF4295DC1E760BD2E24AC462D2556AAAD9A7C46C9A91C16B0CD6A9090A7C6`.
+
+The iPhone 6s Plus then ran OFF/ON, ON/OFF, OFF/ON from the same authenticated
+7,212 M snapshot, writable image, active host clock, Settings touch and 160 M
+instruction cap. Every arm consumed the restore and touch markers, accepted
+both touch transitions, reached the populated Settings screen, and preserved
+work-image SHA-256
+`3DFEB6129FDE451B7DC4BBF66E67082407D313ABF486E3275BA04F8FBFB138FD`.
+Snapshot and external-media state hashes were also identical in all arms.
+
+| isolated physical-A9 metric | privileged OFF samples | privileged ON samples | median ON vs OFF |
+|---|---:|---:|---:|
+| endpoint FPS | 10, 17, 15 | 15, 8, 17 | 15 vs 15; no gain |
+| changed scanout signatures | 13, 14, 14 | 14, 10, 12 | 12 vs 14; -14.29% |
+| changed scanout signatures/s | 2.845, 2.861, 2.844 | 2.991, 1.959, 2.369 | 2.369 vs 2.845; -16.73% |
+| scanout host interval, s | 4.218199, 4.544131, 4.571654 | 4.345907, 4.593015, 4.643237 | 4.593015 vs 4.544131; +1.08% |
+| maximum scanout-attempt gap, ms | 38.163, 40.683, 42.970 | 39.104, 40.077, 37.752 | 39.104 vs 40.683; -3.88% |
+| attempt gaps over 100 / 500 ms | 0 / 0 in every arm | 0 / 0 in every arm | no stall difference |
+| maximum changed-scanout gap, ms | 3067.215, 3388.880, 3352.018 | 3206.162, 3505.590, 3416.189 | 3416.189 vs 3352.018; +1.91% |
+| compact calls | 4,230,621; 4,255,180; 4,308,932 | 2,452,022; 2,387,666; 2,395,521 | -43.70% |
+| privileged compact calls | 3,723,527; 3,748,350; 3,803,113 | 1,945,372; 1,881,680; 1,887,752 | -49.64% |
+| compact native retirements | 151,762,675; 151,948,168; 151,933,239 | 152,228,241; 152,097,501; 152,081,092 | +0.11% |
+| compact fallback retirements | 4,916,986; 4,917,549; 4,903,656 | 4,912,786; 4,915,199; 4,922,069 | -0.04% |
+| fetch-refill attempts | 2,304,318; 2,318,188; 2,353,328 | 421,208; 414,983; 416,587 | -82.03% |
+| privileged window refills | 0, 0, 0 | 2,127,877; 2,107,278; 2,108,528 | exact control separation |
+
+Brutal status: **retain the code, reject it as the stock default, and do not
+call it an FPS improvement.** The entry and fetch-work reductions are large,
+stable and worth keeping for later composition with a real cadence fix. The
+isolated median FPS is unchanged, mean endpoint FPS falls from 14.0 to 13.3,
+and changed-signature cadence is worse. This neither reaches 30 FPS nor fixes
+the reported 2 FPS navigation experience. Raw evidence is retained under
+`work/artifacts/dafe857-a9-privileged-window-isolated/`; the phone was returned
+to the marker-free stock policy after the comparison.
