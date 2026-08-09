@@ -259,6 +259,9 @@ static void test_app_settings_reach_the_guest(const uint8_t *kernel,
  *   rootfs-work.img, state.snap, state.snap.mdstate,
  *   state.snap.restore-once
  *
+ * Optional nonempty host-policy controls in the same directory are honored,
+ * including clock.active-host-off when that policy is compiled into the app.
+ *
  * This reaches the same VMFirmwareBoot entry point as the phone.  It is not a
  * core-only snapshot test: the app must open the external disk, create both md
  * bridges, apply their sidecar, load the machine, and consume the marker.
@@ -294,6 +297,12 @@ static void test_saved_state_restore_fixture(void) {
     FILE *window_refill_off_file = fopen(window_refill_off_marker, "rb");
     bool expect_window_refill_off = window_refill_off_file != NULL;
     if (window_refill_off_file) fclose(window_refill_off_file);
+    char active_clock_off_marker[VM_FW_BOOT_PATH_CAPACITY + 64u];
+    snprintf(active_clock_off_marker, sizeof active_clock_off_marker,
+             "%s/%s", fixture, VM_FW_BOOT_ACTIVE_CLOCK_OFF_FILE);
+    FILE *active_clock_off_file = fopen(active_clock_off_marker, "rb");
+    bool expect_active_clock_off = active_clock_off_file != NULL;
+    if (active_clock_off_file) fclose(active_clock_off_file);
 
     bool values[VM_BOOT_OPTION_MAX];
     for (unsigned i = 0; i < VM_BOOT_OPTION_MAX; i++) values[i] = false;
@@ -338,6 +347,16 @@ static void test_saved_state_restore_fixture(void) {
               "restored active scene has no CLCD window");
         CHECK(mentions(report.summary, "restored"),
               "restore summary hides what happened: %s", report.summary);
+#if defined(S5LBOX_IOS_ACTIVE_REALTIME_CLOCK)
+        CHECK((machine.active_host_now == NULL) == expect_active_clock_off,
+              "active-clock marker policy disagrees with the machine");
+        CHECK(mentions(report.summary, "active-clock-off control") ==
+                  expect_active_clock_off,
+              "active-clock marker is hidden or falsely reported: %s",
+              report.summary);
+#else
+        (void)expect_active_clock_off;
+#endif
 #if defined(S5LBOX_STATIC_A64_ENGINE)
         if (expect_interpreter)
             CHECK(mentions(report.summary, "interpreter control"),

@@ -92,6 +92,12 @@ extern "C" {
  * policy, never guest state or a stock-device dependency. */
 #define VM_FW_BOOT_COMPACT_WINDOW_REFILL_OFF_FILE \
     "engine.compact-window-refill-off"
+/* Same-binary timing control for an exact navigation replay. A nonempty
+ * marker leaves real-time WFI pacing enabled but does not install the active
+ * host clock, so the guest advances active time from retired instructions as
+ * it did before that optional product policy. Ordinary machines never contain
+ * this file; it is diagnostic host policy, not guest state. */
+#define VM_FW_BOOT_ACTIVE_CLOCK_OFF_FILE "clock.active-host-off"
 
 /* How much free space rootfs_work_create() adds to the volume. The stock
  * rootfs ships with ZERO free blocks, so without this launchd can create

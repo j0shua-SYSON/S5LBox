@@ -496,6 +496,7 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
     bool forced_interpreter = false;
     bool compact_user_only = false;
     bool compact_window_refill_off = false;
+    bool active_clock_off = false;
 #if defined(S5LBOX_STATIC_A64_ENGINE)
     /*
      * One signed binary supplies both halves of the physical A/B.  The marker
@@ -565,6 +566,20 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
 #endif
     (void)compact_user_only;
     (void)compact_window_refill_off;
+
+#if defined(S5LBOX_IOS_ACTIVE_REALTIME_CLOCK)
+    char active_clock_off_path[VM_FW_BOOT_PATH_CAPACITY + 64u];
+    if (!join_path(active_clock_off_path, sizeof active_clock_off_path,
+                   paths->work, VM_FW_BOOT_ACTIVE_CLOCK_OFF_FILE)) {
+        set_detail(report->detail, sizeof report->detail,
+                   "The active-clock control path is too long to use.");
+        set_detail(report->summary, sizeof report->summary, "path too long");
+        return false;
+    }
+    active_clock_off = file_size(active_clock_off_path) > 0u;
+#else
+    (void)active_clock_off;
+#endif
 
     vm_firmware_boot_state_t state;
     vm_firmware_boot_probe(paths, &state);
@@ -715,7 +730,8 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
      * reverting would recreate the device-dependent navigation cadence this
      * build is intended to measure.
      */
-    if (!s5l8900_set_active_host_clock(
+    if (!active_clock_off &&
+        !s5l8900_set_active_host_clock(
             machine, vm_firmware_active_now, NULL)) {
         (void)file_block_close(boot->media);
         set_detail(report->detail, sizeof report->detail,
@@ -806,12 +822,14 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
     }
     if (restored) {
         (void)snprintf(report->summary, sizeof report->summary,
-                       "iPhone OS 3.1.3 restored at %.1f M insn (%s)",
-                       (double)machine->cpu.cycles / 1000000.0, engine_mode);
+                       "iPhone OS 3.1.3 restored at %.1f M insn (%s%s)",
+                       (double)machine->cpu.cycles / 1000000.0, engine_mode,
+                       active_clock_off ? ", active-clock-off control" : "");
     } else {
         (void)snprintf(report->summary, sizeof report->summary,
-                       "iPhone OS 3.1.3 kernel, root on /dev/md0 (%s)",
-                       engine_mode);
+                       "iPhone OS 3.1.3 kernel, root on /dev/md0 (%s%s)",
+                       engine_mode,
+                       active_clock_off ? ", active-clock-off control" : "");
     }
 #endif
     report->summary[sizeof report->summary - 1u] = '\0';
