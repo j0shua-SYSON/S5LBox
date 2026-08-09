@@ -99,6 +99,14 @@ typedef struct {
     uint64_t fetch_refill_hits;
     uint64_t fetch_refill_skips;
     uint64_t known_negative_bypasses;
+    uint64_t mbx_2d_candidates;
+    uint64_t mbx_2d_completed;
+    uint64_t mbx_2d_rejected;
+    uint64_t mbx_2d_bytes;
+    uint64_t mbx_3d_candidates;
+    uint64_t mbx_3d_completed;
+    uint64_t mbx_3d_rejected;
+    uint64_t mbx_3d_pixels;
 } vm_execution_telemetry_observation_t;
 
 typedef struct {
@@ -110,7 +118,12 @@ typedef struct {
     uint64_t scanout_changes;
     uint64_t scanout_first_host_ns;
     uint64_t scanout_last_host_ns;
+    uint64_t scanout_max_attempt_gap_ns;
+    uint64_t scanout_attempt_gaps_over_100ms;
+    uint64_t scanout_attempt_gaps_over_500ms;
     uint64_t scanout_last_valid_host_ns;
+    uint64_t scanout_last_change_host_ns;
+    uint64_t scanout_max_change_gap_ns;
     uint64_t scanout_last_valid_timer_ticks;
     uint64_t scanout_last_valid_clcd_frames;
     uint64_t scanout_reason_counts[VM_FRAME_SCANOUT_REASON_COUNT];
@@ -132,12 +145,32 @@ typedef struct {
     vm_execution_telemetry_observation_t execution_first;
     vm_execution_telemetry_observation_t execution_last;
 
+    /* Work retired across the single worst emulator-thread scanout gap. This
+     * is the causal witness for a visible stall: renderer work here implicates
+     * synchronous MBX; no renderer work but a normal instruction slice points
+     * back at guest execution instead. */
+    bool scanout_max_gap_execution_captured;
+    uint64_t scanout_max_gap_cpu_retired;
+    uint64_t scanout_max_gap_mbx_2d_candidates;
+    uint64_t scanout_max_gap_mbx_2d_completed;
+    uint64_t scanout_max_gap_mbx_2d_rejected;
+    uint64_t scanout_max_gap_mbx_2d_bytes;
+    uint64_t scanout_max_gap_mbx_3d_candidates;
+    uint64_t scanout_max_gap_mbx_3d_completed;
+    uint64_t scanout_max_gap_mbx_3d_rejected;
+    uint64_t scanout_max_gap_mbx_3d_pixels;
+
     uint64_t layer_attempts;
     uint64_t layer_accepted;
     uint64_t layer_rejected;
     uint64_t layer_changes;
     uint64_t layer_first_host_ns;
     uint64_t layer_last_host_ns;
+    uint64_t layer_max_attempt_gap_ns;
+    uint64_t layer_attempt_gaps_over_100ms;
+    uint64_t layer_attempt_gaps_over_500ms;
+    uint64_t layer_last_change_host_ns;
+    uint64_t layer_max_change_gap_ns;
     uint64_t layer_total_work_ns;
     uint64_t layer_max_work_ns;
 } vm_frame_telemetry_snapshot_t;

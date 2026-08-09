@@ -167,6 +167,12 @@ static uint64_t mbx_3d_completed;
 static uint64_t mbx_3d_rejected;
 static uint64_t mbx_3d_pixels;
 
+static void mbx_counter_add(uint64_t *counter, uint64_t amount) {
+    if (!counter) return;
+    *counter = *counter > UINT64_MAX - amount
+        ? UINT64_MAX : *counter + amount;
+}
+
 static void mbx_trace_dump(void);
 
 static bool mbx_trace_enabled(void) {
@@ -970,7 +976,8 @@ static bool mbx_execute_2d_submit(s5l_mbx_t *m, const arm_bus_t *bus,
 }
 
 bool s5l_mbx_process_2d(s5l_mbx_t *m, const arm_bus_t *bus,
-                        uint32_t written_off, uint32_t value) {
+                        uint32_t written_off, uint32_t value,
+                        s5l_mbx_telemetry_t *telemetry) {
     if (!m || !m->edram || written_off < S5L_MBX_2D_RING_BASE ||
         written_off >= S5L_MBX_2D_RING_BASE + S5L_MBX_2D_RING_SIZE ||
         (written_off & 3u))
@@ -995,14 +1002,18 @@ bool s5l_mbx_process_2d(s5l_mbx_t *m, const arm_bus_t *bus,
     /* Count zero is the explicit >=256/legacy-unknown marker. Recording 256
      * is a truthful lower bound; normal measured batches retain exact counts. */
     uint32_t metric_count = command_count ? command_count : 256u;
-    mbx_2d_candidates += metric_count;
+    mbx_counter_add(&mbx_2d_candidates, metric_count);
+    if (telemetry)
+        mbx_counter_add(&telemetry->candidates_2d, metric_count);
 
     const char *why = "unknown rejection";
     uint64_t committed = 0u;
     bool ok = mbx_execute_2d_submit(m, bus, packet_off, command_count,
                                     &why, &committed);
     if (!ok) {
-        mbx_2d_rejected += metric_count;
+        mbx_counter_add(&mbx_2d_rejected, metric_count);
+        if (telemetry)
+            mbx_counter_add(&telemetry->rejected_2d, metric_count);
         if (mbx_trace_state == 1)
             fprintf(stderr, "MBX2D reject ring+0x%04x (%u commands): %s\n",
                     packet_off - S5L_MBX_2D_RING_BASE,
@@ -1013,8 +1024,12 @@ bool s5l_mbx_process_2d(s5l_mbx_t *m, const arm_bus_t *bus,
     /* Completion belongs to the whole atomic submit whose pixels were just
      * committed, not to the unrelated startup BACKGROUND_TAG write at 0x6d8. */
     m->status |= S5L_MBX_STATUS_2D_SYNC;
-    mbx_2d_completed += command_count;
-    mbx_2d_bytes += committed;
+    mbx_counter_add(&mbx_2d_completed, command_count);
+    mbx_counter_add(&mbx_2d_bytes, committed);
+    if (telemetry) {
+        mbx_counter_add(&telemetry->completed_2d, command_count);
+        mbx_counter_add(&telemetry->bytes_2d, committed);
+    }
     if (mbx_trace_state == 1)
         fprintf(stderr,
                 "MBX2D complete ring+0x%04x (%u commands): %llu bytes\n",
@@ -3217,17 +3232,20 @@ static bool mbx_execute_textured_sprite(s5l_mbx_t *m,
 }
 
 bool s5l_mbx_process_3d(s5l_mbx_t *m, const arm_bus_t *bus,
-                        uint32_t written_off, uint32_t value) {
+                        uint32_t written_off, uint32_t value,
+                        s5l_mbx_telemetry_t *telemetry) {
     if (!m || written_off != S5L_MBX_STARTRENDER || value != 1u) return false;
 
-    mbx_3d_candidates++;
+    mbx_counter_add(&mbx_3d_candidates, 1u);
+    if (telemetry) mbx_counter_add(&telemetry->candidates_3d, 1u);
     const char *why = "unknown rejection";
     uint32_t pixels = 0u;
     if (!mbx_execute_first_tiled_over(m, bus, &why, &pixels) &&
         !mbx_execute_status_sprite(m, bus, &why, &pixels) &&
         !mbx_execute_textured_sprite(m, bus, &why, &pixels) &&
         !mbx_execute_solid_quad(m, bus, &why, &pixels)) {
-        mbx_3d_rejected++;
+        mbx_counter_add(&mbx_3d_rejected, 1u);
+        if (telemetry) mbx_counter_add(&telemetry->rejected_3d, 1u);
         if (mbx_trace_state == 1)
             fprintf(stderr, "MBX3D reject STARTRENDER: %s\n", why);
         return false;
@@ -3239,8 +3257,12 @@ bool s5l_mbx_process_3d(s5l_mbx_t *m, const arm_bus_t *bus,
     m->status |= S5L_MBX_STATUS_ISP |
                  S5L_MBX_STATUS_RENDER_COMPLETE |
                  S5L_MBX_STATUS_EVM_DALLOC;
-    mbx_3d_completed++;
-    mbx_3d_pixels += pixels;
+    mbx_counter_add(&mbx_3d_completed, 1u);
+    mbx_counter_add(&mbx_3d_pixels, pixels);
+    if (telemetry) {
+        mbx_counter_add(&telemetry->completed_3d, 1u);
+        mbx_counter_add(&telemetry->pixels_3d, pixels);
+    }
     if (mbx_trace_state == 1)
         fprintf(stderr, "MBX3D complete STARTRENDER: %u pixels\n", pixels);
     return true;

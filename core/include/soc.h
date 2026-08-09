@@ -926,6 +926,28 @@ typedef struct {
     uint8_t *edram;
 } s5l_mbx_t;
 
+/*
+ * Host-only work ledger for one machine's synchronous MBX submissions.
+ *
+ * These totals deliberately live outside s5l_mbx_t: that struct is guest
+ * device state and has an independently guarded snapshot layout. The ledger
+ * answers a different question -- how much native renderer work happened
+ * between two host observations -- so snapshot restore preserves the live
+ * totals instead of rewinding them with the guest. Updating it costs only a
+ * handful of integer additions at a real submit boundary; ordinary register
+ * and EDRAM traffic does not touch it.
+ */
+typedef struct {
+    uint64_t candidates_2d;
+    uint64_t completed_2d;
+    uint64_t rejected_2d;
+    uint64_t bytes_2d;
+    uint64_t candidates_3d;
+    uint64_t completed_3d;
+    uint64_t rejected_3d;
+    uint64_t pixels_3d;
+} s5l_mbx_telemetry_t;
+
 void     s5l_mbx_reset(s5l_mbx_t *m);
 uint32_t s5l_mbx_read(s5l_mbx_t *m, uint32_t off);
 void     s5l_mbx_write(s5l_mbx_t *m, uint32_t off, uint32_t val);
@@ -938,7 +960,8 @@ void     s5l_mbx_write(s5l_mbx_t *m, uint32_t off, uint32_t val);
  * true only after a decoded copy, measured premultiplied/global-alpha blend,
  * or captured lower-screen black fill committed pixels and raised 2D_SYNC. */
 bool     s5l_mbx_process_2d(s5l_mbx_t *m, const arm_bus_t *bus,
-                            uint32_t written_off, uint32_t value);
+                            uint32_t written_off, uint32_t value,
+                            s5l_mbx_telemetry_t *telemetry);
 
 /* Attempt an exactly decoded tiled 3D object after a STARTRENDER write. The
  * accepted forms are the captured 320x96 premultiplied source-over rectangle
@@ -948,7 +971,8 @@ bool     s5l_mbx_process_2d(s5l_mbx_t *m, const arm_bus_t *bus,
  * Returns true only after staged pixels commit and the three events AppleMBX
  * requires for 3DIdle (ISP, render complete, EVM deallocate) rise. */
 bool     s5l_mbx_process_3d(s5l_mbx_t *m, const arm_bus_t *bus,
-                            uint32_t written_off, uint32_t value);
+                            uint32_t written_off, uint32_t value,
+                            s5l_mbx_telemetry_t *telemetry);
 
 /*
  * THE LINE THE DEVICE TREE SAYS THIS DEVICE HAS. /arm-io/mbx carries
@@ -3751,6 +3775,11 @@ typedef struct {
      */
     uint64_t        interpreter_tick_batches;
     uint64_t        interpreter_tick_batched_retired;
+
+    /* Per-machine native renderer work, sampled by the app at its existing
+     * scanout boundary. Host diagnostics only: snap_mach() deliberately
+     * preserves these running totals across a guest-state restore. */
+    s5l_mbx_telemetry_t mbx_telemetry;
 } s5l8900_t;
 
 /*

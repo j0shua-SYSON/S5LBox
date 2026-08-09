@@ -527,6 +527,7 @@ static void test_springboard_settings_black_fill_batch(void) {
         0x70000000u, 0x70000000u, 0x70000000u, 0x70000000u,
     };
     uint32_t packets[6][16];
+    uint64_t expected_bytes = 0u;
 
     s5l8900_t m;
     CHECK(s5l8900_init(&m, RAM_BASE, RAM_SIZE),
@@ -541,6 +542,8 @@ static void test_springboard_settings_black_fill_batch(void) {
         packets[i][8] = ((uint32_t)rects[i][0] << 16) | rects[i][1];
         packets[i][9] = ((uint32_t)rects[i][2] << 16) | rects[i][3];
         write_packet(&m, RING + i * 0x40u, packets[i], 16u);
+        expected_bytes += (uint64_t)(rects[i][2] - rects[i][0]) *
+                          (uint64_t)(rects[i][3] - rects[i][1]) * 4u;
     }
     test_gpu_write32(&m, target + 31u * STRIDE + 3u * 4u, 0xff112233u);
     test_gpu_write32(&m, target + 32u * STRIDE + 2u * 4u, 0xff445566u);
@@ -566,6 +569,16 @@ static void test_springboard_settings_black_fill_batch(void) {
           "bounded Settings fills changed pixels outside their rectangles");
     CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0x400u,
           "Settings fill batch did not raise exactly 2D completion");
+    CHECK(m.mbx_telemetry.candidates_2d == 6u &&
+          m.mbx_telemetry.completed_2d == 6u &&
+          m.mbx_telemetry.rejected_2d == 0u &&
+          m.mbx_telemetry.bytes_2d == expected_bytes,
+          "Settings 2D work ledger=%llu/%llu/%llu/%llu, expected 6/6/0/%llu",
+          (unsigned long long)m.mbx_telemetry.candidates_2d,
+          (unsigned long long)m.mbx_telemetry.completed_2d,
+          (unsigned long long)m.mbx_telemetry.rejected_2d,
+          (unsigned long long)m.mbx_telemetry.bytes_2d,
+          (unsigned long long)expected_bytes);
 
     m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x400u);
     test_gpu_write32(&m, target + 32u * STRIDE + 3u * 4u, 0xff123456u);
@@ -579,6 +592,15 @@ static void test_springboard_settings_black_fill_batch(void) {
           "out-of-bounds late Settings fill committed part of the batch");
     CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
           "out-of-bounds Settings fill raised completion");
+    CHECK(m.mbx_telemetry.candidates_2d == 12u &&
+          m.mbx_telemetry.completed_2d == 6u &&
+          m.mbx_telemetry.rejected_2d == 6u &&
+          m.mbx_telemetry.bytes_2d == expected_bytes,
+          "rejected Settings batch ledger=%llu/%llu/%llu/%llu",
+          (unsigned long long)m.mbx_telemetry.candidates_2d,
+          (unsigned long long)m.mbx_telemetry.completed_2d,
+          (unsigned long long)m.mbx_telemetry.rejected_2d,
+          (unsigned long long)m.mbx_telemetry.bytes_2d);
 
     s5l8900_free(&m);
 }
@@ -1008,6 +1030,15 @@ static void test_first_tiled_premultiplied_over(void) {
     CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0x4cu,
           "completed tiled render status=%08x, expect ISP/render/EVM",
           m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS));
+    CHECK(m.mbx_telemetry.candidates_3d == 1u &&
+          m.mbx_telemetry.completed_3d == 1u &&
+          m.mbx_telemetry.rejected_3d == 0u &&
+          m.mbx_telemetry.pixels_3d == WIDTH * HEIGHT,
+          "first 3D work ledger=%llu/%llu/%llu/%llu",
+          (unsigned long long)m.mbx_telemetry.candidates_3d,
+          (unsigned long long)m.mbx_telemetry.completed_3d,
+          (unsigned long long)m.mbx_telemetry.rejected_3d,
+          (unsigned long long)m.mbx_telemetry.pixels_3d);
 
     m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x4cu);
     test_gpu_write32(&m, target + TOP * TARGET_STRIDE, 0x12345678u);
@@ -1027,6 +1058,15 @@ static void test_first_tiled_premultiplied_over(void) {
           "late missing 3D PTE left a partially rendered rectangle");
     CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
           "late missing 3D PTE raised completion");
+    CHECK(m.mbx_telemetry.candidates_3d == 3u &&
+          m.mbx_telemetry.completed_3d == 1u &&
+          m.mbx_telemetry.rejected_3d == 2u &&
+          m.mbx_telemetry.pixels_3d == WIDTH * HEIGHT,
+          "rejected 3D work ledger=%llu/%llu/%llu/%llu",
+          (unsigned long long)m.mbx_telemetry.candidates_3d,
+          (unsigned long long)m.mbx_telemetry.completed_3d,
+          (unsigned long long)m.mbx_telemetry.rejected_3d,
+          (unsigned long long)m.mbx_telemetry.pixels_3d);
 
     /* r379 captured the overwritten render before r377's retained one. It
      * reused this exact quad/source, but narrowed the tiles to y=1..6 and the

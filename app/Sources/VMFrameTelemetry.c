@@ -19,6 +19,8 @@ typedef struct {
     bool layer_signature_valid;
     uint64_t scanout_signature;
     uint64_t layer_signature;
+    bool execution_previous_valid;
+    vm_execution_telemetry_observation_t execution_previous;
 } vm_frame_telemetry_state_t;
 
 static vm_frame_telemetry_state_t g_vm_frame_telemetry;
@@ -172,7 +174,15 @@ static bool vm_execution_telemetry_not_before(
            VM_EXEC_NOT_BEFORE(fetch_refill_attempts) &&
            VM_EXEC_NOT_BEFORE(fetch_refill_hits) &&
            VM_EXEC_NOT_BEFORE(fetch_refill_skips) &&
-           VM_EXEC_NOT_BEFORE(known_negative_bypasses);
+           VM_EXEC_NOT_BEFORE(known_negative_bypasses) &&
+           VM_EXEC_NOT_BEFORE(mbx_2d_candidates) &&
+           VM_EXEC_NOT_BEFORE(mbx_2d_completed) &&
+           VM_EXEC_NOT_BEFORE(mbx_2d_rejected) &&
+           VM_EXEC_NOT_BEFORE(mbx_2d_bytes) &&
+           VM_EXEC_NOT_BEFORE(mbx_3d_candidates) &&
+           VM_EXEC_NOT_BEFORE(mbx_3d_completed) &&
+           VM_EXEC_NOT_BEFORE(mbx_3d_rejected) &&
+           VM_EXEC_NOT_BEFORE(mbx_3d_pixels);
 #undef VM_EXEC_NOT_BEFORE
 }
 
@@ -192,9 +202,13 @@ void vm_frame_telemetry_note_execution(
         state->execution_captured = true;
         state->execution_consistent = true;
         state->execution_first = *observation;
-    } else if (!vm_execution_telemetry_not_before(
-                   observation, &state->execution_last)) {
-        state->execution_consistent = false;
+        g_vm_frame_telemetry.execution_previous_valid = false;
+    } else {
+        g_vm_frame_telemetry.execution_previous = state->execution_last;
+        g_vm_frame_telemetry.execution_previous_valid = true;
+        if (!vm_execution_telemetry_not_before(
+                observation, &state->execution_last))
+            state->execution_consistent = false;
     }
     state->execution_last = *observation;
     state->execution_observations++;
@@ -232,10 +246,50 @@ void vm_frame_telemetry_note_scanout(
 
     vm_frame_telemetry_snapshot_t *state =
         &g_vm_frame_telemetry.public_state;
+    uint64_t attempt_gap = 0u;
+    if (state->scanout_last_host_ns != 0u && host_ns != 0u &&
+        host_ns >= state->scanout_last_host_ns)
+        attempt_gap = host_ns - state->scanout_last_host_ns;
     state->scanout_attempts++;
     if (state->scanout_attempts == UINT64_C(1))
         state->scanout_first_host_ns = host_ns;
     state->scanout_last_host_ns = host_ns;
+    if (attempt_gap > UINT64_C(100000000))
+        state->scanout_attempt_gaps_over_100ms++;
+    if (attempt_gap > UINT64_C(500000000))
+        state->scanout_attempt_gaps_over_500ms++;
+    if (attempt_gap > state->scanout_max_attempt_gap_ns) {
+        state->scanout_max_attempt_gap_ns = attempt_gap;
+        state->scanout_max_gap_execution_captured = false;
+        if (g_vm_frame_telemetry.execution_previous_valid &&
+            vm_execution_telemetry_not_before(
+                &state->execution_last,
+                &g_vm_frame_telemetry.execution_previous)) {
+#define VM_STALL_DELTA(field_) \
+    (state->execution_last.field_ - \
+     g_vm_frame_telemetry.execution_previous.field_)
+            state->scanout_max_gap_execution_captured = true;
+            state->scanout_max_gap_cpu_retired =
+                VM_STALL_DELTA(cpu_retired);
+            state->scanout_max_gap_mbx_2d_candidates =
+                VM_STALL_DELTA(mbx_2d_candidates);
+            state->scanout_max_gap_mbx_2d_completed =
+                VM_STALL_DELTA(mbx_2d_completed);
+            state->scanout_max_gap_mbx_2d_rejected =
+                VM_STALL_DELTA(mbx_2d_rejected);
+            state->scanout_max_gap_mbx_2d_bytes =
+                VM_STALL_DELTA(mbx_2d_bytes);
+            state->scanout_max_gap_mbx_3d_candidates =
+                VM_STALL_DELTA(mbx_3d_candidates);
+            state->scanout_max_gap_mbx_3d_completed =
+                VM_STALL_DELTA(mbx_3d_completed);
+            state->scanout_max_gap_mbx_3d_rejected =
+                VM_STALL_DELTA(mbx_3d_rejected);
+            state->scanout_max_gap_mbx_3d_pixels =
+                VM_STALL_DELTA(mbx_3d_pixels);
+#undef VM_STALL_DELTA
+        }
+    }
     if (state->scanout_attempts > UINT64_C(1) &&
         state->scanout_last.reason == observed.reason) {
         state->scanout_last_reason_streak++;
@@ -272,9 +326,19 @@ void vm_frame_telemetry_note_scanout(
             signature != g_vm_frame_telemetry.scanout_signature) {
             g_vm_frame_telemetry.scanout_signature_valid = true;
             g_vm_frame_telemetry.scanout_signature = signature;
+            if (state->scanout_last_change_host_ns != 0u && host_ns != 0u &&
+                host_ns >= state->scanout_last_change_host_ns) {
+                uint64_t gap = host_ns - state->scanout_last_change_host_ns;
+                if (gap > state->scanout_max_change_gap_ns)
+                    state->scanout_max_change_gap_ns = gap;
+            }
+            state->scanout_last_change_host_ns = host_ns;
             state->scanout_changes++;
         }
     }
+    /* One execution pair belongs to one scanout interval. Do not let a caller
+     * that omits the next execution sample attach stale work to a later gap. */
+    g_vm_frame_telemetry.execution_previous_valid = false;
     vm_frame_telemetry_unlock();
 }
 
@@ -295,10 +359,20 @@ void vm_frame_telemetry_note_layer_submission(
 
     vm_frame_telemetry_snapshot_t *state =
         &g_vm_frame_telemetry.public_state;
+    uint64_t attempt_gap = 0u;
+    if (state->layer_last_host_ns != 0u && host_ns != 0u &&
+        host_ns >= state->layer_last_host_ns)
+        attempt_gap = host_ns - state->layer_last_host_ns;
     state->layer_attempts++;
     if (state->layer_attempts == UINT64_C(1))
         state->layer_first_host_ns = host_ns;
     state->layer_last_host_ns = host_ns;
+    if (attempt_gap > state->layer_max_attempt_gap_ns)
+        state->layer_max_attempt_gap_ns = attempt_gap;
+    if (attempt_gap > UINT64_C(100000000))
+        state->layer_attempt_gaps_over_100ms++;
+    if (attempt_gap > UINT64_C(500000000))
+        state->layer_attempt_gaps_over_500ms++;
     if (UINT64_MAX - state->layer_total_work_ns < work_ns)
         state->layer_total_work_ns = UINT64_MAX;
     else
@@ -313,6 +387,13 @@ void vm_frame_telemetry_note_layer_submission(
              signature != g_vm_frame_telemetry.layer_signature)) {
             g_vm_frame_telemetry.layer_signature_valid = true;
             g_vm_frame_telemetry.layer_signature = signature;
+            if (state->layer_last_change_host_ns != 0u && host_ns != 0u &&
+                host_ns >= state->layer_last_change_host_ns) {
+                uint64_t gap = host_ns - state->layer_last_change_host_ns;
+                if (gap > state->layer_max_change_gap_ns)
+                    state->layer_max_change_gap_ns = gap;
+            }
+            state->layer_last_change_host_ns = host_ns;
             state->layer_changes++;
         }
     } else {

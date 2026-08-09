@@ -339,7 +339,36 @@ static void test_device_state_round_trips(void) {
     a->cpu_hz = 412000000u; a->tb_hz = 6000000u; a->tb_accum = 1234567u;
     a->stub_declare_failures = 0;
 
+    /* Renderer work is host measurement, not guest state. A restore must
+     * preserve the destination machine's live ledger rather than importing
+     * or clearing it with the snapshot. */
+    a->mbx_telemetry.candidates_2d = 101u;
+    a->mbx_telemetry.completed_2d = 102u;
+    a->mbx_telemetry.rejected_2d = 103u;
+    a->mbx_telemetry.bytes_2d = 104u;
+    a->mbx_telemetry.candidates_3d = 105u;
+    a->mbx_telemetry.completed_3d = 106u;
+    a->mbx_telemetry.rejected_3d = 107u;
+    a->mbx_telemetry.pixels_3d = 108u;
+    b->mbx_telemetry.candidates_2d = 201u;
+    b->mbx_telemetry.completed_2d = 202u;
+    b->mbx_telemetry.rejected_2d = 203u;
+    b->mbx_telemetry.bytes_2d = 204u;
+    b->mbx_telemetry.candidates_3d = 205u;
+    b->mbx_telemetry.completed_3d = 206u;
+    b->mbx_telemetry.rejected_3d = 207u;
+    b->mbx_telemetry.pixels_3d = 208u;
+
     CHECK(roundtrip(a, b), "device round trip");
+    CHECK(b->mbx_telemetry.candidates_2d == 201u &&
+          b->mbx_telemetry.completed_2d == 202u &&
+          b->mbx_telemetry.rejected_2d == 203u &&
+          b->mbx_telemetry.bytes_2d == 204u &&
+          b->mbx_telemetry.candidates_3d == 205u &&
+          b->mbx_telemetry.completed_3d == 206u &&
+          b->mbx_telemetry.rejected_3d == 207u &&
+          b->mbx_telemetry.pixels_3d == 208u,
+          "snapshot restore changed the live host-only MBX work ledger");
 
     SAME(uart0.ulcon); SAME(uart0.ucon); SAME(uart0.ufcon);
     SAME(uart0.umcon); SAME(uart0.ubrdiv); SAME(uart0.tx_len);

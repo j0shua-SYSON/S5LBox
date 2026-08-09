@@ -171,6 +171,14 @@ static double VMDeviceAutomationSeconds(uint64_t firstNS, uint64_t lastNS) {
         ? state.scanout_changes - 1u : 0u;
     const double scanoutChangedPerHostSecond = scanoutSeconds > 0.0
         ? (double)scanoutPostBaseline / scanoutSeconds : 0.0;
+    const uint64_t telemetryNowNS = vm_frame_telemetry_now_ns();
+    const uint64_t telemetryBoundaryNS = telemetryNowNS != 0u
+        ? telemetryNowNS : state.scanout_last_host_ns;
+    const double lastAttemptAgoSeconds =
+        state.scanout_last_host_ns != 0u &&
+        telemetryBoundaryNS >= state.scanout_last_host_ns
+        ? (double)(telemetryBoundaryNS - state.scanout_last_host_ns) / 1.0e9
+        : 0.0;
 
     const BOOL guestClockValid =
         state.scanout_guest_clock_captured &&
@@ -197,9 +205,15 @@ static double VMDeviceAutomationSeconds(uint64_t firstNS, uint64_t lastNS) {
         ? state.scanout_reason_counts[lastReasonIndex] : 0u;
     const double lastValidAgoSeconds =
         state.scanout_last_valid_host_ns != 0u &&
-        state.scanout_last_host_ns >= state.scanout_last_valid_host_ns
-        ? (double)(state.scanout_last_host_ns -
+        telemetryBoundaryNS >= state.scanout_last_valid_host_ns
+        ? (double)(telemetryBoundaryNS -
                    state.scanout_last_valid_host_ns) / 1.0e9
+        : 0.0;
+    const double lastChangeAgoSeconds =
+        state.scanout_last_change_host_ns != 0u &&
+        telemetryBoundaryNS >= state.scanout_last_change_host_ns
+        ? (double)(telemetryBoundaryNS -
+                   state.scanout_last_change_host_ns) / 1.0e9
         : 0.0;
 
     const double layerSeconds = VMDeviceAutomationSeconds(
@@ -213,6 +227,17 @@ static double VMDeviceAutomationSeconds(uint64_t firstNS, uint64_t lastNS) {
               (double)state.layer_attempts / 1.0e6
         : 0.0;
     const double layerMaxMS = (double)state.layer_max_work_ns / 1.0e6;
+    const double layerLastAttemptAgoSeconds =
+        state.layer_last_host_ns != 0u &&
+        telemetryBoundaryNS >= state.layer_last_host_ns
+        ? (double)(telemetryBoundaryNS - state.layer_last_host_ns) / 1.0e9
+        : 0.0;
+    const double layerLastChangeAgoSeconds =
+        state.layer_last_change_host_ns != 0u &&
+        telemetryBoundaryNS >= state.layer_last_change_host_ns
+        ? (double)(telemetryBoundaryNS - state.layer_last_change_host_ns) /
+              1.0e9
+        : 0.0;
 
     NSString *execution = @"execution_captured=0";
     if (state.execution_captured) {
@@ -241,7 +266,11 @@ static double VMDeviceAutomationSeconds(uint64_t firstNS, uint64_t lastNS) {
              "compact_refused_fetch_witness=%llu,"
              "compact_refused_runner=%llu,compact_zero_retired=%llu,"
              "fetch_refill_attempts=%llu,fetch_refill_hits=%llu,"
-             "fetch_refill_skips=%llu,known_negative_bypasses=%llu",
+             "fetch_refill_skips=%llu,known_negative_bypasses=%llu,"
+             "mbx_2d_candidates=%llu,mbx_2d_completed=%llu,"
+             "mbx_2d_rejected=%llu,mbx_2d_bytes=%llu,"
+             "mbx_3d_candidates=%llu,mbx_3d_completed=%llu,"
+             "mbx_3d_rejected=%llu,mbx_3d_pixels=%llu",
             state.execution_consistent ? 1u : 0u,
             (unsigned long long)state.execution_observations,
             (unsigned long long)VM_EXEC_DELTA(cpu_retired),
@@ -270,9 +299,40 @@ static double VMDeviceAutomationSeconds(uint64_t firstNS, uint64_t lastNS) {
             (unsigned long long)VM_EXEC_DELTA(fetch_refill_attempts),
             (unsigned long long)VM_EXEC_DELTA(fetch_refill_hits),
             (unsigned long long)VM_EXEC_DELTA(fetch_refill_skips),
-            (unsigned long long)VM_EXEC_DELTA(known_negative_bypasses)];
+            (unsigned long long)VM_EXEC_DELTA(known_negative_bypasses),
+            (unsigned long long)VM_EXEC_DELTA(mbx_2d_candidates),
+            (unsigned long long)VM_EXEC_DELTA(mbx_2d_completed),
+            (unsigned long long)VM_EXEC_DELTA(mbx_2d_rejected),
+            (unsigned long long)VM_EXEC_DELTA(mbx_2d_bytes),
+            (unsigned long long)VM_EXEC_DELTA(mbx_3d_candidates),
+            (unsigned long long)VM_EXEC_DELTA(mbx_3d_completed),
+            (unsigned long long)VM_EXEC_DELTA(mbx_3d_rejected),
+            (unsigned long long)VM_EXEC_DELTA(mbx_3d_pixels)];
 #undef VM_EXEC_DELTA
     }
+
+    NSString *stallWitness = state.scanout_max_gap_execution_captured
+        ? [NSString stringWithFormat:
+            @"scanout_stall_execution_captured=1,"
+             "scanout_stall_cpu_retired=%llu,"
+             "scanout_stall_mbx_2d_candidates=%llu,"
+             "scanout_stall_mbx_2d_completed=%llu,"
+             "scanout_stall_mbx_2d_rejected=%llu,"
+             "scanout_stall_mbx_2d_bytes=%llu,"
+             "scanout_stall_mbx_3d_candidates=%llu,"
+             "scanout_stall_mbx_3d_completed=%llu,"
+             "scanout_stall_mbx_3d_rejected=%llu,"
+             "scanout_stall_mbx_3d_pixels=%llu",
+            (unsigned long long)state.scanout_max_gap_cpu_retired,
+            (unsigned long long)state.scanout_max_gap_mbx_2d_candidates,
+            (unsigned long long)state.scanout_max_gap_mbx_2d_completed,
+            (unsigned long long)state.scanout_max_gap_mbx_2d_rejected,
+            (unsigned long long)state.scanout_max_gap_mbx_2d_bytes,
+            (unsigned long long)state.scanout_max_gap_mbx_3d_candidates,
+            (unsigned long long)state.scanout_max_gap_mbx_3d_completed,
+            (unsigned long long)state.scanout_max_gap_mbx_3d_rejected,
+            (unsigned long long)state.scanout_max_gap_mbx_3d_pixels]
+        : @"scanout_stall_execution_captured=0";
 
     NSString *guest = guestClockValid
         ? [NSString stringWithFormat:
@@ -281,10 +341,16 @@ static double VMDeviceAutomationSeconds(uint64_t firstNS, uint64_t lastNS) {
             scanoutChangedPerGuestSecond]
         : @"guest_clock=invalid";
     NSString *value = [NSString stringWithFormat:
-        @"frame_pipeline_v1,generation=%llu,"
+        @"frame_pipeline_v2,generation=%llu,"
          "scanout_attempts=%llu,scanout_valid=%llu,scanout_invalid=%llu,"
          "scanout_signatures=%llu,scanout_host_s=%.6f,"
          "scanout_changed_per_host_s=%.3f,%@,"
+         "scanout_attempt_gap_max_ms=%.3f,"
+         "scanout_attempt_gaps_over_100ms=%llu,"
+         "scanout_attempt_gaps_over_500ms=%llu,"
+         "scanout_change_gap_max_ms=%.3f,"
+         "scanout_last_attempt_ago_host_s=%.6f,"
+         "scanout_last_change_ago_host_s=%.6f,%@,"
          "scanout_last_reason=%s,scanout_last_reason_count=%llu,"
          "scanout_last_reason_streak=%llu,scanout_last_valid_ago_host_s=%.6f,"
          "scanout_last_scanning=%u,scanout_last_ctrl=%08x,"
@@ -295,13 +361,24 @@ static double VMDeviceAutomationSeconds(uint64_t firstNS, uint64_t lastNS) {
          "layer_attempts=%llu,layer_accepted=%llu,layer_rejected=%llu,"
          "layer_signatures=%llu,layer_host_s=%.6f,"
          "layer_changed_per_host_s=%.3f,layer_work_mean_ms=%.3f,"
-         "layer_work_max_ms=%.3f,layer_is_submission_not_display=1,%@",
+         "layer_work_max_ms=%.3f,layer_attempt_gap_max_ms=%.3f,"
+         "layer_attempt_gaps_over_100ms=%llu,"
+         "layer_attempt_gaps_over_500ms=%llu,"
+         "layer_change_gap_max_ms=%.3f,"
+         "layer_last_attempt_ago_host_s=%.6f,"
+         "layer_last_change_ago_host_s=%.6f,"
+         "layer_is_submission_not_display=1,%@",
         (unsigned long long)state.generation,
         (unsigned long long)state.scanout_attempts,
         (unsigned long long)state.scanout_valid,
         (unsigned long long)scanoutInvalid,
         (unsigned long long)state.scanout_changes,
         scanoutSeconds, scanoutChangedPerHostSecond, guest,
+        (double)state.scanout_max_attempt_gap_ns / 1.0e6,
+        (unsigned long long)state.scanout_attempt_gaps_over_100ms,
+        (unsigned long long)state.scanout_attempt_gaps_over_500ms,
+        (double)state.scanout_max_change_gap_ns / 1.0e6,
+        lastAttemptAgoSeconds, lastChangeAgoSeconds, stallWitness,
         vm_frame_scanout_reason_name(lastReason),
         (unsigned long long)lastReasonCount,
         (unsigned long long)state.scanout_last_reason_streak,
@@ -320,6 +397,11 @@ static double VMDeviceAutomationSeconds(uint64_t firstNS, uint64_t lastNS) {
         (unsigned long long)state.layer_rejected,
         (unsigned long long)state.layer_changes,
         layerSeconds, layerChangedPerHostSecond, layerMeanMS, layerMaxMS,
+        (double)state.layer_max_attempt_gap_ns / 1.0e6,
+        (unsigned long long)state.layer_attempt_gaps_over_100ms,
+        (unsigned long long)state.layer_attempt_gaps_over_500ms,
+        (double)state.layer_max_change_gap_ns / 1.0e6,
+        layerLastAttemptAgoSeconds, layerLastChangeAgoSeconds,
         execution];
     if ([screen isKindOfClass:[UIView class]])
         screen.accessibilityValue = value;

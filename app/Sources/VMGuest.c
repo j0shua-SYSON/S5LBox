@@ -265,6 +265,14 @@ static const uint8_t *vm_guest_record_display(const s5l8900_t *m,
                 s5l8900_static_a64_fetch_refill_skips(m);
             execution.known_negative_bypasses =
                 s5l8900_static_a64_known_negative_bypasses(m);
+            execution.mbx_2d_candidates = m->mbx_telemetry.candidates_2d;
+            execution.mbx_2d_completed = m->mbx_telemetry.completed_2d;
+            execution.mbx_2d_rejected = m->mbx_telemetry.rejected_2d;
+            execution.mbx_2d_bytes = m->mbx_telemetry.bytes_2d;
+            execution.mbx_3d_candidates = m->mbx_telemetry.candidates_3d;
+            execution.mbx_3d_completed = m->mbx_telemetry.completed_3d;
+            execution.mbx_3d_rejected = m->mbx_telemetry.rejected_3d;
+            execution.mbx_3d_pixels = m->mbx_telemetry.pixels_3d;
             vm_frame_telemetry_note_execution(&execution);
         }
     }

@@ -56,6 +56,14 @@ static vm_execution_telemetry_observation_t execution_observation(
     value.fetch_refill_hits = base + 23u;
     value.fetch_refill_skips = base + 24u;
     value.known_negative_bypasses = base + 25u;
+    value.mbx_2d_candidates = base + 26u;
+    value.mbx_2d_completed = base + 27u;
+    value.mbx_2d_rejected = base + 28u;
+    value.mbx_2d_bytes = base + 29u;
+    value.mbx_3d_candidates = base + 30u;
+    value.mbx_3d_completed = base + 31u;
+    value.mbx_3d_rejected = base + 32u;
+    value.mbx_3d_pixels = base + 33u;
     return value;
 }
 
@@ -191,7 +199,9 @@ static void test_boundaries_and_sampled_changes(void) {
            state.execution_first.compact_refused_privileged == 1017u &&
            state.execution_last.compact_window_fast_refills == 2014u &&
            state.execution_last.fetch_refill_skips == 2024u &&
-           state.execution_last.known_negative_bypasses == 2025u,
+           state.execution_last.known_negative_bypasses == 2025u &&
+           state.execution_last.mbx_2d_bytes == 2029u &&
+           state.execution_last.mbx_3d_pixels == 2033u,
           "execution counter endpoints are wrong");
 
     CHECK(state.layer_attempts == 4u && state.layer_accepted == 3u &&
@@ -230,9 +240,54 @@ static void test_boundaries_and_sampled_changes(void) {
           "scanout reason names are not stable");
 }
 
+static void test_worst_scanout_gap_keeps_its_work_witness(void) {
+    uint8_t pixels[800];
+    memset(pixels, 0x6b, sizeof pixels);
+    vm_frame_scanout_observation_t valid =
+        observation(VM_FRAME_SCANOUT_REASON_VALID);
+
+    vm_frame_telemetry_reset(true);
+    vm_execution_telemetry_observation_t first =
+        execution_observation(1000u);
+    vm_frame_telemetry_note_execution(&first);
+    vm_frame_telemetry_note_scanout(
+        pixels, sizeof pixels, 100u, 1u, 6000000u, 412000000u, &valid);
+
+    vm_frame_telemetry_snapshot_t state;
+    vm_frame_telemetry_snapshot(&state);
+    uint64_t anchor = state.scanout_last_host_ns;
+    uint64_t now = anchor;
+    for (unsigned i = 0; i < 1000000u && now <= anchor; i++)
+        now = vm_frame_telemetry_now_ns();
+
+    vm_execution_telemetry_observation_t second =
+        execution_observation(1100u);
+    vm_frame_telemetry_note_execution(&second);
+    vm_frame_telemetry_note_scanout(
+        pixels, sizeof pixels, 200u, 2u, 6000000u, 412000000u, &valid);
+    vm_frame_telemetry_snapshot(&state);
+
+    if (anchor != 0u && now > anchor) {
+        CHECK(state.scanout_max_attempt_gap_ns > 0u,
+              "advanced host clock produced a zero scanout gap");
+        CHECK(state.scanout_max_gap_execution_captured &&
+              state.scanout_max_gap_cpu_retired == 100u &&
+              state.scanout_max_gap_mbx_2d_candidates == 100u &&
+              state.scanout_max_gap_mbx_2d_completed == 100u &&
+              state.scanout_max_gap_mbx_2d_rejected == 100u &&
+              state.scanout_max_gap_mbx_2d_bytes == 100u &&
+              state.scanout_max_gap_mbx_3d_candidates == 100u &&
+              state.scanout_max_gap_mbx_3d_completed == 100u &&
+              state.scanout_max_gap_mbx_3d_rejected == 100u &&
+              state.scanout_max_gap_mbx_3d_pixels == 100u,
+              "worst scanout gap did not retain its exact execution/MBX delta");
+    }
+}
+
 int main(void) {
     test_disabled_is_inert();
     test_boundaries_and_sampled_changes();
+    test_worst_scanout_gap_keeps_its_work_witness();
     printf("vm frame telemetry: %u checks, %u failed\n", tests, failed);
     return failed ? 1 : 0;
 }
