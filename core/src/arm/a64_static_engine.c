@@ -1462,9 +1462,8 @@ static unsigned try_compact_raw(
     pc = cpu->r[15];
     thumb = (cpu->cpsr & ARM_CPSR_T) != 0u;
     width = thumb ? 2u : 4u;
-    /* The native loop seeds its resident A32/Thumb width from CPSR at entry
-     * and resynchronizes it after every interworking or fallback boundary.
-     * Requiring A32 alignment here would discard every valid Thumb entry at
+    /* The native loop selects A32/Thumb width from CPSR on every iteration.
+     * Requiring A32 alignment here discarded every valid Thumb entry at
      * address 2 modulo 4 before that loop could inspect it. */
     if ((pc & (width - 1u)) != 0u) {
         state->compact_raw_refusals.alignment++;

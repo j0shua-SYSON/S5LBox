@@ -3413,16 +3413,9 @@ def compact_raw_function() -> list[str]:
         "    mov w24, w5",       # code_bytes
         "    mov w25, w6",       # remaining instruction budget
         "    mov x27, x7",       # compact raw execution context
-        "    mov w28, #4",       # resident A32/Thumb instruction width
+        "    mov w28, #4",       # current A32/Thumb instruction width
         "    mov w29, wzr",      # native retirements pending cycle commit
         "    ldr w26, [x19, #60]", # architectural PC
-        # Width stays resident until an exact native interworking or fallback
-        # boundary changes it. This keeps CPSR memory-backed while removing
-        # its load and the redundant width write from every ordinary fetch.
-        "    ldr w10, [x20]",
-        "    tbz w10, #5, .La64cr_mode_ready",
-        "    mov w28, #2",
-        ".La64cr_mode_ready:",
         # Pin the semantic jump table once rather than resolving it per
         # instruction.  The table contains relative offsets and is ordinary
         # signed text on every platform.
@@ -3450,10 +3443,11 @@ def compact_raw_function() -> list[str]:
         "    sub w8, w26, w23",
         "    cmp w8, w24",
         "    b.hs .La64cr_window_miss",
-        # Width 4 has bit 1 clear and width 2 has it set. Native state-changing
-        # instructions and fallback reloads synchronize w28 before returning
-        # here, so the ordinary path needs only this register branch-test.
-        "    tbnz w28, #1, .La64cr_thumb_fetch",
+        # Select width and fetch from live CPSR.T every iteration. A fallback
+        # or native BX/BLX may change state without leaving this invocation.
+        "    ldr w10, [x20]",
+        "    tbnz w10, #5, .La64cr_thumb_fetch",
+        "    mov w28, #4",
         "    tst w8, #3",
         "    b.ne .La64cr_exit",
         "    add w11, w8, #4",
@@ -3502,6 +3496,7 @@ def compact_raw_function() -> list[str]:
         "    b .La64cr_fallback",
         "",
         ".La64cr_thumb_fetch:",
+        "    mov w28, #2",
         "    tst w8, #1",
         "    b.ne .La64cr_exit",
         "    add w11, w8, #2",
@@ -3970,10 +3965,10 @@ def compact_raw_function() -> list[str]:
         "    str w2, [x20]",
         "    tbnz w0, #0, .La64cr_memory_thumb_target",
         "    bic w26, w0, #3",
-        "    b .La64cr_state_retire",
+        "    b .La64cr_retire",
         ".La64cr_memory_thumb_target:",
         "    bic w26, w0, #1",
-        "    b .La64cr_state_retire",
+        "    b .La64cr_retire",
         ".La64cr_memory_fallthrough:",
         "    add w26, w26, w28",
         "    b .La64cr_retire",
@@ -4118,10 +4113,10 @@ def compact_raw_function() -> list[str]:
         "    str w1, [x20]",
         "    tbnz w5, #0, .La64cr_block_thumb_target",
         "    bic w26, w5, #3",
-        "    b .La64cr_state_retire",
+        "    b .La64cr_retire",
         ".La64cr_block_thumb_target:",
         "    bic w26, w5, #1",
-        "    b .La64cr_state_retire",
+        "    b .La64cr_retire",
         ".La64cr_block_fallthrough:",
         "    add w26, w26, w28",
         "    b .La64cr_retire",
@@ -4155,7 +4150,7 @@ def compact_raw_function() -> list[str]:
         "    bfi w12, w10, #5, #1",
         "    str w12, [x20]",
         "    bic w26, w11, #1",
-        "    b .La64cr_state_retire",
+        "    b .La64cr_retire",
         "",
         ".La64cr_branch:",
         "    tbz w9, #24, .La64cr_branch_no_link",
@@ -4691,7 +4686,7 @@ def compact_raw_function() -> list[str]:
         "    bfi w12, w10, #5, #1",
         "    str w12, [x20]",
         "    bic w26, w11, #1",
-        "    b .La64cr_state_retire",
+        "    b .La64cr_retire",
         "",
         ".La64cr_thumb_conditional:",
         "    ubfx w10, w9, #8, #4",
@@ -4730,7 +4725,7 @@ def compact_raw_function() -> list[str]:
         "    bic w12, w12, #0x20",
         "    str w12, [x20]",
         "    mov w26, w10",
-        "    b .La64cr_state_retire",
+        "    b .La64cr_retire",
         "",
         ".La64cr_thumb_long_branch:",
         "    tbnz w9, #11, .La64cr_thumb_bl_suffix",
@@ -4958,15 +4953,6 @@ def compact_raw_function() -> list[str]:
         "    b.le .La64cr_condition_pass",
         "    b .La64cr_condition_skip",
         "",
-        # Only interworking paths enter here. Keep CPSR authoritative and
-        # synchronize the resident width after their architectural mutation.
-        ".La64cr_state_retire:",
-        "    ldr w10, [x20]",
-        "    mov w28, #4",
-        "    tbz w10, #5, .La64cr_retire",
-        "    mov w28, #2",
-        "    b .La64cr_retire",
-        "",
         ".globl A64S_CSYM(a64_compact_raw_profile_retire)",
         "A64S_CSYM(a64_compact_raw_profile_retire):",
         ".La64cr_retire:",
@@ -5076,11 +5062,10 @@ def compact_raw_function() -> list[str]:
         "    cmp w8, w24",
         "    b.hs .La64cr_exit",
         "    ldr w10, [x20]",
-        "    mov w28, #4",
-        "    tbz w10, #5, .La64cr_fallback_alignment_ready",
-        "    mov w28, #2",
-        ".La64cr_fallback_alignment_ready:",
-        "    sub w10, w28, #1",
+        "    tst w10, #0x20",
+        "    mov w10, #3",
+        "    mov w12, #1",
+        "    csel w10, w12, w10, ne",
         "    tst w8, w10",
         "    b.ne .La64cr_exit",
         # Preserve the exact current window for the C wrapper, then retain a
