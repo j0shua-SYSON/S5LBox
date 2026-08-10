@@ -25,6 +25,7 @@ typedef NS_ENUM(NSUInteger, VMButton) {
 };
 
 typedef void (^VMEngineCheckpointCompletion)(BOOL saved, NSString *message);
+typedef void (^VMEngineStopCompletion)(void);
 
 @interface VMEngine : NSObject
 
@@ -63,6 +64,14 @@ typedef void (^VMEngineCheckpointCompletion)(BOOL saved, NSString *message);
 - (void)stop;
 
 /*
+ * The completion runs on the main queue only after the emulator thread has
+ * freed the machine and closed its writable work image. Reset must use this
+ * form: opening the replacement sooner gives two guests concurrent access to
+ * one HFS+ volume, and a process-local fcntl lock cannot prevent that.
+ */
+- (void)stopWithCompletion:(VMEngineStopCompletion)completion;
+
+/*
  * Save this live firmware machine as the next-run resume point, then stop it.
  * The request is handled by the emulator thread between guest instructions;
  * the completion always runs on the main queue after the machine and its work
@@ -76,6 +85,9 @@ typedef void (^VMEngineCheckpointCompletion)(BOOL saved, NSString *message);
 /* Suspend interpretation (used when the app leaves the foreground: burning a
  * core in the background is the fastest way to be terminated). */
 - (void)setPaused:(BOOL)paused;
+
+/* As above, but records the app-level cause in the visible status and console. */
+- (void)setPaused:(BOOL)paused reason:(NSString *)reason;
 
 /* The emulator's own flags, so the run controls can be drawn from what the
  * machine is actually doing rather than from a copy the UI keeps and forgets
@@ -117,6 +129,9 @@ typedef void (^VMEngineCheckpointCompletion)(BOOL saved, NSString *message);
 
 /* One line for the status bar: which guest, work done, rate, and footprint. */
 - (NSString *)statusLine;
+
+/* The exact current state word used inside -statusLine, for stop alerts. */
+- (NSString *)statusDescription;
 
 #pragma mark - Which guest is running
 

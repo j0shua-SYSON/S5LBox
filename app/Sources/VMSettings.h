@@ -95,7 +95,7 @@ typedef NS_ENUM(NSInteger, VMGraphicsMode) {
 /* The next cap in the cycle the settings screen offers, wrapping round. */
 - (uint64_t)nextInstructionCap;
 
-/* Suspend the emulator while the app is not frontmost. On by default: iOS
+/* Suspend the emulator while the app is in the background. On by default: iOS
  * terminates apps that keep a core busy in the background. */
 /*
  * DEVELOPER MODE. Off by default, and it is the switch that decides which app

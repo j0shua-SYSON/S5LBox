@@ -97,12 +97,14 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
 - (void)runUartDemo;
 - (void)runInterruptDemo;
 - (void)runMmuDemo;
-- (void)appWillResignActive:(NSNotification *)notification;
+- (void)appDidEnterBackground:(NSNotification *)notification;
+- (void)appWillEnterForeground:(NSNotification *)notification;
 - (void)appDidBecomeActive:(NSNotification *)notification;
 - (void)settingsDidChange:(NSNotification *)notification;
 - (void)blockSystemPopGestures;
 - (void)restoreSystemPopGestures;
 - (void)setCheckpointSaving:(BOOL)saving;
+- (void)setRestarting:(BOOL)restarting;
 - (void)applyPauseState;
 - (void)applySettingsToEngine;
 - (void)refreshRunControls;
@@ -174,6 +176,7 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
     BOOL               _userPaused;
     BOOL               _inBackground;
     BOOL               _savingCheckpoint;
+    BOOL               _restarting;
 
     /* What the toolbar is currently showing, so it is only rebuilt when the
      * engine's answer changes rather than four times a second. */
@@ -380,10 +383,14 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
     [_link addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
 
     // Interpreting flat out in the background is a good way to be terminated,
-    // and nobody is looking at the screen anyway.
+    // and nobody is looking at the screen anyway. Use actual background
+    // transitions, not WillResignActive: transient interruptions such as
+    // Control Center are not permission to leave the guest suspended.
     NSNotificationCenter *nc = [NSNotificationCenter defaultCenter];
-    [nc addObserver:self selector:@selector(appWillResignActive:)
-               name:UIApplicationWillResignActiveNotification object:nil];
+    [nc addObserver:self selector:@selector(appDidEnterBackground:)
+               name:UIApplicationDidEnterBackgroundNotification object:nil];
+    [nc addObserver:self selector:@selector(appWillEnterForeground:)
+               name:UIApplicationWillEnterForegroundNotification object:nil];
     [nc addObserver:self selector:@selector(appDidBecomeActive:)
                name:UIApplicationDidBecomeActiveNotification object:nil];
     [nc addObserver:self selector:@selector(settingsDidChange:)
@@ -391,7 +398,7 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
 
     [self launchEngine];
 
-    /* Reconcile with the current state, so a resign-active notification that
+    /* Reconcile with the current state, so a background notification that
      * arrived before the observers above existed cannot leave the interpreter
      * burning CPU in the background on a memory-constrained phone.
      *
@@ -400,7 +407,7 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
      * Inactive rather than Active, so "not Active" would take this branch on
      * every single cold launch and then immediately undo it. */
     if ([UIApplication sharedApplication].applicationState == UIApplicationStateBackground)
-        [self appWillResignActive:nil];
+        [self appDidEnterBackground:nil];
 }
 
 - (void)launchEngine {
@@ -476,16 +483,27 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
 
 - (void)setCheckpointSaving:(BOOL)saving {
     _savingCheckpoint = saving;
-    self.navigationItem.leftBarButtonItem.enabled = !saving;
-    _screen.userInteractionEnabled = !saving;
-    _keys.userInteractionEnabled = !saving;
-    _toolbar.userInteractionEnabled = !saving;
+    const BOOL busy = _savingCheckpoint || _restarting;
+    self.navigationItem.leftBarButtonItem.enabled = !busy;
+    _screen.userInteractionEnabled = !busy;
+    _keys.userInteractionEnabled = !busy;
+    _toolbar.userInteractionEnabled = !busy;
+    [self refreshPrepareOverlay];
+}
+
+- (void)setRestarting:(BOOL)restarting {
+    _restarting = restarting;
+    const BOOL busy = _savingCheckpoint || _restarting;
+    self.navigationItem.leftBarButtonItem.enabled = !busy;
+    _screen.userInteractionEnabled = !busy;
+    _keys.userInteractionEnabled = !busy;
+    _toolbar.userInteractionEnabled = !busy;
     [self refreshPrepareOverlay];
 }
 
 - (void)backTapped:(id)sender {
     (void)sender;
-    if (_savingCheckpoint) return;
+    if (_savingCheckpoint || _restarting) return;
 
     /* A halted machine has already released its s5l8900_t, so there is no
      * state left to serialize. Leaving is still safe and must not trap the
@@ -529,14 +547,22 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
         }];
 }
 
-- (void)appWillResignActive:(NSNotification *)notification {
+- (void)appDidEnterBackground:(NSNotification *)notification {
     (void)notification;
     _inBackground = YES;
     [self applyPauseState];
 }
 
+- (void)appWillEnterForeground:(NSNotification *)notification {
+    (void)notification;
+    _inBackground = NO;
+    [self applyPauseState];
+}
+
 - (void)appDidBecomeActive:(NSNotification *)notification {
     (void)notification;
+    /* Safety reconciliation for scene/application lifecycle edge cases. It is
+     * idempotent after WillEnterForeground and does nothing for a user pause. */
     _inBackground = NO;
     [self applyPauseState];
 }
@@ -562,12 +588,13 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
 
 /*
  * The single writer of the engine's pause flag. Pause has two causes — the
- * user asked, or the app is not frontmost and the setting says to stop — and
+ * user asked, or the app is actually in the background and the setting says
+ * to stop — and
  * folding them here is what stops a return to the foreground from resuming a
  * machine the user deliberately paused.
  *
  * Backgrounding is honoured through a setting because a user who has turned
- * "pause when not frontmost" off is asking for the interpreter to keep going,
+ * "pause in background" off is asking for the interpreter to keep going,
  * and the settings screen states the consequence.
  */
 - (void)applyPauseState {
@@ -575,7 +602,10 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
         _inBackground && [[VMSettings sharedSettings] pausesInBackground];
     const BOOL paused = _userPaused || backgroundPause;
 
-    [_engine setPaused:paused];
+    NSString *reason = _userPaused ? @"user"
+                     : backgroundPause ? @"background"
+                                       : nil;
+    [_engine setPaused:paused reason:reason];
 
     /*
      * The link stops only when the app is hidden — NOT when the machine is
@@ -657,67 +687,85 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
 
 - (void)playPauseTapped:(id)sender {
     (void)sender;
+    if (_savingCheckpoint || _restarting) return;
 
-    /* A machine that has stopped — halted, or reached its cap — cannot be
-     * resumed, because its s5l8900_t is gone. Play then means start a new one,
-     * which is what Reset does, and saying so is better than a dead button. */
+    /* A halted machine cannot resume because its s5l8900_t is gone. Older
+     * builds silently routed Play through Reset, disguising a terminal stop as
+     * a failed resume and destroying the evidence. Ask before a fresh boot. */
     if (!_engine || ![_engine isRunning]) {
-        [self resetTapped:nil];
+        NSString *state = _engine ? [_engine statusDescription] : @"no machine";
+        NSString *message = [NSString stringWithFormat:
+            @"The machine cannot resume because it is %@. Restarting performs "
+             "a fresh boot; it does not continue the stopped CPU state.", state];
+        UIAlertController *alert = [UIAlertController
+            alertControllerWithTitle:@"Machine Stopped"
+                             message:message
+                      preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:@"Cancel"
+                                                  style:UIAlertActionStyleCancel
+                                                handler:nil]];
+        __weak EmulatorViewController *weakSelf = self;
+        [alert addAction:[UIAlertAction
+            actionWithTitle:@"Restart"
+                      style:UIAlertActionStyleDestructive
+                    handler:^(__unused UIAlertAction *action) {
+                        [weakSelf resetTapped:nil];
+                    }]];
+        [self presentViewController:alert animated:YES completion:nil];
         return;
     }
 
-    _userPaused = !_userPaused;
+    /* Play clears a stale lifecycle pause in one tap instead of layering a new
+     * user pause on top of an engine which is already suspended. */
+    _userPaused = ![_engine isPaused];
     [self applyPauseState];
     [self refreshStatusLine];
 }
 
 - (void)resetTapped:(id)sender {
     (void)sender;
-    if (!_frame) return;
+    if (!_frame || _savingCheckpoint || _restarting) return;
 
     /* Take what the outgoing machine has already said before letting go of it.
      * Its final publication — the last of the guest's output, and the engine's
      * own "stopped" line — happens on a thread whose only reader is about to
      * be dropped, so anything not collected here is lost. */
     [self appendConsole:[_engine takePendingConsoleText]];
-    [self append:@"\n[vm] reset: dropping this machine and building a new one"];
+    [self append:@"\n[vm] reset requested; waiting for the old machine"];
 
-    /*
-     * -stop is a request the emulator thread notices between chunks, so the
-     * old machine is not gone yet. Nothing waits for it: the thread holds the
-     * last reference to its own engine and frees the machine before letting
-     * go, so a fresh engine can be built immediately alongside it. The two
-     * overlap for a few tens of milliseconds and 128 MB of guest DRAM is
-     * address space rather than footprint until it is touched (see VMEngine.m),
-     * so the overlap costs a fraction of a megabyte.
-     *
-     * KNOWN HAZARD, STATED RATHER THAN HIDDEN. That reasoning was written when
-     * an engine owned nothing outside its own guest DRAM. It now owns an open,
-     * WRITABLE root filesystem, and the new engine opens the same file: both
-     * machines are this machine, so both resolve to the same
-     * Machines/<id>/rootfs-work.img. tools/file_block.c takes an fcntl record
-     * lock, and file_block.h says in as many words that the lock is not the
-     * correctness boundary -- it is per PROCESS, so the second open from this
-     * app succeeds, and the outgoing engine's close releases the lock for both.
-     * The outgoing guest can therefore write through its memory-disk bridge for
-     * up to one chunk (kVMChunkInstructions) while the incoming one is already
-     * mounting the same HFS+ volume.
-     *
-     * The fix is for this to WAIT until the outgoing engine has released the
-     * image -- VMEngine would need a stop that joins its thread, which it does
-     * not have -- and it is not done here. Reset after a firmware boot is
-     * therefore the one operation in this app that can corrupt a guest disk,
-     * and this comment is here so that the next person to touch it knows that
-     * rather than reading the paragraph above and concluding it is safe.
-     */
-    [_engine stop];
-    _engine = nil;
-    _lastBringUpNote = nil;
-
+    /* The completion is the ownership boundary: it runs only after the old
+     * machine has been freed and its writable work image closed. Starting the
+     * replacement sooner allows two guests to write one HFS+ volume because
+     * fcntl record locks are per process, not per file descriptor. */
+    [self setRestarting:YES];
     _userPaused = NO;
     _haveTouch = NO;
-    [self launchEngine];
-    [self refreshStatusLine];
+    VMEngine *oldEngine = _engine;
+    if (!oldEngine) {
+        _lastBringUpNote = nil;
+        [self launchEngine];
+        [self setRestarting:NO];
+        [self refreshStatusLine];
+        return;
+    }
+
+    __weak EmulatorViewController *weakSelf = self;
+    __weak VMEngine *weakOldEngine = oldEngine;
+    [oldEngine stopWithCompletion:^{
+        EmulatorViewController *strongSelf = weakSelf;
+        VMEngine *stoppedEngine = weakOldEngine;
+        if (!strongSelf || !stoppedEngine ||
+            strongSelf->_engine != stoppedEngine) return;
+
+        [strongSelf appendConsole:[stoppedEngine takePendingConsoleText]];
+        strongSelf->_engine = nil;
+        strongSelf->_lastBringUpNote = nil;
+        [strongSelf append:
+            @"[vm] reset: old machine released; starting replacement"];
+        [strongSelf launchEngine];
+        [strongSelf setRestarting:NO];
+        [strongSelf refreshStatusLine];
+    }];
 }
 
 - (void)settingsTapped:(id)sender {
@@ -818,6 +866,13 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
         _prepareScrim.hidden = NO;
         _prepareBar.hidden = YES;
         _prepareLabel.text = @"Saving machine...\nIt will resume here next time.";
+        return;
+    }
+    if (_restarting) {
+        _prepareScrim.hidden = NO;
+        _prepareBar.hidden = YES;
+        _prepareLabel.text =
+            @"Restarting iPhone OS...\nClosing the old machine safely.";
         return;
     }
     BOOL preparing = [_engine isPreparingRootFilesystem];

@@ -148,6 +148,7 @@ static double VMDeviceAutomationSeconds(uint64_t firstNS, uint64_t lastNS) {
     __weak UIView *_telemetryScreen;
     __weak UILabel *_telemetryLabel;
     VMEngine *_stoppingEngine;
+    BOOL _stopCompleted;
     NSTimer *_timer;
     VMDeviceAutomationState _state;
     VMDeviceAutomationMode _mode;
@@ -781,7 +782,17 @@ static double VMDeviceAutomationSeconds(uint64_t firstNS, uint64_t lastNS) {
 
     _state = VMDeviceAutomationStateWaitingForStop;
     _stoppingEngine = engine;
-    [engine stop];
+    _stopCompleted = NO;
+    __weak VMDeviceAutomation *weakSelf = self;
+    __weak VMEngine *weakEngine = engine;
+    [engine stopWithCompletion:^{
+        VMDeviceAutomation *strongSelf = weakSelf;
+        VMEngine *stoppedEngine = weakEngine;
+        if (!strongSelf || !stoppedEngine ||
+            strongSelf->_stoppingEngine != stoppedEngine) return;
+        strongSelf->_stopCompleted = YES;
+        [strongSelf reopenWhenStopped];
+    }];
 
     EmulatorViewController *emulator = _emulator;
     UINavigationController *navigation = _navigationController;
@@ -798,8 +809,12 @@ static double VMDeviceAutomationSeconds(uint64_t firstNS, uint64_t lastNS) {
 }
 
 - (void)reopenWhenStopped {
-    if (_stoppingEngine.isRunning) return;
+    /* isRunning becomes false when Stop is requested, before the machine and
+     * work image are released. Only VMEngine's completion is a safe reopen
+     * boundary. */
+    if (!_stopCompleted) return;
 
+    _stopCompleted = NO;
     _stoppingEngine = nil;
     VMInstanceListViewController *machineList = _machineList;
     UINavigationController *navigation = _navigationController;

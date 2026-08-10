@@ -215,9 +215,11 @@ static double vm_engine_now_seconds(void) {
     NSString        *_status;
     VMEngineState    _state;
     BOOL             _stopRequested;
+    VMEngineStopCompletion _stopCompletion;
     BOOL             _checkpointRequested;
     VMEngineCheckpointCompletion _checkpointCompletion;
     BOOL             _paused;
+    NSString        *_pauseReason;
     uint64_t         _instructionCap; // 0: run until stopped or halted
     BOOL             _buttons[VMButtonCount];
     BOOL             _discardedInputLogged;
@@ -735,9 +737,11 @@ static double vm_engine_now_seconds(void) {
     }
     _state = VMEngineStateStarting;
     _stopRequested = NO;
+    _stopCompletion = nil;
     _checkpointRequested = NO;
     _checkpointCompletion = nil;
     _paused = NO;
+    _pauseReason = nil;
     _snapshotFresh = NO;
     _snapshotBlank = NO;
     _retired = 0;
@@ -777,14 +781,22 @@ static double vm_engine_now_seconds(void) {
 
     pthread_mutex_lock(&_lock);
     BOOL cancelledEarly = (_state == VMEngineStateStopping || _stopRequested);
+    VMEngineStopCompletion earlyStopCompletion = nil;
     if (cancelledEarly) {
+        earlyStopCompletion = _stopCompletion;
+        _stopCompletion = nil;
         _state = VMEngineStateIdle;
         _stopRequested = NO;
         _paused = NO;
+        _pauseReason = nil;
         _status = @"stopped";
     }
     pthread_mutex_unlock(&_lock);
-    if (cancelledEarly) return NO;
+    if (cancelledEarly) {
+        if (earlyStopCompletion)
+            dispatch_async(dispatch_get_main_queue(), earlyStopCompletion);
+        return NO;
+    }
 
     // Measured either side of the allocation so the guest DRAM's real cost is
     // a number on the screen rather than an assertion in a comment.
@@ -850,11 +862,16 @@ static double vm_engine_now_seconds(void) {
         s5l8900_free(&_machine);
         vm_firmware_boot_destroy(&_firmwareBoot);
         pthread_mutex_lock(&_lock);
+        VMEngineStopCompletion cancelledStopCompletion = _stopCompletion;
+        _stopCompletion = nil;
         _state = VMEngineStateIdle;
         _stopRequested = NO;
         _paused = NO;
+        _pauseReason = nil;
         _status = @"stopped";
         pthread_mutex_unlock(&_lock);
+        if (cancelledStopCompletion)
+            dispatch_async(dispatch_get_main_queue(), cancelledStopCompletion);
         return NO;
     }
 
@@ -863,14 +880,41 @@ static double vm_engine_now_seconds(void) {
 }
 
 - (void)stop {
+    [self stopWithCompletion:nil];
+}
+
+- (void)stopWithCompletion:(VMEngineStopCompletion)completion {
+    BOOL completeNow = NO;
     pthread_mutex_lock(&_lock);
+    if (_state == VMEngineStateIdle) {
+        completeNow = YES;
+    } else {
+        if (completion) {
+            VMEngineStopCompletion next = [completion copy];
+            VMEngineStopCompletion prior = _stopCompletion;
+            if (prior) {
+                _stopCompletion = ^{
+                    prior();
+                    next();
+                };
+            } else {
+                _stopCompletion = next;
+            }
+        }
+    }
     if (_state == VMEngineStateStarting || _state == VMEngineStateRunning ||
         _state == VMEngineStateCheckpointing) {
         _stopRequested = YES;
         _paused = NO;
+        _pauseReason = nil;
         _state = VMEngineStateStopping;
     }
     pthread_mutex_unlock(&_lock);
+
+    if (completeNow && completion) {
+        VMEngineStopCompletion done = [completion copy];
+        dispatch_async(dispatch_get_main_queue(), done);
+    }
 }
 
 - (void)saveCheckpointAndStopWithCompletion:
@@ -901,6 +945,11 @@ static double vm_engine_now_seconds(void) {
 }
 
 - (void)setPaused:(BOOL)paused {
+    [self setPaused:paused reason:(paused ? @"requested" : nil)];
+}
+
+- (void)setPaused:(BOOL)paused reason:(NSString *)reason {
+    NSString *event = nil;
     pthread_mutex_lock(&_lock);
     /* A suspended machine is retiring nothing, so say nothing rather than
      * leaving the smoothed rate frozen at whatever it was a moment before the
@@ -909,12 +958,23 @@ static double vm_engine_now_seconds(void) {
      * Only when it is actually running: -setPaused: is also reached on the way
      * to the background, and a machine that has already halted must keep
      * saying "halted" rather than being relabelled as merely paused. */
-    if (paused && !_paused && _state == VMEngineStateRunning) {
+    if (_state == VMEngineStateRunning && paused != _paused) {
         _rate = 0.0;
-        _status = @"paused";
+        if (paused) {
+            _pauseReason = reason.length ? [reason copy] : @"requested";
+            _status = [NSString stringWithFormat:@"paused (%@)", _pauseReason];
+            event = [NSString stringWithFormat:@"[vm] paused: %@\n", _pauseReason];
+        } else {
+            NSString *oldReason = _pauseReason ?: @"requested";
+            _pauseReason = nil;
+            _status = @"running";
+            event = [NSString stringWithFormat:@"[vm] resumed: %@ pause cleared\n",
+                                               oldReason];
+        }
     }
     _paused = paused;
     pthread_mutex_unlock(&_lock);
+    if (event.length) [self appendConsole:event];
 }
 
 - (BOOL)isPaused {
@@ -1569,6 +1629,12 @@ static bool vm_spin_already_reported(const vm_spin_t *s, uint32_t region) {
         [self appendConsole:[NSString stringWithFormat:
             @"[vm] stopped at the instruction cap: %llu retired\n",
             (unsigned long long)retired]];
+    else if (status != ARM_OK && !stoppedByRequest)
+        [self appendConsole:[NSString stringWithFormat:
+            @"[vm] terminal CPU status %d at pc=0x%08x cpsr=0x%08x "
+             "after %llu retired\n",
+            (int)status, _machine.cpu.r[15], _machine.cpu.cpsr,
+            (unsigned long long)retired]];
 
     if (_machineReady) {
         s5l8900_free(&_machine);
@@ -1583,7 +1649,9 @@ static bool vm_spin_already_reported(const vm_spin_t *s, uint32_t region) {
      * machine instead of returning a false success for a dead worker. */
     pthread_mutex_lock(&_lock);
     VMEngineCheckpointCompletion checkpointCompletion = _checkpointCompletion;
+    VMEngineStopCompletion stopCompletion = _stopCompletion;
     _checkpointCompletion = nil;
+    _stopCompletion = nil;
     _checkpointRequested = NO;
     _machineReady = NO;
     _thread = nil;
@@ -1598,6 +1666,7 @@ static bool vm_spin_already_reported(const vm_spin_t *s, uint32_t region) {
     _state = VMEngineStateIdle;
     _stopRequested = NO;
     _paused = NO;
+    _pauseReason = nil;
     pthread_mutex_unlock(&_lock);
 
     if (checkpointCompletion) {
@@ -1610,6 +1679,8 @@ static bool vm_spin_already_reported(const vm_spin_t *s, uint32_t region) {
             checkpointCompletion(saved, message);
         });
     }
+    if (stopCompletion)
+        dispatch_async(dispatch_get_main_queue(), stopCompletion);
 }
 
 // Called on the emulator thread only.
@@ -1645,8 +1716,14 @@ static bool vm_spin_already_reported(const vm_spin_t *s, uint32_t region) {
     NSString *statusText;
     switch (status) {
         case ARM_OK:        statusText = @"running";        break;
-        case ARM_UNDEFINED: statusText = @"undefined insn"; break;
-        case ARM_HALT:      statusText = @"halted";         break;
+        case ARM_UNDEFINED:
+            statusText = [NSString stringWithFormat:@"undefined insn at 0x%08x",
+                                                    _machine.cpu.r[15]];
+            break;
+        case ARM_HALT:
+            statusText = [NSString stringWithFormat:@"halted at 0x%08x",
+                                                    _machine.cpu.r[15]];
+            break;
         default:            statusText = @"?";              break;
     }
 
@@ -1699,8 +1776,17 @@ static bool vm_spin_already_reported(const vm_spin_t *s, uint32_t region) {
     }
     _retired = retired;
     // Smooth the rate: a per-chunk figure jitters too much to read.
-    _rate = (_rate > 0.0) ? (_rate * 0.8 + instantRate * 0.2) : instantRate;
-    _status = statusText;
+    if (_paused && _state == VMEngineStateRunning) {
+        /* A pause can land while s5l8900_run() is inside its bounded chunk.
+         * That chunk publishes once after the request; it must not overwrite
+         * the pause cause with a misleading "running" status. */
+        _rate = 0.0;
+        _status = [NSString stringWithFormat:@"paused (%@)",
+                   _pauseReason.length ? _pauseReason : @"requested"];
+    } else {
+        _rate = (_rate > 0.0) ? (_rate * 0.8 + instantRate * 0.2) : instantRate;
+        _status = statusText;
+    }
     pthread_mutex_unlock(&_lock);
 }
 
@@ -1782,6 +1868,13 @@ static bool vm_spin_already_reported(const vm_spin_t *s, uint32_t region) {
             @"%@%@  ·  %.1f M insn  ·  %.2f M insn/s  ·  %@  ·  %.0f MB",
             mode.length ? [mode stringByAppendingString:@"  ·  "] : @"",
             status, retired / 1.0e6, rate / 1.0e6, fpsText, footprintMB];
+}
+
+- (NSString *)statusDescription {
+    pthread_mutex_lock(&_lock);
+    NSString *status = [_status copy];
+    pthread_mutex_unlock(&_lock);
+    return status.length ? status : @"unknown";
 }
 
 - (NSString *)modeDescription {

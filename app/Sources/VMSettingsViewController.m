@@ -719,7 +719,7 @@ titleForFooterInSection:(NSInteger)section {
 
             UITableViewCell *cell = [self cellWithIdentifier:kVMSwitchCell
                                                        style:UITableViewCellStyleSubtitle];
-            cell.textLabel.text = @"Pause when not frontmost";
+            cell.textLabel.text = @"Pause in background";
             cell.detailTextLabel.text =
                 @"Applied. Off keeps the interpreter running in the background, "
                  "which iOS may end the app for.";
