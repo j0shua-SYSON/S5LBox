@@ -354,7 +354,8 @@ int main(int argc, char **argv) {
             "usage: %s <kernel.macho> [-d dt.bin] [-c cmdline] [-r ramdisk]\n"
             "          [-R ram-MB] [-n steps] [-p physbase] [-V virtbase]\n"
             "          [--snapshot-at <steps> <file>] [--restore <file>]\n"
-            "          [--wake-power] [--dump-ram <file>]\n"
+            "          [--wake-power] [--release-power-after <steps>]\n"
+            "          [--dump-ram <file>]\n"
             "          [--peek <virtual-address>]...\n"
             "          [--break-pc <address> [--break-reg <0..15> <value>]]\n",
             argv[0]);
@@ -366,6 +367,8 @@ int main(int argc, char **argv) {
     const char *dtpath = NULL, *rdpath = NULL, *restore = NULL;
     const char *dump_ram = NULL;
     bool wake_power = false;
+    bool release_power = false;
+    uint64_t release_power_after = 0u;
     bool break_pc_set = false;
     uint32_t break_pc = 0u;
     int break_reg = -1;
@@ -390,6 +393,11 @@ int main(int argc, char **argv) {
         }
         if (!strcmp(argv[i], "--wake-power")) {
             wake_power = true;
+            continue;
+        }
+        if (!strcmp(argv[i], "--release-power-after") && i + 1 < argc) {
+            release_power = true;
+            release_power_after = strtoull(argv[++i], NULL, 0);
             continue;
         }
         if (!strcmp(argv[i], "--break-reg") && i + 2 < argc) {
@@ -428,6 +436,10 @@ int main(int argc, char **argv) {
 
     if (break_reg >= 0 && !break_pc_set) {
         fprintf(stderr, "--break-reg requires --break-pc\n");
+        return 1;
+    }
+    if (release_power && !wake_power) {
+        fprintf(stderr, "--release-power-after requires --wake-power\n");
         return 1;
     }
 
@@ -551,8 +563,24 @@ int main(int argc, char **argv) {
     }
 
     arm_status_t st = ARM_OK;
+    uint64_t wake_at = mach.cpu.cycles;
+    uint64_t release_refusals = 0u;
+    bool release_done = false;
     uint64_t n = mach.cpu.cycles;      /* continue from where the machine is */
     for (; n < steps; n++) {
+        if (release_power && !release_done &&
+            mach.cpu.cycles - wake_at >= release_power_after) {
+            if (s5l8900_set_button(&mach, S5L_BUTTON_HOLD, false)) {
+                release_done = true;
+                fprintf(stderr,
+                        "Power release accepted at %llu instructions after "
+                        "%llu refusal(s)\n",
+                        (unsigned long long)mach.cpu.cycles,
+                        (unsigned long long)release_refusals);
+            } else {
+                release_refusals++;
+            }
+        }
         if (break_pc_set && mach.cpu.r[15] == break_pc &&
             (break_reg < 0 || mach.cpu.r[break_reg] == break_value)) {
             fprintf(stderr, "break at pc=0x%08x r%d=0x%08x after %llu instructions\n",
@@ -573,6 +601,11 @@ int main(int argc, char **argv) {
             if (ss != SNAP_OK) return 4;
         }
     }
+    if (release_power && !release_done)
+        fprintf(stderr,
+                "Power release was not accepted before the run ended "
+                "(%llu refusal(s))\n",
+                (unsigned long long)release_refusals);
 
     if (dump_ram && !dump_file(dump_ram, mach.ram, mach.ram_size)) {
         s5l8900_free(&mach);

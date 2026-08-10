@@ -1545,6 +1545,16 @@ bool s5l8900_set_button(s5l8900_t *m, unsigned which, bool pressed) {
     if (!m) return false;
 
     if (!s5l_pcf50635_hibernating(&m->pmu)) {
+        /* AppleM68Buttons reads the PMU wake reason before dispatching the
+         * synthetic Power press. Do not let the host's queued release overtake
+         * that read: once INT2 has cleared, the release proceeds through the
+         * ordinary GPIO debounce path below. */
+        if (which == S5L_BUTTON_HOLD && !pressed &&
+            s5l_buttons_held(&m->buttons, S5L_BUTTON_HOLD) &&
+            (m->pmu.regs[PCF50635_INT2] & PCF50635_INT2_ONKEYR) != 0u) {
+            m->buttons.refused++;
+            return false;
+        }
         bool accepted = s5l_buttons_set(&m->buttons, &m->gpio, &m->gpioic,
                                         which, pressed);
         if (accepted) s5l8900_tick(m, 0u);
@@ -1565,23 +1575,22 @@ bool s5l8900_set_button(s5l8900_t *m, unsigned which, bool pressed) {
         return true;
     }
 
-    /* The same physical switch reaches both pieces of hardware. The PMU uses
-     * ONKEY to power the ARM core up, while the still-held switch is also high
-     * on the ordinary GPIO wire. AppleM68Buttons synthesizes the wake press
-     * from PMU STAT, then relies on its GPIO interrupt/debounce path to see the
-     * later release. Dropping this level leaves the guest with a Power key
-     * that was pressed forever and a display that never completes wake.
-     *
-     * This transition cannot use s5l_buttons_set(): the powered-down guest is
-     * allowed to have its GPIO line unarmed or still pending, but neither can
-     * prevent a real switch from changing level. Preserve the physical state
-     * and let the existing level-sensitive controller expose it when the AP
-     * resumes. The queued release will retain the ordinary no-edge-loss gate. */
+    /* AppleM68Buttons' setPowerState path reads function-wake_button_hold and
+     * dispatches a Power press when PMU STAT says ONKEY. Leaving the same edge
+     * pending on GPIO line 45 dispatches a second press after debounce; the
+     * real-device reproduction went straight back to _ml_arm_sleep. Retain
+     * the held electrical level without that duplicate edge, and select the
+     * line's auto-flipped release polarity. The app's queued release is then
+     * one ordinary, guest-visible GPIO transition. */
     m->buttons.sets++;
-    if (!s5l_buttons_held(&m->buttons, S5L_BUTTON_HOLD)) {
+    if (!s5l_buttons_held(&m->buttons, S5L_BUTTON_HOLD) &&
+        s5l_gpioic_consume_autoflip_level(
+            &m->gpioic, s5l_button_line(S5L_BUTTON_HOLD),
+            s5l_button_level(S5L_BUTTON_HOLD, true))) {
         m->buttons.pressed |= (uint8_t)(1u << S5L_BUTTON_HOLD);
         m->buttons.edges++;
-        s5l_buttons_apply(&m->buttons, &m->gpio, &m->gpioic);
+        s5l_gpio_drive(&m->gpio, s5l_button_pin(S5L_BUTTON_HOLD),
+                       s5l_button_level(S5L_BUTTON_HOLD, true));
     }
 
     /* XNU copied its reset trampoline to the first retained DRAM page before

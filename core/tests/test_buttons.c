@@ -845,7 +845,6 @@ static void test_power_wakes_hibernation_through_retained_reset(void) {
     CHECK(s5l8900_init(&m, S5L8900_SDRAM_BASE, 1u << 16),
           "machine init failed");
     arm_all(&m);
-
     m.pmu.regs[PCF50635_OOCSHDWN] = PCF50635_OOCSHDWN_GOHIB;
     m.pmu.written[PCF50635_OOCSHDWN] = 1u;
     m.cpu.r[0] = 0x11111111u;
@@ -895,29 +894,31 @@ static void test_power_wakes_hibernation_through_retained_reset(void) {
           m.active_clock_guest_ticks_since_sync == 0u &&
           m.active_clock_fraction == 0u,
           "warm reset retained stale host-clock state");
+    unsigned hold_line = s5l_button_line(S5L_BUTTON_HOLD);
+    uint32_t hold_bit = 1u << (hold_line & 31u);
+    unsigned hold_group = hold_line >> 5;
     CHECK(s5l_buttons_held(&m.buttons, S5L_BUTTON_HOLD) &&
-          s5l_gpioic_pending(&m.gpioic, s5l_button_line(S5L_BUTTON_HOLD)) &&
+          s5l_gpioic_line(&m.gpioic, hold_line) &&
+          !s5l_gpioic_pending(&m.gpioic, hold_line) &&
+          (m.gpioic.level[hold_group] & hold_bit) == 0u &&
           s5l_gpio_pin(&m.gpio, s5l_button_pin(S5L_BUTTON_HOLD)) ==
               s5l_button_level(S5L_BUTTON_HOLD, true),
-          "PMU wake did not retain the physical Power press on its GPIO wire");
+          "PMU wake did not consume its GPIO edge and retain the held wire");
 
     CHECK(!s5l8900_set_button(&m, S5L_BUTTON_HOLD, false),
-          "Power release erased the still-pending wake edge");
-    CHECK(guest_services(&m, s5l_button_line(S5L_BUTTON_HOLD)),
-          "guest could not service the retained wake press");
-    s5l8900_tick(&m, 0u);
+          "Power release overtook the guest's PMU wake-reason read");
+    m.pmu.regs[PCF50635_INT2] = 0u; /* the clear-on-read tested in test_i2c */
     CHECK(s5l8900_set_button(&m, S5L_BUTTON_HOLD, false),
-          "queued Power release was not drainable after the wake press");
-    CHECK(s5l_gpioic_pending(&m.gpioic,
-                             s5l_button_line(S5L_BUTTON_HOLD)),
-          "Power release did not produce its own guest-visible edge");
-    CHECK(guest_services(&m, s5l_button_line(S5L_BUTTON_HOLD)),
+          "queued Power release was not drainable after the PMU read");
+    CHECK(s5l_gpioic_pending(&m.gpioic, hold_line),
+          "post-wake Power release produced no guest-visible interrupt");
+    CHECK(guest_services(&m, hold_line),
           "guest could not service the post-wake Power release");
     s5l8900_tick(&m, 0u);
     CHECK(!s5l_buttons_held(&m.buttons, S5L_BUTTON_HOLD) &&
-          !s5l_gpioic_pending(&m.gpioic,
-                              s5l_button_line(S5L_BUTTON_HOLD)),
-          "Power remained held after its post-wake release");
+          !s5l_gpioic_pending(&m.gpioic, hold_line) &&
+          (m.gpioic.level[hold_group] & hold_bit) != 0u,
+          "Power did not return to its released, press-armed state");
     CHECK(m.buttons.sets == 3u && m.buttons.edges == 2u &&
           m.buttons.refused == 2u,
           "wake press/release evidence drifted: sets=%llu edges=%llu refused=%llu",

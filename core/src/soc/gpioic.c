@@ -307,6 +307,34 @@ void s5l_gpioic_set_line(s5l_gpioic_t *g, unsigned line, bool level) {
     if (level && !was) g->stat[group] |= bit;
 }
 
+bool s5l_gpioic_consume_autoflip_level(s5l_gpioic_t *g, unsigned line,
+                                       bool level) {
+    if (!g || line >= S5L_GPIOIC_LINES) return false;
+    unsigned group = line >> 5;
+    uint32_t bit = 1u << (line & 31u);
+    if (!(g->type[group] & bit)) return false;
+
+    /*
+     * This transition has already been reported through a second hardware
+     * path, so putting it through set_line() would deliver it twice. Preserve
+     * the facts the next transition depends on instead: something drives the
+     * wire, the wire is at `level`, no interrupt for this consumed edge is
+     * pending, and AUTO-FLIP now selects the opposite electrical level.
+     *
+     * The last assignment deliberately does not call relatch_level(). The
+     * opposite level is non-asserting by construction; calling it would be
+     * harmless but would obscure the stronger invariant this helper exists to
+     * establish.
+     */
+    g->driven[group] |= bit;
+    if (level) g->raw[group] |= bit;
+    else       g->raw[group] &= ~bit;
+    g->stat[group] &= ~bit;
+    if (level) g->level[group] &= ~bit;
+    else       g->level[group] |= bit;
+    return true;
+}
+
 bool s5l_gpioic_line(const s5l_gpioic_t *g, unsigned line) {
     if (!g || line >= S5L_GPIOIC_LINES) return false;
     return (g->raw[line >> 5] & (1u << (line & 31u))) != 0u;
