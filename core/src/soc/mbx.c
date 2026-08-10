@@ -2980,6 +2980,17 @@ static bool mbx_execute_textured_sprite(s5l_mbx_t *m,
                 scale_x > 0.0f && scale_y > 0.0f &&
                 scale_x <= 1.0f + epsilon && scale_y <= 1.0f + epsilon &&
                 scale_difference <= 0.00001f;
+            /* The post-unlock recovery capture uses a one-column texture as
+             * a vertical strip: the direct sampler stretches that column
+             * across the 320-pixel surface while independently reducing its
+             * 222-row extent to 37 rows.  This is separable filtering, not an
+             * arbitrary two-dimensional nonuniform transform.  Keep the
+             * exception one-dimensional and directional; wider sources still
+             * require the measured magnification or uniform-scale families. */
+            bool direct_column_resample =
+                direct_sampler && half_texel_layout && source_width == 1u &&
+                scale_x >= 1.0f - epsilon &&
+                scale_y > 0.0f && scale_y <= 1.0f + epsilon;
             bool modulated_uniform_scale =
                 modulated_sampler && half_texel_layout &&
                 scale_x > 0.0f && scale_y > 0.0f &&
@@ -2991,6 +3002,7 @@ static bool mbx_execute_textured_sprite(s5l_mbx_t *m,
                 scale_difference <= 0.00001f;
             if (source_width > MBX_3D_WIDTH || source_height > 480u ||
                 (!direct_magnification && !direct_uniform_minification &&
+                 !direct_column_resample &&
                  !modulated_uniform_scale &&
                  !alternate_uniform_minification)) {
                 if (mbx_trace_state == 1) {

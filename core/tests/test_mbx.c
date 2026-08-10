@@ -1575,7 +1575,10 @@ static void test_write_compact_blit_copy(s5l8900_t *m,
                                          uint32_t top,
                                          uint32_t width,
                                          uint32_t height,
-                                         uint32_t source_stride) {
+                                         uint32_t source_width,
+                                         uint32_t source_height,
+                                         uint32_t source_stride,
+                                         uint32_t vertex_colour) {
     for (uint32_t off = 0u; off < 0x500u; off += 4u)
         test_gpu_write32(m, object + off, 0u);
 
@@ -1619,7 +1622,7 @@ static void test_write_compact_blit_copy(s5l8900_t *m,
         width_field++;
     }
     uint32_t texture_height = 8u, height_field = 0u;
-    while (texture_height < height) {
+    while (texture_height < source_height) {
         texture_height <<= 1;
         height_field++;
     }
@@ -1637,8 +1640,8 @@ static void test_write_compact_blit_copy(s5l8900_t *m,
         x0, y0, x1, y0, x0, y1, x1, y1,
     };
     const float u0 = 0.0f, v0 = 0.0f;
-    const float u1 = ((float)width - 0.5f) / (float)texture_width;
-    const float v1 = ((float)height - 0.5f) / (float)texture_height;
+    const float u1 = ((float)source_width - 0.5f) / (float)texture_width;
+    const float v1 = ((float)source_height - 0.5f) / (float)texture_height;
     const float uv[8] = {
         u0, v0, u1, v0, u0, v1, u1, v1,
     };
@@ -1657,7 +1660,7 @@ static void test_write_compact_blit_copy(s5l8900_t *m,
         record[5u + i] = test_float_word(vertices[i]);
     for (unsigned vertex = 0; vertex < 4u; vertex++) {
         unsigned attribute = 21u + vertex * 3u;
-        record[attribute] = 0u;
+        record[attribute] = vertex_colour;
         record[attribute + 1u] = test_float_word(uv[vertex * 2u]);
         record[attribute + 2u] = test_float_word(uv[vertex * 2u + 1u]);
     }
@@ -1738,7 +1741,7 @@ static void test_compact_opaque_blit_copy(void) {
 
     test_write_compact_blit_copy(&m, region, object, source, target,
                                  0x0e8u, LEFT, TOP, WIDTH, HEIGHT,
-                                 SOURCE_STRIDE);
+                                 WIDTH, HEIGHT, SOURCE_STRIDE, 0u);
     for (uint32_t y = 0; y < HEIGHT; y++)
         for (uint32_t x = 0; x < WIDTH; x++)
             test_gpu_write32(&m, source + y * SOURCE_STRIDE + x * 4u,
@@ -1785,7 +1788,7 @@ static void test_compact_opaque_blit_copy(void) {
      * not a literal +0xe8 packet or an accidental source-over path. */
     test_write_compact_blit_copy(&m, region, object, source, target,
                                  0x300u, LEFT, TOP, WIDTH, HEIGHT,
-                                 SOURCE_STRIDE);
+                                 WIDTH, HEIGHT, SOURCE_STRIDE, 0u);
     for (uint32_t y = 0; y < HEIGHT; y++)
         for (uint32_t x = 0; x < WIDTH; x++) {
             test_gpu_write32(&m, source + y * SOURCE_STRIDE + x * 4u,
@@ -1874,6 +1877,155 @@ static void test_compact_opaque_blit_copy(void) {
           test_gpu_read32(&m, last) == 0x76543210u &&
           m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
           "late missing compact target PTE partially committed or completed");
+
+    s5l8900_free(&m);
+}
+
+/* The post-unlock recovery checkpoint retained this exact compact producer
+ * geometry.  It expands one texture column across the full surface while
+ * independently reducing 222 source rows to 37 output rows.  Rejecting the
+ * mixed-axis scale leaves 3DIdle false and makes AppleMBX retry recovery
+ * forever, so exercise the rendered pixels and the transaction boundary. */
+static void test_compact_column_resample(void) {
+    enum {
+        LEFT = 0u, TOP = 42u, WIDTH = 320u, HEIGHT = 37u,
+        SOURCE_WIDTH = 1u, SOURCE_HEIGHT = 222u,
+        SOURCE_STRIDE = 0x20u, TEXTURE_WIDTH = 8u,
+        TEXTURE_HEIGHT = 256u, TARGET_STRIDE = 0x500u,
+    };
+    const uint32_t table0 = 0x08003000u;
+    const uint32_t table2 = 0x08004000u;
+    const uint32_t region = 0x00001000u;
+    const uint32_t object = 0x00014000u;
+    const uint32_t source = 0x00b74000u;
+    const uint32_t target = 0x00a3d000u;
+    const uint32_t region_pa = 0x08010000u;
+    const uint32_t object_pa = 0x08014000u;
+    const uint32_t source_pa = 0x08020000u;
+    const uint32_t target_pa = 0x080c0000u;
+
+    s5l8900_t m;
+    CHECK(s5l8900_init(&m, RAM_BASE, RAM_SIZE),
+          "compact column-resample machine init failed");
+    if (!m.ram) return;
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_GART0, table0);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_GART2, table2);
+    test_map_gpu_page(&m, table0, region, region_pa);
+    test_map_gpu_page(&m, table0, object, object_pa);
+
+    uint32_t source_page0 = source & ~0xfffu;
+    uint32_t source_last = source +
+        (TEXTURE_HEIGHT - 1u) * SOURCE_STRIDE + TEXTURE_WIDTH * 4u - 1u;
+    for (uint32_t page = source_page0;
+         page <= (source_last & ~0xfffu); page += 0x1000u)
+        test_map_gpu_page(&m, table2, page,
+                          source_pa + (page - source_page0));
+
+    uint32_t before = target + (TOP - 1u) * TARGET_STRIDE;
+    uint32_t after = target + (TOP + HEIGHT) * TARGET_STRIDE;
+    uint32_t target_page0 = target & ~0xfffu;
+    uint32_t target_last = after + 3u;
+    for (uint32_t page = target_page0;
+         page <= (target_last & ~0xfffu); page += 0x1000u)
+        test_map_gpu_page(&m, table2, page,
+                          target_pa + (page - target_page0));
+
+    const uint32_t record_offset = 0x300u;
+    test_write_compact_blit_copy(
+        &m, region, object, source, target, record_offset,
+        LEFT, TOP, WIDTH, HEIGHT, SOURCE_WIDTH, SOURCE_HEIGHT,
+        SOURCE_STRIDE, 0xff000000u);
+    for (uint32_t y = 0u; y < TEXTURE_HEIGHT; y++)
+        for (uint32_t x = 0u; x < TEXTURE_WIDTH; x++)
+            test_gpu_write32(&m, source + y * SOURCE_STRIDE + x * 4u,
+                             test_sprite_source_pixel(x, y));
+    for (uint32_t y = 0u; y < HEIGHT; y++)
+        for (uint32_t x = 0u; x < WIDTH; x++)
+            test_gpu_write32(&m,
+                target + (TOP + y) * TARGET_STRIDE + (LEFT + x) * 4u,
+                0xff102030u + y * 0x00010101u + x);
+    test_gpu_write32(&m, before, 0x11223344u);
+    test_gpu_write32(&m, after, 0x55667788u);
+
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
+    uint32_t mismatches = 0u;
+    for (uint32_t y = 0u; y < HEIGHT; y++) {
+        struct test_bilinear_axis y_axis;
+        bool y_ok = test_bilinear_axis(
+            (float)TOP, (float)HEIGHT, 0.0f,
+            (float)SOURCE_HEIGHT - 0.5f,
+            TOP + y, TEXTURE_HEIGHT, &y_axis);
+        for (uint32_t x = 0u; x < WIDTH; x++) {
+            struct test_bilinear_axis x_axis;
+            bool x_ok = test_bilinear_axis(
+                (float)LEFT, (float)WIDTH, 0.0f,
+                (float)SOURCE_WIDTH - 0.5f,
+                LEFT + x, TEXTURE_WIDTH, &x_axis);
+            uint32_t expected = x_ok && y_ok
+                ? test_bilinear_sprite_pixel(&x_axis, &y_axis) : 0u;
+            uint32_t actual = test_gpu_read32(&m,
+                target + (TOP + y) * TARGET_STRIDE + (LEFT + x) * 4u);
+            mismatches += !x_ok || !y_ok || actual != expected;
+        }
+    }
+    CHECK(mismatches == 0u,
+          "compact column resample mismatched %u pixels", mismatches);
+    CHECK(test_gpu_read32(&m, before) == 0x11223344u &&
+          test_gpu_read32(&m, after) == 0x55667788u,
+          "compact column resample changed a pixel outside its rectangle");
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0x4cu,
+          "compact column resample did not raise all completion events");
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x4cu);
+
+    uint32_t first = target + TOP * TARGET_STRIDE;
+    uint32_t last = target + (TOP + HEIGHT - 1u) * TARGET_STRIDE +
+                    (WIDTH - 1u) * 4u;
+    uint32_t first_u1 = object + record_offset + 25u * 4u;
+    uint32_t second_u1 = object + record_offset + 31u * 4u;
+    uint32_t captured_u1 = test_float_word(0.5f / (float)TEXTURE_WIDTH);
+    uint32_t wider_u1 = test_float_word(1.5f / (float)TEXTURE_WIDTH);
+    CHECK(test_gpu_read32(&m, first_u1) == captured_u1 &&
+          test_gpu_read32(&m, second_u1) == captured_u1,
+          "compact column fixture lost its half-texel width");
+    test_gpu_write32(&m, first, 0x89abcdefu);
+    test_gpu_write32(&m, last, 0x76543210u);
+    test_gpu_write32(&m, first_u1, wider_u1);
+    test_gpu_write32(&m, second_u1, wider_u1);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
+    CHECK(test_gpu_read32(&m, first) == 0x89abcdefu &&
+          test_gpu_read32(&m, last) == 0x76543210u &&
+          m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
+          "wider mixed-axis compact scale was not rejected atomically");
+    test_gpu_write32(&m, first_u1, captured_u1);
+    test_gpu_write32(&m, second_u1, captured_u1);
+
+    uint32_t late_source = source +
+        (SOURCE_HEIGHT - 1u) * SOURCE_STRIDE + (SOURCE_WIDTH - 1u) * 4u;
+    uint32_t source_pte_address = table2 +
+        (((late_source >> 12) & 0x3ffu) * 4u);
+    uint32_t source_pte = m.bus.read32(m.bus.ctx, source_pte_address);
+    test_gpu_write32(&m, first, 0x89abcdefu);
+    test_gpu_write32(&m, last, 0x76543210u);
+    m.bus.write32(m.bus.ctx, source_pte_address, 0u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
+    m.bus.write32(m.bus.ctx, source_pte_address, source_pte);
+    CHECK(test_gpu_read32(&m, first) == 0x89abcdefu &&
+          test_gpu_read32(&m, last) == 0x76543210u &&
+          m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
+          "missing column source PTE partially committed or completed");
+
+    uint32_t target_pte_address = table2 +
+        ((((last & ~0xfffu) >> 12) & 0x3ffu) * 4u);
+    uint32_t target_pte = m.bus.read32(m.bus.ctx, target_pte_address);
+    test_gpu_write32(&m, first, 0x89abcdefu);
+    test_gpu_write32(&m, last, 0x76543210u);
+    m.bus.write32(m.bus.ctx, target_pte_address, 0u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
+    m.bus.write32(m.bus.ctx, target_pte_address, target_pte);
+    CHECK(test_gpu_read32(&m, first) == 0x89abcdefu &&
+          test_gpu_read32(&m, last) == 0x76543210u &&
+          m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
+          "missing column target PTE partially committed or completed");
 
     s5l8900_free(&m);
 }
@@ -3903,6 +4055,7 @@ int main(void) {
     test_first_tiled_premultiplied_over();
     test_second_tiled_status_glyph();
     test_compact_opaque_blit_copy();
+    test_compact_column_resample();
     test_pointer_selected_solid_quad();
     test_later_tiled_status_sprites();
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
