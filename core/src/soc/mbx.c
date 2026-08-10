@@ -648,12 +648,12 @@ static bool mbx_stage_simple_copy(s5l_mbx_t *m, const arm_bus_t *bus,
     return true;
 }
 
-static bool mbx_stage_opaque_rect_fill(s5l_mbx_t *m,
-                                       const arm_bus_t *bus,
-                                       uint32_t packet_off,
-                                       const struct mbx_2d_batch_state *batch,
-                                       struct mbx_2d_job *job,
-                                       const char **why) {
+static bool mbx_stage_rect_fill(s5l_mbx_t *m,
+                                const arm_bus_t *bus,
+                                uint32_t packet_off,
+                                const struct mbx_2d_batch_state *batch,
+                                struct mbx_2d_job *job,
+                                const char **why) {
     memset(job, 0, sizeof *job);
     uint32_t w[MBX_2D_COPY_WORDS];
     for (unsigned i = 0; i < MBX_2D_COPY_WORDS; i++)
@@ -664,17 +664,15 @@ static bool mbx_stage_opaque_rect_fill(s5l_mbx_t *m,
      * 7, then packs (x, y) and (x + width, y + height) into words 8 and 9.
      * r408 measured black bounded fills. The Safari Tabs recovery fixture then
      * captured the identical BGRA8 command with opaque white and 0xe0 gray.
-     * Accept opaque colours from that decoded producer while keeping alpha,
-     * raster operation, surface format and bounds closed to measured forms. */
+     * A retained Settings transition uses zero as a raw transparent surface
+     * clear before two copies reconstruct the visible rows. Accept the complete
+     * converted BGRA8 word while keeping the raster operation, surface format
+     * and bounds closed to measured forms. */
     if ((w[0] != MBX_2D_COMMAND_HEADER && w[0] != MBX_2D_SUBMIT) ||
         w[2] != 0x94060500u || w[3] != 0u || w[4] != 0x30000000u ||
         w[5] != 0x60800200u || w[6] != MBX_2D_FILL_MODE ||
         (w[8] & ~0x1fff1fffu) || (w[9] & ~0x1fff1fffu)) {
-        if (why) *why = "packet is not the decoded opaque BGRA8 fill form";
-        return false;
-    }
-    if ((w[7] >> 24) != 0xffu) {
-        if (why) *why = "solid-fill colour is not opaque BGRA8";
+        if (why) *why = "packet is not the decoded BGRA8 fill form";
         return false;
     }
     for (unsigned i = 10; i < MBX_2D_COPY_WORDS; i++) {
@@ -943,8 +941,8 @@ static bool mbx_stage_2d_packet(s5l_mbx_t *m, const arm_bus_t *bus,
         *packet_words = MBX_2D_BLEND_WORDS;
     } else if (mbx_edram_word(m, packet_off + 6u * 4u) ==
                MBX_2D_FILL_MODE) {
-        if (!mbx_stage_opaque_rect_fill(m, bus, packet_off,
-                                         batch, job, why))
+        if (!mbx_stage_rect_fill(m, bus, packet_off,
+                                 batch, job, why))
             return false;
         *packet_words = MBX_2D_COPY_WORDS;
     } else {

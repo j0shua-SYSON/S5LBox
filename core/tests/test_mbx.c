@@ -442,10 +442,20 @@ static void test_full_lower_surface_opaque_fill(void) {
     packet[7] = 0x7f000000u;
     write_packet(&m, RING + 0x40u, packet, 16u);
     m.bus.write32(m.bus.ctx, MBX_BASE + RING, 0xf0000000u);
+    CHECK(test_gpu_read32(&m, target + TOP * STRIDE) == 0x7f000000u,
+          "translucent raw fill stored the wrong BGRA8 value");
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0x400u,
+          "translucent raw fill did not raise exactly 2D completion");
+
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x400u);
+    test_gpu_write32(&m, target + TOP * STRIDE, 0x89abcdefu);
+    packet[6] ^= 1u;
+    write_packet(&m, RING + 0x80u, packet, 16u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + RING, 0xf0000000u);
     CHECK(test_gpu_read32(&m, target + TOP * STRIDE) == 0x89abcdefu,
-          "unmeasured translucent fill changed the destination");
+          "unknown fill mode changed the destination");
     CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
-          "unmeasured translucent fill raised completion");
+          "unknown fill mode raised completion");
 
     s5l8900_free(&m);
 }
@@ -659,6 +669,157 @@ static void test_split_lower_surface_black_fill(void) {
           "rejected split fill committed part of the batch");
     CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
           "rejected split fill raised completion");
+
+    s5l8900_free(&m);
+}
+
+static uint32_t test_settings_transition_source1(uint32_t x, uint32_t y) {
+    return ((y & 0xffu) << 16) | ((x & 0xffu) << 8) |
+           ((x + y) & 0xffu);
+}
+
+static uint32_t test_settings_transition_source2(uint32_t x) {
+    return 0x80000000u | ((x & 0xffu) << 16) |
+           (((x * 3u) & 0xffu) << 8) | ((x * 7u) & 0xffu);
+}
+
+static void test_settings_transition_transparent_clear_batch(void) {
+    enum {
+        STRIDE = 0x500u,
+        WIDTH = 320u,
+        HEIGHT = 480u,
+        CLEAR_HEIGHT = 460u,
+        FIRST_COPY_HEIGHT = 356u,
+        SECOND_COPY_SOURCE_Y = 59u,
+    };
+    const uint32_t table2 = 0x08003000u;
+    const uint32_t table3 = 0x08002000u;
+    const uint32_t target = 0x00c69000u;
+    const uint32_t target_pa = 0x08040000u;
+    const uint32_t source1 = 0x00bf9080u;
+    const uint32_t source1_page = 0x00bf9000u;
+    const uint32_t source1_pa = 0x08100000u;
+    const uint32_t source2 = 0x00af5080u;
+    const uint32_t source2_page = 0x00af5000u;
+    const uint32_t source2_pa = 0x08180000u;
+    const uint32_t original = 0x7f556677u;
+    uint32_t clear[16] = {
+        0xa0060500u, target, 0x94060500u, 0x00000000u,
+        0x30000000u, 0x60800200u, 0x8000f0f0u, 0x00000000u,
+        0x00000000u, 0x014001ccu, 0x70000000u, 0x70000000u,
+        0x70000000u, 0x70000000u, 0x70000000u, 0x70000000u,
+    };
+    uint32_t first_copy[18] = {
+        0xa0060500u, target, 0x94060500u, source1,
+        0x30000000u, 0x20000004u, 0x0d5ff000u, 0x60800200u,
+        0x8002ccccu, 0xffffffffu, 0x0000003cu, 0x014001a0u,
+        0x70000000u, 0x70000000u, 0x70000000u, 0x70000000u,
+        0x70000000u, 0x70000000u,
+    };
+    uint32_t second_copy[18] = {
+        0xa0060500u, target, 0x94060500u, source2,
+        0x3000003bu, 0x20000004u, 0x0d5ff000u, 0x60800200u,
+        0x8002ccccu, 0xffffffffu, 0x0000003bu, 0x0140003cu,
+        0x70000000u, 0x70000000u, 0x70000000u, 0x70000000u,
+        0x70000000u, 0x70000000u,
+    };
+
+    s5l8900_t m;
+    CHECK(s5l8900_init(&m, RAM_BASE, RAM_SIZE),
+          "Settings-transition machine init failed");
+    if (!m.ram) return;
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_GART2, table2);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_GART3, table3);
+
+    for (uint32_t page = 0u; page < STRIDE * HEIGHT; page += 0x1000u)
+        test_map_gpu_page(&m, table3, target + page, target_pa + page);
+    for (uint32_t page = 0u;
+         page < 0x80u + STRIDE * FIRST_COPY_HEIGHT;
+         page += 0x1000u) {
+        uint32_t gpu = source1_page + page;
+        uint32_t table = gpu < 0x00c00000u ? table2 : table3;
+        test_map_gpu_page(&m, table, gpu, source1_pa + page);
+    }
+    for (uint32_t page = 0u;
+         page < 0x80u + STRIDE * (SECOND_COPY_SOURCE_Y + 1u);
+         page += 0x1000u)
+        test_map_gpu_page(&m, table2, source2_page + page,
+                          source2_pa + page);
+
+    for (uint32_t y = 0u; y < HEIGHT; y++) {
+        for (uint32_t x = 0u; x < WIDTH; x++)
+            test_gpu_write32(&m, target + y * STRIDE + x * 4u, original);
+    }
+    for (uint32_t y = 0u; y < FIRST_COPY_HEIGHT; y++) {
+        for (uint32_t x = 0u; x < WIDTH; x++)
+            test_gpu_write32(&m, source1 + y * STRIDE + x * 4u,
+                             test_settings_transition_source1(x, y));
+    }
+    for (uint32_t x = 0u; x < WIDTH; x++)
+        test_gpu_write32(&m,
+            source2 + SECOND_COPY_SOURCE_Y * STRIDE + x * 4u,
+            test_settings_transition_source2(x));
+
+    /* This is the exact three-command family retained when SpringBoard opens
+     * Settings: a transparent raw clear followed by two opaque XRGB copies.
+     * The first source crosses from GART root 2 into root 3 immediately before
+     * the target mapping, so the fixture also pins that boundary. */
+    write_packet(&m, RING + 0x79c0u, clear, 16u);
+    write_packet(&m, RING + 0x7a00u, first_copy, 18u);
+    write_packet(&m, RING + 0x7a48u, second_copy, 18u);
+    const char *probe_why = "unset";
+    uint64_t probe_hash = UINT64_MAX;
+    CHECK(s5l_mbx_probe_2d_submit(&m.mbx, &m.bus,
+                                  RING + 0x79c0u, 3u,
+                                  &probe_hash, &probe_why) &&
+          probe_hash == 0u,
+          "captured Settings transition rejected: %s (%016llx)",
+          probe_why, (unsigned long long)probe_hash);
+    CHECK(test_gpu_read32(&m, target) == original &&
+          m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
+          "read-only Settings-transition probe changed machine state");
+
+    m.bus.write32(m.bus.ctx, MBX_BASE + RING, 0xf0000000u);
+    uint32_t mismatches = 0u;
+    for (uint32_t y = 0u; y < HEIGHT; y++) {
+        for (uint32_t x = 0u; x < WIDTH; x++) {
+            uint32_t expected = original;
+            if (y < CLEAR_HEIGHT) expected = 0u;
+            if (y == 59u)
+                expected = test_settings_transition_source2(x) |
+                           0xff000000u;
+            else if (y >= 60u && y < 416u)
+                expected = test_settings_transition_source1(x, y - 60u) |
+                           0xff000000u;
+            mismatches += test_gpu_read32(
+                &m, target + y * STRIDE + x * 4u) != expected;
+        }
+    }
+    CHECK(mismatches == 0u,
+          "captured Settings transition produced %u wrong pixels", mismatches);
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0x400u,
+          "Settings-transition batch did not raise exactly 2D completion");
+    CHECK(m.mbx_telemetry.candidates_2d == 3u &&
+          m.mbx_telemetry.completed_2d == 3u &&
+          m.mbx_telemetry.rejected_2d == 0u &&
+          m.mbx_telemetry.bytes_2d == UINT64_C(1045760),
+          "Settings-transition ledger=%llu/%llu/%llu/%llu",
+          (unsigned long long)m.mbx_telemetry.candidates_2d,
+          (unsigned long long)m.mbx_telemetry.completed_2d,
+          (unsigned long long)m.mbx_telemetry.rejected_2d,
+          (unsigned long long)m.mbx_telemetry.bytes_2d);
+
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x400u);
+    test_gpu_write32(&m, target, original);
+    second_copy[6] ^= 0x00100000u;
+    write_packet(&m, RING + 0x7b00u, clear, 16u);
+    write_packet(&m, RING + 0x7b40u, first_copy, 18u);
+    write_packet(&m, RING + 0x7b88u, second_copy, 18u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + RING, 0xf0000000u);
+    CHECK(test_gpu_read32(&m, target) == original,
+          "rejected Settings transition leaked its transparent clear");
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
+          "rejected Settings-transition batch raised completion");
 
     s5l8900_free(&m);
 }
@@ -4460,6 +4621,7 @@ int main(void) {
     test_safari_tabs_opaque_fill_batch();
     test_safari_tabs_bounded_source_stride_copy();
     test_split_lower_surface_black_fill();
+    test_settings_transition_transparent_clear_batch();
     test_springboard_settings_black_fill_batch();
     test_status_write_to_set_and_ack();
     test_premultiplied_2d_clock_form();
