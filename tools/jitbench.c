@@ -8746,6 +8746,68 @@ static bool validate_compact_raw_system_coprocessor_oracles(void) {
     return true;
 }
 
+/* The generated loop retains instruction width across ordinary retirements.
+ * Prove both native state transitions and the following fetch in one call:
+ * A32 BX enters Thumb, one Thumb ALU instruction retires, Thumb BX returns to
+ * A32, and the next A32 ALU instruction retires. A stale width would decode
+ * the second, third, or fourth instruction from the wrong byte boundary. */
+static bool validate_compact_raw_mode_continuity_oracle(void) {
+    const uint32_t pc = UINT32_C(0x7c00);
+    const uint32_t program[] = {
+        UINT32_C(0xe12fff10), /* A32 BX r0 -> pc+4 in Thumb state */
+        UINT32_C(0x47103101), /* Thumb ADDS r1,#1; BX r2 -> A32 */
+        UINT32_C(0xe2833001), /* A32 ADD r3,r3,#1 */
+        UINT32_C(0xe2844001), /* unexecuted padding */
+    };
+    arm_cpu_t reference;
+    arm_cpu_t compact;
+    final_state_t reference_state;
+    final_state_t compact_state;
+    arm_status_t status = ARM_OK;
+    unsigned completed = UINT_MAX;
+
+    seed_cpu_at(&reference, program,
+                (unsigned)(sizeof program / sizeof program[0]), false, pc);
+    reference.r[0] = pc + UINT32_C(5);
+    reference.r[1] = UINT32_C(41);
+    reference.r[2] = pc + UINT32_C(8);
+    reference.r[3] = UINT32_C(99);
+    compact = reference;
+
+    for (unsigned i = 0u; i < 4u; i++) {
+        status = arm_step(&reference);
+        if (status != ARM_OK) break;
+    }
+    capture_state(&reference_state, &reference, status, JIT_EXIT_NEXT);
+
+    if (!a64_compact_raw_run(
+            &compact, &g_ram[pc], pc, (uint32_t)sizeof program, 4u,
+            g_ram, sizeof g_ram, &completed)) {
+        fprintf(stderr,
+                "jitbench: compact raw mode-continuity contract refused\n");
+        return false;
+    }
+    capture_state(&compact_state, &compact, ARM_OK, JIT_EXIT_NEXT);
+    if (status != ARM_OK || completed != 4u ||
+        compact.r[1] != UINT32_C(42) ||
+        compact.r[3] != UINT32_C(100) || compact.r[15] != pc + 12u ||
+        (compact.cpsr & ARM_CPSR_T) != 0u ||
+        !architectural_states_equal(&reference_state, &compact_state)) {
+        fprintf(stderr,
+                "jitbench: compact raw mode-continuity mismatch "
+                "completed=%u r1=%08" PRIx32 " r3=%08" PRIx32
+                " pc=%08" PRIx32 " cpsr=%08" PRIx32 "\n",
+                completed, compact.r[1], compact.r[3], compact.r[15],
+                compact.cpsr);
+        return false;
+    }
+
+    printf("COMPACT-RAW-MODE-CONTINUITY-ORACLE exact=yes "
+           "transitions=a32-thumb-a32 native-following-fetch=yes "
+           "runtime-codegen=no\n");
+    return true;
+}
+
 static bool validate_compact_raw_oracles(void) {
     static const unsigned result_ops[] = {
         0u, 1u, 2u, 3u, 4u, 5u, 6u, 7u, 12u, 13u, 14u, 15u,
@@ -8804,6 +8866,11 @@ static bool validate_compact_raw_oracles(void) {
         UINT32_C(0xe2855001), /* native ADD in the published window */
         UINT32_C(0xe0000090), /* fallback continues without publication */
         UINT32_C(0xe2866001), /* must not execute via the stale window */
+    };
+    const uint32_t resident_fallback_interworking[] = {
+        UINT32_C(0xe597f004), /* fallback LDR pc,[r7,#4] enters Thumb */
+        DATA_BASE + UINT32_C(9), /* odd target at the following word */
+        UINT32_C(0x00003101), /* native Thumb ADDS r1,#1 at target */
     };
     const uint32_t resident_window_cache[] = {
         UINT32_C(0xea000000), /* branch 0x73fc -> 0x7404 */
@@ -8891,6 +8958,8 @@ static bool validate_compact_raw_oracles(void) {
     if (!validate_compact_raw_thumb_multi_oracles())
         return false;
     if (!validate_compact_raw_a32_indirect_oracles())
+        return false;
+    if (!validate_compact_raw_mode_continuity_oracle())
         return false;
     if (!compact_raw_compare("data-processing-flags", flag_program,
                              (unsigned)(sizeof flag_program /
@@ -8991,6 +9060,11 @@ static bool validate_compact_raw_oracles(void) {
             false, false, 0u))
         return false;
     if (!compact_raw_resident_compare(
+            "fallback-interworking", resident_fallback_interworking, 3u,
+            false, DATA_BASE, DATA_BASE, 12u, 2u, 2u, 1u, 1u, 0u,
+            false, false, 0u, false, 0u, false, false, 0u))
+        return false;
+    if (!compact_raw_resident_compare(
             "thumb-memory", resident_thumb_memory, 6u, true,
             UINT32_C(0x6c00), UINT32_C(0x6c00), 12u,
             5u, 5u, 4u, 1u, 0u, false, false, 0u, false, 0u,
@@ -9025,10 +9099,12 @@ static bool validate_compact_raw_oracles(void) {
            "live-bytes=yes mmu-code-window=yes data-ops-stop=yes "
            "out-of-window=yes unsupported-prefix=yes "
            "invalid-contract-rollback=yes\n");
-    printf("COMPACT-RAW-RESIDENT-ORACLE exact=yes cases=7 "
+    printf("COMPACT-RAW-RESIDENT-ORACLE exact=yes cases=10 "
            "native-fallback-partition=yes interpreter-continue=yes "
            "boundary-stop=yes window-sequential=yes window-branch=yes "
-           "window-refusal=yes stale-window-rejection=yes thumb-memory=yes "
+           "window-refusal=yes stale-window-rejection=yes "
+           "no-retire-window=yes repeated-window-cache=yes "
+           "fallback-interworking=yes thumb-memory=yes "
            "write-consent=yes ram-equality=yes "
            "runtime-codegen=no\n");
     return true;
