@@ -311,6 +311,17 @@ static void report(const s5l8900_t *m, arm_status_t st) {
            (unsigned long long)m->mtz2.frames_read,
            (unsigned long long)m->mtz2.frames_queued,
            (unsigned long long)m->mtz2.injects_refused);
+    printf("  spi1          : control=%08x setup=%08x cnt=%u left=%u "
+           "status=%08x fifo=%u/%u cs=%u words=%llu reads=%llu "
+           "under=%llu over=%llu\n",
+           m->spi[1].control, m->spi[1].setup, m->spi[1].cnt,
+           m->spi[1].words_left, m->spi[1].status,
+           m->spi[1].tx_level, m->spi[1].rx_level,
+           m->spi[1].cs & S5L_SPI_CS_ROUTE_MASK,
+           (unsigned long long)m->spi[1].words,
+           (unsigned long long)m->spi[1].rx_reads,
+           (unsigned long long)m->spi[1].rx_underruns,
+           (unsigned long long)m->spi[1].rx_overruns);
     for (unsigned g = 0; g < S5L_GPIOIC_GROUPS; g++)
         printf("  gpioic%u       : raw=%08x stat=%08x en=%08x "
                "level=%08x type=%08x driven=%08x\n",
