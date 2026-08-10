@@ -584,35 +584,35 @@ Against a decoder that re-decodes every instruction every time, that is
 precisely the ARM-vs-Thumb gap above, and it is the most promising route to
 the ~1.7x still missing after the two frame-cost fixes.
 
-## Buttons were never broken; they were slow (2026-07-31)
+## CORRECTION: short button taps really were broken (2026-08-10)
 
-Reported from the device as "the buttons don't seem to work", then resolved by
-the reporter's own next observation: pressing Power turned the guest's screen
-black while the app kept running. That is not a failure, it is iPhone OS 3
-going to sleep, which is precisely what Power does -- so the whole chain works
-end to end:
+The section previously here said there was no separate input bug. That was
+wrong. It extrapolated from a working Power press and board-level scripted
+holds to every UIKit tap without reproducing an ordinary short Home tap on a
+physical phone.
 
-    tap -> VMEngine queue -> emulator thread -> s5l_buttons_set -> GPIO pin
-        -> interrupt controller -> AppleM68Buttons -> SpringBoard -> sleep
+The decisive control used the CPU renderer on a fresh real-firmware machine.
+A normal tap on Home from Settings did nothing, while a 250 ms hold returned to
+SpringBoard immediately. The renderer therefore was not the cause. The app
+could queue a UIKit press and release together; after the board accepted the
+press, the release could be delivered at the very next chunk boundary.
+AppleM68Buttons does not sample the pin in its interrupt handler. It arms a
+14 ms timer and samples later, so a pulse already released at that point is
+genuinely invisible to the guest.
 
-Nothing was wrong with the app path, which matches a static review that failed
-to find a defect in it: the bar is enabled, the transition is queued, the
-app-to-core enum translation is correct, the drain runs between chunks, and
-buttons.c's own header already recorded run86 measuring the guest ARMING all
-five lines at instruction 238,689,154 (INTEN group 1 = 0x00002f00).
+The repair keeps accepted Home and volume presses asserted for a 50 ms host
+floor. The anchor is board acceptance, not the UIKit event, because a press may
+wait in the FIFO until the guest arms its line. Power retains its separate
+500 ms sleep/wake and display-edge policy; the ringer remains a two-position
+switch. The plain-C queue test covers the exact boundary, missing/backwards
+clock fail-open behaviour, and the exclusions, and the full 61-test host suite
+passes.
 
-WHY IT LOOKED BROKEN, and why this belongs in the frame-rate file rather than
-an input one. At 1-2 fps a frame is 0.5-1 SECOND. SpringBoard answers Home
-with an animation, which is many frames, so a press produces no visible change
-for ten seconds or more -- indistinguishable from a dead button. Power looked
-different only because its response is a single state change with no animation
-to sit through: one frame, and the screen is off.
-
-So "input is broken" was a frame-rate symptom, and there is no separate input
-bug to fix. The lesson for the next such report is that at these frame rates
-the UI cannot be judged by whether it responds, only by whether it responds
-EVENTUALLY, and the status line now prints the board's own delivered/refused
-counters so that question can be answered without waiting for an animation.
+BRUTAL STATUS AT THIS POINT: the mechanism and regression tests are complete,
+but this new floor has not yet been proven in an IPA on a physical phone. The
+old claim is retracted now because the reproduction disproved it; the fix must
+not be called device-verified until a normal tap passes in both CPU and MBX
+modes.
 
 ## The key generation TERMINATES, at ~6.4e9 instructions (r219, decisive)
 

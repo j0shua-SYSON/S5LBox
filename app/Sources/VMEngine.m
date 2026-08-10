@@ -259,6 +259,7 @@ static double vm_engine_now_seconds(void) {
     uint64_t          _buttonDelivered;
     uint64_t          _buttonRefused;
     vm_button_power_hold_t _powerHold;
+    vm_button_momentary_holds_t _momentaryHolds;
     BOOL              _droppedButtonLogged;
 }
 
@@ -769,6 +770,7 @@ static double vm_engine_now_seconds(void) {
     _buttonDelivered = 0;
     _buttonRefused = 0;
     memset(&_powerHold, 0, sizeof _powerHold);
+    memset(&_momentaryHolds, 0, sizeof _momentaryHolds);
     _droppedButtonLogged = NO;
     _status = @"starting";
     BOOL needSnapshot = (_snapshot == NULL);
@@ -1249,18 +1251,21 @@ static double vm_engine_now_seconds(void) {
     pthread_mutex_lock(&_lock);
     BOOL have = vm_button_queue_peek(&_buttonQueue, &e);
     vm_button_power_hold_t powerHold = _powerHold;
+    vm_button_momentary_holds_t momentaryHolds = _momentaryHolds;
     pthread_mutex_unlock(&_lock);
     if (!have) return;
 
-    /* A UIKit tap can queue down and up in the same emulator chunk.  The PMU
-     * wake reason prevents the release from overtaking its status read, but a
-     * zero-duration pulse is still unlike the physical switch and can reach
-     * AppleM68Buttons before its post-wake debounce path has settled.  Anchor
-     * the minimum at BOARD acceptance, not at the UI event, because a press
-     * may spend time waiting in this queue while the guest arms the line. */
+    /* A UIKit tap can queue down and up in the same emulator chunk.  Every
+     * momentary key is sampled by a later guest debounce callback, so a
+     * zero-duration electrical pulse can disappear before AppleM68Buttons ever
+     * sees it.  Power additionally has a post-wake boundary.  Both policies
+     * anchor at BOARD acceptance, not at the UI event, because a press may wait
+     * in this queue while the guest arms its line. */
     uint64_t nowNS = vm_now_ns();
     uint64_t nowCycles = _machine.cpu.cycles;
     bool displayRunning = s5l_clcd_running(&_machine.clcd);
+    if (!vm_button_momentary_release_ready(&e, &momentaryHolds, nowNS))
+        return;
     if (!vm_button_power_release_ready(&e, &powerHold, nowNS, nowCycles,
                                        displayRunning))
         return;
@@ -1271,6 +1276,7 @@ static double vm_engine_now_seconds(void) {
         pthread_mutex_lock(&_lock);
         vm_button_queue_pop(&_buttonQueue);
         _buttonDelivered++;
+        vm_button_momentary_note_accepted(&e, &_momentaryHolds, nowNS);
         if (e.which == S5L_BUTTON_HOLD) {
             if (e.pressed) {
                 _powerHold.active = true;

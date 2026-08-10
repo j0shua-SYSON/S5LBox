@@ -107,6 +107,43 @@ bool vm_button_power_release_ready(const vm_button_event_t *event,
                VM_BUTTON_POWER_MIN_HOLD_CYCLES;
 }
 
+static bool uses_momentary_floor(unsigned which) {
+    return which == S5L_BUTTON_MENU ||
+           which == S5L_BUTTON_VOLUP ||
+           which == S5L_BUTTON_VOLDOWN;
+}
+
+bool vm_button_momentary_release_ready(
+    const vm_button_event_t *event,
+    const vm_button_momentary_holds_t *holds,
+    uint64_t now_ns) {
+    if (!event) return false;
+    if (event->pressed || !uses_momentary_floor(event->which)) return true;
+    if (!holds || event->which >= S5L_BUTTON_COUNT ||
+        !holds->active[event->which]) return true;
+
+    uint64_t delivered_ns = holds->delivered_ns[event->which];
+    if (delivered_ns == 0u || now_ns == 0u || now_ns < delivered_ns)
+        return true;
+    return now_ns - delivered_ns >= VM_BUTTON_MOMENTARY_MIN_HOLD_NS;
+}
+
+void vm_button_momentary_note_accepted(
+    const vm_button_event_t *event,
+    vm_button_momentary_holds_t *holds,
+    uint64_t delivered_ns) {
+    if (!event || !holds || event->which >= S5L_BUTTON_COUNT ||
+        !uses_momentary_floor(event->which)) return;
+
+    if (event->pressed) {
+        holds->active[event->which] = true;
+        holds->delivered_ns[event->which] = delivered_ns;
+    } else {
+        holds->active[event->which] = false;
+        holds->delivered_ns[event->which] = 0u;
+    }
+}
+
 void vm_button_queue_pop(vm_button_queue_t *q) {
     if (!q || q->count == 0u) return;
     q->head = (q->head + 1u) % VM_BUTTON_QUEUE_CAP;

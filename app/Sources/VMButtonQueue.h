@@ -90,6 +90,19 @@
 #define VM_BUTTON_POWER_MIN_HOLD_NS UINT64_C(500000000)
 #define VM_BUTTON_POWER_MIN_HOLD_CYCLES UINT64_C(8000000)
 
+/*
+ * Home and the two volume keys use AppleM68Buttons' ordinary 14 ms debounce
+ * path.  A UIKit tap can put both edges in the queue before the emulator has
+ * delivered either one, so keep an accepted press electrically asserted long
+ * enough for that callback to sample it.  Fifty milliseconds is still a short
+ * physical tap, while leaving margin for a timer boundary and host scheduling.
+ *
+ * Power is deliberately not covered by this floor: its sleep/wake path has the
+ * stronger display-edge and bounded-fallback policy above.  The ringer is a
+ * two-position switch, not a momentary key.
+ */
+#define VM_BUTTON_MOMENTARY_MIN_HOLD_NS UINT64_C(50000000)
+
 typedef struct {
     uint8_t  which;     /* an S5L_BUTTON_*, already translated  */
     bool     pressed;   /* what the guest should end up reporting */
@@ -102,6 +115,12 @@ typedef struct {
     uint64_t delivered_ns;
     uint64_t delivered_cycles;
 } vm_button_power_hold_t;
+
+/* Per-core-button anchors for Home and the two volume keys. */
+typedef struct {
+    bool     active[S5L_BUTTON_COUNT];
+    uint64_t delivered_ns[S5L_BUTTON_COUNT];
+} vm_button_momentary_holds_t;
 
 typedef struct {
     vm_button_event_t slot[VM_BUTTON_QUEUE_CAP];
@@ -162,6 +181,22 @@ bool vm_button_power_release_ready(const vm_button_event_t *event,
                                    uint64_t now_ns,
                                    uint64_t now_cycles,
                                    bool display_running_now);
+
+/*
+ * Apply the ordinary Home/volume debounce floor.  Presses, Power, ringer and
+ * an unpaired release are immediately ready.  A missing or backwards host
+ * clock fails open rather than leaving a physical key stuck forever.
+ */
+bool vm_button_momentary_release_ready(
+    const vm_button_event_t *event,
+    const vm_button_momentary_holds_t *holds,
+    uint64_t now_ns);
+
+/* Update those anchors only after the emulated board accepts the transition. */
+void vm_button_momentary_note_accepted(
+    const vm_button_event_t *event,
+    vm_button_momentary_holds_t *holds,
+    uint64_t delivered_ns);
 
 /* Remove the oldest transition. Harmless on an empty queue. */
 void vm_button_queue_pop(vm_button_queue_t *q);

@@ -320,6 +320,72 @@ static void test_power_release_uses_display_edge_or_bounded_fallback(void) {
           "a NULL event was called ready");
 }
 
+static void test_home_and_volume_survive_the_guest_debounce(void) {
+    const uint64_t down_ns = UINT64_C(11000000000);
+    vm_button_event_t home_down = { S5L_BUTTON_MENU, true };
+    vm_button_event_t home_up = { S5L_BUTTON_MENU, false };
+    vm_button_event_t power_up = { S5L_BUTTON_HOLD, false };
+    vm_button_event_t ringer_up = { S5L_BUTTON_RINGERAB, false };
+    vm_button_momentary_holds_t holds;
+    memset(&holds, 0, sizeof holds);
+
+    CHECK(vm_button_momentary_release_ready(&home_down, &holds, down_ns),
+          "a Home press was delayed");
+    vm_button_momentary_note_accepted(&home_down, &holds, down_ns);
+    CHECK(!vm_button_momentary_release_ready(
+              &home_up, &holds,
+              down_ns + VM_BUTTON_MOMENTARY_MIN_HOLD_NS - 1u),
+          "Home was released before the debounce floor");
+    CHECK(vm_button_momentary_release_ready(
+              &home_up, &holds,
+              down_ns + VM_BUTTON_MOMENTARY_MIN_HOLD_NS),
+          "Home stayed held at the exact debounce boundary");
+
+    vm_button_momentary_note_accepted(
+        &home_up, &holds, down_ns + VM_BUTTON_MOMENTARY_MIN_HOLD_NS);
+    CHECK(vm_button_momentary_release_ready(&home_up, &holds, down_ns),
+          "an already-released Home key wedged the queue");
+
+    const unsigned volume[] = { S5L_BUTTON_VOLUP, S5L_BUTTON_VOLDOWN };
+    for (unsigned i = 0; i < sizeof volume / sizeof volume[0]; i++) {
+        vm_button_event_t down = { (uint8_t)volume[i], true };
+        vm_button_event_t up = { (uint8_t)volume[i], false };
+        vm_button_momentary_note_accepted(&down, &holds, down_ns);
+        CHECK(!vm_button_momentary_release_ready(
+                  &up, &holds,
+                  down_ns + VM_BUTTON_MOMENTARY_MIN_HOLD_NS - 1u),
+              "volume button %u ignored the debounce floor", volume[i]);
+        CHECK(vm_button_momentary_release_ready(
+                  &up, &holds,
+                  down_ns + VM_BUTTON_MOMENTARY_MIN_HOLD_NS),
+              "volume button %u stayed held at the boundary", volume[i]);
+        vm_button_momentary_note_accepted(
+            &up, &holds, down_ns + VM_BUTTON_MOMENTARY_MIN_HOLD_NS);
+    }
+
+    CHECK(vm_button_momentary_release_ready(&power_up, &holds, down_ns),
+          "the ordinary floor captured Power's separate policy");
+    CHECK(vm_button_momentary_release_ready(&ringer_up, &holds, down_ns),
+          "the momentary floor captured the two-position ringer");
+    vm_button_momentary_note_accepted(&power_up, &holds, down_ns);
+    vm_button_momentary_note_accepted(&ringer_up, &holds, down_ns);
+    CHECK(!holds.active[S5L_BUTTON_HOLD] &&
+          !holds.active[S5L_BUTTON_RINGERAB],
+          "Power or ringer acquired a momentary hold anchor");
+
+    vm_button_momentary_note_accepted(&home_down, &holds, down_ns);
+    CHECK(vm_button_momentary_release_ready(&home_up, &holds, 0u),
+          "a missing host clock wedged Home");
+    CHECK(vm_button_momentary_release_ready(&home_up, &holds, down_ns - 1u),
+          "a backwards host clock wedged Home");
+    CHECK(vm_button_momentary_release_ready(&home_up, NULL, down_ns),
+          "an unpaired Home release wedged the queue");
+    CHECK(!vm_button_momentary_release_ready(NULL, &holds, down_ns),
+          "a NULL event was called ready");
+    vm_button_momentary_note_accepted(NULL, &holds, down_ns);
+    vm_button_momentary_note_accepted(&home_down, NULL, down_ns);
+}
+
 int main(void) {
     printf("S5LBox app button queue tests\n");
     test_the_two_orders_are_not_the_same_and_map_correctly();
@@ -327,6 +393,7 @@ int main(void) {
     test_the_queue_is_a_strict_fifo();
     test_no_transition_is_ever_coalesced();
     test_power_release_uses_display_edge_or_bounded_fallback();
+    test_home_and_volume_survive_the_guest_debounce();
     printf("  %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }
