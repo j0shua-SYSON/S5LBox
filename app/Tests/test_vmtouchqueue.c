@@ -195,21 +195,25 @@ static void test_edges_are_never_coalesced(void) {
     vm_touch_queue_t q;
     s5l_mt_contact_t out;
 
-    /* An incoming EDGE must not replace a MOVED: that would reorder the
-     * gesture, putting a lift before the move that preceded it. */
+    /* An incoming EDGE displaces the newest MOVED. It stays at the back, so
+     * every surviving report remains in chronological order. */
     vm_touch_queue_reset(&q);
     for (uint16_t i = 0; i < VM_TOUCH_QUEUE_CAP; i++) {
         s5l_mt_contact_t c = make(MTZ2_PHASE_TOUCHING, i);
         (void)vm_touch_queue_push(&q, &c);
     }
     s5l_mt_contact_t lift = make(MTZ2_PHASE_BREAK_TOUCH, 500);
-    CHECK(!vm_touch_queue_push(&q, &lift),
-          "a BREAK_TOUCH must not silently replace a queued MOVED");
-    CHECK(q.dropped == 1u, "and the loss is counted, got %llu",
-          (unsigned long long)q.dropped);
-    CHECK(q.coalesced == 0u, "it is not a coalesce");
+    CHECK(vm_touch_queue_push(&q, &lift),
+          "a BREAK_TOUCH was dropped although a MOVED could make room");
+    CHECK(q.dropped == 0u, "preserving the edge reported a dropped input");
+    CHECK(q.coalesced == 1u, "the displaced MOVED was not counted");
     CHECK(vm_touch_queue_peek(&q, &out) && out.x == 0,
-          "the queue is otherwise untouched");
+          "making room reordered the front of the queue");
+    for (unsigned i = 0; i < VM_TOUCH_QUEUE_CAP - 1u; i++)
+        vm_touch_queue_pop(&q);
+    CHECK(vm_touch_queue_peek(&q, &out) &&
+          out.phase == MTZ2_PHASE_BREAK_TOUCH && out.x == 500,
+          "the preserved lift is not the last report");
 
     /* A queued EDGE at the back must not be overwritten by a MOVED. */
     vm_touch_queue_reset(&q);
@@ -250,13 +254,12 @@ static void test_a_full_tap_survives_a_flood(void) {
         (void)vm_touch_queue_push(&q, &c);
     }
     s5l_mt_contact_t up = make(MTZ2_PHASE_BREAK_TOUCH, 2);
-    /* The lift arrives at a full queue whose back is a MOVED, so it may not
-     * coalesce — it is an edge. It is dropped, and that is the honest outcome
-     * for a queue this size; what must NOT happen is it silently replacing a
-     * MOVED and arriving out of order. */
+    /* The lift arrives at a full queue whose back is a MOVED. The newest old
+     * position is the safe report to sacrifice; losing the lift would leave a
+     * permanent finger in the guest. */
     bool liftQueued = vm_touch_queue_push(&q, &up);
-    CHECK(!liftQueued, "the lift cannot displace a MOVED");
-    CHECK(q.dropped >= 1u, "and it is counted as lost, not hidden");
+    CHECK(liftQueued, "the lift did not displace an obsolete MOVED");
+    CHECK(q.dropped == 0u, "the drag lost an incoming report");
 
     s5l_mt_contact_t out;
     CHECK(vm_touch_queue_peek(&q, &out), "the queue still has the press");
@@ -264,6 +267,11 @@ static void test_a_full_tap_survives_a_flood(void) {
           "the finger-down edge is still at the front after 200 moves, got %u",
           (unsigned)out.phase);
     CHECK(q.count == VM_TOUCH_QUEUE_CAP, "and the queue is exactly full");
+    for (unsigned i = 0; i < VM_TOUCH_QUEUE_CAP - 1u; i++)
+        vm_touch_queue_pop(&q);
+    CHECK(vm_touch_queue_peek(&q, &out) &&
+          out.phase == MTZ2_PHASE_BREAK_TOUCH,
+          "the finger-up edge did not survive at the back");
 }
 
 static void test_null_arguments(void) {

@@ -57,19 +57,42 @@ bool vm_touch_queue_push(vm_touch_queue_t *q, const s5l_mt_contact_t *c) {
         return true;
     }
 
-    /*
-     * Full. The only report that may be thrown away is one that a newer report
-     * completely supersedes, and that is a MOVED replaced by a MOVED. Both
-     * halves of the test matter: replacing an edge would lose a tap, and
-     * replacing WITH an edge would reorder the gesture, putting a lift before
-     * the move that preceded it.
-     */
+    /* Full. A newer MOVED supersedes the MOVED at the back. */
     unsigned back = (q->head + q->count - 1u) % VM_TOUCH_QUEUE_CAP;
     if (c->phase == MTZ2_PHASE_TOUCHING &&
         q->slot[back].phase == MTZ2_PHASE_TOUCHING) {
         q->slot[back] = *c;
         q->coalesced++;
         return true;
+    }
+
+    /*
+     * A lifecycle edge is worth more than an old position. Find the newest
+     * queued MOVED, remove it, shift only the later reports toward the front,
+     * and append the edge at the back. Chronological order is preserved: the
+     * edge remains after every report that survives. The old implementation
+     * dropped BREAK_TOUCH here even when the back was a MOVED, which is exactly
+     * how a bounded drag queue becomes a finger held forever in the guest.
+     */
+    if (c->phase == MTZ2_PHASE_MAKE_TOUCH ||
+        c->phase == MTZ2_PHASE_BREAK_TOUCH) {
+        for (unsigned offset = q->count; offset > 0u; offset--) {
+            unsigned logical = offset - 1u;
+            unsigned at = (q->head + logical) % VM_TOUCH_QUEUE_CAP;
+            if (q->slot[at].phase != MTZ2_PHASE_TOUCHING) continue;
+
+            for (unsigned move = logical; move + 1u < q->count; move++) {
+                unsigned dst = (q->head + move) % VM_TOUCH_QUEUE_CAP;
+                unsigned src = (q->head + move + 1u) % VM_TOUCH_QUEUE_CAP;
+                q->slot[dst] = q->slot[src];
+            }
+            q->count--;
+            q->slot[(q->head + q->count) % VM_TOUCH_QUEUE_CAP] = *c;
+            q->count++;
+            q->queued++;
+            q->coalesced++;
+            return true;
+        }
     }
 
     q->dropped++;

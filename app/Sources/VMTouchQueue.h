@@ -76,7 +76,9 @@ typedef struct {
     unsigned         head;      /* index of the oldest report */
     unsigned         count;     /* how many are held */
     /* Bounded accounting, so a caller that ignores every return value still
-     * leaves evidence. `dropped` is the one that means input was lost. */
+     * leaves evidence. `coalesced` counts obsolete MOVED reports replaced or
+     * displaced by newer information; `dropped` means the incoming report had
+     * no safe place to go. */
     uint64_t         queued, coalesced, dropped;
 } vm_touch_queue_t;
 
@@ -107,9 +109,11 @@ bool vm_touch_contact_from_ui(vm_touch_phase_t phase, int x, int y,
  * Add a report. Returns whether it is now in the queue.
  *
  * False means it was dropped and `dropped` was incremented: the queue was full
- * and the incoming report was not a MOVED that could replace a MOVED already at
- * the back. Nothing else can fail — a null argument aside — because validation
- * is vm_touch_contact_from_ui()'s job.
+ * and there was no obsolete MOVED that could safely make room. A later edge is
+ * more important than an older position, so it may displace the newest queued
+ * MOVED while preserving the order of every surviving report. Nothing else can
+ * fail — a null argument aside — because validation is
+ * vm_touch_contact_from_ui()'s job.
  */
 bool vm_touch_queue_push(vm_touch_queue_t *q, const s5l_mt_contact_t *c);
 
