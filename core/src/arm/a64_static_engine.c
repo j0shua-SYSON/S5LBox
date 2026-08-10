@@ -81,6 +81,7 @@ typedef struct {
     bool compact_raw_privileged_enabled;
     bool compact_raw_window_refill_enabled;
     bool compact_raw_privileged_window_refill_enabled;
+    bool compact_raw_window_cache_enabled;
     bool compact_raw_pc_profile_enabled;
     bool indirect_enabled;
     bool thumb_conditional_enabled;
@@ -108,6 +109,7 @@ typedef struct {
     uint64_t compact_raw_window_reloads;
     uint64_t compact_raw_window_stops;
     uint64_t compact_raw_window_fast_refills;
+    uint64_t compact_raw_window_cache_hits;
     uint64_t compact_raw_privileged_window_refills;
     uint64_t compact_raw_privileged_boundary_retired;
     s5l_static_a64_compact_raw_refusals_t compact_raw_refusals;
@@ -703,6 +705,21 @@ bool s5l8900_static_a64_set_compact_raw_privileged_window_refill(
 #endif
 }
 
+bool s5l8900_static_a64_set_compact_raw_window_cache(s5l8900_t *m,
+                                                      bool enabled) {
+    if (!m) return false;
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    static_a64_state_t *state = static_state(m);
+    if (!state || !state->enabled || !a64_static_host_available())
+        return false;
+    state->compact_raw_window_cache_enabled = enabled;
+    return true;
+#else
+    (void)enabled;
+    return false;
+#endif
+}
+
 bool s5l8900_static_a64_enable_compact_raw_pc_profile(s5l8900_t *m) {
     if (!m) return false;
 #if defined(S5LBOX_STATIC_A64_ENGINE)
@@ -1126,6 +1143,17 @@ uint64_t s5l8900_static_a64_compact_raw_window_fast_refills(
 #endif
 }
 
+uint64_t s5l8900_static_a64_compact_raw_window_cache_hits(
+        const s5l8900_t *m) {
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    const static_a64_state_t *state = static_state(m);
+    return state ? state->compact_raw_window_cache_hits : 0u;
+#else
+    (void)m;
+    return 0u;
+#endif
+}
+
 uint64_t s5l8900_static_a64_compact_raw_privileged_window_refills(
         const s5l8900_t *m) {
 #if defined(S5LBOX_STATIC_A64_ENGINE)
@@ -1387,6 +1415,7 @@ static unsigned try_compact_raw(
     unsigned completed = 0u;
     unsigned native_completed = 0u;
     unsigned fallback_completed = 0u;
+    uint64_t window_cache_hits = 0u;
 
     if (known_negative) *known_negative = false;
     if (boundary_retired) *boundary_retired = 0u;
@@ -1430,9 +1459,11 @@ static unsigned try_compact_raw(
         return 0u;
     }
     fallback_context.fetch_block = fetch_block;
-    if (!a64_compact_raw_run_code_window_resident(
+    if (!a64_compact_raw_run_code_window_resident_cached(
             cpu, cpu->fetch_host, fetch_block, UINT32_C(0x400), budget,
-            compact_raw_fallback, &fallback_context, &completed,
+            compact_raw_fallback, &fallback_context,
+            state->compact_raw_window_cache_enabled, &window_cache_hits,
+            &completed,
             &native_completed, &fallback_completed)) {
         state->compact_raw_refusals.runner++;
         return 0u;
@@ -1440,6 +1471,9 @@ static unsigned try_compact_raw(
     if (status) *status = fallback_context.status;
     if (boundary_retired)
         *boundary_retired = fallback_context.boundary_retired;
+    state->compact_raw_window_cache_hits += window_cache_hits;
+    state->compact_raw_window_crossings += window_cache_hits;
+    state->compact_raw_window_reloads += window_cache_hits;
     if (completed) {
         state->compact_raw_calls++;
         state->compact_raw_retired += native_completed;

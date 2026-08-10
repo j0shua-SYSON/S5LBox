@@ -6429,7 +6429,8 @@ static bool compact_raw_resident_compare(
         unsigned expected_native, unsigned expected_fallback,
         unsigned stop_after, bool stale_write_witness, bool refuse_window,
         unsigned omit_window_after, bool fast_refill_window,
-        unsigned expected_fast_refills) {
+        unsigned expected_fast_refills, bool window_cache_enabled,
+        uint64_t expected_window_cache_hits) {
     arm_cpu_t reference, resident;
     final_state_t reference_state, resident_state;
     compact_raw_resident_oracle_context_t context;
@@ -6439,6 +6440,7 @@ static bool compact_raw_resident_compare(
     unsigned completed = 0u;
     unsigned native_completed = 0u;
     unsigned fallback_completed = 0u;
+    uint64_t window_cache_hits = 0u;
     bool ok = false;
     arm_bus_t write_bus = g_bus;
 
@@ -6491,10 +6493,11 @@ static bool compact_raw_resident_compare(
     context.refuse_window = refuse_window;
     context.fast_refill_window = fast_refill_window;
     context.omit_window_after = omit_window_after;
-    if (!a64_compact_raw_run_code_window_resident(
+    if (!a64_compact_raw_run_code_window_resident_cached(
             &resident, &g_ram[initial_code_base], initial_code_base,
             initial_code_bytes, budget,
-            compact_raw_resident_oracle_step, &context, &completed,
+            compact_raw_resident_oracle_step, &context,
+            window_cache_enabled, &window_cache_hits, &completed,
             &native_completed, &fallback_completed)) {
         fprintf(stderr,
                 "jitbench: compact raw resident %s contract refused\n",
@@ -6507,17 +6510,20 @@ static bool compact_raw_resident_compare(
         fallback_completed != expected_fallback ||
         context.calls != expected_fallback ||
         context.fast_refills != expected_fast_refills ||
+        window_cache_hits != expected_window_cache_hits ||
         native_completed + fallback_completed != completed ||
         memcmp(expected_ram, g_ram, sizeof g_ram) != 0 ||
         !architectural_states_equal(&reference_state, &resident_state)) {
         fprintf(stderr,
                 "jitbench: compact raw resident %s mismatch "
-                "(completed/native/fallback/calls/fast-refills "
-                "%u/%u/%u/%u/%u, expected %u/%u/%u/%u/%u)\n",
+                "(completed/native/fallback/calls/fast-refills/cache-hits "
+                "%u/%u/%u/%u/%u/%" PRIu64 ", expected "
+                "%u/%u/%u/%u/%u/%" PRIu64 ")\n",
                 name, completed, native_completed, fallback_completed,
-                context.calls, context.fast_refills, reference_steps,
+                context.calls, context.fast_refills, window_cache_hits,
+                reference_steps,
                 expected_native, expected_fallback, expected_fallback,
-                expected_fast_refills);
+                expected_fast_refills, expected_window_cache_hits);
         goto done;
     }
     ok = true;
@@ -8794,6 +8800,11 @@ static bool validate_compact_raw_oracles(void) {
         UINT32_C(0xe0000090), /* fallback continues without publication */
         UINT32_C(0xe2866001), /* must not execute via the stale window */
     };
+    const uint32_t resident_window_cache[] = {
+        UINT32_C(0xea000000), /* branch 0x73fc -> 0x7404 */
+        UINT32_C(0xe2844001), /* skipped padding at 0x7400 */
+        UINT32_C(0xeafffffc), /* branch 0x7404 -> 0x73fc */
+    };
     const uint16_t resident_thumb_memory[] = {
         UINT16_C(0xba00), /* fallback REV publishes the Thumb window */
         UINT16_C(0x6833), /* native LDR r3,[r6,#0] via seeded DREAD */
@@ -8937,42 +8948,54 @@ static bool validate_compact_raw_oracles(void) {
     if (!compact_raw_resident_compare(
             "continue", resident_mixed, 5u, false, UINT32_C(0x4c00),
             UINT32_C(0x4c00), 20u, 5u, 5u, 3u, 2u, 0u, true,
-            false, 0u, false, 0u))
+            false, 0u, false, 0u, false, 0u))
         return false;
     if (!compact_raw_resident_compare(
             "boundary-stop", resident_mixed, 5u, false, UINT32_C(0x4c00),
             UINT32_C(0x4c00), 20u, 2u, 5u, 1u, 1u, 1u, false,
-            false, 0u, false, 0u))
+            false, 0u, false, 0u, false, 0u))
         return false;
     if (!compact_raw_resident_compare(
             "sequential-window", resident_cross_sequential, 3u, false,
             UINT32_C(0x5ffc), UINT32_C(0x5c00), UINT32_C(0x400),
-            3u, 3u, 2u, 1u, 0u, false, false, 0u, false, 0u))
+            3u, 3u, 2u, 1u, 0u, false, false, 0u, false, 0u,
+            false, 0u))
         return false;
     if (!compact_raw_resident_compare(
             "no-retire-window", resident_cross_fast, 3u, false,
             UINT32_C(0x5ffc), UINT32_C(0x5c00), UINT32_C(0x400),
-            3u, 3u, 2u, 1u, 0u, false, false, 0u, true, 1u))
+            3u, 3u, 2u, 1u, 0u, false, false, 0u, true, 1u,
+            false, 0u))
         return false;
     if (!compact_raw_resident_compare(
             "window-refusal", resident_cross_sequential, 3u, false,
             UINT32_C(0x5ffc), UINT32_C(0x5c00), UINT32_C(0x400),
-            2u, 3u, 1u, 1u, 0u, false, true, 0u, false, 0u))
+            2u, 3u, 1u, 1u, 0u, false, true, 0u, false, 0u,
+            false, 0u))
         return false;
     if (!compact_raw_resident_compare(
             "branch-window", resident_cross_branch, 5u, false,
             UINT32_C(0x63f8), UINT32_C(0x6000), UINT32_C(0x400),
-            4u, 4u, 3u, 1u, 0u, false, false, 0u, false, 0u))
+            4u, 4u, 3u, 1u, 0u, false, false, 0u, false, 0u,
+            false, 0u))
         return false;
     if (!compact_raw_resident_compare(
             "stale-window", resident_stale_window, 5u, false,
             UINT32_C(0x67fc), UINT32_C(0x6400), UINT32_C(0x400),
-            4u, 5u, 2u, 2u, 0u, false, false, 2u, false, 0u))
+            4u, 5u, 2u, 2u, 0u, false, false, 2u, false, 0u,
+            false, 0u))
         return false;
     if (!compact_raw_resident_compare(
             "thumb-memory", resident_thumb_memory, 6u, true,
             UINT32_C(0x6c00), UINT32_C(0x6c00), 12u,
-            5u, 5u, 4u, 1u, 0u, false, false, 0u, false, 0u))
+            5u, 5u, 4u, 1u, 0u, false, false, 0u, false, 0u,
+            false, 0u))
+        return false;
+    if (!compact_raw_resident_compare(
+            "window-cache", resident_window_cache, 3u, false,
+            UINT32_C(0x73fc), UINT32_C(0x7000), UINT32_C(0x400),
+            8u, 8u, 8u, 0u, 0u, false, false, 0u, true, 1u,
+            true, UINT64_C(6)))
         return false;
 
     seed_cpu_at(&contract, unsupported_prefix, 2u, false,
@@ -9244,6 +9267,7 @@ typedef struct {
     uint64_t compact_raw_window_reloads;
     uint64_t compact_raw_window_stops;
     uint64_t compact_raw_window_fast_refills;
+    uint64_t compact_raw_window_cache_hits;
     uint64_t compact_raw_privileged_window_refills;
     uint64_t compact_raw_privileged_boundary_retired;
     double seconds;
@@ -9252,6 +9276,7 @@ typedef struct {
 typedef enum {
     SOC_ENTRY_REFERENCE,
     SOC_ENTRY_COMPACT_RAW,
+    SOC_ENTRY_COMPACT_RAW_WINDOW_CACHE,
     SOC_ENTRY_COMPACT_RAW_WINDOW_REFILL_OFF,
     SOC_ENTRY_SIGNED,
     SOC_ENTRY_GRAPH,
@@ -9273,6 +9298,8 @@ static const char *soc_entry_path_name(soc_entry_path_t path) {
     switch (path) {
     case SOC_ENTRY_REFERENCE: return "reference";
     case SOC_ENTRY_COMPACT_RAW: return "compact-raw";
+    case SOC_ENTRY_COMPACT_RAW_WINDOW_CACHE:
+        return "compact-raw-window-cache";
     case SOC_ENTRY_COMPACT_RAW_WINDOW_REFILL_OFF:
         return "compact-raw-window-refill-off";
     case SOC_ENTRY_SIGNED:    return "signed";
@@ -9511,6 +9538,8 @@ static bool run_soc_entry_configured(const soc_entry_setup_t *setup,
     uint64_t compact_raw_window_stops_after;
     uint64_t compact_raw_window_fast_refills_before;
     uint64_t compact_raw_window_fast_refills_after;
+    uint64_t compact_raw_window_cache_hits_before;
+    uint64_t compact_raw_window_cache_hits_after;
     uint64_t compact_raw_privileged_window_refills_before;
     uint64_t compact_raw_privileged_window_refills_after;
     uint64_t compact_raw_privileged_boundary_retired_before;
@@ -9521,7 +9550,10 @@ static bool run_soc_entry_configured(const soc_entry_setup_t *setup,
 
     bool signed_path = path != SOC_ENTRY_REFERENCE;
     bool compact_raw_path = path == SOC_ENTRY_COMPACT_RAW ||
+        path == SOC_ENTRY_COMPACT_RAW_WINDOW_CACHE ||
         path == SOC_ENTRY_COMPACT_RAW_WINDOW_REFILL_OFF;
+    bool compact_raw_window_cache_path =
+        path == SOC_ENTRY_COMPACT_RAW_WINDOW_CACHE;
     bool compact_raw_window_refill_off_path =
         path == SOC_ENTRY_COMPACT_RAW_WINDOW_REFILL_OFF;
     bool graph_path = path == SOC_ENTRY_GRAPH ||
@@ -9608,6 +9640,12 @@ static bool run_soc_entry_configured(const soc_entry_setup_t *setup,
         !s5l8900_static_a64_set_compact_raw_window_refill(&machine, false)) {
         fprintf(stderr,
                 "jitbench: SoC compact window-refill control unavailable\n");
+        goto done;
+    }
+    if (compact_raw_window_cache_path &&
+        !s5l8900_static_a64_set_compact_raw_window_cache(&machine, true)) {
+        fprintf(stderr,
+                "jitbench: SoC compact window-cache path unavailable\n");
         goto done;
     }
     if (compact_raw_path && setup->mmu_identity_privileged &&
@@ -9738,6 +9776,8 @@ static bool run_soc_entry_configured(const soc_entry_setup_t *setup,
         s5l8900_static_a64_compact_raw_window_stops(&machine);
     compact_raw_window_fast_refills_before =
         s5l8900_static_a64_compact_raw_window_fast_refills(&machine);
+    compact_raw_window_cache_hits_before =
+        s5l8900_static_a64_compact_raw_window_cache_hits(&machine);
     compact_raw_privileged_window_refills_before =
         s5l8900_static_a64_compact_raw_privileged_window_refills(&machine);
     compact_raw_privileged_boundary_retired_before =
@@ -9783,6 +9823,8 @@ static bool run_soc_entry_configured(const soc_entry_setup_t *setup,
         s5l8900_static_a64_compact_raw_window_stops(&machine);
     compact_raw_window_fast_refills_after =
         s5l8900_static_a64_compact_raw_window_fast_refills(&machine);
+    compact_raw_window_cache_hits_after =
+        s5l8900_static_a64_compact_raw_window_cache_hits(&machine);
     compact_raw_privileged_window_refills_after =
         s5l8900_static_a64_compact_raw_privileged_window_refills(&machine);
     compact_raw_privileged_boundary_retired_after =
@@ -9830,6 +9872,9 @@ static bool run_soc_entry_configured(const soc_entry_setup_t *setup,
     out->compact_raw_window_fast_refills =
         compact_raw_window_fast_refills_after -
         compact_raw_window_fast_refills_before;
+    out->compact_raw_window_cache_hits =
+        compact_raw_window_cache_hits_after -
+        compact_raw_window_cache_hits_before;
     out->compact_raw_privileged_window_refills =
         compact_raw_privileged_window_refills_after -
         compact_raw_privileged_window_refills_before;
@@ -9866,6 +9911,7 @@ static bool run_soc_entry_configured(const soc_entry_setup_t *setup,
             out->compact_raw_window_reloads != 0u ||
             out->compact_raw_window_stops != 0u ||
             out->compact_raw_window_fast_refills != 0u ||
+            out->compact_raw_window_cache_hits != 0u ||
             out->compact_raw_privileged_window_refills != 0u ||
             out->compact_raw_privileged_boundary_retired != 0u)) ||
         (graph_path &&
@@ -9923,6 +9969,7 @@ static bool run_soc_compact_raw_path(const uint32_t *program,
         .mmu_identity_workload = true,
     };
     if (path != SOC_ENTRY_REFERENCE && path != SOC_ENTRY_COMPACT_RAW &&
+        path != SOC_ENTRY_COMPACT_RAW_WINDOW_CACHE &&
         path != SOC_ENTRY_COMPACT_RAW_WINDOW_REFILL_OFF)
         return false;
     return run_soc_entry_configured(&setup, length, total, path, out);
@@ -10669,7 +10716,7 @@ done:
  * in both directions. The control interprets the first instruction in each
  * newly reached window. The enabled arm instead consumes the exact warm FETCH
  * witness, publishes the new window without retirement, and executes that
- * admitted instruction natively. All three complete machine snapshots must be
+ * admitted instruction natively. All four complete machine snapshots must be
  * byte-identical. */
 static bool validate_soc_compact_raw_windows(void) {
     enum { LOOP_INSNS = 259u, LOOP_COUNT = 32u,
@@ -10678,6 +10725,7 @@ static bool validate_soc_compact_raw_windows(void) {
     soc_run_result_t reference = {0};
     soc_run_result_t refill_off = {0};
     soc_run_result_t refill_on = {0};
+    soc_run_result_t cached = {0};
     bool ok = false;
 
     for (unsigned i = 0u; i < 256u; i++)
@@ -10695,17 +10743,25 @@ static bool validate_soc_compact_raw_windows(void) {
         !run_soc_compact_raw_path(
             program, LOOP_INSNS, TOTAL_INSNS, SOC_ENTRY_COMPACT_RAW,
             &refill_on) ||
+        !run_soc_compact_raw_path(
+            program, LOOP_INSNS, TOTAL_INSNS,
+            SOC_ENTRY_COMPACT_RAW_WINDOW_CACHE, &cached) ||
         !reference.snapshot || !refill_off.snapshot || !refill_on.snapshot ||
+        !cached.snapshot ||
         reference.snapshot_len != refill_off.snapshot_len ||
         reference.snapshot_len != refill_on.snapshot_len ||
+        reference.snapshot_len != cached.snapshot_len ||
         memcmp(reference.snapshot, refill_off.snapshot,
                reference.snapshot_len) != 0 ||
         memcmp(reference.snapshot, refill_on.snapshot,
+               reference.snapshot_len) != 0 ||
+        memcmp(reference.snapshot, cached.snapshot,
                reference.snapshot_len) != 0 ||
         reference.compact_raw_window_crossings != 0u ||
         reference.compact_raw_window_reloads != 0u ||
         reference.compact_raw_window_stops != 0u ||
         reference.compact_raw_window_fast_refills != 0u ||
+        reference.compact_raw_window_cache_hits != 0u ||
         refill_off.compact_raw_window_crossings == 0u ||
         refill_off.compact_raw_window_crossings !=
                 refill_on.compact_raw_window_crossings ||
@@ -10713,22 +10769,39 @@ static bool validate_soc_compact_raw_windows(void) {
                 refill_off.compact_raw_window_crossings ||
         refill_off.compact_raw_window_stops != 0u ||
         refill_off.compact_raw_window_fast_refills != 0u ||
+        refill_off.compact_raw_window_cache_hits != 0u ||
         refill_on.compact_raw_window_reloads !=
                 refill_on.compact_raw_window_crossings ||
         refill_on.compact_raw_window_stops != 0u ||
         refill_on.compact_raw_window_fast_refills !=
                 refill_on.compact_raw_window_crossings ||
+        refill_on.compact_raw_window_cache_hits != 0u ||
         refill_off.compact_raw_fallback_retired -
                 refill_on.compact_raw_fallback_retired !=
                 refill_on.compact_raw_window_fast_refills ||
         refill_on.compact_raw_retired - refill_off.compact_raw_retired !=
-                refill_on.compact_raw_window_fast_refills) {
+                refill_on.compact_raw_window_fast_refills ||
+        cached.compact_raw_window_cache_hits == 0u ||
+        cached.compact_raw_window_crossings !=
+                refill_on.compact_raw_window_crossings ||
+        cached.compact_raw_window_reloads !=
+                refill_on.compact_raw_window_reloads ||
+        cached.compact_raw_window_stops != 0u ||
+        cached.compact_raw_window_fast_refills >=
+                refill_on.compact_raw_window_fast_refills ||
+        cached.compact_raw_window_fast_refills +
+                cached.compact_raw_window_cache_hits !=
+                cached.compact_raw_window_crossings ||
+        cached.compact_raw_retired != refill_on.compact_raw_retired ||
+        cached.compact_raw_fallback_retired !=
+                refill_on.compact_raw_fallback_retired) {
         fprintf(stderr,
                 "jitbench: SoC compact-raw window oracle failed "
                 "off-cross/reload/fast/native/fallback=%" PRIu64 "/%" PRIu64
                 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64
                 " on=%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64
-                "/%" PRIu64 "\n",
+                "/%" PRIu64 " cached=%" PRIu64 "/%" PRIu64 "/%" PRIu64
+                "/%" PRIu64 "/%" PRIu64 "/%" PRIu64 "\n",
                 refill_off.compact_raw_window_crossings,
                 refill_off.compact_raw_window_reloads,
                 refill_off.compact_raw_window_fast_refills,
@@ -10738,19 +10811,28 @@ static bool validate_soc_compact_raw_windows(void) {
                 refill_on.compact_raw_window_reloads,
                 refill_on.compact_raw_window_fast_refills,
                 refill_on.compact_raw_retired,
-                refill_on.compact_raw_fallback_retired);
+                refill_on.compact_raw_fallback_retired,
+                cached.compact_raw_window_crossings,
+                cached.compact_raw_window_reloads,
+                cached.compact_raw_window_fast_refills,
+                cached.compact_raw_window_cache_hits,
+                cached.compact_raw_retired,
+                cached.compact_raw_fallback_retired);
         goto done;
     }
 
     printf("SOC-COMPACT-RAW-WINDOW-ORACLE exact=yes guest-insns=%u "
            "window-bytes=1024 crossings=%" PRIu64
-           " fast-refills=%" PRIu64 " displaced-fallbacks=%" PRIu64
+           " fast-refills=%" PRIu64 " cache-hits=%" PRIu64
+           " displaced-fallbacks=%" PRIu64
            " sequential-cross=yes branch-cross=yes "
-           "lookup-only=yes no-retire-continue=yes same-binary-control=yes "
+           "lookup-only=yes no-retire-continue=yes repeated-window-cache=yes "
+           "same-binary-control=yes "
            "timebase-bounded=yes "
            "serialized-machine=yes runtime-codegen=no\n",
            TOTAL_INSNS, refill_on.compact_raw_window_crossings,
            refill_on.compact_raw_window_fast_refills,
+           cached.compact_raw_window_cache_hits,
            refill_on.compact_raw_window_fast_refills);
     ok = true;
 
@@ -10758,6 +10840,7 @@ done:
     free_soc_run_result(&reference);
     free_soc_run_result(&refill_off);
     free_soc_run_result(&refill_on);
+    free_soc_run_result(&cached);
     return ok;
 }
 

@@ -268,6 +268,19 @@ bool a64_compact_raw_run_code_window_resident(
     unsigned *completed, unsigned *native_completed,
     unsigned *fallback_completed);
 
+/* Opt-in variant of the same contract. Its invocation-local cache may reuse
+ * up to eight full, aligned User-mode windows that this same invocation
+ * already proved; translation generation and privilege cannot change across
+ * such a reuse. `window_cache_hits` counts only C callback transitions that
+ * were avoided. */
+bool a64_compact_raw_run_code_window_resident_cached(
+    arm_cpu_t *cpu, const uint8_t *code, uint32_t code_base,
+    uint32_t code_bytes, unsigned max_insns,
+    a64_compact_raw_fallback_fn fallback, void *fallback_opaque,
+    bool window_cache_enabled, uint64_t *window_cache_hits,
+    unsigned *completed, unsigned *native_completed,
+    unsigned *fallback_completed);
+
 /* Opt-in statistical attribution for the build-time-linked compact runner.
  * SIGPROF samples only while the public SoC run slice is active, then assigns
  * the interrupted PC to one ordered text region. The aliases exported by the

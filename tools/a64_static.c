@@ -1965,6 +1965,8 @@ a64_compact_raw_admission_t a64_compact_raw_classify_instruction(
 }
 
 #if defined(S5LBOX_STATIC_A64_NATIVE)
+enum { A64_COMPACT_RAW_WINDOW_CACHE_ENTRIES = 8u };
+
 typedef struct {
     uint8_t *flat_ram;
     uint64_t flat_mask;
@@ -1987,6 +1989,12 @@ typedef struct {
     uint64_t vfp_host_fpcr;
     uint64_t vfp_host_fpsr;
     arm_cp15_t *cp15;
+    uint64_t window_cache_hits;
+    uint32_t window_cache_next;
+    uint32_t window_cache_enabled;
+    a64_compact_raw_code_window_t current_window;
+    a64_compact_raw_code_window_t
+        window_cache[A64_COMPACT_RAW_WINDOW_CACHE_ENTRIES];
 } a64_compact_raw_context_t;
 
 _Static_assert(sizeof(void *) == 8u,
@@ -2017,7 +2025,17 @@ _Static_assert(offsetof(a64_compact_raw_context_t, flat_ram) == 0u &&
                    offsetof(a64_compact_raw_context_t, vfp_host_fpcr) == 136u &&
                    offsetof(a64_compact_raw_context_t, vfp_host_fpsr) == 144u &&
                    offsetof(a64_compact_raw_context_t, cp15) == 152u &&
-                   sizeof(a64_compact_raw_context_t) == 160u,
+                   offsetof(a64_compact_raw_context_t,
+                            window_cache_hits) == 160u &&
+                   offsetof(a64_compact_raw_context_t,
+                            window_cache_next) == 168u &&
+                   offsetof(a64_compact_raw_context_t,
+                            window_cache_enabled) == 172u &&
+                   offsetof(a64_compact_raw_context_t,
+                            current_window) == 176u &&
+                   offsetof(a64_compact_raw_context_t,
+                            window_cache) == 192u &&
+                   sizeof(a64_compact_raw_context_t) == 320u,
                "compact raw native context layout drifted");
 _Static_assert(offsetof(arm_cp15_t, tpidrurw) == 52u &&
                    offsetof(arm_cp15_t, tpidruro) == 56u &&
@@ -2276,12 +2294,26 @@ bool a64_compact_raw_run_code_window_resident(
         a64_compact_raw_fallback_fn fallback, void *fallback_opaque,
         unsigned *completed, unsigned *native_completed,
         unsigned *fallback_completed) {
+    return a64_compact_raw_run_code_window_resident_cached(
+        cpu, code, code_base, code_bytes, max_insns, fallback,
+        fallback_opaque, false, NULL, completed, native_completed,
+        fallback_completed);
+}
+
+bool a64_compact_raw_run_code_window_resident_cached(
+        arm_cpu_t *cpu, const uint8_t *code, uint32_t code_base,
+        uint32_t code_bytes, unsigned max_insns,
+        a64_compact_raw_fallback_fn fallback, void *fallback_opaque,
+        bool window_cache_enabled, uint64_t *window_cache_hits,
+        unsigned *completed, unsigned *native_completed,
+        unsigned *fallback_completed) {
     uint64_t code_end;
 
     if (!completed || !native_completed || !fallback_completed) return false;
     *completed = 0u;
     *native_completed = 0u;
     *fallback_completed = 0u;
+    if (window_cache_hits) *window_cache_hits = 0u;
     code_end = (uint64_t)code_base + code_bytes;
     if (!cpu || !code || !max_insns || code_bytes < 4u ||
         (code_base & 3u) != 0u || (code_bytes & 3u) != 0u ||
@@ -2316,6 +2348,15 @@ bool a64_compact_raw_run_code_window_resident(
         context.vfp_fpscr = &cpu->vfp_fpscr;
         context.vfp_access = vfp_cpacr_permits(cpu) ? 1u : 0u;
         context.cp15 = &cpu->cp15;
+        context.window_cache_enabled =
+            window_cache_enabled && fallback && !priv &&
+            (code_base & UINT32_C(0x3ff)) == 0u &&
+            code_bytes == UINT32_C(0x400) ? 1u : 0u;
+        context.window_cache_next = 1u;
+        context.current_window.code = code;
+        context.current_window.code_base = code_base;
+        context.current_window.code_bytes = code_bytes;
+        context.window_cache[0] = context.current_window;
         uint32_t result = a64_compact_raw_execute(
             cpu->r, &cpu->cpsr, &cpu->cycles, code, code_base, code_bytes,
             max_insns, &context);
@@ -2329,12 +2370,29 @@ bool a64_compact_raw_run_code_window_resident(
         *completed = result;
         *native_completed = (unsigned)context.native_retired;
         *fallback_completed = (unsigned)context.fallback_retired;
+        if (window_cache_hits)
+            *window_cache_hits = context.window_cache_hits;
+        if (context.window_cache_enabled && context.current_window.code &&
+            cpu->tlb_gen == context.tlb_gen &&
+            ((cpu->cpsr & ARM_CPSR_MODE_MASK) != ARM_MODE_USR) == priv &&
+            cpu->r[15] - context.current_window.code_base <
+                context.current_window.code_bytes) {
+            /* This is derived FETCH state, not architectural state. Restore
+             * the exact window selected inside signed text so the next outer
+             * entry does not pay to rediscover the same witness. */
+            cpu->fetch_host = (uint8_t *)context.current_window.code;
+            cpu->fetch_blk = context.current_window.code_base;
+            cpu->fetch_gen = context.tlb_gen;
+            cpu->fetch_priv = priv;
+        }
         return true;
     }
 #else
     (void)code_end;
     (void)fallback;
     (void)fallback_opaque;
+    (void)window_cache_enabled;
+    (void)window_cache_hits;
     return false;
 #endif
 }

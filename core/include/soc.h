@@ -4124,6 +4124,13 @@ bool s5l8900_static_a64_set_compact_raw_window_refill(s5l8900_t *m,
  * exact FETCH witness. The generic window-refill switch above must also be on. */
 bool s5l8900_static_a64_set_compact_raw_privileged_window_refill(
     s5l8900_t *m, bool enabled);
+/* Opt-in same-binary experiment for repeated User-mode window transitions.
+ * Up to eight full FETCH witnesses proved inside one compact invocation may
+ * be selected directly by the build-time-linked runner. The cache is cleared
+ * on every invocation, never crosses privilege or translation generation,
+ * and defaults off until physical cadence evidence justifies rollout. */
+bool s5l8900_static_a64_set_compact_raw_window_cache(s5l8900_t *m,
+                                                      bool enabled);
 /* Explicit diagnostic-only CPU-time sampling for the compact runner. On a
  * supported Apple AArch64 host this installs SIGPROF at 1 ms of process CPU
  * time and records samples only while s5l8900_run() is active. Ordinary
@@ -4231,6 +4238,8 @@ uint64_t s5l8900_static_a64_compact_raw_window_reloads(
 uint64_t s5l8900_static_a64_compact_raw_window_stops(
     const s5l8900_t *m);
 uint64_t s5l8900_static_a64_compact_raw_window_fast_refills(
+    const s5l8900_t *m);
+uint64_t s5l8900_static_a64_compact_raw_window_cache_hits(
     const s5l8900_t *m);
 uint64_t s5l8900_static_a64_compact_raw_privileged_window_refills(
     const s5l8900_t *m);

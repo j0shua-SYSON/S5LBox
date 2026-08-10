@@ -252,6 +252,8 @@ static const uint8_t *vm_guest_record_display(const s5l8900_t *m,
                 s5l8900_static_a64_compact_raw_window_reloads(m);
             execution.compact_window_fast_refills =
                 s5l8900_static_a64_compact_raw_window_fast_refills(m);
+            execution.compact_window_cache_hits =
+                s5l8900_static_a64_compact_raw_window_cache_hits(m);
             execution.compact_window_stops =
                 s5l8900_static_a64_compact_raw_window_stops(m);
             execution.compact_refused_guard = refusals.guard;

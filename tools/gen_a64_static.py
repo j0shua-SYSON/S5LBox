@@ -3442,7 +3442,7 @@ def compact_raw_function() -> list[str]:
         # must publish the next proven window before another native fetch.
         "    sub w8, w26, w23",
         "    cmp w8, w24",
-        "    b.hs .La64cr_fallback",
+        "    b.hs .La64cr_window_miss",
         # Select width and fetch from live CPSR.T every iteration. A fallback
         # or native BX/BLX may change state without leaving this invocation.
         "    ldr w10, [x20]",
@@ -4943,6 +4943,43 @@ def compact_raw_function() -> list[str]:
         "    b.ne .La64cr_loop",
         "    b .La64cr_exit",
         "",
+        # An explicit experiment may retain eight full User-mode windows that
+        # this invocation already received from the exact C callback. A hit
+        # changes only the live code pointer/base; generation and privilege
+        # cannot change inside an admitted User interval. Missing, privileged,
+        # partial or unaligned windows still take the literal callback.
+        ".La64cr_window_miss:",
+        "    ldr w10, [x27, #172]",
+        "    cbz w10, .La64cr_fallback",
+        "    ldr w10, [x27, #84]",
+        "    cbnz w10, .La64cr_fallback",
+        "    lsr w9, w26, #10",
+        "    lsl w9, w9, #10",
+        "    add x10, x27, #192",
+        "    mov w11, #8",
+        ".La64cr_window_cache_probe:",
+        "    ldr x12, [x10]",
+        "    cbz x12, .La64cr_window_cache_next",
+        "    ldr w13, [x10, #8]",
+        "    cmp w13, w9",
+        "    b.eq .La64cr_window_cache_hit",
+        ".La64cr_window_cache_next:",
+        "    add x10, x10, #16",
+        "    subs w11, w11, #1",
+        "    b.ne .La64cr_window_cache_probe",
+        "    b .La64cr_fallback",
+        ".La64cr_window_cache_hit:",
+        "    mov x22, x12",
+        "    mov w23, w13",
+        "    ldr w24, [x10, #12]",
+        "    str x22, [x27, #176]",
+        "    str w23, [x27, #184]",
+        "    str w24, [x27, #188]",
+        "    ldr x12, [x27, #160]",
+        "    add x12, x12, #1",
+        "    str x12, [x27, #160]",
+        "    b .La64cr_loop",
+        "",
         # Commit native cycles before a fallback because arm_step owns the
         # next instruction's cycle accounting and may inspect the counter.
         # The callback result is 0=no retirement, 1=retire+continue,
@@ -4992,6 +5029,7 @@ def compact_raw_function() -> list[str]:
         # Reload and validate the callback's live fetch witness. The next loop
         # still repeats the exact PC-in-window check; these guards prevent a
         # NULL, unaligned or empty publication from causing a native read.
+        "    mov w14, w23",
         "    ldr x22, [x27, #88]",
         "    ldr w23, [x27, #96]",
         "    ldr w24, [x27, #100]",
@@ -5012,6 +5050,34 @@ def compact_raw_function() -> list[str]:
         "    csel w10, w12, w10, ne",
         "    tst w8, w10",
         "    b.ne .La64cr_exit",
+        # Preserve the exact current window for the C wrapper, then retain a
+        # newly reached full 1 KiB User witness in an invocation-local
+        # round-robin cache. Same-window interpreter fallbacks do not consume
+        # a slot and partial generic windows are never cached.
+        "    str x22, [x27, #176]",
+        "    str w23, [x27, #184]",
+        "    str w24, [x27, #188]",
+        "    ldr w8, [x27, #172]",
+        "    cbz w8, .La64cr_fallback_reload_tables",
+        "    ldr w8, [x27, #84]",
+        "    cbnz w8, .La64cr_fallback_reload_tables",
+        "    cmp w23, w14",
+        "    b.eq .La64cr_fallback_reload_tables",
+        "    tst w23, #0x3ff",
+        "    b.ne .La64cr_fallback_reload_tables",
+        "    cmp w24, #0x400",
+        "    b.ne .La64cr_fallback_reload_tables",
+        "    ldr w8, [x27, #168]",
+        "    and w8, w8, #7",
+        "    add x10, x27, #192",
+        "    add x10, x10, w8, uxtw #4",
+        "    str x22, [x10]",
+        "    str w23, [x10, #8]",
+        "    str w24, [x10, #12]",
+        "    add w8, w8, #1",
+        "    and w8, w8, #7",
+        "    str w8, [x27, #168]",
+        ".La64cr_fallback_reload_tables:",
         "#if defined(__APPLE__)",
         "    adrp x16, .La64cr_dp_table@PAGE",
         "    add x16, x16, .La64cr_dp_table@PAGEOFF",

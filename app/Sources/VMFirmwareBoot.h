@@ -92,6 +92,12 @@ extern "C" {
  * policy, never guest state or a stock-device dependency. */
 #define VM_FW_BOOT_COMPACT_WINDOW_REFILL_OFF_FILE \
     "engine.compact-window-refill-off"
+/* Opt-in same-binary experiment for switching among repeated, already-proved
+ * full User-mode FETCH windows inside signed text. It is invocation-local,
+ * never snapshot state, and remains off until physical evidence supports the
+ * product default. */
+#define VM_FW_BOOT_COMPACT_WINDOW_CACHE_FILE \
+    "engine.compact-window-cache-on"
 /* Opt-in rollout control for privileged window continuation. The code remains
  * available because it substantially reduces engine work, but it is not the
  * stock product default after a three-pair physical-A9 Settings replay showed

@@ -496,6 +496,7 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
     bool forced_interpreter = false;
     bool compact_user_only = false;
     bool compact_window_refill_off = false;
+    bool compact_window_cache = false;
     bool compact_privileged_window_refill = false;
     bool compact_pc_profile = false;
     bool active_clock_off = false;
@@ -564,6 +565,34 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
                    "window-refill control unavailable");
         return false;
     }
+    char compact_window_cache_path[VM_FW_BOOT_PATH_CAPACITY + 64u];
+    if (!join_path(compact_window_cache_path,
+                   sizeof compact_window_cache_path, paths->work,
+                   VM_FW_BOOT_COMPACT_WINDOW_CACHE_FILE)) {
+        set_detail(report->detail, sizeof report->detail,
+                   "The compact window-cache path is too long to use.");
+        set_detail(report->summary, sizeof report->summary, "path too long");
+        return false;
+    }
+    compact_window_cache = file_size(compact_window_cache_path) > 0u;
+    if (compact_window_cache &&
+        (forced_interpreter || compact_window_refill_off)) {
+        set_detail(report->detail, sizeof report->detail,
+                   "The compact window-cache experiment conflicts with an "
+                   "interpreter or window-refill-off control.");
+        set_detail(report->summary, sizeof report->summary,
+                   "conflicting compact controls");
+        return false;
+    }
+    if (compact_window_cache &&
+        !s5l8900_static_a64_set_compact_raw_window_cache(machine, true)) {
+        set_detail(report->detail, sizeof report->detail,
+                   "The compact window-cache experiment could not be "
+                   "enabled.");
+        set_detail(report->summary, sizeof report->summary,
+                   "window-cache experiment unavailable");
+        return false;
+    }
     char compact_privileged_window_refill_path[
         VM_FW_BOOT_PATH_CAPACITY + 64u];
     if (!join_path(compact_privileged_window_refill_path,
@@ -618,6 +647,7 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
 #endif
     (void)compact_user_only;
     (void)compact_window_refill_off;
+    (void)compact_window_cache;
     (void)compact_privileged_window_refill;
     (void)compact_pc_profile;
 
@@ -895,14 +925,16 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
     }
     if (restored) {
         (void)snprintf(report->summary, sizeof report->summary,
-                       "iPhone OS 3.1.3 restored at %.1f M insn (%s%s%s)",
+                       "iPhone OS 3.1.3 restored at %.1f M insn (%s%s%s%s)",
                        (double)machine->cpu.cycles / 1000000.0, engine_mode,
+                       compact_window_cache ? ", window-cache experiment" : "",
                        compact_pc_profile ? ", compact-PC profile" : "",
                        active_clock_off ? ", active-clock-off control" : "");
     } else {
         (void)snprintf(report->summary, sizeof report->summary,
-                       "iPhone OS 3.1.3 kernel, root on /dev/md0 (%s%s%s)",
+                       "iPhone OS 3.1.3 kernel, root on /dev/md0 (%s%s%s%s)",
                        engine_mode,
+                       compact_window_cache ? ", window-cache experiment" : "",
                        compact_pc_profile ? ", compact-PC profile" : "",
                        active_clock_off ? ", active-clock-off control" : "");
     }
