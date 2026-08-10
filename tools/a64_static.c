@@ -8,9 +8,12 @@
 
 #if defined(S5LBOX_STATIC_A64_NATIVE) && defined(__APPLE__) && \
     (defined(__aarch64__) || defined(__arm64__))
-#include <signal.h>
-#include <sys/time.h>
-#include <sys/ucontext.h>
+#include <mach/arm/thread_status.h>
+#include <mach/mach.h>
+#include <mach/thread_info.h>
+#include <pthread.h>
+#include <stdatomic.h>
+#include <time.h>
 #endif
 
 enum {
@@ -2095,11 +2098,19 @@ _Static_assert(sizeof g_compact_profile_boundary /
                    A64_COMPACT_RAW_PC_PROFILE_REGION_COUNT + 1u,
                "compact PC-profile boundary count drifted");
 
-static volatile sig_atomic_t g_compact_profile_enabled;
-static volatile sig_atomic_t g_compact_profile_active;
-static volatile sig_atomic_t g_compact_profile_samples;
-static volatile sig_atomic_t g_compact_profile_outside;
-static volatile sig_atomic_t
+static atomic_bool g_compact_profile_enabled = ATOMIC_VAR_INIT(false);
+static atomic_bool g_compact_profile_active = ATOMIC_VAR_INIT(false);
+static atomic_uint g_compact_profile_target_thread =
+    ATOMIC_VAR_INIT(MACH_PORT_NULL);
+static pthread_mutex_t g_compact_profile_lock = PTHREAD_MUTEX_INITIALIZER;
+static bool g_compact_profile_sampler_started;
+static uint64_t g_compact_profile_polls;
+static uint64_t g_compact_profile_not_running;
+static uint64_t g_compact_profile_state_failures;
+static uint64_t g_compact_profile_target_races;
+static uint64_t g_compact_profile_samples;
+static uint64_t g_compact_profile_outside;
+static uint64_t
     g_compact_profile_region[A64_COMPACT_RAW_PC_PROFILE_REGION_COUNT];
 
 #define COMPACT_PROFILE_PC_SAMPLE_CAPACITY 4096u
@@ -2111,24 +2122,17 @@ static volatile sig_atomic_t
 _Static_assert((COMPACT_PROFILE_PC_BUCKET_CAPACITY &
                 COMPACT_PROFILE_PC_BUCKET_MASK) == 0u,
                "compact PC-profile bucket capacity must be a power of two");
-_Static_assert(COMPACT_PROFILE_PC_SAMPLE_CAPACITY <= (unsigned)INT_MAX,
-               "compact PC-profile sample index must fit sig_atomic_t");
-_Static_assert(sizeof(sig_atomic_t) == sizeof(uint32_t),
-               "compact PC-profile storage requires 32-bit sig_atomic_t");
 _Static_assert(sizeof(uintptr_t) == sizeof(uint64_t),
                "compact PC-profile storage requires 64-bit pointers");
 
-/* The handler writes only volatile sig_atomic_t objects. A captured PC is
- * published by advancing the captured count after both halves are stored;
- * ordinary snapshot code then performs all hashing and ranking outside signal
- * context. No code touches these arrays unless the explicit profile marker is
- * enabled, so marker-free runs pay no initialization or processing work. */
-static volatile sig_atomic_t g_compact_profile_pc_captured;
-static volatile sig_atomic_t g_compact_profile_pc_dropped;
-static volatile sig_atomic_t
-    g_compact_profile_pc_hi[COMPACT_PROFILE_PC_SAMPLE_CAPACITY];
-static volatile sig_atomic_t
-    g_compact_profile_pc_lo[COMPACT_PROFILE_PC_SAMPLE_CAPACITY];
+/* Only the marker-created sampler thread writes these counters and the
+ * snapshot path reads them under g_compact_profile_lock. No code touches the
+ * storage unless the explicit profile marker is enabled, so marker-free runs
+ * still pay no initialization, thread, timer, signal, or ranking work. */
+static unsigned g_compact_profile_pc_captured;
+static uint64_t g_compact_profile_pc_dropped;
+static uintptr_t
+    g_compact_profile_pc[COMPACT_PROFILE_PC_SAMPLE_CAPACITY];
 
 static unsigned g_compact_profile_pc_processed;
 static uintptr_t
@@ -2138,13 +2142,15 @@ static uintptr_t
 static uint64_t
     g_compact_profile_bucket_samples[COMPACT_PROFILE_PC_BUCKET_CAPACITY];
 
-static void compact_profile_increment(volatile sig_atomic_t *value) {
-    sig_atomic_t current = *value;
-    if (current < INT_MAX) *value = current + 1;
+static void compact_profile_increment(uint64_t *value) {
+    if (*value != UINT64_MAX) (*value)++;
 }
 
-static void compact_profile_reset(void) {
-    g_compact_profile_active = 0;
+static void compact_profile_reset_locked(void) {
+    g_compact_profile_polls = 0;
+    g_compact_profile_not_running = 0;
+    g_compact_profile_state_failures = 0;
+    g_compact_profile_target_races = 0;
     g_compact_profile_samples = 0;
     g_compact_profile_outside = 0;
     for (unsigned i = 0u;
@@ -2161,19 +2167,14 @@ static void compact_profile_reset(void) {
            sizeof g_compact_profile_bucket_samples);
 }
 
-static void compact_profile_capture_outside_pc(uintptr_t pc) {
-    sig_atomic_t published = g_compact_profile_pc_captured;
-    if (published < 0 ||
-        (unsigned)published >= COMPACT_PROFILE_PC_SAMPLE_CAPACITY) {
+static void compact_profile_capture_outside_pc_locked(uintptr_t pc) {
+    unsigned published = g_compact_profile_pc_captured;
+    if (published >= COMPACT_PROFILE_PC_SAMPLE_CAPACITY) {
         compact_profile_increment(&g_compact_profile_pc_dropped);
         return;
     }
-    unsigned index = (unsigned)published;
-    g_compact_profile_pc_hi[index] =
-        (sig_atomic_t)(uint32_t)((uint64_t)pc >> 32u);
-    g_compact_profile_pc_lo[index] =
-        (sig_atomic_t)(uint32_t)(uint64_t)pc;
-    g_compact_profile_pc_captured = (sig_atomic_t)(index + 1u);
+    g_compact_profile_pc[published] = pc;
+    g_compact_profile_pc_captured = published + 1u;
 }
 
 static unsigned compact_profile_bucket_index(uintptr_t key) {
@@ -2207,17 +2208,12 @@ static void compact_profile_bucket_pc(uintptr_t pc) {
 }
 
 static void compact_profile_process_outside_pcs(void) {
-    sig_atomic_t published = g_compact_profile_pc_captured;
-    unsigned captured = published > 0 ? (unsigned)published : 0u;
+    unsigned captured = g_compact_profile_pc_captured;
     if (captured > COMPACT_PROFILE_PC_SAMPLE_CAPACITY)
         captured = COMPACT_PROFILE_PC_SAMPLE_CAPACITY;
     while (g_compact_profile_pc_processed < captured) {
         unsigned index = g_compact_profile_pc_processed++;
-        uintptr_t pc =
-            (uintptr_t)(((uint64_t)(uint32_t)
-                g_compact_profile_pc_hi[index] << 32u) |
-                (uint32_t)g_compact_profile_pc_lo[index]);
-        compact_profile_bucket_pc(pc);
+        compact_profile_bucket_pc(g_compact_profile_pc[index]);
     }
 }
 
@@ -2264,16 +2260,7 @@ static bool compact_profile_layout_valid(void) {
     return true;
 }
 
-static void compact_profile_signal(int signal_number, siginfo_t *info,
-                                   void *raw_context) {
-    (void)signal_number;
-    (void)info;
-    if (!g_compact_profile_enabled || !g_compact_profile_active ||
-        !raw_context)
-        return;
-
-    const ucontext_t *context = (const ucontext_t *)raw_context;
-    uintptr_t pc = (uintptr_t)context->uc_mcontext->__ss.__pc;
+static void compact_profile_sample_pc_locked(uintptr_t pc) {
     compact_profile_increment(&g_compact_profile_samples);
 
     const uintptr_t begin =
@@ -2282,7 +2269,7 @@ static void compact_profile_signal(int signal_number, siginfo_t *info,
         A64_COMPACT_RAW_PC_PROFILE_REGION_COUNT];
     if (pc < begin || pc >= end) {
         compact_profile_increment(&g_compact_profile_outside);
-        compact_profile_capture_outside_pc(pc);
+        compact_profile_capture_outside_pc_locked(pc);
         return;
     }
     for (unsigned i = 0u;
@@ -2295,74 +2282,187 @@ static void compact_profile_signal(int signal_number, siginfo_t *info,
     compact_profile_increment(&g_compact_profile_outside);
 }
 
+typedef enum {
+    COMPACT_PROFILE_SAMPLE_CAPTURED = 0,
+    COMPACT_PROFILE_SAMPLE_NOT_RUNNING,
+    COMPACT_PROFILE_SAMPLE_STATE_FAILURE,
+    COMPACT_PROFILE_SAMPLE_TARGET_RACE
+} compact_profile_sample_result_t;
+
+static bool compact_profile_target_matches(mach_port_t target) {
+    return atomic_load_explicit(&g_compact_profile_active,
+                                memory_order_acquire) &&
+           (mach_port_t)atomic_load_explicit(
+               &g_compact_profile_target_thread,
+               memory_order_acquire) == target;
+}
+
+static void compact_profile_record_poll(
+        mach_port_t target, compact_profile_sample_result_t result,
+        uintptr_t pc) {
+    (void)pthread_mutex_lock(&g_compact_profile_lock);
+    compact_profile_increment(&g_compact_profile_polls);
+    if (result == COMPACT_PROFILE_SAMPLE_CAPTURED &&
+        !compact_profile_target_matches(target))
+        result = COMPACT_PROFILE_SAMPLE_TARGET_RACE;
+    switch (result) {
+    case COMPACT_PROFILE_SAMPLE_CAPTURED:
+        compact_profile_sample_pc_locked(pc);
+        break;
+    case COMPACT_PROFILE_SAMPLE_NOT_RUNNING:
+        compact_profile_increment(&g_compact_profile_not_running);
+        break;
+    case COMPACT_PROFILE_SAMPLE_STATE_FAILURE:
+        compact_profile_increment(&g_compact_profile_state_failures);
+        break;
+    case COMPACT_PROFILE_SAMPLE_TARGET_RACE:
+        compact_profile_increment(&g_compact_profile_target_races);
+        break;
+    }
+    (void)pthread_mutex_unlock(&g_compact_profile_lock);
+}
+
+static kern_return_t compact_profile_thread_basic_info(
+        mach_port_t target, thread_basic_info_data_t *info) {
+    mach_msg_type_number_t count = THREAD_BASIC_INFO_COUNT;
+    memset(info, 0, sizeof *info);
+    return thread_info(target, THREAD_BASIC_INFO,
+                       (thread_info_t)info, &count);
+}
+
+static void *compact_profile_sampler_main(void *opaque) {
+    (void)opaque;
+    const struct timespec interval = {0, 2000000L};
+    for (;;) {
+        (void)nanosleep(&interval, NULL);
+        if (!atomic_load_explicit(&g_compact_profile_enabled,
+                                  memory_order_acquire) ||
+            !atomic_load_explicit(&g_compact_profile_active,
+                                  memory_order_acquire))
+            continue;
+
+        mach_port_t target = (mach_port_t)atomic_load_explicit(
+            &g_compact_profile_target_thread, memory_order_acquire);
+        if (target == MACH_PORT_NULL) continue;
+
+        compact_profile_sample_result_t result =
+            COMPACT_PROFILE_SAMPLE_STATE_FAILURE;
+        uintptr_t pc = 0u;
+        thread_basic_info_data_t before;
+        if (compact_profile_thread_basic_info(target, &before) !=
+                KERN_SUCCESS) {
+            result = COMPACT_PROFILE_SAMPLE_STATE_FAILURE;
+        } else if (before.run_state != TH_STATE_RUNNING) {
+            result = COMPACT_PROFILE_SAMPLE_NOT_RUNNING;
+        } else {
+            arm_thread_state64_t state;
+            mach_msg_type_number_t count = ARM_THREAD_STATE64_COUNT;
+            memset(&state, 0, sizeof state);
+            if (thread_get_state(target, ARM_THREAD_STATE64,
+                                 (thread_state_t)&state, &count) !=
+                    KERN_SUCCESS) {
+                result = COMPACT_PROFILE_SAMPLE_STATE_FAILURE;
+            } else {
+                thread_basic_info_data_t after;
+                if (compact_profile_thread_basic_info(target, &after) !=
+                        KERN_SUCCESS) {
+                    result = COMPACT_PROFILE_SAMPLE_STATE_FAILURE;
+                } else if (after.run_state != TH_STATE_RUNNING) {
+                    result = COMPACT_PROFILE_SAMPLE_NOT_RUNNING;
+                } else if (!compact_profile_target_matches(target)) {
+                    result = COMPACT_PROFILE_SAMPLE_TARGET_RACE;
+                } else {
+                    pc = (uintptr_t)arm_thread_state64_get_pc(state);
+                    result = COMPACT_PROFILE_SAMPLE_CAPTURED;
+                }
+            }
+        }
+        compact_profile_record_poll(target, result, pc);
+    }
+    return NULL;
+}
+
 bool a64_compact_raw_pc_profile_enable(void) {
-    struct sigaction previous;
-    struct sigaction action;
-    struct itimerval existing;
-    struct itimerval timer;
+    pthread_t sampler;
+    pthread_attr_t attributes;
 
     if (!compact_profile_layout_valid()) return false;
-    if (g_compact_profile_enabled) {
-        compact_profile_reset();
-        return true;
+    atomic_store_explicit(&g_compact_profile_enabled, false,
+                          memory_order_release);
+    atomic_store_explicit(&g_compact_profile_active, false,
+                          memory_order_release);
+    atomic_store_explicit(&g_compact_profile_target_thread, MACH_PORT_NULL,
+                          memory_order_release);
+
+    (void)pthread_mutex_lock(&g_compact_profile_lock);
+    compact_profile_reset_locked();
+    if (!g_compact_profile_sampler_started) {
+        if (pthread_attr_init(&attributes) != 0) {
+            (void)pthread_mutex_unlock(&g_compact_profile_lock);
+            return false;
+        }
+        if (pthread_attr_setdetachstate(
+                &attributes, PTHREAD_CREATE_DETACHED) != 0) {
+            (void)pthread_attr_destroy(&attributes);
+            (void)pthread_mutex_unlock(&g_compact_profile_lock);
+            return false;
+        }
+        int create_result = pthread_create(
+            &sampler, &attributes, compact_profile_sampler_main, NULL);
+        (void)pthread_attr_destroy(&attributes);
+        if (create_result != 0) {
+            (void)pthread_mutex_unlock(&g_compact_profile_lock);
+            return false;
+        }
+        g_compact_profile_sampler_started = true;
     }
-    if (getitimer(ITIMER_PROF, &existing) != 0 ||
-        existing.it_value.tv_sec != 0 || existing.it_value.tv_usec != 0 ||
-        existing.it_interval.tv_sec != 0 ||
-        existing.it_interval.tv_usec != 0 ||
-        sigaction(SIGPROF, NULL, &previous) != 0 ||
-        (previous.sa_handler != SIG_DFL &&
-         previous.sa_handler != SIG_IGN))
-        return false;
-
-    memset(&action, 0, sizeof action);
-    action.sa_sigaction = compact_profile_signal;
-    action.sa_flags = SA_SIGINFO | SA_RESTART;
-    if (sigemptyset(&action.sa_mask) != 0 ||
-        sigaction(SIGPROF, &action, NULL) != 0)
-        return false;
-
-    compact_profile_reset();
-    g_compact_profile_enabled = 1;
-
-    memset(&timer, 0, sizeof timer);
-    timer.it_value.tv_usec = 1000;
-    timer.it_interval.tv_usec = 1000;
-    if (setitimer(ITIMER_PROF, &timer, NULL) != 0) {
-        g_compact_profile_enabled = 0;
-        (void)sigaction(SIGPROF, &previous, NULL);
-        return false;
-    }
+    atomic_store_explicit(&g_compact_profile_enabled, true,
+                          memory_order_release);
+    (void)pthread_mutex_unlock(&g_compact_profile_lock);
     return true;
 }
 
 void a64_compact_raw_pc_profile_slice_begin(void) {
-    if (g_compact_profile_enabled) g_compact_profile_active = 1;
+    if (!atomic_load_explicit(&g_compact_profile_enabled,
+                              memory_order_acquire))
+        return;
+    mach_port_t target = pthread_mach_thread_np(pthread_self());
+    if (target == MACH_PORT_NULL) return;
+    atomic_store_explicit(&g_compact_profile_target_thread,
+                          (unsigned)target, memory_order_release);
+    atomic_store_explicit(&g_compact_profile_active, true,
+                          memory_order_release);
 }
 
 void a64_compact_raw_pc_profile_slice_end(void) {
-    g_compact_profile_active = 0;
+    atomic_store_explicit(&g_compact_profile_active, false,
+                          memory_order_release);
+    atomic_store_explicit(&g_compact_profile_target_thread, MACH_PORT_NULL,
+                          memory_order_release);
 }
 
 void a64_compact_raw_pc_profile_snapshot(
         a64_compact_raw_pc_profile_t *out) {
     if (!out) return;
     memset(out, 0, sizeof *out);
-    out->enabled = g_compact_profile_enabled != 0;
-    out->samples = (uint64_t)g_compact_profile_samples;
-    out->outside = (uint64_t)g_compact_profile_outside;
+    out->enabled = atomic_load_explicit(&g_compact_profile_enabled,
+                                        memory_order_acquire);
+    (void)pthread_mutex_lock(&g_compact_profile_lock);
+    out->polls = g_compact_profile_polls;
+    out->not_running = g_compact_profile_not_running;
+    out->state_failures = g_compact_profile_state_failures;
+    out->target_races = g_compact_profile_target_races;
+    out->samples = g_compact_profile_samples;
+    out->outside = g_compact_profile_outside;
     for (unsigned i = 0u;
          i < (unsigned)A64_COMPACT_RAW_PC_PROFILE_REGION_COUNT; i++)
         out->region[i] = (uint64_t)g_compact_profile_region[i];
     out->reference_pc =
         (uintptr_t)g_compact_profile_boundary[0];
-    out->outside_pc_captured =
-        (uint64_t)(g_compact_profile_pc_captured > 0
-            ? g_compact_profile_pc_captured : 0);
-    out->outside_pc_dropped =
-        (uint64_t)(g_compact_profile_pc_dropped > 0
-            ? g_compact_profile_pc_dropped : 0);
+    out->outside_pc_captured = g_compact_profile_pc_captured;
+    out->outside_pc_dropped = g_compact_profile_pc_dropped;
     compact_profile_rank_outside(out);
+    (void)pthread_mutex_unlock(&g_compact_profile_lock);
 }
 #else
 bool a64_compact_raw_pc_profile_enable(void) { return false; }

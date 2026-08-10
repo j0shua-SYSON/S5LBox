@@ -4131,12 +4131,12 @@ bool s5l8900_static_a64_set_compact_raw_privileged_window_refill(
  * and defaults off until physical cadence evidence justifies rollout. */
 bool s5l8900_static_a64_set_compact_raw_window_cache(s5l8900_t *m,
                                                       bool enabled);
-/* Explicit diagnostic-only CPU-time sampling for the compact runner. On a
- * supported Apple AArch64 host this installs SIGPROF at 1 ms of process CPU
- * time and records samples only while s5l8900_run() is active. Ordinary
- * machines pay one disabled gate per public run slice, never per guest
- * instruction; their signal and timer state remain unchanged. It emits no
- * runtime code and is never guest snapshot state. */
+/* Explicit diagnostic-only sampling for the compact runner. On a supported
+ * Apple AArch64 host a marker-created sampler polls only the pthread executing
+ * s5l8900_run(), and retains a PC only when that target is running before and
+ * after state capture. Ordinary machines pay one disabled gate per public run
+ * slice, never per guest instruction; they create no sampler thread. It emits
+ * no runtime code and is never guest snapshot state. */
 bool s5l8900_static_a64_enable_compact_raw_pc_profile(s5l8900_t *m);
 
 typedef enum {
@@ -4162,6 +4162,10 @@ typedef struct {
 
 typedef struct {
     bool enabled;
+    uint64_t polls;
+    uint64_t not_running;
+    uint64_t state_failures;
+    uint64_t target_races;
     uint64_t samples;
     uint64_t outside;
     uint64_t region[S5L_STATIC_A64_COMPACT_PC_REGION_COUNT];

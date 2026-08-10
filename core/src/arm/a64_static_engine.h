@@ -59,9 +59,10 @@ bool s5l8900_static_a64_commit_known_negative_bypass(s5l8900_t *m);
 /* Bracket one public s5l8900_run() call for the explicit compact-PC sampler.
  * False means the marker was not enabled and the caller performs no matching
  * end operation. This outer-slice gate is not a per-instruction cost. The
- * global SIGPROF timer is installed only at opt-in boot; these calls merely
- * gate the eligible process-CPU sampling interval. Retained outside-runner PCs
- * reveal whether delivery actually interrupted this work or another thread. */
+ * sampler thread is created only at opt-in boot; begin records the exact Mach
+ * thread executing this slice and end makes it ineligible. Retained outside-
+ * runner PCs therefore still belong to the emulator pthread rather than an
+ * arbitrary process thread. */
 bool s5l8900_static_a64_compact_raw_pc_profile_slice_begin(
     const s5l8900_t *m);
 void s5l8900_static_a64_compact_raw_pc_profile_slice_end(

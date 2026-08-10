@@ -867,15 +867,15 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
 #endif
 
 #if defined(S5LBOX_STATIC_A64_ENGINE)
-    /* Install process-wide diagnostic state only after the firmware, saved
-     * state and every ordinary host policy have passed validation. Marker-free
-     * boots never touch SIGPROF or ITIMER_PROF. */
+    /* Start diagnostic state only after the firmware, saved state and every
+     * ordinary host policy have passed validation. Marker-free boots never
+     * create the dedicated sampler thread. */
     if (compact_pc_profile &&
         !s5l8900_static_a64_enable_compact_raw_pc_profile(machine)) {
         (void)file_block_close(boot->media);
         set_detail(report->detail, sizeof report->detail,
                    "The compact CPU profile is unavailable on this host or "
-                   "another process CPU timer is already active.");
+                   "its target-thread sampler could not be started.");
         set_detail(report->summary, sizeof report->summary,
                    "compact CPU profile unavailable");
         return false;

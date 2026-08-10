@@ -86,6 +86,10 @@ static vm_execution_telemetry_observation_t execution_observation(
     value.compact_pc_profile_reference_pc = UINT64_C(0x100000000) + base;
     value.compact_pc_profile_outside_pc_captured = base + 53u;
     value.compact_pc_profile_outside_pc_dropped = base + 54u;
+    value.compact_pc_profile_polls = base + 63u;
+    value.compact_pc_profile_not_running = base + 64u;
+    value.compact_pc_profile_state_failures = base + 65u;
+    value.compact_pc_profile_target_races = base + 66u;
     for (unsigned i = 0u; i < VM_COMPACT_PC_PROFILE_HOT_COUNT; i++) {
         value.compact_pc_profile_outside_hot_pc[i] =
             UINT64_C(0x200000000) + base + (uint64_t)i * UINT64_C(0x100);
@@ -236,6 +240,10 @@ static void test_boundaries_and_sampled_changes(void) {
            state.execution_last.compact_privileged_window_refills == 2038u &&
            state.execution_last.compact_privileged_boundary_retired == 2039u &&
            state.execution_last.compact_window_cache_hits == 2040u &&
+           state.execution_last.compact_pc_profile_polls == 2063u &&
+           state.execution_last.compact_pc_profile_not_running == 2064u &&
+           state.execution_last.compact_pc_profile_state_failures == 2065u &&
+           state.execution_last.compact_pc_profile_target_races == 2066u &&
            state.execution_last.compact_pc_profile_samples == 2041u &&
            state.execution_last.compact_pc_profile_outside == 2042u &&
            state.execution_last.compact_pc_profile_entry == 2043u &&

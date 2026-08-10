@@ -281,15 +281,14 @@ bool a64_compact_raw_run_code_window_resident_cached(
     unsigned *completed, unsigned *native_completed,
     unsigned *fallback_completed);
 
-/* Opt-in statistical attribution for the build-time-linked compact runner.
- * SIGPROF samples only while the public SoC run slice is active, then assigns
- * the interrupted PC to one ordered text region. A bounded outside-runner
- * sample retains raw PCs so ordinary code can rank them; because SIGPROF is
- * process-directed, those addresses are also the evidence for whether another
- * thread or image was interrupted. The aliases exported by the generator add
- * no hot-path instructions. Unsupported hosts refuse enablement and every
- * snapshot remains zero. This is host diagnostic state only: it is neither
- * guest state nor part of a snapshot. */
+/* Opt-in statistical attribution for the build-time-linked compact runner. A
+ * marker-created sampler polls only the pthread executing the public SoC run
+ * slice, rejects observations while that thread is not running, and assigns
+ * the captured PC to one ordered text region. A bounded outside-runner sample
+ * retains raw PCs so ordinary code can rank them. The aliases exported by the
+ * generator add no hot-path instructions. Unsupported hosts refuse enablement
+ * and every snapshot remains zero. This is host diagnostic state only: it is
+ * neither guest state nor part of a snapshot. */
 typedef enum {
     A64_COMPACT_RAW_PC_PROFILE_ENTRY = 0,
     A64_COMPACT_RAW_PC_PROFILE_DP,
@@ -313,6 +312,10 @@ typedef struct {
 
 typedef struct {
     bool enabled;
+    uint64_t polls;
+    uint64_t not_running;
+    uint64_t state_failures;
+    uint64_t target_races;
     uint64_t samples;
     uint64_t outside;
     uint64_t region[A64_COMPACT_RAW_PC_PROFILE_REGION_COUNT];

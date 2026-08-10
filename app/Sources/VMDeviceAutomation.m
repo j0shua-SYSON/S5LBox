@@ -438,6 +438,10 @@ static double VMDeviceAutomationSeconds(uint64_t firstNS, uint64_t lastNS) {
              "mbx_3d_rejected=%llu,mbx_3d_pixels=%llu,"
              "active_clock_updates=%llu,active_clock_added_ticks=%llu,"
              "active_clock_clamps=%llu,active_clock_failures=%llu,"
+             "compact_pc_profile_polls=%llu,"
+             "compact_pc_profile_not_running=%llu,"
+             "compact_pc_profile_state_failures=%llu,"
+             "compact_pc_profile_target_races=%llu,"
              "compact_pc_profile_samples=%llu,"
              "compact_pc_profile_outside=%llu,"
              "compact_pc_profile_entry=%llu,compact_pc_profile_dp=%llu,"
@@ -494,6 +498,13 @@ static double VMDeviceAutomationSeconds(uint64_t firstNS, uint64_t lastNS) {
             (unsigned long long)VM_EXEC_DELTA(active_clock_added_ticks),
             (unsigned long long)VM_EXEC_DELTA(active_clock_clamps),
             (unsigned long long)VM_EXEC_DELTA(active_clock_failures),
+            (unsigned long long)VM_EXEC_DELTA(compact_pc_profile_polls),
+            (unsigned long long)VM_EXEC_DELTA(
+                compact_pc_profile_not_running),
+            (unsigned long long)VM_EXEC_DELTA(
+                compact_pc_profile_state_failures),
+            (unsigned long long)VM_EXEC_DELTA(
+                compact_pc_profile_target_races),
             (unsigned long long)VM_EXEC_DELTA(
                 compact_pc_profile_samples),
             (unsigned long long)VM_EXEC_DELTA(

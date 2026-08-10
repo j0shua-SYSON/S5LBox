@@ -116,6 +116,10 @@ typedef struct {
     uint64_t compact_privileged_window_refills;
     uint64_t compact_privileged_boundary_retired;
     uint64_t compact_window_cache_hits;
+    uint64_t compact_pc_profile_polls;
+    uint64_t compact_pc_profile_not_running;
+    uint64_t compact_pc_profile_state_failures;
+    uint64_t compact_pc_profile_target_races;
     uint64_t compact_pc_profile_samples;
     uint64_t compact_pc_profile_outside;
     uint64_t compact_pc_profile_entry;

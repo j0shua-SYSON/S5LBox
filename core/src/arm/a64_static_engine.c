@@ -752,6 +752,10 @@ void s5l8900_static_a64_compact_raw_pc_profile(
                        "compact PC-profile hot count drifted");
         a64_compact_raw_pc_profile_snapshot(&native);
         out->enabled = native.enabled;
+        out->polls = native.polls;
+        out->not_running = native.not_running;
+        out->state_failures = native.state_failures;
+        out->target_races = native.target_races;
         out->samples = native.samples;
         out->outside = native.outside;
         for (unsigned i = 0u;

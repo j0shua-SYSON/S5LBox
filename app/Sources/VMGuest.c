@@ -286,6 +286,13 @@ static const uint8_t *vm_guest_record_display(const s5l8900_t *m,
             execution.active_clock_failures = m->active_clock_failures;
             s5l_static_a64_compact_pc_profile_t pc_profile;
             s5l8900_static_a64_compact_raw_pc_profile(m, &pc_profile);
+            execution.compact_pc_profile_polls = pc_profile.polls;
+            execution.compact_pc_profile_not_running =
+                pc_profile.not_running;
+            execution.compact_pc_profile_state_failures =
+                pc_profile.state_failures;
+            execution.compact_pc_profile_target_races =
+                pc_profile.target_races;
             execution.compact_pc_profile_samples = pc_profile.samples;
             execution.compact_pc_profile_outside = pc_profile.outside;
             execution.compact_pc_profile_entry = pc_profile.region[
