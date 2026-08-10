@@ -96,18 +96,16 @@ are deterministic apart from that one contact, so the tap is what dismissed it.
   reached the transmit FIFO.
 - **No packet has been carried.** The PPP link comes up — `IPCP Opened`,
   `10.0.2.15` — and every NAT counter is still zero.
-- **30 fps is not established.** The currently installed foreground app is still
-  reported at roughly **0–4 fps**. An exact physical-A9 standalone replay now
-  supplies the missing counter-backed core result: the accepted interpreter
-  candidate has a 9.796 median mean and 11.975 best changed-scanout window, with
-  **zero** windows at 30. It mirrors the app's execution/publication schedule but
-  excludes UIKit and Core Animation, so 9.796 is not claimed as displayed FPS.
-  Timebase-bounded User-mode tick batching improves both core rate and that meter
-  by about 4.6% with byte-identical output. That is real progress and nowhere
-  near the roughly threefold gain still required. The no-JIT signed graph remains
-  compiled for experiments but is disabled in the shipping app after measuring
-  as a 6.17x A9 regression. See *Speed* and
-  [`docs/hotpath.md`](docs/hotpath.md).
+- **30 fps is not established.** User-reported foreground navigation can still
+  fall to roughly **0–4 fps** and visibly stall. In the newest exact physical-A9
+  Settings replay, the marker-free compact engine's three control arms ended at
+  15, 9 and 13 endpoint FPS, with only 1.825–3.262 changed scanouts/s and a
+  2.207–3.233 second maximum changed-pixel gap. The repeated-window cache then
+  removed about 42% of C fast refills but slowed the same instruction interval
+  by 9.5% on average and worsened the median changed-pixel gap, so it remains
+  disabled. These counters diagnose the foreground pipeline; they do not prove
+  that iOS displayed every submitted frame. No arm reached a 30-fps acceptance
+  result. See *Speed* and [`docs/hotpath.md`](docs/hotpath.md).
 
 Two smaller things the picture shows honestly. The clock reads 4:00 on
 31 December because the real-time clock answers with a placeholder nobody has
@@ -141,7 +139,7 @@ userspace received the framebuffer read-only and faulted on its first store.*
 | **Hidden from the guest by default** | SHA-1 acceleration, cellular/baseband transport and USB are deliberately declared absent by editing only the in-memory device tree, because their rows name measured boot failures. MBX is also hidden in the accepted default, but is now an opt-in experiment rather than an unmodelled register hole. The firmware files on disk are never modified. |
 | **Invented register values** | The USB controller's three configuration registers (`GHWCFG1`/`GHWCFG2`/`GHWCFG4`) hold a legal and sufficient configuration. They are **not** measured from real S5L8900 silicon. This is one of the two exceptions the networking row above draws its line around: three constants, named here so nobody has to discover them, and replaceable the day somebody reads the real part. |
 | **Rendering** | The accepted default sets `CA_ENABLE_MBX2D=0` in a new work image so QuartzCore uses Apple's CPU renderer. The experimental path leaves MBX matched and now completes a live interval of 1,388/1,388 2D jobs and 8,888/8,888 3D renders with zero decoder rejection or recovery. That interval is checkpoint-derived; final cold-boot and 30 fps acceptance are still open, so MBX is not silently promoted to the default. |
-| **Speed** | Not cycle-accurate and not yet 30 fps. The build-time-signed no-JIT graph looked faster in synthetic loops but is a **6.17x regression** in the exact A9 full-guest app-bus replay: 1.125446 Minsn/s versus 6.944527 for repeated interpreter controls. The shipping target therefore keeps it only for experiments, disables it by default, and retains direct RAM writes, which measured 4.14% faster with identical output. Two interpreter fixes later delivered about +24% instruction rate in a matched static-scene app crossover, but that scene produced no dynamic-FPS evidence. Exact dynamic A9 replay at `3f7a47e` now shows the next real layer: User-mode tick batching covers 66.544% of retirements and improves median core rate 10.741804→11.235212 Minsn/s (+4.59%) and median mean changed cadence 9.370→9.796 (+4.55%), with identical disk/frame hashes and no 30-FPS window. The meter excludes UIKit, while the installed foreground app is still reported around 0–4 fps; neither number may be promoted into a displayed-FPS claim. Historical foreground runs near 20 Minsn/s on an iPhone 6s Plus and 40 Minsn/s on an iPhone 16 Pro Max also remained around 0–2 fps, which disproves treating instruction rate as visible FPS. App telemetry separates validated scanout changes, immutable-image/layer submissions, build cost, and a device-wide Core Animation gauge. A layer submission is not called a displayed frame. |
+| **Speed** | Not cycle-accurate and not 30 fps. The old monolithic signed graph remains a measured **6.17x A9 regression**, but the current iOS target uses the newer bounded compact signed-static engine with exact interpreter fallback and no runtime code generation. In the newest 7,212 M Settings replay, marker-free cache-OFF controls ended at 15, 9 and 13 endpoint FPS and only 1.825–3.262 changed scanouts/s. Repeated-window caching cut C fast refills about 42% yet slowed every same-instruction pair; mean host interval rose 9.54%, median endpoint FPS fell 13→9, and the median maximum changed-scanout gap worsened 3.105→3.614 seconds, so the cache stays off. Earlier User-mode tick batching and exact-witness work remain real efficiency gains, but neither established visible 30 fps. Historical foreground runs near 20 Minsn/s on an iPhone 6s Plus and 40 Minsn/s on an iPhone 16 Pro Max also remained around 0–2 fps, disproving any simple instruction-rate-to-visible-FPS conversion. App telemetry separates validated scanout changes, immutable-image/layer submissions, build cost, and a device-wide Core Animation gauge; a layer submission is not called a displayed frame. |
 | **Kernel patches** | The kernel is modified in memory as it loads: a real-time-clock timeout is forced to zero, the root-device lookup is redirected to the emulator's fake disk, and hooks are installed so the guest's disk access reaches the host. Applied only after checking a SHA-256 hash and a nine-segment layout check of the exact 7,942,144-byte kernel. |
 | **Storage** | Not flash memory. The desktop harness can create a fresh writable work image per run; the app keeps one persistent work image per machine. Snapshot storage and copy-on-write layers exist and are host-tested, but the current app controller still refuses Take/Open because their lifecycle wiring is unfinished, so app snapshots are not claimed working. The canonical imported root filesystem is read-only. |
 | **Boot chain** | No secure boot chain is executed. The kernel is loaded directly; the boot ROM, the low-level bootloader and iBoot are not run. Apple's firmware container format has been parsed and an extracted bootloader payload executed, but separately, never as a chain. |
@@ -261,20 +259,20 @@ shell is Apple-specific. Detail in
 
 The runtime-code-generating translator still exists and is tested, but the boot
 loop does not call it and the iOS app excludes it. Stock iOS does not generally
-grant JIT execution, and the 30 fps target must be met without it. A separate
-build-time-signed AArch64 semantic engine also remains linked: it creates no
-runtime code or writable-executable page, but an exact A9 app-bus replay found
-its lookup/refill/handler boundaries made the real workload **6.17x slower**.
-The shipping app therefore disables it and uses the interpreter; controlled
-experiments can still enable it in the same binary.
+grant JIT execution, and the 30 fps target must be met without it. The old
+monolithic build-time-signed AArch64 graph is also retained as rejected
+evidence: an exact A9 app-bus replay measured it **6.17x slower** than repeated
+interpreter controls.
 
-The accepted interpreter retains canonical-bus direct plain-RAM writes, keeps a
-rare 68 KiB privileged-SVC rollback frame out of `arm_step`, and batches only
-redundant device ticks during proven-safe User-mode intervals up to the first
-exact timebase edge. The latter covers 66.544% of the measured dynamic interval
-and adds about 4.6% on an iPhone 6s Plus with byte-identical output. Its best
-changed-scanout window is still 11.975, not 30, and this meter still stops before
-UIKit presentation. Full synthetic and rejected-engine measurements remain in
+The current iOS target instead defaults to a newer bounded compact AArch64
+engine generated entirely at build time. It creates no runtime code or
+writable-executable page and falls back to the interpreter for every unsupported
+or unsafe boundary. Marker-free machines keep User-mode window continuation,
+while privileged continuation and repeated-window caching remain opt-in after
+physical A9 gates failed to improve cadence. The newest cache replay reduced C
+fast refills about 42% but made the same 160 M-instruction interval about 9.5%
+slower on average; it therefore stays off. Full synthetic, physical and
+rejected-engine measurements remain in
 [`docs/hotpath.md`](docs/hotpath.md); they are evidence, not FPS multipliers.
 
 ## Build & run

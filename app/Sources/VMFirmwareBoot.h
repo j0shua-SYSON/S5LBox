@@ -93,9 +93,11 @@ extern "C" {
 #define VM_FW_BOOT_COMPACT_WINDOW_REFILL_OFF_FILE \
     "engine.compact-window-refill-off"
 /* Opt-in same-binary experiment for switching among repeated, already-proved
- * full User-mode FETCH windows inside signed text. It is invocation-local,
- * never snapshot state, and remains off until physical evidence supports the
- * product default. */
+ * full User-mode FETCH windows inside signed text. It is invocation-local and
+ * never snapshot state. A three-pair physical-A9 Settings replay cut C fast
+ * refills by about 42%, but made the same 160 M-instruction interval about 9.5%
+ * slower on average and worsened the median changed-frame gap. It therefore
+ * remains diagnostic-only and off by default. */
 #define VM_FW_BOOT_COMPACT_WINDOW_CACHE_FILE \
     "engine.compact-window-cache-on"
 /* Opt-in rollout control for privileged window continuation. The code remains

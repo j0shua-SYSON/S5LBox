@@ -8630,3 +8630,71 @@ generation, privilege, fallback and serialized-machine oracles remain required
 before that path can be enabled. Raw measurements are retained under
 `work/artifacts/2fe8094-a9-compact-pc-profile/`; the diagnostic marker was
 removed after the third run.
+
+### 2026-08-10: repeated-window caching removes callbacks and makes A9 slower
+
+Commits `5988115183e318e1e99cff934b3a3567396c0b69` through
+`2b2a1b084ab2b2e032b8e93b104e450882cbe0e1` add an invocation-local
+eight-entry cache of complete, aligned 1 KiB User FETCH witnesses. A hit
+switches windows inside the build-time-generated signed AArch64 text without
+calling C. Entries never cross an invocation, privilege transition or
+translation generation. Walks, faults, MMIO and partial windows still refuse.
+There is no runtime code generation, JIT entitlement or stock-device
+dependency, and the experiment requires a nonempty
+`engine.compact-window-cache-on` marker.
+
+The Apple-arm64 oracle and serialized-SoC oracle are byte-exact. The latter
+retires 8,288 guest instructions across 63 crossings: its control performs 63
+C refills, while its cached arm performs 33 C refills plus 30 native cache
+hits, with the same machine state and bounded timebase. Local strict CTest
+passes 65/65. Exact-SHA core run `31344650204` and iPhone build run
+`31344656649` are green. The resulting IPA SHA-256 is
+`5C7B5D8C0A6B630814B80CC890AD7E6B8824FAD76AD0D5741796BFEE47F6C2CE`;
+the extracted and installed executable both hash to
+`198DC64C48BF82F945D9BD95C26D2CBF828E06B96773DAB13E4D1952D7731925`.
+
+The iPhone 6s Plus then ran OFF/ON, ON/OFF, OFF/ON from the same authenticated
+7,212 M snapshot, writable image, active host clock, Settings touch and 160 M
+instruction cap. Every included arm consumed both one-shot files, accepted
+both touch transitions, restored at exactly 7,212 M and preserved these hashes:
+
+- work image:
+  `3DFEB6129FDE451B7DC4BBF66E67082407D313ABF486E3275BA04F8FBFB138FD`
+- snapshot:
+  `DC67A9E26C02500302370A66537A48DC6BAC47639C771E4D896D93EE830FC57A`
+- external-media state:
+  `99AFAFEA9B01BD244BE6E41ACB80B22DEA47081A8B0684DF8901699EBBE28D82`
+
+One preliminary launch is explicitly excluded: its one-shot files were armed
+at the wrong paths, remained unconsumed, and the status showed a cold boot at
+486 M rather than a 7,212 M restore. It changed none of the canonical files and
+is labelled invalid in the retained evidence.
+
+| isolated physical-A9 metric | cache OFF samples | cache ON samples | median ON vs OFF |
+|---|---:|---:|---:|
+| endpoint FPS | 15, 9, 13 | 9, 8, 17 | 9 vs 13; -4 FPS |
+| changed scanout signatures/s | 3.262, 1.825, 2.528 | 2.270, 2.268, 2.622 | 2.270 vs 2.528; -10.21% |
+| scanout host interval, s | 4.292441, 4.383750, 4.351897 | 4.845024, 4.849351, 4.576809 | 4.845024 vs 4.351897; +11.33% |
+| maximum scanout-attempt gap, ms | 37.887, 40.911, 39.845 | 40.074, 39.013, 43.451 | 40.074 vs 39.845; +0.23 ms |
+| attempt gaps over 100 / 500 ms | 0 / 0 in every arm | 0 / 0 in every arm | no attempt-stall difference |
+| maximum changed-scanout gap, ms | 3105.109, 3233.144, 2206.647 | 3628.194, 3613.564, 3324.453 | 3613.564 vs 3105.109; +16.37% |
+| compact calls | 4,247,210; 4,255,025; 4,269,971 | 4,300,064; 4,229,046; 4,234,114 | -0.49% |
+| C fast window refills | 4,185,833; 4,173,112; 4,167,012 | 2,396,066; 2,408,716; 2,409,767 | -42.28% |
+| native window-cache hits | 0, 0, 0 | 2,058,265; 2,058,628; 2,064,135 | 2,058,628 |
+| fetch-refill attempts | 2,320,889; 2,323,483; 2,346,947 | 2,355,305; 2,308,522; 2,320,756 | -0.12% |
+
+All three cached arms took longer for essentially the same 159.1--159.2 M
+observed retirements. Mean scanout host time rose from 4.342696 to 4.757061
+seconds, a 9.54% regression; mean changed cadence fell 5.98%. The cache really
+does remove about 2.06 million C callbacks, but its lookup and maintenance cost
+more than those callbacks on A9. The counter reduction is not an overall
+efficiency improvement.
+
+Brutal status: **retain the exact implementation for controlled composition,
+keep it off by default, and reject it as present progress toward 30 FPS or
+stall-free navigation.** It neither reduces outer compact-call density nor
+fixes the multi-second changed-pixel gaps. The next diagnostic must symbolicate
+the roughly half of CPU samples outside generated text instead of guessing that
+all of them are refill callbacks. Raw valid and excluded measurements are
+retained under `work/artifacts/2b2a1b0-a9-window-cache/`; the phone was
+returned to marker-free policy after the comparison.
