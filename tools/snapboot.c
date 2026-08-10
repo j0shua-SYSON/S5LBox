@@ -382,7 +382,8 @@ int main(int argc, char **argv) {
             "usage: %s <kernel.macho> [-d dt.bin] [-c cmdline] [-r ramdisk]\n"
             "          [-R ram-MB] [-n steps] [-p physbase] [-V virtbase]\n"
             "          [--snapshot-at <steps> <file>] [--restore <file>]\n"
-            "          [--press-power | --wake-power] [--probe-mbx3d]\n"
+            "          [--press-power | --wake-power]\n"
+            "          [--probe-mbx2d | --probe-mbx3d]\n"
             "          [--release-power-after <steps>]\n"
             "          [--dump-ram <file>]\n"
             "          [--peek <virtual-address>]...\n"
@@ -397,6 +398,7 @@ int main(int argc, char **argv) {
     const char *dump_ram = NULL;
     bool press_power = false;
     bool wake_power = false;
+    bool probe_mbx2d = false;
     bool probe_mbx3d = false;
     bool release_power = false;
     uint64_t release_power_after = 0u;
@@ -432,6 +434,10 @@ int main(int argc, char **argv) {
         }
         if (!strcmp(argv[i], "--probe-mbx3d")) {
             probe_mbx3d = true;
+            continue;
+        }
+        if (!strcmp(argv[i], "--probe-mbx2d")) {
+            probe_mbx2d = true;
             continue;
         }
         if (!strcmp(argv[i], "--release-power-after") && i + 1 < argc) {
@@ -486,8 +492,13 @@ int main(int argc, char **argv) {
                 "--release-power-after requires --press-power or --wake-power\n");
         return 1;
     }
-    if (probe_mbx3d && !restore) {
-        fprintf(stderr, "--probe-mbx3d requires --restore\n");
+    if (probe_mbx2d && probe_mbx3d) {
+        fprintf(stderr, "--probe-mbx2d and --probe-mbx3d are mutually exclusive\n");
+        return 1;
+    }
+    if ((probe_mbx2d || probe_mbx3d) && !restore) {
+        fprintf(stderr, "%s requires --restore\n",
+                probe_mbx2d ? "--probe-mbx2d" : "--probe-mbx3d");
         return 1;
     }
 
@@ -591,6 +602,69 @@ int main(int argc, char **argv) {
         }
         fprintf(stderr, "restored %s at %llu instructions\n",
                 restore, (unsigned long long)mach.cpu.cycles);
+    }
+
+    if (probe_mbx2d) {
+        struct rejection_family {
+            const char *why;
+            uint32_t count;
+            uint32_t first_off;
+            uint32_t last_off;
+        } families[32] = {{0}};
+        uint32_t family_count = 0u;
+        uint32_t candidates = 0u;
+        uint32_t accepted = 0u;
+        uint32_t rejected = 0u;
+
+        for (uint32_t off = S5L_MBX_2D_RING_BASE;
+             off < S5L_MBX_2D_RING_BASE + S5L_MBX_2D_RING_SIZE;
+             off += 4u) {
+            uint32_t head = s5l_mbx_read(&mach.mbx, off);
+            if (head != S5L_MBX_2D_COMMAND_HEADER &&
+                !(off == S5L_MBX_2D_RING_BASE &&
+                  head == S5L_MBX_2D_SUBMIT))
+                continue;
+
+            candidates++;
+            const char *why = "unknown rejection";
+            uint32_t packet_words = 0u;
+            if (s5l_mbx_probe_2d_packet(&mach.mbx, &mach.bus, off,
+                                        &packet_words, &why)) {
+                accepted++;
+                continue;
+            }
+
+            rejected++;
+            uint32_t family = 0u;
+            while (family < family_count &&
+                   strcmp(families[family].why, why))
+                family++;
+            if (family == family_count &&
+                family_count < sizeof families / sizeof families[0]) {
+                families[family].why = why;
+                families[family].first_off = off;
+                family_count++;
+            }
+            if (family < family_count) {
+                families[family].count++;
+                families[family].last_off = off;
+            }
+        }
+
+        fprintf(stderr,
+                "MBX2D retained-ring probe: candidates=%u accepted=%u "
+                "rejected=%u families=%u\n",
+                candidates, accepted, rejected, family_count);
+        for (uint32_t i = 0u; i < family_count; i++) {
+            fprintf(stderr,
+                    "  rejected=%u first=ring+0x%04x last=ring+0x%04x: %s\n",
+                    families[i].count,
+                    families[i].first_off - S5L_MBX_2D_RING_BASE,
+                    families[i].last_off - S5L_MBX_2D_RING_BASE,
+                    families[i].why);
+        }
+        if (!candidates || rejected) return 6;
+        return 0;
     }
 
     if (probe_mbx3d) {

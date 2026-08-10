@@ -83,8 +83,8 @@
 #define MBX_2D_COPY_WORDS      16u
 #define MBX_2D_BLEND_WORDS     18u
 #define MBX_2D_END             0x70000000u
-#define MBX_2D_COMMAND_HEADER  0xa0060500u
-#define MBX_2D_SUBMIT          0xf0000000u
+#define MBX_2D_COMMAND_HEADER  S5L_MBX_2D_COMMAND_HEADER
+#define MBX_2D_SUBMIT          S5L_MBX_2D_SUBMIT
 #define MBX_2D_BLEND_TAG       0x20000004u
 #define MBX_2D_BLEND_EQUATION  0x095ff000u
 #define MBX_2D_OPAQUE_GLOBAL_FACTORS 0x0d500000u
@@ -1007,6 +1007,25 @@ static bool mbx_execute_2d_submit(s5l_mbx_t *m, const arm_bus_t *bus,
         mbx_2d_job_dispose(&jobs[i]);
     free(jobs);
     if (ok) *committed = total;
+    return ok;
+}
+
+bool s5l_mbx_probe_2d_packet(s5l_mbx_t *m, const arm_bus_t *bus,
+                             uint32_t packet_off, uint32_t *packet_words,
+                             const char **why) {
+    if (packet_words) *packet_words = 0u;
+    if (why) *why = "unknown rejection";
+    if (!m || !bus) {
+        if (why) *why = "missing MBX or bus";
+        return false;
+    }
+
+    struct mbx_2d_job job = {0};
+    uint32_t words = 0u;
+    bool ok = mbx_stage_2d_packet(m, bus, packet_off, NULL,
+                                  &job, &words, why);
+    mbx_2d_job_dispose(&job);
+    if (ok && packet_words) *packet_words = words;
     return ok;
 }
 
@@ -2492,27 +2511,31 @@ static bool mbx_execute_textured_sprite(s5l_mbx_t *m,
         return false;
     }
 
-    static const uint32_t background[26] = {
-        0xe0000000u, 0xa7718000u, 0u, 0xd6887610u,
-        0x22220e80u, 0u, 0u, 0x45000000u,
-        0u, 0u, 0x45000000u, 0x3f800000u,
-        0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
-        0x3f800000u, 0u, 0u, 0u,
-        0u, 0x40000000u, 0u, 0u,
-        0u, 0x40000000u,
-    };
-    for (unsigned i = 0; i < 26u; i++) {
-        uint32_t value;
-        if (!mbx_gart_u32(m, bus, object + i * 4u, &value, why)) return false;
-        if (i == 2u) {
-            if ((value & ~MBX_3D_ADDRESS_MASK) != 0x0e500000u ||
-                mbx_3d_decode_address(value) != target) {
-                if (why) *why = "sprite background does not resolve to FBSTART";
+    if (perspective_copy) {
+        static const uint32_t background[26] = {
+            0xe0000000u, 0xa7718000u, 0u, 0xd6887610u,
+            0x22220e80u, 0u, 0u, 0x45000000u,
+            0u, 0u, 0x45000000u, 0x3f800000u,
+            0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+            0x3f800000u, 0u, 0u, 0u,
+            0u, 0x40000000u, 0u, 0u,
+            0u, 0x40000000u,
+        };
+        for (unsigned i = 0; i < 26u; i++) {
+            uint32_t value;
+            if (!mbx_gart_u32(m, bus, object + i * 4u, &value, why))
+                return false;
+            if (i == 2u) {
+                if ((value & ~MBX_3D_ADDRESS_MASK) != 0x0e500000u ||
+                    mbx_3d_decode_address(value) != target) {
+                    if (why) *why =
+                        "sprite background does not resolve to FBSTART";
+                    return false;
+                }
+            } else if (value != background[i]) {
+                if (why) *why = "sprite background object is unknown";
                 return false;
             }
-        } else if (value != background[i]) {
-            if (why) *why = "sprite background object is unknown";
-            return false;
         }
     }
 
@@ -2587,8 +2610,22 @@ static bool mbx_execute_textured_sprite(s5l_mbx_t *m,
     }
     static const unsigned alpha_words[4] = {24u, 29u, 34u, 39u};
     uint32_t vertex_alpha_word = quad[alpha_words[0]];
+    /* Opaque compact copies bypass vertex modulation in the commit loop. The
+     * producer has emitted both all-zero unused colour words (Safari) and the
+     * older all-opaque form; require one of those exact uniform encodings. */
+    bool compact_unused_colour = compact_copy &&
+        (vertex_alpha_word == 0u || vertex_alpha_word == 0xff000000u);
     if ((vertex_alpha_word & 0x00ffffffu) ||
-        (direct_sampler && vertex_alpha_word != 0xff000000u)) {
+        (direct_sampler && !compact_unused_colour &&
+         vertex_alpha_word != 0xff000000u)) {
+        if (mbx_trace_state == 1) {
+            fprintf(stderr,
+                    "MBX3D sprite vertex modulation=%08x,%08x,%08x,%08x "
+                    "direct=%u compact=%u\n",
+                    quad[alpha_words[0]], quad[alpha_words[1]],
+                    quad[alpha_words[2]], quad[alpha_words[3]],
+                    direct_sampler ? 1u : 0u, compact_copy ? 1u : 0u);
+        }
         if (why) *why = "sprite vertex modulation is invalid for its sampler";
         return false;
     }
@@ -3431,16 +3468,28 @@ bool s5l_mbx_process_3d(s5l_mbx_t *m, const arm_bus_t *bus,
 
     mbx_counter_add(&mbx_3d_candidates, 1u);
     if (telemetry) mbx_counter_add(&telemetry->candidates_3d, 1u);
-    const char *why = "unknown rejection";
+    const char *tiled_why = "unknown tiled rejection";
+    const char *status_why = "unknown status rejection";
+    const char *sprite_why = "unknown sprite rejection";
+    const char *solid_why = "unknown solid rejection";
     uint32_t pixels = 0u;
-    if (!mbx_execute_first_tiled_over(m, bus, &why, &pixels) &&
-        !mbx_execute_status_sprite(m, bus, &why, &pixels) &&
-        !mbx_execute_textured_sprite(m, bus, &why, &pixels) &&
-        !mbx_execute_solid_quad(m, bus, &why, &pixels)) {
+    bool accepted = mbx_execute_first_tiled_over(
+        m, bus, &tiled_why, &pixels);
+    if (!accepted)
+        accepted = mbx_execute_status_sprite(m, bus, &status_why, &pixels);
+    if (!accepted)
+        accepted = mbx_execute_textured_sprite(m, bus, &sprite_why, &pixels);
+    if (!accepted)
+        accepted = mbx_execute_solid_quad(m, bus, &solid_why, &pixels);
+    if (!accepted) {
         mbx_counter_add(&mbx_3d_rejected, 1u);
         if (telemetry) mbx_counter_add(&telemetry->rejected_3d, 1u);
-        if (mbx_trace_state == 1)
-            fprintf(stderr, "MBX3D reject STARTRENDER: %s\n", why);
+        if (mbx_trace_state == 1) {
+            fprintf(stderr,
+                    "MBX3D reject STARTRENDER: tiled=%s; status=%s; "
+                    "sprite=%s; solid=%s\n",
+                    tiled_why, status_why, sprite_why, solid_why);
+        }
         return false;
     }
 

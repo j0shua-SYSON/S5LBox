@@ -1389,20 +1389,11 @@ static void test_write_compact_blit_copy(s5l8900_t *m,
     for (uint32_t off = 0u; off < 0x500u; off += 4u)
         test_gpu_write32(m, object + off, 0u);
 
-    static const uint32_t background[26] = {
-        0xe0000000u, 0xa7718000u, 0u, 0xd6887610u,
-        0x22220e80u, 0u, 0u, 0x45000000u,
-        0u, 0u, 0x45000000u, 0x3f800000u,
-        0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
-        0x3f800000u, 0u, 0u, 0u,
-        0u, 0x40000000u, 0u, 0u,
-        0u, 0x40000000u,
-    };
-    for (unsigned i = 0; i < 26u; i++) {
-        uint32_t value = i == 2u
-            ? 0x0e500000u | (target >> 7) : background[i];
-        test_gpu_write32(m, object + i * 4u, value);
-    }
+    /* The compact pointer selects its 33-word record directly. Safari leaves
+     * the preceding, unreferenced background storage stale; poison it so this
+     * regression cannot accidentally depend on the older perspective form. */
+    for (unsigned i = 0; i < 26u; i++)
+        test_gpu_write32(m, object + i * 4u, 0x5a000000u ^ i);
 
     uint32_t list = object + 0x68u;
     test_gpu_write32(m, list, 0x60200020u);
@@ -1476,7 +1467,7 @@ static void test_write_compact_blit_copy(s5l8900_t *m,
         record[5u + i] = test_float_word(vertices[i]);
     for (unsigned vertex = 0; vertex < 4u; vertex++) {
         unsigned attribute = 21u + vertex * 3u;
-        record[attribute] = 0xff000000u;
+        record[attribute] = 0u;
         record[attribute + 1u] = test_float_word(uv[vertex * 2u]);
         record[attribute + 2u] = test_float_word(uv[vertex * 2u + 1u]);
     }

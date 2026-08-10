@@ -913,6 +913,8 @@ void     s5l_power_write(s5l_power_t *p, uint32_t off, uint32_t val);
  * ring word across a store without adding a read to unrelated EDRAM traffic. */
 #define S5L_MBX_2D_RING_BASE 0x00a00000u
 #define S5L_MBX_2D_RING_SIZE 0x00010000u
+#define S5L_MBX_2D_COMMAND_HEADER 0xa0060500u
+#define S5L_MBX_2D_SUBMIT 0xf0000000u
 
 typedef struct {
     uint32_t reg[S5L_MBX_SIZE / 4u];
@@ -962,6 +964,15 @@ void     s5l_mbx_write(s5l_mbx_t *m, uint32_t off, uint32_t val);
 bool     s5l_mbx_process_2d(s5l_mbx_t *m, const arm_bus_t *bus,
                             uint32_t written_off, uint32_t value,
                             s5l_mbx_telemetry_t *telemetry);
+
+/* Validate one retained 2D ring packet without committing its staged pixels
+ * or raising completion. This is for offline snapshot diagnosis: the live
+ * submit path above remains the only path that can change guest-visible state.
+ * packet_words receives the decoded packet length when validation succeeds. */
+bool     s5l_mbx_probe_2d_packet(s5l_mbx_t *m, const arm_bus_t *bus,
+                                 uint32_t packet_off,
+                                 uint32_t *packet_words,
+                                 const char **why);
 
 /* Attempt an exactly decoded tiled 3D object after a STARTRENDER write. The
  * accepted forms are the captured 320x96 premultiplied source-over rectangle
