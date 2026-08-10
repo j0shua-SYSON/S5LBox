@@ -83,14 +83,21 @@ bool vm_button_queue_peek(const vm_button_queue_t *q, vm_button_event_t *out) {
 }
 
 bool vm_button_power_release_ready(const vm_button_event_t *event,
-                                   uint64_t power_press_delivered_ns,
-                                   uint64_t now_ns) {
+                                   const vm_button_power_hold_t *hold,
+                                   uint64_t now_ns,
+                                   uint64_t now_cycles) {
     if (!event) return false;
     if (event->which != S5L_BUTTON_HOLD || event->pressed) return true;
-    if (power_press_delivered_ns == 0u || now_ns == 0u ||
-        now_ns < power_press_delivered_ns)
-        return true;
-    return now_ns - power_press_delivered_ns >= VM_BUTTON_POWER_MIN_HOLD_NS;
+    if (!hold || !hold->active) return true;
+
+    bool host_ready = hold->delivered_ns == 0u || now_ns == 0u ||
+                      now_ns < hold->delivered_ns ||
+                      now_ns - hold->delivered_ns >=
+                          VM_BUTTON_POWER_MIN_HOLD_NS;
+    bool guest_ready = now_cycles < hold->delivered_cycles ||
+                       now_cycles - hold->delivered_cycles >=
+                           VM_BUTTON_POWER_MIN_HOLD_CYCLES;
+    return host_ready && guest_ready;
 }
 
 void vm_button_queue_pop(vm_button_queue_t *q) {

@@ -70,16 +70,33 @@
  * A real Sleep/Wake tap is not a zero-duration edge pair.  The PMU reports
  * the wake press before AppleM68Buttons has finished rebuilding its GPIO
  * debounce path, and releasing immediately after the PMU status read can be
- * interpreted as another sleep request.  Hold the guest-visible Power switch
- * for at least this much HOST time after the board accepts its press.  Wake
- * begins on the press, so this does not delay the first visible work.
+ * interpreted as another sleep request.
+ *
+ * BOTH clocks matter.  The host floor preserves a physical-feeling pulse,
+ * while the guest floor is what makes that pulse observable: AppleM68Buttons
+ * waits 14 ms before sampling the pin, which is 5,768,000 retired instructions
+ * at the modelled 412 MHz CPU clock.  Eight million leaves a small scheduling
+ * margin.  A host-only floor is wrong on a slow no-JIT run: at 1.5 Minsn/s,
+ * 500 ms retires fewer than one million guest instructions and the guest
+ * samples an already-released pin.
+ *
+ * Wake begins on the press, so holding the internal guest wire does not delay
+ * the first visible work.
  */
 #define VM_BUTTON_POWER_MIN_HOLD_NS UINT64_C(500000000)
+#define VM_BUTTON_POWER_MIN_HOLD_CYCLES UINT64_C(8000000)
 
 typedef struct {
     uint8_t  which;     /* an S5L_BUTTON_*, already translated  */
     bool     pressed;   /* what the guest should end up reporting */
 } vm_button_event_t;
+
+/* The two clock anchors captured when the board, not UIKit, accepts Power. */
+typedef struct {
+    bool     active;
+    uint64_t delivered_ns;
+    uint64_t delivered_cycles;
+} vm_button_power_hold_t;
 
 typedef struct {
     vm_button_event_t slot[VM_BUTTON_QUEUE_CAP];
@@ -127,13 +144,17 @@ bool vm_button_queue_peek(const vm_button_queue_t *q, vm_button_event_t *out);
 
 /*
  * Whether the event at the front of the queue may be delivered now.  Every
- * event except a Power release is immediately ready.  A zero timestamp means
- * the host clock was unavailable and fails open rather than leaving Power
- * held forever; a monotonic clock moving backwards is handled the same way.
+ * event except a Power release is immediately ready.  An inactive or NULL hold
+ * means no accepted press is known and fails open rather than wedging Power.
+ * A missing/backwards host clock waives only the host-time half; guest cycles
+ * still have to cross their debounce-safe floor.  A backwards guest counter
+ * similarly fails open for that half so a discontinuity cannot hold the key
+ * forever.
  */
 bool vm_button_power_release_ready(const vm_button_event_t *event,
-                                   uint64_t power_press_delivered_ns,
-                                   uint64_t now_ns);
+                                   const vm_button_power_hold_t *hold,
+                                   uint64_t now_ns,
+                                   uint64_t now_cycles);
 
 /* Remove the oldest transition. Harmless on an empty queue. */
 void vm_button_queue_pop(vm_button_queue_t *q);

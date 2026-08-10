@@ -258,7 +258,7 @@ static double vm_engine_now_seconds(void) {
     vm_button_queue_t _buttonQueue;
     uint64_t          _buttonDelivered;
     uint64_t          _buttonRefused;
-    uint64_t          _powerPressDeliveredNS;
+    vm_button_power_hold_t _powerHold;
     BOOL              _droppedButtonLogged;
 }
 
@@ -768,7 +768,7 @@ static double vm_engine_now_seconds(void) {
     memset(_buttons, 0, sizeof _buttons);
     _buttonDelivered = 0;
     _buttonRefused = 0;
-    _powerPressDeliveredNS = 0u;
+    memset(&_powerHold, 0, sizeof _powerHold);
     _droppedButtonLogged = NO;
     _status = @"starting";
     BOOL needSnapshot = (_snapshot == NULL);
@@ -1248,7 +1248,7 @@ static double vm_engine_now_seconds(void) {
     vm_button_event_t e;
     pthread_mutex_lock(&_lock);
     BOOL have = vm_button_queue_peek(&_buttonQueue, &e);
-    uint64_t powerPressDeliveredNS = _powerPressDeliveredNS;
+    vm_button_power_hold_t powerHold = _powerHold;
     pthread_mutex_unlock(&_lock);
     if (!have) return;
 
@@ -1259,16 +1259,25 @@ static double vm_engine_now_seconds(void) {
      * the minimum at BOARD acceptance, not at the UI event, because a press
      * may spend time waiting in this queue while the guest arms the line. */
     uint64_t nowNS = vm_now_ns();
-    if (!vm_button_power_release_ready(&e, powerPressDeliveredNS, nowNS))
+    uint64_t nowCycles = _machine.cpu.cycles;
+    if (!vm_button_power_release_ready(&e, &powerHold, nowNS, nowCycles))
         return;
 
     if (s5l8900_set_button(&_machine, e.which, e.pressed)) {
         if (nowNS == 0u) nowNS = vm_now_ns();
+        nowCycles = _machine.cpu.cycles;
         pthread_mutex_lock(&_lock);
         vm_button_queue_pop(&_buttonQueue);
         _buttonDelivered++;
-        if (e.which == S5L_BUTTON_HOLD)
-            _powerPressDeliveredNS = e.pressed ? nowNS : 0u;
+        if (e.which == S5L_BUTTON_HOLD) {
+            if (e.pressed) {
+                _powerHold.active = true;
+                _powerHold.delivered_ns = nowNS;
+                _powerHold.delivered_cycles = nowCycles;
+            } else {
+                memset(&_powerHold, 0, sizeof _powerHold);
+            }
+        }
         pthread_mutex_unlock(&_lock);
         return;
     }
