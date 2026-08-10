@@ -10,6 +10,7 @@
 #import "VMInstanceListViewController.h"
 
 #import <UIKit/UIKit.h>
+#import <dlfcn.h>
 
 typedef NS_ENUM(NSUInteger, VMDeviceAutomationState) {
     VMDeviceAutomationStateObserving = 0,
@@ -524,15 +525,44 @@ static double VMDeviceAutomationSeconds(uint64_t firstNS, uint64_t lastNS) {
                         last->compact_pc_profile_outside_pc_dropped];
             for (unsigned i = 0u;
                  i < VM_COMPACT_PC_PROFILE_HOT_COUNT; i++) {
+                uint64_t pc =
+                    last->compact_pc_profile_outside_hot_pc[i];
+                Dl_info info = {0};
+                BOOL resolved = pc != 0u &&
+                    dladdr((const void *)(uintptr_t)pc, &info) != 0;
+                NSString *imageName = @"none";
+                if (resolved && info.dli_fname) {
+                    NSString *imagePath = [NSString
+                        stringWithUTF8String:info.dli_fname];
+                    if (imagePath.lastPathComponent.length)
+                        imageName = imagePath.lastPathComponent;
+                }
+                NSString *symbolName = @"none";
+                if (resolved && info.dli_sname) {
+                    NSString *candidate = [NSString
+                        stringWithUTF8String:info.dli_sname];
+                    if (candidate.length) symbolName = candidate;
+                }
                 [outsidePCs appendFormat:
                     @",compact_pc_profile_outside_hot%u_pc=%016llx,"
-                     "compact_pc_profile_outside_hot%u_samples=%llu",
+                     "compact_pc_profile_outside_hot%u_samples=%llu,"
+                     "compact_pc_profile_outside_hot%u_image_base=%016llx,"
+                     "compact_pc_profile_outside_hot%u_symbol_pc=%016llx,"
+                     "compact_pc_profile_outside_hot%u_image=%@,"
+                     "compact_pc_profile_outside_hot%u_symbol=%@",
+                    i,
+                    (unsigned long long)pc,
                     i,
                     (unsigned long long)
-                        last->compact_pc_profile_outside_hot_pc[i],
+                        last->compact_pc_profile_outside_hot_samples[i],
                     i,
-                    (unsigned long long)
-                        last->compact_pc_profile_outside_hot_samples[i]];
+                    (unsigned long long)(uintptr_t)
+                        (resolved ? info.dli_fbase : NULL),
+                    i,
+                    (unsigned long long)(uintptr_t)
+                        (resolved ? info.dli_saddr : NULL),
+                    i, imageName,
+                    i, symbolName];
             }
             execution = [execution stringByAppendingString:outsidePCs];
         }
