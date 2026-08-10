@@ -428,7 +428,7 @@ static bool mbx_gart_write(const s5l_mbx_t *m, const arm_bus_t *bus,
     return true;
 }
 
-static uint32_t mbx_premultiplied_over(uint32_t dst, uint32_t src);
+static uint32_t mbx_source_over_clamped(uint32_t dst, uint32_t src);
 static uint32_t mbx_modulate_vertex_alpha(uint32_t src, uint32_t alpha);
 
 struct mbx_2d_job {
@@ -851,7 +851,7 @@ static bool mbx_stage_premultiplied_copy(s5l_mbx_t *m,
         if (opaque_global)
             src = mbx_modulate_vertex_alpha(
                 src, (w[6] & MBX_2D_GLOBAL_ALPHA_MASK) >> 12);
-        uint32_t blended = mbx_premultiplied_over(
+        uint32_t blended = mbx_source_over_clamped(
             mbx_load_le32(pixels + i), src);
         pixels[i] = (uint8_t)blended;
         pixels[i + 1u] = (uint8_t)(blended >> 8);
@@ -1160,14 +1160,18 @@ static uint32_t mbx_3d_decode_address(uint32_t word) {
 
 /* QuartzCore selects source ONE and destination ONE_MINUS_SRC_ALPHA for this
  * object. Its shipped software compositor at 0x3122dcf4 uses the same 8-bit
- * fixed-point equation, with 256-alpha rather than an inferred /255 rule. */
-static uint32_t mbx_premultiplied_over(uint32_t dst, uint32_t src) {
+ * fixed-point equation, with 256-alpha rather than an inferred /255 rule.
+ * Fixed-function blending clamps each resulting component. Premultiplied
+ * sources never reach that clamp, while arbitrary BGRA8 texture bytes can. */
+static uint32_t mbx_source_over_clamped(uint32_t dst, uint32_t src) {
     uint32_t inv = 256u - (src >> 24);
     uint32_t out = 0u;
     for (unsigned shift = 0; shift < 32u; shift += 8u) {
         uint32_t s = (src >> shift) & 0xffu;
         uint32_t d = (dst >> shift) & 0xffu;
-        out |= (s + ((d * inv) >> 8)) << shift;
+        uint32_t blended = s + ((d * inv) >> 8);
+        if (blended > 0xffu) blended = 0xffu;
+        out |= blended << shift;
     }
     return out;
 }
@@ -1522,7 +1526,7 @@ static bool mbx_execute_first_tiled_over(s5l_mbx_t *m,
         }
         for (uint32_t x = 0; x < form->width; x++) {
             uint8_t *pixel = pixels + row * row_bytes + x * 4u;
-            uint32_t blended = mbx_premultiplied_over(
+            uint32_t blended = mbx_source_over_clamped(
                 mbx_load_le32(pixel), src);
             pixel[0] = (uint8_t)blended;
             pixel[1] = (uint8_t)(blended >> 8);
@@ -2137,7 +2141,7 @@ static bool mbx_execute_status_sprite(s5l_mbx_t *m,
             break;
         }
         src = mbx_modulate_vertex_alpha(src, vertex_alpha_word >> 24);
-        uint32_t blended = mbx_premultiplied_over(
+        uint32_t blended = mbx_source_over_clamped(
             mbx_load_le32(pixels + i), src);
         pixels[i] = (uint8_t)blended;
         pixels[i + 1u] = (uint8_t)(blended >> 8);
@@ -2503,7 +2507,7 @@ static bool mbx_execute_solid_quad(s5l_mbx_t *m,
                            row_bytes, why);
     }
     for (uint32_t i = 0; i < total && ok; i += 4u) {
-        uint32_t blended = mbx_premultiplied_over(
+        uint32_t blended = mbx_source_over_clamped(
             mbx_load_le32(pixels + i), colour);
         pixels[i] = (uint8_t)blended;
         pixels[i + 1u] = (uint8_t)(blended >> 8);
@@ -3367,16 +3371,6 @@ static bool mbx_execute_textured_sprite(s5l_mbx_t *m,
         ok = mbx_gart_read(m, bus, dst, pixels + row * row_bytes,
                            row_bytes, why);
     }
-    for (uint32_t i = 0; !compact_copy && i < source_total && ok; i += 4u) {
-        uint32_t src = mbx_load_le32(source_pixels + i);
-        uint32_t alpha = src >> 24;
-        if ((src & 0xffu) > alpha || ((src >> 8) & 0xffu) > alpha ||
-            ((src >> 16) & 0xffu) > alpha) {
-            if (why) *why = "sprite source is not premultiplied BGRA8";
-            ok = false;
-            break;
-        }
-    }
     /* Axis-aligned filtered sprites reuse the same vertical interpolation for
      * every destination x that names a given source column.  The literal
      * transcription used to recompute both vertical lanes for every output
@@ -3486,7 +3480,7 @@ static bool mbx_execute_textured_sprite(s5l_mbx_t *m,
             if (!compact_copy) {
                 src = mbx_modulate_vertex_alpha(
                     src, vertex_alpha_word >> 24);
-                output = mbx_premultiplied_over(
+                output = mbx_source_over_clamped(
                     mbx_load_le32(pixels + pixel_offset), src);
             }
             pixels[pixel_offset] = (uint8_t)output;

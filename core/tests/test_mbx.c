@@ -270,7 +270,9 @@ static uint32_t test_over(uint32_t dst, uint32_t src) {
     for (unsigned shift = 0; shift < 32u; shift += 8u) {
         uint32_t s = (src >> shift) & 0xffu;
         uint32_t d = (dst >> shift) & 0xffu;
-        out |= (s + ((d * inv) >> 8)) << shift;
+        uint32_t blended = s + ((d * inv) >> 8);
+        if (blended > 0xffu) blended = 0xffu;
+        out |= blended << shift;
     }
     return out;
 }
@@ -2186,6 +2188,7 @@ struct mbx_test_status_form {
     bool variable_vertex_alpha;
     bool boundary_override;
     bool zero_coverage;
+    bool arbitrary_bgra_probe;
     uint32_t tile_x0, tile_x1, tile_y0, tile_y1;
     uint32_t left, top, width, height;
     uint32_t source, source_x0, source_row0, source_stride, source_control;
@@ -2540,6 +2543,44 @@ static void test_captured_status_form(const struct mbx_test_status_form *form) {
           "%s did not raise all three completion events", form->name);
 
     m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x4cu);
+    if (form->arbitrary_bgra_probe) {
+        const uint32_t arbitrary = 0xbad43210u;
+        CHECK(filtered_sprite && covered_pixels == (uint32_t)pixel_count,
+              "%s arbitrary-BGRA probe requires full filtered coverage",
+              form->name);
+        for (uint32_t y = 0; y < filtered_texture_height; y++)
+            for (uint32_t x = 0; x < filtered_pitch_pixels; x++)
+                test_gpu_write32(&m,
+                    form->source + y * form->source_stride + x * 4u,
+                    arbitrary);
+        for (uint32_t y = 0; y < form->height; y++)
+            for (uint32_t x = 0; x < form->width; x++)
+                test_gpu_write32(&m,
+                    target + (form->top + y) * TARGET_STRIDE +
+                        (form->left + x) * 4u,
+                    0xff102030u + y * 0x00010101u + x);
+
+        m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
+        uint32_t arbitrary_mismatches = 0u;
+        uint32_t modulated = test_modulate_vertex_alpha(
+            arbitrary, form->quad[24] >> 24);
+        for (uint32_t y = 0; y < form->height; y++) {
+            for (uint32_t x = 0; x < form->width; x++) {
+                uint32_t dst = 0xff102030u + y * 0x00010101u + x;
+                uint32_t actual = test_gpu_read32(&m,
+                    target + (form->top + y) * TARGET_STRIDE +
+                        (form->left + x) * 4u);
+                arbitrary_mismatches +=
+                    actual != test_over(dst, modulated);
+            }
+        }
+        CHECK(arbitrary_mismatches == 0u,
+              "%s arbitrary BGRA8 source mismatched %u saturated pixels",
+              form->name, arbitrary_mismatches);
+        CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0x4cu,
+              "%s arbitrary BGRA8 source did not complete", form->name);
+        m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x4cu);
+    }
     uint32_t first_offset = first_covered_offset == UINT32_MAX
         ? 0u : first_covered_offset;
     uint32_t first = target +
@@ -2678,19 +2719,6 @@ static void test_captured_status_form(const struct mbx_test_status_form *form) {
             }
             last_source = form->source + sampled_y * form->source_stride +
                           sampled_x * 4u;
-            uint32_t saved_source = test_gpu_read32(&m, last_source);
-            test_gpu_write32(&m, first, 0x89abcdefu);
-            test_gpu_write32(&m, last_destination, 0x76543210u);
-            test_gpu_write32(&m, last_source, 0x01000002u);
-            m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
-            CHECK(test_gpu_read32(&m, first) == 0x89abcdefu &&
-                  test_gpu_read32(&m, last_destination) == 0x76543210u,
-                  "%s non-premultiplied final texel partially committed",
-                  form->name);
-            CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
-                  "%s non-premultiplied final texel raised completion",
-                  form->name);
-            test_gpu_write32(&m, last_source, saved_source);
         } else {
             uint32_t source_table = m.bus.read32(m.bus.ctx,
                 MBX_BASE + REG_GART0 + (form->source >> 22) * 4u);
@@ -3615,6 +3643,7 @@ static void test_later_tiled_status_sprites(void) {
             .semantic_sprite = true,
             .scaled_sprite = true,
             .boundary_override = true,
+            .arbitrary_bgra_probe = true,
             .tile_x0 = 0x18u, .tile_x1 = 0x1eu,
             .tile_y0 = 0x13u, .tile_y1 = 0x14u,
             .left = 199u, .top = 318u, .width = 49u, .height = 15u,
