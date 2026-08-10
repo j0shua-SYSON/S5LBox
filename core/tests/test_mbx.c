@@ -3262,6 +3262,46 @@ static const struct mbx_test_status_form safari_tabs_column_resample_form = {
     },
 };
 
+/* The reverse Safari transition retained this modulated-sampler companion to
+ * the tabs packet. It expands one half texel to 69 output pixels while
+ * retaining the 31-row source height exactly. Together the direct, alternate
+ * and modulated captures establish that this one-dimensional operation is
+ * independent of the filtered sampler state. */
+static const struct mbx_test_status_form safari_done_column_resample_form = {
+    .name = "Safari Done modulated filtered column resample",
+    .xclip = 0x013000e0u, .yclip = 0x00500020u,
+    .target = 0x00a3d000u,
+    .semantic_sprite = true,
+    .scaled_sprite = true,
+    .column_resample = true,
+    .boundary_override = true,
+    .arbitrary_bgra_probe = true,
+    .tile_x0 = 0x1cu, .tile_x1 = 0x25u,
+    .tile_y0 = 2u, .tile_y1 = 4u,
+    .left = 228u, .top = 41u, .width = 69u, .height = 31u,
+    .source = 0x00996000u,
+    .source_stride = 0x20u, .source_control = 0x8e000000u,
+    .source_width = 1u, .source_height = 31u,
+    .expected_covered_pixels = 2139u,
+    .boundary = {
+        0x43640000u, 0x42900000u, 0x43640000u, 0x42240000u,
+        0x43948000u, 0x42900000u, 0x43948000u, 0x42240000u,
+    },
+    .quad = {
+        0xe0000000u, 0xa0218001u, 0x8e0132c0u, 0xcd206c40u,
+        0xa7718000u, 0x0e5147a0u, 0xae504ea0u, 0x22250e80u,
+        0x43640000u, 0x42240000u, 0x43948000u, 0x42240000u,
+        0x43640000u, 0x42900000u, 0x43948000u, 0x42900000u,
+        0u, 0u, 0u, 0u,
+        0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+        0x08000000u, 0x00000000u, 0x00000000u, 0x3e640000u,
+        0x3d240000u, 0x08000000u, 0x3d800000u, 0x00000000u,
+        0x3e948000u, 0x3d240000u, 0x08000000u, 0x00000000u,
+        0x3f780000u, 0x3e640000u, 0x3d900000u, 0x08000000u,
+        0x3d800000u, 0x3f780000u, 0x3e948000u, 0x3d900000u,
+    },
+};
+
 /* A right-edge conservative tile can be non-empty while the subpixel quad
  * contains no sample centre after the 320-pixel surface clip.  Completion is
  * a lifecycle property of this geometry, not of the captured addresses. */
@@ -4300,6 +4340,7 @@ static void test_later_tiled_status_sprites(void) {
     test_captured_status_form(&phase);
 
     test_captured_status_form(&safari_tabs_column_resample_form);
+    test_captured_status_form(&safari_done_column_resample_form);
     test_captured_status_form(&zero_coverage_status_form);
     struct mbx_test_status_form relocated_zero = zero_coverage_status_form;
     relocated_zero.name = "relocated right-edge zero-coverage sprite";

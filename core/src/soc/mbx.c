@@ -3009,24 +3009,16 @@ static bool mbx_execute_textured_sprite(s5l_mbx_t *m,
                 scale_x > 0.0f && scale_y > 0.0f &&
                 scale_x <= 1.0f + epsilon && scale_y <= 1.0f + epsilon &&
                 scale_difference <= 0.00001f;
-            /* The post-unlock recovery capture uses a one-column texture as
-             * a vertical strip: the direct sampler stretches that column
-             * across the 320-pixel surface while independently reducing its
-             * 222-row extent to 37 rows.  This is separable filtering, not an
-             * arbitrary two-dimensional nonuniform transform.  Keep the
-             * exception one-dimensional and directional; wider sources still
-             * require the measured magnification or uniform-scale families. */
-            bool direct_column_resample =
-                direct_sampler && half_texel_layout && source_width == 1u &&
-                scale_x >= 1.0f - epsilon &&
-                scale_y > 0.0f && scale_y <= 1.0f + epsilon;
-            /* Safari's tabs transition emits the same separable one-column
-             * transform through the alternate filtered sampler. The shipped
-             * producer selects that sampler from texture state independently
-             * of its quad geometry, so keep an equally narrow alternate
-             * class instead of treating it as arbitrary mixed-axis scaling. */
-            bool alternate_column_resample =
-                scaled_sampler && half_texel_layout && source_width == 1u &&
+            /* Retained direct, alternate and modulated producer packets all
+             * use a one-column texture as a vertical strip. They independently
+             * magnify that column in X while retaining or reducing its rows in
+             * Y. The producer selects its filtered sampler from texture state,
+             * not from this geometry. Model the shared separable operation,
+             * but keep it one-dimensional and directional: wider sources and
+             * vertical magnification still require another measured family. */
+            bool filtered_column_resample =
+                (direct_sampler || modulated_sampler || scaled_sampler) &&
+                half_texel_layout && source_width == 1u &&
                 scale_x >= 1.0f - epsilon &&
                 scale_y > 0.0f && scale_y <= 1.0f + epsilon;
             bool modulated_uniform_scale =
@@ -3040,8 +3032,7 @@ static bool mbx_execute_textured_sprite(s5l_mbx_t *m,
                 scale_difference <= 0.00001f;
             if (source_width > MBX_3D_WIDTH || source_height > 480u ||
                 (!direct_magnification && !direct_uniform_minification &&
-                 !direct_column_resample &&
-                 !alternate_column_resample &&
+                 !filtered_column_resample &&
                  !modulated_uniform_scale &&
                  !alternate_uniform_minification)) {
                 if (mbx_trace_state == 1) {
