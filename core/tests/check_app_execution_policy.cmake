@@ -56,6 +56,23 @@ if(text MATCHES "S5LBOX_STATIC_A64_DEFAULT_GRAPH")
         "an end-to-end win")
 endif()
 
+string(REGEX MATCHALL "S5LBOX_IOS_WFI_REALTIME_PACING"
+    wfi_clock_occurrences "${text}")
+list(LENGTH wfi_clock_occurrences wfi_clock_count)
+if(NOT wfi_clock_count EQUAL 1 OR
+   NOT text MATCHES "S5LBOX_IOS_WFI_REALTIME_PACING=1")
+    message(FATAL_ERROR
+        "${APP_PROJECT} must retain real-time pacing for autonomous WFI "
+        "intervals exactly once; found ${wfi_clock_count} references")
+endif()
+
+if(text MATCHES "S5LBOX_IOS_ACTIVE_REALTIME_CLOCK")
+    message(FATAL_ERROR
+        "${APP_PROJECT} must not synchronize active execution to wall time; "
+        "physical unlock replay proved that policy can expire guest sleep "
+        "deadlines before emulated foreground work completes")
+endif()
+
 message(STATUS
     "iOS policy: compact live-byte engine plus direct writes selected; "
-    "rejected graph disabled")
+    "WFI paced; active wall clock and rejected graph disabled")
