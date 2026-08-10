@@ -242,9 +242,15 @@ expect_refused(external_md_read_cache_off_requires_external_md
 expect_config(run_api_accepts_scheduled_tap
     "touch taps           1|--run-api|--touch"
     absent-kernel --run-api --touch 1000:160:240 --print-config)
-# Multi-report gestures and buttons still use the literal runner's
-# per-instruction retry scheduler. Refuse those rather than accepting a request
-# the app-shaped path cannot currently execute faithfully.
+# The app drains one button transition on that same between-chunk boundary.
+# Keep the exact guest debounce floor while allowing a fast coherent wake
+# replay to use the app's real s5l8900_run() entry point.
+expect_config(run_api_accepts_scheduled_button
+    "button presses       1|--run-api|--button"
+    absent-kernel --run-api --button hold:1000:8000000 --print-config)
+# Multi-report gestures still use the literal runner's per-instruction retry
+# scheduler. Refuse those rather than accepting a request the app-shaped path
+# cannot currently execute faithfully.
 expect_refused(run_api_refuses_scheduled_gesture
     "--run-api cannot be combined"
     absent-kernel --run-api --drag 1000:10:240:300:240 --print-config)

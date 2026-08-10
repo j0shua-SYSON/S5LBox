@@ -18608,6 +18608,74 @@ static BOOTKERNEL_NOINLINE void button_press_step(uint64_t n) {
     }
 }
 
+/*
+ * The app drains one queued button transition between s5l8900_run() chunks.
+ * Keep the app-shaped harness on that ownership boundary as well: choose the
+ * oldest due transition, attempt exactly that one, and let a refusal block the
+ * later transitions until the next ordinary chunk gives the guest time to
+ * service its GPIO line.  The literal runner above deliberately keeps its
+ * per-instruction/all-due policy.
+ */
+static void button_press_run_api_step(uint64_t n) {
+    if (!G.mach) return;
+
+    unsigned selected = G.button_n;
+    uint64_t selected_due = UINT64_MAX;
+    for (unsigned i = 0; i < G.button_n; i++) {
+        const button_press_t *b = &G.button[i];
+        uint64_t due;
+
+        if (b->stage == 0u) {
+            due = b->at;
+        } else if (b->stage == 1u) {
+            if (b->down_at > UINT64_MAX - b->hold) continue;
+            due = b->down_at + b->hold;
+        } else {
+            continue;
+        }
+        if (due <= n &&
+            (selected == G.button_n || due < selected_due)) {
+            selected = i;
+            selected_due = due;
+        }
+    }
+    if (selected == G.button_n) return;
+
+    button_press_t *b = &G.button[selected];
+    if (!s5l8900_set_button(G.mach, b->which, b->stage == 0u)) {
+        b->refusals++;
+        return;
+    }
+    if (b->stage == 0u) {
+        b->down_at = n;
+        b->stage = 1u;
+    } else {
+        b->up_at = n;
+        b->stage = 2u;
+    }
+}
+
+/* Split only for a future transition.  An overdue/refused transition retries
+ * after the next normal app chunk instead of producing a zero-progress loop. */
+static uint64_t button_press_next_run_api_boundary(uint64_t now) {
+    uint64_t next = UINT64_MAX;
+    for (unsigned i = 0; i < G.button_n; i++) {
+        const button_press_t *b = &G.button[i];
+        uint64_t due;
+
+        if (b->stage == 0u) {
+            due = b->at;
+        } else if (b->stage == 1u) {
+            if (b->down_at > UINT64_MAX - b->hold) continue;
+            due = b->down_at + b->hold;
+        } else {
+            continue;
+        }
+        if (due > now && due < next) next = due;
+    }
+    return next;
+}
+
 static void button_report(void) {
     if (!G.button_n) return;
     const s5l_buttons_t *b = G.mach ? &G.mach->buttons : NULL;
@@ -33547,11 +33615,12 @@ static void boot_print_usage(FILE *stream, const char *argv0) {
             "      every per-instruction host observer while retaining CPU,\n"
             "      MMU, device tick, framebuffer, MBX, and external-md guest\n"
             "      behavior. Exact --snapshot-at boundaries and --frame-meter\n"
-            "      are supported. Scheduled --touch reports are delivered\n"
+            "      are supported. Scheduled --touch reports and --button\n"
+            "      transitions are delivered\n"
             "      between bounded chunks, matching the app's queue ownership;\n"
             "      a requested count may shorten the preceding chunk. --hle\n"
             "      uses the same exact-PC machine hook as the experimental iOS\n"
-            "      build; scheduled gestures/buttons, HLE verify, PPP/NAT, call probes,\n"
+            "      build; scheduled gestures, HLE verify, PPP/NAT, call probes,\n"
             "      and per-instruction diagnostic requests are refused rather than\n"
             "      silently ignored. The final diagnostic report is necessarily\n"
             "      sparse; TLB counters omit observer translations and therefore\n"
@@ -35193,18 +35262,18 @@ int main(int argc, char **argv) {
 
     /* s5l8900_run() now has one deliberately narrow instruction-boundary
      * facility: exact-PC replacements, which is how the experimental iOS HLE
-     * is measured through the real app runner. A scheduled tap, snapshots and
-     * frame-meter are app-chunk-boundary work. Everything else below changes
-     * guest state or promises diagnostics at a boundary the API does not
-     * expose. */
+     * is measured through the real app runner. Scheduled taps/buttons,
+     * snapshots and frame-meter are app-chunk-boundary work. Everything else
+     * below changes guest state or promises diagnostics at a boundary the API
+     * does not expose. */
     if (run_api_hot &&
-        (call_probe_n || drag_n || pinch_n || button_n ||
+        (call_probe_n || drag_n || pinch_n ||
          cfg.v.hle_verify || ppp ||
          stop_on_abort || heartbeat || hot_page_given || win_lo != 0u ||
          win_hi != UINT64_MAX || ktail != 512u)) {
         fprintf(stderr,
                 "--run-api cannot be combined with call probes, scheduled "
-                "gestures/buttons, HLE verify, PPP/NAT, stop-on-abort, -Z, -H, -W, "
+                "gestures, HLE verify, PPP/NAT, stop-on-abort, -Z, -H, -W, "
                 "or a non-default -T: those require per-instruction host "
                 "observation\n");
         return 1;
@@ -37460,10 +37529,11 @@ external_md_work_ready:
         fflush(stdout);
 
         while (mach.cpu.cycles < steps) {
-            /* VMEngine drains its touch queue here, between app chunks.  The
-             * absolute schedule below can split the preceding chunk so this
-             * call lands exactly at the requested retired count. */
+            /* VMEngine drains its input queues here, between app chunks.  The
+             * absolute schedules below can split the preceding chunk so these
+             * calls land exactly at the requested retired count. */
             if (G.touch_n) touch_tap_step(mach.cpu.cycles);
+            if (G.button_n) button_press_run_api_step(mach.cpu.cycles);
 
             uint64_t boundary = steps;
             for (unsigned s = 0; s < nsnaps; s++) {
@@ -37477,6 +37547,11 @@ external_md_work_ready:
                 uint64_t touch_boundary =
                     touch_tap_next_run_api_boundary(mach.cpu.cycles);
                 if (touch_boundary < boundary) boundary = touch_boundary;
+            }
+            if (G.button_n) {
+                uint64_t button_boundary =
+                    button_press_next_run_api_boundary(mach.cpu.cycles);
+                if (button_boundary < boundary) boundary = button_boundary;
             }
 
             if (boundary == mach.cpu.cycles) {
