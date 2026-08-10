@@ -203,6 +203,15 @@ static bool vm_execution_telemetry_not_before(
            VM_EXEC_NOT_BEFORE(compact_pc_profile_system) &&
            VM_EXEC_NOT_BEFORE(compact_pc_profile_vfp) &&
            VM_EXEC_NOT_BEFORE(compact_pc_profile_thumb) &&
+           VM_EXEC_NOT_BEFORE(compact_pc_profile_thumb_decode) &&
+           VM_EXEC_NOT_BEFORE(compact_pc_profile_thumb_low_alu) &&
+           VM_EXEC_NOT_BEFORE(compact_pc_profile_thumb_alu_high) &&
+           VM_EXEC_NOT_BEFORE(compact_pc_profile_thumb_memory_form) &&
+           VM_EXEC_NOT_BEFORE(compact_pc_profile_thumb_misc) &&
+           VM_EXEC_NOT_BEFORE(compact_pc_profile_thumb_branch) &&
+           VM_EXEC_NOT_BEFORE(compact_pc_profile_thumb_memory_access) &&
+           VM_EXEC_NOT_BEFORE(compact_pc_profile_thumb_condition) &&
+           VM_EXEC_NOT_BEFORE(compact_pc_profile_a32_condition) &&
            VM_EXEC_NOT_BEFORE(compact_pc_profile_retire) &&
            VM_EXEC_NOT_BEFORE(compact_pc_profile_fallback) &&
            VM_EXEC_NOT_BEFORE(compact_pc_profile_exit) &&

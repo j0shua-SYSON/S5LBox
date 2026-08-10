@@ -4174,8 +4174,8 @@ def compact_raw_function() -> list[str]:
         # Thumb-1 is decoded directly from the same live fetch window. The
         # broad family below mirrors decode_thumb(): unsupported encodings
         # reach the exact fallback before architectural mutation.
-        ".globl A64S_CSYM(a64_compact_raw_profile_thumb)",
-        "A64S_CSYM(a64_compact_raw_profile_thumb):",
+        ".globl A64S_CSYM(a64_compact_raw_profile_thumb_decode)",
+        "A64S_CSYM(a64_compact_raw_profile_thumb_decode):",
         ".La64cr_thumb_decode:",
         "    ubfx w10, w9, #8, #8",
         "    cmp w10, #0x47",
@@ -4186,6 +4186,8 @@ def compact_raw_function() -> list[str]:
         "    add x15, x15, x14",
         "    br x15",
         "",
+        ".globl A64S_CSYM(a64_compact_raw_profile_thumb_low_alu)",
+        "A64S_CSYM(a64_compact_raw_profile_thumb_low_alu):",
         ".La64cr_thumb_top1:",
         "    tbnz w9, #11, .La64cr_thumb_add_sub",
         ".La64cr_thumb_shift_imm:",
@@ -4268,6 +4270,8 @@ def compact_raw_function() -> list[str]:
         "    mov w14, #2",
         "    b .La64cr_dp_flag_dispatch",
         "",
+        ".globl A64S_CSYM(a64_compact_raw_profile_thumb_alu_high)",
+        "A64S_CSYM(a64_compact_raw_profile_thumb_alu_high):",
         ".La64cr_thumb_top4:",
         "    tbnz w9, #11, .La64cr_thumb_pc_load",
         "    tbnz w9, #10, .La64cr_thumb_high",
@@ -4440,6 +4444,8 @@ def compact_raw_function() -> list[str]:
         "    mov w14, #13",
         "    b .La64cr_dp_plain_dispatch",
         "",
+        ".globl A64S_CSYM(a64_compact_raw_profile_thumb_memory_form)",
+        "A64S_CSYM(a64_compact_raw_profile_thumb_memory_form):",
         ".La64cr_thumb_pc_load:",
         "    add w10, w26, #4",
         "    bic w10, w10, #3",
@@ -4532,6 +4538,8 @@ def compact_raw_function() -> list[str]:
         "    add w26, w26, w28",
         "    b .La64cr_retire",
         "",
+        ".globl A64S_CSYM(a64_compact_raw_profile_thumb_misc)",
+        "A64S_CSYM(a64_compact_raw_profile_thumb_misc):",
         ".La64cr_thumb_address:",
         "    ubfx w13, w9, #8, #3",
         "    and w10, w9, #0xff",
@@ -4648,6 +4656,8 @@ def compact_raw_function() -> list[str]:
         "    orr w9, w10, w12",
         "    b .La64cr_block",
         "",
+        ".globl A64S_CSYM(a64_compact_raw_profile_thumb_branch)",
+        "A64S_CSYM(a64_compact_raw_profile_thumb_branch):",
         ".La64cr_thumb_bx:",
         "    ubfx w10, w9, #3, #4",
         "    tbnz w9, #7, .La64cr_thumb_bx_link_check",
@@ -4741,6 +4751,8 @@ def compact_raw_function() -> list[str]:
         # load flag w15. It validates alignment and the exact live witness
         # before touching guest state, returning one on success and zero on
         # refusal. x16/x17 and all resident architectural state stay pinned.
+        ".globl A64S_CSYM(a64_compact_raw_profile_thumb_memory_access)",
+        "A64S_CSYM(a64_compact_raw_profile_thumb_memory_access):",
         ".La64cr_thumb_memory_access:",
         "    cmp w14, #4",
         "    b.hi .La64cr_thumb_memory_fail",
@@ -4849,6 +4861,8 @@ def compact_raw_function() -> list[str]:
         "    mov w0, wzr",
         "    ret",
         "",
+        ".globl A64S_CSYM(a64_compact_raw_profile_thumb_condition)",
+        "A64S_CSYM(a64_compact_raw_profile_thumb_condition):",
         ".La64cr_thumb_cond_eq:",
         "    b.eq .La64cr_thumb_branch_taken",
         "    b .La64cr_condition_skip",
@@ -4892,6 +4906,10 @@ def compact_raw_function() -> list[str]:
         "    b.le .La64cr_thumb_branch_taken",
         "    b .La64cr_condition_skip",
         "",
+        # These shared condition stubs are reached by A32 instructions. They
+        # used to be folded into the broad Thumb-to-retire address bucket.
+        ".globl A64S_CSYM(a64_compact_raw_profile_a32_condition)",
+        "A64S_CSYM(a64_compact_raw_profile_a32_condition):",
         ".La64cr_cond_eq:",
         "    b.eq .La64cr_condition_pass",
         "    b .La64cr_condition_skip",

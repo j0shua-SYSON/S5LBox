@@ -449,6 +449,15 @@ static double VMDeviceAutomationSeconds(uint64_t firstNS, uint64_t lastNS) {
              "compact_pc_profile_block_control=%llu,"
              "compact_pc_profile_system=%llu,compact_pc_profile_vfp=%llu,"
              "compact_pc_profile_thumb=%llu,"
+             "compact_pc_profile_thumb_decode=%llu,"
+             "compact_pc_profile_thumb_low_alu=%llu,"
+             "compact_pc_profile_thumb_alu_high=%llu,"
+             "compact_pc_profile_thumb_memory_form=%llu,"
+             "compact_pc_profile_thumb_misc=%llu,"
+             "compact_pc_profile_thumb_branch=%llu,"
+             "compact_pc_profile_thumb_memory_access=%llu,"
+             "compact_pc_profile_thumb_condition=%llu,"
+             "compact_pc_profile_a32_condition=%llu,"
              "compact_pc_profile_retire=%llu,"
              "compact_pc_profile_fallback=%llu,"
              "compact_pc_profile_exit=%llu",
@@ -517,6 +526,24 @@ static double VMDeviceAutomationSeconds(uint64_t firstNS, uint64_t lastNS) {
             (unsigned long long)VM_EXEC_DELTA(compact_pc_profile_system),
             (unsigned long long)VM_EXEC_DELTA(compact_pc_profile_vfp),
             (unsigned long long)VM_EXEC_DELTA(compact_pc_profile_thumb),
+            (unsigned long long)VM_EXEC_DELTA(
+                compact_pc_profile_thumb_decode),
+            (unsigned long long)VM_EXEC_DELTA(
+                compact_pc_profile_thumb_low_alu),
+            (unsigned long long)VM_EXEC_DELTA(
+                compact_pc_profile_thumb_alu_high),
+            (unsigned long long)VM_EXEC_DELTA(
+                compact_pc_profile_thumb_memory_form),
+            (unsigned long long)VM_EXEC_DELTA(
+                compact_pc_profile_thumb_misc),
+            (unsigned long long)VM_EXEC_DELTA(
+                compact_pc_profile_thumb_branch),
+            (unsigned long long)VM_EXEC_DELTA(
+                compact_pc_profile_thumb_memory_access),
+            (unsigned long long)VM_EXEC_DELTA(
+                compact_pc_profile_thumb_condition),
+            (unsigned long long)VM_EXEC_DELTA(
+                compact_pc_profile_a32_condition),
             (unsigned long long)VM_EXEC_DELTA(compact_pc_profile_retire),
             (unsigned long long)VM_EXEC_DELTA(
                 compact_pc_profile_fallback),

@@ -2073,7 +2073,15 @@ extern const unsigned char a64_compact_raw_profile_memory[];
 extern const unsigned char a64_compact_raw_profile_block_control[];
 extern const unsigned char a64_compact_raw_profile_system[];
 extern const unsigned char a64_compact_raw_profile_vfp[];
-extern const unsigned char a64_compact_raw_profile_thumb[];
+extern const unsigned char a64_compact_raw_profile_thumb_decode[];
+extern const unsigned char a64_compact_raw_profile_thumb_low_alu[];
+extern const unsigned char a64_compact_raw_profile_thumb_alu_high[];
+extern const unsigned char a64_compact_raw_profile_thumb_memory_form[];
+extern const unsigned char a64_compact_raw_profile_thumb_misc[];
+extern const unsigned char a64_compact_raw_profile_thumb_branch[];
+extern const unsigned char a64_compact_raw_profile_thumb_memory_access[];
+extern const unsigned char a64_compact_raw_profile_thumb_condition[];
+extern const unsigned char a64_compact_raw_profile_a32_condition[];
 extern const unsigned char a64_compact_raw_profile_retire[];
 extern const unsigned char a64_compact_raw_profile_fallback[];
 extern const unsigned char a64_compact_raw_profile_exit[];
@@ -2086,7 +2094,15 @@ static const unsigned char *const g_compact_profile_boundary[] = {
     a64_compact_raw_profile_block_control,
     a64_compact_raw_profile_system,
     a64_compact_raw_profile_vfp,
-    a64_compact_raw_profile_thumb,
+    a64_compact_raw_profile_thumb_decode,
+    a64_compact_raw_profile_thumb_low_alu,
+    a64_compact_raw_profile_thumb_alu_high,
+    a64_compact_raw_profile_thumb_memory_form,
+    a64_compact_raw_profile_thumb_misc,
+    a64_compact_raw_profile_thumb_branch,
+    a64_compact_raw_profile_thumb_memory_access,
+    a64_compact_raw_profile_thumb_condition,
+    a64_compact_raw_profile_a32_condition,
     a64_compact_raw_profile_retire,
     a64_compact_raw_profile_fallback,
     a64_compact_raw_profile_exit,

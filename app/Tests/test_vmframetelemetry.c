@@ -90,6 +90,15 @@ static vm_execution_telemetry_observation_t execution_observation(
     value.compact_pc_profile_not_running = base + 64u;
     value.compact_pc_profile_state_failures = base + 65u;
     value.compact_pc_profile_target_races = base + 66u;
+    value.compact_pc_profile_thumb_decode = base + 67u;
+    value.compact_pc_profile_thumb_low_alu = base + 68u;
+    value.compact_pc_profile_thumb_alu_high = base + 69u;
+    value.compact_pc_profile_thumb_memory_form = base + 70u;
+    value.compact_pc_profile_thumb_misc = base + 71u;
+    value.compact_pc_profile_thumb_branch = base + 72u;
+    value.compact_pc_profile_thumb_memory_access = base + 73u;
+    value.compact_pc_profile_thumb_condition = base + 74u;
+    value.compact_pc_profile_a32_condition = base + 75u;
     for (unsigned i = 0u; i < VM_COMPACT_PC_PROFILE_HOT_COUNT; i++) {
         value.compact_pc_profile_outside_hot_pc[i] =
             UINT64_C(0x200000000) + base + (uint64_t)i * UINT64_C(0x100);
@@ -253,6 +262,16 @@ static void test_boundaries_and_sampled_changes(void) {
            state.execution_last.compact_pc_profile_system == 2047u &&
            state.execution_last.compact_pc_profile_vfp == 2048u &&
            state.execution_last.compact_pc_profile_thumb == 2049u &&
+           state.execution_last.compact_pc_profile_thumb_decode == 2067u &&
+           state.execution_last.compact_pc_profile_thumb_low_alu == 2068u &&
+           state.execution_last.compact_pc_profile_thumb_alu_high == 2069u &&
+           state.execution_last.compact_pc_profile_thumb_memory_form == 2070u &&
+           state.execution_last.compact_pc_profile_thumb_misc == 2071u &&
+           state.execution_last.compact_pc_profile_thumb_branch == 2072u &&
+           state.execution_last.compact_pc_profile_thumb_memory_access ==
+               2073u &&
+           state.execution_last.compact_pc_profile_thumb_condition == 2074u &&
+           state.execution_last.compact_pc_profile_a32_condition == 2075u &&
            state.execution_last.compact_pc_profile_retire == 2050u &&
            state.execution_last.compact_pc_profile_fallback == 2051u &&
            state.execution_last.compact_pc_profile_exit == 2052u &&

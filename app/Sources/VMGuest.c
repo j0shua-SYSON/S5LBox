@@ -307,8 +307,35 @@ static const uint8_t *vm_guest_record_display(const s5l8900_t *m,
                 S5L_STATIC_A64_COMPACT_PC_SYSTEM];
             execution.compact_pc_profile_vfp = pc_profile.region[
                 S5L_STATIC_A64_COMPACT_PC_VFP];
-            execution.compact_pc_profile_thumb = pc_profile.region[
-                S5L_STATIC_A64_COMPACT_PC_THUMB];
+            execution.compact_pc_profile_thumb_decode = pc_profile.region[
+                S5L_STATIC_A64_COMPACT_PC_THUMB_DECODE];
+            execution.compact_pc_profile_thumb_low_alu = pc_profile.region[
+                S5L_STATIC_A64_COMPACT_PC_THUMB_LOW_ALU];
+            execution.compact_pc_profile_thumb_alu_high = pc_profile.region[
+                S5L_STATIC_A64_COMPACT_PC_THUMB_ALU_HIGH];
+            execution.compact_pc_profile_thumb_memory_form = pc_profile.region[
+                S5L_STATIC_A64_COMPACT_PC_THUMB_MEMORY_FORM];
+            execution.compact_pc_profile_thumb_misc = pc_profile.region[
+                S5L_STATIC_A64_COMPACT_PC_THUMB_MISC];
+            execution.compact_pc_profile_thumb_branch = pc_profile.region[
+                S5L_STATIC_A64_COMPACT_PC_THUMB_BRANCH];
+            execution.compact_pc_profile_thumb_memory_access =
+                pc_profile.region[
+                    S5L_STATIC_A64_COMPACT_PC_THUMB_MEMORY_ACCESS];
+            execution.compact_pc_profile_thumb_condition = pc_profile.region[
+                S5L_STATIC_A64_COMPACT_PC_THUMB_CONDITION];
+            execution.compact_pc_profile_a32_condition = pc_profile.region[
+                S5L_STATIC_A64_COMPACT_PC_A32_CONDITION];
+            execution.compact_pc_profile_thumb =
+                execution.compact_pc_profile_thumb_decode +
+                execution.compact_pc_profile_thumb_low_alu +
+                execution.compact_pc_profile_thumb_alu_high +
+                execution.compact_pc_profile_thumb_memory_form +
+                execution.compact_pc_profile_thumb_misc +
+                execution.compact_pc_profile_thumb_branch +
+                execution.compact_pc_profile_thumb_memory_access +
+                execution.compact_pc_profile_thumb_condition +
+                execution.compact_pc_profile_a32_condition;
             execution.compact_pc_profile_retire = pc_profile.region[
                 S5L_STATIC_A64_COMPACT_PC_RETIRE];
             execution.compact_pc_profile_fallback = pc_profile.region[

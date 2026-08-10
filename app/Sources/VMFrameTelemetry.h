@@ -128,7 +128,18 @@ typedef struct {
     uint64_t compact_pc_profile_block_control;
     uint64_t compact_pc_profile_system;
     uint64_t compact_pc_profile_vfp;
+    /* Compatibility aggregate for the old Thumb-to-retire address range.
+     * The detailed counters below expose its A32-condition contamination. */
     uint64_t compact_pc_profile_thumb;
+    uint64_t compact_pc_profile_thumb_decode;
+    uint64_t compact_pc_profile_thumb_low_alu;
+    uint64_t compact_pc_profile_thumb_alu_high;
+    uint64_t compact_pc_profile_thumb_memory_form;
+    uint64_t compact_pc_profile_thumb_misc;
+    uint64_t compact_pc_profile_thumb_branch;
+    uint64_t compact_pc_profile_thumb_memory_access;
+    uint64_t compact_pc_profile_thumb_condition;
+    uint64_t compact_pc_profile_a32_condition;
     uint64_t compact_pc_profile_retire;
     uint64_t compact_pc_profile_fallback;
     uint64_t compact_pc_profile_exit;
