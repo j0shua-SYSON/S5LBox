@@ -2367,6 +2367,12 @@ bool a64_compact_raw_run_code_window_resident_cached(
             context.native_retired > UINT_MAX ||
             context.fallback_retired > UINT_MAX)
             return false;
+        /* Every cached switch replaces a successful refill to a different
+         * FETCH block. With the MMU on, that exact refill consumed an already
+         * proved TLB entry and incremented this serialized diagnostic counter.
+         * Preserve its meaning even though native text avoided the C call. */
+        if ((cpu->cp15.sctlr & ARM_SCTLR_M) != 0u)
+            cpu->tlb_hits += context.window_cache_hits;
         *completed = result;
         *native_completed = (unsigned)context.native_retired;
         *fallback_completed = (unsigned)context.fallback_retired;
