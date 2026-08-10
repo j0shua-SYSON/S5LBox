@@ -746,10 +746,14 @@ static bool mbx_stage_premultiplied_copy(s5l_mbx_t *m,
 
     /* _pack2DCtxBlitCopy at 0x30e1c3c4 inserts the two extra words only when
      * ctx+0x35 enables blending. The retained clock/date packets use the
-     * 0x095 factors at global alpha 255. r395 exposed QuartzCore's other
-     * simple branch from RenderMBX2D::set_tex_blend_mode (0x3123a9c8): fixed
-     * 0x0d5 factors plus a variable byte at bits 12..19. Its captured source
-     * is wholly opaque, so that branch is staged only as global-alpha
+     * 0x095 factors at global alpha 255. QuartzCore's other simple branch in
+     * RenderMBX2D::set_tex_blend_mode (0x3123a9c8) is selected for a texture
+     * it classifies as opaque and passes fixed 0x0d5 factors plus a variable
+     * byte at bits 12..19. An earlier retained source happened to store 0xff
+     * in every unused alpha byte. The Safari tab transition instead retains a
+     * 320x60 source whose fourth bytes are non-alpha data, proving that the
+     * branch is opaque XRGB semantics rather than a BGRA alpha precondition.
+     * Force that ignored byte opaque, then apply the measured global-alpha
      * modulation followed by premultiplied source-over. */
     bool premultiplied_over = w[6] == MBX_2D_BLEND_EQUATION;
     bool opaque_global =
@@ -833,14 +837,37 @@ static bool mbx_stage_premultiplied_copy(s5l_mbx_t *m,
     if (ok)
         ok = mbx_2d_stage_destination(m, bus, w[1], dst_x, dst_y,
                                       width, height, pixels, batch, why);
+    if (ok && opaque_global && mbx_trace_enabled()) {
+        uint32_t nonopaque = 0u;
+        uint32_t premultiplication_violations = 0u;
+        uint32_t first_nonopaque = 0u;
+        uint32_t first_nonopaque_pixel = 0u;
+        for (uint32_t i = 0; i < total; i += 4u) {
+            uint32_t src = mbx_load_le32(source + i);
+            uint32_t alpha = src >> 24;
+            if (alpha == 0xffu) continue;
+            if (nonopaque == 0u) {
+                first_nonopaque = src;
+                first_nonopaque_pixel = i / 4u;
+            }
+            nonopaque++;
+            if ((src & 0xffu) > alpha || ((src >> 8) & 0xffu) > alpha ||
+                ((src >> 16) & 0xffu) > alpha)
+                premultiplication_violations++;
+        }
+        fprintf(stderr,
+                "MBX2D global-alpha source ring+0x%04x equation=%08x "
+                "source=%08x target=%08x src=%u,%u dst=%u,%u size=%ux%u "
+                "stride=%u nonopaque=%u/%u premul-violations=%u "
+                "first[%u]=%08x\n",
+                packet_off - S5L_MBX_2D_RING_BASE, w[6], w[3], w[1],
+                src_x, src_y, dst_x, dst_y, width, height, source_stride,
+                nonopaque, total / 4u, premultiplication_violations,
+                first_nonopaque_pixel, first_nonopaque);
+    }
     for (uint32_t i = 0; i < total && ok; i += 4u) {
         uint32_t src = mbx_load_le32(source + i);
         uint32_t alpha = src >> 24;
-        if (opaque_global && alpha != 0xffu) {
-            if (why) *why = "global-alpha 2D source is not opaque BGRA8";
-            ok = false;
-            break;
-        }
         if (!opaque_global &&
             ((src & 0xffu) > alpha || ((src >> 8) & 0xffu) > alpha ||
              ((src >> 16) & 0xffu) > alpha)) {
@@ -848,9 +875,11 @@ static bool mbx_stage_premultiplied_copy(s5l_mbx_t *m,
             ok = false;
             break;
         }
-        if (opaque_global)
+        if (opaque_global) {
+            src |= 0xff000000u;
             src = mbx_modulate_vertex_alpha(
                 src, (w[6] & MBX_2D_GLOBAL_ALPHA_MASK) >> 12);
+        }
         uint32_t blended = mbx_source_over_clamped(
             mbx_load_le32(pixels + i), src);
         pixels[i] = (uint8_t)blended;

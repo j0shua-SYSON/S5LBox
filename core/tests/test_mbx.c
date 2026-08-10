@@ -938,18 +938,36 @@ static void test_opaque_global_alpha_2d_form(void) {
     m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x400u);
 
     uint32_t first = target + 3u * 0x500u + 2u * 4u;
+    const uint32_t ignored_alpha_source = 0x00d43210u;
+    const uint32_t ignored_alpha_destination = 0x89abcdefu;
+    const uint32_t ignored_alpha_expected = test_over(
+        ignored_alpha_destination,
+        test_modulate_vertex_alpha(ignored_alpha_source | 0xff000000u, 0xf8u));
     test_gpu_write32(&m, first, 0x89abcdefu);
-    test_gpu_write32(&m, source + 4u, 0x80804020u);
+    test_gpu_write32(&m, source + 4u, ignored_alpha_source);
     write_packet(&m, RING + 0x88u, packet, 18u);
     m.bus.write32(m.bus.ctx, MBX_BASE + RING, 0xf0000000u);
-    CHECK(test_gpu_read32(&m, first) == 0x89abcdefu,
-          "non-opaque global-alpha source changed the destination");
-    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
-          "non-opaque global-alpha source raised completion");
+    CHECK(test_gpu_read32(&m, first) == ignored_alpha_expected,
+          "opaque-global BGRX source rendered the wrong pixel");
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0x400u,
+          "opaque-global BGRX source did not complete");
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x400u);
 
+    test_gpu_write32(&m, first, ignored_alpha_destination);
+    test_gpu_write32(&m, source + 4u,
+                     ignored_alpha_source | 0x80000000u);
+    write_packet(&m, RING + 0xd0u, packet, 18u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + RING, 0xf0000000u);
+    CHECK(test_gpu_read32(&m, first) == ignored_alpha_expected,
+          "opaque-global output depended on the ignored source byte");
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0x400u,
+          "opaque-global ignored-byte variant did not complete");
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x400u);
+
+    test_gpu_write32(&m, first, ignored_alpha_destination);
     test_gpu_write32(&m, source + 4u, source_pixels[0]);
     packet[6] ^= 0x00100000u;
-    write_packet(&m, RING + 0xd0u, packet, 18u);
+    write_packet(&m, RING + 0x118u, packet, 18u);
     m.bus.write32(m.bus.ctx, MBX_BASE + RING, 0xf0000000u);
     CHECK(test_gpu_read32(&m, first) == 0x89abcdefu,
           "unknown global-alpha factors changed the destination");
