@@ -1889,27 +1889,131 @@ static void test_arm_media_reverse_edges(void) {
           "failed-condition REV mutated state");
 }
 
-static void test_unimplemented_media_still_traps(void) {
-    /*
-     * This guard used to name SEL. SEL is implemented now -- see
-     * test_pack_halfword_and_select -- so the guard moves to encodings that are
-     * still absent, because its point is not any particular instruction: it is
-     * that media space must be REFUSED by name rather than falling through into
-     * the load/store decode and being executed as something else.
-     *
-     * SSAT and USAT are the natural successors: same 011 space, same bit 4, and
-     * the decoder's catch-all still lists them.
-     */
-    struct { uint32_t insn; const char *what; } v[] = {
-        { 0xe6a01011u, "SSAT r1, #1, r1, LSL #0" },
-        { 0xe6e01011u, "USAT r1, #0, r1, LSL #0" },
+static void test_arm_media_saturate(void) {
+#define SAT(cond, uns, field, rd, shift, asr, rn) \
+    (((cond) << 28) | 0x06a00010u | ((uns) << 22) | ((field) << 16) | \
+     ((rd) << 12) | ((shift) << 7) | ((asr) << 6) | (rn))
+#define SAT16(cond, uns, field, rd, rn) \
+    (((cond) << 28) | 0x06a00f30u | ((uns) << 22) | ((field) << 16) | \
+     ((rd) << 12) | (rn))
+    arm_cpu_t c;
+    arm_status_t st;
+
+    /* Both observed UI stops used this exact word. ASR #14 produces 256 here,
+     * which USAT #8 must clamp to 255 and report through sticky Q. */
+    const uint32_t blocker = 0xe6e83756u;       /* USAT r3,#8,r6,ASR #14 */
+    memset(g_ram, 0, sizeof g_ram); m_w32(NULL, 0, blocker);
+    arm_reset(&c, &g_bus);
+    c.cpsr = ARM_MODE_SYS | ARM_CPSR_N | ARM_CPSR_Z | ARM_CPSR_C |
+             ARM_CPSR_V | 0x000a0000u;
+    c.r[6] = 0x00400000u;
+    uint32_t preserved = c.cpsr;
+    st = arm_step(&c);
+    CHECK(st == ARM_OK && c.r[3] == 0xffu && c.r[15] == 4u,
+          "real USAT blocker status=%d r3=%08x pc=%08x",
+          (int)st, c.r[3], c.r[15]);
+    CHECK(c.cpsr == (preserved | ARM_CPSR_Q),
+          "real USAT blocker flags=%08x expect=%08x",
+          c.cpsr, preserved | ARM_CPSR_Q);
+
+    static const struct {
+        uint32_t insn, source, expect;
+        bool expect_q;
+        const char *what;
+    } scalar[] = {
+        { SAT(0xeu,1u,8u,0u,0u,0u,1u), 0xffffffffu, 0u, true,
+          "USAT clamps a negative input to zero" },
+        { SAT(0xeu,1u,8u,0u,0u,0u,1u), 0x000000ffu, 0x000000ffu, false,
+          "USAT keeps its upper boundary" },
+        { SAT(0xeu,1u,8u,0u,0u,0u,1u), 0x00000100u, 0x000000ffu, true,
+          "USAT clamps above its upper boundary" },
+        { SAT(0xeu,1u,0u,0u,0u,0u,1u), 1u, 0u, true,
+          "USAT zero-bit range contains only zero" },
+        { SAT(0xeu,0u,7u,0u,0u,0u,1u), 0xffffff7fu, 0xffffff80u, true,
+          "SSAT clamps below minus 128" },
+        { SAT(0xeu,0u,7u,0u,0u,0u,1u), 0xffffff80u, 0xffffff80u, false,
+          "SSAT keeps its negative boundary" },
+        { SAT(0xeu,0u,7u,0u,0u,0u,1u), 0x00000080u, 0x0000007fu, true,
+          "SSAT clamps above 127" },
+        { SAT(0xeu,0u,31u,0u,0u,0u,1u), 0x80000000u, 0x80000000u, false,
+          "SSAT 32-bit range keeps INT_MIN" },
+        { SAT(0xeu,1u,8u,0u,0u,1u,1u), 0x80000000u, 0u, true,
+          "USAT ASR immediate zero means shift by 32" },
+        { SAT(0xeu,1u,8u,0u,31u,0u,1u), 1u, 0u, true,
+          "USAT saturates the signed result after LSL" },
     };
-    for (unsigned i = 0; i < sizeof v / sizeof v[0]; i++) {
-        arm_cpu_t c;
-        arm_status_t st = run_status(&c, &v[i].insn, 1, 1);
-        CHECK(st == ARM_UNDEFINED, "%s: status=%d expect ARM_UNDEFINED",
-              v[i].what, (int)st);
+    for (size_t i = 0; i < sizeof scalar / sizeof scalar[0]; i++) {
+        memset(g_ram, 0, sizeof g_ram); m_w32(NULL, 0, scalar[i].insn);
+        arm_reset(&c, &g_bus);
+        c.cpsr = ARM_MODE_SYS | ARM_CPSR_N | ARM_CPSR_Z | ARM_CPSR_C |
+                 ARM_CPSR_V | 0x00050000u;
+        preserved = c.cpsr;
+        c.r[1] = scalar[i].source;
+        st = arm_step(&c);
+        CHECK(st == ARM_OK && c.r[0] == scalar[i].expect,
+              "%s status=%d got=%08x expect=%08x", scalar[i].what,
+              (int)st, c.r[0], scalar[i].expect);
+        CHECK(c.cpsr == (preserved | (scalar[i].expect_q ? ARM_CPSR_Q : 0u)),
+              "%s flags=%08x", scalar[i].what, c.cpsr);
     }
+
+    /* Q is sticky and Rd may alias Rn. */
+    uint32_t alias = SAT(0xeu,1u,8u,1u,0u,0u,1u);
+    memset(g_ram, 0, sizeof g_ram); m_w32(NULL, 0, alias);
+    arm_reset(&c, &g_bus); c.cpsr |= ARM_CPSR_Q | ARM_CPSR_Z;
+    c.r[1] = 42u; preserved = c.cpsr;
+    CHECK(arm_step(&c) == ARM_OK && c.r[1] == 42u && c.cpsr == preserved,
+          "non-saturating aliased USAT changed value or sticky flags");
+
+    static const struct {
+        uint32_t insn, source, expect;
+        bool expect_q;
+        const char *what;
+    } lanes[] = {
+        { SAT16(0xeu,0u,7u,0u,1u), 0xff7f0080u, 0xff80007fu, true,
+          "SSAT16 clamps each signed half independently" },
+        { SAT16(0xeu,0u,7u,0u,1u), 0x007fffffu, 0x007fffffu, false,
+          "SSAT16 keeps in-range signed halves" },
+        { SAT16(0xeu,1u,8u,0u,1u), 0xffff012cu, 0x000000ffu, true,
+          "USAT16 clamps negative and oversized halves" },
+        { SAT16(0xeu,1u,0u,0u,1u), 0u, 0u, false,
+          "USAT16 zero-bit range keeps zero" },
+    };
+    for (size_t i = 0; i < sizeof lanes / sizeof lanes[0]; i++) {
+        memset(g_ram, 0, sizeof g_ram); m_w32(NULL, 0, lanes[i].insn);
+        arm_reset(&c, &g_bus);
+        c.cpsr = ARM_MODE_SYS | ARM_CPSR_N | ARM_CPSR_C | 0x000a0000u;
+        preserved = c.cpsr; c.r[1] = lanes[i].source;
+        st = arm_step(&c);
+        CHECK(st == ARM_OK && c.r[0] == lanes[i].expect,
+              "%s status=%d got=%08x expect=%08x", lanes[i].what,
+              (int)st, c.r[0], lanes[i].expect);
+        CHECK(c.cpsr == (preserved | (lanes[i].expect_q ? ARM_CPSR_Q : 0u)),
+              "%s flags=%08x", lanes[i].what, c.cpsr);
+    }
+
+    /* Failed conditions are ordinary no-ops, and PC is not a legal source or
+     * destination for any of the four saturation forms. */
+    uint32_t eq = SAT(0u,1u,8u,0u,0u,0u,1u);
+    memset(g_ram, 0, sizeof g_ram); m_w32(NULL, 0, eq);
+    arm_reset(&c, &g_bus); c.cpsr &= ~ARM_CPSR_Z;
+    c.r[0] = 0xfeedfaceu; c.r[1] = 0x100u; preserved = c.cpsr;
+    CHECK(arm_step(&c) == ARM_OK && c.r[0] == 0xfeedfaceu &&
+          c.r[15] == 4u && c.cpsr == preserved,
+          "failed-condition USAT mutated architectural state");
+
+    uint32_t bad[] = {
+        SAT(0xeu,0u,7u,15u,0u,0u,1u),
+        SAT(0xeu,1u,8u,0u,0u,0u,15u),
+        SAT16(0xeu,0u,7u,15u,1u),
+        SAT16(0xeu,1u,8u,0u,15u),
+    };
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++)
+        CHECK(run_status(&c, &bad[i], 1, 1) == ARM_UNDEFINED,
+              "saturate encoding %08x accepted PC operand", bad[i]);
+
+#undef SAT16
+#undef SAT
 }
 
 static void test_apx_makes_mapping_read_only(void) {
@@ -3695,7 +3799,6 @@ static void test_non_vfp_undefined_still_halts(void) {
      * trapped deliberately and we want to see where. */
     struct { uint32_t insn; const char *what; } v[] = {
         { 0xe7ffdefeu, "BKPT (0xE7FFDEFE)"           },
-        { 0xe6a01011u, "SSAT (unimplemented media)" },
         { 0xf1010200u, "SETEND BE"                   },
         { 0xee000d10u, "MCR p13 (a coprocessor we do not model)" },
     };
@@ -5661,7 +5764,7 @@ int main(void) {
     test_arm_media_extend_and_reverse();
     test_arm_media_pair_extend();
     test_arm_media_reverse_edges();
-    test_unimplemented_media_still_traps();
+    test_arm_media_saturate();
     test_apx_makes_mapping_read_only();
     test_xp0_ignores_extended_apx_bits();
     test_xp0_large_and_small_ap_subpages();

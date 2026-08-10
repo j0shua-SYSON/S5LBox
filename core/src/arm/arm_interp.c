@@ -981,6 +981,26 @@ static inline uint32_t sign_extend16(uint32_t v) {
     return (v ^ 0x8000u) - 0x8000u;
 }
 
+/* Clamp an already shifted signed value to an architectural saturation
+ * range. `bits` is 1..32 for SSAT and 0..31 for USAT. The caller owns the
+ * sticky Q flag, so these helpers only ever set *saturated, never clear it. */
+static inline uint32_t signed_saturate(int64_t value, unsigned bits,
+                                       bool *saturated) {
+    int64_t limit = INT64_C(1) << (bits - 1u);
+    int64_t lo = -limit, hi = limit - 1;
+    if (value < lo) { *saturated = true; return (uint32_t)lo; }
+    if (value > hi) { *saturated = true; return (uint32_t)hi; }
+    return (uint32_t)value;
+}
+
+static inline uint32_t unsigned_saturate(int64_t value, unsigned bits,
+                                         bool *saturated) {
+    int64_t hi = bits ? ((INT64_C(1) << bits) - 1) : 0;
+    if (value < 0)  { *saturated = true; return 0u; }
+    if (value > hi) { *saturated = true; return (uint32_t)hi; }
+    return (uint32_t)value;
+}
+
 /* Barrel shifter. Returns the shifted value and, via *carry, the shifter
  * carry-out (seeded with the current C flag for the "unaffected" cases). */
 static uint32_t barrel_shift(uint32_t val, unsigned type, unsigned amount,
@@ -2100,7 +2120,74 @@ static arm_status_t exec_media(arm_cpu_t *c, uint32_t pc, uint32_t insn) {
         return ARM_OK;
     }
 
-    return ARM_UNDEFINED;                  /* USAT, SSAT, ... */
+    /*
+     * SSAT / USAT -- signed input clamped to a signed or unsigned range.
+     *
+     *   cccc 0110 1u1 sssss dddd iiiii t01 nnnn
+     *
+     * Safari's pages view and SpringBoard's Spotlight transition independently
+     * stopped at 0x3393d544 and 0x33932e54 on the same instruction word,
+     * `USAT r3, #8, r6, ASR #14` (0xe6e83756). This was not a scheduler pause:
+     * the media decoder deliberately reached its unsupported catch-all below.
+     *
+     * The source is shifted as a 32-bit value before saturation. For ASR an
+     * imm5 of zero means #32; barrel_shift already implements that distinction.
+     * SSAT encodes widths 1..32 as field+1, while USAT encodes 0..31 directly.
+     * Saturation sets Q and a non-saturating operation leaves the sticky flag
+     * alone. NZCV and GE are never changed.
+     */
+    if ((insn & 0x0fa00030u) == 0x06a00010u) {
+        bool uns = ((insn >> 22) & 1u) != 0u;
+        unsigned sat_field = (insn >> 16) & 0x1fu;
+        unsigned rd = (insn >> 12) & 0xfu;
+        unsigned imm5 = (insn >> 7) & 0x1fu;
+        bool asr = ((insn >> 6) & 1u) != 0u;
+        unsigned rn = insn & 0xfu;
+        bool ignored_carry = false, saturated = false;
+        uint32_t shifted;
+        int64_t value;
+
+        if (rd == 15u || rn == 15u) return ARM_UNDEFINED;
+        shifted = barrel_shift(reg_read(c, pc, rn), asr ? 2u : 0u,
+                               imm5, false, &ignored_carry);
+        value = (shifted & UINT32_C(0x80000000))
+              ? (int64_t)shifted - INT64_C(0x100000000)
+              : (int64_t)shifted;
+        c->r[rd] = uns
+            ? unsigned_saturate(value, sat_field, &saturated)
+            : signed_saturate(value, sat_field + 1u, &saturated);
+        if (saturated) c->cpsr |= ARM_CPSR_Q;
+        return ARM_OK;
+    }
+
+    /* SSAT16 / USAT16 apply the same rules independently to the two signed
+     * halfwords in Rn. Their width fields are 1..16 (signed, field+1) and
+     * 0..15 (unsigned, direct). Either lane saturating sets the shared Q bit. */
+    if ((insn & 0x0fb00ff0u) == 0x06a00f30u) {
+        bool uns = ((insn >> 22) & 1u) != 0u;
+        unsigned sat_field = (insn >> 16) & 0xfu;
+        unsigned rd = (insn >> 12) & 0xfu;
+        unsigned rn = insn & 0xfu;
+        bool saturated = false;
+        uint32_t source, result = 0u;
+
+        if (rd == 15u || rn == 15u) return ARM_UNDEFINED;
+        source = reg_read(c, pc, rn);
+        for (unsigned lane = 0; lane < 2u; lane++) {
+            uint32_t raw = (source >> (lane * 16u)) & 0xffffu;
+            int64_t value = (raw & 0x8000u)
+                ? (int64_t)raw - INT64_C(0x10000) : (int64_t)raw;
+            uint32_t clamped = uns
+                ? unsigned_saturate(value, sat_field, &saturated)
+                : signed_saturate(value, sat_field + 1u, &saturated);
+            result |= (clamped & 0xffffu) << (lane * 16u);
+        }
+        c->r[rd] = result;
+        if (saturated) c->cpsr |= ARM_CPSR_Q;
+        return ARM_OK;
+    }
+
+    return ARM_UNDEFINED;                  /* remaining unimplemented media */
 }
 
 static arm_status_t exec_multiply(arm_cpu_t *c, uint32_t pc, uint32_t insn) {
