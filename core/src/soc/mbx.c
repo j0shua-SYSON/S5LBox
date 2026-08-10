@@ -2724,8 +2724,14 @@ static bool mbx_execute_textured_sprite(s5l_mbx_t *m,
 
     uint32_t source_control = quad[2] & ~MBX_3D_ADDRESS_MASK;
     bool half_texel_layout = (source_control & 0x80000000u) != 0u;
-    if (!half_texel_layout && !modulated_sampler) {
-        if (why) *why = "full-extent sprite layout has an unmeasured sampler";
+    /* Texture filtering and corner order are independent producer choices.
+     * Direct packets retain row-major p00,p10,p01,p11 corners in both the
+     * half-texel 0x8e form and Spotlight's measured full-extent 0x0e form.
+     * The older modulated 0x0e producer uses the alternate ordering below.
+     * No full-extent packet has established alternate-sampler semantics. */
+    bool row_major_corners = half_texel_layout || direct_sampler;
+    if (!half_texel_layout && scaled_sampler) {
+        if (why) *why = "full-extent alternate sampler is unmeasured";
         return false;
     }
     const float epsilon = 0.0009765625f;
@@ -2739,15 +2745,15 @@ static bool mbx_execute_textured_sprite(s5l_mbx_t *m,
             return false;
         }
     }
-    bool axis_aligned = half_texel_layout
+    bool axis_aligned = row_major_corners
         ? quad[8] == quad[12] && quad[10] == quad[14] &&
           quad[9] == quad[11] && quad[13] == quad[15]
         : quad[8] == quad[10] && quad[12] == quad[14] &&
           quad[9] == quad[13] && quad[11] == quad[15];
-    unsigned p00 = half_texel_layout ? 0u : 1u;
-    unsigned p10 = half_texel_layout ? 1u : 3u;
-    unsigned p01 = half_texel_layout ? 2u : 0u;
-    unsigned p11 = half_texel_layout ? 3u : 2u;
+    unsigned p00 = row_major_corners ? 0u : 1u;
+    unsigned p10 = row_major_corners ? 1u : 3u;
+    unsigned p01 = row_major_corners ? 2u : 0u;
+    unsigned p11 = row_major_corners ? 3u : 2u;
     float x0 = destination_x[p00], y0 = destination_y[p00];
     float x1 = destination_x[p11], y1 = destination_y[p11];
     struct mbx_affine_transform affine = {0};
@@ -2854,10 +2860,10 @@ static bool mbx_execute_textured_sprite(s5l_mbx_t *m,
     uint32_t header_texture_width = 8u << header_width_field;
     uint32_t header_texture_height = 8u << header_height_field;
     uint32_t u0_word = quad[25];
-    uint32_t v0_word = half_texel_layout ? quad[26] : quad[31];
-    uint32_t u1_word = half_texel_layout ? quad[30] : quad[35];
-    uint32_t v1_word = half_texel_layout ? quad[36] : quad[26];
-    bool uv_rectangle = half_texel_layout
+    uint32_t v0_word = row_major_corners ? quad[26] : quad[31];
+    uint32_t u1_word = row_major_corners ? quad[30] : quad[35];
+    uint32_t v1_word = row_major_corners ? quad[36] : quad[26];
+    bool uv_rectangle = row_major_corners
         ? quad[35] == u0_word && quad[31] == v0_word &&
           quad[40] == u1_word && quad[41] == v1_word
         : quad[30] == u0_word && quad[41] == v0_word &&

@@ -2990,6 +2990,27 @@ static void test_captured_status_form(const struct mbx_test_status_form *form) {
                   form->name);
             test_gpu_write32(&m, first_v_word, first_v);
             test_gpu_write32(&m, second_v_word, second_v);
+
+            if (form->quad[3] == 0xa6884710u) {
+                /* Corner order does not establish sampling semantics. Keep
+                 * the direct packet's coherent geometry and allocation but
+                 * switch to the alternate sampler pair; no full-extent form
+                 * has measured that operation, so it must remain atomic. */
+                uint32_t sampler_word = object + 0x1f0u + 3u * 4u;
+                uint32_t companion_word = object + 0x1f0u + 6u * 4u;
+                test_gpu_write32(&m, first, 0x89abcdefu);
+                test_gpu_write32(&m, sampler_word, 0xd6887610u);
+                test_gpu_write32(&m, companion_word, 0xa3104620u);
+                m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
+                CHECK(test_gpu_read32(&m, first) == 0x89abcdefu,
+                      "%s unmeasured full-extent sampler changed the destination",
+                      form->name);
+                CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
+                      "%s unmeasured full-extent sampler raised completion",
+                      form->name);
+                test_gpu_write32(&m, sampler_word, form->quad[3]);
+                test_gpu_write32(&m, companion_word, form->quad[6]);
+            }
         }
 
         /* A different split pitch can be a valid padded allocation when it
@@ -3341,6 +3362,44 @@ spotlight_home_narrow_strip_resample_form = {
         0x3e890000u, 0x3cd00000u, 0xed000000u, 0x3e880000u,
         0x3f780000u, 0x3afffffbu, 0x3d640000u, 0xed000000u,
         0x3e900001u, 0x3f780000u, 0x3e890000u, 0x3d640000u,
+    },
+};
+
+/* SpringBoard's Spotlight entry retained a direct-sampler, full-extent
+ * texture packet. The direct sampler keeps the filtered producer's row-major
+ * corner order even though its 0x0e texture state is unfiltered. Its 86x13
+ * quad begins four pixels left of the surface, and the boundary clips the
+ * resulting strict 1:1 crop to source columns 4..85. */
+static const struct mbx_test_status_form
+spotlight_entry_unfiltered_direct_crop_form = {
+    .name = "Spotlight entry unfiltered direct crop",
+    .xclip = 0x00580000u, .yclip = 0x00d000b0u,
+    .target = 0x00998000u,
+    .semantic_sprite = true,
+    .boundary_override = true,
+    .tile_x0 = 0u, .tile_x1 = 0x0au,
+    .tile_y0 = 0x0bu, .tile_y1 = 0x0cu,
+    .left = 0u, .top = 182u, .width = 82u, .height = 13u,
+    .source = 0x00965080u, .source_x0 = 4u,
+    .source_stride = 0x160u, .source_control = 0x0e140000u,
+    .source_width = 86u, .source_height = 13u,
+    .expected_covered_pixels = 1066u,
+    .boundary = {
+        0x00000000u, 0x43430000u, 0x00000000u, 0x43360000u,
+        0x42a40000u, 0x43430000u, 0x42a40000u, 0x43360000u,
+    },
+    .quad = {
+        0xe0000000u, 0xa4118001u, 0x0e152ca1u, 0xa6884710u,
+        0xa7718000u, 0x0e513300u, 0xae504ea0u, 0x22250e80u,
+        0xc0800000u, 0x43360000u, 0x42a40000u, 0x43360000u,
+        0xc0800000u, 0x43430000u, 0x42a40000u, 0x43430000u,
+        0u, 0u, 0u, 0u,
+        0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+        0xff000000u, 0x00000000u, 0x00000000u, 0xbb800000u,
+        0x3e360000u, 0xff000000u, 0x3f2c0000u, 0x00000000u,
+        0x3da40000u, 0x3e360000u, 0xff000000u, 0x00000000u,
+        0x3f500000u, 0xbb800000u, 0x3e430000u, 0xff000000u,
+        0x3f2c0000u, 0x3f500000u, 0x3da40000u, 0x3e430000u,
     },
 };
 
@@ -4384,6 +4443,7 @@ static void test_later_tiled_status_sprites(void) {
     test_captured_status_form(&safari_tabs_column_resample_form);
     test_captured_status_form(&safari_done_column_resample_form);
     test_captured_status_form(&spotlight_home_narrow_strip_resample_form);
+    test_captured_status_form(&spotlight_entry_unfiltered_direct_crop_form);
     test_captured_status_form(&zero_coverage_status_form);
     struct mbx_test_status_form relocated_zero = zero_coverage_status_form;
     relocated_zero.name = "relocated right-edge zero-coverage sprite";
