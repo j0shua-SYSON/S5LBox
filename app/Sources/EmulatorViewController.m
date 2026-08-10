@@ -103,6 +103,8 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
 - (void)settingsDidChange:(NSNotification *)notification;
 - (void)blockSystemPopGestures;
 - (void)restoreSystemPopGestures;
+- (void)beginCheckpointBackgroundTask;
+- (void)endCheckpointBackgroundTask;
 - (void)setCheckpointSaving:(BOOL)saving;
 - (void)setRestarting:(BOOL)restarting;
 - (void)applyPauseState;
@@ -177,6 +179,7 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
     BOOL               _inBackground;
     BOOL               _savingCheckpoint;
     BOOL               _restarting;
+    UIBackgroundTaskIdentifier _checkpointBackgroundTask;
 
     /* What the toolbar is currently showing, so it is only rebuilt when the
      * engine's answer changes rather than four times a second. */
@@ -252,6 +255,7 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
 
 - (void)viewDidLoad {
     [super viewDidLoad];
+    _checkpointBackgroundTask = UIBackgroundTaskInvalid;
     self.view.backgroundColor = [UIColor blackColor];
 
     /* Machines benefits from a large browsing title; the running guest does
@@ -475,10 +479,44 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
 
 - (void)dealloc {
     [self restoreSystemPopGestures];
+    [self endCheckpointBackgroundTask];
     [[NSNotificationCenter defaultCenter] removeObserver:self];
     [_link invalidate];
     [_engine stop];
     free(_frame);
+}
+
+/*
+ * Saving writes and fsyncs the complete machine state before it publishes the
+ * one-shot restore marker. That transaction is deliberately atomic, but it is
+ * large enough that an immediate screen lock can otherwise suspend the app in
+ * the middle and leave the user staring at "Saving" until the next foreground
+ * transition. Ask iOS for its bounded background grace period. This is not a
+ * promise of unlimited execution time: expiration merely ends the assertion;
+ * the partial-file/marker protocol remains the authority on whether a save is
+ * valid.
+ */
+- (void)beginCheckpointBackgroundTask {
+    if (_checkpointBackgroundTask != UIBackgroundTaskInvalid) return;
+
+    UIApplication *application = [UIApplication sharedApplication];
+    __weak EmulatorViewController *weakSelf = self;
+    UIBackgroundTaskIdentifier task = [application
+        beginBackgroundTaskWithName:@"Saving machine"
+                  expirationHandler:^{
+        dispatch_async(dispatch_get_main_queue(), ^{
+            EmulatorViewController *strongSelf = weakSelf;
+            if (strongSelf) [strongSelf endCheckpointBackgroundTask];
+        });
+    }];
+    _checkpointBackgroundTask = task;
+}
+
+- (void)endCheckpointBackgroundTask {
+    UIBackgroundTaskIdentifier task = _checkpointBackgroundTask;
+    if (task == UIBackgroundTaskInvalid) return;
+    _checkpointBackgroundTask = UIBackgroundTaskInvalid;
+    [[UIApplication sharedApplication] endBackgroundTask:task];
 }
 
 - (void)setCheckpointSaving:(BOOL)saving {
@@ -513,12 +551,14 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
         return;
     }
 
+    [self beginCheckpointBackgroundTask];
     [self setCheckpointSaving:YES];
     __weak EmulatorViewController *weakSelf = self;
     [_engine saveCheckpointAndStopWithCompletion:
         ^(BOOL saved, NSString *message) {
             EmulatorViewController *strongSelf = weakSelf;
             if (!strongSelf) return;
+            [strongSelf endCheckpointBackgroundTask];
             if (saved) {
                 [strongSelf.navigationController
                     popViewControllerAnimated:YES];
