@@ -60,7 +60,8 @@ bool s5l8900_static_a64_commit_known_negative_bypass(s5l8900_t *m);
  * False means the marker was not enabled and the caller performs no matching
  * end operation. This outer-slice gate is not a per-instruction cost. The
  * global SIGPROF timer is installed only at opt-in boot; these calls merely
- * gate which process-CPU samples belong to guest work. */
+ * gate the eligible process-CPU sampling interval. Retained outside-runner PCs
+ * reveal whether delivery actually interrupted this work or another thread. */
 bool s5l8900_static_a64_compact_raw_pc_profile_slice_begin(
     const s5l8900_t *m);
 void s5l8900_static_a64_compact_raw_pc_profile_slice_end(

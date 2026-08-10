@@ -83,6 +83,14 @@ static vm_execution_telemetry_observation_t execution_observation(
     value.compact_pc_profile_retire = base + 50u;
     value.compact_pc_profile_fallback = base + 51u;
     value.compact_pc_profile_exit = base + 52u;
+    value.compact_pc_profile_reference_pc = UINT64_C(0x100000000) + base;
+    value.compact_pc_profile_outside_pc_captured = base + 53u;
+    value.compact_pc_profile_outside_pc_dropped = base + 54u;
+    for (unsigned i = 0u; i < VM_COMPACT_PC_PROFILE_HOT_COUNT; i++) {
+        value.compact_pc_profile_outside_hot_pc[i] =
+            UINT64_C(0x200000000) + base + (uint64_t)i * UINT64_C(0x100);
+        value.compact_pc_profile_outside_hot_samples[i] = base + 55u + i;
+    }
     return value;
 }
 
@@ -239,7 +247,21 @@ static void test_boundaries_and_sampled_changes(void) {
            state.execution_last.compact_pc_profile_thumb == 2049u &&
            state.execution_last.compact_pc_profile_retire == 2050u &&
            state.execution_last.compact_pc_profile_fallback == 2051u &&
-           state.execution_last.compact_pc_profile_exit == 2052u,
+           state.execution_last.compact_pc_profile_exit == 2052u &&
+           state.execution_last.compact_pc_profile_reference_pc ==
+               UINT64_C(0x100000000) + 2000u &&
+           state.execution_last.compact_pc_profile_outside_pc_captured ==
+               2053u &&
+           state.execution_last.compact_pc_profile_outside_pc_dropped ==
+               2054u &&
+           state.execution_last.compact_pc_profile_outside_hot_pc[0] ==
+               UINT64_C(0x200000000) + 2000u &&
+           state.execution_last.compact_pc_profile_outside_hot_samples[0] ==
+               2055u &&
+           state.execution_last.compact_pc_profile_outside_hot_pc[7] ==
+               UINT64_C(0x200000000) + 2000u + UINT64_C(0x700) &&
+           state.execution_last.compact_pc_profile_outside_hot_samples[7] ==
+               2062u,
           "execution counter endpoints are wrong");
 
     CHECK(state.layer_attempts == 4u && state.layer_accepted == 3u &&

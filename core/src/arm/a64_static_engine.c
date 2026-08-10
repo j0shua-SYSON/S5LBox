@@ -747,6 +747,9 @@ void s5l8900_static_a64_compact_raw_pc_profile(
         _Static_assert((unsigned)S5L_STATIC_A64_COMPACT_PC_REGION_COUNT ==
                            (unsigned)A64_COMPACT_RAW_PC_PROFILE_REGION_COUNT,
                        "compact PC-profile region count drifted");
+        _Static_assert((unsigned)S5L_STATIC_A64_COMPACT_PC_HOT_COUNT ==
+                           (unsigned)A64_COMPACT_RAW_PC_PROFILE_HOT_COUNT,
+                       "compact PC-profile hot count drifted");
         a64_compact_raw_pc_profile_snapshot(&native);
         out->enabled = native.enabled;
         out->samples = native.samples;
@@ -754,6 +757,16 @@ void s5l8900_static_a64_compact_raw_pc_profile(
         for (unsigned i = 0u;
              i < (unsigned)S5L_STATIC_A64_COMPACT_PC_REGION_COUNT; i++)
             out->region[i] = native.region[i];
+        out->reference_pc = (uint64_t)native.reference_pc;
+        out->outside_pc_captured = native.outside_pc_captured;
+        out->outside_pc_dropped = native.outside_pc_dropped;
+        for (unsigned i = 0u;
+             i < (unsigned)S5L_STATIC_A64_COMPACT_PC_HOT_COUNT; i++) {
+            out->outside_hot[i].pc =
+                (uint64_t)native.outside_hot[i].pc;
+            out->outside_hot[i].samples =
+                native.outside_hot[i].samples;
+        }
     }
 #else
     (void)m;

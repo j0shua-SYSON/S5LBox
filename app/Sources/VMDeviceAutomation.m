@@ -510,6 +510,32 @@ static double VMDeviceAutomationSeconds(uint64_t firstNS, uint64_t lastNS) {
                 compact_pc_profile_fallback),
             (unsigned long long)VM_EXEC_DELTA(compact_pc_profile_exit)];
 #undef VM_EXEC_DELTA
+        if (last->compact_pc_profile_reference_pc != 0u) {
+            NSMutableString *outsidePCs = [NSMutableString
+                stringWithFormat:
+                    @",compact_pc_profile_reference_pc=%016llx,"
+                     "compact_pc_profile_outside_pc_captured=%llu,"
+                     "compact_pc_profile_outside_pc_dropped=%llu",
+                    (unsigned long long)
+                        last->compact_pc_profile_reference_pc,
+                    (unsigned long long)
+                        last->compact_pc_profile_outside_pc_captured,
+                    (unsigned long long)
+                        last->compact_pc_profile_outside_pc_dropped];
+            for (unsigned i = 0u;
+                 i < VM_COMPACT_PC_PROFILE_HOT_COUNT; i++) {
+                [outsidePCs appendFormat:
+                    @",compact_pc_profile_outside_hot%u_pc=%016llx,"
+                     "compact_pc_profile_outside_hot%u_samples=%llu",
+                    i,
+                    (unsigned long long)
+                        last->compact_pc_profile_outside_hot_pc[i],
+                    i,
+                    (unsigned long long)
+                        last->compact_pc_profile_outside_hot_samples[i]];
+            }
+            execution = [execution stringByAppendingString:outsidePCs];
+        }
     }
 
     NSString *stallWitness = state.scanout_max_gap_execution_captured

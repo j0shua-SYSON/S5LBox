@@ -283,10 +283,13 @@ bool a64_compact_raw_run_code_window_resident_cached(
 
 /* Opt-in statistical attribution for the build-time-linked compact runner.
  * SIGPROF samples only while the public SoC run slice is active, then assigns
- * the interrupted PC to one ordered text region. The aliases exported by the
- * generator add no hot-path instructions. Unsupported hosts refuse enablement
- * and every snapshot remains zero. This is host diagnostic state only: it is
- * neither guest state nor part of a snapshot. */
+ * the interrupted PC to one ordered text region. A bounded outside-runner
+ * sample retains raw PCs so ordinary code can rank them; because SIGPROF is
+ * process-directed, those addresses are also the evidence for whether another
+ * thread or image was interrupted. The aliases exported by the generator add
+ * no hot-path instructions. Unsupported hosts refuse enablement and every
+ * snapshot remains zero. This is host diagnostic state only: it is neither
+ * guest state nor part of a snapshot. */
 typedef enum {
     A64_COMPACT_RAW_PC_PROFILE_ENTRY = 0,
     A64_COMPACT_RAW_PC_PROFILE_DP,
@@ -301,11 +304,23 @@ typedef enum {
     A64_COMPACT_RAW_PC_PROFILE_REGION_COUNT
 } a64_compact_raw_pc_profile_region_t;
 
+#define A64_COMPACT_RAW_PC_PROFILE_HOT_COUNT 8u
+
+typedef struct {
+    uintptr_t pc;
+    uint64_t samples;
+} a64_compact_raw_pc_profile_hot_t;
+
 typedef struct {
     bool enabled;
     uint64_t samples;
     uint64_t outside;
     uint64_t region[A64_COMPACT_RAW_PC_PROFILE_REGION_COUNT];
+    uintptr_t reference_pc;
+    uint64_t outside_pc_captured;
+    uint64_t outside_pc_dropped;
+    a64_compact_raw_pc_profile_hot_t
+        outside_hot[A64_COMPACT_RAW_PC_PROFILE_HOT_COUNT];
 } a64_compact_raw_pc_profile_t;
 
 bool a64_compact_raw_pc_profile_enable(void);

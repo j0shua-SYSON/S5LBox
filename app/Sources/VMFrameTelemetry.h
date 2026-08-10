@@ -73,6 +73,8 @@ typedef struct {
 /* Emulator-thread counters sampled only at the existing scanout lookup. This
  * keeps diagnostics out of the instruction hot path while still exposing
  * whether a signed invocation retired useful work or failed an entry gate. */
+#define VM_COMPACT_PC_PROFILE_HOT_COUNT 8u
+
 typedef struct {
     uint64_t cpu_retired;
     uint64_t interpreter_tick_batches;
@@ -126,6 +128,13 @@ typedef struct {
     uint64_t compact_pc_profile_retire;
     uint64_t compact_pc_profile_fallback;
     uint64_t compact_pc_profile_exit;
+    uint64_t compact_pc_profile_reference_pc;
+    uint64_t compact_pc_profile_outside_pc_captured;
+    uint64_t compact_pc_profile_outside_pc_dropped;
+    uint64_t compact_pc_profile_outside_hot_pc[
+        VM_COMPACT_PC_PROFILE_HOT_COUNT];
+    uint64_t compact_pc_profile_outside_hot_samples[
+        VM_COMPACT_PC_PROFILE_HOT_COUNT];
 } vm_execution_telemetry_observation_t;
 
 typedef struct {

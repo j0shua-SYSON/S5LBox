@@ -4153,11 +4153,23 @@ typedef enum {
     S5L_STATIC_A64_COMPACT_PC_REGION_COUNT
 } s5l_static_a64_compact_pc_region_t;
 
+#define S5L_STATIC_A64_COMPACT_PC_HOT_COUNT 8u
+
+typedef struct {
+    uint64_t pc;
+    uint64_t samples;
+} s5l_static_a64_compact_pc_hot_t;
+
 typedef struct {
     bool enabled;
     uint64_t samples;
     uint64_t outside;
     uint64_t region[S5L_STATIC_A64_COMPACT_PC_REGION_COUNT];
+    uint64_t reference_pc;
+    uint64_t outside_pc_captured;
+    uint64_t outside_pc_dropped;
+    s5l_static_a64_compact_pc_hot_t
+        outside_hot[S5L_STATIC_A64_COMPACT_PC_HOT_COUNT];
 } s5l_static_a64_compact_pc_profile_t;
 
 void s5l8900_static_a64_compact_raw_pc_profile(

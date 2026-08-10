@@ -201,7 +201,9 @@ static bool vm_execution_telemetry_not_before(
            VM_EXEC_NOT_BEFORE(compact_pc_profile_thumb) &&
            VM_EXEC_NOT_BEFORE(compact_pc_profile_retire) &&
            VM_EXEC_NOT_BEFORE(compact_pc_profile_fallback) &&
-           VM_EXEC_NOT_BEFORE(compact_pc_profile_exit);
+           VM_EXEC_NOT_BEFORE(compact_pc_profile_exit) &&
+           VM_EXEC_NOT_BEFORE(compact_pc_profile_outside_pc_captured) &&
+           VM_EXEC_NOT_BEFORE(compact_pc_profile_outside_pc_dropped);
 #undef VM_EXEC_NOT_BEFORE
 }
 

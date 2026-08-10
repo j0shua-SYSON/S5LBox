@@ -308,6 +308,22 @@ static const uint8_t *vm_guest_record_display(const s5l8900_t *m,
                 S5L_STATIC_A64_COMPACT_PC_FALLBACK];
             execution.compact_pc_profile_exit = pc_profile.region[
                 S5L_STATIC_A64_COMPACT_PC_EXIT];
+            _Static_assert(VM_COMPACT_PC_PROFILE_HOT_COUNT ==
+                               S5L_STATIC_A64_COMPACT_PC_HOT_COUNT,
+                           "compact PC-profile hot count drifted");
+            execution.compact_pc_profile_reference_pc =
+                pc_profile.reference_pc;
+            execution.compact_pc_profile_outside_pc_captured =
+                pc_profile.outside_pc_captured;
+            execution.compact_pc_profile_outside_pc_dropped =
+                pc_profile.outside_pc_dropped;
+            for (unsigned i = 0u;
+                 i < VM_COMPACT_PC_PROFILE_HOT_COUNT; i++) {
+                execution.compact_pc_profile_outside_hot_pc[i] =
+                    pc_profile.outside_hot[i].pc;
+                execution.compact_pc_profile_outside_hot_samples[i] =
+                    pc_profile.outside_hot[i].samples;
+            }
             vm_frame_telemetry_note_execution(&execution);
         }
     }
