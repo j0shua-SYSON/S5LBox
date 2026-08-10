@@ -242,60 +242,81 @@ static void test_no_transition_is_ever_coalesced(void) {
     CHECK(q.dropped == 0u, "a wrap that never overflowed reported a drop");
 }
 
-static void test_power_release_waits_for_host_and_guest_pulse(void) {
+static void test_power_release_uses_display_edge_or_bounded_fallback(void) {
     const uint64_t down_ns = UINT64_C(7000000000);
     const uint64_t down_cycles = UINT64_C(9000000000);
     vm_button_event_t power_down = { S5L_BUTTON_HOLD, true };
     vm_button_event_t power_up = { S5L_BUTTON_HOLD, false };
     vm_button_event_t home_up = { S5L_BUTTON_MENU, false };
     vm_button_power_hold_t hold = {
-        true, down_ns, down_cycles
+        .active = true,
+        .display_running_at_press = false,
+        .delivered_ns = down_ns,
+        .delivered_cycles = down_cycles,
     };
 
     CHECK(vm_button_power_release_ready(
-              &power_down, &hold, down_ns, down_cycles),
+              &power_down, &hold, down_ns, down_cycles, false),
           "a Power press was delayed");
     CHECK(vm_button_power_release_ready(
-              &home_up, &hold, down_ns, down_cycles),
+              &home_up, &hold, down_ns, down_cycles, false),
           "a non-Power release was delayed");
     CHECK(!vm_button_power_release_ready(
               &power_up, &hold,
               down_ns + VM_BUTTON_POWER_MIN_HOLD_NS - 1u,
-              down_cycles + VM_BUTTON_POWER_MIN_HOLD_CYCLES),
-          "Power ignored the host-time floor");
-    CHECK(!vm_button_power_release_ready(
-              &power_up, &hold,
-              down_ns + VM_BUTTON_POWER_MIN_HOLD_NS,
-              down_cycles + VM_BUTTON_POWER_MIN_HOLD_CYCLES - 1u),
-          "Power ignored the guest debounce floor");
+              down_cycles + VM_BUTTON_POWER_MIN_HOLD_CYCLES, true),
+          "a display edge waived the host-time floor");
     CHECK(vm_button_power_release_ready(
               &power_up, &hold,
               down_ns + VM_BUTTON_POWER_MIN_HOLD_NS,
-              down_cycles + VM_BUTTON_POWER_MIN_HOLD_CYCLES),
-          "Power stayed held at both exact minimum boundaries");
+              down_cycles + 1u, true),
+          "a dark-display wake edge did not release Power");
+    CHECK(!vm_button_power_release_ready(
+              &power_up, &hold,
+              down_ns + VM_BUTTON_POWER_MIN_HOLD_NS,
+              down_cycles + VM_BUTTON_POWER_MIN_HOLD_CYCLES - 1u, false),
+          "a dark display ignored the bounded retirement fallback");
+    CHECK(vm_button_power_release_ready(
+              &power_up, &hold,
+              down_ns + VM_BUTTON_POWER_MIN_HOLD_NS,
+              down_cycles + VM_BUTTON_POWER_MIN_HOLD_CYCLES, false),
+          "Power stayed held at the exact fallback boundary");
+
+    hold.display_running_at_press = true;
+    CHECK(!vm_button_power_release_ready(
+              &power_up, &hold,
+              down_ns + VM_BUTTON_POWER_MIN_HOLD_NS - 1u,
+              down_cycles + VM_BUTTON_POWER_MIN_HOLD_CYCLES, true),
+          "an awake press ignored the host-time floor");
+    CHECK(vm_button_power_release_ready(
+              &power_up, &hold,
+              down_ns + VM_BUTTON_POWER_MIN_HOLD_NS,
+              down_cycles + 1u, false),
+          "an awake press was forced through the dark-display fallback");
+    hold.display_running_at_press = false;
 
     /* A missing host clock waives only its own half.  This is the regression:
-     * slow execution must never turn 500 ms into a sub-debounce guest pulse. */
+     * a dark display still needs an observed wake or the bounded fallback. */
     hold.delivered_ns = 0u;
     CHECK(!vm_button_power_release_ready(
               &power_up, &hold, 0u,
-              down_cycles + VM_BUTTON_POWER_MIN_HOLD_CYCLES - 1u),
-          "a missing host clock also waived the guest floor");
+              down_cycles + VM_BUTTON_POWER_MIN_HOLD_CYCLES - 1u, false),
+          "a missing host clock also waived the dark-display fallback");
     CHECK(vm_button_power_release_ready(
               &power_up, &hold, 0u,
-              down_cycles + VM_BUTTON_POWER_MIN_HOLD_CYCLES),
-          "the guest floor did not release Power without a host clock");
+              down_cycles + VM_BUTTON_POWER_MIN_HOLD_CYCLES, false),
+          "the fallback did not release Power without a host clock");
 
     hold.delivered_ns = down_ns;
     CHECK(vm_button_power_release_ready(
-              &power_up, NULL, down_ns, down_cycles),
+              &power_up, NULL, down_ns, down_cycles, false),
           "an unpaired Power release wedged the queue");
     CHECK(vm_button_power_release_ready(
               &power_up, &hold,
-              down_ns + VM_BUTTON_POWER_MIN_HOLD_NS, down_cycles - 1u),
+              down_ns + VM_BUTTON_POWER_MIN_HOLD_NS, down_cycles - 1u, false),
           "a backwards guest counter wedged Power");
     CHECK(!vm_button_power_release_ready(
-              NULL, &hold, down_ns, down_cycles),
+              NULL, &hold, down_ns, down_cycles, false),
           "a NULL event was called ready");
 }
 
@@ -305,7 +326,7 @@ int main(void) {
     test_the_silent_switch_means_muted();
     test_the_queue_is_a_strict_fifo();
     test_no_transition_is_ever_coalesced();
-    test_power_release_waits_for_host_and_guest_pulse();
+    test_power_release_uses_display_edge_or_bounded_fallback();
     printf("  %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

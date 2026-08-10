@@ -1260,7 +1260,9 @@ static double vm_engine_now_seconds(void) {
      * may spend time waiting in this queue while the guest arms the line. */
     uint64_t nowNS = vm_now_ns();
     uint64_t nowCycles = _machine.cpu.cycles;
-    if (!vm_button_power_release_ready(&e, &powerHold, nowNS, nowCycles))
+    bool displayRunning = s5l_clcd_running(&_machine.clcd);
+    if (!vm_button_power_release_ready(&e, &powerHold, nowNS, nowCycles,
+                                       displayRunning))
         return;
 
     if (s5l8900_set_button(&_machine, e.which, e.pressed)) {
@@ -1272,6 +1274,7 @@ static double vm_engine_now_seconds(void) {
         if (e.which == S5L_BUTTON_HOLD) {
             if (e.pressed) {
                 _powerHold.active = true;
+                _powerHold.display_running_at_press = displayRunning;
                 _powerHold.delivered_ns = nowNS;
                 _powerHold.delivered_cycles = nowCycles;
             } else {
