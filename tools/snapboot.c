@@ -382,7 +382,8 @@ int main(int argc, char **argv) {
             "usage: %s <kernel.macho> [-d dt.bin] [-c cmdline] [-r ramdisk]\n"
             "          [-R ram-MB] [-n steps] [-p physbase] [-V virtbase]\n"
             "          [--snapshot-at <steps> <file>] [--restore <file>]\n"
-            "          [--wake-power] [--release-power-after <steps>]\n"
+            "          [--press-power | --wake-power]\n"
+            "          [--release-power-after <steps>]\n"
             "          [--dump-ram <file>]\n"
             "          [--peek <virtual-address>]...\n"
             "          [--break-pc <address> [--break-reg <0..15> <value>]]\n",
@@ -394,6 +395,7 @@ int main(int argc, char **argv) {
     uint64_t steps = 2000000ull;
     const char *dtpath = NULL, *rdpath = NULL, *restore = NULL;
     const char *dump_ram = NULL;
+    bool press_power = false;
     bool wake_power = false;
     bool release_power = false;
     uint64_t release_power_after = 0u;
@@ -418,6 +420,10 @@ int main(int argc, char **argv) {
                 nsnaps++;
             }
             i += 2; continue;
+        }
+        if (!strcmp(argv[i], "--press-power")) {
+            press_power = true;
+            continue;
         }
         if (!strcmp(argv[i], "--wake-power")) {
             wake_power = true;
@@ -466,8 +472,13 @@ int main(int argc, char **argv) {
         fprintf(stderr, "--break-reg requires --break-pc\n");
         return 1;
     }
-    if (release_power && !wake_power) {
-        fprintf(stderr, "--release-power-after requires --wake-power\n");
+    if (press_power && wake_power) {
+        fprintf(stderr, "--press-power and --wake-power are mutually exclusive\n");
+        return 1;
+    }
+    if (release_power && !press_power && !wake_power) {
+        fprintf(stderr,
+                "--release-power-after requires --press-power or --wake-power\n");
         return 1;
     }
 
@@ -573,21 +584,28 @@ int main(int argc, char **argv) {
                 restore, (unsigned long long)mach.cpu.cycles);
     }
 
-    if (wake_power) {
+    if (press_power || wake_power) {
         if (!restore) {
-            fprintf(stderr, "--wake-power requires --restore\n");
+            fprintf(stderr, "%s requires --restore\n",
+                    wake_power ? "--wake-power" : "--press-power");
             return 1;
         }
-        if (!s5l_pcf50635_hibernating(&mach.pmu)) {
+        if (wake_power && !s5l_pcf50635_hibernating(&mach.pmu)) {
             fprintf(stderr, "restored machine is not in PMU hibernation\n");
             return 6;
         }
         if (!s5l8900_set_button(&mach, S5L_BUTTON_HOLD, true)) {
-            fprintf(stderr, "Power wake was refused\n");
+            fprintf(stderr, "Power press was refused\n");
             return 6;
         }
-        fprintf(stderr, "Power wake reset CPU to retained RAM at 0x%08x\n",
-                mach.cpu.r[15]);
+        if (wake_power)
+            fprintf(stderr,
+                    "Power wake reset CPU to retained RAM at 0x%08x\n",
+                    mach.cpu.r[15]);
+        else
+            fprintf(stderr,
+                    "Power press accepted outside PMU hibernation at 0x%08x\n",
+                    mach.cpu.r[15]);
     }
 
     arm_status_t st = ARM_OK;
