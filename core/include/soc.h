@@ -1310,8 +1310,9 @@ bool     s5l_gpio_watch(s5l_gpio_t *g, uint16_t pin, void *ctx,
  * involved only through `function-wake_button_hold`, a 'STAT' function on
  * /arm-io/i2c0/pmu that AppleM68Buttons resolves once at start (0xc065a6a4,
  * stored at this+0x90+4i) and reads only in its power-state path (0xc065a0c8)
- * to answer "did this button wake us". It is NOT the press/release path and is
- * NOT modelled here; nothing in a machine that never sleeps consults it.
+ * to answer "did this button wake us". It is NOT the ordinary press/release
+ * path. The machine-level s5l8900_set_button() wrapper models it only while
+ * the PMU has put the application processor into hibernation.
  *
  * WHICH LEVEL IS "PRESSED". This is the number that had to be right, because a
  * wrong one reads as a button held down forever. Two independently decoded
@@ -1878,6 +1879,14 @@ bool     s5l_i2c_irq(const s5l_i2c_t *bus);
  */
 #define PCF50635_I2C_ADDR 0x73u
 #define PCF50635_NREG     0x100u
+#define PCF50635_INT1     0x02u
+#define PCF50635_INT2     0x03u
+#define PCF50635_INT3     0x04u
+#define PCF50635_INT4     0x05u
+#define PCF50635_INT5     0x06u
+#define PCF50635_OOCSHDWN 0x0cu
+#define PCF50635_INT2_ONKEYR 0x01u
+#define PCF50635_OOCSHDWN_GOHIB 0x02u
 #define PCF50635_RTCSC    0x59u
 #define PCF50635_RTCWD    0x5cu
 #define PCF50635_RTCYR    0x5fu
@@ -1907,6 +1916,8 @@ void s5l_pcf50635_reset(s5l_pcf50635_t *pmu, uint32_t tick_hz);
 void s5l_pcf50635_set_time(s5l_pcf50635_t *pmu, uint64_t unix_seconds);
 void s5l_pcf50635_tick(s5l_pcf50635_t *pmu, uint32_t ticks);
 void s5l_pcf50635_bind(s5l_pcf50635_t *pmu, s5l_i2c_slave_t *slave);
+bool s5l_pcf50635_hibernating(const s5l_pcf50635_t *pmu);
+void s5l_pcf50635_wake_onkey(s5l_pcf50635_t *pmu);
 void s5l_pcf50635_civil(uint64_t unix_seconds, int *year, int *month, int *day,
                         int *hour, int *minute, int *second, int *weekday);
 
@@ -3962,6 +3973,19 @@ bool s5l8900_overlaps(uint32_t a, uint32_t alen, uint32_t b, uint32_t blen);
  * for why a refresh has to be asked for rather than assumed.
  */
 void s5l8900_tick(s5l8900_t *m, uint32_t ticks);
+
+/*
+ * Inject one host button transition through the complete machine, including
+ * the PCF50635's separate Power wake path. Ordinary running transitions use
+ * the GPIO button model above and refresh interrupt levels before returning.
+ *
+ * When the guest has commanded PMU hibernation, only a Power press is a wake
+ * source. It latches the PMU ONKEY rising event and resets the ARM core into
+ * the retained-RAM reset vector prepared by XNU. Other button transitions are
+ * consumed without reaching the powered-down application processor, so one
+ * stale Home event cannot permanently block a later Power event in a FIFO.
+ */
+bool s5l8900_set_button(s5l8900_t *m, unsigned which, bool pressed);
 
 /* ---------------------------------------------------------- wake sources ---
  *

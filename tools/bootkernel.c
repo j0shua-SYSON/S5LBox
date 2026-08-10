@@ -6948,7 +6948,7 @@ typedef struct {
  * it opens. Each stage RETRIES on every subsequent instruction until the board
  * accepts it -- and counts the refusals, because "the guest never armed the
  * line" and "the press was never attempted" are different failures that must
- * not look alike. See s5l_buttons_set() for what a refusal means.
+ * not look alike. See s5l8900_set_button() for what a refusal means.
  */
 #define BUTTON_PRESS_MAX 8u
 /*
@@ -6979,7 +6979,7 @@ typedef struct {
     unsigned stage;       /* 0 = want press, 1 = want release, 2 = done    */
     uint64_t down_at;     /* instruction at which the press was ACCEPTED   */
     uint64_t up_at;
-    uint64_t refusals;    /* the board said no; see s5l_buttons_set()      */
+    uint64_t refusals;    /* the board said no; see s5l8900_set_button()  */
 } button_press_t;
 
 typedef enum {
@@ -18594,17 +18594,15 @@ static BOOTKERNEL_NOINLINE void button_press_step(uint64_t n) {
         }
 
         /*
-         * The board decides. s5l_buttons_set() says no while the guest has not
+         * The board decides. s5l8900_set_button() says no while the guest has not
          * armed that line and while it has not serviced the previous
          * transition, and either is a real fact about the guest that must stay
          * visible rather than being retried into invisibility.
          */
-        if (!s5l_buttons_set(&G.mach->buttons, &G.mach->gpio, &G.mach->gpioic,
-                             b->which, b->stage == 0u)) {
+        if (!s5l8900_set_button(G.mach, b->which, b->stage == 0u)) {
             b->refusals++;
             continue;              /* not armed yet, or still unserviced */
         }
-        s5l8900_tick(G.mach, 0);        /* as touch_tap_step(); see soc.h */
         if (b->stage == 0u) { b->down_at = n; b->stage = 1u; }
         else                { b->up_at   = n; b->stage = 2u; }
     }
@@ -18616,7 +18614,7 @@ static void button_report(void) {
 
     printf("\n=== BUTTONS: SCHEDULED PRESSES (%u) ===\n", G.button_n);
     printf("    A press is accepted by the BOARD, not by the guest. `down`/`up`\n"
-           "    are the instructions at which s5l_buttons_set() returned true;\n"
+           "    are the instructions at which s5l8900_set_button() returned true;\n"
            "    `refused` counts instructions on which it returned false, which\n"
            "    means the guest had not armed that line's INTEN bit or had not\n"
            "    yet serviced the previous transition. Acceptance is not\n"

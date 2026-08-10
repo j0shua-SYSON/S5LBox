@@ -840,6 +840,73 @@ static void test_the_board_drives_inputs_and_the_guest_cannot(void) {
               "an out-of-range drive wrapped into port %u", g);
 }
 
+static void test_power_wakes_hibernation_through_retained_reset(void) {
+    s5l8900_t m;
+    CHECK(s5l8900_init(&m, S5L8900_SDRAM_BASE, 1u << 16),
+          "machine init failed");
+
+    m.pmu.regs[PCF50635_OOCSHDWN] = PCF50635_OOCSHDWN_GOHIB;
+    m.pmu.written[PCF50635_OOCSHDWN] = 1u;
+    m.cpu.r[0] = 0x11111111u;
+    m.cpu.r[15] = 0xc0061eb0u; /* XNU's deliberate post-quiesce branch */
+    m.cpu.cpsr = ARM_MODE_USR;
+    m.cpu.cp15.sctlr = 0x00c5187du;
+    m.cpu.cp15.ttbr0 = 0x12344000u;
+    m.cpu.cycles = UINT64_C(17667762932);
+    m.wfi_pace_yield = true;
+    m.active_clock_last_host_ns = 99u;
+    m.active_clock_guest_ticks_since_sync = 88u;
+    m.active_clock_fraction = 77u;
+    m.active_clock_anchor_valid = true;
+
+    CHECK(!s5l8900_set_button(&m, S5L_BUTTON_COUNT, true),
+          "nonexistent sleeping button was accepted");
+    CHECK(m.buttons.refused == 1u, "malformed sleeping input was not counted");
+
+    CHECK(s5l8900_set_button(&m, S5L_BUTTON_MENU, true),
+          "non-wake button was allowed to block the sleeping input FIFO");
+    CHECK(m.cpu.r[15] == 0xc0061eb0u &&
+          s5l_pcf50635_hibernating(&m.pmu),
+          "Home incorrectly woke or mutated the sleeping CPU");
+    CHECK(!s5l_buttons_held(&m.buttons, S5L_BUTTON_MENU) &&
+          !s5l_gpioic_pending(&m.gpioic, s5l_button_line(S5L_BUTTON_MENU)),
+          "unobservable sleeping Home press reached the GPIO path");
+
+    CHECK(s5l8900_set_button(&m, S5L_BUTTON_HOLD, true),
+          "Power did not wake the hibernating machine");
+    CHECK(!s5l_pcf50635_hibernating(&m.pmu) &&
+          (m.pmu.regs[PCF50635_INT2] & PCF50635_INT2_ONKEYR) != 0u,
+          "Power wake did not latch the PMU ONKEY reason");
+    CHECK(m.cpu.r[15] == S5L8900_SDRAM_BASE,
+          "warm reset PC=%08x, expected retained vector %08x",
+          m.cpu.r[15], S5L8900_SDRAM_BASE);
+    CHECK(m.cpu.r[0] == 0u && m.cpu.cp15.sctlr == 0u &&
+          m.cpu.cp15.ttbr0 == 0u,
+          "Power wake did not reset general/translation CPU state");
+    CHECK(m.cpu.cpsr ==
+          (ARM_MODE_SVC | ARM_CPSR_I | ARM_CPSR_F | ARM_CPSR_A),
+          "warm reset CPSR=%08x", m.cpu.cpsr);
+    CHECK(m.cpu.cycles == UINT64_C(17667762932),
+          "host retired-instruction timeline restarted at %llu",
+          (unsigned long long)m.cpu.cycles);
+    CHECK(!m.wfi_pace_yield && !m.active_clock_anchor_valid &&
+          m.active_clock_last_host_ns == 0u &&
+          m.active_clock_guest_ticks_since_sync == 0u &&
+          m.active_clock_fraction == 0u,
+          "warm reset retained stale host-clock state");
+    CHECK(!s5l_buttons_held(&m.buttons, S5L_BUTTON_HOLD) &&
+          !s5l_gpioic_pending(&m.gpioic, s5l_button_line(S5L_BUTTON_HOLD)),
+          "PMU wake was duplicated as an ordinary GPIO press");
+
+    CHECK(s5l8900_set_button(&m, S5L_BUTTON_HOLD, false),
+          "queued Power release was not drainable after wake");
+    CHECK(m.buttons.sets == 3u && m.buttons.edges == 0u,
+          "PMU-only transitions polluted GPIO edge evidence: sets=%llu edges=%llu",
+          (unsigned long long)m.buttons.sets,
+          (unsigned long long)m.buttons.edges);
+    s5l8900_free(&m);
+}
+
 /* Held buttons are machine state and must survive a checkpoint. */
 static void test_snapshot_carries_the_switches(void) {
     s5l8900_t src, dst;
@@ -951,6 +1018,7 @@ int main(void) {
     test_level_lines_relatch_on_every_input();
     test_an_undriven_level_line_never_asserts();
     test_the_board_drives_inputs_and_the_guest_cannot();
+    test_power_wakes_hibernation_through_retained_reset();
     test_snapshot_carries_the_switches();
     test_snapshot_rejects_a_sixth_button();
     printf("  %d passed, %d failed\n", g_pass, g_fail);

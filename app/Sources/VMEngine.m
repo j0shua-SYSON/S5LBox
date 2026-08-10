@@ -1225,7 +1225,7 @@ static double vm_engine_now_seconds(void) {
  * so draining more would just be a run of refusals.
  *
  * A refusal is not necessarily an error and it is never a reason to throw the
- * transition away. s5l_buttons_set() says no while the guest has not armed
+ * transition away. s5l8900_set_button() says no while the guest has not armed
  * that line's interrupt — which, for a real boot, is true until
  * AppleM68Buttons starts a couple of hundred million instructions in — and
  * while the previous transition on that line is still pending. Both become
@@ -1240,9 +1240,7 @@ static double vm_engine_now_seconds(void) {
     pthread_mutex_unlock(&_lock);
     if (!have) return;
 
-    if (s5l_buttons_set(&_machine.buttons, &_machine.gpio, &_machine.gpioic,
-                        e.which, e.pressed)) {
-        s5l8900_tick(&_machine, 0);     /* as drainOneTouch; see soc.h */
+    if (s5l8900_set_button(&_machine, e.which, e.pressed)) {
         pthread_mutex_lock(&_lock);
         vm_button_queue_pop(&_buttonQueue);
         _buttonDelivered++;

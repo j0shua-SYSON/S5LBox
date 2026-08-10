@@ -315,6 +315,52 @@ static void test_pmu_rtc_and_tick_overflow(void) {
           "RTC advanced past its representable century");
 }
 
+static void test_pmu_hibernate_wake_event_is_one_shot(void) {
+    s5l_i2c_t bus;
+    s5l_pcf50635_t pmu;
+    setup_pmu(&bus, &pmu);
+
+    CHECK(!s5l_pcf50635_hibernating(&pmu),
+          "reset PMU claimed the application processor was hibernating");
+
+    uint8_t command = (uint8_t)(0x80u | PCF50635_OOCSHDWN_GOHIB);
+    drive_write(&bus, PCF50635_I2C_ADDR, PCF50635_OOCSHDWN,
+                &command, 1u);
+    CHECK(s5l_pcf50635_hibernating(&pmu),
+          "OOCSHDWN.GOHIB did not enter hibernation");
+
+    uint64_t guest_writes = pmu.reg_writes;
+    s5l_pcf50635_wake_onkey(&pmu);
+    CHECK(!s5l_pcf50635_hibernating(&pmu),
+          "ONKEY wake left GOHIB asserted");
+    CHECK(pmu.regs[PCF50635_OOCSHDWN] == 0x80u,
+          "ONKEY wake discarded unrelated OOCSHDWN bits: %02x",
+          pmu.regs[PCF50635_OOCSHDWN]);
+    CHECK(pmu.reg_writes == guest_writes,
+          "hardware ONKEY event was counted as a guest I2C write");
+
+    uint64_t unknown = pmu.unknown_reads;
+    uint8_t events[5] = {0};
+    drive_read(&bus, PCF50635_I2C_ADDR, PCF50635_INT1,
+               events, sizeof events);
+    CHECK(events[0] == 0u && events[1] == PCF50635_INT2_ONKEYR &&
+          events[2] == 0u && events[3] == 0u && events[4] == 0u,
+          "wake bank was %02x %02x %02x %02x %02x",
+          events[0], events[1], events[2], events[3], events[4]);
+    CHECK(pmu.unknown_reads == unknown,
+          "known event registers were counted as unknown");
+
+    memset(events, 0xff, sizeof events);
+    drive_read(&bus, PCF50635_I2C_ADDR, PCF50635_INT1,
+               events, sizeof events);
+    CHECK(events[0] == 0u && events[1] == 0u && events[2] == 0u &&
+          events[3] == 0u && events[4] == 0u,
+          "PMU wake event did not clear on read");
+
+    CHECK(!s5l_pcf50635_hibernating(NULL), "NULL PMU hibernated");
+    s5l_pcf50635_wake_onkey(NULL);
+}
+
 static void test_unknown_pmu_registers_are_visible_and_bounded(void) {
     s5l_i2c_t bus;
     s5l_pcf50635_t pmu;
@@ -530,6 +576,7 @@ int main(void) {
     test_unknown_slave_naks_and_w1c_is_selective();
     test_pmu_multibyte_pointer_and_wrap();
     test_pmu_rtc_and_tick_overflow();
+    test_pmu_hibernate_wake_event_is_one_shot();
     test_unknown_pmu_registers_are_visible_and_bounded();
     test_machine_routes_widths_windows_and_irqs();
     test_malformed_runtime_state_cannot_index_callbacks();

@@ -84,6 +84,10 @@ static bool is_rtc(uint8_t reg) {
     return reg >= PCF50635_RTCSC && reg <= PCF50635_RTCYR;
 }
 
+static bool is_event_latch(uint8_t reg) {
+    return reg >= PCF50635_INT1 && reg <= PCF50635_INT5;
+}
+
 static uint8_t rtc_byte(const s5l_pcf50635_t *pmu, uint8_t reg) {
     int y, mo, d, h, mi, s, wd;
     s5l_pcf50635_civil(pmu->seconds, &y, &mo, &d, &h, &mi, &s, &wd);
@@ -110,6 +114,18 @@ static void note_unknown_read(s5l_pcf50635_t *pmu, uint8_t reg) {
 static uint8_t reg_read(s5l_pcf50635_t *pmu, uint8_t reg) {
     pmu->reg_reads++;
     if (is_rtc(reg)) return rtc_byte(pmu, reg);
+    /* INT1..INT5 are hardware event latches, not persistent configuration.
+     * The PCF50633-family interface clears them as the host reads them. The
+     * iPhone1,2 device tree's `STAT, 0x100` wake function selects INT2 bit 0,
+     * so retaining that byte forever would report every later resume as a
+     * Power wake too. They are known registers even when all five are zero. */
+    if (is_event_latch(reg)) {
+        uint8_t val = pmu->regs[reg];
+        pmu->regs[reg] = 0u;
+        return val;
+    }
+    /* The shutdown command is also a known register at its reset value. */
+    if (reg == PCF50635_OOCSHDWN) return pmu->regs[reg];
     if (pmu->written[reg]) return pmu->regs[reg];
     note_unknown_read(pmu, reg);
     return 0;
@@ -169,4 +185,25 @@ void s5l_pcf50635_bind(s5l_pcf50635_t *pmu, s5l_i2c_slave_t *slave) {
     slave->write = pmu_write;
     slave->read = pmu_read;
     slave->stop = pmu_stop;
+}
+
+bool s5l_pcf50635_hibernating(const s5l_pcf50635_t *pmu) {
+    return pmu && pmu->written[PCF50635_OOCSHDWN] &&
+           (pmu->regs[PCF50635_OOCSHDWN] &
+            PCF50635_OOCSHDWN_GOHIB) != 0u;
+}
+
+void s5l_pcf50635_wake_onkey(s5l_pcf50635_t *pmu) {
+    if (!pmu) return;
+
+    /* Hardware, not an I2C master, raises this event; do not count a guest
+     * register write. AppleM68Buttons later obtains bit 8 from its PMU `STAT`
+     * platform function, which is INT2 bit 0 in the five-byte event bank. */
+    pmu->regs[PCF50635_INT2] |= PCF50635_INT2_ONKEYR;
+
+    /* OOCSHDWN is a command. Once ONKEY has powered the AP back up, keeping
+     * GOHIB asserted would make every later Power press look like another
+     * hardware wake and reset the running CPU. Preserve unrelated bits. */
+    pmu->regs[PCF50635_OOCSHDWN] &=
+        (uint8_t)~PCF50635_OOCSHDWN_GOHIB;
 }
