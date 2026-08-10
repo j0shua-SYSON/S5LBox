@@ -3020,6 +3020,15 @@ static bool mbx_execute_textured_sprite(s5l_mbx_t *m,
                 direct_sampler && half_texel_layout && source_width == 1u &&
                 scale_x >= 1.0f - epsilon &&
                 scale_y > 0.0f && scale_y <= 1.0f + epsilon;
+            /* Safari's tabs transition emits the same separable one-column
+             * transform through the alternate filtered sampler. The shipped
+             * producer selects that sampler from texture state independently
+             * of its quad geometry, so keep an equally narrow alternate
+             * class instead of treating it as arbitrary mixed-axis scaling. */
+            bool alternate_column_resample =
+                scaled_sampler && half_texel_layout && source_width == 1u &&
+                scale_x >= 1.0f - epsilon &&
+                scale_y > 0.0f && scale_y <= 1.0f + epsilon;
             bool modulated_uniform_scale =
                 modulated_sampler && half_texel_layout &&
                 scale_x > 0.0f && scale_y > 0.0f &&
@@ -3032,6 +3041,7 @@ static bool mbx_execute_textured_sprite(s5l_mbx_t *m,
             if (source_width > MBX_3D_WIDTH || source_height > 480u ||
                 (!direct_magnification && !direct_uniform_minification &&
                  !direct_column_resample &&
+                 !alternate_column_resample &&
                  !modulated_uniform_scale &&
                  !alternate_uniform_minification)) {
                 if (mbx_trace_state == 1) {

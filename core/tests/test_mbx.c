@@ -2505,6 +2505,7 @@ struct mbx_test_status_form {
     bool semantic_sprite;
     bool affine_sprite;
     bool scaled_sprite;
+    bool column_resample;
     bool variable_vertex_alpha;
     bool boundary_override;
     bool zero_coverage;
@@ -3103,30 +3104,68 @@ static void test_captured_status_form(const struct mbx_test_status_form *form) {
         }
 
         if (form->scaled_sprite) {
-            /* Keep geometry and normalized records mutually consistent while
-             * making only X scale differ.  A literal-packet whitelist or an
-             * unchecked generic scaler would both miss this rejection. */
-            uint32_t changed_x1 = test_float_word(
-                test_float_value(form->quad[10]) + 0.25f);
-            uint32_t changed_normalized = test_float_word(
-                test_float_value(changed_x1) / 1024.0f);
-            test_gpu_write32(&m, first, 0x89abcdefu);
-            test_gpu_write32(&m, object + 0x1f0u + 10u * 4u, changed_x1);
-            test_gpu_write32(&m, object + 0x1f0u + 14u * 4u, changed_x1);
-            test_gpu_write32(&m, object + 0x1f0u + 32u * 4u,
-                             changed_normalized);
-            test_gpu_write32(&m, object + 0x1f0u + 42u * 4u,
-                             changed_normalized);
-            m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
-            CHECK(test_gpu_read32(&m, first) == 0x89abcdefu,
-                  "%s nonuniform filtered scale changed the destination",
-                  form->name);
-            CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
-                  "%s nonuniform filtered scale raised completion", form->name);
-            test_gpu_write32(&m, object + 0x1f0u + 10u * 4u, form->quad[10]);
-            test_gpu_write32(&m, object + 0x1f0u + 14u * 4u, form->quad[14]);
-            test_gpu_write32(&m, object + 0x1f0u + 32u * 4u, form->quad[32]);
-            test_gpu_write32(&m, object + 0x1f0u + 42u * 4u, form->quad[42]);
+            if (form->column_resample) {
+                /* The measured mixed-axis exception is one-dimensional.
+                 * Preserve both redundant UV corners while widening its
+                 * half-texel source span from one column to two; that must
+                 * remain an atomic rejection. */
+                uint32_t texture_width =
+                    8u << ((form->quad[1] >> 24) & 7u);
+                uint32_t changed_u1 = test_float_word(
+                    test_float_value(form->quad[30]) +
+                    1.0f / (float)texture_width);
+                test_gpu_write32(&m, first, 0x89abcdefu);
+                test_gpu_write32(&m, last_destination, 0x76543210u);
+                test_gpu_write32(&m, object + 0x1f0u + 30u * 4u,
+                                 changed_u1);
+                test_gpu_write32(&m, object + 0x1f0u + 40u * 4u,
+                                 changed_u1);
+                m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
+                CHECK(test_gpu_read32(&m, first) == 0x89abcdefu &&
+                      test_gpu_read32(&m, last_destination) == 0x76543210u,
+                      "%s wider mixed-axis source partially committed",
+                      form->name);
+                CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
+                      "%s wider mixed-axis source raised completion",
+                      form->name);
+                test_gpu_write32(&m, object + 0x1f0u + 30u * 4u,
+                                 form->quad[30]);
+                test_gpu_write32(&m, object + 0x1f0u + 40u * 4u,
+                                 form->quad[40]);
+            } else {
+                /* Keep geometry and normalized records mutually consistent
+                 * while making only X scale differ. A literal-packet
+                 * whitelist or unchecked generic scaler would both miss this
+                 * rejection. */
+                uint32_t changed_x1 = test_float_word(
+                    test_float_value(form->quad[10]) + 0.25f);
+                uint32_t changed_normalized = test_float_word(
+                    test_float_value(changed_x1) / 1024.0f);
+                test_gpu_write32(&m, first, 0x89abcdefu);
+                test_gpu_write32(&m, object + 0x1f0u + 10u * 4u,
+                                 changed_x1);
+                test_gpu_write32(&m, object + 0x1f0u + 14u * 4u,
+                                 changed_x1);
+                test_gpu_write32(&m, object + 0x1f0u + 32u * 4u,
+                                 changed_normalized);
+                test_gpu_write32(&m, object + 0x1f0u + 42u * 4u,
+                                 changed_normalized);
+                m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
+                CHECK(test_gpu_read32(&m, first) == 0x89abcdefu,
+                      "%s nonuniform filtered scale changed the destination",
+                      form->name);
+                CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
+                      "%s nonuniform filtered scale raised completion",
+                      form->name);
+                test_gpu_write32(&m, object + 0x1f0u + 10u * 4u,
+                                 form->quad[10]);
+                test_gpu_write32(&m, object + 0x1f0u + 14u * 4u,
+                                 form->quad[14]);
+                test_gpu_write32(&m, object + 0x1f0u + 32u * 4u,
+                                 form->quad[32]);
+                test_gpu_write32(&m, object + 0x1f0u + 42u * 4u,
+                                 form->quad[42]);
+            }
 
             uint32_t source_table = m.bus.read32(m.bus.ctx,
                 MBX_BASE + REG_GART0 + (last_source >> 22) * 4u);
@@ -3146,6 +3185,27 @@ static void test_captured_status_form(const struct mbx_test_status_form *form) {
                   "%s late missing filtered source PTE raised completion",
                   form->name);
             m.bus.write32(m.bus.ctx, source_pte_address, source_pte);
+
+            if (form->column_resample) {
+                uint32_t target_table = m.bus.read32(m.bus.ctx,
+                    MBX_BASE + REG_GART0 + (last_destination >> 22) * 4u);
+                uint32_t target_pte_address = target_table +
+                    (((last_destination >> 12) & 0x3ffu) * 4u);
+                uint32_t target_pte =
+                    m.bus.read32(m.bus.ctx, target_pte_address);
+                test_gpu_write32(&m, first, 0x89abcdefu);
+                test_gpu_write32(&m, last_destination, 0x76543210u);
+                m.bus.write32(m.bus.ctx, target_pte_address, 0u);
+                m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
+                CHECK(test_gpu_read32(&m, first) == 0x89abcdefu &&
+                      m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
+                      "%s missing target PTE partially committed or completed",
+                      form->name);
+                m.bus.write32(m.bus.ctx, target_pte_address, target_pte);
+                CHECK(test_gpu_read32(&m, last_destination) == 0x76543210u,
+                      "%s missing target PTE changed its late destination",
+                      form->name);
+            }
         }
     }
 
@@ -3161,6 +3221,46 @@ static void test_captured_status_form(const struct mbx_test_status_form *form) {
     free(expected);
     s5l8900_free(&m);
 }
+
+/* Safari's tabs transition retained this exact alternate-sampler packet. It
+ * stretches a half-texel-wide source column over the 320-pixel surface while
+ * reducing 222 source rows to 37 destination rows. The sampler mode comes
+ * from the producer's texture state rather than the transform geometry, and
+ * rejecting this coherent draw leaves AppleMBX waiting for 3DIdle. */
+static const struct mbx_test_status_form safari_tabs_column_resample_form = {
+    .name = "Safari tabs alternate filtered column resample",
+    .xclip = 0x01400000u, .yclip = 0x00500020u,
+    .target = 0x00a3d000u,
+    .semantic_sprite = true,
+    .scaled_sprite = true,
+    .column_resample = true,
+    .boundary_override = true,
+    .arbitrary_bgra_probe = true,
+    .tile_x0 = 0u, .tile_x1 = 0x27u,
+    .tile_y0 = 2u, .tile_y1 = 4u,
+    .left = 0u, .top = 42u, .width = 320u, .height = 37u,
+    .source = 0x00983000u,
+    .source_stride = 0x20u, .source_control = 0x8e000000u,
+    .source_width = 1u, .source_height = 222u,
+    .expected_covered_pixels = 11840u,
+    .boundary = {
+        0x00000000u, 0x429e0000u, 0x00000000u, 0x42280000u,
+        0x43a00000u, 0x429e0000u, 0x43a00000u, 0x42280000u,
+    },
+    .quad = {
+        0xe0000000u, 0xa0518001u, 0x8e013060u, 0xd6887610u,
+        0xa7718000u, 0x0e5147a0u, 0xa3104620u, 0x22250e80u,
+        0x00000000u, 0x42280000u, 0x43a00000u, 0x42280000u,
+        0x00000000u, 0x429e0000u, 0x43a00000u, 0x429e0000u,
+        0u, 0u, 0u, 0u,
+        0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+        0xf9000000u, 0x00000000u, 0x00000000u, 0x00000000u,
+        0x3d280000u, 0xf9000000u, 0x3d800000u, 0x00000000u,
+        0x3ea00000u, 0x3d280000u, 0xf9000000u, 0x00000000u,
+        0x3f5d8000u, 0x00000000u, 0x3d9e0000u, 0xf9000000u,
+        0x3d800000u, 0x3f5d8000u, 0x3ea00000u, 0x3d9e0000u,
+    },
+};
 
 /* A right-edge conservative tile can be non-empty while the subpixel quad
  * contains no sample centre after the 320-pixel surface clip.  Completion is
@@ -4199,6 +4299,7 @@ static void test_later_tiled_status_sprites(void) {
         0x61000000u;
     test_captured_status_form(&phase);
 
+    test_captured_status_form(&safari_tabs_column_resample_form);
     test_captured_status_form(&zero_coverage_status_form);
     struct mbx_test_status_form relocated_zero = zero_coverage_status_form;
     relocated_zero.name = "relocated right-edge zero-coverage sprite";
