@@ -2048,6 +2048,156 @@ static void test_compact_column_resample(void) {
     s5l8900_free(&m);
 }
 
+/* The retained unlock transition clipped this compact 320x60 texture to the
+ * single row [185, 186).  Its subpixel destination begins at y=185.770721, so
+ * no pixel centre survives the scissor.  The command is still a valid draw
+ * whose completion makes AppleMBX 3DIdle; it must not touch the target, and a
+ * malformed source, target, or tile mapping must remain rejected. */
+static void test_compact_clipped_zero_coverage(void) {
+    enum {
+        LEFT = 120u, TOP = 185u, RIGHT = 200u, BOTTOM = 186u,
+        SOURCE_STRIDE = 0x500u, TEXTURE_HEIGHT = 64u,
+        TARGET_STRIDE = 0x500u,
+    };
+    const uint32_t table0 = 0x08003000u;
+    const uint32_t table2 = 0x08004000u;
+    const uint32_t region = 0x00001000u;
+    const uint32_t object = 0x00014000u;
+    const uint32_t source = 0x00b56080u;
+    const uint32_t target = 0x00998000u;
+    const uint32_t region_pa = 0x08010000u;
+    const uint32_t object_pa = 0x08014000u;
+    const uint32_t source_pa = 0x08020000u;
+    const uint32_t target_pa = 0x080c0000u;
+
+    s5l8900_t m;
+    CHECK(s5l8900_init(&m, RAM_BASE, RAM_SIZE),
+          "clipped zero-coverage machine init failed");
+    if (!m.ram) return;
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_GART0, table0);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_GART2, table2);
+    test_map_gpu_page(&m, table0, region, region_pa);
+    test_map_gpu_page(&m, table0, object, object_pa);
+
+    uint32_t source_page0 = source & ~0xfffu;
+    uint32_t source_last = source + TEXTURE_HEIGHT * SOURCE_STRIDE - 1u;
+    for (uint32_t page = source_page0;
+         page <= (source_last & ~0xfffu); page += 0x1000u)
+        test_map_gpu_page(&m, table2, page,
+                          source_pa + (page - source_page0));
+
+    uint32_t first = target + TOP * TARGET_STRIDE + LEFT * 4u;
+    uint32_t last = target + (BOTTOM - 1u) * TARGET_STRIDE +
+                    (RIGHT - 1u) * 4u;
+    uint32_t target_page0 = first & ~0xfffu;
+    for (uint32_t page = target_page0;
+         page <= (last & ~0xfffu); page += 0x1000u)
+        test_map_gpu_page(&m, table2, page,
+                          target_pa + (page - target_page0));
+
+    for (uint32_t off = 0u; off < 0x500u; off += 4u)
+        test_gpu_write32(&m, object + off, 0u);
+    for (unsigned i = 0; i < 26u; i++)
+        test_gpu_write32(&m, object + i * 4u, 0x5a000000u ^ i);
+
+    uint32_t list = object + 0x68u;
+    test_gpu_write32(&m, list, 0x60200020u);
+    test_gpu_write32(&m, list + 4u, 0x6020002du);
+    test_gpu_write32(&m, list + 8u, 0x6120003au);
+    test_gpu_write32(&m, list + 12u, 0xf0000000u);
+
+    static const struct {
+        uint16_t off;
+        uint32_t value;
+    } boundary_fixed[] = {
+        {0x080u, 0x22206f80u}, {0x088u, 0x45800000u},
+        {0x094u, 0x45800000u}, {0x098u, 0x45800000u},
+        {0x09cu, 0x45800000u}, {0x0b4u, 0x22207f80u},
+    };
+    for (unsigned i = 0;
+         i < sizeof boundary_fixed / sizeof boundary_fixed[0]; i++)
+        test_gpu_write32(&m, object + boundary_fixed[i].off,
+                         boundary_fixed[i].value);
+    const uint32_t boundary[8] = {
+        LEFT, BOTTOM, LEFT, TOP, RIGHT, BOTTOM, RIGHT, TOP,
+    };
+    for (unsigned i = 0; i < 8u; i++)
+        test_gpu_write32(&m, object + 0x0b8u + i * 4u,
+                         test_float_word((float)boundary[i]));
+
+    const uint32_t record_offset = 0x0e8u;
+    const uint32_t record[33] = {
+        0xe0000000u, 0xa6318000u, 0x8e516ac1u, 0xa6887610u,
+        0x22220e80u,
+        0x42f11efeu, 0x4339c54eu, 0x43477082u, 0x4339c54eu,
+        0x42f11efeu, 0x43488f7eu, 0x43477082u, 0x43488f7eu,
+        0u, 0u, 0u, 0u,
+        0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+        0xff000000u, 0u, 0u,
+        0xff000000u, 0x3f1fc000u, 0u,
+        0xff000000u, 0u, 0x3f6e0000u,
+        0xff000000u, 0x3f1fc000u, 0x3f6e0000u,
+    };
+    for (unsigned i = 0; i < 33u; i++)
+        test_gpu_write32(&m, object + record_offset + i * 4u, record[i]);
+
+    const uint32_t tile_x0 = 15u, tile_x1 = 24u, tile_y = 11u;
+    uint32_t tile_count = tile_x1 - tile_x0 + 1u;
+    for (uint32_t i = 0; i < tile_count; i++) {
+        uint32_t code = (tile_y << 8) | (tile_x0 + i);
+        if (i + 1u == tile_count) code |= 0x80000000u;
+        test_gpu_write32(&m, region + i * 8u, code);
+        test_gpu_write32(&m, region + i * 8u + 4u, list);
+    }
+
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_RGNBASE, region);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_OBJBASE, object);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_PIXSAMP, 0x00020007u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_FBCTL, 6u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_FBXCLIP, 0x00c80078u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_FBYCLIP, 0x00c000b0u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_FBSTART, target);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_FBSTRIDE, 320u);
+
+    test_gpu_write32(&m, first, 0x89abcdefu);
+    test_gpu_write32(&m, last, 0x76543210u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
+    CHECK(test_gpu_read32(&m, first) == 0x89abcdefu &&
+          test_gpu_read32(&m, last) == 0x76543210u,
+          "clipped zero-coverage draw changed its target row");
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0x4cu,
+          "clipped zero-coverage draw did not raise all completion events");
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x4cu);
+
+    uint32_t late_source_page = source_last & ~0xfffu;
+    uint32_t source_pte_address = table2 +
+        (((late_source_page >> 12) & 0x3ffu) * 4u);
+    uint32_t source_pte = m.bus.read32(m.bus.ctx, source_pte_address);
+    m.bus.write32(m.bus.ctx, source_pte_address, 0u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
+    m.bus.write32(m.bus.ctx, source_pte_address, source_pte);
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
+          "missing zero-coverage source PTE raised completion");
+
+    uint32_t target_pte_address = table2 +
+        (((target_page0 >> 12) & 0x3ffu) * 4u);
+    uint32_t target_pte = m.bus.read32(m.bus.ctx, target_pte_address);
+    m.bus.write32(m.bus.ctx, target_pte_address, 0u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
+    m.bus.write32(m.bus.ctx, target_pte_address, target_pte);
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
+          "missing zero-coverage target PTE raised completion");
+
+    uint32_t region_word = test_gpu_read32(&m, region);
+    test_gpu_write32(&m, region, region_word ^ 1u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
+          "malformed zero-coverage tile raised completion");
+    test_gpu_write32(&m, region, region_word);
+
+    s5l8900_free(&m);
+}
+
 static void test_write_solid_quad(s5l8900_t *m,
                                   uint32_t region,
                                   uint32_t object,
@@ -4074,6 +4224,7 @@ int main(void) {
     test_second_tiled_status_glyph();
     test_compact_opaque_blit_copy();
     test_compact_column_resample();
+    test_compact_clipped_zero_coverage();
     test_pointer_selected_solid_quad();
     test_later_tiled_status_sprites();
     printf("\n%d passed, %d failed\n", g_pass, g_fail);

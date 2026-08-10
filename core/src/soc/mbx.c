@@ -3125,18 +3125,11 @@ static bool mbx_execute_textured_sprite(s5l_mbx_t *m,
     uint32_t guard_top = (uint32_t)(producer_y0 + lower_bias);
     uint32_t guard_right = (uint32_t)(producer_x1 + upper_bias);
     uint32_t guard_bottom = (uint32_t)(producer_y1 + upper_bias);
-    if (guard_left >= guard_right || guard_top >= guard_bottom ||
-        guard_right > MBX_3D_WIDTH || guard_bottom > 480u) {
-        if (why) *why = "sprite producer bounds leave the 320x480 surface";
-        return false;
-    }
 
-    /* The values above are conservative tile/clip bounds, not fragment
-     * coverage. Standard pixel-centre bounding coverage for the producer quad
-     * is [ceil(min - 0.5), ceil(max - 0.5)); affine fragments are subsequently
-     * tested by inverse mapping inside that box. r417 is the first capture
-     * where the producer's asymmetric guard biases add a row that this raster
-     * interval does not cover. Keep the two rectangles independent. */
+    /* Standard pixel-centre coverage can be empty even when the producer's
+     * conservative, tile-aligned region is non-empty.  Work it out before
+     * rejecting a collapsed integer guard: the fully validated command must
+     * still complete so AppleMBX can return to 3DIdle. */
     int32_t raster_left_unclipped = mbx_3d_ceil_to_i32(x0 - 0.5f);
     int32_t raster_top_unclipped = mbx_3d_ceil_to_i32(y0 - 0.5f);
     int32_t raster_right_unclipped = mbx_3d_ceil_to_i32(x1 - 0.5f);
@@ -3163,8 +3156,16 @@ static bool mbx_execute_textured_sprite(s5l_mbx_t *m,
     uint32_t top = (uint32_t)raster_top;
     uint32_t right = (uint32_t)raster_right;
     uint32_t bottom = (uint32_t)raster_bottom;
-    uint32_t width = right - left;
-    uint32_t height = bottom - top;
+    uint32_t width = zero_coverage ? 0u : right - left;
+    uint32_t height = zero_coverage ? 0u : bottom - top;
+
+    bool collapsed_guard =
+        guard_left >= guard_right || guard_top >= guard_bottom;
+    if ((collapsed_guard && !zero_coverage) ||
+        guard_right > MBX_3D_WIDTH || guard_bottom > 480u) {
+        if (why) *why = "sprite producer bounds leave the 320x480 surface";
+        return false;
+    }
 
     uint32_t source_x0 = 0u, source_y0 = 0u;
     if (!half_texel_layout && !zero_coverage) {
@@ -3216,6 +3217,13 @@ static bool mbx_execute_textured_sprite(s5l_mbx_t *m,
     uint32_t clip_right = (guard_right + 7u) & ~7u;
     uint32_t clip_top = guard_top & ~15u;
     uint32_t clip_bottom = (guard_bottom + 15u) & ~15u;
+    if (clip_left >= clip_right || clip_top >= clip_bottom ||
+        clip_right > MBX_3D_WIDTH || clip_bottom > 480u) {
+        if (why) {
+            *why = "sprite aligned clip rectangle is empty or out of bounds";
+        }
+        return false;
+    }
     uint32_t expected_xclip = (clip_right << 16) | clip_left;
     uint32_t expected_yclip = (clip_bottom << 16) | clip_top;
     if (m->reg[S5L_MBX_FBXCLIP / 4u] != expected_xclip ||
