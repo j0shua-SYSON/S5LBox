@@ -3010,15 +3010,18 @@ static bool mbx_execute_textured_sprite(s5l_mbx_t *m,
                 scale_x <= 1.0f + epsilon && scale_y <= 1.0f + epsilon &&
                 scale_difference <= 0.00001f;
             /* Retained direct, alternate and modulated producer packets all
-             * use a one-column texture as a vertical strip. They independently
-             * magnify that column in X while retaining or reducing its rows in
-             * Y. The producer selects its filtered sampler from texture state,
-             * not from this geometry. Model the shared separable operation,
-             * but keep it one-dimensional and directional: wider sources and
-             * vertical magnification still require another measured family. */
-            bool filtered_column_resample =
+             * use a one-texel-or-narrower horizontal UV strip. They magnify
+             * that strip in X while retaining or reducing its rows in Y. The
+             * Spotlight return packet's normalized float round-trip lands
+             * 0.00000191 texels above one, so its conservative floor/ceil
+             * envelope spans two columns. Classify the sampled UV span, while
+             * bounding that envelope to two columns; genuinely wider strips
+             * and vertical magnification still require another measured
+             * family. */
+            bool filtered_narrow_strip_resample =
                 (direct_sampler || modulated_sampler || scaled_sampler) &&
-                half_texel_layout && source_width == 1u &&
+                half_texel_layout && source_width <= 2u &&
+                u_texel_span <= 1.0f + epsilon &&
                 scale_x >= 1.0f - epsilon &&
                 scale_y > 0.0f && scale_y <= 1.0f + epsilon;
             bool modulated_uniform_scale =
@@ -3032,7 +3035,7 @@ static bool mbx_execute_textured_sprite(s5l_mbx_t *m,
                 scale_difference <= 0.00001f;
             if (source_width > MBX_3D_WIDTH || source_height > 480u ||
                 (!direct_magnification && !direct_uniform_minification &&
-                 !filtered_column_resample &&
+                 !filtered_narrow_strip_resample &&
                  !modulated_uniform_scale &&
                  !alternate_uniform_minification)) {
                 if (mbx_trace_state == 1) {

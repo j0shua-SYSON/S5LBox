@@ -3105,10 +3105,10 @@ static void test_captured_status_form(const struct mbx_test_status_form *form) {
 
         if (form->scaled_sprite) {
             if (form->column_resample) {
-                /* The measured mixed-axis exception is one-dimensional.
-                 * Preserve both redundant UV corners while widening its
-                 * half-texel source span from one column to two; that must
-                 * remain an atomic rejection. */
+                /* The measured mixed-axis exception has a one-texel-or-less
+                 * horizontal UV span. Preserve both redundant UV corners
+                 * while widening that span by one full texel; the resulting
+                 * two-dimensional transform must remain an atomic rejection. */
                 uint32_t texture_width =
                     8u << ((form->quad[1] >> 24) & 7u);
                 uint32_t changed_u1 = test_float_word(
@@ -3299,6 +3299,48 @@ static const struct mbx_test_status_form safari_done_column_resample_form = {
         0x3e948000u, 0x3d240000u, 0x08000000u, 0x00000000u,
         0x3f780000u, 0x3e640000u, 0x3d900000u, 0x08000000u,
         0x3d800000u, 0x3f780000u, 0x3e948000u, 0x3d900000u,
+    },
+};
+
+/* SpringBoard's return from Spotlight retained this modulated-sampler strip.
+ * The producer's normalized float round-trip makes its one-texel horizontal
+ * UV span 1.00000191 texels, so the conservative floor/ceil envelope covers
+ * two source columns even though the sampled operation is still the same
+ * narrow horizontal strip. It expands that strip over 272 pixels while
+ * retaining all 31 source rows. */
+static const struct mbx_test_status_form
+spotlight_home_narrow_strip_resample_form = {
+    .name = "Spotlight home modulated narrow-strip resample",
+    .xclip = 0x01180000u, .yclip = 0x00400010u,
+    .target = 0x00897000u,
+    .semantic_sprite = true,
+    .scaled_sprite = true,
+    .column_resample = true,
+    .boundary_override = true,
+    .arbitrary_bgra_probe = true,
+    .tile_x0 = 0u, .tile_x1 = 0x22u,
+    .tile_y0 = 1u, .tile_y1 = 3u,
+    .left = 2u, .top = 26u, .width = 272u, .height = 31u,
+    .source = 0x00981000u,
+    .source_stride = 0x0a0u, .source_control = 0x8e080000u,
+    .source_width = 2u, .source_height = 31u,
+    .expected_covered_pixels = 8432u,
+    .boundary = {
+        0x3f800000u, 0x42640000u, 0x3f800000u, 0x41d00000u,
+        0x43890000u, 0x42640000u, 0x43890000u, 0x41d00000u,
+    },
+    .quad = {
+        0xe0000000u, 0xa3218001u, 0x8e093020u, 0xcd206c40u,
+        0xa7718000u, 0x0e5112e0u, 0xae504ea0u, 0x22250e80u,
+        0x3ffffffbu, 0x41d00000u, 0x43890000u, 0x41d00000u,
+        0x3ffffffbu, 0x42640000u, 0x43890000u, 0x42640000u,
+        0u, 0u, 0u, 0u,
+        0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+        0xed000000u, 0x3e880000u, 0x00000000u, 0x3afffffbu,
+        0x3cd00000u, 0xed000000u, 0x3e900001u, 0x00000000u,
+        0x3e890000u, 0x3cd00000u, 0xed000000u, 0x3e880000u,
+        0x3f780000u, 0x3afffffbu, 0x3d640000u, 0xed000000u,
+        0x3e900001u, 0x3f780000u, 0x3e890000u, 0x3d640000u,
     },
 };
 
@@ -4341,6 +4383,7 @@ static void test_later_tiled_status_sprites(void) {
 
     test_captured_status_form(&safari_tabs_column_resample_form);
     test_captured_status_form(&safari_done_column_resample_form);
+    test_captured_status_form(&spotlight_home_narrow_strip_resample_form);
     test_captured_status_form(&zero_coverage_status_form);
     struct mbx_test_status_form relocated_zero = zero_coverage_status_form;
     relocated_zero.name = "relocated right-edge zero-coverage sprite";
