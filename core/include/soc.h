@@ -928,6 +928,35 @@ typedef struct {
     uint8_t *edram;
 } s5l_mbx_t;
 
+#define S5L_MBX_3D_REJECTION_HISTORY 4u
+#define S5L_MBX_3D_REJECTION_RECORD_WORDS 44u
+
+/* Host-only evidence for one fail-closed STARTRENDER. Four records cover the
+ * complete burst observed during the SpringBoard-to-Settings transition.
+ * The selected object record is captured at rejection time because later
+ * accepted renders may reuse the same guest allocation before a checkpoint
+ * can be taken. Nothing here is guest-visible or part of snap_mbx(). */
+typedef struct {
+    uint64_t sequence;
+    uint64_t tiled_reason_hash;
+    uint64_t status_reason_hash;
+    uint64_t sprite_reason_hash;
+    uint64_t solid_reason_hash;
+    uint32_t region;
+    uint32_t object;
+    uint32_t target;
+    uint32_t xclip;
+    uint32_t yclip;
+    uint32_t pixel_sample;
+    uint32_t framebuffer_control;
+    uint32_t framebuffer_stride;
+    uint32_t list_valid_mask;
+    uint32_t list_words[4];
+    uint32_t record_base;
+    uint32_t record_valid_words;
+    uint32_t record_words[S5L_MBX_3D_REJECTION_RECORD_WORDS];
+} s5l_mbx_3d_rejection_witness_t;
+
 /*
  * Host-only work ledger for one machine's synchronous MBX submissions.
  *
@@ -955,6 +984,8 @@ typedef struct {
     uint64_t completed_3d;
     uint64_t rejected_3d;
     uint64_t pixels_3d;
+    s5l_mbx_3d_rejection_witness_t rejected_3d_history[
+        S5L_MBX_3D_REJECTION_HISTORY];
 } s5l_mbx_telemetry_t;
 
 void     s5l_mbx_reset(s5l_mbx_t *m);

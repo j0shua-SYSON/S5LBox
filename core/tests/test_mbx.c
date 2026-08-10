@@ -1452,6 +1452,47 @@ static void test_first_tiled_premultiplied_over(void) {
           (unsigned long long)m.mbx_telemetry.completed_3d,
           (unsigned long long)m.mbx_telemetry.rejected_3d,
           (unsigned long long)m.mbx_telemetry.pixels_3d);
+    const s5l_mbx_3d_rejection_witness_t *first_reject =
+        &m.mbx_telemetry.rejected_3d_history[0];
+    const s5l_mbx_3d_rejection_witness_t *second_reject =
+        &m.mbx_telemetry.rejected_3d_history[1];
+    CHECK(first_reject->sequence == 1u &&
+          second_reject->sequence == 2u &&
+          first_reject->region == region &&
+          first_reject->object == object &&
+          first_reject->target == target &&
+          first_reject->xclip == 0x01400000u &&
+          first_reject->yclip == 0x00800010u &&
+          first_reject->pixel_sample == 0x00020007u &&
+          first_reject->framebuffer_control == 6u &&
+          first_reject->framebuffer_stride == WIDTH,
+          "3D rejection witnesses lost sequence or render registers");
+    CHECK(first_reject->tiled_reason_hash != 0u &&
+          first_reject->status_reason_hash != 0u &&
+          first_reject->sprite_reason_hash != 0u &&
+          first_reject->solid_reason_hash != 0u &&
+          first_reject->list_valid_mask == 0x0fu &&
+          first_reject->list_words[2] == 0x61a0007cu &&
+          first_reject->record_base == object + 0x1f0u &&
+          first_reject->record_valid_words ==
+              S5L_MBX_3D_REJECTION_RECORD_WORDS &&
+          first_reject->record_words[3] == 0xa6884711u,
+          "first 3D rejection witness did not retain the malformed record");
+    CHECK(second_reject->list_valid_mask == 0x0fu &&
+          second_reject->record_base == object + 0x1f0u &&
+          second_reject->record_valid_words ==
+              S5L_MBX_3D_REJECTION_RECORD_WORDS &&
+          second_reject->record_words[3] == 0xa6884710u,
+          "second 3D rejection witness did not retain the restored record");
+
+    for (unsigned i = 0u; i < S5L_MBX_3D_REJECTION_HISTORY; i++)
+        m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
+    CHECK(m.mbx_telemetry.rejected_3d == 6u &&
+          m.mbx_telemetry.rejected_3d_history[0].sequence == 5u &&
+          m.mbx_telemetry.rejected_3d_history[1].sequence == 6u &&
+          m.mbx_telemetry.rejected_3d_history[2].sequence == 3u &&
+          m.mbx_telemetry.rejected_3d_history[3].sequence == 4u,
+          "3D rejection history did not retain the latest bounded window");
 
     /* r379 captured the overwritten render before r377's retained one. It
      * reused this exact quad/source, but narrowed the tiles to y=1..6 and the

@@ -188,10 +188,12 @@ SNAP_SIZE_GUARD(s5l_stub_t,        56,    "snap_stubs");
  * another callback/context, seven uint64_t values and transient anchor flag;
  * it follows the same policy. 122192 adds three uint64_t witnesses identifying
  * the last rejected 2D batch inside the already host-only MBX ledger (24).
+ * 123312 adds four bounded host-only MBX3D rejection witnesses (4 x 280).
+ * They retain transient decoder evidence only and remain outside snap_mach().
  * SNAPSHOT_VERSION and the bytes on disk therefore do not move. The size below
  * must be read from the compiler's emitted `.space`, not inferred from source
  * padding. */
-SNAP_SIZE_GUARD(s5l8900_t,         122192, "snap_mach");
+SNAP_SIZE_GUARD(s5l8900_t,         123312, "snap_mach");
 #endif
 
 /* ---------------------------------------------------------------- the IO --- */

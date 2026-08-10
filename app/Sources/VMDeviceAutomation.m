@@ -556,6 +556,54 @@ static double VMDeviceAutomationSeconds(uint64_t firstNS, uint64_t lastNS) {
                 compact_pc_profile_fallback),
             (unsigned long long)VM_EXEC_DELTA(compact_pc_profile_exit)];
 #undef VM_EXEC_DELTA
+        uint64_t firstReject = first->mbx_3d_rejected;
+        uint64_t lastReject = last->mbx_3d_rejected;
+        uint64_t rejectDelta = lastReject >= firstReject
+            ? lastReject - firstReject : 0u;
+        uint64_t witnessCount = rejectDelta;
+        if (witnessCount > VM_MBX_3D_REJECTION_HISTORY)
+            witnessCount = VM_MBX_3D_REJECTION_HISTORY;
+        uint64_t witnessStart = witnessCount
+            ? lastReject - witnessCount + 1u : 0u;
+        NSMutableString *rejectionWitnesses = [NSMutableString string];
+        for (uint64_t sequence = witnessStart;
+             sequence != 0u && sequence <= lastReject; sequence++) {
+            const vm_mbx_3d_rejection_witness_t *witness =
+                &last->mbx_3d_rejection_history[
+                    (sequence - 1u) % VM_MBX_3D_REJECTION_HISTORY];
+            if (witness->sequence != sequence) continue;
+            /* Decoder reasons retain their execution order: tiled, status,
+             * textured sprite, then solid quad. */
+            [rejectionWitnesses appendFormat:
+                @",mbx_3d_reject_%llu_reasons=%016llx:%016llx:%016llx:%016llx,"
+                 "mbx_3d_reject_%llu_regs=%08x:%08x:%08x:%08x:%08x:%08x:%08x:%08x,"
+                 "mbx_3d_reject_%llu_list=%x:%08x:%08x:%08x:%08x,"
+                 "mbx_3d_reject_%llu_record=%08x:%u",
+                (unsigned long long)sequence,
+                (unsigned long long)witness->tiled_reason_hash,
+                (unsigned long long)witness->status_reason_hash,
+                (unsigned long long)witness->sprite_reason_hash,
+                (unsigned long long)witness->solid_reason_hash,
+                (unsigned long long)sequence,
+                witness->region, witness->object, witness->target,
+                witness->xclip, witness->yclip, witness->pixel_sample,
+                witness->framebuffer_control, witness->framebuffer_stride,
+                (unsigned long long)sequence,
+                witness->list_valid_mask,
+                witness->list_words[0], witness->list_words[1],
+                witness->list_words[2], witness->list_words[3],
+                (unsigned long long)sequence,
+                witness->record_base, witness->record_valid_words];
+            uint32_t validWords = witness->record_valid_words;
+            if (validWords > VM_MBX_3D_REJECTION_RECORD_WORDS)
+                validWords = VM_MBX_3D_REJECTION_RECORD_WORDS;
+            for (uint32_t i = 0u; i < validWords; i++)
+                [rejectionWitnesses appendFormat:@":%08x",
+                    witness->record_words[i]];
+        }
+        if (rejectionWitnesses.length)
+            execution = [execution stringByAppendingString:
+                rejectionWitnesses];
         if (last->compact_pc_profile_reference_pc != 0u) {
             NSMutableString *outsidePCs = [NSMutableString
                 stringWithFormat:

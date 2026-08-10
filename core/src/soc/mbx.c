@@ -3565,6 +3565,69 @@ static bool mbx_execute_textured_sprite(s5l_mbx_t *m,
     return ok;
 }
 
+static void mbx_capture_3d_rejection(
+        const s5l_mbx_t *m, const arm_bus_t *bus,
+        const char *tiled_why, const char *status_why,
+        const char *sprite_why, const char *solid_why,
+        s5l_mbx_telemetry_t *telemetry) {
+    if (!m || !bus || !telemetry || !telemetry->rejected_3d) return;
+
+    uint64_t sequence = telemetry->rejected_3d;
+    s5l_mbx_3d_rejection_witness_t *witness =
+        &telemetry->rejected_3d_history[
+            (sequence - 1u) % S5L_MBX_3D_REJECTION_HISTORY];
+    memset(witness, 0, sizeof *witness);
+    witness->sequence = sequence;
+    witness->tiled_reason_hash = mbx_rejection_reason_hash(tiled_why);
+    witness->status_reason_hash = mbx_rejection_reason_hash(status_why);
+    witness->sprite_reason_hash = mbx_rejection_reason_hash(sprite_why);
+    witness->solid_reason_hash = mbx_rejection_reason_hash(solid_why);
+    witness->region = m->reg[S5L_MBX_RGNBASE / 4u];
+    witness->object = m->reg[S5L_MBX_OBJBASE / 4u];
+    witness->target = m->reg[S5L_MBX_FBSTART / 4u];
+    witness->xclip = m->reg[S5L_MBX_FBXCLIP / 4u];
+    witness->yclip = m->reg[S5L_MBX_FBYCLIP / 4u];
+    witness->pixel_sample = m->reg[S5L_MBX_3DPIXSAMP / 4u];
+    witness->framebuffer_control = m->reg[S5L_MBX_FBCTL / 4u];
+    witness->framebuffer_stride =
+        m->reg[S5L_MBX_FBLINESTRIDE / 4u];
+
+    const char *capture_why = "rejection-witness read failed";
+    uint64_t list64 = (uint64_t)witness->object + 0x68u;
+    if (list64 <= UINT32_MAX - 12u) {
+        for (unsigned i = 0u; i < 4u; i++) {
+            uint32_t value = 0u;
+            if (!mbx_gart_u32(m, bus, (uint32_t)list64 + i * 4u,
+                              &value, &capture_why))
+                continue;
+            witness->list_valid_mask |= 1u << i;
+            witness->list_words[i] = value;
+        }
+    }
+
+    if ((witness->list_valid_mask & 4u) == 0u) return;
+    uint32_t pointer = witness->list_words[2];
+    uint64_t record64 = 0u;
+    if (pointer == 0x61a0007cu)
+        record64 = (uint64_t)witness->object + 0x1f0u;
+    else if ((pointer & 0xfff00000u) == 0x61200000u)
+        record64 = (uint64_t)witness->object +
+                   (uint64_t)(pointer & 0x000fffffu) * 4u;
+    if (!record64 || record64 > UINT32_MAX -
+            (S5L_MBX_3D_REJECTION_RECORD_WORDS - 1u) * 4u)
+        return;
+
+    witness->record_base = (uint32_t)record64;
+    for (unsigned i = 0u; i < S5L_MBX_3D_REJECTION_RECORD_WORDS; i++) {
+        uint32_t value = 0u;
+        if (!mbx_gart_u32(m, bus, witness->record_base + i * 4u,
+                          &value, &capture_why))
+            break;
+        witness->record_words[i] = value;
+        witness->record_valid_words = i + 1u;
+    }
+}
+
 bool s5l_mbx_process_3d(s5l_mbx_t *m, const arm_bus_t *bus,
                         uint32_t written_off, uint32_t value,
                         s5l_mbx_telemetry_t *telemetry) {
@@ -3587,7 +3650,12 @@ bool s5l_mbx_process_3d(s5l_mbx_t *m, const arm_bus_t *bus,
         accepted = mbx_execute_solid_quad(m, bus, &solid_why, &pixels);
     if (!accepted) {
         mbx_counter_add(&mbx_3d_rejected, 1u);
-        if (telemetry) mbx_counter_add(&telemetry->rejected_3d, 1u);
+        if (telemetry) {
+            mbx_counter_add(&telemetry->rejected_3d, 1u);
+            mbx_capture_3d_rejection(
+                m, bus, tiled_why, status_why, sprite_why, solid_why,
+                telemetry);
+        }
         if (mbx_trace_state == 1) {
             fprintf(stderr,
                     "MBX3D reject STARTRENDER: tiled=%s; status=%s; "

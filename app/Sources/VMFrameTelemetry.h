@@ -74,6 +74,29 @@ typedef struct {
  * keeps diagnostics out of the instruction hot path while still exposing
  * whether a signed invocation retired useful work or failed an entry gate. */
 #define VM_COMPACT_PC_PROFILE_HOT_COUNT 8u
+#define VM_MBX_3D_REJECTION_HISTORY 4u
+#define VM_MBX_3D_REJECTION_RECORD_WORDS 44u
+
+typedef struct {
+    uint64_t sequence;
+    uint64_t tiled_reason_hash;
+    uint64_t status_reason_hash;
+    uint64_t sprite_reason_hash;
+    uint64_t solid_reason_hash;
+    uint32_t region;
+    uint32_t object;
+    uint32_t target;
+    uint32_t xclip;
+    uint32_t yclip;
+    uint32_t pixel_sample;
+    uint32_t framebuffer_control;
+    uint32_t framebuffer_stride;
+    uint32_t list_valid_mask;
+    uint32_t list_words[4];
+    uint32_t record_base;
+    uint32_t record_valid_words;
+    uint32_t record_words[VM_MBX_3D_REJECTION_RECORD_WORDS];
+} vm_mbx_3d_rejection_witness_t;
 
 typedef struct {
     uint64_t cpu_retired;
@@ -112,6 +135,8 @@ typedef struct {
     uint64_t mbx_3d_completed;
     uint64_t mbx_3d_rejected;
     uint64_t mbx_3d_pixels;
+    vm_mbx_3d_rejection_witness_t mbx_3d_rejection_history[
+        VM_MBX_3D_REJECTION_HISTORY];
     uint64_t active_clock_updates;
     uint64_t active_clock_added_ticks;
     uint64_t active_clock_clamps;
