@@ -6429,7 +6429,8 @@ static bool compact_raw_resident_compare(
         unsigned expected_native, unsigned expected_fallback,
         unsigned stop_after, bool stale_write_witness, bool refuse_window,
         unsigned omit_window_after, bool fast_refill_window,
-        unsigned expected_fast_refills, bool window_cache_enabled,
+        unsigned expected_fast_refills, bool user_mode,
+        bool window_cache_enabled,
         uint64_t expected_window_cache_hits) {
     arm_cpu_t reference, resident;
     final_state_t reference_state, resident_state;
@@ -6455,6 +6456,10 @@ static bool compact_raw_resident_compare(
                                insns, pc);
     else
         seed_cpu_at(&reference, program, insns, false, pc);
+    if (user_mode) {
+        reference.cpsr =
+            (reference.cpsr & ~ARM_CPSR_MODE_MASK) | ARM_MODE_USR;
+    }
     resident = reference;
     /* The generic synthetic bus neither populates DREAD nor grants the live
      * frontend write consent required to expose DWRITE. The Thumb cache-path
@@ -8948,54 +8953,54 @@ static bool validate_compact_raw_oracles(void) {
     if (!compact_raw_resident_compare(
             "continue", resident_mixed, 5u, false, UINT32_C(0x4c00),
             UINT32_C(0x4c00), 20u, 5u, 5u, 3u, 2u, 0u, true,
-            false, 0u, false, 0u, false, 0u))
+            false, 0u, false, 0u, false, false, 0u))
         return false;
     if (!compact_raw_resident_compare(
             "boundary-stop", resident_mixed, 5u, false, UINT32_C(0x4c00),
             UINT32_C(0x4c00), 20u, 2u, 5u, 1u, 1u, 1u, false,
-            false, 0u, false, 0u, false, 0u))
+            false, 0u, false, 0u, false, false, 0u))
         return false;
     if (!compact_raw_resident_compare(
             "sequential-window", resident_cross_sequential, 3u, false,
             UINT32_C(0x5ffc), UINT32_C(0x5c00), UINT32_C(0x400),
             3u, 3u, 2u, 1u, 0u, false, false, 0u, false, 0u,
-            false, 0u))
+            false, false, 0u))
         return false;
     if (!compact_raw_resident_compare(
             "no-retire-window", resident_cross_fast, 3u, false,
             UINT32_C(0x5ffc), UINT32_C(0x5c00), UINT32_C(0x400),
             3u, 3u, 2u, 1u, 0u, false, false, 0u, true, 1u,
-            false, 0u))
+            false, false, 0u))
         return false;
     if (!compact_raw_resident_compare(
             "window-refusal", resident_cross_sequential, 3u, false,
             UINT32_C(0x5ffc), UINT32_C(0x5c00), UINT32_C(0x400),
             2u, 3u, 1u, 1u, 0u, false, true, 0u, false, 0u,
-            false, 0u))
+            false, false, 0u))
         return false;
     if (!compact_raw_resident_compare(
             "branch-window", resident_cross_branch, 5u, false,
             UINT32_C(0x63f8), UINT32_C(0x6000), UINT32_C(0x400),
             4u, 4u, 3u, 1u, 0u, false, false, 0u, false, 0u,
-            false, 0u))
+            false, false, 0u))
         return false;
     if (!compact_raw_resident_compare(
             "stale-window", resident_stale_window, 5u, false,
             UINT32_C(0x67fc), UINT32_C(0x6400), UINT32_C(0x400),
             4u, 5u, 2u, 2u, 0u, false, false, 2u, false, 0u,
-            false, 0u))
+            false, false, 0u))
         return false;
     if (!compact_raw_resident_compare(
             "thumb-memory", resident_thumb_memory, 6u, true,
             UINT32_C(0x6c00), UINT32_C(0x6c00), 12u,
             5u, 5u, 4u, 1u, 0u, false, false, 0u, false, 0u,
-            false, 0u))
+            false, false, 0u))
         return false;
     if (!compact_raw_resident_compare(
             "window-cache", resident_window_cache, 3u, false,
             UINT32_C(0x73fc), UINT32_C(0x7000), UINT32_C(0x400),
             8u, 8u, 8u, 0u, 0u, false, false, 0u, true, 1u,
-            true, UINT64_C(6)))
+            true, true, UINT64_C(6)))
         return false;
 
     seed_cpu_at(&contract, unsupported_prefix, 2u, false,
