@@ -2250,6 +2250,302 @@ static void test_compact_column_resample(void) {
     s5l8900_free(&m);
 }
 
+/* Unlocking into Safari's retained error alert produced these two exact
+ * compact-copy records.  Unlike the older compact fixtures, their texture
+ * control uses the 0x0e layout while their UV endpoints remain half a texel
+ * inside a 320x356 source.  Both destination rectangles are uniform
+ * minifications to subpixel edges.  They are two phases of one producer
+ * family, not permission to treat every full-extent compact packet as a
+ * filtered transform. */
+struct compact_uniform_minification_capture {
+    const char *name;
+    uint32_t target;
+    uint32_t boundary_left, boundary_top, boundary_right, boundary_bottom;
+    uint32_t raster_left, raster_top, raster_right, raster_bottom;
+    uint32_t xclip, yclip;
+    uint32_t record[33];
+};
+
+static const struct compact_uniform_minification_capture
+compact_uniform_minification_captures[] = {
+    {
+        .name = "Safari alert compact minification on CLCD surface",
+        .target = 0x00897000u,
+        .boundary_left = 120u, .boundary_top = 200u,
+        .boundary_right = 200u, .boundary_bottom = 289u,
+        .raster_left = 120u, .raster_top = 200u,
+        .raster_right = 200u, .raster_bottom = 289u,
+        .xclip = 0x00c80078u, .yclip = 0x013000c0u,
+        .record = {
+            0xe0000000u, 0xa6618000u, 0x0e514a21u, 0xa6887610u,
+            0x22220e80u,
+            0x42f08777u, 0x434843bcu, 0x4347bc44u, 0x434843bcu,
+            0x42f08777u, 0x43905684u, 0x4347bc44u, 0x43905684u,
+            0u, 0u, 0u, 0u,
+            0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+            0xff000000u, 0u, 0u,
+            0xff000000u, 0x3f1fc000u, 0u,
+            0xff000000u, 0u, 0x3f31c000u,
+            0xff000000u, 0x3f1fc000u, 0x3f31c000u,
+        },
+    },
+    {
+        .name = "Safari alert compact minification on transition surface",
+        .target = 0x00bd1000u,
+        .boundary_left = 115u, .boundary_top = 195u,
+        .boundary_right = 205u, .boundary_bottom = 294u,
+        .raster_left = 116u, .raster_top = 196u,
+        .raster_right = 204u, .raster_bottom = 294u,
+        .xclip = 0x00d00070u, .yclip = 0x013000c0u,
+        .record = {
+            0xe0000000u, 0xa6618000u, 0x0e514a21u, 0xa6887610u,
+            0x22220e80u,
+            0x42e7fb15u, 0x4343fd8bu, 0x434c0275u, 0x4343fd8bu,
+            0x42e7fb15u, 0x4392f4b5u, 0x434c0275u, 0x4392f4b5u,
+            0u, 0u, 0u, 0u,
+            0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+            0xff000000u, 0u, 0u,
+            0xff000000u, 0x3f1fc000u, 0u,
+            0xff000000u, 0u, 0x3f31c000u,
+            0xff000000u, 0x3f1fc000u, 0x3f31c000u,
+        },
+    },
+};
+
+static uint32_t test_compact_capture_gart(uint32_t gpu_page,
+                                          uint32_t table2,
+                                          uint32_t table3) {
+    return gpu_page < 0x00c00000u ? table2 : table3;
+}
+
+static void test_compact_full_extent_uniform_minification(void) {
+    enum {
+        SOURCE_WIDTH = 320u, SOURCE_HEIGHT = 356u,
+        SOURCE_STRIDE = 0x500u, TEXTURE_HEIGHT = 512u,
+        TARGET_STRIDE = 0x500u,
+    };
+    const uint32_t table0 = 0x08003000u;
+    const uint32_t table2 = 0x08004000u;
+    const uint32_t table3 = 0x08005000u;
+    const uint32_t region = 0x00001000u;
+    const uint32_t object = 0x00014000u;
+    const uint32_t source = 0x00a51080u;
+    const uint32_t region_pa = 0x08010000u;
+    const uint32_t object_pa = 0x08014000u;
+    const uint32_t source_pa = 0x08020000u;
+    const uint32_t target_pa = 0x08100000u;
+    const uint32_t record_offset = 0x0e8u;
+
+    for (unsigned capture_index = 0;
+         capture_index < sizeof compact_uniform_minification_captures /
+                             sizeof compact_uniform_minification_captures[0];
+         capture_index++) {
+        const struct compact_uniform_minification_capture *capture =
+            &compact_uniform_minification_captures[capture_index];
+        s5l8900_t m;
+        CHECK(s5l8900_init(&m, RAM_BASE, RAM_SIZE),
+              "%s machine init failed", capture->name);
+        if (!m.ram) continue;
+        m.bus.write32(m.bus.ctx, MBX_BASE + REG_GART0, table0);
+        m.bus.write32(m.bus.ctx, MBX_BASE + REG_GART2, table2);
+        m.bus.write32(m.bus.ctx, MBX_BASE + REG_GART3, table3);
+        test_map_gpu_page(&m, table0, region, region_pa);
+        test_map_gpu_page(&m, table0, object, object_pa);
+
+        uint32_t source_page0 = source & ~0xfffu;
+        uint32_t source_last = source +
+            (SOURCE_HEIGHT - 1u) * SOURCE_STRIDE + SOURCE_WIDTH * 4u - 1u;
+        for (uint32_t page = source_page0;
+             page <= (source_last & ~0xfffu); page += 0x1000u)
+            test_map_gpu_page(&m, table2, page,
+                              source_pa + (page - source_page0));
+
+        uint32_t target_first = capture->target +
+            capture->boundary_top * TARGET_STRIDE;
+        uint32_t target_last = capture->target +
+            (capture->boundary_bottom - 1u) * TARGET_STRIDE +
+            capture->boundary_right * 4u - 1u;
+        uint32_t target_page0 = target_first & ~0xfffu;
+        for (uint32_t page = target_page0;
+             page <= (target_last & ~0xfffu); page += 0x1000u) {
+            uint32_t table = test_compact_capture_gart(page, table2, table3);
+            test_map_gpu_page(&m, table, page,
+                              target_pa + (page - target_page0));
+        }
+
+        test_write_compact_blit_copy(
+            &m, region, object, source, capture->target, record_offset,
+            capture->boundary_left, capture->boundary_top,
+            capture->boundary_right - capture->boundary_left,
+            capture->boundary_bottom - capture->boundary_top,
+            SOURCE_WIDTH, SOURCE_HEIGHT, SOURCE_STRIDE, 0xff000000u);
+        for (unsigned i = 0; i < 33u; i++)
+            test_gpu_write32(&m, object + record_offset + i * 4u,
+                             capture->record[i]);
+
+        CHECK(test_gpu_read32(&m, object + 0x70u) == 0x6120003au &&
+              m.bus.read32(m.bus.ctx, MBX_BASE + REG_FBXCLIP) ==
+                  capture->xclip &&
+              m.bus.read32(m.bus.ctx, MBX_BASE + REG_FBYCLIP) ==
+                  capture->yclip,
+              "%s lost its exact object pointer or clip registers",
+              capture->name);
+
+        for (uint32_t y = 0u; y < SOURCE_HEIGHT; y++)
+            for (uint32_t x = 0u; x < SOURCE_WIDTH; x++)
+                test_gpu_write32(&m,
+                    source + y * SOURCE_STRIDE + x * 4u,
+                    test_sprite_source_pixel(x, y));
+
+        const uint32_t untouched = 0x11223344u;
+        for (uint32_t y = capture->boundary_top;
+             y < capture->boundary_bottom; y++)
+            for (uint32_t x = capture->boundary_left;
+                 x < capture->boundary_right; x++)
+                test_gpu_write32(&m,
+                    capture->target + y * TARGET_STRIDE + x * 4u,
+                    untouched);
+        uint32_t outside = capture->target +
+            capture->boundary_top * TARGET_STRIDE +
+            (capture->boundary_left - 1u) * 4u;
+        test_gpu_write32(&m, outside, 0x55667788u);
+
+        m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
+        float x0 = test_float_value(capture->record[5]);
+        float y0 = test_float_value(capture->record[6]);
+        float x1 = test_float_value(capture->record[7]);
+        float y1 = test_float_value(capture->record[10]);
+        uint32_t mismatches = 0u;
+        for (uint32_t y = capture->boundary_top;
+             y < capture->boundary_bottom; y++) {
+            for (uint32_t x = capture->boundary_left;
+                 x < capture->boundary_right; x++) {
+                uint32_t expected = untouched;
+                bool covered = x >= capture->raster_left &&
+                               x < capture->raster_right &&
+                               y >= capture->raster_top &&
+                               y < capture->raster_bottom;
+                if (covered) {
+                    struct test_bilinear_axis x_axis, y_axis;
+                    bool axes_ok = test_bilinear_axis(
+                        x0, x1 - x0, 0.0f, (float)SOURCE_WIDTH - 0.5f,
+                        x, SOURCE_WIDTH, &x_axis) &&
+                        test_bilinear_axis(
+                            y0, y1 - y0, 0.0f,
+                            (float)SOURCE_HEIGHT - 0.5f,
+                            y, TEXTURE_HEIGHT, &y_axis);
+                    if (!axes_ok) {
+                        mismatches++;
+                        continue;
+                    }
+                    expected = test_bilinear_sprite_pixel(&x_axis, &y_axis);
+                }
+                uint32_t actual = test_gpu_read32(&m,
+                    capture->target + y * TARGET_STRIDE + x * 4u);
+                mismatches += actual != expected;
+            }
+        }
+        CHECK(mismatches == 0u,
+              "%s mismatched %u filtered or untouched pixels",
+              capture->name, mismatches);
+        CHECK(test_gpu_read32(&m, outside) == 0x55667788u,
+              "%s changed a pixel outside its boundary", capture->name);
+        CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0x4cu,
+              "%s did not raise all completion events", capture->name);
+        m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x4cu);
+
+        uint32_t first = capture->target +
+            capture->raster_top * TARGET_STRIDE +
+            capture->raster_left * 4u;
+        uint32_t last = capture->target +
+            (capture->raster_bottom - 1u) * TARGET_STRIDE +
+            (capture->raster_right - 1u) * 4u;
+        uint32_t y1_word0 = object + record_offset + 10u * 4u;
+        uint32_t y1_word1 = object + record_offset + 12u * 4u;
+        uint32_t captured_y1 = capture->record[10];
+        uint32_t nonuniform_y1 =
+            test_float_word(test_float_value(captured_y1) + 1.0f);
+        test_gpu_write32(&m, first, 0x89abcdefu);
+        test_gpu_write32(&m, last, 0x76543210u);
+        test_gpu_write32(&m, y1_word0, nonuniform_y1);
+        test_gpu_write32(&m, y1_word1, nonuniform_y1);
+        m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
+        CHECK(test_gpu_read32(&m, first) == 0x89abcdefu &&
+              test_gpu_read32(&m, last) == 0x76543210u &&
+              m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
+              "%s nonuniform scale partially committed or completed",
+              capture->name);
+        m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x4cu);
+        test_gpu_write32(&m, y1_word0, captured_y1);
+        test_gpu_write32(&m, y1_word1, captured_y1);
+
+        uint32_t v1_word0 = object + record_offset + 29u * 4u;
+        uint32_t v1_word1 = object + record_offset + 32u * 4u;
+        uint32_t captured_v1 = capture->record[29];
+        uint32_t full_v1 = test_float_word(
+            (float)SOURCE_HEIGHT / (float)TEXTURE_HEIGHT);
+        test_gpu_write32(&m, first, 0x89abcdefu);
+        test_gpu_write32(&m, last, 0x76543210u);
+        test_gpu_write32(&m, v1_word0, full_v1);
+        test_gpu_write32(&m, v1_word1, full_v1);
+        m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
+        CHECK(test_gpu_read32(&m, first) == 0x89abcdefu &&
+              test_gpu_read32(&m, last) == 0x76543210u &&
+              m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
+              "%s non-half-texel UV endpoint partially committed or completed",
+              capture->name);
+        m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x4cu);
+        test_gpu_write32(&m, v1_word0, captured_v1);
+        test_gpu_write32(&m, v1_word1, captured_v1);
+
+        struct test_bilinear_axis late_source_x, late_source_y;
+        bool late_source_ok = test_bilinear_axis(
+            x0, x1 - x0, 0.0f, (float)SOURCE_WIDTH - 0.5f,
+            capture->raster_right - 1u, SOURCE_WIDTH, &late_source_x) &&
+            test_bilinear_axis(
+                y0, y1 - y0, 0.0f, (float)SOURCE_HEIGHT - 0.5f,
+                capture->raster_bottom - 1u, TEXTURE_HEIGHT,
+                &late_source_y);
+        CHECK(late_source_ok, "%s has no final bilinear source sample",
+              capture->name);
+        uint32_t late_source = source +
+            late_source_y.second * SOURCE_STRIDE + late_source_x.second * 4u;
+        uint32_t source_pte_address = table2 +
+            (((late_source >> 12) & 0x3ffu) * 4u);
+        uint32_t source_pte = m.bus.read32(m.bus.ctx, source_pte_address);
+        test_gpu_write32(&m, first, 0x89abcdefu);
+        test_gpu_write32(&m, last, 0x76543210u);
+        m.bus.write32(m.bus.ctx, source_pte_address, 0u);
+        m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
+        m.bus.write32(m.bus.ctx, source_pte_address, source_pte);
+        CHECK(test_gpu_read32(&m, first) == 0x89abcdefu &&
+              test_gpu_read32(&m, last) == 0x76543210u &&
+              m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
+              "%s missing source PTE partially committed or completed",
+              capture->name);
+        m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x4cu);
+
+        uint32_t target_page = last & ~0xfffu;
+        uint32_t target_table = test_compact_capture_gart(
+            target_page, table2, table3);
+        uint32_t target_pte_address = target_table +
+            (((target_page >> 12) & 0x3ffu) * 4u);
+        uint32_t target_pte = m.bus.read32(m.bus.ctx, target_pte_address);
+        test_gpu_write32(&m, first, 0x89abcdefu);
+        test_gpu_write32(&m, last, 0x76543210u);
+        m.bus.write32(m.bus.ctx, target_pte_address, 0u);
+        m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
+        m.bus.write32(m.bus.ctx, target_pte_address, target_pte);
+        CHECK(test_gpu_read32(&m, first) == 0x89abcdefu &&
+              test_gpu_read32(&m, last) == 0x76543210u &&
+              m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
+              "%s missing target PTE partially committed or completed",
+              capture->name);
+
+        s5l8900_free(&m);
+    }
+}
+
 /* The retained unlock transition clipped this compact 320x60 texture to the
  * single row [185, 186).  Its subpixel destination begins at y=185.770721, so
  * no pixel centre survives the scissor.  The command is still a valid draw
@@ -4964,6 +5260,7 @@ int main(void) {
     test_second_tiled_status_glyph();
     test_compact_opaque_blit_copy();
     test_compact_column_resample();
+    test_compact_full_extent_uniform_minification();
     test_compact_clipped_zero_coverage();
     test_pointer_selected_solid_quad();
     test_later_tiled_status_sprites();

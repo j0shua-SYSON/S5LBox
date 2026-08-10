@@ -2905,6 +2905,7 @@ static bool mbx_execute_textured_sprite(s5l_mbx_t *m,
     uint32_t source_height = source_bottom - source_top;
     float u_texel_span = u_texel_end - u_texel_start;
     float v_texel_span = v_texel_end - v_texel_start;
+    bool compact_full_extent_uniform_minification = false;
 
     /* The texture allocation and the UV rectangle are independent producer
      * inputs.  _mbx3DCtxQuadCopyPerspective derives the header power from its
@@ -3026,6 +3027,29 @@ static bool mbx_execute_textured_sprite(s5l_mbx_t *m,
                 direct_sampler && half_texel_layout && source_width > 2u &&
                 scale_x > 0.0f && scale_x <= 1.0f + epsilon &&
                 scale_y >= 1.0f - epsilon && scale_y <= 1.0f + epsilon;
+            /* The compact blit producer used while unlocking back into
+             * Safari carries the same direct filtered sampler as the older
+             * compact records, but selects the 0x0e texture-coordinate layout.
+             * Its independently encoded UV rectangle starts on integer texels
+             * and ends exactly one half texel inside both conservative source
+             * bounds.  Two retained phases uniformly reduce the same 320x356
+             * source to different subpixel rectangles.  Keep this distinct
+             * from the genuinely unfiltered 0x0e perspective producer: both
+             * axes must be strict, positive, uniform minification and neither
+             * source axis may collapse into the narrow-strip family. */
+            bool compact_half_texel_envelope =
+                compact_copy && direct_sampler && !half_texel_layout &&
+                source_width > 2u && source_height > 2u &&
+                u_texel_start == (float)source_left &&
+                v_texel_start == (float)source_top &&
+                u_texel_end == (float)source_right - 0.5f &&
+                v_texel_end == (float)source_bottom - 0.5f;
+            compact_full_extent_uniform_minification =
+                compact_half_texel_envelope &&
+                scale_x > 0.0f && scale_y > 0.0f &&
+                scale_x < 1.0f - epsilon &&
+                scale_y < 1.0f - epsilon &&
+                scale_difference <= 0.00001f;
             /* Retained direct, alternate and modulated producer packets all
              * use a one-texel-or-narrower horizontal UV strip. They magnify
              * that strip in X while retaining or reducing its rows in Y. The
@@ -3053,6 +3077,7 @@ static bool mbx_execute_textured_sprite(s5l_mbx_t *m,
             if (source_width > MBX_3D_WIDTH || source_height > 480u ||
                 (!direct_magnification && !direct_uniform_minification &&
                  !direct_horizontal_minification &&
+                 !compact_full_extent_uniform_minification &&
                  !filtered_narrow_strip_resample &&
                  !modulated_uniform_scale &&
                  !alternate_uniform_minification)) {
@@ -3082,6 +3107,8 @@ static bool mbx_execute_textured_sprite(s5l_mbx_t *m,
             return false;
         }
     }
+    bool filtered_sampling = half_texel_layout ||
+                             compact_full_extent_uniform_minification;
     float bounded_x0 = x0 < 0.0f ? 0.0f : x0;
     float bounded_y0 = y0 < 0.0f ? 0.0f : y0;
     float bounded_x1 = x1 > (float)MBX_3D_WIDTH
@@ -3190,9 +3217,9 @@ static bool mbx_execute_textured_sprite(s5l_mbx_t *m,
     }
 
     uint32_t source_x0 = 0u, source_y0 = 0u;
-    if (!half_texel_layout && !zero_coverage) {
-        /* The 0x0e producer order is unfiltered.  Its integer-sized unity
-         * transform must still select one strict contiguous source crop.
+    if (!filtered_sampling && !zero_coverage) {
+        /* The remaining 0x0e producer order is unfiltered.  Its integer-sized
+         * unity transform must still select one strict contiguous source crop.
          * The crop does not have to begin at texture origin: r430 copies
          * source rows 20..479 to destination rows 20..479 from a 320x480
          * surface inside a 512x512 allocation.  Require integer UV edges so
@@ -3346,7 +3373,7 @@ static bool mbx_execute_textured_sprite(s5l_mbx_t *m,
     uint32_t source_stage_y0 = source_y0;
     uint32_t source_stage_width = width;
     uint32_t source_stage_height = height;
-    if (half_texel_layout) {
+    if (filtered_sampling) {
         uint32_t minimum_x = UINT32_MAX, minimum_y = UINT32_MAX;
         uint32_t maximum_x = 0u, maximum_y = 0u;
         if (!affine_sprite) {
@@ -3452,7 +3479,7 @@ static bool mbx_execute_textured_sprite(s5l_mbx_t *m,
      * The order *inside each sample* remains vertical then horizontal, which
      * preserves the shipped packed-byte rounding exactly. */
     uint32_t vertical_pixels[MBX_3D_WIDTH + 2u];
-    bool cache_vertical = half_texel_layout && !affine_sprite &&
+    bool cache_vertical = filtered_sampling && !affine_sprite &&
                           source_stage_width <= width + 2u;
     uint32_t affine_rendered_pixels = 0u;
     for (uint32_t y = 0; y < height && ok; y++) {
@@ -3475,7 +3502,7 @@ static bool mbx_execute_textured_sprite(s5l_mbx_t *m,
         }
         for (uint32_t x = 0; x < width; x++) {
             uint32_t src;
-            if (half_texel_layout) {
+            if (filtered_sampling) {
                 struct mbx_bilinear_axis affine_x, affine_y;
                 const struct mbx_bilinear_axis *sample_x = &x_axis[x];
                 const struct mbx_bilinear_axis *sample_y = &y_axis[y];
