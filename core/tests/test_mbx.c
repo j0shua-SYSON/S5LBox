@@ -3425,6 +3425,43 @@ static void test_later_tiled_status_sprites(void) {
             },
         },
         {
+            /* Captured from the unlock path that previously left AppleMBX's
+             * 3DIdle field false and drove its watchdog into Graphics
+             * Recovery Event forever. The direct filtered producer is not
+             * magnifying here: it uniformly maps a 67x20 source rectangle to
+             * a 49x15 covered destination. */
+            .name = "unlock direct filtered minification",
+            .xclip = 0x00f800c0u, .yclip = 0x01500130u,
+            .target = 0x00897000u,
+            .semantic_sprite = true,
+            .scaled_sprite = true,
+            .boundary_override = true,
+            .tile_x0 = 0x18u, .tile_x1 = 0x1eu,
+            .tile_y0 = 0x13u, .tile_y1 = 0x14u,
+            .left = 199u, .top = 318u, .width = 49u, .height = 15u,
+            .source = 0x00be2080u,
+            .source_stride = 0x120u, .source_control = 0x8e100000u,
+            .source_width = 67u, .source_height = 20u,
+            .expected_covered_pixels = 735u,
+            .boundary = {
+                0x43470000u, 0x43a68000u, 0x43470000u, 0x439f0000u,
+                0x43780000u, 0x43a68000u, 0x43780000u, 0x439f0000u,
+            },
+            .quad = {
+                0xe0000000u, 0xa4218001u, 0u, 0xa6884710u,
+                0xa7718000u, 0u, 0xae504ea0u, 0x22250e80u,
+                0x43471a73u, 0x439f1a73u, 0x43779ed2u, 0x439f1a73u,
+                0x43471a73u, 0x43a6583cu, 0x43779ed2u, 0x43a6583cu,
+                0u, 0u, 0u, 0u,
+                0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+                0xff000000u, 0u, 0u, 0x3e471a73u,
+                0x3e9f1a73u, 0xff000000u, 0x3f050000u, 0u,
+                0x3e779ed2u, 0x3e9f1a73u, 0xff000000u, 0u,
+                0x3f1c0000u, 0x3e471a73u, 0x3ea6583cu, 0xff000000u,
+                0x3f050000u, 0x3f1c0000u, 0x3e779ed2u, 0x3ea6583cu,
+            },
+        },
+        {
             .name = "r434 rigid affine wiggle sprite",
             .xclip = 0x00600000u, .yclip = 0x01e001d0u,
             .target = 0x00998000u,

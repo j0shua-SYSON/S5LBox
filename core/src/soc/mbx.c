@@ -2873,8 +2873,19 @@ static bool mbx_execute_textured_sprite(s5l_mbx_t *m,
             float scale_y = dy / (float)source_height;
             float scale_difference = scale_x > scale_y
                 ? scale_x - scale_y : scale_y - scale_x;
+            /* The device unlock capture is a direct-filtered 67x20 source at
+             * 0.724135x in both axes. Rejecting every direct minification left
+             * 3DIdle false and sent AppleMBX's watchdog into an endless
+             * Graphics Recovery Event loop. Preserve the previously measured
+             * nonuniform magnification family, but admit minification only
+             * when both axes carry the captured uniform-scale invariant. */
             bool direct_magnification = direct_sampler && half_texel_layout &&
                 scale_x >= 1.0f - epsilon && scale_y >= 1.0f - epsilon;
+            bool direct_uniform_minification =
+                direct_sampler && half_texel_layout &&
+                scale_x > 0.0f && scale_y > 0.0f &&
+                scale_x <= 1.0f + epsilon && scale_y <= 1.0f + epsilon &&
+                scale_difference <= 0.00001f;
             bool modulated_uniform_scale =
                 modulated_sampler && half_texel_layout &&
                 scale_x > 0.0f && scale_y > 0.0f &&
@@ -2885,8 +2896,25 @@ static bool mbx_execute_textured_sprite(s5l_mbx_t *m,
                 scale_x <= 1.0f + epsilon && scale_y <= 1.0f + epsilon &&
                 scale_difference <= 0.00001f;
             if (source_width > MBX_3D_WIDTH || source_height > 480u ||
-                (!direct_magnification && !modulated_uniform_scale &&
+                (!direct_magnification && !direct_uniform_minification &&
+                 !modulated_uniform_scale &&
                  !alternate_uniform_minification)) {
+                if (mbx_trace_state == 1) {
+                    fprintf(stderr,
+                            "MBX3D transform reject: sampler=%s half=%u "
+                            "source=%ux%u uv-span=%.9gx%.9g "
+                            "destination=%.9gx%.9g scale=%.9gx%.9g "
+                            "difference=%.9g quad=%08x/%08x/%08x/%08x/%08x\n",
+                            direct_sampler ? "direct" :
+                            (modulated_sampler ? "modulated" : "scaled"),
+                            half_texel_layout ? 1u : 0u,
+                            source_width, source_height,
+                            (double)u_texel_span, (double)v_texel_span,
+                            (double)dx, (double)dy,
+                            (double)scale_x, (double)scale_y,
+                            (double)scale_difference,
+                            quad[1], quad[2], quad[3], quad[6], quad[7]);
+                }
                 if (why) *why =
                     "filtered transform is outside its measured sampler scale family";
                 return false;

@@ -382,7 +382,7 @@ int main(int argc, char **argv) {
             "usage: %s <kernel.macho> [-d dt.bin] [-c cmdline] [-r ramdisk]\n"
             "          [-R ram-MB] [-n steps] [-p physbase] [-V virtbase]\n"
             "          [--snapshot-at <steps> <file>] [--restore <file>]\n"
-            "          [--press-power | --wake-power]\n"
+            "          [--press-power | --wake-power] [--probe-mbx3d]\n"
             "          [--release-power-after <steps>]\n"
             "          [--dump-ram <file>]\n"
             "          [--peek <virtual-address>]...\n"
@@ -397,6 +397,7 @@ int main(int argc, char **argv) {
     const char *dump_ram = NULL;
     bool press_power = false;
     bool wake_power = false;
+    bool probe_mbx3d = false;
     bool release_power = false;
     uint64_t release_power_after = 0u;
     bool break_pc_set = false;
@@ -427,6 +428,10 @@ int main(int argc, char **argv) {
         }
         if (!strcmp(argv[i], "--wake-power")) {
             wake_power = true;
+            continue;
+        }
+        if (!strcmp(argv[i], "--probe-mbx3d")) {
+            probe_mbx3d = true;
             continue;
         }
         if (!strcmp(argv[i], "--release-power-after") && i + 1 < argc) {
@@ -479,6 +484,10 @@ int main(int argc, char **argv) {
     if (release_power && !press_power && !wake_power) {
         fprintf(stderr,
                 "--release-power-after requires --press-power or --wake-power\n");
+        return 1;
+    }
+    if (probe_mbx3d && !restore) {
+        fprintf(stderr, "--probe-mbx3d requires --restore\n");
         return 1;
     }
 
@@ -582,6 +591,32 @@ int main(int argc, char **argv) {
         }
         fprintf(stderr, "restored %s at %llu instructions\n",
                 restore, (unsigned long long)mach.cpu.cycles);
+    }
+
+    if (probe_mbx3d) {
+        uint64_t completed_before = mach.mbx_telemetry.completed_3d;
+        uint64_t rejected_before = mach.mbx_telemetry.rejected_3d;
+        uint32_t status_before = mach.mbx.status;
+
+        /* Prime the existing read-only trace switch before the retry. The 3D
+         * decoder prints its exact fail-closed reason only when that switch is
+         * active, and snapshot restore itself performs no guest register
+         * accesses. This retries the captured STARTRENDER against an isolated
+         * restored copy; it never writes the snapshot file. */
+        (void)s5l_mbx_read(&mach.mbx, S5L_MBX_STATUS);
+        bool accepted = s5l_mbx_process_3d(
+            &mach.mbx, &mach.bus, S5L_MBX_STARTRENDER, 1u,
+            &mach.mbx_telemetry);
+        fprintf(stderr,
+                "MBX3D restored-state probe: %s status=%08x->%08x "
+                "completed=+%llu rejected=+%llu\n",
+                accepted ? "accepted" : "rejected", status_before,
+                mach.mbx.status,
+                (unsigned long long)(mach.mbx_telemetry.completed_3d -
+                                     completed_before),
+                (unsigned long long)(mach.mbx_telemetry.rejected_3d -
+                                     rejected_before));
+        if (!accepted) return 6;
     }
 
     if (press_power || wake_power) {
