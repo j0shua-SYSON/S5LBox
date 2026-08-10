@@ -16,19 +16,24 @@
 
 int main(int argc, char **argv) {
     if (argc < 2) {
-        fprintf(stderr, "usage: %s <kernel.macho> [-k] [-r <addr>]...\n"
+        fprintf(stderr, "usage: %s <kernel.macho> [-k] [-r <addr>]... "
+                        "[-s <substring>]\n"
                         "  -k  dump the prelinked kext load map\n"
-                        "  -r  resolve one address to a symbol or kext+offset\n",
+                        "  -r  resolve one address to a symbol or kext+offset\n"
+                        "  -s  list kernel symbols containing substring\n",
                 argv[0]);
         return 1;
     }
     bool     want_kexts = false;
+    const char *symbol_search = NULL;
     unsigned nres = 0;
     uint32_t res[64];
     for (int i = 2; i < argc; i++) {
         if (!strcmp(argv[i], "-k")) want_kexts = true;
         else if (!strcmp(argv[i], "-r") && i + 1 < argc && nres < 64)
             res[nres++] = (uint32_t)strtoul(argv[++i], NULL, 0);
+        else if (!strcmp(argv[i], "-s") && i + 1 < argc)
+            symbol_search = argv[++i];
         else { fprintf(stderr, "unknown argument %s\n", argv[i]); return 1; }
     }
 
@@ -68,7 +73,7 @@ int main(int argc, char **argv) {
     else
         printf("symtab     : NONE (stripped)\n");
 
-    if (!want_kexts && !nres) { free(b); return 0; }
+    if (!want_kexts && !nres && !symbol_search) { free(b); return 0; }
 
     ksyms_t ks;
     ksyms_load(&ks, b, (size_t)n);
@@ -91,6 +96,13 @@ int main(int argc, char **argv) {
         printf("    --- no executable (KPI pseudo-extensions, never a hot PC) ---\n");
         for (unsigned i = 0; i < ks.nkext; i++)
             if (!ks.kext[i].has_exec) printf("    %s\n", ks.kext[i].bundle);
+    }
+
+    if (symbol_search) {
+        printf("\n=== KERNEL SYMBOLS CONTAINING %s ===\n", symbol_search);
+        for (unsigned i = 0; i < ks.nsym; i++)
+            if (strstr(ks.sym[i].name, symbol_search))
+                printf("    0x%08x %s\n", ks.sym[i].value, ks.sym[i].name);
     }
 
     for (unsigned i = 0; i < nres; i++) {

@@ -42,9 +42,34 @@ static uint8_t *slurp(const char *path, size_t *len_out) {
     return b;
 }
 
+static bool dump_file(const char *path, const void *bytes, size_t len) {
+    FILE *f = fopen(path, "wb");
+    if (!f) { perror("open dump"); return false; }
+    size_t written = fwrite(bytes, 1, len, f);
+    bool write_failed = written != len || ferror(f);
+    bool close_failed = fclose(f) != 0;
+    bool ok = !write_failed && !close_failed;
+    if (!ok) {
+        if (write_failed) fprintf(stderr, "write dump: short write\n");
+        else perror("close dump");
+    }
+    return ok;
+}
+
 static uint32_t ld32(const uint8_t *p) {
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
            ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static bool peek32(s5l8900_t *m, uint32_t va, uint32_t *pa_out,
+                   uint32_t *value_out, uint32_t *fault_out) {
+    uint32_t pa = 0u;
+    uint32_t fault = arm_mmu_translate(&m->cpu, va, ARM_ACCESS_READ, true, &pa);
+    if (pa_out) *pa_out = pa;
+    if (fault_out) *fault_out = fault;
+    if (fault != 0u) return false;
+    if (value_out) *value_out = m->cpu.bus->read32(m->cpu.bus->ctx, pa);
+    return true;
 }
 
 /* --------------------------------------------------------------------------
@@ -264,6 +289,30 @@ static void report(const s5l8900_t *m, arm_status_t st) {
     printf("  tb_accum      : %llu\n", (unsigned long long)m->tb_accum);
     printf("  power         : state=%08x cfg0=%08x cfg1=%08x sram=%08x\n",
            m->power.state, m->power.cfg0, m->power.cfg1, m->power.sram);
+    printf("  buttons       : pressed=%02x sets=%llu refused=%llu edges=%llu\n",
+           m->buttons.pressed,
+           (unsigned long long)m->buttons.sets,
+           (unsigned long long)m->buttons.refused,
+           (unsigned long long)m->buttons.edges);
+    for (unsigned g = 0; g < S5L_GPIOIC_GROUPS; g++)
+        printf("  gpioic%u       : raw=%08x stat=%08x en=%08x "
+               "level=%08x type=%08x driven=%08x\n",
+               g, m->gpioic.raw[g], m->gpioic.stat[g], m->gpioic.en[g],
+               m->gpioic.level[g], m->gpioic.type[g],
+               m->gpioic.driven[g]);
+    printf("  pcf50635      : ptr=%02x have=%d read=%d r=%llu w=%llu "
+           "unknown=%llu/%llu int=%02x/%02x/%02x/%02x/%02x\n",
+           m->pmu.ptr, m->pmu.have_ptr, m->pmu.reading,
+           (unsigned long long)m->pmu.reg_reads,
+           (unsigned long long)m->pmu.reg_writes,
+           (unsigned long long)m->pmu.unknown_reads,
+           (unsigned long long)m->pmu.unknown_writes,
+           m->pmu.regs[PCF50635_INT1], m->pmu.regs[PCF50635_INT2],
+           m->pmu.regs[PCF50635_INT3], m->pmu.regs[PCF50635_INT4],
+           m->pmu.regs[PCF50635_INT5]);
+    for (unsigned reg = 0; reg < PCF50635_NREG; reg++)
+        if (m->pmu.written[reg])
+            printf("    reg[%02x]    : %02x\n", reg, m->pmu.regs[reg]);
     /* The DWC2 block's only writable register, and therefore the whole of what
      * a snapshot can get wrong about it. A snapshotted field that never reaches
      * this report is invisible to a save/restore diff, which is the blind spot
@@ -304,19 +353,31 @@ int main(int argc, char **argv) {
         fprintf(stderr,
             "usage: %s <kernel.macho> [-d dt.bin] [-c cmdline] [-r ramdisk]\n"
             "          [-R ram-MB] [-n steps] [-p physbase] [-V virtbase]\n"
-            "          [--snapshot-at <steps> <file>]  [--restore <file>]\n", argv[0]);
+            "          [--snapshot-at <steps> <file>] [--restore <file>]\n"
+            "          [--wake-power] [--dump-ram <file>]\n"
+            "          [--peek <virtual-address>]...\n"
+            "          [--break-pc <address> [--break-reg <0..15> <value>]]\n",
+            argv[0]);
         return 1;
     }
     uint32_t phys_base = S5L8900_SDRAM_BASE;
     uint32_t virt_base = 0xc0000000u;
     uint64_t steps = 2000000ull;
     const char *dtpath = NULL, *rdpath = NULL, *restore = NULL;
+    const char *dump_ram = NULL;
+    bool wake_power = false;
+    bool break_pc_set = false;
+    uint32_t break_pc = 0u;
+    int break_reg = -1;
+    uint32_t break_value = 0u;
     const char *cmdline = "debug=0x8 serial=1";
     uint32_t ram_size = 128u << 20;
     unsigned ba_rev = 1, ba_ver = 6;
 
     struct { uint64_t at; const char *path; } snaps[8];
     unsigned nsnaps = 0;
+    uint32_t peeks[64];
+    unsigned npeeks = 0;
 
     for (int i = 2; i < argc; i++) {
         if (!strcmp(argv[i], "--snapshot-at") && i + 2 < argc) {
@@ -327,8 +388,34 @@ int main(int argc, char **argv) {
             }
             i += 2; continue;
         }
-        if (i + 1 >= argc) break;
+        if (!strcmp(argv[i], "--wake-power")) {
+            wake_power = true;
+            continue;
+        }
+        if (!strcmp(argv[i], "--break-reg") && i + 2 < argc) {
+            break_reg = (int)strtol(argv[i + 1], NULL, 0);
+            break_value = (uint32_t)strtoul(argv[i + 2], NULL, 0);
+            if (break_reg < 0 || break_reg > 15) {
+                fprintf(stderr, "--break-reg index must be 0..15\n");
+                return 1;
+            }
+            i += 2;
+            continue;
+        }
+        if (i + 1 >= argc) {
+            fprintf(stderr, "missing value for %s\n", argv[i]);
+            return 1;
+        }
         if      (!strcmp(argv[i], "--restore")) restore  = argv[++i];
+        else if (!strcmp(argv[i], "--dump-ram")) dump_ram = argv[++i];
+        else if (!strcmp(argv[i], "--peek")) {
+            uint32_t va = (uint32_t)strtoul(argv[++i], NULL, 0);
+            if (npeeks < sizeof peeks / sizeof peeks[0]) peeks[npeeks++] = va;
+        }
+        else if (!strcmp(argv[i], "--break-pc")) {
+            break_pc = (uint32_t)strtoul(argv[++i], NULL, 0);
+            break_pc_set = true;
+        }
         else if (!strcmp(argv[i], "-p")) phys_base = (uint32_t)strtoul(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "-V")) virt_base = (uint32_t)strtoul(argv[++i], NULL, 0);
         else if (!strcmp(argv[i], "-n")) steps     = strtoull(argv[++i], NULL, 0);
@@ -336,6 +423,12 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "-c")) cmdline   = argv[++i];
         else if (!strcmp(argv[i], "-r")) rdpath    = argv[++i];
         else if (!strcmp(argv[i], "-R")) ram_size  = (uint32_t)strtoul(argv[++i], NULL, 0) << 20;
+        else { fprintf(stderr, "unknown argument %s\n", argv[i]); return 1; }
+    }
+
+    if (break_reg >= 0 && !break_pc_set) {
+        fprintf(stderr, "--break-reg requires --break-pc\n");
+        return 1;
     }
 
     /* The kernel's static map tops out at 0xe0000000; see bootkernel. */
@@ -440,9 +533,34 @@ int main(int argc, char **argv) {
                 restore, (unsigned long long)mach.cpu.cycles);
     }
 
+    if (wake_power) {
+        if (!restore) {
+            fprintf(stderr, "--wake-power requires --restore\n");
+            return 1;
+        }
+        if (!s5l_pcf50635_hibernating(&mach.pmu)) {
+            fprintf(stderr, "restored machine is not in PMU hibernation\n");
+            return 6;
+        }
+        if (!s5l8900_set_button(&mach, S5L_BUTTON_HOLD, true)) {
+            fprintf(stderr, "Power wake was refused\n");
+            return 6;
+        }
+        fprintf(stderr, "Power wake reset CPU to retained RAM at 0x%08x\n",
+                mach.cpu.r[15]);
+    }
+
     arm_status_t st = ARM_OK;
     uint64_t n = mach.cpu.cycles;      /* continue from where the machine is */
     for (; n < steps; n++) {
+        if (break_pc_set && mach.cpu.r[15] == break_pc &&
+            (break_reg < 0 || mach.cpu.r[break_reg] == break_value)) {
+            fprintf(stderr, "break at pc=0x%08x r%d=0x%08x after %llu instructions\n",
+                    mach.cpu.r[15], break_reg,
+                    break_reg < 0 ? 0u : mach.cpu.r[break_reg],
+                    (unsigned long long)mach.cpu.cycles);
+            break;
+        }
         st = arm_step(&mach.cpu);
         if (st != ARM_OK) { n++; break; }
         s5l8900_tick(&mach, 1);
@@ -454,6 +572,20 @@ int main(int argc, char **argv) {
                     snapshot_strerror(ss));
             if (ss != SNAP_OK) return 4;
         }
+    }
+
+    if (dump_ram && !dump_file(dump_ram, mach.ram, mach.ram_size)) {
+        s5l8900_free(&mach);
+        free(img);
+        return 5;
+    }
+    for (unsigned i = 0; i < npeeks; i++) {
+        uint32_t pa = 0u, value = 0u, fault = 0u;
+        if (peek32(&mach, peeks[i], &pa, &value, &fault))
+            printf("peek 0x%08x -> 0x%08x = 0x%08x\n",
+                   peeks[i], pa, value);
+        else
+            printf("peek 0x%08x -> fault 0x%08x\n", peeks[i], fault);
     }
 
     report(&mach, st);
