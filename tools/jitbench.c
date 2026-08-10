@@ -10731,6 +10731,10 @@ static bool validate_soc_compact_raw_windows(void) {
     soc_run_result_t refill_off = {0};
     soc_run_result_t refill_on = {0};
     soc_run_result_t cached = {0};
+    bool refill_off_snapshot_equal = false;
+    bool refill_on_snapshot_equal = false;
+    bool cached_snapshot_equal = false;
+    size_t cached_snapshot_first_diff = SIZE_MAX;
     bool ok = false;
 
     for (unsigned i = 0u; i < 256u; i++)
@@ -10752,16 +10756,36 @@ static bool validate_soc_compact_raw_windows(void) {
             program, LOOP_INSNS, TOTAL_INSNS,
             SOC_ENTRY_COMPACT_RAW_WINDOW_CACHE, &cached) ||
         !reference.snapshot || !refill_off.snapshot || !refill_on.snapshot ||
-        !cached.snapshot ||
-        reference.snapshot_len != refill_off.snapshot_len ||
-        reference.snapshot_len != refill_on.snapshot_len ||
-        reference.snapshot_len != cached.snapshot_len ||
+        !cached.snapshot) {
+        fprintf(stderr,
+                "jitbench: SoC compact-raw window oracle setup failed\n");
+        goto done;
+    }
+
+    refill_off_snapshot_equal =
+        reference.snapshot_len == refill_off.snapshot_len &&
         memcmp(reference.snapshot, refill_off.snapshot,
-               reference.snapshot_len) != 0 ||
+               reference.snapshot_len) == 0;
+    refill_on_snapshot_equal =
+        reference.snapshot_len == refill_on.snapshot_len &&
         memcmp(reference.snapshot, refill_on.snapshot,
-               reference.snapshot_len) != 0 ||
+               reference.snapshot_len) == 0;
+    cached_snapshot_equal =
+        reference.snapshot_len == cached.snapshot_len &&
         memcmp(reference.snapshot, cached.snapshot,
-               reference.snapshot_len) != 0 ||
+               reference.snapshot_len) == 0;
+    if (!cached_snapshot_equal &&
+        reference.snapshot_len == cached.snapshot_len) {
+        for (size_t i = 0u; i < reference.snapshot_len; i++) {
+            if (reference.snapshot[i] != cached.snapshot[i]) {
+                cached_snapshot_first_diff = i;
+                break;
+            }
+        }
+    }
+
+    if (!refill_off_snapshot_equal || !refill_on_snapshot_equal ||
+        !cached_snapshot_equal ||
         reference.compact_raw_window_crossings != 0u ||
         reference.compact_raw_window_reloads != 0u ||
         reference.compact_raw_window_stops != 0u ||
@@ -10806,7 +10830,10 @@ static bool validate_soc_compact_raw_windows(void) {
                 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64
                 " on=%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64
                 "/%" PRIu64 " cached=%" PRIu64 "/%" PRIu64 "/%" PRIu64
-                "/%" PRIu64 "/%" PRIu64 "/%" PRIu64 "\n",
+                "/%" PRIu64 "/%" PRIu64 "/%" PRIu64
+                " stops=%" PRIu64
+                " snapshots(off/on/cached)=%s/%s/%s"
+                " cached-snapshot-len=%zu ref-len=%zu first-diff=%zu\n",
                 refill_off.compact_raw_window_crossings,
                 refill_off.compact_raw_window_reloads,
                 refill_off.compact_raw_window_fast_refills,
@@ -10822,7 +10849,13 @@ static bool validate_soc_compact_raw_windows(void) {
                 cached.compact_raw_window_fast_refills,
                 cached.compact_raw_window_cache_hits,
                 cached.compact_raw_retired,
-                cached.compact_raw_fallback_retired);
+                cached.compact_raw_fallback_retired,
+                cached.compact_raw_window_stops,
+                refill_off_snapshot_equal ? "yes" : "no",
+                refill_on_snapshot_equal ? "yes" : "no",
+                cached_snapshot_equal ? "yes" : "no",
+                cached.snapshot_len, reference.snapshot_len,
+                cached_snapshot_first_diff);
         goto done;
     }
 
