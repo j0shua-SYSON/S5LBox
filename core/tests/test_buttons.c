@@ -844,6 +844,7 @@ static void test_power_wakes_hibernation_through_retained_reset(void) {
     s5l8900_t m;
     CHECK(s5l8900_init(&m, S5L8900_SDRAM_BASE, 1u << 16),
           "machine init failed");
+    arm_all(&m);
 
     m.pmu.regs[PCF50635_OOCSHDWN] = PCF50635_OOCSHDWN_GOHIB;
     m.pmu.written[PCF50635_OOCSHDWN] = 1u;
@@ -894,16 +895,35 @@ static void test_power_wakes_hibernation_through_retained_reset(void) {
           m.active_clock_guest_ticks_since_sync == 0u &&
           m.active_clock_fraction == 0u,
           "warm reset retained stale host-clock state");
-    CHECK(!s5l_buttons_held(&m.buttons, S5L_BUTTON_HOLD) &&
-          !s5l_gpioic_pending(&m.gpioic, s5l_button_line(S5L_BUTTON_HOLD)),
-          "PMU wake was duplicated as an ordinary GPIO press");
+    CHECK(s5l_buttons_held(&m.buttons, S5L_BUTTON_HOLD) &&
+          s5l_gpioic_pending(&m.gpioic, s5l_button_line(S5L_BUTTON_HOLD)) &&
+          s5l_gpio_pin(&m.gpio, s5l_button_pin(S5L_BUTTON_HOLD)) ==
+              s5l_button_level(S5L_BUTTON_HOLD, true),
+          "PMU wake did not retain the physical Power press on its GPIO wire");
 
+    CHECK(!s5l8900_set_button(&m, S5L_BUTTON_HOLD, false),
+          "Power release erased the still-pending wake edge");
+    CHECK(guest_services(&m, s5l_button_line(S5L_BUTTON_HOLD)),
+          "guest could not service the retained wake press");
+    s5l8900_tick(&m, 0u);
     CHECK(s5l8900_set_button(&m, S5L_BUTTON_HOLD, false),
-          "queued Power release was not drainable after wake");
-    CHECK(m.buttons.sets == 3u && m.buttons.edges == 0u,
-          "PMU-only transitions polluted GPIO edge evidence: sets=%llu edges=%llu",
+          "queued Power release was not drainable after the wake press");
+    CHECK(s5l_gpioic_pending(&m.gpioic,
+                             s5l_button_line(S5L_BUTTON_HOLD)),
+          "Power release did not produce its own guest-visible edge");
+    CHECK(guest_services(&m, s5l_button_line(S5L_BUTTON_HOLD)),
+          "guest could not service the post-wake Power release");
+    s5l8900_tick(&m, 0u);
+    CHECK(!s5l_buttons_held(&m.buttons, S5L_BUTTON_HOLD) &&
+          !s5l_gpioic_pending(&m.gpioic,
+                              s5l_button_line(S5L_BUTTON_HOLD)),
+          "Power remained held after its post-wake release");
+    CHECK(m.buttons.sets == 3u && m.buttons.edges == 2u &&
+          m.buttons.refused == 2u,
+          "wake press/release evidence drifted: sets=%llu edges=%llu refused=%llu",
           (unsigned long long)m.buttons.sets,
-          (unsigned long long)m.buttons.edges);
+          (unsigned long long)m.buttons.edges,
+          (unsigned long long)m.buttons.refused);
     s5l8900_free(&m);
 }
 

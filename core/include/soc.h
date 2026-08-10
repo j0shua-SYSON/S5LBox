@@ -3981,9 +3981,11 @@ void s5l8900_tick(s5l8900_t *m, uint32_t ticks);
  *
  * When the guest has commanded PMU hibernation, only a Power press is a wake
  * source. It latches the PMU ONKEY rising event and resets the ARM core into
- * the retained-RAM reset vector prepared by XNU. Other button transitions are
- * consumed without reaching the powered-down application processor, so one
- * stale Home event cannot permanently block a later Power event in a FIFO.
+ * the retained-RAM reset vector prepared by XNU. The same physical press stays
+ * asserted on its ordinary GPIO wire so AppleM68Buttons can pair the PMU wake
+ * press with the later GPIO release. Other button transitions are consumed
+ * without reaching the powered-down application processor, so one stale Home
+ * event cannot permanently block a later Power event in a FIFO.
  */
 bool s5l8900_set_button(s5l8900_t *m, unsigned which, bool pressed);
 

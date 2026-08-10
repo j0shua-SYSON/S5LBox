@@ -1565,12 +1565,30 @@ bool s5l8900_set_button(s5l8900_t *m, unsigned which, bool pressed) {
         return true;
     }
 
+    /* The same physical switch reaches both pieces of hardware. The PMU uses
+     * ONKEY to power the ARM core up, while the still-held switch is also high
+     * on the ordinary GPIO wire. AppleM68Buttons synthesizes the wake press
+     * from PMU STAT, then relies on its GPIO interrupt/debounce path to see the
+     * later release. Dropping this level leaves the guest with a Power key
+     * that was pressed forever and a display that never completes wake.
+     *
+     * This transition cannot use s5l_buttons_set(): the powered-down guest is
+     * allowed to have its GPIO line unarmed or still pending, but neither can
+     * prevent a real switch from changing level. Preserve the physical state
+     * and let the existing level-sensitive controller expose it when the AP
+     * resumes. The queued release will retain the ordinary no-edge-loss gate. */
+    m->buttons.sets++;
+    if (!s5l_buttons_held(&m->buttons, S5L_BUTTON_HOLD)) {
+        m->buttons.pressed |= (uint8_t)(1u << S5L_BUTTON_HOLD);
+        m->buttons.edges++;
+        s5l_buttons_apply(&m->buttons, &m->gpio, &m->gpioic);
+    }
+
     /* XNU copied its reset trampoline to the first retained DRAM page before
      * writing OOCSHDWN.GOHIB, then entered an intentional infinite branch.
      * ONKEY powers the ARM core back up from reset; it is not an IRQ capable
      * of escaping that branch. This machine has no low-address DRAM alias, so
      * the hardware reset vector is represented by the actual DRAM base. */
-    m->buttons.sets++;
     s5l_pcf50635_wake_onkey(&m->pmu);
 
     uint64_t cycles = m->cpu.cycles;
