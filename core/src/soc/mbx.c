@@ -3016,6 +3016,16 @@ static bool mbx_execute_textured_sprite(s5l_mbx_t *m,
                 scale_x > 0.0f && scale_y > 0.0f &&
                 scale_x <= 1.0f + epsilon && scale_y <= 1.0f + epsilon &&
                 scale_difference <= 0.00001f;
+            /* Safari's keyboard/address transition contributes a direct-
+             * filtered row operation with a wide source rectangle. It keeps
+             * the conservative source height exactly 1:1 while reducing only
+             * X. Treat that one-dimensional resample as its own family: this
+             * does not admit vertical minification, mixed two-axis scaling,
+             * or an unchecked generic textured quad. */
+            bool direct_horizontal_minification =
+                direct_sampler && half_texel_layout && source_width > 2u &&
+                scale_x > 0.0f && scale_x <= 1.0f + epsilon &&
+                scale_y >= 1.0f - epsilon && scale_y <= 1.0f + epsilon;
             /* Retained direct, alternate and modulated producer packets all
              * use a one-texel-or-narrower horizontal UV strip. They magnify
              * that strip in X while retaining or reducing its rows in Y. The
@@ -3042,6 +3052,7 @@ static bool mbx_execute_textured_sprite(s5l_mbx_t *m,
                 scale_difference <= 0.00001f;
             if (source_width > MBX_3D_WIDTH || source_height > 480u ||
                 (!direct_magnification && !direct_uniform_minification &&
+                 !direct_horizontal_minification &&
                  !filtered_narrow_strip_resample &&
                  !modulated_uniform_scale &&
                  !alternate_uniform_minification)) {

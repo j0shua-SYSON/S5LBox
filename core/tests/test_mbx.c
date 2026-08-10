@@ -2708,6 +2708,7 @@ struct mbx_test_status_form {
     bool affine_sprite;
     bool scaled_sprite;
     bool column_resample;
+    bool row_resample;
     bool variable_vertex_alpha;
     bool boundary_override;
     bool zero_coverage;
@@ -3357,6 +3358,34 @@ static void test_captured_status_form(const struct mbx_test_status_form *form) {
                                  form->quad[30]);
                 test_gpu_write32(&m, object + 0x1f0u + 40u * 4u,
                                  form->quad[40]);
+            } else if (form->row_resample) {
+                /* The measured row-resample family preserves the vertical
+                 * source extent at 1:1. Preserve both redundant UV corners
+                 * while extending that extent by one texel; a generic
+                 * two-axis minifier must remain an atomic rejection. */
+                uint32_t texture_height =
+                    8u << ((form->quad[1] >> 20) & 7u);
+                uint32_t changed_v1 = test_float_word(
+                    test_float_value(form->quad[36]) +
+                    1.0f / (float)texture_height);
+                test_gpu_write32(&m, first, 0x89abcdefu);
+                test_gpu_write32(&m, last_destination, 0x76543210u);
+                test_gpu_write32(&m, object + 0x1f0u + 36u * 4u,
+                                 changed_v1);
+                test_gpu_write32(&m, object + 0x1f0u + 41u * 4u,
+                                 changed_v1);
+                m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
+                CHECK(test_gpu_read32(&m, first) == 0x89abcdefu &&
+                      test_gpu_read32(&m, last_destination) == 0x76543210u,
+                      "%s taller mixed-axis source partially committed",
+                      form->name);
+                CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
+                      "%s taller mixed-axis source raised completion",
+                      form->name);
+                test_gpu_write32(&m, object + 0x1f0u + 36u * 4u,
+                                 form->quad[36]);
+                test_gpu_write32(&m, object + 0x1f0u + 41u * 4u,
+                                 form->quad[41]);
             } else {
                 /* Keep geometry and normalized records mutually consistent
                  * while making only X scale differ. A literal-packet
@@ -3411,7 +3440,7 @@ static void test_captured_status_form(const struct mbx_test_status_form *form) {
                   form->name);
             m.bus.write32(m.bus.ctx, source_pte_address, source_pte);
 
-            if (form->column_resample) {
+            if (form->column_resample || form->row_resample) {
                 uint32_t target_table = m.bus.read32(m.bus.ctx,
                     MBX_BASE + REG_GART0 + (last_destination >> 22) * 4u);
                 uint32_t target_pte_address = target_table +
@@ -3604,6 +3633,85 @@ spotlight_entry_unfiltered_direct_crop_form = {
         0x3da40000u, 0x3e360000u, 0xff000000u, 0x00000000u,
         0x3f500000u, 0xbb800000u, 0x3e430000u, 0xff000000u,
         0x3f2c0000u, 0x3f500000u, 0x3da40000u, 0x3e430000u,
+    },
+};
+
+/* Entering Safari's address field retained these direct-sampler records. The
+ * exact object words describe a 308x31 sampled envelope in a 312-pixel-pitch
+ * texture. The producer keeps Y at 1:1 while reducing X to 203.666 or 209.101
+ * pixels, so this is a bounded horizontal row resample rather than uniform
+ * minification. The witness did not include the separate boundary object;
+ * these integer boundary words are reconstructed from the established
+ * producer floor/ceil envelope and its captured clip registers. */
+static const struct mbx_test_status_form
+safari_keyboard_address_row_resample_form = {
+    .name = "Safari keyboard address-surface row resample",
+    .xclip = 0x00d80000u, .yclip = 0x00500020u,
+    .target = 0x00bd1000u,
+    .semantic_sprite = true,
+    .scaled_sprite = true,
+    .row_resample = true,
+    .boundary_override = true,
+    .arbitrary_bgra_probe = true,
+    .tile_x0 = 0u, .tile_x1 = 0x1au,
+    .tile_y0 = 2u, .tile_y1 = 4u,
+    .left = 6u, .top = 42u, .width = 204u, .height = 31u,
+    .source = 0x00ac4080u,
+    .source_stride = 0x4e0u, .source_control = 0x8e4c0000u,
+    .source_width = 308u, .source_height = 31u,
+    .expected_covered_pixels = 6324u,
+    .boundary = {
+        0x40c00000u, 0x42920000u, 0x40c00000u, 0x42240000u,
+        0x43520000u, 0x42920000u, 0x43520000u, 0x42240000u,
+    },
+    .quad = {
+        0xe0000000u, 0xa6218001u, 0x8e4d5881u, 0xa6884710u,
+        0xa7718000u, 0x0e517a20u, 0xae504ea0u, 0x22250e80u,
+        0x40c00000u, 0x4227f049u, 0x4351aa9au, 0x4227f049u,
+        0x40c00000u, 0x4291f824u, 0x4351aa9au, 0x4291f824u,
+        0u, 0u, 0u, 0u,
+        0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+        0xff000000u, 0x00000000u, 0x00000000u, 0x3bc00000u,
+        0x3d27f049u, 0xff000000u, 0x3f19c000u, 0x00000000u,
+        0x3e51aa9au, 0x3d27f049u, 0xff000000u, 0x00000000u,
+        0x3f740000u, 0x3bc00000u, 0x3d91f824u, 0xff000000u,
+        0x3f19c000u, 0x3f740000u, 0x3e51aa9au, 0x3d91f824u,
+    },
+};
+
+static const struct mbx_test_status_form
+safari_keyboard_surface_row_resample_form = {
+    .name = "Safari keyboard surface row resample",
+    .xclip = 0x00d80000u, .yclip = 0x00500020u,
+    .target = 0x00998000u,
+    .semantic_sprite = true,
+    .scaled_sprite = true,
+    .row_resample = true,
+    .boundary_override = true,
+    .arbitrary_bgra_probe = true,
+    .tile_x0 = 0u, .tile_x1 = 0x1au,
+    .tile_y0 = 2u, .tile_y1 = 4u,
+    .left = 6u, .top = 43u, .width = 209u, .height = 31u,
+    .source = 0x00acf080u,
+    .source_stride = 0x4e0u, .source_control = 0x8e4c0000u,
+    .source_width = 308u, .source_height = 31u,
+    .expected_covered_pixels = 6479u,
+    .boundary = {
+        0x40c00000u, 0x42960000u, 0x40c00000u, 0x422c0000u,
+        0x43580000u, 0x42960000u, 0x43580000u, 0x422c0000u,
+    },
+    .quad = {
+        0xe0000000u, 0xa6218001u, 0x8e4d59e1u, 0xa6884710u,
+        0xa7718000u, 0x0e513300u, 0xae504ea0u, 0x22250e80u,
+        0x40c00000u, 0x422c8699u, 0x435719e7u, 0x422c8699u,
+        0x40c00000u, 0x4294434cu, 0x435719e7u, 0x4294434cu,
+        0u, 0u, 0u, 0u,
+        0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+        0xff000000u, 0x00000000u, 0x00000000u, 0x3bc00000u,
+        0x3d2c8699u, 0xff000000u, 0x3f19c000u, 0x00000000u,
+        0x3e5719e7u, 0x3d2c8699u, 0xff000000u, 0x00000000u,
+        0x3f740000u, 0x3bc00000u, 0x3d94434cu, 0xff000000u,
+        0x3f19c000u, 0x3f740000u, 0x3e5719e7u, 0x3d94434cu,
     },
 };
 
@@ -4788,6 +4896,43 @@ static void test_later_tiled_status_sprites(void) {
     test_captured_status_form(&safari_done_column_resample_form);
     test_captured_status_form(&spotlight_home_narrow_strip_resample_form);
     test_captured_status_form(&spotlight_entry_unfiltered_direct_crop_form);
+    test_captured_status_form(&safari_keyboard_address_row_resample_form);
+    test_captured_status_form(&safari_keyboard_surface_row_resample_form);
+    struct mbx_test_status_form keyboard_clip =
+        safari_keyboard_surface_row_resample_form;
+    keyboard_clip.name = "Safari keyboard lower-left row-resample clip";
+    keyboard_clip.xclip = 0x00100000u;
+    keyboard_clip.yclip = 0x00500040u;
+    keyboard_clip.tile_x0 = 0u;
+    keyboard_clip.tile_x1 = 1u;
+    keyboard_clip.tile_y0 = keyboard_clip.tile_y1 = 4u;
+    keyboard_clip.left = 6u;
+    keyboard_clip.top = 64u;
+    keyboard_clip.width = 10u;
+    keyboard_clip.height = 10u;
+    keyboard_clip.expected_covered_pixels = 100u;
+    const uint32_t keyboard_left_boundary[8] = {
+        0x40c00000u, 0x42960000u, 0x40c00000u, 0x42800000u,
+        0x41800000u, 0x42960000u, 0x41800000u, 0x42800000u,
+    };
+    memcpy(keyboard_clip.boundary, keyboard_left_boundary,
+           sizeof keyboard_clip.boundary);
+    test_captured_status_form(&keyboard_clip);
+
+    keyboard_clip.name = "Safari keyboard lower-right row-resample clip";
+    keyboard_clip.xclip = 0x00d80010u;
+    keyboard_clip.tile_x0 = 2u;
+    keyboard_clip.tile_x1 = 0x1au;
+    keyboard_clip.left = 16u;
+    keyboard_clip.width = 199u;
+    keyboard_clip.expected_covered_pixels = 1990u;
+    const uint32_t keyboard_right_boundary[8] = {
+        0x41800000u, 0x42960000u, 0x41800000u, 0x42800000u,
+        0x43580000u, 0x42960000u, 0x43580000u, 0x42800000u,
+    };
+    memcpy(keyboard_clip.boundary, keyboard_right_boundary,
+           sizeof keyboard_clip.boundary);
+    test_captured_status_form(&keyboard_clip);
     for (unsigned i = 0;
          i < sizeof settings_transition_subpixel_forms /
                  sizeof settings_transition_subpixel_forms[0];
