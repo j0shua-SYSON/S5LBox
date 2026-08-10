@@ -242,12 +242,43 @@ static void test_no_transition_is_ever_coalesced(void) {
     CHECK(q.dropped == 0u, "a wrap that never overflowed reported a drop");
 }
 
+static void test_power_release_waits_for_a_physical_pulse(void) {
+    const uint64_t down = UINT64_C(7000000000);
+    vm_button_event_t power_down = { S5L_BUTTON_HOLD, true };
+    vm_button_event_t power_up = { S5L_BUTTON_HOLD, false };
+    vm_button_event_t home_up = { S5L_BUTTON_MENU, false };
+
+    CHECK(vm_button_power_release_ready(&power_down, down, down),
+          "a Power press was delayed");
+    CHECK(vm_button_power_release_ready(&home_up, down, down),
+          "a non-Power release was delayed");
+    CHECK(!vm_button_power_release_ready(
+              &power_up, down, down + VM_BUTTON_POWER_MIN_HOLD_NS - 1u),
+          "Power was released one nanosecond before the minimum hold");
+    CHECK(vm_button_power_release_ready(
+              &power_up, down, down + VM_BUTTON_POWER_MIN_HOLD_NS),
+          "Power stayed held at the exact minimum boundary");
+
+    /* Clock failure or discontinuity must not turn a wake tap into a key that
+     * remains held forever.  The board's PMU-status gate still pairs the edge
+     * on that fallback path. */
+    CHECK(vm_button_power_release_ready(&power_up, 0u, down),
+          "a missing press timestamp wedged Power");
+    CHECK(vm_button_power_release_ready(&power_up, down, 0u),
+          "a missing current timestamp wedged Power");
+    CHECK(vm_button_power_release_ready(&power_up, down, down - 1u),
+          "a backwards clock wedged Power");
+    CHECK(!vm_button_power_release_ready(NULL, down, down),
+          "a NULL event was called ready");
+}
+
 int main(void) {
     printf("S5LBox app button queue tests\n");
     test_the_two_orders_are_not_the_same_and_map_correctly();
     test_the_silent_switch_means_muted();
     test_the_queue_is_a_strict_fifo();
     test_no_transition_is_ever_coalesced();
+    test_power_release_waits_for_a_physical_pulse();
     printf("  %d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

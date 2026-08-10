@@ -92,6 +92,15 @@ static double vm_now(void) {
     return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
 }
 
+static uint64_t vm_now_ns(void) {
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0 || ts.tv_sec < 0 ||
+        (uint64_t)ts.tv_sec > UINT64_MAX / UINT64_C(1000000000))
+        return 0u;
+    return (uint64_t)ts.tv_sec * UINT64_C(1000000000) +
+           (uint64_t)ts.tv_nsec;
+}
+
 // Declared up front so every call below is checked against a prototype.
 @interface VMEngine ()
 - (void)threadMain:(id)unused;
@@ -249,6 +258,7 @@ static double vm_engine_now_seconds(void) {
     vm_button_queue_t _buttonQueue;
     uint64_t          _buttonDelivered;
     uint64_t          _buttonRefused;
+    uint64_t          _powerPressDeliveredNS;
     BOOL              _droppedButtonLogged;
 }
 
@@ -758,6 +768,7 @@ static double vm_engine_now_seconds(void) {
     memset(_buttons, 0, sizeof _buttons);
     _buttonDelivered = 0;
     _buttonRefused = 0;
+    _powerPressDeliveredNS = 0u;
     _droppedButtonLogged = NO;
     _status = @"starting";
     BOOL needSnapshot = (_snapshot == NULL);
@@ -1237,13 +1248,27 @@ static double vm_engine_now_seconds(void) {
     vm_button_event_t e;
     pthread_mutex_lock(&_lock);
     BOOL have = vm_button_queue_peek(&_buttonQueue, &e);
+    uint64_t powerPressDeliveredNS = _powerPressDeliveredNS;
     pthread_mutex_unlock(&_lock);
     if (!have) return;
 
+    /* A UIKit tap can queue down and up in the same emulator chunk.  The PMU
+     * wake reason prevents the release from overtaking its status read, but a
+     * zero-duration pulse is still unlike the physical switch and can reach
+     * AppleM68Buttons before its post-wake debounce path has settled.  Anchor
+     * the minimum at BOARD acceptance, not at the UI event, because a press
+     * may spend time waiting in this queue while the guest arms the line. */
+    uint64_t nowNS = vm_now_ns();
+    if (!vm_button_power_release_ready(&e, powerPressDeliveredNS, nowNS))
+        return;
+
     if (s5l8900_set_button(&_machine, e.which, e.pressed)) {
+        if (nowNS == 0u) nowNS = vm_now_ns();
         pthread_mutex_lock(&_lock);
         vm_button_queue_pop(&_buttonQueue);
         _buttonDelivered++;
+        if (e.which == S5L_BUTTON_HOLD)
+            _powerPressDeliveredNS = e.pressed ? nowNS : 0u;
         pthread_mutex_unlock(&_lock);
         return;
     }

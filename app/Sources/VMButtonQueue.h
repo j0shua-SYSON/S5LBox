@@ -66,6 +66,16 @@
  */
 #define VM_BUTTON_QUEUE_CAP 10u
 
+/*
+ * A real Sleep/Wake tap is not a zero-duration edge pair.  The PMU reports
+ * the wake press before AppleM68Buttons has finished rebuilding its GPIO
+ * debounce path, and releasing immediately after the PMU status read can be
+ * interpreted as another sleep request.  Hold the guest-visible Power switch
+ * for at least this much HOST time after the board accepts its press.  Wake
+ * begins on the press, so this does not delay the first visible work.
+ */
+#define VM_BUTTON_POWER_MIN_HOLD_NS UINT64_C(500000000)
+
 typedef struct {
     uint8_t  which;     /* an S5L_BUTTON_*, already translated  */
     bool     pressed;   /* what the guest should end up reporting */
@@ -114,6 +124,16 @@ bool vm_button_queue_push(vm_button_queue_t *q, unsigned which, bool pressed);
 
 /* Copy the oldest transition out without removing it. False if empty. */
 bool vm_button_queue_peek(const vm_button_queue_t *q, vm_button_event_t *out);
+
+/*
+ * Whether the event at the front of the queue may be delivered now.  Every
+ * event except a Power release is immediately ready.  A zero timestamp means
+ * the host clock was unavailable and fails open rather than leaving Power
+ * held forever; a monotonic clock moving backwards is handled the same way.
+ */
+bool vm_button_power_release_ready(const vm_button_event_t *event,
+                                   uint64_t power_press_delivered_ns,
+                                   uint64_t now_ns);
 
 /* Remove the oldest transition. Harmless on an empty queue. */
 void vm_button_queue_pop(vm_button_queue_t *q);
