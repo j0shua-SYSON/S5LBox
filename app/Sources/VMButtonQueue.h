@@ -135,6 +135,13 @@ typedef struct {
 void vm_button_queue_reset(vm_button_queue_t *q);
 
 /*
+ * Cancel transitions not yet accepted by the board, preserving lifetime
+ * accounting. Returns how many were removed. Lifecycle cancellation is not a
+ * capacity drop, so this does not increment `dropped`.
+ */
+unsigned vm_button_queue_cancel_pending(vm_button_queue_t *q);
+
+/*
  * Translate one app-side button into the core's identifier, and the UI's
  * "pressed" into the state the GUEST will report.
  *

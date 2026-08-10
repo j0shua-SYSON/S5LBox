@@ -12,6 +12,15 @@ void vm_touch_queue_reset(vm_touch_queue_t *q) {
     memset(q, 0, sizeof *q);
 }
 
+unsigned vm_touch_queue_cancel_pending(vm_touch_queue_t *q) {
+    if (!q) return 0u;
+    unsigned cancelled = q->count;
+    q->head = 0u;
+    q->count = 0u;
+    memset(q->slot, 0, sizeof q->slot);
+    return cancelled;
+}
+
 bool vm_touch_contact_from_ui(vm_touch_phase_t phase, int x, int y,
                               s5l_mt_contact_t *out) {
     if (!out) return false;
@@ -44,6 +53,33 @@ bool vm_touch_contact_from_ui(vm_touch_phase_t phase, int x, int y,
     out->pressure = pressure;
     out->major    = VM_TOUCH_MAJOR;
     out->minor    = VM_TOUCH_MINOR;
+    return true;
+}
+
+void vm_touch_delivery_reset(vm_touch_delivery_state_t *state) {
+    if (!state) return;
+    memset(state, 0, sizeof *state);
+}
+
+void vm_touch_delivery_note_accepted(vm_touch_delivery_state_t *state,
+                                     const s5l_mt_contact_t *contact) {
+    if (!state || !contact) return;
+    if (contact->phase == MTZ2_PHASE_MAKE_TOUCH ||
+        contact->phase == MTZ2_PHASE_TOUCHING) {
+        state->active = true;
+        state->last = *contact;
+    } else if (contact->phase == MTZ2_PHASE_BREAK_TOUCH) {
+        state->active = false;
+        state->last = *contact;
+    }
+}
+
+bool vm_touch_delivery_make_break(const vm_touch_delivery_state_t *state,
+                                  s5l_mt_contact_t *out) {
+    if (!state || !state->active || !out) return false;
+    *out = state->last;
+    out->phase = MTZ2_PHASE_BREAK_TOUCH;
+    out->pressure = 0u;
     return true;
 }
 

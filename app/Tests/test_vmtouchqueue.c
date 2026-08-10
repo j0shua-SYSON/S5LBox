@@ -160,6 +160,76 @@ static void test_wraparound(void) {
     }
 }
 
+static void test_lifecycle_cancellation_and_accepted_contact_tracking(void) {
+    vm_touch_queue_t q;
+    vm_touch_queue_reset(&q);
+    for (uint16_t i = 0; i < 3u; i++) {
+        s5l_mt_contact_t c = make(MTZ2_PHASE_TOUCHING, i);
+        CHECK(vm_touch_queue_push(&q, &c), "setup push %u", i);
+    }
+    uint64_t queued = q.queued;
+    uint64_t coalesced = q.coalesced;
+    uint64_t dropped = q.dropped;
+    CHECK(vm_touch_queue_cancel_pending(&q) == 3u,
+          "cancellation did not report all pending reports");
+    CHECK(q.count == 0u && q.head == 0u,
+          "cancellation did not empty the ring");
+    CHECK(q.queued == queued && q.coalesced == coalesced &&
+          q.dropped == dropped,
+          "cancellation rewrote lifetime accounting");
+    CHECK(vm_touch_queue_cancel_pending(&q) == 0u,
+          "cancelling an empty queue reported work");
+    CHECK(vm_touch_queue_cancel_pending(NULL) == 0u,
+          "cancelling a null queue reported work");
+    s5l_mt_contact_t afterCancel = make(MTZ2_PHASE_BREAK_TOUCH, 17u);
+    s5l_mt_contact_t peeked;
+    CHECK(vm_touch_queue_push(&q, &afterCancel) &&
+          vm_touch_queue_peek(&q, &peeked) && peeked.x == 17u,
+          "the cancelled ring could not be reused from a clean head");
+    (void)vm_touch_queue_cancel_pending(&q);
+
+    vm_touch_delivery_state_t state;
+    memset(&state, 0x5a, sizeof state);
+    vm_touch_delivery_reset(&state);
+    s5l_mt_contact_t release;
+    CHECK(!state.active &&
+          !vm_touch_delivery_make_break(&state, &release),
+          "a reset delivery state invented a held finger");
+
+    s5l_mt_contact_t down = make(MTZ2_PHASE_MAKE_TOUCH, 41u);
+    down.y = 73u;
+    down.pressure = VM_TOUCH_PRESSURE;
+    down.major = VM_TOUCH_MAJOR;
+    down.minor = VM_TOUCH_MINOR;
+    vm_touch_delivery_note_accepted(&state, &down);
+    CHECK(state.active, "an accepted MAKE_TOUCH was not tracked");
+    CHECK(vm_touch_delivery_make_break(&state, &release),
+          "an accepted finger could not be cancelled");
+    CHECK(release.id == down.id && release.x == down.x &&
+          release.y == down.y && release.phase == MTZ2_PHASE_BREAK_TOUCH &&
+          release.pressure == 0u,
+          "the synthesized lift did not preserve the accepted path and point");
+
+    s5l_mt_contact_t move = make(MTZ2_PHASE_TOUCHING, 99u);
+    move.y = 101u;
+    move.pressure = VM_TOUCH_PRESSURE;
+    vm_touch_delivery_note_accepted(&state, &move);
+    CHECK(vm_touch_delivery_make_break(&state, &release) &&
+          release.x == 99u && release.y == 101u,
+          "the synthesized lift did not use the last accepted position");
+    vm_touch_delivery_note_accepted(&state, &release);
+    CHECK(!state.active &&
+          !vm_touch_delivery_make_break(&state, &release),
+          "an accepted BREAK_TOUCH left the finger held");
+
+    vm_touch_delivery_reset(NULL);
+    vm_touch_delivery_note_accepted(NULL, &down);
+    vm_touch_delivery_note_accepted(&state, NULL);
+    CHECK(!vm_touch_delivery_make_break(NULL, &release) &&
+          !vm_touch_delivery_make_break(&state, NULL),
+          "null delivery arguments were accepted");
+}
+
 static void test_moved_coalesces_when_full(void) {
     vm_touch_queue_t q;
     vm_touch_queue_reset(&q);
@@ -236,6 +306,32 @@ static void test_edges_are_never_coalesced(void) {
     CHECK(out.phase == MTZ2_PHASE_MAKE_TOUCH && out.x == 700,
           "and it is the same edge, got phase %u x %u",
           (unsigned)out.phase, (unsigned)out.x);
+
+    /* Exercise the non-trivial case: the newest MOVED is one slot before an
+     * existing edge and the ring's head has wrapped. Removing it must shift the
+     * old edge without moving either edge ahead of surviving positions. */
+    vm_touch_queue_reset(&q);
+    for (uint16_t i = 0; i < VM_TOUCH_QUEUE_CAP; i++) {
+        s5l_mt_contact_t c = make(MTZ2_PHASE_TOUCHING, i);
+        (void)vm_touch_queue_push(&q, &c);
+    }
+    for (unsigned i = 0; i < 3u; i++) vm_touch_queue_pop(&q);
+    for (uint16_t i = 8u; i < 10u; i++) {
+        s5l_mt_contact_t c = make(MTZ2_PHASE_TOUCHING, i);
+        CHECK(vm_touch_queue_push(&q, &c), "wrapped refill %u", i);
+    }
+    down = make(MTZ2_PHASE_MAKE_TOUCH, 700u);
+    CHECK(vm_touch_queue_push(&q, &down), "wrapped edge fill");
+    lift = make(MTZ2_PHASE_BREAK_TOUCH, 800u);
+    CHECK(vm_touch_queue_push(&q, &lift),
+          "wrapped full queue dropped a lift with a MOVED available");
+    const uint16_t expected[] = { 3u, 4u, 5u, 6u, 7u, 8u, 700u, 800u };
+    for (unsigned i = 0; i < VM_TOUCH_QUEUE_CAP; i++) {
+        CHECK(vm_touch_queue_peek(&q, &out) && out.x == expected[i],
+              "wrapped displacement %u produced x=%u, expected %u", i,
+              (unsigned)out.x, (unsigned)expected[i]);
+        vm_touch_queue_pop(&q);
+    }
 }
 
 static void test_a_full_tap_survives_a_flood(void) {
@@ -294,6 +390,7 @@ int main(void) {
     test_phase_mapping_rejects();
     test_fifo_order();
     test_wraparound();
+    test_lifecycle_cancellation_and_accepted_contact_tracking();
     test_moved_coalesces_when_full();
     test_edges_are_never_coalesced();
     test_a_full_tap_survives_a_flood();

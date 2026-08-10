@@ -181,6 +181,30 @@ static void test_the_queue_is_a_strict_fifo(void) {
           "a malformed push was stored or counted as a drop");
 }
 
+static void test_lifecycle_cancellation_preserves_accounting(void) {
+    vm_button_queue_t q;
+    vm_button_queue_reset(&q);
+    CHECK(vm_button_queue_push(&q, S5L_BUTTON_MENU, true), "setup press");
+    CHECK(vm_button_queue_push(&q, S5L_BUTTON_MENU, false), "setup release");
+    uint64_t queued = q.queued;
+    uint64_t dropped = q.dropped;
+    CHECK(vm_button_queue_cancel_pending(&q) == 2u,
+          "cancellation did not report both transitions");
+    CHECK(q.count == 0u && q.head == 0u,
+          "cancellation did not empty the ring");
+    CHECK(q.queued == queued && q.dropped == dropped,
+          "cancellation rewrote lifetime accounting");
+    CHECK(vm_button_queue_cancel_pending(&q) == 0u,
+          "cancelling an empty queue reported work");
+    CHECK(vm_button_queue_cancel_pending(NULL) == 0u,
+          "cancelling a null queue reported work");
+    vm_button_event_t event;
+    CHECK(vm_button_queue_push(&q, S5L_BUTTON_VOLUP, false) &&
+          vm_button_queue_peek(&q, &event) &&
+          event.which == S5L_BUTTON_VOLUP && !event.pressed,
+          "the cancelled ring could not be reused from a clean head");
+}
+
 /*
  * NOTHING IS EVER COALESCED. This is where the button queue is deliberately
  * stricter than the touch queue, and the test states the difference: a repeated
@@ -391,6 +415,7 @@ int main(void) {
     test_the_two_orders_are_not_the_same_and_map_correctly();
     test_the_silent_switch_means_muted();
     test_the_queue_is_a_strict_fifo();
+    test_lifecycle_cancellation_preserves_accounting();
     test_no_transition_is_ever_coalesced();
     test_power_release_uses_display_edge_or_bounded_fallback();
     test_home_and_volume_survive_the_guest_debounce();

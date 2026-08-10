@@ -62,6 +62,17 @@ static const double kVMPublishInterval = 1.0 / 30.0;
 static const NSUInteger kVMConsoleLimit = 16000;
 
 /*
+ * Automatic resume must never serialize a UIKit press whose matching release
+ * lives only in a host queue. Give the guest far more than the known physical
+ * floors (0.5 s and 8 M retirements for Power) to consume the cancellation,
+ * but fail the save instead of displaying "Saving" forever if its input driver
+ * is genuinely wedged. Either independent bound may stop the attempt; the
+ * retirement bound is the fallback if the monotonic host clock is unavailable.
+ */
+static const uint64_t kVMCheckpointInputTimeoutNS = UINT64_C(10000000000);
+static const uint64_t kVMCheckpointInputTimeoutInstructions = UINT64_C(128000000);
+
+/*
  * THE ONE PLACE THE APP'S TWO BUTTON ENUMS MEET.
  *
  * VMButton (VMEngine.h) is Objective-C and needs Foundation; VM_BUTTON_*
@@ -113,6 +124,8 @@ static uint64_t vm_now_ns(void) {
 - (void)noteDroppedButton;
 - (void)drainOneTouch_emulatorThread;
 - (void)drainOneButton_emulatorThread;
+- (void)beginCheckpointInputQuiesce_emulatorThread;
+- (BOOL)checkpointInputIsQuiescent_emulatorThread;
 - (void)publishBlankSnapshotLocked;
 - (BOOL)installGuestPayload;
 - (void)provisionRootFilesystem:(id)unused;
@@ -248,6 +261,7 @@ static double vm_engine_now_seconds(void) {
      * and the part a host CI runner can test.
      */
     vm_touch_queue_t _touch;
+    vm_touch_delivery_state_t _touchDelivery;
     uint64_t         _touchDelivered;
     /*
      * Button transitions waiting to be handed to the board, for exactly the
@@ -760,6 +774,7 @@ static double vm_engine_now_seconds(void) {
     /* A restart must not inherit the previous machine's pending finger, nor
      * its counters — the status line reads them as claims about THIS run. */
     vm_touch_queue_reset(&_touch);
+    vm_touch_delivery_reset(&_touchDelivery);
     _touchDelivered = 0;
     _droppedTouchLogged = NO;
     /* And the buttons, for the same reason: a switch held when the last
@@ -1210,6 +1225,7 @@ static double vm_engine_now_seconds(void) {
         s5l8900_tick(&_machine, 0);
         pthread_mutex_lock(&_lock);
         vm_touch_queue_pop(&_touch);
+        vm_touch_delivery_note_accepted(&_touchDelivery, &c);
         _touchDelivered++;
         pthread_mutex_unlock(&_lock);
         return;
@@ -1293,6 +1309,108 @@ static double vm_engine_now_seconds(void) {
     pthread_mutex_lock(&_lock);
     _buttonRefused++;
     pthread_mutex_unlock(&_lock);
+}
+
+/*
+ * A checkpoint is a lifecycle cancellation boundary. Once
+ * saveCheckpointAndStopWithCompletion: changes the state to Checkpointing, the
+ * UI cannot enqueue anything new. Reports which have not reached hardware can
+ * therefore be cancelled; reports the devices already accepted must receive a
+ * real release and enough guest execution to consume it before serialization.
+ */
+- (void)beginCheckpointInputQuiesce_emulatorThread {
+    pthread_mutex_lock(&_lock);
+    unsigned touches = vm_touch_queue_cancel_pending(&_touch);
+    unsigned buttons = vm_button_queue_cancel_pending(&_buttonQueue);
+    memset(_buttons, 0, sizeof _buttons);
+    pthread_mutex_unlock(&_lock);
+
+    if (touches || buttons) {
+        [self appendConsole:[NSString stringWithFormat:
+            @"[input] checkpoint cancelled %u queued touch report(s) and %u "
+             @"button transition(s) before releasing accepted input\n",
+            touches, buttons]];
+    }
+}
+
+- (BOOL)checkpointInputIsQuiescent_emulatorThread {
+    BOOL touchWaiting = NO;
+    pthread_mutex_lock(&_lock);
+    unsigned touchQueued = _touch.count;
+    vm_touch_delivery_state_t touchDelivery = _touchDelivery;
+    pthread_mutex_unlock(&_lock);
+
+    if (touchQueued) {
+        [self drainOneTouch_emulatorThread];
+        touchWaiting = YES;
+    } else if (s5l_mtz2_irq(&_machine.mtz2)) {
+        /* A report already accepted by the controller still has to be clocked
+         * out before a cancellation can follow it. */
+        touchWaiting = YES;
+    } else if (touchDelivery.active) {
+        s5l_mt_contact_t release;
+        if (vm_touch_delivery_make_break(&touchDelivery, &release)) {
+            pthread_mutex_lock(&_lock);
+            BOOL queued = vm_touch_queue_push(&_touch, &release);
+            pthread_mutex_unlock(&_lock);
+            if (queued) [self drainOneTouch_emulatorThread];
+        }
+        touchWaiting = YES;
+    } else if (s5l_gpioic_pending(&_machine.gpioic,
+                                  S5L_GPIOIC_LINE_MULTITOUCH)) {
+        /* The controller has been read; let the guest acknowledge the cascade
+         * as well so the restored boundary contains no deferred touch IRQ. */
+        touchWaiting = YES;
+    }
+
+    BOOL buttonWaiting = NO;
+    pthread_mutex_lock(&_lock);
+    unsigned buttonQueued = _buttonQueue.count;
+    pthread_mutex_unlock(&_lock);
+
+    if (buttonQueued) {
+        [self drainOneButton_emulatorThread];
+        buttonWaiting = YES;
+    } else {
+        /* Ordinary keys first. Power has a longer, display-aware release floor
+         * and must not prevent independent lines from returning to rest. */
+        static const unsigned releaseOrder[S5L_BUTTON_COUNT] = {
+            S5L_BUTTON_MENU, S5L_BUTTON_VOLUP, S5L_BUTTON_VOLDOWN,
+            S5L_BUTTON_RINGERAB, S5L_BUTTON_HOLD,
+        };
+        for (unsigned i = 0; i < S5L_BUTTON_COUNT; i++) {
+            unsigned which = releaseOrder[i];
+            if (!s5l_buttons_held(&_machine.buttons, which)) continue;
+            pthread_mutex_lock(&_lock);
+            BOOL queued = vm_button_queue_push(&_buttonQueue, which, false);
+            pthread_mutex_unlock(&_lock);
+            if (queued) [self drainOneButton_emulatorThread];
+            buttonWaiting = YES;
+            break;
+        }
+
+        /* The release itself is serialized, but waiting for its interrupt to
+         * clear makes this a genuinely quiet guest boundary rather than a
+         * deferred host gesture that happens to be representable on disk. */
+        if (!buttonWaiting) {
+            for (unsigned i = 0; i < S5L_BUTTON_COUNT; i++) {
+                if (s5l_gpioic_pending(&_machine.gpioic,
+                                       s5l_button_line(i))) {
+                    buttonWaiting = YES;
+                    break;
+                }
+            }
+        }
+    }
+
+    if (touchWaiting || buttonWaiting) return NO;
+
+    pthread_mutex_lock(&_lock);
+    memset(_buttons, 0, sizeof _buttons);
+    memset(&_powerHold, 0, sizeof _powerHold);
+    memset(&_momentaryHolds, 0, sizeof _momentaryHolds);
+    pthread_mutex_unlock(&_lock);
+    return YES;
 }
 
 /* Same discipline as noteDroppedTouch. */
@@ -1452,6 +1570,9 @@ static bool vm_spin_already_reported(const vm_spin_t *s, uint32_t region) {
     BOOL reachedCap = NO;
     BOOL checkpointSaved = NO;
     NSString *checkpointFailure = nil;
+    BOOL checkpointInputPrepared = NO;
+    uint64_t checkpointInputStartNS = 0u;
+    uint64_t checkpointInputStartRetired = 0u;
 
     /* Emulator-thread only, so it is a local and not an ivar: nothing else may
      * read it and no lock can be forgotten. */
@@ -1471,15 +1592,43 @@ static bool vm_spin_already_reported(const vm_spin_t *s, uint32_t region) {
                 break;
             }
             if (checkpoint) {
-                /* Drain host-visible output before serializing. Otherwise the
-                 * UART bytes already shown on this run would be present again
-                 * after restore and appear twice in the next console. */
-                [self publishRetired:retired rate:0.0 status:ARM_OK];
+                if (!checkpointInputPrepared) {
+                    [self beginCheckpointInputQuiesce_emulatorThread];
+                    checkpointInputStartNS = vm_now_ns();
+                    checkpointInputStartRetired = retired;
+                    checkpointInputPrepared = YES;
+                }
+
+                BOOL inputReady =
+                    [self checkpointInputIsQuiescent_emulatorThread];
+                uint64_t nowNS = vm_now_ns();
+                BOOL hostTimedOut =
+                    !inputReady && checkpointInputStartNS != 0u &&
+                    nowNS != 0u && nowNS >= checkpointInputStartNS &&
+                    nowNS - checkpointInputStartNS >=
+                        kVMCheckpointInputTimeoutNS;
+                BOOL guestTimedOut =
+                    !inputReady && retired >= checkpointInputStartRetired &&
+                    retired - checkpointInputStartRetired >=
+                        kVMCheckpointInputTimeoutInstructions;
 
                 char why[VM_FW_BOOT_DETAIL_CAPACITY] = {0};
-                vm_firmware_checkpoint_status_t saved =
-                    vm_firmware_boot_save_resume(_firmwareBoot, &_machine,
-                                                 why, sizeof why);
+                vm_firmware_checkpoint_status_t saved = VM_FW_CHECKPOINT_BUSY;
+                if (inputReady) {
+                    /* Drain host-visible output before serializing. Otherwise
+                     * UART bytes already shown on this run would be present
+                     * again after restore and appear twice. */
+                    [self publishRetired:retired rate:0.0 status:ARM_OK];
+                    saved = vm_firmware_boot_save_resume(
+                        _firmwareBoot, &_machine, why, sizeof why);
+                } else if (hostTimedOut || guestTimedOut) {
+                    (void)snprintf(
+                        why, sizeof why,
+                        "The guest did not consume transient input releases "
+                        "within the checkpoint safety window. Nothing was "
+                        "saved; the machine is still running.");
+                    saved = VM_FW_CHECKPOINT_ERROR;
+                }
                 if (saved == VM_FW_CHECKPOINT_OK) {
                     [self appendConsole:@"[vm] automatic resume checkpoint saved\n"];
                     checkpointSaved = YES;
@@ -1500,6 +1649,7 @@ static bool vm_spin_already_reported(const vm_spin_t *s, uint32_t region) {
                     _state = VMEngineStateRunning;
                     _status = _paused ? @"paused" : @"running (save failed)";
                     pthread_mutex_unlock(&_lock);
+                    checkpointInputPrepared = NO;
 
                     if (failed) {
                         NSString *message = checkpointFailure;
@@ -1510,10 +1660,11 @@ static bool vm_spin_already_reported(const vm_spin_t *s, uint32_t region) {
                     checkpointFailure = nil;
                     continue;
                 }
-                /* BUSY: execute one bounded chunk so the guest can reach the
-                 * completion SVC, then retry before any further UI work. This
-                 * deliberately advances even if the machine was user-paused;
-                 * an in-flight disk operation is not a safe pause boundary. */
+                /* BUSY: execute one bounded chunk so input cancellation or an
+                 * in-flight disk operation can reach a safe boundary, then
+                 * retry before any further UI work. This deliberately advances
+                 * even if the machine was user-paused: neither boundary is safe
+                 * to freeze halfway through. */
             }
             if (paused && !checkpoint) {
                 usleep(50 * 1000);
@@ -1522,10 +1673,13 @@ static bool vm_spin_already_reported(const vm_spin_t *s, uint32_t region) {
                 continue;
             }
 
-            /* The only place the UI's input reaches the machine, and it is on
-             * this thread, between chunks, with nothing executing. */
-            [self drainOneTouch_emulatorThread];
-            [self drainOneButton_emulatorThread];
+            /* The only place ordinary UI input reaches the machine, and it is
+             * on this thread, between chunks, with nothing executing. During a
+             * checkpoint the quiesce state machine above owns input instead. */
+            if (!checkpoint) {
+                [self drainOneTouch_emulatorThread];
+                [self drainOneButton_emulatorThread];
+            }
 
             retired += s5l8900_run(&_machine, kVMChunkInstructions, &status);
 

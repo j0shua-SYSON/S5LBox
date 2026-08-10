@@ -32,6 +32,15 @@ void vm_button_queue_reset(vm_button_queue_t *q) {
     memset(q, 0, sizeof *q);
 }
 
+unsigned vm_button_queue_cancel_pending(vm_button_queue_t *q) {
+    if (!q) return 0u;
+    unsigned cancelled = q->count;
+    q->head = 0u;
+    q->count = 0u;
+    memset(q->slot, 0, sizeof q->slot);
+    return cancelled;
+}
+
 bool vm_button_to_guest(unsigned app_button, bool pressed,
                         unsigned *out_which, bool *out_pressed) {
     if (app_button >= VM_BUTTON_COUNT) return false;

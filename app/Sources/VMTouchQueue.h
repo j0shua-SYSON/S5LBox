@@ -82,8 +82,27 @@ typedef struct {
     uint64_t         queued, coalesced, dropped;
 } vm_touch_queue_t;
 
+/*
+ * What the emulated controller has ACCEPTED, as opposed to what UIKit most
+ * recently queued. The controller forgets a frame after the guest reads it,
+ * but the guest still believes that path is down until a BREAK_TOUCH arrives.
+ * Keeping that one physical fact lets lifecycle code cancel a contact before
+ * it serializes the guest, without reaching into the controller's wire frame.
+ */
+typedef struct {
+    bool             active;
+    s5l_mt_contact_t last;
+} vm_touch_delivery_state_t;
+
 /* Empty the queue and zero the counters. Safe on a zeroed struct. */
 void vm_touch_queue_reset(vm_touch_queue_t *q);
+
+/*
+ * Cancel reports not yet accepted by the controller, preserving all lifetime
+ * accounting. Returns how many were removed. This is lifecycle cancellation,
+ * not queue overflow, so it does not increment `dropped`.
+ */
+unsigned vm_touch_queue_cancel_pending(vm_touch_queue_t *q);
 
 /*
  * Translate one UIKit-side report into the device's encoding.
@@ -104,6 +123,15 @@ void vm_touch_queue_reset(vm_touch_queue_t *q);
  */
 bool vm_touch_contact_from_ui(vm_touch_phase_t phase, int x, int y,
                               s5l_mt_contact_t *out);
+
+/* Track only reports the emulated controller accepted. */
+void vm_touch_delivery_reset(vm_touch_delivery_state_t *state);
+void vm_touch_delivery_note_accepted(vm_touch_delivery_state_t *state,
+                                     const s5l_mt_contact_t *contact);
+
+/* Build the BREAK_TOUCH needed to cancel an accepted contact. */
+bool vm_touch_delivery_make_break(const vm_touch_delivery_state_t *state,
+                                  s5l_mt_contact_t *out);
 
 /*
  * Add a report. Returns whether it is now in the queue.
