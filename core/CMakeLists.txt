@@ -396,6 +396,7 @@ add_test(NAME app_frame_telemetry COMMAND test_vmframetelemetry)
 add_executable(test_vmfirmwareboot
     ../app/Tests/test_vmfirmwareboot.c
     ../app/Sources/VMFirmwareBoot.c
+    ../app/Sources/VMResumeCheckpoint.c
     ../app/Sources/VMSnapshotCow.c
     ../app/Sources/VMBootOptions.c
     ../app/Sources/VMOptions.c
@@ -417,6 +418,29 @@ target_compile_definitions(test_vmfirmwareboot PRIVATE
     S5LBOX_FIRMWARE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../firmware")
 add_test(NAME app_firmware_boot COMMAND test_vmfirmwareboot)
 set_tests_properties(app_firmware_boot PROPERTIES
+    WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+
+# The single automatic resume point is a two-payload transaction whose
+# non-empty marker must be published last. It needs no firmware: a small core
+# machine is enough to prove replacement, round-trip and fail-closed ordering.
+add_executable(test_vmresumecheckpoint
+    ../app/Tests/test_vmresumecheckpoint.c
+    ../app/Sources/VMResumeCheckpoint.c
+)
+target_include_directories(test_vmresumecheckpoint PRIVATE ../app/Sources)
+target_link_libraries(test_vmresumecheckpoint PRIVATE emucore)
+set_target_properties(test_vmresumecheckpoint PROPERTIES
+    C_STANDARD 11
+    C_STANDARD_REQUIRED YES
+    C_EXTENSIONS NO)
+if(MSVC)
+    target_compile_options(test_vmresumecheckpoint PRIVATE /W4 /WX)
+else()
+    target_compile_options(test_vmresumecheckpoint PRIVATE
+        -Wall -Wextra -Werror -pedantic -Wformat=2 -Wshadow)
+endif()
+add_test(NAME app_resume_checkpoint COMMAND test_vmresumecheckpoint)
+set_tests_properties(app_resume_checkpoint PROPERTIES
     WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
 
 # Which of the settings screen's fourteen switches reaches a bring-up request,
@@ -578,6 +602,7 @@ add_executable(test_vminstancepaths
     ../app/Sources/VMInstancePaths.c
     ../app/Sources/VMInstances.c
     ../app/Sources/VMFirmwareBoot.c
+    ../app/Sources/VMResumeCheckpoint.c
     ../app/Sources/VMSnapshotCow.c
     ../app/Sources/VMBootOptions.c
     ../app/Sources/VMOptions.c

@@ -102,6 +102,7 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
 - (void)settingsDidChange:(NSNotification *)notification;
 - (void)blockSystemPopGestures;
 - (void)restoreSystemPopGestures;
+- (void)setCheckpointSaving:(BOOL)saving;
 - (void)applyPauseState;
 - (void)applySettingsToEngine;
 - (void)refreshRunControls;
@@ -110,6 +111,7 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
 - (void)resetTapped:(id)sender;
 - (void)settingsTapped:(id)sender;
 - (void)consoleTapped:(id)sender;
+- (void)backTapped:(id)sender;
 @end
 
 @implementation VMDisplayLinkProxy {
@@ -171,6 +173,7 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
      * reasons for it, and -applyPauseState is the only thing that writes it. */
     BOOL               _userPaused;
     BOOL               _inBackground;
+    BOOL               _savingCheckpoint;
 
     /* What the toolbar is currently showing, so it is only rebuilt when the
      * engine's answer changes rather than four times a second. */
@@ -247,6 +250,23 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.view.backgroundColor = [UIColor blackColor];
+
+    /* The stock navigation back item pops immediately, which used to destroy
+     * the only live machine state. This explicit item keeps the familiar
+     * chevron but routes the action through the asynchronous checkpoint. */
+    self.navigationItem.hidesBackButton = YES;
+    UIImage *backImage = [UIImage systemImageNamed:@"chevron.left"];
+    UIBarButtonItem *backItem = backImage
+        ? [[UIBarButtonItem alloc] initWithImage:backImage
+                                          style:UIBarButtonItemStylePlain
+                                         target:self
+                                         action:@selector(backTapped:)]
+        : [[UIBarButtonItem alloc] initWithTitle:@"Machines"
+                                          style:UIBarButtonItemStylePlain
+                                         target:self
+                                         action:@selector(backTapped:)];
+    backItem.accessibilityLabel = @"Back to Machines";
+    self.navigationItem.leftBarButtonItem = backItem;
 
     _consoleText = [NSMutableString string];
 
@@ -446,6 +466,61 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
     [_link invalidate];
     [_engine stop];
     free(_frame);
+}
+
+- (void)setCheckpointSaving:(BOOL)saving {
+    _savingCheckpoint = saving;
+    self.navigationItem.leftBarButtonItem.enabled = !saving;
+    _screen.userInteractionEnabled = !saving;
+    _keys.userInteractionEnabled = !saving;
+    _toolbar.userInteractionEnabled = !saving;
+    [self refreshPrepareOverlay];
+}
+
+- (void)backTapped:(id)sender {
+    (void)sender;
+    if (_savingCheckpoint) return;
+
+    /* A halted machine has already released its s5l8900_t, so there is no
+     * state left to serialize. Leaving is still safe and must not trap the
+     * user behind a save button that can never succeed. */
+    if (!_engine || ![_engine isRunning]) {
+        [self.navigationController popViewControllerAnimated:YES];
+        return;
+    }
+
+    [self setCheckpointSaving:YES];
+    __weak typeof(self) weakSelf = self;
+    [_engine saveCheckpointAndStopWithCompletion:
+        ^(BOOL saved, NSString *message) {
+            EmulatorViewController *strongSelf = weakSelf;
+            if (!strongSelf) return;
+            if (saved) {
+                [strongSelf.navigationController
+                    popViewControllerAnimated:YES];
+                return;
+            }
+
+            [strongSelf setCheckpointSaving:NO];
+            UIAlertController *alert = [UIAlertController
+                alertControllerWithTitle:@"Machine Not Saved"
+                                 message:message.length
+                                     ? message
+                                     : @"The checkpoint could not be saved."
+                          preferredStyle:UIAlertControllerStyleAlert];
+            [alert addAction:[UIAlertAction actionWithTitle:@"Keep Running"
+                                                      style:UIAlertActionStyleCancel
+                                                    handler:nil]];
+            [alert addAction:[UIAlertAction
+                actionWithTitle:@"Leave Without Saving"
+                          style:UIAlertActionStyleDestructive
+                        handler:^(__unused UIAlertAction *action) {
+                            [strongSelf->_engine stop];
+                            [strongSelf.navigationController
+                                popViewControllerAnimated:YES];
+                        }]];
+            [strongSelf presentViewController:alert animated:YES completion:nil];
+        }];
 }
 
 - (void)appWillResignActive:(NSNotification *)notification {
@@ -706,18 +781,19 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
 - (NSString *)snapshotListTakeUnavailableReason:(VMSnapshotListViewController *)list {
     (void)list;
     /*
-     * Saving is blocked on the same missing piece as opening, and the reason
-     * is worth stating plainly rather than hiding behind "not available":
-     * writing only the CPU and RAM would produce a file that RESTORES wrong
-     * later, which is a worse outcome than refusing now. Whether the machine
-     * is running has nothing to do with it, and this used to say it did.
+     * The automatic Back checkpoint is safe because the machine stops at the
+     * exact boundary it saves, so its live work image can never move away from
+     * that state before the one-shot restore. A named historical snapshot has
+     * a harder contract: it must remain restorable while the machine keeps
+     * running and changing that image. The COW recorder exists, but this UI has
+     * not yet completed that lifecycle, so claiming named saves here would
+     * still be false.
      */
-    return @"Saving is not available yet — this is about the app, not about "
-           @"your machine, which is running fine. A saved state also has to "
-           @"record the host side of the disk bridge, and that part is still "
-           @"being built. Writing the file without it would give you a "
-           @"snapshot that restores into a machine whose disk disagrees with "
-           @"its memory, so it refuses instead of saving something broken.";
+    return @"Named saved states are not available yet. Leaving the machine "
+           @"screen can safely write one automatic resume point because it "
+           @"stops the machine immediately afterward. A named snapshot must "
+           @"remain valid while the machine keeps changing its disk, and that "
+           @"disk-history lifecycle is not integrated here yet.";
 }
 
 #pragma mark - Layout
@@ -732,6 +808,12 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
  * a user can see it moving even when the bar is only a few pixels along.
  */
 - (void)refreshPrepareOverlay {
+    if (_savingCheckpoint) {
+        _prepareScrim.hidden = NO;
+        _prepareBar.hidden = YES;
+        _prepareLabel.text = @"Saving machine...\nIt will resume here next time.";
+        return;
+    }
     BOOL preparing = [_engine isPreparingRootFilesystem];
     _prepareScrim.hidden = !preparing;
     if (!preparing) return;

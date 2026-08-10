@@ -51,9 +51,8 @@ extern "C" {
 #define VM_FW_BOOT_ROOTFS_FILE      "rootfs.img"
 #define VM_FW_BOOT_WORK_FILE        "rootfs-work.img"
 /*
- * The reserved suspend-to-disk pair.  The app does not yet create this pair;
- * a complete pair supplied by a trusted checkpoint may be consumed once when
- * VM_FW_BOOT_RESTORE_ONCE_FILE is also present.  No marker means no restore,
+ * The automatic suspend-to-disk pair. A complete pair is consumed once when
+ * VM_FW_BOOT_RESTORE_ONCE_FILE is also present. No marker means no restore,
  * even if stale or partial state files happen to exist.
  *
  * WHY THIS IS TWO FILES AND NOT THREE. bootkernel writes a 466 MB `.mdimage`
@@ -75,6 +74,7 @@ extern "C" {
 #define VM_FW_BOOT_STATE_TMP        "state.snap.partial"
 #define VM_FW_BOOT_STATE_MD_TMP     "state.snap.mdstate.partial"
 #define VM_FW_BOOT_RESTORE_ONCE_FILE "state.snap.restore-once"
+#define VM_FW_BOOT_RESTORE_ONCE_TMP  "state.snap.restore-once.partial"
 
 /* Physical A/B control for the signed-static engine.  This marker is read only
  * in builds which contain that engine.  It never enables executable memory;
@@ -247,6 +247,26 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
                             const vm_firmware_boot_paths_t *paths,
                             const bool *options, unsigned option_count,
                             vm_firmware_boot_report_t *report);
+
+/*
+ * Save the one automatic resume point while the emulator thread exclusively
+ * owns `machine` between instructions.
+ *
+ * BUSY means a native memory-disk continuation is in flight. Nothing was
+ * written and the caller should execute a little more guest code before
+ * retrying. ERROR is terminal for this attempt and `detail` says why. OK means
+ * the complete checkpoint and its one-shot marker are durable, after which the
+ * current machine must stop before it can change its disk again.
+ */
+typedef enum {
+    VM_FW_CHECKPOINT_OK = 0,
+    VM_FW_CHECKPOINT_BUSY,
+    VM_FW_CHECKPOINT_ERROR
+} vm_firmware_checkpoint_status_t;
+
+vm_firmware_checkpoint_status_t vm_firmware_boot_save_resume(
+    vm_firmware_boot_t *boot, const s5l8900_t *machine,
+    char *detail, size_t detail_capacity);
 
 /* Close the work image and release the bridge storage. Safe on a NULL slot. */
 /*

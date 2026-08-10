@@ -24,6 +24,8 @@ typedef NS_ENUM(NSUInteger, VMButton) {
     VMButtonCount
 };
 
+typedef void (^VMEngineCheckpointCompletion)(BOOL saved, NSString *message);
+
 @interface VMEngine : NSObject
 
 /*
@@ -59,6 +61,17 @@ typedef NS_ENUM(NSUInteger, VMButton) {
 
 /* Ask the emulator thread to finish and release the machine. */
 - (void)stop;
+
+/*
+ * Save this live firmware machine as the next-run resume point, then stop it.
+ * The request is handled by the emulator thread between guest instructions;
+ * the completion always runs on the main queue after the machine and its work
+ * image have been released. A failed save leaves the current machine running
+ * and reports why, so the UI never has to leave on a checkpoint it only hoped
+ * was written.
+ */
+- (void)saveCheckpointAndStopWithCompletion:
+    (VMEngineCheckpointCompletion)completion;
 
 /* Suspend interpretation (used when the app leaves the foreground: burning a
  * core in the background is the fastest way to be terminated). */

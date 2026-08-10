@@ -6,6 +6,7 @@
 #include "snapshot.h"
 #include "VMSnapshotCow.h"
 #include "VMFirmwareHLE.h"
+#include "VMResumeCheckpoint.h"
 #include "ios3_bringup_gate.h"
 #include "rootfs_work.h"
 
@@ -32,6 +33,8 @@ struct vm_firmware_boot {
     vm_cow_t         *cow;
     char              overlay[VM_FW_BOOT_PATH_CAPACITY];
     bool              overlay_armed;
+    char              work_directory[VM_FW_BOOT_PATH_CAPACITY];
+    uint64_t          media_size;
 #if defined(S5LBOX_IOS3_HLE_EXPERIMENT)
     /* Pointer identity only. VMEngine frees the machine before this owner;
      * vm_firmware_hle_release() deliberately never dereferences it. */
@@ -450,6 +453,54 @@ bool vm_firmware_boot_flush_overlay(vm_firmware_boot_t *boot) {
     return vm_cow_flush(boot->cow) == VM_COW_OK;
 }
 
+vm_firmware_checkpoint_status_t vm_firmware_boot_save_resume(
+        vm_firmware_boot_t *boot, const s5l8900_t *machine,
+        char *detail, size_t detail_capacity) {
+    set_detail(detail, detail_capacity, "");
+    if (!boot || !machine || !boot->bridges || !boot->media ||
+        !boot->bridges->installed || !boot->work_directory[0] ||
+        boot->media_size == 0u) {
+        set_detail(detail, detail_capacity,
+                   "This machine does not have a live firmware checkpoint path.");
+        return VM_FW_CHECKPOINT_ERROR;
+    }
+
+    /* The entry SVC may leave a host continuation live until the guest reaches
+     * its completion SVC. That continuation owns scratch spans which the small
+     * sidecar deliberately does not serialize, so run forward and retry rather
+     * than writing a checkpoint that can never complete the operation. */
+    for (unsigned i = 0; i < MD_RAW_BRIDGE_MAX_BOUNCE_SLOTS; i++) {
+        if (boot->bridges->raw.pending[i].active) {
+            set_detail(detail, detail_capacity,
+                       "Waiting for the current disk operation to finish.");
+            return VM_FW_CHECKPOINT_BUSY;
+        }
+    }
+
+    if (!vm_firmware_boot_flush_overlay(boot)) {
+        set_detail(detail, detail_capacity,
+                   "The writable root filesystem could not be flushed.");
+        return VM_FW_CHECKPOINT_ERROR;
+    }
+
+    external_md_sidecar_t sidecar;
+    memset(&sidecar, 0, sizeof sidecar);
+    sidecar.magic = EXTERNAL_MD_SIDECAR_MAGIC;
+    sidecar.version = EXTERNAL_MD_SIDECAR_VERSION;
+    sidecar.media_size = boot->media_size;
+    sidecar.image_bytes = boot->media_size;
+    sidecar.strategy_stats = boot->bridges->strategy.stats;
+    sidecar.raw_stats = boot->bridges->raw.stats;
+    memcpy(sidecar.guard_tail, boot->bridges->raw.guard_tail,
+           sizeof sidecar.guard_tail);
+
+    if (!vm_resume_checkpoint_save(machine, &sidecar,
+                                   boot->work_directory,
+                                   detail, detail_capacity))
+        return VM_FW_CHECKPOINT_ERROR;
+    return VM_FW_CHECKPOINT_OK;
+}
+
 void vm_firmware_boot_destroy(vm_firmware_boot_t **slot) {
     if (!slot || !*slot) return;
     vm_firmware_boot_t *boot = *slot;
@@ -705,6 +756,17 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
                    "root filesystem unavailable");
         return false;
     }
+    int work_written = snprintf(boot->work_directory,
+                                sizeof boot->work_directory, "%s", paths->work);
+    if (work_written < 0 ||
+        (size_t)work_written >= sizeof boot->work_directory) {
+        (void)file_block_close(boot->media);
+        set_detail(report->detail, sizeof report->detail,
+                   "The machine work directory is too long to checkpoint.");
+        set_detail(report->summary, sizeof report->summary, "path too long");
+        return false;
+    }
+    boot->media_size = state.work_size;
 
     size_t kernel_size = 0u, tree_size = 0u;
     uint8_t *kernel = slurp(kernel_path, &kernel_size);

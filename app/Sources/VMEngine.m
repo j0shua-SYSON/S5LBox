@@ -33,6 +33,7 @@
 #import "VMEngine.h"
 #import "VMTouchQueue.h"
 #import "VMButtonQueue.h"
+#import <dispatch/dispatch.h>
 #import "VMFirmwareBoot.h"
 #import "VMInstancePaths.h"
 #import "VMInstanceStore.h"
@@ -81,6 +82,7 @@ typedef NS_ENUM(uint8_t, VMEngineState) {
     VMEngineStateIdle = 0,
     VMEngineStateStarting,
     VMEngineStateRunning,
+    VMEngineStateCheckpointing,
     VMEngineStateStopping,
 };
 
@@ -213,6 +215,8 @@ static double vm_engine_now_seconds(void) {
     NSString        *_status;
     VMEngineState    _state;
     BOOL             _stopRequested;
+    BOOL             _checkpointRequested;
+    VMEngineCheckpointCompletion _checkpointCompletion;
     BOOL             _paused;
     uint64_t         _instructionCap; // 0: run until stopped or halted
     BOOL             _buttons[VMButtonCount];
@@ -731,6 +735,8 @@ static double vm_engine_now_seconds(void) {
     }
     _state = VMEngineStateStarting;
     _stopRequested = NO;
+    _checkpointRequested = NO;
+    _checkpointCompletion = nil;
     _paused = NO;
     _snapshotFresh = NO;
     _snapshotBlank = NO;
@@ -858,12 +864,40 @@ static double vm_engine_now_seconds(void) {
 
 - (void)stop {
     pthread_mutex_lock(&_lock);
-    if (_state == VMEngineStateStarting || _state == VMEngineStateRunning) {
+    if (_state == VMEngineStateStarting || _state == VMEngineStateRunning ||
+        _state == VMEngineStateCheckpointing) {
         _stopRequested = YES;
         _paused = NO;
         _state = VMEngineStateStopping;
     }
     pthread_mutex_unlock(&_lock);
+}
+
+- (void)saveCheckpointAndStopWithCompletion:
+        (VMEngineCheckpointCompletion)completion {
+    NSString *refusal = nil;
+    pthread_mutex_lock(&_lock);
+    if (_state == VMEngineStateCheckpointing || _checkpointRequested) {
+        refusal = @"A machine checkpoint is already being saved.";
+    } else if (_state != VMEngineStateRunning || !_machineReady) {
+        refusal = @"The machine stopped before it could be saved.";
+    } else if (!_firmwareBoot) {
+        refusal = @"Only a running iPhone OS machine can be resumed automatically.";
+    } else {
+        _checkpointRequested = YES;
+        _checkpointCompletion = [completion copy];
+        _state = VMEngineStateCheckpointing;
+        _status = @"saving checkpoint";
+        _rate = 0.0;
+    }
+    pthread_mutex_unlock(&_lock);
+
+    if (refusal.length && completion) {
+        VMEngineCheckpointCompletion rejected = [completion copy];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            rejected(NO, refusal);
+        });
+    }
 }
 
 - (void)setPaused:(BOOL)paused {
@@ -892,7 +926,8 @@ static double vm_engine_now_seconds(void) {
 
 - (BOOL)isRunning {
     pthread_mutex_lock(&_lock);
-    BOOL running = (_state == VMEngineStateRunning);
+    BOOL running = (_state == VMEngineStateRunning ||
+                    _state == VMEngineStateCheckpointing);
     pthread_mutex_unlock(&_lock);
     return running;
 }
@@ -1314,6 +1349,8 @@ static bool vm_spin_already_reported(const vm_spin_t *s, uint32_t region) {
     arm_status_t status = ARM_OK;
     BOOL stoppedByRequest = NO;
     BOOL reachedCap = NO;
+    BOOL checkpointSaved = NO;
+    NSString *checkpointFailure = nil;
 
     /* Emulator-thread only, so it is a local and not an ivar: nothing else may
      * read it and no lock can be forgotten. */
@@ -1324,6 +1361,7 @@ static bool vm_spin_already_reported(const vm_spin_t *s, uint32_t region) {
         @autoreleasepool {
             pthread_mutex_lock(&_lock);
             BOOL stop = _stopRequested;
+            BOOL checkpoint = _checkpointRequested;
             BOOL paused = _paused;
             pthread_mutex_unlock(&_lock);
 
@@ -1331,7 +1369,52 @@ static bool vm_spin_already_reported(const vm_spin_t *s, uint32_t region) {
                 stoppedByRequest = YES;
                 break;
             }
-            if (paused) {
+            if (checkpoint) {
+                /* Drain host-visible output before serializing. Otherwise the
+                 * UART bytes already shown on this run would be present again
+                 * after restore and appear twice in the next console. */
+                [self publishRetired:retired rate:0.0 status:ARM_OK];
+
+                char why[VM_FW_BOOT_DETAIL_CAPACITY] = {0};
+                vm_firmware_checkpoint_status_t saved =
+                    vm_firmware_boot_save_resume(_firmwareBoot, &_machine,
+                                                 why, sizeof why);
+                if (saved == VM_FW_CHECKPOINT_OK) {
+                    [self appendConsole:@"[vm] automatic resume checkpoint saved\n"];
+                    checkpointSaved = YES;
+                    stoppedByRequest = YES;
+                    break;
+                }
+                if (saved == VM_FW_CHECKPOINT_ERROR) {
+                    checkpointFailure = why[0]
+                        ? [NSString stringWithUTF8String:why]
+                        : @"The machine checkpoint could not be saved.";
+                    if (!checkpointFailure.length)
+                        checkpointFailure = @"The machine checkpoint could not be saved.";
+
+                    pthread_mutex_lock(&_lock);
+                    VMEngineCheckpointCompletion failed = _checkpointCompletion;
+                    _checkpointCompletion = nil;
+                    _checkpointRequested = NO;
+                    _state = VMEngineStateRunning;
+                    _status = _paused ? @"paused" : @"running (save failed)";
+                    pthread_mutex_unlock(&_lock);
+
+                    if (failed) {
+                        NSString *message = checkpointFailure;
+                        dispatch_async(dispatch_get_main_queue(), ^{
+                            failed(NO, message);
+                        });
+                    }
+                    checkpointFailure = nil;
+                    continue;
+                }
+                /* BUSY: execute one bounded chunk so the guest can reach the
+                 * completion SVC, then retry before any further UI work. This
+                 * deliberately advances even if the machine was user-paused;
+                 * an in-flight disk operation is not a safe pause boundary. */
+            }
+            if (paused && !checkpoint) {
                 usleep(50 * 1000);
                 lastPublish = vm_now();
                 retiredAtLastPublish = retired;
@@ -1420,8 +1503,11 @@ static bool vm_spin_already_reported(const vm_spin_t *s, uint32_t region) {
              * guest halt as though the controller were still active. */
             pthread_mutex_lock(&_lock);
             stop = _stopRequested;
+            checkpoint = _checkpointRequested;
             uint64_t cap = _instructionCap;
-            if (status != ARM_OK && !stop && _state == VMEngineStateRunning)
+            if (status != ARM_OK && !stop &&
+                (_state == VMEngineStateRunning ||
+                 _state == VMEngineStateCheckpointing))
                 _state = VMEngineStateStopping;
             if (cap > 0 && retired >= cap && !stop &&
                 _state == VMEngineStateRunning)
@@ -1430,6 +1516,10 @@ static bool vm_spin_already_reported(const vm_spin_t *s, uint32_t region) {
             if (stop) {
                 stoppedByRequest = YES;
                 break;
+            }
+            if (status != ARM_OK && checkpoint) {
+                checkpointFailure =
+                    @"The guest stopped before its checkpoint could be completed.";
             }
 
             /* A diagnostic limit, not a guest fault. Publish the frame and the
@@ -1444,7 +1534,7 @@ static bool vm_spin_already_reported(const vm_spin_t *s, uint32_t region) {
              * as a clean diagnostic stop. A failure reported as a success is
              * the one outcome this project does not permit. The fault wins;
              * the cap is still crossed and will be reported next time. */
-            if (status == ARM_OK && cap > 0 && retired >= cap) {
+            if (status == ARM_OK && !checkpoint && cap > 0 && retired >= cap) {
                 reachedCap = YES;
                 [self publishRetired:retired rate:0.0 status:status];
                 break;
@@ -1472,7 +1562,7 @@ static bool vm_spin_already_reported(const vm_spin_t *s, uint32_t region) {
     /* An explicit stop can arrive between regular publications. Drain the
      * remaining UART bytes and publish the final counters before destroying
      * the sole copy of the machine. */
-    if (stoppedByRequest)
+    if (stoppedByRequest && !checkpointSaved)
         [self publishRetired:retired rate:0.0 status:ARM_OK];
 
     if (reachedCap)
@@ -1492,6 +1582,9 @@ static bool vm_spin_already_reported(const vm_spin_t *s, uint32_t region) {
      * particular, clear _thread here so a later start really creates a fresh
      * machine instead of returning a false success for a dead worker. */
     pthread_mutex_lock(&_lock);
+    VMEngineCheckpointCompletion checkpointCompletion = _checkpointCompletion;
+    _checkpointCompletion = nil;
+    _checkpointRequested = NO;
     _machineReady = NO;
     _thread = nil;
     if (stoppedByRequest) {
@@ -1506,6 +1599,17 @@ static bool vm_spin_already_reported(const vm_spin_t *s, uint32_t region) {
     _stopRequested = NO;
     _paused = NO;
     pthread_mutex_unlock(&_lock);
+
+    if (checkpointCompletion) {
+        BOOL saved = checkpointSaved;
+        NSString *message = saved
+            ? @"The machine was saved and will resume here next time."
+            : (checkpointFailure ?:
+               @"The machine stopped before its checkpoint could be completed.");
+        dispatch_async(dispatch_get_main_queue(), ^{
+            checkpointCompletion(saved, message);
+        });
+    }
 }
 
 // Called on the emulator thread only.
