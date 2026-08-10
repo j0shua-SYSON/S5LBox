@@ -916,11 +916,12 @@ static bool mbx_stage_2d_packet(s5l_mbx_t *m, const arm_bus_t *bus,
     return true;
 }
 
-static bool mbx_execute_2d_submit(s5l_mbx_t *m, const arm_bus_t *bus,
-                                  uint32_t packet_off,
-                                  uint32_t command_count,
-                                  const char **why,
-                                  uint64_t *committed) {
+static bool mbx_run_2d_submit(s5l_mbx_t *m, const arm_bus_t *bus,
+                              uint32_t packet_off,
+                              uint32_t command_count,
+                              bool commit,
+                              const char **why,
+                              uint64_t *committed) {
     *committed = 0u;
     if (!command_count) {
         if (why) *why = "pending batch exceeded 255 heads or came from an old count-less snapshot";
@@ -933,7 +934,7 @@ static bool mbx_execute_2d_submit(s5l_mbx_t *m, const arm_bus_t *bus,
         if (!mbx_stage_2d_packet(m, bus, packet_off, NULL,
                                  &job, &packet_words, why))
             return false;
-        bool ok = mbx_2d_job_commit(m, bus, &job, why);
+        bool ok = !commit || mbx_2d_job_commit(m, bus, &job, why);
         if (ok) *committed = job.total;
         mbx_2d_job_dispose(&job);
         return ok;
@@ -1000,14 +1001,26 @@ static bool mbx_execute_2d_submit(s5l_mbx_t *m, const arm_bus_t *bus,
      * these ordered writes. Each job retains its post-command rectangle,
      * preserving intermediate overlap semantics and the scanout write
      * observer. */
-    for (uint32_t i = 0; i < command_count && ok; i++)
-        ok = mbx_2d_job_commit(m, bus, &jobs[i], why);
+    if (commit) {
+        for (uint32_t i = 0; i < command_count && ok; i++)
+            ok = mbx_2d_job_commit(m, bus, &jobs[i], why);
+    }
 
     for (uint32_t i = 0; i < command_count; i++)
         mbx_2d_job_dispose(&jobs[i]);
     free(jobs);
     if (ok) *committed = total;
     return ok;
+}
+
+static uint64_t mbx_rejection_reason_hash(const char *reason) {
+    uint64_t hash = UINT64_C(14695981039346656037);
+    if (!reason) return 0u;
+    for (const unsigned char *p = (const unsigned char *)reason; *p; p++) {
+        hash ^= *p;
+        hash *= UINT64_C(1099511628211);
+    }
+    return hash;
 }
 
 bool s5l_mbx_probe_2d_packet(s5l_mbx_t *m, const arm_bus_t *bus,
@@ -1026,6 +1039,29 @@ bool s5l_mbx_probe_2d_packet(s5l_mbx_t *m, const arm_bus_t *bus,
                                   &job, &words, why);
     mbx_2d_job_dispose(&job);
     if (ok && packet_words) *packet_words = words;
+    return ok;
+}
+
+bool s5l_mbx_probe_2d_submit(s5l_mbx_t *m, const arm_bus_t *bus,
+                             uint32_t packet_off, uint32_t command_count,
+                             uint64_t *reason_hash, const char **why) {
+    const char *local_why = "unknown rejection";
+    if (reason_hash) *reason_hash = 0u;
+    if (why) *why = local_why;
+    if (!m || !bus) {
+        local_why = "missing MBX or bus";
+        if (why) *why = local_why;
+        if (reason_hash)
+            *reason_hash = mbx_rejection_reason_hash(local_why);
+        return false;
+    }
+
+    uint64_t staged_bytes = 0u;
+    bool ok = mbx_run_2d_submit(m, bus, packet_off, command_count, false,
+                                &local_why, &staged_bytes);
+    if (why) *why = local_why;
+    if (!ok && reason_hash)
+        *reason_hash = mbx_rejection_reason_hash(local_why);
     return ok;
 }
 
@@ -1062,12 +1098,18 @@ bool s5l_mbx_process_2d(s5l_mbx_t *m, const arm_bus_t *bus,
 
     const char *why = "unknown rejection";
     uint64_t committed = 0u;
-    bool ok = mbx_execute_2d_submit(m, bus, packet_off, command_count,
-                                    &why, &committed);
+    bool ok = mbx_run_2d_submit(m, bus, packet_off, command_count, true,
+                                &why, &committed);
     if (!ok) {
         mbx_counter_add(&mbx_2d_rejected, metric_count);
-        if (telemetry)
+        if (telemetry) {
             mbx_counter_add(&telemetry->rejected_2d, metric_count);
+            telemetry->last_rejected_2d_ring_offset =
+                packet_off - S5L_MBX_2D_RING_BASE;
+            telemetry->last_rejected_2d_count = command_count;
+            telemetry->last_rejected_2d_reason_hash =
+                mbx_rejection_reason_hash(why);
+        }
         if (mbx_trace_state == 1)
             fprintf(stderr, "MBX2D reject ring+0x%04x (%u commands): %s\n",
                     packet_off - S5L_MBX_2D_RING_BASE,

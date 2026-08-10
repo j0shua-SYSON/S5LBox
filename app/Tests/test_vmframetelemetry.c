@@ -60,6 +60,9 @@ static vm_execution_telemetry_observation_t execution_observation(
     value.mbx_2d_completed = base + 27u;
     value.mbx_2d_rejected = base + 28u;
     value.mbx_2d_bytes = base + 29u;
+    value.mbx_2d_last_rejected_ring_offset = base + 76u;
+    value.mbx_2d_last_rejected_count = base + 77u;
+    value.mbx_2d_last_rejected_reason_hash = base + 78u;
     value.mbx_3d_candidates = base + 30u;
     value.mbx_3d_completed = base + 31u;
     value.mbx_3d_rejected = base + 32u;
@@ -241,6 +244,9 @@ static void test_boundaries_and_sampled_changes(void) {
            state.execution_last.fetch_refill_skips == 2024u &&
            state.execution_last.known_negative_bypasses == 2025u &&
            state.execution_last.mbx_2d_bytes == 2029u &&
+           state.execution_last.mbx_2d_last_rejected_ring_offset == 2076u &&
+           state.execution_last.mbx_2d_last_rejected_count == 2077u &&
+           state.execution_last.mbx_2d_last_rejected_reason_hash == 2078u &&
            state.execution_last.mbx_3d_pixels == 2033u &&
            state.execution_last.active_clock_updates == 2034u &&
            state.execution_last.active_clock_added_ticks == 2035u &&

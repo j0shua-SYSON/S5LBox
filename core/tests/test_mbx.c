@@ -549,6 +549,21 @@ static void test_springboard_settings_black_fill_batch(void) {
     test_gpu_write32(&m, target + 32u * STRIDE + 2u * 4u, 0xff445566u);
     test_gpu_write32(&m, target + 32u * STRIDE + 317u * 4u, 0xff778899u);
     test_gpu_write32(&m, target + 107u * STRIDE + 3u * 4u, 0xffaabbccu);
+    /* Reproduce the fixed doorbell word without invoking the live handler,
+     * then prove an exact accepted-batch probe changes neither pixels nor
+     * completion state. The real bus write below consumes the retained heads. */
+    s5l_mbx_write(&m.mbx, RING, S5L_MBX_2D_SUBMIT);
+    const char *probe_why = "unset";
+    uint64_t probe_hash = UINT64_MAX;
+    CHECK(s5l_mbx_probe_2d_submit(&m.mbx, &m.bus, RING, 6u,
+                                  &probe_hash, &probe_why) &&
+          probe_hash == 0u,
+          "valid Settings batch probe rejected: %s (%016llx)",
+          probe_why, (unsigned long long)probe_hash);
+    CHECK(test_gpu_read32(&m, target + 31u * STRIDE + 3u * 4u) ==
+              0xff112233u &&
+          m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
+          "accepted Settings probe changed pixels or completion state");
     m.bus.write32(m.bus.ctx, MBX_BASE + RING, 0xf0000000u);
 
     uint32_t mismatches = 0u;
@@ -595,12 +610,31 @@ static void test_springboard_settings_black_fill_batch(void) {
     CHECK(m.mbx_telemetry.candidates_2d == 12u &&
           m.mbx_telemetry.completed_2d == 6u &&
           m.mbx_telemetry.rejected_2d == 6u &&
-          m.mbx_telemetry.bytes_2d == expected_bytes,
-          "rejected Settings batch ledger=%llu/%llu/%llu/%llu",
+          m.mbx_telemetry.bytes_2d == expected_bytes &&
+          m.mbx_telemetry.last_rejected_2d_ring_offset == 0x200u &&
+          m.mbx_telemetry.last_rejected_2d_count == 6u &&
+          m.mbx_telemetry.last_rejected_2d_reason_hash != 0u,
+          "rejected Settings batch ledger=%llu/%llu/%llu/%llu "
+          "last=%llu/%llu/%016llx",
           (unsigned long long)m.mbx_telemetry.candidates_2d,
           (unsigned long long)m.mbx_telemetry.completed_2d,
           (unsigned long long)m.mbx_telemetry.rejected_2d,
-          (unsigned long long)m.mbx_telemetry.bytes_2d);
+          (unsigned long long)m.mbx_telemetry.bytes_2d,
+          (unsigned long long)m.mbx_telemetry.last_rejected_2d_ring_offset,
+          (unsigned long long)m.mbx_telemetry.last_rejected_2d_count,
+          (unsigned long long)m.mbx_telemetry.last_rejected_2d_reason_hash);
+
+    probe_why = "unset";
+    probe_hash = 0u;
+    CHECK(!s5l_mbx_probe_2d_submit(&m.mbx, &m.bus, RING + 0x200u, 6u,
+                                   &probe_hash, &probe_why) &&
+          strcmp(probe_why,
+                 "solid-fill rectangle is empty, reversed, or outside "
+                 "320x480") == 0 &&
+          probe_hash == m.mbx_telemetry.last_rejected_2d_reason_hash,
+          "exact rejected-batch probe=%s/%016llx, live=%016llx",
+          probe_why, (unsigned long long)probe_hash,
+          (unsigned long long)m.mbx_telemetry.last_rejected_2d_reason_hash);
 
     s5l8900_free(&m);
 }

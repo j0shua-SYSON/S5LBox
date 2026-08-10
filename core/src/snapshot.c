@@ -186,10 +186,12 @@ SNAP_SIZE_GUARD(s5l_stub_t,        56,    "snap_stubs");
  * the bus callbacks, snapshot_load preserves this live host policy; none of
  * it belongs to guest state or the stream. The optional active host clock adds
  * another callback/context, seven uint64_t values and transient anchor flag;
- * it follows the same policy. SNAPSHOT_VERSION and the bytes on disk therefore
- * do not move. The size below must be read from the compiler's emitted
- * `.space`, not inferred from source padding. */
-SNAP_SIZE_GUARD(s5l8900_t,         122168, "snap_mach");
+ * it follows the same policy. 122192 adds three uint64_t witnesses identifying
+ * the last rejected 2D batch inside the already host-only MBX ledger (24).
+ * SNAPSHOT_VERSION and the bytes on disk therefore do not move. The size below
+ * must be read from the compiler's emitted `.space`, not inferred from source
+ * padding. */
+SNAP_SIZE_GUARD(s5l8900_t,         122192, "snap_mach");
 #endif
 
 /* ---------------------------------------------------------------- the IO --- */

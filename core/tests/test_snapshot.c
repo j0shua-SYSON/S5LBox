@@ -359,18 +359,24 @@ static void test_device_state_round_trips(void) {
     a->mbx_telemetry.completed_2d = 102u;
     a->mbx_telemetry.rejected_2d = 103u;
     a->mbx_telemetry.bytes_2d = 104u;
-    a->mbx_telemetry.candidates_3d = 105u;
-    a->mbx_telemetry.completed_3d = 106u;
-    a->mbx_telemetry.rejected_3d = 107u;
-    a->mbx_telemetry.pixels_3d = 108u;
+    a->mbx_telemetry.last_rejected_2d_ring_offset = 105u;
+    a->mbx_telemetry.last_rejected_2d_count = 106u;
+    a->mbx_telemetry.last_rejected_2d_reason_hash = 107u;
+    a->mbx_telemetry.candidates_3d = 108u;
+    a->mbx_telemetry.completed_3d = 109u;
+    a->mbx_telemetry.rejected_3d = 110u;
+    a->mbx_telemetry.pixels_3d = 111u;
     b->mbx_telemetry.candidates_2d = 201u;
     b->mbx_telemetry.completed_2d = 202u;
     b->mbx_telemetry.rejected_2d = 203u;
     b->mbx_telemetry.bytes_2d = 204u;
-    b->mbx_telemetry.candidates_3d = 205u;
-    b->mbx_telemetry.completed_3d = 206u;
-    b->mbx_telemetry.rejected_3d = 207u;
-    b->mbx_telemetry.pixels_3d = 208u;
+    b->mbx_telemetry.last_rejected_2d_ring_offset = 205u;
+    b->mbx_telemetry.last_rejected_2d_count = 206u;
+    b->mbx_telemetry.last_rejected_2d_reason_hash = 207u;
+    b->mbx_telemetry.candidates_3d = 208u;
+    b->mbx_telemetry.completed_3d = 209u;
+    b->mbx_telemetry.rejected_3d = 210u;
+    b->mbx_telemetry.pixels_3d = 211u;
 
     /* Interactive pacing is live host policy. The destination's callback,
      * context and running evidence must survive a guest restore, while a
@@ -405,10 +411,13 @@ static void test_device_state_round_trips(void) {
           b->mbx_telemetry.completed_2d == 202u &&
           b->mbx_telemetry.rejected_2d == 203u &&
           b->mbx_telemetry.bytes_2d == 204u &&
-          b->mbx_telemetry.candidates_3d == 205u &&
-          b->mbx_telemetry.completed_3d == 206u &&
-          b->mbx_telemetry.rejected_3d == 207u &&
-          b->mbx_telemetry.pixels_3d == 208u,
+          b->mbx_telemetry.last_rejected_2d_ring_offset == 205u &&
+          b->mbx_telemetry.last_rejected_2d_count == 206u &&
+          b->mbx_telemetry.last_rejected_2d_reason_hash == 207u &&
+          b->mbx_telemetry.candidates_3d == 208u &&
+          b->mbx_telemetry.completed_3d == 209u &&
+          b->mbx_telemetry.rejected_3d == 210u &&
+          b->mbx_telemetry.pixels_3d == 211u,
           "snapshot restore changed the live host-only MBX work ledger");
     CHECK(b->wfi_host_sleep == snapshot_wfi_sleep_probe &&
           b->wfi_host_sleep_ctx == &pacing_context &&

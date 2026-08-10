@@ -435,6 +435,9 @@ static double VMDeviceAutomationSeconds(uint64_t firstNS, uint64_t lastNS) {
              "fetch_refill_skips=%llu,known_negative_bypasses=%llu,"
              "mbx_2d_candidates=%llu,mbx_2d_completed=%llu,"
              "mbx_2d_rejected=%llu,mbx_2d_bytes=%llu,"
+             "mbx_2d_last_rejected_ring_offset=%llu,"
+             "mbx_2d_last_rejected_count=%llu,"
+             "mbx_2d_last_rejected_reason_hash=%016llx,"
              "mbx_3d_candidates=%llu,mbx_3d_completed=%llu,"
              "mbx_3d_rejected=%llu,mbx_3d_pixels=%llu,"
              "active_clock_updates=%llu,active_clock_added_ticks=%llu,"
@@ -500,6 +503,9 @@ static double VMDeviceAutomationSeconds(uint64_t firstNS, uint64_t lastNS) {
             (unsigned long long)VM_EXEC_DELTA(mbx_2d_completed),
             (unsigned long long)VM_EXEC_DELTA(mbx_2d_rejected),
             (unsigned long long)VM_EXEC_DELTA(mbx_2d_bytes),
+            (unsigned long long)last->mbx_2d_last_rejected_ring_offset,
+            (unsigned long long)last->mbx_2d_last_rejected_count,
+            (unsigned long long)last->mbx_2d_last_rejected_reason_hash,
             (unsigned long long)VM_EXEC_DELTA(mbx_3d_candidates),
             (unsigned long long)VM_EXEC_DELTA(mbx_3d_completed),
             (unsigned long long)VM_EXEC_DELTA(mbx_3d_rejected),

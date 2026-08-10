@@ -944,6 +944,13 @@ typedef struct {
     uint64_t completed_2d;
     uint64_t rejected_2d;
     uint64_t bytes_2d;
+    /* Raw identity of the most recent failed atomic 2D submission. These are
+     * endpoints, not monotonic counters: a frontend must pair them with an
+     * increase in rejected_2d before attributing them to its observation.
+     * count is zero only for the explicit >=256/legacy-unknown marker. */
+    uint64_t last_rejected_2d_ring_offset;
+    uint64_t last_rejected_2d_count;
+    uint64_t last_rejected_2d_reason_hash;
     uint64_t candidates_3d;
     uint64_t completed_3d;
     uint64_t rejected_3d;
@@ -972,6 +979,19 @@ bool     s5l_mbx_process_2d(s5l_mbx_t *m, const arm_bus_t *bus,
 bool     s5l_mbx_probe_2d_packet(s5l_mbx_t *m, const arm_bus_t *bus,
                                  uint32_t packet_off,
                                  uint32_t *packet_words,
+                                 const char **why);
+
+/* Validate one exact retained atomic 2D submission without committing pixels
+ * or raising completion. packet_off is the absolute MBX aperture offset;
+ * command_count is the exact pending-head count captured at the live submit.
+ * A rejection returns this build's exact reason text and the same FNV-1a
+ * witness recorded in s5l_mbx_telemetry_t, allowing a frontend endpoint to
+ * select one retained circular-ring batch without persisting host diagnostic
+ * strings. */
+bool     s5l_mbx_probe_2d_submit(s5l_mbx_t *m, const arm_bus_t *bus,
+                                 uint32_t packet_off,
+                                 uint32_t command_count,
+                                 uint64_t *reason_hash,
                                  const char **why);
 
 /* Attempt an exactly decoded tiled 3D object after a STARTRENDER write. The

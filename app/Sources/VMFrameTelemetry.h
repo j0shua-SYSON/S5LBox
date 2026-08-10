@@ -105,6 +105,9 @@ typedef struct {
     uint64_t mbx_2d_completed;
     uint64_t mbx_2d_rejected;
     uint64_t mbx_2d_bytes;
+    uint64_t mbx_2d_last_rejected_ring_offset;
+    uint64_t mbx_2d_last_rejected_count;
+    uint64_t mbx_2d_last_rejected_reason_hash;
     uint64_t mbx_3d_candidates;
     uint64_t mbx_3d_completed;
     uint64_t mbx_3d_rejected;

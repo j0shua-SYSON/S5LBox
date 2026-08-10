@@ -383,7 +383,8 @@ int main(int argc, char **argv) {
             "          [-R ram-MB] [-n steps] [-p physbase] [-V virtbase]\n"
             "          [--snapshot-at <steps> <file>] [--restore <file>]\n"
             "          [--press-power | --wake-power]\n"
-            "          [--probe-mbx2d | --probe-mbx3d]\n"
+            "          [--probe-mbx2d | --probe-mbx2d-at <ring-off> <count>\n"
+            "           | --probe-mbx3d]\n"
             "          [--release-power-after <steps>]\n"
             "          [--dump-ram <file>]\n"
             "          [--peek <virtual-address>]...\n"
@@ -399,6 +400,9 @@ int main(int argc, char **argv) {
     bool press_power = false;
     bool wake_power = false;
     bool probe_mbx2d = false;
+    bool probe_mbx2d_at = false;
+    uint32_t probe_mbx2d_offset = 0u;
+    uint32_t probe_mbx2d_count = 0u;
     bool probe_mbx3d = false;
     bool release_power = false;
     uint64_t release_power_after = 0u;
@@ -438,6 +442,15 @@ int main(int argc, char **argv) {
         }
         if (!strcmp(argv[i], "--probe-mbx2d")) {
             probe_mbx2d = true;
+            continue;
+        }
+        if (!strcmp(argv[i], "--probe-mbx2d-at") && i + 2 < argc) {
+            probe_mbx2d_at = true;
+            probe_mbx2d_offset =
+                (uint32_t)strtoul(argv[i + 1], NULL, 0);
+            probe_mbx2d_count =
+                (uint32_t)strtoul(argv[i + 2], NULL, 0);
+            i += 2;
             continue;
         }
         if (!strcmp(argv[i], "--release-power-after") && i + 1 < argc) {
@@ -492,13 +505,25 @@ int main(int argc, char **argv) {
                 "--release-power-after requires --press-power or --wake-power\n");
         return 1;
     }
-    if (probe_mbx2d && probe_mbx3d) {
-        fprintf(stderr, "--probe-mbx2d and --probe-mbx3d are mutually exclusive\n");
+    unsigned mbx_probe_count = (probe_mbx2d ? 1u : 0u) +
+                               (probe_mbx2d_at ? 1u : 0u) +
+                               (probe_mbx3d ? 1u : 0u);
+    if (mbx_probe_count > 1u) {
+        fprintf(stderr, "MBX probe modes are mutually exclusive\n");
         return 1;
     }
-    if ((probe_mbx2d || probe_mbx3d) && !restore) {
-        fprintf(stderr, "%s requires --restore\n",
-                probe_mbx2d ? "--probe-mbx2d" : "--probe-mbx3d");
+    if (mbx_probe_count && !restore) {
+        fprintf(stderr, "MBX probe modes require --restore\n");
+        return 1;
+    }
+    if (probe_mbx2d_at &&
+        ((probe_mbx2d_offset & 3u) != 0u ||
+         probe_mbx2d_offset >= S5L_MBX_2D_RING_SIZE ||
+         probe_mbx2d_count == 0u || probe_mbx2d_count > 255u)) {
+        fprintf(stderr,
+                "--probe-mbx2d-at requires an aligned ring offset below "
+                "0x%x and a count from 1 to 255\n",
+                S5L_MBX_2D_RING_SIZE);
         return 1;
     }
 
@@ -602,6 +627,23 @@ int main(int argc, char **argv) {
         }
         fprintf(stderr, "restored %s at %llu instructions\n",
                 restore, (unsigned long long)mach.cpu.cycles);
+    }
+
+    if (probe_mbx2d_at) {
+        const char *why = "unknown rejection";
+        uint64_t reason_hash = 0u;
+        bool accepted = s5l_mbx_probe_2d_submit(
+            &mach.mbx, &mach.bus,
+            S5L_MBX_2D_RING_BASE + probe_mbx2d_offset,
+            probe_mbx2d_count, &reason_hash, &why);
+        fprintf(stderr,
+                "MBX2D exact submit probe: ring+0x%04x commands=%u %s "
+                "reason_hash=%016llx%s%s\n",
+                probe_mbx2d_offset, probe_mbx2d_count,
+                accepted ? "accepted" : "rejected",
+                (unsigned long long)reason_hash,
+                accepted ? "" : ": ", accepted ? "" : why);
+        return accepted ? 0 : 6;
     }
 
     if (probe_mbx2d) {

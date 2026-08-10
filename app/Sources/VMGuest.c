@@ -275,6 +275,12 @@ static const uint8_t *vm_guest_record_display(const s5l8900_t *m,
             execution.mbx_2d_completed = m->mbx_telemetry.completed_2d;
             execution.mbx_2d_rejected = m->mbx_telemetry.rejected_2d;
             execution.mbx_2d_bytes = m->mbx_telemetry.bytes_2d;
+            execution.mbx_2d_last_rejected_ring_offset =
+                m->mbx_telemetry.last_rejected_2d_ring_offset;
+            execution.mbx_2d_last_rejected_count =
+                m->mbx_telemetry.last_rejected_2d_count;
+            execution.mbx_2d_last_rejected_reason_hash =
+                m->mbx_telemetry.last_rejected_2d_reason_hash;
             execution.mbx_3d_candidates = m->mbx_telemetry.candidates_3d;
             execution.mbx_3d_completed = m->mbx_telemetry.completed_3d;
             execution.mbx_3d_rejected = m->mbx_telemetry.rejected_3d;
