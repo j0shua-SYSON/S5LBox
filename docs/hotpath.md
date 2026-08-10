@@ -8698,3 +8698,49 @@ the roughly half of CPU samples outside generated text instead of guessing that
 all of them are refill callbacks. Raw valid and excluded measurements are
 retained under `work/artifacts/2b2a1b0-a9-window-cache/`; the phone was
 returned to marker-free policy after the comparison.
+
+### 2026-08-10: CPSR residency passes semantics and worsens Settings
+
+Commit `eaeda40abea17e7812984766a2d0d3fed1c9e26b` kept guest CPSR in a
+host register throughout the generated compact runner. It published CPSR at
+the exact C fallback and exit boundaries and reloaded it after callbacks. The
+change removed the per-instruction CPSR load and store without runtime code
+generation or a JIT. Local strict CTest passes 65/65. Exact-SHA core run
+`31352757077` and iPhone build run `31352757078` are green, including the
+native Apple semantic and serialized-machine oracles.
+
+The hosted long-running measurements were mixed rather than a product win.
+The serialized-SoC ratio improved only 0.36% on macOS 14 and 0.38% on macOS
+15. The mixed synthetic ratio improved 8.9% and 10.2%, respectively, while
+the pure-ALU ratio was inconsistent: +1.0% on macOS 14 and -5.0% on macOS 15.
+The candidate IPA SHA-256 is
+`4DC8AB06FB86E8BC77CAA04F2FB22E3B3D6B3BC12F2B8DD76C0AB7FD6267B7B2`;
+its extracted and installed executable both hash to
+`561F5C64315228468FBD5B06961990E4E59ED9DE63D13A1910D24CB49D52734B`.
+
+The iPhone 6s Plus ran three candidate repetitions and three exact baseline
+repetitions from the same authenticated 7,212 M snapshot, writable image,
+active host clock, Settings touch and 160 M instruction cap. Canonical work,
+snapshot and external-media hashes remained identical in every arm.
+
+| exact physical-A9 metric | baseline samples | CPSR-resident samples | median candidate vs baseline |
+|---|---:|---:|---:|
+| scanout host interval, s | 4.448412, 4.470340, 4.494984 | 4.751677, 4.809858, 4.690485 | 4.751677 vs 4.470340; +6.29% slower |
+| changed scanout signatures/s | 2.023, 2.237, 2.225 | 1.894, 2.287, 2.132 | 2.132 vs 2.225; -4.18% |
+| maximum changed-scanout gap, ms | 3277.774, 3333.988, 3353.811 | 3616.148, 3593.099, 3494.030 | 3593.099 vs 3333.988; +7.77% worse |
+| endpoint FPS | 13, 11, 12 | 6, 11, 4 | 6 vs 12; -50% |
+
+Mean host time also regressed 6.25%, and mean changed-signature cadence fell
+2.65%. Native retirements, fallbacks, calls and fetch attempts were effectively
+unchanged; median native retirements changed -0.008% and calls -0.142%. This
+was a same-work slowdown, not a different execution partition or a renderer
+measurement artifact.
+
+Brutal status: **reject and revert.** The structural change is semantically
+correct and improves one synthetic loop, but it materially worsens the real
+Settings interval and its longest visible stall on A9. It is not a useful
+efficiency win, does not approach 30 FPS and must not remain enabled. Commit
+`6a4a134184ee1adfa2fa8d7bb48cf92642ba07c7` restores the prior runner. Raw
+measurements are retained under
+`work/artifacts/eaeda40-a9-cpsr-resident/`; the phone was returned to the exact
+marker-free baseline app after the comparison.
