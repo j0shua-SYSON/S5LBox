@@ -91,7 +91,6 @@
 #define MBX_2D_GLOBAL_ALPHA_MASK     0x000ff000u
 #define MBX_2D_BLEND_MODE      0x8002ccccu
 #define MBX_2D_FILL_MODE       0x8000f0f0u
-#define MBX_2D_FILL_COLOR      0xff000000u
 
 /*
  * The command-copy helper advances a software cursor, but the actual submit
@@ -554,7 +553,6 @@ static bool mbx_stage_simple_copy(s5l_mbx_t *m, const arm_bus_t *bus,
      */
     if ((w[0] != MBX_2D_COMMAND_HEADER && w[0] != MBX_2D_SUBMIT) ||
         (w[2] & 0xffff8000u) != 0x94060000u ||
-        (w[2] & 0x7fffu) != MBX_2D_BGRA_STRIDE ||
         (w[4] & 0xf8002000u) != 0x30000000u ||
         w[5] != 0x60800200u || w[6] != 0x8000ccccu ||
         w[7] != 0xffffffffu ||
@@ -575,6 +573,12 @@ static bool mbx_stage_simple_copy(s5l_mbx_t *m, const arm_bus_t *bus,
     uint32_t dst_y = w[8] & 0x1fffu;
     uint32_t dst_x1 = (w[9] >> 16) & 0x1fffu;
     uint32_t dst_y1 = w[9] & 0x1fffu;
+    uint32_t source_stride = w[2] & 0x7fffu;
+    if (!source_stride || (source_stride & 3u) ||
+        source_stride > MBX_2D_BGRA_STRIDE) {
+        if (why) *why = "copy source stride is not an aligned bounded BGRA8 pitch";
+        return false;
+    }
     if (dst_x1 <= dst_x || dst_y1 <= dst_y) {
         if (why) *why = "destination rectangle is empty or reversed";
         return false;
@@ -582,9 +586,11 @@ static bool mbx_stage_simple_copy(s5l_mbx_t *m, const arm_bus_t *bus,
     uint32_t width = dst_x1 - dst_x;
     uint32_t height = dst_y1 - dst_y;
     if (dst_x1 > MBX_2D_WIDTH || dst_y1 > MBX_2D_HEIGHT ||
-        src_x > MBX_2D_WIDTH || width > MBX_2D_WIDTH - src_x ||
+        src_x > source_stride / 4u ||
+        width > source_stride / 4u - src_x ||
         src_y > MBX_2D_HEIGHT || height > MBX_2D_HEIGHT - src_y) {
-        if (why) *why = "rectangle exceeds the only measured 320x480 surfaces";
+        if (why) *why =
+            "copy rectangle exceeds its decoded source or 320x480 destination";
         return false;
     }
 
@@ -602,7 +608,7 @@ static bool mbx_stage_simple_copy(s5l_mbx_t *m, const arm_bus_t *bus,
      * semantics before it constructs any private results. */
     for (uint32_t row = 0; row < height; row++) {
         uint64_t src64 = (uint64_t)w[3] +
-                         (uint64_t)(src_y + row) * MBX_2D_BGRA_STRIDE +
+                         (uint64_t)(src_y + row) * source_stride +
                          (uint64_t)src_x * 4u;
         uint64_t dst64 = (uint64_t)w[1] +
                          (uint64_t)(dst_y + row) * MBX_2D_BGRA_STRIDE +
@@ -623,7 +629,7 @@ static bool mbx_stage_simple_copy(s5l_mbx_t *m, const arm_bus_t *bus,
     }
     bool ok = true;
     for (uint32_t row = 0; row < height && ok; row++) {
-        uint32_t src = w[3] + (src_y + row) * MBX_2D_BGRA_STRIDE + src_x * 4u;
+        uint32_t src = w[3] + (src_y + row) * source_stride + src_x * 4u;
         ok = mbx_gart_read(m, bus, src, pixels + row * row_bytes,
                            row_bytes, why);
     }
@@ -642,29 +648,33 @@ static bool mbx_stage_simple_copy(s5l_mbx_t *m, const arm_bus_t *bus,
     return true;
 }
 
-static bool mbx_stage_black_rect_fill(s5l_mbx_t *m,
-                                      const arm_bus_t *bus,
-                                      uint32_t packet_off,
-                                      const struct mbx_2d_batch_state *batch,
-                                      struct mbx_2d_job *job,
-                                      const char **why) {
+static bool mbx_stage_opaque_rect_fill(s5l_mbx_t *m,
+                                       const arm_bus_t *bus,
+                                       uint32_t packet_off,
+                                       const struct mbx_2d_batch_state *batch,
+                                       struct mbx_2d_job *job,
+                                       const char **why) {
     memset(job, 0, sizeof *job);
     uint32_t w[MBX_2D_COPY_WORDS];
     for (unsigned i = 0; i < MBX_2D_COPY_WORDS; i++)
         w[i] = mbx_edram_word(m, packet_off + i * 4u);
 
-    /* _pack2DCtxBlitColor at 0x30e1b080..0x30e1b0b4 packs (x, y) and
-     * (x + width, y + height), masking each component with the literal
-     * 0x1fff/0x1fff0000 pair. r408 then measured six non-full-width instances
-     * with this same mode and black colour. Geometry is therefore decoded,
-     * while colour, raster operation, surface format and bounds remain closed
-     * to the captured iPhone OS 3 form. */
+    /* _pack2DCtxBlitColor at 0x30e1ae1c..0x30e1b0b4 converts its colour
+     * argument to the destination format, stores that complete value in word
+     * 7, then packs (x, y) and (x + width, y + height) into words 8 and 9.
+     * r408 measured black bounded fills. The Safari Tabs recovery fixture then
+     * captured the identical BGRA8 command with opaque white and 0xe0 gray.
+     * Accept opaque colours from that decoded producer while keeping alpha,
+     * raster operation, surface format and bounds closed to measured forms. */
     if ((w[0] != MBX_2D_COMMAND_HEADER && w[0] != MBX_2D_SUBMIT) ||
         w[2] != 0x94060500u || w[3] != 0u || w[4] != 0x30000000u ||
         w[5] != 0x60800200u || w[6] != MBX_2D_FILL_MODE ||
-        w[7] != MBX_2D_FILL_COLOR ||
         (w[8] & ~0x1fff1fffu) || (w[9] & ~0x1fff1fffu)) {
-        if (why) *why = "packet is not the measured bounded black fill";
+        if (why) *why = "packet is not the decoded opaque BGRA8 fill form";
+        return false;
+    }
+    if ((w[7] >> 24) != 0xffu) {
+        if (why) *why = "solid-fill colour is not opaque BGRA8";
         return false;
     }
     for (unsigned i = 10; i < MBX_2D_COPY_WORDS; i++) {
@@ -705,11 +715,12 @@ static bool mbx_stage_black_rect_fill(s5l_mbx_t *m,
         if (why) *why = "host allocation for staged solid fill failed";
         return false;
     }
+    const uint32_t colour = w[7];
     for (uint32_t i = 0; i < total; i += 4u) {
-        pixels[i] = 0u;
-        pixels[i + 1u] = 0u;
-        pixels[i + 2u] = 0u;
-        pixels[i + 3u] = 0xffu;
+        pixels[i] = (uint8_t)colour;
+        pixels[i + 1u] = (uint8_t)(colour >> 8);
+        pixels[i + 2u] = (uint8_t)(colour >> 16);
+        pixels[i + 3u] = (uint8_t)(colour >> 24);
     }
     job->target = w[1];
     job->dst_x = left;
@@ -903,8 +914,8 @@ static bool mbx_stage_2d_packet(s5l_mbx_t *m, const arm_bus_t *bus,
         *packet_words = MBX_2D_BLEND_WORDS;
     } else if (mbx_edram_word(m, packet_off + 6u * 4u) ==
                MBX_2D_FILL_MODE) {
-        if (!mbx_stage_black_rect_fill(m, bus, packet_off,
-                                        batch, job, why))
+        if (!mbx_stage_opaque_rect_fill(m, bus, packet_off,
+                                         batch, job, why))
             return false;
         *packet_words = MBX_2D_COPY_WORDS;
     } else {

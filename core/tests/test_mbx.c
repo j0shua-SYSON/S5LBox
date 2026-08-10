@@ -392,7 +392,7 @@ static void test_map_gpu_page(s5l8900_t *m, uint32_t table,
         table + (((gpu >> 12) & 0x3ffu) * 4u), pa);
 }
 
-static void test_full_lower_surface_black_fill(void) {
+static void test_full_lower_surface_opaque_fill(void) {
     enum { STRIDE = 0x500u, WIDTH = 320u, HEIGHT = 480u, TOP = 20u };
     const uint32_t table2 = 0x08003000u;
     const uint32_t target = 0x00897000u;
@@ -437,13 +437,167 @@ static void test_full_lower_surface_black_fill(void) {
 
     m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x400u);
     test_gpu_write32(&m, target + TOP * STRIDE, 0x89abcdefu);
-    packet[7] ^= 1u;
+    packet[7] = 0x7f000000u;
     write_packet(&m, RING + 0x40u, packet, 16u);
     m.bus.write32(m.bus.ctx, MBX_BASE + RING, 0xf0000000u);
     CHECK(test_gpu_read32(&m, target + TOP * STRIDE) == 0x89abcdefu,
-          "unknown solid colour changed the destination");
+          "unmeasured translucent fill changed the destination");
     CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
-          "unknown solid colour raised completion");
+          "unmeasured translucent fill raised completion");
+
+    s5l8900_free(&m);
+}
+
+static void test_safari_tabs_opaque_fill_batch(void) {
+    enum { STRIDE = 0x500u, HEIGHT = 480u };
+    const uint32_t table2 = 0x08003000u;
+    const uint32_t target = 0x00998000u;
+    const uint32_t target_pa = 0x08040000u;
+    uint32_t white[16] = {
+        0xa0060500u, target, 0x94060500u, 0x00000000u,
+        0x30000000u, 0x60800200u, 0x8000f0f0u, 0xffffffffu,
+        0x00000148u, 0x014001b4u, 0x70000000u, 0x70000000u,
+        0x70000000u, 0x70000000u, 0x70000000u, 0x70000000u,
+    };
+    uint32_t gray[16];
+    memcpy(gray, white, sizeof gray);
+    gray[7] = 0xffe0e0e0u;
+    gray[8] = 0x00000147u;
+    gray[9] = 0x01400148u;
+
+    s5l8900_t m;
+    CHECK(s5l8900_init(&m, RAM_BASE, RAM_SIZE),
+          "Safari-tabs fill machine init failed");
+    if (!m.ram) return;
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_GART2, table2);
+    for (uint32_t page = 0; page < STRIDE * HEIGHT; page += 0x1000u)
+        test_map_gpu_page(&m, table2, target + page, target_pa + page);
+
+    test_gpu_write32(&m, target + 326u * STRIDE, 0xff112233u);
+    test_gpu_write32(&m, target + 327u * STRIDE, 0xff445566u);
+    test_gpu_write32(&m, target + 328u * STRIDE, 0xff778899u);
+    test_gpu_write32(&m, target + 435u * STRIDE + 319u * 4u,
+                     0xffaabbccu);
+    test_gpu_write32(&m, target + 436u * STRIDE, 0xffabcdefu);
+
+    write_packet(&m, RING + 0x23a0u, white, 16u);
+    write_packet(&m, RING + 0x23e0u, gray, 16u);
+    const char *probe_why = "unset";
+    uint64_t probe_hash = UINT64_MAX;
+    CHECK(s5l_mbx_probe_2d_submit(&m.mbx, &m.bus,
+                                  RING + 0x23a0u, 2u,
+                                  &probe_hash, &probe_why) &&
+          probe_hash == 0u,
+          "captured Safari-tabs fills rejected: %s (%016llx)",
+          probe_why, (unsigned long long)probe_hash);
+    CHECK(test_gpu_read32(&m, target + 327u * STRIDE) == 0xff445566u &&
+          test_gpu_read32(&m, target + 328u * STRIDE) == 0xff778899u,
+          "read-only Safari-tabs probe changed destination pixels");
+
+    m.bus.write32(m.bus.ctx, MBX_BASE + RING, 0xf0000000u);
+    CHECK(test_gpu_read32(&m, target + 326u * STRIDE) == 0xff112233u &&
+          test_gpu_read32(&m, target + 327u * STRIDE) == 0xffe0e0e0u &&
+          test_gpu_read32(&m, target + 328u * STRIDE) == 0xffffffffu &&
+          test_gpu_read32(&m, target + 435u * STRIDE + 319u * 4u) ==
+              0xffffffffu &&
+          test_gpu_read32(&m, target + 436u * STRIDE) == 0xffabcdefu,
+          "Safari-tabs opaque fill colours or bounds are wrong");
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0x400u,
+          "Safari-tabs fill batch did not raise exactly 2D completion");
+    CHECK(m.mbx_telemetry.candidates_2d == 2u &&
+          m.mbx_telemetry.completed_2d == 2u &&
+          m.mbx_telemetry.rejected_2d == 0u &&
+          m.mbx_telemetry.bytes_2d ==
+              (uint64_t)(320u * 108u + 320u) * 4u,
+          "Safari-tabs fill ledger=%llu/%llu/%llu/%llu",
+          (unsigned long long)m.mbx_telemetry.candidates_2d,
+          (unsigned long long)m.mbx_telemetry.completed_2d,
+          (unsigned long long)m.mbx_telemetry.rejected_2d,
+          (unsigned long long)m.mbx_telemetry.bytes_2d);
+
+    s5l8900_free(&m);
+}
+
+static void test_safari_tabs_bounded_source_stride_copy(void) {
+    enum {
+        TARGET_STRIDE = 0x500u,
+        SOURCE_STRIDE = 0x420u,
+        WIDTH = 258u,
+        HEIGHT = 43u,
+    };
+    const uint32_t table2 = 0x08003000u;
+    const uint32_t table3 = 0x08002000u;
+    const uint32_t target = 0x00998000u;
+    const uint32_t target_pa = 0x08040000u;
+    const uint32_t source = 0x00c01080u;
+    const uint32_t source_page = 0x00c01000u;
+    const uint32_t source_pa = 0x08100000u;
+    uint32_t packet[16] = {
+        0xa0060500u, target, 0x94060420u, source,
+        0x30000000u, 0x60800200u, 0x8000ccccu, 0xffffffffu,
+        0x0034011cu, 0x01360147u, 0x70000000u, 0x70000000u,
+        0x70000000u, 0x70000000u, 0x70000000u, 0x70000000u,
+    };
+
+    s5l8900_t m;
+    CHECK(s5l8900_init(&m, RAM_BASE, RAM_SIZE),
+          "Safari-tabs copy machine init failed");
+    if (!m.ram) return;
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_GART2, table2);
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_GART3, table3);
+    for (uint32_t page = 0; page < TARGET_STRIDE * 480u; page += 0x1000u)
+        test_map_gpu_page(&m, table2, target + page, target_pa + page);
+    for (uint32_t page = 0;
+         page < 0x80u + SOURCE_STRIDE * HEIGHT;
+         page += 0x1000u)
+        test_map_gpu_page(&m, table3, source_page + page,
+                          source_pa + page);
+
+    const uint32_t top_left = 0xff102030u;
+    const uint32_t top_right = 0xff405060u;
+    const uint32_t second_row = 0xff708090u;
+    const uint32_t bottom_right = 0xffa0b0c0u;
+    test_gpu_write32(&m, source, top_left);
+    test_gpu_write32(&m, source + (WIDTH - 1u) * 4u, top_right);
+    test_gpu_write32(&m, source + SOURCE_STRIDE, second_row);
+    test_gpu_write32(&m, source + (HEIGHT - 1u) * SOURCE_STRIDE +
+                     (WIDTH - 1u) * 4u, bottom_right);
+    test_gpu_write32(&m, source + TARGET_STRIDE, 0xffdead00u);
+
+    const uint32_t dst = target + 284u * TARGET_STRIDE + 52u * 4u;
+    test_gpu_write32(&m, dst - 4u, 0xff112233u);
+    test_gpu_write32(&m, dst + WIDTH * 4u, 0xff445566u);
+    write_packet(&m, RING + 0x2460u, packet, 16u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + RING, 0xf0000000u);
+
+    CHECK(test_gpu_read32(&m, dst) == top_left &&
+          test_gpu_read32(&m, dst + (WIDTH - 1u) * 4u) == top_right &&
+          test_gpu_read32(&m, dst + TARGET_STRIDE) == second_row &&
+          test_gpu_read32(&m, dst + (HEIGHT - 1u) * TARGET_STRIDE +
+                          (WIDTH - 1u) * 4u) == bottom_right,
+          "Safari-tabs copy did not use its encoded 0x420-byte source stride");
+    CHECK(test_gpu_read32(&m, dst - 4u) == 0xff112233u &&
+          test_gpu_read32(&m, dst + WIDTH * 4u) == 0xff445566u,
+          "Safari-tabs copy changed pixels outside its destination rectangle");
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0x400u &&
+          m.mbx_telemetry.candidates_2d == 1u &&
+          m.mbx_telemetry.completed_2d == 1u &&
+          m.mbx_telemetry.rejected_2d == 0u &&
+          m.mbx_telemetry.bytes_2d == (uint64_t)WIDTH * HEIGHT * 4u,
+          "Safari-tabs copy completion ledger=%llu/%llu/%llu/%llu",
+          (unsigned long long)m.mbx_telemetry.candidates_2d,
+          (unsigned long long)m.mbx_telemetry.completed_2d,
+          (unsigned long long)m.mbx_telemetry.rejected_2d,
+          (unsigned long long)m.mbx_telemetry.bytes_2d);
+
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x400u);
+    test_gpu_write32(&m, dst, 0xffabcdefu);
+    packet[9] = (317u << 16) | 327u;
+    write_packet(&m, RING + 0x24a0u, packet, 16u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + RING, 0xf0000000u);
+    CHECK(test_gpu_read32(&m, dst) == 0xffabcdefu &&
+          m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
+          "source-stride overflow changed pixels or raised completion");
 
     s5l8900_free(&m);
 }
@@ -3708,7 +3862,9 @@ int main(void) {
     printf("PowerVR MBX2D tests\n");
     test_translated_copy_and_completion_boundary();
     test_unknown_packet_and_bad_gart_are_atomic();
-    test_full_lower_surface_black_fill();
+    test_full_lower_surface_opaque_fill();
+    test_safari_tabs_opaque_fill_batch();
+    test_safari_tabs_bounded_source_stride_copy();
     test_split_lower_surface_black_fill();
     test_springboard_settings_black_fill_batch();
     test_status_write_to_set_and_ack();
