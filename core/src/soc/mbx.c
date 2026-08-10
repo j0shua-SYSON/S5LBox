@@ -2843,9 +2843,12 @@ static bool mbx_execute_textured_sprite(s5l_mbx_t *m,
     const float upper_bias = 0.531494140625f; /* 0x3f081000 */
     float dx = x1 - x0;
     float dy = y1 - y0;
-    if (dx < 1.0f - epsilon || dy < 1.0f - epsilon ||
-        dx > 512.0f + epsilon || dy > 512.0f + epsilon) {
-        if (why) *why = "sprite transform is outside the bounded textured family";
+    /* UI transitions can emit a positive subpixel extent on one axis while
+     * still covering one or more pixel centres. Empty and reversed geometry
+     * was rejected above; the scale family, pixel-centre coverage, boundary,
+     * clip, tile, source and target checks below remain authoritative. */
+    if (dx > 512.0f + epsilon || dy > 512.0f + epsilon) {
+        if (why) *why = "sprite transform exceeds the bounded textured family";
         return false;
     }
 

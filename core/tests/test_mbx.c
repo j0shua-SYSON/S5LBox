@@ -2803,8 +2803,10 @@ static void test_captured_status_form(const struct mbx_test_status_form *form) {
             tile_index++;
         }
     }
-    CHECK(test_gpu_read32(&m, region) ==
-              ((form->tile_y0 << 8) | form->tile_x0) &&
+    uint32_t expected_first_tile =
+        (form->tile_y0 << 8) | form->tile_x0;
+    if (tile_count == 1u) expected_first_tile |= 0x80000000u;
+    CHECK(test_gpu_read32(&m, region) == expected_first_tile &&
           test_gpu_read32(&m, region + (tile_count - 1u) * 8u) ==
               (0x80000000u | (form->tile_y1 << 8) | form->tile_x1),
           "%s region fixture lost its first or final tile", form->name);
@@ -3602,6 +3604,146 @@ spotlight_entry_unfiltered_direct_crop_form = {
         0x3da40000u, 0x3e360000u, 0xff000000u, 0x00000000u,
         0x3f500000u, 0xbb800000u, 0x3e430000u, 0xff000000u,
         0x3f2c0000u, 0x3f500000u, 0x3da40000u, 0x3e430000u,
+    },
+};
+
+/* Opening Settings retained these four sprite records after the bounded
+ * rejection witness was added.  Their object words are captured verbatim.
+ * The separate boundary record was not part of that witness, so these
+ * boundary words are reconstructed from the producer's established integer
+ * floor/ceil envelope and reproduce the captured clip and tile registers.
+ * Each sprite is subpixel-sized on one axis but still covers valid pixel
+ * centres; rejecting it before the full scale and bounds validation leaves
+ * AppleMBX waiting for completion during an otherwise valid transition. */
+static const struct mbx_test_status_form
+settings_transition_subpixel_forms[] = {
+    {
+        .name = "Settings transition direct subpixel column A",
+        .xclip = 0x00b000a8u, .yclip = 0x010000f0u,
+        .target = 0x00998000u,
+        .semantic_sprite = true,
+        .scaled_sprite = true,
+        .boundary_override = true,
+        .tile_x0 = 0x15u, .tile_x1 = 0x15u,
+        .tile_y0 = 0x0fu, .tile_y1 = 0x0fu,
+        .left = 169u, .top = 248u, .width = 1u, .height = 5u,
+        .source = 0x00996000u,
+        .source_stride = 0x40u, .source_control = 0x8e040000u,
+        .source_width = 5u, .source_height = 27u,
+        .expected_covered_pixels = 5u,
+        .boundary = {
+            0x43290000u, 0x437d0000u, 0x43290000u, 0x43770000u,
+            0x432b0000u, 0x437d0000u, 0x432b0000u, 0x43770000u,
+        },
+        .quad = {
+            0xe0000000u, 0xa1218000u, 0x8e0532c0u, 0xa6884710u,
+            0xa7718000u, 0x0e513300u, 0xae504ea0u, 0x22250e80u,
+            0x43294e72u, 0x4377c15fu, 0x432a469eu, 0x4377c15fu,
+            0x43294e72u, 0x437cfd7fu, 0x432a469eu, 0x437cfd7fu,
+            0u, 0u, 0u, 0u,
+            0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+            0xff000000u, 0x00000000u, 0x00000000u, 0x3e294e72u,
+            0x3e77c15fu, 0xff000000u, 0x3ea00000u, 0x00000000u,
+            0x3e2a469eu, 0x3e77c15fu, 0xff000000u, 0x00000000u,
+            0x3f540000u, 0x3e294e72u, 0x3e7cfd7fu, 0xff000000u,
+            0x3ea00000u, 0x3f540000u, 0x3e2a469eu, 0x3e7cfd7fu,
+        },
+    },
+    {
+        .name = "Settings transition direct subpixel column B",
+        .xclip = 0x00b800b0u, .yclip = 0x010000f0u,
+        .target = 0x00998000u,
+        .semantic_sprite = true,
+        .scaled_sprite = true,
+        .boundary_override = true,
+        .tile_x0 = 0x16u, .tile_x1 = 0x16u,
+        .tile_y0 = 0x0fu, .tile_y1 = 0x0fu,
+        .left = 183u, .top = 248u, .width = 1u, .height = 5u,
+        .source = 0x00996000u,
+        .source_stride = 0x40u, .source_control = 0x8e040000u,
+        .source_width = 5u, .source_height = 27u,
+        .expected_covered_pixels = 5u,
+        .boundary = {
+            0x43360000u, 0x437d0000u, 0x43360000u, 0x43770000u,
+            0x43380000u, 0x437d0000u, 0x43380000u, 0x43770000u,
+        },
+        .quad = {
+            0xe0000000u, 0xa1218000u, 0x8e0532c0u, 0xa6884710u,
+            0xa7718000u, 0x0e513300u, 0xae504ea0u, 0x22250e80u,
+            0x4336af36u, 0x4377c15fu, 0x4337a762u, 0x4377c15fu,
+            0x4336af36u, 0x437cfd7fu, 0x4337a762u, 0x437cfd7fu,
+            0u, 0u, 0u, 0u,
+            0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+            0xff000000u, 0x3ec00000u, 0x00000000u, 0x3e36af36u,
+            0x3e77c15fu, 0xff000000u, 0x3f280000u, 0x00000000u,
+            0x3e37a762u, 0x3e77c15fu, 0xff000000u, 0x3ec00000u,
+            0x3f540000u, 0x3e36af36u, 0x3e7cfd7fu, 0xff000000u,
+            0x3f280000u, 0x3f540000u, 0x3e37a762u, 0x3e7cfd7fu,
+        },
+    },
+    {
+        .name = "Settings transition alternate subpixel row",
+        .xclip = 0x00a80098u, .yclip = 0x00f000e0u,
+        .target = 0x00897000u,
+        .semantic_sprite = true,
+        .scaled_sprite = true,
+        .boundary_override = true,
+        .tile_x0 = 0x13u, .tile_x1 = 0x14u,
+        .tile_y0 = 0x0eu, .tile_y1 = 0x0eu,
+        .left = 155u, .top = 233u, .width = 10u, .height = 1u,
+        .source = 0x00ada080u,
+        .source_stride = 0x500u, .source_control = 0x8e500000u,
+        .source_width = 320u, .source_height = 20u,
+        .expected_covered_pixels = 10u,
+        .boundary = {
+            0x431b0000u, 0x436a0000u, 0x431b0000u, 0x43690000u,
+            0x43250000u, 0x436a0000u, 0x43250000u, 0x43690000u,
+        },
+        .quad = {
+            0xe0000000u, 0xa6218000u, 0x8e515b41u, 0xd6887610u,
+            0xa7718000u, 0x0e5112e0u, 0xa3104620u, 0x22250e80u,
+            0x431b5b3au, 0x43694211u, 0x4324a4c7u, 0x43694211u,
+            0x431b5b3au, 0x4369d6aau, 0x4324a4c7u, 0x4369d6aau,
+            0u, 0u, 0u, 0u,
+            0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+            0x07000000u, 0x00000000u, 0x00000000u, 0x3e1b5b3au,
+            0x3e694211u, 0x07000000u, 0x3f1fc000u, 0x00000000u,
+            0x3e24a4c7u, 0x3e694211u, 0x07000000u, 0x00000000u,
+            0x3f1c0000u, 0x3e1b5b3au, 0x3e69d6aau, 0x07000000u,
+            0x3f1fc000u, 0x3f1c0000u, 0x3e24a4c7u, 0x3e69d6aau,
+        },
+    },
+    {
+        .name = "Settings transition modulated subpixel row",
+        .xclip = 0x00a80098u, .yclip = 0x00f000e0u,
+        .target = 0x00897000u,
+        .semantic_sprite = true,
+        .scaled_sprite = true,
+        .boundary_override = true,
+        .tile_x0 = 0x13u, .tile_x1 = 0x14u,
+        .tile_y0 = 0x0eu, .tile_y1 = 0x0eu,
+        .left = 155u, .top = 233u, .width = 10u, .height = 1u,
+        .source = 0x00932080u,
+        .source_stride = 0x500u, .source_control = 0x8e500000u,
+        .source_width = 320u, .source_height = 20u,
+        .expected_covered_pixels = 10u,
+        .boundary = {
+            0x431b0000u, 0x436a0000u, 0x431b0000u, 0x43690000u,
+            0x43250000u, 0x436a0000u, 0x43250000u, 0x43690000u,
+        },
+        .quad = {
+            0xe0000000u, 0xa6218000u, 0x8e512641u, 0xcd206c40u,
+            0xa7718000u, 0x0e5112e0u, 0xae504ea0u, 0x22250e80u,
+            0x431b5b3au, 0x43694211u, 0x4324a4c7u, 0x43694211u,
+            0x431b5b3au, 0x4369d6aau, 0x4324a4c7u, 0x4369d6aau,
+            0u, 0u, 0u, 0u,
+            0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+            0x07000000u, 0x00000000u, 0x00000000u, 0x3e1b5b3au,
+            0x3e694211u, 0x07000000u, 0x3f1fc000u, 0x00000000u,
+            0x3e24a4c7u, 0x3e694211u, 0x07000000u, 0x00000000u,
+            0x3f1c0000u, 0x3e1b5b3au, 0x3e69d6aau, 0x07000000u,
+            0x3f1fc000u, 0x3f1c0000u, 0x3e24a4c7u, 0x3e69d6aau,
+        },
     },
 };
 
@@ -4646,6 +4788,11 @@ static void test_later_tiled_status_sprites(void) {
     test_captured_status_form(&safari_done_column_resample_form);
     test_captured_status_form(&spotlight_home_narrow_strip_resample_form);
     test_captured_status_form(&spotlight_entry_unfiltered_direct_crop_form);
+    for (unsigned i = 0;
+         i < sizeof settings_transition_subpixel_forms /
+                 sizeof settings_transition_subpixel_forms[0];
+         i++)
+        test_captured_status_form(&settings_transition_subpixel_forms[i]);
     test_captured_status_form(&zero_coverage_status_form);
     struct mbx_test_status_form relocated_zero = zero_coverage_status_form;
     relocated_zero.name = "relocated right-edge zero-coverage sprite";
