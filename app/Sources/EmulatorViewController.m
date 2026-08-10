@@ -251,6 +251,12 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
     [super viewDidLoad];
     self.view.backgroundColor = [UIColor blackColor];
 
+    /* Machines benefits from a large browsing title; the running guest does
+     * not. Keep its name in the compact navigation bar beside Back so the
+     * framebuffer gets the vertical space and the title stays centred. */
+    self.navigationItem.largeTitleDisplayMode =
+        UINavigationItemLargeTitleDisplayModeNever;
+
     /* The stock navigation back item pops immediately, which used to destroy
      * the only live machine state. This explicit item keeps the familiar
      * chevron but routes the action through the asynchronous checkpoint. */
