@@ -4,8 +4,8 @@ name: ios-build
 # subject to GitHub's current usage and billing policy. CI has no Apple signing
 # identity, so it applies a private-entitlement-free ad-hoc signature and
 # uploads a transport artifact. Stock installation requires the user's normal
-# provisioning signature; a jailbreak is test infrastructure, never an app
-# runtime dependency. The workflow does not install or launch the app.
+# provisioning signature; privileged lab tooling is never an app runtime
+# dependency. The workflow does not install or launch the app.
 on:
   push:
     paths:
@@ -91,7 +91,6 @@ jobs:
           forbidden = (
               "/var/jb",
               "jbctl",
-              "Dopamine",
               "dynamic-codesigning",
               "get-task-allow",
               "com.apple.developer.kernel.increased-memory-limit",

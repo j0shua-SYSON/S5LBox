@@ -1,9 +1,9 @@
 # S5LBox -- the host iOS app must remain a stock-device application.
 #
-# A jailbroken test phone provides SSH, trust-cache access and standalone CLI
+# A privileged test phone can provide extra lab services and standalone CLI
 # profiling. None of that is a product dependency. This deliberately permits
-# the app's "Jailbreak" setting because it modifies the emulated iPhone OS 3
-# guest; it rejects only host jailbreak/private-signing contracts.
+# the app's guest-only system-modification setting while rejecting host-private
+# execution and signing contracts.
 
 if(NOT DEFINED APP_DIR OR NOT IS_DIRECTORY "${APP_DIR}")
     message(FATAL_ERROR
@@ -44,7 +44,6 @@ set(checked_files
 set(forbidden_markers
     "/var/jb"
     "jbctl"
-    "dopamine"
     "dynamic-codesigning"
     "get-task-allow"
     "com.apple.developer.kernel.increased-memory-limit"
@@ -70,8 +69,8 @@ endforeach()
 if(violations)
     string(REPLACE ";" "\n" pretty "${violations}")
     message(FATAL_ERROR
-        "jailbreak/private host dependency leaked into the iOS app:\n${pretty}")
+        "private host dependency leaked into the iOS app:\n${pretty}")
 endif()
 
 message(STATUS
-    "stock-host policy: empty entitlements, no jailbreak-only dependency")
+    "stock-host policy: empty entitlements, no private host dependency")

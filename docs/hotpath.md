@@ -608,11 +608,21 @@ switch. The plain-C queue test covers the exact boundary, missing/backwards
 clock fail-open behaviour, and the exclusions, and the full 61-test host suite
 passes.
 
-BRUTAL STATUS AT THIS POINT: the mechanism and regression tests are complete,
-but this new floor has not yet been proven in an IPA on a physical phone. The
-old claim is retracted now because the reproduction disproved it; the fix must
-not be called device-verified until a normal tap passes in both CPU and MBX
-modes.
+BRUTAL STATUS AFTER PHYSICAL TESTING: commit `85ea69a` was installed on an
+iPhone8,2 running iOS 15.8.5. In a fresh CPU-renderer machine, one ordinary
+Home tap returned from Settings to SpringBoard; the board reported two
+transitions taken and zero refused. A separate machine was then created only
+after selecting MBX and preparing a new work image. Its preparation reported
+the QuartzCore software renderer off, its cold boot exposed `arm-io/mbx`, and
+the guest logged `AppleMBX: Detected mbx,s5l8900x`. It reached SpringBoard,
+opened Settings, and the same single short Home tap returned to SpringBoard
+while the VM remained running. Before that transition the live MBX counters
+had completed 221/221 2D and 84/84 3D submissions with zero decoder rejection.
+
+That proves the short-pulse repair on this phone in both controlled renderer
+modes. It does **not** prove MBX stable over a long session, sleep/wake, or
+checkpoint/restore, and it does not establish a sustained frame rate. Those
+are separate acceptance tests and remain open.
 
 ## The key generation TERMINATES, at ~6.4e9 instructions (r219, decisive)
 
@@ -7562,7 +7572,7 @@ The synthetic signed-engine benchmark above was not enough evidence for product 
 retirement/refill counters to the **same** iPhoneOS full-guest executable. Exact workflow run
 `31067846341` is green. Its hosted-signed artifact is 3,546,816 bytes with SHA-256
 `8D17C3A294E0EE07D5EF8BB4F78749884DAA2D1EC6799AEE6111CF573ADAC602`; the exact phone CDHash is
-`1417760a73a63df2d40ad7450404113bb1b588d3`. It has only the three previously proven Dopamine CLI
+`1417760a73a63df2d40ad7450404113bb1b588d3`. It has only the three previously proven privileged CLI
 entitlements and requests no JIT or writable-executable memory.
 
 The run reused r446's retained 7.320 B checkpoint instead of spending another cold boot. The
@@ -7660,7 +7670,7 @@ Commit `55379b6517c12452eb14c8dd16292a39c5be4fc0` adds the clock domain that the
 frame meter omitted. Exact full-guest workflow run `31071907256` is green. Its hosted-signed arm64
 artifact is 3,546,864 bytes, SHA-256
 `CAC31EF1D760FE4D25F86DDDFDC0672B776598E21766E6760412995B25149FAF`, and has phone CDHash
-`a3f7c61fb5a36fd90c05c992fc44a53c88c4e4c9`. Those are standalone jailbreak-lab harness
+`a3f7c61fb5a36fd90c05c992fc44a53c88c4e4c9`. Those are standalone privileged-lab harness
 properties, not app dependencies. The stock-compatible app still requests no private entitlement.
 
 The exact artifact restored the same authenticated r446 7.320 B state and ran the canonical app bus,
@@ -7741,8 +7751,8 @@ are green. Its MBX IPA is 1,223,871 bytes, SHA-256
 `364B116073AB6396A0BBA050E13A1603204539BBCBDAF68965AB9CCD028F8BCA`; the executable is
 SHA-256 `949C551E28A5346BD21B15C789B167D5E86FC3424C7C3A7406290A0BCA2BFBC4`.
 
-Cleaner code did **not** become a measured product win. The iPhone 6s Plus crossover used iOS MCP
-for every device action, killed the app between arms, reinstalled exact IPAs, and restored the same
+Cleaner code did **not** become a measured product win. The iPhone 6s Plus crossover used controlled
+device automation for every action, killed the app between arms, reinstalled exact IPAs, and restored the same
 466,825,216-byte rootfs checkpoint (SHA-256
 `4A5B1A2739A57CF52FA843CEF612CC285C6DC6242DA8BF7AE1832D38BCCBD6BB`) before every cold app
 run. Each arm used a 20-second warmup followed by seven three-second-spaced accessibility samples:
@@ -7971,7 +7981,7 @@ prove that compact execution wins on restored firmware or improves one displayed
 Manual no-JIT device workflow run `31155444985` built commit `9a8f5558` successfully for iPhoneOS
 arm64. The hosted artifact is 3,566,272 bytes with SHA-256
 `42E3430F6D45F4FEDA9C49E1CE9D16915F44400715298D4971DC1DA6AD060007`; the byte-identical phone
-copy executed without phone-side re-signing. Immediately before the test, iOS MCP re-hashed the
+copy executed without phone-side re-signing. Immediately before the test, the phone re-hashed the
 retained r446 snapshot, media image and media state plus the kernel, device tree and root file
 system. All six matched the canonical hashes recorded above.
 
@@ -8029,7 +8039,7 @@ and stock-compatible iOS run `31159903993` are green. Diagnostic-only commit
 run `31160539347` and device replay build `31160623542` are green.
 
 The physical iPhone 6s Plus then ran the same authenticated 7.320--7.330 B interval in balanced
-interpreter/candidate/candidate/interpreter order. iOS MCP re-hashed the snapshot, media triplet,
+interpreter/candidate/candidate/interpreter order. The phone re-hashed the snapshot, media triplet,
 kernel, device tree and root file system first; all six remained canonical. Every arm used the same
 3,566,736-byte no-JIT binary, canonical app bus/direct writes, fresh disposable work image,
 `--run-api` and frame meter:

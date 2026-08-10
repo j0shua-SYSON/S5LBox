@@ -57,10 +57,10 @@ jobs:
             $core_sources device-benchmark/a64_static_handlers.S \
             -o device-benchmark/s5lbox-insnbench-ios-arm64
 
-          # A jailbreak is still required. These are the minimal CLI
-          # entitlements proven on Dopamine; they do not grant dynamic code or
-          # JIT. Keep the plist with the artifact so a necessary phone-side
-          # re-sign can preserve the exact same contract.
+          # This standalone CLI requires a privileged development phone. These
+          # are the minimal lab-only CLI entitlements; they do not grant
+          # dynamic code or JIT. Keep the plist with the artifact so any
+          # necessary phone-side re-sign preserves the exact same contract.
           cp tools/ios-device-benchmark-entitlements.plist \
             device-benchmark/entitlements.plist
           codesign --force --sign - --timestamp=none \

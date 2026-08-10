@@ -1,9 +1,9 @@
-# Jailbroken iPhone core benchmark
+# Privileged iPhone core benchmark
 
 The manual `ios-device-benchmark` workflow builds the existing `insnbench`
 harness as an arm64 iPhoneOS command-line executable. It is intended for a
-maintainer-controlled jailbroken device and is not installable or runnable on
-stock iOS.
+maintainer-controlled privileged test device and is not installable or runnable
+on stock iOS.
 
 The build deliberately measures the signed-static AArch64 candidate under
 `-O3`, LLVM LTO, the full non-JIT core source graph, and its direct-write
@@ -16,28 +16,19 @@ source and requests no JIT entitlement. Its artifact
 contains synthetic instruction loops only; it contains no firmware, rootfs,
 machine image, snapshot, device address, pairing record, or credential.
 
-After downloading the artifact, copy it to a user-owned path on the test phone.
-Verify its SHA-256 before changing it, inspect the embedded signature, and add
-that exact CDHash to Dopamine's dynamic trust cache as root. The artifact is
-ad-hoc signed with the three CLI entitlements in the accompanying
-`entitlements.plist`:
+After downloading the artifact, install it only through the maintainer's
+private device-lab process. Verify its SHA-256 before changing it and inspect
+the embedded signature. The artifact is ad-hoc signed with the three CLI
+entitlements in the accompanying `entitlements.plist`:
 
 - `platform-application`
 - `com.apple.private.security.no-container`
 - `com.apple.private.skip-library-validation`
 
-This is a privileged jailbreak-only executable. None of those keys grants a
-JIT or writable-executable memory. If a specific phone rejects the hosted
-signature and re-signing is genuinely necessary, preserve the same contract:
-
-```sh
-ldid -Sentitlements.plist -Cadhoc ./s5lbox-insnbench-ios-arm64
-```
-
-Recompute the file SHA-256 and CDHash after signing, then admit only that new
-CDHash. Plain `ldid -S` is not equivalent: on the tested Dopamine device it
-produced CodeDirectory flags `none`, stripped the required CLI entitlements,
-and the kernel killed the trust-cached binary with status 137 before `main`.
+This is a privileged lab-only executable. None of those keys grants JIT or
+writable-executable memory. If device-specific signing changes the artifact,
+preserve the same entitlement contract and recompute its file SHA-256 and
+CDHash; the altered binary is no longer the hosted canonical artifact.
 
 A fast validation run is:
 

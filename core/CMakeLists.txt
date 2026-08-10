@@ -1177,10 +1177,10 @@ add_test(NAME app_execution_policy
             -DAPP_PROJECT=${CMAKE_CURRENT_SOURCE_DIR}/../app/project.yml
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_app_execution_policy.cmake)
 
-# Dopamine makes the physical A9 a flexible lab target; it is never part of
-# the product contract. Defend that boundary on every host by rejecting private
-# execution entitlements, rootless-jailbreak paths and tweak frameworks from
-# the app target. The emulated guest's separate jailbreak option is allowed.
+# A privileged physical A9 is a flexible lab target; that privilege is never
+# part of the product contract. Defend the boundary on every host by rejecting
+# private execution entitlements, host-only paths and injection frameworks from
+# the app target. The emulated guest's separate modification option is allowed.
 add_test(NAME app_stock_host_policy
     COMMAND ${CMAKE_COMMAND}
             -DAPP_DIR=${CMAKE_CURRENT_SOURCE_DIR}/../app
