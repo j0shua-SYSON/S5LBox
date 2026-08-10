@@ -490,7 +490,7 @@ static UIGestureRecognizer *VMContentPopGestureRecognizer(
     }
 
     [self setCheckpointSaving:YES];
-    __weak typeof(self) weakSelf = self;
+    __weak EmulatorViewController *weakSelf = self;
     [_engine saveCheckpointAndStopWithCompletion:
         ^(BOOL saved, NSString *message) {
             EmulatorViewController *strongSelf = weakSelf;
