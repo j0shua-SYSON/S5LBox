@@ -294,6 +294,23 @@ static void report(const s5l8900_t *m, arm_status_t st) {
            (unsigned long long)m->buttons.sets,
            (unsigned long long)m->buttons.refused,
            (unsigned long long)m->buttons.edges);
+    printf("  mtz2          : reset=%d hbpp=%d power=%d pins=%d/%d/%d "
+           "power_edges=%llu reset_edges=%llu select_edges=%llu "
+           "probes=%llu execs=%llu packets=%llu frames=%llu/%llu "
+           "refused=%llu\n",
+           m->mtz2.in_reset, m->mtz2.hbpp_mode, m->mtz2.power_level,
+           s5l_gpio_pin(&m->gpio, MTZ2_PIN_RESET),
+           s5l_gpio_pin(&m->gpio, MTZ2_PIN_SELECT),
+           s5l_gpio_pin(&m->gpio, MTZ2_PIN_POWER),
+           (unsigned long long)m->mtz2.power_edges,
+           (unsigned long long)m->mtz2.resets,
+           (unsigned long long)m->mtz2.select_edges,
+           (unsigned long long)m->mtz2.hbpp_probes,
+           (unsigned long long)m->mtz2.hbpp_execs,
+           (unsigned long long)m->mtz2.packets,
+           (unsigned long long)m->mtz2.frames_read,
+           (unsigned long long)m->mtz2.frames_queued,
+           (unsigned long long)m->mtz2.injects_refused);
     for (unsigned g = 0; g < S5L_GPIOIC_GROUPS; g++)
         printf("  gpioic%u       : raw=%08x stat=%08x en=%08x "
                "level=%08x type=%08x driven=%08x\n",
