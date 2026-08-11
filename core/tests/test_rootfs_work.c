@@ -605,8 +605,8 @@ static void test_minimum_volume_expands_allocation_file(void) {
     uint8_t header[HFS_VH_LEN];
     uint8_t alternate[HFS_VH_LEN];
     uint8_t old_tail_bits[2];
-    uint8_t high_tail_low;
-    uint8_t high_tail_high;
+    uint8_t high_tail_low = 0u;
+    uint8_t high_tail_high = 0u;
     rootfs_work_options_t options;
     rootfs_work_result_t result;
     rootfs_work_status_t status;
