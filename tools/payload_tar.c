@@ -45,6 +45,11 @@ struct payload_tar {
     payload_tar_stats_t stats;
 };
 
+#if defined(__GNUC__) || defined(__clang__)
+static void say(char *detail, size_t cap, const char *fmt, ...)
+    __attribute__((format(printf, 3, 4)));
+#endif
+
 static void say(char *detail, size_t cap, const char *fmt, ...) {
     if (!detail || cap == 0u) return;
     va_list ap;
@@ -172,8 +177,8 @@ static payload_tar_t *payload_tar_parse_owned(uint8_t *image,
         if (all_zero(h)) break;                       /* end-of-archive */
         if (!checksum_ok(h)) {
             say(detail, cap,
-                "payload header at offset %zu fails its checksum; the archive "
-                "is truncated or corrupt", off);
+                "payload header at offset %llu fails its checksum; the archive "
+                "is truncated or corrupt", (unsigned long long)off);
             payload_tar_close(&t);
             return NULL;
         }
@@ -365,8 +370,9 @@ payload_tar_t *payload_tar_open_memory(const uint8_t *bytes, size_t size,
         return NULL;
     }
     if (size > PAYLOAD_TAR_MAX_BYTES) {
-        say(detail, cap, "memory payload is %zu bytes, over the %u-byte limit",
-            size, (unsigned)PAYLOAD_TAR_MAX_BYTES);
+        say(detail, cap,
+            "memory payload is %llu bytes, over the %u-byte limit",
+            (unsigned long long)size, (unsigned)PAYLOAD_TAR_MAX_BYTES);
         return NULL;
     }
     uint8_t *copy = (uint8_t *)malloc(size);
