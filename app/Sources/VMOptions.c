@@ -112,8 +112,8 @@ static const vm_option_t VM_OPTIONS[] = {
       "has not been demonstrated.",
       false, VM_OPT_GROUP_GUEST_STATE, VM_OPT_IMPL_HARNESS },
     { "ppp", "Guest networking (PPP over uart4)",
-      "Off, and explicitly temporary: runs the guest's own pppd over an "
-      "emulated UART until real drivers exist. Needs a writable work image.",
+      "Off by default during physical validation. Runs the guest's own pppd "
+      "over uart4 and records that choice when a fresh work image is made.",
       false, VM_OPT_GROUP_GUEST_STATE, VM_OPT_IMPL_HARNESS },
     { "nat", "Route guest traffic to the internet",
       "On, but it does nothing without PPP, which is what carries the "
@@ -141,11 +141,10 @@ static const char *const VM_OPTION_GROUP_NOTE[VM_OPT_GROUP_COUNT] = {
     "straight to the kernel. Each patch has its own switch so a boot can be "
     "bisected against it.",
 
-    "Persistent changes to the guest or its work image. Activation is applied "
-    "while a work image is built. The desktop harness has partial jailbreak "
-    "and networking implementations, but this app deliberately does not offer "
-    "either until their complete paths are demonstrated here; each row says "
-    "what is missing."
+    "Persistent changes to the guest or its work image. Activation and the "
+    "optional PPP job are applied while a work image is built. Guest "
+    "networking remains off by default until its full phone path is validated; "
+    "the two jailbreak rows remain unavailable and say why."
 };
 
 /*

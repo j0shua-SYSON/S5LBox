@@ -50,6 +50,11 @@ extern "C" {
 #define VM_FW_BOOT_DEVICETREE_FILE  "devicetree.bin"
 #define VM_FW_BOOT_ROOTFS_FILE      "rootfs.img"
 #define VM_FW_BOOT_WORK_FILE        "rootfs-work.img"
+/* Host metadata proving that this work image contains the stock pppd launchd
+ * job. Runtime networking follows this record, not a setting changed after the
+ * filesystem was made. The marker contains no credential or network state. */
+#define VM_FW_BOOT_PPP_FILE         "network.ppp-v1"
+#define VM_FW_BOOT_PPP_TMP          "network.ppp-v1.partial"
 /*
  * The automatic suspend-to-disk pair. A complete pair is consumed once when
  * VM_FW_BOOT_RESTORE_ONCE_FILE is also present. No marker means no restore,
@@ -329,8 +334,9 @@ void vm_firmware_boot_destroy(vm_firmware_boot_t **boot);
  * Refuses rather than replaces if the destination already exists, so calling
  * it twice is safe. `detail` always receives a reason on failure.
  *
- * `options` selects the work-image transformations -- today only the
- * QuartzCore software-renderer plist rewrite. NULL is the table's defaults.
+ * `options` selects the work-image transformations: QuartzCore's renderer,
+ * offline activation data, and the stock pppd launchd job. NULL is the
+ * table's defaults.
  * The directory paths->work names must already exist; nothing here creates
  * directories, because C has no portable way to.
  */

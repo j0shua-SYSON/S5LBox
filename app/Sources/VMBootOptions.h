@@ -10,9 +10,10 @@
  * that the join is CHECKABLE — every row of the option table has exactly one
  * entry in the map below, and the test fails when a row has none.
  *
- * IT IS ALSO WHERE THE APP ADMITS WHAT IT CANNOT DO. Eight rows currently
- * reach the bring-up request, two are provisioned into a work image, and six
- * are fixed or unavailable here. They fall into three kinds, and the
+ * IT IS ALSO WHERE THE APP ADMITS WHAT IT CANNOT DO. Nine rows currently
+ * reach bring-up or a live runtime service, three are provisioned into a work
+ * image, and four are fixed or unavailable here. They fall into three kinds,
+ * and the
  * difference between them is the whole point:
  *
  *   APPLIED      the request now carries this row's value, both ways.
@@ -24,11 +25,11 @@
  *
  * The last of those is why `effective` exists next to `requested`. The app once
  * lacked the device-tree un-match step, so five OFF rows silently stayed ON;
- * that bug is fixed and all six hardware rows now reach bring-up. Fixed rows
- * still need the distinction: NAT, for example, defaults ON in the option
- * mirror but is effectively OFF because this app has no PPP endpoint. A report
- * that showed only the requested value would still lie, so the override is
- * counted and named.
+ * that bug is fixed and all six hardware rows now reach bring-up. Rows whose
+ * effect depends on persisted state still need the distinction: NAT, for
+ * example, defaults ON but is effective only when this machine's work image
+ * records the guest PPP job. A report that showed only the requested value
+ * would still lie, so the override is counted and named.
  *
  * PLAIN C11, and for the usual reason: no Objective-C is compilable by a host
  * CI runner, and "which switch reached the machine" is exactly the claim a UI
@@ -155,10 +156,21 @@ typedef struct {
      * and none is verified.
      */
     bool activate;
+    /* Installs the stock pppd launchd job into a newly made work image. */
+    bool ppp;
 } vm_boot_provision_options_t;
 
 void vm_boot_options_for_provisioning(const bool *values, unsigned count,
                                       vm_boot_provision_options_t *out);
+
+/*
+ * Replace the settings-time prediction for PPP with what this work image
+ * actually records. NAT is then effective only when both its switch and that
+ * recorded PPP job are on. Rebuilds counts and summary so a boot report cannot
+ * claim that changing an image-time switch rewrote an existing filesystem.
+ */
+void vm_boot_options_reconcile_network(vm_boot_options_report_t *report,
+                                       bool ppp_provisioned);
 
 /*
  * The map, for its own test only. The app calls neither: the property they

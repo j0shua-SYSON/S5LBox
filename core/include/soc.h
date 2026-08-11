@@ -3672,6 +3672,25 @@ typedef bool (*s5l_wfi_host_sleep_fn)(void *ctx, uint64_t nanoseconds);
  */
 typedef bool (*s5l_active_host_now_fn)(void *ctx, uint64_t *nanoseconds);
 
+/*
+ * Optional host peer on uart4, the guest's PPP line.
+ *
+ * `tx` sees every low byte the guest writes to UTXH, including bytes beyond
+ * uart4's bounded diagnostic capture. It runs inside the guest MMIO write and
+ * must update host-owned state only: it may not call back into the machine.
+ *
+ * `service` runs once after each public s5l8900_run() slice and receives the
+ * number of guest instructions that slice retired. This is the safe handoff
+ * boundary for a non-blocking host peer: it may push bytes into uart4's RX
+ * FIFO through s5l_uart_rx_push() and then call s5l8900_tick(machine, 0) to
+ * refresh the interrupt line. It must not call s5l8900_run() recursively.
+ *
+ * Both callbacks run synchronously on the machine-owning thread. Generic
+ * frontends leave them NULL, preserving the historical machine exactly.
+ */
+typedef void (*s5l_uart4_host_tx_fn)(void *ctx, uint8_t byte);
+typedef void (*s5l_uart4_host_service_fn)(void *ctx, unsigned retired);
+
 /* Do not hold an interactive execution slice inside WFI for longer than this.
  * Longer guest waits are advanced in real-time-sized pieces, yielding between
  * them so a frontend can drain input, stop requests and scanout. */
@@ -3942,6 +3961,16 @@ typedef struct {
     uint64_t               active_clock_clamps;
     uint64_t               active_clock_failures;
     bool                   active_clock_anchor_valid;
+
+    /*
+     * uart4's optional host peer. Host wiring, never guest state: snapshot
+     * visitors deliberately leave all three fields untouched, so restoring a
+     * guest underneath a live frontend retains that frontend's peer rather
+     * than importing a stale pointer from the snapshot writer.
+     */
+    s5l_uart4_host_tx_fn      uart4_host_tx;
+    s5l_uart4_host_service_fn uart4_host_service;
+    void                     *uart4_host_ctx;
 } s5l8900_t;
 
 /*
@@ -4148,6 +4177,14 @@ bool s5l8900_set_wfi_host_pacing(s5l8900_t *m,
  */
 bool s5l8900_set_active_host_clock(s5l8900_t *m,
                                    s5l_active_host_now_fn now, void *ctx);
+
+/*
+ * Attach or detach uart4's host peer. Attaching requires both callbacks; the
+ * context may be NULL. Passing all three as NULL detaches. A partial request
+ * is rejected without changing the live attachment.
+ */
+bool s5l8900_set_uart4_host(s5l8900_t *m, s5l_uart4_host_tx_fn tx,
+                            s5l_uart4_host_service_fn service, void *ctx);
 
 /*
  * ram_base/ram_size define where RAM appears. Returns false on allocation

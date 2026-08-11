@@ -11,11 +11,12 @@
  * The counts in this comment used to be "two rows reach the request; twelve do
  * not; six are already in conflict on an untouched installation", and they
  * were accurate when written. They are not the shape of the thing any more:
- * seven rows now reach the request (two opt-outs and the five nubs bring-up
- * learned to un-match), two are written into the work image when it is made,
- * and exactly one -- "nat" -- is still in conflict at its defaults. The live
- * numbers are asserted below; this paragraph is prose and must never be the
- * thing anyone trusts.
+ * nine rows now reach bring-up or a runtime service (two opt-outs, six nubs,
+ * and NAT), three are written into the work image when it is made, and four
+ * remain fixed. Exactly one -- "nat" -- conflicts with the settings-time
+ * prediction at its defaults before the actual work-image record is read. The
+ * live numbers are asserted below; this paragraph is prose and must never be
+ * the thing anyone trusts.
  *
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed.
  */
@@ -96,9 +97,9 @@ static void test_map_covers_the_table(void) {
 }
 
 /*
- * The two rows that actually reach the request, both ways. These are the only
- * two switches in this app that change what the machine does at boot, so they
- * are pinned in both positions and against the request field directly.
+ * The two scalar opt-outs that reach request fields directly, both ways. The
+ * device-tree rows are tested against the request's un-match list below, and
+ * NAT is a runtime service, so those have separate assertions.
  */
 static void test_applied_rows_reach_the_request(void) {
     bool values[VM_BOOT_OPTION_MAX];
@@ -139,13 +140,13 @@ static void test_applied_rows_reach_the_request(void) {
           "turning memory-reg off did not set no_memory_node");
     CHECK(!report.row[lcd].effective && !report.row[mem].effective,
           "a row turned off still reports as effective");
-    /* The two request opt-outs plus the SIX nubs, which became applied rows
-     * when bring-up learned to un-match. Counted rather than left open so that
+    /* The two request opt-outs, the SIX nubs, and live NAT are applied rows.
+     * Counted rather than left open so that
      * a row quietly joining them has to be a deliberate edit here -- which is
      * what this is: `multitouch` was added on 2026-07-29 and it is applied
      * like the rest, even at its default, because "left matched because you
      * asked for it" is the switch working rather than being ignored. */
-    CHECK(report.applied == 8u, "%u rows applied, expected 8", report.applied);
+    CHECK(report.applied == 9u, "%u rows applied, expected 9", report.applied);
 
     /* Nothing else in the request may be touched. no_framebuffer in
      * particular: the app never turns the display off, and a mapping that
@@ -160,19 +161,11 @@ static void test_applied_rows_reach_the_request(void) {
 }
 
 /*
- * A fresh installation, untouched. Six switches are already in conflict with
- * what bring-up does, and every one of them is named. This is the assertion
- * that would have caught the whole problem: the app has been showing five nubs
- * as hidden and one activation as on, and doing neither.
- */
-/*
- * "nat" joins this list for a different reason from the rest, and the
- * difference is worth keeping visible. The others are devices this app
- * deliberately does not declare; the NAT is portable and would work here --
- * core/src/net/net.c has no socket in it and tools/net_host.c needs nothing
- * privileged. It is fixed off only because --ppp is, and --ppp is what would
- * carry its datagrams. It stops being an override on the day the app
- * terminates PPP.
+ * A fresh settings table, before a particular work image is examined. NAT is
+ * the only default mismatch: its switch is on while PPP defaults off, so there
+ * is no carrier. vm_boot_options_reconcile_network() later replaces that
+ * prediction with the image's recorded PPP state. Keeping the pre-image case
+ * explicit prevents the settings screen from promising a route with no link.
  */
 static const char *const EXPECTED_OVERRIDDEN_AT_DEFAULT[] = {
     "nat"
@@ -358,12 +351,12 @@ static void test_fixed_rows(void) {
     }
 
     /*
-     * The two that are implemented nowhere, plus ppp. "activate" was here
-     * and is not any more: rootfs_work has always been able to write the
-     * Lockdown objects and the app now asks it to, at image time.
+     * The two that are implemented nowhere. "activate" and "ppp" were here
+     * and are not any more: both now reach rootfs_work at image time, and PPP
+     * additionally has a live uart4 host peer.
      */
     static const char *const FIXED_OFF[] = {
-        "jb-codesign", "jb-payload", "ppp"
+        "jb-codesign", "jb-payload"
     };
     for (unsigned i = 0; i < sizeof FIXED_OFF / sizeof FIXED_OFF[0]; i++) {
         int index = index_of(FIXED_OFF[i]);
@@ -383,9 +376,8 @@ static void test_fixed_rows(void) {
 }
 
 /*
- * ca-software-render is the only row whose value is written into a file rather
- * than into a request, so it is the only one that can be honoured completely
- * and still not be true of a machine that already exists.
+ * Three rows are written into the work image rather than a bring-up request,
+ * so changing them later cannot rewrite a machine that already exists.
  */
 static void test_provisioned_row(void) {
     bool values[VM_BOOT_OPTION_MAX];
@@ -393,16 +385,18 @@ static void test_provisioned_row(void) {
     vm_boot_provision_options_t provision;
 
     const int ca = index_of("ca-software-render");
-    if (ca < 0) return;
+    const int ppp = index_of("ppp");
+    if (ca < 0 || ppp < 0) return;
 
     defaults_into(values);
     vm_boot_options_apply(values, vm_option_count(), NULL, &report);
     CHECK(report.row[ca].outcome == VM_BOOT_OPTION_PROVISIONED,
           "ca-software-render is not reported as an image-time decision");
-    /* ca-software-render and activate. Both are written into the work image
-     * when it is made, and neither can be revisited by a boot. */
-    CHECK(report.provisioned == 2u,
-          "%u provisioned rows, expected 2", report.provisioned);
+    /* ca-software-render, activate, and the stock pppd launchd job. */
+    CHECK(report.provisioned == 3u,
+          "%u provisioned rows, expected 3", report.provisioned);
+    CHECK(report.row[ppp].outcome == VM_BOOT_OPTION_PROVISIONED,
+          "ppp is not reported as an image-time decision");
     CHECK(report.row[ca].note &&
           strstr(report.row[ca].note, "work image") != NULL,
           "ca-software-render does not say where its value lives");
@@ -431,10 +425,64 @@ static void test_provisioned_row(void) {
           "flipping ca-software-render off its default did not reach the "
           "provisioner");
 
+    const bool ppp_def = vm_option_at((unsigned)ppp)->def;
+    defaults_into(values);
+    vm_boot_options_for_provisioning(values, vm_option_count(), &provision);
+    CHECK(provision.ppp == ppp_def,
+          "the default ppp value did not reach the provisioner");
+    values[ppp] = !ppp_def;
+    vm_boot_options_for_provisioning(values, vm_option_count(), &provision);
+    CHECK(provision.ppp == !ppp_def,
+          "flipping ppp did not reach the provisioner");
+
     /* NULL means the table's defaults, never all-false-by-accident. */
     vm_boot_options_for_provisioning(NULL, 0u, &provision);
     CHECK(provision.ca_software_render == vm_option_at((unsigned)ca)->def,
           "a NULL value array did not fall back to the table default");
+}
+
+static void test_network_state_is_reconciled_with_the_work_image(void) {
+    bool values[VM_BOOT_OPTION_MAX];
+    vm_boot_options_report_t report;
+    const int ppp = index_of("ppp");
+    const int nat = index_of("nat");
+    if (ppp < 0 || nat < 0) return;
+
+    defaults_into(values);
+    values[ppp] = true;
+    values[nat] = true;
+    vm_boot_options_apply(values, vm_option_count(), NULL, &report);
+    CHECK(report.row[ppp].effective && report.row[nat].effective,
+          "a new PPP/NAT image is predicted off before reconciliation");
+
+    vm_boot_options_reconcile_network(&report, false);
+    CHECK(!report.row[ppp].effective && !report.row[nat].effective,
+          "an image with no PPP marker still reports PPP/NAT on");
+    CHECK(report.row[ppp].note && strstr(report.row[ppp].note, "without PPP") &&
+          report.row[nat].note && strstr(report.row[nat].note, "no PPP job"),
+          "the no-marker mismatch is not actionable");
+    CHECK(strstr(report.summary, "ppp") && strstr(report.summary, "nat"),
+          "the no-marker mismatch is absent from the summary: %s",
+          report.summary);
+
+    vm_boot_options_reconcile_network(&report, true);
+    CHECK(report.row[ppp].effective && report.row[nat].effective,
+          "a marked PPP/NAT image did not reconcile on");
+
+    defaults_into(values);                 /* PPP setting off, NAT setting on */
+    vm_boot_options_apply(values, vm_option_count(), NULL, &report);
+    vm_boot_options_reconcile_network(&report, true);
+    CHECK(report.row[ppp].effective && report.row[nat].effective,
+          "an existing PPP image followed a later PPP switch instead of its "
+          "recorded filesystem");
+    CHECK(report.row[ppp].note && strstr(report.row[ppp].note, "contains"),
+          "the recorded-on/settings-off mismatch has no explanation");
+
+    values[nat] = false;
+    vm_boot_options_apply(values, vm_option_count(), NULL, &report);
+    vm_boot_options_reconcile_network(&report, true);
+    CHECK(report.row[ppp].effective && !report.row[nat].effective,
+          "the live NAT switch could not disable routing on a PPP image");
 }
 
 /*
@@ -496,8 +544,10 @@ static void test_every_note_is_usable(void) {
         const vm_option_t *option = vm_option_at(i);
         const char *name = option && option->name ? option->name : "?";
         if (report.row[i].outcome == VM_BOOT_OPTION_APPLIED) {
-            CHECK(report.row[i].note == NULL,
-                  "\"%s\" is applied and still carries a caveat", name);
+            CHECK((report.row[i].effective == report.row[i].requested) ==
+                      (report.row[i].note == NULL),
+                  "\"%s\" applied note does not match whether it was "
+                  "honoured", name);
             continue;
         }
         CHECK(report.row[i].note != NULL, "\"%s\" refuses without a reason",
@@ -513,7 +563,7 @@ static void test_every_note_is_usable(void) {
     }
 
     CHECK(report.summary[0] != '\0',
-          "an untouched installation has six overrides and says nothing");
+          "an untouched installation has an override and says nothing");
     CHECK(strlen(report.summary) < VM_BOOT_OPTIONS_SUMMARY_CAPACITY,
           "the summary is not terminated inside its buffer");
 }
@@ -549,6 +599,7 @@ int main(void) {
     test_untouched_installation_reaches_the_machine();
     test_fixed_rows();
     test_provisioned_row();
+    test_network_state_is_reconciled_with_the_work_image();
     test_missing_and_short_value_arrays();
     test_every_note_is_usable();
     test_summary_bounds();

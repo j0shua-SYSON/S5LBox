@@ -190,10 +190,12 @@ SNAP_SIZE_GUARD(s5l_stub_t,        56,    "snap_stubs");
  * the last rejected 2D batch inside the already host-only MBX ledger (24).
  * 123312 adds four bounded host-only MBX3D rejection witnesses (4 x 280).
  * They retain transient decoder evidence only and remain outside snap_mach().
+ * 123336 adds uart4's two host-peer callbacks and shared context (24), also
+ * live host wiring and deliberately outside snap_mach().
  * SNAPSHOT_VERSION and the bytes on disk therefore do not move. The size below
  * must be read from the compiler's emitted `.space`, not inferred from source
  * padding. */
-SNAP_SIZE_GUARD(s5l8900_t,         123312, "snap_mach");
+SNAP_SIZE_GUARD(s5l8900_t,         123336, "snap_mach");
 #endif
 
 /* ---------------------------------------------------------------- the IO --- */
@@ -1032,8 +1034,9 @@ static void snap_nor(sn_io_t *io, s5l_nor_t *n) {
  * Deliberately NOT serialised: `cpu` (own section), `bus` (host function
  * pointers and callback contexts — a tool may have interposed on them),
  * `ram` (host allocation), `pre_step_hook`/its context, targets and counters,
- * and the interpreter tick-batching counters, MBX work ledger and WFI pacing
- * callback/context/counters (live host policy/measurement),
+ * and the interpreter tick-batching counters, MBX work ledger, uart4 host-peer
+ * callbacks/context and WFI pacing callback/context/counters (live host
+ * policy/measurement),
  * `nor.data` and `stubs[].regs`/`stubs[].name` (host allocations / string
  * literals). ram_base/ram_size live in GEOM.
  */

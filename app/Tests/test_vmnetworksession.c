@@ -1,0 +1,122 @@
+/* Host-side tests for the iOS PPP/NAT attachment. */
+#include "VMNetworkSession.h"
+
+#include "ppp.h"
+
+#include <stdio.h>
+#include <string.h>
+
+static int g_pass, g_fail;
+#define CHECK(cond, ...) do { \
+    if (cond) g_pass++; \
+    else { g_fail++; printf("  FAIL %s:%d: ", __func__, __LINE__); \
+           printf(__VA_ARGS__); printf("\n"); } \
+} while (0)
+
+static void send_initial_guest_request(s5l8900_t *machine) {
+    ppp_config_t config;
+    ppp_peer_t guest;
+    ppp_config_default(&config);
+    config.magic ^= UINT32_C(0x01010101);
+    ppp_init(&guest, &config);
+    ppp_open(&guest);
+
+    int byte;
+    while ((byte = ppp_output_byte(&guest)) >= 0)
+        machine->bus.write32(machine->bus.ctx,
+                             S5L8900_UART4_BASE + UART_UTXH,
+                             (uint32_t)(uint8_t)byte);
+}
+
+static void test_ppp_attachment_closes_the_uart_loop(void) {
+    s5l8900_t machine;
+    char detail[192];
+    CHECK(s5l8900_init(&machine, 0u, 1u << 20), "machine init failed");
+
+    vm_network_session_t *session = vm_network_session_create(
+        &machine, false, detail, sizeof detail);
+    CHECK(session != NULL, "PPP-only attachment failed: %s", detail);
+    if (!session) {
+        s5l8900_free(&machine);
+        return;
+    }
+
+    vm_network_status_t status;
+    vm_network_session_status(session, &status);
+    CHECK(status.attached && !status.nat_enabled && !status.peer_opened,
+          "fresh status is attached/nat/open=%u/%u/%u",
+          status.attached, status.nat_enabled, status.peer_opened);
+
+    send_initial_guest_request(&machine);
+    vm_network_session_status(session, &status);
+    CHECK(status.peer_opened && status.guest_tx_bytes > 6u,
+          "guest request did not open/feed the peer (%llu bytes)",
+          (unsigned long long)status.guest_tx_bytes);
+    CHECK(machine.uart4.rx_count == 0u,
+          "host bytes entered uart4 inside guest MMIO instead of at a boundary");
+
+    /* No guest instruction is required to poll a peer: the public run-call
+     * boundary itself is the synchronization point. */
+    arm_status_t arm_status = ARM_OK;
+    CHECK(s5l8900_run(&machine, 0u, &arm_status) == 0u &&
+          arm_status == ARM_OK,
+          "zero-retirement service boundary changed CPU status");
+    vm_network_session_status(session, &status);
+    CHECK(status.service_calls == 1u && status.guest_rx_bytes > 0u &&
+          machine.uart4.rx_count > 0u,
+          "host reply was not injected at the run boundary "
+          "(calls/rx/fifo=%llu/%llu/%u)",
+          (unsigned long long)status.service_calls,
+          (unsigned long long)status.guest_rx_bytes,
+          machine.uart4.rx_count);
+
+    vm_network_session_destroy(&session);
+    CHECK(session == NULL && machine.uart4_host_tx == NULL &&
+          machine.uart4_host_service == NULL &&
+          machine.uart4_host_ctx == NULL,
+          "destroy did not detach the uart4 host peer");
+    s5l8900_free(&machine);
+}
+
+static void test_nat_socket_owner_starts_without_a_flow(void) {
+    s5l8900_t machine;
+    char detail[192];
+    CHECK(s5l8900_init(&machine, 0u, 1u << 20), "machine init failed");
+    vm_network_session_t *session = vm_network_session_create(
+        &machine, true, detail, sizeof detail);
+    CHECK(session != NULL, "PPP/NAT attachment failed: %s", detail);
+    if (session) {
+        vm_network_status_t status;
+        vm_network_session_status(session, &status);
+        CHECK(status.attached && status.nat_enabled &&
+              status.host_errors == 0u,
+              "fresh NAT status attached/nat/errors=%u/%u/%llu",
+              status.attached, status.nat_enabled,
+              (unsigned long long)status.host_errors);
+    }
+    vm_network_session_destroy(&session);
+    s5l8900_free(&machine);
+}
+
+static void test_invalid_create_fails_closed(void) {
+    char detail[96];
+    vm_network_session_t *session = vm_network_session_create(
+        NULL, true, detail, sizeof detail);
+    CHECK(session == NULL && detail[0] != '\0',
+          "NULL-machine create did not fail with a reason");
+    vm_network_status_t status;
+    memset(&status, 0xa5, sizeof status);
+    vm_network_session_status(NULL, &status);
+    CHECK(!status.attached && status.guest_tx_bytes == 0u,
+          "NULL status did not produce a clean zero report");
+    vm_network_session_destroy(NULL);
+}
+
+int main(void) {
+    printf("S5LBox iOS PPP/NAT attachment tests\n");
+    test_ppp_attachment_closes_the_uart_loop();
+    test_nat_socket_owner_starts_without_a_flow();
+    test_invalid_create_fails_closed();
+    printf("  %d passed, %d failed\n", g_pass, g_fail);
+    return g_fail ? 1 : 0;
+}

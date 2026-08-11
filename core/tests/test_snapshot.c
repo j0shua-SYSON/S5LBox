@@ -52,6 +52,16 @@ static bool snapshot_active_now_probe(void *ctx, uint64_t *nanoseconds) {
     return true;
 }
 
+static void snapshot_uart4_tx_probe(void *ctx, uint8_t byte) {
+    (void)ctx;
+    (void)byte;
+}
+
+static void snapshot_uart4_service_probe(void *ctx, unsigned retired) {
+    (void)ctx;
+    (void)retired;
+}
+
 /* --------------------------------------------------------------- helpers --- */
 
 /* Save `a` to memory, restore it into a freshly initialised `b`. */
@@ -410,6 +420,14 @@ static void test_device_state_round_trips(void) {
     b->active_clock_fraction = 407u;
     b->active_clock_anchor_valid = true;
 
+    /* uart4's peer is also live frontend wiring. A restore must retain the
+     * destination callbacks and context, never import pointers from `a`. */
+    int uart4_host_context = 0;
+    CHECK(s5l8900_set_uart4_host(
+              b, snapshot_uart4_tx_probe, snapshot_uart4_service_probe,
+              &uart4_host_context),
+          "could not install destination uart4 host peer");
+
     CHECK(roundtrip(a, b), "device round trip");
     CHECK(b->mbx_telemetry.candidates_2d == 201u &&
           b->mbx_telemetry.completed_2d == 202u &&
@@ -443,6 +461,10 @@ static void test_device_state_round_trips(void) {
           !b->active_clock_anchor_valid,
           "snapshot restore changed active host policy/evidence or retained "
           "a stale anchor");
+    CHECK(b->uart4_host_tx == snapshot_uart4_tx_probe &&
+          b->uart4_host_service == snapshot_uart4_service_probe &&
+          b->uart4_host_ctx == &uart4_host_context,
+          "snapshot restore changed the live uart4 host peer");
 
     SAME(uart0.ulcon); SAME(uart0.ucon); SAME(uart0.ufcon);
     SAME(uart0.umcon); SAME(uart0.ubrdiv); SAME(uart0.tx_len);

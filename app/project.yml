@@ -80,6 +80,10 @@ targets:
         group: core
       - path: ../tools/rootfs_work.c
         group: core
+      # Ordinary nonblocking TCP/UDP sockets behind the portable guest NAT.
+      # No tunnel, raw socket, private API, entitlement, or background daemon.
+      - path: ../tools/net_host.c
+        group: core
     # Linked explicitly rather than relying on module auto-linking: the display
     # path calls into CoreGraphics (CGImageCreate) and QuartzCore (CALayer
     # filters) directly, and "it happened to link via UIKit" is not something to

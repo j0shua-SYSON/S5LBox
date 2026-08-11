@@ -397,6 +397,7 @@ add_executable(test_vmfirmwareboot
     ../app/Tests/test_vmfirmwareboot.c
     ../app/Sources/VMFrameTelemetry.c
     ../app/Sources/VMFirmwareBoot.c
+    ../app/Sources/VMNetworkSession.c
     ../app/Sources/VMResumeCheckpoint.c
     ../app/Sources/VMSnapshotCow.c
     ../app/Sources/VMBootOptions.c
@@ -404,7 +405,7 @@ add_executable(test_vmfirmwareboot
 )
 target_include_directories(test_vmfirmwareboot PRIVATE ../app/Sources ../tools)
 target_link_libraries(test_vmfirmwareboot PRIVATE
-    emucore host_ios3_bringup_gate host_file_block host_rootfs_work)
+    emucore host_ios3_bringup_gate host_file_block host_rootfs_work nethost)
 set_target_properties(test_vmfirmwareboot PROPERTIES
     C_STANDARD 11
     C_STANDARD_REQUIRED YES
@@ -420,6 +421,27 @@ target_compile_definitions(test_vmfirmwareboot PRIVATE
 add_test(NAME app_firmware_boot COMMAND test_vmfirmwareboot)
 set_tests_properties(app_firmware_boot PROPERTIES
     WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+
+# The phone's uart4-to-PPP/NAT join, kept in portable C so a host test can pin
+# the synchronization boundary and prove that a real peer keeps receiving
+# after uart4's deliberately bounded diagnostic capture is full.
+add_executable(test_vmnetworksession
+    ../app/Tests/test_vmnetworksession.c
+    ../app/Sources/VMNetworkSession.c
+)
+target_include_directories(test_vmnetworksession PRIVATE ../app/Sources ../tools)
+target_link_libraries(test_vmnetworksession PRIVATE nethost emucore)
+set_target_properties(test_vmnetworksession PROPERTIES
+    C_STANDARD 11
+    C_STANDARD_REQUIRED YES
+    C_EXTENSIONS NO)
+if(MSVC)
+    target_compile_options(test_vmnetworksession PRIVATE /W4 /WX)
+else()
+    target_compile_options(test_vmnetworksession PRIVATE
+        -Wall -Wextra -Werror -pedantic -Wformat=2 -Wshadow)
+endif()
+add_test(NAME app_network_session COMMAND test_vmnetworksession)
 
 # The single automatic resume point is a two-payload transaction whose
 # non-empty marker must be published last. It needs no firmware: a small core
@@ -604,6 +626,7 @@ add_executable(test_vminstancepaths
     ../app/Sources/VMInstancePaths.c
     ../app/Sources/VMInstances.c
     ../app/Sources/VMFirmwareBoot.c
+    ../app/Sources/VMNetworkSession.c
     ../app/Sources/VMResumeCheckpoint.c
     ../app/Sources/VMSnapshotCow.c
     ../app/Sources/VMBootOptions.c
@@ -611,7 +634,7 @@ add_executable(test_vminstancepaths
 )
 target_include_directories(test_vminstancepaths PRIVATE ../app/Sources ../tools)
 target_link_libraries(test_vminstancepaths PRIVATE
-    emucore host_ios3_bringup_gate host_file_block host_rootfs_work)
+    emucore host_ios3_bringup_gate host_file_block host_rootfs_work nethost)
 set_target_properties(test_vminstancepaths PROPERTIES
     C_STANDARD 11
     C_STANDARD_REQUIRED YES

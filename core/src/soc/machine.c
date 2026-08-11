@@ -465,7 +465,10 @@ static void bus_write(void *ctx, uint32_t addr, uint32_t val, unsigned bytes) {
     if ((bytes == 1u || bytes == 2u || bytes == 4u) && (addr & 3u) == 0u &&
         in_dev(addr, bytes, S5L8900_UART4_BASE)) {
         note_device(m, addr, val, true);
-        s5l_uart_write(&m->uart4, addr - S5L8900_UART4_BASE, val);
+        uint32_t off = addr - S5L8900_UART4_BASE;
+        s5l_uart_write(&m->uart4, off, val);
+        if (off == UART_UTXH && m->uart4_host_tx)
+            m->uart4_host_tx(m->uart4_host_ctx, (uint8_t)val);
         return;
     }
     if (mmio_word(addr, bytes, S5L8900_VIC0_BASE, S5L8900_DEV_SIZE)) {
@@ -710,6 +713,26 @@ bool s5l8900_set_active_host_clock(s5l8900_t *m,
     m->active_clock_failures = 0u;
     m->active_clock_anchor_valid = false;
     if (now) m->active_host_now = now;
+    return true;
+}
+
+bool s5l8900_set_uart4_host(s5l8900_t *m, s5l_uart4_host_tx_fn tx,
+                            s5l_uart4_host_service_fn service, void *ctx) {
+    if (!m) return false;
+    if (!tx && !service) {
+        if (ctx) return false;
+        /* Clear the callable fields first, then their borrowed context. */
+        m->uart4_host_tx = NULL;
+        m->uart4_host_service = NULL;
+        m->uart4_host_ctx = NULL;
+        return true;
+    }
+    if (!tx || !service) return false;
+
+    /* Publish the context before either callback becomes callable. */
+    m->uart4_host_ctx = ctx;
+    m->uart4_host_tx = tx;
+    m->uart4_host_service = service;
     return true;
 }
 
@@ -2168,6 +2191,8 @@ unsigned s5l8900_run(s5l8900_t *m, unsigned max_steps, arm_status_t *status) {
     if (compact_pc_profile_slice)
         s5l8900_static_a64_compact_raw_pc_profile_slice_end(m);
 #endif
+    if (m->uart4_host_service)
+        m->uart4_host_service(m->uart4_host_ctx, n);
     if (status) *status = st;
     return n;
 }

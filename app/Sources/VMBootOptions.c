@@ -26,6 +26,10 @@ typedef enum {
     MAP_PROVISION_CA_SOFTWARE_RENDER,
     /* rootfs_work_create()'s activation entries, likewise at image time. */
     MAP_PROVISION_ACTIVATE,
+    /* The stock pppd launchd job, written into a new work image. */
+    MAP_PROVISION_PPP,
+    /* The live host NAT, conditional on that recorded PPP job. */
+    MAP_RUNTIME_NAT,
     /* A device-tree nub. Set means "leave it matched"; clear un-matches it
      * through s5l_bringup_request_t::unmatch. */
     MAP_UNMATCH,
@@ -38,7 +42,7 @@ typedef enum {
 static const struct {
     const char *name;             /* VMOptions.c's spelling, exactly */
     unsigned char kind;           /* vm_boot_map_kind_t              */
-    const char *note;             /* NULL only for the two applied rows */
+    const char *note;             /* optional user-facing qualification */
     const char *path;             /* MAP_UNMATCH only: the node to strike */
 } VM_BOOT_MAP[] = {
     /*
@@ -160,29 +164,10 @@ static const struct {
       "way to import one yet, and the code-signing half it depends on has not "
       "been demonstrated.", NULL },
 
-    /*
-     * rootfs_work_options_t::ppp_launchd_job would give the guest its half.
-     * The host half -- a PPP endpoint on the far side of the emulated uart4 --
-     * is not wired into this app, and a guest pppd talking to a UART nobody
-     * answers is the declared-but-silent-device failure this project already
-     * refuses for the baseband. So it is offered as neither.
-     */
-    { "ppp", MAP_FIXED_OFF,
-      "Not offered here. The guest half could be written into the work image, "
-      "but nothing in this app terminates PPP on the host side, so the guest's "
-      "pppd would talk to a UART nobody answers.", NULL },
-    /*
-     * The NAT itself is portable -- core/src/net/net.c has no socket in it and
-     * tools/net_host.c needs nothing privileged -- so this one is fixed off
-     * only because the thing that would carry its datagrams is. It becomes a
-     * real toggle here on the day the app terminates PPP, and not before:
-     * offering a route to the internet with no link under it would be the
-     * declared-but-silent-device failure the row above refuses.
-     */
-    { "nat", MAP_FIXED_OFF,
-      "Not offered here, because --ppp above is not. The NAT is what would "
-      "answer the guest's datagrams, and without the link there are none.",
-      NULL }
+    { "ppp", MAP_PROVISION_PPP,
+      "Written into a fresh work image; changing it later cannot rewrite an "
+      "existing guest filesystem.", NULL },
+    { "nat", MAP_RUNTIME_NAT, NULL, NULL }
 };
 
 #define VM_BOOT_MAP_COUNT \
@@ -233,6 +218,66 @@ static void append(char *out, size_t cap, size_t *used, const char *text) {
     if (written < 0) return;
     *used += (size_t)written;
     if (*used >= cap) *used = cap - 1u;
+}
+
+static void recount_and_summarize(vm_boot_options_report_t *report) {
+    if (!report) return;
+    report->applied = 0u;
+    report->provisioned = 0u;
+    report->ignored = 0u;
+    report->overridden = 0u;
+    report->summary[0] = '\0';
+
+    unsigned rows = report->count;
+    if (rows > VM_BOOT_OPTION_MAX) rows = VM_BOOT_OPTION_MAX;
+    for (unsigned i = 0u; i < rows; i++) {
+        switch ((vm_boot_option_outcome_t)report->row[i].outcome) {
+            case VM_BOOT_OPTION_APPLIED: report->applied++; break;
+            case VM_BOOT_OPTION_PROVISIONED: report->provisioned++; break;
+            case VM_BOOT_OPTION_IGNORED: report->ignored++; break;
+        }
+        if (report->row[i].effective != report->row[i].requested)
+            report->overridden++;
+    }
+
+    /* Two clauses, both optional, because they are different problems: a
+     * switch this start contradicts, and a switch fixed inside the image. */
+    size_t used = 0u;
+    if (report->overridden > 0u) {
+        char head[96];
+        (void)snprintf(head, sizeof head,
+                       "%u switch%s not applied as set: ",
+                       report->overridden,
+                       report->overridden == 1u ? " is" : "es are");
+        append(report->summary, sizeof report->summary, &used, head);
+        unsigned printed = 0u;
+        for (unsigned i = 0u; i < rows; i++) {
+            if (report->row[i].effective == report->row[i].requested) continue;
+            const vm_option_t *option = vm_option_at(i);
+            if (printed++) append(report->summary, sizeof report->summary,
+                                  &used, ", ");
+            append(report->summary, sizeof report->summary, &used,
+                   option && option->name ? option->name : "?");
+        }
+        append(report->summary, sizeof report->summary, &used, ".");
+    }
+    if (report->provisioned > 0u) {
+        if (used > 0u)
+            append(report->summary, sizeof report->summary, &used, " ");
+        append(report->summary, sizeof report->summary, &used,
+               "Fixed when the work image was made: ");
+        unsigned printed = 0u;
+        for (unsigned i = 0u; i < rows; i++) {
+            if (report->row[i].outcome != VM_BOOT_OPTION_PROVISIONED) continue;
+            const vm_option_t *option = vm_option_at(i);
+            if (printed++) append(report->summary, sizeof report->summary,
+                                  &used, ", ");
+            append(report->summary, sizeof report->summary, &used,
+                   option && option->name ? option->name : "?");
+        }
+        append(report->summary, sizeof report->summary, &used, ".");
+    }
+    report->summary[sizeof report->summary - 1u] = '\0';
 }
 
 void vm_boot_options_apply(const bool *values, unsigned count,
@@ -300,10 +345,22 @@ void vm_boot_options_apply(const bool *values, unsigned count,
                 break;
             case MAP_PROVISION_ACTIVATE:
             case MAP_PROVISION_CA_SOFTWARE_RENDER:
+            case MAP_PROVISION_PPP:
                 row->outcome = VM_BOOT_OPTION_PROVISIONED;
                 row->effective = row->requested;
                 report->provisioned++;
                 break;
+            case MAP_RUNTIME_NAT: {
+                int ppp = vm_option_index("ppp");
+                bool link = ppp >= 0 &&
+                    requested_value(values, count, (unsigned)ppp);
+                row->outcome = VM_BOOT_OPTION_APPLIED;
+                row->effective = row->requested && link;
+                row->note = link ? NULL :
+                    "Requires PPP in this machine's work image.";
+                report->applied++;
+                break;
+            }
             case MAP_FIXED_ON:
                 row->outcome = VM_BOOT_OPTION_IGNORED;
                 row->effective = true;
@@ -330,45 +387,7 @@ void vm_boot_options_apply(const bool *values, unsigned count,
         request->unmatch_count = report->unmatch_count;
     }
 
-    /* The summary. Two clauses, both optional, because they are two different
-     * problems: a switch the machine contradicts, and a switch that needs the
-     * work image remade before it means anything. */
-    size_t used = 0u;
-    if (report->overridden > 0u) {
-        char head[96];
-        (void)snprintf(head, sizeof head,
-                       "%u switch%s not applied as set: ",
-                       report->overridden,
-                       report->overridden == 1u ? " is" : "es are");
-        append(report->summary, sizeof report->summary, &used, head);
-        unsigned printed = 0u;
-        for (unsigned i = 0; i < rows; i++) {
-            if (report->row[i].effective == report->row[i].requested) continue;
-            const vm_option_t *option = vm_option_at(i);
-            if (printed++) append(report->summary, sizeof report->summary,
-                                  &used, ", ");
-            append(report->summary, sizeof report->summary, &used,
-                   option && option->name ? option->name : "?");
-        }
-        append(report->summary, sizeof report->summary, &used, ".");
-    }
-    if (report->provisioned > 0u) {
-        if (used > 0u)
-            append(report->summary, sizeof report->summary, &used, " ");
-        append(report->summary, sizeof report->summary, &used,
-               "Fixed when the work image was made: ");
-        unsigned printed = 0u;
-        for (unsigned i = 0; i < rows; i++) {
-            if (report->row[i].outcome != VM_BOOT_OPTION_PROVISIONED) continue;
-            const vm_option_t *option = vm_option_at(i);
-            if (printed++) append(report->summary, sizeof report->summary,
-                                  &used, ", ");
-            append(report->summary, sizeof report->summary, &used,
-                   option && option->name ? option->name : "?");
-        }
-        append(report->summary, sizeof report->summary, &used, ".");
-    }
-    report->summary[sizeof report->summary - 1u] = '\0';
+    recount_and_summarize(report);
 }
 
 void vm_boot_options_for_provisioning(const bool *values, unsigned count,
@@ -383,4 +402,37 @@ void vm_boot_options_for_provisioning(const bool *values, unsigned count,
     index = vm_option_index("activate");
     if (index >= 0)
         out->activate = requested_value(values, count, (unsigned)index);
+
+    index = vm_option_index("ppp");
+    if (index >= 0)
+        out->ppp = requested_value(values, count, (unsigned)index);
+}
+
+void vm_boot_options_reconcile_network(vm_boot_options_report_t *report,
+                                       bool ppp_provisioned) {
+    if (!report) return;
+    int ppp = vm_option_index("ppp");
+    int nat = vm_option_index("nat");
+    if (ppp >= 0 && (unsigned)ppp < report->count) {
+        vm_boot_option_status_t *row = &report->row[ppp];
+        row->outcome = VM_BOOT_OPTION_PROVISIONED;
+        row->effective = ppp_provisioned;
+        if (row->requested == ppp_provisioned) {
+            row->note = "Recorded in this work image when it was made.";
+        } else if (ppp_provisioned) {
+            row->note = "This work image contains the PPP job; remaking the "
+                        "image is required to remove it.";
+        } else {
+            row->note = "This work image was made without PPP; remaking the "
+                        "image is required to add it.";
+        }
+    }
+    if (nat >= 0 && (unsigned)nat < report->count) {
+        vm_boot_option_status_t *row = &report->row[nat];
+        row->outcome = VM_BOOT_OPTION_APPLIED;
+        row->effective = row->requested && ppp_provisioned;
+        row->note = ppp_provisioned ? NULL :
+            "No host route is attached because this work image has no PPP job.";
+    }
+    recount_and_summarize(report);
 }

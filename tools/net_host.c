@@ -131,6 +131,24 @@ static bool set_nonblocking(sock_t fd) {
 #endif
 }
 
+/*
+ * A write to a TCP peer that closed can raise SIGPIPE on Darwin and terminate
+ * the whole app before send() returns an error. Linux can suppress it per send
+ * with MSG_NOSIGNAL; Apple platforms expose the equivalent socket option.
+ * Refuse an Apple socket if that guard cannot be installed: a dead guest flow
+ * must become a counted network error, never a host-process crash.
+ */
+static bool suppress_sigpipe(sock_t fd) {
+#if defined(__APPLE__) && defined(SO_NOSIGPIPE)
+    int enabled = 1;
+    return setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE,
+                      &enabled, (socklen_t)sizeof enabled) == 0;
+#else
+    (void)fd;
+    return true;
+#endif
+}
+
 static host_sock_t *slot(net_host_t *h, int handle) {
     if (!h || handle < 0 || handle >= (int)NET_HOST_MAX_SOCKETS) return NULL;
     return h->s[handle].used ? &h->s[handle] : NULL;
@@ -163,7 +181,7 @@ static int h_open(void *ctx, unsigned proto, uint32_t ip, uint16_t port) {
     int type = (proto == NET_PROTO_TCP) ? SOCK_STREAM : SOCK_DGRAM;
     sock_t fd = socket(AF_INET, type, 0);
     if (fd == SOCK_INVALID) { note_error(h); h->stats.open_failures++; return -1; }
-    if (!set_nonblocking(fd)) {
+    if (!set_nonblocking(fd) || !suppress_sigpipe(fd)) {
         note_error(h); sock_close(fd); h->stats.open_failures++; return -1;
     }
 
@@ -252,7 +270,11 @@ static int h_send(void *ctx, int handle, const uint8_t *data, size_t n) {
     if (!s || s->failed) return -1;
     if (!n) return 0;
 
-    int w = (int)send(s->fd, (const char *)data, (int)n, 0);
+    int flags = 0;
+#if !defined(_WIN32) && defined(MSG_NOSIGNAL)
+    flags = MSG_NOSIGNAL;
+#endif
+    int w = (int)send(s->fd, (const char *)data, (int)n, flags);
     if (w >= 0) { h->stats.bytes_out += (uint64_t)w; return w; }
 
     int e = sock_errno();

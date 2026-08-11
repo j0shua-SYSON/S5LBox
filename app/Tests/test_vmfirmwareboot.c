@@ -326,6 +326,12 @@ static void test_saved_state_restore_fixture(void) {
     FILE *active_clock_off_file = fopen(active_clock_off_marker, "rb");
     bool expect_active_clock_off = active_clock_off_file != NULL;
     if (active_clock_off_file) fclose(active_clock_off_file);
+    char ppp_marker[VM_FW_BOOT_PATH_CAPACITY + 64u];
+    snprintf(ppp_marker, sizeof ppp_marker, "%s/%s", fixture,
+             VM_FW_BOOT_PPP_FILE);
+    FILE *ppp_file = fopen(ppp_marker, "rb");
+    bool expect_ppp = ppp_file && fgetc(ppp_file) != EOF;
+    if (ppp_file) fclose(ppp_file);
 
     bool values[VM_BOOT_OPTION_MAX];
     for (unsigned i = 0; i < VM_BOOT_OPTION_MAX; i++) values[i] = false;
@@ -370,6 +376,24 @@ static void test_saved_state_restore_fixture(void) {
               "restored active scene has no CLCD window");
         CHECK(mentions(report.summary, "restored"),
               "restore summary hides what happened: %s", report.summary);
+        int ppp = vm_option_index("ppp");
+        int nat = vm_option_index("nat");
+        CHECK(ppp >= 0 && nat >= 0,
+              "network option rows are absent from the restore report");
+        if (ppp >= 0 && nat >= 0) {
+            CHECK(report.options.row[ppp].effective == expect_ppp,
+                  "PPP report disagrees with this work image's record");
+            CHECK(report.options.row[nat].effective == expect_ppp,
+                  "NAT did not follow the requested-on switch and recorded "
+                  "PPP state");
+        }
+        CHECK((machine.uart4_host_tx != NULL) == expect_ppp &&
+              (machine.uart4_host_service != NULL) == expect_ppp &&
+              (machine.uart4_host_ctx != NULL) == expect_ppp,
+              "the live uart4 host peer disagrees with the PPP record");
+        CHECK(mentions(report.summary, ", PPP/NAT") == expect_ppp,
+              "the restore summary hides or invents PPP/NAT: %s",
+              report.summary);
 #if defined(S5LBOX_IOS_ACTIVE_REALTIME_CLOCK)
         CHECK((machine.active_host_now == NULL) == expect_active_clock_off,
               "active-clock marker policy disagrees with the machine");
@@ -479,7 +503,11 @@ int main(void) {
     remove_file(VM_FW_BOOT_DEVICETREE_FILE);
     remove_file(VM_FW_BOOT_ROOTFS_FILE);
     remove_file(VM_FW_BOOT_WORK_FILE);
+    remove_file(VM_FW_BOOT_PPP_FILE);
+    remove_file(VM_FW_BOOT_PPP_TMP);
     remove_at(WORKDIR, VM_FW_BOOT_WORK_FILE);
+    remove_at(WORKDIR, VM_FW_BOOT_PPP_FILE);
+    remove_at(WORKDIR, VM_FW_BOOT_PPP_TMP);
 
     /* Nothing imported at all. */
     vm_firmware_boot_probe(&SHARED, &state);
@@ -743,7 +771,11 @@ int main(void) {
     remove_file(VM_FW_BOOT_DEVICETREE_FILE);
     remove_file(VM_FW_BOOT_ROOTFS_FILE);
     remove_file(VM_FW_BOOT_WORK_FILE);
+    remove_file(VM_FW_BOOT_PPP_FILE);
+    remove_file(VM_FW_BOOT_PPP_TMP);
     remove_at(WORKDIR, VM_FW_BOOT_WORK_FILE);
+    remove_at(WORKDIR, VM_FW_BOOT_PPP_FILE);
+    remove_at(WORKDIR, VM_FW_BOOT_PPP_TMP);
 
     printf("== vm firmware boot: %u checks, %u failure(s) ==\n",
            checks, failures);

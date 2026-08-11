@@ -110,6 +110,27 @@ static const uint8_t LCP_CONFREQ_PREFIX[6] = {
     0x7eu, 0xffu, 0x7du, 0x23u, 0xc0u, 0x21u
 };
 
+typedef struct {
+    uint64_t tx_calls;
+    uint64_t service_calls;
+    uint64_t retired;
+    uint8_t  last_tx;
+} uart4_host_probe_t;
+
+static void uart4_host_tx_probe(void *ctx, uint8_t byte) {
+    uart4_host_probe_t *probe = (uart4_host_probe_t *)ctx;
+    if (!probe) return;
+    probe->tx_calls++;
+    probe->last_tx = byte;
+}
+
+static void uart4_host_service_probe(void *ctx, unsigned retired) {
+    uart4_host_probe_t *probe = (uart4_host_probe_t *)ctx;
+    if (!probe) return;
+    probe->service_calls++;
+    probe->retired += retired;
+}
+
 /*
  * UCON's receive-interrupt enable, and the driver's own filter mask.
  *
@@ -373,6 +394,71 @@ static void test_uart4_registers_route_through_the_bus(void) {
     (void)m.bus.read32(m.bus.ctx, S5L8900_UART4_BASE + S5L8900_DEV_SIZE);
     CHECK(m.unmapped_reads == unmapped_before + 1u,
           "the word past uart4's window was decoded as uart4");
+
+    s5l8900_free(&m);
+}
+
+static void test_host_peer_sees_the_live_stream_and_run_boundary(void) {
+    static const uint32_t code[] = {
+        UINT32_C(0xe1a00000), /* mov r0, r0 */
+        UINT32_C(0xe1a00000), /* mov r0, r0 */
+    };
+    s5l8900_t m;
+    uart4_host_probe_t probe = {0};
+    CHECK(s5l8900_init(&m, 0, 1u << 20), "machine init failed");
+
+    CHECK(!s5l8900_set_uart4_host(NULL, uart4_host_tx_probe,
+                                  uart4_host_service_probe, &probe),
+          "a NULL machine accepted a uart4 host peer");
+    CHECK(!s5l8900_set_uart4_host(&m, uart4_host_tx_probe, NULL, &probe),
+          "a partial uart4 host peer was accepted");
+    CHECK(s5l8900_set_uart4_host(&m, uart4_host_tx_probe,
+                                 uart4_host_service_probe, &probe),
+          "a complete uart4 host peer was refused");
+
+    /* Configuration and uart0 traffic are not bytes on this peer's wire. */
+    m.bus.write32(m.bus.ctx, S5L8900_UART4_BASE + UART_UCON, 0x1234u);
+    m.bus.write32(m.bus.ctx, S5L8900_UART0_BASE + UART_UTXH, 0x55u);
+    CHECK(probe.tx_calls == 0u,
+          "non-uart4-UTXH traffic reached the peer (%llu calls)",
+          (unsigned long long)probe.tx_calls);
+
+    /* The diagnostic capture intentionally stops at its first 8191 bytes.
+     * A real peer cannot: a long-lived network must keep receiving the live
+     * stream after that evidence buffer is full. */
+    const unsigned sent = UART_TX_BUFFER + 3u;
+    for (unsigned i = 0; i < sent; i++)
+        m.bus.write32(m.bus.ctx, S5L8900_UART4_BASE + UART_UTXH, i);
+    CHECK(probe.tx_calls == sent && probe.last_tx == (uint8_t)(sent - 1u),
+          "host peer saw %llu bytes/last %02x, expected %u/%02x",
+          (unsigned long long)probe.tx_calls, probe.last_tx, sent,
+          (unsigned)((uint8_t)(sent - 1u)));
+    CHECK(m.uart4.tx_len == UART_TX_BUFFER - 1u,
+          "attaching a host changed the bounded diagnostic capture (%zu)",
+          m.uart4.tx_len);
+
+    s5l8900_load(&m, 0u, code, sizeof code);
+    m.cpu.r[15] = 0u;
+    arm_status_t status = ARM_OK;
+    CHECK(s5l8900_run(&m, 2u, &status) == 2u && status == ARM_OK,
+          "two-instruction host-service slice did not run");
+    CHECK(probe.service_calls == 1u && probe.retired == 2u,
+          "host service saw %llu calls/%llu retired, expected 1/2",
+          (unsigned long long)probe.service_calls,
+          (unsigned long long)probe.retired);
+
+    CHECK(!s5l8900_set_uart4_host(&m, NULL, NULL, &probe),
+          "detach with a live context was accepted");
+    CHECK(m.uart4_host_tx == uart4_host_tx_probe &&
+          m.uart4_host_service == uart4_host_service_probe &&
+          m.uart4_host_ctx == &probe,
+          "a rejected detach changed the live peer");
+    CHECK(s5l8900_set_uart4_host(&m, NULL, NULL, NULL),
+          "complete uart4 host detach was refused");
+    m.bus.write32(m.bus.ctx, S5L8900_UART4_BASE + UART_UTXH, 0xa5u);
+    (void)s5l8900_run(&m, 0u, &status);
+    CHECK(probe.tx_calls == sent && probe.service_calls == 1u,
+          "a detached uart4 host was still called");
 
     s5l8900_free(&m);
 }
@@ -1301,6 +1387,7 @@ int main(void) {
     test_machine_decodes_uart4_as_its_own_window();
     test_the_two_captures_do_not_alias();
     test_uart4_registers_route_through_the_bus();
+    test_host_peer_sees_the_live_stream_and_run_boundary();
     test_transmitting_alone_raises_no_interrupt_line();
     test_no_host_peer_means_no_receive_anything();
     test_receive_fifo_is_ordered_and_bounded();

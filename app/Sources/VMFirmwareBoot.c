@@ -5,6 +5,7 @@
 #include "md_snapshot.h"
 #include "snapshot.h"
 #include "VMFrameTelemetry.h"
+#include "VMNetworkSession.h"
 #include "VMSnapshotCow.h"
 #include "VMFirmwareHLE.h"
 #include "VMResumeCheckpoint.h"
@@ -36,6 +37,7 @@ struct vm_firmware_boot {
     bool              overlay_armed;
     char              work_directory[VM_FW_BOOT_PATH_CAPACITY];
     uint64_t          media_size;
+    vm_network_session_t *network;
 #if defined(S5LBOX_IOS3_HLE_EXPERIMENT)
     /* Pointer identity only. VMEngine frees the machine before this owner;
      * vm_firmware_hle_release() deliberately never dereferences it. */
@@ -139,6 +141,53 @@ static void set_detail(char *out, size_t capacity, const char *text) {
     if (!out || !capacity) return;
     (void)snprintf(out, capacity, "%s", text ? text : "");
     out[capacity - 1u] = '\0';
+}
+
+static bool write_ppp_marker(const vm_firmware_boot_paths_t *paths,
+                             bool enabled, char *detail,
+                             size_t detail_capacity) {
+    char marker[VM_FW_BOOT_PATH_CAPACITY + 64u];
+    char temporary[VM_FW_BOOT_PATH_CAPACITY + 64u];
+    if (!paths ||
+        !join_path(marker, sizeof marker, paths->work,
+                   VM_FW_BOOT_PPP_FILE) ||
+        !join_path(temporary, sizeof temporary, paths->work,
+                   VM_FW_BOOT_PPP_TMP)) {
+        set_detail(detail, detail_capacity,
+                   "The guest-network record path is too long to use.");
+        return false;
+    }
+
+    /* This is called only while making a new/incomplete work image. A stale
+     * record from an interrupted attempt must follow the current request. */
+    (void)remove(temporary);
+    (void)remove(marker);
+    if (!enabled) return true;
+
+    static const char contents[] = "s5lbox-ppp-provision 1\n";
+    FILE *file = fopen(temporary, "wb");
+    if (!file) {
+        set_detail(detail, detail_capacity,
+                   "The guest-network record could not be created.");
+        return false;
+    }
+    bool ok = fwrite(contents, 1u, sizeof contents - 1u, file) ==
+              sizeof contents - 1u;
+    if (fflush(file) != 0) ok = false;
+    if (fclose(file) != 0) ok = false;
+    if (!ok) {
+        (void)remove(temporary);
+        set_detail(detail, detail_capacity,
+                   "The guest-network record could not be written.");
+        return false;
+    }
+    if (rename(temporary, marker) != 0) {
+        (void)remove(temporary);
+        set_detail(detail, detail_capacity,
+                   "The guest-network record could not be published.");
+        return false;
+    }
+    return true;
 }
 
 /*
@@ -505,6 +554,7 @@ vm_firmware_checkpoint_status_t vm_firmware_boot_save_resume(
 void vm_firmware_boot_destroy(vm_firmware_boot_t **slot) {
     if (!slot || !*slot) return;
     vm_firmware_boot_t *boot = *slot;
+    vm_network_session_destroy(&boot->network);
 #if defined(S5LBOX_IOS3_HLE_EXPERIMENT)
     if (boot->hle_machine)
         vm_firmware_hle_release(boot->hle_machine);
@@ -834,6 +884,21 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
      */
     vm_boot_options_apply(options, option_count, &request, &report->options);
 
+    char ppp_marker[VM_FW_BOOT_PATH_CAPACITY + 64u];
+    if (!join_path(ppp_marker, sizeof ppp_marker, paths->work,
+                   VM_FW_BOOT_PPP_FILE)) {
+        free(kernel);
+        free(tree);
+        (void)file_block_close(boot->media);
+        set_detail(report->detail, sizeof report->detail,
+                   "The guest-network record path is too long to use.");
+        set_detail(report->summary, sizeof report->summary,
+                   "network path unavailable");
+        return false;
+    }
+    bool ppp_provisioned = file_size(ppp_marker) > 0u;
+    vm_boot_options_reconcile_network(&report->options, ppp_provisioned);
+
     s5l_bringup_status_t status =
         s5l_bringup(machine, &request, boot->bridges, &report->bringup);
 
@@ -909,6 +974,27 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
         return false;
     }
 #endif
+
+    if (ppp_provisioned) {
+        int nat_index = vm_option_index("nat");
+        bool nat_enabled = nat_index >= 0 &&
+            (unsigned)nat_index < report->options.count &&
+            report->options.row[nat_index].effective;
+        char network_detail[VM_FW_BOOT_DETAIL_CAPACITY] = {0};
+        boot->network = vm_network_session_create(
+            machine, nat_enabled, network_detail, sizeof network_detail);
+        if (!boot->network) {
+            (void)file_block_close(boot->media);
+            (void)snprintf(report->detail, sizeof report->detail,
+                           "Guest networking could not start: %s",
+                           network_detail[0] ? network_detail :
+                               "the host peer was unavailable");
+            report->detail[sizeof report->detail - 1u] = '\0';
+            set_detail(report->summary, sizeof report->summary,
+                       "guest networking unavailable");
+            return false;
+        }
+    }
 
 #if defined(S5LBOX_IOS3_HLE_EXPERIMENT)
     /*
@@ -1002,6 +1088,17 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
                        active_clock_off ? ", active-clock-off control" : "");
     }
 #endif
+    if (ppp_provisioned) {
+        int nat_index = vm_option_index("nat");
+        bool nat_enabled = nat_index >= 0 &&
+            (unsigned)nat_index < report->options.count &&
+            report->options.row[nat_index].effective;
+        size_t used = strlen(report->summary);
+        if (used < sizeof report->summary)
+            (void)snprintf(report->summary + used,
+                           sizeof report->summary - used,
+                           "%s", nat_enabled ? ", PPP/NAT" : ", PPP");
+    }
     report->summary[sizeof report->summary - 1u] = '\0';
     /* No failure remains after this point. Execution observations begin only
      * when the caller enters its run loop, so this is the exact boundary at
@@ -1054,6 +1151,7 @@ bool vm_firmware_boot_provision(const vm_firmware_boot_paths_t *paths,
      * is where that is said to the user.
      */
     options.ca_software_render = wanted.ca_software_render;
+    options.ppp_launchd_job = wanted.ppp;
 
     /*
      * ACTIVATION, which the app used to describe as unimplemented while the
@@ -1099,9 +1197,10 @@ bool vm_firmware_boot_provision(const vm_firmware_boot_paths_t *paths,
      * data loss dressed up as repair. The size test is the same one
      * vm_firmware_boot_probe() uses to decide the image is real.
      */
+    uint64_t source_size = file_size(source_path);
     uint64_t existing = file_size(work_path);
+    bool creating = existing == 0u;
     if (existing > 0u) {
-        uint64_t source_size = file_size(source_path);
         if (source_size > 0u && existing < source_size) {
             if (remove(work_path) != 0) {
                 (void)snprintf(detail, detail_capacity,
@@ -1110,8 +1209,13 @@ bool vm_firmware_boot_provision(const vm_firmware_boot_paths_t *paths,
                                "again.", VM_FW_BOOT_WORK_FILE);
                 return false;
             }
+            creating = true;
         }
     }
+
+    if (creating &&
+        !write_ppp_marker(paths, wanted.ppp, detail, detail_capacity))
+        return false;
 
     /* The caller's bar. NULL is fine and means nobody is watching. */
     options.progress     = progress;
