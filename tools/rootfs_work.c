@@ -29,6 +29,7 @@
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <winioctl.h>
 #include <process.h>
 #else
 #include <fcntl.h>
@@ -765,6 +766,16 @@ static bool host_file_resize(host_file_t *file, uint64_t size,
     return true;
 }
 
+static void host_file_allow_sparse_extension(host_file_t *file) {
+    DWORD returned = 0u;
+
+    /* A sparse-capable destination avoids physically allocating a multi-GiB
+     * zero tail. Unsupported filesystems remain correct: SetEndOfFile below
+     * is still the fallback, only less space-efficient. */
+    (void)DeviceIoControl(file->handle, FSCTL_SET_SPARSE, NULL, 0u, NULL, 0u,
+                          &returned, NULL);
+}
+
 static bool host_file_sync(host_file_t *file, int *system_error) {
     if (FlushFileBuffers(file->handle))
         return true;
@@ -1363,6 +1374,12 @@ static bool host_file_resize(host_file_t *file, uint64_t size,
         return true;
     *system_error = errno;
     return false;
+}
+
+static void host_file_allow_sparse_extension(host_file_t *file) {
+    (void)file;
+    /* ftruncate creates an unwritten hole on the iOS/macOS and Unix filesystems
+     * this backend targets. No host-specific flag is required. */
 }
 
 static bool host_file_sync(host_file_t *file, int *system_error) {
@@ -1964,9 +1981,10 @@ static bool checked_write(host_file_t *file, uint64_t file_size,
     return true;
 }
 
-static bool allocation_physical_offset(const hfs_volume_t *volume,
-                                       uint64_t logical_offset,
-                                       uint64_t *physical_offset) {
+static bool allocation_physical_span(const hfs_volume_t *volume,
+                                     uint64_t logical_offset,
+                                     uint64_t *physical_offset,
+                                     uint64_t *available) {
     uint64_t seen = 0;
     unsigned index;
 
@@ -1976,14 +1994,62 @@ static bool allocation_physical_offset(const hfs_volume_t *volume,
         if (span == 0u)
             continue;
         if (logical_offset < seen + span) {
+            uint64_t within = logical_offset - seen;
             *physical_offset =
                 (uint64_t)volume->ext_start[index] * volume->block_size +
-                (logical_offset - seen);
+                within;
+            if (available)
+                *available = span - within;
             return true;
         }
         seen += span;
     }
     return false;
+}
+
+static bool allocation_physical_offset(const hfs_volume_t *volume,
+                                       uint64_t logical_offset,
+                                       uint64_t *physical_offset) {
+    return allocation_physical_span(volume, logical_offset, physical_offset,
+                                    NULL);
+}
+
+static bool allocation_zero_range(host_file_t *file, uint64_t file_size,
+                                  const hfs_volume_t *volume,
+                                  uint64_t begin, uint64_t end,
+                                  uint8_t *buffer, size_t buffer_size,
+                                  rootfs_work_stage_t stage,
+                                  rootfs_work_result_t *result) {
+    uint64_t logical = begin;
+
+    if (begin > end || end > volume->alloc_bytes) {
+        result_fail(result, ROOTFS_WORK_RANGE_ERROR, stage, 0,
+                    "allocation zero range is outside logicalSize");
+        return false;
+    }
+    memset(buffer, 0, buffer_size);
+    while (logical < end) {
+        uint64_t physical;
+        uint64_t contiguous;
+        uint64_t remaining = end - logical;
+        size_t amount;
+
+        if (!allocation_physical_span(volume, logical, &physical,
+                                      &contiguous)) {
+            result_fail(result, ROOTFS_WORK_RANGE_ERROR, stage, 0,
+                        "allocation byte %" PRIu64 " has no mapped extent",
+                        logical);
+            return false;
+        }
+        if (contiguous > remaining)
+            contiguous = remaining;
+        amount = contiguous > buffer_size ? buffer_size : (size_t)contiguous;
+        if (!checked_write(file, file_size, physical, buffer, amount, stage,
+                           result))
+            return false;
+        logical += amount;
+    }
+    return true;
 }
 
 static uint32_t hfs_head_end(uint32_t block_size) {
@@ -2587,34 +2653,96 @@ static bool extent_overlaps(uint32_t start, uint32_t count,
 }
 
 static bool grow_volume(host_file_t *file, uint64_t *file_size,
-                        uint64_t growth_bytes, const hfs_volume_t *before,
+                        uint64_t growth_bytes, uint64_t minimum_volume_bytes,
+                        const hfs_volume_t *before,
                         uint8_t *buffer, size_t buffer_size,
                         rootfs_work_result_t *result) {
-    uint64_t requested_blocks;
-    uint64_t requested_total;
+    uint64_t requested_blocks = 0u;
+    uint64_t requested_total = before->total_blocks;
+    uint64_t minimum_blocks = 0u;
+    uint64_t needed_alloc_bytes;
+    uint64_t physical_alloc_blocks;
     uint32_t new_total;
     uint32_t old_tail;
     uint32_t new_tail;
+    uint32_t added_alloc_blocks;
+    uint32_t new_alloc_start = 0u;
+    uint32_t next_alloc;
     uint64_t new_size;
     uint8_t primary[HFS_VH_LEN];
+    hfs_volume_t after;
     uint32_t used;
+    unsigned new_extent = 8u;
     unsigned index;
     int error = 0;
 
-    if (growth_bytes == 0u)
+    if (growth_bytes == 0u && minimum_volume_bytes == 0u)
         return true;
-    requested_blocks = growth_bytes / before->block_size;
-    if (requested_blocks != 0u)
-        requested_blocks--;
-    requested_total = (uint64_t)before->total_blocks + requested_blocks;
-    new_total = requested_total > before->nbits ? before->nbits :
-                (uint32_t)requested_total;
-    if (new_total <= before->total_blocks) {
+    if (growth_bytes != 0u) {
+        requested_blocks = growth_bytes / before->block_size;
+        if (requested_blocks != 0u)
+            requested_blocks--;
+        if (requested_blocks > UINT64_MAX - requested_total) {
+            result_fail(result, ROOTFS_WORK_RANGE_ERROR,
+                        ROOTFS_WORK_STAGE_GROW_PLAN, 0,
+                        "incremental growth overflows the volume block count");
+            return false;
+        }
+        requested_total += requested_blocks;
+    }
+    if (minimum_volume_bytes != 0u) {
+        if (minimum_volume_bytes >
+            UINT64_MAX - (uint64_t)before->block_size + 1u) {
+            result_fail(result, ROOTFS_WORK_RANGE_ERROR,
+                        ROOTFS_WORK_STAGE_GROW_PLAN, 0,
+                        "minimum volume size overflows block rounding");
+            return false;
+        }
+        minimum_blocks =
+            (minimum_volume_bytes + before->block_size - 1u) /
+            before->block_size;
+        if (minimum_blocks > requested_total)
+            requested_total = minimum_blocks;
+    }
+    if (requested_total <= before->total_blocks) {
+        if (minimum_volume_bytes != 0u && growth_bytes == 0u)
+            return true;
         result_fail(result, ROOTFS_WORK_GROW_INVALID,
                     ROOTFS_WORK_STAGE_GROW_PLAN, 0,
-                    "growth request is less than two allocation blocks or bitmap is full");
+                    "growth request is less than two allocation blocks");
         return false;
     }
+    if (requested_total > UINT32_MAX) {
+        result_fail(result, ROOTFS_WORK_RANGE_ERROR,
+                    ROOTFS_WORK_STAGE_GROW_PLAN, 0,
+                    "grown volume needs more than UINT32_MAX blocks");
+        return false;
+    }
+    new_total = (uint32_t)requested_total;
+    needed_alloc_bytes = ((uint64_t)new_total + 7u) / 8u;
+    if (needed_alloc_bytes < before->alloc_bytes)
+        needed_alloc_bytes = before->alloc_bytes;
+    if (needed_alloc_bytes > ROOTFS_WORK_MAX_BITMAP_BYTES) {
+        result_fail(result, ROOTFS_WORK_GROW_INVALID,
+                    ROOTFS_WORK_STAGE_GROW_PLAN, 0,
+                    "grown allocation bitmap needs %" PRIu64
+                    " bytes; limit is %u",
+                    needed_alloc_bytes, ROOTFS_WORK_MAX_BITMAP_BYTES);
+        return false;
+    }
+    physical_alloc_blocks =
+        (needed_alloc_bytes + before->block_size - 1u) /
+        before->block_size;
+    if (physical_alloc_blocks < before->alloc_fork_blocks)
+        physical_alloc_blocks = before->alloc_fork_blocks;
+    if (physical_alloc_blocks > UINT32_MAX) {
+        result_fail(result, ROOTFS_WORK_RANGE_ERROR,
+                    ROOTFS_WORK_STAGE_GROW_PLAN, 0,
+                    "grown allocation fork block count overflows");
+        return false;
+    }
+    added_alloc_blocks = (uint32_t)physical_alloc_blocks -
+                         before->alloc_fork_blocks;
     old_tail = hfs_tail_first(before->total_blocks, before->block_size);
     new_tail = hfs_tail_first(new_total, before->block_size);
     if (hfs_head_end(before->block_size) > old_tail ||
@@ -2639,6 +2767,31 @@ static bool grow_volume(host_file_t *file, uint64_t *file_size,
             return false;
         }
     }
+    if (added_alloc_blocks != 0u) {
+        uint64_t new_alloc_end;
+
+        for (index = 0u; index < 8u; index++) {
+            if (before->ext_count[index] == 0u) {
+                new_extent = index;
+                break;
+            }
+        }
+        if (new_extent == 8u) {
+            result_fail(result, ROOTFS_WORK_GROW_INVALID,
+                        ROOTFS_WORK_STAGE_GROW_PLAN, 0,
+                        "allocation fork has no free inline extent slot");
+            return false;
+        }
+        new_alloc_start = before->total_blocks;
+        new_alloc_end = (uint64_t)new_alloc_start + added_alloc_blocks;
+        if (new_alloc_end > new_tail) {
+            result_fail(result, ROOTFS_WORK_GROW_INVALID,
+                        ROOTFS_WORK_STAGE_GROW_PLAN, 0,
+                        "growth leaves no room for the expanded allocation "
+                        "bitmap before the alternate volume header");
+            return false;
+        }
+    }
     for (index = old_tail; index < before->total_blocks; index++) {
         bool set;
         if (!allocation_bit_read(file, *file_size, before, index, &set,
@@ -2654,6 +2807,8 @@ static bool grow_volume(host_file_t *file, uint64_t *file_size,
     for (index = new_tail; index < new_total; index++) {
         bool set;
         if (index < before->total_blocks)
+            continue;
+        if (index >= before->nbits)
             continue;
         if (!allocation_bit_read(file, *file_size, before, index, &set,
                                  ROOTFS_WORK_STAGE_GROW_PLAN, result))
@@ -2673,6 +2828,7 @@ static bool grow_volume(host_file_t *file, uint64_t *file_size,
                     "grown image size is outside the supported 64-bit range");
         return false;
     }
+    host_file_allow_sparse_extension(file);
     if (!host_file_resize(file, new_size, &error)) {
         result_fail(result, ROOTFS_WORK_WRITE_FAILED,
                     ROOTFS_WORK_STAGE_GROW_WRITE, error,
@@ -2681,31 +2837,70 @@ static bool grow_volume(host_file_t *file, uint64_t *file_size,
         return false;
     }
     *file_size = new_size;
+
+    after = *before;
+    after.total_blocks = new_total;
+    after.alloc_bytes = needed_alloc_bytes;
+    after.alloc_fork_blocks = (uint32_t)physical_alloc_blocks;
+    after.nbits = (uint32_t)(needed_alloc_bytes * 8u);
+    if (added_alloc_blocks != 0u) {
+        after.ext_start[new_extent] = new_alloc_start;
+        after.ext_count[new_extent] = added_alloc_blocks;
+    }
+    if (!allocation_zero_range(file, *file_size, &after,
+                               before->alloc_bytes, after.alloc_bytes,
+                               buffer, buffer_size,
+                               ROOTFS_WORK_STAGE_GROW_WRITE, result))
+        return false;
     for (index = old_tail; index < before->total_blocks; index++) {
-        if (!allocation_bit_write(file, *file_size, before, index, false,
+        if (!allocation_bit_write(file, *file_size, &after, index, false,
                                   ROOTFS_WORK_STAGE_GROW_WRITE, result))
             return false;
     }
+    for (index = 0u; index < 8u; index++) {
+        uint32_t block;
+        uint64_t end = (uint64_t)after.ext_start[index] +
+                       after.ext_count[index];
+
+        for (block = after.ext_start[index]; block < end; block++) {
+            if (!allocation_bit_write(file, *file_size, &after, block, true,
+                                      ROOTFS_WORK_STAGE_GROW_WRITE, result))
+                return false;
+        }
+    }
     for (index = new_tail; index < new_total; index++) {
-        if (!allocation_bit_write(file, *file_size, before, index, true,
+        if (!allocation_bit_write(file, *file_size, &after, index, true,
                                   ROOTFS_WORK_STAGE_GROW_WRITE, result))
             return false;
     }
 
-    {
-        hfs_volume_t recount = *before;
-        recount.total_blocks = new_total;
-        recount.nbits = before->nbits;
-        if (!allocation_scan(file, *file_size, &recount, buffer, buffer_size,
-                             &used, ROOTFS_WORK_STAGE_GROW_WRITE, result))
-            return false;
-    }
+    if (!allocation_scan(file, *file_size, &after, buffer, buffer_size,
+                         &used, ROOTFS_WORK_STAGE_GROW_WRITE, result))
+        return false;
     if (!checked_read(file, *file_size, HFS_VH_OFF, primary, sizeof(primary),
                       ROOTFS_WORK_STAGE_GROW_WRITE, result))
         return false;
+    next_alloc = old_tail;
+    while (next_alloc < new_tail &&
+           allocation_file_contains_block(&after, next_alloc))
+        next_alloc++;
+    if (next_alloc >= new_tail) {
+        result_fail(result, ROOTFS_WORK_GROW_INVALID,
+                    ROOTFS_WORK_STAGE_GROW_WRITE, 0,
+                    "grown volume has no free next-allocation hint");
+        return false;
+    }
+    after.free_blocks = new_total - used;
+    after.next_alloc = next_alloc;
     write_be32(primary + 44, new_total);
-    write_be32(primary + 48, new_total - used);
-    write_be32(primary + 52, old_tail);
+    write_be32(primary + 48, after.free_blocks);
+    write_be32(primary + 52, after.next_alloc);
+    write_be64(primary + 112, after.alloc_bytes);
+    write_be32(primary + 124, after.alloc_fork_blocks);
+    for (index = 0u; index < 8u; index++) {
+        write_be32(primary + 128u + index * 8u, after.ext_start[index]);
+        write_be32(primary + 132u + index * 8u, after.ext_count[index]);
+    }
     if (!checked_write(file, *file_size, HFS_VH_OFF, primary, sizeof(primary),
                        ROOTFS_WORK_STAGE_GROW_WRITE, result) ||
         !checked_write(file, *file_size, new_size - HFS_VH_OFF, primary,
@@ -6415,7 +6610,8 @@ rootfs_work_status_t rootfs_work_create(const char *source_path,
                            selected.io_buffer_bytes, result))
         goto done;
     if (!grow_volume(&temporary, &work_size, selected.growth_bytes,
-                     &copied_volume, buffer, selected.io_buffer_bytes, result))
+                     selected.minimum_volume_bytes, &copied_volume, buffer,
+                     selected.io_buffer_bytes, result))
         goto done;
     /*
      * Catalog provisioning is placed HERE, after growth, and re-validates the
@@ -6438,11 +6634,19 @@ rootfs_work_status_t rootfs_work_create(const char *source_path,
                       selected.io_buffer_bytes,
                       ROOTFS_WORK_STAGE_FINAL_VALIDATE, result))
         goto done;
-    if (selected.growth_bytes != 0u &&
+    if ((selected.growth_bytes != 0u ||
+         selected.minimum_volume_bytes > source_before.size) &&
         final_volume.total_blocks <= copied_volume.total_blocks) {
         result_fail(result, ROOTFS_WORK_HFS_INVALID,
                     ROOTFS_WORK_STAGE_FINAL_VALIDATE, 0,
                     "final validation did not observe planned volume growth");
+        goto done;
+    }
+    if (selected.minimum_volume_bytes != 0u &&
+        work_size < selected.minimum_volume_bytes) {
+        result_fail(result, ROOTFS_WORK_HFS_INVALID,
+                    ROOTFS_WORK_STAGE_FINAL_VALIDATE, 0,
+                    "final volume is smaller than the requested minimum");
         goto done;
     }
     result->final_size = work_size;

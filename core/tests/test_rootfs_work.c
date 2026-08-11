@@ -255,6 +255,10 @@ static uint32_t get_be32(const uint8_t *bytes) {
            ((uint32_t)bytes[2] << 8) | bytes[3];
 }
 
+static uint64_t get_be64(const uint8_t *bytes) {
+    return ((uint64_t)get_be32(bytes) << 32) | get_be32(bytes + 4);
+}
+
 static void bitmap_set(uint8_t *image, uint32_t bit, bool set) {
     uint8_t *byte = image + FIXTURE_BITMAP_OFFSET + (bit >> 3);
     uint8_t mask = (uint8_t)(1u << (7u - (bit & 7u)));
@@ -588,6 +592,105 @@ static void test_success_boundary_growth_and_source_immutable(void) {
               "fstab replacement/padding is malformed");
     }
     CHECK(no_temporary_files(), "successful publication left a temp name");
+    remove_if_present(destination);
+    remove_if_present(source);
+}
+
+static void test_minimum_volume_expands_allocation_file(void) {
+    enum { TARGET_BLOCKS = 4097u };
+    char source[160];
+    char destination[160];
+    uint8_t original[FIXTURE_SIZE];
+    uint8_t source_after[FIXTURE_SIZE];
+    uint8_t header[HFS_VH_LEN];
+    uint8_t alternate[HFS_VH_LEN];
+    uint8_t old_tail_bits[2];
+    uint8_t high_tail_low;
+    uint8_t high_tail_high;
+    rootfs_work_options_t options;
+    rootfs_work_result_t result;
+    rootfs_work_status_t status;
+    FILE *stream;
+    const uint64_t expected_size =
+        (uint64_t)TARGET_BLOCKS * FIXTURE_BLOCK_SIZE;
+
+    CHECK(make_path(source, sizeof(source), "bitmap-grow-source"),
+          "could not form bitmap-growth source path");
+    CHECK(make_path(destination, sizeof(destination), "bitmap-grow-work"),
+          "could not form bitmap-growth destination path");
+    remove_if_present(source);
+    remove_if_present(destination);
+    make_hfs_fixture(original, 1u);
+    CHECK(write_file(source, original, sizeof(original)),
+          "could not write bitmap-growth fixture");
+    memset(&options, 0, sizeof(options));
+    options.preserve_fstab = true;
+    options.minimum_volume_bytes = expected_size;
+    options.io_buffer_bytes = 7u;
+    status = rootfs_work_create(source, destination, &options, &result);
+    CHECK(status == ROOTFS_WORK_OK,
+          "bitmap growth failed: %s/%s sys=%d detail=%s",
+          rootfs_work_status_name(status), rootfs_work_stage_name(result.stage),
+          result.system_error, result.detail);
+    CHECK(result.published && result.final_size == expected_size &&
+          file_size(destination) == expected_size,
+          "bitmap-grown image was %llu/%llu bytes, expected %llu",
+          (unsigned long long)result.final_size,
+          (unsigned long long)file_size(destination),
+          (unsigned long long)expected_size);
+    CHECK(read_file(source, source_after, sizeof(source_after)) &&
+          memcmp(original, source_after, sizeof(original)) == 0,
+          "bitmap growth changed the immutable source");
+
+    stream = fopen(destination, "rb");
+    CHECK(stream != NULL, "could not open bitmap-grown image");
+    if (stream) {
+        CHECK(fseek(stream, (long)HFS_VH_OFF, SEEK_SET) == 0 &&
+              fread(header, 1u, sizeof(header), stream) == sizeof(header),
+              "could not read bitmap-grown primary header");
+        CHECK(fseek(stream, (long)(expected_size - HFS_VH_OFF), SEEK_SET) == 0 &&
+              fread(alternate, 1u, sizeof(alternate), stream) ==
+                  sizeof(alternate),
+              "could not read bitmap-grown alternate header");
+        CHECK(fseek(stream, (long)(FIXTURE_BITMAP_OFFSET + 1u), SEEK_SET) == 0 &&
+              fread(old_tail_bits, 1u, sizeof(old_tail_bits), stream) ==
+                  sizeof(old_tail_bits),
+              "could not read the low allocation bits");
+        CHECK(fseek(stream,
+                    (long)(FIXTURE_BITMAP_OFFSET + FIXTURE_BLOCK_SIZE - 1u),
+                    SEEK_SET) == 0 &&
+              fread(&high_tail_low, 1u, 1u, stream) == 1u &&
+              fseek(stream, (long)(FIXTURE_BLOCKS * FIXTURE_BLOCK_SIZE),
+                    SEEK_SET) == 0 &&
+              fread(&high_tail_high, 1u, 1u, stream) == 1u,
+              "could not read the split expanded-allocation bits");
+        CHECK(fclose(stream) == 0,
+              "could not close bitmap-grown work image");
+
+        CHECK(get_be32(header + 44u) == TARGET_BLOCKS &&
+              get_be32(header + 48u) == TARGET_BLOCKS - 7u &&
+              get_be32(header + 52u) == 14u,
+              "bitmap-grown volume accounting is %u/%u/%u",
+              get_be32(header + 44u), get_be32(header + 48u),
+              get_be32(header + 52u));
+        CHECK(get_be64(header + 112u) == 513u &&
+              get_be32(header + 124u) == 2u &&
+              get_be32(header + 128u) == 4u &&
+              get_be32(header + 132u) == 1u &&
+              get_be32(header + 136u) == FIXTURE_BLOCKS &&
+              get_be32(header + 140u) == 1u,
+              "allocation fork was not extended into one new inline extent");
+        CHECK(memcmp(header, alternate, sizeof(header)) == 0,
+              "bitmap-grown alternate header differs from primary");
+        CHECK(old_tail_bits[0] == 0u && old_tail_bits[1] == 0x80u,
+              "old tail was not freed or the new bitmap block was not owned: "
+              "%02x %02x", old_tail_bits[0], old_tail_bits[1]);
+        CHECK(high_tail_low == 0x01u && high_tail_high == 0x80u,
+              "new alternate-header bits are not split across bitmap extents: "
+              "%02x %02x", high_tail_low, high_tail_high);
+    }
+    CHECK(no_temporary_files(),
+          "bitmap-growth success left a temporary name");
     remove_if_present(destination);
     remove_if_present(source);
 }
@@ -1572,6 +1675,7 @@ int main(void) {
     test_sha256_known_answers_and_chunking();
     test_sha256_invalid_and_overflow_guards();
     test_success_boundary_growth_and_source_immutable();
+    test_minimum_volume_expands_allocation_file();
     test_stale_alternate_accounting_is_accepted();
     test_required_identity_chunk_boundaries();
     test_source_identity_policy_and_cleanup();

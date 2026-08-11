@@ -350,16 +350,29 @@ typedef struct rootfs_work_options {
     bool ppp_launchd_job;
 
     /*
-     * Same arithmetic as bootkernel's historical --grow implementation:
-     * floor(growth_bytes / allocationBlockSize), less the old reserved-tail
-     * block, is added to totalBlocks and then clamped to the existing
-     * allocation bitmap's bit capacity.  Zero disables growth.
+     * Same incremental arithmetic as bootkernel's historical --grow
+     * implementation: floor(growth_bytes / allocationBlockSize), less the
+     * old reserved-tail block, is added to totalBlocks. Zero disables this
+     * incremental request.
+     *
+     * Growth may extend the allocation special file when its existing bitmap
+     * is too short. That remains deliberately bounded: the new bitmap must fit
+     * ROOTFS_WORK_MAX_BITMAP_BYTES and one of the fork's eight inline extent
+     * slots. The writer does not create an extents-overflow record.
      *
      * For compatibility with the already-proven bootkernel transformation,
      * this narrow image builder leaves HFS lastMountedVersion and writeCount
      * unchanged. It is not a general-purpose HFS writer or fsck replacement.
      */
     uint64_t growth_bytes;
+
+    /*
+     * Absolute lower bound for the published HFS volume, rounded up to an
+     * allocation block. This composes with growth_bytes by selecting the
+     * larger result. Zero disables the lower bound; a nonzero value already
+     * met by the source is a no-op rather than an error.
+     */
+    uint64_t minimum_volume_bytes;
 
     /* Zero selects ROOTFS_WORK_MAX_IO_BUFFER; otherwise 1..that limit. */
     size_t io_buffer_bytes;

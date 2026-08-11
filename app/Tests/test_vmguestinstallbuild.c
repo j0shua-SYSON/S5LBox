@@ -292,6 +292,10 @@ static void test_real_build_when_supplied(void) {
           result.plan.packages == 28u &&
           result.plan.foundation_packages == 14u,
           "real build result is incomplete");
+    CHECK(result.rootfs.final_size ==
+              VM_GUEST_INSTALL_MINIMUM_VOLUME_BYTES,
+          "real install volume is %llu bytes, expected the 2 GiB minimum",
+          (unsigned long long)result.rootfs.final_size);
     uint8_t marker[VM_GUEST_INSTALL_SHA256_SIZE];
     CHECK(vm_guest_install_probe(machine, marker, detail, sizeof detail) ==
               VM_GUEST_INSTALL_PROBE_VALID &&

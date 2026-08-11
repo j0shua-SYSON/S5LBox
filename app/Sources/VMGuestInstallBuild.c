@@ -191,7 +191,7 @@ vm_guest_install_build_from_directory(
     rootfs_work_options_t options;
     memset(&options, 0, sizeof options);
     options.preserve_fstab = true;
-    options.growth_bytes = VM_GUEST_INSTALL_ADDITIONAL_GROWTH_BYTES;
+    options.minimum_volume_bytes = VM_GUEST_INSTALL_MINIMUM_VOLUME_BYTES;
     options.entries = vm_guest_rootfs_plan_entries(plan);
     options.entry_count = vm_guest_rootfs_plan_entry_count(plan);
     build_progress_adapter_t adapter = {progress, progress_context};
