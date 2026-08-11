@@ -166,10 +166,18 @@ void vm_boot_options_for_provisioning(const bool *values, unsigned count,
 /*
  * Replace the settings-time prediction for PPP with what this work image
  * actually records. NAT is then effective only when both its switch and that
- * recorded PPP job are on. Rebuilds counts and summary so a boot report cannot
- * claim that changing an image-time switch rewrote an existing filesystem.
+ * recorded PPP job are on. A recorded PPP job also selects the serial
+ * driver's PIO boot argument: the guest job and the uart4 host peer cannot
+ * exchange bytes if AppleS5L8900XSerial takes its DMA path. Rebuilds counts and
+ * summary so a boot report cannot claim that changing an image-time switch
+ * rewrote an existing filesystem.
+ *
+ * `request` may be NULL when only the report is needed. When supplied, it must
+ * still use bring-up's default command line; this function owns the one app
+ * extension to that line.
  */
 void vm_boot_options_reconcile_network(vm_boot_options_report_t *report,
+                                       s5l_bringup_request_t *request,
                                        bool ppp_provisioned);
 
 /*

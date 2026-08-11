@@ -897,7 +897,8 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
         return false;
     }
     bool ppp_provisioned = file_size(ppp_marker) > 0u;
-    vm_boot_options_reconcile_network(&report->options, ppp_provisioned);
+    vm_boot_options_reconcile_network(&report->options, &request,
+                                      ppp_provisioned);
 
     s5l_bringup_status_t status =
         s5l_bringup(machine, &request, boot->bridges, &report->bringup);

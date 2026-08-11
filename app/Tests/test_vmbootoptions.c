@@ -444,6 +444,7 @@ static void test_provisioned_row(void) {
 static void test_network_state_is_reconciled_with_the_work_image(void) {
     bool values[VM_BOOT_OPTION_MAX];
     vm_boot_options_report_t report;
+    s5l_bringup_request_t request;
     const int ppp = index_of("ppp");
     const int nat = index_of("nat");
     if (ppp < 0 || nat < 0) return;
@@ -455,9 +456,12 @@ static void test_network_state_is_reconciled_with_the_work_image(void) {
     CHECK(report.row[ppp].effective && report.row[nat].effective,
           "a new PPP/NAT image is predicted off before reconciliation");
 
-    vm_boot_options_reconcile_network(&report, false);
+    memset(&request, 0, sizeof request);
+    vm_boot_options_reconcile_network(&report, &request, false);
     CHECK(!report.row[ppp].effective && !report.row[nat].effective,
           "an image with no PPP marker still reports PPP/NAT on");
+    CHECK(request.cmdline == NULL,
+          "an image with no PPP job changed the kernel command line");
     CHECK(report.row[ppp].note && strstr(report.row[ppp].note, "without PPP") &&
           report.row[nat].note && strstr(report.row[nat].note, "no PPP job"),
           "the no-marker mismatch is not actionable");
@@ -465,24 +469,40 @@ static void test_network_state_is_reconciled_with_the_work_image(void) {
           "the no-marker mismatch is absent from the summary: %s",
           report.summary);
 
-    vm_boot_options_reconcile_network(&report, true);
+    memset(&request, 0, sizeof request);
+    vm_boot_options_reconcile_network(&report, &request, true);
     CHECK(report.row[ppp].effective && report.row[nat].effective,
           "a marked PPP/NAT image did not reconcile on");
+    CHECK(request.cmdline &&
+          strstr(request.cmdline, S5L_BRINGUP_DEFAULT_CMDLINE) ==
+              request.cmdline &&
+          strstr(request.cmdline, "uart4_dma_enable=0") != NULL,
+          "a marked PPP image did not force uart4 onto its host-visible PIO "
+          "path");
 
     defaults_into(values);                 /* PPP setting off, NAT setting on */
     vm_boot_options_apply(values, vm_option_count(), NULL, &report);
-    vm_boot_options_reconcile_network(&report, true);
+    memset(&request, 0, sizeof request);
+    vm_boot_options_reconcile_network(&report, &request, true);
     CHECK(report.row[ppp].effective && report.row[nat].effective,
           "an existing PPP image followed a later PPP switch instead of its "
           "recorded filesystem");
+    CHECK(request.cmdline &&
+          strstr(request.cmdline, "uart4_dma_enable=0") != NULL,
+          "an existing PPP image followed a later switch and lost its uart4 "
+          "boot policy");
     CHECK(report.row[ppp].note && strstr(report.row[ppp].note, "contains"),
           "the recorded-on/settings-off mismatch has no explanation");
 
     values[nat] = false;
     vm_boot_options_apply(values, vm_option_count(), NULL, &report);
-    vm_boot_options_reconcile_network(&report, true);
+    memset(&request, 0, sizeof request);
+    vm_boot_options_reconcile_network(&report, &request, true);
     CHECK(report.row[ppp].effective && !report.row[nat].effective,
           "the live NAT switch could not disable routing on a PPP image");
+    CHECK(request.cmdline &&
+          strstr(request.cmdline, "uart4_dma_enable=0") != NULL,
+          "disabling NAT also disabled the PPP serial transport");
 }
 
 /*
