@@ -337,6 +337,91 @@ static void dns_reply(net_stack_t *ns, uint16_t gport,
         ns->stats.udp_out++;
 }
 
+static void dns_finish(net_stack_t *ns, uint16_t gport,
+                       const uint8_t *query, size_t query_len,
+                       int result, uint32_t address) {
+    if (result == NET_RES_OK) {
+        dns_reply(ns, gport, query, query_len, query_len,
+                  DNS_RC_OK, true, address);
+        ns->stats.dns_answered++;
+    } else if (result == NET_RES_NXDOMAIN) {
+        dns_reply(ns, gport, query, query_len, query_len,
+                  DNS_RC_NXDOMAIN, false, 0u);
+        ns->stats.dns_nxdomain++;
+    } else {
+        dns_reply(ns, gport, query, query_len, query_len,
+                  DNS_RC_SERVFAIL, false, 0u);
+        ns->stats.dns_failed++;
+    }
+}
+
+/*
+ * Keep the question, not a pointer into ppp.c's borrowed receive frame. A
+ * retransmission of the same transaction is already represented and needs no
+ * second slot; a fifth independent lookup is dropped so the guest's normal
+ * DNS retry policy can recover without receiving a fabricated failure.
+ */
+static bool dns_defer(net_stack_t *ns, uint16_t gport,
+                      const uint8_t *query, size_t query_len,
+                      const char *name) {
+    if (!ns || !query || !name || !query_len ||
+        query_len > NET_DNS_QUERY_MAX)
+        return false;
+
+    net_dns_pending_t *free_slot = NULL;
+    for (unsigned i = 0u; i < NET_DNS_PENDING; i++) {
+        net_dns_pending_t *slot = &ns->dns[i];
+        if (!slot->used) {
+            if (!free_slot) free_slot = slot;
+            continue;
+        }
+        if (slot->guest_port == gport &&
+            slot->query_len == (uint16_t)query_len &&
+            memcmp(slot->query, query, query_len) == 0)
+            return true;
+    }
+    if (!free_slot) {
+        ns->stats.dns_pending_full++;
+        return false;
+    }
+
+    memset(free_slot, 0, sizeof *free_slot);
+    free_slot->used = true;
+    free_slot->guest_port = gport;
+    free_slot->query_len = (uint16_t)query_len;
+    free_slot->started_ms = ns->now_ms;
+    memcpy(free_slot->query, query, query_len);
+    size_t name_len = strlen(name);
+    if (name_len >= sizeof free_slot->name) name_len = sizeof free_slot->name - 1u;
+    memcpy(free_slot->name, name, name_len);
+    free_slot->name[name_len] = '\0';
+    ns->stats.dns_deferred++;
+    return true;
+}
+
+static void dns_tick(net_stack_t *ns) {
+    if (!ns) return;
+    for (unsigned i = 0u; i < NET_DNS_PENDING; i++) {
+        net_dns_pending_t *slot = &ns->dns[i];
+        if (!slot->used) continue;
+
+        uint32_t address = 0u;
+        int result = ns->eg.resolve
+            ? ns->eg.resolve(ns->eg.ctx, slot->name, &address)
+            : NET_RES_FAIL;
+        if (result == NET_RES_PENDING) {
+            if ((uint32_t)(ns->now_ms - slot->started_ms) <
+                NET_DNS_TIMEOUT_MS)
+                continue;
+            result = NET_RES_FAIL;
+            ns->stats.dns_timeouts++;
+        }
+        dns_finish(ns, slot->guest_port, slot->query, slot->query_len,
+                   result, address);
+        memset(slot, 0, sizeof *slot);
+    }
+}
+
 static void dns_input(net_stack_t *ns, uint16_t gport,
                       const uint8_t *p, size_t n) {
     ns->stats.dns_queries++;
@@ -388,16 +473,11 @@ static void dns_input(net_stack_t *ns, uint16_t gport,
     uint32_t a = 0;
     int rc = ns->eg.resolve ? ns->eg.resolve(ns->eg.ctx, name, &a)
                             : NET_RES_FAIL;
-    if (rc == NET_RES_OK) {
-        dns_reply(ns, gport, p, n, qend, DNS_RC_OK, true, a);
-        ns->stats.dns_answered++;
-    } else if (rc == NET_RES_NXDOMAIN) {
-        dns_reply(ns, gport, p, n, qend, DNS_RC_NXDOMAIN, false, 0);
-        ns->stats.dns_nxdomain++;
-    } else {
-        dns_reply(ns, gport, p, n, qend, DNS_RC_SERVFAIL, false, 0);
-        ns->stats.dns_failed++;
+    if (rc == NET_RES_PENDING) {
+        (void)dns_defer(ns, gport, p, qend, name);
+        return;
     }
+    dns_finish(ns, gport, p, qend, rc, a);
 }
 
 /* ================================================================= UDP === */
@@ -523,6 +603,8 @@ void net_tick(net_stack_t *ns, uint32_t now_ms) {
     if (!ns) return;
     if ((int32_t)(now_ms - ns->now_ms) < 0) return;   /* monotonic only      */
     ns->now_ms = now_ms;
+
+    dns_tick(ns);
 
     for (unsigned i = 0; i < NET_MAX_FLOWS; i++) {
         net_flow_t *f = &ns->flow[i];

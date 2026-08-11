@@ -45,11 +45,17 @@ typedef struct {
     uint64_t ip_out;
     uint64_t dns_queries;
     uint64_t dns_answered;
+    uint64_t dns_deferred;
+    uint64_t dns_pending_full;
+    uint64_t dns_timeouts;
     uint64_t tcp_established;
     uint64_t tcp_bytes_to_host;
     uint64_t tcp_bytes_to_guest;
     uint64_t host_bytes_out;
     uint64_t host_bytes_in;
+    uint64_t host_resolves;
+    uint64_t host_resolve_failures;
+    uint64_t host_resolve_nxdomain;
     uint64_t host_errors;
     int      host_last_error;
 } vm_network_status_t;

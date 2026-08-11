@@ -92,6 +92,7 @@ typedef struct {
     int         resolve_rc;
     uint32_t    resolve_ip;
     char        resolved[256];
+    unsigned    resolve_calls;
     int         icmp_calls;
     bool        icmp_ok;
     unsigned    opens, closes;
@@ -153,6 +154,7 @@ static void m_close(void *ctx, int h) {
 }
 static int m_resolve(void *ctx, const char *name, uint32_t *ip) {
     mock_t *m = ctx;
+    m->resolve_calls++;
     snprintf(m->resolved, sizeof m->resolved, "%s", name);
     if (m->resolve_rc == NET_RES_OK) *ip = m->resolve_ip;
     return m->resolve_rc;
@@ -593,6 +595,73 @@ static void test_dns_answers_an_a_query_from_the_host_resolver(void) {
                           r.raw + 20, r.rawlen - 20u) == 0u,
           "the reply's UDP checksum does not verify");
     CHECK(g_ns.stats.dns_answered == 1u, "dns_answered did not count");
+}
+
+static void test_dns_waits_for_an_async_host_resolver(void) {
+    uint8_t q[512];
+    pkt_t r;
+    start(true, false);
+    g_mock.resolve_rc = NET_RES_PENDING;
+    size_t qn = dns_query(q, sizeof q, "slow.example.com", 1u, 1u, 1u);
+    send_udp(DNS_IP, 40010u, 53u, q, qn);
+
+    CHECK(g_mock.resolve_calls == 1u &&
+          strcmp(g_mock.resolved, "slow.example.com") == 0,
+          "the first asynchronous resolve was not started exactly once");
+    CHECK(!take(&r),
+          "a pending host lookup produced an immediate DNS answer");
+    CHECK(g_ns.stats.dns_deferred == 1u &&
+          g_ns.stats.dns_answered == 0u && g_ns.stats.dns_failed == 0u,
+          "pending DNS was not recorded as deferred only");
+
+    g_mock.resolve_rc = NET_RES_OK;
+    net_tick(&g_ns, 1u);
+    CHECK(g_mock.resolve_calls == 2u,
+          "net_tick did not poll the pending resolver");
+    CHECK(take(&r) && r.dport == 40010u &&
+          (r16(r.pay + 2) & 0xfu) == 0u &&
+          r16(r.pay + 6) == 1u && r32(r.pay + qn + 12u) == PEER_IP,
+          "the completed asynchronous lookup did not become its DNS answer");
+    CHECK(g_ns.stats.dns_answered == 1u && g_ns.stats.dns_failed == 0u,
+          "the asynchronous success counters are wrong");
+}
+
+static void test_pending_dns_is_bounded_and_times_out(void) {
+    uint8_t q[512];
+    pkt_t r;
+    start(true, false);
+    g_mock.resolve_rc = NET_RES_PENDING;
+
+    for (unsigned i = 0u; i < NET_DNS_PENDING + 1u; i++) {
+        char name[64];
+        snprintf(name, sizeof name, "pending-%u.example.com", i);
+        size_t qn = dns_query(q, sizeof q, name, 1u, 1u, 1u);
+        q[0] = (uint8_t)(i >> 8u);
+        q[1] = (uint8_t)i;
+        send_udp(DNS_IP, (uint16_t)(40100u + i), 53u, q, qn);
+    }
+    CHECK(g_ns.stats.dns_deferred == NET_DNS_PENDING &&
+          g_ns.stats.dns_pending_full == 1u,
+          "the bounded DNS queue recorded deferred/full as %llu/%llu",
+          (unsigned long long)g_ns.stats.dns_deferred,
+          (unsigned long long)g_ns.stats.dns_pending_full);
+    CHECK(net_output_pending(&g_ns) == 0u,
+          "a full pending queue fabricated a DNS failure");
+
+    net_tick(&g_ns, NET_DNS_TIMEOUT_MS - 1u);
+    CHECK(net_output_pending(&g_ns) == 0u,
+          "a pending lookup timed out early");
+    net_tick(&g_ns, NET_DNS_TIMEOUT_MS);
+    CHECK(g_ns.stats.dns_timeouts == NET_DNS_PENDING &&
+          g_ns.stats.dns_failed == NET_DNS_PENDING,
+          "DNS timeout/failure counters are %llu/%llu, expected %u/%u",
+          (unsigned long long)g_ns.stats.dns_timeouts,
+          (unsigned long long)g_ns.stats.dns_failed,
+          NET_DNS_PENDING, NET_DNS_PENDING);
+    for (unsigned i = 0u; i < NET_DNS_PENDING; i++) {
+        CHECK(take(&r) && (r16(r.pay + 2) & 0xfu) == 2u,
+              "timed-out DNS slot %u did not produce SERVFAIL", i);
+    }
 }
 
 static void test_dns_says_the_right_no(void) {
@@ -1451,6 +1520,8 @@ int main(void) {
     RUN(test_icmp_echo_comes_back_from_the_address_it_was_aimed_at);
     RUN(test_an_echo_past_the_gateway_is_never_fabricated);
     RUN(test_dns_answers_an_a_query_from_the_host_resolver);
+    RUN(test_dns_waits_for_an_async_host_resolver);
+    RUN(test_pending_dns_is_bounded_and_times_out);
     RUN(test_dns_says_the_right_no);
     RUN(test_dns_refuses_names_it_should_not_hand_to_getaddrinfo);
     RUN(test_udp_goes_out_through_a_socket_and_comes_back);

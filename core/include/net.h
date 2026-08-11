@@ -108,6 +108,16 @@
 #define NET_TCP_TIME_WAIT_MS 2000u   /* abbreviated 2MSL; see tcp.c            */
 #define NET_UDP_IDLE_MS     60000u   /* docs/networking.md §8.2's idle timer   */
 #define NET_DNS_TTL         60u      /* what we put in the answers we synth    */
+#define NET_DNS_TIMEOUT_MS  30000u   /* pending host lookup -> SERVFAIL        */
+
+/*
+ * Host resolution is allowed to finish after the packet that requested it.
+ * Four outstanding questions cover the parallel A lookups a browser normally
+ * emits without letting an untrusted guest turn DNS into unbounded storage.
+ * A one-question DNS message can occupy at most 12 + 255 + 4 wire octets.
+ */
+#define NET_DNS_PENDING       4u
+#define NET_DNS_QUERY_MAX   271u
 
 /* ------------------------------------------------------------- egress ----- */
 
@@ -123,6 +133,7 @@
 
 /* net_egress_t::resolve */
 #define NET_RES_OK         0
+#define NET_RES_PENDING    1     /* no answer yet; poll again from net_tick   */
 #define NET_RES_NXDOMAIN (-1)    /* authoritatively no such name              */
 #define NET_RES_FAIL     (-2)    /* transient: the guest gets SERVFAIL        */
 
@@ -163,10 +174,12 @@ typedef struct net_egress {
     void (*close)(void *ctx, int handle);
 
     /*
-     * Resolve one name to one IPv4 address, host byte order. Implemented with
-     * the host's own getaddrinfo() rather than by forwarding port 53, because
-     * that inherits the host's resolver configuration and survives a captive
-     * network that blocks 53 outright (docs/networking.md §8.2).
+     * Resolve one name to one IPv4 address, host byte order. NET_RES_PENDING
+     * asks the stack to retain the guest's query and poll again from later
+     * net_tick() calls; the CPU thread must never wait for a host resolver.
+     * Implemented with the host's own getaddrinfo() rather than forwarding
+     * port 53, because that inherits the host's resolver configuration and
+     * survives a captive network that blocks 53 outright (§8.2).
      */
     int  (*resolve)(void *ctx, const char *name, uint32_t *ip);
 
@@ -259,6 +272,9 @@ typedef struct {
 
     uint64_t udp_in, udp_out;
     uint64_t dns_queries, dns_answered, dns_nxdomain, dns_failed;
+    uint64_t dns_deferred;       /* accepted for later resolver completion    */
+    uint64_t dns_pending_full;   /* dropped; the bounded queue was occupied   */
+    uint64_t dns_timeouts;       /* a pending lookup became SERVFAIL          */
     uint64_t dns_malformed;     /* answered FORMERR, or too broken to answer */
     /*
      * The header word of the last query this stack looked at, kept ONLY so a
@@ -291,12 +307,22 @@ typedef struct {
 } net_dgram_t;
 
 typedef struct {
+    bool     used;
+    uint16_t guest_port;
+    uint16_t query_len;
+    uint32_t started_ms;
+    char     name[256];
+    uint8_t  query[NET_DNS_QUERY_MAX];
+} net_dns_pending_t;
+
+typedef struct {
     net_config_t cfg;
     net_egress_t eg;
     net_stats_t  stats;
     uint32_t     now_ms;
     uint32_t     iss_walk;      /* moves per connection, RFC 793 §3.3        */
     net_flow_t   flow[NET_MAX_FLOWS];
+    net_dns_pending_t dns[NET_DNS_PENDING];
     net_dgram_t  out[NET_OUT_SLOTS];
     uint32_t     out_head, out_tail;
 } net_stack_t;

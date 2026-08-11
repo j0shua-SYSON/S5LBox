@@ -40,6 +40,15 @@ static int g_pass, g_fail;
 
 #define LOOPBACK 0x7f000001u    /* 127.0.0.1, host byte order */
 
+static int await_resolve(net_egress_t *eg, const char *name, uint32_t *ip) {
+    int rc = NET_RES_PENDING;
+    for (unsigned i = 0u; i < 5000u && rc == NET_RES_PENDING; i++) {
+        rc = eg->resolve(eg->ctx, name, ip);
+        if (rc == NET_RES_PENDING) nap_ms(1u);
+    }
+    return rc;
+}
+
 static void test_the_table_is_filled_except_where_it_must_not_be(void) {
     net_egress_t eg;
     memset(&eg, 0xff, sizeof eg);
@@ -164,6 +173,10 @@ static void test_the_resolver_separates_no_such_name_from_try_again(void) {
 
     /* A name every host can answer without a network. */
     int rc = eg.resolve(eg.ctx, "localhost", &ip);
+    CHECK(rc == NET_RES_PENDING,
+          "a fresh lookup returned %d instead of starting asynchronously", rc);
+    if (rc == NET_RES_PENDING)
+        rc = await_resolve(&eg, "localhost", &ip);
     CHECK(rc == NET_RES_OK, "\"localhost\" did not resolve (rc %d)", rc);
     if (rc == NET_RES_OK)
         CHECK((ip >> 24) == 127u,
@@ -180,12 +193,71 @@ static void test_the_resolver_separates_no_such_name_from_try_again(void) {
      */
     ip = 0xdeadbeefu;
     rc = eg.resolve(eg.ctx, "s5lbox-nonexistent-host.invalid", &ip);
+    CHECK(rc == NET_RES_PENDING,
+          "a fresh negative lookup did not start asynchronously (rc %d)", rc);
+    if (rc == NET_RES_PENDING)
+        rc = await_resolve(&eg, "s5lbox-nonexistent-host.invalid", &ip);
     CHECK(rc == NET_RES_NXDOMAIN || rc == NET_RES_FAIL,
           "a .invalid name resolved successfully to 0x%08x", ip);
     CHECK(ip == 0xdeadbeefu,
           "a failed resolve wrote 0x%08x into the caller's address anyway", ip);
 
     net_host_close(h);
+}
+
+static void test_close_abandons_inflight_resolvers_without_waiting(void) {
+    /*
+     * Close owns no join: a system resolver can take seconds on a captive
+     * network, and leaving the VM must not wait behind it. Repeated immediate
+     * close also gives ASan a deterministic chance to catch a worker that
+     * retained the freed net_host rather than its own reference-counted job.
+     */
+    for (unsigned i = 0u; i < 16u; i++) {
+        net_egress_t eg;
+        net_host_t *h = net_host_open(&eg);
+        CHECK(h != NULL, "resolver-close sockets layer %u would not start", i);
+        if (!h) continue;
+        uint32_t ip = 0u;
+        int rc = eg.resolve(eg.ctx, "localhost", &ip);
+        CHECK(rc == NET_RES_PENDING,
+              "resolver-close lookup %u returned %d synchronously", i, rc);
+        net_host_close(h);
+    }
+    /* Let every detached localhost lookup publish and release its final
+     * reference before the test process exits. This is not part of close. */
+    nap_ms(50u);
+}
+
+static void test_completed_unclaimed_resolvers_release_their_slots(void) {
+    static const char *const names[NET_DNS_PENDING] = {
+        "localhost", "LOCALHOST", "LocalHost", "LoCaLhOsT"
+    };
+    net_egress_t eg;
+    net_host_t *h = net_host_open(&eg);
+    CHECK(h != NULL, "resolver-reap sockets layer would not start");
+    if (!h) return;
+
+    uint32_t ip = 0u;
+    for (unsigned i = 0u; i < NET_DNS_PENDING; i++) {
+        int rc = eg.resolve(eg.ctx, names[i], &ip);
+        CHECK(rc == NET_RES_PENDING,
+              "resolver-reap lookup %u returned %d synchronously", i, rc);
+    }
+    CHECK(net_host_stats(h)->resolves == NET_DNS_PENDING,
+          "resolver-reap did not occupy every bounded worker slot");
+
+    /* Do not poll the original names: this models the core timing them out.
+     * A later name must reap a completed orphan before it can start. */
+    for (unsigned i = 0u;
+         i < 5000u && net_host_stats(h)->resolves == NET_DNS_PENDING;
+         i++) {
+        (void)eg.resolve(eg.ctx, "lOcAlHoSt", &ip);
+        nap_ms(1u);
+    }
+    CHECK(net_host_stats(h)->resolves == NET_DNS_PENDING + 1u,
+          "completed unclaimed resolvers permanently occupied the table");
+    net_host_close(h);
+    nap_ms(10u);
 }
 
 static void test_the_handle_table_is_bounded_and_reusable(void) {
@@ -264,6 +336,8 @@ int main(void) {
     test_a_connect_to_a_closed_port_fails_rather_than_hanging();
     test_a_udp_socket_is_ready_at_once();
     test_the_resolver_separates_no_such_name_from_try_again();
+    test_close_abandons_inflight_resolvers_without_waiting();
+    test_completed_unclaimed_resolvers_release_their_slots();
     test_the_handle_table_is_bounded_and_reusable();
     test_bad_handles_are_refused_and_not_dereferenced();
     test_the_null_forms_do_not_crash();

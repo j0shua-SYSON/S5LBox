@@ -11,17 +11,16 @@
  * point below either completes at once or reports "not yet" and is asked again
  * on the next net_tick().
  *
- * THE ONE EXCEPTION IS resolve(), and it is stated rather than hidden:
- * getaddrinfo() has no portable non-blocking form, so a DNS lookup for a name
- * that is not cached blocks the CPU thread for as long as the host's resolver
- * takes. Fixing that needs a thread and a completion queue, which is more
- * machinery than N0 justifies; it is recorded here so the first person to see a
- * multi-second hitch on a captive network knows where to look.
+ * DNS follows the same rule. getaddrinfo() has no portable non-blocking form,
+ * so bounded detached workers own that one blocking call. resolve() starts or
+ * polls a job and returns NET_RES_PENDING immediately; a slow or captive host
+ * resolver therefore cannot freeze the emulated CPU or its display.
  *
  * Copyright (c) 2026 j0shua-SYSON. MIT licensed.
  */
 #include "net_host.h"
 
+#include <errno.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -31,6 +30,7 @@
 #  endif
 #  include <winsock2.h>
 #  include <ws2tcpip.h>
+#  include <process.h>
    typedef SOCKET sock_t;
 #  define SOCK_INVALID   INVALID_SOCKET
 #  define sock_close      closesocket
@@ -50,6 +50,7 @@
 #  include <fcntl.h>
 #  include <netdb.h>
 #  include <netinet/in.h>
+#  include <pthread.h>
 #  include <sys/socket.h>
 #  include <unistd.h>
    typedef int sock_t;
@@ -76,10 +77,69 @@ typedef struct {
     bool     failed;
 } host_sock_t;
 
+/* One resolver job per core pending slot. `refs` starts at two: the owner and
+ * the detached worker. Either may finish first; the second destroys it. */
+typedef struct host_resolver {
+#if defined(_WIN32)
+    CRITICAL_SECTION lock;
+#else
+    pthread_mutex_t lock;
+#endif
+    unsigned refs;
+    bool     done;
+    int      result;
+    uint32_t ip;
+    char     name[256];
+} host_resolver_t;
+
 struct net_host {
     host_sock_t      s[NET_HOST_MAX_SOCKETS];
+    host_resolver_t *resolver[NET_DNS_PENDING];
     net_host_stats_t stats;
 };
+
+static bool resolver_lock_init(host_resolver_t *job) {
+#if defined(_WIN32)
+    return InitializeCriticalSectionAndSpinCount(&job->lock, 0u) != 0;
+#else
+    return pthread_mutex_init(&job->lock, NULL) == 0;
+#endif
+}
+
+static void resolver_lock(host_resolver_t *job) {
+#if defined(_WIN32)
+    EnterCriticalSection(&job->lock);
+#else
+    (void)pthread_mutex_lock(&job->lock);
+#endif
+}
+
+static void resolver_unlock(host_resolver_t *job) {
+#if defined(_WIN32)
+    LeaveCriticalSection(&job->lock);
+#else
+    (void)pthread_mutex_unlock(&job->lock);
+#endif
+}
+
+static void resolver_dispose(host_resolver_t *job) {
+    if (!job) return;
+#if defined(_WIN32)
+    DeleteCriticalSection(&job->lock);
+#else
+    (void)pthread_mutex_destroy(&job->lock);
+#endif
+    free(job);
+}
+
+static void resolver_release(host_resolver_t *job) {
+    if (!job) return;
+    resolver_lock(job);
+    if (job->refs) job->refs--;
+    bool dispose = job->refs == 0u;
+    resolver_unlock(job);
+    if (dispose) resolver_dispose(job);
+}
 
 /* ------------------------------------------------------------- helpers --- */
 
@@ -350,11 +410,9 @@ static void h_close(void *ctx, int handle) {
     h->stats.closes++;
 }
 
-static int h_resolve(void *ctx, const char *name, uint32_t *ip) {
-    net_host_t *h = ctx;
+static int resolve_name(const char *name, uint32_t *ip) {
     struct addrinfo hints, *res = NULL;
-    if (!h || !name || !ip) return NET_RES_FAIL;
-    h->stats.resolves++;
+    if (!name || !ip) return NET_RES_FAIL;
 
     memset(&hints, 0, sizeof hints);
     hints.ai_family   = AF_INET;         /* A records only; N0 is IPv4       */
@@ -370,19 +428,162 @@ static int h_resolve(void *ctx, const char *name, uint32_t *ip) {
          * that exists out of service for the whole boot.
          */
 #if defined(EAI_NONAME)
-        if (rc == EAI_NONAME) { h->stats.resolve_nxdomain++; return NET_RES_NXDOMAIN; }
+        if (rc == EAI_NONAME) return NET_RES_NXDOMAIN;
 #endif
 #if defined(EAI_NODATA) && (!defined(EAI_NONAME) || EAI_NODATA != EAI_NONAME)
-        if (rc == EAI_NODATA) { h->stats.resolve_nxdomain++; return NET_RES_NXDOMAIN; }
+        if (rc == EAI_NODATA) return NET_RES_NXDOMAIN;
 #endif
-        h->stats.resolve_failures++;
         return NET_RES_FAIL;
     }
 
-    const struct sockaddr_in *sa = (const struct sockaddr_in *)(void *)res->ai_addr;
+    if (!res->ai_addr ||
+        (size_t)res->ai_addrlen < sizeof(struct sockaddr_in)) {
+        freeaddrinfo(res);
+        return NET_RES_FAIL;
+    }
+    const struct sockaddr_in *sa =
+        (const struct sockaddr_in *)(const void *)res->ai_addr;
     *ip = ntohl(sa->sin_addr.s_addr);
     freeaddrinfo(res);
     return NET_RES_OK;
+}
+
+#if defined(_WIN32)
+static unsigned __stdcall resolver_worker(void *arg) {
+#else
+static void *resolver_worker(void *arg) {
+#endif
+    host_resolver_t *job = (host_resolver_t *)arg;
+    uint32_t ip = 0u;
+    int result = NET_RES_FAIL;
+#if defined(_WIN32)
+    WSADATA wsa;
+    bool sockets_ready = WSAStartup(MAKEWORD(2, 2), &wsa) == 0;
+    if (sockets_ready) {
+        result = resolve_name(job->name, &ip);
+        WSACleanup();
+    }
+#else
+    result = resolve_name(job->name, &ip);
+#endif
+
+    resolver_lock(job);
+    job->result = result;
+    job->ip = ip;
+    job->done = true;
+    resolver_unlock(job);
+    resolver_release(job);              /* the detached worker's reference */
+#if defined(_WIN32)
+    return 0u;
+#else
+    return NULL;
+#endif
+}
+
+static bool resolver_start(host_resolver_t *job, int *error) {
+    if (error) *error = 0;
+#if defined(_WIN32)
+    uintptr_t thread = _beginthreadex(NULL, 0u, resolver_worker, job, 0u, NULL);
+    if (!thread) {
+        if (error) *error = errno;
+        return false;
+    }
+    (void)CloseHandle((HANDLE)thread);
+    return true;
+#else
+    pthread_attr_t attr;
+    int rc = pthread_attr_init(&attr);
+    if (rc != 0) {
+        if (error) *error = rc;
+        return false;
+    }
+    rc = pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    pthread_t thread;
+    if (rc == 0) rc = pthread_create(&thread, &attr, resolver_worker, job);
+    (void)pthread_attr_destroy(&attr);
+    if (rc != 0) {
+        if (error) *error = rc;
+        return false;
+    }
+    return true;
+#endif
+}
+
+static int h_resolve(void *ctx, const char *name, uint32_t *ip) {
+    net_host_t *h = ctx;
+    if (!h || !name || !ip || !name[0] || strlen(name) >= 256u) {
+        if (h) h->stats.resolve_failures++;
+        return NET_RES_FAIL;
+    }
+
+    int free_slot = -1;
+    for (unsigned i = 0u; i < NET_DNS_PENDING; i++) {
+        host_resolver_t *job = h->resolver[i];
+        if (!job) {
+            if (free_slot < 0) free_slot = (int)i;
+            continue;
+        }
+
+        resolver_lock(job);
+        bool done = job->done;
+        int result = job->result;
+        uint32_t address = job->ip;
+        resolver_unlock(job);
+
+        if (strcmp(job->name, name) != 0) {
+            /* The core may already have timed this question out. Reap its
+             * completed worker here so later names cannot lose the slot. */
+            if (done) {
+                h->resolver[i] = NULL;
+                resolver_release(job);
+                if (free_slot < 0) free_slot = (int)i;
+            }
+            continue;
+        }
+        if (!done) return NET_RES_PENDING;
+
+        h->resolver[i] = NULL;
+        resolver_release(job);          /* the net_host owner's reference */
+        if (result == NET_RES_OK) {
+            *ip = address;
+        } else if (result == NET_RES_NXDOMAIN) {
+            h->stats.resolve_nxdomain++;
+        } else {
+            h->stats.resolve_failures++;
+        }
+        return result;
+    }
+
+    /* Every slot is doing useful work. The core retains this query and asks
+     * again; returning a false failure here would poison the guest's cache. */
+    if (free_slot < 0) return NET_RES_PENDING;
+
+    host_resolver_t *job = (host_resolver_t *)calloc(1u, sizeof *job);
+    if (!job) {
+        h->stats.resolve_failures++;
+        return NET_RES_FAIL;
+    }
+    if (!resolver_lock_init(job)) {
+        free(job);
+        h->stats.resolve_failures++;
+        return NET_RES_FAIL;
+    }
+    memcpy(job->name, name, strlen(name) + 1u);
+    job->refs = 2u;
+    h->resolver[(unsigned)free_slot] = job;
+    h->stats.resolves++;
+
+    int error = 0;
+    if (!resolver_start(job, &error)) {
+        h->resolver[(unsigned)free_slot] = NULL;
+        job->refs = 0u;                 /* no worker was created */
+        resolver_dispose(job);
+        h->stats.resolve_failures++;
+        h->stats.errors++;
+        h->stats.last_error = error;
+        return NET_RES_FAIL;
+    }
+    return NET_RES_PENDING;
 }
 
 /* ------------------------------------------------------------ lifetime --- */
@@ -421,6 +622,11 @@ void net_host_close(net_host_t *h) {
     if (!h) return;
     for (unsigned i = 0; i < NET_HOST_MAX_SOCKETS; i++)
         if (h->s[i].used) { sock_close(h->s[i].fd); h->s[i].used = false; }
+    for (unsigned i = 0u; i < NET_DNS_PENDING; i++) {
+        host_resolver_t *job = h->resolver[i];
+        h->resolver[i] = NULL;
+        resolver_release(job);          /* worker may still finish later */
+    }
     free(h);
 #if defined(_WIN32)
     WSACleanup();

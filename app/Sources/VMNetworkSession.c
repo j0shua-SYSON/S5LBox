@@ -237,6 +237,9 @@ void vm_network_session_status(const vm_network_session_t *session,
         out->ip_out = session->net->stats.ip_out;
         out->dns_queries = session->net->stats.dns_queries;
         out->dns_answered = session->net->stats.dns_answered;
+        out->dns_deferred = session->net->stats.dns_deferred;
+        out->dns_pending_full = session->net->stats.dns_pending_full;
+        out->dns_timeouts = session->net->stats.dns_timeouts;
         out->tcp_established = session->net->stats.tcp_established;
         out->tcp_bytes_to_host = session->net->stats.tcp_bytes_to_host;
         out->tcp_bytes_to_guest = session->net->stats.tcp_bytes_to_guest;
@@ -245,6 +248,9 @@ void vm_network_session_status(const vm_network_session_t *session,
     if (host) {
         out->host_bytes_out = host->bytes_out;
         out->host_bytes_in = host->bytes_in;
+        out->host_resolves = host->resolves;
+        out->host_resolve_failures = host->resolve_failures;
+        out->host_resolve_nxdomain = host->resolve_nxdomain;
         out->host_errors = host->errors;
         out->host_last_error = host->last_error;
     }
