@@ -592,6 +592,74 @@ static void test_success_boundary_growth_and_source_immutable(void) {
     remove_if_present(source);
 }
 
+static void test_stale_alternate_accounting_is_accepted(void) {
+    char source[160];
+    char destination[160];
+    uint8_t fixture[FIXTURE_SIZE];
+    uint8_t source_after[FIXTURE_SIZE];
+    uint8_t primary[HFS_VH_LEN];
+    uint8_t alternate[HFS_VH_LEN];
+    uint8_t *stale;
+    rootfs_work_options_t options;
+    rootfs_work_result_t result;
+    FILE *stream;
+    uint64_t expected_size = (uint64_t)19u * FIXTURE_BLOCK_SIZE;
+
+    CHECK(make_path(source, sizeof(source), "stale-accounting-source"),
+          "could not form stale-accounting source path");
+    CHECK(make_path(destination, sizeof(destination), "stale-accounting-work"),
+          "could not form stale-accounting destination path");
+    remove_if_present(source);
+    remove_if_present(destination);
+    make_hfs_fixture(fixture, 1u);
+    stale = fixture + FIXTURE_SIZE - HFS_VH_OFF;
+    put_be32(stale + 20u, 0x12345678u); /* modifyDate */
+    put_be32(stale + 32u, 3u);          /* fileCount */
+    put_be32(stale + 36u, 2u);          /* folderCount */
+    put_be32(stale + 48u, 9u);          /* freeBlocks */
+    put_be32(stale + 52u, 2u);          /* nextAllocation */
+    put_be32(stale + 64u, 15u);         /* nextCatalogID */
+    put_be32(stale + 68u, 7u);          /* writeCount */
+    CHECK(write_file(source, fixture, sizeof(fixture)),
+          "could not write stale-accounting fixture");
+
+    memset(&options, 0, sizeof(options));
+    options.fstab_line = "/dev/md0 / hfs rw,update 0 0";
+    options.growth_bytes = 4u * FIXTURE_BLOCK_SIZE;
+    options.io_buffer_bytes = 17u;
+    CHECK(rootfs_work_create(source, destination, &options, &result) ==
+              ROOTFS_WORK_OK,
+          "legal stale alternate returned %s/%s: %s",
+          rootfs_work_status_name(result.status),
+          rootfs_work_stage_name(result.stage), result.detail);
+    CHECK(result.published && file_size(destination) == expected_size,
+          "legal stale alternate did not publish the grown work image");
+    CHECK(read_file(source, source_after, sizeof(source_after)) &&
+              memcmp(source_after, fixture, sizeof(fixture)) == 0,
+          "stale-accounting source changed during provisioning");
+
+    stream = fopen(destination, "rb");
+    CHECK(stream != NULL, "could not open stale-accounting work image");
+    if (stream) {
+        CHECK(fseek(stream, (long)HFS_VH_OFF, SEEK_SET) == 0 &&
+                  fread(primary, 1u, sizeof(primary), stream) ==
+                      sizeof(primary),
+              "could not read stale-accounting primary header");
+        CHECK(fseek(stream, (long)(expected_size - HFS_VH_OFF), SEEK_SET) == 0 &&
+                  fread(alternate, 1u, sizeof(alternate), stream) ==
+                      sizeof(alternate),
+              "could not read stale-accounting alternate header");
+        CHECK(fclose(stream) == 0,
+              "could not close stale-accounting work image");
+        CHECK(memcmp(primary, alternate, sizeof(primary)) == 0,
+              "published work image did not refresh its alternate header");
+    }
+    CHECK(no_temporary_files(),
+          "stale-accounting success left a temporary file");
+    remove_if_present(destination);
+    remove_if_present(source);
+}
+
 static void test_required_identity_chunk_boundaries(void) {
     static const size_t buffer_sizes[] = {1u, 63u, 64u, 65u};
     char source[160];
@@ -1225,8 +1293,12 @@ static void test_malformed_hfs_refused(void) {
     uint8_t *header;
 
     make_hfs_fixture(fixture, 1u);
-    fixture[FIXTURE_SIZE - HFS_VH_OFF + 48u] ^= 1u;
+    fixture[FIXTURE_SIZE - HFS_VH_OFF + 44u] ^= 1u;
     expect_hfs_invalid(fixture, "alternate-mismatch", "headers disagree");
+
+    make_hfs_fixture(fixture, 1u);
+    fixture[FIXTURE_SIZE - HFS_VH_OFF + 128u] ^= 1u;
+    expect_hfs_invalid(fixture, "alternate-fork-mismatch", "headers disagree");
 
     make_hfs_fixture(fixture, 1u);
     bitmap_set(fixture, 1u, false);
@@ -1500,6 +1572,7 @@ int main(void) {
     test_sha256_known_answers_and_chunking();
     test_sha256_invalid_and_overflow_guards();
     test_success_boundary_growth_and_source_immutable();
+    test_stale_alternate_accounting_is_accepted();
     test_required_identity_chunk_boundaries();
     test_source_identity_policy_and_cleanup();
     test_fstab_uniqueness_and_cleanup();

@@ -2086,6 +2086,28 @@ static bool allocation_scan(host_file_t *file, uint64_t file_size,
     return true;
 }
 
+/*
+ * TN1150 does not require the alternate volume header to be a byte-for-byte
+ * mirror of the primary.  The primary is updated before unmount, while the
+ * alternate is intended for repair utilities and should only be refreshed
+ * when a special file's length or location changes.  Ordinary guest use can
+ * therefore leave dates, counts, allocation hints, and writeCount stale in
+ * the alternate even after a clean unmount.
+ *
+ * Keep the refusal boundary on everything that could make us interpret the
+ * disk differently: format signature/version, allocation geometry, and all
+ * five special-file fork descriptors.  hfs_validate() separately requires a
+ * clean, non-journalled primary and reconciles its freeBlocks against the
+ * allocation bitmap, so no stale alternate accounting value is trusted.
+ */
+static bool hfs_headers_share_layout(const uint8_t primary[HFS_VH_LEN],
+                                     const uint8_t alternate[HFS_VH_LEN]) {
+    return memcmp(primary, alternate, 4u) == 0 &&
+           memcmp(primary + 40u, alternate + 40u, 8u) == 0 &&
+           memcmp(primary + 112u, alternate + 112u,
+                  HFS_VH_LEN - 112u) == 0;
+}
+
 static bool hfs_validate(host_file_t *file, uint64_t file_size,
                          hfs_volume_t *volume, uint8_t *buffer,
                          size_t buffer_size, rootfs_work_stage_t stage,
@@ -2174,9 +2196,10 @@ static bool hfs_validate(host_file_t *file, uint64_t file_size,
     if (!checked_read(file, file_size, file_size - HFS_VH_OFF, alternate,
                       sizeof(alternate), stage, result))
         return false;
-    if (memcmp(primary, alternate, sizeof(primary)) != 0) {
+    if (!hfs_headers_share_layout(primary, alternate)) {
         result_fail(result, ROOTFS_WORK_HFS_INVALID, stage, 0,
-                    "primary and alternate volume headers disagree");
+                    "primary and alternate volume headers disagree on "
+                    "format, geometry, or special-file layout");
         return false;
     }
 
