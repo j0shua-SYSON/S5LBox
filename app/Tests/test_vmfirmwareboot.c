@@ -332,12 +332,17 @@ static void test_saved_state_restore_fixture(void) {
     FILE *ppp_file = fopen(ppp_marker, "rb");
     bool expect_ppp = ppp_file && fgetc(ppp_file) != EOF;
     if (ppp_file) fclose(ppp_file);
-    char jailbreak_marker[VM_FW_BOOT_PATH_CAPACITY + 64u];
-    snprintf(jailbreak_marker, sizeof jailbreak_marker, "%s/%s", fixture,
-             VM_FW_BOOT_JAILBREAK_FILE);
-    FILE *jailbreak_file = fopen(jailbreak_marker, "rb");
-    bool expect_jailbreak = jailbreak_file && fgetc(jailbreak_file) != EOF;
-    if (jailbreak_file) fclose(jailbreak_file);
+    uint8_t jailbreak_digest[VM_GUEST_INSTALL_SHA256_SIZE];
+    char jailbreak_detail[VM_FW_BOOT_DETAIL_CAPACITY] = {0};
+    vm_guest_install_probe_t jailbreak_probe =
+        vm_guest_install_probe(fixture, jailbreak_digest,
+                               jailbreak_detail, sizeof jailbreak_detail);
+    CHECK(jailbreak_probe != VM_GUEST_INSTALL_PROBE_INVALID &&
+          jailbreak_probe != VM_GUEST_INSTALL_PROBE_IO_ERROR,
+          "restore fixture has an unsafe guest-install record: %s",
+          jailbreak_detail);
+    bool expect_jailbreak =
+        jailbreak_probe == VM_GUEST_INSTALL_PROBE_VALID;
 
     bool values[VM_BOOT_OPTION_MAX];
     for (unsigned i = 0; i < VM_BOOT_OPTION_MAX; i++) values[i] = false;
@@ -686,6 +691,34 @@ int main(void) {
         remove_at(WORKDIR, VM_FW_BOOT_WORK_FILE);
         remove_file(VM_FW_BOOT_KERNEL_FILE);
         write_file(VM_FW_BOOT_KERNEL_FILE, 0);
+    }
+
+    /* The app entry point itself, not merely the record parser, must refuse an
+     * arbitrary nonempty guest-install marker. Otherwise a truncated write
+     * could arm kernel policy without proving that the matching disk payload
+     * was ever committed. This runs before firmware probing by design. */
+    {
+        vm_firmware_boot_t *boot = vm_firmware_boot_create();
+        vm_firmware_boot_report_t report;
+        s5l8900_t machine;
+        write_file(VM_FW_BOOT_JAILBREAK_FILE, 1u);
+        CHECK(boot != NULL, "could not create strict-marker boot context");
+        if (boot) {
+            CHECK(s5l8900_init(&machine, S5L_BRINGUP_PHYS_BASE,
+                               S5L_BRINGUP_RAM_SIZE),
+                  "strict-marker s5l8900_init failed");
+            bool ok = vm_firmware_boot_start(boot, &machine, &SHARED,
+                                             NULL, 0u, &report);
+            CHECK(!ok && !report.ok,
+                  "a malformed guest-install marker reached bring-up");
+            CHECK(mentions(report.detail, "guest-install") &&
+                  mentions(report.summary, "guest-install"),
+                  "strict-marker refusal was hidden: %s / %s",
+                  report.detail, report.summary);
+            s5l8900_free(&machine);
+            vm_firmware_boot_destroy(&boot);
+        }
+        remove_file(VM_FW_BOOT_JAILBREAK_FILE);
     }
 
     /*

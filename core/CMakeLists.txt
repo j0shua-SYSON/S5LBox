@@ -400,6 +400,7 @@ add_executable(test_vmfirmwareboot
     ../app/Tests/test_vmfirmwareboot.c
     ../app/Sources/VMFrameTelemetry.c
     ../app/Sources/VMFirmwareBoot.c
+    ../app/Sources/VMGuestInstall.c
     ../app/Sources/VMNetworkSession.c
     ../app/Sources/VMResumeCheckpoint.c
     ../app/Sources/VMSnapshotCow.c
@@ -467,6 +468,30 @@ else()
 endif()
 add_test(NAME app_resume_checkpoint COMMAND test_vmresumecheckpoint)
 set_tests_properties(app_resume_checkpoint PROPERTIES
+    WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+
+# Publishing a prepared guest filesystem is a journalled rename transaction.
+# Tiny files exercise every crash boundary precisely; a full HFS image would
+# make this test hundreds of megabytes slower without changing the state graph.
+add_executable(test_vmguestinstall
+    ../app/Tests/test_vmguestinstall.c
+    ../app/Sources/VMGuestInstall.c
+)
+target_include_directories(test_vmguestinstall PRIVATE ../app/Sources)
+target_compile_definitions(test_vmguestinstall PRIVATE
+    S5LBOX_GUEST_INSTALL_TESTING=1)
+set_target_properties(test_vmguestinstall PROPERTIES
+    C_STANDARD 11
+    C_STANDARD_REQUIRED YES
+    C_EXTENSIONS NO)
+if(MSVC)
+    target_compile_options(test_vmguestinstall PRIVATE /W4 /WX)
+else()
+    target_compile_options(test_vmguestinstall PRIVATE
+        -Wall -Wextra -Werror -pedantic -Wformat=2 -Wshadow)
+endif()
+add_test(NAME app_guest_install_transaction COMMAND test_vmguestinstall)
+set_tests_properties(app_guest_install_transaction PROPERTIES
     WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
 
 # Which of the settings screen's fourteen switches reaches a bring-up request,
@@ -629,6 +654,7 @@ add_executable(test_vminstancepaths
     ../app/Sources/VMInstancePaths.c
     ../app/Sources/VMInstances.c
     ../app/Sources/VMFirmwareBoot.c
+    ../app/Sources/VMGuestInstall.c
     ../app/Sources/VMNetworkSession.c
     ../app/Sources/VMResumeCheckpoint.c
     ../app/Sources/VMSnapshotCow.c

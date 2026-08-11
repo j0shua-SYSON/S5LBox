@@ -20,6 +20,7 @@
 #ifndef S5LBOX_APP_VMFIRMWAREBOOT_H
 #define S5LBOX_APP_VMFIRMWAREBOOT_H
 
+#include "VMGuestInstall.h"
 #include "VMBootOptions.h"
 #include "bringup.h"
 #include "soc.h"
@@ -55,12 +56,11 @@ extern "C" {
  * filesystem was made. The marker contains no credential or network state. */
 #define VM_FW_BOOT_PPP_FILE         "network.ppp-v1"
 #define VM_FW_BOOT_PPP_TMP          "network.ppp-v1.partial"
-/* A nonempty record published only after the replacement work image contains
- * the complete guest payload. Boot policy follows this per-machine record,
- * never a live settings switch. Presence proves a committed host transaction,
- * not that Cydia or an unsigned executable has passed a runtime test. */
-#define VM_FW_BOOT_JAILBREAK_FILE    "guest.jailbreak-v1"
-#define VM_FW_BOOT_JAILBREAK_TMP     "guest.jailbreak-v1.partial"
+/* Compatibility names for callers that derive all boot-sidecar paths here.
+ * Unlike the PPP record, this is a strict manifest record parsed by
+ * VMGuestInstall: arbitrary nonempty bytes are deliberately not accepted. */
+#define VM_FW_BOOT_JAILBREAK_FILE VM_GUEST_INSTALL_MARKER_FILE
+#define VM_FW_BOOT_JAILBREAK_TMP  VM_GUEST_INSTALL_MARKER_TMP
 /*
  * The automatic suspend-to-disk pair. A complete pair is consumed once when
  * VM_FW_BOOT_RESTORE_ONCE_FILE is also present. No marker means no restore,
@@ -84,8 +84,8 @@ extern "C" {
 #define VM_FW_BOOT_STATE_MD_FILE    "state.snap.mdstate"
 #define VM_FW_BOOT_STATE_TMP        "state.snap.partial"
 #define VM_FW_BOOT_STATE_MD_TMP     "state.snap.mdstate.partial"
-#define VM_FW_BOOT_RESTORE_ONCE_FILE "state.snap.restore-once"
-#define VM_FW_BOOT_RESTORE_ONCE_TMP  "state.snap.restore-once.partial"
+#define VM_FW_BOOT_RESTORE_ONCE_FILE VM_GUEST_INSTALL_RESUME_ONCE_FILE
+#define VM_FW_BOOT_RESTORE_ONCE_TMP  VM_GUEST_INSTALL_RESUME_ONCE_TMP
 
 /* Physical A/B control for the signed-static engine.  This marker is read only
  * in builds which contain that engine.  It never enables executable memory;

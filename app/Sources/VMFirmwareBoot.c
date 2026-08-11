@@ -5,6 +5,7 @@
 #include "md_snapshot.h"
 #include "snapshot.h"
 #include "VMFrameTelemetry.h"
+#include "VMGuestInstall.h"
 #include "VMNetworkSession.h"
 #include "VMSnapshotCow.h"
 #include "VMFirmwareHLE.h"
@@ -595,6 +596,29 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
         return false;
     }
 
+    /* Finish or roll back an interrupted rootfs replacement BEFORE probing or
+     * opening the live image. The strict marker is also the only authority for
+     * the paired code-signing policy below: malformed evidence stops here
+     * instead of producing a half-installed, policy-off boot. */
+    vm_guest_install_result_t guest_install;
+    char guest_install_detail[VM_FW_BOOT_DETAIL_CAPACITY] = {0};
+    vm_guest_install_status_t guest_install_status =
+        vm_guest_install_recover(paths->work, &guest_install,
+                                 guest_install_detail,
+                                 sizeof guest_install_detail);
+    if (guest_install_status != VM_GUEST_INSTALL_OK) {
+        (void)snprintf(report->detail, sizeof report->detail,
+                       "Guest-install recovery refused (%s): %s",
+                       vm_guest_install_status_text(guest_install_status),
+                       guest_install_detail[0] ? guest_install_detail
+                                               : "no safe recovery exists");
+        report->detail[sizeof report->detail - 1u] = '\0';
+        set_detail(report->summary, sizeof report->summary,
+                   "guest-install recovery required");
+        return false;
+    }
+    bool guest_install_committed = guest_install.committed;
+
     bool forced_interpreter = false;
     bool compact_user_only = false;
     bool compact_window_refill_off = false;
@@ -900,20 +924,8 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
     vm_boot_options_reconcile_network(&report->options, &request,
                                       ppp_provisioned);
 
-    char jailbreak_marker[VM_FW_BOOT_PATH_CAPACITY + 64u];
-    if (!join_path(jailbreak_marker, sizeof jailbreak_marker, paths->work,
-                   VM_FW_BOOT_JAILBREAK_FILE)) {
-        free(kernel);
-        free(tree);
-        (void)file_block_close(boot->media);
-        set_detail(report->detail, sizeof report->detail,
-                   "The guest-install record path is too long to use.");
-        set_detail(report->summary, sizeof report->summary,
-                   "guest-install path unavailable");
-        return false;
-    }
     vm_boot_options_reconcile_jailbreak(
-        &report->options, &request, file_size(jailbreak_marker) > 0u);
+        &report->options, &request, guest_install_committed);
 
     s5l_bringup_status_t status =
         s5l_bringup(machine, &request, boot->bridges, &report->bringup);
