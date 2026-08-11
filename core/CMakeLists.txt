@@ -542,6 +542,36 @@ add_test(NAME app_guest_package_manifest COMMAND test_vmguestpackagemanifest)
 set_tests_properties(app_guest_package_manifest PROPERTIES
     WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
 
+# End-to-end host-side planning for the guest package transaction: exact
+# package identity, Debian ar, gzip, tar metadata, iPhone OS alias remapping,
+# package cache and first-boot launchd job. The ordinary test authors all of
+# its bytes; an opt-in environment variable admits the local original packages.
+add_executable(test_vmguestrootfsplan
+    ../app/Tests/test_vmguestrootfsplan.c
+    ../app/Sources/VMGuestRootfsPlan.c
+    ../app/Sources/VMGuestPackageManifest.c
+    ../app/Sources/VMDebArchive.c
+    ../app/Sources/VMFirmwareInflate.c
+    ../app/Sources/VMFirmwareZip.c
+    ../tools/payload_tar.c
+    ../tools/sha256.c
+)
+target_include_directories(test_vmguestrootfsplan PRIVATE
+    ../app/Sources ../tools)
+set_target_properties(test_vmguestrootfsplan PROPERTIES
+    C_STANDARD 11
+    C_STANDARD_REQUIRED YES
+    C_EXTENSIONS NO)
+if(MSVC)
+    target_compile_options(test_vmguestrootfsplan PRIVATE /W4 /WX)
+else()
+    target_compile_options(test_vmguestrootfsplan PRIVATE
+        -Wall -Wextra -Werror -pedantic -Wformat=2 -Wshadow)
+endif()
+add_test(NAME app_guest_rootfs_plan COMMAND test_vmguestrootfsplan)
+set_tests_properties(app_guest_rootfs_plan PROPERTIES
+    WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+
 # Which of the settings screen's fourteen switches reaches a bring-up request,
 # and what the app says about the ones that do not.  Two do; twelve do not; on
 # an untouched installation six are already in conflict with what bring-up
@@ -1101,6 +1131,10 @@ else()
     target_compile_options(host_rootfs_work PRIVATE
         -Wall -Wextra -Werror -pedantic)
 endif()
+# The guest-plan test is declared with the other app policy tests above, then
+# gains the real HFS writer here once that standalone library exists. Its disk
+# case remains opt-in; ordinary CI still authors only tiny in-memory fixtures.
+target_link_libraries(test_vmguestrootfsplan PRIVATE host_rootfs_work)
 
 add_executable(test_rootfs_work tests/test_rootfs_work.c)
 target_link_libraries(test_rootfs_work PRIVATE host_rootfs_work)

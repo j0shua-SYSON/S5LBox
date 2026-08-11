@@ -80,6 +80,10 @@ targets:
         group: core
       - path: ../tools/rootfs_work.c
         group: core
+      # Strict tar metadata parsing for the verified guest package foundation.
+      # Payload bytes remain download-only and are never part of the app.
+      - path: ../tools/payload_tar.c
+        group: core
       # Ordinary nonblocking TCP/UDP sockets behind the portable guest NAT.
       # No tunnel, raw socket, private API, entitlement, or background daemon.
       - path: ../tools/net_host.c
