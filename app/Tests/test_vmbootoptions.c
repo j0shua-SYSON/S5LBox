@@ -505,6 +505,71 @@ static void test_network_state_is_reconciled_with_the_work_image(void) {
           "disabling NAT also disabled the PPP serial transport");
 }
 
+static void test_jailbreak_state_is_reconciled_with_the_work_image(void) {
+    bool values[VM_BOOT_OPTION_MAX];
+    vm_boot_options_report_t report;
+    s5l_bringup_request_t request;
+    const int codesign = index_of("jb-codesign");
+    const int payload = index_of("jb-payload");
+    if (codesign < 0 || payload < 0) return;
+
+    /* A switch cannot manufacture the on-disk half during boot. Also start
+     * request true so the absent record proves reconciliation actively clears
+     * stale caller state rather than merely relying on memset. */
+    defaults_into(values);
+    values[codesign] = true;
+    values[payload] = true;
+    vm_boot_options_apply(values, vm_option_count(), NULL, &report);
+    memset(&request, 0, sizeof request);
+    request.guest_codesign_disabled = true;
+    vm_boot_options_reconcile_jailbreak(&report, &request, false);
+    CHECK(!request.guest_codesign_disabled,
+          "an absent install record left guest code signing relaxed");
+    CHECK(report.row[codesign].outcome == VM_BOOT_OPTION_APPLIED &&
+          report.row[payload].outcome == VM_BOOT_OPTION_PROVISIONED,
+          "the two install halves have the wrong runtime/image outcomes");
+    CHECK(!report.row[codesign].effective &&
+          !report.row[payload].effective,
+          "settings alone claimed an installed guest payload");
+    CHECK(report.row[codesign].note &&
+          strstr(report.row[codesign].note, "without") &&
+          report.row[payload].note &&
+          strstr(report.row[payload].note, "no completed"),
+          "the refused settings-only request is not actionable");
+    CHECK(strstr(report.summary, "jb-codesign") &&
+          strstr(report.summary, "jb-payload"),
+          "the settings/record mismatch is absent from the summary: %s",
+          report.summary);
+
+    /* Conversely, a committed work image owns both halves even if the old
+     * switches are off. This is the state the button-based UI will produce. */
+    defaults_into(values);
+    values[codesign] = false;
+    values[payload] = false;
+    vm_boot_options_apply(values, vm_option_count(), NULL, &report);
+    memset(&request, 0, sizeof request);
+    vm_boot_options_reconcile_jailbreak(&report, &request, true);
+    CHECK(request.guest_codesign_disabled,
+          "a completed install record did not reach bring-up");
+    CHECK(report.row[codesign].effective && report.row[payload].effective,
+          "a completed install record did not reconcile both halves on");
+    CHECK(report.row[codesign].note &&
+          strstr(report.row[codesign].note, "required") &&
+          report.row[payload].note &&
+          strstr(report.row[payload].note, "already contains"),
+          "the recorded-on/settings-off mismatch has no explanation");
+    CHECK(strstr(report.summary, "jb-codesign") &&
+          strstr(report.summary, "jb-payload"),
+          "the recorded install is absent from the summary: %s",
+          report.summary);
+
+    request.guest_codesign_disabled = false;
+    vm_boot_options_reconcile_jailbreak(NULL, &request, true);
+    CHECK(request.guest_codesign_disabled,
+          "report-only omission prevented request reconciliation");
+    vm_boot_options_reconcile_jailbreak(&report, NULL, true);
+}
+
 /*
  * Absent, short and over-long value arrays. A caller with no stored settings,
  * or one whose stored array predates a new row, must get each row's DEFAULT --
@@ -620,6 +685,7 @@ int main(void) {
     test_fixed_rows();
     test_provisioned_row();
     test_network_state_is_reconciled_with_the_work_image();
+    test_jailbreak_state_is_reconciled_with_the_work_image();
     test_missing_and_short_value_arrays();
     test_every_note_is_usable();
     test_summary_bounds();

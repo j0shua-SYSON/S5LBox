@@ -181,6 +181,21 @@ void vm_boot_options_reconcile_network(vm_boot_options_report_t *report,
                                        bool ppp_provisioned);
 
 /*
+ * Reconcile both guest-jailbreak rows with a completed per-machine install
+ * record. The filesystem payload and relaxed guest code-signing policy are a
+ * single persisted state: a settings value cannot install either one during
+ * boot, and bring-up must never enable only the kernel half.
+ *
+ * `installed` means that the rootfs transaction completed and published its
+ * host-side record. It does not claim that Cydia launched, that an unsigned
+ * binary ran, or that a tweak loaded; those require separate runtime proof.
+ * `request` may be NULL when only the report is needed.
+ */
+void vm_boot_options_reconcile_jailbreak(vm_boot_options_report_t *report,
+                                         s5l_bringup_request_t *request,
+                                         bool installed);
+
+/*
  * The map, for its own test only. The app calls neither: the property they
  * defend is that the map and VMOptions.c's table are the SAME SET of names,
  * which nothing at run time can check and nothing at run time should have to.

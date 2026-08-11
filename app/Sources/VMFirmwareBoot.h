@@ -55,6 +55,12 @@ extern "C" {
  * filesystem was made. The marker contains no credential or network state. */
 #define VM_FW_BOOT_PPP_FILE         "network.ppp-v1"
 #define VM_FW_BOOT_PPP_TMP          "network.ppp-v1.partial"
+/* A nonempty record published only after the replacement work image contains
+ * the complete guest payload. Boot policy follows this per-machine record,
+ * never a live settings switch. Presence proves a committed host transaction,
+ * not that Cydia or an unsigned executable has passed a runtime test. */
+#define VM_FW_BOOT_JAILBREAK_FILE    "guest.jailbreak-v1"
+#define VM_FW_BOOT_JAILBREAK_TMP     "guest.jailbreak-v1.partial"
 /*
  * The automatic suspend-to-disk pair. A complete pair is consumed once when
  * VM_FW_BOOT_RESTORE_ONCE_FILE is also present. No marker means no restore,

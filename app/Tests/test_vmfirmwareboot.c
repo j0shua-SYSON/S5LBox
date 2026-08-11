@@ -332,6 +332,12 @@ static void test_saved_state_restore_fixture(void) {
     FILE *ppp_file = fopen(ppp_marker, "rb");
     bool expect_ppp = ppp_file && fgetc(ppp_file) != EOF;
     if (ppp_file) fclose(ppp_file);
+    char jailbreak_marker[VM_FW_BOOT_PATH_CAPACITY + 64u];
+    snprintf(jailbreak_marker, sizeof jailbreak_marker, "%s/%s", fixture,
+             VM_FW_BOOT_JAILBREAK_FILE);
+    FILE *jailbreak_file = fopen(jailbreak_marker, "rb");
+    bool expect_jailbreak = jailbreak_file && fgetc(jailbreak_file) != EOF;
+    if (jailbreak_file) fclose(jailbreak_file);
 
     bool values[VM_BOOT_OPTION_MAX];
     for (unsigned i = 0; i < VM_BOOT_OPTION_MAX; i++) values[i] = false;
@@ -386,6 +392,16 @@ static void test_saved_state_restore_fixture(void) {
             CHECK(report.options.row[nat].effective == expect_ppp,
                   "NAT did not follow the requested-on switch and recorded "
                   "PPP state");
+        }
+        int codesign = vm_option_index("jb-codesign");
+        int payload = vm_option_index("jb-payload");
+        CHECK(codesign >= 0 && payload >= 0,
+              "guest-install option rows are absent from the restore report");
+        if (codesign >= 0 && payload >= 0) {
+            CHECK(report.options.row[codesign].effective ==
+                      expect_jailbreak &&
+                  report.options.row[payload].effective == expect_jailbreak,
+                  "guest-install report disagrees with its persisted record");
         }
         CHECK((machine.uart4_host_tx != NULL) == expect_ppp &&
               (machine.uart4_host_service != NULL) == expect_ppp &&
@@ -505,9 +521,13 @@ int main(void) {
     remove_file(VM_FW_BOOT_WORK_FILE);
     remove_file(VM_FW_BOOT_PPP_FILE);
     remove_file(VM_FW_BOOT_PPP_TMP);
+    remove_file(VM_FW_BOOT_JAILBREAK_FILE);
+    remove_file(VM_FW_BOOT_JAILBREAK_TMP);
     remove_at(WORKDIR, VM_FW_BOOT_WORK_FILE);
     remove_at(WORKDIR, VM_FW_BOOT_PPP_FILE);
     remove_at(WORKDIR, VM_FW_BOOT_PPP_TMP);
+    remove_at(WORKDIR, VM_FW_BOOT_JAILBREAK_FILE);
+    remove_at(WORKDIR, VM_FW_BOOT_JAILBREAK_TMP);
 
     /* Nothing imported at all. */
     vm_firmware_boot_probe(&SHARED, &state);
@@ -773,9 +793,13 @@ int main(void) {
     remove_file(VM_FW_BOOT_WORK_FILE);
     remove_file(VM_FW_BOOT_PPP_FILE);
     remove_file(VM_FW_BOOT_PPP_TMP);
+    remove_file(VM_FW_BOOT_JAILBREAK_FILE);
+    remove_file(VM_FW_BOOT_JAILBREAK_TMP);
     remove_at(WORKDIR, VM_FW_BOOT_WORK_FILE);
     remove_at(WORKDIR, VM_FW_BOOT_PPP_FILE);
     remove_at(WORKDIR, VM_FW_BOOT_PPP_TMP);
+    remove_at(WORKDIR, VM_FW_BOOT_JAILBREAK_FILE);
+    remove_at(WORKDIR, VM_FW_BOOT_JAILBREAK_TMP);
 
     printf("== vm firmware boot: %u checks, %u failure(s) ==\n",
            checks, failures);

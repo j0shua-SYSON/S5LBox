@@ -450,6 +450,43 @@ static arm_svc_result_t bringup_svc_handler(void *context, arm_cpu_t *cpu,
     return md_raw_bridge_handle_svc(&md->raw, cpu, pc, encoding);
 }
 
+/* A boot-argument key is one complete whitespace-delimited token up to '='.
+ * Matching tokens rather than substrings keeps `rd` distinct from `board`,
+ * and lets an explicit `key=0` override an opt-in request instead of silently
+ * appending a contradictory `key=1`. */
+static bool cmdline_has_key(const char *line, const char *key) {
+    size_t key_len;
+
+    if (!line || !key || !*key) return false;
+    key_len = strlen(key);
+    while (*line) {
+        const char *start;
+        size_t length;
+
+        while (*line == ' ' || *line == '\t') line++;
+        if (!*line) break;
+        start = line;
+        while (*line && *line != ' ' && *line != '\t') line++;
+        length = (size_t)(line - start);
+        if (length > key_len && start[key_len] == '=' &&
+            memcmp(start, key, key_len) == 0)
+            return true;
+    }
+    return false;
+}
+
+static bool cmdline_append(char *line, size_t capacity, const char *token) {
+    size_t used;
+    int written;
+
+    if (!line || !capacity || !token || !*token) return false;
+    used = strlen(line);
+    if (used >= capacity) return false;
+    written = snprintf(line + used, capacity - used, "%s%s",
+                       used ? " " : "", token);
+    return written >= 0 && (size_t)written < capacity - used;
+}
+
 /* ------------------------------------------------------------------------- */
 
 s5l_bringup_status_t s5l_bringup(s5l8900_t *machine,
@@ -826,6 +863,16 @@ s5l_bringup_status_t s5l_bringup(s5l8900_t *machine,
         result->devicetree_patches++;
     }
 
+    if (request->guest_codesign_disabled) {
+        if (!dt_set_u32(tree_ram, tree_len, "chosen", "debug-enabled", 1u))
+            return result_fail(result,
+                               S5L_BRINGUP_DEVICETREE_PATCH_FAILED,
+                               S5L_BRINGUP_STAGE_DEVICETREE_PATCH,
+                               "cannot set /chosen:debug-enabled; refusing "
+                               "a half-applied guest code-signing policy");
+        result->devicetree_patches++;
+    }
+
     if (want_fb && !request->no_lcd_panel_id) {
         if (!dt_compatible_exact(tree_ram, tree_len, S5L_BRINGUP_LCD_NODE,
                                  S5L_BRINGUP_LCD_COMPAT))
@@ -936,20 +983,7 @@ s5l_bringup_status_t s5l_bringup(s5l8900_t *machine,
      * first one was not recognised is exactly the kind of quiet wrongness that
      * ends in the guest mounting something nobody chose.
      */
-    bool have_root_token = false;
-    for (const char *t = base_cmdline; *t; ) {
-        while (*t == ' ' || *t == '\t') t++;
-        if (!*t) break;
-        if (t[0] == 'r' && t[1] == 'd' && t[2] == '=') { have_root_token = true; break; }
-        while (*t && *t != ' ' && *t != '\t') t++;
-    }
-    int written;
-    if (want_root && !have_root_token)
-        written = snprintf(result->cmdline, sizeof result->cmdline, "%s%s%s",
-                           base_cmdline, *base_cmdline ? " " : "",
-                           S5L_BRINGUP_ROOT_TOKEN);
-    else
-        written = snprintf(result->cmdline, sizeof result->cmdline, "%s",
+    int written = snprintf(result->cmdline, sizeof result->cmdline, "%s",
                            base_cmdline);
     if (written < 0 || (size_t)written >= sizeof result->cmdline) {
         result->cmdline[0] = '\0';
@@ -958,6 +992,34 @@ s5l_bringup_status_t s5l_bringup(s5l8900_t *machine,
                            "command line exceeds the %u-byte boot_args field",
                            (unsigned)(S5L_BRINGUP_CMDLINE_CAPACITY - 1u));
     }
+
+    static const struct { const char *key, *token; } codesign[] = {
+        { "cs_enforcement_disable", "cs_enforcement_disable=1" },
+        { "amfi_get_out_of_my_way", "amfi_get_out_of_my_way=1" },
+        { "amfi_allow_any_signature", "amfi_allow_any_signature=1" },
+    };
+    if (request->guest_codesign_disabled) {
+        for (size_t i = 0; i < sizeof codesign / sizeof codesign[0]; i++) {
+            if (cmdline_has_key(result->cmdline, codesign[i].key)) continue;
+            if (!cmdline_append(result->cmdline, sizeof result->cmdline,
+                                codesign[i].token))
+                return result_fail(result, S5L_BRINGUP_CMDLINE_TOO_LONG,
+                                   S5L_BRINGUP_STAGE_COMMAND_LINE,
+                                   "cannot append %s within the %u-byte "
+                                   "boot_args field", codesign[i].token,
+                                   (unsigned)(S5L_BRINGUP_CMDLINE_CAPACITY -
+                                              1u));
+        }
+    }
+    if (want_root && !cmdline_has_key(result->cmdline, "rd") &&
+        !cmdline_append(result->cmdline, sizeof result->cmdline,
+                        S5L_BRINGUP_ROOT_TOKEN))
+        return result_fail(result, S5L_BRINGUP_CMDLINE_TOO_LONG,
+                           S5L_BRINGUP_STAGE_COMMAND_LINE,
+                           "cannot append %s within the %u-byte boot_args "
+                           "field", S5L_BRINGUP_ROOT_TOKEN,
+                           (unsigned)(S5L_BRINGUP_CMDLINE_CAPACITY - 1u));
+    written = (int)strlen(result->cmdline);
 
     /*
      * XNU derives where to put its page tables from these fields; zeros make

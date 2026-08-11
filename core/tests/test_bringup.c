@@ -497,6 +497,79 @@ static void test_no_root(const uint8_t *kernel, size_t kernel_len,
     }
 }
 
+/* The guest code-signing policy is two inputs or it is nothing: XNU reads
+ * /chosen/debug-enabled before consulting the three boot arguments. Exercise
+ * the shared app/core bring-up directly so a UI marker can never arm only one
+ * half, and prove that an explicit key supplied by a caller still wins. */
+static void test_guest_codesign_policy(const uint8_t *kernel,
+                                       size_t kernel_len,
+                                       const uint8_t *tree,
+                                       size_t tree_len) {
+    s5l8900_t machine;
+    s5l_bringup_request_t request;
+    s5l_bringup_result_t result;
+    s5l_bringup_status_t status;
+
+    printf("guest code-signing policy inputs\n");
+    CHECK(build_machine(&machine), "s5l8900_init failed");
+    memset(&request, 0, sizeof request);
+    request.kernel = kernel;
+    request.kernel_size = kernel_len;
+    request.devicetree = tree;
+    request.devicetree_size = tree_len;
+    request.guest_codesign_disabled = true;
+
+    status = s5l_bringup(&machine, &request, NULL, &result);
+    CHECK(status == S5L_BRINGUP_OK, "policy bring-up refused: %s (%s)",
+          s5l_bringup_status_name(status), result.detail);
+    if (status == S5L_BRINGUP_OK) {
+        static const char expected[] =
+            "debug=0x8 serial=1 nand-enable-adm=0 "
+            "cs_enforcement_disable=1 amfi_get_out_of_my_way=1 "
+            "amfi_allow_any_signature=1";
+        CHECK(strcmp(result.cmdline, expected) == 0,
+              "policy cmdline is \"%s\", want \"%s\"",
+              result.cmdline, expected);
+
+        uint8_t *published = machine.ram +
+            (result.devicetree_pa - S5L_BRINGUP_PHYS_BASE);
+        size_t chosen = dtn_path(published, result.devicetree_size, "chosen");
+        uint32_t value_len = 0u;
+        const uint8_t *value = chosen == DT_NONE ? NULL :
+            dtn_prop(published, result.devicetree_size, chosen,
+                     "debug-enabled", &value_len);
+        CHECK(value && value_len == 4u && dtn_ld32(value) == 1u,
+              "/chosen:debug-enabled was not published as 1");
+    }
+    s5l8900_free(&machine);
+
+    CHECK(build_machine(&machine), "s5l8900_init failed");
+    memset(&request, 0, sizeof request);
+    request.kernel = kernel;
+    request.kernel_size = kernel_len;
+    request.devicetree = tree;
+    request.devicetree_size = tree_len;
+    request.guest_codesign_disabled = true;
+    request.cmdline = "debug=0x8 cs_enforcement_disable=0 "
+                      "amfi_allow_any_signature=0";
+    status = s5l_bringup(&machine, &request, NULL, &result);
+    CHECK(status == S5L_BRINGUP_OK,
+          "explicit-policy bring-up refused: %s (%s)",
+          s5l_bringup_status_name(status), result.detail);
+    if (status == S5L_BRINGUP_OK) {
+        CHECK(strstr(result.cmdline, "cs_enforcement_disable=0") != NULL &&
+              strstr(result.cmdline, "cs_enforcement_disable=1") == NULL,
+              "an explicit code-signing key did not win: %s", result.cmdline);
+        CHECK(strstr(result.cmdline, "amfi_allow_any_signature=0") != NULL &&
+              strstr(result.cmdline, "amfi_allow_any_signature=1") == NULL,
+              "an explicit AMFI signature key did not win: %s",
+              result.cmdline);
+        CHECK(strstr(result.cmdline, "amfi_get_out_of_my_way=1") != NULL,
+              "the missing AMFI key was not appended: %s", result.cmdline);
+    }
+    s5l8900_free(&machine);
+}
+
 /* -------------------------------------------------------- refusal cases --- */
 /*
  * These need no firmware and are the ones that matter most: each is a way the
@@ -920,6 +993,7 @@ int main(void) {
                kernel_len, tree_len);
         test_run89_layout(kernel, kernel_len, tree, tree_len);
         test_no_root(kernel, kernel_len, tree, tree_len);
+        test_guest_codesign_policy(kernel, kernel_len, tree, tree_len);
         test_unmatch(kernel, kernel_len, tree, tree_len);
         test_executes(kernel, kernel_len, tree, tree_len);
     } else {

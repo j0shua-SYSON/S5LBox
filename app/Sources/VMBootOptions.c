@@ -137,16 +137,18 @@ static const struct {
       "not at boot, so changing it does nothing to a machine that already has "
       "one. A new machine gets an image built with it as set now.", NULL },
     /*
-     * Both halves stay off here, but the reasons are no longer the same and
-     * neither is "not implemented anywhere" any more.
+     * Both halves stay off in the SETTINGS map, but the reasons are no longer
+     * the same and neither is "not implemented anywhere" any more. A later
+     * reconciliation step may turn both on together from this machine's
+     * completed install record; a live switch can never do that by itself.
      *
-     * The code-signing half IS implemented in bootkernel -- the boot args gain
-     * cs_enforcement_disable, amfi_get_out_of_my_way and
+     * The code-signing half IS implemented in shared bring-up and bootkernel:
+     * the boot args gain cs_enforcement_disable, amfi_get_out_of_my_way and
      * amfi_allow_any_signature, and /chosen/debug-enabled is set. It has never
      * been DEMONSTRATED: nothing unsigned has been executed under it. Offering
-     * a switch labelled "jailbreak" that has never once produced a jailbreak is
-     * the declared-but-silent failure this project refuses elsewhere, so it
-     * stays off until an unsigned binary actually runs.
+     * a switch labelled "jailbreak" that has never once produced a jailbreak
+     * is the declared-but-silent failure this project refuses elsewhere, so a
+     * switch alone stays off until an unsigned binary actually runs.
      *
      * The payload half is implemented in the shared provisioner as of the
      * commit that added it: tools/payload_tar.c reads the archive and
@@ -157,8 +159,9 @@ static const struct {
      * would then refuse to execute would also be premature.
      */
     { "jb-codesign", MAP_FIXED_OFF,
-      "Implemented for the desktop harness but never demonstrated: no unsigned "
-      "binary has been executed under it. Stays off here until one does.", NULL },
+      "A switch cannot relax guest code signing. A completed per-machine "
+      "install record can arm the shared policy, but unsigned execution is "
+      "still not demonstrated.", NULL },
     { "jb-payload", MAP_FIXED_OFF,
       "The provisioner this app links can install a payload, but the app has no "
       "way to import one yet, and the code-signing half it depends on has not "
@@ -446,6 +449,59 @@ void vm_boot_options_reconcile_network(vm_boot_options_report_t *report,
         row->effective = row->requested && ppp_provisioned;
         row->note = ppp_provisioned ? NULL :
             "No host route is attached because this work image has no PPP job.";
+    }
+    recount_and_summarize(report);
+}
+
+void vm_boot_options_reconcile_jailbreak(vm_boot_options_report_t *report,
+                                         s5l_bringup_request_t *request,
+                                         bool installed) {
+    /*
+     * The marker is authoritative because it is published only after the
+     * replacement work image is complete. A switch is not authority to relax
+     * the running kernel: doing that against an unmodified filesystem would
+     * expose a misleading half-jailbreak, while leaving policy off against an
+     * installed filesystem would make its executables fail unpredictably.
+     */
+    if (request) request->guest_codesign_disabled = installed;
+    if (!report) return;
+
+    int codesign = vm_option_index("jb-codesign");
+    int payload = vm_option_index("jb-payload");
+    if (codesign >= 0 && (unsigned)codesign < report->count) {
+        vm_boot_option_status_t *row = &report->row[codesign];
+        row->outcome = VM_BOOT_OPTION_APPLIED;
+        row->effective = installed;
+        if (row->requested == installed) {
+            row->note = installed ?
+                "Enabled by this machine's completed install record." :
+                "Disabled because this machine has no completed install "
+                "record.";
+        } else if (installed) {
+            row->note = "This machine records an installed payload, so its "
+                        "matching guest code-signing policy is required.";
+        } else {
+            row->note = "A setting cannot relax guest code signing without "
+                        "a completed filesystem transaction.";
+        }
+    }
+    if (payload >= 0 && (unsigned)payload < report->count) {
+        vm_boot_option_status_t *row = &report->row[payload];
+        row->outcome = VM_BOOT_OPTION_PROVISIONED;
+        row->effective = installed;
+        if (row->requested == installed) {
+            row->note = installed ?
+                "Recorded after this machine's filesystem transaction "
+                "completed." :
+                "No completed payload transaction is recorded for this "
+                "machine.";
+        } else if (installed) {
+            row->note = "This machine's work image already contains the "
+                        "installed payload.";
+        } else {
+            row->note = "A setting cannot install a payload during boot; no "
+                        "completed filesystem transaction is recorded.";
+        }
     }
     recount_and_summarize(report);
 }

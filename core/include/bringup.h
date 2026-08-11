@@ -316,6 +316,15 @@ typedef struct {
     bool no_memory_node;      /* leave /memory reg at the template's zero */
 
     /*
+     * iPhone OS 3's two-part code-signing policy input. When true, bring-up
+     * sets /chosen/debug-enabled to 1 and appends the three established
+     * cs_enforcement_disable/amfi boot arguments unless the caller already
+     * supplied a value for a key. This changes guest policy only; it is not
+     * evidence that an unsigned binary executed successfully.
+     */
+    bool guest_codesign_disabled;
+
+    /*
      * DEVICE-TREE NODES TO UN-MATCH, by path, before the tree is published.
      *
      * Un-matching is how this project says "this machine does not have that
