@@ -377,11 +377,16 @@ static void test_committed_cleanup_failure_is_distinct(void) {
           "backup path overflow");
     CHECK(remove(backup) == 0 && make_directory(backup),
           "could not create cleanup obstruction");
+    char obstruction[1400];
+    CHECK(join_path(obstruction, sizeof obstruction, backup, "keep") &&
+          write_bytes(obstruction, "not removable as a file"),
+          "could not make cleanup obstruction non-empty");
     status = vm_guest_install_recover(FIXTURE_DIR, &result,
                                       detail, sizeof detail);
     CHECK(status == VM_GUEST_INSTALL_OK && result.committed &&
           !result.cleanup_complete,
           "cleanup failure lost committed state: %s", detail);
+    (void)remove(obstruction);
     CHECK(remove_directory(backup), "could not remove cleanup obstruction");
     status = vm_guest_install_recover(FIXTURE_DIR, &result,
                                       detail, sizeof detail);

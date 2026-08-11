@@ -608,7 +608,7 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
                                  sizeof guest_install_detail);
     if (guest_install_status != VM_GUEST_INSTALL_OK) {
         (void)snprintf(report->detail, sizeof report->detail,
-                       "Guest-install recovery refused (%s): %s",
+                       "Guest-install recovery refused (%s): %.180s",
                        vm_guest_install_status_text(guest_install_status),
                        guest_install_detail[0] ? guest_install_detail
                                                : "no safe recovery exists");
