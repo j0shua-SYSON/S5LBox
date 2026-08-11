@@ -613,12 +613,10 @@ static const boot_toggle_t BOOT_TOGGLES[] = {
     { "activate", NULL, NULL, true, BOOT_GROUP_GUEST_STATE,
       BOOT_FIELD(activate),
       "present the guest as activated, so SpringBoard does not sit at the\n"
-      "\"connect to iTunes\" screen. NOT IMPLEMENTED YET: writing\n"
-      "ActivationState = Activated needs a file the source rootfs does not\n"
-      "contain, and tools/rootfs_work.c does size-neutral in-place rewrites\n"
-      "only -- it cannot create one. ON by default anyway, so the day the\n"
-      "provisioner lands no command line has to change; until then every run\n"
-      "header says, in as many words, that it was requested and not applied." },
+      "\"connect to iTunes\" screen. The work-image transaction creates\n"
+      "/private/var/root/Library/Lockdown/data_ark.plist with the values\n"
+      "derived from lockdownd. This is offline guest provisioning, not an\n"
+      "Apple activation record. Requires --external-md." },
     { "hle", NULL, NULL, false, BOOT_GROUP_DIAGNOSTIC,
       BOOT_FIELD(hle),
       "arm userspace high-level-emulation sites in tools/ios3_hle.c. A\n"
@@ -634,20 +632,18 @@ static const boot_toggle_t BOOT_TOGGLES[] = {
       "with --hle, and intentionally slower than a throughput run." },
     { "jb-codesign", NULL, NULL, false, BOOT_GROUP_GUEST_STATE,
       BOOT_FIELD(jb_codesign),
-      "the kernel half of --jailbreak: disable the guest's code-signature\n"
-      "enforcement. NOT IMPLEMENTED YET. Separate from --jb-payload because\n"
-      "the two halves are independent and this one only needs the kernel,\n"
-      "which we already load and own (docs/activation.md A.2 traces the\n"
-      "enforcement switch), so it can land first and be exercised alone." },
+      "the kernel half of --jailbreak: append the three iPhone OS 3\n"
+      "code-signing policy boot arguments and publish /chosen/debug-enabled.\n"
+      "This applies the policy inputs but is not proof that unsigned execution\n"
+      "works; that requires an unsigned guest binary to retire instructions." },
     { "jb-payload", NULL, NULL, false, BOOT_GROUP_GUEST_STATE,
       BOOT_FIELD(jb_payload),
       "the filesystem half of --jailbreak: install the Cydia payload named by\n"
-      "--jailbreak-payload, and its launchd jobs, onto the work image. NOT\n"
-      "IMPLEMENTED YET -- it needs the same HFS+ file provisioner --activate\n"
-      "is waiting on. No exploit is involved in either half: inside an\n"
-      "emulator that loads the kernel and owns the disk there is nothing to\n"
-      "exploit past. Requires --external-md, which is the only mode with a\n"
-      "writable work image." },
+      "--jailbreak-payload transactionally onto a new work image. The tar is\n"
+      "checksummed member by member, unsafe paths are refused, existing\n"
+      "directories and equivalent symlinks are type-checked, and the final\n"
+      "HFS catalog is audited before publication. No exploit is involved: the\n"
+      "emulator owns the kernel and disk. Requires --external-md." },
     { "nat", NULL, NULL, true, BOOT_GROUP_GUEST_STATE, BOOT_FIELD(nat),
       "route what the guest sends over PPP through the host IPv4 stack in\n"
       "core/src/net/net.c: ICMP echo terminated here, names resolved\n"
@@ -1208,14 +1204,9 @@ static void boot_config_emit(FILE *out, const boot_config_t *cfg) {
 /*
  * Capabilities that are asked for and cannot be delivered yet.
  *
- * --activate defaults ON and --jailbreak's two halves default off, but none of
- * the three is implemented: two need an HFS+ file provisioner that does not
- * exist (tools/rootfs_work.c does size-neutral in-place rewrites only, and
- * data_ark.plist is not in the source rootfs), and the code-signing switch has
- * been traced but not built. The rule for all three is the same -- never fail
- * the run closed, because that would break every current workflow, and never
- * no-op silently, because a run whose header claims a configuration it did not
- * apply is worse than one that never offered the option.
+ * --activate defaults ON and --jailbreak's two halves default off. State what
+ * this run is about to apply without promoting a successful image transaction
+ * to proof that guest userspace booted or that an unsigned binary executed.
  */
 static void boot_capability_notes(FILE *out, const boot_config_t *cfg,
                                   bool external_md,
@@ -1249,17 +1240,20 @@ static void boot_capability_notes(FILE *out, const boot_config_t *cfg,
                 "              The deciding test is an unsigned binary that "
                 "runs -- see --jb-payload.)\n");
     if (cfg->v.jb_payload) {
-        fprintf(out,
-                "jailbreak  : payload half requested but NOT APPLIED (no "
-                "work-image file provisioning yet)\n");
-        if (jailbreak_payload)
+        if (external_md && jailbreak_payload)
             fprintf(out,
-                    "jailbreak  : payload %s verified readable but NOT USED\n",
+                    "jailbreak  : payload %s will be parsed and installed by "
+                    "the type-checked work-image overlay transaction\n",
+                    jailbreak_payload);
+        else if (jailbreak_payload)
+            fprintf(out,
+                    "jailbreak  : payload %s cannot be installed without a "
+                    "writable --external-md work image\n",
                     jailbreak_payload);
         else
             fprintf(out,
-                    "jailbreak  : no --jailbreak-payload given; there would be "
-                    "nothing to install even once the provisioner lands\n");
+                    "jailbreak  : no --jailbreak-payload given; there is "
+                    "nothing to install\n");
     }
     if (!external_md && (cfg->v.activate || cfg->v.jb_payload))
         fprintf(out,
@@ -33809,10 +33803,10 @@ static void boot_print_usage(FILE *stream, const char *argv0) {
             "      backed disk0, so launchd's fsck fails and it halts the\n"
             "      machine. The image on disk is never modified.\n"
             "  --jailbreak-payload <path>\n"
-            "      the Cydia payload --jb-payload would install onto the work\n"
-            "      image. We ship none and never will, so it is supplied the\n"
-            "      same way firmware is. The path is checked for readability in\n"
-            "      preflight; nothing reads its contents yet.\n",
+            "      the Cydia payload --jb-payload installs transactionally onto\n"
+            "      the new work image. This harness bundles no payload, so it is\n"
+            "      supplied like firmware. The ustar reader verifies checksums,\n"
+            "      paths, types and bounds before the HFS catalog plan writes.\n",
             argv0);
         fputs(
             "  --grow <MB>  free space to give the guest by growing the HFS+\n"
@@ -35926,6 +35920,16 @@ external_md_work_ready:
         printf("external md: verified %s; created %s (%llu bytes, +%u MiB)\n",
                external_md_source, external_md_work,
                (unsigned long long)external_media_size, rd_grow_mb);
+        if (result.provision_entries != 0u ||
+            result.provision_reused_entries != 0u)
+            printf("provisioning: created %u objects, reused %u existing "
+                   "objects, allocated %u blocks; catalog splits leaf=%u "
+                   "index=%u\n",
+                   result.provision_entries,
+                   result.provision_reused_entries,
+                   result.provision_blocks,
+                   result.provision_leaf_splits,
+                   result.provision_index_splits);
         if (result.ca_plist_offset != UINT64_MAX)
             printf("CA renderer: com.apple.SpringBoard.plist @ image+0x%08llx"
                    " -> EnvironmentVariables CA_ENABLE_MBX2D=0\n"

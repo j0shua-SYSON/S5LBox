@@ -259,6 +259,21 @@ typedef enum rootfs_work_entry_kind {
 } rootfs_work_entry_kind_t;
 
 /*
+ * What an entry may do when its final catalog key already exists.
+ *
+ * REFUSE remains zero so every existing caller is create-only.  Reusing a
+ * directory is deliberately narrower than a generic "overlay" switch: the
+ * provisioner verifies that the existing record really is a directory and
+ * leaves its metadata and children untouched.  Files and symlinks still fail
+ * closed until their bytes/targets can be compared or replaced transactionally.
+ */
+typedef enum rootfs_work_existing_policy {
+    ROOTFS_WORK_EXISTING_REFUSE = 0,
+    ROOTFS_WORK_EXISTING_REUSE_DIRECTORY = 1,
+    ROOTFS_WORK_EXISTING_REUSE_IDENTICAL_SYMLINK = 2
+} rootfs_work_existing_policy_t;
+
+/*
  * One catalog object to create in the work image.
  *
  * `path` is absolute, '/'-separated and printable-ASCII: every component is
@@ -282,11 +297,20 @@ typedef struct rootfs_work_entry {
     uint16_t permissions;
     uint32_t owner_id;
     uint32_t group_id;
+    rootfs_work_existing_policy_t existing_policy;
 } rootfs_work_entry_t;
 
 typedef struct rootfs_work_options {
-    /* NULL selects ROOTFS_WORK_DEFAULT_FSTAB. */
+    /* NULL selects ROOTFS_WORK_DEFAULT_FSTAB unless preserve_fstab is true. */
     const char *fstab_line;
+
+    /*
+     * Opt-in, OFF by default: do not scan or rewrite fstab.  This is for a
+     * transaction whose immutable source is an already-provisioned machine
+     * image rather than Apple's pristine rootfs.  Supplying fstab_line at the
+     * same time is invalid; callers must say either "preserve" or "replace".
+     */
+    bool preserve_fstab;
 
     /*
      * Opt-in, OFF by default: rewrite the stock SpringBoard LaunchDaemon plist
@@ -411,6 +435,8 @@ typedef struct rootfs_work_result {
     uint64_t ppp_plist_offset;
     /* Catalog provisioning, all zero unless entries were requested. */
     uint32_t provision_entries;
+    /* Existing directories or symlinks accepted by an explicit reuse policy. */
+    uint32_t provision_reused_entries;
     uint32_t provision_first_cnid;
     uint32_t provision_last_cnid;
     uint32_t provision_blocks;

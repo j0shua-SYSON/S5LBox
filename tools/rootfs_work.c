@@ -2791,6 +2791,7 @@ static bool grow_volume(host_file_t *file, uint64_t *file_size,
 #define HFS_FLAG_HAS_FOLDER_COUNT 0x0010u
 #define HFS_MODE_IFDIR 0040000u
 #define HFS_MODE_IFREG 0100000u
+#define HFS_MODE_IFMT  0170000u
 #define HFS_MODE_PERM_MASK 07777u
 /* The header node's three records: BTHeaderRec, a 128-byte user record, and
  * the node-allocation map that fills the rest of the node. */
@@ -4502,6 +4503,216 @@ static uint16_t catalog_build_symlink(catalog_ctx_t *ctx, uint32_t parent,
     return record_len;
 }
 
+/* Prove that an absolute or parent-relative target names a directory in the
+ * catalog state currently being planned. `..` is resolved through the current
+ * folder's own HFS thread record, not by string surgery, so normalization never
+ * guesses which catalog parent a symlink traversal reaches. */
+static bool catalog_target_is_directory(catalog_ctx_t *ctx,
+                                        uint32_t parent_cnid,
+                                        const uint8_t *target,
+                                        size_t target_size,
+                                        bool *is_directory,
+                                        rootfs_work_stage_t stage,
+                                        rootfs_work_result_t *result) {
+    uint32_t current = parent_cnid;
+    size_t cursor = 0u;
+
+    *is_directory = false;
+    if (target_size == 0u)
+        return true;
+    if (target[0] == '/') {
+        current = HFS_ROOT_FOLDER_CNID;
+        cursor = 1u;
+        if (cursor == target_size) {
+            *is_directory = true;
+            return true;
+        }
+    }
+    while (cursor < target_size) {
+        uint16_t units[HFS_NAME_MAX_UNITS];
+        size_t start = cursor;
+        size_t length;
+        uint32_t leaf = 0u;
+        uint16_t position = 0u;
+        bool found = false;
+        uint8_t *node = NULL;
+        const uint8_t *data;
+        uint16_t offset;
+        size_t index;
+
+        while (cursor < target_size && target[cursor] != '/')
+            cursor++;
+        length = cursor - start;
+        if (length == 0u || length > HFS_NAME_MAX_UNITS)
+            return true;
+        if (length == 1u && target[start] == '.') {
+            if (cursor < target_size)
+                cursor++;
+            continue;
+        }
+        if (length == 2u && target[start] == '.' &&
+            target[start + 1u] == '.') {
+            if (current != HFS_ROOT_FOLDER_CNID) {
+                if (!catalog_search(ctx, current, NULL, 0u, &leaf, &position,
+                                    &found, stage, result))
+                    return false;
+                if (!found) {
+                    result_fail(result,
+                                ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
+                                "directory CNID %u has no thread record",
+                                current);
+                    return false;
+                }
+                if (!catalog_node_load(ctx, leaf, &node, stage, result))
+                    return false;
+                offset = catalog_slot(node, ctx->node_size, position);
+                data = node + offset +
+                       catalog_record_data_offset(node + offset);
+                if (read_be16(data) != HFS_CAT_FOLDER_THREAD) {
+                    result_fail(result,
+                                ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
+                                "directory CNID %u has a non-folder thread",
+                                current);
+                    return false;
+                }
+                current = read_be32(data + 4);
+                if (current < HFS_ROOT_FOLDER_CNID) {
+                    result_fail(result,
+                                ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
+                                "directory thread names reserved parent CNID %u",
+                                current);
+                    return false;
+                }
+            }
+            if (cursor < target_size)
+                cursor++;
+            continue;
+        }
+        for (index = 0u; index < length; index++)
+            units[index] = (uint16_t)target[start + index];
+        if (!catalog_search(ctx, current, units, (uint16_t)length, &leaf,
+                            &position, &found, stage, result))
+            return false;
+        if (!found)
+            return true;
+        if (!catalog_node_load(ctx, leaf, &node, stage, result))
+            return false;
+        offset = catalog_slot(node, ctx->node_size, position);
+        data = node + offset + catalog_record_data_offset(node + offset);
+        if (read_be16(data) != HFS_CAT_FOLDER_RECORD)
+            return true;
+        current = read_be32(data + 8);
+        if (current < HFS_FIRST_USER_CNID) {
+            result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
+                        "a symlink target directory claims reserved CNID %u",
+                        current);
+            return false;
+        }
+        if (cursor < target_size)
+            cursor++;
+    }
+    *is_directory = true;
+    return true;
+}
+
+/*
+ * Compare an existing HFS+ symlink with one payload member without changing
+ * the image. A symlink's target is its data fork; all stock-image symlinks fit
+ * in their inline extents, but a valid object that needs the extents-overflow
+ * tree is reported as unsupported rather than miscalled corrupt.
+ *
+ * Tar snapshots commonly record a directory target with a trailing slash
+ * while HFS stores the same link without it. Those spellings are accepted as
+ * equivalent only after the normalized target is resolved and proven to be a
+ * directory in this exact catalog. A file target therefore cannot be widened
+ * accidentally by dropping its directory requirement.
+ */
+static bool catalog_existing_symlink_equal(catalog_ctx_t *ctx,
+                                            uint32_t parent_cnid,
+                                            const uint8_t *data,
+                                            const rootfs_work_entry_t *entry,
+                                            bool *equal,
+                                            rootfs_work_stage_t stage,
+                                            rootfs_work_result_t *result) {
+    uint8_t existing[ROOTFS_WORK_MAX_PATH];
+    uint64_t logical;
+    uint64_t capacity = 0u;
+    uint32_t declared_blocks;
+    uint32_t inline_blocks = 0u;
+    size_t copied = 0u;
+    size_t existing_normal;
+    size_t requested_normal;
+    unsigned extent;
+
+    *equal = false;
+    if (read_be16(data) != HFS_CAT_FILE_RECORD ||
+        (read_be16(data + 42) & HFS_MODE_IFMT) != HFS_MODE_IFLNK)
+        return true;
+    logical = read_be64(data + 88);
+    if (logical == 0u || logical > sizeof(existing))
+        return true;
+    declared_blocks = read_be32(data + 100);
+    for (extent = 0; extent < 8u; extent++) {
+        uint32_t start = read_be32(data + 104u + extent * 8u);
+        uint32_t count = read_be32(data + 108u + extent * 8u);
+
+        if (count == 0u)
+            continue;
+        if ((uint64_t)start + count > ctx->total_blocks ||
+            UINT32_MAX - inline_blocks < count) {
+            result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
+                        "an existing symlink has an invalid data extent");
+            return false;
+        }
+        inline_blocks += count;
+    }
+    if (inline_blocks != declared_blocks) {
+        result_fail(result, ROOTFS_WORK_PROVISION_UNSUPPORTED, stage, 0,
+                    "an existing symlink uses the extents-overflow tree");
+        return false;
+    }
+    capacity = (uint64_t)declared_blocks * ctx->block_size;
+    if (logical > capacity) {
+        result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
+                    "an existing symlink's logical size exceeds its extents");
+        return false;
+    }
+    for (extent = 0; extent < 8u && copied < (size_t)logical; extent++) {
+        uint32_t start = read_be32(data + 104u + extent * 8u);
+        uint32_t count = read_be32(data + 108u + extent * 8u);
+        uint64_t available = (uint64_t)count * ctx->block_size;
+        size_t amount = (size_t)logical - copied;
+
+        if ((uint64_t)amount > available)
+            amount = (size_t)available;
+        if (amount != 0u &&
+            !checked_read(ctx->file, ctx->file_size,
+                          (uint64_t)start * ctx->block_size, existing + copied,
+                          amount, stage, result))
+            return false;
+        copied += amount;
+    }
+    if (copied != (size_t)logical)
+        return true;
+    if ((size_t)logical == entry->content_size &&
+        memcmp(existing, entry->content, entry->content_size) == 0) {
+        *equal = true;
+        return true;
+    }
+    existing_normal = (size_t)logical;
+    requested_normal = entry->content_size;
+    while (existing_normal > 1u && existing[existing_normal - 1u] == '/')
+        existing_normal--;
+    while (requested_normal > 1u &&
+           entry->content[requested_normal - 1u] == '/')
+        requested_normal--;
+    if (existing_normal != requested_normal ||
+        memcmp(existing, entry->content, requested_normal) != 0)
+        return true;
+    return catalog_target_is_directory(ctx, parent_cnid, entry->content,
+                                       requested_normal, equal, stage, result);
+}
+
 static uint16_t catalog_build_thread(catalog_ctx_t *ctx, uint32_t cnid,
                                      uint16_t type, uint32_t parent,
                                      const uint16_t *units,
@@ -4824,6 +5035,28 @@ static bool provision_one(catalog_ctx_t *ctx,
                     (int)entry->kind);
         return false;
     }
+    if (entry->existing_policy != ROOTFS_WORK_EXISTING_REFUSE &&
+        entry->existing_policy != ROOTFS_WORK_EXISTING_REUSE_DIRECTORY &&
+        entry->existing_policy !=
+            ROOTFS_WORK_EXISTING_REUSE_IDENTICAL_SYMLINK) {
+        result_fail(result, ROOTFS_WORK_PROVISION_INVALID, stage, 0,
+                    "entry has unknown existing-object policy %d",
+                    (int)entry->existing_policy);
+        return false;
+    }
+    if (entry->existing_policy == ROOTFS_WORK_EXISTING_REUSE_DIRECTORY &&
+        !is_directory) {
+        result_fail(result, ROOTFS_WORK_PROVISION_INVALID, stage, 0,
+                    "reuse-directory policy is valid only for a directory");
+        return false;
+    }
+    if (entry->existing_policy ==
+            ROOTFS_WORK_EXISTING_REUSE_IDENTICAL_SYMLINK && !is_symlink) {
+        result_fail(result, ROOTFS_WORK_PROVISION_INVALID, stage, 0,
+                    "reuse-identical-symlink policy is valid only for a "
+                    "symlink");
+        return false;
+    }
     if (is_directory && (entry->content != NULL || entry->content_size != 0u)) {
         result_fail(result, ROOTFS_WORK_PROVISION_INVALID, stage, 0,
                     "a directory entry cannot carry content");
@@ -4903,9 +5136,59 @@ static bool provision_one(catalog_ctx_t *ctx,
                         &found, stage, result))
         return false;
     if (found) {
+        if (entry->existing_policy ==
+                ROOTFS_WORK_EXISTING_REUSE_DIRECTORY) {
+            uint8_t *node = NULL;
+            uint16_t offset;
+            const uint8_t *data;
+
+            if (!catalog_node_load(ctx, leaf, &node, stage, result))
+                return false;
+            offset = catalog_slot(node, ctx->node_size, position);
+            data = node + offset + catalog_record_data_offset(node + offset);
+            if (read_be16(data) != HFS_CAT_FOLDER_RECORD) {
+                result_fail(result, ROOTFS_WORK_PROVISION_EXISTS, stage, 0,
+                            "an object already exists under CNID %u with that "
+                            "name, but it is not a directory",
+                            folder.cnid);
+                return false;
+            }
+            if (read_be32(data + 8) < HFS_FIRST_USER_CNID) {
+                result_fail(result,
+                            ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
+                            "an existing directory claims reserved CNID %u",
+                            read_be32(data + 8));
+                return false;
+            }
+            result->provision_reused_entries++;
+            return true;
+        }
+        if (entry->existing_policy ==
+                ROOTFS_WORK_EXISTING_REUSE_IDENTICAL_SYMLINK) {
+            uint8_t *node = NULL;
+            uint16_t offset;
+            const uint8_t *data;
+            bool equal = false;
+
+            if (!catalog_node_load(ctx, leaf, &node, stage, result))
+                return false;
+            offset = catalog_slot(node, ctx->node_size, position);
+            data = node + offset + catalog_record_data_offset(node + offset);
+            if (!catalog_existing_symlink_equal(ctx, folder.cnid, data, entry,
+                                                &equal, stage, result))
+                return false;
+            if (equal) {
+                result->provision_reused_entries++;
+                return true;
+            }
+            result_fail(result, ROOTFS_WORK_PROVISION_EXISTS, stage, 0,
+                        "provisioned path %.160s exists but is not the same "
+                        "symlink", entry->path);
+            return false;
+        }
         result_fail(result, ROOTFS_WORK_PROVISION_EXISTS, stage, 0,
-                    "an object already exists under CNID %u with that name",
-                    folder.cnid);
+                    "provisioned path %.160s already exists under CNID %u",
+                    entry->path, folder.cnid);
         return false;
     }
 
@@ -5964,7 +6247,12 @@ rootfs_work_status_t rootfs_work_create(const char *source_path,
     memset(&selected, 0, sizeof(selected));
     if (options)
         selected = *options;
-    if (!selected.fstab_line)
+    if (selected.preserve_fstab && selected.fstab_line)
+        return result_fail(result, ROOTFS_WORK_INVALID_ARGUMENT,
+                           ROOTFS_WORK_STAGE_ARGUMENTS, 0,
+                           "preserve_fstab and fstab_line are mutually "
+                           "exclusive");
+    if (!selected.preserve_fstab && !selected.fstab_line)
         selected.fstab_line = ROOTFS_WORK_DEFAULT_FSTAB;
     if (selected.io_buffer_bytes == 0u)
         selected.io_buffer_bytes = ROOTFS_WORK_MAX_IO_BUFFER;
@@ -6086,7 +6374,8 @@ rootfs_work_status_t rootfs_work_create(const char *source_path,
         goto done;
     }
     work_size = source_before.size;
-    if (!fstab_rewrite(&temporary, work_size, selected.fstab_line, buffer,
+    if (!selected.preserve_fstab &&
+        !fstab_rewrite(&temporary, work_size, selected.fstab_line, buffer,
                        selected.io_buffer_bytes, result))
         goto done;
     /* Opt-in and off by default: a stock image is left with Apple's own

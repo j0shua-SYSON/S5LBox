@@ -258,6 +258,10 @@ payload_tar_t *payload_tar_open(const char *path, const char *prefix,
 
         if (type == '5') {
             e->kind = ROOTFS_WORK_ENTRY_DIRECTORY;
+            /* A tar payload is an overlay: its ancestor directories commonly
+             * already exist in the base image.  Reuse is explicit per entry,
+             * and rootfs_work still refuses a same-named non-directory. */
+            e->existing_policy = ROOTFS_WORK_EXISTING_REUSE_DIRECTORY;
             t->stats.directories++;
         } else if (type == '2') {
             if (!link[0] || !printable_path(link)) {
@@ -268,6 +272,8 @@ payload_tar_t *payload_tar_open(const char *path, const char *prefix,
                 return NULL;
             }
             e->kind = ROOTFS_WORK_ENTRY_SYMLINK;
+            e->existing_policy =
+                ROOTFS_WORK_EXISTING_REUSE_IDENTICAL_SYMLINK;
             e->content = (const uint8_t *)arena_put(t, "", link);
             if (!e->content) {
                 say(detail, cap, "payload link targets exceed the name arena");

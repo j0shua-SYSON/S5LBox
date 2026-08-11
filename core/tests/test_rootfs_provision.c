@@ -1595,17 +1595,21 @@ typedef struct run {
     size_t output_size;
 } run_t;
 
-static int run_provision_image(run_t *run, const uint8_t *image, size_t size,
-                               const char *tag,
-                               const rootfs_work_entry_t *entries, size_t count,
-                               uint64_t growth) {
+static int run_provision_image_mode(run_t *run, const uint8_t *image,
+                                    size_t size, const char *tag,
+                                    const rootfs_work_entry_t *entries,
+                                    size_t count, uint64_t growth,
+                                    int preserve_fstab) {
     memset(run, 0, sizeof(*run));
     if (!make_path(run->source, sizeof(run->source), tag) ||
         !make_path(run->destination, sizeof(run->destination), tag))
         return 0;
     if (!write_file(run->source, image, size))
         return 0;
-    run->options.fstab_line = ROOTFS_WORK_DEFAULT_FSTAB;
+    if (preserve_fstab)
+        run->options.preserve_fstab = true;
+    else
+        run->options.fstab_line = ROOTFS_WORK_DEFAULT_FSTAB;
     run->options.entries = entries;
     run->options.entry_count = count;
     run->options.growth_bytes = growth;
@@ -1614,6 +1618,21 @@ static int run_provision_image(run_t *run, const uint8_t *image, size_t size,
     if (run->status == ROOTFS_WORK_OK)
         run->output = read_file(run->destination, &run->output_size);
     return 1;
+}
+
+static int run_provision_image(run_t *run, const uint8_t *image, size_t size,
+                               const char *tag,
+                               const rootfs_work_entry_t *entries, size_t count,
+                               uint64_t growth) {
+    return run_provision_image_mode(run, image, size, tag, entries, count,
+                                    growth, 0);
+}
+
+static int run_provision_existing_image(
+    run_t *run, const uint8_t *image, size_t size, const char *tag,
+    const rootfs_work_entry_t *entries, size_t count, uint64_t growth) {
+    return run_provision_image_mode(run, image, size, tag, entries, count,
+                                    growth, 1);
 }
 
 static int run_provision(run_t *run, const fixture_t *fx, const char *tag,
@@ -2182,6 +2201,132 @@ static void test_duplicate_name_is_refused(void) {
         }
         run_release(&run);
     }
+    free(fx);
+}
+
+static void test_existing_directory_reuse_is_explicit_and_type_safe(void) {
+    fixture_t *fx = fx_create(FX_DATA_BLOCKS - 1u);
+    rootfs_work_entry_t entries[2];
+    rootfs_work_entry_t wrong;
+    run_t run;
+    tr_volume_t vol;
+    tr_record_t before;
+    tr_record_t after;
+    int found_before = 0;
+
+    if (!fx) {
+        CHECK(0, "fixture allocation failed");
+        return;
+    }
+
+    entry_directory(&entries[0], "/alpha/dup", 0777u);
+    entries[0].existing_policy = ROOTFS_WORK_EXISTING_REUSE_DIRECTORY;
+    entry_file(&entries[1], "/alpha/dup/inside.txt", "ok", 2u, 0644u);
+    if (!run_provision(&run, fx, "reusedir", entries, 2u, 0u)) {
+        CHECK(0, "reuse-directory fixture setup failed");
+        free(fx);
+        return;
+    }
+    expect_success(&run, "reuse existing directory then add a child");
+    CHECK(run.result.provision_reused_entries == 1u &&
+          run.result.provision_entries == 1u,
+          "reuse report: reused=%u created=%u",
+          run.result.provision_reused_entries,
+          run.result.provision_entries);
+    if (run.output && tr_open(fx->image, FX_SIZE, &vol)) {
+        found_before = tr_find(&vol, FX_ALPHA, "dup", &before);
+        CHECK(found_before, "source fixture lost /alpha/dup");
+        tr_close(&vol);
+    }
+    if (run.output && tr_open(run.output, run.output_size, &vol)) {
+        CHECK(tr_find(&vol, FX_ALPHA, "dup", &after),
+              "published image lost /alpha/dup");
+        CHECK(get_be32(after.data + 8) == FX_DUP,
+              "reused directory changed CNID to %u", get_be32(after.data + 8));
+        if (found_before)
+            CHECK(get_be16(after.data + 42) == get_be16(before.data + 42),
+                  "reused directory metadata was overwritten");
+        CHECK(tr_find(&vol, FX_DUP, "inside.txt", NULL),
+              "child under reused directory was not created");
+        tr_close(&vol);
+    }
+    run_release(&run);
+
+    entry_directory(&wrong, "/beta/note.txt", 0755u);
+    wrong.existing_policy = ROOTFS_WORK_EXISTING_REUSE_DIRECTORY;
+    if (run_provision(&run, fx, "reusetype", &wrong, 1u, 0u)) {
+        expect_refusal(&run, fx, ROOTFS_WORK_PROVISION_EXISTS,
+                       "reuse-directory policy over an existing file");
+        run_release(&run);
+    }
+    free(fx);
+}
+
+static void test_existing_symlink_reuse_requires_the_same_target(void) {
+    fixture_t *fx = fx_create(FX_DATA_BLOCKS - 1u);
+    rootfs_work_entry_t entry;
+    rootfs_work_entry_t mismatch;
+    run_t first;
+    run_t second;
+    run_t third;
+
+    if (!fx) {
+        CHECK(0, "fixture allocation failed");
+        return;
+    }
+
+    entry_symlink(&entry, "/alpha/current", "../beta", 0755u);
+    if (!run_provision(&first, fx, "linkbase", &entry, 1u, 0u)) {
+        CHECK(0, "symlink base fixture setup failed");
+        free(fx);
+        return;
+    }
+    expect_success(&first, "create symlink used by reuse test");
+    if (!first.output) {
+        run_release(&first);
+        free(fx);
+        return;
+    }
+
+    /* The tar spelling adds a trailing slash. Reuse is allowed only because
+     * resolving `..` through alpha's thread proves that beta is a directory. */
+    entry_symlink(&entry, "/alpha/current", "../beta/", 0755u);
+    entry.existing_policy = ROOTFS_WORK_EXISTING_REUSE_IDENTICAL_SYMLINK;
+    if (run_provision_existing_image(&second, first.output, first.output_size,
+                                     "linksame", &entry, 1u, 0u)) {
+        expect_success(&second,
+                       "reuse equivalent existing directory symlink");
+        CHECK(second.result.provision_reused_entries == 1u &&
+              second.result.provision_entries == 0u,
+              "symlink reuse report: reused=%u created=%u",
+              second.result.provision_reused_entries,
+              second.result.provision_entries);
+        run_release(&second);
+    }
+
+    entry_symlink(&mismatch, "/alpha/current", "../beta/other", 0755u);
+    mismatch.existing_policy = ROOTFS_WORK_EXISTING_REUSE_IDENTICAL_SYMLINK;
+    if (run_provision_existing_image(&third, first.output, first.output_size,
+                                     "linkdifferent", &mismatch, 1u, 0u)) {
+        CHECK(third.status == ROOTFS_WORK_PROVISION_EXISTS,
+              "different symlink target: expected provision-exists, got %s "
+              "at %s (%s)", rootfs_work_status_name(third.status),
+              rootfs_work_stage_name(third.result.stage), third.result.detail);
+        CHECK(third.result.stage == ROOTFS_WORK_STAGE_PROVISION_PLAN &&
+              !third.result.published && !third.result.temporary_left &&
+              !path_exists(third.destination),
+              "different symlink target escaped the read-only plan");
+        run_release(&third);
+    }
+
+    entry_symlink(&mismatch, "/beta/note.txt", "anything", 0755u);
+    mismatch.existing_policy = ROOTFS_WORK_EXISTING_REUSE_IDENTICAL_SYMLINK;
+    if (run_provision(&third, fx, "linkoverfile", &mismatch, 1u, 0u)) {
+        expect_refusal(&third, fx, ROOTFS_WORK_PROVISION_EXISTS,
+                       "reuse-identical-symlink over a regular file");
+        run_release(&third);
+    }
+    run_release(&first);
     free(fx);
 }
 
@@ -4757,6 +4902,8 @@ int main(void) {
     test_deep_existing_parents();
     test_missing_parent_is_refused();
     test_duplicate_name_is_refused();
+    test_existing_directory_reuse_is_explicit_and_type_safe();
+    test_existing_symlink_reuse_requires_the_same_target();
     test_full_leaf_is_refused_not_split();
     test_out_of_space_is_refused();
     test_broken_catalog_is_never_absence();
