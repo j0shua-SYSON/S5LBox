@@ -129,9 +129,10 @@ targets:
         # units; without link-time optimisation neither can be inlined into the
         # loop that calls them once per guest instruction.
         LLVM_LTO: YES
-        # tools/file_block.c does 64-bit random access into a ~450 MB work
-        # image. iOS's off_t is already 64-bit, so this is belt rather than
-        # braces -- but core/CMakeLists.txt sets it for the same file on every
+        # tools/file_block.c does 64-bit random access into a work image that
+        # may grow to 2 GiB. iOS's off_t is already 64-bit, so this is belt
+        # rather than braces -- but core/CMakeLists.txt sets it for the same
+        # file on every
         # non-Windows host, and a build that differs from the tested one only
         # in a width is the kind of difference that shows up as a silently
         # truncated root filesystem.

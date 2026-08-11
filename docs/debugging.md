@@ -50,8 +50,9 @@ later reads, while neither the 466,825,216-byte work image nor the immutable
 source grows. External snapshots remain rejected because this overlay is not
 serialized yet.
 
-Checkpoint replay still uses historical direct-RAM mode:
-`-r firmware/rootfs.img -R 512`. There, `-R 512` is not cosmetic:
+Checkpoint replay in historical direct-RAM mode uses
+`-r firmware/rootfs.img -R 512`. There, the 512 MiB guest-RAM limit is not
+cosmetic:
 `arm_vm_init` hardcodes `virtual_avail = 0xe0000000`,
 so advertising more than 512 MiB at the documented virtual base makes
 `zone_virtual_addr` index an empty `pv_head_table` and fault during

@@ -755,7 +755,8 @@ add_test(NAME app_firmware_hle_adapter COMMAND test_vmfirmwarehle)
 # becomes a PATH COMPONENT here, so the check that admits only sixteen
 # lower-case hex digits is a security boundary and not a formatting rule; and
 # the adoption of a pre-instance work image is the one operation in the app
-# that can lose 450 MB of somebody's guest disk.  Links the firmware boot path
+# that can lose up to 2 GiB of somebody's guest disk. Links the firmware boot
+# path
 # because the property worth asserting is end to end: that two machines see two
 # root filesystems through the code that actually opens them.
 add_executable(test_vminstancepaths

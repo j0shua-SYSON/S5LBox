@@ -766,8 +766,10 @@ blocks + primary header) and block 105,779 (the alternate) — and no file
 owner would own the alternate header's bytes and be scribbled on at every
 flush. When the tail moves, that block becomes ordinary free space.
 
-The 16 KiB allocation file is the ceiling: 16384 × 8 = 131,072 bits, a 512 MiB
-volume at this block size. `--grow` clamps there and says so. (The headroom
+At that time, the 16 KiB allocation file was the ceiling: 16384 × 8 = 131,072
+bits, a 512 MiB volume at this block size. That implementation clamped `--grow`
+there. The current provisioner can expand and relocate the allocation bitmap;
+this section retains the historical limit and measurements. (The headroom
 exists because `newfs_hfs` rounded 105,780 bits up to a whole 4-block clump;
 TN1150 allows a bitmap larger than the volume needs and requires only that the
 surplus bits be zero, which they are.)
@@ -865,8 +867,11 @@ filesystem. `-Y` does that, and needs `-V` to open a gap under the kernel
 The two 768 MiB rows are retained as historical observations from older source,
 not valid current configurations. The current machine constructor rejects a RAM
 aperture that overlaps a decoded device. NOR begins at `0x28000000`, so SDRAM
-starting at `0x08000000` has a maximum non-overlapping size of 512 MiB. The
-allocation file also caps this volume layout at 512 MiB.
+starting at `0x08000000` has a maximum non-overlapping size of 512 MiB. At that
+historical commit, the fixed allocation file also capped this volume
+layout at 512 MiB. The current external-media provisioner grows the bitmap and
+uses a separate, host-backed 2 GiB disk ceiling; the 512 MiB guest-RAM ceiling
+above remains unchanged.
 
 **The last column was the historical point.** In those older runs both `-V` rows
 reached `BSD root: md0` and then went idle without reaching

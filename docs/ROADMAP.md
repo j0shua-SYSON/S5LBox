@@ -421,7 +421,8 @@ entry is a wall that stopped the boot dead, and how it was found.
    retained the zero-timeout patch. Direct `IORTC` publication therefore still
    needs a one-patch diagnostic option or clearly identified targeted build;
    `-K` disables the whole patch table and external-md rejects it.
-5. **512 MiB is the current hard ceiling.** A historical run with `-R 768`
+5. **512 MiB is the current guest-RAM hard ceiling.** A historical run with
+   `-R 768`
    panicked at ~34 M in early VM init with a null-zone dereference.
    `arm_vm_init` hardcodes `virtual_avail = 0xe0000000`, so at the documented
    virtual base the kernel's physical-linear window is exactly 512 MiB;

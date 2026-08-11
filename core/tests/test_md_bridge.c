@@ -562,14 +562,14 @@ static void test_mode_and_configuration_fail_closed(void) {
 
     fixture_init(&fixture);
     config = fixture.bridge.config;
-    config.token_base = UINT64_C(0xfffff000);
+    config.token_base = UINT64_C(0x100000000);
     config.media_size = UINT64_C(8192);
     fixture.block.size = config.media_size;
     md_bridge_init(&fixture.bridge, &config);
     set_request(&fixture, MD_BRIDGE_DIRECTION_READ, TEST_GUEST,
                 config.token_base, 1u);
     expect_error(&fixture, MD_BRIDGE_DIRECTION_READ,
-                 MD_BRIDGE_ERROR_INVALID_CONFIG, "32-bit token overflow");
+                 MD_BRIDGE_ERROR_INVALID_CONFIG, "non-32-bit token base");
 
     fixture_init(&fixture);
     config = fixture.bridge.config;
@@ -798,7 +798,7 @@ static void test_argument_and_range_validation(void) {
                 TEST_TOKEN, 1u);
     fixture.cpu.r[1] = 1u;
     expect_error(&fixture, MD_BRIDGE_DIRECTION_READ,
-                 MD_BRIDGE_ERROR_ADDRESS_HIGH, "source high word");
+                 MD_BRIDGE_ERROR_TOKEN_RANGE, "token outside configured range");
 
     fixture_init(&fixture);
     set_request(&fixture, MD_BRIDGE_DIRECTION_READ, TEST_GUEST,
@@ -806,6 +806,13 @@ static void test_argument_and_range_validation(void) {
     fixture.cpu.r[3] = 1u;
     expect_error(&fixture, MD_BRIDGE_DIRECTION_READ,
                  MD_BRIDGE_ERROR_ADDRESS_HIGH, "destination high word");
+
+    fixture_init(&fixture);
+    set_request(&fixture, MD_BRIDGE_DIRECTION_WRITE, TEST_GUEST,
+                TEST_TOKEN, 1u);
+    fixture.cpu.r[1] = 1u;
+    expect_error(&fixture, MD_BRIDGE_DIRECTION_WRITE,
+                 MD_BRIDGE_ERROR_ADDRESS_HIGH, "write source high word");
 
     fixture_init(&fixture);
     set_request(&fixture, MD_BRIDGE_DIRECTION_READ, TEST_GUEST,
@@ -1034,6 +1041,37 @@ static void test_exact_uint32_last_byte(void) {
           "write of exact physical last byte failed");
 }
 
+static void test_token_window_crosses_uint32_boundary(void) {
+    fixture_t fixture;
+    md_bridge_config_t config;
+    const uint64_t high_token = UINT64_C(0x100000020);
+    const size_t media_offset = 0x1020u;
+
+    fixture_init(&fixture);
+    config = fixture.bridge.config;
+    config.token_base = UINT64_C(0xfffff000);
+    config.media_size = UINT64_C(8192);
+    fixture.block.size = config.media_size;
+    fixture.fake_block.size = (size_t)config.media_size;
+    md_bridge_init(&fixture.bridge, &config);
+    CHECK(md_bridge_config_valid(&config),
+          "token aperture crossing 4 GiB failed preflight");
+
+    fixture.fake_block.bytes[media_offset] = 0x7du;
+    set_request(&fixture, MD_BRIDGE_DIRECTION_READ, TEST_GUEST,
+                high_token, 1u);
+    CHECK(invoke(&fixture, MD_BRIDGE_DIRECTION_READ) == ARM_SVC_HANDLED &&
+          fixture.ram.bytes[TEST_GUEST] == 0x7du,
+          "read beyond the 32-bit token boundary failed");
+
+    fixture.ram.bytes[TEST_GUEST] = 0xb6u;
+    set_request(&fixture, MD_BRIDGE_DIRECTION_WRITE, TEST_GUEST,
+                high_token, 1u);
+    CHECK(invoke(&fixture, MD_BRIDGE_DIRECTION_WRITE) == ARM_SVC_HANDLED &&
+          fixture.fake_block.bytes[media_offset] == 0xb6u,
+          "write beyond the 32-bit token boundary failed");
+}
+
 static void test_saturating_statistics(void) {
     fixture_t fixture;
 
@@ -1236,6 +1274,7 @@ int main(void) {
     test_partial_retry_and_cancellation();
     test_backend_failures_and_atomicity();
     test_exact_uint32_last_byte();
+    test_token_window_crosses_uint32_boundary();
     test_saturating_statistics();
     test_arm_step_success_and_error();
     test_exact_patched_thumb_pair();

@@ -316,10 +316,12 @@ anything is opened:
 | `firmware/rootfs.img` | 433,274,880 | `c3251e7f092c939d5818e92086cb47680981cfb03731de7b55d238c942eb5e82` |
 
 It then creates a writable work image — exactly 466,825,216 bytes (445.199 MiB)
-at the default growth, up to a 512 MiB volume ceiling with larger `--grow`
-values — and serves the guest's disk from it. Budget at least 500 MiB plus room
-for logs; the parent directory must exist. This mode is cold-boot only and
-rejects snapshots. Any guest storage error, undefined instruction, kernel panic
+at the default growth, up to the external bridge's 2 GiB volume ceiling with
+larger `--grow` values — and serves the guest's disk from it. Budget at least
+500 MiB for the default image or slightly over 2 GiB for the maximum, plus room
+for logs; the parent directory must exist. External-media checkpoints carry
+same-name `.mdimage` and `.mdstate` sidecars and may be restored or chained.
+Any guest storage error, undefined instruction, kernel panic
 or halt exits nonzero; the work image is deliberately kept afterwards and the
 next run refuses to reuse that path, so archive it or pick a new filename. A
 cleanup warning means a second large temporary may also be left behind.

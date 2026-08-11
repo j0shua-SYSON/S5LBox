@@ -80,7 +80,7 @@ static rootfs_work_entry_t *g_jb_entries = NULL;
 #endif
 
 #define EXTERNAL_MD_TOKEN_BASE UINT64_C(0xe0000000)
-#define EXTERNAL_MD_MAX_SIZE   UINT64_C(0x20000000)
+#define EXTERNAL_MD_MAX_SIZE   UINT64_C(0x80000000)
 #define EXTERNAL_MD_RAW_DEVICE UINT32_C(0x09000000)
 #define EXTERNAL_MD_RAW_SLOT_COUNT UINT32_C(4)
 #define EXTERNAL_MD_RAW_RESERVE_SIZE \
@@ -35904,8 +35904,7 @@ external_md_work_ready:
             external_media_size > EXTERNAL_MD_MAX_SIZE ||
             external_media_size > UINT32_MAX ||
             (external_media_size & UINT64_C(0xfff)) != 0u ||
-            !add_u64(EXTERNAL_MD_TOKEN_BASE, external_media_size, &token_end) ||
-            token_end > UINT64_C(0x100000000)) {
+            !add_u64(EXTERNAL_MD_TOKEN_BASE, external_media_size, &token_end)) {
             fprintf(stderr,
                     "external-md: published %llu-byte work image has invalid "
                     "media geometry; image preserved\n",

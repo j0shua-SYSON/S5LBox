@@ -43,10 +43,13 @@ typedef struct {
 /*
  * Every address range is half-open.  token_base identifies the synthetic
  * physical address corresponding to block offset zero; media_size must equal
- * block->size exactly.  Both the token and RAM ranges must be non-empty,
- * disjoint, and wholly representable by the guest's 32-bit physical address
- * space (an exclusive end of 0x100000000 is valid).  All four range values
- * are 4 KiB aligned because the guest publishes this geometry in pages.
+ * block->size exactly.  Both ranges must be non-empty and disjoint. token_base
+ * itself must be a 32-bit published address, but the token range may cross
+ * 4 GiB: the audited mdevstrategy path supplies bcopy_phys with split 64-bit
+ * arguments. The RAM range and every guest-RAM operand remain wholly within
+ * the guest's 32-bit physical address space (an exclusive end of 0x100000000
+ * is valid). All four range values are 4 KiB aligned because the guest
+ * publishes this geometry in pages.
  * `ram` points at an array of at least ram_size bytes whose first byte
  * corresponds to ram_base; it must not overlap the bridge object or backend
  * transfer storage.
@@ -83,7 +86,7 @@ typedef enum {
     MD_BRIDGE_ERROR_STACK_PAGE,
     MD_BRIDGE_ERROR_STACK_TRANSLATION,
     MD_BRIDGE_ERROR_STACK_RANGE,
-    MD_BRIDGE_ERROR_ADDRESS_HIGH,
+    MD_BRIDGE_ERROR_ADDRESS_HIGH, /* guest-RAM operand has a nonzero high word */
     MD_BRIDGE_ERROR_LENGTH,
     MD_BRIDGE_ERROR_TOKEN_RANGE,
     MD_BRIDGE_ERROR_GUEST_RANGE,

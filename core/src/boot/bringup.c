@@ -757,12 +757,11 @@ s5l_bringup_status_t s5l_bringup(s5l8900_t *machine,
         if (media_size == 0u || media_size > S5L_BRINGUP_MD_MAX_SIZE ||
             media_size > UINT32_MAX || (media_size & 0xfffu) != 0u ||
             !request->root_media->read_at || !request->root_media->write_at ||
-            !add_u64(S5L_BRINGUP_MD_TOKEN_BASE, media_size, &token_end) ||
-            token_end > UINT64_C(0x100000000))
+            !add_u64(S5L_BRINGUP_MD_TOKEN_BASE, media_size, &token_end))
             return result_fail(result, S5L_BRINGUP_ROOT_MEDIA_INVALID,
                                S5L_BRINGUP_STAGE_ARGUMENTS,
                                "root medium of %llu bytes is empty, unaligned, "
-                               "or does not fit the token window at 0x%08x",
+                               "or exceeds the supported token window at 0x%08x",
                                (unsigned long long)media_size,
                                (unsigned)S5L_BRINGUP_MD_TOKEN_BASE);
         result->root_media_size = media_size;

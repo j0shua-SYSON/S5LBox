@@ -148,10 +148,14 @@
 /*
  * The root filesystem is host-backed: the guest's /dev/md0 is a window onto a
  * file on the host, not a copy of it in guest DRAM. This synthetic base is the
- * address published to the guest; nothing in DRAM lives there.
+ * 32-bit address published to the guest; nothing in DRAM lives there. The
+ * audited iPhone OS 3 mdevstrategy path expands the page-number base and byte
+ * offset into the split 64-bit bcopy_phys ABI, so token arithmetic may cross
+ * 4 GiB even though the published base and device-tree length remain 32-bit.
+ * Two GiB is a deliberate volume cap, not guest RAM.
  */
 #define S5L_BRINGUP_MD_TOKEN_BASE        UINT64_C(0xe0000000)
-#define S5L_BRINGUP_MD_MAX_SIZE          UINT64_C(0x20000000)
+#define S5L_BRINGUP_MD_MAX_SIZE          UINT64_C(0x80000000)
 #define S5L_BRINGUP_MD_RAW_SLOT_COUNT    UINT32_C(4)
 #define S5L_BRINGUP_MD_RAW_RESERVE_SIZE \
     (S5L_BRINGUP_MD_RAW_SLOT_COUNT * MD_RAW_BRIDGE_MAX_TRANSFER)

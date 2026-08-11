@@ -35,6 +35,14 @@ static bool range_end_32(uint64_t base, uint64_t size, uint64_t *end) {
     return true;
 }
 
+static bool token_range_end(uint64_t base, uint64_t size, uint64_t *end) {
+    if (size == 0u || base >= MD_BRIDGE_ADDRESS_SPACE_SIZE ||
+        size > UINT64_MAX - base)
+        return false;
+    *end = base + size;
+    return true;
+}
+
 static bool range_contains(uint64_t base, uint64_t size,
                            uint64_t address, uint64_t length) {
     if (address < base || length > size)
@@ -81,7 +89,7 @@ bool md_bridge_config_valid(const md_bridge_config_t *config) {
     if (config->ram_size > (uint64_t)SIZE_MAX)
         return false;
 #endif
-    if (!range_end_32(config->token_base, config->media_size, &token_end) ||
+    if (!token_range_end(config->token_base, config->media_size, &token_end) ||
         !range_end_32(config->ram_base, config->ram_size, &ram_end))
         return false;
     if (config->token_base < ram_end && config->ram_base < token_end)
@@ -204,8 +212,6 @@ arm_svc_result_t md_bridge_handle_svc(void *context, arm_cpu_t *cpu,
     error.source = source;
     error.destination = destination;
 
-    if ((source >> 32) != 0u || (destination >> 32) != 0u)
-        return fail(bridge, &error, MD_BRIDGE_ERROR_ADDRESS_HIGH);
     if (length == 0u || length > MD_BRIDGE_MAX_TRANSFER)
         return fail(bridge, &error, MD_BRIDGE_ERROR_LENGTH);
 
@@ -216,6 +222,14 @@ arm_svc_result_t md_bridge_handle_svc(void *context, arm_cpu_t *cpu,
         guest_address = source;
         token_address = destination;
     }
+
+    /*
+     * mdevstrategy reconstructs its page base plus byte offset as a 64-bit
+     * bcopy_phys operand. A host-backed token may therefore cross 4 GiB. The
+     * other operand is real guest RAM and must never escape the 32-bit machine.
+     */
+    if ((guest_address >> 32) != 0u)
+        return fail(bridge, &error, MD_BRIDGE_ERROR_ADDRESS_HIGH);
 
     if (!range_contains(config->token_base, config->media_size,
                         token_address, length))
@@ -285,7 +299,7 @@ const char *md_bridge_error_string(md_bridge_error_code_t code) {
     case MD_BRIDGE_ERROR_STACK_PAGE:        return "service stack word crosses a page";
     case MD_BRIDGE_ERROR_STACK_TRANSLATION: return "service stack translation failed";
     case MD_BRIDGE_ERROR_STACK_RANGE:       return "service stack is outside RAM";
-    case MD_BRIDGE_ERROR_ADDRESS_HIGH:      return "64-bit bcopy address is not 32-bit";
+    case MD_BRIDGE_ERROR_ADDRESS_HIGH:      return "guest RAM bcopy address is not 32-bit";
     case MD_BRIDGE_ERROR_LENGTH:            return "invalid transfer length";
     case MD_BRIDGE_ERROR_TOKEN_RANGE:       return "media token range is invalid";
     case MD_BRIDGE_ERROR_GUEST_RANGE:       return "guest RAM range is invalid";

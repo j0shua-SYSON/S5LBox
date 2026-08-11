@@ -664,6 +664,33 @@ static void test_refusals(const uint8_t *kernel, size_t kernel_len,
                   s5l_bringup_status_name(status));
             s5l8900_free(&machine);
 
+            /* The supported 2 GiB endpoint crosses 4 GiB in synthetic token
+             * arithmetic, but mdevstrategy passes it through the split 64-bit
+             * bcopy_phys ABI. This sparse backend proves geometry without a
+             * 2 GiB test allocation. */
+            CHECK(build_machine(&machine), "s5l8900_init failed");
+            media = sparse_media(S5L_BRINGUP_MD_MAX_SIZE);
+            status = s5l_bringup(&machine, &request, md, &result);
+            CHECK(status == S5L_BRINGUP_OK,
+                  "the exact 2 GiB medium gave %s at %s (%s)",
+                  s5l_bringup_status_name(status),
+                  s5l_bringup_stage_name(result.stage), result.detail);
+            if (status == S5L_BRINGUP_OK) {
+                CHECK(result.root_media_size == S5L_BRINGUP_MD_MAX_SIZE &&
+                      result.root_dt_address ==
+                          (uint32_t)S5L_BRINGUP_MD_TOKEN_BASE &&
+                      result.root_dt_size ==
+                          (uint32_t)S5L_BRINGUP_MD_MAX_SIZE,
+                      "2 GiB root geometry was published incorrectly");
+                CHECK(result.md_bridge_installed && md->installed &&
+                      md->strategy.config.token_base ==
+                          S5L_BRINGUP_MD_TOKEN_BASE &&
+                      md->strategy.config.media_size ==
+                          S5L_BRINGUP_MD_MAX_SIZE,
+                      "2 GiB strategy bridge geometry was not installed");
+            }
+            s5l8900_free(&machine);
+
             /* A medium too large for the token window. */
             CHECK(build_machine(&machine), "s5l8900_init failed");
             media = sparse_media(S5L_BRINGUP_MD_MAX_SIZE + 0x1000u);
