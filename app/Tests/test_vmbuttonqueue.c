@@ -300,6 +300,16 @@ static void test_power_release_uses_display_edge_or_bounded_fallback(void) {
               down_ns + VM_BUTTON_POWER_MIN_HOLD_NS,
               down_cycles + VM_BUTTON_POWER_MIN_HOLD_CYCLES - 1u, false),
           "a dark display ignored the bounded retirement fallback");
+    CHECK(!vm_button_power_release_ready(
+              &power_up, &hold,
+              down_ns + VM_BUTTON_POWER_MAX_HOLD_NS - 1u,
+              down_cycles + VM_BUTTON_POWER_MIN_HOLD_CYCLES - 1u, false),
+          "Power ignored the host cap's lower boundary");
+    CHECK(vm_button_power_release_ready(
+              &power_up, &hold,
+              down_ns + VM_BUTTON_POWER_MAX_HOLD_NS,
+              down_cycles + 1u, false),
+          "Power stayed held at the absolute host-time cap");
     CHECK(vm_button_power_release_ready(
               &power_up, &hold,
               down_ns + VM_BUTTON_POWER_MIN_HOLD_NS,

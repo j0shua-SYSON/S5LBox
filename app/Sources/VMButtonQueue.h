@@ -74,20 +74,18 @@
  * The host floor preserves a physical-feeling pulse.  For a press that began
  * with the display dark, CLCD changing to running is stronger evidence than a
  * guessed instruction delay: the guest acted on that press, so release can no
- * longer erase it.  This distinction is load-bearing on a slow no-JIT idle
- * path.  Guest time there follows the active host clock while cpu.cycles still
- * counts retired instructions; waiting for eight million retirements took
- * several HOST seconds on a real device and turned a wake tap into "slide to
- * power off".
+ * longer erase it.  Fifty milliseconds is the same physically-tested floor
+ * used by Home and volume and leaves ample margin over the 14 ms debounce.
  *
- * Eight million retirements remains only a bounded fallback for a dark display
- * that exposes no CLCD edge.  It is above the 5,768,000-retirement debounce
- * floor used by deterministic runners with no active host clock.  A press that
- * began with CLCD already running needs only the host floor: that driver path
- * is already alive, and forcing the dark-display fallback under heavy UI load
- * would manufacture the same long-press bug.
+ * Eight million retirements remains evidence for deterministic runners with no
+ * usable host clock.  On a slow phone it is NOT a host-time bound: a sleeping
+ * guest can take several seconds to retire it, and the guest then correctly
+ * interprets the emulated wire as a long press.  Therefore a usable monotonic
+ * clock imposes a 250 ms absolute cap.  The display edge or retirement floor
+ * may release earlier, but neither can extend a human tap beyond that cap.
  */
-#define VM_BUTTON_POWER_MIN_HOLD_NS UINT64_C(500000000)
+#define VM_BUTTON_POWER_MIN_HOLD_NS UINT64_C(50000000)
+#define VM_BUTTON_POWER_MAX_HOLD_NS UINT64_C(250000000)
 #define VM_BUTTON_POWER_MIN_HOLD_CYCLES UINT64_C(8000000)
 
 /*
@@ -179,9 +177,9 @@ bool vm_button_queue_peek(const vm_button_queue_t *q, vm_button_event_t *out);
  * means no accepted press is known and fails open rather than wedging Power.
  * The host floor always applies when its clock is usable.  After that, a press
  * which began on a running display is ready; a dark-display press is ready
- * when CLCD has started or when the retired-instruction fallback expires.
- * Missing/backwards clocks fail open only for their own half so a discontinuity
- * cannot hold the key forever.
+ * when CLCD has started, when the retired-instruction fallback expires, or at
+ * the absolute host-time cap. Missing/backwards clocks fail open only for their
+ * own half so a discontinuity cannot hold the key forever.
  */
 bool vm_button_power_release_ready(const vm_button_event_t *event,
                                    const vm_button_power_hold_t *hold,

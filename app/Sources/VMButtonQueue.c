@@ -100,11 +100,19 @@ bool vm_button_power_release_ready(const vm_button_event_t *event,
     if (event->which != S5L_BUTTON_HOLD || event->pressed) return true;
     if (!hold || !hold->active) return true;
 
-    bool host_ready = hold->delivered_ns == 0u || now_ns == 0u ||
-                      now_ns < hold->delivered_ns ||
-                      now_ns - hold->delivered_ns >=
-                          VM_BUTTON_POWER_MIN_HOLD_NS;
+    bool host_clock_usable = hold->delivered_ns != 0u && now_ns != 0u &&
+                             now_ns >= hold->delivered_ns;
+    uint64_t host_elapsed = host_clock_usable
+        ? now_ns - hold->delivered_ns : 0u;
+    bool host_ready = !host_clock_usable ||
+                      host_elapsed >= VM_BUTTON_POWER_MIN_HOLD_NS;
     if (!host_ready) return false;
+
+    /* Retirements are a guest-time witness, not a host-time bound.  A slow
+     * interpreter can need seconds to reach the old 8M fallback, which turns
+     * one UIKit tap into the guest's long-press shutdown gesture. */
+    if (host_clock_usable && host_elapsed >= VM_BUTTON_POWER_MAX_HOLD_NS)
+        return true;
 
     /* An already-running display has no post-wake rebuild to wait through.
      * For a dark display, the off->on edge proves the guest consumed the press
