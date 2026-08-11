@@ -287,44 +287,49 @@ static void test_power_release_uses_display_edge_or_bounded_fallback(void) {
           "a non-Power release was delayed");
     CHECK(!vm_button_power_release_ready(
               &power_up, &hold,
-              down_ns + VM_BUTTON_POWER_MIN_HOLD_NS - 1u,
+              down_ns + VM_BUTTON_POWER_DARK_MIN_HOLD_NS - 1u,
               down_cycles + VM_BUTTON_POWER_MIN_HOLD_CYCLES, true),
           "a display edge waived the host-time floor");
     CHECK(vm_button_power_release_ready(
               &power_up, &hold,
-              down_ns + VM_BUTTON_POWER_MIN_HOLD_NS,
+              down_ns + VM_BUTTON_POWER_DARK_MIN_HOLD_NS,
               down_cycles + 1u, true),
           "a dark-display wake edge did not release Power");
     CHECK(!vm_button_power_release_ready(
               &power_up, &hold,
-              down_ns + VM_BUTTON_POWER_MIN_HOLD_NS,
+              down_ns + VM_BUTTON_POWER_DARK_MIN_HOLD_NS,
               down_cycles + VM_BUTTON_POWER_MIN_HOLD_CYCLES - 1u, false),
           "a dark display ignored the bounded retirement fallback");
     CHECK(!vm_button_power_release_ready(
               &power_up, &hold,
-              down_ns + VM_BUTTON_POWER_MAX_HOLD_NS - 1u,
+              down_ns + VM_BUTTON_POWER_DARK_MAX_HOLD_NS - 1u,
               down_cycles + VM_BUTTON_POWER_MIN_HOLD_CYCLES - 1u, false),
           "Power ignored the host cap's lower boundary");
     CHECK(vm_button_power_release_ready(
               &power_up, &hold,
-              down_ns + VM_BUTTON_POWER_MAX_HOLD_NS,
+              down_ns + VM_BUTTON_POWER_DARK_MAX_HOLD_NS,
               down_cycles + 1u, false),
           "Power stayed held at the absolute host-time cap");
     CHECK(vm_button_power_release_ready(
               &power_up, &hold,
-              down_ns + VM_BUTTON_POWER_MIN_HOLD_NS,
+              down_ns + VM_BUTTON_POWER_DARK_MIN_HOLD_NS,
               down_cycles + VM_BUTTON_POWER_MIN_HOLD_CYCLES, false),
           "Power stayed held at the exact fallback boundary");
 
     hold.display_running_at_press = true;
     CHECK(!vm_button_power_release_ready(
               &power_up, &hold,
-              down_ns + VM_BUTTON_POWER_MIN_HOLD_NS - 1u,
+              down_ns + VM_BUTTON_POWER_DARK_MAX_HOLD_NS,
+              down_cycles + VM_BUTTON_POWER_MIN_HOLD_CYCLES, true),
+          "the dark-display host cap shortened an awake Power pulse");
+    CHECK(!vm_button_power_release_ready(
+              &power_up, &hold,
+              down_ns + VM_BUTTON_POWER_AWAKE_MIN_HOLD_NS - 1u,
               down_cycles + VM_BUTTON_POWER_MIN_HOLD_CYCLES, true),
           "an awake press ignored the host-time floor");
     CHECK(vm_button_power_release_ready(
               &power_up, &hold,
-              down_ns + VM_BUTTON_POWER_MIN_HOLD_NS,
+              down_ns + VM_BUTTON_POWER_AWAKE_MIN_HOLD_NS,
               down_cycles + 1u, false),
           "an awake press was forced through the dark-display fallback");
     hold.display_running_at_press = false;
@@ -347,7 +352,8 @@ static void test_power_release_uses_display_edge_or_bounded_fallback(void) {
           "an unpaired Power release wedged the queue");
     CHECK(vm_button_power_release_ready(
               &power_up, &hold,
-              down_ns + VM_BUTTON_POWER_MIN_HOLD_NS, down_cycles - 1u, false),
+              down_ns + VM_BUTTON_POWER_DARK_MIN_HOLD_NS,
+              down_cycles - 1u, false),
           "a backwards guest counter wedged Power");
     CHECK(!vm_button_power_release_ready(
               NULL, &hold, down_ns, down_cycles, false),

@@ -71,21 +71,22 @@
  * samples the pin from a 14 ms debounce callback, not from its interrupt, and
  * the callback may not execute before a UIKit tap has already queued release.
  *
- * The host floor preserves a physical-feeling pulse.  For a press that began
- * with the display dark, CLCD changing to running is stronger evidence than a
- * guessed instruction delay: the guest acted on that press, so release can no
- * longer erase it.  Fifty milliseconds is the same physically-tested floor
- * used by Home and volume and leaves ample margin over the 14 ms debounce.
+ * The two directions need different host-time bounds.  With CLCD already
+ * running, AppleM68Buttons still has to sample the asserted pin from its guest
+ * debounce callback.  A 50 ms host pulse delivered both edges on a real phone
+ * but was intermittently missed by that callback, while the earlier 500 ms
+ * pulse reliably put the awake guest to sleep and remains far below a shutdown
+ * hold.  Keep that proven floor for an awake press.
  *
- * Eight million retirements remains evidence for deterministic runners with no
- * usable host clock.  On a slow phone it is NOT a host-time bound: a sleeping
- * guest can take several seconds to retire it, and the guest then correctly
- * interprets the emulated wire as a long press.  Therefore a usable monotonic
- * clock imposes a 250 ms absolute cap.  The display edge or retirement floor
- * may release earlier, but neither can extend a human tap beyond that cap.
+ * A dark-display wake is the opposite case: waiting for eight million retired
+ * instructions can take several HOST seconds in the sleeping no-JIT guest and
+ * manufacture a shutdown hold.  It gets the ordinary 50 ms electrical floor,
+ * then releases on the CLCD wake edge or at a 250 ms absolute host cap.  Eight
+ * million retirements remains only a clockless deterministic-runner fallback.
  */
-#define VM_BUTTON_POWER_MIN_HOLD_NS UINT64_C(50000000)
-#define VM_BUTTON_POWER_MAX_HOLD_NS UINT64_C(250000000)
+#define VM_BUTTON_POWER_AWAKE_MIN_HOLD_NS UINT64_C(500000000)
+#define VM_BUTTON_POWER_DARK_MIN_HOLD_NS UINT64_C(50000000)
+#define VM_BUTTON_POWER_DARK_MAX_HOLD_NS UINT64_C(250000000)
 #define VM_BUTTON_POWER_MIN_HOLD_CYCLES UINT64_C(8000000)
 
 /*
@@ -175,11 +176,11 @@ bool vm_button_queue_peek(const vm_button_queue_t *q, vm_button_event_t *out);
  * Whether the event at the front of the queue may be delivered now.  Every
  * event except a Power release is immediately ready.  An inactive or NULL hold
  * means no accepted press is known and fails open rather than wedging Power.
- * The host floor always applies when its clock is usable.  After that, a press
- * which began on a running display is ready; a dark-display press is ready
- * when CLCD has started, when the retired-instruction fallback expires, or at
- * the absolute host-time cap. Missing/backwards clocks fail open only for their
- * own half so a discontinuity cannot hold the key forever.
+ * With a usable host clock an awake press uses its longer debounce-safe floor.
+ * A dark-display press uses its short floor, then is ready when CLCD starts,
+ * when the retired-instruction fallback expires, or at its absolute host-time
+ * cap. Missing/backwards clocks fail open only for their own half so a
+ * discontinuity cannot hold the key forever.
  */
 bool vm_button_power_release_ready(const vm_button_event_t *event,
                                    const vm_button_power_hold_t *hold,

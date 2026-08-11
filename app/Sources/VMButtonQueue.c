@@ -104,14 +104,19 @@ bool vm_button_power_release_ready(const vm_button_event_t *event,
                              now_ns >= hold->delivered_ns;
     uint64_t host_elapsed = host_clock_usable
         ? now_ns - hold->delivered_ns : 0u;
-    bool host_ready = !host_clock_usable ||
-                      host_elapsed >= VM_BUTTON_POWER_MIN_HOLD_NS;
+    uint64_t host_floor = hold->display_running_at_press
+        ? VM_BUTTON_POWER_AWAKE_MIN_HOLD_NS
+        : VM_BUTTON_POWER_DARK_MIN_HOLD_NS;
+    bool host_ready = !host_clock_usable || host_elapsed >= host_floor;
     if (!host_ready) return false;
 
     /* Retirements are a guest-time witness, not a host-time bound.  A slow
      * interpreter can need seconds to reach the old 8M fallback, which turns
-     * one UIKit tap into the guest's long-press shutdown gesture. */
-    if (host_clock_usable && host_elapsed >= VM_BUTTON_POWER_MAX_HOLD_NS)
+     * one UIKit tap into the guest's long-press shutdown gesture.  The cap is
+     * intentionally dark-only: an awake press needs the longer proven floor
+     * above so the guest's debounce callback does not miss it. */
+    if (!hold->display_running_at_press && host_clock_usable &&
+        host_elapsed >= VM_BUTTON_POWER_DARK_MAX_HOLD_NS)
         return true;
 
     /* An already-running display has no post-wake rebuild to wait through.
