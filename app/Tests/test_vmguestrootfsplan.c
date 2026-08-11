@@ -337,16 +337,48 @@ static void test_complete_synthetic_plan(void) {
           strstr((const char *)script->content,
                  "/usr/bin/uicache || true") == NULL,
           "the first-boot script still hides an icon-cache failure");
+    const char *configured = script
+        ? strstr((const char *)script->content,
+                 "/usr/bin/dpkg --force-depends --configure -a || exit 1")
+        : NULL;
+    const char *cydia_owner = script
+        ? strstr((const char *)script->content,
+                 "/bin/chown 0:0 \"$cydia\" || exit 1")
+        : NULL;
+    const char *cydia_mode = script
+        ? strstr((const char *)script->content,
+                 "/bin/chmod 6755 \"$cydia\" || exit 1")
+        : NULL;
+    const char *cydia_mode_check = script
+        ? strstr((const char *)script->content,
+                 "[ -u \"$cydia\" ] && [ -g \"$cydia\" ] || exit 1")
+        : NULL;
+    CHECK(configured && cydia_owner && cydia_mode && cydia_mode_check &&
+          configured < cydia_owner && cydia_owner < cydia_mode &&
+          cydia_mode < cydia_mode_check,
+          "the configured Cydia executable is not restored to root 6755");
     const char *mobile_cache = script
         ? strstr((const char *)script->content,
                  "/bin/grep -aq 'com.saurik.Cydia' \"$cache\" || exit 1")
+        : NULL;
+    const char *respring = script
+        ? strstr((const char *)script->content,
+                 "if /usr/bin/killall SpringBoard; then")
         : NULL;
     const char *completion = script
         ? strstr((const char *)script->content,
                  ": >\"$state/complete.partial\" || exit 1")
         : NULL;
-    CHECK(mobile_cache && completion && mobile_cache < completion,
-          "the install can complete before Cydia enters the mobile icon cache");
+    CHECK(mobile_cache && respring && completion &&
+          cydia_mode_check < mobile_cache && mobile_cache < respring &&
+          respring < completion,
+          "the install can complete before Cydia is privileged, cached, and resprung");
+    CHECK(script &&
+          strstr((const char *)script->content,
+                 "/usr/bin/killall SpringBoard || true") == NULL &&
+          strstr((const char *)script->content,
+                 "[ \"$attempt\" -lt 60 ] || exit 1") != NULL,
+          "the first-boot respring still hides a missing SpringBoard process");
 
     vm_guest_rootfs_stats_t stats;
     vm_guest_rootfs_plan_get_stats(plan, &stats);
@@ -360,10 +392,10 @@ static void test_complete_synthetic_plan(void) {
     CHECK(vm_guest_rootfs_plan_manifest_sha256(plan, digest),
           "plan manifest identity was not produced");
     static const uint8_t EXPECTED[VM_GUEST_PACKAGE_SHA256_SIZE] = {
-        0x2du, 0xb6u, 0x11u, 0x47u, 0xedu, 0xfeu, 0x1bu, 0xfeu,
-        0xbdu, 0xcbu, 0xfcu, 0xa4u, 0x1bu, 0xc2u, 0xd2u, 0x03u,
-        0xf1u, 0xafu, 0x58u, 0x6cu, 0x22u, 0x00u, 0xd6u, 0xc8u,
-        0x82u, 0x5eu, 0xf4u, 0x6bu, 0x76u, 0x4bu, 0xa6u, 0x8fu
+        0xc7u, 0x7eu, 0xecu, 0xc8u, 0xceu, 0x22u, 0x1fu, 0x4du,
+        0xa2u, 0x1au, 0xebu, 0xf8u, 0x21u, 0x53u, 0x38u, 0x45u,
+        0x15u, 0x66u, 0x65u, 0xbbu, 0x10u, 0xa3u, 0x44u, 0x6au,
+        0x7cu, 0x82u, 0xc9u, 0x7fu, 0xcau, 0x7eu, 0xeau, 0x6au
     };
     CHECK(memcmp(digest, EXPECTED, sizeof digest) == 0,
           "synthetic plan identity changed");

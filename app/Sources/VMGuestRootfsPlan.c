@@ -63,17 +63,30 @@ static const char SCRIPT_HEADER[] =
 
 static const char SCRIPT_FOOTER[] =
     "/usr/bin/dpkg --force-depends --configure -a || exit 1\n"
+    "cydia=/Applications/Cydia.app/Cydia_\n"
+    "[ -f \"$cydia\" ] || exit 1\n"
+    "/bin/chown 0:0 \"$cydia\" || exit 1\n"
+    "/bin/chmod 6755 \"$cydia\" || exit 1\n"
+    "[ -u \"$cydia\" ] && [ -g \"$cydia\" ] || exit 1\n"
     "[ -x /usr/bin/uicache ] || exit 1\n"
     "/bin/su --login --command /usr/bin/uicache mobile || exit 1\n"
     "cache=/private/var/mobile/Library/Caches/"
         "com.apple.mobile.installation.plist\n"
     "/bin/grep -aq 'com.saurik.Cydia' \"$cache\" || exit 1\n"
+    "attempt=0\n"
+    "while [ \"$attempt\" -lt 60 ]; do\n"
+    "    if /usr/bin/killall SpringBoard; then\n"
+    "        break\n"
+    "    fi\n"
+    "    attempt=$((attempt + 1))\n"
+    "    /bin/sleep 1\n"
+    "done\n"
+    "[ \"$attempt\" -lt 60 ] || exit 1\n"
     ": >\"$state/complete.partial\" || exit 1\n"
     "/bin/sync\n"
     "/bin/mv -f \"$state/complete.partial\" \"$state/complete\" || exit 1\n"
     "/bin/sync\n"
     "echo \"s5lbox guest install complete\"\n"
-    "[ -x /usr/bin/killall ] && /usr/bin/killall SpringBoard || true\n"
     "exit 0\n";
 
 struct vm_guest_rootfs_plan {
