@@ -8754,3 +8754,59 @@ efficiency win, does not approach 30 FPS and must not remain enabled. Commit
 measurements are retained under
 `work/artifacts/eaeda40-a9-cpsr-resident/`; the phone was returned to the exact
 marker-free baseline app after the comparison.
+
+### 2026-08-11: Power taps no longer become shutdown holds or vanish
+
+The first bounded-host revision, `c8db12bae9d3aa411dfbbe004bba5f2486b12d5d`,
+fixed the catastrophic half of the bug but was not acceptable. A Power press
+that began with the display dark could no longer wait several host seconds for
+eight million guest retirements: it released after at most 250 ms, so one wake
+tap stopped turning into the guest's long-press shutdown slider. On the same
+physical iPhone 6s Plus, however, its single 50 ms floor was too short for the
+awake path. Both edges reached the board, but a settled lock-screen tap could
+leave the display awake. Delivery counters alone would have called that a
+success; the screen disproved them.
+
+Commit `95e73e4c9b555c129cd1eb1659f772dcfa6ed9cb` separates the two
+electrical cases instead of choosing one compromise duration. An awake press
+keeps the previously reliable 500 ms debounce-safe pulse. A dark-display press
+uses a 50 ms floor, releases on the CLCD wake edge, and has a 250 ms absolute
+host cap. The eight-million-retirement condition remains only as a clockless
+deterministic-runner fallback. The focused button test and all 61/61 local
+tests pass. Exact-SHA iOS run `31451780241` and core run `31451780286` are
+green. The installed IPA SHA-256 is
+`133C70B7C6F7358B9E18F357BE31E068A2D19F6EEA3285274F712E11762CCFA3`.
+
+The exact IPA cold-booted the existing MBX work image. Early boot reached
+34--39 M instructions/s; late boot fell to roughly 1.8 M instructions/s and
+then entered the kernel idle PC with CLCD stopped. That was Auto-Lock, not a
+dead VM: one Power tap produced two accepted edges and the lock screen. Three
+settled sleep/wake cycles then produced the expected alternating `valid` and
+`stopped` scanout states. Seven taps delivered 14/14 board transitions with
+zero refusals, zero WFI pacing failures, and no shutdown slider.
+
+The normal Back action showed `Saving machine... It will resume here next
+time.`, installed a 26-byte one-shot marker, and returned to Machines. Reopen
+restored at 5,419.6 M instructions rather than cold-booting, consumed the
+marker, and resumed a sleeping display. One bounded wake tap again delivered
+two edges and restored live scanout; after that wake, MBX had completed 102/102
+2D commands and 8/8 3D commands with no decoder rejection.
+
+Brutal status: **the reported Power/Auto-Lock/reopen trap is fixed on this one
+A9 device and the automatic checkpoint transaction works in the same exact
+build.** This does not prove long-session navigation stability, internet,
+sound, 30 FPS, or that MBX is ready to become the product default. It proves a
+specific lifecycle path through cold boot, repeated sleep/wake, checkpoint,
+restore, and post-restore wake; those wider acceptance tests remain open.
+
+The same restored session then unlocked, opened Settings, navigated through
+General and Restrictions, returned Home, opened Safari, entered the Pages
+view, created a second page, and selected a page after leaving the guest static
+for 38 seconds. Restrictions remained responsive at roughly 1.8--2.1 M
+instructions/s and 11 FPS. The unchanged Safari page reported 0 FPS, but
+responded immediately to the next touch; in this case zero meant that no new
+frame was being submitted, not that the VM had stalled. Global MBX counters
+reached 6,654/6,654 accepted 2D commands and 4,112/4,112 accepted 3D commands,
+with zero decoder rejections, zero scanout-attempt gaps above 100 ms, and zero
+WFI pacing failures. This is useful post-restore navigation and short-soak
+evidence, but it is still only one device and one session.
