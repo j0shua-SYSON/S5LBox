@@ -13,6 +13,43 @@ a green unit test nor a later lifecycle callback is presented as a rendered
 SpringBoard. Later test-only commits are recorded separately and do not inherit
 run21's firmware evidence.
 
+## 2026-08-11 VFP short-vector and physical regression evidence
+
+Exact source commit `7f37acc426cc3aa563afede163e87e927344e630`
+contains the VFPv2 short-vector implementation from `64bd021` plus only the
+hosted-workflow oracle-count correction. This result supersedes the historical
+statement below that short vectors were unimplemented; it does not rewrite or
+inherit the older run evidence.
+
+- The default local build passed **61/61** CTest tests and the JIT/static build
+  passed **66/66**. `test_vfp` passed **607/0** in both builds. The directed
+  cases include the exact Voice Memos instruction `0xee22aa00` with captured
+  `FPSCR=0x03030000`, bank wrapping, stride two, scalar broadcast, overlap,
+  cumulative exceptions, and fail-atomic invalid shapes.
+- Exact-head hosted runs were green: [core run
+  31460531585](https://github.com/j0shua-SYSON/S5LBox/actions/runs/31460531585)
+  and [unsigned iOS run
+  31460547163](https://github.com/j0shua-SYSON/S5LBox/actions/runs/31460547163).
+  The installed IPA was 1,292,866 bytes with SHA-256
+  `CE5A6ED4D4CCA7EFA0C5D54860F6E7A127D5F34E1023ACE87E08D20925A1B7EB`.
+- On a physical iPhone8,2 running iOS 15.8.5, a saved CPU-renderer guest
+  reached SpringBoard. Voice Memos entered its list view twice and remained
+  `running`; the displayed retired counter advanced from **4,250.1 M** to
+  **4,826.1 M** after the first activation. Safari's far-right Pages view and
+  Spotlight with its keyboard also opened and remained running. Spotlight's
+  counter advanced from **7,579.2 M** to **7,740.5 M** during the final hold.
+  A final console scan contained no terminal-CPU, undefined-instruction,
+  machine-stopped, or `0x04b78d94` marker.
+- This is evidence for those three previously fatal interaction paths, not for
+  general stability. Voice Memos' list view fell to roughly **1.3--1.6 M
+  insn/s**, and the sampler reported a single-region loop at
+  `0xc0062300--0xc006233f`; the guest continued retiring instructions, but that
+  low-throughput behavior remains unresolved. Two separate cold starts also
+  remained black beyond 4.5 billion instructions; one was observed sleeping
+  in the modeled WFI path at roughly 1.8 M insn/s. This run therefore does not
+  validate cold boot, MBX stability, internet, sound, or sustained everyday
+  use.
+
 ## Current verdict
 
 - The post-run19 TV-out correction built successfully in Release mode, and all
