@@ -62,15 +62,41 @@ extern NSString *const VMInstanceStoreDidChangeNotification;
 - (void)addRetired:(uint64_t)retired toInstanceWithID:(NSString *)identifier;
 
 /*
- * Per-instance option values, in option-table order. `values` is read and
- * written by the settings screen; out-of-range indices are ignored rather
- * than growing the array.
+ * Per-instance option values, in option-table order. Current creation paths
+ * snapshot the new-machine settings; the raw accessors remain for future
+ * machine-specific UI. Out-of-range indices are ignored rather than growing
+ * the array. Historical rows are not automatically trustworthy; the graphics
+ * record below is the explicit ownership boundary for the renderer pair.
  */
 - (BOOL)optionValueAtIndex:(NSUInteger)optionIndex
       forInstanceWithID:(NSString *)identifier;
 - (void)setOptionValue:(BOOL)value
                atIndex:(NSUInteger)optionIndex
      forInstanceWithID:(NSString *)identifier;
+
+/*
+ * Resolve the graphics pair for an opening machine. Returns YES and fills the
+ * pair when a trustworthy versioned record exists. If the machine has never
+ * had a work image, this method atomically records the current new-machine
+ * setting first: first open is the actual image-time boundary. Returns NO with
+ * no error for a legacy machine that already has a work image but no record;
+ * that is the explicit signal to retain app-wide launch behaviour. Returns NO
+ * with an error for a malformed or unwritable record, which must refuse launch
+ * rather than risk mismatching the image.
+ *
+ * machines.txt has always contained option bits, but older create paths filled
+ * them from compile-time defaults while VMEngine actually read app-wide
+ * Settings. Inferring an old machine's renderer from those bits can therefore
+ * pair an MBX boot with a software-renderer image, or the reverse. New machines
+ * carry a small versioned record beside their mutable image. Only that record
+ * authorizes a per-machine launch override; absence or malformed content falls
+ * back to the unchanged app-wide behaviour.
+ */
+- (BOOL)graphicsForOpeningInstanceWithID:(NSString *)identifier
+                              mbxEnabled:(BOOL * _Nullable)mbxEnabled
+                 softwareRendererEnabled:
+                     (BOOL * _Nullable)softwareRendererEnabled
+                                   error:(NSError **)error;
 
 /*
  * Where this machine's mutable files belong — its work image and, later, its

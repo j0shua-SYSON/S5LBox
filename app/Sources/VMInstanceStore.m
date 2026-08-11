@@ -5,19 +5,40 @@
 //
 #import "VMInstanceStore.h"
 
+#import "VMFirmwareBoot.h"
 #import "VMOptions.h"
+#import "VMSettings.h"
 
 NSString *const VMInstanceStoreDidChangeNotification =
     @"VMInstanceStoreDidChangeNotification";
 
 static NSString *const kStoreFile = @"machines.txt";
+static NSString *const kGraphicsRecordFile = @".graphics-v1";
 static NSString *const kErrorDomain = @"VMInstanceStore";
+static const NSInteger kGraphicsRecordError = 1000;
 
 /* realpath(), PATH_MAX. Declarations must precede @implementation --
  * Objective-C takes only method definitions inside one. */
 #include <limits.h>
 #include <stdlib.h>
 #include <string.h>
+
+static NSString *VMGraphicsRecordText(BOOL mbxEnabled,
+                                      BOOL softwareRendererEnabled) {
+    return [NSString stringWithFormat:
+        @"s5lbox-machine-graphics 1\nmbx %u\nca-software-render %u\n",
+        mbxEnabled ? 1u : 0u, softwareRendererEnabled ? 1u : 0u];
+}
+
+@interface VMInstanceStore ()
+- (BOOL)recordedGraphicsForInstanceWithID:(NSString *)identifier
+                               mbxEnabled:(BOOL *)mbxEnabled
+                  softwareRendererEnabled:(BOOL *)softwareRendererEnabled;
+- (BOOL)writeRecordedGraphicsForInstanceWithID:(NSString *)identifier
+                                    mbxEnabled:(BOOL)mbxEnabled
+                       softwareRendererEnabled:(BOOL)softwareRendererEnabled
+                                         error:(NSError **)error;
+@end
 
 
 @implementation VMInstanceStore {
@@ -138,6 +159,152 @@ static NSString *const kErrorDomain = @"VMInstanceStore";
                                               attributes:nil
                                                    error:NULL];
     return dir;
+}
+
+- (NSString *)graphicsRecordPathForInstanceWithID:(NSString *)identifier {
+    NSString *dir =
+        [[self containerDirectory] stringByAppendingPathComponent:identifier];
+    return [dir stringByAppendingPathComponent:kGraphicsRecordFile];
+}
+
+- (BOOL)writeRecordedGraphicsForInstanceWithID:(NSString *)identifier
+                                    mbxEnabled:(BOOL)mbxEnabled
+                       softwareRendererEnabled:(BOOL)softwareRendererEnabled
+                                         error:(NSError **)error {
+    NSString *dir = [self directoryForInstanceWithID:identifier];
+    NSString *path = [dir stringByAppendingPathComponent:kGraphicsRecordFile];
+    NSError *writeError = nil;
+    BOOL ok = [VMGraphicsRecordText(mbxEnabled, softwareRendererEnabled)
+        writeToFile:path
+         atomically:YES
+           encoding:NSUTF8StringEncoding
+              error:&writeError];
+    if (!ok && error) {
+        NSString *why = writeError.localizedDescription
+            ?: @"the graphics record could not be written";
+        *error = [NSError errorWithDomain:kErrorDomain
+                                     code:kGraphicsRecordError
+                                 userInfo:@{ NSLocalizedDescriptionKey: why }];
+    }
+    return ok;
+}
+
+- (BOOL)recordedGraphicsForInstanceWithID:(NSString *)identifier
+                               mbxEnabled:(BOOL *)mbxEnabled
+                  softwareRendererEnabled:(BOOL *)softwareRendererEnabled {
+    if ([self indexOfID:identifier] < 0) return NO;
+
+    NSString *text = [NSString stringWithContentsOfFile:
+        [self graphicsRecordPathForInstanceWithID:identifier]
+                                             encoding:NSUTF8StringEncoding
+                                                error:NULL];
+    if (!text) return NO;
+
+    /* Accept only one of the four canonical records. A damaged or hand-edited
+     * marker is not permission to guess at an image-time renderer. */
+    for (unsigned mbx = 0; mbx <= 1u; mbx++) {
+        for (unsigned software = 0; software <= 1u; software++) {
+            if (![text isEqualToString:
+                    VMGraphicsRecordText(mbx != 0u, software != 0u)])
+                continue;
+            if (mbxEnabled) *mbxEnabled = mbx != 0u;
+            if (softwareRendererEnabled)
+                *softwareRendererEnabled = software != 0u;
+            return YES;
+        }
+    }
+    NSLog(@"[instances] %@ has an unreadable graphics record; using legacy "
+           "app-wide settings", identifier);
+    return NO;
+}
+
+- (BOOL)graphicsForOpeningInstanceWithID:(NSString *)identifier
+                              mbxEnabled:(BOOL *)mbxEnabled
+                 softwareRendererEnabled:(BOOL *)softwareRendererEnabled
+                                   error:(NSError **)error {
+    if ([self indexOfID:identifier] < 0) {
+        if (error) *error = [self errorFor:VM_INSTANCE_ERR_RANGE];
+        return NO;
+    }
+
+    NSString *recordPath =
+        [self graphicsRecordPathForInstanceWithID:identifier];
+    BOOL recordExists =
+        [[NSFileManager defaultManager] fileExistsAtPath:recordPath];
+    BOOL recordedMBX = NO, recordedSoftware = NO;
+    if ([self recordedGraphicsForInstanceWithID:identifier
+                                     mbxEnabled:&recordedMBX
+                        softwareRendererEnabled:&recordedSoftware]) {
+        if (mbxEnabled) *mbxEnabled = recordedMBX;
+        if (softwareRendererEnabled)
+            *softwareRendererEnabled = recordedSoftware;
+        return YES;
+    }
+
+    if (recordExists) {
+        if (error) {
+            *error = [NSError errorWithDomain:kErrorDomain
+                                         code:kGraphicsRecordError
+                                     userInfo:@{
+                NSLocalizedDescriptionKey:
+                    @"This machine's graphics record is unreadable. It was "
+                     "not started because guessing could mismatch its image."
+            }];
+        }
+        return NO;
+    }
+
+    NSString *workName =
+        [NSString stringWithUTF8String:VM_FW_BOOT_WORK_FILE];
+    NSString *workPath = [[[self containerDirectory]
+        stringByAppendingPathComponent:identifier]
+        stringByAppendingPathComponent:workName];
+    if ([[NSFileManager defaultManager] fileExistsAtPath:workPath]) {
+        /* Deliberate legacy path. Its old option bits cannot tell us which
+         * renderer prepared this existing file. Preserve global behaviour. */
+        return NO;
+    }
+
+    int mbx = vm_option_index("mbx");
+    int ca = vm_option_index("ca-software-render");
+    if (mbx < 0 || ca < 0 ||
+        (unsigned)mbx >= VM_INSTANCE_OPTION_MAX ||
+        (unsigned)ca >= VM_INSTANCE_OPTION_MAX) {
+        if (error) {
+            *error = [NSError errorWithDomain:kErrorDomain
+                                         code:kGraphicsRecordError
+                                     userInfo:@{
+                NSLocalizedDescriptionKey:
+                    @"The graphics option table is incomplete."
+            }];
+        }
+        return NO;
+    }
+
+    VMSettings *settings = [VMSettings sharedSettings];
+    recordedMBX =
+        [settings valueForNewMachineOptionIndex:(NSUInteger)mbx];
+    recordedSoftware =
+        [settings valueForNewMachineOptionIndex:(NSUInteger)ca];
+    NSError *writeError = nil;
+    if (![self writeRecordedGraphicsForInstanceWithID:identifier
+                                           mbxEnabled:recordedMBX
+                              softwareRendererEnabled:recordedSoftware
+                                                error:&writeError]) {
+        if (error) *error = writeError;
+        return NO;
+    }
+
+    int row = [self indexOfID:identifier];
+    if (row >= 0) {
+        _list.slot[row].options[mbx] = recordedMBX ? true : false;
+        _list.slot[row].options[ca] = recordedSoftware ? true : false;
+        [self changed];
+    }
+    if (mbxEnabled) *mbxEnabled = recordedMBX;
+    if (softwareRendererEnabled)
+        *softwareRendererEnabled = recordedSoftware;
+    return YES;
 }
 
 #pragma mark - Persistence
@@ -263,22 +430,47 @@ static NSString *const kErrorDomain = @"VMInstanceStore";
         if (error) *error = [self errorFor:VM_INSTANCE_ERR_ID_TAKEN];
         return nil;
     }
-    /* Defaults come from the option table, so a new machine matches what the
-     * harness would do with no flags. */
+    /* Snapshot what Settings ACTUALLY says for a new machine. The old path
+     * copied compile-time table defaults here while VMEngine read NSUserDefaults
+     * at launch, making machines.txt look authoritative when it was not. */
     bool defaults[VM_INSTANCE_OPTION_MAX];
     memset(defaults, 0, sizeof defaults);
     unsigned n = vm_option_count();
     if (n > VM_INSTANCE_OPTION_MAX) n = VM_INSTANCE_OPTION_MAX;
+    VMSettings *settings = [VMSettings sharedSettings];
     for (unsigned i = 0; i < n; i++) {
-        const vm_option_t *o = vm_option_at(i);
-        defaults[i] = o ? o->def : false;
+        defaults[i] = [settings valueForNewMachineOptionIndex:i]
+            ? true : false;
     }
 
+    unsigned added = 0;
     vm_instance_status_t s =
         vm_instance_add(&_list, identifier.UTF8String, name.UTF8String,
                         defaults, VM_INSTANCE_OPTION_MAX,
-                        (uint64_t)[NSDate date].timeIntervalSince1970, NULL);
+                        (uint64_t)[NSDate date].timeIntervalSince1970, &added);
     if (![self report:s to:error]) return nil;
+
+    int mbx = vm_option_index("mbx");
+    int ca = vm_option_index("ca-software-render");
+    if (mbx < 0 || ca < 0 ||
+        (unsigned)mbx >= VM_INSTANCE_OPTION_MAX ||
+        (unsigned)ca >= VM_INSTANCE_OPTION_MAX) {
+        (void)vm_instance_remove(&_list, added);
+        if (error) {
+            *error = [NSError errorWithDomain:kErrorDomain
+                                         code:kGraphicsRecordError
+                                     userInfo:@{
+                NSLocalizedDescriptionKey:
+                    @"The graphics option table is incomplete."
+            }];
+        }
+        return nil;
+    }
+
+    /* Do not write the ownership marker yet. The first open, not the list-row
+     * creation, is when the image-time setting becomes immutable. This also
+     * lets the automatically created first row follow a choice made before it
+     * is opened. */
     [self changed];
     return identifier;
 }
@@ -313,12 +505,74 @@ static NSString *const kErrorDomain = @"VMInstanceStore";
                > VM_INSTANCE_NAME_MAX && base.length > 1u)
         base = [base substringToIndex:base.length - 1u];
 
+    /* A duplicate gets a fresh work image, so it must also get an exact
+     * image-time graphics record. Copy a trustworthy source record. For a
+     * legacy source whose historical bits are not evidence, use the current
+     * new-machine setting rather than blessing those bits retroactively. */
+    BOOL mbxEnabled = NO, softwareRendererEnabled = NO;
+    if (![self recordedGraphicsForInstanceWithID:source[@"id"]
+                                      mbxEnabled:&mbxEnabled
+                         softwareRendererEnabled:&softwareRendererEnabled]) {
+        VMSettings *settings = [VMSettings sharedSettings];
+        int mbx = vm_option_index("mbx");
+        int ca = vm_option_index("ca-software-render");
+        if (mbx < 0 || ca < 0) {
+            if (error) {
+                *error = [NSError errorWithDomain:kErrorDomain
+                                             code:kGraphicsRecordError
+                                         userInfo:@{
+                    NSLocalizedDescriptionKey:
+                        @"The graphics option table is incomplete."
+                }];
+            }
+            return nil;
+        }
+        mbxEnabled =
+            [settings valueForNewMachineOptionIndex:(NSUInteger)mbx];
+        softwareRendererEnabled =
+            [settings valueForNewMachineOptionIndex:(NSUInteger)ca];
+    }
+
+    unsigned added = 0;
     vm_instance_status_t s =
         vm_instance_duplicate(&_list, (unsigned)index, identifier.UTF8String,
                               base.UTF8String,
                               (uint64_t)[NSDate date].timeIntervalSince1970,
-                              NULL);
+                              &added);
     if (![self report:s to:error]) return nil;
+
+    int mbx = vm_option_index("mbx");
+    int ca = vm_option_index("ca-software-render");
+    if (mbx < 0 || ca < 0 ||
+        (unsigned)mbx >= VM_INSTANCE_OPTION_MAX ||
+        (unsigned)ca >= VM_INSTANCE_OPTION_MAX) {
+        (void)vm_instance_remove(&_list, added);
+        if (error) {
+            *error = [NSError errorWithDomain:kErrorDomain
+                                         code:kGraphicsRecordError
+                                     userInfo:@{
+                NSLocalizedDescriptionKey:
+                    @"The graphics option table is incomplete."
+            }];
+        }
+        return nil;
+    }
+    _list.slot[added].options[mbx] = mbxEnabled ? true : false;
+    _list.slot[added].options[ca] =
+        softwareRendererEnabled ? true : false;
+
+    NSError *graphicsError = nil;
+    if (![self writeRecordedGraphicsForInstanceWithID:identifier
+                                           mbxEnabled:mbxEnabled
+                              softwareRendererEnabled:softwareRendererEnabled
+                                                error:&graphicsError]) {
+        (void)vm_instance_remove(&_list, added);
+        NSString *dir = [[self containerDirectory]
+            stringByAppendingPathComponent:identifier];
+        (void)[[NSFileManager defaultManager] removeItemAtPath:dir error:NULL];
+        if (error) *error = graphicsError;
+        return nil;
+    }
     [self changed];
     return identifier;
 }

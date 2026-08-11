@@ -9,6 +9,7 @@
 #import "VMEngine.h"
 #import "VMInstanceStore.h"
 #import "VMInstances.h"
+#import "VMSettings.h"
 #import "VMSettingsViewController.h"
 
 static NSString *const kCell = @"machine";
@@ -234,8 +235,10 @@ titleForHeaderInSection:(NSInteger)section {
 titleForFooterInSection:(NSInteger)section {
     (void)tableView; (void)section;
     return [NSString stringWithFormat:
-            @"Each machine keeps its own options and its own files. %@ "
-            @"Only one machine runs at a time.",
+            @"New machines keep their recorded graphics mode and their own "
+            @"files. Legacy machines keep the app-wide graphics setting; their "
+            @"old option bits are not treated as evidence. %@ Only one machine "
+            @"runs at a time.",
             [VMEngine firmwareReadinessSummary]];
 }
 
@@ -299,7 +302,30 @@ titleForFooterInSection:(NSInteger)section {
      * emulator over whichever controller is currently visible. */
     if (!row || !navigation || navigation.topViewController != self) return NO;
 
-    [[VMInstanceStore sharedStore] noteOpenedInstanceWithID:row[@"id"]];
+    VMInstanceStore *store = [VMInstanceStore sharedStore];
+    BOOL mbxEnabled = NO, softwareRendererEnabled = NO;
+    NSError *graphicsError = nil;
+    BOOL hasRecordedGraphics =
+        [store graphicsForOpeningInstanceWithID:row[@"id"]
+                                     mbxEnabled:&mbxEnabled
+                        softwareRendererEnabled:&softwareRendererEnabled
+                                          error:&graphicsError];
+    if (graphicsError) {
+        [self showError:graphicsError doing:@"Could not open the machine"];
+        return NO;
+    }
+    if (hasRecordedGraphics) {
+        [[VMSettings sharedSettings]
+            useRecordedGraphicsForMachineWithMBX:mbxEnabled
+                                softwareRenderer:softwareRendererEnabled];
+    } else {
+        /* This is compatibility, not migration. Historical bits did not
+         * necessarily prepare the image, so an old machine keeps exactly the
+         * global launch behaviour it had before this feature. */
+        [[VMSettings sharedSettings] clearRecordedGraphicsForMachine];
+    }
+
+    [store noteOpenedInstanceWithID:row[@"id"]];
 
     EmulatorViewController *vc = [[EmulatorViewController alloc] init];
     vc.title = row[@"name"];

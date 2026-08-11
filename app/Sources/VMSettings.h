@@ -15,11 +15,13 @@
 //  APPLIED HERE. The instruction cap and the pause-on-background switch. Both
 //  are real properties of this app's run loop and both take effect immediately.
 //
-//  APP-WIDE, NOT PER MACHINE. These are NSUserDefaults keys, so every machine
-//  shares them. VMInstanceStore carries a per-instance option array that
-//  nothing writes yet; when the settings screen becomes per-machine it becomes
-//  the source and -[VMEngine copyOptionValuesInto:capacity:] is the one place
-//  that changes.
+//  NEW-MACHINE DEFAULTS live in NSUserDefaults. A machine created by the
+//  current app records the two image-time graphics values at its first open,
+//  and the launch path temporarily overlays those two rows while that machine
+//  starts.
+//  Older machines have no trustworthy record: their historical option bits
+//  were compile-time defaults rather than what prepared the image, so they
+//  deliberately retain the app-wide behaviour instead of being guessed at.
 //
 //  Firmware paths are a third case: reported, not stored. The app ships no
 //  firmware and downloads none, so all this class does is name the directory it
@@ -71,11 +73,26 @@ typedef NS_ENUM(NSInteger, VMGraphicsMode) {
 
 #pragma mark - Recorded only (see the file note)
 
-/* `index` is an index into VMOptions.c's table. An unset key reads as that
- * row's default rather than as NO, so adding a row to the table does not
- * silently turn it off for everyone who has already run the app. */
+/* `index` is an index into VMOptions.c's table. This is the effective launch
+ * value: normally the new-machine default below, except that the two graphics
+ * rows can come from a versioned machine record selected immediately before
+ * VMEngine starts. An unset global key reads as the table default rather than
+ * as NO. */
 - (BOOL)valueForOptionIndex:(NSUInteger)index;
+
+/* The app-wide value shown and edited by Settings for machines created later.
+ * UI must use this method rather than accidentally displaying the transient
+ * launch overlay of the machine that is currently open. */
+- (BOOL)valueForNewMachineOptionIndex:(NSUInteger)index;
 - (void)setValue:(BOOL)value forOptionIndex:(NSUInteger)index;
+
+/* Select or clear a trustworthy per-machine graphics pair. Selection is
+ * process-local and does not rewrite NSUserDefaults. The pair stays selected
+ * until another machine is opened so a slow image provisioner cannot lose it
+ * merely because its screen was dismissed. */
+- (void)useRecordedGraphicsForMachineWithMBX:(BOOL)mbxEnabled
+                            softwareRenderer:(BOOL)softwareRendererEnabled;
+- (void)clearRecordedGraphicsForMachine;
 
 /* The bootkernel arguments these switches correspond to, or a stated
  * "everything is at its default" when they correspond to none. */

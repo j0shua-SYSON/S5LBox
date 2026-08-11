@@ -33,7 +33,8 @@ static void VMResolveOptions(vm_boot_options_report_t *report) {
     unsigned count = vm_option_count();
     if (count > VM_BOOT_OPTION_MAX) count = VM_BOOT_OPTION_MAX;
     for (unsigned i = 0; i < count; i++)
-        values[i] = [[VMSettings sharedSettings] valueForOptionIndex:i]
+        values[i] = [[VMSettings sharedSettings]
+                        valueForNewMachineOptionIndex:i]
                         ? true : false;
     /* NULL request: nothing is being started, only described. */
     vm_boot_options_apply(values, count, NULL, report);
@@ -609,7 +610,7 @@ titleForFooterInSection:(NSInteger)section {
 
         UISwitch *toggle = [[UISwitch alloc] initWithFrame:CGRectZero];
         toggle.tag = (NSInteger)index;
-        toggle.on = [_settings valueForOptionIndex:index];
+        toggle.on = [_settings valueForNewMachineOptionIndex:index];
         toggle.accessibilityLabel = VMStringFromC(option->title);
         /*
          * Grey for a row the machine does not read, the system tint for one it
@@ -879,12 +880,14 @@ didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
 - (void)chooseGraphicsMode {
     VMGraphicsMode current = [_settings graphicsModeForNewMachines];
     NSString *message =
-        @"Choose before opening a new machine for the first time. This changes "
-        @"the settings used when its writable image is prepared. Existing "
-        @"machines keep their image-time renderer value even though the MBX "
-        @"boot switch follows Settings, so they are not a controlled test "
-        @"after a change.\n\nMBX is the performance candidate, but "
-        @"it has not yet passed the final cold-boot or 30 FPS phone test.";
+        @"Choose before opening a new machine for the first time. It records "
+        @"this exact graphics pair and reuses it whenever it starts, matching "
+        @"the value "
+        @"written into their writable image. Older machines created before "
+        @"that record existed keep the app-wide setting because their saved "
+        @"option bits cannot be trusted.\n\nMBX is substantially faster on "
+        @"the tested phones, but it is not the default until repeated "
+        @"cold-boot, navigation, sleep/wake, and resume soaks are stable.";
     UIAlertController *picker = [UIAlertController
         alertControllerWithTitle:@"Graphics for new machines"
                          message:message

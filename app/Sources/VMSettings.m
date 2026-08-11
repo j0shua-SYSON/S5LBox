@@ -51,7 +51,15 @@ static const uint64_t kVMInstructionCaps[] = {
     ((NSUInteger)(sizeof kVMInstructionCaps / sizeof kVMInstructionCaps[0]))
 
 // Declared up front so every call below is checked against a prototype.
-@interface VMSettings ()
+@interface VMSettings () {
+    /* One immutable-in-practice pair selected before an engine starts. It is
+     * read by both the main-thread boot probe and the background provisioner,
+     * so every access is under the same monitor rather than three atomic
+     * properties that could expose a mixed pair. */
+    BOOL _recordedGraphicsActive;
+    BOOL _recordedGraphicsMBX;
+    BOOL _recordedGraphicsSoftware;
+}
 - (NSUserDefaults *)defaults;
 - (NSString *)keyForOptionIndex:(NSUInteger)index;
 - (void)publishChange;
@@ -86,7 +94,7 @@ static const uint64_t kVMInstructionCaps[] = {
             [NSString stringWithUTF8String:option->name]];
 }
 
-- (BOOL)valueForOptionIndex:(NSUInteger)index {
+- (BOOL)valueForNewMachineOptionIndex:(NSUInteger)index {
     const vm_option_t *option = vm_option_at((unsigned)index);
     if (!option) return NO;
 
@@ -94,6 +102,38 @@ static const uint64_t kVMInstructionCaps[] = {
     NSNumber *stored = key ? [[self defaults] objectForKey:key] : nil;
     if (![stored isKindOfClass:[NSNumber class]]) return option->def ? YES : NO;
     return stored.boolValue;
+}
+
+- (BOOL)valueForOptionIndex:(NSUInteger)index {
+    int mbx = vm_option_index("mbx");
+    int ca = vm_option_index("ca-software-render");
+
+    @synchronized (self) {
+        if (_recordedGraphicsActive) {
+            if (mbx >= 0 && index == (NSUInteger)mbx)
+                return _recordedGraphicsMBX;
+            if (ca >= 0 && index == (NSUInteger)ca)
+                return _recordedGraphicsSoftware;
+        }
+    }
+    return [self valueForNewMachineOptionIndex:index];
+}
+
+- (void)useRecordedGraphicsForMachineWithMBX:(BOOL)mbxEnabled
+                            softwareRenderer:(BOOL)softwareRendererEnabled {
+    @synchronized (self) {
+        _recordedGraphicsMBX = mbxEnabled;
+        _recordedGraphicsSoftware = softwareRendererEnabled;
+        _recordedGraphicsActive = YES;
+    }
+}
+
+- (void)clearRecordedGraphicsForMachine {
+    @synchronized (self) {
+        _recordedGraphicsActive = NO;
+        _recordedGraphicsMBX = NO;
+        _recordedGraphicsSoftware = NO;
+    }
 }
 
 - (void)setValue:(BOOL)value forOptionIndex:(NSUInteger)index {
@@ -108,8 +148,9 @@ static const uint64_t kVMInstructionCaps[] = {
     int ca = vm_option_index("ca-software-render");
     if (mbx < 0 || ca < 0) return VMGraphicsModeCustom;
 
-    BOOL mbxEnabled = [self valueForOptionIndex:(NSUInteger)mbx];
-    BOOL softwareEnabled = [self valueForOptionIndex:(NSUInteger)ca];
+    BOOL mbxEnabled = [self valueForNewMachineOptionIndex:(NSUInteger)mbx];
+    BOOL softwareEnabled =
+        [self valueForNewMachineOptionIndex:(NSUInteger)ca];
     if (!mbxEnabled && softwareEnabled) return VMGraphicsModeSoftware;
     if (mbxEnabled && !softwareEnabled)
         return VMGraphicsModeExperimentalMBX;
@@ -148,7 +189,7 @@ static const uint64_t kVMInstructionCaps[] = {
     bool *slots = (bool *)values.mutableBytes;
     if (!slots) return @"(unavailable)";
     for (unsigned i = 0; i < count; i++)
-        slots[i] = [self valueForOptionIndex:i] ? true : false;
+        slots[i] = [self valueForNewMachineOptionIndex:i] ? true : false;
 
     const size_t needed = vm_option_command_line(slots, count, NULL, 0);
     if (needed == 0) return @"(every option is at its default)";
@@ -194,8 +235,8 @@ static const uint64_t kVMInstructionCaps[] = {
     int cs = vm_option_index("jb-codesign");
     int pl = vm_option_index("jb-payload");
     if (cs < 0 || pl < 0) return NO;
-    return [self valueForOptionIndex:(NSUInteger)cs] &&
-           [self valueForOptionIndex:(NSUInteger)pl];
+    return [self valueForNewMachineOptionIndex:(NSUInteger)cs] &&
+           [self valueForNewMachineOptionIndex:(NSUInteger)pl];
 }
 
 - (void)setJailbreakEnabled:(BOOL)enabled {

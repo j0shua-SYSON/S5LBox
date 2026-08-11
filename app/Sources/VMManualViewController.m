@@ -160,18 +160,21 @@ typedef struct {
         @"b": @"The default remains Apple's CPU software renderer because it "
               @"has the strongest cold-boot history. Settings now pairs the "
               @"two controls as Graphics for new machines: CPU software, or "
-              @"experimental MBX. Choose before opening a new machine for the "
-              @"first time. The choice is written into that machine's work "
-              @"image. On an existing machine, the MBX boot switch can change "
-              @"while the stored renderer value cannot, so changing Settings "
-              @"later does not convert it and is not a controlled comparison.\n\n"
+              @"experimental MBX. Choose before a machine's first open. Current "
+              @"machines then record the exact pair beside their work image and "
+              @"reuse it on later starts. Machines created by older builds do "
+              @"not: their saved option bits were compile-time defaults, not "
+              @"proof of what prepared the image, so they deliberately keep "
+              @"the app-wide setting rather than being guessed or migrated.\n\n"
               @"The current MBX model completes the "
               @"measured reset, command-ring, 2D and 3D workloads, including "
               @"a live 1,388/1,388 2D and 8,888/8,888 3D interval with no "
               @"decoder rejection or recovery.\n\nThat is substantial graphics "
-              @"coverage. It is still not the required final cold boot and it "
-              @"is not a measured 30 fps phone result, so the app does not "
-              @"silently make it the default." }];
+              @"coverage. Recent physical runs also survive the historical "
+              @"Safari Pages and Spotlight terminal paths, repeated sleep/wake, "
+              @"and checkpoint restore. That is promising evidence, not yet "
+              @"the repeated long-session proof required to make MBX the "
+              @"default." }];
 
     if (dev) {
         [e addObject:@{ @"h": @"Console",
