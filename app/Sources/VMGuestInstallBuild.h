@@ -54,10 +54,12 @@ typedef void (*vm_guest_install_build_progress_t)(
 
 typedef struct {
     bool already_installed;
+    bool storage_upgraded;
     size_t historical_snapshots;
     vm_guest_rootfs_stats_t plan;
     rootfs_work_result_t rootfs;
     vm_guest_install_result_t transaction;
+    vm_guest_install_result_t storage_transaction;
     uint8_t manifest_sha256[VM_GUEST_INSTALL_SHA256_SIZE];
 } vm_guest_install_build_result_t;
 
@@ -67,8 +69,11 @@ typedef struct {
  * remain stopped through completion. The source-change checks in rootfs_work
  * are a final refusal, not a substitute for that lifecycle precondition.
  *
- * A valid existing v1 marker is idempotent success and needs no package cache.
- * Upgrades use a new transaction version rather than mutating an installed v1.
+ * A valid existing v1 marker needs no package cache. If that installation's
+ * live HFS image predates the 2 GiB minimum, a separate crash-safe storage
+ * transaction clones and grows it while the v1 boot-policy marker remains
+ * continuously authoritative. A machine already at the minimum is idempotent
+ * success with no disk rewrite.
  */
 vm_guest_install_build_status_t
 vm_guest_install_build_from_directory(

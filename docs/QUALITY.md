@@ -1018,3 +1018,50 @@ which owns hosted
 and
 [iOS run 30143455036](https://github.com/j0shua-SYSON/S5LBox/actions/runs/30143455036);
 hosted CI contains no private firmware and establishes nothing about this boot.
+
+## 2026-08-12: 2 GiB migration for existing Cydia guests
+
+The initial 2 GiB builder fixed fresh guest installations but did not repair a
+machine that already carried the strict v1 install marker: that marker returned
+idempotent success before disk capacity was inspected. The current change adds
+a second, disjoint disk-replacement journal for capacity maintenance. The v1
+install marker remains continuously authoritative while the live image is
+cloned, grown, flushed, and atomically replaced. Boot recovery processes this
+storage journal first because both transactions share the live image path.
+
+The artifact-backed migration test used a retained, real HFSX work image with a
+valid committed install marker. It produced:
+
+| Evidence | Before | After |
+|---|---:|---:|
+| Host image bytes | 500,375,552 | 2,147,483,648 |
+| HFS allocation blocks | 122,162 | 524,288 |
+| HFS free blocks | not captured | 412,331 |
+| HFS free bytes | not used as acceptance evidence | 1,688,907,776 (78.65%) |
+
+The pre-migration free-block value was not captured in that run, so this
+document does not invent it after the fact. The post-migration primary header
+is `HX`, allocation block size 4,096, and its
+`totalBlocks * blockSize` exactly matches the host file length. The builder ran
+519 checks with zero failures and a second invocation performed no rewrite.
+
+Content-preservation evidence was extracted through the read-only HFS catalog
+walker before and after migration:
+
+```text
+s5lbox-guest-install                 7F825FDBCD2E806D803966A3D4DD89AC79B0C4CAA85968F98AE9B950B1A15DDB
+cydia_1.0.3044-66_iphoneos-arm.deb  94769B67E88198012CD1E45163F2F8BD949B4AA927DAB1503A03D62A8EE3DBA9
+guest.jailbreak-v1                  57AC94CC21F0F03B2A91284AFCB7C884AF928779F0A127E2395A5DBCA8D6C2E1
+```
+
+Each hash matched before and after. The byte-sized transaction suite also
+interrupts after journal publication, old-live preservation, new-live
+publication, and commit-record publication; every boundary recovers to the new
+disk while preserving the original install identity. The complete normal and
+static/JIT-gated local suites pass 67/67 and 72/72 respectively.
+
+What this does **not** prove: this exact build has not yet been installed on the
+physical test phone, and Cydia has not yet completed a real package operation
+against the migrated image. The offline storage defect is fixed and measured;
+the final on-device package transaction remains required before calling the
+user-visible problem closed.

@@ -5,6 +5,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 
 typedef struct {
     vm_guest_install_build_progress_t callback;
@@ -48,6 +49,23 @@ static bool build_join(char out[VM_GUEST_INSTALL_PATH_CAPACITY],
            (size_t)written < VM_GUEST_INSTALL_PATH_CAPACITY;
 }
 
+static bool build_regular_file_size(const char *path, uint64_t *out_size) {
+    if (out_size) *out_size = 0u;
+    if (!path || !*path || !out_size) return false;
+#ifdef _WIN32
+    struct _stat64 st;
+    if (_stat64(path, &st) != 0 || (st.st_mode & _S_IFREG) == 0 ||
+        st.st_size <= 0)
+        return false;
+#else
+    struct stat st;
+    if (stat(path, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size <= 0)
+        return false;
+#endif
+    *out_size = (uint64_t)st.st_size;
+    return true;
+}
+
 static vm_guest_install_build_status_t build_snapshot_gate(
     const char *work_directory, vm_guest_install_build_result_t *result,
     char *detail, size_t detail_capacity) {
@@ -80,6 +98,110 @@ static vm_guest_install_build_status_t build_snapshot_gate(
     return VM_GUEST_INSTALL_BUILD_OK;
 }
 
+static vm_guest_install_build_status_t build_upgrade_storage(
+    const char *work_directory,
+    const vm_guest_install_result_t *install,
+    const vm_guest_install_result_t *storage,
+    vm_guest_install_build_progress_t progress, void *progress_context,
+    vm_guest_install_build_result_t *result,
+    char *detail, size_t detail_capacity) {
+    if (!install || !install->committed || !install->has_manifest || !storage) {
+        build_detail(detail, detail_capacity,
+                     "The committed installation has no safe identity for a storage upgrade.");
+        return VM_GUEST_INSTALL_BUILD_ERR_TRANSACTION;
+    }
+
+    char live[VM_GUEST_INSTALL_PATH_CAPACITY];
+    uint64_t live_size = 0u;
+    if (!build_join(live, work_directory, VM_GUEST_INSTALL_LIVE_FILE) ||
+        !build_regular_file_size(live, &live_size)) {
+        build_detail(detail, detail_capacity,
+                     "The committed installation has no valid live guest disk.");
+        return VM_GUEST_INSTALL_BUILD_ERR_TRANSACTION;
+    }
+    if (live_size >= VM_GUEST_INSTALL_MINIMUM_VOLUME_BYTES) {
+        build_progress(progress, progress_context,
+                       VM_GUEST_INSTALL_BUILD_COMPLETE, 1u, 1u);
+        return VM_GUEST_INSTALL_BUILD_OK;
+    }
+    if (storage->committed) {
+        build_detail(detail, detail_capacity,
+                     "The storage-upgrade record is committed, but the live guest disk is still smaller than 2 GiB.");
+        return VM_GUEST_INSTALL_BUILD_ERR_TRANSACTION;
+    }
+
+    vm_guest_install_build_status_t snapshot_gate = build_snapshot_gate(
+        work_directory, result, detail, detail_capacity);
+    if (snapshot_gate != VM_GUEST_INSTALL_BUILD_OK) return snapshot_gate;
+
+    build_progress(progress, progress_context,
+                   VM_GUEST_INSTALL_BUILD_STAGING, 0u, 1u);
+    vm_guest_install_result_t prepared;
+    char transaction_detail[VM_GUEST_INSTALL_BUILD_DETAIL_CAPACITY];
+    vm_guest_install_status_t preparation = vm_guest_storage_prepare_stage(
+        work_directory, &prepared, transaction_detail,
+        sizeof transaction_detail);
+    if (preparation != VM_GUEST_INSTALL_OK || prepared.committed) {
+        build_detail(detail, detail_capacity,
+                     preparation == VM_GUEST_INSTALL_OK
+                         ? "The storage upgrade became committed while its disk was being prepared."
+                         : (transaction_detail[0]
+                                ? transaction_detail
+                                : vm_guest_install_status_text(preparation)));
+        return VM_GUEST_INSTALL_BUILD_ERR_TRANSACTION;
+    }
+
+    char stage[VM_GUEST_INSTALL_PATH_CAPACITY];
+    if (!vm_guest_storage_stage_image_path(stage, sizeof stage,
+                                           work_directory)) {
+        build_detail(detail, detail_capacity,
+                     "The storage-upgrade stage path is too long.");
+        return VM_GUEST_INSTALL_BUILD_ERR_PATH;
+    }
+    build_progress(progress, progress_context,
+                   VM_GUEST_INSTALL_BUILD_STAGING, 1u, 1u);
+
+    rootfs_work_options_t options;
+    memset(&options, 0, sizeof options);
+    options.preserve_fstab = true;
+    options.minimum_volume_bytes = VM_GUEST_INSTALL_MINIMUM_VOLUME_BYTES;
+    build_progress_adapter_t adapter = {progress, progress_context};
+    options.progress = build_rootfs_progress;
+    options.progress_ctx = &adapter;
+    rootfs_work_result_t rootfs;
+    rootfs_work_status_t rootfs_status = rootfs_work_create(
+        live, stage, &options, &rootfs);
+    if (result) result->rootfs = rootfs;
+    if (rootfs_status != ROOTFS_WORK_OK || !rootfs.published ||
+        rootfs.final_size < VM_GUEST_INSTALL_MINIMUM_VOLUME_BYTES) {
+        build_detail(detail, detail_capacity,
+                     rootfs.detail[0] ? rootfs.detail
+                                      : rootfs_work_status_name(rootfs_status));
+        return VM_GUEST_INSTALL_BUILD_ERR_ROOTFS;
+    }
+
+    build_progress(progress, progress_context,
+                   VM_GUEST_INSTALL_BUILD_PUBLISHING, 0u, 1u);
+    vm_guest_install_result_t published;
+    vm_guest_install_status_t publication = vm_guest_storage_publish(
+        work_directory, install->manifest_sha256, &published,
+        transaction_detail, sizeof transaction_detail);
+    if (result) result->storage_transaction = published;
+    if (publication != VM_GUEST_INSTALL_OK || !published.committed) {
+        build_detail(detail, detail_capacity,
+                     transaction_detail[0]
+                         ? transaction_detail
+                         : vm_guest_install_status_text(publication));
+        return VM_GUEST_INSTALL_BUILD_ERR_PUBLISH;
+    }
+    if (result) result->storage_upgraded = true;
+    build_progress(progress, progress_context,
+                   VM_GUEST_INSTALL_BUILD_PUBLISHING, 1u, 1u);
+    build_progress(progress, progress_context,
+                   VM_GUEST_INSTALL_BUILD_COMPLETE, 1u, 1u);
+    return VM_GUEST_INSTALL_BUILD_OK;
+}
+
 vm_guest_install_build_status_t
 vm_guest_install_build_from_directory(
     const char *work_directory, const char *package_directory,
@@ -95,9 +217,23 @@ vm_guest_install_build_from_directory(
     }
 
     build_progress(progress, progress_context,
-                   VM_GUEST_INSTALL_BUILD_RECOVERING, 0u, 1u);
-    vm_guest_install_result_t recovered;
+                   VM_GUEST_INSTALL_BUILD_RECOVERING, 0u, 2u);
+    vm_guest_install_result_t storage;
     char transaction_detail[VM_GUEST_INSTALL_BUILD_DETAIL_CAPACITY];
+    vm_guest_install_status_t storage_recovery = vm_guest_storage_recover(
+        work_directory, &storage, transaction_detail,
+        sizeof transaction_detail);
+    if (storage_recovery != VM_GUEST_INSTALL_OK) {
+        build_detail(detail, detail_capacity,
+                     transaction_detail[0]
+                         ? transaction_detail
+                         : vm_guest_install_status_text(storage_recovery));
+        return VM_GUEST_INSTALL_BUILD_ERR_TRANSACTION;
+    }
+    if (result) result->storage_transaction = storage;
+    build_progress(progress, progress_context,
+                   VM_GUEST_INSTALL_BUILD_RECOVERING, 1u, 2u);
+    vm_guest_install_result_t recovered;
     vm_guest_install_status_t recovery = vm_guest_install_recover(
         work_directory, &recovered, transaction_detail,
         sizeof transaction_detail);
@@ -109,7 +245,7 @@ vm_guest_install_build_from_directory(
     }
     if (result) result->transaction = recovered;
     build_progress(progress, progress_context,
-                   VM_GUEST_INSTALL_BUILD_RECOVERING, 1u, 1u);
+                   VM_GUEST_INSTALL_BUILD_RECOVERING, 2u, 2u);
     if (recovered.committed) {
         if (result) {
             result->already_installed = true;
@@ -117,9 +253,9 @@ vm_guest_install_build_from_directory(
                 memcpy(result->manifest_sha256, recovered.manifest_sha256,
                        VM_GUEST_INSTALL_SHA256_SIZE);
         }
-        build_progress(progress, progress_context,
-                       VM_GUEST_INSTALL_BUILD_COMPLETE, 1u, 1u);
-        return VM_GUEST_INSTALL_BUILD_OK;
+        return build_upgrade_storage(
+            work_directory, &recovered, &storage,
+            progress, progress_context, result, detail, detail_capacity);
     }
 
     vm_guest_install_build_status_t snapshot_gate = build_snapshot_gate(

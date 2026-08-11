@@ -596,10 +596,33 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
         return false;
     }
 
-    /* Finish or roll back an interrupted rootfs replacement BEFORE probing or
-     * opening the live image. The strict marker is also the only authority for
-     * the paired code-signing policy below: malformed evidence stops here
-     * instead of producing a half-installed, policy-off boot. */
+    /* A capacity repair and a first install have disjoint journals but replace
+     * the same live image. Recover the repair first: at its middle rename the
+     * install marker remains valid while the live path is temporarily absent,
+     * so probing the install transaction first would reject a state the repair
+     * journal can resolve exactly. */
+    vm_guest_install_result_t guest_storage;
+    char guest_storage_detail[VM_FW_BOOT_DETAIL_CAPACITY] = {0};
+    vm_guest_install_status_t guest_storage_status =
+        vm_guest_storage_recover(paths->work, &guest_storage,
+                                 guest_storage_detail,
+                                 sizeof guest_storage_detail);
+    if (guest_storage_status != VM_GUEST_INSTALL_OK) {
+        (void)snprintf(report->detail, sizeof report->detail,
+                       "Guest-storage recovery refused (%s): %.180s",
+                       vm_guest_install_status_text(guest_storage_status),
+                       guest_storage_detail[0] ? guest_storage_detail
+                                               : "no safe recovery exists");
+        report->detail[sizeof report->detail - 1u] = '\0';
+        set_detail(report->summary, sizeof report->summary,
+                   "guest-storage recovery required");
+        return false;
+    }
+
+    /* Finish or roll back an interrupted install BEFORE probing or opening the
+     * live image. The strict marker is also the only authority for the paired
+     * code-signing policy below: malformed evidence stops here instead of
+     * producing a half-installed, policy-off boot. */
     vm_guest_install_result_t guest_install;
     char guest_install_detail[VM_FW_BOOT_DETAIL_CAPACITY] = {0};
     vm_guest_install_status_t guest_install_status =

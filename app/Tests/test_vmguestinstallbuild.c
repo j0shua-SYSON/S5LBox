@@ -10,6 +10,8 @@
 #include <sys/stat.h>
 #ifdef _WIN32
 #include <direct.h>
+#include <windows.h>
+#include <winioctl.h>
 #else
 #include <unistd.h>
 #endif
@@ -74,6 +76,42 @@ static bool exists(const char *path) {
     return stat(path, &st) == 0;
 }
 
+static uint64_t file_size_or_zero(const char *path) {
+#ifdef _WIN32
+    struct _stat64 st;
+    return path && _stat64(path, &st) == 0 &&
+           (st.st_mode & _S_IFREG) != 0 && st.st_size > 0
+               ? (uint64_t)st.st_size : 0u;
+#else
+    struct stat st;
+    return path && stat(path, &st) == 0 && S_ISREG(st.st_mode) &&
+           st.st_size > 0 ? (uint64_t)st.st_size : 0u;
+#endif
+}
+
+static bool resize_sparse(const char *path, uint64_t size) {
+#ifdef _WIN32
+    HANDLE file = CreateFileA(path, GENERIC_WRITE, 0, NULL, OPEN_EXISTING,
+                              FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE) return false;
+    DWORD ignored = 0u;
+    bool ok = DeviceIoControl(file, FSCTL_SET_SPARSE, NULL, 0u, NULL, 0u,
+                              &ignored, NULL) != 0;
+    LARGE_INTEGER end;
+    end.QuadPart = (LONGLONG)size;
+    if (ok && !SetFilePointerEx(file, end, NULL, FILE_BEGIN)) ok = false;
+    if (ok && !SetEndOfFile(file)) ok = false;
+    if (!CloseHandle(file)) ok = false;
+    return ok;
+#else
+    FILE *file = fopen(path, "r+b");
+    if (!file) return false;
+    bool ok = ftruncate(fileno(file), (off_t)size) == 0;
+    if (fclose(file) != 0) ok = false;
+    return ok;
+#endif
+}
+
 static void remove_file(const char *directory, const char *leaf) {
     char path[VM_GUEST_INSTALL_PATH_CAPACITY];
     if (join_path(path, sizeof path, directory, leaf)) (void)remove(path);
@@ -98,6 +136,11 @@ static void clear_fixture(void) {
     (void)remove_directory(snapshots);
     (void)remove(next);
     (void)remove_directory(stage);
+    (void)join_path(stage, sizeof stage, FIXTURE_DIR,
+                    VM_GUEST_STORAGE_STAGE_DIRECTORY);
+    (void)join_path(next, sizeof next, stage, VM_GUEST_INSTALL_NEXT_FILE);
+    (void)remove(next);
+    (void)remove_directory(stage);
     static const char *const LEAVES[] = {
         VM_GUEST_INSTALL_LIVE_FILE,
         VM_GUEST_INSTALL_BACKUP_FILE,
@@ -105,6 +148,11 @@ static void clear_fixture(void) {
         VM_GUEST_INSTALL_MARKER_TMP,
         VM_GUEST_INSTALL_JOURNAL_FILE,
         VM_GUEST_INSTALL_JOURNAL_TMP,
+        VM_GUEST_STORAGE_BACKUP_FILE,
+        VM_GUEST_STORAGE_MARKER_FILE,
+        VM_GUEST_STORAGE_MARKER_TMP,
+        VM_GUEST_STORAGE_JOURNAL_FILE,
+        VM_GUEST_STORAGE_JOURNAL_TMP,
         VM_GUEST_INSTALL_RESUME_ONCE_FILE,
         VM_GUEST_INSTALL_RESUME_ONCE_TMP
     };
@@ -227,6 +275,8 @@ static void test_existing_install_is_idempotent(void) {
                                    detail, sizeof detail) ==
               VM_GUEST_INSTALL_OK && transaction.committed,
           "could not commit fixture: %s", detail);
+    CHECK(resize_sparse(live, VM_GUEST_INSTALL_MINIMUM_VOLUME_BYTES),
+          "could not make the committed fixture represent a 2 GiB disk");
 
     progress_log_t progress;
     memset(&progress, 0, sizeof progress);
@@ -236,6 +286,7 @@ static void test_existing_install_is_idempotent(void) {
             FIXTURE_DIR, NULL, capture_progress, &progress,
             &result, detail, sizeof detail);
     CHECK(status == VM_GUEST_INSTALL_BUILD_OK && result.already_installed &&
+          !result.storage_upgraded &&
           result.transaction.committed &&
           memcmp(result.manifest_sha256, digest, sizeof digest) == 0,
           "existing install was not idempotent: %s / %s",
@@ -301,11 +352,89 @@ static void test_real_build_when_supplied(void) {
               VM_GUEST_INSTALL_PROBE_VALID &&
           memcmp(marker, result.manifest_sha256, sizeof marker) == 0,
           "real transaction marker does not match the built plan: %s", detail);
+    vm_guest_install_build_result_t retry;
+    status = vm_guest_install_build_from_directory(
+        machine, NULL, capture_progress, &progress,
+        &retry, detail, sizeof detail);
+    CHECK(status == VM_GUEST_INSTALL_BUILD_OK && retry.already_installed &&
+          !retry.storage_upgraded && retry.transaction.committed &&
+          retry.rootfs.final_size == 0u,
+          "2 GiB install was rewritten or not idempotent: %s / %s",
+          vm_guest_install_build_status_text(status), detail);
     printf("real-install-build base=%llu final=%llu entries=%u reused=%u\n",
            (unsigned long long)base.final_size,
            (unsigned long long)result.rootfs.final_size,
            result.rootfs.provision_entries,
            result.rootfs.provision_reused_entries);
+}
+
+static void test_real_storage_upgrade_when_supplied(void) {
+    const char *machine = getenv("S5LBOX_EXISTING_INSTALL_MACHINE_DIR");
+    if (!machine || !*machine) {
+        printf("real-storage-upgrade SKIP (existing machine path unset)\n");
+        return;
+    }
+
+    char live[VM_GUEST_INSTALL_PATH_CAPACITY];
+    CHECK(join_path(live, sizeof live, machine,
+                    VM_GUEST_INSTALL_LIVE_FILE),
+          "real storage-upgrade live path overflow");
+    uint64_t before = file_size_or_zero(live);
+    CHECK(before > 0u && before < VM_GUEST_INSTALL_MINIMUM_VOLUME_BYTES,
+          "real storage-upgrade source is %llu bytes, not an older small disk",
+          (unsigned long long)before);
+    if (before == 0u || before >= VM_GUEST_INSTALL_MINIMUM_VOLUME_BYTES)
+        return;
+
+    uint8_t manifest[VM_GUEST_INSTALL_SHA256_SIZE];
+    char detail[VM_GUEST_INSTALL_BUILD_DETAIL_CAPACITY];
+    CHECK(vm_guest_install_probe(machine, manifest, detail, sizeof detail) ==
+              VM_GUEST_INSTALL_PROBE_VALID,
+          "real storage-upgrade source has no valid install marker: %s",
+          detail);
+
+    progress_log_t progress;
+    memset(&progress, 0, sizeof progress);
+    vm_guest_install_build_result_t result;
+    vm_guest_install_build_status_t status =
+        vm_guest_install_build_from_directory(
+            machine, NULL, capture_progress, &progress,
+            &result, detail, sizeof detail);
+    CHECK(status == VM_GUEST_INSTALL_BUILD_OK && result.already_installed &&
+          result.storage_upgraded && result.transaction.committed &&
+          result.storage_transaction.committed,
+          "real storage upgrade refused: %s / %s",
+          vm_guest_install_build_status_text(status), detail);
+    uint64_t after = file_size_or_zero(live);
+    CHECK(after == VM_GUEST_INSTALL_MINIMUM_VOLUME_BYTES &&
+          result.rootfs.final_size == after,
+          "real storage upgrade published %llu bytes, result says %llu",
+          (unsigned long long)after,
+          (unsigned long long)result.rootfs.final_size);
+
+    uint8_t after_manifest[VM_GUEST_INSTALL_SHA256_SIZE];
+    CHECK(vm_guest_install_probe(machine, after_manifest,
+                                 detail, sizeof detail) ==
+              VM_GUEST_INSTALL_PROBE_VALID &&
+          memcmp(after_manifest, manifest, sizeof manifest) == 0,
+          "real storage upgrade changed install authority: %s", detail);
+    vm_guest_install_result_t storage;
+    CHECK(vm_guest_storage_recover(machine, &storage,
+                                   detail, sizeof detail) ==
+              VM_GUEST_INSTALL_OK && storage.committed &&
+          memcmp(storage.manifest_sha256, manifest, sizeof manifest) == 0,
+          "real storage-upgrade record is not recoverable: %s", detail);
+
+    vm_guest_install_build_result_t retry;
+    status = vm_guest_install_build_from_directory(
+        machine, NULL, capture_progress, &progress,
+        &retry, detail, sizeof detail);
+    CHECK(status == VM_GUEST_INSTALL_BUILD_OK && retry.already_installed &&
+          !retry.storage_upgraded && retry.rootfs.final_size == 0u,
+          "real storage-upgrade retry rewrote the disk: %s / %s",
+          vm_guest_install_build_status_text(status), detail);
+    printf("real-storage-upgrade before=%llu final=%llu\n",
+           (unsigned long long)before, (unsigned long long)after);
 }
 
 int main(void) {
@@ -317,6 +446,7 @@ int main(void) {
     test_argument_and_package_refusals();
     test_historical_snapshot_gate();
     test_existing_install_is_idempotent();
+    test_real_storage_upgrade_when_supplied();
     test_real_build_when_supplied();
     clear_fixture();
     (void)remove_directory(FIXTURE_DIR);

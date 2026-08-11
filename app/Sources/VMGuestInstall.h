@@ -28,6 +28,16 @@ extern "C" {
 #define VM_GUEST_INSTALL_MARKER_TMP      "guest.jailbreak-v1.partial"
 #define VM_GUEST_INSTALL_JOURNAL_FILE    "guest.jailbreak-v1.transaction"
 #define VM_GUEST_INSTALL_JOURNAL_TMP     "guest.jailbreak-v1.transaction.partial"
+/* A separate transaction upgrades an already-installed guest's disk without
+ * rewriting or temporarily removing the v1 boot-policy marker. Keeping the
+ * namespaces disjoint is what makes an interrupted capacity repair recoverable
+ * before ordinary guest-install recovery examines the shared live image. */
+#define VM_GUEST_STORAGE_BACKUP_FILE     "rootfs-work.pre-storage-v1"
+#define VM_GUEST_STORAGE_STAGE_DIRECTORY "guest.storage-v1.stage"
+#define VM_GUEST_STORAGE_MARKER_FILE     "guest.storage-v1"
+#define VM_GUEST_STORAGE_MARKER_TMP      "guest.storage-v1.partial"
+#define VM_GUEST_STORAGE_JOURNAL_FILE    "guest.storage-v1.transaction"
+#define VM_GUEST_STORAGE_JOURNAL_TMP     "guest.storage-v1.transaction.partial"
 /* A filesystem replacement can never resume a CPU/RAM image captured against
  * the old disk. The transaction removes only this one-shot authority; inert
  * checkpoint payloads are harmless and can be replaced by the next save. */
@@ -107,6 +117,29 @@ vm_guest_install_recover(const char *work_directory,
  * v1 installation. */
 vm_guest_install_status_t
 vm_guest_install_publish(const char *work_directory,
+                         const uint8_t manifest_sha256[
+                             VM_GUEST_INSTALL_SHA256_SIZE],
+                         vm_guest_install_result_t *result,
+                         char *detail, size_t detail_capacity);
+
+/* Crash-safe disk replacement for capacity-only maintenance. The digest is
+ * the already-committed guest-install manifest: it binds the repair record to
+ * the installation whose live disk was copied, while leaving that installation
+ * marker continuously authoritative. Recover this transaction before calling
+ * vm_guest_install_recover() at boot because both transactions share the live
+ * image path. */
+bool vm_guest_storage_stage_image_path(char *out, size_t capacity,
+                                       const char *work_directory);
+vm_guest_install_status_t
+vm_guest_storage_prepare_stage(const char *work_directory,
+                               vm_guest_install_result_t *result,
+                               char *detail, size_t detail_capacity);
+vm_guest_install_status_t
+vm_guest_storage_recover(const char *work_directory,
+                         vm_guest_install_result_t *result,
+                         char *detail, size_t detail_capacity);
+vm_guest_install_status_t
+vm_guest_storage_publish(const char *work_directory,
                          const uint8_t manifest_sha256[
                              VM_GUEST_INSTALL_SHA256_SIZE],
                          vm_guest_install_result_t *result,

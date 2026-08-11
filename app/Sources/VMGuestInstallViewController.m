@@ -208,16 +208,19 @@ static void VMGuestInstallBuildProgress(
     });
 }
 
-- (void)completeInstallAlreadyPresent:(BOOL)alreadyPresent {
+- (void)completeInstallAlreadyPresent:(BOOL)alreadyPresent
+                       storageUpgraded:(BOOL)storageUpgraded {
     dispatch_async(dispatch_get_main_queue(), ^{
         if (self->_finished) return;
         self->_finished = YES;
         [self endBackgroundTime];
         [self->_progressBar setProgress:1.0f animated:YES];
-        self->_headline.text = alreadyPresent ? @"Jailbreak already installed"
-                                             : @"Jailbreak ready";
-        self->_detail.text = @"Starting iPhone OS. The first boot finishes "
-                             @"package configuration inside the guest.";
+        self->_headline.text = storageUpgraded ? @"Storage upgraded"
+                              : (alreadyPresent ? @"Jailbreak already installed"
+                                                : @"Jailbreak ready");
+        self->_detail.text = storageUpgraded
+            ? @"Starting iPhone OS with a 2 GiB guest disk. Existing Cydia data was preserved."
+            : @"Starting iPhone OS. The first boot finishes package configuration inside the guest.";
         void (^ready)(void) = [self.readyHandler copy];
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
                                      (int64_t)(0.8 * NSEC_PER_SEC)),
@@ -246,9 +249,11 @@ static void VMGuestInstallBuildProgress(
         vm_guest_install_build_status_t status =
             vm_guest_install_build_from_directory(
                 self_->_machineDirectory.fileSystemRepresentation,
-                NULL, NULL, NULL, &result, detail, sizeof detail);
+                NULL, VMGuestInstallBuildProgress, (__bridge void *)self_,
+                &result, detail, sizeof detail);
         if (status == VM_GUEST_INSTALL_BUILD_OK && result.already_installed) {
-            [self_ completeInstallAlreadyPresent:YES];
+            [self_ completeInstallAlreadyPresent:YES
+                                 storageUpgraded:result.storage_upgraded];
             return;
         }
         if (status != VM_GUEST_INSTALL_BUILD_ERR_ARGUMENT) {
@@ -302,7 +307,8 @@ static void VMGuestInstallBuildProgress(
                     vm_guest_install_build_status_text(status)]];
             return;
         }
-        [self_ completeInstallAlreadyPresent:result.already_installed];
+        [self_ completeInstallAlreadyPresent:result.already_installed
+                             storageUpgraded:result.storage_upgraded];
     });
 }
 

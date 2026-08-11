@@ -29,6 +29,46 @@ static const char VM_GUEST_MARKER_PREFIX[] =
     "s5lbox-guest-install 1\nmanifest-sha256 ";
 static const char VM_GUEST_JOURNAL_PREFIX[] =
     "s5lbox-guest-install-transaction 1\nmanifest-sha256 ";
+static const char VM_GUEST_STORAGE_MARKER_PREFIX[] =
+    "s5lbox-guest-storage 1\ninstall-manifest-sha256 ";
+static const char VM_GUEST_STORAGE_JOURNAL_PREFIX[] =
+    "s5lbox-guest-storage-transaction 1\ninstall-manifest-sha256 ";
+
+typedef struct {
+    const char *backup_file;
+    const char *stage_directory;
+    const char *marker_file;
+    const char *marker_tmp;
+    const char *journal_file;
+    const char *journal_tmp;
+    const char *marker_prefix;
+    const char *journal_prefix;
+    const char *diagnostic_name;
+} guest_transaction_spec_t;
+
+static const guest_transaction_spec_t VM_GUEST_INSTALL_SPEC = {
+    VM_GUEST_INSTALL_BACKUP_FILE,
+    VM_GUEST_INSTALL_STAGE_DIRECTORY,
+    VM_GUEST_INSTALL_MARKER_FILE,
+    VM_GUEST_INSTALL_MARKER_TMP,
+    VM_GUEST_INSTALL_JOURNAL_FILE,
+    VM_GUEST_INSTALL_JOURNAL_TMP,
+    VM_GUEST_MARKER_PREFIX,
+    VM_GUEST_JOURNAL_PREFIX,
+    "guest-install"
+};
+
+static const guest_transaction_spec_t VM_GUEST_STORAGE_SPEC = {
+    VM_GUEST_STORAGE_BACKUP_FILE,
+    VM_GUEST_STORAGE_STAGE_DIRECTORY,
+    VM_GUEST_STORAGE_MARKER_FILE,
+    VM_GUEST_STORAGE_MARKER_TMP,
+    VM_GUEST_STORAGE_JOURNAL_FILE,
+    VM_GUEST_STORAGE_JOURNAL_TMP,
+    VM_GUEST_STORAGE_MARKER_PREFIX,
+    VM_GUEST_STORAGE_JOURNAL_PREFIX,
+    "guest-storage"
+};
 
 typedef enum {
     GUEST_NODE_ABSENT = 0,
@@ -76,6 +116,16 @@ static void guest_detail(char *out, size_t capacity, const char *text) {
     out[capacity - 1u] = '\0';
 }
 
+static void guest_named_detail(char *out, size_t capacity,
+                               const guest_transaction_spec_t *spec,
+                               const char *suffix) {
+    if (!out || capacity == 0u) return;
+    (void)snprintf(out, capacity, "The %s%s",
+                   spec ? spec->diagnostic_name : "guest-disk",
+                   suffix ? suffix : "");
+    out[capacity - 1u] = '\0';
+}
+
 static void guest_result_clear(vm_guest_install_result_t *result) {
     if (!result) return;
     memset(result, 0, sizeof *result);
@@ -95,9 +145,10 @@ static bool guest_join(char *out, size_t capacity, const char *directory,
     return written >= 0 && (size_t)written < capacity;
 }
 
-static bool guest_paths_init(guest_paths_t *paths,
-                             const char *work_directory) {
-    if (!paths) return false;
+static bool guest_paths_init_for(guest_paths_t *paths,
+                                 const char *work_directory,
+                                 const guest_transaction_spec_t *spec) {
+    if (!paths || !spec) return false;
     memset(paths, 0, sizeof *paths);
     if (!work_directory || !*work_directory) return false;
     int copied = snprintf(paths->work, sizeof paths->work, "%s",
@@ -106,37 +157,56 @@ static bool guest_paths_init(guest_paths_t *paths,
     return guest_join(paths->live, sizeof paths->live, paths->work,
                       VM_GUEST_INSTALL_LIVE_FILE) &&
            guest_join(paths->backup, sizeof paths->backup, paths->work,
-                      VM_GUEST_INSTALL_BACKUP_FILE) &&
+                      spec->backup_file) &&
            guest_join(paths->stage, sizeof paths->stage, paths->work,
-                      VM_GUEST_INSTALL_STAGE_DIRECTORY) &&
+                      spec->stage_directory) &&
            guest_join(paths->next, sizeof paths->next, paths->stage,
                       VM_GUEST_INSTALL_NEXT_FILE) &&
            guest_join(paths->marker, sizeof paths->marker, paths->work,
-                      VM_GUEST_INSTALL_MARKER_FILE) &&
+                      spec->marker_file) &&
            guest_join(paths->marker_tmp, sizeof paths->marker_tmp, paths->work,
-                      VM_GUEST_INSTALL_MARKER_TMP) &&
+                      spec->marker_tmp) &&
            guest_join(paths->journal, sizeof paths->journal, paths->work,
-                      VM_GUEST_INSTALL_JOURNAL_FILE) &&
+                      spec->journal_file) &&
            guest_join(paths->journal_tmp, sizeof paths->journal_tmp,
-                      paths->work, VM_GUEST_INSTALL_JOURNAL_TMP) &&
+                      paths->work, spec->journal_tmp) &&
            guest_join(paths->resume_once, sizeof paths->resume_once,
                       paths->work, VM_GUEST_INSTALL_RESUME_ONCE_FILE) &&
            guest_join(paths->resume_once_tmp, sizeof paths->resume_once_tmp,
                       paths->work, VM_GUEST_INSTALL_RESUME_ONCE_TMP);
 }
 
-bool vm_guest_install_stage_image_path(char *out, size_t capacity,
-                                       const char *work_directory) {
+static bool guest_paths_init(guest_paths_t *paths,
+                             const char *work_directory) {
+    return guest_paths_init_for(paths, work_directory,
+                                &VM_GUEST_INSTALL_SPEC);
+}
+
+static bool guest_stage_image_path_for(
+    char *out, size_t capacity, const char *work_directory,
+    const guest_transaction_spec_t *spec) {
     guest_paths_t paths;
     if (!out || capacity == 0u) return false;
     out[0] = '\0';
-    if (!guest_paths_init(&paths, work_directory)) return false;
+    if (!guest_paths_init_for(&paths, work_directory, spec)) return false;
     int written = snprintf(out, capacity, "%s", paths.next);
     if (written < 0 || (size_t)written >= capacity) {
         out[0] = '\0';
         return false;
     }
     return true;
+}
+
+bool vm_guest_install_stage_image_path(char *out, size_t capacity,
+                                       const char *work_directory) {
+    return guest_stage_image_path_for(out, capacity, work_directory,
+                                      &VM_GUEST_INSTALL_SPEC);
+}
+
+bool vm_guest_storage_stage_image_path(char *out, size_t capacity,
+                                       const char *work_directory) {
+    return guest_stage_image_path_for(out, capacity, work_directory,
+                                      &VM_GUEST_STORAGE_SPEC);
 }
 
 static guest_node_t guest_node(const char *path) {
@@ -440,6 +510,7 @@ static bool guest_remove_rolled_back_artifacts(const guest_paths_t *paths) {
 
 static vm_guest_install_status_t
 guest_continue(const guest_paths_t *paths,
+               const guest_transaction_spec_t *spec,
                const uint8_t digest[VM_GUEST_INSTALL_SHA256_SIZE],
                vm_guest_install_result_t *result,
                char *detail, size_t detail_capacity) {
@@ -455,7 +526,7 @@ guest_continue(const guest_paths_t *paths,
         (backup != GUEST_NODE_ABSENT && backup != GUEST_NODE_REGULAR) ||
         (next != GUEST_NODE_ABSENT && next != GUEST_NODE_REGULAR)) {
         guest_detail(detail, detail_capacity,
-                     "The guest-install disk transaction contains an invalid file type or empty image.");
+                     "The guest-disk replacement contains an invalid file type or empty image.");
         return VM_GUEST_INSTALL_ERR_STATE;
     }
 
@@ -492,10 +563,10 @@ guest_continue(const guest_paths_t *paths,
 
     if (have_live && !have_next && have_backup) {
         if (!guest_publish_record(paths->marker_tmp, paths->marker,
-                                  paths->work, VM_GUEST_MARKER_PREFIX,
+                                  paths->work, spec->marker_prefix,
                                   digest)) {
             guest_detail(detail, detail_capacity,
-                         "The new guest disk is installed, but its boot-policy record could not be published.");
+                         "The new guest disk is installed, but its commit record could not be published.");
             return VM_GUEST_INSTALL_ERR_IO;
         }
         if (result) {
@@ -510,7 +581,7 @@ guest_continue(const guest_paths_t *paths,
         if (result) result->cleanup_complete = cleaned;
         if (!cleaned)
             guest_detail(detail, detail_capacity,
-                         "The guest install is committed, but inert transaction files could not all be removed.");
+                         "The guest-disk replacement is committed, but inert transaction files could not all be removed.");
         return VM_GUEST_INSTALL_OK;
     }
 
@@ -518,7 +589,7 @@ guest_continue(const guest_paths_t *paths,
         if (!guest_rename_new(paths->backup, paths->live) ||
             !guest_sync_directory(paths->work)) {
             guest_detail(detail, detail_capacity,
-                         "The interrupted guest install could not restore the original disk.");
+                         "The interrupted guest-disk replacement could not restore the original disk.");
             return VM_GUEST_INSTALL_ERR_IO;
         }
         if (result) result->rolled_back = true;
@@ -526,26 +597,27 @@ guest_continue(const guest_paths_t *paths,
         if (result) result->cleanup_complete = cleaned;
         guest_detail(detail, detail_capacity,
                      cleaned
-                         ? "An incomplete guest install was rolled back to the original disk."
+                         ? "An incomplete guest-disk replacement was rolled back to the original disk."
                          : "The original guest disk was restored, but inert transaction files remain.");
         return VM_GUEST_INSTALL_OK;
     }
 
     guest_detail(detail, detail_capacity,
-                 "The guest-install disk transaction is contradictory; no file was changed.");
+                 "The guest-disk replacement transaction is contradictory; no file was changed.");
     return VM_GUEST_INSTALL_ERR_STATE;
 }
 
-vm_guest_install_status_t
-vm_guest_install_recover(const char *work_directory,
-                         vm_guest_install_result_t *result,
-                         char *detail, size_t detail_capacity) {
+static vm_guest_install_status_t
+guest_recover_for(const char *work_directory,
+                  const guest_transaction_spec_t *spec,
+                  vm_guest_install_result_t *result,
+                  char *detail, size_t detail_capacity) {
     guest_result_clear(result);
     guest_detail(detail, detail_capacity, "");
     guest_paths_t paths;
-    if (!guest_paths_init(&paths, work_directory)) {
+    if (!guest_paths_init_for(&paths, work_directory, spec)) {
         guest_detail(detail, detail_capacity,
-                     "The guest-install transaction path is too long to use.");
+                     "The guest-disk transaction path is too long to use.");
         return VM_GUEST_INSTALL_ERR_PATH;
     }
     if (!guest_work_directory_ok(&paths)) {
@@ -556,44 +628,44 @@ vm_guest_install_recover(const char *work_directory,
 
     uint8_t marker_digest[VM_GUEST_INSTALL_SHA256_SIZE];
     vm_guest_install_probe_t marker =
-        guest_record_probe(paths.marker, VM_GUEST_MARKER_PREFIX,
+        guest_record_probe(paths.marker, spec->marker_prefix,
                            marker_digest);
     if (marker == VM_GUEST_INSTALL_PROBE_INVALID) {
-        guest_detail(detail, detail_capacity,
-                     "The committed guest-install record is malformed; no recovery was attempted.");
+        guest_named_detail(detail, detail_capacity, spec,
+                           " record is malformed; no recovery was attempted.");
         return VM_GUEST_INSTALL_ERR_RECORD;
     }
     if (marker == VM_GUEST_INSTALL_PROBE_IO_ERROR) {
-        guest_detail(detail, detail_capacity,
-                     "The committed guest-install record could not be read safely.");
+        guest_named_detail(detail, detail_capacity, spec,
+                           " record could not be read safely.");
         return VM_GUEST_INSTALL_ERR_IO;
     }
 
     uint8_t journal_digest[VM_GUEST_INSTALL_SHA256_SIZE];
     vm_guest_install_probe_t journal =
-        guest_record_probe(paths.journal, VM_GUEST_JOURNAL_PREFIX,
+        guest_record_probe(paths.journal, spec->journal_prefix,
                            journal_digest);
     if (journal == VM_GUEST_INSTALL_PROBE_INVALID) {
         guest_detail(detail, detail_capacity,
-                     "The guest-install recovery journal is malformed; no disk was changed.");
+                     "The guest-disk recovery journal is malformed; no disk was changed.");
         return VM_GUEST_INSTALL_ERR_RECORD;
     }
     if (journal == VM_GUEST_INSTALL_PROBE_IO_ERROR) {
         guest_detail(detail, detail_capacity,
-                     "The guest-install recovery journal could not be read safely.");
+                     "The guest-disk recovery journal could not be read safely.");
         return VM_GUEST_INSTALL_ERR_IO;
     }
 
     if (marker == VM_GUEST_INSTALL_PROBE_VALID) {
         if (guest_node(paths.live) != GUEST_NODE_REGULAR) {
             guest_detail(detail, detail_capacity,
-                         "A guest-install record exists without a valid live guest disk.");
+                         "A guest-disk record exists without a valid live guest disk.");
             return VM_GUEST_INSTALL_ERR_STATE;
         }
         if (journal == VM_GUEST_INSTALL_PROBE_VALID &&
             !guest_digest_equal(marker_digest, journal_digest)) {
             guest_detail(detail, detail_capacity,
-                         "The committed guest-install record and recovery journal name different manifests.");
+                         "The committed guest-disk record and recovery journal name different identities.");
             return VM_GUEST_INSTALL_ERR_STATE;
         }
         if (result) {
@@ -619,12 +691,12 @@ vm_guest_install_recover(const char *work_directory,
         if (result) result->cleanup_complete = cleaned;
         if (!cleaned)
             guest_detail(detail, detail_capacity,
-                         "The guest install is committed, but inert transaction files could not all be removed.");
+                         "The guest-disk replacement is committed, but inert transaction files could not all be removed.");
         return VM_GUEST_INSTALL_OK;
     }
 
     if (journal == VM_GUEST_INSTALL_PROBE_VALID)
-        return guest_continue(&paths, journal_digest, result,
+        return guest_continue(&paths, spec, journal_digest, result,
                               detail, detail_capacity);
 
     guest_node_t live = guest_node(paths.live);
@@ -655,19 +727,36 @@ vm_guest_install_recover(const char *work_directory,
 }
 
 vm_guest_install_status_t
-vm_guest_install_prepare_stage(const char *work_directory,
-                               vm_guest_install_result_t *result,
-                               char *detail, size_t detail_capacity) {
+vm_guest_install_recover(const char *work_directory,
+                         vm_guest_install_result_t *result,
+                         char *detail, size_t detail_capacity) {
+    return guest_recover_for(work_directory, &VM_GUEST_INSTALL_SPEC, result,
+                             detail, detail_capacity);
+}
+
+vm_guest_install_status_t
+vm_guest_storage_recover(const char *work_directory,
+                         vm_guest_install_result_t *result,
+                         char *detail, size_t detail_capacity) {
+    return guest_recover_for(work_directory, &VM_GUEST_STORAGE_SPEC, result,
+                             detail, detail_capacity);
+}
+
+static vm_guest_install_status_t
+guest_prepare_stage_for(const char *work_directory,
+                        const guest_transaction_spec_t *spec,
+                        vm_guest_install_result_t *result,
+                        char *detail, size_t detail_capacity) {
     vm_guest_install_result_t local_result;
     vm_guest_install_result_t *recovered = result ? result : &local_result;
-    vm_guest_install_status_t status = vm_guest_install_recover(
-        work_directory, recovered, detail, detail_capacity);
+    vm_guest_install_status_t status = guest_recover_for(
+        work_directory, spec, recovered, detail, detail_capacity);
     if (status != VM_GUEST_INSTALL_OK || recovered->committed) return status;
 
     guest_paths_t paths;
-    if (!guest_paths_init(&paths, work_directory)) {
+    if (!guest_paths_init_for(&paths, work_directory, spec)) {
         guest_detail(detail, detail_capacity,
-                     "The guest-install stage path is too long to use.");
+                     "The guest-disk stage path is too long to use.");
         return VM_GUEST_INSTALL_ERR_PATH;
     }
     if (guest_node(paths.live) != GUEST_NODE_REGULAR ||
@@ -683,12 +772,12 @@ vm_guest_install_prepare_stage(const char *work_directory,
         if (node == GUEST_NODE_REGULAR || node == GUEST_NODE_EMPTY) {
             if (!guest_remove_if_present(partials[i])) {
                 guest_detail(detail, detail_capacity,
-                             "An inert guest-install partial record could not be removed.");
+                             "An inert guest-disk partial record could not be removed.");
                 return VM_GUEST_INSTALL_ERR_IO;
             }
         } else if (node != GUEST_NODE_ABSENT) {
             guest_detail(detail, detail_capacity,
-                         "A guest-install partial record has an unsafe file type.");
+                         "A guest-disk partial record has an unsafe file type.");
             return node == GUEST_NODE_IO_ERROR ? VM_GUEST_INSTALL_ERR_IO
                                                : VM_GUEST_INSTALL_ERR_STATE;
         }
@@ -712,16 +801,16 @@ vm_guest_install_prepare_stage(const char *work_directory,
         if (!guest_remove_directory_if_present(paths.stage)) {
             if (errno == ENOTEMPTY || errno == EEXIST) {
                 guest_detail(detail, detail_capacity,
-                             "The guest-install stage contains unexpected files and was not replaced.");
+                             "The guest-disk stage contains unexpected files and was not replaced.");
                 return VM_GUEST_INSTALL_ERR_STATE;
             }
             guest_detail(detail, detail_capacity,
-                         "The inert guest-install stage could not be removed.");
+                         "The inert guest-disk stage could not be removed.");
             return VM_GUEST_INSTALL_ERR_IO;
         }
     } else if (stage != GUEST_NODE_ABSENT) {
         guest_detail(detail, detail_capacity,
-                     "The guest-install stage is not a real directory.");
+                     "The guest-disk stage is not a real directory.");
         return stage == GUEST_NODE_IO_ERROR ? VM_GUEST_INSTALL_ERR_IO
                                             : VM_GUEST_INSTALL_ERR_STATE;
     }
@@ -730,13 +819,13 @@ vm_guest_install_prepare_stage(const char *work_directory,
         !guest_sync_directory(paths.work)) {
         (void)guest_remove_directory_if_present(paths.stage);
         guest_detail(detail, detail_capacity,
-                     "The empty guest-install stage could not be created durably.");
+                     "The empty guest-disk stage could not be created durably.");
         return VM_GUEST_INSTALL_ERR_IO;
     }
     if (guest_node(paths.stage) != GUEST_NODE_DIRECTORY ||
         guest_node(paths.next) != GUEST_NODE_ABSENT) {
         guest_detail(detail, detail_capacity,
-                     "The guest-install stage changed while it was being prepared.");
+                     "The guest-disk stage changed while it was being prepared.");
         return VM_GUEST_INSTALL_ERR_STATE;
     }
     guest_detail(detail, detail_capacity, "");
@@ -744,23 +833,40 @@ vm_guest_install_prepare_stage(const char *work_directory,
 }
 
 vm_guest_install_status_t
-vm_guest_install_publish(const char *work_directory,
-                         const uint8_t manifest_sha256[
-                             VM_GUEST_INSTALL_SHA256_SIZE],
-                         vm_guest_install_result_t *result,
-                         char *detail, size_t detail_capacity) {
+vm_guest_install_prepare_stage(const char *work_directory,
+                               vm_guest_install_result_t *result,
+                               char *detail, size_t detail_capacity) {
+    return guest_prepare_stage_for(work_directory, &VM_GUEST_INSTALL_SPEC,
+                                   result, detail, detail_capacity);
+}
+
+vm_guest_install_status_t
+vm_guest_storage_prepare_stage(const char *work_directory,
+                               vm_guest_install_result_t *result,
+                               char *detail, size_t detail_capacity) {
+    return guest_prepare_stage_for(work_directory, &VM_GUEST_STORAGE_SPEC,
+                                   result, detail, detail_capacity);
+}
+
+static vm_guest_install_status_t
+guest_publish_for(const char *work_directory,
+                  const guest_transaction_spec_t *spec,
+                  const uint8_t manifest_sha256[
+                      VM_GUEST_INSTALL_SHA256_SIZE],
+                  vm_guest_install_result_t *result,
+                  char *detail, size_t detail_capacity) {
     guest_result_clear(result);
     guest_detail(detail, detail_capacity, "");
     if (!manifest_sha256) {
         guest_detail(detail, detail_capacity,
-                     "The guest-install manifest digest is missing.");
+                     "The guest-disk transaction identity is missing.");
         return VM_GUEST_INSTALL_ERR_ARGUMENT;
     }
 
     guest_paths_t paths;
-    if (!guest_paths_init(&paths, work_directory)) {
+    if (!guest_paths_init_for(&paths, work_directory, spec)) {
         guest_detail(detail, detail_capacity,
-                     "The guest-install transaction path is too long to use.");
+                     "The guest-disk transaction path is too long to use.");
         return VM_GUEST_INSTALL_ERR_PATH;
     }
     if (!guest_work_directory_ok(&paths)) {
@@ -771,48 +877,48 @@ vm_guest_install_publish(const char *work_directory,
 
     uint8_t existing_digest[VM_GUEST_INSTALL_SHA256_SIZE];
     vm_guest_install_probe_t marker =
-        guest_record_probe(paths.marker, VM_GUEST_MARKER_PREFIX,
+        guest_record_probe(paths.marker, spec->marker_prefix,
                            existing_digest);
     if (marker == VM_GUEST_INSTALL_PROBE_VALID) {
         if (!guest_digest_equal(existing_digest, manifest_sha256)) {
             guest_detail(detail, detail_capacity,
-                         "This machine already has a different committed guest-install manifest.");
+                         "This machine already has a different committed guest-disk identity.");
             return VM_GUEST_INSTALL_ERR_STATE;
         }
-        return vm_guest_install_recover(work_directory, result,
-                                        detail, detail_capacity);
+        return guest_recover_for(work_directory, spec, result,
+                                 detail, detail_capacity);
     }
     if (marker == VM_GUEST_INSTALL_PROBE_INVALID) {
         guest_detail(detail, detail_capacity,
-                     "The existing guest-install record is malformed; it was not overwritten.");
+                     "The existing guest-disk record is malformed; it was not overwritten.");
         return VM_GUEST_INSTALL_ERR_RECORD;
     }
     if (marker == VM_GUEST_INSTALL_PROBE_IO_ERROR) {
         guest_detail(detail, detail_capacity,
-                     "The existing guest-install record could not be read safely.");
+                     "The existing guest-disk record could not be read safely.");
         return VM_GUEST_INSTALL_ERR_IO;
     }
 
     vm_guest_install_probe_t journal =
-        guest_record_probe(paths.journal, VM_GUEST_JOURNAL_PREFIX,
+        guest_record_probe(paths.journal, spec->journal_prefix,
                            existing_digest);
     if (journal == VM_GUEST_INSTALL_PROBE_VALID) {
         if (!guest_digest_equal(existing_digest, manifest_sha256)) {
             guest_detail(detail, detail_capacity,
-                         "An unfinished guest install names a different manifest.");
+                         "An unfinished guest-disk replacement names a different identity.");
             return VM_GUEST_INSTALL_ERR_STATE;
         }
-        return vm_guest_install_recover(work_directory, result,
-                                        detail, detail_capacity);
+        return guest_recover_for(work_directory, spec, result,
+                                 detail, detail_capacity);
     }
     if (journal == VM_GUEST_INSTALL_PROBE_INVALID) {
         guest_detail(detail, detail_capacity,
-                     "The existing guest-install recovery journal is malformed.");
+                     "The existing guest-disk recovery journal is malformed.");
         return VM_GUEST_INSTALL_ERR_RECORD;
     }
     if (journal == VM_GUEST_INSTALL_PROBE_IO_ERROR) {
         guest_detail(detail, detail_capacity,
-                     "The existing guest-install recovery journal could not be read safely.");
+                     "The existing guest-disk recovery journal could not be read safely.");
         return VM_GUEST_INSTALL_ERR_IO;
     }
 
@@ -830,15 +936,37 @@ vm_guest_install_publish(const char *work_directory,
         return VM_GUEST_INSTALL_ERR_IO;
     }
     if (!guest_publish_record(paths.journal_tmp, paths.journal, paths.work,
-                              VM_GUEST_JOURNAL_PREFIX, manifest_sha256)) {
+                              spec->journal_prefix, manifest_sha256)) {
         guest_detail(detail, detail_capacity,
-                     "The guest-install recovery journal could not be published.");
+                     "The guest-disk recovery journal could not be published.");
         return VM_GUEST_INSTALL_ERR_IO;
     }
     if (guest_test_interrupt(1u))
         return VM_GUEST_INSTALL_ERR_INTERRUPTED;
-    return guest_continue(&paths, manifest_sha256, result,
+    return guest_continue(&paths, spec, manifest_sha256, result,
                           detail, detail_capacity);
+}
+
+vm_guest_install_status_t
+vm_guest_install_publish(const char *work_directory,
+                         const uint8_t manifest_sha256[
+                             VM_GUEST_INSTALL_SHA256_SIZE],
+                         vm_guest_install_result_t *result,
+                         char *detail, size_t detail_capacity) {
+    return guest_publish_for(work_directory, &VM_GUEST_INSTALL_SPEC,
+                             manifest_sha256, result,
+                             detail, detail_capacity);
+}
+
+vm_guest_install_status_t
+vm_guest_storage_publish(const char *work_directory,
+                         const uint8_t manifest_sha256[
+                             VM_GUEST_INSTALL_SHA256_SIZE],
+                         vm_guest_install_result_t *result,
+                         char *detail, size_t detail_capacity) {
+    return guest_publish_for(work_directory, &VM_GUEST_STORAGE_SPEC,
+                             manifest_sha256, result,
+                             detail, detail_capacity);
 }
 
 const char *vm_guest_install_status_text(vm_guest_install_status_t status) {
