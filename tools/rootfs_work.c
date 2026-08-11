@@ -5627,10 +5627,11 @@ static const char PPP_OPTIONS_FILE[] =
 static const char RESOLV_CONF_FILE[] = "nameserver 10.0.2.3\n";
 
 /*
- * The stock image deliberately ships an empty SystemConfiguration preferences
- * directory.  A directly launched pppd can create State: dictionaries, but it
- * cannot create the persistent Setup: service that CFNetwork reachability and
- * configd correlate with them.  This is the minimal structure emitted by the
+ * The stock image does not ship a SystemConfiguration preferences directory.
+ * A directly launched pppd can create State: dictionaries, but it cannot
+ * create the persistent Setup: service that CFNetwork reachability and configd
+ * correlate with them.  The directory and this file therefore have to be one
+ * ordered catalog transaction.  This is the minimal structure emitted by the
  * matching-era SCNetworkService/SCNetworkSet APIs:
  *
  *   - one current set;
@@ -5724,9 +5725,10 @@ static const char PPP_SYSTEM_CONFIGURATION[] =
     "</plist>\n";
 
 size_t rootfs_work_ppp_entries(rootfs_work_entry_t *entries, size_t capacity) {
-    /* All three files describe one service. Never publish a partial table. */
-    if (entries && capacity >= 3u) {
-        memset(entries, 0, 3u * sizeof(*entries));
+    /* All four catalog entries describe one service. Never publish a partial
+     * table. The directory must precede the plist which depends on it. */
+    if (entries && capacity >= 4u) {
+        memset(entries, 0, 4u * sizeof(*entries));
         /*
          * The DIRECTORY entry this used to carry was wrong and the provisioner
          * said so: "an object already exists under CNID 1410 with that name".
@@ -5745,15 +5747,19 @@ size_t rootfs_work_ppp_entries(rootfs_work_entry_t *entries, size_t capacity) {
         entries[1].content = (const uint8_t *)RESOLV_CONF_FILE;
         entries[1].content_size = sizeof(RESOLV_CONF_FILE) - 1u;
         entries[1].permissions = 0644u;
-        entries[2].kind = ROOTFS_WORK_ENTRY_FILE;
+        entries[2].kind = ROOTFS_WORK_ENTRY_DIRECTORY;
         entries[2].path =
+            "/private/var/preferences/SystemConfiguration";
+        entries[2].permissions = 0755u;
+        entries[3].kind = ROOTFS_WORK_ENTRY_FILE;
+        entries[3].path =
             "/private/var/preferences/SystemConfiguration/preferences.plist";
-        entries[2].content =
+        entries[3].content =
             (const uint8_t *)PPP_SYSTEM_CONFIGURATION;
-        entries[2].content_size = sizeof(PPP_SYSTEM_CONFIGURATION) - 1u;
-        entries[2].permissions = 0644u;
+        entries[3].content_size = sizeof(PPP_SYSTEM_CONFIGURATION) - 1u;
+        entries[3].permissions = 0644u;
     }
-    return 3u;
+    return 4u;
 }
 
 size_t rootfs_work_standard_entries(bool activate, bool ppp,
