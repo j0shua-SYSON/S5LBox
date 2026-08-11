@@ -93,6 +93,41 @@ static uint64_t file_size_or_zero(const char *path) {
 #endif
 }
 
+static uint32_t read_be32(const uint8_t *bytes) {
+    return ((uint32_t)bytes[0] << 24) |
+           ((uint32_t)bytes[1] << 16) |
+           ((uint32_t)bytes[2] << 8) |
+           (uint32_t)bytes[3];
+}
+
+static bool read_hfs_geometry(const char *path, uint32_t *block_size,
+                              uint32_t *total_blocks,
+                              uint32_t *free_blocks) {
+    if (block_size) *block_size = 0u;
+    if (total_blocks) *total_blocks = 0u;
+    if (free_blocks) *free_blocks = 0u;
+    if (!path || !block_size || !total_blocks || !free_blocks) return false;
+
+    FILE *file = fopen(path, "rb");
+    if (!file) return false;
+    uint8_t header[512];
+    bool ok = fseek(file, 1024L, SEEK_SET) == 0 &&
+              fread(header, 1u, sizeof header, file) == sizeof header;
+    if (fclose(file) != 0) ok = false;
+    if (!ok || !((header[0] == 'H' && header[1] == '+') ||
+                 (header[0] == 'H' && header[1] == 'X')))
+        return false;
+
+    uint32_t block = read_be32(header + 40u);
+    uint32_t total = read_be32(header + 44u);
+    uint32_t free = read_be32(header + 48u);
+    if (block == 0u || total == 0u || free > total) return false;
+    *block_size = block;
+    *total_blocks = total;
+    *free_blocks = free;
+    return true;
+}
+
 static bool resize_sparse(const char *path, uint64_t size) {
 #ifdef _WIN32
     HANDLE file = CreateFileA(path, GENERIC_WRITE, 0, NULL, OPEN_EXISTING,
@@ -390,6 +425,13 @@ static void test_real_storage_upgrade_when_supplied(void) {
     if (before == 0u || before >= VM_GUEST_INSTALL_MINIMUM_VOLUME_BYTES)
         return;
 
+    uint32_t old_block_size = 0u, old_total_blocks = 0u,
+             old_free_blocks = 0u;
+    CHECK(read_hfs_geometry(live, &old_block_size, &old_total_blocks,
+                            &old_free_blocks),
+          "real storage-upgrade source has no readable HFS geometry");
+    if (old_block_size == 0u || old_total_blocks == 0u) return;
+
     uint8_t manifest[VM_GUEST_INSTALL_SHA256_SIZE];
     char detail[VM_GUEST_INSTALL_BUILD_DETAIL_CAPACITY];
     CHECK(vm_guest_install_probe(machine, manifest, detail, sizeof detail) ==
@@ -416,6 +458,15 @@ static void test_real_storage_upgrade_when_supplied(void) {
           (unsigned long long)after,
           (unsigned long long)result.rootfs.final_size);
 
+    uint32_t new_block_size = 0u, new_total_blocks = 0u,
+             new_free_blocks = 0u;
+    CHECK(read_hfs_geometry(live, &new_block_size, &new_total_blocks,
+                            &new_free_blocks) &&
+          new_block_size == old_block_size &&
+          new_total_blocks > old_total_blocks &&
+          new_free_blocks > old_free_blocks,
+          "real storage upgrade did not publish larger usable HFS geometry");
+
     uint8_t after_manifest[VM_GUEST_INSTALL_SHA256_SIZE];
     CHECK(vm_guest_install_probe(machine, after_manifest,
                                  detail, sizeof detail) ==
@@ -437,8 +488,69 @@ static void test_real_storage_upgrade_when_supplied(void) {
           !retry.storage_upgraded && retry.rootfs.final_size == 0u,
           "real storage-upgrade retry rewrote the disk: %s / %s",
           vm_guest_install_build_status_text(status), detail);
-    printf("real-storage-upgrade before=%llu final=%llu\n",
-           (unsigned long long)before, (unsigned long long)after);
+
+    const char *capacity_proof = getenv("S5LBOX_STORAGE_CAPACITY_PROOF");
+    if (capacity_proof && *capacity_proof) {
+        CHECK(!exists(capacity_proof),
+              "capacity-proof destination already exists; refusing to replace it");
+        size_t payload_size = ROOTFS_WORK_MAX_ENTRY_BYTES;
+        uint8_t *payload = (uint8_t *)malloc(payload_size);
+        CHECK(payload != NULL, "capacity-proof payload allocation failed");
+        if (payload && !exists(capacity_proof)) {
+            for (size_t i = 0u; i < payload_size; i++)
+                payload[i] = (uint8_t)(i * 131u + 17u);
+            rootfs_work_entry_t entries[3];
+            memset(entries, 0, sizeof entries);
+            static const char *const PATHS[3] = {
+                "/private/var/tmp/.s5lbox-capacity-proof-1",
+                "/private/var/tmp/.s5lbox-capacity-proof-2",
+                "/private/var/tmp/.s5lbox-capacity-proof-3"
+            };
+            for (size_t i = 0u; i < 3u; i++) {
+                entries[i].kind = ROOTFS_WORK_ENTRY_FILE;
+                entries[i].path = PATHS[i];
+                entries[i].content = payload;
+                entries[i].content_size = payload_size;
+                entries[i].permissions = 0600u;
+                entries[i].owner_id = 0u;
+                entries[i].group_id = 0u;
+            }
+            rootfs_work_options_t proof_options;
+            memset(&proof_options, 0, sizeof proof_options);
+            proof_options.preserve_fstab = true;
+            proof_options.entries = entries;
+            proof_options.entry_count = 3u;
+            rootfs_work_result_t proof;
+            rootfs_work_status_t proof_status = rootfs_work_create(
+                live, capacity_proof, &proof_options, &proof);
+            uint64_t old_free_bytes =
+                (uint64_t)old_free_blocks * old_block_size;
+            uint64_t requested_bytes = (uint64_t)payload_size * 3u;
+            CHECK(requested_bytes > old_free_bytes,
+                  "capacity proof requested %llu bytes but old disk had %llu free",
+                  (unsigned long long)requested_bytes,
+                  (unsigned long long)old_free_bytes);
+            CHECK(proof_status == ROOTFS_WORK_OK && proof.published &&
+                  proof.provision_entries == 3u &&
+                  proof.provision_blocks > old_free_blocks,
+                  "post-growth allocation did not exceed the old free-block ceiling: %s/%s entries=%u blocks=%u old-free=%u",
+                  rootfs_work_status_name(proof_status),
+                  proof.detail, proof.provision_entries,
+                  proof.provision_blocks, old_free_blocks);
+            printf("real-storage-capacity old-free=%u blocks allocated=%u "
+                   "bytes=%llu proof=%s\n",
+                   old_free_blocks, proof.provision_blocks,
+                   (unsigned long long)requested_bytes, capacity_proof);
+        }
+        free(payload);
+    } else {
+        printf("real-storage-capacity SKIP (proof path unset)\n");
+    }
+    printf("real-storage-upgrade before=%llu final=%llu blocks=%u->%u "
+           "free=%u->%u\n",
+           (unsigned long long)before, (unsigned long long)after,
+           old_total_blocks, new_total_blocks,
+           old_free_blocks, new_free_blocks);
 }
 
 int main(void) {

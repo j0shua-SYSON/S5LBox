@@ -1036,14 +1036,24 @@ valid committed install marker. It produced:
 |---|---:|---:|
 | Host image bytes | 500,375,552 | 2,147,483,648 |
 | HFS allocation blocks | 122,162 | 524,288 |
-| HFS free blocks | not captured | 412,331 |
-| HFS free bytes | not used as acceptance evidence | 1,688,907,776 (78.65%) |
+| HFS free blocks | 10,217 | 412,331 |
+| HFS free bytes | 41,848,832 | 1,688,907,776 (78.65%) |
 
-The pre-migration free-block value was not captured in that run, so this
-document does not invent it after the fact. The post-migration primary header
-is `HX`, allocation block size 4,096, and its
+The post-migration primary header is `HX`, allocation block size 4,096, and its
 `totalBlocks * blockSize` exactly matches the host file length. The builder ran
-519 checks with zero failures and a second invocation performed no rewrite.
+525 checks with zero failures and a second invocation performed no rewrite.
+
+The follow-up capacity test did not stop at the header. It cloned the migrated
+image again and provisioned three 16,777,216-byte files, consuming 12,288
+allocation blocks. That is greater than the old volume's entire 10,217-block
+free pool. The read-only catalog walker found their extents at blocks
+`122174+4096`, `126270+4096`, and `130366+4096`; all three begin beyond the old
+volume's 122,162-block boundary. Extracting the first complete 16 MiB file
+produced SHA-256
+`789AE1E03031156AB4FB0C19892B9197F8097298F66876E59CF1A63DC6CC0DB2`,
+exactly matching the deterministic input payload. This proves that the grown
+allocator writes and reads newly added space rather than merely advertising it
+in the volume header.
 
 Content-preservation evidence was extracted through the read-only HFS catalog
 walker before and after migration:
