@@ -518,6 +518,30 @@ add_test(NAME app_debian_archive COMMAND test_vmdebarchive)
 set_tests_properties(app_debian_archive PROPERTIES
     WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
 
+# Download metadata only: no Cydia or bootstrap payload bytes are part of this
+# target (or the repository). The package list is deterministic and every
+# original-server download is gated by exact size and SHA-256 before parsing.
+add_executable(test_vmguestpackagemanifest
+    ../app/Tests/test_vmguestpackagemanifest.c
+    ../app/Sources/VMGuestPackageManifest.c
+    ../tools/sha256.c
+)
+target_include_directories(test_vmguestpackagemanifest PRIVATE
+    ../app/Sources ../tools)
+set_target_properties(test_vmguestpackagemanifest PROPERTIES
+    C_STANDARD 11
+    C_STANDARD_REQUIRED YES
+    C_EXTENSIONS NO)
+if(MSVC)
+    target_compile_options(test_vmguestpackagemanifest PRIVATE /W4 /WX)
+else()
+    target_compile_options(test_vmguestpackagemanifest PRIVATE
+        -Wall -Wextra -Werror -pedantic -Wformat=2 -Wshadow)
+endif()
+add_test(NAME app_guest_package_manifest COMMAND test_vmguestpackagemanifest)
+set_tests_properties(app_guest_package_manifest PROPERTIES
+    WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+
 # Which of the settings screen's fourteen switches reaches a bring-up request,
 # and what the app says about the ones that do not.  Two do; twelve do not; on
 # an untouched installation six are already in conflict with what bring-up
