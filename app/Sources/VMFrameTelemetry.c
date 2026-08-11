@@ -94,14 +94,25 @@ static uint64_t vm_frame_telemetry_signature(const uint8_t *pixels,
     return hash;
 }
 
-void vm_frame_telemetry_reset(bool enabled) {
-    vm_frame_telemetry_lock();
+static void vm_frame_telemetry_reset_locked(bool enabled) {
     uint64_t generation =
         g_vm_frame_telemetry.public_state.generation + UINT64_C(1);
     memset(&g_vm_frame_telemetry, 0, sizeof g_vm_frame_telemetry);
     g_vm_frame_telemetry.public_state.enabled = enabled;
     g_vm_frame_telemetry.public_state.generation = generation;
     vm_frame_telemetry_set_enabled(enabled);
+}
+
+void vm_frame_telemetry_reset(bool enabled) {
+    vm_frame_telemetry_lock();
+    vm_frame_telemetry_reset_locked(enabled);
+    vm_frame_telemetry_unlock();
+}
+
+void vm_frame_telemetry_begin_machine(void) {
+    vm_frame_telemetry_lock();
+    bool enabled = g_vm_frame_telemetry.public_state.enabled;
+    vm_frame_telemetry_reset_locked(enabled);
     vm_frame_telemetry_unlock();
 }
 
@@ -187,6 +198,10 @@ static bool vm_execution_telemetry_not_before(
            VM_EXEC_NOT_BEFORE(active_clock_added_ticks) &&
            VM_EXEC_NOT_BEFORE(active_clock_clamps) &&
            VM_EXEC_NOT_BEFORE(active_clock_failures) &&
+           VM_EXEC_NOT_BEFORE(wfi_paced_waits) &&
+           VM_EXEC_NOT_BEFORE(wfi_paced_wait_ns) &&
+           VM_EXEC_NOT_BEFORE(wfi_paced_partial_advances) &&
+           VM_EXEC_NOT_BEFORE(wfi_paced_failures) &&
            VM_EXEC_NOT_BEFORE(compact_privileged_window_refills) &&
            VM_EXEC_NOT_BEFORE(compact_privileged_boundary_retired) &&
            VM_EXEC_NOT_BEFORE(compact_window_cache_hits) &&

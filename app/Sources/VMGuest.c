@@ -254,6 +254,14 @@ static const uint8_t *vm_guest_record_display(const s5l8900_t *m,
             vm_execution_telemetry_observation_t execution;
             memset(&execution, 0, sizeof execution);
             s5l8900_static_a64_compact_raw_refusals(m, &refusals);
+            execution.cpu_pc = m->cpu.r[15];
+            execution.cpu_cpsr = m->cpu.cpsr;
+            execution.cpu_irq_line = m->cpu.irq_line ? 1u : 0u;
+            execution.cpu_fiq_line = m->cpu.fiq_line ? 1u : 0u;
+            execution.wfi_host_pacing_enabled =
+                m->wfi_host_sleep ? 1u : 0u;
+            execution.active_host_clock_enabled =
+                m->active_host_now ? 1u : 0u;
             execution.cpu_retired = m->cpu.cycles;
             execution.interpreter_tick_batches =
                 s5l8900_interpreter_tick_batches(m);
@@ -326,6 +334,11 @@ static const uint8_t *vm_guest_record_display(const s5l8900_t *m,
                 m->active_clock_added_ticks;
             execution.active_clock_clamps = m->active_clock_clamps;
             execution.active_clock_failures = m->active_clock_failures;
+            execution.wfi_paced_waits = m->wfi_paced_waits;
+            execution.wfi_paced_wait_ns = m->wfi_paced_wait_ns;
+            execution.wfi_paced_partial_advances =
+                m->wfi_paced_partial_advances;
+            execution.wfi_paced_failures = m->wfi_paced_failures;
             s5l_static_a64_compact_pc_profile_t pc_profile;
             s5l8900_static_a64_compact_raw_pc_profile(m, &pc_profile);
             execution.compact_pc_profile_polls = pc_profile.polls;

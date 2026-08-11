@@ -4,6 +4,7 @@
 #include "file_block.h"
 #include "md_snapshot.h"
 #include "snapshot.h"
+#include "VMFrameTelemetry.h"
 #include "VMSnapshotCow.h"
 #include "VMFirmwareHLE.h"
 #include "VMResumeCheckpoint.h"
@@ -1002,6 +1003,11 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
     }
 #endif
     report->summary[sizeof report->summary - 1u] = '\0';
+    /* No failure remains after this point. Execution observations begin only
+     * when the caller enters its run loop, so this is the exact boundary at
+     * which a restarted machine must stop inheriting the preceding machine's
+     * counter baselines and worst-gap witness. */
+    vm_frame_telemetry_begin_machine();
     return true;
 }
 

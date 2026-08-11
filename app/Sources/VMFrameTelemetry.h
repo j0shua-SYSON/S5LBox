@@ -99,6 +99,14 @@ typedef struct {
 } vm_mbx_3d_rejection_witness_t;
 
 typedef struct {
+    /* Current CPU state. These are witnesses, not monotonic counters, and are
+     * therefore deliberately excluded from the consistency comparison. */
+    uint32_t cpu_pc;
+    uint32_t cpu_cpsr;
+    uint32_t cpu_irq_line;
+    uint32_t cpu_fiq_line;
+    uint32_t wfi_host_pacing_enabled;
+    uint32_t active_host_clock_enabled;
     uint64_t cpu_retired;
     uint64_t interpreter_tick_batches;
     uint64_t interpreter_tick_batched_retired;
@@ -141,6 +149,10 @@ typedef struct {
     uint64_t active_clock_added_ticks;
     uint64_t active_clock_clamps;
     uint64_t active_clock_failures;
+    uint64_t wfi_paced_waits;
+    uint64_t wfi_paced_wait_ns;
+    uint64_t wfi_paced_partial_advances;
+    uint64_t wfi_paced_failures;
     uint64_t compact_privileged_window_refills;
     uint64_t compact_privileged_boundary_retired;
     uint64_t compact_window_cache_hits;
@@ -248,6 +260,12 @@ typedef struct {
 
 /* Reset every counter and select whether subsequent calls do any work. */
 void vm_frame_telemetry_reset(bool enabled);
+
+/* Start a new machine generation without changing whether telemetry is
+ * enabled. A restarted machine's counters begin at zero, so carrying the old
+ * endpoints across this boundary would manufacture regressions and stale gap
+ * witnesses. Call only after a new machine has completed bring-up. */
+void vm_frame_telemetry_begin_machine(void);
 
 /* Fast gate for call sites that want to avoid even reading a timer. */
 bool vm_frame_telemetry_is_enabled(void);

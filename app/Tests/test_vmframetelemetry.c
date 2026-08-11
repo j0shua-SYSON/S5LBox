@@ -31,6 +31,12 @@ static vm_execution_telemetry_observation_t execution_observation(
         uint64_t base) {
     vm_execution_telemetry_observation_t value;
     memset(&value, 0, sizeof value);
+    value.cpu_pc = UINT32_C(0xc0000000) + (uint32_t)base;
+    value.cpu_cpsr = UINT32_C(0x60000013);
+    value.cpu_irq_line = (uint32_t)(base & 1u);
+    value.cpu_fiq_line = (uint32_t)((base >> 1u) & 1u);
+    value.wfi_host_pacing_enabled = 1u;
+    value.active_host_clock_enabled = 1u;
     value.cpu_retired = base + 1u;
     value.interpreter_tick_batches = base + 2u;
     value.interpreter_tick_batched_retired = base + 3u;
@@ -76,6 +82,10 @@ static vm_execution_telemetry_observation_t execution_observation(
     value.active_clock_added_ticks = base + 35u;
     value.active_clock_clamps = base + 36u;
     value.active_clock_failures = base + 37u;
+    value.wfi_paced_waits = base + 82u;
+    value.wfi_paced_wait_ns = base + 83u;
+    value.wfi_paced_partial_advances = base + 84u;
+    value.wfi_paced_failures = base + 85u;
     value.compact_privileged_window_refills = base + 38u;
     value.compact_privileged_boundary_retired = base + 39u;
     value.compact_window_cache_hits = base + 40u;
@@ -113,6 +123,44 @@ static vm_execution_telemetry_observation_t execution_observation(
         value.compact_pc_profile_outside_hot_samples[i] = base + 55u + i;
     }
     return value;
+}
+
+static void test_machine_generation_boundary(void) {
+    vm_frame_telemetry_reset(true);
+    vm_execution_telemetry_observation_t old = execution_observation(5000u);
+    vm_frame_telemetry_note_execution(&old);
+
+    vm_frame_telemetry_snapshot_t before;
+    vm_frame_telemetry_snapshot(&before);
+    vm_frame_telemetry_begin_machine();
+
+    vm_frame_telemetry_snapshot_t after;
+    vm_frame_telemetry_snapshot(&after);
+    CHECK(after.enabled && vm_frame_telemetry_is_enabled(),
+          "a machine boundary disabled enabled telemetry");
+    CHECK(after.generation == before.generation + 1u,
+          "machine boundary generation=%llu after %llu",
+          (unsigned long long)after.generation,
+          (unsigned long long)before.generation);
+    CHECK(!after.execution_captured && after.execution_observations == 0u &&
+              after.scanout_attempts == 0u && after.layer_attempts == 0u,
+          "machine boundary retained stale telemetry");
+
+    vm_execution_telemetry_observation_t fresh = execution_observation(100u);
+    vm_frame_telemetry_note_execution(&fresh);
+    vm_frame_telemetry_snapshot(&after);
+    CHECK(after.execution_captured && after.execution_consistent &&
+              after.execution_observations == 1u &&
+              after.execution_first.cpu_retired == 101u,
+          "fresh lower machine counters were treated as a regression");
+
+    vm_frame_telemetry_reset(false);
+    vm_frame_telemetry_snapshot(&before);
+    vm_frame_telemetry_begin_machine();
+    vm_frame_telemetry_snapshot(&after);
+    CHECK(!after.enabled && !vm_frame_telemetry_is_enabled() &&
+              after.generation == before.generation + 1u,
+          "disabled telemetry did not survive a machine boundary");
 }
 
 static void test_disabled_is_inert(void) {
@@ -191,6 +239,10 @@ static void test_boundaries_and_sampled_changes(void) {
         pixels, sizeof pixels, true, 400u);
     vm_execution_telemetry_observation_t execution_last =
         execution_observation(2000u);
+    execution_last.cpu_pc = 0x100u;
+    execution_last.cpu_cpsr = 0x13u;
+    execution_last.cpu_irq_line = 0u;
+    execution_last.cpu_fiq_line = 1u;
     vm_frame_telemetry_note_execution(&execution_last);
 
     vm_frame_telemetry_snapshot_t state;
@@ -244,6 +296,12 @@ static void test_boundaries_and_sampled_changes(void) {
           (unsigned long long)state.execution_observations);
     CHECK(state.execution_first.cpu_retired == 1001u &&
            state.execution_last.cpu_retired == 2001u &&
+           state.execution_last.cpu_pc == 0x100u &&
+           state.execution_last.cpu_cpsr == 0x13u &&
+           state.execution_last.cpu_irq_line == 0u &&
+           state.execution_last.cpu_fiq_line == 1u &&
+           state.execution_last.wfi_host_pacing_enabled == 1u &&
+           state.execution_last.active_host_clock_enabled == 1u &&
            state.execution_first.compact_refused_privileged == 1017u &&
            state.execution_last.compact_window_fast_refills == 2014u &&
            state.execution_last.fetch_refill_skips == 2024u &&
@@ -265,6 +323,10 @@ static void test_boundaries_and_sampled_changes(void) {
            state.execution_last.active_clock_added_ticks == 2035u &&
            state.execution_last.active_clock_clamps == 2036u &&
            state.execution_last.active_clock_failures == 2037u &&
+           state.execution_last.wfi_paced_waits == 2082u &&
+           state.execution_last.wfi_paced_wait_ns == 2083u &&
+           state.execution_last.wfi_paced_partial_advances == 2084u &&
+           state.execution_last.wfi_paced_failures == 2085u &&
            state.execution_last.compact_privileged_window_refills == 2038u &&
            state.execution_last.compact_privileged_boundary_retired == 2039u &&
            state.execution_last.compact_window_cache_hits == 2040u &&
@@ -392,6 +454,7 @@ static void test_worst_scanout_gap_keeps_its_work_witness(void) {
 
 int main(void) {
     test_disabled_is_inert();
+    test_machine_generation_boundary();
     test_boundaries_and_sampled_changes();
     test_worst_scanout_gap_keeps_its_work_witness();
     printf("vm frame telemetry: %u checks, %u failed\n", tests, failed);

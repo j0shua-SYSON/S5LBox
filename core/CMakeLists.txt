@@ -395,6 +395,7 @@ add_test(NAME app_frame_telemetry COMMAND test_vmframetelemetry)
 # is a file the test writes itself.
 add_executable(test_vmfirmwareboot
     ../app/Tests/test_vmfirmwareboot.c
+    ../app/Sources/VMFrameTelemetry.c
     ../app/Sources/VMFirmwareBoot.c
     ../app/Sources/VMResumeCheckpoint.c
     ../app/Sources/VMSnapshotCow.c
@@ -599,6 +600,7 @@ add_test(NAME app_firmware_hle_adapter COMMAND test_vmfirmwarehle)
 # root filesystems through the code that actually opens them.
 add_executable(test_vminstancepaths
     ../app/Tests/test_vminstancepaths.c
+    ../app/Sources/VMFrameTelemetry.c
     ../app/Sources/VMInstancePaths.c
     ../app/Sources/VMInstances.c
     ../app/Sources/VMFirmwareBoot.c

@@ -411,8 +411,11 @@ static double VMDeviceAutomationSeconds(uint64_t firstNS, uint64_t lastNS) {
 #define VM_EXEC_DELTA(field_) \
     (last->field_ >= first->field_ ? last->field_ - first->field_ : 0u)
         execution = [NSString stringWithFormat:
-            @"execution_captured=1,execution_consistent=%u,"
-             "execution_observations=%llu,cpu_retired=%llu,"
+             @"execution_captured=1,execution_consistent=%u,"
+              "execution_observations=%llu,cpu_pc=%08x,cpu_cpsr=%08x,"
+              "cpu_irq_line=%u,cpu_fiq_line=%u,"
+              "wfi_host_pacing_enabled=%u,active_host_clock_enabled=%u,"
+              "cpu_retired=%llu,"
              "interpreter_tick_batches=%llu,"
              "interpreter_tick_batched_retired=%llu,"
              "static_native_retired=%llu,compact_attempts=%llu,"
@@ -439,9 +442,11 @@ static double VMDeviceAutomationSeconds(uint64_t firstNS, uint64_t lastNS) {
              "mbx_2d_last_rejected_count=%llu,"
              "mbx_2d_last_rejected_reason_hash=%016llx,"
              "mbx_3d_candidates=%llu,mbx_3d_completed=%llu,"
-             "mbx_3d_rejected=%llu,mbx_3d_pixels=%llu,"
-             "active_clock_updates=%llu,active_clock_added_ticks=%llu,"
-             "active_clock_clamps=%llu,active_clock_failures=%llu,"
+              "mbx_3d_rejected=%llu,mbx_3d_pixels=%llu,"
+              "active_clock_updates=%llu,active_clock_added_ticks=%llu,"
+              "active_clock_clamps=%llu,active_clock_failures=%llu,"
+              "wfi_paced_waits=%llu,wfi_paced_wait_ns=%llu,"
+              "wfi_paced_partial_advances=%llu,wfi_paced_failures=%llu,"
              "compact_pc_profile_polls=%llu,"
              "compact_pc_profile_not_running=%llu,"
              "compact_pc_profile_state_failures=%llu,"
@@ -467,6 +472,12 @@ static double VMDeviceAutomationSeconds(uint64_t firstNS, uint64_t lastNS) {
              "compact_pc_profile_exit=%llu",
             state.execution_consistent ? 1u : 0u,
             (unsigned long long)state.execution_observations,
+            last->cpu_pc,
+            last->cpu_cpsr,
+            last->cpu_irq_line,
+            last->cpu_fiq_line,
+            last->wfi_host_pacing_enabled,
+            last->active_host_clock_enabled,
             (unsigned long long)VM_EXEC_DELTA(cpu_retired),
             (unsigned long long)VM_EXEC_DELTA(interpreter_tick_batches),
             (unsigned long long)VM_EXEC_DELTA(
@@ -514,6 +525,10 @@ static double VMDeviceAutomationSeconds(uint64_t firstNS, uint64_t lastNS) {
             (unsigned long long)VM_EXEC_DELTA(active_clock_added_ticks),
             (unsigned long long)VM_EXEC_DELTA(active_clock_clamps),
             (unsigned long long)VM_EXEC_DELTA(active_clock_failures),
+            (unsigned long long)VM_EXEC_DELTA(wfi_paced_waits),
+            (unsigned long long)VM_EXEC_DELTA(wfi_paced_wait_ns),
+            (unsigned long long)VM_EXEC_DELTA(wfi_paced_partial_advances),
+            (unsigned long long)VM_EXEC_DELTA(wfi_paced_failures),
             (unsigned long long)VM_EXEC_DELTA(compact_pc_profile_polls),
             (unsigned long long)VM_EXEC_DELTA(
                 compact_pc_profile_not_running),
