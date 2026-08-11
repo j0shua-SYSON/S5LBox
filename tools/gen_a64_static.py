@@ -905,7 +905,9 @@ def vfp_gate(kind: str) -> list[str]:
             body.extend([
                 "    ldr x4, [x3, #40]",
                 "    ldr w4, [x4]",
-                "    tst w4, #0x70000",
+                "    mov w5, #0x37",
+                "    lsl w5, w5, #16",
+                "    tst w4, w5",
                 "    b.eq 1f",
                 "    b .La64s_direct_miss",
                 "1:",
@@ -926,7 +928,7 @@ def vfp_gate(kind: str) -> list[str]:
                 "    ldr x4, [x3, #40]",
                 "    ldr w4, [x4]",
                 # Accept exactly the live RunFast control mode: RN, FZ, DN,
-                # scalar Len and all exception enables clear.
+                # scalar LEN/STRIDE and all exception enables clear.
                 "    mov w5, #0x9f00",
                 "    movk w5, #0x3c7, lsl #16",
                 "    and w6, w4, w5",
@@ -3166,7 +3168,9 @@ def compact_vfp_nonarith_body() -> list[str]:
         "    tbz w0, #30, .La64cr_vfp_guard_fail",
         "    ldr x1, [x27, #120]",
         "    ldr w0, [x1]",
-        "    tst w0, #0x70000",
+        "    mov w1, #0x37",
+        "    lsl w1, w1, #16",
+        "    tst w0, w1",
         "    b.ne .La64cr_vfp_guard_fail",
         "    mov w0, #1",
         "    ret",
@@ -3194,7 +3198,7 @@ def compact_vfp_nonarith_body() -> list[str]:
         "    ldr x1, [x27, #120]",
         "    cbz x1, .La64cr_vfp_guard_fail",
         "    ldr w0, [x1]",
-        # Accept exactly RN/FZ/DN, scalar Len, no enables. NZCV is outside
+        # Accept exactly RN/FZ/DN, scalar LEN/STRIDE, no enables. NZCV is outside
         # this mask and remains available to guest compare/condition logic.
         "    mov w1, #0x9f00",
         "    movk w1, #0x3c7, lsl #16",

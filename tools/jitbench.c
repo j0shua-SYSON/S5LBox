@@ -3613,8 +3613,12 @@ static bool validate_static_vfp_register_oracles(void) {
         VFP_VMRS(0, 0),                 /* privileged FPSID succeeds */
         VFP_VMOV_S_R(0, 1),             /* ordinary VFP must fall back */
     };
-    static const uint32_t LEN_GUARD[] = {
-        VFP_UN_S(0, 0, 1, 0),           /* VMOV.F32 with Len != 0 */
+    static const uint32_t VECTOR_GUARD[] = {
+        VFP_UN_S(0, 0, 1, 0),           /* VMOV.F32 vector controls */
+    };
+    static const uint32_t VECTOR_MODES[] = {
+        ARM_FPSCR_LEN,
+        ARM_FPSCR_STRIDE,
     };
     a64_static_block_t block;
     arm_cpu_t reference, statik, before;
@@ -3684,16 +3688,20 @@ static bool validate_static_vfp_register_oracles(void) {
         return false;
     }
 
-    seed_vfp_oracle(&statik, LEN_GUARD, 1u, 0xe800u, true);
-    statik.vfp_fpscr = ARM_FPSCR_LEN;
-    before = statik;
-    if (!a64_static_decode_read_hits_bytes_at(&g_ram[0xe800u], 1u, false,
-                                              0xe800u, &block) ||
-        !a64_static_run_read_hits(&statik, &block, g_ram, sizeof g_ram,
-                                  &completed) || completed != 0u ||
-        !static_vfp_states_equal(&before, &statik)) {
-        fprintf(stderr, "jitbench: VFP Len guard changed state\n");
-        return false;
+    for (unsigned i = 0u; i < sizeof VECTOR_MODES / sizeof VECTOR_MODES[0];
+         i++) {
+        const uint32_t pc = UINT32_C(0xe800) + i * 4u;
+        seed_vfp_oracle(&statik, VECTOR_GUARD, 1u, pc, true);
+        statik.vfp_fpscr = VECTOR_MODES[i];
+        before = statik;
+        if (!a64_static_decode_read_hits_bytes_at(&g_ram[pc], 1u, false,
+                                                  pc, &block) ||
+            !a64_static_run_read_hits(&statik, &block, g_ram, sizeof g_ram,
+                                      &completed) || completed != 0u ||
+            !static_vfp_states_equal(&before, &statik)) {
+            fprintf(stderr, "jitbench: VFP vector guard changed state\n");
+            return false;
+        }
     }
 
     /* A failed ARM condition retires without consulting CPACR/FPEXC. */
@@ -5644,14 +5652,20 @@ static bool validate_compact_raw_admission_shapes(void) {
             return false;
         }
     }
-    cpu.vfp_fpscr = ARM_FPSCR_LEN;
-    if (a64_compact_raw_classify_instruction(
-            &cpu, VFP_UN_S(4, 0, 0, 1), false) !=
-            A64_COMPACT_RAW_REJECT_VFP) {
-        fprintf(stderr, "jitbench: compact raw VFP Len guard admitted\n");
-        return false;
+    for (unsigned i = 0u; i < 2u; i++) {
+        a64_compact_raw_admission_t actual;
+        cpu.vfp_fpscr = i == 0u ? ARM_FPSCR_LEN : ARM_FPSCR_STRIDE;
+        actual = a64_compact_raw_classify_instruction(
+            &cpu, VFP_UN_S(0, 0, 0, 1), false);
+        if (actual != A64_COMPACT_RAW_REJECT_VFP) {
+            fprintf(stderr,
+                    "jitbench: compact raw VFP vector guard admitted "
+                    "FPSCR=%08" PRIx32 " result=%u\n",
+                    cpu.vfp_fpscr, (unsigned)actual);
+            return false;
+        }
     }
-    printf("COMPACT-RAW-ADMISSION-MODEL exact-shapes=yes cases=80 "
+    printf("COMPACT-RAW-ADMISSION-MODEL exact-shapes=yes cases=81 "
            "outcomes=13 condition-before-decode=yes machine-gates=excluded\n");
     return true;
 }
@@ -6696,7 +6710,7 @@ static bool validate_compact_raw_vfp_nonarith_oracles(void) {
         cases++;
     }
 
-    /* Failed conditions retire before access checks, while live access/Len
+    /* Failed conditions retire before access checks, while live access/vector
      * failures must leave the current instruction wholly untouched. */
     {
         const uint32_t insn = VFP_UN_S(4, 0, 0, 2) & UINT32_C(0x0fffffff);
@@ -6708,14 +6722,16 @@ static bool validate_compact_raw_vfp_nonarith_oracles(void) {
             return false;
         cases++;
     }
-    for (unsigned i = 0u; i < 2u; i++) {
-        const uint32_t insn = VFP_UN_S(4, 0, 0, 2);
+    for (unsigned i = 0u; i < 3u; i++) {
+        const uint32_t insn = VFP_UN_S(0, 0, 0, 2);
         const uint32_t pc = UINT32_C(0x7b00) + i * 4u;
         seed_vfp_oracle(&compact, &insn, 1u, pc, true);
         if (i == 0u)
             compact.cp15.cpacr = 0u;
-        else
+        else if (i == 1u)
             compact.vfp_fpscr = ARM_FPSCR_LEN;
+        else
+            compact.vfp_fpscr = ARM_FPSCR_STRIDE;
         before = compact;
         if (!a64_compact_raw_run(&compact, &g_ram[pc], pc, 4u, 1u,
                                  g_ram, sizeof g_ram, &completed) ||

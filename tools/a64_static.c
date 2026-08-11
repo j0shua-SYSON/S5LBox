@@ -157,6 +157,7 @@ _Static_assert(sizeof(a64_static_read_context_t) == 72u &&
                "signed memory context layout changed");
 _Static_assert(ARM1176_FPSID == UINT32_C(0x410120b4) &&
                ARM_FPEXC_EN == (1u << 30) &&
+               ARM_FPSCR_STRIDE == UINT32_C(0x00300000) &&
                ARM_FPSCR_LEN == UINT32_C(0x00070000) &&
                ARM_FPSCR_ENABLES == UINT32_C(0x00009f00) &&
                ARM_FPSCR_DN == (1u << 25) &&
@@ -1731,7 +1732,8 @@ static a64_compact_raw_admission_t compact_raw_classify_vfp(
      * lazy host-FP session before every exit or callback. */
     if (handler >= A64S_VFP_UNARY32 &&
         handler < A64S_VFP_COMPARE32) {
-        return (cpu->vfp_fpscr & ARM_FPSCR_LEN) == 0u
+        return (cpu->vfp_fpscr &
+                (ARM_FPSCR_STRIDE | ARM_FPSCR_LEN)) == 0u
             ? A64_COMPACT_RAW_ADMIT_EXECUTE
             : A64_COMPACT_RAW_REJECT_VFP;
     }

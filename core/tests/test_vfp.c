@@ -691,6 +691,212 @@ static void test_double_precision_arithmetic(void) {
 }
 
 /*
+ * VFPv2 short vectors are selected by FPSCR.LEN and advance within one of
+ * four circular register banks. This is not an optimization hint: executing
+ * one of these as a scalar silently leaves up to seven architectural results
+ * unwritten. Voice Memos reaches the first exact instruction below when its
+ * level meter opens, so keep the real word as well as the general bank tests.
+ */
+static void test_short_vector_arithmetic(void) {
+    arm_cpu_t c;
+
+    /* VMUL.F32 s20,s4,s0: Fn advances even though it is in bank zero, while
+     * Fm in bank zero is a scalar broadcast. */
+    {
+        uint32_t voice[] = { 0xee22aa00u };
+        CHECK(voice[0] == DP_S(0,1,0,0, 20,4,0),
+              "Voice Memos VMUL encoding = 0x%08x", voice[0]);
+        vfp_reset(&c);
+        /* Captured RunFast mode: FZ, DN, four lanes, stride one. */
+        c.vfp_fpscr = ARM_FPSCR_FZ | ARM_FPSCR_DN | (3u << 16);
+        set_f32(&c, 0, 10.0f);
+        for (unsigned i = 0; i < 4; i++) set_f32(&c, 4u + i, (float)(i + 1u));
+        CHECK(run(&c, voice, 1, 1) == ARM_OK, "Voice Memos VMUL trapped");
+        for (unsigned i = 0; i < 4; i++)
+            CHECK(get_f32(&c, 20u + i) == (float)((i + 1u) * 10u),
+                  "Voice lane %u = %f", i, (double)get_f32(&c, 20u + i));
+    }
+
+    /* ARM DDI 0274H example 2-1: all three vectors wrap independently inside
+     * their original eight-register banks. */
+    {
+        static const unsigned DREG[] = { 11, 12, 13, 14, 15, 8 };
+        static const unsigned NREG[] = { 22, 23, 16, 17, 18, 19 };
+        static const unsigned MREG[] = { 31, 24, 25, 26, 27, 28 };
+        uint32_t add[] = { DP_S(0,1,1,0, 11,22,31) };
+        vfp_reset(&c);
+        c.vfp_fpscr = 5u << 16;                  /* six lanes, stride one */
+        for (unsigned i = 0; i < 6; i++) {
+            set_f32(&c, NREG[i], (float)(i + 1u));
+            set_f32(&c, MREG[i], (float)((i + 1u) * 10u));
+        }
+        CHECK(run(&c, add, 1, 1) == ARM_OK, "wrapping VADD trapped");
+        for (unsigned i = 0; i < 6; i++)
+            CHECK(get_f32(&c, DREG[i]) == (float)((i + 1u) * 11u),
+                  "wrapped lane %u (s%u) = %f", i, DREG[i],
+                  (double)get_f32(&c, DREG[i]));
+    }
+
+    /* STRIDE=b11 advances by two. Registers skipped by the destination vector
+     * must remain untouched. */
+    {
+        uint32_t add[] = { DP_S(0,1,1,0, 8,16,24) };
+        vfp_reset(&c);
+        c.vfp_fpscr = (3u << 16) | (3u << 20);    /* four lanes, stride two */
+        for (unsigned i = 0; i < 8; i++) set_f32(&c, 8u + i, -100.0f - (float)i);
+        for (unsigned i = 0; i < 4; i++) {
+            set_f32(&c, 16u + i * 2u, (float)(i + 1u));
+            set_f32(&c, 24u + i * 2u, (float)((i + 1u) * 10u));
+        }
+        CHECK(run(&c, add, 1, 1) == ARM_OK, "stride-two VADD trapped");
+        for (unsigned i = 0; i < 4; i++) {
+            CHECK(get_f32(&c, 8u + i * 2u) == (float)((i + 1u) * 11u),
+                  "stride-two lane %u = %f", i,
+                  (double)get_f32(&c, 8u + i * 2u));
+            CHECK(get_f32(&c, 9u + i * 2u) == -101.0f - (float)(i * 2u),
+                  "stride-two clobbered s%u", 9u + i * 2u);
+        }
+    }
+
+    /* Double vectors use four-register banks, not the single-precision bank
+     * size inherited through the shared S/D storage. */
+    {
+        uint32_t add[] = { DP_D(0,1,1,0, 4,8,12) };
+        vfp_reset(&c);
+        c.vfp_fpscr = 3u << 16;
+        for (unsigned i = 0; i < 4; i++) {
+            set_f64(&c, 8u + i, (double)(i + 1u));
+            set_f64(&c, 12u + i, (double)((i + 1u) * 10u));
+        }
+        CHECK(run(&c, add, 1, 1) == ARM_OK, "double short-vector VADD trapped");
+        for (unsigned i = 0; i < 4; i++)
+            CHECK(get_f64(&c, 4u + i) == (double)((i + 1u) * 11u),
+                  "double lane %u = %f", i, get_f64(&c, 4u + i));
+    }
+
+    /* All lane inputs are architectural source values from before the vector
+     * writes begin. Lane 1 therefore reads the old s8, not lane 0's result. */
+    {
+        uint32_t mul[] = { DP_S(0,1,0,0, 8,15,0) };
+        vfp_reset(&c);
+        c.vfp_fpscr = 1u << 16;                  /* two lanes */
+        set_f32(&c, 0, 10.0f);
+        set_f32(&c, 15, 3.0f);
+        set_f32(&c, 8, 7.0f);
+        CHECK(run(&c, mul, 1, 1) == ARM_OK, "overlapping vector VMUL trapped");
+        CHECK(get_f32(&c, 8) == 30.0f, "overlap lane 0 = %f", (double)get_f32(&c, 8));
+        CHECK(get_f32(&c, 9) == 70.0f, "overlap lane 1 = %f", (double)get_f32(&c, 9));
+    }
+
+    /* Exception flags accumulate across every iteration. */
+    {
+        uint32_t div[] = { DP_S(1,0,0,0, 8,16,24) };
+        vfp_reset(&c);
+        c.vfp_fpscr = 1u << 16;
+        set_f32(&c, 16, 1.0f); vfp_set_s(&c, 24, 0u); /* division by zero */
+        set_f32(&c, 17, 1.0f); set_f32(&c, 25, 3.0f); /* inexact */
+        CHECK(run(&c, div, 1, 1) == ARM_OK, "vector VDIV trapped");
+        CHECK((c.vfp_fpscr & (ARM_FPSCR_DZC | ARM_FPSCR_IXC)) ==
+              (ARM_FPSCR_DZC | ARM_FPSCR_IXC),
+              "vector exceptions = 0x%08x", c.vfp_fpscr);
+    }
+
+    /* A failure in a later lane must not leave earlier destination lanes
+     * committed. This boundary result is deliberately refused by the existing
+     * fail-closed FZ rule, so it also proves the vector write is atomic. */
+    {
+        uint32_t mul[] = { DP_S(0,1,0,0, 8,16,24) };
+        vfp_reset(&c);
+        c.vfp_fpscr = ARM_FPSCR_FZ | (1u << 16);
+        set_f32(&c, 8, -11.0f); set_f32(&c, 9, -12.0f);
+        set_f32(&c, 16, 2.0f); set_f32(&c, 24, 3.0f);
+        vfp_set_s(&c, 17, 0x00800000u);          /* smallest normal */
+        vfp_set_s(&c, 25, 0x3f7fffffu);          /* 1.0 - 2^-24 */
+        CHECK(run(&c, mul, 1, 1) == ARM_UNDEFINED,
+              "later-lane FZ ambiguity did not trap");
+        CHECK(get_f32(&c, 8) == -11.0f, "failed vector committed lane 0");
+        CHECK(get_f32(&c, 9) == -12.0f, "failed vector committed lane 1");
+    }
+}
+
+static void test_short_vector_unary_and_scalar_only(void) {
+    arm_cpu_t c;
+
+    /* A two-operand source in bank zero is broadcast to the whole vector. */
+    {
+        uint32_t neg[] = { UN_S(1,0, 8,1) };       /* VNEG.F32 s8,s1 */
+        vfp_reset(&c);
+        c.vfp_fpscr = 2u << 16;                    /* three lanes */
+        set_f32(&c, 1, 7.0f);
+        CHECK(run(&c, neg, 1, 1) == ARM_OK, "vector VNEG trapped");
+        for (unsigned i = 0; i < 3; i++)
+            CHECK(get_f32(&c, 8u + i) == -7.0f, "VNEG lane %u = %f", i,
+                  (double)get_f32(&c, 8u + i));
+    }
+
+    /* A destination in bank zero makes an otherwise vector-capable operation
+     * scalar without clearing LEN. */
+    {
+        uint32_t add[] = { DP_S(0,1,1,0, 2,8,16) };
+        vfp_reset(&c);
+        c.vfp_fpscr = 3u << 16;
+        set_f32(&c, 8, 2.0f); set_f32(&c, 16, 5.0f);
+        set_f32(&c, 3, 123.0f);
+        CHECK(run(&c, add, 1, 1) == ARM_OK, "bank-zero scalar VADD trapped");
+        CHECK(get_f32(&c, 2) == 7.0f, "bank-zero VADD = %f", (double)get_f32(&c, 2));
+        CHECK(get_f32(&c, 3) == 123.0f, "bank-zero VADD became a vector");
+    }
+
+    /* Comparisons and conversions are scalar-only by definition, even if
+     * their register number is outside bank zero and LEN remains nonzero. */
+    {
+        uint32_t cmp[] = { UN_S(4,0, 16,17) };
+        vfp_reset(&c);
+        c.vfp_fpscr = 3u << 16;
+        set_f32(&c, 16, 1.0f); set_f32(&c, 17, 2.0f);
+        CHECK(run(&c, cmp, 1, 1) == ARM_OK, "VCMP refused with LEN set");
+        CHECK((c.vfp_fpscr & ARM_FPSCR_NZCV) == ARM_FPSCR_N,
+              "VCMP with LEN set produced 0x%08x", c.vfp_fpscr & ARM_FPSCR_NZCV);
+    }
+    {
+        uint32_t cvt[] = { UN_S(8,1, 16,0) };      /* VCVT.F32.S32 s16,s0 */
+        vfp_reset(&c);
+        c.vfp_fpscr = 3u << 16;
+        vfp_set_s(&c, 0, 7u);
+        set_f32(&c, 17, 123.0f);
+        CHECK(run(&c, cvt, 1, 1) == ARM_OK, "VCVT refused with LEN set");
+        CHECK(get_f32(&c, 16) == 7.0f, "VCVT with LEN set = %f", (double)get_f32(&c, 16));
+        CHECK(get_f32(&c, 17) == 123.0f, "scalar-only VCVT wrote a second lane");
+    }
+}
+
+static void test_invalid_short_vector_shapes_halt_without_writes(void) {
+    arm_cpu_t c;
+    uint32_t smul[] = { DP_S(0,1,0,0, 8,16,24) };
+    uint32_t dmul[] = { DP_D(0,1,0,0, 4,8,12) };
+
+    /* With vector length one, STRIDE=b11 is architecturally Unpredictable. */
+    vfp_reset(&c); c.vfp_fpscr = 3u << 20; set_f32(&c, 8, 91.0f);
+    CHECK(run(&c, smul, 1, 1) == ARM_UNDEFINED, "LEN=0/STRIDE=2 ran");
+    CHECK(get_f32(&c, 8) == 91.0f, "invalid LEN=0 shape wrote s8");
+
+    /* STRIDE encodings b01 and b10 are reserved. */
+    vfp_reset(&c); c.vfp_fpscr = (1u << 16) | (1u << 20); set_f32(&c, 8, 92.0f);
+    CHECK(run(&c, smul, 1, 1) == ARM_UNDEFINED, "reserved STRIDE ran");
+    CHECK(get_f32(&c, 8) == 92.0f, "reserved STRIDE wrote s8");
+
+    /* A five-lane stride-two single vector and a three-lane stride-two double
+     * vector would each visit a register twice inside their circular bank. */
+    vfp_reset(&c); c.vfp_fpscr = (4u << 16) | (3u << 20); set_f32(&c, 8, 93.0f);
+    CHECK(run(&c, smul, 1, 1) == ARM_UNDEFINED, "repeating single vector ran");
+    CHECK(get_f32(&c, 8) == 93.0f, "repeating single vector wrote s8");
+
+    vfp_reset(&c); c.vfp_fpscr = (2u << 16) | (3u << 20); set_f64(&c, 4, 94.0);
+    CHECK(run(&c, dmul, 1, 1) == ARM_UNDEFINED, "repeating double vector ran");
+    CHECK(get_f64(&c, 4) == 94.0, "repeating double vector wrote d4");
+}
+
+/*
  * VMLA is a multiply, ROUNDED, then an add, ROUNDED. VFPv2 has no fused
  * multiply-add, so an implementation that let the compiler contract the two
  * would differ from hardware in the last bit. These operands are chosen so
@@ -1240,14 +1446,13 @@ static void test_unimplemented_encodings_still_halt(void) {
  * not consult the rounding mode, so they must keep working in RZ, while VADD
  * must not.
  */
-static void test_unmodelled_fpscr_modes_halt(void) {
+static void test_fpscr_mode_handling(void) {
     arm_cpu_t c;
     uint32_t add[] = { DP_S(0,1,1,0, 2,0,1) };   /* VADD.F32 s2,s0,s1 */
     uint32_t mov[] = { UN_S(0,0, 1,0) };         /* VMOV.F32 s1,s0    */
 
     struct { uint32_t fpscr; const char *what; } modes[] = {
-        { ARM_FPSCR_LEN,   "Len != 0"        },
-        { ARM_FPSCR_IOE,   "IOE trap enable" },
+        { ARM_FPSCR_IOE, "IOE trap enable" },
     };
     for (size_t i = 0; i < sizeof modes / sizeof modes[0]; i++) {
         vfp_reset(&c); c.vfp_fpscr = modes[i].fpscr;
@@ -1283,14 +1488,16 @@ static void test_unmodelled_fpscr_modes_halt(void) {
         }
     }
 
-    /* VMOV survives everything except short vectors, which change which
-     * registers it writes. */
+    /* VMOV survives directed rounding and trap enables because it cannot
+     * raise an exception. With a bank-zero destination it also remains scalar
+     * while LEN is nonzero. */
     vfp_reset(&c); c.vfp_fpscr = ARM_FPSCR_RMODE;
     CHECK(run(&c, mov, 1, 1) == ARM_OK, "VMOV refused in RZ mode");
     vfp_reset(&c); c.vfp_fpscr = ARM_FPSCR_IOE;
     CHECK(run(&c, mov, 1, 1) == ARM_OK, "VMOV refused with a trap enable set");
-    vfp_reset(&c); c.vfp_fpscr = ARM_FPSCR_LEN;
-    CHECK(run(&c, mov, 1, 1) == ARM_UNDEFINED, "VMOV ran with Len != 0");
+    vfp_reset(&c); c.vfp_fpscr = ARM_FPSCR_LEN; vfp_set_s(&c, 0, 0x12345678u);
+    CHECK(run(&c, mov, 1, 1) == ARM_OK, "bank-zero VMOV refused with LEN set");
+    CHECK(vfp_get_s(&c, 1) == 0x12345678u, "bank-zero VMOV with LEN set was wrong");
 
     /*
      * An integer-source conversion has nothing for FZ or DN to act on and, for
@@ -1506,6 +1713,9 @@ int main(void) {
     test_ios313_libm_fmod_return_block();
     test_single_precision_arithmetic();
     test_double_precision_arithmetic();
+    test_short_vector_arithmetic();
+    test_short_vector_unary_and_scalar_only();
+    test_invalid_short_vector_shapes_halt_without_writes();
     test_vmla_is_not_fused();
     test_vabs_vneg_vmov_are_sign_bit_operations();
     test_infinity_and_nan();
@@ -1514,7 +1724,7 @@ int main(void) {
     test_conversions();
     test_ios313_corefoundation_vfp_helpers();
     test_unimplemented_encodings_still_halt();
-    test_unmodelled_fpscr_modes_halt();
+    test_fpscr_mode_handling();
     test_flush_to_zero();
     test_default_nan();
     test_ldm_uses_the_translating_bus();

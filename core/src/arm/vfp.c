@@ -51,11 +51,13 @@
  * one of these, FPSCR is checked and the instruction TRAPS (ARM_UNDEFINED,
  * with a printed reason) rather than computing a plausible wrong number:
  *
- *   FPSCR.Len   != 0   short vectors. VFP11 really implements them; we do not.
- *                      A vector operation executed as a scalar one would write
- *                      one register instead of up to eight, silently. This
- *                      gates every data-processing instruction, VMOV included,
- *                      because Len changes which registers they write.
+ *   invalid short-vector shapes
+ *                      VFP11 implements the legacy VFPv2 short-vector mode.
+ *                      Valid LEN/STRIDE combinations execute with circular
+ *                      register-bank addressing below. Reserved strides and
+ *                      shapes that reuse a register are still refused rather
+ *                      than assigned one of the architecture's Unpredictable
+ *                      outcomes.
  *   FPSCR.RMode != 0   directed rounding (RP/RM/RZ). Host arithmetic rounds to
  *                      nearest-even. Honouring the other three would mean
  *                      driving the host's rounding mode through <fenv.h>
@@ -182,9 +184,11 @@ bool vfp_enabled(const arm_cpu_t *c) {
 /*
  * Three tiers, from the least to the most that an instruction can depend on.
  *
- * Short vectors change which REGISTERS any data-processing instruction writes,
- * VMOV and VABS included, so Len gates everything. The trap enables gate every
- * instruction that can raise an exception, which VMOV, VABS and VNEG cannot.
+ * The trap enables gate every instruction that can raise an exception, which
+ * VMOV, VABS and VNEG cannot. Short-vector LEN/STRIDE is handled by the CDP
+ * operations themselves: arithmetic and unary operations can iterate, while
+ * compares and conversions are architecturally scalar-only even when LEN is
+ * nonzero.
  *
  * FPSCR.RMode used to be a third gate, refusing every rounding instruction in a
  * directed mode. It is no longer, because the mode is now implemented rather
@@ -197,12 +201,11 @@ bool vfp_enabled(const arm_cpu_t *c) {
  * FZ and DN are not here because they are implemented (see fz_in32 and
  * f32_do); they change results rather than making them unrepresentable.
  */
-#define MODE_EXACT    (ARM_FPSCR_LEN)
-#define MODE_VALUES   (MODE_EXACT | ARM_FPSCR_ENABLES)
+#define MODE_EXACT    0u
+#define MODE_VALUES   (ARM_FPSCR_ENABLES)
 #define MODE_ROUNDING (MODE_VALUES)
 
 static const char *mode_complaint(uint32_t bad) {
-    if (bad & ARM_FPSCR_LEN)     return "FPSCR.Len selects short vectors";
     if (bad & ARM_FPSCR_ENABLES) return "FPSCR enables a trapped FP exception";
     if (bad & ARM_FPSCR_RMODE)   return "FPSCR.RMode selects directed rounding";
     return "FPSCR selects an unmodelled mode";
@@ -555,6 +558,81 @@ static uint32_t cmp_flags_ordered(int order) {
 #define FIELD(hi) ((insn >> (hi)) & 0xfu)
 #define SREG(f4, lo) (((f4) << 1) | (lo))
 
+/* ------------------------------------------------ legacy short vectors --
+ *
+ * VFP11 divides the register file into four circular banks: eight S registers
+ * or four D registers per bank. A nonzero LEN makes a data-processing result
+ * a vector only when its destination is outside bank zero. Fn then advances as
+ * a vector, while Fm advances only when it too is outside bank zero; an Fm in
+ * bank zero is broadcast as a scalar. The destination being in bank zero
+ * deliberately leaves the whole operation scalar, even while LEN stays set.
+ *
+ * ARM DDI 0274H, sections 2.7 and 3.4.2, defines only stride encodings 00
+ * (one) and 11 (two). It also calls a shape Unpredictable when wrapping would
+ * visit one register twice. Refusing those shapes is this emulator's normal
+ * fail-closed policy for Unpredictable encodings; valid shapes are exact.
+ */
+typedef struct {
+    unsigned count;
+    unsigned stride;
+    unsigned bank_mask;
+    unsigned bank_size;
+    bool vector;
+} vfp_short_vector_t;
+
+static bool vfp_short_vector_shape(uint32_t fpscr, bool dbl, unsigned rd,
+                                   vfp_short_vector_t *shape,
+                                   const char **why) {
+    const unsigned len = (fpscr & ARM_FPSCR_LEN) >> 16;
+    const unsigned encoded_stride = (fpscr & ARM_FPSCR_STRIDE) >> 20;
+    const unsigned bank_size = dbl ? 4u : 8u;
+
+    if (!shape) return false;
+    shape->count = 1u;
+    shape->stride = 1u;
+    shape->bank_mask = bank_size - 1u;
+    shape->bank_size = bank_size;
+    shape->vector = len != 0u && rd >= bank_size;
+
+    if (len == 0u) {
+        if (encoded_stride != 0u) {
+            if (why) *why = "FPSCR.Stride is invalid when vector length is one";
+            return false;
+        }
+        return true;
+    }
+    if (encoded_stride == 0u)
+        shape->stride = 1u;
+    else if (encoded_stride == 3u)
+        shape->stride = 2u;
+    else {
+        if (why) *why = "FPSCR.Stride uses a reserved encoding";
+        return false;
+    }
+
+    /* A bank-zero destination makes this instruction scalar regardless of
+     * LEN. Its operands are therefore used once and cannot wrap onto
+     * themselves. */
+    if (!shape->vector) return true;
+
+    shape->count = len + 1u;
+    if (shape->count > bank_size / shape->stride) {
+        if (why) *why = "FPSCR.Len/Stride would reuse a short-vector register";
+        return false;
+    }
+    return true;
+}
+
+static unsigned vfp_short_vector_reg(const vfp_short_vector_t *shape,
+                                     unsigned reg, unsigned lane,
+                                     bool bank_zero_is_scalar) {
+    if (!shape || !shape->vector ||
+        (bank_zero_is_scalar && reg < shape->bank_size))
+        return reg;
+    return (reg & ~shape->bank_mask) |
+           ((reg + lane * shape->stride) & shape->bank_mask);
+}
+
 /* ================================================= load / store group ==== *
  *
  * cond 110 P U D W L Rn Vd 101 sz imm8   (ARM ARM A7.6, "Extension register
@@ -842,6 +920,8 @@ static arm_status_t vfp_dp_arith(arm_cpu_t *c, uint32_t pc, uint32_t insn,
     bool     dbl = BIT(8), alt = BIT(6);
     unsigned kind, rd, rn, rm;
     uint32_t exc = 0, bad;
+    vfp_short_vector_t shape;
+    const char *why = NULL;
 
     switch (op) {
         case 0: kind = alt ? A_VMLS  : A_VMLA; break;
@@ -869,47 +949,71 @@ static arm_status_t vfp_dp_arith(arm_cpu_t *c, uint32_t pc, uint32_t insn,
         rn = SREG(FIELD(16), BIT(7));
         rm = SREG(insn & 0xfu, BIT(5));
     }
+    if (!vfp_short_vector_shape(c->vfp_fpscr, dbl, rd, &shape, &why))
+        return vfp_trap(pc, insn, why);
 
     if (dbl) {
         uint32_t fs = c->vfp_fpscr;
-        double n = u2d(vfp_get_d(c, rn)), m = u2d(vfp_get_d(c, rm)), r;
-        switch (kind) {
-            case A_VADD:  r = f64_do(OP_ADD, n, m, fs, &exc); break;
-            case A_VSUB:  r = f64_do(OP_SUB, n, m, fs, &exc); break;
-            case A_VMUL:  r = f64_do(OP_MUL, n, m, fs, &exc); break;
-            case A_VNMUL: r = fneg64(f64_do(OP_MUL, n, m, fs, &exc)); break;
-            case A_VDIV:  r = f64_do(OP_DIV, n, m, fs, &exc); break;
-            default: {
-                double d = u2d(vfp_get_d(c, rd));
-                double p = f64_do(OP_MUL, n, m, fs, &exc);  /* rounded, then...*/
-                if (kind == A_VMLS  || kind == A_VNMLA) p = fneg64(p);
-                if (kind == A_VNMLA || kind == A_VNMLS) d = fneg64(d);
-                r = f64_do(OP_ADD, d, p, fs, &exc);         /* ...rounded again*/
-                break;
+        uint64_t result[4];
+        for (unsigned lane = 0; lane < shape.count; lane++) {
+            unsigned dr = vfp_short_vector_reg(&shape, rd, lane, false);
+            unsigned nr = vfp_short_vector_reg(&shape, rn, lane, false);
+            unsigned mr = vfp_short_vector_reg(&shape, rm, lane, true);
+            double n = u2d(vfp_get_d(c, nr));
+            double m = u2d(vfp_get_d(c, mr));
+            double r;
+            switch (kind) {
+                case A_VADD:  r = f64_do(OP_ADD, n, m, fs, &exc); break;
+                case A_VSUB:  r = f64_do(OP_SUB, n, m, fs, &exc); break;
+                case A_VMUL:  r = f64_do(OP_MUL, n, m, fs, &exc); break;
+                case A_VNMUL: r = fneg64(f64_do(OP_MUL, n, m, fs, &exc)); break;
+                case A_VDIV:  r = f64_do(OP_DIV, n, m, fs, &exc); break;
+                default: {
+                    double d = u2d(vfp_get_d(c, dr));
+                    double p = f64_do(OP_MUL, n, m, fs, &exc); /* round, then... */
+                    if (kind == A_VMLS  || kind == A_VNMLA) p = fneg64(p);
+                    if (kind == A_VNMLA || kind == A_VNMLS) d = fneg64(d);
+                    r = f64_do(OP_ADD, d, p, fs, &exc);        /* ...round again */
+                    break;
+                }
             }
+            result[lane] = d2u(r);
         }
         if (exc & VFP_FZ_AMBIGUOUS) return vfp_trap(pc, insn, FZ_AMBIGUOUS_WHY);
-        vfp_set_d(c, rd, d2u(r));
+        for (unsigned lane = 0; lane < shape.count; lane++)
+            vfp_set_d(c, vfp_short_vector_reg(&shape, rd, lane, false),
+                      result[lane]);
     } else {
         uint32_t fs = c->vfp_fpscr;
-        float n = u2f(vfp_get_s(c, rn)), m = u2f(vfp_get_s(c, rm)), r;
-        switch (kind) {
-            case A_VADD:  r = f32_do(OP_ADD, n, m, fs, &exc); break;
-            case A_VSUB:  r = f32_do(OP_SUB, n, m, fs, &exc); break;
-            case A_VMUL:  r = f32_do(OP_MUL, n, m, fs, &exc); break;
-            case A_VNMUL: r = fneg32(f32_do(OP_MUL, n, m, fs, &exc)); break;
-            case A_VDIV:  r = f32_do(OP_DIV, n, m, fs, &exc); break;
-            default: {
-                float d = u2f(vfp_get_s(c, rd));
-                float p = f32_do(OP_MUL, n, m, fs, &exc);
-                if (kind == A_VMLS  || kind == A_VNMLA) p = fneg32(p);
-                if (kind == A_VNMLA || kind == A_VNMLS) d = fneg32(d);
-                r = f32_do(OP_ADD, d, p, fs, &exc);
-                break;
+        uint32_t result[8];
+        for (unsigned lane = 0; lane < shape.count; lane++) {
+            unsigned dr = vfp_short_vector_reg(&shape, rd, lane, false);
+            unsigned nr = vfp_short_vector_reg(&shape, rn, lane, false);
+            unsigned mr = vfp_short_vector_reg(&shape, rm, lane, true);
+            float n = u2f(vfp_get_s(c, nr));
+            float m = u2f(vfp_get_s(c, mr));
+            float r;
+            switch (kind) {
+                case A_VADD:  r = f32_do(OP_ADD, n, m, fs, &exc); break;
+                case A_VSUB:  r = f32_do(OP_SUB, n, m, fs, &exc); break;
+                case A_VMUL:  r = f32_do(OP_MUL, n, m, fs, &exc); break;
+                case A_VNMUL: r = fneg32(f32_do(OP_MUL, n, m, fs, &exc)); break;
+                case A_VDIV:  r = f32_do(OP_DIV, n, m, fs, &exc); break;
+                default: {
+                    float d = u2f(vfp_get_s(c, dr));
+                    float p = f32_do(OP_MUL, n, m, fs, &exc);
+                    if (kind == A_VMLS  || kind == A_VNMLA) p = fneg32(p);
+                    if (kind == A_VNMLA || kind == A_VNMLS) d = fneg32(d);
+                    r = f32_do(OP_ADD, d, p, fs, &exc);
+                    break;
+                }
             }
+            result[lane] = f2u(r);
         }
         if (exc & VFP_FZ_AMBIGUOUS) return vfp_trap(pc, insn, FZ_AMBIGUOUS_WHY);
-        vfp_set_s(c, rd, f2u(r));
+        for (unsigned lane = 0; lane < shape.count; lane++)
+            vfp_set_s(c, vfp_short_vector_reg(&shape, rd, lane, false),
+                      result[lane]);
     }
     c->vfp_fpscr |= exc;
     return ARM_OK;
@@ -933,6 +1037,8 @@ static arm_status_t vfp_dp_other(arm_cpu_t *c, uint32_t pc, uint32_t insn) {
     case 0u: case 1u: {
         unsigned rd, rm;
         bool sqrt_ = (opc2 == 1u) && top;
+        vfp_short_vector_t shape;
+        const char *why = NULL;
         /* VMOV/VABS/VNEG never round and never inspect a value's class, so
          * they are admissible in any rounding mode; VSQRT rounds. */
         bad = c->vfp_fpscr & (sqrt_ ? MODE_ROUNDING : MODE_EXACT);
@@ -944,22 +1050,40 @@ static arm_status_t vfp_dp_other(arm_cpu_t *c, uint32_t pc, uint32_t insn) {
         } else {
             rd = SREG(vd, D); rm = SREG(vm, M);
         }
+        if (!vfp_short_vector_shape(c->vfp_fpscr, dbl, rd, &shape, &why))
+            return vfp_trap(pc, insn, why);
         if (dbl) {
-            uint64_t s = vfp_get_d(c, rm);
-            double   r;
-            if (opc2 == 0u) r = top ? fabs64(u2d(s)) : u2d(s);        /* VABS/VMOV */
-            else if (!top)  r = fneg64(u2d(s));                       /* VNEG      */
-            else            r = f64_do(OP_SQRT, u2d(s), 0.0, c->vfp_fpscr, &exc);
+            uint64_t result[4];
+            for (unsigned lane = 0; lane < shape.count; lane++) {
+                unsigned sr = vfp_short_vector_reg(&shape, rm, lane, true);
+                uint64_t s = vfp_get_d(c, sr);
+                double r;
+                if (opc2 == 0u) r = top ? fabs64(u2d(s)) : u2d(s);   /* VABS/VMOV */
+                else if (!top)  r = fneg64(u2d(s));                  /* VNEG      */
+                else            r = f64_do(OP_SQRT, u2d(s), 0.0,
+                                           c->vfp_fpscr, &exc);
+                result[lane] = d2u(r);
+            }
             if (exc & VFP_FZ_AMBIGUOUS) return vfp_trap(pc, insn, FZ_AMBIGUOUS_WHY);
-            vfp_set_d(c, rd, d2u(r));
+            for (unsigned lane = 0; lane < shape.count; lane++)
+                vfp_set_d(c, vfp_short_vector_reg(&shape, rd, lane, false),
+                          result[lane]);
         } else {
-            uint32_t s = vfp_get_s(c, rm);
-            float    r;
-            if (opc2 == 0u) r = top ? fabs32(u2f(s)) : u2f(s);
-            else if (!top)  r = fneg32(u2f(s));
-            else            r = f32_do(OP_SQRT, u2f(s), 0.0f, c->vfp_fpscr, &exc);
+            uint32_t result[8];
+            for (unsigned lane = 0; lane < shape.count; lane++) {
+                unsigned sr = vfp_short_vector_reg(&shape, rm, lane, true);
+                uint32_t s = vfp_get_s(c, sr);
+                float r;
+                if (opc2 == 0u) r = top ? fabs32(u2f(s)) : u2f(s);
+                else if (!top)  r = fneg32(u2f(s));
+                else            r = f32_do(OP_SQRT, u2f(s), 0.0f,
+                                           c->vfp_fpscr, &exc);
+                result[lane] = f2u(r);
+            }
             if (exc & VFP_FZ_AMBIGUOUS) return vfp_trap(pc, insn, FZ_AMBIGUOUS_WHY);
-            vfp_set_s(c, rd, f2u(r));
+            for (unsigned lane = 0; lane < shape.count; lane++)
+                vfp_set_s(c, vfp_short_vector_reg(&shape, rd, lane, false),
+                          result[lane]);
         }
         c->vfp_fpscr |= exc;
         return ARM_OK;
@@ -1067,9 +1191,8 @@ static arm_status_t vfp_dp_other(arm_cpu_t *c, uint32_t pc, uint32_t insn) {
          * The source is an INTEGER, so there is nothing for flush-to-zero to
          * unpack and no NaN for default-NaN to replace; neither mode can reach
          * this instruction. int32 -> binary64 is exact for every input and so
-         * cannot raise anything either, leaving only short vectors to refuse.
-         * int32 -> binary32 can round and can be inexact, so it is gated on
-         * the rounding mode and the trap enables.
+         * cannot raise anything either. int32 -> binary32 can round and can be
+         * inexact, so it is gated on the rounding mode and the trap enables.
          *
          * That distinction is not pedantry: dyld runs in RunFast mode with
          * FPSCR.FZ set, and its very first floating-point instruction is
