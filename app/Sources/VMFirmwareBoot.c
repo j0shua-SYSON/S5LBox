@@ -986,7 +986,7 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
         if (!boot->network) {
             (void)file_block_close(boot->media);
             (void)snprintf(report->detail, sizeof report->detail,
-                           "Guest networking could not start: %s",
+                           "Guest networking could not start: %.220s",
                            network_detail[0] ? network_detail :
                                "the host peer was unavailable");
             report->detail[sizeof report->detail - 1u] = '\0';
