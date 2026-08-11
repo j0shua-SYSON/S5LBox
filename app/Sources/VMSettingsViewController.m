@@ -9,6 +9,8 @@
 #import "VMEngine.h"            /* +firmwareReadinessSummary, used below */
 #import "VMJitProbe.h"          /* the explicit, recoverable execution test */
 #import "VMFirmwareImportViewController.h"
+#import "VMGuestInstall.h"
+#import "VMInstanceStore.h"
 #import "VMOptions.h"
 #import "VMManualViewController.h"
 #import "VMSnapshotListViewController.h"
@@ -84,10 +86,6 @@ typedef NS_ENUM(NSInteger, VMDiagnosticsRow) {
     VMDiagnosticsRowCount
 };
 
-/* The guest-state group carries one extra row the option table cannot: the
- * payload the filesystem half of --jailbreak would install. */
-static const NSInteger kVMGuestStateExtraRows = 1;
-
 static NSString *const kVMSwitchCell = @"switch";
 static NSString *const kVMValueCell  = @"value";
 static NSString *const kVMPlainCell  = @"plain";
@@ -119,7 +117,8 @@ static NSString *VMStringFromC(const char *text) {
                                   style:(UITableViewCellStyle)style;
 - (void)performReset;
 - (void)refreshBanner;
-- (void)jailbreakToggled:(UISwitch *)sender;
+- (void)confirmGuestInstall;
+- (void)chooseMachineForGuestInstall;
 - (void)inlineConsoleChanged:(UISwitch *)sender;
 - (void)developerModeToggled:(UISwitch *)sender;
 - (void)chooseGraphicsMode;
@@ -237,14 +236,6 @@ static NSString *VMStringFromC(const char *text) {
  * three sections below" in a mode that has none -- a caveat that describes a
  * screen the reader is not looking at reads as a bug in the caveat. */
 
-- (void)jailbreakToggled:(UISwitch *)sender {
-    [[VMSettings sharedSettings] setJailbreakEnabled:sender.isOn];
-    /* Developer mode shows the two halves as separate switches, and they have
-     * just both moved. Reload so the screen cannot show this on and one half
-     * off at the same time. */
-    if ([[VMSettings sharedSettings] developerMode]) [self.tableView reloadData];
-}
-
 - (void)inlineConsoleChanged:(UISwitch *)sender {
     [[VMSettings sharedSettings] setInlineConsole:sender.isOn];
 }
@@ -359,9 +350,7 @@ static NSString *VMStringFromC(const char *text) {
     if (section == VMSettingsSectionGeneral) return VMGeneralRowCount;
     (void)tableView;
     if (section < VM_OPT_GROUP_COUNT) {
-        NSInteger rows = (NSInteger)[self optionsInGroup:section].count;
-        if (section == VM_OPT_GROUP_GUEST_STATE) rows += kVMGuestStateExtraRows;
-        return rows;
+        return (NSInteger)[self optionsInGroup:section].count;
     }
     switch ((VMSettingsSection)section) {
         case VMSettingsSectionFirmware:    return VMFirmwareRowCount;
@@ -396,10 +385,9 @@ titleForFooterInSection:(NSInteger)section {
               @"the diagnostics are shown. Each option says whether it reaches "
               @"the boot, is fixed into a work image, or is unavailable here."
             : @"New here? Read the manual first.\n\n"
-              @"Jailbreak disables the guest's signature checking and installs "
-              @"Cydia into that machine's own files. It applies to a real "
-              @"firmware boot, and this app does not perform it yet — today it "
-              @"is recorded and not performed.\n\n"
+              @"Jailbreak downloads a pinned iPhone OS 3 package set from its "
+              @"publisher's archive and installs it into one stopped machine's "
+              @"own disk. The app bundles none of those packages.\n\n"
               @"Developer mode adds the full option table, the guest console "
               @"and diagnostics — useful for working on the emulator, noise "
               @"otherwise.";
@@ -481,6 +469,7 @@ titleForFooterInSection:(NSInteger)section {
     cell.accessoryView = nil;
     cell.accessoryType = UITableViewCellAccessoryNone;
     cell.selectionStyle = UITableViewCellSelectionStyleNone;
+    cell.accessibilityIdentifier = nil;
     cell.textLabel.numberOfLines = 0;
     cell.textLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
     cell.textLabel.adjustsFontForContentSizeCategory = YES;
@@ -521,14 +510,13 @@ titleForFooterInSection:(NSInteger)section {
             cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
             cell.selectionStyle = UITableViewCellSelectionStyleDefault;
         } else if (indexPath.row == VMGeneralRowJailbreak) {
-            cell.textLabel.text = @"Jailbreak";
-            cell.accessoryType = UITableViewCellAccessoryNone;
-            cell.selectionStyle = UITableViewCellSelectionStyleNone;
-            UISwitch *sw = [[UISwitch alloc] init];
-            sw.on = [[VMSettings sharedSettings] jailbreakEnabled];
-            [sw addTarget:self action:@selector(jailbreakToggled:)
-                 forControlEvents:UIControlEventValueChanged];
-            cell.accessoryView = sw;
+            cell.textLabel.text = @"Jailbreak…";
+            cell.accessibilityIdentifier = @"s5lbox.settings.jailbreak";
+            cell.detailTextLabel.text = self.guestInstallRequest
+                ? @"Install Cydia and its verified bootstrap in a stopped machine"
+                : @"Return to Machines and open Settings there before installing";
+            cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+            cell.selectionStyle = UITableViewCellSelectionStyleDefault;
         } else if (indexPath.row == VMGeneralRowDeveloperMode) {
             cell.textLabel.text = @"Developer Mode";
             cell.accessoryType = UITableViewCellAccessoryNone;
@@ -556,20 +544,6 @@ titleForFooterInSection:(NSInteger)section {
 
     if (section < VM_OPT_GROUP_COUNT) {
         NSArray<NSNumber *> *rows = [self optionsInGroup:section];
-
-        if (indexPath.row >= (NSInteger)rows.count) {
-            // The payload path, which belongs with the jailbreak halves above it.
-            UITableViewCell *cell = [self cellWithIdentifier:kVMPlainCell
-                                                       style:UITableViewCellStyleSubtitle];
-            cell.textLabel.text = @"Jailbreak payload";
-            cell.textLabel.textColor = [UIColor secondaryLabelColor];
-            cell.detailTextLabel.text = [NSString stringWithFormat:
-                @"%@  ·  expected file name \"%@\"",
-                [_settings statusForFirmwareFile:VMFirmwareJailbreakPayloadFile],
-                VMFirmwareJailbreakPayloadFile];
-            return cell;
-        }
-
         const NSUInteger index = rows[(NSUInteger)indexPath.row].unsignedIntegerValue;
         const vm_option_t *option = vm_option_at((unsigned)index);
         UITableViewCell *cell = [self cellWithIdentifier:kVMSwitchCell
@@ -804,6 +778,8 @@ didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
                 [self.navigationController pushViewController:m animated:YES];
         } else if (indexPath.row == VMGeneralRowGraphicsMode) {
             [self chooseGraphicsMode];
+        } else if (indexPath.row == VMGeneralRowJailbreak) {
+            [self confirmGuestInstall];
         } else if (indexPath.row == VMGeneralRowSnapshots) {
             if (self.snapshotsDirectory.length == 0) return;
             VMSnapshotListViewController *list =
@@ -875,6 +851,106 @@ didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
         default:
             return;
     }
+}
+
+- (void)confirmGuestInstall {
+    NSString *message = self.guestInstallRequest
+        ? @"This downloads exact, pinned iPhone OS 3 packages from the "
+           @"publisher's archive and replaces only the selected virtual "
+           @"machine's writable disk. S5LBox does not bundle the packages.\n\n"
+           @"Inside the emulated guest, signature enforcement is disabled and "
+           @"Cydia is installed on the next cold boot. It does not modify or "
+           @"jailbreak the host iPhone. Historical snapshots of that machine "
+           @"must be removed first. Continue?"
+        : @"A running virtual machine cannot have its disk replaced safely. "
+           @"Close this Settings screen, leave the machine with Back, then "
+           @"open Settings from the Machines screen.";
+    UIAlertController *alert = [UIAlertController
+        alertControllerWithTitle:@"Jailbreak the guest?"
+                         message:message
+                  preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Cancel"
+                                              style:UIAlertActionStyleCancel
+                                            handler:nil]];
+    if (self.guestInstallRequest) {
+        __weak VMSettingsViewController *weakSelf = self;
+        [alert addAction:[UIAlertAction actionWithTitle:@"Continue"
+                                                  style:UIAlertActionStyleDestructive
+                                                handler:^(UIAlertAction *action) {
+            (void)action;
+            [weakSelf chooseMachineForGuestInstall];
+        }]];
+    }
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)chooseMachineForGuestInstall {
+    if (!self.guestInstallRequest) return;
+    VMInstanceStore *store = [VMInstanceStore sharedStore];
+    NSMutableArray<NSDictionary<NSString *, NSString *> *> *eligible =
+        [NSMutableArray array];
+    NSFileManager *files = [NSFileManager defaultManager];
+    for (NSUInteger index = 0u; index < store.count; index++) {
+        NSDictionary *row = [store instanceAtIndex:index];
+        NSString *identifier = row[@"id"];
+        NSString *name = row[@"name"] ?: @"iPhone OS 3.1.3";
+        if (!identifier.length) continue;
+        NSString *machine = [store directoryForInstanceWithID:identifier];
+        NSString *leaf = [NSString stringWithUTF8String:
+            VM_GUEST_INSTALL_LIVE_FILE];
+        NSString *work = [machine stringByAppendingPathComponent:leaf];
+        NSDictionary *attributes = [files attributesOfItemAtPath:work error:NULL];
+        if ([attributes[NSFileSize] unsignedLongLongValue] == 0u) continue;
+        [eligible addObject:@{ @"id": identifier, @"name": name }];
+    }
+
+    if (eligible.count == 0u) {
+        UIAlertController *none = [UIAlertController
+            alertControllerWithTitle:@"No prepared machine"
+                             message:@"Open a machine once so its writable root "
+                                      @"filesystem is prepared, return with Back, "
+                                      @"then try again."
+                      preferredStyle:UIAlertControllerStyleAlert];
+        [none addAction:[UIAlertAction actionWithTitle:@"OK"
+                                                  style:UIAlertActionStyleDefault
+                                                handler:nil]];
+        [self presentViewController:none animated:YES completion:nil];
+        return;
+    }
+
+    void (^choose)(NSDictionary<NSString *, NSString *> *) =
+        ^(NSDictionary<NSString *, NSString *> *row) {
+        void (^request)(NSString *, NSString *) = [self.guestInstallRequest copy];
+        [self dismissViewControllerAnimated:YES completion:^{
+            if (request) request(row[@"id"], row[@"name"]);
+        }];
+    };
+    if (eligible.count == 1u) {
+        choose(eligible.firstObject);
+        return;
+    }
+
+    UIAlertController *picker = [UIAlertController
+        alertControllerWithTitle:@"Choose a stopped machine"
+                         message:nil
+                  preferredStyle:UIAlertControllerStyleActionSheet];
+    for (NSDictionary<NSString *, NSString *> *row in eligible) {
+        [picker addAction:[UIAlertAction actionWithTitle:row[@"name"]
+                                                  style:UIAlertActionStyleDefault
+                                                handler:^(UIAlertAction *action) {
+            (void)action;
+            choose(row);
+        }]];
+    }
+    [picker addAction:[UIAlertAction actionWithTitle:@"Cancel"
+                                              style:UIAlertActionStyleCancel
+                                            handler:nil]];
+    UIPopoverPresentationController *popover = picker.popoverPresentationController;
+    popover.sourceView = self.view;
+    popover.sourceRect = CGRectMake(CGRectGetMidX(self.view.bounds),
+                                    CGRectGetMidY(self.view.bounds), 1.0, 1.0);
+    popover.permittedArrowDirections = 0;
+    [self presentViewController:picker animated:YES completion:nil];
 }
 
 - (void)chooseGraphicsMode {

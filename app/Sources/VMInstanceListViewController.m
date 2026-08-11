@@ -7,6 +7,7 @@
 
 #import "EmulatorViewController.h"
 #import "VMEngine.h"
+#import "VMGuestInstallViewController.h"
 #import "VMInstanceStore.h"
 #import "VMInstances.h"
 #import "VMSettings.h"
@@ -145,6 +146,42 @@ static NSString *const kAutomationMachinePrefix = @"s5lbox.machine.";
 - (void)settingsTapped {
     VMSettingsViewController *settings =
         [[VMSettingsViewController alloc] init];
+    __weak VMInstanceListViewController *weakSelf = self;
+    settings.guestInstallRequest = ^(NSString *identifier, NSString *name) {
+        VMInstanceListViewController *self_ = weakSelf;
+        UINavigationController *navigation = self_.navigationController;
+        if (!self_ || !navigation || navigation.topViewController != self_)
+            return;
+        VMGuestInstallViewController *install =
+            [[VMGuestInstallViewController alloc] initWithInstanceID:identifier
+                                                         machineName:name];
+        __weak VMGuestInstallViewController *weakInstall = install;
+        install.readyHandler = ^{
+            VMInstanceListViewController *list = weakSelf;
+            VMGuestInstallViewController *screen = weakInstall;
+            UINavigationController *nav = list.navigationController;
+            if (!list || !screen || nav.topViewController != screen) return;
+            [nav popViewControllerAnimated:NO];
+            VMInstanceStore *store = [VMInstanceStore sharedStore];
+            for (NSUInteger index = 0u; index < store.count; index++) {
+                NSDictionary *row = [store instanceAtIndex:index];
+                if ([row[@"id"] isEqualToString:identifier]) {
+                    [list openInstanceAtIndex:index animated:YES];
+                    return;
+                }
+            }
+            NSError *missing = [NSError errorWithDomain:
+                @"com.j0shua.S5LBox.GuestInstall"
+                                                   code:1
+                                               userInfo:@{
+                NSLocalizedDescriptionKey:
+                    @"Its disk was installed, but its Machines entry was removed."
+            }];
+            [list showError:missing
+                      doing:@"The installed machine no longer exists"];
+        };
+        [navigation pushViewController:install animated:YES];
+    };
     UINavigationController *nav = [[UINavigationController alloc]
         initWithRootViewController:settings];
     nav.navigationBar.prefersLargeTitles = YES;

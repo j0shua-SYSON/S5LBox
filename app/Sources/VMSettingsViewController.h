@@ -36,4 +36,12 @@
 @property (nonatomic, copy) NSString *snapshotsDirectory;
 @property (nonatomic, weak) id<VMSnapshotListDelegate> snapshotDelegate;
 
+/*
+ * Supplied only by the Machines screen, where every emulator is stopped.
+ * Settings dismisses itself before invoking the request; disk replacement is
+ * never attempted from a live emulator screen.
+ */
+@property (nonatomic, copy, nullable) void (^guestInstallRequest)(
+    NSString *instanceID, NSString *machineName);
+
 @end

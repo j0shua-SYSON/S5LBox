@@ -150,22 +150,20 @@ static const struct {
      * is the declared-but-silent failure this project refuses elsewhere, so a
      * switch alone stays off until an unsigned binary actually runs.
      *
-     * The payload half is implemented in the shared provisioner as of the
-     * commit that added it: tools/payload_tar.c reads the archive and
-     * bootkernel concatenates its entries onto --activate's and --ppp's. This
-     * app links the same libraries and simply is not asking yet -- and it
-     * cannot ask until there is a way to GET a payload onto the device, which
-     * is an import flow this app does not have. Installing a payload the guest
-     * would then refuse to execute would also be premature.
+     * The normal Settings action now downloads an exact, pinned package set,
+     * builds a complete stopped-machine disk and publishes one durable marker.
+     * That marker, not either developer switch, turns both halves on together.
+     * The older arbitrary-tar path remains a desktop diagnostic and is not the
+     * product installation format.
      */
     { "jb-codesign", MAP_FIXED_OFF,
       "A switch cannot relax guest code signing. A completed per-machine "
       "install record can arm the shared policy, but unsigned execution is "
       "still not demonstrated.", NULL },
     { "jb-payload", MAP_FIXED_OFF,
-      "The provisioner this app links can install a payload, but the app has no "
-      "way to import one yet, and the code-signing half it depends on has not "
-      "been demonstrated.", NULL },
+      "A switch cannot install guest files during boot. The normal Jailbreak "
+      "action builds a verified stopped-machine disk and records both halves "
+      "only after publication succeeds.", NULL },
 
     { "ppp", MAP_PROVISION_PPP,
       "Written into a fresh work image; changing it later cannot rewrite an "
