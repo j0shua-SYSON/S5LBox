@@ -1,4 +1,7 @@
 /* S5LBox -- end-to-end guest install builder policy tests. */
+#if !defined(_WIN32) && !defined(_POSIX_C_SOURCE)
+#define _POSIX_C_SOURCE 200809L
+#endif
 #include "VMGuestInstallBuild.h"
 
 #include "VMSnapshotStore.h"
@@ -7,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/types.h>
 #include <sys/stat.h>
 #ifdef _WIN32
 #include <direct.h>
