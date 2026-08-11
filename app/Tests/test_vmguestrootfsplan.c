@@ -102,12 +102,12 @@ static bool tar_add(tar_fixture_t *tar, const char *name, char type,
     return true;
 }
 
-static bool make_tar(tar_fixture_t *tar) {
+static bool make_tar_variant(tar_fixture_t *tar, bool ncurses_alias) {
     static const uint8_t TOOL[] = {'t', 'o', 'o', 'l', '\n'};
     static const uint8_t CONFIG[] = {'o', 'k', '\n'};
     if (!tar) return false;
     memset(tar, 0, sizeof *tar);
-    return tar_add(tar, "./var/", '5', 0755u, NULL, 0u, NULL) &&
+    if (!(tar_add(tar, "./var/", '5', 0755u, NULL, 0u, NULL) &&
            tar_add(tar, "./var/lib/", '5', 0755u, NULL, 0u, NULL) &&
            tar_add(tar, "./var/lib/testpkg/", '5', 0755u, NULL, 0u, NULL) &&
            tar_add(tar, "./var/lib/testpkg/state", '0', 0644u,
@@ -121,10 +121,23 @@ static bool make_tar(tar_fixture_t *tar) {
                    TOOL, sizeof TOOL, NULL) &&
            tar_add(tar, "./bin/", '5', 0755u, NULL, 0u, NULL) &&
            tar_add(tar, "./bin/testpkg", '2', 0777u, NULL, 0u,
-                   "/usr/bin/testpkg") &&
-           tar->used <= TAR_CAPACITY - 2u * TAR_BLOCK &&
-           (memset(tar->bytes + tar->used, 0, 2u * TAR_BLOCK),
-            tar->used += 2u * TAR_BLOCK, true);
+                   "/usr/bin/testpkg")))
+        return false;
+    if (ncurses_alias &&
+        !(tar_add(tar, "./usr/lib/", '5', 0755u, NULL, 0u, NULL) &&
+          tar_add(tar, "./usr/lib/libncurses.5.dylib", '0', 0755u,
+                  TOOL, sizeof TOOL, NULL) &&
+          tar_add(tar, "./usr/lib/_ncurses/", '5', 0755u,
+                  NULL, 0u, NULL) &&
+          tar_add(tar, "./usr/lib/_ncurses/libcurses.dylib", '2', 0777u,
+                  NULL, 0u, "libncurses.5.dylib") &&
+          tar_add(tar, "./usr/lib/_ncurses/libncurses.dylib", '2', 0777u,
+                  NULL, 0u, "libncurses.5.dylib")))
+        return false;
+    if (tar->used > TAR_CAPACITY - 2u * TAR_BLOCK) return false;
+    memset(tar->bytes + tar->used, 0, 2u * TAR_BLOCK);
+    tar->used += 2u * TAR_BLOCK;
+    return true;
 }
 
 static size_t make_gzip(uint8_t *out, size_t capacity,
@@ -184,12 +197,12 @@ static bool ar_member(deb_fixture_t *deb, const char *name,
     return true;
 }
 
-static bool make_deb(deb_fixture_t *deb) {
+static bool make_deb_variant(deb_fixture_t *deb, bool ncurses_alias) {
     static const uint8_t AR_MAGIC[8] = {'!', '<', 'a', 'r', 'c', 'h', '>', '\n'};
     static const uint8_t VERSION[4] = {'2', '.', '0', '\n'};
     tar_fixture_t tar;
     uint8_t gzip[TAR_CAPACITY + 32u];
-    if (!deb || !make_tar(&tar)) return false;
+    if (!deb || !make_tar_variant(&tar, ncurses_alias)) return false;
     size_t gzip_size = make_gzip(gzip, sizeof gzip, tar.bytes, tar.used);
     if (gzip_size == 0u) return false;
     memset(deb, 0, sizeof *deb);
@@ -198,6 +211,10 @@ static bool make_deb(deb_fixture_t *deb) {
            ar_member(deb, "debian-binary", VERSION, sizeof VERSION, NULL) &&
            ar_member(deb, "control.tar.gz", gzip, gzip_size, NULL) &&
            ar_member(deb, "data.tar.gz", gzip, gzip_size, &deb->data_header);
+}
+
+static bool make_deb(deb_fixture_t *deb) {
+    return make_deb_variant(deb, false);
 }
 
 static void digest_hex(const uint8_t *bytes, size_t size,
@@ -213,23 +230,29 @@ static void digest_hex(const uint8_t *bytes, size_t size,
     out[VM_GUEST_PACKAGE_SHA256_HEX_SIZE - 1u] = '\0';
 }
 
-static void make_package(vm_guest_package_t *package,
-                         char sha[VM_GUEST_PACKAGE_SHA256_HEX_SIZE],
-                         char url[256], const deb_fixture_t *deb) {
-    static const char NAME[] = "testpkg";
-    static const char VERSION[] = "1-1";
-    static const char FILENAME[] = "testpkg_1-1_iphoneos-arm.deb";
+static void make_named_package(
+    vm_guest_package_t *package,
+    char sha[VM_GUEST_PACKAGE_SHA256_HEX_SIZE],
+    char url[256], const deb_fixture_t *deb,
+    const char *name, const char *version, const char *filename) {
     digest_hex(deb->bytes, deb->size, sha);
     int written = snprintf(url, 256u,
-        "https://apt.saurik.com/cydia-3.7/debs/%s", FILENAME);
+        "https://apt.saurik.com/cydia-3.7/debs/%s", filename);
     CHECK(written > 0 && written < 256, "fixture URL was truncated");
-    package->package = NAME;
-    package->version = VERSION;
-    package->filename = FILENAME;
+    package->package = name;
+    package->version = version;
+    package->filename = filename;
     package->source_url = url;
     package->size = deb->size;
     package->sha256_hex = sha;
     package->roles = VM_GUEST_PACKAGE_INSTALL | VM_GUEST_PACKAGE_FOUNDATION;
+}
+
+static void make_package(vm_guest_package_t *package,
+                         char sha[VM_GUEST_PACKAGE_SHA256_HEX_SIZE],
+                         char url[256], const deb_fixture_t *deb) {
+    make_named_package(package, sha, url, deb, "testpkg", "1-1",
+                       "testpkg_1-1_iphoneos-arm.deb");
 }
 
 static const rootfs_work_entry_t *find_entry(
@@ -319,10 +342,10 @@ static void test_complete_synthetic_plan(void) {
     CHECK(vm_guest_rootfs_plan_manifest_sha256(plan, digest),
           "plan manifest identity was not produced");
     static const uint8_t EXPECTED[VM_GUEST_PACKAGE_SHA256_SIZE] = {
-        0x20u, 0xe8u, 0x22u, 0x05u, 0x55u, 0x76u, 0xc3u, 0x35u,
-        0x78u, 0x40u, 0xdfu, 0xaeu, 0xf8u, 0x4du, 0xadu, 0x20u,
-        0xfbu, 0x3eu, 0x7bu, 0x7fu, 0x58u, 0xfdu, 0x0du, 0x7bu,
-        0x2cu, 0xc0u, 0xe9u, 0xf3u, 0x0cu, 0xc5u, 0xc5u, 0x1eu
+        0x88u, 0xccu, 0x0bu, 0xcbu, 0xefu, 0x44u, 0x62u, 0x2cu,
+        0x0au, 0x17u, 0x88u, 0xd9u, 0x23u, 0xcfu, 0xccu, 0x17u,
+        0xedu, 0x0cu, 0xafu, 0x4cu, 0x0fu, 0x16u, 0x61u, 0xe2u,
+        0x1au, 0x32u, 0x20u, 0xa2u, 0x04u, 0x5eu, 0x8cu, 0x0cu
     };
     CHECK(memcmp(digest, EXPECTED, sizeof digest) == 0,
           "synthetic plan identity changed");
@@ -379,6 +402,49 @@ static void test_identity_and_compression_refusals(void) {
     vm_guest_rootfs_plan_close(&plan);
 }
 
+static void test_ncurses_preinst_alias_is_left_for_guest_dpkg(void) {
+    /* Model only the conflicting archive paths. No package-maintainer binary
+     * is embedded in this fixture. */
+    deb_fixture_t deb;
+    CHECK(make_deb_variant(&deb, true),
+          "could not build the ncurses-alias fixture");
+    vm_guest_package_t package;
+    char sha[VM_GUEST_PACKAGE_SHA256_HEX_SIZE];
+    char url[256];
+    make_named_package(&package, sha, url, &deb, "ncurses", "5.7-10",
+                       "ncurses_5.7-10_iphoneos-arm.deb");
+    vm_guest_package_input_t input = {&package, deb.bytes, deb.size};
+    char detail[VM_GUEST_ROOTFS_DETAIL_CAPACITY];
+    vm_guest_rootfs_status_t status = VM_GUEST_ROOTFS_ERR_ARGUMENT;
+    vm_guest_rootfs_plan_t *plan = vm_guest_rootfs_plan_open(
+        &input, 1u, &status, detail, sizeof detail);
+    CHECK(plan != NULL && status == VM_GUEST_ROOTFS_OK,
+          "ncurses-alias plan refused: %s / %s",
+          vm_guest_rootfs_status_text(status), detail);
+    if (!plan) return;
+
+    CHECK(find_entry(plan, "/usr/lib/libncurses.5.dylib") != NULL,
+          "ordinary ncurses foundation content was not seeded");
+    CHECK(find_entry(plan, "/usr/lib/_ncurses") == NULL &&
+          find_entry(plan, "/usr/lib/_ncurses/libcurses.dylib") == NULL &&
+          find_entry(plan, "/usr/lib/_ncurses/libncurses.dylib") == NULL,
+          "the ncurses preinst-owned alias subtree was preseeded");
+    vm_guest_rootfs_plan_close(&plan);
+
+    make_named_package(&package, sha, url, &deb, "ncurses", "5.7-11",
+                       "ncurses_5.7-11_iphoneos-arm.deb");
+    input.package = &package;
+    status = VM_GUEST_ROOTFS_ERR_ARGUMENT;
+    plan = vm_guest_rootfs_plan_open(&input, 1u, &status,
+                                     detail, sizeof detail);
+    CHECK(plan != NULL && status == VM_GUEST_ROOTFS_OK,
+          "nearby ncurses revision fixture refused: %s / %s",
+          vm_guest_rootfs_status_text(status), detail);
+    CHECK(plan && find_entry(plan, "/usr/lib/_ncurses") != NULL,
+          "an unaudited ncurses revision inherited the compatibility rule");
+    vm_guest_rootfs_plan_close(&plan);
+}
+
 static void test_real_packages_when_supplied(void) {
     const char *directory = getenv("S5LBOX_GUEST_PACKAGE_DIR");
     if (!directory || !*directory) {
@@ -400,6 +466,11 @@ static void test_real_packages_when_supplied(void) {
           stats.packages, stats.foundation_packages);
     CHECK(stats.entries != 0u && stats.entries <= ROOTFS_WORK_MAX_ENTRIES,
           "real plan has an invalid entry count: %zu", stats.entries);
+    CHECK(find_entry(plan, "/usr/lib/libncurses.5.dylib") != NULL &&
+          find_entry(plan, "/usr/lib/_ncurses") == NULL &&
+          find_entry(plan, "/usr/lib/_ncurses/libcurses.dylib") == NULL &&
+          find_entry(plan, "/usr/lib/_ncurses/libncurses.dylib") == NULL,
+          "the real ncurses plan violates its preinst alias invariant");
     printf("real-package-plan packages=%zu foundation=%zu entries=%zu "
            "deduplicated=%zu payload-bytes=%llu\n",
            stats.packages, stats.foundation_packages, stats.entries,
@@ -449,6 +520,7 @@ int main(void) {
     printf("== guest rootfs plan ==\n");
     test_complete_synthetic_plan();
     test_identity_and_compression_refusals();
+    test_ncurses_preinst_alias_is_left_for_guest_dpkg();
     test_real_packages_when_supplied();
     printf("== guest rootfs plan: %u checks, %u failure(s) ==\n",
            checks, failures);

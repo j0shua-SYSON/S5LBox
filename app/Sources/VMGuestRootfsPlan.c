@@ -233,7 +233,30 @@ static bool plan_map_package_path(char out[ROOTFS_WORK_MAX_PATH],
     return written > 0 && (size_t)written < ROOTFS_WORK_MAX_PATH;
 }
 
-static bool plan_add_tar(vm_guest_rootfs_plan_t *plan, payload_tar_t *tar,
+/* Foundation payloads only seed enough files to start the guest's dpkg. The
+ * pinned ncurses preinst owns this compatibility alias: it removes the old
+ * path and recreates it as a symlink to /usr/lib before unpacking. Preseeding
+ * the archive's directory form makes unlink fail with EISDIR and the following
+ * symlink fail with EEXIST. Leave that exact subtree absent so the original
+ * package and its maintainer script remain the authority for the final shape. */
+static bool plan_defer_path_to_guest_dpkg(
+    const vm_guest_package_t *package, const char *path) {
+    static const char NCURSES_ALIAS[] = "/usr/lib/_ncurses";
+    if (!package || !path ||
+        strcmp(package->package, "ncurses") != 0 ||
+        strcmp(package->version, "5.7-10") != 0 ||
+        strcmp(package->filename,
+               "ncurses_5.7-10_iphoneos-arm.deb") != 0)
+        return false;
+    size_t alias_length = sizeof NCURSES_ALIAS - 1u;
+    return strcmp(path, NCURSES_ALIAS) == 0 ||
+           (strncmp(path, NCURSES_ALIAS, alias_length) == 0 &&
+            path[alias_length] == '/');
+}
+
+static bool plan_add_tar(vm_guest_rootfs_plan_t *plan,
+                         const vm_guest_package_t *package,
+                         payload_tar_t *tar,
                          char *detail, size_t detail_capacity) {
     const rootfs_work_entry_t *entries = payload_tar_entries(tar);
     size_t count = payload_tar_entry_count(tar);
@@ -248,6 +271,7 @@ static bool plan_add_tar(vm_guest_rootfs_plan_t *plan, payload_tar_t *tar,
             }
             return false;
         }
+        if (plan_defer_path_to_guest_dpkg(package, mapped)) continue;
         rootfs_work_entry_t candidate = entries[i];
         if (candidate.kind == ROOTFS_WORK_ENTRY_DIRECTORY)
             candidate.existing_policy = ROOTFS_WORK_EXISTING_REUSE_DIRECTORY;
@@ -374,7 +398,7 @@ static bool plan_compute_manifest(vm_guest_rootfs_plan_t *plan,
                                   size_t input_count) {
     ios3_sha256_context_t context;
     if (!ios3_sha256_init(&context) ||
-        !plan_hash_text(&context, "s5lbox-guest-rootfs-plan 1\n") ||
+        !plan_hash_text(&context, "s5lbox-guest-rootfs-plan 2\n") ||
         !plan_hash_text(&context,
                         "aliases /etc=/private/etc /var=/private/var\n"))
         return false;
@@ -579,7 +603,7 @@ vm_guest_rootfs_plan_open(const vm_guest_package_input_t *inputs,
         }
         plan->tars[plan->tar_count++] = tar;
         plan->stats.foundation_tar_bytes += tar_size;
-        if (!plan_add_tar(plan, tar, detail, detail_capacity)) {
+        if (!plan_add_tar(plan, package, tar, detail, detail_capacity)) {
             plan_status(out_status, VM_GUEST_ROOTFS_ERR_ENTRY);
             vm_guest_rootfs_plan_close(&plan);
             return NULL;
