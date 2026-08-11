@@ -3,7 +3,6 @@
 
 #include "sha256.h"
 
-#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -128,12 +127,12 @@ static const vm_guest_package_t PACKAGES[] = {
 static const size_t PACKAGE_COUNT = sizeof PACKAGES / sizeof PACKAGES[0];
 
 static void package_reason(char *why, size_t capacity,
-                           const char *format, ...) {
+                           const char *package, const char *message) {
     if (!why || capacity == 0u) return;
-    va_list arguments;
-    va_start(arguments, format);
-    (void)vsnprintf(why, capacity, format, arguments);
-    va_end(arguments);
+    if (package)
+        (void)snprintf(why, capacity, "%s %s", package, message);
+    else
+        (void)snprintf(why, capacity, "%s", message);
     why[capacity - 1u] = '\0';
 }
 
@@ -165,18 +164,18 @@ bool vm_guest_package_validate_entry(const vm_guest_package_t *package,
                                      char *why, size_t why_capacity) {
     if (why && why_capacity) why[0] = '\0';
     if (!package) {
-        package_reason(why, why_capacity, "package record is missing");
+        package_reason(why, why_capacity, NULL, "package record is missing");
         return false;
     }
     if (!package_token(package->package, true) ||
         !package_token(package->version, false)) {
-        package_reason(why, why_capacity, "invalid package/version token");
+        package_reason(why, why_capacity, NULL, "invalid package/version token");
         return false;
     }
     if (!package->filename || !package->source_url || !package->sha256_hex ||
         package->size == 0u) {
-        package_reason(why, why_capacity, "%s has incomplete metadata",
-                       package->package);
+        package_reason(why, why_capacity, package->package,
+                       "has incomplete metadata");
         return false;
     }
 
@@ -187,27 +186,27 @@ bool vm_guest_package_validate_entry(const vm_guest_package_t *package,
     if (filename_length <= 0 ||
         (size_t)filename_length >= sizeof expected_filename ||
         strcmp(package->filename, expected_filename) != 0) {
-        package_reason(why, why_capacity, "%s has a mismatched filename",
-                       package->package);
+        package_reason(why, why_capacity, package->package,
+                       "has a mismatched filename");
         return false;
     }
 
     size_t base_length = strlen(PACKAGE_ARCHIVE_BASE);
     if (strncmp(package->source_url, PACKAGE_ARCHIVE_BASE, base_length) != 0 ||
         strcmp(package->source_url + base_length, package->filename) != 0) {
-        package_reason(why, why_capacity, "%s is not on the pinned HTTPS archive",
-                       package->package);
+        package_reason(why, why_capacity, package->package,
+                       "is not on the pinned HTTPS archive");
         return false;
     }
     if (strlen(package->sha256_hex) != VM_GUEST_PACKAGE_SHA256_HEX_SIZE - 1u) {
-        package_reason(why, why_capacity, "%s has a non-64-byte digest",
-                       package->package);
+        package_reason(why, why_capacity, package->package,
+                       "has a non-64-byte digest");
         return false;
     }
     for (size_t i = 0u; i < VM_GUEST_PACKAGE_SHA256_HEX_SIZE - 1u; i++) {
         if (package_hex_value(package->sha256_hex[i]) < 0) {
-            package_reason(why, why_capacity, "%s has a non-lowercase digest",
-                           package->package);
+            package_reason(why, why_capacity, package->package,
+                           "has a non-lowercase digest");
             return false;
         }
     }
@@ -215,8 +214,8 @@ bool vm_guest_package_validate_entry(const vm_guest_package_t *package,
                              VM_GUEST_PACKAGE_FOUNDATION;
     if ((package->roles & VM_GUEST_PACKAGE_INSTALL) == 0u ||
         (package->roles & ~allowed) != 0u) {
-        package_reason(why, why_capacity, "%s has invalid install roles",
-                       package->package);
+        package_reason(why, why_capacity, package->package,
+                       "has invalid install roles");
         return false;
     }
     return true;
@@ -241,7 +240,7 @@ const vm_guest_package_t *vm_guest_package_find(const char *package) {
 bool vm_guest_package_manifest_validate(char *why, size_t why_capacity) {
     if (why && why_capacity) why[0] = '\0';
     if (PACKAGE_COUNT == 0u) {
-        package_reason(why, why_capacity, "package manifest is empty");
+        package_reason(why, why_capacity, NULL, "package manifest is empty");
         return false;
     }
     for (size_t i = 0u; i < PACKAGE_COUNT; i++) {
@@ -250,9 +249,8 @@ bool vm_guest_package_manifest_validate(char *why, size_t why_capacity) {
         for (size_t j = 0u; j < i; j++) {
             if (strcmp(PACKAGES[i].package, PACKAGES[j].package) == 0 ||
                 strcmp(PACKAGES[i].filename, PACKAGES[j].filename) == 0) {
-                package_reason(why, why_capacity,
-                               "%s is duplicated in the manifest",
-                               PACKAGES[i].package);
+                package_reason(why, why_capacity, PACKAGES[i].package,
+                               "is duplicated in the manifest");
                 return false;
             }
         }
