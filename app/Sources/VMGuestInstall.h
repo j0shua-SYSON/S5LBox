@@ -83,6 +83,16 @@ vm_guest_install_probe(const char *work_directory,
 bool vm_guest_install_stage_image_path(char *out, size_t capacity,
                                        const char *work_directory);
 
+/* Recover first, then create one empty real stage directory for the image
+ * constructor. A journal-free interrupted candidate is inert and is removed;
+ * unexpected files or file types are refused. On OK with result->committed,
+ * the existing installation remains authoritative and no stage is created.
+ * Otherwise the path returned above is absent and ready for O_EXCL publish. */
+vm_guest_install_status_t
+vm_guest_install_prepare_stage(const char *work_directory,
+                               vm_guest_install_result_t *result,
+                               char *detail, size_t detail_capacity);
+
 /* Recover a transaction left at any durable boundary. No journal means a
  * staged image is inert. Contradictory or malformed evidence is never guessed
  * through. A cleanup warning can accompany VM_GUEST_INSTALL_OK; consult the

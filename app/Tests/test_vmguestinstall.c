@@ -174,6 +174,68 @@ static void check_committed_files(const uint8_t digest[
           "committed marker digest changed");
 }
 
+static void test_stage_preparation(void) {
+    remove_fixture_artifacts();
+    char live[1400];
+    char stage[1400];
+    char next[1400];
+    char marker_tmp[1400];
+    char unexpected[1400];
+    CHECK(path_for(live, sizeof live, VM_GUEST_INSTALL_LIVE_FILE) &&
+          path_for(stage, sizeof stage, VM_GUEST_INSTALL_STAGE_DIRECTORY) &&
+          stage_path_for(next, sizeof next, VM_GUEST_INSTALL_NEXT_FILE) &&
+          path_for(marker_tmp, sizeof marker_tmp,
+                   VM_GUEST_INSTALL_MARKER_TMP) &&
+          join_path(unexpected, sizeof unexpected, stage, "unexpected"),
+          "stage-preparation path overflow");
+    CHECK(write_bytes(live, "old-rootfs") && make_directory(stage) &&
+          write_bytes(next, "inert-incomplete-image") &&
+          write_bytes(marker_tmp, "inert partial record"),
+          "could not seed an interrupted builder");
+
+    vm_guest_install_result_t result;
+    char detail[256];
+    vm_guest_install_status_t status = vm_guest_install_prepare_stage(
+        FIXTURE_DIR, &result, detail, sizeof detail);
+    CHECK(status == VM_GUEST_INSTALL_OK && !result.committed &&
+          exists(stage) && !exists(next) && !exists(marker_tmp),
+          "interrupted builder did not converge to an empty stage: %s / %s",
+          vm_guest_install_status_text(status), detail);
+
+    status = vm_guest_install_prepare_stage(FIXTURE_DIR, &result,
+                                            detail, sizeof detail);
+    CHECK(status == VM_GUEST_INSTALL_OK && exists(stage) && !exists(next),
+          "preparing an already empty stage was not idempotent: %s",
+          detail);
+    CHECK(write_bytes(unexpected, "preserve me"),
+          "could not seed an unexpected stage file");
+    status = vm_guest_install_prepare_stage(FIXTURE_DIR, &result,
+                                            detail, sizeof detail);
+    CHECK(status == VM_GUEST_INSTALL_ERR_STATE && exists(unexpected),
+          "an unexpected stage file was removed or accepted: %s / %s",
+          vm_guest_install_status_text(status), detail);
+    CHECK(remove(unexpected) == 0,
+          "could not remove unexpected stage fixture");
+
+    status = vm_guest_install_prepare_stage(FIXTURE_DIR, &result,
+                                            detail, sizeof detail);
+    CHECK(status == VM_GUEST_INSTALL_OK && write_bytes(next, "new-rootfs"),
+          "could not prepare a publishable stage: %s", detail);
+    uint8_t digest[VM_GUEST_INSTALL_SHA256_SIZE];
+    fill_digest(digest, 0x51u);
+    status = vm_guest_install_publish(FIXTURE_DIR, digest, &result,
+                                      detail, sizeof detail);
+    CHECK(status == VM_GUEST_INSTALL_OK && result.committed,
+          "prepared stage did not publish: %s / %s",
+          vm_guest_install_status_text(status), detail);
+    status = vm_guest_install_prepare_stage(FIXTURE_DIR, &result,
+                                            detail, sizeof detail);
+    CHECK(status == VM_GUEST_INSTALL_OK && result.committed && !exists(stage),
+          "prepare did not preserve an existing committed install: %s",
+          detail);
+    check_committed_files(digest);
+}
+
 static void test_normal_and_idempotent(void) {
     uint8_t digest[VM_GUEST_INSTALL_SHA256_SIZE];
     uint8_t other[VM_GUEST_INSTALL_SHA256_SIZE];
@@ -412,6 +474,7 @@ int main(void) {
           strstr(stage_image, VM_GUEST_INSTALL_NEXT_FILE) != NULL,
           "stage-image path names the wrong file: %s", stage_image);
 
+    test_stage_preparation();
     test_normal_and_idempotent();
     test_every_durable_boundary();
     test_missing_stage_rolls_back();

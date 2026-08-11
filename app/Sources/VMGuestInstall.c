@@ -180,6 +180,23 @@ static bool guest_remove_if_present(const char *path) {
     return errno == ENOENT;
 }
 
+static bool guest_remove_directory_if_present(const char *path) {
+#ifdef _WIN32
+    if (_rmdir(path) == 0) return true;
+#else
+    if (rmdir(path) == 0) return true;
+#endif
+    return errno == ENOENT;
+}
+
+static bool guest_make_directory(const char *path) {
+#ifdef _WIN32
+    return _mkdir(path) == 0;
+#else
+    return mkdir(path, 0700) == 0;
+#endif
+}
+
 static bool guest_invalidate_resume(const guest_paths_t *paths) {
     if (!paths) return false;
     if (!guest_remove_if_present(paths->resume_once) ||
@@ -405,11 +422,7 @@ static bool guest_remove_committed_artifacts(const guest_paths_t *paths) {
     if (!guest_remove_if_present(paths->journal_tmp)) ok = false;
     if (!guest_remove_if_present(paths->marker_tmp)) ok = false;
     if (!guest_remove_if_present(paths->next)) ok = false;
-#ifdef _WIN32
-    if (_rmdir(paths->stage) != 0 && errno != ENOENT) ok = false;
-#else
-    if (rmdir(paths->stage) != 0 && errno != ENOENT) ok = false;
-#endif
+    if (!guest_remove_directory_if_present(paths->stage)) ok = false;
     if (!guest_sync_directory(paths->work)) ok = false;
     return ok;
 }
@@ -420,11 +433,7 @@ static bool guest_remove_rolled_back_artifacts(const guest_paths_t *paths) {
     if (!guest_remove_if_present(paths->journal_tmp)) ok = false;
     if (!guest_remove_if_present(paths->marker_tmp)) ok = false;
     if (!guest_remove_if_present(paths->next)) ok = false;
-#ifdef _WIN32
-    if (_rmdir(paths->stage) != 0 && errno != ENOENT) ok = false;
-#else
-    if (rmdir(paths->stage) != 0 && errno != ENOENT) ok = false;
-#endif
+    if (!guest_remove_directory_if_present(paths->stage)) ok = false;
     if (!guest_sync_directory(paths->work)) ok = false;
     return ok;
 }
@@ -642,6 +651,95 @@ vm_guest_install_recover(const char *work_directory,
                      "A guest-disk backup exists without a recovery journal; no file was changed.");
         return VM_GUEST_INSTALL_ERR_STATE;
     }
+    return VM_GUEST_INSTALL_OK;
+}
+
+vm_guest_install_status_t
+vm_guest_install_prepare_stage(const char *work_directory,
+                               vm_guest_install_result_t *result,
+                               char *detail, size_t detail_capacity) {
+    vm_guest_install_result_t local_result;
+    vm_guest_install_result_t *recovered = result ? result : &local_result;
+    vm_guest_install_status_t status = vm_guest_install_recover(
+        work_directory, recovered, detail, detail_capacity);
+    if (status != VM_GUEST_INSTALL_OK || recovered->committed) return status;
+
+    guest_paths_t paths;
+    if (!guest_paths_init(&paths, work_directory)) {
+        guest_detail(detail, detail_capacity,
+                     "The guest-install stage path is too long to use.");
+        return VM_GUEST_INSTALL_ERR_PATH;
+    }
+    if (guest_node(paths.live) != GUEST_NODE_REGULAR ||
+        guest_node(paths.backup) != GUEST_NODE_ABSENT) {
+        guest_detail(detail, detail_capacity,
+                     "Preparing an install needs one live guest disk and no backup.");
+        return VM_GUEST_INSTALL_ERR_STATE;
+    }
+
+    const char *partials[] = {paths.marker_tmp, paths.journal_tmp};
+    for (size_t i = 0u; i < sizeof partials / sizeof partials[0]; i++) {
+        guest_node_t node = guest_node(partials[i]);
+        if (node == GUEST_NODE_REGULAR || node == GUEST_NODE_EMPTY) {
+            if (!guest_remove_if_present(partials[i])) {
+                guest_detail(detail, detail_capacity,
+                             "An inert guest-install partial record could not be removed.");
+                return VM_GUEST_INSTALL_ERR_IO;
+            }
+        } else if (node != GUEST_NODE_ABSENT) {
+            guest_detail(detail, detail_capacity,
+                         "A guest-install partial record has an unsafe file type.");
+            return node == GUEST_NODE_IO_ERROR ? VM_GUEST_INSTALL_ERR_IO
+                                               : VM_GUEST_INSTALL_ERR_STATE;
+        }
+    }
+
+    guest_node_t stage = guest_node(paths.stage);
+    if (stage == GUEST_NODE_DIRECTORY) {
+        guest_node_t next = guest_node(paths.next);
+        if (next == GUEST_NODE_REGULAR || next == GUEST_NODE_EMPTY) {
+            if (!guest_remove_if_present(paths.next)) {
+                guest_detail(detail, detail_capacity,
+                             "The inert staged guest disk could not be removed.");
+                return VM_GUEST_INSTALL_ERR_IO;
+            }
+        } else if (next != GUEST_NODE_ABSENT) {
+            guest_detail(detail, detail_capacity,
+                         "The staged guest-disk path has an unsafe file type.");
+            return next == GUEST_NODE_IO_ERROR ? VM_GUEST_INSTALL_ERR_IO
+                                               : VM_GUEST_INSTALL_ERR_STATE;
+        }
+        if (!guest_remove_directory_if_present(paths.stage)) {
+            if (errno == ENOTEMPTY || errno == EEXIST) {
+                guest_detail(detail, detail_capacity,
+                             "The guest-install stage contains unexpected files and was not replaced.");
+                return VM_GUEST_INSTALL_ERR_STATE;
+            }
+            guest_detail(detail, detail_capacity,
+                         "The inert guest-install stage could not be removed.");
+            return VM_GUEST_INSTALL_ERR_IO;
+        }
+    } else if (stage != GUEST_NODE_ABSENT) {
+        guest_detail(detail, detail_capacity,
+                     "The guest-install stage is not a real directory.");
+        return stage == GUEST_NODE_IO_ERROR ? VM_GUEST_INSTALL_ERR_IO
+                                            : VM_GUEST_INSTALL_ERR_STATE;
+    }
+
+    if (!guest_make_directory(paths.stage) ||
+        !guest_sync_directory(paths.work)) {
+        (void)guest_remove_directory_if_present(paths.stage);
+        guest_detail(detail, detail_capacity,
+                     "The empty guest-install stage could not be created durably.");
+        return VM_GUEST_INSTALL_ERR_IO;
+    }
+    if (guest_node(paths.stage) != GUEST_NODE_DIRECTORY ||
+        guest_node(paths.next) != GUEST_NODE_ABSENT) {
+        guest_detail(detail, detail_capacity,
+                     "The guest-install stage changed while it was being prepared.");
+        return VM_GUEST_INSTALL_ERR_STATE;
+    }
+    guest_detail(detail, detail_capacity, "");
     return VM_GUEST_INSTALL_OK;
 }
 
