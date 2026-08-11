@@ -1357,13 +1357,20 @@ static arm_status_t exec_single_transfer(arm_cpu_t *c, uint32_t pc, uint32_t ins
     unsigned rn = (insn >> 16) & 0xf;
     unsigned rd = (insn >> 12) & 0xf;
     bool writeback = !P || W;
+    bool load_same_base_zero_post =
+        L && !I && !P && !W && rn == rd && rd != 15u &&
+        (insn & 0xfffu) == 0u;
 
     /* Addressing mode 2 marks these operand combinations UNPREDICTABLE. Trap
-     * them before calculating an address or touching the bus: guessing at the
-     * writeback order when Rn==Rd can silently replace either the loaded value
-     * or the updated base, and an R15 offset/base has no defined writeback
-     * value. Byte transfers cannot name R15 as their data register at all. */
-    if (writeback && (rn == 15u || rn == rd)) return ARM_UNDEFINED;
+     * them before calculating an address or touching the bus rather than
+     * guessing which result wins. There is one bounded ARMv6-era exception:
+     * legacy startup code uses LDR Rd,[Rd],#0. Its writeback is arithmetically
+     * a no-op, and the loaded value wins. Keep every nonzero, register-offset,
+     * pre-indexed and store overlap fail-closed. An R15 offset/base has no
+     * defined writeback value, and byte transfers cannot name R15 as data. */
+    if (writeback &&
+        (rn == 15u || (rn == rd && !load_same_base_zero_post)))
+        return ARM_UNDEFINED;
     if (I && (insn & 0xfu) == 15u) return ARM_UNDEFINED;
     if (B && rd == 15u) return ARM_UNDEFINED;
     if (L && !P && W && rd == 15u) return ARM_UNDEFINED; /* LDRT pc */
@@ -1418,7 +1425,10 @@ static arm_status_t exec_single_transfer(arm_cpu_t *c, uint32_t pc, uint32_t ins
     }
 
     /* Writeback: post-indexed always writes back; pre-indexed writes back if W. */
-    if (!P) { addr = U ? base + offset : base - offset; c->r[rn] = addr; }
+    if (!P) {
+        addr = U ? base + offset : base - offset;
+        if (!load_same_base_zero_post) c->r[rn] = addr;
+    }
     else if (W) { c->r[rn] = addr; }
     return ARM_OK;
 }

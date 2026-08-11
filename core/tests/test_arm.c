@@ -2612,11 +2612,44 @@ static void check_unpredictable_single_transfer(uint32_t insn,
           "%s changed architectural state before trapping", what);
 }
 
+static void test_single_transfer_zero_post_same_base_load(void) {
+    arm_cpu_t c;
+
+    g_watch_addr = 0xffffffffu;
+    memset(g_ram, 0, sizeof g_ram);
+    m_w32(NULL, 0u, 0xe4933000u); /* LDR r3,[r3],#0 */
+    m_w32(NULL, 0x800u, 0x12345678u);
+    arm_reset(&c, &g_bus);
+    c.cpsr = (c.cpsr & ~ARM_CPSR_MODE_MASK) | ARM_MODE_SYS;
+    c.r[3] = 0x800u;
+    c.r[15] = 0u;
+
+    g_watch_addr = 0x800u;
+    g_watch_reads8 = g_watch_writes8 = 0u;
+    g_watch_reads16 = g_watch_writes16 = 0u;
+    g_watch_reads32 = g_watch_writes32 = 0u;
+    arm_status_t st = arm_step(&c);
+    g_watch_addr = 0xffffffffu;
+
+    CHECK(st == ARM_OK && c.r[3] == 0x12345678u && c.r[15] == 4u,
+          "zero-offset LDR Rd,[Rd],#0 status=%d rd=%08x pc=%08x",
+          (int)st, c.r[3], c.r[15]);
+    CHECK(g_watch_reads32 == 1u && g_watch_writes32 == 0u &&
+          g_watch_reads8 == 0u && g_watch_writes8 == 0u &&
+          g_watch_reads16 == 0u && g_watch_writes16 == 0u,
+          "zero-offset LDR Rd,[Rd],#0 bus r8=%u w8=%u r16=%u w16=%u "
+          "r32=%u w32=%u",
+          g_watch_reads8, g_watch_writes8,
+          g_watch_reads16, g_watch_writes16,
+          g_watch_reads32, g_watch_writes32);
+}
+
 static void test_single_transfer_unpredictable_forms_trap_before_bus(void) {
     /* Addressing mode 2: any post-indexed form writes back, as does P=1,W=1.
-     * Rn==Rd is therefore ambiguous for both loads and stores. R15 cannot be a
-     * writeback base or a register offset, and byte transfers reserve R15 as
-     * their data register. */
+     * Apart from the separately tested immediate-zero load, Rn==Rd is
+     * ambiguous for both loads and stores. R15 cannot be a writeback base or
+     * a register offset, and byte transfers reserve R15 as their data
+     * register. */
     check_unpredictable_single_transfer(0xe4900004u, 0x800u,
                                         "LDR r0,[r0],#4");
     check_unpredictable_single_transfer(0xe4800004u, 0x800u,
@@ -5778,6 +5811,7 @@ int main(void) {
     test_sctlr_u_selects_legacy_or_armv6_unaligned_data();
     test_multiword_alignment_depends_on_sctlr_u_a();
     test_arm_multiword_base_writeback_restrictions();
+    test_single_transfer_zero_post_same_base_load();
     test_single_transfer_unpredictable_forms_trap_before_bus();
     test_ldrd_strd_transfer_the_register_pair();
     test_ldrd_strd_alignment_is_the_armv6_word_rule();
