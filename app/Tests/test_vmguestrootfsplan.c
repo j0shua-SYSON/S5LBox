@@ -361,24 +361,34 @@ static void test_complete_synthetic_plan(void) {
         ? strstr((const char *)script->content,
                  "/bin/grep -aq 'com.saurik.Cydia' \"$cache\" || exit 1")
         : NULL;
+    const char *springboard_ready = script
+        ? strstr((const char *)script->content,
+                 "/usr/bin/killall -0 SpringBoard >/dev/null 2>&1")
+        : NULL;
+    const char *icon_cache = script
+        ? strstr((const char *)script->content,
+                 "[ -s \"$icon_cache/com.saurik.Cydia\" ] || exit 1")
+        : NULL;
     const char *respring = script
         ? strstr((const char *)script->content,
-                 "if /usr/bin/killall SpringBoard; then")
+                 "/usr/bin/killall SpringBoard || exit 1")
         : NULL;
     const char *completion = script
         ? strstr((const char *)script->content,
                  ": >\"$state/complete.partial\" || exit 1")
         : NULL;
-    CHECK(mobile_cache && respring && completion &&
-          cydia_mode_check < mobile_cache && mobile_cache < respring &&
+    CHECK(springboard_ready && mobile_cache && icon_cache && respring &&
+          completion && cydia_mode_check < springboard_ready &&
+          springboard_ready < mobile_cache && mobile_cache < icon_cache &&
+          icon_cache < respring &&
           respring < completion,
-          "the install can complete before Cydia is privileged, cached, and resprung");
+          "the install can complete before SpringBoard is ready or Cydia is visibly cached and resprung");
     CHECK(script &&
           strstr((const char *)script->content,
                  "/usr/bin/killall SpringBoard || true") == NULL &&
           strstr((const char *)script->content,
                  "[ \"$attempt\" -lt 60 ] || exit 1") != NULL,
-          "the first-boot respring still hides a missing SpringBoard process");
+          "the first-boot cache refresh still hides a missing SpringBoard process");
 
     vm_guest_rootfs_stats_t stats;
     vm_guest_rootfs_plan_get_stats(plan, &stats);
@@ -392,10 +402,10 @@ static void test_complete_synthetic_plan(void) {
     CHECK(vm_guest_rootfs_plan_manifest_sha256(plan, digest),
           "plan manifest identity was not produced");
     static const uint8_t EXPECTED[VM_GUEST_PACKAGE_SHA256_SIZE] = {
-        0xc7u, 0x7eu, 0xecu, 0xc8u, 0xceu, 0x22u, 0x1fu, 0x4du,
-        0xa2u, 0x1au, 0xebu, 0xf8u, 0x21u, 0x53u, 0x38u, 0x45u,
-        0x15u, 0x66u, 0x65u, 0xbbu, 0x10u, 0xa3u, 0x44u, 0x6au,
-        0x7cu, 0x82u, 0xc9u, 0x7fu, 0xcau, 0x7eu, 0xeau, 0x6au
+        0x67u, 0x56u, 0x76u, 0xa4u, 0x8au, 0x3eu, 0xbau, 0xbfu,
+        0x4du, 0xd1u, 0xefu, 0x8cu, 0x57u, 0x3du, 0xa9u, 0x0du,
+        0x45u, 0x62u, 0xb8u, 0x97u, 0xc8u, 0x80u, 0x7bu, 0xd6u,
+        0xb3u, 0xa4u, 0x97u, 0xe6u, 0xd1u, 0x29u, 0x91u, 0xb8u
     };
     CHECK(memcmp(digest, EXPECTED, sizeof digest) == 0,
           "synthetic plan identity changed");
