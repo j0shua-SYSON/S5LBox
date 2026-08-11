@@ -42,7 +42,7 @@ static const vm_guest_package_t PACKAGES[] = {
             "0b5f348f3d871a269970217405e1d5c24e5256831ab456e5d010d8ecc4949cfd",
             FOUNDATION),
     PACKAGE("bzip2", "1.0.5-7", "bzip2_1.0.5-7_iphoneos-arm.deb", 22158,
-            "4203a21737a3703cef93b75a13711ca1a9a031a153aecb6b9d0935a6c7531b91",
+            "4203a21737a3703cef93b75a13711ca1a9a031a153aebc6b9d0935a6c7531b91",
             FOUNDATION),
     PACKAGE("coreutils", "7.2-8", "coreutils_7.2-8_iphoneos-arm.deb", 3579518,
             "f412a75d43631397b371fc762877904cb70b8e2fed9a8315df1ddc86d6749d1b",
