@@ -3514,19 +3514,23 @@ static void test_captured_status_form(const struct mbx_test_status_form *form) {
             }
         }
 
-        /* A different split pitch can be a valid padded allocation when it
-         * remains inside the same power-of-two header.  Break the redundant
-         * width/pitch relationship instead of assuming the minimal stride. */
+        /* Allocation width and linear row pitch are independent, but the
+         * bounded sprite family does not admit a 1024-pixel allocation. */
         word_address = object + 0x1f0u + 1u * 4u;
         saved_word = test_gpu_read32(&m, word_address);
+        uint32_t too_wide_header =
+            (saved_word & ~0x07000000u) | 0x07000000u;
+        CHECK(too_wide_header != saved_word,
+              "%s fixture already uses an unsupported 1024-pixel allocation",
+              form->name);
         test_gpu_write32(&m, first, 0x89abcdefu);
-        test_gpu_write32(&m, word_address, saved_word ^ 0x01000000u);
+        test_gpu_write32(&m, word_address, too_wide_header);
         m.bus.write32(m.bus.ctx, MBX_BASE + REG_RENDER, 1u);
         CHECK(test_gpu_read32(&m, first) == 0x89abcdefu,
-              "%s inconsistent texture width/pitch changed the destination",
+              "%s unsupported texture allocation changed the destination",
               form->name);
         CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
-              "%s inconsistent texture width/pitch raised completion",
+              "%s unsupported texture allocation raised completion",
               form->name);
         test_gpu_write32(&m, word_address, saved_word);
 
@@ -4008,6 +4012,139 @@ safari_keyboard_surface_row_resample_form = {
         0x3e5719e7u, 0x3d2c8699u, 0xff000000u, 0x00000000u,
         0x3f740000u, 0x3bc00000u, 0x3d94434cu, 0xff000000u,
         0x3f19c000u, 0x3f740000u, 0x3e5719e7u, 0x3d94434cu,
+    },
+};
+
+/* The synchronized unlock-to-Safari transition retained these four exact
+ * perspective records after the earlier compact minification packets had
+ * completed.  Their 8- or 16-pixel texture allocations occupy sub-rectangles
+ * of independently encoded 72- or 320-pixel linear rows.  The separate
+ * boundary and tile records were not retained, so those words are reconstructed
+ * from each exact integer quad and its captured clip registers. */
+static const struct mbx_test_status_form safari_unlock_padded_row_forms[] = {
+    {
+        .name = "Safari unlock 16-wide allocation in 320-pixel row",
+        .xclip = 0x00100000u, .yclip = 0x00200010u,
+        .target = 0x00998000u,
+        .semantic_sprite = true,
+        .boundary_override = true,
+        .tile_x0 = 0u, .tile_x1 = 1u,
+        .tile_y0 = 1u, .tile_y1 = 1u,
+        .left = 0u, .top = 19u, .width = 13u, .height = 1u,
+        .source = 0x00a33080u, .source_row0 = 19u,
+        .source_stride = 0x500u, .source_control = 0x0e500000u,
+        .source_width = 13u, .source_height = 1u,
+        .expected_covered_pixels = 13u,
+        .boundary = {
+            0x00000000u, 0x41a00000u, 0x00000000u, 0x41980000u,
+            0x41500000u, 0x41a00000u, 0x41500000u, 0x41980000u,
+        },
+        .quad = {
+            0xe0000000u, 0xa1218000u, 0x0e514661u, 0xcd206c40u,
+            0xa7718000u, 0x0e513300u, 0xae504ea0u, 0x22250e80u,
+            0x00000000u, 0x41a00000u, 0x00000000u, 0x41980000u,
+            0x41500000u, 0x41a00000u, 0x41500000u, 0x41980000u,
+            0u, 0u, 0u, 0u,
+            0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+            0x14000000u, 0x00000000u, 0x3f200000u, 0x00000000u,
+            0x3ca00000u, 0x14000000u, 0x00000000u, 0x3f180000u,
+            0x00000000u, 0x3c980000u, 0x14000000u, 0x3f500000u,
+            0x3f200000u, 0x3c500000u, 0x3ca00000u, 0x14000000u,
+            0x3f500000u, 0x3f180000u, 0x3c500000u, 0x3c980000u,
+        },
+    },
+    {
+        .name = "Safari unlock 8-wide allocation in 320-pixel row A",
+        .xclip = 0x00080000u, .yclip = 0x00200000u,
+        .target = 0x00897000u,
+        .semantic_sprite = true,
+        .boundary_override = true,
+        .tile_x0 = 0u, .tile_x1 = 0u,
+        .tile_y0 = 0u, .tile_y1 = 1u,
+        .left = 0u, .top = 10u, .width = 7u, .height = 10u,
+        .source = 0x0098d080u, .source_row0 = 10u,
+        .source_stride = 0x500u, .source_control = 0x0e500000u,
+        .source_width = 7u, .source_height = 10u,
+        .expected_covered_pixels = 70u,
+        .boundary = {
+            0x00000000u, 0x41a00000u, 0x00000000u, 0x41200000u,
+            0x40e00000u, 0x41a00000u, 0x40e00000u, 0x41200000u,
+        },
+        .quad = {
+            0xe0000000u, 0xa0218000u, 0x0e5131a1u, 0xcd206c40u,
+            0xa7718000u, 0x0e5112e0u, 0xae504ea0u, 0x22250e80u,
+            0x00000000u, 0x41a00000u, 0x00000000u, 0x41200000u,
+            0x40e00000u, 0x41a00000u, 0x40e00000u, 0x41200000u,
+            0u, 0u, 0u, 0u,
+            0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+            0x0d000000u, 0x00000000u, 0x3f200000u, 0x00000000u,
+            0x3ca00000u, 0x0d000000u, 0x00000000u, 0x3ea00000u,
+            0x00000000u, 0x3c200000u, 0x0d000000u, 0x3f600000u,
+            0x3f200000u, 0x3be00000u, 0x3ca00000u, 0x0d000000u,
+            0x3f600000u, 0x3ea00000u, 0x3be00000u, 0x3c200000u,
+        },
+    },
+    {
+        .name = "Safari unlock 8-wide allocation in 320-pixel row B",
+        .xclip = 0x00080000u, .yclip = 0x00200000u,
+        .target = 0x00897000u,
+        .semantic_sprite = true,
+        .boundary_override = true,
+        .tile_x0 = 0u, .tile_x1 = 0u,
+        .tile_y0 = 0u, .tile_y1 = 1u,
+        .left = 0u, .top = 10u, .width = 7u, .height = 10u,
+        .source = 0x00a33080u, .source_row0 = 10u,
+        .source_stride = 0x500u, .source_control = 0x0e500000u,
+        .source_width = 7u, .source_height = 10u,
+        .expected_covered_pixels = 70u,
+        .boundary = {
+            0x00000000u, 0x41a00000u, 0x00000000u, 0x41200000u,
+            0x40e00000u, 0x41a00000u, 0x40e00000u, 0x41200000u,
+        },
+        .quad = {
+            0xe0000000u, 0xa0218000u, 0x0e514661u, 0xcd206c40u,
+            0xa7718000u, 0x0e5112e0u, 0xae504ea0u, 0x22250e80u,
+            0x00000000u, 0x41a00000u, 0x00000000u, 0x41200000u,
+            0x40e00000u, 0x41a00000u, 0x40e00000u, 0x41200000u,
+            0u, 0u, 0u, 0u,
+            0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+            0x09000000u, 0x00000000u, 0x3f200000u, 0x00000000u,
+            0x3ca00000u, 0x09000000u, 0x00000000u, 0x3ea00000u,
+            0x00000000u, 0x3c200000u, 0x09000000u, 0x3f600000u,
+            0x3f200000u, 0x3be00000u, 0x3ca00000u, 0x09000000u,
+            0x3f600000u, 0x3ea00000u, 0x3be00000u, 0x3c200000u,
+        },
+    },
+    {
+        .name = "Safari unlock 8-wide allocation in split 72-pixel row",
+        .xclip = 0x00080000u, .yclip = 0x00200000u,
+        .target = 0x00897000u,
+        .semantic_sprite = true,
+        .boundary_override = true,
+        .tile_x0 = 0u, .tile_x1 = 0u,
+        .tile_y0 = 0u, .tile_y1 = 1u,
+        .left = 4u, .top = 10u, .width = 3u, .height = 7u,
+        .source = 0x00995080u, .source_row0 = 9u,
+        .source_stride = 0x120u, .source_control = 0x0e100000u,
+        .source_width = 3u, .source_height = 7u,
+        .expected_covered_pixels = 21u,
+        .boundary = {
+            0x40800000u, 0x41880000u, 0x40800000u, 0x41200000u,
+            0x40e00000u, 0x41880000u, 0x40e00000u, 0x41200000u,
+        },
+        .quad = {
+            0xe0000000u, 0xa0118001u, 0x0e1132a1u, 0xcd206c40u,
+            0xa7718000u, 0x0e5112e0u, 0xae504ea0u, 0x22250e80u,
+            0x40800000u, 0x41880000u, 0x40800000u, 0x41200000u,
+            0x40e00000u, 0x41880000u, 0x40e00000u, 0x41200000u,
+            0u, 0u, 0u, 0u,
+            0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u,
+            0x09000000u, 0x00000000u, 0x3f800000u, 0x3b800000u,
+            0x3c880000u, 0x09000000u, 0x00000000u, 0x3f100000u,
+            0x3b800000u, 0x3c200000u, 0x09000000u, 0x3ec00000u,
+            0x3f800000u, 0x3be00000u, 0x3c880000u, 0x09000000u,
+            0x3ec00000u, 0x3f100000u, 0x3be00000u, 0x3c200000u,
+        },
     },
 };
 
@@ -5194,6 +5331,11 @@ static void test_later_tiled_status_sprites(void) {
     test_captured_status_form(&spotlight_entry_unfiltered_direct_crop_form);
     test_captured_status_form(&safari_keyboard_address_row_resample_form);
     test_captured_status_form(&safari_keyboard_surface_row_resample_form);
+    for (unsigned i = 0;
+         i < sizeof safari_unlock_padded_row_forms /
+                 sizeof safari_unlock_padded_row_forms[0];
+         i++)
+        test_captured_status_form(&safari_unlock_padded_row_forms[i]);
     struct mbx_test_status_form keyboard_clip =
         safari_keyboard_surface_row_resample_form;
     keyboard_clip.name = "Safari keyboard lower-left row-resample clip";

@@ -2853,9 +2853,9 @@ static bool mbx_execute_textured_sprite(s5l_mbx_t *m,
     }
 
     /* Source dimensions are encoded independently of destination geometry.
-     * Invert the producer's normalized UV extent first, then reconstruct the
-     * power-of-two header and split pitch exactly.  This is what distinguishes
-     * r420's 320x460 texture from its 28.8x41.4 destination. */
+     * Invert the producer's normalized UV extent first, then decode the
+     * power-of-two allocation and split pitch independently.  This is what
+     * distinguishes r420's 320x460 texture from its 28.8x41.4 destination. */
     uint32_t header_width_field = (quad[1] >> 24) & 7u;
     uint32_t header_height_field = (quad[1] >> 20) & 7u;
     uint32_t header_texture_width = 8u << header_width_field;
@@ -2907,14 +2907,14 @@ static bool mbx_execute_textured_sprite(s5l_mbx_t *m,
     float v_texel_span = v_texel_end - v_texel_start;
     bool compact_full_extent_uniform_minification = false;
 
-    /* The texture allocation and the UV rectangle are independent producer
-     * inputs.  _mbx3DCtxQuadCopyPerspective derives the header power from its
-     * surface-width argument at 0x30e1ced4..0x30e1cf18, while the linear row
-     * bytes arrive independently through context+0x14.  r426 is the first
-     * retained packet whose 5x27 UV rectangle occupies only part of a 16x32,
-     * 64-byte-pitch texture.  Reconstruct the allocation width from the split
-     * pitch; requiring the smallest allocation around the UVs rejects valid
-     * sub-rectangles.
+    /* The texture allocation, UV rectangle and linear row pitch are independent
+     * producer inputs.  _mbx3DCtxQuadCopyPerspective derives the header power
+     * from its surface-width argument at 0x30e1ced4..0x30e1cf18, while the row
+     * bytes arrive independently through context+0x14.  Retained Safari unlock
+     * packets place 8- or 16-pixel allocations inside 72- or 320-pixel rows.
+     * Requiring header width to equal the smallest power covering the pitch
+     * therefore rejects valid padded-row sub-rectangles.  Decode both fields
+     * independently, while requiring the sampled UV footprint to fit both.
      *
      * BGRA8 rows are eight-pixel aligned, so pitch_bytes/16 is even.  Bits
      * 2..7 stay in source-control bits 18..23 and bit 1 moves to header bit 0.
@@ -2923,14 +2923,8 @@ static bool mbx_execute_textured_sprite(s5l_mbx_t *m,
                            ((quad[1] & 1u) << 1);
     uint32_t source_stride = pitch_units * 16u;
     uint32_t source_pitch_pixels = source_stride / 4u;
-    uint32_t texture_width = 8u;
-    uint32_t width_field = 0u;
-    while (texture_width < source_pitch_pixels) {
-        texture_width <<= 1;
-        width_field++;
-    }
-    if (!pitch_units || width_field > 7u ||
-        source_pitch_pixels > 512u || header_texture_height > 512u ||
+    if (!pitch_units || source_pitch_pixels > 512u ||
+        header_texture_width > 512u || header_texture_height > 512u ||
         source_right > source_pitch_pixels ||
         source_bottom > header_texture_height) {
         if (why) *why =
@@ -2938,7 +2932,7 @@ static bool mbx_execute_textured_sprite(s5l_mbx_t *m,
         return false;
     }
     uint32_t expected_header = 0xa0018000u |
-        (width_field << 24) | (header_height_field << 20) |
+        (header_width_field << 24) | (header_height_field << 20) |
         ((pitch_units & 2u) >> 1);
     uint32_t expected_source_control =
         (half_texel_layout ? 0x8e000000u : 0x0e000000u) |
