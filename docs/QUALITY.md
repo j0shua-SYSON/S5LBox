@@ -32,14 +32,31 @@ inherit the older run evidence.
   31460547163](https://github.com/j0shua-SYSON/S5LBox/actions/runs/31460547163).
   The installed IPA was 1,292,866 bytes with SHA-256
   `CE5A6ED4D4CCA7EFA0C5D54860F6E7A127D5F34E1023ACE87E08D20925A1B7EB`.
-- On a physical iPhone8,2 running iOS 15.8.5, a saved CPU-renderer guest
-  reached SpringBoard. Voice Memos entered its list view twice and remained
+- On a physical iPhone8,2 running iOS 15.8.5, a saved legacy guest reached
+  SpringBoard under the current app-wide MBX launch setting. Because that
+  machine predates `.graphics-v1`, its image-time renderer cannot be proved;
+  this is not a controlled CPU-renderer or MBX result. Voice Memos entered its
+  list view twice and remained
   `running`; the displayed retired counter advanced from **4,250.1 M** to
   **4,826.1 M** after the first activation. Safari's far-right Pages view and
   Spotlight with its keyboard also opened and remained running. Spotlight's
   counter advanced from **7,579.2 M** to **7,740.5 M** during the final hold.
   A final console scan contained no terminal-CPU, undefined-instruction,
   machine-stopped, or `0x04b78d94` marker.
+- A separate machine was then created from scratch with **MBX on** and the
+  QuartzCore software renderer **off**. Its first open wrote the exact ownership
+  record `mbx 1` / `ca-software-render 0` before preparing its 466,825,216-byte
+  work image. That machine cold-booted to the guest lock screen, unlocked into
+  SpringBoard, and launched Voice Memos. The black framebuffer observed after
+  the long unattended boot was the guest's normal display sleep, not a stopped
+  boot: one guest Power pulse immediately exposed the live lock screen.
+- Leaving that controlled MBX machine wrote a 121,007,450-byte `state.snap`, a
+  131,248-byte block-device sidecar, and its one-shot restore marker. Reopening
+  it reported `restored at 9659.6 M insn`, returned to the visible Voice Memos
+  screen, remained `running`, and had advanced another **93.6 M** instructions
+  when observed. This validates one physical MBX cold boot and one MBX
+  checkpoint/restore cycle. It does **not** establish repeated restore safety,
+  long-session stability, or readiness to make MBX the default.
 - This is evidence for those three previously fatal interaction paths, not for
   general stability. Voice Memos' list view fell to roughly **1.3--1.6 M
   insn/s**, and the sampler reported a single-region loop at
