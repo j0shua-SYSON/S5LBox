@@ -1,6 +1,8 @@
 /* S5LBox -- pinned guest package manifest tests. */
 #include "VMGuestPackageManifest.h"
+#include "VMGuestPackageFile.h"
 
+#include <errno.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -131,11 +133,61 @@ static void test_digest_and_download_match(void) {
     printf("\n");
 }
 
+static void test_downloaded_file_gate(void) {
+    static const char PATH[] = "vmguestpackagefile-fixture";
+    static const char ABC_SHA256[] =
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+    vm_guest_package_t package = {
+        "fixture", "1", "fixture_1_iphoneos-arm.deb",
+        "https://example.invalid/fixture_1_iphoneos-arm.deb",
+        UINT64_C(3), ABC_SHA256, VM_GUEST_PACKAGE_INSTALL
+    };
+    (void)remove(PATH);
+    FILE *file = fopen(PATH, "wb");
+    bool written = false;
+    if (file) {
+        written = fwrite("abc", 1u, 3u, file) == 3u;
+        if (fclose(file) != 0) written = false;
+    }
+    CHECK(written,
+          "could not create package-file fixture: %s", strerror(errno));
+    if (!written) {
+        (void)remove(PATH);
+        return;
+    }
+
+    uint64_t size = 0u;
+    char detail[160];
+    CHECK(vm_guest_package_file_verify(&package, PATH, &size,
+                                       detail, sizeof detail) ==
+              VM_GUEST_PACKAGE_FILE_OK && size == 3u,
+          "exact downloaded file refused: %s", detail);
+
+    package.size = 4u;
+    CHECK(vm_guest_package_file_verify(&package, PATH, &size,
+                                       detail, sizeof detail) ==
+              VM_GUEST_PACKAGE_FILE_ERR_SIZE,
+          "wrong downloaded size was accepted");
+    package.size = 3u;
+    package.sha256_hex =
+        "aa7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+    CHECK(vm_guest_package_file_verify(&package, PATH, &size,
+                                       detail, sizeof detail) ==
+              VM_GUEST_PACKAGE_FILE_ERR_DIGEST,
+          "wrong downloaded digest was accepted");
+    CHECK(vm_guest_package_file_verify(&package, "does-not-exist", &size,
+                                       detail, sizeof detail) ==
+              VM_GUEST_PACKAGE_FILE_ERR_OPEN,
+          "missing downloaded file was accepted");
+    (void)remove(PATH);
+}
+
 int main(void) {
     printf("== guest package manifest ==\n");
     test_shipping_manifest();
     test_entry_refusals();
     test_digest_and_download_match();
+    test_downloaded_file_gate();
     printf("== guest package manifest: %u checks, %u failure(s) ==\n",
            checks, failures);
     return failures ? 1 : 0;

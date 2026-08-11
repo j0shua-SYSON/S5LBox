@@ -523,6 +523,7 @@ set_tests_properties(app_debian_archive PROPERTIES
 # original-server download is gated by exact size and SHA-256 before parsing.
 add_executable(test_vmguestpackagemanifest
     ../app/Tests/test_vmguestpackagemanifest.c
+    ../app/Sources/VMGuestPackageFile.c
     ../app/Sources/VMGuestPackageManifest.c
     ../tools/sha256.c
 )
