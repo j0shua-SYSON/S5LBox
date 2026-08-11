@@ -2935,6 +2935,126 @@ static void test_activation_entries(void) {
     free(fx);
 }
 
+/*
+ * The guest network payload is one identity expressed three ways: pppd reads
+ * it from options, configd reads it from preferences.plist, and libc retains a
+ * resolver-file fallback. A partial table recreates the exact false-positive
+ * state where the UI says PPP/NAT because the link opened but applications
+ * cannot discover a usable network.
+ */
+static void test_ppp_entries(void) {
+    static const char expected_options[] =
+        "defaultroute\n"
+        "usepeerdns\n"
+        "serviceid 53354C42-4F58-4050-9000-000000000001\n";
+    static const char service_id[] =
+        "53354C42-4F58-4050-9000-000000000001";
+    rootfs_work_entry_t entries[3];
+    rootfs_work_entry_t short_table[3];
+    size_t needed = rootfs_work_ppp_entries(NULL, 0u);
+
+    CHECK(needed == 3u, "PPP needs %zu entries, expected 3", needed);
+    memset(short_table, 0, sizeof short_table);
+    CHECK(rootfs_work_ppp_entries(short_table, 2u) == 3u &&
+          short_table[0].path == NULL && short_table[1].path == NULL &&
+          short_table[2].path == NULL,
+          "a short PPP table was partially filled");
+    memset(entries, 0, sizeof entries);
+    CHECK(rootfs_work_ppp_entries(entries, 3u) == 3u,
+          "PPP entries were not produced");
+
+    for (size_t i = 0; i < 3u; i++) {
+        CHECK(entries[i].kind == ROOTFS_WORK_ENTRY_FILE,
+              "PPP entry %zu is kind %d, not a file", i,
+              (int)entries[i].kind);
+        CHECK(entries[i].permissions == 0644u,
+              "PPP entry %zu has mode 0%o", i,
+              (unsigned)entries[i].permissions);
+        CHECK(entries[i].content != NULL && entries[i].content_size != 0u,
+              "PPP entry %zu has no body", i);
+        CHECK(entries[i].content == NULL ||
+              memchr(entries[i].content, 0, entries[i].content_size) == NULL,
+              "PPP entry %zu carries an embedded NUL", i);
+    }
+
+    CHECK(entries[0].path &&
+          strcmp(entries[0].path, "/private/etc/ppp/options") == 0,
+          "PPP options path is %s",
+          entries[0].path ? entries[0].path : "(null)");
+    CHECK(entries[0].content_size == sizeof expected_options - 1u &&
+          memcmp(entries[0].content, expected_options,
+                 sizeof expected_options - 1u) == 0,
+          "PPP options do not carry the exact route, DNS and service ID");
+
+    CHECK(entries[1].path &&
+          strcmp(entries[1].path, "/private/var/run/resolv.conf") == 0,
+          "resolver path is %s",
+          entries[1].path ? entries[1].path : "(null)");
+    CHECK(entries[1].content_size == strlen("nameserver 10.0.2.3\n") &&
+          memcmp(entries[1].content, "nameserver 10.0.2.3\n",
+                 strlen("nameserver 10.0.2.3\n")) == 0,
+          "resolver fallback does not name 10.0.2.3");
+
+    CHECK(entries[2].path &&
+          strcmp(entries[2].path,
+                 "/private/var/preferences/SystemConfiguration/"
+                 "preferences.plist") == 0,
+          "SystemConfiguration path is %s",
+          entries[2].path ? entries[2].path : "(null)");
+    const char *plist = (const char *)entries[2].content;
+    const char *id1 = plist ? strstr(plist, service_id) : NULL;
+    const char *id2 = id1 ? strstr(id1 + 1, service_id) : NULL;
+    const char *id3 = id2 ? strstr(id2 + 1, service_id) : NULL;
+    CHECK(entries[2].content_size > 1000u &&
+          entries[2].content_size < 4096u,
+          "SystemConfiguration plist is %zu bytes",
+          entries[2].content_size);
+    CHECK(plist && strstr(plist, "<key>CurrentSet</key>") &&
+          strstr(plist, "<key>NetworkServices</key>") &&
+          strstr(plist, "<key>ServiceOrder</key>") &&
+          strstr(plist, "<key>__LINK__</key>"),
+          "SystemConfiguration plist lacks its set/service graph");
+    CHECK(plist && strstr(plist, "<string>tty.debug</string>") &&
+          strstr(plist, "<string>PPPSerial</string>") &&
+          strstr(plist, "<string>10.0.2.3</string>"),
+          "SystemConfiguration plist lacks the serial interface or resolver");
+    CHECK(id1 && id2 && id3,
+          "the stable PPP service ID is not shared by service, order and link");
+    CHECK(plist && entries[2].content_size >= 9u &&
+          memcmp(plist + entries[2].content_size - 9u, "</plist>\n", 9u) == 0,
+          "SystemConfiguration payload is not a complete plist document");
+
+    rootfs_work_entry_t combined[5];
+    rootfs_work_entry_t combined_short[5];
+    memset(combined_short, 0, sizeof combined_short);
+    CHECK(rootfs_work_standard_entries(true, true, NULL, 0u) == 5u,
+          "the activation+PPP plan is not five entries");
+    CHECK(rootfs_work_standard_entries(true, true, combined_short, 4u) == 5u &&
+          combined_short[0].path == NULL && combined_short[4].path == NULL,
+          "a short activation+PPP plan was partially filled");
+    memset(combined, 0, sizeof combined);
+    CHECK(rootfs_work_standard_entries(true, true, combined, 5u) == 5u &&
+          combined[0].path &&
+          strcmp(combined[0].path,
+                 "/private/var/root/Library/Lockdown") == 0 &&
+          combined[2].path &&
+          strcmp(combined[2].path, "/private/etc/ppp/options") == 0 &&
+          combined[4].path &&
+          strcmp(combined[4].path,
+                 "/private/var/preferences/SystemConfiguration/"
+                 "preferences.plist") == 0,
+          "the shared activation+PPP plan is missing or misordered");
+    CHECK(rootfs_work_standard_entries(false, true, combined, 5u) == 3u &&
+          combined[0].path &&
+          strcmp(combined[0].path, "/private/etc/ppp/options") == 0,
+          "the PPP-only standard plan is wrong");
+    CHECK(rootfs_work_standard_entries(true, false, combined, 5u) == 2u &&
+          combined[1].path &&
+          strcmp(combined[1].path,
+                 "/private/var/root/Library/Lockdown/data_ark.plist") == 0,
+          "the activation-only standard plan is wrong");
+}
+
 /* ------------------------------- B-tree splits -------------------------- */
 
 /*
@@ -4594,6 +4714,7 @@ int main(void) {
     test_invalid_requests_are_refused();
     test_output_is_deterministic();
     test_activation_entries();
+    test_ppp_entries();
     printf("%d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
 }

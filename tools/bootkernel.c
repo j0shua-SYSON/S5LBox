@@ -35603,64 +35603,36 @@ int main(int argc, char **argv) {
          * freeBlocks = 0, so without --grow the provisioner refuses rather than
          * quietly skipping.
          */
-        static rootfs_work_entry_t activation_entries[2];
-        if (cfg.v.activate) {
-            size_t n = rootfs_work_activation_entries(
-                activation_entries,
-                sizeof activation_entries / sizeof activation_entries[0]);
-            if (n == 0) {
-                fprintf(stderr, "activation: entry table refused; refusing a "
-                                "half-configured work image\n");
-                free(dt);
-                s5l8900_free(&mach);
-                ksyms_free(&KS);
-                free(img);
-                return 1;
-            }
-            options.entries = activation_entries;
-            options.entry_count = n;
-        }
-
         /*
-         * --ppp needs one more provisioned file, and it must MERGE with the
-         * activation entries rather than replace them: both switches are on by
-         * default in the app, and an assignment here would have silently
-         * dropped whichever ran second. options.entries is one array, so the
-         * two tables are concatenated into one.
+         * Activation and PPP are one shared plan, built by the same helper the
+         * app calls.  An earlier app path enabled the PPP launchd rewrite but
+         * omitted every PPP provisioning file; keeping the merge in one
+         * library function makes that split-brain configuration impossible.
          *
          * See rootfs_work_ppp_entries() for why the option goes in
          * /etc/ppp/options rather than into the launchd job's argument list.
          */
-        static rootfs_work_entry_t provision_entries[4];
+        static rootfs_work_entry_t provision_entries[5];
+        size_t standard_count = rootfs_work_standard_entries(
+            cfg.v.activate, cfg.v.ppp, NULL, 0u);
+        if (standard_count > sizeof provision_entries /
+                             sizeof provision_entries[0] ||
+            rootfs_work_standard_entries(
+                cfg.v.activate, cfg.v.ppp, provision_entries,
+                sizeof provision_entries / sizeof provision_entries[0]) !=
+                standard_count) {
+            fprintf(stderr, "rootfs: %zu standard provisioning entries do not "
+                            "fit; refusing a half-configured work image\n",
+                    standard_count);
+            free(dt);
+            s5l8900_free(&mach);
+            ksyms_free(&KS);
+            free(img);
+            return 1;
+        }
+        options.entries = standard_count ? provision_entries : NULL;
+        options.entry_count = standard_count;
         if (cfg.v.ppp) {
-            size_t have = options.entry_count;
-            size_t want = rootfs_work_ppp_entries(NULL, 0);
-            if (have + want > sizeof provision_entries /
-                              sizeof provision_entries[0]) {
-                fprintf(stderr, "ppp: %zu provisioning entries do not fit in "
-                                "%zu; refusing a half-configured work image\n",
-                        have + want,
-                        sizeof provision_entries / sizeof provision_entries[0]);
-                free(dt);
-                s5l8900_free(&mach);
-                ksyms_free(&KS);
-                free(img);
-                return 1;
-            }
-            for (size_t i = 0; i < have; i++)
-                provision_entries[i] = options.entries[i];
-            if (rootfs_work_ppp_entries(provision_entries + have,
-                                        want) != want) {
-                fprintf(stderr, "ppp: entry table refused; refusing a "
-                                "half-configured work image\n");
-                free(dt);
-                s5l8900_free(&mach);
-                ksyms_free(&KS);
-                free(img);
-                return 1;
-            }
-            options.entries = provision_entries;
-            options.entry_count = have + want;
             /*
              * Print the BYTES, not a sentence about them. r200 spent thirty
              * minutes measuring DNS against a binary built one second before
@@ -35670,7 +35642,7 @@ int main(int argc, char **argv) {
              * invalid. A hand-written banner describes what the author meant.
              * This describes what the guest will actually read.
              */
-            for (unsigned pi = 0; pi < have + want; pi++) {
+            for (unsigned pi = 0; pi < standard_count; pi++) {
                 const char *path = provision_entries[pi].path;
                 if (!path || !strstr(path, "/etc/ppp/options")) continue;
                 printf("ppp        : %s <- ", path);
@@ -35681,7 +35653,7 @@ int main(int argc, char **argv) {
                 printf("(%u bytes)\n", (unsigned)body_n);
             }
             printf("ppp        : /etc/ppp/options will be provisioned with "
-                   "defaultroute and usepeerdns\n"
+                   "defaultroute, usepeerdns and a stable serviceid\n"
                    "             (run129: the link opened and the guest had no "
                    "route pointing at it;\n"
                    "              r198: the route existed and Safari still "
@@ -35689,7 +35661,9 @@ int main(int argc, char **argv) {
                    "              nothing told the guest a nameserver -- "
                    "/etc/resolv.conf is a symlink to\n"
                    "              runtime state, so pppd has to learn 10.0.2.3 "
-                   "from the peer)\n");
+                   "from the peer;\n"
+                   "              preferences.plist binds that live state to "
+                   "a persistent PPPSerial service)\n");
         }
 
         /*

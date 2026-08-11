@@ -5549,7 +5549,20 @@ size_t rootfs_work_activation_entries(rootfs_work_entry_t *entries,
  * complete is the measurement, and dns_queries in the NAT report is where it
  * shows.
  */
-static const char PPP_OPTIONS_FILE[] = "defaultroute\nusepeerdns\n";
+/*
+ * pppd publishes its negotiated IPv4 and DNS state under a service ID.  When
+ * none is supplied it invents a UUID for that process, while configd's Setup:
+ * service has a persistent ID.  Those two halves then cannot describe the
+ * same service.  Apple ppp-412's sys-MacOSX.c names the option `serviceid` and
+ * Apple configd-293.6 uses that ID below NetworkServices and ServiceOrder.
+ * Keep one deterministic, UUID-shaped value in both files.
+ */
+#define PPP_SERVICE_ID "53354C42-4F58-4050-9000-000000000001"
+
+static const char PPP_OPTIONS_FILE[] =
+    "defaultroute\n"
+    "usepeerdns\n"
+    "serviceid " PPP_SERVICE_ID "\n";
 
 /*
  * r203 measured what r198 could only assume, and the assumption above --
@@ -5613,9 +5626,107 @@ static const char PPP_OPTIONS_FILE[] = "defaultroute\nusepeerdns\n";
  */
 static const char RESOLV_CONF_FILE[] = "nameserver 10.0.2.3\n";
 
+/*
+ * The stock image deliberately ships an empty SystemConfiguration preferences
+ * directory.  A directly launched pppd can create State: dictionaries, but it
+ * cannot create the persistent Setup: service that CFNetwork reachability and
+ * configd correlate with them.  This is the minimal structure emitted by the
+ * matching-era SCNetworkService/SCNetworkSet APIs:
+ *
+ *   - one current set;
+ *   - one PPPSerial service on the exact tty pppd opens;
+ *   - an IPv4/PPP protocol and the negotiated resolver as setup fallback;
+ *   - the set-to-service __LINK__ and matching ServiceOrder entry.
+ *
+ * pppd publishes the live ppp0 address and negotiated DNS under the identical
+ * service ID above.  The static 10.0.2.3 is intentional: it leaves configd a
+ * valid resolver even if this old pppd build omits its dynamic DNS dictionary.
+ *
+ * NOT YET A RUNTIME CLAIM: the schema comes from configd-293.6 and ppp-412,
+ * but a MobileSafari page still has to load on the physical guest before this
+ * can be called working Internet.
+ */
+static const char PPP_SYSTEM_CONFIGURATION[] =
+    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+    "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" "
+        "\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
+    "<plist version=\"1.0\">\n"
+    "<dict>\n"
+    "\t<key>CurrentSet</key>\n"
+    "\t<string>/Sets/53354C42-4F58-4053-9000-000000000001</string>\n"
+    "\t<key>NetworkServices</key>\n"
+    "\t<dict>\n"
+    "\t\t<key>" PPP_SERVICE_ID "</key>\n"
+    "\t\t<dict>\n"
+    "\t\t\t<key>DNS</key>\n"
+    "\t\t\t<dict>\n"
+    "\t\t\t\t<key>ServerAddresses</key>\n"
+    "\t\t\t\t<array><string>10.0.2.3</string></array>\n"
+    "\t\t\t</dict>\n"
+    "\t\t\t<key>IPv4</key>\n"
+    "\t\t\t<dict>\n"
+    "\t\t\t\t<key>ConfigMethod</key>\n"
+    "\t\t\t\t<string>PPP</string>\n"
+    "\t\t\t</dict>\n"
+    "\t\t\t<key>Interface</key>\n"
+    "\t\t\t<dict>\n"
+    "\t\t\t\t<key>DeviceName</key>\n"
+    "\t\t\t\t<string>tty.debug</string>\n"
+    "\t\t\t\t<key>Hardware</key>\n"
+    "\t\t\t\t<string>Modem</string>\n"
+    "\t\t\t\t<key>SubType</key>\n"
+    "\t\t\t\t<string>PPPSerial</string>\n"
+    "\t\t\t\t<key>Type</key>\n"
+    "\t\t\t\t<string>PPP</string>\n"
+    "\t\t\t\t<key>UserDefinedName</key>\n"
+    "\t\t\t\t<string>S5LBox Serial</string>\n"
+    "\t\t\t</dict>\n"
+    "\t\t\t<key>PPP</key>\n"
+    "\t\t\t<dict>\n"
+    "\t\t\t\t<key>DialOnDemand</key><integer>0</integer>\n"
+    "\t\t\t\t<key>LCPEchoEnabled</key><integer>0</integer>\n"
+    "\t\t\t\t<key>VerboseLogging</key><integer>0</integer>\n"
+    "\t\t\t</dict>\n"
+    "\t\t\t<key>Proxies</key>\n"
+    "\t\t\t<dict><key>FTPPassive</key><integer>1</integer></dict>\n"
+    "\t\t\t<key>UserDefinedName</key>\n"
+    "\t\t\t<string>S5LBox Internet</string>\n"
+    "\t\t</dict>\n"
+    "\t</dict>\n"
+    "\t<key>Sets</key>\n"
+    "\t<dict>\n"
+    "\t\t<key>53354C42-4F58-4053-9000-000000000001</key>\n"
+    "\t\t<dict>\n"
+    "\t\t\t<key>Network</key>\n"
+    "\t\t\t<dict>\n"
+    "\t\t\t\t<key>Global</key>\n"
+    "\t\t\t\t<dict>\n"
+    "\t\t\t\t\t<key>IPv4</key>\n"
+    "\t\t\t\t\t<dict>\n"
+    "\t\t\t\t\t\t<key>ServiceOrder</key>\n"
+    "\t\t\t\t\t\t<array><string>" PPP_SERVICE_ID "</string></array>\n"
+    "\t\t\t\t\t</dict>\n"
+    "\t\t\t\t</dict>\n"
+    "\t\t\t\t<key>Service</key>\n"
+    "\t\t\t\t<dict>\n"
+    "\t\t\t\t\t<key>" PPP_SERVICE_ID "</key>\n"
+    "\t\t\t\t\t<dict>\n"
+    "\t\t\t\t\t\t<key>__LINK__</key>\n"
+    "\t\t\t\t\t\t<string>/NetworkServices/" PPP_SERVICE_ID "</string>\n"
+    "\t\t\t\t\t</dict>\n"
+    "\t\t\t\t</dict>\n"
+    "\t\t\t</dict>\n"
+    "\t\t\t<key>UserDefinedName</key>\n"
+    "\t\t\t<string>Automatic</string>\n"
+    "\t\t</dict>\n"
+    "\t</dict>\n"
+    "</dict>\n"
+    "</plist>\n";
+
 size_t rootfs_work_ppp_entries(rootfs_work_entry_t *entries, size_t capacity) {
-    if (entries && capacity >= 1u) {
-        memset(entries, 0, sizeof(*entries));
+    /* All three files describe one service. Never publish a partial table. */
+    if (entries && capacity >= 3u) {
+        memset(entries, 0, 3u * sizeof(*entries));
         /*
          * The DIRECTORY entry this used to carry was wrong and the provisioner
          * said so: "an object already exists under CNID 1410 with that name".
@@ -5629,16 +5740,39 @@ size_t rootfs_work_ppp_entries(rootfs_work_entry_t *entries, size_t capacity) {
         entries[0].content = (const uint8_t *)PPP_OPTIONS_FILE;
         entries[0].content_size = sizeof(PPP_OPTIONS_FILE) - 1u;
         entries[0].permissions = 0644u;
-    }
-    if (entries && capacity >= 2u) {
-        memset(entries + 1, 0, sizeof(*entries));
         entries[1].kind = ROOTFS_WORK_ENTRY_FILE;
         entries[1].path = "/private/var/run/resolv.conf";
         entries[1].content = (const uint8_t *)RESOLV_CONF_FILE;
         entries[1].content_size = sizeof(RESOLV_CONF_FILE) - 1u;
         entries[1].permissions = 0644u;
+        entries[2].kind = ROOTFS_WORK_ENTRY_FILE;
+        entries[2].path =
+            "/private/var/preferences/SystemConfiguration/preferences.plist";
+        entries[2].content =
+            (const uint8_t *)PPP_SYSTEM_CONFIGURATION;
+        entries[2].content_size = sizeof(PPP_SYSTEM_CONFIGURATION) - 1u;
+        entries[2].permissions = 0644u;
     }
-    return 2u;
+    return 3u;
+}
+
+size_t rootfs_work_standard_entries(bool activate, bool ppp,
+                                    rootfs_work_entry_t *entries,
+                                    size_t capacity) {
+    size_t activation_count = activate ?
+        rootfs_work_activation_entries(NULL, 0u) : 0u;
+    size_t ppp_count = ppp ? rootfs_work_ppp_entries(NULL, 0u) : 0u;
+    size_t needed = activation_count + ppp_count;
+
+    if (!entries || capacity < needed)
+        return needed;
+    if (needed != 0u)
+        memset(entries, 0, needed * sizeof(*entries));
+    if (activation_count != 0u)
+        (void)rootfs_work_activation_entries(entries, activation_count);
+    if (ppp_count != 0u)
+        (void)rootfs_work_ppp_entries(entries + activation_count, ppp_count);
+    return needed;
 }
 
 static bool copy_source(host_file_t *source, host_file_t *temporary,

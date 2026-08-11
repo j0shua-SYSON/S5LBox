@@ -1168,18 +1168,29 @@ bool vm_firmware_boot_provision(const vm_firmware_boot_paths_t *paths,
      * Apple record is applied, none is verified, and the canonical firmware is
      * not touched.
      */
-    rootfs_work_entry_t activation[VM_FW_BOOT_ACTIVATION_ENTRIES];
-    if (wanted.activate) {
-        size_t n = rootfs_work_activation_entries(
-            activation, sizeof activation / sizeof activation[0]);
-        /* The library reports how many it needs and fills nothing when the
-         * array is short. Refusing to provision beats provisioning half of a
-         * two-object dependency chain and leaving a directory with no plist. */
-        if (n > 0u && n <= sizeof activation / sizeof activation[0]) {
-            options.entries = activation;
-            options.entry_count = n;
-        }
+    rootfs_work_entry_t provision[VM_FW_BOOT_PROVISION_ENTRIES];
+    size_t provision_count = rootfs_work_standard_entries(
+        wanted.activate, wanted.ppp, NULL, 0u);
+    memset(provision, 0, sizeof provision);
+    /*
+     * The phone used to set only ppp_launchd_job. That made pppd appear and
+     * negotiate a link, but silently omitted /etc/ppp/options, resolv.conf and
+     * the matching SystemConfiguration service that bootkernel already
+     * provisions. A green core test therefore described a desktop image, not
+     * the image users created in the app. Merge the same authoritative table
+     * here, after activation, exactly as bootkernel does.
+     */
+    if (provision_count > sizeof provision / sizeof provision[0] ||
+        rootfs_work_standard_entries(wanted.activate, wanted.ppp, provision,
+                                     sizeof provision / sizeof provision[0]) !=
+            provision_count) {
+        set_detail(detail, detail_capacity,
+                   "The standard provisioning table no longer fits; refusing "
+                   "a partial work image.");
+        return false;
     }
+    options.entries = provision_count ? provision : NULL;
+    options.entry_count = provision_count;
 
     /*
      * CLEAR AN INCOMPLETE ONE FIRST, AND ONLY AN INCOMPLETE ONE.

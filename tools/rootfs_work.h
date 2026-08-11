@@ -498,10 +498,26 @@ size_t rootfs_work_activation_entries(rootfs_work_entry_t *entries,
  * file is created; asking for the parent too made the provisioner refuse the
  * whole plan with "an object already exists under CNID 1410".
  *
- * Returns the number of entries required (1).  Fills `entries` only when
- * `capacity` is at least that.  The filled entries point at static storage.
+ * The options file carries the fixed pppd service ID, resolv.conf remains a
+ * libc fallback, and preferences.plist gives configd the matching persistent
+ * PPPSerial service.  These are one transaction: a short buffer is left
+ * untouched rather than producing a half-described network.
+ *
+ * Returns the number of entries required (3). Fills `entries` only when
+ * `capacity` is at least that. The filled entries point at static storage.
  */
 size_t rootfs_work_ppp_entries(rootfs_work_entry_t *entries, size_t capacity);
+
+/*
+ * The shared image-time plan used by both the desktop harness and the iOS app.
+ * Keeping the merge here prevents one frontend from enabling the PPP launchd
+ * rewrite while forgetting the files that make the resulting link usable.
+ * Returns the required count and fills nothing unless the whole requested
+ * activation/PPP plan fits.
+ */
+size_t rootfs_work_standard_entries(bool activate, bool ppp,
+                                    rootfs_work_entry_t *entries,
+                                    size_t capacity);
 
 #ifdef __cplusplus
 }
