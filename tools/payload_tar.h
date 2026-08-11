@@ -3,7 +3,8 @@
  *
  * WHY A TAR AND NOT A DIRECTORY. tools/rootfs_work.c can already create files,
  * directories and symlinks in the work image's HFS+ catalog, with the exact
- * permission bits the payload needs -- its own header names "the Cydia
+ * permission and numeric ownership metadata the payload needs -- its own
+ * header names "the Cydia
  * payload's 06755 MobileCydia, 04555 bin/su and 02775 var/local". What was
  * missing was anything that turns a payload into the rootfs_work_entry_t array
  * it wants; activation and PPP both use small hardcoded tables.
@@ -11,9 +12,10 @@
  * A host DIRECTORY cannot supply that faithfully. Walking a tree needs
  * per-platform metadata calls, and on Windows -- where this project is
  * developed -- an extracted tree has already lost every symlink and every
- * setuid bit before the walker sees it. A tar carries type, mode and link
- * target *inside the archive*, so the same file parses identically on every
- * host and the payload's 88 symlinks and four setuid binaries survive.
+ * setuid bit before the walker sees it. A tar carries type, mode, numeric
+ * owner/group and link target *inside the archive*, so the same file parses
+ * identically on every host and the payload's non-root ownership, 88 symlinks
+ * and four setuid binaries survive.
  *
  * WHAT IS NOT SHIPPED. No payload. Cydia is Jay Freeman's software and is not
  * this project's to redistribute, exactly as Apple's firmware is not; the user

@@ -53,15 +53,15 @@ static void tb_octal(unsigned char *p, size_t n, unsigned long long v) {
     p[n - 1u] = '\0';
 }
 
-static void tb_add(tarbuf_t *t, const char *name, char type,
-                   unsigned mode, const void *body, size_t body_len,
-                   const char *link) {
+static void tb_add_owned(tarbuf_t *t, const char *name, char type,
+                         unsigned mode, unsigned uid, unsigned gid,
+                         const void *body, size_t body_len, const char *link) {
     unsigned char *h = t->buf + t->used;
     memset(h, 0, BLOCK);
     (void)snprintf((char *)h + 0, 100u, "%s", name);
     tb_octal(h + 100, 8, mode);
-    tb_octal(h + 108, 8, 0);            /* uid  */
-    tb_octal(h + 116, 8, 0);            /* gid  */
+    tb_octal(h + 108, 8, uid);
+    tb_octal(h + 116, 8, gid);
     tb_octal(h + 124, 12, body_len);
     tb_octal(h + 136, 12, 0);           /* mtime */
     h[156] = (unsigned char)type;
@@ -78,6 +78,12 @@ static void tb_add(tarbuf_t *t, const char *name, char type,
         memcpy(t->buf + t->used, body, body_len);
         t->used += (body_len + BLOCK - 1u) / BLOCK * BLOCK;
     }
+}
+
+static void tb_add(tarbuf_t *t, const char *name, char type,
+                   unsigned mode, const void *body, size_t body_len,
+                   const char *link) {
+    tb_add_owned(t, name, type, mode, 0u, 0u, body, body_len, link);
 }
 
 static void tb_end(tarbuf_t *t) { t->used += 2u * BLOCK; }
@@ -105,6 +111,8 @@ static void test_the_shapes_a_real_payload_has(void) {
     tb_add(&t, "bin/bzcat",                     '2', 0777u, NULL, 0, "bzip2");
     tb_add(&t, "Sections/x.png",                '2', 0777u, NULL, 0,
            "/usr/share/bigboss/icons/b.png");
+    tb_add_owned(&t, "private/var/mobile/",      '5', 0750u, 501u, 501u,
+                 NULL, 0, NULL);
     tb_end(&t);
     tb_write(&t, "payload-shapes.tar");
     tb_free(&t);
@@ -115,7 +123,7 @@ static void test_the_shapes_a_real_payload_has(void) {
     if (!p) return;
 
     const rootfs_work_entry_t *e = payload_tar_entries(p);
-    CHECK(payload_tar_entry_count(p) == 4u, "%zu entries, expected 4",
+    CHECK(payload_tar_entry_count(p) == 5u, "%zu entries, expected 5",
           payload_tar_entry_count(p));
 
     CHECK(e[0].kind == ROOTFS_WORK_ENTRY_DIRECTORY, "member 0 is not a directory");
@@ -148,9 +156,13 @@ static void test_the_shapes_a_real_payload_has(void) {
           "absolute link target was altered: \"%s\"",
           e[3].content ? (const char *)e[3].content : "(null)");
 
+    CHECK(e[4].owner_id == 501u && e[4].group_id == 501u,
+          "numeric ownership was lost: uid=%u gid=%u, expected 501/501",
+          e[4].owner_id, e[4].group_id);
+
     payload_tar_stats_t s;
     payload_tar_get_stats(p, &s);
-    CHECK(s.files == 1u && s.directories == 1u && s.symlinks == 2u,
+    CHECK(s.files == 1u && s.directories == 2u && s.symlinks == 2u,
           "stats say files=%zu dirs=%zu links=%zu", s.files, s.directories,
           s.symlinks);
     payload_tar_close(&p);

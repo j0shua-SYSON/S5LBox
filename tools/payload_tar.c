@@ -18,6 +18,10 @@
 #define TAR_LEN_NAME    100u
 #define TAR_OFF_MODE    100u
 #define TAR_LEN_MODE      8u
+#define TAR_OFF_UID     108u
+#define TAR_LEN_UID       8u
+#define TAR_OFF_GID     116u
+#define TAR_LEN_GID       8u
 #define TAR_OFF_SIZE    124u
 #define TAR_LEN_SIZE     12u
 #define TAR_OFF_CHKSUM  148u
@@ -188,11 +192,20 @@ payload_tar_t *payload_tar_open(const char *path, const char *prefix,
         if (pfx[0]) (void)snprintf(name, sizeof name, "%s/%s", pfx, base);
         else        (void)snprintf(name, sizeof name, "%s", base);
 
-        uint64_t mode = 0, size = 0;
+        uint64_t mode = 0, uid = 0, gid = 0, size = 0;
         if (!octal_field(h + TAR_OFF_MODE, TAR_LEN_MODE, &mode) ||
+            !octal_field(h + TAR_OFF_UID, TAR_LEN_UID, &uid) ||
+            !octal_field(h + TAR_OFF_GID, TAR_LEN_GID, &gid) ||
             !octal_field(h + TAR_OFF_SIZE, TAR_LEN_SIZE, &size)) {
             say(detail, cap, "payload member \"%s\" has a malformed octal field",
                 name);
+            payload_tar_close(&t);
+            return NULL;
+        }
+        if (uid > UINT32_MAX || gid > UINT32_MAX) {
+            say(detail, cap,
+                "payload member \"%s\" has an owner or group outside the "
+                "HFS+ metadata range", name);
             payload_tar_close(&t);
             return NULL;
         }
@@ -255,6 +268,8 @@ payload_tar_t *payload_tar_open(const char *path, const char *prefix,
             return NULL;
         }
         e->permissions = (uint32_t)(mode & 07777u);
+        e->owner_id = (uint32_t)uid;
+        e->group_id = (uint32_t)gid;
 
         if (type == '5') {
             e->kind = ROOTFS_WORK_ENTRY_DIRECTORY;
