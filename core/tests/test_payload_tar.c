@@ -115,9 +115,23 @@ static void test_the_shapes_a_real_payload_has(void) {
                  NULL, 0, NULL);
     tb_end(&t);
     tb_write(&t, "payload-shapes.tar");
-    tb_free(&t);
 
     char why[PAYLOAD_TAR_DETAIL_CAPACITY] = {0};
+    payload_tar_t *memory =
+        payload_tar_open_memory(t.buf, t.used, "", why, sizeof why);
+    CHECK(memory != NULL, "the memory form was refused: %s", why);
+    memset(t.buf, 0, t.used); /* prove the returned object owns a copy */
+    tb_free(&t);
+    if (memory) {
+        const rootfs_work_entry_t *memory_entries = payload_tar_entries(memory);
+        CHECK(payload_tar_entry_count(memory) == 5u &&
+              memory_entries[1].content_size == sizeof body - 1u &&
+              !memcmp(memory_entries[1].content, body, sizeof body - 1u),
+              "memory payload still aliases the caller's bytes");
+        payload_tar_close(&memory);
+    }
+
+    why[0] = '\0';
     payload_tar_t *p = payload_tar_open("payload-shapes.tar", "", why, sizeof why);
     CHECK(p != NULL, "a well-formed payload was refused: %s", why);
     if (!p) return;
@@ -287,6 +301,15 @@ static void test_a_missing_payload_says_so(void) {
     payload_tar_close(&p);
     CHECK(payload_tar_entry_count(NULL) == 0u, "NULL must report no entries");
     CHECK(payload_tar_entries(NULL) == NULL, "NULL must report no array");
+
+    uint8_t byte = 0u;
+    p = payload_tar_open_memory(NULL, 1u, "", why, sizeof why);
+    CHECK(p == NULL, "a NULL memory payload was accepted");
+    p = payload_tar_open_memory(&byte, 0u, "", why, sizeof why);
+    CHECK(p == NULL, "an empty memory payload was accepted");
+    p = payload_tar_open_memory(&byte, PAYLOAD_TAR_MAX_BYTES + 1u,
+                                "", why, sizeof why);
+    CHECK(p == NULL, "an oversized memory payload was accepted");
 }
 
 int main(void) {

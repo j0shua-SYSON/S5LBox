@@ -18,9 +18,10 @@
  * and four setuid binaries survive.
  *
  * WHAT IS NOT SHIPPED. No payload. Cydia is Jay Freeman's software and is not
- * this project's to redistribute, exactly as Apple's firmware is not; the user
- * supplies a tar they are entitled to use. Nothing here contains, embeds or
- * downloads one, and a missing file is an ordinary refusal that names the path.
+ * this project's to redistribute, exactly as Apple's firmware is not. A caller
+ * may supply a tar it is entitled to use, or pass the verified data member of
+ * an original-server package. Nothing here contains, embeds or downloads one,
+ * and a missing file is an ordinary refusal that names the path.
  *
  * NO EXPLOIT IS INVOLVED. Inside an emulator that loads the kernel and owns the
  * disk image there is nothing to exploit past: this writes files into a
@@ -44,6 +45,7 @@ extern "C" {
 #endif
 
 #define PAYLOAD_TAR_DETAIL_CAPACITY 256u
+#define PAYLOAD_TAR_MAX_BYTES (64u * 1024u * 1024u)
 
 typedef struct payload_tar payload_tar_t;
 
@@ -73,6 +75,13 @@ typedef struct payload_tar payload_tar_t;
  */
 payload_tar_t *payload_tar_open(const char *path, const char *prefix,
                                 char *detail, size_t detail_capacity);
+
+/* The same strict parser over caller-owned memory. The bytes are copied into
+ * the returned object, so the caller may release or overwrite its buffer as
+ * soon as this returns. The fixed size cap is checked before allocation. */
+payload_tar_t *payload_tar_open_memory(const uint8_t *bytes, size_t size,
+                                       const char *prefix,
+                                       char *detail, size_t detail_capacity);
 
 /* Safe on NULL and on an already-closed slot. */
 void payload_tar_close(payload_tar_t **slot);

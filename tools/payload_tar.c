@@ -141,37 +141,30 @@ void payload_tar_get_stats(const payload_tar_t *t, payload_tar_stats_t *out) {
     if (t) *out = t->stats; else memset(out, 0, sizeof *out);
 }
 
-payload_tar_t *payload_tar_open(const char *path, const char *prefix,
-                                char *detail, size_t cap) {
-    if (!path || !*path) { say(detail, cap, "no payload path given"); return NULL; }
-
-    FILE *f = fopen(path, "rb");
-    if (!f) { say(detail, cap, "cannot open payload %s", path); return NULL; }
-    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); say(detail, cap, "cannot size %s", path); return NULL; }
-    long end = ftell(f);
-    if (end <= 0) { fclose(f); say(detail, cap, "payload %s is empty", path); return NULL; }
-    rewind(f);
-
+static payload_tar_t *payload_tar_parse_owned(uint8_t *image,
+                                              size_t image_size,
+                                              const char *label,
+                                              const char *prefix,
+                                              char *detail, size_t cap) {
     payload_tar_t *t = (payload_tar_t *)calloc(1u, sizeof *t);
-    if (!t) { fclose(f); say(detail, cap, "out of memory"); return NULL; }
-    t->image_size = (size_t)end;
-    t->image = (uint8_t *)malloc(t->image_size);
+    if (!t) {
+        free(image);
+        say(detail, cap, "out of memory");
+        return NULL;
+    }
+    t->image = image;
+    t->image_size = image_size;
     /* One name arena sized from the archive: every path is shorter than the
      * header it came from, so the block count is a safe upper bound. */
     t->names_cap = t->image_size / TAR_BLOCK * 300u + 4096u;
     t->names = (char *)malloc(t->names_cap);
     t->entries = (rootfs_work_entry_t *)calloc(ROOTFS_WORK_MAX_ENTRIES,
                                                sizeof *t->entries);
-    if (!t->image || !t->names || !t->entries) {
-        fclose(f); payload_tar_close(&t); say(detail, cap, "out of memory");
+    if (!t->names || !t->entries) {
+        payload_tar_close(&t);
+        say(detail, cap, "out of memory");
         return NULL;
     }
-    if (fread(t->image, 1u, t->image_size, f) != t->image_size) {
-        fclose(f); payload_tar_close(&t);
-        say(detail, cap, "short read on %s", path);
-        return NULL;
-    }
-    fclose(f);
 
     size_t off = 0;
     while (off + TAR_BLOCK <= t->image_size) {
@@ -357,9 +350,86 @@ payload_tar_t *payload_tar_open(const char *path, const char *prefix,
     }
 
     if (t->entry_count == 0u) {
-        say(detail, cap, "payload %s contains no usable members", path);
+        say(detail, cap, "payload %s contains no usable members", label);
         payload_tar_close(&t);
         return NULL;
     }
     return t;
+}
+
+payload_tar_t *payload_tar_open_memory(const uint8_t *bytes, size_t size,
+                                       const char *prefix,
+                                       char *detail, size_t cap) {
+    if (!bytes || size == 0u) {
+        say(detail, cap, "memory payload is empty");
+        return NULL;
+    }
+    if (size > PAYLOAD_TAR_MAX_BYTES) {
+        say(detail, cap, "memory payload is %zu bytes, over the %u-byte limit",
+            size, (unsigned)PAYLOAD_TAR_MAX_BYTES);
+        return NULL;
+    }
+    uint8_t *copy = (uint8_t *)malloc(size);
+    if (!copy) {
+        say(detail, cap, "out of memory");
+        return NULL;
+    }
+    memcpy(copy, bytes, size);
+    return payload_tar_parse_owned(copy, size, "memory tar", prefix,
+                                   detail, cap);
+}
+
+payload_tar_t *payload_tar_open(const char *path, const char *prefix,
+                                char *detail, size_t cap) {
+    if (!path || !*path) {
+        say(detail, cap, "no payload path given");
+        return NULL;
+    }
+
+    FILE *file = fopen(path, "rb");
+    if (!file) {
+        say(detail, cap, "cannot open payload %s", path);
+        return NULL;
+    }
+    if (fseek(file, 0, SEEK_END) != 0) {
+        (void)fclose(file);
+        say(detail, cap, "cannot size %s", path);
+        return NULL;
+    }
+    long end = ftell(file);
+    if (end <= 0) {
+        (void)fclose(file);
+        say(detail, cap, "payload %s is empty", path);
+        return NULL;
+    }
+    if ((uint64_t)end > (uint64_t)PAYLOAD_TAR_MAX_BYTES) {
+        (void)fclose(file);
+        say(detail, cap, "payload %s is over the %u-byte limit", path,
+            (unsigned)PAYLOAD_TAR_MAX_BYTES);
+        return NULL;
+    }
+    if (fseek(file, 0, SEEK_SET) != 0) {
+        (void)fclose(file);
+        say(detail, cap, "cannot rewind %s", path);
+        return NULL;
+    }
+
+    size_t size = (size_t)end;
+    uint8_t *image = (uint8_t *)malloc(size);
+    if (!image) {
+        (void)fclose(file);
+        say(detail, cap, "out of memory");
+        return NULL;
+    }
+    bool read_ok = fread(image, 1u, size, file) == size;
+    bool close_ok = fclose(file) == 0;
+    if (!read_ok || !close_ok) {
+        free(image);
+        if (!read_ok)
+            say(detail, cap, "short read on %s", path);
+        else
+            say(detail, cap, "cannot close %s after reading", path);
+        return NULL;
+    }
+    return payload_tar_parse_owned(image, size, path, prefix, detail, cap);
 }
