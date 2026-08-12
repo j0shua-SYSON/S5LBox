@@ -37,6 +37,7 @@ static int g_pass, g_fail;
 #define REG_MASK       0x00000130u
 #define REG_ACK        0x00000134u
 #define REG_KICK       0x000006d8u
+#define REG_CTX_RESET  0x0000081cu
 #define REG_RGNBASE    0x00000608u
 #define REG_OBJBASE    0x0000060cu
 #define REG_PIXSAMP    0x0000061cu
@@ -237,6 +238,41 @@ static void test_status_write_to_set_and_ack(void) {
           "final acknowledge left recovery status pending");
     CHECK(!s5l_mbx_irq(&m.mbx),
           "fully acknowledged recovery status left IRQ asserted");
+
+    s5l8900_free(&m);
+}
+
+static void test_ta_context_reset_handshake(void) {
+    s5l8900_t m;
+    CHECK(s5l8900_init(&m, RAM_BASE, RAM_SIZE), "machine init failed");
+    if (!m.ram) return;
+
+    /* AppleMBX at 0xc077ed04 writes exactly one to 0x81c, polls status bit
+     * 0x100 at 0xc077ed18, then acknowledges exactly 0x100 at 0xc077ed30.
+     * Keep the literals here so a wrong model constant cannot bless itself. */
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_CTX_RESET, 0u);
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
+          "zero context-reset write raised completion");
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_CTX_RESET, 2u);
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
+          "unmeasured context-reset value raised completion");
+
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_CTX_RESET, 1u);
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_CTX_RESET) == 1u,
+          "context-reset request did not remain readable storage");
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0x100u,
+          "context-reset request did not raise TA_CONTEXT");
+    CHECK(!s5l_mbx_irq(&m.mbx),
+          "masked synchronous context completion asserted IRQ");
+
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_MASK, 0x100u);
+    CHECK(s5l_mbx_irq(&m.mbx),
+          "unmasking TA_CONTEXT did not assert its pending IRQ");
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x100u);
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
+          "TA_CONTEXT acknowledge left status pending");
+    CHECK(!s5l_mbx_irq(&m.mbx),
+          "TA_CONTEXT acknowledge did not lower IRQ");
 
     s5l8900_free(&m);
 }
@@ -5564,6 +5600,7 @@ int main(void) {
     test_settings_transition_transparent_clear_batch();
     test_springboard_settings_black_fill_batch();
     test_status_write_to_set_and_ack();
+    test_ta_context_reset_handshake();
     test_premultiplied_2d_clock_form();
     test_opaque_global_alpha_2d_form();
     test_ordered_atomic_2d_batches();

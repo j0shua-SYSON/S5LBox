@@ -3941,4 +3941,12 @@ void s5l_mbx_write(s5l_mbx_t *m, uint32_t off, uint32_t val) {
      * only by s5l_mbx_process_2d(), after a decoded packet moved its pixels. */
     if (off == S5L_MBX_BACKGROUND_TAG)
         m->status |= S5L_MBX_STATUS_EVM_DALLOC;
+
+    /* AppleMBX's context-reset setup at 0xc077ed04 writes the literal one to
+     * 0x81c, then polls 0x12c bit 8 synchronously and clears that exact bit at
+     * 0x134. The register and interrupt names independently agree with that
+     * code path. This event says only that the reset request completed; it
+     * moves no pixels and is not a substitute for a TA or render consumer. */
+    if (off == S5L_MBX_TA_CONTEXT_RESET && val == 1u)
+        m->status |= S5L_MBX_STATUS_TA_CONTEXT;
 }

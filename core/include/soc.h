@@ -836,6 +836,24 @@ void     s5l_power_write(s5l_power_t *p, uint32_t off, uint32_t val);
  * pretending this register is a generic 2D/3D submission doorbell. */
 #define S5L_MBX_BACKGROUND_TAG 0x000006d8u
 
+/*
+ * THE TA CONTEXT-RESET HANDSHAKE. The public MBX1 register map names 0x81c
+ * TAGLOBREG_CONTEXT_RESET and its companion interrupt definitions name status
+ * bit 8 TA_CONTEXT. The shipped AppleMBX path at 0xc077ed04 proves how this
+ * particular driver uses that pair:
+ *
+ *     write(0x81c, 1);
+ *   loop:
+ *     status = read(0x12c);
+ *     if (!(status & 0x100)) goto loop;
+ *     write(0x134, 0x100);
+ *
+ * This is synchronous setup, not a render completion. Only the one observed
+ * request value is accepted below; an unmeasured value must remain ordinary
+ * register storage rather than manufacturing a completion.
+ */
+#define S5L_MBX_TA_CONTEXT_RESET 0x0000081cu
+
 /* The first measured tiled-render register set. The names come from the
  * PowerVR MBX register definitions and match AppleMBX's stores immediately
  * before it writes STARTRENDER. Values remain ordinary register storage;
