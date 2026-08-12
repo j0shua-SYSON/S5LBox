@@ -255,14 +255,27 @@ configuration. The source uses HTTP because the pinned iPhone OS 3-era APT
 stack cannot negotiate a modern HTTPS endpoint; host PPP/NAT remains the
 transport boundary.
 
-PMU hibernation is retained guest state, but the physical act that leaves it is
-not. A checkpoint restored after `OOCSHDWN.GOHIB` is therefore detected before
-host clock and WFI policies are reattached. Firmware startup supplies the PMU
-ONKEY wake reason and resets the ARM core into XNU's retained-RAM vector while
-preserving the monotonic instruction timeline. This path deliberately does not
-touch the button pressed mask or GPIO pending state. Ordinary physical Power
-input uses the same reset primitive only after recording its real held wire and
-release semantics.
+`OOCSHDWN.GO_STANDBY` is full guest power-off, not an ordinary suspend point.
+The quiesced CPU deliberately loops, so restoring its CPU/RAM and preserving the
+instruction timeline only reproduces a black powered-off machine. The retained-
+RAM experiment corrected two real model defects: PCF50635 event banks now latch
+behind their masks, and the PMU's active-low `INT_N` output reaches GPIOIC line
+85 with level relatching gated by `INTEN`. Exact replay then reached and returned
+from XNU's GPIO handler, but neither the PMU child nor CLCD was re-enabled after
+two billion additional instructions (about 4.85 guest seconds). Forcing a stale
+host Power release also left PMU `INT2=0x01`, GPIO line 85 disabled, and the CLCD
+frame counter frozen. That experiment improved interrupt fidelity; it did not
+produce a defensible wake path.
+
+Firmware restore therefore loads and validates the snapshot and external-media
+sidecar long enough to identify `GO_STANDBY`, then destroys the powered-off
+machine, creates a new one, reapplies the already validated engine controls, and
+runs normal kernel bring-up against the same clean work image. The one-shot
+marker is consumed only after the post-boot hooks succeed. Ordinary running
+checkpoints bypass this fallback and retain exact CPU/RAM restore semantics.
+Physical validation of `9f3d107` cold-booted a powered-off 2 GiB machine to real
+guest pixels, accepted slide-to-unlock, saved the home screen, and restored that
+ordinary checkpoint at exactly 3,926.8 M instructions on the next open.
 
 `/dev/rmd0` is a separate raw-character path through `_uiomove64`/`_copypv`, not
 one of the two strategy calls. The raw bridge reproduces the reached

@@ -1182,7 +1182,7 @@ device, observed through Cydia's completion UI; it is not broad package
 compatibility, a post-run catalog extraction, or proof that applying the five
 bootstrap upgrades is safe. No kernel MAC-policy bypass was added.
 
-## 2026-08-12: official source seed and powered-down checkpoint wake
+## 2026-08-12: official source seed and powered-down checkpoint recovery
 
 Fresh guest rootfs plans now create `/private/etc/apt/sources.list.d/saurik.list`
 as exact root:root `0644` data containing:
@@ -1199,17 +1199,44 @@ prepared guests. It does not silently modify an already committed installation;
 the physical transaction above used a source entered manually.
 
 A separate physical edge case exposed a lifecycle mismatch. After the guest
-printed its real shutdown path and set `OOCSHDWN.GOHIB`, the emulation engine
-still described itself as running because the powered-down CPU deliberately
-loops after quiescing. Saving and reopening that state therefore restored the
-same black, non-progressing loop. The current core factors the existing PMU
-ONKEY/retained-RAM reset into an explicit wake operation. Firmware restore calls
-it only when the loaded PMU is hibernating, and it does not manufacture a held
-Power GPIO, input edge, or deferred release. The focused input suite passes
-416/416 and the full Release suite passes 67/67.
+printed its real shutdown path and set `OOCSHDWN.GO_STANDBY`, the emulation
+engine still described itself as running because the powered-down CPU
+deliberately loops after quiescing. Saving and reopening that state therefore
+restored the same black, non-progressing loop.
 
-Brutal-honesty boundary: the automatic restore wake is locally compiled and
-host-tested, but has not yet been installed and repeated on the physical phone.
+The first proposed repair treated the checkpoint as retained-RAM sleep. It also
+fixed two real omissions: PCF50635 interrupt events now latch even while masked,
+its active-low `INT_N` output drives GPIOIC line 85, and level relatching obeys
+the GPIO `INTEN` bit. Exact physical replay reached and returned from the XNU
+GPIO handler without livelock. It still did not re-enable the PMU child or CLCD
+after another 2,000 M instructions (about 4.85 guest seconds). A separate forced
+release of the saved host Power state after 40 M instructions, followed by 500 M
+more, also failed: PMU `INT2` remained `0x01`, GPIO line 85 remained disabled,
+and the CLCD frame counter remained frozen. The retained-RAM theory is therefore
+rejected evidence, not a shipped success claim.
+
+The implemented recovery loads and validates the snapshot and external-media
+sidecar, recognizes `GO_STANDBY`, preserves the clean 2 GiB work image, discards
+the powered-off CPU/RAM, rebuilds the machine, reapplies the validated engine
+controls, and performs normal kernel bring-up. Ordinary running checkpoints
+still restore exactly. Normal and static/JIT-gated portable suites pass 67/67
+and 72/72. Both the
+[iOS build](https://github.com/j0shua-SYSON/S5LBox/actions/runs/31567644467)
+and [core tests](https://github.com/j0shua-SYSON/S5LBox/actions/runs/31567644466)
+completed successfully for exact commit `9f3d107`.
+
+That exact artifact was installed on one physical iPhone 6s Plus running iOS
+15.8.5. A real powered-off checkpoint was consumed once and reported `fresh
+boot after powered-off checkpoint`; its saved powered-off CPU state was not
+resumed. The fresh path reached the lock screen at about 3,384 M
+instructions, accepted slide-to-unlock, and reached the home screen. Back then
+atomically published a new checkpoint and marker. Reopening consumed the marker,
+reported an exact restore at 3,926.8 M instructions, and immediately displayed
+the same unlocked home screen rather than replaying boot.
+
+Brutal-honesty boundary: this is one powered-off recovery and one ordinary
+resume on one physical device, not broad lifecycle soak coverage. The fallback
+is a cold kernel boot and can take substantially longer than ordinary resume.
 The frontend also still lacks a distinct powered-off status: until the user
 leaves or presses Power, a shut-down guest is represented by a running engine.
-This patch fixes the saved-state reopen path, not that larger UI-state model.
+This patch fixes reopen behavior, not that larger UI-state model.
