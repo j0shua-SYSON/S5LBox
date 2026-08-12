@@ -322,6 +322,19 @@ static void test_pmu_standby_wake_event_is_one_shot(void) {
 
     CHECK(!s5l_pcf50635_in_standby(&pmu),
           "reset PMU claimed the application processor was in standby");
+    CHECK(!s5l_pcf50635_irq(&pmu) && !s5l_pcf50635_irq(NULL),
+          "reset or NULL PMU asserted INT_N");
+
+    uint64_t unknown = pmu.unknown_reads;
+    uint8_t masks[5] = {0xffu, 0xffu, 0xffu, 0xffu, 0xffu};
+    drive_read(&bus, PCF50635_I2C_ADDR, PCF50635_INT1MASK,
+               masks, sizeof masks);
+    CHECK(masks[0] == 0u && masks[1] == 0u && masks[2] == 0u &&
+          masks[3] == 0u && masks[4] == 0u,
+          "reset mask bank was %02x %02x %02x %02x %02x",
+          masks[0], masks[1], masks[2], masks[3], masks[4]);
+    CHECK(pmu.unknown_reads == unknown,
+          "known interrupt-mask registers were counted as unknown");
 
     /* Bit 1 is reserved on the period PCF50633-family register map. The old
      * model called it GOHIB, which made a real iPhone OS 3 shutdown (0x01)
@@ -339,6 +352,8 @@ static void test_pmu_standby_wake_event_is_one_shot(void) {
     CHECK(s5l_pcf50635_in_standby(&pmu),
           "OOCSHDWN.GO_STANDBY did not enter standby");
 
+    uint8_t mask = PCF50635_INT2_ONKEYR;
+    drive_write(&bus, PCF50635_I2C_ADDR, PCF50635_INT2MASK, &mask, 1u);
     uint64_t guest_writes = pmu.reg_writes;
     s5l_pcf50635_wake_onkey(&pmu);
     CHECK(!s5l_pcf50635_in_standby(&pmu),
@@ -348,8 +363,15 @@ static void test_pmu_standby_wake_event_is_one_shot(void) {
           pmu.regs[PCF50635_OOCSHDWN]);
     CHECK(pmu.reg_writes == guest_writes,
           "hardware ONKEY event was counted as a guest I2C write");
+    CHECK(!s5l_pcf50635_irq(&pmu),
+          "masked ONKEY event asserted the PMU interrupt");
 
-    uint64_t unknown = pmu.unknown_reads;
+    mask = 0u;
+    drive_write(&bus, PCF50635_I2C_ADDR, PCF50635_INT2MASK, &mask, 1u);
+    CHECK(s5l_pcf50635_irq(&pmu),
+          "unmasking a latched ONKEY event did not assert the PMU interrupt");
+
+    unknown = pmu.unknown_reads;
     uint8_t events[5] = {0};
     drive_read(&bus, PCF50635_I2C_ADDR, PCF50635_INT1,
                events, sizeof events);
@@ -359,6 +381,8 @@ static void test_pmu_standby_wake_event_is_one_shot(void) {
           events[0], events[1], events[2], events[3], events[4]);
     CHECK(pmu.unknown_reads == unknown,
           "known event registers were counted as unknown");
+    CHECK(!s5l_pcf50635_irq(&pmu),
+          "reading the event bank did not deassert the PMU interrupt");
 
     memset(events, 0xff, sizeof events);
     drive_read(&bus, PCF50635_I2C_ADDR, PCF50635_INT1,

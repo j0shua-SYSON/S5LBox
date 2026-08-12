@@ -271,6 +271,46 @@ static void arm_all(s5l8900_t *m) {
     }
 }
 
+/* Configure the PMU interrupt exactly as `/arm-io/i2c0/pmu` describes it:
+ * flat GPIOIC line 85, cell 1 (level-sensitive, active low), cascading from
+ * group 2 to VIC0 line 31. The physical clean-shutdown checkpoint has this
+ * same bit configured and enabled before the retained reset vector runs. */
+static void arm_pmu_irq(s5l8900_t *m) {
+    CHECK(S5L_GPIOIC_LINE_PMU == 85u,
+          "PMU line drifted from the device tree: %u", S5L_GPIOIC_LINE_PMU);
+    unsigned group = S5L_GPIOIC_LINE_PMU >> 5;
+    unsigned bit = S5L_GPIOIC_LINE_PMU & 31u;
+    uint32_t mask = 1u << bit;
+
+    uint32_t type = s5l_gpioic_read(&m->gpioic,
+                                    GPIOIC_INTTYPE + 4u * group);
+    s5l_gpioic_write(&m->gpioic, GPIOIC_INTTYPE + 4u * group,
+                     type | mask);
+    uint32_t level = s5l_gpioic_read(&m->gpioic,
+                                     GPIOIC_INTLEVEL + 4u * group);
+    s5l_gpioic_write(&m->gpioic, GPIOIC_INTLEVEL + 4u * group,
+                     level & ~mask);
+    s5l_gpioic_write(&m->gpioic, GPIOIC_INTSTAT + 4u * group, mask);
+    uint32_t enable = s5l_gpioic_read(&m->gpioic,
+                                      GPIOIC_INTEN + 4u * group);
+    s5l_gpioic_write(&m->gpioic, GPIOIC_INTEN + 4u * group,
+                     enable | mask);
+
+    unsigned cascade = s5l_gpioic_cascade(group);
+    CHECK(cascade == 31u, "PMU group cascades to VIC line %u", cascade);
+    s5l_vic_write(&m->vic[cascade >> 5], VIC_INTENABLE,
+                  1u << (cascade & 31u));
+    m->level_dirty = true;
+    s5l8900_tick(m, 0u);
+
+    CHECK((m->gpioic.driven[group] & mask) != 0u &&
+          s5l_gpioic_line(&m->gpioic, S5L_GPIOIC_LINE_PMU),
+          "idle PMU did not drive INT_N high");
+    CHECK(!s5l_gpioic_pending(&m->gpioic, S5L_GPIOIC_LINE_PMU) &&
+          !m->cpu.irq_line,
+          "inactive PMU interrupt asserted at rest");
+}
+
 /*
  * The guest's own service routine for one auto-flip level line, in
  * AppleS5L8900XGPIOIC::handleInterrupt's real instruction order:
@@ -615,28 +655,20 @@ static void test_level_lines_relatch_on_every_input(void) {
     CHECK(!s5l_gpioic_pending(&g, line),
           "driving an EDGE line low latched something");
 
-    /*
-     * Now declare it level while its polarity bit is still zero and its wire is
-     * low. That IS an asserting condition — "assert while low", wire low — and
-     * the model must say so rather than being quietly forgiving, because this
-     * is the exact transient the guest's own configure sequence passes through:
-     * initVector writes INTTYPE (0xc05a55e4) BEFORE INTLEVEL (0xc05a5608).
-     */
+    /* Configure it active-low while still masked. The electrical condition is
+     * true, but INTEN is deliberately part of a level interrupt's assertion:
+     * the guest masks a deferred line specifically so its W1C can stick. */
     s5l_gpioic_write(&g, GPIOIC_INTTYPE + 4u, mask);
-    CHECK(s5l_gpioic_pending(&g, line),
-          "a level line configured active-low with a low wire did not assert");
+    CHECK(!s5l_gpioic_pending(&g, line),
+          "a masked level line asserted during configuration");
 
-    /*
-     * And THIS is why enableVector writes INTSTAT immediately before INTEN
-     * (0xc05a56b0, `1 << bit`): it discards exactly that transient. Set the
-     * real polarity, clear, and the line is quiet — which is what
-     * test_rest_asserts_nothing() confirms end to end for all five buttons.
-     */
+    /* Set the real rest polarity, discard stale state, then arm it in the same
+     * order as enableVector at 0xc05a56b0. */
     s5l_gpioic_write(&g, GPIOIC_INTLEVEL + 4u, mask);
     s5l_gpioic_write(&g, GPIOIC_INTSTAT + 4u, mask);
+    s5l_gpioic_write(&g, GPIOIC_INTEN + 4u, mask);
     CHECK(!s5l_gpioic_pending(&g, line),
-          "the driver's own stale-pending clear did not settle the configure "
-          "transient — every level line would arm already asserted");
+          "the driver's own arm sequence left the resting line asserted");
 
     /* The wire goes high: assert. */
     s5l_gpioic_set_line(&g, line, true);
@@ -648,6 +680,17 @@ static void test_level_lines_relatch_on_every_input(void) {
     CHECK(s5l_gpioic_pending(&g, line),
           "acknowledging a level line whose condition still holds cleared it "
           "for good — a real level interrupt would come straight back");
+
+    /* The PMU child takes this route instead of auto-flip: mask line 85, then
+     * acknowledge it so handleInterrupt can return and deferred PMU work can
+     * clear INT_N. Re-enabling while still active must assert again. */
+    s5l_gpioic_write(&g, GPIOIC_INTEN + 4u, 0u);
+    s5l_gpioic_write(&g, GPIOIC_INTSTAT + 4u, mask);
+    CHECK(!s5l_gpioic_pending(&g, line),
+          "acknowledging a masked level line immediately re-latched it");
+    s5l_gpioic_write(&g, GPIOIC_INTEN + 4u, mask);
+    CHECK(s5l_gpioic_pending(&g, line),
+          "unmasking a still-active level line did not reassert it");
 
     /* Flip the polarity and the condition goes away, so the acknowledge
      * sticks. This pair is the whole auto-flip mechanism. */
@@ -708,12 +751,13 @@ static void test_level_lines_relatch_on_every_input(void) {
 /*
  * AN UNDRIVEN LEVEL LINE ASSERTS NOTHING, EVER. This is the one run87 paid for.
  *
- * Eleven nodes hang off /arm-io/gpio and this machine models four of them.
- * /arm-io/i2c0/als `interrupts {73,1}` and /arm-io/i2c0/pmu `interrupts {85,1}`
- * are two it does not: cell 1 is LEVEL with INTLEVEL 0, "assert while low", and
- * an unconnected line whose raw bit sits at the array's initial zero satisfies
- * that condition forever. The guest read and acknowledged group 2's pending
- * word 668,039 times and never got past instruction ~96 million.
+ * Eleven nodes hang off /arm-io/gpio and this machine now models five of them.
+ * /arm-io/i2c0/als `interrupts {73,1}` remains unmodelled: cell 1 is LEVEL with
+ * INTLEVEL 0, "assert while low", and an unconnected line whose raw bit sits at
+ * the array's initial zero satisfies that condition forever. The PMU formerly
+ * had the same problem; it is now a real driven line and is tested separately.
+ * The guest read and acknowledged group 2's pending word 668,039 times and
+ * never got past instruction ~96 million when undriven lines asserted.
  *
  * The fix is that an undriven line is not a line at level zero, and the test is
  * that configuring one exactly as the guest does asserts nothing at all.
@@ -722,7 +766,6 @@ static void test_an_undriven_level_line_never_asserts(void) {
     /* The real ones, transcribed from the tree rather than invented. */
     static const struct { const char *node; unsigned line, cell; } UNDRIVEN[] = {
         { "/arm-io/i2c0/als",           73u, 1u },
-        { "/arm-io/i2c0/pmu",           85u, 1u },
         { "/arm-io/i2c0/accelerometer",163u, 1u },
         { "/arm-io/i2c0/accelerometer",156u, 1u },
         { "/arm-io/i2c0/audio0",        44u, 3u },
@@ -762,7 +805,7 @@ static void test_an_undriven_level_line_never_asserts(void) {
     }
     s5l8900_tick(&m, 0u);
     CHECK(!m.cpu.irq_line,
-          "a machine with five buttons at rest and six unmodelled level lines "
+          "a machine with five buttons at rest and five unmodelled level lines "
           "raised an interrupt");
     s5l8900_free(&m);
 
@@ -775,6 +818,7 @@ static void test_an_undriven_level_line_never_asserts(void) {
     s5l_gpioic_reset(&g2);
     s5l_gpioic_write(&g2, GPIOIC_INTTYPE + 4u * 2u, 1u << 9);   /* line 73 */
     s5l_gpioic_write(&g2, GPIOIC_INTLEVEL + 4u * 2u, 0u);       /* assert low */
+    s5l_gpioic_write(&g2, GPIOIC_INTEN + 4u * 2u, 1u << 9);
     CHECK(!s5l_gpioic_pending(&g2, 73u), "an undriven line asserted");
     s5l_gpioic_set_line(&g2, 73u, false);   /* a device says: my line is low */
     CHECK(s5l_gpioic_pending(&g2, 73u),
@@ -845,6 +889,9 @@ static void test_power_wakes_standby_through_retained_reset(void) {
     CHECK(s5l8900_init(&m, S5L8900_SDRAM_BASE, 1u << 16),
           "machine init failed");
     arm_all(&m);
+    arm_pmu_irq(&m);
+    unsigned pmu_group = S5L_GPIOIC_LINE_PMU >> 5;
+    uint32_t pmu_bit = 1u << (S5L_GPIOIC_LINE_PMU & 31u);
     m.pmu.regs[PCF50635_OOCSHDWN] = PCF50635_OOCSHDWN_GO_STANDBY;
     m.pmu.written[PCF50635_OOCSHDWN] = 1u;
     m.cpu.r[0] = 0x11111111u;
@@ -877,6 +924,10 @@ static void test_power_wakes_standby_through_retained_reset(void) {
     CHECK(!s5l_pcf50635_in_standby(&m.pmu) &&
           (m.pmu.regs[PCF50635_INT2] & PCF50635_INT2_ONKEYR) != 0u,
           "Power wake did not latch the PMU ONKEY reason");
+    CHECK(!s5l_gpioic_line(&m.gpioic, S5L_GPIOIC_LINE_PMU) &&
+          s5l_gpioic_pending(&m.gpioic, S5L_GPIOIC_LINE_PMU) &&
+          m.cpu.irq_line,
+          "PMU ONKEY did not assert active-low GPIO line 85 through VIC0");
     CHECK(m.cpu.r[15] == S5L8900_SDRAM_BASE,
           "warm reset PC=%08x, expected retained vector %08x",
           m.cpu.r[15], S5L8900_SDRAM_BASE);
@@ -908,6 +959,17 @@ static void test_power_wakes_standby_through_retained_reset(void) {
     CHECK(!s5l8900_set_button(&m, S5L_BUTTON_HOLD, false),
           "Power release overtook the guest's PMU wake-reason read");
     m.pmu.regs[PCF50635_INT2] = 0u; /* the clear-on-read tested in test_i2c */
+    m.level_dirty = true;            /* a real I2C read dirties the machine */
+    s5l8900_tick(&m, 0u);
+    CHECK(s5l_gpioic_line(&m.gpioic, S5L_GPIOIC_LINE_PMU) &&
+          s5l_gpioic_pending(&m.gpioic, S5L_GPIOIC_LINE_PMU),
+          "clearing PMU status did not deassert INT_N while retaining its latch");
+    s5l_gpioic_write(&m.gpioic, GPIOIC_INTSTAT + 4u * pmu_group, pmu_bit);
+    m.level_dirty = true;
+    s5l8900_tick(&m, 0u);
+    CHECK(!s5l_gpioic_pending(&m.gpioic, S5L_GPIOIC_LINE_PMU) &&
+          !m.cpu.irq_line,
+          "acknowledging deasserted PMU INT_N left the CPU interrupted");
     CHECK(s5l8900_set_button(&m, S5L_BUTTON_HOLD, false),
           "queued Power release was not drainable after the PMU read");
     CHECK(s5l_gpioic_pending(&m.gpioic, hold_line),
@@ -935,6 +997,7 @@ static void test_restore_wakes_standby_without_a_button(void) {
     CHECK(s5l8900_init(&m, S5L8900_SDRAM_BASE, 1u << 16),
           "machine init failed");
     arm_all(&m);
+    arm_pmu_irq(&m);
     CHECK(!s5l8900_wake_from_standby(&m),
           "a running machine was reported as woken");
 
@@ -983,9 +1046,20 @@ static void test_restore_wakes_standby_without_a_button(void) {
     CHECK(m.buttons.pressed == pressed && m.buttons.sets == sets &&
           m.buttons.edges == edges && m.buttons.refused == refused,
           "restore wake manufactured a host button transition");
-    CHECK(memcmp(m.gpioic.level, gpio_level, sizeof gpio_level) == 0 &&
-          memcmp(m.gpioic.stat, gpio_stat, sizeof gpio_stat) == 0,
-          "restore wake manufactured a GPIO level or edge");
+    CHECK(memcmp(m.gpioic.level, gpio_level, sizeof gpio_level) == 0,
+          "restore wake changed a GPIO polarity configuration");
+    for (unsigned group = 0; group < S5L_GPIOIC_GROUPS; group++) {
+        uint32_t expected = gpio_stat[group];
+        if (group == (S5L_GPIOIC_LINE_PMU >> 5))
+            expected |= 1u << (S5L_GPIOIC_LINE_PMU & 31u);
+        CHECK(m.gpioic.stat[group] == expected,
+              "restore wake changed GPIO group %u status: %08x vs %08x",
+              group, m.gpioic.stat[group], expected);
+    }
+    CHECK(!s5l_gpioic_line(&m.gpioic, S5L_GPIOIC_LINE_PMU) &&
+          s5l_gpioic_pending(&m.gpioic, S5L_GPIOIC_LINE_PMU) &&
+          m.cpu.irq_line,
+          "restore wake did not assert the PMU's real active-low interrupt");
     CHECK(!s5l8900_wake_from_standby(&m),
           "an already-woken machine accepted a second wake");
     s5l8900_free(&m);
@@ -1049,14 +1123,19 @@ static void test_snapshot_carries_the_switches(void) {
           "back undriven — the mask is not being serialised at all, and every "
           "level line a device brought online during the run would go silent "
           "across a checkpoint");
-    /* A saved machine's undriven lines must stay undriven, or a restore would
-     * reintroduce run87's storm on the six unmodelled level lines. */
+    /* Serialization preserves the source's exact pre-refresh wire state. The
+     * source has not refreshed since init, so neither PMU nor ALS has driven a
+     * line yet; restore must not silently invent either one inside the blob. */
     CHECK((dst.gpioic.driven[2] & ((1u << 9) | (1u << 21))) == 0u,
-          "the als and pmu lines came back driven: group 2 %08x",
+          "the pre-refresh ALS or PMU line came back driven: group 2 %08x",
           dst.gpioic.driven[2]);
 
     /* And the restored machine still presents them on the wire. */
     s5l8900_tick(&dst, 0u);
+    CHECK((dst.gpioic.driven[2] & (1u << 21)) != 0u &&
+          (dst.gpioic.driven[2] & (1u << 9)) == 0u &&
+          s5l_gpioic_line(&dst.gpioic, S5L_GPIOIC_LINE_PMU),
+          "refresh did not drive idle PMU INT_N high while leaving ALS absent");
     CHECK(s5l_gpio_pin(&dst.gpio, 0x1605u) == s5l_button_level(S5L_BUTTON_HOLD, true),
           "the restored machine does not drive the held Hold pin");
     CHECK(s5l_gpio_pin(&dst.gpio, 0x1603u) ==

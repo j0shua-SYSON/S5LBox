@@ -120,20 +120,23 @@ static bool decode(uint32_t off, uint32_t base, unsigned *group) {
  *
  *   pending  <=  (raw bit == INTLEVEL bit)
  *
- * evaluated whenever anything on either side of that comparison moves. It is a
- * SET-only rule. The latch is still a latch: only the guest's write-one-to-
- * clear clears it, so a condition that goes away on its own does not silently
- * un-report an interrupt the guest has already been given.
+ * evaluated whenever anything on either side of that comparison moves while
+ * the line is enabled. It is a SET-only rule. The latch is still a latch: only
+ * the guest's write-one-to-clear clears it, so a condition that goes away on
+ * its own does not silently un-report an interrupt the guest has already been
+ * given.
  *
- * That is why this file re-evaluates in four places rather than one — a device
+ * That is why this file re-evaluates in five places rather than one — a device
  * moving a line is only the most obvious of them:
  *
  *   set_line          the board moved the wire
- *   write(INTSTAT)    the guest acknowledged; if the condition still holds a
- *                     real level line asserts again immediately
+ *   write(INTSTAT)    the guest acknowledged; if the enabled condition still
+ *                     holds, a real level line asserts again immediately
  *   write(INTLEVEL)   the guest changed which level asserts. This one is the
  *                     whole mechanism, not an edge case — see below
  *   write(INTTYPE)    the guest changed whether this line is level at all
+ *   write(INTEN)      masking lets an active line be acknowledged without an
+ *                     IRQ-handler livelock; unmasking rechecks it immediately
  *
  * AUTO-FLIP, and why a button needs it. handleInterrupt at 0xc05a4358 reads a
  * software shadow of the device tree's cell bit 2 and, for a line that has it,
@@ -167,18 +170,22 @@ static bool decode(uint32_t off, uint32_t base, unsigned *group) {
 static void relatch_level(s5l_gpioic_t *g, unsigned group) {
     /*
      * `raw ^ level` is 0 in the bits where the wire equals the selected
-     * polarity, so its complement is "asserting". It is masked twice:
+     * polarity, so its complement is "asserting". It is masked three times:
      *
      *   `type`   keeps only the lines the guest asked to be level-sensitive.
      *   `driven` keeps only the lines this machine has a device on.
+     *   `en`     suppresses a masked line until the guest unmasks it.
      *
      * THE SECOND MASK IS NOT DEFENSIVE. It was measured. Without it, run87
      * spent its whole budget in an interrupt storm: /arm-io/i2c0/als and
      * /arm-io/i2c0/pmu both have interrupt cell 1, which is LEVEL with
-     * INTLEVEL 0 — assert while LOW — and this machine models neither device,
-     * so their `raw` bit sat at the array's initial zero and `0 == 0` made
-     * them permanently asserted. The guest read and acknowledged group 2's
-     * pending word 668,039 times and never got past instruction ~96 million.
+     * INTLEVEL 0 — assert while LOW. Before the PMU interrupt was wired, this
+     * machine modelled neither device, so their `raw` bit sat at the array's
+     * initial zero and `0 == 0` made them permanently asserted. The PMU now
+     * drives its real line; ALS remains absent, and every line is still
+     * undriven between reset and its device's first refresh. The guest read and
+     * acknowledged group 2's pending word 668,039 times and never got past
+     * instruction ~96 million when that distinction was missing.
      *
      * An undriven line is not a line at level zero. It is a line with nothing
      * on the end of it, and the model has to be able to say so — which is what
@@ -191,7 +198,7 @@ static void relatch_level(s5l_gpioic_t *g, unsigned group) {
      * level line existed.
      */
     g->stat[group] |= ~(g->raw[group] ^ g->level[group]) &
-                      g->type[group] & g->driven[group];
+                      g->type[group] & g->driven[group] & g->en[group];
 }
 
 uint32_t s5l_gpioic_read(s5l_gpioic_t *g, uint32_t off) {
@@ -235,12 +242,14 @@ void s5l_gpioic_write(s5l_gpioic_t *g, uint32_t off, uint32_t val) {
          * acknowledges. */
         g->stat[group] &= ~val;
         /* A LEVEL line is the opposite, and that is not a contradiction: it is
-         * what "level-sensitive" means. If the wire still matches the selected
-         * polarity the condition is still true and the part still asserts.
+         * what "level-sensitive" means. If an enabled wire still matches the
+         * selected polarity, the condition is still true and the part asserts.
          * This does not reintroduce run71 for the buttons, because the guest's
          * own auto-flip has already inverted the polarity by the time it
          * acknowledges — handleInterrupt flips at 0xc05a4384 and acknowledges
-         * a level line at 0xc05a4418, in that order. */
+         * a level line at 0xc05a4418, in that order. The PMU line uses the
+         * other valid route: its child disables line 85 before acknowledging,
+         * queues PMU work, then unmasks after that work has deasserted INT_N. */
         relatch_level(g, group);
         return;
     }
@@ -254,6 +263,10 @@ void s5l_gpioic_write(s5l_gpioic_t *g, uint32_t off, uint32_t val) {
          * would make that disable path a no-op and leave every line armed.
          */
         g->en[group] = val;
+        /* A level that remained active while masked asserts as soon as the
+         * guest unmasks it. Conversely, writing zero above makes a following
+         * W1C stick until the deferred device handler has cleared the source. */
+        relatch_level(g, group);
         return;
     }
     if (decode(off, GPIOIC_INTTYPE, &group)) {

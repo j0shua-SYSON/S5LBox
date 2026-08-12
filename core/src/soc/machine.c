@@ -1740,9 +1740,16 @@ static void s5l8900_refresh(s5l8900_t *m, uint32_t tb) {
      * to be split here; passing 33 to vic[0] would enable nothing and fail
      * without a symptom.
      */
-    /* The touch controller's attention line first, so the cascade below sees
-     * it in the same refresh. It is asserted only when the device has a frame
-     * waiting, which nothing produces yet. */
+    /* Device interrupt lines first, so the cascade below sees them in the same
+     * refresh. */
+    /* `/arm-io/i2c0/pmu` declares `interrupts {85, 1}`: GPIOIC line 85,
+     * level-sensitive and active low. This is the PMU chip's INT_N output,
+     * distinct from the I2C controller's transfer-complete VIC interrupt. */
+    s5l_gpioic_set_line(&m->gpioic, S5L_GPIOIC_LINE_PMU,
+                        !s5l_pcf50635_irq(&m->pmu));
+
+    /* Touch attention is asserted only when the device has a frame waiting,
+     * which nothing produces yet. */
     s5l_gpioic_set_line(&m->gpioic, S5L_GPIOIC_LINE_MULTITOUCH,
                         s5l_mtz2_irq(&m->mtz2));
 

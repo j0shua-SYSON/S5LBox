@@ -88,6 +88,10 @@ static bool is_event_latch(uint8_t reg) {
     return reg >= PCF50635_INT1 && reg <= PCF50635_INT5;
 }
 
+static bool is_event_mask(uint8_t reg) {
+    return reg >= PCF50635_INT1MASK && reg <= PCF50635_INT5MASK;
+}
+
 static uint8_t rtc_byte(const s5l_pcf50635_t *pmu, uint8_t reg) {
     int y, mo, d, h, mi, s, wd;
     s5l_pcf50635_civil(pmu->seconds, &y, &mo, &d, &h, &mi, &s, &wd);
@@ -124,8 +128,9 @@ static uint8_t reg_read(s5l_pcf50635_t *pmu, uint8_t reg) {
         pmu->regs[reg] = 0u;
         return val;
     }
-    /* The shutdown command is also a known register at its reset value. */
-    if (reg == PCF50635_OOCSHDWN) return pmu->regs[reg];
+    /* Masks and the shutdown command are known even at their reset value. */
+    if (is_event_mask(reg) || reg == PCF50635_OOCSHDWN)
+        return pmu->regs[reg];
     if (pmu->written[reg]) return pmu->regs[reg];
     note_unknown_read(pmu, reg);
     return 0;
@@ -185,6 +190,16 @@ void s5l_pcf50635_bind(s5l_pcf50635_t *pmu, s5l_i2c_slave_t *slave) {
     slave->write = pmu_write;
     slave->read = pmu_read;
     slave->stop = pmu_stop;
+}
+
+bool s5l_pcf50635_irq(const s5l_pcf50635_t *pmu) {
+    if (!pmu) return false;
+    for (unsigned i = 0; i < 5u; i++) {
+        uint8_t events = pmu->regs[PCF50635_INT1 + i];
+        uint8_t mask = pmu->regs[PCF50635_INT1MASK + i];
+        if ((events & (uint8_t)~mask) != 0u) return true;
+    }
+    return false;
 }
 
 bool s5l_pcf50635_in_standby(const s5l_pcf50635_t *pmu) {

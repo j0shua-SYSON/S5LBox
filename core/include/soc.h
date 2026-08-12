@@ -1158,7 +1158,8 @@ bool     s5l_mbx_irq(const s5l_mbx_t *m);
 #define GPIOIC_INTEN    0xc0u   /* + 4*group, enable mask                     */
 #define GPIOIC_INTTYPE  0xe0u   /* + 4*group, read-modify-write configuration */
 
-/* The multi-touch ATN, as a flat line index on this controller. */
+/* Device-tree interrupt lines, as flat indices on this controller. */
+#define S5L_GPIOIC_LINE_PMU         85u
 #define S5L_GPIOIC_LINE_MULTITOUCH 155u
 
 /* Number of distinct unknown offsets remembered, as on I2C and SPI. */
@@ -1180,9 +1181,11 @@ typedef struct {
      * line half a billion instructions' worth of times and never read the
      * report it was being told about.
      *
-     * It is load-bearing a second way now: a LEVEL line's pending condition is
-     * `raw bit == INTLEVEL bit`, so `raw` is re-consulted every time the guest
-     * writes INTSTAT, INTLEVEL or INTTYPE, not only when a device moves a line.
+     * It is load-bearing a second way now: an enabled LEVEL line's pending
+     * condition is `raw bit == INTLEVEL bit`, so `raw` is re-consulted every
+     * time the guest writes INTSTAT, INTLEVEL, INTTYPE or INTEN, not only when
+     * a device moves a line. Masking a line lets its deferred handler clear the
+     * source without handleInterrupt immediately reading the same status again.
      */
     uint32_t raw  [S5L_GPIOIC_GROUPS];
     /*
@@ -1191,13 +1194,13 @@ typedef struct {
      * true one, and never cleared except by reset.
      *
      * This is not the same fact as `raw`, and conflating the two cost run87 its
-     * entire budget. Eleven nodes hang off /arm-io/gpio and this machine models
-     * four of them; /arm-io/i2c0/als and /arm-io/i2c0/pmu are among the seven it
-     * does not, and both declare interrupt cell 1 — LEVEL, asserting while LOW.
-     * With `raw` at its initial zero and no way to say "nothing drives this",
-     * `raw == INTLEVEL` made them permanently asserted, and the guest read and
-     * acknowledged group 2's pending word 668,039 times without ever getting
-     * past instruction ~96 million.
+     * entire budget. Eleven nodes hang off /arm-io/gpio. The PMU is now one of
+     * the five this machine models; /arm-io/i2c0/als remains among the six it
+     * does not. Both declare interrupt cell 1 — LEVEL, asserting while LOW.
+     * Before PMU wiring existed, `raw` at its initial zero and no way to say
+     * "nothing drives this" made both look permanently asserted, and the guest
+     * read and acknowledged group 2's pending word 668,039 times without ever
+     * getting past instruction ~96 million.
      *
      * The edge path never needed it, because an undriven line has no rising
      * edge and silently never latched. A level line has no such luck.
@@ -1955,6 +1958,11 @@ bool     s5l_i2c_irq(const s5l_i2c_t *bus);
 #define PCF50635_INT3     0x04u
 #define PCF50635_INT4     0x05u
 #define PCF50635_INT5     0x06u
+#define PCF50635_INT1MASK 0x07u
+#define PCF50635_INT2MASK 0x08u
+#define PCF50635_INT3MASK 0x09u
+#define PCF50635_INT4MASK 0x0au
+#define PCF50635_INT5MASK 0x0bu
 #define PCF50635_OOCSHDWN 0x0cu
 #define PCF50635_INT2_ONKEYR 0x01u
 #define PCF50635_OOCSHDWN_GO_STANDBY 0x01u
@@ -1987,6 +1995,7 @@ void s5l_pcf50635_reset(s5l_pcf50635_t *pmu, uint32_t tick_hz);
 void s5l_pcf50635_set_time(s5l_pcf50635_t *pmu, uint64_t unix_seconds);
 void s5l_pcf50635_tick(s5l_pcf50635_t *pmu, uint32_t ticks);
 void s5l_pcf50635_bind(s5l_pcf50635_t *pmu, s5l_i2c_slave_t *slave);
+bool s5l_pcf50635_irq(const s5l_pcf50635_t *pmu);
 bool s5l_pcf50635_in_standby(const s5l_pcf50635_t *pmu);
 void s5l_pcf50635_wake_onkey(s5l_pcf50635_t *pmu);
 void s5l_pcf50635_civil(uint64_t unix_seconds, int *year, int *month, int *day,
