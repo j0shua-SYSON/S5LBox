@@ -471,6 +471,21 @@ typedef struct rootfs_work_result {
 } rootfs_work_result_t;
 
 /*
+ * Read-only validation of one prospective source image. This applies the
+ * exact HFS format, geometry, allocation-bitmap, clean-unmount and source-file
+ * identity checks that rootfs_work_create() performs before it creates a
+ * temporary destination. It never hashes, transforms or publishes the source,
+ * and leaves final_size/published zero on success.
+ *
+ * Callers that need to create their own transaction directory can therefore
+ * reject a dirty or malformed source before making that durable transaction
+ * visible. rootfs_work_create() still repeats every check: this preflight is a
+ * user-facing early refusal, not a substitute for the copy-time race gate.
+ */
+rootfs_work_status_t rootfs_work_validate_source(
+    const char *source_path, rootfs_work_result_t *result);
+
+/*
  * Create destination_path.  The destination must not exist.  On success the
  * exact published size is in result->final_size.  Once result->published is
  * true, the complete destination is intentionally preserved even if a later

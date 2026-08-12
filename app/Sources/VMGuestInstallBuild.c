@@ -134,6 +134,24 @@ static vm_guest_install_build_status_t build_upgrade_storage(
         work_directory, result, detail, detail_capacity);
     if (snapshot_gate != VM_GUEST_INSTALL_BUILD_OK) return snapshot_gate;
 
+    rootfs_work_result_t preflight;
+    rootfs_work_status_t preflight_status =
+        rootfs_work_validate_source(live, &preflight);
+    if (result) result->rootfs = preflight;
+    if (preflight_status != ROOTFS_WORK_OK) {
+        if (preflight_status == ROOTFS_WORK_HFS_INVALID &&
+            strstr(preflight.detail, "not cleanly unmounted") != NULL) {
+            build_detail(detail, detail_capacity,
+                         "Storage expansion needs a clean guest shutdown. Reopen this machine, hold Power, slide to power off, wait until the guest halts, return to Machines, and try again. S5LBox will not guess-repair this unjournaled HFS disk.");
+            return VM_GUEST_INSTALL_BUILD_ERR_STORAGE_NOT_CLEAN;
+        }
+        build_detail(detail, detail_capacity,
+                     preflight.detail[0]
+                         ? preflight.detail
+                         : rootfs_work_status_name(preflight_status));
+        return VM_GUEST_INSTALL_BUILD_ERR_ROOTFS;
+    }
+
     build_progress(progress, progress_context,
                    VM_GUEST_INSTALL_BUILD_STAGING, 0u, 1u);
     vm_guest_install_result_t prepared;
@@ -373,6 +391,8 @@ const char *vm_guest_install_build_status_text(
         case VM_GUEST_INSTALL_BUILD_ERR_ARGUMENT:    return "invalid argument";
         case VM_GUEST_INSTALL_BUILD_ERR_TRANSACTION: return "transaction recovery";
         case VM_GUEST_INSTALL_BUILD_ERR_SNAPSHOTS:   return "historical snapshots";
+        case VM_GUEST_INSTALL_BUILD_ERR_STORAGE_NOT_CLEAN:
+            return "guest shutdown required";
         case VM_GUEST_INSTALL_BUILD_ERR_PACKAGES:    return "package plan";
         case VM_GUEST_INSTALL_BUILD_ERR_MANIFEST:    return "manifest identity";
         case VM_GUEST_INSTALL_BUILD_ERR_PATH:        return "path unavailable";

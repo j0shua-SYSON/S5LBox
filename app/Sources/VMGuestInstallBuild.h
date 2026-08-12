@@ -32,6 +32,7 @@ typedef enum {
     VM_GUEST_INSTALL_BUILD_ERR_ARGUMENT,
     VM_GUEST_INSTALL_BUILD_ERR_TRANSACTION,
     VM_GUEST_INSTALL_BUILD_ERR_SNAPSHOTS,
+    VM_GUEST_INSTALL_BUILD_ERR_STORAGE_NOT_CLEAN,
     VM_GUEST_INSTALL_BUILD_ERR_PACKAGES,
     VM_GUEST_INSTALL_BUILD_ERR_MANIFEST,
     VM_GUEST_INSTALL_BUILD_ERR_PATH,
@@ -72,8 +73,11 @@ typedef struct {
  * A valid existing v1 marker needs no package cache. If that installation's
  * live HFS image predates the 2 GiB minimum, a separate crash-safe storage
  * transaction clones and grows it while the v1 boot-policy marker remains
- * continuously authoritative. A machine already at the minimum is idempotent
- * success with no disk rewrite.
+ * continuously authoritative. Because a running checkpoint leaves this
+ * unjournaled HFS volume legitimately dirty, storage growth requires the guest
+ * to have completed its own power-off first; the read-only source preflight
+ * refuses before a storage transaction is staged otherwise. A machine already
+ * at the minimum is idempotent success with no disk rewrite.
  */
 vm_guest_install_build_status_t
 vm_guest_install_build_from_directory(

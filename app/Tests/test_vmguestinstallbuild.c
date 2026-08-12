@@ -21,6 +21,12 @@
 #endif
 
 #define FIXTURE_DIR "vmguestinstallbuild-fixture"
+#define HFS_FIXTURE_BLOCK_SIZE 512u
+#define HFS_FIXTURE_BLOCKS 16u
+#define HFS_FIXTURE_SIZE (HFS_FIXTURE_BLOCK_SIZE * HFS_FIXTURE_BLOCKS)
+#define HFS_FIXTURE_BITMAP_OFFSET (4u * HFS_FIXTURE_BLOCK_SIZE)
+#define HFS_VOLUME_HEADER_OFFSET 1024u
+#define HFS_VOLUME_HEADER_SIZE 512u
 
 static unsigned checks;
 static unsigned failures;
@@ -75,6 +81,23 @@ static bool write_bytes(const char *path, const char *bytes) {
     return ok;
 }
 
+static bool write_buffer(const char *path, const uint8_t *bytes,
+                         size_t size) {
+    FILE *file = fopen(path, "wb");
+    if (!file) return false;
+    bool ok = size == 0u || fwrite(bytes, 1u, size, file) == size;
+    if (fclose(file) != 0) ok = false;
+    return ok;
+}
+
+static bool read_buffer(const char *path, uint8_t *bytes, size_t size) {
+    FILE *file = fopen(path, "rb");
+    if (!file) return false;
+    bool ok = size == 0u || fread(bytes, 1u, size, file) == size;
+    if (fclose(file) != 0) ok = false;
+    return ok;
+}
+
 static bool exists(const char *path) {
     struct stat st;
     return stat(path, &st) == 0;
@@ -98,6 +121,51 @@ static uint32_t read_be32(const uint8_t *bytes) {
            ((uint32_t)bytes[1] << 16) |
            ((uint32_t)bytes[2] << 8) |
            (uint32_t)bytes[3];
+}
+
+static void write_be16(uint8_t *bytes, uint16_t value) {
+    bytes[0] = (uint8_t)(value >> 8);
+    bytes[1] = (uint8_t)value;
+}
+
+static void write_be32(uint8_t *bytes, uint32_t value) {
+    bytes[0] = (uint8_t)(value >> 24);
+    bytes[1] = (uint8_t)(value >> 16);
+    bytes[2] = (uint8_t)(value >> 8);
+    bytes[3] = (uint8_t)value;
+}
+
+static void write_be64(uint8_t *bytes, uint64_t value) {
+    write_be32(bytes, (uint32_t)(value >> 32));
+    write_be32(bytes + 4u, (uint32_t)value);
+}
+
+static void hfs_fixture_bitmap_set(uint8_t *image, uint32_t bit) {
+    uint8_t *byte = image + HFS_FIXTURE_BITMAP_OFFSET + (bit >> 3);
+    *byte |= (uint8_t)(1u << (7u - (bit & 7u)));
+}
+
+static void make_dirty_hfs_fixture(uint8_t image[HFS_FIXTURE_SIZE]) {
+    static const uint32_t USED_BLOCKS[] = {0u, 1u, 2u, 4u, 14u, 15u};
+    memset(image, 0, HFS_FIXTURE_SIZE);
+    uint8_t *header = image + HFS_VOLUME_HEADER_OFFSET;
+    write_be16(header, 0x4858u); /* HFSX */
+    write_be16(header + 2u, 5u);
+    write_be32(header + 4u, 0u); /* not cleanly unmounted */
+    write_be32(header + 40u, HFS_FIXTURE_BLOCK_SIZE);
+    write_be32(header + 44u, HFS_FIXTURE_BLOCKS);
+    write_be32(header + 48u,
+               HFS_FIXTURE_BLOCKS -
+                   (uint32_t)(sizeof USED_BLOCKS / sizeof USED_BLOCKS[0]));
+    write_be32(header + 52u, 1u);
+    write_be64(header + 112u, 8u); /* 64 allocation-bitmap bits */
+    write_be32(header + 124u, 1u);
+    write_be32(header + 128u, 4u);
+    write_be32(header + 132u, 1u);
+    for (size_t i = 0u; i < sizeof USED_BLOCKS / sizeof USED_BLOCKS[0]; i++)
+        hfs_fixture_bitmap_set(image, USED_BLOCKS[i]);
+    memcpy(image + HFS_FIXTURE_SIZE - HFS_VOLUME_HEADER_OFFSET, header,
+           HFS_VOLUME_HEADER_SIZE);
 }
 
 static bool read_hfs_geometry(const char *path, uint32_t *block_size,
@@ -203,6 +271,7 @@ typedef struct {
     unsigned calls;
     vm_guest_install_build_phase_t first;
     vm_guest_install_build_phase_t last;
+    bool staging_seen;
 } progress_log_t;
 
 static void capture_progress(void *opaque,
@@ -212,6 +281,7 @@ static void capture_progress(void *opaque,
     if (!log) return;
     if (log->calls == 0u) log->first = phase;
     log->last = phase;
+    if (phase == VM_GUEST_INSTALL_BUILD_STAGING) log->staging_seen = true;
     log->calls++;
     CHECK(total == 0u || completed <= total,
           "progress exceeds its phase total");
@@ -334,6 +404,83 @@ static void test_existing_install_is_idempotent(void) {
           progress.first == VM_GUEST_INSTALL_BUILD_RECOVERING &&
           progress.last == VM_GUEST_INSTALL_BUILD_COMPLETE,
           "idempotent progress did not reach completion");
+}
+
+static void test_dirty_existing_install_refuses_before_stage(void) {
+    clear_fixture();
+    CHECK(make_directory(FIXTURE_DIR), "could not create dirty fixture");
+    char live[VM_GUEST_INSTALL_PATH_CAPACITY];
+    char next[VM_GUEST_INSTALL_PATH_CAPACITY];
+    CHECK(join_path(live, sizeof live, FIXTURE_DIR,
+                    VM_GUEST_INSTALL_LIVE_FILE) &&
+          write_bytes(live, "old-rootfs"),
+          "could not seed dirty committed fixture");
+
+    vm_guest_install_result_t transaction;
+    char detail[VM_GUEST_INSTALL_BUILD_DETAIL_CAPACITY];
+    CHECK(vm_guest_install_prepare_stage(FIXTURE_DIR, &transaction,
+                                         detail, sizeof detail) ==
+              VM_GUEST_INSTALL_OK &&
+          vm_guest_install_stage_image_path(next, sizeof next, FIXTURE_DIR) &&
+          write_bytes(next, "installed-rootfs"),
+          "could not prepare dirty committed fixture: %s", detail);
+    uint8_t digest[VM_GUEST_INSTALL_SHA256_SIZE];
+    fill_digest(digest);
+    CHECK(vm_guest_install_publish(FIXTURE_DIR, digest, &transaction,
+                                   detail, sizeof detail) ==
+              VM_GUEST_INSTALL_OK && transaction.committed,
+          "could not commit dirty fixture: %s", detail);
+
+    uint8_t fixture[HFS_FIXTURE_SIZE];
+    uint8_t observed[HFS_FIXTURE_SIZE];
+    make_dirty_hfs_fixture(fixture);
+    CHECK(write_buffer(live, fixture, sizeof fixture),
+          "could not write dirty HFS fixture");
+
+    progress_log_t progress;
+    memset(&progress, 0, sizeof progress);
+    vm_guest_install_build_result_t result;
+    vm_guest_install_build_status_t status =
+        vm_guest_install_build_from_directory(
+            FIXTURE_DIR, NULL, capture_progress, &progress,
+            &result, detail, sizeof detail);
+    CHECK(status == VM_GUEST_INSTALL_BUILD_ERR_STORAGE_NOT_CLEAN &&
+          result.already_installed && result.transaction.committed &&
+          !result.storage_upgraded && !result.storage_transaction.committed &&
+          result.rootfs.status == ROOTFS_WORK_HFS_INVALID &&
+          result.rootfs.stage == ROOTFS_WORK_STAGE_SOURCE_VALIDATE &&
+          strstr(detail, "clean guest shutdown") != NULL,
+          "dirty install returned %s/%s: %s",
+          vm_guest_install_build_status_text(status),
+          rootfs_work_stage_name(result.rootfs.stage), detail);
+    CHECK(!progress.staging_seen,
+          "dirty install emitted staging progress before refusing");
+    CHECK(read_buffer(live, observed, sizeof observed) &&
+          memcmp(observed, fixture, sizeof fixture) == 0 &&
+          file_size_or_zero(live) == HFS_FIXTURE_SIZE,
+          "dirty install changed its live disk");
+
+    uint8_t after_digest[VM_GUEST_INSTALL_SHA256_SIZE];
+    CHECK(vm_guest_install_probe(FIXTURE_DIR, after_digest,
+                                 detail, sizeof detail) ==
+              VM_GUEST_INSTALL_PROBE_VALID &&
+          memcmp(after_digest, digest, sizeof digest) == 0,
+          "dirty refusal changed install authority: %s", detail);
+    static const char *const STORAGE_LEAVES[] = {
+        VM_GUEST_STORAGE_BACKUP_FILE,
+        VM_GUEST_STORAGE_STAGE_DIRECTORY,
+        VM_GUEST_STORAGE_MARKER_FILE,
+        VM_GUEST_STORAGE_MARKER_TMP,
+        VM_GUEST_STORAGE_JOURNAL_FILE,
+        VM_GUEST_STORAGE_JOURNAL_TMP
+    };
+    for (size_t i = 0u;
+         i < sizeof STORAGE_LEAVES / sizeof STORAGE_LEAVES[0]; i++) {
+        char path[VM_GUEST_INSTALL_PATH_CAPACITY];
+        CHECK(join_path(path, sizeof path, FIXTURE_DIR, STORAGE_LEAVES[i]) &&
+              !exists(path),
+              "dirty refusal left storage artifact %s", STORAGE_LEAVES[i]);
+    }
 }
 
 static void test_real_build_when_supplied(void) {
@@ -562,6 +709,7 @@ int main(void) {
     test_argument_and_package_refusals();
     test_historical_snapshot_gate();
     test_existing_install_is_idempotent();
+    test_dirty_existing_install_refuses_before_stage();
     test_real_storage_upgrade_when_supplied();
     test_real_build_when_supplied();
     clear_fixture();

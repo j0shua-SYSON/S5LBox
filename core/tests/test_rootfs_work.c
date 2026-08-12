@@ -1451,6 +1451,46 @@ static void test_malformed_hfs_refused(void) {
     expect_hfs_invalid(fixture, "boot-inconsistent", "boot-inconsistent");
 }
 
+static void test_source_preflight_is_read_only(void) {
+    uint8_t fixture[FIXTURE_SIZE];
+    uint8_t observed[FIXTURE_SIZE];
+    char source[160];
+    rootfs_work_result_t result;
+
+    CHECK(make_path(source, sizeof(source), "preflight-source"),
+          "could not form preflight source path");
+    remove_if_present(source);
+    make_hfs_fixture(fixture, 1u);
+    CHECK(write_file(source, fixture, sizeof(fixture)),
+          "could not write preflight fixture");
+    CHECK(rootfs_work_validate_source(source, &result) == ROOTFS_WORK_OK &&
+          result.source_size == FIXTURE_SIZE && result.final_size == 0u &&
+          !result.published,
+          "clean preflight returned %s/%s: %s",
+          rootfs_work_status_name(result.status),
+          rootfs_work_stage_name(result.stage), result.detail);
+    CHECK(read_file(source, observed, sizeof(observed)) &&
+          memcmp(observed, fixture, sizeof(fixture)) == 0,
+          "clean preflight changed its source");
+
+    put_be32(fixture + HFS_VH_OFF + 4u, 0u);
+    put_be32(fixture + FIXTURE_SIZE - HFS_VH_OFF + 4u, 0u);
+    CHECK(write_file(source, fixture, sizeof(fixture)),
+          "could not write dirty preflight fixture");
+    CHECK(rootfs_work_validate_source(source, &result) ==
+              ROOTFS_WORK_HFS_INVALID &&
+          result.stage == ROOTFS_WORK_STAGE_SOURCE_VALIDATE &&
+          strstr(result.detail, "not cleanly unmounted") != NULL &&
+          !result.published,
+          "dirty preflight returned %s/%s: %s",
+          rootfs_work_status_name(result.status),
+          rootfs_work_stage_name(result.stage), result.detail);
+    CHECK(read_file(source, observed, sizeof(observed)) &&
+          memcmp(observed, fixture, sizeof(fixture)) == 0,
+          "dirty preflight changed its source");
+    remove_if_present(source);
+}
+
 static void make_overlapping_reserved_fixture(uint8_t image[2048]) {
     uint8_t *header;
 
@@ -1683,6 +1723,7 @@ int main(void) {
     test_ca_software_render_plist();
     test_ppp_launchd_job_plist();
     test_both_plist_rewrites_in_one_build();
+    test_source_preflight_is_read_only();
     test_malformed_hfs_refused();
     test_growth_rejects_head_tail_overlap();
     test_existing_destination_preserved();

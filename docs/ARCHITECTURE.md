@@ -218,6 +218,18 @@ authenticates the kernel and device tree. Snapshot coupling to backing identity
 and overlay generation remains future work after the first cold-boot slice.
 Backend failure pauses the VM visibly; it must never be converted to zero-filled
 successful I/O.
+
+The iOS app's later 2 GiB capacity migration uses its own storage transaction,
+separate from the package-install transaction even though both ultimately replace
+the same live image. Before that transaction becomes durable, a read-only pass
+validates the source HFS geometry, allocation bitmap, primary/alternate volume
+headers, clean-unmount bit, and host-file identity. A normal emulator checkpoint
+captures a mounted, legitimately dirty unjournaled filesystem and is therefore
+not an acceptable migration source. The user must complete the guest's own
+power-off sequence first. The app deliberately refuses before staging instead
+of guessing a host-side filesystem repair; the full validation is repeated while
+the clone is made to retain the race gate.
+
 `/dev/rmd0` is a separate raw-character path through `_uiomove64`/`_copypv`, not
 one of the two strategy calls. The raw bridge reproduces the reached
 `mdevrw`/`uio_update` contract, including physical-user segment variants,

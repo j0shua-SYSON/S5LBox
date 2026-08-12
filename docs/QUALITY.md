@@ -1070,8 +1070,36 @@ publication, and commit-record publication; every boundary recovers to the new
 disk while preserving the original install identity. The complete normal and
 static/JIT-gated local suites pass 67/67 and 72/72 respectively.
 
-What this does **not** prove: this exact build has not yet been installed on the
-physical test phone, and Cydia has not yet completed a real package operation
-against the migrated image. The offline storage defect is fixed and measured;
-the final on-device package transaction remains required before calling the
-user-visible problem closed.
+The exact `96894c9` IPA was then installed on a physical iPhone and exercised
+against a retained 500,375,552-byte committed installation. The first attempt
+from an ordinary saved session refused with `source volume was not cleanly
+unmounted`. That was not a false positive: both on-disk HFS volume headers had
+attributes `0x00000000`. A saved emulator checkpoint freezes a live mounted
+filesystem; it does not perform the guest's unmount protocol.
+
+The guest was reopened, powered off through its own long-press and slide UI,
+and allowed to reach `reboot(RB_HALT)` / PMU standby. Both HFS headers then had
+attributes `0x00000100` (cleanly unmounted). Leaving the stopped machine and
+retrying the same operation grew the live image to exactly 2,147,483,648 bytes,
+published the 112-byte `guest.storage-v1` marker, preserved the existing install
+marker byte-for-byte, removed the one-shot resume request, and cold-booted the
+guest. This is physical evidence for the migration transaction, not merely a
+host-side image test.
+
+The current, not-yet-installed follow-up adds a read-only HFS preflight before
+`guest.storage-v1.stage` can exist. Its portable builder regression starts from
+a valid committed install, presents a dirty primary and alternate HFS header,
+and asserts the shutdown-required result, no staging progress, a byte-identical
+live disk, unchanged install authority, and absence of every storage stage,
+backup, journal, temporary marker, and committed marker. The copy-time validator
+still repeats the checks, so a source race remains fail-closed. Automatic repair
+is deliberately absent: guessing repairs on a mounted, unjournaled HFS image is
+not a safe migration strategy.
+
+Cydia did complete its first-run `Reorganizing` phase and respring on the grown
+physical guest. Its next launch then failed during archive cleanup with
+`Could not open lock file /var/cache/apt/archives/lock - open (13 Permission
+denied)`. Therefore the capacity defect is fixed, but a real package install is
+still blocked by a separate privilege or sandbox defect. Full package-manager
+operation must not be claimed until that denial is diagnosed, corrected, and
+reproduced on a stock-compatible build.

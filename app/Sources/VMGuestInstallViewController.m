@@ -12,6 +12,8 @@
 @interface VMGuestInstallViewController ()
 - (void)startInstall;
 - (void)runBuilderWithPackageDirectory:(NSURL *)packageDirectory;
+- (void)failWithHeadline:(NSString *)headline
+             description:(NSString *)description;
 - (void)receiveBuildPhase:(vm_guest_install_build_phase_t)phase
                  completed:(uint64_t)completed total:(uint64_t)total;
 @end
@@ -193,12 +195,13 @@ static void VMGuestInstallBuildProgress(
     if (stage.length) _detail.text = stage;
 }
 
-- (void)failWithDescription:(NSString *)description {
+- (void)failWithHeadline:(NSString *)headline
+             description:(NSString *)description {
     dispatch_async(dispatch_get_main_queue(), ^{
         if (self->_finished) return;
         self->_finished = YES;
         [self endBackgroundTime];
-        self->_headline.text = @"Jailbreak failed";
+        self->_headline.text = headline.length ? headline : @"Jailbreak failed";
         self->_headline.textColor = [UIColor systemRedColor];
         self->_detail.text = description.length ? description
                                                 : @"The guest disk was not changed.";
@@ -206,6 +209,10 @@ static void VMGuestInstallBuildProgress(
         self.navigationItem.hidesBackButton = NO;
         self.navigationController.interactivePopGestureRecognizer.enabled = YES;
     });
+}
+
+- (void)failWithDescription:(NSString *)description {
+    [self failWithHeadline:@"Jailbreak failed" description:description];
 }
 
 - (void)completeInstallAlreadyPresent:(BOOL)alreadyPresent
@@ -259,7 +266,11 @@ static void VMGuestInstallBuildProgress(
         if (status != VM_GUEST_INSTALL_BUILD_ERR_ARGUMENT) {
             NSString *why = detail[0]
                 ? [NSString stringWithUTF8String:detail] : nil;
-            [self_ failWithDescription:why ?:
+            NSString *headline =
+                status == VM_GUEST_INSTALL_BUILD_ERR_STORAGE_NOT_CLEAN
+                    ? @"Shut down this guest first"
+                    : @"Jailbreak failed";
+            [self_ failWithHeadline:headline description:why ?:
                 [NSString stringWithUTF8String:
                     vm_guest_install_build_status_text(status)]];
             return;
@@ -302,7 +313,11 @@ static void VMGuestInstallBuildProgress(
             !result.transaction.committed) {
             NSString *why = detail[0]
                 ? [NSString stringWithUTF8String:detail] : nil;
-            [self_ failWithDescription:why ?:
+            NSString *headline =
+                status == VM_GUEST_INSTALL_BUILD_ERR_STORAGE_NOT_CLEAN
+                    ? @"Shut down this guest first"
+                    : @"Jailbreak failed";
+            [self_ failWithHeadline:headline description:why ?:
                 [NSString stringWithUTF8String:
                     vm_guest_install_build_status_text(status)]];
             return;

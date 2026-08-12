@@ -6434,6 +6434,72 @@ static bool publish(destination_dir_t *destination,
 #endif
 }
 
+rootfs_work_status_t rootfs_work_validate_source(
+    const char *source_path, rootfs_work_result_t *result) {
+    host_file_t source;
+    file_stamp_t source_before;
+    file_stamp_t source_after;
+    hfs_volume_t source_volume;
+    uint8_t *buffer = NULL;
+    int error = 0;
+
+    if (!result)
+        return ROOTFS_WORK_INVALID_ARGUMENT;
+    result_reset(result);
+    host_file_init(&source);
+    if (!source_path || source_path[0] == '\0')
+        return result_fail(result, ROOTFS_WORK_INVALID_ARGUMENT,
+                           ROOTFS_WORK_STAGE_ARGUMENTS, 0,
+                           "a source path is required");
+
+    buffer = (uint8_t *)malloc(ROOTFS_WORK_MAX_IO_BUFFER);
+    if (!buffer)
+        return result_fail(result, ROOTFS_WORK_NO_MEMORY,
+                           ROOTFS_WORK_STAGE_ARGUMENTS, 0,
+                           "cannot allocate %u-byte bounded I/O buffer",
+                           ROOTFS_WORK_MAX_IO_BUFFER);
+
+#ifdef _WIN32
+    if (!windows_open_source(source_path, &source, &source_before, result))
+        goto done;
+#else
+    if (!posix_open_source(source_path, &source, &source_before, result))
+        goto done;
+#endif
+    result->source_size = source_before.size;
+    if (!hfs_validate(&source, source_before.size, &source_volume, buffer,
+                      ROOTFS_WORK_MAX_IO_BUFFER,
+                      ROOTFS_WORK_STAGE_SOURCE_VALIDATE, result))
+        goto done;
+    if (!host_file_stamp(&source, &source_after, &error)) {
+        result_fail(result, ROOTFS_WORK_SOURCE_CHANGED,
+                    ROOTFS_WORK_STAGE_SOURCE_VALIDATE, error,
+                    "cannot revalidate source identity after validation");
+        goto done;
+    }
+    if (!stamp_equal(&source_before, &source_after)) {
+        result_fail(result, ROOTFS_WORK_SOURCE_CHANGED,
+                    ROOTFS_WORK_STAGE_SOURCE_VALIDATE, 0,
+                    "source identity, size, links, or timestamps changed during validation");
+        goto done;
+    }
+    (void)snprintf(result->detail, sizeof(result->detail),
+                   "validated %" PRIu64 "-byte rootfs source image",
+                   source_before.size);
+
+done:
+    if (host_file_is_open(&source) && !host_file_close(&source, &error)) {
+        if (result->status == ROOTFS_WORK_OK)
+            result_fail(result, ROOTFS_WORK_SOURCE_CHANGED,
+                        ROOTFS_WORK_STAGE_SOURCE_VALIDATE, error,
+                        "source close failed after validation");
+        else if (result->cleanup_system_error == 0)
+            result->cleanup_system_error = error;
+    }
+    free(buffer);
+    return result->status;
+}
+
 rootfs_work_status_t rootfs_work_create(const char *source_path,
                                         const char *destination_path,
                                         const rootfs_work_options_t *options,
