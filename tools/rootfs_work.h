@@ -116,6 +116,7 @@ extern "C" {
  * in the plan, so the cap itself is 24 KiB.  The scale test runs 678.
  */
 #define ROOTFS_WORK_MAX_ENTRIES 1024u
+#define ROOTFS_WORK_MAX_FILE_REPAIRS 16u
 #define ROOTFS_WORK_MAX_ENTRY_BYTES (16u * 1024u * 1024u)
 /*
  * 4096 catalog nodes one request may TOUCH -- not a bound on the tree, which
@@ -205,6 +206,10 @@ typedef enum rootfs_work_status {
                                          /* capability and is not implemented*/
     ROOTFS_WORK_PROVISION_NO_SPACE,      /* free blocks or CNIDs exhausted   */
     ROOTFS_WORK_PROVISION_LIMIT,         /* a ROOTFS_WORK_MAX_* cap          */
+    /* An existing regular file did not match either the exact legacy or the
+     * exact desired BSD metadata tuple, or its bytes did not match the
+     * caller-pinned size and SHA-256. Decided before the first catalog write. */
+    ROOTFS_WORK_FILE_REPAIR_MISMATCH,
     ROOTFS_WORK_RANGE_ERROR,
     ROOTFS_WORK_PUBLISH_FAILED,
     ROOTFS_WORK_PUBLISH_DURABILITY_FAILED
@@ -300,6 +305,38 @@ typedef struct rootfs_work_entry {
     rootfs_work_existing_policy_t existing_policy;
 } rootfs_work_entry_t;
 
+/*
+ * One exact, in-place BSD metadata migration for an existing regular file.
+ *
+ * This is deliberately not a generic chmod primitive. The catalog record is
+ * eligible only when the data fork has exactly expected_size bytes and the
+ * exact expected_sha256 digest. Its current owner/group/permission tuple must
+ * then be either the named legacy tuple (NEEDED) or the desired tuple
+ * (SATISFIED). Any third state fails closed before a catalog byte is written.
+ * The file contents, CNID, extents, dates, Finder metadata and resource fork
+ * are never changed.
+ */
+typedef struct rootfs_work_file_repair {
+    const char *path;
+    uint64_t expected_size;
+    uint8_t expected_sha256[IOS3_SHA256_DIGEST_SIZE];
+    uint32_t expected_owner_id;
+    uint32_t expected_group_id;
+    uint16_t expected_permissions;
+    uint32_t desired_owner_id;
+    uint32_t desired_group_id;
+    uint16_t desired_permissions;
+} rootfs_work_file_repair_t;
+
+typedef enum rootfs_work_file_repair_state {
+    /* The final object or one of its parent directories does not exist. */
+    ROOTFS_WORK_FILE_REPAIR_MISSING = 0,
+    /* Exact file identity and exact legacy metadata; mutation is permitted. */
+    ROOTFS_WORK_FILE_REPAIR_NEEDED,
+    /* Exact file identity and exact desired metadata; no mutation is needed. */
+    ROOTFS_WORK_FILE_REPAIR_SATISFIED
+} rootfs_work_file_repair_state_t;
+
 typedef struct rootfs_work_options {
     /* NULL selects ROOTFS_WORK_DEFAULT_FSTAB unless preserve_fstab is true. */
     const char *fstab_line;
@@ -394,6 +431,15 @@ typedef struct rootfs_work_options {
     size_t entry_count;
 
     /*
+     * Existing regular files whose BSD metadata may be migrated in the same
+     * unpublished catalog transaction. Repairs run after new-entry planning;
+     * every repair is fully identity-checked before the first catalog write.
+     * A zero count is the default and does not open the catalog by itself.
+     */
+    const rootfs_work_file_repair_t *file_repairs;
+    size_t file_repair_count;
+
+    /*
      * HFS+ epoch seconds stamped on created records and on the modification
      * times of the folders that gain a child.  Zero selects
      * ROOTFS_WORK_DEFAULT_MAC_TIME, which keeps output reproducible.
@@ -453,6 +499,8 @@ typedef struct rootfs_work_result {
     uint32_t provision_first_cnid;
     uint32_t provision_last_cnid;
     uint32_t provision_blocks;
+    uint32_t file_repairs_applied;
+    uint32_t file_repairs_satisfied;
     /*
      * B-tree nodes the request had to add, reported rather than absorbed: a
      * split changes the catalog's shape, and a caller comparing two work
@@ -484,6 +532,18 @@ typedef struct rootfs_work_result {
  */
 rootfs_work_status_t rootfs_work_validate_source(
     const char *source_path, rootfs_work_result_t *result);
+
+/*
+ * Read-only preflight for one exact file repair. The same HFS validation,
+ * catalog audit, path resolution, data-fork identity and BSD metadata checks
+ * are repeated by rootfs_work_create(). No destination or temporary file is
+ * created. A missing path is an OK result with state MISSING; an unexpected
+ * object is a named mismatch/unsupported/corruption refusal.
+ */
+rootfs_work_status_t rootfs_work_probe_file_repair(
+    const char *source_path, const rootfs_work_file_repair_t *repair,
+    rootfs_work_file_repair_state_t *state,
+    rootfs_work_result_t *result);
 
 /*
  * Create destination_path.  The destination must not exist.  On success the

@@ -596,26 +596,28 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
         return false;
     }
 
-    /* A capacity repair and a first install have disjoint journals but replace
-     * the same live image. Recover the repair first: at its middle rename the
-     * install marker remains valid while the live path is temporarily absent,
-     * so probing the install transaction first would reject a state the repair
-     * journal can resolve exactly. */
+    /* Capacity and Cydia-metadata maintenance have disjoint journals but
+     * replace the same live image. Their recovery layer inspects which one
+     * currently owns that pathname and runs it first; a fixed order is wrong
+     * once either transaction can be interrupted between the two renames. */
+    vm_guest_install_result_t guest_privilege;
     vm_guest_install_result_t guest_storage;
-    char guest_storage_detail[VM_FW_BOOT_DETAIL_CAPACITY] = {0};
-    vm_guest_install_status_t guest_storage_status =
-        vm_guest_storage_recover(paths->work, &guest_storage,
-                                 guest_storage_detail,
-                                 sizeof guest_storage_detail);
-    if (guest_storage_status != VM_GUEST_INSTALL_OK) {
+    char guest_maintenance_detail[VM_FW_BOOT_DETAIL_CAPACITY] = {0};
+    vm_guest_install_status_t guest_maintenance_status =
+        vm_guest_maintenance_recover(paths->work, &guest_privilege,
+                                     &guest_storage,
+                                     guest_maintenance_detail,
+                                     sizeof guest_maintenance_detail);
+    if (guest_maintenance_status != VM_GUEST_INSTALL_OK) {
         (void)snprintf(report->detail, sizeof report->detail,
-                       "Guest-storage recovery refused (%s): %.180s",
-                       vm_guest_install_status_text(guest_storage_status),
-                       guest_storage_detail[0] ? guest_storage_detail
-                                               : "no safe recovery exists");
+                       "Guest-maintenance recovery refused (%s): %.180s",
+                       vm_guest_install_status_text(guest_maintenance_status),
+                       guest_maintenance_detail[0]
+                           ? guest_maintenance_detail
+                           : "no safe recovery exists");
         report->detail[sizeof report->detail - 1u] = '\0';
         set_detail(report->summary, sizeof report->summary,
-                   "guest-storage recovery required");
+                   "guest-maintenance recovery required");
         return false;
     }
 

@@ -219,9 +219,16 @@ and overlay generation remains future work after the first cold-boot slice.
 Backend failure pauses the VM visibly; it must never be converted to zero-filled
 successful I/O.
 
-The iOS app's later 2 GiB capacity migration uses its own storage transaction,
-separate from the package-install transaction even though both ultimately replace
-the same live image. Before that transaction becomes durable, a read-only pass
+The iOS app has three disjoint disk-replacement namespaces: the original package
+install, 2 GiB capacity maintenance, and a versioned repair for the exact legacy
+Cydia executable metadata. They all ultimately replace the same live image.
+Boot therefore does not use a fixed maintenance order: it first detects which
+journal/backup currently owns the temporarily missing live pathname, recovers
+that transaction, then recovers the inert or committed namespace. Two active
+maintenance transactions are contradictory and stop boot rather than being
+guessed through.
+
+Before either maintenance transaction becomes durable, a read-only pass
 validates the source HFS geometry, allocation bitmap, primary/alternate volume
 headers, clean-unmount bit, and host-file identity. A normal emulator checkpoint
 captures a mounted, legitimately dirty unjournaled filesystem and is therefore
@@ -229,6 +236,16 @@ not an acceptable migration source. The user must complete the guest's own
 power-off sequence first. The app deliberately refuses before staging instead
 of guessing a host-side filesystem repair; the full validation is repeated while
 the clone is made to retain the race gate.
+
+The Cydia repair is not a general host-side `chmod`. It resolves only
+`/Applications/Cydia.app/Cydia_`, requires the pinned 320,704-byte data fork and
+its exact SHA-256, and accepts only root:root `0755` as the legacy tuple or
+root:root `06755` as the desired tuple. A different file, type, byte, owner,
+group, or mode refuses during the in-memory catalog plan before the first write.
+Only the BSD owner/group/mode fields change in the unpublished clone; file bytes,
+CNID, extents, dates, Finder metadata, and resource fork remain untouched. A
+separate marker records this migration because disk capacity and executable
+privileges are independent version axes.
 
 `/dev/rmd0` is a separate raw-character path through `_uiomove64`/`_copypv`, not
 one of the two strategy calls. The raw bridge reproduces the reached

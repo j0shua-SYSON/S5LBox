@@ -38,6 +38,15 @@ extern "C" {
 #define VM_GUEST_STORAGE_MARKER_TMP      "guest.storage-v1.partial"
 #define VM_GUEST_STORAGE_JOURNAL_FILE    "guest.storage-v1.transaction"
 #define VM_GUEST_STORAGE_JOURNAL_TMP     "guest.storage-v1.transaction.partial"
+/* A third namespace repairs the exact Cydia executable metadata installed by
+ * older v1 plans. It cannot share the storage marker: a disk can already be
+ * 2 GiB and still carry the historical 0755 mode. */
+#define VM_GUEST_PRIVILEGE_BACKUP_FILE     "rootfs-work.pre-cydia-privileges-v1"
+#define VM_GUEST_PRIVILEGE_STAGE_DIRECTORY "guest.cydia-privileges-v1.stage"
+#define VM_GUEST_PRIVILEGE_MARKER_FILE     "guest.cydia-privileges-v1"
+#define VM_GUEST_PRIVILEGE_MARKER_TMP      "guest.cydia-privileges-v1.partial"
+#define VM_GUEST_PRIVILEGE_JOURNAL_FILE    "guest.cydia-privileges-v1.transaction"
+#define VM_GUEST_PRIVILEGE_JOURNAL_TMP     "guest.cydia-privileges-v1.transaction.partial"
 /* A filesystem replacement can never resume a CPU/RAM image captured against
  * the old disk. The transaction removes only this one-shot authority; inert
  * checkpoint payloads are harmless and can be replaced by the next save. */
@@ -125,9 +134,9 @@ vm_guest_install_publish(const char *work_directory,
 /* Crash-safe disk replacement for capacity-only maintenance. The digest is
  * the already-committed guest-install manifest: it binds the repair record to
  * the installation whose live disk was copied, while leaving that installation
- * marker continuously authoritative. Recover this transaction before calling
- * vm_guest_install_recover() at boot because both transactions share the live
- * image path. */
+ * marker continuously authoritative. Boot callers recover both maintenance
+ * namespaces through vm_guest_maintenance_recover() before ordinary install
+ * recovery because every transaction shares the live image path. */
 bool vm_guest_storage_stage_image_path(char *out, size_t capacity,
                                        const char *work_directory);
 vm_guest_install_status_t
@@ -144,6 +153,47 @@ vm_guest_storage_publish(const char *work_directory,
                              VM_GUEST_INSTALL_SHA256_SIZE],
                          vm_guest_install_result_t *result,
                          char *detail, size_t detail_capacity);
+
+/* Crash-safe replacement for the versioned Cydia executable-metadata repair.
+ * Use vm_guest_maintenance_recover() at boot: either this transaction or the
+ * storage transaction may temporarily own the shared live-disk pathname. */
+bool vm_guest_privilege_stage_image_path(char *out, size_t capacity,
+                                         const char *work_directory);
+vm_guest_install_status_t
+vm_guest_privilege_prepare_stage(const char *work_directory,
+                                 vm_guest_install_result_t *result,
+                                 char *detail, size_t detail_capacity);
+vm_guest_install_status_t
+vm_guest_privilege_recover(const char *work_directory,
+                           vm_guest_install_result_t *result,
+                           char *detail, size_t detail_capacity);
+
+/* Recover both maintenance namespaces in the only safe dynamic order. If one
+ * journal/backup currently owns the shared live pathname, it runs first; two
+ * simultaneously active maintenance transactions are contradictory. Call
+ * this before ordinary install recovery and before opening the live disk. */
+vm_guest_install_status_t
+vm_guest_maintenance_recover(const char *work_directory,
+                             vm_guest_install_result_t *privilege_result,
+                             vm_guest_install_result_t *storage_result,
+                             char *detail, size_t detail_capacity);
+vm_guest_install_status_t
+vm_guest_privilege_publish(const char *work_directory,
+                           const uint8_t manifest_sha256[
+                               VM_GUEST_INSTALL_SHA256_SIZE],
+                           vm_guest_install_result_t *result,
+                           char *detail, size_t detail_capacity);
+
+/* Publish only the versioned record when a read-only disk probe proved that
+ * the exact desired metadata is already present. The matching v1 install
+ * marker remains the authority and is checked again before this record is
+ * made durable; no CPU checkpoint is invalidated because no disk changed. */
+vm_guest_install_status_t
+vm_guest_privilege_confirm(const char *work_directory,
+                           const uint8_t manifest_sha256[
+                               VM_GUEST_INSTALL_SHA256_SIZE],
+                           vm_guest_install_result_t *result,
+                           char *detail, size_t detail_capacity);
 
 #if defined(S5LBOX_GUEST_INSTALL_TESTING)
 /* Stop publish after durable boundary 1..4: journal, backup, new live image,

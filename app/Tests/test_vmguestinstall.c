@@ -83,6 +83,14 @@ static bool storage_stage_path_for(char *out, size_t capacity,
            join_path(out, capacity, stage, name);
 }
 
+static bool privilege_stage_path_for(char *out, size_t capacity,
+                                     const char *name) {
+    char stage[1400];
+    return path_for(stage, sizeof stage,
+                    VM_GUEST_PRIVILEGE_STAGE_DIRECTORY) &&
+           join_path(out, capacity, stage, name);
+}
+
 static bool file_equals(const char *path, const char *wanted) {
     char bytes[64];
     memset(bytes, 0, sizeof bytes);
@@ -113,6 +121,11 @@ static void remove_fixture_artifacts(void) {
         VM_GUEST_STORAGE_MARKER_TMP,
         VM_GUEST_STORAGE_JOURNAL_FILE,
         VM_GUEST_STORAGE_JOURNAL_TMP,
+        VM_GUEST_PRIVILEGE_BACKUP_FILE,
+        VM_GUEST_PRIVILEGE_MARKER_FILE,
+        VM_GUEST_PRIVILEGE_MARKER_TMP,
+        VM_GUEST_PRIVILEGE_JOURNAL_FILE,
+        VM_GUEST_PRIVILEGE_JOURNAL_TMP,
         VM_GUEST_INSTALL_RESUME_ONCE_FILE,
         VM_GUEST_INSTALL_RESUME_ONCE_TMP,
     };
@@ -125,6 +138,11 @@ static void remove_fixture_artifacts(void) {
                                VM_GUEST_INSTALL_NEXT_FILE))
         (void)remove(path);
     if (path_for(path, sizeof path, VM_GUEST_STORAGE_STAGE_DIRECTORY))
+        (void)remove_directory(path);
+    if (privilege_stage_path_for(path, sizeof path,
+                                 VM_GUEST_INSTALL_NEXT_FILE))
+        (void)remove(path);
+    if (path_for(path, sizeof path, VM_GUEST_PRIVILEGE_STAGE_DIRECTORY))
         (void)remove_directory(path);
     for (size_t i = 0u; i < sizeof names / sizeof names[0]; i++) {
         if (!path_for(path, sizeof path, names[i])) continue;
@@ -540,6 +558,242 @@ static void test_storage_recovery_preserves_install_authority(void) {
     }
 }
 
+static void test_privilege_recovery_preserves_install_authority(void) {
+    for (unsigned boundary = 1u; boundary <= 4u; boundary++) {
+        uint8_t digest[VM_GUEST_INSTALL_SHA256_SIZE];
+        fill_digest(digest, 93u);
+        CHECK(prepare_pair(),
+              "could not prepare install before privilege boundary %u",
+              boundary);
+        vm_guest_install_result_t result;
+        char detail[256];
+        CHECK(vm_guest_install_publish(FIXTURE_DIR, digest, &result,
+                                       detail, sizeof detail) ==
+                  VM_GUEST_INSTALL_OK && result.committed,
+              "could not commit install before privilege boundary %u: %s",
+              boundary, detail);
+
+        CHECK(vm_guest_privilege_prepare_stage(FIXTURE_DIR, &result,
+                                               detail, sizeof detail) ==
+                  VM_GUEST_INSTALL_OK && !result.committed,
+              "could not prepare privilege boundary %u: %s",
+              boundary, detail);
+        char next[1400];
+        char resume[1400];
+        CHECK(vm_guest_privilege_stage_image_path(next, sizeof next,
+                                                  FIXTURE_DIR) &&
+              path_for(resume, sizeof resume,
+                       VM_GUEST_INSTALL_RESUME_ONCE_FILE) &&
+              write_bytes(next, "privileged-rootfs") &&
+              write_bytes(resume, "resume pre-repair disk\n"),
+              "could not seed privilege boundary %u", boundary);
+
+        vm_guest_install_test_interrupt_after(boundary);
+        vm_guest_install_status_t status = vm_guest_privilege_publish(
+            FIXTURE_DIR, digest, &result, detail, sizeof detail);
+        vm_guest_install_test_interrupt_after(0u);
+        CHECK(status == VM_GUEST_INSTALL_ERR_INTERRUPTED,
+              "privilege boundary %u returned %s, not interruption",
+              boundary, vm_guest_install_status_text(status));
+
+        uint8_t install_digest[VM_GUEST_INSTALL_SHA256_SIZE];
+        CHECK(vm_guest_install_probe(FIXTURE_DIR, install_digest,
+                                     detail, sizeof detail) ==
+                  VM_GUEST_INSTALL_PROBE_VALID &&
+              memcmp(install_digest, digest, sizeof install_digest) == 0,
+              "privilege boundary %u removed or changed install authority",
+              boundary);
+
+        status = vm_guest_privilege_recover(FIXTURE_DIR, &result,
+                                             detail, sizeof detail);
+        CHECK(status == VM_GUEST_INSTALL_OK && result.committed &&
+              result.cleanup_complete && result.has_manifest &&
+              memcmp(result.manifest_sha256, digest, sizeof digest) == 0,
+              "privilege boundary %u did not recover to a clean commit: %s",
+              boundary, detail);
+        char live[1400];
+        CHECK(path_for(live, sizeof live, VM_GUEST_INSTALL_LIVE_FILE) &&
+              file_equals(live, "privileged-rootfs") && !exists(resume),
+              "privilege boundary %u published wrong bytes or kept resume",
+              boundary);
+        status = vm_guest_install_recover(FIXTURE_DIR, &result,
+                                          detail, sizeof detail);
+        CHECK(status == VM_GUEST_INSTALL_OK && result.committed &&
+              memcmp(result.manifest_sha256, digest, sizeof digest) == 0,
+              "install authority failed after privilege boundary %u: %s",
+              boundary, detail);
+    }
+}
+
+static void test_privilege_confirmation_is_marker_only(void) {
+    uint8_t digest[VM_GUEST_INSTALL_SHA256_SIZE];
+    uint8_t other[VM_GUEST_INSTALL_SHA256_SIZE];
+    fill_digest(digest, 117u);
+    fill_digest(other, 118u);
+    CHECK(prepare_pair(), "could not prepare marker-only confirmation");
+    vm_guest_install_result_t result;
+    char detail[256];
+    CHECK(vm_guest_install_publish(FIXTURE_DIR, digest, &result,
+                                   detail, sizeof detail) ==
+              VM_GUEST_INSTALL_OK && result.committed,
+          "could not commit install before marker-only confirmation: %s",
+          detail);
+    char resume[1400];
+    CHECK(path_for(resume, sizeof resume,
+                   VM_GUEST_INSTALL_RESUME_ONCE_FILE) &&
+          write_bytes(resume, "resume current disk\n"),
+          "could not seed current-disk resume authority");
+
+    vm_guest_install_status_t status = vm_guest_privilege_confirm(
+        FIXTURE_DIR, digest, &result, detail, sizeof detail);
+    CHECK(status == VM_GUEST_INSTALL_OK && result.committed &&
+          result.cleanup_complete && result.has_manifest &&
+          memcmp(result.manifest_sha256, digest, sizeof digest) == 0,
+          "marker-only confirmation failed: %s / %s",
+          vm_guest_install_status_text(status), detail);
+    char live[1400];
+    CHECK(path_for(live, sizeof live, VM_GUEST_INSTALL_LIVE_FILE) &&
+          file_equals(live, "new-rootfs") &&
+          file_equals(resume, "resume current disk\n"),
+          "marker-only confirmation changed the disk or invalidated resume");
+
+    status = vm_guest_privilege_confirm(FIXTURE_DIR, digest, &result,
+                                        detail, sizeof detail);
+    CHECK(status == VM_GUEST_INSTALL_OK && result.committed,
+          "marker-only confirmation was not idempotent: %s", detail);
+    status = vm_guest_privilege_confirm(FIXTURE_DIR, other, &result,
+                                        detail, sizeof detail);
+    CHECK(status == VM_GUEST_INSTALL_ERR_STATE,
+          "different confirmation identity replaced the committed marker");
+}
+
+static void test_maintenance_recovery_chooses_the_active_owner(void) {
+    uint8_t digest[VM_GUEST_INSTALL_SHA256_SIZE];
+    fill_digest(digest, 139u);
+
+    /* A committed privilege marker must not inspect the temporarily missing
+     * live path before the active storage journal puts that path back. */
+    CHECK(prepare_pair(), "could not prepare active-storage ordering case");
+    vm_guest_install_result_t install;
+    vm_guest_install_result_t privilege;
+    vm_guest_install_result_t storage;
+    char detail[256];
+    CHECK(vm_guest_install_publish(FIXTURE_DIR, digest, &install,
+                                   detail, sizeof detail) ==
+              VM_GUEST_INSTALL_OK && install.committed &&
+          vm_guest_privilege_confirm(FIXTURE_DIR, digest, &privilege,
+                                     detail, sizeof detail) ==
+              VM_GUEST_INSTALL_OK && privilege.committed &&
+          vm_guest_storage_prepare_stage(FIXTURE_DIR, &storage,
+                                         detail, sizeof detail) ==
+              VM_GUEST_INSTALL_OK,
+          "could not seed active storage with committed privilege: %s",
+          detail);
+    char next[1400];
+    CHECK(vm_guest_storage_stage_image_path(next, sizeof next, FIXTURE_DIR) &&
+          write_bytes(next, "grown-rootfs"),
+          "could not write active-storage candidate");
+    vm_guest_install_test_interrupt_after(2u);
+    CHECK(vm_guest_storage_publish(FIXTURE_DIR, digest, &storage,
+                                   detail, sizeof detail) ==
+              VM_GUEST_INSTALL_ERR_INTERRUPTED,
+          "storage transaction did not stop with live temporarily absent");
+    vm_guest_install_test_interrupt_after(0u);
+    CHECK(vm_guest_maintenance_recover(FIXTURE_DIR, &privilege, &storage,
+                                       detail, sizeof detail) ==
+              VM_GUEST_INSTALL_OK && privilege.committed &&
+          storage.committed,
+          "dynamic recovery did not run active storage first: %s", detail);
+    char live[1400];
+    CHECK(path_for(live, sizeof live, VM_GUEST_INSTALL_LIVE_FILE) &&
+          file_equals(live, "grown-rootfs"),
+          "active-storage ordering published the wrong live disk");
+
+    /* The converse: a committed storage marker must wait while the active
+     * privilege journal restores the shared live path. */
+    CHECK(prepare_pair(), "could not prepare active-privilege ordering case");
+    CHECK(vm_guest_install_publish(FIXTURE_DIR, digest, &install,
+                                   detail, sizeof detail) ==
+              VM_GUEST_INSTALL_OK && install.committed &&
+          vm_guest_storage_prepare_stage(FIXTURE_DIR, &storage,
+                                         detail, sizeof detail) ==
+              VM_GUEST_INSTALL_OK &&
+          vm_guest_storage_stage_image_path(next, sizeof next, FIXTURE_DIR) &&
+          write_bytes(next, "grown-rootfs") &&
+          vm_guest_storage_publish(FIXTURE_DIR, digest, &storage,
+                                   detail, sizeof detail) ==
+              VM_GUEST_INSTALL_OK && storage.committed &&
+          vm_guest_privilege_prepare_stage(FIXTURE_DIR, &privilege,
+                                           detail, sizeof detail) ==
+              VM_GUEST_INSTALL_OK &&
+          vm_guest_privilege_stage_image_path(next, sizeof next,
+                                              FIXTURE_DIR) &&
+          write_bytes(next, "privileged-rootfs"),
+          "could not seed active privilege with committed storage: %s",
+          detail);
+    vm_guest_install_test_interrupt_after(2u);
+    CHECK(vm_guest_privilege_publish(FIXTURE_DIR, digest, &privilege,
+                                     detail, sizeof detail) ==
+              VM_GUEST_INSTALL_ERR_INTERRUPTED,
+          "privilege transaction did not stop with live temporarily absent");
+    vm_guest_install_test_interrupt_after(0u);
+    CHECK(vm_guest_maintenance_recover(FIXTURE_DIR, &privilege, &storage,
+                                       detail, sizeof detail) ==
+              VM_GUEST_INSTALL_OK && privilege.committed &&
+          storage.committed,
+          "dynamic recovery did not run active privilege first: %s", detail);
+    CHECK(file_equals(live, "privileged-rootfs"),
+          "active-privilege ordering published the wrong live disk");
+}
+
+static void test_maintenance_recovery_refuses_competing_owners(void) {
+    char live[1400];
+    char privilege_journal[1400];
+    char storage_journal[1400];
+    char privilege_backup[1400];
+    char storage_backup[1400];
+    char detail[256];
+    vm_guest_install_result_t privilege;
+    vm_guest_install_result_t storage;
+
+    remove_fixture_artifacts();
+    CHECK(path_for(live, sizeof live, VM_GUEST_INSTALL_LIVE_FILE) &&
+          path_for(privilege_journal, sizeof privilege_journal,
+                   VM_GUEST_PRIVILEGE_JOURNAL_FILE) &&
+          path_for(storage_journal, sizeof storage_journal,
+                   VM_GUEST_STORAGE_JOURNAL_FILE) &&
+          write_bytes(live, "original-rootfs") &&
+          write_bytes(privilege_journal, "claimed\n") &&
+          write_bytes(storage_journal, "claimed\n"),
+          "could not seed two competing maintenance journals");
+    CHECK(vm_guest_maintenance_recover(FIXTURE_DIR, &privilege, &storage,
+                                       detail, sizeof detail) ==
+              VM_GUEST_INSTALL_ERR_STATE,
+          "two maintenance journals were guessed through: %s", detail);
+    CHECK(file_equals(live, "original-rootfs") &&
+          file_equals(privilege_journal, "claimed\n") &&
+          file_equals(storage_journal, "claimed\n"),
+          "journal conflict changed the live disk or either owner record");
+
+    remove_fixture_artifacts();
+    CHECK(path_for(privilege_backup, sizeof privilege_backup,
+                   VM_GUEST_PRIVILEGE_BACKUP_FILE) &&
+          path_for(storage_backup, sizeof storage_backup,
+                   VM_GUEST_STORAGE_BACKUP_FILE) &&
+          write_bytes(privilege_backup, "privilege-original") &&
+          write_bytes(storage_backup, "storage-original"),
+          "could not seed two orphaned maintenance backups");
+    CHECK(vm_guest_maintenance_recover(FIXTURE_DIR, &privilege, &storage,
+                                       detail, sizeof detail) ==
+              VM_GUEST_INSTALL_ERR_STATE,
+          "two orphaned maintenance backups were guessed through: %s",
+          detail);
+    CHECK(!exists(live) &&
+          file_equals(privilege_backup, "privilege-original") &&
+          file_equals(storage_backup, "storage-original"),
+          "orphan-backup conflict restored an arbitrary owner");
+}
+
 int main(void) {
     printf("== guest install transaction ==\n");
     if (!make_directory(FIXTURE_DIR)) {
@@ -560,6 +814,12 @@ int main(void) {
           strstr(stage_image, VM_GUEST_STORAGE_STAGE_DIRECTORY) != NULL &&
           strstr(stage_image, VM_GUEST_INSTALL_NEXT_FILE) != NULL,
           "storage stage-image path names the wrong file: %s", stage_image);
+    CHECK(vm_guest_privilege_stage_image_path(stage_image,
+                                              sizeof stage_image,
+                                              FIXTURE_DIR) &&
+          strstr(stage_image, VM_GUEST_PRIVILEGE_STAGE_DIRECTORY) != NULL &&
+          strstr(stage_image, VM_GUEST_INSTALL_NEXT_FILE) != NULL,
+          "privilege stage-image path names the wrong file: %s", stage_image);
 
     test_stage_preparation();
     test_normal_and_idempotent();
@@ -569,6 +829,10 @@ int main(void) {
     test_malformed_records_fail_closed();
     test_committed_cleanup_failure_is_distinct();
     test_storage_recovery_preserves_install_authority();
+    test_privilege_recovery_preserves_install_authority();
+    test_privilege_confirmation_is_marker_only();
+    test_maintenance_recovery_chooses_the_active_owner();
+    test_maintenance_recovery_refuses_competing_owners();
 
     vm_guest_install_test_interrupt_after(0u);
     remove_fixture_artifacts();

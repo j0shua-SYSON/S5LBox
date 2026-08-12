@@ -56,11 +56,14 @@ typedef void (*vm_guest_install_build_progress_t)(
 typedef struct {
     bool already_installed;
     bool storage_upgraded;
+    bool cydia_privileges_repaired;
+    bool cydia_privileges_verified;
     size_t historical_snapshots;
     vm_guest_rootfs_stats_t plan;
     rootfs_work_result_t rootfs;
     vm_guest_install_result_t transaction;
     vm_guest_install_result_t storage_transaction;
+    vm_guest_install_result_t privilege_transaction;
     uint8_t manifest_sha256[VM_GUEST_INSTALL_SHA256_SIZE];
 } vm_guest_install_build_result_t;
 
@@ -78,6 +81,13 @@ typedef struct {
  * to have completed its own power-off first; the read-only source preflight
  * refuses before a storage transaction is staged otherwise. A machine already
  * at the minimum is idempotent success with no disk rewrite.
+ *
+ * A committed older install may also carry Cydia_'s historical root:root 0755
+ * metadata. The builder probes the exact 320704-byte pinned executable by
+ * SHA-256 and accepts only that legacy tuple or root:root 06755. A needed
+ * repair is applied to an unpublished clone under its own versioned recovery
+ * journal (or folded into the same clone when storage also needs growth).
+ * Different bytes or a third metadata tuple are refused, never normalized.
  */
 vm_guest_install_build_status_t
 vm_guest_install_build_from_directory(

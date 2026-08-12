@@ -513,7 +513,7 @@ titleForFooterInSection:(NSInteger)section {
             cell.textLabel.text = @"Jailbreak…";
             cell.accessibilityIdentifier = @"s5lbox.settings.jailbreak";
             cell.detailTextLabel.text = self.guestInstallRequest
-                ? @"Install Cydia, or expand an older Cydia guest to a 2 GiB disk"
+                ? @"Install Cydia, or repair and expand a compatible older guest"
                 : @"Return to Machines and open Settings there before installing";
             cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
             cell.selectionStyle = UITableViewCellSelectionStyleDefault;
@@ -858,8 +858,10 @@ didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
         ? @"For a new install, this downloads exact, pinned iPhone OS 3 "
            @"packages from the publisher's archive and replaces only the "
            @"selected virtual machine's writable disk. S5LBox does not bundle "
-           @"the packages. An older Cydia machine is instead copied and "
-           @"expanded to 2 GiB without redownloading or deleting its guest data.\n\n"
+           @"the packages. A compatible older Cydia machine is instead copied "
+           @"to expand it to 2 GiB and, when needed, repair the exact known "
+           @"legacy Cydia executable permissions without redownloading or "
+           @"deleting guest data. Unexpected files are refused.\n\n"
            @"Inside the emulated guest, signature enforcement is disabled and "
            @"Cydia is installed on the next cold boot. It does not modify or "
            @"jailbreak the host iPhone. Historical snapshots of that machine "

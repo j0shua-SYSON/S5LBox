@@ -1099,7 +1099,72 @@ not a safe migration strategy.
 Cydia did complete its first-run `Reorganizing` phase and respring on the grown
 physical guest. Its next launch then failed during archive cleanup with
 `Could not open lock file /var/cache/apt/archives/lock - open (13 Permission
-denied)`. Therefore the capacity defect is fixed, but a real package install is
-still blocked by a separate privilege or sandbox defect. Full package-manager
-operation must not be claimed until that denial is diagnosed, corrected, and
-reproduced on a stock-compatible build.
+denied)`. Capacity was therefore fixed, but a real package install remained
+blocked. The next section replaces the earlier vague “privilege or sandbox”
+description with the first byte-backed cause; it does not yet prove that this is
+the only cause.
+
+## 2026-08-12: versioned repair for the older Cydia permission defect
+
+The retained physical guest's own log contained three permission failures:
+
+```text
+mktemp: failed to create directory via template `/var/stash/Applications.XXXXXX': Permission denied
+cp: cannot create directory `': No such file or directory
+E:[Could not open lock file /var/cache/apt/archives/lock - open (13 Permission denied)]
+```
+
+Read-only catalog inspection then found the decisive precondition. The guest's
+`/Applications/Cydia.app/Cydia_` was uid 0, gid 0, mode `0100755`. Cydia is
+launched as mobile, so without the package's setuid/setgid bits it never becomes
+root and cannot write `/var/stash` or `/var/cache/apt/archives`. This guest was
+created by `069659d`; the explicit first-boot `chown 0:0`, `chmod 6755`, and
+setuid/setgid verification arrived later in `330a614`. The old v1 install marker
+made subsequent builds idempotent, so the later repair script never migrated
+that already-committed machine. This is a versioning defect, not evidence that
+the current fresh-install provisioner dropped the bits.
+
+The executable identity was checked from both sides. Extracting `Cydia_` from
+the exact pinned `cydia_1.0.3044-66_iphoneos-arm.deb` and extracting it from the
+physical guest each produced 320,704 bytes and SHA-256:
+
+```text
+4CA3F70FE5CB67737688AB0614C686FE18B124844369848B76846F80A52F6324
+```
+
+The implemented migration is intentionally much narrower than a general image
+`chmod`:
+
+- the absolute path, regular-file type, 320,704-byte size, and SHA-256 must all
+  match;
+- current BSD metadata must be exactly root:root `0755` (repair needed) or
+  root:root `06755` (already satisfied); any third tuple refuses;
+- only owner, group, and mode fields change in an unpublished HFS clone;
+  contents, CNID, extents, timestamps, Finder metadata, and resource fork do
+  not change;
+- `guest.cydia-privileges-v1` has its own backup, stage, journal, temporary
+  records, and commit marker because disk capacity and executable privileges
+  are independent migrations;
+- storage growth and permission repair can share one clone, while dynamic boot
+  recovery first resolves whichever maintenance journal currently owns the
+  temporarily missing live-disk pathname. Two active maintenance journals fail
+  closed.
+
+Portable evidence is green: the catalog suite passes 861 checks including
+wrong hash, wrong metadata, missing path, immutable source, and independently
+read root:root `06755`; the transaction suite passes 255 checks including all
+four durable rename boundaries and both active-maintenance recovery orders. An
+exact-binary integration built a legacy root:root `0755` file into a retained
+2 GiB HFSX image, ran the real builder, published one repair, independently
+re-probed the live result as satisfied, and then proved the next builder call
+idempotent: 2,126 checks, zero failures. Full normal and static/JIT-gated suites
+pass 67/67 and 72/72.
+
+Brutal-honesty boundary: this implementation has not yet been built by hosted
+iOS CI, installed on the physical test phone, or used to complete a real Cydia
+package transaction. The retained post-failure image is dirty, so the new
+preflight correctly refuses it until the guest performs a real power-off; the
+code does not clear the unmount bit or run an unsafe speculative repair. The
+missing-setuid defect is diagnosed and its exact migration is host-tested. A
+second Seatbelt, package-manager, or guest-state defect may still appear after
+physical validation. No kernel MAC-policy bypass was added.

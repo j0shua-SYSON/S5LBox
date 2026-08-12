@@ -1635,6 +1635,24 @@ static int run_provision_existing_image(
                                     growth, 1);
 }
 
+static int run_repair_existing_image(
+    run_t *run, const uint8_t *image, size_t size, const char *tag,
+    const rootfs_work_file_repair_t *repair) {
+    memset(run, 0, sizeof(*run));
+    if (!make_path(run->source, sizeof(run->source), tag) ||
+        !make_path(run->destination, sizeof(run->destination), tag) ||
+        !write_file(run->source, image, size))
+        return 0;
+    run->options.preserve_fstab = true;
+    run->options.file_repairs = repair;
+    run->options.file_repair_count = 1u;
+    run->status = rootfs_work_create(run->source, run->destination,
+                                     &run->options, &run->result);
+    if (run->status == ROOTFS_WORK_OK)
+        run->output = read_file(run->destination, &run->output_size);
+    return 1;
+}
+
 static int run_provision(run_t *run, const fixture_t *fx, const char *tag,
                          const rootfs_work_entry_t *entries, size_t count,
                          uint64_t growth) {
@@ -1670,6 +1688,7 @@ static int is_provision_status(rootfs_work_status_t status) {
     case ROOTFS_WORK_PROVISION_BTREE_FULL:
     case ROOTFS_WORK_PROVISION_NO_SPACE:
     case ROOTFS_WORK_PROVISION_LIMIT:
+    case ROOTFS_WORK_FILE_REPAIR_MISMATCH:
         return 1;
     default:
         return 0;
@@ -2326,6 +2345,176 @@ static void test_existing_symlink_reuse_requires_the_same_target(void) {
                        "reuse-identical-symlink over a regular file");
         run_release(&third);
     }
+    run_release(&first);
+    free(fx);
+}
+
+static void test_exact_file_metadata_repair(void) {
+    static const char body[] = "known MobileCydia executable bytes";
+    fixture_t *fx = fx_create(FX_DATA_BLOCKS - 1u);
+    rootfs_work_entry_t entry;
+    rootfs_work_file_repair_t repair;
+    rootfs_work_file_repair_t wrong;
+    rootfs_work_file_repair_state_t state;
+    rootfs_work_result_t probe;
+    run_t first;
+    run_t second;
+    run_t refusal;
+    tr_volume_t vol;
+    tr_record_t file;
+
+    if (!fx) {
+        CHECK(0, "fixture allocation failed");
+        return;
+    }
+    entry_file(&entry, "/alpha/MobileCydia", body, sizeof(body) - 1u,
+               0755u);
+    entry.owner_id = 0u;
+    entry.group_id = 0u;
+    if (!run_provision(&first, fx, "repairbase", &entry, 1u, 0u)) {
+        CHECK(0, "metadata-repair base setup failed");
+        free(fx);
+        return;
+    }
+    expect_success(&first, "metadata-repair base");
+    memset(&repair, 0, sizeof repair);
+    repair.path = "/alpha/MobileCydia";
+    repair.expected_size = sizeof(body) - 1u;
+    CHECK(ios3_sha256((const uint8_t *)body, sizeof(body) - 1u,
+                      repair.expected_sha256),
+          "could not hash metadata-repair identity");
+    repair.expected_owner_id = 0u;
+    repair.expected_group_id = 0u;
+    repair.expected_permissions = 0755u;
+    repair.desired_owner_id = 0u;
+    repair.desired_group_id = 0u;
+    repair.desired_permissions = 06755u;
+
+    state = ROOTFS_WORK_FILE_REPAIR_MISSING;
+    CHECK(rootfs_work_probe_file_repair(first.destination, &repair, &state,
+                                        &probe) == ROOTFS_WORK_OK &&
+          state == ROOTFS_WORK_FILE_REPAIR_NEEDED &&
+          probe.file_repairs_applied == 0u &&
+          probe.file_repairs_satisfied == 0u,
+          "exact legacy file did not probe as repairable: %s at %s (%s)",
+          rootfs_work_status_name(probe.status),
+          rootfs_work_stage_name(probe.stage), probe.detail);
+
+    if (!run_repair_existing_image(&second, first.output,
+                                   first.output_size, "repairapply", &repair)) {
+        CHECK(0, "metadata-repair apply setup failed");
+        run_release(&first);
+        free(fx);
+        return;
+    }
+    expect_success(&second, "apply exact metadata repair");
+    CHECK(second.result.file_repairs_applied == 1u &&
+          second.result.file_repairs_satisfied == 0u &&
+          second.result.provision_entries == 0u &&
+          second.result.provision_blocks == 0u,
+          "repair result says applied=%u satisfied=%u entries=%u blocks=%u",
+          second.result.file_repairs_applied,
+          second.result.file_repairs_satisfied,
+          second.result.provision_entries, second.result.provision_blocks);
+    if (second.output && tr_open(second.output, second.output_size, &vol)) {
+        CHECK(tr_find(&vol, FX_ALPHA, "MobileCydia", &file),
+              "repaired file vanished");
+        CHECK(file.type == 2u && get_be32(file.data + 32u) == 0u &&
+              get_be32(file.data + 36u) == 0u &&
+              get_be16(file.data + 42u) == (0100000u | 06755u),
+              "repaired file is uid %u gid %u mode 0%o",
+              get_be32(file.data + 32u), get_be32(file.data + 36u),
+              get_be16(file.data + 42u));
+        CHECK(get_be64(file.data + 88u) == sizeof(body) - 1u,
+              "repair changed the data-fork logical size");
+        tr_close(&vol);
+    } else {
+        CHECK(0, "repaired image could not be independently opened");
+    }
+    {
+        size_t source_size = 0u;
+        uint8_t *source = read_file(second.source, &source_size);
+        CHECK(source && source_size == first.output_size &&
+              memcmp(source, first.output, source_size) == 0,
+              "metadata repair modified its immutable source image");
+        free(source);
+    }
+    state = ROOTFS_WORK_FILE_REPAIR_MISSING;
+    CHECK(rootfs_work_probe_file_repair(second.destination, &repair, &state,
+                                        &probe) == ROOTFS_WORK_OK &&
+          state == ROOTFS_WORK_FILE_REPAIR_SATISFIED &&
+          probe.file_repairs_satisfied == 1u,
+          "repaired file did not probe as satisfied: %s at %s (%s)",
+          rootfs_work_status_name(probe.status),
+          rootfs_work_stage_name(probe.stage), probe.detail);
+
+    wrong = repair;
+    wrong.expected_sha256[0] ^= 0x80u;
+    if (run_repair_existing_image(&refusal, first.output,
+                                  first.output_size, "repairhash", &wrong)) {
+        size_t source_size = 0u;
+        uint8_t *source = read_file(refusal.source, &source_size);
+        CHECK(refusal.status == ROOTFS_WORK_FILE_REPAIR_MISMATCH &&
+              refusal.result.stage == ROOTFS_WORK_STAGE_PROVISION_PLAN &&
+              !refusal.result.published && !refusal.result.temporary_left &&
+              !path_exists(refusal.destination),
+              "wrong repair hash did not fail closed: %s at %s (%s)",
+              rootfs_work_status_name(refusal.status),
+              rootfs_work_stage_name(refusal.result.stage),
+              refusal.result.detail);
+        CHECK(source && source_size == first.output_size &&
+              memcmp(source, first.output, source_size) == 0,
+              "wrong-hash repair changed its source");
+        free(source);
+        run_release(&refusal);
+    } else {
+        CHECK(0, "wrong-hash repair setup failed");
+    }
+
+    wrong = repair;
+    wrong.expected_permissions = 0700u;
+    if (run_repair_existing_image(&refusal, first.output,
+                                  first.output_size, "repairmode", &wrong)) {
+        CHECK(refusal.status == ROOTFS_WORK_FILE_REPAIR_MISMATCH &&
+              !refusal.result.published && !path_exists(refusal.destination),
+              "third metadata tuple was accepted: %s (%s)",
+              rootfs_work_status_name(refusal.status), refusal.result.detail);
+        run_release(&refusal);
+    } else {
+        CHECK(0, "wrong-mode repair setup failed");
+    }
+
+    wrong = repair;
+    wrong.path = "/alpha/not-installed-yet";
+    state = ROOTFS_WORK_FILE_REPAIR_NEEDED;
+    CHECK(rootfs_work_probe_file_repair(first.destination, &wrong, &state,
+                                        &probe) == ROOTFS_WORK_OK &&
+          state == ROOTFS_WORK_FILE_REPAIR_MISSING,
+          "missing file was not a clean probe result: %s (%s)",
+          rootfs_work_status_name(probe.status), probe.detail);
+    if (run_repair_existing_image(&refusal, first.output,
+                                  first.output_size, "repairmissing", &wrong)) {
+        CHECK(refusal.status == ROOTFS_WORK_FILE_REPAIR_MISMATCH &&
+              !refusal.result.published && !path_exists(refusal.destination),
+              "missing file was silently accepted for mutation: %s (%s)",
+              rootfs_work_status_name(refusal.status), refusal.result.detail);
+        run_release(&refusal);
+    } else {
+        CHECK(0, "missing-file repair setup failed");
+    }
+
+    wrong = repair;
+    wrong.path = "/alpha";
+    state = ROOTFS_WORK_FILE_REPAIR_MISSING;
+    CHECK(rootfs_work_probe_file_repair(first.destination, &wrong, &state,
+                                        &probe) ==
+              ROOTFS_WORK_FILE_REPAIR_MISMATCH &&
+          probe.stage == ROOTFS_WORK_STAGE_PROVISION_PLAN,
+          "directory at repair path was not a read-only type refusal: %s at %s (%s)",
+          rootfs_work_status_name(probe.status),
+          rootfs_work_stage_name(probe.stage), probe.detail);
+
+    run_release(&second);
     run_release(&first);
     free(fx);
 }
@@ -4879,7 +5068,8 @@ static void test_status_and_stage_names(void) {
         ROOTFS_WORK_PROVISION_NODE_FULL, ROOTFS_WORK_PROVISION_LEAF_HEAD,
         ROOTFS_WORK_PROVISION_SPLIT_UNSUPPORTED,
         ROOTFS_WORK_PROVISION_BTREE_FULL,
-        ROOTFS_WORK_PROVISION_NO_SPACE, ROOTFS_WORK_PROVISION_LIMIT
+        ROOTFS_WORK_PROVISION_NO_SPACE, ROOTFS_WORK_PROVISION_LIMIT,
+        ROOTFS_WORK_FILE_REPAIR_MISMATCH
     };
     size_t index;
 
@@ -4904,6 +5094,7 @@ int main(void) {
     test_duplicate_name_is_refused();
     test_existing_directory_reuse_is_explicit_and_type_safe();
     test_existing_symlink_reuse_requires_the_same_target();
+    test_exact_file_metadata_repair();
     test_full_leaf_is_refused_not_split();
     test_out_of_space_is_refused();
     test_broken_catalog_is_never_absence();

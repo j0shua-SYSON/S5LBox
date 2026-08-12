@@ -595,6 +595,8 @@ const char *rootfs_work_status_name(rootfs_work_status_t status) {
     case ROOTFS_WORK_PROVISION_BTREE_FULL: return "provision-btree-full";
     case ROOTFS_WORK_PROVISION_NO_SPACE: return "provision-no-space";
     case ROOTFS_WORK_PROVISION_LIMIT: return "provision-limit";
+    case ROOTFS_WORK_FILE_REPAIR_MISMATCH:
+        return "file-repair-mismatch";
     case ROOTFS_WORK_RANGE_ERROR: return "range-error";
     case ROOTFS_WORK_PUBLISH_FAILED: return "publish-failed";
     case ROOTFS_WORK_PUBLISH_DURABILITY_FAILED:
@@ -5217,6 +5219,276 @@ static void rootfs_component_units(const char *path,
         units[index] = (uint16_t)(unsigned char)path[component->start + index];
 }
 
+/*
+ * Resolve one absolute path without turning an absent component into catalog
+ * corruption. The provisioner needs a missing parent to be an error because
+ * it is creating a child; a metadata migration instead needs to report
+ * MISSING so a first boot that has not unpacked the package yet is harmless.
+ */
+static bool catalog_find_path_record(catalog_ctx_t *ctx, const char *path,
+                                     uint32_t *leaf, uint16_t *position,
+                                     bool *found, uint8_t **record_data,
+                                     rootfs_work_stage_t stage,
+                                     rootfs_work_result_t *result) {
+    rootfs_path_component_t components[ROOTFS_WORK_MAX_PATH_DEPTH];
+    uint16_t units[HFS_NAME_MAX_UNITS];
+    catalog_folder_ref_t folder;
+    size_t count = 0u;
+    size_t index;
+
+    *leaf = 0u;
+    *position = 0u;
+    *found = false;
+    *record_data = NULL;
+    if (!rootfs_path_split(path, components, &count, result) ||
+        !catalog_root_folder(ctx, &folder, stage, result))
+        return false;
+
+    for (index = 0u; index < count; index++) {
+        uint8_t *node = NULL;
+        uint16_t offset;
+        uint8_t *data;
+
+        rootfs_component_units(path, &components[index], units);
+        if (!catalog_search(ctx, folder.cnid, units,
+                            components[index].length, leaf, position,
+                            found, stage, result))
+            return false;
+        if (!*found)
+            return true;
+        if (!catalog_node_load(ctx, *leaf, &node, stage, result))
+            return false;
+        offset = catalog_slot(node, ctx->node_size, *position);
+        data = node + offset + catalog_record_data_offset(node + offset);
+        if (index + 1u == count) {
+            *record_data = data;
+            return true;
+        }
+        if (read_be16(data) != HFS_CAT_FOLDER_RECORD) {
+            result_fail(result, ROOTFS_WORK_FILE_REPAIR_MISMATCH, stage, 0,
+                        "path component %zu of %.160s is not a directory",
+                        index, path);
+            return false;
+        }
+        folder.cnid = read_be32(data + 8u);
+        if (folder.cnid < HFS_FIRST_USER_CNID) {
+            result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT,
+                        stage, 0,
+                        "path component %zu of %.160s claims reserved CNID %u",
+                        index, path, folder.cnid);
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool catalog_regular_file_digest(
+    catalog_ctx_t *ctx, const uint8_t *data, uint64_t expected_size,
+    uint8_t digest[IOS3_SHA256_DIGEST_SIZE], rootfs_work_stage_t stage,
+    rootfs_work_result_t *result) {
+    uint64_t logical;
+    uint32_t declared_blocks;
+    uint32_t inline_blocks = 0u;
+    bool saw_empty = false;
+    ios3_sha256_context_t sha;
+    unsigned extent;
+
+    if (read_be16(data) != HFS_CAT_FILE_RECORD ||
+        (read_be16(data + 42u) & HFS_MODE_IFMT) != HFS_MODE_IFREG) {
+        result_fail(result, ROOTFS_WORK_FILE_REPAIR_MISMATCH, stage, 0,
+                    "the metadata-repair path is not a regular file");
+        return false;
+    }
+    logical = read_be64(data + 88u);
+    if (logical != expected_size) {
+        result_fail(result, ROOTFS_WORK_FILE_REPAIR_MISMATCH, stage, 0,
+                    "the metadata-repair file is %" PRIu64
+                    " bytes, expected %" PRIu64,
+                    logical, expected_size);
+        return false;
+    }
+    declared_blocks = read_be32(data + 100u);
+    for (extent = 0u; extent < 8u; extent++) {
+        uint32_t start = read_be32(data + 104u + extent * 8u);
+        uint32_t count = read_be32(data + 108u + extent * 8u);
+        unsigned prior;
+
+        if (count == 0u) {
+            if (start != 0u) {
+                result_fail(result,
+                            ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
+                            "an empty metadata-repair extent has a start block");
+                return false;
+            }
+            saw_empty = true;
+            continue;
+        }
+        if (saw_empty || (uint64_t)start + count > ctx->total_blocks ||
+            UINT32_MAX - inline_blocks < count) {
+            result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT,
+                        stage, 0,
+                        "the metadata-repair file has invalid data extents");
+            return false;
+        }
+        for (prior = 0u; prior < extent; prior++) {
+            uint32_t prior_start =
+                read_be32(data + 104u + prior * 8u);
+            uint32_t prior_count =
+                read_be32(data + 108u + prior * 8u);
+            uint64_t prior_end = (uint64_t)prior_start + prior_count;
+            uint64_t current_end = (uint64_t)start + count;
+
+            if (prior_count != 0u && start < prior_end &&
+                prior_start < current_end) {
+                result_fail(result,
+                            ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
+                            "the metadata-repair file has overlapping extents");
+                return false;
+            }
+        }
+        inline_blocks += count;
+    }
+    if (inline_blocks != declared_blocks) {
+        result_fail(result, ROOTFS_WORK_PROVISION_UNSUPPORTED, stage, 0,
+                    "the metadata-repair file uses the extents-overflow tree");
+        return false;
+    }
+    if (logical > (uint64_t)declared_blocks * ctx->block_size) {
+        result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT, stage, 0,
+                    "the metadata-repair file is larger than its data extents");
+        return false;
+    }
+    if (!ios3_sha256_init(&sha)) {
+        result_fail(result, ROOTFS_WORK_RANGE_ERROR, stage, 0,
+                    "cannot initialize metadata-repair SHA-256 state");
+        return false;
+    }
+    {
+        uint64_t hashed = 0u;
+
+        for (extent = 0u; extent < 8u && hashed < logical; extent++) {
+            uint32_t start = read_be32(data + 104u + extent * 8u);
+            uint32_t count = read_be32(data + 108u + extent * 8u);
+            uint64_t available = (uint64_t)count * ctx->block_size;
+            uint64_t take = logical - hashed;
+            uint64_t offset = (uint64_t)start * ctx->block_size;
+
+            if (take > available) take = available;
+            while (take != 0u) {
+                size_t amount = take > ctx->node_size
+                    ? ctx->node_size : (size_t)take;
+                if (!checked_read(ctx->file, ctx->file_size, offset,
+                                  ctx->scratch, amount, stage, result) ||
+                    !ios3_sha256_update(&sha, ctx->scratch, amount)) {
+                    if (result->status == ROOTFS_WORK_OK)
+                        result_fail(result, ROOTFS_WORK_RANGE_ERROR, stage, 0,
+                                    "cannot hash metadata-repair file bytes");
+                    return false;
+                }
+                offset += amount;
+                hashed += amount;
+                take -= amount;
+            }
+        }
+        if (hashed != logical) {
+            result_fail(result, ROOTFS_WORK_PROVISION_CATALOG_CORRUPT,
+                        stage, 0,
+                        "the metadata-repair data fork ended before logicalSize");
+            return false;
+        }
+    }
+    if (!ios3_sha256_final(&sha, digest)) {
+        result_fail(result, ROOTFS_WORK_RANGE_ERROR, stage, 0,
+                    "cannot finalize metadata-repair SHA-256 state");
+        return false;
+    }
+    return true;
+}
+
+static bool catalog_file_repair(catalog_ctx_t *ctx,
+                                const rootfs_work_file_repair_t *repair,
+                                bool apply,
+                                rootfs_work_file_repair_state_t *state,
+                                rootfs_work_result_t *result) {
+    const rootfs_work_stage_t stage = ROOTFS_WORK_STAGE_PROVISION_PLAN;
+    uint32_t leaf = 0u;
+    uint16_t position = 0u;
+    bool found = false;
+    uint8_t *data = NULL;
+    uint8_t digest[IOS3_SHA256_DIGEST_SIZE];
+    uint32_t owner;
+    uint32_t group;
+    uint16_t permissions;
+    bool desired;
+    bool legacy;
+
+    *state = ROOTFS_WORK_FILE_REPAIR_MISSING;
+    if (!repair || !repair->path || repair->path[0] == '\0' ||
+        repair->expected_size > IOS3_SHA256_MAX_INPUT_BYTES ||
+        (repair->expected_permissions &
+         (uint16_t)~(uint16_t)HFS_MODE_PERM_MASK) != 0u ||
+        (repair->desired_permissions &
+         (uint16_t)~(uint16_t)HFS_MODE_PERM_MASK) != 0u) {
+        result_fail(result, ROOTFS_WORK_PROVISION_INVALID, stage, 0,
+                    "the file-metadata repair request is malformed");
+        return false;
+    }
+    if (!catalog_find_path_record(ctx, repair->path, &leaf, &position,
+                                  &found, &data, stage, result))
+        return false;
+    if (!found) {
+        if (apply) {
+            result_fail(result, ROOTFS_WORK_FILE_REPAIR_MISMATCH, stage, 0,
+                        "metadata-repair path %.160s is missing",
+                        repair->path);
+            return false;
+        }
+        return true;
+    }
+    if (!catalog_regular_file_digest(ctx, data, repair->expected_size,
+                                     digest, stage, result))
+        return false;
+    if (memcmp(digest, repair->expected_sha256, sizeof digest) != 0) {
+        result_fail(result, ROOTFS_WORK_FILE_REPAIR_MISMATCH, stage, 0,
+                    "metadata-repair file %.160s has unexpected bytes",
+                    repair->path);
+        return false;
+    }
+
+    owner = read_be32(data + 32u);
+    group = read_be32(data + 36u);
+    permissions = (uint16_t)(read_be16(data + 42u) & HFS_MODE_PERM_MASK);
+    desired = owner == repair->desired_owner_id &&
+              group == repair->desired_group_id &&
+              permissions == repair->desired_permissions;
+    legacy = owner == repair->expected_owner_id &&
+             group == repair->expected_group_id &&
+             permissions == repair->expected_permissions;
+    if (desired) {
+        *state = ROOTFS_WORK_FILE_REPAIR_SATISFIED;
+        result->file_repairs_satisfied++;
+        return true;
+    }
+    if (!legacy) {
+        result_fail(result, ROOTFS_WORK_FILE_REPAIR_MISMATCH, stage, 0,
+                    "metadata-repair file %.160s is uid %u gid %u mode 0%o, "
+                    "not the exact legacy or desired tuple",
+                    repair->path, owner, group, permissions);
+        return false;
+    }
+    *state = ROOTFS_WORK_FILE_REPAIR_NEEDED;
+    if (!apply)
+        return true;
+
+    write_be32(data + 32u, repair->desired_owner_id);
+    write_be32(data + 36u, repair->desired_group_id);
+    write_be16(data + 42u,
+               (uint16_t)(HFS_MODE_IFREG | repair->desired_permissions));
+    catalog_node_dirty(ctx, leaf);
+    result->file_repairs_applied++;
+    return true;
+}
+
 static bool provision_one(catalog_ctx_t *ctx,
                           const rootfs_work_entry_t *entry,
                           catalog_content_t *content,
@@ -5930,11 +6202,26 @@ static bool provision_volume(host_file_t *file, uint64_t file_size,
                     options->entry_count, ROOTFS_WORK_MAX_ENTRIES);
         return false;
     }
-    if (!options->entries) {
+    if (options->file_repair_count > ROOTFS_WORK_MAX_FILE_REPAIRS) {
+        result_fail(result, ROOTFS_WORK_PROVISION_LIMIT,
+                    ROOTFS_WORK_STAGE_PROVISION_PLAN, 0,
+                    "%zu file repairs requested; the cap is %u",
+                    options->file_repair_count,
+                    ROOTFS_WORK_MAX_FILE_REPAIRS);
+        return false;
+    }
+    if (options->entry_count != 0u && !options->entries) {
         result_fail(result, ROOTFS_WORK_PROVISION_INVALID,
                     ROOTFS_WORK_STAGE_PROVISION_PLAN, 0,
                     "entry_count is %zu but entries is NULL",
                     options->entry_count);
+        return false;
+    }
+    if (options->file_repair_count != 0u && !options->file_repairs) {
+        result_fail(result, ROOTFS_WORK_PROVISION_INVALID,
+                    ROOTFS_WORK_STAGE_PROVISION_PLAN, 0,
+                    "file_repair_count is %zu but file_repairs is NULL",
+                    options->file_repair_count);
         return false;
     }
     if (!catalog_open(&ctx, file, file_size, volume,
@@ -5948,21 +6235,30 @@ static bool provision_volume(host_file_t *file, uint64_t file_size,
     if (!catalog_audit(&ctx, before_records, ROOTFS_WORK_STAGE_PROVISION_PLAN,
                        result))
         goto done;
-    contents = (catalog_content_t *)calloc(options->entry_count,
-                                           sizeof(*contents));
-    if (!contents) {
-        result_fail(result, ROOTFS_WORK_NO_MEMORY,
-                    ROOTFS_WORK_STAGE_PROVISION_PLAN, 0,
-                    "cannot allocate %zu content placements",
-                    options->entry_count);
-        goto done;
+    if (options->entry_count != 0u) {
+        contents = (catalog_content_t *)calloc(options->entry_count,
+                                               sizeof(*contents));
+        if (!contents) {
+            result_fail(result, ROOTFS_WORK_NO_MEMORY,
+                        ROOTFS_WORK_STAGE_PROVISION_PLAN, 0,
+                        "cannot allocate %zu content placements",
+                        options->entry_count);
+            goto done;
+        }
     }
     for (index = 0; index < options->entry_count; index++) {
         if (!provision_one(&ctx, &options->entries[index], &contents[index],
                            result))
             goto done;
     }
-    ctx.vh_dirty = true;
+    for (index = 0; index < options->file_repair_count; index++) {
+        rootfs_work_file_repair_state_t state;
+
+        if (!catalog_file_repair(&ctx, &options->file_repairs[index], true,
+                                 &state, result))
+            goto done;
+    }
+    ctx.vh_dirty = options->entry_count != 0u;
     /* Report the shape change before the commit can fail, so a caller reading
      * a failed result still learns that a split was required. */
     result->provision_leaf_splits = ctx.leaf_splits;
@@ -6500,6 +6796,86 @@ done:
     return result->status;
 }
 
+rootfs_work_status_t rootfs_work_probe_file_repair(
+    const char *source_path, const rootfs_work_file_repair_t *repair,
+    rootfs_work_file_repair_state_t *state,
+    rootfs_work_result_t *result) {
+    host_file_t source;
+    file_stamp_t source_before;
+    file_stamp_t source_after;
+    hfs_volume_t source_volume;
+    catalog_ctx_t catalog;
+    uint8_t *buffer = NULL;
+    int error = 0;
+
+    if (!result)
+        return ROOTFS_WORK_INVALID_ARGUMENT;
+    result_reset(result);
+    host_file_init(&source);
+    memset(&catalog, 0, sizeof catalog);
+    if (state) *state = ROOTFS_WORK_FILE_REPAIR_MISSING;
+    if (!source_path || source_path[0] == '\0' || !repair || !state)
+        return result_fail(result, ROOTFS_WORK_INVALID_ARGUMENT,
+                           ROOTFS_WORK_STAGE_ARGUMENTS, 0,
+                           "a source, one file repair and its state are required");
+
+    buffer = (uint8_t *)malloc(ROOTFS_WORK_MAX_IO_BUFFER);
+    if (!buffer)
+        return result_fail(result, ROOTFS_WORK_NO_MEMORY,
+                           ROOTFS_WORK_STAGE_ARGUMENTS, 0,
+                           "cannot allocate %u-byte bounded I/O buffer",
+                           ROOTFS_WORK_MAX_IO_BUFFER);
+
+#ifdef _WIN32
+    if (!windows_open_source(source_path, &source, &source_before, result))
+        goto done;
+#else
+    if (!posix_open_source(source_path, &source, &source_before, result))
+        goto done;
+#endif
+    result->source_size = source_before.size;
+    if (!hfs_validate(&source, source_before.size, &source_volume, buffer,
+                      ROOTFS_WORK_MAX_IO_BUFFER,
+                      ROOTFS_WORK_STAGE_SOURCE_VALIDATE, result) ||
+        !catalog_open(&catalog, &source, source_before.size, &source_volume,
+                      ROOTFS_WORK_DEFAULT_MAC_TIME, result) ||
+        !catalog_audit(&catalog, catalog.leaf_records,
+                       ROOTFS_WORK_STAGE_PROVISION_PLAN, result) ||
+        !catalog_file_repair(&catalog, repair, false, state, result))
+        goto done;
+    if (!host_file_stamp(&source, &source_after, &error)) {
+        result_fail(result, ROOTFS_WORK_SOURCE_CHANGED,
+                    ROOTFS_WORK_STAGE_SOURCE_VALIDATE, error,
+                    "cannot revalidate source identity after repair preflight");
+        goto done;
+    }
+    if (!stamp_equal(&source_before, &source_after)) {
+        result_fail(result, ROOTFS_WORK_SOURCE_CHANGED,
+                    ROOTFS_WORK_STAGE_SOURCE_VALIDATE, 0,
+                    "source identity, size, links, or timestamps changed during repair preflight");
+        goto done;
+    }
+    (void)snprintf(result->detail, sizeof(result->detail),
+                   *state == ROOTFS_WORK_FILE_REPAIR_MISSING
+                       ? "metadata-repair path is not installed yet"
+                       : (*state == ROOTFS_WORK_FILE_REPAIR_NEEDED
+                              ? "exact legacy file metadata needs repair"
+                              : "exact desired file metadata is already present"));
+
+done:
+    catalog_close(&catalog);
+    if (host_file_is_open(&source) && !host_file_close(&source, &error)) {
+        if (result->status == ROOTFS_WORK_OK)
+            result_fail(result, ROOTFS_WORK_SOURCE_CHANGED,
+                        ROOTFS_WORK_STAGE_SOURCE_VALIDATE, error,
+                        "source close failed after repair preflight");
+        else if (result->cleanup_system_error == 0)
+            result->cleanup_system_error = error;
+    }
+    free(buffer);
+    return result->status;
+}
+
 rootfs_work_status_t rootfs_work_create(const char *source_path,
                                         const char *destination_path,
                                         const rootfs_work_options_t *options,
@@ -6687,7 +7063,7 @@ rootfs_work_status_t rootfs_work_create(const char *source_path,
      * volume's freeBlocks = 0 becomes a measured ROOTFS_WORK_PROVISION_NO_SPACE
      * refusal rather than an assumption about what the caller did.
      */
-    if (selected.entry_count != 0u) {
+    if (selected.entry_count != 0u || selected.file_repair_count != 0u) {
         if (!hfs_validate(&temporary, work_size, &grown_volume, buffer,
                           selected.io_buffer_bytes,
                           ROOTFS_WORK_STAGE_PROVISION_PLAN, result))

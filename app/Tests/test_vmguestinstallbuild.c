@@ -221,7 +221,10 @@ static bool resize_sparse(const char *path, uint64_t size) {
 
 static void remove_file(const char *directory, const char *leaf) {
     char path[VM_GUEST_INSTALL_PATH_CAPACITY];
-    if (join_path(path, sizeof path, directory, leaf)) (void)remove(path);
+    if (join_path(path, sizeof path, directory, leaf)) {
+        (void)remove(path);
+        (void)remove_directory(path);
+    }
 }
 
 static void clear_fixture(void) {
@@ -248,6 +251,11 @@ static void clear_fixture(void) {
     (void)join_path(next, sizeof next, stage, VM_GUEST_INSTALL_NEXT_FILE);
     (void)remove(next);
     (void)remove_directory(stage);
+    (void)join_path(stage, sizeof stage, FIXTURE_DIR,
+                    VM_GUEST_PRIVILEGE_STAGE_DIRECTORY);
+    (void)join_path(next, sizeof next, stage, VM_GUEST_INSTALL_NEXT_FILE);
+    (void)remove(next);
+    (void)remove_directory(stage);
     static const char *const LEAVES[] = {
         VM_GUEST_INSTALL_LIVE_FILE,
         VM_GUEST_INSTALL_BACKUP_FILE,
@@ -260,6 +268,11 @@ static void clear_fixture(void) {
         VM_GUEST_STORAGE_MARKER_TMP,
         VM_GUEST_STORAGE_JOURNAL_FILE,
         VM_GUEST_STORAGE_JOURNAL_TMP,
+        VM_GUEST_PRIVILEGE_BACKUP_FILE,
+        VM_GUEST_PRIVILEGE_MARKER_FILE,
+        VM_GUEST_PRIVILEGE_MARKER_TMP,
+        VM_GUEST_PRIVILEGE_JOURNAL_FILE,
+        VM_GUEST_PRIVILEGE_JOURNAL_TMP,
         VM_GUEST_INSTALL_RESUME_ONCE_FILE,
         VM_GUEST_INSTALL_RESUME_ONCE_TMP
     };
@@ -384,6 +397,11 @@ static void test_existing_install_is_idempotent(void) {
                                    detail, sizeof detail) ==
               VM_GUEST_INSTALL_OK && transaction.committed,
           "could not commit fixture: %s", detail);
+    CHECK(vm_guest_privilege_confirm(FIXTURE_DIR, digest, &transaction,
+                                     detail, sizeof detail) ==
+              VM_GUEST_INSTALL_OK && transaction.committed,
+          "could not seed an already-completed privilege migration: %s",
+          detail);
     CHECK(resize_sparse(live, VM_GUEST_INSTALL_MINIMUM_VOLUME_BYTES),
           "could not make the committed fixture represent a 2 GiB disk");
 
@@ -404,6 +422,55 @@ static void test_existing_install_is_idempotent(void) {
           progress.first == VM_GUEST_INSTALL_BUILD_RECOVERING &&
           progress.last == VM_GUEST_INSTALL_BUILD_COMPLETE,
           "idempotent progress did not reach completion");
+}
+
+static void test_committed_maintenance_cleanup_blocks_new_transaction(void) {
+    clear_fixture();
+    char live[VM_GUEST_INSTALL_PATH_CAPACITY];
+    char next[VM_GUEST_INSTALL_PATH_CAPACITY];
+    CHECK(join_path(live, sizeof live, FIXTURE_DIR,
+                    VM_GUEST_INSTALL_LIVE_FILE) &&
+          write_bytes(live, "old-rootfs"),
+          "could not seed cleanup-residue fixture");
+    vm_guest_install_result_t transaction;
+    char detail[VM_GUEST_INSTALL_BUILD_DETAIL_CAPACITY];
+    CHECK(vm_guest_install_prepare_stage(FIXTURE_DIR, &transaction,
+                                         detail, sizeof detail) ==
+              VM_GUEST_INSTALL_OK &&
+          vm_guest_install_stage_image_path(next, sizeof next, FIXTURE_DIR) &&
+          write_bytes(next, "installed-rootfs"),
+          "could not prepare cleanup-residue fixture: %s", detail);
+    uint8_t digest[VM_GUEST_INSTALL_SHA256_SIZE];
+    fill_digest(digest);
+    CHECK(vm_guest_install_publish(FIXTURE_DIR, digest, &transaction,
+                                   detail, sizeof detail) ==
+              VM_GUEST_INSTALL_OK && transaction.committed &&
+          vm_guest_privilege_confirm(FIXTURE_DIR, digest, &transaction,
+                                     detail, sizeof detail) ==
+              VM_GUEST_INSTALL_OK && transaction.committed &&
+          resize_sparse(live, VM_GUEST_INSTALL_MINIMUM_VOLUME_BYTES),
+          "could not commit cleanup-residue fixture: %s", detail);
+
+    char residue[VM_GUEST_INSTALL_PATH_CAPACITY];
+    CHECK(join_path(residue, sizeof residue, FIXTURE_DIR,
+                    VM_GUEST_PRIVILEGE_BACKUP_FILE) &&
+          make_directory(residue),
+          "could not seed committed cleanup residue");
+    progress_log_t progress;
+    memset(&progress, 0, sizeof progress);
+    vm_guest_install_build_result_t result;
+    vm_guest_install_build_status_t status =
+        vm_guest_install_build_from_directory(
+            FIXTURE_DIR, NULL, capture_progress, &progress,
+            &result, detail, sizeof detail);
+    CHECK(status == VM_GUEST_INSTALL_BUILD_ERR_TRANSACTION &&
+          result.already_installed && result.transaction.committed &&
+          result.privilege_transaction.committed &&
+          !result.privilege_transaction.cleanup_complete &&
+          strstr(detail, "cleanup residue") != NULL &&
+          !progress.staging_seen && exists(residue),
+          "cleanup residue did not block new disk maintenance: %s / %s",
+          vm_guest_install_build_status_text(status), detail);
 }
 
 static void test_dirty_existing_install_refuses_before_stage(void) {
@@ -466,20 +533,28 @@ static void test_dirty_existing_install_refuses_before_stage(void) {
               VM_GUEST_INSTALL_PROBE_VALID &&
           memcmp(after_digest, digest, sizeof digest) == 0,
           "dirty refusal changed install authority: %s", detail);
-    static const char *const STORAGE_LEAVES[] = {
+    static const char *const MAINTENANCE_LEAVES[] = {
         VM_GUEST_STORAGE_BACKUP_FILE,
         VM_GUEST_STORAGE_STAGE_DIRECTORY,
         VM_GUEST_STORAGE_MARKER_FILE,
         VM_GUEST_STORAGE_MARKER_TMP,
         VM_GUEST_STORAGE_JOURNAL_FILE,
-        VM_GUEST_STORAGE_JOURNAL_TMP
+        VM_GUEST_STORAGE_JOURNAL_TMP,
+        VM_GUEST_PRIVILEGE_BACKUP_FILE,
+        VM_GUEST_PRIVILEGE_STAGE_DIRECTORY,
+        VM_GUEST_PRIVILEGE_MARKER_FILE,
+        VM_GUEST_PRIVILEGE_MARKER_TMP,
+        VM_GUEST_PRIVILEGE_JOURNAL_FILE,
+        VM_GUEST_PRIVILEGE_JOURNAL_TMP
     };
     for (size_t i = 0u;
-         i < sizeof STORAGE_LEAVES / sizeof STORAGE_LEAVES[0]; i++) {
+         i < sizeof MAINTENANCE_LEAVES / sizeof MAINTENANCE_LEAVES[0]; i++) {
         char path[VM_GUEST_INSTALL_PATH_CAPACITY];
-        CHECK(join_path(path, sizeof path, FIXTURE_DIR, STORAGE_LEAVES[i]) &&
+        CHECK(join_path(path, sizeof path, FIXTURE_DIR,
+                        MAINTENANCE_LEAVES[i]) &&
               !exists(path),
-              "dirty refusal left storage artifact %s", STORAGE_LEAVES[i]);
+              "dirty refusal left maintenance artifact %s",
+              MAINTENANCE_LEAVES[i]);
     }
 }
 
@@ -700,6 +775,157 @@ static void test_real_storage_upgrade_when_supplied(void) {
            old_free_blocks, new_free_blocks);
 }
 
+static void test_real_privilege_repair_when_supplied(void) {
+    const char *machine = getenv("S5LBOX_EXISTING_PRIVILEGE_MACHINE_DIR");
+    if (!machine || !*machine) {
+        printf("real-cydia-privilege-repair SKIP (existing machine path unset)\n");
+        return;
+    }
+
+    char live[VM_GUEST_INSTALL_PATH_CAPACITY];
+    CHECK(join_path(live, sizeof live, machine,
+                    VM_GUEST_INSTALL_LIVE_FILE),
+          "real privilege-repair live path overflow");
+    const char *base = getenv("S5LBOX_PRIVILEGE_REPAIR_BASE_IMAGE");
+    const char *executable = getenv("S5LBOX_PRIVILEGE_REPAIR_EXECUTABLE");
+    bool setup_any = (base && *base) || (executable && *executable);
+    bool setup_all = base && *base && executable && *executable;
+    uint8_t executable_sha256[IOS3_SHA256_DIGEST_SIZE];
+    bool executable_sha256_valid = false;
+    memset(executable_sha256, 0, sizeof executable_sha256);
+    CHECK(!setup_any || setup_all,
+          "repair fixture setup needs both base image and executable");
+    if (setup_any && !setup_all) return;
+    if (setup_all) {
+        uint64_t executable_size = file_size_or_zero(executable);
+        uint8_t *bytes = executable_size <= SIZE_MAX
+            ? (uint8_t *)malloc((size_t)executable_size) : NULL;
+        bool payload_ok = !exists(live) &&
+            executable_size == UINT64_C(320704) && bytes &&
+            read_buffer(executable, bytes, (size_t)executable_size);
+        if (payload_ok)
+            executable_sha256_valid = ios3_sha256(
+                bytes, (size_t)executable_size, executable_sha256);
+        CHECK(payload_ok,
+              "could not prepare the exact Cydia executable fixture");
+        CHECK(executable_sha256_valid,
+              "could not hash the exact Cydia executable fixture");
+        if (!payload_ok || !executable_sha256_valid) {
+            free(bytes);
+            return;
+        }
+        rootfs_work_entry_t entries[2];
+        memset(entries, 0, sizeof entries);
+        entries[0].kind = ROOTFS_WORK_ENTRY_DIRECTORY;
+        entries[0].path = "/Applications/Cydia.app";
+        entries[0].permissions = 0755u;
+        entries[0].owner_id = 0u;
+        entries[0].group_id = 0u;
+        entries[0].existing_policy = ROOTFS_WORK_EXISTING_REUSE_DIRECTORY;
+        entries[1].kind = ROOTFS_WORK_ENTRY_FILE;
+        entries[1].path = "/Applications/Cydia.app/Cydia_";
+        entries[1].content = bytes;
+        entries[1].content_size = (size_t)executable_size;
+        entries[1].permissions = 0755u;
+        entries[1].owner_id = 0u;
+        entries[1].group_id = 0u;
+        rootfs_work_options_t setup;
+        memset(&setup, 0, sizeof setup);
+        setup.preserve_fstab = true;
+        setup.entries = entries;
+        setup.entry_count = 2u;
+        rootfs_work_result_t setup_result;
+        rootfs_work_status_t setup_status = rootfs_work_create(
+            base, live, &setup, &setup_result);
+        free(bytes);
+        CHECK(setup_status == ROOTFS_WORK_OK && setup_result.published &&
+              setup_result.provision_entries >= 1u,
+              "exact Cydia repair fixture refused: %s at %s (%s)",
+              rootfs_work_status_name(setup_status),
+              rootfs_work_stage_name(setup_result.stage),
+              setup_result.detail);
+        if (setup_status != ROOTFS_WORK_OK) return;
+    }
+    uint64_t before = file_size_or_zero(live);
+    CHECK(before > 0u,
+          "real privilege-repair source has no live disk (%llu bytes)",
+          (unsigned long long)before);
+    if (before == 0u) return;
+    bool expect_storage_growth =
+        before < VM_GUEST_INSTALL_MINIMUM_VOLUME_BYTES;
+
+    uint8_t manifest[VM_GUEST_INSTALL_SHA256_SIZE];
+    char detail[VM_GUEST_INSTALL_BUILD_DETAIL_CAPACITY];
+    CHECK(vm_guest_install_probe(machine, manifest, detail, sizeof detail) ==
+              VM_GUEST_INSTALL_PROBE_VALID,
+          "real privilege-repair source has no valid install marker: %s",
+          detail);
+
+    progress_log_t progress;
+    memset(&progress, 0, sizeof progress);
+    vm_guest_install_build_result_t result;
+    vm_guest_install_build_status_t status =
+        vm_guest_install_build_from_directory(
+            machine, NULL, capture_progress, &progress,
+            &result, detail, sizeof detail);
+    CHECK(status == VM_GUEST_INSTALL_BUILD_OK && result.already_installed &&
+          result.storage_upgraded == expect_storage_growth &&
+          result.cydia_privileges_repaired &&
+          result.cydia_privileges_verified &&
+          result.rootfs.file_repairs_applied == 1u &&
+          result.privilege_transaction.committed,
+          "real Cydia privilege repair refused or did not apply: %s / %s",
+          vm_guest_install_build_status_text(status), detail);
+    uint64_t after = file_size_or_zero(live);
+    CHECK(after == (expect_storage_growth
+                        ? VM_GUEST_INSTALL_MINIMUM_VOLUME_BYTES : before),
+          "combined repair published %llu bytes from a %llu-byte source",
+          (unsigned long long)after, (unsigned long long)before);
+    if (executable_sha256_valid) {
+        rootfs_work_file_repair_t verify;
+        memset(&verify, 0, sizeof verify);
+        verify.path = "/Applications/Cydia.app/Cydia_";
+        verify.expected_size = UINT64_C(320704);
+        memcpy(verify.expected_sha256, executable_sha256,
+               sizeof verify.expected_sha256);
+        verify.expected_owner_id = 0u;
+        verify.expected_group_id = 0u;
+        verify.expected_permissions = 0755u;
+        verify.desired_owner_id = 0u;
+        verify.desired_group_id = 0u;
+        verify.desired_permissions = 06755u;
+        rootfs_work_file_repair_state_t state =
+            ROOTFS_WORK_FILE_REPAIR_MISSING;
+        rootfs_work_result_t probe;
+        CHECK(rootfs_work_probe_file_repair(live, &verify, &state, &probe) ==
+                  ROOTFS_WORK_OK &&
+              state == ROOTFS_WORK_FILE_REPAIR_SATISFIED,
+              "published exact Cydia executable is not root:root 06755: %s at %s (%s)",
+              rootfs_work_status_name(probe.status),
+              rootfs_work_stage_name(probe.stage), probe.detail);
+    }
+    vm_guest_install_result_t privilege;
+    CHECK(vm_guest_privilege_recover(machine, &privilege,
+                                     detail, sizeof detail) ==
+              VM_GUEST_INSTALL_OK && privilege.committed &&
+          privilege.has_manifest &&
+          memcmp(privilege.manifest_sha256, manifest, sizeof manifest) == 0,
+          "real privilege-repair record is not recoverable: %s", detail);
+
+    vm_guest_install_build_result_t retry;
+    status = vm_guest_install_build_from_directory(
+        machine, NULL, capture_progress, &progress,
+        &retry, detail, sizeof detail);
+    CHECK(status == VM_GUEST_INSTALL_BUILD_OK && retry.already_installed &&
+          !retry.storage_upgraded && !retry.cydia_privileges_repaired &&
+          retry.cydia_privileges_verified && retry.rootfs.final_size == 0u,
+          "real privilege-repair retry rewrote the disk: %s / %s",
+          vm_guest_install_build_status_text(status), detail);
+    printf("real-cydia-privilege-repair before=%llu after=%llu applied=%u\n",
+           (unsigned long long)before, (unsigned long long)after,
+           result.rootfs.file_repairs_applied);
+}
+
 int main(void) {
     printf("== guest install builder ==\n");
     if (!make_directory(FIXTURE_DIR)) {
@@ -709,8 +935,10 @@ int main(void) {
     test_argument_and_package_refusals();
     test_historical_snapshot_gate();
     test_existing_install_is_idempotent();
+    test_committed_maintenance_cleanup_blocks_new_transaction();
     test_dirty_existing_install_refuses_before_stage();
     test_real_storage_upgrade_when_supplied();
+    test_real_privilege_repair_when_supplied();
     test_real_build_when_supplied();
     clear_fixture();
     (void)remove_directory(FIXTURE_DIR);

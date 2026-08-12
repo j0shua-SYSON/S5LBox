@@ -12,6 +12,32 @@ typedef struct {
     void *context;
 } build_progress_adapter_t;
 
+/* Extracted from the exact pinned cydia_1.0.3044-66 package, then matched on
+ * the retained physical guest that exposed the historical 0755 install. This
+ * is the executable data-fork identity, not the .deb archive identity. */
+static const uint8_t VM_CYDIA_EXECUTABLE_SHA256[
+    IOS3_SHA256_DIGEST_SIZE] = {
+    0x4cu, 0xa3u, 0xf7u, 0x0fu, 0xe5u, 0xcbu, 0x67u, 0x73u,
+    0x76u, 0x88u, 0xabu, 0x06u, 0x14u, 0xc6u, 0x86u, 0xfeu,
+    0x18u, 0xb1u, 0x24u, 0x84u, 0x43u, 0x69u, 0x84u, 0x8bu,
+    0x76u, 0x84u, 0x6fu, 0x80u, 0xa5u, 0x2fu, 0x63u, 0x24u
+};
+
+static void build_cydia_privilege_repair(
+    rootfs_work_file_repair_t *repair) {
+    memset(repair, 0, sizeof *repair);
+    repair->path = "/Applications/Cydia.app/Cydia_";
+    repair->expected_size = UINT64_C(320704);
+    memcpy(repair->expected_sha256, VM_CYDIA_EXECUTABLE_SHA256,
+           sizeof repair->expected_sha256);
+    repair->expected_owner_id = 0u;
+    repair->expected_group_id = 0u;
+    repair->expected_permissions = 0755u;
+    repair->desired_owner_id = 0u;
+    repair->desired_group_id = 0u;
+    repair->desired_permissions = 06755u;
+}
+
 static void build_detail(char *detail, size_t capacity, const char *text) {
     if (!detail || capacity == 0u) return;
     (void)snprintf(detail, capacity, "%s", text ? text : "");
@@ -98,16 +124,52 @@ static vm_guest_install_build_status_t build_snapshot_gate(
     return VM_GUEST_INSTALL_BUILD_OK;
 }
 
-static vm_guest_install_build_status_t build_upgrade_storage(
+static bool build_transaction_matches_install(
+    const vm_guest_install_result_t *transaction,
+    const vm_guest_install_result_t *install) {
+    return transaction && install &&
+           (!transaction->committed ||
+            (transaction->has_manifest && install->has_manifest &&
+             memcmp(transaction->manifest_sha256, install->manifest_sha256,
+                    VM_GUEST_INSTALL_SHA256_SIZE) == 0));
+}
+
+static vm_guest_install_build_status_t build_rootfs_refusal(
+    rootfs_work_status_t status, const rootfs_work_result_t *rootfs,
+    char *detail, size_t detail_capacity) {
+    if (status == ROOTFS_WORK_HFS_INVALID && rootfs &&
+        strstr(rootfs->detail, "not cleanly unmounted") != NULL) {
+        build_detail(detail, detail_capacity,
+                     "Guest-disk maintenance needs a clean guest shutdown. Reopen this machine, hold Power, slide to power off, wait until the guest halts, return to Machines, and try again. S5LBox will not guess-repair this unjournaled HFS disk.");
+        return VM_GUEST_INSTALL_BUILD_ERR_STORAGE_NOT_CLEAN;
+    }
+    build_detail(detail, detail_capacity,
+                 rootfs && rootfs->detail[0]
+                     ? rootfs->detail : rootfs_work_status_name(status));
+    return VM_GUEST_INSTALL_BUILD_ERR_ROOTFS;
+}
+
+static vm_guest_install_build_status_t build_maintain_install(
     const char *work_directory,
     const vm_guest_install_result_t *install,
     const vm_guest_install_result_t *storage,
+    const vm_guest_install_result_t *privilege,
     vm_guest_install_build_progress_t progress, void *progress_context,
     vm_guest_install_build_result_t *result,
     char *detail, size_t detail_capacity) {
-    if (!install || !install->committed || !install->has_manifest || !storage) {
+    if (!install || !install->committed || !install->has_manifest ||
+        !storage || !privilege ||
+        !build_transaction_matches_install(storage, install) ||
+        !build_transaction_matches_install(privilege, install)) {
         build_detail(detail, detail_capacity,
-                     "The committed installation has no safe identity for a storage upgrade.");
+                     "A guest-disk maintenance record does not match the committed installation.");
+        return VM_GUEST_INSTALL_BUILD_ERR_TRANSACTION;
+    }
+    if (!install->cleanup_complete ||
+        (storage->committed && !storage->cleanup_complete) ||
+        (privilege->committed && !privilege->cleanup_complete)) {
+        build_detail(detail, detail_capacity,
+                     "A committed guest-disk transaction still has cleanup residue; no new maintenance transaction was started.");
         return VM_GUEST_INSTALL_BUILD_ERR_TRANSACTION;
     }
 
@@ -119,50 +181,84 @@ static vm_guest_install_build_status_t build_upgrade_storage(
                      "The committed installation has no valid live guest disk.");
         return VM_GUEST_INSTALL_BUILD_ERR_TRANSACTION;
     }
-    if (live_size >= VM_GUEST_INSTALL_MINIMUM_VOLUME_BYTES) {
-        build_progress(progress, progress_context,
-                       VM_GUEST_INSTALL_BUILD_COMPLETE, 1u, 1u);
-        return VM_GUEST_INSTALL_BUILD_OK;
-    }
-    if (storage->committed) {
+    bool grow_storage = live_size < VM_GUEST_INSTALL_MINIMUM_VOLUME_BYTES;
+    if (grow_storage && storage->committed) {
         build_detail(detail, detail_capacity,
                      "The storage-upgrade record is committed, but the live guest disk is still smaller than 2 GiB.");
         return VM_GUEST_INSTALL_BUILD_ERR_TRANSACTION;
     }
 
+    rootfs_work_file_repair_t repair;
+    build_cydia_privilege_repair(&repair);
+    rootfs_work_file_repair_state_t repair_state =
+        ROOTFS_WORK_FILE_REPAIR_MISSING;
+    bool repair_needed = false;
+    bool source_preflighted = false;
+    char transaction_detail[VM_GUEST_INSTALL_BUILD_DETAIL_CAPACITY];
+
+    if (privilege->committed) {
+        if (result) result->cydia_privileges_verified = true;
+    } else {
+        rootfs_work_result_t probe;
+        rootfs_work_status_t probe_status = rootfs_work_probe_file_repair(
+            live, &repair, &repair_state, &probe);
+        if (result) result->rootfs = probe;
+        if (probe_status != ROOTFS_WORK_OK)
+            return build_rootfs_refusal(probe_status, &probe,
+                                        detail, detail_capacity);
+        source_preflighted = true;
+        repair_needed = repair_state == ROOTFS_WORK_FILE_REPAIR_NEEDED;
+        if (repair_state == ROOTFS_WORK_FILE_REPAIR_SATISFIED) {
+            vm_guest_install_result_t confirmed;
+            vm_guest_install_status_t confirmation =
+                vm_guest_privilege_confirm(
+                    work_directory, install->manifest_sha256, &confirmed,
+                    transaction_detail, sizeof transaction_detail);
+            if (result) result->privilege_transaction = confirmed;
+            if (confirmation != VM_GUEST_INSTALL_OK || !confirmed.committed) {
+                build_detail(detail, detail_capacity,
+                             transaction_detail[0]
+                                 ? transaction_detail
+                                 : vm_guest_install_status_text(confirmation));
+                return VM_GUEST_INSTALL_BUILD_ERR_TRANSACTION;
+            }
+            if (result) result->cydia_privileges_verified = true;
+        }
+    }
+
+    if (!grow_storage && !repair_needed) {
+        build_progress(progress, progress_context,
+                       VM_GUEST_INSTALL_BUILD_COMPLETE, 1u, 1u);
+        return VM_GUEST_INSTALL_BUILD_OK;
+    }
+
     vm_guest_install_build_status_t snapshot_gate = build_snapshot_gate(
         work_directory, result, detail, detail_capacity);
     if (snapshot_gate != VM_GUEST_INSTALL_BUILD_OK) return snapshot_gate;
-
-    rootfs_work_result_t preflight;
-    rootfs_work_status_t preflight_status =
-        rootfs_work_validate_source(live, &preflight);
-    if (result) result->rootfs = preflight;
-    if (preflight_status != ROOTFS_WORK_OK) {
-        if (preflight_status == ROOTFS_WORK_HFS_INVALID &&
-            strstr(preflight.detail, "not cleanly unmounted") != NULL) {
-            build_detail(detail, detail_capacity,
-                         "Storage expansion needs a clean guest shutdown. Reopen this machine, hold Power, slide to power off, wait until the guest halts, return to Machines, and try again. S5LBox will not guess-repair this unjournaled HFS disk.");
-            return VM_GUEST_INSTALL_BUILD_ERR_STORAGE_NOT_CLEAN;
-        }
-        build_detail(detail, detail_capacity,
-                     preflight.detail[0]
-                         ? preflight.detail
-                         : rootfs_work_status_name(preflight_status));
-        return VM_GUEST_INSTALL_BUILD_ERR_ROOTFS;
+    if (!source_preflighted) {
+        rootfs_work_result_t preflight;
+        rootfs_work_status_t preflight_status =
+            rootfs_work_validate_source(live, &preflight);
+        if (result) result->rootfs = preflight;
+        if (preflight_status != ROOTFS_WORK_OK)
+            return build_rootfs_refusal(preflight_status, &preflight,
+                                        detail, detail_capacity);
     }
 
     build_progress(progress, progress_context,
                    VM_GUEST_INSTALL_BUILD_STAGING, 0u, 1u);
     vm_guest_install_result_t prepared;
-    char transaction_detail[VM_GUEST_INSTALL_BUILD_DETAIL_CAPACITY];
-    vm_guest_install_status_t preparation = vm_guest_storage_prepare_stage(
-        work_directory, &prepared, transaction_detail,
-        sizeof transaction_detail);
+    vm_guest_install_status_t preparation = grow_storage
+        ? vm_guest_storage_prepare_stage(
+              work_directory, &prepared, transaction_detail,
+              sizeof transaction_detail)
+        : vm_guest_privilege_prepare_stage(
+              work_directory, &prepared, transaction_detail,
+              sizeof transaction_detail);
     if (preparation != VM_GUEST_INSTALL_OK || prepared.committed) {
         build_detail(detail, detail_capacity,
                      preparation == VM_GUEST_INSTALL_OK
-                         ? "The storage upgrade became committed while its disk was being prepared."
+                         ? "Guest-disk maintenance became committed while its disk was being prepared."
                          : (transaction_detail[0]
                                 ? transaction_detail
                                 : vm_guest_install_status_text(preparation)));
@@ -170,10 +266,14 @@ static vm_guest_install_build_status_t build_upgrade_storage(
     }
 
     char stage[VM_GUEST_INSTALL_PATH_CAPACITY];
-    if (!vm_guest_storage_stage_image_path(stage, sizeof stage,
-                                           work_directory)) {
+    bool stage_ok = grow_storage
+        ? vm_guest_storage_stage_image_path(stage, sizeof stage,
+                                            work_directory)
+        : vm_guest_privilege_stage_image_path(stage, sizeof stage,
+                                              work_directory);
+    if (!stage_ok) {
         build_detail(detail, detail_capacity,
-                     "The storage-upgrade stage path is too long.");
+                     "The guest-disk maintenance stage path is too long.");
         return VM_GUEST_INSTALL_BUILD_ERR_PATH;
     }
     build_progress(progress, progress_context,
@@ -182,7 +282,12 @@ static vm_guest_install_build_status_t build_upgrade_storage(
     rootfs_work_options_t options;
     memset(&options, 0, sizeof options);
     options.preserve_fstab = true;
-    options.minimum_volume_bytes = VM_GUEST_INSTALL_MINIMUM_VOLUME_BYTES;
+    if (grow_storage)
+        options.minimum_volume_bytes = VM_GUEST_INSTALL_MINIMUM_VOLUME_BYTES;
+    if (repair_needed) {
+        options.file_repairs = &repair;
+        options.file_repair_count = 1u;
+    }
     build_progress_adapter_t adapter = {progress, progress_context};
     options.progress = build_rootfs_progress;
     options.progress_ctx = &adapter;
@@ -191,20 +296,33 @@ static vm_guest_install_build_status_t build_upgrade_storage(
         live, stage, &options, &rootfs);
     if (result) result->rootfs = rootfs;
     if (rootfs_status != ROOTFS_WORK_OK || !rootfs.published ||
-        rootfs.final_size < VM_GUEST_INSTALL_MINIMUM_VOLUME_BYTES) {
-        build_detail(detail, detail_capacity,
-                     rootfs.detail[0] ? rootfs.detail
-                                      : rootfs_work_status_name(rootfs_status));
-        return VM_GUEST_INSTALL_BUILD_ERR_ROOTFS;
+        (grow_storage &&
+         rootfs.final_size < VM_GUEST_INSTALL_MINIMUM_VOLUME_BYTES) ||
+        (repair_needed && rootfs.file_repairs_applied != 1u)) {
+        if (rootfs_status == ROOTFS_WORK_OK) {
+            build_detail(detail, detail_capacity,
+                         "The completed guest-disk clone did not contain the requested maintenance result.");
+            return VM_GUEST_INSTALL_BUILD_ERR_ROOTFS;
+        }
+        return build_rootfs_refusal(rootfs_status, &rootfs,
+                                    detail, detail_capacity);
     }
 
     build_progress(progress, progress_context,
                    VM_GUEST_INSTALL_BUILD_PUBLISHING, 0u, 1u);
     vm_guest_install_result_t published;
-    vm_guest_install_status_t publication = vm_guest_storage_publish(
-        work_directory, install->manifest_sha256, &published,
-        transaction_detail, sizeof transaction_detail);
-    if (result) result->storage_transaction = published;
+    vm_guest_install_status_t publication = grow_storage
+        ? vm_guest_storage_publish(
+              work_directory, install->manifest_sha256, &published,
+              transaction_detail, sizeof transaction_detail)
+        : vm_guest_privilege_publish(
+              work_directory, install->manifest_sha256, &published,
+              transaction_detail, sizeof transaction_detail);
+    if (grow_storage) {
+        if (result) result->storage_transaction = published;
+    } else if (result) {
+        result->privilege_transaction = published;
+    }
     if (publication != VM_GUEST_INSTALL_OK || !published.committed) {
         build_detail(detail, detail_capacity,
                      transaction_detail[0]
@@ -212,7 +330,26 @@ static vm_guest_install_build_status_t build_upgrade_storage(
                          : vm_guest_install_status_text(publication));
         return VM_GUEST_INSTALL_BUILD_ERR_PUBLISH;
     }
-    if (result) result->storage_upgraded = true;
+    if (result && grow_storage) result->storage_upgraded = true;
+    if (repair_needed) {
+        if (result) result->cydia_privileges_repaired = true;
+        if (grow_storage) {
+            vm_guest_install_result_t confirmed;
+            vm_guest_install_status_t confirmation =
+                vm_guest_privilege_confirm(
+                    work_directory, install->manifest_sha256, &confirmed,
+                    transaction_detail, sizeof transaction_detail);
+            if (result) result->privilege_transaction = confirmed;
+            if (confirmation != VM_GUEST_INSTALL_OK || !confirmed.committed) {
+                build_detail(detail, detail_capacity,
+                             transaction_detail[0]
+                                 ? transaction_detail
+                                 : vm_guest_install_status_text(confirmation));
+                return VM_GUEST_INSTALL_BUILD_ERR_PUBLISH;
+            }
+        }
+        if (result) result->cydia_privileges_verified = true;
+    }
     build_progress(progress, progress_context,
                    VM_GUEST_INSTALL_BUILD_PUBLISHING, 1u, 1u);
     build_progress(progress, progress_context,
@@ -235,22 +372,27 @@ vm_guest_install_build_from_directory(
     }
 
     build_progress(progress, progress_context,
-                   VM_GUEST_INSTALL_BUILD_RECOVERING, 0u, 2u);
+                   VM_GUEST_INSTALL_BUILD_RECOVERING, 0u, 3u);
+    vm_guest_install_result_t privilege;
     vm_guest_install_result_t storage;
     char transaction_detail[VM_GUEST_INSTALL_BUILD_DETAIL_CAPACITY];
-    vm_guest_install_status_t storage_recovery = vm_guest_storage_recover(
-        work_directory, &storage, transaction_detail,
-        sizeof transaction_detail);
-    if (storage_recovery != VM_GUEST_INSTALL_OK) {
+    vm_guest_install_status_t maintenance_recovery =
+        vm_guest_maintenance_recover(
+            work_directory, &privilege, &storage, transaction_detail,
+            sizeof transaction_detail);
+    if (maintenance_recovery != VM_GUEST_INSTALL_OK) {
         build_detail(detail, detail_capacity,
                      transaction_detail[0]
                          ? transaction_detail
-                         : vm_guest_install_status_text(storage_recovery));
+                         : vm_guest_install_status_text(maintenance_recovery));
         return VM_GUEST_INSTALL_BUILD_ERR_TRANSACTION;
     }
-    if (result) result->storage_transaction = storage;
+    if (result) {
+        result->privilege_transaction = privilege;
+        result->storage_transaction = storage;
+    }
     build_progress(progress, progress_context,
-                   VM_GUEST_INSTALL_BUILD_RECOVERING, 1u, 2u);
+                   VM_GUEST_INSTALL_BUILD_RECOVERING, 2u, 3u);
     vm_guest_install_result_t recovered;
     vm_guest_install_status_t recovery = vm_guest_install_recover(
         work_directory, &recovered, transaction_detail,
@@ -263,7 +405,7 @@ vm_guest_install_build_from_directory(
     }
     if (result) result->transaction = recovered;
     build_progress(progress, progress_context,
-                   VM_GUEST_INSTALL_BUILD_RECOVERING, 2u, 2u);
+                   VM_GUEST_INSTALL_BUILD_RECOVERING, 3u, 3u);
     if (recovered.committed) {
         if (result) {
             result->already_installed = true;
@@ -271,9 +413,14 @@ vm_guest_install_build_from_directory(
                 memcpy(result->manifest_sha256, recovered.manifest_sha256,
                        VM_GUEST_INSTALL_SHA256_SIZE);
         }
-        return build_upgrade_storage(
-            work_directory, &recovered, &storage,
+        return build_maintain_install(
+            work_directory, &recovered, &storage, &privilege,
             progress, progress_context, result, detail, detail_capacity);
+    }
+    if (storage.committed || privilege.committed) {
+        build_detail(detail, detail_capacity,
+                     "A guest-disk maintenance record exists without a committed guest installation.");
+        return VM_GUEST_INSTALL_BUILD_ERR_TRANSACTION;
     }
 
     vm_guest_install_build_status_t snapshot_gate = build_snapshot_gate(

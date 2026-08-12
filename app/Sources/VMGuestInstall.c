@@ -33,6 +33,10 @@ static const char VM_GUEST_STORAGE_MARKER_PREFIX[] =
     "s5lbox-guest-storage 1\ninstall-manifest-sha256 ";
 static const char VM_GUEST_STORAGE_JOURNAL_PREFIX[] =
     "s5lbox-guest-storage-transaction 1\ninstall-manifest-sha256 ";
+static const char VM_GUEST_PRIVILEGE_MARKER_PREFIX[] =
+    "s5lbox-guest-cydia-privileges 1\ninstall-manifest-sha256 ";
+static const char VM_GUEST_PRIVILEGE_JOURNAL_PREFIX[] =
+    "s5lbox-guest-cydia-privileges-transaction 1\ninstall-manifest-sha256 ";
 
 typedef struct {
     const char *backup_file;
@@ -68,6 +72,18 @@ static const guest_transaction_spec_t VM_GUEST_STORAGE_SPEC = {
     VM_GUEST_STORAGE_MARKER_PREFIX,
     VM_GUEST_STORAGE_JOURNAL_PREFIX,
     "guest-storage"
+};
+
+static const guest_transaction_spec_t VM_GUEST_PRIVILEGE_SPEC = {
+    VM_GUEST_PRIVILEGE_BACKUP_FILE,
+    VM_GUEST_PRIVILEGE_STAGE_DIRECTORY,
+    VM_GUEST_PRIVILEGE_MARKER_FILE,
+    VM_GUEST_PRIVILEGE_MARKER_TMP,
+    VM_GUEST_PRIVILEGE_JOURNAL_FILE,
+    VM_GUEST_PRIVILEGE_JOURNAL_TMP,
+    VM_GUEST_PRIVILEGE_MARKER_PREFIX,
+    VM_GUEST_PRIVILEGE_JOURNAL_PREFIX,
+    "guest-cydia-privileges"
 };
 
 typedef enum {
@@ -207,6 +223,12 @@ bool vm_guest_storage_stage_image_path(char *out, size_t capacity,
                                        const char *work_directory) {
     return guest_stage_image_path_for(out, capacity, work_directory,
                                       &VM_GUEST_STORAGE_SPEC);
+}
+
+bool vm_guest_privilege_stage_image_path(char *out, size_t capacity,
+                                         const char *work_directory) {
+    return guest_stage_image_path_for(out, capacity, work_directory,
+                                      &VM_GUEST_PRIVILEGE_SPEC);
 }
 
 static guest_node_t guest_node(const char *path) {
@@ -742,6 +764,85 @@ vm_guest_storage_recover(const char *work_directory,
                              detail, detail_capacity);
 }
 
+vm_guest_install_status_t
+vm_guest_privilege_recover(const char *work_directory,
+                           vm_guest_install_result_t *result,
+                           char *detail, size_t detail_capacity) {
+    return guest_recover_for(work_directory, &VM_GUEST_PRIVILEGE_SPEC, result,
+                             detail, detail_capacity);
+}
+
+vm_guest_install_status_t
+vm_guest_maintenance_recover(const char *work_directory,
+                             vm_guest_install_result_t *privilege_result,
+                             vm_guest_install_result_t *storage_result,
+                             char *detail, size_t detail_capacity) {
+    guest_paths_t privilege_paths;
+    guest_paths_t storage_paths;
+    vm_guest_install_result_t privilege_local;
+    vm_guest_install_result_t storage_local;
+    vm_guest_install_result_t *privilege = privilege_result
+        ? privilege_result : &privilege_local;
+    vm_guest_install_result_t *storage = storage_result
+        ? storage_result : &storage_local;
+
+    guest_result_clear(privilege);
+    guest_result_clear(storage);
+    guest_detail(detail, detail_capacity, "");
+    if (!guest_paths_init_for(&privilege_paths, work_directory,
+                              &VM_GUEST_PRIVILEGE_SPEC) ||
+        !guest_paths_init_for(&storage_paths, work_directory,
+                              &VM_GUEST_STORAGE_SPEC)) {
+        guest_detail(detail, detail_capacity,
+                     "A guest-maintenance recovery path is too long to use.");
+        return VM_GUEST_INSTALL_ERR_PATH;
+    }
+    bool privilege_journal =
+        guest_node(privilege_paths.journal) != GUEST_NODE_ABSENT;
+    bool storage_journal =
+        guest_node(storage_paths.journal) != GUEST_NODE_ABSENT;
+    if (privilege_journal && storage_journal) {
+        guest_detail(detail, detail_capacity,
+                     "Two guest-disk maintenance journals claim the shared live disk; neither was guessed through.");
+        return VM_GUEST_INSTALL_ERR_STATE;
+    }
+
+    /* A journal names the transaction that is genuinely in flight. A backup
+     * without a journal can instead be inert cleanup residue from an already
+     * committed marker, so it must not steal priority from that journal. Only
+     * when the shared live name is absent and there is no journal does one
+     * lone orphan backup identify the recovery owner. */
+    bool storage_first = storage_journal;
+    if (!privilege_journal && !storage_journal &&
+        guest_node(privilege_paths.live) == GUEST_NODE_ABSENT) {
+        bool privilege_backup =
+            guest_node(privilege_paths.backup) != GUEST_NODE_ABSENT;
+        bool storage_backup =
+            guest_node(storage_paths.backup) != GUEST_NODE_ABSENT;
+        if (privilege_backup && storage_backup) {
+            guest_detail(detail, detail_capacity,
+                         "Two orphaned guest-disk maintenance backups exist without a live disk; neither was guessed through.");
+            return VM_GUEST_INSTALL_ERR_STATE;
+        }
+        storage_first = storage_backup;
+    }
+
+    const guest_transaction_spec_t *first_spec = storage_first
+        ? &VM_GUEST_STORAGE_SPEC : &VM_GUEST_PRIVILEGE_SPEC;
+    const guest_transaction_spec_t *second_spec = storage_first
+        ? &VM_GUEST_PRIVILEGE_SPEC : &VM_GUEST_STORAGE_SPEC;
+    vm_guest_install_result_t *first_result = storage_first
+        ? storage : privilege;
+    vm_guest_install_result_t *second_result = storage_first
+        ? privilege : storage;
+    vm_guest_install_status_t status = guest_recover_for(
+        work_directory, first_spec, first_result, detail, detail_capacity);
+    if (status != VM_GUEST_INSTALL_OK)
+        return status;
+    return guest_recover_for(work_directory, second_spec, second_result,
+                             detail, detail_capacity);
+}
+
 static vm_guest_install_status_t
 guest_prepare_stage_for(const char *work_directory,
                         const guest_transaction_spec_t *spec,
@@ -844,7 +945,47 @@ vm_guest_install_status_t
 vm_guest_storage_prepare_stage(const char *work_directory,
                                vm_guest_install_result_t *result,
                                char *detail, size_t detail_capacity) {
+    vm_guest_install_result_t privilege;
+    vm_guest_install_result_t storage;
+    vm_guest_install_status_t status = vm_guest_maintenance_recover(
+        work_directory, &privilege, &storage, detail, detail_capacity);
+    if (status != VM_GUEST_INSTALL_OK)
+        return status;
+    if ((privilege.committed || privilege.rolled_back) &&
+        !privilege.cleanup_complete) {
+        guest_detail(detail, detail_capacity,
+                     "Cydia privilege-repair residue must be cleaned before storage maintenance starts.");
+        return VM_GUEST_INSTALL_ERR_STATE;
+    }
+    if (storage.committed) {
+        if (result) *result = storage;
+        return VM_GUEST_INSTALL_OK;
+    }
     return guest_prepare_stage_for(work_directory, &VM_GUEST_STORAGE_SPEC,
+                                   result, detail, detail_capacity);
+}
+
+vm_guest_install_status_t
+vm_guest_privilege_prepare_stage(const char *work_directory,
+                                 vm_guest_install_result_t *result,
+                                 char *detail, size_t detail_capacity) {
+    vm_guest_install_result_t privilege;
+    vm_guest_install_result_t storage;
+    vm_guest_install_status_t status = vm_guest_maintenance_recover(
+        work_directory, &privilege, &storage, detail, detail_capacity);
+    if (status != VM_GUEST_INSTALL_OK)
+        return status;
+    if ((storage.committed || storage.rolled_back) &&
+        !storage.cleanup_complete) {
+        guest_detail(detail, detail_capacity,
+                     "Storage-maintenance residue must be cleaned before the Cydia privilege repair starts.");
+        return VM_GUEST_INSTALL_ERR_STATE;
+    }
+    if (privilege.committed) {
+        if (result) *result = privilege;
+        return VM_GUEST_INSTALL_OK;
+    }
+    return guest_prepare_stage_for(work_directory, &VM_GUEST_PRIVILEGE_SPEC,
                                    result, detail, detail_capacity);
 }
 
@@ -967,6 +1108,105 @@ vm_guest_storage_publish(const char *work_directory,
     return guest_publish_for(work_directory, &VM_GUEST_STORAGE_SPEC,
                              manifest_sha256, result,
                              detail, detail_capacity);
+}
+
+vm_guest_install_status_t
+vm_guest_privilege_publish(const char *work_directory,
+                           const uint8_t manifest_sha256[
+                               VM_GUEST_INSTALL_SHA256_SIZE],
+                           vm_guest_install_result_t *result,
+                           char *detail, size_t detail_capacity) {
+    return guest_publish_for(work_directory, &VM_GUEST_PRIVILEGE_SPEC,
+                             manifest_sha256, result,
+                             detail, detail_capacity);
+}
+
+vm_guest_install_status_t
+vm_guest_privilege_confirm(const char *work_directory,
+                           const uint8_t manifest_sha256[
+                               VM_GUEST_INSTALL_SHA256_SIZE],
+                           vm_guest_install_result_t *result,
+                           char *detail, size_t detail_capacity) {
+    vm_guest_install_result_t recovered;
+    guest_paths_t paths;
+    guest_paths_t install_paths;
+    uint8_t install_digest[VM_GUEST_INSTALL_SHA256_SIZE];
+
+    guest_result_clear(result);
+    guest_detail(detail, detail_capacity, "");
+    if (!manifest_sha256) {
+        guest_detail(detail, detail_capacity,
+                     "The Cydia privilege-repair identity is missing.");
+        return VM_GUEST_INSTALL_ERR_ARGUMENT;
+    }
+    vm_guest_install_status_t status = guest_recover_for(
+        work_directory, &VM_GUEST_PRIVILEGE_SPEC, &recovered,
+        detail, detail_capacity);
+    if (status != VM_GUEST_INSTALL_OK)
+        return status;
+    if (!guest_paths_init_for(&paths, work_directory,
+                              &VM_GUEST_PRIVILEGE_SPEC) ||
+        !guest_paths_init_for(&install_paths, work_directory,
+                              &VM_GUEST_INSTALL_SPEC)) {
+        guest_detail(detail, detail_capacity,
+                     "The Cydia privilege-repair path is too long to use.");
+        return VM_GUEST_INSTALL_ERR_PATH;
+    }
+    vm_guest_install_probe_t install = guest_record_probe(
+        install_paths.marker, VM_GUEST_MARKER_PREFIX, install_digest);
+    if (install == VM_GUEST_INSTALL_PROBE_INVALID) {
+        guest_detail(detail, detail_capacity,
+                     "The guest-install record is malformed; the repair was not recorded.");
+        return VM_GUEST_INSTALL_ERR_RECORD;
+    }
+    if (install == VM_GUEST_INSTALL_PROBE_IO_ERROR) {
+        guest_detail(detail, detail_capacity,
+                     "The guest-install record could not be read safely.");
+        return VM_GUEST_INSTALL_ERR_IO;
+    }
+    if (install != VM_GUEST_INSTALL_PROBE_VALID ||
+        !guest_digest_equal(install_digest, manifest_sha256)) {
+        guest_detail(detail, detail_capacity,
+                     "The Cydia repair does not match this committed guest installation.");
+        return VM_GUEST_INSTALL_ERR_STATE;
+    }
+    if (recovered.committed) {
+        if (!recovered.has_manifest ||
+            !guest_digest_equal(recovered.manifest_sha256,
+                                manifest_sha256)) {
+            guest_detail(detail, detail_capacity,
+                         "This machine already has a different Cydia privilege-repair identity.");
+            return VM_GUEST_INSTALL_ERR_STATE;
+        }
+        if (result) *result = recovered;
+        return VM_GUEST_INSTALL_OK;
+    }
+    if (guest_node(paths.live) != GUEST_NODE_REGULAR ||
+        guest_node(paths.marker) != GUEST_NODE_ABSENT ||
+        guest_node(paths.backup) != GUEST_NODE_ABSENT ||
+        guest_node(paths.stage) != GUEST_NODE_ABSENT ||
+        guest_node(paths.journal) != GUEST_NODE_ABSENT ||
+        guest_node(paths.marker_tmp) != GUEST_NODE_ABSENT ||
+        guest_node(paths.journal_tmp) != GUEST_NODE_ABSENT) {
+        guest_detail(detail, detail_capacity,
+                     "The Cydia privilege-repair namespace is not clean enough to confirm.");
+        return VM_GUEST_INSTALL_ERR_STATE;
+    }
+    if (!guest_publish_record(paths.marker_tmp, paths.marker, paths.work,
+                              VM_GUEST_PRIVILEGE_MARKER_PREFIX,
+                              manifest_sha256)) {
+        guest_detail(detail, detail_capacity,
+                     "The Cydia privilege-repair record could not be published.");
+        return VM_GUEST_INSTALL_ERR_IO;
+    }
+    if (result) {
+        result->committed = true;
+        result->cleanup_complete = true;
+        result->has_manifest = true;
+        memcpy(result->manifest_sha256, manifest_sha256,
+               VM_GUEST_INSTALL_SHA256_SIZE);
+    }
+    return VM_GUEST_INSTALL_OK;
 }
 
 const char *vm_guest_install_status_text(vm_guest_install_status_t status) {
