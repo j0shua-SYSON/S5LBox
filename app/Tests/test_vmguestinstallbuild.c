@@ -452,9 +452,13 @@ static void test_committed_maintenance_cleanup_blocks_new_transaction(void) {
           "could not commit cleanup-residue fixture: %s", detail);
 
     char residue[VM_GUEST_INSTALL_PATH_CAPACITY];
+    char residue_member[VM_GUEST_INSTALL_PATH_CAPACITY];
     CHECK(join_path(residue, sizeof residue, FIXTURE_DIR,
                     VM_GUEST_PRIVILEGE_BACKUP_FILE) &&
-          make_directory(residue),
+          make_directory(residue) &&
+          join_path(residue_member, sizeof residue_member, residue,
+                    "blocks-cleanup") &&
+          write_bytes(residue_member, "not empty\n"),
           "could not seed committed cleanup residue");
     progress_log_t progress;
     memset(&progress, 0, sizeof progress);
@@ -471,6 +475,8 @@ static void test_committed_maintenance_cleanup_blocks_new_transaction(void) {
           !progress.staging_seen && exists(residue),
           "cleanup residue did not block new disk maintenance: %s / %s",
           vm_guest_install_build_status_text(status), detail);
+    (void)remove(residue_member);
+    (void)remove_directory(residue);
 }
 
 static void test_dirty_existing_install_refuses_before_stage(void) {
