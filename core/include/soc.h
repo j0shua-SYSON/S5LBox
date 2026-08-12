@@ -985,9 +985,11 @@ typedef struct {
 /* Bounded evidence for completed STARTRENDERs. A completion counter alone
  * cannot distinguish a full transition from a decoder that accepted a small
  * status sprite, so retain the decoder family, committed pixel count and the
- * selected object identity. The full selected record is hashed before later
- * renders can reuse its guest allocation; its first eight words retain the
- * control and address fields needed to group matching forms. */
+ * selected object identity. The first physical backing and contiguous mapping
+ * span let host diagnostics correlate the GPU target with the active scanout.
+ * The full selected record is hashed before later renders can reuse its guest
+ * allocation; its first eight words retain the control and address fields
+ * needed to group matching forms. */
 typedef struct {
     uint64_t sequence;
     uint64_t record_hash;
@@ -996,6 +998,8 @@ typedef struct {
     uint32_t region;
     uint32_t object;
     uint32_t target;
+    uint32_t target_physical;
+    uint32_t target_mapping_span;
     uint32_t xclip;
     uint32_t yclip;
     uint32_t pixel_sample;

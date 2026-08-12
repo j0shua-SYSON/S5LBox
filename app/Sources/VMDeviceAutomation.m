@@ -638,6 +638,7 @@ static double VMDeviceAutomationSeconds(uint64_t firstNS, uint64_t lastNS) {
             [acceptWitnesses appendFormat:
                 @",mbx_3d_accept_%llu=%u:%u:%016llx,"
                  "mbx_3d_accept_%llu_regs=%08x:%08x:%08x:%08x:%08x:%08x:%08x:%08x,"
+                 "mbx_3d_accept_%llu_target=%08x:%08x:%u,"
                  "mbx_3d_accept_%llu_list=%x:%08x:%08x:%08x:%08x,"
                  "mbx_3d_accept_%llu_record=%08x:%u",
                 (unsigned long long)sequence,
@@ -647,6 +648,9 @@ static double VMDeviceAutomationSeconds(uint64_t firstNS, uint64_t lastNS) {
                 witness->region, witness->object, witness->target,
                 witness->xclip, witness->yclip, witness->pixel_sample,
                 witness->framebuffer_control, witness->framebuffer_stride,
+                (unsigned long long)sequence,
+                witness->target, witness->target_physical,
+                witness->target_mapping_span,
                 (unsigned long long)sequence,
                 witness->list_valid_mask,
                 witness->list_words[0], witness->list_words[1],

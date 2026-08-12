@@ -83,6 +83,10 @@ static vm_execution_telemetry_observation_t execution_observation(
     value.mbx_3d_accept_history[15].kind = (uint32_t)(base + 88u);
     value.mbx_3d_accept_history[15].pixels = (uint32_t)(base + 89u);
     value.mbx_3d_accept_history[15].record_words[7] = (uint32_t)(base + 90u);
+    value.mbx_3d_accept_history[15].target_physical =
+        (uint32_t)(base + 91u);
+    value.mbx_3d_accept_history[15].target_mapping_span =
+        (uint32_t)(base + 92u);
     value.active_clock_updates = base + 34u;
     value.active_clock_added_ticks = base + 35u;
     value.active_clock_clamps = base + 36u;
@@ -331,6 +335,10 @@ static void test_boundaries_and_sampled_changes(void) {
            state.execution_last.mbx_3d_accept_history[15].pixels == 2089u &&
            state.execution_last.mbx_3d_accept_history[15].record_words[7] ==
                2090u &&
+           state.execution_last.mbx_3d_accept_history[15].target_physical ==
+               2091u &&
+           state.execution_last.mbx_3d_accept_history[15].
+               target_mapping_span == 2092u &&
            state.execution_last.active_clock_updates == 2034u &&
            state.execution_last.active_clock_added_ticks == 2035u &&
            state.execution_last.active_clock_clamps == 2036u &&

@@ -1636,6 +1636,8 @@ static void test_first_tiled_premultiplied_over(void) {
           first_accept->region == region &&
           first_accept->object == object &&
           first_accept->target == target &&
+          first_accept->target_physical == target_pa &&
+          first_accept->target_mapping_span == 0x1000u &&
           first_accept->xclip == 0x01400000u &&
           first_accept->yclip == 0x00800010u &&
           first_accept->list_valid_mask == 0x0fu &&

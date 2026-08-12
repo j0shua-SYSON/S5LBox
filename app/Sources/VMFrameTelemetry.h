@@ -108,6 +108,8 @@ typedef struct {
     uint32_t region;
     uint32_t object;
     uint32_t target;
+    uint32_t target_physical;
+    uint32_t target_mapping_span;
     uint32_t xclip;
     uint32_t yclip;
     uint32_t pixel_sample;

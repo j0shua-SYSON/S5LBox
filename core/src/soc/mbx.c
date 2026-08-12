@@ -3734,6 +3734,13 @@ static void mbx_capture_3d_accept(
     witness->region = m->reg[S5L_MBX_RGNBASE / 4u];
     witness->object = m->reg[S5L_MBX_OBJBASE / 4u];
     witness->target = m->reg[S5L_MBX_FBSTART / 4u];
+    uint32_t target_physical = 0u, target_span = 0u;
+    const char *capture_why = "accept-witness read failed";
+    if (mbx_gart_span(m, bus, witness->target, &target_physical,
+                      &target_span, &capture_why)) {
+        witness->target_physical = target_physical;
+        witness->target_mapping_span = target_span;
+    }
     witness->xclip = m->reg[S5L_MBX_FBXCLIP / 4u];
     witness->yclip = m->reg[S5L_MBX_FBYCLIP / 4u];
     witness->pixel_sample = m->reg[S5L_MBX_3DPIXSAMP / 4u];
@@ -3741,7 +3748,6 @@ static void mbx_capture_3d_accept(
     witness->framebuffer_stride =
         m->reg[S5L_MBX_FBLINESTRIDE / 4u];
 
-    const char *capture_why = "accept-witness read failed";
     uint64_t list64 = (uint64_t)witness->object + 0x68u;
     if (list64 <= UINT32_MAX - 12u) {
         for (unsigned i = 0u; i < 4u; i++) {
