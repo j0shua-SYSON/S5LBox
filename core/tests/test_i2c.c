@@ -315,24 +315,34 @@ static void test_pmu_rtc_and_tick_overflow(void) {
           "RTC advanced past its representable century");
 }
 
-static void test_pmu_hibernate_wake_event_is_one_shot(void) {
+static void test_pmu_standby_wake_event_is_one_shot(void) {
     s5l_i2c_t bus;
     s5l_pcf50635_t pmu;
     setup_pmu(&bus, &pmu);
 
-    CHECK(!s5l_pcf50635_hibernating(&pmu),
-          "reset PMU claimed the application processor was hibernating");
+    CHECK(!s5l_pcf50635_in_standby(&pmu),
+          "reset PMU claimed the application processor was in standby");
 
-    uint8_t command = (uint8_t)(0x80u | PCF50635_OOCSHDWN_GOHIB);
+    /* Bit 1 is reserved on the period PCF50633-family register map. The old
+     * model called it GOHIB, which made a real iPhone OS 3 shutdown (0x01)
+     * invisible and treated the reserved bit as power state instead. Keep an
+     * explicit negative control so that one-bit error cannot return. */
+    uint8_t command = 0x02u;
     drive_write(&bus, PCF50635_I2C_ADDR, PCF50635_OOCSHDWN,
                 &command, 1u);
-    CHECK(s5l_pcf50635_hibernating(&pmu),
-          "OOCSHDWN.GOHIB did not enter hibernation");
+    CHECK(!s5l_pcf50635_in_standby(&pmu),
+          "reserved OOCSHDWN bit 1 was treated as standby");
+
+    command = (uint8_t)(0x80u | PCF50635_OOCSHDWN_GO_STANDBY);
+    drive_write(&bus, PCF50635_I2C_ADDR, PCF50635_OOCSHDWN,
+                &command, 1u);
+    CHECK(s5l_pcf50635_in_standby(&pmu),
+          "OOCSHDWN.GO_STANDBY did not enter standby");
 
     uint64_t guest_writes = pmu.reg_writes;
     s5l_pcf50635_wake_onkey(&pmu);
-    CHECK(!s5l_pcf50635_hibernating(&pmu),
-          "ONKEY wake left GOHIB asserted");
+    CHECK(!s5l_pcf50635_in_standby(&pmu),
+          "ONKEY wake left GO_STANDBY asserted");
     CHECK(pmu.regs[PCF50635_OOCSHDWN] == 0x80u,
           "ONKEY wake discarded unrelated OOCSHDWN bits: %02x",
           pmu.regs[PCF50635_OOCSHDWN]);
@@ -357,7 +367,7 @@ static void test_pmu_hibernate_wake_event_is_one_shot(void) {
           events[3] == 0u && events[4] == 0u,
           "PMU wake event did not clear on read");
 
-    CHECK(!s5l_pcf50635_hibernating(NULL), "NULL PMU hibernated");
+    CHECK(!s5l_pcf50635_in_standby(NULL), "NULL PMU entered standby");
     s5l_pcf50635_wake_onkey(NULL);
 }
 
@@ -576,7 +586,7 @@ int main(void) {
     test_unknown_slave_naks_and_w1c_is_selective();
     test_pmu_multibyte_pointer_and_wrap();
     test_pmu_rtc_and_tick_overflow();
-    test_pmu_hibernate_wake_event_is_one_shot();
+    test_pmu_standby_wake_event_is_one_shot();
     test_unknown_pmu_registers_are_visible_and_bounded();
     test_machine_routes_widths_windows_and_irqs();
     test_malformed_runtime_state_cannot_index_callbacks();

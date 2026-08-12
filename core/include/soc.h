@@ -1383,7 +1383,7 @@ bool     s5l_gpio_watch(s5l_gpio_t *g, uint16_t pin, void *ctx,
  * stored at this+0x90+4i) and reads only in its power-state path (0xc065a0c8)
  * to answer "did this button wake us". It is NOT the ordinary press/release
  * path. The machine-level s5l8900_set_button() wrapper models it only while
- * the PMU has put the application processor into hibernation.
+ * the PMU has put the application processor into standby.
  *
  * WHICH LEVEL IS "PRESSED". This is the number that had to be right, because a
  * wrong one reads as a button held down forever. Two independently decoded
@@ -1957,7 +1957,7 @@ bool     s5l_i2c_irq(const s5l_i2c_t *bus);
 #define PCF50635_INT5     0x06u
 #define PCF50635_OOCSHDWN 0x0cu
 #define PCF50635_INT2_ONKEYR 0x01u
-#define PCF50635_OOCSHDWN_GOHIB 0x02u
+#define PCF50635_OOCSHDWN_GO_STANDBY 0x01u
 #define PCF50635_RTCSC    0x59u
 #define PCF50635_RTCWD    0x5cu
 #define PCF50635_RTCYR    0x5fu
@@ -1987,7 +1987,7 @@ void s5l_pcf50635_reset(s5l_pcf50635_t *pmu, uint32_t tick_hz);
 void s5l_pcf50635_set_time(s5l_pcf50635_t *pmu, uint64_t unix_seconds);
 void s5l_pcf50635_tick(s5l_pcf50635_t *pmu, uint32_t ticks);
 void s5l_pcf50635_bind(s5l_pcf50635_t *pmu, s5l_i2c_slave_t *slave);
-bool s5l_pcf50635_hibernating(const s5l_pcf50635_t *pmu);
+bool s5l_pcf50635_in_standby(const s5l_pcf50635_t *pmu);
 void s5l_pcf50635_wake_onkey(s5l_pcf50635_t *pmu);
 void s5l_pcf50635_civil(uint64_t unix_seconds, int *year, int *month, int *day,
                         int *hour, int *minute, int *second, int *weekday);
@@ -4075,21 +4075,21 @@ bool s5l8900_overlaps(uint32_t a, uint32_t alen, uint32_t b, uint32_t blen);
 void s5l8900_tick(s5l8900_t *m, uint32_t ticks);
 
 /*
- * Wake a PMU-hibernating machine through the retained-RAM reset path without
+ * Wake a PMU-standby machine through the retained-RAM reset path without
  * manufacturing a host button transition.  Snapshot restore uses this after
  * loading a powered-down guest: the saved PMU state supplies the wake context,
  * while the absence of a physical press means no held GPIO wire or deferred
  * release may be added to the restored machine.  Returns false for NULL or a
- * machine that is not hibernating.
+ * machine that is not in standby.
  */
-bool s5l8900_wake_from_hibernation(s5l8900_t *m);
+bool s5l8900_wake_from_standby(s5l8900_t *m);
 
 /*
  * Inject one host button transition through the complete machine, including
  * the PCF50635's separate Power wake path. Ordinary running transitions use
  * the GPIO button model above and refresh interrupt levels before returning.
  *
- * When the guest has commanded PMU hibernation, only a Power press is a wake
+ * When the guest has commanded PMU standby, only a Power press is a wake
  * source. It latches the PMU ONKEY rising event and resets the ARM core into
  * the retained-RAM reset vector prepared by XNU. AppleM68Buttons turns that
  * PMU reason into the Power press itself, so the GPIO controller consumes the

@@ -992,8 +992,8 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
      * resets into XNU's retained-RAM trampoline; do exactly that here without
      * inventing a held host button or a later release. */
     bool restored_from_pmu_standby = false;
-    if (restored && s5l_pcf50635_hibernating(&machine->pmu)) {
-        if (!s5l8900_wake_from_hibernation(machine)) {
+    if (restored && s5l_pcf50635_in_standby(&machine->pmu)) {
+        if (!s5l8900_wake_from_standby(machine)) {
             (void)file_block_close(boot->media);
             set_detail(report->detail, sizeof report->detail,
                        "The saved powered-down machine could not enter its "

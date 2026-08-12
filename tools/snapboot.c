@@ -741,8 +741,8 @@ int main(int argc, char **argv) {
                     wake_power ? "--wake-power" : "--press-power");
             return 1;
         }
-        if (wake_power && !s5l_pcf50635_hibernating(&mach.pmu)) {
-            fprintf(stderr, "restored machine is not in PMU hibernation\n");
+        if (wake_power && !s5l_pcf50635_in_standby(&mach.pmu)) {
+            fprintf(stderr, "restored machine is not in PMU standby\n");
             return 6;
         }
         if (!s5l8900_set_button(&mach, S5L_BUTTON_HOLD, true)) {
@@ -755,7 +755,7 @@ int main(int argc, char **argv) {
                     mach.cpu.r[15]);
         else
             fprintf(stderr,
-                    "Power press accepted outside PMU hibernation at 0x%08x\n",
+                    "Power press accepted outside PMU standby at 0x%08x\n",
                     mach.cpu.r[15]);
     }
 

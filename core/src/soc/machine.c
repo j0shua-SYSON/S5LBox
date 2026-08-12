@@ -1564,11 +1564,11 @@ void s5l8900_tick(s5l8900_t *m, uint32_t ticks) {
     s5l8900_refresh(m, tb);
 }
 
-bool s5l8900_wake_from_hibernation(s5l8900_t *m) {
-    if (!m || !s5l_pcf50635_hibernating(&m->pmu)) return false;
+bool s5l8900_wake_from_standby(s5l8900_t *m) {
+    if (!m || !s5l_pcf50635_in_standby(&m->pmu)) return false;
 
     /* XNU copied its reset trampoline to the first retained DRAM page before
-     * writing OOCSHDWN.GOHIB, then entered an intentional infinite branch.
+     * writing OOCSHDWN.GO_STANDBY, then entered an intentional infinite branch.
      * ONKEY powers the ARM core back up from reset; it is not an IRQ capable
      * of escaping that branch. This machine has no low-address DRAM alias, so
      * the hardware reset vector is represented by the actual DRAM base. */
@@ -1597,7 +1597,7 @@ bool s5l8900_wake_from_hibernation(s5l8900_t *m) {
 bool s5l8900_set_button(s5l8900_t *m, unsigned which, bool pressed) {
     if (!m) return false;
 
-    if (!s5l_pcf50635_hibernating(&m->pmu)) {
+    if (!s5l_pcf50635_in_standby(&m->pmu)) {
         /* AppleM68Buttons reads the PMU wake reason before dispatching the
          * synthetic Power press. Do not let the host's queued release overtake
          * that read: once INT2 has cleared, the release proceeds through the
@@ -1646,7 +1646,7 @@ bool s5l8900_set_button(s5l8900_t *m, unsigned which, bool pressed) {
                        s5l_button_level(S5L_BUTTON_HOLD, true));
     }
 
-    return s5l8900_wake_from_hibernation(m);
+    return s5l8900_wake_from_standby(m);
 }
 
 /* One implementation of the observable device work, kept out of the public
