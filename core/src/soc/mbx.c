@@ -131,6 +131,9 @@
 #define MBX_2D_WIDTH           320u
 #define MBX_2D_HEIGHT          480u
 #define MBX_2D_SURFACE_BYTES   (MBX_2D_BGRA_STRIDE * MBX_2D_HEIGHT)
+#define MBX_2D_SOURCE_FORMAT_M  0xffff8000u
+#define MBX_2D_SOURCE_BGRA8     0x94060000u
+#define MBX_2D_SOURCE_ARGB1555  0x94048000u
 
 /* The first tiled render captured in r369. The source is an 8x128 BGRA8
  * texture with a 32-byte stride; the object samples its first column over a
@@ -244,6 +247,15 @@ static void mbx_trace(uint32_t off, uint32_t val, bool is_write) {
 static uint32_t mbx_load_le32(const uint8_t *p) {
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
            ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static uint16_t mbx_load_le16(const uint8_t *p) {
+    return (uint16_t)((uint16_t)p[0] | ((uint16_t)p[1] << 8));
+}
+
+static uint8_t mbx_expand_5_to_8(uint32_t component) {
+    component &= 0x1fu;
+    return (uint8_t)((component << 3) | (component >> 2));
 }
 
 static uint32_t mbx_edram_word(const s5l_mbx_t *m, uint32_t aperture_off) {
@@ -548,16 +560,29 @@ static bool mbx_stage_simple_copy(s5l_mbx_t *m, const arm_bus_t *bus,
         w[i] = mbx_edram_word(m, packet_off + i * 4u);
 
     /* These constants and masks are the stores/literal pool in
-     * _pack2DCtxBlitCopy at 0x30e1c2ac..0x30e1c5a4. This deliberately accepts
-     * coordinates but only the captured BGRA8, unity-scale, simple-copy mode.
+     * _pack2DCtxBlitCopy at 0x30e1c2ac..0x30e1c5a4. QuartzCore's
+     * RenderMBX2D::map_surface at 0x3123a514..0x3123a5cc maps both IOSurface
+     * '1555' and '555L' to source-format bits 0x48000; '565L' maps to the
+     * distinct 0x50000 format and remains unsupported. _pack2DCtxBlitColor at
+     * 0x30e1aecc..0x30e1aeec independently proves the 0x48000 bit layout:
+     * A at 15, R at 14..10, G at 9..5 and B at 4..0. The retained Wallpaper
+     * batch uses that exact family with descriptor 0x94048280.
+     *
+     * Accept coordinates in the measured unity-scale simple-copy mode, and
+     * only the two source formats whose layout is now decoded. Do not treat
+     * every 16-bit descriptor as interchangeable.
      */
+    const uint32_t source_format = w[2] & MBX_2D_SOURCE_FORMAT_M;
+    const bool source_bgra8 = source_format == MBX_2D_SOURCE_BGRA8;
+    const bool source_argb1555 = source_format == MBX_2D_SOURCE_ARGB1555;
     if ((w[0] != MBX_2D_COMMAND_HEADER && w[0] != MBX_2D_SUBMIT) ||
-        (w[2] & 0xffff8000u) != 0x94060000u ||
+        (!source_bgra8 && !source_argb1555) ||
         (w[4] & 0xf8002000u) != 0x30000000u ||
         w[5] != 0x60800200u || w[6] != 0x8000ccccu ||
         w[7] != 0xffffffffu ||
         (w[8] & ~0x1fff1fffu) || (w[9] & ~0x1fff1fffu)) {
-        if (why) *why = "packet is not the decoded BGRA8 unity simple-copy form";
+        if (why)
+            *why = "packet is not a decoded BGRA8 or ARGB1555 unity simple-copy form";
         return false;
     }
     for (unsigned i = 10; i < MBX_2D_COPY_WORDS; i++) {
@@ -574,9 +599,11 @@ static bool mbx_stage_simple_copy(s5l_mbx_t *m, const arm_bus_t *bus,
     uint32_t dst_x1 = (w[9] >> 16) & 0x1fffu;
     uint32_t dst_y1 = w[9] & 0x1fffu;
     uint32_t source_stride = w[2] & 0x7fffu;
-    if (!source_stride || (source_stride & 3u) ||
-        source_stride > MBX_2D_BGRA_STRIDE) {
-        if (why) *why = "copy source stride is not an aligned bounded BGRA8 pitch";
+    const uint32_t source_pixel_bytes = source_bgra8 ? 4u : 2u;
+    if (!source_stride || source_stride % source_pixel_bytes != 0u ||
+        source_stride > MBX_2D_WIDTH * source_pixel_bytes) {
+        if (why)
+            *why = "copy source stride is not aligned and bounded for its decoded format";
         return false;
     }
     if (dst_x1 <= dst_x || dst_y1 <= dst_y) {
@@ -585,9 +612,10 @@ static bool mbx_stage_simple_copy(s5l_mbx_t *m, const arm_bus_t *bus,
     }
     uint32_t width = dst_x1 - dst_x;
     uint32_t height = dst_y1 - dst_y;
+    uint32_t source_pixels_per_row = source_stride / source_pixel_bytes;
     if (dst_x1 > MBX_2D_WIDTH || dst_y1 > MBX_2D_HEIGHT ||
-        src_x > source_stride / 4u ||
-        width > source_stride / 4u - src_x ||
+        src_x > source_pixels_per_row ||
+        width > source_pixels_per_row - src_x ||
         src_y > MBX_2D_HEIGHT || height > MBX_2D_HEIGHT - src_y) {
         if (why) *why =
             "copy rectangle exceeds its decoded source or 320x480 destination";
@@ -595,6 +623,7 @@ static bool mbx_stage_simple_copy(s5l_mbx_t *m, const arm_bus_t *bus,
     }
 
     uint32_t row_bytes = width * 4u;
+    uint32_t source_row_bytes = width * source_pixel_bytes;
     uint32_t total = row_bytes * height;
     if ((w[1] & 3u) || (w[3] & 3u)) {
         if (why) *why = "source or destination GPU base is not word aligned";
@@ -609,15 +638,16 @@ static bool mbx_stage_simple_copy(s5l_mbx_t *m, const arm_bus_t *bus,
     for (uint32_t row = 0; row < height; row++) {
         uint64_t src64 = (uint64_t)w[3] +
                          (uint64_t)(src_y + row) * source_stride +
-                         (uint64_t)src_x * 4u;
+                         (uint64_t)src_x * source_pixel_bytes;
         uint64_t dst64 = (uint64_t)w[1] +
                          (uint64_t)(dst_y + row) * MBX_2D_BGRA_STRIDE +
                          (uint64_t)dst_x * 4u;
-        if (src64 + row_bytes > (uint64_t)UINT32_MAX + 1u ||
+        if (src64 + source_row_bytes > (uint64_t)UINT32_MAX + 1u ||
             dst64 + row_bytes > (uint64_t)UINT32_MAX + 1u ||
             (batch && !mbx_2d_batch_source_ok(
-                (uint32_t)src64, row_bytes, batch->target, why)) ||
-            !mbx_gart_validate(m, bus, (uint32_t)src64, row_bytes, why) ||
+                (uint32_t)src64, source_row_bytes, batch->target, why)) ||
+            !mbx_gart_validate(m, bus, (uint32_t)src64,
+                               source_row_bytes, why) ||
             !mbx_gart_validate(m, bus, (uint32_t)dst64, row_bytes, why))
             return false;
     }
@@ -628,10 +658,35 @@ static bool mbx_stage_simple_copy(s5l_mbx_t *m, const arm_bus_t *bus,
         return false;
     }
     bool ok = true;
-    for (uint32_t row = 0; row < height && ok; row++) {
-        uint32_t src = w[3] + (src_y + row) * source_stride + src_x * 4u;
-        ok = mbx_gart_read(m, bus, src, pixels + row * row_bytes,
-                           row_bytes, why);
+    if (source_bgra8) {
+        for (uint32_t row = 0; row < height && ok; row++) {
+            uint32_t src = w[3] + (src_y + row) * source_stride +
+                           src_x * source_pixel_bytes;
+            ok = mbx_gart_read(m, bus, src, pixels + row * row_bytes,
+                               source_row_bytes, why);
+        }
+    } else {
+        uint8_t *packed = malloc(source_row_bytes);
+        if (!packed) {
+            free(pixels);
+            if (why) *why = "host allocation for packed ARGB1555 row failed";
+            return false;
+        }
+        for (uint32_t row = 0; row < height && ok; row++) {
+            uint32_t src = w[3] + (src_y + row) * source_stride +
+                           src_x * source_pixel_bytes;
+            ok = mbx_gart_read(m, bus, src, packed,
+                               source_row_bytes, why);
+            for (uint32_t x = 0; x < width && ok; x++) {
+                uint16_t argb = mbx_load_le16(packed + x * 2u);
+                uint8_t *bgra = pixels + row * row_bytes + x * 4u;
+                bgra[0] = mbx_expand_5_to_8(argb);
+                bgra[1] = mbx_expand_5_to_8(argb >> 5);
+                bgra[2] = mbx_expand_5_to_8(argb >> 10);
+                bgra[3] = (argb & 0x8000u) ? 0xffu : 0u;
+            }
+        }
+        free(packed);
     }
     if (!ok) {
         free(pixels);

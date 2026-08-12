@@ -258,6 +258,21 @@ static uint32_t test_gpu_read32(s5l8900_t *m, uint32_t gpu) {
     return m->bus.read32(m->bus.ctx, test_gpu_pa(m, gpu));
 }
 
+static void test_gpu_write16(s5l8900_t *m, uint32_t gpu, uint16_t value) {
+    m->bus.write16(m->bus.ctx, test_gpu_pa(m, gpu), value);
+}
+
+static uint32_t test_argb1555_to_bgra8(uint16_t pixel) {
+    uint32_t blue5 = pixel & 0x1fu;
+    uint32_t green5 = (pixel >> 5) & 0x1fu;
+    uint32_t red5 = (pixel >> 10) & 0x1fu;
+    uint32_t blue8 = (blue5 << 3) | (blue5 >> 2);
+    uint32_t green8 = (green5 << 3) | (green5 >> 2);
+    uint32_t red8 = (red5 << 3) | (red5 >> 2);
+    uint32_t alpha8 = (pixel & 0x8000u) ? 0xffu : 0u;
+    return blue8 | (green8 << 8) | (red8 << 16) | (alpha8 << 24);
+}
+
 static uint32_t test_float_word(float value) {
     uint32_t word = 0u;
     memcpy(&word, &value, sizeof word);
@@ -392,6 +407,159 @@ static void test_map_gpu_page(s5l8900_t *m, uint32_t table,
                               uint32_t gpu, uint32_t pa) {
     m->bus.write32(m->bus.ctx,
         table + (((gpu >> 12) & 0x3ffu) * 4u), pa);
+}
+
+/* Wallpaper Preview's rejected r447 submit contains five simple-copy strips
+ * with descriptor 0x94048280: format 0x48000 and a 0x280-byte pitch. The
+ * shipped QuartzCore binary maps both '1555' and little-endian '555L' to that
+ * format while mapping '565L' to 0x50000. The producer's color-packing branch
+ * independently fixes the bit order as A1:R5:G5:B5. Exercise the exact
+ * descriptor, a 320-pixel source, non-contiguous source pages, channel/alpha
+ * expansion, destination guards, and whole-batch rejection semantics.
+ */
+static void test_wallpaper_argb1555_simple_copy(void) {
+    enum {
+        SOURCE_STRIDE = 0x280u,
+        TARGET_STRIDE = 0x500u,
+        WIDTH = 320u,
+        HEIGHT = 8u,
+        LEFT = 3u,
+        TOP = 68u,
+    };
+    const uint32_t table2 = 0x08003000u;
+    const uint32_t source = 0x00a96000u;
+    const uint32_t target = 0x00998000u;
+    const uint32_t source_pa0 = 0x08010000u;
+    const uint32_t source_pa1 = 0x08013000u;
+    const uint32_t target_pa = 0x08080000u;
+    uint32_t packet[16] = {
+        0xa0060500u, target, 0x94048280u, source,
+        0x30000000u, 0x60800200u, 0x8000ccccu, 0xffffffffu,
+        (LEFT << 16) | TOP, (WIDTH << 16) | (TOP + HEIGHT),
+        0x70000000u, 0x70000000u, 0x70000000u, 0x70000000u,
+        0x70000000u, 0x70000000u,
+    };
+
+    s5l8900_t m;
+    CHECK(s5l8900_init(&m, RAM_BASE, RAM_SIZE),
+          "ARGB1555 wallpaper machine init failed");
+    if (!m.ram) return;
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_GART2, table2);
+    test_map_gpu_page(&m, table2, source, source_pa0);
+    test_map_gpu_page(&m, table2, source + 0x1000u, source_pa1);
+    for (uint32_t page = 0; page < TARGET_STRIDE * 480u; page += 0x1000u)
+        test_map_gpu_page(&m, table2, target + page, target_pa + page);
+
+    for (uint32_t y = 0; y < HEIGHT; y++) {
+        for (uint32_t x = 0; x < WIDTH; x++) {
+            uint16_t pixel = (uint16_t)(
+                (((x + y * 3u) & 0x1fu) << 10) |
+                (((x * 5u + y) & 0x1fu) << 5) |
+                ((x * 7u + y * 11u) & 0x1fu) |
+                (((x ^ y) & 1u) ? 0x8000u : 0u));
+            test_gpu_write16(&m, source + y * SOURCE_STRIDE + x * 2u,
+                             pixel);
+        }
+    }
+    static const uint16_t vectors[] = {
+        0x0000u, 0x001fu, 0x03e0u, 0x7c00u,
+        0x8000u, 0xffffu, 0x4294u,
+    };
+    static const uint32_t expected_vectors[] = {
+        0x00000000u, 0x000000ffu, 0x0000ff00u, 0x00ff0000u,
+        0xff000000u, 0xffffffffu, 0x0084a5a5u,
+    };
+    for (uint32_t i = 0; i < sizeof vectors / sizeof vectors[0]; i++)
+        test_gpu_write16(&m, source + i * 2u, vectors[i]);
+
+    const uint32_t before = target + (TOP - 1u) * TARGET_STRIDE + LEFT * 4u;
+    const uint32_t left_guard = target + TOP * TARGET_STRIDE + (LEFT - 1u) * 4u;
+    const uint32_t after = target + (TOP + HEIGHT) * TARGET_STRIDE + LEFT * 4u;
+    test_gpu_write32(&m, before, 0x11223344u);
+    test_gpu_write32(&m, left_guard, 0x55667788u);
+    test_gpu_write32(&m, after, 0x99aabbccu);
+    for (uint32_t i = 0; i < sizeof vectors / sizeof vectors[0]; i++)
+        test_gpu_write32(&m, target + TOP * TARGET_STRIDE +
+                         (LEFT + i) * 4u, 0xdeadbeefu);
+
+    write_packet(&m, RING + 0xc470u, packet, 16u);
+    const char *why = "unset";
+    uint64_t reason_hash = UINT64_MAX;
+    CHECK(s5l_mbx_probe_2d_submit(&m.mbx, &m.bus,
+                                  RING + 0xc470u, 1u,
+                                  &reason_hash, &why) &&
+          reason_hash == 0u,
+          "captured ARGB1555 descriptor rejected: %s (%016llx)",
+          why, (unsigned long long)reason_hash);
+    m.bus.write32(m.bus.ctx, MBX_BASE + RING, 0xf0000000u);
+
+    uint32_t mismatches = 0u;
+    for (uint32_t y = 0; y < HEIGHT; y++) {
+        for (uint32_t x = LEFT; x < WIDTH; x++) {
+            uint32_t raw_pa = test_gpu_pa(
+                &m, source + y * SOURCE_STRIDE + (x - LEFT) * 2u);
+            uint16_t raw = m.bus.read16(m.bus.ctx, raw_pa);
+            uint32_t actual = test_gpu_read32(
+                &m, target + (TOP + y) * TARGET_STRIDE + x * 4u);
+            mismatches += actual != test_argb1555_to_bgra8(raw);
+        }
+    }
+    CHECK(mismatches == 0u,
+          "ARGB1555 wallpaper strip mismatched %u converted pixels",
+          mismatches);
+    for (uint32_t i = 0; i < sizeof vectors / sizeof vectors[0]; i++)
+        CHECK(test_gpu_read32(&m, target + TOP * TARGET_STRIDE +
+                              (LEFT + i) * 4u) == expected_vectors[i],
+              "ARGB1555 vector %u decoded to %08x, expected %08x", i,
+              test_gpu_read32(&m, target + TOP * TARGET_STRIDE +
+                              (LEFT + i) * 4u), expected_vectors[i]);
+    CHECK(test_gpu_read32(&m, before) == 0x11223344u &&
+          test_gpu_read32(&m, left_guard) == 0x55667788u &&
+          test_gpu_read32(&m, after) == 0x99aabbccu,
+          "ARGB1555 copy changed a pixel outside its destination rectangle");
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0x400u,
+          "ARGB1555 copy did not raise exactly 2D_SYNC");
+    m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x400u);
+
+    /* A late source hole must be found before any earlier row is committed. */
+    uint32_t first_destination =
+        target + TOP * TARGET_STRIDE + LEFT * 4u;
+    test_gpu_write32(&m, first_destination, 0x13579bdfu);
+    m.bus.write32(m.bus.ctx,
+        table2 + (((source + 0x1000u) >> 12 & 0x3ffu) * 4u), 0u);
+    write_packet(&m, RING + 0x100u, packet, 16u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + RING, 0xf0000000u);
+    CHECK(test_gpu_read32(&m, first_destination) == 0x13579bdfu,
+          "late ARGB1555 source hole partially committed an earlier row");
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
+          "late ARGB1555 source hole raised completion");
+    test_map_gpu_page(&m, table2, source + 0x1000u, source_pa1);
+
+    /* 0x50000 is the separately identified 565L format. It is not decoded by
+     * this change and must not be accepted merely because it is 16-bit. */
+    uint32_t unsupported[16];
+    memcpy(unsupported, packet, sizeof unsupported);
+    unsupported[2] = 0x94050280u;
+    test_gpu_write32(&m, first_destination, 0x2468ace0u);
+    write_packet(&m, RING + 0x140u, unsupported, 16u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + RING, 0xf0000000u);
+    CHECK(test_gpu_read32(&m, first_destination) == 0x2468ace0u,
+          "unsupported RGB565 descriptor changed the destination");
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
+          "unsupported RGB565 descriptor raised completion");
+
+    /* A valid 1555 command followed by that unsupported format is one atomic
+     * submit. The first command may not leak through before the second fails. */
+    test_gpu_write32(&m, first_destination, 0xa5a5a5a5u);
+    write_packet(&m, RING + 0x200u, packet, 16u);
+    write_packet(&m, RING + 0x240u, unsupported, 16u);
+    m.bus.write32(m.bus.ctx, MBX_BASE + RING, 0xf0000000u);
+    CHECK(test_gpu_read32(&m, first_destination) == 0xa5a5a5a5u,
+          "rejected mixed-format batch committed its valid first command");
+    CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0u,
+          "rejected mixed-format batch raised completion");
+
+    s5l8900_free(&m);
 }
 
 static void test_full_lower_surface_opaque_fill(void) {
@@ -5388,6 +5556,7 @@ int main(void) {
     printf("PowerVR MBX2D tests\n");
     test_translated_copy_and_completion_boundary();
     test_unknown_packet_and_bad_gart_are_atomic();
+    test_wallpaper_argb1555_simple_copy();
     test_full_lower_surface_opaque_fill();
     test_safari_tabs_opaque_fill_batch();
     test_safari_tabs_bounded_source_stride_copy();
