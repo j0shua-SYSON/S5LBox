@@ -78,6 +78,7 @@ typedef struct {
 #define VM_MBX_3D_REJECTION_RECORD_WORDS 44u
 #define VM_MBX_3D_ACCEPT_HISTORY 16u
 #define VM_MBX_3D_ACCEPT_RECORD_WORDS 8u
+#define VM_MBX_3D_TARGET_LEDGER 8u
 
 typedef struct {
     uint64_t sequence;
@@ -121,6 +122,16 @@ typedef struct {
     uint32_t record_valid_words;
     uint32_t record_words[VM_MBX_3D_ACCEPT_RECORD_WORDS];
 } vm_mbx_3d_accept_witness_t;
+
+typedef struct {
+    uint64_t last_sequence;
+    uint64_t completed;
+    uint64_t pixels;
+    uint32_t target;
+    uint32_t target_physical;
+    uint32_t target_mapping_span;
+    uint32_t last_kind;
+} vm_mbx_3d_target_ledger_t;
 
 typedef struct {
     /* Current CPU state. These are witnesses, not monotonic counters, and are
@@ -171,6 +182,8 @@ typedef struct {
         VM_MBX_3D_REJECTION_HISTORY];
     vm_mbx_3d_accept_witness_t mbx_3d_accept_history[
         VM_MBX_3D_ACCEPT_HISTORY];
+    vm_mbx_3d_target_ledger_t mbx_3d_target_ledger[
+        VM_MBX_3D_TARGET_LEDGER];
     uint64_t active_clock_updates;
     uint64_t active_clock_added_ticks;
     uint64_t active_clock_clamps;

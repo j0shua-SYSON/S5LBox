@@ -87,6 +87,15 @@ static vm_execution_telemetry_observation_t execution_observation(
         (uint32_t)(base + 91u);
     value.mbx_3d_accept_history[15].target_mapping_span =
         (uint32_t)(base + 92u);
+    value.mbx_3d_target_ledger[7].last_sequence = base + 93u;
+    value.mbx_3d_target_ledger[7].completed = base + 94u;
+    value.mbx_3d_target_ledger[7].pixels = base + 95u;
+    value.mbx_3d_target_ledger[7].target = (uint32_t)(base + 96u);
+    value.mbx_3d_target_ledger[7].target_physical =
+        (uint32_t)(base + 97u);
+    value.mbx_3d_target_ledger[7].target_mapping_span =
+        (uint32_t)(base + 98u);
+    value.mbx_3d_target_ledger[7].last_kind = (uint32_t)(base + 99u);
     value.active_clock_updates = base + 34u;
     value.active_clock_added_ticks = base + 35u;
     value.active_clock_clamps = base + 36u;
@@ -339,6 +348,16 @@ static void test_boundaries_and_sampled_changes(void) {
                2091u &&
            state.execution_last.mbx_3d_accept_history[15].
                target_mapping_span == 2092u &&
+           state.execution_last.mbx_3d_target_ledger[7].last_sequence ==
+               2093u &&
+           state.execution_last.mbx_3d_target_ledger[7].completed == 2094u &&
+           state.execution_last.mbx_3d_target_ledger[7].pixels == 2095u &&
+           state.execution_last.mbx_3d_target_ledger[7].target == 2096u &&
+           state.execution_last.mbx_3d_target_ledger[7].target_physical ==
+               2097u &&
+           state.execution_last.mbx_3d_target_ledger[7].
+               target_mapping_span == 2098u &&
+           state.execution_last.mbx_3d_target_ledger[7].last_kind == 2099u &&
            state.execution_last.active_clock_updates == 2034u &&
            state.execution_last.active_clock_added_ticks == 2035u &&
            state.execution_last.active_clock_clamps == 2036u &&

@@ -666,6 +666,22 @@ static double VMDeviceAutomationSeconds(uint64_t firstNS, uint64_t lastNS) {
         }
         if (acceptWitnesses.length)
             execution = [execution stringByAppendingString:acceptWitnesses];
+        NSMutableString *targetLedger = [NSMutableString string];
+        for (unsigned i = 0u; i < VM_MBX_3D_TARGET_LEDGER; i++) {
+            const vm_mbx_3d_target_ledger_t *entry =
+                &last->mbx_3d_target_ledger[i];
+            if (!entry->completed) continue;
+            [targetLedger appendFormat:
+                @",mbx_3d_target_%u=%08x:%08x:%u:%llu:%llu:%llu:%u",
+                i, entry->target, entry->target_physical,
+                entry->target_mapping_span,
+                (unsigned long long)entry->last_sequence,
+                (unsigned long long)entry->completed,
+                (unsigned long long)entry->pixels,
+                entry->last_kind];
+        }
+        if (targetLedger.length)
+            execution = [execution stringByAppendingString:targetLedger];
         if (last->compact_pc_profile_reference_pc != 0u) {
             NSMutableString *outsidePCs = [NSMutableString
                 stringWithFormat:

@@ -380,6 +380,10 @@ static void test_device_state_round_trips(void) {
     a->mbx_telemetry.rejected_3d_history[2].record_words[43] = 113u;
     a->mbx_telemetry.accepted_3d_history[12].sequence = 114u;
     a->mbx_telemetry.accepted_3d_history[12].record_words[7] = 115u;
+    a->mbx_telemetry.target_3d_ledger[4].last_sequence = 116u;
+    a->mbx_telemetry.target_3d_ledger[4].completed = 117u;
+    a->mbx_telemetry.target_3d_ledger[4].pixels = 118u;
+    a->mbx_telemetry.target_3d_ledger[4].target_physical = 119u;
     b->mbx_telemetry.candidates_2d = 201u;
     b->mbx_telemetry.completed_2d = 202u;
     b->mbx_telemetry.rejected_2d = 203u;
@@ -395,6 +399,10 @@ static void test_device_state_round_trips(void) {
     b->mbx_telemetry.rejected_3d_history[2].record_words[43] = 213u;
     b->mbx_telemetry.accepted_3d_history[12].sequence = 214u;
     b->mbx_telemetry.accepted_3d_history[12].record_words[7] = 215u;
+    b->mbx_telemetry.target_3d_ledger[4].last_sequence = 216u;
+    b->mbx_telemetry.target_3d_ledger[4].completed = 217u;
+    b->mbx_telemetry.target_3d_ledger[4].pixels = 218u;
+    b->mbx_telemetry.target_3d_ledger[4].target_physical = 219u;
 
     /* Interactive pacing is live host policy. The destination's callback,
      * context and running evidence must survive a guest restore, while a
@@ -447,7 +455,11 @@ static void test_device_state_round_trips(void) {
           b->mbx_telemetry.rejected_3d_history[2].sequence == 212u &&
           b->mbx_telemetry.rejected_3d_history[2].record_words[43] == 213u &&
           b->mbx_telemetry.accepted_3d_history[12].sequence == 214u &&
-          b->mbx_telemetry.accepted_3d_history[12].record_words[7] == 215u,
+          b->mbx_telemetry.accepted_3d_history[12].record_words[7] == 215u &&
+          b->mbx_telemetry.target_3d_ledger[4].last_sequence == 216u &&
+          b->mbx_telemetry.target_3d_ledger[4].completed == 217u &&
+          b->mbx_telemetry.target_3d_ledger[4].pixels == 218u &&
+          b->mbx_telemetry.target_3d_ledger[4].target_physical == 219u,
           "snapshot restore changed the live host-only MBX work ledger");
     CHECK(b->wfi_host_sleep == snapshot_wfi_sleep_probe &&
           b->wfi_host_sleep_ctx == &pacing_context &&

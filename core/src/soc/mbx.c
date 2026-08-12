@@ -3741,6 +3741,32 @@ static void mbx_capture_3d_accept(
         witness->target_physical = target_physical;
         witness->target_mapping_span = target_span;
     }
+    s5l_mbx_3d_target_ledger_t *slot = NULL;
+    s5l_mbx_3d_target_ledger_t *empty = NULL;
+    s5l_mbx_3d_target_ledger_t *oldest =
+        &telemetry->target_3d_ledger[0];
+    for (unsigned i = 0u; i < S5L_MBX_3D_TARGET_LEDGER; i++) {
+        s5l_mbx_3d_target_ledger_t *entry =
+            &telemetry->target_3d_ledger[i];
+        if (entry->completed && entry->target == witness->target &&
+            entry->target_physical == witness->target_physical) {
+            slot = entry;
+            break;
+        }
+        if (!entry->completed && !empty) empty = entry;
+        if (entry->last_sequence < oldest->last_sequence) oldest = entry;
+    }
+    if (!slot) {
+        slot = empty ? empty : oldest;
+        memset(slot, 0, sizeof *slot);
+    }
+    slot->last_sequence = sequence;
+    slot->target = witness->target;
+    slot->target_physical = witness->target_physical;
+    slot->target_mapping_span = witness->target_mapping_span;
+    slot->last_kind = kind;
+    mbx_counter_add(&slot->completed, 1u);
+    mbx_counter_add(&slot->pixels, pixels);
     witness->xclip = m->reg[S5L_MBX_FBXCLIP / 4u];
     witness->yclip = m->reg[S5L_MBX_FBYCLIP / 4u];
     witness->pixel_sample = m->reg[S5L_MBX_3DPIXSAMP / 4u];

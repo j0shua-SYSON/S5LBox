@@ -147,6 +147,24 @@ VM_ASSERT_MBX_ACCEPT_OFFSET(record_valid_words);
 VM_ASSERT_MBX_ACCEPT_OFFSET(record_words);
 #undef VM_ASSERT_MBX_ACCEPT_OFFSET
 
+_Static_assert(S5L_MBX_3D_TARGET_LEDGER == VM_MBX_3D_TARGET_LEDGER,
+               "core/app 3D target-ledger counts differ");
+_Static_assert(sizeof(s5l_mbx_3d_target_ledger_t) ==
+                   sizeof(vm_mbx_3d_target_ledger_t),
+               "core/app 3D target-ledger layouts differ");
+#define VM_ASSERT_MBX_TARGET_OFFSET(field_) \
+    _Static_assert(offsetof(s5l_mbx_3d_target_ledger_t, field_) == \
+                       offsetof(vm_mbx_3d_target_ledger_t, field_), \
+                   "core/app 3D target-ledger offsets differ")
+VM_ASSERT_MBX_TARGET_OFFSET(last_sequence);
+VM_ASSERT_MBX_TARGET_OFFSET(completed);
+VM_ASSERT_MBX_TARGET_OFFSET(pixels);
+VM_ASSERT_MBX_TARGET_OFFSET(target);
+VM_ASSERT_MBX_TARGET_OFFSET(target_physical);
+VM_ASSERT_MBX_TARGET_OFFSET(target_mapping_span);
+VM_ASSERT_MBX_TARGET_OFFSET(last_kind);
+#undef VM_ASSERT_MBX_TARGET_OFFSET
+
 /* ---------------------------------------------------------- encodings --- */
 
 /* Condition codes (bits 31:28). */
@@ -365,6 +383,9 @@ static const uint8_t *vm_guest_record_display(const s5l8900_t *m,
             memcpy(execution.mbx_3d_accept_history,
                    m->mbx_telemetry.accepted_3d_history,
                    sizeof execution.mbx_3d_accept_history);
+            memcpy(execution.mbx_3d_target_ledger,
+                   m->mbx_telemetry.target_3d_ledger,
+                   sizeof execution.mbx_3d_target_ledger);
             execution.active_clock_updates = m->active_clock_updates;
             execution.active_clock_added_ticks =
                 m->active_clock_added_ticks;

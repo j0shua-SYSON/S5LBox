@@ -1649,6 +1649,16 @@ static void test_first_tiled_premultiplied_over(void) {
           first_accept->record_words[0] == 0xe0000000u &&
           first_accept->record_words[3] == 0xa6884710u,
           "accepted 3D witness did not retain the completed tiled render");
+    const s5l_mbx_3d_target_ledger_t *first_target =
+        &m.mbx_telemetry.target_3d_ledger[0];
+    CHECK(first_target->last_sequence == 1u &&
+          first_target->completed == 1u &&
+          first_target->pixels == WIDTH * HEIGHT &&
+          first_target->target == target &&
+          first_target->target_physical == target_pa &&
+          first_target->target_mapping_span == 0x1000u &&
+          first_target->last_kind == S5L_MBX_3D_ACCEPT_TILED,
+          "3D target ledger did not retain the completed tiled render");
 
     m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x4cu);
     test_gpu_write32(&m, target + TOP * TARGET_STRIDE, 0x12345678u);
@@ -1677,6 +1687,10 @@ static void test_first_tiled_premultiplied_over(void) {
           (unsigned long long)m.mbx_telemetry.completed_3d,
           (unsigned long long)m.mbx_telemetry.rejected_3d,
           (unsigned long long)m.mbx_telemetry.pixels_3d);
+    CHECK(first_target->last_sequence == 1u &&
+          first_target->completed == 1u &&
+          first_target->pixels == WIDTH * HEIGHT,
+          "rejected 3D work changed the completed-target ledger");
     const s5l_mbx_3d_rejection_witness_t *first_reject =
         &m.mbx_telemetry.rejected_3d_history[0];
     const s5l_mbx_3d_rejection_witness_t *second_reject =
@@ -1845,6 +1859,12 @@ static void test_first_tiled_premultiplied_over(void) {
           "clipped background overlay changed a pixel outside its boundary");
     CHECK(m.bus.read32(m.bus.ctx, MBX_BASE + REG_STATUS) == 0x4cu,
           "clipped background overlay did not raise all three 3D events");
+    CHECK(first_target->last_sequence == 3u &&
+          first_target->completed == 3u &&
+          first_target->pixels == WIDTH * HEIGHT +
+              WIDTH * UPPER_HEIGHT + PARTIAL_WIDTH * PARTIAL_HEIGHT &&
+          first_target->last_kind == S5L_MBX_3D_ACCEPT_TILED,
+          "3D target ledger did not aggregate repeated framebuffer work");
 
     m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x4cu);
     uint32_t partial_first = target + PARTIAL_TOP * TARGET_STRIDE +

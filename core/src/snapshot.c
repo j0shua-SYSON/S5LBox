@@ -195,10 +195,13 @@ SNAP_SIZE_GUARD(s5l_stub_t,        56,    "snap_stubs");
  * 125384 adds sixteen bounded accepted-render witnesses (16 x 128) to the
  * same host-only MBX ledger. They classify completed work and retain no guest
  * state, so a restore preserves the destination process's live evidence.
+ * 125704 adds eight per-framebuffer target aggregates (8 x 40), likewise
+ * host-only, so a short witness ring cannot hide which completed surface later
+ * became the active CLCD scanout.
  * SNAPSHOT_VERSION and the bytes on disk therefore do not move. The size below
  * must be read from the compiler's emitted `.space`, not inferred from source
  * padding. */
-SNAP_SIZE_GUARD(s5l8900_t,         125384, "snap_mach");
+SNAP_SIZE_GUARD(s5l8900_t,         125704, "snap_mach");
 #endif
 
 /* ---------------------------------------------------------------- the IO --- */

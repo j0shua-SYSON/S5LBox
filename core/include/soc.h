@@ -950,6 +950,7 @@ typedef struct {
 #define S5L_MBX_3D_REJECTION_RECORD_WORDS 44u
 #define S5L_MBX_3D_ACCEPT_HISTORY 16u
 #define S5L_MBX_3D_ACCEPT_RECORD_WORDS 8u
+#define S5L_MBX_3D_TARGET_LEDGER 8u
 
 #define S5L_MBX_3D_ACCEPT_TILED  1u
 #define S5L_MBX_3D_ACCEPT_STATUS 2u
@@ -1012,6 +1013,22 @@ typedef struct {
     uint32_t record_words[S5L_MBX_3D_ACCEPT_RECORD_WORDS];
 } s5l_mbx_3d_accept_witness_t;
 
+/* Bounded host-only aggregate for completed work by framebuffer mapping.
+ * The accepted-render ring is intentionally short and can roll over during a
+ * single transition. This ledger preserves the last eight distinct
+ * GPU/physical target pairs so a frontend can still determine whether the CLCD
+ * scanout received completed work. Least-recently-used entries are replaced;
+ * no field is guest-visible or part of snap_mbx(). */
+typedef struct {
+    uint64_t last_sequence;
+    uint64_t completed;
+    uint64_t pixels;
+    uint32_t target;
+    uint32_t target_physical;
+    uint32_t target_mapping_span;
+    uint32_t last_kind;
+} s5l_mbx_3d_target_ledger_t;
+
 /*
  * Host-only work ledger for one machine's synchronous MBX submissions.
  *
@@ -1043,6 +1060,8 @@ typedef struct {
         S5L_MBX_3D_REJECTION_HISTORY];
     s5l_mbx_3d_accept_witness_t accepted_3d_history[
         S5L_MBX_3D_ACCEPT_HISTORY];
+    s5l_mbx_3d_target_ledger_t target_3d_ledger[
+        S5L_MBX_3D_TARGET_LEDGER];
 } s5l_mbx_telemetry_t;
 
 void     s5l_mbx_reset(s5l_mbx_t *m);
