@@ -481,6 +481,81 @@ static void test_saved_state_restore_fixture(void) {
     vm_firmware_boot_destroy(&boot);
 }
 
+/*
+ * A second optional physical fixture covers the state ordinary CI cannot
+ * manufacture: iPhone OS has flushed and unmounted /dev/md0, written the PMU
+ * full-power-off command and entered its terminal branch. That CPU/RAM image
+ * is a valid snapshot, but it is not a resumable running checkpoint. The app
+ * must keep the clean disk, rebuild the machine at the supported kernel-entry
+ * boundary, and consume the one-shot request instead of reopening forever on
+ * a black display.
+ *
+ * The fixture directory named by S5LBOX_APP_POWEROFF_FIXTURE contains the same
+ * four files as the restore fixture above. Its work image may be sparse for
+ * this seam test: vm_firmware_boot_start() validates and opens the exact size,
+ * but no guest disk request occurs before it returns.
+ */
+static void test_powered_off_checkpoint_fixture(void) {
+    const char *fixture = getenv("S5LBOX_APP_POWEROFF_FIXTURE");
+    if (!fixture || !*fixture) {
+        printf("SKIP: powered-off app checkpoint needs "
+               "S5LBOX_APP_POWEROFF_FIXTURE\n");
+        return;
+    }
+
+    vm_firmware_boot_paths_t paths;
+    CHECK(vm_firmware_boot_paths_split(&paths, S5LBOX_FIRMWARE_DIR, fixture),
+          "powered-off fixture paths were refused");
+
+    s5l8900_t machine;
+    vm_firmware_boot_report_t report;
+    vm_firmware_boot_t *boot = vm_firmware_boot_create();
+    memset(&machine, 0, sizeof machine);
+    CHECK(boot != NULL, "could not create powered-off boot context");
+    CHECK(s5l8900_init(&machine, S5L_BRINGUP_PHYS_BASE,
+                       S5L_BRINGUP_RAM_SIZE),
+          "powered-off s5l8900_init failed");
+    if (!boot || !machine.ram) {
+        if (machine.ram) s5l8900_free(&machine);
+        vm_firmware_boot_destroy(&boot);
+        return;
+    }
+
+    bool ok = vm_firmware_boot_start(boot, &machine, &paths, NULL, 0u,
+                                     &report);
+    CHECK(ok, "powered-off checkpoint fallback was refused: %s",
+          report.detail);
+    CHECK(report.ok == ok,
+          "powered-off fallback report.ok disagrees with return value");
+    if (ok) {
+        CHECK(machine.cpu.cycles == 0u,
+              "powered-off checkpoint resumed at %llu instructions instead "
+              "of fresh-booting",
+              (unsigned long long)machine.cpu.cycles);
+        CHECK(machine.cpu.r[15] == report.bringup.entry_pa,
+              "fresh boot PC %08x is not kernel entry %08x",
+              machine.cpu.r[15], report.bringup.entry_pa);
+        CHECK(!s5l_pcf50635_in_standby(&machine.pmu),
+              "fresh boot retained the checkpoint's PMU power-off command");
+        CHECK(mentions(report.summary,
+                       "fresh boot after powered-off checkpoint") &&
+              !mentions(report.summary, "restored"),
+              "powered-off fallback summary is misleading: %s",
+              report.summary);
+
+        char marker[VM_FW_BOOT_PATH_CAPACITY + 64u];
+        snprintf(marker, sizeof marker, "%s/%s", fixture,
+                 VM_FW_BOOT_RESTORE_ONCE_FILE);
+        FILE *still_there = fopen(marker, "rb");
+        CHECK(still_there == NULL,
+              "powered-off fallback did not consume its one-shot marker");
+        if (still_there) fclose(still_there);
+    }
+
+    s5l8900_free(&machine);
+    vm_firmware_boot_destroy(&boot);
+}
+
 int main(void) {
     vm_firmware_boot_state_t state;
 
@@ -498,6 +573,7 @@ int main(void) {
           "external-md sidecar identity drifted");
 
     test_saved_state_restore_fixture();
+    test_powered_off_checkpoint_fixture();
 
     {
         size_t klen = 0, tlen = 0;

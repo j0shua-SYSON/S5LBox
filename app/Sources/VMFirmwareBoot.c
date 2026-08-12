@@ -117,8 +117,16 @@ static bool join_path(char *out, size_t capacity, const char *directory,
 static uint64_t file_size(const char *path) {
     FILE *f = fopen(path, "rb");
     if (!f) return 0u;
-    long size = 0;
-    if (fseek(f, 0, SEEK_END) == 0) size = ftell(f);
+    int64_t size = 0;
+#ifdef _WIN32
+    /* MinGW's C `long` is 32-bit even on a 64-bit host. The app now supports
+     * an exact 2 GiB work image, whose first unrepresentable byte made ftell()
+     * return -1 and the Windows seam test call a prepared disk absent. */
+    if (_fseeki64(f, 0, SEEK_END) == 0) size = _ftelli64(f);
+#else
+    /* iOS is LP64, so the ordinary C interface covers every supported image. */
+    if (fseek(f, 0, SEEK_END) == 0) size = (int64_t)ftell(f);
+#endif
     fclose(f);
     return size > 0 ? (uint64_t)size : 0u;
 }
@@ -580,6 +588,49 @@ void vm_firmware_boot_destroy(vm_firmware_boot_t **slot) {
     *slot = NULL;
 }
 
+/*
+ * A powered-off checkpoint is loaded only long enough to identify its PMU
+ * state, then the machine is rebuilt for a fresh boot. s5l8900_init() restores
+ * the product build's default engine, so replay the already-validated marker
+ * controls before bring-up writes the kernel into the new RAM allocation.
+ *
+ * This is deliberately smaller than the marker parser below. Every conflict,
+ * pathname and availability check has already succeeded once in this call;
+ * this helper only reapplies host policy lost with the old machine object.
+ */
+static bool reapply_engine_controls_after_reset(
+        s5l8900_t *machine, bool forced_interpreter,
+        bool compact_user_only, bool compact_window_refill_off,
+        bool compact_window_cache, bool compact_privileged_window_refill) {
+    (void)machine;
+    (void)forced_interpreter;
+    (void)compact_user_only;
+    (void)compact_window_refill_off;
+    (void)compact_window_cache;
+    (void)compact_privileged_window_refill;
+#if defined(S5LBOX_STATIC_A64_ENGINE)
+    if (forced_interpreter &&
+        !s5l8900_static_a64_set_enabled(machine, false))
+        return false;
+#if defined(S5LBOX_STATIC_A64_DEFAULT_COMPACT_RAW)
+    if (!forced_interpreter && compact_user_only &&
+        !s5l8900_static_a64_set_compact_raw_privileged(machine, false))
+        return false;
+    if (!forced_interpreter && compact_window_refill_off &&
+        !s5l8900_static_a64_set_compact_raw_window_refill(machine, false))
+        return false;
+    if (compact_window_cache &&
+        !s5l8900_static_a64_set_compact_raw_window_cache(machine, true))
+        return false;
+    if (!forced_interpreter && compact_privileged_window_refill &&
+        !s5l8900_static_a64_set_compact_raw_privileged_window_refill(
+            machine, true))
+        return false;
+#endif
+#endif
+    return true;
+}
+
 bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
                             s5l8900_t *machine,
                             const vm_firmware_boot_paths_t *paths,
@@ -955,12 +1006,9 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
     s5l_bringup_status_t status =
         s5l_bringup(machine, &request, boot->bridges, &report->bringup);
 
-    /* Guest DRAM holds its own copy of everything, so the files go now
-     * regardless of the outcome. */
-    free(kernel);
-    free(tree);
-
     if (status != S5L_BRINGUP_OK) {
+        free(kernel);
+        free(tree);
         (void)file_block_close(boot->media);
         (void)snprintf(report->detail, sizeof report->detail,
                        "Could not start Apple's kernel (%s at %s): %s",
@@ -980,30 +1028,85 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
     if (!restore_once(boot, machine, paths, state.work_size, &restored,
                       restore_marker, sizeof restore_marker,
                       report->detail, sizeof report->detail)) {
+        free(kernel);
+        free(tree);
         (void)file_block_close(boot->media);
         set_detail(report->summary, sizeof report->summary,
                    "saved state unavailable");
         return false;
     }
 
-    /* A powered-down guest deliberately spins after asking the PMU to enter
-     * standby. Restoring that CPU state verbatim would reopen on the same
-     * black, non-progressing loop. A real Power-on supplies PMU ONKEY and
-     * resets into XNU's retained-RAM trampoline; do exactly that here without
-     * inventing a held host button or a later release. */
-    bool restored_from_pmu_standby = false;
+    bool checkpoint_loaded = restored;
+    bool fresh_boot_after_poweroff = false;
+
+    /* OOCSHDWN.GO_STANDBY is the guest's full power-off command, not an
+     * ordinary suspend point. A prior implementation reset directly into
+     * XNU's retained-RAM page and delivered PMU ONKEY. Exact replay proved
+     * that it reaches and exits the GPIO handler, but the saved shutdown never
+     * re-enables the PMU child or LCD and remains black indefinitely. Real
+     * hardware starts through its boot chain after full power-off; this
+     * emulator's supported boot boundary starts at the kernel instead.
+     *
+     * The guest flushed and unmounted the same work image before issuing this
+     * command, so retain that disk but discard the powered-off CPU/RAM image.
+     * Ordinary running checkpoints never enter this branch and still restore
+     * exactly. Keeping the kernel and device-tree buffers alive until here is
+     * what lets the fallback rebuild without a second file read. */
     if (restored && s5l_pcf50635_in_standby(&machine->pmu)) {
-        if (!s5l8900_wake_from_standby(machine)) {
+        uint32_t ram_base = machine->ram_base;
+        uint32_t ram_size = machine->ram_size;
+        s5l8900_free(machine);
+        if (!s5l8900_init(machine, ram_base, ram_size)) {
+            free(kernel);
+            free(tree);
             (void)file_block_close(boot->media);
             set_detail(report->detail, sizeof report->detail,
-                       "The saved powered-down machine could not enter its "
-                       "retained-RAM wake path.");
+                       "The saved machine was fully powered off, but memory "
+                       "for its required fresh boot could not be allocated.");
             set_detail(report->summary, sizeof report->summary,
-                       "saved standby state could not wake");
+                       "powered-off checkpoint could not restart");
             return false;
         }
-        restored_from_pmu_standby = true;
+        if (!reapply_engine_controls_after_reset(
+                machine, forced_interpreter, compact_user_only,
+                compact_window_refill_off, compact_window_cache,
+                compact_privileged_window_refill)) {
+            free(kernel);
+            free(tree);
+            (void)file_block_close(boot->media);
+            set_detail(report->detail, sizeof report->detail,
+                       "The saved machine was fully powered off, but its "
+                       "engine controls could not be reapplied for a fresh "
+                       "boot.");
+            set_detail(report->summary, sizeof report->summary,
+                       "powered-off checkpoint controls unavailable");
+            return false;
+        }
+        status = s5l_bringup(machine, &request, boot->bridges,
+                             &report->bringup);
+        if (status != S5L_BRINGUP_OK) {
+            free(kernel);
+            free(tree);
+            (void)file_block_close(boot->media);
+            (void)snprintf(
+                report->detail, sizeof report->detail,
+                "The saved machine was fully powered off, and its required "
+                "fresh boot failed (%.32s at %.32s): %.100s",
+                s5l_bringup_status_name(status),
+                s5l_bringup_stage_name(report->bringup.stage),
+                report->bringup.detail);
+            report->detail[sizeof report->detail - 1u] = '\0';
+            set_detail(report->summary, sizeof report->summary,
+                       "powered-off checkpoint could not restart");
+            return false;
+        }
+        restored = false;
+        fresh_boot_after_poweroff = true;
     }
+
+    /* Guest DRAM now holds its own copy of everything. */
+    free(kernel);
+    free(tree);
 
 #if defined(S5LBOX_IOS_ACTIVE_REALTIME_CLOCK)
     /*
@@ -1107,7 +1210,7 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
      * for a controlled repeat, but it cannot roll a disk forward or backward a
      * second time unless the caller explicitly re-arms it after reinstalling
      * the matching image. */
-    if (restored && remove(restore_marker) != 0) {
+    if (checkpoint_loaded && remove(restore_marker) != 0) {
         (void)file_block_close(boot->media);
         set_detail(report->detail, sizeof report->detail,
                    "The saved state loaded, but its one-shot marker could not "
@@ -1146,9 +1249,15 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
     }
     if (restored) {
         (void)snprintf(report->summary, sizeof report->summary,
-                       "iPhone OS 3.1.3 restored%s at %.1f M insn (%s%s%s%s)",
-                       restored_from_pmu_standby ? " from PMU standby" : "",
+                       "iPhone OS 3.1.3 restored at %.1f M insn (%s%s%s%s)",
                        (double)machine->cpu.cycles / 1000000.0, engine_mode,
+                       compact_window_cache ? ", window-cache experiment" : "",
+                       compact_pc_profile ? ", compact-PC profile" : "",
+                       active_clock_off ? ", active-clock-off control" : "");
+    } else if (fresh_boot_after_poweroff) {
+        (void)snprintf(report->summary, sizeof report->summary,
+                       "iPhone OS 3.1.3 fresh boot after powered-off "
+                       "checkpoint (%s%s%s%s)", engine_mode,
                        compact_window_cache ? ", window-cache experiment" : "",
                        compact_pc_profile ? ", compact-PC profile" : "",
                        active_clock_off ? ", active-clock-off control" : "");
