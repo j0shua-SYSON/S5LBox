@@ -1564,6 +1564,36 @@ void s5l8900_tick(s5l8900_t *m, uint32_t ticks) {
     s5l8900_refresh(m, tb);
 }
 
+bool s5l8900_wake_from_hibernation(s5l8900_t *m) {
+    if (!m || !s5l_pcf50635_hibernating(&m->pmu)) return false;
+
+    /* XNU copied its reset trampoline to the first retained DRAM page before
+     * writing OOCSHDWN.GOHIB, then entered an intentional infinite branch.
+     * ONKEY powers the ARM core back up from reset; it is not an IRQ capable
+     * of escaping that branch. This machine has no low-address DRAM alias, so
+     * the hardware reset vector is represented by the actual DRAM base. */
+    s5l_pcf50635_wake_onkey(&m->pmu);
+
+    uint64_t cycles = m->cpu.cycles;
+    arm_reset(&m->cpu, &m->bus);
+    m->cpu.cycles = cycles;
+    m->cpu.r[15] = m->ram_base;
+
+    /* CPU translation state changed discontinuously even though retained RAM
+     * did not. Flush host-derived execution state and detach the new guest
+     * instant from any pre-sleep host-clock anchor. Lifetime evidence counters
+     * remain intact, including the monotonic retired-instruction count above. */
+    s5l8900_static_a64_invalidate_derived(m);
+    m->wfi_pace_yield = false;
+    m->active_clock_last_host_ns = 0u;
+    m->active_clock_guest_ticks_since_sync = 0u;
+    m->active_clock_fraction = 0u;
+    m->active_clock_anchor_valid = false;
+    m->level_dirty = true;
+    s5l8900_tick(m, 0u);
+    return true;
+}
+
 bool s5l8900_set_button(s5l8900_t *m, unsigned which, bool pressed) {
     if (!m) return false;
 
@@ -1616,31 +1646,7 @@ bool s5l8900_set_button(s5l8900_t *m, unsigned which, bool pressed) {
                        s5l_button_level(S5L_BUTTON_HOLD, true));
     }
 
-    /* XNU copied its reset trampoline to the first retained DRAM page before
-     * writing OOCSHDWN.GOHIB, then entered an intentional infinite branch.
-     * ONKEY powers the ARM core back up from reset; it is not an IRQ capable
-     * of escaping that branch. This machine has no low-address DRAM alias, so
-     * the hardware reset vector is represented by the actual DRAM base. */
-    s5l_pcf50635_wake_onkey(&m->pmu);
-
-    uint64_t cycles = m->cpu.cycles;
-    arm_reset(&m->cpu, &m->bus);
-    m->cpu.cycles = cycles;
-    m->cpu.r[15] = m->ram_base;
-
-    /* CPU translation state changed discontinuously even though retained RAM
-     * did not. Flush host-derived execution state and detach the new guest
-     * instant from any pre-sleep host-clock anchor. Lifetime evidence counters
-     * remain intact, including the monotonic retired-instruction count above. */
-    s5l8900_static_a64_invalidate_derived(m);
-    m->wfi_pace_yield = false;
-    m->active_clock_last_host_ns = 0u;
-    m->active_clock_guest_ticks_since_sync = 0u;
-    m->active_clock_fraction = 0u;
-    m->active_clock_anchor_valid = false;
-    m->level_dirty = true;
-    s5l8900_tick(m, 0u);
-    return true;
+    return s5l8900_wake_from_hibernation(m);
 }
 
 /* One implementation of the observable device work, kept out of the public

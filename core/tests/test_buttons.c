@@ -928,6 +928,69 @@ static void test_power_wakes_hibernation_through_retained_reset(void) {
     s5l8900_free(&m);
 }
 
+static void test_restore_wakes_hibernation_without_a_button(void) {
+    s5l8900_t m;
+    CHECK(!s5l8900_wake_from_hibernation(NULL),
+          "NULL machine was reported as woken");
+    CHECK(s5l8900_init(&m, S5L8900_SDRAM_BASE, 1u << 16),
+          "machine init failed");
+    arm_all(&m);
+    CHECK(!s5l8900_wake_from_hibernation(&m),
+          "a running machine was reported as woken");
+
+    m.pmu.regs[PCF50635_OOCSHDWN] = PCF50635_OOCSHDWN_GOHIB;
+    m.pmu.written[PCF50635_OOCSHDWN] = 1u;
+    m.cpu.r[0] = 0x22222222u;
+    m.cpu.r[15] = 0xc0062300u;
+    m.cpu.cpsr = ARM_MODE_USR;
+    m.cpu.cp15.sctlr = 0x00c5187du;
+    m.cpu.cp15.ttbr0 = 0x56788000u;
+    m.cpu.cycles = UINT64_C(18123456789);
+    m.wfi_pace_yield = true;
+    m.active_clock_last_host_ns = 199u;
+    m.active_clock_guest_ticks_since_sync = 188u;
+    m.active_clock_fraction = 177u;
+    m.active_clock_anchor_valid = true;
+
+    uint8_t pressed = m.buttons.pressed;
+    uint64_t sets = m.buttons.sets;
+    uint64_t edges = m.buttons.edges;
+    uint64_t refused = m.buttons.refused;
+    uint32_t gpio_level[S5L_GPIOIC_GROUPS];
+    uint32_t gpio_stat[S5L_GPIOIC_GROUPS];
+    memcpy(gpio_level, m.gpioic.level, sizeof gpio_level);
+    memcpy(gpio_stat, m.gpioic.stat, sizeof gpio_stat);
+
+    CHECK(s5l8900_wake_from_hibernation(&m),
+          "restored PMU standby state did not wake");
+    CHECK(!s5l_pcf50635_hibernating(&m.pmu) &&
+          (m.pmu.regs[PCF50635_INT2] & PCF50635_INT2_ONKEYR) != 0u,
+          "restore wake did not latch the PMU ONKEY reason");
+    CHECK(m.cpu.r[15] == S5L8900_SDRAM_BASE && m.cpu.r[0] == 0u &&
+          m.cpu.cp15.sctlr == 0u && m.cpu.cp15.ttbr0 == 0u,
+          "restore wake did not enter the retained-RAM reset vector cleanly");
+    CHECK(m.cpu.cpsr ==
+          (ARM_MODE_SVC | ARM_CPSR_I | ARM_CPSR_F | ARM_CPSR_A),
+          "restore wake CPSR=%08x", m.cpu.cpsr);
+    CHECK(m.cpu.cycles == UINT64_C(18123456789),
+          "restore wake restarted the retired-instruction timeline at %llu",
+          (unsigned long long)m.cpu.cycles);
+    CHECK(!m.wfi_pace_yield && !m.active_clock_anchor_valid &&
+          m.active_clock_last_host_ns == 0u &&
+          m.active_clock_guest_ticks_since_sync == 0u &&
+          m.active_clock_fraction == 0u,
+          "restore wake retained stale host-clock state");
+    CHECK(m.buttons.pressed == pressed && m.buttons.sets == sets &&
+          m.buttons.edges == edges && m.buttons.refused == refused,
+          "restore wake manufactured a host button transition");
+    CHECK(memcmp(m.gpioic.level, gpio_level, sizeof gpio_level) == 0 &&
+          memcmp(m.gpioic.stat, gpio_stat, sizeof gpio_stat) == 0,
+          "restore wake manufactured a GPIO level or edge");
+    CHECK(!s5l8900_wake_from_hibernation(&m),
+          "an already-woken machine accepted a second wake");
+    s5l8900_free(&m);
+}
+
 /* Held buttons are machine state and must survive a checkpoint. */
 static void test_snapshot_carries_the_switches(void) {
     s5l8900_t src, dst;
@@ -1040,6 +1103,7 @@ int main(void) {
     test_an_undriven_level_line_never_asserts();
     test_the_board_drives_inputs_and_the_guest_cannot();
     test_power_wakes_hibernation_through_retained_reset();
+    test_restore_wakes_hibernation_without_a_button();
     test_snapshot_carries_the_switches();
     test_snapshot_rejects_a_sixth_button();
     printf("  %d passed, %d failed\n", g_pass, g_fail);

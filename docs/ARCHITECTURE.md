@@ -247,6 +247,23 @@ CNID, extents, dates, Finder metadata, and resource fork remain untouched. A
 separate marker records this migration because disk capacity and executable
 privileges are independent version axes.
 
+Fresh guest plans also seed the official period-compatible flat APT source at
+`/private/etc/apt/sources.list.d/saurik.list`. The file is root:root `0644` and
+its exact bytes participate in the plan digest. It is intentionally part of
+new-image provisioning, not an in-place rewrite of arbitrary existing APT
+configuration. The source uses HTTP because the pinned iPhone OS 3-era APT
+stack cannot negotiate a modern HTTPS endpoint; host PPP/NAT remains the
+transport boundary.
+
+PMU hibernation is retained guest state, but the physical act that leaves it is
+not. A checkpoint restored after `OOCSHDWN.GOHIB` is therefore detected before
+host clock and WFI policies are reattached. Firmware startup supplies the PMU
+ONKEY wake reason and resets the ARM core into XNU's retained-RAM vector while
+preserving the monotonic instruction timeline. This path deliberately does not
+touch the button pressed mask or GPIO pending state. Ordinary physical Power
+input uses the same reset primitive only after recording its real held wire and
+release semantics.
+
 `/dev/rmd0` is a separate raw-character path through `_uiomove64`/`_copypv`, not
 one of the two strategy calls. The raw bridge reproduces the reached
 `mdevrw`/`uio_update` contract, including physical-user segment variants,

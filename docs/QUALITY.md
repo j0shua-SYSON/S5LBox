@@ -1160,11 +1160,56 @@ re-probed the live result as satisfied, and then proved the next builder call
 idempotent: 2,126 checks, zero failures. Full normal and static/JIT-gated suites
 pass 67/67 and 72/72.
 
-Brutal-honesty boundary: this implementation has not yet been built by hosted
-iOS CI, installed on the physical test phone, or used to complete a real Cydia
-package transaction. The retained post-failure image is dirty, so the new
-preflight correctly refuses it until the guest performs a real power-off; the
-code does not clear the unmount bit or run an unsafe speculative repair. The
-missing-setuid defect is diagnosed and its exact migration is host-tested. A
-second Seatbelt, package-manager, or guest-state defect may still appear after
-physical validation. No kernel MAC-policy bypass was added.
+The exact `aa87afd` iOS artifact was then installed on one physical iPhone 6s
+Plus running iOS 15.8.5. After the guest completed its own shutdown, the same
+retained machine grew to exactly 2 GiB and published the exact privilege marker.
+Cydia completed first-run reorganization, refreshed the manually entered
+official `http://apt.saurik.com/cydia/` source, and reported five available
+essential upgrades. Those upgrades were deliberately not applied: this guest's
+bootstrap is version-pinned for iPhone OS 3 compatibility, and a blanket upgrade
+would be a different, destructive experiment.
+
+The smaller `adv-cmds` transaction did complete. Cydia downloaded 61.3 kB,
+reported 536.0 kB of disk use, selected and unpacked
+`adv-cmds_119-6_iphoneos-arm.deb`, and printed `Setting up adv-cmds (119-6)`.
+Returning to its package page changed the action from `Install` to `Modify`.
+No `EACCES` or no-space error appeared. That is end-to-end physical evidence
+for guest PPP/NAT, the official package archive, APT download, dpkg unpack and
+configure, the executable privilege repair, and usable grown storage.
+
+Brutal-honesty boundary: this is one small package transaction on one test
+device, observed through Cydia's completion UI; it is not broad package
+compatibility, a post-run catalog extraction, or proof that applying the five
+bootstrap upgrades is safe. No kernel MAC-policy bypass was added.
+
+## 2026-08-12: official source seed and powered-down checkpoint wake
+
+Fresh guest rootfs plans now create `/private/etc/apt/sources.list.d/saurik.list`
+as exact root:root `0644` data containing:
+
+```text
+deb http://apt.saurik.com/cydia/ ./
+```
+
+The plan identity was advanced and includes those source bytes. Synthetic
+metadata/content checks pass, all 28 real pinned packages merge into a 567-entry
+plan, and applying that plan to the exact stock rootfs produced a 466,825,216-byte
+HFS image with 556 new and 11 safely reused entries. This seeds only newly
+prepared guests. It does not silently modify an already committed installation;
+the physical transaction above used a source entered manually.
+
+A separate physical edge case exposed a lifecycle mismatch. After the guest
+printed its real shutdown path and set `OOCSHDWN.GOHIB`, the emulation engine
+still described itself as running because the powered-down CPU deliberately
+loops after quiescing. Saving and reopening that state therefore restored the
+same black, non-progressing loop. The current core factors the existing PMU
+ONKEY/retained-RAM reset into an explicit wake operation. Firmware restore calls
+it only when the loaded PMU is hibernating, and it does not manufacture a held
+Power GPIO, input edge, or deferred release. The focused input suite passes
+416/416 and the full Release suite passes 67/67.
+
+Brutal-honesty boundary: the automatic restore wake is locally compiled and
+host-tested, but has not yet been installed and repeated on the physical phone.
+The frontend also still lacks a distinct powered-off status: until the user
+leaves or presses Power, a shut-down guest is represented by a running engine.
+This patch fixes the saved-state reopen path, not that larger UI-state model.

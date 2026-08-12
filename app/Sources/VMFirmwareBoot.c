@@ -986,6 +986,25 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
         return false;
     }
 
+    /* A powered-down guest deliberately spins after asking the PMU to enter
+     * standby. Restoring that CPU state verbatim would reopen on the same
+     * black, non-progressing loop. A real Power-on supplies PMU ONKEY and
+     * resets into XNU's retained-RAM trampoline; do exactly that here without
+     * inventing a held host button or a later release. */
+    bool restored_from_pmu_standby = false;
+    if (restored && s5l_pcf50635_hibernating(&machine->pmu)) {
+        if (!s5l8900_wake_from_hibernation(machine)) {
+            (void)file_block_close(boot->media);
+            set_detail(report->detail, sizeof report->detail,
+                       "The saved powered-down machine could not enter its "
+                       "retained-RAM wake path.");
+            set_detail(report->summary, sizeof report->summary,
+                       "saved standby state could not wake");
+            return false;
+        }
+        restored_from_pmu_standby = true;
+    }
+
 #if defined(S5LBOX_IOS_ACTIVE_REALTIME_CLOCK)
     /*
      * Arm this after restore so the first host sample anchors the restored
@@ -1127,7 +1146,8 @@ bool vm_firmware_boot_start(vm_firmware_boot_t *boot,
     }
     if (restored) {
         (void)snprintf(report->summary, sizeof report->summary,
-                       "iPhone OS 3.1.3 restored at %.1f M insn (%s%s%s%s)",
+                       "iPhone OS 3.1.3 restored%s at %.1f M insn (%s%s%s%s)",
+                       restored_from_pmu_standby ? " from PMU standby" : "",
                        (double)machine->cpu.cycles / 1000000.0, engine_mode,
                        compact_window_cache ? ", window-cache experiment" : "",
                        compact_pc_profile ? ", compact-PC profile" : "",

@@ -4075,6 +4075,16 @@ bool s5l8900_overlaps(uint32_t a, uint32_t alen, uint32_t b, uint32_t blen);
 void s5l8900_tick(s5l8900_t *m, uint32_t ticks);
 
 /*
+ * Wake a PMU-hibernating machine through the retained-RAM reset path without
+ * manufacturing a host button transition.  Snapshot restore uses this after
+ * loading a powered-down guest: the saved PMU state supplies the wake context,
+ * while the absence of a physical press means no held GPIO wire or deferred
+ * release may be added to the restored machine.  Returns false for NULL or a
+ * machine that is not hibernating.
+ */
+bool s5l8900_wake_from_hibernation(s5l8900_t *m);
+
+/*
  * Inject one host button transition through the complete machine, including
  * the PCF50635's separate Power wake path. Ordinary running transitions use
  * the GPIO button model above and refresh interrupt levels before returning.

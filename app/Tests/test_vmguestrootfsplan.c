@@ -301,6 +301,33 @@ static void test_complete_synthetic_plan(void) {
           usr_directory->existing_policy == ROOTFS_WORK_EXISTING_REUSE_DIRECTORY,
           "foundation directory is not reusable on the stock rootfs");
 
+    const rootfs_work_entry_t *apt_directory =
+        find_entry(plan, "/private/etc/apt");
+    const rootfs_work_entry_t *source_directory =
+        find_entry(plan, "/private/etc/apt/sources.list.d");
+    const rootfs_work_entry_t *cydia_source =
+        find_entry(plan, "/private/etc/apt/sources.list.d/saurik.list");
+    static const char EXPECTED_CYDIA_SOURCE[] =
+        "deb http://apt.saurik.com/cydia/ ./\n";
+    CHECK(apt_directory && source_directory &&
+          apt_directory->kind == ROOTFS_WORK_ENTRY_DIRECTORY &&
+          source_directory->kind == ROOTFS_WORK_ENTRY_DIRECTORY &&
+          apt_directory->permissions == 0755u &&
+          source_directory->permissions == 0755u &&
+          apt_directory->existing_policy ==
+              ROOTFS_WORK_EXISTING_REUSE_DIRECTORY &&
+          source_directory->existing_policy ==
+              ROOTFS_WORK_EXISTING_REUSE_DIRECTORY,
+          "the official source parent directories are absent or unsafe");
+    CHECK(cydia_source && cydia_source->kind == ROOTFS_WORK_ENTRY_FILE &&
+          cydia_source->permissions == 0644u &&
+          cydia_source->owner_id == 0u && cydia_source->group_id == 0u &&
+          cydia_source->existing_policy == ROOTFS_WORK_EXISTING_REFUSE &&
+          cydia_source->content_size == sizeof EXPECTED_CYDIA_SOURCE - 1u &&
+          memcmp(cydia_source->content, EXPECTED_CYDIA_SOURCE,
+                 sizeof EXPECTED_CYDIA_SOURCE - 1u) == 0,
+          "the official period-compatible Cydia source is not exact root:root 0644 data");
+
     char cache_path[ROOTFS_WORK_MAX_PATH];
     int written = snprintf(cache_path, sizeof cache_path, "%s/%s",
                            VM_GUEST_ROOTFS_PACKAGE_DIRECTORY,
@@ -402,10 +429,10 @@ static void test_complete_synthetic_plan(void) {
     CHECK(vm_guest_rootfs_plan_manifest_sha256(plan, digest),
           "plan manifest identity was not produced");
     static const uint8_t EXPECTED[VM_GUEST_PACKAGE_SHA256_SIZE] = {
-        0x67u, 0x56u, 0x76u, 0xa4u, 0x8au, 0x3eu, 0xbau, 0xbfu,
-        0x4du, 0xd1u, 0xefu, 0x8cu, 0x57u, 0x3du, 0xa9u, 0x0du,
-        0x45u, 0x62u, 0xb8u, 0x97u, 0xc8u, 0x80u, 0x7bu, 0xd6u,
-        0xb3u, 0xa4u, 0x97u, 0xe6u, 0xd1u, 0x29u, 0x91u, 0xb8u
+        0x06u, 0xc2u, 0xb4u, 0xf2u, 0x6bu, 0x1fu, 0x72u, 0x49u,
+        0x69u, 0x4du, 0x14u, 0xb2u, 0x41u, 0xf7u, 0x0fu, 0x2fu,
+        0xdfu, 0x96u, 0xb0u, 0xd4u, 0x4eu, 0x4au, 0x58u, 0x87u,
+        0x8cu, 0xbau, 0x33u, 0x23u, 0x4bu, 0x7cu, 0xa0u, 0xb9u
     };
     CHECK(memcmp(digest, EXPECTED, sizeof digest) == 0,
           "synthetic plan identity changed");

@@ -15,6 +15,9 @@
 #define PLAN_SCRIPT_CAPACITY 16384u
 #define PLAN_PATH_CAPACITY 1400u
 
+static const char CYDIA_SOURCE_LIST[] =
+    "deb http://apt.saurik.com/cydia/ ./\n";
+
 static const char INSTALL_PLIST[] =
     "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
     "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" "
@@ -375,6 +378,8 @@ static bool plan_add_runtime_entries(
         VM_GUEST_ROOTFS_STATE_DIRECTORY,
         VM_GUEST_ROOTFS_PACKAGE_DIRECTORY,
         "/private/var/log",
+        "/private/etc/apt",
+        "/private/etc/apt/sources.list.d",
         "/usr/libexec",
         "/System/Library/LaunchDaemons"
     };
@@ -386,6 +391,11 @@ static bool plan_add_runtime_entries(
     if (!plan_add_file(plan, "/private/var/lib/dpkg/status", NULL, 0u, 0644u,
                        detail, detail_capacity) ||
         !plan_add_file(plan, "/private/var/lib/dpkg/available", NULL, 0u, 0644u,
+                       detail, detail_capacity) ||
+        !plan_add_file(plan,
+                       "/private/etc/apt/sources.list.d/saurik.list",
+                       (const uint8_t *)CYDIA_SOURCE_LIST,
+                       sizeof CYDIA_SOURCE_LIST - 1u, 0644u,
                        detail, detail_capacity))
         return false;
 
@@ -418,9 +428,14 @@ static bool plan_compute_manifest(vm_guest_rootfs_plan_t *plan,
                                   size_t input_count) {
     ios3_sha256_context_t context;
     if (!ios3_sha256_init(&context) ||
-        !plan_hash_text(&context, "s5lbox-guest-rootfs-plan 2\n") ||
+        !plan_hash_text(&context, "s5lbox-guest-rootfs-plan 3\n") ||
         !plan_hash_text(&context,
-                        "aliases /etc=/private/etc /var=/private/var\n"))
+                        "aliases /etc=/private/etc /var=/private/var\n") ||
+        !plan_hash_text(
+            &context,
+            "source /private/etc/apt/sources.list.d/saurik.list\n") ||
+        !ios3_sha256_update(&context, CYDIA_SOURCE_LIST,
+                            sizeof CYDIA_SOURCE_LIST - 1u))
         return false;
     for (size_t i = 0u; i < input_count; i++) {
         const vm_guest_package_t *package = inputs[i].package;
