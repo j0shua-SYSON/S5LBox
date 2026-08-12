@@ -114,6 +114,37 @@ VM_ASSERT_MBX_REJECTION_OFFSET(record_valid_words);
 VM_ASSERT_MBX_REJECTION_OFFSET(record_words);
 #undef VM_ASSERT_MBX_REJECTION_OFFSET
 
+_Static_assert(S5L_MBX_3D_ACCEPT_HISTORY == VM_MBX_3D_ACCEPT_HISTORY,
+               "core/app 3D acceptance history counts differ");
+_Static_assert(S5L_MBX_3D_ACCEPT_RECORD_WORDS ==
+                   VM_MBX_3D_ACCEPT_RECORD_WORDS,
+               "core/app 3D acceptance record sizes differ");
+_Static_assert(sizeof(s5l_mbx_3d_accept_witness_t) ==
+                   sizeof(vm_mbx_3d_accept_witness_t),
+               "core/app 3D acceptance witness layouts differ");
+#define VM_ASSERT_MBX_ACCEPT_OFFSET(field_) \
+    _Static_assert(offsetof(s5l_mbx_3d_accept_witness_t, field_) == \
+                       offsetof(vm_mbx_3d_accept_witness_t, field_), \
+                   "core/app 3D acceptance witness offsets differ")
+VM_ASSERT_MBX_ACCEPT_OFFSET(sequence);
+VM_ASSERT_MBX_ACCEPT_OFFSET(record_hash);
+VM_ASSERT_MBX_ACCEPT_OFFSET(kind);
+VM_ASSERT_MBX_ACCEPT_OFFSET(pixels);
+VM_ASSERT_MBX_ACCEPT_OFFSET(region);
+VM_ASSERT_MBX_ACCEPT_OFFSET(object);
+VM_ASSERT_MBX_ACCEPT_OFFSET(target);
+VM_ASSERT_MBX_ACCEPT_OFFSET(xclip);
+VM_ASSERT_MBX_ACCEPT_OFFSET(yclip);
+VM_ASSERT_MBX_ACCEPT_OFFSET(pixel_sample);
+VM_ASSERT_MBX_ACCEPT_OFFSET(framebuffer_control);
+VM_ASSERT_MBX_ACCEPT_OFFSET(framebuffer_stride);
+VM_ASSERT_MBX_ACCEPT_OFFSET(list_valid_mask);
+VM_ASSERT_MBX_ACCEPT_OFFSET(list_words);
+VM_ASSERT_MBX_ACCEPT_OFFSET(record_base);
+VM_ASSERT_MBX_ACCEPT_OFFSET(record_valid_words);
+VM_ASSERT_MBX_ACCEPT_OFFSET(record_words);
+#undef VM_ASSERT_MBX_ACCEPT_OFFSET
+
 /* ---------------------------------------------------------- encodings --- */
 
 /* Condition codes (bits 31:28). */
@@ -329,6 +360,9 @@ static const uint8_t *vm_guest_record_display(const s5l8900_t *m,
             memcpy(execution.mbx_3d_rejection_history,
                    m->mbx_telemetry.rejected_3d_history,
                    sizeof execution.mbx_3d_rejection_history);
+            memcpy(execution.mbx_3d_accept_history,
+                   m->mbx_telemetry.accepted_3d_history,
+                   sizeof execution.mbx_3d_accept_history);
             execution.active_clock_updates = m->active_clock_updates;
             execution.active_clock_added_ticks =
                 m->active_clock_added_ticks;

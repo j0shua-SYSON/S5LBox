@@ -192,10 +192,13 @@ SNAP_SIZE_GUARD(s5l_stub_t,        56,    "snap_stubs");
  * They retain transient decoder evidence only and remain outside snap_mach().
  * 123336 adds uart4's two host-peer callbacks and shared context (24), also
  * live host wiring and deliberately outside snap_mach().
+ * 125256 adds sixteen bounded accepted-render witnesses (16 x 120) to the
+ * same host-only MBX ledger. They classify completed work and retain no guest
+ * state, so a restore preserves the destination process's live evidence.
  * SNAPSHOT_VERSION and the bytes on disk therefore do not move. The size below
  * must be read from the compiler's emitted `.space`, not inferred from source
  * padding. */
-SNAP_SIZE_GUARD(s5l8900_t,         123336, "snap_mach");
+SNAP_SIZE_GUARD(s5l8900_t,         125256, "snap_mach");
 #endif
 
 /* ---------------------------------------------------------------- the IO --- */

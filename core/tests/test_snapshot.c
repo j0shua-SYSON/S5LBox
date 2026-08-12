@@ -378,6 +378,8 @@ static void test_device_state_round_trips(void) {
     a->mbx_telemetry.pixels_3d = 111u;
     a->mbx_telemetry.rejected_3d_history[2].sequence = 112u;
     a->mbx_telemetry.rejected_3d_history[2].record_words[43] = 113u;
+    a->mbx_telemetry.accepted_3d_history[12].sequence = 114u;
+    a->mbx_telemetry.accepted_3d_history[12].record_words[7] = 115u;
     b->mbx_telemetry.candidates_2d = 201u;
     b->mbx_telemetry.completed_2d = 202u;
     b->mbx_telemetry.rejected_2d = 203u;
@@ -391,6 +393,8 @@ static void test_device_state_round_trips(void) {
     b->mbx_telemetry.pixels_3d = 211u;
     b->mbx_telemetry.rejected_3d_history[2].sequence = 212u;
     b->mbx_telemetry.rejected_3d_history[2].record_words[43] = 213u;
+    b->mbx_telemetry.accepted_3d_history[12].sequence = 214u;
+    b->mbx_telemetry.accepted_3d_history[12].record_words[7] = 215u;
 
     /* Interactive pacing is live host policy. The destination's callback,
      * context and running evidence must survive a guest restore, while a
@@ -441,7 +445,9 @@ static void test_device_state_round_trips(void) {
           b->mbx_telemetry.rejected_3d == 210u &&
           b->mbx_telemetry.pixels_3d == 211u &&
           b->mbx_telemetry.rejected_3d_history[2].sequence == 212u &&
-          b->mbx_telemetry.rejected_3d_history[2].record_words[43] == 213u,
+          b->mbx_telemetry.rejected_3d_history[2].record_words[43] == 213u &&
+          b->mbx_telemetry.accepted_3d_history[12].sequence == 214u &&
+          b->mbx_telemetry.accepted_3d_history[12].record_words[7] == 215u,
           "snapshot restore changed the live host-only MBX work ledger");
     CHECK(b->wfi_host_sleep == snapshot_wfi_sleep_probe &&
           b->wfi_host_sleep_ctx == &pacing_context &&

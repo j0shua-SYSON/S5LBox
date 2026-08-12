@@ -1628,6 +1628,25 @@ static void test_first_tiled_premultiplied_over(void) {
           (unsigned long long)m.mbx_telemetry.completed_3d,
           (unsigned long long)m.mbx_telemetry.rejected_3d,
           (unsigned long long)m.mbx_telemetry.pixels_3d);
+    const s5l_mbx_3d_accept_witness_t *first_accept =
+        &m.mbx_telemetry.accepted_3d_history[0];
+    CHECK(first_accept->sequence == 1u &&
+          first_accept->kind == S5L_MBX_3D_ACCEPT_TILED &&
+          first_accept->pixels == WIDTH * HEIGHT &&
+          first_accept->region == region &&
+          first_accept->object == object &&
+          first_accept->target == target &&
+          first_accept->xclip == 0x01400000u &&
+          first_accept->yclip == 0x00800010u &&
+          first_accept->list_valid_mask == 0x0fu &&
+          first_accept->list_words[2] == 0x61a0007cu &&
+          first_accept->record_base == object + 0x1f0u &&
+          first_accept->record_valid_words ==
+              S5L_MBX_3D_REJECTION_RECORD_WORDS &&
+          first_accept->record_hash != 0u &&
+          first_accept->record_words[0] == 0xe0000000u &&
+          first_accept->record_words[3] == 0xa6884710u,
+          "accepted 3D witness did not retain the completed tiled render");
 
     m.bus.write32(m.bus.ctx, MBX_BASE + REG_ACK, 0x4cu);
     test_gpu_write32(&m, target + TOP * TARGET_STRIDE, 0x12345678u);

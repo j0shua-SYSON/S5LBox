@@ -78,6 +78,11 @@ static vm_execution_telemetry_observation_t execution_observation(
     value.mbx_3d_rejection_history[0].record_valid_words =
         VM_MBX_3D_REJECTION_RECORD_WORDS;
     value.mbx_3d_rejection_history[0].record_words[43] = base + 81u;
+    value.mbx_3d_accept_history[15].sequence = base + 86u;
+    value.mbx_3d_accept_history[15].record_hash = base + 87u;
+    value.mbx_3d_accept_history[15].kind = (uint32_t)(base + 88u);
+    value.mbx_3d_accept_history[15].pixels = (uint32_t)(base + 89u);
+    value.mbx_3d_accept_history[15].record_words[7] = (uint32_t)(base + 90u);
     value.active_clock_updates = base + 34u;
     value.active_clock_added_ticks = base + 35u;
     value.active_clock_clamps = base + 36u;
@@ -319,6 +324,13 @@ static void test_boundaries_and_sampled_changes(void) {
                record_valid_words == VM_MBX_3D_REJECTION_RECORD_WORDS &&
            state.execution_last.mbx_3d_rejection_history[0].
                record_words[43] == 2081u &&
+           state.execution_last.mbx_3d_accept_history[15].sequence == 2086u &&
+           state.execution_last.mbx_3d_accept_history[15].record_hash ==
+               2087u &&
+           state.execution_last.mbx_3d_accept_history[15].kind == 2088u &&
+           state.execution_last.mbx_3d_accept_history[15].pixels == 2089u &&
+           state.execution_last.mbx_3d_accept_history[15].record_words[7] ==
+               2090u &&
            state.execution_last.active_clock_updates == 2034u &&
            state.execution_last.active_clock_added_ticks == 2035u &&
            state.execution_last.active_clock_clamps == 2036u &&

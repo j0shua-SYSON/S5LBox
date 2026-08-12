@@ -76,6 +76,8 @@ typedef struct {
 #define VM_COMPACT_PC_PROFILE_HOT_COUNT 8u
 #define VM_MBX_3D_REJECTION_HISTORY 4u
 #define VM_MBX_3D_REJECTION_RECORD_WORDS 44u
+#define VM_MBX_3D_ACCEPT_HISTORY 16u
+#define VM_MBX_3D_ACCEPT_RECORD_WORDS 8u
 
 typedef struct {
     uint64_t sequence;
@@ -97,6 +99,26 @@ typedef struct {
     uint32_t record_valid_words;
     uint32_t record_words[VM_MBX_3D_REJECTION_RECORD_WORDS];
 } vm_mbx_3d_rejection_witness_t;
+
+typedef struct {
+    uint64_t sequence;
+    uint64_t record_hash;
+    uint32_t kind;
+    uint32_t pixels;
+    uint32_t region;
+    uint32_t object;
+    uint32_t target;
+    uint32_t xclip;
+    uint32_t yclip;
+    uint32_t pixel_sample;
+    uint32_t framebuffer_control;
+    uint32_t framebuffer_stride;
+    uint32_t list_valid_mask;
+    uint32_t list_words[4];
+    uint32_t record_base;
+    uint32_t record_valid_words;
+    uint32_t record_words[VM_MBX_3D_ACCEPT_RECORD_WORDS];
+} vm_mbx_3d_accept_witness_t;
 
 typedef struct {
     /* Current CPU state. These are witnesses, not monotonic counters, and are
@@ -145,6 +167,8 @@ typedef struct {
     uint64_t mbx_3d_pixels;
     vm_mbx_3d_rejection_witness_t mbx_3d_rejection_history[
         VM_MBX_3D_REJECTION_HISTORY];
+    vm_mbx_3d_accept_witness_t mbx_3d_accept_history[
+        VM_MBX_3D_ACCEPT_HISTORY];
     uint64_t active_clock_updates;
     uint64_t active_clock_added_ticks;
     uint64_t active_clock_clamps;

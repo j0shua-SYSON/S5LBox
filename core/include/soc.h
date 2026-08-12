@@ -948,6 +948,13 @@ typedef struct {
 
 #define S5L_MBX_3D_REJECTION_HISTORY 4u
 #define S5L_MBX_3D_REJECTION_RECORD_WORDS 44u
+#define S5L_MBX_3D_ACCEPT_HISTORY 16u
+#define S5L_MBX_3D_ACCEPT_RECORD_WORDS 8u
+
+#define S5L_MBX_3D_ACCEPT_TILED  1u
+#define S5L_MBX_3D_ACCEPT_STATUS 2u
+#define S5L_MBX_3D_ACCEPT_SPRITE 3u
+#define S5L_MBX_3D_ACCEPT_SOLID  4u
 
 /* Host-only evidence for one fail-closed STARTRENDER. Four records cover the
  * complete burst observed during the SpringBoard-to-Settings transition.
@@ -974,6 +981,32 @@ typedef struct {
     uint32_t record_valid_words;
     uint32_t record_words[S5L_MBX_3D_REJECTION_RECORD_WORDS];
 } s5l_mbx_3d_rejection_witness_t;
+
+/* Bounded evidence for completed STARTRENDERs. A completion counter alone
+ * cannot distinguish a full transition from a decoder that accepted a small
+ * status sprite, so retain the decoder family, committed pixel count and the
+ * selected object identity. The full selected record is hashed before later
+ * renders can reuse its guest allocation; its first eight words retain the
+ * control and address fields needed to group matching forms. */
+typedef struct {
+    uint64_t sequence;
+    uint64_t record_hash;
+    uint32_t kind;
+    uint32_t pixels;
+    uint32_t region;
+    uint32_t object;
+    uint32_t target;
+    uint32_t xclip;
+    uint32_t yclip;
+    uint32_t pixel_sample;
+    uint32_t framebuffer_control;
+    uint32_t framebuffer_stride;
+    uint32_t list_valid_mask;
+    uint32_t list_words[4];
+    uint32_t record_base;
+    uint32_t record_valid_words;
+    uint32_t record_words[S5L_MBX_3D_ACCEPT_RECORD_WORDS];
+} s5l_mbx_3d_accept_witness_t;
 
 /*
  * Host-only work ledger for one machine's synchronous MBX submissions.
@@ -1004,6 +1037,8 @@ typedef struct {
     uint64_t pixels_3d;
     s5l_mbx_3d_rejection_witness_t rejected_3d_history[
         S5L_MBX_3D_REJECTION_HISTORY];
+    s5l_mbx_3d_accept_witness_t accepted_3d_history[
+        S5L_MBX_3D_ACCEPT_HISTORY];
 } s5l_mbx_telemetry_t;
 
 void     s5l_mbx_reset(s5l_mbx_t *m);
